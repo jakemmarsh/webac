@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ac": {
+      "command": "npx",
+      "args": ["tsx", "tools/ac-agent/mcp-server.ts"]
+    }
+  }
+}

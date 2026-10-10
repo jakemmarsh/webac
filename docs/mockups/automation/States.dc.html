@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HUD states, server rules, import</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Tinos:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0d0c08;font-family:Tinos,'Times New Roman',serif}
+.panel{position:relative;box-sizing:border-box;background:rgba(22,20,9,.97);border:2px solid #6e5526;box-shadow:inset 0 0 0 1px #d9ba6a,0 0 0 1px #140f04;color:#e9e1c8}
+.btn{height:24px;padding:0 12px;font:13px Tinos,serif;color:#f1ead6;background:linear-gradient(#1b28b3,#0b1266);border:2px solid #c9a04a;box-shadow:inset 0 1px 0 #3c4ad6;cursor:pointer;white-space:nowrap}
+.btn.red{background:linear-gradient(#4b1616,#2a0909);box-shadow:inset 0 1px 0 #7a2a2a}
+.muted{color:#a79d80}
+.sec{font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:#c9a95e}
+.cap{font-size:13px;color:#a79d80}
+.row{display:flex;align-items:center;gap:8px}
+.box{border:1px solid #4b3d1c;background:rgba(0,0,0,.28)}
+.hud{width:156px;height:40px;padding:3px 7px;display:flex;flex-direction:column;justify-content:center}
+.scale{transform:scale(1.6);transform-origin:top left}
+</style>
+</helmet>
+<div style="width: 1600px; height: 620px; box-sizing: border-box; padding: 40px 48px; display: flex; flex-direction: column; gap: 36px; color: #e9e1c8;">
+<div style="display: flex; flex-direction: column; gap: 14px;">
+<div class="sec">HUD strip under the vitals · shown 1.6× · click it to open the Automation panel</div>
+<div style="display: flex; gap: 24px;">
+<sc-for list="{{huds}}" as="h" hint-placeholder-count="5">
+<div style="display: flex; flex-direction: column; gap: 10px; width: 262px;">
+<div style="width: 250px; height: 64px;">
+<div class="panel hud scale">
+<div class="row" style="gap: 5px; font-size: 12.5px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: {{h.c}}; box-shadow: 0 0 4px {{h.c}};"></span><span>{{h.a}}</span></div>
+<div class="muted" style="font-size: 11.5px; white-space: nowrap;">{{h.b}}</div>
+</div>
+</div>
+<div class="cap" style="line-height: 17px;">{{h.note}}</div>
+</div>
+</sc-for>
+</div>
+</div>
+
+<div style="display: flex; gap: 32px; align-items: flex-start;">
+<div style="display: flex; flex-direction: column; gap: 10px;">
+<div class="sec">Attendance check · only if the server asks for one</div>
+<div class="panel" style="width: 400px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;">
+<div style="font-size: 16px; color: #f6efd9;">Still at the keyboard?</div>
+<div style="font-size: 13px; line-height: 18px;">This server needs combat automation to be attended. Continue within <span style="color: #ffd774;">1:48</span> or combat pauses. Looting, buffing and your route keep going.</div>
+<div class="row" style="justify-content: flex-end;"><button class="btn red">Pause combat</button><button class="btn">Continue</button></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 10px;">
+<div class="sec">Import from VirindiTank</div>
+<div class="panel" style="width: 560px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
+<div class="row"><span style="font-size: 16px; color: #f6efd9;">Import 3 files</span><div style="flex-grow: 1;"></div><span class="muted">Drop .met, .nav or .utl files here</span></div>
+<div class="box" style="display: flex; flex-direction: column;">
+<div class="row" style="height: 30px; padding: 0 10px; border-bottom: 1px solid rgba(185,154,82,.15);"><span style="width: 150px;">Wights.met</span><span class="muted" style="flex-grow: 1;">5 states, 14 rules → Routine</span><span style="color: #52d65e;">Ready</span></div>
+<div class="row" style="height: 30px; padding: 0 10px; border-bottom: 1px solid rgba(185,154,82,.15);"><span style="width: 150px;">Wight loop.nav</span><span class="muted" style="flex-grow: 1;">Circular, 23 points → Route</span><span style="color: #52d65e;">Ready</span></div>
+<div class="row" style="height: 30px; padding: 0 10px;"><span style="width: 150px;">Endgame.utl</span><span class="muted" style="flex-grow: 1;">14 rules → Loot</span><span style="color: #ffd774;">2 need a look</span></div>
+</div>
+<div class="muted" style="font-size: 12.5px; line-height: 17px;">Rules we cannot run exactly are imported switched off and marked, never guessed.</div>
+<div class="row" style="justify-content: flex-end;"><button class="btn red">Cancel</button><button class="btn">Import</button></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 10px;">
+<div class="sec">Server rules · from the server, read only</div>
+<div class="panel" style="width: 420px; padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; font-size: 13px;">
+<sc-for list="{{rules}}" as="r" hint-placeholder-count="6">
+<div class="row" style="height: 27px; border-bottom: 1px solid rgba(185,154,82,.15);"><span style="flex-grow: 1;">{{r.k}}</span><span style="color: {{r.c}};">{{r.v}}</span></div>
+</sc-for>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1600,"height":620}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      huds: [
+        { c: '#52d65e', a: 'Running · Hunt', b: '118k XP/h · 0:42:10', note: 'Running. The state name is from your routine.' },
+        { c: '#e2b23c', a: 'Paused · Hunt', b: 'Paused by you', note: 'Paused. Nothing acts until you resume.' },
+        { c: '#e2b23c', a: 'Waiting for you', b: 'Trade window opened', note: 'Yields when a player trades with you, or you move or type.' },
+        { c: '#d65a4a', a: 'Combat stopped', b: 'Server: must be attended', note: 'The server blocked a module. The panel says which rule.' },
+        { c: '#6fb0ff', a: 'Serving · 3 in queue', b: 'buffs heavy · Aldric Venn', note: 'Service mode: who is being served, and the queue.' }
+      ],
+      rules: [
+        { k: 'Maps, trackers, timers', v: 'Allowed', c: '#52d65e' },
+        { k: 'Buffing, looting, packing, vendoring', v: 'Allowed', c: '#52d65e' },
+        { k: 'Combat automation', v: 'Attended only', c: '#ffd774' },
+        { k: 'Service bots while away', v: 'Allowed', c: '#52d65e' },
+        { k: 'Combat while away', v: 'Not allowed', c: '#e07a6a' },
+        { k: 'Attendance check', v: 'Every 30 min', c: '#e9e1c8' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

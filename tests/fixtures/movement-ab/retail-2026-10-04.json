@@ -1,0 +1,1667 @@
+{
+ "source": "tools/retail-movement-ab.ts report of the recorded retail run (relay capture 2026-10-04, retail acclient.exe EoL on the local ACE; mover Abretail). The cast-* scenarios come from the second recording (relay capture 2026-10-05, mover Abretail @god'd: Run skill ~15225, so the client run rate is ~3.71; Heal Self VI at 0.8 s in magic stance). Track rows: [ms from the first key, 'MTS'|'AP', right m, forward m, z, compass heading deg, contact byte] in the mover's start frame (start heading north).",
+ "scenarios": {
+  "walk": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": 3.5,
+    "right": 0,
+    "dz": 0,
+    "dist": 3.5
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     87,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1150,
+     "AP",
+     0,
+     1.2,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2157,
+     "AP",
+     0,
+     2.37,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3001,
+     "AP",
+     0,
+     3.41,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3063,
+     "MTS",
+     0,
+     3.5,
+     94.01,
+     0,
+     1
+    ],
+    [
+     4149,
+     "AP",
+     0,
+     3.5,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 87,
+     "flags": "0x6",
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 3063,
+     "flags": "0x2",
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 2,
+    "ap": 4
+   }
+  },
+  "run": {
+   "style": "NonCombat",
+   "displacement": {
+    "fwd": 17.77,
+    "right": 2.05,
+    "dz": 0,
+    "dist": 17.89
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     39,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     719,
+     "AP",
+     0,
+     3.83,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1756,
+     "AP",
+     0,
+     10.63,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2796,
+     "AP",
+     0.93,
+     16.5,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3044,
+     "MTS",
+     1.73,
+     17.3,
+     94.01,
+     0,
+     1
+    ],
+    [
+     4134,
+     "AP",
+     2.05,
+     17.77,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 39,
+     "flags": "0x5",
+     "hold": 2,
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 3044,
+     "flags": "0x1",
+     "hold": 2,
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 2,
+    "ap": 4
+   }
+  },
+  "backpedal": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": -3.2,
+    "right": 0,
+    "dz": 0,
+    "dist": 3.2
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     67,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1140,
+     "AP",
+     0,
+     -1.38,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2159,
+     "AP",
+     0,
+     -2.76,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2535,
+     "MTS",
+     0,
+     -3.2,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3618,
+     "AP",
+     0,
+     -3.2,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 67,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkBackward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2535,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 2,
+    "ap": 3
+   }
+  },
+  "backpedal-walk": {
+   "style": "NonCombat",
+   "displacement": {
+    "fwd": -3.93,
+    "right": 0,
+    "dz": 0,
+    "dist": 3.93
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     119,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1195,
+     "AP",
+     0,
+     -1.27,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2239,
+     "AP",
+     0,
+     -3.02,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2555,
+     "MTS",
+     0,
+     -3.56,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3628,
+     "AP",
+     0,
+     -3.93,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 119,
+     "flags": "0x4",
+     "fwd": "WalkBackward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2555,
+     "flags": "0x0",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 2,
+    "ap": 3
+   }
+  },
+  "strafe-run": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": 0,
+    "right": 0.17,
+    "dz": 0,
+    "dist": 0.17
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     32,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1089,
+     "AP",
+     2.1,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2007,
+     "MTS",
+     3.9,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2406,
+     "MTS",
+     3.9,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3506,
+     "AP",
+     1.91,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     4415,
+     "MTS",
+     0.17,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     5493,
+     "AP",
+     0.17,
+     0,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 32,
+     "flags": "0x23",
+     "hold": 2,
+     "style": "Magic",
+     "side": "SideStepRight",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2007,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2406,
+     "flags": "0x23",
+     "hold": 2,
+     "style": "Magic",
+     "side": "SideStepLeft",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 4415,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 4,
+    "ap": 3
+   }
+  },
+  "strafe-walk": {
+   "style": "NonCombat",
+   "displacement": {
+    "fwd": 0,
+    "right": 2.98,
+    "dz": 0,
+    "dist": 2.98
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     71,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1143,
+     "AP",
+     1.65,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2019,
+     "MTS",
+     2.98,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3100,
+     "AP",
+     2.98,
+     0,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 71,
+     "flags": "0x20",
+     "side": "SideStepRight",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2019,
+     "flags": "0x0",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 2,
+    "ap": 2
+   }
+  },
+  "run-strafe": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": 18.12,
+    "right": 3.9,
+    "dz": 0,
+    "dist": 18.53
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     36,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     706,
+     "MTS",
+     -0.14,
+     2.65,
+     94.01,
+     0,
+     1
+    ],
+    [
+     811,
+     "AP",
+     0.17,
+     3.45,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1834,
+     "AP",
+     2.77,
+     10.12,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2227,
+     "MTS",
+     3.76,
+     12.65,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2923,
+     "MTS",
+     3.76,
+     17.18,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3988,
+     "AP",
+     3.9,
+     18.12,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 36,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 706,
+     "flags": "0x27",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "side": "SideStepRight",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2227,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2923,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 4,
+    "ap": 3
+   }
+  },
+  "walk-strafe": {
+   "style": "NonCombat",
+   "displacement": {
+    "fwd": 6.75,
+    "right": 3.1,
+    "dz": 0,
+    "dist": 7.42
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     67,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     752,
+     "MTS",
+     0,
+     1.17,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1719,
+     "AP",
+     1.49,
+     3.66,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2746,
+     "AP",
+     3.1,
+     6.34,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2746,
+     "MTS",
+     3.1,
+     6.34,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2746,
+     "MTS",
+     3.1,
+     6.34,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3809,
+     "AP",
+     3.1,
+     6.75,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 67,
+     "flags": "0x4",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 752,
+     "flags": "0x24",
+     "fwd": "WalkForward",
+     "side": "SideStepRight",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2746,
+     "flags": "0x0",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2746,
+     "flags": "0x20",
+     "side": "SideStepRight",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 4,
+    "ap": 3
+   }
+  },
+  "run-turn": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": -2.88,
+    "right": 4.49,
+    "dz": 0,
+    "dist": 5.34
+   },
+   "finalHeading": 191.91,
+   "track": [
+    [
+     33,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     639,
+     "MTS",
+     -0.14,
+     2.25,
+     94.01,
+     0,
+     1
+    ],
+    [
+     814,
+     "AP",
+     0.08,
+     3.42,
+     94.01,
+     23.66,
+     1
+    ],
+    [
+     1825,
+     "AP",
+     5.37,
+     3.6,
+     94.01,
+     155.1,
+     1
+    ],
+    [
+     1872,
+     "AP",
+     5.48,
+     3.36,
+     94.01,
+     160.36,
+     1
+    ],
+    [
+     2123,
+     "MTS",
+     5.62,
+     1.78,
+     94.01,
+     191.91,
+     1
+    ],
+    [
+     2711,
+     "MTS",
+     4.82,
+     -2,
+     94.01,
+     191.91,
+     1
+    ],
+    [
+     3772,
+     "AP",
+     4.49,
+     -2.88,
+     94.01,
+     191.91,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 33,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 639,
+     "flags": "0x107",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "turn": "TurnRight",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2123,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2711,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 4,
+    "ap": 4
+   }
+  },
+  "turn-in-place": {
+   "style": "NonCombat",
+   "displacement": {
+    "fwd": 0,
+    "right": 0,
+    "dz": 0,
+    "dist": 0
+   },
+   "finalHeading": 354.27,
+   "track": [
+    [
+     63,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1119,
+     "AP",
+     0,
+     0,
+     94.01,
+     134.65,
+     1
+    ],
+    [
+     1506,
+     "MTS",
+     0,
+     0,
+     94.01,
+     186.21,
+     1
+    ],
+    [
+     1853,
+     "MTS",
+     0,
+     0,
+     94.01,
+     186.21,
+     1
+    ],
+    [
+     2926,
+     "AP",
+     0,
+     0,
+     94.01,
+     48.7,
+     1
+    ],
+    [
+     3346,
+     "MTS",
+     0,
+     0,
+     94.01,
+     354.27,
+     1
+    ],
+    [
+     4420,
+     "AP",
+     0,
+     0,
+     94.01,
+     354.27,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 63,
+     "flags": "0x101",
+     "hold": 2,
+     "turn": "TurnRight",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 1506,
+     "flags": "0x1",
+     "hold": 2,
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 1853,
+     "flags": "0x101",
+     "hold": 2,
+     "turn": "TurnLeft",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 3346,
+     "flags": "0x1",
+     "hold": 2,
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 4,
+    "ap": 3
+   }
+  },
+  "stop-start": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": 7.45,
+    "right": 0.02,
+    "dz": 0,
+    "dist": 7.45
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     78,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     549,
+     "MTS",
+     -0.14,
+     1.45,
+     94.01,
+     0,
+     1
+    ],
+    [
+     917,
+     "MTS",
+     0,
+     2.38,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1452,
+     "MTS",
+     -0.14,
+     2.36,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1620,
+     "AP",
+     -0.14,
+     3.71,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1836,
+     "MTS",
+     -0.06,
+     4,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2347,
+     "MTS",
+     -0.04,
+     4.02,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2726,
+     "MTS",
+     -0.13,
+     5.62,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3236,
+     "MTS",
+     0.01,
+     5.76,
+     94.01,
+     0,
+     1
+    ],
+    [
+     4295,
+     "AP",
+     0.02,
+     7.45,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 78,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 549,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 917,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 1452,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 1836,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2347,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 2726,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 3236,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 8,
+    "ap": 2
+   }
+  },
+  "shift-toggle": {
+   "style": "NonCombat",
+   "displacement": {
+    "fwd": 18.77,
+    "right": 2.18,
+    "dz": 0,
+    "dist": 18.9
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     63,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     732,
+     "AP",
+     0,
+     3.7,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1733,
+     "AP",
+     0,
+     8.51,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2741,
+     "AP",
+     0,
+     11.63,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3740,
+     "AP",
+     0.2,
+     16,
+     94.01,
+     0,
+     1
+    ],
+    [
+     4468,
+     "MTS",
+     1.1,
+     16.91,
+     94.01,
+     0,
+     1
+    ],
+    [
+     5547,
+     "AP",
+     2.18,
+     18.77,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 63,
+     "flags": "0x5",
+     "hold": 2,
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 4468,
+     "flags": "0x1",
+     "hold": 2,
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 2,
+    "ap": 5
+   }
+  },
+  "jump-run": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": 18.21,
+    "right": 2.33,
+    "dz": 0,
+    "dist": 18.36
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     40,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     831,
+     "AP",
+     -0.14,
+     3.45,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1042,
+     "MTS",
+     -0.14,
+     4.92,
+     94.01,
+     0,
+     1
+    ],
+    [
+     2121,
+     "AP",
+     -0.14,
+     13.38,
+     94.01,
+     0,
+     1
+    ],
+    [
+     3015,
+     "MTS",
+     1.83,
+     17.64,
+     94.01,
+     0,
+     1
+    ],
+    [
+     4074,
+     "AP",
+     2.33,
+     18.21,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 40,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 1042,
+     "flags": "0x7",
+     "hold": 2,
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 3015,
+     "flags": "0x3",
+     "hold": 2,
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [
+    {
+     "t": 1164,
+     "extent": 0.122,
+     "v": [
+      0,
+      6.54,
+      2.62
+     ]
+    }
+   ],
+   "counts": {
+    "mts": 3,
+    "ap": 3
+   }
+  },
+  "jump-stand": {
+   "style": "NonCombat",
+   "displacement": {
+    "fwd": 0,
+    "right": 0,
+    "dz": 0,
+    "dist": 0
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     47,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     3
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 47,
+     "flags": "0x1",
+     "hold": 2,
+     "cmds": [],
+     "clj": 3
+    }
+   ],
+   "jumps": [
+    {
+     "t": 419,
+     "extent": 0.374,
+     "v": [
+      0,
+      0,
+      3.62
+     ]
+    }
+   ],
+   "counts": {
+    "mts": 1,
+    "ap": 0
+   }
+  },
+  "cast-run": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": 11.32,
+    "right": 0,
+    "dz": 0,
+    "dist": 11.32
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     38,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     382,
+     "AP",
+     -0.14,
+     3.45,
+     94.01,
+     0,
+     1
+    ],
+    [
+     849,
+     "MTS",
+     -0.14,
+     10.38,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1900,
+     "AP",
+     0,
+     11.32,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 38,
+     "flags": "0x7",
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 849,
+     "flags": "0x3",
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 2,
+    "ap": 2
+   },
+   "casts": [
+    {
+     "t": 849,
+     "spell": 1161
+    }
+   ],
+   "cast": {
+    "result": "You cast Heal Self VI and restore 0 points of your health.",
+    "ms": 2803
+   }
+  },
+  "cast-strafe": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": 0,
+    "right": 2.23,
+    "dz": 0,
+    "dist": 2.23
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     67,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     817,
+     "MTS",
+     2.23,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1886,
+     "AP",
+     2.23,
+     0,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 67,
+     "flags": "0x23",
+     "style": "Magic",
+     "side": "SideStepRight",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 817,
+     "flags": "0x3",
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 2,
+    "ap": 1
+   },
+   "casts": [
+    {
+     "t": 817,
+     "spell": 1161
+    }
+   ],
+   "cast": {
+    "result": "You cast Heal Self VI and restore 0 points of your health.",
+    "ms": 2223
+   }
+  },
+  "cast-run-strafe": {
+   "style": "Magic",
+   "displacement": {
+    "fwd": 10.92,
+    "right": 2.8,
+    "dz": 0,
+    "dist": 11.27
+   },
+   "finalHeading": 0,
+   "track": [
+    [
+     36,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     85,
+     "MTS",
+     0,
+     0,
+     94.01,
+     0,
+     1
+    ],
+    [
+     425,
+     "AP",
+     1.17,
+     4.12,
+     94.01,
+     0,
+     1
+    ],
+    [
+     823,
+     "MTS",
+     2.65,
+     9.98,
+     94.01,
+     0,
+     1
+    ],
+    [
+     1874,
+     "AP",
+     2.8,
+     10.92,
+     94.01,
+     0,
+     1
+    ]
+   ],
+   "moveToState": [
+    {
+     "t": 36,
+     "flags": "0x7",
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 85,
+     "flags": "0x27",
+     "style": "Magic",
+     "fwd": "WalkForward",
+     "side": "SideStepRight",
+     "cmds": [],
+     "clj": 1
+    },
+    {
+     "t": 823,
+     "flags": "0x3",
+     "style": "Magic",
+     "cmds": [],
+     "clj": 1
+    }
+   ],
+   "jumps": [],
+   "counts": {
+    "mts": 3,
+    "ap": 2
+   },
+   "casts": [
+    {
+     "t": 823,
+     "spell": 1161
+    }
+   ],
+   "cast": {
+    "result": "You cast Heal Self VI and restore 0 points of your health.",
+    "ms": 2801
+   }
+  }
+ }
+}

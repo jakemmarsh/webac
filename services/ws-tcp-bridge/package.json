@@ -1,0 +1,22 @@
+{
+  "name": "@ac/ws-tcp-bridge",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jakemmarsh/webac.git",
+    "directory": "services/ws-tcp-bridge"
+  },
+  "private": true,
+  "type": "module",
+  "main": "src/bridge.ts",
+  "types": "src/bridge.ts",
+  "scripts": {
+    "start": "tsx src/bridge.ts",
+    "build": "esbuild src/bridge.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/bridge.cjs --external:bufferutil --external:utf-8-validate",
+    "start:prod": "node dist/bridge.cjs"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}

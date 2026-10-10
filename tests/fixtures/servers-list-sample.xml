@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Trimmed copy of acresources/serverslist Servers.xml (2026-10-04 shape) plus
+     deliberately broken items, for tests/verify-bridge-hosting.ts. -->
+<ArrayOfServerItem>
+  <ServerItem>
+    <id>59544be2-9435-400d-a589-30b2a39ed071</id>
+    <name>Newfoundland</name>
+    <description>End of retail server. All Weclome</description>
+    <emu>ACE</emu>
+    <server_host>rftc.duckdns.org</server_host>
+    <server_port>9000</server_port>
+    <type>PvE</type>
+    <status>Stable</status>
+    <website_url></website_url>
+    <discord_url>https://discord.gg/A5AHWZFUAa</discord_url>
+  </ServerItem>
+  <ServerItem>
+    <id>99b5533c-196a-4d38-8db1-dbad7a91d7a2</id>
+    <name>Nexus &amp; Friends</name>
+    <description>PvP/PvE hybrid &lt;custom&gt;</description>
+    <emu>ACE</emu>
+    <server_host>135.148.136.179</server_host>
+    <server_port>9000</server_port>
+    <type>PvP</type>
+    <status>Stable</status>
+  </ServerItem>
+  <ServerItem>
+    <id>gdle-reefcull</id>
+    <name>Reefcull</name>
+    <emu>GDL</emu>
+    <server_host>Reefcull.GDLEAC.com</server_host>
+    <server_port>9000</server_port>
+  </ServerItem>
+  <ServerItem>
+    <id>bad-port</id>
+    <name>Bad port</name>
+    <emu>ACE</emu>
+    <server_host>example.org</server_host>
+    <server_port>65535</server_port>
+  </ServerItem>
+  <ServerItem>
+    <id>bad-host</id>
+    <name>Bad host</name>
+    <emu>ACE</emu>
+    <server_host>evil host; rm -rf</server_host>
+    <server_port>9000</server_port>
+  </ServerItem>
+  <ServerItem>
+    <id></id>
+    <name>No id</name>
+    <server_host>example.org</server_host>
+    <server_port>9000</server_port>
+  </ServerItem>
+  <ServerItem>
+    <id>59544BE2-9435-400D-A589-30B2A39ED071</id>
+    <name>Duplicate of Newfoundland</name>
+    <server_host>other.example.org</server_host>
+    <server_port>9000</server_port>
+  </ServerItem>
+</ArrayOfServerItem>

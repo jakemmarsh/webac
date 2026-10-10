@@ -1,0 +1,618 @@
+/**
+ * createBridgeServer: the WS↔UDP bridge as a module (bridge.ts is the CLI
+ * entry). One HTTP server carries the WebSocket upgrades plus /healthz and
+ * /metrics. Each WebSocket session owns one UDP socket, so the game server
+ * tells sessions apart by source port.
+ *
+ * Port routing (ACE + GDLE): ConnectResponse (flag 0x00080000) → the world
+ * port (base + 1); every other client packet → the base port, where the
+ * server routes it by header Id. Replies are accepted from the target's IP
+ * on either port (GDLE sends everything from the base port; ACE from both).
+ *
+ * Each session has a wire protocol (protocol.ts). End of retail is the
+ * default and takes the routing above. A 1999 session (its server's era is a
+ * 1999 era, or `?proto=ac1999`) uses the one base port both ways, takes its
+ * id from the server's connect grant, and closes with a 1999 Disconnect.
+ *
+ * Modes (BridgeConfig.mode):
+ *   pinned  one fixed target (CLI args, BRIDGE_TARGET, or 127.0.0.1:9000);
+ *           any path, ?server ignored. Local dev and operator-run bridges.
+ *   multi   `?server=<id>` picks a server from the allowlist (ServerRegistry);
+ *           the host is resolved at connect time and must be a public IPv4
+ *           address. A connection without ?server is a probe-only session
+ *           (answers the text "health" message, forwards nothing).
+ *
+ * Admission, in order (rejections answer the upgrade with an HTTP status and
+ * count in /metrics rejects{reason}): origin → global cap → per-IP new
+ * connection rate → per-IP concurrent cap → [multi] server id → per-server
+ * cap → DNS + public-address check.
+ */
+import * as http from 'http';
+import type { Duplex } from 'stream';
+import * as dgram from 'dgram';
+import * as dns from 'dns';
+import * as fs from 'fs';
+import { WebSocketServer, WebSocket } from 'ws';
+import {
+  type BridgeConfig,
+  FLAG_CONNECT_RESPONSE,
+  WS_BACKPRESSURE_LIMIT,
+  shouldDropForBackpressure,
+  makeImpairedLink,
+  readPacketFlags,
+  readPacketId,
+  readConnectRequestClientId,
+  buildDisconnectPacket,
+  isOriginAllowed,
+  isFromAce,
+  initialAceAddresses,
+  normalizeAddress,
+  automationAllowed,
+} from './bridgeUtil.js';
+import { type Logger, makeLogger, rateLimitedLog } from './log.js';
+import { AbuseMeter, KeyedCounter, SlidingWindowCounter, TokenBucket, clientIp, isLoopbackAddress } from './limits.js';
+import { BridgeMetrics, type BridgeSnapshot, makeHttpHandler } from './metrics.js';
+import type { ServerRegistry } from './serverList.js';
+import type { ServerDirectory } from './serverDirectory.js';
+import { sanitizeClientError } from './clientErrors.js';
+import { type LookupFn, resolveTarget } from './targets.js';
+import { compatFor } from './serverCompat.js';
+import { RoutineTokens, handleRoutines, readCharacterListAccount, readCharacterListAccount1999 } from './routines.js';
+import { RoutineStore } from './routineStore.js';
+import {
+  type SessionProtocol, sessionProtocol, readGrant1999Ids, readTime1999, buildDisconnectPacket1999,
+} from './protocol.js';
+
+/** Where a session's datagrams go. */
+interface Target {
+  /** Stable key for per-server accounting ('pinned' in pinned mode, else the server id). */
+  key: string;
+  name: string;
+  /** Address the UDP socket sends to (a resolved IP in multi mode). */
+  sendHost: string;
+  authPort: number;
+  worldPort: number;
+  /** Source addresses replies are accepted from. */
+  sourceAddrs: Set<string>;
+}
+
+interface Session {
+  id: number;
+  ip: string;
+  ws: WebSocket;
+  target: Target | null;
+  udp: dgram.Socket | null;
+  closed: boolean;
+  openedAt: number;
+  /** The id the server knows this session by: the EoL ConnectRequest clientId, or the 1999 grant's slot. */
+  aceSessionId: number | null;
+  /** Wire protocol (protocol.ts); 'eor' unless the server's era or ?proto says 1999. */
+  protocol: SessionProtocol;
+  /** 1999: the last server header time byte, echoed on our Disconnect. */
+  time1999: number;
+  /** The account the server's CharacterList named (proof of login; AGENT.routine-store-auth). */
+  account: string | null;
+  packetsUp: number;
+  packetsDown: number;
+  bytesFromBrowser: number;
+  bytesToServer: number;
+  bytesFromServer: number;
+  bytesToBrowser: number;
+  dropped: number;
+  close(reason: string, code?: number): Promise<void>;
+}
+
+export interface BridgeDeps {
+  /** Required in multi mode. */
+  registry?: ServerRegistry;
+  /** Multi mode: the launcher's GET /servers body (world list + live status). */
+  directory?: ServerDirectory;
+  log?: Logger;
+  lookup?: LookupFn;
+  now?: () => number;
+}
+
+export interface BridgeServer {
+  httpServer: http.Server;
+  /** Start listening; resolves with the bound port (config.wsPort may be 0). */
+  listen(): Promise<number>;
+  /** Send each session's Disconnect to its game server, close everything. */
+  shutdown(): Promise<void>;
+  /**
+   * Deploys without dropping players: refuse new connections (503
+   * `draining`), keep every open session running, and resolve once the last
+   * one ends ('empty') or `maxMs` passes ('timeout'). The caller then runs
+   * shutdown() for whatever is left. A new deployment takes the new logins.
+   */
+  drain(maxMs: number): Promise<'empty' | 'timeout'>;
+  metrics: BridgeMetrics;
+  snapshot(): BridgeSnapshot;
+}
+
+type Admission =
+  | { ok: true; target: Target | null; protocol: SessionProtocol; release: () => void }
+  | { ok: false; status: number; reason: string; message: string };
+
+export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}): BridgeServer {
+  const log = deps.log ?? makeLogger(config.debug);
+  const now = deps.now ?? Date.now;
+  const metrics = new BridgeMetrics(now);
+  const registry = deps.registry;
+  if (config.mode === 'multi' && !registry) throw new Error('multi mode needs a ServerRegistry');
+
+  const limits = config.limits;
+  const perIp = new KeyedCounter();
+  const perServer = new KeyedCounter();
+  const serverNames = new Map<string, string>();
+  const connectRate = new SlidingWindowCounter(limits.connectRatePerIp, limits.connectRateWindowMs, now);
+  // RELEASE.error-reporting — a page sends at most a handful of reports; this
+  // caps a broken or hostile client at 30 per 10 minutes per address.
+  const clientErrorRate = new SlidingWindowCounter(30, 10 * 60_000, now);
+  const sweepTimer = setInterval(() => { connectRate.sweep(); clientErrorRate.sweep(); }, limits.connectRateWindowMs);
+  sweepTimer.unref?.();
+  const sessions = new Set<Session>();
+  /** Admitted-but-not-yet-open upgrades count against the global cap too. */
+  let pending = 0;
+  let sessionCounter = 0;
+  const lastServerResponse = new Map<string, number>();
+  let shuttingDown = false;
+  let draining = false;
+
+  // ─── Capture (packet-replay corpus; never in production) ───
+  let capture: fs.WriteStream | null = null;
+  if (config.captureRefused) {
+    log('error', 'capture_refused', { reason: 'BRIDGE_CAPTURE is ignored when NODE_ENV=production (it would record every player\'s traffic)' });
+  } else if (config.capturePath) {
+    capture = fs.createWriteStream(config.capturePath, { flags: 'a' });
+    log('warn', 'capture_on', { path: config.capturePath });
+  }
+  const captureFrame = (frame: Buffer) => {
+    if (!capture) return;
+    const prefix = Buffer.alloc(4);
+    prefix.writeUInt32LE(frame.length, 0);
+    capture.write(Buffer.concat([prefix, frame]));
+  };
+
+  // ─── Pinned target (resolved addresses filled in asynchronously, as before) ───
+  let pinned: Target | null = null;
+  if (config.mode === 'pinned') {
+    pinned = {
+      key: 'pinned',
+      name: `${config.aceHost}:${config.aceAuthPort}`,
+      sendHost: config.aceHost,
+      authPort: config.aceAuthPort,
+      worldPort: config.aceWorldPort,
+      sourceAddrs: initialAceAddresses(config.aceHost),
+    };
+    serverNames.set('pinned', pinned.name);
+    const t = pinned;
+    dns.lookup(config.aceHost, { all: true }, (err, addrs) => {
+      if (err) { log('warn', 'target_resolve_failed', { host: config.aceHost, error: err.message }); return; }
+      for (const a of addrs) t.sourceAddrs.add(normalizeAddress(a.address));
+    });
+  }
+
+  const snapshot = (): BridgeSnapshot => {
+    const counts = new Map(perServer.entries());
+    const ids = new Set<string>([...counts.keys()]);
+    if (pinned) ids.add(pinned.key);
+    return {
+      mode: config.mode,
+      era: config.mode === 'pinned' ? config.era ?? null : null,
+      sessions: sessions.size,
+      perServer: [...ids].map(id => ({ id, name: serverNames.get(id) ?? id, sessions: counts.get(id) ?? 0 })),
+      serversList: registry ? registry.status() : null,
+      uptimeSeconds: Math.round((now() - metrics.startedAt) / 1000),
+      draining,
+    };
+  };
+
+  // ─── Routines (AGENT.routine-store-auth): pinned servers are local-<era>, the id agent tools use ───
+  const routineStore = config.routinesDir ? new RoutineStore(config.routinesDir) : null;
+  const routineTokens = new RoutineTokens(now);
+  const routinesServer = (t: Target): string => (t.key === 'pinned' ? `local-${config.era ?? 'eor'}` : t.key);
+  const tokenSweep = setInterval(() => routineTokens.sweep(), 60_000);
+  tokenSweep.unref?.();
+
+  const baseHandler = makeHttpHandler(metrics, snapshot, {
+    metricsToken: config.metricsToken,
+    clientErrors: (body, req) => {
+      const ip = clientIp(req.socket.remoteAddress, req.headers, config.trustProxyHops, config.clientIpHeader);
+      if (!clientErrorRate.hit(ip)) return 429;
+      const report = sanitizeClientError(body);
+      if (!report) return 400;
+      metrics.clientError(report.kind);
+      log('warn', 'client_error', { ip, ...report });
+      return 204;
+    },
+    servers: deps.directory ? () => deps.directory!.body() : null,
+  });
+  const httpServer = http.createServer((req, res) => {
+    if (new URL(req.url ?? '/', 'http://bridge.local').pathname === '/routines') return handleRoutines(req, res, routineTokens, routineStore);
+    return baseHandler(req, res);
+  });
+  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: config.maxPayload });
+
+  // ─── Admission ─────────────────────────────────────
+
+  async function admit(req: http.IncomingMessage, ip: string): Promise<Admission> {
+    const origin = req.headers.origin;
+    if (!isOriginAllowed(origin || undefined, config.allowedOrigins)) {
+      return { ok: false, status: 403, reason: 'origin', message: 'Origin not allowed' };
+    }
+    if (shuttingDown) return { ok: false, status: 503, reason: 'shutting_down', message: 'Bridge shutting down' };
+    if (draining) return { ok: false, status: 503, reason: 'draining', message: 'Bridge is handing over to a new deployment' };
+    if (sessions.size + pending >= config.maxConnections) {
+      return { ok: false, status: 503, reason: 'global_cap', message: 'Too many connections' };
+    }
+    // Loopback peers (local dev tools) skip per-IP limits — unless the address
+    // came from a trusted proxy header, where it is a real client address.
+    const exempt = config.trustProxyHops === 0 && isLoopbackAddress(ip);
+    if (!exempt) {
+      if (!connectRate.hit(ip)) return { ok: false, status: 429, reason: 'ip_rate', message: 'Too many new connections' };
+      if (perIp.get(ip) >= limits.maxSessionsPerIp) {
+        return { ok: false, status: 429, reason: 'ip_cap', message: 'Too many sessions from this address' };
+      }
+    }
+
+    let target: Target | null = pinned;
+    // The server's era picks the session's wire protocol (pinned: BRIDGE_ERA).
+    let era: string | null | undefined = config.mode === 'pinned' ? config.era : null;
+    // Pinned mode counts its sessions under 'pinned' (for /healthz) but does
+    // not apply the per-server cap: the operator chose that one server.
+    let serverKey: string | null = pinned ? pinned.key : null;
+    if (config.mode === 'multi') {
+      const id = new URL(req.url ?? '/', 'http://bridge.local').searchParams.get('server');
+      if (id !== null && id.trim() !== '') {
+        const entry = registry!.lookup(id);
+        if (!entry) return { ok: false, status: 404, reason: 'unknown_server', message: 'Unknown server id' };
+        if (perServer.get(entry.id) >= limits.maxSessionsPerServer) {
+          return { ok: false, status: 503, reason: 'server_cap', message: 'Too many sessions to this server' };
+        }
+        serverKey = entry.id;
+        // Reserve before the async DNS step so concurrent upgrades can't overshoot the caps.
+        perServer.inc(serverKey);
+        perIp.inc(ip);
+        pending++;
+        const res = await resolveTarget(entry.host, { allowPrivate: config.allowPrivateTargets, lookup: deps.lookup });
+        pending--;
+        perIp.dec(ip);
+        perServer.dec(serverKey);
+        if (!res.ok) {
+          log('warn', 'target_rejected', { server: entry.id, host: entry.host, reason: res.reason, detail: res.detail });
+          return res.reason === 'private_target'
+            ? { ok: false, status: 403, reason: 'private_target', message: 'Server address not allowed' }
+            : { ok: false, status: 502, reason: res.reason, message: 'Server address could not be resolved' };
+        }
+        if (shuttingDown) return { ok: false, status: 503, reason: 'shutting_down', message: 'Bridge shutting down' };
+        serverNames.set(entry.id, entry.name);
+        // The launcher's directory row (overlay + live detection) names the era;
+        // without a directory, the overlay alone.
+        const row = deps.directory?.body().servers.find(s => s.id.toLowerCase() === entry.id.toLowerCase());
+        era = row ? row.era : compatFor(entry.id, entry.emu).era;
+        target = {
+          key: entry.id,
+          name: entry.name,
+          sendHost: res.address,
+          authPort: entry.port,
+          worldPort: entry.port + 1,
+          sourceAddrs: new Set([res.address]),
+        };
+      } else {
+        target = null; // probe-only session
+      }
+    }
+
+    perIp.inc(ip);
+    if (serverKey) perServer.inc(serverKey);
+    let released = false;
+    return {
+      ok: true,
+      target,
+      protocol: sessionProtocol(era, req.url),
+      release: () => {
+        if (released) return;
+        released = true;
+        perIp.dec(ip);
+        if (serverKey) perServer.dec(serverKey);
+      },
+    };
+  }
+
+  function rejectUpgrade(socket: Duplex, status: number, message: string): void {
+    const text = http.STATUS_CODES[status] ?? 'Error';
+    try {
+      socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(message)}\r\n\r\n${message}`);
+    } catch { /* ignore */ }
+    socket.destroy();
+  }
+
+  httpServer.on('upgrade', (req: http.IncomingMessage, socket: Duplex, head: Buffer) => {
+    socket.on('error', () => { /* client vanished mid-handshake */ });
+    const ip = clientIp(req.socket.remoteAddress, req.headers, config.trustProxyHops, config.clientIpHeader);
+    void admit(req, ip).then((a) => {
+      if (!a.ok) {
+        metrics.reject(a.reason);
+        log('warn', 'connect_rejected', { ip, reason: a.reason, status: a.status, origin: req.headers.origin, url: req.url });
+        rejectUpgrade(socket, a.status, a.message);
+        return;
+      }
+      if (socket.destroyed) { a.release(); return; }
+      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, a.target, a.protocol, a.release));
+    }, (err) => {
+      metrics.reject('internal');
+      log('error', 'admit_failed', { ip, error: err as Error });
+      rejectUpgrade(socket, 500, 'Internal error');
+    });
+  });
+
+  // ─── Session ───────────────────────────────────────
+
+  function openSession(ws: WebSocket, ip: string, target: Target | null, protocol: SessionProtocol, release: () => void): void {
+    const id = ++sessionCounter;
+    const upLink = makeImpairedLink(config.impairment);
+    const downLink = makeImpairedLink(config.impairment && { ...config.impairment, seed: config.impairment.seed + 1 });
+    const msgBucket = new TokenBucket(limits.msgRatePerSec, limits.msgBurst, now);
+    const byteBucket = new TokenBucket(limits.byteRatePerSec, limits.byteBurst, now);
+    const abuse = new AbuseMeter(limits.abuseMaxDrops, limits.abuseWindowMs, now);
+    const warnBackpressure = rateLimitedLog(log, 1000, now);
+    const warnRate = rateLimitedLog(log, 1000, now);
+    const warnForeign = rateLimitedLog(log, 5000, now);
+    let isProbe = false;
+    let isAlive = true;
+
+    const session: Session = {
+      id, ip, ws, target, udp: null, closed: false, openedAt: now(), aceSessionId: null, protocol, time1999: 0, account: null,
+      packetsUp: 0, packetsDown: 0, bytesFromBrowser: 0, bytesToServer: 0, bytesFromServer: 0, bytesToBrowser: 0, dropped: 0,
+      close: (reason, code) => cleanup(reason, code),
+    };
+    sessions.add(session);
+    metrics.connects++;
+    log('info', 'session_open', { session: id, ip, server: target?.key ?? null, protocol, active: sessions.size });
+    const is1999 = protocol === 'ac1999';
+
+    ws.on('pong', () => { isAlive = true; });
+    const pingInterval = setInterval(() => {
+      if (!isAlive) {
+        log('info', 'session_ping_timeout', { session: id });
+        ws.terminate();
+        return;
+      }
+      isAlive = false;
+      ws.ping();
+    }, 20_000);
+
+    const sendUdp = (buf: Buffer, port: number) => {
+      const t = session.target!;
+      const udp = session.udp!;
+      upLink.send(() => {
+        if (session.closed) return;
+        session.bytesToServer += buf.length;
+        metrics.addBytes('udp_out', buf.length);
+        udp.send(buf, port, t.sendHost);
+      });
+    };
+
+    const ensureUdp = (): dgram.Socket => {
+      if (session.udp) return session.udp;
+      const t = session.target!;
+      // A 1999 server speaks from its one port only.
+      const sourcePorts = is1999 ? [t.authPort] : [t.authPort, t.worldPort];
+      const udp = dgram.createSocket('udp4');
+      session.udp = udp;
+      udp.bind(0, () => log('debug', 'udp_bound', { session: id, port: udp.address().port }));
+      udp.on('error', (err) => {
+        log('error', 'udp_error', { session: id, error: err });
+        void cleanup('udp_error');
+      });
+      udp.on('message', (msg: Buffer, rinfo: dgram.RemoteInfo) => {
+        if (!config.allowAnyUdpSource && !isFromAce(rinfo, t.sourceAddrs, sourcePorts)) {
+          metrics.drop('foreign_udp');
+          warnForeign('warn', 'udp_foreign_source', { session: id, from: `${rinfo.address}:${rinfo.port}` });
+          return;
+        }
+        lastServerResponse.set(t.key, now());
+        if (session.closed) return;
+        session.bytesFromServer += msg.length;
+        session.packetsDown++;
+        metrics.addBytes('udp_in', msg.length);
+        if (config.debug) {
+          log('debug', 'udp_in', { session: id, port: rinfo.port, seq: msg.length >= 4 ? msg.readUInt32LE(0) : 0, flags: readPacketFlags(msg), len: msg.length });
+        }
+        if (is1999) {
+          // The slot comes from the server's connect grant body; its own id is the grant header's recipient.
+          session.time1999 = readTime1999(msg) ?? session.time1999;
+          const grant = readGrant1999Ids(msg);
+          if (grant && grant.slot !== session.aceSessionId) {
+            session.aceSessionId = grant.slot;
+            log('info', 'session_server_id', { session: id, aceSessionId: grant.slot, serverRecipient: grant.serverRecipient, protocol });
+          }
+          // Read the account when something needs it: the routines store or the automation allowlist.
+          if (session.account === null && (routineStore || config.automationAccounts.length)) {
+            const account = readCharacterListAccount1999(msg);
+            if (account) { session.account = account; log('info', 'session_account', { session: id }); }
+          }
+        } else {
+          // The client's session id comes from the server's ConnectRequest
+          // payload (server header Ids are always ServerId 0xB).
+          const clientId = readConnectRequestClientId(msg);
+          if (clientId !== null && clientId !== session.aceSessionId) {
+            session.aceSessionId = clientId;
+            log('info', 'session_server_id', { session: id, aceSessionId: clientId });
+          }
+          // Read the account when something needs it: the routines store or the automation allowlist.
+          if (session.account === null && (routineStore || config.automationAccounts.length)) {
+            const account = readCharacterListAccount(msg);
+            if (account) { session.account = account; log('info', 'session_account', { session: id }); }
+          }
+        }
+        // Backpressure: drop the datagram (UDP semantics; the client NAKs).
+        downLink.send(() => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          if (shouldDropForBackpressure(ws.bufferedAmount)) {
+            metrics.drop('backpressure');
+            warnBackpressure('warn', 'ws_backpressure_drop', { session: id, buffered: ws.bufferedAmount, limit: WS_BACKPRESSURE_LIMIT });
+            return;
+          }
+          captureFrame(msg);
+          session.bytesToBrowser += msg.length;
+          metrics.addBytes('ws_out', msg.length);
+          ws.send(msg);
+        });
+      });
+      return udp;
+    };
+
+    ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+      if (session.closed) return;
+      const buf = data instanceof ArrayBuffer ? Buffer.from(data) : Array.isArray(data) ? Buffer.concat(data) : data;
+      session.bytesFromBrowser += buf.length;
+      metrics.addBytes('ws_in', buf.length);
+
+      // Per-session rate limits: drop over-limit messages; close on sustained abuse.
+      if (!msgBucket.tryTake(1) || !byteBucket.tryTake(buf.length)) {
+        session.dropped++;
+        metrics.drop('rate_limited');
+        warnRate('warn', 'session_rate_limited', { session: id, ip });
+        if (abuse.recordDrop()) {
+          log('warn', 'session_abuse_close', { session: id, ip, dropped: session.dropped });
+          void cleanup('abuse', 1008);
+        }
+        return;
+      }
+
+      // Text "health" → JSON status, then close (probeBridgeHealth / check-stack).
+      if (!isBinary) {
+        if (buf.toString('utf8').trim().toLowerCase() === 'health') {
+          isProbe = true;
+          const key = session.target?.key;
+          const last = key ? lastServerResponse.get(key) ?? 0 : Math.max(0, ...lastServerResponse.values());
+          const recent = last > 0 && now() - last < 30_000;
+          // ERA.dm-support: a pinned bridge names its server's era here too —
+          // the web CSP allows wss: to any bridge but not its https /healthz.
+          const era = config.mode === 'pinned' && config.era ? { era: config.era } : {};
+          ws.send(JSON.stringify({ bridge: 'ok', ace: recent ? 'ok' : 'unknown', sessions: sessions.size, ...era }));
+          ws.close();
+        } else if (buf.toString('utf8').trim().toLowerCase() === 'routines') {
+          // A token for /routines once the server has logged this session in (routines.ts).
+          const reason = !routineStore ? 'routines are not kept on this bridge'
+            : !session.target ? 'not connected to a server'
+            : !session.account ? 'not logged in yet' : null;
+          // AGENT.automation-allowlist — whether this (server-reported) account gets the automation UI.
+          const automation = !!session.target && !!session.account && automationAllowed(config.automationAccounts, routinesServer(session.target), session.account);
+          // A bridge that keeps no routines still names the logged-in account, so the page keeps them in
+          // its own browser storage under it (AGENT.automation-allowlist; RoutineSync's local mode).
+          const who = session.target && session.account ? { server: routinesServer(session.target), account: session.account } : {};
+          ws.send(JSON.stringify(reason || !session.target || !session.account
+            ? { routines: null, reason, automation, ...who }
+            : { routines: { token: routineTokens.issue(id, routinesServer(session.target), session.account), server: routinesServer(session.target), account: session.account }, automation }));
+        }
+        return;
+      }
+
+      if (isProbe || !session.target) return; // probe-only session: forward nothing
+      if (buf.length < 20) return;
+      ensureUdp();
+      const flags = readPacketFlags(buf);
+      session.packetsUp++;
+      if (config.debug) log('debug', 'ws_in', { session: id, seq: buf.readUInt32LE(0), flags, len: buf.length });
+
+      if (is1999) {
+        // One port for everything (no ConnectResponse / world port in 1999).
+        sendUdp(buf, session.target.authPort);
+      } else if (flags & FLAG_CONNECT_RESPONSE) {
+        // ConnectResponse is the only packet for the world port.
+        // Fallback only: the client stamps its header Id with the ConnectRequest's clientId.
+        if (session.aceSessionId === null) session.aceSessionId = readPacketId(buf);
+        log('info', 'session_connect_response', { session: id, worldPort: session.target.worldPort });
+        sendUdp(buf, session.target.worldPort);
+      } else {
+        sendUdp(buf, session.target.authPort);
+      }
+    });
+
+    function cleanup(reason: string, code?: number): Promise<void> {
+      if (session.closed) return Promise.resolve();
+      session.closed = true;
+      sessions.delete(session);
+      routineTokens.sessionEnded(id);
+      release();
+      clearInterval(pingInterval);
+      upLink.close();
+      downLink.close();
+      metrics.close(reason);
+      log('info', 'session_close', {
+        session: id, ip, server: session.target?.key ?? null, reason,
+        durationMs: now() - session.openedAt,
+        bytesFromBrowser: session.bytesFromBrowser, bytesToServer: session.bytesToServer,
+        bytesFromServer: session.bytesFromServer, bytesToBrowser: session.bytesToBrowser,
+        packetsUp: session.packetsUp, packetsDown: session.packetsDown, dropped: session.dropped,
+        active: sessions.size,
+      });
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        try { ws.close(code ?? 1000); } catch { /* ignore */ }
+      }
+      const udp = session.udp;
+      if (!udp) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        const done = () => { try { udp.close(); } catch { /* ignore */ } resolve(); };
+        // Tell the server to free the session now instead of after its 60 s
+        // timeout. Needs the right session id + a valid checksum.
+        if (session.aceSessionId !== null && session.target) {
+          const pkt = is1999
+            ? buildDisconnectPacket1999(session.aceSessionId, session.time1999)
+            : buildDisconnectPacket(session.aceSessionId);
+          log('info', 'session_disconnect_sent', { session: id, aceSessionId: session.aceSessionId, protocol });
+          try { udp.send(pkt, session.target.authPort, session.target.sendHost, done); } catch { done(); }
+        } else {
+          done();
+        }
+      });
+    }
+
+    ws.on('close', () => { void cleanup('ws_close'); });
+    ws.on('error', (err) => {
+      log('warn', 'ws_error', { session: id, error: err });
+      void cleanup('ws_error');
+    });
+  }
+
+  return {
+    httpServer,
+    metrics,
+    snapshot,
+    listen: () => new Promise<number>((resolve, reject) => {
+      httpServer.once('error', reject);
+      httpServer.listen(config.wsPort, config.wsHost, () => {
+        httpServer.off('error', reject);
+        const addr = httpServer.address();
+        resolve(typeof addr === 'object' && addr ? addr.port : config.wsPort);
+      });
+    }),
+    drain: (maxMs: number) => new Promise<'empty' | 'timeout'>((resolve) => {
+      draining = true;
+      const started = now();
+      log('info', 'bridge_draining', { sessions: sessions.size, maxSeconds: Math.round(maxMs / 1000) });
+      const check = () => {
+        if (sessions.size === 0) { resolve('empty'); return; }
+        if (now() - started >= maxMs) { resolve('timeout'); return; }
+        setTimeout(check, Math.min(1000, Math.max(10, maxMs / 10))).unref?.();
+      };
+      check();
+    }),
+    shutdown: async () => {
+      shuttingDown = true;
+      clearInterval(sweepTimer); clearInterval(tokenSweep);
+      registry?.stop();
+      deps.directory?.stop();
+      const closing = [...sessions].map(s => s.close('shutdown', 1001));
+      await Promise.race([Promise.all(closing), new Promise(r => setTimeout(r, 3000))]);
+      for (const c of wss.clients) c.terminate();
+      await new Promise<void>((resolve) => {
+        httpServer.close(() => resolve());
+        httpServer.closeAllConnections?.();
+      });
+      if (capture) await new Promise<void>(r => capture!.end(() => r()));
+    },
+  };
+}

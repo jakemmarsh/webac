@@ -1,0 +1,14 @@
+# BuildKit uses this instead of the root .dockerignore for this Dockerfile:
+# the bridge image needs only its own source (+ the 1999 packet file it imports and its one import).
+*
+!services/ws-tcp-bridge/src/**
+!packages/network/src/era1999/Packet1999.ts
+!packages/network/src/Hash32.ts
+!packages/shared/src/routines/index.ts
+!packages/shared/src/routines/RoutineDoc.ts
+!packages/shared/src/routines/validateRoutine.ts
+!packages/shared/src/routines/exampleProfile.ts
+!packages/shared/src/routines/vtank.ts
+!packages/shared/src/routines/vtankExpr.ts
+!packages/shared/src/routines/vtankOptions.ts
+!packages/shared/src/routines/vtankProfile.ts

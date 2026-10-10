@@ -1,0 +1,18 @@
+# Build context for deploy/*/Dockerfile (context = repo root). Keep it to
+# source: the DATs are hosted separately and the evidence trees are GBs.
+.git
+**/node_modules
+dist
+**/dist
+dat
+dat-*
+public
+reference
+verification
+docs
+world-db-raw
+*.sqlite
+*.sqlite-*
+tests
+tools
+.claude

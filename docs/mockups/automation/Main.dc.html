@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>In game: Automation panel</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Tinos:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#000;font-family:Tinos,'Times New Roman',serif}
+.panel{position:absolute;box-sizing:border-box;background:rgba(22,20,9,.95);border:2px solid #6e5526;box-shadow:inset 0 0 0 1px #d9ba6a,0 0 0 1px #140f04;color:#e9e1c8}
+.tab{height:22px;padding:0 12px;display:flex;align-items:center;font:13px Tinos,serif;color:#b9ad8c;background:#121210;border:1px solid #b89a52;border-bottom:none;border-radius:3px 12px 0 0;cursor:pointer}
+.tab.on{background:#3d382d;color:#f3ecd6}
+.btn{height:24px;padding:0 10px;font:13px Tinos,serif;color:#f1ead6;background:linear-gradient(#1b28b3,#0b1266);border:2px solid #c9a04a;box-shadow:inset 0 1px 0 #3c4ad6;cursor:pointer}
+.btn.red{background:linear-gradient(#4b1616,#2a0909);box-shadow:inset 0 1px 0 #7a2a2a}
+.field{box-sizing:border-box;height:21px;display:flex;align-items:center;justify-content:space-between;gap:6px;padding:0 6px;background:#0a0a07;border:1px solid #8d7642;color:#f0e6c6;font:12.5px Tinos,serif;white-space:nowrap;cursor:pointer}
+.cb{width:14px;height:14px;flex-shrink:0;border:1px solid #c9a04a;background:#0a0a07;display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer}
+.muted{color:#a79d80}
+.sec{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#c9a95e}
+.iconbtn{width:22px;height:22px;padding:0;display:flex;align-items:center;justify-content:center;background:#121210;border:1px solid #b89a52;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 1600px; height: 900px; position: relative; overflow: hidden;">
+<img src="/_blob/6138126c717834a82eebdc8107505f96" alt="Holtburg, retail client" style="position: absolute; left: 0; top: 0; width: 1600px; height: 900px;">
+
+<div class="panel" style="left: 722px; top: 57px; width: 156px; height: 40px; padding: 3px 5px; display: flex; align-items: center; gap: 6px;">
+<div style="display: flex; flex-direction: column; flex-grow: 1; gap: 1px; min-width: 0;">
+<div style="display: flex; align-items: center; gap: 5px; font-size: 12.5px;">
+<span class="dot" style="width: 8px; height: 8px; border-radius: 50%; background: {{dotColor}}; box-shadow: 0 0 4px {{dotColor}};"></span>
+<span style="color: #f3ecd6;">{{hudState}}</span>
+</div>
+<div class="muted" style="font-size: 11.5px; white-space: nowrap;">118k XP/h · 0:42:10</div>
+</div>
+<button class="iconbtn" aria-label="{{pauseLabel}}" onClick="{{togglePause}}">
+<sc-if value="{{running}}" hint-placeholder-val="{{ true }}">
+<svg width="10" height="12" viewBox="0 0 10 12"><path d="M1 0h3v12H1zM6 0h3v12H6z" fill="#e4cc83"></path></svg>
+</sc-if>
+<sc-if value="{{paused}}" hint-placeholder-val="{{ false }}">
+<svg width="10" height="12" viewBox="0 0 10 12"><path d="M1 0l9 6-9 6z" fill="#e4cc83"></path></svg>
+</sc-if>
+</button>
+</div>
+
+<div style="position: absolute; left: 20px; top: 803px; width: 352px; height: 74px; background: rgba(13,12,6,.97); font-size: 11.5px; line-height: 15.5px; padding: 2px 4px; box-sizing: border-box; overflow: hidden;">
+<div style="color: #9fd0ff;">[Automation] Rebuffed 14 of 14 spells (set: Heavy)</div>
+<div style="color: #9fd0ff;">[Automation] Kept Diamond Scimitar (rule: Legendary weapons)</div>
+<div style="color: #9fd0ff;">[Automation] Salvaged 6 items into 2 bags</div>
+<div style="color: #ffd774;">[Automation] 4 pack slots left: going to Vendor run</div>
+</div>
+
+<div class="panel" style="left: 1292px; top: 396px; width: 308px; height: 406px; display: flex; flex-direction: column;">
+<div style="display: flex; gap: 2px; padding: 4px 4px 0; align-items: flex-end; border-bottom: 1px solid #b89a52;">
+<sc-for list="{{tabs}}" as="t" hint-placeholder-count="2">
+<button class="{{t.cls}}" onClick="{{t.pick}}">{{t.label}}</button>
+</sc-for>
+<div style="flex-grow: 1;"></div>
+<button class="iconbtn" aria-label="Minimize" style="margin-bottom: 2px;"><svg width="10" height="3" viewBox="0 0 10 3"><path d="M0 0h10v3H0z" fill="#e4cc83"></path></svg></button>
+</div>
+
+<sc-if value="{{isOverview}}" hint-placeholder-val="{{ true }}">
+<div style="padding: 8px 9px; display: flex; flex-direction: column; gap: 7px;">
+<div style="display: flex; align-items: center; gap: 8px;">
+<span class="sec" style="width: 44px;">Profile</span>
+<button class="field" style="flex-grow: 1;"><span>Hunt: Graveyard Wights</span><svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button>
+</div>
+<div style="display: flex; align-items: center; gap: 8px; padding: 5px 7px; background: rgba(0,0,0,.35); border: 1px solid #4b3d1c;">
+<span style="width: 10px; height: 10px; border-radius: 50%; background: {{dotColor}}; box-shadow: 0 0 5px {{dotColor}};"></span>
+<div style="display: flex; flex-direction: column;">
+<span style="font-size: 14px; color: #f6efd9;">{{statusLine}}</span>
+<span class="muted" style="font-size: 11.5px;">{{statusSub}}</span>
+</div>
+</div>
+<div style="display: flex; gap: 6px;">
+<button class="btn" style="flex-grow: 1;" onClick="{{togglePause}}">{{pauseLabel}}</button>
+<button class="btn red" style="flex-grow: 1;">Stop</button>
+<button class="btn" style="flex-grow: 1;">Edit…</button>
+</div>
+<div class="sec" style="margin-top: 2px;">Modules</div>
+<div style="display: flex; flex-direction: column;">
+<sc-for list="{{modules}}" as="m" hint-placeholder-count="7">
+<div style="display: flex; align-items: center; gap: 8px; height: 29px; border-bottom: 1px solid rgba(185,154,82,.18);">
+<button class="cb" aria-label="{{m.aria}}" onClick="{{m.toggle}}">
+<sc-if value="{{m.on}}" hint-placeholder-val="{{ true }}"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 5.5l3 3 5-7" stroke="#ffd774" stroke-width="2" fill="none"></path></svg></sc-if>
+</button>
+<div style="display: flex; flex-direction: column; min-width: 0; flex-grow: 1;">
+<span style="font-size: 13px; color: {{m.nameColor}}; line-height: 14px;">{{m.name}}</span>
+<span class="muted" style="font-size: 11px; line-height: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{m.sum}}</span>
+</div>
+<button class="iconbtn" aria-label="{{m.gear}}" style="width: 18px; height: 18px;"><svg width="8" height="10" viewBox="0 0 8 10"><path d="M1 1l5 4-5 4" stroke="#e4cc83" stroke-width="1.6" fill="none"></path></svg></button>
+</div>
+</sc-for>
+</div>
+<div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #cdbf95; margin-top: 1px;">
+<svg width="11" height="12" viewBox="0 0 11 12"><path d="M5.5 0.5l5 2v4c0 2.6-2.2 4.4-5 5-2.8-.6-5-2.4-5-5v-4z" stroke="#c9a04a" fill="none"></path></svg>
+<span>Server: combat automation must be attended</span>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{isStats}}" hint-placeholder-val="{{ false }}">
+<div style="padding: 9px 10px; display: flex; flex-direction: column; gap: 6px; font-size: 13px;">
+<div class="sec">This session · 0:42:10</div>
+<sc-for list="{{stats}}" as="s" hint-placeholder-count="8">
+<div style="display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid rgba(185,154,82,.18); padding-bottom: 4px;">
+<span class="muted">{{s.k}}</span><span style="color: #f3ecd6; text-align: right;">{{s.v}}</span>
+</div>
+</sc-for>
+<div style="display: flex; gap: 6px; margin-top: 4px;">
+<button class="btn" style="flex-grow: 1;">Reset</button>
+<button class="btn" style="flex-grow: 1;">Report to chat</button>
+</div>
+</div>
+</sc-if>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1600,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = {
+      tab: 'overview', paused: false,
+      on: { buffs: true, vitals: true, combat: true, loot: true, nav: true, inv: true, service: false }
+    };
+  }
+  renderVals() {
+    const s = this.state;
+    const defs = [
+      ['buffs', 'Buffs', 'Set: Heavy · rebuff under 5 min left'],
+      ['vitals', 'Vitals', 'Heal under 55% · stamina under 30%'],
+      ['combat', 'Combat', 'Heavy Weapons · monsters within 25 yd'],
+      ['loot', 'Looting', 'Endgame.utl · 14 rules'],
+      ['nav', 'Navigation', 'Route: Wight loop (circular, 23 points)'],
+      ['inv', 'Inventory', 'Salvage, pack, and sell at vendors'],
+      ['service', 'Service', 'Off · answers /tell requests when on']
+    ];
+    const modules = defs.map(([id, name, sum]) => ({
+      name, sum, on: s.on[id],
+      nameColor: s.on[id] ? '#f3ecd6' : '#8a8168',
+      aria: (s.on[id] ? 'Turn off ' : 'Turn on ') + name,
+      gear: name + ' settings',
+      toggle: () => this.setState({ on: { ...s.on, [id]: !s.on[id] } })
+    }));
+    const tabs = [['overview', 'Automation'], ['stats', 'Stats']].map(([id, label]) => ({
+      label, cls: s.tab === id ? 'tab on' : 'tab', pick: () => this.setState({ tab: id })
+    }));
+    const running = !s.paused;
+    return {
+      tabs, modules,
+      isOverview: s.tab === 'overview', isStats: s.tab === 'stats',
+      running, paused: s.paused,
+      dotColor: running ? '#52d65e' : '#e2b23c',
+      hudState: running ? 'Running · Hunt' : 'Paused · Hunt',
+      statusLine: running ? 'Running: Hunt' : 'Paused: Hunt',
+      statusSub: running ? 'Fighting Grave Wight · 3 in range' : 'Nothing will act until you resume',
+      pauseLabel: running ? 'Pause' : 'Resume',
+      togglePause: () => this.setState({ paused: !s.paused }),
+      stats: [
+        { k: 'XP per hour', v: '118,400' },
+        { k: 'Next level in', v: '1 h 12 m' },
+        { k: 'Kills', v: '214' },
+        { k: 'Deaths', v: '0' },
+        { k: 'Loot', v: '9 kept · 31 salvaged · 44 sold' },
+        { k: 'Burned per hour', v: '38 tapers · 3 kits · 2 stones' },
+        { k: 'Rebuffs', v: '3' },
+        { k: 'Time in each state', v: 'Hunt 88% · Rebuff 7% · Vendor 5%' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

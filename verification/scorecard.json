@@ -1,0 +1,615 @@
+{
+ "about": "Retail-match scorecard (tools/scorecard.mjs, tools/scorecard-lib.mjs). The fixed list of screens and flows a player meets; each verdict answers 'would a retail player notice a difference at a glance?'. Seeded 2026-09-26 all unassessed.",
+ "screens": [
+  {
+   "id": "preworld-loading",
+   "name": "Connecting / loading screen",
+   "tier": 1,
+   "captures": [
+    "preworld/loading"
+   ],
+   "retail": [
+    "preworld/loading-ref1.webp",
+    "preworld/login-connecting-ref1.png"
+   ],
+   "verdict": "match",
+   "judged": "2026-09-27",
+   "evidence": "verification/preworld-ranged-splash/sbs-preworld-ranged-splash.png",
+   "gaps": [],
+   "notes": "Re-judged 2026-09-27 after VISUAL.preworld-placeholder-before-portal-dat: a cold launch now shows black for ~0.4 s while the splash's 46 portal.dat files are read by byte range, then the DAT-drawn gmDataPatchUI splash (layout 0x21000000: title image, copyright, Cancel plate, both helix meters, font-0x40000001 labels) BEFORE the 1.25 GB download starts; the download then runs under it. The splash is identical to the full-DAT draw judged a match. No era-correct retail capture of 0x21000000 exists (loading-ref1 / login-connecting-ref1 are ToD-2005 shots of other screens), so the DAT layout chain is the reference. Remaining non-visual difference: retail leaves this screen with the session open (CORE.17.k.b.b.a.a.b, blocked on Jake), which shows up on char select, not here. Fallback: a host refusing Range requests still gets the sans-serif status line until portal.dat arrives."
+  },
+  {
+   "id": "preworld-char-select",
+   "name": "Character select",
+   "tier": 1,
+   "captures": [
+    "preworld/login"
+   ],
+   "retail": [
+    "preworld/char-select-release.png",
+    "preworld/char-select-web1.webp"
+   ],
+   "verdict": "close",
+   "judged": "2026-10-07",
+   "evidence": "verification/charselect-logout-render/02-charselect-after-logout.png",
+   "gaps": [
+    "CORE.17.k.b.b.a.a.b"
+   ],
+   "notes": "2026-10-07 after PERF.charselect-after-logout-renders-world: the char select reached by logging out is now the same frame as the fresh pre-world one (02-charselect-after-logout.png vs verification/sidebyside/char-select/char-select-sidebyside.png) and runs at pre-world cost (121 rAF/2s, 0 world draws; it was 5-6 rAF/2s with 400+ ms timer latency). Element for element it still matches the Wine retail frame. Still close only because the patch screen does not hold for the character set as retail's does (CORE.17.k.b.b.a.a.b, blocked on Jake)."
+  },
+  {
+   "id": "preworld-char-create",
+   "name": "Character creation (every page)",
+   "tier": 1,
+   "captures": [
+    "preworld/char-create"
+   ],
+   "retail": [
+    "preworld/char-create-ref1.png",
+    "preworld/char-create-step2-ref1.webp",
+    "preworld/char-create-step3-ref1.webp"
+   ],
+   "verdict": "match",
+   "judged": "2026-10-06",
+   "evidence": "verification/sidebyside/chargen-profession/chargen-profession-sidebyside.png",
+   "gaps": [],
+   "notes": "RECON.dom-chrome-sweep.b.a.a fixed the last filed gap: Profession and Appearance Face/Clothes labels now sit at retail's CalcJustification offset (label bottoms in 800x600 units: Custom 205/205, Bow Hunter 240/240 vs +4 before). Remaining retail-ab differences on every chargen page are the random roll (template, figure, stats) only."
+  },
+  {
+   "id": "preworld-portal-space",
+   "name": "Portal space",
+   "tier": 1,
+   "captures": [
+    "preworld/portal-space"
+   ],
+   "retail": [
+    "preworld/portal-space-ref1.jpg"
+   ],
+   "verdict": "match",
+   "judged": "2026-09-29",
+   "evidence": "verification/sidebyside/portal-space-hud/portal-space-hud-sidebyside.png",
+   "gaps": [],
+   "notes": "2026-09-29 VISUAL.spew-row-text-narrower-than-retail: the spew row now draws in 0x40000001, so 'In' and the trailing dots peek out either side of the vitals plate as in retail-portal-2.png. The yellow core is 183 px in both. Tunnel, HUD layer and strip layout match. Sub-glance residual, filed at T3: ours centres the row 3 px right of retail (a 't' shows before the dots), VISUAL.spew-row-text-narrower-than-retail.a."
+  },
+  {
+   "id": "hud-whole-screen",
+   "name": "In-world HUD, whole screen (vitals, radar, chat, toolbar, panel icons)",
+   "tier": 1,
+   "captures": [
+    "hud-overview",
+    "scenes/hud-idle-over-world"
+   ],
+   "retail": [
+    "hud/reddit-shutdown.jpg",
+    "hud/rawg_01.jpg",
+    "retail-client/ab/retail-holtburg.png"
+   ],
+   "verdict": "match",
+   "judged": "2026-10-09",
+   "evidence": "verification/sidebyside/toolbar-stack-selected/toolbar-stack-selected-sidebyside.png",
+   "gaps": [],
+   "notes": "2026-10-09 re-judged after RECON.dom-chrome-sweep.c: the toolbar's selected-stack state now matches retail-stack-selected.png (name in font 0x40000002 left over the entry, '5000' right-justified in the DAT UI font, slider thumb with transparent corners); the single-selection name ('Chest', container-open side-by-side) is centred in the same font as retail. Whole-HUD --ui regression unchanged (32/32)."
+  },
+  {
+   "id": "world-town-day",
+   "name": "World at spawn: Holtburg by day (terrain, buildings, sky, lighting)",
+   "tier": 1,
+   "captures": [
+    "scenes/world-town-day",
+    "scenes/world-town-far"
+   ],
+   "retail": [
+    "retail-client/ab/retail-holtburg.png",
+    "hud/rawg_02.jpg"
+   ],
+   "verdict": "close",
+   "judged": "2026-10-08",
+   "evidence": "verification/visual-town-scenery-gaps/holtburg-gap-is-sky.png",
+   "gaps": [
+    "VISUAL.scorecard-world-town-framing"
+   ],
+   "notes": "2026-10-08 re-judge after VISUAL.town-scenery-gaps.a: the 'missing roof behind the oven' at the Holtburg POI is sky in retail too (stars visible; no LandblockInfo building projects into the gap); the cloud A/B pinned the sky from another ACE server's clock. Distant buildings/trees/rocks hold retail's degrade levels. A retail player would still notice the framing gap; the night-sky colour at that A/B's phase is VISUAL.night-sky-clouds-vs-retail.a (not a day-screen gap)."
+  },
+  {
+   "id": "world-night",
+   "name": "World at night",
+   "tier": 1,
+   "captures": [
+    "scenes/world-night",
+    "scenes/world-dawn"
+   ],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-05",
+   "evidence": "verification/gpu-results/VISUAL.night-sky-clouds-vs-retail-retail-ab-26483d97-20261004T232423Z/sheet__town-ayan-baqur.png",
+   "gaps": [
+    "VISUAL.night-sky-clouds-vs-retail.a"
+   ],
+   "notes": "2026-10-05 routine: re-judged from the queued Mac GPU retail-ab of 12 towns (VISUAL.night-sky-clouds-vs-retail-retail-ab-26483d97-20261004T232423Z). Phases 0.00-0.03 (Lytelthorpe, Outpost, Plateau, Qalabar, Redspire, Refuge) match the retail sky layers at a glance. Phases 0.91-0.95 do not: Ayan Baqur retail magenta clouds over dark gaps vs ours olive-green; Al-Arqas retail grey-magenta vs ours teal; Eastwatch retail teal gaps vs ours black starfield. A retail player at pre-dawn would notice the sky colour, so close, not match. Gap filed: VISUAL.night-sky-clouds-vs-retail.a (T2)."
+  },
+  {
+   "id": "world-dungeon",
+   "name": "Dungeon interior",
+   "tier": 1,
+   "captures": [
+    "scenes/world-dungeon-stone",
+    "scenes/world-dungeon"
+   ],
+   "retail": [
+    "hud/rawg_04.jpg",
+    "hud/rawg_09.jpg",
+    "hud/rawg_02.jpg"
+   ],
+   "verdict": "close",
+   "judged": "2026-10-10",
+   "evidence": "verification/sidebyside/dungeon-sconces/dungeon-sconces-sidebyside.png",
+   "gaps": [
+    "VISUAL.sylsfear-canopy-bright-cards",
+    "VISUAL.dungeon-scene-details"
+   ],
+   "notes": "2026-10-10 after RENDER.cell-particles-delayed-light-set: delayed (blended/clip/fading) particle draws in cells now take the sun set as retail's FlushAlphaList does. Holtburg Dungeon stone hall before/after: sconce flames unchanged (luminous), the cobweb over the door darker (87/69/39 -> 80/63/36), nothing else. A retail player would still notice the Sylsfear canopy and the scene details already filed."
+  },
+  {
+   "id": "flow-movement",
+   "name": "Movement feel: walk/run/jump/turn, slopes, collision",
+   "tier": 1,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-10",
+   "evidence": "verification/recon-obstacle-step-up/after-Holtburg.json",
+   "gaps": [
+    "HARNESS.flow-movement-probe-beats",
+    "RECON.transition-stepup-stepdown-port.a.b",
+    "RECON.transition-stepup-stepdown-port.c.b.a"
+   ],
+   "notes": "2026-10-10 cloud: obstacle step ups now land like retail (Holtburg scan before→after: 13 step-ups all at a raised 0.6 incl. 5 over boulder spheres → 8 cylinder step-ups at the real 0.266 lift, boulders met at the side slid round; walking onto the town portal dais steps up 0.266 and the server portals the body). A retail player would still notice the body sinking back into a low obstacle it stepped onto (c.b.a) and the open movement gaps listed."
+  },
+  {
+   "id": "flow-camera",
+   "name": "Camera: 3rd person, zoom, mouse-look, in-head, collisions",
+   "tier": 1,
+   "captures": [],
+   "retail": [],
+   "verdict": "match",
+   "judged": "2026-09-28",
+   "evidence": "verification/mouse-turning/probe.json",
+   "gaps": [],
+   "notes": "Re-judged after CORE.18.b.a.a.a.a.a.b (2026-09-28). The default camera (option off) is unchanged: screen-regression --ui shows no camera-related change. The Use Mouse Turning mode now follows the decomp and was live-verified: right-hold mouse-look, mouse X turns the player with the orbit fixed, left runs forward, and the server heading and position match (gap 0). No retail capture of the option mode exists; its direction (mouse right = TurnLeft, as the orbit) follows CameraSet::MouseLookHandler/Rotate literally."
+  },
+  {
+   "id": "flow-combat",
+   "name": "Melee + missile combat: bar, targeting, damage text, death",
+   "tier": 1,
+   "captures": [
+    "scenes/hud-combat"
+   ],
+   "retail": [
+    "hud/monster-fights-live.jpg",
+    "hud/charge-radius.jpg"
+   ],
+   "verdict": "close",
+   "judged": "2026-10-04",
+   "evidence": "verification/recon-wielded-item-objdesc/wand-sidebyside.png",
+   "gaps": [
+    "HARNESS.hud-combat-scene-not-in-combat"
+   ],
+   "notes": "2026-10-04 re-judge after RECON.wielded-item-objdesc: the wielded Practice Wand now draws in the right hand in combat stance exactly where retail draws it (tip and off-hand glint, retail-ab/combat-mode/retail.png vs ours); a Battle Axe sits over the shoulder in melee stance. Remaining: the hud-combat capture scene is not in combat (HARNESS.hud-combat-scene-not-in-combat)."
+  },
+  {
+   "id": "flow-magic",
+   "name": "Spellcasting: spell bar, casting, projectiles, buffs",
+   "tier": 1,
+   "captures": [],
+   "retail": [
+    "hud/spellbook-panel.jpg"
+   ],
+   "verdict": "close",
+   "judged": "2026-10-01",
+   "evidence": "verification/scorecard-evidence/flow-magic/effects-positive-sidebyside-2026-10-01.png",
+   "gaps": [
+    "HARNESS.flow-magic-probe-character"
+   ],
+   "notes": "Re-judged 2026-10-01 after VISUAL.spell-icon-composite: the Beneficial Spells rows now carry CompositeSpellIcon's scarab orb behind each icon, the black NonReversed outline and the orange TargetSelf badge, as beneficial-spells.jpg shows; spell bar / spellbook / endowment take the same composite (unit-tested; the probe character knows no spells, so not seen live). Still close only because the live self-buff cast flow needs the probe character (HARNESS.flow-magic-probe-character)."
+  },
+  {
+   "id": "panel-chat",
+   "name": "Chat window + chat flow",
+   "tier": 1,
+   "captures": [
+    "scenes/hud-chat-active"
+   ],
+   "retail": [
+    "hud/chat-panel.jpg"
+   ],
+   "verdict": "match",
+   "judged": "2026-10-09",
+   "evidence": "verification/chat-entry-maxchars/main-entry-300-typed.png",
+   "gaps": [],
+   "notes": "Re-judged after RECON.chat-entry-maxchars (2026-10-09): the entry now stops at the DAT p30 = 255 characters (retail GlyphList::m_nMaxCharacters) instead of 200; live, 300 pasted + 3 typed chars kept 255 and the send echoed as 'You say, ...'. Window art unchanged (--ui regression: chat captures identical). Earlier: matches the Wine EoL frame; typed text in the DAT font with the 1-px caret (verification/dom-chrome-sweep/chat-entry-*.png, verification/sidebyside/chat/chat-sidebyside.png)."
+  },
+  {
+   "id": "panel-inventory",
+   "name": "Inventory + paperdoll",
+   "tier": 1,
+   "captures": [
+    "inventory",
+    "scenes/hud-inventory-over-world"
+   ],
+   "retail": [
+    "hud/inventory-panel.jpg",
+    "hud/equipment-slots.jpg",
+    "retail-client/ab/retail-inventory-vendor.png"
+   ],
+   "verdict": "close",
+   "judged": "2026-10-10",
+   "evidence": "verification/trade-state-every-uiitem/sbs-trade-state-salvage.png",
+   "gaps": [
+    "RECON.inventory-grid-dat-cells.b.a.a"
+   ],
+   "notes": "2026-10-10 (RECON.inventory-grid-dat-cells.c.b): the trade-state overlay now shows on every UIItem (paperdoll slots, pack column, trade/salvage/slumlord cells), verified live with a worn dirk queued for salvage and a two-client trade. Remaining at a glance: a second drop during a pending one is accepted (.b.a.a, rare)."
+  },
+  {
+   "id": "panel-character",
+   "name": "Character panel: attributes / skills / titles",
+   "tier": 1,
+   "captures": [
+    "char-attributes",
+    "char-skills",
+    "char-titles"
+   ],
+   "retail": [
+    "hud/character-panel-attributes.jpg",
+    "hud/character-panel-skills.jpg",
+    "hud/character-panel-titles.jpg"
+   ],
+   "verdict": "close",
+   "judged": "2026-09-30",
+   "evidence": "verification/sidebyside/character/character-sidebyside.png",
+   "gaps": [
+    "HARNESS.char-tab-captures-stale-click"
+   ],
+   "notes": "2026-09-30: spellbook/social/world/contracts now take the panels-window slot one at a time instead of docking beside it. The Skills and Titles tabs still can't be judged from captures."
+  },
+  {
+   "id": "panel-magic",
+   "name": "Spellbook + components",
+   "tier": 2,
+   "captures": [
+    "magic-spellbook",
+    "magic-components"
+   ],
+   "retail": [
+    "hud/spellbook-panel.jpg",
+    "hud/components-panel.jpg"
+   ],
+   "verdict": "close",
+   "judged": "2026-09-30",
+   "evidence": "verification/sidebyside/spellbook/spellbook-sidebyside.png",
+   "gaps": [
+    "VISUAL.magic-capture-no-spells"
+   ],
+   "notes": "2026-09-30: the spellbook now opens in the panels window (slot 0x10000190) at retail's rect over the toolbar, 5 px frame, one 0x06004cc2 scrim that reads like the Wine frame's options body. The Components capture now opens the Components tab. Left: the probe character knows no spells, so the list rows can't be judged live."
+  },
+  {
+   "id": "panel-social",
+   "name": "Social: fellowship / allegiance / friends",
+   "tier": 2,
+   "captures": [
+    "social-fellowship-seeded",
+    "social-allegiance-seeded",
+    "social-friends-seeded"
+   ],
+   "retail": [
+    "hud/fellowship-panel.jpg",
+    "hud/allegiance-panel.jpg",
+    "hud/friends-panel.jpg"
+   ],
+   "verdict": "match",
+   "judged": "2026-10-09",
+   "evidence": "verification/sidebyside/social-fellowship-members/social-fellowship-members-sidebyside.png",
+   "gaps": [],
+   "notes": "2026-10-09 RECON.social-rows-dat-templates.a: fellowship LVL/XP now always formats ID_Fellowship_FellowStats (N/0% with sharing off, truncated share otherwise; live ACE 1/0% and 1/100%), matching fellowship-panel-2.jpg's LEVEL/XX% grammar (its 4-member even split reads 1/55%, as ours computes). The taller stone-backed allegiance/friends refs are older-era: the EoL panels window is 310x372 over the toolbar (VISUAL.char-panel-body-too-bright.a) and 0x06004cc2 is a black alpha-175 scrim showing the world through (.c), which reads black over the headless capture's empty world."
+  },
+  {
+   "id": "panel-options",
+   "name": "Options: gameplay / character / chat / config",
+   "tier": 2,
+   "captures": [
+    "options",
+    "options-character",
+    "options-chat",
+    "options-config"
+   ],
+   "retail": [
+    "hud/options-gameplay.jpg",
+    "hud/options-character.jpg",
+    "hud/chat-options.jpg",
+    "hud/options-config.jpg"
+   ],
+   "verdict": "match",
+   "judged": "2026-10-08",
+   "evidence": "verification/scorecard-evidence/panel-options-2026-10-08.png",
+   "gaps": [],
+   "notes": "2026-10-08 (cloud): last gap RECON.keyboard-dialog.a closed as confirmed (Windows names the sysmouse button 'Button 2'). Fresh captures vs retail-client/ab/retail-options-gameplay.png (1600x900) and hud/options-*.jpg: dock place and height match (panel sits above the toolbar), tabs, rows, sliders. Volume sliders at max are retail's default (effect_sound_volume static init 1.0, globals.tsv). The only visible difference is the three dead-end Gameplay buttons, removed per the No Dead-End UI rule."
+  },
+  {
+   "id": "panel-map",
+   "name": "Map",
+   "tier": 2,
+   "captures": [
+    "map",
+    "map-house"
+   ],
+   "retail": [
+    "hud/map-panel.jpg"
+   ],
+   "verdict": "match",
+   "judged": "2026-10-03",
+   "evidence": "verification/sidebyside/map/map-sidebyside.png",
+   "gaps": [],
+   "notes": "2026-10-03 GAP.calendar-date-vs-retail: Date/Time now retail GameTime on the server clock (live probe MATCH 'Seedsow 21, 121 P.Y. | Evensong'; reproduces the retail A/B reading exactly). Same font, ink, placement as map-panel.jpg; map art, pictograms, coords unchanged."
+  },
+  {
+   "id": "flow-containers",
+   "name": "Chests / corpses / ground containers",
+   "tier": 2,
+   "captures": [
+    "scenes/hud-container-chest-stocked-over-world"
+   ],
+   "retail": [
+    "retail-client/ab/retail-container-open.png"
+   ],
+   "verdict": "close",
+   "judged": "2026-10-09",
+   "evidence": "verification/recon-pending-pack-item/sbs-pending-pack-item.png",
+   "gaps": [
+    "RECON.inventory-grid-dat-cells.b.a.b"
+   ],
+   "notes": "2026-10-09: downgraded from match. Before this cycle a chest/corpse item could not be dragged out of the row at all (double-click only), which a retail player would notice on the first loot; fixed in 5389a47d (drag to pack grid/column, paperdoll, backpack button, 3D view, ghosted while pending). Remaining: no pending ghost in the chest row when storing a pack item there (.b.a.b)."
+  },
+  {
+   "id": "flow-vendor",
+   "name": "Vendor buy / sell",
+   "tier": 2,
+   "captures": [],
+   "retail": [
+    "retail-client/ab/retail-vendor-items.png",
+    "retail-client/ab/retail-vendor-buying.png",
+    "retail-client/ab/retail-vendor-selling.png"
+   ],
+   "verdict": "close",
+   "judged": "2026-10-10",
+   "evidence": "verification/vendor-sell-worn/sbs-vendor-sell-worn.png",
+   "gaps": [
+    "HARNESS.flow-vendor-probe-sell"
+   ],
+   "notes": "2026-10-10 live (Shopkeeper Renald the Elder): the sell side now driven end to end with the real mouse. A worn Dagger dragged from its paperdoll slot onto the bar is listed (sell-state badge on the slot), Sell All pays 36p and the dagger leaves the paperdoll, as retail's DragItemAcceptable (IsOwnedByPlayer counts the wielder) + ACE's dequip-on-sale do. The bar, tabs, strip and purse lines match retail at a glance; the remaining gap is the harness framing (after the use-approach walk ours faces a wall at night, so the whole frame cannot be compared shot for shot)."
+  },
+  {
+   "id": "flow-trade",
+   "name": "Player trade",
+   "tier": 2,
+   "captures": [],
+   "retail": [],
+   "verdict": "match",
+   "judged": "2026-09-29",
+   "evidence": "verification/scorecard-evidence/flow-trade/flow-trade-sidebyside.png",
+   "gaps": [],
+   "notes": "Driven live 2026-09-29: two characters (testacjs / testacjs2) at Holtburg, open -> items on both lists -> partner accepts (lamp 0x06004cba lit) -> both accept -> ACE completes, lists clear, Trade toggle back to disabled 0x06004cbb. Against the only retail frame (asheron.fandom Secure_Trade_Live.jpg, saved reference/images/hud/secure-trade-live.webp; Decal-era, pre-EoL, 700x500): same structure - partner LEFT (name, Total Items: N, 32-px UIItem strip, horizontal bar under an overflowing strip), accept lamp + Trade toggle + Clear All centred on the divider, You RIGHT. The frame's warm-brown fill and full-width halves are the 2000 skin; the EoL DAT (0x2100000d) fills both halves with 0x06004cc2, the dark recessed tile the EoL fellowship name box shows (reference/images/hud/fellowship-panel.jpg), and the dock slot sizes it. Red / orange cell backdrops are RenderIcons item-type backdrops (weapons red), as in the retail strip. Caveat: no EoL trade frame exists; HARNESS.retail-trade-ab-frames stays open for a Wine A/B."
+  },
+  {
+   "id": "flow-examine",
+   "name": "Examine / appraisal + tooltips",
+   "tier": 2,
+   "captures": [],
+   "retail": [
+    "hud/examine-bow.jpg",
+    "hud/examine-helm.jpg",
+    "hud/examine-npc.jpg",
+    "hud/item-stack-tooltip.jpg"
+   ],
+   "verdict": "close",
+   "judged": "2026-10-05",
+   "evidence": "verification/sidebyside/examine-npc/examine-npc-sidebyside.png",
+   "gaps": [
+    "VISUAL.examine-misc-list-row-sliver.a",
+    "VISUAL.examine-port-uncertainties",
+    "HARNESS.retail-examine-ab-frames",
+    "VISUAL.ui-owned-object-layers.a.a"
+   ],
+   "notes": "2026-10-05 re-judged after VISUAL.ui-owned-object-layers.a: the model draws undimmed over the stat rows through the decomp's per-frame relink, same as retail; a retail player would still notice the 4th misc-row sliver and the head/hair variance (BUG.npc-head-appearance-intermittent). Stat texts under the model's hands: .a.a."
+  },
+  {
+   "id": "flow-npc-interaction",
+   "name": "NPC use / talk / give, doors, portals",
+   "tier": 2,
+   "captures": [],
+   "retail": [
+    "retail-client/ab/retail-hover-npc.png"
+   ],
+   "verdict": "match",
+   "judged": "2026-10-04",
+   "evidence": "verification/recon-closed-doors/door-front-open.png",
+   "gaps": [],
+   "notes": "Re-judged 2026-10-04: the earlier match missed that closed doors were walk-through. Now fixed: Use opens the door (Ethereal), closed doors block. NPC use/talk/give and portals unchanged since 2026-09-28."
+  },
+  {
+   "id": "flow-salvage-tinker",
+   "name": "Salvage + tinkering",
+   "tier": 3,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-09-30",
+   "evidence": "verification/scorecard/flow-salvage-tinker/salvage-flow-sidebyside.png",
+   "gaps": [
+    "HARNESS.retail-salvage-housing-ab-frames"
+   ],
+   "notes": "Driven live 2026-09-30 (ACE, Holtburg, +Perf Tester): Ust double-click opens gmSalvageUI in the bottom dock (layout 0x2100000c: warning title, one row of 32-px cells, Salvage button, close box); a pyreal is refused, a dropped Pack adds its contents with the retail notice 'Adding contents of Pack', the dirk lists once Salvage Multiple is on, queued items carry the trade-state overlay in the pack; Salvage clicked -> ACE 'You obtain 1 Pyreal (ws 3.00) and 1 Iron (ws 3.00) using your knowledge of Armor Tinkering.', the list empties and two salvage bags land in the pack. Every element is DAT/decomp-anchored, but no retail salvage or tinkering frame exists in the corpus (wiki pages 402/403), so match cannot be claimed; the tinkering half (salvage onto an item -> CraftInteraction confirmation) was not driven this cycle."
+  },
+  {
+   "id": "flow-housing",
+   "name": "Housing + slumlord",
+   "tier": 3,
+   "captures": [
+    "map-house"
+   ],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-09-30",
+   "evidence": "verification/scorecard-housing/ours-slumlord-buy.png",
+   "gaps": [
+    "HARNESS.retail-salvage-housing-ab-frames",
+    "HARNESS.map-captures-stale-report-abuse-dialog"
+   ],
+   "notes": "2026-09-30 first judgment, driven live. Teleported beside the cottage slumlord 0x73B9C051 (landblock 0x3B9C) and Used it. ACE's HouseProfile opened gmSlumlordUI (0x2100000e) in the EoL bottom transaction dock, 610x120, centred 80 px above the bottom, not covering the vitals or shortcuts. Buy page: '300000 Pyreals, 1 Writ of Refuge, 1 Swamp Stone', 'Owner: None', 12 UIItem cells, the Buy button in the disabled state; the Maintenance tab switches pages. The Map panel's House tab reads 'You do not currently own a house. / You may buy another house immediately.' No retail frame of any housing surface exists, so this cannot be 'match' (HARNESS.retail-salvage-housing-ab-frames; a web search found only text walkthroughs). The map-house capture also carries a stale Report Abuse dialog (filed). Not driven: an actual purchase, house permissions, hooks, the house recall."
+  },
+  {
+   "id": "flow-first-hour",
+   "name": "A new character's first hour: create, training academy, first levels, first death",
+   "tier": 1,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-05",
+   "evidence": "verification/first-hour/19573/11-outer-courtyard.png",
+   "gaps": [
+    "BUG.academy-olthoi-leg-upper-floor",
+    "HARNESS.first-hour-shaft-stair-route"
+   ],
+   "notes": "Live 2026-10-05 (cloud, run 19573, fresh non-admin): spawn → greeter → golem token (L2) → courtyard → wasp wing (L3) → thrungus bellows (L4, library key) → up the stairs through the library → Outer Courtyard portal, 12/15. With BUG.academy-stairs-fall-through fixed the stair climb holds (4/4 admin stairs runs), and walking onto a shaft's floor portal drops onto the stair / z -6 floor as in retail. Still noticeable: on the olthoi-hive leg the player once ended up on the upper floor over a z -12 doorway (BUG.academy-olthoi-leg-upper-floor, unreproduced in a targeted replay). The orb / Sentry / exit steps are blocked by that and by the probe's routing (HARNESS.first-hour-shaft-stair-route), so they are unverified rather than failing in the client."
+  },
+  {
+   "id": "flow-remote-network",
+   "name": "Core play over a remote-player network (latency, jitter, loss) instead of localhost",
+   "tier": 1,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-08",
+   "evidence": "verification/impaired-network/bad-2026-10-08/",
+   "gaps": [
+    "MOVE.idle-autopos-heartbeat",
+    "NET.retransmit-header-flag",
+    "HARNESS.retail-impaired-combat"
+   ],
+   "notes": "2026-10-08 NET.impaired-tell-trade-tail: the bad-profile tell/trade tail is retail's own recovery path (client resends only on the server's NAK; ACE NAKs a client gap only two sequences past it, so a lone lost action waits ~6-9 s) and the probe waited 4-10 s; with link-aware waits plus two stale-probe fixes (allegiance swear passed no patron; B stood hidden behind A for the trade double-click) the bad profile passes 3/3 runs 6/6 and clean 6/6. Still close, not match: ours re-sends without the Retransmission flag (wire-only), the 20 s idle AutonomousPosition heartbeat, and combat timing under impairment not yet compared with retail."
+  },
+  {
+   "id": "flow-audio",
+   "name": "Audio: UI sounds, combat and spell sounds, footsteps, ambient and music",
+   "tier": 1,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-07",
+   "evidence": "verification/audio/hook-stall-fixed-72b0f63.json",
+   "gaps": [
+    "HARNESS.audio-flow-coverage",
+    "SOUND.scenery-default-scripts",
+    "SOUND.enable-checkboxes-persist"
+   ],
+   "notes": "Re-judged after SOUND.hook-stall-burst. Live (SwiftShader, ACE, Holtburg, 49 animated entities, ~24 animation hooks/s): a 5.1 s main-thread stall now fires 0 hooks in the frame after it (pre-fix build, same probe: 131 hooks in that one frame), and hooks resume at the normal rate afterwards, as update_object @ 00515d10's HUGE_QUANTUM skip does. Still close: landscape scenery never runs its DefaultScript sound loops, the enable check boxes reset per session, and spell sounds / music have no retail A/B."
+  },
+  {
+   "id": "flow-death-vitae",
+   "name": "Death and respawn: death message, corpse, lifestone, vitae, corpse recovery",
+   "tier": 2,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-07",
+   "evidence": "verification/created-state-no-replay",
+   "gaps": [
+    "HARNESS.death-corpse-recovery-coverage"
+   ],
+   "notes": "Re-judged 2026-10-07 after SWEEP1006B.world-objects.objects-created-already-state-replay (live tools/probe-created-state-no-replay.ts, Holtburg skulker @smite). The corpse now arrives already lying in the Dead cycle (frame 39, no link) instead of standing up and falling a second time; the negative control without the fix played the fall link from frame 0 for ~1.4 s. The self channel-line gap (BUG.channel-broadcast-self-verbs) has closed since 2026-10-04 and was not re-driven this cycle. Corpse recovery is still not exercised (HARNESS.death-corpse-recovery-coverage), so the verdict stays close."
+  },
+  {
+   "id": "flow-advancement",
+   "name": "Advancement: spending XP on attributes/skills, training, level-up, augmentations",
+   "tier": 2,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-04",
+   "evidence": "verification/flow-advancement/03-strength-raised.png",
+   "gaps": [
+    "RECON.train-skill-confirm"
+   ],
+   "notes": "2026-10-04 live (tools/archive/probe-flow-advancement.ts): @grantxp 2,000,000 → 'You are now level 23!' + credit line; Strength row select → footer 'Experience To Raise 110 / Unassigned 2,000,000' → raise sends RaiseAttribute, XP drops by exactly the cost, 'Your base Strength is now 11!', the next cost is 167. Skills tab groups Untrained / Unusable skills under retail headers; the untrained footer shows Skill Credits To Train / Available with raise-10 hidden (gmSkillUI::DisplaySelectionFooter_Untrained). A retail player would notice that training a skill goes through with no Yes/No prompt (RECON.train-skill-confirm). Augmentations and a trained-skill raise were not exercised: the probe character has no trained skills."
+  },
+  {
+   "id": "flow-social-multiplayer",
+   "name": "Fellowship / allegiance / tells / squelch with a second live player",
+   "tier": 2,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-09",
+   "evidence": "verification/retail-ab/social-trade/chat-zoom.png",
+   "gaps": [
+    "VISUAL.confirmation-dialog-text-glyphs"
+   ],
+   "notes": "2026-10-09 GAP.fellowship-client-chat-lines: re-ran tools/probe-two-client-retail-ab.ts --phase ours (3/3) against the stored retail receiver frames. The receiver's chat now logs the same lines as retail, wrapped identically: 'You have been recruited into the X fellowship, a fellowship led by +Fxprobe.', '+Fxprobe has disbanded your Fellowship.', sworn / broken allegiance (social-fellowship-joined/chat-zoom.png, social-trade/chat-zoom.png). Invite and swear confirmations, the trade window and the whole frames match in place and layout. One thing a retail player would notice: the confirmation dialog text draws with thinner, harder glyphs ('to' reads 'lo', 'No' reads 'Nu'; social-allegiance-ask/dialog-zoom.png, VISUAL.confirmation-dialog-text-glyphs). Retail side is llvmpipe, so the comparison covers HUD and panels only."
+  },
+  {
+   "id": "flow-quests-contracts",
+   "name": "Quests and contracts: quest NPC flows, contracts panel, timers",
+   "tier": 3,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-04",
+   "evidence": "verification/sidebyside/contracts/contracts-sidebyside.png",
+   "gaps": [
+    "HARNESS.flow-quests-contracts-drive"
+   ],
+   "notes": "Empty contracts panel matches retail element for element (tabs, green headers, bare well + scrollbar, labels, Timed/Abandon) and in the whole frame. Quest NPC flows, populated contracts and timers not driven yet, so not match."
+  },
+  {
+   "id": "flow-pk",
+   "name": "PK / PvP: PK status, PK combat, PK deaths",
+   "tier": 3,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-04",
+   "evidence": "verification/flow-pk/2026-10-04/03-b-after.png",
+   "gaps": [
+    "HARNESS.flow-pk-retail-frames"
+   ],
+   "notes": "Live two-client drive 2026-10-04 (cloud, SwiftShader): @pk pk on both, A's melee kills B in ~20 s; both chats carry the retail/ACE text (graze lines, Dirty Fighting, 'has defeated … The kill occured at 42.0N, 33.5E' + [PKDe], 'Your body is shattered by Fxprobe's attack!', retained items, Bael'Zharon respite) and B respawns at the lifestone with the Vitae panel. Unverified vs retail (no PK reference frame): PK radar dot / name colour — a retail player could notice those."
+  },
+  {
+   "id": "flow-barber",
+   "name": "Barber: gmBarberUI appearance change",
+   "tier": 3,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-04",
+   "evidence": "verification/barber/2-edited.png",
+   "gaps": [
+    "HARNESS.retail-ab-barber-frame"
+   ],
+   "notes": "2026-10-03: gmBarberUI ported on LayoutDesc 0x21000068 and driven live via @barbershop: opens at its smartbox slot, hair/colour/rotate/Apply work, and preview and world agree on the applied hair (face-palette fix). The see-through preview is retail (depth-only clear over the 0x06004cc2 scrim). No retail barber frame yet."
+  },
+  {
+   "id": "flow-books-minigames",
+   "name": "Books, journals and the chess minigame",
+   "tier": 3,
+   "captures": [],
+   "retail": [],
+   "verdict": "close",
+   "judged": "2026-10-09",
+   "evidence": "verification/sidebyside/book-editor-typed/book-editor-typed-sidebyside.png",
+   "gaps": [
+    "HARNESS.scorecard-chess-drive",
+    "HARNESS.retail-book-journal-frames"
+   ],
+   "notes": "2026-10-09 live (ACE, SwiftShader): the book opens in gmBookUI 0x21000019 (VISUAL.char-panel-body-too-bright.a.a.a.b done) and its editable page, the journal notes and the examine inscription now draw their desc DAT fonts and p27 ink, wrapped by GlyphList::Recalculate, with NotColorBits selection (RECON.dom-chrome-sweep.a). Side-by-sides: verification/sidebyside/book-editor-typed/, journal-notes-typed/, examine-inscription-typed.png. Not match: chess is still undriven, and no retail frame of an open book or journal exists to judge against (both filed)."
+  }
+ ]
+}

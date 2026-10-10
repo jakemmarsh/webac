@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Real git pre-push hook (enabled via: git config core.hooksPath tools/githooks).
+#
+# Type-checks (`tsc -b`) only when the pushed commits touch TypeScript or
+# build config. Claim / progress-only pushes skip it entirely. After the
+# cycle's own `npm run build` it is incremental and takes well under a
+# second. The TEST SUITE deliberately does not run here: the old push-time
+# suite (~5 min in the cloud container) killed sessions (2026-09-12).
+# This exists because a tools/ type error sat on main for ~1 h on
+# 2026-09-24 while Actions minutes were exhausted and CI ran nothing.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+ZERO=0000000000000000000000000000000000000000
+NEEDS=0
+while read -r _lref lsha _rref rsha; do
+  [[ "$lsha" == "$ZERO" ]] && continue
+  if [[ "$rsha" == "$ZERO" ]] || ! git cat-file -e "$rsha" 2>/dev/null; then
+    BASE="$(git merge-base "$lsha" origin/main 2>/dev/null || echo "")"
+  else
+    BASE="$rsha"
+  fi
+  if [[ -z "$BASE" ]]; then NEEDS=1; continue; fi
+  # Capture, then grep the variable. Piping `git diff | grep -q` under
+  # pipefail was wrong on big diffs: grep -q exits at the first match, git
+  # dies of SIGPIPE (141), the pipeline "fails", and a TS-touching push
+  # skipped tsc (OPS.ci-and-hooks-gaps, 2026-09-26). A failed diff counts as
+  # "needs tsc" rather than silently skipping it.
+  # Leftover merge / rebase conflict markers in an added line (2026-10-08: a
+  # rebase continued with progress.md still marked and went out). Only the
+  # <<<<<<< / >>>>>>> lines: a bare ======= is a Markdown heading underline.
+  if MARKERS="$(git diff -U0 "$BASE" "$lsha" | grep -nE '^\+(<<<<<<<|>>>>>>>)( |$)' || true)"; [[ -n "$MARKERS" ]]; then
+    echo "BLOCKED: conflict markers in the pushed commits:" >&2
+    git diff -U0 "$BASE" "$lsha" | grep -E '^(\+\+\+ |\+(<<<<<<<|>>>>>>>)( |$))' | grep -B1 -E '^\+(<<<<<<<|>>>>>>>)' | grep -v '^--$' >&2 || true
+    exit 1
+  fi
+  if ! CHANGED="$(git diff --name-only "$BASE" "$lsha")"; then NEEDS=1; continue; fi
+  if grep -qE '\.(ts|tsx|mts|cts)$|(^|/)tsconfig[^/]*\.json$|(^|/)package(-lock)?\.json$' <<<"$CHANGED"; then
+    NEEDS=1
+  fi
+done
+
+[[ $NEEDS -eq 0 ]] && exit 0
+if ! npx tsc -b; then
+  echo "BLOCKED: tsc -b failed — main would go red. Fix the type errors, then push." >&2
+  exit 1
+fi

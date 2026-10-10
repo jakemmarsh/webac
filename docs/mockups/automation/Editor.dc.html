@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Automation editor window</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Tinos:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#000;font-family:Tinos,'Times New Roman',serif}
+.panel{position:absolute;box-sizing:border-box;background:rgba(22,20,9,.96);border:2px solid #6e5526;box-shadow:inset 0 0 0 1px #d9ba6a,0 0 0 1px #140f04,0 12px 40px rgba(0,0,0,.6);color:#e9e1c8}
+.tab{height:24px;padding:0 16px;display:flex;align-items:center;font:14px Tinos,serif;color:#b9ad8c;background:#121210;border:1px solid #b89a52;border-bottom:none;border-radius:3px 12px 0 0;cursor:pointer}
+.tab.on{background:#3d382d;color:#f3ecd6}
+.btn{height:24px;padding:0 12px;font:13px Tinos,serif;color:#f1ead6;background:linear-gradient(#1b28b3,#0b1266);border:2px solid #c9a04a;box-shadow:inset 0 1px 0 #3c4ad6;cursor:pointer;white-space:nowrap}
+.btn.grey{height:21px;font-size:12.5px;background:linear-gradient(#3a3a3a,#1e1e1e);border:1px solid #a8a8a8;box-shadow:inset 0 1px 0 #6a6a6a}
+.field{box-sizing:border-box;height:22px;display:inline-flex;align-items:center;gap:6px;padding:0 7px;background:#0a0a07;border:1px solid #8d7642;color:#f0e6c6;font:13px Tinos,serif;white-space:nowrap;cursor:pointer}
+.field.subj{color:#ffe29a}
+.field.num{color:#9fd0ff}
+.cb{width:14px;height:14px;flex-shrink:0;border:1px solid #c9a04a;background:#0a0a07;display:inline-flex;align-items:center;justify-content:center;padding:0;cursor:pointer}
+.muted{color:#a79d80}
+.sec{font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:#c9a95e}
+.box{border:1px solid #4b3d1c;background:rgba(0,0,0,.28)}
+.iconbtn{width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:#121210;border:1px solid #b89a52;cursor:pointer}
+.kw{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#c9a95e}
+.row{display:flex;align-items:center;gap:8px}
+.listitem{display:flex;align-items:center;gap:8px;height:30px;padding:0 8px;border:1px solid transparent;cursor:pointer;background:none;font:13.5px Tinos,serif;color:#e9e1c8;text-align:left;width:100%}
+.badge{font-size:11.5px;padding:1px 6px;border:1px solid;border-radius:2px;white-space:nowrap}
+</style>
+</helmet>
+<div style="width: 1600px; height: 900px; position: relative; overflow: hidden;">
+<img src="/_blob/6138126c717834a82eebdc8107505f96" alt="Holtburg, retail client" style="position: absolute; left: 0; top: 0; width: 1600px; height: 900px; filter: brightness(.7);">
+
+<div class="panel" style="left: 722px; top: 57px; width: 156px; height: 40px; padding: 3px 7px; display: flex; flex-direction: column; justify-content: center;">
+<div class="row" style="gap: 5px; font-size: 12.5px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: #52d65e;"></span><span>Running · Hunt</span></div>
+<div class="muted" style="font-size: 11.5px;">118k XP/h · 0:42:10</div>
+</div>
+
+<div class="panel" style="left: 220px; top: 110px; width: 1160px; height: 690px; display: flex; flex-direction: column;">
+<div class="row" style="height: 32px; padding: 0 8px 0 12px; border-bottom: 1px solid #6e5526; background: rgba(0,0,0,.35);">
+<span style="font-size: 15px; color: #f6efd9;">Automation</span>
+<span class="muted" style="font-size: 13px;">·</span>
+<button class="field"><span>Profile: Hunt: Graveyard Wights</span><svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button>
+<div style="flex-grow: 1;"></div>
+<button class="btn grey">Import from VirindiTank…</button>
+<button class="btn grey">Export</button>
+<button class="btn">Save</button>
+<button class="iconbtn" aria-label="Close"><svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="#e4cc83" stroke-width="1.8"></path></svg></button>
+</div>
+<div style="display: flex; gap: 3px; padding: 6px 10px 0; border-bottom: 1px solid #b89a52;">
+<sc-for list="{{tabs}}" as="t" hint-placeholder-count="5">
+<button class="{{t.cls}}" onClick="{{t.pick}}">{{t.label}}</button>
+</sc-for>
+</div>
+
+<sc-if value="{{isRoutine}}" hint-placeholder-val="{{ true }}">
+<div style="flex-grow: 1; display: flex; gap: 12px; padding: 12px; min-height: 0;">
+<div style="width: 210px; display: flex; flex-direction: column; gap: 8px;">
+<div class="sec">States</div>
+<div class="box" style="display: flex; flex-direction: column; padding: 4px;">
+<sc-for list="{{states}}" as="st" hint-placeholder-count="5">
+<button class="listitem" style="{{st.style}}" onClick="{{st.pick}}">
+<span style="width: 8px; height: 8px; border-radius: 50%; background: {{st.dot}};"></span>
+<span style="flex-grow: 1;">{{st.name}}</span>
+<span class="muted" style="font-size: 12px;">{{st.count}}</span>
+</button>
+</sc-for>
+</div>
+<button class="btn grey">+ New state</button>
+<div class="muted" style="font-size: 12px; line-height: 16px; margin-top: 4px;">Starts in <span style="color: #f0e6c6;">Start</span>. The green dot is the state running now.</div>
+<div style="flex-grow: 1;"></div>
+<div class="sec">Shared settings</div>
+<div class="box" style="padding: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px;">
+<div class="row"><span class="muted" style="width: 64px;">Loot</span><span>Endgame.utl</span></div>
+<div class="row"><span class="muted" style="width: 64px;">Buff set</span><span>Heavy</span></div>
+<div class="row"><span class="muted" style="width: 64px;">Routes</span><span>Wight loop, To vendors</span></div>
+</div>
+</div>
+
+<div style="flex-grow: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0;">
+<div class="row">
+<span class="sec">State</span>
+<span style="font-size: 18px; color: #f6efd9;">{{stateName}}</span>
+<span class="muted" style="font-size: 12.5px;">Rules are checked top to bottom, every second. The first match acts.</span>
+<div style="flex-grow: 1;"></div>
+<button class="btn grey">Rename</button>
+<button class="btn">+ Add rule</button>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 6px; flex-grow: 1;">
+<sc-if value="{{noRules}}" hint-placeholder-val="{{ false }}">
+<div class="box muted" style="padding: 24px; text-align: center; font-size: 13px;">No rules yet. Add one, or copy rules from another state.</div>
+</sc-if>
+<sc-for list="{{rules}}" as="r" hint-placeholder-count="5">
+<div class="box" style="position: relative; display: flex; align-items: center; gap: 8px; padding: 7px 8px; flex-wrap: wrap; {{r.hl}}">
+<svg width="8" height="14" viewBox="0 0 8 14" aria-hidden="true"><path d="M2 2h1M5 2h1M2 7h1M5 7h1M2 12h1M5 12h1" stroke="#8d7642" stroke-width="2"></path></svg>
+<span class="muted" style="width: 14px; font-size: 12.5px;">{{r.n}}</span>
+<span class="kw">When</span>
+<sc-for list="{{r.cond}}" as="c" hint-placeholder-count="1">
+<sc-if value="{{c.and}}" hint-placeholder-val="{{ false }}"><span class="kw">and</span></sc-if>
+<sc-for list="{{c.parts}}" as="p" hint-placeholder-count="2">
+<button class="{{p.cls}}" onClick="{{p.click}}">{{p.t}}<sc-if value="{{p.drop}}" hint-placeholder-val="{{ true }}"><svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></sc-if></button>
+</sc-for>
+</sc-for>
+<svg width="18" height="10" viewBox="0 0 18 10" aria-hidden="true"><path d="M0 5h15M11 1l4 4-4 4" stroke="#c9a04a" stroke-width="1.5" fill="none"></path></svg>
+<span class="kw">Do</span>
+<sc-for list="{{r.act}}" as="c" hint-placeholder-count="1">
+<sc-if value="{{c.and}}" hint-placeholder-val="{{ false }}"><span class="kw">then</span></sc-if>
+<sc-for list="{{c.parts}}" as="p" hint-placeholder-count="2">
+<button class="{{p.cls}}">{{p.t}}<sc-if value="{{p.drop}}" hint-placeholder-val="{{ true }}"><svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></sc-if></button>
+</sc-for>
+</sc-for>
+<div style="flex-grow: 1;"></div>
+<sc-if value="{{r.live}}" hint-placeholder-val="{{ false }}"><span class="badge" style="color: #52d65e; border-color: #2f7a36;">acting now</span></sc-if>
+<button class="iconbtn" aria-label="More for rule {{r.n}}" style="width: 20px; height: 20px;"><svg width="12" height="4" viewBox="0 0 12 4"><path d="M1 2h1M6 2h1M11 2h1" stroke="#e4cc83" stroke-width="2.5"></path></svg></button>
+
+<sc-if value="{{r.menu}}" hint-placeholder-val="{{ false }}">
+<div class="panel" style="left: 70px; top: 34px; width: 470px; height: 236px; z-index: 5; display: flex;">
+<div style="width: 140px; border-right: 1px solid #4b3d1c; padding: 4px; display: flex; flex-direction: column;">
+<sc-for list="{{menuCats}}" as="mc" hint-placeholder-count="8">
+<div style="height: 26px; display: flex; align-items: center; padding: 0 8px; font-size: 13px; {{mc.style}}">{{mc.t}}</div>
+</sc-for>
+</div>
+<div style="flex-grow: 1; padding: 4px; display: flex; flex-direction: column;">
+<div style="padding: 4px 8px;"><div class="field" style="width: 100%;"><svg width="11" height="11" viewBox="0 0 11 11"><circle cx="4.5" cy="4.5" r="3.5" stroke="#c9a04a" fill="none"></circle><path d="M7 7l3 3" stroke="#c9a04a"></path></svg><span class="muted">Search conditions</span></div></div>
+<sc-for list="{{menuItems}}" as="mi" hint-placeholder-count="6">
+<div style="height: 26px; display: flex; align-items: center; justify-content: space-between; padding: 0 8px; font-size: 13px; {{mi.style}}"><span>{{mi.t}}</span><span class="muted" style="font-size: 11.5px;">{{mi.h}}</span></div>
+</sc-for>
+</div>
+</div>
+</sc-if>
+</div>
+</sc-for>
+</div>
+
+<div class="box row" style="padding: 7px 10px; font-size: 12.5px; gap: 14px;">
+<span class="row" style="gap: 6px;"><span style="width: 8px; height: 8px; border-radius: 50%; background: #52d65e;"></span><span style="color: #f0e6c6;">Live</span></span>
+<span class="muted">In <span style="color: #f0e6c6;">Hunt</span> for 4 m 12 s</span>
+<span class="muted">Rule 5 acting</span>
+<span class="muted">Last change: Rebuff → Hunt (rule 1 of Rebuff)</span>
+<div style="flex-grow: 1;"></div>
+<button class="btn grey">History</button>
+<button class="btn grey">Step one rule</button>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{isBuffs}}" hint-placeholder-val="{{ false }}">
+<div style="flex-grow: 1; display: flex; gap: 12px; padding: 12px; min-height: 0;">
+<div style="width: 210px; display: flex; flex-direction: column; gap: 8px;">
+<div class="sec">Buff sets</div>
+<div class="box" style="display: flex; flex-direction: column; padding: 4px;">
+<button class="listitem" style="background: #3d382d; border-color: #b89a52;"><span style="flex-grow: 1;">Heavy</span><span class="muted" style="font-size: 12px;">14</span></button>
+<button class="listitem"><span style="flex-grow: 1;">Missile</span><span class="muted" style="font-size: 12px;">13</span></button>
+<button class="listitem"><span style="flex-grow: 1;">Mage</span><span class="muted" style="font-size: 12px;">12</span></button>
+<button class="listitem"><span style="flex-grow: 1;">For others: Heavy</span><span class="muted" style="font-size: 12px;">9</span></button>
+<button class="listitem"><span style="flex-grow: 1;">For others: Mage</span><span class="muted" style="font-size: 12px;">8</span></button>
+</div>
+<button class="btn grey">+ New set</button>
+<button class="btn grey">Fill from my spellbook</button>
+</div>
+<div style="flex-grow: 1; display: flex; gap: 12px; min-width: 0;">
+<div style="flex-grow: 1; display: flex; flex-direction: column; gap: 6px;">
+<div class="row"><span class="sec">Set</span><span style="font-size: 18px; color: #f6efd9;">Heavy</span><span class="muted" style="font-size: 12.5px;">Cast in this order. Drag to reorder.</span></div>
+<div class="box" style="display: flex; flex-direction: column;">
+<div class="row" style="height: 24px; padding: 0 10px; border-bottom: 1px solid #4b3d1c; font-size: 12px;"><span class="sec" style="flex-grow: 1;">Spell</span><span class="sec" style="width: 150px;">On</span><span class="sec" style="width: 90px;">Left</span></div>
+<sc-for list="{{spells}}" as="sp" hint-placeholder-count="14">
+<div class="row" style="height: 24px; padding: 0 10px; font-size: 13px; border-bottom: 1px solid rgba(185,154,82,.12);">
+<svg width="8" height="12" viewBox="0 0 8 12" aria-hidden="true"><path d="M2 2h1M5 2h1M2 6h1M5 6h1M2 10h1M5 10h1" stroke="#8d7642" stroke-width="2"></path></svg>
+<span style="flex-grow: 1;">{{sp.n}}</span>
+<span class="muted" style="width: 150px;">{{sp.on}}</span>
+<span style="width: 90px; color: {{sp.c}};">{{sp.left}}</span>
+</div>
+</sc-for>
+</div>
+</div>
+<div style="width: 330px; display: flex; flex-direction: column; gap: 8px;">
+<div class="sec">When to cast</div>
+<div class="box" style="padding: 10px; display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
+<div class="row" style="flex-wrap: wrap;">Rebuff when any spell has less than <button class="field num">5 min</button> left</div>
+<div class="row"><button class="cb" aria-label="Top up while idle"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 5.5l3 3 5-7" stroke="#ffd774" stroke-width="2" fill="none"></path></svg></button>Top up early while nothing is nearby</div>
+<div class="row"><button class="cb" aria-label="Buff before logging in fully"></button>Buff all after logging in</div>
+</div>
+<div class="sec">Spell level</div>
+<div class="box" style="padding: 10px; display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
+<div class="row" style="flex-wrap: wrap;">Cast the highest level I know, down to <button class="field">Level VI<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button></div>
+<div class="row"><button class="cb" aria-label="Drop a level on fizzle"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 5.5l3 3 5-7" stroke="#ffd774" stroke-width="2" fill="none"></path></svg></button>Drop a level after 2 fizzles</div>
+</div>
+<div class="sec">Supplies</div>
+<div class="box" style="padding: 10px; display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
+<div class="row" style="flex-wrap: wrap;">Warn me when <button class="field subj">Prismatic Taper<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button> is below <button class="field num">50</button></div>
+<div class="row" style="flex-wrap: wrap;">Stay above <button class="field num">40%</button> mana, using <button class="field">Stamina to Mana<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button></div>
+</div>
+<div style="flex-grow: 1;"></div>
+<button class="btn">Cast this set now</button>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{isCombat}}" hint-placeholder-val="{{ false }}">
+<div style="flex-grow: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 12px; align-content: start; font-size: 13px;">
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<div class="sec">Attack</div>
+<div class="box" style="padding: 10px; display: flex; flex-direction: column; gap: 10px;">
+<div class="row">Fight with <button class="field subj">Heavy Weapons<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button></div>
+<div class="row">Attack height <button class="field">Best for target<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button></div>
+<div class="row">Power <button class="field num">100%</button> at range under <button class="field num">3 yd</button></div>
+<div class="row"><button class="cb" aria-label="Swap weapon by weakness"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 5.5l3 3 5-7" stroke="#ffd774" stroke-width="2" fill="none"></path></svg></button>Swap to the weapon matching the target's weakness</div>
+</div>
+<div class="sec">Debuff before attacking</div>
+<div class="box" style="padding: 10px; display: flex; flex-direction: column; gap: 8px;">
+<div class="row"><button class="cb" aria-label="Imperil"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 5.5l3 3 5-7" stroke="#ffd774" stroke-width="2" fill="none"></path></svg></button>Imperil</div>
+<div class="row"><button class="cb" aria-label="Vulnerability"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 5.5l3 3 5-7" stroke="#ffd774" stroke-width="2" fill="none"></path></svg></button>Vulnerability matching my weapon</div>
+<div class="row"><button class="cb" aria-label="Only strong monsters"></button>Only on monsters with over <button class="field num">2,000</button> health</div>
+</div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<div class="sec">Targets</div>
+<div class="box" style="padding: 10px; display: flex; flex-direction: column; gap: 10px;">
+<div class="row">Attack monsters within <button class="field num">25 yd</button></div>
+<div class="row">Pick <button class="field">Closest first<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button></div>
+<div class="row"><button class="cb" aria-label="Ignore others' targets"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 5.5l3 3 5-7" stroke="#ffd774" stroke-width="2" fill="none"></path></svg></button>Skip monsters other players are fighting</div>
+</div>
+<div class="sec">Monster list</div>
+<div class="box" style="display: flex; flex-direction: column;">
+<div class="row" style="height: 26px; padding: 0 10px; border-bottom: 1px solid #4b3d1c;"><span class="sec" style="flex-grow: 1;">Monster</span><span class="sec" style="width: 90px;">Priority</span><span class="sec" style="width: 70px;">Weak to</span></div>
+<div class="row" style="height: 26px; padding: 0 10px;"><span style="flex-grow: 1;">Grave Wight</span><span style="width: 90px;">Normal</span><span class="muted" style="width: 70px;">Fire</span></div>
+<div class="row" style="height: 26px; padding: 0 10px;"><span style="flex-grow: 1;">Shadow</span><span style="width: 90px; color: #ffd774;">First</span><span class="muted" style="width: 70px;">Fire</span></div>
+<div class="row" style="height: 26px; padding: 0 10px;"><span style="flex-grow: 1;">Anything else</span><span style="width: 90px;">Normal</span><span class="muted" style="width: 70px;">Auto</span></div>
+<div style="padding: 6px 10px;"><button class="btn grey">+ Add monster</button></div>
+</div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<div class="sec">Stay alive</div>
+<div class="box" style="padding: 10px; display: flex; flex-direction: column; gap: 10px;">
+<div class="row">Heal under <button class="field num">55%</button> with <button class="field">Kit, then spell<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button></div>
+<div class="row">Stamina under <button class="field num">30%</button></div>
+<div class="row">Mana under <button class="field num">40%</button></div>
+<div class="row">Retreat under <button class="field num">25%</button> health</div>
+<div class="row"><button class="cb" aria-label="Log out when in danger"></button>Log out if health falls under <button class="field num">10%</button></div>
+</div>
+<div class="sec">Fellowship</div>
+<div class="box" style="padding: 10px; display: flex; flex-direction: column; gap: 10px;">
+<div class="row"><button class="cb" aria-label="Heal fellows"></button>Heal fellows under <button class="field num">50%</button></div>
+<div class="row"><button class="cb" aria-label="Follow leader"></button>Follow <button class="field">Fellowship leader<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button></div>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{isLoot}}" hint-placeholder-val="{{ false }}">
+<div style="flex-grow: 1; display: flex; gap: 12px; padding: 12px; min-height: 0;">
+<div style="width: 470px; display: flex; flex-direction: column; gap: 8px;">
+<div class="row"><span class="sec">Rules</span><span class="muted" style="font-size: 12.5px;">Endgame.utl · first match wins</span><div style="flex-grow: 1;"></div><button class="btn grey">+ Rule</button></div>
+<div class="box" style="display: flex; flex-direction: column; padding: 4px;">
+<sc-for list="{{lootRules}}" as="lr" hint-placeholder-count="7">
+<button class="listitem" style="{{lr.style}}" onClick="{{lr.pick}}">
+<span class="muted" style="width: 14px; font-size: 12px;">{{lr.n}}</span>
+<span class="badge" style="{{lr.badge}}">{{lr.a}}</span>
+<span style="flex-grow: 1;">{{lr.name}}</span>
+<span class="muted" style="font-size: 12px;">{{lr.hits}}</span>
+</button>
+</sc-for>
+</div>
+<div class="muted" style="font-size: 12px; line-height: 16px;">Anything no rule matches is left on the corpse. Numbers show items matched today.</div>
+</div>
+<div style="flex-grow: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0;">
+<div class="row"><span class="sec">Rule</span><span style="font-size: 18px; color: #f6efd9;">{{lr.name}}</span></div>
+<div class="box" style="padding: 12px; display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
+<div class="row">Action <button class="field subj">{{lr.a}}<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button></div>
+<div class="kw" style="margin-top: 2px;">The item must match all of</div>
+<sc-for list="{{lr.req}}" as="q" hint-placeholder-count="3">
+<div class="row">
+<button class="field subj">{{q.a}}<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button>
+<button class="field">{{q.b}}<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button>
+<button class="field num">{{q.c}}</button>
+<button class="iconbtn" aria-label="Remove requirement" style="width: 20px; height: 20px;"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M1 1l6 6M7 1l-6 6" stroke="#e4cc83" stroke-width="1.5"></path></svg></button>
+</div>
+</sc-for>
+<div class="row"><button class="btn grey">+ Requirement</button><button class="btn grey">+ Any of…</button></div>
+</div>
+<div class="sec">Try it</div>
+<div class="box row" style="padding: 12px; gap: 14px; font-size: 13px;">
+<div style="width: 36px; height: 36px; border: 1px dashed #8d7642; background: #0a0a07;"></div>
+<div style="display: flex; flex-direction: column; gap: 3px;">
+<span>Drop an item here, or pick one from a corpse or your packs.</span>
+<span class="muted">Last test: Diamond Scimitar → <span style="color: #52d65e;">Keep</span>, matched rule 2</span>
+</div>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{isService}}" hint-placeholder-val="{{ false }}">
+<div style="flex-grow: 1; display: flex; gap: 12px; padding: 12px; min-height: 0; font-size: 13px;">
+<div style="flex-grow: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0;">
+<div class="box row" style="padding: 10px; gap: 10px;">
+<button class="cb" aria-label="Offer services"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 5.5l3 3 5-7" stroke="#ffd774" stroke-width="2" fill="none"></path></svg></button>
+<span style="font-size: 14px; color: #f6efd9;">Offer services to other players</span>
+<span class="muted">They send you a /tell; you act on it.</span>
+<div style="flex-grow: 1;"></div>
+<span>Who may ask</span><button class="field">Anyone<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button>
+</div>
+<div class="row"><span class="sec">Commands</span><div style="flex-grow: 1;"></div><button class="btn grey">+ Command</button></div>
+<div class="box" style="display: flex; flex-direction: column;">
+<div class="row" style="height: 26px; padding: 0 10px; border-bottom: 1px solid #4b3d1c;"><span class="sec" style="width: 170px;">They tell you</span><span class="sec" style="flex-grow: 1;">You do</span><span class="sec" style="width: 70px;">Used</span></div>
+<sc-for list="{{cmds}}" as="cm" hint-placeholder-count="6">
+<div class="row" style="height: 30px; padding: 0 10px; border-bottom: 1px solid rgba(185,154,82,.12);">
+<span style="width: 170px;"><span class="field" style="color: #9fd0ff;">{{cm.k}}</span></span>
+<span style="flex-grow: 1;">{{cm.d}}</span>
+<span class="muted" style="width: 70px;">{{cm.u}}</span>
+</div>
+</sc-for>
+</div>
+<div class="sec">Limits</div>
+<div class="box" style="padding: 10px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;">
+<div class="row">One request per person every <button class="field num">10 min</button></div>
+<div class="row">Queue up to <button class="field num">6</button> people</div>
+<div class="row">Pause and say "Restocking" under <button class="field num">100</button> tapers</div>
+<div class="row">Accept trades <button class="field">Donations only<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button></div>
+<div class="row" style="grid-column: span 2;">Every <button class="field num">15 min</button> say in <button class="field">Local<svg width="8" height="6" viewBox="0 0 8 6"><path d="M0 0h8L4 6z" fill="#c9a04a"></path></svg></button><button class="field" style="flex-grow: 1;">Buffs and portal ties here. /tell me help</button></div>
+</div>
+</div>
+<div style="width: 300px; display: flex; flex-direction: column; gap: 8px;">
+<div class="sec">Queue</div>
+<div class="box" style="display: flex; flex-direction: column; padding: 4px;">
+<div class="row" style="height: 34px; padding: 0 8px; background: rgba(82,214,94,.08);"><span style="width: 8px; height: 8px; border-radius: 50%; background: #52d65e;"></span><span style="flex-grow: 1;">Aldric Venn</span><span class="muted" style="font-size: 12px;">buffs heavy · 6/9</span></div>
+<div class="row" style="height: 30px; padding: 0 8px;"><span class="muted" style="width: 8px;">2</span><span style="flex-grow: 1;">Miri of Yaraq</span><span class="muted" style="font-size: 12px;">tie 1</span></div>
+<div class="row" style="height: 30px; padding: 0 8px;"><span class="muted" style="width: 8px;">3</span><span style="flex-grow: 1;">Olthoi Bane</span><span class="muted" style="font-size: 12px;">buffs mage</span></div>
+</div>
+<div class="row"><button class="btn grey">Skip</button><button class="btn grey">Clear queue</button></div>
+<div class="sec">Today</div>
+<div class="box" style="padding: 10px; display: flex; flex-direction: column; gap: 6px;">
+<div class="row"><span class="muted" style="flex-grow: 1;">Served</span><span>41 people</span></div>
+<div class="row"><span class="muted" style="flex-grow: 1;">Refused (too soon)</span><span>5</span></div>
+<div class="row"><span class="muted" style="flex-grow: 1;">Donations</span><span>3 trades</span></div>
+</div>
+<div style="flex-grow: 1;"></div>
+<div class="box row" style="padding: 8px 10px; gap: 8px; font-size: 12px; color: #cdbf95;">
+<svg width="11" height="12" viewBox="0 0 11 12"><path d="M5.5 0.5l5 2v4c0 2.6-2.2 4.4-5 5-2.8-.6-5-2.4-5-5v-4z" stroke="#c9a04a" fill="none"></path></svg>
+<span>This server allows service bots to run while you are away.</span>
+</div>
+</div>
+</div>
+</sc-if>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1600,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { tab: 'routine', st: 'hunt', menu: true, loot: 1 };
+  }
+  renderVals() {
+    const s = this.state;
+    const tabs = [['routine', 'Routine'], ['buffs', 'Buffs'], ['combat', 'Combat'], ['loot', 'Loot'], ['service', 'Service']]
+      .map(([id, label]) => ({ label, cls: s.tab === id ? 'tab on' : 'tab', pick: () => this.setState({ tab: id }) }));
+
+    const F = (t, cls) => ({ t, cls: 'field ' + (cls || ''), drop: cls !== 'num' });
+    const data = {
+      start: { name: 'Start', rules: [
+        { cond: [[F('Always', 'subj')]], act: [[F('Go to state'), F('Rebuff', 'subj')]] } ] },
+      hunt: { name: 'Hunt', rules: [
+        { cond: [[F('Character died', 'subj')]], act: [[F('Go to state'), F('Recover corpse', 'subj')]] },
+        { menu: true, cond: [[F('Free pack slots', 'subj'), F('below'), F('5', 'num')]], act: [[F('Go to state'), F('Vendor run', 'subj')]] },
+        { cond: [[F('Any buff', 'subj'), F('ends within'), F('3 min', 'num')], [F('No monsters within', 'subj'), F('20 yd', 'num')]], act: [[F('Go to state'), F('Rebuff', 'subj')]] },
+        { cond: [[F('Not moved for', 'subj'), F('60 s', 'num')]], act: [[F('Say in'), F('Fellowship'), F('Stuck, can someone check on me?', 'num')]] },
+        { live: true, cond: [[F('Always', 'subj')]], act: [[F('Fight'), F('Combat settings', 'subj')], [F('Loot with'), F('Endgame.utl', 'subj')], [F('Follow route'), F('Wight loop', 'subj')]] } ] },
+      rebuff: { name: 'Rebuff', rules: [
+        { cond: [[F('Every buff', 'subj'), F('has more than'), F('5 min', 'num')]], act: [[F('Go to state'), F('Hunt', 'subj')]] },
+        { cond: [[F('Always', 'subj')]], act: [[F('Stop moving')], [F('Cast buff set'), F('Heavy', 'subj')]] } ] },
+      vendor: { name: 'Vendor run', rules: [
+        { cond: [[F('Route finished', 'subj')]], act: [[F('Salvage and sell by'), F('Endgame.utl', 'subj')], [F('Go to state'), F('Rebuff', 'subj')]] },
+        { cond: [[F('Always', 'subj')]], act: [[F('Use item'), F('Holtburg recall', 'subj')], [F('Follow route'), F('To vendors', 'subj')]] } ] },
+      corpse: { name: 'Recover corpse', rules: [] }
+    };
+    const order = ['start', 'hunt', 'rebuff', 'vendor', 'corpse'];
+    const states = order.map((id) => ({
+      name: data[id].name, count: data[id].rules.length ? String(data[id].rules.length) : '',
+      dot: id === 'hunt' ? '#52d65e' : 'transparent',
+      style: s.st === id ? 'background: #3d382d; border-color: #b89a52;' : '',
+      pick: () => this.setState({ st: id })
+    }));
+    const cur = data[s.st];
+    const toggleMenu = () => this.setState({ menu: !s.menu });
+    const rules = cur.rules.map((r, i) => ({
+      n: i + 1, live: !!r.live, menu: !!r.menu && s.menu,
+      hl: r.live ? 'border-color: #2f7a36;' : '',
+      cond: r.cond.map((parts, j) => ({ and: j > 0, parts: parts.map((p, k) => ({ ...p, click: r.menu && j === 0 && k === 0 ? toggleMenu : null })) })),
+      act: r.act.map((parts, j) => ({ and: j > 0, parts }))
+    }));
+
+    const on = 'background: #3d382d; color: #f3ecd6;';
+    const menuCats = ['Character', 'Vitals', 'Buffs', 'Inventory', 'Nearby', 'Location', 'Routine', 'Chat'].map((t) => ({ t, style: t === 'Inventory' ? on : '' }));
+    const menuItems = [['Free pack slots', 'number'], ['Item count', 'by name or loot rule'], ['Burden', 'percent'], ['Component count', 'by type'], ['Mana stones', 'number'], ['Pyreals and notes', 'amount'], ['Item is wielded', 'yes or no']]
+      .map(([t, h]) => ({ t, h, style: t === 'Free pack slots' ? on : '' }));
+
+    const spells = [
+      ['Strength Self', 'Me'], ['Endurance Self', 'Me'], ['Coordination Self', 'Me'], ['Quickness Self', 'Me'],
+      ['Focus Self', 'Me'], ['Willpower Self', 'Me'], ['Heavy Weapon Mastery Self', 'Me'], ['Invulnerability Self', 'Me'],
+      ['Impregnability Self', 'Me'], ['Blood Drinker', 'Wielded weapon'], ['Swift Killer', 'Wielded weapon'],
+      ['Heart Seeker', 'Wielded weapon'], ['Defender', 'Wielded weapon'], ['Impenetrability', 'All worn armor']
+    ].map(([n, onT], i) => ({ n, on: onT, left: i === 7 ? '3 min' : (i === 12 ? 'missing' : (52 - i * 2) + ' min'), c: i === 7 || i === 12 ? '#ffd774' : '#e9e1c8' }));
+
+    const KEEP = 'color: #52d65e; border-color: #2f7a36;';
+    const SALV = 'color: #ffd774; border-color: #8d7642;';
+    const SELL = 'color: #9fd0ff; border-color: #3a5a8a;';
+    const lootDefs = [
+      ['Keep', KEEP, 'Rares', '0', [['Rarity', 'is', 'any rare']]],
+      ['Keep', KEEP, 'Legendary weapons', '2', [['Item type', 'is', 'Melee weapon'], ['Has cantrip', 'at least', 'Legendary'], ['Workmanship', 'at least', '7']]],
+      ['Keep 20', KEEP, 'Mana stones', '6', [['Name', 'contains', 'Mana Stone'], ['Keep up to', 'count', '20']]],
+      ['Salvage', SALV, 'Armor salvage', '31', [['Material', 'is one of', 'Steel, Iron, Granite'], ['Workmanship', 'at least', '6']]],
+      ['Sell', SELL, 'Worth selling', '44', [['Value', 'at least', '5,000p'], ['Burden', 'at most', '300']]],
+      ['Sell', SELL, 'Jewelry without cantrips', '9', [['Item type', 'is', 'Jewelry'], ['Has cantrip', 'is', 'none']]]
+    ];
+    const lootRules = lootDefs.map(([a, badge, name, hits, req], i) => ({
+      n: i + 1, a, badge, name, hits, req: req.map(([qa, qb, qc]) => ({ a: qa, b: qb, c: qc })),
+      style: s.loot === i ? 'background: #3d382d; border-color: #b89a52;' : '',
+      pick: () => this.setState({ loot: i })
+    }));
+
+    const cmds = [
+      ['buffs heavy', 'Cast "For others: Heavy" on them', '28'],
+      ['buffs mage', 'Cast "For others: Mage" on them', '9'],
+      ['tie 1', 'Summon my primary portal tie', '11'],
+      ['tie 2', 'Summon my secondary portal tie', '6'],
+      ['queue', 'Tell them their place in line', '4'],
+      ['help', 'Reply with this list', '17']
+    ].map(([k, d, u]) => ({ k, d, u }));
+
+    return {
+      tabs, states, rules, menuCats, menuItems, spells, lootRules, cmds,
+      lr: lootRules[s.loot],
+      stateName: cur.name, noRules: cur.rules.length === 0,
+      isRoutine: s.tab === 'routine', isBuffs: s.tab === 'buffs', isCombat: s.tab === 'combat',
+      isLoot: s.tab === 'loot', isService: s.tab === 'service'
+    };
+  }
+}
+</script>
+</body>
+</html>

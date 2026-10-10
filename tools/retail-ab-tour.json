@@ -1,0 +1,121 @@
+{
+  "generated": "2026-10-05",
+  "source": "ace_world.points_of_interest + portal weenie Destination positions (tools/gen-retail-ab-tour.ts)",
+  "skipped": [
+    "Advocate Dungeon: AddWorldObjectInternal: couldn't spawn at 0x018A017F [180 -90 0.005], then LoginComplete NRE (ACE log, 2026-10-02)",
+    "Ogham Dungeon: cell 0x272029a not in cell.dat",
+    "Crater Caves Dungeon: retail cannot place the drop point (point not in 0x019A02CA or its 43 stab cells)",
+    "Dungeon Maggreth: retail cannot place the drop point (point not in 0x014F01B9 or its 0 stab cells)",
+    "Soul-Fearing Vestry Dungeon: retail cannot place the drop point (point not in 0x02EF0269 or its 23 stab cells)"
+  ],
+  "towns": [
+    "Ahurenga",
+    "Al-Arqas",
+    "Al-Jalima",
+    "Arwic",
+    "Ayan Baqur",
+    "Baishi",
+    "Bandit Castle",
+    "Beach Fort",
+    "Bluespire",
+    "Cragstone",
+    "Dryreach",
+    "Eastham",
+    "Eastwatch",
+    "Fiun",
+    "Fort Tethana",
+    "Freehold",
+    "Glenden Wood",
+    "Greenspire",
+    "Hebian-to",
+    "Holtburg",
+    "Kara",
+    "Khayyaban",
+    "Kryst",
+    "Lin",
+    "Linvak Tukal",
+    "Lytelthorpe",
+    "Mayoi",
+    "Nanto",
+    "Neydisa",
+    "Outpost",
+    "Plateau",
+    "Qalabar",
+    "Redspire",
+    "Refuge",
+    "Rithwic",
+    "Samsur",
+    "Sanamar",
+    "Sawato",
+    "Shoushi",
+    "Silyun",
+    "Stonehold",
+    "Timaru",
+    "Tou-Tou",
+    "Tufa",
+    "Uziz",
+    "Westwatch",
+    "Xarabydun",
+    "Yanshi",
+    "Yaraq",
+    "Zaikhal"
+  ],
+  "dungeons": [
+    {
+      "name": "Alfreth Dungeon",
+      "teleloc": "@teleloc 0x01D601B9 [135.8 -1.22 0] -0.7218 0 0 -0.6921"
+    },
+    {
+      "name": "Daiklos Dungeon",
+      "teleloc": "@teleloc 0x0185020F [80 -90 0] -0.7145 0 0 -0.6997"
+    },
+    {
+      "name": "Dungeon Binar",
+      "teleloc": "@teleloc 0x018301AF [60 -50 0] 1 0 0 0"
+    },
+    {
+      "name": "Dungeon Gallery Tower",
+      "teleloc": "@teleloc 0x01AD0116 [29.94 -32.6 0] 1 0 0 -0.0087"
+    },
+    {
+      "name": "Dungeon Manor",
+      "teleloc": "@teleloc 0x01E801BA [-0.6 -38.5 0] 0.0698 0 0 -0.9976"
+    },
+    {
+      "name": "Dungeon Muddy",
+      "teleloc": "@teleloc 0x01B60100 [0.24 -0.7 0] 0.0086 0 0 -1"
+    },
+    {
+      "name": "Dungeon of Corpses",
+      "teleloc": "@teleloc 0x01090160 [30 -20 0] 0 0 0 -1"
+    },
+    {
+      "name": "Dungeon of Tatters",
+      "teleloc": "@teleloc 0x01BA0186 [64.95 -50.27 0] 0.7592 0 0 -0.6508"
+    },
+    {
+      "name": "Glenden Wood Dungeon",
+      "teleloc": "@teleloc 0x01E3033D [161 -150 0] -0.9833 0 0 -0.1822"
+    },
+    {
+      "name": "Holtburg Dungeon",
+      "teleloc": "@teleloc 0x01F60289 [96.7 -10 0] -0.7193 0 0 -0.6947"
+    },
+    {
+      "name": "Mansion Dungeon",
+      "teleloc": "@teleloc 0x5651038E [77.3194 -140.167 -5.995] 1 0 0 0"
+    },
+    {
+      "name": "Nuhmudira's Dungeon",
+      "teleloc": "@teleloc 0x536D0289 [149.243 -129.946 -5.995] -0.7071 0 0 -0.7071"
+    },
+    {
+      "name": "Sylsfear Dungeon",
+      "teleloc": "@teleloc 0x01D70277 [59.8 -136.9 0] -0.4664 0 0 -0.8846"
+    },
+    {
+      "name": "The Pit Dungeon",
+      "teleloc": "@teleloc 0x01A302F3 [39.685 -20.631 0] -0.0025 0 0 -1"
+    }
+  ]
+}

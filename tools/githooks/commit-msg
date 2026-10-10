@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Real git commit-msg hook (enabled via: git config core.hooksPath tools/githooks)
+# Enforces the tests-with-code rule for commits made outside a Claude session.
+# (The Claude-harness PreToolUse hook tools/hooks/pre-commit-check.sh enforces
+# the richer build/progress.md/tasks.json gate; this is the terminal backstop.)
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+MSG_FILE="$1"
+STAGED=$(git diff --cached --name-only 2>/dev/null || true)
+
+HAS_SOURCE=$(echo "$STAGED" | grep -c '^packages/' || true)
+if [[ "$HAS_SOURCE" -gt 0 ]]; then
+  HAS_TESTS=$(echo "$STAGED" | grep -c '^tests/' || true)
+  if [[ "$HAS_TESTS" -eq 0 ]] && ! grep -qi '\[skip-tests\]' "$MSG_FILE"; then
+    echo "BLOCKED: Code in packages/ changed but no test files in tests/ were added or updated." >&2
+    echo "Add/update tests, or include [skip-tests] for truly test-free changes." >&2
+    exit 1
+  fi
+fi
+exit 0

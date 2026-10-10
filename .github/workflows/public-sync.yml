@@ -1,0 +1,59 @@
+name: Sync from the private repository
+
+# RELEASE.open-source-repo — the public repository (jakemmarsh/webac) is a
+# generated mirror of the private working repository (jakemmarsh/acjs):
+# tools/public-export.mjs exports the allowlisted tree and refuses to write
+# anything when its scan finds decompiled code, a secret or a retail file
+# (docs/open-source-release.md). The private repository keeps this file at
+# deploy/public-repo/ (so it never runs there) and the export places it at
+# .github/workflows/ here, where Actions minutes are free. It reads the private repository with a read-only deploy
+# key (secret ACJS_DEPLOY_KEY) and pushes with a write deploy key on this
+# repository (secret WEBAC_DEPLOY_KEY): the workflow's own token may not push
+# workflow-file changes, and its pushes would not start CI here.
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: public-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.repository == 'jakemmarsh/webac'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ssh-key: ${{ secrets.WEBAC_DEPLOY_KEY }}
+          path: public
+          fetch-depth: 1
+
+      # Partial clone, evidence left out of the working tree: the export reads
+      # tracked blobs through git, fetching the few it needs on demand.
+      - uses: actions/checkout@v4
+        with:
+          repository: jakemmarsh/acjs
+          ssh-key: ${{ secrets.ACJS_DEPLOY_KEY }}
+          path: private
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /tools/
+            /package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Export and push
+        run: |
+          git -C public config user.name "webAC sync"
+          git -C public config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node private/tools/public-export.mjs --publish public --ref HEAD --push

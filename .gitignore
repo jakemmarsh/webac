@@ -1,0 +1,28 @@
+node_modules
+# Root DAT-file directory only — anchored so it doesn't swallow source dirs
+# like packages/renderer/src/dat/ (DAT-loading client code).
+/dat/
+world-db-raw/
+reference/
+*.sqlite
+dist/
+.vite/
+*.tsbuildinfo
+.DS_Store
+/public/dat
+.claude/scheduled_tasks.lock
+verification/screens/
+.provision-lanes
+verification/screen-regression/
+verification/screen-regression-*/
+
+# Retail A/B (tools/capture-retail-ab.ts): retail.png, sheet.png, meta.json and report.md are committed evidence
+verification/retail-ab/*/ours.png
+verification/retail-ab/*/diff.png
+verification/retail-ab/.retail-probe.png
+
+# Local GDLE server (tools/gdle/start-gdle.sh): extracted SQL dumps / run state
+tools/gdle/run/
+tools/classicace/run/
+tools/gdl-classic/run/
+/dat-sets/

@@ -1,0 +1,9 @@
+# The short-lived R2 uploader Worker (README.md). Deploy, upload, delete.
+name = "acjs-r2-uploader"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "B"
+bucket_name = "webac-dats"

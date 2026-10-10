@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "paths": {
+      "@ac/shared": ["./packages/shared/src/index.ts"],
+      "@ac/shared/*": ["./packages/shared/src/*"],
+      "@ac/dat-parser": ["./packages/dat-parser/src/index.ts"],
+      "@ac/dat-parser/*": ["./packages/dat-parser/src/*"],
+      "@ac/renderer": ["./packages/renderer/src/index.ts"],
+      "@ac/renderer/*": ["./packages/renderer/src/*"],
+      "@ac/network": ["./packages/network/src/index.ts"],
+      "@ac/network/*": ["./packages/network/src/*"]
+    }
+  },
+  "include": ["packages/*/src/**/*.ts", "services/*/src/**/*.ts", "tests/**/*.ts", "tools/**/*.ts"],
+  "exclude": ["node_modules", "dist", "reference", "world-db-raw", "tools/archive"]
+}

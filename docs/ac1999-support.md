@@ -1,0 +1,244 @@
+# AC1999 (Nov 1999 retail) support
+
+How we run the 1999 stack locally, what the real 1999 client and the AC1999 server actually do on the wire, and where that differs from AC1999's knowledge base. The plan is [ac1999-support-scope.md](ac1999-support-scope.md); this file is the running record of facts and gotchas. It is the counterpart of [dark-majesty-support.md](dark-majesty-support.md).
+
+## Status (2026-10-06)
+
+Phases 0–7 of [the scope](ac1999-support-scope.md) are built: AC1999 servers are playable from the world list as an opt-in era (`ac1999-retail`, chip "1999 launch era"), the 1999 world under the end-of-retail interface. Phase 8 (the faithful 1999 interface) is parked by Jake.
+
+| Layer | What it is | Where |
+|---|---|---|
+| DATs | pre-ToD container in DatDatabase; every 1999 file translated to the end-of-retail format by a DatOverlay (all 17,794 portal + 131,560 cell files parse clean) | `packages/dat-parser/src/era1999/` |
+| Transport | the 1999 packet layer (checksums reproduce the real client's session both ways), Connection1999 behind NetConnection; `createConnection()` picks it for `protocol: 'ac1999'` only | `packages/network/src/era1999/` |
+| Messages | Adapter1999 + codecs: 1999 messages ⇄ end-of-retail messages, so ServerMessageHandler and every panel are shared; every client action and server message accounted for (sections below) | `packages/network/src/era1999/codecs/` |
+| Bridge | per-session protocol (end of retail by default): one port, the 1999 disconnect | `services/ws-tcp-bridge/src/protocol.ts` |
+| Era | `ac1999-retail`: the interface streams end of retail's set; the world streams its own set (`ac1999-retail-world-p102-c67`) or loads the whole 1999 files; `uiPortalDb`/`worldPortalDb` (one DB for every other era); server DAT patches; chargen on 1999 data; controls 1999 lacked hidden | `packages/renderer/src/era/`, `ui/Chargen1999.ts`, `era/EraFeatures.ts` |
+| World list | AC1999 rows (public `ac1999.cobradragon.com:9110`; `BRIDGE_AC1999_LOCAL` for the local server), never era-probed, shared chip | `services/ws-tcp-bridge/src/serverCompat.ts`, `serverList.ts` |
+
+### Hosted (R2, 2026-10-06)
+
+| Set | URL | Config |
+|---|---|---|
+| raw 1999 DATs (portal 99.6 MB, cell 45.1 MB) | `https://dats.playwebac.com/v1/raw/ac1999-retail-p102-c67/{portal,cell}.dat` | web `ACJS_ERA_ASSET_BASES["ac1999-retail"]` |
+| 1999 world streaming set (12,264 objects, 54 MB gz) | `https://dats.playwebac.com/v1/sets/ac1999-retail-world-p102-c67.json` | web `ACJS_ERA_DAT_SETS["ac1999-retail"]` |
+
+Uploaded with `tools/r2-uploader/` (a short-lived Worker under `wrangler login`; recipe in its README) and `tools/upload-era-set-r2.ts` / `tools/upload-stream-set-r2.ts`. The set is built with `npx tsx tools/publish-dats-r2.ts --overlay ac1999 --dat-dir dat-sets/ac1999-retail --stage-only`. Sets are immutable: a new 1999 data release gets a new set name.
+
+### Phase 0 ground truth
+
+- The pristine 1999 DATs are in `dat-sets/ac1999-retail/` (gitignored), copied off the retail ISO.
+- **The server.** The AC1999 server runs in Docker (`tools/ac1999/start-ac1999.sh`, UDP 9310). Its world imports from the AC1999 SQL tree: 5,780 weenies, 19,498 landblock instances.
+- **The client.** The real 1999 client runs under Wine against it (`tools/ac1999/launch-ac1999-client-mac.sh`). Verified live: login, connect grant, DAT sync ("up to date"), character list, Quick Character creation, entering the world at Al-Arqas North (cell 0x905C003C), walking, turning, jumping, exiting to character select.
+- **Capture.** `tools/ac1999/capture-ac1999-session.sh` records a scripted session both ways into `tests/fixtures/ac1999-session-001.jsonl.gz`.
+- **Headless protocol probe.** `npx tsx tools/ac1999/probe-connection.ts ws://localhost:<bridge> <account ≤8> [--name N] [--resume] [--social]` drives Connection1999 from Node and reports dropped messages and checksum failures.
+
+## Running it
+
+```bash
+bash tools/ac1999/start-ac1999.sh            # clone + build (~5 min first time), DB, world import, server
+bash tools/ac1999/launch-ac1999-client-mac.sh # the real 1999 client, via the relay on 9320
+bash tools/ac1999/capture-ac1999-session.sh tests/fixtures/ac1999-session-001.jsonl.gz
+bash tools/ac1999/start-ac1999.sh status|stop|reset
+```
+
+| Piece | Where |
+|---|---|
+| AC1999 source | `reference/ac1999` (gitignored), pinned by `AC1999_COMMIT` in the start script (4bdbcc91, 2026-10-09: includes upstream d1f681ce80, retail's melee attack-height test, which the public server runs: short creatures need low swings) |
+| Server image | `acjs-ac1999:<sha8>`, built by `tools/ac1999/Dockerfile` (Debian) |
+| Containers | `acjs-ac1999-db` (MariaDB 11.4, 127.0.0.1:3308), `acjs-ac1999-server` (UDP 9310 → 9110) |
+| Server run dir | `reference/ac1999/Server/Bin`, mounted at `/gdle`. The retail DATs are copied into `ServerModes/Release/Data/` |
+| Server news / MOTD | ours (`tools/ac1999/servernews.txt`, `motd.txt`), bind-mounted over upstream's |
+| Client prefix | `~/.acjs-ac1999`, installed from `~/Games/AC1999/AC-Retail.iso` (`AC1999_ISO`). Every launch restores the pristine DATs (`AC1999_KEEP_DATS=1` to keep patched ones) |
+| Relay | `tools/retail-client-udp-relay.mjs 9320 127.0.0.1 9310` (the end-of-retail relay, unchanged). `RELAY_CAPTURE` writes JSONL |
+| Accounts | auto-created on first login. `user:password` must fit 19 characters |
+
+None of this touches the ACE, ClassicACE or GDL containers, nor a personal AC1999 checkout's `ac1999-db` on 3307.
+
+**Licensing.** AC1999's `Server/` is AGPL-3.0, so we may run it and read it. Its knowledge base, DatInspector, Python proof of concept and launcher are unlicensed, so they are reference only. The 1999 DATs and client are Turbine's retail files, with the same standing as the end-of-retail files we already host. Captures we commit must not carry AC1999's unlicensed text, which is why the server sends our news.
+
+## The 1999 DATs (measured)
+
+From `AC-Retail.iso` (files dated Oct 8 1999; `client.exe` Oct 11 1999, version string `4.35752`):
+
+| File | Bytes | SHA-256 | Header @0x12C |
+|---|---|---|---|
+| `portal.dat` | 99,614,720 | `195e6fbb…1975a` | FileType 0x5442, BlockSize 0x400, FileSize 0x5F00000, **Iteration 102**, FreeHead 0x3CA5800, FreeTail 0x3C8EC00, FreeCount 0x3E5, BTreeRoot 0x1080800 |
+| `cell.dat` | 45,088,768 | `11185565…870b8` | FileType 0x5442, BlockSize 0x100, FileSize 0x2B00000, **Iteration 67**, FreeHead 0x2A77400, FreeTail 0x512E00, FreeCount 0xAF9, BTreeRoot 0x13DA700 |
+| `client.exe` | 2,455,040 | `61cb908a…c4902` | — |
+
+Full hashes: portal `195e6fbb6d1cb9c849b2f4732c29509b5f20f67038a1d0763041387287c1975a`, cell `111855655c7b1daec563a96476e29cf10f17a8252a50f6102f1245146e0870b8`, client `61cb908a78456921dcd8c7c2f8178b87ebcf210761a07e84e51e024367dc4902`.
+
+- **The iteration is the header word at +0x0C** (file offset 0x138): 102 / 67.
+  - The real client sends exactly these in its LoginRequest tail (`…66000000 43000000…`).
+  - The server's own manifests are named `portal-102.manifest` / `cell-67.manifest`.
+  - The KB's "1625 / 1294" (`kb/messages/server-to-client/0xF7B8-DDDBegin.md`) is not what this CD carries. Its own `kb/dat/README.md` says 102.
+  - `tools/era-dat-sweep.ts`'s comment on the header ("3 free-list words, ?, BTreeRoot") has the order wrong: it is Iteration, FreeHead, FreeTail, FreeCount, BTreeRoot.
+- **A server stamps its own iterations into the client's DATs.** A client prefix patched by an AC1999 server reads **10006** (0x2716) in both headers.
+- **Census.** Portal: 17,794 files in 22 types (01:3816 02:1021 03:539 04:758 05:1904 06:3069 08:1599 09:62 0a:335 0d:369 0e:11 0f:162 10:289 11:1359 12:95 13:2 20:71 30:35 31:27 32:666 33:1538 34:67). Cell: 131,560 files (65,025 landblocks, 1,471 LandblockInfo, 65,064 EnvCells). There are no 0x14, 0x21–0x27, 0x39 or 0x40 files and no local DAT.
+- **Our parsers over these files** (`npx tsx tools/era-dat-sweep.ts dat-sets/ac1999-retail --sample 300`):
+  - **Clean as-is (20 types):** Animation, BadData, ChatPoseTable, Clothing, CombatTable, DegradeInfo, MotionTable, Palette, PaletteSet, ParticleEmitter, PhysicsScript, PhysicsScriptTable, Scene, SecondaryAttributeTable, Setup, SkillTable, SoundTable, SpellComponentTable, Wave; cell CellLandblock and LandblockInfo.
+  - **Need a 1999 variant (11):** GfxObj (all throw), SurfaceTexture, Texture, Surface (leftover 4/28: the leading id), Environment, EnvCell, Region, CharGen, SpellTable, XpTable, String.
+
+  Those 11 are exactly Phase 2's list.
+
+## In the world list
+
+AC1999 worlds are ordinary rows in the launcher's world list. Their era shows the way every classic world's does: the compat chip in the details, `1999 launch era` (`AC1999_ERA_NOTE`, beside the classic worlds' `Dark Majesty era`). No toggle, no separate era tag.
+
+- **Rows.** They are not in Servers.xml, so the multi bridge adds them itself (`serverList.ac1999Overlay`, after the operator overlay so an operator can deny or replace them): `ac1999` = `ac1999.cobradragon.com:9110` always, and `ac1999-local` = "AC1999 (local)" only when `BRIDGE_AC1999_LOCAL=<host>:<port>` is set (our Docker server: `BRIDGE_AC1999_LOCAL=127.0.0.1:9310 BRIDGE_ALLOW_PRIVATE_TARGETS=1`). Both have emu `AC1999`.
+- **Era.** `serverCompat.ts` maps emu `AC1999` to era `ac1999-retail`, beta, note `1999 launch era`. The `GET /servers` row carries that era; the bridge's per-session protocol routing reads it (`protocol.ts`).
+- **No era probe.** `ac1999-retail` is in `NO_PROBE_ERAS`: `ServerDirectory.probeable()` and `EraDetector.sweep` skip those rows whatever their emu says, and `buildDirectory` ignores any detection result for them. The server auto-creates accounts, so a probe login would make one.
+- **ENTER** takes the row once the client has the `ac1999-retail` era profile; older clients refuse the unknown era id (fails safe). From an end-of-retail page, ENTER reloads into the era (`docs/dark-majesty-support.md` "How the client picks the era"); that reload shows no patch splash, only black until the connecting screen, with one progress line if a download takes over a second.
+- Tests: `tests/verify-launcher-ac1999-rows.ts` (rows, overlay, no probe), `tests/verify-launcher-client.ts` (the rows and their chips; every non-1999 row exactly as on main).
+
+## The wire, from the real client (capture 2026-10-06)
+
+Decoded with the release header layout (seq, flags, recipient u32, checksum, size u16, time u8, table u8). The counts below come from the first manual 4-minute session. The committed fixture `tests/fixtures/ac1999-session-001.jsonl.gz` (2,853 datagrams, 40 KB, scripted: Quick Character → enter → walk/turn/jump → exit → quit) shows the same opcode set and groups at smaller counts, and none of AC1999's text (the server sends our news):
+
+- **Handshake.**
+  - The client sends 10 connectionless strobes (`0x8002`), then LoginRequest (`0x2`) with the body the KB describes: magic, `4.35752`, 0xBEEFBEEF, `acct:pw`, iterations 102/67.
+  - The server sends grant `0x202` (version `4.35752`, len 59), ServerSwitch `0x102`, then the DAT sync.
+  - **The server answers the login from a Docker NAT address** (the client shows as 192.168.65.1). That is harmless: the 1999 protocol carries the session in the header recipient field, not the source address.
+- **Server → client data** is `0x802` (plus `0x1004002`/`0x1000002` and `0x4000` control packets, not yet decoded). Fragments use groups **3** (objects: F745 ×82, F748 ×51, F74C ×25, F625 ×37, F746, F747, F74B, F74E), **4** (F658 ×2, F65A, F7C7, F643, 0x0013, 0x000E ×5, 0x000F, 0x0029 ×4) and **7** (F7B8 ×3).
+  - The order matches the KB: three DDD begins (the first is sacrificial), the character list twice around the news, 0xF7C7, then the 0xF746 → 0xF745 enter-world burst and PlayerDescription 0x0013.
+  - **Surprise:** 13 messages with opcode **0xF7B0** on group 4. The KB says 1999 has no 0xF7B0 wrapper (`kb/messages/framing.md`). Decode them before trusting the "all flat" rule.
+- **Client → server data** is `0x802`/`0x803`, with **a 4-byte word before the first fragment**, as on `0x22`. Groups: **6** for the character-select messages (F656 CharacterCreate, F7C8, F657) and **5** for 0xF7B1 game actions (inner 0xA1 LoginComplete, 0xF61C MoveToState, 0xF753 AutonomousPosition, 0xF61B Jump, 0x36 Use, 0x1F, 0x5C, 0xCA appraisal, 0x1B7 CancelAttack).
+  - The KB lists 3/4/7 only for the server's queues.
+- **The client resends its sequenced packets without end.** In the first 4-minute capture, 31 distinct sequences went out about 2,400 times (`0x803` = data + retransmit): CharacterCreate (seq 2) ×256, LoginComplete (seq 8) ×872.
+  - The client never sees an acknowledgement it accepts, from either the server's `0xA` lists (~2,500 of them) or anything else.
+  - Whether retail Turbine servers sent an ack this server lacks is open. Our client must not copy this: resend only what the server NAKs.
+- **Messages are reassembled by group, not by sequence.** Several fragments with different groups share a datagram.
+
+## Features 1999 doesn't have (hidden, not stubbed)
+
+`packages/network/src/era1999/Absent1999.ts` lists the features the 1999 client has no builder for (KB `*-absent.md` scans): secure trade, housing, consent, chess, TurbineChat, contracts, character titles, salvage, fellowship leader / openness / disband, allegiance administration (including allegiance names and the hometown recall), AFK, the Marketplace and PK arena recalls, PK Lite, account squelch and `/filter`, Yes / No confirmations, plugin queries, the barber and character restore. The adapter names the feature when it drops one of their actions. `packages/renderer/src/era/EraFeatures.ts` turns that list (plus the wcid-keyed weenie side-files, the Friends page and nether damage) into the controls the interface doesn't build on a 1999 world: the journal toolbar button (the tab row closes up and the freed end is the plain bar, `ui/ToolbarTabs.ts`: retail has no disabled art for a tab), the contracts / mini-game panels, the Titles tab, the Friends tab (and its key), the Squelch Account button, the RESTORE button on a pending-deletion character, the armor appraisal's Nether row, the TurbineChat rows of the Chat menu, the room filters on the Chat page, the matching Character-page options and Keyboard Config commands, and the fellowship Leader / Open / Disband buttons. The rest (AFK, PK Lite, the recalls, allegiance names) are chat commands with no control; the adapter logs the drop. Use on a player doesn't try to open a trade. The World panel (map button and keys) stays: it is client-side (the end-of-retail Dereth map and the player's position), so Jake wanted it back on 1999 (2026-10-06). `tests/verify-ac1999-era-features.ts` holds both eras, and checks that the captured 1999 session never sends an absent action.
+
+## Adapter notes (2026-10-06)
+
+- **Portal storm `0x9C`–`0x9F`** (`codecs/PortalStorm1999.ts`). The local server sent `0x9D` live when a probe crowd gathered. Brewing `0x9D` and imminent `0x9E` (a discarded `u32`) become end-of-retail events `0x2C9` / `0x2CA` with extent 0 / 1. Storm `0x9F` (an AcString) becomes an `0xF7E0` chat line with the server's text, because the 1999 client only prints it and shows no banner. Subsided `0x9C` (no body) becomes `0x2CC`. A 45-second probe on 2026-10-06 dropped nothing else.
+- **A re-sent `0xF745` stays an `0xF745`.** 1999 has no `0xF7DB`: the 1999 client applies a create for a guid it already has as an in-place update when the instance stamp matches. `ServerObjectManager.createObject` already does exactly that (DECOMP.recreate-teardown), and own-inventory items upsert. Translating to `0xF7DB` would be wrong, because end of retail's UpdateObject always tears the object down and moves an inventory item to slot 0. The server re-sends creates for items (container moves, stack splits, trades, a client force request). Its only self-create is at world entry.
+- **DAT patches are always zlib.** `Client.cpp SendDatFile` runs `compress2` on every file. So a compressed length equal to the raw length is no proof the file is stored. `inflateAc1999Patch` inflates first, and uses the bytes as stored only when inflating fails or gives the wrong length and the two lengths are equal.
+- **Jump position.** The end-of-retail Jump carries no position. The codec sends the newest of two: our last MoveToState / AutonomousPosition position, or the server's last `0xF748` for our own guid (a teleport or a force-position snap). The jump is not stale after standing still: MovementSync sends a MoveToState at every jump charge (CommenceJump), carrying the current spot. The server snaps us back if the jump position is 10 m or more from its own, and its own position is whichever of those two it applied last.
+
+## Client actions (audit 2026-10-06)
+
+Every message the page sends goes through `Adapter1999.outbound`; one with no codec is dropped and logged. The table covers every `GameActionType` value and every direct opcode the renderer builds (`tests/verify-ac1999-misc.ts` fails if a new one is neither translated nor a named absent feature). Totals: **70 translated** (27 added in this audit, in `codecs/Misc1999.ts` unless noted), **8 deliberately not sent**, **78 absent** (16 added); direct opcodes: 6 translated (2 added), 2 absent. Layout authority: the AC1999 server's readers (`ClientEvents.cpp`, `Client.cpp`, `Messages/Client to Server/`), then the KB's `messages/client-to-server` pages and `Client/reference/symbols.json` (the named 1999 `CM_*_Event_*` builders). Strings go out as AcStrings: the server's `ReadString` / `ReadAcString1999` read that form.
+
+| End-of-retail action | 1999 | Source |
+|---|---|---|
+| Movement `0xF61C` MoveToState, `0xF753` AutonomousPosition | same bytes | capture (Movement1999) |
+| `0xF61B` Jump | 1999 jump with a Position | `MOVEMENT_JUMP` reader (Movement1999) |
+| `0xF61E` / `0xF649` / `0xF661` / `0xF752` | not sent: the AC1999 server reads none of them | Movement1999 |
+| `0x15` Talk, `0x1DF` Emote, `0x1E1` SoulEmote, `0x5D` Tell, `0x32` TalkDirect, `0x147` ChatChannel | same type, AcStrings | ChatMsgs / ClientEvents readers (Movement1999) |
+| `0xA1` LoginComplete, `0x36` Use, `0xC8` Identify, `0x1B7` CancelAttack, `0x1F` AllegianceUpdateRequest | same bytes | capture |
+| `0x19` / `0x1A` / `0x1B` / `0x35` / `0x54` / `0x55` / `0x56` / `0x19B` / `0xCD` / `0x195` / `0x263` inventory | same dwords | Inventory1999 |
+| `0x5F` Buy / `0x60` Sell | 1999 ItemProfiles (24-bit amount) | Inventory1999 |
+| `0xBF` SetInscription | AcString | `INSCRIBE` (Inventory1999) |
+| `0x08` / `0x0A` attacks, `0x48` / `0x4A` casts, `0x44`–`0x47` raises, `0x1BF` QueryHealth, `0x1E9` Ping, `0x1A8` RemoveSpell | same bytes | Combat1999 |
+| `0x53` ChangeCombatMode | sequential 1999 mode | `CHANGE_COMBAT_STANCE` (Combat1999) |
+| `0x1E3` / `0x1E4` spell favorites | no bar index; bars 1–7 not sent | KB Character/0x1E3 (Combat1999) |
+| `0x279` Suicide (`/die`) | `0x63` `@lifestone` | KB Character/0x63 (Combat1999) |
+| `0x63` TeleToLifestone | not sent: `0x63` is the 1999 suicide verb; recall was a spell | Combat1999 |
+| `0x286` SpellbookFilter, `0x224` SetDesiredComponentLevel | not sent (no 1999 builder); the controls keep working locally, unsaved | Combat1999 |
+| **`0x05` SetSingleCharacterOption** | same dwords | `CHANGE_PLAYER_OPTION` maps it onto the options word |
+| **`0x1A1` SetCharacterOptions** | `{u32 options}` only | `CHARACTER_OPTIONS` reads one dword (KB Character/0x1A1) |
+| **`0x1D` / `0x1E`** Swear / Break allegiance | same dword | `MAllegianceSwear_001D` / `Break_001E` |
+| **`0xA2` FellowshipCreate** | `{AcString name}` (no shareXP) | `FELLOW_CREATE`; KB Fellowship/0xA2 |
+| **`0xA3` FellowshipQuit** | opcode only; a disband is not sent | `FELLOW_QUIT`; KB Fellowship/0xA3 |
+| **`0xA4` / `0xA5` / `0xA6`** Dismiss / Recruit / UpdateRequest | same dword | `FELLOW_*` readers |
+| **`0xAA` / `0xAC` / `0xAD` / `0xAE`** book data / add / delete / page | same dwords | `BOOK_*` readers |
+| **`0xAB` BookModifyPage** | AcString text | `BOOK_MODIFY_PAGE` (`ReadAcString1999`) |
+| **`0x58` ModifyCharacterSquelch** | `0x5A` / `0x5B {guid}` by id, `0x58` / `0x59 {AcString}` by name; every channel | `SQUELCH_LIST_*`; KB Communication/0x58–0x5B |
+| **`0x18` AddFriend, `0x25` RemoveAllFriends** | top-level `0xF7CD {u32 command, AcString}` (1 / 3) | `Client.cpp FRIENDS_COMMAND_OPCODE`; KB 0xF7CD |
+| **`0x17` RemoveFriend** | not sent (1999 removes by name; `/friends` sends `0xF7CD` itself) | KB 0xF7CD |
+| **`0x19C` AddShortCut** | `{index, object, u32 spell}`, slots 0–8 only | `ShortCutData`; KB Character/0x19C |
+| **`0x19D` RemoveShortCut** | same dword, slots 0–8 only | `REMOVE_ITEM_SHORTCUT` |
+| **`0x1C2` QueryAge / `0x1C4` QueryBirth** | `{u32 0}` | `QUERY_AGE` / `QUERY_BIRTH` read a dword |
+| **`0x145` / `0x146` / `0x148` / `0x149`** channel add / remove / list / index | same dwords | 1999 builders (symbols.json); the server ignores them |
+| **`0xD6` AdvocateTeleport** | AcString + Position | `ADMIN_TELEPORT` |
+| **`0x140` AbuseLogRequest** | AcStrings | `CM_Character_Event_AbuseLogRequest`; the server ignores it (and our UI no longer sends it) |
+| Absent (Absent1999.ts) | trade `0x1F6`–`0x204`; housing; consent `0x216`–`0x21A`; chess; contracts `0x316`; titles `0x2C`; salvage `0x27D`; fellowship `0x290` / `0x291`; allegiance admin `0x3B`–`0x41`, `0x254`–`0x256`, `0x277`, `0x27B`, `0x2A0`–`0x2A7`, **names `0x30` / `0x31` / `0x33`, hometown `0x2AB`**; **AFK `0x0F` / `0x10`; recalls `0x26` / `0x27` / `0x28D`; PK Lite `0x28F`; account squelch `0x59`, `/filter` `0x5B`; ConfirmationResponse `0x275`; plugin replies `0x2AF` / `0x2B2`; FinishBarber `0x311`** | see each entry's evidence comment |
+
+Direct messages: `0xF656` CharacterCreate, `0xF7C8`, `0xF657`, `0xF653` (CharSelect1999), **`0xF655` CharacterDelete** (FixedBlob28 account + `i32` slot; `Client.cpp DeleteCharacter`) and **`0xF7CD` FriendsCommand** (the page sends it on a 1999 world for `/friends`, following the 1999 `@friends` rules, `friendsCommand1999Plan`). Absent: `0xF7DE` TurbineChat, **`0xF7D9` CharacterRestore** (no `Client.cpp` case). `0xF7E6` DDD interrogation is Connection1999's own.
+
+Live check (probe `--social`, 2026-10-06): create fellowship → `0x2BE`, quit → `0xA3`, `/age`, `/birth`, `@friends` and a squelch by name each drew the server's chat line; nothing dropped either way.
+
+## Server messages (audit 2026-10-06)
+
+Every opcode the AC1999 server writes (a scan of each `BinaryWriter`'s first write across `Server/Source`, plus the `statNotify` property writers and the KB's server-to-client pages). Totals: **115 translated** (14 added), **19 dropped with a reason**, **7 never sent by this server**. 1999 events may arrive flat or `0xF7B0`-wrapped (`event=TRUE`); each codec is registered both ways.
+
+| 1999 | End of retail | Module |
+|---|---|---|
+| char select `0xF658`, `0xF643`, `0xF7C7`, `0xF653`, `0xF65A` (logged), **`0xF655` (delete ack)** | same / `0xF7DF` | CharSelect1999 |
+| objects `0xF745`, `0xF746`, `0xF747`, `0xF749`, `0xF74A`, `0xF74B`, `0xF74E`, `0xF625`, `0xF750`, `0xF751`, `0xF755` | same (create body transcoded, PlayScript renumbered) | Objects1999 |
+| movement `0xF748`, `0xF74C`, `0xF619` (split), chat `0x37`, `0x38`, `0xF62C`, `0x1E0`, `0x1E2`, `0x14A`, events `0x2B`, `0x196`, `0x1C7`, `0x1C8`, `0x1CA`, `0xB4`, `0x20` | see module | Movement1999 |
+| properties `0x0E`, `0x0F`, `0x10`, `0x11`, `0x26`, `0x28`, `0x29`, `0x2C`–`0x2F`, `0x43`, `0x57`, `0x1D1`–`0x1DE`, `0x13`, GDLE leftovers `0x2CF` / `0x2D0` / `0x2DB` / `0x2DC` | Private/Public updates, PlayerDescription | Player1999 |
+| combat / magic `0x1A7`, `0x1AC`, `0x1AD`, `0x1B1`–`0x1B4`, `0x1B8`, `0x1C0`, `0x1EA`, `0x4C`–`0x4F`, `0x1A4`–`0x1A6`, `0x1AE`, `0x4`, `0x1C`, `0x28A`, `0x28B`, `0x2EB`, `0x19E` | see module | Combat1999 |
+| inventory `0x22`, `0x23`, `0x24`, `0x52`, `0x62`, `0xA0`, `0xC9`, `0x197`, `0x19A`, `0x264` | see module | Inventory1999 |
+| portal storm `0x9C`–`0x9F` | `0x2C9` / `0x2CA` / `0xF7E0` / `0x2CC` | PortalStorm1999 |
+| **fellowship `0xAF`** `{PackableHashTable<u32, Fellow{u16 cp, u16 level, AcString}>, AcString name, u32 leader}` | `0x2BE` (no vitals, lum or share flags: zeros) | Misc1999 |
+| **`0xB0` UpdateFellow, `0xA7` Quit, `0xB1` Dismiss, `0xB3` Disband** | `0x2C0` (Full), `0xA3`, `0xA4`, `0x2BF` | Misc1999 |
+| **books `0xB5` / `0xB6` / `0xB7`, `0xB8` (PageData1999)** | same; `0xB8` gains the EoL page fields | Misc1999 |
+| **squelch `0x5A` / `0x5B` {AcString, u32 id}** | a full `0x1F4` SetSquelchDB snapshot + the 1999 line, only when the list changed | Misc1999 |
+| **`0xF7C1` AccountBanned, `0xF7DC` AccountBoot** | same bytes (GDLE `WriteString` = String16L) | Misc1999 |
+
+### Spawned into a pack (message order, 2026-10-07)
+
+`CContainerWeenie::SpawnInContainer` (Container.cpp:773-830: vendor buys, emote / quest rewards, corpse loot, and the `_openedById` viewer copy) sends the `0x22` InventoryMove **before** MakeAware's `0xF745`, and links the item only afterwards, so the create carries a world POSITION (from the unset frame) and no container. Our end-of-retail handlers drop a `0x22` for an unknown guid, so a bought Metal Cap took the pyreals and never reached the pack. `ContainOrder1999.ts` (the adapter's `inboundOrder` stage) holds such a `0x22` until its item's create, writes the container into that create (WeenieDesc `0x4000`, EoL field order) and removes the POSITION, then releases the `0x22` right after: ACE's order and shape. A held `0x22` goes out unchanged after 3 s or past 32 waiting. Tests: `tests/verify-ac1999-contain-order.ts`.
+
+Dropped with a reason (the generic "no codec" path logs each once):
+
+| 1999 | Why |
+|---|---|
+| `0x1FD`, `0x1FF`, `0x200`, `0x202`, `0x203`, `0x205`, `0x207` trade | secure trade is absent; only follow a trade the 1999 client can't start |
+| `0x21D`, `0x226`, `0x271` house | housing absent |
+| `0x274` ConfirmationRequest | no 1999 client handler; GDLE leftover from crafting and AskYesNo emotes |
+| `0x27A` allegiance login alert, `0x27C` AllegianceInfoResponse | no 1999 dispatcher case; the info request is absent |
+| `0x2B4` salvage results | salvage absent |
+| `0x2B8` / `0x2B9` Int64 removes | GDLE leftovers; no end-of-retail remove either |
+| `0x75` StartBarber | admin-only `@barber`; barber absent |
+| `0xF7DB` UpdateObject | 1999 has no `0xF7DB`; the server sends it only from housing, admin `@setstats` and crafting |
+| `0xF7DE` TurbineChat ack | TurbineChat absent |
+
+Never sent by the AC1999 server (KB pages or dead code, no codec needed): `0x16` SetStatusText, `0x51`, `0x1B5` HearRangedSpeech, `0x1C3` QueryAgeResponse (it answers with `0xF62C`), `0xF630`, `0x1C9` FellowUpdateDone, `0x2E1` (`NotifySkillAdvancementClassUpdated` has no caller).
+
+## Meaning checks (types that parse clean but might mean something else)
+
+| Type | Verdict | Handling |
+|---|---|---|
+| **PhysicsScriptTable 0x34** / PScriptType | **Differs.** 1999 has no SkillDownBlack (end of retail's ordinal 30), so every 1999 ordinal from 30 up is one lower: PortalStorm 114 = EoL 115, Fizzle 80 = 81, Hide/UnHide/Hidden 115–117 = 116–118, LevelUp 137 = 138. Evidence: the KB's block-shape map over all 67 tables, and the client's hardcoded storm ordinal 0x72. | **Fixed.** The overlay renumbers the table keys to EoL's (`transcodePhysicsScriptTable1999`), the `0xF755` codec renumbers the server's ordinals, and the SpellTable transcode renumbers the caster / target / fizzle effects (`@ac/shared` `playScript1999ToEoL`). Our client's own PlayScript lookups now find the 1999 scripts: the portal-storm swirl, Hidden/UnHide, and the Fizzle check that cancels a cast. Before this they played the wrong script or nothing. Open: PhysicsDesc `default_script` comes from the server's 2017-sourced weenie DB (the KB says "likely still one too high"), so it passes through unchanged. |
+| **SoundTable 0x20** / SoundType | **Labels differ, keys don't need to.** The KB says EoL 0x8B–0x97 = 1999 0x76–0x82, but every key our client looks up in a 1999 world comes from a 1999 source. The server's `0xF750` sends 1999 values (pickup / drop 0x7A / 0x7B, wield 0x77; every `EmitSound` in the server source is a 1999 value), and the animation and PhysicsScript sound hooks are 1999 DAT data. The client plays nothing of its own in the shifted block: its local sounds are UI_EnterPortal / ExitPortal / ButtonPress 0x6A / 0x6B / 0x72 and the AdminEnvirons bank, and 1999 has no environs message. | **Not renumbered.** Renumbering only the tables would silence the server's sounds. Pinned by a test: the 1999 human table has 0x7A / 0x7B / 0x77 and no 0x8F / 0x90 / 0x8C. |
+| **MotionTable 0x09** / command ids | **Same.** The 1999 tables top out at index 0x10E, and both eras number everything up to there the same way (the `0xF74C` codec relies on it). The post-release block 0x115+ (LogOut, SnowAngel, Pickup5–20) is absent from 1999. | None. An EoL command above 0x10E finds no 1999 link, so it does nothing, as in 1999. |
+| **CombatTable 0x30** | **Same.** Its entries are motion command ids and attack heights, covered by the MotionTable row. No KB divergence. | None. |
+| **SkillTable** | **Same ids** (a worker confirmed the numbering; the `0x0013` codec relies on it). | None. |
+| **ParticleEmitter 0x32** | **Same.** Plain geometry and timing fields, no enums. The KB documents no divergence. | None. |
+| **SpellComponentTable** | **Same layout, different content.** 74 components against EoL's 163. `category` is 0-based and `type` 1-based in both eras. Names and texts are AcStrings: read as is, each ended in a NUL. | The overlay drops the NUL (`transcodeSpellComponentTable1999`). 1999 ids are what the 1999 SpellTable formulas name. |
+| **Spell-component → WCID map (DualDidMapper 0x27000002)** | **Absent from the 1999 portal.** The 1999 client hardcodes it: SpellComponentTable::SCIDtoWCID @ 0x5e41f0, a switch on (scid − 1) through the 74-entry jump table at 0x5e4578 (WCIDtoSCID @ 0x5e46a0 is the inverse). Decoded, it equals end of retail's 0x27000002 for all 74 ids (same names too). Without it the cast pre-check mapped every component to wcid 0 and refused every cast ("You do not have all of this spell's components", 2026-10-07). | The portal overlay serves a synthetic EoL-format 0x27000002 (`SPELL_COMPONENT_WCIDS_1999`, `synthesizeSpellComponentMapper1999`) over any base, a streamed set included. No 0x27000003 (1999 had no foci). Pinned against client.exe by `tests/verify-ac1999-spell-components.ts`. |
+| **Property keys (STypeInt / Int64 / Bool / Float / String / DID / IID / Position)** | **Int, Int64, String and DID differ; Bool, Float, IID and Position are the same up to their ends.** Int: past 214. The AC1999 server's `STypeInt` (PhatSDK/GameStatEnums.h) is sequential and never had ACE's augmentation entries, so keys 215–260 sit 32 below ACE's, 261–266 42, 267–281 44, 282–343 47 (matched name by name against PropertyInt.cs). Unmapped, the player's NUM_CHARACTER_TITLES (230, from `LoadTitles`) read as AugmentationIncreasedCarryingCapacity, so the burden capacity was Strength × 180 in sessions whose description carried it and × 150 otherwise (2026-10-07). The server's own capacity is `EncumbranceCapacity(enchanted strength, 0)` = Strength × 150 (Monster.cpp RefuseIfOverloaded, Qualities.cpp InqLoad). Int64 3–7 sit 1 below (no AugmentationCost; luminance 5/6 = EoL 6/7), String 48–51 1 below (no AugmentationAddQuest), DID 53 2 below and 54–58 3 below (no AugmentationMutationFilter / Effect / CreateItem). Bool 131 MERGE_LOCKED and 133 XPGAIN_BOOL have no EoL key. | **Fixed.** `key1999ToEoL(kind, key)` (Player1999) renumbers every 0x0013 table, every update and remove, and the server's EoL-layout Int64 / Position leftovers (0x2CF/0x2D0/0x2DB/0x2DC). A key with no EoL property (past each enum's end, Bool 131/133) is dropped with a log line, never passed on to be misread. Appraisal and ObjectCreate carry no raw keys. |
+| **PublicWeenieDesc burden** | **Absent in 1999.** Header 0x200000 is a trade note's issuing-vendor wcid (KB PublicWeenieDesc README row 23), not EoL's Burden, and no other 1999 slot carries burden. An item's burden is unknown until appraised (`0xC9` always keeps ENCUMB_VAL); the 1999 backpack's load bar uses the player's own ENCUMB_VAL (Int 5). | Objects1999 drops 0x200000 / 0x1000000 and carries every other field; the EoL `burden` stays 0. Pinned in `tests/verify-ac1999-objects.ts`. |
+| **SpellTable formula version** | **Differs in meaning.** Every 1999 spell says 0, but the 1999 client personalizes every formula with RandomizeVersion1 (0x540140 calls 0x5d8f40 directly; RandomizeForName / versions 2–3 came later), and so does the AC1999 server when it reserves components (keyed by the char-list account name). Version 0 made our pre-check ask for the unrandomized tapers. | The SpellTable transcode writes version 1 (`SPELL_FORMULA_VERSION_1999`); getPlayerFormula's version-1 path is the same algorithm. Formulas are personalized with the char-list account name in every era (`characterMessageAccount`). |
+
+## Gotchas
+
+- **1999 palettes have 256 colours, end of retail's 2048, and sub-palette ranges follow.** The 1999 server sends ObjDesc sub-palette bytes as raw colour indices (skin (0, 0x18), hair (0x18, 8), eyes (0x20, 8), clothing from 40); retail reads bytes × 8 into 2048-entry palettes. Read × 8 on a 1999 palette, skin covered every clothing range and clothing ranges were refused (a new character wore the skin palette's green and red). The renderer rescales by the palette's own size (`AppearanceOverrides.subPaletteScale`, no era check); the adapter keeps the bytes. `tests/verify-ac1999-subpalette-domain.ts`.
+- **Doors open through their animation's Ethereal hook, not a SetState.** The AC1999 server opens and closes a door with the On / Off motion alone (`CBaseDoor::OpenDoor`). Retail makes the door passable through the directed Ethereal hooks in its animation (0x03000559 frame 1: 1 forward, 0 back; `EtherealHook::Execute` → `CPhysicsObj::set_ethereal` sets / clears 0x4). Our client applies the hook to `physicsState` (`ServerObjectManager.runObjectHook`). Before 2026-10-08 it only flagged the mesh, so the door stayed solid on the client while the server walked the player through it, then snapped them 19-28 m ([FORCEPOS], BUG.ac1999-forced-position-snap). ACE sends a SetState too, so end of retail never showed it.
+- **Debug position bugs with the server's VERBOSE log.** `log_level=VERBOSE` in `reference/ac1999/Server/Bin/server.cfg` + `docker restart acjs-ac1999-server` (check nobody is playing; set it back after): `[1999-MOVE-DIAG]` prints client vs server origin per MoveToState, `[FORCEPOS]` each snap, `[1999-USE]` each Use and its MoveTo outcome.
+- **1999 icons have no alpha: pure black is the transparent key.** A 1999 0x06 Texture is bare RGB. Of the 1,800 32x32 icons both portals carry, 1,588 match the end-of-retail art's alpha pixel for pixel under "pure black = alpha 0" (the rest differ by a few retouched pixels). Read opaque, they drew as black squares over the item-type backdrop in every item cell. GameUI keys them at read time (`ItemIconComposite.keyBlackTransparent`, for any world portal `worldIconsBlackKeyed` accepts) rather than in `Textures1999`, so the hosted 1999 world set (translated bytes, immutable) needn't be rebuilt.
+- **Upstream's Alpine Dockerfile no longer builds.** musl has no `<execinfo.h>`, which easylogging's crash log needs. Use `tools/ac1999/Dockerfile` (Debian, Release).
+- **The server needs `../Database/AC1999-Shard`** next to its run dir to create the shard tables, or it exits ("could not find the shard DDL"). The start script mounts `Server/Database` at `/Database`.
+- **The server logs to stdout.** Upstream's `start-server.sh` tees it into `server.log`. Use `docker logs acjs-ac1999-server`.
+- **The world import needs PyMySQL.** `python3 -I` ignores user site-packages, so the start script makes a venv in `reference/ac1999/.venv`.
+- **`servernews.txt` is read from `Data/` directly, not through the `ServerModes/<Mode>/Data` overlay.** Override it with a bind mount, and restart the server after changing it (it is read at boot).
+- **The client crashes at startup about half the time** ("Exception frame is not in stack limits" right after wined3d init, or a page fault), before it sends anything. Measured on 2026-10-06: 8 launches each in our fresh prefix and in a long-used personal one, both about 50%. Seeding the registry options a clean exit writes didn't help, and Wine debug channels only shift the timing. So it is the 1999 exe under Wine + Rosetta (its CPU-detection probe is a suspect), not our setup. The launcher relaunches up to 10 times, watching for the fault or the server's `connected on slot`.
+- **The client minimises when it loses focus** (Wine on macOS; AC1999's README notes it). Its 3D view stays black after that, though the session is unaffected. Don't click other windows while it is being driven.
+- **The driver's `type` presses Enter before the text** (end-of-retail chat). In the 1999 name field, that submits the form. Use `key Shift+KeyA KeyB…` for text.
+- **The 1999 chat line ignores injected keystrokes.** They reach the game's key bindings instead (Space jumps, E examines). Chat isn't captured yet.
+- **1999 logout has no purple bubbles; that is correct.** The bubble logout ("Added new logout motion and animation. Now, when a player logs out, they get purple bubbly effects and fade out.") came in the September 2000 Twilight's Gleaming patch. The 1999 motion tables have no LogOut motion, so the AC1999 server plays Motion_Sanctuary (the lifestone gesture, animation 0x030003C2 with hand particles 0x32000029). It looks like an emote. Login and teleport bubbles are unchanged: the player's wire PeTable 0x34000004 (1999) maps Hidden / UnHide to the same 0x33000331 / 0x3300032F as end of retail. Pinned by `tests/verify-ac1999-logout-and-teleport-effects.ts`.
+- **`grep -q` under `set -o pipefail`** SIGPIPEs the producer (`docker logs`) and fails the test. Use `grep … >/dev/null` in wait loops.
+
+## Open
+- The 1999 cast pre-check (0x4d1bd0) checks only formula slots 1–5 (`for i = 1..5: if comps[i] && !owned(SCIDtoWCID(comps[i]))`), so it never checks the scarab (slot 0) or slots 6–7 (no SpellComponentsRequired read is visible in that function; unconfirmed). Ours checks every slot (the EoL CastSpell). A missing scarab is then refused by our client instead of by the server. Undecided whether to mirror it.
+- Decode the 13 s2c 0xF7B0 messages and the `0x4000` / `0x1004002` control packets.
+- Find out whether the client's resend storm is the client or this server (a missing ack).
+- A chat capture (type one line by hand; injected keys don't reach the chat line).
+- Compare a 1999 world frame against the real client once our renderer reads 1999 DATs (Phase 2).

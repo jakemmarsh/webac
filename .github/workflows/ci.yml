@@ -1,0 +1,146 @@
+name: CI
+
+# Actions-minutes budget: main receives ~100+ pushes/week, most of them
+# backlog/log-only (claim commits touching tasks.json + progress.md). Every
+# one used to burn a full ~5-minute build+test run. The `paths` filters
+# below skip runs for commits that can't change build/test results; the
+# concurrency block cancels a superseded in-flight run when a newer push
+# lands on the same ref. Keep both in sync with what tests actually read
+# (tests only read verification/texture-index.json and verification/scorecard.json
+# from verification/).
+#
+# Why `paths` with `!` and not `paths-ignore`: GitHub documents `!` negation
+# (and "the last matching pattern wins") only for `paths`, so re-including a
+# file inside an ignored tree needs this form (OPS.ci-and-hooks-gaps,
+# 2026-09-26). The run triggers when ANY changed file ends on a positive
+# match: `'**'` includes everything, the `!` lines drop what can't affect
+# the build (progress.md is covered by `!**.md`), and the two re-includes
+# come after `!verification/**/*.json`. push and pull_request lists must
+# stay identical (tests/verify-ci-path-filters.ts checks both; simulate a
+# push with `node tools/ci-path-filter-lib.mjs <files>`).
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**'
+      - '!**.md'
+      - '!tasks.json'
+      - '!docs/**'
+      - '!.claude/**'
+      - '!verification/playtest/**'
+      - '!verification/perf/**'
+      - '!verification/panel-specs/**'
+      - '!verification/**/*.png'
+      - '!verification/**/*.json'
+      # re-included AFTER the exclusions (the last matching pattern wins):
+      # tests read these two files.
+      - 'verification/texture-index.json'
+      - 'verification/scorecard.json'
+      - '!reference/**'
+      - '!LICENSE'
+      - '!.gitignore'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**'
+      - '!**.md'
+      - '!tasks.json'
+      - '!docs/**'
+      - '!.claude/**'
+      - '!verification/playtest/**'
+      - '!verification/perf/**'
+      - '!verification/panel-specs/**'
+      - '!verification/**/*.png'
+      - '!verification/**/*.json'
+      # re-included AFTER the exclusions (the last matching pattern wins):
+      # tests read these two files.
+      - 'verification/texture-index.json'
+      - 'verification/scorecard.json'
+      - '!reference/**'
+      - '!LICENSE'
+      - '!.gitignore'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # The tracked tree is ~2.7 GB, ~2.6 GB of it verification evidence
+      # (png/jpg/side-by-side html) that no test reads (the paths filter
+      # above already treats it as build-irrelevant). A full checkout took
+      # 16.5 min on 2026-10-01 and pushed runs past the 20 min timeout.
+      # Sparse checkout + blob:none skips downloading and writing it;
+      # tools/ci-local.sh uses the same patterns (CI_SPARSE_PATTERNS) for
+      # its CI-shaped worktree.
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/verification/**/*.png
+            !/verification/**/*.jpg
+            !/verification/**/*.jpeg
+            !/verification/**/*.html
+            !/verification/**/*.webm
+            !/verification/**/*.gif
+
+      # Many tests verify our enums/parsers against authoritative ACE source.
+      # The reference/ACE tree is gitignored locally; clone it on CI so the
+      # parity tests can read DamageType.cs / WieldRequirement.cs / etc.
+      #
+      # ASSESS: pinned to the exact commit checked out in the local
+      # reference/ACE clone the client was built/verified against — an
+      # unpinned `master` clone made parity tests track ACE HEAD instead of
+      # our actual reference, so upstream ACE churn could break (or silently
+      # re-anchor) CI. To bump: `git -C reference/ACE pull`, re-run the
+      # parity tests locally, then set ACE_REF to the output of
+      #   git -C reference/ACE rev-parse HEAD
+      - name: Clone ACE reference (pinned)
+        env:
+          ACE_REF: 48539f4651e796e9f0cfe42ae1a12ce42d53a63d
+        run: |
+          mkdir -p reference/ACE
+          git -C reference/ACE init -q
+          git -C reference/ACE remote add origin https://github.com/ACEmulator/ACE.git
+          git -C reference/ACE fetch -q --depth=1 origin "$ACE_REF"
+          git -C reference/ACE checkout -q FETCH_HEAD
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type check
+        run: npm run build
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee vitest-output.log
+
+      # ASSESS: CI has no DAT files / world DB, so DAT-gated suites skip via
+      # describe.skipIf — green CI does NOT imply full coverage. Surface the
+      # skipped counts in the job summary so the gap is visible per-run.
+      - name: Surface skipped tests in job summary
+        if: always()
+        run: |
+          {
+            echo "### Vitest skip visibility"
+            echo ""
+            echo "CI runners have no DAT files or world DB; DAT-gated suites skip silently via \`describe.skipIf\`. Green CI does **not** imply full coverage — the skipped portion below only runs locally."
+            echo ""
+            echo '```'
+            grep -E '^ *(Test Files|Tests) ' vitest-output.log || echo 'vitest summary line not found in output'
+            echo '```'
+            files_skipped=$(grep -E '^ *Test Files ' vitest-output.log | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' | head -1)
+            tests_skipped=$(grep -E '^ *Tests ' vitest-output.log | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' | head -1)
+            echo ""
+            echo "**${files_skipped:-0} test files / ${tests_skipped:-0} tests skipped** (missing DAT files and other skipIf conditions)."
+          } >> "$GITHUB_STEP_SUMMARY"

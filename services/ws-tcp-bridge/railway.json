@@ -1,0 +1,18 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "services/ws-tcp-bridge/Dockerfile",
+    "watchPatterns": [
+      "services/ws-tcp-bridge/**",
+      "packages/network/src/era1999/Packet1999.ts",
+      "packages/network/src/Hash32.ts"
+    ]
+  },
+  "deploy": {
+    "healthcheckPath": "/healthz",
+    "healthcheckTimeout": 60,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}

@@ -1,0 +1,232 @@
+/**
+ * VirindiTank's options (its Advanced Options list and `/vt opt`), by the
+ * names VTank stores them under, with their types and defaults
+ * (docs/vtank-macro-behavior.md §10). A routine profile's `settings` use
+ * these names.
+ *
+ * Units: VTank stores a range as yards / 240 (an AC map unit is 240 yards;
+ * its "yard" is a game metre). Our settings keep ranges in metres, so a
+ * `range` option is converted where VTank's own numbers come in or go out:
+ * an imported `/vt opt set`, Set VT Option, vtgetsetting / vtsetsetting.
+ *
+ * Names are case-insensitive, as in VTank ("/vt opt set enablecombat true"
+ * in the wiki's own example meta); the wiki's misspellings are aliases.
+ *
+ * Defaults: the wiki gives none. They come from a VTank-written default
+ * settings file (defaultsettings.usd, VTank's output data, not code); see the
+ * provenance note in docs/vtank-macro-behavior.md.
+ *
+ * `engine: true` marks the options the routine engine acts on. Only those are
+ * offered in the VirindiTank window (no dead-end controls); the rest are kept
+ * so imported settings and expressions keep their values.
+ */
+
+export type VtOptionKind = 'bool' | 'int' | 'float' | 'range' | 'string' | 'enum';
+export type VtGroup = 'Misc' | 'Recharge' | 'Melee Combat' | 'Spell Combat' | 'Ranges' | 'Navigation' | 'Buffing' | 'Crafting' | 'Looting';
+
+export interface VtOption {
+  name: string;
+  kind: VtOptionKind;
+  /** The default, in our units (ranges in metres). */
+  default: string | number | boolean;
+  group: VtGroup;
+  /** The label on VTank's tabs, when it has one there. */
+  label?: string;
+  /** One line from VTank's own description (the wiki's Advanced Options page). */
+  help?: string;
+  /** For enums: value → its name. */
+  values?: Record<number, string>;
+  aliases?: string[];
+  /** The routine engine acts on it. */
+  engine?: boolean;
+}
+
+const o = (name: string, kind: VtOptionKind, def: string | number | boolean, group: VtGroup, extra: Partial<VtOption> = {}): VtOption => ({ name, kind, default: def, group, ...extra });
+/** A range default given as VTank stores it (map units). */
+const yd = (mapUnits: number): number => Math.round(mapUnits * 240 * 1000) / 1000;
+
+export const VT_OPTIONS: VtOption[] = [
+  // Misc
+  // VTank's default is off; ours is on: our profiles are rule-first, and saved routines predate the setting.
+  o('EnableMeta', 'bool', true, 'Misc', { label: 'Enable Meta', help: 'Enables meta', engine: true }),
+  o('AutoCram', 'bool', false, 'Misc', { label: 'Enable Autocram', help: 'Moves items from the main pack to side packs' }),
+  o('AutoStack', 'bool', true, 'Misc', { label: 'Enable Autostack', help: 'Stacks items towards the bottom-most item in the pack, and into side packs' }),
+  o('RandomHelperBuffs', 'bool', false, 'Misc'),
+  o('RandomHelperIntervalSeconds', 'float', 5, 'Misc'),
+  o('IdlePeaceMode', 'bool', false, 'Misc', { label: 'Peace Mode When Idle', help: 'Loots, navigates, and salvages in peace mode', engine: true }),
+  o('StopMacroOnDeath', 'bool', true, 'Misc', { help: 'Causes the macro to become disabled when the character dies', engine: true }),
+  o('RefillWornMana', 'bool', true, 'Misc', { help: 'Uses mana charge types specified in the Consumables panel to refill worn items' }),
+  o('RefillWornMana-Item-ManaPercent', 'int', 33, 'Misc'),
+  o('ManaStoneLootCount', 'int', 4, 'Misc'),
+  o('ManaTankMinimumMana', 'int', 1000, 'Misc'),
+  o('ManaChargesWhenOff', 'bool', true, 'Misc', { label: 'M. Charges When Off' }),
+  o('AutoFellowManagement', 'bool', true, 'Misc', { label: 'Auto Fellow Mgmt.' }),
+  o('DeleteGhostMonsters', 'bool', true, 'Misc'),
+  o('GhostMonsterSpellAttemptCount', 'int', 200, 'Misc'),
+  o('WhoYouGonnaCall', 'bool', true, 'Misc'),
+  o('BlacklistMonsterAttemptCount', 'int', 4, 'Misc'),
+  o('BlacklistMonsterTimeoutSeconds', 'int', 120, 'Misc'),
+  o('DeleteGhostMonstersByHPTracker', 'bool', true, 'Misc', { aliases: ['DeleteGhostMonsterByHPTracker'] }),
+  o('GhostDeleteHPTrackerSeconds', 'int', 30, 'Misc'),
+  o('GoToPeaceModeToUseKits', 'bool', false, 'Misc'),
+  o('DropToPeaceModeRetryCount', 'int', 34, 'Misc'),
+  o('BlacklistCorpseOpenAttemptCount', 'int', 30, 'Misc'),
+  o('BlacklistCorpseOpenTimeoutSeconds', 'int', 200, 'Misc'),
+  // Recharge
+  o('Recharge-Norm-HitP', 'int', 75, 'Recharge', { label: 'Heal at:' }),
+  o('Recharge-Norm-Stam', 'int', 50, 'Recharge', { label: 'Restam at:' }),
+  o('Recharge-Norm-Mana', 'int', 50, 'Recharge', { label: 'Get Mana at:' }),
+  o('Recharge-NoTarg-HitP', 'int', 1, 'Recharge', { label: 'Top-off HP:' }),
+  o('Recharge-NoTarg-Stam', 'int', 1, 'Recharge', { label: 'Top-off Stam:' }),
+  o('Recharge-NoTarg-Mana', 'int', 1, 'Recharge', { label: 'Top-off Mana:' }),
+  o('Recharge-Helper-HitP', 'int', 20, 'Recharge', { label: 'Heal others at:' }),
+  o('Recharge-Helper-Stam', 'int', 1, 'Recharge', { label: 'Restam others' }),
+  o('Recharge-Helper-Mana', 'int', 1, 'Recharge', { label: 'Infuse others' }),
+  o('DoHelp', 'bool', true, 'Recharge'),
+  o('HelperDistanceHitP', 'range', yd(0.3104), 'Recharge'),
+  o('HelperDistanceStam', 'range', yd(0.3104), 'Recharge'),
+  o('HelperDistanceMana', 'range', yd(0.1667), 'Recharge'),
+  o('CastDispelSelf', 'bool', false, 'Recharge', { label: 'Cast Dispel Self' }),
+  o('UseDispelItems', 'bool', false, 'Recharge', { label: 'Use Dispel Items' }),
+  o('UseDispelDrum', 'bool', false, 'Recharge'),
+  o('UseHealersHeart', 'bool', true, 'Recharge'),
+  o('JumpOutWandCasting', 'bool', false, 'Recharge'),
+  o('RechargeBoostTimeSeconds', 'float', 5, 'Recharge'),
+  o('RechargeBoostAmount', 'int', 40, 'Recharge'),
+  o('MinimumHealKitSuccessChance', 'int', 95, 'Recharge'),
+  o('UseKitsInMagicMode', 'bool', true, 'Recharge'),
+  o('StaminaToHealthMultiplier', 'float', 1.9, 'Recharge'),
+  o('ManaToHealthMultiplier', 'float', 2.8, 'Recharge'),
+  o('ClearLevelBoostFlagOnCast', 'bool', true, 'Recharge'),
+  // Melee / spell combat
+  o('EnableCombat', 'bool', true, 'Melee Combat', { label: 'Enable Combat', help: 'Enable/Disable Combat', engine: true }),
+  o('DefaultMeleeAttackHeight', 'enum', 2, 'Melee Combat', { values: { 1: 'High', 2: 'Medium', 3: 'Low' } }),
+  o('TargetLock', 'bool', false, 'Melee Combat'),
+  o('TargetSelectMethod', 'enum', 3, 'Melee Combat', { values: { 1: 'By Range', 2: 'By Angle', 3: 'Both' } }),
+  o('TargetSelectAngleRange', 'range', yd(0.0208333), 'Melee Combat'),
+  o('DebuffEachFirst', 'enum', 1, 'Melee Combat', { values: { 1: 'One', 2: 'Priority', 3: 'All' } }),
+  o('AutoAttackPower', 'bool', true, 'Melee Combat'),
+  o('DebuffSelectionMethod', 'enum', 2, 'Melee Combat', { values: { 1: 'Spell Level', 2: 'Skill' } }),
+  o('UseRecklessness', 'bool', true, 'Melee Combat'),
+  o('SpellDiffExcessThreshold-Hunt', 'int', 25, 'Spell Combat'),
+  o('MinimumRingTargets', 'int', 4, 'Spell Combat'),
+  o('SwitchWandsToDebuff', 'bool', false, 'Spell Combat', { aliases: ['SwitchWandToDebuff'] }),
+  o('DoJiggle', 'bool', false, 'Spell Combat'),
+  o('UseArcs', 'enum', 1, 'Spell Combat', { values: { 1: 'No', 2: 'At Range', 3: 'Yes' } }),
+  o('ArcRange', 'range', yd(0.0208333), 'Spell Combat'),
+  o('DebuffPrecastSeconds', 'int', 5, 'Spell Combat'),
+  o('SummonPets', 'bool', true, 'Spell Combat', { label: 'Summon Pets' }),
+  o('PetRangeMode', 'enum', 0, 'Spell Combat', { label: 'Custom Pet Range:', values: { 0: 'AttackDistance', 1: 'PetCustomRange' } }),
+  o('PetCustomRange', 'range', yd(0.0208333), 'Spell Combat'),
+  o('PetRefillCount-Idle', 'int', 3, 'Spell Combat'),
+  o('PetRefillCount-Normal', 'int', 1, 'Spell Combat'),
+  o('PetMonsterDensity', 'int', 1, 'Spell Combat', { label: 'Pet Min. Monsters:' }),
+  o('UseBreakableTurnTo', 'bool', true, 'Spell Combat'),
+  o('UseProjectileAwareness', 'bool', true, 'Spell Combat'),
+  o('CollisionProjectileRadius', 'float', 0.4, 'Spell Combat'),
+  o('CollisionStepDistance', 'float', 0.7, 'Spell Combat'),
+  o('ShowCollisionDebug', 'bool', false, 'Spell Combat'),
+  o('MaximumCollisionChecksPerTick', 'int', 500, 'Spell Combat'),
+  o('SpellRangeFudge', 'float', 1, 'Spell Combat'),
+  o('AllowDebuffFallback', 'bool', false, 'Spell Combat'),
+  // Ranges (in metres here; VTank's map units × 240)
+  o('AttackDistance', 'range', yd(0.0208333), 'Ranges', { label: 'Monster Range:', help: 'The maximum range at which the macro will attempt to engage targets', engine: true }),
+  o('AttackMinimumDistance', 'range', 0, 'Ranges'),
+  o('ApproachDistance', 'range', 0, 'Ranges', { label: 'Approach', help: 'With navigation on, run toward a monster within this range until it is within Monster Range', engine: true }),
+  o('RingDistance', 'range', yd(0.0208333), 'Ranges', { label: 'Ring Range:' }),
+  o('CorpseApproachRange-Max', 'range', 0, 'Ranges'),
+  o('CorpseApproachRange-Min', 'range', yd(0.014), 'Ranges', { aliases: ['CorpeApproachRange-Min'] }),
+  o('NavCloseStopRange', 'range', yd(0.0083333), 'Ranges', { label: 'Follow/Nav Min', help: 'How near a waypoint counts as reaching it', engine: true }),
+  o('NavFarStopRange', 'range', 999999 * 240, 'Ranges'),
+  o('UsePortalDistance', 'range', yd(0.0166667), 'Ranges'),
+  o('DoorIDRange', 'range', yd(0.0833333), 'Ranges'),
+  o('DoorOpenRange', 'range', yd(0.0166667), 'Ranges'),
+  // Navigation
+  o('EnableNav', 'bool', false, 'Navigation', { label: 'Enable Navigation', help: 'Enable/Disable Navigation', engine: true }),
+  o('NavPriorityBoost', 'bool', false, 'Navigation', { label: 'Boost Nav. Priority', help: 'Navigate before attacking', engine: true }),
+  o('CorpseCacheTimeoutMinutes', 'float', 60, 'Navigation'),
+  o('OpenDoors', 'bool', false, 'Navigation'),
+  o('DoorLockpickDiffExcessThreshold', 'int', -50, 'Navigation'),
+  o('FollowAroundCorners', 'bool', true, 'Navigation'),
+  // Buffing
+  o('EnableBuffing', 'bool', true, 'Buffing', { label: 'Enable Buffing' }),
+  o('SpellDiffExcessThreshold-Buff', 'int', 5, 'Buffing'),
+  o('IdleBuffTopoff', 'bool', false, 'Buffing', { label: 'Rebuff When Idle', aliases: ['IdleBuffTOpoff'] }),
+  o('IdleBuffTopoffTimeSeconds', 'int', 1200, 'Buffing'),
+  o('RebuffTimeRemainingSeconds', 'int', 300, 'Buffing'),
+  o('BuffProfile-Prots', 'string', 'ALFCBPS', 'Buffing'),
+  o('BuffProfile-Banes', 'string', 'ALFCBPS', 'Buffing'),
+  o('BuffProfile_Prots', 'enum', 2, 'Buffing', { values: { 1: 'Custom', 2: 'All', 3: 'None', 4: 'B', 5: 'BPS', 6: 'BPSA', 7: 'ALFC', 8: 'BPSAC' } }),
+  o('BuffProfile_Banes', 'enum', 2, 'Buffing', { values: { 1: 'Custom', 2: 'All', 3: 'None', 4: 'B', 5: 'BPS', 6: 'BPSA', 7: 'BPSAC', 8: 'ALFC' } }),
+  o('BuffCastRecast_Seconds', 'int', 30, 'Buffing'),
+  o('BuffCastRecastReset_Seconds', 'int', 30, 'Buffing'),
+  o('FastCastBuffs', 'bool', false, 'Buffing'),
+  o('BuffWithUntrained-Item', 'int', 80, 'Buffing'),
+  o('BuffWithUntrained-Creature', 'int', 80, 'Buffing'),
+  o('BuffWithUntrained-Life', 'int', 80, 'Buffing'),
+  // Crafting
+  o('ArrowheadFletchDiffExcessThreshold', 'int', 10, 'Crafting', { aliases: ['ArrowheadFletchDiffExcessTheshold'] }),
+  o('AutoCraftItems', 'bool', true, 'Crafting'),
+  o('SplitPeas', 'bool', true, 'Crafting'),
+  o('SpellCompMin-Critical', 'int', 4, 'Crafting'),
+  o('SpellCompMin-Normal', 'int', 20, 'Crafting'),
+  o('SpellCompMin-Idle', 'int', 20, 'Crafting'),
+  o('UseSpecialAmmo', 'enum', 0, 'Crafting', { values: { 0: 'None', 1: 'Raider', 2: 'SCurrency', 3: 'Both' } }),
+  o('IdleCraftCount_HealthKits', 'int', 2, 'Crafting'),
+  o('IdleCraftCount_StamKits', 'int', 2, 'Crafting'),
+  o('IdleCraftCount_ManaKits', 'int', 2, 'Crafting'),
+  o('IdleCraftCount_HealthFood', 'int', 15, 'Crafting'),
+  o('IdleCraftCount_StamFood', 'int', 15, 'Crafting'),
+  o('IdleCraftCount_ManaFood', 'int', 15, 'Crafting'),
+  o('BlacklistedSpellComps', 'string', '', 'Crafting'),
+  // Looting
+  o('EnableLooting', 'bool', false, 'Looting', { label: 'Enable Looting', help: 'Loots corpses with the loot profile', engine: true }),
+  o('ReadUnknownScrolls', 'bool', true, 'Looting'),
+  o('LootAllCorpses', 'bool', false, 'Looting'),
+  o('LootFellowCorpses', 'bool', false, 'Looting'),
+  o('LootPriorityBoost', 'bool', false, 'Looting', { label: 'Boost Loot Priority', help: 'Loots corpses before attacking the next monster', engine: true }),
+  o('LootOnlyRareCorpses', 'bool', false, 'Looting', { label: 'Loot Only Rare Corpses' }),
+  o('CorpseItemAppearanceTimeoutSeconds', 'float', 6, 'Looting'),
+  o('CorpseItemIDTimeoutSeconds', 'float', 60, 'Looting'),
+  o('CorpseOpenTimeoutSeconds', 'float', 1.5, 'Looting'),
+  o('CorpseLootItemMaxAttempts', 'int', 20, 'Looting'),
+  o('CombineSalvage', 'bool', true, 'Looting'),
+];
+
+const BY_NAME = new Map<string, VtOption>();
+for (const x of VT_OPTIONS) { BY_NAME.set(x.name.toLowerCase(), x); for (const a of x.aliases ?? []) BY_NAME.set(a.toLowerCase(), x); }
+
+/** The option by any spelling VTank accepts (case-insensitive, wiki aliases). */
+export function vtOption(name: string): VtOption | undefined { return BY_NAME.get(name.trim().toLowerCase()); }
+/** The name VTank stores an option under (an unknown name is kept as given: plugins add their own). */
+export function vtCanonicalName(name: string): string { return vtOption(name)?.name ?? name.trim(); }
+
+/** A value in VTank's own units (as `/vt opt get` and vtgetsetting give it): ranges ÷ 240. */
+export function vtToVTank(name: string, v: string | number | boolean): string | number | boolean {
+  return vtOption(name)?.kind === 'range' && typeof v === 'number' ? v / 240 : v;
+}
+/** A value VTank gave (an imported `/vt opt set`, vtsetsetting) in our units: ranges × 240, and typed by the option. */
+export function vtFromVTank(name: string, v: string | number | boolean): string | number | boolean {
+  const opt = vtOption(name);
+  const typed = typeValue(opt, v);
+  return opt?.kind === 'range' && typeof typed === 'number' ? Math.round(typed * 240 * 1000) / 1000 : typed;
+}
+/** A value the player typed in the window (ranges in yards = our metres), typed by the option. */
+export function vtStoredValue(name: string, text: string | number | boolean): string | number | boolean { return typeValue(vtOption(name), text); }
+/** A stored value as the window shows it. */
+export function vtDisplayValue(_name: string, v: string | number | boolean): string | number | boolean { return v; }
+
+function typeValue(opt: VtOption | undefined, v: string | number | boolean): string | number | boolean {
+  const s = typeof v === 'string' ? v.trim() : v;
+  if (!opt) return typeof s === 'string' && /^(true|false)$/i.test(s) ? /^true$/i.test(s) : typeof s === 'string' && /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : s;
+  if (opt.kind === 'bool') return s === true || s === 1 || (typeof s === 'string' && /^(true|1|yes|on)$/i.test(s));
+  if (opt.kind === 'string') return String(s);
+  const num = typeof s === 'number' ? s : Number(s);
+  if (!Number.isFinite(num)) return opt.default;
+  return opt.kind === 'int' || opt.kind === 'enum' ? Math.round(num) : num;
+}
+
+/** Every default, by name (the engine's starting settings for a macro profile). */
+export function vtDefaults(): Record<string, string | number | boolean> {
+  return Object.fromEntries(VT_OPTIONS.map((x) => [x.name, x.default]));
+}
