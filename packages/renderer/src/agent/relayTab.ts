@@ -5,10 +5,26 @@
  * daemon drives through window.__acAgent) and its answer goes back up.
  *
  * - Only while the tab has opted in (`on`); otherwise every call is refused.
- * - One call at a time, in arrival order.
- * - A call past its deadline stops what it set moving and answers an error.
+ * - Acting calls one at a time, in arrival order; reading calls (READ_METHODS)
+ *   answer at once, so an observe never waits behind a long walk (Claude
+ *   sends calls in parallel, and a queued one timed out on Claude's side).
+ * - An acting call past its deadline keeps going in the game and answers
+ *   "still in progress" (ok): the hosted connector keeps every call under
+ *   Claude's tool timeout, and the task's own task-done event (ac_wait)
+ *   reports the end. Stopping it there made a 30 m walk to a vendor a
+ *   failure (Jake, 2026-10-10: Claude gave up after "use" failed at 60 s).
  */
+import { READ_METHODS } from './claudeControl.js';
+
 export interface RelayCall { id: number; method: string; args: unknown[]; deadlineMs: number }
+
+/**
+ * The bridge caps one WebSocket message at 64 KB (BRIDGE_MAX_PAYLOAD), sized for game packets; a
+ * screenshot answer is bigger, and one past the cap made the bridge close the game's connection
+ * (2026-10-10). Answers longer than this go up as {"agentResultPart":{id,i,n,data}} slices of the
+ * same JSON text, which the bridge joins back (relay.ts).
+ */
+export const RESULT_PART_CHARS = 48_000;
 type Surface = Record<string, unknown>;
 
 export class TabRelay {
@@ -29,6 +45,7 @@ export class TabRelay {
   }
 
   handle(call: RelayCall): Promise<void> {
+    if (READ_METHODS.has(call.method)) return this.run(call).catch(() => {});
     this.chain = this.chain.then(() => this.run(call)).catch(() => {});
     return this.chain;
   }
@@ -37,7 +54,9 @@ export class TabRelay {
     let text: string;
     try { text = JSON.stringify({ agentResult: ok ? { id, ok: true, result: body } : { id, ok: false, error: String(body) } }); }
     catch { text = JSON.stringify({ agentResult: { id, ok: false, error: 'the answer could not be sent (not serialisable)' } }); }
-    this.send(text);
+    if (text.length <= RESULT_PART_CHARS) { this.send(text); return; }
+    const n = Math.ceil(text.length / RESULT_PART_CHARS);
+    for (let i = 0; i < n; i++) this.send(JSON.stringify({ agentResultPart: { id, i, n, data: text.slice(i * RESULT_PART_CHARS, (i + 1) * RESULT_PART_CHARS) } }));
   }
 
   private async run(call: RelayCall): Promise<void> {
@@ -54,9 +73,11 @@ export class TabRelay {
     try {
       const out = await Promise.race([Promise.resolve((fn as (...a: unknown[]) => unknown)(...call.args)), deadline]);
       if (out === 'deadline') {
-        // A motor task past its deadline is stopped (the player's character shouldn't run on unattended).
-        try { (api.stopMoving as (() => unknown) | undefined)?.(); } catch { /* nothing moving */ }
-        this.reply(call.id, false, `${call.method} took longer than ${Math.round(call.deadlineMs / 1000)} s and was stopped`);
+        const s = Math.round(call.deadlineMs / 1000);
+        if (READ_METHODS.has(call.method)) { this.reply(call.id, false, `${call.method} took longer than ${s} s`); return; }
+        // Still walking / using: it keeps going (the player can always take over); its task-done event says when it ends.
+        ok = true;
+        this.reply(call.id, true, { ok: true, message: `${call.method} is still in progress after ${s} s and keeps going: ac_wait types=task-done to hear when it finishes, or ac_observe to see where you are` });
         return;
       }
       ok = true;

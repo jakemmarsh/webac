@@ -7,8 +7,7 @@
  * sent contract data, and house events vanished silently.
  *
  * This test asserts main.ts now installs:
- *   - onContractTrackerTable → gameUI.setContractData
- *   - onContractTracker (single-contract update — logged)
+ *   - onContractTrackerTable / onContractTracker → contractRows' state helpers (behavioral below)
  *   - onHouseStatus → chat surface
  *   - onHouseProfile → chat surface (with house type + owner)
  *   - onHouseData → chat surface (with rent days + maintenance flag)
@@ -23,35 +22,19 @@ import { resolve } from 'node:path';
 const REPO = resolve(__dirname, '..');
 const MAIN_SRC = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf-8');
 
-describe('FAITHFUL.194/202 — Contract wiring + delta tracking', () => {
-  it('registers onContractTrackerTable that patches the contract state', () => {
-    expect(MAIN_SRC).toContain('onContractTrackerTable:');
-    const idx = MAIN_SRC.indexOf('onContractTrackerTable:');
-    const block = MAIN_SRC.slice(idx, idx + 1500);
-    // FAITHFUL.202: full-table broadcast now routes through contractState +
-    // publishContracts() shared helper rather than calling setContractData
-    // inline. Verify both pieces are present.
-    expect(block).toMatch(/contractState\.(clear|set)\b/);
-    expect(block).toContain('publishContracts(');
-  });
-
-  it('publishContracts forwards into gameUI.setContractData', () => {
-    expect(MAIN_SRC).toContain('publishContracts = (): void =>');
-    const idx = MAIN_SRC.indexOf('publishContracts = (): void =>');
-    // Window widened for the CORE.15 detail fields (contact/contactLoc/
-    // questLoc) added inside the map.
-    const block = MAIN_SRC.slice(idx, idx + 2600);
-    expect(block).toContain('gameUI.setContractData(');
-  });
-
-  it('registers onContractTracker single-update handler with delete + display flags', () => {
-    expect(MAIN_SRC).toContain('onContractTracker:');
-    const idx = MAIN_SRC.indexOf('onContractTracker:');
-    const block = MAIN_SRC.slice(idx, idx + 1500);
-    expect(block).toContain('deleteContract');
-    expect(block).toContain('setAsDisplayContract');
-    expect(block).toContain('contractState.delete(');
-    expect(block).toContain('contractState.set(');
+// RECON.contracts-tracker-retail — the former source-text pins over
+// main.ts's contract handlers are converted: the table / update / delete
+// logic is contractRows.applyContractTrackerTable / applyContractTracker
+// (main.ts calls them, then publishContracts), executed for real here.
+describe('FAITHFUL.194/202 — Contract wiring + delta tracking (behavioral)', () => {
+  it('a full table replaces the tracker state; single updates patch it; a delete removes the contract', async () => {
+    const { applyContractTrackerTable, applyContractTracker, buildContractRows } = await import('../packages/renderer/src/network/contractRows.js');
+    const e = (contractId: number, stage = 2) => ({ version: 1, contractId, stage, timeWhenDone: 0, timeWhenRepeats: 0 });
+    const state = new Map();
+    applyContractTrackerTable(state, [e(7), e(8)], 1);
+    applyContractTracker(state, e(9), false, 2);
+    applyContractTracker(state, e(7), true, 3);
+    expect(buildContractRows(state.values(), () => undefined).map((r) => r.id)).toEqual([8, 9]);
   });
 });
 
@@ -104,18 +87,18 @@ describe('FAITHFUL.194 — Housing wiring', () => {
 });
 
 describe('FAITHFUL.194/202/284 — ContractTracker stage decode', () => {
-  it('contract rows decode stages via contractStageLabel (behavioral — CORE.15.a converted the source pin)', async () => {
+  it('contract rows decode stages via contractProgressText (behavioral — CORE.15.a converted the source pin)', async () => {
     // Pre-FAITHFUL.284 this was a hardcoded CONTRACT_STAGE_NAMES Record map
     // with only 3 of 4 ACE values + the wrong "Complete" label. The row
     // building now lives in network/contractRows.ts (main.ts delegates);
     // execute the real builder instead of regexing main.ts source. Full
     // stage/timer/meta coverage: verify-contract-stage-enum.ts.
     const { buildContractRows } = await import('../packages/renderer/src/network/contractRows.js');
+    const { contractProgressText } = await import('../packages/shared/src/enums/ContractStage.js');
     const rows = buildContractRows(
       [{ version: 1, contractId: 9, stage: 4, timeWhenDone: 0, timeWhenRepeats: 0 }],
       () => undefined);
     // ProgressCounter=0x4 — the value the pre-fix map missed entirely.
-    expect(rows[0].status).toBe('In Progress');
-    expect(rows[0].status).not.toBe('Active');
+    expect(contractProgressText(rows[0].timing, 0)).toBe('In Progress');
   });
 });

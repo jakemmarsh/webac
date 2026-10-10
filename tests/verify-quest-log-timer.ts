@@ -89,10 +89,11 @@ describe('GAP.38 — contract timer surfaces in the retail contracts pane (behav
 
   it('selected contract with a timer renders the Timed countdown; one without stays bare', () => {
     ui.contractTab = 'contracts';
+    const tm = (stage: number, o: Record<string, unknown> = {}) => ({ stage, timeWhenDone: 0, timeWhenRepeats: 0, updatedAtSec: performance.now() / 1000, hasTimerFlag: false, hasRepeatFlag: false, descriptionProgress: '', ...o });
     ui.setContractData({
       contracts: [
-        { id: 2, name: 'Test Quest Stamping', description: 'd', timer: 'Repeats in 30s', status: 'Pending Repeat' },
-        { id: 3, name: 'One Shot', description: 'd', timer: '', status: 'Done' },
+        { id: 2, name: 'Test Quest Stamping', description: 'd', stage: 2, timing: tm(2, { hasTimerFlag: true, timeWhenDone: 30 }) },
+        { id: 3, name: 'One Shot', description: 'd', stage: 3, timing: tm(3) },
       ],
       journal: [],
     });
@@ -102,13 +103,13 @@ describe('GAP.38 — contract timer surfaces in the retail contracts pane (behav
     expect(panel).toBeTruthy();
     const timed = panel.querySelector('.contract-timed');
     expect(timed).toBeTruthy();
-    expect(timed!.textContent).toContain('Repeats in 30s');
+    expect(timed!.textContent).toMatch(/^(30|29)s$/);
 
-    // Select the timer-less contract: the Timed value renders empty.
+    // Select the timer-less contract: UpdateButtons writes "None".
     ui.selectedContractIdx = 1;
     ui.setContractData(ui.contractData);
     panel = ui.contractPanel as HTMLElement;
-    expect(panel.querySelector('.contract-timed')).toBeNull();
+    expect(panel.querySelector('.contract-timed')?.textContent).toBe('None');
 
     ui.toggleContractPanel();
   });

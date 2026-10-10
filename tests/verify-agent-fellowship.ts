@@ -142,4 +142,18 @@ describe('agent fellowship (real GameUI)', () => {
     // Now trained, it raises with XP instead of being refused as untrained.
     expect(ui.agentTrainSkill('Creature Enchantment')).toMatchObject({ ok: false, message: 'Creature Enchantment is already trained; raise it with XP (ac_raise)' });
   });
+  it('the sheet shows what one more raise of each attribute, vital and trained skill costs, and ac_raise spends exactly that (Bulwark spent 1,802 XP unawares, 2026-10-10)', () => {
+    const attrs: Array<[number, number]> = [];
+    ui.setRaiseCallbacks({ onRaiseAttribute: (id: number, cost: number) => attrs.push([id, cost]) }, { attribute: [0, 110, 277, 501, 784, 1126, 1527, 2000, 3802], vital: [0, 100, 250], trainedSkill: [0, 5, 15, 30], specializedSkill: [0, 50] });
+    ui.charInfo.unassignedXp = 5000;
+    ui.charInfo.attributes.endurance = { base: 84, buffed: 84, raises: 7 };
+    ui.charInfo.vitals.health = { current: 50, max: 50, raises: 1 };
+    ui.charInfo.skills = [{ id: 6, name: 'Melee Defense', status: 'Trained', base: 40, effective: 40, raises: 2, pp: 5 }];
+    const sheet = ui.agentCharacterSheet();
+    expect(sheet).toMatch(/Endurance 84 \[\+1: 1,802 xp\]/);
+    expect(sheet).toMatch(/health 50\/50 \[\+1: 150 xp\]/);
+    expect(sheet).toMatch(/Melee Defense 40 \[\+1: 25 xp\]/);
+    expect(ui.agentRaise('endurance')).toMatchObject({ ok: true, cost: 1802 });
+    expect(attrs).toEqual([[expect.any(Number), 1802]]);
+  });
 });

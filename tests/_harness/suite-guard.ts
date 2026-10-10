@@ -17,7 +17,7 @@
  * Both are skipped on CI (CI=true: one job per VM) and with ACJS_TEST_LOCK=0. The worker cap and per-worker heap limit live in vitest.config.ts.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { freemem, totalmem } from 'node:os';
 import { join } from 'node:path';
 
@@ -50,13 +50,23 @@ function readOwner(): { pid: number; cwd: string; started: string } | null {
   try { return JSON.parse(readFileSync(OWNER, 'utf8')); } catch { return null; }
 }
 
+/** An ownerless lock dir this old is an orphan (owner.json is written right after mkdir). */
+export const ORPHAN_LOCK_MS = 30_000;
+
+function lockAgeMs(): number {
+  try { return Date.now() - statSync(LOCK_DIR).mtimeMs; } catch { return 0; }
+}
+
 function tryAcquire(): boolean {
   try {
     mkdirSync(LOCK_DIR);
   } catch {
     const owner = readOwner();
-    // Owner gone (crashed run), or the dir was created but owner.json not yet written by a dead process.
-    if (owner && !pidAlive(owner.pid)) {
+    // Owner gone (crashed run), or the dir was created but owner.json never
+    // written (the run died in between): an ownerless lock older than
+    // ORPHAN_LOCK_MS is reclaimed. Without that, every later suite waited
+    // forever behind an empty lock dir (2026-10-10).
+    if ((owner && !pidAlive(owner.pid)) || (!owner && lockAgeMs() > ORPHAN_LOCK_MS)) {
       rmSync(LOCK_DIR, { recursive: true, force: true });
       return tryAcquire();
     }

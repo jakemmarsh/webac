@@ -102,8 +102,13 @@ describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('t
     // Sentry 0x860202C2 (123.67, −132.95, 0.005) → Exit to Holtburg 0x86020169 (158.64, −149.52, −6.06).
     const from = v(123.67, -132.95, 0.005), to = v(158.641, -149.516, -6.063);
     const opening = v(130, -140, 0);
+    // The opening is a 6 m drop; the stairwell's stair is a static object, and since the router reads statics'
+    // floors (2026-10-10) the route walks down it rather than falling (a fall costs DROP_PENALTY_M).
     const direct = findRoute(g, 0x860202C5, v(129, -140, 0), 0x86020169, to)!;
-    expect(direct.some((p) => p.floor && Math.hypot(p.x - 130, p.y + 140, p.z) < 0.01)).toBe(true);
+    expect(direct.every((p) => p.drop === undefined)).toBe(true);
+    expect(direct.some((p) => p.floor && Math.hypot(p.x - 130, p.y + 130, p.z) < 0.01)).toBe(true);
+    const fallOnly = findRoute(g, 0x860202C5, v(129, -140, 0), 0x86020169, to, [v(130, -130, 0)])!;
+    expect(fallOnly.some((p) => p.floor && p.drop === 6 && Math.hypot(p.x - 130, p.y + 140, p.z) < 0.01)).toBe(true);
     const around = findRoute(g, 0x860202C5, v(129, -140, 0), 0x86020169, to, [opening])!;
     expect(around).not.toBeNull();
     expect(around.some((p) => Math.hypot(p.x - 130, p.y + 140, p.z) < 0.01)).toBe(false);
@@ -333,5 +338,26 @@ describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('r
     // The only walk: down the SE ramp, across the hall, up the west ramp, arriving on the landing's floor.
     expect(r.at(-1)).toEqual(v(8.5, -30, 6));
     expect(Math.min(...r.map((p) => p.feet ?? p.z))).toBeCloseTo(0, 1);
+  });
+});
+
+describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('Holtburg (landblock 0xA9B4): the archmage\'s tower', () => {
+  let g: CellGraph;
+  beforeAll(() => { g = loadCellGraph(openDat(DAT_PATHS.cell), openDat(DAT_PATHS.portal), 0xA9B40000); });
+  it('walk_to Archmage Cindrue climbs the staircase static to the upper floor (Arcanist pressed into the wall, 2026-10-10)', () => {
+    // The stair is the static Setup 0x020001B4 in cell 0x0117, not the cell's own floor; it rises to the
+    // 0.2 m floorless slab 0x011E and on through it to the archmage's floor in 0x011B at z 69.
+    const up = (g.doors.get(0xA9B40117) ?? []).find((d) => d.b === 0xA9B4011E)!;
+    expect(up.climb).toBe(true);
+    expect(g.airCells?.has(0xA9B4011E)).toBe(false);
+    const archmage = { x: 152.347, y: 132.546, z: 69.005 };
+    const route = findRouteViaOutside(g, 0xA9B40036, { x: 148.5, y: 136.4, z: 66 }, 0xA9B4011B, archmage)!;
+    expect(route).not.toBeNull();
+    expect(route.at(-1)).toEqual(archmage);
+    expect(route.some((p) => p.floor && Math.abs(p.z - 69) < 0.05)).toBe(true);
+    expect(route.every((p) => p.drop === undefined)).toBe(true);
+  });
+  it('still never climbs into a true air cell (the Banderling Ruin atrium stays down-only)', () => {
+    for (const c of g.airCells ?? []) for (const d of g.doors.get(c) ?? []) if (d.below === c) expect(d.climb).toBe(false);
   });
 });

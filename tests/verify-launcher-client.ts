@@ -516,10 +516,10 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
       renderTextToCanvas: (t: string) => { painted.push(t); return doc.createElement('canvas'); },
     };
     const k = makeKit();
-    const bound: Array<{ input: HTMLInputElement; host: HTMLElement; ref: string; hJustify?: number }> = [];
-    (k.kit as Record<string, unknown>).bindEditField = (input: HTMLInputElement, host: HTMLElement, ref: string, hJustify?: number) => {
-      bound.push({ input, host, ref, hJustify });
-      return attachDatEditField(input, host, { font, color: 'rgb(255, 242, 204)', hJustify });
+    const bound: Array<{ input: HTMLInputElement; host: HTMLElement; ref: string; hJustify?: number; masked?: boolean }> = [];
+    (k.kit as Record<string, unknown>).bindEditField = (input: HTMLInputElement, host: HTMLElement, ref: string, hJustify?: number, masked?: boolean) => {
+      bound.push({ input, host, ref, hJustify, masked });
+      return attachDatEditField(input, host, { font, color: 'rgb(255, 242, 204)', hJustify, masked });
     };
     const screen = new mod.LauncherScreen(k.kit, {
       bridgeUrl: BRIDGE, prefillAccount: 'olthoi', storage: new MemStorage(),
@@ -529,8 +529,9 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     await screen.loaded;
     const account = k.mount.querySelector('.launcher-account') as HTMLInputElement;
     const password = k.mount.querySelector('.launcher-password') as HTMLInputElement;
-    expect(bound).toHaveLength(1);
+    expect(bound).toHaveLength(2);
     expect(bound[0].input).toBe(account);
+    expect(bound[0].masked).toBeFalsy();
     expect(bound[0].ref).toBe(LAUNCHER_TEXT.edit);
     // Left-justified over the text-entry desc's centring: the text starts at the field's left edge.
     expect(bound[0].hJustify).toBe(0);
@@ -544,18 +545,23 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(bound[0].host.querySelector('.ac-dat-edit-layer canvas')).not.toBeNull();
     account.value = 'olthoi2';
     expect(painted.at(-1)).toBe('olthoi2');
-    // The password is never handed to a glyph painter (no mask glyph is decided).
+    // RECON.dom-chrome-sweep.d.a — the password binds the same edit desc,
+    // left-justified and masked: the DAT layer paints one dot per character
+    // and never the value. The <input> stays type=password (password
+    // managers), its own bullets transparent.
+    expect(bound[1]).toMatchObject({ input: password, ref: LAUNCHER_TEXT.edit, hJustify: 0, masked: true });
     expect(password.type).toBe('password');
-    expect(password.style.color).not.toBe('transparent');
-    // Its bullets and caret start at the left edge, in line with the account.
+    expect(password.style.color).toBe('transparent');
     expect(password.style.textAlign).toBe('left');
     expect(painted.some(t => t.includes('hunter2'))).toBe(false);
     password.value = 'hunter2';
+    expect(painted.at(-1)).toBe('\u25CF'.repeat(7));
     expect(painted.some(t => t.includes('hunter2'))).toBe(false);
     // ENTER tears the painted layer down with the screen.
     screen.attemptEnter();
     await expect(done).resolves.toMatchObject({ account: 'olthoi2', password: 'hunter2' });
     expect(bound[0].host.querySelector('.ac-dat-edit-layer')).toBeNull();
+    expect(bound[1].host.querySelector('.ac-dat-edit-layer')).toBeNull();
     expect(account.dataset.acDatEdit).toBe('1');
   });
 });

@@ -11,7 +11,7 @@ import type { AgentEvent, AgentItem, AgentObservation, AgentResult, AgentSpell, 
 import { AgentClient, DEFAULT_PROFILE, requireClient, startDaemon } from './client.ts';
 import { listInfos, type DaemonInfo } from './state.ts';
 import { AGENT_ERAS, ERA_IDS } from './eras.ts';
-import { NOTE_KINDS, type NoteKind, addNote, formatJournal, loadJournal, saveJournal } from './journal.ts';
+import { NOTE_KINDS, type Journal, type NoteKind, addNote, formatJournal, loadJournal, saveJournal } from './journal.ts';
 import { RoutineStore } from './routineStore.ts';
 import { EXAMPLE_HUNT_PROFILE, explainProfile, importVTank, validateRoutineDoc, type RoutineDoc } from '../../packages/shared/src/routines/index.ts';
 import { readFileSync } from 'node:fs';
@@ -105,7 +105,54 @@ export function formatStatus(conn: HostedConnection | null, tab: AgentStatus | n
 export const TOOL_CALLER = new AsyncLocalStorage<ToolCaller>();
 const callerFor = (profile?: string): ToolCaller => TOOL_CALLER.getStore() ?? requireClient(profile);
 /** The tools that need the local daemon itself (its browser, its files): not served by the hosted connector. */
-export const LOCAL_ONLY_TOOLS = new Set(['ac_start', 'ac_stop', 'ac_sessions', 'ac_look', 'ac_screenshot', 'ac_click', 'ac_note', 'ac_journal', 'ac_routines', 'ac_routine']);
+export const LOCAL_ONLY_TOOLS = new Set(['ac_start', 'ac_stop', 'ac_sessions', 'ac_click']);
+/**
+ * The hosted connector serves every other tool through the player's tab
+ * (Jake, 2026-10-10: "why doesn't it have all the same tools as the CLI"):
+ * the screenshot is the tab's own 3D view, the journal lives in the player's
+ * browser, routines in the game's routine store. Left out: starting or
+ * stopping a session (that is the player's login; ac_status and
+ * ac_enter_world stand in) and ac_click (the tab's screenshot has no UI to
+ * aim at).
+ */
+const isHosted = (): boolean => !!TOOL_CALLER.getStore()?.connection;
+
+/** A screenshot: the local daemon's browser window, or (hosted) the tab's own 3D view. */
+async function screenshotOf(c: ToolCaller, profile?: string): Promise<string> {
+  return isHosted() ? c.call<string>('screenshot') : requireClient(profile).screenshot();
+}
+
+/** The character's journal and where it is kept: the daemon's files, or (hosted) the player's browser. */
+async function journalFor(c: ToolCaller, profile?: string): Promise<{ j: Journal; save(j: Journal): Promise<void> }> {
+  if (!isHosted()) {
+    const info = requireClient(profile).info;
+    return { j: journalOf(info), save: async (x) => saveJournal(x) };
+  }
+  const st = await c.call<AgentStatus>('status');
+  const stored = await c.call<Journal | null>('journalLoad');
+  const j: Journal = stored ?? { character: st.character ?? 'unknown', account: c.connection?.().account ?? '', era: 'live', notes: [] };
+  return { j, save: async (x) => { await c.call('journalSave', [x]); } };
+}
+
+type RoutinesPut = { ok: true; doc: RoutineDoc } | { ok: false; issues: Array<{ path: string; message: string }> };
+/** An account's routines for this caller: the local files, or (hosted) the game's own routine store through the tab. */
+function hostedRoutines(c: ToolCaller): { label: string; get(): Promise<RoutineDoc>; put(doc: unknown): Promise<RoutinesPut> } {
+  type Sync = { ok: true; doc: unknown } | { ok: false; message: string; issues?: Array<{ path: string; message: string }> };
+  return {
+    label: 'your game',
+    get: async () => {
+      const r = await c.call<Sync>('routinesLoad');
+      if (!r.ok) throw new Error(r.message);
+      return r.doc as RoutineDoc;
+    },
+    put: async (doc) => {
+      const issues = validateRoutineDoc(doc);
+      if (issues.length) return { ok: false, issues };
+      const r = await c.call<Sync>('routinesSave', [doc]);
+      return r.ok ? { ok: true, doc: r.doc as RoutineDoc } : { ok: false, issues: r.issues ?? [{ path: '', message: r.message }] };
+    },
+  };
+}
 
 /** Put a pending "the session reloaded" notice in front of a tool's output. */
 function withNotice(c: ToolCaller, out: ToolOutput): ToolOutput {
@@ -156,6 +203,56 @@ export function waitFilter(a: Record<string, any>): { types?: string[]; chatMatc
 async function observeText(c: ToolCaller, a: Record<string, any>): Promise<string> {
   const obs = await c.call<AgentObservation>('observe', [{ radius: a.radius, max: a.max, filter: a.filter }]);
   return formatObservation(obs);
+}
+
+/** ac_routines through the hosted connector: the account's routines in the player's own game, text in place of files. */
+async function hostedRoutinesTool(c: ToolCaller, a: Record<string, any>): Promise<ToolOutput> {
+  const store = hostedRoutines(c);
+  const account = c.connection?.().account ?? 'this account';
+  const action = String(a.action);
+  if (action === 'example') return { text: JSON.stringify(EXAMPLE_HUNT_PROFILE, null, 2) };
+  const parseDoc = (): { body: unknown } | ToolOutput => {
+    if (!a.doc) return { text: 'pass doc= (the whole routine document as JSON text)', isError: true };
+    try { return { body: JSON.parse(String(a.doc)) }; } catch (e) { return { text: `doc is not JSON: ${(e as Error).message}`, isError: true }; }
+  };
+  if (action === 'validate') {
+    const f = parseDoc();
+    if (!('body' in f)) return f;
+    const issues = validateRoutineDoc(f.body);
+    return issues.length ? { text: issues.map((i) => `${i.path || '(document)'}: ${i.message}`).join('\n'), isError: true } : { text: 'valid' };
+  }
+  const doc = await store.get();
+  const pick = (n?: string) => doc.profiles.filter((p) => !n || p.name.toLowerCase() === String(n).toLowerCase());
+  if (action === 'list') {
+    return { text: doc.profiles.length
+      ? `${account}:\n${doc.profiles.map((p) => `  ${p.name}${p.description ? ` — ${p.description}` : ''}`).join('\n')}${doc.characters ? `\ncharacters: ${Object.entries(doc.characters).map(([k, v]) => `${k} → ${v}`).join(', ')}` : ''}`
+      : `${account} has no routines yet (start from: ac_routines action=example)` };
+  }
+  if (action === 'show') return { text: JSON.stringify(a.name ? pick(a.name)[0] ?? null : doc, null, 2) };
+  if (action === 'explain') {
+    const ps = pick(a.name);
+    return { text: ps.length ? ps.map(explainProfile).join('\n\n') : `no profile${a.name ? ` "${a.name}"` : 's'} for ${account}` };
+  }
+  if (action === 'set') {
+    const f = parseDoc();
+    if (!('body' in f)) return f;
+    const r = await store.put(f.body);
+    return r.ok
+      ? { text: `stored ${r.doc.profiles.length} profile(s) in ${store.label}\n\n${r.doc.profiles.map(explainProfile).join('\n\n')}` }
+      : { text: `not stored:\n${r.issues.map((i) => `${i.path || '(document)'}: ${i.message}`).join('\n')}`, isError: true };
+  }
+  if (action === 'import') {
+    let files: Array<{ name: string; text: string }>;
+    try { files = JSON.parse(String(a.files_json ?? '')); } catch { return { text: 'pass files_json= ([{"name":"Hunt.met","text":"…"}], each VirindiTank file\'s text)', isError: true }; }
+    if (!Array.isArray(files) || !files.every((f) => f && typeof f.name === 'string' && typeof f.text === 'string')) return { text: 'files_json must be [{"name","text"}, …]', isError: true };
+    const name = String(a.name ?? files.find((f) => /\.met$/i.test(f.name))?.name.replace(/^.*[\\/]/, '').replace(/\.met$/i, '') ?? 'Imported');
+    const base = doc.profiles.find((p) => p.name.toLowerCase() === name.toLowerCase()) ?? null;
+    const r = importVTank(files, base, base?.name ?? name);
+    const put = await store.put({ ...doc, profiles: [...doc.profiles.filter((p) => p !== base), r.value] });
+    if (!put.ok) return { text: `not stored:\n${put.issues.map((i) => `${i.path || '(document)'}: ${i.message}`).join('\n')}`, isError: true };
+    return { text: [`imported into "${r.value.name}" in ${store.label}`, ...(r.problems.length ? ['', `not carried over exactly (${r.problems.length}):`, ...r.problems.slice(0, 40).map((x) => `  ${x}`)] : []), '', explainProfile(r.value)].join('\n') };
+  }
+  return { text: `unknown action ${action}`, isError: true };
 }
 
 export const TOOLS: AgentTool[] = [
@@ -236,8 +333,9 @@ export const TOOLS: AgentTool[] = [
     description: 'Look around properly: a screenshot of what your character sees plus the text observation, in one call. Use it whenever you arrive somewhere new or the list alone doesn\'t tell you what the place is like.',
     props: { ...PROFILE_PROP },
     async run(a) {
-      const c = requireClient(a.profile);
-      const [jpegBase64, text] = await Promise.all([c.screenshot(), observeText(c, { max: 15 })]);
+      const c = callerFor(a.profile);
+      const jpegBase64 = await screenshotOf(c, a.profile);
+      const text = await observeText(c, { max: 15 });
       return withNotice(c, { text, jpegBase64 });
     },
   },
@@ -251,27 +349,28 @@ export const TOOLS: AgentTool[] = [
     },
     required: ['kind', 'text'],
     async run(a) {
-      const c = requireClient(a.profile);
+      const c = callerFor(a.profile);
       const kind = String(a.kind) as NoteKind;
       if (!NOTE_KINDS.includes(kind)) return { text: `kind must be one of ${NOTE_KINDS.join(', ')}`, isError: true };
       const obs = await c.call<AgentObservation>('observe', [{ max: 0 }]).catch(() => null);
       const where = obs?.me ? (obs.me.coords ?? `indoors ${obs.me.cell}`) : undefined;
-      const j = addNote(journalOf(c.info), kind, String(a.text), where);
-      saveJournal(j);
-      return { text: `noted (${kind}). ${j.notes.length} notes in ${c.info.character}'s journal.` };
+      const store = await journalFor(c, a.profile);
+      const j = addNote(store.j, kind, String(a.text), where);
+      await store.save(j);
+      return { text: `noted (${kind}). ${j.notes.length} notes in ${j.character}'s journal.` };
     },
   },
   {
     name: 'ac_journal',
     description: 'Read your character\'s journal: open goals and the latest places, people and events you noted in earlier sessions.',
     props: { ...PROFILE_PROP },
-    async run(a) { return { text: formatJournal(journalOf(requireClient(a.profile).info)) }; },
+    async run(a) { const { j } = await journalFor(callerFor(a.profile), a.profile); return { text: formatJournal(j) }; },
   },
   {
     name: 'ac_screenshot',
     description: 'A screenshot of the game window (for terrain, buildings, dungeons, or checking what the UI shows).',
     props: { ...PROFILE_PROP },
-    async run(a) { return { text: 'screenshot', jpegBase64: await requireClient(a.profile).screenshot() }; },
+    async run(a) { return { text: isHosted() ? 'screenshot (the 3D view; panels and chat are not in it)' : 'screenshot', jpegBase64: await screenshotOf(callerFor(a.profile), a.profile) }; },
   },
   {
     name: 'ac_click',
@@ -494,9 +593,12 @@ export const TOOLS: AgentTool[] = [
       name: { type: 'string', description: 'Profile name for show/explain (default: all).' },
       file: { type: 'string', description: 'For validate/set: path to the whole routine document (JSON).' },
       files: { type: 'string', description: 'For import: comma-separated paths of VirindiTank .met / .nav / .utl files.' },
+      doc: { type: 'string', description: 'Through the hosted connector (no files): for validate/set, the whole routine document as JSON text.' },
+      files_json: { type: 'string', description: 'Through the hosted connector: for import, JSON [{"name":"Hunt.met","text":"…"}] with each VirindiTank file\'s text.' },
     },
     required: ['action'],
     async run(a) {
+      if (isHosted()) return hostedRoutinesTool(callerFor(a.profile), a);
       const info = findDaemon(a.profile);
       const account = String(a.account ?? info?.account ?? '');
       const server = String(a.server ?? `local-${info?.era ?? 'eor'}`);
@@ -568,7 +670,7 @@ export const TOOLS: AgentTool[] = [
     },
     required: ['action'],
     async run(a) {
-      const c = requireClient(a.profile);
+      const c = callerFor(a.profile);
       const action = String(a.action);
       if (action === 'stop') return result(await c.call<AgentResult>('routineStop'));
       if (action === 'pause') return result(await c.call<AgentResult>('routinePause'));
@@ -580,17 +682,21 @@ export const TOOLS: AgentTool[] = [
         return { text: st.running ? [`${st.paused ? 'paused' : 'running'} "${st.profile}" in state "${st.state}"${st.acting ? `, acting: ${st.acting}` : ''}`, ...(stats ? [stats] : []), ...st.last.map((l) => `  ${l}`)].join('\n') : ['no routine running', ...(stats ? [stats] : []), ...st.last.map((l) => `  ${l}`)].join('\n') };
       }
       // The game client loads its own account's routines through the bridge (AGENT.routine-store-auth);
-      // the local files are the fallback for a bridge without /routines.
-      let doc = new RoutineStore().get(String(a.server ?? `local-${c.info.era ?? 'eor'}`), c.info.account);
-      let source = 'local files';
-      if (a.server === undefined || a.server === null) {
+      // the local files are the fallback for a bridge without /routines. Hosted: the game's store only.
+      const hosted = isHosted();
+      const who = hosted
+        ? { account: c.connection?.().account ?? '', character: (await c.call<AgentStatus>('status')).character ?? '' }
+        : { account: requireClient(a.profile).info.account, character: requireClient(a.profile).info.character };
+      let doc = hosted ? await hostedRoutines(c).get() : new RoutineStore().get(String(a.server ?? `local-${requireClient(a.profile).info.era ?? 'eor'}`), who.account);
+      let source = hosted ? 'your game' : 'local files';
+      if (!hosted && (a.server === undefined || a.server === null)) {
         type Loaded = { ok: boolean; doc?: RoutineDoc; message?: string };
         const fromPage: Loaded = await c.call<Loaded>('routinesLoad').catch((e: Error): Loaded => ({ ok: false, message: e.message }));
         if (fromPage.ok && fromPage.doc) { doc = fromPage.doc; source = 'the bridge'; } else source = `local files (bridge: ${fromPage.message})`;
       }
-      const wanted = a.name ?? doc.characters?.[c.info.character] ?? (doc.profiles.length === 1 ? doc.profiles[0].name : undefined);
+      const wanted = a.name ?? doc.characters?.[who.character] ?? (doc.profiles.length === 1 ? doc.profiles[0].name : undefined);
       const prof = doc.profiles.find((p) => p.name.toLowerCase() === String(wanted ?? '').toLowerCase());
-      if (!prof) return { text: `no routine ${wanted ? `"${wanted}" ` : ''}for ${c.info.account} in ${source} (have: ${doc.profiles.map((p) => p.name).join(', ') || 'none — configure one with ac_routines'})`, isError: true };
+      if (!prof) return { text: `no routine ${wanted ? `"${wanted}" ` : ''}for ${who.account} in ${source} (have: ${doc.profiles.map((p) => p.name).join(', ') || 'none — configure one with ac_routines'})`, isError: true };
       if (action === 'run') {
         const r = await c.call<AgentResult>('routineStart', [prof]);
         return result({ ...r, message: `${r.message} (from ${source})` });

@@ -21,7 +21,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { aceReferenceExists } from './_harness/reference.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { ContractStage, contractStageLabel } from '@ac/shared';
+import { ContractStage, contractProgressText, contractTimedText } from '@ac/shared';
 import { buildContractRows, contractContact, contractLocText } from '../packages/renderer/src/network/contractRows.js';
 
 const REPO = resolve(__dirname, '..');
@@ -51,23 +51,17 @@ describe.skipIf(!aceReferenceExists(ACE_SRC))('ACE source faithfulness (FAITHFUL
   });
 });
 
-describe('contractStageLabel (FAITHFUL.284)', () => {
-  it('renders each of the 4 ACE stages', () => {
-    expect(contractStageLabel(ContractStage.Available)).toBe('Available');
-    expect(contractStageLabel(ContractStage.InProgress)).toBe('In Progress');
-    expect(contractStageLabel(ContractStage.DoneOrPendingRepeat)).toBe('Done');
-    expect(contractStageLabel(ContractStage.ProgressCounter)).toBe('In Progress');
+describe('contractProgressText covers all 4 ACE stages (FAITHFUL.284, BUG.contract-status-strings-not-retail)', () => {
+  const t = (stage: number) => ({ stage, timeWhenDone: 0, timeWhenRepeats: 0, updatedAtSec: 0, hasTimerFlag: false, hasRepeatFlag: false, descriptionProgress: '' });
+  it('renders each of the 4 ACE stages in retail FillProgressString wording', () => {
+    expect(contractProgressText(t(ContractStage.Available), 0)).toBe('Available');
+    expect(contractProgressText(t(ContractStage.InProgress), 0)).toBe('In Progress');
+    expect(contractProgressText(t(ContractStage.DoneOrPendingRepeat), 0)).toBe('Done');
+    // ProgressCounter=0x4 with no progress format — the value the pre-fix map missed.
+    expect(contractProgressText(t(ContractStage.ProgressCounter), 0)).toBe('In Progress');
   });
-
-  it('falls back to "Active" for unknown values', () => {
-    expect(contractStageLabel(0)).toBe('Active');
-    expect(contractStageLabel(99)).toBe('Active');
-  });
-
-  it('the pre-fix bug — stage 4 (ProgressCounter) no longer falls back', () => {
-    // Pre-fix this returned 'Active' because the map only had 1/2/3.
-    expect(contractStageLabel(4)).not.toBe('Active');
-    expect(contractStageLabel(4)).toBe('In Progress');
+  it('no invented "Active" fallback: an unknown stage prints nothing', () => {
+    expect(contractProgressText(t(0), 0)).toBe('');
   });
 });
 
@@ -77,31 +71,35 @@ describe('contractStageLabel (FAITHFUL.284)', () => {
 // for real here. main.ts's publishContracts is a two-line delegation.
 describe('buildContractRows (behavioral — FAITHFUL.284/206, GAP.32/35, CORE.15.a)', () => {
   const entry = (contractId: number, stage: number, timeWhenDone = 0, timeWhenRepeats = 0) =>
-    ({ version: 1, contractId, stage, timeWhenDone, timeWhenRepeats });
+    ({ version: 1, contractId, stage, timeWhenDone, timeWhenRepeats, updatedAtSec: 50 });
 
-  it('status + description run through contractStageLabel for all 4 ACE stages (no meta)', () => {
+  it('rows carry the tracker values + receipt time; the status words them per stage (no meta)', () => {
     const rows = buildContractRows(
       [entry(1, 1), entry(2, 2), entry(3, 3), entry(4, 4)], () => undefined);
-    expect(rows.map(r => r.status)).toEqual(['Available', 'In Progress', 'Done', 'In Progress']);
-    // With no ContractTable meta the description falls back to the label.
-    expect(rows.map(r => r.description)).toEqual(['Available', 'In Progress', 'Done', 'In Progress']);
-    // The pre-fix inline map fell back to 'Active' for ProgressCounter=4.
-    expect(rows[3].status).not.toBe('Active');
+    expect(rows.map(r => contractProgressText(r.timing, 50))).toEqual(['Available', 'In Progress', 'Done', 'In Progress']);
+    // No ContractTable meta: no Notes text (the invented stage-label fallback is gone).
+    expect(rows.map(r => r.description)).toEqual(['', '', '', '']);
+    expect(rows[0].timing.updatedAtSec).toBe(50);
   });
 
-  it('GAP.35 — DoneOrPendingRepeat splits Pending Repeat (cooldown) vs Done', () => {
+  it('GAP.35 — a stage-3 repeat cooldown reads "Done (… to Repeat)" while it runs', () => {
     const rows = buildContractRows([entry(1, 3, 0, 600), entry(2, 3, 0, 0)], () => undefined);
-    expect(rows[0].status).toBe('Pending Repeat');
-    expect(rows[1].status).toBe('Done');
+    expect(contractProgressText(rows[0].timing, 50)).toBe('Done (10m 0s to Repeat)');
+    expect(contractProgressText(rows[1].timing, 50)).toBe('Done');
   });
 
-  it('GAP.32 — timer renders remaining-seconds countdowns, not epochs', () => {
-    const rows = buildContractRows(
-      [entry(1, 2, 7830, 0), entry(2, 3, 0, 100), entry(3, 1, 0, 0)], () => undefined);
-    expect(rows[0].timer).toMatch(/^Done in /);
-    expect(rows[0].timer).not.toContain('1970');
-    expect(rows[1].timer).toMatch(/^Repeats in /);
-    expect(rows[2].timer).toBe('');
+  it('GAP.32 — Timed reads the remaining-seconds countdown when the contract has a timer flag, else None', () => {
+    const timed = { contractName: 'T', description: '', nameNpcStart: '', questflagTimer: 'timerflag' };
+    const rows = buildContractRows([entry(1, 2, 7830, 0), entry(2, 2, 7830, 0)], (id) => (id === 1 ? timed : undefined));
+    expect(contractTimedText(rows[0].timing, 50)).toBe('2h 10m 30s');
+    expect(contractTimedText(rows[1].timing, 50)).toBe('None');
+  });
+
+  it('the ContractTable flags reach the timing record', () => {
+    const meta = { contractName: 'R', description: '', nameNpcStart: '', descriptionProgress: '%d of 5', questflagRepeatTime: 'r' };
+    const [row] = buildContractRows([entry(1, 6)], () => meta);
+    expect(row.timing).toMatchObject({ hasRepeatFlag: true, hasTimerFlag: false, descriptionProgress: '%d of 5' });
+    expect(contractProgressText(row.timing, 50)).toBe('2 of 5');
   });
 
   it('locations read as gmContractsUI::UpdateButtons prints them: the cell\'s map coords, Indoors, or blank', () => {
@@ -152,11 +150,33 @@ describe('buildContractRows (behavioral — FAITHFUL.284/206, GAP.32/35, CORE.15
     expect(rows[1].name).toBe('Contract #101');
   });
 
-  it('CORE.15.a — raw stage + repeatsSec pass through for the Status header sort', () => {
+  it('CORE.15.a — raw stage + repeat time pass through for the Status header sort', () => {
     const rows = buildContractRows([entry(1, 3, 0, 500), entry(2, 2, 30, 0)], () => undefined);
     expect(rows[0].stage).toBe(3);
-    expect(rows[0].repeatsSec).toBe(500);
+    expect(rows[0].timing.timeWhenRepeats).toBe(500);
     expect(rows[1].stage).toBe(2);
-    expect(rows[1].repeatsSec).toBe(0);
+    expect(rows[1].timing.timeWhenRepeats).toBe(0);
+  });
+});
+
+// RECON.contracts-tracker-retail — the AbandonContract round trip: the
+// server answers with a ContractTracker carrying deleteContract, and the row
+// is gone from the next rebuild (gmContractsUI::RecvNotice_UpdateContractTracker
+// @ 0049a390 → RebuildContractList). The Abandon button (0x100005dc) sends
+// at once — no confirmation (ListenToElementMessage @ 0049a3b0).
+describe('contract tracker state: table, update, delete', async () => {
+  const { applyContractTrackerTable, applyContractTracker } = await import('../packages/renderer/src/network/contractRows.js');
+  const e = (contractId: number, stage = 2) => ({ version: 1, contractId, stage, timeWhenDone: 0, timeWhenRepeats: 0 });
+  it('a table replaces the state, an update upserts with its receipt time, a delete drops the row', () => {
+    const state = new Map();
+    applyContractTrackerTable(state, [e(1), e(2)], 10);
+    expect([...state.keys()]).toEqual([1, 2]);
+    applyContractTracker(state, e(2, 3), false, 20);
+    expect(state.get(2)).toMatchObject({ stage: 3, updatedAtSec: 20 });
+    applyContractTracker(state, e(1), true, 30);
+    const rows = buildContractRows(state.values(), () => undefined);
+    expect(rows.map((r) => r.id)).toEqual([2]);
+    applyContractTrackerTable(state, [e(5)], 40);
+    expect([...state.keys()]).toEqual([5]);
   });
 });

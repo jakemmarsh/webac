@@ -195,6 +195,11 @@ export class PathSearch {
     return (this.done = { status: 'none', expanded: this.expanded, nearest: this.bestKey === this.key(0, 0, 0) ? null : this.at.get(this.bestKey) ?? null, boxed: this.boxed });
   }
 
+  /** End the search now, as if it had found no way (the walk ran out of time to stand searching). */
+  abandon(): PlanResult {
+    return this.done ?? (this.done = { status: 'none', expanded: this.expanded, nearest: this.bestKey === this.key(0, 0, 0) ? null : this.at.get(this.bestKey) ?? null, boxed: this.boxed });
+  }
+
   private relax(k: number, nk: number, at: NavPoint, cost: number, jump?: JumpSpec): void {
     if (this.closed.has(nk)) return;
     const ng = this.g.get(k)! + cost;

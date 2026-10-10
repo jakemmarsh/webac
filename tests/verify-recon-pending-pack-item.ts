@@ -117,6 +117,30 @@ describe('m_pendingItem in the pack grid (real GameUI)', () => {
     expect(order()).toEqual(['7', `pending:${APPLE}`, '9', 'empty']);
   });
 
+  // RECON.inventory-grid-dat-cells.b.a.a — AcceptDragObject @ 004e4250 with
+  // m_pendingItem set: the 0x1a line (.rdata 0x7bfd40) and no placement.
+  it('a second drop on a list that shows a pending item waits: "Already attempting to place <name> here", nothing sent', () => {
+    ui.setInventoryData([dagger, potion], [], 1, 100, 102);
+    ui.showPendingInPack({ guid: APPLE, packSlot: 0, index: 0, iconDid: 0x06001234, name: 'Apple' });
+    const lines: string[] = [];
+    const orig = ui.displayErrorText;
+    ui.displayErrorText = (t: string) => { lines.push(t); };
+    const sent: unknown[] = [];
+    const prevCallbacks = ui.dragCallbacks;
+    ui.dragCallbacks = { ...prevCallbacks, onItemListDrop: (src: unknown, tgt: unknown) => { sent.push([src, tgt]); } };
+    ui.worldDragGuid = 0x80005555;
+    ui.itemListDrop({ list: 'items', packSlot: 0, cellItemId: 0 });
+    expect(lines).toEqual(['Already attempting to place Apple here']);
+    expect(sent).toEqual([]);
+    // A list with no pending item (another pack) takes the drop.
+    ui.worldDragGuid = 0x80005555;
+    ui.itemListDrop({ list: 'items', packSlot: 1, cellItemId: 0 });
+    expect(sent.length).toBe(1);
+    ui.displayErrorText = orig;
+    ui.dragCallbacks = prevCallbacks;
+    ui.endPendingInPack();
+  });
+
   it('survives a grid rebuild and goes on the server\'s answer for that object only', () => {
     ui.setInventoryData([dagger, potion], [], 1, 100, 102);
     ui.showPendingInPack({ guid: APPLE, packSlot: 0, index: 0, iconDid: 0x06001234 });
@@ -211,6 +235,33 @@ describe('ItemList_BeginDrag on the ground container\'s item row (real GameUI)',
       { guid: 2, name: 'Pear', iconDid: 0x06002222, stackSize: 1, containerId: CHEST, isContainer: false },
     ]);
   }
+
+  // RECON.inventory-grid-dat-cells.b.a.b — AcceptDragObject @ 004e4250 on the
+  // ground container's m_itemList: the stored object shows at the drop cell,
+  // ghosted, until the server answers.
+  it('a store drop shows the object pending at its cell in the chest row until the answer', () => {
+    openChest();
+    const POTION = 0x80007777;
+    ui.showPendingInContainer({ guid: POTION, listGuid: CHEST, packSlot: 0, index: 1, iconDid: 0x06003333, name: 'Potion' });
+    const row = (ui.containerPanel as HTMLElement).querySelector('[data-ac-container-row]') as HTMLElement;
+    const order = [...row.children].slice(0, 3).map((c) => (c as HTMLElement).dataset.acPendingGuid ? 'pending' : (c as HTMLElement).dataset.acContainerGuid ?? 'empty');
+    expect(order).toEqual(['1', 'pending', '2']);
+    const pcell = row.children[1] as HTMLElement;
+    expect(pcell.querySelector(':scope > [data-waiting-ghost]')).not.toBeNull();
+    ui.itemRequestAnswered(2);
+    expect(ui.pendingContainerItemNow()?.guid).toBe(POTION);
+    ui.itemRequestAnswered(POTION);
+    expect(ui.pendingContainerItemNow()).toBeNull();
+    expect((ui.containerPanel as HTMLElement).querySelector('[data-ac-pending-guid]')).toBeNull();
+  });
+
+  it('a pending item for another list (a nested pack) does not show in this row; opening a new container clears it', () => {
+    openChest();
+    ui.showPendingInContainer({ guid: 0x80007778, listGuid: 0x80009999, packSlot: 0, index: 0, iconDid: 0x06003333 });
+    expect((ui.containerPanel as HTMLElement).querySelector('[data-ac-pending-guid]')).toBeNull();
+    openChest();
+    expect(ui.pendingContainerItemNow()).toBeNull();
+  });
 
   it('a row cell starts a drag: the object is selected, ghosted, and carried as a ground object', () => {
     openChest();

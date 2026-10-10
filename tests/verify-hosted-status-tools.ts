@@ -102,7 +102,7 @@ describe('the tools through a hosted caller', () => {
     expect(off.text).toMatch(/Claude is switched off in that tab/);
   });
 
-  it('ac_enter_world, ac_goal; ac_wait is capped at 25 s for the hosted connector', async () => {
+  it('ac_enter_world, ac_goal; ac_wait is capped at 20 s for the hosted connector', async () => {
     const { api } = selectHost();
     const on = caller('on', api);
     expect((await TOOL_CALLER.run(on.c, () => tool('ac_enter_world').run({ character: 'Jake' }))).text).toBe('in the world as Jake');
@@ -111,9 +111,9 @@ describe('the tools through a hosted caller', () => {
     expect(await TOOL_CALLER.run(on.c, () => tool('ac_status').run({}))).toMatchObject({ text: expect.stringContaining('screen: world; in the world: Jake\ngoal: level to 10') });
     const waits = caller('on', null);
     waits.c.call = async <T>(method: string, args: unknown[] = [], timeoutMs?: number) => { waits.calls.push({ method, args, timeoutMs }); return [] as T; };
-    expect((await TOOL_CALLER.run(waits.c, () => tool('ac_wait').run({ timeout_s: 120 }))).text).toBe('(nothing within 25 s)');
-    // ac_wait asks the page's wait (counting from the last look), capped at the hosted 25 s.
-    expect(waits.calls[0]).toMatchObject({ method: 'wait', args: [expect.anything(), 25_000] });
+    expect((await TOOL_CALLER.run(waits.c, () => tool('ac_wait').run({ timeout_s: 120 }))).text).toBe('(nothing within 20 s)');
+    // ac_wait asks the page's wait (counting from the last look), capped at the hosted 20 s.
+    expect(waits.calls[0]).toMatchObject({ method: 'wait', args: [expect.anything(), 20_000] });
     // A tab on an older build through the relay ("unknown method wait") falls back to waitFor.
     const old = caller('on', null);
     old.c.call = async <T>(method: string, args: unknown[] = [], timeoutMs?: number) => {
@@ -121,7 +121,7 @@ describe('the tools through a hosted caller', () => {
       if (method === 'wait') throw new Error('unknown method wait');
       return [] as T;
     };
-    expect((await TOOL_CALLER.run(old.c, () => tool('ac_wait').run({ timeout_s: 120 }))).text).toBe('(nothing within 25 s)');
+    expect((await TOOL_CALLER.run(old.c, () => tool('ac_wait').run({ timeout_s: 120 }))).text).toBe('(nothing within 20 s)');
     expect(old.calls.map((c) => c.method)).toEqual(['wait', 'waitFor']);
   });
 

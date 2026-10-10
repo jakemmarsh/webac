@@ -306,10 +306,11 @@ describe('CORE.15 — renderContractPanel (behavioral)', () => {
   });
 
   it('opens as the 0x21000063 panel in the panels window with the retail tab trio (no quest_log)', () => {
+    const tm = (stage: number, o: Record<string, unknown> = {}) => ({ stage, timeWhenDone: 0, timeWhenRepeats: 0, updatedAtSec: performance.now() / 1000, hasTimerFlag: false, hasRepeatFlag: false, descriptionProgress: '', ...o });
     ui.setContractData({
       contracts: [
-        { id: 2, name: 'Test Quest', description: 'line1\nline2', timer: 'Repeats in 30s', status: 'Pending Repeat', contact: 'Royal Guard', contactLoc: '42.1N, 33.5E', questLoc: '10.0S, 5.0W' },
-        { id: 3, name: 'One Shot', description: 'd', timer: '', status: 'Done' },
+        { id: 2, name: 'Test Quest', description: 'line1\nline2', stage: 2, timing: tm(2, { hasTimerFlag: true, timeWhenDone: 30 }), contact: 'Royal Guard', contactLoc: '42.1N, 33.5E', questLoc: '10.0S, 5.0W' },
+        { id: 3, name: 'One Shot', description: 'd', stage: 3, timing: tm(3) },
       ],
       journal: [],
     });
@@ -344,11 +345,29 @@ describe('CORE.15 — renderContractPanel (behavioral)', () => {
     // GAP.38 lives on here: the countdown line surfaces in the Timed row.
     const timed = panel.querySelector('.contract-timed');
     expect(timed).toBeTruthy();
-    expect(timed!.textContent).toContain('Repeats in 30s');
+    // UpdateButtons: the timer flag's time left through DeltaTimeToString.
+    expect(timed!.textContent).toMatch(/^(30|29)s$/);
     // FAITHFUL.512 — multi-line description renders one node per line.
     const notes = panel.querySelector('.contract-notes');
     expect(notes).toBeTruthy();
     expect(notes!.childNodes.length).toBe(2); // 'line1\nline2'
+  });
+
+  // BUG.contract-status-strings-not-retail — RefreshContractListbox @ 00499830
+  // (every 0.5 s while open) rewrites the texts; the rows stay the same nodes,
+  // so the list keeps its scroll.
+  it('the Timed and Status texts tick in place (RefreshContractListbox), the rows are not rebuilt', () => {
+    const panel = ui.contractPanel as HTMLElement;
+    const pane = panel.querySelector('[data-element-id="0x100005d4"]') as HTMLElement;
+    const rowsBefore = [...panel.querySelectorAll('.contract-row')];
+    ui.refreshContractTexts(pane, performance.now() / 1000 + 31);
+    expect(panel.querySelector('.contract-timed')!.textContent).toBe('Finished');
+    expect([...panel.querySelectorAll('.contract-row')]).toEqual(rowsBefore);
+    // Name order: 'One Shot' (Done), 'Test Quest' (In Progress).
+    expect(rowsBefore.map((r) => r.children[1].textContent)).toEqual(['Done', 'In Progress']);
+    // Each text sits in its template element's box and clips there.
+    const boxes = [...(rowsBefore[0] as HTMLElement).children] as HTMLElement[];
+    expect(boxes.map((b) => [b.style.left, b.style.width, b.style.overflow])).toEqual([['0px', '152px', 'hidden'], ['152px', '118px', 'hidden']]);
   });
 
   it('contract rows take the 20px row template 0x100005d7 and bind the DAT scrollbar 0x100005d0', () => {

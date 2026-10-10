@@ -19,6 +19,7 @@ import { DatDatabase } from '../packages/dat-parser/src/DatDatabase.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable } from '../packages/dat-parser/src/file-types/LayoutDesc.js';
 import { spellListPaddedCells } from '../packages/renderer/src/ui/SpellShortcutBar.js';
 import { COMBAT_WINDOW } from '../packages/renderer/src/ui/CombatWindow.js';
+import { ZLayer } from '../packages/renderer/src/ui/ZIndexRegistry.js';
 import { openDat } from './_harness/dat.js';
 
 const ROOT = resolve(__dirname, '..');
@@ -69,6 +70,9 @@ describe.skipIf(!hasDats)('the spell bar in the EoL combat window (real GameUI +
     expect([w.style.width, w.style.height]).toEqual([`${COMBAT_WINDOW.width}px`, `${COMBAT_WINDOW.height}px`]);
     const body = w.querySelector('[data-combat-window-body]') as HTMLElement;
     expect([body.style.left, body.style.top, body.style.width, body.style.height]).toEqual(['5px', '5px', '600px', '80px']);
+    // VISUAL.melee-bar-under-transaction-dock — the spell page shares the
+    // melee page's floaty tier (over the dock, under the panels window).
+    expect(w.style.zIndex).toBe(String(ZLayer.HUD_COMBAT_BAR));
   });
   it('the classic subtree is reflowed: the shortcut list is 439 px, the Cast button follows the right edge', () => {
     const list = ui.spellBarPanelEl.querySelector('[data-element-id="0x100000b6"]') as HTMLElement;

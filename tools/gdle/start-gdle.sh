@@ -5,6 +5,7 @@
 #   bash tools/gdle/start-gdle.sh stop     # stop both (containers and DB volume are kept)
 #   bash tools/gdle/start-gdle.sh status   # container state + last server log lines
 #   bash tools/gdle/start-gdle.sh reset    # remove both containers and the DB volume
+#   GDLE_TELEPORT=1 bash tools/gdle/start-gdle.sh   # with @teletown / @teleloc for probes (as start-gdle-native.sh)
 #
 # Then bridge to it (never the ACE bridge on 9090):
 #   npx tsx services/ws-tcp-bridge/src/bridge.ts 9092 127.0.0.1 9110 9111
@@ -28,6 +29,12 @@ SRV="gdle-server"
 VOL="gdle-db-data"
 PORT="${GDLE_PORT:-9110}"   # GDLE binds PORT and PORT+1 (UDP)
 DB_IMAGE="mariadb:10.11"
+# The container mounts a rendered copy of server.cfg from a fixed cache path,
+# never a worktree's file: a container created from a since-removed worktree
+# failed to start ("not a directory", 2026-10-10). Rendered on every start, so
+# GDLE_TELEPORT takes effect on the next start (the bind mount sees the rewrite).
+CFG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/acjs-gdle"
+CFG="$CFG_DIR/server.cfg"
 
 cmd="${1:-start}"
 
@@ -92,10 +99,13 @@ for _ in $(seq 1 90); do
   echo -n .; sleep 2
 done
 
+mkdir -p "$CFG_DIR"
+sed -e "s/^enable_teleport_commands=.*/enable_teleport_commands=${GDLE_TELEPORT:-0}/" "$HERE/server.cfg" > "$CFG"
+
 if ! exists "$SRV"; then
   docker run -d --name "$SRV" --platform linux/amd64 --network "$NET" --stop-signal SIGINT --stop-timeout 30 \
     -p "$PORT:$PORT/udp" -p "$((PORT + 1)):$((PORT + 1))/udp" \
-    -v "$HERE/server.cfg:/gdle/server.cfg:ro" \
+    -v "$CFG:/gdle/server.cfg:ro" \
     -v "$DAT_DIR/client_portal.dat:/gdle/Data/client_portal.dat:ro" \
     -v "$DAT_DIR/client_cell_1.dat:/gdle/Data/client_cell_1.dat:ro" \
     "$IMAGE" >/dev/null

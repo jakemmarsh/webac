@@ -104,9 +104,20 @@ export class EquipmentSystem {
 
   /**
    * Equip an item to the specified slot.
+   *
+   * `evictOverlaps` (default true) is the client's own optimistic equip: what
+   * covers any of the slots comes off, as the server will move it. A wield the
+   * SERVER reports (CreateObject with a wielder, WieldObject) passes false: the
+   * server already decided what is worn, and a real conflict is taken off by
+   * its own request first (the client's auto-dequip, ACE
+   * Player_Inventory.cs:1664), each confirmed by the server — so a sibling
+   * whose mask merely overlaps stays — a
+   * starting shirt (…|AbdomenWear) and trousers (AbdomenWear|UpperLegWear|…)
+   * are both worn, and evicting by overlap kept whichever arrived last
+   * (BUG.paperdoll-overlapping-clothing-evicted, 2026-10-10).
    * @returns EquipResult with success status and any unequipped items
    */
-  equipItem(item: InventoryItem, slot: EquipMask): EquipResult {
+  equipItem(item: InventoryItem, slot: EquipMask, evictOverlaps = true): EquipResult {
     const unequipped: EquippedItem[] = [];
 
     // An item is worn in one place: an earlier entry for it (the optimistic
@@ -118,7 +129,7 @@ export class EquipmentSystem {
     // leggings worn as UpperLeg|LowerLeg is replaced by the next pair, not
     // kept beside it).
     for (const [s, eq] of this.equipped) {
-      if (s === slot || ((s as number) & (slot as number)) !== 0) {
+      if (s === slot || (evictOverlaps && ((s as number) & (slot as number)) !== 0)) {
         unequipped.push(eq);
         this.equipped.delete(s);
       }

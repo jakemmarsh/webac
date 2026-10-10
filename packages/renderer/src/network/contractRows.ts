@@ -1,4 +1,4 @@
-import { contractStageLabel, formatContractTimer } from '@ac/shared';
+import type { ContractTiming } from '@ac/shared';
 import { gidToLcoord, mapCoordinateText, mapCoordsOfCell } from '../ui/MapMarkers.js';
 import type { ContractTrackerEntry } from './ServerMessageHandler.js';
 
@@ -19,6 +19,10 @@ export interface ContractMetaLike {
   locationNpcStart?: ContractPositionLike;
   locationNpcEnd?: ContractPositionLike;
   locationQuestArea?: ContractPositionLike;
+  /** BUG.contract-status-strings-not-retail — the flags FillProgressString / UpdateButtons read. */
+  descriptionProgress?: string;
+  questflagTimer?: string;
+  questflagRepeatTime?: string;
 }
 
 export interface ContractPositionLike {
@@ -33,10 +37,19 @@ export interface ContractRow {
   contact: string;
   contactLoc: string;
   questLoc: string;
-  timer: string;
-  status: string;
   stage: number;
-  repeatsSec: number;
+  /**
+   * BUG.contract-status-strings-not-retail — the tracker values + table flags
+   * the panel words at draw time (contractProgressText / contractTimedText,
+   * every 0.5 s while open, as gmContractsUI::RefreshContractListbox does).
+   */
+  timing: ContractTiming;
+}
+
+/** A tracker entry as main.ts keeps it: the wire values + the client clock at receipt. */
+export interface TimedContractEntry extends ContractTrackerEntry {
+  /** Seconds (the panel's clock) when this entry arrived; 0 = unknown. */
+  updatedAtSec?: number;
 }
 
 /**
@@ -67,8 +80,24 @@ export function contractContact(meta: ContractMetaLike | undefined, stage: numbe
   return { name: end, location: meta.locationNpcEnd };
 }
 
+/**
+ * The tracker table main.ts keeps (CPlayerSystem's contract list): a full
+ * ContractTrackerTable replaces it; a single ContractTracker either deletes
+ * its contract (the server's answer to AbandonContract — the row goes on
+ * the next RebuildContractList) or upserts it with the receipt time.
+ */
+export function applyContractTrackerTable(state: Map<number, TimedContractEntry>, entries: Iterable<ContractTrackerEntry>, nowSec: number): void {
+  state.clear();
+  for (const entry of entries) state.set(entry.contractId, { ...entry, updatedAtSec: nowSec });
+}
+
+export function applyContractTracker(state: Map<number, TimedContractEntry>, contract: ContractTrackerEntry, deleteContract: boolean, nowSec: number): void {
+  if (deleteContract) state.delete(contract.contractId);
+  else state.set(contract.contractId, { ...contract, updatedAtSec: nowSec });
+}
+
 export function buildContractRows(
-  entries: Iterable<ContractTrackerEntry>,
+  entries: Iterable<TimedContractEntry>,
   getMeta: (contractId: number) => ContractMetaLike | undefined,
 ): ContractRow[] {
   return [...entries].map(entry => {
@@ -80,30 +109,27 @@ export function buildContractRows(
     return {
       id: entry.contractId,
       name: meta?.contractName || `Contract #${entry.contractId}`,
-      // FAITHFUL.284 — stage labels via the shared ContractStage enum +
-      // contractStageLabel (the pre-fix inline map missed
-      // ProgressCounter=0x4 and mislabeled DoneOrPendingRepeat=0x3).
-      description: meta?.description || contractStageLabel(entry.stage, entry.timeWhenRepeats),
+      // The Notes text (m_pNotesText) is the table's description; an
+      // unknown contract has none (the invented stage-label fallback is gone).
+      description: meta?.description ?? '',
       // CORE.15 — retail gmContractsUI detail rows (Contact / Contact
       // Location / Quest Location) from the ContractTable entry.
       contact: contact.name,
       contactLoc: contractLocText(contact.location),
       questLoc: contractLocText(meta?.locationQuestArea),
-      // GAP.32 — BOTH wire fields are remaining-seconds countdowns (ACE
-      // ContractTracker.cs GetNextSolveTime().TotalSeconds), not epochs.
-      timer: entry.timeWhenDone > 0
-        ? `Done in ${formatContractTimer(entry.timeWhenDone)}`
-        : entry.timeWhenRepeats > 0
-          ? `Repeats in ${formatContractTimer(entry.timeWhenRepeats)}`
-          : '',
-      // GAP.35 — timeWhenRepeats splits DoneOrPendingRepeat into
-      // 'Pending Repeat' (cooldown running) vs 'Done'.
-      status: contractStageLabel(entry.stage, entry.timeWhenRepeats),
-      // CORE.15.a — raw stage + remaining repeat seconds so the panel's
-      // Status header sort can order repeat-cooldown contracts by
-      // remaining time (retail ContractInfoSortStatus @ 004987a0).
       stage: entry.stage,
-      repeatsSec: entry.timeWhenRepeats,
+      // GAP.32 — BOTH wire fields are remaining-seconds countdowns (ACE
+      // ContractTracker.cs GetNextSolveTime().TotalSeconds), not epochs;
+      // they count from updatedAtSec.
+      timing: {
+        stage: entry.stage,
+        timeWhenDone: entry.timeWhenDone,
+        timeWhenRepeats: entry.timeWhenRepeats,
+        updatedAtSec: entry.updatedAtSec ?? 0,
+        hasTimerFlag: !!meta?.questflagTimer,
+        hasRepeatFlag: !!meta?.questflagRepeatTime,
+        descriptionProgress: meta?.descriptionProgress ?? '',
+      },
     };
   });
 }

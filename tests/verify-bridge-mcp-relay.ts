@@ -49,6 +49,31 @@ describe('the relay pieces', () => {
     expect(parseRelayFrame('{"routines":null}')).toBeNull();
   });
 
+  it('a big answer (a screenshot) arrives in slices under the 64 KB message cap and joins back; bad or stray slices are ignored', async () => {
+    const relay = new AgentRelay();
+    const sent: string[] = [];
+    const tabPeer = { send: (t: string) => sent.push(t) };
+    const key = accountKey('local-eor', 'agentclaude');
+    relay.register(tabPeer, key);
+    relay.onText(tabPeer, '{"agentState":{"relay":"on"}}');
+    const big = 'x'.repeat(130_000);
+    const p = relay.call(key, 'screenshot', [], 5000);
+    const { id } = JSON.parse(sent.at(-1)!).agent;
+    // The tab's own splitter (relayTab.ts) makes the slices.
+    const { TabRelay } = await import('../packages/renderer/src/agent/relayTab');
+    const out: string[] = [];
+    const tab = new TabRelay((t) => out.push(t), () => ({ screenshot: () => big }));
+    tab.on = true;
+    await tab.handle({ id, method: 'screenshot', args: [], deadlineMs: 5000 });
+    expect(out.length).toBe(3);
+    expect(out.every((t) => t.length < 64 * 1024)).toBe(true);
+    expect(parseRelayFrame('{"agentResultPart":{"id":1,"i":5,"n":2,"data":"x"}}')).toBeNull();
+    expect(parseRelayFrame('{"agentResultPart":{"id":1,"i":0,"n":999,"data":"x"}}')).toBeNull();
+    relay.onText(tabPeer, '{"agentResultPart":{"id":424242,"i":0,"n":2,"data":"x"}}'); // no such call
+    for (const t of [out[2], out[0], out[1]]) relay.onText(tabPeer, t); // any order
+    await expect(p).resolves.toBe(big);
+  });
+
   it('a later login of the account replaces the tab; a closed tab\'s calls fail with the reconnect advice; a quiet one times out', async () => {
     const relay = new AgentRelay();
     const sent: string[] = [];

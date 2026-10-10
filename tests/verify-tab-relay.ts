@@ -46,7 +46,7 @@ describe('the tab relay', () => {
     expect(sent.at(-1)).toEqual({ agentState: { relay: 'on', character: 'Claude', screen: null } });
   });
 
-  it('one call at a time, in order; a call past its deadline stops movement and answers an error', async () => {
+  it('acting calls one at a time; a read answers at once; an acting call past its deadline keeps going and answers "still in progress"', async () => {
     vi.useFakeTimers();
     const sent: Array<{ agentResult: { id: number; ok: boolean; error?: string } }> = [];
     let stopped = 0;
@@ -60,12 +60,21 @@ describe('the tab relay', () => {
     r.on = true;
     const a = r.handle({ id: 1, method: 'walkTo', args: [], deadlineMs: 2000 });
     const b = r.handle({ id: 2, method: 'observe', args: [], deadlineMs: 2000 });
+    const c = r.handle({ id: 3, method: 'walkTo', args: [], deadlineMs: 20_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    // The observe answered while the walk was still going (Claude's parallel calls no longer queue behind it).
+    expect(sent.map((s) => s.agentResult.id)).toEqual([2]);
     await vi.advanceTimersByTimeAsync(2500);
     await a; await b;
-    expect(sent.map((s) => [s.agentResult.id, s.agentResult.ok])).toEqual([[1, false], [2, true]]);
-    expect(sent[0].agentResult.error).toMatch(/took longer than 2 s and was stopped/);
-    expect(stopped).toBe(1);
-    expect(order).toEqual(['walk start', 'observe']);
+    // The walk keeps going past its deadline: "still in progress", ok, nothing stopped.
+    expect(sent.map((s) => [s.agentResult.id, s.agentResult.ok])).toEqual([[2, true], [1, true]]);
+    expect((sent[1].agentResult as unknown as { result: { message: string } }).result.message).toMatch(/^walkTo is still in progress after 2 s and keeps going: ac_wait types=task-done/);
+    expect(stopped).toBe(0);
+    // The second acting call waits its turn behind the first (one at a time).
+    expect(order).toEqual(['observe', 'walk start', 'walk start']);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await c;
+    expect(order).toEqual(['observe', 'walk start', 'walk start', 'walk end', 'walk end']);
     vi.useRealTimers();
   });
 });

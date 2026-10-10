@@ -17,6 +17,7 @@ import { Heritage, Gender, SkillAdvancementClass, EquipMask, DEFAULT_ATTRIBUTE_C
 import type { InventoryItem, EquippedItem, SpellDefinition, NameFilterRules, TabooPredicate } from '@ac/shared';
 import { SPELLBOOK_FILTERS_DEFAULT, isSpellbookFilteredOut, spellbookLevelBit, spellbookOrder, spellbookSchoolBit, toggleSpellbookFilter, spellbookDeleteConfirmText } from './spellbookFilter.js';
 import { MagicSchool, magicSchoolColor, magicSchoolColorRGBA, LUMINANCE_MIN_LEVEL, getAppropriateName, StartingTown, SPELL_COMPONENT_DID_MAPPER_ID } from '@ac/shared';
+import { contractProgressText, contractTimedText, contractRepeatLeft, type ContractTiming } from '@ac/shared';
 import { TeleportAnimation, TeleportAnimState, PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
 import { PortalSpaceRenderer, portalSpaceHookSound } from '../effects/PortalSpaceRenderer.js';
 import { getAllegianceRankTitle, getDefaultCombatMode } from '@ac/shared';
@@ -382,6 +383,14 @@ export const OPTIONS_DEAD_END_BUTTONS = [0x10000205, 0x10000206, 0x10000207] as 
  * the retired Keystone plugin the Options "In-Game Help Files" button also led to.
  */
 export const CHARGEN_DEAD_END_BUTTONS = [0x100003c9] as const;
+
+/** gmContractsUI row template 0x21000069:0x100005d7 — the name (0x100005d1) and status (0x100005d2) texts. */
+export const CONTRACT_ROW_NAME_DESC = descRef(0x21000069, 0x100005d7, 0x100005d1);
+export const CONTRACT_ROW_STATUS_DESC = descRef(0x21000069, 0x100005d7, 0x100005d2);
+/** gmContractsUI::ListenToGlobalMessage @ 00499e60: m_timeNextUpdate = cur_time + 0.5. */
+export const CONTRACT_REFRESH_MS = 500;
+/** Row template 0x21000069:0x100005d7's text elements: 0x100005d1 (0,0) 152x20, 0x100005d2 (152,0) 118x20. */
+export const CONTRACT_ROW_CELLS = [{ x: 0, w: 152 }, { x: 152, w: 118 }] as const;
 
 /** The character panel's stat-row template 0x21000045:0x10000248: name 0x1000012a, value 0x1000012b. */
 const STAT_ROW_NAME_REF = descRef(0x21000045, 0x10000248, 0x1000012a);
@@ -961,6 +970,18 @@ export interface PendingPackItem {
   iconUnderlayDid?: number;
   itemType?: number;
   uiEffects?: number;
+  /** GetObjectNameWide(itemID, 2) — for AcceptDragObject's "Already attempting to place %s here". */
+  name?: string;
+}
+
+/**
+ * RECON.inventory-grid-dat-cells.b.a.a — UIElement_ItemList::AcceptDragObject
+ * @ 004e4250: a drop on an item list that still shows a pending item is
+ * refused with this 0x1a line (.rdata 0x7bfd40, %s = the pending item's
+ * GetObjectNameWide(id, 2)) — the second drop waits for the first answer.
+ */
+export function alreadyPlacingText(name: string): string {
+  return `Already attempting to place ${name} here`;
 }
 
 /** GameEventStartBarber / GameActionFinishBarber's 16 fields (GAP.barber-ui-retail: BarberModel.ts). */
@@ -2927,7 +2948,7 @@ export class GameUI {
      * object's list (main.ts runs the placement: merge onto `cellItemId`'s
      * stack, else AttemptToPlaceInContainer into the container). 0 = an
      * empty spot of the row. */
-    onStoreItem?: (itemGuid: number, cellItemId?: number) => void;
+    onStoreItem?: (itemGuid: number, cellItemId?: number, cellIndex?: number) => void;
     /** gmExternalContainerUI::DragItemAcceptable(id, silent) @ 004cbb60 —
      *  OnItemListDragOver @ 004cbf80's verdict for the hovered cell's art
      *  (a housing hook takes only its kind of item, in an owned house). */
@@ -5244,8 +5265,12 @@ export class GameUI {
         return r?.isReady ? r.lineHeight : 0;
       },
       // RECON.dom-chrome-sweep.d — the account field in the DialogFactory edit font.
-      bindEditField: (input, host, ref, hJustify) =>
-        this.bindDatEditField(input, host, ref, hJustify === undefined ? undefined : { hJustify }),
+      // RECON.dom-chrome-sweep.d.a — the password the same way, drawn as mask dots.
+      bindEditField: (input, host, ref, hJustify, masked) =>
+        this.bindDatEditField(input, host, ref, {
+          ...(hJustify === undefined ? {} : { hJustify }),
+          ...(masked ? { masked: true } : {}),
+        }),
       onlineColor: AC_COLORS.onlineGreen,
       attachScale: (inner) => this.attachPreworldScale(inner),
       plate: (w, h) => this.buildDialogPlate(w, h),
@@ -14450,7 +14475,7 @@ export class GameUI {
    * with the waiting ghost 0x10000349 over it (SetWaitingState(1)). It is not
    * a held item yet, so it takes no clicks and starts no drag.
    */
-  private buildPendingPackCell(pending: PendingPackItem): HTMLDivElement {
+  private buildPendingPackCell(pending: PendingPackItem, packDrop = true): HTMLDivElement {
     const cell = document.createElement('div');
     Object.assign(cell.style, {
       width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -14471,11 +14496,14 @@ export class GameUI {
     });
     cell.appendChild(ghost);
     // A drop on it lands on the cell it took (the list under the mouse).
-    cell.addEventListener('dragover', (e) => { if (this.worldDropSource()) e.preventDefault(); });
-    cell.addEventListener('drop', (e) => {
-      e.preventDefault();
-      this.itemListDrop({ list: 'items', packSlot: this.selectedPackSlot, cellItemId: 0 });
-    });
+    // In the ground container's row the row's own drop handler takes it.
+    if (packDrop) {
+      cell.addEventListener('dragover', (e) => { if (this.worldDropSource()) e.preventDefault(); });
+      cell.addEventListener('drop', (e) => {
+        e.preventDefault();
+        this.itemListDrop({ list: 'items', packSlot: this.selectedPackSlot, cellItemId: 0 });
+      });
+    }
     return cell;
   }
 
@@ -14610,6 +14638,27 @@ export class GameUI {
     return this.pendingPackItem;
   }
 
+  /** RECON.inventory-grid-dat-cells.b.a.b — the ground container's m_itemList pending item (listGuid = the list's container). */
+  private containerPendingItem: (PendingPackItem & { listGuid: number }) | null = null;
+
+  /** AcceptDragObject on the open container's item row: `item` ghosted at its index there. */
+  showPendingInContainer(item: PendingPackItem & { listGuid: number }): void {
+    this.containerPendingItem = { ...item, guid: item.guid >>> 0, listGuid: item.listGuid >>> 0, index: Math.max(0, item.index | 0) };
+    if (this.containerPanel?.isConnected) this.renderContainerPanel();
+  }
+
+  /** The server answered (or the list closed / re-parented): the ghost goes. */
+  endPendingInContainer(guid?: number): void {
+    const p = this.containerPendingItem;
+    if (!p || (guid !== undefined && p.guid !== (guid >>> 0))) return;
+    this.containerPendingItem = null;
+    if (this.containerPanel?.isConnected) this.renderContainerPanel();
+  }
+
+  pendingContainerItemNow(): (PendingPackItem & { listGuid: number }) | null {
+    return this.containerPendingItem;
+  }
+
   /**
    * The server answered a request on `guid` (ServerSaysMoveItem, -SetStackSize,
    * -AttemptFailed, -Remove, a delete): the object stops waiting and the item
@@ -14618,6 +14667,7 @@ export class GameUI {
   itemRequestAnswered(guid: number): void {
     this.setItemWaiting(guid, false);
     this.endPendingInPack(guid);
+    this.endPendingInContainer(guid);
   }
 
   /** ItemList_BeginDrag: the dragged pack / paperdoll object waits from the moment the drag starts. */
@@ -15776,7 +15826,15 @@ export class GameUI {
     this.dragItemIndex = -1;
     this.dragSourceSlot = null;
     this.dragIsContainer = false;
-    if (source) this.dragCallbacks.onItemListDrop?.(source, target);
+    if (!source) return;
+    // RECON.inventory-grid-dat-cells.b.a.a — the item list's m_pendingItem
+    // refuses a second drop (AcceptDragObject @ 004e4250).
+    const pending = this.pendingPackItem;
+    if (target.list === 'items' && pending && pending.packSlot === target.packSlot) {
+      this.displayErrorText(alreadyPlacingText(pending.name ?? ''));
+      return;
+    }
+    this.dragCallbacks.onItemListDrop?.(source, target);
   }
 
   /**
@@ -15822,6 +15880,7 @@ export class GameUI {
     nestedListCapacity = -1,
   ): void {
     this.containerGuid = containerGuid;
+    this.containerPendingItem = null;
     this.containerNestedListCapacity = nestedListCapacity;
     this.containerItems = items;
     this.containerPackGuids = [containerGuid];
@@ -16618,7 +16677,23 @@ export class GameUI {
         height: `${CELL}px`, display: 'flex', width: `${contentW}px`,
       });
 
-      for (let pi = 0; pi < slotCount; pi++) {
+      // RECON.inventory-grid-dat-cells.b.a.b — the ground container's
+      // m_itemList takes a pending item too (AcceptDragObject @ 004e4250 →
+      // ItemList_InsertItem + SetWaitingState(1)): the dropped object shows
+      // ghosted at the drop cell until the server answers; a fixed list with
+      // no empty cell left takes none.
+      const cpend = this.containerPendingItem && selectedPackGuid === this.containerPendingItem.listGuid
+        && (fixedSlots < 0 || visibleItems.length < fixedSlots) ? this.containerPendingItem : null;
+      const cpendAt = cpend ? Math.min(cpend.index, visibleItems.length) : -1;
+      const cellTotal = cpend ? Math.max(slotCount, visibleItems.length + 1) : slotCount;
+      for (let ci = 0; ci < cellTotal; ci++) {
+        if (cpend && ci === cpendAt) {
+          const pcell = this.buildPendingPackCell(cpend, false);
+          pcell.style.minWidth = `${CELL}px`;
+          row.appendChild(pcell);
+          continue;
+        }
+        const pi = cpend && ci > cpendAt ? ci - 1 : ci;
         const item = visibleItems[pi];
         const cell = document.createElement('div');
         Object.assign(cell.style, {
@@ -16731,7 +16806,10 @@ export class GameUI {
         if (!dragged) return;
         // The cell under the pointer (GetItemUnderMouse): an item, or 0.
         const cellEl = (e.target as HTMLElement | null)?.closest?.('[data-ac-container-guid]') as HTMLElement | null;
-        this.containerCallbacks.onStoreItem?.(dragged.id, cellEl ? Number(cellEl.dataset.acContainerGuid) >>> 0 : 0);
+        // WhatNum of the cell under the mouse among the row's cells (its index).
+        const rowCells = cellEl?.parentElement ? [...cellEl.parentElement.children] : [];
+        const cellIndex = cellEl ? Math.max(0, rowCells.indexOf(cellEl)) : undefined;
+        this.containerCallbacks.onStoreItem?.(dragged.id, cellEl ? Number(cellEl.dataset.acContainerGuid) >>> 0 : 0, cellIndex);
       });
 
       // The row's bar (0x1000006b, the vendor list's horizontal template):
@@ -17483,7 +17561,7 @@ export class GameUI {
     wrapper.dataset.combatWindow = '1';
     Object.assign(wrapper.style, {
       position: 'absolute', width: `${C.width}px`, height: `${C.height}px`,
-      pointerEvents: 'none', zIndex: '2000',
+      pointerEvents: 'none', zIndex: zLayer(ZLayer.HUD_COMBAT_BAR),
     });
     if (typeof geo.x === 'number' && typeof geo.y === 'number') {
       wrapper.style.left = `${geo.x}px`; wrapper.style.top = `${geo.y}px`;
@@ -19062,16 +19140,20 @@ export class GameUI {
   /** AGENT — the character panel's data as text for an agent player (docs/agent-play.md). */
   agentCharacterSheet(): string {
     const c = this.charInfo;
+    // The XP one more raise costs (the attribute / skill panels' raise cost), so a player sees it before spending.
+    const next = (cost: number): string => (cost > 0 ? ` [+1: ${cost.toLocaleString('en-US')} xp]` : '');
     const out = [
       `${c.name}  level ${c.level}  ${c.heritage} ${c.gender}  ${c.pkStatus}`,
       `XP ${c.totalXp.toLocaleString()} total, ${c.unassignedXp.toLocaleString()} unassigned, ${c.xpToNextLevel.toLocaleString()} to next level; ${c.skillCredits} skill credits`,
-      'Attributes: ' + Object.entries(c.attributes).map(([k, a]) => `${ATTRIBUTE_LABELS[k] ?? k} ${a.buffed}${a.buffed !== a.base ? ` (base ${a.base})` : ''}`).join(', '),
-      'Vitals: ' + Object.entries(c.vitals).map(([k, v]) => `${k} ${v.current}/${v.max}`).join(', '),
+      'Attributes: ' + Object.entries(c.attributes).map(([k, a]) => `${ATTRIBUTE_LABELS[k] ?? k} ${a.buffed}${a.buffed !== a.base ? ` (base ${a.base})` : ''}${next(GameUI.statRaiseCosts(this.xpCostTables.attribute, a.raises ?? 0).cost1)}`).join(', '),
+      'Vitals: ' + Object.entries(c.vitals).map(([k, v]) => `${k} ${v.current}/${v.max}${next(GameUI.statRaiseCosts(this.xpCostTables.vital, v.raises ?? 0).cost1)}`).join(', '),
     ];
     for (const status of ['Specialized', 'Trained']) {
       const list = c.skills.filter((s) => s.status === status);
-      if (list.length) out.push(`${status} skills: ` + list.map((s) => `${s.name} ${s.effective}${s.effective !== s.base ? ` (base ${s.base})` : ''}`).join(', '));
+      const table = status === 'Specialized' ? this.xpCostTables.specializedSkill : this.xpCostTables.trainedSkill;
+      if (list.length) out.push(`${status} skills: ` + list.map((s) => `${s.name} ${s.effective}${s.effective !== s.base ? ` (base ${s.base})` : ''}${next(GameUI.skillRaiseCosts(table, s.raises, s.pp).cost1)}`).join(', '));
     }
+    out.push('[+1: N xp] is what one more raise costs, what ac_raise spends (the panels\' raise buttons show the same).');
     // Untrained and Unusable rows can be trained with credits (gmSkillUI's untrained footer:
     // "Skill Credits To Train"), so each shows its SkillTable trainedCost: what ac_train_skill spends.
     const trainCost = (id: number) => this.skillTable?.skills.get(id)?.trainedCost ?? 0;
@@ -23482,6 +23564,13 @@ export class GameUI {
       /** The list's own DAT scrollbar column (its p114) — bound as the live
        *  widget with the desc's p121 instead of the shared overflow bar. */
       scrollbar?: { column: HTMLElement; hideDisabled: boolean };
+      /**
+       * The row template's two text elements' x / width: each cell sits in
+       * its own box and clips there, as UIElement_Text draws inside its
+       * element (contracts: 0x100005d1 (0,152) / 0x100005d2 (152,118)).
+       * Without it the cells share the row edge to edge (flex).
+       */
+      cellRects?: readonly [{ x: number; w: number }, { x: number; w: number }];
     } = {},
   ): void {
     const rowH = opts.rowHeight ?? 24;
@@ -23510,8 +23599,23 @@ export class GameUI {
           ? { backgroundImage: `url(${bg})`, backgroundSize: '100% 100%', backgroundRepeat: 'no-repeat' }
           : (spec.selected ? { background: goldAlpha(0.25) } : {})),
       });
-      rowEl.appendChild(cell(spec.left));
-      rowEl.appendChild(cell(spec.right));
+      if (opts.cellRects) {
+        Object.assign(rowEl.style, { position: 'relative', display: 'block', padding: '0' });
+        for (const [k, c] of [spec.left, spec.right].entries()) {
+          const r = opts.cellRects[k];
+          const box = document.createElement('div');
+          box.className = 'dat-row-cell';
+          Object.assign(box.style, {
+            position: 'absolute', left: `${r.x}px`, top: '0', width: `${r.w}px`, height: `${rowH}px`,
+            overflow: 'hidden', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center',
+          });
+          box.appendChild(cell(c));
+          rowEl.appendChild(box);
+        }
+      } else {
+        rowEl.appendChild(cell(spec.left));
+        rowEl.appendChild(cell(spec.right));
+      }
       rowEl.addEventListener('click', () => {
         spec.onSelect();
       });
@@ -28755,13 +28859,14 @@ export class GameUI {
     // m_pAreaText, PostInit @ 00497e40), sourced from ContractTable
     // (0x0E00001D) nameNpcStart + locationNpcStart/locationQuestArea.
     contracts: Array<{
-      id: number; name: string; description: string; timer: string; status: string;
+      id: number; name: string; description: string;
       contact?: string; contactLoc?: string; questLoc?: string;
-      // CORE.15.a — raw tracker fields the retail status sort needs
-      // (ContractInfoSortStatus @ 004987a0 orders contracts that are
-      // DoneOrPendingRepeat=3 with a live repeat cooldown by remaining
-      // repeat time, ahead of the status-string compare).
-      stage?: number; repeatsSec?: number;
+      stage?: number;
+      // BUG.contract-status-strings-not-retail — tracker values + table
+      // flags; the Status column / "Status:" / "Timed:" texts are worded
+      // from them at draw time (contractProgressText / contractTimedText)
+      // and every 0.5 s while the pane is open.
+      timing?: ContractTiming;
     }>;
     journal: Array<{ title: string; text: string; timestamp: number }>;
   } = { contracts: [], journal: [] };
@@ -29104,6 +29209,57 @@ export class GameUI {
     };
   }
 
+  /** The contracts panel's clock (seconds); tracker entries carry the same clock's receipt time. */
+  static contractNowSec(): number { return performance.now() / 1000; }
+
+  private contractRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * gmContractsUI::ListenToGlobalMessage @ 00499e60 — while the panel is
+   * visible, RefreshContractListbox @ 00499830 runs every 0.5 s
+   * (m_timeNextUpdate = cur_time + 0.5): each row's 0x100005d2 gets a fresh
+   * FillProgressString and UpdateButtons rewrites the detail texts. In place
+   * — a rebuild would lose the list's scroll — and only where a text changed.
+   */
+  private scheduleContractRefresh(pane: HTMLElement): void {
+    if (this.contractRefreshTimer !== null) clearTimeout(this.contractRefreshTimer);
+    this.contractRefreshTimer = setTimeout(() => {
+      this.contractRefreshTimer = null;
+      if (!pane.isConnected || !this.contractVisible || this.contractTab !== 'contracts') return;
+      this.refreshContractTexts(pane, GameUI.contractNowSec());
+      this.scheduleContractRefresh(pane);
+    }, CONTRACT_REFRESH_MS);
+  }
+
+  /** RefreshContractListbox's text pass (also the tests' entry point). */
+  refreshContractTexts(pane: HTMLElement, nowSec: number): void {
+    const contracts = this.contractData.contracts;
+    const list = this.datChild(pane, 0x100005cf);
+    for (const rowEl of Array.from(list?.children ?? []) as HTMLElement[]) {
+      const c = contracts.find((x) => String(x.id) === rowEl.dataset.rowName);
+      const box = rowEl.children[1] as HTMLElement | undefined;
+      const cellEl = (box?.classList.contains('dat-row-cell') ? box.firstElementChild : box) as HTMLElement | null | undefined;
+      if (!c?.timing || !cellEl) continue;
+      const text = contractProgressText(c.timing, nowSec);
+      if (cellEl.dataset.contractText === text) continue;
+      const fresh = this.renderDatTextOr(text, CONTRACT_ROW_STATUS_DESC, undefined, AC_COLORS.textMed);
+      fresh.dataset.contractText = text;
+      cellEl.replaceWith(fresh);
+    }
+    const sel = this.selectedContractIdx >= 0 ? contracts[this.selectedContractIdx] : null;
+    if (!sel?.timing) return;
+    const status = contractProgressText(sel.timing, nowSec);
+    const timed = contractTimedText(sel.timing, nowSec);
+    if (pane.dataset.contractStatus !== status) {
+      this.setDatLabel(pane, 0x100005df, status, { justify: 'near' });
+      pane.dataset.contractStatus = status;
+    }
+    if (pane.dataset.contractTimed !== timed) {
+      this.setDatLabel(pane, 0x100005e3, timed, { justify: 'near' })?.classList.add('contract-timed');
+      pane.dataset.contractTimed = timed;
+    }
+  }
+
   /** CORE.15 — DAT-NATIVE contracts pane (0x21000063 pane 0x100005d4 ~
    *  base 0x21000069:0x100005cd, retail class 0x1000004B gmContractsUI,
    *  PostInit @ 00497e40). Chrome: headers 0x100005ce "Contract" /
@@ -29141,6 +29297,8 @@ export class GameUI {
     const contracts = this.contractData.contracts;
     if (this.selectedContractIdx >= contracts.length) this.selectedContractIdx = -1;
     const selected = this.selectedContractIdx >= 0 ? contracts[this.selectedContractIdx] : null;
+    const now = GameUI.contractNowSec();
+    const statusOf = (c: { timing?: ContractTiming }): string => (c.timing ? contractProgressText(c.timing, now) : '');
 
     // VISUAL.contracts-empty-list-invented-text — an empty list is a bare
     // well: RebuildContractListbox @ 00499ca0 flushes the listbox and adds
@@ -29150,19 +29308,29 @@ export class GameUI {
     const list = this.datChild(pane, 0x100005cf);
     const scrollbar = this.datChild(pane, 0x100005d0);
     if (list) {
-      const order = GameUI.sortedContractOrder(contracts, this.contractSortCriteria, this.contractReverseSort);
+      const sortable = contracts.map((c) => ({
+        name: c.name, status: statusOf(c), stage: c.stage,
+        repeatsSec: c.timing ? contractRepeatLeft(c.timing, now) : 0,
+      }));
+      const order = GameUI.sortedContractOrder(sortable, this.contractSortCriteria, this.contractReverseSort);
       this.fillDatListRows(list, order.map(i => ({ c: contracts[i], i })), ({ c, i }) => ({
         key: String(c.id),
         selected: i === this.selectedContractIdx,
-        left: { text: c.name, color: AC_COLORS.white },
-        right: { text: c.status, color: AC_COLORS.textMed },
+        // AddContractToListbox @ 004996f0: row template 0x100005d7, the
+        // name in its 0x100005d1, FillProgressString in its 0x100005d2 —
+        // each in that element's own font and colour (the old fixed
+        // white / tan were fallbacks only).
+        left: { text: c.name, desc: CONTRACT_ROW_NAME_DESC, color: AC_COLORS.white },
+        right: { text: sortable[i].status, desc: CONTRACT_ROW_STATUS_DESC, color: AC_COLORS.textMed },
         onSelect: () => {
           this.selectedContractIdx = i;
           this.renderContractPanel();
         },
       }), 'contract-row', {
-        // Row template 0x100005d7 is 270x20.
+        // Row template 0x100005d7 is 270x20: name 0x100005d1 (0,0) 152x20,
+        // status 0x100005d2 (152,0) 118x20.
         rowHeight: 20,
+        cellRects: CONTRACT_ROW_CELLS,
         scrollbar: scrollbar ? { column: scrollbar, hideDisabled: false } : undefined,
       });
     }
@@ -29174,7 +29342,7 @@ export class GameUI {
     this.setDatLabel(pane, 0x100005d9, getString(256913260) ?? 'Contact:', { justify: 'near' });
     this.setDatLabel(pane, 0x100005da, getString(2067884) ?? 'Contact Location:', { justify: 'near' });
     this.setDatLabel(pane, 0x100005db, getString(194519676) ?? 'Quest Location:', { justify: 'near' });
-    this.setDatLabel(pane, 0x100005df, selected?.status ?? '', { justify: 'near' });
+    this.setDatLabel(pane, 0x100005df, selected ? statusOf(selected) : '', { justify: 'near' });
     this.setDatLabel(pane, 0x100005e0, selected?.contact ?? '', { justify: 'near' });
     this.setDatLabel(pane, 0x100005e1, selected?.contactLoc ?? '', { justify: 'near' });
     this.setDatLabel(pane, 0x100005e2, selected?.questLoc ?? '', { justify: 'near' });
@@ -29189,17 +29357,34 @@ export class GameUI {
         const inner = document.createElement('div');
         inner.className = 'contract-notes';
         Object.assign(inner.style, { position: 'absolute', inset: '0', overflowY: 'auto', scrollbarWidth: 'none' });
+        // m_pNotesText (0x100005de, 270x52) is a wrapping UIElement_Text:
+        // each line word-wraps at the box's width inside its p35 / p36
+        // margins, in the element's own font and colour (one clipped line
+        // per '\n' before, 2026-10-10).
+        const notesRef = descRef(0x21000069, 0x100005de);
+        const st = this.datTextStyleFor(notesRef);
+        const wrapW = Math.max(40, 270 - (st?.marginLeft ?? 0) - (st?.marginRight ?? 0));
         for (const line of selected.description.split('\n')) {
-          inner.appendChild(this.renderACText(line || ' ', AC_COLORS.white));
+          const span = document.createElement('span');
+          span.setAttribute('data-ac-text', line || ' ');
+          span.setAttribute('data-ac-desc', notesRef);
+          span.setAttribute('data-ac-maxwidth', String(wrapW));
+          span.setAttribute('data-ac-color', AC_COLORS.white);
+          const lineEl = document.createElement('div');
+          lineEl.appendChild(span);
+          inner.appendChild(lineEl);
         }
         notes.appendChild(inner);
+        this.replaceACTextElements(inner);
         notes.style.pointerEvents = 'auto';
       }
     }
 
     this.setDatLabel(pane, 0x100005dd, getString(103871628) ?? 'Timed:', { justify: 'near' });
-    const timedEl = this.setDatLabel(pane, 0x100005e3, selected?.timer ?? '', { justify: 'near' });
-    if (timedEl && selected?.timer) timedEl.classList.add('contract-timed');
+    const timedText = selected?.timing ? contractTimedText(selected.timing, now) : '';
+    const timedEl = this.setDatLabel(pane, 0x100005e3, timedText, { justify: 'near' });
+    if (timedEl && timedText) timedEl.classList.add('contract-timed');
+    this.scheduleContractRefresh(pane);
 
     const abandonBtn = this.bindDatTextButton(pane, 0x100005dc, getString(54059742) ?? 'Abandon', () => {
       const sel = this.selectedContractIdx >= 0 ? this.contractData.contracts[this.selectedContractIdx] : null;

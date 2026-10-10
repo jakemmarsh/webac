@@ -17,6 +17,9 @@ import type { DatDatabase } from '@ac/dat-parser/DatDatabase.js';
 import { EnvCell } from '@ac/dat-parser/file-types/EnvCell.js';
 import { Environment, type CellStruct } from '@ac/dat-parser/file-types/Environment.js';
 import type { Frame } from '@ac/dat-parser/file-types/Frame.js';
+import { GfxObj } from '@ac/dat-parser/file-types/GfxObj.js';
+import { SetupModel } from '@ac/dat-parser/file-types/SetupModel.js';
+import { placementFrameOf } from '../models/SetupModelGroup.js';
 
 export interface Vec3 { x: number; y: number; z: number }
 
@@ -57,6 +60,43 @@ function walkablePolys(cell: EnvCell, struct: CellStruct): FloorPoly[] {
     out.push({ pts, n, d: n.x * pts[0].x + n.y * pts[0].y + n.z * pts[0].z });
   }
   return out;
+}
+
+/**
+ * The walkable polygons of a cell's static object (a Setup's parts at its placement frame, or a lone GfxObj),
+ * from their physics polygons, in the landblock frame. A staircase is often a static, not the cell's own
+ * geometry: the Holtburg archmage's tower climbs to its upper floor on Setup 0x020001B4 (2026-10-10).
+ * `ok` is false when a file wasn't readable yet (a streamed set's miss).
+ */
+function staticFloors(portalDat: DatDatabase, id: number, at: Frame): { polys: FloorPoly[]; ok: boolean } {
+  const polys: FloorPoly[] = [];
+  let ok = true;
+  const addGfx = (gid: number, part: Frame | null): void => {
+    const data = portalDat.getFileData(gid);
+    if (!data) { ok = false; return; }
+    let gfx: GfxObj;
+    try { gfx = new GfxObj(new DatReader(data)); } catch { return; }
+    const verts = gfx.vertexArray?.vertices;
+    if (!verts) return;
+    for (const poly of gfx.physicsPolygons.values()) {
+      if (poly.vertexIndices.length < 3) continue;
+      const pts = poly.vertexIndices.map((vi) => { const o = verts.get(vi)!.origin; return frameToParent(at, part ? frameToParent(part, o) : o); });
+      const n = newell(pts);
+      if (n.z < FLOOR_Z) continue;
+      polys.push({ pts, n, d: n.x * pts[0].x + n.y * pts[0].y + n.z * pts[0].z });
+    }
+  };
+  const kind = id >>> 24;
+  if (kind === 0x01) addGfx(id, null);
+  else if (kind === 0x02) {
+    const data = portalDat.getFileData(id);
+    if (!data) return { polys, ok: false };
+    let setup: SetupModel;
+    try { setup = new SetupModel(new DatReader(data)); } catch { return { polys, ok }; }
+    const placement = placementFrameOf(setup);
+    setup.parts.forEach((gid, i) => addGfx(gid, placement?.frames[i] ?? null));
+  }
+  return { polys, ok };
 }
 
 /** The unit normal of a polygon by Newell's method (vertex order: AC's front side). */
@@ -142,7 +182,15 @@ export function loadCellGraph(cellDat: DatDatabase, portalDat: DatDatabase, land
       if (!e) complete = false;
     }
     const struct = envs.get(cell.environmentId)?.cells.get(cell.cellStructure);
-    if (struct) floors.set(id, walkablePolys(cell, struct));
+    if (struct) {
+      const fl = walkablePolys(cell, struct);
+      for (const st of cell.staticObjects) {
+        const r = staticFloors(portalDat, st.id, st.frame);
+        fl.push(...r.polys);
+        if (!r.ok) complete = false;
+      }
+      floors.set(id, fl);
+    }
     if (struct) {
       let cx = 0, cy = 0, cz = 0, k = 0;
       for (const v of struct.vertexArray.vertices.values()) {
@@ -184,6 +232,20 @@ export function loadCellGraph(cellDat: DatDatabase, portalDat: DatDatabase, land
     d.landing = floorUnder(fl, d.at.x, d.at.y, d.at.z);
   }
   const airCells = new Set([...floors].filter(([, f]) => f.length === 0).map(([c]) => c));
+  // A thin floorless cell a stair climbs straight through (the archmage tower's 0.2 m slab 0xA9B4011E between
+  // the stair's top at 68.8 and the upper floor at 69): the stair that climbs into it climbs on out of it.
+  for (const c of [...airCells]) {
+    const list = doors.get(c) ?? [];
+    const into = list.filter((d) => d.below !== undefined && d.below !== c && d.climb);
+    const out = list.filter((d) => d.below === c && into.some((i) => d.at.z - i.at.z <= CLIMB_REACH_M));
+    if (!into.length || !out.length) continue;
+    airCells.delete(c);
+    for (const d of out) {
+      d.climb = true;
+      // The upper cell's copy of the same opening.
+      for (const e of doors.get(d.b) ?? []) if (e.b === c && samePoint(e.at, d.at)) e.climb = true;
+    }
+  }
   return { landblock: lb, doors, centers, airCells, complete };
 }
 

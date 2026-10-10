@@ -6,6 +6,7 @@
  *
  *   npx tsx tools/ac-agent/mcp-server.ts
  */
+import { HOSTED_GUIDE } from './hostedGuide.ts';
 import { createInterface } from 'node:readline';
 import { LOCAL_ONLY_TOOLS, TOOLS, TOOL_BY_NAME, inputSchema, type ToolOutput } from './tools.ts';
 
@@ -33,8 +34,8 @@ export function serverInstructions(attach: string | undefined): string {
     : `Play Asheron's Call in this repo's browser client. Start with ac_start, ${loop}`;
 }
 
-/** The hosted connector's instructions: Claude plays the player's own open tab. */
-export const HOSTED_INSTRUCTIONS = "Play Asheron's Call as the player's own character, in the browser tab they have open on playwebac.com (they logged in themselves; you never log in). Start with ac_status; at character select, ac_enter_world. Say what you are doing with ac_goal. Loop: ac_observe → decide → act (ac_walk_to / ac_use / ac_attack / ac_cast / ac_say …) → ac_wait (at most 25 s per call here). This is their real character: play as a normal player, as they ask. If a call says the game is not open or Claude is switched off, tell the player.";
+/** The hosted connector's instructions: the play guide for the player's own open tab (hostedGuide.ts). */
+export const HOSTED_INSTRUCTIONS = HOSTED_GUIDE;
 
 export async function handle(req: RpcRequest, opts: { hosted?: boolean } = {}): Promise<unknown | null> {
   const reply = (result: unknown) => ({ jsonrpc: '2.0', id: req.id, result });

@@ -32,6 +32,7 @@ COPY packages/shared/src/routines/metaView.ts ./packages/shared/src/routines/met
 COPY packages/renderer/src/agent/format.ts ./packages/renderer/src/agent/format.ts
 COPY tools/ac-agent/client.ts ./tools/ac-agent/client.ts
 COPY tools/ac-agent/eras.ts ./tools/ac-agent/eras.ts
+COPY tools/ac-agent/hostedGuide.ts ./tools/ac-agent/hostedGuide.ts
 COPY tools/ac-agent/journal.ts ./tools/ac-agent/journal.ts
 COPY tools/ac-agent/mcp-server.ts ./tools/ac-agent/mcp-server.ts
 COPY tools/ac-agent/routineStore.ts ./tools/ac-agent/routineStore.ts

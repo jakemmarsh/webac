@@ -15,6 +15,7 @@
  *   npx tsx tools/live-drive.ts fill <css selector> <text>
  *   npx tsx tools/live-drive.ts objects               (the client server-object table via CDP; works on production)
  *   npx tsx tools/live-drive.ts goto <url>
+ *   npx tsx tools/live-drive.ts resize <w> <h>          (the viewport, as a window resize)
  *   npx tsx tools/live-drive.ts log [pattern] [n]      (last n console lines, regex-filtered)
  *   npx tsx tools/live-drive.ts stop
  *
@@ -134,6 +135,8 @@ async function serve(): Promise<void> {
         } finally { await cdp.detach(); }
       }
       case 'goto': await page.goto(a[0], { waitUntil: 'commit', timeout: 120_000 }); return 'ok';
+      // A window resize as the browser delivers one (the page's resize event, new innerWidth / innerHeight).
+      case 'resize': await page.setViewportSize({ width: Number(a[0]), height: Number(a[1]) }); return 'ok';
       case 'log': {
         if (!existsSync(LOG)) return '';
         const re = a[0] ? new RegExp(a[0]) : null;

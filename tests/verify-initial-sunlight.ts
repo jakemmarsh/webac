@@ -19,10 +19,12 @@
  * Behavioral: drives the real SkyboxRenderer.
  */
 import { describe, it, expect } from 'vitest';
+import * as THREE from 'three';
 import {
   SkyboxRenderer,
   RETAIL_INITIAL_SUNLIGHT,
   RETAIL_INITIAL_SUNLIGHT_BRIGHTNESS,
+  RETAIL_DEFAULT_DEVICE_FOG,
 } from '../packages/renderer/src/effects/SkyboxRenderer.js';
 
 // The real Dereth "Sunny" keyframes (tools/dump-region-lighting.ts), as in
@@ -112,5 +114,67 @@ describe('VISUAL.sylsfear-canopy-bright-cards — the InitializeLights sun', () 
     sky.setSealedInterior(true);
     expect(sky.directionalLight.intensity).toBe(1);
     expect(sunDir(sky)).toEqual([0, -1, 0]);
+  });
+});
+
+/**
+ * VISUAL.sylsfear-canopy-bright-cards.a — the fog before any landscape loads.
+ * `RenderDeviceD3D::SetDefaultDeviceStates` @ 0059ffe0 sets
+ * SetFFFogProperties(RGBAColor_White, 0, 1000); only the LScape::UseTime fog
+ * tick (loaded_cell_id != 0) sets it again, and `RenderDeviceD3D::SetupState`
+ * @ 005a0c70 enables fog for every mesh draw (WantFFDistanceFog = true).
+ */
+function makeFoggedSky(): { sky: SkyboxRenderer; fog: THREE.Fog } {
+  const sky = makeSky();
+  const fog = new THREE.Fog(0x000000, 1, 2);
+  sky.setFog(fog);
+  sky.updateTimeOfDay(0.5); // the server-clock tick: noon fog 150..2400
+  return { sky, fog };
+}
+
+describe('VISUAL.sylsfear-canopy-bright-cards.a — the SetDefaultDeviceStates fog', () => {
+  it('is white, 0 to 1000', () => {
+    expect(RETAIL_DEFAULT_DEVICE_FOG).toEqual({ color: 0xffffffff, near: 0, far: 1000 });
+  });
+
+  it('a login straight into a sealed cell fogs with it, not with the pre-world clock', () => {
+    const { sky, fog } = makeFoggedSky();
+    expect(fog.near).toBeCloseTo(150, 4);
+    expect(fog.far).toBeCloseTo(2400, 4);
+    sky.setSealedInterior(true);
+    expect(fog.color.getHexString(THREE.SRGBColorSpace)).toBe('ffffff');
+    expect(fog.near).toBe(0);
+    expect(fog.far).toBe(1000);
+  });
+
+  it('holds through clock ticks while sealed (the fog tick idles)', () => {
+    const { sky, fog } = makeFoggedSky();
+    sky.setSealedInterior(true);
+    for (let t = 0; t < 1; t += 0.05) {
+      sky.updateTimeOfDay(t);
+      sky.update(30);
+    }
+    expect(fog.near).toBe(0);
+    expect(fog.far).toBe(1000);
+    expect(fog.color.getHexString(THREE.SRGBColorSpace)).toBe('ffffff');
+  });
+
+  it('a dungeon entered after an outdoor arrival keeps the frozen outdoor fog', () => {
+    const { sky, fog } = makeFoggedSky();
+    sky.noteLandscapeLoaded();
+    sky.setSealedInterior(true);
+    expect(fog.near).toBeCloseTo(150, 4);
+    expect(fog.far).toBeCloseTo(2400, 4);
+    expect(fog.color.getHexString(THREE.SRGBColorSpace)).toBe('c3c8dc');
+  });
+
+  it('leaving to the outdoors fogs from the clock again', () => {
+    const { sky, fog } = makeFoggedSky();
+    sky.setSealedInterior(true);
+    sky.updateTimeOfDay(0.0);
+    sky.setSealedInterior(false);
+    expect(fog.near).toBeCloseTo(0, 4);
+    expect(fog.far).toBeCloseTo(400, 4); // midnight keyframe
+    expect(fog.color.getHexString(THREE.SRGBColorSpace)).toBe('171728');
   });
 });

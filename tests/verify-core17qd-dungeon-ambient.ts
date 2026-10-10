@@ -116,6 +116,7 @@ describe('CORE.17.q.d — a sealed cell lights at the constant, at every hour', 
     const fog = new THREE.Fog(0x000000, 1, 2);
     sky.setFog(fog);
     sky.updateTimeOfDay(0.5);
+    sky.noteLandscapeLoaded(); // entered from outdoors (a direct sealed login fogs with SetDefaultDeviceStates', verify-initial-sunlight.ts)
     sky.setSealedInterior(true);
     const sunBefore = sky.directionalLight.intensity;
     const sunColorBefore = sky.directionalLight.color.getHex();
@@ -139,6 +140,7 @@ describe('CORE.17.q.d — a sealed cell lights at the constant, at every hour', 
     const fog = new THREE.Fog(0x000000, 1, 2);
     sky.setFog(fog);
     sky.updateTimeOfDay(0.5);
+    sky.noteLandscapeLoaded(); // entered from outdoors (a direct sealed login fogs with SetDefaultDeviceStates', verify-initial-sunlight.ts)
     sky.setSealedInterior(true);
     sky.freezeTimeOfDay(0.0);
     sky.update(1);
@@ -154,6 +156,7 @@ describe('CORE.17.q.d — a sealed cell lights at the constant, at every hour', 
     const fog = new THREE.Fog(0x000000, 1, 2);
     sky.setFog(fog);
     sky.updateTimeOfDay(0.0);
+    sky.noteLandscapeLoaded(); // entered from outdoors (a direct sealed login fogs with SetDefaultDeviceStates', verify-initial-sunlight.ts)
     sky.setSealedInterior(true);
     sky.updateTimeOfDay(0.5);
     expect(bytes(fog.color)).toEqual([0x17, 0x17, 0x28]);
@@ -187,6 +190,7 @@ describe('CORE.17.q.d — a sealed cell lights at the constant, at every hour', 
     const fog = new THREE.Fog(0x000000, 1, 2);
     sky.setFog(fog);
     sky.updateTimeOfDay(0.5);
+    sky.noteLandscapeLoaded(); // entered from outdoors (a direct sealed login fogs with SetDefaultDeviceStates', verify-initial-sunlight.ts)
     sky.setSealedInterior(true);
     sky.updateTimeOfDay(0.0);
     sky.setSealedInterior(true);

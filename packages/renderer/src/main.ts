@@ -27,7 +27,7 @@ import { SkillTable } from '@ac/dat-parser/file-types/SkillTable.js';
 import { SecondaryAttributeTable } from '@ac/dat-parser/file-types/SecondaryAttributeTable.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, CombatStyle, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken,  PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle } from '@ac/shared';
+import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, CombatStyle, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken,  PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
@@ -131,7 +131,9 @@ import { RoutineSync } from './agent/RoutineSync.js';
 import { isAutomationCommand } from './ui/automation/AutomationPanel.js';
 import { bridgeConnectApi } from './launcher/ConnectScreen.js';
 import { TabRelay, type RelayCall } from './agent/relayTab.js';
-import { ClaudeControl } from './agent/claudeControl.js';
+import { BackgroundTicker } from './scene/BackgroundTicker.js';
+import { installWorkerTimers, makeTimersWorker } from './scene/workerTimers.js';
+import { ClaudeControl, isTakeoverInput } from './agent/claudeControl.js';
 import { UNPAIR_FRAME, pairFrame, pairingLine, parsePairingCommand, readRelayOptIn, readRevokedBefore, relayOptInKey, writeRelayOptIn, writeRevokedBefore } from './agent/claudePairing.js';
 import { VT_COMMAND } from './agent/RoutineEngine.js';
 import { exposeDebugGlobal, readDebugGlobal, debugBag, debugGlobalsEnabled } from './utils/debugGlobals.js';
@@ -326,7 +328,8 @@ import { createViewerLight, updateViewerLight, viewerLightActive } from './effec
 import { setCellLighting } from './models/RetailLighting.js';
 import type { MovementState, PlayerPosition } from './network/MovementSync.js';
 import { parsePlayerDescription } from './network/PlayerDescriptionParser.js';
-import { buildContractRows } from './network/contractRows.js';
+import { buildContractRows, applyContractTracker, applyContractTrackerTable, type TimedContractEntry } from './network/contractRows.js';
+import { harDumpText } from './chat/HouseAccessText.js';
 import { routeObjectSubject, buildInventoryEntry, WorldObjectRecords, PendingContainIds } from './network/objectSubjectRouting.js';
 import { ItemShortcutRestorer, isShortcutEligible, quickslotCommand, CREATE_SHORTCUT_ACTION, type ShortcutTarget } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
@@ -4499,7 +4502,11 @@ async function main() {
       : inOpen
         ? { iconDid: inOpen.iconDid, iconOverlayDid: inOpen.iconOverlayDid, iconUnderlayDid: inOpen.iconUnderlayDid, itemType: inOpen.itemType, uiEffects: inOpen.uiEffects }
         : { iconDid: obj?.iconId ?? 0, iconOverlayDid: obj?.iconOverlayId, iconUnderlayDid: obj?.iconUnderlayId, itemType: obj?.itemType, uiEffects: obj?.uiEffects };
-    gameUI.showPendingInPack({ guid, packSlot: gameUI.getSelectedPackSlot(), index, ...look });
+    // GetObjectNameWide(id, 2) — the NAME_APPROPRIATE name AcceptDragObject's "Already attempting…" line uses.
+    const name = held ? getAppropriateName(held.name, held.pluralName, held.stackSize)
+      : inOpen ? getAppropriateName(inOpen.name, inOpen.pluralName, inOpen.stackSize)
+        : obj?.name ?? '';
+    gameUI.showPendingInPack({ guid, packSlot: gameUI.getSelectedPackSlot(), index, name, ...look });
   }
   /** AttemptToPlaceInContainer(item, player, 0, autoMerge = 1, 0) — the toolbar's non-owned drop and AutoWield's dequip. */
   const placeInPlayer = (guid: number, gesture: string): boolean => {
@@ -6435,15 +6442,29 @@ async function main() {
     // list: merge onto the cell's stack, else AttemptToPlaceInContainer into
     // the container (IsContainerLegal: a housing hook takes only its kind of
     // item, in an owned house — "That item cannot be placed on the hook.").
-    onStoreItem: (itemGuid: number, cellItemId = 0) => {
+    onStoreItem: (itemGuid: number, cellItemId = 0, cellIndex?: number) => {
       if (!openContainerGuid || !sendGameAction || !aceCharGuid) return;
       const w = placementWorld();
       if (!placementReady()) return;
       const entries = openContainer.items().filter((it) => it.containerId === openContainerGuid).map((it) => ({ id: it.guid, isPack: it.isContainer }));
-      runPlacement(itemGuid, acceptItemListDrop({
+      const placement = acceptItemListDrop({
         itemId: itemGuid, cellItemId, listContainerId: openContainerGuid, containerList: false,
         cellPlacement: itemListDropSlot(entries, cellItemId, w.object(itemGuid)?.isContainer ?? false),
-      }, w), 'item list drop (container)');
+      }, w);
+      // RECON.inventory-grid-dat-cells.b.a.b — AcceptDragObject's m_pendingItem
+      // on the ground container's row (the same rule as the pack grid).
+      const pendingAt = itemListDropPendingIndex(placement, openContainerGuid, cellIndex, entries.filter((e) => !e.isPack).length);
+      const held = pendingAt !== null ? heldItemById(itemGuid) : null;
+      if (pendingAt !== null && held) {
+        gameUI.showPendingInContainer({
+          guid: itemGuid, listGuid: openContainerGuid, packSlot: 0, index: pendingAt,
+          iconDid: held.iconDid ?? 0, iconOverlayDid: held.iconOverlayDid, iconUnderlayDid: held.iconUnderlayDid,
+          itemType: held.itemType, uiEffects: held.uiEffects,
+          name: getAppropriateName(held.name, held.pluralName, held.stackSize),
+        });
+      }
+      const sent = runPlacement(itemGuid, placement, 'item list drop (container)');
+      if (!sent && pendingAt !== null) gameUI.endPendingInContainer(itemGuid);
     },
     // gmExternalContainerUI::DragItemAcceptable @ 004cbb60 (the drag art).
     dragAcceptable: (itemGuid: number) => {
@@ -7062,6 +7083,8 @@ async function main() {
   let aceServerAccount: string | null = null;
   // AGENT.hosted-mcp-connector: the chat side of pairing Claude (set where the tab relay is built).
   let pairingChat: ((line: string) => boolean) | null = null;
+  // The agent API's tick (every 100 ms), run from the frame step once the agent starts.
+  let agentFrameTick: (() => void) | null = null;
   let connectUrl = urlLogin.server ? bridgeUrlWithServer(bridgeUrl, urlLogin.server) : bridgeUrl;
   /** The launcher world's name for the World box (null: the server's own ServerName). */
   let launcherWorldName: string | null = null;
@@ -8044,7 +8067,10 @@ async function main() {
     // both the full-table broadcast and single-contract updates patch this
     // map then re-render the panel. ACE retail uses the same merge-on-delta
     // pattern client-side per GameEventSendClientContractTracker.cs.
-    const contractState = new Map<number, import('./network/ServerMessageHandler.js').ContractTrackerEntry>();
+    // BUG.contract-status-strings-not-retail — each entry keeps the panel
+    // clock at receipt (retail _time_of_server_update), so the countdowns run.
+    const contractState = new Map<number, TimedContractEntry>();
+    const contractNowSec = (): number => performance.now() / 1000;
     // FAITHFUL.284 — contract stage labels now use the @ac/shared
     // ContractStage enum + contractStageLabel helper. Pre-fix this was
     // an inline { 1: 'Available', 2: 'In Progress', 3: 'Complete' }
@@ -8189,7 +8215,8 @@ async function main() {
           if (data.wielderId === aceCharGuid && data.currentWieldedLocation) {
             const invItem = playerState.inventory.getItem(data.guid);
             if (invItem) {
-              playerState.equipment.equipItem(invItem, data.currentWieldedLocation);
+              // The server's own record: no eviction by overlapping masks.
+              playerState.equipment.equipItem(invItem, data.currentWieldedLocation, false);
               // Mesh attach for the wielded item — handles the at-login case
               // (item CreateObjects can arrive before/after the player's own
               // model is registered; the helper silent-no-ops if playerModel
@@ -11323,20 +11350,16 @@ async function main() {
       // single-contract updates (accept new quest, abandon, complete stage)
       // patch the panel live instead of waiting for a full table re-broadcast.
       onContractTrackerTable: (data) => {
-        contractState.clear();
-        for (const { entry } of data.contracts) {
-          contractState.set(entry.contractId, entry);
-        }
+        applyContractTrackerTable(contractState, data.contracts.map(({ entry }) => entry), contractNowSec());
         publishContracts();
         console.log(`[AC] ContractTrackerTable: ${contractState.size} contracts`);
       },
       onContractTracker: (data) => {
         const { contract, deleteContract, setAsDisplayContract } = data;
+        applyContractTracker(contractState, contract, !!deleteContract, contractNowSec());
         if (deleteContract) {
-          contractState.delete(contract.contractId);
           console.log(`[AC] ContractTracker delete: id=${contract.contractId}`);
         } else {
-          contractState.set(contract.contractId, contract);
           console.log(`[AC] ContractTracker update: id=${contract.contractId} stage=${contract.stage}` +
             (setAsDisplayContract ? ' (display)' : ''));
         }
@@ -11437,6 +11460,8 @@ async function main() {
         gameUI.setMapHousePosition(data.houseType, data.position);
       },
       onHouseUpdateHAR: (data) => {
+        // Handle_House__Recv_UpdateHAR @ 00585b80: HAR::Dump to the main chat, type 0.
+        gameUI.addSystemMessage(harDumpText(data).replace(/\n$/, ''), chatColorFor(0), 0);
         gameUI.setHouseData({
           access: {
             monarchId: data.monarchId,
@@ -11691,7 +11716,7 @@ async function main() {
           getItem: (guid) => playerState.inventory.getItem(guid),
           addItem: (entry, guid) => { playerState.inventory.addItem(entry, guid); },
           removeWorldObject: (guid) => { serverObjectManager?.deleteObject(guid, 'wield'); },
-          equip: (it, location) => { playerState.equipment.equipItem(it, location as EquipMask); },
+          equip: (it, location) => { playerState.equipment.equipItem(it, location as EquipMask, false); },
           confirmEquip: (id) => pendingEquipmentActions.confirm(id),
           markInventoryDirty: () => { inventoryDirty = true; },
         }, data.itemGuid, data.location);
@@ -14161,6 +14186,13 @@ async function main() {
       inventoryRequestRefusal: () => inventoryRequests.refusal(),
       /** CORE.17.k.c.a.a — the GameAction sequence counter: it only advances when a message actually went out. */
       gameActionSequence: () => aceActionSequence,
+      /** BUG.contract-status-strings-not-retail — replay a ContractTrackerTable (0x0314) through the live handler. */
+      contractTrackerTable: (contracts: Array<{ contractId: number; stage: number; timeWhenDone?: number; timeWhenRepeats?: number }>): boolean => {
+        serverMessageHandler.getHandlers().onContractTrackerTable?.({
+          contracts: contracts.map((c) => ({ key: c.contractId, entry: { version: 0, timeWhenDone: 0, timeWhenRepeats: 0, ...c } })),
+        } as never);
+        return true;
+      },
       weenieError: (code: number, message?: string, event: 'error' | 'withString' | 'useDone' = 'error'): boolean => {
         const h = serverMessageHandler.getHandlers();
         if (event === 'withString') { h.onWeenieErrorWithString?.({ errorType: code, message: message ?? '' }); return true; }
@@ -15380,17 +15412,19 @@ async function main() {
       say: claudeSay,
     });
     const tabRelay = new TabRelay((t) => aceConnection.sendBridgeText(t), () => relaySurface, claudeControl);
-    // Trusted input only (a script's synthetic events are not the player), outside text fields; Enter / Tab
-    // open chat or cycle, not act. Capture phase, so Claude's keys are released before the game sees the player's.
-    const isPlayerAct = (e: Event): boolean => {
-      if (!e.isTrusted || !tabRelay.on) return false;
+    // Trusted input only (a script's synthetic events are not the player): a moving / fighting key outside
+    // text fields, or a press on the 3D world (isTakeoverInput). Capture phase, so Claude's keys are
+    // released before the game sees the player's.
+    window.addEventListener('keydown', (e) => {
+      if (!e.isTrusted || !tabRelay.on) return;
       const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return false;
-      if (e instanceof KeyboardEvent && (['Enter', 'Tab', 'Shift', 'Control', 'Alt', 'Meta'].includes(e.key))) return false;
-      return true;
-    };
-    window.addEventListener('keydown', (e) => { if (isPlayerAct(e)) claudeControl.playerInput(); }, true);
-    window.addEventListener('mousedown', (e) => { if (isPlayerAct(e)) claudeControl.playerInput(); }, true);
+      const inTextField = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+      if (isTakeoverInput({ kind: 'key', code: e.code, inTextField })) claudeControl.playerInput();
+    }, true);
+    window.addEventListener('mousedown', (e) => {
+      if (!e.isTrusted || !tabRelay.on) return;
+      if (isTakeoverInput({ kind: 'mouse', onWorld: e.target === sceneManager.renderer?.domElement })) claudeControl.playerInput();
+    }, true);
     const relayState = () => {
       if (!aceConnection.isConnected) return;
       tabRelay.sendState(worldCharacterName, tabScreen(), readRevokedBefore(relayStorage, relayKey()));
@@ -15399,7 +15433,9 @@ async function main() {
     tabRelay.on = relayDevOptIn;
     const relayKey = () => relayOptInKey(connectUrl, characterMessageAccount(aceServerAccount, aceAccount));
     const relayStorage = (() => { try { return window.localStorage; } catch { return null; } })();
-    const setRelayOn = (on: boolean) => { tabRelay.on = on || relayDevOptIn; writeRelayOptIn(relayStorage, relayKey(), on); relayState(); };
+    // Claude switched on: this page's timers move to a worker's unthrottled clock (scene/workerTimers.ts).
+    const claudeTimers = () => { if (tabRelay.on) installWorkerTimers(window, makeTimersWorker); };
+    const setRelayOn = (on: boolean) => { tabRelay.on = on || relayDevOptIn; writeRelayOptIn(relayStorage, relayKey(), on); claudeTimers(); relayState(); };
     pairingChat = (line) => {
       const cmd = parsePairingCommand(line);
       if (!cmd) return false;
@@ -15442,7 +15478,7 @@ async function main() {
         worldCharacterName = null;
         // The bridge registers this tab for its account on the CharacterList: tell it whether the relay is on
         // (this account's kept opt-in, now that the server has named the account).
-        setTimeout(() => { tabRelay.on = relayDevOptIn || readRelayOptIn(relayStorage, relayKey()); relayState(); }, 500);
+        setTimeout(() => { tabRelay.on = relayDevOptIn || readRelayOptIn(relayStorage, relayKey()); claudeTimers(); relayState(); }, 500);
         // Logged in: ask once whether this account has the automation UI (dev builds always do).
         if (!automationUiEnabled(urlOverridesEnabled())) aceConnection.requestRoutinesGrant();
       } else if (e.type === 'disconnected') routineSync.reset();
@@ -15783,6 +15819,14 @@ async function main() {
         characterList: () => gameUI.characterSelectList(),
         enterCharacter: (name) => gameUI.enterCharacterNamed(name),
         showGoal: (text) => { if (text) gameUI.addSystemMessage(`[Claude] Goal: ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System); },
+        screenshot: () => sceneManager.captureNextFrame(),
+        // The hosted connector's journal: this browser, per bridge + account + character.
+        journalLoad: () => {
+          try { const raw = localStorage.getItem(`${relayKey()}:journal:${(worldCharacterName ?? '').toLowerCase()}`); return raw ? JSON.parse(raw) : null; } catch { return null; }
+        },
+        journalSave: (j) => {
+          try { localStorage.setItem(`${relayKey()}:journal:${(worldCharacterName ?? '').toLowerCase()}`, JSON.stringify(j)); return true; } catch { return false; }
+        },
       };
       const agentApi = new AgentApi(agentHost);
       relaySurface = agentApi.surface() as unknown as Record<string, unknown>;
@@ -15791,7 +15835,9 @@ async function main() {
       const addSystemMessage = gameUI.addSystemMessage.bind(gameUI);
       // Lines raised before the chat window exists are queued and re-sent through addSystemMessage: count them once, on replay.
       gameUI.addSystemMessage = (text, color, type, targetWindowId) => { if (gameUI['chatMessages']) agentApi.pushChat(text, type); addSystemMessage(text, color, type, targetWindowId); };
-      setInterval(() => agentApi.tick(), 100);
+      // The agent's steering tick rides the frame step (the rAF frame, or the background beat when the
+      // browser stops frames), not a page timer that a covered window throttles to once a second.
+      agentFrameTick = () => agentApi.tick();
       // AGENT.automation-panel — the player's surface over the same engine: the Automation panel
       // (/automation, or the HUD strip while a routine runs). Reports print as System chat.
       // Dev / URL-override builds only (automationUiEnabled); the agent API itself runs everywhere.
@@ -17023,9 +17069,21 @@ async function main() {
   setObjectLightSink(datLightBudget);
   const datLightViewerPos = new THREE.Vector3();
 
+  // The browser stops rAF for a hidden, minimized or covered window; the worker's beat keeps the game
+  // simulating (no drawing) so movement, physics and the agent's tasks carry on (scene/BackgroundTicker.ts).
+  const backgroundTicker = new BackgroundTicker(() => frameStep(false));
+  let agentTickAt = 0;
+  backgroundTicker.start();
   function animate() {
     requestAnimationFrame(animate);
+    backgroundTicker.frame();
+    frameStep(true);
+  }
+
+  /** One frame of the game; `draw` false runs everything but the 3D draw (the background beat). */
+  function frameStep(draw: boolean) {
     const now = performance.now();
+    if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(); }
     const dt = (now - lastTime) / 1000;
     lastTime = now;
 
@@ -18109,7 +18167,7 @@ async function main() {
     // The opaque tunnel covers the canvas then, and a frame drawn under it
     // only competed with the portal-space gate's prefetch (the full sky's
     // layers held the warm login gate ~1.5 s on SwiftShader, 2026-10-05).
-    if (gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
+    if ((!draw && !sceneManager.capturePending) || gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
     else sceneManager.render();
     // SceneTool::UpdateFPSCounter runs after every flip; gmSmartBoxUI::UseTime redraws the meter each frame.
     if (framerateMeter) {

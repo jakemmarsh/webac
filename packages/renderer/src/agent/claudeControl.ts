@@ -2,8 +2,8 @@
  * AGENT.hosted-mcp-connector step 4 — the player and Claude in one tab
  * (docs/hosted-agent-connector.md §5). The player always wins:
  *
- * - **The player takes over** by acting themselves (a key outside chat, a
- *   click in the game) while Claude is active. Claude's movement stops, a
+ * - **The player takes over** by acting themselves (a moving or fighting key,
+ *   a mouse press on the 3D world; isTakeoverInput) while Claude is active. Claude's movement stops, a
  *   routine Claude started pauses, and Claude's acting calls are refused
  *   until the player has been idle 60 s or types `/automation resume`.
  *   Reading calls (observe, status, inventory …) still answer, so Claude
@@ -18,7 +18,25 @@ export type Control = 'claude' | 'player';
 export const READ_METHODS = new Set([
   'version', 'observe', 'self', 'events', 'waitFor', 'inventory', 'spells', 'characterSheet', 'allegiance', 'map', 'probe', 'where',
   'itemPalettes', 'keys', 'vendor', 'trace', 'status', 'goal', 'routineStats', 'routineStatus', 'routineDryRun', 'routinesLoad',
+  // Not game actions: the screenshot, the journal and the routine store.
+  'screenshot', 'journalLoad', 'journalSave', 'routinesSave',
 ]);
+
+/**
+ * The keys that move or fight with retail's default bindings (KeyMap 0x14000002): walk / turn / strafe /
+ * back, jump, the arrow keys, combat mode and the attack-height keys. Typing, opening panels, the camera,
+ * clicking chat or the tab itself is not taking over (Jake, 2026-10-10: the takeover was too twitchy).
+ */
+export const TAKEOVER_KEYS = new Set([
+  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyZ', 'KeyC', 'KeyX', 'Space',
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backquote',
+  'Insert', 'Home', 'PageUp', 'Delete', 'End', 'PageDown',
+]);
+
+/** Whether a trusted input is the player acting: a moving / fighting key, or a mouse press on the 3D world. */
+export function isTakeoverInput(e: { kind: 'key'; code: string; inTextField: boolean } | { kind: 'mouse'; onWorld: boolean }): boolean {
+  return e.kind === 'key' ? !e.inTextField && TAKEOVER_KEYS.has(e.code) : e.onWorld;
+}
 
 export const PLAYER_IDLE_RESUME_MS = 60_000;
 /** Claude counts as active (so player input takes over) this long after its last acting call. */

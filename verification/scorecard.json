@@ -142,11 +142,11 @@
    ],
    "verdict": "close",
    "judged": "2026-10-10",
-   "evidence": "verification/sylsfear-canopy-bright-cards/sbs-tree-matched-0.184.png",
+   "evidence": "verification/sylsfear-canopy-bright-cards/direct-login-fog-after.png",
    "gaps": [
     "VISUAL.dungeon-scene-details"
    ],
-   "notes": "2026-10-10 re-judged: at a matched phase (0.184, sun frozen at the outdoor hop like retail's tour) the Sylsfear canopy matches retail's dark mass with brighter lobes, so VISUAL.sylsfear-canopy-bright-cards was a phase mismatch and leaves the gaps. A direct dungeon login now uses retail's InitializeLights sun. Remaining: VISUAL.dungeon-scene-details."
+   "notes": "2026-10-10 re-judged after VISUAL.sylsfear-canopy-bright-cards.a: a direct dungeon login now has retail's SetDefaultDeviceStates fog (white 0..1000 m) and InitializeLights sun; the teleport-in captures (world-dungeon, world-dungeon-stone) keep the frozen outdoor fog, as retail, and were unchanged in the --ui pass. The fog shift is under 1% at room distances, so nothing a player would notice changed. Remaining: VISUAL.dungeon-scene-details."
   },
   {
    "id": "flow-movement",

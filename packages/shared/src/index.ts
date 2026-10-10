@@ -210,9 +210,13 @@ export {
 export { itemTypeLabel } from './enums/ItemTypeLabels.js';
 export {
   ContractStage,
-  contractStageLabel,
-  formatContractTimer,
+  CONTRACT_TEXT,
+  contractProgressText,
+  contractTimedText,
+  contractRepeatLeft,
+  sprintfOneInt,
   deltaTimeToString,
+  type ContractTiming,
 } from './enums/ContractStage.js';
 export {
   roundHalfAwayFromZero,

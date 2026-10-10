@@ -75,8 +75,18 @@ export const ZLayer = {
    * root 0x1000004b, zLevel 0 in the DAT). Retail draws it over the chat
    * band (zLevel 900 = further back, see HUD_CHAT_BAND); rawg_02 shows the
    * checkbox row fully legible with the chat log art behind/below it.
+   *
+   * VISUAL.melee-bar-under-transaction-dock — it is ONE floaty window with
+   * the spell bar (HUD slot 0x21000005:0x100006b5, both pages), so both sit
+   * on this tier. The slots 0x100005fd (transaction dock), 0x100006b5
+   * (combat window) and 0x100005ff (panels window) are all zLevel 0 in that
+   * DAT order; UIRegion::AddChild @ 006a0760 inserts after the last sibling
+   * whose zlevel >= the new one and DrawChildren paints head → tail, so the
+   * combat window draws OVER the dock (HUD_BOTTOM_BAR 950) and UNDER the
+   * panels (PANEL_BASE 1000). Was 9 for the melee page (under the dock) and
+   * a literal 2000 for the spell page (over the panels).
    */
-  HUD_COMBAT_BAR: 9,
+  HUD_COMBAT_BAR: 960,
 
   /** HUD frame backgrounds */
   HUD_BACKGROUND: 400,

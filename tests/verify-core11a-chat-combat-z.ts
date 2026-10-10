@@ -43,6 +43,15 @@ describe('CORE.11.a — z-tier ordering (registry)', () => {
     expect(ZLayer.HUD_COMBAT_BAR).toBeGreaterThan(ZLayer.HUD_CHAT_BAND);
   });
 
+  // VISUAL.melee-bar-under-transaction-dock — 0x21000005's zLevel-0 floaty
+  // slots in DAT order: dock 0x100005fd, combat window 0x100006b5, panels
+  // window 0x100005ff; UIRegion::AddChild @ 006a0760 puts each after its
+  // equal-z siblings and DrawChildren paints head → tail.
+  it('the combat window draws over the transaction dock and under the panels window', () => {
+    expect(ZLayer.HUD_COMBAT_BAR).toBeGreaterThan(ZLayer.HUD_BOTTOM_BAR);
+    expect(ZLayer.HUD_COMBAT_BAR).toBeLessThan(ZLayer.PANEL_BASE);
+  });
+
   it('chat band stays below the other bottom surfaces (toolbar, bottom bars, panels)', () => {
     expect(ZLayer.HUD_CHAT_BAND).toBeLessThan(ZLayer.HUD_TOOLBAR);
     expect(ZLayer.HUD_CHAT_BAND).toBeLessThan(ZLayer.HUD_BOTTOM_BAR);

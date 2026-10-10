@@ -90,6 +90,7 @@ describe('CORE.17.q — SkyboxRenderer sealed-interior mode', () => {
     expect(sky.isSealedInterior).toBe(false);
     expect(bytes(bg)).toEqual([0xc3, 0xc8, 0xdc]);
 
+    sky.noteLandscapeLoaded(); // an outdoor arrival loaded the landscape (else SetDefaultDeviceStates' fog, verify-initial-sunlight.ts)
     sky.setSealedInterior(true);
     expect(sky.isSealedInterior).toBe(true);
     expect(sky.skyObject.visible).toBe(false);

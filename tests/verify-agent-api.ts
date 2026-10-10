@@ -6,11 +6,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AgentApi, agentApiEnabled, automationUiEnabled, bearing, classify, compassToYaw, MAP_COORD_ORIGIN, parseMapCoords, relDeg, toGlobal, yawToCompass,
-  type AgentHost, type AgentHostObject, type AgentHostSelf, fixtureReach, doorOnTheWay } from '../packages/renderer/src/agent/AgentApi.ts';
+  type AgentHost, type AgentHostObject, type AgentHostSelf, fixtureReach, doorOnTheWay, inUpdateRange } from '../packages/renderer/src/agent/AgentApi.ts';
 import { formatChat, formatObservation, relativeDirection, compassPoint } from '../packages/renderer/src/agent/format.ts';
 import { formatMapCoord } from '../packages/shared/src/types.ts';
 import { mapCoordinateText, mapCoordsOfCell } from '../packages/renderer/src/ui/MapMarkers.ts';
 import { FakeHost, HOLTBURG, run } from './_harness/agentFake.ts';
+import { PathSearch } from '../packages/renderer/src/agent/navPlanner.ts';
 
 
 describe('agent geometry', () => {
@@ -286,6 +287,109 @@ describe('AgentApi', () => {
     expect(seen[0].to).toMatchObject({ x: expect.closeTo(80, 0), y: expect.closeTo(30, 0) });
   });
 
+  it('walkTo plans the doorway route again on the way, for a building not loaded when the walk began (the archmage, 2026-10-10)', async () => {
+    // The goal is in a house 150 m north whose only door is 50 m west of the straight line, too far off for a search.
+    host.wall = (x, y) => Math.abs(y - 150) < 0.4 && !(x > 29.6 && x < 31.4);
+    host.add({ guid: 0x800000c1, name: 'Archmage Cindrue', itemType: 0x10, cell: 0xa9b40105, x: 80, y: 170 });
+    const route = host.route;
+    const asked: number[] = [];
+    // Cells further than 70 m away aren't loaded: no route to them yet.
+    host.route = (fc, f, tc, to) => { asked.push(Math.hypot(80 - host.me.x, 170 - host.me.y)); return Math.hypot(80 - host.me.x, 170 - host.me.y) > 70 ? null : route(fc, f, tc, to); };
+    host.routeTo = [{ x: 30.5, y: 150, z: 94 }];
+    const p = api.walkTo('Archmage Cindrue', { within: 1, timeoutMs: 120_000 });
+    run(api, host, 120_000);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true });
+    expect(asked[0]).toBeGreaterThan(140);
+    expect(asked.some((d) => d <= 70)).toBe(true);
+    expect(host.me.y).toBeGreaterThan(160);
+  });
+
+  it('a standing search uses a share of each frame, more on a slow frame (a 10 fps headless window searched 55 points a second, 2026-10-10)', async () => {
+    host.wall = (x, y) => Math.abs(y - 30) < 0.4;
+    host.add({ guid: 0x80000044, name: 'Beyond', x: 80, y: 40 });
+    const budgets: number[] = [];
+    const step = vi.spyOn(PathSearch.prototype, 'step').mockImplementation((ms?: number) => { budgets.push(ms ?? 0); return null; });
+    void api.walkTo('Beyond', { timeoutMs: 5_000 });
+    run(api, host, 2000); // 100 ms frames
+    step.mockRestore();
+    expect(budgets.length).toBeGreaterThan(0);
+    expect(budgets.every((b) => b === 25)).toBe(true); // 40% of 100 ms, capped at 25
+  });
+
+  it('walkTo never stands searching longer than SEARCH_WALL_MS a search, nor past its timeout by more than SEARCH_CREDIT_MS', async () => {
+    host.wall = (x, y) => Math.abs(y - 30) < 0.4;
+    host.add({ guid: 0x80000043, name: 'Beyond', x: 80, y: 40 });
+    const step = vi.spyOn(PathSearch.prototype, 'step').mockReturnValue(null); // a search that never ends
+    const abandon = vi.spyOn(PathSearch.prototype, 'abandon');
+    let done: { ok: boolean; message: string } | null = null;
+    void api.walkTo('Beyond', { timeoutMs: 10_000 }).then((r) => { done = r; });
+    let ms = 0;
+    for (; ms < 300_000 && !done; ms += 1000) { run(api, host, 1000); await Promise.resolve(); }
+    const abandoned = abandon.mock.calls.length;
+    step.mockRestore();
+    abandon.mockRestore();
+    expect(done).toMatchObject({ ok: false, message: expect.stringMatching(/^timed out/) });
+    expect(abandoned).toBeGreaterThan(0);
+    // Before the cap, a search that never ended held the walk forever: the time stood searching never counted.
+    expect(ms).toBeGreaterThan(10_000);
+    expect(ms).toBeLessThanOrEqual(10_000 + AgentApi.SEARCH_CREDIT_MS + 2000);
+  });
+
+  it('observe says where each fellow is: distance and direction in view, out of sight when not (Bulwark waited 490 m away, 2026-10-10)', () => {
+    host.add({ guid: 0x50000002, name: 'Claude Arcanist', itemType: 0x10, objectDescFlags: 0x8 | 0x10, x: 80, y: 32 }); // 12 m north
+    const vit = (cur: number, max: number) => ({ cur, max });
+    (host as unknown as { fellows: AgentHost['fellows'] }).fellows = () => [
+      { guid: 0x50000002, name: 'Claude Arcanist', health: vit(40, 80), stamina: vit(1, 1), mana: vit(1, 1) },
+      { guid: 0x50000003, name: 'Claude Faraway', health: vit(90, 90), stamina: vit(1, 1), mana: vit(1, 1) },
+    ];
+    const obs = api.observe();
+    expect(obs.fellows).toEqual([
+      { name: 'Claude Arcanist', healthPct: 50, dist: expect.closeTo(12, 0), bearing: expect.closeTo(0, 0) },
+      { name: 'Claude Faraway', healthPct: 100 },
+    ]);
+    const text = formatObservation(obs);
+    expect(text).toMatch(/fellows: Claude Arcanist 50% HP, 12 m N; Claude Faraway 100% HP, out of sight/);
+  });
+
+  it('walkTo refuses map coordinates off the map instead of setting off for them (Arcanist, "197.4S, 59.9E", 2026-10-10)', async () => {
+    expect(await api.walkTo('197.4S, 59.9E')).toMatchObject({ ok: false, message: expect.stringMatching(/off the map/) });
+    expect(await api.walkTo('42.1N, 103.5E')).toMatchObject({ ok: false, message: expect.stringMatching(/off the map/) });
+    expect(host.keys.has('KeyW')).toBe(false);
+  });
+
+  it('a creature past the server\'s 3 × 3 landblock update range is out of sight, not at its last position; a fellow 212 m off resolves by name (2026-10-10)', () => {
+    // Holtburg is landblock A9B4; two landblocks south (A9B2) the server no longer moves anything for us.
+    host.add({ guid: 0x50000003, name: 'Claude Bulwark', itemType: 0x10, objectDescFlags: 0x8 | 0x10, cell: 0xa9b20020, x: 80, y: 20 }); // ~384 m S, stale
+    host.add({ guid: 0x50000002, name: 'Claude Arcanist', itemType: 0x10, objectDescFlags: 0x8 | 0x10, cell: 0xa9b30020, x: 80, y: 0 }); // 212 m S, adjacent landblock
+    host.add({ guid: 0x7a9b4001, name: 'Far Door', objectDescFlags: 0x1000, cell: 0xa9b20020, x: 80, y: 30 }); // static: its position stays good
+    const vit = (cur: number, max: number) => ({ cur, max });
+    (host as unknown as { fellows: AgentHost['fellows'] }).fellows = () => [
+      { guid: 0x50000003, name: 'Claude Bulwark', health: vit(1, 1), stamina: vit(1, 1), mana: vit(1, 1) },
+      { guid: 0x50000002, name: 'Claude Arcanist', health: vit(1, 1), stamina: vit(1, 1), mana: vit(1, 1) },
+    ];
+    const near = api.nearby(1000).map((o) => o.name);
+    expect(near).not.toContain('Claude Bulwark');
+    expect(near).toContain('Claude Arcanist');
+    expect(near).toContain('Far Door');
+    expect(api.observe().fellows).toEqual([
+      { name: 'Claude Bulwark', healthPct: 100 },
+      { name: 'Claude Arcanist', healthPct: 100, dist: expect.closeTo(212, 0), bearing: expect.closeTo(180, 0) },
+    ]);
+    expect(api.resolve('Claude Arcanist', 'world')).toBe(0x50000002);
+    expect(api.resolve('Claude Bulwark', 'world')).toBeNull();
+    expect(inUpdateRange(0xa9b40019, 0xa9b30020)).toBe(true);
+    expect(inUpdateRange(0xa9b40019, 0xaab50001)).toBe(true);
+    expect(inUpdateRange(0xa9b40019, 0xa9b20020)).toBe(false);
+  });
+
+  it('observe says when you are alone in a fellowship (a fellow logged out and /f reaches no one, 2026-10-10)', () => {
+    (host as unknown as { fellowshipInfo: AgentHost['fellowshipInfo'] }).fellowshipInfo = () => ({ leader: true, open: false, count: 1 });
+    expect(formatObservation(api.observe())).toMatch(/fellowship: only you are in it/);
+    (host as unknown as { fellowshipInfo: AgentHost['fellowshipInfo'] }).fellowshipInfo = () => ({ leader: true, open: false, count: 2 });
+    expect(formatObservation(api.observe())).not.toMatch(/only you are in it/);
+  });
+
   it('walkTo to map coordinates', async () => {
     const goal = toGlobal(HOLTBURG, 80, 60);
     const ns = goal.y / 240 - MAP_COORD_ORIGIN, ew = goal.x / 240 - MAP_COORD_ORIGIN;
@@ -345,6 +449,32 @@ describe('AgentApi', () => {
     expect(r).toMatchObject({ ok: true });
     expect(host.sent).toContain('use 80000045');
     expect(Math.hypot(host.me.x - 80, host.me.y - 40)).toBeLessThan(1.6);
+  });
+
+  it('walkTo opens the closed door in the next doorway of its route first, without searching round it (the archmage tower, 2026-10-10)', async () => {
+    let open = false;
+    const inBand = (v: number, c: number, half: number) => Math.abs(v - c) < half;
+    host.wall = (x, y) => {
+      const onWall = (inBand(x, 76.5, 0.4) || inBand(x, 83.5, 0.4)) && y > 36.1 && y < 43.9 || (inBand(y, 36.5, 0.4) || inBand(y, 43.5, 0.4)) && x > 76.1 && x < 83.9;
+      const doorway = inBand(x, 76.5, 0.5) && y > 39.4 && y < 40.6;
+      return onWall && !(doorway && open);
+    };
+    host.me.x = 70; host.me.y = 40;
+    host.add({ guid: 0x80000047, name: 'Door', objectDescFlags: 0x1000, x: 75.8, y: 40 });
+    host.add({ guid: 0x80000048, name: 'Archmage', itemType: 0x10, cell: 0xa9b40105, x: 80, y: 40 });
+    host.routeTo = [{ x: 76.5, y: 40, z: 94 }]; // the doorway, where the door stands
+    const use = host.use;
+    host.use = (g: number) => { if (g === 0x80000047) open = true; return use(g); };
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Archmage', { within: 1.5 });
+    run(api, host, 60_000);
+    const r = await p;
+    log.mockRestore();
+    expect(r).toMatchObject({ ok: true });
+    expect(host.sent).toContain('use 80000047');
+    expect(lines.some((l) => /closed door; going to open Door/.test(l))).toBe(true);
+    expect(lines.filter((l) => /walk search none/.test(l))).toEqual([]);
   });
 
   it('a fixture reaches as far as its part-array radius, a creature as far as its body; radius-less things reach 0', () => {

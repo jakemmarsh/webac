@@ -180,11 +180,12 @@ describe('CORE.15.a — contracts + page-list header sorting (behavioral)', () =
     ui.contractTab = 'contracts';
     ui.contractSortCriteria = 'name';
     ui.contractReverseSort = false;
+    const tm = (stage: number, o: Record<string, unknown> = {}) => ({ stage, timeWhenDone: 0, timeWhenRepeats: 0, updatedAtSec: performance.now() / 1000, hasTimerFlag: false, hasRepeatFlag: false, descriptionProgress: '', ...o });
     ui.setContractData({
       contracts: [
-        { id: 1, name: 'Zury Quest', description: '', timer: '', status: 'In Progress', stage: 2, repeatsSec: 0 },
-        { id: 2, name: 'apple Run', description: '', timer: '', status: 'Pending Repeat', stage: 3, repeatsSec: 500 },
-        { id: 3, name: 'Mule Duty', description: '', timer: '', status: 'Pending Repeat', stage: 3, repeatsSec: 100 },
+        { id: 1, name: 'Zury Quest', description: '', stage: 2, timing: tm(2) },
+        { id: 2, name: 'apple Run', description: '', stage: 3, timing: tm(3, { timeWhenRepeats: 500, hasRepeatFlag: true }) },
+        { id: 3, name: 'Mule Duty', description: '', stage: 3, timing: tm(3, { timeWhenRepeats: 100, hasRepeatFlag: true }) },
       ],
       journal: [],
     });
@@ -192,19 +193,20 @@ describe('CORE.15.a — contracts + page-list header sorting (behavioral)', () =
     // Default = retail ctor state: eName ascending (case-insensitive).
     expect(contractRowIds()).toEqual(['2', '3', '1']);
 
-    // Click Status: cooldown pair ordered by remaining time (3 before 2),
-    // 'In Progress' string sorts before 'Pending Repeat'.
+    // Click Status: cooldown pair ordered by remaining time (3 before 2);
+    // against the plain row the strings compare, and retail's
+    // "Done (… to Repeat)" sorts before "In Progress".
     let panel = ui.contractPanel as HTMLElement;
     (panel.querySelector('[data-element-id="0x100005d6"]') as HTMLElement).click();
     expect(ui.contractSortCriteria).toBe('status');
     expect(ui.contractReverseSort).toBe(false);
-    expect(contractRowIds()).toEqual(['1', '3', '2']);
+    expect(contractRowIds()).toEqual(['3', '2', '1']);
 
     // Second Status click reverses.
     panel = ui.contractPanel as HTMLElement;
     (panel.querySelector('[data-element-id="0x100005d6"]') as HTMLElement).click();
     expect(ui.contractReverseSort).toBe(true);
-    expect(contractRowIds()).toEqual(['2', '3', '1']);
+    expect(contractRowIds()).toEqual(['1', '2', '3']);
 
     // Contract header switches back to name and RESETS to ascending.
     panel = ui.contractPanel as HTMLElement;

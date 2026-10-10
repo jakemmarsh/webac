@@ -96,7 +96,7 @@ export interface LauncherKit {
    * input keeps the keys. Null without the font (the input stays as styled).
    * `hJustify` overrides the desc's p20 justification.
    */
-  bindEditField(input: HTMLInputElement, host: HTMLElement, ref: string, hJustify?: number): { refresh(): void; destroy(): void } | null;
+  bindEditField(input: HTMLInputElement, host: HTMLElement, ref: string, hJustify?: number, masked?: boolean): { refresh(): void; destroy(): void } | null;
   /** The online colour (the 0x06004d17 presence bullet's green, AC_COLORS.onlineGreen). */
   onlineColor: string;
   attachScale(inner: HTMLElement): void;
@@ -251,6 +251,7 @@ export class LauncherScreen {
   private loginEl: HTMLElement | null = null;
   private accountInput: HTMLInputElement | null = null;
   private accountField: { refresh(): void; destroy(): void } | null = null;
+  private passwordField: { refresh(): void; destroy(): void } | null = null;
   private passwordInput: HTMLInputElement | null = null;
   private done = false;
   /** A list texture was not resident yet when last drawn (streamed DATs). */
@@ -470,10 +471,12 @@ export class LauncherScreen {
     this.accountInput = field('Account', 'text', 'username', this.account);
     this.accountInput.classList.add('launcher-account');
     // RECON.dom-chrome-sweep.d — the account types in the DialogFactory
-    // edit font (DatEditField). The password keeps the browser's masked
-    // glyphs: retail had no in-client login (the Turbine launcher took the
-    // password), so no DAT or decomp answers which mask glyph to draw
-    // (RECON.dom-chrome-sweep.d.a, Jake's call).
+    // edit font (DatEditField), and so does the password (.d.a), drawn as
+    // one dot per character in that font. Retail had no in-client login
+    // (the Turbine launcher took the password), so no DAT or decomp names a
+    // mask glyph: the dot is Jake's call (2026-10-10), matching the game's
+    // other edit fields otherwise. The <input> stays type=password for
+    // password managers; its own bullets are transparent like the account's text.
     this.accountField?.destroy();
     // Left-justified (p20 = 0), not the text-entry desc's centring: the desc
     // only lends the font and colour, and a login field reads left to right
@@ -482,6 +485,8 @@ export class LauncherScreen {
     this.accountInput.addEventListener('input', () => { this.account = this.accountInput!.value; });
     this.passwordInput = field('Password', 'password', 'current-password', '');
     this.passwordInput.classList.add('launcher-password');
+    this.passwordField?.destroy();
+    this.passwordField = this.kit.bindEditField(this.passwordInput, this.passwordInput.parentElement!, LAUNCHER_TEXT.edit, 0, true);
     // Hidden submit so Enter in either field submits the form (and password
     // managers see a real login form).
     const submit = document.createElement('button');
@@ -748,6 +753,8 @@ export class LauncherScreen {
       this.handle = null;
       this.accountField?.destroy();
       this.accountField = null;
+      this.passwordField?.destroy();
+      this.passwordField = null;
       this.unsubscribeArrivals?.();
       this.unsubscribeArrivals = null;
       this.resolve?.({ world: w, account, password, connectUrl: connectUrlFor(this.opts.bridgeUrl, w) });

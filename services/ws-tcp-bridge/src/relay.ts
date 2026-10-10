@@ -29,17 +29,28 @@ export interface RelayEntry {
   character: string | null;
   screen: string | null;
   pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>;
+  /** Slices of big answers still arriving, by call id. */
+  parts: Map<number, { n: number; slices: Array<string | undefined> }>;
   updatedAt: number;
 }
 
 export const accountKey = (server: string, account: string): string => `${server}:${account.toLowerCase()}`;
 
 /** A tab's text frame, if it is one of the relay's. */
-export function parseRelayFrame(text: string): { kind: 'result'; id: number; ok: boolean; result?: unknown; error?: string } | { kind: 'state'; relay: boolean; character: string | null; screen: string | null; revokedBefore: number } | null {
+/** A big answer arrives in slices of its JSON text (relayTab.ts RESULT_PART_CHARS); at most this many. */
+export const MAX_RESULT_PARTS = 64;
+
+export function parseRelayFrame(text: string): { kind: 'result'; id: number; ok: boolean; result?: unknown; error?: string } | { kind: 'state'; relay: boolean; character: string | null; screen: string | null; revokedBefore: number } | { kind: 'part'; id: number; i: number; n: number; data: string } | null {
   if (!text.startsWith('{')) return null;
   let o: unknown;
   try { o = JSON.parse(text); } catch { return null; }
   if (!o || typeof o !== 'object') return null;
+  const part = (o as { agentResultPart?: { id?: unknown; i?: unknown; n?: unknown; data?: unknown } }).agentResultPart;
+  if (part) {
+    const { id, i, n, data } = part;
+    if (typeof id !== 'number' || typeof data !== 'string' || !Number.isInteger(i) || !Number.isInteger(n) || (n as number) < 1 || (n as number) > MAX_RESULT_PARTS || (i as number) < 0 || (i as number) >= (n as number)) return null;
+    return { kind: 'part', id, i: i as number, n: n as number, data };
+  }
   const r = (o as { agentResult?: { id?: unknown; ok?: unknown; result?: unknown; error?: unknown } }).agentResult;
   if (r && typeof r.id === 'number') return { kind: 'result', id: r.id, ok: r.ok === true, ...(r.ok === true ? { result: r.result } : { error: typeof r.error === 'string' ? r.error : 'the tab refused the call' }) };
   const st = (o as { agentState?: { relay?: unknown; character?: unknown; screen?: unknown; revokedBefore?: unknown } }).agentState;
@@ -66,7 +77,7 @@ export class AgentRelay {
     if (old && old.peer !== peer) this.remove(old.peer);
     const existing = this.byPeer.get(peer);
     if (existing) { existing.key = key; this.byKey.set(key, existing); return existing; }
-    const e: RelayEntry = { peer, key, relayOn: false, revokedBefore: 0, character: null, screen: null, pending: new Map(), updatedAt: this.now() };
+    const e: RelayEntry = { peer, key, relayOn: false, revokedBefore: 0, parts: new Map(), character: null, screen: null, pending: new Map(), updatedAt: this.now() };
     this.byKey.set(key, e);
     this.byPeer.set(peer, e);
     return e;
@@ -90,6 +101,23 @@ export class AgentRelay {
     if (!e) return true;
     e.updatedAt = this.now();
     if (f.kind === 'state') { e.relayOn = f.relay; e.character = f.character; e.screen = f.screen; e.revokedBefore = f.revokedBefore; return true; }
+    if (f.kind === 'part') {
+      // Only for a call still waiting; the slices join back into the agentResult text.
+      if (!e.pending.has(f.id)) return true;
+      const got = e.parts.get(f.id) ?? { n: f.n, slices: Array.from({ length: f.n }, (): string | undefined => undefined) };
+      if (got.n !== f.n) { e.parts.delete(f.id); return true; }
+      got.slices[f.i] = f.data;
+      e.parts.set(f.id, got);
+      if (got.slices.some((x) => x === undefined)) return true;
+      e.parts.delete(f.id);
+      const whole = parseRelayFrame(got.slices.join(''));
+      if (!whole || whole.kind !== 'result' || whole.id !== f.id) return true;
+      return this.onResult(e, whole);
+    }
+    return this.onResult(e, f);
+  }
+
+  private onResult(e: RelayEntry, f: { id: number; ok: boolean; result?: unknown; error?: string }): boolean {
     const p = e.pending.get(f.id);
     if (!p) return true;
     e.pending.delete(f.id);
@@ -126,7 +154,7 @@ export class AgentRelay {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       // The tab enforces the deadline on its side too; this one covers a tab that went quiet.
-      const timer = setTimeout(() => { e.pending.delete(id); reject(new Error(`no answer from the game in ${Math.round((deadlineMs + 5000) / 1000)} s`)); }, deadlineMs + 5000);
+      const timer = setTimeout(() => { e.pending.delete(id); e.parts.delete(id); reject(new Error(`no answer from the game in ${Math.round((deadlineMs + 5000) / 1000)} s`)); }, deadlineMs + 5000);
       e.pending.set(id, { resolve, reject, timer });
       try { e.peer.send(JSON.stringify({ agent: { id, method, args, deadlineMs } })); } catch (err) { clearTimeout(timer); e.pending.delete(id); reject(err as Error); }
     });

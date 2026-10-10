@@ -27,7 +27,9 @@ export function parseMcpTokens(spec: string | undefined): Map<string, string> {
 }
 
 const MAX_BODY = 1 << 20;
-export const HOSTED_MAX_WAIT_MS = 25_000;
+export const HOSTED_MAX_WAIT_MS = 20_000;
+/** The longest a hosted call runs before answering (an ac_wait of HOSTED_MAX_WAIT_MS, plus margin). */
+export const HOSTED_CALL_MS = 22_000;
 
 /**
  * A grant for some characters plays only those: refused while another is in
@@ -74,7 +76,8 @@ export async function handleMcp(req: IncomingMessage, res: ServerResponse, auth0
       if (who.createdAt !== undefined && e && who.createdAt < e.revokedBefore) return Promise.reject(new Error('this connection was disconnected in the game (/automation unpair); connect Claude again'));
       const why = scopeRefusal(who.scope, e?.character ?? null, method, args ?? []);
       if (why) return Promise.reject(new Error(why));
-      return relay.call(key, method, args ?? [], timeoutMs ?? 30_000) as Promise<T>;
+      // Every call answers within HOSTED_CALL_MS (under Claude's per-call tool timeout); a longer walk or use keeps going in the game (relayTab.ts).
+      return relay.call(key, method, args ?? [], Math.min(timeoutMs ?? 30_000, HOSTED_CALL_MS)) as Promise<T>;
     },
   };
   const one = (r: unknown) => TOOL_CALLER.run(caller, () => handle(r as RpcRequest, { hosted: true }));

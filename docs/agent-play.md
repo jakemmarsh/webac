@@ -86,7 +86,25 @@ Claude plays the character in a game tab you logged in yourself. No daemon, no P
 
 Start with `ac_status`: it shows the account, the characters this connection may play, whether the tab is open with Claude on, the screen and the goal. At character select, `ac_enter_world character=<name>` enters the way the player does. `ac_goal` puts a line in the player's chat. Hosted, `ac_wait` waits at most 25 s per call, and each account gets a 20-call burst, then 10 calls a second (50,000 a day).
 
-All game tools are served (`ac_observe`, `ac_walk_to`, `ac_attack` …), but not the ones that need the local daemon (`ac_start`, `ac_look`, `ac_click`, the journal, the routines file tools). Calls run one at a time in the tab; one past its deadline stops movement.
+The connector serves the CLI's tools. Only `ac_start` / `ac_stop` / `ac_sessions` (the player logs in; `ac_status` / `ac_enter_world` stand in) and `ac_click` stay local. How the others work through the tab:
+- `ac_look` / `ac_screenshot`: the tab's own 3D view. Panels and chat aren't in it.
+- `ac_journal` / `ac_note`: kept in the player's browser, per character.
+- `ac_routines` / `ac_routine`: the game's own routine store. Pass `doc=` / `files_json=` text in place of file paths.
+
+Claude also gets the full play guide as the connector's instructions (`tools/ac-agent/hostedGuide.ts`; keep it in step with the /play skill).
+
+**Call timing:**
+- Acting calls run one at a time; reads answer at once.
+- Every call answers within about 22 s, under Claude's tool timeout. A longer walk or use keeps going in the game and answers "still in progress"; `ac_wait types=task-done` follows it.
+- Big answers (screenshots) cross the bridge in slices under its 64 KB WebSocket cap.
+
+**Covered or hidden windows:** Chrome stops a hidden, minimized or covered window's frames and throttles its timers. That froze Claude's walks whenever Claude Desktop was in front. The CLI's Playwright browser runs with that throttling switched off. Two fixes:
+- A worker's beat keeps the frame step running without drawing (`scene/BackgroundTicker.ts`).
+- With Claude on, the page's timers ride a worker's clock (`scene/workerTimers.ts`).
+
+Measured in a real Chrome with the game tab hidden: a walk that never moved in 22 s now arrives in 10 s.
+
+
 
 - **Not paired, or the tab is off:** the tool says "Claude is paired but this tab has Claude switched off" or that the game is not open.
 - **Tab closed or reloaded:** a call says to retry once the game reconnects.
@@ -146,8 +164,17 @@ brief: send an opening `/tell <Name>, …` with coordinates, `ac_wait` for the r
 name one leader. The leader runs `ac_fellowship action=create`, then `recruit target=<partner>`. The recruit
 first turns on `ac_fellowship action=requests name=accept` (or `auto name=on`): new characters ignore fellowship
 requests. Both confirm with `show` before leaving town. Then the brief sets the rules of play:
-- a leash of about 15 m;
+- a leash of about 15 m. The observation's `fellows:` line gives each fellow's health, distance and direction, or
+  "out of sight". On 2026-10-10 Bulwark sat in 5-minute waits for buffs while Arcanist was 490 m away: brief
+  players to keep waits short and to walk to a partner who is out of sight;
 - buffs before each outing (observations list known buffs that aren't up);
+- **buffing is one of the caster's important jobs (Jake, 2026-10-10: "buffs become pretty crucial, so the caster should be
+  aiming to get as many as possible").** Without being told, agents skipped buffs and never learned more. The brief
+  has the caster train Creature Enchantment and Life Magic with credits, buy and `use` every buff scroll a magic
+  vendor sells at their level (attribute buffs, the tank's weapon and defense masteries, armor, regeneration and
+  protections), and rebuff the whole fellowship before each outing, whenever a buff drops and after a death. The
+  tank refuses to pull unbuffed. It is not the caster's main job (Jake: "not MAIN job, just an important job! it
+  should still help fight, heal, etc"): the caster still fights the called target and heals;
 - the tank calls each target in `/f`, the caster attacks only that target and heals the tank below 50%;
 - "/f RUN" when either is below 35% or more than two monsters are on them;
 - after a death, regroup at the lifestone;

@@ -214,6 +214,17 @@ export const RETAIL_INITIAL_SUNLIGHT = { x: 0, y: 0, z: -1 } as const;
 export const RETAIL_INITIAL_SUNLIGHT_BRIGHTNESS = Math.hypot(RETAIL_INITIAL_SUNLIGHT.x, RETAIL_INITIAL_SUNLIGHT.y, RETAIL_INITIAL_SUNLIGHT.z);
 
 /**
+ * The fog before any landscape is loaded (VISUAL.sylsfear-canopy-bright-cards.a):
+ * `RenderDeviceD3D::SetDefaultDeviceStates` @ 0059ffe0 sets
+ * `SetFFFogProperties(RGBAColor_White, 0.0, 1000.0)`, and only the
+ * `LScape::UseTime` @ 00505880 fog tick (gated by `loaded_cell_id != 0`)
+ * sets it again. Fog is ON for every mesh draw: `RenderDeviceD3D::SetupState`
+ * @ 005a0c70 sets `MGStates.WantFFDistanceFog = true` and
+ * `SetFFFogEnable(true)`, linear vertex fog (render state 0x8c = 3).
+ */
+export const RETAIL_DEFAULT_DEVICE_FOG = { color: 0xffffffff, near: 0, far: 1000 } as const;
+
+/**
  * DECOMP.camera-far-plane — retail `GameSky::Draw` @ 00506ff0 draws the sky
  * set alone with `Render::set_zfar(Render::zfar × 4)` (DEPTHTEST_ALWAYS), so
  * native sky domes out to ~10,087 m fit its frustum. We draw the sky in the
@@ -1071,7 +1082,10 @@ export class SkyboxRenderer {
       this.ambientLight.color.copy(argbToColor(DUNGEON_AMBIENT_COLOR));
       this.ambientLight.intensity = DUNGEON_LIGHT_MINIMUM;
       setRetailLightLevels(0, DUNGEON_LIGHT_MINIMUM);
-      if (!this.landscapeLoaded) this.applyInitialSunlight();
+      if (!this.landscapeLoaded) {
+        this.applyInitialSunlight();
+        this.applyDefaultDeviceFog();
+      }
     }
     this.publishBackground();
     if (was && !sealed) {
@@ -1093,6 +1107,18 @@ export class SkyboxRenderer {
     this.sunLight.color.setRGB(1, 1, 1);
     // AC (x, y, z) → ours (x, z, y): AC z is our up axis.
     this.sunLight.position.set(RETAIL_INITIAL_SUNLIGHT.x, RETAIL_INITIAL_SUNLIGHT.z, RETAIL_INITIAL_SUNLIGHT.y).multiplyScalar(200);
+  }
+
+  /**
+   * `SetDefaultDeviceStates`' fog (RETAIL_DEFAULT_DEVICE_FOG): a login
+   * straight into a sealed cell never ran a landscape fog tick, so its cells
+   * fog toward white from 0 to 1000 m instead of the pre-world clock's fog.
+   */
+  private applyDefaultDeviceFog(): void {
+    if (!this.fog) return;
+    setSrgbFromRaw(this.fog.color, argbToColor(RETAIL_DEFAULT_DEVICE_FOG.color));
+    this.fog.near = RETAIL_DEFAULT_DEVICE_FOG.near;
+    this.fog.far = RETAIL_DEFAULT_DEVICE_FOG.far;
   }
 
   get isSealedInterior(): boolean {

@@ -117,6 +117,16 @@ export interface AgentObservation {
   buffs?: Array<{ name: string; remaining: number; beneficial?: boolean }>;
   /** Buffs you know that aren't up on you (self-only ones first), to cast with ac_cast. */
   buffsMissing?: string[];
+  /**
+   * Your fellows (not you): health %, and distance and compass direction when in view, else out of sight.
+   * Without it a player stood waiting for a partner 490 m away to buff him (Bulwark, 2026-10-10).
+   */
+  fellows?: Array<{ name: string; healthPct: number; dist?: number; bearing?: number }>;
+  /**
+   * In a fellowship with nobody else in it: a fellow logged out (the server takes them out, as retail did) and /f
+   * reaches no one. Arcanist and Bulwark each sat in a separate fellowship waiting on the other's /f, 2026-10-10.
+   */
+  fellowshipAlone?: boolean;
   /** Chat / system lines since the previous observe (or the last N on the first call). */
   chat: AgentChatLine[];
   /** Highest event seq seen; pass it to waitFor/events to get only newer ones. */

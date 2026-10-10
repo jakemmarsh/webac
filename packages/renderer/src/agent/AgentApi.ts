@@ -232,6 +232,11 @@ export interface AgentHost {
   enterCharacter?(name: string): string | null;
   /** Show Claude's goal line to the player (null clears it). */
   showGoal?(text: string | null): void;
+  /** The 3D view as a JPEG (base64), for the hosted connector's ac_look / ac_screenshot. */
+  screenshot?(): Promise<string | null>;
+  /** This character's journal kept in the player's browser (the hosted connector's ac_journal / ac_note). */
+  journalLoad?(): unknown;
+  journalSave?(journal: unknown): boolean;
   now(): number;
   /** Wall-clock ms (Date.now()), for what outlives the page; absent = Date.now(). */
   wallClock?(): number;
@@ -275,6 +280,18 @@ export function parseMapCoords(text: string): { x: number; y: number } | null {
   const ns = Number(m[1]) * (/s/i.test(m[2]) ? -1 : 1);
   const ew = Number(m[3]) * (/w/i.test(m[4]) ? -1 : 1);
   return { x: (ew + MAP_COORD_ORIGIN) * 240, y: (ns + MAP_COORD_ORIGIN) * 240 };
+}
+
+/**
+ * Whether an object in `cell` is inside the server's update range of a player in `myCell`: the player's
+ * landblock and the eight round it. ACE (Landblock adjacents / ObjectMaint), GDLE and the 1999 server send
+ * creatures' positions only that far; past it the client keeps the last one it got.
+ */
+export function inUpdateRange(myCell: number, cell: number): boolean {
+  // (A creature first reaches the client only within 112.5 m: ObjectMaint.InitialClamp_Dist.)
+  const dx = Math.abs(((myCell >>> 24) & 0xff) - ((cell >>> 24) & 0xff));
+  const dy = Math.abs(((myCell >>> 16) & 0xff) - ((cell >>> 16) & 0xff));
+  return dx <= 1 && dy <= 1;
 }
 
 /** ObjectDescriptionFlag bits (packages/shared ace-enums.ts). */
@@ -493,6 +510,18 @@ export class AgentApi {
     if (!this.host.placeItem) return { ok: false, message: 'moving items is not available' };
     return this.host.placeItem(guid, to) ? { ok: true, message: 'onto' in to ? `merging #${guid.toString(16)} onto #${to.onto.toString(16)}` : `moving #${guid.toString(16)} to pack ${to.packSlot}` } : { ok: false, message: 'the move was refused' };
   }
+  /** Every fellow, with where they are when the client can see them (an observation line). */
+  private fellowsAt(): NonNullable<AgentObservation['fellows']> {
+    const fs = this.host.fellows?.() ?? [];
+    if (!fs.length) return [];
+    const seen = new Map(this.nearby(1000).map((o) => [o.guid, o])); // in update range only (nearby)
+    return fs.map((f) => {
+      const o = seen.get(f.guid);
+      const healthPct = f.health.max > 0 ? Math.round((100 * f.health.cur) / f.health.max) : 0;
+      return o ? { name: f.name, healthPct, dist: o.dist, bearing: o.bearing } : { name: f.name, healthPct };
+    });
+  }
+
   /** Fellows in sight with their vitals and distance (the macro's Helper heals those within its range). */
   fellowsNear(radius = 100): Array<{ guid: number; name: string; distance: number; health: { cur: number; max: number }; stamina: { cur: number; max: number }; mana: { cur: number; max: number } }> {
     const near = new Map(this.snapshot({ radius, max: 80 }).nearby.map((o) => [o.guid, o.dist]));
@@ -663,6 +692,9 @@ export class AgentApi {
       const d = this.describe(o, me);
       if (!d || d.dist > radius) continue;
       if (f && !d.name.toLowerCase().includes(f) && d.kind !== f) continue;
+      // A creature or player outside the server's update range is only its last-known position: the client keeps it,
+      // but nothing moves it any more (a fellow 430 m off read 212 m, 2026-10-10).
+      if ((o.itemType & IT.Creature) && o.cell && !inUpdateRange(me.s.cell, o.cell)) continue;
       out.push(d);
     }
     return out.sort((a, b) => a.dist - b.dist);
@@ -727,6 +759,8 @@ export class AgentApi {
       windows: this.host.openWindows?.() ?? [],
       buffs: this.host.activeSpells(),
       buffsMissing: this.missingBuffs(),
+      fellows: this.fellowsAt(),
+      fellowshipAlone: (this.host.fellowshipInfo?.()?.count ?? 0) === 1,
       remembered: this.rememberedPlaces(),
       chat,
       seq: this.seqN,
@@ -765,7 +799,9 @@ export class AgentApi {
     }
     let world: { guid: number; score: number } | null = null;
     if (where !== 'inventory') {
-      const near = bestNameMatch(name, this.nearby(200), (o) => o.name);
+      // As far as the server keeps us updated (3 × 3 landblocks): "walk_to Claude Arcanist" with them 212 m off
+      // found nothing at 200 m, 2026-10-10.
+      const near = bestNameMatch(name, this.nearby(600), (o) => o.name);
       if (near) world = { guid: near.item.guid, score: near.score };
       const place = bestNameMatch(name, [...this.places.entries()], ([, v]) => v.name);
       if (place && place.score > (world?.score ?? 0)) world = { guid: place.item[0], score: place.score };
@@ -1305,6 +1341,19 @@ export class AgentApi {
   /** Raise a stat `times` times; reports "Name from → to, N XP" (and why it stopped early). */
   /** Kept between a walking body and a portal's reach: the body's radius (0.48 m) and a margin. */
   static readonly PORTAL_CLEARANCE_M = 0.8;
+  /**
+   * The longest one walk_to search may run while the body stands still, and the most standing-searching
+   * time a walk is let off its timeout. A search with jumps simulates flights at each blocked point and can
+   * take minutes a few ms a frame: Arcanist stood 4 minutes outside the Holtburg archmage's house, 2026-10-10.
+   */
+  static readonly SEARCH_WALL_MS = 30_000;
+  static readonly SEARCH_CREDIT_MS = 90_000;
+  /**
+   * The share of each frame a standing search may use (the body isn't moving, so a slower frame costs nothing),
+   * between 6 and 25 ms. A fixed 6 ms a frame searched only ~55 points a second in a 10 fps headless window,
+   * and the 15 s cap then cut off searches that found the way (Bulwark in Holtburg's south houses, 2026-10-10).
+   */
+  static readonly SEARCH_FRAME_SHARE = 0.4;
 
   /** One raise toward `upTo`, with what changed: the routine's train action. */
   raiseOnce(stat: string, upTo: number): { ok: true; name: string; from: number; to: number; cost: number } | { ok: false; message: string; reached: boolean } {
@@ -1477,6 +1526,10 @@ export class AgentApi {
     let label: string;
     let targetGuid = 0;
     const coords = typeof target === 'string' ? parseMapCoords(target) : null;
+    if (coords && (coords.x < 0 || coords.y < 0 || coords.x >= 256 * LANDBLOCK_SIZE || coords.y >= 256 * LANDBLOCK_SIZE)) {
+      // Arcanist set off for "197.4S, 59.9E", 2026-10-10.
+      return Promise.resolve({ ok: false, message: `${target} is off the map: Dereth runs from about 101.9S to 102.9N and 101.9W to 102.9E` });
+    }
     if (coords) {
       goal = () => coords;
       label = `walking to ${target}`;
@@ -1503,6 +1556,10 @@ export class AgentApi {
     const startHealth = this.host.self()?.health.current ?? 0;
     // Time spent standing still searching, and a grace per door opened, don't count against the timeout.
     let credit = 0;
+    let searchCredit = 0;
+    // The search being run and when it started, for SEARCH_WALL_MS.
+    let timed: PathSearch | null = null;
+    let timedAt = start;
     let lastTick = start;
     let best = Infinity;
     let bestAt = start;
@@ -1615,6 +1672,21 @@ export class AgentApi {
           return;
         }
       }
+      // The next doorway on the route has a closed door in it: open it first, as a player does. The archmage's
+      // tower door cost three searches (12,000 points) before the door detour, 2026-10-10.
+      if (route.length && !doorDetour && aim === route[0]) {
+        const shut = this.nearby(12)
+          .filter((o) => o.kind === 'door' && !o.open && !doorsTried.has(o.guid))
+          .map((o) => ({ o, p: doorPos(o, me) }))
+          .find((dd) => Math.hypot(dd.p.x - aim.x, dd.p.y - aim.y) < 2.5);
+        if (shut) {
+          doorDetour = { guid: shut.o.guid, ...shut.p, wide: false };
+          this.trace(`walk: the doorway ahead has a closed door; going to open ${shut.o.name} #${shut.o.guid.toString(16)} first`);
+          if (straightWalk(probe, from, doorDetour)) return;
+          search = new PathSearch(probe, from, doorDetour, { within: 1.6, margin: 12, maxNodes: 4000 });
+          return;
+        }
+      }
       this.trace(`walk leg blocked straight; searching ${far.toFixed(1)} m to (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)}), ${route.length} doorway(s) ahead`);
       startSearch(from, aim, 0);
     };
@@ -1657,7 +1729,9 @@ export class AgentApi {
       }
       const dz = gl.z === undefined ? 0 : me.s.z - gl.z;
       if (!jumping && d <= within && Math.abs(dz) < 2.5) { release(); return { ok: true, message: `arrived (${d.toFixed(1)} m away)${featText()}` }; }
-      if (search || jumping) credit += now - lastTick;
+      const frameMs = now - lastTick;
+      if (jumping) credit += now - lastTick;
+      else if (search && searchCredit < AgentApi.SEARCH_CREDIT_MS) { const c = Math.min(now - lastTick, AgentApi.SEARCH_CREDIT_MS - searchCredit); searchCredit += c; credit += c; }
       lastTick = now;
       if (now - start - credit > timeoutMs) { release(); return { ok: false, message: `timed out ${d.toFixed(1)} m short${featText()}` }; }
       if (now < dodgeUntil) return null;
@@ -1707,7 +1781,13 @@ export class AgentApi {
         // Finding a way round: stand still while the search runs (a few ms a frame).
         this.host.key('KeyW', false);
         this.host.key('ShiftLeft', false);
-        const r = (search as PathSearch).step(6);
+        const sr = search as PathSearch;
+        if (sr !== timed) { timed = sr; timedAt = now; }
+        let r = sr.step(Math.min(25, Math.max(6, frameMs * AgentApi.SEARCH_FRAME_SHARE)));
+        if (!r && now - timedAt > AgentApi.SEARCH_WALL_MS) {
+          r = sr.abandon();
+          this.trace(`walk search stopped after ${Math.round((now - timedAt) / 1000)} s standing still`);
+        }
         if (!r) return null;
         search = null;
         legs = r.status === 'found' ? r.path : [];
@@ -1802,7 +1882,9 @@ export class AgentApi {
         replanAfterDoor = true;
         return null;
       }
-      if (stretch && !legs.length && !search && Math.hypot(stretch.x - me.g.x, stretch.y - me.g.y) < 5) { stretch = null; planLegs(); if (search) return null; }
+      // Each stretch plans the doorway route again: a building far off isn't loaded when the walk starts, so a
+      // target inside it had no route then and the walk ended up searching at its wall (the archmage, 2026-10-10).
+      if (stretch && !legs.length && !search && Math.hypot(stretch.x - me.g.x, stretch.y - me.g.y) < 5) { stretch = null; if (route.length || directWide) planLegs(); else plan(); if (search) return null; }
       let advanced = false;
       // A doorway is passed on it (0.3 m) or once the probe says the next point is a straight walk. Within
       // 0.8 m of it, but off its axis, the jamb still stands between (a 0.96 m body in a 1.5–1.9 m door).
@@ -2254,6 +2336,9 @@ export class AgentApi {
       status: () => this.status(),
       enterWorld: (n: string) => this.enterWorld(n),
       goal: (t: string) => this.setGoal(t),
+      screenshot: async () => { const s = (await this.host.screenshot?.()) ?? null; if (!s) throw new Error('no 3D view to capture (not in the world, or in portal space)'); return s; },
+      journalLoad: () => this.host.journalLoad?.() ?? null,
+      journalSave: (j: unknown) => { if (!this.host.journalSave?.(j)) throw new Error('this browser blocks storage, so the journal can\'t be kept'); return true; },
     };
   }
 }

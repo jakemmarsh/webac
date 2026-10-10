@@ -230,12 +230,49 @@ export class SceneManager {
    * thread (a 3.5-minute world entry with the streamed AC1999 world, whose
    * world packs keep char select up longest). A hidden canvas skips the draw.
    */
+  private pendingCaptures: Array<(jpeg: string | null) => void> = [];
+
+  /** A screenshot is waiting for a frame (the background beat draws one even while the window is covered). */
+  get capturePending(): boolean { return this.pendingCaptures.length > 0; }
+
+  /**
+   * AGENT.hosted-mcp-connector — the next frame the game draws, as a JPEG (base64, no data: prefix,
+   * at most 1024 wide). Read right after that frame's render, in the same task, so the WebGL buffer
+   * still holds it (no preserveDrawingBuffer) and the camera, sky and lights are the frame's own: a
+   * render of our own between frames drew a half-set-up scene. Null when no frame comes within
+   * `timeoutMs` (the world hidden: char select, portal space).
+   */
+  captureNextFrame(timeoutMs = 1500): Promise<string | null> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v: string | null) => { if (!done) { done = true; resolve(v); } };
+      this.pendingCaptures.push(finish);
+      setTimeout(() => finish(null), timeoutMs);
+    });
+  }
+
+  private flushCaptures(): void {
+    const waiting = this.pendingCaptures.splice(0);
+    const src = this.renderer?.domElement;
+    let jpeg: string | null = null;
+    if (src?.width) {
+      const scale = Math.min(1, 1024 / src.width);
+      const out = document.createElement('canvas');
+      out.width = Math.round(src.width * scale);
+      out.height = Math.round(src.height * scale);
+      out.getContext('2d')?.drawImage(src, 0, 0, out.width, out.height);
+      jpeg = out.toDataURL('image/jpeg', 0.75).replace(/^data:image\/jpeg;base64,/, '');
+    }
+    for (const w of waiting) w(jpeg);
+  }
+
   render(): void {
     if (this.renderer?.domElement?.style?.visibility === 'hidden') {
       this.skipDraw();
       return;
     }
     this.renderer?.render(this.scene, this.camera);
+    if (this.pendingCaptures.length) this.flushCaptures();
     // PERF.gpu-soak-frame-hitches-28a525da — no program is ever relinked.
     this.programRetention.retainNew();
   }

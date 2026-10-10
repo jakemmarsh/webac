@@ -16,6 +16,7 @@
 !packages/renderer/src/agent/format.ts
 !tools/ac-agent/client.ts
 !tools/ac-agent/eras.ts
+!tools/ac-agent/hostedGuide.ts
 !tools/ac-agent/journal.ts
 !tools/ac-agent/mcp-server.ts
 !tools/ac-agent/routineStore.ts

@@ -147,3 +147,37 @@ describe('EquipmentSystem keeps one entry per worn item', () => {
     expect(equip.getAll().map((e) => e.id).sort()).toEqual([0x80000001, 0x8000bfce]);
   });
 });
+
+// BUG.paperdoll-overlapping-clothing-evicted — playwebac.com 2026-10-10: a
+// new character's paperdoll showed only the shirt (Chrome, Firefox) or only
+// the trousers (WebKit), whichever CreateObject arrived last. The server wears
+// both; its records never evict a sibling whose mask merely overlaps.
+describe('EquipmentSystem: server-reported wields keep overlapping clothing', () => {
+  const SHIRT = (EquipMask.ChestWear | EquipMask.AbdomenWear | EquipMask.UpperArmWear | EquipMask.LowerArmWear) as EquipMask;
+  const TROUSERS = (EquipMask.AbdomenWear | EquipMask.UpperLegWear | EquipMask.LowerLegWear) as EquipMask;
+  for (const order of [['shirt', 'trousers'], ['trousers', 'shirt']] as const) {
+    it(`${order[0]} then ${order[1]}: both stay worn`, () => {
+      const equip = new EquipmentSystem();
+      const shirt = makeItem({ id: 0x80000010, name: 'Shirt' });
+      const trousers = makeItem({ id: 0x80000011, name: 'Trousers' });
+      for (const which of order) {
+        const r = which === 'shirt' ? equip.equipItem(shirt, SHIRT, false) : equip.equipItem(trousers, TROUSERS, false);
+        expect(r.unequipped).toEqual([]);
+      }
+      expect(equip.getAll().map((e) => [e.id, e.slot]).sort()).toEqual([[0x80000010, SHIRT], [0x80000011, TROUSERS]]);
+    });
+  }
+  it('the same item reported again under another location still keeps one entry', () => {
+    const equip = new EquipmentSystem();
+    const shirt = makeItem({ id: 0x80000010, name: 'Shirt' });
+    equip.equipItem(shirt, EquipMask.ChestWear, false);
+    equip.equipItem(shirt, SHIRT, false);
+    expect(equip.getAll().map((e) => [e.id, e.slot])).toEqual([[0x80000010, SHIRT]]);
+  });
+  it("the client's optimistic equip (default) still takes off what it overlaps", () => {
+    const equip = new EquipmentSystem();
+    equip.equipItem(makeItem({ id: 0x80000010, name: 'Shirt' }), SHIRT, false);
+    const r = equip.equipItem(makeItem({ id: 0x80000011, name: 'Trousers' }), TROUSERS);
+    expect(r.unequipped?.map((e) => e.id)).toEqual([0x80000010]);
+  });
+});

@@ -36,6 +36,22 @@ export interface DatEditFont {
   measureText(text: string): number;
   renderTextToCanvas(text: string, color?: string, scale?: number, outlineColor?: string): HTMLCanvasElement;
   readonly outlinePadding: { x: number; y: number };
+  /** The glyph for a code point, if the font has one (ACFontRenderer.getChar). */
+  getChar?(codepoint: number): unknown;
+}
+
+/**
+ * RECON.dom-chrome-sweep.d.a — the mask a masked field draws, one per
+ * character: the dot (Jake, 2026-10-10), else the first the font carries.
+ * Retail had no in-client password field (the Turbine launcher took it), so
+ * no DAT or decomp names one; every end-of-retail edit font has U+25CF, some
+ * large fonts and older eras' fonts may not.
+ */
+export const MASK_GLYPHS = ['\u25CF', '\u2022', '*'] as const;
+
+export function pickMaskGlyph(font: Pick<DatEditFont, 'getChar'>): string {
+  for (const g of MASK_GLYPHS) if (!font.getChar || font.getChar(g.charCodeAt(0))) return g;
+  return '*';
 }
 
 /** Per-field class suffix for the ::selection rule. */
@@ -147,6 +163,12 @@ export interface DatEditFieldOptions {
   marginBottom?: number;
   /** The clock (tests). */
   now?: () => number;
+  /**
+   * Draw one mask glyph (pickMaskGlyph) per character instead of the text —
+   * the launcher password. The caret, selection and clicks use the mask's
+   * advances; the real value never reaches the canvas.
+   */
+  masked?: boolean;
 }
 
 export interface DatEditFieldHandle {
@@ -169,6 +191,9 @@ export function attachDatEditField(
   const now = opts.now ?? (() => performance.now());
   const marginLeft = opts.marginLeft ?? 0;
   const marginRight = opts.marginRight ?? 0;
+  const mask = opts.masked ? pickMaskGlyph(font) : null;
+  /** What the field draws: the value, or one mask glyph per UTF-16 unit (so indices line up). */
+  const shown = (): string => (mask ? mask.repeat(input.value.length) : input.value);
 
   input.style.color = 'transparent';
   input.style.caretColor = 'transparent';
@@ -218,7 +243,7 @@ export function attachDatEditField(
   const focused = (): boolean => input.ownerDocument.activeElement === input;
 
   const paint = (): void => {
-    const text = input.value;
+    const text = shown();
     if (text !== painted) {
       painted = text;
       canvas?.remove();
@@ -283,7 +308,7 @@ export function attachDatEditField(
   const indexAt = (clientX: number): number => {
     const rect = layer.getBoundingClientRect();
     const scale = layer.offsetWidth > 0 ? rect.width / layer.offsetWidth : 1;
-    return indexAtX(font, input.value, (clientX - rect.left) / (scale || 1) - justX + scroll);
+    return indexAtX(font, shown(), (clientX - rect.left) / (scale || 1) - justX + scroll);
   };
   const onDown = (e: MouseEvent): void => {
     if (e.button !== 0) return;

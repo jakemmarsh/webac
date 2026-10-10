@@ -38,6 +38,21 @@ CONSOLE_LOG=/tmp/gdle-console.log GDLE_BASE=http://localhost:<vite>/ \
 bash tools/gdle/start-gdle.sh stop
 ```
 
+`GDLE_TELEPORT=1 bash tools/gdle/start-gdle.sh` turns on GDLE's player
+`/teletown` / `/teleloc` here too (a new character can't leave the Academy
+practice area otherwise; the agent tools refuse `@` commands, `/teletown
+Holtburg` works). The container mounts a rendered copy of `server.cfg` from
+`~/.cache/acjs-gdle/`, never a worktree path: a container created from a
+since-removed worktree would not start ("not a directory"). Re-rendered on
+every start, so a changed flag takes effect at the next start without
+recreating the container (2026-10-10).
+
+**New-player pass, 2026-10-10 (local GDLE 1.34, production streamed EoL set):**
+account auto-created on first login → chargen by mouse → Academy → `/teletown
+Holtburg` → Flame Bolt kills (Mite Scion, Drudge Slinker) → loot → grocer
+(buy; the pyreal readout reads 500 once the vendor opens, then 491) → killed by
+banderlings → Academy lifestone, Vitae panel (1 %), vitals at 75 %. All worked.
+
 Footprint while running: gdle-server about 540 MB RSS and 3% CPU idle under emulation; gdle-db about 115 MB.
 
 ## Flow results (local GDLE, 2026-10-04, headless SwiftShader)

@@ -9,7 +9,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   attachDatEditField, caretOffset, indexAtX, scrollForCaret, selectionSpan, CaretBlink, CARET_BLINK_MS,
-  pinCaretBlink, type DatEditFont,
+  pinCaretBlink, pickMaskGlyph, MASK_GLYPHS, type DatEditFont,
 } from '../packages/renderer/src/ui/DatEditField.js';
 
 /** A font whose glyphs are 6 px wide, except 'i' (3 px) and 'W' (10 px). */
@@ -147,6 +147,33 @@ describe('attachDatEditField', () => {
     expect(caret.style.background).toContain('255');
     input.blur();
     expect(caret.style.display).toBe('none');
+  });
+
+  // RECON.dom-chrome-sweep.d.a — the launcher password.
+  it('a masked field paints one dot per character, never the value, and measures the caret and clicks on the dots', () => {
+    const { input, font, handle } = mount({ masked: true });
+    input.type = 'password';
+    input.value = 'hiW';
+    expect(handle.layer.querySelector('canvas')?.dataset.text).toBe('\u25CF\u25CF\u25CF');
+    expect(font.rendered.some((t) => /[hiW]/.test(t))).toBe(false);
+    input.focus();
+    input.setSelectionRange(2, 2);
+    handle.refresh();
+    // Two 6-px dots, not 'h' (6) + 'i' (3).
+    expect((handle.layer.querySelector('.ac-dat-edit-caret') as HTMLElement).style.left).toBe('12px');
+    input.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 8, bubbles: true }));
+    expect(input.selectionStart).toBe(1);
+    expect(input.value).toBe('hiW');
+  });
+
+  it('picks the dot when the font has it, else the next mask glyph it carries', () => {
+    expect(MASK_GLYPHS[0]).toBe('\u25CF');
+    const has = (cps: number[]) => ({ getChar: (cp: number) => (cps.includes(cp) ? {} : undefined) });
+    expect(pickMaskGlyph(has([0x25cf, 0x2022, 0x2a]))).toBe('\u25CF');
+    expect(pickMaskGlyph(has([0x2022, 0x2a]))).toBe('\u2022');
+    expect(pickMaskGlyph(has([0x2a]))).toBe('*');
+    expect(pickMaskGlyph(has([]))).toBe('*');
+    expect(pickMaskGlyph({})).toBe('\u25CF');
   });
 
   it('places the cursor from a click by DAT advances', () => {
