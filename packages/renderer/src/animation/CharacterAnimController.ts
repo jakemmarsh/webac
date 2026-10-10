@@ -429,14 +429,22 @@ export class CharacterAnimController {
    * A standing strafe or turn is the motion table's substate, but the
    * interpreted state keeps them in sidestep_command / turn_command: its
    * forward command stays Ready (a bow build survives a strafe —
-   * PlayerInReadyPosition @ 0056b820, sweep-bow-charge-C).
+   * PlayerInReadyPosition @ 0056b820, sweep-bow-charge-C). The state
+   * changes when a motion is applied, not when its animation reaches the
+   * cycle: the AC1999 server sends a reload's AttackDone just before its
+   * Ready, and reading the still-playing Reload link made the repeat build
+   * look out of position and cancel the repeat.
    */
   private forwardCommand(input: CameraController | null): number {
     if (input?.isMovingForward) return (input.isForwardRunning ?? input.isRunning) ? MotionCommand.RunForward : MotionCommand.WalkForward;
     if (input?.isMovingBackward) return MotionCommand.WalkBackwards;
-    const stance = this.mm.stance;
-    if (typeof stance !== 'number') return MotionCommand.Ready;
-    const sub = motionCommandFromWireIndex(stance & 0xFFFF) ?? MotionCommand.Ready;
+    let sub: number;
+    if (this.tableState) sub = this.tableState.substate >>> 0;
+    else {
+      const stance = this.mm.stance;
+      if (typeof stance !== 'number') return MotionCommand.Ready;
+      sub = motionCommandFromWireIndex(stance & 0xFFFF) ?? MotionCommand.Ready;
+    }
     return SIDESTEP_AND_TURN.has(sub) ? MotionCommand.Ready : sub;
   }
 

@@ -34,8 +34,10 @@ jobs:
           path: public
           fetch-depth: 1
 
-      # Partial clone, evidence left out of the working tree: the export reads
-      # tracked blobs through git, fetching the few it needs on demand.
+      # Partial clone without verification/ evidence (4+ GB). The export reads
+      # blobs through git; checking out every path it publishes fetches them
+      # in one batch (a tools/-only checkout made git fetch ~2,400 blobs one
+      # at a time, 7+ minutes).
       - uses: actions/checkout@v4
         with:
           repository: jakemmarsh/acjs
@@ -45,8 +47,10 @@ jobs:
           filter: blob:none
           sparse-checkout-cone-mode: false
           sparse-checkout: |
-            /tools/
-            /package.json
+            /*
+            !/verification/
+            /verification/texture-index.json
+            /verification/scorecard.json
 
       - uses: actions/setup-node@v4
         with:

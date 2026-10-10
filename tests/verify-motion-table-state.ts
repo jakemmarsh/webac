@@ -123,3 +123,52 @@ describe.skipIf(!existsSync(DAT_PATHS.portal))('CharacterAnimController.motionsP
     expect(anim.motionsPending).toBe(false);
   });
 });
+
+describe.skipIf(!existsSync(DAT_PATHS.portal))('a server Ready with the forward command left out ends a server substate (the AC1999 / GDL reload)', () => {
+  it('Reload, then a state with no forward command: the interpreted forward command is Ready at once, and the substate returns', async () => {
+    const { MotionManager } = await import('../packages/renderer/src/animation/MotionManager.js');
+    const { CharacterAnimController } = await import('../packages/renderer/src/animation/CharacterAnimController.js');
+    const { applyServerForwardToLocalPlayer } = await import('../packages/renderer/src/world/ServerObjectManager.js');
+    const BOW = 0x8000003f;
+    const mm = new MotionManager(openDat(DAT_PATHS.portal));
+    mm.loadMotionTable(0x09000001); mm.setDefaultStance(1);
+    const anim = new CharacterAnimController(mm);
+    anim.setStance(BOW);
+    const idle = { isMovingForward: false, isMovingBackward: false, isStrafingLeft: false, isStrafingRight: false, isTurningLeft: false, isTurningRight: false, isRunning: true } as never;
+    for (let i = 0; i < 300; i++) { mm.update(1 / 60); anim.update(1 / 60, idle); }
+    expect(anim.interpretedForwardCommand(null)).toBe(MotionCommand.Ready);
+    // The server's Reload (0x16): the bow is not in the ready position (PlayerInReadyPosition).
+    applyServerForwardToLocalPlayer(mm, 0x16, 1, BOW);
+    expect(anim.interpretedForwardCommand(null)).toBe(MotionCommand.Reload);
+    for (let i = 0; i < 20; i++) { mm.update(1 / 60); anim.update(1 / 60, idle); }
+    // The AC1999 server's DoForcedStopCompletely: InterpretedMotionState::Pack leaves Ready out.
+    // UnPack reads an absent forward command as Ready, and the state changes before the link plays.
+    applyServerForwardToLocalPlayer(mm, 0, 1, BOW);
+    expect(anim.interpretedForwardCommand(null)).toBe(MotionCommand.Ready);
+    for (let i = 0; i < 240; i++) { mm.update(1 / 60); anim.update(1 / 60, idle); }
+    expect(anim.motionsPending).toBe(false);
+    expect(anim.interpretedForwardCommand(null)).toBe(MotionCommand.Ready);
+  });
+
+  it('ACE writes Ready out (0x03): the same return; an absent forward while the controller owns the substate changes nothing', async () => {
+    const { MotionManager } = await import('../packages/renderer/src/animation/MotionManager.js');
+    const { CharacterAnimController } = await import('../packages/renderer/src/animation/CharacterAnimController.js');
+    const { applyServerForwardToLocalPlayer } = await import('../packages/renderer/src/world/ServerObjectManager.js');
+    const BOW = 0x8000003f;
+    const mm = new MotionManager(openDat(DAT_PATHS.portal));
+    mm.loadMotionTable(0x09000001); mm.setDefaultStance(1);
+    const anim = new CharacterAnimController(mm);
+    anim.setStance(BOW);
+    const idle = { isMovingForward: false, isMovingBackward: false, isStrafingLeft: false, isStrafingRight: false, isTurningLeft: false, isTurningRight: false, isRunning: true } as never;
+    for (let i = 0; i < 300; i++) { mm.update(1 / 60); anim.update(1 / 60, idle); }
+    applyServerForwardToLocalPlayer(mm, 0x16, 1, BOW);
+    applyServerForwardToLocalPlayer(mm, 0x03, 1, BOW);
+    expect(anim.interpretedForwardCommand(null)).toBe(MotionCommand.Ready);
+    for (let i = 0; i < 240; i++) { mm.update(1 / 60); anim.update(1 / 60, idle); }
+    const strafe = { ...(idle as object), isStrafingRight: true } as never;
+    for (let i = 0; i < 30; i++) { mm.update(1 / 60); anim.update(1 / 60, strafe); }
+    applyServerForwardToLocalPlayer(mm, 0, 1, BOW, 0x0f); // the server's echo of the strafe, forward left out
+    expect(anim.interpretedForwardCommand(null)).toBe(MotionCommand.Ready);
+    expect(mm.motionTableState!.substate >>> 0).toBe(MotionCommand.SideStepRight);
+  });
+});

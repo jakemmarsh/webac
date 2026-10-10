@@ -129,8 +129,11 @@ export function applyServerForwardToLocalPlayer(mm: MotionManager, forwardCmd: n
   // The server's Ready that ends such a substate (FinishCast's return to
   // the magic Ready stance, a use motion's Ready) plays its return link.
   // A Ready while the character is in the controller's own substates
-  // (Ready / walk / run / turn …) stays the controller's.
-  if (forwardCmd === MOTION_READY_WIRE_INDEX) {
+  // (Ready / walk / run / turn …) stays the controller's. An absent forward
+  // command is Ready (InterpretedMotionState::UnPack @ 0051f400): ACE writes
+  // Ready out, but the AC1999 and GDL servers pack it only when it is not
+  // Ready, so their reload's Ready left a 1999 bow stuck in Reload.
+  if (forwardCmd === MOTION_READY_WIRE_INDEX || forwardCmd === 0) {
     const target = typeof mm.targetSubstate === 'number' ? mm.targetSubstate & 0xFFFF : MOTION_READY_WIRE_INDEX;
     if (!LOCAL_CONTROLLER_OWNED_WIRE_INDICES.has(target)) {
       if (mm.motionTableState) mm.motionTableState.doMotion(MotionCommand.Ready, forwardSpeed, true);
@@ -501,6 +504,13 @@ export function isSequenceNewer(newSeq: number, lastSeq: number): boolean {
  * drawing it.
  */
 export const PHYSICS_HIDE_MASK = PhysicsState.Hidden | PhysicsState.NoDraw;
+
+/** Why an object left the table (the removal journal, ServerObjectManager.onBulkRemoval). */
+export type ObjectRemovalReason =
+  | 'server' | 'recreate' | 'maint' | 'clear'
+  | 'own-inventory' | 'pickup' | 'wield';
+/** Removals in one maintenance pass at or above this are reported. */
+export const BULK_REMOVAL_REPORT = 5;
 
 /** PositionPack flag IsGrounded (ACE PositionFlags 0x4, retail has_contact). */
 const POSITION_FLAG_IS_GROUNDED = 0x4;
@@ -1099,7 +1109,7 @@ export class ServerObjectManager {
         this.updateInPlace(held, data);
         return held;
       }
-      this.deleteObject(data.guid);
+      this.deleteObject(data.guid, 'recreate');
     }
 
     const obj: ServerObject = {
@@ -1533,15 +1543,15 @@ export class ServerObjectManager {
     }
   }
 
-  /** Delete a server object and remove from scene. */
-  deleteObject(guid: number): void {
+  /** Delete a server object and remove from scene. `reason` names the caller for the removal journal. */
+  deleteObject(guid: number, reason: ObjectRemovalReason = 'server'): void {
     const obj = this.objects.get(guid);
     if (!obj) return;
 
     // Projectiles are removed instantly (no death fade)
     if (this.projectiles.has(guid)) {
       this.projectiles.delete(guid);
-      this.forceDelete(guid);
+      this.forceDelete(guid, reason);
       return;
     }
 
@@ -1567,6 +1577,7 @@ export class ServerObjectManager {
     }
 
     this.objects.delete(guid);
+    this.removals.push({ guid, reason });
     this.unparentChildren(guid);
   }
 
@@ -1585,7 +1596,7 @@ export class ServerObjectManager {
   }
 
   /** Force-delete an object (bypass fade). */
-  private forceDelete(guid: number): void {
+  private forceDelete(guid: number, reason: ObjectRemovalReason): void {
     this.dyingObjects.delete(guid);
     this.projectiles.delete(guid);
     this.destructionQueue.delete(guid);
@@ -1604,6 +1615,7 @@ export class ServerObjectManager {
       obj.mesh = null;
     }
     this.objects.delete(guid);
+    this.removals.push({ guid, reason });
     this.unparentChildren(guid);
   }
 
@@ -2157,6 +2169,10 @@ export class ServerObjectManager {
    * with the viewer's state, so the next occurrence names its cause.
    */
   onObjectMaintReport: ((report: { left: Array<{ guid: number; cell: number }>; destroyed: number[] }) => void) | null = null;
+  /** A pass that removed BULK_REMOVAL_REPORT or more objects, each with its reason (flushRemovalJournal). */
+  onBulkRemoval: ((removed: Array<{ guid: number; reason: ObjectRemovalReason }>) => void) | null = null;
+  /** Removals since the last maintenance pass (flushRemovalJournal). */
+  private removals: Array<{ guid: number; reason: ObjectRemovalReason }> = [];
 
   /** Objects currently out of the world, waiting in the destruction queue (probes / tests). */
   get lostObjectCount(): number {
@@ -2216,11 +2232,26 @@ export class ServerObjectManager {
     for (const [guid, at] of [...this.destructionQueue]) {
       if (nowSec < at) continue;
       this.destructionQueue.delete(guid);
-      if (this.objects.get(guid)?.lostCell) { this.forceDelete(guid); destroyed.push(guid); }
+      if (this.objects.get(guid)?.lostCell) { this.forceDelete(guid, 'maint'); destroyed.push(guid); }
     }
     if ((left.length > 0 || destroyed.length > 0) && this.onObjectMaintReport) {
       try { this.onObjectMaintReport({ left, destroyed }); } catch { /* diagnostics never block the upkeep */ }
     }
+    this.flushRemovalJournal();
+  }
+
+  /**
+   * BUG.ac1999-world-objects-missing-after-login — every removal since the
+   * last pass, whatever its path (a server DeleteObject, a pickup or wield,
+   * a recreate, CObjectMaint): a burst of BULK_REMOVAL_REPORT or more is
+   * reported once, with each removal's reason, so a recurrence of the
+   * missing-statics bug names the path that took them.
+   */
+  private flushRemovalJournal(): void {
+    if (this.removals.length >= BULK_REMOVAL_REPORT && this.onBulkRemoval) {
+      try { this.onBulkRemoval(this.removals.slice()); } catch { /* diagnostics never block the upkeep */ }
+    }
+    this.removals.length = 0;
   }
 
   /**
@@ -2719,8 +2750,10 @@ export class ServerObjectManager {
     this.projectiles.clear();
     this.destructionQueue.clear();
     for (const guid of [...this.objects.keys()]) {
-      this.forceDelete(guid);
+      this.forceDelete(guid, 'clear');
     }
+    // The teardown logs itself ("World state torn down"); no burst report.
+    this.removals.length = 0;
   }
 
   /**

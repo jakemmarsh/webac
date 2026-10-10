@@ -7,6 +7,10 @@
  * SmartBox::ProcessObjectNetBlobs @ 00454b20 replays it at the create.
  * Pre-fix ours returned early, so e.g. a DeleteObject racing its
  * CreateObject was lost and the object stayed in the world.
+ *
+ * A message for an OLDER instance than the object is dropped
+ * (NETBLOB_OLD_INSTANCE); applying a stale DeleteObject removed the AC1999
+ * tutorial dungeon's re-minted statics (BUG.ac1999-world-objects-missing-after-login).
  */
 import { describe, it, expect } from 'vitest';
 import { gateObjectHandlers, createObjectBlobGate, OBJECT_BLOB_HANDLERS } from '../packages/renderer/src/world/ObjectBlobGate.js';
@@ -75,6 +79,63 @@ describe('gateObjectHandlers', () => {
     expect(seen).toEqual([]); // the old instance stays
     create(9, 5);
     expect(seen).toEqual([5]);
+  });
+
+  // BUG.ac1999-world-objects-missing-after-login — NETBLOB_OLD_INSTANCE. The
+  // AC1999 server re-mints a respawned landblock's static guids at a newer
+  // instance; the previous instance's DeleteObject, queued before the new
+  // CreateObject, removed every door, sign and NPC of the tutorial dungeon
+  // at once after a login (2026-10-08 local, 2026-10-09 playwebac.com).
+  it('a queued DeleteObject for an OLDER instance is dropped at the newer create (the 1999 static re-mint)', () => {
+    const { gate, create } = harness();
+    const seen: number[] = [];
+    const out = gateObjectHandlers({ onObjectDelete: (d) => seen.push(d.guid) }, gate);
+    out.onObjectDelete!({ guid: 0x7017e004, instanceSequence: 3 }); // the despawned instance's delete
+    create(0x7017e004, 4); // the respawn's CreateObject
+    expect(seen).toEqual([]);
+    out.onObjectDelete!({ guid: 0x7017e004, instanceSequence: 3 }); // a late copy: still the old instance
+    expect(seen).toEqual([]);
+    out.onObjectDelete!({ guid: 0x7017e004, instanceSequence: 4 }); // this instance's own delete
+    expect(seen).toEqual([0x7017e004]);
+  });
+
+  it('a drop is reported (stamp, current instance) for the owner\'s log', () => {
+    const drops: number[][] = [];
+    const gate = createObjectBlobGate({
+      queue: new PendingPlayScripts(), worldInstance: () => 9, knownWithoutWorldRecord: () => false,
+      isNewer: isSequenceNewer, now: () => 0, dropped: (g, s, c) => drops.push([g, s, c]),
+    });
+    expect(gate.defer(0x7017e010, 8, () => {})).toBe(true);
+    expect(gate.defer(0x7017e010, 9, () => {})).toBe(false);
+    expect(drops).toEqual([[0x7017e010, 8, 9]]);
+  });
+
+  it('every gated handler drops an older instance\'s message (SetState, VectorUpdate, Pickup, position)', () => {
+    const { gate, create } = harness();
+    create(0x7017e008, 7);
+    const seen: string[] = [];
+    const out = gateObjectHandlers({
+      onSetState: () => seen.push('state'),
+      onVectorUpdate: () => seen.push('vector'),
+      onPickupEvent: () => seen.push('pickup'),
+    }, gate);
+    out.onSetState!({ guid: 0x7017e008, physicsState: 4, instanceSequence: 6, stateSequence: 1 });
+    out.onVectorUpdate!({ guid: 0x7017e008, velocity: { x: 0, y: 0, z: 0 }, omega: { x: 0, y: 0, z: 0 }, instanceSequence: 6, vectorSequence: 1 });
+    out.onPickupEvent!({ guid: 0x7017e008, instanceSequence: 6, positionSequence: 1 } as never);
+    expect(seen).toEqual([]);
+    out.onSetState!({ guid: 0x7017e008, physicsState: 4, instanceSequence: 7, stateSequence: 2 });
+    expect(seen).toEqual(['state']);
+  });
+
+  it('sequence wrap: 0xFFFF is older than 1, so its delete is dropped; a stamp-less message still applies', () => {
+    const { gate, create } = harness();
+    create(0x7017e00c, 1);
+    const seen: Array<number | undefined> = [];
+    const out = gateObjectHandlers({ onObjectDelete: (d) => seen.push(d.instanceSequence) }, gate);
+    out.onObjectDelete!({ guid: 0x7017e00c, instanceSequence: 0xFFFF });
+    expect(seen).toEqual([]);
+    out.onObjectDelete!({ guid: 0x7017e00c, instanceSequence: undefined as unknown as number });
+    expect(seen).toEqual([undefined]);
   });
 
   it('ParentEvent checks the holder (its stamp is the holder\'s instance) then queues on the missing item', () => {

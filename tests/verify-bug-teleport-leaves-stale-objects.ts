@@ -295,3 +295,53 @@ describe('ServerObjectManager.onObjectMaintReport', () => {
     expect(reports[1]).toEqual({ left: [], destroyed: [portal.guid] });
   });
 });
+
+// BUG.ac1999-world-objects-missing-after-login diagnostic — the removal
+// journal: a pass that took BULK_REMOVAL_REPORT or more objects out of the
+// table reports each with its path; fewer, or a teardown, report nothing.
+describe('ServerObjectManager.onBulkRemoval', () => {
+  const statics = (som: ServerObjectManager, n: number) =>
+    Array.from({ length: n }, (_, i) => som.createObject(createData(0x7017e000 + i, 0x017e0104) as never)!.guid);
+
+  it('five server deletes in one pass are reported with their reason; four are not', () => {
+    const { som } = rig();
+    const reports: Array<Array<{ guid: number; reason: string }>> = [];
+    som.onBulkRemoval = (r) => { reports.push(r); };
+    const loaded = () => true;
+    const guids = statics(som, 9);
+    for (const g of guids.slice(0, 4)) som.deleteObject(g);
+    som.updateObjectMaint(loaded, 1);
+    expect(reports).toEqual([]);
+    som.deleteObject(guids[4], 'pickup');
+    for (const g of guids.slice(5)) som.deleteObject(g);
+    som.updateObjectMaint(loaded, 2);
+    expect(reports).toEqual([[
+      { guid: guids[4], reason: 'pickup' },
+      ...guids.slice(5).map((guid) => ({ guid, reason: 'server' })),
+    ]]);
+    som.updateObjectMaint(loaded, 3);
+    expect(reports).toHaveLength(1);
+  });
+
+  it('CObjectMaint destroys are journaled as maint', () => {
+    const { som } = rig();
+    const reports: Array<Array<{ guid: number; reason: string }>> = [];
+    som.onBulkRemoval = (r) => { reports.push(r); };
+    const guids = statics(som, 5);
+    const sealedElsewhere = (id: number) => isCellLoaded(id, viewer({ viewerCellId: 0x01D90108, sealed: true }));
+    som.updateObjectMaint(sealedElsewhere, 10);
+    som.updateObjectMaint(sealedElsewhere, 10 + NONVISIBLE_OBJECT_DESTRUCTION_TIME);
+    expect(reports).toEqual([guids.map((guid) => ({ guid, reason: 'maint' }))]);
+  });
+
+  it('clear() (the world teardown) is not reported', () => {
+    const { som } = rig();
+    const reports: unknown[] = [];
+    som.onBulkRemoval = (r) => { reports.push(r); };
+    statics(som, 8);
+    som.clear();
+    som.updateObjectMaint(() => true, 1);
+    expect(reports).toEqual([]);
+    expect(som.getAllObjects().size).toBe(0);
+  });
+});

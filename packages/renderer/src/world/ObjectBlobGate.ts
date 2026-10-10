@@ -16,6 +16,9 @@
  * checks the holder against the stamp (it is the holder's instance) and
  * queues on whichever of the holder and the item is missing.
  *
+ * An object NEWER than the message gets NETBLOB_OLD_INSTANCE: the message
+ * is dropped (equal stamps apply it).
+ *
  * Pre-fix every one of these returned early for an unknown guid: e.g. ACE
  * sends a wielded item's ParentEvent before its CreateObject
  * (BUG.wielded-item-left-behind-on-teleport), and a DeleteObject racing a
@@ -33,7 +36,9 @@ export interface ObjectBlobGate {
   /**
    * Queue `replay` for `guid` and return true when the message cannot be
    * applied now (no object, an older instance than `instanceSequence`, or
-   * earlier messages for it still queued); false = apply it now.
+   * earlier messages for it still queued), or return true WITHOUT queuing
+   * when the message names an older instance than the object
+   * (NETBLOB_OLD_INSTANCE: dropped); false = apply it now.
    */
   defer(guid: number, instanceSequence: number | undefined, replay: () => void): boolean;
   /**
@@ -88,6 +93,8 @@ export interface ObjectBlobGateDeps {
   knownWithoutWorldRecord(guid: number): boolean;
   isNewer(a: number, b: number): boolean;
   now(): number;
+  /** A message dropped as NETBLOB_OLD_INSTANCE (its stamp, the object's) — logged by the owner. */
+  dropped?(guid: number, instanceSequence: number, current: number): void;
 }
 
 /** The SmartBox handlers' queue-or-apply decision (see the header). */
@@ -116,6 +123,17 @@ export function createObjectBlobGate(deps: ObjectBlobGateDeps): ObjectBlobGate {
           const cur = deps.worldInstance(guid);
           return cur !== null && (cur === undefined || !deps.isNewer(instanceSequence, cur));
         });
+        return true;
+      }
+      // NETBLOB_OLD_INSTANCE — every handler above drops a message for an
+      // OLDER instance than the object it finds. A landblock respawn on the
+      // AC1999 server re-mints its static guids at a newer instance, so the
+      // previous instance's DeleteObject, queued before the new CreateObject
+      // (or arriving after it), must not release the new one: applying it
+      // removed every door, sign and NPC of the tutorial dungeon right after
+      // a login (BUG.ac1999-world-objects-missing-after-login).
+      if (instanceSequence !== undefined && instance !== undefined && deps.isNewer(instance, instanceSequence)) {
+        deps.dropped?.(guid, instanceSequence, instance);
         return true;
       }
       return false;

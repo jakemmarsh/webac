@@ -8109,6 +8109,7 @@ async function main() {
         || !!playerState.inventory.getItem(guid) || playerState.equipment.getAll().some((e) => e.id === guid),
       isNewer: isSequenceNewer,
       now: () => performance.now(),
+      dropped: (guid, stamp, current) => console.log(`[AC] object message for an older instance of 0x${(guid >>> 0).toString(16)} dropped (instance ${stamp}, object ${current})`),
     });
     const handleObjectCreateOrUpdate = (data: CreateObjectData, isUpdate: boolean): void => {
       // HandleCreateObject @ 00454c80: a parent not known yet → the whole
@@ -8207,7 +8208,7 @@ async function main() {
             // before re-creating it; an own-inventory subject must not keep
             // a world-object registration (this also disposes a stale
             // pre-fix phantom at world origin). No-op when unregistered.
-            serverObjectManager?.deleteObject(data.guid);
+            serverObjectManager?.deleteObject(data.guid, 'own-inventory');
           }
           inventoryDirty = true;
           return;
@@ -8264,6 +8265,9 @@ async function main() {
             appearanceRoots(data),
           )
           : serverObjectManager!.createObject(data, isUpdate);
+        // BUG.ac1999-world-objects-missing-after-login — a world object the
+        // table did not take (diagnostic: statics vanished after a 1999 login).
+        if (!obj && data.guid !== aceCharGuid) console.warn(`[AC] CreateObject 0x${(data.guid >>> 0).toString(16)} "${data.name}" was not stored`);
         // GAP.world-drag-drop — keep a movable world object's record for the
         // pick-up (ServerSaysContainID moves it; ACE sends no CreateObject).
         if (obj) worldObjectRecords.remember(data.guid, data);
@@ -11518,7 +11522,7 @@ async function main() {
             && !playerState.inventory.getItem(data.itemGuid)) {
           const picked = worldObjectRecords.containIn(data.itemGuid, data.containerGuid);
           if (picked) {
-            serverObjectManager?.deleteObject(data.itemGuid);
+            serverObjectManager?.deleteObject(data.itemGuid, 'pickup');
             playerState.inventory.addItem(picked, data.itemGuid);
             if ((picked.itemType & ItemType.Container) !== 0 && data.containerGuid === aceCharGuid && !sidePackGuids.includes(data.itemGuid)) {
               sidePackGuids.push(data.itemGuid);
@@ -11661,7 +11665,7 @@ async function main() {
           playerId: aceCharGuid,
           getItem: (guid) => playerState.inventory.getItem(guid),
           addItem: (entry, guid) => { playerState.inventory.addItem(entry, guid); },
-          removeWorldObject: (guid) => { serverObjectManager?.deleteObject(guid); },
+          removeWorldObject: (guid) => { serverObjectManager?.deleteObject(guid, 'wield'); },
           equip: (it, location) => { playerState.equipment.equipItem(it, location as EquipMask); },
           confirmEquip: (id) => pendingEquipmentActions.confirm(id),
           markInventoryDirty: () => { inventoryDirty = true; },
@@ -17334,6 +17338,15 @@ async function main() {
                 + ` world=(${playerWorldX.toFixed(0)}, ${playerWorldZ.toFixed(0)}))`
                 + (left.length ? ` left: ${left.slice(0, 6).map((o) => `${hex(o.guid)}@${hex(o.cell)}`).join(' ')}` : '')
                 + (destroyed.length ? ` destroyed: ${destroyed.slice(0, 6).map(hex).join(' ')}` : ''));
+            };
+          }
+          if (!serverObjectManager.onBulkRemoval) {
+            serverObjectManager.onBulkRemoval = (removed) => {
+              const reasons: Record<string, number> = {};
+              for (const r of removed) reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
+              console.log(`[AC] ${removed.length} objects left the table in one frame: ${JSON.stringify(reasons)}`
+                + ` (${serverObjectManager?.getAllObjects().size ?? 0} remain; viewer inDungeon=${playerInDungeon})`
+                + ` ${removed.slice(0, 8).map((r) => `0x${(r.guid >>> 0).toString(16)}:${r.reason}`).join(' ')}`);
             };
           }
           serverObjectManager.updateObjectMaint(objectCellLoaded, performance.now() / 1000);
