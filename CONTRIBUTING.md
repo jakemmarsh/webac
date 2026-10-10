@@ -36,6 +36,15 @@ npm test                                     # the full suite, before a PR
 change must accompany a code change; `[skip-tests]` in the message for docs
 and config).
 
+## How pull requests land
+
+This repository is a mirror. Development happens in a private repository
+that also holds verification evidence (retail screenshots and captures) that
+can't be published, and a sync publishes the code here every 30 minutes as
+"Sync to <commit>" commits. Open pull requests here as usual: an accepted one
+is applied to the private repository and comes back with the next sync, and
+the pull request is closed with a link to that sync commit.
+
 ## Where things are
 
 - `docs/`: design notes and findings, for example `docs/dat-streaming.md`,

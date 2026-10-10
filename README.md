@@ -75,7 +75,8 @@ in, and for running your own bridge.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Fidelity rules come first: every
+See [CONTRIBUTING.md](CONTRIBUTING.md); this repository is a mirror synced
+from the development repository, and pull requests are welcome here. Fidelity rules come first: every
 value comes from the game data or a reference implementation, never a guess.
 Report security problems privately ([SECURITY.md](SECURITY.md)).
 
