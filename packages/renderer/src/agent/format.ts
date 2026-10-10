@@ -26,6 +26,14 @@ export function relativeDirection(rel: number): string {
 
 const pct = (f: number): string => `${Math.round(f * 100)}%`;
 
+/** "45s", "12m", "3h", "2d": how long ago a remembered place was seen. */
+export function seenAgoText(s: number): string {
+  if (s < 120) return `${Math.round(s)}s`;
+  if (s < 2 * 3600) return `${Math.round(s / 60)}m`;
+  if (s < 2 * 86400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86400)}d`;
+}
+
 export function formatObject(o: AgentObject): string {
   const bits = [
     `#${o.guid.toString(16)}`,
@@ -37,7 +45,8 @@ export function formatObject(o: AgentObject): string {
   if (o.health !== undefined) bits.push(`hp ${pct(o.health)}`);
   if (o.stack && o.stack > 1) bits.push(`x${o.stack}`);
   if (o.open) bits.push('open');
-  if (o.seenAgo !== undefined) bits.push(`last seen ${o.seenAgo < 120 ? `${o.seenAgo}s` : `${Math.round(o.seenAgo / 60)}m`} ago`);
+  if (o.dying) bits.push('dying');
+  if (o.seenAgo !== undefined) bits.push(`last seen ${seenAgoText(o.seenAgo)} ago`);
   return bits.join('  ');
 }
 

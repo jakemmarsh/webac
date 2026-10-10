@@ -14,8 +14,28 @@
  * share frames with rendering.
  */
 
+import { dropDamage, jumpOptions, type JumpKit, type JumpSpec } from './jumpPlan.js';
+
 export interface NavPoint { x: number; y: number; z: number }
 export type NavProbe = (from: NavPoint, to: { x: number; y: number }) => NavPoint | null;
+/** A path point; `jump` when it is reached by jumping (or dropping) from the point before it. */
+export type NavStep = NavPoint & { jump?: JumpSpec };
+
+/**
+ * Jumps and drops the search may take (AGENT.walk-drops-jumps): where the body can't walk on (a
+ * ledge, a gap, a platform's side) it tries the jumps the client's own physics would fly
+ * (jumpPlan.jumpOptions), landing no harder than `maxDamage`. Each one costs `penalty` metres of
+ * extra path, so a walk round is taken when it is not much longer.
+ */
+export interface JumpSearch {
+  kit: JumpKit;
+  /** The fall damage a landing may deal (jumpPlan.fallBudget of the player's health). */
+  maxDamage: number;
+  /** Extra path cost of one jump, metres (default 8). */
+  penalty?: number;
+  /** Most flights simulated before jumps stop being tried (default 1500). */
+  maxFlights?: number;
+}
 
 export interface PlanOptions {
   /** Grid spacing in metres (default 0.6: under the body's diameter, so door gaps aren't skipped). */
@@ -28,11 +48,17 @@ export interface PlanOptions {
   maxNodes?: number;
   /** An edge is open when the probe ends this close to its end (default 0.15 m). */
   tolerance?: number;
+  /** Jumps and drops it may take; none without. */
+  jumps?: JumpSearch;
 }
 
+/**
+ * `boxed`: the search met the edge of its box (start → goal plus the margin) somewhere, so a wider
+ * one may find a way it could not (the Banderling Ruin ramp lay 2 m past a 12 m margin, 2026-10-10).
+ */
 export type PlanResult =
-  | { status: 'found'; path: NavPoint[]; expanded: number }
-  | { status: 'none'; expanded: number; nearest: NavPoint | null };
+  | { status: 'found'; path: NavStep[]; expanded: number; jumps: number }
+  | { status: 'none'; expanded: number; nearest: NavPoint | null; boxed: boolean };
 
 const DIRS: ReadonlyArray<[number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 
@@ -88,7 +114,12 @@ export class PathSearch {
   private readonly g = new Map<number, number>();
   private readonly at = new Map<number, NavPoint>();
   private readonly from = new Map<number, number>();
+  /** The jump that reaches a node (its edge from `from`). */
+  private readonly via = new Map<number, JumpSpec>();
   private readonly closed = new Set<number>();
+  private readonly jumps: JumpSearch | null;
+  private flights = 0;
+  private boxed = false;
   private expanded = 0;
   private bestKey: number;
   private bestH: number;
@@ -104,6 +135,7 @@ export class PathSearch {
     this.within = opts.within ?? this.spacing;
     this.maxNodes = opts.maxNodes ?? 6000;
     this.tolerance = opts.tolerance ?? 0.15;
+    this.jumps = opts.jumps ?? null;
     const margin = opts.margin ?? 12;
     const gi = (goal.x - start.x) / this.spacing, gj = (goal.y - start.y) / this.spacing;
     const m = Math.ceil(margin / this.spacing);
@@ -143,41 +175,92 @@ export class PathSearch {
       const p = this.at.get(k)!;
       const hp = this.h(p);
       if (hp < this.bestH) { this.bestH = hp; this.bestKey = k; }
-      if (this.reached(p)) return (this.done = { status: 'found', path: this.smooth(this.trace(k)), expanded: this.expanded });
+      if (this.reached(p)) {
+        const path = this.smooth(this.trace(k));
+        return (this.done = { status: 'found', path, expanded: this.expanded, jumps: path.filter((q) => q.jump).length });
+      }
       if (++this.expanded > this.maxNodes) break;
       const [i, j] = this.ijb(k);
+      const stuck: Array<[number, number]> = [];
       for (const [di, dj] of DIRS) {
         const ni = i + di, nj = j + dj;
-        if (ni < this.minI || ni > this.maxI || nj < this.minJ || nj > this.maxJ) continue;
+        if (ni < this.minI || ni > this.maxI || nj < this.minJ || nj > this.maxJ) { this.boxed = true; continue; }
         const target = { x: this.start.x + ni * this.spacing, y: this.start.y + nj * this.spacing };
         const got = this.probe(p, target);
-        if (!got || Math.hypot(got.x - target.x, got.y - target.y) > this.tolerance) continue;
-        const nk = this.key(ni, nj, this.band(got.z));
-        if (this.closed.has(nk)) continue;
-        const ng = this.g.get(k)! + Math.hypot(di, dj) * this.spacing;
-        if (ng >= (this.g.get(nk) ?? Infinity)) continue;
-        this.g.set(nk, ng);
-        this.at.set(nk, { x: target.x, y: target.y, z: got.z });
-        this.from.set(nk, k);
-        this.open.push(nk, ng + this.h({ ...target, z: got.z }));
+        if (!got || Math.hypot(got.x - target.x, got.y - target.y) > this.tolerance) { stuck.push([di, dj]); continue; }
+        this.relax(k, this.key(ni, nj, this.band(got.z)), { x: target.x, y: target.y, z: got.z }, Math.hypot(di, dj) * this.spacing);
       }
+      if (this.jumps && stuck.length) this.tryJumps(k, p, stuck);
     }
-    return (this.done = { status: 'none', expanded: this.expanded, nearest: this.bestKey === this.key(0, 0, 0) ? null : this.at.get(this.bestKey) ?? null });
+    return (this.done = { status: 'none', expanded: this.expanded, nearest: this.bestKey === this.key(0, 0, 0) ? null : this.at.get(this.bestKey) ?? null, boxed: this.boxed });
   }
 
-  private trace(k: number): NavPoint[] {
-    const out: NavPoint[] = [];
-    for (let c: number | undefined = k; c !== undefined; c = this.from.get(c)) out.push(this.at.get(c)!);
+  private relax(k: number, nk: number, at: NavPoint, cost: number, jump?: JumpSpec): void {
+    if (this.closed.has(nk)) return;
+    const ng = this.g.get(k)! + cost;
+    if (ng >= (this.g.get(nk) ?? Infinity)) return;
+    this.g.set(nk, ng);
+    this.at.set(nk, at);
+    this.from.set(nk, k);
+    if (jump) this.via.set(nk, jump); else this.via.delete(nk);
+    this.open.push(nk, ng + this.h(at));
+  }
+
+  /**
+   * Where the walk from `p` stopped short (a ledge, a gap, a wall), the jumps that way land
+   * somewhere: each landing is a node, reached by that jump. A way the body can't go even in the
+   * air (a wall that stands higher than a jump) is skipped before any flight is simulated.
+   */
+  private tryJumps(k: number, p: NavPoint, stuck: Array<[number, number]>): void {
+    const js = this.jumps!;
+    const max = js.maxFlights ?? 1500;
+    for (const [di, dj] of stuck) {
+      if (this.flights >= max) return;
+      const n = Math.hypot(di, dj);
+      const u = { x: di / n, y: dj / n };
+      // Open air that way: a 1.2 m move at knee or head height above the floor goes through.
+      const open = [0.8, 1.6].some((h) => {
+        const to = js.kit.airStep({ x: p.x, y: p.y, z: p.z + h }, u.x * 1.2, u.y * 1.2);
+        return Math.hypot(to.x - p.x, to.y - p.y) > 0.9;
+      });
+      if (!open) continue;
+      let flights = 0;
+      const kit: typeof js.kit = { ...js.kit, launch: (power, walk) => { flights++; return js.kit.launch(power, walk); } };
+      const options = jumpOptions(kit, p, u, { maxDamage: js.maxDamage, max: 2 });
+      this.flights += flights;
+      for (const o of options) {
+        const ni = Math.round((o.to.x - this.start.x) / this.spacing), nj = Math.round((o.to.y - this.start.y) / this.spacing);
+        if (ni < this.minI || ni > this.maxI || nj < this.minJ || nj > this.maxJ) { this.boxed = true; continue; }
+        const nk = this.key(ni, nj, this.band(o.to.z));
+        if (nk === k) continue;
+        this.relax(k, nk, o.to, Math.hypot(o.to.x - p.x, o.to.y - p.y) + (js.penalty ?? 8), o);
+      }
+    }
+  }
+
+  private trace(k: number): NavStep[] {
+    const out: NavStep[] = [];
+    for (let c: number | undefined = k; c !== undefined; c = this.from.get(c)) {
+      const j = this.via.get(c);
+      out.push(j ? { ...this.at.get(c)!, jump: j } : this.at.get(c)!);
+    }
     return out.reverse();
   }
 
-  /** Drop grid points a straight walk can skip (the probe decides), so the body steers in long legs. */
-  private smooth(path: NavPoint[]): NavPoint[] {
-    if (path.length <= 2) return path.slice(1);
-    const out: NavPoint[] = [];
+  /**
+   * Drop grid points a straight walk can skip (the probe decides), so the body steers in long legs.
+   * A jump's take-off and landing stay: the walk is smoothed between them.
+   */
+  private smooth(path: NavStep[]): NavStep[] {
+    if (path.length <= 1) return [];
+    const out: NavStep[] = [];
     let a = 0;
     while (a < path.length - 1) {
-      let b = path.length - 1;
+      if (path[a + 1].jump) { out.push(path[a + 1]); a = a + 1; continue; }
+      // The run of walking steps from a: up to the next jump's take-off.
+      let end = a + 1;
+      while (end + 1 < path.length && !path[end + 1].jump) end++;
+      let b = end;
       for (; b > a + 1; b--) if (this.straight(path[a], path[b])) break;
       out.push(path[b]);
       a = b;
@@ -222,8 +305,8 @@ export function planPath(probe: NavProbe, start: NavPoint, goal: { x: number; y:
 export function floorPlan(
   probe: NavProbe, center: NavPoint,
   marks: ReadonlyArray<{ x: number; y: number; ch: string; label: string }>,
-  opts: { radius?: number; spacing?: number; maxProbes?: number } = {},
-): { lines: string[]; legend: string[]; reached: number } {
+  opts: { radius?: number; spacing?: number; maxProbes?: number; jumps?: JumpSearch } = {},
+): { lines: string[]; legend: string[]; reached: number; drops: number; deadly: number; jumpSpots: number } {
   const spacing = opts.spacing ?? 1;
   const r = Math.round((opts.radius ?? 15) / spacing);
   const maxProbes = opts.maxProbes ?? 6000;
@@ -257,6 +340,49 @@ export function floorPlan(
     }
     grid.push(row);
   }
+  // AGENT.walk-drops-jumps — the edges a body can drop off ('v', or '!' where the fall would hurt more
+  // than you can take), and the floor only a jump reaches ('J'), from the client's own jump physics.
+  let drops = 0, deadly = 0, jumpSpots = 0;
+  const js = opts.jumps;
+  if (js) {
+    const cellAt = (i: number, j: number): string => grid[r - j][i + r];
+    const setAt = (i: number, j: number, ch: string): void => { grid[r - j][i + r] = ch; };
+    const edges: Array<{ p: NavPoint; i: number; j: number; di: number; dj: number }> = [];
+    for (let j = -r; j <= r; j++) for (let i = -r; i <= r; i++) {
+      const p = reach[idx(i, j)];
+      // Edges of the floor you stand on (the plan shows one floor per square: yours where it reaches).
+      if (!p || Math.abs(p.z - center.z) > 1) continue;
+      for (const [di, dj] of DIRS.slice(0, 4)) {
+        const ni = i + di, nj = j + dj;
+        if (Math.abs(ni) > r || Math.abs(nj) > r) continue;
+        const n = reach[idx(ni, nj)];
+        if (n && n.z > p.z - 1) continue; // walked on to, on this floor
+        const f = js.kit.floor(center.x + ni * spacing, center.y + nj * spacing, p.z);
+        if (f === null || p.z - f <= 1) continue;
+        edges.push({ p, i, j, di, dj });
+        if (cellAt(ni, nj) !== '#' && cellAt(ni, nj) !== ':') continue;
+        const safe = dropDamage(p.z - f) <= js.maxDamage;
+        setAt(ni, nj, safe ? 'v' : '!');
+        if (safe) drops++; else deadly++;
+      }
+    }
+    // Jumps from the edges, a flight budget's worth, spread over them.
+    let flights = 0;
+    const maxFlights = js.maxFlights ?? 600;
+    const stride = Math.max(1, Math.ceil(edges.length / 40));
+    for (let e = 0; e < edges.length && flights < maxFlights; e += stride) {
+      const { p, di, dj } = edges[e];
+      const kit: JumpKit = { ...js.kit, launch: (power, walk) => { flights++; return js.kit.launch(power, walk); } };
+      for (const o of jumpOptions(kit, p, { x: di, y: dj }, { maxDamage: js.maxDamage, max: 2 })) {
+        if (o.to.z < p.z - 1) continue; // a drop's landing: the 'v' beside it says so
+        const ni = Math.round((o.to.x - center.x) / spacing), nj = Math.round((o.to.y - center.y) / spacing);
+        const n = Math.abs(ni) <= r && Math.abs(nj) <= r ? reach[idx(ni, nj)] : undefined;
+        if (n === undefined || (n && Math.abs(n.z - o.to.z) < 1)) continue; // off the plan, or floor you walk to
+        if (cellAt(ni, nj) !== 'J') jumpSpots++;
+        setAt(ni, nj, 'J');
+      }
+    }
+  }
   const legend: string[] = [];
   for (const m of marks) {
     const i = Math.round((m.x - center.x) / spacing), j = Math.round((m.y - center.y) / spacing);
@@ -265,5 +391,5 @@ export function floorPlan(
     legend.push(`${m.ch} ${m.label}`);
   }
   grid[r][r] = '@';
-  return { lines: grid.map((row) => row.join('')), legend, reached: reach.filter(Boolean).length };
+  return { lines: grid.map((row) => row.join('')), legend, reached: reach.filter(Boolean).length, drops, deadly, jumpSpots };
 }

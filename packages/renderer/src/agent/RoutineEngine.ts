@@ -12,16 +12,19 @@
  * live game before turning it on.
  */
 import {
-  itemTypeLabel, vtCanonicalName, vtDefaults,
+  itemTypeLabel, parseMetaView, vtCanonicalName, vtDefaults, type MetaView, type MetaViewButton,
   type LootRule, type PropTest, type Route, type RoutineAction, type RoutineCondition, type RoutineProfile, type RoutineRule,
 } from '@ac/shared';
 import { parseMapCoords, type AgentApi, type LootDecision } from './AgentApi.ts';
+import { VtMacro } from './macro/vtMacro.ts';
+import { matchMonsterRow } from './macro/combatPlan.ts';
+import { planInventory } from './macro/inventoryPlan.ts';
 import type { AgentObservation, AgentResult } from './types.ts';
 
 /** Live facts the conditions read that the observation doesn't carry. */
 export interface RoutineFacts {
   /** Active enchantments by spell name, with seconds left. */
-  activeSpells(): Array<{ name: string; remaining: number }>;
+  activeSpells(): Array<{ spellId?: number; name: string; remaining: number }>;
   /** Free slots in the main pack. */
   freePackSlots(): number;
   /** Burden as a percent of capacity. */
@@ -193,6 +196,10 @@ export interface RoutineStatus {
   lastChange?: { from: string; to: string; rule: string | null } | null;
   /** Rules that fired and wait to re-arm (ruleFiring 'once'), as "state#index": VirindiTank's Meta tab lists them in red. */
   spent?: string[];
+  /** A Force Buff round is under way. */
+  forcingBuffs?: boolean;
+  /** The loaded route and the point it walks to next (VirindiTank's current waypoint). */
+  nav?: { route: string; point: number; done: boolean };
 }
 
 /** What this run has done (the panel's Stats tab), since it started. */
@@ -216,6 +223,9 @@ const STEP_MS = 500;
 
 /** VirindiTank's defaults for the settings the macro reads (overridden by the profile's settings, then by set-setting). */
 /** The macro's starting settings: VirindiTank's defaults (vtankOptions.ts; EnableMeta is on there, see its note). */
+/** A VirindiTank command line (/vt … or /vtank …). */
+export const VT_COMMAND = /^\s*\/(vt|vtank)(\s|$)/i;
+
 export const MACRO_DEFAULTS: Record<string, string | number | boolean> = { ...vtDefaults(), BuffSet: '' };
 
 /** Does any rule (through Not) use this condition kind? */
@@ -249,14 +259,25 @@ export class RoutineEngine {
   private callStack: string[] = [];
   /** ruleFiring 'once': rules (state#index) that fired and wait for their conditions to turn false. */
   private spent = new Set<string>();
+  /** Loot Only Rare Corpses: a rare of yours was announced and not looted yet. */
+  private rarePending = false;
+  private rareMark = 0;
+  /** When the macro last moved an item (Autostack / Autocram wait for the server between moves). */
+  private lastTidyAt = -Infinity;
+  /** When the macro last went looting (kills before it are done). */
+  private macroLootedAt = -Infinity;
+  /** VirindiTank's planners, for profiles with its tabs (made on first use). */
+  private vt: VtMacro | null = null;
   /** A death already counted (StopMacroOnDeath off holds still while dead). */
   private deadSeen = false;
+  /** When the run last resumed from a pause (Seconds in State counts from it, as VTank's does from switching on). */
+  private resumedAt = -Infinity;
   private watchdog: { state: string; meters: number; seconds: number; samples: Array<{ t: number; x: number; y: number }> } | null = null;
   private settings: Record<string, string | number | boolean> = {};
   /** The profile a dry run is checking (another one than the running profile, maybe). */
   private checking: RoutineProfile | null = null;
   /** The expression evaluator, when one is attached (VirindiTank meta expressions). */
-  expressions: { test(expr: string): boolean; run(expr: string): string } | null = null;
+  expressions: { test(expr: string): boolean; run(expr: string): string; setVar?(name: string, value: string): void } | null = null;
   private lastChange: { from: string; to: string; rule: string | null } | null = null;
   /** Rules (by state + index) resting after a pass where they found nothing to do, until this time. */
   private resting = new Map<string, number>();
@@ -265,6 +286,20 @@ export class RoutineEngine {
   private stats: RoutineStats = emptyStats();
   private xpAtStart = 0;
   private stateClock = 0;
+  /** Where meta views open (GameUI; main.ts wires it). */
+  views: { open(name: string, view: MetaView, click: (b: MetaViewButton) => void): void; close(name: string): void; closeAll(): void } | null = null;
+
+  /** A meta view's button: its actionexpr runs, then its setstate (VirindiTank's Meta_Views). */
+  viewButton(b: MetaViewButton): void {
+    if (!this.profile) return;
+    if (b.actionexpr) { try { this.expressions?.run(b.actionexpr); } catch (e) { this.note(`view button ${b.name}: ${(e as Error).message}`); } }
+    if (b.setstate && this.profile.states.some((s) => s.name === b.setstate)) this.enterState(b.setstate, `view button ${b.name}`);
+  }
+
+  /** VirindiTank's /vt commands (the window's handler; main.ts wires it). */
+  onVtCommand: ((line: string) => void) | null = null;
+  /** VirindiTank's /vt fakedeath: the meta's Character Death fires as if you had died. */
+  fakeDeath(): AgentResult { this.api.push('death', 'fake death (/vt fakedeath)'); return { ok: true, message: 'fake death' }; }
   /** Player-facing reports ("Kept Pyreals (rule: Money)"); main.ts prints them to chat as [Automation]. */
   onReport: ((text: string) => void) | null = null;
 
@@ -287,12 +322,16 @@ export class RoutineEngine {
     this.callStack = [];
     this.spent.clear();
     this.deadSeen = false;
+    this.resumedAt = -Infinity;
+    this.macroLootedAt = -Infinity;
+    this.rarePending = false;
+    this.rareMark = this.api.currentSeq();
     this.watchdog = null;
     this.settings = { ...MACRO_DEFAULTS };
     for (const [k, v] of Object.entries(profile.settings ?? {})) this.settings[vtCanonicalName(k)] = v;
     // VirindiTank's Auto-Navigation and Looting profiles: the route and loot set it starts with.
     const navRoute = profile.navRoute ? profile.routes.find((r) => r.name === profile.navRoute) : undefined;
-    if (navRoute) this.nav = { route: navRoute, i: 0, dir: 1, done: navRoute.points.length === 0 };
+    if (navRoute) this.nav = { route: navRoute, i: 0, dir: 1, done: navRoute.mode !== 'follow' && navRoute.points.length === 0 };
     if (profile.lootSet && profile.lootSets?.[profile.lootSet]) this.profile.loot = profile.lootSets[profile.lootSet];
     this.note(`started "${profile.name}" in "${this.state}"`);
     return { ok: true, message: `running "${profile.name}" (starts in "${this.state}")` };
@@ -305,6 +344,8 @@ export class RoutineEngine {
     this.paused = false;
     this.stopRequested = true;
     const name = this.profile.name;
+    // A meta's views go with the run.
+    this.views?.closeAll();
     this.profile = null;
     this.api.stopMoving();
     return { ok: true, message: `stopped "${name}"` };
@@ -313,7 +354,8 @@ export class RoutineEngine {
   status(): RoutineStatus {
     return {
       running: !!this.profile, paused: !!this.profile && this.paused, profile: this.profile?.name ?? null, state: this.profile ? this.state : null,
-      acting: this.acting, last: this.log.slice(-12), stateSince: this.stateSince, lastChange: this.lastChange, spent: [...this.spent],
+      acting: this.acting, last: this.log.slice(-12), stateSince: this.stateSince, lastChange: this.lastChange, spent: [...this.spent], forcingBuffs: !!this.vt?.forcing,
+      ...(this.nav ? { nav: { route: this.nav.route.name, point: this.nav.i, done: this.nav.done } } : {}),
     };
   }
 
@@ -332,6 +374,7 @@ export class RoutineEngine {
     if (!this.profile) return { ok: false, message: 'no routine is running' };
     if (!this.paused) return { ok: true, message: 'already running' };
     this.paused = false;
+    this.resumedAt = this.now();
     this.note('resumed');
     return { ok: true, message: `resumed "${this.profile.name}" in "${this.state}"` };
   }
@@ -380,6 +423,44 @@ export class RoutineEngine {
     this.eventMark = this.api.currentSeq();
     this.spent.clear();
     this.stateSince = this.now();
+  }
+
+  /** VirindiTank's /vt reverseroute: walk the loaded route the other way (its stops move with their points). */
+  reverseRoute(): AgentResult {
+    if (!this.nav) return { ok: false, message: 'no route loaded' };
+    const r = this.nav.route;
+    const last = r.points.length - 1;
+    this.nav.route = { ...r, points: [...r.points].reverse(), ...(r.stops ? { stops: r.stops.map((st) => ({ ...st, at: last - st.at })) } : {}) };
+    this.nav.i = Math.max(0, last - this.nav.i);
+    this.reversed = !this.reversed;
+    return { ok: true, message: `route "${r.name}" reversed` };
+  }
+  /** Whether /vt reverseroute has the loaded route reversed (/vt reverseroutequery). */
+  reversed = false;
+
+  /** VirindiTank's current-waypoint arrow: walk to this point of the loaded route next. */
+  setWaypoint(i: number): AgentResult {
+    if (!this.nav) return { ok: false, message: 'no route loaded' };
+    if (i < 0 || i >= this.nav.route.points.length) return { ok: false, message: `no point ${i + 1}` };
+    this.nav.i = i;
+    this.nav.done = false;
+    this.note(`route "${this.nav.route.name}": next point ${i + 1} (set by hand)`);
+    return { ok: true, message: `next point ${i + 1}` };
+  }
+
+  /** VirindiTank's Force Buff / Cancel Force Buff (a profile with its tabs). */
+  forceBuff(): AgentResult {
+    if (!this.profile) return { ok: false, message: 'no routine is running' };
+    if (!this.profile.vtank) return { ok: false, message: 'Force Buff works with the VirindiTank tabs\' buffs' };
+    this.vt ??= new VtMacro(this.api, this.now);
+    this.vt.forceBuff();
+    this.note('force buff');
+    return { ok: true, message: 'force buff: recasting every buff' };
+  }
+  cancelForceBuff(): AgentResult {
+    this.vt?.cancelForceBuff();
+    this.note('force buff cancelled');
+    return { ok: true, message: 'force buff cancelled' };
   }
 
   /** Put the running routine in a state by hand (VirindiTank's Current State menu). */
@@ -516,7 +597,46 @@ export class RoutineEngine {
       case 'died': { const hit = this.api.eventsSince(this.eventMark).some((e) => e.type === 'death'); return { ok: hit, why: hit ? 'you died' : 'no death since' }; }
       case 'vendor-open': case 'vendor-closed': { const open = this.api.vendorOpen(); return { ok: c.kind === 'vendor-open' ? open : !open, why: open ? 'a vendor is open' : 'no vendor open' }; }
       case 'route-done': { const done = !this.nav || this.nav.done; return { ok: done, why: !this.nav ? 'no route loaded' : done ? `"${this.nav.route.name}" finished` : `"${this.nav.route.name}" point ${this.nav.i + 1} of ${this.nav.route.points.length}` }; }
-      case 'spell-time-at-least': { const on = this.facts.activeSpells().find((x) => x.name.toLowerCase() === c.spell.toLowerCase()); const left = on?.remaining ?? 0; return { ok: left >= c.seconds, why: on ? `${c.spell} ${Math.round(left)} s left` : `${c.spell} not on` }; }
+      case 'spell-time-at-least': {
+        // By id (an imported meta) or by name; the longest-lasting layer counts.
+        const label = c.spell || `spell ${c.spellId}`;
+        const on = this.facts.activeSpells().filter((x) => (c.spellId ? x.spellId === c.spellId : x.name.toLowerCase() === c.spell.toLowerCase())).sort((a, b) => b.remaining - a.remaining)[0];
+        const left = on ? (on.remaining < 0 ? Infinity : on.remaining) : 0;
+        return { ok: left >= c.seconds, why: on ? `${label} ${on.remaining < 0 ? 'lasts' : `${Math.round(left)} s left`}` : `${label} not on` };
+      }
+      case 'seconds-in-state-persistent': { const s = (this.now() - this.stateSince) / 1000; return { ok: s >= c.seconds, why: `${Math.round(s)} s in "${this.state}"` }; }
+      case 'monster-priority-count': {
+        const rows = (this.checking ?? this.profile)?.vtank?.monsters;
+        if (!rows) return { ok: false, why: 'no Monsters tab in this profile' };
+        const n = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying && o.dist <= c.meters && matchMonsterRow(rows, o, { settings: this.settings }).priority === c.priority).length;
+        return { ok: n >= c.count, why: `${n} of priority ${c.priority} within ${c.meters} m` };
+      }
+      case 'route-distance-at-least': {
+        if (!this.nav || !me) return { ok: false, why: !this.nav ? 'no route loaded' : 'not in world' };
+        const pts = this.nav.route.points.map(parseMapCoords).filter((x): x is NonNullable<typeof x> => !!x);
+        if (!pts.length) return { ok: false, why: 'the route has no points' };
+        const d = Math.min(...pts.map((g) => Math.hypot(g.x - me.pos.x, g.y - me.pos.y)));
+        return { ok: d >= c.meters, why: `${Math.round(d)} m from the nearest route point` };
+      }
+      case 'chat-capture': {
+        let re: RegExp;
+        try { re = new RegExp(c.pattern, 'i'); } catch { return { ok: false, why: `bad pattern /${c.pattern}/` }; }
+        for (const e of this.api.eventsSince(this.chatSeq)) {
+          if (e.type !== 'chat') continue;
+          if (c.colors?.length && (e.chatType === undefined || !c.colors.includes(e.chatType))) continue;
+          const line = e.text.replace(/^\([a-z]+\) /, '');
+          const m = re.exec(line);
+          if (!m) continue;
+          // The first match since the last check; its named groups become capturegroup_<name> (VTank's CMC).
+          // (the running routine's checks only: a dry run of another profile sets nothing)
+          if (this.checking === this.profile) {
+            for (const [k, v] of Object.entries(m.groups ?? {})) this.expressions?.setVar?.(`capturegroup_${k}`, v ?? '');
+            if (e.chatType !== undefined) this.expressions?.setVar?.('capturecolor', String(e.chatType));
+          }
+          return { ok: true, why: `chat: ${line.slice(0, 60)}` };
+        }
+        return { ok: false, why: 'no matching chat' };
+      }
       case 'monster-count': {
         let re: RegExp;
         try { re = new RegExp(c.pattern, 'i'); } catch { return { ok: false, why: `bad pattern /${c.pattern}/` }; }
@@ -538,7 +658,8 @@ export class RoutineEngine {
         const d = Math.hypot(goal.x - me.pos.x, goal.y - me.pos.y);
         return { ok: d <= c.meters, why: `${Math.round(d)} m from ${c.coords}` };
       }
-      case 'seconds-in-state': { const s = (this.now() - this.stateSince) / 1000; return { ok: s >= c.seconds, why: `${Math.round(s)} s in "${this.state}"` }; }
+      // VirindiTank's Seconds in State resets when the macro is switched off and on (our pause / resume).
+      case 'seconds-in-state': { const s = (this.now() - Math.max(this.stateSince, this.resumedAt)) / 1000; return { ok: s >= c.seconds, why: `${Math.round(s)} s in "${this.state}"` }; }
       case 'not': {
         // Not over a check this engine can't make doesn't hold either.
         if (c.condition.kind === 'unsupported') return { ok: false, why: `can't run: not (${c.condition.what})` };
@@ -599,7 +720,17 @@ export class RoutineEngine {
   /** Called from the agent API's tick (~10 Hz); evaluates at most every half second. */
   tick(): void {
     const p = this.profile;
-    if (!p || this.busy || this.paused) return;
+    if (!p || this.busy) return;
+    if (this.paused) {
+      // M. Charges When Off (VirindiTank): worn items keep their mana while the macro is switched off.
+      if (p.vtank && truthySetting(this.settings.ManaChargesWhenOff) && this.now() - this.lastStep >= STEP_MS) {
+        this.lastStep = this.now();
+        this.vt ??= new VtMacro(this.api, this.now);
+        const m = this.vt.manaStep(p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> }, this.settings);
+        if (m) { this.busy = true; void m.run().then((r) => this.note(`${m.label}: ${r.message.split('\n')[0]}`)).finally(() => { this.busy = false; }); }
+      }
+      return;
+    }
     const t = this.now();
     if (t - this.lastStep < STEP_MS) return;
     this.lastStep = t;
@@ -663,12 +794,63 @@ export class RoutineEngine {
     const combat = truthySetting(st.EnableCombat) && p.modules.combat;
     const looting = truthySetting(st.EnableLooting) && p.modules.looting;
     const navOn = truthySetting(st.EnableNav) && p.modules.navigation && !!this.nav && !this.nav.done;
-    const monsters = obs.nearby.filter((o) => o.kind === 'monster');
+    const monsters = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying);
     const inRange = combat && monsters.some((o) => o.dist <= range);
     const near = combat && truthySetting(st.EnableNav) && approach > range ? monsters.filter((o) => o.dist > range && o.dist <= approach).sort((a, b) => a.dist - b.dist)[0] : undefined;
     if (navOn && truthySetting(st.NavPriorityBoost)) { void this.walkNav(); return; }
     const steps: RoutineAction[] = [];
-    const lootDue = looting && this.kills.some((k) => this.now() - k.at < 120_000);
+    // Loot Only Rare Corpses: only after the server's "<you> has discovered the <rare>!" (ACE Corpse.EnterWorld).
+    const myName = obs.me?.name;
+    for (const e of this.api.eventsSince(this.rareMark)) {
+      this.rareMark = Math.max(this.rareMark, e.seq);
+      if (myName && e.type === 'chat' && e.text.replace(/^\([a-z]+\) /, '').startsWith(`${myName} has discovered the `)) this.rarePending = true;
+    }
+    // A kill is loot to fetch until the macro has gone looting after it (one try per kill, not two minutes of tries).
+    const lootDue = looting && (truthySetting(st.LootOnlyRareCorpses) ? this.rarePending : this.kills.some((k) => k.at > this.macroLootedAt && this.now() - k.at < 120_000));
+    // A profile with VirindiTank's tabs: its planners decide recharge, combat and buffs (vtMacro.ts).
+    if (p.vtank) {
+      this.vt ??= new VtMacro(this.api, this.now);
+      for (const name of this.vt.kills()) { this.kills.push({ name, at: this.now() }); this.kills = this.kills.slice(-10); this.stats.kills++; }
+      // A corpse of ours waiting and nothing in range: only recharging comes before the loot (buffs wait for idle);
+      // with Boost Loot Priority it comes first outright.
+      if (lootDue && truthySetting(st.LootPriorityBoost) && !inRange) { /* loot first, below */ } else {
+        const step = this.vt.decide(p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> }, st, { combat, buffing: truthySetting(st.EnableBuffing) && p.modules.buffs && !(lootDue && !inRange), idle: !inRange && !lootDue });
+        if (step) {
+          this.acting = step.label;
+          this.busy = true;
+          void step.run().then((r) => this.note(`${step.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.note(`${step.label}: ${String((e as Error)?.message ?? e)}`)).finally(() => { this.busy = false; this.acting = null; });
+          return;
+        }
+      }
+      if (lootDue && !inRange) steps.push({ kind: 'loot-nearby', meters: 20 });
+      else if (!inRange && !near && this.now() - this.lastTidyAt > 2500 && (truthySetting(st.AutoStack) || truthySetting(st.AutoCram))) {
+        // Enable Autostack / Autocram: one pack tidy-up at a time when nothing else is to do.
+        const tidy = planInventory({ items: this.api.itemSlots(), packs: this.api.packs(), autostack: truthySetting(st.AutoStack), autocram: truthySetting(st.AutoCram) });
+        if (tidy) {
+          this.lastTidyAt = this.now();
+          const r = tidy.kind === 'merge' ? this.api.placeItem(tidy.from, { onto: tidy.onto }) : this.api.placeItem(tidy.guid, { packSlot: tidy.packSlot });
+          this.note(`${tidy.why}: ${r.message}`);
+          return;
+        }
+      }
+      if (steps.length) { /* loot below */ } else if (near) {
+        this.acting = `approach ${near.name}`;
+        this.busy = true;
+        void this.api.walkTo(near.guid, { within: Math.max(1, range - 0.5), timeoutMs: 30_000 }).finally(() => { this.busy = false; this.acting = null; });
+        return;
+      }
+      if (!steps.length && navOn) { void this.walkNav(); return; }
+      if (!steps.length) {
+        const mode = obs.me?.combatMode;
+        if (truthySetting(st.IdlePeaceMode) && mode && mode !== 'peace' && mode !== 'unknown') void this.act({ kind: 'combat-mode', mode: 'peace' }, p);
+        return;
+      }
+      this.acting = 'macro';
+      this.busy = true;
+      const looting3 = steps.some((x) => x.kind === 'loot-nearby');
+      void this.run(steps, p).finally(() => { if (looting3) { this.macroLootedAt = this.now(); this.rarePending = false; } this.busy = false; this.acting = null; });
+      return;
+    }
     if (inRange) {
       if (lootDue && truthySetting(st.LootPriorityBoost)) steps.push({ kind: 'loot-nearby', meters: 20 });
       steps.push({ kind: 'attack-nearest', meters: range });
@@ -691,7 +873,8 @@ export class RoutineEngine {
     }
     this.acting = 'macro';
     this.busy = true;
-    void this.run(steps, p).finally(() => { this.busy = false; this.acting = null; });
+    const looting2 = steps.some((x) => x.kind === 'loot-nearby');
+    void this.run(steps, p).finally(() => { if (looting2) { this.macroLootedAt = this.now(); this.rarePending = false; } this.busy = false; this.acting = null; });
   }
 
   /** A route point's stops (recall, pause, say, use a portal/NPC/vendor, jump), in order. */
@@ -713,6 +896,18 @@ export class RoutineEngine {
     const n = this.nav!;
     this.acting = `route "${n.route.name}"`;
     this.busy = true;
+    if (n.route.mode === 'follow') {
+      // VirindiTank's Follow route: keep within Follow/Nav Min of the player; it never finishes.
+      try {
+        const within = Math.max(0.5, Number(this.settings.NavCloseStopRange) || 2);
+        const who = (n.route.follow ?? '').toLowerCase();
+        const lead = this.api.snapshot({ radius: 250, max: 100 }).nearby.find((o) => o.kind === 'player' && o.name.toLowerCase() === who);
+        if (!lead) { this.note(`route "${n.route.name}": ${n.route.follow ?? 'no one'} isn't in sight`); await new Promise((ok) => setTimeout(ok, 2000)); return; }
+        if (lead.dist > within) await this.api.walkTo(lead.guid, { within, timeoutMs: 15_000 });
+        else await new Promise((ok) => setTimeout(ok, 500));
+      } finally { this.busy = false; this.acting = null; }
+      return;
+    }
     try {
       // Follow/Nav Min (NavCloseStopRange): how near a waypoint counts as reaching it.
       const within = Math.max(0.5, Number(this.settings.NavCloseStopRange) || 2);
@@ -777,7 +972,9 @@ export class RoutineEngine {
       case 'use-item': return this.api.useOn(a.item, a.on === 'target' ? this.api.targetName() : 'self');
       case 'attack-nearest': {
         const obs = this.api.snapshot({ radius: a.meters ?? 60, max: 30 });
-        const m = obs.nearby.find((o) => o.kind === 'monster' && (!a.names?.length || a.names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))));
+        // A VirindiTank Monsters row with priority -1 means leave that one alone, whoever asks.
+        const ignored = (o: { guid: number; name: string; dist: number; relBearing: number }) => !!p.vtank && matchMonsterRow(p.vtank.monsters, o, { settings: this.settings }).priority < 0;
+        const m = obs.nearby.find((o) => o.kind === 'monster' && !o.dying && !ignored(o) && (!a.names?.length || a.names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))));
         if (!m) return { ok: false, message: 'no monster in reach' };
         const since = this.api.currentSeq();
         const r = this.api.attack(m.guid);
@@ -846,7 +1043,29 @@ export class RoutineEngine {
       }
       case 'walk-to': return this.api.walkTo(a.coords, { within: 3, timeoutMs: 120_000 });
       case 'use-object': return this.api.use(a.name);
-      case 'say': return this.api.say(a.text);
+      case 'create-view': {
+        const v = parseMetaView(a.xml);
+        if (!v) return { ok: false, message: `view "${a.name}" has no <view>` };
+        if (!this.views) return { ok: false, message: 'views need the game window' };
+        this.views.open(a.name, v, (b) => this.viewButton(b));
+        return { ok: true, message: `view "${a.name}" open` };
+      }
+      case 'destroy-view': this.views?.close(a.name); return { ok: true, message: `view "${a.name}" closed` };
+      case 'destroy-all-views': this.views?.closeAll(); return { ok: true, message: 'views closed' };
+      case 'talk-to': {
+        // VirindiTank's NPC Talk: use it until a tell comes back from it (three tries).
+        for (let i = 0; i < 3; i++) {
+          if (this.profile !== p) return null;
+          const since = this.api.currentSeq();
+          const r = await this.api.use(a.name);
+          if (!r.ok) return r;
+          const said = await this.api.waitFor({ types: ['chat'], chatMatch: `^\\(tell\\) ${a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} tells you`, sinceSeq: since }, 8000);
+          if (said.length) return { ok: true, message: `${a.name} answered` };
+        }
+        return { ok: false, message: `${a.name} didn't answer` };
+      }
+      // A rule's Chat Command that is VirindiTank's own (/vt …) goes to its command handler, not the server.
+      case 'say': if (VT_COMMAND.test(a.text) && this.onVtCommand) { this.onVtCommand(a.text); return { ok: true, message: a.text }; } return this.api.say(a.text);
       case 'combat-mode': return this.api.combatMode(a.mode);
       case 'give': return this.api.give(a.item, a.to, a.count ?? null);
       case 'sell-by-loot-rules': {
@@ -874,7 +1093,7 @@ export class RoutineEngine {
       case 'load-route': {
         const route = p.routes.find((r) => r.name === a.route);
         if (!route) return { ok: false, message: `no route "${a.route}"` };
-        this.nav = { route, i: 0, dir: 1, done: route.points.length === 0 };
+        this.nav = { route, i: 0, dir: 1, done: route.mode !== 'follow' && route.points.length === 0 };
         return { ok: true, message: `loaded route "${route.name}" (${route.points.length} points)` };
       }
       case 'set-setting': this.settings[a.name] = a.value; return { ok: true, message: `${a.name} = ${String(a.value)}` };

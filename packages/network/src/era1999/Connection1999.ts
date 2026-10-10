@@ -24,7 +24,7 @@
  */
 import { CharacterError, characterErrorMessage } from '@ac/shared';
 import {
-  parseRoutinesGrant, probeBridgeHealth, type BridgeHealth, type ConnectionEvent, type ConnectionListener,
+  parseAgentCall, parsePairingReply, parseRoutinesGrant, probeBridgeHealth, type BridgeHealth, type ConnectionEvent, type ConnectionListener,
 } from '../ClientConnection.js';
 import type { GameMessageGroup } from '../GameMessageGroup.js';
 import { EOR_LOGIN_PROFILE, type LoginProfile } from '../LoginProfile.js';
@@ -222,6 +222,10 @@ export class Connection1999 implements NetConnection {
           this.emit({ type: 'routinesGrant', data: grant.grant, error: grant.reason ?? undefined });
           this.emit({ type: 'automationAccess', data: grant.automation });
         }
+        const call = grant ? null : parseAgentCall(ev.data);
+        if (call) this.emit({ type: 'agentCall', data: call });
+        const pairing = grant || call ? null : parsePairingReply(ev.data);
+        if (pairing) this.emit({ type: 'agentPairing', data: pairing });
         return;
       }
       this.handleDatagram(new Uint8Array(ev.data as ArrayBuffer));
@@ -254,6 +258,11 @@ export class Connection1999 implements NetConnection {
 
   sendCharacterLogOff(): void {
     this.sendMessage(new Uint8Array([0x53, 0xf6, 0, 0]));
+  }
+
+  /** AGENT.hosted-mcp-connector — as ClientConnection.sendBridgeText. */
+  sendBridgeText(text: string): void {
+    if (this.ws && this.ws.readyState === 1) this.ws.send(text);
   }
 
   /** AGENT.routine-store-auth — as ClientConnection.requestRoutinesGrant. */

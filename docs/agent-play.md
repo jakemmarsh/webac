@@ -65,6 +65,40 @@ Then ask, for example: "Use ac_start attach=chrome, wait for me to log in, then 
 and sell the loot". Claude Code uses the same server from `.mcp.json`. This is the local stand-in for the hosted
 connector (docs/hosted-agent-connector.md): it needs this Mac, the repo and a Chrome window, but nothing hosted.
 
+### Your open tab, through the bridge (hosted connector)
+
+Claude plays the character in a game tab you logged in yourself. No daemon, no Playwright and no password: the bridge relays each tool call down that tab's own game WebSocket (docs/hosted-agent-connector.md §4).
+
+**Pairing (OAuth, no password stored):**
+1. Run the bridge with `BRIDGE_MCP=on BRIDGE_PUBLIC_URL=http://127.0.0.1:<bridge-port>`. Optional settings:
+   - `BRIDGE_MCP_ACCOUNTS=<account>` allows only some accounts.
+   - `BRIDGE_MCP_SECRET=<32+ characters>` keeps pairings across restarts.
+   - `BRIDGE_CONNECT_PAGE=http://localhost:<vite-port>/?bridge=ws://localhost:<bridge-port>` uses the game's Connect Claude screen instead of the bridge's plain page.
+2. Add the connector, e.g. `claude mcp add --transport http ac-tab http://127.0.0.1:<bridge-port>/mcp`, then authenticate (`/mcp` in Claude Code).
+3. The Connect Claude page (or, locally, the bridge's own page) shows `/automation pair ABC-123`. Type that in the game's chat while logged in, then press ALLOW on the page. ONLY ONE (the default when a character is in the world) scopes the grant to that character; ANY ONE allows any of the account's characters.
+4. `/automation unpair` in the game revokes it; `/automation claude` says whether Claude is connected, who has control and its last calls. The tab keeps its opt-in across reloads (per bridge and account).
+5. **The player always wins:** acting yourself (a key or click in the game) while Claude plays stops it, and its acting calls are refused until you've been idle 60 s. `/automation pause` refuses all of Claude's calls until `/automation resume`.
+
+**Dev token instead of pairing:**
+1. Run the bridge with `BRIDGE_MCP_DEV_TOKENS=<token>=<server>:<account>`. `server` is the routines key, e.g. `local-eor`, and the token is at least 16 characters.
+2. Open the game with `?relay` (dev builds) and log in.
+3. `claude mcp add --transport http ac-tab http://localhost:<bridge-port>/mcp --header "Authorization: Bearer <token>"`.
+
+Start with `ac_status`: it shows the account, the characters this connection may play, whether the tab is open with Claude on, the screen and the goal. At character select, `ac_enter_world character=<name>` enters the way the player does. `ac_goal` puts a line in the player's chat. Hosted, `ac_wait` waits at most 25 s per call, and each account gets a 20-call burst, then 10 calls a second (50,000 a day).
+
+All game tools are served (`ac_observe`, `ac_walk_to`, `ac_attack` …), but not the ones that need the local daemon (`ac_start`, `ac_look`, `ac_click`, the journal, the routines file tools). Calls run one at a time in the tab; one past its deadline stops movement.
+
+- **Not paired, or the tab is off:** the tool says "Claude is paired but this tab has Claude switched off" or that the game is not open.
+- **Tab closed or reloaded:** a call says to retry once the game reconnects.
+- **Character-scoped grant, another character in the world:** refused, naming both.
+
+Verified live on 2026-10-10 against local ACE (end of retail), with a stand-in OAuth client:
+- pairing by the code typed in chat;
+- `ac_say` / `ac_observe` / `ac_character` through `/mcp`;
+- the opt-in surviving a reload;
+- a refresh-token rotation;
+- `/automation unpair` turning the old token into 401.
+
 ### Eras
 
 `ac_start era=<id>` plays another era's **local** server (tools/ac-agent/eras.ts; one session and account
@@ -89,6 +123,14 @@ Each character has a journal (`~/.acjs-agent/journals/<era>/<account>/<character
 that only the agent writes (`ac_note kind=goal|done|place|person|event|idea`). `ac_start` and `ac_journal`
 show it: open goals, then the latest places, people and events. `ac_look` is a screenshot and the
 observation in one call.
+
+### Waiting and reading
+
+`ac_wait` counts from your last `ac_observe` or `ac_wait`, not from the moment it's called, so a tell that came in
+between them returns at once. `chat_match` alone waits only for a matching line; `types=tell` waits for tells.
+`ac_use` on a letter or book returns its text, every page. Item names match the way the game says them in chat:
+"Pine Lugian Hammer" finds your "Lugian Hammer". A name in your pack beats one you wear, so `ac_drop` takes the
+spare. Drops and equips made together go out one at a time, as the client allows (2026-10-10).
 
 ### Several players at once
 
@@ -187,6 +229,50 @@ provide.**
   off by default (CLAUDE.md "Always Match Retail's Defaults").
 - `format.ts` renders results as compact text (nearby objects with distance + direction relative to
   facing, e.g. `#80001a2b Drudge Skulker [monster L5]  14.2m ahead-left (NW)  hp 100%`).
+
+## Walking: `ac_walk_to` and `ac_map`
+
+`walkTo` (packages/renderer/src/agent/AgentApi.ts) gets you there the way a player would, and every check
+uses the client's own movement collision:
+
+1. **The doorway route.** Into, out of and between interior cells it follows the cell graph
+   (`agent/cellPath.ts`): each doorway's floor is a waypoint. A floor opening is passed **up** only where a
+   stair or ramp climbs to it, and **down** as a fall onto the floor under it, only when your health takes
+   the fall and only when no walk round is within 30 m. A cell with no floor (the air over an atrium or a
+   pit) is never crossed. Banderling Ruin (0x01E0), 2026-10-10: the route used to go straight up through
+   the atrium's 6 m ceiling opening instead of round by the corner ramps.
+2. **Each leg.** A straight walk when the probe says it arrives; else a path search round walls, door
+   frames and furniture (`agent/navPlanner.ts`, a 12 m box round the leg). When that search ran into its
+   box, a **wider** one (35 m); when there's still no way on foot, one that may **jump and drop**.
+3. **Jumps and drops** (`agent/jumpPlan.ts`). A player can't walk off a ledge (the client's edge slide
+   stops it), so going down a level, across a gap or up onto a platform is a jump. Where the walk stops
+   short, the planner flies the jumps the client would: a standing long jump (charge started standing
+   still, the forward key pressed during it, Shift for a walking jump), the launch from your own Jump
+   skill and load, the flight through the real collision at 30 Hz. It keeps a jump only if a slightly
+   shorter or longer charge lands on the same floor, and only if the landing's fall damage (ACE
+   `HandleFallingDamage`: none below a 12.7 m fall) is at most half your current health, less a margin
+   for a bludgeon weakness. Each jump costs 8 m of path, so a walk round that isn't much longer wins.
+   The walk then goes to the take-off (the last metres at a walk), stops, re-aims the charge from where
+   it actually stands, faces the way and jumps. A landing off the plan re-plans from there.
+4. **Attacked.** A hit, miss or evade line aimed at you (the `attacked` event), or health falling below
+   half since the walk began, ends the walk at once: `stopped 12.3 m short: you're under attack (…)`.
+   Fight, heal or run, then walk again (`attack`'s own run-up fights instead). Crossing a landblock edge
+   or stepping out of a doorway goes on; only a teleport (40 m in one tick) ends a walk as "went through a
+   portal".
+5. **Stuck.** No way at all: a closed door **on the way** (in a doorway still ahead on the route, or ahead
+   on the line to the leg's aim; never the one you stand in or one off to the side), then a wide search
+   straight for the goal (jumps included). Stalls back off, sidestep, and give up on the fifth.
+
+The trace (browser console, `[AC:Agent] walk …`) logs each leg, search, jump (`walk drop 6.0 m from … facing
+0°, walking, jump key held 150 ms (power 0.15); landing … in 1.4 s`) and landing. The result says what the
+walk did: `arrived (1.2 m away); on the way you dropped off a ledge (6.0 m) and jumped once (a gap or a
+platform)`.
+
+`ac_map` draws the floor you can reach from where you stand, and with the jump physics also:
+`v` a ledge you can drop off (the fall is one your health takes), `!` a drop that would hurt too much, and
+`J` floor only a jump reaches. The legend gives each object's distance and compass direction (as
+`ac_observe` does) and its floor when it isn't yours (`18.6 m NE, 6 m down`). You don't need to jump yourself: `ac_walk_to` the place and it jumps and
+drops on its own. `ac_jump hold_ms=… forward=true` is the same jump by hand (1000 ms = a full charge).
 
 ## Plan: one layer for Claude and for the built-in Decal
 
@@ -307,6 +393,7 @@ identify themselves.
 - **Eras differ in small ways.** 1999 teleports a new character into its tutorial dungeon right after login, so a walk issued at that moment sees its target vanish; just retry.
 - **Profiles are machine-wide.** `start` with a profile another session is using attaches to that session's player (acjs-ea's `mage`, 2026-10-07); it now says so. Use a profile name that's yours.
 - **From the 1999 run (acjs-ea):** the snapshot Vite runs without HMR (a page whose Vite went away reloaded into the next one on the port); a kill counts when the corpse appears or a kill line names the target (1999 deletes the object with no death start); `cast` defaults self-only spells to you and never targets a selected item; `start template=` picks the profession; `loot` takes `target`.
+- **Dungeons need jumps.** Many go down a level only by dropping off a ledge, or across a gap or onto a platform only by jumping; a walk that only walks stalls at the edge. The cell route also has to know that a ceiling opening no stair reaches is no way up (Banderling Ruin, 2026-10-10).
 - **JSON nulls.** An omitted trailing argument arrives as `null`; treat `!= null` as given.
 - **Dialogs block.** Server popups (the Academy's tutorial boxes) sit modal until answered (`dialog OK`).
 - **Holtburg's outskirts don't start fights.** Their spawns are the world DB's `-noaggro` variants

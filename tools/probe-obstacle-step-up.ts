@@ -16,7 +16,15 @@
  * stopped or slid, then walks the player (holding W) into the first few
  * stepped-up obstacles and records how far it got.
  *
- * Usage: npx tsx tools/probe-obstacle-step-up.ts [poi=Holtburg] [--label after] [--scan-only]
+ * --stand (RECON.transition-stepup-stepdown-port.c.b.a): instead of the walk
+ * beats, teleloc the body onto the top of each low stepped-up obstacle (top
+ * within StepUpHeight of the ground, the portal dais excluded) and sample
+ * its feet for 3 s. Retail's step down keeps it there (CCylSphere /
+ * CSphere::step_sphere_down); the old floor follow sank it to the terrain.
+ * (A run beat can't stop on a small top under SwiftShader: a frame moves
+ * the body ~2.4 m.)
+ *
+ * Usage: npx tsx tools/probe-obstacle-step-up.ts [poi=Holtburg] [--label after] [--scan-only] [--stand]
  *   (dev server + bridge + ACE). Writes verification/recon-obstacle-step-up/<label>-<poi>.json + PNGs.
  */
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -30,6 +38,7 @@ const li = args.indexOf('--label');
 const label = li > -1 ? args[li + 1] : 'after';
 const poi = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--label') ?? 'Holtburg';
 const scanOnly = args.includes('--scan-only');
+const stand = args.includes('--stand');
 const tag = `${label}-${poi.replace(/\W+/g, '')}`;
 
 type State = { x: number; z: number; feetY: number; lastFloor: number; outdoorStepUp: number };
@@ -107,6 +116,30 @@ try {
     spots.push(p);
   }
   const beats: Record<string, unknown>[] = [];
+  if (stand) {
+    const tops: Probe[] = [];
+    for (const p of stepped) {
+      if (tops.length >= 4) break;
+      if (p.radius > 2 || p.top - p.ground > 0.6) continue; // the portal dais; tops out of step-up reach
+      if (tops.some((s) => Math.hypot(s.ox - p.ox, s.oz - p.oz) < 0.5)) continue;
+      tops.push(p);
+    }
+    for (const [i, p] of tops.entries()) {
+      await teleloc(page, loc(p.ox, p.oz, p.top + 0.01, 1, 0), 3000);
+      await page.waitForTimeout(8000);
+      const feet: number[] = [];
+      for (let k = 0; k < 10; k++) {
+        await page.waitForTimeout(300);
+        const s = await page.evaluate(STATE_JS) as State;
+        feet.push(+s.feetY.toFixed(3));
+      }
+      const beat = { spot: i, kind: p.kind, obstacle: [p.ox, p.oz], radius: p.radius, top: p.top, ground: p.ground, feet, expectedOnTop: +(p.top + 0.48 - 0.475).toFixed(3) };
+      beats.push(beat);
+      console.log(JSON.stringify(beat));
+      await page.screenshot({ path: join(OUT, `${tag}-top${i}.png`) });
+    }
+    spots.length = 0;
+  }
   for (const [i, p] of spots.entries()) {
     const ux = p.dx / STEP, uz = p.dz / STEP;
     // Start 2 m back from the obstacle's near side, facing its axis.

@@ -290,6 +290,7 @@ describe.skipIf(!hasDats)('CORE.17.k.b.b.a — GameUI draws the pre-world labels
   const saved: Partial<Record<(typeof DOM_GLOBALS)[number], unknown>> = {};
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let GameUICtor: any;
+  let CHARGEN_DEAD_END_BUTTONS: readonly number[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let layoutRenderer: any;
 
@@ -306,6 +307,7 @@ describe.skipIf(!hasDats)('CORE.17.k.b.b.a — GameUI draws the pre-world labels
     const { LayoutRenderer } = await import('../packages/renderer/src/ui/LayoutRenderer.js');
     const mod = await import('../packages/renderer/src/ui/GameUI.js');
     GameUICtor = mod.GameUI;
+    CHARGEN_DEAD_END_BUTTONS = mod.CHARGEN_DEAD_END_BUTTONS;
     const portalBuf = fs.readFileSync(PORTAL_PATH);
     const portalDb = new dat.DatDatabase(portalBuf.buffer.slice(portalBuf.byteOffset, portalBuf.byteOffset + portalBuf.byteLength));
     dat.setMasterPropertyTypes(dat.parseMasterProperty(new dat.DatReader(portalDb.getFileData(0x39000001)!)));
@@ -410,7 +412,7 @@ describe.skipIf(!hasDats)('CORE.17.k.b.b.a — GameUI draws the pre-world labels
     expect(runs.length).toBeGreaterThanOrEqual(4);
     expect(runs[0].style.color).toMatch(/^(#00ff00|rgb\(0,\s*255,\s*0\))$/);
     expect(runs[1].style.color).toMatch(/^(#ffffff|rgb\(255,\s*255,\s*255\))$/);
-    for (const [id, str] of [['btn-help', 'Help'], ['btn-cancel', 'Exit'], ['btn-random', 'Random']]) {
+    for (const [id, str] of [['btn-cancel', 'Exit'], ['btn-random', 'Random']]) {
       const btn = container.querySelector(`#${id}`) as HTMLElement;
       const label = btn.firstElementChild as HTMLElement;
       expect(label.textContent, str).toBe(str);
@@ -437,7 +439,15 @@ describe.skipIf(!hasDats)('CORE.17.k.b.b.a — GameUI draws the pre-world labels
     // ≈553 = 540 + 13), and the layout's own copies of the chevron elements are
     // hidden so each chevron paints once.
     expect([back.style.top, next.style.top]).toEqual(['13px', '13px']);
-    expect((container.querySelector('#btn-help') as HTMLElement).style.top).toBe('21px');
+    expect((container.querySelector('#btn-cancel') as HTMLElement).style.top).toBe('21px');
+    // NO-DEAD-ENDS — Help (0x100003c9) led to the retired Keystone help: no
+    // button, and the layout's own copy of the element stays hidden.
+    expect(container.querySelector('#btn-help')).toBeNull();
+    for (const id of CHARGEN_DEAD_END_BUTTONS) {
+      const copy = ui.chargenHandle.elements.get(id);
+      if (copy) expect(copy.style.visibility).toBe('hidden');
+    }
+    expect(CHARGEN_DEAD_END_BUTTONS).toEqual([0x100003c9]);
     for (const id of [0x100003c6, 0x100003c7]) expect(ui.chargenHandle.elements.get(id)?.style.visibility).toBe('hidden');
   });
 

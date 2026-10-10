@@ -106,7 +106,7 @@ export interface PlanItem {
   stack?: number;
   /** ACE ItemType bits. */
   itemType?: number;
-  /** Examined int properties (ACE PropertyInt), e.g. BoostValue 90, BoosterEnum 95, Structure 92. */
+  /** Examined int properties (ACE PropertyInt), e.g. BoosterEnum 89, BoostValue 90, Structure 92. */
   ints?: Record<number, number>;
   floats?: Record<number, number>;
   equipped?: boolean;

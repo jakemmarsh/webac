@@ -120,4 +120,26 @@ describe('agent fellowship (real GameUI)', () => {
     expect(r.from).toBeUndefined();
     expect(vitals).toHaveLength(1);
   });
+  it('trains an untrained skill with credits as the panel train button does, and lists each untrained skill\'s cost', () => {
+    const trains: Array<[number, number]> = [];
+    ui.setRaiseCallbacks({ onTrainSkill: (id: number, credits: number) => trains.push([id, credits]) }, {});
+    // SkillTable trainedCost by id (the DAT's 0x0E000004 in the client): Creature Enchantment 31, Life Magic 33.
+    (ui as unknown as { skillTable: unknown }).skillTable = { skills: new Map([[31, { trainedCost: 8 }], [33, { trainedCost: 12 }], [34, { trainedCost: 16 }]]) };
+    ui.charInfo.skillCredits = 9;
+    ui.charInfo.skills = [
+      { id: 34, name: 'War Magic', status: 'Specialized', base: 120, effective: 120, raises: 50 },
+      { id: 31, name: 'Creature Enchantment', status: 'Unusable', base: 0, effective: 0, raises: 0 },
+      { id: 33, name: 'Life Magic', status: 'Unusable', base: 0, effective: 0, raises: 0 },
+    ];
+    // The Unusable magic schools were missing from the sheet altogether; now each shows its train cost.
+    expect(ui.agentCharacterSheet()).toContain('Untrained skills (credits to train): Creature Enchantment [8 cr], Life Magic [12 cr]');
+    expect(ui.agentTrainSkill('life magic')).toMatchObject({ ok: false, message: 'training Life Magic costs 12 skill credits; you have 9' });
+    expect(ui.agentTrainSkill('War Magic')).toMatchObject({ ok: false });
+    expect(trains).toEqual([]);
+    expect(ui.agentTrainSkill('creature')).toMatchObject({ ok: true, name: 'Creature Enchantment', cost: 8 });
+    expect(trains).toEqual([[31, 8]]);
+    expect(ui.charInfo.skillCredits).toBe(1);
+    // Now trained, it raises with XP instead of being refused as untrained.
+    expect(ui.agentTrainSkill('Creature Enchantment')).toMatchObject({ ok: false, message: 'Creature Enchantment is already trained; raise it with XP (ac_raise)' });
+  });
 });

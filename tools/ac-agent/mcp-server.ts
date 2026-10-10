@@ -7,12 +7,12 @@
  *   npx tsx tools/ac-agent/mcp-server.ts
  */
 import { createInterface } from 'node:readline';
-import { TOOLS, TOOL_BY_NAME, inputSchema, type ToolOutput } from './tools.ts';
+import { LOCAL_ONLY_TOOLS, TOOLS, TOOL_BY_NAME, inputSchema, type ToolOutput } from './tools.ts';
 
 const SERVER_INFO = { name: 'acjs-agent', version: '0.1.0' };
 const DEFAULT_PROTOCOL = '2025-06-18';
 
-interface RpcRequest { jsonrpc: '2.0'; id?: number | string | null; method: string; params?: any }
+export interface RpcRequest { jsonrpc: '2.0'; id?: number | string | null; method: string; params?: any }
 
 export function toolContent(out: ToolOutput): { content: unknown[]; isError?: boolean } {
   const content: unknown[] = [];
@@ -33,7 +33,10 @@ export function serverInstructions(attach: string | undefined): string {
     : `Play Asheron's Call in this repo's browser client. Start with ac_start, ${loop}`;
 }
 
-export async function handle(req: RpcRequest): Promise<unknown | null> {
+/** The hosted connector's instructions: Claude plays the player's own open tab. */
+export const HOSTED_INSTRUCTIONS = "Play Asheron's Call as the player's own character, in the browser tab they have open on playwebac.com (they logged in themselves; you never log in). Start with ac_status; at character select, ac_enter_world. Say what you are doing with ac_goal. Loop: ac_observe → decide → act (ac_walk_to / ac_use / ac_attack / ac_cast / ac_say …) → ac_wait (at most 25 s per call here). This is their real character: play as a normal player, as they ask. If a call says the game is not open or Claude is switched off, tell the player.";
+
+export async function handle(req: RpcRequest, opts: { hosted?: boolean } = {}): Promise<unknown | null> {
   const reply = (result: unknown) => ({ jsonrpc: '2.0', id: req.id, result });
   const fail = (code: number, message: string) => ({ jsonrpc: '2.0', id: req.id, error: { code, message } });
   if (req.id === undefined || req.id === null) return null;
@@ -43,15 +46,15 @@ export async function handle(req: RpcRequest): Promise<unknown | null> {
         protocolVersion: req.params?.protocolVersion ?? DEFAULT_PROTOCOL,
         capabilities: { tools: {} },
         serverInfo: SERVER_INFO,
-        instructions: serverInstructions(process.env.AC_AGENT_ATTACH),
+        instructions: opts.hosted ? HOSTED_INSTRUCTIONS : serverInstructions(process.env.AC_AGENT_ATTACH),
       });
     case 'ping':
       return reply({});
     case 'tools/list':
-      return reply({ tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: inputSchema(t) })) });
+      return reply({ tools: TOOLS.filter((t) => !opts.hosted || !LOCAL_ONLY_TOOLS.has(t.name)).map((t) => ({ name: t.name, description: t.description, inputSchema: inputSchema(t) })) });
     case 'tools/call': {
       const tool = TOOL_BY_NAME.get(req.params?.name);
-      if (!tool) return fail(-32602, `unknown tool: ${req.params?.name}`);
+      if (!tool || (opts.hosted && LOCAL_ONLY_TOOLS.has(tool.name))) return fail(-32602, `unknown tool: ${req.params?.name}`);
       try {
         return reply(toolContent(await tool.run(req.params?.arguments ?? {})));
       } catch (e) {

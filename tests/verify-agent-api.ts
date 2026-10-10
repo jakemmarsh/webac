@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AgentApi, agentApiEnabled, automationUiEnabled, bearing, classify, compassToYaw, MAP_COORD_ORIGIN, parseMapCoords, relDeg, toGlobal, yawToCompass,
-  type AgentHost, type AgentHostObject, type AgentHostSelf, fixtureReach } from '../packages/renderer/src/agent/AgentApi.ts';
+  type AgentHost, type AgentHostObject, type AgentHostSelf, fixtureReach, doorOnTheWay } from '../packages/renderer/src/agent/AgentApi.ts';
 import { formatChat, formatObservation, relativeDirection, compassPoint } from '../packages/renderer/src/agent/format.ts';
 import { formatMapCoord } from '../packages/shared/src/types.ts';
 import { mapCoordinateText, mapCoordsOfCell } from '../packages/renderer/src/ui/MapMarkers.ts';
@@ -347,11 +347,25 @@ describe('AgentApi', () => {
     expect(Math.hypot(host.me.x - 80, host.me.y - 40)).toBeLessThan(1.6);
   });
 
-  it('a fixture reaches as far as its part-array radius; creatures and radius-less things reach 0', () => {
+  it('a fixture reaches as far as its part-array radius, a creature as far as its body; radius-less things reach 0', () => {
     expect(fixtureReach({ itemType: 0, collisionRadius: 1.6 })).toBe(1.6); // the lifestone (Setup radius × scale)
-    expect(fixtureReach({ itemType: 0x10, collisionRadius: 0.6 })).toBe(0); // a creature
+    expect(fixtureReach({ itemType: 0x10, collisionRadius: 0.6 })).toBe(0); // a creature with no blocking shape
+    expect(fixtureReach({ itemType: 0x10, collisionRadius: 0.6, blockRadius: 0.35 })).toBeCloseTo(0.35); // a drudge's body
+    // AGENT.walk-shrine-statue-reach — the Dark Majesty Tusker Shrine Statue is a Creature (ClassicACE CustomDM
+    // weenie 50178): Setup 0x02000E6C, one 2 m sphere, radius 2.83, scale 1.2. Its body, 2.4 m, is the reach.
+    expect(fixtureReach({ itemType: 0x10, collisionRadius: 2.83 * 1.2, blockRadius: 2 * 1.2 })).toBeCloseTo(2.4);
     expect(fixtureReach({ itemType: 0x80, collisionRadius: 0 })).toBe(0);
     expect(fixtureReach({})).toBe(0);
+  });
+
+  it('walkTo a statue that is a creature arrives at its body, not 2.7 m short (AGENT.walk-shrine-statue-reach)', async () => {
+    // The statue's 2.4 m sphere at (80, 40); with the body (0.4 m) the centre can't come nearer than 2.8 m.
+    host.wall = (x, y) => Math.hypot(x - 80, y - 40) < 2.8;
+    host.add({ guid: 0x8000c402, name: 'Tusker Shrine Statue', itemType: 0x10, x: 80, y: 40 });
+    host.objectReach = (g) => (g === 0x8000c402 ? fixtureReach({ itemType: 0x10, collisionRadius: 3.39, blockRadius: 2.4 }) : 0);
+    const p = api.walkTo('Tusker Shrine Statue');
+    run(api, host, 30_000);
+    expect(await p).toMatchObject({ ok: true });
   });
 
   it('walkTo a fixture arrives at its edge: the lifestone\'s middle is inside its own collision (Holtburg, 2026-10-09)', async () => {
@@ -817,5 +831,199 @@ describe('examineText', () => {
         stats: [{ kind: 'vital', id: 2, label: 'Health', value: '40/40', color: 0 }], miscInfo: [] },
     } as never;
     expect(examineText(creature)).toBe('Drudge Skulker\nDrudge\nLevel 5\nHealth: 40/40');
+  });
+});
+
+describe('walk_to drops and jumps (AGENT.walk-drops-jumps)', () => {
+  // The body stands at local (80, 20) on z 94, facing north; the floors around it vary per test.
+  let host: FakeHost;
+  let api: AgentApi;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    host = new FakeHost();
+    api = new AgentApi(host);
+  });
+  afterEach(() => vi.useRealTimers());
+  const inX = (x: number) => x > 70 && x < 90;
+
+  it('drops off a ledge to a lower floor when no walk leads down, says so, and takes no damage from 6 m', async () => {
+    host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y < 30 ? [94, 88] : [88]) : []);
+    host.add({ guid: 0x80000060, name: 'Pit Chest', x: 80, y: 45, z: 88 });
+    const p = api.walkTo('Pit Chest', { within: 1.5, timeoutMs: 60_000 });
+    run(api, host, 40_000);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true });
+    expect(r.message).toMatch(/^arrived \([0-9.]+ m away\); on the way you dropped off a ledge \(6\.0 m\)/);
+    expect(host.launches).toHaveLength(1);
+    // A standing long jump: the forward key went down during the charge, never before it.
+    expect(host.launches[0].forward).toBeGreaterThan(0);
+    expect(host.landings[0].z).toBe(88);
+    expect(host.me.z).toBe(88);
+  });
+
+  it('never takes a drop whose fall would hurt more than half your health', async () => {
+    // 40 m down: ACE HandleFallingDamage deals ~95 points; the character has 50.
+    host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y < 30 ? [94, 54] : [54]) : []);
+    host.add({ guid: 0x80000061, name: 'Deep Chest', x: 80, y: 45, z: 54 });
+    const p = api.walkTo('Deep Chest', { within: 1.5, timeoutMs: 60_000 });
+    run(api, host, 70_000);
+    const r = await p;
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/no jump or drop your health can take/);
+    expect(host.launches).toEqual([]);
+    expect(host.me.z).toBe(94);
+  });
+
+  it('jumps a gap over a deadly pit to the floor beyond', async () => {
+    host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y < 30 || y > 32.5 ? [94, 50] : [50]) : []);
+    host.add({ guid: 0x80000062, name: 'Far Ledge Post', x: 80, y: 40, z: 94 });
+    const p = api.walkTo('Far Ledge Post', { within: 1.5, timeoutMs: 60_000 });
+    run(api, host, 40_000);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true });
+    expect(r.message).toMatch(/on the way you jumped once/);
+    expect(host.launches).toHaveLength(1);
+    expect(host.landings.every((l) => l.z === 94)).toBe(true);
+    expect(host.me.y).toBeGreaterThan(32.5);
+  });
+
+  it('jumps up onto a platform a step too high to walk onto', async () => {
+    host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y > 30 && y < 40 ? [94, 95.2] : [94]) : []);
+    host.add({ guid: 0x80000063, name: 'Dais Stone', x: 80, y: 35, z: 95.2 });
+    const p = api.walkTo('Dais Stone', { within: 1.5, timeoutMs: 60_000 });
+    run(api, host, 40_000);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true });
+    expect(r.message).toMatch(/jumped once/);
+    expect(host.me.z).toBeCloseTo(95.2, 5);
+    // It had to charge high: a 1.2 m rise needs more than a tap.
+    expect(host.launches[0].power).toBeGreaterThan(0.5);
+  });
+
+  it('walks up a ramp instead of jumping when there is one', async () => {
+    // The same platform, with a ramp up its west end (x 70..73, y 22..30 rising 94 → 95.2).
+    host.floors = (x, y) => {
+      if (!inX(x) || y <= 0 || y >= 60) return [];
+      if (y > 30 && y < 40) return [94, 95.2];
+      if (x < 73 && y > 22 && y <= 30) return [94 + ((y - 22) / 8) * 1.2];
+      return [94];
+    };
+    host.add({ guid: 0x80000064, name: 'Dais Stone', x: 80, y: 35, z: 95.2 });
+    const p = api.walkTo('Dais Stone', { within: 1.5, timeoutMs: 60_000 });
+    run(api, host, 40_000);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true });
+    expect(r.message).not.toMatch(/jumped|dropped/);
+    expect(host.launches).toEqual([]);
+  });
+
+  it('ac_map marks the ledges you can drop off (v), deadly ones (!) and floor only a jump reaches (J)', () => {
+    // North: a gap (y 30..32.5) over a 44 m pit, the far ledge beyond; west: a 3 m step down at x < 75.
+    host.floors = (x, y) => {
+      if (x <= 70 || x >= 90 || y <= 0 || y >= 60) return [];
+      if (y >= 30 && y <= 32.5) return [50];
+      return x < 75 ? [91] : [94, 91];
+    };
+    const r = api.map({ radius: 15 });
+    const grid = r.message.split('\n').slice(1, 32);
+    const at = (dx: number, dy: number): string => grid[15 - dy][15 + dx];
+    expect(r.message.split('\n')[0]).toMatch(/v a ledge you can drop off .*! a drop that would hurt too much, J floor a jump reaches/);
+    expect(at(-6, 0)).toBe('v'); // x 74: the 3 m step down
+    expect(at(0, 11)).toBe('!'); // y 31: over the pit
+    expect(grid.join('')).toContain('J'); // the far ledge
+    expect(at(-5, 13)).toBe('J'); // landing spots on the far ledge, every other column from the edges tried
+    expect(grid.slice(0, 3).join('')).not.toContain('.'); // the far side is not walkable from here
+  });
+
+  it('a leg whose way round lies past the search box searches wider before going off to open doors (Banderling Ruin, 2026-10-10)', async () => {
+    // Indoors: a wall along y 30 whose only gap is 25 m east, past the 12 m box round the leg; a door
+    // in the wall straight ahead opens nothing (the wall stays).
+    host.me.cell = 0xa9b40150;
+    host.wall = (x, y) => Math.abs(y - 30) < 0.4 && !(x > 104 && x < 106);
+    host.add({ guid: 0x80000065, name: 'Door', objectDescFlags: 0x1000, cell: 0xa9b40150, x: 80, y: 30 });
+    host.add({ guid: 0x80000066, name: 'Hall Chest', cell: 0xa9b40150, x: 80, y: 40 });
+    const p = api.walkTo('Hall Chest', { within: 1.5, timeoutMs: 90_000 });
+    run(api, host, 60_000);
+    expect(await p).toMatchObject({ ok: true });
+    expect(host.sent.filter((x) => x.startsWith('use '))).toEqual([]);
+  });
+
+  it('the door fallback only tries doors on the way: not the one you stand in, not one in a side room (Banderling Ruin, 2026-10-10)', () => {
+    // Live: standing at (202, 42983.1) in door 0x701E0002's doorway, heading for (202, 42993).
+    const me = { x: 202, y: 42983.1 }, aim = { x: 202, y: 42993 };
+    expect(doorOnTheWay({ x: 202, y: 42982.8 }, me, aim, [])).toBe(false); // the door you stand in
+    expect(doorOnTheWay({ x: 222.1, y: 42993.1 }, me, aim, [])).toBe(false); // 0x701E0005, a side room 20 m off
+    expect(doorOnTheWay({ x: 202, y: 42978 }, me, aim, [])).toBe(false); // behind you
+    expect(doorOnTheWay({ x: 203, y: 42989 }, me, aim, [])).toBe(true); // ahead, on the line
+    expect(doorOnTheWay({ x: 222.1, y: 42993.1 }, me, aim, [{ x: 222, y: 42992 }])).toBe(true); // in a doorway on the route
+  });
+});
+
+describe('walk_to keeps going over landblock edges, and stops when you are attacked (players\' reports, 2026-10-10)', () => {
+  let host: FakeHost;
+  let api: AgentApi;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    host = new FakeHost();
+    api = new AgentApi(host);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('crossing into the next landblock outdoors is not a portal: the walk goes on to its goal 320 m north', async () => {
+    host.me.y = 180;
+    const goal = toGlobal(HOLTBURG, 80, 500);
+    const p = api.walkTo(`${(goal.y / 240 - MAP_COORD_ORIGIN).toFixed(4)}N, ${(goal.x / 240 - MAP_COORD_ORIGIN).toFixed(4)}E`, { within: 3, timeoutMs: 200_000 });
+    for (let t = 0; t < 120_000; t += 100) {
+      run(api, host, 100);
+      // The client hands the body to the next landblock's cell as it crosses (0xA9B4 → 0xA9B5, y − 192).
+      if (host.me.y >= 192) { host.me.cell = (host.me.cell + 0x10000) >>> 0; host.me.y -= 192; }
+    }
+    const r = await p;
+    expect(r.message).not.toMatch(/portal/);
+    expect(r).toMatchObject({ ok: true });
+    expect(host.me.cell >>> 16).toBe(0xa9b6);
+  });
+
+  it('being hit ends the walk at once, with the line, and the keys up', async () => {
+    host.add({ guid: 0x80000070, name: 'Far Post', x: 80, y: 120 });
+    const p = api.walkTo('Far Post');
+    run(api, host, 1000);
+    api.pushChat('Banderling Guard hits you for 12 points of bludgeoning damage!', 0x15);
+    run(api, host, 200);
+    const r = await p;
+    expect(r).toMatchObject({ ok: false, attacked: true });
+    expect(r.message).toMatch(/^stopped [0-9.]+ m short: you're under attack \(Banderling Guard hits you for 12 points/);
+    expect([...host.keys]).toEqual([]);
+  });
+
+  it('losing health below half ends the walk too; a walk begun hurt is not stopped for being hurt', async () => {
+    host.add({ guid: 0x80000071, name: 'Far Post', x: 80, y: 120 });
+    let p = api.walkTo('Far Post');
+    run(api, host, 500);
+    host.me.health.current = 20;
+    run(api, host, 200);
+    expect((await p).message).toMatch(/you're losing health \(20\/50\)/);
+    p = api.walkTo('Far Post', { timeoutMs: 5_000 });
+    run(api, host, 1000);
+    expect(host.keys.has('KeyW')).toBe(true);
+    run(api, host, 5_000);
+    expect((await p).message).not.toMatch(/losing health/);
+  });
+
+  it('ac_map in a dungeon puts each object at observe\'s distance and direction, and names its floor (Banderling Ruin cell 0x01E00121)', () => {
+    host.me.cell = 0x01e00121; host.me.x = 8.5; host.me.y = -30; host.me.z = 6;
+    host.wall = () => false;
+    host.add({ guid: 0x80000072, name: 'Banderling Chief', itemType: 0x10, objectDescFlags: 0x10, cell: 0x01e0010c, x: 24.2, y: -20, z: 0 });
+    host.add({ guid: 0x80000073, name: 'Banderling Guard', itemType: 0x10, objectDescFlags: 0x10, cell: 0x01e00106, x: 6.1, y: -33.8, z: 0 });
+    const obs = api.observe();
+    const chief = obs.nearby.find((o) => o.name === 'Banderling Chief')!;
+    expect(chief).toMatchObject({ dist: 18.6, bearing: 58 });
+    const r = api.map({ radius: 20 });
+    const grid = r.message.split('\n').slice(1, 42);
+    const where = (ch: string) => { const row = grid.findIndex((l) => l.includes(ch)); return { dx: grid[row].indexOf(ch) - 20, dy: 20 - row }; };
+    const letter = (name: string) => r.message.match(new RegExp(`\\n {2}(\\w) ${name}`))![1];
+    expect(where(letter('Banderling Chief'))).toEqual({ dx: 16, dy: 10 }); // NE: east 15.7, north 10
+    expect(where(letter('Banderling Guard'))).toEqual({ dx: -2, dy: -4 }); // SW
+    expect(r.message).toMatch(/Banderling Chief \[monster\] #80000072 {2}18\.6 m NE, 6 m down/);
   });
 });

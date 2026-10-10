@@ -58,6 +58,10 @@ import { sanitizeClientError } from './clientErrors.js';
 import { type LookupFn, resolveTarget } from './targets.js';
 import { compatFor } from './serverCompat.js';
 import { RoutineTokens, handleRoutines, readCharacterListAccount, readCharacterListAccount1999 } from './routines.js';
+import { AgentRelay, accountKey, type RelayPeer } from './relay.js';
+import { handleMcp, parseMcpTokens } from './mcpHttp.js';
+import { OAuthServer } from './oauth.js';
+import { handleOAuth } from './oauthHttp.js';
 import { RoutineStore } from './routineStore.js';
 import {
   type SessionProtocol, sessionProtocol, readGrant1999Ids, readTime1999, buildDisconnectPacket1999,
@@ -227,8 +231,20 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     },
     servers: deps.directory ? () => deps.directory!.body() : null,
   });
+  // AGENT.hosted-mcp-connector — /mcp relays an MCP client's tool calls to the account's own tab.
+  const mcpTokens = parseMcpTokens(config.mcpTokens);
+  const relay = new AgentRelay(now);
+  // Step 3: OAuth pairing (BRIDGE_MCP=on). Tokens are sealed with BRIDGE_MCP_SECRET, so nothing is stored.
+  const oauth = config.mcpOAuth ? new OAuthServer({ issuer: config.mcpPublicUrl || `http://127.0.0.1:${config.wsPort}`, allow: config.mcpAccounts, now, secret: config.mcpSecret, fetchJson: async (u) => (await fetch(u, { signal: AbortSignal.timeout(5000) })).json() }) : null;
+  // Without the secret every pairing ends with this process (and isn't shared with the other bridge during a drain).
+  if (oauth) log(oauth.persistent ? 'info' : 'warn', 'mcp_oauth_on', { tokens: oauth.persistent ? 'sealed' : 'this-process', allowlist: config.mcpAccounts.length });
+  const relayOn = mcpTokens.size > 0 || !!oauth;
+  const mcpAuth = (t: string) => { const dev = mcpTokens.get(t); if (dev) return { key: dev, scope: 'any' as const }; return oauth?.resolve(t) ?? null; };
   const httpServer = http.createServer((req, res) => {
-    if (new URL(req.url ?? '/', 'http://bridge.local').pathname === '/routines') return handleRoutines(req, res, routineTokens, routineStore);
+    const path = new URL(req.url ?? '/', 'http://bridge.local').pathname;
+    if (path === '/routines') return handleRoutines(req, res, routineTokens, routineStore);
+    if (oauth && (path.startsWith('/.well-known/oauth') || path.startsWith('/oauth/'))) { void handleOAuth(req, res, oauth, config.mcpConnectPage).then((handled) => { if (!handled) baseHandler(req, res); }).catch((e) => { log('warn', 'oauth_error', { error: String((e as Error)?.message ?? e) }); if (!res.headersSent) { res.writeHead(500); res.end(); } }); return; }
+    if (path === '/mcp' && relayOn) { void handleMcp(req, res, mcpAuth, relay, oauth ? `${oauth.resource.replace(/\/mcp$/, '')}/.well-known/oauth-protected-resource` : null).catch((e) => { log('warn', 'mcp_error', { error: String((e as Error)?.message ?? e) }); if (!res.headersSent) { res.writeHead(500); res.end(); } }); return; }
     return baseHandler(req, res);
   });
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: config.maxPayload });
@@ -366,6 +382,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       packetsUp: 0, packetsDown: 0, bytesFromBrowser: 0, bytesToServer: 0, bytesFromServer: 0, bytesToBrowser: 0, dropped: 0,
       close: (reason, code) => cleanup(reason, code),
     };
+    // The relay's handle on this session's tab (text frames on the game WebSocket).
+    const relayPeer: RelayPeer = { send: (t) => { if (ws.readyState === WebSocket.OPEN) ws.send(t); } };
     sessions.add(session);
     metrics.connects++;
     log('info', 'session_open', { session: id, ip, server: target?.key ?? null, protocol, active: sessions.size });
@@ -428,9 +446,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
             log('info', 'session_server_id', { session: id, aceSessionId: grant.slot, serverRecipient: grant.serverRecipient, protocol });
           }
           // Read the account when something needs it: the routines store or the automation allowlist.
-          if (session.account === null && (routineStore || config.automationAccounts.length)) {
+          if (session.account === null && (routineStore || config.automationAccounts.length || relayOn)) {
             const account = readCharacterListAccount1999(msg);
-            if (account) { session.account = account; log('info', 'session_account', { session: id }); }
+            if (account) { session.account = account; log('info', 'session_account', { session: id }); if (relayOn && session.target) relay.register(relayPeer, accountKey(routinesServer(session.target), account)); }
           }
         } else {
           // The client's session id comes from the server's ConnectRequest
@@ -441,9 +459,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
             log('info', 'session_server_id', { session: id, aceSessionId: clientId });
           }
           // Read the account when something needs it: the routines store or the automation allowlist.
-          if (session.account === null && (routineStore || config.automationAccounts.length)) {
+          if (session.account === null && (routineStore || config.automationAccounts.length || relayOn)) {
             const account = readCharacterListAccount(msg);
-            if (account) { session.account = account; log('info', 'session_account', { session: id }); }
+            if (account) { session.account = account; log('info', 'session_account', { session: id }); if (relayOn && session.target) relay.register(relayPeer, accountKey(routinesServer(session.target), account)); }
           }
         }
         // Backpressure: drop the datagram (UDP semantics; the client NAKs).
@@ -483,6 +501,27 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
 
       // Text "health" → JSON status, then close (probeBridgeHealth / check-stack).
       if (!isBinary) {
+        // The relay's frames from the tab (agentResult / agentState).
+        if (relayOn && relay.onText(relayPeer, buf.toString('utf8'))) return;
+        // A pairing code typed in the game, or an unpair (step 3): only from a session the server has logged in.
+        const pairText = buf.toString('utf8');
+        if (pairText.startsWith('{"pair"') || pairText.startsWith('{"unpair"')) {
+          const unpair = pairText.startsWith('{"unpair"');
+          const key = session.target && session.account ? accountKey(routinesServer(session.target), session.account) : null;
+          let r: { ok: boolean; message: string; at?: number };
+          if (!oauth) r = { ok: false, message: 'this server has no Claude connector' };
+          else if (!key) r = { ok: false, message: 'log in first' };
+          // `at` (this bridge's clock) is what the tab keeps as its revokedBefore.
+          else if (unpair) { oauth.revokeAccount(key); r = { ok: true, message: 'every Claude connection for this account is revoked', at: now() }; }
+          else {
+            let code = '';
+            try { code = String((JSON.parse(pairText) as { pair?: unknown }).pair ?? ''); } catch { /* not JSON */ }
+            r = oauth.pair(code, key, relay.entry(key)?.character ?? null);
+          }
+          if (key) log('info', unpair ? 'mcp_unpair' : 'mcp_pair', { session: id, ok: r.ok });
+          ws.send(JSON.stringify(unpair ? { unpaired: r } : { paired: r }));
+          return;
+        }
         if (buf.toString('utf8').trim().toLowerCase() === 'health') {
           isProbe = true;
           const key = session.target?.key;
@@ -532,6 +571,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     });
 
     function cleanup(reason: string, code?: number): Promise<void> {
+      relay.remove(relayPeer);
       if (session.closed) return Promise.resolve();
       session.closed = true;
       sessions.delete(session);

@@ -30,6 +30,11 @@ const SIDESTEP_AND_TURN: ReadonlySet<number> = new Set([MotionCommand.SideStepRi
 const ATTACK_POWERUP_TIME = 1.0;
 const DUAL_WIELD_POWERUP_TIME = 0.8;
 
+/** Seconds of holding the jump key to charge a jump fully in stance `stanceId` (GetJumpPowerLevel's duration). */
+export function jumpChargeSeconds(stanceId: number): number {
+  return stanceId === MotionStance.DualWieldCombat ? DUAL_WIELD_POWERUP_TIME : ATTACK_POWERUP_TIME;
+}
+
 /**
  * ClientCombatSystem::GetJumpPowerLevel @ 0056b050 / DoJump @ 0056b110: the
  * jump extent never goes below MIN_JUMP_EXTENT (0.001), so a tap still jumps.
@@ -566,10 +571,7 @@ export class CharacterAnimController {
     if (this._jumpCharging) {
       if (input.isJumpHeld) {
         this._jumpChargeElapsed += dt;
-        const duration = this.currentStanceId === MotionStance.DualWieldCombat
-          ? DUAL_WIELD_POWERUP_TIME
-          : ATTACK_POWERUP_TIME;
-        this._jumpPower = Math.min(this._jumpChargeElapsed / duration, 1.0);
+        this._jumpPower = Math.min(this._jumpChargeElapsed / jumpChargeSeconds(this.currentStanceId), 1.0);
       } else {
         // Space released — jump will be triggered by main.ts (needs physics access)
         // Don't clear here — main.ts reads jumpCharging and calls triggerJump()

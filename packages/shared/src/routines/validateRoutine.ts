@@ -4,6 +4,7 @@
  * so whoever wrote the document — the editor, an importer, or Claude —
  * can fix it before the engine ever sees it.
  */
+import { VT_MONSTER_COLUMNS } from './vtankProfile.js';
 import {
   ROUTINE_SCHEMA_VERSION, type RoutineAction, type RoutineCondition, type RoutineDoc, type RoutineProfile,
 } from './RoutineDoc.js';
@@ -21,6 +22,24 @@ const MODULES = ['buffs', 'vitals', 'combat', 'looting', 'navigation', 'inventor
 
 function regexOk(p: string): boolean {
   try { new RegExp(p, 'i'); return true; } catch { return false; }
+}
+
+/** VirindiTank's Monsters / Items / Consumables / Buffs tabs (vtankProfile.ts). */
+function checkVtank(v: unknown, path: string, out: RoutineIssue[]): void {
+  if (!isObj(v)) { out.push({ path, message: 'must be an object' }); return; }
+  const strs = (k: string) => { if (!Array.isArray(v[k]) || !(v[k] as unknown[]).every(isStr)) out.push({ path: `${path}.${k}`, message: 'must be a list of names' }); };
+  strs('consumables'); strs('excludedScarabs'); strs('extraBuffs'); strs('blacklistedBuffs');
+  if (!Array.isArray(v.items) || !v.items.every((x) => isObj(x) && isStr(x.name))) out.push({ path: `${path}.items`, message: 'must be a list of { "name": … }' });
+  if (!Array.isArray(v.monsters) || !v.monsters.length) { out.push({ path: `${path}.monsters`, message: 'needs the <DEFAULT> row first' }); return; }
+  v.monsters.forEach((m: unknown, i: number) => {
+    const mp = `${path}.monsters[${i}]`;
+    if (!isObj(m) || !isStr(m.name)) { out.push({ path: mp, message: 'a monster row needs a name' }); return; }
+    if (!isNum(m.priority, -1, 4)) out.push({ path: `${mp}.priority`, message: 'must be -1..4' });
+    if (!Array.isArray(m.on) || !m.on.every((c) => (VT_MONSTER_COLUMNS as readonly string[]).includes(String(c)))) out.push({ path: `${mp}.on`, message: `columns are ${VT_MONSTER_COLUMNS.join(' ')}` });
+    for (const k of ['damage', 'exVuln', 'petDamage']) if (!isNum(m[k], 0)) out.push({ path: `${mp}.${k}`, message: 'must be a damage type number' });
+    for (const k of ['weapon', 'offhand']) if (m[k] !== null && !isStr(m[k])) out.push({ path: `${mp}.${k}`, message: 'must be an item name or null (<AUTO>)' });
+  });
+  if (isObj(v.monsters[0]) && v.monsters[0].name !== '<DEFAULT>') out.push({ path: `${path}.monsters[0].name`, message: 'the first row is <DEFAULT>' });
 }
 
 function checkCondition(c: unknown, path: string, out: RoutineIssue[]): void {
@@ -60,7 +79,18 @@ function checkCondition(c: unknown, path: string, out: RoutineIssue[]): void {
     case 'landblock': if (!isNum(c.landblock, 0)) bad('landblock must be a number'); return;
     case 'landcell': if (!isNum(c.cell, 0)) bad('cell must be a number'); return;
     case 'portal-entered': case 'portal-exited': case 'died': case 'vendor-open': case 'vendor-closed': case 'route-done': case 'need-buff': return;
-    case 'spell-time-at-least': if (!isStr(c.spell)) bad('spell is required'); if (!isNum(c.seconds, 0)) bad('seconds must be ≥ 0'); return;
+    case 'spell-time-at-least': if (!isStr(c.spell) && !isNum(c.spellId, 1)) bad('spell (or spellId) is required'); if (!isNum(c.seconds, 0)) bad('seconds must be ≥ 0'); return;
+    case 'seconds-in-state-persistent': if (!isNum(c.seconds, 0)) bad('seconds must be ≥ 0'); return;
+    case 'route-distance-at-least': if (!isNum(c.meters, 0)) bad('meters must be ≥ 0'); return;
+    case 'monster-priority-count':
+      if (!isNum(c.priority, -1, 4)) bad('priority must be -1..4');
+      if (!isNum(c.count, 1)) bad('count must be ≥ 1');
+      if (!isNum(c.meters, 0, 500)) bad('meters must be 0..500');
+      return;
+    case 'chat-capture':
+      if (!isStr(c.pattern) || !regexOk(c.pattern)) bad('pattern must be a valid regex');
+      if (c.colors !== undefined && (!Array.isArray(c.colors) || !c.colors.every((x) => isNum(x, 0)))) bad('colors must be a list of chat colour ids');
+      return;
     case 'monster-count':
       if (!isStr(c.pattern) || !regexOk(c.pattern)) bad('pattern must be a valid regex');
       if (!isNum(c.count, 1)) bad('count must be ≥ 1');
@@ -98,7 +128,9 @@ function checkAction(a: unknown, path: string, p: RoutineProfile, out: RoutineIs
       if (!(Array.isArray(p.routes) && p.routes.some((r) => r?.name === a.route))) bad(`no route named "${String(a.route)}"`);
       return;
     case 'walk-to': if (!isStr(a.coords) || !COORDS.test(a.coords)) bad('coords must look like "42.1N, 33.6E"'); return;
-    case 'use-object': if (!isStr(a.name)) bad('name is required'); return;
+    case 'use-object': case 'talk-to': case 'destroy-view': if (!isStr(a.name)) bad('name is required'); return;
+    case 'create-view': if (!isStr(a.name)) bad('name is required'); if (typeof a.xml !== 'string' || !/<view\b/i.test(a.xml)) bad('xml needs a <view>'); return;
+    case 'destroy-all-views': return;
     case 'say':
       if (!isStr(a.text)) bad('text is required');
       else if (/^\s*@/.test(a.text)) bad('"@" server commands are not allowed (routines play as a player)');
@@ -218,13 +250,16 @@ function checkProfile(p: unknown, path: string, out: RoutineIssue[]): void {
       out.push({ path: `${path}.buffSets[${bi}]`, message: 'a buff set needs a name and spells [{ "spell": "…" }]' });
     }
   });
+  if (p.vtank !== undefined) checkVtank(p.vtank, `${path}.vtank`, out);
   if (p.navRoute !== undefined && !(Array.isArray(p.routes) && p.routes.some((r) => isObj(r) && r.name === p.navRoute))) out.push({ path: `${path}.navRoute`, message: `no route named "${String(p.navRoute)}"` });
   if (p.lootSet !== undefined && !(isObj(p.lootSets) && Array.isArray(p.lootSets[String(p.lootSet)]))) out.push({ path: `${path}.lootSet`, message: `no loot set named "${String(p.lootSet)}"` });
   (Array.isArray(p.routes) ? p.routes : []).forEach((r: unknown, ri: number) => {
     const rp = `${path}.routes[${ri}]`;
     if (!isObj(r) || !isStr(r.name)) { out.push({ path: rp, message: 'a route needs a name' }); return; }
-    if (!['circular', 'linear', 'once'].includes(String(r.mode))) out.push({ path: `${rp}.mode`, message: 'must be circular, linear or once' });
-    if (!Array.isArray(r.points) || r.points.length === 0 || !r.points.every((pt) => isStr(pt) && COORDS.test(pt))) {
+    if (!['circular', 'linear', 'once', 'follow'].includes(String(r.mode))) out.push({ path: `${rp}.mode`, message: 'must be circular, linear, once or follow' });
+    if (r.mode === 'follow' && r.follow !== undefined && !isStr(r.follow)) out.push({ path: `${rp}.follow`, message: 'must be a player name' });
+    // An empty route is VirindiTank's empty nav profile (Navroute Empty holds).
+    if (!Array.isArray(r.points) || !r.points.every((pt) => isStr(pt) && COORDS.test(pt))) {
       out.push({ path: `${rp}.points`, message: 'needs coordinates like "42.1N, 33.6E"' });
     }
     if (r.stops !== undefined) {
@@ -289,7 +324,11 @@ function sayCondition(c: RoutineCondition): string {
     case 'vendor-open': return 'a vendor window is open';
     case 'vendor-closed': return 'no vendor window is open';
     case 'route-done': return 'the loaded route is finished';
-    case 'spell-time-at-least': return `${c.spell} has at least ${c.seconds} s left`;
+    case 'spell-time-at-least': return `${c.spell || `spell ${c.spellId}`} has at least ${c.seconds} s left`;
+    case 'seconds-in-state-persistent': return `${c.seconds} s in this state (pauses included)`;
+    case 'route-distance-at-least': return `at least ${c.meters} m from every point of the route`;
+    case 'monster-priority-count': return `${c.count}+ monsters of priority ${c.priority} within ${c.meters} m`;
+    case 'chat-capture': return `chat says /${c.pattern}/ (captured)`;
     case 'need-buff': return 'the buff set needs a rebuff';
     case 'monster-count': return `at least ${c.count} monsters matching /${c.pattern}/ within ${c.meters} m`;
     case 'expression': return `expression ${c.expr}`;
@@ -307,6 +346,10 @@ function sayAction(a: RoutineAction): string {
     case 'follow-route': return `follow route "${a.route}"`;
     case 'walk-to': return `walk to ${a.coords}`;
     case 'use-object': return `use ${a.name}`;
+    case 'talk-to': return `talk to ${a.name} until it answers`;
+    case 'create-view': return `open the view "${a.name}"`;
+    case 'destroy-view': return `close the view "${a.name}"`;
+    case 'destroy-all-views': return 'close every view';
     case 'say': return `say "${a.text}"`;
     case 'sell-by-loot-rules': return `sell what the loot rules mark "sell" to ${a.vendor || 'the open vendor'}`;
     case 'combat-mode': return `switch to ${a.mode} mode`;

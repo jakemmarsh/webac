@@ -410,7 +410,18 @@ describe.skipIf(!haveDat)('the Holtburg blacksmith stairs (A9B4, EnvCell 0xA9B40
   const ceilingY = ATTIC_FLOOR + DungeonCollision.STEP_UP_HEIGHT + 1e-3;
 
   function checkAttic(s: Body, label: string): void {
-    expect(s.floorY, label).toBeLessThanOrEqual(ceilingY);
+    // Above one step up from the attic floor only by standing on something in
+    // the attic: since RECON.transition-stepup-stepdown-port.c.b.a an obstacle's
+    // top is a step-down contact, so a body can climb a pot's crown (static 6,
+    // a 0.175 m Sphere) and step from it onto the furniture beside it, as
+    // retail's can. It stays in 0x123 with its head under the roof.
+    if (s.floorY > ceilingY) {
+      expect(dc.findCellContaining(s.x, s.z, s.floorY + DungeonCollision.LOWER_SPHERE_HEIGHT), `${label}: raised out of 0x123`).toBe(ATTIC);
+      const head = s.floorY + DungeonCollision.UPPER_SPHERE_HEIGHT + DungeonCollision.BODY_SPHERE_RADIUS;
+      for (const p of dc.floorPlanesAt(s.x, s.z, 0.01)) {
+        if (p.normalZ < 0.99) expect(head, `${label}: head through the roof at ${p.y.toFixed(2)}`).toBeLessThan(p.y);
+      }
+    }
     const cell = dc.findCellContaining(s.x, s.z, s.floorY + DungeonCollision.LOWER_SPHERE_HEIGHT);
     // Out of the attic only at or below its floor (its stair opening into
     // 0x121; the eave, where the cell is lower than the feet sphere's centre).

@@ -103,10 +103,8 @@ export function parseSkillChoices(text: string): Record<string, string> {
 }
 
 /** A pronounceable default name (ACE names: letters, spaces, ' and -; 3–32 chars). */
-export function defaultCharacterName(profile: string): string {
-  const word = profile.replace(/[^A-Za-z]/g, '').toLowerCase() || 'agent';
-  return word === 'claude' ? 'Claude' : `Claude ${word[0].toUpperCase()}${word.slice(1)}`.slice(0, 32);
-}
+import { defaultCharacterName } from './state.ts';
+export { defaultCharacterName };
 
 /** The game tab to drive in an attached browser: the one with the agent API on, else any game page. */
 export function pickGameTab<T extends { url(): string }>(pages: T[], hasApi: boolean[]): T | null {

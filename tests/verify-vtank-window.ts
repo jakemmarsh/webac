@@ -88,6 +88,13 @@ function fakeSource(doc: RoutineDoc) {
     now: () => 1_700_000_000_000,
     setting: (n) => live[vtCanonicalName(n)],
     setSetting: (n, v) => { calls.push(`set ${n}=${String(v)}`); live[vtCanonicalName(n)] = v; },
+    forceBuff: () => { calls.push('force buff'); return { ok: true, message: '' }; },
+    mexec: (e) => { calls.push(`mexec ${e}`); return 'True'; },
+    jump: (o) => { calls.push(`jump ${JSON.stringify(o)}`); return { ok: true, message: 'jumped' }; },
+    fakeDeath: () => { calls.push('fake death'); return { ok: true, message: 'fake death' }; },
+    reverseRoute: () => { calls.push('reverse'); return { ok: true, message: 'reversed' }; },
+    setWaypoint: (i) => { calls.push(`waypoint ${i}`); status = { ...status, nav: { route: 'runback', point: i, done: false } }; return { ok: true, message: '' }; },
+    cancelForceBuff: () => { calls.push('cancel force buff'); return { ok: true, message: '' }; },
     setState: (n) => { calls.push(`state ${n}`); status = { ...status, state: n }; return { ok: true, message: '' }; },
     update: (p) => { calls.push(`update ${p.name}`); return { ok: true, message: '' }; },
     selection: () => selected,
@@ -154,16 +161,16 @@ describe('VirindiTank options (vtankOptions.ts)', () => {
 });
 
 describe('the VirindiTank window', () => {
-  it('VirindiTank\'s tabs in its order; only those whose controls all work', async () => {
+  it('VirindiTank\'s tabs in its order', async () => {
     const t = await open();
-    expect(Array.from(t.body.querySelectorAll('[data-vtank-tab]')).map((e) => (e as HTMLElement).dataset.tab)).toEqual(['Options', 'Profiles', 'Route', 'Meta']);
+    expect(Array.from(t.body.querySelectorAll('[data-vtank-tab]')).map((e) => (e as HTMLElement).dataset.tab)).toEqual(['Options', 'Profiles', 'Vitals', 'Monsters', 'Items', 'Consumables', 'Buffs', 'Route', 'Meta']);
     expect((t.body.querySelector('[data-vtank-tab="options"]') as HTMLElement).dataset.selected).toBe('1');
   });
 
   it('Options: VTank\'s controls at its places, only those the engine acts on; a change saves and reaches the run', async () => {
     const t = await open();
     const names = Array.from(t.body.querySelectorAll('[data-vtank-option]')).map((e) => (e as HTMLElement).dataset.vtankOption);
-    expect(names).toEqual(['AttackDistance', 'ApproachDistance', 'NavCloseStopRange', 'EnableCombat', 'EnableNav', 'EnableLooting', 'EnableMeta', 'NavPriorityBoost', 'LootPriorityBoost', 'IdlePeaceMode']);
+    expect(names).toEqual(['AttackDistance', 'RingDistance', 'ApproachDistance', 'NavCloseStopRange', 'EnableBuffing', 'EnableCombat', 'EnableNav', 'EnableLooting', 'EnableMeta', 'AutoStack', 'AutoCram', 'UseDispelItems', 'CastDispelSelf', 'AutoFellowManagement', 'ManaChargesWhenOff', 'NavPriorityBoost', 'LootPriorityBoost', 'LootOnlyRareCorpses', 'IdlePeaceMode', 'IdleBuffTopoff', 'SummonPets', 'PetRangeMode', 'PetCustomRange', 'PetMonsterDensity']);
     expect(names.every((n) => vtOption(n!)?.engine)).toBe(true);
     // Values: the profile's, else VTank's default (Follow/Nav Min 2 yd).
     expect((t.body.querySelector('[data-vtank-option="AttackDistance"]') as HTMLInputElement).value).toBe('20');
@@ -181,6 +188,16 @@ describe('the VirindiTank window', () => {
     expect(t.calls).toContain('set AttackDistance=30');
     await flush();
     expect(t.saved.at(-1)!.profiles[0].settings!.AttackDistance).toBe(30);
+  });
+
+  it('Force Buff / Cancel Force Buff: only while the macro runs', async () => {
+    const t = await open();
+    (t.body.querySelector('[data-vtank="force-buff"]') as HTMLElement).click();
+    expect(texts(t.body)).toContain('Turn Run Macro on to buff.');
+    (t.body.querySelector('[data-vtank="run-macro"] [data-check]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="force-buff"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="cancel-force-buff"]') as HTMLElement).click();
+    expect(t.calls).toEqual(['run Runback', 'force buff', 'cancel force buff']);
   });
 
   it('Run Macro starts the profile, then works as VTank\'s pause switch', async () => {
@@ -257,6 +274,8 @@ describe('the VirindiTank window', () => {
     const rule = t.win.profile()!.states.find((s) => s.name === 'Default')!.rules.at(-1)!;
     expect(rule.when).toEqual([{ kind: 'free-slots-below', slots: 5 }]);
     // Chat Command takes VTank's own commands.
+    (dlg().querySelector('[data-vtank="rule-action"]') as HTMLElement).click();
+    expect(lastMenu!.items.map((i) => i.label).slice(-6)).toEqual(['Clear Watchdog', 'Get VT Option', 'Set VT Option', 'Create View', 'Destroy View', 'Destroy All Views']);
     pick(dlg().querySelector('[data-vtank="rule-action"]'), 'Chat Command');
     const cmd = dlg().querySelector('[data-vtank-param="text"]') as HTMLInputElement;
     cmd.value = '/vt opt set enablecombat false';
@@ -304,6 +323,32 @@ describe('the VirindiTank window', () => {
     expect(texts(t.body)).toContain('Your position is not known yet.');
   });
 
+  it('Route: Add NPC Talk, the current-waypoint arrow, and Follow (Add sets the player to follow)', async () => {
+    const t = await open();
+    (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
+    const wps = () => Array.from(t.body.querySelectorAll('[data-vtank-waypoint]')).map((e) => texts(e)[0]);
+    t.select({ name: 'Sean the Speedy', kind: 'npc' });
+    (t.body.querySelector('[data-vtank="add-npc-talk"]') as HTMLElement).click();
+    expect(wps().at(-1)).toBe('3. NPC Talk: Sean the Speedy');
+    (t.body.querySelector('[data-vtank-waypoint="1"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="wp-current"]') as HTMLElement).click();
+    expect(texts(t.body)).toContain('Turn Run Macro on first.');
+    (t.body.querySelector('[data-vtank-tab="options"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="run-macro"] [data-check]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank-waypoint="1"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="wp-current"]') as HTMLElement).click();
+    expect(t.calls).toContain('waypoint 1');
+    expect((t.body.querySelector('[data-vtank-waypoint="1"]') as HTMLElement).dataset.current).toBe('1');
+    pick(t.body.querySelector('[data-vtank="route-mode"]'), 'Follow');
+    t.select({ name: 'Leader', kind: 'player' });
+    (t.body.querySelector('[data-vtank="add-point"]') as HTMLElement).click();
+    expect((t.body.querySelector('[data-vtank-follow]') as HTMLElement).dataset.vtankFollow).toBe('Leader');
+    await flush();
+    expect(t.saved.at(-1)!.profiles[0].routes[0]).toMatchObject({ mode: 'follow', follow: 'Leader' });
+    expect(validateRoutineDoc(t.saved.at(-1)!)).toEqual([]);
+  });
+
   it('Profiles: Macro Settings, CopyTo, the nav and loot profiles the macro starts with, Mine only', async () => {
     const t = await open();
     (t.body.querySelector('[data-vtank-tab="profiles"]') as HTMLElement).click();
@@ -324,6 +369,140 @@ describe('the VirindiTank window', () => {
     (t.body.querySelector('[data-vtank-option="EnableCombat"] [data-check]') as HTMLElement).click();
     await flush();
     expect(t.saved.at(-1)!.profiles.map((p) => [p.name, p.initialState, p.macro])).toEqual([['Default', 'Default', true]]);
+  });
+});
+
+describe('VirindiTank\'s /vt commands', () => {
+  it('start / stop, forcebuff, setmetastate, mexec, echo, jump, fakedeath, reverseroute', async () => {
+    const t = await open();
+    expect(await t.win.command('/vt start')).toEqual(['macro on']);
+    expect(await t.win.command('/vt forcebuff')).toEqual(['']);
+    expect(await t.win.command('/vt setmetastate dead')).toEqual(['']);
+    expect(await t.win.command('/vt mexec getvar[x]==0')).toEqual(['True']);
+    expect(await t.win.command('/vt echo hello there')).toEqual(['hello there']);
+    await t.win.command('/vt jump 90 true 500');
+    await t.win.command('/vt fakedeath');
+    await t.win.command('/vt reverseroute');
+    expect(await t.win.command('/vt stop')).toEqual(['macro off']);
+    expect(t.calls).toEqual(['run Runback', 'force buff', 'state dead', 'mexec getvar[x]==0', 'jump {"heading":90,"walk":true,"holdMs":500}', 'fake death', 'reverse', 'pause']);
+  });
+
+  it('opt get / set in VTank\'s units (ranges ÷ 240), case-insensitive; setinall sets every profile', async () => {
+    const t = await open(docWith(meta(), { ...meta(), name: 'Other' }));
+    expect(await t.win.command('/vt opt get attackdistance')).toEqual([`AttackDistance = ${20 / 240}`]);
+    expect(await t.win.command('/vt opt set AttackDistance 0.125')).toEqual(['AttackDistance = 0.125']);
+    expect(t.saved.at(-1)!.profiles[0].settings!.AttackDistance).toBe(30);
+    await t.win.command('/vt opt setinall enablelooting true');
+    expect(t.saved.at(-1)!.profiles.map((p) => p.settings!.EnableLooting)).toEqual([true, true]);
+    expect((await t.win.command('/vt opt get nosuchthing'))[0]).toBe('no option "nosuchthing"');
+  });
+
+  it('settings / nav / meta load and save, addnavpt; unknown commands say what exists', async () => {
+    const t = await open(docWith(meta(), { ...meta(), name: 'Other', states: [{ name: 'Default', rules: [{ when: [{ kind: 'always' }], do: [{ kind: 'say', text: 'hi' }] }] }] }));
+    expect(await t.win.command('/vt nav save loop2')).toEqual(['nav saved as "loop2"']);
+    expect(await t.win.command('/vt nav load runback')).toEqual(['nav "runback" loaded']);
+    expect(await t.win.command('/vt addnavpt 41.9N, 33.5E')).toEqual(['point 3 added to "runback"']);
+    expect(await t.win.command('/vt meta load Other')).toEqual(['meta "Other" loaded']);
+    expect(t.win.profile()!.states.map((s) => s.name)).toEqual(['Default']);
+    expect(await t.win.command('/vt settings save Mine')).toEqual(['settings saved as "Mine"']);
+    expect(await t.win.command('/vt settings load Runback')).toEqual(['settings "Runback" loaded']);
+    expect((await t.win.command('/vt frobnicate'))[0]).toMatch(/^unknown command \/vt frobnicate/);
+    expect(validateRoutineDoc(t.saved.at(-1)!)).toEqual([]);
+  });
+});
+
+describe('the VirindiTank window: Vitals, Monsters, Items, Consumables, Buffs', () => {
+  const show = (t: Awaited<ReturnType<typeof open>>, tab: 'vitals' | 'monsters' | 'items' | 'consumables' | 'buffs') => { t.win.tab = tab; t.redraw(); };
+
+  it('Vitals: the nine sliders in VTank\'s three groups with its defaults; a change saves', async () => {
+    const t = await open();
+    show(t, 'vitals');
+    const sliders = Array.from(t.body.querySelectorAll('[data-vtank-option]')).map((e) => [(e as HTMLElement).dataset.vtankOption, (e as HTMLElement).dataset.slider]);
+    expect(sliders).toEqual([
+      ['Recharge-Norm-HitP', '75'], ['Recharge-Norm-Stam', '50'], ['Recharge-Norm-Mana', '50'],
+      ['Recharge-NoTarg-HitP', '1'], ['Recharge-NoTarg-Stam', '1'], ['Recharge-NoTarg-Mana', '1'],
+      ['Recharge-Helper-HitP', '20'], ['Recharge-Helper-Stam', '1'], ['Recharge-Helper-Mana', '1'],
+    ]);
+    expect(texts(t.body)).toContain('Heal at:');
+    const heal = t.body.querySelector('[data-vtank-option="Recharge-Norm-HitP"]') as HTMLInputElement;
+    heal.value = '60';
+    heal.dispatchEvent(new Event('change'));
+    await flush();
+    expect(t.saved.at(-1)!.profiles[0].settings!['Recharge-Norm-HitP']).toBe(60);
+    expect(texts(t.body)).toContain('60%');
+  });
+
+  it('Monsters: the <DEFAULT> row as VTank\'s (A and S on, P 1, Auto, None, <AUTO>, PAuto); switches, cycles, Add, Add Sel', async () => {
+    const t = await open();
+    show(t, 'monsters');
+    expect(Array.from(t.body.querySelectorAll('[data-vtank-column]')).map((e) => (e as HTMLElement).dataset.vtankColumn)).toEqual(['F', 'B', 'G', 'I', 'Y', 'V', 'A', 'R', 'S', 'WC', 'FC', 'Cp', 'DC', 'Cs']);
+    const row0 = () => t.body.querySelector('[data-vtank-monster="0"]') as HTMLElement;
+    const on = () => Array.from(row0().querySelectorAll('[data-vtank-cell]')).filter((e) => (e.querySelector('[data-check]') ?? e as HTMLElement).getAttribute('data-check') === '1').map((e) => (e as HTMLElement).dataset.vtankCell);
+    expect(on()).toEqual(['A', 'S']);
+    // PetDmg isn't drawn until its element choice is built.
+    expect(texts(row0())).toEqual(['<< DEFAULT >>', '1', 'Auto', 'None', '<AUTO>', '<AUTO>']);
+    (row0().querySelector('[data-vtank-cell="I"]') as HTMLElement).click();
+    (row0().querySelector('[data-vtank-cycle="priority"]') as HTMLElement).click();
+    (row0().querySelector('[data-vtank-cycle="damage"]') as HTMLElement).click();
+    expect(texts(row0())).toEqual(['<< DEFAULT >>', '2', 'Pierce', 'None', '<AUTO>', '<AUTO>']);
+    const name = t.body.querySelector('[data-vtank="monster-name"]') as HTMLInputElement;
+    name.value = 'Drudge Skulker';
+    name.dispatchEvent(new Event('input'));
+    (t.body.querySelector('[data-vtank="add-monster"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="add-selected-monster"]') as HTMLElement).click();
+    expect(texts(t.body)).toContain('Select a monster first.');
+    t.select({ name: 'Mite Snowman', kind: 'monster' });
+    (t.body.querySelector('[data-vtank="add-selected-monster"]') as HTMLElement).click();
+    await flush();
+    const m = t.saved.at(-1)!.profiles[0].vtank!.monsters;
+    expect(m.map((r) => r.name)).toEqual(['<DEFAULT>', 'Drudge Skulker', 'Mite Snowman']);
+    expect(m[0]).toMatchObject({ priority: 2, damage: 0, on: ['A', 'S', 'I'] });
+    expect(validateRoutineDoc(t.saved.at(-1)!)).toEqual([]);
+    // The default row can't be removed; the others can.
+    expect(row0().querySelector('[data-vtank-remove]')).toBeNull();
+    ((t.body.querySelector('[data-vtank-monster="1"] [data-vtank-remove]')) as HTMLElement).click();
+    expect(t.win.profile()!.vtank!.monsters.map((r) => r.name)).toEqual(['<DEFAULT>', 'Mite Snowman']);
+  });
+
+  it('Items and Consumables add what you have selected in your pack; scarabs to exclude (no Add All Peas until pea splitting is built)', async () => {
+    const t = await open();
+    t.source.items = () => [{ name: 'Aqua Pea' }, { name: 'Healing Kit' }, { name: 'Ruby Pea' }];
+    show(t, 'items');
+    (t.body.querySelector('[data-vtank="add-item"]') as HTMLElement).click();
+    expect(texts(t.body)).toContain('Select an item in your inventory first.');
+    t.select({ name: 'Frost Wand', kind: 'item' });
+    (t.body.querySelector('[data-vtank="add-item"]') as HTMLElement).click();
+    t.select({ name: 'Kite Shield', kind: 'item' });
+    (t.body.querySelector('[data-vtank="add-item-nobuffs"]') as HTMLElement).click();
+    expect(texts(t.body)).toEqual(expect.arrayContaining(['Frost Wand', 'Kite Shield', '(no buffs)']));
+    show(t, 'consumables');
+    t.select({ name: 'Healing Kit', kind: 'item' });
+    (t.body.querySelector('[data-vtank="add-consumable"]') as HTMLElement).click();
+    expect(t.body.querySelector('[data-vtank="add-peas"]')).toBeNull();
+    t.select({ name: 'Copper Scarab', kind: 'item' });
+    (t.body.querySelector('[data-vtank="add-scarab"]') as HTMLElement).click();
+    await flush();
+    const v = t.saved.at(-1)!.profiles[0].vtank!;
+    expect(v.items).toEqual([{ name: 'Frost Wand' }, { name: 'Kite Shield', noBuffs: true }]);
+    expect(v.consumables).toEqual(['Healing Kit']);
+    expect(v.excludedScarabs).toEqual(['Copper Scarab']);
+    // The Monsters tab's Weapon cycles through the Items list.
+    show(t, 'monsters');
+    const wpn = t.body.querySelector('[data-vtank-monster="0"] [data-vtank-cycle="weapon"]') as HTMLElement;
+    wpn.click();
+    expect((t.body.querySelector('[data-vtank-monster="0"] [data-vtank-cycle="weapon"]') as HTMLElement).dataset.text).toBe('Frost Wand');
+  });
+
+  it('Buffs: Add… picks a spell you know for Extra Buff Spells or Blacklisted Buff Families', async () => {
+    const t = await open();
+    t.source.spells = () => [{ name: 'Leadership Mastery Self I', school: 'Creature Enchantment' }, { name: 'Armor Self I', school: 'Life Magic' }];
+    show(t, 'buffs');
+    pick(t.body.querySelector('[data-vtank="add-extra-buff"]'), 'Leadership Mastery Self I');
+    pick(t.body.querySelector('[data-vtank="add-blacklisted-buff"]'), 'Armor Self I');
+    await flush();
+    expect(t.saved.at(-1)!.profiles[0].vtank).toMatchObject({ extraBuffs: ['Leadership Mastery Self I'], blacklistedBuffs: ['Armor Self I'] });
+    ((t.body.querySelector('[data-vtank-list="extra-buffs"] [data-vtank-remove]')) as HTMLElement).click();
+    expect(t.win.profile()!.vtank!.extraBuffs).toEqual([]);
   });
 });
 

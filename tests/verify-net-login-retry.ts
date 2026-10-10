@@ -155,6 +155,31 @@ describe('ClientConnection — stale-session login retry', () => {
     expect(RecordingWebSocket.instances.length).toBe(0);
   });
 
+  it('booted after logging in (the account logged in elsewhere): no retry, the error goes to the Disconnected screen', () => {
+    vi.useFakeTimers();
+    const { conn, events } = makeConn();
+    const anyConn = conn as unknown as { handlePacket(p: Uint8Array): void };
+    // Logged in: the character list arrived, then (in the world) ACE boots this session for a newer login.
+    anyConn.handlePacket(buildOpcodePacket(2, CHARACTER_LIST, 0));
+    anyConn.handlePacket(buildOpcodePacket(3, CHARACTER_ERROR, 1, ERR_LOGON));
+    expect(events.find(e => e.type === 'loginRetry')).toBeUndefined();
+    expect(events.find(e => e.type === 'error')).toMatchObject({ characterError: ERR_LOGON, loginRetryScheduled: false });
+    vi.advanceTimersByTime(60_000);
+    // No fresh login: two pages would otherwise take turns booting each other.
+    expect(RecordingWebSocket.instances.length).toBe(0);
+  });
+
+  it('a new socket starts before login again: a refused login on it still retries', () => {
+    vi.useFakeTimers();
+    const { conn, events } = makeConn();
+    const anyConn = conn as unknown as { handlePacket(p: Uint8Array): void; doConnect(a: string, p: string): void; sessionPastLogin: boolean };
+    anyConn.handlePacket(buildOpcodePacket(2, CHARACTER_LIST, 0));
+    expect(anyConn.sessionPastLogin).toBe(true);
+    anyConn.doConnect('acct', 'pw');
+    expect(anyConn.sessionPastLogin).toBe(false);
+    expect(events.filter(e => e.type === 'loginRetry')).toHaveLength(0);
+  });
+
   it('retry budget is capped', () => {
     vi.useFakeTimers();
     const { conn, events } = makeConn();

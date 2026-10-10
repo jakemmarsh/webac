@@ -63,3 +63,17 @@ export function applyViewerFade(root: THREE.Object3D, translucency: number): voi
 export function viewerFadeLevel(root: THREE.Object3D): number {
   return (root.userData[LEVEL_KEY] as number | undefined) ?? 0;
 }
+
+/**
+ * Run `fn` with `root`'s viewer fade lifted, then put it back. The paperdoll
+ * clones the live player model; in first person (or with the camera pulled
+ * into the head by walls) that model is hidden and no-draw, and the clone
+ * came up blank (Jake, Coldeve 2026-10-10). The doll is retail's own object
+ * (gmPaperDollUI::RedressCreature), never the camera's translucency.
+ */
+export function withoutViewerFade<T>(root: THREE.Object3D, fn: () => T): T {
+  const level = viewerFadeLevel(root);
+  if (level <= 0) return fn();
+  applyViewerFade(root, 0);
+  try { return fn(); } finally { applyViewerFade(root, level); }
+}

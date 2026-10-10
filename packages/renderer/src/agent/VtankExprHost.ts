@@ -13,7 +13,7 @@
  */
 import { exprToString, runExpr, truthy, vtFromVTank, vtToVTank, type ExprCoords, type ExprHost, type ExprValue, type HostObject, type VarScope } from '@ac/shared';
 import type { AgentApi } from './AgentApi.ts';
-import type { RoutineEngine } from './RoutineEngine.ts';
+import { VT_COMMAND, type RoutineEngine } from './RoutineEngine.ts';
 import type { AgentObjectKind } from './types.ts';
 
 /** Decal ObjectClass for what the agent API calls each kind. */
@@ -72,7 +72,8 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
     clearAllVars: (scope) => { if (scope === 'var') runVars.clear(); else (scope === 'gvar' ? gvars : pvarsFor()).set({}); },
     now: () => performance.now(),
     echo: (text) => print(text),
-    chatbox: (text) => { void api.say(text); },
+    // VirindiTank's own commands (/vt …) go to its handler, as typed; anything else is chat.
+    chatbox: (text) => { if (VT_COMMAND.test(text) && engine.onVtCommand) engine.onVtCommand(text); else void api.say(text); },
     // VTank's units out and in: its ranges are map units (yards / 240), ours metres.
     vtGetSetting: (name) => { const v = engine.setting(name); if (v === undefined) return 0; const out = vtToVTank(name, v); return typeof out === 'boolean' ? (out ? 'True' : 'False') : out; },
     vtSetSetting: (name, value) => { engine.setSetting(name, vtFromVTank(name, value)); return true; },
@@ -101,9 +102,11 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
 }
 
 /** The engine's expression evaluator over a host: conditions test truthiness, actions report the value. */
-export function vtankExpressions(host: ExprHost): { test(expr: string): boolean; run(expr: string): string } {
+export function vtankExpressions(host: ExprHost): { test(expr: string): boolean; run(expr: string): string; setVar(name: string, value: string): void } {
   return {
     test: (expr) => truthy(runExpr(expr, host)),
     run: (expr) => exprToString(runExpr(expr, host)),
+    // Chat Message Capture's capturegroup_<name> / capturecolor (meta variables).
+    setVar: (name, value) => host.setVar('var', name, value),
   };
 }

@@ -32,3 +32,23 @@ describe('livePlace', () => {
     expect(livePlace({ worldX: NaN, worldZ: 1, worldY: 0, cell: null, placed: true })).toBeNull();
   });
 });
+
+/**
+ * AGENT.play-reports-2026-10-10 (item 5) — a body nobody steps (its cell not
+ * loaded here, no mesh, a stalled frame loop) stands still while the server
+ * moves the creature: rats on another floor of A Rat Nest kept the same
+ * distances for ten minutes, a fellow by an indoor cell read 66–81 m off.
+ */
+describe('livePlace falls back to the server\'s last position when the body is not live', () => {
+  const server = { cell: 0x01dd015f, worldX: 0x01 * 192 + 40, worldY: -12, worldZ: 0xdd * 192 + 70 };
+  it('uses the server position when the body has not moved the object lately', () => {
+    const p = livePlace({ worldX: 0x01 * 192 + 10, worldY: -6, worldZ: 0xdd * 192 + 20, cell: 0x01dd011c, placed: true, server, bodyLive: false })!;
+    expect(p).toEqual({ cell: 0x01dd015f, x: 40, y: 70, z: -12 });
+  });
+  it('keeps the live body when it is being stepped, or when the server never placed it', () => {
+    const live = { worldX: 0x01 * 192 + 10, worldY: -6, worldZ: 0xdd * 192 + 20, cell: 0x01dd011c, placed: true };
+    expect(livePlace({ ...live, server, bodyLive: true })).toEqual({ cell: 0x01dd011c, x: 10, y: 20, z: -6 });
+    expect(livePlace({ ...live, server: null, bodyLive: false })).toEqual({ cell: 0x01dd011c, x: 10, y: 20, z: -6 });
+    expect(livePlace({ ...live, placed: false, server, bodyLive: false })).toBeNull();
+  });
+});

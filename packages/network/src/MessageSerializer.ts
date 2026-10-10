@@ -105,6 +105,22 @@ export class BinaryWriter {
    * GetEncoding(1252).GetBytes which uses replacement byte for unmappable).
    */
   writeString16(s: string): void {
+    if (string16Wire === 'ace' && /[^\x00-\x7f]/.test(s)) {
+      // ACE reads every client String16L with BinaryReader.ReadChars on a UTF-8 reader
+      // (ClientMessage.cs `new BinaryReader(Data)`, BinaryReaderExtensions.ReadString16L): the
+      // length is a count of characters, the bytes are decoded as UTF-8, and the pad is computed
+      // from the character count. Windows-1252 bytes ≥ 0x80 are invalid UTF-8 there, so "±"
+      // (0xB1) became U+FFFD and came back to everyone as "?" (BUG.chat-nonascii-question-mark).
+      // ACE then broadcasts in Windows-1252 (WriteString16L), so what it hears intact reaches every
+      // client intact. Pure ASCII is byte-identical either way.
+      const bytes = new TextEncoder().encode(s);
+      this.writeUInt16(s.length);
+      this.writeBytes(bytes);
+      const pad = (4 - ((2 + s.length) % 4)) % 4;
+      this._grow(pad);
+      this._pos += pad;
+      return;
+    }
     const bytes = encodeWindows1252(s);
     this.writeUInt16(bytes.length);
     this.writeBytes(bytes);
@@ -122,6 +138,18 @@ export class BinaryWriter {
     return this._buf.slice(0, this._pos);
   }
 }
+
+/**
+ * How the client writes a String16L for the server it talks to: 'windows-1252'
+ * (retail's code page; GDLE-family servers such as Classic Dereth and the 1999
+ * server keep the bytes as sent) or 'ace' (ACE and ClassicACE read client
+ * strings as UTF-8 characters: see BinaryWriter.writeString16). Set once per
+ * boot from the era profile (era/EraProfiles.ts `stringWire`).
+ */
+export type String16Wire = 'windows-1252' | 'ace';
+let string16Wire: String16Wire = 'windows-1252';
+export function setString16Wire(wire: String16Wire): void { string16Wire = wire; }
+export function getString16Wire(): String16Wire { return string16Wire; }
 
 // ─── Binary Reader ─────────────────────────────────────────
 
@@ -3842,6 +3870,10 @@ export function parseCreateObjectFromReader(r: BinaryReader): CreateObjectData {
     // property is null server-side, and every ACE use-range gate falls back
     // to 0.6f there (Player_Move.cs:59 `target.UseRadius ?? 0.6f`), so the
     // fallback IS the correct parsed value, not merely unknown.
+    // Retail's PublicWeenieDesc::Reset @ 005acc70 leaves _useRadius 0, but
+    // the range checks (vendor / container / book) must match how close the
+    // server walks us: ACE approaches to UseRadius ?? 0.6 (Player_Move.cs:59),
+    // and 373 book / 14 container weenies have none, so 0 would close them at once.
     let useRadius = 0.6;
 
     // CORE.10.e — PluralName captured (was consumed + dropped): retail

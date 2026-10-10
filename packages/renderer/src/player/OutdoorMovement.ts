@@ -304,7 +304,8 @@ function walkableTerrainContact(
   const h = services.terrain.getHeightAt(x, z);
   if (h === null) return null;
   const ground = services.groundAt?.(x, z, fromY) ?? null;
-  if (ground !== null && ground > h + 0.01) return null; // a BSP floor is the contact
+  // A BSP floor is the contact: one over the terrain, or an interior cell's under it.
+  if (ground !== null && Math.abs(ground - h) > 0.01) return null;
   const n = services.terrain.getTriangleNormalAt(x, z);
   return n && n.y >= FLOOR_Z ? { n, h } : null;
 }
@@ -348,6 +349,20 @@ function cliffSlide(
   };
 }
 
+/**
+ * BUG.holtburg-statue-tunnel-wall — the body at (x, z) stands on an interior
+ * cell's floor under the terrain (outdoorGroundY's cell rule: the only
+ * ground below it). Retail's cell array then holds no land cell
+ * (CEnvCell::find_transit_cells @ 0052c820), so the terrain's slope and water
+ * rules (CLandCell::find_env_collisions @ 00532f20) do not apply there.
+ */
+function onCellFloorUnderTerrain(services: MovementServices, x: number, z: number, fromY: number): boolean {
+  const h = services.terrain.getHeightAt(x, z);
+  if (h === null || fromY >= h + 0.5) return false;
+  const ground = services.groundAt?.(x, z, fromY) ?? null;
+  return ground !== null && ground < h - 0.01;
+}
+
 function outdoorAdjustedStep(
   state: MovementStepState, dx: number, dz: number, services: MovementServices, slopeGate: boolean,
 ): [number, number] {
@@ -376,7 +391,8 @@ function outdoorAdjustedStep(
     if (slopeGate && !services.terrain.isWalkable(destX, destZ)) {
       const destH = services.terrain.getHeightAt(destX, destZ);
       const curH = services.terrain.getHeightAt(state.x, state.z);
-      if (destH !== null && curH !== null && destH > curH + 0.001) return [0, 0];
+      if (destH !== null && curH !== null && destH > curH + 0.001
+        && !onCellFloorUnderTerrain(services, destX, destZ, state.floorY)) return [0, 0];
     }
     // GAP.6 — fully-flooded cells are impassable: ACE
     // LandCell.FindEnvCollisions returns Collided for any
@@ -384,17 +400,21 @@ function outdoorAdjustedStep(
     // cell (LandCell.cs:54-58). AC1 has no swimming — deep water
     // is a hard wall, matching the server (which would reject the
     // transition and force-correct us anyway).
-    if (services.water.cellWaterTypeAt(destX, destZ) === LandWaterType.EntirelyWater) return [0, 0];
+    if (services.water.cellWaterTypeAt(destX, destZ) === LandWaterType.EntirelyWater
+      && !onCellFloorUnderTerrain(services, destX, destZ, state.floorY)) return [0, 0];
     if (slopeGate && stepDownRefused(services.outdoorCollision, state.x, state.z, destX, destZ, state.floorY, services)) return [0, 0];
     if (!slopeGate || !services.edgeSlide || (services.outdoorCollision.lastStepUp ?? 0) > 0) return [adjX, adjZ];
 
     // RECON.transition-stepup-stepdown-port.b — on a BSP floor (a roof, a
     // bridge, a stair landing) a step past its edge with no walkable in
     // reach slides along the edge (precipice_slide). The outdoor ground is
-    // never below the terrain, so only a destination whose terrain lies out
-    // of step-down reach can be one; ordinary steps skip the BSP search.
+    // below the terrain only on an interior cell's floor (a tunnel, a
+    // cellar), so only a destination whose terrain lies out of step-down
+    // reach, or a body on such a floor, can be one; ordinary steps skip the
+    // BSP search.
     const destTerrain = services.terrain.getHeightAt(destX, destZ);
-    if (destTerrain !== null && state.floorY - destTerrain > services.stepDownHeight) {
+    if (destTerrain !== null && (state.floorY - destTerrain > services.stepDownHeight
+      || (state.floorY < destTerrain - 0.01 && onCellFloorUnderTerrain(services, state.x, state.z, state.floorY)))) {
       const precipice = precipiceStep(services.outdoorCollision, state.x, state.z, state.floorY, adjX, adjZ,
         services.stepDownHeight, services.groundAt);
       if (precipice === 'collided') return [0, 0];
@@ -417,7 +437,7 @@ function outdoorAdjustedStep(
     if (contact === undefined) contact = walkableTerrainContact(state.x, state.z, state.floorY, services);
     if (!contact) return [adjX, adjZ];
     const ground = services.groundAt?.(destX, destZ, contact.h) ?? null;
-    if (ground !== null && ground > destH + 0.01) return [adjX, adjZ]; // a BSP floor is the contact there
+    if (ground !== null && Math.abs(ground - destH) > 0.01) return [adjX, adjZ]; // a BSP floor is the contact there
     // The step-down lands on an unwalkable plane (Normal.Z < walkable z), so
     // step_down fails and edge_slide runs. Within StepDownHeight the probe
     // made it the contact plane: cliff_slide along the walkable/unwalkable

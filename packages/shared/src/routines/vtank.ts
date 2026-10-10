@@ -187,7 +187,8 @@ function nodeStep(n: NavNode): { do: RoutineAction[] } | { problem: string } | n
     case 3: return { do: [{ kind: 'wait', seconds: Math.max(0, Number(n.extra[0]) / 1000) }] };
     case 4: { const a = chatAction(n.extra[0] ?? '', { routes: [], problems: [], metName: '' }); const bad = a.find((x) => x.kind === 'unsupported'); return bad ? { problem: (bad as { what: string }).what } : { do: a }; }
     case 5: return { do: [{ kind: 'use-object', name: n.extra[1] ?? '' }] };
-    case 6: case 7: return { do: [{ kind: 'use-object', name: n.extra[0] ?? '' }] };
+    case 6: return { do: [{ kind: 'use-object', name: n.extra[0] ?? '' }] };
+    case 7: return { do: [{ kind: 'talk-to', name: n.extra[0] ?? '' }] };
     case 9: return { do: [{ kind: 'jump', heading: normDeg(Number(n.extra[0]) || 0), ...(Number(n.extra[2]) > 0 ? { holdMs: Math.min(5000, Number(n.extra[2])) } : {}), ...(/^true$/i.test(n.extra[1] ?? '') ? { walk: true } : {}) }] };
     case 1: return { problem: 'a portal step by object id (only valid on the server that recorded it)' };
     default: return { problem: `navroute step type ${n.type}` };
@@ -196,7 +197,7 @@ function nodeStep(n: NavNode): { do: RoutineAction[] } | { problem: string } | n
 
 /** A navroute as one of our routes: points, and on-arrival stops for its recall / pause / chat / use / jump steps. */
 export function navToRoute(name: string, nav: NavRoute): { route: Route | null; problems: string[] } {
-  if (nav.mode === 'follow') return { route: null, problems: [`route "${name}" follows ${nav.follow?.name ?? 'a player'}: following a player isn't supported yet`] };
+  if (nav.mode === 'follow') return { route: { name, mode: 'follow', points: [], ...(nav.follow?.name ? { follow: nav.follow.name } : {}) }, problems: [] };
   const points = nav.nodes.map((n) => navCoords(n.ew, n.ns));
   if (!points.length) return { route: null, problems: [`route "${name}" has no points`] };
   const stops: NonNullable<Route['stops']> = [];
@@ -308,20 +309,26 @@ function convertCondition(id: number, data: MetValue, ctx: ConvertCtx): RoutineC
       return { kind: 'not', condition: convertCondition(c.id, c.data, ctx) };
     }
     case 24: return { kind: 'burden-above', percent: Math.max(0, num(data) - 1) };
-    case 28: return { kind: 'chat-matches', pattern: str(d.get('p')) };
+    case 28: {
+      // The colour list is ';'-separated chat-type ids ("0;2"); empty means any.
+      const raw = str(d.get('c')).trim();
+      const colors = raw ? raw.split(';').map((x) => Number(x.trim())).filter((x) => Number.isFinite(x) && x >= 0) : [];
+      return { kind: 'chat-capture', pattern: str(d.get('p')), ...(colors.length ? { colors } : {}) };
+    }
     case 7: return { kind: 'route-done' };
     case 8: return { kind: 'died' };
     case 9: return { kind: 'vendor-open' };
     case 10: return { kind: 'vendor-closed' };
-    case 14: return unsupportedCondition(`monsters of priority ${num(d.get('p'))} within ${num(d.get('r'))}`);
+    case 14: return { kind: 'monster-priority-count', priority: num(d.get('p')), count: Math.max(1, num(d.get('c'))), meters: num(d.get('r')) };
     case 15: return { kind: 'need-buff' };
     case 17: return { kind: 'landblock', landblock: num(data) >>> 0 };
     case 18: return { kind: 'landcell', cell: num(data) >>> 0 };
     case 19: return { kind: 'portal-entered' };
     case 20: return { kind: 'portal-exited' };
-    case 22: return unsupportedCondition(`Seconds in state (persistent) ≥ ${num(data)}`);
-    case 23: return unsupportedCondition(`Time left on spell ${num(d.get('sid'))} ≥ ${num(d.get('sec'))} s`);
-    case 25: return unsupportedCondition(`Distance to route ≥ ${num(d.get('dist'))}`);
+    case 22: return { kind: 'seconds-in-state-persistent', seconds: num(data) };
+    case 23: return { kind: 'spell-time-at-least', spell: '', spellId: num(d.get('sid')), seconds: num(d.get('sec')) };
+    // Meta distances are yards (metaf reference: "DistToRteGE … (in yards)"), a game metre: ours as they are.
+    case 25: return { kind: 'route-distance-at-least', meters: num(d.get('dist')) };
     case 26: return { kind: 'expression', expr: str(d.get('e')) };
     default: return unsupportedCondition(`VirindiTank condition type ${id}`);
   }
@@ -358,9 +365,9 @@ function convertAction(id: number, data: MetValue, ctx: ConvertCtx): RoutineActi
       const lit = settingLiteral(str(d.get('v')));
       return lit !== null ? [{ kind: 'set-setting', name: vtCanonicalName(str(d.get('o'))), value: vtFromVTank(str(d.get('o')), lit) }] : [{ kind: 'expression', expr: `vtsetsetting[${str(d.get('o'))},${str(d.get('v'))}]` }];
     }
-    case 13: return [unsupportedAction(`Create view "${str(d.get('n'))}"`)];
-    case 14: return [unsupportedAction(`Destroy view "${str(d.get('n'))}"`)];
-    case 15: return [unsupportedAction('Destroy all views')];
+    case 13: return [{ kind: 'create-view', name: str(d.get('n')), xml: str(d.get('x')) }];
+    case 14: return [{ kind: 'destroy-view', name: str(d.get('n')) }];
+    case 15: return [{ kind: 'destroy-all-views' }];
     default: return [unsupportedAction(`VirindiTank action type ${id}`)];
   }
 }

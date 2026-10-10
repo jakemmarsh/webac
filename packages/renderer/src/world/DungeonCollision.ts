@@ -1386,8 +1386,9 @@ export class DungeonCollision {
   getBodyFloorHeight(
     worldX: number, worldZ: number, fromY: number, stepDownHeight: number, maxDrop = FLOOR_SEARCH_MAX_DROP,
   ): number | null {
-    if (this.cells.size === 0) return this.getFloorHeight(worldX, worldZ, fromY, maxDrop);
     const contact = this.stepDownContact(worldX, worldZ, fromY, stepDownHeight);
+    // Only CylSphere / Sphere obstacles registered: their tops are the contact.
+    if (this.cells.size === 0) return contact?.y ?? this.getFloorHeight(worldX, worldZ, fromY, maxDrop);
     const candidates = this.floorCandidates(worldX, worldZ, fromY, fromY + 2.0, fromY - maxDrop);
     // A floor under the centre counts above the search height only while
     // the feet sphere's centre is still above it (a tread the body's centre
@@ -1469,12 +1470,79 @@ export class DungeonCollision {
         landings.push({ y, placeY: startZ + tPlace * s - lowH, normal: { x: g.x, y: g.z, z: g.y } });
       }
     }
+    this.obstacleLandings(worldX, worldZ, startZ, stepDownHeight, fromY, landings);
     if (landings.length === 0) return null;
     let top = landings[0];
     for (const l of landings) if (l.y > top.y) top = l;
     // StepDown's Placement insert (ACE Transition.cs:731-740): the body must
     // fit where it lands, or the step down fails.
     return { y: top.y, normal: top.normal, fits: this.bodyFitsAt(worldX, worldZ, top.placeY) };
+  }
+
+  /**
+   * RECON.transition-stepup-stepdown-port.c.b.a — the CylSphere / Sphere
+   * obstacles' part of CTransition::step_down (CheckOtherCells runs every
+   * object, not only the BSPs): the feet sphere lowered to `startZ` (AC Z,
+   * three.js Y) that overlaps an obstacle is set back up onto it.
+   *  - CCylSphere::step_sphere_down @ 0053a9b0 (ACE CylSphere.StepSphereDown):
+   *    horizontal reach radius − EPSILON + r and the vertical span test of
+   *    collides_with_sphere; up by Height + r − disp.Z onto the flat top
+   *    (contact plane +Z);
+   *  - CSphere::step_sphere_down @ 00536d20 (ACE Sphere.StepSphereDown): up
+   *    to sqrt(reach² − dxy²) above the centre (reach = radsum + EPSILON); a
+   *    spot whose normal Z is not above FloorZ sets no contact plane.
+   * Both refuse a lift past 1.1 × the step-down amount (interp < −0.1); such
+   * an obstacle is no landing here. The sphere rests its full radius off the
+   * obstacle as retail's does (5 mm above where a BSP floor rests it,
+   * lowerSphereHeight), so the body standing there no longer overlaps it and
+   * its next step is not taken for a collision.
+   */
+  private obstacleLandings(
+    worldX: number, worldZ: number, startZ: number, stepDownHeight: number, fromY: number,
+    out: { y: number; placeY: number; normal: { x: number; y: number; z: number } }[],
+  ): void {
+    if ((this.cylinders.size === 0 && this.spheres.size === 0) || stepDownHeight < PHYSICS_EPSILON) return;
+    const r = this.bodySphereRadius;
+    const lowH = this.lowerSphereHeight;
+    const maxLift = 1.1 * stepDownHeight;
+    const land = (centerZ: number, normal: { x: number; y: number; z: number }): void => {
+      const y = centerZ - lowH;
+      if (y > fromY + STEP_SEARCH_SLACK) return; // the step up, not the step down, lifts the body
+      out.push({ y, placeY: y, normal });
+    };
+    const cyls = this.spatialIndex
+      ? this.cylinderGrid.queryDisc(worldX, worldZ, r + this.maxObstacleRadius)
+      : this.cylinders.values();
+    for (const cyl of cyls) {
+      const radsum = cyl.radius - PHYSICS_EPSILON + r;
+      const dx = worldX - cyl.x;
+      const dy = worldZ - cyl.z;
+      if (dx * dx + dy * dy > radsum * radsum) continue;
+      const height = cyl.topY - cyl.bottomY;
+      if (!Number.isFinite(height)) continue; // an unbounded column has no top
+      const dz = startZ - cyl.bottomY;
+      if (Math.abs(height / 2 - dz) > r - PHYSICS_EPSILON + height / 2) continue;
+      const lift = height + r - dz;
+      if (lift <= 0 || lift > maxLift) continue;
+      land(cyl.topY + r, { x: 0, y: 1, z: 0 });
+    }
+    const sphs = this.spatialIndex
+      ? this.sphereGrid.queryDisc(worldX, worldZ, r + this.maxObstacleRadius)
+      : this.spheres.values();
+    for (const sph of sphs) {
+      const reach = sph.radius + r;
+      const dx = worldX - sph.x;
+      const dy = worldZ - sph.z;
+      const dz = startZ - sph.y;
+      const dxy2 = dx * dx + dy * dy;
+      const radsum = reach - PHYSICS_EPSILON;
+      if (dxy2 + dz * dz > radsum * radsum) continue;
+      const up = Math.sqrt(reach * reach - dxy2);
+      const lift = up - dz;
+      if (lift <= 0 || lift > maxLift) continue;
+      if (up / reach <= FLOOR_WALKABLE_Z) continue; // no contact plane: the body slides off
+      land(sph.y + up, { x: dx / reach, y: up / reach, z: dy / reach });
+    }
   }
 
   /**

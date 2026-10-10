@@ -326,6 +326,16 @@ export interface ServerObject {
    */
   lostCell?: boolean;
   /**
+   * AGENT — where the server last placed the object: its cell and global
+   * metres in render axes (worldX/Y/Z's frame), set by every position the
+   * object accepted (CreateObject, UpdatePosition, AutonomousPosition,
+   * PublicUpdatePosition). The agent's observations read it when the physics
+   * body is not being stepped (agent/livePlace.ts).
+   */
+  serverPlace?: { cell: number; worldX: number; worldY: number; worldZ: number };
+  /** AGENT — performance.now() ms when the physics body last moved worldX/Y/Z (syncBodyToMesh). */
+  bodySyncedAt?: number;
+  /**
    * DECOMP.pickup-event-ignored — the object left the world
    * (`CPhysicsObj::leave_world` @ 005155a0, run by `SmartBox::DoPickupEvent`
    * @ 00452240): it is in no cell, so it is not drawn and does not update.
@@ -758,6 +768,13 @@ export class ServerObjectManager {
    * LoseControlToServer — main.ts → CameraController.loseControlToServer.
    */
   onLocalPlayerServerMotion: (() => void) | null = null;
+  /**
+   * The style of a non-autonomous movement for our own character
+   * (CPhysics::SetObjectMovement @ 00509690 applies it to the player like
+   * any object's): the server's stance wins over the one the client guessed
+   * from the wielded weapon.
+   */
+  onLocalPlayerStyle: ((stanceId: number) => void) | null = null;
 
   /**
    * An animation-frame hook fired on a server object's animation (its
@@ -866,7 +883,13 @@ export class ServerObjectManager {
   /** Register an externally-created AnimatedEntity (e.g. the player character). */
   registerAnimatedEntity(guid: number, animated: AnimatedEntity, isLocalPlayer = false): void {
     this.animatedObjects.set(guid, animated);
-    if (isLocalPlayer) this.localPlayerGuid = guid;
+    if (isLocalPlayer) {
+      this.localPlayerGuid = guid;
+      // The player's CreateObject came before its sequence existed: its
+      // style (a login already in combat mode) is the stance to start in.
+      const initial = this.pendingMotion.get(guid);
+      if (initial && initial.movementType === 0 && initial.styleIndex > 0) this.onLocalPlayerStyle?.(motionStanceFromIndex(initial.styleIndex));
+    }
   }
 
   /** Look up the AnimatedEntity for a server-tracked object (null if not animated). */
@@ -1217,6 +1240,7 @@ export class ServerObjectManager {
       obj.worldX = wp.x;
       obj.worldY = wp.y;
       obj.worldZ = wp.z;
+      obj.serverPlace = { cell: data.position.landblock >>> 0, worldX: wp.x, worldY: wp.y, worldZ: wp.z };
     }
     // The object's physics: its CreateObject position, velocity, omega and
     // update timestamps (CPhysicsObj::set_description / makeObject).
@@ -1633,6 +1657,7 @@ export class ServerObjectManager {
       contact: (data.flags & POSITION_FLAG_IS_GROUNDED) !== 0,
       positionTs: data.positionSequence,
       teleportTs: data.teleportSequence,
+      placement: data.placementId,
     });
   }
 
@@ -1658,7 +1683,7 @@ export class ServerObjectManager {
   private applyPositionUpdate(
     guid: number, cell: number,
     x: number, y: number, z: number, rw: number, rx: number, ry: number, rz: number,
-    stamps: { contact: boolean; positionTs?: number; teleportTs?: number },
+    stamps: { contact: boolean; positionTs?: number; teleportTs?: number; placement?: number },
   ): void {
     const obj = this.objects.get(guid);
     if (!obj) return;
@@ -1698,7 +1723,14 @@ export class ServerObjectManager {
       cell, pos: { x: newX, y: newZ, z }, orient: { w: rw, x: rx, y: ry, z: rz },
       contact: stamps.contact, positionTs: stamps.positionTs, teleportTs: stamps.teleportTs,
     }, playerDistance);
-    if (r === 'stale' || r === 'ignored') return;
+    if (r === 'stale') return;
+    // Where the server says it is, for the agent's observations (an airborne one the body ignores included).
+    obj.serverPlace = { cell: cell >>> 0, worldX: newX, worldY: newY, worldZ: newZ };
+    if (r === 'ignored') return;
+    // SmartBox::HandleReceivedPosition @ 00453fd0: an object without
+    // animations takes the position's placement (SetPlacementFrame; 0 when
+    // the PositionPack had none).
+    if (stamps.placement !== undefined && !this.animatedObjects.has(guid)) this.setPlacementFrame(obj, stamps.placement);
     // BUG.teleport-leaves-stale-objects — the cell the object now stands in
     // (updateObjectMaint moves it out of / back into the world by it).
     obj.objCellId = cell;
@@ -1712,6 +1744,13 @@ export class ServerObjectManager {
         try { this.onObjectReenteredWorld(obj); } catch { /* never block the update */ }
       }
     }
+  }
+
+  /** CPhysicsObj::SetPlacementFrame: re-pose a built object's parts (rebuilds keep obj.placement). */
+  setPlacementFrame(obj: ServerObject, placement: number): void {
+    if ((obj.placement ?? PLACEMENT_RESTING) === placement) return;
+    obj.placement = placement;
+    if (obj.mesh && obj.setupId) this.setupModelRenderer.posePlacement(obj.mesh, obj.setupId, placement);
   }
 
   /**
@@ -2389,6 +2428,7 @@ export class ServerObjectManager {
     obj.worldX = wx;
     obj.worldY = clampedY;
     obj.worldZ = wz;
+    obj.serverPlace = { cell: landblock >>> 0, worldX: wx, worldY: clampedY, worldZ: wz };
     obj.physics?.interp.stopInterpolating();
     obj.physics?.setPositionSimple({ cell: landblock >>> 0, pos: { x: wx, y: wz, z: clampedY }, orient: { w: qw, x: qx, y: qy, z: qz } });
 
@@ -2519,6 +2559,9 @@ export class ServerObjectManager {
       if (parsed.autonomous) return;
       if (live) this.onLocalPlayerServerMotion?.();
       if (isServerMove) {
+        // unpack_movement @ 00524440 DoMotions the movement's style first for
+        // every object, a MoveTo / TurnTo included (a melee approach begun in peace).
+        if (live && parsed.styleIndex > 0) this.onLocalPlayerStyle?.(motionStanceFromIndex(parsed.styleIndex));
         this.onLocalPlayerMovement?.(parsed.movementType, { moveTo: parsed.moveTo, turnTo: parsed.turnTo });
         return;
       }
@@ -2657,7 +2700,11 @@ export class ServerObjectManager {
     // frames 18–end is the throw itself. As one-shots the reload snapped
     // back at frame 22 and the throw never played
     // (BUG.missile-aim-reload-played-as-actions).
-    if (isLocalPlayer && !parsed.autonomous) applyServerForwardToLocalPlayer(mm, forwardCmd, forwardSpeed, fullStanceId, sidestepCmd, turnCmd);
+    if (isLocalPlayer && !parsed.autonomous) {
+      // The style first: a swing or a reload is keyed to the server's style.
+      if (styleIndex > 0 && live) this.onLocalPlayerStyle?.(fullStanceId);
+      applyServerForwardToLocalPlayer(mm, forwardCmd, forwardSpeed, fullStanceId, sidestepCmd, turnCmd);
+    }
 
     // The object's interpreted motion state (CMotionInterp::
     // move_to_interpreted_state): forward, sidestep and turn with their
@@ -2833,6 +2880,7 @@ export class ServerObjectManager {
     obj.worldX = body.pos.x;
     obj.worldY = body.pos.z;
     obj.worldZ = body.pos.y;
+    obj.bodySyncedAt = performance.now();
     if (!obj.mesh || obj.wielderId || obj.outOfWorld) return;
     obj.mesh.position.set(obj.worldX, obj.worldY, obj.worldZ);
     const [qx, qy, qz, qw] = acQuatToThree(body.orient);

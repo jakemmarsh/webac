@@ -599,6 +599,82 @@ describe('VirindiTank window options in the engine (AGENT.vtank-window)', () => 
     expect(api.routine.update({ ...edited, name: 'Other' }).ok).toBe(false);
   });
 
+  it('VTank\'s Seconds in State restarts on resume; Seconds in state (P) doesn\'t', async () => {
+    api.routine.start(profile({ states: [{ name: 'Hunt', rules: [
+      { label: 'S', when: [{ kind: 'seconds-in-state', seconds: 3 }], do: [{ kind: 'stop' }] },
+      { label: 'P', when: [{ kind: 'seconds-in-state-persistent', seconds: 3 }], do: [{ kind: 'stop' }] },
+    ] }] }));
+    await step(2500);
+    api.routine.pause();
+    await step(1000);
+    api.routine.resume();
+    const v = api.routine.dryRun();
+    expect(v[0].fires).toBe(false);
+    expect(v[1].fires).toBe(true);
+  });
+
+  it('Time Left On Spell by an imported spell id; Dist Any Route Pt from the loaded route', async () => {
+    host.buffs = [{ spellId: 2, name: 'Strength Self I', remaining: 500 }, { spellId: 2, name: 'Strength Self I', remaining: 100 }] as never;
+    api.routine.start(profile({ macro: true, navRoute: 'R', routes: [{ name: 'R', mode: 'once', points: [M(80, 60)] }], states: [{ name: 'Hunt', rules: [
+      { when: [{ kind: 'spell-time-at-least', spell: '', spellId: 2, seconds: 400 }], do: [{ kind: 'stop' }] },
+      { when: [{ kind: 'spell-time-at-least', spell: '', spellId: 3, seconds: 1 }], do: [{ kind: 'stop' }] },
+      { when: [{ kind: 'route-distance-at-least', meters: 30 }], do: [{ kind: 'stop' }] },
+      { when: [{ kind: 'route-distance-at-least', meters: 50 }], do: [{ kind: 'stop' }] },
+    ] }] }));
+    expect(api.routine.dryRun().map((r) => r.fires)).toEqual([true, false, true, false]);
+  });
+
+  it('Chat Message Capture: a matching line (of a listed chat type) puts its named groups in capturegroup_<name>', async () => {
+    api.routine.start(profile({ ruleFiring: 'once', states: [{ name: 'Hunt', rules: [
+      { label: 'Cap', when: [{ kind: 'chat-capture', pattern: '^(?<who>\\w+) tells you, "come (?<where>\\w+)"$', colors: [3] }], do: [{ kind: 'expression', expr: 'echo[getvar[capturegroup_who]]' }, { kind: 'expression', expr: 'echo[getvar[capturegroup_where]]' }, { kind: 'expression', expr: 'echo[getvar[capturecolor]]' }] },
+    ] }] }));
+    const echoes: string[] = [];
+    api.routine.onReport = (r) => echoes.push(r);
+    api.pushChat('Bob tells you, "come here"', 2);
+    await step(800);
+    expect(echoes).toEqual([]);
+    api.pushChat('Bob tells you, "come here"', 3);
+    await step(800);
+    expect(echoes).toEqual(['Bob', 'here', '3']);
+  });
+
+  it('a Follow route keeps within Follow/Nav Min of the player it follows', async () => {
+    host.add({ guid: 0x50000099, name: 'Leader', itemType: 0x10, objectDescFlags: 0x8, x: 80, y: 40 });
+    const calls: unknown[] = [];
+    const walk = api.walkTo.bind(api);
+    api.walkTo = (t, o = {}) => { calls.push([t, o.within]); return walk(t, o); };
+    api.routine.start(profile({ macro: true, settings: { EnableCombat: false, EnableNav: true, NavCloseStopRange: 3 }, navRoute: 'F', routes: [{ name: 'F', mode: 'follow', points: [], follow: 'Leader' }], states: [{ name: 'Hunt', rules: [] }] }));
+    expect(api.routine.status().nav).toMatchObject({ route: 'F', done: false });
+    await step(2000);
+    expect(calls[0]).toEqual([0x50000099, 3]);
+  });
+
+  it('NPC Talk uses the NPC until it tells you something', async () => {
+    host.add({ guid: 0x80006001, name: 'Sean the Speedy', itemType: 0x10, objectDescFlags: 0x0, x: 81, y: 21 });
+    api.routine.start(profile({ ruleFiring: 'once', states: [{ name: 'Hunt', rules: [{ label: 'Talk', when: [{ kind: 'always' }], do: [{ kind: 'talk-to', name: 'Sean the Speedy' }] }] }] }));
+    await step(1500);
+    expect(host.sent.filter((x) => x === 'use 80006001').length).toBeGreaterThanOrEqual(1);
+    api.pushChat('Sean the Speedy tells you, "Welcome!"', 3);
+    await step(1500);
+    expect(api.routine.history().join('\n')).toContain('talk-to: Sean the Speedy answered');
+  });
+
+  it('the current-waypoint arrow sets the point the loaded route walks to next', async () => {
+    api.routine.start(profile({ macro: true, settings: { EnableCombat: false }, navRoute: 'R', routes: [{ name: 'R', mode: 'circular', points: [M(80, 30), M(80, 40), M(80, 50)] }], states: [{ name: 'Hunt', rules: [] }] }));
+    expect(api.routine.setWaypoint(2).ok).toBe(true);
+    expect(api.routine.status().nav).toMatchObject({ route: 'R', point: 2 });
+    expect(api.routine.setWaypoint(5).ok).toBe(false);
+  });
+
+  it('a rule\'s /vt Chat Command goes to the /vt handler, not the server', async () => {
+    const lines: string[] = [];
+    api.routine.onVtCommand = (l) => lines.push(l);
+    api.routine.start({ ...say('/vt opt set enablecombat false'), ruleFiring: 'once' });
+    await step(1000);
+    expect(lines).toEqual(['/vt opt set enablecombat false']);
+    expect(host.chats).not.toContain('/vt opt set enablecombat false');
+  });
+
   it('a rule that fired is listed (VTank shows it red) until its state is entered again', async () => {
     api.routine.start({ ...say('once'), ruleFiring: 'once' });
     await step(1000);

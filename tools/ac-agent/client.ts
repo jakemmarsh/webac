@@ -6,10 +6,15 @@ import { spawn } from 'node:child_process';
 import { existsSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { REPO } from '../lib/game-session.ts';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { type DaemonInfo, accountForProfile, listInfos, logFile, readInfo, STATE_DIR } from './state.ts';
 import { agentEra, eraAccount } from './eras.ts';
-import { defaultCharacterName } from './daemon.ts';
+import { defaultCharacterName } from './state.ts';
+
+// The repo root (game-session.ts has the same; importing it would load Playwright, which the bridge doesn't carry).
+// Worked out only when a daemon is started: the bridge bundles this module as CommonJS, where import.meta is empty.
+const repoRoot = (): string => resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 import { mkdirSync } from 'node:fs';
 
 export const DEFAULT_PROFILE = process.env.AC_AGENT_PROFILE ?? 'claude';
@@ -100,7 +105,7 @@ export async function startDaemon(opts: StartOptions = {}): Promise<{ info: Daem
   for (const k of ['template', 'heritage', 'gender', 'town', 'seed', 'attributes', 'skills'] as const) if (opts[k] !== undefined) args.push(`--${k}`, String(opts[k]));
   mkdirSync(STATE_DIR, { recursive: true });
   const out = openSync(logFile(profile), 'a');
-  const child = spawn('npx', args, { cwd: REPO, detached: true, stdio: ['ignore', out, out] });
+  const child = spawn('npx', args, { cwd: repoRoot(), detached: true, stdio: ['ignore', out, out] });
   child.unref();
   const deadline = Date.now() + (opts.timeoutMs ?? 300_000);
   while (Date.now() < deadline) {

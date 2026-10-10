@@ -231,7 +231,7 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
       measure: (_r: string, t: string) => t.length * 5,
       textColor: () => null,
       lineHeight: () => 12,
-      bindEditField: () => null, textAlign: () => 'left' as const,
+      bindEditField: () => null,
       onlineColor: 'green',
       attachScale: () => {},
       plate: () => domWindow.document.createElement('div'),
@@ -322,6 +322,55 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(a.rel).toContain('noopener');
     const none = await open();
     expect(none.mount.querySelector('a.launcher-source')).toBeNull();
+  });
+
+  it('first visit (streamed DATs): the online bullets paint once their texture streams in', async () => {
+    const k = makeKit();
+    let resident = false;
+    const listeners = new Set<() => void>();
+    const kit = {
+      ...k.kit,
+      texUrl: (id: number) => (resident ? `data:tex/${id.toString(16)}` : null),
+      onFilesArrived: (cb: () => void) => { listeners.add(cb); return () => { listeners.delete(cb); }; },
+    };
+    const screen = new mod.LauncherScreen(kit, {
+      bridgeUrl: BRIDGE, storage: new MemStorage(),
+      loadDirectory: async () => ({ mode: 'multi', worlds: worlds() }),
+    });
+    void screen.run();
+    await screen.loaded;
+    const dots = () => [...k.mount.querySelectorAll('.launcher-dot')] as HTMLElement[];
+    expect(dots().filter((d) => d.dataset.online === 'true').every((d) => d.style.backgroundImage === '')).toBe(true);
+    // The files land: the list redraws with the bullets (0x06004d17 online, 0x06004d19 offline).
+    resident = true;
+    for (const cb of listeners) cb();
+    const painted = dots().filter((d) => d.dataset.online !== undefined);
+    expect(painted.length).toBeGreaterThan(0);
+    for (const d of painted) {
+      expect(d.style.backgroundImage).toContain(d.dataset.online === 'true' ? '6004d17' : '6004d19');
+    }
+    // Nothing missed since: a later arrival leaves the list alone.
+    const before = k.mount.querySelector('.launcher-world-row');
+    for (const cb of listeners) cb();
+    expect(k.mount.querySelector('.launcher-world-row')).toBe(before);
+  });
+
+  it('the launcher stops listening for file arrivals once a world is entered', async () => {
+    const k = makeKit();
+    const listeners = new Set<() => void>();
+    const kit = { ...k.kit, onFilesArrived: (cb: () => void) => { listeners.add(cb); return () => { listeners.delete(cb); }; } };
+    const screen = new mod.LauncherScreen(kit, {
+      bridgeUrl: BRIDGE, storage: new MemStorage(), prefillAccount: 'someone',
+      loadDirectory: async () => ({ mode: 'multi', worlds: worlds() }),
+    });
+    const done = screen.run();
+    await screen.loaded;
+    expect(listeners.size).toBe(1);
+    (k.mount.querySelector('.launcher-password') as HTMLInputElement).value = 'pw';
+    const row = ([...k.mount.querySelectorAll('.launcher-world-row')] as HTMLElement[]).find((r) => r.textContent?.includes('Coldeve'))!;
+    row.dispatchEvent(new domWindow.MouseEvent('dblclick', { bubbles: true }));
+    await done;
+    expect(listeners.size).toBe(0);
   });
 
   it('RELEASE.launcher-enter-before-ready — ENTER while the list loads waits, says so, then enters', async () => {
@@ -466,12 +515,11 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
       measureText: (t: string) => t.length * 6,
       renderTextToCanvas: (t: string) => { painted.push(t); return doc.createElement('canvas'); },
     };
-    const bound: Array<{ input: HTMLInputElement; host: HTMLElement; ref: string }> = [];
     const k = makeKit();
-    (k.kit as Record<string, unknown>).textAlign = (ref: string) => (ref === LAUNCHER_TEXT.edit ? 'center' : 'left');
-    (k.kit as Record<string, unknown>).bindEditField = (input: HTMLInputElement, host: HTMLElement, ref: string) => {
-      bound.push({ input, host, ref });
-      return attachDatEditField(input, host, { font, color: 'rgb(255, 242, 204)' });
+    const bound: Array<{ input: HTMLInputElement; host: HTMLElement; ref: string; hJustify?: number }> = [];
+    (k.kit as Record<string, unknown>).bindEditField = (input: HTMLInputElement, host: HTMLElement, ref: string, hJustify?: number) => {
+      bound.push({ input, host, ref, hJustify });
+      return attachDatEditField(input, host, { font, color: 'rgb(255, 242, 204)', hJustify });
     };
     const screen = new mod.LauncherScreen(k.kit, {
       bridgeUrl: BRIDGE, prefillAccount: 'olthoi', storage: new MemStorage(),
@@ -484,6 +532,8 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(bound).toHaveLength(1);
     expect(bound[0].input).toBe(account);
     expect(bound[0].ref).toBe(LAUNCHER_TEXT.edit);
+    // Left-justified over the text-entry desc's centring: the text starts at the field's left edge.
+    expect(bound[0].hJustify).toBe(0);
     // The host is the edit box inside the 24-px frame art, the input filling it.
     expect(bound[0].host.className).toBe('launcher-edit');
     expect(bound[0].host.style.height).toBe('16px');
@@ -497,8 +547,8 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     // The password is never handed to a glyph painter (no mask glyph is decided).
     expect(password.type).toBe('password');
     expect(password.style.color).not.toBe('transparent');
-    // Its bullets follow the edit desc's justification, in line with the account.
-    expect(password.style.textAlign).toBe('center');
+    // Its bullets and caret start at the left edge, in line with the account.
+    expect(password.style.textAlign).toBe('left');
     expect(painted.some(t => t.includes('hunter2'))).toBe(false);
     password.value = 'hunter2';
     expect(painted.some(t => t.includes('hunter2'))).toBe(false);
@@ -568,7 +618,7 @@ describe('ERA.dm-support: LauncherScreen era handling (fake kit)', () => {
       kit: {
         prepareScreen: () => { mount.replaceChildren(); return mount; }, renderLayout: () => null, desc: () => null, texUrl: () => null,
         text: (t: string) => { const e = domWindow.document.createElement('span'); e.textContent = t; return e; },
-        measure: (_r: string, t: string) => t.length * 5, textColor: () => null, lineHeight: () => 12, bindEditField: () => null, textAlign: () => 'left' as const, onlineColor: 'green',
+        measure: (_r: string, t: string) => t.length * 5, textColor: () => null, lineHeight: () => 12, bindEditField: () => null, onlineColor: 'green',
         attachScale: () => {}, plate: () => domWindow.document.createElement('div'), message: () => {},
         textEntry: (_p: string, done: (t: string) => void) => { entries.push(done); },
         confirmExit: () => {}, openCredits: () => {}, justifyLabel: () => {}, tagElement: () => {},
@@ -640,7 +690,7 @@ describe('ERA.ac1999: a world\'s era is its compat chip, the same mechanism for 
     const kit = {
       prepareScreen: () => { mount.replaceChildren(); return mount; }, renderLayout: () => null, desc: () => null, texUrl: () => null,
       text: (t: string) => { const e = domWindow.document.createElement('span'); e.textContent = t; return e; },
-      measure: (_r: string, t: string) => t.length * 5, textColor: () => null, lineHeight: () => 12, bindEditField: () => null, textAlign: () => 'left' as const, onlineColor: 'green',
+      measure: (_r: string, t: string) => t.length * 5, textColor: () => null, lineHeight: () => 12, bindEditField: () => null, onlineColor: 'green',
       attachScale: () => {}, plate: () => domWindow.document.createElement('div'), message: () => {},
       textEntry: () => {}, confirmExit: () => {}, openCredits: () => {}, justifyLabel: () => {}, tagElement: () => {},
     };

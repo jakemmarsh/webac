@@ -94,10 +94,9 @@ export interface LauncherKit {
    * Draw `input` (filling `host`) as the DAT edit text `ref` (DatEditField:
    * the desc's font and colour, the 1-px caret, inverted selection); the
    * input keeps the keys. Null without the font (the input stays as styled).
+   * `hJustify` overrides the desc's p20 justification.
    */
-  bindEditField(input: HTMLInputElement, host: HTMLElement, ref: string): { refresh(): void; destroy(): void } | null;
-  /** `ref`'s p20 horizontal justification as CSS text-align (left without DAT). */
-  textAlign(ref: string): 'left' | 'center' | 'right';
+  bindEditField(input: HTMLInputElement, host: HTMLElement, ref: string, hJustify?: number): { refresh(): void; destroy(): void } | null;
   /** The online colour (the 0x06004d17 presence bullet's green, AC_COLORS.onlineGreen). */
   onlineColor: string;
   attachScale(inner: HTMLElement): void;
@@ -115,6 +114,12 @@ export interface LauncherKit {
   justifyLabel(btn: HTMLElement): void;
   /** Tag a node as layout element (press sounds). */
   tagElement(el: HTMLElement, layoutId: number, elementId: number): void;
+  /**
+   * Call `cb` whenever streamed DAT files land; returns the unsubscribe.
+   * A first visit draws the list before the row art (the online bullets)
+   * has streamed in, so the launcher redraws when it missed a texture.
+   */
+  onFilesArrived?(cb: () => void): () => void;
 }
 
 export interface LauncherChoice {
@@ -168,6 +173,65 @@ export function wrapLines(text: string, width: number, maxLines: number, measure
   return lines;
 }
 
+/** A DAT plate button (the 0x21000040 templates): faces normal / hover / pressed, the label in `labelRef`'s font. */
+export function launcherPlateButton(
+  kit: LauncherKit, inner: HTMLElement, elementId: number, x: number, y: number, w: number, h: number,
+  label: string, labelRef: string, faces: [number, number, number], onClick: (e: MouseEvent) => void,
+): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  Object.assign(btn.style, {
+    position: 'absolute', left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`, zIndex: '2',
+    cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0', outline: 'none',
+    background: 'transparent', border: 'none', backgroundSize: '100% 100%', backgroundRepeat: 'no-repeat',
+  });
+  const set = (id: number): void => { const u = kit.texUrl(id); if (u) btn.style.backgroundImage = `url(${u})`; };
+  set(faces[0]);
+  btn.addEventListener('mouseenter', () => set(faces[1]));
+  btn.addEventListener('mouseleave', () => set(faces[0]));
+  btn.addEventListener('mousedown', () => set(faces[2]));
+  btn.addEventListener('mouseup', () => set(faces[1]));
+  const span = kit.text(label, labelRef);
+  span.dataset.acDesc = labelRef;
+  btn.appendChild(span);
+  btn.addEventListener('click', onClick);
+  kit.tagElement(btn, CHARSEL_LAYOUT, elementId);
+  inner.appendChild(btn);
+  kit.justifyLabel(btn);
+  return btn;
+}
+
+/**
+ * Cover the backdrop's baked "World" and "Characters" labels with patches
+ * cut from plain sky of the same backdrop texture, feathered at the edges.
+ */
+export function coverLauncherBakedLabels(kit: LauncherKit, inner: HTMLElement): void {
+  const url = kit.texUrl(0x06007576);
+  if (!url) return;
+  const patches: Array<{ dst: [number, number, number, number]; src: [number, number] }> = [
+    // "World" label (above the hidden World box)
+    { dst: [40, 14, 160, 50], src: [212, 140] },
+    // "Characters" label (above the list frame)
+    { dst: [8, 148, 212, 58], src: [212, 140] },
+  ];
+  for (const p of patches) {
+    const [x, y, w, h] = p.dst;
+    const el = document.createElement('div');
+    el.className = 'launcher-backdrop-patch';
+    Object.assign(el.style, {
+      position: 'absolute', left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`,
+      backgroundImage: `url(${url})`, backgroundSize: '800px 600px',
+      backgroundPosition: `${-p.src[0]}px ${-p.src[1]}px`, pointerEvents: 'none', zIndex: '1',
+    });
+    const mask = 'linear-gradient(to right, transparent, black 14px, black calc(100% - 14px), transparent), linear-gradient(to bottom, transparent, black 10px, black calc(100% - 10px), transparent)';
+    el.style.setProperty('mask-image', mask);
+    el.style.setProperty('-webkit-mask-image', mask);
+    el.style.setProperty('mask-composite', 'intersect');
+    el.style.setProperty('-webkit-mask-composite', 'source-in');
+    inner.appendChild(el);
+  }
+}
+
 export class LauncherScreen {
   private worlds: World[] = [];
   private mode: WorldDirectory['mode'] | null = null;
@@ -189,6 +253,9 @@ export class LauncherScreen {
   private accountField: { refresh(): void; destroy(): void } | null = null;
   private passwordInput: HTMLInputElement | null = null;
   private done = false;
+  /** A list texture was not resident yet when last drawn (streamed DATs). */
+  private texMissed = false;
+  private unsubscribeArrivals: (() => void) | null = null;
 
   constructor(private readonly kit: LauncherKit, private readonly opts: LauncherOptions) {
     this.remembered = loadRememberedLogin(opts.storage === undefined ? undefined : opts.storage);
@@ -203,6 +270,11 @@ export class LauncherScreen {
   /** Draw the screen, load the worlds, and resolve when the player enters a world. */
   run(): Promise<LauncherChoice> {
     const p = new Promise<LauncherChoice>((resolve) => { this.resolve = resolve; });
+    this.unsubscribeArrivals = this.kit.onFilesArrived?.(() => {
+      if (this.done || !this.texMissed) return;
+      this.texMissed = false;
+      this.refresh();
+    }) ?? null;
     this.build();
     void this.load();
     return p;
@@ -274,7 +346,7 @@ export class LauncherScreen {
       if (bg) Object.assign(main.style, { backgroundImage: `url(${bg})`, backgroundSize: '800px 600px' });
     }
 
-    this.coverBakedLabels(inner);
+    coverLauncherBakedLabels(this.kit, inner);
     this.buildLogin(inner);
 
     const header = document.createElement('div');
@@ -338,37 +410,6 @@ export class LauncherScreen {
     this.refresh();
   }
 
-  /**
-   * Cover the backdrop's baked "World" and "Characters" labels with patches
-   * cut from plain sky of the same backdrop texture, feathered at the edges.
-   */
-  private coverBakedLabels(inner: HTMLElement): void {
-    const url = this.kit.texUrl(0x06007576);
-    if (!url) return;
-    const patches: Array<{ dst: [number, number, number, number]; src: [number, number] }> = [
-      // "World" label (above the hidden World box)
-      { dst: [40, 14, 160, 50], src: [212, 140] },
-      // "Characters" label (above the list frame)
-      { dst: [8, 148, 212, 58], src: [212, 140] },
-    ];
-    for (const p of patches) {
-      const [x, y, w, h] = p.dst;
-      const el = document.createElement('div');
-      el.className = 'launcher-backdrop-patch';
-      Object.assign(el.style, {
-        position: 'absolute', left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`,
-        backgroundImage: `url(${url})`, backgroundSize: '800px 600px',
-        backgroundPosition: `${-p.src[0]}px ${-p.src[1]}px`, pointerEvents: 'none', zIndex: '1',
-      });
-      const mask = 'linear-gradient(to right, transparent, black 14px, black calc(100% - 14px), transparent), linear-gradient(to bottom, transparent, black 10px, black calc(100% - 10px), transparent)';
-      el.style.setProperty('mask-image', mask);
-      el.style.setProperty('-webkit-mask-image', mask);
-      el.style.setProperty('mask-composite', 'intersect');
-      el.style.setProperty('-webkit-mask-composite', 'source-in');
-      inner.appendChild(el);
-    }
-  }
-
   private buildLogin(inner: HTMLElement): void {
     const g = LAUNCHER_GEOMETRY.login;
     const form = document.createElement('form');
@@ -382,7 +423,6 @@ export class LauncherScreen {
     form.addEventListener('submit', (e) => { e.preventDefault(); this.attemptEnter(); });
     const editColor = this.kit.textColor(LAUNCHER_TEXT.edit) ?? this.kit.textColor(LAUNCHER_TEXT.body) ?? 'white';
     const editPx = Math.max(10, Math.min(14, this.kit.lineHeight(LAUNCHER_TEXT.edit) || 12));
-    const editAlign = this.kit.textAlign(LAUNCHER_TEXT.edit);
     const field = (label: string, type: 'text' | 'password', autocomplete: string, value: string): HTMLInputElement => {
       const lbl = document.createElement('label');
       Object.assign(lbl.style, { display: 'flex', flexDirection: 'column', gap: '3px' });
@@ -419,9 +459,7 @@ export class LauncherScreen {
         position: 'absolute', left: '0', top: '0', width: '100%', height: '100%', zIndex: '5',
         boxSizing: 'border-box', padding: '0 3px', background: 'transparent', border: 'none', outline: 'none',
         color: editColor, caretColor: editColor, fontFamily: 'Tahoma, Verdana, sans-serif', fontSize: `${editPx}px`,
-        // The edit desc's justification (centred), so the masked password
-        // lines up with the DAT-drawn account above it.
-        textAlign: editAlign,
+        textAlign: 'left',
       });
       host.appendChild(input);
       frame.appendChild(host);
@@ -437,7 +475,10 @@ export class LauncherScreen {
     // password), so no DAT or decomp answers which mask glyph to draw
     // (RECON.dom-chrome-sweep.d.a, Jake's call).
     this.accountField?.destroy();
-    this.accountField = this.kit.bindEditField(this.accountInput, this.accountInput.parentElement!, LAUNCHER_TEXT.edit);
+    // Left-justified (p20 = 0), not the text-entry desc's centring: the desc
+    // only lends the font and colour, and a login field reads left to right
+    // with the password's bullets under it (Jake, 2026-10-10).
+    this.accountField = this.kit.bindEditField(this.accountInput, this.accountInput.parentElement!, LAUNCHER_TEXT.edit, 0);
     this.accountInput.addEventListener('input', () => { this.account = this.accountInput!.value; });
     this.passwordInput = field('Password', 'password', 'current-password', '');
     this.passwordInput.classList.add('launcher-password');
@@ -456,27 +497,7 @@ export class LauncherScreen {
     inner: HTMLElement, elementId: number, x: number, y: number, w: number, h: number,
     label: string, labelRef: string, faces: [number, number, number], onClick: (e: MouseEvent) => void,
   ): HTMLButtonElement {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    Object.assign(btn.style, {
-      position: 'absolute', left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`, zIndex: '2',
-      cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0', outline: 'none',
-      background: 'transparent', border: 'none', backgroundSize: '100% 100%', backgroundRepeat: 'no-repeat',
-    });
-    const set = (id: number): void => { const u = this.kit.texUrl(id); if (u) btn.style.backgroundImage = `url(${u})`; };
-    set(faces[0]);
-    btn.addEventListener('mouseenter', () => set(faces[1]));
-    btn.addEventListener('mouseleave', () => set(faces[0]));
-    btn.addEventListener('mousedown', () => set(faces[2]));
-    btn.addEventListener('mouseup', () => set(faces[1]));
-    const span = this.kit.text(label, labelRef);
-    span.dataset.acDesc = labelRef;
-    btn.appendChild(span);
-    btn.addEventListener('click', onClick);
-    this.kit.tagElement(btn, CHARSEL_LAYOUT, elementId);
-    inner.appendChild(btn);
-    this.kit.justifyLabel(btn);
-    return btn;
+    return launcherPlateButton(this.kit, inner, elementId, x, y, w, h, label, labelRef, faces, onClick);
   }
 
   private buildButtons(inner: HTMLElement): void {
@@ -495,6 +516,13 @@ export class LauncherScreen {
   }
 
   // ─── State → DOM ──────────────────────────────────────
+
+  /** A list texture's URL; a miss redraws the list once the file streams in. */
+  private listTex(id: number): string | null {
+    const u = this.kit.texUrl(id);
+    if (!u) this.texMissed = true;
+    return u;
+  }
 
   private refresh(): void {
     this.renderHeader();
@@ -539,7 +567,7 @@ export class LauncherScreen {
         row.querySelectorAll('.launcher-row-hl').forEach((n) => n.remove());
         if (!rowDesc) return;
         for (const s of charselHighlightSlices(rowDesc, rowH, state)) {
-          const u = s.file ? this.kit.texUrl(s.file) : null;
+          const u = s.file ? this.listTex(s.file) : null;
           if (!u) continue;
           const hl = document.createElement('div');
           hl.className = 'launcher-row-hl';
@@ -558,7 +586,7 @@ export class LauncherScreen {
       dot.className = 'launcher-dot';
       Object.assign(dot.style, { position: 'relative', flex: '0 0 9px', width: '9px', height: '9px', backgroundSize: '100% 100%' });
       if (w.online !== null) {
-        const u = this.kit.texUrl(w.online ? 0x06004d17 : 0x06004d19);
+        const u = this.listTex(w.online ? 0x06004d17 : 0x06004d19);
         if (u) dot.style.backgroundImage = `url(${u})`;
         dot.dataset.online = String(w.online);
       }
@@ -720,6 +748,8 @@ export class LauncherScreen {
       this.handle = null;
       this.accountField?.destroy();
       this.accountField = null;
+      this.unsubscribeArrivals?.();
+      this.unsubscribeArrivals = null;
       this.resolve?.({ world: w, account, password, connectUrl: connectUrlFor(this.opts.bridgeUrl, w) });
     };
     // A custom world's era comes from its bridge; enter once that answer is in.

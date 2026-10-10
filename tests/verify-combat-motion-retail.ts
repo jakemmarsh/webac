@@ -230,3 +230,61 @@ describe('TurnToObject / TurnToHeading — the cast and attack turn to face', ()
     expect((v as { isTurningRight?: boolean }).isTurningRight).toBe(true);
   });
 });
+
+describe('the player\'s stance is the style of the server\'s movement (CPhysics::SetObjectMovement; SetCombatMode sets none)', () => {
+  async function makeSOM() {
+    const { ServerObjectManager } = await import('../packages/renderer/src/world/ServerObjectManager.js');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const som = new ServerObjectManager({} as any, {} as any, { add: () => {}, remove: () => {} } as any);
+    const calls: string[] = [];
+    const mm = {
+      queueAction: (key: number) => calls.push(`action ${(key >>> 0).toString(16)}`),
+      setForwardMotion: () => {}, setStanceFromId: () => {},
+      isPlayingAction: false, motion: 0, currentStyleId: 0x8000003c,
+    };
+    som.onLocalPlayerStyle = (stance) => calls.push(`style ${(stance >>> 0).toString(16)}`);
+    return { som, calls, mm };
+  }
+
+  it('a non-autonomous movement hands its style over before the swing it carries (a Lugian Hammer + shield: SwordShieldCombat 0x40, SlashMed 0x5c)', async () => {
+    const { som, calls, mm } = await makeSOM();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    som.registerAnimatedEntity(0x50000001, { motionManager: mm } as any, true);
+    som.handleMovementEvent({ guid: 0x50000001, movementData: interpreted(0x40, 0x5c) } as never);
+    expect(calls).toEqual(['style 80000040', 'action 40005c']); // the swing keyed (style << 16 | command) in the server's style
+  });
+
+  it('a server MoveTo for us (a melee approach) applies its style before the approach', async () => {
+    const { som, calls, mm } = await makeSOM();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    som.registerAnimatedEntity(0x50000001, { motionManager: mm } as any, true);
+    som.onLocalPlayerMovement = (type) => calls.push(`moveTo ${type}`);
+    som.handleMovementEvent({ guid: 0x50000001, movementData: moveToObject(0x80000513) } as never);
+    expect(calls).toEqual(['style 8000003e', 'moveTo 6']);
+  });
+
+  it('our own movement echoed back (autonomous) does not touch the stance', async () => {
+    const { som, calls, mm } = await makeSOM();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    som.registerAnimatedEntity(0x50000001, { motionManager: mm } as any, true);
+    som.handleMovementEvent({ guid: 0x50000001, movementData: interpreted(0x3e, 0x07, true) } as never);
+    expect(calls).toEqual([]);
+  });
+
+  it('a login already in combat: the style of the player\'s CreateObject motion is applied when the player\'s sequence registers', async () => {
+    const { som, calls, mm } = await makeSOM();
+    // The CreateObject arrived before the player's sequence existed (handleCreateObject keeps it in pendingMotion).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (som as any).pendingMotion.set(0x50000001, parseMovementData(interpreted(0x3f, 0x03).subarray(6), false));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    som.registerAnimatedEntity(0x50000001, { motionManager: mm } as any, true);
+    expect(calls).toEqual(['style 8000003f']);
+    // A remote object's registration does not.
+    const other = await makeSOM();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (other.som as any).pendingMotion.set(0x50000002, parseMovementData(interpreted(0x3f, 0x03).subarray(6), false));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    other.som.registerAnimatedEntity(0x50000002, { motionManager: other.mm } as any, false);
+    expect(other.calls).toEqual([]);
+  });
+});

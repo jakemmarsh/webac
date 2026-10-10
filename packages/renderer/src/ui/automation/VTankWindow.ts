@@ -17,10 +17,11 @@
  * A control is drawn only when the engine does what it says (no dead-end UI).
  */
 import {
-  type RoutineAction, type RoutineCondition, type RoutineDoc, type RoutineProfile, type RoutineRule, type Route, type VtOption,
-  ROUTINE_SCHEMA_VERSION, VT_OPTIONS, validateRoutineDoc, vtankChatCommand, vtDisplayValue, vtOption, vtStoredValue,
+  type RoutineAction, type RoutineCondition, type RoutineDoc, type RoutineProfile, type RoutineRule, type Route, type VtMonsterRow, type VtOption, type VtankProfileData,
+  ROUTINE_SCHEMA_VERSION, VT_DEFAULT_MONSTER, VT_MONSTER_COLUMNS, VT_OPTIONS, emptyVtankData, validateRoutineDoc, vtankChatCommand, vtDisplayValue, vtFromVTank, vtOption, vtStoredValue, vtToVTank,
 } from '@ac/shared';
 import type { RoutineStatus } from '../../agent/RoutineEngine.js';
+import { matchMonsterRow } from '../../agent/macro/combatPlan.js';
 import { type AutomationKit, type AutomationSource, type MenuItem, newProfile } from './AutomationPanel.js';
 
 export type VtTab = 'options' | 'profiles' | 'vitals' | 'monsters' | 'items' | 'consumables' | 'buffs' | 'route' | 'meta';
@@ -32,7 +33,7 @@ export const VT_TABS: Array<{ id: VtTab; label: string }> = [
   { id: 'buffs', label: 'Buffs' }, { id: 'route', label: 'Route' }, { id: 'meta', label: 'Meta' },
 ];
 export const VT_TAB_READY: Record<VtTab, boolean> = {
-  options: true, profiles: true, vitals: false, monsters: false, items: false, consumables: false, buffs: false, route: true, meta: true,
+  options: true, profiles: true, vitals: true, monsters: true, items: true, consumables: true, buffs: true, route: true, meta: true,
 };
 
 /** What the window needs beyond the panel's source: live settings and state, and live profile edits. */
@@ -41,7 +42,20 @@ export interface VTankSource extends AutomationSource {
   setSetting(name: string, value: string | number | boolean): void;
   setState(name: string): { ok: boolean; message: string };
   update(profile: RoutineProfile): { ok: boolean; message: string };
-  /** The selected object's name and kind (Route's Add Portal/NPC, Open Vendor). */
+  /** /vt mexec: run a meta expression, its value as text. */
+  mexec(expr: string): string;
+  /** /vt jump [heading] [shift] [ms]. */
+  jump(opts: { heading?: number; walk?: boolean; holdMs?: number }): { ok: boolean; message: string };
+  /** /vt fakedeath. */
+  fakeDeath(): { ok: boolean; message: string };
+  /** /vt reverseroute. */
+  reverseRoute(): { ok: boolean; message: string };
+  /** VirindiTank's current-waypoint arrow (the running macro's loaded route). */
+  setWaypoint(i: number): { ok: boolean; message: string };
+  /** VirindiTank's Force Buff / Cancel Force Buff. */
+  forceBuff(): { ok: boolean; message: string };
+  cancelForceBuff(): { ok: boolean; message: string };
+  /** The selected object's name and kind (Route's Add Portal/NPC, Open Vendor; Items / Consumables' Add: an item you carry is kind 'item'). */
   selection(): { name: string; kind: string } | null;
 }
 
@@ -68,7 +82,7 @@ export interface VTankDialogs {
 }
 
 /** VirindiTank's Options tab: each option's place (Vtank_Main.PNG). Drawn only when the engine acts on it. */
-export const VT_OPTIONS_LAYOUT: Array<{ name: string; kind: 'range' | 'check' | 'field'; x: number; y: number }> = [
+export const VT_OPTIONS_LAYOUT: Array<{ name: string; kind: 'range' | 'check' | 'field' | 'box'; x: number; y: number }> = [
   { name: 'AttackDistance', kind: 'range', x: 8, y: 2 }, { name: 'RingDistance', kind: 'range', x: 8, y: 36 },
   { name: 'ApproachDistance', kind: 'range', x: 8, y: 69 }, { name: 'NavCloseStopRange', kind: 'range', x: 8, y: 103 },
   { name: 'EnableBuffing', kind: 'check', x: 97, y: 69 }, { name: 'EnableCombat', kind: 'check', x: 97, y: 89 },
@@ -78,8 +92,21 @@ export const VT_OPTIONS_LAYOUT: Array<{ name: string; kind: 'range' | 'check' | 
   { name: 'AutoFellowManagement', kind: 'check', x: 228, y: 129 }, { name: 'ManaChargesWhenOff', kind: 'check', x: 228, y: 149 },
   { name: 'NavPriorityBoost', kind: 'check', x: 395, y: 9 }, { name: 'LootPriorityBoost', kind: 'check', x: 395, y: 29 },
   { name: 'LootOnlyRareCorpses', kind: 'check', x: 395, y: 49 }, { name: 'IdlePeaceMode', kind: 'check', x: 395, y: 69 }, { name: 'IdleBuffTopoff', kind: 'check', x: 395, y: 89 },
-  { name: 'SummonPets', kind: 'check', x: 560, y: 9 }, { name: 'PetCustomRange', kind: 'field', x: 560, y: 29 }, { name: 'PetMonsterDensity', kind: 'field', x: 560, y: 51 },
+  { name: 'SummonPets', kind: 'check', x: 560, y: 9 }, { name: 'PetRangeMode', kind: 'check', x: 560, y: 29 }, { name: 'PetCustomRange', kind: 'box', x: 680, y: 27 }, { name: 'PetMonsterDensity', kind: 'field', x: 560, y: 51 },
 ];
+
+/** The Vitals tab's sliders, in its three groups (an empty slot is the gap between groups). */
+export const VT_VITALS_LAYOUT = ['Recharge-Norm-HitP', 'Recharge-Norm-Stam', 'Recharge-Norm-Mana', '', 'Recharge-NoTarg-HitP', 'Recharge-NoTarg-Stam', 'Recharge-NoTarg-Mana', '', 'Recharge-Helper-HitP', 'Recharge-Helper-Stam', 'Recharge-Helper-Mana'];
+/** The Monsters tab's columns drawn in red (the attacks; Vtank_monsters.PNG). */
+export const VT_ATTACK_COLUMNS = new Set<string>(['A', 'R', 'S', 'Cp', 'DC', 'Cs']);
+const DAMAGE_NAMES: Record<number, string> = { 0: 'Pierce', 1: 'Bludgeon', 2: 'Slash', 3: 'Acid', 4: 'Lightning', 5: 'Cold', 6: 'Fire', 7: 'Harm', 8: 'Auto', 9: 'Void', 10: 'Drain Auto', 11: 'Prismatic', 12: 'Random', 13: 'Fists', 98: 'None', 99: 'Physical' };
+export const vtDamageName = (v: number): string => DAMAGE_NAMES[v] ?? String(v);
+/** What a click on Dmg type / Ex. Vuln / PetDmg steps through (VTank cycles them). */
+// Only the types the combat planner acts on (Harm / Drain Auto / Random / Fists aren't built: they'd act as Auto).
+export const VT_DAMAGE_CYCLE = [8, 0, 1, 2, 3, 4, 5, 6, 9];
+export const VT_EXVULN_CYCLE = [98, 8, 0, 1, 2, 3, 4, 5, 6];
+export const VT_PET_CYCLE = [101, 8, 98, 0, 1, 2, 3, 4, 5, 6];
+const nextIn = (cycle: number[], v: number): number => cycle[(cycle.indexOf(v) + 1) % cycle.length];
 
 export const VT_ICON = { up: 0x060028fc, down: 0x060028fd, current: 0x060011f7, remove: 0x060011f8 } as const;
 
@@ -131,6 +158,10 @@ export const VT_CONDITIONS: VtCondDef[] = [
     params: [{ key: 'pattern', label: 'Name (regex)', type: 'text' }, { key: 'count', label: 'Count', type: 'number' }, { key: 'meters', label: 'Distance', type: 'number' }],
     get: (c): Record<string, string | number> => c.kind === 'monster-count' ? { pattern: c.pattern, count: c.count, meters: c.meters } : c.kind === 'monster-within' ? { pattern: (c.names ?? []).join('|'), count: 1, meters: c.meters } : {},
     set: (v) => ({ kind: 'monster-count', pattern: v.pattern || '.', count: Math.max(1, n(v.count, 1)), meters: n(v.meters, 10) }) },
+  { id: 'monprio', label: 'Monster Priority Count Within Distance', make: () => ({ kind: 'monster-priority-count', priority: 1, count: 1, meters: 10 }), is: (c) => c.kind === 'monster-priority-count',
+    params: [{ key: 'priority', label: 'Priority', type: 'number' }, { key: 'count', label: 'Count', type: 'number' }, { key: 'meters', label: 'Distance', type: 'number' }],
+    get: (c) => { const x = c as { priority: number; count: number; meters: number }; return { priority: x.priority, count: x.count, meters: x.meters }; },
+    set: (v) => ({ kind: 'monster-priority-count', priority: Math.max(-1, Math.min(4, Math.round(n(v.priority, 1)))), count: Math.max(1, n(v.count, 1)), meters: n(v.meters, 10) }) },
   { id: 'needbuff', label: 'Need to Buff', make: () => ({ kind: 'need-buff' }), is: (c) => c.kind === 'need-buff' },
   { id: 'nomon', label: 'No Monsters Within Distance', make: () => ({ kind: 'no-monster-within', meters: 10 }), is: (c) => c.kind === 'no-monster-within',
     params: [{ key: 'meters', label: 'Distance', type: 'number' }], get: (c) => ({ meters: (c as { meters: number }).meters }), set: (v) => ({ kind: 'no-monster-within', meters: n(v.meters, 10) }) },
@@ -141,16 +172,27 @@ export const VT_CONDITIONS: VtCondDef[] = [
   { id: 'pin', label: 'Portalspace Entered', make: () => ({ kind: 'portal-entered' }), is: (c) => c.kind === 'portal-entered' },
   { id: 'pout', label: 'Portalspace Exited', make: () => ({ kind: 'portal-exited' }), is: (c) => c.kind === 'portal-exited' },
   { id: 'not', label: 'Not', make: () => ({ kind: 'not', condition: { kind: 'died' } }), is: (c) => c.kind === 'not' },
+  { id: 'psecs', label: 'Seconds in state (P) >=', make: () => ({ kind: 'seconds-in-state-persistent', seconds: 10 }), is: (c) => c.kind === 'seconds-in-state-persistent',
+    params: [{ key: 'seconds', label: 'Seconds', type: 'number' }], get: (c) => ({ seconds: (c as { seconds: number }).seconds }), set: (v) => ({ kind: 'seconds-in-state-persistent', seconds: n(v.seconds) }) },
   { id: 'spelltime', label: 'Time Left On Spell >=', make: () => ({ kind: 'spell-time-at-least', spell: '', seconds: 60 }), is: (c) => c.kind === 'spell-time-at-least',
     params: [{ key: 'spell', label: 'Spell', type: 'text' }, { key: 'seconds', label: 'Seconds', type: 'number' }],
-    get: (c) => ({ spell: (c as { spell: string }).spell, seconds: (c as { seconds: number }).seconds }), set: (v) => ({ kind: 'spell-time-at-least', spell: v.spell ?? '', seconds: n(v.seconds) }) },
+    get: (c) => { const x = c as { spell: string; spellId?: number; seconds: number }; return { spell: x.spell || (x.spellId ? `#${x.spellId}` : ''), seconds: x.seconds }; },
+    set: (v) => { const id = /^#(\d+)$/.exec((v.spell ?? '').trim()); return id ? { kind: 'spell-time-at-least', spell: '', spellId: Number(id[1]), seconds: n(v.seconds) } : { kind: 'spell-time-at-least', spell: v.spell ?? '', seconds: n(v.seconds) }; } },
   { id: 'burden', label: 'Burden Percent >=', make: () => ({ kind: 'burden-above', percent: 99 }), is: (c) => c.kind === 'burden-above',
     params: [{ key: 'percent', label: 'Percent', type: 'number' }], get: (c) => ({ percent: (c as { percent: number }).percent + 1 }), set: (v) => ({ kind: 'burden-above', percent: Math.max(0, n(v.percent) - 1) }) },
+  { id: 'routedist', label: 'Dist Any Route Pt >=', make: () => ({ kind: 'route-distance-at-least', meters: 20 }), is: (c) => c.kind === 'route-distance-at-least',
+    params: [{ key: 'meters', label: 'Distance', type: 'number' }], get: (c) => ({ meters: (c as { meters: number }).meters }), set: (v) => ({ kind: 'route-distance-at-least', meters: n(v.meters, 20) }) },
   { id: 'expr', label: 'Expression', make: () => ({ kind: 'expression', expr: '' }), is: (c) => c.kind === 'expression',
     params: [{ key: 'expr', label: 'Expression', type: 'text' }], get: (c) => ({ expr: (c as { expr: string }).expr }), set: (v) => ({ kind: 'expression', expr: v.expr ?? '' }) },
+  { id: 'capture', label: 'Chat Message Capture', make: () => ({ kind: 'chat-capture', pattern: '' }), is: (c) => c.kind === 'chat-capture',
+    params: [{ key: 'pattern', label: 'Pattern (regex)', type: 'text' }, { key: 'colors', label: 'Color ids (;)', type: 'text' }],
+    get: (c) => ({ pattern: (c as { pattern: string }).pattern, colors: ((c as { colors?: number[] }).colors ?? []).join(';') }),
+    set: (v) => { const colors = (v.colors ?? '').split(';').map((x) => x.trim()).filter(Boolean).map(Number).filter((x) => Number.isFinite(x) && x >= 0); return { kind: 'chat-capture', pattern: v.pattern ?? '', ...(colors.length ? { colors } : {}) }; } },
 ];
 
 const one = (a: RoutineAction[], kind: RoutineAction['kind']) => a.length === 1 && a[0].kind === kind;
+/** How an imported Get VT Option reads (vtank.ts: setvar[variable,vtgetsetting[option]]). */
+const GETOPT = /^setvar\[([^,\]]+),vtgetsetting\[([^\]]+)\]\]$/i;
 /** VirindiTank's action list, mapped to our action lists (All = several in order). */
 export const VT_ACTIONS: VtActDef[] = [
   { id: 'none', label: 'None', make: () => [], is: (a) => a.length === 0 },
@@ -165,7 +207,7 @@ export const VT_ACTIONS: VtActDef[] = [
     params: [{ key: 'state', label: 'Call state', type: 'state' }, { key: 'returnTo', label: 'Return to', type: 'state' }],
     get: (a) => ({ state: (a[0] as { state: string }).state, returnTo: (a[0] as { returnTo: string }).returnTo }), set: (v) => [{ kind: 'call-state', state: v.state ?? '', returnTo: v.returnTo ?? '' }] },
   { id: 'return', label: 'Return From Call', make: () => [{ kind: 'return' }], is: (a) => one(a, 'return') },
-  { id: 'expr', label: 'Expression Action', make: () => [{ kind: 'expression', expr: '' }], is: (a) => one(a, 'expression') && !/^chatbox\[/i.test((a[0] as { expr: string }).expr),
+  { id: 'expr', label: 'Expression Action', make: () => [{ kind: 'expression', expr: '' }], is: (a) => one(a, 'expression') && !/^chatbox\[/i.test((a[0] as { expr: string }).expr) && !GETOPT.test((a[0] as { expr: string }).expr),
     params: [{ key: 'expr', label: 'Expression', type: 'text' }], get: (a) => ({ expr: (a[0] as { expr: string }).expr }), set: (v) => [{ kind: 'expression', expr: v.expr ?? '' }] },
   { id: 'chatexpr', label: 'Chat Expression', make: () => [{ kind: 'expression', expr: 'chatbox[]' }], is: (a) => one(a, 'expression') && /^chatbox\[/i.test((a[0] as { expr: string }).expr),
     params: [{ key: 'expr', label: 'Expression', type: 'text' }], get: (a) => ({ expr: (a[0] as { expr: string }).expr.replace(/^chatbox\[([\s\S]*)\]$/i, '$1') }), set: (v) => [{ kind: 'expression', expr: `chatbox[${v.expr ?? ''}]` }] },
@@ -174,10 +216,21 @@ export const VT_ACTIONS: VtActDef[] = [
     get: (a) => { const x = a[0] as { state: string; meters: number; seconds: number }; return { state: x.state, meters: x.meters, seconds: x.seconds }; },
     set: (v) => [{ kind: 'set-watchdog', state: v.state ?? '', meters: n(v.meters, 5), seconds: Math.max(1, n(v.seconds, 60)) }] },
   { id: 'clearwd', label: 'Clear Watchdog', make: () => [{ kind: 'clear-watchdog' }], is: (a) => one(a, 'clear-watchdog') },
+  { id: 'getopt', label: 'Get VT Option', make: () => [{ kind: 'expression', expr: 'setvar[range,vtgetsetting[AttackDistance]]' }],
+    is: (a) => one(a, 'expression') && GETOPT.test((a[0] as { expr: string }).expr),
+    params: [{ key: 'name', label: 'Option', type: 'text' }, { key: 'variable', label: 'Into variable', type: 'text' }],
+    get: (a) => { const m = GETOPT.exec((a[0] as { expr: string }).expr)!; return { variable: m[1], name: m[2] }; },
+    set: (v) => [{ kind: 'expression', expr: `setvar[${(v.variable ?? '').trim()},vtgetsetting[${(v.name ?? '').trim()}]]` }] },
   { id: 'setopt', label: 'Set VT Option', make: () => [{ kind: 'set-setting', name: 'EnableCombat', value: true }], is: (a) => one(a, 'set-setting'),
     params: [{ key: 'name', label: 'Option', type: 'text' }, { key: 'value', label: 'Value', type: 'text' }],
     get: (a) => { const x = a[0] as { name: string; value: string | number | boolean }; return { name: x.name, value: String(vtDisplayValue(x.name, x.value)) }; },
     set: (v) => { const name = vtOption(v.name ?? '')?.name ?? (v.name ?? ''); return [{ kind: 'set-setting', name, value: vtStoredValue(name, v.value ?? '') }]; } },
+  { id: 'createview', label: 'Create View', make: () => [{ kind: 'create-view', name: 'View', xml: '<?xml version="1.0"?><view width="300" height="200" title="View"><control type="layout"></control></view>' }], is: (a) => one(a, 'create-view'),
+    params: [{ key: 'name', label: 'View name', type: 'text' }, { key: 'xml', label: 'XML', type: 'text' }],
+    get: (a) => ({ name: (a[0] as { name: string }).name, xml: (a[0] as { xml: string }).xml }), set: (v) => [{ kind: 'create-view', name: v.name ?? '', xml: v.xml ?? '' }] },
+  { id: 'destroyview', label: 'Destroy View', make: () => [{ kind: 'destroy-view', name: 'View' }], is: (a) => one(a, 'destroy-view'),
+    params: [{ key: 'name', label: 'View name', type: 'text' }], get: (a) => ({ name: (a[0] as { name: string }).name }), set: (v) => [{ kind: 'destroy-view', name: v.name ?? '' }] },
+  { id: 'destroyall', label: 'Destroy All Views', make: () => [{ kind: 'destroy-all-views' }], is: (a) => one(a, 'destroy-all-views') },
 ];
 
 export const vtCondDef = (c: RoutineCondition): VtCondDef | undefined => VT_CONDITIONS.find((d) => d.is(c));
@@ -209,7 +262,7 @@ function describeOther(c: RoutineCondition): string {
 export function vtActionText(a: RoutineAction[]): string {
   const d = vtActDef(a);
   if (d?.id === 'all') return `All: ${a.map((x) => vtActionText([x])).join('; ')}`;
-  if (d) { const v = d.get?.(a); return v ? `${d.label}: ${d.id === 'setopt' ? `${v.name} = ${v.value}` : d.id === 'call' ? `${v.state} (return to ${v.returnTo})` : Object.values(v).join(', ')}` : d.label; }
+  if (d) { const v = d.get?.(a); return v ? `${d.label}: ${d.id === 'setopt' ? `${v.name} = ${v.value}` : d.id === 'call' ? `${v.state} (return to ${v.returnTo})` : d.id === 'createview' ? v.name : Object.values(v).join(', ')}` : d.label; }
   const x = a[0];
   switch (x?.kind) {
     case 'cast': return `Cast: ${x.spell}`;
@@ -266,6 +319,7 @@ export function waypointText(w: Waypoint): string {
     case 'wait': return `Pause ${s.seconds} s`;
     case 'say': return `Chat: ${s.text}`;
     case 'use-object': return `Use: ${s.name}`;
+    case 'talk-to': return `NPC Talk: ${s.name}`;
     case 'sell-by-loot-rules': return `Vendor: ${s.vendor}`;
     case 'jump': return 'Jump';
     default: return `${s.kind} (${w.coords})`;
@@ -318,7 +372,7 @@ export class VTankWindow {
     let p = this.profile();
     if (p) return p;
     if (!this.doc) throw new Error('not loaded');
-    p = { ...newProfile('Default'), initialState: 'Default', states: [{ name: 'Default', rules: [] }], macro: true, ruleFiring: 'once', settings: {} };
+    p = { ...newProfile('Default'), initialState: 'Default', states: [{ name: 'Default', rules: [] }], macro: true, ruleFiring: 'once', settings: {}, vtank: emptyVtankData() };
     p.modules = { buffs: true, vitals: true, combat: true, looting: true, navigation: true, inventory: true, service: false };
     this.doc.profiles.push(p);
     this.profileName = p.name;
@@ -355,8 +409,16 @@ export class VTankWindow {
     const s = this.profile()?.settings?.[key];
     return s !== undefined ? s : (o?.default ?? '');
   }
-  setValue(name: string, v: string | number | boolean, redraw: () => void): void {
+  /** A profile the window's macro tabs edit runs VirindiTank's macro (its tabs' data and planners). */
+  private macroProfile(): RoutineProfile {
     const p = this.ensureProfile();
+    p.macro = true;
+    p.vtank ??= emptyVtankData();
+    return p;
+  }
+
+  setValue(name: string, v: string | number | boolean, redraw: () => void): void {
+    const p = this.macroProfile();
     const key = vtOption(name)?.name ?? name;
     p.settings = { ...(p.settings ?? {}), [key]: v };
     if (this.running()) this.source.setSetting(key, v);
@@ -384,6 +446,11 @@ export class VTankWindow {
     else if (this.tab === 'profiles') this.renderProfiles(area, w, ch, redraw);
     else if (this.tab === 'route') this.renderRoute(area, w, ch, redraw);
     else if (this.tab === 'meta') this.renderMeta(area, w, ch, redraw);
+    else if (this.tab === 'vitals') this.renderVitals(area, w, ch, redraw);
+    else if (this.tab === 'monsters') this.renderMonsters(area, w, ch, redraw);
+    else if (this.tab === 'items') this.renderItems(area, w, ch, redraw);
+    else if (this.tab === 'consumables') this.renderConsumables(area, w, ch, redraw);
+    else if (this.tab === 'buffs') this.renderBuffs(area, w, ch, redraw);
     if (this.message) root.appendChild(tag(at(kit.text(this.message, { color: kit.colors.warn, maxWidth: w - 16 }), 8, h - 16), { vtank: 'message' }));
   }
 
@@ -396,11 +463,13 @@ export class VTankWindow {
     return tag(r, { ...data, on: on ? '1' : '0' });
   }
   private optionCheck(o: VtOption, redraw: () => void): HTMLElement {
+    // A two-value enum drawn as a switch (Custom Pet Range is PetRangeMode 0 / 1).
+    if (o.kind === 'enum') return this.check(o.label ?? o.name, Number(this.value(o.name)) === 1, (v) => this.setValue(o.name, v ? 1 : 0, redraw), { vtankOption: o.name });
     return this.check(o.label ?? o.name, this.value(o.name) === true || this.value(o.name) === 'true', (v) => this.setValue(o.name, v, redraw), { vtankOption: o.name });
   }
   private optionField(o: VtOption, width: number, redraw: () => void): HTMLElement {
     return tag(this.kit.input(String(vtDisplayValue(o.name, this.value(o.name))), width, (v) => {
-      const p = this.ensureProfile();
+      const p = this.macroProfile();
       p.settings = { ...(p.settings ?? {}), [o.name]: vtStoredValue(o.name, v) };
       if (this.running()) this.source.setSetting(o.name, vtStoredValue(o.name, v));
       this.changed(() => {});
@@ -418,6 +487,7 @@ export class VTankWindow {
         area.appendChild(at(kit.text(o.label ?? o.name, { color: c.text }), L.x, L.y));
         area.appendChild(at(this.optionField(o, 40, redraw), L.x, L.y + 14));
       } else if (L.kind === 'check') area.appendChild(at(this.optionCheck(o, redraw), L.x, L.y));
+      else if (L.kind === 'box') area.appendChild(at(this.optionField(o, 40, redraw), L.x, L.y));
       else {
         const r = row(6);
         r.appendChild(kit.text(o.label ?? o.name, { color: c.text }));
@@ -425,6 +495,10 @@ export class VTankWindow {
         area.appendChild(at(r, L.x, L.y));
       }
     }
+    // Force Buff / Cancel Force Buff (left of the switches, Vtank_Main.PNG).
+    const say = (r: { ok: boolean; message: string }) => { this.message = r.ok ? '' : r.message; redraw(); };
+    area.appendChild(at(tag(kit.flatButton('Force Buff', () => say(this.running() ? this.source.forceBuff() : { ok: false, message: 'Turn Run Macro on to buff.' }), 110, 22), { vtank: 'force-buff' }), 97, 2));
+    area.appendChild(at(tag(kit.flatButton('Cancel Force Buff', () => say(this.source.cancelForceBuff()), 110, 22), { vtank: 'cancel-force-buff' }), 97, 34));
     // Advanced Options and Run Macro, bottom right.
     area.appendChild(at(this.check('Advanced Options', false, () => { this.advanced = true; redraw(); }, { vtank: 'advanced' }), 620, Math.min(129, h - 44)));
     const st = this.source.status();
@@ -589,10 +663,15 @@ export class VTankWindow {
     const list = el('div', { display: 'flex', flexDirection: 'column', paddingRight: '18px' });
     const here = this.source.status().running ? null : null;
     void here;
-    (r ? routeWaypoints(r) : []).forEach((wp, i) => {
+    const st = this.source.status();
+    const current = this.running() && st.nav && r && st.nav.route === r.name && !st.nav.done ? st.nav.point : -1;
+    if (r?.mode === 'follow') {
+      list.appendChild(tag(kit.text(r.follow ? `Following: ${r.follow}` : 'Follow: select a player and press Add', { color: c.text }), { vtankFollow: r.follow ?? '' }));
+    } else (r ? routeWaypoints(r) : []).forEach((wp, i) => {
       const line = kit.row(i === this.waypoint, () => { this.waypoint = i; redraw(); });
-      tag(line, { vtankWaypoint: String(i) });
-      line.appendChild(kit.text(`${i + 1}. ${waypointText(wp)}`, { color: c.text }));
+      tag(line, { vtankWaypoint: String(i), ...(i === current ? { current: '1' } : {}) });
+      // The point the macro walks to next shows in the "good" colour (VTank marks the current waypoint).
+      line.appendChild(kit.text(`${i + 1}. ${waypointText(wp)}`, { color: i === current ? c.good : c.text }));
       list.appendChild(line);
     });
     box.appendChild(list);
@@ -600,7 +679,7 @@ export class VTankWindow {
     kit.list(box);
     // Bottom: route type, insert mode, and the waypoint arrows.
     const by = h - 22;
-    const modes: Array<{ v: Route['mode']; l: string }> = [{ v: 'circular', l: 'Circular' }, { v: 'linear', l: 'Linear' }, { v: 'once', l: 'Once' }];
+    const modes: Array<{ v: Route['mode']; l: string }> = [{ v: 'circular', l: 'Circular' }, { v: 'linear', l: 'Linear' }, { v: 'follow', l: 'Follow' }, { v: 'once', l: 'Once' }];
     area.appendChild(at(tag(kit.dropdown(modes.find((m) => m.v === (r?.mode ?? 'circular'))!.l, (a) => kit.menu(a, modes.map((m) => ({ label: m.l, value: m.v })), (v) => { this.ensureRoute().mode = v as Route['mode']; this.changed(redraw); }), 90), { vtank: 'route-mode' }), 4, by));
     const ins = { end: 'Add to End', above: 'Insert Above', below: 'Insert Below' } as const;
     area.appendChild(at(tag(kit.dropdown(ins[this.insertMode], (a) => kit.menu(a, (Object.keys(ins) as Array<keyof typeof ins>).map((k) => ({ label: ins[k], value: k })), (v) => { this.insertMode = v as keyof typeof ins; redraw(); }), 120), { vtank: 'insert-mode' }), 200, by));
@@ -626,11 +705,29 @@ export class VTankWindow {
       this.waypoint = Math.min(this.waypoint, wps.length - 1);
       this.changed(redraw);
     }), { vtank: 'wp-remove' }), 360, by + 2));
+    // The curly arrow: the selected waypoint is the one the running macro walks to next.
+    area.appendChild(at(tag(kit.icon(VT_ICON.current, 15, () => {
+      if (this.waypoint < 0) { this.message = 'Select a waypoint first.'; redraw(); return; }
+      if (!this.running()) { this.message = 'Turn Run Macro on first.'; redraw(); return; }
+      const res = this.source.setWaypoint(this.waypoint);
+      this.message = res.ok ? '' : res.message;
+      redraw();
+    }), { vtank: 'wp-current' }), 377, by + 2));
     // Right: the add buttons.
     const bx = 380;
     const here2 = () => this.source.coords();
     const needHere = (f: (coords: string) => void) => { const h2 = here2(); if (!h2) { this.message = 'Your position is not known yet.'; redraw(); return; } f(h2); };
-    area.appendChild(at(tag(kit.flatButton('Add', () => needHere((co) => this.addWaypoint({ coords: co, step: null }, redraw)), 86), { vtank: 'add-point' }), bx, 18));
+    area.appendChild(at(tag(kit.flatButton('Add', () => {
+      // In Follow mode, Add sets the player to follow (the selection), as VirindiTank's does.
+      if (r?.mode === 'follow') {
+        const s = this.source.selection();
+        if (!s || s.kind !== 'player') { this.message = 'Select the player to follow first.'; redraw(); return; }
+        r.follow = s.name;
+        this.changed(redraw);
+        return;
+      }
+      needHere((co) => this.addWaypoint({ coords: co, step: null }, redraw));
+    }, 86), { vtank: 'add-point' }), bx, 18));
     area.appendChild(at(tag(kit.flatButton('Open Vendor', () => needHere((co) => {
       const s = this.source.selection();
       if (!s) { this.message = 'Select the vendor first.'; redraw(); return; }
@@ -641,6 +738,11 @@ export class VTankWindow {
       if (!s) { this.message = 'Select the portal or NPC first.'; redraw(); return; }
       this.addWaypoint({ coords: co, step: [{ kind: 'use-object', name: s.name }] }, redraw);
     }), 86), { vtank: 'add-portal' }), bx, 40));
+    area.appendChild(at(tag(kit.flatButton('Add NPC Talk', () => needHere((co) => {
+      const s = this.source.selection();
+      if (!s || (s.kind !== 'npc' && s.kind !== 'vendor')) { this.message = 'Select the NPC first.'; redraw(); return; }
+      this.addWaypoint({ coords: co, step: [{ kind: 'talk-to', name: s.name }] }, redraw);
+    }), 86), { vtank: 'add-npc-talk' }), bx + 94, 40));
     area.appendChild(at(tag(kit.flatButton('Add Recall', () => needHere((co) => this.addWaypoint({ coords: co, step: [{ kind: 'cast', spell: this.recall, target: 'self' }] }, redraw)), 86), { vtank: 'add-recall' }), bx, 62));
     area.appendChild(at(tag(kit.dropdown(this.recall, (a) => kit.menu(a, VT_RECALLS.map((x) => ({ label: x, value: x })), (v) => { this.recall = v; redraw(); }), 210), { vtank: 'recall' }), bx + 94, 62));
     area.appendChild(at(tag(kit.flatButton('Add Pause', () => needHere((co) => this.addWaypoint({ coords: co, step: [{ kind: 'wait', seconds: Math.max(0, Number(this.pauseSeconds) || 0) }] }, redraw)), 86), { vtank: 'add-pause' }), bx, 84));
@@ -649,6 +751,156 @@ export class VTankWindow {
     area.appendChild(at(tag(kit.flatButton('Add Chat', () => needHere((co) => this.addWaypoint({ coords: co, step: [{ kind: 'say', text: this.chatText }] }, redraw)), 86), { vtank: 'add-chat' }), bx, 106));
     area.appendChild(at(tag(kit.input(this.chatText, 120, (v) => { this.chatText = v; }), { vtank: 'chat-text' }), bx + 94, 106));
     void w;
+  }
+
+  // ── Vitals ──
+
+  private renderVitals(area: HTMLElement, _w: number, _h: number, redraw: () => void): void {
+    const { kit } = this;
+    // Three groups of sliders (Vtank_vitals.PNG): in combat, top-off with no target, helping others;
+    // 17 px rows and a 4 px gap between groups, as there.
+    let group = 0;
+    let row2 = 0;
+    VT_VITALS_LAYOUT.forEach((name) => {
+      if (!name) { group++; return; }
+      const o = vtOption(name)!;
+      const y = row2++ * 17 + group * 4 + 2;
+      const v = Math.max(0, Math.min(100, Number(this.value(name)) || 0));
+      area.appendChild(at(kit.text(o.label ?? name, { color: kit.colors.text }), 6, y));
+      area.appendChild(at(tag(kit.slider(v, 0, 100, 145, (nv) => this.setValue(name, nv, redraw)), { vtankOption: name }), 94, y + 2));
+      area.appendChild(at(tag(kit.text(`${v}%`, { color: kit.colors.dim }), { vtankValue: name }), 246, y));
+    });
+  }
+
+  // ── the tab data (Monsters, Items, Consumables, Buffs) ──
+
+  private data(): VtankProfileData { return this.macroProfile().vtank!; }
+  private dataView(): VtankProfileData { return this.profile()?.vtank ?? emptyVtankData(); }
+
+  /** A list box with a header, rows of names and a delete icon per row. */
+  private nameList(area: HTMLElement, x: number, y: number, w: number, h: number, title: string, names: string[], onRemove: (i: number) => void, key: string, extra?: (i: number) => HTMLElement | null): void {
+    const { kit } = this;
+    area.appendChild(at(kit.text(title, { color: kit.colors.text }), x + 22, y));
+    const box = el('div', { position: 'absolute', left: `${x}px`, top: `${y + 16}px`, width: `${w}px`, height: `${h}px` }, { vtankList: key });
+    const list = el('div', { display: 'flex', flexDirection: 'column', paddingRight: '18px' });
+    names.forEach((nm, i) => {
+      const line = el('div', { position: 'relative', height: '18px' }, { vtankRow: `${key}#${i}` });
+      line.appendChild(at(kit.text(nm, { color: kit.colors.text }), 2, 2));
+      const ex = extra?.(i);
+      if (ex) line.appendChild(at(ex, w - 110, 2));
+      line.appendChild(at(tag(kit.icon(VT_ICON.remove, 14, () => onRemove(i)), { vtankRemove: '1' }), w - 36, 2));
+      list.appendChild(line);
+    });
+    box.appendChild(list);
+    area.appendChild(box);
+    kit.list(box);
+  }
+
+  /** The selected item you carry, or a message why not. */
+  private selectedItem(redraw: () => void): string | null {
+    const s = this.source.selection();
+    if (!s || s.kind !== 'item') { this.message = 'Select an item in your inventory first.'; redraw(); return null; }
+    return s.name;
+  }
+
+  // ── Monsters ──
+
+  private renderMonsters(area: HTMLElement, w: number, h: number, redraw: () => void): void {
+    const { kit } = this;
+    const c = kit.colors;
+    const rows = this.dataView().monsters;
+    // The header (Vtank_monsters.PNG): attack columns in red, debuffs in white.
+    VT_MONSTER_COLUMNS.forEach((col, i) => area.appendChild(at(tag(kit.text(col, { color: VT_ATTACK_COLUMNS.has(col) ? c.bad : c.text }), { vtankColumn: col }), 6 + i * 19, 0)));
+    // PetDmg (which elemental pet to summon) isn't built — Summon Pets uses the first pet device — so it isn't drawn.
+    const head: Array<[string, number]> = [['Name', 300], ['P', 412], ['Dmg type', 432], ['Ex. Vuln', 500], ['Weapon', 566], ['Offhand', 646]];
+    for (const [t, x] of head) area.appendChild(at(kit.text(t, { color: c.text }), x, 0));
+    const box = el('div', { position: 'absolute', left: '0', top: '16px', width: `${w}px`, height: `${h - 44}px` }, { vtankList: 'monsters' });
+    const list = el('div', { display: 'flex', flexDirection: 'column', paddingRight: '18px' });
+    const items = ['<AUTO>', ...this.dataView().items.map((x) => x.name)];
+    rows.forEach((r, i) => {
+      const line = el('div', { position: 'relative', height: '18px' }, { vtankMonster: String(i) });
+      const edit = (f: (row: VtMonsterRow) => void) => { f(this.data().monsters[i]); this.changed(redraw); };
+      VT_MONSTER_COLUMNS.forEach((col, ci) => line.appendChild(at(tag(kit.check(r.on.includes(col), (v) => edit((row) => { row.on = v ? [...row.on, col].filter((x, k, a) => a.indexOf(x) === k) : row.on.filter((x) => x !== col); })), { vtankCell: col }), 4 + ci * 19, 2)));
+      line.appendChild(at(kit.text(r.name === '<DEFAULT>' ? '<< DEFAULT >>' : r.name, { color: c.text, maxWidth: 108 }), 300, 2));
+      const cycle = (key: string, x: number, label: string, next: () => void) => {
+        const t = tag(kit.text(label, { color: c.text }), { vtankCycle: key });
+        t.style.cursor = 'pointer';
+        t.addEventListener('click', (e) => { e.stopPropagation(); next(); });
+        line.appendChild(at(t, x, 2));
+      };
+      cycle('priority', 414, String(r.priority), () => edit((row) => { row.priority = row.priority >= 4 ? -1 : row.priority + 1; }));
+      cycle('damage', 436, vtDamageName(r.damage), () => edit((row) => { row.damage = nextIn(VT_DAMAGE_CYCLE, row.damage); }));
+      cycle('exVuln', 504, vtDamageName(r.exVuln), () => edit((row) => { row.exVuln = nextIn(VT_EXVULN_CYCLE, row.exVuln); }));
+      cycle('weapon', 570, r.weapon ?? '<AUTO>', () => edit((row) => { const j = items.indexOf(row.weapon ?? '<AUTO>'); const nx = items[(j + 1) % items.length]; row.weapon = nx === '<AUTO>' ? null : nx; }));
+      cycle('offhand', 650, r.offhand ?? '<AUTO>', () => edit((row) => { const j = items.indexOf(row.offhand ?? '<AUTO>'); const nx = items[(j + 1) % items.length]; row.offhand = nx === '<AUTO>' ? null : nx; }));
+      if (i > 0) line.appendChild(at(tag(kit.icon(VT_ICON.remove, 14, () => { this.data().monsters.splice(i, 1); this.changed(redraw); }), { vtankRemove: '1' }), w - 22, 2));
+      list.appendChild(line);
+    });
+    box.appendChild(list);
+    area.appendChild(box);
+    kit.list(box);
+    // Under the list: a name box, Add (that name) and Add Sel (the selected monster).
+    const by = h - 22;
+    let typed = '';
+    area.appendChild(at(tag(kit.input('', 385, (v) => { typed = v; }), { vtank: 'monster-name' }), 10, by));
+    const add = (name: string) => { const d = this.data(); d.monsters.push({ ...structuredClone(VT_DEFAULT_MONSTER), name }); this.changed(redraw); };
+    area.appendChild(at(tag(kit.flatButton('Add', () => { const t = typed.trim(); if (t) add(t); }, 60), { vtank: 'add-monster' }), 404, by));
+    area.appendChild(at(tag(kit.flatButton('Add Sel', () => {
+      const s2 = this.source.selection();
+      if (!s2 || s2.kind !== 'monster') { this.message = 'Select a monster first.'; redraw(); return; }
+      add(s2.name);
+    }, 60), { vtank: 'add-selected-monster' }), 470, by));
+  }
+
+  // ── Items ──
+
+  private renderItems(area: HTMLElement, w: number, h: number, redraw: () => void): void {
+    const { kit } = this;
+    const d = this.dataView();
+    this.nameList(area, 4, 0, Math.min(430, w - 8), h - 44, 'Weapons / Wands / Shields / Pets', d.items.map((x) => x.name), (i) => { this.data().items.splice(i, 1); this.changed(redraw); }, 'items',
+      (i) => (d.items[i].noBuffs ? kit.text('(no buffs)', { color: kit.colors.dim }) : null));
+    const by = h - 22;
+    const add = (noBuffs: boolean) => { const n = this.selectedItem(redraw); if (!n) return; const dd = this.data(); if (!dd.items.some((x) => x.name === n)) dd.items.push(noBuffs ? { name: n, noBuffs: true } : { name: n }); this.changed(redraw); };
+    area.appendChild(at(tag(kit.flatButton('Add', () => add(false), 140), { vtank: 'add-item' }), 14, by));
+    area.appendChild(at(tag(kit.flatButton('Add (no buffs)', () => add(true), 140), { vtank: 'add-item-nobuffs' }), 174, by));
+  }
+
+  // ── Consumables ──
+
+  private renderConsumables(area: HTMLElement, w: number, h: number, redraw: () => void): void {
+    const { kit } = this;
+    const d = this.dataView();
+    const half = Math.floor((w - 12) / 2);
+    this.nameList(area, 4, 0, half - 10, h - 44, 'Gems / Food / Kits / Potions / Charges / Grenades / Lockpicks', d.consumables, (i) => { this.data().consumables.splice(i, 1); this.changed(redraw); }, 'consumables');
+    this.nameList(area, half + 8, 0, half - 10, h - 44, 'Excluded Scarab Types:', d.excludedScarabs, (i) => { this.data().excludedScarabs.splice(i, 1); this.changed(redraw); }, 'scarabs');
+    const by = h - 22;
+    area.appendChild(at(tag(kit.flatButton('Add', () => { const n = this.selectedItem(redraw); if (!n) return; const dd = this.data(); if (!dd.consumables.includes(n)) dd.consumables.push(n); this.changed(redraw); }, half - 10), { vtank: 'add-consumable' }), 4, by));
+    // Add All Peas waits for pea splitting (SplitPeas), which isn't built.
+
+    area.appendChild(at(tag(kit.flatButton('Add Selected', () => { const n = this.selectedItem(redraw); if (!n) return; const dd = this.data(); if (!dd.excludedScarabs.includes(n)) dd.excludedScarabs.push(n); this.changed(redraw); }, half - 10), { vtank: 'add-scarab' }), half + 8, by));
+  }
+
+  // ── Buffs ──
+
+  private renderBuffs(area: HTMLElement, w: number, h: number, redraw: () => void): void {
+    const { kit } = this;
+    const d = this.dataView();
+    const half = Math.floor((w - 12) / 2);
+    this.nameList(area, 4, 0, half - 10, h - 44, 'Extra Buff Spells (best similar will be used)', d.extraBuffs, (i) => { this.data().extraBuffs.splice(i, 1); this.changed(redraw); }, 'extra-buffs');
+    this.nameList(area, half + 8, 0, half - 10, h - 44, 'Blacklisted Buff Families', d.blacklistedBuffs, (i) => { this.data().blacklistedBuffs.splice(i, 1); this.changed(redraw); }, 'blacklisted-buffs');
+    const by = h - 22;
+    // Add…: a spell you know, from a searchable menu.
+    const pickSpell = (anchor: HTMLElement, into: 'extraBuffs' | 'blacklistedBuffs') => kit.menu(anchor, this.source.spells().map((sp) => ({ label: sp.name, value: sp.name, hint: sp.school })), (v) => {
+      const dd = this.data();
+      if (!dd[into].includes(v)) dd[into].push(v);
+      this.changed(redraw);
+    }, { search: true, width: 280 });
+    let a1: HTMLElement | null = null;
+    a1 = tag(kit.flatButton('Add...', () => pickSpell(a1!, 'extraBuffs'), 140), { vtank: 'add-extra-buff' });
+    area.appendChild(at(a1, 14, by));
+    let a2: HTMLElement | null = null;
+    a2 = tag(kit.flatButton('Add...', () => pickSpell(a2!, 'blacklistedBuffs'), 140), { vtank: 'add-blacklisted-buff' });
+    area.appendChild(at(a2, half + 18, by));
   }
 
   // ── Meta ──
@@ -860,6 +1112,147 @@ export class VTankWindow {
   }
 
   menuItems(items: string[]): MenuItem[] { return items.map((x) => ({ label: x, value: x })); }
+
+  /**
+   * VirindiTank's /vt commands (Virindi_Tank_Commands on its wiki), typed in
+   * chat or run by a meta's Chat Command: the profile, option and action
+   * commands a player uses. Each answer is a line for chat.
+   */
+  async command(line: string): Promise<string[]> {
+    if (!this.doc) await this.load(() => {});
+    const doc = this.doc;
+    if (!doc) return [this.message || 'Your routines have not loaded.'];
+    const args = line.trim().replace(/^\/(vt|vtank)\s*/i, '').split(/\s+/).filter(Boolean);
+    const [cmd = '', ...rest] = args;
+    const tail = line.trim().replace(/^\/(vt|vtank)\s+\S+\s*/i, '');
+    const done = (r: { ok: boolean; message: string }) => [r.message];
+    const saved = async (text: string) => { this.changed(() => {}); await this.saveNow(() => {}); return [text]; };
+    const byName = (n: string) => doc.profiles.find((p) => p.name.toLowerCase() === n.toLowerCase());
+    switch (cmd.toLowerCase()) {
+      case 'start': this.runMacro(true, () => {}); return [this.message || 'macro on'];
+      case 'stop': this.runMacro(false, () => {}); return [this.message || 'macro off'];
+      case 'forcebuff': return done(this.source.forceBuff());
+      case 'cancelforcebuff': return done(this.source.cancelForceBuff());
+      case 'setmetastate': return done(this.source.setState(tail));
+      case 'fakedeath': return done(this.source.fakeDeath());
+      case 'reverseroute': return done(this.source.reverseRoute());
+      case 'mexec': try { return [this.source.mexec(tail)]; } catch (e) { return [`expression failed: ${(e as Error).message}`]; }
+      case 'echo': return [tail];
+      case 'jump': {
+        const [h, shift, ms] = rest;
+        return done(this.source.jump({ ...(h !== undefined ? { heading: Number(h) } : {}), ...(shift !== undefined ? { walk: /^true$/i.test(shift) } : {}), ...(ms !== undefined ? { holdMs: Number(ms) } : {}) }));
+      }
+      case 'opt': {
+        const [sub = 'list', name = '', ...v] = rest;
+        const o = vtOption(name);
+        if (sub.toLowerCase() === 'list') return [VT_OPTIONS.filter((x) => x.engine).map((x) => `${x.name}=${String(this.value(x.name))}`).join(', ')];
+        if (!o) return [`no option "${name}"`];
+        if (sub.toLowerCase() === 'get') return [`${o.name} = ${String(vtToVTank(o.name, this.value(o.name)))}`];
+        if (sub.toLowerCase() === 'set' || sub.toLowerCase() === 'setinall') {
+          // VTank's own units here (ranges ÷ 240), as /vt opt set takes them.
+          const val = vtFromVTank(o.name, v.join(' '));
+          if (sub.toLowerCase() === 'setinall') for (const p of doc.profiles) p.settings = { ...(p.settings ?? {}), [o.name]: val };
+          this.setValue(o.name, val, () => {});
+          await this.saveNow(() => {});
+          return [`${o.name} = ${String(vtToVTank(o.name, val))}`];
+        }
+        return [`/vt opt list | get <option> | set <option> <value> | setinall <option> <value>`];
+      }
+      case 'settings': {
+        const [sub = '', ...nm] = rest;
+        const name = nm.join(' ');
+        if (/^load(char)?$/i.test(sub)) {
+          const p = byName(name);
+          if (!p) return [`no settings profile "${name}"`];
+          if (this.source.status().running) return ['turn the macro off (/vt stop) and stop it before loading a profile'];
+          this.profileName = p.name;
+          if (/char/i.test(sub)) { const ch = this.source.character(); if (ch) doc.characters = { ...(doc.characters ?? {}), [ch]: p.name }; }
+          return saved(`settings "${p.name}" loaded`);
+        }
+        if (/^save(char)?$/i.test(sub) && name) {
+          const base = this.ensureProfile();
+          const copy = { ...structuredClone(base), name };
+          doc.profiles = [...doc.profiles.filter((p) => p.name !== name), copy];
+          this.profileName = name;
+          if (/char/i.test(sub)) { const ch = this.source.character(); if (ch) doc.characters = { ...(doc.characters ?? {}), [ch]: name }; }
+          return saved(`settings saved as "${name}"`);
+        }
+        return ['/vt settings load|save|loadchar|savechar <name>'];
+      }
+      case 'nav': {
+        const [sub = '', ...nm] = rest;
+        const name = nm.join(' ');
+        const p = this.ensureProfile();
+        if (/^load$/i.test(sub)) {
+          const r = p.routes.find((x) => x.name.toLowerCase() === name.toLowerCase());
+          if (!r) return [`no route "${name}" in "${p.name}"`];
+          p.navRoute = r.name;
+          this.routeName = r.name;
+          if (this.running()) this.source.update(p);
+          return saved(`nav "${r.name}" loaded`);
+        }
+        if (/^save$/i.test(sub) && name) {
+          const r = this.route();
+          p.routes = [...p.routes.filter((x) => x.name !== name), { ...(r ? structuredClone(r) : { mode: 'circular' as const, points: [] }), name }];
+          p.navRoute = name;
+          this.routeName = name;
+          return saved(`nav saved as "${name}"`);
+        }
+        return ['/vt nav load|save <name>'];
+      }
+      case 'loot': {
+        const [sub = '', ...nm] = rest;
+        const name = nm.join(' ').replace(/\.utl$/i, '');
+        const p = this.ensureProfile();
+        if (/^load$/i.test(sub)) {
+          if (!p.lootSets?.[name]) return [`no loot profile "${name}" (import its .utl first)`];
+          p.lootSet = name;
+          return saved(`loot "${name}" loaded`);
+        }
+        return ['/vt loot load <name>'];
+      }
+      case 'meta': {
+        const [sub = '', ...nm] = rest;
+        const name = nm.join(' ').replace(/\.met$/i, '');
+        const p = this.ensureProfile();
+        // Meta profiles are a profile's states: load copies another profile's, save makes a profile of these.
+        if (/^load$/i.test(sub)) {
+          const from = byName(name);
+          if (!from) return [`no meta "${name}"`];
+          p.states = structuredClone(from.states);
+          p.initialState = from.initialState;
+          p.ruleFiring = from.ruleFiring;
+          for (const r of from.routes) if (!p.routes.some((x) => x.name === r.name)) p.routes.push(structuredClone(r));
+          if (this.running()) this.source.update(p);
+          return saved(`meta "${from.name}" loaded`);
+        }
+        if (/^save$/i.test(sub) && name) {
+          const existing = byName(name);
+          const copy: RoutineProfile = existing ?? { ...newProfile(name), states: [], initialState: p.initialState };
+          copy.states = structuredClone(p.states);
+          copy.initialState = p.initialState;
+          if (!existing) doc.profiles.push(copy);
+          return saved(`meta saved as "${name}"`);
+        }
+        return ['/vt meta load|save <name>'];
+      }
+      case 'addnavpt': case 'addnavcheckpoint': {
+        const coords = cmd.toLowerCase() === 'addnavpt' && tail ? tail : this.source.coords();
+        if (!coords) return ['your position is not known yet'];
+        const r = this.ensureRoute();
+        setRouteWaypoints(r, [...routeWaypoints(r), { coords, step: null }]);
+        return saved(`point ${r.points.length} added to "${r.name}"`);
+      }
+      case 'testmonster': {
+        const sel = this.source.selection();
+        if (!sel || sel.kind !== 'monster') return ['select a monster first'];
+        const row = matchMonsterRow(this.dataView().monsters, { guid: 0, name: sel.name, dist: 0, relBearing: 0 }, { settings: this.profile()?.settings ?? {} });
+        return [`${sel.name}: row ${row.name === '<DEFAULT>' ? '<< DEFAULT >>' : row.name}, priority ${row.priority}, ${row.on.join(' ') || 'no columns'}`];
+      }
+      case 'listmonstervariables': return ['true, false, name, typeid, species, maxhp, range, hasshield, metastate, setting_<option>'];
+      default: return [`unknown command /vt ${cmd} (start, stop, forcebuff, cancelforcebuff, setmetastate, opt, settings, nav, loot, meta, addnavpt, addnavcheckpoint, reverseroute, mexec, echo, jump, fakedeath, testmonster)`];
+    }
+  }
 }
 
 /** Rename a state everywhere it is named (its rules' Set / Call / Watchdog targets and where the profile starts). */

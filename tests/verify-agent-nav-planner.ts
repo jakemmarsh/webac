@@ -6,8 +6,13 @@
  * y 2..3.6, and a 2 m square pillar; the body has a 0.4 m radius and stops
  * where it would touch either (the real probe is the client's own collision).
  */
-import { describe, expect, it } from 'vitest';
+import { existsSync } from 'node:fs';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { getJumpVelocity } from '@ac/shared';
 import { PathSearch, floorPlan, planPath, type NavPoint } from '../packages/renderer/src/agent/navPlanner.ts';
+import type { JumpKit } from '../packages/renderer/src/agent/jumpPlan.ts';
+import { DAT_PATHS } from './_harness/dat.js';
+import { dungeonNav, type DungeonNav } from './_harness/dungeonNav.js';
 
 const R = 0.4;
 let probes = 0;
@@ -135,5 +140,129 @@ describe('agent path planner (movement-probe A*)', () => {
     // Every leg walks with the probe, on the floors it says.
     let at: NavPoint = start;
     for (const w of r.path) { const got = probe2(at, w)!; expect(Math.hypot(got.x - w.x, got.y - w.y)).toBeLessThan(0.16); at = got; }
+  });
+});
+
+describe('AGENT.walk-drops-jumps — the planner jumps and drops where walking can\'t', () => {
+  // A world of floors: heights at (x, y). The body walks a step of 0.6 m up or down at most (a ledge
+  // stops it, as the client's edge slide does) and is blocked by a floor top between its feet and head.
+  const world = (floors: (x: number, y: number) => number[]) => {
+    const below = (x: number, y: number, z: number): number | null => {
+      const fs = floors(x, y).filter((f) => f <= z + 0.05);
+      return fs.length ? Math.max(...fs) : null;
+    };
+    const blocks = (x: number, y: number, z: number, rise: number) => floors(x, y).some((f) => f > z + rise && f < z + 1.8);
+    const probe = (from: NavPoint, to: { x: number; y: number }): NavPoint | null => {
+      const n = Math.max(1, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y) / 0.05));
+      let last = from;
+      for (let k = 1; k <= n; k++) {
+        const x = from.x + ((to.x - from.x) * k) / n, y = from.y + ((to.y - from.y) * k) / n;
+        if (blocks(x, y, last.z, 0.6)) return last;
+        const f = below(x, y, last.z + 0.6);
+        if (f === null || last.z - f > 0.6) return last;
+        last = { x, y, z: f };
+      }
+      return last;
+    };
+    const kit: JumpKit = {
+      floor: below,
+      airStep: (from, dx, dy) => {
+        const n = Math.max(1, Math.ceil(Math.hypot(dx, dy) / 0.05));
+        let p = { x: from.x, y: from.y };
+        for (let k = 1; k <= n; k++) {
+          const t = { x: from.x + (dx * k) / n, y: from.y + (dy * k) / n };
+          if (blocks(t.x, t.y, from.z, 0.05)) break;
+          p = t;
+        }
+        return p;
+      },
+      launch: (power, walk) => ({ forward: walk ? 3.12 : 8, up: getJumpVelocity(0, 100, power) }),
+      chargeSeconds: 1,
+    };
+    return { probe, kit };
+  };
+  const box = (x: number, y: number) => x > -10 && x < 10 && y > -10 && y < 30;
+
+  it('a ledge drop: walks to the edge, then one drop to the floor 6 m down', () => {
+    const { probe: p, kit } = world((x, y) => (box(x, y) ? (y < 5 ? [0, -6] : [-6]) : []));
+    const start = { x: 0, y: 0, z: 0 };
+    expect(planPath(p, start, { x: 0, y: 15, z: -6 }).status).toBe('none'); // on foot: no way down
+    const r = planPath(p, start, { x: 0, y: 15, z: -6 }, { jumps: { kit, maxDamage: 20 } });
+    expect(r.status).toBe('found');
+    if (r.status !== 'found') return;
+    expect(r.jumps).toBe(1);
+    const j = r.path.findIndex((q) => q.jump);
+    const jump = r.path[j].jump!;
+    expect(jump.to.z).toBe(-6);
+    expect(jump.from.z).toBe(0);
+    // The take-off is the point before the landing, kept through the smoothing.
+    expect(r.path[j - 1] ?? start).toMatchObject({ x: jump.from.x, y: jump.from.y });
+    expect(r.path.at(-1)!.z).toBe(-6);
+  });
+
+  it('a lethal drop is refused: a 40 m fall is more than the damage allowed', () => {
+    const { probe: p, kit } = world((x, y) => (box(x, y) ? (y < 5 ? [0, -40] : [-40]) : []));
+    const r = planPath(p, { x: 0, y: 0, z: 0 }, { x: 0, y: 15, z: -40 }, { jumps: { kit, maxDamage: 20 } });
+    expect(r.status).toBe('none');
+    // With the damage allowed (a full-health 300-point character's budget), it drops.
+    expect(planPath(p, { x: 0, y: 0, z: 0 }, { x: 0, y: 15, z: -40 }, { jumps: { kit, maxDamage: 120 } }).status).toBe('found');
+  });
+
+  it('a gap jump: across 2.5 m of pit to the far ledge, on its floor', () => {
+    const { probe: p, kit } = world((x, y) => (box(x, y) ? (y > 5 && y < 7.5 ? [-30] : [0, -30]) : []));
+    const r = planPath(p, { x: 0, y: 0, z: 0 }, { x: 0, y: 15, z: 0 }, { jumps: { kit, maxDamage: 20 } });
+    expect(r.status).toBe('found');
+    if (r.status !== 'found') return;
+    expect(r.jumps).toBe(1);
+    const jump = r.path.find((q) => q.jump)!.jump!;
+    expect(jump.to.z).toBe(0);
+    expect(jump.to.y).toBeGreaterThan(7.5);
+    expect(r.path.every((q) => q.z === 0)).toBe(true);
+  });
+
+  it('a platform jump: up 1.2 m, more than a step', () => {
+    const { probe: p, kit } = world((x, y) => (box(x, y) ? (y > 5 && y < 12 ? [0, 1.2] : [0]) : []));
+    const r = planPath(p, { x: 0, y: 0, z: 0 }, { x: 0, y: 9, z: 1.2 }, { jumps: { kit, maxDamage: 20 } });
+    expect(r.status).toBe('found');
+    if (r.status !== 'found') return;
+    const jump = r.path.find((q) => q.jump)!.jump!;
+    expect(jump.to.z).toBe(1.2);
+    expect(jump.power).toBeGreaterThan(0.5);
+  });
+
+  it('a search that ran into the edge of its box says so (a wider one may find a way)', () => {
+    const r = planPath(probe, { x: 0, y: -4, z: 0 }, { x: -2, y: 5 }, { margin: 2, maxNodes: 400 });
+    expect(r).toMatchObject({ status: 'none', boxed: true });
+  });
+});
+
+describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('Banderling Ruin (dungeon 0x01E0), the live stall of 2026-10-10', () => {
+  // The ground rooms (floor z 0) sit under an atrium; the walkway rooms above (z 6) are reached by the corner ramps.
+  let nav: DungeonNav;
+  const BX = 0x01 * 192, BY = 0xe0 * 192;
+  beforeAll(async () => { nav = await dungeonNav(0x01e00000); }, 120_000);
+
+  it('from the doorway at (202, 42983) to the walkway at (202, 42993, z 6): none in a 12 m box (it ran into the box), found by a wider search up the north ramp', () => {
+    const start = { x: BX + 10, y: BY - 25, z: 0 };
+    const goal = { x: BX + 10, y: BY - 15, z: 6 };
+    const narrow = planPath(nav.probe, start, goal, { margin: 12, maxNodes: 4000 });
+    expect(narrow).toMatchObject({ status: 'none', boxed: true }); // live: "walk search none after 1606 points"
+    const wide = planPath(nav.probe, start, goal, { spacing: 1, margin: 35, maxNodes: 6000 });
+    expect(wide.status).toBe('found');
+    if (wide.status !== 'found') return;
+    // Up the ramp past the north end of the hall (local y > −3), where the 12 m box stopped.
+    expect(wide.path.some((p) => p.y - BY > -3)).toBe(true);
+    expect(wide.path.at(-1)!.z).toBeCloseTo(6, 1);
+  });
+
+  it('from the walkway landing 0x01E00121 (z 6) down to the hall (z 0): one drop off the edge, no damage', () => {
+    const r = planPath(nav.probe, { x: BX + 8.5, y: BY - 28, z: 6 }, { x: BX + 10, y: BY - 20, z: 0 }, { within: 2.5, jumps: { kit: nav.kit, maxDamage: 20 } });
+    expect(r.status).toBe('found');
+    if (r.status !== 'found') return;
+    expect(r.jumps).toBe(1);
+    const jump = r.path.find((p) => p.jump)!.jump!;
+    expect(jump.from.z).toBeCloseTo(6, 1);
+    expect(jump.to.z).toBeCloseTo(0, 1);
+    expect(jump.damage).toBe(0);
   });
 });

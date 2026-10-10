@@ -79,7 +79,7 @@ describe('char-create visual fidelity 2026-06-10 (behavioural, happy-dom)', () =
     const { container } = makeUI();
     const btn = (id: string): HTMLElement => container.querySelector(`#${id}`) as HTMLElement;
     for (const [id, x, y, w, h, label] of [
-      ['btn-help', 247, 21, 46, 24, 'Help'], ['btn-cancel', 379, 21, 39, 24, 'Exit'], ['btn-random', 486, 21, 75, 24, 'Random'],
+      ['btn-cancel', 379, 21, 39, 24, 'Exit'], ['btn-random', 486, 21, 75, 24, 'Random'],
     ] as Array<[string, number, number, number, number, string]>) {
       const b = btn(id);
       expect(b, id).toBeTruthy();
@@ -97,7 +97,7 @@ describe('char-create visual fidelity 2026-06-10 (behavioural, happy-dom)', () =
       expect(b.dataset.acMedia).toMatch(/^6004c(8f|91|92)$/);
     }
     // the invented buttonBg boxes are gone from the bar
-    const bar = btn('btn-help').parentElement as HTMLElement;
+    const bar = btn('btn-cancel').parentElement as HTMLElement;
     for (const child of Array.from(bar.children) as HTMLElement[]) expect(child.style.background).not.toContain('rgb(26, 24, 48)');
   });
 });

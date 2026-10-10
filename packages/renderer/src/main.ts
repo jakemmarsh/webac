@@ -49,7 +49,7 @@ import { InventoryRequestTracker, InventoryRequest, characterOptionIsSet, Object
 import type { AttemptFailedObject } from '@ac/shared';
 import { recordInventoryRequestFromAction, handleAttemptFailed, gateInventoryRequestSend, respondToVendorOpen, type InventoryObjectState } from './inventory/InventoryRequests.js';
 import { smartBoxPhysicsSteps, inventoryRequestRefusalText } from '@ac/shared';
-import { WaterMap, getWeaponStance, addShieldStance, canAttackTarget, canUseTarget, canAddToTrade, canOpenTrade, getPlayerFormula, spellComponentsSatisfied, appropriateSpellFormula, SPELL_COMPONENT_DID_MAPPER_ID, resolveAllegiancePatron, DEFAULT_WEAPON_SPEED, resolveCombatManeuverTableDid } from '@ac/shared';
+import { WaterMap, canAttackTarget, canUseTarget, canAddToTrade, canOpenTrade, getPlayerFormula, spellComponentsSatisfied, appropriateSpellFormula, SPELL_COMPONENT_DID_MAPPER_ID, resolveAllegiancePatron, DEFAULT_WEAPON_SPEED, resolveCombatManeuverTableDid } from '@ac/shared';
 import { SceneManager } from './scene/SceneManager.js';
 import { CameraController } from './scene/CameraController.js';
 import { CAMERA_DEFAULT_PIVOT_Z, CAMERA_IN_HEAD_Y, TRACK_TARGET_OFFSET_Z, blipResetsViewer, cameraPlayerTranslucency } from './scene/RetailCamera.js';
@@ -99,7 +99,7 @@ import { resolveUiSoundTable } from './audio/RetailLocalSounds.js';
 import { WavePrefetch, setWavePrefetch } from './audio/WavePrefetch.js';
 import { MotionManager } from './animation/MotionManager.js';
 import { AnimatedEntity } from './animation/AnimatedEntity.js';
-import { CharacterAnimController } from './animation/CharacterAnimController.js';
+import { CharacterAnimController, jumpChargeSeconds } from './animation/CharacterAnimController.js';
 import { MotionCommand, MotionStance, isSubstateCommand } from './animation/MotionCommands.js';
 import { KeybindRegistry, eventToCode } from './input/KeybindRegistry.js';
 import { wheelZoomDirections } from './ui/MouseTurningDefaults.js';
@@ -123,15 +123,21 @@ import { PingLatencyTracker } from './network/PingLatencyTracker.js';
 import { GameActions } from './network/GameActions.js';
 import { debugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
 import { AgentApi, agentApiEnabled, automationUiEnabled, fixtureReach, type AgentHost, type AgentHostObject } from './agent/AgentApi.js';
-import type { AgentSelf } from './agent/types.js';
+import { createHostAttack } from './agent/hostAttack.js';
+import type { AgentScreen, AgentSelf } from './agent/types.js';
 import { examineText } from './agent/examineText.js';
 import { findRouteViaOutside, loadCellGraph, type CellGraph } from './agent/cellPath.js';
 import { RoutineSync } from './agent/RoutineSync.js';
 import { isAutomationCommand } from './ui/automation/AutomationPanel.js';
+import { bridgeConnectApi } from './launcher/ConnectScreen.js';
+import { TabRelay, type RelayCall } from './agent/relayTab.js';
+import { ClaudeControl } from './agent/claudeControl.js';
+import { UNPAIR_FRAME, pairFrame, pairingLine, parsePairingCommand, readRelayOptIn, readRevokedBefore, relayOptInKey, writeRelayOptIn, writeRevokedBefore } from './agent/claudePairing.js';
+import { VT_COMMAND } from './agent/RoutineEngine.js';
 import { exposeDebugGlobal, readDebugGlobal, debugBag, debugGlobalsEnabled } from './utils/debugGlobals.js';
 import { resolveUrlLogin } from './launcher/urlLogin.js';
 import { urlOverridesEnabled } from './config/urlOverrides.js';
-import { bridgeUrlWithServer, loadWorldDirectory, worldBoxName } from './launcher/worldDirectory.js';
+import { bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, worldBoxName } from './launcher/worldDirectory.js';
 import { worldKeyOf } from './launcher/launcherStorage.js';
 import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
 import { eraClientRules, unsupportedFeatures } from './era/EraFeatures.js';
@@ -147,7 +153,7 @@ import { populateDungeonCollision, type DungeonCollisionSources } from './world/
 import { arrivalMode, confirmSurfaceArrival } from './world/arrivalMode.js';
 import { runRetryingOnArrival } from './dat/streaming/RetryOnArrival.js';
 import { resolveObjectPhysics, createServerObjectMissileSweep, type ObjectPhysicsModel } from './world/ObjectCollision.js';
-import { playCreationDefaultScript, physicsDescDefaultScriptId, playScriptType, playScriptDid, PendingPlayScripts, type PlayScriptSink } from './effects/PlayScriptResolve.js';
+import { playCreationDefaultScript, physicsDescDefaultScriptId, playScriptTypeInOrder, playScriptDid, PendingPlayScripts, type PlayScriptSink } from './effects/PlayScriptResolve.js';
 import { examineHeldItem, resolveExamineHeader } from './ui/examineHeader.js';
 import { chooseExaminePage, examineTitle, examineInscription, type ExaminationView } from './ui/examine/ExaminationWindow.js';
 import { buildItemAppraisalText } from './ui/examine/ItemAppraisalText.js';
@@ -158,7 +164,7 @@ import { LandblockObjectStreamer } from './world/LandblockObjectStreamer.js';
 import { StaticScriptDriver } from './world/StaticScriptDriver.js';
 import { StaticAnimationDriver } from './world/StaticAnimationDriver.js';
 import { createLandblockSceneryBuilder } from './world/LandblockScenery.js';
-import { losesContact, advanceAirborne, PLAYER_STEP_DOWN_HEIGHT, resolvePlayerStepDownHeight } from './world/fallPhysics.js';
+import { losesContact, advanceAirborne, airborneReferenceY, headroomClamp, PLAYER_STEP_DOWN_HEIGHT, resolvePlayerStepDownHeight } from './world/fallPhysics.js';
 import { ClothingRenderer } from './models/ClothingRenderer.js';
 import { AppearanceManager } from './models/AppearanceManager.js';
 import { CharacterModelBuilder } from './models/CharacterModelBuilder.js';
@@ -184,7 +190,7 @@ import { PlayerState } from './player/PlayerState.js';
 import { containInLeavesPlayer, removeItemLeavingPlayer } from './player/containInLeavesPlayer.js';
 import { dropDeletedOwnedItem } from './player/deletedOwnedItem.js';
 import { orderSidePacks } from './player/sidePackOrder.js';
-import { livePlace } from './agent/livePlace.js';
+import { BODY_LIVE_MS, livePlace } from './agent/livePlace.js';
 import { stepPlayerMovement, stepMoveToMotion, type MovementServices, type MovementCreatureObstacles } from './player/OutdoorMovement.js';
 import { addCreatureObstacles } from './world/CreatureCollision.js';
 import { jumpLaunchVelocity } from './player/JumpLaunch.js';
@@ -273,7 +279,7 @@ import {
   buildChangeStoragePermissionPayload,
   buildAddFriendPayload,
   buildRemoveFriendPayload} from '@ac/network';
-import type { ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant } from '@ac/network';
+import type { ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant, PairingReply } from '@ac/network';
 import { ServerMessageHandler } from './network/ServerMessageHandler.js';
 import { applySetStackSize } from './network/applySetStackSize.js';
 import { getObjectSplitSize } from './inventory/dragSplit.js';
@@ -333,8 +339,9 @@ import { LastOutsideDeathState } from './session/LastOutsideDeathState.js';
 // concurrent agent this round, so they're imported by path. Resolves to the
 // same module instance as the barrel under vite, vitest, and tsc.
 import { buildCharacterDelete, buildCharacterRestore } from '../../network/src/MessageSerializer.js';
-import { buildFriendsCommand1999, friendsCommand1999Plan } from '@ac/network';
+import { buildFriendsCommand1999, friendsCommand1999Plan, setString16Wire } from '@ac/network';
 import { MAP_TELEPORT_ORIGIN } from './ui/MapMarkers.js';
+import { tradeReceiveContainsIn } from './inventory/TradeReceiveContainId.js';
 import { buildSpellExamineModel } from './ui/examine/SpellExamine.js';
 import { TalkFocus } from './ui/ChatTalkFocus.js';
 import { MAIN_CHAT_WINDOW_ID } from './ui/FloatyChatModel.js';
@@ -720,6 +727,8 @@ let reportScreen: () => string = () => 'boot';
 // One era's DATs per page load. main() resolves the boot era before any DAT
 // is fetched; until then this is end of retail with the end-of-retail URLs.
 let activeEra: EraProfile = eraProfile(EOR_ERA_ID)!;
+// BUG.chat-nonascii-question-mark — the strings we send in the form this era's server reads them.
+setString16Wire(activeEra.stringWire ?? 'windows-1252');
 /** The streamed sets of a non-end-of-retail era (eraStreamPlan); null = end of retail (its one `datSet`). */
 let eraWorldStream: EraStreamPlan | null = null;
 let eraDatPlan: EraDatPlan = {
@@ -1140,6 +1149,7 @@ async function main() {
       quietPatchTimer = setTimeout(refreshQuietPatchLine, QUIET_PATCH_REVEAL_MS + 100);
       console.log(`[AC:Era] resuming the login to ${pendingEraLogin!.worldName ?? 'the world'} — no patch splash`);
     }
+    setString16Wire(activeEra.stringWire ?? 'windows-1252');
     console.log(`[AC:Era] booting ${activeEra.name}${activeEra.id === EOR_ERA_ID ? '' : ` (login "${activeEra.login.clientVersion}", ${activeEra.login.authStyle})`}`);
     exposeDebugGlobal('__era', { id: activeEra.id, sources: eraDatPlan.sources });
     // Free classic DATs players imported before the sets were hosted.
@@ -1472,7 +1482,7 @@ async function main() {
     loadTable: (tableId) => loadPhysicsScriptTable(tableId),
     setupScriptTable: (setupId) => setupModelRenderer.loadSetupModel(setupId)?.defaultScriptTable ?? 0,
     loadScript: (scriptId) => loadPhysicsScript(scriptId),
-    play: (script, anchor) => physicsScriptPlayer.play(script, anchor),
+    play: (script, anchor, internal) => internal ? physicsScriptPlayer.playInternal(script, anchor) : physicsScriptPlayer.play(script, anchor),
   };
   /**
    * BUG.server-sound-not-positional — a server Sound message on `guid`
@@ -2407,12 +2417,20 @@ async function main() {
   /** Building + cell meshes per block (streamer-owned; the camera/collision raycast rebuild reads them). */
   const loadedBuildingMeshes = landblockObjects.loadedBuildingMeshes;
 
+  /**
+   * The registered surface interior cell holding a body whose feet are at
+   * `footY` (0 = none): a floor in one is the ground even under the terrain
+   * (BUG.holtburg-statue-tunnel-wall, outdoorGround.ts).
+   */
+  const surfaceCellAt = (x: number, z: number, footY: number): number =>
+    outdoorCollision.findCellContaining(x, z, footY + outdoorCollision.lowerSphereHeight, currentSurfaceCellId);
   /** Terrain + outdoor collision-world floors (world/outdoorGround.ts). */
   const outdoorGroundSources: OutdoorGroundSources = {
     terrainHeight: (x, z) => terrainCollision.getHeightAt(x, z),
     get floorHeight() {
       return outdoorCollision.hasCells ? (x: number, z: number, fromY: number) => outdoorCollision.getFloorHeight(x, z, fromY) : null;
     },
+    cellAt: surfaceCellAt,
   };
   /**
    * The same, for the player's own floor follow: a BSP floor is the contact
@@ -2427,6 +2445,7 @@ async function main() {
         ? (x: number, z: number, fromY: number) => outdoorCollision.getBodyFloorHeight(x, z, fromY, playerStepDownHeight)
         : null;
     },
+    cellAt: surfaceCellAt,
   };
 
   function feedTerrainCollision(worldX: number, worldZ: number) {
@@ -2881,39 +2900,6 @@ async function main() {
     return undefined;
   }
 
-  /**
-   * GAP.9 — ACE Creature_Combat.cs:265 GetCombatStance (melee branch):
-   * weapon's DefaultCombatStyle → stance (GetWeaponStance), then a shield
-   * upgrades Sword→SwordShield / Thrown→ThrownShield (AddShieldStance).
-   * HandCombat when unarmed. (Wand→Magic is handled by the Magic combat
-   * mode path; dual-wield offhand tracking is a residual.)
-   */
-  function resolveMeleeStance(): number {
-    const weapon = getEquippedMeleeWeaponItem();
-    let stance: number = MotionStance.HandCombat;
-    if (weapon) {
-      const cs = weenieCombatStyles.get(weapon.weenieClassId) ?? 0;
-      stance = getWeaponStance(cs);
-    }
-    // GAP.12 — a dual-wield weapon in the Shield slot overrides the weapon
-    // stance (Creature_Combat.cs:281-282); only a REAL shield upgrades to
-    // the shield stances (:284).
-    if (getDualWieldItem()) return MotionStance.DualWieldCombat;
-    if (playerState.equipment.getSlot(EquipMask.Shield)) stance = addShieldStance(stance);
-    return stance;
-  }
-
-  /** GAP.9 — missile stance from the equipped missile weapon's CombatStyle. */
-  function resolveMissileStance(): number {
-    const weapon = playerState.equipment.getSlot(EquipMask.MissileWeapon);
-    if (weapon) {
-      const cs = weenieCombatStyles.get(weapon.weenieClassId) ?? 0;
-      const stance = getWeaponStance(cs);
-      if (stance !== MotionStance.HandCombat) return stance;
-    }
-    return MotionStance.BowCombat;
-  }
-
   /** GAP.9 — equipped melee weapon's W_AttackType flags (null = unarmed). */
   function equippedWeaponAttackType(): number | null {
     const weapon = getEquippedMeleeWeaponItem();
@@ -3264,8 +3250,11 @@ async function main() {
   /** The terrain face under (x, z) is the contact plane and fails FloorZ; its normal, else null. */
   function unwalkableTerrainContact(x: number, z: number, groundY: number): SlideVec3 | null {
     const terrainY = terrainCollision.getHeightAt(x, z);
-    // A BSP floor (bridge, building, stairs) over the terrain is the contact there.
+    // A BSP floor (bridge, building, stairs) over the terrain is the contact there,
+    // and so is an interior cell's floor under it (a tunnel or cellar;
+    // BUG.holtburg-statue-tunnel-wall). A wade on the terrain is in no cell.
     if (terrainY === null || groundY > terrainY + 0.01) return null;
+    if (groundY < terrainY - 0.01 && surfaceCellAt(x, z, groundY) !== 0) return null;
     const n = terrainCollision.getTriangleNormalAt(x, z);
     return n && n.y < TerrainCollision.ACE_FLOOR_Z ? n : null;
   }
@@ -4982,6 +4971,9 @@ async function main() {
         cameraController.playerYaw = arrivalYaw;
       }
     }
+    // An outdoor or SeenOutside arrival loads the landscape, so the sun
+    // follows the clock from now on (SkyboxRenderer.noteLandscapeLoaded).
+    if (!skybox.isSealedInterior) skybox.noteLandscapeLoaded();
 
     // ASSESS — bind() registers fresh listener closures; guard for the
     // logout → re-enter path so movement keys don't double-apply.
@@ -5243,6 +5235,7 @@ async function main() {
       cameraController.setPosition(worldX, (groundY ?? z) + EYE_HEIGHT, worldZ);
       cameraController.playerYaw = teleportYaw;
     }
+    if (!skybox.isSealedInterior) skybox.noteLandscapeLoaded();
 
     // Update player position
     playerWorldX = worldX;
@@ -7067,6 +7060,8 @@ async function main() {
   let acePassword = urlLogin.autoLogin?.password ?? '';
   /** The account name as ACE stores it (from the CharacterList); see session/ServerAccountName.ts. */
   let aceServerAccount: string | null = null;
+  // AGENT.hosted-mcp-connector: the chat side of pairing Claude (set where the tab relay is built).
+  let pairingChat: ((line: string) => boolean) | null = null;
   let connectUrl = urlLogin.server ? bridgeUrlWithServer(bridgeUrl, urlLogin.server) : bridgeUrl;
   /** The launcher world's name for the World box (null: the server's own ServerName). */
   let launcherWorldName: string | null = null;
@@ -7171,6 +7166,14 @@ async function main() {
       return;
     }
   };
+  // AGENT.hosted-mcp-connector — Claude's connect button lands here (the bridge's /oauth/authorize redirects to
+  // ?connect=<request>): the pairing screen, drawn like the launcher. Nothing logs in on this page.
+  const connectReq = new URLSearchParams(window.location.search).get('connect');
+  const connectOrigin = connectReq && /^[A-Za-z0-9_-]{8,64}$/.test(connectReq) ? bridgeHttpOrigin(bridgeUrl) : null;
+  if (connectReq && connectOrigin) {
+    await gameUI.showConnectClaude(bridgeConnectApi(connectOrigin), connectReq);
+    await new Promise<never>(() => {});
+  }
   if (pendingEraLogin) {
     // The era reload of a launcher ENTER: log in where the player was going.
     aceAccount = pendingEraLogin.account;
@@ -7259,6 +7262,8 @@ async function main() {
   };
   let aceCharList: CharacterListData | null = null;
   let aceCharGuid: number | null = null;
+  // The character entering / in the world, for the Claude relay's state (AGENT.hosted-mcp-connector).
+  let worldCharacterName: string | null = null;
   // CORE.17.d — the local player's PlayerKillerStatus bits (seeded from
   // PlayerDescription, kept current by PrivateUpdatePropertyInt) for the
   // radar's mutual-PK Threat blip shape.
@@ -7678,6 +7683,12 @@ async function main() {
       return playerMoveTo;
     };
     serverObjectManager.onLocalPlayerServerMotion = () => cameraController.loseControlToServer();
+    // The player's stance is the style of the server's movement (retail sets
+    // no style on a combat-mode change). A weapon-table guess made a Lugian
+    // Hammer, missing from weenie-combat-styles.json, HandCombat: no swings.
+    serverObjectManager.onLocalPlayerStyle = (stanceId) => {
+      if (animController && animController.stanceId !== stanceId) animController.setStance(stanceId);
+    };
     serverObjectManager.onLocalPlayerMovement = (type, move) => {
       performServerMovement(playerMoveToManager(), type, move, (id) => !!serverObjectManager?.targetInfo(id));
     };
@@ -8060,23 +8071,24 @@ async function main() {
      * (BUG.playscript-fallback-invented-art). Sounds come from the script's
      * own SoundTable hooks.
      */
-    const handlePlayScript = (guid: number, scriptType: number, intensity = 1.0): void => {
-      const r = playScriptType(playScriptSink, guid, scriptType, intensity);
-      if (pendingPlayScripts.park(r, guid, () => playScriptType(playScriptSink, guid, scriptType, intensity), performance.now())) return;
+    const handlePlayScript = (guid: number, scriptType: number, intensity = 1.0, internal = false): void => {
+      const r = playScriptTypeInOrder(pendingPlayScripts, playScriptSink, guid, scriptType, intensity, performance.now(), internal);
+      if ('queued' in r) return;
       console.log(r.played
         ? `[AC] PScript 0x${scriptType.toString(16)} → DAT script 0x${r.scriptId.toString(16)} via table 0x${(r.tableId ?? 0).toString(16)}`
         : `[AC] PScript 0x${scriptType.toString(16)} on 0x${guid.toString(16)}: nothing played (${r.reason})`);
     };
     // CPhysicsObj::set_hidden @ 00514c60 — the Hidden / UnHide scripts of a
-    // server object's Hidden edge (effects/HiddenStateScripts).
-    serverObjectManager.onHiddenStateScript = (guid, script) => handlePlayScript(guid, script, 1.0);
+    // server object's Hidden edge (effects/HiddenStateScripts), through
+    // play_script_internal: queued even while the object's cell is loading.
+    serverObjectManager.onHiddenStateScript = (guid, script) => handlePlayScript(guid, script, 1.0, true);
     /** Apply a PhysicsState to our own player: set_state's Hidden edge. */
     const applyPlayerPhysicsState = (state: number): void => {
       const script = hiddenEdgeScript(playerPhysicsState, state);
       playerPhysicsState = state;
       // CPhysicsPart::SetTranslucency @ 0050e670 reads the owner's Cloaked bit.
       if (playerModel) playerModel.userData[PHYSICS_STATE_KEY] = state;
-      if (script !== null && aceCharGuid !== null) handlePlayScript(aceCharGuid, script, 1.0);
+      if (script !== null && aceCharGuid !== null) handlePlayScript(aceCharGuid, script, 1.0, true);
     };
 
     /**
@@ -8297,6 +8309,163 @@ async function main() {
       if (squelchedNames.blocksChannel('', squelchMaskForChatType(ChatMessageType.Magic))) return;
       const line = enchantmentExpiredLine(spellId, spellTable?.spells.get(spellId & 0xffff)?.name);
       if (line) gameUI.addSystemMessage(line, chatColorFor(ChatMessageType.Magic), ChatMessageType.Magic);
+    };
+
+    // ── Inventory item moved to container (confirmation from server) ──
+    // A named function: GDLE's container-id property update reuses it (onPublicUpdatePropertyInstanceID).
+    const handleInventoryPut = (data: { itemGuid: number; containerGuid: number; slot: number }): void => {
+      // CORE.17.k.c.a — 0x0022 ServerSaysContainID → ServerSaysMoveItem @ 0058dbb0 clears the pending request for this object.
+      inventoryRequests.respond(data.itemGuid);
+      // ServerSaysMoveItem also clears ACCWeenieObject::waiting (RECON.inventory-grid-dat-cells.b).
+      gameUI.itemRequestAnswered(data.itemGuid);
+      // RecvNotice_ServerSaysMoveItem @ 00563260: the container we are viewing moved → SetGroundObject(0, true).
+      if (data.itemGuid === openContainerGuid) releaseGroundObject();
+      console.log(`[AC] InventoryPut: item=0x${data.itemGuid.toString(16)} → container=0x${data.containerGuid.toString(16)} slot=${data.slot}`);
+      // BUG.inventory-put-slot-itemtype-unused — every server-confirmed
+      // contain-in event (pickup, vendor buy, trade, corpse loot,
+      // server-side reshuffle — not just local drag-drop) carries the
+      // authoritative PlacementPosition. Without this, getAll()/
+      // getByContainer() fell back to Map-insertion order for any item
+      // not already in _placementOrder until the next relog. data.itemType
+      // is ACE's ContainerType (NonContainer/Container/Foci per
+      // reference/ACE/Source/ACE.Entity/Enum/ContainerType.cs) — a
+      // different enum than InventoryItem.itemType (the ItemType
+      // bitmask), so it is intentionally not stored here; see
+      // PlayerDescriptionParser's identical field for the same
+      // precedent (parsed to advance the reader, never persisted).
+      // GAP.world-drag-drop — ServerSaysMoveItem @ 0058dbb0 moves the
+      // existing object: a ground object picked up into one of our packs
+      // becomes a carried item from its CreateObject record, and leaves
+      // the 3D view (ACE sends no CreateObject / DeleteObject for it).
+      if (aceCharGuid !== null
+          && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))
+          && !playerState.inventory.getItem(data.itemGuid)) {
+        const picked = worldObjectRecords.containIn(data.itemGuid, data.containerGuid);
+        if (picked) {
+          serverObjectManager?.deleteObject(data.itemGuid, 'pickup');
+          playerState.inventory.addItem(picked, data.itemGuid);
+          if ((picked.itemType & ItemType.Container) !== 0 && data.containerGuid === aceCharGuid && !sidePackGuids.includes(data.itemGuid)) {
+            sidePackGuids.push(data.itemGuid);
+            gameUI.setSidePackGuids([...sidePackGuids]);
+          }
+          inventoryDirty = true;
+        }
+      }
+      playerState.inventory.setSlotForItem(data.itemGuid, data.slot);
+      // If item was in the open container and moved to us (the main pack or
+      // a side pack: PlaceInBackpack aims at the shown pack), remove it
+      // from container UI
+      if (openContainer.has(data.itemGuid) && aceCharGuid !== null
+          && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))) {
+        // Taking a nested pack also drops its tab + contents (they move
+        // with the pack server-side), so re-sync the whole panel.
+        openContainer.remove(data.itemGuid);
+        syncOpenContainerUI();
+      }
+      // If item moved back to player inventory (unequip), update local state
+      if (aceCharGuid !== null && data.containerGuid === aceCharGuid) {
+        const item = playerState.inventory.getItem(data.itemGuid);
+        if (item) {
+          playerState.equipment.unequipItem(item.id);
+          // BUG.equip-unequip-optimistic-no-rollback — ACE confirmed the
+          // unequip; the optimistic mutation no longer needs a rollback.
+          pendingEquipmentActions.confirm(item.id);
+          inventoryDirty = true;
+        }
+        // BUG.equip-no-auto-dequip-conflicting — retail retry point
+        // (CPlayerSystem @ LAB_005633cf): the auto-dequipped blocker just
+        // landed in the pack, so re-run AutoWield for the blocked item.
+        // Chained conflicts unwind one dequip per confirmation, exactly
+        // like retail; seenBlockers guards against ping-ponging on a
+        // blocker the server refuses to keep dequipped.
+        if (pendingAutoWield && data.itemGuid === pendingAutoWield.blockingId) {
+          const pending = pendingAutoWield;
+          pendingAutoWield = null;
+          const blocked = playerState.inventory.getItem(pending.itemId);
+          if (blocked) attemptAutoWield(blocked, pending.side, pending.seenBlockers);
+        }
+      }
+      // GAP.18 — server-confirmed container move: retag the item's
+      // containerId when it lands in the main pack or any of our side
+      // packs. Pre-fix a cross-pack PutItemInContainer left the local
+      // containerId stale, so the item kept rendering under the OLD
+      // pack's tab until relog.
+      if (aceCharGuid !== null
+          && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))) {
+        const item = playerState.inventory.getItem(data.itemGuid);
+        if (item && item.containerId !== data.containerGuid) {
+          item.containerId = data.containerGuid;
+          inventoryDirty = true;
+        }
+      }
+      // GAP.20 — server-confirmed store into the OPEN external container
+      // (chest): the item left our inventory — remove it locally, stash
+      // the full record for a lossless take-back, and surface it in the
+      // container panel.
+      if (openContainerGuid && data.containerGuid === openContainerGuid) {
+        const stored = playerState.inventory.getItem(data.itemGuid);
+        if (stored) {
+          storedItemStash.set(data.itemGuid, { ...stored, containerId: data.containerGuid });
+          playerState.inventory.removeItem(data.itemGuid);
+          inventoryDirty = true;
+          openContainer.trackStoredItem(data.itemGuid, {
+            name: stored.name, pluralName: stored.pluralName,
+            iconDid: stored.iconDid ?? 0, stackSize: stored.stackSize,
+            itemType: stored.itemType,
+            // CORE.17.o.b — a stored pack's tab keeps its own capacity.
+            itemsCapacity: stored.itemsCapacity,
+            // CORE.18.c.a — the cell's RenderIcons inputs.
+            uiEffects: stored.uiEffects, iconOverlayDid: stored.iconOverlayDid, iconUnderlayDid: stored.iconUnderlayDid,
+          });
+          syncOpenContainerUI();
+        }
+      }
+      // BUG.sold-item-lingers-in-local-inventory — ServerSaysMoveItem
+      // @ 0058dbb0 moves the object for ANY container: a ContainId into a
+      // vendor (ACE sell path, Player_Commerce.cs:202, no
+      // InventoryRemoveObject) or any other off-player container takes it
+      // out of our hierarchy. Stash the record like GAP.20 (the client
+      // keeps the weenie) so a later take-back re-adds it.
+      if (aceCharGuid !== null && containInLeavesPlayer(data.containerGuid, {
+        playerGuid: aceCharGuid, sidePackGuids, openContainerGuid,
+        isCarried: (g) => playerState.inventory.getItem(g) !== undefined,
+      })) {
+        for (const left of removeItemLeavingPlayer(playerState, data.itemGuid)) {
+          // RecvNotice_ServerSaysMoveItem @ 00563260: moved somewhere the
+          // player no longer sees (a vendor, an NPC) → no longer selected.
+          deselectIfSelected(left.id);
+          storedItemStash.set(left.id, left.id === data.itemGuid ? { ...left, containerId: data.containerGuid } : { ...left });
+          const packIdx = sidePackGuids.indexOf(left.id);
+          if (packIdx > 0) { sidePackGuids.splice(packIdx, 1); gameUI.setSidePackGuids([...sidePackGuids]); }
+          gameUI.onInventoryItemLeftPlayer(left.id);
+          inventoryDirty = true;
+        }
+      }
+      // GAP.20 — take-back of an object the client already knows: the
+      // server sends NO fresh CreateObject for it (only this
+      // InventoryPut), so re-add it to local inventory here. Fresh loot
+      // still arrives via CreateObject as before.
+      if (aceCharGuid !== null
+          && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))
+          && !playerState.inventory.getItem(data.itemGuid)) {
+        const stash = storedItemStash.get(data.itemGuid);
+        if (stash) {
+          storedItemStash.delete(data.itemGuid);
+          playerState.inventory.addItem({ ...stash, containerId: data.containerGuid }, data.itemGuid);
+          playerState.inventory.setSlotForItem(data.itemGuid, data.slot);
+          inventoryDirty = true;
+        }
+      }
+      // RELEASE.gdle-untested-surfaces — ServerSaysContainID @ 0058be40: an
+      // item the client does not hold yet is listed in our pack now, and
+      // joins it when its CreateObject arrives (GDLE sends that second).
+      if (aceCharGuid !== null
+          && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))
+          && !playerState.inventory.getItem(data.itemGuid) && !serverObjectManager?.getObject(data.itemGuid)) {
+        pendingContainIds.note(data.itemGuid, data.containerGuid);
+      } else {
+        pendingContainIds.forget(data.itemGuid);
+      }
     };
 
     // Wire up all server message handlers
@@ -8982,11 +9151,10 @@ async function main() {
           combatController.setCombatMode(serverMode);
           gameUI.hudState.combatMode = serverMode;
           updateWorldCursor(); // GAP.84
+          // Melee / missile: the server's movement style sets the stance (onLocalPlayerStyle).
           if (animController) {
             if (serverMode === CombatMode.Magic) animController.setStance(MotionStance.Magic);
-            else if (serverMode === CombatMode.Melee) animController.setStance(resolveMeleeStance()); // GAP.9 — weapon-derived stance
-            else if (serverMode === CombatMode.Missile) animController.setStance(resolveMissileStance()); // GAP.9
-            else animController.setStance(MotionStance.NonCombat);
+            else if (serverMode === CombatMode.NonCombat) animController.setStance(MotionStance.NonCombat);
           }
         }
         // STATS.burden-capacity-augs-buffs — PropertyInt.EncumbranceCapacity is
@@ -9521,11 +9689,10 @@ async function main() {
           combatController.setCombatMode(serverMode);
           gameUI.hudState.combatMode = serverMode;
           updateWorldCursor(); // GAP.84
+          // Melee / missile: the server's movement style sets the stance (onLocalPlayerStyle).
           if (animController) {
             if (serverMode === CombatMode.Magic) animController.setStance(MotionStance.Magic);
-            else if (serverMode === CombatMode.Melee) animController.setStance(resolveMeleeStance()); // GAP.9 — weapon-derived stance
-            else if (serverMode === CombatMode.Missile) animController.setStance(resolveMissileStance()); // GAP.9
-            else animController.setStance(MotionStance.NonCombat);
+            else if (serverMode === CombatMode.NonCombat) animController.setStance(MotionStance.NonCombat);
           }
           // DECOMP.invented-combat-mode-refusal — no local refusal text. ACE
           // reverts a refused mode change with this silent PropertyInt update
@@ -9829,6 +9996,16 @@ async function main() {
       },
       onPublicUpdatePropertyInstanceID: (data: PropertyUpdateData) => {
         const val = data.value as number;
+        // RELEASE.gdle-untested-surfaces.a — a GDLE trade hands the partner's
+        // item over with this ContainerID update and no 0x0022: run the
+        // ServerSaysContainID path for it (TradeReceiveContainId.ts).
+        if (data.key === PropertyInstanceId.Container && tradeReceiveContainsIn(data.guid, val, {
+          playerGuid: aceCharGuid, sidePackGuids,
+          partnerTradeGuids: gameUI.getTradeData().theirItems.map((i) => i.guid),
+          holds: (guid) => !!playerState.inventory.getItem(guid),
+        })) {
+          handleInventoryPut({ itemGuid: data.guid, containerGuid: val, slot: 0 });
+        }
         // FAITHFUL.345 — Detach the visual wielded-item mesh when ACE
         // broadcasts a Wielder=Invalid (=0) transition. ACE emits this
         // when:
@@ -10886,8 +11063,10 @@ async function main() {
       onVectorUpdate: (data) => {
         // DECOMP.remote-vector-update — SmartBox::DoVectorUpdate @ 004521c0:
         // the velocity + omega land on ANY other object (a peer's jump arc, a
-        // knockback, a missile's correction), gated on its VECTOR_TS. Our
-        // own character's physics is the local movement code's.
+        // knockback, a missile's correction), gated on its VECTOR_TS. On the
+        // player it applies only when cmdinterp->UsePositionFromServer
+        // @ 006b3b40 (autonomy_level != 2), and the constructor's level 2 is
+        // never changed: retail drops our own, as here.
         // ACE GameMessageVectorUpdate.cs.
         if (data.guid !== aceCharGuid) {
           serverObjectManager?.applyVectorUpdate(
@@ -11374,8 +11553,8 @@ async function main() {
         // (FAITHFUL.393's wire float), attenuated to the viewer. An unknown
         // object's message is queued until it is created.
         if (!audioInitialized) return;
-        const r = playServerSound(data.guid, data.soundId, data.volume);
-        if (pendingPlayScripts.park(r, data.guid, () => playServerSound(data.guid, data.soundId, data.volume), performance.now())) return;
+        const r = pendingPlayScripts.inOrder(data.guid, () => playServerSound(data.guid, data.soundId, data.volume), performance.now());
+        if ('queued' in r) return;
         console.log(`[AC] Sound 0x${data.soundId.toString(16)} on 0x${data.guid.toString(16)} vol ${data.volume}: ${r.played ? `wave 0x${r.waveId.toString(16)} at the object` : `nothing (${r.reason})`}`);
       },
 
@@ -11492,161 +11671,7 @@ async function main() {
         // are the container motion's own animation hooks.
       },
 
-      // ── Inventory item moved to container (confirmation from server) ──
-      onInventoryPut: (data) => {
-        // CORE.17.k.c.a — 0x0022 ServerSaysContainID → ServerSaysMoveItem @ 0058dbb0 clears the pending request for this object.
-        inventoryRequests.respond(data.itemGuid);
-        // ServerSaysMoveItem also clears ACCWeenieObject::waiting (RECON.inventory-grid-dat-cells.b).
-        gameUI.itemRequestAnswered(data.itemGuid);
-        // RecvNotice_ServerSaysMoveItem @ 00563260: the container we are viewing moved → SetGroundObject(0, true).
-        if (data.itemGuid === openContainerGuid) releaseGroundObject();
-        console.log(`[AC] InventoryPut: item=0x${data.itemGuid.toString(16)} → container=0x${data.containerGuid.toString(16)} slot=${data.slot}`);
-        // BUG.inventory-put-slot-itemtype-unused — every server-confirmed
-        // contain-in event (pickup, vendor buy, trade, corpse loot,
-        // server-side reshuffle — not just local drag-drop) carries the
-        // authoritative PlacementPosition. Without this, getAll()/
-        // getByContainer() fell back to Map-insertion order for any item
-        // not already in _placementOrder until the next relog. data.itemType
-        // is ACE's ContainerType (NonContainer/Container/Foci per
-        // reference/ACE/Source/ACE.Entity/Enum/ContainerType.cs) — a
-        // different enum than InventoryItem.itemType (the ItemType
-        // bitmask), so it is intentionally not stored here; see
-        // PlayerDescriptionParser's identical field for the same
-        // precedent (parsed to advance the reader, never persisted).
-        // GAP.world-drag-drop — ServerSaysMoveItem @ 0058dbb0 moves the
-        // existing object: a ground object picked up into one of our packs
-        // becomes a carried item from its CreateObject record, and leaves
-        // the 3D view (ACE sends no CreateObject / DeleteObject for it).
-        if (aceCharGuid !== null
-            && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))
-            && !playerState.inventory.getItem(data.itemGuid)) {
-          const picked = worldObjectRecords.containIn(data.itemGuid, data.containerGuid);
-          if (picked) {
-            serverObjectManager?.deleteObject(data.itemGuid, 'pickup');
-            playerState.inventory.addItem(picked, data.itemGuid);
-            if ((picked.itemType & ItemType.Container) !== 0 && data.containerGuid === aceCharGuid && !sidePackGuids.includes(data.itemGuid)) {
-              sidePackGuids.push(data.itemGuid);
-              gameUI.setSidePackGuids([...sidePackGuids]);
-            }
-            inventoryDirty = true;
-          }
-        }
-        playerState.inventory.setSlotForItem(data.itemGuid, data.slot);
-        // If item was in the open container and moved to us (the main pack or
-        // a side pack: PlaceInBackpack aims at the shown pack), remove it
-        // from container UI
-        if (openContainer.has(data.itemGuid) && aceCharGuid !== null
-            && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))) {
-          // Taking a nested pack also drops its tab + contents (they move
-          // with the pack server-side), so re-sync the whole panel.
-          openContainer.remove(data.itemGuid);
-          syncOpenContainerUI();
-        }
-        // If item moved back to player inventory (unequip), update local state
-        if (aceCharGuid !== null && data.containerGuid === aceCharGuid) {
-          const item = playerState.inventory.getItem(data.itemGuid);
-          if (item) {
-            playerState.equipment.unequipItem(item.id);
-            // BUG.equip-unequip-optimistic-no-rollback — ACE confirmed the
-            // unequip; the optimistic mutation no longer needs a rollback.
-            pendingEquipmentActions.confirm(item.id);
-            inventoryDirty = true;
-          }
-          // BUG.equip-no-auto-dequip-conflicting — retail retry point
-          // (CPlayerSystem @ LAB_005633cf): the auto-dequipped blocker just
-          // landed in the pack, so re-run AutoWield for the blocked item.
-          // Chained conflicts unwind one dequip per confirmation, exactly
-          // like retail; seenBlockers guards against ping-ponging on a
-          // blocker the server refuses to keep dequipped.
-          if (pendingAutoWield && data.itemGuid === pendingAutoWield.blockingId) {
-            const pending = pendingAutoWield;
-            pendingAutoWield = null;
-            const blocked = playerState.inventory.getItem(pending.itemId);
-            if (blocked) attemptAutoWield(blocked, pending.side, pending.seenBlockers);
-          }
-        }
-        // GAP.18 — server-confirmed container move: retag the item's
-        // containerId when it lands in the main pack or any of our side
-        // packs. Pre-fix a cross-pack PutItemInContainer left the local
-        // containerId stale, so the item kept rendering under the OLD
-        // pack's tab until relog.
-        if (aceCharGuid !== null
-            && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))) {
-          const item = playerState.inventory.getItem(data.itemGuid);
-          if (item && item.containerId !== data.containerGuid) {
-            item.containerId = data.containerGuid;
-            inventoryDirty = true;
-          }
-        }
-        // GAP.20 — server-confirmed store into the OPEN external container
-        // (chest): the item left our inventory — remove it locally, stash
-        // the full record for a lossless take-back, and surface it in the
-        // container panel.
-        if (openContainerGuid && data.containerGuid === openContainerGuid) {
-          const stored = playerState.inventory.getItem(data.itemGuid);
-          if (stored) {
-            storedItemStash.set(data.itemGuid, { ...stored, containerId: data.containerGuid });
-            playerState.inventory.removeItem(data.itemGuid);
-            inventoryDirty = true;
-            openContainer.trackStoredItem(data.itemGuid, {
-              name: stored.name, pluralName: stored.pluralName,
-              iconDid: stored.iconDid ?? 0, stackSize: stored.stackSize,
-              itemType: stored.itemType,
-              // CORE.17.o.b — a stored pack's tab keeps its own capacity.
-              itemsCapacity: stored.itemsCapacity,
-              // CORE.18.c.a — the cell's RenderIcons inputs.
-              uiEffects: stored.uiEffects, iconOverlayDid: stored.iconOverlayDid, iconUnderlayDid: stored.iconUnderlayDid,
-            });
-            syncOpenContainerUI();
-          }
-        }
-        // BUG.sold-item-lingers-in-local-inventory — ServerSaysMoveItem
-        // @ 0058dbb0 moves the object for ANY container: a ContainId into a
-        // vendor (ACE sell path, Player_Commerce.cs:202, no
-        // InventoryRemoveObject) or any other off-player container takes it
-        // out of our hierarchy. Stash the record like GAP.20 (the client
-        // keeps the weenie) so a later take-back re-adds it.
-        if (aceCharGuid !== null && containInLeavesPlayer(data.containerGuid, {
-          playerGuid: aceCharGuid, sidePackGuids, openContainerGuid,
-          isCarried: (g) => playerState.inventory.getItem(g) !== undefined,
-        })) {
-          for (const left of removeItemLeavingPlayer(playerState, data.itemGuid)) {
-            // RecvNotice_ServerSaysMoveItem @ 00563260: moved somewhere the
-            // player no longer sees (a vendor, an NPC) → no longer selected.
-            deselectIfSelected(left.id);
-            storedItemStash.set(left.id, left.id === data.itemGuid ? { ...left, containerId: data.containerGuid } : { ...left });
-            const packIdx = sidePackGuids.indexOf(left.id);
-            if (packIdx > 0) { sidePackGuids.splice(packIdx, 1); gameUI.setSidePackGuids([...sidePackGuids]); }
-            gameUI.onInventoryItemLeftPlayer(left.id);
-            inventoryDirty = true;
-          }
-        }
-        // GAP.20 — take-back of an object the client already knows: the
-        // server sends NO fresh CreateObject for it (only this
-        // InventoryPut), so re-add it to local inventory here. Fresh loot
-        // still arrives via CreateObject as before.
-        if (aceCharGuid !== null
-            && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))
-            && !playerState.inventory.getItem(data.itemGuid)) {
-          const stash = storedItemStash.get(data.itemGuid);
-          if (stash) {
-            storedItemStash.delete(data.itemGuid);
-            playerState.inventory.addItem({ ...stash, containerId: data.containerGuid }, data.itemGuid);
-            playerState.inventory.setSlotForItem(data.itemGuid, data.slot);
-            inventoryDirty = true;
-          }
-        }
-        // RELEASE.gdle-untested-surfaces — ServerSaysContainID @ 0058be40: an
-        // item the client does not hold yet is listed in our pack now, and
-        // joins it when its CreateObject arrives (GDLE sends that second).
-        if (aceCharGuid !== null
-            && (data.containerGuid === aceCharGuid || sidePackGuids.includes(data.containerGuid))
-            && !playerState.inventory.getItem(data.itemGuid) && !serverObjectManager?.getObject(data.itemGuid)) {
-          pendingContainIds.note(data.itemGuid, data.containerGuid);
-        } else {
-          pendingContainIds.forget(data.itemGuid);
-        }
-      },
+      onInventoryPut: (data) => handleInventoryPut(data),
 
       // ── Wield object confirmation from server ──
       onWieldObject: (data) => {
@@ -11678,7 +11703,11 @@ async function main() {
         inventoryRequests.respond(data.itemGuid);
         gameUI.itemRequestAnswered(data.itemGuid);
         console.log(`[AC] InventoryPutIn3D: item=0x${data.itemGuid.toString(16)} dropped to ground`);
-        playerState.inventory.removeItem(data.itemGuid);
+        // ServerSaysMoveItem @ 0058dbb0: the old wielder was the player → its wield location clears. A worn
+        // item dropped (ACE HandleActionDropItem dequips it first) used to stay on the paperdoll and in the
+        // equipment list, and the next item worn in its place was listed twice (2026-10-10). A dropped pack's
+        // contents go with it.
+        removeItemLeavingPlayer(playerState, data.itemGuid);
         inventoryDirty = true;
         // CORE.17.k.b.b.c.c.a.a.b — the dropped item is no longer
         // IsOwnedByPlayer (RecvNotice_ServerSaysMoveItem → RemoveItem).
@@ -11717,8 +11746,8 @@ async function main() {
       // ── PlayScriptId (0xF754): a PhysicsScript DID played directly on the
       //    object (SmartBox::HandlePlayScriptID @ 00452020). ACE never sends it.
       onPlayScript: (data) => {
-        const r = playScriptDid(playScriptSink, data.guid, data.scriptId);
-        if (pendingPlayScripts.park(r, data.guid, () => playScriptDid(playScriptSink, data.guid, data.scriptId), performance.now())) return;
+        const r = pendingPlayScripts.inOrder(data.guid, () => playScriptDid(playScriptSink, data.guid, data.scriptId), performance.now());
+        if ('queued' in r) return;
         console.log(`[AC] PlayScript: guid=0x${data.guid.toString(16)} script=0x${data.scriptId.toString(16)}${r.played ? '' : ` — nothing played (${r.reason})`}`);
       },
 
@@ -12311,11 +12340,14 @@ async function main() {
       attackRequest?.reset();
       gameUI.hudState.combatMode = mode;
       updateWorldCursor(); // GAP.84
+      // ClientCombatSystem::SetCombatMode @ 0056be30 only sends the request:
+      // the stance is the style of the server's movement for the player
+      // (onLocalPlayerStyle). Peace and magic have one style each; a weapon's
+      // style is the server's to say (a weapon-table guess made a Lugian
+      // Hammer, missing from the table, HandCombat with no swings).
       if (animController) {
         if (mode === CombatMode.Magic) animController.setStance(MotionStance.Magic);
-        else if (mode === CombatMode.Melee) animController.setStance(resolveMeleeStance()); // GAP.9 — weapon-derived stance
-        else if (mode === CombatMode.Missile) animController.setStance(resolveMissileStance()); // GAP.9
-        else animController.setStance(MotionStance.NonCombat);
+        else if (mode === CombatMode.NonCombat) animController.setStance(MotionStance.NonCombat);
       }
       const modePayload = new BinaryWriter(4);
       modePayload.writeUInt32(mode);
@@ -12648,6 +12680,7 @@ async function main() {
       // recall buffer to this character before any chat can be sent,
       // since GameUI outlives character switches within one session.
       gameUI.setChatHistoryScope(aceAccount, slot.name);
+      worldCharacterName = slot.name;
       // ASSESS — remember the choice for reconnect resume + clear any
       // pending logout intent (see SessionLifecycle).
       sessionLifecycle.noteEnterWorldRequested(aceCharGuid);
@@ -13111,6 +13144,10 @@ async function main() {
       // client has one; it never enters the retail command table, so elsewhere it is retail's
       // unknown command.
       // AGENT.vtank-window: /automation opens the VirindiTank-style window; /automation panel, the docked panel.
+      // AGENT.vtank-window: VirindiTank's /vt commands, handled by the automation window's model.
+      // AGENT.hosted-mcp-connector: /automation pair|unpair|claude connects Claude (its own allowlist, on the bridge).
+      if (pairingChat?.(message)) return;
+      if (gameUI.automationAvailable && VT_COMMAND.test(message)) { gameUI.automationCommand(message); return; }
       if (gameUI.automationAvailable && isAutomationCommand(message)) { if (/\bpanel\s*$/i.test(message)) gameUI.toggleAutomationPanel(); else gameUI.toggleAutomationWindow(); return; }
       retailCommands.onChatCommand(message, gameUI.commandSourceWindowId ?? MAIN_CHAT_WINDOW_ID);
     };
@@ -14783,6 +14820,12 @@ async function main() {
       },
       /** Active PhysicsScript playback count + manual-trigger helper (FAITHFUL.177). */
       activeScripts: () => physicsScriptPlayer.activeCount,
+      /** An object's live emitters by hook emitter id, and whether each is stopped (probes). */
+      emittersOn: (guid: number) => {
+        const anchor = playScriptSink.target(guid)?.anchor;
+        if (!anchor) return null;
+        return [...physicsScriptPlayer.emittersFor(anchor)].map(([id, sys]) => ({ id: '0x' + id.toString(16), stopped: sys.isStopped, done: sys.isDone }));
+      },
       /** VISUAL.dat-static-default-scripts — DAT statics running their DefaultScript. */
       staticScripts: () => staticScripts.count,
       /** SWEEP1006B — DAT statics looping their Setup DefaultAnimation. */
@@ -15318,11 +15361,88 @@ async function main() {
     let enableAutomationUi: (() => void) | null = null;
     let automationUiOn = false;
     const showAutomationUi = (): void => { if (!automationUiOn && enableAutomationUi) { automationUiOn = true; enableAutomationUi(); } };
+    // AGENT.hosted-mcp-connector — this tab answers the bridge's /mcp relay once it opts in:
+    // `/automation pair CODE` in chat (step 3; kept per bridge + account), or ?relay on a dev build.
+    let relaySurface: Record<string, unknown> | null = null;
+    // What the tab shows (the agent API's screen, and the relay state ac_status reads on the bridge).
+    const tabScreen = (): AgentScreen => {
+      const screen = gameUI.ui.currentScreen as string;
+      if (screen === 'character-select') return 'character-select';
+      if (screen === 'character-create') return 'character-create';
+      if (gameUI.worldHiddenByPortalSpace || teleportBusy.value) return 'portal-space';
+      return gameStarted ? 'world' : 'loading';
+    };
+    const claudeSay = (text: string) => gameUI.addSystemMessage(`[Claude] ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System);
+    // The player always wins (agent/claudeControl.ts): acting while Claude plays takes over.
+    const claudeControl = new ClaudeControl({
+      stopMoving: () => { (relaySurface?.stopMoving as (() => unknown) | undefined)?.(); },
+      pauseRoutine: () => { (relaySurface?.routinePause as (() => unknown) | undefined)?.(); },
+      say: claudeSay,
+    });
+    const tabRelay = new TabRelay((t) => aceConnection.sendBridgeText(t), () => relaySurface, claudeControl);
+    // Trusted input only (a script's synthetic events are not the player), outside text fields; Enter / Tab
+    // open chat or cycle, not act. Capture phase, so Claude's keys are released before the game sees the player's.
+    const isPlayerAct = (e: Event): boolean => {
+      if (!e.isTrusted || !tabRelay.on) return false;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return false;
+      if (e instanceof KeyboardEvent && (['Enter', 'Tab', 'Shift', 'Control', 'Alt', 'Meta'].includes(e.key))) return false;
+      return true;
+    };
+    window.addEventListener('keydown', (e) => { if (isPlayerAct(e)) claudeControl.playerInput(); }, true);
+    window.addEventListener('mousedown', (e) => { if (isPlayerAct(e)) claudeControl.playerInput(); }, true);
+    const relayState = () => {
+      if (!aceConnection.isConnected) return;
+      tabRelay.sendState(worldCharacterName, tabScreen(), readRevokedBefore(relayStorage, relayKey()));
+    };
+    const relayDevOptIn = urlOverridesEnabled() && new URLSearchParams(window.location.search).has('relay');
+    tabRelay.on = relayDevOptIn;
+    const relayKey = () => relayOptInKey(connectUrl, characterMessageAccount(aceServerAccount, aceAccount));
+    const relayStorage = (() => { try { return window.localStorage; } catch { return null; } })();
+    const setRelayOn = (on: boolean) => { tabRelay.on = on || relayDevOptIn; writeRelayOptIn(relayStorage, relayKey(), on); relayState(); };
+    pairingChat = (line) => {
+      const cmd = parsePairingCommand(line);
+      if (!cmd) return false;
+      const say = (text: string) => gameUI.addSystemMessage(text, chatColorFor(ChatMessageType.System), ChatMessageType.System);
+      if (cmd.kind === 'status') {
+        say(pairingLine({ kind: 'status', on: tabRelay.on }));
+        if (tabRelay.on) {
+          const goal = ((relaySurface?.status as (() => { goal?: string | null }) | undefined)?.()?.goal) ?? null;
+          say(claudeControl.summary(goal));
+          for (const line of claudeControl.recent(5)) say(line);
+        }
+      } else if (cmd.kind === 'switch') { setRelayOn(cmd.on); say(pairingLine(cmd)); }
+      else if (cmd.kind === 'pause') say(claudeControl.pause());
+      else if (cmd.kind === 'resume') say(claudeControl.resume());
+      else if (cmd.kind === 'unpair') { setRelayOn(false); aceConnection.sendBridgeText(UNPAIR_FRAME); }
+      else if (!cmd.code) say(pairingLine({ kind: 'usage' }));
+      // The bridge binds the code to the character in the world: send the state first.
+      else { relayState(); aceConnection.sendBridgeText(pairFrame(cmd.code)); }
+      return true;
+    };
+    setInterval(relayState, 10_000);
     aceConnection.on((e) => {
+      if (e.type === 'agentCall') {
+        if (tabRelay.on && !relaySurface) startAgent(false);
+        void tabRelay.handle(e.data as RelayCall);
+        return;
+      }
+      if (e.type === 'agentPairing') {
+        const r = e.data as PairingReply;
+        // A code the bridge accepted is the player's opt-in for this account; unpairing already switched it off.
+        if (r.kind === 'paired' && r.ok) { setRelayOn(true); startAgent(false); }
+        if (r.kind === 'unpaired' && r.ok && r.at) { writeRevokedBefore(relayStorage, relayKey(), r.at); relayState(); }
+        gameUI.addSystemMessage(pairingLine(r), chatColorFor(ChatMessageType.System), ChatMessageType.System);
+        return;
+      }
       if (e.type === 'routinesGrant') routineSync.onGrant(e.data as RoutinesGrant | null, e.error);
       else if (e.type === 'automationAccess') { if (e.data === true) { startAgent(false); showAutomationUi(); } }
       else if (e.type === 'characterList') {
         routineSync.reset();
+        worldCharacterName = null;
+        // The bridge registers this tab for its account on the CharacterList: tell it whether the relay is on
+        // (this account's kept opt-in, now that the server has named the account).
+        setTimeout(() => { tabRelay.on = relayDevOptIn || readRelayOptIn(relayStorage, relayKey()); relayState(); }, 500);
         // Logged in: ask once whether this account has the automation UI (dev builds always do).
         if (!automationUiEnabled(urlOverridesEnabled())) aceConnection.requestRoutinesGrant();
       } else if (e.type === 'disconnected') routineSync.reset();
@@ -15337,10 +15457,13 @@ async function main() {
       const schoolName = (s: MagicSchool): string => ({ [MagicSchool.WarMagic]: 'War', [MagicSchool.LifeMagic]: 'Life', [MagicSchool.ItemEnchantment]: 'Item', [MagicSchool.CreatureEnchantment]: 'Creature', [MagicSchool.VoidMagic]: 'Void' } as Record<number, string>)[s] ?? 'Other';
       const modeName = (): AgentSelf['combatMode'] => ({ [CombatMode.NonCombat]: 'peace', [CombatMode.Melee]: 'melee', [CombatMode.Missile]: 'missile', [CombatMode.Magic]: 'magic' } as Record<number, AgentSelf['combatMode']>)[combatController.mode] ?? 'unknown';
       // Where the object is now (its physics body / render position), not the last UpdatePosition (agent/livePlace.ts).
+      // A body that isn't being stepped (lost cell, no mesh, a stalled frame loop) yields to the server's last position.
       const placeOf = (o: import('./world/ServerObjectManager.js').ServerObject) => livePlace({
         worldX: o.worldX, worldY: o.worldY, worldZ: o.worldZ,
         cell: o.physics?.cell ?? o.objCellId ?? o.position?.landblock,
         placed: !!(o.mesh || o.physics) && !o.wielderId && !o.outOfWorld,
+        server: o.serverPlace ?? null,
+        bodyLive: o.bodySyncedAt !== undefined && performance.now() - o.bodySyncedAt < BODY_LIVE_MS,
       });
       const hostObject = (o: import('./world/ServerObjectManager.js').ServerObject): AgentHostObject => {
         const live = placeOf(o);
@@ -15356,15 +15479,46 @@ async function main() {
       };
       const carried = (): Set<number> => new Set([...playerState.inventory.getAll().map((i) => i.id >>> 0), ...playerState.equipment.getAll().map((i) => i.id >>> 0)]);
       const inventoryItem = (guid: number) => playerState.inventory.getItem(guid) ?? playerState.equipment.getAll().find((e) => e.id === guid);
+      // The agent's attack: auto-enter the weapon's stance, then the attack key (agent/hostAttack.ts).
+      const agentHostAttack = createHostAttack({
+        inAttackStance: () => combatController.isInCombat && combatController.mode !== CombatMode.Magic,
+        autoEnterPlan: () => getAutoEnterAttackPlan(playerState.equipment.getAll()),
+        changeCombatMode: (mode) => sendChangeCombatMode(mode),
+        swing: (guid, power, height) => {
+          if (selectedObjectId() !== guid) selectGuid(guid);
+          if (!attackRequest) { initiateMeleeAttack(guid, power, height); return; }
+          attackRequest.setRequestedAttackHeight(height);
+          attackRequest.startAttackRequest();
+          attackRequest.endAttackRequest(height, power);
+        },
+        requestPending: () => !!attackRequest && (attackRequest.attackServerResponsePending || attackRequest.attackInProgress || attackRequest.repeatAttackInProgress()),
+        now: () => performance.now(),
+        schedule: (fn, ms) => { setTimeout(fn, ms); },
+      });
+      // The frame the agent's movement probes work in, and the collision services they step through:
+      // agent global metres in and out (outdoors the render world is global; a dungeon's is its
+      // stream-offset local frame). Server-spawned fixtures (awnings, forges, closed doors …) block like
+      // any wall; only creatures are left out, since they move. The shared sliding normal is kept apart,
+      // so a probe never touches the player.
+      const agentNav = () => {
+        const inDungeon = playerInDungeon;
+        const lbX = ((dungeonLandblockId >>> 24) & 0xff) * 192, lbY = ((dungeonLandblockId >>> 16) & 0xff) * 192;
+        const off = inDungeon ? dungeonRenderer.worldToLocal(0, 0) : { localX: 0, localY: 0 };
+        const toWorld = (gx: number, gy: number) => (inDungeon ? { x: gx - lbX - off.localX, z: gy - lbY - off.localY } : { x: gx, z: gy });
+        const toGlobal = (wx: number, wz: number) => (inDungeon ? { x: wx + off.localX + lbX, y: wz + off.localY + lbY } : { x: wx, y: wz });
+        const fixtures: MovementCreatureObstacles | null = serverObjectManager ? (collider, x, z, range) => {
+          const collision = collider as DungeonCollision;
+          const still = serverObjectManager!.getBlockersNear(x, z, range).filter((b) => !((serverObjectManager!.getObject(b.guid)?.itemType ?? 0) & ItemType.Creature));
+          const keys = addCreatureObstacles(collision, still, objectPhysics);
+          return () => { for (const k of keys) collision.removeKey(k); };
+        } : null;
+        const services: MovementServices = { ...movementServices, creatureObstacles: fixtures, slide: { slidingNormal: null } };
+        return { inDungeon, toWorld, toGlobal, services };
+      };
       const agentHost: AgentHost = {
         now: () => performance.now(),
-        screen: () => {
-          const screen = gameUI.ui.currentScreen as string;
-          if (screen === 'character-select') return 'character-select';
-          if (screen === 'character-create') return 'character-create';
-          if (gameUI.worldHiddenByPortalSpace || teleportBusy.value) return 'portal-space';
-          return gameStarted ? 'world' : 'loading';
-        },
+        wallClock: () => Date.now(),
+        screen: () => tabScreen(),
         self: () => {
           const f = movementSync?.lastSentFrame;
           if (!aceCharGuid || !f || !f.cellId) return null;
@@ -15383,7 +15537,7 @@ async function main() {
         },
         // The effects windows' list (fed by the server's Magic update events). PlayerState's
         // EnchantmentManager.getAll() is never filled (the registry is), so reading it showed no buffs ever.
-        activeSpells: () => gameUI.agentActiveEnchantments().map((e) => ({ name: e.name, remaining: e.remaining, beneficial: e.beneficial })),
+        activeSpells: () => gameUI.agentActiveEnchantments().map((e) => ({ spellId: e.spellId, name: e.name, remaining: e.remaining, beneficial: e.beneficial })),
         freePackSlots: () => Math.max(0, playerState.itemsCapacity - playerState.inventory.getAll().filter((i) => (i.containerId === aceCharGuid || i.containerId === 0) && !playerState.equipment.getAll().some((e) => e.id === i.id)).length),
         burdenPercent: () => (gameUI['burdenMax'] ? (gameUI['burdenCurrent'] / gameUI['burdenMax']) * 100 : 0),
         cameraBoom: () => {
@@ -15418,10 +15572,38 @@ async function main() {
           ...(((spellTable?.spells.get(s.id)?.bitfield ?? 0) & SPELL_FLAG_SELF_TARGETED) ? { self: true } : {}),
           // SpellFlags.Beneficial (0x4) with a duration: an enchantment that helps (ACE SpellFlags.cs).
           ...(((spellTable?.spells.get(s.id)?.bitfield ?? 0) & 0x4) && (spellTable?.spells.get(s.id)?.duration ?? 0) !== 0 ? { buff: true } : {}),
+          ...(spellTable?.spells.get(s.id) ? { category: spellTable.spells.get(s.id)!.category, power: spellTable.spells.get(s.id)!.power, duration: spellTable.spells.get(s.id)!.duration ?? 0 } : {}),
         })),
         characterSheet: () => gameUI.agentCharacterSheet(),
         allegiance: () => gameUI.agentAllegiance(),
         fellowship: () => gameUI.agentFellowship(),
+        fellows: () => gameUI.agentFellows(),
+        fellowshipInfo: () => gameUI.agentFellowshipInfo(),
+        // AGENT.vtank-window — Autostack / Autocram: packs, items by pack slot, and moves through the drop path.
+        packs: () => sidePackGuids.flatMap((g, slot) => {
+          const guid = slot === 0 ? (aceCharGuid ?? 0) : g;
+          if (!guid) return [];
+          const isPack = (i: { itemType?: number; itemsCapacity?: number; objectDescFlags?: number }) => heldIsContainer(i);
+          const inIt = slot === 0 ? playerState.inventory.getAll().filter((i) => (i.containerId === aceCharGuid || i.containerId === 0) && !isPack(i)) : playerState.inventory.getByContainer(guid);
+          const capacity = slot === 0 ? playerState.itemsCapacity : (serverObjectManager?.getObject(guid)?.itemsCapacity ?? 24);
+          return [{ slot, guid, capacity, count: inIt.length }];
+        }),
+        itemSlots: () => {
+          const worn = new Set(playerState.equipment.getAll().map((e) => e.id >>> 0));
+          return playerState.inventory.getAll().map((i) => {
+            const o = serverObjectManager?.getObject(i.id >>> 0);
+            const container = i.containerId === aceCharGuid || i.containerId === 0 ? 0 : sidePackGuids.indexOf(i.containerId);
+            return { guid: i.id >>> 0, name: i.name, packSlot: container < 0 ? -1 : container, stack: i.stackSize || 1, maxStack: o?.maxStackSize ?? 1, wcid: o?.weenieClassId ?? 0, isPack: heldIsContainer(i), equipped: worn.has(i.id >>> 0) };
+          });
+        },
+        placeItem: (guid, to) => {
+          if ('packSlot' in to) return gameUI.agentItemListDrop({ kind: 'world', guid }, { list: 'packs', packSlot: to.packSlot });
+          const onto = playerState.inventory.getItem(to.onto);
+          if (!onto) return false;
+          const slot = onto.containerId === aceCharGuid || onto.containerId === 0 ? 0 : sidePackGuids.indexOf(onto.containerId);
+          if (slot < 0) return false;
+          return gameUI.agentItemListDrop({ kind: 'world', guid }, { list: 'items', packSlot: slot, cellItemId: to.onto });
+        },
         // What showing the panes asks the server for: the fellowship's full update (and its fellows'
         // updates while "shown"), the allegiance's AllegianceUpdate.
         refreshSocial: (what) => {
@@ -15434,6 +15616,9 @@ async function main() {
         swearAllegiance: () => gameUI.agentSwearAllegiance(),
         breakAllegiance: (n) => gameUI.agentBreakAllegiance(n),
         skill: (id) => gameUI.agentSkill(id),
+        skillList: () => gameUI.agentSkills(),
+        spellTableData: () => spellTable ?? null,
+        spellComponents: (id) => (spellTable?.spells.get(id)?.formula ?? []).flatMap((c) => { const n = spellComponentTable?.components.get(c)?.name; return n ? [n] : []; }),
         carriedPalettes: (guid) => inventoryItem(guid)?.visualDesc?.subPalettes.map((p) => ({ id: p.paletteId >>> 0, offset: p.offset, length: p.length })) ?? null,
         paletteColor: (paletteId, index) => {
           const colors = appearanceManager.loadPaletteColors(paletteId);
@@ -15444,34 +15629,25 @@ async function main() {
         },
         openContainer: () => (openContainerGuid ? { guid: openContainerGuid >>> 0, items: openContainer.items().map((i) => ({ guid: i.guid >>> 0, name: i.name })) } : null),
         dialogs: () => gameUI.agentDialogs(),
+        book: () => gameUI.agentBook(),
+        bookPage: (index) => gameUI.agentBookPage(index),
         answerDialog: (label, index) => gameUI.agentAnswerDialog(label, index),
         busy: () => busyCount.busy || inventoryRequests.pending !== null || teleportBusy.value,
         select: (guid) => { selectGuid(guid); return selectedObjectId() === guid; },
         use: (guid) => { if (!sendUseAction || (!serverObjectManager?.getObject(guid) && !inventoryItem(guid))) return false; sendUseAction(guid); return true; },
         useWithTarget: (src, tgt) => { if (!sendGameAction) return false; sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(src, tgt)); return true; },
         setCombatMode: (mode) => sendChangeCombatMode({ peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode]),
-        attack: (guid, power, height) => {
-          // CORE.12.a — the context-menu Attack's auto-enter plan, then the attack itself.
-          if (!combatController.isInCombat || combatController.mode === CombatMode.Magic) {
-            const plan = getAutoEnterAttackPlan(playerState.equipment.getAll());
-            if (plan.sendAttack) { sendChangeCombatMode(plan.mode); setTimeout(() => initiateMeleeAttack(guid, power, height), 1000); }
-            return;
-          }
-          // The attack key's press + release (AttackRequestController: StartAttackRequest /
-          // EndAttackRequest at an explicit power), on the selected target.
-          if (selectedObjectId() !== guid) selectGuid(guid);
-          if (!attackRequest) { initiateMeleeAttack(guid, power, height); return; }
-          attackRequest.setRequestedAttackHeight(height);
-          attackRequest.startAttackRequest();
-          attackRequest.endAttackRequest(height, power);
-        },
-        attackPending: () => !!attackRequest && (attackRequest.attackServerResponsePending || attackRequest.attackInProgress || attackRequest.repeatAttackInProgress()),
+        attack: (guid, power, height) => agentHostAttack.attack(guid, power, height),
+        attackPending: () => agentHostAttack.pending(),
         cancelAttack: () => { sendGameAction?.(GameActionType.CancelAttack, new Uint8Array(0)); },
         cast: (spellId, target) => {
           // The spell bar / spellbook's own cast (component, target and compatibility checks included).
           const index = magicController.knownSpells.findIndex((s) => s.id === spellId);
           if (index < 0) return false;
           selectGuid(target ?? myPlayerGuid ?? aceCharGuid ?? 0);
+          // A target the client could not select (it is gone) is no cast: the spell bar would cast at whatever
+          // is selected, yourself included ("You cannot cast this spell upon yourself", 2026-10-10).
+          if (target !== null && (selectedObjectId() >>> 0) !== (target >>> 0)) return false;
           gameUI['spellCallbacks'].onCastSpell?.(index);
           return true;
         },
@@ -15491,6 +15667,7 @@ async function main() {
         appraisal: (guid) => examined.get(guid) ?? null,
         appraisalData: (guid) => agentAppraisals.get(guid >>> 0) ?? null,
         raise: (stat, upTo) => gameUI.agentRaise(stat, upTo),
+        trainSkill: (skill) => gameUI.agentTrainSkill(skill),
         press: (input) => {
           // An action name resolves to its first bound key; a code is pressed as given.
           const action = keybinds.actions().find((a) => a.name.toLowerCase() === input.trim().toLowerCase())
@@ -15531,12 +15708,12 @@ async function main() {
           ({ accept: cb.onAcceptTrade, decline: cb.onDeclineTrade, reset: cb.onResetTrade, close: cb.onCloseTrade })[action]?.();
           return true;
         },
-        route: (fromCell, from, toCell, to) => {
+        route: (fromCell, from, toCell, to, opts) => {
           const lb = (fromCell & 0xffff0000) >>> 0;
           let g = agentCellGraphs.get(lb);
           // A graph read while a streamed file was still in flight may lack doors: kept only when complete.
           if (!g) { g = loadCellGraph(cellDb, worldPortalDb, lb); if (g.complete !== false) agentCellGraphs.set(lb, g); }
-          return findRouteViaOutside(g, fromCell, from, toCell, to);
+          return findRouteViaOutside(g, fromCell, from, toCell, to, opts);
         },
         // AGENT navigation — the player's body walked from `from` toward `to` by the same substep
         // the held movement keys run (stepPlayerMovement through these collision services), with
@@ -15548,20 +15725,7 @@ async function main() {
           return o ? fixtureReach(o) : 0;
         },
         navProbe: (from, to) => {
-          const inDungeon = playerInDungeon;
-          const lbX = ((dungeonLandblockId >>> 24) & 0xff) * 192, lbY = ((dungeonLandblockId >>> 16) & 0xff) * 192;
-          const off = inDungeon ? dungeonRenderer.worldToLocal(0, 0) : { localX: 0, localY: 0 };
-          const toWorld = (gx: number, gy: number) => (inDungeon ? { x: gx - lbX - off.localX, z: gy - lbY - off.localY } : { x: gx, z: gy });
-          const toGlobal = (wx: number, wz: number) => (inDungeon ? { x: wx + off.localX + lbX, y: wz + off.localY + lbY } : { x: wx, y: wz });
-          // Server-spawned fixtures (awnings, forges, closed doors …) block like any wall; only creatures
-          // are left out, since they move.
-          const fixtures: MovementCreatureObstacles | null = serverObjectManager ? (collider, x, z, range) => {
-            const collision = collider as DungeonCollision;
-            const still = serverObjectManager!.getBlockersNear(x, z, range).filter((b) => !((serverObjectManager!.getObject(b.guid)?.itemType ?? 0) & ItemType.Creature));
-            const keys = addCreatureObstacles(collision, still, objectPhysics);
-            return () => { for (const k of keys) collision.removeKey(k); };
-          } : null;
-          const services: MovementServices = { ...movementServices, creatureObstacles: fixtures, slide: { slidingNormal: null } };
+          const { inDungeon, toWorld, toGlobal, services } = agentNav();
           const a = toWorld(from.x, from.y), b = toWorld(to.x, to.y);
           const dist = Math.hypot(b.x - a.x, b.z - a.z);
           const n = Math.max(1, Math.ceil(dist / 0.15));
@@ -15581,10 +15745,49 @@ async function main() {
           const g = toGlobal(x, z);
           return { x: g.x, y: g.y, z: floorY };
         },
+        // AGENT.walk-drops-jumps — the jump physics the walk plans with (agent/jumpPlan.ts): the floor
+        // under a point, one airborne transition of the body at its feet height (the airborne branch of
+        // stepPlayerMovement, as a jump moves it), and a standing long jump's launch for this player.
+        navFloor: (x, y, fromZ) => {
+          const { inDungeon, toWorld, services } = agentNav();
+          const w = toWorld(x, y);
+          const f = inDungeon ? services.dungeonGroundAt?.(w.x, w.z, fromZ + 0.05) : services.groundAt?.(w.x, w.z, fromZ + 0.05);
+          return f ?? null;
+        },
+        navAirStep: (from, dx, dy) => {
+          const { inDungeon, toWorld, toGlobal, services } = agentNav();
+          const a = toWorld(from.x, from.y);
+          const step = stepPlayerMovement(
+            { x: a.x, z: a.z, floorY: from.z, inDungeon, airborne: true, jumpVelocityX: dx, jumpVelocityZ: dy, slideVelocity: null },
+            0, 0, 1, services,
+          );
+          return toGlobal(step.x, step.z);
+        },
+        jumpLaunch: (power, walk) => {
+          // As the jump release does (the frame loop's triggerJump branch): the Jump skill's current
+          // value and the load into getJumpVelocity; the held keys' state velocity forward
+          // (get_leave_ground_velocity). `walk` is Shift held: a walk when running is the default.
+          const SKILL_ID_JUMP = 22;
+          const jumpSkill = playerSkillTable
+            ? playerState.getSkillCurrent(SKILL_ID_JUMP, playerSkillTable.skills)
+            : Math.max(200, playerState.skills.getRaises(SKILL_ID_JUMP));
+          const running = cameraController.runIsDefault !== walk;
+          return {
+            forward: running ? RUN_ANIM_SPEED * cameraController.runRate : WALK_ANIM_SPEED,
+            up: getJumpVelocity(getPlayerBurdenRatio(), jumpSkill, power),
+            chargeSeconds: jumpChargeSeconds(animController?.stanceId ?? MotionStance.NonCombat),
+          };
+        },
         logout: () => gameUI.callbacks.onLogout?.(),
         accountRoutines: routineSync,
+        characterList: () => gameUI.characterSelectList(),
+        enterCharacter: (name) => gameUI.enterCharacterNamed(name),
+        showGoal: (text) => { if (text) gameUI.addSystemMessage(`[Claude] Goal: ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System); },
       };
       const agentApi = new AgentApi(agentHost);
+      relaySurface = agentApi.surface() as unknown as Record<string, unknown>;
+      // ac_status also says who has control (the tab's ClaudeControl).
+      relaySurface.status = () => ({ ...agentApi.status(), control: claudeControl.paused ? 'paused' : claudeControl.control });
       const addSystemMessage = gameUI.addSystemMessage.bind(gameUI);
       // Lines raised before the chat window exists are queued and re-sent through addSystemMessage: count them once, on replay.
       gameUI.addSystemMessage = (text, color, type, targetWindowId) => { if (gameUI['chatMessages']) agentApi.pushChat(text, type); addSystemMessage(text, color, type, targetWindowId); };
@@ -15594,6 +15797,10 @@ async function main() {
       // Dev / URL-override builds only (automationUiEnabled); the agent API itself runs everywhere.
       enableAutomationUi = () => {
         agentApi.routine.onReport = (text) => gameUI.addSystemMessage(`[Automation] ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System);
+        // A rule's /vt … Chat Command runs as if typed (VirindiTank's own commands).
+        agentApi.routine.onVtCommand = (line) => gameUI.automationCommand(line);
+        // A meta's Create View / Destroy View (VirindiTank's meta views).
+        agentApi.routine.views = { open: (n, v, c) => gameUI.openMetaView(n, v, c as never), close: (n) => gameUI.closeMetaView(n), closeAll: () => gameUI.closeAllMetaViews() };
         gameUI.setAutomationSource({
           load: () => routineSync.load(),
           save: (doc) => routineSync.save(doc),
@@ -15608,8 +15815,22 @@ async function main() {
           setting: (name) => agentApi.routine.setting(name),
           setSetting: (name, value) => agentApi.routine.setSetting(name, value),
           setState: (name) => agentApi.routine.setState(name),
+          forceBuff: () => agentApi.routine.forceBuff(),
+          mexec: (expr) => { const x = agentApi.routine.expressions; if (!x) throw new Error('expressions are not available'); return x.run(expr); },
+          jump: (o) => { if (o.heading !== undefined) agentApi.turn(o.heading); return agentApi.jump({ ...(o.holdMs !== undefined ? { holdMs: o.holdMs } : {}), ...(o.walk ? { walk: true } : {}) }); },
+          fakeDeath: () => agentApi.routine.fakeDeath(),
+          reverseRoute: () => agentApi.routine.reverseRoute(),
+          setWaypoint: (i) => agentApi.routine.setWaypoint(i),
+          cancelForceBuff: () => agentApi.routine.cancelForceBuff(),
           update: (p) => agentApi.routine.update(p),
-          selection: () => { const g = agentApi.selectedGuid(); const o = g === null ? null : agentApi.snapshot({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g); return o ? { name: o.name, kind: o.kind } : null; },
+          selection: () => {
+            const g = agentApi.selectedGuid();
+            if (g === null) return null;
+            const carried = agentApi.inventory().find((i) => i.guid === g);
+            if (carried) return { name: carried.name, kind: 'item' };
+            const o = agentApi.snapshot({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g);
+            return o ? { name: o.name, kind: o.kind } : null;
+          },
           resetStats: () => agentApi.routine.resetStats(),
         step: () => agentApi.routine.stepOnce(),
         history: () => agentApi.routine.history(),
@@ -15748,6 +15969,7 @@ async function main() {
             console.log(`[AC] ACE: character "${response.characterName}" created`);
             aceCharGuid = response.characterGuid ?? null;
             myPlayerGuid = aceCharGuid;
+            worldCharacterName = response.characterName ?? null;
             if (aceCharGuid !== null) serverObjectManager?.setPlayerGuid(aceCharGuid);
             // CORE.17.k.b.b.c.c.a.a — gmSlumlordUI::AmIHouseOwner compares the
             // HouseProfile's owner with SmartBox::player_id.
@@ -16085,7 +16307,8 @@ async function main() {
                     // equipment map. Server-side wields after this point arrive
                     // via ParentEvent and are handled there.
                     for (const item of playerState.equipment.getAll()) {
-                      const loc = wieldLocationFromMask(item.slot, item.weenieClassId);
+                      // The item's CreateObject Parent block is retail's answer; the mask + table only when it had none.
+                      const loc = serverObjectManager?.getObject(item.id)?.parentLocation || wieldLocationFromMask(item.slot, item.weenieClassId);
                       if (loc !== 0) attachWieldedToPlayer(item.id, loc);
                     }
 
@@ -16899,7 +17122,8 @@ async function main() {
         // step is now collided too (ACE: every transition — LandCell.cs:54-58).
         const step = stepPlayerMovement(
           {
-            x: playerWorldX, z: playerWorldZ, floorY: lastFloorAwareGroundY,
+            // In the air the body collides where it is (airborneReferenceY), not on the floor below.
+            x: playerWorldX, z: playerWorldZ, floorY: airborneReferenceY(isPlayerAirborne, airborneBaseY, playerWorldY, lastFloorAwareGroundY),
             inDungeon: playerInDungeon, airborne: isPlayerAirborne,
             jumpVelocityX, jumpVelocityZ,
             slideVelocity: isPlayerAirborne ? null : slopeContact.velocity,
@@ -16999,7 +17223,8 @@ async function main() {
         : outdoorCollision.lastStepUp;
       // A pending teleport arrival searches from the arrival height (outdoorGround.ts).
       const floorFromY = floorSearchFromY(
-        playerInDungeon ? null : pendingTeleportArrivalZ, lastFloorAwareGroundY, stepBias);
+        playerInDungeon ? null : pendingTeleportArrivalZ,
+        airborneReferenceY(isPlayerAirborne, airborneBaseY, playerWorldY, lastFloorAwareGroundY), stepBias);
       // BUG.academy-stairs-fall-through — the floor is followed along the
       // frame's move in retail transition steps (traceGroundAlongPath), and
       // a body inside a cell with no floor under it drops to the walkable
@@ -17255,6 +17480,14 @@ async function main() {
         const air = advanceAirborne(airborneBaseY, playerWorldY, jumpVelocityY, physSteps, groundY, GRAVITY);
         playerWorldY = air.offsetY;
         jumpVelocityY = air.velocityY;
+        if (!air.landed && jumpVelocityY > 0) {
+          // The head meets the floor above: stop rising (headroomClamp).
+          const h = (playerInDungeon ? dungeonCollision : outdoorCollision)?.playerHeight ?? DungeonCollision.PLAYER_HEIGHT;
+          const feet = airborneBaseY + playerWorldY;
+          const over = playerInDungeon ? movementServices.dungeonGroundAt?.(playerWorldX, playerWorldZ, feet + h) : movementServices.groundAt?.(playerWorldX, playerWorldZ, feet + h);
+          const c = headroomClamp(feet, jumpVelocityY, over ?? null, h);
+          if (c.hit) { playerWorldY = c.feetY - airborneBaseY; jumpVelocityY = c.velocityY; }
+        }
         // FAITHFUL.596 verification telemetry — peak height + airtime of the
         // current jump for acDebug.jumpStats() (peak must equal the launch
         // formula's h).

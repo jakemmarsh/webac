@@ -17,16 +17,34 @@ export interface OutdoorGroundSources {
   terrainHeight(worldX: number, worldZ: number): number | null;
   /** Walkable BSP floor nearest `fromY` (DungeonCollision.getFloorHeight); null = no collision world. */
   floorHeight: ((worldX: number, worldZ: number, fromY: number) => number | null) | null;
+  /**
+   * The registered interior cell holding a body whose feet are at `footY`
+   * (DungeonCollision.findCellContaining at the feet sphere's centre), 0 for
+   * none. Absent = no cells known (the terrain rule alone).
+   */
+  cellAt?: (worldX: number, worldZ: number, footY: number) => number;
 }
 
 /**
  * The per-frame outdoor ground rule: a BSP floor wins when it sits no more
  * than 0.5 m below the terrain (and never below it); else the terrain.
+ *
+ * BUG.holtburg-statue-tunnel-wall — except inside an interior cell: a BSP
+ * floor whose body stands in a registered EnvCell is the ground however far
+ * below the terrain it lies. Retail tests the terrain only for the land
+ * cells in the body's cell array, and a body in an EnvCell has them only
+ * while a sphere is within its radius of an outside portal's plane
+ * (CEnvCell::find_transit_cells @ 0052c820 → CLandCell::add_all_outside_cells;
+ * the terrain is CLandCell::find_env_collisions @ 00532f20). The Holtburg
+ * drudge statue's tunnel ramp (cell 0xA9B40177) runs down to 5.2 m under
+ * the town's terrain: on the terrain rule the body walked level on the
+ * terrain over the ramp until the sloped ceiling stopped it at x 66.8.
  */
 export function outdoorGroundY(src: OutdoorGroundSources, worldX: number, worldZ: number, fromY: number): number | null {
   const terrainY = src.terrainHeight(worldX, worldZ);
   if (src.floorHeight) {
     const bspFloor = src.floorHeight(worldX, worldZ, fromY);
+    if (bspFloor !== null && terrainY !== null && bspFloor < terrainY && src.cellAt?.(worldX, worldZ, bspFloor)) return bspFloor;
     if (bspFloor !== null && bspFloor >= (terrainY ?? 0) - 0.5) return Math.max(bspFloor, terrainY ?? 0);
   }
   return terrainY;

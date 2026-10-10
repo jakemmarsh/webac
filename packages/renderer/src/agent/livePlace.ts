@@ -19,10 +19,27 @@ export interface LivePlaceInput {
   cell: number | null | undefined;
   /** The object is placed in the world (drawn or simulated), not held, carried or out of the world. */
   placed: boolean;
+  /**
+   * Where the server last put it (ServerObject.serverPlace: cell + render-axis global metres), and whether
+   * the physics body moved worldX/Y/Z in the last moment (`bodyLive`). A body nobody steps (its cell is not
+   * loaded here, it has no mesh yet, the frame loop is stalled) stands where it was while the server moves
+   * the creature on: four rats on another floor of A Rat Nest kept the same distances for ten minutes, and a
+   * fellow by an indoor cell read 66–81 m off one second and 2 m the next (2026-10-10). Then the server's
+   * last position is the better one.
+   */
+  server?: { cell: number; worldX: number; worldY: number; worldZ: number } | null;
+  bodyLive?: boolean;
 }
 
+/** How recently the body must have moved the object for its position to be the live one, ms. */
+export const BODY_LIVE_MS = 1500;
+
 export function livePlace(o: LivePlaceInput): { cell: number; x: number; y: number; z: number } | null {
-  if (!o.placed || !Number.isFinite(o.worldX) || !Number.isFinite(o.worldZ)) return null;
+  if (!o.placed) return null;
+  if (o.bodyLive === false && o.server && Number.isFinite(o.server.worldX) && Number.isFinite(o.server.worldZ)) {
+    return livePlace({ worldX: o.server.worldX, worldY: o.server.worldY, worldZ: o.server.worldZ, cell: o.server.cell, placed: true });
+  }
+  if (!Number.isFinite(o.worldX) || !Number.isFinite(o.worldZ)) return null;
   const cell = (o.cell ?? 0) >>> 0;
   if (cell && (cell & 0xffff) >= 0x100) {
     const lbX = (cell >>> 24) & 0xff, lbY = (cell >>> 16) & 0xff;

@@ -246,3 +246,92 @@ describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('H
     for (const p of r.slice(0, -1)) if (!p.floor) expect(p.feet!).toBeCloseTo(94, 0);
   });
 });
+
+describe('AGENT.walk-drops-jumps — floor openings: up only by a stair, down as a fall your health takes, never across the air', () => {
+  // A hall (floor 0) under an air cell (no floor) with a 6 m-high opening between them; a walkway room
+  // (floor 6) opens onto the air; a ramp room joins the hall to the walkway; a second walkway across the air.
+  const LB = 0x12340000;
+  const H = LB | 0x100, A = LB | 0x101, W = LB | 0x102, R = LB | 0x103, W2 = LB | 0x104;
+  const UP = v(0, 0, 1), WALL = v(0, 1, 0);
+  const hole = (a: number, b: number) => ({ a, b, at: v(10, 0, 6), normal: UP, height: 0, bottom: 6, below: H, climb: false, landing: 0 });
+  const door = (a: number, b: number, at: { x: number; y: number; z: number }) => ({ a, b, at, normal: WALL, height: 3, bottom: at.z - 1.5 });
+  const graph = (withRamp: boolean): CellGraph => ({
+    landblock: LB,
+    airCells: new Set([A]),
+    doors: new Map([
+      [H, [hole(H, A), ...(withRamp ? [door(H, R, v(0, 0, 1.5))] : [])]],
+      [A, [hole(A, H), door(A, W, v(10, 5, 7.5)), door(A, W2, v(10, -5, 7.5))]],
+      [W, [door(W, A, v(10, 5, 7.5)), ...(withRamp ? [door(W, R, v(0, 10, 7.5))] : [])]],
+      [W2, [door(W2, A, v(10, -5, 7.5))]],
+      [R, withRamp ? [door(R, H, v(0, 0, 1.5)), door(R, W, v(0, 10, 7.5))] : []],
+    ]),
+  });
+
+  it('never up through the opening, which no floor climbs to: up the ramp instead', () => {
+    const r = findRoute(graph(true), H, v(10, -2, 0), W, v(10, 8, 6))!;
+    expect(r).not.toBeNull();
+    expect(r.some((p) => p.floor)).toBe(false);
+    expect(r.some((p) => p.x === 0 && p.y === 10)).toBe(true);
+    expect(findRoute(graph(false), H, v(10, -2, 0), W, v(10, 8, 6))).toBeNull();
+  });
+
+  it('down, a walk round beats a fall; with no walk, the fall, tagged with its height and landing, if your health takes it', () => {
+    expect(findRoute(graph(true), W, v(10, 8, 6), H, v(10, -2, 0))!.some((p) => p.drop !== undefined)).toBe(false);
+    const fall = findRoute(graph(false), W, v(10, 8, 6), H, v(10, -2, 0))!;
+    expect(fall.find((p) => p.floor)).toMatchObject({ x: 10, y: 0, z: 6, drop: 6, landing: 0 });
+    expect(findRoute(graph(false), W, v(10, 8, 6), H, v(10, -2, 0), [], { maxDrop: 5 })).toBeNull();
+  });
+
+  it('never across the air from one walkway to another (a body in it falls)', () => {
+    expect(findRoute(graph(false), W, v(10, 8, 6), W2, v(10, -8, 6))).toBeNull();
+  });
+});
+
+describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('Banderling Ruin (dungeon 0x01E0): the atrium (2026-10-10)', () => {
+  let g: CellGraph;
+  beforeAll(() => { g = loadCellGraph(openDat(DAT_PATHS.cell), openDat(DAT_PATHS.portal), 0x01e00000); });
+
+  it('reads the atrium: 0x01E00120 is air over the hall 0x01E00105, the opening between them 6 m up with no floor rising to it', () => {
+    expect(g.airCells!.has(0x01e00120)).toBe(true);
+    expect(g.airCells!.has(0x01e00105)).toBe(false);
+    const hole = g.doors.get(0x01e00105)!.find((d) => d.b === 0x01e00120)!;
+    expect(hole).toMatchObject({ below: 0x01e00105, climb: false, landing: 0 });
+    expect(hole.at.z).toBeCloseTo(6, 3);
+  });
+
+  it('from the south nook 0x01E00106 to the walkway room 0x01E0011F goes up the north ramp, never up through the opening', () => {
+    // Live: walk_to went for the doorway (10, −15) at z 6 straight from the hall, by way of the opening at (10, −20, 6).
+    const r = findRoute(g, 0x01e00106, v(10, -28.6, 0), 0x01e0011f, v(10, -12, 6))!;
+    expect(r).not.toBeNull();
+    expect(r.some((p) => p.floor)).toBe(false);
+    expect(r.some((p) => Math.abs(p.x - 10) < 0.5 && Math.abs(p.y + 20) < 0.5)).toBe(false);
+    // The ramp 0x01E0011C–0x01E0011E: doorways at feet 3 and 6 along local y ≈ 0 … −5.
+    expect(r.some((p) => p.feet !== undefined && Math.abs(p.feet - 3) < 0.1 && p.y > -2)).toBe(true);
+    expect(r.at(-1)).toEqual(v(10, -12, 6));
+  });
+
+  it('down from the walkway landing 0x01E00121 to the hall takes the ramp down, not a fall through the air', () => {
+    const r = findRoute(g, 0x01e00121, v(8.5, -30, 6), 0x01e00105, v(10, -22, 0))!;
+    expect(r.some((p) => p.drop !== undefined)).toBe(false);
+  });
+});
+
+describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('routes that stay on the floors a body can walk (players\' reports, 2026-10-10)', () => {
+  it('A Rat Nest (0x01DD): from the lower floor 0x01DD011C to the red rats in 0x01DD0116 it stays down at z −6, not back up through the entry 0x01DD015F', () => {
+    const g = loadCellGraph(openDat(DAT_PATHS.cell), openDat(DAT_PATHS.portal), 0x01dd0000);
+    const r = findRoute(g, 0x01dd011c, g.centers!.get(0x01dd011c)!, 0x01dd0116, v(21.8, -34, -6))!;
+    expect(r).not.toBeNull();
+    // The old route climbed to the entry (feet 0 at (30, −65..−75)) and then needed the hole at (30, −60).
+    for (const p of r) expect(p.feet ?? p.z).toBeLessThan(-2.5);
+  });
+
+  it('Banderling Ruin: from the SE walkway landing 0x01E00127 to the chest landing 0x01E00121 it never walks into the air between them', () => {
+    const g = loadCellGraph(openDat(DAT_PATHS.cell), openDat(DAT_PATHS.portal), 0x01e00000);
+    const r = findRoute(g, 0x01e00127, v(30, -30, 6), 0x01e00121, v(8.5, -30, 6))!;
+    // The old route went (25, −30) → (15, −30) at z 6, straight through the air cell 0x01E00124: a fall into the hall.
+    expect(r.some((p) => Math.abs(p.y + 30) < 0.5 && (Math.abs(p.x - 25) < 0.5 || Math.abs(p.x - 15) < 0.5))).toBe(false);
+    // The only walk: down the SE ramp, across the hall, up the west ramp, arriving on the landing's floor.
+    expect(r.at(-1)).toEqual(v(8.5, -30, 6));
+    expect(Math.min(...r.map((p) => p.feet ?? p.z))).toBeCloseTo(0, 1);
+  });
+});

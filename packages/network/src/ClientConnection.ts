@@ -62,6 +62,30 @@ import type { GameMessage, CharacterCreateResponseData, CharacterRestoreResponse
 export interface RoutinesGrant { token: string; server: string; account: string; local?: true }
 
 /** The bridge's `{"routines": …}` text answer, or null for any other text. */
+/** AGENT.hosted-mcp-connector — a relay call frame from the bridge (services/ws-tcp-bridge/src/relay.ts), or null. */
+export interface AgentCallFrame { id: number; method: string; args: unknown[]; deadlineMs: number }
+export function parseAgentCall(text: string): AgentCallFrame | null {
+  if (!text.startsWith('{"agent"')) return null;
+  try {
+    const a = (JSON.parse(text) as { agent?: { id?: unknown; method?: unknown; args?: unknown; deadlineMs?: unknown } }).agent;
+    if (!a || typeof a.id !== 'number' || typeof a.method !== 'string') return null;
+    return { id: a.id, method: a.method, args: Array.isArray(a.args) ? a.args : [], deadlineMs: typeof a.deadlineMs === 'number' ? a.deadlineMs : 30_000 };
+  } catch { return null; }
+}
+
+/** AGENT.hosted-mcp-connector, step 3 — the bridge's answer to a pairing code or an unpair, or null. */
+export interface PairingReply { kind: 'paired' | 'unpaired'; ok: boolean; message: string; /** unpaired: the bridge's time of the unpair (the tab's revokedBefore). */ at?: number }
+export function parsePairingReply(text: string): PairingReply | null {
+  if (!text.startsWith('{"paired"') && !text.startsWith('{"unpaired"')) return null;
+  try {
+    const j = JSON.parse(text) as { paired?: { ok?: unknown; message?: unknown; at?: unknown }; unpaired?: { ok?: unknown; message?: unknown; at?: unknown } };
+    const kind = j.paired ? 'paired' : 'unpaired';
+    const r = j.paired ?? j.unpaired;
+    if (!r || typeof r !== 'object') return null;
+    return { kind, ok: r.ok === true, message: typeof r.message === 'string' ? r.message : '', ...(typeof r.at === 'number' && Number.isFinite(r.at) ? { at: r.at } : {}) };
+  } catch { return null; }
+}
+
 export function parseRoutinesGrant(text: string): { grant: RoutinesGrant | null; reason: string | null; automation: boolean } | null {
   let j: unknown;
   try { j = JSON.parse(text); } catch { return null; }
@@ -127,6 +151,10 @@ export type ConnectionEventType =
   // AGENT.automation-allowlist — sent with every routines answer: data = true when the bridge
   // allowlists this account for the automation UI.
   | 'automationAccess'
+  // AGENT.hosted-mcp-connector — a relay call from the bridge's /mcp (data = { id, method, args, deadlineMs }).
+  | 'agentCall'
+  // Step 3: the bridge's answer to a pairing code or an unpair (data = PairingReply).
+  | 'agentPairing'
   | 'message';
 
 export interface ConnectionEvent {
@@ -456,13 +484,23 @@ export class ClientConnection {
     this.listeners = this.listeners.filter(l => l !== listener);
   }
 
-  /** Bridge text frames (not game packets): the routines grant. */
+  /** Bridge text frames (not game packets): the routines grant, relay calls. */
   private handleBridgeText(text: string): void {
     const grant = parseRoutinesGrant(text);
     if (grant) {
       this.emit({ type: 'routinesGrant', data: grant.grant, error: grant.reason ?? undefined });
       this.emit({ type: 'automationAccess', data: grant.automation });
+      return;
     }
+    const call = parseAgentCall(text);
+    if (call) { this.emit({ type: 'agentCall', data: call }); return; }
+    const pairing = parsePairingReply(text);
+    if (pairing) this.emit({ type: 'agentPairing', data: pairing });
+  }
+
+  /** AGENT.hosted-mcp-connector — a text frame to the bridge (a relay answer or the tab's relay state). */
+  sendBridgeText(text: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(text);
   }
 
   private emit(event: ConnectionEvent): void {
@@ -488,6 +526,13 @@ export class ClientConnection {
   /** Max timed login retries after a "two accounts" rejection (~2 min). */
   private static readonly MAX_LOGIN_REJECT_RETRIES = 12;
   private loginRejectRetryAttempts = 0;
+  /**
+   * This socket's login succeeded (a CharacterList arrived). A Logon error
+   * after that is not a refused login but ACE booting this session because
+   * the account logged in elsewhere (account_login_boots_in_use): never
+   * retried, or two pages take turns booting each other (2026-10-10).
+   */
+  private sessionPastLogin = false;
   private loginRejectRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -537,6 +582,7 @@ export class ClientConnection {
     this.stopConnectResponseRetry();
     this.resetSequencingState();
     this.preHandshakeQueue = [];
+    this.sessionPastLogin = false;
     this.lastPacketReceivedAt = Date.now();
     this.serverTimeoutEmitted = false;
     this.linkStatusAverages = new LinkStatusAverages();
@@ -1496,6 +1542,7 @@ export class ClientConnection {
           // A character list means the login fully succeeded — clear any
           // pending stale-session retry budget (ASSESS).
           this.loginRejectRetryAttempts = 0;
+          this.sessionPastLogin = true;
           if (this.loginRejectRetryTimer) {
             clearTimeout(this.loginRejectRetryTimer);
             this.loginRejectRetryTimer = null;
@@ -1587,7 +1634,8 @@ export class ClientConnection {
           // CORE.17.k.b — the event carries the code and whether a retry is
           // pending, so the renderer can pick the retail surface (Disconnected
           // screen / char-select dialog) when it is not.
-          const loginRetryScheduled = errorCode === CharacterError.Logon && this.scheduleLoginRetryAfterReject();
+          // Booted after a successful login (the account logged in elsewhere): the Disconnected screen, no retry.
+          const loginRetryScheduled = errorCode === CharacterError.Logon && !this.sessionPastLogin && this.scheduleLoginRetryAfterReject();
           this.emit({ type: 'error', error: `Server: ${userText}`, characterError: errorCode, loginRetryScheduled });
           break;
         }

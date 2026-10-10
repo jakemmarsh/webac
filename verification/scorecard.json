@@ -142,12 +142,11 @@
    ],
    "verdict": "close",
    "judged": "2026-10-10",
-   "evidence": "verification/sidebyside/dungeon-sconces/dungeon-sconces-sidebyside.png",
+   "evidence": "verification/sylsfear-canopy-bright-cards/sbs-tree-matched-0.184.png",
    "gaps": [
-    "VISUAL.sylsfear-canopy-bright-cards",
     "VISUAL.dungeon-scene-details"
    ],
-   "notes": "2026-10-10 after RENDER.cell-particles-delayed-light-set: delayed (blended/clip/fading) particle draws in cells now take the sun set as retail's FlushAlphaList does. Holtburg Dungeon stone hall before/after: sconce flames unchanged (luminous), the cobweb over the door darker (87/69/39 -> 80/63/36), nothing else. A retail player would still notice the Sylsfear canopy and the scene details already filed."
+   "notes": "2026-10-10 re-judged: at a matched phase (0.184, sun frozen at the outdoor hop like retail's tour) the Sylsfear canopy matches retail's dark mass with brighter lobes, so VISUAL.sylsfear-canopy-bright-cards was a phase mismatch and leaves the gaps. A direct dungeon login now uses retail's InitializeLights sun. Remaining: VISUAL.dungeon-scene-details."
   },
   {
    "id": "flow-movement",
@@ -157,13 +156,12 @@
    "retail": [],
    "verdict": "close",
    "judged": "2026-10-10",
-   "evidence": "verification/recon-obstacle-step-up/after-Holtburg.json",
+   "evidence": "verification/recon-obstacle-step-up/stand-after-Shoushi-post.json",
    "gaps": [
     "HARNESS.flow-movement-probe-beats",
-    "RECON.transition-stepup-stepdown-port.a.b",
-    "RECON.transition-stepup-stepdown-port.c.b.a"
+    "RECON.transition-stepup-stepdown-port.a.b"
    ],
-   "notes": "2026-10-10 cloud: obstacle step ups now land like retail (Holtburg scan before→after: 13 step-ups all at a raised 0.6 incl. 5 over boulder spheres → 8 cylinder step-ups at the real 0.266 lift, boulders met at the side slid round; walking onto the town portal dais steps up 0.266 and the server portals the body). A retail player would still notice the body sinking back into a low obstacle it stepped onto (c.b.a) and the open movement gaps listed."
+   "notes": "2026-10-10 cloud (c.b.a): a body on a low obstacle's top now stays there like retail. Teleloc onto the Shoushi 0.4 m post (r 0.05): feet 20.412 held for 3 s, where the old code sank them to the terrain at 20.0 inside the post (stand-before-Shoushi-post.json). Obstacle step ups land at the real lift (c.b). A retail player would still notice the landing velocity reset (a.b); the headless probes can't show run-speed beats (HARNESS…probe-beats)."
   },
   {
    "id": "flow-camera",

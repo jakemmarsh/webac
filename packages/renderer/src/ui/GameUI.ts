@@ -208,6 +208,7 @@ import { ACFontRenderer, OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { outlineCssFromArgb, DEFAULT_TEXT_OUTLINE_ARGB } from './TextOutline.js';
 import { attachPreworldScale as attachPreworldScaleShared } from './PreworldScale.js';
 import { debugBag } from '../utils/debugGlobals.js';
+import { ConnectScreen, type ConnectApi, type ConnectOutcome } from '../launcher/ConnectScreen.js';
 import { LauncherScreen, type LauncherKit, type LauncherOptions, type LauncherChoice } from '../launcher/LauncherScreen.js';
 import {
   descRef, parseDescRef, parseStateRef, findElementByPath, textStyleFromDesc, cssFromArgb, DEFAULT_TEXT_COLOR_ARGB,
@@ -310,6 +311,7 @@ import {
   loadUiChatFontsMapper, resolveChatFontDid, RETAIL_DEFAULT_CHAT_FONT_FACE, RETAIL_DEFAULT_CHAT_FONT_SIZE,
   RETAIL_DEFAULT_CHAT_FONT_DID, isChatFontChoiceValid,
 } from './ChatFont.js';
+import { withoutViewerFade } from '../scene/ViewerFade.js';
 import { buildPaperdollCamera, paperdollFigureRotationY, PAPERDOLL_AMBIENT, PAPERDOLL_DISTANT_LIGHT, PAPERDOLL_LIGHT_DIRECTION } from './PaperdollFraming.js';
 import {
   loadPaperdollHitTestDid, paperdollItemAt, partSelectionFlipLevels, partsForSelectionMask, selectionMaskFromObject,
@@ -371,6 +373,15 @@ export function collapseDatSpaceRuns(text: string): string {
 
 /** Options → Gameplay's dead-end buttons (Help Files, Urgent Assistance, Report Abuse), hidden. */
 export const OPTIONS_DEAD_END_BUTTONS = [0x10000205, 0x10000206, 0x10000207] as const;
+
+/**
+ * The chargen bar's dead-end Help button (0x2100003a:0x100003c9, tooltip
+ * "Bring up the in-game help system."), hidden. gmCharGenMainUI::
+ * ListenToElementMessage @ 004e9450 has no case for it; the screen's help is
+ * global message 0x7b → KeyStone::OpenHelp (ListenToGlobalMessage @ 004e9000),
+ * the retired Keystone plugin the Options "In-Game Help Files" button also led to.
+ */
+export const CHARGEN_DEAD_END_BUTTONS = [0x100003c9] as const;
 
 /** The character panel's stat-row template 0x21000045:0x10000248: name 0x1000012a, value 0x1000012b. */
 const STAT_ROW_NAME_REF = descRef(0x21000045, 0x10000248, 0x1000012a);
@@ -3719,6 +3730,9 @@ export class GameUI {
    */
   onStreamedFilesArrived(): void {
     this.reloadMissedDatAssets();
+    for (const cb of [...this.filesArrivedListeners]) {
+      try { cb(); } catch (e) { console.warn('[GameUI] files-arrived listener failed', e); }
+    }
     if (this.chatFontPending) this.applyChatFont();
     // An open portal-space tunnel built without its teleport object / animation.
     this.portalSpaceRenderer?.rebuildIfIncomplete();
@@ -5176,6 +5190,11 @@ export class GameUI {
    * screen (launcher/LauncherScreen.ts); resolves with the chosen world and
    * credentials. This class only lends it the DAT primitives (LauncherKit).
    */
+  /** AGENT.hosted-mcp-connector — Claude's connect page, drawn like the launcher (launcher/ConnectScreen.ts). */
+  showConnectClaude(api: ConnectApi, req: string): Promise<ConnectOutcome> {
+    return new ConnectScreen(this.launcherKit(), api, req).run();
+  }
+
   showLauncher(opts: LauncherOptions): Promise<LauncherChoice> {
     const screen = new LauncherScreen(this.launcherKit(), opts);
     const done = screen.run();
@@ -5183,8 +5202,15 @@ export class GameUI {
     return done;
   }
 
+  /** Pre-world screens that redraw when streamed files land (LauncherKit.onFilesArrived). */
+  private readonly filesArrivedListeners = new Set<() => void>();
+
   private launcherKit(): LauncherKit {
     return {
+      onFilesArrived: (cb) => {
+        this.filesArrivedListeners.add(cb);
+        return () => { this.filesArrivedListeners.delete(cb); };
+      },
       prepareScreen: () => {
         this.connectingMode = false;
         this.uiManager.setScreen('character-select');
@@ -5218,11 +5244,8 @@ export class GameUI {
         return r?.isReady ? r.lineHeight : 0;
       },
       // RECON.dom-chrome-sweep.d — the account field in the DialogFactory edit font.
-      bindEditField: (input, host, ref) => this.bindDatEditField(input, host, ref),
-      textAlign: (ref) => {
-        const j = this.datTextStyleFor(ref)?.hJustify;
-        return j === 1 ? 'center' : j === 3 || j === 5 ? 'right' : 'left';
-      },
+      bindEditField: (input, host, ref, hJustify) =>
+        this.bindDatEditField(input, host, ref, hJustify === undefined ? undefined : { hJustify }),
       onlineColor: AC_COLORS.onlineGreen,
       attachScale: (inner) => this.attachPreworldScale(inner),
       plate: (w, h) => this.buildDialogPlate(w, h),
@@ -6304,6 +6327,26 @@ export class GameUI {
     this.callbacks.onEnterWorld?.(char);
   }
 
+  /** AGENT.hosted-mcp-connector — the select screen's characters, as its list shows them. */
+  characterSelectList(): Array<{ name: string; pendingDeletion: boolean }> {
+    return this.selectScreen.slots.map((c) => ({ name: c.name, pendingDeletion: (c.deleteTime ?? 0) > 0 }));
+  }
+
+  /** AGENT.hosted-mcp-connector — enter the world as a named character the
+   *  select screen's own way: select its row (as a click does), then EnterGame.
+   *  Null when it started, else why not. */
+  enterCharacterNamed(name: string): string | null {
+    const slots = this.selectScreen.slots;
+    const i = slots.findIndex((c) => c.name.toLowerCase() === name.trim().toLowerCase());
+    if (i < 0) return `no character named ${name} on this account (${slots.map((c) => c.name).join(', ') || 'none'})`;
+    if ((slots[i].deleteTime ?? 0) > 0) return `${slots[i].name} is pending deletion`;
+    if (this.screenContainer.querySelector('#charsel-enteringworld')) return 'already entering the world';
+    this.selectScreen.selectCharacter(i);
+    this.renderCharacterSelect();
+    this.enterSelectedCharacter();
+    return null;
+  }
+
   showEnteringWorldDialog(): void {
     if (this.screenContainer.querySelector('#charsel-enteringworld')) return;
     const dlg = this.buildWaitDialog('charsel-enteringworld', getString(50695556) ?? 'Entering World');
@@ -6758,8 +6801,14 @@ export class GameUI {
       mkBarBtn('btn-next', 0x100003c7, 68, 13, 47, 44, '',
         () => { this.wizard.nextStep(); this.renderCharacterCreate(); }, !this.wizard.canGoNext);
     }
-    mkBarBtn('btn-help', 0x100003c9, 247, 21, 46, 24, getString(163389760) ?? 'Help',
-      () => { this.showChargenHelp(); });
+    // NO-DEAD-ENDS (Jake 2026-10-04) — Help (0x100003c9) is not built, and
+    // the layout's own copy is hidden (CHARGEN_DEAD_END_BUTTONS). A stand-in
+    // popup showed one page's instruction text on another (playwebac.com,
+    // 2026-10-10: the Heritage page showed the Appearance text).
+    for (const elemId of CHARGEN_DEAD_END_BUTTONS) {
+      const copy = this.chargenHandle?.elements.get(elemId);
+      if (copy) copy.style.visibility = 'hidden';
+    }
     // Exit (0x100003ca, message 1) shares Back's DoExit jump (LAB_004e9597):
     // the ID_CharGen_ExitWarning Yes / No dialog, Yes → the character-select
     // screen. Keep id 'btn-cancel' for the capture harnesses / tests that
@@ -6849,42 +6898,6 @@ export class GameUI {
     this.chargenVerificationPending = true;
     this.callbacks.onCharacterCreated?.(this.wizard);
     return true;
-  }
-
-  /**
-   * Help button (0x100003c9) — shows the current page's DAT instruction
-   * string in a dismissable overlay. The DAT wires p72=0x21000041 (help
-   * popup layout) with per-element p73 help text; this renders the
-   * page-level instruction as the closest equivalent.
-   */
-  private showChargenHelp(): void {
-    const helpByStep: Record<number, number> = {
-      [CreateStep.Heritage]: 43066563,    // generic customize text (heritage page has no page-level p23)
-      [CreateStep.Profession]: 37144559,  // "From this screen you can modify your profession and attributes…"
-      [CreateStep.Skills]: 24143443,      // "Use this screen to select and modify your character's skills…"
-      [CreateStep.Appearance]: 43066563,  // "You can customize the look of your character on this screen…"
-    };
-    const text = getString(helpByStep[this.wizard.currentStep] ?? 43066563)
-      ?? 'Use the arrows at the bottom of the screen to move through the character creation steps.';
-    const existing = document.getElementById('chargen-help-popup');
-    if (existing) { existing.remove(); return; }
-    const root = document.getElementById('chargen-root');
-    if (!root) return;
-    const pop = document.createElement('div');
-    pop.id = 'chargen-help-popup';
-    Object.assign(pop.style, {
-      position: 'absolute', left: '200px', top: '180px', width: '400px',
-      padding: '16px', zIndex: '50', cursor: 'pointer',
-      background: AC_COLORS.screenBg, border: `1px solid ${AC_COLORS.goldDim}`,
-    });
-    const span = document.createElement('span');
-    span.setAttribute('data-ac-text', text);
-    span.setAttribute('data-ac-color', AC_COLORS.textMed);
-    span.setAttribute('data-ac-maxwidth', '370');
-    pop.appendChild(span);
-    pop.addEventListener('click', () => pop.remove());
-    (root.firstElementChild ?? root).appendChild(pop);
-    this.replaceACTextElements(pop);
   }
 
   /* ── CORE.17.k.b.b.a.d — chargen hover tooltips (layout 0x21000041) ── */
@@ -13147,6 +13160,13 @@ export class GameUI {
   }
 
   /** Set drag-and-drop callbacks for inventory management. */
+  /** AGENT.vtank-window — an agent's move or merge, as a drag released on the inventory (the UI's own path). */
+  agentItemListDrop(source: WorldDropSource, target: ItemListDropTarget): boolean {
+    if (!this.dragCallbacks.onItemListDrop) return false;
+    this.dragCallbacks.onItemListDrop(source, target);
+    return true;
+  }
+
   setDragCallbacks(callbacks: typeof GameUI.prototype.dragCallbacks): void {
     this.dragCallbacks = callbacks;
   }
@@ -13168,7 +13188,8 @@ export class GameUI {
     // CORE.17.m — retail (gmPaperDollUI::RedressCreature @ 004a3bc0) clones
     // the player's CPhysicsObj at the origin with set_heading(191.3679):
     // square-on to the camera, turned 11.37° past it.
-    const clone = playerModel.clone(true);
+    // The camera's fade (first person hides the model) is the world view's, not the doll's.
+    const clone = withoutViewerFade(playerModel, () => playerModel.clone(true));
     // makeObject builds the doll from the Setup and ObjDesc alone, so the
     // live model's held weapon / shield / torch copies don't come along.
     stripHeldCopies(clone);
@@ -19028,6 +19049,11 @@ export class GameUI {
   }
 
   /** AGENT — one skill's base and buffed values by AC skill id (loot rules' character requirements), or null when unknown. */
+  /** AGENT.vtank-window — every skill with its training, for the macro's planners (VTank buffs trained skills). */
+  agentSkills(): Array<{ id: number; name: string; training: 'untrained' | 'trained' | 'specialized'; base: number; buffed: number }> {
+    return this.charInfo.skills.map((k) => ({ id: k.id, name: k.name, training: k.status === 'Specialized' ? 'specialized' : k.status === 'Trained' ? 'trained' : 'untrained', base: k.base, buffed: k.effective }));
+  }
+
   agentSkill(id: number): { base: number; buffed: number } | null {
     const s = this.charInfo.skills.find((k) => k.id === id);
     return s ? { base: s.base, buffed: s.effective } : null;
@@ -19042,11 +19068,44 @@ export class GameUI {
       'Attributes: ' + Object.entries(c.attributes).map(([k, a]) => `${ATTRIBUTE_LABELS[k] ?? k} ${a.buffed}${a.buffed !== a.base ? ` (base ${a.base})` : ''}`).join(', '),
       'Vitals: ' + Object.entries(c.vitals).map(([k, v]) => `${k} ${v.current}/${v.max}`).join(', '),
     ];
-    for (const status of ['Specialized', 'Trained', 'Untrained']) {
+    for (const status of ['Specialized', 'Trained']) {
       const list = c.skills.filter((s) => s.status === status);
       if (list.length) out.push(`${status} skills: ` + list.map((s) => `${s.name} ${s.effective}${s.effective !== s.base ? ` (base ${s.base})` : ''}`).join(', '));
     }
+    // Untrained and Unusable rows can be trained with credits (gmSkillUI's untrained footer:
+    // "Skill Credits To Train"), so each shows its SkillTable trainedCost: what ac_train_skill spends.
+    const trainCost = (id: number) => this.skillTable?.skills.get(id)?.trainedCost ?? 0;
+    const untrained = c.skills.filter((s) => s.status !== 'Specialized' && s.status !== 'Trained');
+    if (untrained.length) {
+      out.push('Untrained skills (credits to train): ' + untrained.map((s) => {
+        const cost = trainCost(s.id);
+        return `${s.name}${s.effective > 0 ? ` ${s.effective}` : ''}${cost > 0 ? ` [${cost} cr]` : ''}`;
+      }).join(', '));
+    }
     return out.join('\n');
+  }
+
+  /**
+   * AGENT — train an untrained skill with skill credits, as the skills panel's train button does
+   * (gmSkillUI::TrainSkill @ 0049c5f0 → TrainSkillDialogCallback @ 0049c210 → CM_Train::Event_TrainSkill;
+   * the agent's call is its "Yes" to the confirmation). Cost = SkillTable trainedCost.
+   */
+  agentTrainSkill(name: string): { ok: boolean; message: string; name?: string; cost?: number } {
+    const want = name.trim().toLowerCase();
+    const skill = this.charInfo.skills.find((s) => s.name.toLowerCase() === want)
+      ?? this.charInfo.skills.find((s) => s.name.toLowerCase().includes(want));
+    if (!skill) return { ok: false, message: `no skill called "${name}"` };
+    if (skill.status === 'Trained' || skill.status === 'Specialized') return { ok: false, message: `${skill.name} is already ${skill.status.toLowerCase()}; raise it with XP (ac_raise)` };
+    const cost = this.skillTable?.skills.get(skill.id)?.trainedCost ?? 0;
+    if (cost <= 0) return { ok: false, message: `${skill.name} can't be trained` };
+    const credits = this.charInfo.skillCredits;
+    if (cost > credits) return { ok: false, message: `training ${skill.name} costs ${cost} skill credits; you have ${credits}` };
+    if (!this.raiseCallbacks.onTrainSkill) return { ok: false, message: 'not in the world' };
+    this.raiseCallbacks.onTrainSkill(skill.id, cost);
+    // Optimistic, like agentRaise: the server's PrivateUpdateSkill / AvailableSkillCredits overwrite it.
+    this.charInfo.skillCredits -= cost;
+    skill.status = 'Trained';
+    return { ok: true, message: `trained ${skill.name} (${cost} skill credit${cost === 1 ? '' : 's'}; ${credits - cost} left)`, name: skill.name, cost };
   }
 
   /**
@@ -19099,7 +19158,7 @@ export class GameUI {
     const skill = this.charInfo.skills.find((s) => s.name.toLowerCase() === want)
       ?? this.charInfo.skills.find((s) => s.name.toLowerCase().includes(want));
     if (!skill) return { ok: false, message: `no attribute, vital or skill called "${stat}"` };
-    if (skill.status !== 'Trained' && skill.status !== 'Specialized') return { ok: false, message: `${skill.name} is ${skill.status.toLowerCase()}; train it in the skills panel first` };
+    if (skill.status !== 'Trained' && skill.status !== 'Specialized') return { ok: false, message: `${skill.name} is ${skill.status.toLowerCase()}; train it first with skill credits (ac_train_skill)` };
     const table = skill.status === 'Specialized' ? this.xpCostTables.specializedSkill : this.xpCostTables.trainedSkill;
     const { cost1 } = GameUI.skillRaiseCosts(table, skill.raises, skill.pp);
     const at = reached(skill.name, skill.base);
@@ -20769,11 +20828,11 @@ export class GameUI {
    * (EffectsPanelModel: startTime + duration − time since applied); −1 for
    * a permanent one. Cooldowns aren't effects and are left out.
    */
-  agentActiveEnchantments(nowSec = Date.now() / 1000): Array<{ name: string; remaining: number; beneficial: boolean }> {
-    const out: Array<{ name: string; remaining: number; beneficial: boolean }> = [];
+  agentActiveEnchantments(nowSec = Date.now() / 1000): Array<{ spellId: number; name: string; remaining: number; beneficial: boolean }> {
+    const out: Array<{ spellId: number; name: string; remaining: number; beneficial: boolean }> = [];
     for (const e of this.activeEnchantments.values()) {
       if (e.isCooldown) continue;
-      out.push({ name: e.name, beneficial: e.isBeneficial, remaining: e.duration < 0 ? -1 : Math.max(0, e.startTime + e.duration - (nowSec - e.appliedAt)) });
+      out.push({ spellId: e.spellId, name: e.name, beneficial: e.isBeneficial, remaining: e.duration < 0 ? -1 : Math.max(0, e.startTime + e.duration - (nowSec - e.appliedAt)) });
     }
     return out;
   }
@@ -21113,6 +21172,13 @@ export class GameUI {
   toggleAutomationPanel(): void {
     if (!this.automationModel) return;
     this.setPanelsWindowPanel(AUTOMATION_PANEL, !this.automationPanelVisible);
+  }
+
+  /** VirindiTank's /vt commands: run through the window's model; its answers print as [Automation] lines. */
+  automationCommand(line: string): void {
+    const m = this.vtankModel;
+    if (!m) return;
+    void m.command(line).then((lines) => { for (const l of lines) m.source.report(l); this.vtankRedraw?.(); });
   }
 
   /** `/automation` and the HUD strip: the VirindiTank-style window (the default surface). */
@@ -21529,6 +21595,31 @@ export class GameUI {
     this.automationMenuEl?.remove();
     this.automationMenuEl = null;
   }
+
+  private metaViews = new Map<string, HTMLDivElement>();
+
+  /** A meta's view (VirindiTank's Create View): a VVS-framed window of its buttons at their XML places. */
+  openMetaView(name: string, view: { title: string; width: number; height: number; buttons: Array<{ name: string; left: number; top: number; width: number; height: number; text: string }> }, click: (b: { name: string; left: number; top: number; width: number; height: number; text: string }) => void): void {
+    // The same view again (a rule that fires on every step) stays as it is: no flicker, no lost place.
+    const sig = JSON.stringify(view);
+    if (this.metaViews.get(name)?.dataset.metaViewSig === sig) return;
+    this.closeMetaView(name);
+    const kit = this.vtankKit();
+    const { win, body } = this.buildVTankFrame(view.title || name, view.width + 12, view.height + 35, `acjs.metaView.${name}`, () => this.closeMetaView(name));
+    win.dataset.metaView = name;
+    win.dataset.metaViewSig = sig;
+    win.style.zIndex = '9020';
+    for (const b of view.buttons) {
+      const el = kit.flatButton(b.text, () => click(b), b.width, b.height);
+      Object.assign(el.style, { position: 'absolute', left: `${b.left}px`, top: `${b.top}px` });
+      el.dataset.metaViewButton = b.name;
+      body.appendChild(el);
+    }
+    this.hudContainer.appendChild(win);
+    this.metaViews.set(name, win);
+  }
+  closeMetaView(name: string): void { this.metaViews.get(name)?.remove(); this.metaViews.delete(name); }
+  closeAllMetaViews(): void { for (const n of [...this.metaViews.keys()]) this.closeMetaView(n); }
 
   private openVTankDialog(title: string, W: number, H: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void): void {
     this.closeVTankDialog();
@@ -23877,6 +23968,22 @@ export class GameUI {
    * AGENT — the fellowship pane as text: name, leader, open or closed, XP
    * sharing, and each fellow's level and vitals; or how to start one.
    */
+  /** AGENT.vtank-window — your fellows (not you) with their vitals, for the macro's Helper (VTank: the fellowship's data). */
+  agentFellows(): Array<{ guid: number; name: string; health: { cur: number; max: number }; stamina: { cur: number; max: number }; mana: { cur: number; max: number } }> {
+    const f = this.fellowshipData;
+    if (!f) return [];
+    const self = f.selfGuid ?? this.playerGuid;
+    return f.fellows.filter((m) => m.guid !== self).map((m) => ({ guid: m.guid, name: m.name, health: { cur: m.healthCurrent, max: m.healthMax }, stamina: { cur: m.staminaCurrent, max: m.staminaMax }, mana: { cur: m.manaCurrent, max: m.manaMax } }));
+  }
+
+  /** AGENT.vtank-window — your fellowship's shape for Auto Fellow Mgmt: are you its leader, is it open, how many are in it. */
+  agentFellowshipInfo(): { leader: boolean; open: boolean; count: number } | null {
+    const f = this.fellowshipData;
+    if (!f) return null;
+    const self = f.selfGuid ?? this.playerGuid;
+    return { leader: f.leaderGuid === self, open: !!f.open, count: f.fellows.length };
+  }
+
   agentFellowship(): string {
     const f = this.fellowshipData;
     const reqs = `${this.optionsSettings.ignoreFellowshipRequests ? 'ignoring fellowship requests (action=requests name=accept to allow them)' : 'accepting fellowship requests'}${this.optionsSettings.autoAcceptFellowshipRequests ? ', automatically' : ''}`;
@@ -31093,6 +31200,22 @@ export class GameUI {
    * AGENT — the open windows by the names a player sees (Social shows its
    * tab), for observations and ac_close.
    */
+  /** AGENT — the open book or note (gmBookUI's BookModel): its object, title and pages; null text = not sent yet. */
+  agentBook(): { guid: number; title: string; pages: Array<{ author: string; text: string | null }> } | null {
+    const b = this.book;
+    if (!b.open || !b.pages) return null;
+    return { guid: b.bookId >>> 0, title: b.title, pages: b.pages.map((p) => ({ author: p.authorName, text: p.textIncluded ? p.pageText : null })) };
+  }
+
+  /** AGENT — ask for one page of the open book, the request turning to that page sends (BookGetPageData). */
+  agentBookPage(index: number): boolean {
+    const b = this.book;
+    const page = b.pages?.[index];
+    if (!b.open || !page || page.textIncluded || !this.bookCallbacks.pageData) return false;
+    this.bookCallbacks.pageData(b.bookId, index);
+    return true;
+  }
+
   agentOpenWindows(): string[] {
     const out: string[] = [];
     if (this.inventoryVisible) out.push('Inventory');
@@ -31155,6 +31278,11 @@ export class GameUI {
     if (this.automationPanelVisible) this.toggleAutomationPanel();
     this.hideExaminePanel();
     this.hideBookPanel();
+    // A panel that hands the window back when it hides (gmPanelUI 0x10000049: the book, the effects,
+    // vitae, character info, link status and mini-game panels) brought back the one it had displaced, so
+    // "close everything" with a book open over the Character panel left the Character panel open
+    // (2026-10-10). Hide whatever the window shows until it shows nothing.
+    for (let i = 0; i < 4 && this.panelsSlot.current; i++) this.setPanelsWindowPanel(this.panelsSlot.current, false);
   }
 
   /* ================================================================ */

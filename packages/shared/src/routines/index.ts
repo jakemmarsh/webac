@@ -5,3 +5,4 @@ export * from './vtank.js';
 export * from './vtankExpr.js';
 export * from './vtankOptions.js';
 export * from './vtankProfile.js';
+export * from './metaView.js';

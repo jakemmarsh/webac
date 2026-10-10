@@ -13,6 +13,7 @@ import * as THREE from 'three';
 import { makePlane, findWalkable, FLOOR_WALKABLE_Z } from '@ac/shared';
 import type { PhysicsPolygon, CollisionBSPNode, CollisionSphere } from '@ac/shared';
 import { DungeonCollision, terrainStepUpLift } from '@ac/renderer/world/DungeonCollision.js';
+import { outdoorGroundY } from '@ac/renderer/world/outdoorGround.js';
 
 type V = [number, number, number];
 
@@ -320,5 +321,85 @@ describe('obstacle step up = CTransition::step_up (CylSphere / Sphere)', () => {
     const [dx, dz] = dc.getAdjustedMovement(new THREE.Vector3(10, 0, 8.4), 0, 0.2);
     expect(dc.lastStepUp).toBe(0);
     expect(Math.hypot(dx, dz)).toBeLessThan(1e-6);
+  });
+});
+
+/**
+ * RECON.transition-stepup-stepdown-port.c.b.a — the step down's contact
+ * includes the CylSphere / Sphere obstacles (CheckOtherCells): the body that
+ * stepped up onto a stump's top or a boulder's walkable crown stands there
+ * (CCylSphere::step_sphere_down @ 0053a9b0, CSphere::step_sphere_down
+ * @ 00536d20) instead of settling back to the ground inside the obstacle.
+ */
+describe('obstacle tops are step-down contacts (CylSphere / Sphere step_sphere_down)', () => {
+  const DOWN = 0.4;
+  const terrain = { terrainHeight: () => 0 };
+
+  it('a body on a stump top stands on it: the ground is Height + r − lowerSphereHeight', () => {
+    const dc = new DungeonCollision();
+    dc.addCylinderObstacle('stump', 10, 10, 0.5, 0, 0.3);
+    const top = 0.3 + R - FEET;
+    expect(dc.getBodyFloorHeight(10, 10.2, top, DOWN)).toBeCloseTo(top, 6);
+    const contact = dc.stepDownContact(10, 10.2, top, DOWN);
+    expect(contact?.normal).toEqual({ x: 0, y: 1, z: 0 });
+    expect(contact?.fits).toBe(true);
+    // The outdoor ground rule picks the top over the terrain under it.
+    const ground = outdoorGroundY({ ...terrain, floorHeight: (x, z, y) => dc.getBodyFloorHeight(x, z, y, DOWN) }, 10, 10.2, top);
+    expect(ground).toBeCloseTo(top, 6);
+  });
+
+  it('the step up then the floor follow leave the body on the top, and walking across it is not a collision', () => {
+    const dc = new DungeonCollision();
+    dc.addCylinderObstacle('stump', 10, 10, 0.5, 0, 0.3);
+    dc.getAdjustedMovement(new THREE.Vector3(10, 0, 8.5), 0, 0.6);
+    const lift = dc.lastStepUp;
+    expect(lift).toBeGreaterThan(0);
+    const y = dc.getBodyFloorHeight(10, 9.1, lift, DOWN);
+    expect(y).toBeCloseTo(lift, 6);
+    // Resting r off the top, the feet sphere no longer overlaps the cylinder:
+    // the next step across it moves freely, with no step up.
+    const [dx, dz] = dc.getAdjustedMovement(new THREE.Vector3(10, y!, 9.1), 0, 0.3);
+    expect(dx).toBe(0);
+    expect(dz).toBeCloseTo(0.3, 6);
+    expect(dc.lastStepUp).toBe(0);
+  });
+
+  it('past the top edge (beyond radius − EPSILON + r) there is no contact: the body walks off to the ground', () => {
+    const dc = new DungeonCollision();
+    dc.addCylinderObstacle('stump', 10, 10, 0.5, 0, 0.3);
+    const top = 0.3 + R - FEET;
+    expect(dc.getBodyFloorHeight(10, 10 + 0.5 + R + 0.01, top, DOWN)).toBeNull();
+    const ground = outdoorGroundY({ ...terrain, floorHeight: (x, z, y) => dc.getBodyFloorHeight(x, z, y, DOWN) }, 10, 11.1, top);
+    expect(ground).toBe(0);
+  });
+
+  it('a top further below than 1.1 × the step down is no contact (interp < −0.1)', () => {
+    const dc = new DungeonCollision();
+    dc.addCylinderObstacle('stump', 10, 10, 0.5, 0, 0.3);
+    // Feet 1 m above the top: the lowered sphere does not reach it.
+    expect(dc.getBodyFloorHeight(10, 10, 1.3, DOWN)).toBeNull();
+    // A top higher than the search height is the step up's to climb, not the step down's.
+    expect(dc.getBodyFloorHeight(10, 10, 0, DOWN)).toBeNull();
+  });
+
+  it('a boulder crown is a contact at sqrt(reach² − dxy²) above its centre; its flank (normal Z ≤ FloorZ) is not', () => {
+    const dc = new DungeonCollision();
+    dc.addSphereObstacle('boulder', 10, 0, 10, 0.3);
+    const reach = 0.3 + R;
+    const crown = Math.sqrt(reach * reach - 0.3 * 0.3) - FEET;
+    const at = dc.getBodyFloorHeight(10, 10.3, crown, DOWN);
+    expect(at).toBeCloseTo(crown, 6);
+    const n = dc.stepDownContact(10, 10.3, crown, DOWN)!.normal;
+    expect(n.y).toBeCloseTo(Math.sqrt(reach * reach - 0.09) / reach, 6);
+    expect(n.y).toBeGreaterThan(FLOOR_WALKABLE_Z);
+    // 0.65 m off the axis the surface normal Z is ~0.52: no contact plane.
+    const flank = Math.sqrt(reach * reach - 0.65 * 0.65) - FEET;
+    expect(dc.getBodyFloorHeight(10, 10.65, flank, DOWN)).toBeNull();
+  });
+
+  it('a BSP floor above an obstacle top still wins (the highest landing)', () => {
+    const dc = collider([floor(5, 15, 0.5)]);
+    dc.addCylinderObstacle('stump', 10, 0, 0.5, 0, 0.3);
+    expect(dc.getBodyFloorHeight(10, 0, 0.5, DOWN)).toBeCloseTo(0.5, 4);
   });
 });

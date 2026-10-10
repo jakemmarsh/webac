@@ -13,7 +13,7 @@ import { Palette } from '../packages/dat-parser/src/file-types/Palette.js';
 import { DAT_PATHS, openDat } from './_harness/dat.js';
 import { VTCLASSIC_COLOR_SLOTS } from '../packages/shared/src/routines/vtank.js';
 import {
-  emptyRoutineDoc, importVTank, metToProfile, navCoords, parseMet, parseNav, parseUtl, utlToLoot, validateRoutineDoc, vtankKind,
+  emptyRoutineDoc, importVTank, navToRoute, metToProfile, navCoords, parseMet, parseNav, parseUtl, utlToLoot, validateRoutineDoc, vtankKind,
 } from '../packages/shared/src/routines/index.js';
 import { colourNear, lootRuleFor, vtcHsv } from '../packages/renderer/src/agent/RoutineEngine.js';
 
@@ -105,6 +105,36 @@ describe('.met', () => {
     ]);
     expect(problems).toEqual([]);
     expect(validateRoutineDoc({ ...emptyRoutineDoc('local-eor', 'a'), profiles: [p] })).toEqual([]);
+  });
+
+  it('Seconds in state (P), Time Left On Spell, Dist Any Route Pt and Chat Message Capture import as ours', () => {
+    const kv = (pairs: Array<[string, { t: 'i' | 's' | 'd'; v: number | string }]>) => ({ t: 'table' as const, cols: ['k', 'v'], rows: pairs.map(([k, v]) => [{ t: 's' as const, v: k }, v]) });
+    const rule = (cond: number, condData: unknown) => ({ cond, condData, act: 1, actData: { t: 's' as const, v: 'Default' }, state: 'Default' }) as never;
+    const { value: p, problems } = metToProfile('X', [
+      rule(22, { t: 'i', v: 30 }),
+      rule(23, kv([['sid', { t: 'i', v: 2 }], ['sec', { t: 'i', v: 600 }]])),
+      rule(25, kv([['dist', { t: 'd', v: 40 }]])),
+      rule(14, kv([['p', { t: 'i', v: 2 }], ['c', { t: 'i', v: 3 }], ['r', { t: 'd', v: 12.5 }]])),
+      rule(28, kv([['p', { t: 's', v: '^(?<who>\\w+) says' }], ['c', { t: 's', v: '0;2' }]])),
+    ]);
+    expect(p.states[0].rules.map((r) => r.when[0])).toEqual([
+      { kind: 'seconds-in-state-persistent', seconds: 30 },
+      { kind: 'spell-time-at-least', spell: '', spellId: 2, seconds: 600 },
+      // Meta distances are yards (a game metre): no conversion (metaf reference: DistToRteGE "(in yards)").
+      { kind: 'route-distance-at-least', meters: 40 },
+      { kind: 'monster-priority-count', priority: 2, count: 3, meters: 12.5 },
+      { kind: 'chat-capture', pattern: '^(?<who>\\w+) says', colors: [0, 2] },
+    ]);
+    expect(problems).toEqual([]);
+    expect(validateRoutineDoc({ ...emptyRoutineDoc('local-eor', 'a'), profiles: [p] })).toEqual([]);
+  });
+
+  it('a Follow navroute is a follow route; an NPC Talk point is talk-to', () => {
+    const follow = navToRoute('F', { mode: 'follow', nodes: [], follow: { name: 'Leader', guid: 1 } });
+    expect(follow).toEqual({ route: { name: 'F', mode: 'follow', points: [], follow: 'Leader' }, problems: [] });
+    const talk = navToRoute('T', { mode: 'once', nodes: [{ type: 7, ew: 33.6, ns: 42.1, z: 0, extra: ['Sean the Speedy', '37', 'True', '33.6', '42.1', '0'] }] });
+    expect(talk.route?.stops).toEqual([{ at: 0, do: [{ kind: 'talk-to', name: 'Sean the Speedy' }] }]);
+    expect(validateRoutineDoc({ ...emptyRoutineDoc('local-eor', 'a'), profiles: [{ name: 'P', modules: { buffs: false, vitals: false, combat: false, looting: false, navigation: true, inventory: false, service: false }, initialState: 'S', states: [{ name: 'S', rules: [] }], loot: [], buffSets: [], routes: [follow.route!, talk.route!, { name: 'Empty', mode: 'circular', points: [] }] }] })).toEqual([]);
   });
 
   it('Call state creates the states it goes to and returns to, and an empty state name gets one', () => {

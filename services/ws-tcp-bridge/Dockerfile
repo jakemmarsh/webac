@@ -27,6 +27,16 @@ COPY packages/shared/src/routines/vtank.ts ./packages/shared/src/routines/vtank.
 COPY packages/shared/src/routines/vtankExpr.ts ./packages/shared/src/routines/vtankExpr.ts
 COPY packages/shared/src/routines/vtankOptions.ts ./packages/shared/src/routines/vtankOptions.ts
 COPY packages/shared/src/routines/vtankProfile.ts ./packages/shared/src/routines/vtankProfile.ts
+COPY packages/shared/src/routines/metaView.ts ./packages/shared/src/routines/metaView.ts
+# The hosted connector's /mcp serves the ac-agent tool table (tools/ac-agent; no Playwright in it).
+COPY packages/renderer/src/agent/format.ts ./packages/renderer/src/agent/format.ts
+COPY tools/ac-agent/client.ts ./tools/ac-agent/client.ts
+COPY tools/ac-agent/eras.ts ./tools/ac-agent/eras.ts
+COPY tools/ac-agent/journal.ts ./tools/ac-agent/journal.ts
+COPY tools/ac-agent/mcp-server.ts ./tools/ac-agent/mcp-server.ts
+COPY tools/ac-agent/routineStore.ts ./tools/ac-agent/routineStore.ts
+COPY tools/ac-agent/state.ts ./tools/ac-agent/state.ts
+COPY tools/ac-agent/tools.ts ./tools/ac-agent/tools.ts
 RUN npx esbuild services/ws-tcp-bridge/src/bridge.ts --bundle --platform=node --target=node20 --format=cjs \
       --outfile=dist/bridge.cjs --external:bufferutil --external:utf-8-validate
 

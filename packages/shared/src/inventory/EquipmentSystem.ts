@@ -109,11 +109,19 @@ export class EquipmentSystem {
   equipItem(item: InventoryItem, slot: EquipMask): EquipResult {
     const unequipped: EquippedItem[] = [];
 
-    // If slot is occupied, unequip existing item first
-    const existing = this.equipped.get(slot);
-    if (existing) {
-      unequipped.push(existing);
-      this.equipped.delete(slot);
+    // An item is worn in one place: an earlier entry for it (the optimistic
+    // equip under the slot the client chose, then the server's WieldObject
+    // under the location it chose) goes, or the item is listed twice.
+    for (const [s, eq] of this.equipped) if (eq.id === item.id) this.equipped.delete(s);
+
+    // Whatever already covers any of these slots comes off (a pair of
+    // leggings worn as UpperLeg|LowerLeg is replaced by the next pair, not
+    // kept beside it).
+    for (const [s, eq] of this.equipped) {
+      if (s === slot || ((s as number) & (slot as number)) !== 0) {
+        unequipped.push(eq);
+        this.equipped.delete(s);
+      }
     }
 
     const equipped: EquippedItem = { ...item, slot };

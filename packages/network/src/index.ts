@@ -135,6 +135,7 @@ export {
   parseViewContents,
   encodeWindows1252,
   decodeWindows1252,
+  setString16Wire, getString16Wire,
   parseServerName,
   parseDDDBeginDDD, parseDDDDataMessage,
 } from './MessageSerializer.js';
@@ -161,6 +162,7 @@ export type {
   SetCharacterOptionsFields,
   MotionCommandEntry, RawMotionStateFields, MovementPositionFields,
   ServerNameData,
+  String16Wire,
   DDDDatType, DDDMissingIterationEntry, DDDBeginDDDData, DDDDataMessageData,
 } from './MessageSerializer.js';
 
@@ -176,8 +178,8 @@ export type {
 } from './ConnectionData.js';
 
 // Client connection (browser-side)
-export { ClientConnection, parseRoutinesGrant, probeBridgeHealth } from './ClientConnection.js';
-export type { ConnectionEventType, ConnectionEvent, ConnectionListener, BridgeHealth, HealthSocketLike, RoutinesGrant } from './ClientConnection.js';
+export { ClientConnection, parsePairingReply, parseRoutinesGrant, probeBridgeHealth } from './ClientConnection.js';
+export type { ConnectionEventType, ConnectionEvent, ConnectionListener, BridgeHealth, HealthSocketLike, RoutinesGrant, PairingReply } from './ClientConnection.js';
 export { hostClientConnection, NET_SNAPSHOT_INTERVAL_MS } from './NetWorker.js';
 export { createConnection } from './createConnection.js';
 export { Connection1999, VERSION_1999 } from './era1999/Connection1999.js';

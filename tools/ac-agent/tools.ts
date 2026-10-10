@@ -7,7 +7,7 @@
 import {
   formatEvents, formatInventory, formatObservation, formatSpells, formatTrace,
 } from '../../packages/renderer/src/agent/format.ts';
-import type { AgentEvent, AgentItem, AgentObservation, AgentResult, AgentSpell, AgentTracePoint } from '../../packages/renderer/src/agent/types.ts';
+import type { AgentEvent, AgentItem, AgentObservation, AgentResult, AgentSpell, AgentStatus, AgentTracePoint } from '../../packages/renderer/src/agent/types.ts';
 import { AgentClient, DEFAULT_PROFILE, requireClient, startDaemon } from './client.ts';
 import { listInfos, type DaemonInfo } from './state.ts';
 import { AGENT_ERAS, ERA_IDS } from './eras.ts';
@@ -15,6 +15,7 @@ import { NOTE_KINDS, type NoteKind, addNote, formatJournal, loadJournal, saveJou
 import { RoutineStore } from './routineStore.ts';
 import { EXAMPLE_HUNT_PROFILE, explainProfile, importVTank, validateRoutineDoc, type RoutineDoc } from '../../packages/shared/src/routines/index.ts';
 import { readFileSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { findDaemon } from './client.ts';
 
 const journalOf = (info: DaemonInfo) => loadJournal(info.era ?? 'eor', info.account, info.character);
@@ -55,8 +56,59 @@ function guidOrName(v: unknown): number | string {
 
 const result = (r: AgentResult): ToolOutput => ({ text: r.message, isError: !r.ok });
 
+/**
+ * What a game tool calls: one agent-API method by name. The local daemon
+ * (AgentClient) is the default; the bridge's hosted connector swaps in its
+ * relay to the player's own tab (useCaller), so one tool table serves both.
+ */
+export interface ToolCaller {
+  call<T = unknown>(method: string, args?: unknown[], timeoutMs?: number): Promise<T>;
+  notice: string | null;
+  /** The hosted connector's own view of this connection (ac_status): the bridge knows it without asking the tab. */
+  connection?(): HostedConnection;
+  /** The longest ac_wait this caller allows (the hosted connector caps it below the client's tool timeout). */
+  maxWaitMs?: number;
+}
+
+/** What the bridge knows about a hosted connection (docs/hosted-agent-connector.md §3, ac_status). */
+export interface HostedConnection {
+  account: string;
+  /** The characters this grant may play ('any', or the names). */
+  characters: 'any' | string[];
+  /** none: no logged-in tab; off: a tab with Claude switched off; on: Claude can play it. */
+  tab: 'none' | 'off' | 'on';
+  character: string | null;
+  screen: string | null;
+}
+
+/** ac_status's text, from the bridge's view and the tab's own (either can be missing). */
+export function formatStatus(conn: HostedConnection | null, tab: AgentStatus | null, tabError: string | null): string {
+  const lines: string[] = [];
+  if (conn) {
+    lines.push(`account ${conn.account}; this connection plays ${conn.characters === 'any' ? 'any of its characters' : `only ${conn.characters.join(', ')}`}`);
+    if (conn.tab === 'none') lines.push('game: not open. The player logs in at playwebac.com in a browser tab; Claude cannot log in.');
+    else if (conn.tab === 'off') lines.push('game: open, but Claude is switched off in that tab (the player types /automation pair or /automation claude)');
+  }
+  if (tab) {
+    lines.push(`screen: ${tab.screen}${tab.character ? `; in the world: ${tab.character}` : ''}`);
+    if (tab.screen === 'character-select') {
+      const chars = tab.characters.filter((c) => !c.pendingDeletion).map((c) => c.name);
+      lines.push(chars.length ? `characters: ${chars.join(', ')}. Enter with ac_enter_world.` : 'no characters on this account (Claude does not create characters)');
+    }
+    if (tab.goal) lines.push(`goal: ${tab.goal}`);
+    if (tab.control === 'player') lines.push('control: the player took over. Acting calls are refused until they have been idle 60 s; reading still works.');
+    else if (tab.control === 'paused') lines.push('control: paused by the player. Every call is refused until they type /automation resume.');
+  } else if (tabError && (!conn || conn.tab === 'on')) lines.push(`game: ${tabError}`);
+  return lines.join('\n');
+}
+/** The caller for this request when one is set (the hosted connector runs each MCP call inside one). */
+export const TOOL_CALLER = new AsyncLocalStorage<ToolCaller>();
+const callerFor = (profile?: string): ToolCaller => TOOL_CALLER.getStore() ?? requireClient(profile);
+/** The tools that need the local daemon itself (its browser, its files): not served by the hosted connector. */
+export const LOCAL_ONLY_TOOLS = new Set(['ac_start', 'ac_stop', 'ac_sessions', 'ac_look', 'ac_screenshot', 'ac_click', 'ac_note', 'ac_journal', 'ac_routines', 'ac_routine']);
+
 /** Put a pending "the session reloaded" notice in front of a tool's output. */
-function withNotice(c: AgentClient, out: ToolOutput): ToolOutput {
+function withNotice(c: ToolCaller, out: ToolOutput): ToolOutput {
   if (!c.notice) return out;
   const n = c.notice;
   c.notice = null;
@@ -67,7 +119,7 @@ function act(name: string, description: string, props: Props, required: string[]
   return {
     name, description, props: { ...props, ...PROFILE_PROP }, required,
     async run(a) {
-      const c = requireClient(a.profile);
+      const c = callerFor(a.profile);
       return withNotice(c, result(await c.call<AgentResult>(name.replace(/^ac_/, '').replace(/_([a-z])/g, (_, x) => x.toUpperCase()), toArgs(a), timeoutMs)));
     },
   };
@@ -84,7 +136,24 @@ export function defaultAttach(a: Record<string, unknown>, env: string | undefine
   return local ? undefined : env;
 }
 
-async function observeText(c: AgentClient, a: Record<string, any>): Promise<string> {
+/**
+ * ac_wait's arguments as the page's wait filter. "tell" (and "tells") is not an event type but the
+ * tool lists it: it means a chat line that is a tell, so it waits for those (a types=tell wait never
+ * woke, 2026-10-10). Other names pass through.
+ */
+export function waitFilter(a: Record<string, any>): { types?: string[]; chatMatch?: string; sinceSeq?: number } {
+  let types = a.types ? String(a.types).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : undefined;
+  let chatMatch: string | undefined = a.chat_match === undefined || a.chat_match === '' ? undefined : String(a.chat_match);
+  if (types?.some((t) => t === 'tell' || t === 'tells')) {
+    types = types.filter((t) => t !== 'tell' && t !== 'tells');
+    chatMatch = chatMatch ? `^\\(tell\\) .*(?:${chatMatch})` : '^\\(tell\\) ';
+    if (!types.length) types = undefined;
+  }
+  const since = a.since_seq === undefined || a.since_seq === '' ? undefined : Number(a.since_seq);
+  return { ...(types ? { types } : {}), ...(chatMatch ? { chatMatch } : {}), ...(since !== undefined && Number.isFinite(since) ? { sinceSeq: since } : {}) };
+}
+
+async function observeText(c: ToolCaller, a: Record<string, any>): Promise<string> {
   const obs = await c.call<AgentObservation>('observe', [{ radius: a.radius, max: a.max, filter: a.filter }]);
   return formatObservation(obs);
 }
@@ -160,7 +229,7 @@ export const TOOLS: AgentTool[] = [
       max: { type: 'number', description: 'Max objects listed (default 25).' },
       filter: { type: 'string', description: 'Only objects whose name or kind contains this text (e.g. "monster", "Drudge", "corpse").' },
     },
-    async run(a) { const c = requireClient(a.profile); return withNotice(c, { text: await observeText(c, a) }); },
+    async run(a) { const c = callerFor(a.profile); return withNotice(c, { text: await observeText(c, a) }); },
   },
   {
     name: 'ac_look',
@@ -222,21 +291,22 @@ export const TOOLS: AgentTool[] = [
   },
   {
     name: 'ac_wait',
-    description: 'Sleep until something happens instead of polling: returns as soon as a matching event arrives (chat, tell, death, target-died, task-done, vitals-low, attacked, object-added, level-up, portal), or after timeout. Use after starting a walk or an attack.',
+    description: 'Sleep until something happens instead of polling: returns as soon as a matching event arrives (chat, tell, death, target-died, task-done, vitals-low, attacked, object-added, level-up, portal), or after timeout. It counts from your last ac_observe or ac_wait, so something that arrived since then (a tell between your observe and this wait) returns at once. Use after starting a walk or an attack.',
     props: {
       ...PROFILE_PROP,
       types: { type: 'string', description: 'Comma-separated event types to wake on (default: any): chat, dialog, task-done, target-died, target-lost, vitals-low, attacked (any incoming attack, even a 0-damage hit or a miss), death, object-added, portal, level-up, screen.' },
-      chat_match: { type: 'string', description: 'Also wake on chat lines matching this regex.' },
+      chat_match: { type: 'string', description: 'Wake on chat lines matching this regex (case-insensitive), e.g. a partner\'s name. Alone it waits only for such a line; with types it also wakes on those types.' },
       timeout_s: { type: 'number', description: 'Seconds (default 20, max 300).' },
-      since_seq: { type: 'number', description: 'Only events after this seq (default: from now).' },
+      since_seq: { type: 'number', description: 'Only events after this seq (default: since your last ac_observe or ac_wait).' },
     },
     async run(a) {
-      const c = requireClient(a.profile);
-      const timeout = Math.min(Math.max(Number(a.timeout_s ?? 20), 1), 300) * 1000;
-      const evs = await c.call<AgentEvent[]>('waitFor', [{
-        types: a.types ? String(a.types).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
-        chatMatch: a.chat_match, sinceSeq: a.since_seq,
-      }, timeout], timeout + 5000);
+      const c = callerFor(a.profile);
+      const timeout = Math.min(Math.max(Number(a.timeout_s ?? 20), 1) * 1000, c.maxWaitMs ?? 300_000);
+      const filter = waitFilter(a);
+      // A page from before ac_wait counted from the last look (an older playwebac.com build, local or through
+      // the hosted relay, whose errors read "unknown agent method: wait" / "unknown method wait"): its waitFor.
+      const evs = await c.call<AgentEvent[]>('wait', [filter, timeout], timeout + 5000)
+        .catch((e: Error) => { if (/unknown (?:agent )?method:? wait\b/.test(String(e?.message ?? e))) return c.call<AgentEvent[]>('waitFor', [filter, timeout], timeout + 5000); throw e; });
       return withNotice(c, { text: evs.length ? formatEvents(evs) : `(nothing within ${timeout / 1000} s)` });
     },
   },
@@ -244,19 +314,51 @@ export const TOOLS: AgentTool[] = [
     name: 'ac_inventory',
     description: 'Your inventory: equipped items, main pack and side packs, with ids.',
     props: { ...PROFILE_PROP },
-    async run(a) { return { text: formatInventory(await requireClient(a.profile).call<AgentItem[]>('inventory')) }; },
+    async run(a) { return { text: formatInventory(await callerFor(a.profile).call<AgentItem[]>('inventory')) }; },
   },
   {
     name: 'ac_spells',
     description: 'Spells in your spellbook, optionally filtered by name/school text.',
     props: { ...PROFILE_PROP, filter: { type: 'string', description: 'Text to match (e.g. "Flame Bolt", "Life", "Self").' }, max: { type: 'number', description: 'Default 40.' } },
-    async run(a) { return { text: formatSpells(await requireClient(a.profile).call<AgentSpell[]>('spells', [a.filter ?? '', a.max ?? 40])) }; },
+    async run(a) { return { text: formatSpells(await callerFor(a.profile).call<AgentSpell[]>('spells', [a.filter ?? '', a.max ?? 40])) }; },
+  },
+  {
+    name: 'ac_status',
+    description: 'Where things stand: which account and characters this connection plays, whether the game tab is open and has Claude on, the screen (character select / world / portal space), the character in the world, and your goal line. Call it first, and after any "not open" or "disconnected" error.',
+    props: { ...PROFILE_PROP },
+    async run(a) {
+      const c = callerFor(a.profile);
+      const conn = c.connection?.() ?? null;
+      let tab: AgentStatus | null = null;
+      let err: string | null = null;
+      if (!conn || conn.tab === 'on') { try { tab = await c.call<AgentStatus>('status'); } catch (e) { err = (e as Error).message; } }
+      return withNotice(c, { text: formatStatus(conn, tab, err) || '(no status)' });
+    },
+  },
+  {
+    name: 'ac_enter_world',
+    description: 'At character select, enter the world as one of the account\'s characters, the way the player does (that character\'s row, then Enter). Claude never creates or deletes characters. Waits until you are in the world (up to 60 s).',
+    props: { ...PROFILE_PROP, character: { type: 'string', description: 'The character\'s name, as ac_status lists it.' } },
+    required: ['character'],
+    async run(a) {
+      const c = callerFor(a.profile);
+      return withNotice(c, result(await c.call<AgentResult>('enterWorld', [String(a.character ?? '')], 70_000)));
+    },
+  },
+  {
+    name: 'ac_goal',
+    description: 'Tell the player what you are doing: sets your goal line (e.g. "farm drudges near Holtburg until level 20"), shown in their chat and in ac_status. An empty text clears it.',
+    props: { ...PROFILE_PROP, text: { type: 'string', description: 'The goal, one line (≤ 200 characters).' } },
+    async run(a) {
+      const c = callerFor(a.profile);
+      return withNotice(c, result(await c.call<AgentResult>('goal', [String(a.text ?? '')])));
+    },
   },
   {
     name: 'ac_character',
     description: 'Your character sheet: attributes, vitals, skills (with training), level, XP and unassigned XP.',
     props: { ...PROFILE_PROP },
-    async run(a) { return { text: await requireClient(a.profile).call<string>('characterSheet') }; },
+    async run(a) { return { text: await callerFor(a.profile).call<string>('characterSheet') }; },
   },
   {
     name: 'ac_fellowship',
@@ -268,7 +370,7 @@ export const TOOLS: AgentTool[] = [
       target: { type: 'string', description: 'recruit: the player (id or name nearby).' },
     },
     async run(a) {
-      const c = requireClient(a.profile);
+      const c = callerFor(a.profile);
       const action = a.action ?? 'show';
       const arg = action === 'recruit' ? (a.target ? guidOrName(a.target) : undefined) : a.name;
       if (action === 'recruit' && !arg) return { text: 'recruit needs target= (the player to recruit)', isError: true };
@@ -285,7 +387,7 @@ export const TOOLS: AgentTool[] = [
       target: { type: 'string', description: 'swear: the player (id or name nearby). break: a vassal\'s name (omit to break from your patron).' },
     },
     async run(a) {
-      const c = requireClient(a.profile);
+      const c = callerFor(a.profile);
       const action = a.action ?? 'show';
       if (action === 'show') return { text: await c.call<string>('allegiance') };
       if (action === 'swear') {
@@ -303,7 +405,7 @@ export const TOOLS: AgentTool[] = [
     item: { type: 'string', description: 'Item id or name in your inventory.' },
     target: { type: 'string', description: 'Target id or name ("self" for yourself).' },
   }, ['item', 'target'], (a) => [guidOrName(a.item), String(a.target) === 'self' ? 'self' : guidOrName(a.target)]),
-  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E") or a relative offset. Returns when you arrive, get stuck, or after timeout; check ac_observe after.', {
+  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E") or a relative offset. Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after.', {
     target: { type: 'string', description: 'Object id (#…), nearby object name, or map coordinates like "42.1N, 33.6E".' },
     within: { type: 'number', description: 'Stop this close, metres (default 2).' },
     timeout_s: { type: 'number', description: 'Give up after this long (default 60).' },
@@ -317,7 +419,7 @@ export const TOOLS: AgentTool[] = [
     button: { type: 'string', description: 'Button label, e.g. "OK", "Yes", "No".' },
     index: { type: 'number', description: 'Which dialog (the DIALOG number in observe); default newest.' },
   }, ['button'], (a) => [String(a.button), a.index]),
-  act('ac_map', 'A text floor plan around you, built from the game\'s own movement collision: @ you, . floor you can walk to, : reachable floor over 1 m up/down, # walls/drops/unreachable, and nearby objects as letters with a legend. North is up, 1 character = 1 m. Use it to see rooms, doorways and exits when deciding where to go; ac_walk_to already paths around walls on its own.', {
+  act('ac_map', 'A text floor plan around you, built from the game\'s own movement collision: @ you, . floor you can walk to, : reachable floor over 1 m up/down, # walls/drops/unreachable, v a ledge you can drop off, ! a drop that would hurt too much, J floor only a jump reaches, and nearby objects as letters with a legend. North is up, 1 character = 1 m. Use it to see rooms, doorways and exits when deciding where to go; ac_walk_to already paths around walls on its own.', {
     radius: { type: 'number', description: 'Metres around you (5–25, default 15).' },
   }, [], (a) => [{ radius: a.radius }]),
   act('ac_close', 'Close an open window the way its close box does: name="Social", "Container", "Inventory", "Vendor", "Examine" … (observe lists them under "windows open"), or "all" (what Escape does, plus an open chest/corpse). Pop-up DIALOG lines are answered with ac_dialog instead.', {
@@ -339,7 +441,11 @@ export const TOOLS: AgentTool[] = [
     action: { type: 'string', description: 'view | add | accept | decline | reset | close', enum: ['view', 'add', 'accept', 'decline', 'reset', 'close'] },
     item: { type: 'string', description: 'For add: inventory item name or id.' },
   }, [], (a) => [a.action ?? 'view', a.item === undefined ? null : guidOrName(a.item)]),
-  act('ac_jump', 'Jump (forward if moving).', {}, [], () => []),
+  act('ac_jump', 'Jump. Hold longer to jump higher and further (as holding the jump key charges the power bar); forward=true runs forward through the jump (to cross a gap or get off a ledge), walk=true walks it.', {
+    hold_ms: { type: 'number', description: 'How long the jump key is held, ms (50–3000, default 350; about 1000 = full power).' },
+    forward: { type: 'boolean', description: 'Hold forward through the jump.' },
+    walk: { type: 'boolean', description: 'A walking (shorter) jump.' },
+  }, [], (a) => [{ holdMs: a.hold_ms === undefined ? undefined : Number(a.hold_ms), forward: a.forward === true || a.forward === 'true', walk: a.walk === true || a.walk === 'true' }]),
   act('ac_stop_moving', 'Stop any movement or walk task.', {}, [], () => []),
   act('ac_combat_mode', 'Switch stance: peace, melee, missile or magic (wields what you have equipped for it).', { mode: { type: 'string', description: 'peace | melee | missile | magic', enum: ['peace', 'melee', 'missile', 'magic'] } }, ['mode'], (a) => [String(a.mode)]),
   act('ac_attack', 'Attack a creature with your melee or missile weapon (switches to the right stance, faces it and keeps swinging until it dies, you stop, or the timeout). Use ac_wait for target-died.', {
@@ -369,13 +475,13 @@ export const TOOLS: AgentTool[] = [
     name: 'ac_keys',
     description: 'Look up keymap actions and their keys (e.g. filter "inventory", "spell", "camera").',
     props: { ...PROFILE_PROP, filter: { type: 'string', description: 'Text in the action name.' } },
-    async run(a) { return { text: await requireClient(a.profile).call<string>('keys', [a.filter ?? '']) }; },
+    async run(a) { return { text: await callerFor(a.profile).call<string>('keys', [a.filter ?? '']) }; },
   },
   {
     name: 'ac_trace',
     description: 'Where your character has been (position, cell, height, facing, task) every 0.5 s — for working out what just happened (stuck, fell, clipped into something).',
     props: { ...PROFILE_PROP, seconds: { type: 'number', description: 'How far back (default 30, max 120).' } },
-    async run(a) { return { text: formatTrace(await requireClient(a.profile).call<AgentTracePoint[]>('trace', [Math.min(Number(a.seconds ?? 30), 120)])) }; },
+    async run(a) { return { text: formatTrace(await callerFor(a.profile).call<AgentTracePoint[]>('trace', [Math.min(Number(a.seconds ?? 30), 120)])) }; },
   },
   {
     name: 'ac_routines',
@@ -503,6 +609,9 @@ export const TOOLS: AgentTool[] = [
     stat: { type: 'string', description: 'Attribute (Strength…), vital (Health/Stamina/Mana) or skill name (e.g. "War Magic").' },
     times: { type: 'number', description: 'How many raises (default 1).' },
   }, ['stat'], (a) => [String(a.stat), Number(a.times ?? 1)]),
+  act('ac_train_skill', 'Spend skill credits to train an untrained skill (e.g. "Life Magic", "Creature Enchantment", "Healing"). ac_character lists each untrained skill\'s cost in credits and your credits. A trained magic school lets you learn its spells from scrolls (ac_use the scroll).', {
+    skill: { type: 'string', description: 'Skill name.' },
+  }, ['skill'], (a) => [String(a.skill)]),
 ];
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));

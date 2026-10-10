@@ -76,6 +76,13 @@ export interface EraProfile {
    * name all thirteen. Absent = every heritage the world CharGen has.
    */
   heritages?: readonly number[];
+  /**
+   * How this era's server reads the client's strings (String16L): 'ace' for
+   * ACE and ClassicACE, which decode them as UTF-8 characters (see
+   * @ac/network setString16Wire; BUG.chat-nonascii-question-mark), else
+   * Windows-1252 (GDLE-family servers keep the bytes as retail sent them).
+   */
+  stringWire?: 'ace';
 }
 
 export const EOR_ERA_ID = 'eor';
@@ -89,6 +96,7 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     name: 'End of Retail',
     login: EOR_LOGIN_PROFILE,
     own: {},
+    stringWire: 'ace',
     source: '',
   },
   /**
@@ -100,6 +108,7 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     id: 'classicace-customdm',
     name: 'ClassicACE CustomDM',
     login: { clientVersion: 'c118', authStyle: 'account-password' },
+    stringWire: 'ace',
     own: {
       portal: { iterations: 20044, entry: null },
       cell: { iterations: 20011, entry: null },
@@ -119,6 +128,7 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     id: 'classicace-infiltration',
     name: 'ClassicACE Infiltration',
     login: { clientVersion: 'i104', authStyle: 'account-password' },
+    stringWire: 'ace',
     own: {
       portal: { iterations: 10006, entry: null },
       cell: { iterations: 10001, entry: null },

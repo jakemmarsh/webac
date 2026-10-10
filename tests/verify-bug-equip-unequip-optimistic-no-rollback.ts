@@ -120,3 +120,30 @@ describe('OptimisticEquipmentTracker', () => {
     expect(tracker.rollback(999, equip)).toBe(false);
   });
 });
+
+/**
+ * AGENT.play-reports-2026-10-10 (item 1) — an item is worn in one place.
+ * Bulwark's inventory listed a new pair of Chainmail Leggings twice under
+ * equipped (the optimistic equip under the client's slot, then the server's
+ * WieldObject under its own location) and the old, dropped pair as still worn.
+ */
+describe('EquipmentSystem keeps one entry per worn item', () => {
+  const LEGS = (EquipMask.UpperLegArmor | EquipMask.LowerLegArmor) as EquipMask;
+  it('a second equip of the same item under another location replaces the first', () => {
+    const equip = new EquipmentSystem();
+    const legs = makeItem({ id: 0x8000bfce, name: 'Chainmail Leggings' });
+    equip.equipItem(legs, EquipMask.UpperLegArmor);
+    equip.equipItem(legs, LEGS);
+    expect(equip.getAll().map((e) => [e.id, e.slot])).toEqual([[0x8000bfce, LEGS]]);
+  });
+  it('a new pair covering the same slots takes the old pair off, whatever key it was stored under', () => {
+    const equip = new EquipmentSystem();
+    equip.equipItem(makeItem({ id: 0x80007ab2, name: 'Chainmail Leggings' }), LEGS);
+    const r = equip.equipItem(makeItem({ id: 0x8000bfce, name: 'Chainmail Leggings' }), EquipMask.UpperLegArmor);
+    expect(r.unequipped?.map((e) => e.id)).toEqual([0x80007ab2]);
+    expect(equip.getAll().map((e) => e.id)).toEqual([0x8000bfce]);
+    // Different slots stay worn side by side.
+    equip.equipItem(makeItem({ id: 0x80000001, name: 'Leather Cap' }), EquipMask.HeadWear);
+    expect(equip.getAll().map((e) => e.id).sort()).toEqual([0x80000001, 0x8000bfce]);
+  });
+});

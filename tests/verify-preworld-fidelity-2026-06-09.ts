@@ -156,14 +156,14 @@ describe('preworld fidelity 2026-06-09 — GameUI (behavioural)', () => {
     expect(doc().getElementById('btn-cancel')).not.toBeNull();
   });
 
-  it('chargen bottom bar is the DAT 0x2100003a set (Help/Exit/Random at their fallback rects, DAT y in the 0x100003cf placeholder — no +10), no invented Cancel', () => {
+  it('chargen bottom bar is the DAT 0x2100003a set (Exit/Random at their fallback rects, DAT y in the 0x100003cf placeholder — no +10), no invented Cancel, no dead-end Help', () => {
     H.ui.wizard.currentStep = CreateStep.Heritage;
     H.ui.renderCharacterCreate();
     const rect = (id: string): string[] => {
       const b = doc().getElementById(id) as HTMLElement;
       return [b.style.left, b.style.top, b.style.width, b.style.height, (b.textContent ?? '').trim()];
     };
-    expect(rect('btn-help')).toEqual(['247px', '21px', '46px', '24px', 'Help']);
+    expect(doc().getElementById('btn-help')).toBeNull();
     expect(rect('btn-cancel')).toEqual(['379px', '21px', '39px', '24px', 'Exit']);
     expect(rect('btn-random')).toEqual(['486px', '21px', '75px', '24px', 'Random']);
   });

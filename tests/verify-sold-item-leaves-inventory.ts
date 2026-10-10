@@ -95,3 +95,23 @@ describe('BUG.sold-item-lingers-in-local-inventory', () => {
     expect(removeItemLeavingPlayer(ps, GIFT)).toEqual([]);
   });
 });
+
+/**
+ * AGENT.play-reports-2026-10-10 (item 1) — a worn item dropped on the ground:
+ * ACE HandleActionDropItem dequips it and sends InventoryPutObjIn3D
+ * (ServerSaysMoveItem @ 0058dbb0 clears the player's wield location), which
+ * main.ts's onInventoryPutIn3D now applies through removeItemLeavingPlayer.
+ * It used to only remove the inventory record, so the paperdoll and the agent's
+ * inventory kept the dropped pair as worn.
+ */
+describe('a worn item dropped to the ground leaves the equipment too', () => {
+  it('removeItemLeavingPlayer takes a worn item off the paperdoll and out of the pack', () => {
+    const ps = new PlayerState();
+    const LEGS = 0x80007ab2;
+    ps.inventory.addItem(item(LEGS, PLAYER), LEGS);
+    ps.equipment.equipItem(ps.inventory.getItem(LEGS)!, (EquipMask.UpperLegArmor | EquipMask.LowerLegArmor) as EquipMask);
+    expect(removeItemLeavingPlayer(ps, LEGS).map((r) => r.id)).toEqual([LEGS]);
+    expect(ps.equipment.isEquipped(LEGS)).toBe(false);
+    expect(ps.inventory.getItem(LEGS)).toBeUndefined();
+  });
+});

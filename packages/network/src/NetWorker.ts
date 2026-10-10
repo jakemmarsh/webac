@@ -32,6 +32,8 @@ export interface NetConnection {
   sendCharacterLogOff(): void;
   /** Ask the bridge for the /routines token; answered by a 'routinesGrant' event. */
   requestRoutinesGrant(): void;
+  /** A text frame to the bridge (the hosted connector's relay answers and state). */
+  sendBridgeText(text: string): void;
   checkHealth(): Promise<BridgeHealth>;
   getLinkStatus(now?: number): { connected: boolean; secondsSinceLastPacket: number };
   getPacketLossPercentage(): number;
@@ -56,7 +58,8 @@ export type NetCommand =
   | { t: 'disconnect' }
   | { t: 'send'; bytes: Uint8Array; queue?: GameMessageGroup }
   | { t: 'logOff' }
-  | { t: 'routines' };
+  | { t: 'routines' }
+  | { t: 'text'; text: string };
 
 export type NetReply =
   | { t: 'event'; event: ConnectionEvent; snap: NetSnapshot }
@@ -106,6 +109,7 @@ export function hostClientConnection(port: NetPort): () => void {
       case 'send': conn.sendMessage(cmd.bytes, cmd.queue); break;
       case 'logOff': conn.sendCharacterLogOff(); break;
       case 'routines': conn.requestRoutinesGrant(); break;
+      case 'text': conn.sendBridgeText(cmd.text); break;
     }
     port.postMessage({ t: 'snap', snap: snapshot() });
   });

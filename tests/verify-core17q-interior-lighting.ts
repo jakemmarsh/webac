@@ -119,6 +119,9 @@ describe('CORE.17.q — SkyboxRenderer sealed-interior mode', () => {
     sky.setFog(fog);
     sky.setSceneBackground(bg);
     sky.updateTimeOfDay(0.5);
+    // outdoors first: the landscape was loaded, so the sun freezes at its
+    // last tick (a login straight into the dungeon: verify-initial-sunlight)
+    sky.noteLandscapeLoaded();
     sky.setSealedInterior(true);
     sky.updateTimeOfDay(0.0);
     expect(sky.currentTimeOfDay).toBe(0.0);

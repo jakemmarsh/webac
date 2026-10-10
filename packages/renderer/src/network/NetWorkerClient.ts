@@ -81,6 +81,8 @@ export class NetWorkerClient implements NetConnection {
 
   requestRoutinesGrant(): void { this.post({ t: 'routines' }); }
 
+  sendBridgeText(text: string): void { this.post({ t: 'text', text }); }
+
   /** The bridge's text health probe needs no session: it runs on the page. */
   checkHealth(): Promise<BridgeHealth> { return probeBridgeHealth(this.url); }
 

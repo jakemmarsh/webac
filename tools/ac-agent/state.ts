@@ -83,3 +83,9 @@ export function accountForProfile(profile: string): string {
   const slug = profile.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 14) || 'agent';
   return slug.startsWith('agent') ? slug : `agent${slug}`;
 }
+
+/** A new character's default name for a profile ("claude" → "Claude", "mage" → "Claude Mage"). */
+export function defaultCharacterName(profile: string): string {
+  const word = profile.replace(/[^A-Za-z]/g, '').toLowerCase() || 'agent';
+  return word === 'claude' ? 'Claude' : `Claude ${word[0].toUpperCase()}${word.slice(1)}`.slice(0, 32);
+}

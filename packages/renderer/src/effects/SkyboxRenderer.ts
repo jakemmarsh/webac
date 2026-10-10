@@ -206,6 +206,14 @@ function sunDirectionFromHeadingPitch(heading: number, pitch: number): THREE.Vec
 }
 
 /**
+ * The sun before any landscape is loaded: `PrimD3DRender::InitializeLights`
+ * @ 0059abf0 writes `Render::world_lights.sunlight` = (0, 0, 0xbf800000 = −1)
+ * in AC axes and `sunlight_color` = 1.0 white; its length is the brightness.
+ */
+export const RETAIL_INITIAL_SUNLIGHT = { x: 0, y: 0, z: -1 } as const;
+export const RETAIL_INITIAL_SUNLIGHT_BRIGHTNESS = Math.hypot(RETAIL_INITIAL_SUNLIGHT.x, RETAIL_INITIAL_SUNLIGHT.y, RETAIL_INITIAL_SUNLIGHT.z);
+
+/**
  * DECOMP.camera-far-plane — retail `GameSky::Draw` @ 00506ff0 draws the sky
  * set alone with `Render::set_zfar(Render::zfar × 4)` (DEPTHTEST_ALWAYS), so
  * native sky domes out to ~10,087 m fit its frustum. We draw the sky in the
@@ -1032,6 +1040,25 @@ export class SkyboxRenderer {
    */
   private sealedInterior = false;
 
+  /**
+   * VISUAL.sylsfear-canopy-bright-cards — whether a landscape has been loaded
+   * in this client run. Retail lights the sun only from a loaded landscape:
+   * `LScape::set_landscape_lighting` @ 005054d0 (the light tick, gated by
+   * `loaded_cell_id != 0`) and `CellManager::ChangePosition` @ 004559b0's
+   * outdoor / seen_outside arm copy `LScape::sunlight` into
+   * `Render::world_lights`. Until then the sun is the one
+   * `PrimD3DRender::InitializeLights` @ 0059abf0 set at device init. So a
+   * login straight into a sealed cell lights the delayed leaf / glass
+   * batches with that sun, not with the pre-world clock's. Nothing resets it
+   * at logout (both globals live for the process).
+   */
+  private landscapeLoaded = false;
+
+  /** The player is in an outdoor or SeenOutside cell (the landscape is loaded). */
+  noteLandscapeLoaded(): void {
+    this.landscapeLoaded = true;
+  }
+
   setSealedInterior(sealed: boolean): void {
     const was = this.sealedInterior;
     this.sealedInterior = sealed;
@@ -1044,6 +1071,7 @@ export class SkyboxRenderer {
       this.ambientLight.color.copy(argbToColor(DUNGEON_AMBIENT_COLOR));
       this.ambientLight.intensity = DUNGEON_LIGHT_MINIMUM;
       setRetailLightLevels(0, DUNGEON_LIGHT_MINIMUM);
+      if (!this.landscapeLoaded) this.applyInitialSunlight();
     }
     this.publishBackground();
     if (was && !sealed) {
@@ -1051,6 +1079,20 @@ export class SkyboxRenderer {
       // re-lights from the clock, which never stopped.
       this.updateTimeOfDay(this.timeOfDay);
     }
+  }
+
+  /**
+   * `PrimD3DRender::InitializeLights` @ 0059abf0: `world_lights.sunlight` =
+   * (0, 0, −1) and `sunlight_color` = (1, 1, 1). `UpdateLightsInternal` makes
+   * the D3D sun from them (Diffuse = colour · |sunlight| = white 1.0,
+   * Direction = −sunlight), so the vector points at the light like the DAT
+   * sun's: straight below, lighting the faces that look down.
+   */
+  private applyInitialSunlight(): void {
+    this.sunLight.intensity = RETAIL_INITIAL_SUNLIGHT_BRIGHTNESS;
+    this.sunLight.color.setRGB(1, 1, 1);
+    // AC (x, y, z) → ours (x, z, y): AC z is our up axis.
+    this.sunLight.position.set(RETAIL_INITIAL_SUNLIGHT.x, RETAIL_INITIAL_SUNLIGHT.z, RETAIL_INITIAL_SUNLIGHT.y).multiplyScalar(200);
   }
 
   get isSealedInterior(): boolean {

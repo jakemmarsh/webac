@@ -14,6 +14,12 @@ import { wavePrefetch } from '../audio/WavePrefetch.js';
  * Loads SetupModel from portal.dat, creates child GfxObj meshes per part,
  * positions them using placement frames and parent hierarchy.
  */
+/** A placement frame on a part mesh (AC Z-up to Three.js Y-up: swap Y and Z). */
+function poseSetupPart(part: THREE.Object3D, frame: { origin: { x: number; y: number; z: number }; orientation: { w: number; x: number; y: number; z: number } }): void {
+  part.position.set(frame.origin.x, frame.origin.z, frame.origin.y);
+  part.quaternion.set(-frame.orientation.x, -frame.orientation.z, -frame.orientation.y, frame.orientation.w);
+}
+
 export class SetupModelRenderer {
   private portalDb: DatDatabase;
   private modelRenderer: ModelRenderer;
@@ -130,16 +136,7 @@ export class SetupModelRenderer {
           (levelId) => this.modelRenderer.createMesh(levelId, partTexOverrides, paletteColors, buildingPass));
       }
 
-      // Apply placement frame transform
-      // Convert AC Z-up to Three.js Y-up: swap Y and Z
-      const frame = placement.frame;
-      partMesh.position.set(frame.origin.x, frame.origin.z, frame.origin.y);
-      partMesh.quaternion.set(
-        -frame.orientation.x,
-        -frame.orientation.z,
-        -frame.orientation.y,
-        frame.orientation.w,
-      );
+      poseSetupPart(partMesh, placement.frame);
 
       // Apply scale if present (swap Y↔Z)
       if (placement.scale) {
@@ -160,6 +157,21 @@ export class SetupModelRenderer {
     }
 
     return group;
+  }
+
+  /**
+   * CPhysicsObj::SetPlacementFrame on a built setup mesh: every part moves to
+   * the placement's frame (a missing placement falls back to Default, as
+   * getPartPlacements does). Parts are found by their `part_<index>` names.
+   */
+  posePlacement(group: THREE.Object3D, setupId: number, placementKey: number): boolean {
+    const setup = this.loadSetupModel(setupId);
+    if (!setup) return false;
+    for (const placement of getPartPlacements(setup, placementKey)) {
+      const part = group.getObjectByName(`part_${placement.partIndex}`);
+      if (part && part.parent === group) poseSetupPart(part, placement.frame);
+    }
+    return true;
   }
 
   /**

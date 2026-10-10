@@ -30,6 +30,8 @@ export interface AgentObject {
   level?: number;
   /** Doors only: true when it stands open (Using an open door closes it). */
   open?: boolean;
+  /** Monsters only: its death has begun (the corpse follows); not a target. */
+  dying?: boolean;
   /** Set on a remembered place that is out of view: seconds since it was last seen. */
   seenAgo?: number;
 }
@@ -79,9 +81,24 @@ export interface AgentEvent {
     | 'vitals-low' | 'level-up' | 'portal' | 'screen' | 'dialog' | 'attacked';
   text: string;
   guid?: number;
+  /** Chat lines: the ChatMessageType the line came in as (Chat Message Capture's colour filter). */
+  chatType?: number;
 }
 
 export type AgentScreen = 'world' | 'portal-space' | 'character-select' | 'character-create' | 'loading' | 'unknown';
+
+/** AGENT.hosted-mcp-connector step 2 — the tab's own state for ac_status. */
+export interface AgentStatus {
+  screen: AgentScreen;
+  /** The character in the world, or null at character select / loading. */
+  character: string | null;
+  /** The account's characters as the select screen lists them. */
+  characters: Array<{ name: string; pendingDeletion: boolean }>;
+  /** Claude's goal line (ac_goal), or null. */
+  goal: string | null;
+  /** Who acts (agent/claudeControl.ts): Claude, the player who took over, or paused by the player. Absent locally. */
+  control?: 'claude' | 'player' | 'paused';
+}
 
 export interface AgentObservation {
   screen: AgentScreen;
@@ -164,6 +181,10 @@ export interface AgentSpell {
   self?: boolean;
   /** A buff: beneficial (SpellFlags.Beneficial 0x4) with a duration (an enchantment, not an instant heal). */
   buff?: boolean;
+  /** The spell table's family (category), difficulty (power) and duration in seconds (the macro's planners). */
+  category?: number;
+  power?: number;
+  duration?: number;
 }
 
 /** Result of every action: ok + a human line the LLM can read. */

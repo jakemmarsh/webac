@@ -143,6 +143,24 @@ export interface BridgeConfig {
    * against the account the game server reported in its CharacterList.
    */
   automationAccounts: string[];
+  /**
+   * AGENT.hosted-mcp-connector — BRIDGE_MCP_DEV_TOKENS: `token=server:account,…`. Each bearer token
+   * lets an MCP client (Claude Code) play that account's own open tab through /mcp. Empty: no /mcp.
+   * (Step 1 of docs/hosted-agent-connector.md; OAuth pairing replaces these tokens later.)
+   */
+  mcpTokens: string;
+  /**
+   * AGENT.hosted-mcp-connector step 3 — BRIDGE_MCP=on serves OAuth pairing (/.well-known, /oauth/*) and
+   * /mcp for paired clients. BRIDGE_PUBLIC_URL is the bridge's public https origin (metadata);
+   * BRIDGE_MCP_ACCOUNTS limits pairing to `server:account` / `account` entries (empty: any);
+   * BRIDGE_MCP_SECRET (≥ 32 characters) seals the tokens so pairings survive restarts (oauth.ts).
+   */
+  mcpOAuth: boolean;
+  mcpPublicUrl: string;
+  mcpAccounts: string[];
+  mcpSecret: string | null;
+  /** BRIDGE_CONNECT_PAGE: the game's connect screen (e.g. https://playwebac.com/); authorize redirects there. Unset: the bridge's plain page. */
+  mcpConnectPage: string | null;
 }
 
 /** Whether `account` on `server` is on the automation allowlist. */
@@ -316,6 +334,12 @@ export function resolveBridgeConfig(
     metricsToken: env.BRIDGE_METRICS_TOKEN || null,
     routinesDir: resolveRoutinesDir(env, production),
     automationAccounts: (env.BRIDGE_AUTOMATION_ACCOUNTS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
+    mcpTokens: env.BRIDGE_MCP_DEV_TOKENS ?? '',
+    mcpOAuth: (env.BRIDGE_MCP ?? '').toLowerCase() === 'on',
+    mcpPublicUrl: (env.BRIDGE_PUBLIC_URL ?? '').replace(/\/+$/, ''),
+    mcpAccounts: (env.BRIDGE_MCP_ACCOUNTS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
+    mcpSecret: env.BRIDGE_MCP_SECRET || null,
+    mcpConnectPage: /^https?:\/\//.test(env.BRIDGE_CONNECT_PAGE ?? '') ? env.BRIDGE_CONNECT_PAGE! : null,
   };
 }
 

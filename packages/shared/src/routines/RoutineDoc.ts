@@ -13,6 +13,8 @@
  * teleports, spawns or reads hidden data.
  */
 
+import type { VtankProfileData } from './vtankProfile.js';
+
 export const ROUTINE_SCHEMA_VERSION = 1;
 
 export type Vital = 'health' | 'stamina' | 'mana';
@@ -49,8 +51,16 @@ export type RoutineCondition =
   | { kind: 'vendor-closed' }
   /** The loaded route (load-route) has no points left / was never loaded. */
   | { kind: 'route-done' }
-  /** An enchantment you carry has at least this many seconds left. */
-  | { kind: 'spell-time-at-least'; spell: string; seconds: number }
+  /** An enchantment you carry has at least this many seconds left (by name, or by spell id: an imported meta). */
+  | { kind: 'spell-time-at-least'; spell: string; spellId?: number; seconds: number }
+  /** VirindiTank's Seconds in state (P): since the state began, not reset by a pause (ours: seconds-in-state is). */
+  | { kind: 'seconds-in-state-persistent'; seconds: number }
+  /** VirindiTank's Monster Priority Count Within Distance: at least `count` monsters whose Monsters-tab row has exactly this priority (metaf). */
+  | { kind: 'monster-priority-count'; priority: number; count: number; meters: number }
+  /** VirindiTank's Dist Any Route Pt >=: the nearest point of the loaded route is at least this far. */
+  | { kind: 'route-distance-at-least'; meters: number }
+  /** VirindiTank's Chat Message Capture: a chat line matches; its named groups go to capturegroup_<name>. */
+  | { kind: 'chat-capture'; pattern: string; colors?: number[] }
   /** At least `count` monsters whose name matches the pattern within range. */
   | { kind: 'monster-count'; pattern: string; count: number; meters: number }
   /** The macro's buff set (setting BuffSet) has a spell off or about to run out (VTank's "Need to buff"). */
@@ -80,6 +90,12 @@ export type RoutineAction =
   /** Go to a state, remembering where to come back to (Return). */
   | { kind: 'call-state'; state: string; returnTo: string }
   | { kind: 'return' }
+  /** VirindiTank's meta views: open a window of buttons from its XML (metaView.ts); close one or all. */
+  | { kind: 'create-view'; name: string; xml: string }
+  | { kind: 'destroy-view'; name: string }
+  | { kind: 'destroy-all-views' }
+  /** VirindiTank's NPC Talk: use the NPC until it says something to you (a tell), a few tries. */
+  | { kind: 'talk-to'; name: string }
   /** Make this route the one the macro walks (VirindiTank's Embed Nav). */
   | { kind: 'load-route'; route: string }
   /** Change one of the profile's settings for this run. */
@@ -189,7 +205,10 @@ export interface Route {
   name: string;
   /** What an import could not carry over (recall / chat / portal steps…). */
   note?: string;
-  mode: 'circular' | 'linear' | 'once';
+  /** follow: VirindiTank's Follow route, chasing the player named in `follow` (no points). */
+  mode: 'circular' | 'linear' | 'once' | 'follow';
+  /** A Follow route's player, by name. */
+  follow?: string;
   /** Map coordinates ("42.1N, 33.6E"), walked in order. */
   points: string[];
   /** What to do on arriving at a point (a VirindiTank route's recall / pause / chat / portal / vendor / jump steps). */
@@ -215,6 +234,8 @@ export interface RoutineProfile {
   navRoute?: string;
   /** The loot set made active at the start (VirindiTank's Looting profile); unset: `loot`. */
   lootSet?: string;
+  /** VirindiTank's Monsters / Items / Consumables / Buffs tabs (vtankProfile.ts). */
+  vtank?: VtankProfileData;
   /**
    * VirindiTank's macro: when no rule acts, fight (EnableCombat), loot
    * (EnableLooting), buff (EnableBuffing, set BuffSet) and walk the loaded

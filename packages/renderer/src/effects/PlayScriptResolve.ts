@@ -50,7 +50,11 @@ export interface PlayScriptSink<A> {
   loadTable(tableId: number): PhysicsScriptTable | null;
   setupScriptTable(setupId: number): number;
   loadScript(scriptId: number): PhysicsScript | null;
-  play(script: PhysicsScript, anchor: A): void;
+  /**
+   * Queue `script` on `anchor`: play_script (dropped while the object is out
+   * of the world), or with `internal` play_script_internal (queued anyway).
+   */
+  play(script: PhysicsScript, anchor: A, internal?: boolean): void;
 }
 
 export type PlayScriptOutcome =
@@ -67,7 +71,7 @@ export type PlayScriptOutcome =
  * for a missing entry (BUG.playscript-fallback-invented-art).
  */
 export function playScriptType<A>(
-  sink: PlayScriptSink<A>, guid: number, scriptType: number, intensity: number,
+  sink: PlayScriptSink<A>, guid: number, scriptType: number, intensity: number, internal = false,
 ): PlayScriptOutcome {
   const target = sink.target(guid);
   if (!target) return { played: false, reason: 'no-object' };
@@ -76,8 +80,23 @@ export function playScriptType<A>(
   if (!resolved) return { played: false, reason: 'no-table-entry' };
   const script = sink.loadScript(resolved.scriptId);
   if (!script) return { played: false, reason: 'no-script' };
-  sink.play(script, target.anchor);
+  sink.play(script, target.anchor, internal);
   return { played: true, scriptId: resolved.scriptId, tableId: resolved.tableId };
+}
+
+/**
+ * playScriptType in the object's message order. CObjectMaint keeps one
+ * blob queue per object and replays it in arrival order, so a script for
+ * an object that still has messages parked goes behind them rather than
+ * ahead (a Hidden parked while the mesh was building, then the UnHide,
+ * must run Hidden → UnHide); one that finds no object is parked. `internal`
+ * is set_hidden's play_script_internal (see PlayScriptSink.play).
+ */
+export function playScriptTypeInOrder<A>(
+  queue: PendingPlayScripts, sink: PlayScriptSink<A>, guid: number, scriptType: number, intensity: number,
+  now: number, internal = false,
+): PlayScriptOutcome | { queued: true } {
+  return queue.inOrder(guid, () => playScriptType(sink, guid, scriptType, intensity, internal), now);
 }
 
 /**
@@ -196,6 +215,20 @@ export class PendingPlayScripts {
     const list = this.byGuid.get(guid);
     if (list) list.push(e);
     else this.byGuid.set(guid, [e]);
+  }
+
+  /**
+   * Run a message for `guid` in its arrival order: behind messages still
+   * queued for it, else now, parked if it found no object. Returns the
+   * outcome, or `{ queued: true }`.
+   */
+  inOrder<R extends QueuedBlobOutcome>(guid: number, run: () => R, now: number): R | { queued: true } {
+    if (this.has(guid)) {
+      this.queue(guid, run, now);
+      return { queued: true };
+    }
+    const r = run();
+    return this.park(r, guid, run, now) ? { queued: true } : r;
   }
 
   /** True while `guid` has queued messages (a later one must queue behind them). */

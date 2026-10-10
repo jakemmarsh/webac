@@ -33,6 +33,8 @@ export interface UpdatePositionData {
   x: number; y: number; z: number;
   rw: number; rx: number; ry: number; rz: number;
   velocityX?: number; velocityY?: number; velocityZ?: number;
+  /** PositionPack placement_id: 0 when the flag is absent (PositionPack::UnPack). */
+  placementId?: number;
   instanceSequence: number;
   positionSequence: number;
   teleportSequence: number;
@@ -1707,6 +1709,16 @@ export class ServerMessageHandler {
         this.dispatchTurbineChatChannels(r);
         break;
 
+      // GDLE sends ChannelBroadcast (fellowship / patron / vassal / monarch
+      // lines) as a top-level 0x0147 message too (ChatMsgs.cpp ChannelChat,
+      // SendNetMessage(PRIVATE_MSG, game_event = FALSE)): channel, sender,
+      // text, the same body ACE puts in the 0xF7B0 event. Retail routes the
+      // opcode to CM_Communication::DispatchUI_ChannelBroadcast either way
+      // (UIQueueManager::ProcessNetBlobData @ 0055b000).
+      case GameEventType.ChannelBroadcast as number:
+        this.dispatchChannelBroadcast(r);
+        break;
+
       // GAP.89 — Enum opcodes ported from the original retail wire protocol
       // (present in PacketOpCodeNames.cs's debug name table and/or the
       // GameMessageOpcode.cs enum) for which ACE.Server has NO code path
@@ -2341,13 +2353,15 @@ export class ServerMessageHandler {
       // Wire format from GameEventChannelBroadcast.cs:
       //   channel u32 + senderName string16L (empty when echoing back to sender)
       //   + messageText string16L
-      case GameEventType.ChannelBroadcast: {
-        const channel = r.readUInt32();
-        const senderName = r.readString16();
-        const message = r.readString16();
-        this.handlers.onChannelBroadcast?.({ channel, senderName, message });
+      case GameEventType.ChannelBroadcast:
+        this.dispatchChannelBroadcast(r);
         break;
-      }
+      // GDLE sends InventoryRemoveObject wrapped in a game event (TradeManager
+      // trade completion: 0x24 + item, SendNetMessage(PRIVATE_MSG, game_event
+      // = TRUE)); ACE sends it as the top-level 0x0024 message. Same body.
+      case GameMessageOpcode.InventoryRemoveObject as number:
+        this.handlers.onInventoryRemove?.({ itemGuid: r.readUInt32() });
+        break;
       // ── InventoryServerSaveFailed: itemGuid u32 + WeenieError u32 ──
       // Sent ~180 times in ACE server source — covers nearly every drop/equip
       // failure that the simpler WeenieError event doesn't cover.
@@ -2913,9 +2927,8 @@ export class ServerMessageHandler {
       velocityZ = r.readFloat32();
     }
 
-    if (flags & PositionFlags.HasPlacementID) {
-      r.readUInt32(); // placementId
-    }
+    // PositionPack::UnPack: an absent placement id is 0.
+    const placementId = (flags & PositionFlags.HasPlacementID) ? r.readUInt32() : 0;
 
     // PositionFlags.IsGrounded — flag only, no data to read
 
@@ -2927,7 +2940,7 @@ export class ServerMessageHandler {
 
     this.handlers.onUpdatePosition?.({
       guid, flags, landblock, x, y, z, rw, rx, ry, rz,
-      velocityX, velocityY, velocityZ,
+      velocityX, velocityY, velocityZ, placementId,
       instanceSequence, positionSequence, teleportSequence, forcePositionSequence,
     });
   }
@@ -3357,6 +3370,14 @@ export class ServerMessageHandler {
   // ─── Debug logging ──────────────────────────────────────────────
 
   /** The ten uint32s of SetTurbineChatChannels (see the GameEvent case). */
+  /** ChannelBroadcast's body: channel u32, sender String16L, text String16L. */
+  private dispatchChannelBroadcast(r: BinaryReader): void {
+    const channel = r.readUInt32();
+    const senderName = r.readString16();
+    const message = r.readString16();
+    this.handlers.onChannelBroadcast?.({ channel, senderName, message });
+  }
+
   private dispatchTurbineChatChannels(r: BinaryReader): void {
     const allegiance = r.readUInt32();
     r.readUInt32(); // General (fixed 2)

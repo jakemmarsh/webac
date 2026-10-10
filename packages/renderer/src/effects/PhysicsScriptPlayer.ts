@@ -294,6 +294,15 @@ export class PhysicsScriptPlayer {
    */
   private emittersById: Map<THREE.Object3D, Map<number, ParticleSystem>> = new Map();
   /**
+   * FX.pending-emitter-misses-stop — emitters still waiting for their
+   * streamed files, by hook emitter id. Retail creates an emitter the
+   * moment its hook runs (DBObj::Get blocks), so a later StopParticle /
+   * DestroyParticle / same-id Create always finds it; here those land on
+   * the slot and apply, in hook order, when the files do. (An UnHide's
+   * StopParticle that missed its Hidden emitters left the bubbles running.)
+   */
+  private pendingEmitters: Map<THREE.Object3D, Map<number, { stopped: boolean; cancelled: boolean }>> = new Map();
+  /**
    * BUG.sky-emitters-fog-on-environs — the live emitters of the sky cell's
    * objects, and whether an Environs fog override is up: GameSky::Draw
    * @ 00506ff0 draws the sky with `SetFFFogEnable(LScape::m_override_enabled)`,
@@ -332,14 +341,28 @@ export class PhysicsScriptPlayer {
    * anchor-position lookups are accurate before any later reposition.
    */
   play(script: PhysicsScript, anchor: THREE.Object3D): void {
-    if (!script.steps.length) return;
     // DECOMP.scripts-replayed-on-reentry — play_script drops it outright.
     if (this.suspendedAnchors.has(anchor)) return;
+    this.playInternal(script, anchor);
+  }
+
+  /**
+   * CPhysicsObj::play_script_internal @ 00510cd0 itself: no cell test, so
+   * the script queues on an object out of the world and runs once it is
+   * back (update_object resumes). set_hidden @ 00514c60 plays its Hidden /
+   * UnHide scripts this way (as do InitDefaults and makeObject): an UnHide
+   * that lands while the object's cell is still loading must not be lost,
+   * or the Hidden script's bubbles and fade outlive the Hidden state.
+   */
+  playInternal(script: PhysicsScript, anchor: THREE.Object3D): void {
+    if (!script.steps.length) return;
     const st = this.stateFor(anchor);
     const last = st.scripts[st.scripts.length - 1];
     const start = last ? last.start + last.length : st.clock;
     st.scripts.push({ script, start, length: scriptLength(script) });
     if (st.scripts.length === 1) st.hookIndex = -1;
+    // Out of the world, update_object does not run: it waits for the return.
+    if (this.suspendedAnchors.has(anchor)) return;
     this.runScripts(anchor, st);
     this.processHooks(anchor, st);
   }
@@ -654,6 +677,11 @@ export class PhysicsScriptPlayer {
       for (const system of byId.values()) this.deps.spellEffects.removeParticleSystem(system);
       this.emittersById.delete(anchor);
     }
+    const pendingById = this.pendingEmitters.get(anchor);
+    if (pendingById) {
+      for (const slot of pendingById.values()) slot.cancelled = true;
+      this.pendingEmitters.delete(anchor);
+    }
   }
 
   /**
@@ -753,6 +781,13 @@ export class PhysicsScriptPlayer {
       if (existing) for (const [id, sys] of byId) existing.set(id, sys);
       else this.emittersById.set(to, byId);
     }
+    const pendingById = this.pendingEmitters.get(from);
+    if (pendingById) {
+      this.pendingEmitters.delete(from);
+      const existing = this.pendingEmitters.get(to);
+      if (existing) for (const [id, slot] of pendingById) existing.set(id, slot);
+      else this.pendingEmitters.set(to, pendingById);
+    }
     const systems = this.objectSystems.get(from);
     if (systems) {
       // Each emitter follows its part on the new mesh (the old parts are disposed).
@@ -840,6 +875,11 @@ export class PhysicsScriptPlayer {
   }
 
   private destroyEmitter(anchor: THREE.Object3D, emitterId: number): void {
+    const slot = this.pendingEmitters.get(anchor)?.get(emitterId >>> 0);
+    if (slot) {
+      slot.cancelled = true;
+      this.pendingEmitters.get(anchor)!.delete(emitterId >>> 0);
+    }
     const byId = this.emittersById.get(anchor);
     const system = byId?.get(emitterId >>> 0);
     if (!byId || !system) return;
@@ -850,6 +890,8 @@ export class PhysicsScriptPlayer {
 
   /** Whether the object's emitter table holds a live emitter under `emitterId`. */
   private hasLiveEmitter(anchor: THREE.Object3D, emitterId: number): boolean {
+    // One still waiting for its files is live: retail would have built it.
+    if (this.pendingEmitters.get(anchor)?.has(emitterId >>> 0)) return true;
     const system = this.emittersById.get(anchor)?.get(emitterId >>> 0);
     // ParticleManager::UpdateParticles removes an emitter the tick its
     // UpdateParticles returns 0 — a done / disposed system is not in the table.
@@ -872,12 +914,30 @@ export class PhysicsScriptPlayer {
     // falls through to the normal path below).
     const pending = arrived ? null : this.deps.emitterPending?.(data.emitterInfoId >>> 0);
     if (pending) {
-      pending.then(() => {
+      const slot = { stopped: false, cancelled: false };
+      if (emitterId !== 0) {
+        const slots = this.pendingEmitters.get(anchor) ?? new Map<number, { stopped: boolean; cancelled: boolean }>();
+        this.pendingEmitters.set(anchor, slots);
+        slots.set(emitterId, slot);
+      }
+      const settle = (): THREE.Object3D => {
         // FX.pending-emitter-orphaned-by-rebuild — the object may have been
         // rebuilt meanwhile (transferAnchor): the emitter goes on its mesh now.
         const cur = this.currentAnchor(anchor);
-        if (cur.parent) this.createParticleEmitter(data, cur, cur.getWorldPosition(new THREE.Vector3()), true);
-      }, () => { /* fetch failed: the effect is skipped */ });
+        const slots = this.pendingEmitters.get(cur);
+        if (slots?.get(emitterId) === slot) {
+          slots.delete(emitterId);
+          if (slots.size === 0) this.pendingEmitters.delete(cur);
+        }
+        return cur;
+      };
+      pending.then(() => {
+        const cur = settle();
+        if (slot.cancelled || !cur.parent) return;
+        this.createParticleEmitter(data, cur, cur.getWorldPosition(new THREE.Vector3()), true);
+        // A StopParticle that came first: created, then stopped, as retail ran them.
+        if (slot.stopped && emitterId !== 0) this.emittersById.get(cur)?.get(emitterId)?.stop();
+      }, () => { settle(); /* fetch failed: the effect is skipped */ });
       return;
     }
     const info = this.deps.loadEmitterInfo(data.emitterInfoId);
@@ -1159,6 +1219,8 @@ export class PhysicsScriptPlayer {
         // live ones play out (the windup's hand glow when the hands lower).
         const data = hook as StopParticleHookData;
         this.emittersById.get(anchor)?.get(data.emitterId >>> 0)?.stop();
+        const slot = this.pendingEmitters.get(anchor)?.get(data.emitterId >>> 0);
+        if (slot) slot.stopped = true;
         break;
       }
       case AnimationHookType.TextureVelocity: {

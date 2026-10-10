@@ -5,6 +5,7 @@
  */
 import { expect, vi } from 'vitest';
 import { compassToYaw, type AgentApi, type AgentHost, type AgentHostObject, type AgentHostSelf } from '../../packages/renderer/src/agent/AgentApi.ts';
+import { getJumpVelocity } from '@ac/shared';
 
 export const HOLTBURG = 0xa9b40019; // landblock 0xA9,0xB4 outdoor cell
 
@@ -76,10 +77,14 @@ export class FakeHost implements AgentHost {
   cancelAttack = () => { this.sent.push('cancel'); };
   cast = (id: number, t: number | null) => { this.sent.push(`cast ${id} ${t === null ? 'self' : t.toString(16)}`); return true; };
   chat = (text: string) => { this.chats.push(text); };
-  key = (code: string, down: boolean) => { if (down) this.keys.add(code); else this.keys.delete(code); };
   setYaw = (y: number) => { this.me.yaw = y; };
   pickUp = (g: number) => { this.sent.push(`pickup ${g.toString(16)}`); return true; };
-  drop = () => true;
+  drop = (_g: number) => true;
+  /** Wall-clock ms for remembered places; unset = Date.now(). */
+  wallClock: (() => number) | undefined = undefined;
+  /** The open book (ac_use on a readable) and its page requests; unset = the host has none. */
+  book: AgentHost['book'] = undefined;
+  bookPage: AgentHost['bookPage'] = undefined;
   give = (t: number, i: number, n: number) => { this.sent.push(`give ${i.toString(16)} to ${t.toString(16)} x${n}`); return true; };
   wield = () => true;
   appraised: number[] = [];
@@ -112,6 +117,8 @@ export class FakeHost implements AgentHost {
     this.stats.set(name, from + 1);
     return { ok: true, message: `raised ${name}`, name, from, to: from + 1, cost };
   };
+  trained: string[] = [];
+  trainSkill = (s: string) => { this.trained.push(s); return { ok: true, message: `trained ${s}`, name: s, cost: 4 }; };
   pressed: string[] = [];
   press = (k: string) => { this.pressed.push(k); return { ok: true, message: `pressed ${k}` }; };
   keyBindings = (f: string) => [{ name: 'Show/Hide Inventory', keys: ['F12'] }, { name: 'Toggle Autorun', keys: [] }].filter((k) => k.name.toLowerCase().includes(f.toLowerCase()));
@@ -138,6 +145,7 @@ export class FakeHost implements AgentHost {
   /** Optional walls (landblock-local x, y → blocked): the body stops at them, and navProbe sees them. */
   wall: ((x: number, y: number) => boolean) | null = null;
   physics(dtMs: number): void {
+    if (this.floors) return this.physics3d(dtMs);
     if (!this.keys.has('KeyW')) return;
     const speed = 4; // m/s
     const step = (speed * dtMs) / 1000;
@@ -147,8 +155,127 @@ export class FakeHost implements AgentHost {
     this.me.x = nx;
     this.me.y = ny;
   }
+
+  /**
+   * AGENT.walk-drops-jumps — an optional world of floors (landblock-local x, y → the floor heights
+   * there, any order). The body walks on a floor (a step of at most STEP up or down; a ledge stops
+   * it, as the client's edge slide does), and jumps: Space charges (1 s to full), its release
+   * launches a standing long jump at the forward speed of the keys held then (4 m/s, 3.12 with
+   * Shift) and getJumpVelocity(load 0, Jump 100, power) up, flown at 30 Hz and landing on the
+   * first floor its feet reach. The navigation hooks (navProbe / navFloor / navAirStep / jumpLaunch)
+   * answer from the same world.
+   */
+  floors: ((x: number, y: number) => number[]) | null = null;
+  static readonly STEP = 0.6;
+  jumpSkill = 100;
+  airborne: { vx: number; vy: number; vz: number } | null = null;
+  private chargeAt: number | null = null;
+  /** Every launch: power, forward speed, where from. */
+  launches: Array<{ power: number; forward: number; walk: boolean; x: number; y: number; z: number }> = [];
+  private get ox(): number { return ((HOLTBURG >>> 24) & 0xff) * 192; }
+  private get oy(): number { return ((HOLTBURG >>> 16) & 0xff) * 192; }
+  /** The floor at local (x, y) at or below z (+5 cm). */
+  floorBelow(x: number, y: number, z: number): number | null {
+    const fs = (this.floors?.(x, y) ?? []).filter((f) => f <= z + 0.05);
+    return fs.length ? Math.max(...fs) : null;
+  }
+  /** A body with feet at z can be at local (x, y): no wall, no floor top in its way above its feet (`rise`: the step it may take up). */
+  private clear(x: number, y: number, z: number, rise = FakeHost.STEP): boolean {
+    if (this.wall && this.wall(x, y)) return false;
+    return !(this.floors?.(x, y) ?? []).some((f) => f > z + rise && f < z + 1.8);
+  }
+  /** A walking step from feet z to local (x, y): the floor there, or null (a wall, a riser, a ledge). */
+  private walkStep(x: number, y: number, z: number): number | null {
+    if (!this.clear(x, y, z)) return null;
+    const f = this.floorBelow(x, y, z + FakeHost.STEP);
+    return f !== null && z - f <= FakeHost.STEP ? f : null;
+  }
+  private airMove(x: number, y: number, z: number, dx: number, dy: number): { x: number; y: number } {
+    const n = Math.max(1, Math.ceil(Math.hypot(dx, dy) / 0.05));
+    let px = x, py = y;
+    for (let i = 1; i <= n; i++) {
+      const tx = x + (dx * i) / n, ty = y + (dy * i) / n;
+      if (!this.clear(tx, ty, z, 0.05)) break;
+      px = tx; py = ty;
+    }
+    return { x: px, y: py };
+  }
+  private launchOf(power: number, walk: boolean): { forward: number; up: number; chargeSeconds: number } {
+    return { forward: walk ? 3.12 : 4, up: getJumpVelocity(0, this.jumpSkill, power), chargeSeconds: 1 };
+  }
+  private physics3d(dtMs: number): void {
+    const dt = 1 / 30;
+    for (let t = 0; t < dtMs / 1000 - 1e-9; t += dt) {
+      if (this.airborne) {
+        const a = this.airborne;
+        const m = this.airMove(this.me.x, this.me.y, this.me.z, a.vx * dt, a.vy * dt);
+        let nz = this.me.z + a.vz * dt - 4.9 * dt * dt;
+        let nv = a.vz - 9.8 * dt;
+        if (nv > 0) {
+          const over = this.floorBelow(this.me.x, this.me.y, nz + 1.835);
+          if (over !== null && over > nz + 1) { nz = Math.min(nz, over - 1.835); nv = 0; }
+        }
+        const g = this.floorBelow(m.x, m.y, Math.max(this.me.z, nz));
+        this.me.x = m.x; this.me.y = m.y;
+        if (nv < 0 && g !== null && nz <= g) { this.me.z = g; this.landings.push({ x: m.x, y: m.y, z: g, vz: nv }); this.airborne = null; continue; }
+        this.me.z = nz; a.vz = nv;
+        continue;
+      }
+      // Charging a standing long jump: the held forward key doesn't move the body.
+      if (this.chargeAt !== null || !this.keys.has('KeyW')) continue;
+      const speed = this.keys.has('ShiftLeft') ? 3.12 : 4;
+      const nx = this.me.x + -Math.sin(this.me.yaw) * speed * dt;
+      const ny = this.me.y + -Math.cos(this.me.yaw) * speed * dt;
+      const f = this.walkStep(nx, ny, this.me.z);
+      if (f === null) continue;
+      this.me.x = nx; this.me.y = ny; this.me.z = f;
+    }
+  }
+  landings: Array<{ x: number; y: number; z: number; vz: number }> = [];
+  key = (code: string, down: boolean) => {
+    if (code === 'Space' && this.floors) {
+      if (down && !this.keys.has('Space') && !this.airborne) this.chargeAt = Date.now();
+      if (!down && this.keys.has('Space') && this.chargeAt !== null) {
+        const power = Math.min(1, Math.max(0.001, (Date.now() - this.chargeAt) / 1000));
+        this.chargeAt = null;
+        const walk = this.keys.has('ShiftLeft');
+        const l = this.launchOf(power, walk);
+        const forward = this.keys.has('KeyW') ? l.forward : 0;
+        this.launches.push({ power, forward, walk, x: this.me.x, y: this.me.y, z: this.me.z });
+        this.airborne = { vx: -Math.sin(this.me.yaw) * forward, vy: -Math.cos(this.me.yaw) * forward, vz: l.up };
+      }
+    }
+    if (down) this.keys.add(code); else this.keys.delete(code);
+  };
+  get navFloor(): AgentHost['navFloor'] {
+    if (!this.floors) return undefined;
+    return (x, y, z) => this.floorBelow(x - this.ox, y - this.oy, z);
+  }
+  get navAirStep(): AgentHost['navAirStep'] {
+    if (!this.floors) return undefined;
+    return (from, dx, dy) => { const m = this.airMove(from.x - this.ox, from.y - this.oy, from.z, dx, dy); return { x: m.x + this.ox, y: m.y + this.oy }; };
+  }
+  get jumpLaunch(): AgentHost['jumpLaunch'] {
+    if (!this.floors) return undefined;
+    return (power, walk) => this.launchOf(power, walk);
+  }
   /** The client's probe stand-in: walk the body in 5 cm steps until a wall (agent global metres). */
   get navProbe(): AgentHost['navProbe'] {
+    if (this.floors) {
+      return (from, to) => {
+        const ox = this.ox, oy = this.oy;
+        const d = Math.hypot(to.x - from.x, to.y - from.y);
+        const n = Math.max(1, Math.ceil(d / 0.05));
+        let last = from;
+        for (let s = 1; s <= n; s++) {
+          const x = from.x + ((to.x - from.x) * s) / n, y = from.y + ((to.y - from.y) * s) / n;
+          const f = this.walkStep(x - ox, y - oy, last.z);
+          if (f === null) return last;
+          last = { x, y, z: f };
+        }
+        return last;
+      };
+    }
     if (!this.wall) return undefined;
     const wall = this.wall;
     const ox = ((HOLTBURG >>> 24) & 0xff) * 192, oy = ((HOLTBURG >>> 16) & 0xff) * 192;

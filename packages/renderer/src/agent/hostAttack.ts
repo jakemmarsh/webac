@@ -1,0 +1,49 @@
+/**
+ * The agent host's attack (AgentHost.attack / attackPending): the context-menu Attack's
+ * auto-enter (CORE.12.a: switch to the weapon's stance first, then swing), and the attack
+ * key's press + release once in a combat stance.
+ *
+ * The stance switch takes a moment, so the swing goes out AUTO_ENTER_DELAY_MS later. Until
+ * then the attack counts as pending: AgentApi.attack's loop resends whenever nothing is
+ * pending, and each resend made ACE cancel the approach or swing in flight (AttackDone
+ * ActionCancelled 0x36). Claude Bulwark stood among rats swinging about once (2026-10-10).
+ * The delayed swing also goes through the attack-key path, whose request state the
+ * pending check reads, not a bare TargetedMeleeAttack that nothing tracks.
+ */
+import type { AttackHeightName } from './AgentApi.js';
+
+export const AUTO_ENTER_DELAY_MS = 1000;
+/** How long past the delayed swing the attack still counts as pending, for the server's reply. */
+const AUTO_ENTER_GRACE_MS = 1000;
+
+export interface HostAttackDeps {
+  /** In a melee or missile stance (the attack key works as is). */
+  inAttackStance(): boolean;
+  /** The stance to enter for the wielded weapon; sendAttack false = nothing to attack with. */
+  autoEnterPlan(): { sendAttack: boolean; mode: number };
+  changeCombatMode(mode: number): void;
+  /** The attack key's press + release on `guid` (AttackRequestController). */
+  swing(guid: number, power: number, height: AttackHeightName): void;
+  /** The attack key's request is waiting on the server or a swing is in progress. */
+  requestPending(): boolean;
+  now(): number;
+  schedule(fn: () => void, ms: number): void;
+}
+
+export function createHostAttack(d: HostAttackDeps): {
+  attack(guid: number, power: number, height: AttackHeightName): void;
+  pending(): boolean;
+} {
+  let enteringUntil = 0;
+  return {
+    attack(guid, power, height) {
+      if (d.inAttackStance()) { d.swing(guid, power, height); return; }
+      const plan = d.autoEnterPlan();
+      if (!plan.sendAttack) return;
+      d.changeCombatMode(plan.mode);
+      enteringUntil = d.now() + AUTO_ENTER_DELAY_MS + AUTO_ENTER_GRACE_MS;
+      d.schedule(() => d.swing(guid, power, height), AUTO_ENTER_DELAY_MS);
+    },
+    pending: () => d.now() < enteringUntil || d.requestPending(),
+  };
+}

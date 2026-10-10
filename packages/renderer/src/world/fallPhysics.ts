@@ -121,3 +121,31 @@ export function advanceAirborne(
   }
   return { offsetY: y, velocityY: vy, peakY, airtime, landed: false, impactVelocityY: 0 };
 }
+
+/**
+ * AGENT.walk-drops-jumps — where an airborne body's collision and floor search
+ * start: its feet, not the ground under it. Retail moves a jumping body's
+ * spheres where the body is (every transition, airborne or not, starts from
+ * the object's own position: CPhysicsObj::UpdateObjectInternal @ 005156b0), so
+ * a jump clears the far side of a gap and the side of a platform once the
+ * feet are above them. Placing the spheres on the floor below (the pit's
+ * bottom) stopped every gap jump at the pit's far wall, and a floor search
+ * from there never found the far ledge.
+ */
+export function airborneReferenceY(airborne: boolean, airborneBaseY: number, offsetY: number, groundY: number): number {
+  return airborne ? airborneBaseY + offsetY : groundY;
+}
+
+/**
+ * The head of a rising body meets the floor of the level above (the body has
+ * no ceiling collision of its own in the airborne step): it stops rising
+ * there and its feet stay a body height under that floor. `floorAtHead` is
+ * the walkable found searching down from the head (feet + height); one more
+ * than 1 m above the feet is a floor over the body, not one it stands on or a
+ * ramp under it. Without this, searching the floor from the feet would land a
+ * high jump on the floor above.
+ */
+export function headroomClamp(feetY: number, velocityY: number, floorAtHead: number | null, height: number): { feetY: number; velocityY: number; hit: boolean } {
+  if (velocityY <= 0 || floorAtHead === null || floorAtHead <= feetY + 1) return { feetY, velocityY, hit: false };
+  return { feetY: Math.min(feetY, floorAtHead - height), velocityY: 0, hit: true };
+}

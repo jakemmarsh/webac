@@ -164,6 +164,12 @@ file) would silence it.
   session (no truncation seen); keep them at 484 B or less.
 * The bridge needed no change: its ConnectResponse to port+1, its source
   filter, and its Disconnect on close all work with GDLE.
+* A new GDLE character reads 0 pyreals (inventory, vendor "You have …")
+  while its pack holds 500, until a purchase makes GDLE send CoinValue
+  (int 20). Checked, retail (2026-10-10): retail's readout is that int,
+  not a sum of the carried coin stacks (`gmVendorUI::UpdateTotalValue
+  @ 004c48e0` reads `InqInt(0x14)`), so retail on GDLE would also show 0.
+  Not ours to fix.
 
 ### 8. Notes from the GDLE source (from the first pass)
 
@@ -262,12 +268,49 @@ Resolved 2026-10-09 (RELEASE.gdle-untested-surfaces, native GDLE, headless Swift
    Server behaviour; filed as RELEASE.gdle-new-character-coinvalue to check
    what retail displays from.
 
+Resolved 2026-10-10 (RELEASE.gdle-untested-surfaces.a, native GDLE, two agent clients):
+
+10. **A player who logs in after you never appeared: FIXED.** GDLE first
+    deletes the player's previous login (DeleteObject, instance N) and then
+    creates the new one (instance N+1). The delete, for a guid this client
+    had never seen, was queued and replayed after the create, and it deleted
+    the new player. Retail drops a message stamped with an OLDER instance
+    than the object holds (`HandleDeleteObject` @ 00451ea0 /
+    `HandleSetState` @ 004533e0: only `update_times[8] == ts` applies,
+    older is NETBLOB_OLD_INSTANCE). The same ObjectBlobGate rule landed the
+    same day for BUG.ac1999-world-objects-missing-after-login (the 1999
+    server's re-minted statics); verified live here with
+    tools/probe-gdle-late-arrival.ts.
+11. **Fellowship: OK; fellowship chat FIXED.** Create, recruit and the
+    member list work. GDLE adds a recruit at once (`FellowshipManager::Recruit`
+    asks nothing), so there is no accept dialog: server behaviour. GDLE
+    sends ChannelBroadcast as a top-level 0x0147 message
+    (`ChatMsgs.cpp ChannelChat`, game_event = FALSE); it is now routed like
+    the 0xF7B0 event (retail `UIQueueManager::ProcessNetBlobData` @ 0055b000
+    dispatches the opcode either way). Live: "[Fellowship] Claude Gdb says".
+12. **Secure trade: FIXED.** The window opens on both sides (GDLE's
+    RegisterTrade names the initiator twice for the partner; harmless). A
+    completed trade moved nothing in either client: GDLE removes the
+    giver's item with InventoryRemoveObject wrapped in a game event (0x24),
+    and gives the receiver only a ContainerID update (0x02DA, from
+    `CPlayerWeenie::OnReceiveInventoryItem` → `SetWeenieContainer`) and a
+    PickupEvent, no 0x0022. The event form is now routed, and a ContainerID
+    update for one of the partner's traded items takes the
+    ServerSaysContainID path (TradeReceiveContainId.ts). GDLE cancels a
+    trade when the two stand 1 m or more apart (`TradeManager::CheckDistance`).
+    Live (tools/probe-gdle-trade.ts): a Gem Template moved, 1 → 2 and 1 → 0.
+13. **Portals: OK.** The Holtburg Meeting Hall Portal takes the player inside
+    (cell 0x01250126). GDLE also prints "Unable to move to object!" on that use.
+
 Still open:
 
-10. Untested on GDLE: trade, fellowship (both need two clients), portals out
-    of the academy (the agent's approach did not reach the courtyard portal
-    from the practice area), death. Filed as RELEASE.gdle-untested-surfaces.a.
-11. A local GDLE (`tools/gdle/`) left running for hours is fine now; the
+14. Death on GDLE is untested. GDLE has no player suicide command, a
+    `/teleloc` to 400 m up landed safely (and left the server holding the
+    character mid-air until a `/teletown`), Holtburg's Drudge Slinkers did
+    not fight back, and `@spawnbael` answered "Unknown command!" even with
+    the account at access 6 after a server restart. Filed as
+    RELEASE.gdle-death-untested.
+15. A local GDLE (`tools/gdle/`) left running for hours is fine now; the
     "Invalid login" seen earlier was item 4, not the server.
 
 ## Public servers (2026-10-04 probe)

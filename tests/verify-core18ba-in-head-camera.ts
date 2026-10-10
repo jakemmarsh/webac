@@ -14,7 +14,7 @@ import { CameraController } from '../packages/renderer/src/scene/CameraControlle
 import {
   CAMERA_IN_HEAD_Y, CAMERA_MIN_CHAR_DIST2, CAMERA_MIN_CHAR_TRANS_DIST, cameraPlayerTranslucency,
 } from '../packages/renderer/src/scene/RetailCamera.js';
-import { applyViewerFade, viewerFadeLevel } from '../packages/renderer/src/scene/ViewerFade.js';
+import { applyViewerFade, viewerFadeLevel, withoutViewerFade } from '../packages/renderer/src/scene/ViewerFade.js';
 import { ACT } from '../packages/renderer/src/input/KeybindDefaults.js';
 
 describe('CORE.18.b.a retail camera translucency curve', () => {
@@ -64,6 +64,24 @@ describe('CORE.18.b.a applyViewerFade', () => {
     root.add(mesh);
     return { root, mesh, shared };
   }
+
+  it('the paperdoll\'s clone of a first-person (hidden) or half-faded player is whole and opaque; the live model stays as it was', () => {
+    for (const level of [1, 0.6]) {
+      const { root, mesh, shared } = playerLike();
+      applyViewerFade(root, level);
+      const clone = withoutViewerFade(root, () => root.clone(true));
+      expect(clone.visible).toBe(true);
+      expect(clone.userData.acNoDraw).toBeUndefined();
+      expect((clone.children[0] as THREE.Mesh).material).toBe(shared);
+      // The world view keeps its fade.
+      expect(viewerFadeLevel(root)).toBe(level);
+      expect(root.visible).toBe(level < 1);
+      if (level < 1) expect((mesh.material as THREE.Material).opacity).toBeCloseTo(1 - level, 6);
+    }
+    // Not faded: just the callback.
+    const plain = playerLike();
+    expect(withoutViewerFade(plain.root, () => 7)).toBe(7);
+  });
 
   it('never writes to the shared (cached) material', () => {
     const { root, mesh, shared } = playerLike();
