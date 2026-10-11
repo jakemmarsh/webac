@@ -3305,6 +3305,44 @@ export class ServerObjectManager {
     };
   }
 
+  /**
+   * Is there a clear line of fire from our character to `guid`? The
+   * straight line a bolt or arrow flies, from just in front of our upper
+   * body to the target's middle, swept through the same walls, terrain and
+   * solid objects (closed doors, …) our missiles collide with; creatures
+   * are left out, since they move. As ACE's IsDirectVisible: start past our
+   * own radius, at body height. `blockedAt` is the obstacle's distance (m)
+   * along the line, or null when it reaches the target. null when the
+   * target or our body isn't known.
+   */
+  lineOfFire(guid: number, radius = 0.1): { dist: number; blockedAt: number | null } | null {
+    const o = this.objects.get(guid);
+    const me = this.missileLocalPlayer?.();
+    if (!o || !me || !this.missileEnvironmentSweep) return null;
+    const target = { x: o.worldX, y: o.worldZ, z: o.worldY + Math.max(o.collisionHeight, 0.6) * 0.5 };
+    const eye = { x: me.x, y: me.y, z: me.z + me.height * 0.75 };
+    const dx = target.x - eye.x, dy = target.y - eye.y, dz = target.z - eye.z;
+    const len = Math.hypot(dx, dy, dz);
+    const dist = Math.hypot(dx, dy);
+    // Start past our own body and stop at the target's surface, so neither counts as the obstacle.
+    const startOff = me.radius + radius;
+    const endOff = Math.max(o.collisionRadius, 0.3);
+    if (len <= startOff + endOff) return { dist, blockedAt: null };
+    const u = { x: dx / len, y: dy / len, z: dz / len };
+    const from = { x: eye.x + u.x * startOff, y: eye.y + u.y * startOff, z: eye.z + u.z * startOff };
+    const to = { x: target.x - u.x * endOff, y: target.y - u.y * endOff, z: target.z - u.z * endOff };
+    const span = len - startOff - endOff;
+    let best = this.missileEnvironmentSweep(from, to, radius);
+    const reach = span + radius;
+    for (const s of this.objects.values()) {
+      if (s.guid === guid || s.guid === this.playerGuid || !s.mesh || s.wielderId || (s.itemType & ItemType.Creature)) continue;
+      if (classifyMissileObstacle(s.physicsState, PhysicsState.Missile) === 'ignore' || !this.missileObjectSweep) continue;
+      if (Math.hypot(s.worldX - from.x, s.worldZ - from.y) > reach + ServerObjectManager.MISSILE_OBJECT_REACH) continue;
+      best = nearestContact(best, this.missileObjectSweep(s, from, to, radius));
+    }
+    return { dist, blockedAt: best && best.t < 1 ? Math.round((startOff + best.t * span) * 10) / 10 : null };
+  }
+
   /** Coarse cull for {@link missileObjectSweep}: no server object's collision reaches further than this (m) from its origin. */
   private static readonly MISSILE_OBJECT_REACH = 20;
 

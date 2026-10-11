@@ -64,6 +64,8 @@ function makeHost() {
     echo: (t, c) => { log.push(`echo:${t}${c === undefined ? '' : `@${c}`}`); },
     chatbox: (t) => { log.push(`chat:${t}`); },
     chatboxPaste: (t) => { log.push(`paste:${t}`); },
+    viewControl: (v, c) => v === 'panel' && (c === 'btnTest1' || c === 'btnTest2'),
+    setViewLabel: (v, c, t) => { log.push(`label:${v}.${c}=${t}`); return v === 'panel'; },
     random: () => rnd,
     vtGetSetting: (n) => settings.get(n) ?? '',
     vtSetSetting: (n, v) => { settings.set(n, v); return true; },
@@ -474,6 +476,19 @@ describe('actions, settings, chat, scheduling', () => {
     run('statushudcolored[k,v,255]');
     expect(h.log).toEqual(['echo:Hello Me@15', 'echo:plain', 'chat:/vt echo B1!', 'paste:draft', 'hud:k=v', 'hud:k=v@255']);
   });
+  it('meta views: uigetcontrol[window, control] gives a control (none when the open view lacks it); uisetlabel sets a button\'s text', () => {
+    expect(run('uigetcontrol[panel,btnTest1]')).toEqual({ kind: 'viewcontrol', view: 'panel', control: 'btnTest1' });
+    expect(run('uigetcontrol[panel,nope]')).toBeNull();
+    expect(run('uigetcontrol[other,btnTest1]')).toBeNull();
+    expect(run('uisetlabel[uigetcontrol[panel,btnTest2],`Stop`]')).toBe(1);
+    expect(h.log).toEqual(['label:panel.btnTest2=Stop']);
+    // A stored reference works later, as the wiki's ViewControl parameter type implies.
+    run('setvar[b,uigetcontrol[panel,btnTest1]]');
+    expect(run('uisetlabel[getvar[b],Go]')).toBe(1);
+    expect(h.log).toContain('label:panel.btnTest1=Go');
+    expect(run('getvar[b]==uigetcontrol[panel,btnTest1]')).toBe(1);
+    expect(() => run('uisetlabel[5,x]')).toThrow(ExprError);
+  });
   it('the corpus ChatExpr with getheadingto', () => {
     run('setvar[corpse,wobjectfindbyid[103]]');
     expect(run('\\/ub face +getheadingto[getvar[corpse]]')).toBe('/ub face 90');
@@ -528,7 +543,7 @@ describe('coverage', () => {
       'stopwatchelapsedseconds getunixtime randint actiontryselect actiontryuseitem actiontryapplyitem actiontrygiveitem',
       'actiontrygiveprofile actiontryequipanywand actiontrycastbyid actiontrycastbyidontarget setmotion getmotion clearmotion',
       'delayexec vtsetsetting vtgetsetting uboptset uboptget vtsetmetastate vtgetmetastate echo chatbox chatboxpaste statushud',
-      'statushudcolored wobjectrequestdata getheadingto wobjectfindnearestmonster wobjectisvalid hexstr getquestktprogress',
+      'statushudcolored wobjectrequestdata getheadingto wobjectfindnearestmonster wobjectisvalid hexstr getquestktprogress uigetcontrol uisetlabel',
     ].join(' ').split(/\s+/);
     const text = covered.join('\n').toLowerCase();
     const missing = EXPR_FUNCTIONS.filter((f) => !extra.includes(f) && !new RegExp(`\\b${f}\\[`).test(text));

@@ -60,6 +60,12 @@ export const AGENT_ERAS: Record<string, AgentEra> = {
     id: 'classic-dereth', label: 'Dark Majesty era: GDL Classic Dereth', ports: [9210, 9211], bridgeEra: 'classic-dereth',
     access: null,
   },
+  'classic-dereth-1-0': {
+    // The same local GDL-Classic, started on Classic Dereth 1.0 data:
+    // GDL_CLASSIC_DAT_DIR=dat-sets/classic-dereth-1.0 (Snowreap's set; no Salvaging).
+    id: 'classic-dereth-1-0', label: 'Dark Majesty era: GDL Classic Dereth 1.0 data (Snowreap)', ports: [9210, 9211], bridgeEra: 'classic-dereth-1-0',
+    access: null, accountTag: 'c10',
+  },
   gdle: {
     // End-of-retail client against vanilla GDLE 1.34 (tools/gdle/, docs/gdle-compat.md):
     // the client boots its default era; only the server differs.

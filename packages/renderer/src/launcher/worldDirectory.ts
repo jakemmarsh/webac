@@ -161,7 +161,7 @@ export function worldEnterBlock(world: World | null): string | null {
   }
   if (world.online === false) return `${world.name} is offline right now. Pick another world.`;
   if (world.era && !eraProfile(world.era)) {
-    return `${world.name} needs a kind of game data (${world.era}) this version of the client does not know. Pick another world.`;
+    return `${world.name} needs a kind of game data (${world.era}) this version of the client does not know. Reload the page to update, or pick another world.`;
   }
   return null;
 }

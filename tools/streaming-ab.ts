@@ -50,9 +50,13 @@ const SET = opt('--set', 'https://dats.playwebac.com/v1/sets/eol-p2072-c982-h497
 const STAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const OUT = opt('--out', join(REPO, 'verification/dat-streaming/ab', STAMP));
 /**
- * --prod <url>: check a deployed build after flipping ACJS_DAT_SET_URL. Runs only
- * the stream half against that site (its own config.json datSet, `&debug` for
- * acDebug, CSP + Local Network Access bypassed so it can reach the local ws://
+ * --prod <url>: check a production-shaped build after flipping ACJS_DAT_SET_URL.
+ * The deployed site no longer installs acDebug or the __ hooks this script reads
+ * (2026-10-11: ?debug is dev-only), so <url> is a local
+ * `VITE_ACJS_URL_OVERRIDES=1 npx vite build && npx vite preview` of the deployed
+ * commit serving the same config.json. Runs only the stream half against it
+ * (its own config.json datSet, `&debug` for acDebug, CSP + Local Network Access
+ * bypassed so it can reach the local ws://
  * bridge) and compares it with the raw captures of an earlier run of the same
  * script (--raw-from <dir>). A deployed page ignores URL login and ?bridge
  * (config/urlOverrides.ts), so it logs in through the launcher's CUSTOM… world.

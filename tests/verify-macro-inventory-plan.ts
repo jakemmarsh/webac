@@ -84,31 +84,162 @@ describe('Auto Fellow Mgmt (VirindiTank\'s fellowship commands)', () => {
     initialState: 'Default', states: [{ name: 'Default', rules: [] }], loot: [], buffSets: [], routes: [], macro: true, vtank: emptyVtankData(), settings: { EnableBuffing: false, AutoStack: false, ...settings },
   });
 
-  it('as leader, a /tell "xp" from a player in reach recruits them; "help" answers; not leader: nothing', async () => {
-    host.add({ guid: 0x50000077, name: 'Asker', itemType: 0x10, objectDescFlags: 0x8, x: 82, y: 22 });
-    let info: { leader: boolean; open: boolean; count: number } | null = { leader: true, open: false, count: 2 };
-    (host as unknown as Record<string, unknown>).fellowshipInfo = () => info;
+  const VT = (s: string) => `[VT Fellow Manager] ${s} -v-`;
+  const tells = (to: string) => host.chats.filter((c) => c.startsWith(`/tell ${to}, `)).map((c) => c.slice(`/tell ${to}, `.length));
+  const fchat = () => host.chats.filter((c) => c.startsWith('/f ')).map((c) => c.slice(3));
+  const recruits = () => host.sent.filter((x) => x.startsWith('fellowship recruit'));
+  const leaders = () => host.sent.filter((x) => x.startsWith('fellowship leader'));
+  const player = (guid: number, name: string) => host.add({ guid, name, itemType: 0x10, objectDescFlags: 0x8, x: 82, y: 22 });
+  const tell = (from: string, text: string) => api.pushChat(`${from} tells you, "${text}"`, 3);
+  const lead = (members: string[], handOff = true) => { host.fellowInfo = { leader: true, open: false, count: members.length, members, handOff }; };
+
+  it('as leader, a /tell "xp" from a player in reach recruits them; "help" and "leader" answer; not leader: nothing', async () => {
+    player(0x50000077, 'Asker');
+    lead(['Claude Test']);
     api.routine.start(vt());
-    api.pushChat('Asker tells you, "xp"', 3);
+    tell('Asker', 'XP');
     await step(1500);
-    expect(host.sent).toContain('fellowship recruit Asker 50000077');
-    api.pushChat('Asker tells you, "help"', 3);
+    expect(tells('Asker')).toEqual([VT('I will recruit you in a moment. Please stand close to me.')]);
+    expect(recruits()).toEqual(['fellowship recruit Asker 50000077']);
+    await step(5000); // the Recruit waits up to 5 s for the pane to change
+    tell('Asker', 'help');
     await step(1500);
-    expect(host.chats.some((c) => /^\/tell Asker, Tell me "xp"/.test(c))).toBe(true);
-    info = { leader: false, open: false, count: 2 };
+    expect(tells('Asker').at(-1)).toBe(VT('Available commands: xp, line, remove, leader, startvote, vote, help'));
+    tell('Asker', 'leader');
+    await step(1000);
+    expect(tells('Asker').at(-1)).toBe(VT('The fellowship leader is Claude Test.'));
+    host.fellowInfo = { leader: false, open: false, count: 2, members: ['Other', 'Claude Test'], handOff: true };
     host.sent.length = 0;
-    api.pushChat('Asker tells you, "xp"', 3);
+    host.chats.length = 0;
+    tell('Asker', 'xp');
     await step(1500);
-    expect(host.sent.filter((x) => x.startsWith('fellowship recruit'))).toEqual([]);
+    expect(recruits()).toEqual([]);
+    expect(host.chats).toEqual([]);
+  });
+
+  it('too far: told so, one more chance 20 s later; still away then, dropped', async () => {
+    lead(['Claude Test']);
+    api.routine.start(vt());
+    tell('Faraway', 'xp');
+    await step(1500);
+    expect(tells('Faraway')).toEqual([VT('I will recruit you in a moment. Please stand close to me.'), VT('You are too far away. I will wait 20 seconds and give you one more chance.')]);
+    expect(recruits()).toEqual([]);
+    await step(15000);
+    player(0x50000079, 'Faraway');
+    await step(6000);
+    expect(recruits()).toEqual(['fellowship recruit Faraway 50000079']);
+    tell('Gone', 'xp');
+    await step(22000);
+    expect(recruits()).toHaveLength(1);
+    expect(tells('Gone')).toHaveLength(2);
+  });
+
+  it('full: a waiting line (line, remove); when a fellow leaves, the next in line is recruited', async () => {
+    const nine = ['Claude Test', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+    lead(nine);
+    player(0x50000081, 'First');
+    player(0x50000082, 'Second');
+    api.routine.start(vt());
+    tell('First', 'xp');
+    tell('Second', 'xp');
+    await step(1500);
+    expect(tells('First')).toEqual([VT('The fellowship is full. You are number 1 in line.')]);
+    expect(tells('Second')).toEqual([VT('The fellowship is full. You are number 2 in line.')]);
+    tell('Second', 'line');
+    await step(1000);
+    expect(tells('Second').at(-1)).toBe(VT('Fellowship: 9/9. Waiting list: First, Second. You are number 2.'));
+    tell('Second', 'remove');
+    await step(1000);
+    expect(tells('Second').at(-1)).toBe(VT('You have been removed from the waiting list.'));
+    tell('Second', 'remove');
+    await step(1000);
+    expect(tells('Second').at(-1)).toBe(VT('You are not on the waiting list.'));
+    expect(recruits()).toEqual([]);
+    lead(nine.filter((n) => n !== 'C')); // C left
+    await step(1500);
+    expect(tells('First').at(-1)).toBe(VT('I will recruit you in a moment. Please stand close to me.'));
+    expect(recruits()).toEqual(['fellowship recruit First 50000081']);
+    // The offer holds the slot: another asker queues until First joins or the offer lapses.
+    await step(5000);
+    tell('Second', 'xp');
+    await step(1000);
+    expect(tells('Second').at(-1)).toBe(VT('The fellowship is full. You are number 1 in line.'));
+  });
+
+  it('at most 8 commands per player in 3 minutes; other players are still answered', async () => {
+    lead(['Claude Test']);
+    api.routine.start(vt());
+    for (let i = 0; i < 10; i++) tell('Spammer', 'help');
+    tell('Polite', 'help');
+    await step(3000);
+    expect(tells('Spammer')).toHaveLength(8);
+    expect(tells('Polite')).toHaveLength(1);
+    host.t += 180_000;
+    tell('Spammer', 'help');
+    await step(1000);
+    expect(tells('Spammer')).toHaveLength(9);
+  });
+
+  it('startvote giveleader: announced in fellowship chat, 2 minutes, a majority passes leadership through the Leader action', async () => {
+    lead(['Claude Test', 'Bob', 'Cid', 'Dee']);
+    api.routine.start(vt());
+    tell('Bob', 'startvote giveleader cid');
+    await step(1000);
+    expect(fchat()).toEqual([VT("Bob has called a new vote: giveleader Cid! To vote either tell me 'vote 1 yes' or 'vote 1 no'. You have 2 minutes.")]);
+    tell('Bob', 'vote 1 yes');
+    tell('Cid', 'vote 1 yes');
+    tell('Dee', 'vote 1 no');
+    tell('Outsider', 'vote 1 yes'); // not a fellow: not counted
+    await step(1000);
+    expect(leaders()).toEqual([]);
+    host.t += 120_000;
+    await step(2000);
+    expect(fchat().at(-1)).toBe(VT("Vote total for 'giveleader Cid' (1): 2/3"));
+    expect(leaders()).toEqual(['fellowship leader Cid']);
+  });
+
+  it('a vote without a majority hands nothing over; a startvote for a non-fellow gets the usage', async () => {
+    lead(['Claude Test', 'Bob', 'Cid', 'Dee']);
+    api.routine.start(vt());
+    tell('Bob', 'startvote giveleader Nobody');
+    await step(1000);
+    expect(tells('Bob')).toEqual([VT('Usage: startvote giveleader <fellow>')]);
+    tell('Bob', 'startvote giveleader Dee');
+    await step(1000);
+    tell('Dee', 'vote 1 yes');
+    await step(1000);
+    host.t += 120_000;
+    await step(2000);
+    expect(fchat().at(-1)).toBe(VT("Vote total for 'giveleader Dee' (1): 1/3"));
+    expect(leaders()).toEqual([]);
+  });
+
+  it('an era whose client has no Leader hand-off (1999): help leaves out startvote and vote, and they are ignored', async () => {
+    lead(['Claude Test', 'Bob', 'Cid'], false);
+    api.routine.start(vt());
+    tell('Bob', 'help');
+    tell('Bob', 'startvote giveleader Cid');
+    await step(2000);
+    expect(tells('Bob')).toEqual([VT('Available commands: xp, line, remove, leader, help')]);
+    expect(fchat()).toEqual([]);
+  });
+
+  it('startvote names a fellow whose name has spaces (AC names do)', async () => {
+    lead(['Claude Test', 'Bob Stone', 'Cid Vale']);
+    api.routine.start(vt({}));
+    tell('Bob Stone', 'startvote giveleader Cid Vale');
+    await step(1500);
+    expect(fchat()).toEqual([VT("Bob Stone has called a new vote: giveleader Cid Vale! To vote either tell me 'vote 1 yes' or 'vote 1 no'. You have 2 minutes.")]);
   });
 
   it('off: tells are ignored', async () => {
-    host.add({ guid: 0x50000078, name: 'Asker', itemType: 0x10, objectDescFlags: 0x8, x: 82, y: 22 });
-    (host as unknown as Record<string, unknown>).fellowshipInfo = () => ({ leader: true, open: false, count: 2 });
+    player(0x50000078, 'Asker');
+    lead(['Claude Test']);
     api.routine.start(vt({ AutoFellowManagement: false }));
-    api.pushChat('Asker tells you, "xp"', 3);
+    tell('Asker', 'xp');
     await step(1500);
-    expect(host.sent.filter((x) => x.startsWith('fellowship recruit'))).toEqual([]);
+    expect(recruits()).toEqual([]);
+    expect(host.chats).toEqual([]);
   });
 });
 
@@ -159,6 +290,77 @@ describe('worn mana (RefillWornMana, M. Charges When Off) and pets (Summon Pets)
     api.routine.pause();
     await step(1500);
     expect(host.sent.filter((x) => x.startsWith('usewith 50000082'))).toEqual([]);
+  });
+
+  it('M. Charges When Off with the macro stopped or never started: the stand-by profile (the window\'s selection) keeps worn items topped up', async () => {
+    (host as unknown as Record<string, unknown>).spellTableData = () => ({ spells: new Map() });
+    let standby = setup() as never;
+    api.routine.standby = () => standby;
+    await step(1500);
+    expect(api.routine.status().running).toBe(false);
+    expect(host.sent).toContain('usewith 50000082 50000001');
+    // Off in the profile: nothing while stopped.
+    host.sent.length = 0;
+    const fresh = new AgentApi(host);
+    standby = setup({ settings: { ManaChargesWhenOff: false } }) as never;
+    fresh.routine.standby = () => standby;
+    for (let t = 0; t < 1500; t += 100) { run(fresh, host, 100); await vi.advanceTimersByTimeAsync(100); }
+    expect(host.sent.filter((x) => x.startsWith('usewith'))).toEqual([]);
+    // Dead: no stones (the server refuses them).
+    standby = setup() as never;
+    host.me.dead = true;
+    for (let t = 0; t < 1500; t += 100) { run(fresh, host, 100); await vi.advanceTimersByTimeAsync(100); }
+    expect(host.sent.filter((x) => x.startsWith('usewith'))).toEqual([]);
+    host.me.dead = false;
+    // No stand-by profile (nothing loaded): nothing.
+    fresh.routine.standby = () => null;
+    for (let t = 0; t < 1500; t += 100) { run(fresh, host, 100); await vi.advanceTimersByTimeAsync(100); }
+    expect(host.sent.filter((x) => x.startsWith('usewith'))).toEqual([]);
+  });
+
+  it('RefillWornMana-Item-ManaPercent is "at or below": an item at exactly 33 % gets a stone; above it does not', async () => {
+    (host as unknown as Record<string, unknown>).spellTableData = () => ({ spells: new Map() });
+    const p = setup();
+    host.appraisalDatas.set(0x50000081, data({ 107: 330, 108: 1000 }));
+    api.routine.start(p as never);
+    await step(1500);
+    expect(host.sent).toContain('usewith 50000082 50000001');
+    api.routine.stop();
+    host.sent.length = 0;
+    const other = new AgentApi(host);
+    const q = setup();
+    host.appraisalDatas.set(0x50000081, data({ 107: 331, 108: 1000 }));
+    other.routine.start(q as never);
+    for (let t = 0; t < 1500; t += 100) { run(other, host, 100); await vi.advanceTimersByTimeAsync(100); }
+    expect(host.sent.filter((x) => x.startsWith('usewith'))).toEqual([]);
+    other.routine.stop();
+  });
+
+  it('a used stone waits for a fresh examination (re-asked 2 s after the use); spent, it is skipped and another stone is used, always on you', async () => {
+    (host as unknown as Record<string, unknown>).spellTableData = () => ({ spells: new Map() });
+    api.routine.start(setup({ consumables: ['Mana Stone', 'Small Mana Stone'] }) as never);
+    host.inv.push({ guid: 0x50000084, name: 'Small Mana Stone', where: 'main pack' });
+    host.appraised.push(0x50000084);
+    host.appraisalDatas.set(0x50000084, data({ 107: 2000 }));
+    const asksBefore = host.appraised.filter((g) => g === 0x50000082).length;
+    await step(3000);
+    // One use, then a wait for the re-examinations: the worn item's, and the stone's 2 s after the use.
+    expect(host.sent.filter((x) => x.startsWith('usewith'))).toEqual(['usewith 50000082 50000001']);
+    expect(host.appraised.filter((g) => g === 0x50000082).length).toBeGreaterThan(asksBefore);
+    // Every look the macro takes is quiet: no Examine window pops up over the player's game.
+    expect(host.appraiseCalls.length).toBeGreaterThan(0);
+    expect(host.appraiseCalls.filter((c) => !c.quiet)).toEqual([]);
+    // The worn item still reads low; the stone's examination is the same reply as before the use: not used again.
+    await step(3000);
+    expect(host.sent.filter((x) => x === 'usewith 50000082 50000001')).toHaveLength(1);
+    expect(host.sent).toContain('usewith 50000084 50000001');
+    // Its examination comes back without ItemCurMana (ACE: a drained stone): it stays skipped.
+    host.appraisalDatas.set(0x50000082, data({}));
+    host.appraisalDatas.set(0x50000084, data({}));
+    await step(6000);
+    expect(host.sent.filter((x) => x === 'usewith 50000082 50000001')).toHaveLength(1);
+    expect(host.sent).toContain('usewith 50000084 50000001');
+    expect(host.sent.every((x) => !x.startsWith('usewith') || x.endsWith(' 50000001'))).toBe(true);
   });
 
   it('Summon Pets: with enough monsters in pet range, the Items tab\'s pet device is used, once per 45 s', async () => {

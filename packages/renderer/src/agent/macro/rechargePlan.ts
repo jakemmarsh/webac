@@ -86,6 +86,15 @@ export interface RechargeInput {
   rechargeFamilies: RechargeFamilies;
   /** Fellows the Helper may help (VTank: fellowship panel open / VI2 fellows). */
   fellows?: HelperTarget[];
+  /**
+   * Recharge boost, in vital points (RechargeBoostAmount), while it is on: the
+   * macro switched to magic mode to recharge, and VTank then "prefers to
+   * recharge" (the wiki's Advanced Options). A vital within this many points of
+   * its level still counts as due, so a stance change paid for is not wasted
+   * when the vital regenerated past the level during the switch. The caller
+   * keeps the timing (RechargeBoostTimeSeconds, ClearLevelBoostFlagOnCast).
+   */
+  boost?: number;
 }
 
 export type RechargeAction =
@@ -394,8 +403,13 @@ export function planRecharge(input: RechargeInput): RechargeAction | null {
     const top = `Recharge-NoTarg-${VITAL_SUFFIX[v]}`;
     const name = input.hasTarget || num(input.settings, norm) >= num(input.settings, top) ? norm : top;
     const level = num(input.settings, name);
-    if (p >= level) continue;
-    const why = `${v} ${fmt(p)} < ${level}% (${name})`;
+    // Recharge boost: within RechargeBoostAmount points of the level (and not full) still counts.
+    const boost = magic ? Math.max(0, input.boost ?? 0) : 0;
+    const boosted = p >= level && boost > 0 && value.cur < value.max && value.cur < (level / 100) * value.max + boost;
+    if (p >= level && !boosted) continue;
+    const why = boosted
+      ? `${v} ${fmt(p)}, within ${boost} points of ${level}% (${name}; recharge boost, RechargeBoostAmount)`
+      : `${v} ${fmt(p)} < ${level}% (${name})`;
     for (const r of RECHARGE_HANDLER_SET) {
       if (r.vital !== v || r.magic !== magic || p < r.minPct || p > r.maxPct) continue;
       const a = tryRow(ctx, r, why);

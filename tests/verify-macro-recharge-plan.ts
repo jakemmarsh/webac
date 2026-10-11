@@ -95,6 +95,22 @@ describe('ACE kit success chance', () => {
 describe('planRecharge', () => {
   it('has 26 handler rows, as VTank stores', () => expect(RECHARGE_HANDLER_SET).toHaveLength(26));
 
+  it('recharge boost: in magic mode a vital within RechargeBoostAmount points of its level still recharges; not full, not outside magic', () => {
+    // Heal at 75 % of 400 = 300; 320 is above it, within 40 points.
+    expect(planRecharge(input({ hp: 320 }))).toBeNull();
+    // (Little stamina and mana, so the drains don't beat the heal; health comes first.)
+    const a = planRecharge(input({ hp: 320, st: 100, mn: 100, boost: 40 }));
+    expect(castName(a)).toBe('Heal Self');
+    expect(a!.why).toContain('recharge boost');
+    // 345 is more than 40 points over the level; full is never recharged.
+    expect(planRecharge(input({ hp: 345, boost: 40 }))).toBeNull();
+    expect(planRecharge(input({ boost: 400 }))).toBeNull();
+    // The boost is a magic-mode preference: in peace mode it changes nothing.
+    expect(planRecharge(input({ hp: 320, boost: 40, stance: 'peace' }))).toBeNull();
+    // Stamina too: Restam at 50 % = 200; 230 within 40.
+    expect(castName(planRecharge(input({ st: 230, boost: 40 })))).toBe('Revitalize Self');
+  });
+
   it('does nothing when every vital is fine', () => {
     expect(planRecharge(input())).toBeNull();
     expect(planRecharge(input({ hp: 320, st: 220, mn: 220 }))).toBeNull(); // 80 / 55 / 55 % vs 75 / 50 / 50

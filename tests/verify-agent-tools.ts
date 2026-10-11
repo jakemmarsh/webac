@@ -7,7 +7,11 @@ import { TOOLS, TOOL_BY_NAME, defaultAttach, inputSchema, parseGuid } from '../t
 import { parseCliArgs } from '../tools/ac-agent/cli.ts';
 import { handle, serverInstructions, toolContent } from '../tools/ac-agent/mcp-server.ts';
 import { accountForProfile } from '../tools/ac-agent/state.ts';
-import { defaultCharacterName, parseArgs, parseAttributeChoices, parseSkillChoices, pickGameTab, portFree } from '../tools/ac-agent/daemon.ts';
+import { defaultCharacterName, parseArgs, parseAttributeChoices, parseSkillChoices, pickGameTab, portFree, sharedDirFor } from '../tools/ac-agent/daemon.ts';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('agent tool table', () => {
   it('has unique ac_* names and well-formed schemas', () => {
@@ -224,5 +228,27 @@ describe('every action tool reaches an in-page method', async () => {
       .map((t) => t.name.replace(/^ac_/, '').replace(/_([a-z])/g, (_, x: string) => x.toUpperCase()))
       .filter((m) => typeof surface[m] !== 'function');
     expect(missing).toEqual([]);
+  });
+});
+
+describe('the game snapshot\'s shared dirs', () => {
+  it('links node_modules from the main checkout when started from a fresh worktree', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'acjs-snapshot-')));
+    try {
+      const main = join(root, 'main');
+      mkdirSync(main);
+      const git = (...a: string[]): string => execFileSync('git', a, { cwd: main, encoding: 'utf8' });
+      git('init', '-q');
+      git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x');
+      mkdirSync(join(main, 'node_modules'));
+      const wt = join(root, 'wt');
+      git('worktree', 'add', '-q', '--detach', wt);
+      expect(sharedDirFor(wt, 'node_modules')).toBe(join(main, 'node_modules'));
+      expect(sharedDirFor(wt, 'dat')).toBeNull();
+      mkdirSync(join(wt, 'node_modules'));
+      expect(sharedDirFor(wt, 'node_modules')).toBe(join(wt, 'node_modules'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

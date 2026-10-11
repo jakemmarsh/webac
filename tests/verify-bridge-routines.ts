@@ -176,6 +176,11 @@ describe('/routines through the bridge', () => {
     expect(automationAllowed(['*:agentclaude', 'jake'], 'coldeve', 'agentclaude')).toBe(true);
     expect(automationAllowed(['jake'], 'coldeve', 'Jake')).toBe(true);
     expect(automationAllowed([], 'local-eor', 'agentclaude')).toBe(false);
+    // `*` opens the automation UI to every account; `server:*` to every account on that server.
+    expect(automationAllowed(['*'], 'coldeve', 'anyone')).toBe(true);
+    expect(automationAllowed(['coldeve:*'], 'Coldeve', 'anyone')).toBe(true);
+    expect(automationAllowed(['coldeve:*'], 'local-eor', 'anyone')).toBe(false);
+    expect(automationAllowed(['*:*'], 'local-eor', 'anyone')).toBe(true);
     expect(config({ BRIDGE_AUTOMATION_ACCOUNTS: ' local-eor:agentclaude , jake ' }, 9000).automationAccounts).toEqual(['local-eor:agentclaude', 'jake']);
 
     // On the wire: a production bridge (no routines kept) still says whether this account has the UI.

@@ -29,17 +29,23 @@ export interface Grant {
   grantId: string;
   clientId: string;
   clientName: string;
-  /** The relay's account key (server:account). */
-  key: string;
+  /** The relay's account keys (server:account): one per tab paired with this code (multiboxing). */
+  keys: string[];
   characterScope: 'any' | string[];
   createdAt: number;
 }
 interface Client { clientId: string; clientName: string; redirectUris: string[] }
 interface PendingAuth {
   reqId: string; code: string; clientId: string; clientName: string; redirectUri: string; challenge: string; state: string;
-  expiresAt: number; key: string | null; character: string | null;
+  expiresAt: number;
+  /** Each tab that typed the code: its account key and the character it had in the world. */
+  paired: Array<{ key: string; character: string | null }>;
 }
-interface IssuedCode { code: string; reqId: string; clientId: string; redirectUri: string; challenge: string; key: string; scope: 'any' | string[]; expiresAt: number }
+interface IssuedCode { code: string; reqId: string; clientId: string; redirectUri: string; challenge: string; keys: string[]; scope: 'any' | string[]; expiresAt: number }
+/** Sealed tokens carry `k` as one key (tokens issued before multiboxing) or a list. */
+const keysOf = (k: string | string[]): string[] => (Array.isArray(k) ? k : [k]);
+/** At most this many accounts on one connection. */
+export const MAX_LINKED_ACCOUNTS = 8;
 
 const sha = (s: string): string => createHash('sha256').update(s).digest('hex');
 const b64url = (b: Buffer): string => b.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -173,53 +179,66 @@ export class OAuthServer {
     const redirectUri = q.get('redirect_uri') ?? '';
     if (!redirectAllowed(redirectUri) || !client.redirectUris.includes(redirectUri)) return { ok: false, error: 'redirect_uri is not registered for this client' };
     for (const [id, p] of this.pending) if (p.expiresAt < this.now()) this.pending.delete(id);
-    const pending: PendingAuth = { reqId: token(16), code: pairCode(), clientId: client.clientId, clientName: client.clientName, redirectUri, challenge: q.get('code_challenge')!, state: q.get('state') ?? '', expiresAt: this.now() + PAIR_MS, key: null, character: null };
+    const pending: PendingAuth = { reqId: token(16), code: pairCode(), clientId: client.clientId, clientName: client.clientName, redirectUri, challenge: q.get('code_challenge')!, state: q.get('state') ?? '', expiresAt: this.now() + PAIR_MS, paired: [] };
     this.pending.set(pending.reqId, pending);
     return { ok: true, pending };
   }
 
-  /** The tab typed a pairing code: bind the waiting request to its account (and character in the world). */
+  /**
+   * The tab typed a pairing code: add its account (and character in the world) to the waiting request.
+   * The same code typed in several tabs, each logged in on its own account, gives one connection that
+   * plays all of them (multiboxing); every tool then takes `account=` to pick the tab.
+   */
   pair(code: string, key: string, character: string | null): { ok: boolean; message: string } {
     const c = code.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-    const p = [...this.pending.values()].find((x) => x.code === c && x.expiresAt >= this.now() && !x.key);
+    const p = [...this.pending.values()].find((x) => x.code === c && x.expiresAt >= this.now());
     if (!p) return { ok: false, message: 'that pairing code is not waiting (codes last 10 minutes)' };
     if (!this.allowed(key)) return { ok: false, message: 'Claude is not open to this account yet' };
-    p.key = key;
-    p.character = character;
-    return { ok: true, message: `is paired (${p.clientName}): approve it on the page that showed the code` };
+    const had = p.paired.find((x) => x.key === key);
+    if (had) { had.character = character; return { ok: true, message: `is already paired with this code (${p.clientName}): approve it on the page that showed the code` }; }
+    if (p.paired.length >= MAX_LINKED_ACCOUNTS) return { ok: false, message: `one connection plays at most ${MAX_LINKED_ACCOUNTS} accounts` };
+    p.paired.push({ key, character });
+    const n = p.paired.length;
+    return { ok: true, message: `is paired (${p.clientName})${n > 1 ? `, ${n} accounts on this code` : ''}: approve it on the page that showed the code` };
   }
 
-  status(reqId: string): { state: 'waiting' | 'paired' | 'expired'; account?: string; character?: string | null; client?: string; code?: string } {
+  status(reqId: string): { state: 'waiting' | 'paired' | 'expired'; account?: string; character?: string | null; accounts?: Array<{ account: string; character: string | null }>; client?: string; code?: string } {
     const p = this.pending.get(reqId);
     if (!p || p.expiresAt < this.now()) return { state: 'expired' };
     // The connect page (playwebac.com/?connect=<req>) shows the code; the request id is the secret that reads it.
-    if (!p.key) return { state: 'waiting', client: p.clientName, code: p.code };
-    return { state: 'paired', account: p.key, character: p.character, client: p.clientName };
+    if (!p.paired.length) return { state: 'waiting', client: p.clientName, code: p.code };
+    // Still showing the code: another tab can type it to add its account before the player approves.
+    const accounts = p.paired.map((x) => ({ account: x.key, character: x.character }));
+    return { state: 'paired', account: accounts[0].account, character: accounts[0].character, accounts, client: p.clientName, code: p.code };
   }
 
   /** Approve or deny: approve gives the redirect with a code. */
   decide(reqId: string, approve: boolean, onlyCharacter: boolean): { ok: boolean; redirect?: string; error?: string } {
     const p = this.pending.get(reqId);
-    if (!p || p.expiresAt < this.now() || !p.key) return { ok: false, error: 'this pairing has expired; start again from Claude' };
+    if (!p || p.expiresAt < this.now() || !p.paired.length) return { ok: false, error: 'this pairing has expired; start again from Claude' };
     this.pending.delete(reqId);
     const u = new URL(p.redirectUri);
     if (p.state) u.searchParams.set('state', p.state);
     if (!approve) { u.searchParams.set('error', 'access_denied'); return { ok: true, redirect: u.toString() }; }
     const code = token(24);
-    this.codes.set(code, { code, reqId, clientId: p.clientId, redirectUri: p.redirectUri, challenge: p.challenge, key: p.key, scope: onlyCharacter && p.character ? [p.character] : 'any', expiresAt: this.now() + CODE_MS });
+    // "Only these characters": the ones each paired tab had in the world.
+    const chars = p.paired.map((x) => x.character).filter((x): x is string => !!x);
+    this.codes.set(code, { code, reqId, clientId: p.clientId, redirectUri: p.redirectUri, challenge: p.challenge, keys: p.paired.map((x) => x.key), scope: onlyCharacter && chars.length ? chars : 'any', expiresAt: this.now() + CODE_MS });
     u.searchParams.set('code', code);
     return { ok: true, redirect: u.toString() };
   }
 
   private issue(g: Grant): { access_token: string; token_type: 'Bearer'; expires_in: number; refresh_token: string } {
     const t = this.now();
-    const access = this.sealer.seal('a1', { g: g.grantId, k: g.key, s: g.characterScope, t: g.createdAt, e: t + ACCESS_MS });
-    const refresh = this.sealer.seal('r1', { g: g.grantId, c: g.clientId, n: g.clientName, k: g.key, s: g.characterScope, t: g.createdAt, i: t });
+    const access = this.sealer.seal('a1', { g: g.grantId, k: g.keys, s: g.characterScope, t: g.createdAt, e: t + ACCESS_MS });
+    const refresh = this.sealer.seal('r1', { g: g.grantId, c: g.clientId, n: g.clientName, k: g.keys, s: g.characterScope, t: g.createdAt, i: t });
     return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_MS / 1000, refresh_token: refresh };
   }
 
-  private live(g: { g: string; k: string; t: number }): boolean {
-    return !this.revoked.has(g.g) && g.t >= (this.revokedBefore.get(g.k) ?? -Infinity);
+  /** The grant's accounts still live: not revoked, not unpaired in the game since, still allowed. Empty: the grant is over. */
+  private liveKeys(g: { g: string; k: string | string[]; t: number }): string[] {
+    if (this.revoked.has(g.g)) return [];
+    return keysOf(g.k).filter((k) => g.t >= (this.revokedBefore.get(k) ?? -Infinity) && this.allowed(k));
   }
 
   /** POST /oauth/token (form or JSON). */
@@ -231,18 +250,20 @@ export class OAuthServer {
       this.codes.delete(c.code);
       if (c.expiresAt < this.now() || c.clientId !== f.client_id || c.redirectUri !== f.redirect_uri || !pkceOk(f.code_verifier ?? '', c.challenge)) return bad('invalid_grant');
       const client = await this.clientFor(c.clientId);
-      const g: Grant = { grantId: token(12), clientId: c.clientId, clientName: client?.clientName ?? 'Claude', key: c.key, characterScope: c.scope, createdAt: this.now() };
+      const g: Grant = { grantId: token(12), clientId: c.clientId, clientName: client?.clientName ?? 'Claude', keys: c.keys, characterScope: c.scope, createdAt: this.now() };
       return { status: 200, body: this.issue(g) };
     }
     if (f.grant_type === 'refresh_token') {
-      const r = this.sealer.open<{ g: string; c: string; n: string; k: string; s: 'any' | string[]; t: number; i: number }>('r1', f.refresh_token ?? '');
-      if (!r || r.c !== f.client_id || this.now() - r.i > REFRESH_MS || !this.live(r) || !this.allowed(r.k)) return bad('invalid_grant');
+      const r = this.sealer.open<{ g: string; c: string; n: string; k: string | string[]; s: 'any' | string[]; t: number; i: number }>('r1', f.refresh_token ?? '');
+      const keys = r ? this.liveKeys(r) : [];
+      if (!r || r.c !== f.client_id || this.now() - r.i > REFRESH_MS || !keys.length) return bad('invalid_grant');
       // Rotating and single use: a refresh token presented twice means it leaked, so the grant ends.
       const h = sha(f.refresh_token);
       if (this.usedRefresh.has(h)) { this.revoked.add(r.g); return bad('invalid_grant'); }
       this.usedRefresh.set(h, r.i + REFRESH_MS);
       if (this.usedRefresh.size > 10_000) for (const [k, exp] of this.usedRefresh) if (exp < this.now()) this.usedRefresh.delete(k);
-      return { status: 200, body: this.issue({ grantId: r.g, clientId: r.c, clientName: r.n, key: r.k, characterScope: r.s, createdAt: r.t }) };
+      // An account unpaired since stays out of the new tokens.
+      return { status: 200, body: this.issue({ grantId: r.g, clientId: r.c, clientName: r.n, keys, characterScope: r.s, createdAt: r.t }) };
     }
     return bad('unsupported_grant_type');
   }
@@ -258,10 +279,11 @@ export class OAuthServer {
     this.revokedBefore.set(key, this.now());
   }
 
-  /** An access token's account key, character scope and grant time, or null. */
-  resolve(tok: string): { key: string; scope: 'any' | string[]; createdAt: number } | null {
-    const a = this.sealer.open<{ g: string; k: string; s: 'any' | string[]; t: number; e: number }>('a1', tok);
-    if (!a || a.e < this.now() || !this.live(a) || !this.allowed(a.k)) return null;
-    return { key: a.k, scope: a.s, createdAt: a.t };
+  /** An access token's live account keys, character scope and grant time, or null. */
+  resolve(tok: string): { keys: string[]; scope: 'any' | string[]; createdAt: number } | null {
+    const a = this.sealer.open<{ g: string; k: string | string[]; s: 'any' | string[]; t: number; e: number }>('a1', tok);
+    const keys = a && a.e >= this.now() ? this.liveKeys(a) : [];
+    if (!a || !keys.length) return null;
+    return { keys, scope: a.s, createdAt: a.t };
   }
 }

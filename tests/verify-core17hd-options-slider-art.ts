@@ -33,6 +33,7 @@
  * it builds — no source-text pins.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { pickNextMenuValue } from './_harness/options-menu.js';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -276,17 +277,100 @@ describe('CORE.17.h.d — options-tab slider / menu / header art and template ge
     expect(arrow.style.height).toBe('19px');
     expect(arrow.style.backgroundImage).toContain('data:fake-menuArrow');
     expect(arrow.style.backgroundImage).not.toContain('data:fake-oldArrow');
-    // Hover swaps the arrow to its state-6 art; the click still cycles the value.
+    // Hover swaps the arrow to its state-6 art; a click opens the menu and a pick sets the value.
     field.dispatchEvent(new domWindow.MouseEvent('mouseenter', { bubbles: false }));
     expect(arrow.style.backgroundImage).toContain('data:fake-menuArrowHover');
     const before = ui.optionsSettings.soundFeatures;
-    field.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    pickNextMenuValue(domWindow.document, field);
     expect(ui.optionsSettings.soundFeatures).not.toBe(before);
     // The click re-rendered the page (persistAndApply): click the LIVE field.
     const liveField = (ui.optionsPanel.querySelector('[data-option-key="soundFeatures"]') as HTMLElement)
       .querySelector('.options-menu-field') as HTMLElement;
-    liveField.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    pickNextMenuValue(domWindow.document, liveField);
     expect(ui.optionsSettings.soundFeatures).toBe(before);
+  });
+
+  // UIOption_Menu (0x21000043:0x10000353) is a UIElement_Menu: a click opens
+  // the popup 0x10000357 (120 wide, p60 = 300) of 100x18 rows 0x1000035a with
+  // the listbox's p114 bar 0x10000359 at x = 100; a pick (message 7,
+  // UIOption_Menu::ListenToElementMessage @ 00483da0) stores the row's value.
+  // It never stepped the value on a click.
+  it('a menu click opens the retail popup list; a pick sets the value and closes it', () => {
+    renderTab('config');
+    const field = (): HTMLElement => (ui.optionsPanel.querySelector('[data-option-key="soundFeatures"]') as HTMLElement)
+      .querySelector('.options-menu-field') as HTMLElement;
+    const before = ui.optionsSettings.soundFeatures;
+    field().dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    expect(ui.optionsSettings.soundFeatures).toBe(before); // opening changes nothing
+    const popup = domWindow.document.querySelector('[data-options-menu]') as HTMLElement;
+    expect(popup).toBeTruthy();
+    expect(popup.style.width).toBe('120px');
+    const list = popup.querySelector('[data-options-menu-list]') as HTMLElement;
+    const rows = [...list.children] as HTMLElement[];
+    expect(rows.length).toBeGreaterThan(1);
+    expect(popup.style.height).toBe(`${rows.length * 18}px`);
+    expect(list.style.width).toBe('100px');
+    expect(list.style.getPropertyValue('scrollbar-width')).toBe('none');
+    for (const r of rows) { expect(r.style.width).toBe('100px'); expect(r.style.height).toBe('18px'); }
+    expect(rows.filter((r) => r.dataset.current === '1').map((r) => r.dataset.optionsMenuRow)).toEqual([before]);
+    const bar = popup.querySelector('[data-options-menu-scrollbar]') as HTMLElement;
+    expect(bar.style.left).toBe('100px');
+    expect(bar.style.width).toBe('16px');
+    const pick = rows.find((r) => r.dataset.optionsMenuRow !== before)!;
+    pick.click();
+    expect(ui.optionsSettings.soundFeatures).toBe(pick.dataset.optionsMenuRow);
+    expect(domWindow.document.querySelector('[data-options-menu]')).toBeNull();
+    ui.optionsSettings.soundFeatures = before;
+    renderTab('config');
+  });
+
+  it('the popup closes on a click elsewhere, on Escape, and when the panel closes, without changing the value', () => {
+    renderTab('config');
+    const field = (): HTMLElement => (ui.optionsPanel.querySelector('[data-option-key="soundFeatures"]') as HTMLElement)
+      .querySelector('.options-menu-field') as HTMLElement;
+    const before = ui.optionsSettings.soundFeatures;
+    field().dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    expect(domWindow.document.querySelector('[data-options-menu]')).toBeTruthy();
+    domWindow.document.body.dispatchEvent(new domWindow.Event('pointerdown', { bubbles: true }));
+    expect(domWindow.document.querySelector('[data-options-menu]')).toBeNull();
+    field().dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    domWindow.dispatchEvent(new domWindow.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(domWindow.document.querySelector('[data-options-menu]')).toBeNull();
+    field().dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    ui.toggleOptionsPanel();
+    expect(domWindow.document.querySelector('[data-options-menu]')).toBeNull();
+    expect(ui.optionsSettings.soundFeatures).toBe(before);
+  });
+
+  it('a pick re-renders the page but keeps the list where the player had scrolled it', () => {
+    renderTab('config');
+    const list = (): HTMLElement => ui.optionsListEl as HTMLElement;
+    expect(list()).toBeTruthy();
+    list().scrollTop = 120;
+    expect(list().scrollTop).toBe(120);
+    const before = ui.optionsSettings.soundFeatures;
+    const field = (ui.optionsPanel.querySelector('[data-option-key="soundFeatures"]') as HTMLElement)
+      .querySelector('.options-menu-field') as HTMLElement;
+    pickNextMenuValue(domWindow.document, field);
+    expect(ui.optionsSettings.soundFeatures).not.toBe(before);
+    expect(list().scrollTop).toBe(120);
+    // Another tab starts at the top.
+    renderTab('character');
+    expect(list().scrollTop).toBe(0);
+    ui.optionsSettings.soundFeatures = before;
+  });
+
+  it('a long list caps at p60 = 300 px (16 rows) and scrolls under the bar', () => {
+    const anchor = domWindow.document.createElement('div');
+    ui.hudContainer.appendChild(anchor);
+    const values = Array.from({ length: 24 }, (_, i) => `Choice ${i}`);
+    ui.openOptionsMenu(anchor, values, 'Choice 3', () => {});
+    const popup = domWindow.document.querySelector('[data-options-menu]') as HTMLElement;
+    expect(popup.style.height).toBe(`${16 * 18}px`);
+    expect((popup.querySelector('[data-options-menu-list]') as HTMLElement).children.length).toBe(24);
+    expect((popup.querySelector('[data-options-menu-scrollbar]') as HTMLElement).querySelector('[data-dat-scroll-btn="down"]')).toBeTruthy();
+    ui.closeOptionsMenu();
+    anchor.remove();
   });
 
   it('toggle rows (template 0x10000218): 20px pitch, bullet at x = 6, label 18px in; ON = state 6 art, OFF = state 1 art; the chat channel LIST rows (0x10000520) keep their own off dot', () => {

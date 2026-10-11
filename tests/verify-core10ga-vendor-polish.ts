@@ -123,14 +123,16 @@ describe('CORE.10.g.a — vendor bar polish (behavioral)', () => {
     expect(ui.transactionDockPanel).toBe('vendor');
   });
 
-  it('filter popup uses the DAT menu chrome: 120px wide, 126px max height, 100x18 rows, no CSS border', () => {
+  const listOf = (popup: HTMLElement): HTMLElement => popup.querySelector('[data-vendor-filter-list]') as HTMLElement;
+
+  it('filter popup uses the DAT menu chrome: 120px wide, sized to its rows (p60 caps it at 7), 100x18 rows, no CSS border', () => {
     openVendor();
     const popup = openPopup();
     expect(popup).not.toBeNull();
-    expect(popup!.style.width).toBe('120px'); // root 0x1000034f (3 rows, no scrollbar)
-    expect(popup!.style.maxHeight).toBe('126px'); // p60 = 7 rows of 18
+    expect(popup!.style.width).toBe('120px'); // root 0x1000034f
+    expect(popup!.style.height).toBe('54px'); // 3 rows of 18 (p60 = 126 = 7 rows at most)
     expect(popup!.style.border).toBe(''); // rows carry the chrome, not the box
-    const rows = [...popup!.children] as HTMLElement[];
+    const rows = [...listOf(popup!).children] as HTMLElement[];
     expect(rows.length).toBe(3); // Armor, Food, Weapons present in MERCH
     for (const row of rows) {
       expect(row.style.width).toBe('100px'); // listbox/item template width
@@ -146,9 +148,31 @@ describe('CORE.10.g.a — vendor bar polish (behavioral)', () => {
   it('clicking a popup row selects that category and closes the popup', () => {
     openVendor();
     const popup = openPopup()!;
-    (popup.children[2] as HTMLElement).click(); // "Weapons" (retail order: Armor, Food, Weapons)
+    (listOf(popup).children[2] as HTMLElement).click(); // "Weapons" (retail order: Armor, Food, Weapons)
     expect(ui.vendorData.filterMenuOpen).toBe(false);
     expect(texts.get(EL.filterText)).toBe('Weapons');
+  });
+
+  // More than 7 categories: the listbox 0x10000350 scrolls under its p114 bar
+  // 0x10000351 (16 px at x=100). The old addPanelScrollbar path moved the rows
+  // into an absolute inner box and the popup collapsed to 0 px: invisible.
+  it('more than 7 categories: a 7-row (126 px) list beside the DAT scrollbar 0x10000351, never collapsed', () => {
+    const TYPES = [0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800];
+    const many = TYPES.map((t, i) => ({ guid: 0x83100000 + i, weenieClassId: 200 + i, name: `Thing ${i}`, price: 5, burden: 1, itemType: t, stackSize: -1 }));
+    ui.showVendorWindow('Bazaar', many, [], '1', '1', undefined, undefined, nextGuid++);
+    const popup = openPopup()!;
+    const list = listOf(popup);
+    expect(list.children.length).toBeGreaterThan(7);
+    expect(popup.style.height).toBe('126px');
+    expect(list.style.height).toBe('126px');
+    expect(list.style.width).toBe('100px');
+    expect(list.style.getPropertyValue('scrollbar-width')).toBe('none');
+    const bar = popup.querySelector('[data-vendor-filter-scrollbar]') as HTMLElement;
+    expect(bar.style.left).toBe('100px');
+    expect(bar.style.width).toBe('16px');
+    expect(bar.style.height).toBe('126px');
+    expect(popup.style.position).toBe('absolute');
+    ui.vendorData.filterMenuOpen = false;
   });
 
   it('only the SELECTED shop cell shows a quantity, and only for a limited (>= 1) amount', () => {

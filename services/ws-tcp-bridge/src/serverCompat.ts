@@ -53,6 +53,14 @@ export interface CompatOverlay {
 export const CLASSIC_ERA_NOTE = 'Dark Majesty era';
 
 const CLASSIC_DERETH: CompatEntry = { compat: 'beta', note: CLASSIC_ERA_NOTE, era: 'classic-dereth' };
+/**
+ * Classic Dereth 1.0 data (no Salvaging skill): the client serves the 1.1
+ * set's SkillTable without it (renderer era/EraProfiles.ts
+ * 'classic-dereth-1-0'). Both sets report the same DDD iterations, so only
+ * the server's refusal tells them apart: Snowreap answered every 1.1 create
+ * (Salvaging trained) with Corrupt (Jake, 2026-10-11).
+ */
+const CLASSIC_DERETH_1_0: CompatEntry = { compat: 'beta', note: CLASSIC_ERA_NOTE, era: 'classic-dereth-1-0' };
 const CLASSICACE_CUSTOMDM: CompatEntry = { compat: 'beta', note: CLASSIC_ERA_NOTE, era: 'classicace-customdm' };
 
 /** The Nov 1999 launch world (AC1999 servers; docs/ac1999-support-scope.md). */
@@ -80,7 +88,7 @@ export const SERVER_COMPAT: CompatOverlay = {
     // "A PVE Dark Majesty server must use classic AC .dats"
     '394c58d0-885d-466b-b17f-d7e0b96fe3e2': CLASSIC_DERETH, // Seedsow
     // "A PVP Dark Majesty server must use classic AC .dats"
-    'eea962c0-cf9f-481e-9736-0eb058acc1d8': CLASSIC_DERETH, // Snowreap
+    'eea962c0-cf9f-481e-9736-0eb058acc1d8': CLASSIC_DERETH_1_0, // Snowreap
     // ClassicACE: detected live once they answer; until then, their listings'
     // own words. "ACE-Classic Dark Majesty era custom PVE server"
     '4db379b0-587a-4775-9b7f-879e0f15ba4b': CLASSICACE_CUSTOMDM, // Dekarutide

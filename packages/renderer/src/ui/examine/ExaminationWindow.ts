@@ -32,7 +32,7 @@ export const EXAMINATION_WINDOW = {
   title: 0x1000012d,
   pages: { item: 0x1000012e, creature: 0x10000140, character: 0x10000140, spell: 0x10000153 },
   /** Item page elements (0x2100006b): body text + its scrollbar, the inscription block. */
-  item: { body: 0x1000013c, scrollbar: 0x1000013d, inscriptionBlock: 0x10000137, inscription: 0x1000013e, signature: 0x1000013f },
+  item: { body: 0x1000013c, scrollbar: 0x1000013d, inscriptionBlock: 0x10000137, inscription: 0x1000013e, inscriptionScrollbar: 0x1000046e, signature: 0x1000013f },
   windowId: 7,
   /** The HUD slot's authored rect in the 800x600 design and its right/bottom gaps (edges R1/B1). */
   design: { x: 180, y: 128, w: 310, h: 400, right: 800 - (180 + 310), bottom: 600 - (128 + 400) },

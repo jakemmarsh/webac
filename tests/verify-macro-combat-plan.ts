@@ -8,9 +8,9 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { VT_DAMAGE, VT_DEFAULT_MONSTER, type PlanItem, type PlanSkill, type PlanSpell, type VtMonsterRow } from '@ac/shared';
+import { VT_DAMAGE, VT_DEFAULT_MONSTER, VT_PET_AUTO, type PlanItem, type PlanSkill, type PlanSpell, type VtMonsterRow } from '@ac/shared';
 import {
-  buildCombatFamilies, matchMonsterRow, pickTarget, planCombat,
+  ammoFor, buildCombatFamilies, matchMonsterRow, petDeviceElement, pickTarget, planCombat, planPet,
   type CombatFamilies, type CombatInput, type CombatMonster, type CombatSpellTableEntry,
 } from '../packages/renderer/src/agent/macro/combatPlan.ts';
 import { openDat } from './_harness/dat.js';
@@ -36,6 +36,18 @@ const TABLE: Array<[number, CombatSpellTableEntry]> = [
   [1800, { name: 'Flame Streak V', category: 247, school: 1, bitfield: 0x4003, power: 200 }],
   [1785, { name: "Cassius' Ring of Fire", category: 226, school: 1, bitfield: 0x3, power: 200 }],
   [5395, { name: 'Corruption I', category: 638, school: 5, bitfield: 0x10003, power: 1 }],
+  // The non-elemental modes (EoL DAT rows): Harm Other shares category 80 with Harm Self and Martyr's Hecatomb,
+  // Drain Health Other shares 87 with Health to Stamina Other, Tusker Fists shares 230 with creature walls.
+  [7, { name: 'Harm Other I', category: 80, school: 2, bitfield: 0x13, power: 1 }],
+  [8, { name: 'Harm Self I', category: 80, school: 2, bitfield: 0x1a, power: 15 }],
+  [1176, { name: 'Harm Other VI', category: 80, school: 2, bitfield: 0x13, power: 275 }],
+  [2766, { name: "Martyr's Hecatomb VII", category: 80, school: 2, bitfield: 0x3, power: 300 }],
+  [1237, { name: 'Drain Health Other I', category: 87, school: 2, bitfield: 0x13, power: 38 }],
+  [1242, { name: 'Drain Health Other VI', category: 87, school: 2, bitfield: 0x13, power: 288 }],
+  [1266, { name: 'Health to Stamina Other I', category: 87, school: 2, bitfield: 0x82, power: 1 }],
+  [2934, { name: 'Tusker Fists', category: 230, school: 1, bitfield: 0x83, power: 325 }],
+  [1845, { name: 'Hammering Crawler', category: 230, school: 1, bitfield: 0x3, power: 200 }],
+  [58, { name: 'Acid Stream I', category: 117, school: 1, bitfield: 0x3, power: 1 }],
 ];
 const FAMILIES: CombatFamilies = buildCombatFamilies({ spells: new Map(TABLE) });
 const spell = (id: number): PlanSpell => {
@@ -193,6 +205,106 @@ describe('planCombat: spell level by buffed skill + SpellDiffExcessThreshold-Hun
   });
 });
 
+describe('planCombat: DebuffSelectionMethod (1 Spell Level, 2 Skill = default)', () => {
+  const rows = [row('<DEFAULT>', { on: ['I'] })];
+  const spells = [spell(25), spell(1326), spell(1327)];
+  const at = (method?: number) => planCombat(input({ rows, spells, skills: [skill(33, 'Life Magic', 200)], settings: method === undefined ? { AttackDistance: 30 } : { AttackDistance: 30, DebuffSelectionMethod: method } }));
+  it('Skill (default): the level your buffed skill casts (difficulty + SpellDiffExcessThreshold-Hunt ≤ skill)', () => {
+    expect(at()).toMatchObject({ spell: { id: 25 } }); // V needs 225 + 25 > 200
+    expect(at(2)).toMatchObject({ spell: { id: 25 } });
+  });
+  it('Spell Level: the highest level you know, whatever your skill; untrained schools still cast nothing', () => {
+    expect(at(1)).toMatchObject({ spell: { id: 1327 } });
+    expect(planCombat(input({ rows, spells, skills: [skill(33, 'Life Magic', 400, 'untrained')], settings: { AttackDistance: 30, DebuffSelectionMethod: 1 } }))).toBeNull();
+  });
+  it('attacks keep the skill rule under Spell Level', () => {
+    expect(planCombat(input({ skills: [skill(34, 'War Magic', 230)], settings: { AttackDistance: 30, DebuffSelectionMethod: 1 } }))).toMatchObject({ spell: { id: 84 } });
+  });
+});
+
+describe('planCombat: Harm, Drain Auto, Random, Fists', () => {
+  it('builds the Harm / Drain / Fists families from the table, leaving out Martyr\'s, self and vital-moving spells', () => {
+    expect([...FAMILIES.harm!.ids].sort((a, b) => a - b)).toEqual([7, 1176]);
+    expect([...FAMILIES.drain!.ids].sort((a, b) => a - b)).toEqual([1237, 1242]);
+    expect([...FAMILIES.fists!.ids]).toEqual([2934]);
+    expect(buildCombatFamilies({ spells: new Map(TABLE.filter(([id]) => id !== 2934)) }).fists).toBeUndefined();
+  });
+  it('Harm casts the best Harm Other; V casts no element vuln for it', () => {
+    const rows = [row('<DEFAULT>', { on: ['V', 'A'], damage: VT_DAMAGE.Harm })];
+    expect(planCombat(input({ rows, spells: [spell(7), spell(1176), spell(2766), spell(21)] }))).toMatchObject({ kind: 'cast', spell: { id: 1176 }, why: expect.stringContaining('harm') });
+    // Without Life Magic: nothing to cast with a wand.
+    expect(planCombat(input({ rows, spells: [spell(1176)], skills: [skill(34, 'War Magic', 400)] }))).toBeNull();
+  });
+  it('Drain Auto drains a healthy (or unreported) target and harms one below half health', () => {
+    const rows = [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.DrainAuto })];
+    const spells = [spell(1176), spell(1242), spell(1266)];
+    expect(planCombat(input({ rows, spells }))).toMatchObject({ spell: { id: 1242 } });
+    expect(planCombat(input({ rows, spells, monsters: [mon(1, 'Rat', 3, 0, { health: 0.8 })] }))).toMatchObject({ spell: { id: 1242 } });
+    expect(planCombat(input({ rows, spells, monsters: [mon(1, 'Rat', 3, 0, { health: 0.3 })] }))).toMatchObject({ spell: { id: 1176 } });
+    expect(planCombat(input({ rows, spells: [spell(1242)], monsters: [mon(1, 'Rat', 3, 0, { health: 0.3 })] }))).toMatchObject({ spell: { id: 1242 } });
+  });
+  it('Auto with neither War nor Void Magic trained is Drain Auto (FAQ)', () => {
+    const rows = [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Auto })];
+    const lifeOnly = [skill(33, 'Life Magic', 400), skill(34, 'War Magic', 0, 'untrained')];
+    expect(planCombat(input({ rows, spells: [spell(1242), spell(85)], skills: lifeOnly }))).toMatchObject({ spell: { id: 1242 } });
+    // War trained: Auto stays a war bolt.
+    expect(planCombat(input({ rows, spells: [spell(1242), spell(85)] }))).toMatchObject({ spell: { id: 85 } });
+  });
+  it('Random picks one element per decision among the bolts you can cast; V and the attack agree', () => {
+    const rows = [row('<DEFAULT>', { on: ['V', 'A'], damage: VT_DAMAGE.Random })];
+    const spells = [spell(58), spell(85), spell(21), spell(521)];
+    expect(planCombat(input({ rows, spells, random: () => 0 }))).toMatchObject({ spell: { id: 521 } }); // acid vuln
+    expect(planCombat(input({ rows, spells, random: () => 0.99 }))).toMatchObject({ spell: { id: 21 } }); // fire vuln
+    const vulned = (cat: number) => [{ guid: 1, category: cat, at: 100_000, duration: 60 }];
+    expect(planCombat(input({ rows, spells, random: () => 0, castLog: vulned(102) }))).toMatchObject({ spell: { id: 58 } });
+    expect(planCombat(input({ rows, spells, random: () => 0.99, castLog: vulned(110) }))).toMatchObject({ spell: { id: 85 } });
+  });
+  it('Fists casts Tusker Fists at the target; an era without it (1999) casts nothing', () => {
+    const rows = [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Fists })];
+    expect(planCombat(input({ rows, spells: [spell(2934), spell(85)] }))).toMatchObject({ kind: 'cast', spell: { id: 2934 }, target: 1 });
+    const no = buildCombatFamilies({ spells: new Map(TABLE.filter(([id]) => id !== 2934)) });
+    expect(planCombat(input({ rows, families: no, spells: [spell(85)] }))).toBeNull();
+  });
+});
+
+describe('planPet: Summon Pets and the PetDmg column', () => {
+  const ess = (guid: number, name: string, uiEffects: number): PlanItem => ({ guid, name, uiEffects, ints: { 266: 49052 } });
+  const ACID = ess(700, 'Acid Grievver Essence (50)', 0x100);
+  const FIRE = ess(701, 'Fire Grievver Essence (50)', 0x20);
+  const GOLEM = ess(702, 'Mud Golem Essence', 0x1);
+  const devices = [GOLEM, ACID, FIRE];
+  const pet = (over: Partial<CombatInput>, range = 30, min = 1, d = devices) => planPet(input(over), { range, minMonsters: min, devices: d });
+  it('reads an essence\'s element from its UiEffects (the golem shows only Magical)', () => {
+    expect([petDeviceElement(ACID), petDeviceElement(FIRE), petDeviceElement(GOLEM)]).toEqual(['acid', 'fire', null]);
+  });
+  it('PAuto: the element your own Dmg type resolves to; else the Auto element; else the first device', () => {
+    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Fire })] })?.device.name).toBe(FIRE.name);
+    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Acid })] })?.device.name).toBe(ACID.name);
+    // Slash has no essence: the Auto element (the fire wand) instead.
+    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Slash })] })?.device.name).toBe(FIRE.name);
+    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Slash })] }, 30, 1, [GOLEM, ACID])?.device.name).toBe(GOLEM.name);
+  });
+  it('Auto uses the Auto element; a named element only that one; None monsters don\'t count', () => {
+    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Acid, petDamage: VT_DAMAGE.Auto })] })?.device.name).toBe(FIRE.name);
+    expect(pet({ rows: [row('<DEFAULT>', { petDamage: VT_DAMAGE.Acid })] })?.device.name).toBe(ACID.name);
+    expect(pet({ rows: [row('<DEFAULT>', { petDamage: VT_DAMAGE.Cold })] })).toBeNull();
+    expect(pet({ rows: [row('<DEFAULT>', { petDamage: VT_DAMAGE.None })] })).toBeNull();
+  });
+  it('the highest-priority monster in pet range picks the element; Pet Min. Monsters counts only those in range', () => {
+    const rows = [row('<DEFAULT>', { petDamage: VT_DAMAGE.Fire }), row('Boss', { priority: 3, petDamage: VT_DAMAGE.Acid })];
+    const monsters = [mon(1, 'Rat', 3), mon(2, 'Boss', 20), mon(3, 'Rat', 45)];
+    expect(pet({ rows, monsters }, 30)?.device.name).toBe(ACID.name);
+    expect(pet({ rows, monsters }, 10)?.device.name).toBe(FIRE.name);
+    expect(pet({ rows, monsters }, 30, 3)).toBeNull();
+    // A Custom Pet Range past Monster Range (AttackDistance 30) sees the far one too.
+    expect(pet({ rows, monsters }, 50, 3)?.count).toBe(3);
+  });
+  it('no pet device, no summon; the default row is PAuto', () => {
+    expect(VT_DEFAULT_MONSTER.petDamage).toBe(VT_PET_AUTO);
+    expect(pet({}, 30, 1, [])).toBeNull();
+  });
+});
+
 describe('planCombat: ring vs bolt vs streak vs arc', () => {
   const spells = [spell(85), spell(2743), spell(1800), spell(1785)];
   const many = [mon(1, 'Rat', 2), mon(2, 'Rat', 3), mon(3, 'Rat', 4), mon(4, 'Rat', 4.5), mon(5, 'Rat', 20)];
@@ -207,8 +319,10 @@ describe('planCombat: ring vs bolt vs streak vs arc', () => {
     expect(planCombat(input({ rows, spells, monsters: [mon(1, 'Rat', 3)] }))).toMatchObject({ spell: { id: 1785 } });
     expect(planCombat(input({ rows, spells, monsters: [mon(1, 'Rat', 12)] }))).toMatchObject({ spell: { id: 85 } });
   });
-  it('S streaks; UseArcs Yes / At Range picks the arc when it is at the best level', () => {
-    expect(planCombat(input({ rows: [row('<DEFAULT>', { on: ['A', 'S'], damage: VT_DAMAGE.Fire })], spells }))).toMatchObject({ spell: { id: 1800 } });
+  it('S alone streaks (A with S streaks only to finish: verify-macro-monster-table.ts); UseArcs Yes / At Range picks the arc when it is at the best level', () => {
+    expect(planCombat(input({ rows: [row('<DEFAULT>', { on: ['S'], damage: VT_DAMAGE.Fire })], spells }))).toMatchObject({ spell: { id: 1800 } });
+    // A with S on a monster nothing is known about: no finisher, so the bolt (before 2026-10-11 it streaked every time).
+    expect(planCombat(input({ rows: [row('<DEFAULT>', { on: ['A', 'S'], damage: VT_DAMAGE.Fire })], spells }))).toMatchObject({ spell: { id: 85 } });
     const rows = [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Fire })];
     // Bolt VI (250) beats Arc V (200): bolt even with UseArcs Yes.
     expect(planCombat(input({ rows, spells, settings: { AttackDistance: 30, UseArcs: 3 } }))).toMatchObject({ spell: { id: 85 } });
@@ -288,6 +402,17 @@ describe.skipIf(!existsSync(EOL))('buildCombatFamilies on the end-of-retail Spel
     expect(eol.fams.attack.nether?.bolt?.category).toBe(640);
     expect(eol.fams.attack.nether?.streak?.category).toBe(639);
   });
+  it('Harm Other (80), Drain Health Other (87) and Tusker Fists: no Martyr\'s, self or Health-to-vital spells', () => {
+    const { fams, table } = eol;
+    expect(fams.harm?.category).toBe(80);
+    expect(fams.harm?.ids.has(4308)).toBe(true); // Incantation of Harm Other
+    expect(fams.harm?.ids.has(2766)).toBe(false); // Martyr's Hecatomb VII
+    expect(fams.harm?.ids.has(8)).toBe(false); // Harm Self I
+    expect(fams.drain?.category).toBe(87);
+    expect(fams.drain?.ids.has(4643)).toBe(true); // Incantation of Drain Health Other
+    for (const id of fams.drain!.ids) expect(table.spells.get(id)!.name).not.toMatch(/Health to|Regeneration/);
+    expect([...fams.fists!.ids]).toEqual([2934]);
+  });
 });
 
 describe.skipIf(!existsSync(DM) || !existsSync(Y1999))('buildCombatFamilies follows each era\'s own table', () => {
@@ -306,5 +431,68 @@ describe.skipIf(!existsSync(DM) || !existsSync(Y1999))('buildCombatFamilies foll
   it('Dark Majesty (classic Dereth): Flame Bolt and Imperil families present', () => {
     expect(dm.fams.debuff.I?.ids.has(25)).toBe(true);
     expect(dm.fams.attack.fire?.bolt?.ids.has(27)).toBe(true);
+  });
+  it('Harm / Drain / Fists follow each era: 1999 has Harm (76) and Drain (81) but no Tusker Fists; Dark Majesty has all three', () => {
+    expect(y1999.fams.harm?.category).toBe(76);
+    expect(y1999.fams.harm?.ids.has(7)).toBe(true);
+    expect(y1999.fams.drain?.category).toBe(81);
+    expect(y1999.fams.drain?.ids.has(1237)).toBe(true);
+    expect(y1999.fams.fists).toBeUndefined();
+    expect(dm.fams.harm?.ids.has(1176)).toBe(true);
+    expect(dm.fams.drain?.ids.has(1242)).toBe(true);
+    expect(dm.fams.fists?.ids.has(2934)).toBe(true);
+  });
+  it('the planner plans sensibly on each era\'s table: Harm, Drain Auto and Imperil under both debuff methods', () => {
+    for (const era of [dm, y1999]) {
+      const sp = (id: number): PlanSpell => { const s = era.table.spells.get(id)!; return { id, name: s.name, school: SCHOOL_NAME[s.school], category: s.category, power: s.power, self: false, buff: false, duration: s.duration ?? 0 }; };
+      const base = { families: era.fams, items: [], itemNames: [], wielded: {}, skills: [skill(33, 'Life Magic', 120)] };
+      expect(planCombat(input({ ...base, rows: [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Harm })], spells: [sp(7), sp(1172), sp(1176)] }))).toMatchObject({ spell: { id: 1172 } });
+      expect(planCombat(input({ ...base, rows: [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.DrainAuto })], spells: [sp(1237), sp(1242)] }))).toMatchObject({ spell: { id: 1237 } });
+      const imp = { ...base, rows: [row('<DEFAULT>', { on: ['I'] })], spells: [sp(25), sp(1327)] };
+      expect(planCombat(input(imp))).toMatchObject({ spell: { id: 25 } });
+      expect(planCombat(input({ ...imp, settings: { AttackDistance: 30, DebuffSelectionMethod: 1 } }))).toMatchObject({ spell: { id: 1327 } });
+    }
+  });
+});
+
+describe('ammunition (VTank: AmmoType, the row\'s element, prismatic per Dmg type)', () => {
+  const BOW: PlanItem = { guid: 950, name: 'Yew Longbow', itemType: 0x100, ints: { 50: 1 }, equipped: true, slot: 'MissileWeapon' };
+  const ammo = (guid: number, name: string, ints: Record<number, number>, extra: Partial<PlanItem> = {}): PlanItem => ({ guid, name, fits: 'MissileAmmo', stack: 50, ints: { 50: 1, ...ints }, ...extra });
+  const FIRE = ammo(951, 'Fire Arrow', { 44: 9, 45: 0x10 });
+  const GREATER_FIRE = ammo(952, 'Greater Fire Arrow', { 44: 12, 45: 0x10 });
+  const ACID = ammo(953, 'Acid Arrow', { 44: 9, 45: 0x20 });
+  const PRISM = ammo(954, 'Prismatic Arrow', { 44: 10 });
+  const QUARREL = ammo(955, 'Fire Quarrel', { 44: 20, 45: 0x10, 50: 2 });
+  const archer = (damage: number, items: PlanItem[], extra: Partial<CombatInput> = {}) => input({ rows: [row('<DEFAULT>', { on: ['A'], damage })], items: [BOW, ...items], itemNames: [], wielded: { weapon: 'Yew Longbow' }, stance: 'missile', spells: [], ...extra });
+
+  it('a named element: the strongest arrow of it the bow takes (a quarrel never), prismatic only when none of the element is carried', () => {
+    expect(ammoFor(archer(VT_DAMAGE.Fire, [FIRE, GREATER_FIRE, ACID, PRISM, QUARREL]), row('x', { damage: VT_DAMAGE.Fire }), BOW)?.name).toBe('Greater Fire Arrow');
+    expect(ammoFor(archer(VT_DAMAGE.Cold, [FIRE, PRISM]), row('x', { damage: VT_DAMAGE.Cold }), BOW)?.name).toBe('Prismatic Arrow');
+    expect(ammoFor(archer(VT_DAMAGE.Cold, [FIRE]), row('x', { damage: VT_DAMAGE.Cold }), BOW)).toBeNull();
+  });
+
+  it('Prismatic (11) shoots prismatic ammo first; Auto with nothing to aim at takes the best of any element', () => {
+    expect(ammoFor(archer(VT_DAMAGE.Prismatic, [GREATER_FIRE, PRISM]), row('x', { damage: VT_DAMAGE.Prismatic }), BOW)?.name).toBe('Prismatic Arrow');
+    expect(ammoFor(archer(VT_DAMAGE.Prismatic, [GREATER_FIRE]), row('x', { damage: VT_DAMAGE.Prismatic }), BOW)?.name).toBe('Greater Fire Arrow');
+    expect(ammoFor(archer(VT_DAMAGE.Auto, [FIRE, GREATER_FIRE, ACID]), row('x', { damage: VT_DAMAGE.Auto }), BOW)?.name).toBe('Greater Fire Arrow');
+  });
+
+  it('an unexamined launcher picks nothing yet; a wield requirement you miss is skipped; the element can come from UiEffects', () => {
+    expect(ammoFor(archer(VT_DAMAGE.Fire, [FIRE]), row('x', { damage: VT_DAMAGE.Fire }), { ...BOW, ints: {} })).toBeNull();
+    const gated = ammo(956, 'Deadly Fire Arrow', { 44: 30, 45: 0x10, 158: 1, 159: 47, 160: 400 });
+    const lowBow = archer(VT_DAMAGE.Fire, [FIRE, gated], { skills: [skill(47, 'Missile Weapons', 200)] });
+    expect(ammoFor(lowBow, row('x', { damage: VT_DAMAGE.Fire }), BOW)?.name).toBe('Fire Arrow');
+    // AmmoType from the public description, before any examination (CreateObject carries it).
+    const unexamined = ammo(958, 'Fire Arrow', { 44: 9, 45: 0x10 }, { ints: { 44: 9, 45: 0x10 }, ammoType: 1 });
+    expect(ammoFor(archer(VT_DAMAGE.Fire, [unexamined]), row('x', { damage: VT_DAMAGE.Fire }), { ...BOW, ints: {}, ammoType: 1 })?.guid).toBe(958);
+    const glow = ammo(957, 'Fire Arrow', { 44: 9 }, { uiEffects: 0x20 });
+    expect(ammoFor(archer(VT_DAMAGE.Fire, [glow]), row('x', { damage: VT_DAMAGE.Fire }), BOW)?.guid).toBe(957);
+  });
+
+  it('planCombat equips the row\'s ammunition before shooting, then attacks', () => {
+    const p = planCombat(archer(VT_DAMAGE.Fire, [ACID, GREATER_FIRE]));
+    expect(p).toMatchObject({ kind: 'equip', item: { name: 'Greater Fire Arrow' } });
+    const loaded = planCombat(archer(VT_DAMAGE.Fire, [ACID, { ...GREATER_FIRE, equipped: true, slot: 'MissileAmmo' }]));
+    expect(loaded).toMatchObject({ kind: 'attack', target: 1 });
   });
 });

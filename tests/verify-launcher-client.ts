@@ -105,6 +105,9 @@ describe('world directory', () => {
     expect(worldEnterBlock(listed({ name: 'Seedsow', compat: 'incompatible' }))).toMatch(/Seedsow needs the classic/);
     expect(worldEnterBlock(listed({ name: 'Funky', online: false }))).toMatch(/Funky is offline/);
     expect(worldEnterBlock(null)).toMatch(/Pick a world/);
+    // An era this build lacks (usually a page loaded before the deploy that added it): reload, never another era's data.
+    expect(worldEnterBlock(listed({ name: 'FutureWorld', era: 'classic-dereth-9-9' }))).toBe('FutureWorld needs a kind of game data (classic-dereth-9-9) this version of the client does not know. Reload the page to update, or pick another world.');
+    expect(worldEnterBlock(listed({ name: 'Snowreap', era: 'classic-dereth-1-0' }))).toBeNull();
   });
 
   it('Custom…: wss:// (scheme optional), ws:// only for localhost', () => {

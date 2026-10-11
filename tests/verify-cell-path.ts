@@ -4,8 +4,10 @@
  */
 import { existsSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { type CellGraph, OPENING_MIN_HEIGHT_M, findRoute, findRouteViaOutside, frameToParent, loadCellGraph, onLevel, walkableExit, yawToward } from '../tools/lib/cell-path.ts';
+import { type CellDoor, type CellGraph, type FloorPoly, OPENING_MIN_HEIGHT_M, findRoute, findRouteViaOutside, frameToParent, loadCellGraph, onLevel, walkableExit, yawToward } from '../tools/lib/cell-path.ts';
 import { DAT_PATHS, openDat } from './_harness/dat.js';
+import { DatReader } from '../packages/dat-parser/src/DatReader.ts';
+import { RegionDesc } from '../packages/dat-parser/src/file-types/RegionDesc.ts';
 
 const v = (x: number, y: number, z = 0) => ({ x, y, z });
 
@@ -359,5 +361,101 @@ describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('H
   });
   it('still never climbs into a true air cell (the Banderling Ruin atrium stays down-only)', () => {
     for (const c of g.airCells ?? []) for (const d of g.doors.get(c) ?? []) if (d.below === c) expect(d.climb).toBe(false);
+  });
+});
+
+describe('findRouteViaOutside: doorways the landscape walks up to, and doors that would not open', () => {
+  // A hall 0x0100 with a door on a 5 m porch (east, x 10, feet 99) and one at the ground up a ramp (south, y -10, feet 96).
+  const LB = 0xE63D0000;
+  const hall = (LB | 0x0100) >>> 0;
+  const porch: FloorPoly = { pts: [v(10, -2, 99), v(12.5, -2, 99), v(12.5, 2, 99), v(10, 2, 99)], n: v(0, 0, 1), d: 99 };
+  const high: CellDoor = { a: hall, b: 0xFFFF, at: v(10, 0, 100.25), normal: v(1, 0), height: 2.5, bottom: 99, grounded: false };
+  const low: CellDoor = { a: hall, b: 0xFFFF, at: v(0, -10, 97.25), normal: v(0, 1), height: 2.5, bottom: 96, grounded: true };
+  const g: CellGraph = { landblock: LB, doors: new Map([[hall, [high, low]]]), exitFloors: new Map([[high, [porch]], [low, []]]) };
+  const outside = (LB | 0x002D) >>> 0;
+  it('from the ground, in by the door the ground reaches, though the porch door is nearer', () => {
+    expect(findRouteViaOutside(g, outside, v(11, -4, 94), hall, v(5, 0, 96))).toEqual([{ ...v(0, -10, 97.25), feet: 96 }, v(5, 0, 96)]);
+  });
+  it('from up on the porch, in by the porch door', () => {
+    expect(findRouteViaOutside(g, outside, v(11.5, 0, 99), hall, v(5, 0, 96))).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+  });
+  it('with no grounded door at all, any door (the walk may still jump or find a way)', () => {
+    const g2: CellGraph = { landblock: LB, doors: new Map([[hall, [high]]]) };
+    expect(findRouteViaOutside(g2, outside, v(11, -4, 94), hall, v(5, 0, 96))).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+  });
+  it('leaves out a doorway by a door that would not open, and has no route when it was the only one', () => {
+    expect(findRouteViaOutside(g, outside, v(1, -14, 94), hall, v(5, 0, 96), { closed: [v(0.2, -10.7, 96)] })).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+    expect(findRouteViaOutside(g, outside, v(1, -14, 94), hall, v(5, 0, 96), { closed: [v(0.2, -10.7, 96), v(10.7, 0, 99)] })).toBeNull();
+    // Indoors as well: a shut door between two rooms.
+    const A = (LB | 0x0101) >>> 0, B = (LB | 0x0102) >>> 0;
+    const gi: CellGraph = { landblock: LB, doors: new Map([[A, [{ a: A, b: B, at: v(5, 0, 1), normal: v(1, 0), bottom: 0 }]], [B, [{ a: B, b: A, at: v(5, 0, 1), normal: v(1, 0), bottom: 0 }]]]) };
+    expect(findRoute(gi, A, v(0, 0, 0), B, v(9, 0, 0))).not.toBeNull();
+    expect(findRoute(gi, A, v(0, 0, 0), B, v(9, 0, 0), [], { closed: [v(5.6, 0.3, 0)] })).toBeNull();
+  });
+});
+
+describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('Nanto (landblock 0xE63D): the scriveners\' hall up on its foundation (2026-10-11)', () => {
+  let g: CellGraph;
+  const LB = 0xE63D0000;
+  const exit = (cell: number): CellDoor => g.doors.get((LB | cell) >>> 0)!.find((d) => d.b === 0xFFFF)!;
+  beforeAll(() => {
+    const portal = openDat(DAT_PATHS.portal);
+    const region = new RegionDesc(new DatReader(portal.getFileData(0x13000000)!));
+    g = loadCellGraph(openDat(DAT_PATHS.cell), portal, LB, { landHeightTable: region.landDefs.landHeightTable });
+  });
+
+  it('reads the hall\'s doors: four 5 m up on porches no stair reaches, one at 96 up the ramp static 0x020002F8', () => {
+    expect(g.complete).toBe(true);
+    for (const c of [0x015D, 0x015E, 0x015F, 0x0160]) {
+      expect(exit(c).bottom!).toBeCloseTo(99, 1);
+      expect(exit(c).grounded).toBe(false);
+    }
+    expect(exit(0x0161).bottom!).toBeCloseTo(96, 1);
+    expect(exit(0x0161).grounded).toBe(true);
+    // Elsewhere in Nanto, ground-floor doors stay grounded.
+    expect(exit(0x0121).grounded).toBe(true);
+    expect(exit(0x0165).grounded).toBe(true);
+  });
+
+  it('walk_to the Journeyman Scrivener of War Magic from the foot of the foundation goes up the ramp and in at 0x0161, not at the porch door overhead', () => {
+    // The player at local (139.6, 102.8, z 94) in 0xE63D002D; the scrivener in 0xE63D0159 at (136.7, 105.6, z 96).
+    const r = findRouteViaOutside(g, (LB | 0x002D) >>> 0, v(139.6, 102.8, 94), (LB | 0x0159) >>> 0, v(136.7, 105.6, 96), { maxDrop: 0 })!;
+    expect(r).not.toBeNull();
+    expect(r[0].feet).toBeCloseTo(96, 1);
+    expect(Math.hypot(r[0].x - 132.1, r[0].y - 117)).toBeLessThan(0.3); // the doorstep, on the ramp
+    expect(r.every((p) => (p.feet ?? p.z) < 98.5 || p === r[r.length - 1])).toBe(true);
+    // Standing up on the east porch, the east door is the way in.
+    const up = findRouteViaOutside(g, (LB | 0x002D) >>> 0, v(141, 107.9, 99), (LB | 0x0159) >>> 0, v(136.7, 105.6, 96), { maxDrop: 0 })!;
+    expect(up[0].feet).toBeCloseTo(99, 1);
+    expect(Math.hypot(up[0].x - 141, up[0].y - 107.9)).toBeLessThan(0.3);
+  });
+
+  it('with the ramp door shut to a Use, the route goes by a porch door (the walk may still jump to it)', () => {
+    const r = findRouteViaOutside(g, (LB | 0x002D) >>> 0, v(139.6, 102.8, 94), (LB | 0x0159) >>> 0, v(136.7, 105.6, 96), { maxDrop: 0, closed: [v(132.1, 115.6, 96)] })!;
+    expect(r).not.toBeNull();
+    expect(r[0].feet).toBeCloseTo(99, 1);
+  });
+
+  it('counts the cells LandblockInfo says it has: a cell still in flight below NumCells marks the graph incomplete', () => {
+    const cell = openDat(DAT_PATHS.cell), portal = openDat(DAT_PATHS.portal);
+    const gap = { getFileData: (id: number) => (id === 0xE63D0130 ? null : cell.getFileData(id)) } as unknown as typeof cell;
+    const partial = loadCellGraph(gap, portal, LB);
+    expect(partial.complete).toBe(false);
+    // The cells past the gap were still read (the old scan stopped at the first gap and called it complete).
+    expect(partial.doors.has((LB | 0x0159) >>> 0)).toBe(true);
+  });
+});
+
+describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('Holtburg (landblock 0xA9B4): the drudge statue\'s pedestal (2026-10-11)', () => {
+  it('the pedestal\'s opening 0xA9B40178, 2 m over the ground with nothing up to it, is not a doorway the landscape reaches', () => {
+    const portal = openDat(DAT_PATHS.portal);
+    const region = new RegionDesc(new DatReader(portal.getFileData(0x13000000)!));
+    const g = loadCellGraph(openDat(DAT_PATHS.cell), portal, 0xA9B40000, { landHeightTable: region.landDefs.landHeightTable });
+    const d = g.doors.get(0xA9B40178)!.find((x) => x.b === 0xFFFF)!;
+    expect(d.bottom!).toBeCloseTo(68, 1);
+    expect(d.grounded).toBe(false);
+    // Holtburg's ground-floor doors (the blacksmith's west door, the tavern's) stay grounded.
+    expect(g.doors.get(0xA9B4010B)!.find((x) => x.b === 0xFFFF)!.grounded).toBe(true);
+    expect(g.doors.get(0xA9B40164)!.find((x) => x.b === 0xFFFF)!.grounded).toBe(true);
   });
 });

@@ -213,6 +213,11 @@ file) would silence it.
 * Packed-word password length: we write one byte, which is correct up to 127
   chars. GDLE's limit is 64.
 
+### 9. Compat sweep, 2026-10-11 (after Snowreap)
+- **Strings.** End-of-retail worlds on GDL / GDLE (Reefcull, Harvestbud, FunkyTown ×3, GDLE Test) had no era, so they got end of retail's ACE string wire (UTF-8). GDL keeps the bytes as retail sent them (Windows-1252), so non-ASCII chat arrived garbled for other players. The wire now follows the directory's emulator (`EraProfiles.string16WireFor`, set at launcher ENTER; the console logs "<world>: <emu> server, strings as …"). Names are ASCII-only on GDL, so chargen was never affected.
+- **Bare PopUpString.** GDL sends Communication::PopUpString as a top-level 0x0004 message, not a 0xF7B0 event; we now show it (GDLE's "No Olthoi at this time." refusal and GDL-Classic's heritage refusal).
+- **Data behind identical iterations.** GDLE's DDD compares only the iteration record, so a server whose DAT contents differ behind the same numbers passes login and fails at create with Corrupt (Snowreap: docs/dark-majesty-support.md, "Classic Dereth 1.0 vs 1.1"). GDLE server checks that read its own data: attributes ≤ 330, heritages 1-11 (Olthoi only with AllowOlthoi), every trained/specialized skill in its SkillTable, credits ≤ 56 (GDLE Client.cpp @ 353cbab, lines ~419-507). Reefcull / Harvestbud tell players to install gdleac's DATs; no create has been run there (accounts are web-form only), so a live create is still the open check. A Corrupt reply now also logs "chargen data: era <id>, <n> skills sent".
+
 ## Open items
 
 Resolved 2026-10-06 (RELEASE.gdle-npc-use-teleport, -30s-idle-drop, -turbine-chat-0x295):

@@ -73,6 +73,23 @@ export function spellRangeText(baseRangeMod: number, baseRangeConstant: number, 
   return `Range: ${(r / METERS_PER_YARD).toFixed(1)} yds.`;
 }
 
+/**
+ * DetermineSpellRange @ 004ad450 in metres: base_range_mod × the school's skill + base_range_constant, capped at
+ * 75. The skill is CACQualities::InqSkillLevel @ 00591e40, `_level_from_pp + _init_level` (the ranks bought plus
+ * the creation bonus; no attribute part, no buffs), and the best of the five magic skills for a school with none.
+ * ACE's server check is the same (Player_Magic.cs: "use init + ranks, same as acclient DetermineSpellRange").
+ */
+export function spellRangeMeters(s: { school: number; baseRangeMod: number; baseRangeConstant: number }, inqSkillLevel: (skillId: number) => number): number {
+  const skill = skillForSchool(s.school);
+  const level = skill ? inqSkillLevel(skill) : Math.max(...[0x1f, 0x20, 0x21, 0x22, 0x2b].map(inqSkillLevel));
+  return Math.min(s.baseRangeMod * level + s.baseRangeConstant, MAX_SPELL_RANGE);
+}
+
+/** CACQualities::InqSkillLevel @ 00591e40 over the client's skill records: ranks + init level, 0 without a record. */
+export function inqSkillLevel(skills: { getRaises(id: number): number; getInitLevel(id: number): number }, skillId: number): number {
+  return skills.getRaises(skillId) + skills.getInitLevel(skillId);
+}
+
 /** One component row of the list (and its body line). */
 export interface SpellExamineComponent {
   /** The SpellComponentTable id (row property 0x10000010). */

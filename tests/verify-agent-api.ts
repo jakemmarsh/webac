@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AgentApi, agentApiEnabled, automationUiEnabled, bearing, classify, compassToYaw, MAP_COORD_ORIGIN, parseMapCoords, relDeg, toGlobal, yawToCompass,
-  type AgentHost, type AgentHostObject, type AgentHostSelf, fixtureReach, doorOnTheWay, inUpdateRange } from '../packages/renderer/src/agent/AgentApi.ts';
+  type AgentHost, type AgentHostObject, type AgentHostSelf, fixtureReach, doorOnTheWay, inUpdateRange, swingReached } from '../packages/renderer/src/agent/AgentApi.ts';
 import { formatChat, formatObservation, relativeDirection, compassPoint } from '../packages/renderer/src/agent/format.ts';
 import { formatMapCoord } from '../packages/shared/src/types.ts';
 import { mapCoordinateText, mapCoordsOfCell } from '../packages/renderer/src/ui/MapMarkers.ts';
@@ -477,6 +477,98 @@ describe('AgentApi', () => {
     expect(lines.filter((l) => /walk search none/.test(l))).toEqual([]);
   });
 
+  it('walkTo routes round a door its Use did not open (a locked door, the drudge statue\'s Pedestal Weak Spot, 2026-10-11)', async () => {
+    // A 7 m box round the goal (80, 40) with a doorway in the west wall and one in the east wall. The west one's
+    // "door" never opens to a Use (ACE Door.ActOnUse on a locked door: "The door is locked!"); the east one does.
+    let eastOpen = false;
+    const inBand = (v: number, c: number, half: number) => Math.abs(v - c) < half;
+    host.wall = (x, y) => {
+      const onWall = (inBand(x, 76.5, 0.4) || inBand(x, 83.5, 0.4)) && y > 36.1 && y < 43.9 || (inBand(y, 36.5, 0.4) || inBand(y, 43.5, 0.4)) && x > 76.1 && x < 83.9;
+      const east = inBand(x, 83.5, 0.5) && y > 39.4 && y < 40.6;
+      return onWall && !(east && eastOpen);
+    };
+    host.me.x = 70; host.me.y = 40;
+    const west = host.add({ guid: 0x80000049, name: 'Pedestal Weak Spot', objectDescFlags: 0x1000, physicsState: 0, x: 75.8, y: 40 });
+    const eastDoor = host.add({ guid: 0x8000004a, name: 'Door', objectDescFlags: 0x1000, physicsState: 0, x: 84.2, y: 40 });
+    host.add({ guid: 0x8000004b, name: 'Scrivener', itemType: 0x10, cell: 0xa9b40105, x: 80, y: 40 });
+    const asked: Array<Array<{ x: number; y: number; z: number }> | undefined> = [];
+    host.route = ((_fc: number, _f: unknown, _tc: number, to: { x: number; y: number; z: number }, opts?: { closed?: Array<{ x: number; y: number; z: number }> }) => {
+      asked.push(opts?.closed);
+      // The cell router leaves out a doorway with a shut door by it (cellPath CLOSED_DOOR_M).
+      const westShut = opts?.closed?.some((c) => Math.hypot(c.x - 76.5, c.y - 40) <= 2.5);
+      return westShut ? [{ x: 85, y: 40, z: 94 }, { x: 83.5, y: 40, z: 94 }, to] : [{ x: 76.5, y: 40, z: 94 }, to];
+    }) as typeof host.route;
+    const use = host.use;
+    host.use = (g: number) => {
+      if (g === eastDoor.guid) { eastOpen = true; eastDoor.physicsState = 0x4; }
+      if (g === west.guid) api.pushChat('The door is locked!'); // ACE Door.ActOnUse's transient line
+      return use(g);
+    };
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Scrivener', { within: 1.5 });
+    run(api, host, 120_000);
+    const r = await p;
+    log.mockRestore();
+    expect(r).toMatchObject({ ok: true });
+    expect(host.sent.filter((x) => x === `use ${west.guid.toString(16)}`)).toHaveLength(1); // locked: tried once, never again
+    expect(host.sent).toContain(`use ${eastDoor.guid.toString(16)}`);
+    expect(lines.some((l) => /Pedestal Weak Spot #80000049 did not open \(locked\); routing round it/.test(l))).toBe(true);
+    // The route asked after it carries the shut door, in the landblock's frame.
+    const shut = asked.find((c) => c && c.length)!;
+    expect(shut[0].x).toBeCloseTo(75.8, 1);
+    expect(shut[0].y).toBeCloseTo(40, 1);
+    expect(Math.hypot(host.me.x - 80, host.me.y - 40)).toBeLessThan(1.6);
+  });
+
+  it('walkTo waits for the server\'s answer before judging a door: one that opens late is walked through, not routed round (Holtburg tower, 2026-10-11)', async () => {
+    // One doorway (the west wall of a 7 m box round the goal). The Use is answered late: the server walks you to the
+    // door first, and the door's Ethereal state arrives 3 s after the Use (ACE MoveTo, then Door.ActOnUse).
+    let open = false;
+    const inBand = (v: number, c: number, half: number) => Math.abs(v - c) < half;
+    host.wall = (x, y) => {
+      const onWall = (inBand(x, 76.5, 0.4) || inBand(x, 83.5, 0.4)) && y > 36.1 && y < 43.9 || (inBand(y, 36.5, 0.4) || inBand(y, 43.5, 0.4)) && x > 76.1 && x < 83.9;
+      const gap = inBand(x, 76.5, 0.5) && y > 39.4 && y < 40.6;
+      return onWall && !(gap && open);
+    };
+    host.me.x = 70; host.me.y = 40;
+    const door = host.add({ guid: 0x8000004c, name: 'Door', objectDescFlags: 0x1000, physicsState: 0, x: 75.8, y: 40 });
+    host.add({ guid: 0x8000004d, name: 'Scrivener', itemType: 0x10, cell: 0xa9b40105, x: 80, y: 40 });
+    host.route = ((_fc: number, _f: unknown, _tc: number, to: { x: number; y: number; z: number }) => [{ x: 76.5, y: 40, z: 94 }, to]) as typeof host.route;
+    let usedAt = -1;
+    host.busy = () => usedAt >= 0 && !open;
+    const use = host.use;
+    host.use = (g: number) => { if (g === door.guid) usedAt = host.t; return use(g); };
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Scrivener', { within: 1.5 });
+    for (let i = 0; i < 1200; i++) {
+      run(api, host, 100);
+      if (usedAt >= 0 && !open && host.t - usedAt >= 3000) { open = true; door.physicsState = 0x4; }
+    }
+    const r = await p;
+    log.mockRestore();
+    expect(r).toMatchObject({ ok: true });
+    expect(host.sent.filter((x) => x === `use ${door.guid.toString(16)}`)).toHaveLength(1);
+    expect(lines.filter((l) => /did not open/.test(l))).toEqual([]);
+  });
+
+  it('walkTo gives a door that ignored its Use (no "locked" reply) a second try, and a stuck walk never blames a door that opened', async () => {
+    // ACE Door.ActOnUse returns at once while the door is busy swinging: the first Use does nothing, the second opens it.
+    host.add({ guid: 0x8000004e, name: 'Door', objectDescFlags: 0x1000, physicsState: 0, x: 81, y: 21 });
+    host.add({ guid: 0x80000041, name: 'Far Thing', x: 80, y: 120 });
+    let uses = 0;
+    const use = host.use;
+    host.use = (g: number) => { if (g === 0x8000004e && ++uses === 2) host.objs.get(g)!.physicsState = 0x4; return use(g); };
+    const p = api.walkTo('Far Thing');
+    run(api, host, 60_000, { physics: false }); // the body never moves: something else blocks
+    const r = await p;
+    expect(uses).toBe(2);
+    expect(r.ok).toBe(false);
+    expect(r.message).not.toMatch(/stayed shut/);
+    expect(r.message).toMatch(/opened Door, but the way on is still blocked/);
+  });
+
   it('a fixture reaches as far as its part-array radius, a creature as far as its body; radius-less things reach 0', () => {
     expect(fixtureReach({ itemType: 0, collisionRadius: 1.6 })).toBe(1.6); // the lifestone (Setup radius × scale)
     expect(fixtureReach({ itemType: 0x10, collisionRadius: 0.6 })).toBe(0); // a creature with no blocking shape
@@ -592,7 +684,7 @@ describe('AgentApi', () => {
     run(api, host, 40_000, { physics: false }); // the body never moves
     const r = await p;
     expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/^stuck .* tried the door Door, which did not let you through .* ac_map shows the room/);
+    expect(r.message).toMatch(/^stuck .* tried the door Door, which stayed shut: locked, or it needs a key\)\. ac_map shows the room/);
     expect(host.sent).toContain('use 80000040');
     expect([...host.keys]).toEqual([]);
   });
@@ -612,6 +704,22 @@ describe('AgentApi', () => {
     // A shut one (Ethereal clear) is still tried.
     host.objs.get(0x80000042)!.physicsState = 0x8;
     expect(api.nearby(5, 'Door')[0].open).toBe(false);
+  });
+
+  it('attack power: 0.6 unless asked; \'bar\' is the combat bar\'s own setting (VTank with AutoAttackPower off); clamped to 0..1', () => {
+    host.add({ guid: 0x80000051, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 23 });
+    host.add({ guid: 0x80000052, name: 'Drudge Slinker', itemType: 0x10, objectDescFlags: 0x10, x: 81, y: 23 });
+    host.add({ guid: 0x80000053, name: 'Drudge Sneaker', itemType: 0x10, objectDescFlags: 0x10, x: 82, y: 23 });
+    host.barPower = 0.42;
+    api.attack(0x80000051);
+    run(api, host, 100);
+    api.attack(0x80000052, { power: 'bar' });
+    host.pending = false;
+    run(api, host, 100);
+    api.attack(0x80000053, { power: 7 });
+    host.pending = false;
+    run(api, host, 100);
+    expect(host.sent.filter((s) => s.startsWith('attack '))).toEqual(['attack 80000051 0.6 medium', 'attack 80000052 0.42 medium', 'attack 80000053 1 medium']);
   });
 
   it('attack sends one request, lets the server repeat, and re-sends only after the chain ends', async () => {
@@ -648,6 +756,44 @@ describe('AgentApi', () => {
     expect(api.dialog('OK', null).ok).toBe(true); // an omitted index arrives as JSON null
     expect(api.observe().dialogs).toEqual([]);
     expect(api.dialog('OK').message).toBe('no dialog is open');
+  });
+
+  it('melee swings that report nothing (AC1999: a swing over a short creature) try the next height, and the one that reaches is kept', async () => {
+    // Live 2026-10-11 (AC1999, local server): medium swings at a Black Rabbit 1.1 m away for a minute, no line, 100 % health.
+    host.me.combatMode = 'melee';
+    host.add({ guid: 0x60000075, name: 'Black Rabbit', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 21.1 });
+    api.attack('Black Rabbit');
+    run(api, host, 100);
+    expect(host.sent).toContain('attack 60000075 0.6 medium'); // the combat bar's height
+    // It bites us: that's not one of our swings reaching it.
+    for (let t = 0; t < AgentApi.QUIET_SWING_MS + 500; t += 500) { run(api, host, 500); if (t === 1000) api.pushChat('Black Rabbit bites you for 2 points of piercing damage!', 0x15); }
+    expect(host.sent).toContain('cancel');
+    expect(host.sent).toContain('height low'); // set on the combat bar, as its Low button does
+    host.pending = false;
+    run(api, host, 1600);
+    expect(host.sent).toContain('attack 60000075 0.6 low');
+    api.pushChat('You hit Black Rabbit for 4 points of bludgeoning damage!', 0x16);
+    run(api, host, 500);
+    for (let t = 0; t < 10_000; t += 500) { run(api, host, 500); api.pushChat('You hit Black Rabbit for 3 points of bludgeoning damage!', 0x16); }
+    expect(host.sent.filter((s) => s.startsWith('height'))).toEqual(['height low']); // reaching: no more changes
+    // The next rabbit starts at the height that reached.
+    host.dying.add(0x60000075);
+    host.pending = false; // its death ended the chain
+    run(api, host, 300);
+    host.add({ guid: 0x60000076, name: 'Black Rabbit', itemType: 0x10, objectDescFlags: 0x10, x: 80.5, y: 21.1 });
+    api.attack(0x60000076);
+    run(api, host, 100);
+    expect(host.sent).toContain('attack 60000076 0.6 low');
+    AgentApi.reachHeights.clear();
+  });
+
+  it('swingReached: our hits (with retail\'s prefixes) and its evades reach; its hits on us do not', () => {
+    expect(swingReached('(combat) You graze Black Rabbit for 0 points of bludgeoning damage!', 'Black Rabbit')).toBe(true);
+    expect(swingReached('(combat) Critical hit!  Sneak Attack! You smash Black Rabbit for 30 points of bludgeoning damage!', 'Black Rabbit')).toBe(true);
+    expect(swingReached('(combat) Black Rabbit evaded your attack.', 'Black Rabbit')).toBe(true);
+    expect(swingReached('(combat) Black Rabbit bites you for 2 points of piercing damage!', 'Black Rabbit')).toBe(false);
+    expect(swingReached('(combat) You evaded Black Rabbit!', 'Black Rabbit')).toBe(false);
+    expect(swingReached('(combat) You hit Drudge Skulker for 3 points!', 'Black Rabbit')).toBe(false);
   });
 
   it('attack gives up after 20 s without a swing either way', async () => {
@@ -837,12 +983,77 @@ describe('AgentApi', () => {
     run(api, host, 2000);
     expect(host.sent).toContain('use 80000070');
     host.container = { guid: 0x80000070, items: [{ guid: 0x80000071, name: 'Pyreals' }, { guid: 0x80000072, name: 'Drudge Charm' }] };
+    host.pickUp = (g: number) => { host.sent.push(`pickup ${g.toString(16)}`); host.inv.push({ guid: g, name: 'Drudge Charm', where: 'main pack' }); return true; };
     run(api, host, 3000);
     const r = await p;
     expect(r).toMatchObject({ ok: true });
     expect(r.message).toContain('Drudge Charm');
     expect(host.sent).toContain('pickup 80000072');
     expect(host.sent).not.toContain('pickup 80000071');
+  });
+
+  /** A chest whose items move into the pack one request at a time, as the server answers (FakeHost hooks). */
+  function lootableChest(guid: number, items: Array<{ guid: number; name: string; stack?: number }>): { closeAfter: (n: number) => void; refuse: (g: number, line: string) => void } {
+    host.add({ guid, name: 'Chest', itemType: 0x200, x: 81, y: 21 });
+    let closeAfter = Infinity, moved = 0;
+    const refusals = new Map<number, string>();
+    const content = [...items];
+    host.use = (g: number) => {
+      host.sent.push(`use ${g.toString(16)}`);
+      // ACE Container.ActOnUse: a Use of the container you have open closes it; else it opens.
+      if (g === guid) host.container = host.container?.guid === guid ? null : { guid, items: content.map((i) => ({ guid: i.guid, name: i.name })) };
+      return true;
+    };
+    host.pickUp = (g: number) => {
+      host.sent.push(`pickup ${g.toString(16)}`);
+      const it = content.find((i) => i.guid === g);
+      if (!it || host.container?.guid !== guid) { api.pushChat('Source item not found!'); return true; }
+      if (refusals.has(g)) { api.pushChat(refusals.get(g)!); return true; }
+      if (/^Pyreal/.test(it.name) && host.inv.some((i) => /^Pyreal/.test(i.name))) host.inv.find((i) => /^Pyreal/.test(i.name))!.stack! += it.stack ?? 1; // a merge: no new item
+      else host.inv.push({ guid: g, name: it.name, where: 'main pack', ...(it.stack ? { stack: it.stack } : {}) });
+      content.splice(content.indexOf(it), 1);
+      if (host.container) host.container = { guid, items: content.map((i) => ({ guid: i.guid, name: i.name })) };
+      if (++moved >= closeAfter) host.container = null; // walked out of range, or the chest reset
+      return true;
+    };
+    return { closeAfter: (n) => { closeAfter = n; }, refuse: (g, line) => refusals.set(g, line) };
+  }
+
+  it('loot from a chest ac_use already opened takes every item and never Uses it again (that closes it: Nanto, 2026-10-11)', async () => {
+    host.inv = [{ guid: 0x80000900, name: 'Pyreal', where: 'main pack', stack: 10 }];
+    lootableChest(0x80000910, [
+      { guid: 0x80000911, name: 'Pyreal', stack: 25 }, { guid: 0x80000912, name: 'Scroll of Strength Other II' },
+      { guid: 0x80000913, name: 'Chevron Cloak' }, { guid: 0x80000914, name: 'Scroll of Focus Self II' },
+    ]);
+    host.use(0x80000910); // ac_use opened it
+    host.sent.length = 0;
+    const p = api.loot('Chest', null);
+    run(api, host, 15_000);
+    const r = await p;
+    expect(host.sent.filter((x) => x.startsWith('use'))).toEqual([]);
+    expect(host.sent.filter((x) => x.startsWith('pickup'))).toHaveLength(4);
+    expect(r).toMatchObject({ ok: true });
+    expect(r.message).toBe('took 4: Pyreal, Scroll of Strength Other II, Chevron Cloak, Scroll of Focus Self II');
+  });
+
+  it('loot reports only what arrived, with the server\'s reason for what it refused', async () => {
+    const chest = lootableChest(0x80000920, [{ guid: 0x80000921, name: 'Bronze Gear' }, { guid: 0x80000922, name: 'Cookie' }]);
+    chest.refuse(0x80000921, 'You have solved this quest too recently!');
+    const p = api.loot('Chest', null);
+    run(api, host, 20_000);
+    const r = await p;
+    expect(r.message).toBe('took 1: Cookie; could not take 1: Bronze Gear (You have solved this quest too recently!)');
+    expect(host.inv.map((i) => i.name)).toEqual(['Cookie']);
+  });
+
+  it('loot opens a container again when it closes with items left, and takes the rest', async () => {
+    const chest = lootableChest(0x80000930, [{ guid: 0x80000931, name: 'Apple' }, { guid: 0x80000932, name: 'Cider' }, { guid: 0x80000933, name: 'Cookie' }]);
+    chest.closeAfter(1);
+    const p = api.loot('Chest', null);
+    run(api, host, 30_000);
+    const r = await p;
+    expect(r.message).toBe('took 3: Apple, Cider, Cookie');
+    expect(host.sent.filter((x) => x === 'use 80000930').length).toBeGreaterThanOrEqual(2);
   });
 
   it('loot reports names as they are once the items land (1999 lists "???" before the creates)', async () => {
@@ -874,6 +1085,23 @@ describe('AgentApi', () => {
     // A targeted spell with only an item selected asks for a target instead of casting at the wand.
     expect((await api.cast('Flame Bolt I', null)).message).toMatch(/needs a target/);
     expect(await api.cast('Incantation of Something', null)).toMatchObject({ ok: false });
+  });
+
+  it('a resisted or refused cast is not ok: "X resists your spell", an immune target, and ACE\'s components refusal', async () => {
+    host.spells = () => [{ id: 25, name: 'Imperil Other I', school: 'Creature', level: 1 }, { id: 6, name: 'Heal Self I', school: 'Life', level: 1, self: true }];
+    host.add({ guid: 0x80000080, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 25 });
+    const at = async (reply: string, spell = 'Imperil Other I', target: string | null = 'Drudge Skulker') => {
+      const p = api.cast(spell, target);
+      setTimeout(() => api.pushChat(reply, 0x07), 300);
+      await vi.advanceTimersByTimeAsync(3500);
+      return p;
+    };
+    // ACE TryResistSpell, and the same words from GDLE / AC1999 (SpellcastingManager_Effects.cpp).
+    expect(await at('Drudge Skulker resists your spell')).toMatchObject({ ok: false, message: expect.stringContaining('resists your spell') });
+    expect((await at('You fail to affect Drudge Skulker with Imperil Other I')).ok).toBe(false);
+    // ACE WeenieError 0x0400 (it says "don't", not "do not"): before 2026-10-11 this read as a cast.
+    expect((await at("You don't have all the components for this spell.", 'Heal Self I', 'self')).ok).toBe(false);
+    expect((await at('You cast Imperil Other I on Drudge Skulker')).ok).toBe(true);
   });
 
   it('a target deleted without a death start (1999) still counts as killed when its corpse appears', () => {

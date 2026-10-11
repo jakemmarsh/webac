@@ -9,7 +9,8 @@ import { describe, expect, it } from 'vitest';
 import { AgentApi } from '../packages/renderer/src/agent/AgentApi';
 import { FakeHost } from './_harness/agentFake';
 import { TOOLS, TOOL_CALLER, formatStatus, type ToolCaller } from '../tools/ac-agent/tools';
-import { HOSTED_MAX_WAIT_MS, scopeRefusal } from '../services/ws-tcp-bridge/src/mcpHttp';
+import { HOSTED_MAX_WAIT_MS, pickTab, scopeRefusal } from '../services/ws-tcp-bridge/src/mcpHttp';
+import { hostedArgs, hostedInputSchema } from '../tools/ac-agent/mcp-server';
 import { AgentRelay, RATE } from '../services/ws-tcp-bridge/src/relay';
 
 const CHARS = [{ name: 'Jake', pendingDeletion: false }, { name: 'Jakemule', pendingDeletion: false }, { name: 'Oldie', pendingDeletion: true }];
@@ -88,6 +89,39 @@ describe('the tools through a hosted caller', () => {
     };
     return { c, calls };
   }
+
+  it('multiboxing: account= picks the linked tab, ac_status lists them all, and the hosted tools offer account (not the local profile)', async () => {
+    const { api } = selectHost();
+    const main = caller('on', api);
+    const alt = caller('on', null);
+    alt.c.call = async <T>(method: string, args: unknown[] = []) => { alt.calls.push({ method, args }); return { ok: true, message: 'goal: from the alt' } as T; };
+    const linked = [{ account: 'enkarta', tab: 'on' as const, character: 'Jake', screen: 'world' }, { account: 'enkartaalt', tab: 'on' as const, character: 'Alty', screen: 'world' }];
+    const hub: ToolCaller = { ...main.c, connection: () => ({ ...main.c.connection!(), linked }), forTab: (n: string) => (/alt/i.test(n) ? alt.c : main.c) };
+    await TOOL_CALLER.run(hub, () => tool('ac_goal').run(hostedArgs({ text: 'tank', account: 'Alty' })));
+    expect(alt.calls.map((x) => x.method)).toEqual(['goal']);
+    expect(main.calls).toEqual([]);
+    const st = await TOOL_CALLER.run(hub, () => tool('ac_status').run({}));
+    expect(st.text).toContain('this connection plays 2 accounts, one tab each; pass account= to pick (the account, or its character in the world):\n  enkarta: in the world as Jake\n  enkartaalt: in the world as Alty');
+    const schema = hostedInputSchema(tool('ac_observe')) as { properties: Record<string, unknown> };
+    expect(Object.keys(schema.properties)).toContain('account');
+    expect(Object.keys(schema.properties)).not.toContain('profile');
+    expect(hostedArgs({ account: '' }).profile).toBeUndefined();
+  });
+
+  it('pickTab: one account always; several: by account or in-world character, the only tab with Claude on, else a refusal that lists them', () => {
+    const entries: Record<string, { relayOn: boolean; character: string | null }> = { 'coldeve:main': { relayOn: true, character: 'Jake' }, 'coldeve:alt': { relayOn: true, character: 'Alty' } };
+    const relay = { entry: (k: string) => entries[k] as never };
+    expect(pickTab(['coldeve:main'], relay)).toEqual({ key: 'coldeve:main' });
+    expect(pickTab(['coldeve:main'], relay, 'Jake')).toEqual({ key: 'coldeve:main' });
+    // Live 2026-10-11: after /automation unpair in the alt's tab, account=alt fell through to the main tab.
+    expect(pickTab(['coldeve:main'], relay, 'alt')).toEqual({ error: 'no tab on this connection is account or character "alt" (it plays main (Jake); an account unpaired in the game leaves the connection)' });
+    expect(pickTab(['coldeve:main', 'coldeve:alt'], relay, 'ALT')).toEqual({ key: 'coldeve:alt' });
+    expect(pickTab(['coldeve:main', 'coldeve:alt'], relay, 'alty')).toEqual({ key: 'coldeve:alt' });
+    expect(pickTab(['coldeve:main', 'coldeve:alt'], relay, 'nobody')).toEqual({ error: 'no tab on this connection is account or character "nobody" (it plays main (Jake), alt (Alty); an account unpaired in the game leaves the connection)' });
+    expect(pickTab(['coldeve:main', 'coldeve:alt'], relay)).toEqual({ error: 'this connection plays several tabs: main (Jake), alt (Alty). Pass account= (the account, or the character in the world there).' });
+    entries['coldeve:alt'].relayOn = false;
+    expect(pickTab(['coldeve:main', 'coldeve:alt'], relay)).toEqual({ key: 'coldeve:main' });
+  });
 
   it('ac_status: the bridge\'s view alone when no tab is open; with the tab, its screen and characters', async () => {
     const none = caller('none', null);

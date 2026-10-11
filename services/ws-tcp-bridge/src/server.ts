@@ -239,7 +239,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
   // Without the secret every pairing ends with this process (and isn't shared with the other bridge during a drain).
   if (oauth) log(oauth.persistent ? 'info' : 'warn', 'mcp_oauth_on', { tokens: oauth.persistent ? 'sealed' : 'this-process', allowlist: config.mcpAccounts.length });
   const relayOn = mcpTokens.size > 0 || !!oauth;
-  const mcpAuth = (t: string) => { const dev = mcpTokens.get(t); if (dev) return { key: dev, scope: 'any' as const }; return oauth?.resolve(t) ?? null; };
+  const mcpAuth = (t: string) => { const dev = mcpTokens.get(t); if (dev) return { keys: [dev], scope: 'any' as const }; return oauth?.resolve(t) ?? null; };
   const httpServer = http.createServer((req, res) => {
     const path = new URL(req.url ?? '/', 'http://bridge.local').pathname;
     if (path === '/routines') return handleRoutines(req, res, routineTokens, routineStore);

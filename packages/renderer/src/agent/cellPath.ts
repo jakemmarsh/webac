@@ -14,11 +14,14 @@
  */
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import type { DatDatabase } from '@ac/dat-parser/DatDatabase.js';
+import { CellLandblock } from '@ac/dat-parser/file-types/CellLandblock.js';
 import { EnvCell } from '@ac/dat-parser/file-types/EnvCell.js';
 import { Environment, type CellStruct } from '@ac/dat-parser/file-types/Environment.js';
 import type { Frame } from '@ac/dat-parser/file-types/Frame.js';
 import { GfxObj } from '@ac/dat-parser/file-types/GfxObj.js';
+import { LandblockInfo } from '@ac/dat-parser/file-types/LandblockInfo.js';
 import { SetupModel } from '@ac/dat-parser/file-types/SetupModel.js';
+import { TerrainCollision } from '@ac/shared';
 import { placementFrameOf } from '../models/SetupModelGroup.js';
 
 export interface Vec3 { x: number; y: number; z: number }
@@ -33,7 +36,14 @@ export interface Vec3 { x: number; y: number; z: number }
  * `climb`s to within CLIMB_REACH_M of it (a stair rising through the opening; else a body only falls through it),
  * and the `landing`: the walkable height in the lower cell under the opening (null = none under it).
  */
-export interface CellDoor { a: number; b: number; at: Vec3; normal: Vec3; height?: number; bottom?: number; below?: number; climb?: boolean; landing?: number | null }
+/**
+ * An outside doorway (b = 0xFFFF) is `grounded` when a body on the landscape can walk up to it: the terrain is at
+ * its feet, or the walkable surfaces outside it (the building's own porch, a landblock static's ramp or steps) join
+ * up, a step at a time, down to the terrain. false: a door on a ledge with no way up to it (Nanto's scriveners'
+ * hall 0xE63D: four doors 5 m up on porches no stair reaches, and a ground door up a ramp static, 2026-10-11).
+ * undefined: not known (no terrain to measure against).
+ */
+export interface CellDoor { a: number; b: number; at: Vec3; normal: Vec3; height?: number; bottom?: number; below?: number; climb?: boolean; landing?: number | null; grounded?: boolean }
 
 /** PhysicsGlobals.FloorZ: the least normal.z a walkable polygon has (ACE ObjectInfo.GetWalkableZ). */
 const FLOOR_Z = 0.66417414618662751;
@@ -47,7 +57,7 @@ const FLOOR_Z = 0.66417414618662751;
 export const CLIMB_REACH_M = 1.5;
 
 /** A walkable polygon of a cell in the landblock frame: its points and plane (n · p = d). */
-interface FloorPoly { pts: Vec3[]; n: Vec3; d: number }
+export interface FloorPoly { pts: Vec3[]; n: Vec3; d: number }
 
 /** The walkable polygons (normal.z ≥ FloorZ) of a cell's physics polygons, through the cell's frame. */
 function walkablePolys(cell: EnvCell, struct: CellStruct): FloorPoly[] {
@@ -144,6 +154,11 @@ export interface CellGraph {
    */
   airCells?: Set<number>;
   /**
+   * The walkable surfaces just outside each outside doorway, joined a step at a time (its porch, a ramp up to
+   * it): whether a body standing on the landscape is already up there (CellDoor.grounded).
+   */
+  exitFloors?: Map<CellDoor, FloorPoly[]>;
+  /**
    * False when a file it needed was not readable yet (a streamed set's miss: the read returns null and
    * the fetch starts), so the graph may lack doors. Don't keep it; build it again on the next route.
    */
@@ -163,18 +178,34 @@ export function frameToParent(f: Frame, v: Vec3): Vec3 {
   };
 }
 
+/**
+ * `landHeightTable`: the region's LandDefs.LandHeightTable (RegionDesc 0x13000000), for the terrain under each
+ * outside doorway (CellDoor.grounded). Without it no doorway's grounding is known.
+ */
+export interface CellGraphOptions { landHeightTable?: ArrayLike<number> }
+
+/** The human body (Setup 0x02000001): how high it steps up (StepUpHeight, 0.6 m in the end-of-retail DAT). */
+const HUMAN_SETUP = 0x02000001;
+
 /** Read every EnvCell of `landblock` (0xXXYY0000) and its doors. */
-export function loadCellGraph(cellDat: DatDatabase, portalDat: DatDatabase, landblock: number): CellGraph {
+export function loadCellGraph(cellDat: DatDatabase, portalDat: DatDatabase, landblock: number, opts: CellGraphOptions = {}): CellGraph {
   const lb = (landblock & 0xFFFF0000) >>> 0;
   const envs = new Map<number, Environment | null>();
   const doors = new Map<number, CellDoor[]>();
   const centers = new Map<number, Vec3>();
   const floors = new Map<number, FloorPoly[]>();
   let complete = true;
-  for (let n = 0x0100; n <= 0xFFFD; n++) {
+  // The landblock's LandblockInfo says how many EnvCells it has (NumCells, numbered from 0x0100; any past them are
+  // orphans). Without it, read on until the first gap. A streamed store answers a cell still in flight with null:
+  // a gap below NumCells is a miss, not the end, so the graph is incomplete (not kept) rather than cut short.
+  const infoData = cellDat.getFileData((lb | 0xFFFE) >>> 0);
+  let info: LandblockInfo | null = null;
+  if (infoData) { try { info = new LandblockInfo(new DatReader(infoData)); } catch { info = null; } }
+  const last = info ? 0x0100 + info.numCells - 1 : 0xFFFD;
+  for (let n = 0x0100; n <= last; n++) {
     const id = (lb | n) >>> 0;
     const data = cellDat.getFileData(id);
-    if (!data) { if (n === 0x0100) complete = false; break; } // EnvCells are numbered contiguously from 0x0100; none at all may be a bundle still in flight
+    if (!data) { if (info || n === 0x0100) complete = false; if (info) continue; break; } // none at all may be a bundle still in flight
     const cell = new EnvCell(new DatReader(data));
     if (!envs.has(cell.environmentId)) {
       const e = portalDat.getFileData(cell.environmentId);
@@ -246,7 +277,101 @@ export function loadCellGraph(cellDat: DatDatabase, portalDat: DatDatabase, land
       for (const e of doors.get(d.b) ?? []) if (e.b === c && samePoint(e.at, d.at)) e.climb = true;
     }
   }
-  return { landblock: lb, doors, centers, airCells, complete };
+  const graph: CellGraph = { landblock: lb, doors, centers, airCells, complete };
+  if (info && opts.landHeightTable) {
+    const r = groundExits(graph, cellDat, portalDat, info, opts.landHeightTable);
+    if (!r) graph.complete = false;
+  }
+  return graph;
+}
+
+/** Height of polygon `f`'s plane at (x, y). */
+const zOn = (f: FloorPoly, x: number, y: number): number => (f.d - f.n.x * x - f.n.y * y) / f.n.z;
+
+/** How far apart (seen from above) two surfaces' edges may be and still join: a body's foot crosses the seam. */
+const SEAM_M = 0.25;
+
+/**
+ * Whether a body steps from surface `a` onto surface `b`: a corner of one lies on an edge of the other (within
+ * SEAM_M seen from above) no more than a step (`step`) above or below it.
+ */
+function joins(a: FloorPoly, b: FloorPoly, step: number): boolean {
+  const touch = (p: FloorPoly, q: FloorPoly): boolean => {
+    for (const v of p.pts) {
+      for (let i = 0; i < q.pts.length; i++) {
+        const e0 = q.pts[i], e1 = q.pts[(i + 1) % q.pts.length];
+        const ex = e1.x - e0.x, ey = e1.y - e0.y;
+        const l2 = ex * ex + ey * ey;
+        const t = l2 > 0 ? Math.max(0, Math.min(1, ((v.x - e0.x) * ex + (v.y - e0.y) * ey) / l2)) : 0;
+        const cx = e0.x + ex * t, cy = e0.y + ey * t;
+        if (Math.hypot(v.x - cx, v.y - cy) <= SEAM_M && Math.abs(v.z - (e0.z + (e1.z - e0.z) * t)) <= step) return true;
+      }
+    }
+    return false;
+  };
+  return touch(a, b) || touch(b, a);
+}
+
+/**
+ * Mark each outside doorway grounded or not (CellDoor.grounded) and keep the surfaces outside it
+ * (CellGraph.exitFloors). The surfaces are the walkable physics polygons of the landblock's buildings and
+ * statics (LandblockInfo Buildings and Objects); the ground is the terrain (CellLandblock heights through the
+ * LandHeightTable, split as the client splits it). From the surface a body stands on just outside the doorway,
+ * the walk spreads to every surface that joins it a step up or down (the human StepUpHeight); it is grounded
+ * when one of them meets the terrain. Returns false when a file it needed was not readable yet.
+ */
+function groundExits(g: CellGraph, cellDat: DatDatabase, portalDat: DatDatabase, info: LandblockInfo, table: ArrayLike<number>): boolean {
+  const lbData = cellDat.getFileData((g.landblock | 0xFFFF) >>> 0);
+  const humanData = portalDat.getFileData(HUMAN_SETUP);
+  if (!lbData || !humanData) return false;
+  let land: CellLandblock, step: number;
+  try { land = CellLandblock.read(new DatReader(lbData)); step = new SetupModel(new DatReader(humanData)).stepUpHeight; } catch { return true; }
+  const heights = land.heights.map((h) => table[h]);
+  const bx = (g.landblock >>> 24) & 0xFF, by = (g.landblock >>> 16) & 0xFF;
+  const ground = (x: number, y: number): number => TerrainCollision.sampleHeight(heights, x, y, bx, by);
+  const polys: FloorPoly[] = [];
+  let ok = true;
+  for (const b of info.buildings) { const r = staticFloors(portalDat, b.modelId, b.frame); polys.push(...r.polys); ok &&= r.ok; }
+  for (const o of info.objects) { const r = staticFloors(portalDat, o.id, o.frame); polys.push(...r.polys); ok &&= r.ok; }
+  // A surface meets the terrain where a corner is within a step of it, or its edge passes through it.
+  const meetsGround = (f: FloorPoly): boolean => {
+    let above = false, below = false;
+    for (const v of f.pts) {
+      const dz = v.z - ground(v.x, v.y);
+      if (Math.abs(dz) <= step) return true;
+      if (dz > 0) above = true; else below = true;
+    }
+    return above && below;
+  };
+  const exitFloors = new Map<CellDoor, FloorPoly[]>();
+  for (const list of g.doors.values()) for (const d of list) {
+    if (d.b !== 0xFFFF || !walkableExit(d) || d.bottom === undefined) continue;
+    const c = g.centers?.get(d.a);
+    const h = Math.hypot(d.normal.x, d.normal.y);
+    if (!c) continue;
+    const nx = d.normal.x / h, ny = d.normal.y / h;
+    const side = (c.x - d.at.x) * nx + (c.y - d.at.y) * ny > 0 ? -1 : 1;
+    // Where a body's feet are just through the doorway, on the outside.
+    const q = { x: d.at.x + side * nx * 0.3, y: d.at.y + side * ny * 0.3 };
+    const feet = d.bottom;
+    const seen = new Set<FloorPoly>(polys.filter((f) => insideXY(f.pts, q.x, q.y) && Math.abs(zOn(f, q.x, q.y) - feet) <= step));
+    const queue = [...seen];
+    let grounded = Math.abs(ground(q.x, q.y) - feet) <= step;
+    for (let i = 0; i < queue.length; i++) {
+      const f = queue[i];
+      if (meetsGround(f)) grounded = true;
+      for (const o of polys) if (!seen.has(o) && joins(f, o, step)) { seen.add(o); queue.push(o); }
+    }
+    d.grounded = grounded;
+    exitFloors.set(d, queue);
+  }
+  g.exitFloors = exitFloors;
+  return ok;
+}
+
+/** Whether `p` (feet) stands on one of the surfaces outside doorway `d`: already up on its porch. */
+function standsOutside(g: CellGraph, d: CellDoor, p: Vec3): boolean {
+  return (g.exitFloors?.get(d) ?? []).some((f) => insideXY(f.pts, p.x, p.y) && Math.abs(zOn(f, p.x, p.y) - p.z) <= 0.5);
 }
 
 const dist = (p: Vec3, q: Vec3): number => Math.hypot(p.x - q.x, p.y - q.y, p.z - q.z);
@@ -279,7 +404,20 @@ export function findRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: nu
  * `maxDrop`: the highest fall through a floor opening the route may take (metres; default no limit).
  * The agent sets it from the fall damage the player's health can take (jumpPlan.safeDropHeight).
  */
-export interface RouteOptions { maxDrop?: number }
+export interface RouteOptions {
+  maxDrop?: number;
+  /**
+   * Where a door stands that a Use did not open (locked, or opened only by a key or a quest item): every doorway
+   * within CLOSED_DOOR_M of one is left out of the route. The Holtburg drudge statue's Pedestal Weak Spot (a Door
+   * weenie in the pedestal's opening 0xA9B40178) sent a walk to open it again and again (2026-10-11).
+   */
+  closed?: Vec3[];
+}
+
+/** How near a doorway a door that would not open stands (seen from above; within 3 m of height). */
+export const CLOSED_DOOR_M = 2.5;
+const shutIn = (d: CellDoor, closed: Vec3[] | undefined): boolean =>
+  !!closed?.some((c) => Math.hypot(c.x - d.at.x, c.y - d.at.y) <= CLOSED_DOOR_M && Math.abs(c.z - (d.bottom ?? d.at.z)) <= 3);
 
 /**
  * A fall through an opening costs this much extra route length: a walk round by stairs or a ramp up
@@ -306,7 +444,7 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
   const pos = new Map<string, RoutePoint>();
   const door = new Map<string, CellDoor>();
   const cellsOf = new Map<string, number[]>();
-  const usable = (d: CellDoor): boolean => d.b !== 0xFFFF && !(bodySized && tooLow(d)) && !avoid.some((a) => samePoint(a, d.at));
+  const usable = (d: CellDoor): boolean => d.b !== 0xFFFF && !(bodySized && tooLow(d)) && !avoid.some((a) => samePoint(a, d.at)) && !shutIn(d, opts.closed);
   for (const [cell, list] of g.doors) for (const d of list) {
     if (!usable(d)) continue;
     const k = key(d);
@@ -404,16 +542,31 @@ export function walkableExit(d: CellDoor): boolean {
 function routeViaOutside(g: CellGraph, fromCell: number, from: Vec3, toCell: number, to: Vec3, opts: RouteOptions): RoutePoint[] | null {
   const fromIn = isInterior(fromCell), toIn = isInterior(toCell);
   if (!fromIn && !toIn) return [to];
+  if (fromIn && toIn) {
+    const inside = findRoute(g, fromCell, from, toCell, to, [], opts);
+    if (inside) return inside;
+  }
   const all: CellDoor[] = [];
-  for (const list of g.doors.values()) for (const d of list) if (d.b === 0xFFFF) all.push(d);
+  for (const list of g.doors.values()) for (const d of list) if (d.b === 0xFFFF && !shutIn(d, opts.closed)) all.push(d);
   const doors = all.filter(walkableExit);
   const exits = doors.length ? doors : all; // a building with no door-sized opening: any way out beats none
+  // A doorway the landscape walks up to, or one whose porch the outdoor end already stands on, before a door on a
+  // ledge no stair reaches: Nanto's scriveners' hall has four doors 5 m up and one up a ramp (2026-10-11). With
+  // none of those giving a route, any doorway (the walk's jumps may still get there).
+  const reachable = (e: CellDoor, outdoorEnd: Vec3 | null): boolean => e.grounded !== false || (outdoorEnd !== null && standsOutside(g, e, outdoorEnd));
+  const outdoorEnd = fromIn ? (toIn ? null : to) : from;
+  const preferred = exits.filter((e) => reachable(e, outdoorEnd));
+  return (preferred.length ? bestViaExits(g, fromCell, from, toCell, to, preferred, opts) : null)
+    ?? (preferred.length < exits.length ? bestViaExits(g, fromCell, from, toCell, to, exits, opts) : null);
+}
+
+/** The shortest route through one of `exits` (out of one building and into another through two of them). */
+function bestViaExits(g: CellGraph, fromCell: number, from: Vec3, toCell: number, to: Vec3, exits: CellDoor[], opts: RouteOptions): RoutePoint[] | null {
+  const fromIn = isInterior(fromCell), toIn = isInterior(toCell);
   let best: RoutePoint[] | null = null;
   let bestLen = Infinity;
   const length = (start: Vec3, pts: RoutePoint[]): number => pts.reduce((t, p, i) => t + dist(i ? pts[i - 1] : start, p), 0);
   if (fromIn && toIn) {
-    const inside = findRoute(g, fromCell, from, toCell, to, [], opts);
-    if (inside) return inside;
     // Two buildings: out through one doorway, across the landscape, in through another.
     for (const out of exits) {
       const leave = findRoute(g, fromCell, from, out.a, withFeet(out, out.at), [], opts);

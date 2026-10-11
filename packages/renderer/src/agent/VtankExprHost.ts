@@ -78,6 +78,9 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
     vtGetSetting: (name) => { const v = engine.setting(name); if (v === undefined) return 0; const out = vtToVTank(name, v); return typeof out === 'boolean' ? (out ? 'True' : 'False') : out; },
     vtSetSetting: (name, value) => { engine.setSetting(name, vtFromVTank(name, value)); return true; },
     getMetaState: () => engine.status().state ?? '',
+    // Meta Views (Create View's windows): uigetcontrol / uisetlabel.
+    viewControl: (view, control) => engine.views?.hasControl?.(view, control) ?? false,
+    setViewLabel: (view, control, text) => engine.views?.setLabel?.(view, control, text) ?? false,
     setMetaState: (state) => { engine.goTo(state); },
     player: () => { const s = me(); return { id: s?.guid ?? 0, name: s?.name ?? '', objectClass: 24, coords: s ? coordsOf(s.pos.x, s.pos.y, s.pos.z) : null, heading: s?.heading }; },
     playerCoords: () => { const s = me(); return s ? coordsOf(s.pos.x, s.pos.y, s.pos.z) : { kind: 'coords', ns: 0, ew: 0, z: 0 }; },

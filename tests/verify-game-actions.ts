@@ -138,13 +138,19 @@ describe('acDebug install gate (utils/debugTools.ts)', () => {
     expect(debugToolsEnabled(true, '?ace&bridge=ws://localhost:9090')).toBe(true);
   });
 
-  it('in a production build only when the URL carries `debug`', () => {
+  it('a deployed build never installs them, ?debug or not (Jake, 2026-10-11: dev only)', () => {
     expect(debugToolsEnabled(false, '')).toBe(false);
-    expect(debugToolsEnabled(false, '?ace&bridge=ws://localhost:9090&account=a&password=b')).toBe(false);
-    expect(debugToolsEnabled(false, '?debug')).toBe(true);
-    expect(debugToolsEnabled(false, '?ace&debug')).toBe(true);
-    expect(debugToolsEnabled(false, '?ace&debug=1')).toBe(true);
+    expect(debugToolsEnabled(false, '?debug')).toBe(false);
+    expect(debugToolsEnabled(false, '?ace&debug=1', false)).toBe(false);
+  });
+
+  it('a URL-overrides build (VITE_ACJS_URL_OVERRIDES=1 preview) installs them only when the URL carries `debug`', () => {
+    expect(debugToolsEnabled(false, '', true)).toBe(false);
+    expect(debugToolsEnabled(false, '?ace&bridge=ws://localhost:9090&account=a&password=b', true)).toBe(false);
+    expect(debugToolsEnabled(false, '?debug', true)).toBe(true);
+    expect(debugToolsEnabled(false, '?ace&debug', true)).toBe(true);
+    expect(debugToolsEnabled(false, '?ace&debug=1', true)).toBe(true);
     // A parameter merely containing the word is not the flag.
-    expect(debugToolsEnabled(false, '?nodebug=1')).toBe(false);
+    expect(debugToolsEnabled(false, '?nodebug=1', true)).toBe(false);
   });
 });

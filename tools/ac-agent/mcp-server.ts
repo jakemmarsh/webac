@@ -37,6 +37,21 @@ export function serverInstructions(attach: string | undefined): string {
 /** The hosted connector's instructions: the play guide for the player's own open tab (hostedGuide.ts). */
 export const HOSTED_INSTRUCTIONS = HOSTED_GUIDE;
 
+/** The hosted connector's routing argument: which linked tab (multiboxing) a tool acts in. */
+export const HOSTED_ACCOUNT_PROP = { type: 'string' as const, description: 'Which tab to act in, when this connection plays several accounts (ac_status lists them): the account, or the character in the world there. Leave it out when there is one.' };
+
+/** Hosted tools take `account` (a linked tab) where local ones take `profile` (a local session). */
+export function hostedInputSchema(t: Parameters<typeof inputSchema>[0]): Record<string, unknown> {
+  const { profile: _p, server: _s, ...rest } = t.props as Record<string, unknown>;
+  return inputSchema({ ...t, props: { ...rest, account: HOSTED_ACCOUNT_PROP } as typeof t.props });
+}
+
+/** A hosted call's arguments with `account` routed the way the tools read a session (`profile`). */
+export function hostedArgs(a: Record<string, unknown>): Record<string, unknown> {
+  const pick = a.account ?? a.profile;
+  return pick === undefined || pick === null || pick === '' ? { ...a, profile: undefined } : { ...a, profile: String(pick) };
+}
+
 export async function handle(req: RpcRequest, opts: { hosted?: boolean } = {}): Promise<unknown | null> {
   const reply = (result: unknown) => ({ jsonrpc: '2.0', id: req.id, result });
   const fail = (code: number, message: string) => ({ jsonrpc: '2.0', id: req.id, error: { code, message } });
@@ -52,12 +67,12 @@ export async function handle(req: RpcRequest, opts: { hosted?: boolean } = {}): 
     case 'ping':
       return reply({});
     case 'tools/list':
-      return reply({ tools: TOOLS.filter((t) => !opts.hosted || !LOCAL_ONLY_TOOLS.has(t.name)).map((t) => ({ name: t.name, description: t.description, inputSchema: inputSchema(t) })) });
+      return reply({ tools: TOOLS.filter((t) => !opts.hosted || !LOCAL_ONLY_TOOLS.has(t.name)).map((t) => ({ name: t.name, description: t.description, inputSchema: opts.hosted ? hostedInputSchema(t) : inputSchema(t) })) });
     case 'tools/call': {
       const tool = TOOL_BY_NAME.get(req.params?.name);
       if (!tool || (opts.hosted && LOCAL_ONLY_TOOLS.has(tool.name))) return fail(-32602, `unknown tool: ${req.params?.name}`);
       try {
-        return reply(toolContent(await tool.run(req.params?.arguments ?? {})));
+        return reply(toolContent(await tool.run(opts.hosted ? hostedArgs(req.params?.arguments ?? {}) : req.params?.arguments ?? {})));
       } catch (e) {
         return reply(toolContent({ text: `error: ${(e as Error)?.message ?? e}`, isError: true }));
       }

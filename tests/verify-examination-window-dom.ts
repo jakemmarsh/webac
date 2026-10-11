@@ -31,6 +31,7 @@ describe.skipIf(!domWindow)('GameUI.showExaminationWindow (real GameUI in happy-
   const texts = new Map<number, string>();
   const visible = new Map<number, boolean>();
   let rendered: { layout: number; subtree?: number } | null = null;
+  let lastElements: Map<number, HTMLElement> = new Map();
 
   beforeAll(async () => {
     const g = globalThis as Record<string, unknown>;
@@ -47,10 +48,11 @@ describe.skipIf(!domWindow)('GameUI.showExaminationWindow (real GameUI in happy-
       const root = domWindow.document.createElement('div');
       wrapper.appendChild(root); parent.appendChild(wrapper);
       const elements = new Map<number, HTMLElement>();
+      lastElements = elements;
       const el = (id: number) => { if (!elements.has(id)) { const d = domWindow.document.createElement('div'); root.appendChild(d); elements.set(id, d); } return elements.get(id)!; };
-      [0x1000012e, 0x10000140, 0x10000153, 0x1000013c, 0x1000013d, 0x1000013e, 0x1000013f, 0x10000149, 0x10000335, 0x10000148].forEach(el);
+      [0x1000012e, 0x10000140, 0x10000153, 0x1000013c, 0x1000013d, 0x10000137, 0x1000013e, 0x1000046e, 0x1000013f, 0x10000149, 0x10000335, 0x10000148].forEach(el);
       return {
-        root, layout: {}, elements, descs: new Map([[0x1000013c, { width: 280, height: 286 }]]),
+        root, layout: {}, elements, descs: new Map([[0x1000013c, { width: 280, height: 286 }], [0x1000013e, { width: 276, height: 57 }]]),
         setText: (id: number, t: string) => { texts.set(id, t); },
         setVisible: (id: number, v: boolean) => { visible.set(id, v); },
         setFill() {}, setState() {}, setPalette() {}, setInteractive() {}, setScrollable() { return {}; }, setDraggable() {}, setDropTarget() {},
@@ -81,6 +83,43 @@ describe.skipIf(!domWindow)('GameUI.showExaminationWindow (real GameUI in happy-
     const body = domWindow.document.querySelector('[data-examine-body]');
     expect(body).toBeTruthy();
     expect(body.children[0].children.length).toBe(4);
+  });
+
+  // The inscription 0x1000013e (276x57 on 0x2100006b, p30 = 300 characters)
+  // wraps at its width like UIElement_Text and scrolls under its p114 bar
+  // 0x1000046e (p121 = true). setText drew one unwrapped line off its edge.
+  it('a long inscription wraps at the element width and scrolls under its DAT bar 0x1000046e, not a native one', () => {
+    const savedFont = ui.loadFontRenderer;
+    const savedDesc = ui.datDescFor;
+    ui.datDescFor = (ref: string) => (ref.endsWith('1000013e') ? { width: 276, height: 57 } : savedDesc.call(ui, ref));
+    // 10 px glyphs, 18 px lines.
+    ui.loadFontRenderer = () => ({
+      isReady: true, lineHeight: 18, outlinePadding: { x: 1, y: 1 },
+      measureText: (t: string) => t.length * 10,
+      renderTextToCanvas: () => domWindow.document.createElement('canvas'),
+      renderWrappedTextToCanvas: () => domWindow.document.createElement('canvas'),
+    });
+    try {
+      const long = 'This blade was forged in the fires of the Direlands and carried by my father before me';
+      ui.showExaminationWindow({ ...itemView(), inscription: { visible: true, text: long, signature: '--Asheron', scribe: 'Asheron', inscription: long } });
+      const el = lastElements.get(EXAMINATION_WINDOW.item.inscription)!;
+      const cell = el.querySelector('.ac-dat-text-element') as HTMLElement;
+      expect(cell).toBeTruthy();
+      expect(Number(cell.dataset.acLines)).toBeGreaterThan(1);
+      expect(el.style.getPropertyValue('scrollbar-width')).toBe('none');
+      expect(el.style.overflowY).toBe('auto');
+      const bar = lastElements.get(EXAMINATION_WINDOW.item.inscriptionScrollbar)!;
+      expect(bar.querySelector('[data-dat-scroll-btn="down"]')).toBeTruthy();
+      // It takes the wheel (a pointer target), and its clicks are the block 0x10000137's.
+      expect(el.style.pointerEvents).toBe('auto');
+      let blockClicks = 0;
+      lastElements.get(EXAMINATION_WINDOW.item.inscriptionBlock)!.addEventListener('click', () => { blockClicks++; });
+      el.click();
+      expect(blockClicks).toBe(1);
+    } finally {
+      ui.loadFontRenderer = savedFont;
+      ui.datDescFor = savedDesc;
+    }
   });
 
   it('a touchpad swipe over the appraisal text scrolls it by its pixels; a mouse notch by one step', () => {

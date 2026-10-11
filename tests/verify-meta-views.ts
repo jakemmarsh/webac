@@ -60,6 +60,28 @@ describe('meta views', () => {
       api.routine.stop();
       expect(closed).toBe(1);
     });
+
+    it('a button\'s actionexpr relabels a button: uigetcontrol / uisetlabel reach the open view through the engine', async () => {
+      const labels: string[] = [];
+      const open = new Set<string>();
+      let click: ((b: MetaView['buttons'][number]) => void) | null = null;
+      let view: MetaView | null = null;
+      api.routine.views = {
+        open: (name, v, c) => { open.add(name); view = v; click = c; }, close: (n) => { open.delete(n); }, closeAll: () => open.clear(),
+        hasControl: (n, c) => open.has(n) && !!view?.buttons.some((b) => b.name === c),
+        setLabel: (n, c, t) => { labels.push(`${n}.${c}=${t}`); return true; },
+      };
+      const xml = WIKI.replace('actionexpr="chatbox[\\/vt echo Button1\\!]"', 'actionexpr="uisetlabel[uigetcontrol[panel,btnTest1],Running]"');
+      api.routine.start({
+        name: 'V', modules: { ...ALL_MODULES_OFF }, initialState: 'Default', loot: [], buffSets: [], routes: [], ruleFiring: 'once',
+        states: [{ name: 'Default', rules: [{ when: [{ kind: 'always' }], do: [{ kind: 'create-view', name: 'panel', xml }] }] }, { name: 'teststate1', rules: [] }],
+      });
+      await step(1000);
+      expect(view!.buttons[0].actionexpr).toBe('uisetlabel[uigetcontrol[panel,btnTest1],Running]');
+      click!(view!.buttons[0]);
+      expect(labels).toEqual(['panel.btnTest1=Running']);
+      expect(api.routine.expressions!.run('uigetcontrol[panel,nope]')).toBe('');
+    });
   });
 });
 
@@ -83,7 +105,18 @@ describe('GameUI draws a meta view', () => {
     ui.openMetaView('panel', { ...parseMetaView(WIKI)!, title: 'Other' }, () => {});
     expect(H.container.querySelector('[data-meta-view="panel"]')).not.toBe(win);
     expect(H.container.querySelectorAll('[data-meta-view="panel"]')).toHaveLength(1);
+    // uigetcontrol / uisetlabel: a named button of an open view, relabelled in place.
+    const ui2 = H.ui as unknown as { metaViewHasControl(v: string, c: string): boolean; setMetaViewLabel(v: string, c: string, t: string): boolean };
+    expect(ui2.metaViewHasControl('panel', 'btnTest1')).toBe(true);
+    expect(ui2.metaViewHasControl('panel', 'nope')).toBe(false);
+    expect(ui2.metaViewHasControl('gone', 'btnTest1')).toBe(false);
+    const b1 = H.container.querySelector('[data-meta-view="panel"] [data-meta-view-button="btnTest1"]') as HTMLElement;
+    expect(ui2.setMetaViewLabel('panel', 'btnTest1', 'Stop')).toBe(true);
+    expect(b1.textContent).toBe('Stop');
+    expect(b1.isConnected).toBe(true);
+    expect(ui2.setMetaViewLabel('panel', 'nope', 'x')).toBe(false);
     ui.closeMetaView('panel');
     expect(H.container.querySelector('[data-meta-view="panel"]')).toBeNull();
+    expect(ui2.metaViewHasControl('panel', 'btnTest1')).toBe(false);
   });
 });

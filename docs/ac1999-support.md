@@ -243,3 +243,9 @@ Never sent by the AC1999 server (KB pages or dead code, no codec needed): `0x16`
 - Find out whether the client's resend storm is the client or this server (a missing ack).
 - A chat capture (type one line by hand; injected keys don't reach the chat line).
 - Compare a 1999 world frame against the real client once our renderer reads 1999 DATs (Phase 2).
+- **A melee swing that passes over a short creature shows nothing (checked 2026-10-11; retail text still unconfirmed).** On the AC1999 server a medium swing at a rabbit does no damage and prints no line; a low one hits. Jake asked whether retail told the player. What we checked:
+  - The client prints nothing itself. Its own cone test (`CPhysicsObj::attack` @ 00512a70) reports each object hit to that object's collision handler, so with no hit nothing runs. `ClientCombatSystem::HandleAttackDoneEvent` @ 0056c500 prints nothing for any error code. (End-of-retail decomp; the 1999 hub isn't exported locally.)
+  - The 1999 `client.exe` (dat-sets/ac1999-retail) has no miss or "too high" string. Its only combat strings are " evaded your attack.", "You evaded ", "grazes", "You are too fatigued to attack!", "Your missile attack misfired!" and "You must select a target before attacking".
+  - It also has no "You bash … for N points" text, so the 1999 server wrote hit lines as text. A retail 1999 server could therefore have sent a line for a whiff too, and nothing we hold shows whether it did.
+  - Period sources confirm the mechanic but not a message. RPGFan's review: "if you're swinging high in the air, you're simply not going to be able to hit a rat attacking your feet". The wiki's Combat Dialog page lists hit lines only.
+  - Decision: no line is added (Jake: "dont make anything up if you havent confirmed"). The agent and macro adapt instead (`AgentApi` tries the next height after 6 s of silent swings). To close it: a 1999 chat log or capture of a whiffed swing.

@@ -68,8 +68,7 @@ describe('OAuth pieces', () => {
     expect(o.status(a.pending.reqId)).toEqual({ state: 'waiting', client: 'Claude Code', code: a.pending.code });
     expect(o.pair('WRONG1', 'local-eor:jake', 'Jake').ok).toBe(false);
     expect(o.pair(`${a.pending.code.slice(0, 3)}-${a.pending.code.slice(3)}`.toLowerCase(), 'local-eor:jake', 'Jake').ok).toBe(true);
-    expect(o.pair(a.pending.code, 'local-eor:other', null).ok).toBe(false); // single use
-    expect(o.status(a.pending.reqId)).toEqual({ state: 'paired', account: 'local-eor:jake', character: 'Jake', client: 'Claude Code' });
+    expect(o.status(a.pending.reqId)).toEqual({ state: 'paired', account: 'local-eor:jake', character: 'Jake', accounts: [{ account: 'local-eor:jake', character: 'Jake' }], client: 'Claude Code', code: a.pending.code });
     const d = o.decide(a.pending.reqId, true, true);
     const redirect = new URL(d.redirect!);
     expect(redirect.searchParams.get('state')).toBe('s1');
@@ -83,7 +82,7 @@ describe('OAuth pieces', () => {
     const tok = await o.tokenRequest({ grant_type: 'authorization_code', code: code2, code_verifier: verifier, client_id: clientId, redirect_uri: CB });
     expect(tok.status).toBe(200);
     const t1 = tok.body as { access_token: string; refresh_token: string };
-    expect(o.resolve(t1.access_token)).toEqual({ key: 'local-eor:jake', scope: ['Jake'], createdAt: 1_000_000 });
+    expect(o.resolve(t1.access_token)).toEqual({ keys: ['local-eor:jake'], scope: ['Jake'], createdAt: 1_000_000 });
     const r2 = await o.tokenRequest({ grant_type: 'refresh_token', refresh_token: t1.refresh_token, client_id: clientId });
     expect(r2.status).toBe(200);
     expect((await o.tokenRequest({ grant_type: 'refresh_token', refresh_token: t1.refresh_token, client_id: clientId })).status).toBe(400); // rotated
@@ -108,12 +107,48 @@ describe('OAuth pieces', () => {
     expect(o.status(b.pending.reqId).state).toBe('expired');
   });
 
+  it('multiboxing: the same code typed in two tabs gives one connection to both accounts; unpairing one keeps the other', async () => {
+    const { o, clientId, advance } = flow(['local-eor:jake', 'local-eor:alt']);
+    const { verifier, challenge } = pkce();
+    const a = await o.authorize(authQ(clientId, challenge));
+    if (!a.ok) throw new Error(a.error);
+    expect(o.pair(a.pending.code, 'local-eor:jake', 'Jake').ok).toBe(true);
+    const second = o.pair(a.pending.code, 'local-eor:alt', 'Alty');
+    expect(second).toEqual({ ok: true, message: 'is paired (Claude Code), 2 accounts on this code: approve it on the page that showed the code' });
+    expect(o.pair(a.pending.code, 'local-eor:jake', 'Jake').message).toMatch(/already paired/); // the same tab again: no duplicate
+    expect(o.pair(a.pending.code, 'local-eor:stranger', null)).toEqual({ ok: false, message: 'Claude is not open to this account yet' }); // the allowlist, per account
+    const st = o.status(a.pending.reqId);
+    expect(st.accounts).toEqual([{ account: 'local-eor:jake', character: 'Jake' }, { account: 'local-eor:alt', character: 'Alty' }]);
+    expect(st.code).toBe(a.pending.code); // still shown, for a third tab
+    // "Only these characters": both tabs' characters.
+    const code = new URL(o.decide(a.pending.reqId, true, true).redirect!).searchParams.get('code')!;
+    const t = (await o.tokenRequest({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: clientId, redirect_uri: CB })).body as { access_token: string; refresh_token: string };
+    expect(o.resolve(t.access_token)).toMatchObject({ keys: ['local-eor:jake', 'local-eor:alt'], scope: ['Jake', 'Alty'] });
+    // /automation unpair in the alt's tab: that account leaves the connection, the other stays.
+    advance(1000);
+    o.revokeAccount('local-eor:alt');
+    expect(o.resolve(t.access_token)?.keys).toEqual(['local-eor:jake']);
+    const r = await o.tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh_token, client_id: clientId });
+    expect(r.status).toBe(200);
+    expect(o.resolve((r.body as { access_token: string }).access_token)?.keys).toEqual(['local-eor:jake']); // refreshed without it
+    // Unpairing the last account ends the connection.
+    advance(1000);
+    o.revokeAccount('local-eor:jake');
+    expect(o.resolve((r.body as { access_token: string }).access_token)).toBeNull();
+  });
+
+  it('a token sealed before multiboxing (one account key, not a list) still works', () => {
+    const { o, clock } = flow();
+    const old = new Sealer(SECRET).seal('a1', { g: 'g-old', k: 'local-eor:jake', s: 'any', t: clock.now(), e: clock.now() + 60_000 });
+    expect(o.resolve(old)).toEqual({ keys: ['local-eor:jake'], scope: 'any', createdAt: clock.now() });
+  });
+
   it('nothing is stored: a restarted (or the other, draining) bridge with the same secret takes the client id and the tokens; another secret, none', async () => {
     const { o, clientId, clock } = flow();
     const t = await grant(o, clientId);
     const next = new OAuthServer({ issuer: 'https://bridge.test', allow: [], now: clock.now, secret: SECRET });
     expect(next.persistent).toBe(true);
-    expect(next.resolve(t.access_token)).toMatchObject({ key: 'local-eor:jake', scope: ['Jake'] });
+    expect(next.resolve(t.access_token)).toMatchObject({ keys: ['local-eor:jake'], scope: ['Jake'] });
     expect(await next.tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh_token, client_id: clientId })).toMatchObject({ status: 200 });
     const { challenge } = pkce();
     expect((await next.authorize(authQ(clientId, challenge))).ok).toBe(true);

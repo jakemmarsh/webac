@@ -4,7 +4,7 @@
  * record of every action sent (tests/verify-agent-*.ts).
  */
 import { expect, vi } from 'vitest';
-import { compassToYaw, type AgentApi, type AgentHost, type AgentHostObject, type AgentHostSelf } from '../../packages/renderer/src/agent/AgentApi.ts';
+import { compassToYaw, type AgentApi, type FellowshipInfo, type AgentHost, type AgentHostObject, type AgentHostSelf } from '../../packages/renderer/src/agent/AgentApi.ts';
 import { getJumpVelocity } from '@ac/shared';
 
 export const HOLTBURG = 0xa9b40019; // landblock 0xA9,0xB4 outdoor cell
@@ -50,6 +50,9 @@ export class FakeHost implements AgentHost {
   };
   fellowshipText = 'no fellowship';
   fellowship = () => this.fellowshipText;
+  /** Your fellowship for Auto Fellow Mgmt (leader, size, fellows' names, the era's Leader hand-off); null: none. */
+  fellowInfo: FellowshipInfo | null = null;
+  fellowshipInfo = () => this.fellowInfo;
   fellowshipAction = (action: string, arg?: string) => { this.sent.push(`fellowship ${action}${arg ? ` ${arg}` : ''} ${this.target?.toString(16) ?? ''}`.trim()); return null; };
   allegianceText = 'no allegiance (no patron, no vassals)';
   swearRefusal: string | null = null;
@@ -74,6 +77,13 @@ export class FakeHost implements AgentHost {
   pending = false;
   attack = (g: number, p: number, h: string) => { this.sent.push(`attack ${g.toString(16)} ${p} ${h}`); this.pending = true; };
   attackPending = () => this.pending;
+  /** The combat bar's attack height. */
+  barHeight: 'high' | 'medium' | 'low' = 'medium';
+  attackHeight = () => this.barHeight;
+  /** The combat bar's power / accuracy level. */
+  barPower = 0.35;
+  attackPower = () => this.barPower;
+  setAttackHeight = (h: 'high' | 'medium' | 'low') => { this.sent.push(`height ${h}`); this.barHeight = h; };
   cancelAttack = () => { this.sent.push('cancel'); };
   cast = (id: number, t: number | null) => { this.sent.push(`cast ${id} ${t === null ? 'self' : t.toString(16)}`); return true; };
   chat = (text: string) => { this.chats.push(text); };
@@ -86,10 +96,12 @@ export class FakeHost implements AgentHost {
   book: AgentHost['book'] = undefined;
   bookPage: AgentHost['bookPage'] = undefined;
   give = (t: number, i: number, n: number) => { this.sent.push(`give ${i.toString(16)} to ${t.toString(16)} x${n}`); return true; };
-  wield = () => true;
+  wield = (g: number) => { this.sent.push(`wield ${g.toString(16)}`); return true; };
   appraised: number[] = [];
   appraisals = new Map<number, string>();
-  appraise = (g: number) => { this.appraised.push(g); };
+  /** Every appraise call, with whether it was quiet (the automation's own looks: no Examine window). */
+  appraiseCalls: Array<{ guid: number; quiet: boolean }> = [];
+  appraise = (g: number, quiet?: boolean) => { this.appraised.push(g); this.appraiseCalls.push({ guid: g, quiet: !!quiet }); };
   appraisal = (g: number) => (this.appraised.includes(g) ? this.appraisals.get(g) ?? null : null);
   /** Identify data by guid (int/float/… properties and spell names), shown once appraised. */
   appraisalDatas = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[] }>();

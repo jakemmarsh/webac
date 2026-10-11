@@ -74,6 +74,20 @@ describe('agent fellowship (real GameUI)', () => {
     expect(t).toContain('Claude Arcanist L10');
   });
 
+  it('Auto Fellow Mgmt reads leader, size, the fellows\' names, and whether the era\'s client has the Leader hand-off', () => {
+    expect(ui.agentFellowshipInfo()).toBeNull();
+    lead(SELF);
+    expect(ui.agentFellowshipInfo()).toEqual({ leader: true, open: false, count: 2, members: ['Claude Bulwark', 'Claude Arcanist'], handOff: true });
+    lead(OTHER);
+    expect(ui.agentFellowshipInfo().leader).toBe(false);
+    // The 1999 client has no Assign New Leader (Absent1999 fellowshipLeadership): no hand-off there.
+    ui.setUnsupportedFeatures(new Set(['fellowshipLeadership']));
+    try {
+      expect(ui.agentFellowshipInfo().handOff).toBe(false);
+      expect(ui.agentFellowshipAction('leader', 'Claude Arcanist')).toBe('this era has no fellowship leader hand-off');
+    } finally { ui.setUnsupportedFeatures(new Set()); }
+  });
+
   it('leader actions go through the panel functions; a member is refused as the disabled buttons refuse', () => {
     lead(SELF);
     expect(ui.agentFellowshipAction('recruit')).toBeNull();
@@ -155,5 +169,23 @@ describe('agent fellowship (real GameUI)', () => {
     expect(sheet).toMatch(/Melee Defense 40 \[\+1: 25 xp\]/);
     expect(ui.agentRaise('endurance')).toMatchObject({ ok: true, cost: 1802 });
     expect(attrs).toEqual([[expect.any(Number), 1802]]);
+  });
+  it('a skill raise costs what the sheet showed (XP already in the skill makes it cheaper), names the next price, and "creature" means Creature Enchantment, not Assess Creature (Arcanist, 2026-10-11)', () => {
+    const skills: Array<[number, number]> = [];
+    // The EoL TrainedSkillXpList's first ranks (XpTable 0x0E000018): 0, 58, 138, 243, 372, 526, 704.
+    ui.setRaiseCallbacks({ onRaiseSkill: (id: number, cost: number) => skills.push([id, cost]) }, { trainedSkill: [0, 58, 138, 243, 372, 526, 704] });
+    ui.charInfo.unassignedXp = 5000;
+    ui.charInfo.skills = [
+      { id: 27, name: 'Assess Creature', status: 'Trained', base: 13, effective: 13, raises: 3, pp: 243 },
+      // Rank 3 with 75 XP over it (ExperienceSpent 318): the next rank is 372 − 318 = 54 away.
+      { id: 31, name: 'Creature Enchantment', status: 'Trained', base: 13, effective: 13, raises: 3, pp: 318 },
+    ];
+    const sheet = ui.agentCharacterSheet();
+    expect(sheet).toMatch(/Assess Creature 13 \[\+1: 129 xp\]/);
+    expect(sheet).toMatch(/Creature Enchantment 13 \[\+1: 54 xp\]/);
+    expect(ui.agentRaise('creature')).toMatchObject({ ok: true, name: 'Creature Enchantment', cost: 54, message: 'raised Creature Enchantment 13 → 14 (54 XP); the next +1 costs 154 XP' });
+    expect(ui.agentCharacterSheet()).toMatch(/Creature Enchantment 14 \[\+1: 154 xp\]/);
+    expect(ui.agentRaise('assess')).toMatchObject({ ok: true, name: 'Assess Creature', cost: 129 });
+    expect(skills).toEqual([[31, 54], [27, 129]]);
   });
 });

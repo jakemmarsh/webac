@@ -154,7 +154,8 @@ describe('CORE.10.g — classic_vendor bar (behavioral)', () => {
     ui.vendorLayoutHandle.elements.get(EL.filterMenu).click();
     // Popup is the last child of the wrapper; rows are the category names.
     const popup = ui.vendorWrapper.lastChild as HTMLElement;
-    const rows = [...popup.children] as HTMLElement[];
+    // Rows live in the listbox 0x10000350 beside its scrollbar 0x10000351.
+    const rows = [...(popup.querySelector('[data-vendor-filter-list]') as HTMLElement).children] as HTMLElement[];
     expect(rows.length).toBe(2); // Armor + Weapons only
     rows[1].click(); // Weapons
     expect(texts.get(EL.filterText)).toBe('Weapons');

@@ -11,18 +11,22 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
-  ERA_PROFILES, EOR_ERA_ID, eraProfile, ownRoles, datMismatch, roleForHeader, DAT_FILE_NAMES, datFileName,
+  ERA_PROFILES, EOR_ERA_ID, eraProfile, string16WireFor, ownRoles, datMismatch, roleForHeader, DAT_FILE_NAMES, datFileName,
   type DatIdentityView, type DatRole,
 } from '../packages/renderer/src/era/EraProfiles';
 import {
   resolveBootEra, stashEraSwitch, takeEraSwitch, planEraDats, hostedDatUrls, ERA_SWITCH_KEY, ERA_SWITCH_MAX_AGE_MS,
-  forgetImportedEraFiles, eraUnavailableText, eraStreamPlan, type EraSwitch,
+  forgetImportedEraFiles, eraUnavailableText, eraStreamPlan, eraDatsKey, eraPortalOverlay, type EraSwitch,
 } from '../packages/renderer/src/era/EraBoot';
 import { resolveRuntimeConfig } from '../packages/renderer/src/config/RuntimeConfig';
+import { eraIdFrom } from '../packages/renderer/src/launcher/worldDirectory';
 import type { DatBlobStore, DatCacheMeta } from '../packages/renderer/src/dat/DatCache';
 import { resolveBridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil';
 import { healthzBody } from '../services/ws-tcp-bridge/src/metrics';
-import { EOR_LOGIN_PROFILE } from '@ac/network';
+import { EOR_LOGIN_PROFILE, BinaryWriter, setString16Wire, getString16Wire } from '@ac/network';
+import { SkillTable, skillTableWithout, DatReader } from '../packages/dat-parser/src/index.js';
+import { DatDatabase } from '../packages/dat-parser/src/DatDatabase.js';
+import { FileDatBytes } from '../packages/dat-parser/src/node/FileDatBytes.js';
 import { openDat, DAT_PATHS } from './_harness/dat.js';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
 
@@ -348,5 +352,116 @@ describe('streamed sets per era (eraStreamPlan, 2026-10-06)', () => {
     expect(probed).toEqual(['/sets/ac1999-retail/portal.dat', '/sets/ac1999-retail/cell.dat']);
     expect('sources' in wholePlan && wholePlan.sources.worldPortal).toEqual({ kind: 'url', url: '/sets/ac1999-retail/portal.dat', cacheNamespace: 'ac1999-retail' });
     expect('sources' in wholePlan && wholePlan.sources.portal).toEqual({ kind: 'url', url: '/client_portal.dat' });
+  });
+});
+
+/** A SkillTable file (PackedHashTable<uint, SkillBase>) with one entry per [key, name, trainedCost]. */
+function skillTableBytes(entries: Array<[number, string, number]>): ArrayBuffer {
+  const parts: number[] = [];
+  const u32 = (v: number) => { parts.push(v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255); };
+  const pstr = (t: string) => {
+    parts.push(t.length & 255, t.length >>> 8, ...[...t].map((c) => c.charCodeAt(0)));
+    while (parts.length % 4) parts.push(0);
+  };
+  u32(0x0e000004); parts.push(entries.length, 0, 32, 0);
+  for (const [key, name, cost] of entries) {
+    u32(key); pstr(`${name} desc`); pstr(name);
+    u32(0x06000000 + key); u32(cost); u32(999); u32(1); u32(1); u32(0);
+    for (let i = 0; i < 6; i++) u32(i);
+    for (let i = 0; i < 24; i++) parts.push(0); // three float64
+  }
+  return new Uint8Array(parts).buffer;
+}
+
+describe('Classic Dereth 1.0 (Snowreap): the 1.1 set without Salvaging (2026-10-11)', () => {
+  it('skillTableWithout drops the keyed entries and keeps the rest byte for byte', () => {
+    const full = skillTableBytes([[1, 'Axe', 6], [40, 'Salvaging', 0]]);
+    const withoutSalvaging = skillTableWithout(full, new Set([40]));
+    expect(new Uint8Array(withoutSalvaging)).toEqual(new Uint8Array(skillTableBytes([[1, 'Axe', 6]])));
+    const t = new SkillTable(new DatReader(withoutSalvaging));
+    expect([...t.skills.keys()]).toEqual([1]);
+    expect(t.skills.get(1)?.name).toBe('Axe');
+    // A key in the middle goes too; nothing to drop = the same bytes.
+    expect([...new SkillTable(new DatReader(skillTableWithout(skillTableBytes([[1, 'Axe', 6], [2, 'Bow', 6], [3, 'Crossbow', 4]]), new Set([2])))).skills.keys()]).toEqual([1, 3]);
+    expect(new Uint8Array(skillTableWithout(full, new Set()))).toEqual(new Uint8Array(full));
+  });
+
+  it('the profile loads the classic-dereth set and serves its SkillTable without skill 40; other eras get no overlay', async () => {
+    const p = ERA_PROFILES['classic-dereth-1-0'];
+    expect(p.login).toEqual(ERA_PROFILES['classic-dereth'].login);
+    expect(p.heritages).toEqual([1, 2, 3]);
+    expect(eraDatsKey(p)).toBe('classic-dereth');
+    expect(eraDatsKey(ERA_PROFILES['classic-dereth'])).toBe('classic-dereth');
+    const c = resolveRuntimeConfig({ eraAssetBases: { 'classic-dereth': 'https://cd.example.org/files' }, eraDatSets: { 'classic-dereth': 'https://dats.example.org/v1/sets/classic-dereth-1.1.json' } }, '');
+    const plan = await planEraDats(p, c, { headOk: async (u) => u.startsWith('https://cd.example.org/files/') });
+    expect('sources' in plan && plan.sources.portal).toEqual({ kind: 'url', url: 'https://cd.example.org/files/client_portal.dat', cacheNamespace: 'classic-dereth' });
+    expect(eraStreamPlan(p, c)).toEqual({ interface: { manifestUrl: 'https://dats.example.org/v1/sets/classic-dereth-1.1.json' }, world: { manifestUrl: 'https://dats.example.org/v1/sets/classic-dereth-1.1.json' }, separateWorld: false });
+
+    const overlay = eraPortalOverlay(p)!;
+    const full = skillTableBytes([[1, 'Axe', 6], [40, 'Salvaging', 0]]);
+    let reads = 0;
+    const base = (id: number) => { reads++; return id === 0x0e000004 ? full : new ArrayBuffer(4); };
+    const served = overlay.get(0x0e000004, base)!;
+    expect([...new SkillTable(new DatReader(served)).skills.keys()]).toEqual([1]);
+    expect(overlay.get(0x0e000004, base)).toBe(served); // derived once
+    expect(reads).toBe(1);
+    expect(overlay.get(0x0e000002, base)).toBeUndefined(); // every other file is the set's own
+    expect(overlay.has(0x0e000004, () => true)).toBe(true);
+    for (const id of ['classic-dereth', 'classicace-customdm', 'ac1999-retail', EOR_ERA_ID]) expect(eraPortalOverlay(eraProfile(id)!)).toBeNull();
+  });
+
+  it.skipIf(!hasCd || !hasCd11)('on the real sets: 1.1 differs from 1.0 only in the SkillTable, and the overlay serves 1.0\'s exact bytes', () => {
+    const cd10 = openDat(`${CD}/client_portal.dat`);
+    const cd11 = new DatDatabase(new FileDatBytes(`${CD11}/client_portal.dat`));
+    const want = new Uint8Array(cd10.getFileData(0x0e000004)!);
+    expect(new Uint8Array(cd11.getFileData(0x0e000004)!).length).toBe(5064);
+    cd11.setOverlay(eraPortalOverlay(ERA_PROFILES['classic-dereth-1-0']));
+    expect(new Uint8Array(cd11.getFileData(0x0e000004)!)).toEqual(want);
+    expect(new SkillTable(cd11.getReader(0x0e000004)).skills.has(40)).toBe(false);
+    // Another table is untouched.
+    expect(new Uint8Array(cd11.getFileData(0x0e000002)!)).toEqual(new Uint8Array(cd10.getFileData(0x0e000002)!));
+  });
+});
+
+describe('string wire per world (end of retail on GDL / GDLE is Windows-1252; 2026-10-11 sweep)', () => {
+  const eor = eraProfile(EOR_ERA_ID)!;
+  it('end of retail: ACE worlds and unknown ones send UTF-8, GDL / GDLE worlds Windows-1252', () => {
+    expect(string16WireFor(eor, 'ACE')).toBe('ace');
+    expect(string16WireFor(eor, null)).toBe('ace');
+    expect(string16WireFor(eor, 'GDL')).toBe('windows-1252'); // FunkyTown, Reefcull's listing
+    expect(string16WireFor(eor, 'GDLE')).toBe('windows-1252'); // Harvestbud
+  });
+  it('a named era keeps its profile whatever the emulator says', () => {
+    expect(string16WireFor(ERA_PROFILES['classic-dereth'], 'GDL')).toBe('windows-1252');
+    expect(string16WireFor(ERA_PROFILES['classic-dereth-1-0'], 'GDL')).toBe('windows-1252');
+    expect(string16WireFor(ERA_PROFILES['classicace-customdm'], 'ACE')).toBe('ace');
+    expect(string16WireFor(ERA_PROFILES['classicace-infiltration'], 'GDL')).toBe('ace');
+    expect(string16WireFor(ERA_PROFILES['ac1999-retail'], 'AC1999')).toBe('windows-1252');
+  });
+  it('the chosen wire is what a chat string goes out as: "José" in one byte per letter for GDL, UTF-8 for ACE', () => {
+    const before = getString16Wire();
+    try {
+      const bytesFor = (emu: string) => {
+        setString16Wire(string16WireFor(eor, emu));
+        const w = new BinaryWriter();
+        w.writeString16('José');
+        return [...w.toBuffer()];
+      };
+      expect(bytesFor('GDL')).toEqual([4, 0, 0x4a, 0x6f, 0x73, 0xe9, 0, 0]);
+      expect(bytesFor('ACE')).toEqual([4, 0, 0x4a, 0x6f, 0x73, 0xc3, 0xa9, 0, 0]);
+    } finally { setString16Wire(before); }
+  });
+});
+
+describe('every era id survives the launcher directory and config.json (Snowreap\'s "classic-dereth-1.0" was dropped, 2026-10-11)', () => {
+  it('eraIdFrom keeps each era id the bridge can name; config.json accepts it as a set key', () => {
+    for (const p of Object.values(ERA_PROFILES)) {
+      if (p.id === EOR_ERA_ID) { expect(eraIdFrom(p.id)).toBeNull(); continue; }
+      expect(eraIdFrom(p.id)).toBe(p.id);
+      const c = resolveRuntimeConfig({ eraDatSets: { [p.id]: 'https://dats.example.org/v1/sets/x.json' } }, '');
+      expect(Object.keys(c.eraDatSets)).toEqual([p.id]);
+    }
+    // The world row Snowreap gets from the bridge keeps its era.
+    expect(eraIdFrom('classic-dereth-1-0')).toBe('classic-dereth-1-0');
   });
 });

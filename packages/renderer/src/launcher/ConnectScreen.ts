@@ -39,6 +39,8 @@ export interface ConnectStatus {
   /** server:account, as the bridge keys it. */
   account?: string;
   character?: string | null;
+  /** Multiboxing: every tab that typed the code (the first is `account` / `character`). */
+  accounts?: Array<{ account: string; character: string | null }>;
 }
 
 export interface ConnectApi {
@@ -125,7 +127,9 @@ export class ConnectScreen {
       this.status = { ...this.status, ...s };
       this.note = null;
       if (s.state === 'expired') { this.phase = 'expired'; this.render(); this.finish?.('expired'); return; }
-      if (s.state === 'paired') { this.phase = 'paired'; this.only = !!s.character; this.render(); return; }
+      if (s.state === 'paired' && this.phase === 'waiting') { this.phase = 'paired'; this.only = !!s.character; }
+      // Paired: keep polling, so another tab typing the same code (multiboxing) shows up before ALLOW.
+      if (this.phase !== 'waiting' && this.phase !== 'paired') return;
       this.render();
       await this.api.sleep(1500);
     }
@@ -227,11 +231,23 @@ export class ConnectScreen {
         para(`Connect ${this.client}`, LAUNCHER_TEXT.title);
         para('Log in to the game with the character Claude should play (in another tab, or on another device), then type this in chat:', body, undefined, 8);
         out.push({ text: `/automation pair ${code}`, ref: LAUNCHER_TEXT.title, gap: 10, select: true });
-        para('The code works once and lasts 10 minutes. No password is asked for or kept: the game you are logged in to confirms it is you.', body, this.dim, 10);
+        para('The code lasts 10 minutes. Several accounts? Type it in each one\'s tab. No password is asked for or kept: the game you are logged in to confirms it is you.', body, this.dim, 10);
         para(this.note ?? (this.copied ? 'Copied. Paste it into the game\'s chat. Waiting for the code from the game…' : 'Waiting for the code from the game… COPY copies the command.'), body, this.dim, 10);
         break;
       case 'paired':
       case 'leaving': {
+        const accts = this.status.accounts ?? [{ account: this.status.account ?? '', character: this.status.character ?? null }];
+        if (accts.length > 1) {
+          const name = (a: string) => a.slice(a.lastIndexOf(':') + 1);
+          const chars = accts.map((a) => a.character).filter((c): c is string => !!c);
+          para(`Let ${this.client} play?`, LAUNCHER_TEXT.title);
+          para(`Accounts: ${accts.map((a) => (a.character ? `${name(a.account)} (${a.character})` : name(a.account))).join(', ')}`, body, undefined, 8);
+          para(chars.length && this.only ? `Claude may play only ${chars.join(', ')}.` : 'Claude may play any character on these accounts.', body, undefined, 8);
+          if (chars.length) para('ONLY ONE / ANY ONE (bottom left) switches between these characters and any of yours.', body, this.dim);
+          if (this.phase === 'paired') para(`Another account too? Type /automation pair ${code} in its tab.`, body, this.dim, 8);
+          para(this.phase === 'leaving' ? 'Returning to Claude…' : 'Press ALLOW to let it play, or DENY.', body, undefined, 8);
+          break;
+        }
         const ch = this.status.character;
         para(`Let ${this.client} play?`, LAUNCHER_TEXT.title);
         para(`Account: ${this.accountName}`, body, undefined, 8);

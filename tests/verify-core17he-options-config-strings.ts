@@ -27,6 +27,7 @@
  *     CONFIG_STRINGS fallback text at acStringHash(token) for every token.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { pickNextMenuValue } from './_harness/options-menu.js';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
 import fs from 'fs';
 import path from 'path';
@@ -214,9 +215,9 @@ describe('CORE.17.h.e — Config tab strings come from table 0x23000003 (real Ga
     const all = texts();
     expect(all).toContain(marker('resolution'));
     for (const k of KEYS) expect(all).not.toContain(`WRONG-${k}`);
-    // The Sound Features menu cycles through the table's choices.
+    // The Sound Features menu lists the table's choices.
     const menu = ui.optionsPanel.querySelector('[data-option-key="soundFeatures"] .options-menu-field') as HTMLElement;
-    menu.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    pickNextMenuValue(domWindow.document, menu);
     expect(ui.optionsSettings.soundFeatures).toBe(marker('mono'));
     expect(rowTexts('soundFeatures')).toContain(marker('mono'));
     ui.optionsSettings.soundFeatures = 'Stereo';

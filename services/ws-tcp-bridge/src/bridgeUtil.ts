@@ -140,7 +140,8 @@ export interface BridgeConfig {
    * AGENT.automation-allowlist — BRIDGE_AUTOMATION_ACCOUNTS: accounts that get the automation UI on
    * production builds, comma-separated `server:account` (the routines server key, e.g. `local-eor`
    * or a Servers.xml row) or `*:account` / `account` for any server. Names compare case-insensitively
-   * against the account the game server reported in its CharacterList.
+   * against the account the game server reported in its CharacterList. `*` is every account (the
+   * automation UI open to all players), and `server:*` every account on that server.
    */
   automationAccounts: string[];
   /**
@@ -170,7 +171,7 @@ export function automationAllowed(list: readonly string[], server: string, accou
     const i = entry.lastIndexOf(':');
     const s = i < 0 ? '*' : entry.slice(0, i);
     const n = (i < 0 ? entry : entry.slice(i + 1)).toLowerCase();
-    return n === a && (s === '*' || s.toLowerCase() === server.toLowerCase());
+    return (n === '*' || n === a) && (s === '*' || s.toLowerCase() === server.toLowerCase());
   });
 }
 

@@ -68,6 +68,25 @@ describe('ConnectScreen (behavioral, fake kit and bridge)', () => {
     return { screen, done, step, text, btn, decided, navigated, flush, copied, mount, failCopy: () => { copyWorks = false; } };
   }
 
+  it('multiboxing: a second tab typing the same code joins before ALLOW; the page lists both and how to add another', async () => {
+    const two = { state: 'paired' as const, client: 'Claude', code: 'HRCBN3', account: 'coldeve:enkarta', character: 'Enkarta', accounts: [{ account: 'coldeve:enkarta', character: 'Enkarta' }, { account: 'coldeve:enkartaalt', character: 'Alty' }] };
+    const s = setup([
+      { state: 'waiting', client: 'Claude', code: 'HRCBN3' },
+      { state: 'paired', client: 'Claude', code: 'HRCBN3', account: 'coldeve:enkarta', character: 'Enkarta', accounts: [{ account: 'coldeve:enkarta', character: 'Enkarta' }] },
+      two,
+    ]);
+    await s.flush();
+    await s.step();
+    expect(s.text()).toContain('Account: enkarta');
+    await s.step(); // still polling while paired: the second tab shows up
+    expect(s.text()).toContain('Accounts: enkarta (Enkarta), enkartaalt (Alty)');
+    expect(s.text()).toContain('Claude may play only Enkarta, Alty.');
+    expect(s.text()).toContain('Another account too? Type /automation pair HRC-BN3 in its tab.');
+    s.btn('connect-allow').click();
+    expect(await s.done).toBe('allowed');
+    expect(s.decided).toEqual([[true, true]]);
+  });
+
   it('waiting: the code to type in chat, the buttons off; then the account and character, ALLOW back to Claude, one character by default', async () => {
     const s = setup([
       { state: 'waiting', client: 'Claude', code: 'HRCBN3' },

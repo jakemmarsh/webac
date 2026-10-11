@@ -26,12 +26,16 @@ import type { RoutineProfile } from '@ac/shared';
 import { RoutineEngine, type ItemPalette } from './RoutineEngine.ts';
 import type { RoutineSyncResult } from './RoutineSync.ts';
 import { vtankExprHost, vtankExpressions } from './VtankExprHost.ts';
+import { CAST_NOT_LANDED } from './macro/castReply.ts';
 import type {
   AgentChatKind, AgentChatLine, AgentDialog, AgentEvent, AgentTrade, AgentTracePoint, AgentVendor, AgentItem, AgentObject, AgentObjectKind, AgentObservation,
   AgentResult, AgentScreen, AgentSelf, AgentStatus, AgentSpell, AgentWaitFilter,
 } from './types.ts';
 
 // ── Host: what main.ts provides ─────────────────────────────────────────
+
+/** Your fellowship as Auto Fellow Mgmt reads it (AgentHost.fellowshipInfo). */
+export interface FellowshipInfo { leader: boolean; open: boolean; count: number; members?: string[]; handOff?: boolean }
 
 export interface AgentHostObject {
   guid: number;
@@ -85,6 +89,16 @@ export interface AgentHost {
   objects(): Iterable<AgentHostObject>;
   object(guid: number): AgentHostObject | null;
   isAttackable(guid: number): boolean;
+  /**
+   * The straight line a bolt or arrow would fly from you to `guid`: `blockedAt` is the distance (m) of the first
+   * wall, ground or solid object on it (creatures left out), null when it reaches the target. Absent / null: unknown.
+   */
+  lineOfFire?(guid: number): { dist: number; blockedAt: number | null } | null;
+  /**
+   * Dungeon sight: whether interior cell `to` is `from` itself or in its VisibleCells (the EnvCell's PVS, which
+   * ACE's ObjectMaint uses to decide what it sends); null when unknown or not both interior cells of one landblock.
+   */
+  cellSees?(from: number, to: number): boolean | null;
   /** The creature's death has started (its object lingers through the death animation). */
   isDying(guid: number): boolean;
   targetGuid(): number | null;
@@ -120,8 +134,8 @@ export interface AgentHost {
   closeWindow?(name: string): string | null;
   /** The fellowship pane as text. */
   fellowship?(): string;
-  /** Your fellowship: leader or not, open or not, its size (null: none). */
-  fellowshipInfo?(): { leader: boolean; open: boolean; count: number } | null;
+  /** Your fellowship: leader or not, open or not, its size, its fellows' names (you included), and whether this era's client can hand leadership over (null: none). */
+  fellowshipInfo?(): FellowshipInfo | null;
   /** Your fellows (not you) with their vitals (the macro's Helper). */
   fellows?(): Array<{ guid: number; name: string; health: { cur: number; max: number }; stamina: { cur: number; max: number }; mana: { cur: number; max: number } }>;
   /** Ask the server for what the pane would show (fellowship full update / AllegianceUpdate). */
@@ -148,8 +162,12 @@ export interface AgentHost {
   placeItem?(guid: number, to: { packSlot: number } | { onto: number }): boolean;
   /** Every skill with its training (the macro's planners). */
   skillList?(): Array<{ id: number; name: string; training: 'untrained' | 'trained' | 'specialized'; base: number; buffed: number }>;
-  /** A spell's components by name (its spell-table formula through the component table). */
+  /** A spell's components by name, as the server will charge them: the formula the client's own cast pre-check walks (personalized, or scarabs and tapers with foci; SpellComponentCheck.appropriateSpellFormula), through the component table. */
   spellComponents?(spellId: number): string[];
+  /** The era's recipe table (VTank AutoCraftItems; tools/build-craft-tables.ts), loaded on first ask. */
+  craftTable?(): Promise<Array<[string, string, string, number, number, number, number]> | null>;
+  /** The era's monster table ([name, weak elements, max health]; tools/build-monster-tables.ts), loaded on first ask. */
+  monsterTable?(): Promise<Array<[string, string, number]> | null>;
   /** The era's spell table (the macro's planners build spell families from it). */
   spellTableData?(): { spells: Map<number, { name: string; desc: string; category: number; school: number; bitfield: number; power: number; duration?: number }> } | null;
   /** The items in the currently open container (corpse/chest), or null when none is open. */
@@ -183,6 +201,11 @@ export interface AgentHost {
    * keeps swinging until the target dies or the chain ends.
    */
   attack(guid: number, power: number, height: AttackHeightName): void;
+  /** The combat bar's attack height, and setting it as its High / Medium / Low buttons do. */
+  attackHeight?(): AttackHeightName;
+  /** The combat bar's power / accuracy level (0..1), as the player set it. */
+  attackPower?(): number;
+  setAttackHeight?(h: AttackHeightName): void;
   /** An attack request is in flight or the server's swing chain is running (no new request should go out). */
   attackPending(): boolean;
   cancelAttack(): void;
@@ -194,7 +217,8 @@ export interface AgentHost {
   drop(guid: number): boolean;
   give(target: number, item: number, amount: number): boolean;
   wield(guid: number): boolean;
-  appraise(guid: number): void;
+  /** `quiet`: the automation's own look (no Examine window), as VirindiTank's background IDs. */
+  appraise(guid: number, quiet?: boolean): void;
   /** Appraisal text once the server has answered, else null. */
   appraisal(guid: number): string | null;
   /** The appraisal's property maps and spell names (loot rules on item properties), when one arrived. */
@@ -205,7 +229,7 @@ export interface AgentHost {
    * outside doorway), ending at `to`; null when there is no route
    * (cellPath.ts findRouteViaOutside over the cell DAT's EnvCell portals).
    */
-  route(fromCell: number, from: { x: number; y: number; z: number }, toCell: number, to: { x: number; y: number; z: number }, opts?: { maxDrop?: number }): Array<{ x: number; y: number; z: number; feet?: number; drop?: number; landing?: number }> | null;
+  route(fromCell: number, from: { x: number; y: number; z: number }, toCell: number, to: { x: number; y: number; z: number }, opts?: { maxDrop?: number; closed?: Array<{ x: number; y: number; z: number }> }): Array<{ x: number; y: number; z: number; feet?: number; drop?: number; landing?: number }> | null;
   /** Press a key binding: an action name from the keymap ("Show/Hide Inventory") or a key code ("F9", "Ctrl+KeyI"). */
   press(input: string): AgentResult;
   /** Keymap actions matching `filter`, with their bound keys. */
@@ -280,6 +304,27 @@ export function parseMapCoords(text: string): { x: number; y: number } | null {
   const ns = Number(m[1]) * (/s/i.test(m[2]) ? -1 : 1);
   const ew = Number(m[3]) * (/w/i.test(m[4]) ? -1 : 1);
   return { x: (ew + MAP_COORD_ORIGIN) * 240, y: (ns + MAP_COORD_ORIGIN) * 240 };
+}
+
+/**
+ * A walk_to offset as a player says it: a distance in metres and a direction, either a compass one ("10m north",
+ * "25 m NE", "5 m south-west") or one relative to your facing ("5m ahead", "3 m left", "4m back"). `bearing` is the
+ * compass bearing (0 = N, 90 = E); `turn` the angle from your facing (+ = right). Null when it isn't one.
+ */
+export function parseOffset(text: string): { dist: number; bearing?: number; turn?: number } | null {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*m(?:et(?:er|re)s?)?\s+(?:to\s+the\s+)?([a-z-]+)\s*$/i.exec(text);
+  if (!m) return null;
+  const dist = Number(m[1]);
+  if (!(dist > 0) || dist > 2000) return null;
+  const word = m[2].toLowerCase().replace(/-/g, '');
+  const compass: Record<string, number> = {
+    n: 0, north: 0, ne: 45, northeast: 45, e: 90, east: 90, se: 135, southeast: 135,
+    s: 180, south: 180, sw: 225, southwest: 225, w: 270, west: 270, nw: 315, northwest: 315,
+  };
+  const relative: Record<string, number> = { ahead: 0, forward: 0, forwards: 0, right: 90, back: 180, backward: 180, backwards: 180, behind: 180, left: -90 };
+  if (word in compass) return { dist, bearing: compass[word] };
+  if (word in relative) return { dist, turn: relative[word] };
+  return null;
 }
 
 /**
@@ -494,6 +539,10 @@ export class AgentApi {
   /** Every skill with its training (the macro's planners). */
   skillList(): Array<{ id: number; name: string; training: 'untrained' | 'trained' | 'specialized'; base: number; buffed: number }> { return this.host.skillList?.() ?? []; }
   spellTableData(): ReturnType<NonNullable<AgentHost['spellTableData']>> { return this.host.spellTableData?.() ?? null; }
+  /** The era's recipe table, or null (no table for this era, or not loaded). */
+  async craftTable(): Promise<Array<[string, string, string, number, number, number, number]> | null> { return (await this.host.craftTable?.()) ?? null; }
+  /** The era's monster table (the macro's Auto element and streak finisher), or null (none for this era). */
+  async monsterTable(): Promise<Array<[string, string, number]> | null> { return (await this.host.monsterTable?.()) ?? null; }
   /** Your enchantments now, with each spell's family and level from the spell table (the buff planner). */
   activeSpellsNow(): Array<{ spellId?: number; name: string; category?: number; power?: number; remaining: number }> {
     const t = this.host.spellTableData?.();
@@ -504,7 +553,7 @@ export class AgentApi {
   }
   packs(): ReturnType<NonNullable<AgentHost['packs']>> { return this.host.packs?.() ?? []; }
   spellComponents(spellId: number): string[] { return this.host.spellComponents?.(spellId) ?? []; }
-  fellowshipInfo(): { leader: boolean; open: boolean; count: number } | null { return this.host.fellowshipInfo?.() ?? null; }
+  fellowshipInfo(): FellowshipInfo | null { return this.host.fellowshipInfo?.() ?? null; }
   itemSlots(): ReturnType<NonNullable<AgentHost['itemSlots']>> { return this.host.itemSlots?.() ?? []; }
   placeItem(guid: number, to: { packSlot: number } | { onto: number }): AgentResult {
     if (!this.host.placeItem) return { ok: false, message: 'moving items is not available' };
@@ -562,7 +611,125 @@ export class AgentApi {
     // Something attacked you: every incoming swing or spell is a CombatEnemy (0x15) line ("… hits you",
     // "… misses you", "You evaded …"), a 0-damage hit included, so an agent can wait on being attacked
     // instead of on vitals-low.
-    if (type === 0x15) this.push('attacked', clean);
+    if (type === 0x15) {
+      this.push('attacked', clean);
+      this.attackLines.push({ at: this.host.now(), text: clean.toLowerCase() });
+      if (this.attackLines.length > 60) this.attackLines.splice(0, this.attackLines.length - 60);
+    }
+  }
+
+  /**
+   * The server's answer to a use (UseDone): 0 = done, else the WeenieError it failed with. main.ts taps it, so a
+   * refusal retail shows no text for still reaches the player's report ({@link useOutcome}).
+   */
+  pushUseDone(code: number, name: string, text: string | null): void {
+    if (code) this.push('use-failed', text ? `${text} (${name})` : `${name} (no message shown)`);
+  }
+
+  /**
+   * The server ended an attack sequence (AttackDone; ACE Player.OnAttackDone always says ActionCancelled). Ends
+   * that come with no swing between them mean the server would not attack the target at all: ACE ends at once,
+   * silently, when it can't find it (dead and gone on its side), or can't reach it.
+   */
+  pushAttackDone(): void { this.attackDones.push({ at: this.host.now(), seq: this.seqN }); if (this.attackDones.length > 20) this.attackDones.shift(); }
+  private attackDones: Array<{ at: number; seq: number }> = [];
+  static readonly EMPTY_ATTACKS_TO_STOP = 3;
+
+  static readonly USE_VITAL_MIN_CHANGE = 3;
+
+  /** What a use can change, read before it: vitals, carried items, known spells, the enchantments on you. */
+  private useMark(target?: number): { vit: Record<string, number>; inv: Map<number, { name: string; stack: number }>; spells: Set<number>; buffs: Map<string, number>; target?: number; open?: boolean } {
+    const me = this.host.self();
+    const t = target !== undefined ? this.host.object(target) : null;
+    // A door's open state (PhysicsState Ethereal): a player sees it slide open or shut.
+    const open = t && t.physicsState !== undefined && classify(t, false) === 'door' ? (t.physicsState & PHYSICS_ETHEREAL) !== 0 : undefined;
+    const vit: Record<string, number> = me ? { health: me.health.current, stamina: me.stamina.current, mana: me.mana.current } : {};
+    return {
+      vit,
+      inv: new Map(this.host.inventory().map((i) => [i.guid, { name: i.name, stack: i.stack ?? 1 }])),
+      spells: new Set(this.host.spells().map((s) => s.id)),
+      buffs: new Map(this.host.activeSpells().map((b) => [b.name, b.remaining])),
+      ...(open !== undefined ? { target, open } : {}),
+    };
+  }
+
+  /**
+   * What a use did, as a player sees it on screen: the replies (chat, the centre notices, a dialog), a refusal the
+   * server sent with no text, and what changed: vitals, items used up or gained, a spell learned, a buff on you.
+   */
+  private useOutcome(mark: ReturnType<AgentApi['useMark']>, since: number): string[] {
+    const out: string[] = [];
+    const chat = this.eventsSince(since)
+      .filter((e) => (e.type === 'chat' && !/^\(\w+\) (Approaching|Using the) /.test(e.text)) || e.type === 'dialog' || e.type === 'portal')
+      .map((e) => (e.type === 'chat' ? e.text.replace(/^\(\w+\) /, '') : `${e.type}: ${e.text}`));
+    out.push(...chat);
+    for (const e of this.eventsSince(since)) if (e.type === 'use-failed' && !chat.some((l) => e.text.startsWith(l))) out.push(`the server refused it: ${e.text}`);
+    for (const l of chat) { const why = this.scrollShortfall(l); if (why) out.push(why); }
+    const after = this.useMark(mark.target);
+    if (mark.open !== undefined && after.open !== undefined && after.open !== mark.open) out.push(`${this.nameOf(mark.target!)} is now ${after.open ? 'open' : 'closed'}`);
+    for (const k of Object.keys(mark.vit)) {
+      const a = mark.vit[k], b = after.vit[k];
+      // A point or two is the vital regenerating while the use ran, not its result ("mana 53 → 54" opening a corpse).
+      if (b !== undefined && Math.abs(b - a) >= AgentApi.USE_VITAL_MIN_CHANGE) out.push(`${k} ${a} → ${b}`);
+    }
+    for (const [g, i] of mark.inv) {
+      const now = after.inv.get(g);
+      if (!now) out.push(`gone from your pack: ${i.name}${i.stack > 1 ? ` x${i.stack}` : ''}`);
+      else if (now.stack !== i.stack) out.push(`${i.name}: ${i.stack} → ${now.stack}`);
+    }
+    for (const [g, i] of after.inv) if (!mark.inv.has(g)) out.push(`new in your pack: ${i.name}${i.stack > 1 ? ` x${i.stack}` : ''} #${g.toString(16)}`);
+    const learned = this.host.spells().filter((s) => !mark.spells.has(s.id));
+    if (learned.length) out.push(`learned: ${learned.map((s) => s.name).join(', ')}`);
+    for (const [n, r] of after.buffs) {
+      const was = mark.buffs.get(n);
+      if (was === undefined) out.push(`now on you: ${n}`);
+      else if (r >= 0 && was >= 0 && r > was + 1) out.push(`refreshed on you: ${n}`);
+    }
+    return out;
+  }
+
+  /**
+   * "You are not skilled enough in War Magic to learn this spell.": by how much. ACE Player.CanReadScroll: a scroll
+   * of power 50..299 needs the school's current skill ≥ power − 50 (magicSkillCheckMargin); the power is the DAT
+   * spell table's. Only when the line names the school and the scroll's spell can be found.
+   */
+  private lastScroll: string | null = null;
+  private scrollShortfall(line: string): string | null {
+    const m = /not skilled enough in (.+?) to learn this spell/i.exec(line);
+    if (!m || !this.lastScroll) return null;
+    const table = this.host.spellTableData?.();
+    const spellName = this.lastScroll.replace(/^Scroll of /i, '').toLowerCase();
+    const spell = table ? [...table.spells.values()].find((s) => s.name.toLowerCase() === spellName) : undefined;
+    const skill = this.host.skillList?.().find((s) => s.name.toLowerCase() === m[1].toLowerCase());
+    if (!spell || !skill) return null;
+    return `  (${this.lastScroll}: needs ${skill.name} ${spell.power - 50} or more to learn; yours is ${skill.buffed})`;
+  }
+
+  /** Incoming-attack lines (CombatEnemy, lower-cased) with when they came, for {@link attackersOfMe}. */
+  private attackLines: Array<{ at: number; text: string }> = [];
+  static readonly ATTACKER_WINDOW_MS = 10_000;
+
+  /**
+   * Who is attacking you: each CombatEnemy line of the last 10 s ("The Drudge Skulker hits you …", "You evaded
+   * the Drudge Skulker!") goes to the monster whose name it holds (the longest such name; the nearest of several
+   * with that name), counted per guid. Information for the player, not a decision: what to fight is theirs.
+   */
+  attackersOfMe(): Map<number, number> {
+    const out = new Map<number, number>();
+    const now = this.host.now();
+    const lines = this.attackLines.filter((l) => now - l.at <= AgentApi.ATTACKER_WINDOW_MS);
+    if (!lines.length || !this.me()) return out;
+    const monsters = this.nearby(80).filter((o) => o.kind === 'monster' && !o.dying);
+    for (const l of lines) {
+      let best: AgentObject | null = null;
+      for (const o of monsters) {
+        const n = o.name.toLowerCase();
+        if (!n || !l.text.includes(n)) continue;
+        if (!best || n.length > best.name.length || (n.length === best.name.length && o.dist < best.dist)) best = o;
+      }
+      if (best) out.set(best.guid, (out.get(best.guid) ?? 0) + 1);
+    }
+    return out;
   }
 
   private objectAdded(o: AgentHostObject): void {
@@ -590,10 +757,10 @@ export class AgentApi {
   }
 
   /** A kill line naming `name` in the last 5 s ("You slay…", "Your killing blow…", "… died!"). */
-  private killedRecently(name: string): boolean {
+  private killedRecently(name: string, afterSeq = 0): boolean {
     const since = this.host.now() - 5000;
     const n = name.toLowerCase();
-    return this.events.some((e) => e.t >= since && e.type === 'chat' && e.text.toLowerCase().includes(n)
+    return this.events.some((e) => e.t >= since && e.seq > afterSeq && e.type === 'chat' && e.text.toLowerCase().includes(n)
       && /killing blow|you slay|you kill|\bdied\b|is dead|obliterate|torn to ribbons|death/i.test(e.text));
   }
 
@@ -695,6 +862,8 @@ export class AgentApi {
       // A creature or player outside the server's update range is only its last-known position: the client keeps it,
       // but nothing moves it any more (a fellow 430 m off read 212 m, 2026-10-10).
       if ((o.itemType & IT.Creature) && o.cell && !inUpdateRange(me.s.cell, o.cell)) continue;
+      // Likewise a creature in a dungeon cell out of sight of yours: the server stopped sending it, so its place is stale.
+      if ((o.itemType & IT.Creature) && o.cell && this.host.cellSees?.(me.s.cell, o.cell) === false) continue;
       out.push(d);
     }
     return out.sort((a, b) => a.dist - b.dist);
@@ -749,10 +918,20 @@ export class AgentApi {
       const m = /^\((\w+)\) ([\s\S]*)$/.exec(e.text);
       return { seq: e.seq, t: e.t, kind: (m?.[1] ?? 'other') as AgentChatKind, text: m?.[2] ?? e.text };
     });
+    const target = tobj && me ? this.describe(tobj, me) : null;
+    const attackers = this.attackersOfMe();
+    for (const o of target ? [target, ...all] : all) {
+      const n = attackers.get(o.guid);
+      if (n) o.attackingYou = n;
+    }
+    if (target && target.kind === 'monster' && !target.dying) {
+      const lof = this.host.lineOfFire?.(target.guid);
+      if (lof && lof.blockedAt !== null) target.lineOfFireBlockedAt = lof.blockedAt;
+    }
     return {
       screen: this.host.screen(),
       me: this.self(),
-      target: tobj && me ? this.describe(tobj, me) : null,
+      target,
       nearby: all.slice(0, max),
       nearbyTotal: all.length,
       dialogs: this.host.dialogs(),
@@ -761,7 +940,7 @@ export class AgentApi {
       buffsMissing: this.missingBuffs(),
       fellows: this.fellowsAt(),
       fellowshipAlone: (this.host.fellowshipInfo?.()?.count ?? 0) === 1,
-      remembered: this.rememberedPlaces(),
+      remembered: this.rememberedPlaces({ ...(opts.radius !== undefined ? { radius: opts.radius } : {}), ...(opts.filter ? { filter: opts.filter } : {}) }),
       chat,
       seq: this.seqN,
     };
@@ -812,6 +991,8 @@ export class AgentApi {
 
   private need(t: TargetArg, where: 'world' | 'inventory' | 'any', what: string): number | AgentResult {
     const g = this.resolve(t, where);
+    const fellow = g === null && typeof t === 'string' ? (this.host.fellows?.() ?? []).find((f) => f.name.toLowerCase() === t.toLowerCase()) : undefined;
+    if (fellow) return { ok: false, message: `${fellow.name} is in your fellowship but not in view (in a dungeon you only see the rooms in sight of yours): ask in /f where they are, or go back to where you last saw them` };
     if (g === null) return { ok: false, message: `no ${what} matching "${t}"${where === 'world' ? ' nearby' : where === 'inventory' ? ' in your inventory' : ' nearby or in your inventory'}` };
     return g;
   }
@@ -891,9 +1072,11 @@ export class AgentApi {
     const g = this.need(t, 'any', 'object');
     if (typeof g !== 'number') return g;
     const name = this.nameOf(g);
-    const approach = await this.approach(g, 2.5);
-    if (approach && !approach.ok) return { ok: false, message: `couldn't reach ${name}: ${approach.message}` };
+    const approach = await this.approachWithin(g, 2.5, AgentApi.USE_APPROACH_MS);
+    if (approach && !approach.ok) return { ok: false, message: `couldn't reach ${name}: ${approach.message}${this.dialogNote()}` };
     const since = this.seqN;
+    const mark = this.useMark(g);
+    this.lastScroll = /^Scroll of /i.test(name) ? name : null;
     this.host.select(g);
     if (!this.host.use(g)) return { ok: false, message: `can't use #${g.toString(16)} (not known to the client)` };
     const reacted = (): string | null => {
@@ -903,21 +1086,40 @@ export class AgentApi {
       if (this.host.trade()) return `trade window open with ${this.host.trade()!.partner} (ac_trade)`;
       return null;
     };
-    const lines = (): string[] => this.eventsSince(since)
-      .filter((e) => (e.type === 'chat' && !/^\(\w+\) (Approaching|Using the) /.test(e.text)) || e.type === 'dialog' || e.type === 'portal')
-      .map((e) => (e.type === 'chat' ? e.text.replace(/^\(\w+\) /, '') : `${e.type}: ${e.text}`));
-    // Up to 10 s for a first reaction, then 1.2 s more for the rest of it (multi-line replies).
-    let settle = -1;
-    for (let i = 0; i < 50 && settle !== 0; i++) {
-      if (settle < 0 && (lines().length || reacted() || this.host.book?.()?.guid === g)) settle = 6;
-      if (settle > 0) settle--;
-      await sleep(200);
-    }
+    const lines = (): string[] => this.useOutcome(mark, since);
+    await this.settle(() => lines().length > 0 || !!reacted() || this.host.book?.()?.guid === g);
     const out = lines();
     const extra = reacted();
     const read = this.host.book?.()?.guid === g ? await this.readBook() : [];
-    if (!out.length && !extra && !read.length) return { ok: true, message: `used ${name}; no reply within 10 s (it may need you closer, or simply does nothing)` };
-    return { ok: true, message: [`used ${name}:`, ...out.map((l) => `  ${l}`), ...(extra ? [`  ${extra}`] : []), ...read].join('\n') };
+    if (!out.length && !extra && !read.length) return { ok: true, message: `used ${name}; no reply within 10 s (it may need you closer, or simply does nothing)${this.dialogNote()}` };
+    return { ok: !out.some((l) => l.startsWith('the server refused it')), message: [`used ${name}:`, ...out.map((l) => `  ${l}`), ...(extra ? [`  ${extra}`] : []), ...read].join('\n') };
+  }
+
+  /** Up to 10 s for a first reaction, then 1.2 s more for the rest of it (multi-line replies, a heal after its words). */
+  private async settle(reacted: () => boolean): Promise<void> {
+    let settle = -1;
+    for (let i = 0; i < 50 && settle !== 0; i++) {
+      if (settle < 0 && reacted()) settle = 6;
+      if (settle > 0) settle--;
+      await sleep(200);
+    }
+  }
+
+  /** ac_use_on: use an item on a target, then report what came of it as {@link use} does. Routines use {@link useOn}. */
+  async useOnReported(item: TargetArg, target: TargetArg): Promise<AgentResult> {
+    const i = this.need(item, 'inventory', 'item');
+    if (typeof i !== 'number') return i;
+    const t = this.need(target, 'any', 'target');
+    if (typeof t !== 'number') return t;
+    const itemName = this.nameOf(i), targetName = this.nameOf(t);
+    const since = this.seqN;
+    const mark = this.useMark();
+    if (!this.host.useWithTarget(i, t)) return { ok: false, message: 'use-with refused' };
+    await this.settle(() => this.useOutcome(mark, since).length > 0);
+    const out = this.useOutcome(mark, since);
+    const head = `used ${itemName} on ${targetName}`;
+    if (!out.length) return { ok: true, message: `${head}; no reply within 10 s (it may need you closer, or does nothing on that)` };
+    return { ok: !out.some((l) => l.startsWith('the server refused it')), message: [`${head}:`, ...out.map((l) => `  ${l}`)].join('\n') };
   }
 
   /**
@@ -946,11 +1148,42 @@ export class AgentApi {
   }
 
   /**
+   * The longest ac_use spends walking up to its object before it gives up and says so: the use's report (up to
+   * 11 s of replies) still comes inside the tool's own 60 s. A walk that ran on past the tool's timeout kept
+   * walking with nobody waiting for it (Arcanist at a Holtburg tower scrivener, 2026-10-11).
+   */
+  static readonly USE_APPROACH_MS = 45_000;
+
+  /** {@link approach}, given up after `limitMs`: the walk is stopped (not left running) and the reply says how far it got. */
+  private async approachWithin(guid: number, within: number, limitMs: number): Promise<AgentResult | null> {
+    const walk = this.approach(guid, within);
+    if (!walk) return null;
+    let result: AgentResult | null | undefined;
+    void walk.then((r) => { result = r; });
+    const start = this.host.now();
+    while (result === undefined && this.host.now() - start < limitMs) await sleep(200);
+    if (result !== undefined) return result;
+    const task = this.task?.label ?? 'the walk';
+    this.cancelTask('ac_use stopped waiting for it');
+    const o = this.host.object(guid);
+    const me = this.me();
+    const d = o && o.cell && me ? Math.hypot(toGlobal(o.cell, o.x, o.y).x - me.g.x, toGlobal(o.cell, o.x, o.y).y - me.g.y) : null;
+    return { ok: false, message: `${task} took longer than ${Math.round(limitMs / 1000)} s${d !== null ? ` and stopped ${d.toFixed(1)} m away` : ''}; ac_walk_to it first (it can take longer), then use it` };
+  }
+
+  /** "; a dialog is open: …" naming the open popups (they wait for an answer; ac_dialog gives it), or ''. */
+  private dialogNote(): string {
+    const ds = this.host.dialogs();
+    if (!ds.length) return '';
+    return `; ${ds.length === 1 ? 'a dialog is' : `${ds.length} dialogs are`} open: ${ds.map((d) => `"${d.text.replace(/\s+/g, ' ').slice(0, 120)}" [${d.buttons.join(' / ')}]`).join(', ')} (ac_dialog answers it)`;
+  }
+
+  /**
    * When doorways separate us from `guid`, walk the cell route to within
    * `within` m and return how that went; null when a straight line is fine
    * (the server's own MoveTo handles the last stretch).
    */
-  private async approach(guid: number, within: number): Promise<AgentResult | null> {
+  private approach(guid: number, within: number): Promise<AgentResult> | null {
     const o = this.host.object(guid) ?? this.remembered(guid);
     if (!o || !o.cell) return null;
     if (!this.planRoute(toGlobal(o.cell, o.x, o.y), o).length) return null;
@@ -1234,6 +1467,14 @@ export class AgentApi {
       return null;
     };
     if (tg) { const why = gone(tg); if (why) return { ok: false, message: why }; }
+    // A bolt flies in a straight line and stops at the first wall, and the server says nothing when it does
+    // ("You cast …" is all): a player who can't see the wall would cast into it again and again (2026-10-11).
+    if (tg && tg !== me && s.projectile) {
+      const lof = this.host.lineOfFire?.(tg);
+      if (lof && lof.blockedAt !== null) {
+        return { ok: false, message: `${s.name} not cast: no line of fire to ${this.nameOf(tg)} (${lof.dist.toFixed(1)} m away): a wall, the ground or an object ${lof.blockedAt.toFixed(1)} m along the line would take the bolt. Move to where the line to it is open (round the corner, into its room, or closer), then cast.` };
+      }
+    }
     if (tg && tg !== me) this.host.select(tg);
     if (tg) this.watchedTarget = tg;
     // A cast still winding down (the last one's motion, a use) is the client's "You're too busy!": wait it out first.
@@ -1245,15 +1486,24 @@ export class AgentApi {
     // Wait for the outcome (cast, fizzle, a refusal) and for the client to be free again, so the next
     // call can cast straight away; the words alone ("You say, …") are not the end of it.
     const said = (): string[] => this.eventsSince(since).filter((e) => e.type === 'chat').map((e) => e.text.replace(/^\(\w+\) /, ''));
-    const outcome = /you cast|fizzle|do not have|can't|cannot|not enough|unable|refuse|too busy|out of range|resists?|you are not|your spell/i;
+    const outcome = /you cast|fizzle|do not have|don't have|can't|cannot|not enough|unable|refuse|too busy|out of range|resists?|you fail to affect|invalid target|you are not|your spell/i;
     for (let w = 0; w < 40 && !(said().some((l) => outcome.test(l)) && !this.host.busy()); w++) {
       if (w >= 15 && !said().length) break; // no reply at all after 3 s: no wand, wrong mode, …
       await sleep(200);
     }
     const lines = said();
     const head = `casting ${s.name}${tg ? ` at ${this.nameOf(tg)}` : ' on yourself'}`;
+    // "Out of Range!" (ACE Player_Magic: farther than the spell's range for you): say how far it reaches, as its
+    // examine's Range line does, and how far the target is (Arcanist at 11 m with Creature buffs, 2026-10-11).
+    if (tg && tg !== me && s.range && lines.some((l) => /out of range/i.test(l))) {
+      const o = this.host.object(tg), m = this.me();
+      const d = o && o.cell && m ? Math.hypot(toGlobal(o.cell, o.x, o.y).x - m.g.x, toGlobal(o.cell, o.x, o.y).y - m.g.y) : null;
+      lines.push(`(${s.name} reaches ${s.range} m for you, longer as your ${s.school} ranks grow${d !== null ? `; ${this.nameOf(tg)} is ${d.toFixed(1)} m away` : ''})`);
+    }
     return lines.length
-      ? { ok: !lines.some((l) => /do not have|can't|cannot|not enough|fizzle|unable|refuse|too busy/i.test(l)), message: [head, ...lines.map((l) => `  ${l}`)].join('\n') }
+      // A resist ("X resists your spell": ACE TryResistSpell, the same words on GDLE / 1999) or an immune target
+      // didn't take, and ACE's "You don't have all the components" is a refusal: none of them is a landed cast.
+      ? { ok: !lines.some((l) => CAST_NOT_LANDED.test(l)), message: [head, ...lines.map((l) => `  ${l}`)].join('\n') }
       : { ok: true, message: `${head} (no reply yet: a wand/orb wielded and magic mode are needed; ac_wait for the result)` };
   }
 
@@ -1326,10 +1576,10 @@ export class AgentApi {
       () => this.host.inventory().find((i) => i.guid === g)?.where === 'equipped');
   }
 
-  async appraise(t: TargetArg): Promise<AgentResult> {
+  async appraise(t: TargetArg, opts: { quiet?: boolean } = {}): Promise<AgentResult> {
     const g = this.need(t, 'any', 'object');
     if (typeof g !== 'number') return g;
-    this.host.appraise(g);
+    this.host.appraise(g, opts.quiet);
     for (let i = 0; i < 40; i++) {
       const text = this.host.appraisal(g);
       if (text) return { ok: true, message: text, ...(this.host.appraisalData?.(g) ? { data: this.host.appraisalData(g) } : {}) };
@@ -1470,6 +1720,9 @@ export class AgentApi {
   }
 
   /** Press a dialog button ("OK", "Yes", "No", …), as a click on it. */
+  /** The open dialogs, oldest first (the macro answers its own craft confirmations). */
+  openDialogs(): AgentDialog[] { return this.host.dialogs(); }
+
   dialog(button: string, index?: number | null): AgentResult {
     const open = this.host.dialogs();
     if (!open.length) return { ok: false, message: 'no dialog is open' };
@@ -1530,7 +1783,21 @@ export class AgentApi {
       // Arcanist set off for "197.4S, 59.9E", 2026-10-10.
       return Promise.resolve({ ok: false, message: `${target} is off the map: Dereth runs from about 101.9S to 102.9N and 101.9W to 102.9E` });
     }
-    if (coords) {
+    const offset = typeof target === 'string' && !coords ? parseOffset(target) : null;
+    const meNow = offset ? this.me() : null;
+    if (offset && !meNow) return Promise.resolve({ ok: false, message: 'not in the world' });
+    if (offset && meNow) {
+      // "10m north", "5 m ahead": from where you stand now, by compass or by your facing.
+      const b = offset.bearing ?? normDeg(meNow.heading + (offset.turn ?? 0));
+      const to = { x: meNow.g.x + offset.dist * Math.sin(b / DEG), y: meNow.g.y + offset.dist * Math.cos(b / DEG) };
+      goal = () => to;
+      // Indoors the point is in your own building or dungeon (not the landscape a coordinate means): no doorway route out.
+      if ((meNow.s.cell & 0xffff) >= 0x100) {
+        const cell = meNow.s.cell, o = toGlobal(cell, 0, 0), z = meNow.s.z;
+        goalLocal = () => ({ guid: 0, name: String(target), itemType: 0, objectDescFlags: 0, cell, x: to.x - o.x, y: to.y - o.y, z });
+      }
+      label = `walking ${offset.dist} m ${compassPoint(b)}`;
+    } else if (coords) {
       goal = () => coords;
       label = `walking to ${target}`;
     } else {
@@ -1568,6 +1835,26 @@ export class AgentApi {
     let dodgeKey = '';
     let replanAfterDoor = false;
     const doorsTried = new Set<number>();
+    // Doors the walk used that stayed shut (locked, or needing a key), global: the doorway route goes round them.
+    // Seen at the Holtburg drudge statue's Pedestal Weak Spot opening, whose sill is 2 m over the terrain, 2026-10-11.
+    const doorsShut: Array<{ x: number; y: number; z: number }> = [];
+    let doorUsed: number | null = null;
+    // When the walk used it, and the event seq then (its "The door is locked!" reply), for the wait on its answer.
+    let doorUsedAt = 0;
+    let doorUsedSeq = 0;
+    // Doors seen open after the walk used them: they let you through, so a later "stuck" doesn't blame them.
+    const doorsOpened = new Set<number>();
+    // Uses per door: one that ignored a Use (ACE Door.ActOnUse returns at once while the door is busy swinging) gets one more.
+    const doorUses = new Map<number, number>();
+    const useDoor = (guid: number, now: number): void => {
+      doorsTried.add(guid);
+      doorUses.set(guid, (doorUses.get(guid) ?? 0) + 1);
+      doorUsedSeq = this.seqN;
+      this.host.use(guid);
+      doorUsed = guid;
+      doorUsedAt = now;
+      replanAfterDoor = true;
+    };
     const release = (): void => { for (const k of ['KeyW', 'KeyS', 'KeyZ', 'KeyC', 'ShiftLeft', 'Space']) this.host.key(k, false); };
     // Doorway waypoints (global) still ahead of us. `drop`: a floor opening the route falls through, onto `landing`.
     let route: RouteStep[] = [];
@@ -1692,7 +1979,7 @@ export class AgentApi {
     };
     const plan = (): void => {
       const gl = goal();
-      route = gl && !directWide ? this.planRoute(gl, goalLocal()) : [];
+      route = gl && !directWide ? this.planRoute(gl, goalLocal(), doorsShut) : [];
       planLegs();
     };
     const legText = (p: NavStep): string => `${p.jump ? (isDrop(p.jump) ? `drop ${(p.jump.from.z - p.z).toFixed(1)} m to ` : 'jump to ') : ''}(${p.x.toFixed(1)}, ${p.y.toFixed(1)}${p.jump ? `, z ${p.z.toFixed(1)}` : ''})`;
@@ -1769,8 +2056,29 @@ export class AgentApi {
         return null;
       }
       if (replanAfterDoor) {
+        const used = doorUsed !== null ? this.host.object(doorUsed) : null;
+        const isOpen = !!used && used.physicsState !== undefined && (used.physicsState & PHYSICS_ETHEREAL) !== 0;
+        const lockedSaid = this.eventsSince(doorUsedSeq).some((e) => e.type === 'chat' && /is locked/i.test(e.text));
+        // Wait for the server's answer before judging the door: the Use first walks you to it (ACE MoveTo), then
+        // ActOnUse opens it and the Ethereal state follows. A door judged after a fixed 2 s was often still on its
+        // way open, and the walk routed round a door a plain use opened at once (Holtburg tower, 2026-10-11).
+        if (used && !isOpen && !lockedSaid && now - doorUsedAt < 8000 && (this.host.busy() || now - doorUsedAt < 3500)) return null;
         replanAfterDoor = false;
-        route = this.planRoute(gl, goalLocal());
+        if (used && isOpen) doorsOpened.add(used.guid);
+        // A door the Use did not open (ACE Door.ActOnUse: a locked one answers "The door is locked!" and needs
+        // its key) is a wall: route round it rather than back to it. One that said nothing may have been busy
+        // swinging (ACE ignores a Use then): it gets a second try.
+        if (used && used.cell && used.physicsState !== undefined && !isOpen) {
+          if (!lockedSaid && (doorUses.get(used.guid) ?? 0) < 2) {
+            doorsTried.delete(used.guid);
+            this.trace(`walk: ${used.name} #${used.guid.toString(16)} did not open yet; trying it again`);
+          } else {
+            doorsShut.push({ ...toGlobal(used.cell, used.x, used.y), z: used.z });
+            this.trace(`walk: ${used.name} #${used.guid.toString(16)} did not open${lockedSaid ? ' (locked)' : ''}; routing round it`);
+          }
+        }
+        doorUsed = null;
+        route = this.planRoute(gl, goalLocal(), doorsShut);
         if (!route.length) directWide = true;
         prev = null;
         planLegs();
@@ -1870,16 +2178,14 @@ export class AgentApi {
       if (doorDetour && !legs.length && Math.hypot(doorDetour.x - me.g.x, doorDetour.y - me.g.y) < 2.5) {
         // At the door: open it (the server swings it as a player's Use does), give it a moment, plan again.
         this.host.key('KeyW', false);
-        doorsTried.add(doorDetour.guid);
-        this.host.use(doorDetour.guid);
+        // Plan again once it has swung and the server's walk to it is done: from where that left us, by
+        // the doorway route, which now passes doors and never windows. The Use can leave the body in the
+        // jamb, off the opening's axis (the Holtburg tavern's west door, 2026-10-09).
+        useDoor(doorDetour.guid, now);
         doorDetour = null;
         dodgeUntil = now + 2000;
         stalls = 0;
         credit += 30_000;
-        // Plan again once it has swung and the server's walk to it is done: from where that left us, by
-        // the doorway route, which now passes doors and never windows. The Use can leave the body in the
-        // jamb, off the opening's axis (the Holtburg tavern's west door, 2026-10-09).
-        replanAfterDoor = true;
         return null;
       }
       // Each stretch plans the doorway route again: a building far off isn't loaded when the walk starts, so a
@@ -1910,10 +2216,15 @@ export class AgentApi {
       }
       if (stalls > 5) {
         release();
-        const doors = [...doorsTried].map((g) => this.nameOf(g));
+        // Only doors that stayed shut are named as not letting you through: one that opened did its part (a "stuck"
+        // blaming a door a plain use opened at once sent Arcanist round the Holtburg tower, 2026-10-11).
+        const opened = (g: number): boolean => { const o = this.host.object(g); return doorsOpened.has(g) || (!!o && o.physicsState !== undefined && (o.physicsState & PHYSICS_ETHEREAL) !== 0); };
+        const shutNames = [...doorsTried].filter((g) => !opened(g)).map((g) => this.nameOf(g));
+        const openNames = [...doorsTried].filter(opened).map((g) => this.nameOf(g));
         const why = [
           noWay ? `no walkable way from here: the game's collision finds walls all round between you and it${jumpSearch() ? ', and no jump or drop your health can take gets past them' : ''}` : 'blocked',
-          doors.length ? `tried the door${doors.length > 1 ? 's' : ''} ${doors.join(', ')}, which did not let you through (locked, or opened by something else)` : '',
+          shutNames.length ? `tried the door${shutNames.length > 1 ? 's' : ''} ${shutNames.join(', ')}, which stayed shut: locked, or it needs a key` : '',
+          openNames.length ? `opened ${openNames.join(', ')}, but the way on is still blocked` : '',
         ].filter(Boolean).join('; ');
         return { ok: false, message: `stuck ${d.toFixed(1)} m short (${why})${featText()}. ac_map shows the room and its exits; try another route or target.` };
       }
@@ -1925,8 +2236,7 @@ export class AgentApi {
       this.host.key('KeyW', false);
       this.host.key('ShiftLeft', false);
       if (door) {
-        doorsTried.add(door.guid);
-        this.host.use(door.guid);
+        useDoor(door.guid, now);
         dodgeUntil = now + 2500;
         return null;
       }
@@ -1947,7 +2257,7 @@ export class AgentApi {
    * only falls the player's health takes are routed (with no jump physics to
    * plan the drop, none).
    */
-  private planRoute(gl: { x: number; y: number }, o: AgentHostObject | null): RouteStep[] {
+  private planRoute(gl: { x: number; y: number }, o: AgentHostObject | null, closed: Array<{ x: number; y: number; z: number }> = []): RouteStep[] {
     const s = this.host.self();
     if (!s || !s.cell) return [];
     const interior = (c: number): boolean => (c & 0xffff) >= 0x100;
@@ -1961,7 +2271,10 @@ export class AgentApi {
     else { toCell = (lb | 0x0001) >>> 0; to = { x: gl.x - origin.x, y: gl.y - origin.y, z: s.z }; }
     if ((!interior(s.cell) && !interior(toCell)) || s.cell === toCell) return [];
     const maxDrop = this.jumpKit() ? safeDropHeight(fallBudget(s.health)) : 0;
-    const pts = this.host.route(s.cell, { x: s.x, y: s.y, z: s.z }, toCell, to, { maxDrop });
+    // Doors a Use did not open, in this landblock's frame.
+    const shut = closed.map((c) => ({ x: c.x - origin.x, y: c.y - origin.y, z: c.z }));
+    const pts = this.host.route(s.cell, { x: s.x, y: s.y, z: s.z }, toCell, to, { maxDrop, ...(shut.length ? { closed: shut } : {}) });
+    if (!pts) this.trace(`walk route: no doorway route from cell 0x${(s.cell >>> 0).toString(16)} to cell 0x${(toCell >>> 0).toString(16)}${shut.length ? ` (${shut.length} door(s) that would not open left out)` : ''}`);
     // A doorway is reached at its floor (feet height), not at its centroid halfway up the opening.
     return pts ? pts.slice(0, -1).map((p) => ({
       ...toGlobal(s.cell, p.x, p.y), z: p.feet ?? p.z,
@@ -1980,7 +2293,33 @@ export class AgentApi {
    * either way (unreachable), 120 s in all, on death, or when another task
    * starts.
    */
-  attack(target: TargetArg, opts: { height?: AttackHeightName; power?: number } = {}): AgentResult {
+  /** How long swings may report nothing about the target before the next height is tried (several swings). */
+  static readonly QUIET_SWING_MS = 6000;
+  /** The height that last connected, by creature name (this page's session). */
+  static readonly reachHeights = new Map<string, AttackHeightName>();
+
+  /** Close enough that a melee swing is a swing, not the server still closing in. */
+  private withinMeleeReach(guid: number): boolean {
+    const o = this.host.object(guid);
+    const me = this.me();
+    if (!o || !o.cell || !me) return false;
+    const t = toGlobal(o.cell, o.x, o.y);
+    return Math.hypot(t.x - me.g.x, t.y - me.g.y) <= 4;
+  }
+
+  /** "\n  note: … is attacking you …, and isn't this target" for monsters hitting you other than `guid`, else "". */
+  private otherAttackersNote(guid: number): string {
+    const others = [...this.attackersOfMe()].filter(([g]) => g !== guid);
+    if (!others.length) return '';
+    const list = others.map(([g, n]) => `${this.nameOf(g)} #${g.toString(16)} (${n} attack${n === 1 ? '' : 's'} on you in 10 s)`).join(', ');
+    return `\n  note: ${list} ${others.length === 1 ? 'is' : 'are'} attacking you, and ${others.length === 1 ? "isn't" : "aren't"} this target`;
+  }
+
+  /**
+   * `power`: the power / accuracy bar for the swings (0..1), or 'bar' for the
+   * combat bar's own setting (VirindiTank with AutoAttackPower off). Default 0.6.
+   */
+  attack(target: TargetArg, opts: { height?: AttackHeightName; power?: number | 'bar' } = {}): AgentResult {
     let g: number | null;
     if (target === null || target === undefined) {
       const tg = this.host.targetGuid();
@@ -1996,16 +2335,21 @@ export class AgentApi {
     if (!this.host.isAttackable(g)) return { ok: false, message: `${this.nameOf(g)} isn't attackable` };
     const guid = g;
     const name = this.nameOf(guid);
-    const height = opts.height ?? 'medium';
-    const power = Math.min(Math.max(opts.power ?? 0.6, 0), 1);
+    // The height that connected on this kind of creature before, else the asked-for one, else the combat bar's.
+    let height: AttackHeightName = AgentApi.reachHeights.get(name.toLowerCase()) ?? opts.height ?? this.host.attackHeight?.() ?? 'medium';
+    const power = Math.min(Math.max((opts.power === 'bar' ? this.host.attackPower?.() : opts.power) ?? 0.6, 0), 1);
     this.host.select(guid);
     this.attackTarget = guid;
     const fight = (): void => {
       const start = this.host.now();
+      const startSeq = this.seqN;
       let idleSince: number | null = null;
       let sent = false;
       let lastCombatSeq = this.seqN;
       let lastActivity = start;
+      // Swings at this height that report nothing about the target (no hit, no evade): in AC1999 a swing
+      // that passes over a short creature is no attack at all, and says nothing (the cone height test).
+      let quietSince: number | null = null;
       void this.startTask(`attacking ${name}`, (now) => {
         if (this.host.isDying(guid) || (!this.host.object(guid) && this.dyingSeen.has(guid))) {
           if (this.attackTarget === guid) { this.attackTarget = 0; this.dyingSeen.delete(guid); this.push('target-died', `${name} #${guid.toString(16)} died`, guid); }
@@ -2016,10 +2360,45 @@ export class AgentApi {
           return this.killedRecently(name) ? { ok: true, message: `${name} is dead` } : { ok: false, message: `${name} is gone (dead or out of view: see the target-died / target-lost event)` };
         }
         if (this.host.self()?.dead) return { ok: false, message: 'you died' };
+        // A kill line naming it is its death, even while the client still shows it (its death start missed).
+        if (this.killedRecently(name, startSeq)) {
+          this.host.cancelAttack();
+          if (this.attackTarget === guid) { this.attackTarget = 0; this.push('target-died', `${name} #${guid.toString(16)} died`, guid); }
+          return { ok: true, message: `${name} is dead` };
+        }
+        // The server ending attack after attack with no swing between: it isn't attacking this target at all.
+        const ends = this.attackDones.filter((d) => d.at >= start);
+        let empty = 0;
+        for (let i = ends.length - 1; i >= 0; i--) {
+          const after = ends[i].seq, before = i > 0 ? ends[i - 1].seq : startSeq;
+          if (this.events.some((e) => e.seq > before && e.seq <= after && e.type === 'chat' && e.text.startsWith('(combat)'))) break;
+          empty++;
+        }
+        if (empty >= AgentApi.EMPTY_ATTACKS_TO_STOP) {
+          this.host.cancelAttack();
+          if (this.attackTarget === guid) { this.attackTarget = 0; this.push('target-lost', `${name} #${guid.toString(16)}: the server won't attack it`, guid); }
+          return { ok: false, message: `the server ended ${empty} attacks on ${name} at once, with no swing: it is probably dead or gone on the server's side (the client still shows it), or out of reach. Pick another target, or walk_to it if it should be there.` };
+        }
         if (now - start > 120_000) { this.host.cancelAttack(); return { ok: false, message: `${name} still alive after 120 s` }; }
         // Any swing either way since the last tick counts as progress.
-        if (this.events.some((e) => e.seq > lastCombatSeq && e.type === 'chat' && e.text.startsWith('(combat)'))) lastActivity = now;
+        const fresh = this.events.filter((e) => e.seq > lastCombatSeq && e.type === 'chat' && e.text.startsWith('(combat)'));
+        if (fresh.length) lastActivity = now;
         lastCombatSeq = this.seqN;
+        if (fresh.some((e) => swingReached(e.text, name))) { quietSince = null; AgentApi.reachHeights.set(name.toLowerCase(), height); }
+        else if (this.host.self()?.combatMode === 'melee' && this.withinMeleeReach(guid)) {
+          quietSince ??= now;
+          if (now - quietSince >= AgentApi.QUIET_SWING_MS) {
+            // As a player does: try the next height on the combat bar (medium → low → high).
+            height = height === 'medium' ? 'low' : height === 'low' ? 'high' : 'medium';
+            this.host.setAttackHeight?.(height);
+            this.host.cancelAttack();
+            quietSince = null;
+            lastActivity = now; // each height gets its own try before the 20 s give-up
+            sent = false;
+            this.push('chat', `(system) [Agent] swings at ${name} report nothing: attacking ${height} instead`);
+            return null;
+          }
+        } else quietSince = null;
         if (now - lastActivity > 20_000) { this.host.cancelAttack(); return { ok: false, message: `no swings at ${name} for 20 s (blocked, unreachable or fleeing: walk_to it, or pick another target)` }; }
         if (this.host.attackPending()) { idleSince = null; return null; }
         idleSince ??= now;
@@ -2038,22 +2417,30 @@ export class AgentApi {
     if (o && o.cell && (far || this.planRoute(toGlobal(o.cell, o.x, o.y), o).length)) {
       // Attacked on the way: stop walking and fight (the server's own approach closes the rest).
       void this.walkTo(guid, { within: 2.5, timeoutMs: 90_000 }).then((r) => { if (r.ok || r.attacked) fight(); });
-      return { ok: true, message: `running up to ${name} (#${guid.toString(16)}), then attacking; ac_wait types=target-died,target-lost,vitals-low,death,task-done` };
+      return { ok: true, message: `running up to ${name} (#${guid.toString(16)}), then attacking; ac_wait types=target-died,target-lost,vitals-low,death,task-done${this.otherAttackersNote(guid)}` };
     }
     fight();
-    return { ok: true, message: `attacking ${name} (#${guid.toString(16)}); ac_wait types=target-died,target-lost,vitals-low,death` };
+    return { ok: true, message: `attacking ${name} (#${guid.toString(16)}); ac_wait types=target-died,target-lost,vitals-low,death${this.otherAttackersNote(guid)}` };
   }
 
   /**
-   * Loot a corpse or chest: leave combat, Use it (walks over and opens it),
-   * then move each item into the main pack, optionally only names matching
-   * `match`. Resolves with what was taken. `decide` (the routine's loot rules)
-   * says per item whether to take it, skip it, or wait (while it is examined).
+   * Loot a corpse or chest: leave combat, Use it (walks over and opens it) unless it is already open to you,
+   * then move each item into the main pack, optionally only names matching `match`. One request at a time, as
+   * the client allows (IsPlayerReadyToMakeInventoryRequest): each pick waits for the server's answer (the item
+   * in your pack, or its refusal) before the next. Resolves with what actually arrived, and what the server
+   * refused and why. `decide` (the routine's loot rules) says per item whether to take it, skip it, or wait
+   * (while it is examined).
+   *
+   * A Use of a container you already have open closes it (ACE Container.ActOnUse / Chest.CheckUseRequirements:
+   * IsOpen and Viewer == you → Close), and the server then answers every later pick "Source item not found!"
+   * (Player.HandleActionPutItemInContainer_Verify finds items only in the container you are viewing). That is
+   * how ac_use then ac_loot took one item per pass and claimed them all (Arcanist, Nanto, 2026-10-11).
    */
   loot(container: TargetArg, match: string | null, decide?: (item: { guid: number; name: string; itemType: number; objectDescFlags: number; palettes: ItemPalette[] }) => LootDecision): Promise<AgentResult> {
     let g: number | null;
     if (container === null || container === undefined) {
-      g = this.nearby(40).find((o) => o.kind === 'corpse')?.guid ?? null;
+      const open = this.host.openContainer();
+      g = open && this.host.object(open.guid) ? open.guid : this.nearby(40).find((o) => o.kind === 'corpse')?.guid ?? null;
       if (!g) return Promise.resolve({ ok: false, message: 'no corpse nearby' });
     } else {
       const r = this.need(container, 'world', 'corpse or chest');
@@ -2069,8 +2456,11 @@ export class AgentApi {
     const start = this.host.now();
     let phase: 'settle' | 'open' | 'take' = 'settle';
     let openedAt = 0;
+    let reopens = 0;
+    // Items still to try, and the one whose answer we're waiting for.
     let queue: Array<{ guid: number; name: string }> = [];
-    let lastPick = 0;
+    let pending: { item: { guid: number; name: string }; at: number; seq: number; units: number; tries: number } | null = null;
+    let lastAnswer = 0;
     // Names are resolved when reported, not when listed: on some servers (1999) a container lists its
     // items before their creates land, so the listing says "???" (acjs-ea, 2026-10-07).
     const takenItems: Array<{ guid: number; name: string }> = [];
@@ -2078,12 +2468,35 @@ export class AgentApi {
       const now = this.host.inventory().find((i) => i.guid === it.guid)?.name ?? this.host.object(it.guid)?.name;
       return now && !/^\?+$/.test(now) ? now : it.name;
     };
-    const taken = { get length() { return takenItems.length; }, join: (sep: string) => takenItems.map(named).join(sep) };
+    const failed = new Map<number, { item: { guid: number; name: string }; why: string; tries: number }>();
+    const done = new Set<number>();
     const left: string[] = [];
-    const leftNote = (): string => (left.length ? `; left ${left.length}: ${left.join(', ')}` : '');
+    /** Everything you carry, counted in units (a stack of 40 pyreals is 40): a merge onto a stack adds no item. */
+    const units = (): number => this.host.inventory().reduce((t, i) => t + (i.stack ?? 1), 0);
+    const arrived = (p: NonNullable<typeof pending>): boolean => this.host.carriedGuids().has(p.item.guid) || units() > p.units;
+    /** What the server said since the pick (the chat lines and notices a player reads), for a refusal's reason. */
+    const saidSince = (seq: number): string | null => {
+      const lines = [...new Set(this.eventsSince(seq).filter((e) => e.type === 'chat').map((e) => e.text.replace(/^\(\w+\) /, '')).filter((l) => !/^(Approaching|Using the) /.test(l)))];
+      return lines.length ? lines.join(' / ') : null;
+    };
+    const report = (timedOut: boolean): AgentResult => {
+      const took = takenItems.map(named);
+      const notTaken = [...failed.values()].map((f) => `${named(f.item)} (${f.why})`);
+      const untried = queue.filter((i) => !done.has(i.guid) && !failed.has(i.guid)).map(named);
+      const parts = [
+        timedOut ? `looting timed out; took ${took.length ? took.join(', ') : 'nothing'}` : `took ${took.length}${took.length ? `: ${took.join(', ')}` : ''}`,
+        notTaken.length ? `could not take ${notTaken.length}: ${notTaken.join(', ')}` : '',
+        untried.length ? `not tried: ${untried.join(', ')}` : '',
+        left.length ? `left ${left.length}: ${left.join(', ')}` : '',
+      ].filter(Boolean);
+      return { ok: took.length > 0 || (!notTaken.length && !timedOut), message: `${parts.join('; ')}${leftCombat ? ' (switched to peace mode to loot)' : ''}` };
+    };
+    const isOpen = (): boolean => this.host.openContainer()?.guid === guid;
     return this.startTask(`looting ${name}`, (now) => {
-      if (now - start > 60_000) return { ok: taken.length > 0, message: `looting timed out; took ${taken.length ? taken.join(', ') : 'nothing'}${leftNote()}` };
+      if (now - start > 90_000) return report(true);
       if (phase === 'settle') {
+        // Already open to you (ac_use opened it): a Use now would close it.
+        if (isOpen()) { phase = 'open'; openedAt = now; return null; }
         if (now - start < 1500 || this.host.busy()) return null;
         this.host.use(guid);
         phase = 'open';
@@ -2093,32 +2506,81 @@ export class AgentApi {
       if (phase === 'open') {
         const oc = this.host.openContainer();
         if (oc && oc.guid === guid) {
-          queue = oc.items.filter((i) => !re || re.test(i.name));
-          if (!queue.length) return { ok: true, message: oc.items.length ? `${name}: nothing matching /${match}/ (${oc.items.length} items)` : `${name} is empty` };
+          const fresh = oc.items.filter((i) => !done.has(i.guid) && (!re || re.test(i.name)));
+          // After a re-open, the ones it refused because it had closed get one more try.
+          queue = fresh.filter((i) => { const f = failed.get(i.guid); return !f || f.tries < 2; });
+          for (const i of queue) failed.delete(i.guid);
+          if (!queue.length && !takenItems.length && !failed.size && !left.length) {
+            return { ok: true, message: oc.items.length ? `${name}: nothing matching /${match}/ (${oc.items.length} items)` : `${name} is empty` };
+          }
           phase = 'take';
           return null;
         }
-        if (now - openedAt > 20_000) return { ok: false, message: `${name} never opened (too far, someone else's corpse, or locked)` };
+        if (now - openedAt > 20_000) {
+          if (takenItems.length || failed.size) return report(false);
+          return { ok: false, message: `${name} never opened (too far, someone else's corpse, or locked)${this.saidNote(start)}` };
+        }
         return null;
       }
-      if (now - lastPick < 900 || this.host.busy()) return null;
-      const next = queue.shift();
-      if (next === undefined) {
-        // Give the last pick-up a moment to land so its name (and the others') can be read from the pack.
-        if (now - lastPick < 1500) return null;
-        return { ok: true, message: `took ${taken.length}${taken.length ? `: ${taken.join(', ')}` : ''}${leftNote()}${leftCombat ? ' (switched to peace mode to loot)' : ''}` };
+      // phase 'take'
+      if (pending) {
+        const p = pending;
+        if (arrived(p)) {
+          takenItems.push(p.item);
+          done.add(p.item.guid);
+          pending = null;
+          lastAnswer = now;
+          return null;
+        }
+        // Still in flight: the client holds one inventory request at a time until the server answers it.
+        if (this.host.busy() && now - p.at < 10_000) return null;
+        // Answered, or not, with nothing arrived yet: the item can land a moment after the answer.
+        if (now - p.at < 2500) return null;
+        const why = saidSince(p.seq) ?? (isOpen() ? 'the server did not move it' : `${name} closed`);
+        failed.set(p.item.guid, { item: p.item, why, tries: p.tries });
+        pending = null;
+        lastAnswer = now;
+        return null;
       }
+      if (!isOpen()) {
+        // It closed under us (out of range, reset, someone else): open it again for what's left, at most twice.
+        const remaining = queue.filter((i) => !done.has(i.guid)).length + [...failed.values()].filter((f) => f.tries < 2).length;
+        if (remaining && reopens < 2 && !this.host.busy()) {
+          reopens++;
+          this.trace(`loot: ${name} closed with ${remaining} item(s) left; opening it again`);
+          this.host.use(guid);
+          phase = 'open';
+          openedAt = now;
+          return null;
+        }
+        if (remaining && reopens < 2) return null;
+        return report(false);
+      }
+      if (now - lastAnswer < 300 || this.host.busy()) return null;
+      const next = queue.shift();
+      if (next === undefined) return report(false);
+      if (done.has(next.guid)) return null;
       if (decide) {
         const o = this.host.object(next.guid);
         const d = decide({ ...next, itemType: o?.itemType ?? 0, objectDescFlags: o?.objectDescFlags ?? 0, palettes: this.itemPalettes(next.guid) });
         if (d === 'wait') { queue.unshift(next); return null; }
-        if (d === 'skip') { left.push(named(next)); return null; }
+        if (d === 'skip') { left.push(named(next)); done.add(next.guid); return null; }
       }
-      lastPick = now;
-      takenItems.push(next);
-      this.host.pickUp(next.guid);
+      const tries = (failed.get(next.guid)?.tries ?? 0) + 1;
+      pending = { item: next, at: now, seq: this.seqN, units: units(), tries };
+      if (!this.host.pickUp(next.guid)) {
+        // The client refused to send it (its own centre-screen notice says why).
+        failed.set(next.guid, { item: next, why: saidSince(pending.seq) ?? 'the client would not send the move', tries });
+        pending = null;
+      }
       return null;
     }, () => {});
+  }
+
+  /** "; the server said: …" for the chat lines since `sinceT` (page ms), or ''. */
+  private saidNote(sinceT: number): string {
+    const lines = [...new Set(this.events.filter((e) => e.type === 'chat' && e.t >= sinceT).map((e) => e.text.replace(/^\(\w+\) /, '')).filter((l) => !/^(Approaching|Using the) /.test(l)))];
+    return lines.length ? `; the server said: ${lines.slice(-3).join(' / ')}` : '';
   }
 
   /** Wall-clock ms for remembered places (they outlive the page): the host's, else Date.now(). */
@@ -2147,10 +2609,23 @@ export class AgentApi {
     try { globalThis.localStorage?.setItem(key, JSON.stringify([...this.places.entries()].slice(-300))); } catch { /* storage blocked */ }
   }
 
-  /** Remembered places not currently in view, nearest first, as AgentObjects (seenAgo set). */
-  rememberedPlaces(max = 8): AgentObject[] {
+  /**
+   * How far off a remembered place is still listed when observe names no radius: about this region (five
+   * landblocks). Holtburg's vendors 25 km away read as places "here" while Arcanist stood in Nanto (2026-10-11);
+   * walk_to still finds any remembered place by name.
+   */
+  static readonly REMEMBERED_REGION_M = 1000;
+
+  /**
+   * Remembered places not currently in view, nearest first, as AgentObjects (seenAgo set): within `radius` when
+   * given (observe's own), else within this region; only those the `filter` matches (name or kind, as nearby).
+   */
+  rememberedPlaces(opts: { radius?: number; filter?: string; max?: number } = {}): AgentObject[] {
     const me = this.me();
     if (!me) return [];
+    const max = opts.max ?? 8;
+    const radius = opts.radius ?? AgentApi.REMEMBERED_REGION_M;
+    const f = opts.filter?.toLowerCase();
     const wall = this.wallNow();
     const out: AgentObject[] = [];
     const myLb = (me.s.cell & 0xffff0000) >>> 0;
@@ -2161,6 +2636,8 @@ export class AgentApi {
       // cells sit at made-up landblock coordinates, so a distance from the surface means nothing).
       if ((p.cell & 0xffff0000) >>> 0 !== myLb && !(outside(me.s.cell) && outside(p.cell))) continue;
       const g = toGlobal(p.cell, p.x, p.y);
+      if (Math.hypot(g.x - me.g.x, g.y - me.g.y) > radius) continue;
+      if (f && !p.name.toLowerCase().includes(f) && p.kind !== f) continue;
       const b = bearing(me.g, g);
       out.push({
         guid, name: p.name, kind: p.kind,
@@ -2298,14 +2775,14 @@ export class AgentApi {
       say: (t: string) => this.say(t),
       select: (t: TargetArg) => this.select(t),
       use: (t: TargetArg) => this.use(t),
-      useOn: (i: TargetArg, t: TargetArg) => this.useOn(i, t),
+      useOn: (i: TargetArg, t: TargetArg) => this.useOnReported(i, t),
       walkTo: (t: number | string, o?: { within?: number; timeoutMs?: number }) => this.walkTo(t, o),
       turn: (t: number | string) => this.turn(t),
       move: (d: string, s?: number) => this.move(d, s),
       jump: (o?: { holdMs?: number; forward?: boolean; walk?: boolean }) => this.jump(o ?? {}),
       stopMoving: () => this.stopMoving(),
       combatMode: (m: string) => this.combatMode(m),
-      attack: (t: TargetArg, o?: { height?: AttackHeightName; power?: number }) => this.attack(t, o),
+      attack: (t: TargetArg, o?: { height?: AttackHeightName; power?: number | 'bar' }) => this.attack(t, o),
       cast: (s: number | string, t: TargetArg) => this.cast(s, t),
       pickUp: (t: TargetArg) => this.pickUp(t),
       loot: (c: TargetArg, m: string | null) => this.loot(c, m),
@@ -2362,4 +2839,12 @@ export function agentApiEnabled(search: string): boolean {
  */
 export function automationUiEnabled(urlOverridesAllowed: boolean): boolean {
   return urlOverridesAllowed;
+}
+
+/** A combat line saying a swing of ours reached `name`: a hit or graze for points, or its evade. */
+export function swingReached(line: string, name: string): boolean {
+  const t = line.replace(/^\(combat\)\s*/, '');
+  if (!t.toLowerCase().includes(name.toLowerCase())) return false;
+  // Ours start "You …" after retail's prefixes (CombatDialog: "Critical hit!", "Sneak Attack!", "Recklessness!"); a line where it hits us ("… bites you for 3 points") is not a reach.
+  return /^((critical hit|sneak attack|recklessness)!\s*)*you\b.*\bfor \d+ points?\b/i.test(t) || /evaded your attack/i.test(t) || /^you (killed|slay|destroy)/i.test(t);
 }

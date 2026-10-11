@@ -19,8 +19,11 @@
  *              its DATs load on ENTER)
  *   --create <Name>  after the era reload, create a character with the wizard's
  *              defaults (if the account has none), enter the world, walk
- *              forward 2 s and screenshot. Needs the page's debug hooks: a
- *              production --base must carry ?debug (e.g. https://playwebac.com/?debug&).
+ *              forward 2 s and screenshot. Needs the page's debug hooks, which a
+ *              deployed page never installs (2026-10-11: ?debug is dev-only). For a
+ *              production-shaped run, point --base at a local
+ *              `VITE_ACJS_URL_OVERRIDES=1 npx vite build && npx vite preview` of the
+ *              same commit, with ?debug (e.g. http://localhost:4173/?debug&).
  *   --then-custom <ws url>  after --revisit, enter that Custom… bridge (an
  *              end-of-retail ACE bridge): no era reload, the boot was already
  *              end of retail

@@ -180,6 +180,22 @@ describe.skipIf(!hasDats)('chargen listbox scrollbars (happy-dom)', () => {
     expect(thumbOf(bar).style.top).toBe('17px');
   });
 
+  // The profession description 0x100003e0, the skills instruction 0x100003fd
+  // and the town description 0x10000409 inherit 0x2100004c:0x100002e4, which
+  // names no p114 bar: retail clips them. They must not scroll natively.
+  it('the bar-less framed texts (0x100002e4) clip like retail, never scroll natively', () => {
+    const { container: prof } = openStep(1);
+    expect((prof.querySelector('.profession-description') as HTMLElement).style.overflow).toBe('hidden');
+    const { container: skills } = openStep(2);
+    const instr = skills.querySelector(`[data-frame-desc="${descRef(0x21000048, 0x100003fd)}"]`) as HTMLElement;
+    const instrText = Array.from(instr.children).find((c) => !(c as HTMLElement).dataset.framePiece) as HTMLElement;
+    expect(instrText.style.overflow).toBe('hidden');
+    const { container: town } = openStep(4);
+    const desc = town.querySelector('.town-description') as HTMLElement | null;
+    expect(desc).toBeTruthy();
+    expect(desc!.style.overflow).toBe('hidden');
+  });
+
   it('Summary: bar 0x10000401 is bound to the list 0x10000400 the same way', () => {
     const { container } = openStep(5);
     const bar = container.querySelector('.summary-scrollbar') as HTMLElement;

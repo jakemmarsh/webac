@@ -19,7 +19,7 @@ import { RegionDesc } from '@ac/dat-parser/file-types/RegionDesc.js';
 import { CombatManeuverTable } from '@ac/dat-parser/file-types/CombatManeuverTable.js';
 import { SpellComponentTable } from '@ac/dat-parser/file-types/SpellComponentTable.js';
 import { readDualDidMapper } from '@ac/dat-parser/file-types/DualDidMapper.js';
-import { SpellTable } from '@ac/dat-parser/file-types/SpellTable.js';
+import { SpellTable, isProjectileSpellType } from '@ac/dat-parser/file-types/SpellTable.js';
 // FAITHFUL.476 — `SpellBase` type import dropped; never referenced
 // in this file. Sibling of the orphan-helper cleanup audit.
 import { XpTable } from '@ac/dat-parser/file-types/XpTable.js';
@@ -121,10 +121,15 @@ import { enchantmentExpiredLine } from './chat/EnchantmentExpiry.js';
 import { rangedSpeechInRange } from './chat/RangedSpeechGate.js';
 import { PingLatencyTracker } from './network/PingLatencyTracker.js';
 import { GameActions } from './network/GameActions.js';
-import { debugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
+import { pageDebugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
 import { AgentApi, agentApiEnabled, automationUiEnabled, fixtureReach, type AgentHost, type AgentHostObject } from './agent/AgentApi.js';
 import { createHostAttack } from './agent/hostAttack.js';
 import type { AgentScreen, AgentSelf } from './agent/types.js';
+
+/** The agent's tap on every UseDone (its WeenieError code; 0 = done), set when the agent API is on. */
+let agentUseDoneTap: ((code: number) => void) | null = null;
+/** The agent's tap on every AttackDone (its WeenieError code), set when the agent API is on. */
+let agentAttackDoneTap: ((code: number) => void) | null = null;
 import { examineText } from './agent/examineText.js';
 import { findRouteViaOutside, loadCellGraph, type CellGraph } from './agent/cellPath.js';
 import { RoutineSync } from './agent/RoutineSync.js';
@@ -141,10 +146,10 @@ import { resolveUrlLogin } from './launcher/urlLogin.js';
 import { urlOverridesEnabled } from './config/urlOverrides.js';
 import { bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, worldBoxName } from './launcher/worldDirectory.js';
 import { worldKeyOf } from './launcher/launcherStorage.js';
-import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
+import { EOR_ERA_ID, eraProfile, string16WireFor, type DatRole, type EraProfile } from './era/EraProfiles.js';
 import { eraClientRules, unsupportedFeatures } from './era/EraFeatures.js';
 import { Ac1999World, ac1999ServerKey, type Ac1999PatchEvent } from './era/Ac1999World.js';
-import { eraStreamPlan, eraUnavailableText, forgetImportedEraFiles, planEraDats, resolveBootEra, stashEraSwitch, takeEraSwitch, type DatSource, type EraDatPlan, type EraStreamPlan, type EraSwitch } from './era/EraBoot.js';
+import { eraPortalOverlay, eraStreamPlan, eraUnavailableText, forgetImportedEraFiles, planEraDats, resolveBootEra, stashEraSwitch, takeEraSwitch, type DatSource, type EraDatPlan, type EraStreamPlan, type EraSwitch } from './era/EraBoot.js';
 import { EnvCellRenderer } from './world/EnvCellRenderer.js';
 import {
   applySurfaceCellVisibility, objectCellDrawn, type SurfaceView} from './world/buildingCells.js';
@@ -179,6 +184,7 @@ import { setGlobalCursor } from './ui/GlobalCursor.js';
 import { installRetailFog } from './effects/RetailFog.js';
 import { BusyCount, ExamineAwait, TeleportBusy } from './ui/BusyCount.js';
 import { WorldTargetModeController } from './input/WorldTargetMode.js';
+import { isKeyboardField, suppressPageContextMenu } from './input/BrowserDefaults.js';
 import { ACFontRenderer } from './ui/ACFontRenderer.js';
 import { AC_COLORS, type WorldDropSource, type ItemListDropTarget } from './ui/GameUI.js';
 import { placeInBackpackPendingIndex, itemListDropPendingIndex } from './inventory/PendingPackItem.js';
@@ -345,7 +351,7 @@ import { buildCharacterDelete, buildCharacterRestore } from '../../network/src/M
 import { buildFriendsCommand1999, friendsCommand1999Plan, setString16Wire } from '@ac/network';
 import { MAP_TELEPORT_ORIGIN } from './ui/MapMarkers.js';
 import { tradeReceiveContainsIn } from './inventory/TradeReceiveContainId.js';
-import { buildSpellExamineModel } from './ui/examine/SpellExamine.js';
+import { buildSpellExamineModel, inqSkillLevel, spellRangeMeters } from './ui/examine/SpellExamine.js';
 import { TalkFocus } from './ui/ChatTalkFocus.js';
 import { MAIN_CHAT_WINDOW_ID } from './ui/FloatyChatModel.js';
 import { RetailCommandSystem } from './chat/commands/index.js';
@@ -366,6 +372,14 @@ import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateN
 /** How long a LoginComplete may wait on contained objects before the safety valve sends it. */
 const LOGIN_COMPLETE_GRACE_MS = 15_000;
 /** AGENT.vtank-engine-support — each appraisal's properties and spell names, for loot rules on item properties. */
+/**
+ * Appraisals the automation asked for (VirindiTank's background IDs): their replies update the item
+ * data and the agent's examine text without opening the Examine window, and hold no busy count.
+ * A player's own examine of the same object takes it back (sendIdentifyAction).
+ */
+const quietAppraisals = new Set<number>();
+/** Records a quiet appraisal's examine view for the agent (set when the agent starts). */
+let recordQuietExamine: ((view: Parameters<GameUI['showExaminationWindow']>[0]) => void) | null = null;
 const agentAppraisals = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[] }>();
 import { openStreamingDats, type StreamScope, type StreamingDats } from './dat/streaming/StreamingDats.js';
 import { FetchPriority, fileKey, splitFileKey } from './dat/streaming/DatStore.js';
@@ -617,6 +631,7 @@ function initDatSplash(texMgr: TextureManager, portalDb?: DatFileSource) {
   if (bgUrl) {
     const bg = document.createElement('img');
     bg.src = bgUrl;
+    bg.draggable = false;
     Object.assign(bg.style, {
       position: 'absolute', left: '0', top: '30px', width: '800px', height: '482px',
     });
@@ -1096,6 +1111,7 @@ async function main() {
   // transparency, producing a "landscape flash" before the player has actually
   // entered the world. Revealed once below at the moment gameStarted = true.
   canvas.style.visibility = 'hidden';
+  suppressPageContextMenu(document);
 
   runtimeConfig = await loadRuntimeConfig();
 
@@ -1372,6 +1388,10 @@ async function main() {
   const langDb = streamed ? streamed.local : langBuf ? new DatDatabase(langBuf) : null;
   const worldPortalDb = worldPortalBuf ? new DatDatabase(worldPortalBuf)
     : worldStreamingDats && worldStreamingDats !== streamingDats ? worldStreamingDats.portal : uiPortalDb;
+  // Classic Dereth 1.0 (Snowreap) loads the 1.1 set and serves 1.0's
+  // SkillTable over it (EraProfile.dropSkills), before any table is read.
+  const eraPortal = eraPortalOverlay(activeEra);
+  if (eraPortal) worldPortalDb.setOverlay(eraPortal);
   // AC1999: the 1999 portal + cell wear the 1999 overlay (end-of-retail
   // formats + the server's DAT patches; era/Ac1999World.ts). Patches stored
   // for the server an era switch is resuming apply before any world table is read.
@@ -1848,7 +1868,7 @@ async function main() {
       const info = gl?.getExtension('WEBGL_debug_renderer_info');
       rendererName = String((info && gl?.getParameter(info.UNMASKED_RENDERER_WEBGL)) ?? gl?.getParameter(gl.RENDERER) ?? '');
     } catch { /* no context: no pin */ }
-    const pin = harnessDegMulPin(debugToolsEnabled(import.meta.env.DEV, window.location.search), window.location.search, rendererName);
+    const pin = harnessDegMulPin(pageDebugToolsEnabled(window.location.search), window.location.search, rendererName);
     if (pin !== null) {
       degradeLod.controller.pin(pin);
       console.log(`[AC] Adaptive Degrade pinned at deg_mul ${pin} (harness, ${rendererName || 'unknown renderer'})`);
@@ -7186,6 +7206,10 @@ async function main() {
       acePassword = choice.password;
       connectUrl = choice.connectUrl;
       launcherWorldName = worldBoxName(choice.world);
+      // An end-of-retail world on GDL / GDLE reads strings as Windows-1252, not ACE's UTF-8.
+      const wire = string16WireFor(activeEra, choice.world.emu);
+      setString16Wire(wire);
+      console.log(`[AC] ${choice.world.name}: ${choice.world.emu ?? 'unknown'} server, strings as ${wire === 'ace' ? 'UTF-8' : 'Windows-1252'}`);
       return;
     }
   };
@@ -7950,7 +7974,8 @@ async function main() {
         spellId,
         spell,
         formula: appropriateFormulaInputs(spell),
-        skillLevel: (id) => (playerSkillTable ? playerState.getSkillCurrent(id, playerSkillTable.skills) : 0),
+        // InqSkillLevel (ranks + init level), what DetermineSpellRange reads: not the buffed current skill.
+        skillLevel: (id) => inqSkillLevel(playerState.skills, id),
         component: (scid) => {
           const c = spellComponentTable?.components.get(scid);
           return c ? { name: c.name, icon: c.icon } : null;
@@ -10390,6 +10415,7 @@ async function main() {
         // ACCWeenieObject::attackInProgress for every code.
         inventoryRequests.setAttackInProgress(false);
         console.log(`[AttackDone] errorType=0x${data.errorType.toString(16)}`);
+        agentAttackDoneTap?.(data.errorType);
         // BUG.combat-attack-charge-build.b — HandleAttackDoneEvent @
         // 0056c500. 0 (None): the server queued the next swing itself (ACE
         // Player_Melee.cs:375 / Player_Missile.cs:284 repeat at the
@@ -10539,7 +10565,8 @@ async function main() {
             objectName: name,
           }) ?? undefined;
         }
-        gameUI.showExaminationWindow(view);
+        if (quietAppraisals.delete(data.guid >>> 0)) recordQuietExamine?.(view);
+        else gameUI.showExaminationWindow(view);
       },
 
       // ── Book/Sign data ──
@@ -11611,6 +11638,7 @@ async function main() {
           deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType));
         }
         console.log(`[AC] UseDone: errorType=${data.errorType}`);
+        agentUseDoneTap?.(data.errorType);
       },
 
       // ── ViewContents (opening a container — corpse, chest, etc.) ──
@@ -12307,6 +12335,8 @@ async function main() {
     };
     // Wire up Identify (examine) action for ACE server
     sendIdentifyAction = (guid: number, reappraise = false) => {
+      // A player's examine shows the window even if the automation asked for the same object.
+      if (!reappraise) quietAppraisals.delete(guid >>> 0);
       // GAP.88 — mirror Player.cs:265-272's silent target-resolution gate
       // (FindObject returning null → an IdentifyObjectResponse carrying no
       // appraisal data). Same stale-guid rationale as sendUseAction above.
@@ -13177,7 +13207,7 @@ async function main() {
       retailCommands.onChatCommand(message, gameUI.commandSourceWindowId ?? MAIN_CHAT_WINDOW_ID);
     };
 
-    const acDebugEnabled = debugToolsEnabled(import.meta.env.DEV, window.location.search);
+    const acDebugEnabled = pageDebugToolsEnabled(window.location.search);
     if (acDebugEnabled) (window as any).acDebug = {
       /** Clear the OPFS DAT cache so the next load re-downloads fresh DATs. */
       clearDatCache: async () => {
@@ -15490,6 +15520,7 @@ async function main() {
       const agentCellGraphs = new Map<number, CellGraph>();
       const showExamination = gameUI.showExaminationWindow.bind(gameUI);
       gameUI.showExaminationWindow = (view) => { examined.set(view.guid, examineText(view)); showExamination(view); };
+      recordQuietExamine = (view) => { examined.set(view.guid, examineText(view)); };
       const schoolName = (s: MagicSchool): string => ({ [MagicSchool.WarMagic]: 'War', [MagicSchool.LifeMagic]: 'Life', [MagicSchool.ItemEnchantment]: 'Item', [MagicSchool.CreatureEnchantment]: 'Creature', [MagicSchool.VoidMagic]: 'Void' } as Record<number, string>)[s] ?? 'Other';
       const modeName = (): AgentSelf['combatMode'] => ({ [CombatMode.NonCombat]: 'peace', [CombatMode.Melee]: 'melee', [CombatMode.Missile]: 'missile', [CombatMode.Magic]: 'magic' } as Record<number, AgentSelf['combatMode']>)[combatController.mode] ?? 'unknown';
       // Where the object is now (its physics body / render position), not the last UpdatePosition (agent/livePlace.ts).
@@ -15585,6 +15616,13 @@ async function main() {
         // In-flight projectiles (PhysicsState.Missile) and objects that left the world aren't things to observe or act on.
         objects: function* () { for (const o of serverObjectManager?.getAllObjects().values() ?? []) if (!o.outOfWorld && !((o.physicsState ?? 0) & AcePhysicsState.Missile)) yield hostObject(o); },
         object: (guid) => { const o = serverObjectManager?.getObject(guid); return o ? hostObject(o) : null; },
+        lineOfFire: (guid) => serverObjectManager?.lineOfFire(guid) ?? null,
+        cellSees: (from, to) => {
+          if ((from >>> 16) !== (to >>> 16) || (from & 0xffff) < 0x100 || (to & 0xffff) < 0x100) return null;
+          if (from === to) return true;
+          const env = envCellRenderer.loadEnvCell(from >>> 0);
+          return env ? env.visibleCells.includes(to & 0xffff) : null;
+        },
         isAttackable: (guid) => {
           const o = serverObjectManager?.getObject(guid);
           return !!o && guid !== myPlayerGuid && isObjectAttackable(o, serverObjectManager?.playerDescFlags ?? 0);
@@ -15595,11 +15633,22 @@ async function main() {
         carriedGuids: carried,
         inventory: () => {
           const packName = (id: number): string => (!id || id === aceCharGuid ? 'main pack' : playerState.inventory.getItem(id)?.name ?? `pack #${id.toString(16)}`);
-          const worn = playerState.equipment.getAll().map((e) => ({ guid: e.id >>> 0, name: e.name, where: 'equipped', slot: Object.entries(EquipMask).filter(([, v]) => typeof v === 'number' && v && (v & (v - 1)) === 0 && (e.slot & v)).map(([k]) => k).join('+') || String(e.slot), ...(e.stackSize > 1 ? { stack: e.stackSize } : {}) }));
+          const slotNames = (mask: number): string => Object.entries(EquipMask).filter(([, v]) => typeof v === 'number' && v && (v & (v - 1)) === 0 && (mask & v)).map(([k]) => k).join('+');
+          // ACE ItemType bits (the automation's planners tell weapons, missile launchers and casters apart by them).
+          const typeBits = (id: number): number | undefined => playerState.inventory.getItem(id)?.itemType ?? serverObjectManager?.getObject(id)?.itemType;
+          // AmmoType from the public description (launchers and ammunition; the macro matches them by it).
+          const ammoOf = (id: number): number | undefined => (playerState.inventory.getItem(id) as { ammoType?: number } | undefined)?.ammoType || serverObjectManager?.getObject(id)?.ammoType || undefined;
+          const worn = playerState.equipment.getAll().map((e) => ({ guid: e.id >>> 0, name: e.name, where: 'equipped', slot: slotNames(e.slot) || String(e.slot), ...(e.stackSize > 1 ? { stack: e.stackSize } : {}), ...(typeBits(e.id >>> 0) ? { itemType: typeBits(e.id >>> 0) } : {}), ...(ammoOf(e.id >>> 0) ? { ammoType: ammoOf(e.id >>> 0) } : {}) }));
           const wornIds = new Set(worn.map((w) => w.guid));
           const held = playerState.inventory.getAll().filter((i) => !wornIds.has(i.id >>> 0)).map((i) => ({
-            guid: i.id >>> 0, name: i.name, where: packName(i.containerId), ...(i.stackSize > 1 ? { stack: i.stackSize } : {}), value: i.value, burden: i.burden,
-            ...(serverObjectManager?.getObject(i.id >>> 0)?.itemType ? { type: itemTypeLabel(serverObjectManager.getObject(i.id >>> 0)!.itemType!) } : {}),
+            // A container or a RequiresPackSlot item (a pack, a focus) at the top level sits in the side pack slots, not the main pack.
+            guid: i.id >>> 0, name: i.name, where: (!i.containerId || i.containerId === aceCharGuid) && heldIsContainer(i) ? 'pack slots' : packName(i.containerId), ...(i.stackSize > 1 ? { stack: i.stackSize } : {}), value: i.value, burden: i.burden,
+            ...((i.itemType ?? serverObjectManager?.getObject(i.id >>> 0)?.itemType) ? { type: itemTypeLabel((i.itemType ?? serverObjectManager?.getObject(i.id >>> 0)?.itemType)!), itemType: (i.itemType ?? serverObjectManager?.getObject(i.id >>> 0)?.itemType)! } : {}),
+            // Where it could be worn or wielded (its ValidLocations), so an upgrade in the pack is visible.
+            ...(i.validLocations ? { fits: slotNames(i.validLocations) } : {}),
+            ...(ammoOf(i.id >>> 0) ? { ammoType: ammoOf(i.id >>> 0) } : {}),
+            ...(i.weenieClassId ? { wcid: i.weenieClassId } : {}),
+            ...(serverObjectManager?.getObject(i.id >>> 0)?.uiEffects ? { uiEffects: serverObjectManager.getObject(i.id >>> 0)!.uiEffects } : {}),
           }));
           return [...worn, ...held];
         },
@@ -15609,6 +15658,10 @@ async function main() {
           // SpellFlags.Beneficial (0x4) with a duration: an enchantment that helps (ACE SpellFlags.cs).
           ...(((spellTable?.spells.get(s.id)?.bitfield ?? 0) & 0x4) && (spellTable?.spells.get(s.id)?.duration ?? 0) !== 0 ? { buff: true } : {}),
           ...(spellTable?.spells.get(s.id) ? { category: spellTable.spells.get(s.id)!.category, power: spellTable.spells.get(s.id)!.power, duration: spellTable.spells.get(s.id)!.duration ?? 0 } : {}),
+          // A missile spell (bolts, streaks, arcs, life and enchantment projectiles): walls stop it.
+          ...(isProjectileSpellType(spellTable?.spells.get(s.id)?.metaSpellType ?? 0) ? { projectile: true } : {}),
+          // How far it reaches for you: the spell examine's Range line (DetermineSpellRange), the server's check too.
+          ...((): { range?: number } => { const b = spellTable?.spells.get(s.id); const r = b ? spellRangeMeters(b, (id) => inqSkillLevel(playerState.skills, id)) : 0; return r > 0 ? { range: Math.round(r * 10) / 10 } : {}; })(),
         })),
         characterSheet: () => gameUI.agentCharacterSheet(),
         allegiance: () => gameUI.agentAllegiance(),
@@ -15654,7 +15707,28 @@ async function main() {
         skill: (id) => gameUI.agentSkill(id),
         skillList: () => gameUI.agentSkills(),
         spellTableData: () => spellTable ?? null,
-        spellComponents: (id) => (spellTable?.spells.get(id)?.formula ?? []).flatMap((c) => { const n = spellComponentTable?.components.get(c)?.name; return n ? [n] : []; }),
+        // The era's recipe table, from that era's world data: end of retail's ACE world, Dark Majesty's ClassicACE
+        // world (the classic eras), 1999's AC1999 world (tools/build-craft-tables.ts). Split into its own chunk.
+        craftTable: async () => {
+          const k = activeEra.login.protocol === 'ac1999' ? 'ac1999' : activeEra.id === EOR_ERA_ID ? 'eol' : 'dm';
+          const mod = k === 'ac1999' ? await import('./agent/macro/crafts/ac1999.ts') : k === 'eol' ? await import('./agent/macro/crafts/eol.ts') : await import('./agent/macro/crafts/dm.ts');
+          return JSON.parse(mod.default) as Array<[string, string, string, number, number, number, number]>;
+        },
+        // The era's monster table (Auto's weak element, the streak finisher's max health), the same per-era
+        // choice from that era's world data (tools/build-monster-tables.ts). Split into its own chunk.
+        monsterTable: async () => {
+          const k = activeEra.login.protocol === 'ac1999' ? 'ac1999' : activeEra.id === EOR_ERA_ID ? 'eol' : 'dm';
+          const mod = k === 'ac1999' ? await import('./agent/macro/monsters/ac1999.ts') : k === 'eol' ? await import('./agent/macro/monsters/eol.ts') : await import('./agent/macro/monsters/dm.ts');
+          return JSON.parse(mod.default) as Array<[string, string, number]>;
+        },
+        // The formula the server charges (ACE SpellFormula.GetPlayerFormula / GetCurrentFormula): personalized for
+        // the account, or scarabs and tapers with the school's foci or Infused augmentation — what the cast
+        // pre-check walks (SpellComponentCheck). The macro counts the pack against it (VTank BuffCastability).
+        spellComponents: (id) => {
+          const s = spellTable?.spells.get(id);
+          if (!s) return [];
+          return appropriateSpellFormula({ ...appropriateFormulaInputs(s), school: s.school }).flatMap((c) => { const n = c ? spellComponentTable?.components.get(c)?.name : undefined; return n ? [n] : []; });
+        },
         carriedPalettes: (guid) => inventoryItem(guid)?.visualDesc?.subPalettes.map((p) => ({ id: p.paletteId >>> 0, offset: p.offset, length: p.length })) ?? null,
         paletteColor: (paletteId, index) => {
           const colors = appearanceManager.loadPaletteColors(paletteId);
@@ -15674,6 +15748,9 @@ async function main() {
         useWithTarget: (src, tgt) => { if (!sendGameAction) return false; sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(src, tgt)); return true; },
         setCombatMode: (mode) => sendChangeCombatMode({ peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode]),
         attack: (guid, power, height) => agentHostAttack.attack(guid, power, height),
+        attackHeight: () => gameUI.getCombatAttackHeight(),
+        attackPower: () => gameUI.getCombatPowerLevel(),
+        setAttackHeight: (h) => gameUI.setCombatAttackHeight(h),
         attackPending: () => agentHostAttack.pending(),
         cancelAttack: () => { sendGameAction?.(GameActionType.CancelAttack, new Uint8Array(0)); },
         cast: (spellId, target) => {
@@ -15699,7 +15776,12 @@ async function main() {
         },
         give: (target, item, amount) => { if (!sendGameAction) return false; sendGameAction(GameActionType.GiveObjectRequest, buildGiveObjectRequestPayload(target, item, amount)); return true; },
         wield: (guid) => { const it = playerState.inventory.getItem(guid); return it ? attemptAutoWield(it) : false; },
-        appraise: (guid) => { examined.delete(guid); sendIdentifyAction?.(guid); },
+        appraise: (guid, quiet) => {
+          examined.delete(guid);
+          if (quiet) quietAppraisals.add(guid >>> 0);
+          // Quiet: sent as a re-appraise, so no busy count is held for a window that won't open.
+          sendIdentifyAction?.(guid, !!quiet);
+        },
         appraisal: (guid) => examined.get(guid) ?? null,
         appraisalData: (guid) => agentAppraisals.get(guid >>> 0) ?? null,
         raise: (stat, upTo) => gameUI.agentRaise(stat, upTo),
@@ -15748,7 +15830,8 @@ async function main() {
           const lb = (fromCell & 0xffff0000) >>> 0;
           let g = agentCellGraphs.get(lb);
           // A graph read while a streamed file was still in flight may lack doors: kept only when complete.
-          if (!g) { g = loadCellGraph(cellDb, worldPortalDb, lb); if (g.complete !== false) agentCellGraphs.set(lb, g); }
+          // The region's LandHeightTable: the terrain under each outside doorway (which doors the landscape walks up to).
+          if (!g) { g = loadCellGraph(cellDb, worldPortalDb, lb, { landHeightTable }); if (g.complete !== false) agentCellGraphs.set(lb, g); }
           return findRouteViaOutside(g, fromCell, from, toCell, to, opts);
         },
         // AGENT navigation — the player's body walked from `from` toward `to` by the same substep
@@ -15834,7 +15917,16 @@ async function main() {
       relaySurface.status = () => ({ ...agentApi.status(), control: claudeControl.paused ? 'paused' : claudeControl.control });
       const addSystemMessage = gameUI.addSystemMessage.bind(gameUI);
       // Lines raised before the chat window exists are queued and re-sent through addSystemMessage: count them once, on replay.
-      gameUI.addSystemMessage = (text, color, type, targetWindowId) => { if (gameUI['chatMessages']) agentApi.pushChat(text, type); addSystemMessage(text, color, type, targetWindowId); };
+      gameUI.addSystemMessage = (text, color, type, targetWindowId) => {
+        if (gameUI['chatMessages']) {
+          agentApi.pushChat(text, type);
+          // The agent daemon keeps every line in <profile>.chat.log (tools/ac-agent/daemon.ts): what was said and shown.
+          console.log(`[AC:Chat] ${text.replace(/\s+$/, '')}`);
+        }
+        addSystemMessage(text, color, type, targetWindowId);
+      };
+      agentAttackDoneTap = () => agentApi.pushAttackDone();
+      agentUseDoneTap = (code) => agentApi.pushUseDone(code, Object.entries(WeenieError).find(([, v]) => v === code)?.[0] ?? `0x${code.toString(16)}`, weenieErrorText(code));
       // The agent's steering tick rides the frame step (the rAF frame, or the background beat when the
       // browser stops frames), not a page timer that a covered window throttles to once a second.
       agentFrameTick = () => agentApi.tick();
@@ -15846,7 +15938,12 @@ async function main() {
         // A rule's /vt … Chat Command runs as if typed (VirindiTank's own commands).
         agentApi.routine.onVtCommand = (line) => gameUI.automationCommand(line);
         // A meta's Create View / Destroy View (VirindiTank's meta views).
-        agentApi.routine.views = { open: (n, v, c) => gameUI.openMetaView(n, v, c as never), close: (n) => gameUI.closeMetaView(n), closeAll: () => gameUI.closeAllMetaViews() };
+        agentApi.routine.views = {
+          open: (n, v, c) => gameUI.openMetaView(n, v, c as never), close: (n) => gameUI.closeMetaView(n), closeAll: () => gameUI.closeAllMetaViews(),
+          hasControl: (n, c) => gameUI.metaViewHasControl(n, c), setLabel: (n, c, t) => gameUI.setMetaViewLabel(n, c, t),
+        };
+        // VirindiTank's M. Charges When Off: with the macro off, worn items keep their mana by the window's selected profile.
+        agentApi.routine.standby = () => gameUI.automationStandbyProfile();
         gameUI.setAutomationSource({
           load: () => routineSync.load(),
           save: (doc) => routineSync.save(doc),
@@ -15866,8 +15963,11 @@ async function main() {
           jump: (o) => { if (o.heading !== undefined) agentApi.turn(o.heading); return agentApi.jump({ ...(o.holdMs !== undefined ? { holdMs: o.holdMs } : {}), ...(o.walk ? { walk: true } : {}) }); },
           fakeDeath: () => agentApi.routine.fakeDeath(),
           reverseRoute: () => agentApi.routine.reverseRoute(),
-          setWaypoint: (i) => agentApi.routine.setWaypoint(i),
+          setNearestWaypoint: () => agentApi.routine.setNearestWaypoint(),
           cancelForceBuff: () => agentApi.routine.cancelForceBuff(),
+          // The era's own tables decide which controls exist (no Summoning / Void Magic in Dark Majesty or AC1999).
+          hasSkill: (name) => (playerSkillTable ? [...playerSkillTable.skills.values()].some((s) => s.name.toLowerCase() === name.toLowerCase()) : undefined),
+          hasSpell: (id) => (spellTable ? spellTable.spells.has(id) : undefined),
           update: (p) => agentApi.routine.update(p),
           selection: () => {
             const g = agentApi.selectedGuid();
@@ -15878,6 +15978,7 @@ async function main() {
             return o ? { name: o.name, kind: o.kind } : null;
           },
           resetStats: () => agentApi.routine.resetStats(),
+          spellTable: () => agentApi.spellTableData(),
         step: () => agentApi.routine.stepOnce(),
         history: () => agentApi.routine.history(),
         items: () => agentApi.inventory().filter((i) => i.where !== 'equipped').map((i) => ({ name: i.name, type: i.type, value: i.value, burden: i.burden })),
@@ -16041,6 +16142,10 @@ async function main() {
             const token = characterCreateErrorToken(response.responseCode) ?? 'ID_Character_Err_NameDBDown';
             const errorMsg = getStringFromTable(0x23000002, acStringHash(token)) ?? token;
             console.error(`[AC] ACE: Character creation failed (code ${response.responseCode}): ${errorMsg}`);
+            // Corrupt (5) from a server whose data differs from the set we loaded
+            // (Snowreap: Classic Dereth 1.0 vs our 1.1) looks like any other failure:
+            // name the data set so a player's console says which.
+            console.error(`[AC] ACE: chargen data: era ${activeEra.id}, ${gameUI.chargenTotalNumSkills()} skills sent`);
             gameUI.hideMessageDialog();
             gameUI.showMessageDialog(errorMsg);
           }
@@ -16911,7 +17016,10 @@ async function main() {
 
   document.addEventListener('keydown', (e) => {
     if (!gameStarted) return;
-    if (gameUI.ui.inputFocused) return;
+    // Any text field keeps its keys (a DAT edit field — friend / fellowship
+    // name, journal, book — sets no inputFocused flag; "i" and "s" typed there
+    // opened panels and never reached the field).
+    if (gameUI.ui.inputFocused || isKeyboardField(document.activeElement)) return;
 
     // CORE.17.k.b.b.a.g.f — the registered input maps answer first (the
     // retail CInputManager walks its map list before any UI element sees the

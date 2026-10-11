@@ -12,7 +12,7 @@
  * portal reports the end-of-retail iteration (2072) with different contents,
  * so each own DAT also names a directory entry whose size differs.
  */
-import { EOR_LOGIN_PROFILE, type LoginProfile } from '@ac/network';
+import { EOR_LOGIN_PROFILE, type LoginProfile, type String16Wire } from '@ac/network';
 
 /** The end-of-retail DAT roles: every era loads each one (its own file or end of retail's). */
 export type EorDatRole = 'portal' | 'cell' | 'local' | 'highres';
@@ -83,6 +83,17 @@ export interface EraProfile {
    * Windows-1252 (GDLE-family servers keep the bytes as retail sent them).
    */
   stringWire?: 'ace';
+  /**
+   * The era whose hosted DATs (and DAT cache entries) this era loads, when
+   * its files are another era's plus `dropSkills`. Absent = its own id.
+   */
+  datsOf?: string;
+  /**
+   * SkillTable (0x0E000004) entries the era's DATs lack although `datsOf`'s
+   * files have them; served without them (EraBoot.eraPortalOverlay), so
+   * chargen never trains a skill the server's table doesn't know.
+   */
+  dropSkills?: readonly number[];
 }
 
 export const EOR_ERA_ID = 'eor';
@@ -138,7 +149,7 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     heritages: DARK_MAJESTY_HERITAGES,
   },
   /**
-   * Classic Dereth 1.0 (Seedsow, Snowreap; GDL-Classic): replaces only the
+   * Classic Dereth 1.1 (Seedsow, GDL-Classic; 1.0 servers use the profile below): replaces only the
    * portal and cell. The portal keeps the end-of-retail iteration 2072 —
    * identified by its SkillTable (0x0E000004; end of retail 5876).
    * Seedsow takes only auth type 1 ("account:password") and ignores the
@@ -160,6 +171,31 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     heritages: DARK_MAJESTY_HERITAGES,
   },
   /**
+   * Classic Dereth 1.0 (Snowreap): the 1.1 files minus one thing. The two
+   * sets differ only in the SkillTable, and 1.0's is 1.1's without its last
+   * entry, Salvaging (40; trained, cost 0, so chargen trains it for every
+   * character). A GDL server on 1.0 has no skill 40 and refuses a create
+   * that trains it as Corrupt (CClient::CreateCharacter, "trained or
+   * specialized skill the table lacks": reference/classic/ClassicDereth/
+   * Source/Client.cpp ~500), shown as "The server cannot create your new
+   * character at this time" (Jake on Snowreap, 2026-10-11). Both report
+   * portal 2072 / cell 4, so DDD can't tell them apart: the bridge's compat
+   * overlay names this era per server.
+   */
+  'classic-dereth-1-0': {
+    id: 'classic-dereth-1-0',
+    name: 'Classic Dereth 1.0',
+    login: { clientVersion: '1802', authStyle: 'account-colon-password' },
+    own: {
+      portal: { iterations: 2072, entry: { id: 0x0e000004, sizes: [4928, 5064] } },
+      cell: { iterations: 4, entry: null },
+    },
+    source: 'the "Classic Dereth - Portal and Cell" 1.0 download (github.com/bDekaru/ClassicDereth)',
+    heritages: DARK_MAJESTY_HERITAGES,
+    datsOf: 'classic-dereth',
+    dropSkills: Object.freeze([40]),
+  },
+  /**
    * AC1999 (November 1999 retail; docs/ac1999-support-scope.md): the 1999
    * protocol (network era1999/), and the 1999 portal and cell for the world —
    * pre-ToD containers whose header iterations are 102 (portal) and 67 (cell)
@@ -179,6 +215,19 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     source: 'the November 1999 retail CD (portal.dat and cell.dat)',
   },
 });
+
+/**
+ * How strings go to the server of a world the launcher picked (@ac/network
+ * setString16Wire). A classic or 1999 era names its server family, so its
+ * profile decides. End of retail is played on ACE (UTF-8, 'ace') and on GDL /
+ * GDLE (Reefcull, Harvestbud, FunkyTown), which keep the bytes as retail sent
+ * them in Windows-1252; the directory's emulator tells them apart. A world
+ * with no emulator (a custom URL, local) keeps end of retail's ACE default.
+ */
+export function string16WireFor(era: EraProfile, emu: string | null | undefined): String16Wire {
+  if (era.id !== EOR_ERA_ID) return era.stringWire ?? 'windows-1252';
+  return emu === 'GDL' || emu === 'GDLE' ? 'windows-1252' : era.stringWire ?? 'windows-1252';
+}
 
 export function eraProfile(id: string | null | undefined): EraProfile | null {
   if (!id) return ERA_PROFILES[EOR_ERA_ID];

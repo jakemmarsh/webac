@@ -40,6 +40,11 @@ export enum SpellType {
   EnchantmentProjectile = 15,
 }
 
+/** A spell that flies to its target as a missile (ACE SpellProjectile: Projectile, LifeProjectile, EnchantmentProjectile). */
+export function isProjectileSpellType(t: number): boolean {
+  return t === SpellType.Projectile || t === SpellType.LifeProjectile || t === SpellType.EnchantmentProjectile;
+}
+
 export interface SpellBase {
   name: string;
   desc: string;

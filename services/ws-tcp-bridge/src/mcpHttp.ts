@@ -44,8 +44,30 @@ export function scopeRefusal(scope: 'any' | string[], inWorld: string | null, me
   return null;
 }
 
-/** Who a bearer token plays: its account key and, for a paired grant, its character scope. */
-export type McpAuth = (token: string) => { key: string; scope: 'any' | string[]; createdAt?: number } | null;
+/** Who a bearer token plays: its account keys (several when multiboxing) and, for a paired grant, its character scope. */
+export type McpAuth = (token: string) => { keys: string[]; scope: 'any' | string[]; createdAt?: number } | null;
+
+const accountOf = (key: string): string => key.slice(key.lastIndexOf(':') + 1);
+
+/**
+ * Which linked tab a call goes to. One account: that one. Several (multiboxing): the one `name`
+ * names (its account, or the character in the world there); with no name, the only tab with
+ * Claude on, else a refusal that lists them.
+ */
+export function pickTab(keys: string[], relay: Pick<AgentRelay, 'entry'>, name?: string): { key: string } | { error: string } {
+  const list = keys.map((k) => { const c = relay.entry(k)?.character; return c ? `${accountOf(k)} (${c})` : accountOf(k); }).join(', ');
+  // A name always has to match: an account unpaired since must not fall through to another tab.
+  if (name && name.trim()) {
+    const n = name.trim().toLowerCase();
+    const k = keys.find((x) => accountOf(x) === n) ?? keys.find((x) => relay.entry(x)?.character?.toLowerCase() === n);
+    return k ? { key: k } : { error: `no tab on this connection is account or character "${name.trim()}" (it plays ${list}; an account unpaired in the game leaves the connection)` };
+  }
+  if (keys.length === 1) return { key: keys[0] };
+  const on = keys.filter((k) => relay.entry(k)?.relayOn);
+  if (on.length === 1) return { key: on[0] };
+  if (!on.length) return { key: keys[0] };
+  return { error: `this connection plays several tabs: ${list}. Pass account= (the account, or the character in the world there).` };
+}
 
 export async function handleMcp(req: IncomingMessage, res: ServerResponse, auth0: McpAuth, relay: AgentRelay, resourceMetadata: string | null = null): Promise<void> {
   const send = (status: number, body?: unknown, headers: Record<string, string> = {}) => {
@@ -55,22 +77,22 @@ export async function handleMcp(req: IncomingMessage, res: ServerResponse, auth0
   const auth = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? '');
   const who = auth ? auth0(auth[1]) : null;
   if (!who) { send(401, { error: 'unauthorized' }, { 'www-authenticate': resourceMetadata ? `Bearer resource_metadata="${resourceMetadata}"` : 'Bearer' }); return; }
-  const key = who.key;
   if (req.method !== 'POST') { send(405, { error: 'POST JSON-RPC to /mcp' }, { allow: 'POST' }); return; }
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const c of req) { size += (c as Buffer).length; if (size > MAX_BODY) { send(413, { error: 'too large' }); return; } chunks.push(c as Buffer); }
   let body: unknown;
   try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { send(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }); return; }
-  const caller: ToolCaller = {
+  const view = (k: string) => { const e = relay.entry(k); return { account: accountOf(k), tab: (!e ? 'none' : e.relayOn ? 'on' : 'off') as 'none' | 'on' | 'off', character: e?.character ?? null, screen: e?.screen ?? null }; };
+  const callerFor = (picked: { key: string } | { error: string }): ToolCaller => ({
     notice: null,
     // Below claude.ai's per-call tool timeout (undocumented; docs/hosted-agent-connector.md §3).
     maxWaitMs: HOSTED_MAX_WAIT_MS,
-    connection: () => {
-      const e = relay.entry(key);
-      return { account: key.slice(key.lastIndexOf(':') + 1), characters: who.scope, tab: !e ? 'none' : e.relayOn ? 'on' : 'off', character: e?.character ?? null, screen: e?.screen ?? null };
-    },
+    connection: () => ({ ...view('key' in picked ? picked.key : who.keys[0]), characters: who.scope, ...(who.keys.length > 1 ? { linked: who.keys.map(view) } : {}) }),
+    forTab: (name: string) => callerFor(pickTab(who.keys, relay, name)),
     call: <T>(method: string, args?: unknown[], timeoutMs?: number) => {
+      if (!('key' in picked)) return Promise.reject(new Error(picked.error));
+      const key = picked.key;
       const e = relay.entry(key);
       // The tab unpaired after this grant was made (it remembers across bridge restarts).
       if (who.createdAt !== undefined && e && who.createdAt < e.revokedBefore) return Promise.reject(new Error('this connection was disconnected in the game (/automation unpair); connect Claude again'));
@@ -79,7 +101,8 @@ export async function handleMcp(req: IncomingMessage, res: ServerResponse, auth0
       // Every call answers within HOSTED_CALL_MS (under Claude's per-call tool timeout); a longer walk or use keeps going in the game (relayTab.ts).
       return relay.call(key, method, args ?? [], Math.min(timeoutMs ?? 30_000, HOSTED_CALL_MS)) as Promise<T>;
     },
-  };
+  });
+  const caller = callerFor(pickTab(who.keys, relay));
   const one = (r: unknown) => TOOL_CALLER.run(caller, () => handle(r as RpcRequest, { hosted: true }));
   if (Array.isArray(body)) {
     const out = (await Promise.all(body.map(one))).filter((x) => x !== null);

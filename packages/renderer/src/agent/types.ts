@@ -34,6 +34,13 @@ export interface AgentObject {
   dying?: boolean;
   /** Set on a remembered place that is out of view: seconds since it was last seen. */
   seenAgo?: number;
+  /** Monsters only: how many of its attacks on you (hits, misses, evades) the last 10 s of combat lines named. */
+  attackingYou?: number;
+  /**
+   * The target only: a wall, the ground or a solid object stands this far (m) along the straight line to it, so a
+   * bolt or arrow would hit that instead (the client's own missile collision; creatures are not counted).
+   */
+  lineOfFireBlockedAt?: number;
 }
 
 export interface AgentVital { cur: number; max: number }
@@ -78,7 +85,9 @@ export interface AgentEvent {
   t: number;
   type:
     | 'chat' | 'object-added' | 'object-removed' | 'death' | 'target-died' | 'target-lost' | 'task-done'
-    | 'vitals-low' | 'level-up' | 'portal' | 'screen' | 'dialog' | 'attacked';
+    | 'vitals-low' | 'level-up' | 'portal' | 'screen' | 'dialog' | 'attacked'
+    /** The server failed a use (UseDone with a WeenieError): its name, for codes retail shows no text for. */
+    | 'use-failed';
   text: string;
   guid?: number;
   /** Chat lines: the ChatMessageType the line came in as (Chat Message Capture's colour filter). */
@@ -180,6 +189,16 @@ export interface AgentItem {
   /** Equipped slot names when worn/wielded. */
   slot?: string;
   type?: string;
+  /** UiEffects (PropertyInt 18) from its public description, e.g. a summoning essence's element glow. */
+  uiEffects?: number;
+  /** ACE ItemType bits from its public description (MeleeWeapon 0x1, MissileWeapon 0x100, Caster 0x8000…). */
+  itemType?: number;
+  /** AmmoType (arrow 1, quarrel 2, atlatl dart 4) from its public description: launchers and ammunition. */
+  ammoType?: number;
+  /** Not worn: the slots it could be worn or wielded in (its ValidLocations as EquipMask names). */
+  fits?: string;
+  /** Its weenie class id. */
+  wcid?: number;
 }
 
 export interface AgentSpell {
@@ -195,6 +214,10 @@ export interface AgentSpell {
   category?: number;
   power?: number;
   duration?: number;
+  /** It flies to its target as a missile (the spell table's MetaSpellType Projectile / LifeProjectile / EnchantmentProjectile): walls stop it. */
+  projectile?: boolean;
+  /** How far it reaches for you, metres (the spell examine's Range: its range grows with your ranks in the school's skill). */
+  range?: number;
 }
 
 /** Result of every action: ok + a human line the LLM can read. */

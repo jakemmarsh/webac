@@ -146,11 +146,32 @@ export function snapshotDir(sha: string): string {
   return join(STATE_DIR, `tree-${sha.slice(0, 12)}`);
 }
 
+/**
+ * Where a snapshot links `name` (node_modules, dat) from: the checkout
+ * itself, else the main checkout behind it. A fresh `git worktree add`
+ * has neither, and a snapshot without node_modules can't start Vite.
+ */
+export function sharedDirFor(repo: string, name: string): string | null {
+  if (existsSync(join(repo, name))) return join(repo, name);
+  const r = spawnSync('git', ['-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' });
+  const main = r.status === 0 ? dirname(r.stdout.trim()) : '';
+  return main && existsSync(join(main, name)) ? join(main, name) : null;
+}
+
 function ensureSnapshot(say: (s: string) => void): string {
   const sha = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   if (!sha) throw new Error('git rev-parse HEAD failed');
   const dir = snapshotDir(sha);
-  if (!existsSync(join(dir, 'package.json'))) {
+  const linkShared = (): void => {
+    for (const l of ['node_modules', 'dat']) {
+      const from = sharedDirFor(REPO, l);
+      if (from && !existsSync(join(dir, l))) symlinkSync(from, join(dir, l));
+    }
+  };
+  if (existsSync(join(dir, 'package.json'))) {
+    // A tree made from a checkout without its own node_modules (an older daemon) has none: repair it.
+    linkShared();
+  } else {
     say(`creating game snapshot of ${sha.slice(0, 12)} in ${dir}`);
     const git = (...a: string[]): void => {
       const r = spawnSync('git', a, { encoding: 'utf8' });
@@ -160,7 +181,7 @@ function ensureSnapshot(say: (s: string) => void): string {
     // CI's sparse pattern: no verification images (~50 MB instead of ~3.6 GB).
     git('-C', dir, 'sparse-checkout', 'set', '--no-cone', '/*', '!/verification/**/*.png', '!/verification/**/*.jpg', '!/verification/**/*.jpeg', '!/verification/**/*.html', '!/verification/**/*.webm', '!/verification/**/*.gif');
     git('-C', dir, 'checkout', '-q');
-    for (const l of ['node_modules', 'dat']) if (existsSync(join(REPO, l))) symlinkSync(join(REPO, l), join(dir, l));
+    linkShared();
   }
   return dir;
 }
@@ -271,7 +292,10 @@ async function main(): Promise<void> {
   // The server's answer to a character create it refused (the client shows the retail error dialog): stop and say why.
   let createRefused: string | null = null;
   page.on('console', (m) => { const r = /Character creation failed \(code \d+\): (.*)/.exec(m.text()); if (r) createRefused = r[1]; });
-  page.on('console', (m) => { if (/\[AC:Agent\]|\[AC\] Sent|WeenieError|UseDone|ServerSaveFailed|error/i.test(m.text())) appendFileSync(log, `[page] ${m.text().slice(0, 300)}\n`); });
+  page.on('console', (m) => { if (/\[AC:Agent\]|\[AC\] Sent|WeenieError|UseDone|ServerSaveFailed|error/i.test(m.text()) && !m.text().startsWith('[AC:Chat]')) appendFileSync(log, `[page] ${m.text().slice(0, 300)}\n`); });
+  // Every chat line and centre notice the player saw (theirs included), timestamped, beside the log: what was said.
+  const chatLog = log.replace(/\.log$/, '.chat.log');
+  page.on('console', (m) => { const t = m.text(); if (t.startsWith('[AC:Chat] ')) appendFileSync(chatLog, `${new Date().toISOString()} ${t.slice(10)}\n`); });
 
   let ready = false;
   let entering: Promise<void> | null = null;

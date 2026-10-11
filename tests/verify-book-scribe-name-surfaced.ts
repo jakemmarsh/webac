@@ -111,4 +111,66 @@ describe.skipIf(!hasDats)('gmBookUI on 0x21000019 (happy-dom + real LayoutRender
     rows[1].click();
     expect(sent).toEqual(['modify 0', 'addPage']);
   });
+
+  // 0x21000043:0x10000475 holds the listbox 0x10000476 (273x90) and its p114
+  // scrollbar 0x10000477 (16x90 at x=273, the HUD widget, p121 hideDisabled):
+  // a book of more than 5 pages scrolls its menu with the retail bar, never
+  // the browser's own.
+  it('the page menu scrolls with its DAT scrollbar 0x10000477, not a native one', () => {
+    ui.openBook(BOOK, 8, [page(7, 'A')], '', 0, '');
+    el(0x10000470).click();
+    const list = panel().querySelector('.ac-book-menu-list') as HTMLElement;
+    const bar = panel().querySelector('.ac-book-menu-scrollbar') as HTMLElement;
+    expect(list.children.length).toBe(8);
+    expect(list.style.width).toBe('273px');
+    expect(list.style.height).toBe('90px');
+    expect(bar.style.left).toBe('273px');
+    expect(bar.style.width).toBe('16px');
+    expect(list.style.getPropertyValue('scrollbar-width')).toBe('none');
+    // The popup opens upward out of the 18 px button: the button must not clip it.
+    expect(el(0x10000470).style.overflow).toBe('visible');
+    // happy-dom lays nothing out: 8 rows x 18 px in a 90 px view.
+    Object.defineProperty(bar, 'clientHeight', { value: 90, configurable: true });
+    Object.defineProperty(list, 'scrollHeight', { value: 144, configurable: true });
+    Object.defineProperty(list, 'clientHeight', { value: 90, configurable: true });
+    let top = 0;
+    Object.defineProperty(list, 'scrollTop', { get: () => top, set: (v: number) => { top = Math.max(0, v); }, configurable: true });
+    list.dispatchEvent(new Event('scroll'));
+    expect(bar.style.display).not.toBe('none');
+    (bar.querySelector('[data-dat-scroll-btn="down"]') as HTMLElement).click();
+    expect(top).toBe(18); // one row (UIElement_ListBox::InqScrollDelta)
+    // The bar's click does not close the menu.
+    expect(panel().querySelector('.ac-book-menu')).not.toBeNull();
+  });
+
+  // The page text 0x10000111 (262x240) names its p114 bar 0x1000048a (284,26)
+  // 16x240: a long page scrolls under it, never under the browser's own bar.
+  it('a long read-only page scrolls under its DAT bar 0x1000048a', () => {
+    const long = Array.from({ length: 30 }, (_, i) => `Line ${i + 1}`).join('\n');
+    ui.openBook(BOOK, 2, [page(7, 'A')], '', 0, '');
+    ui.bookPageDataResponse(BOOK, 0, page(7, 'A', long, true));
+    const host = el(0x10000111);
+    expect(host.style.overflowY).toBe('auto');
+    expect(host.style.getPropertyValue('scrollbar-width')).toBe('none');
+    expect(el(0x1000048a).querySelector('[data-dat-scroll-btn="down"]')).not.toBeNull();
+  });
+
+  it('our own (editable) page binds the same bar to the editor', () => {
+    ui.openBook(BOOK, 3, [page(ME, 'Me', 'draft', true)], '', 0, '');
+    expect(el(0x10000111).querySelector('textarea.ac-book-editor')).not.toBeNull();
+    expect(el(0x1000048a).querySelector('[data-dat-scroll-btn="down"]')).not.toBeNull();
+  });
+
+  it('a menu that fits (5 pages or fewer) hides the bar (p121)', () => {
+    ui.openBook(BOOK, 3, [page(7, 'A')], '', 0, '');
+    el(0x10000470).click();
+    const list = panel().querySelector('.ac-book-menu-list') as HTMLElement;
+    const bar = panel().querySelector('.ac-book-menu-scrollbar') as HTMLElement;
+    expect(list.style.height).toBe('54px');
+    Object.defineProperty(bar, 'clientHeight', { value: 54, configurable: true });
+    Object.defineProperty(list, 'scrollHeight', { value: 54, configurable: true });
+    Object.defineProperty(list, 'clientHeight', { value: 54, configurable: true });
+    list.dispatchEvent(new Event('scroll'));
+    expect(bar.style.display).toBe('none');
+  });
 });

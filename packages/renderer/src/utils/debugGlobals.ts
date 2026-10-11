@@ -1,15 +1,15 @@
 /**
  * RELEASE.remove-test-defaults — the `window.__*` debug hooks (`__ac`,
  * `__playerState`, `__aceConnection`, `__castSpell`, …) exist only where the
- * tooling that reads them runs: the Vite dev server and pages with `?debug`
- * (the same gate as acDebug, utils/debugTools.ts). A production page without
- * `?debug` exposes none of them.
+ * tooling that reads them runs: the Vite dev server, and `?debug` on a
+ * URL-overrides build (the same gate as acDebug, utils/debugTools.ts). A
+ * deployed page exposes none of them, `?debug` or not.
  *
  * `exposeDebugGlobal(name, value)` sets one; `debugBag()` is the `window.__ac`
  * scratch object (a detached object when the gate is off, so callers can
  * write telemetry fields unconditionally).
  */
-import { debugToolsEnabled } from './debugTools.js';
+import { pageDebugToolsEnabled } from './debugTools.js';
 
 type GlobalTarget = Record<string, unknown>;
 
@@ -19,7 +19,7 @@ function defaultTarget(): GlobalTarget | null {
 
 function defaultEnabled(): boolean {
   const search = typeof location !== 'undefined' ? location.search : '';
-  return debugToolsEnabled(import.meta.env?.DEV === true, search);
+  return pageDebugToolsEnabled(search);
 }
 
 let enabledOverride: boolean | null = null;

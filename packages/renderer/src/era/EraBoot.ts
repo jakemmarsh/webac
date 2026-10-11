@@ -27,6 +27,7 @@
  */
 import { assetUrl, datSetForEra, type RuntimeConfig } from '../config/RuntimeConfig.js';
 import type { DatBlobStore } from '../dat/DatCache.js';
+import { skillTableWithout, type DatOverlay } from '@ac/dat-parser';
 import { EOR_DAT_ROLES, EOR_ERA_ID, ERA_PROFILES, datFileName, eraProfile, ownRoles, type DatRole, type EorDatRole, type EraProfile } from './EraProfiles.js';
 
 export const ERA_SWITCH_KEY = 'acjs.eraSwitch.v1';
@@ -112,6 +113,37 @@ export interface EraDatProbes {
   headOk(url: string): Promise<boolean>;
 }
 
+/** The key of the hosted set (and DAT cache namespace) `era` loads: another era's when it shares its files (EraProfile.datsOf). */
+export function eraDatsKey(era: EraProfile): string {
+  return era.datsOf ?? era.id;
+}
+
+/**
+ * What the era serves over its DATs' own bytes, or null for none: the
+ * SkillTable without the entries its server's DATs lack (EraProfile.
+ * dropSkills; Classic Dereth 1.0 served from the 1.1 set). Set on the world
+ * portal before any table is read.
+ */
+export function eraPortalOverlay(era: EraProfile): DatOverlay | null {
+  if (!era.dropSkills?.length) return null;
+  const drop = new Set(era.dropSkills);
+  let cached: ArrayBuffer | null = null;
+  return {
+    get(id, base) {
+      if (id !== SKILL_TABLE_ID) return undefined;
+      if (cached) return cached;
+      const raw = base(id);
+      if (!raw) return raw;
+      cached = skillTableWithout(raw, drop);
+      return cached;
+    },
+    has: (id, baseHas) => baseHas(id),
+    extraIds: () => [],
+  };
+}
+
+const SKILL_TABLE_ID = 0x0e000004;
+
 /** Candidate hosted URLs for an era's own `role` file, in preference order. */
 export function hostedDatUrls(cfg: RuntimeConfig, era: string, role: DatRole): string[] {
   const file = datFileName(eraProfile(era), role);
@@ -139,14 +171,14 @@ export async function planEraDats(
   const streamedWorld = era.own.worldPortal && eraStreamPlan(era, cfg).world;
   for (const role of ownRoles(era)) {
     if (streamedWorld && (role === 'worldPortal' || role === 'cell')) {
-      sources[role] = { kind: 'url', url: hostedDatUrls(cfg, era.id, role)[0], cacheNamespace: era.id };
+      sources[role] = { kind: 'url', url: hostedDatUrls(cfg, eraDatsKey(era), role)[0], cacheNamespace: eraDatsKey(era) };
       continue;
     }
     let found: string | null = null;
-    for (const url of hostedDatUrls(cfg, era.id, role)) {
+    for (const url of hostedDatUrls(cfg, eraDatsKey(era), role)) {
       if (await probes.headOk(url).catch(() => false)) { found = url; break; }
     }
-    if (found) sources[role] = { kind: 'url', url: found, cacheNamespace: era.id };
+    if (found) sources[role] = { kind: 'url', url: found, cacheNamespace: eraDatsKey(era) };
     else missing.push(role);
   }
   return missing.length ? { era, missing } : { era, sources };
@@ -175,9 +207,9 @@ export interface EraStreamPlan {
 
 export function eraStreamPlan(era: EraProfile, cfg: RuntimeConfig): EraStreamPlan {
   if (era.own.worldPortal) {
-    return { interface: cfg.datSet, world: datSetForEra(cfg, era.id, EOR_ERA_ID), separateWorld: true };
+    return { interface: cfg.datSet, world: datSetForEra(cfg, eraDatsKey(era), EOR_ERA_ID), separateWorld: true };
   }
-  const set = datSetForEra(cfg, era.id, EOR_ERA_ID);
+  const set = datSetForEra(cfg, eraDatsKey(era), EOR_ERA_ID);
   return { interface: set, world: set, separateWorld: false };
 }
 

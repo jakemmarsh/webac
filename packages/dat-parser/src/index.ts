@@ -42,7 +42,7 @@ export { SpellTable } from './file-types/SpellTable.js';
 export type { SpellBase, SpellSet } from './file-types/SpellTable.js';
 export { SpellComponentTable } from './file-types/SpellComponentTable.js';
 export type { SpellComponentBase } from './file-types/SpellComponentTable.js';
-export { SkillTable } from './file-types/SkillTable.js';
+export { SkillTable, skillTableWithout } from './file-types/SkillTable.js';
 export type { SkillBase, SkillFormula } from './file-types/SkillTable.js';
 export { XpTable } from './file-types/XpTable.js';
 export { SecondaryAttributeTable } from './file-types/SecondaryAttributeTable.js';

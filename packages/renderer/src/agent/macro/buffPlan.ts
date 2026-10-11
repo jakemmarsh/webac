@@ -233,6 +233,14 @@ export interface BuffPlanInput {
   level?: number;
   /** The wielded weapon's kind, for the weapon auras; none or unknown: no auras. */
   wielded?: 'melee' | 'missile' | 'caster' | null;
+  /**
+   * Seconds left on a buff that goes on items (a bane or impenetrability on your armor, a weapon spell
+   * cast on the weapon), from the macro's own timers (itemBuffLedger.ts: VTank's BuffedItems), or null
+   * when none is known. The effects list shows only your own enchantments, so without this such a
+   * buff always looks missing and is cast again and again. Not called for a weapon aura cast on
+   * yourself (end of retail's Aura spells sit on you and show in `active`).
+   */
+  itemRemaining?: (target: 'weapon' | 'armor', spell: PlanSpell) => number | null;
 }
 
 export interface PlannedBuff { spell: PlanSpell; target: 'self' | 'weapon' | 'shield' | 'armor'; why: string; remaining: number | null }
@@ -360,7 +368,12 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
     if (!best) continue;
     const t = f.target.kind;
     const target: PlannedBuff['target'] = t === 'bane' || t === 'armorValue' ? 'armor' : t === 'weapon' ? 'weapon' : 'self';
-    wanted.push({ spell: best, target, why, remaining: remainingFor(input.active, category, input.spells, best), order: KIND_ORDER.indexOf(t) });
+    let remaining = remainingFor(input.active, category, input.spells, best);
+    if (input.itemRemaining && (target === 'armor' || (target === 'weapon' && !best.self))) {
+      const onItem = input.itemRemaining(target, best);
+      if (onItem !== null && (remaining === null || onItem > remaining)) remaining = onItem;
+    }
+    wanted.push({ spell: best, target, why, remaining, order: KIND_ORDER.indexOf(t) });
   }
   wanted.sort((a, b) => a.order - b.order || a.spell.category - b.spell.category);
   const out: PlannedBuff[] = wanted.map(({ order: _o, ...b }) => b);

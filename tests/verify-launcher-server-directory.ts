@@ -99,7 +99,8 @@ describe('compat overlay', () => {
   it('undetectable classic servers name their era by id; GDL/GDLE are beta by emu; the rest ok', () => {
     // ERA.dm-support: the client loads the era's DATs and login for these.
     expect(compatFor('394C58D0-885D-466B-B17F-D7E0B96FE3E2', 'GDL')).toEqual({ compat: 'beta', note: 'Dark Majesty era', era: 'classic-dereth' });
-    expect(compatFor('eea962c0-cf9f-481e-9736-0eb058acc1d8', 'GDL').era).toBe('classic-dereth'); // Snowreap
+    // Snowreap runs Classic Dereth 1.0 data (no Salvaging): the 1.1 set minus that skill.
+    expect(compatFor('eea962c0-cf9f-481e-9736-0eb058acc1d8', 'GDL')).toEqual({ compat: 'beta', note: 'Dark Majesty era', era: 'classic-dereth-1-0' });
     // ClassicACE worlds keep a fallback era until live detection (eraDetect.ts) answers.
     expect(compatFor('4db379b0-587a-4775-9b7f-879e0f15ba4b', 'ACE')).toEqual({ compat: 'beta', note: 'Dark Majesty era', era: 'classicace-customdm' }); // Dekarutide
     expect(compatFor('3f1f41ec-c7fd-4ed9-b47d-25b0d94219c1', 'ACE').era).toBe('classicace-customdm'); // Unfamiliar Shores

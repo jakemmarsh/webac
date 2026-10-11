@@ -14,7 +14,6 @@ export const VT_DAMAGE = {
 } as const;
 /** The PetDmg column's "same as the player" (PAuto). */
 export const VT_PET_AUTO = 101;
-
 /** The Monsters tab's switch columns, in its order (F B G I Y V A R S WC FC Cp DC Cs). */
 export const VT_MONSTER_COLUMNS = ['F', 'B', 'G', 'I', 'Y', 'V', 'A', 'R', 'S', 'WC', 'FC', 'Cp', 'DC', 'Cs'] as const;
 export type VtMonsterColumn = (typeof VT_MONSTER_COLUMNS)[number];
@@ -110,6 +109,14 @@ export interface PlanItem {
   ints?: Record<number, number>;
   floats?: Record<number, number>;
   equipped?: boolean;
+  /** UiEffects (PropertyInt 18) from the object's public description (CreateObject weenie header), e.g. a summoning essence's element. */
+  uiEffects?: number;
+  /** The slots it can be worn or wielded in (its ValidLocations as EquipMask names joined by +, e.g. MissileAmmo). */
+  fits?: string;
+  /** Equipped: the slot names it is in. */
+  slot?: string;
+  /** AmmoType from the public description (launchers and ammunition). */
+  ammoType?: number;
 }
 
 export type Stance = 'peace' | 'melee' | 'missile' | 'magic';

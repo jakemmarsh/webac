@@ -183,6 +183,22 @@ describe('planBuffs: which spell of each family', () => {
     expect(at(5)).toBeUndefined();               // nothing castable: 1 + 5 > 5
   });
 
+  it('a bane on the armor is timed by the macro\'s item timers (itemRemaining), not your own effects; an Aura on you is not asked', () => {
+    const asked: Array<[string, string]> = [];
+    const itemRemaining = (target: 'weapon' | 'armor', spell: PlanSpell): number | null => {
+      asked.push([target, spell.name]);
+      return spell.name.startsWith('Etchbane') ? 1500 : null;
+    };
+    const input = baseInput({ itemRemaining, wielded: 'melee', settings: { RebuffTimeRemainingSeconds: 300 } });
+    const { wanted, due } = planBuffs(input);
+    expect(pick(wanted, 'Etchbane')!.remaining).toBe(1500);
+    expect(pick(due, 'Etchbane')).toBeUndefined();           // up (1500 s left) per the timers
+    expect(pick(due, 'Sparkbane')).toBeDefined();            // no timer: due
+    expect(asked.some(([, n]) => n.startsWith('Aura of Thirst Self'))).toBe(false); // a self Aura sits on you
+    // Without timers (before 2026-10-11) a bane always looked missing.
+    expect(pick(planBuffs(baseInput({ wielded: 'melee' })).due, 'Etchbane')).toBeDefined();
+  });
+
   it('never picks an excluded member and only uses spells you know', () => {
     const spells = knowAll().filter((s) => s.category !== 1 || s.id === ODD || s.id === STR[0]);
     const skills = baseInput().skills.map((s) => (s.id === 31 ? { ...s, buffed: 20 } : s));

@@ -85,6 +85,8 @@ describe('FAITHFUL.216 — server-authoritative gameplay (no client Math.random 
       { dir: 'packages/dat-parser/src/file-types/SoundTable.ts', reason: 'picking weighted sound variant — cosmetic' },
       { dir: 'packages/dat-parser/src/file-types/PhysicsScript.ts', reason: 'animation hook probability (chickens cluck random) — cosmetic' },
       { dir: 'packages/shared/src/routines/vtankExpr.ts', reason: "VirindiTank meta randint[] — a player's own automation choice (e.g. which emote), not a game rule" },
+      { dir: 'packages/renderer/src/agent/macro/combatPlan.ts', reason: "VirindiTank's Random damage type — the player's macro picking which element to cast, a player choice the server then resolves; not a game rule",
+        textPattern: /Random damage type|input\.random \?\? Math\.random/ },
     ];
     const uses = findRandomUses(resolve(REPO, 'packages'));
     const violations = uses.filter(u => !APPROVED_DIRS.some(d =>

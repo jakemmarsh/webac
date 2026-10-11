@@ -5,7 +5,9 @@
     "dockerfilePath": "deploy/web/Dockerfile",
     "watchPatterns": [
       "packages/**",
+      "services/**",
       "deploy/web/**",
+      "tools/lib/vite-head-from-stat.ts",
       "vite.config.ts",
       "package.json",
       "package-lock.json",

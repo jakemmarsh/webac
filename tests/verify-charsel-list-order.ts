@@ -90,5 +90,11 @@ describe('GameUI.showCharacterSelect — rows render in retail order', () => {
     // The default pick scans server order before the sort: 'Perf Tester'.
     expect(ui.selectScreen.selectedCharacter?.id).toBe('1');
     expect(ui.selectScreen.selectedIndex).toBe(1);
+    // The listbox 0x1000039d names no scrollbar: the rows' scroller never shows an OS bar.
+    const row = container.querySelector('.char-slot') as unknown as HTMLElement;
+    let scroller: HTMLElement | null = row.parentElement;
+    while (scroller && scroller.style.overflowY !== 'auto') scroller = scroller.parentElement;
+    expect(scroller).not.toBeNull();
+    expect(scroller!.style.getPropertyValue('scrollbar-width')).toBe('none');
   });
 });

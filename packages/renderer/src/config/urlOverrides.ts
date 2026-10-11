@@ -16,8 +16,9 @@
  *     `vite build && vite preview` for production-shaped probes). The
  *     deployed image never sets it.
  *
- * `?debug` does NOT open them: anyone writing a link can add it. It still
- * installs acDebug (utils/debugTools.ts); the server enforces admin access.
+ * `?debug` does NOT open them: anyone writing a link can add it. It is
+ * itself gated here: acDebug and the debug hooks install only in dev, or with
+ * `?debug` on a URL-overrides build (utils/debugTools.ts; Jake, 2026-10-11).
  * Harmless params (`?era`, `?rawDats`, `?nocache`, `?networker=0`, and
  * `?account=` as a launcher pre-fill) work everywhere.
  */

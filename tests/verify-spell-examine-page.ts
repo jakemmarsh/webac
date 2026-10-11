@@ -8,8 +8,9 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { existsSync } from 'node:fs';
 import {
   buildSpellExamineModel, spellManaText, spellDurationText, spellRangeText, schoolName,
-  skillForSchool, spellComponentListRect,
+  skillForSchool, spellComponentListRect, spellRangeMeters, inqSkillLevel,
 } from '../packages/renderer/src/ui/examine/SpellExamine.js';
+import { SkillSystem } from '../packages/shared/src/character/SkillSystem.js';
 import { DatReader } from '../packages/dat-parser/src/DatReader.js';
 import { SpellTable } from '../packages/dat-parser/src/file-types/SpellTable.js';
 import { SpellComponentTable } from '../packages/dat-parser/src/file-types/SpellComponentTable.js';
@@ -40,6 +41,22 @@ describe('spell page text', () => {
     expect(spellRangeText(0.25, 5, 100)).toBe(`Range: ${(30 / 0.9144).toFixed(1)} yds.`);
     expect(spellRangeText(1, 0, 500)).toBe(`Range: ${(75 / 0.9144).toFixed(1)} yds.`);
     expect(spellRangeText(0, 0, 300)).toBe('');
+  });
+
+  it('the range reads InqSkillLevel (ranks + init level, no attribute part or buffs), as ACE\'s server check does (Arcanist "Out of Range!" at 11 m, 2026-10-11)', () => {
+    const skills = new SkillSystem(new Map());
+    // Creature Enchantment (0x1f) trained with credits (init 0), 6 ranks; Life Magic (0x21) with a creation bonus of 5 + 2 ranks.
+    skills.setSkill(0x1f, 2, 6, 0, 704);
+    skills.setSkill(0x21, 2, 2, 5, 138);
+    expect(inqSkillLevel(skills, 0x1f)).toBe(6);
+    expect(inqSkillLevel(skills, 0x21)).toBe(7);
+    expect(inqSkillLevel(skills, 0x22)).toBe(0); // no record
+    // Strength Other I (EoL spell 1): Creature school 4, constant 5, mod 1 → 11 m; Focus Other I: constant 0 → 6 m.
+    expect(spellRangeMeters({ school: 4, baseRangeConstant: 5, baseRangeMod: 1 }, (id) => inqSkillLevel(skills, id))).toBe(11);
+    expect(spellRangeMeters({ school: 4, baseRangeConstant: 0, baseRangeMod: 1 }, (id) => inqSkillLevel(skills, id))).toBe(6);
+    // A school with no casting skill takes the best of the five; the cap is 75 m.
+    expect(spellRangeMeters({ school: 0, baseRangeConstant: 0, baseRangeMod: 1 }, (id) => inqSkillLevel(skills, id))).toBe(7);
+    expect(spellRangeMeters({ school: 4, baseRangeConstant: 70, baseRangeMod: 1 }, (id) => inqSkillLevel(skills, id))).toBe(75);
   });
 
   it('schools and their casting skills', () => {

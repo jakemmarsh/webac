@@ -22,6 +22,8 @@ import {
 } from '@ac/shared';
 import type { RoutineStatus } from '../../agent/RoutineEngine.js';
 import { matchMonsterRow } from '../../agent/macro/combatPlan.js';
+import { addAllPeas } from '../../agent/macro/peaPlan.js';
+import { dispelOptionsAvailable } from '../../agent/macro/vtMacro.js';
 import { type AutomationKit, type AutomationSource, type MenuItem, newProfile } from './AutomationPanel.js';
 
 export type VtTab = 'options' | 'profiles' | 'vitals' | 'monsters' | 'items' | 'consumables' | 'buffs' | 'route' | 'meta';
@@ -50,14 +52,30 @@ export interface VTankSource extends AutomationSource {
   fakeDeath(): { ok: boolean; message: string };
   /** /vt reverseroute. */
   reverseRoute(): { ok: boolean; message: string };
-  /** VirindiTank's current-waypoint arrow (the running macro's loaded route). */
-  setWaypoint(i: number): { ok: boolean; message: string };
+  /** VirindiTank's current-waypoint arrow: the running macro's loaded (circular) route walks next to its point nearest you. */
+  setNearestWaypoint(): { ok: boolean; message: string };
   /** VirindiTank's Force Buff / Cancel Force Buff. */
   forceBuff(): { ok: boolean; message: string };
   cancelForceBuff(): { ok: boolean; message: string };
+  /** The active era's SpellTable (options that need a spell the era lacks are hidden); null while unknown. */
+  spellTable?(): { spells: Map<number, { desc: string }> } | null;
   /** The selected object's name and kind (Route's Add Portal/NPC, Open Vendor; Items / Consumables' Add: an item you carry is kind 'item'). */
   selection(): { name: string; kind: string } | null;
+  /**
+   * Whether the active era's SkillTable (0x0E000004) has a skill, by name
+   * ("Summoning", "Void Magic"); undefined when the table isn't loaded. Controls
+   * for a skill the era lacks are not drawn (Dark Majesty and AC1999 have
+   * neither Summoning nor Void Magic).
+   */
+  hasSkill?(name: string): boolean | undefined;
+  /** Whether the active era's SpellTable has a spell id (Tusker Fists 2934 for the Fists damage type); undefined when unknown. */
+  hasSpell?(id: number): boolean | undefined;
 }
+
+/** The options that only mean something with the Summoning skill (Summon Pets and its settings). */
+export const VT_PET_OPTIONS = new Set(['SummonPets', 'PetRangeMode', 'PetCustomRange', 'PetMonsterDensity', 'PetRefillCount-Idle', 'PetRefillCount-Normal']);
+/** The Monsters-tab columns that cast Void Magic. */
+export const VT_VOID_COLUMNS = new Set<string>(['WC', 'FC', 'Cp', 'DC', 'Cs']);
 
 /** The window's extra parts (GameUI implements them from the DAT; tests fake them). */
 export interface VTankKit extends AutomationKit {
@@ -82,6 +100,9 @@ export interface VTankDialogs {
 }
 
 /** VirindiTank's Options tab: each option's place (Vtank_Main.PNG). Drawn only when the engine acts on it. */
+/** What Follow mode's Add takes as the follow target: a player or any creature (VTank: the selection). */
+const FOLLOW_KINDS = new Set(['player', 'monster', 'npc', 'vendor']);
+
 export const VT_OPTIONS_LAYOUT: Array<{ name: string; kind: 'range' | 'check' | 'field' | 'box'; x: number; y: number }> = [
   { name: 'AttackDistance', kind: 'range', x: 8, y: 2 }, { name: 'RingDistance', kind: 'range', x: 8, y: 36 },
   { name: 'ApproachDistance', kind: 'range', x: 8, y: 69 }, { name: 'NavCloseStopRange', kind: 'range', x: 8, y: 103 },
@@ -101,12 +122,23 @@ export const VT_VITALS_LAYOUT = ['Recharge-Norm-HitP', 'Recharge-Norm-Stam', 'Re
 export const VT_ATTACK_COLUMNS = new Set<string>(['A', 'R', 'S', 'Cp', 'DC', 'Cs']);
 const DAMAGE_NAMES: Record<number, string> = { 0: 'Pierce', 1: 'Bludgeon', 2: 'Slash', 3: 'Acid', 4: 'Lightning', 5: 'Cold', 6: 'Fire', 7: 'Harm', 8: 'Auto', 9: 'Void', 10: 'Drain Auto', 11: 'Prismatic', 12: 'Random', 13: 'Fists', 98: 'None', 99: 'Physical' };
 export const vtDamageName = (v: number): string => DAMAGE_NAMES[v] ?? String(v);
-/** What a click on Dmg type / Ex. Vuln / PetDmg steps through (VTank cycles them). */
-// Only the types the combat planner acts on (Harm / Drain Auto / Random / Fists aren't built: they'd act as Auto).
-export const VT_DAMAGE_CYCLE = [8, 0, 1, 2, 3, 4, 5, 6, 9];
+/**
+ * What a click on Dmg type / Ex. Vuln / PetDmg steps through (VTank cycles
+ * them; its own order is not public). Only the types the combat planner acts
+ * on. Prismatic (11) is Auto that shoots prismatic ammunition first (combatPlan
+ * ammoFor). Void (9) needs Void Magic and Fists (13) Tusker Fists in the era's
+ * tables (VTankWindow.damageCycle).
+ */
+export const VT_DAMAGE_CYCLE = [8, 0, 1, 2, 3, 4, 5, 6, 9, 7, 10, 11, 12, 13];
 export const VT_EXVULN_CYCLE = [98, 8, 0, 1, 2, 3, 4, 5, 6];
-export const VT_PET_CYCLE = [101, 8, 98, 0, 1, 2, 3, 4, 5, 6];
+/** PetDmg: PAuto, Auto, None, then the elements a summoning essence comes in (its UiEffects: acid, lightning, frost, fire). */
+export const VT_PET_CYCLE = [101, 8, 98, 3, 4, 5, 6];
+const PET_NAMES: Record<number, string> = { 101: 'PAuto' };
+export const vtPetDamageName = (v: number): string => PET_NAMES[v] ?? vtDamageName(v);
 const nextIn = (cycle: number[], v: number): number => cycle[(cycle.indexOf(v) + 1) % cycle.length];
+
+/** Printed once when the macro first starts: each server sets its own rules on automation. */
+export const VT_SERVER_RULES_NOTE = 'The macro plays this character for you. Each server has its own rules on macroing; check yours before leaving it running.';
 
 export const VT_ICON = { up: 0x060028fc, down: 0x060028fd, current: 0x060011f7, remove: 0x060011f8 } as const;
 
@@ -343,12 +375,40 @@ export class VTankWindow {
   private chatText = '/ls';
   private recall = VT_RECALLS[0];
   private advanced = false;
+  /** The server-rules line has been printed (once per session). */
+  private rulesNoted = false;
   /** The Meta rule being edited (state + index), or null. */
   private editing: { state: string; index: number } | null = null;
 
   constructor(private readonly kit: VTankKit, readonly source: VTankSource, private readonly dialogs: VTankDialogs) {}
 
   get document(): RoutineDoc | null { return this.doc; }
+
+  /** The character the loaded document's selection was made for. */
+  private loadedFor: string | null = null;
+  private standbyTry = -Infinity;
+  private standbyLoading = false;
+
+  /**
+   * VTank's M. Charges When Off runs with the macro off: the macro settings
+   * profile this window has selected for the character in the world (the
+   * engine's stand-by profile). Loads the account's document the first time
+   * it's asked for a character (again every 30 s while that fails).
+   */
+  standbyProfile(): RoutineProfile | null {
+    const ch = this.source.character();
+    if (!ch) return null;
+    if (this.loadedFor !== ch || !this.doc) {
+      const t = this.source.now();
+      if (!this.standbyLoading && t - this.standbyTry >= 30_000) {
+        this.standbyTry = t;
+        this.standbyLoading = true;
+        void this.load(() => {}).finally(() => { this.standbyLoading = false; });
+      }
+      return null;
+    }
+    return this.profile();
+  }
 
   async load(redraw: () => void): Promise<void> {
     this.message = 'Loading…';
@@ -357,6 +417,8 @@ export class VTankWindow {
     if (r.ok) {
       this.doc = r.doc as RoutineDoc;
       const ch = this.source.character();
+      this.loadedFor = ch;
+      this.standbyTry = -Infinity;
       this.profileName = this.source.status().profile ?? (ch ? this.doc.characters?.[ch] : undefined) ?? this.doc.profiles[0]?.name ?? null;
       this.message = '';
     } else this.message = r.message;
@@ -396,9 +458,17 @@ export class VTankWindow {
     const issues = validateRoutineDoc(this.doc);
     if (issues.length) { this.message = `Not saved: ${issues[0].path}: ${issues[0].message}`; redraw(); return false; }
     const r = await this.source.save(this.doc);
-    this.message = r.ok ? '' : r.message;
+    // The store's own check (a bridge on an older build can refuse what this one allows): name the field.
+    this.message = r.ok ? '' : r.issues?.length ? `${r.message} (${r.issues[0].path}: ${r.issues[0].message})` : r.message;
     redraw();
     return r.ok;
+  }
+
+  /** An option the engine acts on and the active era can use (Cast Dispel Self needs the era's self Life dispel). */
+  private shown(o: VtOption): boolean {
+    if (!o.engine || !this.optionShown(o.name)) return false;
+    if (o.name === 'CastDispelSelf' || o.name === 'UseDispelItems') return dispelOptionsAvailable(this.source.spellTable?.() ?? null)[o.name];
+    return true;
   }
 
   /** A setting's value now: the running macro's, else the profile's, else VirindiTank's default. */
@@ -408,6 +478,15 @@ export class VTankWindow {
     if (this.running()) { const v = this.source.setting(key); if (v !== undefined) return v; }
     const s = this.profile()?.settings?.[key];
     return s !== undefined ? s : (o?.default ?? '');
+  }
+  /** The era has Summoning (unknown counts as yes: the table isn't loaded yet). */
+  hasSummoning(): boolean { return this.source.hasSkill?.('Summoning') !== false; }
+  hasVoid(): boolean { return this.source.hasSkill?.('Void Magic') !== false; }
+  /** An option the era can't use (Summon Pets without Summoning) is not drawn. */
+  optionShown(name: string): boolean { return !VT_PET_OPTIONS.has(name) || this.hasSummoning(); }
+  /** Dmg type's cycle in this era: Void needs Void Magic, Fists needs Tusker Fists (2934). */
+  damageCycle(): number[] {
+    return VT_DAMAGE_CYCLE.filter((v) => (v !== 9 || this.hasVoid()) && (v !== 13 || this.source.hasSpell?.(2934) !== false));
   }
   /** A profile the window's macro tabs edit runs VirindiTank's macro (its tabs' data and planners). */
   private macroProfile(): RoutineProfile {
@@ -482,7 +561,7 @@ export class VTankWindow {
     // Where each control sits on VirindiTank's Options tab (Vtank_Main.PNG, its y less the tab strip's 48 px).
     for (const L of VT_OPTIONS_LAYOUT) {
       const o = vtOption(L.name);
-      if (!o?.engine) continue;
+      if (!o || !this.shown(o)) continue;
       if (L.kind === 'range') {
         area.appendChild(at(kit.text(o.label ?? o.name, { color: c.text }), L.x, L.y));
         area.appendChild(at(this.optionField(o, 40, redraw), L.x, L.y + 14));
@@ -512,6 +591,8 @@ export class VTankWindow {
     let r: { ok: boolean; message: string };
     if (on) r = this.running() && st.paused ? this.source.resume() : st.running && st.profile !== this.profileName ? { ok: false, message: `"${st.profile}" is running` } : this.source.run(this.ensureProfile());
     else r = this.running() ? this.source.pause() : { ok: true, message: '' };
+    // The first start this session: the window is open to every player on public servers, whose own rules decide macroing.
+    if (on && r.ok && !this.rulesNoted) { this.rulesNoted = true; this.source.report(VT_SERVER_RULES_NOTE); }
     this.message = r.ok ? '' : r.message;
     redraw();
   }
@@ -527,7 +608,7 @@ export class VTankWindow {
     const box = el('div', { position: 'absolute', left: '8px', top: '24px', width: `${w - 16}px`, height: `${h - 30}px` }, { vtank: 'advanced-list' });
     const list = el('div', { display: 'flex', flexDirection: 'column', gap: '2px', paddingRight: '20px' });
     let group = '';
-    for (const o of VT_OPTIONS.filter((x) => x.engine)) {
+    for (const o of VT_OPTIONS.filter((x) => this.shown(x))) {
       if (o.group !== group) { group = o.group; list.appendChild(kit.text(group, { color: c.gold })); }
       const r = row(8);
       tag(r, { vtankAdvanced: o.name });
@@ -666,7 +747,9 @@ export class VTankWindow {
     const st = this.source.status();
     const current = this.running() && st.nav && r && st.nav.route === r.name && !st.nav.done ? st.nav.point : -1;
     if (r?.mode === 'follow') {
-      list.appendChild(tag(kit.text(r.follow ? `Following: ${r.follow}` : 'Follow: select a player and press Add', { color: c.text }), { vtankFollow: r.follow ?? '' }));
+      // Out of sight, the macro stands still until the leader is back; the line says so.
+      const lost = this.running() && st.follow && st.follow.target === r.follow && !st.follow.inSight;
+      list.appendChild(tag(kit.text(r.follow ? `Following: ${r.follow}${lost ? ' (out of sight: standing still)' : ''}` : 'Follow: select a player or creature and press Add', { color: lost ? c.bad : c.text }), { vtankFollow: r.follow ?? '', ...(lost ? { lost: '1' } : {}) }));
     } else (r ? routeWaypoints(r) : []).forEach((wp, i) => {
       const line = kit.row(i === this.waypoint, () => { this.waypoint = i; redraw(); });
       tag(line, { vtankWaypoint: String(i), ...(i === current ? { current: '1' } : {}) });
@@ -705,11 +788,11 @@ export class VTankWindow {
       this.waypoint = Math.min(this.waypoint, wps.length - 1);
       this.changed(redraw);
     }), { vtank: 'wp-remove' }), 360, by + 2));
-    // The curly arrow: the selected waypoint is the one the running macro walks to next.
-    area.appendChild(at(tag(kit.icon(VT_ICON.current, 15, () => {
-      if (this.waypoint < 0) { this.message = 'Select a waypoint first.'; redraw(); return; }
+    // The curly arrow (VTank: circular routes only): the running macro walks next to the waypoint nearest you.
+    // On other route types it does nothing in VTank, so it isn't drawn.
+    if ((r?.mode ?? 'circular') === 'circular') area.appendChild(at(tag(kit.icon(VT_ICON.current, 15, () => {
       if (!this.running()) { this.message = 'Turn Run Macro on first.'; redraw(); return; }
-      const res = this.source.setWaypoint(this.waypoint);
+      const res = this.source.setNearestWaypoint();
       this.message = res.ok ? '' : res.message;
       redraw();
     }), { vtank: 'wp-current' }), 377, by + 2));
@@ -718,10 +801,10 @@ export class VTankWindow {
     const here2 = () => this.source.coords();
     const needHere = (f: (coords: string) => void) => { const h2 = here2(); if (!h2) { this.message = 'Your position is not known yet.'; redraw(); return; } f(h2); };
     area.appendChild(at(tag(kit.flatButton('Add', () => {
-      // In Follow mode, Add sets the player to follow (the selection), as VirindiTank's does.
+      // In Follow mode, Add sets the follow target to the selection (a player or a creature), as VirindiTank's does.
       if (r?.mode === 'follow') {
         const s = this.source.selection();
-        if (!s || s.kind !== 'player') { this.message = 'Select the player to follow first.'; redraw(); return; }
+        if (!s || !FOLLOW_KINDS.has(s.kind)) { this.message = 'Select the player or creature to follow first.'; redraw(); return; }
         r.follow = s.name;
         this.changed(redraw);
         return;
@@ -810,9 +893,11 @@ export class VTankWindow {
     const c = kit.colors;
     const rows = this.dataView().monsters;
     // The header (Vtank_monsters.PNG): attack columns in red, debuffs in white.
-    VT_MONSTER_COLUMNS.forEach((col, i) => area.appendChild(at(tag(kit.text(col, { color: VT_ATTACK_COLUMNS.has(col) ? c.bad : c.text }), { vtankColumn: col }), 6 + i * 19, 0)));
-    // PetDmg (which elemental pet to summon) isn't built — Summon Pets uses the first pet device — so it isn't drawn.
-    const head: Array<[string, number]> = [['Name', 300], ['P', 412], ['Dmg type', 432], ['Ex. Vuln', 500], ['Weapon', 566], ['Offhand', 646]];
+    // The void columns and PetDmg are drawn only where the era has Void Magic / Summoning (its SkillTable).
+    const colShown = (col: string) => !VT_VOID_COLUMNS.has(col) || this.hasVoid();
+    const pets = this.hasSummoning();
+    VT_MONSTER_COLUMNS.forEach((col, i) => { if (colShown(col)) area.appendChild(at(tag(kit.text(col, { color: VT_ATTACK_COLUMNS.has(col) ? c.bad : c.text }), { vtankColumn: col }), 6 + i * 19, 0)); });
+    const head: Array<[string, number]> = [['Name', 300], ['P', 412], ['Dmg type', 432], ['Ex. Vuln', 500], ['Weapon', 566], ['Offhand', 646], ...(pets ? [['PetDmg', 712] as [string, number]] : [])];
     for (const [t, x] of head) area.appendChild(at(kit.text(t, { color: c.text }), x, 0));
     const box = el('div', { position: 'absolute', left: '0', top: '16px', width: `${w}px`, height: `${h - 44}px` }, { vtankList: 'monsters' });
     const list = el('div', { display: 'flex', flexDirection: 'column', paddingRight: '18px' });
@@ -820,7 +905,7 @@ export class VTankWindow {
     rows.forEach((r, i) => {
       const line = el('div', { position: 'relative', height: '18px' }, { vtankMonster: String(i) });
       const edit = (f: (row: VtMonsterRow) => void) => { f(this.data().monsters[i]); this.changed(redraw); };
-      VT_MONSTER_COLUMNS.forEach((col, ci) => line.appendChild(at(tag(kit.check(r.on.includes(col), (v) => edit((row) => { row.on = v ? [...row.on, col].filter((x, k, a) => a.indexOf(x) === k) : row.on.filter((x) => x !== col); })), { vtankCell: col }), 4 + ci * 19, 2)));
+      VT_MONSTER_COLUMNS.forEach((col, ci) => colShown(col) && line.appendChild(at(tag(kit.check(r.on.includes(col), (v) => edit((row) => { row.on = v ? [...row.on, col].filter((x, k, a) => a.indexOf(x) === k) : row.on.filter((x) => x !== col); })), { vtankCell: col }), 4 + ci * 19, 2)));
       line.appendChild(at(kit.text(r.name === '<DEFAULT>' ? '<< DEFAULT >>' : r.name, { color: c.text, maxWidth: 108 }), 300, 2));
       const cycle = (key: string, x: number, label: string, next: () => void) => {
         const t = tag(kit.text(label, { color: c.text }), { vtankCycle: key });
@@ -829,10 +914,12 @@ export class VTankWindow {
         line.appendChild(at(t, x, 2));
       };
       cycle('priority', 414, String(r.priority), () => edit((row) => { row.priority = row.priority >= 4 ? -1 : row.priority + 1; }));
-      cycle('damage', 436, vtDamageName(r.damage), () => edit((row) => { row.damage = nextIn(VT_DAMAGE_CYCLE, row.damage); }));
+      cycle('damage', 436, vtDamageName(r.damage), () => edit((row) => { row.damage = nextIn(this.damageCycle(), row.damage); }));
       cycle('exVuln', 504, vtDamageName(r.exVuln), () => edit((row) => { row.exVuln = nextIn(VT_EXVULN_CYCLE, row.exVuln); }));
       cycle('weapon', 570, r.weapon ?? '<AUTO>', () => edit((row) => { const j = items.indexOf(row.weapon ?? '<AUTO>'); const nx = items[(j + 1) % items.length]; row.weapon = nx === '<AUTO>' ? null : nx; }));
       cycle('offhand', 650, r.offhand ?? '<AUTO>', () => edit((row) => { const j = items.indexOf(row.offhand ?? '<AUTO>'); const nx = items[(j + 1) % items.length]; row.offhand = nx === '<AUTO>' ? null : nx; }));
+      // PetDmg: which essence's element Summon Pets uses for this monster (combatPlan planPet).
+      if (pets) cycle('petDamage', 716, vtPetDamageName(r.petDamage), () => edit((row) => { row.petDamage = nextIn(VT_PET_CYCLE, row.petDamage); }));
       if (i > 0) line.appendChild(at(tag(kit.icon(VT_ICON.remove, 14, () => { this.data().monsters.splice(i, 1); this.changed(redraw); }), { vtankRemove: '1' }), w - 22, 2));
       list.appendChild(line);
     });
@@ -857,7 +944,7 @@ export class VTankWindow {
   private renderItems(area: HTMLElement, w: number, h: number, redraw: () => void): void {
     const { kit } = this;
     const d = this.dataView();
-    this.nameList(area, 4, 0, Math.min(430, w - 8), h - 44, 'Weapons / Wands / Shields / Pets', d.items.map((x) => x.name), (i) => { this.data().items.splice(i, 1); this.changed(redraw); }, 'items',
+    this.nameList(area, 4, 0, Math.min(430, w - 8), h - 44, this.hasSummoning() ? 'Weapons / Wands / Shields / Pets' : 'Weapons / Wands / Shields', d.items.map((x) => x.name), (i) => { this.data().items.splice(i, 1); this.changed(redraw); }, 'items',
       (i) => (d.items[i].noBuffs ? kit.text('(no buffs)', { color: kit.colors.dim }) : null));
     const by = h - 22;
     const add = (noBuffs: boolean) => { const n = this.selectedItem(redraw); if (!n) return; const dd = this.data(); if (!dd.items.some((x) => x.name === n)) dd.items.push(noBuffs ? { name: n, noBuffs: true } : { name: n }); this.changed(redraw); };
@@ -874,8 +961,15 @@ export class VTankWindow {
     this.nameList(area, 4, 0, half - 10, h - 44, 'Gems / Food / Kits / Potions / Charges / Grenades / Lockpicks', d.consumables, (i) => { this.data().consumables.splice(i, 1); this.changed(redraw); }, 'consumables');
     this.nameList(area, half + 8, 0, half - 10, h - 44, 'Excluded Scarab Types:', d.excludedScarabs, (i) => { this.data().excludedScarabs.splice(i, 1); this.changed(redraw); }, 'scarabs');
     const by = h - 22;
-    area.appendChild(at(tag(kit.flatButton('Add', () => { const n = this.selectedItem(redraw); if (!n) return; const dd = this.data(); if (!dd.consumables.includes(n)) dd.consumables.push(n); this.changed(redraw); }, half - 10), { vtank: 'add-consumable' }), 4, by));
-    // Add All Peas waits for pea splitting (SplitPeas), which isn't built.
+    // Add, and beside it Add All Peas (Vtank_consumables.PNG): every pea you carry, so SplitPeas keeps its component supplied.
+    const peasW = Math.min(70, Math.floor((half - 10) / 3));
+    area.appendChild(at(tag(kit.flatButton('Add', () => { const n = this.selectedItem(redraw); if (!n) return; const dd = this.data(); if (!dd.consumables.includes(n)) dd.consumables.push(n); this.changed(redraw); }, half - 15 - peasW), { vtank: 'add-consumable' }), 4, by));
+    area.appendChild(at(tag(kit.flatButton('Add All Peas', () => {
+      const add = addAllPeas(this.data().consumables, this.source.items());
+      if (!add.length) { this.message = 'You carry no peas.'; redraw(); return; }
+      this.data().consumables.push(...add);
+      this.changed(redraw);
+    }, peasW), { vtank: 'add-peas' }), half - 6 - peasW, by));
 
     area.appendChild(at(tag(kit.flatButton('Add Selected', () => { const n = this.selectedItem(redraw); if (!n) return; const dd = this.data(); if (!dd.excludedScarabs.includes(n)) dd.excludedScarabs.push(n); this.changed(redraw); }, half - 10), { vtank: 'add-scarab' }), half + 8, by));
   }
@@ -1145,7 +1239,7 @@ export class VTankWindow {
       case 'opt': {
         const [sub = 'list', name = '', ...v] = rest;
         const o = vtOption(name);
-        if (sub.toLowerCase() === 'list') return [VT_OPTIONS.filter((x) => x.engine).map((x) => `${x.name}=${String(this.value(x.name))}`).join(', ')];
+        if (sub.toLowerCase() === 'list') return [VT_OPTIONS.filter((x) => this.shown(x)).map((x) => `${x.name}=${String(this.value(x.name))}`).join(', ')];
         if (!o) return [`no option "${name}"`];
         if (sub.toLowerCase() === 'get') return [`${o.name} = ${String(vtToVTank(o.name, this.value(o.name)))}`];
         if (sub.toLowerCase() === 'set' || sub.toLowerCase() === 'setinall') {

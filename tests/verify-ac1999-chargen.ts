@@ -193,6 +193,11 @@ describe('GameUI chargen with the 1999 world', () => {
     expect(c.querySelector('img')).toBeNull(); // no end-of-retail map art
     const rows = Array.from(c.querySelectorAll('.start-area-row')) as HTMLElement[];
     expect(rows.map((r) => Number(r.dataset.area))).toEqual([...range(12, 18), ...range(0, 12)]);
+    // All 18 rows fit the 481 px frame (8 + 18 x 26 = 476): the list clips, never a native scrollbar.
+    const list = c.querySelector('.start-area-list') as HTMLElement;
+    expect(list.style.overflow).toBe('hidden');
+    const last = rows[rows.length - 1];
+    expect(parseInt(last.style.top, 10) + parseInt(last.style.height, 10)).toBeLessThanOrEqual(481);
     expect(texts(render(H.ui.renderMapStep()), '.start-area-row').slice(0, 2)).toEqual(['Yaraq North', 'Yaraq East']);
     click(c.querySelector('.start-area-row[data-area="13"]'));
     expect(H.ui.wizard.startArea).toBe(13);

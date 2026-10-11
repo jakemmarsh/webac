@@ -58,6 +58,12 @@ describe.skipIf(!hasDats)('agent windows and books on the real GameUI', () => {
     ui.toggleCharPanel();
     ui.openBook(LETTER, 2, [page(null), page(null)], '', 0, '');
     expect(ui.agentCloseWindow('Book')).toBeNull();
+    // ...and says so: the agent saw it as a window opening by itself after a portal (Arcanist, Nanto, 2026-10-11).
+    expect(ui.agentOpenWindows()).toEqual(['Character (back when the Book over it closed)']);
+    // The note is about that hand-back only: the next change to the window drops it, and the name still closes it.
+    expect(ui.agentCloseWindow('character')).toBeNull();
+    expect(ui.agentOpenWindows()).toEqual([]);
+    ui.toggleCharPanel();
     expect(ui.agentOpenWindows()).toEqual(['Character']);
     ui.closeAllPanels();
   });

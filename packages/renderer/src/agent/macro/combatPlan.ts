@@ -26,9 +26,24 @@
  * milliseconds; spell and castLog `duration` in seconds; DebuffPrecastSeconds
  * in seconds.
  */
-import { VT_DAMAGE, vtOption, type PlanItem, type PlanSkill, type PlanSpell, type Stance, type VtMonsterColumn, type VtMonsterRow } from '@ac/shared';
+import { VT_DAMAGE, VT_PET_AUTO, vtOption, type PlanItem, type PlanSkill, type PlanSpell, type Stance, type VtMonsterColumn, type VtMonsterRow } from '@ac/shared';
 
-export interface CombatMonster { guid: number; name: string; dist: number; relBearing: number; health?: number; species?: string; }
+export interface CombatMonster {
+  guid: number; name: string; dist: number; relBearing: number;
+  /** Its health fraction (0–1), as last reported (QueryHealth / the selection bar). */
+  health?: number;
+  species?: string;
+  /** The points of the last blow you landed on it (combat text), for the streak finisher. */
+  lastDamage?: number;
+}
+
+/**
+ * What the era's world data says about a monster, by name (VirindiTank's game-info
+ * DB: MonsterDamageOverrides / SpeciesDamages, SpeciesMembers; built per era by
+ * tools/build-monster-tables.ts). `weak` is the seven elements most damaging
+ * first; `maxHealth` its maximum health in points.
+ */
+export interface MonsterFacts { weak: CombatElement[]; maxHealth: number }
 
 export interface CombatInput {
   /** Creatures you could fight (already filtered to monsters). */
@@ -50,11 +65,16 @@ export interface CombatInput {
   now: number;
   selectedGuid: number | null;
   families: CombatFamilies;
+  /** [0, 1) random numbers for the Random damage type (default Math.random). */
+  random?: () => number;
+  /** The era's monster table, by name (case-insensitive); absent or unlisted: VTank's unlisted-monster behaviour. */
+  monsterFacts?: (name: string) => MonsterFacts | undefined;
 }
 
 export type CombatAction =
   | { kind: 'cast'; spell: PlanSpell; target: number; why: string }
-  | { kind: 'attack'; target: number; why: string }
+  /** `element`: what the row's Dmg resolved to, for the swing's power bar (attackPower.ts). */
+  | { kind: 'attack'; target: number; why: string; element?: CombatElement | null }
   | { kind: 'equip'; item: PlanItem; why: string }
   | { kind: 'stance'; to: Stance; why: string };
 
@@ -82,11 +102,16 @@ export interface CombatFamilies {
   debuff: Partial<Record<DebuffColumn, CombatFamily>>;
   vuln: Partial<Record<CombatElement, CombatFamily>>;
   attack: Partial<Record<CombatElement, Partial<Record<AttackShape, CombatFamily>>>>;
+  /** Life Magic Harm Other (the Harm damage type), Drain Health Other (Drain Auto) and Tusker Fists (Fists), when the era has them. */
+  harm?: CombatFamily;
+  drain?: CombatFamily;
+  fists?: CombatFamily;
 }
 
 /** ACE SpellFlags (ACE.Entity/Enum/SpellFlags.cs). */
 const SF_BENEFICIAL = 0x4;
 const SF_SELF_TARGETED = 0x8;
+const SF_REVERSED = 0x10;
 const SF_NON_TRACKING_PROJECTILE = 0x1000;
 const SF_FELLOWSHIP = 0x2000;
 const SF_DAMAGE_OVER_TIME = 0x10000;
@@ -130,6 +155,19 @@ const ATTACK_ANCHORS: Record<CombatElement, Record<AttackShape, number>> = {
   nether: { bolt: 5349 /* NetherBolt1 */, arc: 5369 /* NetherArc1 */, streak: 5357 /* NetherStreak1 */, ring: 5361 /* NetherRing */ },
 };
 
+/**
+ * The non-elemental attack modes' anchors (ACE SpellId). Their categories hold
+ * other spells too, told apart by SpellFlags.Reversed (0x10, a drain): Harm
+ * Other's category also has Martyr's Hecatomb (no Reversed; it spends a quarter
+ * of YOUR health), Drain Health Other's has Health to Stamina / Mana Other (no
+ * Reversed; they move the target's own vitals). Tusker Fists' category 230 also
+ * holds creature walls (Hammering Crawler, Spray of Coins), so it is a family
+ * of one.
+ */
+const HARM_ANCHOR = 7; // HarmOther1
+const DRAIN_ANCHOR = 1237; // DrainHealth1 ("Drain Health Other I")
+const FISTS_ANCHOR = 2934; // TuskerFists
+
 export interface CombatSpellTableEntry { name: string; category: number; school: number; bitfield: number; power: number; duration?: number; desc?: string }
 
 export function buildCombatFamilies(spellTable: { spells: Map<number, CombatSpellTableEntry> }): CombatFamilies {
@@ -139,13 +177,15 @@ export function buildCombatFamilies(spellTable: { spells: Map<number, CombatSpel
     if (!l) byCategory.set(e[1].category, (l = []));
     l.push(e);
   }
-  const family = (anchor: number): CombatFamily | undefined => {
+  const family = (anchor: number, opts: { sameFlags?: number; only?: boolean } = {}): CombatFamily | undefined => {
     const a = spellTable.spells.get(anchor);
     if (!a) return undefined; // this era lacks the family
     const arc = (a.bitfield & SF_NON_TRACKING_PROJECTILE) !== 0;
     const ids = new Set<number>();
-    for (const [id, s] of byCategory.get(a.category) ?? []) {
+    const members: Array<[number, CombatSpellTableEntry]> = opts.only ? [[anchor, a]] : byCategory.get(a.category) ?? [];
+    for (const [id, s] of members) {
       if (s.school !== a.school) continue;
+      if (opts.sameFlags && (s.bitfield & opts.sameFlags) !== (a.bitfield & opts.sameFlags)) continue;
       if (s.bitfield & (SF_SELF_TARGETED | SF_BENEFICIAL | SF_FELLOWSHIP)) continue;
       if (((s.bitfield & SF_NON_TRACKING_PROJECTILE) !== 0) !== arc) continue;
       ids.add(id);
@@ -161,6 +201,12 @@ export function buildCombatFamilies(spellTable: { spells: Map<number, CombatSpel
       if (f) (out.attack[el] ??= {})[shape] = f;
     }
   }
+  const harm = family(HARM_ANCHOR, { sameFlags: SF_REVERSED });
+  if (harm) out.harm = harm;
+  const drain = family(DRAIN_ANCHOR, { sameFlags: SF_REVERSED });
+  if (drain) out.drain = drain;
+  const fists = family(FISTS_ANCHOR, { only: true });
+  if (fists) out.fists = fists;
   return out;
 }
 
@@ -320,9 +366,9 @@ const boolSetting = (s: CombatInput['settings'], name: string): boolean => { con
 
 interface Candidate { m: CombatMonster; row: VtMonsterRow }
 
-/** Monsters within AttackDistance (and beyond AttackMinimumDistance) whose row is not priority -1, best first. */
-function candidates(input: CombatInput): Candidate[] {
-  const max = numSetting(input.settings, 'AttackDistance');
+/** Monsters within AttackDistance (or `maxRange`; and beyond AttackMinimumDistance) whose row is not priority -1, best first. */
+function candidates(input: CombatInput, maxRange?: number): Candidate[] {
+  const max = maxRange ?? numSetting(input.settings, 'AttackDistance');
   const min = numSetting(input.settings, 'AttackMinimumDistance');
   const method = numSetting(input.settings, 'TargetSelectMethod');
   const angleRange = numSetting(input.settings, 'TargetSelectAngleRange');
@@ -371,12 +417,18 @@ function schoolSkill(input: CombatInput, school: string): PlanSkill | undefined 
  * The best spell of a family you can cast: the highest difficulty whose
  * difficulty + SpellDiffExcessThreshold-Hunt ≤ your buffed school skill (FAQ),
  * difficulty = the spell table's power (INF; the FAQ's 1/50/…/400 table is
- * the war ladder). Untrained magic cannot be used. DebuffSelectionMethod is
- * not modelled (its "Skill" algorithm is not public).
+ * the war ladder). Untrained magic cannot be used.
+ *
+ * Debuffs follow DebuffSelectionMethod (USD enum 1 Spell Level, 2 Skill, the
+ * default): Skill picks the level by your buffed skill against the spell's
+ * difficulty (the threshold rule above, as for attacks); Spell Level picks the
+ * highest level you know in a school you have trained, whatever your skill.
+ * INF: VTank's exact algorithm is not public (ADV: "Select 'Skill' when
+ * fighting monsters with high magic defense").
  */
-function bestSpell(input: CombatInput, fam: CombatFamily | undefined): PlanSpell | null {
+function bestSpell(input: CombatInput, fam: CombatFamily | undefined, debuff = false): PlanSpell | null {
   if (!fam) return null;
-  const threshold = numSetting(input.settings, 'SpellDiffExcessThreshold-Hunt');
+  const threshold = debuff && numSetting(input.settings, 'DebuffSelectionMethod') === 1 ? -Infinity : numSetting(input.settings, 'SpellDiffExcessThreshold-Hunt');
   let best: PlanSpell | null = null;
   for (const s of input.spells) {
     if (!fam.ids.has(s.id) || s.self || s.buff) continue;
@@ -437,26 +489,135 @@ function rowWeapon(input: CombatInput, row: VtMonsterRow): PlanItem | undefined 
   return undefined;
 }
 
+const ALL_ELEMENTS: CombatElement[] = ['pierce', 'bludgeon', 'slash', 'acid', 'lightning', 'cold', 'fire', 'nether'];
+/** One Random pick per decision, so the V column's vuln and the attack agree. */
+const randomPick = new WeakMap<CombatInput, CombatElement | null>();
+
+/** VTank's element order for a monster its database doesn't list (MOSS VtankDamageDatabase.UnlistedElementOrder). */
+const UNLISTED_ORDER: CombatElement[] = ['pierce', 'bludgeon', 'slash', 'acid', 'lightning', 'cold', 'fire'];
+const TABLE_LETTER: Record<string, CombatElement> = { p: 'pierce', b: 'bludgeon', s: 'slash', a: 'acid', l: 'lightning', c: 'cold', f: 'fire' };
+
+/** The era's monster table rows ([name, weak letters, maxHealth]; tools/build-monster-tables.ts) as a by-name lookup. */
+export function indexMonsterTable(rows: Array<[string, string, number]>): (name: string) => MonsterFacts | undefined {
+  const map = new Map<string, MonsterFacts>();
+  for (const [name, weak, maxHealth] of rows) {
+    map.set(name.trim().toLowerCase(), { weak: [...weak].flatMap((c) => (TABLE_LETTER[c] ? [TABLE_LETTER[c]] : [])), maxHealth });
+  }
+  return (name) => map.get(name.trim().toLowerCase());
+}
+
+/**
+ * Whether this fight can deal an element: a launcher when you carry ammunition
+ * of it (or prismatic) that it takes; a caster (or bare hands) when you can
+ * cast its bolt; a melee weapon always, since only its own element (handled
+ * before this) or the vuln changes (MOSS CanDeliverElement limits only a
+ * launcher; the bolt rule is ours, so a mage's Auto names an element it casts).
+ */
+function canDeliver(input: CombatInput, el: CombatElement, weapon: PlanItem | undefined): boolean {
+  const kind = weaponKind(weapon);
+  if (kind === 'missile') return ammoOf(input, weapon, el, 'any') !== null;
+  if (kind === 'caster' || !weapon) return bestSpell(input, input.families.attack[el]?.bolt) !== null;
+  return true;
+}
+
 /**
  * The element a row's damage means. A specific Dmg type is that element (Void
- * = nether). Auto (and the modes we do not model: Harm, DrainAuto, Prismatic,
- * Random, Fists) is, in order: the weapon's examined DamageType; nether when
- * Void Magic is trained and War Magic is not (FAQ); the first element (VTank
- * enum order) whose bolt you can cast. INF: VTank's real Auto reads a
- * per-monster damage list from its game-info DB, which is not public.
+ * = nether). Harm and Drain Auto are not elemental (Life Magic drains), so V
+ * casts no element vuln for them. Fists is bludgeoning (ACE spell 2934 Tusker
+ * Fists, e_Type Bludgeon). Random (CHG .113) is a random element among those
+ * whose bolt you can cast, picked once per decision. Auto and Prismatic (MOSS
+ * CombatController.ResolveAttackElementCore; Prismatic differs only in the
+ * ammunition it takes) are, in order: the weapon's own examined DamageType;
+ * nether when Void Magic is trained and War Magic is not (FAQ); the monster's
+ * weak elements from the era's monster table, most damaging first, that you
+ * can deal (canDeliver); else (a monster the table doesn't list, or nothing of
+ * its list deliverable) the first element in VTank's unlisted order whose bolt
+ * you can cast.
  */
-function resolveElement(input: CombatInput, damage: number, weapon: PlanItem | undefined): CombatElement | null {
+function resolveElement(input: CombatInput, damage: number, weapon: PlanItem | undefined, m?: CombatMonster): CombatElement | null {
   const fixed = VT_TO_ELEMENT[damage];
   if (fixed) return fixed;
-  if (damage === VT_DAMAGE.None) return null;
+  if (damage === VT_DAMAGE.None || damage === VT_DAMAGE.Harm || damage === VT_DAMAGE.DrainAuto) return null;
+  if (damage === VT_DAMAGE.Fists) return 'bludgeon';
+  if (damage === VT_DAMAGE.Random) {
+    if (!randomPick.has(input)) {
+      const can = ALL_ELEMENTS.filter((el) => bestSpell(input, input.families.attack[el]?.bolt));
+      randomPick.set(input, can.length ? can[Math.min(can.length - 1, Math.floor((input.random ?? Math.random)() * can.length))] : null);
+    }
+    const r = randomPick.get(input);
+    if (r) return r;
+  }
   const bits = weapon?.ints?.[PROP_DAMAGE_TYPE];
   if (bits) for (const [bit, el] of ACE_DAMAGE_BITS) if (bits & bit) return el;
   const trained = (school: string) => { const s = schoolSkill(input, school); return !!s && s.training !== 'untrained'; };
   if (trained('Void Magic') && !trained('War Magic') && bestSpell(input, input.families.attack.nether?.bolt)) return 'nether';
-  for (const el of ['pierce', 'bludgeon', 'slash', 'acid', 'lightning', 'cold', 'fire'] as CombatElement[]) {
-    if (bestSpell(input, input.families.attack[el]?.bolt)) return el;
-  }
+  const weak = m ? input.monsterFacts?.(m.name)?.weak ?? [] : [];
+  for (const el of weak) if (canDeliver(input, el, weapon)) return el;
+  for (const el of UNLISTED_ORDER) if (bestSpell(input, input.families.attack[el]?.bolt)) return el;
   return null;
+}
+
+// ─── Ammunition ─────────────────────────────────────────────────────────────
+
+/** PropertyInt.Damage / AmmoType / WieldRequirements / WieldSkillType / WieldDifficulty (ACE). */
+const PROP_DAMAGE = 44, PROP_AMMO_TYPE = 50, PROP_WIELD_REQ = 158, PROP_WIELD_SKILL = 159, PROP_WIELD_DIFF = 160;
+/** UiEffects element glows (Fire 0x20, Lightning 0x40, Frost 0x80, Acid 0x100), seen without an examination. */
+const UI_EFFECT_ELEMENTS: Array<[number, CombatElement]> = [[0x20, 'fire'], [0x40, 'lightning'], [0x80, 'cold'], [0x100, 'acid']];
+type AmmoElement = CombatElement | 'prismatic' | null;
+
+const isAmmo = (i: PlanItem): boolean => /(^|\+)MissileAmmo(\+|$)/.test(i.fits ?? i.slot ?? '');
+/** An ammunition stack's element: its examined DamageType, else its UiEffects glow. Prismatic ammo has no element of its own (see ammoFor). */
+function ammoElement(i: PlanItem): AmmoElement {
+  if (/prismatic/i.test(i.name)) return 'prismatic';
+  const bits = i.ints?.[PROP_DAMAGE_TYPE];
+  if (bits) for (const [bit, el] of ACE_DAMAGE_BITS) if (bits & bit) return el;
+  for (const [bit, el] of UI_EFFECT_ELEMENTS) if ((i.uiEffects ?? 0) & bit) return el;
+  return null;
+}
+/** Its wield requirement, when it has one the planner can check (a skill, buffed or base). */
+function canWield(input: CombatInput, i: PlanItem): boolean {
+  const req = i.ints?.[PROP_WIELD_REQ];
+  if (req !== 1 && req !== 2) return true;
+  const sk = input.skills.find((x) => x.id === i.ints?.[PROP_WIELD_SKILL]);
+  return !!sk && (req === 1 ? sk.buffed : sk.base) >= (i.ints?.[PROP_WIELD_DIFF] ?? 0);
+}
+
+/**
+ * The ammunition a missile row shoots, VTank's way (facts from openac-mosstank's
+ * reading of VTank, docs/vtank-macro-behavior.md §4): only ammo the launcher takes
+ * (AmmoType), of the row's element or prismatic, the highest damage that you
+ * can wield. Dmg type Prismatic (11) wants prismatic ammo first; Auto takes
+ * either; a named element takes prismatic only when nothing of that element is
+ * carried. With no element to want (Auto on a plain launcher), the best ammo
+ * of any element. Launcher and ammo match by AmmoType (their public description, else the examination).
+ * Auto / Prismatic want the monster's weak element you carry ammunition for
+ * (resolveElement with the era's monster table), so the arrows swap per monster.
+ */
+export function ammoFor(input: CombatInput, row: VtMonsterRow, launcher: PlanItem | undefined, m?: CombatMonster): PlanItem | null {
+  const wanted = resolveElement(input, row.damage === VT_DAMAGE.Prismatic ? VT_DAMAGE.Auto : row.damage, launcher, m);
+  const policy = row.damage === VT_DAMAGE.Prismatic ? 'force' : row.damage === VT_DAMAGE.Auto ? 'any' : 'none';
+  return ammoOf(input, launcher, wanted, policy);
+}
+
+/** The best carried ammunition the launcher takes, of `wanted` (or prismatic, per policy), or of any element with none wanted. */
+function ammoOf(input: CombatInput, launcher: PlanItem | undefined, wanted: CombatElement | null, policy: 'force' | 'any' | 'none'): PlanItem | null {
+  const ammoTypeOf = (i: PlanItem | undefined) => i?.ammoType ?? i?.ints?.[PROP_AMMO_TYPE];
+  const type = ammoTypeOf(launcher);
+  if (!type) return null;
+  let best: PlanItem | null = null;
+  let bestScore = -Infinity;
+  for (const a of input.items) {
+    if (!isAmmo(a) || ammoTypeOf(a) !== type || (a.stack ?? 1) < 1 || !canWield(input, a)) continue;
+    const el = ammoElement(a);
+    let score = a.ints?.[PROP_DAMAGE] ?? 0;
+    if (policy === 'force' && el !== 'prismatic') score -= 1000;
+    if (wanted && el !== wanted) {
+      if (el !== 'prismatic') continue;
+      if (policy === 'none') score -= 1000;
+    }
+    if (score > bestScore) { bestScore = score; best = a; }
+  }
+  return best;
 }
 
 // ─── Debuffs ────────────────────────────────────────────────────────────────
@@ -480,8 +641,8 @@ function timeLeft(input: CombatInput, guid: number, category: number): number {
 /** The next debuff this monster needs, if any: a castable family member it lacks (or will lose within DebuffPrecastSeconds; DoTs only when gone). */
 function nextDebuff(input: CombatInput, c: Candidate, weapon: PlanItem | undefined): { spell: PlanSpell; why: string } | null {
   const precast = numSetting(input.settings, 'DebuffPrecastSeconds');
-  const element = resolveElement(input, c.row.damage, weapon);
-  const exElement = c.row.exVuln === VT_DAMAGE.None ? null : resolveElement(input, c.row.exVuln, weapon);
+  const element = resolveElement(input, c.row.damage, weapon, c.m);
+  const exElement = c.row.exVuln === VT_DAMAGE.None ? null : resolveElement(input, c.row.exVuln, weapon, c.m);
   const done = new Set<number>();
   for (const col of DEBUFF_ORDER) {
     let fam: CombatFamily | undefined;
@@ -492,7 +653,7 @@ function nextDebuff(input: CombatInput, c: Candidate, weapon: PlanItem | undefin
     }
     if (!fam || done.has(fam.category)) continue;
     done.add(fam.category);
-    const spell = bestSpell(input, fam);
+    const spell = bestSpell(input, fam, true);
     if (!spell) continue; // the era lacks it, or you can't cast it
     const left = timeLeft(input, c.m.guid, fam.category);
     if (fam.dot ? left > 0 : left > precast) continue;
@@ -500,6 +661,40 @@ function nextDebuff(input: CombatInput, c: Candidate, weapon: PlanItem | undefin
     return { spell, why: `${label} on ${c.m.name}${left > 0 ? ` (${Math.round(left)} s left)` : ''}` };
   }
   return null;
+}
+
+// ─── The streak finisher ────────────────────────────────────────────────────
+
+/**
+ * Whether the monster is hurt enough for the streak to finish it (VTank, from
+ * MOSS CombatController.IsFinishingBlow and MonsterHealthTracker): its health
+ * left in points (the reported fraction × its maximum health from the era's
+ * monster table; the full maximum before any report) is above 0 and below a
+ * seventh of your last blow on it, or, before you have landed one, a seventh
+ * of the streak's difficulty (integer division). A monster the table doesn't
+ * list has no points to compare, so it is never finished with a streak.
+ * INF: MOSS also takes each later blow off the estimate until the next health
+ * report; we use the latest reported fraction.
+ */
+export function isFinishingBlow(input: CombatInput, m: CombatMonster, streak: PlanSpell): boolean {
+  const max = input.monsterFacts?.(m.name)?.maxHealth ?? 0;
+  if (max <= 0) return false;
+  const remaining = m.health === undefined ? max : Math.round(m.health * max);
+  const threshold = Math.floor((m.lastDamage && m.lastDamage > 0 ? m.lastDamage : streak.power) / 7);
+  return remaining > 0 && remaining < threshold;
+}
+
+/**
+ * The points of a blow you landed on `name`, from a combat chat line (melee:
+ * "You hit Drudge Skulker for 12 points of slashing damage!", CombatDialog
+ * formatAttackerChat; war magic: ACE SpellProjectile "You scorch Drudge
+ * Skulker for 40 points with Flame Bolt VI."), or null.
+ */
+export function blowPoints(text: string, name: string): number | null {
+  const at = text.indexOf(`You `);
+  if (at < 0) return null;
+  const m = /^You \S+ (.+?) for (\d+) points?\b/.exec(text.slice(at));
+  return m && m[1].toLowerCase() === name.toLowerCase() ? Number(m[2]) : null;
 }
 
 // ─── The plan ───────────────────────────────────────────────────────────────
@@ -518,6 +713,84 @@ function equipFor(input: CombatInput, row: VtMonsterRow, weapon: PlanItem | unde
 
 function cast(input: CombatInput, spell: PlanSpell, target: number, why: string): CombatAction {
   return needStance(input, 'magic', `to cast ${spell.name}`) ?? { kind: 'cast', spell, target, why };
+}
+
+const trainedIn = (input: CombatInput, school: string): boolean => { const s = schoolSkill(input, school); return !!s && s.training !== 'untrained'; };
+
+/**
+ * Harm: the best Harm Other you can cast. Fists: Tusker Fists (VTank leaves
+ * the positioning to you and aims from .116, as our cast at the target does).
+ * Drain Auto (also Auto with neither War nor Void Magic trained, FAQ .112):
+ * Drain Health Other takes a share of the target's CURRENT health, so it is
+ * cast while the target is at half health or more (or reports none), and
+ * Harm Other's fixed damage finishes it below that. INF: VTank's exact drain
+ * choice (CHG .168 changed it for monsters that report no health) is not
+ * public; the half-health switch is ours.
+ */
+function magicModeAttack(input: CombatInput, top: Candidate): { spell: PlanSpell; why: string } | null {
+  const d = top.row.damage;
+  const name = top.m.name;
+  if (d === VT_DAMAGE.Harm) { const s = bestSpell(input, input.families.harm); return s ? { spell: s, why: `harm at ${name}` } : null; }
+  if (d === VT_DAMAGE.Fists) { const s = bestSpell(input, input.families.fists); return s ? { spell: s, why: `fists at ${name}` } : null; }
+  const drainMode = d === VT_DAMAGE.DrainAuto || (d === VT_DAMAGE.Auto && !trainedIn(input, 'War Magic') && !trainedIn(input, 'Void Magic'));
+  if (!drainMode) return null;
+  const drain = bestSpell(input, input.families.drain);
+  const harm = bestSpell(input, input.families.harm);
+  const healthy = top.m.health === undefined || top.m.health >= 0.5;
+  if (drain && (healthy || !harm)) return { spell: drain, why: `drain at ${name}` };
+  if (harm) return { spell: harm, why: `harm at ${name} (low health)` };
+  return null;
+}
+
+// ─── Pets ───────────────────────────────────────────────────────────────────
+
+/** UiEffects bits (ACE.Entity/Enum/UiEffects.cs) → element. */
+const UI_EFFECT_ELEMENT: Array<[number, CombatElement]> = [[0x20, 'fire'], [0x40, 'lightning'], [0x80, 'cold'], [0x100, 'acid'], [0x200, 'bludgeon'], [0x400, 'slash'], [0x800, 'pierce'], [0x1000, 'nether']];
+
+/**
+ * A summoning essence's element, from what the client sees: its UiEffects in
+ * the object's public description (the icon's element glow). ACE's
+ * PetDevice.PetDeviceToPetMapping (essence → pet + DamageType) is server code
+ * a client can't read, but in the ACE world DB every essence it gives an
+ * element carries the matching UiEffects (Fire 0x20, Lightning 0x40, Frost
+ * 0x80, Acid 0x100: 252 of 252); the golem essences show only Magical (0x1),
+ * so they have no element here.
+ */
+export function petDeviceElement(item: PlanItem): CombatElement | null {
+  const u = item.uiEffects ?? 0;
+  for (const [bit, el] of UI_EFFECT_ELEMENT) if (u & bit) return el;
+  return null;
+}
+
+export interface PetPlan { device: PlanItem; element: CombatElement | null; count: number; why: string }
+
+/**
+ * VirindiTank's Summon Pets choice (CHG .156/.157): monsters within pet range
+ * (not beyond it: the caller passes Monster Range or Custom Pet Range) whose
+ * row is not priority -1 and whose PetDmg is not None count towards Pet Min.
+ * Monsters. The element comes from the highest-priority one's PetDmg: PAuto =
+ * the element your own Dmg type resolves to for it, else the Auto element;
+ * Auto = the Auto element; an element = only that element. The device is the
+ * first pet device (Items-tab order) of that element. INF: with PAuto / Auto
+ * and no essence of either element, the first device is used.
+ */
+export function planPet(input: CombatInput, opts: { range: number; minMonsters: number; devices: PlanItem[] }): PetPlan | null {
+  if (!opts.devices.length) return null;
+  const counted = candidates(input, opts.range).filter((c) => c.row.petDamage !== VT_DAMAGE.None);
+  if (counted.length < Math.max(1, opts.minMonsters)) return null;
+  const top = counted[0];
+  const weapon = rowWeapon(input, top.row);
+  const byElement = (el: CombatElement | null) => (el ? opts.devices.find((d) => petDeviceElement(d) === el) : undefined);
+  const why = (d: PlanItem) => `${counted.length} within ${Math.round(opts.range)} m, ${top.m.name} first: ${d.name}`;
+  const pd = top.row.petDamage;
+  if (pd === VT_PET_AUTO || pd === VT_DAMAGE.Auto) {
+    const mine = pd === VT_PET_AUTO ? byElement(resolveElement(input, top.row.damage, weapon, top.m)) : undefined;
+    const d = mine ?? byElement(resolveElement(input, VT_DAMAGE.Auto, weapon, top.m)) ?? opts.devices[0];
+    return { device: d, element: petDeviceElement(d), count: counted.length, why: why(d) };
+  }
+  const want = VT_TO_ELEMENT[pd] ?? null;
+  const d = byElement(want);
+  return d ? { device: d, element: want, count: counted.length, why: why(d) } : null;
 }
 
 export function planCombat(input: CombatInput): CombatAction | null {
@@ -542,12 +815,12 @@ export function planCombat(input: CombatInput): CombatAction | null {
   }
 
   const on = (col: VtMonsterColumn) => top.row.on.includes(col);
-  if (!on('A') && !on('R')) return null; // debuff only (STD)
+  if (!on('A') && !on('R') && !on('S')) return null; // debuff only (STD)
 
   const eq = equipFor(input, top.row, weapon);
   if (eq) return eq;
 
-  const element = resolveElement(input, top.row.damage, weapon);
+  const element = resolveElement(input, top.row.damage, weapon, top.m);
   const fams = element ? input.families.attack[element] : undefined;
 
   // Ring (STD): with A+R when ≥ MinimumRingTargets monsters are within RingDistance; with R only when any R monster is.
@@ -559,12 +832,13 @@ export function planCombat(input: CombatInput): CombatAction | null {
     if (ring) return cast(input, ring, top.m.guid, `ring: ${inRing.length} within ${ringDist} m`);
   }
   // R only: war on targets outside ring range; inside it, nothing more (STD).
-  if (!on('A') && top.m.dist <= numSetting(input.settings, 'RingDistance')) return null;
+  if (!on('A') && !on('S') && top.m.dist <= numSetting(input.settings, 'RingDistance')) return null;
 
   if (kind === 'caster' || !weapon) {
     if (fams) {
+      // S alone streaks every time; A with S streaks only as the finisher (MOSS CombatController: PlanStreak / IsFinishingBlow).
       const streak = on('S') ? bestSpell(input, fams.streak) : null;
-      if (streak) return cast(input, streak, top.m.guid, `streak at ${top.m.name}`);
+      if (streak && (!on('A') || isFinishingBlow(input, top.m, streak))) return cast(input, streak, top.m.guid, on('A') ? `streak to finish ${top.m.name}` : `streak at ${top.m.name}`);
       const bolt = bestSpell(input, fams.bolt);
       const useArcs = numSetting(input.settings, 'UseArcs');
       const arcOk = useArcs === 3 || (useArcs === 2 && top.m.dist >= numSetting(input.settings, 'ArcRange'));
@@ -573,8 +847,16 @@ export function planCombat(input: CombatInput): CombatAction | null {
       if (arc && (!bolt || arc.power >= bolt.power)) return cast(input, arc, top.m.guid, `arc at ${top.m.name}`);
       if (bolt) return cast(input, bolt, top.m.guid, `bolt at ${top.m.name}`);
     }
+    // The Life Magic / Tusker Fists modes (FAQ: "Void Basic, Drain Auto or Harm"; Auto with neither War nor Void trained is Drain Auto).
+    const m = magicModeAttack(input, top);
+    if (m) return cast(input, m.spell, top.m.guid, m.why);
     if (kind === 'caster') return null; // a caster with no castable attack: nothing to do
   }
+  // A launcher shoots the row's ammunition (VTank swaps arrows per monster).
+  if (kind === 'missile') {
+    const ammo = ammoFor(input, top.row, weapon, top.m);
+    if (ammo && !(ammo.equipped && /MissileAmmo/.test(ammo.slot ?? 'MissileAmmo'))) return { kind: 'equip', item: ammo, why: `${top.row.name} shoots ${ammo.name}` };
+  }
   const stance: Stance = kind === 'missile' ? 'missile' : 'melee';
-  return needStance(input, stance, `to attack with ${weapon?.name ?? 'bare hands'}`) ?? { kind: 'attack', target: top.m.guid, why: `${top.row.name === '<DEFAULT>' ? 'default' : top.row.name} p${top.row.priority}` };
+  return needStance(input, stance, `to attack with ${weapon?.name ?? 'bare hands'}`) ?? { kind: 'attack', target: top.m.guid, why: `${top.row.name === '<DEFAULT>' ? 'default' : top.row.name} p${top.row.priority}`, element };
 }

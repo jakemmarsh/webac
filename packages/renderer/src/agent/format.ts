@@ -46,6 +46,8 @@ export function formatObject(o: AgentObject): string {
   if (o.stack && o.stack > 1) bits.push(`x${o.stack}`);
   if (o.open) bits.push('open');
   if (o.dying) bits.push('dying');
+  if (o.attackingYou) bits.push(`ATTACKING YOU (${o.attackingYou}× in 10 s)`);
+  if (o.lineOfFireBlockedAt !== undefined) bits.push(`no line of fire: blocked ${o.lineOfFireBlockedAt.toFixed(1)} m along it (a bolt or arrow would hit that)`);
   if (o.seenAgo !== undefined) bits.push(`last seen ${seenAgoText(o.seenAgo)} ago`);
   return bits.join('  ');
 }
@@ -86,7 +88,9 @@ export function formatObservation(obs: AgentObservation): string {
   const v = (x: { cur: number; max: number }): string => `${x.cur}/${x.max}`;
   out.push(`${me.name} (L${me.level})${me.dead ? '  ** DEAD **' : ''}  HP ${v(me.health)}  ST ${v(me.stamina)}  MA ${v(me.mana)}  mode ${me.combatMode}`);
   out.push(`at ${me.coords ?? 'indoors'}  cell ${me.cell}  facing ${Math.round(me.heading)}° (${compassPoint(me.heading)})${me.task ? `  task: ${me.task}` : ''}`);
-  if (me.pyreals !== undefined || me.burden || me.xp) out.push(`pyreals ${me.pyreals ?? '?'}${me.burden ? `  burden ${me.burden}` : ''}${me.xp ? `  unassigned xp ${me.xp.unassigned.toLocaleString('en-US')}${me.xp.unassigned >= 1000 ? ' (spend it: ac_raise)' : ''}` : ''}`);
+  // ACE Player_Death.GetNumCoinsDropped: above level 5 a death drops half your coins; trade notes are not coins.
+  const coinRisk = me.pyreals !== undefined && me.pyreals >= 1000 && me.level > 5 ? ' (half drop if you die; trade notes, bought from most vendors, don\'t)' : '';
+  if (me.pyreals !== undefined || me.burden || me.xp) out.push(`pyreals ${me.pyreals ?? '?'}${coinRisk}${me.burden ? `  burden ${me.burden}` : ''}${me.xp ? `  unassigned xp ${me.xp.unassigned.toLocaleString('en-US')}${me.xp.unassigned >= 1000 ? ' (spend it: ac_raise)' : ''}` : ''}`);
   for (const [i, d] of obs.dialogs.entries()) out.push(`DIALOG ${i} [${d.buttons.join(' / ')}]: ${d.text.replace(/\s+/g, ' ')}`);
   if (obs.dialogs.length) out.push('  (answer or dismiss each with ac_dialog, e.g. button=OK; a dialog stays up until you do)');
   out.push(formatBuffs((obs.buffs ?? []).filter((b) => b.beneficial !== false)));
@@ -97,6 +101,8 @@ export function formatObservation(obs: AgentObservation): string {
   if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
   if (obs.windows?.length) out.push(`windows open: ${obs.windows.join(', ')}  (ac_close name=… or all, when done with them)`);
   out.push(`target: ${obs.target ? formatObject(obs.target) : 'none'}`);
+  const attackers = obs.nearby.filter((o) => o.attackingYou && o.guid !== obs.target?.guid);
+  if (attackers.length) out.push(`under attack by: ${attackers.map((o) => `${o.name} #${o.guid.toString(16)} ${o.dist.toFixed(1)}m (${o.attackingYou}× in 10 s)`).join(', ')}${obs.target ? ' (not your target)' : ''}`);
   out.push(`nearby (${obs.nearby.length}${obs.nearbyTotal > obs.nearby.length ? ` of ${obs.nearbyTotal}` : ''}, nearest first):`);
   for (const o of obs.nearby) out.push(`  ${formatObject(o)}`);
   if (obs.remembered?.length) {
@@ -116,6 +122,15 @@ export function formatEvents(events: AgentEvent[]): string {
   return events.map((e) => `  [${e.seq}] ${e.type}: ${e.text}`).join('\n');
 }
 
+/**
+ * The magic foci (ACE Player_Spells.FociWCIDs): one lets you cast its school with fewer components, but only
+ * while it is in your own inventory (Player.HasFoci reads the top-level Inventory, not a side pack's). A focus is
+ * RequiresBackpackSlot (PropertyBool 81), so at the top level it takes one of the side pack slots.
+ */
+export const FOCI_WCIDS: ReadonlyMap<number, string> = new Map([
+  [15268, 'Creature Enchantment'], [15269, 'Item Enchantment'], [15270, 'Life Magic'], [15271, 'War Magic'], [43173, 'Void Magic'],
+]);
+
 export function formatInventory(items: AgentItem[]): string {
   if (!items.length) return '(empty)';
   const groups = new Map<string, AgentItem[]>();
@@ -128,7 +143,13 @@ export function formatInventory(items: AgentItem[]): string {
   for (const [where, list] of groups) {
     out.push(`${where}:`);
     for (const it of list) {
-      const extra = [it.slot, it.stack && it.stack > 1 ? `x${it.stack}` : '', it.type].filter(Boolean).join(', ');
+      const school = it.wcid !== undefined ? FOCI_WCIDS.get(it.wcid) : undefined;
+      const extra = [
+        it.slot, it.stack && it.stack > 1 ? `x${it.stack}` : '', it.type,
+        it.fits && it.where !== 'equipped' ? `fits ${it.fits}` : '',
+        it.value ? `value ${(it.value * (it.stack ?? 1)).toLocaleString('en-US')}` : '',
+        school ? (it.where === 'pack slots' || it.where === 'main pack' ? `${school} focus: in use` : `${school} focus: NOT in use inside ${it.where}; it counts only in your own pack slots`) : '',
+      ].filter(Boolean).join(', ');
       out.push(`  #${it.guid.toString(16)} ${it.name}${extra ? `  (${extra})` : ''}`);
     }
   }
@@ -142,5 +163,5 @@ export function formatTrace(points: AgentTracePoint[]): string {
 
 export function formatSpells(spells: AgentSpell[]): string {
   if (!spells.length) return '(no matching spells)';
-  return spells.map((s) => `  ${s.id}  ${s.name}  [${s.school}${s.level ? ` L${s.level}` : ''}]`).join('\n');
+  return spells.map((s) => `  ${s.id}  ${s.name}  [${s.school}${s.level ? ` L${s.level}` : ''}]${s.range ? `  range ${s.range} m` : ''}`).join('\n');
 }

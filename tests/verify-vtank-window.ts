@@ -5,9 +5,11 @@
  * Meta list and Edit Meta Rule, its Route tab, and live changes to the run.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
 import {
-  VT_OPTIONS, emptyRoutineDoc, importVTank, validateRoutineDoc, vtCanonicalName, vtFromVTank, vtOption, vtToVTank,
+  VT_DAMAGE, VT_OPTIONS, emptyRoutineDoc, importVTank, validateRoutineDoc, vtCanonicalName, vtFromVTank, vtOption, vtToVTank,
   type RoutineDoc, type RoutineProfile,
 } from '../packages/shared/src/routines/index.js';
 import type { RoutineStatus } from '../packages/renderer/src/agent/RoutineEngine.js';
@@ -60,6 +62,7 @@ function pick(field: Element | null, label: string): void {
 
 function fakeSource(doc: RoutineDoc) {
   const calls: string[] = [];
+  const reports: string[] = [];
   let status: RoutineStatus = { running: false, paused: false, profile: null, state: null, acting: null, last: [] };
   const live: Record<string, string | number | boolean> = {};
   const saved: RoutineDoc[] = [];
@@ -79,7 +82,7 @@ function fakeSource(doc: RoutineDoc) {
     resetStats: () => {},
     step: () => ({ ok: true, message: '' }),
     history: () => [],
-    report: () => {},
+    report: (text: string) => { reports.push(text); },
     character: () => 'Claude',
     coords: () => coords,
     items: () => [],
@@ -93,13 +96,14 @@ function fakeSource(doc: RoutineDoc) {
     jump: (o) => { calls.push(`jump ${JSON.stringify(o)}`); return { ok: true, message: 'jumped' }; },
     fakeDeath: () => { calls.push('fake death'); return { ok: true, message: 'fake death' }; },
     reverseRoute: () => { calls.push('reverse'); return { ok: true, message: 'reversed' }; },
-    setWaypoint: (i) => { calls.push(`waypoint ${i}`); status = { ...status, nav: { route: 'runback', point: i, done: false } }; return { ok: true, message: '' }; },
+    // The fake's nearest point to you is point 2 (index 1).
+    setNearestWaypoint: () => { calls.push('nearest waypoint'); status = { ...status, nav: { route: 'runback', point: 1, done: false } }; return { ok: true, message: '' }; },
     cancelForceBuff: () => { calls.push('cancel force buff'); return { ok: true, message: '' }; },
     setState: (n) => { calls.push(`state ${n}`); status = { ...status, state: n }; return { ok: true, message: '' }; },
     update: (p) => { calls.push(`update ${p.name}`); return { ok: true, message: '' }; },
     selection: () => selected,
   };
-  return { source, calls, saved, live, setStatus: (s: Partial<RoutineStatus>) => { status = { ...status, ...s }; }, select: (s: typeof selected) => { selected = s; }, setCoords: (c: string | null) => { coords = c; } };
+  return { source, calls, reports, saved, live, setStatus: (s: Partial<RoutineStatus>) => { status = { ...status, ...s }; }, select: (s: typeof selected) => { selected = s; }, setCoords: (c: string | null) => { coords = c; } };
 }
 
 const meta = (): RoutineProfile => ({
@@ -207,6 +211,8 @@ describe('the VirindiTank window', () => {
     run();
     run();
     expect(t.calls).toEqual(['run Runback', 'pause', 'resume']);
+    // The server-rules line prints once, on the first start (not on resume).
+    expect(t.reports).toEqual([W.VT_SERVER_RULES_NOTE]);
   });
 
   it('Advanced Options lists every option the engine acts on by VTank\'s name, grouped, and edits them', async () => {
@@ -214,6 +220,9 @@ describe('the VirindiTank window', () => {
     (t.body.querySelector('[data-vtank="advanced"] [data-check]') as HTMLElement).click();
     const rows = Array.from(t.body.querySelectorAll('[data-vtank-advanced]')).map((e) => (e as HTMLElement).dataset.vtankAdvanced);
     expect(rows).toEqual(VT_OPTIONS.filter((o) => o.engine).map((o) => o.name));
+    // Recharge boost, pea splitting and crafting are engine options, so they're listed; UseSpecialAmmo (not built) isn't.
+    expect(rows).toEqual(expect.arrayContaining(['RechargeBoostTimeSeconds', 'RechargeBoostAmount', 'ClearLevelBoostFlagOnCast', 'SplitPeas', 'SpellCompMin-Critical', 'SpellCompMin-Normal', 'SpellCompMin-Idle', 'AutoCraftItems', 'IdleCraftCount_HealthKits', 'ArrowheadFletchDiffExcessThreshold']));
+    expect(rows).not.toContain('UseSpecialAmmo');
     (t.body.querySelector('[data-vtank-advanced="StopMacroOnDeath"] [data-check]') as HTMLElement).click();
     await flush();
     expect(t.saved.at(-1)!.profiles[0].settings!.StopMacroOnDeath).toBe(false);
@@ -323,30 +332,68 @@ describe('the VirindiTank window', () => {
     expect(texts(t.body)).toContain('Your position is not known yet.');
   });
 
-  it('Route: Add NPC Talk, the current-waypoint arrow, and Follow (Add sets the player to follow)', async () => {
+  it('Route: Add NPC Talk, the current-waypoint arrow (circular routes only, the nearest point), and Follow (Add sets the player or creature to follow)', async () => {
     const t = await open();
     (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
     const wps = () => Array.from(t.body.querySelectorAll('[data-vtank-waypoint]')).map((e) => texts(e)[0]);
     t.select({ name: 'Sean the Speedy', kind: 'npc' });
     (t.body.querySelector('[data-vtank="add-npc-talk"]') as HTMLElement).click();
     expect(wps().at(-1)).toBe('3. NPC Talk: Sean the Speedy');
-    (t.body.querySelector('[data-vtank-waypoint="1"]') as HTMLElement).click();
+    // A Once route: VTank's arrow works on circular routes only, so it isn't drawn.
+    expect(t.body.querySelector('[data-vtank="wp-current"]')).toBeNull();
+    pick(t.body.querySelector('[data-vtank="route-mode"]'), 'Circular');
     (t.body.querySelector('[data-vtank="wp-current"]') as HTMLElement).click();
     expect(texts(t.body)).toContain('Turn Run Macro on first.');
     (t.body.querySelector('[data-vtank-tab="options"]') as HTMLElement).click();
     (t.body.querySelector('[data-vtank="run-macro"] [data-check]') as HTMLElement).click();
     (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
-    (t.body.querySelector('[data-vtank-waypoint="1"]') as HTMLElement).click();
+    // No waypoint selected: the arrow picks the one nearest you, not the selection.
     (t.body.querySelector('[data-vtank="wp-current"]') as HTMLElement).click();
-    expect(t.calls).toContain('waypoint 1');
+    expect(t.calls).toContain('nearest waypoint');
     expect((t.body.querySelector('[data-vtank-waypoint="1"]') as HTMLElement).dataset.current).toBe('1');
     pick(t.body.querySelector('[data-vtank="route-mode"]'), 'Follow');
+    expect(t.body.querySelector('[data-vtank="wp-current"]')).toBeNull();
+    // An item is no follow target; a player or a creature is (VTank follows the selection).
+    t.select({ name: 'Pyreal', kind: 'item' });
+    (t.body.querySelector('[data-vtank="add-point"]') as HTMLElement).click();
+    expect(texts(t.body)).toContain('Select the player or creature to follow first.');
+    t.select({ name: 'Drudge Skulker', kind: 'monster' });
+    (t.body.querySelector('[data-vtank="add-point"]') as HTMLElement).click();
+    expect((t.body.querySelector('[data-vtank-follow]') as HTMLElement).dataset.vtankFollow).toBe('Drudge Skulker');
     t.select({ name: 'Leader', kind: 'player' });
     (t.body.querySelector('[data-vtank="add-point"]') as HTMLElement).click();
     expect((t.body.querySelector('[data-vtank-follow]') as HTMLElement).dataset.vtankFollow).toBe('Leader');
     await flush();
     expect(t.saved.at(-1)!.profiles[0].routes[0]).toMatchObject({ mode: 'follow', follow: 'Leader' });
     expect(validateRoutineDoc(t.saved.at(-1)!)).toEqual([]);
+    // The leader out of sight: the macro stands still and the line says so.
+    t.setStatus({ follow: { target: 'Leader', inSight: false, trail: 0 } });
+    (t.body.querySelector('[data-vtank-tab="options"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
+    const line = t.body.querySelector('[data-vtank-follow]') as HTMLElement;
+    expect(line.dataset.lost).toBe('1');
+    expect(line.dataset.text).toBe('Following: Leader (out of sight: standing still)');
+  });
+
+  it('Follow on an account with no profile yet: the new profile and its follow route save', async () => {
+    const t = await open(docWith());
+    (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
+    pick(t.body.querySelector('[data-vtank="route-mode"]'), 'Follow');
+    t.select({ name: 'Leader Two', kind: 'player' });
+    (t.body.querySelector('[data-vtank="add-point"]') as HTMLElement).click();
+    await flush();
+    expect(texts(t.body).join(' ')).not.toMatch(/not saved/);
+    const doc = t.saved.at(-1)!;
+    expect(validateRoutineDoc(doc)).toEqual([]);
+    expect(doc.profiles[0].routes[0]).toMatchObject({ mode: 'follow', follow: 'Leader Two' });
+    // The Route tab's route is the one Run Macro loads (VTank has one current nav profile).
+    expect(doc.profiles[0].navRoute).toBe(doc.profiles[0].routes[0].name);
+    // A store that refuses it (a bridge on an older build) is named, field and all.
+    t.source.save = async () => ({ ok: false, message: 'not saved: the routine has problems', issues: [{ path: 'profiles[0].routes[0].mode', message: 'must be circular, linear or once' }] });
+    t.select({ name: 'Leader Three', kind: 'player' });
+    (t.body.querySelector('[data-vtank="add-point"]') as HTMLElement).click();
+    await flush();
+    expect(texts(t.body)).toContain('not saved: the routine has problems (profiles[0].routes[0].mode: must be circular, linear or once)');
   });
 
   it('Profiles: Macro Settings, CopyTo, the nav and loot profiles the macro starts with, Mine only', async () => {
@@ -439,12 +486,12 @@ describe('the VirindiTank window: Vitals, Monsters, Items, Consumables, Buffs', 
     const row0 = () => t.body.querySelector('[data-vtank-monster="0"]') as HTMLElement;
     const on = () => Array.from(row0().querySelectorAll('[data-vtank-cell]')).filter((e) => (e.querySelector('[data-check]') ?? e as HTMLElement).getAttribute('data-check') === '1').map((e) => (e as HTMLElement).dataset.vtankCell);
     expect(on()).toEqual(['A', 'S']);
-    // PetDmg isn't drawn until its element choice is built.
-    expect(texts(row0())).toEqual(['<< DEFAULT >>', '1', 'Auto', 'None', '<AUTO>', '<AUTO>']);
+    expect(texts(row0())).toEqual(['<< DEFAULT >>', '1', 'Auto', 'None', '<AUTO>', '<AUTO>', 'PAuto']);
     (row0().querySelector('[data-vtank-cell="I"]') as HTMLElement).click();
     (row0().querySelector('[data-vtank-cycle="priority"]') as HTMLElement).click();
     (row0().querySelector('[data-vtank-cycle="damage"]') as HTMLElement).click();
-    expect(texts(row0())).toEqual(['<< DEFAULT >>', '2', 'Pierce', 'None', '<AUTO>', '<AUTO>']);
+    (row0().querySelector('[data-vtank-cycle="petDamage"]') as HTMLElement).click();
+    expect(texts(row0())).toEqual(['<< DEFAULT >>', '2', 'Pierce', 'None', '<AUTO>', '<AUTO>', 'Auto']);
     const name = t.body.querySelector('[data-vtank="monster-name"]') as HTMLInputElement;
     name.value = 'Drudge Skulker';
     name.dispatchEvent(new Event('input'));
@@ -456,7 +503,7 @@ describe('the VirindiTank window: Vitals, Monsters, Items, Consumables, Buffs', 
     await flush();
     const m = t.saved.at(-1)!.profiles[0].vtank!.monsters;
     expect(m.map((r) => r.name)).toEqual(['<DEFAULT>', 'Drudge Skulker', 'Mite Snowman']);
-    expect(m[0]).toMatchObject({ priority: 2, damage: 0, on: ['A', 'S', 'I'] });
+    expect(m[0]).toMatchObject({ priority: 2, damage: 0, on: ['A', 'S', 'I'], petDamage: VT_DAMAGE.Auto });
     expect(validateRoutineDoc(t.saved.at(-1)!)).toEqual([]);
     // The default row can't be removed; the others can.
     expect(row0().querySelector('[data-vtank-remove]')).toBeNull();
@@ -464,7 +511,53 @@ describe('the VirindiTank window: Vitals, Monsters, Items, Consumables, Buffs', 
     expect(t.win.profile()!.vtank!.monsters.map((r) => r.name)).toEqual(['<DEFAULT>', 'Mite Snowman']);
   });
 
-  it('Items and Consumables add what you have selected in your pack; scarabs to exclude (no Add All Peas until pea splitting is built)', async () => {
+  it('Dmg type cycles through Harm, Drain Auto, Prismatic, Random and Fists; PetDmg through PAuto, Auto, None and the essence elements', async () => {
+    const t = await open();
+    show(t, 'monsters');
+    const row0 = () => t.body.querySelector('[data-vtank-monster="0"]') as HTMLElement;
+    const seen: string[] = [];
+    for (let i = 0; i < 14; i++) { (row0().querySelector('[data-vtank-cycle="damage"]') as HTMLElement).click(); seen.push((row0().querySelector('[data-vtank-cycle="damage"]') as HTMLElement).dataset.text!); }
+    expect(seen).toEqual(['Pierce', 'Bludgeon', 'Slash', 'Acid', 'Lightning', 'Cold', 'Fire', 'Void', 'Harm', 'Drain Auto', 'Prismatic', 'Random', 'Fists', 'Auto']);
+    const pets: string[] = [];
+    for (let i = 0; i < 7; i++) { (row0().querySelector('[data-vtank-cycle="petDamage"]') as HTMLElement).click(); pets.push((row0().querySelector('[data-vtank-cycle="petDamage"]') as HTMLElement).dataset.text!); }
+    expect(pets).toEqual(['Auto', 'None', 'Acid', 'Lightning', 'Cold', 'Fire', 'PAuto']);
+  });
+
+  it('an era without Summoning / Void Magic / Tusker Fists (Dark Majesty, AC1999 skill tables) draws none of their controls', async () => {
+    const t = await open();
+    t.source.hasSkill = (n) => !/^(summoning|void magic)$/i.test(n);
+    t.source.hasSpell = (id) => id !== 2934;
+    t.redraw();
+    const opts = Array.from(t.body.querySelectorAll('[data-vtank-option]')).map((e) => (e as HTMLElement).dataset.vtankOption);
+    expect(opts).not.toContain('SummonPets');
+    expect(opts.some((n) => /^Pet/.test(n!))).toBe(false);
+    expect(opts).toContain('AttackDistance');
+    (t.body.querySelector('[data-vtank="advanced"] [data-check]') as HTMLElement).click();
+    const adv = Array.from(t.body.querySelectorAll('[data-vtank-advanced]')).map((e) => (e as HTMLElement).dataset.vtankAdvanced);
+    expect(adv).toEqual(VT_OPTIONS.filter((o) => o.engine && !W.VT_PET_OPTIONS.has(o.name)).map((o) => o.name));
+    (t.body.querySelector('[data-vtank="advanced-close"]') as HTMLElement).click();
+    show(t, 'monsters');
+    expect(Array.from(t.body.querySelectorAll('[data-vtank-column]')).map((e) => (e as HTMLElement).dataset.vtankColumn)).toEqual(['F', 'B', 'G', 'I', 'Y', 'V', 'A', 'R', 'S']);
+    const row0 = () => t.body.querySelector('[data-vtank-monster="0"]') as HTMLElement;
+    expect(row0().querySelector('[data-vtank-cycle="petDamage"]')).toBeNull();
+    expect(row0().querySelector('[data-vtank-cell="Cp"]')).toBeNull();
+    expect(texts(t.body)).not.toContain('PetDmg');
+    const seen: string[] = [];
+    for (let i = 0; i < 12; i++) { (row0().querySelector('[data-vtank-cycle="damage"]') as HTMLElement).click(); seen.push((row0().querySelector('[data-vtank-cycle="damage"]') as HTMLElement).dataset.text!); }
+    expect(seen).toEqual(['Pierce', 'Bludgeon', 'Slash', 'Acid', 'Lightning', 'Cold', 'Fire', 'Harm', 'Drain Auto', 'Prismatic', 'Random', 'Auto']);
+    show(t, 'items');
+    expect(texts(t.body)).toContain('Weapons / Wands / Shields');
+    expect(texts(t.body)).not.toContain('Weapons / Wands / Shields / Pets');
+    // End of retail (the table has both): everything is back.
+    t.source.hasSkill = () => true;
+    t.source.hasSpell = () => true;
+    show(t, 'items');
+    expect(texts(t.body)).toContain('Weapons / Wands / Shields / Pets');
+    show(t, 'monsters');
+    expect(texts(t.body)).toContain('PetDmg');
+  });
+
+  it('Items and Consumables add what you have selected in your pack; Add All Peas adds every pea carried; scarabs to exclude', async () => {
     const t = await open();
     t.source.items = () => [{ name: 'Aqua Pea' }, { name: 'Healing Kit' }, { name: 'Ruby Pea' }];
     show(t, 'items');
@@ -478,13 +571,14 @@ describe('the VirindiTank window: Vitals, Monsters, Items, Consumables, Buffs', 
     show(t, 'consumables');
     t.select({ name: 'Healing Kit', kind: 'item' });
     (t.body.querySelector('[data-vtank="add-consumable"]') as HTMLElement).click();
-    expect(t.body.querySelector('[data-vtank="add-peas"]')).toBeNull();
+    (t.body.querySelector('[data-vtank="add-peas"]') as HTMLElement).click();
+    expect(texts(t.body)).toEqual(expect.arrayContaining(['Aqua Pea', 'Ruby Pea']));
     t.select({ name: 'Copper Scarab', kind: 'item' });
     (t.body.querySelector('[data-vtank="add-scarab"]') as HTMLElement).click();
     await flush();
     const v = t.saved.at(-1)!.profiles[0].vtank!;
     expect(v.items).toEqual([{ name: 'Frost Wand' }, { name: 'Kite Shield', noBuffs: true }]);
-    expect(v.consumables).toEqual(['Healing Kit']);
+    expect(v.consumables).toEqual(['Healing Kit', 'Aqua Pea', 'Ruby Pea']);
     expect(v.excludedScarabs).toEqual(['Copper Scarab']);
     // The Monsters tab's Weapon cycles through the Items list.
     show(t, 'monsters');
@@ -524,5 +618,90 @@ describe('GameUI hosts the VirindiTank window', () => {
     expect(ui.automationWindowOpen).toBe(false);
     expect(H.container.querySelector('[data-vtank-dialog]')).toBeNull();
     ui.setAutomationSource(null);
+  });
+});
+
+describe('VirindiTank options that follow the era\'s data', () => {
+  const table = (...descs: string[]) => ({ spells: new Map(descs.map((desc, i) => [i + 1, { desc }])) });
+  const shownOptions = async (t: ReturnType<typeof table> | null) => {
+    const o = await open();
+    (o.source as { spellTable?: () => unknown }).spellTable = () => t;
+    o.redraw();
+    return { o, names: Array.from(o.body.querySelectorAll('[data-vtank-option]')).map((e) => (e as HTMLElement).dataset.vtankOption) };
+  };
+
+  it('Cast Dispel Self shows only when the era\'s SpellTable has a self dispel of negative Life Magic; Use Dispel Items when it has any such dispel', async () => {
+    const eol = await shownOptions(table('Dispels 3-6 negative Life Magic enchantments of level 7 or lower from the caster.'));
+    expect(eol.names).toEqual(expect.arrayContaining(['CastDispelSelf', 'UseDispelItems']));
+    // Only an "other" dispel: no self one to cast, but an item could carry it.
+    const otherOnly = await shownOptions(table('Dispels 3-6 negative Life Magic enchantments of level 7 or lower from the target.'));
+    expect(otherOnly.names).toContain('UseDispelItems');
+    expect(otherOnly.names).not.toContain('CastDispelSelf');
+    // A table with no dispels (AC1999): neither control, nor in Advanced Options or /vt opt list.
+    const none = await shownOptions(table('Improves the caster\'s Strength.'));
+    expect(none.names).not.toContain('CastDispelSelf');
+    expect(none.names).not.toContain('UseDispelItems');
+    const list = (await none.o.win.command('/vt opt list')).join('\n');
+    expect(list).not.toMatch(/CastDispelSelf|UseDispelItems/);
+    expect(list).toMatch(/ManaChargesWhenOff/);
+    // Not known yet (no table loaded): shown.
+    expect((await shownOptions(null)).names).toEqual(expect.arrayContaining(['CastDispelSelf', 'UseDispelItems']));
+  });
+
+  const REPO = resolve(__dirname, '..');
+  const EOL = resolve(REPO, 'dat/client_portal.dat');
+  const DM = resolve(REPO, 'dat/sets/classic-dereth/client_portal.dat');
+  const Y1999 = resolve(REPO, 'dat/sets/ac1999-retail/portal.dat');
+  describe.skipIf(!existsSync(EOL) || !existsSync(DM) || !existsSync(Y1999))('on each era\'s own SpellTable 0x0E00000E', () => {
+    let avail: Record<'eol' | 'dm' | 'y1999', { CastDispelSelf: boolean; UseDispelItems: boolean }>;
+    beforeAll(async () => {
+      const { DatReader } = await import('../packages/dat-parser/src/DatReader');
+      const { SpellTable } = await import('../packages/dat-parser/src/file-types/SpellTable');
+      const { transcodeSpellTable1999 } = await import('../packages/dat-parser/src/era1999/Tables1999');
+      const { openDat } = await import('./_harness/dat.js');
+      const { dispelOptionsAvailable } = await import('../packages/renderer/src/agent/macro/vtMacro.ts');
+      const of = (path: string, y = false) => {
+        let raw = openDat(path).getFileData(0x0e00000e)!;
+        if (y) raw = transcodeSpellTable1999(raw);
+        return dispelOptionsAvailable(new SpellTable(new DatReader(raw)) as never);
+      };
+      avail = { eol: of(EOL), dm: of(DM), y1999: of(Y1999, true) };
+    });
+    it('end of retail and Dark Majesty have Eradicate Life Magic Self (both shown); AC1999 has no dispel spells (both hidden)', () => {
+      expect(avail.eol).toEqual({ CastDispelSelf: true, UseDispelItems: true });
+      expect(avail.dm).toEqual({ CastDispelSelf: true, UseDispelItems: true });
+      expect(avail.y1999).toEqual({ CastDispelSelf: false, UseDispelItems: false });
+    });
+  });
+});
+
+describe('the stand-by profile (M. Charges When Off with the macro off)', () => {
+  it('is the profile the window selects for the character in the world, loaded on first ask; none before a character is in the world', async () => {
+    const doc = docWith({ ...meta(), name: 'Other' }, { ...meta(), name: 'Mine' });
+    doc.characters = { Claude: 'Mine' };
+    const f = fakeSource(doc);
+    let ch: string | null = null;
+    f.source.character = () => ch;
+    let loads = 0;
+    const load = f.source.load;
+    f.source.load = () => { loads++; return load(); };
+    const win = new W.VTankWindow(fakeKit(), f.source, { open: () => {}, close: () => {} });
+    expect(win.standbyProfile()).toBeNull();
+    expect(loads).toBe(0);
+    ch = 'Claude';
+    expect(win.standbyProfile()).toBeNull();
+    expect(win.standbyProfile()).toBeNull();
+    await flush();
+    expect(loads).toBe(1);
+    expect(win.standbyProfile()?.name).toBe('Mine');
+    // Its edits are the stand-by's at once (the same profile object the window edits).
+    win.setValue('ManaChargesWhenOff', false, () => {});
+    expect(win.standbyProfile()?.settings?.ManaChargesWhenOff).toBe(false);
+    // Another character logs in: the document is loaded again for it.
+    ch = 'Alt';
+    expect(win.standbyProfile()).toBeNull();
+    await flush();
+    expect(loads).toBe(2);
+    expect(win.standbyProfile()?.name).toBe('Other');
   });
 });

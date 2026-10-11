@@ -367,8 +367,10 @@ describe('CORE.18.c.a / CORE.18.d — GameUI (happy-dom, synthetic DAT tables)',
     ui.vendorLayoutHandle.elements.get(VEL.filterMenu).click();
     const wrapper = ui.vendorWrapper as HTMLElement;
     const popup = [...wrapper.children].find((c) => (c as HTMLElement).style.bottom === '91px') as HTMLElement;
-    const weaponsRow = [...popup.children].find((r) => r.textContent?.includes('Weapons') || (r as HTMLElement).innerHTML.includes('Weapons')) as HTMLElement
-      ?? popup.children[1] as HTMLElement;
+    // Rows live in the listbox 0x10000350 beside its scrollbar 0x10000351.
+    const filterList = popup.querySelector('[data-vendor-filter-list]') as HTMLElement;
+    const weaponsRow = [...filterList.children].find((r) => r.textContent?.includes('Weapons') || (r as HTMLElement).innerHTML.includes('Weapons')) as HTMLElement
+      ?? filterList.children[1] as HTMLElement;
     weaponsRow.click();
     expect(ui.hud.target?.id).toBe(0x83000011);
     expect(selected).toEqual([0x83000011]);

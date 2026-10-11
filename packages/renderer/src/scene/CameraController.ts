@@ -13,6 +13,7 @@ import {
 } from '@ac/shared';
 import { MotionCommand } from '../animation/MotionCommands.js';
 import { baseOfCode, mouseEventToCode, wheelEventToCode } from '../input/MouseControls.js';
+import { suppressesBrowserScroll } from '../input/BrowserDefaults.js';
 
 /** The local player's interpreted locomotion (InterpretedMotionState's forward / sidestep after adjust_motion). */
 export interface LocalInterpretedMotion {
@@ -892,7 +893,10 @@ export class CameraController {
     element.addEventListener('keydown', (e) => {
       const tag = (document.activeElement as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (this.handleKeyDown(e.code, e.repeat, e.altKey)) e.preventDefault();
+      const consumed = this.handleKeyDown(e.code, e.repeat, e.altKey);
+      // The arrows / Space / Page keys walk and jump; they never also scroll
+      // the panel last clicked (retail panels take no keyboard focus).
+      if (consumed || suppressesBrowserScroll(e.code, document.activeElement)) e.preventDefault();
     });
     // Always process keyup to avoid stuck keys when focus changes mid-press
     element.addEventListener('keyup', (e) => this.handleKeyUp(e.code));

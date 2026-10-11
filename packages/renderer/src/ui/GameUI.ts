@@ -2255,6 +2255,13 @@ export class GameUI {
    * character, character-info and both effects slots.
    */
   private panelsSlot: PanelsWindowSlotState<PanelsWindowSlotPanel | EffectsWindowDef> = { current: null, returnTo: null };
+  /**
+   * AGENT — the panel gmPanelUI last handed the window back to (`shown`) when the panel over it (`by`) hid: a book
+   * read over the Character panel and closed (or dropped by its range check after a portal) brings the Character
+   * panel back, which an agent saw as a window "opening by itself" (Arcanist, Nanto, 2026-10-11). Cleared by the
+   * next change to the window.
+   */
+  private panelHandBack: { shown: string; by: string } | null = null;
 
   // Character Information panel (gmCharacterInfoUI / classic_characterinfo).
   // A scrolling text report (birth/age/deaths, innates, chess+fishing,
@@ -3661,6 +3668,8 @@ export class GameUI {
       0x06005f3c, 0x06005f3d, // Health text states
       0x06005f3e, 0x06005f3f, // Stamina text states
       0x06005f40, 0x06005f41, // Mana text states
+      // Book page-menu row 0x21000043:0x10000478 — tile, hover (state 6)
+      0x06001276, 0x0600127a,
       // Portal space textures now loaded directly by PortalSpaceRenderer via TextureManager
     ];
 
@@ -4375,12 +4384,13 @@ export class GameUI {
     const inner = document.createElement('div');
     Object.assign(inner.style, {
       position: 'absolute', left: '0', top: '0', right: '16px', bottom: '0',
-      overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'none',
+      overflowY: 'auto', overflowX: 'hidden',
     });
-    (inner.style as unknown as Record<string, string>).msOverflowStyle = 'none';
+    hideNativeScrollbar(inner);
     while (host.firstChild) inner.appendChild(host.firstChild);
     host.appendChild(inner);
-    host.style.position = 'relative';
+    // A positioned host keeps its place (the track below is absolute either way).
+    if (host.style.position !== 'absolute' && host.style.position !== 'fixed') host.style.position = 'relative';
     host.style.overflow = 'hidden';
 
     // `art`: another skin's ids (the VirindiTank window's lists: no track art, the blue thumb).
@@ -4400,6 +4410,7 @@ export class GameUI {
       if (!url) return;
       const img = document.createElement('img');
       img.src = url;
+      img.draggable = false; // no browser drag ghost off the arrow art
       Object.assign(img.style, {
         position: 'absolute', left: '0', width: '16px', height: '16px',
         ...(atTop ? { top: '0' } : { bottom: '0' }),
@@ -5983,6 +5994,9 @@ export class GameUI {
       width: `${scrollW}px`, height: `${scrollH}px`,
       overflowY: 'auto', boxSizing: 'border-box',
     });
+    // The listbox 0x1000039d names no scrollbar and its rows are sized to
+    // fit: never an OS scrollbar on it.
+    hideNativeScrollbar(scrollEl);
     listEl.appendChild(scrollEl);
 
     if (slots.length > 0) {
@@ -7224,7 +7238,7 @@ export class GameUI {
         <div class="heritage-btn" data-heritage="${h.key}" ${this.datTooltipAttrs(descRef(0x21000046, h.elementId))} style="
           position:absolute;left:21px;top:${y}px;width:305px;height:32px;cursor:pointer;
         ">
-          ${radioImg ? `<img src="${radioImg}" style="position:absolute;left:0;top:0;width:32px;height:32px;image-rendering:pixelated;">` :
+          ${radioImg ? `<img draggable="false" src="${radioImg}" style="position:absolute;left:0;top:0;width:32px;height:32px;image-rendering:pixelated;">` :
             `<div style="position:absolute;left:9px;top:9px;width:14px;height:14px;border:2px solid ${selected ? AC_COLORS.goldLight : AC_COLORS.textDim};
               border-radius:50%;${selected ? `background:${AC_COLORS.goldLight};` : ''}"></div>`}
           <div style="position:absolute;left:${labelX}px;top:0;height:32px;display:flex;align-items:center;">
@@ -7269,7 +7283,7 @@ export class GameUI {
 
         <!-- Portrait — 0x100003be (258,15) 265x450, frame baked into the art -->
         <div style="position:absolute;left:258px;top:15px;width:265px;height:450px;">
-          ${portraitUrl ? `<img src="${portraitUrl}" style="width:265px;height:450px;">` : ''}
+          ${portraitUrl ? `<img draggable="false" src="${portraitUrl}" style="width:265px;height:450px;">` : ''}
         </div>
 
         <!-- Lore panel — 0x100003c4 (530,15) 265x450 (template 0x100002e6:
@@ -8551,7 +8565,7 @@ export class GameUI {
              template 0x100002e4 (margins 9 / 26 / 15 / 15), text = the
              profession's ID_CharGen_*Text (see professionDescription) -->
         ${datFrameHtml(texUrl, { x: 20, y: 315, w: 255, h: 170 }, `
-          <div class="profession-description" data-template="${this.wizard.templateIndex}" style="${frameTextInsetStyle()}overflow-y:auto;">
+          <div class="profession-description" data-template="${this.wizard.templateIndex}" style="${frameTextInsetStyle()}overflow:hidden;">
             ${description ? `<span data-ac-text="${description}" ${GameUI.datTextAttrs(descRef(0x21000047, 0x100003e0))} data-ac-maxwidth="220"></span>` : ''}
           </div>`, { desc: descRef(0x21000047, 0x100003e0) })}
 
@@ -8823,7 +8837,7 @@ export class GameUI {
              p33 black outline, margins p35/36/37/38 = 9 / 26 / 15 / 15
              (CORE.17.k.b.b.a). -->
         ${datFrameHtml(texUrl, { x: 486, y: 41, w: 305, h: 444 }, `
-          <div style="${frameTextInsetStyle()}overflow-y:auto;">
+          <div style="${frameTextInsetStyle()}overflow:hidden;">
             <span data-ac-text="${skillsInstructionText}" ${GameUI.datTextAttrs(descRef(0x21000048, 0x100003fd))} data-ac-maxwidth="270"></span>
           </div>`, { desc: descRef(0x21000048, 0x100003fd) })}
       </div>
@@ -8950,7 +8964,7 @@ export class GameUI {
              ID_CharGen_TownHowTo + "\n\n" + ID_CharGen_<Town>Text
              (gmCGTownPage::SetTownString; CORE.17.k.b.b.a.b). -->
         ${datFrameHtml(texUrl, { x: 9, y: 85, w: 250, h: 406 }, `
-          <div class="town-description" style="${frameTextInsetStyle()}overflow-y:auto;">
+          <div class="town-description" style="${frameTextInsetStyle()}overflow:hidden;">
             <span data-ac-text="${GameUI.townDescription(selectedTown.textId)}" ${GameUI.datTextAttrs(descRef(0x2100004a, 0x10000407, 0x10000409))} data-ac-maxwidth="215"></span>
           </div>`, { desc: descRef(0x2100004a, 0x10000409) })}
 
@@ -8958,7 +8972,7 @@ export class GameUI {
              around the Dereth art 0x100001ec (5,5) 471x471 -->
         ${datFrameHtml(texUrl, { x: 288, y: 10, w: 481, h: 481 }, `
           ${mapTex
-            ? `<img src="${mapTex}" style="position:absolute;left:5px;top:5px;width:471px;height:471px;image-rendering:pixelated;">`
+            ? `<img draggable="false" src="${mapTex}" style="position:absolute;left:5px;top:5px;width:471px;height:471px;image-rendering:pixelated;">`
             : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;">
                 <span data-ac-text="Map of Dereth" data-ac-color="${AC_COLORS.textDim}"></span>
               </div>`}
@@ -8985,7 +8999,9 @@ export class GameUI {
    * (0..17; CharSelect1999 sends it through). The heading shows the selected
    * area's name as on the end-of-retail page; the description box stays
    * empty (the end-of-retail town texts and "click on the map" how-to don't
-   * apply, and the 1999 CharGen has no town text).
+   * apply, and the 1999 CharGen has no town text). At most 18 rows (8 + 18 x
+   * 26 = 476 px) fit the 481 px frame, so the list clips: it never scrolled,
+   * and a 2 px text overhang put a native scrollbar on it.
    */
   private renderStartAreaList1999(): string {
     const texUrl = (id: number): string | null => this.getTexURL(id);
@@ -9007,9 +9023,9 @@ export class GameUI {
           ${selected >= 0 ? `<span data-ac-text="${escapeHtmlAttr(nameOf(selected))}" ${GameUI.datTextAttrs(descRef(0x2100004a, 0x10000407, 0x10000408))}></span>` : ''}
         </div>
         ${datFrameHtml(texUrl, { x: 9, y: 85, w: 250, h: 406 }, `
-          <div class="town-description" style="${frameTextInsetStyle()}overflow-y:auto;"></div>`, { desc: descRef(0x2100004a, 0x10000409) })}
+          <div class="town-description" style="${frameTextInsetStyle()}overflow:hidden;"></div>`, { desc: descRef(0x2100004a, 0x10000409) })}
         ${datFrameHtml(texUrl, { x: 288, y: 10, w: 481, h: 481 }, `
-          <div class="start-area-list" style="position:absolute;left:0;top:0;width:481px;height:481px;overflow-y:auto;overflow-x:hidden;">
+          <div class="start-area-list" style="position:absolute;left:0;top:0;width:481px;height:481px;overflow:hidden;">
             ${rows}
           </div>`, { desc: descRef(0x2100004a, 0x1000040a) })}
       </div>
@@ -12858,7 +12874,13 @@ export class GameUI {
     // button and Keyboard Config commands are gone too; this catches the
     // keys, restored UI state and server notices).
     if (show && hiddenBy(FEATURE_PANELS, this.eraUnsupported).has(panel.key)) return;
+    const before = this.panelsSlot;
     this.panelsSlot = setPanelsWindowPanelVisibility(this.panelsSlot, panel, show);
+    if (this.panelsSlot !== before) {
+      this.panelHandBack = !show && before.current === panel && before.returnTo && this.panelsSlot.current === before.returnTo
+        ? { shown: before.returnTo.key, by: panel.key }
+        : null;
+    }
     const cur = this.panelsSlot.current;
     const shown: Record<string, boolean> = {
       inventory: this.inventoryVisible,
@@ -19194,14 +19216,31 @@ export class GameUI {
   }
 
   /**
+   * AGENT — a skill by the name a player typed: the exact name, else one that starts with it, else one with a word
+   * starting with it, else one containing it; among several at the same step, one `preferred` (raisable for a raise,
+   * trainable for a train). "creature" once meant Assess Creature (id 27, first in the list) to a raise meant for
+   * Creature Enchantment (Arcanist, 2026-10-11).
+   */
+  private agentFindSkill(want: string, preferred: (s: GameUI['charInfo']['skills'][number]) => boolean): GameUI['charInfo']['skills'][number] | undefined {
+    const esc = want.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const steps: Array<(n: string) => boolean> = [
+      (n) => n === want, (n) => n.startsWith(want), (n) => new RegExp(`\\b${esc}`).test(n), (n) => n.includes(want),
+    ];
+    for (const step of steps) {
+      const hits = this.charInfo.skills.filter((s) => step(s.name.toLowerCase()));
+      if (hits.length) return hits.find(preferred) ?? hits[0];
+    }
+    return undefined;
+  }
+
+  /**
    * AGENT — train an untrained skill with skill credits, as the skills panel's train button does
    * (gmSkillUI::TrainSkill @ 0049c5f0 → TrainSkillDialogCallback @ 0049c210 → CM_Train::Event_TrainSkill;
    * the agent's call is its "Yes" to the confirmation). Cost = SkillTable trainedCost.
    */
   agentTrainSkill(name: string): { ok: boolean; message: string; name?: string; cost?: number } {
     const want = name.trim().toLowerCase();
-    const skill = this.charInfo.skills.find((s) => s.name.toLowerCase() === want)
-      ?? this.charInfo.skills.find((s) => s.name.toLowerCase().includes(want));
+    const skill = this.agentFindSkill(want, (s) => s.status !== 'Trained' && s.status !== 'Specialized');
     if (!skill) return { ok: false, message: `no skill called "${name}"` };
     if (skill.status === 'Trained' || skill.status === 'Specialized') return { ok: false, message: `${skill.name} is already ${skill.status.toLowerCase()}; raise it with XP (ac_raise)` };
     const cost = this.skillTable?.skills.get(skill.id)?.trainedCost ?? 0;
@@ -19263,8 +19302,7 @@ export class GameUI {
       if (data) { data.raises++; data.max++; }
       return raised(`Maximum ${vital[0].toUpperCase()}${vital.slice(1)}`, undefined, cost1);
     }
-    const skill = this.charInfo.skills.find((s) => s.name.toLowerCase() === want)
-      ?? this.charInfo.skills.find((s) => s.name.toLowerCase().includes(want));
+    const skill = this.agentFindSkill(want, (s) => s.status === 'Trained' || s.status === 'Specialized');
     if (!skill) return { ok: false, message: `no attribute, vital or skill called "${stat}"` };
     if (skill.status !== 'Trained' && skill.status !== 'Specialized') return { ok: false, message: `${skill.name} is ${skill.status.toLowerCase()}; train it first with skill credits (ac_train_skill)` };
     const table = skill.status === 'Specialized' ? this.xpCostTables.specializedSkill : this.xpCostTables.trainedSkill;
@@ -19279,7 +19317,11 @@ export class GameUI {
     skill.raises++;
     skill.base++;
     skill.effective++;
-    return raised(skill.name, from, cost1);
+    // The price of the one after, from the same table: a rank's cost is the XP from what the skill has spent up to
+    // the next rank (ACE SpendSkillXp ranks by ExperienceSpent), so XP already in the skill makes a raise cheaper.
+    const r = raised(skill.name, from, cost1);
+    const nextCost = GameUI.skillRaiseCosts(table, skill.raises, skill.pp).cost1;
+    return nextCost > 0 ? { ...r, message: `${r.message}; the next +1 costs ${nextCost.toLocaleString()} XP` } : r;
   }
 
   private statFooterModel(kind: 'attributes' | 'skills'): {
@@ -21277,6 +21319,9 @@ export class GameUI {
 
   get automationAvailable(): boolean { return this.automationModel !== null; }
 
+  /** The routine engine's stand-by profile (M. Charges When Off while the macro is off): the VirindiTank window's selection. */
+  automationStandbyProfile(): ReturnType<VTankWindow['standbyProfile']> { return this.vtankModel?.standbyProfile() ?? null; }
+
   toggleAutomationPanel(): void {
     if (!this.automationModel) return;
     this.setPanelsWindowPanel(AUTOMATION_PANEL, !this.automationPanelVisible);
@@ -21545,7 +21590,8 @@ export class GameUI {
         input.value = value;
         Object.assign(input.style, { position: 'relative', width: `${width}px`, height: '17px', boxSizing: 'border-box', background: AC_COLORS.black, border: line, outline: 'none', color: AC_COLORS.white, padding: '0 3px', flexShrink: '0' });
         input.addEventListener('input', () => onChange(input.value));
-        for (const ev of ['keydown', 'keyup', 'keypress'] as const) input.addEventListener(ev, (e) => e.stopPropagation());
+        // keyup still bubbles: a movement key held into this field must release.
+        for (const ev of ['keydown', 'keypress'] as const) input.addEventListener(ev, (e) => e.stopPropagation());
         return input;
       },
       icon: (id, size, onClick) => {
@@ -21726,6 +21772,24 @@ export class GameUI {
     this.hudContainer.appendChild(win);
     this.metaViews.set(name, win);
   }
+  /** A meta expression's uigetcontrol[window, control]: that open view has a control by that name. */
+  metaViewHasControl(view: string, control: string): boolean {
+    return !!this.metaViewButton(view, control);
+  }
+  /** uisetlabel[control, text] (VirindiTank: "works on buttons"): the button shows the new text, in its place. */
+  setMetaViewLabel(view: string, control: string, text: string): boolean {
+    const b = this.metaViewButton(view, control);
+    if (!b) return false;
+    b.replaceChildren(this.renderACText(text, AC_COLORS.white));
+    b.dataset.button = text;
+    return true;
+  }
+  private metaViewButton(view: string, control: string): HTMLElement | null {
+    const win = this.metaViews.get(view);
+    if (!win) return null;
+    for (const el of win.querySelectorAll<HTMLElement>('[data-meta-view-button]')) if (el.dataset.metaViewButton === control) return el;
+    return null;
+  }
   closeMetaView(name: string): void { this.metaViews.get(name)?.remove(); this.metaViews.delete(name); }
   closeAllMetaViews(): void { for (const n of [...this.metaViews.keys()]) this.closeMetaView(n); }
 
@@ -21838,8 +21902,20 @@ export class GameUI {
     Object.assign(colR.style, { width: `${listW - 12}px`, display: 'flex', flexDirection: 'column' });
     inner.appendChild(colL);
     inner.appendChild(colR);
+    // The retail UIElement_Menu popup (0x21000043:0x1000034f) beside its
+    // listbox carries the HUD scrollbar (0x10000351, base 0x2100003e:
+    // 0x10000455, p121 = true: hidden while the rows fit), never a native one.
+    const MENU_BAR_W = 16;
+    const rowW = listW - 12 - MENU_BAR_W;
+    const listBox = document.createElement('div');
+    Object.assign(listBox.style, { position: 'relative', display: 'flex', width: `${listW - 12}px` });
     const list = document.createElement('div');
-    Object.assign(list.style, { maxHeight: `${18 * 10}px`, overflowY: 'auto', display: 'flex', flexDirection: 'column' });
+    list.dataset.menuList = '1';
+    Object.assign(list.style, { width: `${rowW}px`, overflowY: 'auto', overflowX: 'hidden', display: 'flex', flexDirection: 'column' });
+    const listBar = document.createElement('div');
+    listBar.dataset.menuScrollbar = '1';
+    Object.assign(listBar.style, { position: 'relative', width: `${MENU_BAR_W}px`, flexShrink: '0' });
+    listBox.append(list, listBar);
     const rowEl = (label: string, hint: string | undefined, hl: boolean, w: number, click: () => void) => {
       const r = document.createElement('div');
       const t0 = this.getTexURL(0x060012b3);
@@ -21861,7 +21937,13 @@ export class GameUI {
       list.innerHTML = '';
       const q = query.trim().toLowerCase();
       const shown = items.filter((i) => (q ? (i.label + ' ' + (i.hint ?? '')).toLowerCase().includes(q) : !groups || i.group === group));
-      for (const i of shown) { const r = rowEl(i.label, i.hint, false, listW - 12, () => { close(); onPick(i.value); }); r.dataset.menuItem = i.value; list.appendChild(r); }
+      for (const i of shown) { const r = rowEl(i.label, i.hint, false, rowW, () => { close(); onPick(i.value); }); r.dataset.menuItem = i.value; list.appendChild(r); }
+      // At most 10 rows tall; the bar spans the list (the filter changes the count).
+      const h = `${Math.min(shown.length, 10) * 18}px`;
+      list.style.height = h;
+      listBar.style.height = h;
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event('scroll'));
     };
     let searchInput: HTMLInputElement | null = null;
     if (o.search) {
@@ -21871,10 +21953,11 @@ export class GameUI {
       s.dataset.menuSearch = '1';
       colR.appendChild(s);
     }
-    colR.appendChild(list);
+    colR.appendChild(listBox);
     paint();
     this.hudContainer.appendChild(menu);
     this.automationMenuEl = menu;
+    this.bindDatScrollbarWidget(listBar, list, () => listBoxScrollDelta(list.scrollHeight, list.children.length, list.clientHeight), true);
     setTimeout(() => { window.addEventListener('pointerdown', outside, true); window.addEventListener('keydown', esc, true); searchInput?.focus(); }, 0);
   }
 
@@ -21906,7 +21989,8 @@ export class GameUI {
     Object.assign(input.style, { position: 'absolute', left: '3px', top: '1px', width: `${width - 6}px`, height: '16px', background: 'transparent', border: '0', outline: 'none', color: AC_COLORS.white });
     input.addEventListener('input', () => onChange(input.value));
     // Typing here must not walk the character or open panels.
-    for (const ev of ['keydown', 'keyup', 'keypress'] as const) input.addEventListener(ev, (e) => e.stopPropagation());
+    // keyup still bubbles: a movement key held into this field must release.
+    for (const ev of ['keydown', 'keypress'] as const) input.addEventListener(ev, (e) => e.stopPropagation());
     host.appendChild(input);
     this.bindDatEditField(input, host, descRef(0x21000042, 0x10000456));
     return host;
@@ -22017,6 +22101,9 @@ export class GameUI {
     cell.classList.add('ac-dat-text-element');
     Object.assign(cell.style, { left: '0', top: '0' });
     host.style.overflowY = 'auto';
+    // Retail draws no OS scrollbar: the element's own DAT bar, when it has
+    // one, is bound by the caller (bindDatScrollbarWidget).
+    hideNativeScrollbar(host);
     host.appendChild(cell);
     return cell;
   }
@@ -24106,12 +24193,15 @@ export class GameUI {
     return f.fellows.filter((m) => m.guid !== self).map((m) => ({ guid: m.guid, name: m.name, health: { cur: m.healthCurrent, max: m.healthMax }, stamina: { cur: m.staminaCurrent, max: m.staminaMax }, mana: { cur: m.manaCurrent, max: m.manaMax } }));
   }
 
-  /** AGENT.vtank-window — your fellowship's shape for Auto Fellow Mgmt: are you its leader, is it open, how many are in it. */
-  agentFellowshipInfo(): { leader: boolean; open: boolean; count: number } | null {
+  /**
+   * AGENT.vtank-window — your fellowship's shape for Auto Fellow Mgmt: are you its leader, is it open,
+   * how many are in it and who, and whether this era's client has the Leader hand-off (its startvote).
+   */
+  agentFellowshipInfo(): { leader: boolean; open: boolean; count: number; members: string[]; handOff: boolean } | null {
     const f = this.fellowshipData;
     if (!f) return null;
     const self = f.selfGuid ?? this.playerGuid;
-    return { leader: f.leaderGuid === self, open: !!f.open, count: f.fellows.length };
+    return { leader: f.leaderGuid === self, open: !!f.open, count: f.fellows.length, members: f.fellows.map((m) => m.name), handOff: this.eraSupports('fellowshipLeadership') };
   }
 
   agentFellowship(): string {
@@ -24707,6 +24797,7 @@ export class GameUI {
       this.optionsSnapshot = { ...this.optionsSettings };
       this.renderOptionsPanel();
     } else {
+      this.closeOptionsMenu();
       if (this.optionsPanelHandle) { this.optionsPanelHandle.close(); this.optionsPanelHandle = null; }
       if (this.optionsPanel) { this.optionsPanel.remove(); this.optionsPanel = null; }
       this.panelsWindowFrameHandle = null;
@@ -24714,7 +24805,14 @@ export class GameUI {
   }
 
   /** Render the options panel. */
+  private optionsListEl: HTMLElement | null = null;
+  private optionsListTab: string | null = null;
+
   private renderOptionsPanel(): void {
+    this.closeOptionsMenu(); // its control is about to be rebuilt
+    // A change re-renders the page: the list stays where the player had it
+    // (a fresh page, or another tab, starts at the top).
+    const keepTop = this.optionsListEl?.isConnected && this.optionsListTab === this.optionsTab ? this.optionsListEl.scrollTop : 0;
     if (this.optionsPanelHandle) {
       this.optionsPanelHandle.close();
       this.optionsPanelHandle = null;
@@ -25226,6 +25324,12 @@ export class GameUI {
       datCol.style.display = '';
       this.bindDatScrollbarWidget(datCol, datList,
         () => listBoxScrollDelta(content.scrollHeight, content.children.length, datList.clientHeight), true);
+      this.optionsListEl = datList;
+      this.optionsListTab = this.optionsTab;
+      if (keepTop > 0) {
+        datList.scrollTop = keepTop;
+        datList.dispatchEvent(new Event('scroll'));
+      }
       return;
     }
     {
@@ -25944,6 +26048,85 @@ export class GameUI {
    * 0x06001274). When `onSelect` is omitted the field is display-only (e.g.
    * the Resolution readout, which has no in-browser consumer to switch).
    */
+  private optionsMenuEl: HTMLElement | null = null;
+  private optionsMenuCleanup: (() => void) | null = null;
+
+  closeOptionsMenu(): void {
+    this.optionsMenuCleanup?.();
+    this.optionsMenuCleanup = null;
+    this.optionsMenuEl?.remove();
+    this.optionsMenuEl = null;
+  }
+
+  /**
+   * The UIOption_Menu 0x10000224's popup (0x21000043:0x10000353 → p6 popup
+   * 0x10000357, 120 wide, p60 = 300 tall at most; listbox 0x10000358, 100
+   * wide, of p9 / p10 rows 0x1000035a (100x18, tile 0x060012b3, hover state
+   * 6 0x060012b4); beside it the listbox's p114 bar 0x10000359 at x=100,
+   * base 0x2100003e:0x10000367, p121 = true: hidden while the rows fit).
+   * p19 opens it upward: UIElement_Menu::Open @ 0046cc30 puts its bottom on
+   * the control's top, left-aligned. A pick sets the value and closes it; a
+   * click elsewhere or Escape closes it. It hangs off the HUD root, as the
+   * options list it opens over scrolls and clips.
+   */
+  private openOptionsMenu(anchor: HTMLElement, options: string[], current: string, onSelect: (value: string) => void): void {
+    this.closeOptionsMenu();
+    const ROW_H = 18;
+    const listH = Math.min(options.length, Math.floor(300 / ROW_H)) * ROW_H;
+    const hud = this.hudContainer.getBoundingClientRect();
+    const a = anchor.getBoundingClientRect();
+    const scale = this.hudScaleFactor();
+    const left = (a.left - hud.left) / scale;
+    const bottom = (a.top - hud.top) / scale;
+    const popup = document.createElement('div');
+    popup.dataset.optionsMenu = '1';
+    Object.assign(popup.style, {
+      position: 'absolute', left: `${left}px`, top: `${Math.max(0, bottom - listH)}px`,
+      width: '120px', height: `${listH}px`, zIndex: '9100', pointerEvents: 'auto',
+    });
+    const list = document.createElement('div');
+    list.dataset.optionsMenuList = '1';
+    Object.assign(list.style, { position: 'absolute', left: '0', top: '0', width: '100px', height: `${listH}px`, overflowY: 'auto', overflowX: 'hidden' });
+    const bar = document.createElement('div');
+    bar.dataset.optionsMenuScrollbar = '1';
+    Object.assign(bar.style, { position: 'absolute', left: '100px', top: '0', width: '16px', height: `${listH}px` });
+    popup.append(list, bar);
+    const tile = this.getTexURL(0x060012b3);
+    const hover = this.getTexURL(0x060012b4);
+    for (const value of options) {
+      const row = document.createElement('div');
+      row.dataset.optionsMenuRow = value;
+      if (value === current) row.dataset.current = '1';
+      Object.assign(row.style, {
+        position: 'relative', width: '100px', height: `${ROW_H}px`, flexShrink: '0', cursor: 'pointer',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+        ...(tile ? { backgroundImage: `url(${tile})`, backgroundSize: '100% 100%' } : { background: 'rgba(30,50,25,0.95)' }),
+      });
+      if (tile && hover) {
+        row.addEventListener('mouseenter', () => { row.style.backgroundImage = `url(${hover})`; });
+        row.addEventListener('mouseleave', () => { row.style.backgroundImage = `url(${tile})`; });
+      }
+      row.appendChild(this.renderDatText(value, descRef(0x21000043, 0x1000035a)));
+      row.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.closeOptionsMenu();
+        onSelect(value);
+      });
+      list.appendChild(row);
+    }
+    const outside = (e: Event): void => { if (!popup.contains(e.target as Node) && !anchor.contains(e.target as Node)) this.closeOptionsMenu(); };
+    const esc = (e: KeyboardEvent): void => { if (e.key === 'Escape') { e.stopPropagation(); this.closeOptionsMenu(); } };
+    window.addEventListener('pointerdown', outside, true);
+    window.addEventListener('keydown', esc, true);
+    this.optionsMenuCleanup = () => {
+      window.removeEventListener('pointerdown', outside, true);
+      window.removeEventListener('keydown', esc, true);
+    };
+    this.hudContainer.appendChild(popup);
+    this.optionsMenuEl = popup;
+    this.bindDatScrollbarWidget(bar, list, () => listBoxScrollDelta(list.scrollHeight, list.children.length, list.clientHeight), true);
+  }
+
   private addDropdownRow(
     container: HTMLElement, label: string, current: string,
     options?: string[], onSelect?: (value: string) => void, optionKey?: string, helpToken = this.optionHelpToken(optionKey),
@@ -25995,10 +26178,11 @@ export class GameUI {
         field.addEventListener('mouseenter', () => { arrow.style.backgroundImage = `url(${arrowHoverTex})`; });
         field.addEventListener('mouseleave', () => { arrow.style.backgroundImage = `url(${arrowTex})`; });
       }
-      field.addEventListener('click', () => {
-        const idx = options!.indexOf(current);
-        const next = options![(idx + 1) % options!.length];
-        onSelect!(next);
+      // UIElement_Menu: a click opens the popup list (it does not step the value).
+      field.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.optionsMenuEl) { this.closeOptionsMenu(); return; }
+        this.openOptionsMenu(field, options!, current, onSelect!);
       });
     }
     row.appendChild(field);
@@ -27914,15 +28098,26 @@ export class GameUI {
       // top, left-aligned — button (4,4) on page (0,20) → popup bottom at
       // bar y=24.
       const popup = document.createElement('div');
-      const overflows = filters.length > 7;
+      popup.dataset.vendorFilterMenu = '1';
+      const listH = Math.min(filters.length, 7) * 18;
       // In the dock host: the slot's (5,5) offset — the button's top is at
       // host y 5 + 24, so the popup's bottom sits 120 − 29 = 91 px up.
       const S = TRANSACTION_DOCK.slotRect;
       Object.assign(popup.style, {
         position: 'absolute', left: `${S.x + 4}px`, bottom: `${TRANSACTION_DOCK.height - S.y - 24}px`,
-        width: overflows ? '116px' : '120px', maxHeight: '126px',
-        zIndex: '30', pointerEvents: 'auto', overflow: 'hidden',
+        width: '120px', height: `${listH}px`,
+        zIndex: '30', pointerEvents: 'auto',
       });
+      const list = document.createElement('div');
+      list.dataset.vendorFilterList = '1';
+      Object.assign(list.style, {
+        position: 'absolute', left: '0', top: '0', width: '100px', height: `${listH}px`,
+        overflowY: 'auto', overflowX: 'hidden',
+      });
+      const bar = document.createElement('div');
+      bar.dataset.vendorFilterScrollbar = '1';
+      Object.assign(bar.style, { position: 'absolute', left: '100px', top: '0', width: '16px', height: `${listH}px` });
+      popup.append(list, bar);
       for (let f = 0; f < filters.length; f++) {
         const row = document.createElement('div');
         Object.assign(row.style, {
@@ -27945,12 +28140,14 @@ export class GameUI {
           this.selectFirstVendorItem();
           this.renderVendorPanel();
         });
-        popup.appendChild(row);
+        list.appendChild(row);
       }
-      // Beyond 7 categories the listbox scrolls behind the layout's 16px
-      // scrollbar column (0x10000351) — the shared DAT scrollbar widget.
-      if (overflows) this.addPanelScrollbar(popup);
+      // Beyond 7 categories the listbox scrolls under its p114 bar 0x10000351
+      // (base 0x2100003e:0x10000455, p121 = true: hidden while the rows fit).
+      // addPanelScrollbar here collapsed the popup to 0 px (its rows moved
+      // into an absolute inner box) and took its absolute position.
       this.vendorWrapper.appendChild(popup);
+      this.bindDatScrollbarWidget(bar, list, () => listBoxScrollDelta(list.scrollHeight, list.children.length, list.clientHeight), true);
     }
 
     // Selected-item name + cost lines (VendorItemsUI::UpdateItemsUI:
@@ -30988,9 +31185,32 @@ export class GameUI {
     }
     // ItemExamineUI::SetInscription @ 004ae2f0 (ExaminationWindow.examineInscription).
     handle.setVisible(E.inscription, !!inscription?.visible);
-    if (inscription?.text) handle.setText(E.inscription, inscription.text);
+    if (inscription?.text) this.setExamineInscriptionText(handle, inscription.text);
     if (inscription?.signature) handle.setText(E.signature, inscription.signature);
     if (inscription) this.wireExamineInscription(handle, inscription);
+  }
+
+  /**
+   * The inscription 0x1000013e (271x54, p30 = 300 characters) as
+   * UIElement_Text draws it: wrapped at its width in its own font, scrolling
+   * under its p114 bar 0x1000046e (base 0x2100003e:0x10000367, p121 = true:
+   * hidden while the text fits). setText drew one unwrapped line that ran
+   * off the element.
+   */
+  private setExamineInscriptionText(handle: LayoutHandle, text: string): void {
+    const E = EXAMINATION_WINDOW.item;
+    const el = handle.elements.get(E.inscription);
+    if (!el) return;
+    el.querySelectorAll(':scope > .layout-text').forEach((n) => n.remove());
+    this.fillDatTextElement(el, EXAMINATION_WINDOW.layout, E.inscription, text);
+    // The wheel scrolls it (DAT text elements default to pointer-events none);
+    // wireExamineInscription forwards its clicks to the block 0x10000137.
+    el.style.pointerEvents = 'auto';
+    const bar = handle.elements.get(E.inscriptionScrollbar);
+    if (!bar) return;
+    const font = this.datTextStyleFor(descRef(EXAMINATION_WINDOW.layout, E.inscription))?.font;
+    const lineH = (font ? this.loadFontRenderer(font)?.lineHeight : undefined) ?? this.fontRenderer?.lineHeight ?? 14;
+    this.bindDatScrollbarWidget(bar, el, lineH, true);
   }
 
   /**
@@ -31014,6 +31234,9 @@ export class GameUI {
     const playerName = this.inventoryOwnerName;
     block.style.pointerEvents = 'auto';
     block.style.cursor = 'text';
+    // The text lies over the block and now takes the wheel: its clicks are the block's.
+    textEl.style.cursor = 'text';
+    textEl.addEventListener('click', (e) => { if (e.target === textEl || !textEl.querySelector('textarea')) block.click(); });
     block.addEventListener('click', () => {
       if (textEl.querySelector('textarea')) return;
       const owned = this.inventoryItems.some(i => i.id === guid) || this.equippedItems.some(e => e.id === guid);
@@ -31021,7 +31244,7 @@ export class GameUI {
       if (refusal) { this.displayErrorText(refusal); return; }
       // HandleInscriptionGainingFocus: the drawn text gives way to the edit
       // (a fresh inscription starts empty); the signature reads "--<player>".
-      handle.setText(E.inscription, '');
+      this.setExamineInscriptionText(handle, '');
       handle.setText(E.signature, `--${playerName}`);
       const input = document.createElement('textarea');
       input.dataset.examineInscriptionEdit = '1';
@@ -31038,6 +31261,9 @@ export class GameUI {
       textEl.style.pointerEvents = 'auto';
       textEl.appendChild(input);
       const field = this.bindDatTextAreaField(input, textEl, descRef(EXAMINATION_WINDOW.layout, E.inscription));
+      // While editing, the bar follows the edit's glyph lines.
+      const editBar = handle.elements.get(E.inscriptionScrollbar);
+      if (editBar && field) this.bindDatScrollbarWidget(editBar, field.layer, field.lineHeight, true);
       input.value = view.inscription;
       let done = false;
       const finish = (): void => {
@@ -31048,7 +31274,7 @@ export class GameUI {
         input.remove();
         view = r.view;
         if (r.send !== null && guid) this.onSetInscription?.(guid, r.send);
-        handle.setText(E.inscription, view.text);
+        this.setExamineInscriptionText(handle, view.text);
         handle.setText(E.signature, view.signature);
       };
       input.addEventListener('blur', finish);
@@ -31320,7 +31546,8 @@ export class GameUI {
     if (pageHost) {
       pageHost.style.pointerEvents = 'auto';
       if (book.editable) {
-        const editor = this.bindDatTextArea(wrapper, 0x10000111, 'ac-book-editor', 999);
+        // p114 = 0x1000048a: the page's DAT scrollbar (284,26) 16x240.
+        const editor = this.bindDatTextArea(wrapper, 0x10000111, 'ac-book-editor', 999, 0x1000048a);
         if (editor) editor.value = book.pageText;
       } else {
         const desc = handle.descs.get(0x10000111);
@@ -31331,6 +31558,15 @@ export class GameUI {
         Object.assign(cell.style, { left: '0', top: '0' });
         pageHost.appendChild(cell);
         pageHost.style.overflowY = 'auto';
+        // p114 = 0x1000048a (284,26) 16x240, base 0x2100003e:0x10000367
+        // (p121 = true: hidden while the page fits). An arrow steps one line.
+        const pageBar = handle.elements.get(0x1000048a);
+        if (pageBar) {
+          const lineH = (style.font ? this.loadFontRenderer(style.font)?.lineHeight : undefined) ?? this.fontRenderer?.lineHeight ?? 14;
+          this.bindDatScrollbarWidget(pageBar, pageHost, lineH, true);
+        } else {
+          hideNativeScrollbar(pageHost);
+        }
         // ListenToElementMessage message 0x19: an edit attempt on a page we may not change.
         pageHost.addEventListener('mousedown', () => {
           const refusal = book.editRefusal();
@@ -31365,14 +31601,30 @@ export class GameUI {
       menuEl.style.cursor = 'pointer';
       menuEl.addEventListener('click', () => { this.bookMenuOpen = !this.bookMenuOpen; this.renderBookPanel(); });
       if (this.bookMenuOpen) {
+        // 0x21000043:0x10000475 — 292 wide, at most 90 tall (p60, 5 rows),
+        // its bottom on the menu button's top (p19 open-up). It holds the
+        // listbox 0x10000476 (273x90) and, at x=273, the listbox's p114 bar
+        // 0x10000477 (16x90, base 0x2100003e:0x10000455 — the HUD widget,
+        // p121 = true: hidden while the rows fit).
+        const listH = Math.min(rows.length * 18, 90);
         const popup = document.createElement('div');
         popup.className = 'ac-book-menu';
-        // 0x21000043:0x10000475 — 292 wide, at most 90 tall (5 rows), its
-        // bottom on the menu button's top (p19 open-up).
         Object.assign(popup.style, {
-          position: 'absolute', left: '0', bottom: '18px', width: '292px', maxHeight: '90px',
-          overflowY: rows.length > 5 ? 'auto' : 'hidden', zIndex: '30', pointerEvents: 'auto',
+          position: 'absolute', left: '0', bottom: '18px', width: '292px', height: `${listH}px`,
+          zIndex: '30', pointerEvents: 'auto',
         });
+        const list = document.createElement('div');
+        list.className = 'ac-book-menu-list';
+        Object.assign(list.style, {
+          position: 'absolute', left: '0', top: '0', width: '273px', height: `${listH}px`,
+          overflowY: 'auto', overflowX: 'hidden',
+        });
+        const bar = document.createElement('div');
+        bar.className = 'ac-book-menu-scrollbar';
+        Object.assign(bar.style, { position: 'absolute', left: '273px', top: '0', width: '16px', height: `${listH}px` });
+        popup.append(list, bar);
+        // A click on the bar scrolls; it must not reach the menu button and close the popup.
+        bar.addEventListener('click', (e) => e.stopPropagation());
         rows.forEach((row, i) => {
           // Row template 0x21000043:0x10000478: 273x18, tile 0x06001276, hover (6) 0x0600127a.
           const r = document.createElement('div');
@@ -31395,9 +31647,13 @@ export class GameUI {
             book.setCurPage(i);
             this.renderBookPanel();
           });
-          popup.appendChild(r);
+          list.appendChild(r);
         });
+        // The popup opens upward out of the 292x18 button, which clips its
+        // children: without this the menu never showed at all.
+        menuEl.style.overflow = 'visible';
         menuEl.appendChild(popup);
+        this.bindDatScrollbarWidget(bar, list, () => listBoxScrollDelta(list.scrollHeight, list.children.length, list.clientHeight), true);
       }
     }
   }
@@ -31443,6 +31699,16 @@ export class GameUI {
     if (this.examinePanelHandle) out.push('Examine');
     if (this.bookPanelHandle || this.book.open) out.push('Book');
     if (this.containerPanel) out.push('Container');
+    const back = this.panelHandBack;
+    if (back && this.panelsSlot.current?.key === back.shown) {
+      const names: Record<string, string> = {
+        inventory: 'Inventory', magic: 'Spellbook', character: 'Character', map: 'Map', social: 'Social', options: 'Options',
+        contracts: 'Contracts', automation: 'Automation', book: 'Book', vitae: 'Vitae', linkStatus: 'Link Status',
+        charInfo: 'Character Information', miniGame: 'Mini-game', positive: 'Effects', negative: 'Effects',
+      };
+      const i = out.findIndex((w) => w === names[back.shown] || w.startsWith(`${names[back.shown]} (`));
+      if (i >= 0) out[i] = `${out[i]} (back when the ${names[back.by] ?? back.by} over it closed)`;
+    }
     return out;
   }
 

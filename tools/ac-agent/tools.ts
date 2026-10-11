@@ -68,6 +68,8 @@ export interface ToolCaller {
   connection?(): HostedConnection;
   /** The longest ac_wait this caller allows (the hosted connector caps it below the client's tool timeout). */
   maxWaitMs?: number;
+  /** Hosted, several linked tabs (multiboxing): the caller for the tab a tool's `account` names. */
+  forTab?(name: string): ToolCaller;
 }
 
 /** What the bridge knows about a hosted connection (docs/hosted-agent-connector.md §3, ac_status). */
@@ -79,11 +81,18 @@ export interface HostedConnection {
   tab: 'none' | 'off' | 'on';
   character: string | null;
   screen: string | null;
+  /** Multiboxing: every tab this connection plays (tools take account= to pick one). */
+  linked?: Array<{ account: string; tab: 'none' | 'off' | 'on'; character: string | null; screen: string | null }>;
 }
 
 /** ac_status's text, from the bridge's view and the tab's own (either can be missing). */
 export function formatStatus(conn: HostedConnection | null, tab: AgentStatus | null, tabError: string | null): string {
   const lines: string[] = [];
+  if (conn?.linked && conn.linked.length > 1) {
+    // Multiboxing: every linked tab, then this one's detail.
+    lines.push(`this connection plays ${conn.linked.length} accounts, one tab each; pass account= to pick (the account, or its character in the world):`);
+    for (const l of conn.linked) lines.push(`  ${l.account}: ${l.tab === 'none' ? 'not open' : l.tab === 'off' ? 'open, Claude switched off' : l.character ? `in the world as ${l.character}` : (l.screen ?? 'open')}`);
+  }
   if (conn) {
     lines.push(`account ${conn.account}; this connection plays ${conn.characters === 'any' ? 'any of its characters' : `only ${conn.characters.join(', ')}`}`);
     if (conn.tab === 'none') lines.push('game: not open. The player logs in at playwebac.com in a browser tab; Claude cannot log in.');
@@ -103,7 +112,12 @@ export function formatStatus(conn: HostedConnection | null, tab: AgentStatus | n
 }
 /** The caller for this request when one is set (the hosted connector runs each MCP call inside one). */
 export const TOOL_CALLER = new AsyncLocalStorage<ToolCaller>();
-const callerFor = (profile?: string): ToolCaller => TOOL_CALLER.getStore() ?? requireClient(profile);
+/** Hosted: the connection's caller, or the linked tab `profile` (the hosted tools' `account`) names. Local: that daemon. */
+const callerFor = (profile?: string): ToolCaller => {
+  const hosted = TOOL_CALLER.getStore();
+  if (hosted) return profile && hosted.forTab ? hosted.forTab(profile) : hosted;
+  return requireClient(profile);
+};
 /** The tools that need the local daemon itself (its browser, its files): not served by the hosted connector. */
 export const LOCAL_ONLY_TOOLS = new Set(['ac_start', 'ac_stop', 'ac_sessions', 'ac_click']);
 /**
@@ -186,14 +200,17 @@ export function defaultAttach(a: Record<string, unknown>, env: string | undefine
 /**
  * ac_wait's arguments as the page's wait filter. "tell" (and "tells") is not an event type but the
  * tool lists it: it means a chat line that is a tell, so it waits for those (a types=tell wait never
- * woke, 2026-10-10). Other names pass through.
+ * woke, 2026-10-10); beside "chat" it adds nothing. Other names pass through.
  */
 export function waitFilter(a: Record<string, any>): { types?: string[]; chatMatch?: string; sinceSeq?: number } {
   let types = a.types ? String(a.types).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : undefined;
   let chatMatch: string | undefined = a.chat_match === undefined || a.chat_match === '' ? undefined : String(a.chat_match);
   if (types?.some((t) => t === 'tell' || t === 'tells')) {
+    const anyChat = types.includes('chat');
     types = types.filter((t) => t !== 'tell' && t !== 'tells');
-    chatMatch = chatMatch ? `^\\(tell\\) .*(?:${chatMatch})` : '^\\(tell\\) ';
+    // "chat" already wakes on every line, a tell included. Narrowing chat to tells there made a
+    // types=chat,tell wait sleep through fellowship lines (Arcanist, 2026-10-11).
+    if (!anyChat) chatMatch = chatMatch ? `^\\(tell\\) .*(?:${chatMatch})` : '^\\(tell\\) ';
     if (!types.length) types = undefined;
   }
   const since = a.since_seq === undefined || a.since_seq === '' ? undefined : Number(a.since_seq);
@@ -499,13 +516,13 @@ export const TOOLS: AgentTool[] = [
   },
   act('ac_say', 'Type a line into chat exactly as a player would: plain text is said aloud; "/tell Name, msg", "/f msg", emotes like "*wave*" and the retail "/" commands work. "@" server commands are refused (agents play as players).', { text: { type: 'string', description: 'The chat line.' } }, ['text'], (a) => [String(a.text)]),
   act('ac_select', 'Select an object (it becomes your target).', { target: { type: 'string', description: 'Object id (#…) or a name to find nearby.' } }, ['target'], (a) => [guidOrName(a.target)]),
-  act('ac_use', 'Use an object the way double-clicking does: talk to an NPC, open a door/chest/corpse, enter a portal, use a lifestone, eat/drink an item. You walk to it automatically.', { target: { type: 'string', description: 'Object id (#…) or a name to find nearby.' } }, ['target'], (a) => [guidOrName(a.target)], 60_000),
+  act('ac_use', 'Use an object the way double-clicking does: talk to an NPC, open a door/chest/corpse, enter a portal, use a lifestone, eat/drink an item. You walk to it automatically.', { target: { type: 'string', description: 'Object id (#…) or a name to find nearby.' } }, ['target'], (a) => [guidOrName(a.target)], 120_000),
   act('ac_use_on', 'Use an item from your pack on a target (e.g. a healing kit on yourself, a key on a door, a tool on another item).', {
     item: { type: 'string', description: 'Item id or name in your inventory.' },
     target: { type: 'string', description: 'Target id or name ("self" for yourself).' },
   }, ['item', 'target'], (a) => [guidOrName(a.item), String(a.target) === 'self' ? 'self' : guidOrName(a.target)]),
-  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E") or a relative offset. Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after.', {
-    target: { type: 'string', description: 'Object id (#…), nearby object name, or map coordinates like "42.1N, 33.6E".' },
+  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), or a distance and direction from where you stand ("10m north", "25 m NE", "5m ahead", "3 m left"). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after.', {
+    target: { type: 'string', description: 'Object id (#…), nearby object name, map coordinates like "42.1N, 33.6E", or an offset like "10m north" / "5m ahead" (compass N…NW, or ahead / back / left / right of your facing).' },
     within: { type: 'number', description: 'Stop this close, metres (default 2).' },
     timeout_s: { type: 'number', description: 'Give up after this long (default 60).' },
   }, ['target'], (a) => [/[NS]\s*,?\s*[\d.]+\s*[EW]/i.test(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, timeoutMs: (a.timeout_s ?? 60) * 1000 }], 320_000),

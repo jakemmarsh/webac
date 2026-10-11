@@ -25,7 +25,7 @@ in the cloud) uses the CLI; it is the same tool table (`tools/ac-agent/tools.ts`
 Prereqs: ACE + its DB in Docker (`npm run check-stack`). The daemon starts its own bridge (9127+) and, unless
 you pass `base=`, its own Vite on a **snapshot of the committed HEAD** (a sparse worktree under
 `$TMPDIR/acjs-agent/tree-<sha>`, Vite on 3127+), so other sessions saving files can't reload the game under
-the player. To verify *uncommitted* work, pass `base=http://localhost:<your vite>/`. Logs:
+the player. The snapshot links `node_modules` and `dat/` from the checkout you start from, or from the main checkout when that is a fresh `git worktree` without them (before 2026-10-11 such a snapshot had no `node_modules` and Vite failed with "Cannot find package 'vite'"; the daemon now repairs those trees). To verify *uncommitted* work, pass `base=http://localhost:<your vite>/`. Logs:
 `$TMPDIR/acjs-agent/<profile>.log` (daemon, bridge, Vite, and the client's `[AC] Sent …` / server refusal
 lines, the first place to look when an action "did nothing").
 
@@ -76,7 +76,8 @@ Claude plays the character in a game tab you logged in yourself. No daemon, no P
    - `BRIDGE_CONNECT_PAGE=http://localhost:<vite-port>/?bridge=ws://localhost:<bridge-port>` uses the game's Connect Claude screen instead of the bridge's plain page.
 2. Add the connector, e.g. `claude mcp add --transport http ac-tab http://127.0.0.1:<bridge-port>/mcp`, then authenticate (`/mcp` in Claude Code).
 3. The Connect Claude page (or, locally, the bridge's own page) shows `/automation pair ABC-123`. Type that in the game's chat while logged in, then press ALLOW on the page. ONLY ONE (the default when a character is in the world) scopes the grant to that character; ANY ONE allows any of the account's characters.
-4. `/automation unpair` in the game revokes it; `/automation claude` says whether Claude is connected, who has control and its last calls. The tab keeps its opt-in across reloads (per bridge and account).
+   - **Several accounts (multiboxing):** type the same code in each account's tab (each logged in on its own account) before pressing ALLOW. Claude then picks a tab with `account=` on every tool, and `ac_status` lists them.
+4. `/automation unpair` in the game revokes it (in one tab: that account only); `/automation claude` says whether Claude is connected, who has control and its last calls. The tab keeps its opt-in across reloads (per bridge and account).
 5. **The player always wins:** acting yourself (a key or click in the game) while Claude plays stops it, and its acting calls are refused until you've been idle 60 s. `/automation pause` refuses all of Claude's calls until `/automation resume`.
 
 **Dev token instead of pairing:**
@@ -192,6 +193,52 @@ agents check the live server's world DB with read-only SELECTs:
 portal destinations in `weenie_properties_position` position_Type 2, levels in `weenie_properties_int`
 type 25, and NPC dialogue in `weenie_properties_emote_action.message`.
 
+## What a player sees that the agent is told (2026-10-11)
+
+The agent only knows what the tools say, so anything a player reads off the screen has to reach it as text. Information,
+never a decision: what to fight, wear or sell stays the model's call (Jake: "I'd expect the LLM to use more common sense
+here, not having to hardcode behavior").
+- **Who is hitting you.** Each CombatEnemy line ("The Drudge Skulker hits your chest …", "You evaded …") of the last
+  10 s is credited to the monster it names (the nearest of that name): observe marks it `ATTACKING YOU (N× in 10 s)` and,
+  when it isn't your target, adds `under attack by: …`; `ac_attack` on another monster adds a note. (A Haiku Bulwark
+  kept starting on new monsters while one chased him.)
+- **Line of fire.** A war bolt flies straight and the server says nothing when it hits a wall ("You cast …" only means it
+  left your hands). `ServerObjectManager.lineOfFire` sweeps the client's own missile collision (walls, terrain, closed
+  doors; not creatures) from your body to the target, like ACE's `IsDirectVisible`: the target line shows
+  `no line of fire: blocked D m along it`, and `ac_cast` refuses a projectile spell (MetaSpellType Projectile /
+  LifeProjectile / EnchantmentProjectile) with no line. (Arcanist cast round a corner and hit nothing.)
+- **Inventory.** Pack items show their type, what they fit (ValidLocations) and value, so an upgrade or something to
+  sell is visible without appraising everything. Top-level containers and RequiresBackpackSlot items (packs, foci)
+  are listed under `pack slots`, as the retail pack column shows them; a focus counts only there (ACE `HasFoci`).
+- **What a use did.** `ac_use` and `ac_use_on` wait for the result and report everything a player would see: chat
+  replies, the centre-screen notices ("You're too busy!"), a refusal the server sends with no text (UseDone's
+  WeenieError by name), and what changed: vitals, items used up or gained, a spell learned, a buff on you. A scroll
+  you can't learn yet says by how much (ACE `CanReadScroll`: the school's skill ≥ the spell's power − 50).
+  (Arcanist read scrolls above its skill; `ac_use_on` used to return "using X on Y" at once.) Routines and the
+  macro still call the quick `useOn`.
+- **Chat log.** The daemon writes every chat line and notice the player saw, theirs included, to
+  `$TMPDIR/acjs-agent/<profile>.chat.log` with timestamps (the page logs `[AC:Chat]` lines). Before this the party's
+  conversation lived only in each agent's transcript.
+- **Loot takes what it says (2026-10-11).** `ac_loot` never Uses a container you already have open (that closes it:
+  ACE Container.ActOnUse / Chest.CheckUseRequirements, and every later pick is "Source item not found!"), moves one
+  item at a time and waits for each answer (the client allows one inventory request: IsPlayerReadyToMakeInventoryRequest),
+  reopens a container that closed with items left, and reports only what reached your pack, with the server's reason
+  for each refusal. (Arcanist took one item per pass, four passes, each claiming all four.)
+- **Range and price.** `ac_spells` shows each spell's range for you and an "Out of Range!" cast says it: retail's
+  DetermineSpellRange reads InqSkillLevel (ranks + init level, no attributes or buffs), as ACE's check does, so the
+  spell examine's Range line now uses that too. A skill raise names the next one's price; "creature" picks Creature
+  Enchantment over Assess Creature. A cheaper first raise is XP already in the skill (cost = table[rank+1] − spent).
+- **Windows.** A panel gmPanelUI hands back when the one over it closes (a book over the Character panel, closed or
+  dropped by its range check after a portal) is listed as `Character (back when the Book over it closed)`.
+- **Waits, places, walks.** `types=chat,tell` wakes on every chat line (tell only narrows a wait without chat);
+  observe's radius and filter apply to remembered places, and without a radius only this region's (1 km) are
+  listed; `ac_walk_to "10m north"` / `"5m ahead"` walks an offset; `ac_use` gives up its walk after 45 s (inside the
+  tool's time), stops it, and names an open dialog; a walk judges a door only after the server answered the Use,
+  gives a door that ignored its Use (ACE ignores a Use while the door swings) a second try, and never blames a door
+  that opened.
+- **Purse.** Above level 5 a death drops half your coins and trade notes aren't coins (ACE
+  `Player_Death.GetNumCoinsDropped`); observe says so beside a purse of 1,000 or more. 412 vendors sell trade notes.
+
 ## What makes it play, not automation (Claude's view, 2026-10-07)
 
 Jake asked whether a Claude would enjoy playing this way. The honest answer after a session through the
@@ -268,6 +315,13 @@ uses the client's own movement collision:
    the fall and only when no walk round is within 30 m. A cell with no floor (the air over an atrium or a
    pit) is never crossed. Banderling Ruin (0x01E0), 2026-10-10: the route used to go straight up through
    the atrium's 6 m ceiling opening instead of round by the corner ramps.
+   From the landscape it goes in by a doorway the ground reaches (`CellDoor.grounded`): the terrain is at
+   the door's feet, or the walkable surfaces outside it (the building's porch, a landblock static's ramp
+   or steps, from LandblockInfo) join a step (StepUpHeight) at a time down to the terrain. A door on a
+   porch no stair reaches is used only from up on that porch, or when no grounded door gives a route.
+   Nanto's scriveners' hall (0xE63D), 2026-10-11: four doors 5 m up, and the way in is 0x0161 at the top
+   of the ramp static 0x020002F8. The graph counts the EnvCells LandblockInfo says the landblock has, so
+   a streamed cell still in flight leaves it incomplete (rebuilt next time) instead of silently cut short.
 2. **Each leg.** A straight walk when the probe says it arrives; else a path search round walls, door
    frames and furniture (`agent/navPlanner.ts`, a 12 m box round the leg). When that search ran into its
    box, a **wider** one (35 m); when there's still no way on foot, one that may **jump and drop**.
@@ -286,7 +340,9 @@ uses the client's own movement collision:
    Fight, heal or run, then walk again (`attack`'s own run-up fights instead). Crossing a landblock edge
    or stepping out of a doorway goes on; only a teleport (40 m in one tick) ends a walk as "went through a
    portal".
-5. **Stuck.** No way at all: a closed door **on the way** (in a doorway still ahead on the route, or ahead
+5. **Stuck.** A door the walk opened that stayed shut (locked, or opened only with a key or a quest item,
+   like the Holtburg drudge statue's Pedestal Weak Spot) is a wall: the route is planned again round its
+   doorway (`RouteOptions.closed`), and it is never tried twice. No way at all: a closed door **on the way** (in a doorway still ahead on the route, or ahead
    on the line to the leg's aim; never the one you stand in or one off to the side), then a wide search
    straight for the goal (jumps included). Stalls back off, sidestep, and give up on the fifth.
 

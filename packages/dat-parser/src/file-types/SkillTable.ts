@@ -76,3 +76,34 @@ export class SkillTable {
     }
   }
 }
+
+/**
+ * The SkillTable file without the entries keyed by `drop`, the bytes a DAT
+ * that never had those skills holds: the PackedHashTable count drops and the
+ * kept entries stay byte for byte in order (the bucket size is unchanged).
+ * Classic Dereth 1.0's table is exactly 1.1's without Salvaging (40), the
+ * last entry (era/EraProfiles.ts 'classic-dereth-1-0').
+ */
+export function skillTableWithout(data: ArrayBuffer, drop: ReadonlySet<number>): ArrayBuffer {
+  const src = new Uint8Array(data);
+  const reader = new DatReader(data);
+  reader.readUInt32(); // id
+  const count = reader.readUInt16();
+  reader.readUInt16(); // bucket size
+  const kept: Array<[number, number]> = [];
+  for (let i = 0; i < count; i++) {
+    const start = reader.position;
+    const key = reader.readUInt32();
+    readSkillBase(reader);
+    if (!drop.has(key)) kept.push([start, reader.position]);
+  }
+  const header = 8;
+  const size = header + kept.reduce((n, [a, b]) => n + (b - a), 0) + (src.length - reader.position);
+  const out = new Uint8Array(size);
+  out.set(src.subarray(0, header));
+  new DataView(out.buffer).setUint16(4, kept.length, true);
+  let o = header;
+  for (const [a, b] of kept) { out.set(src.subarray(a, b), o); o += b - a; }
+  out.set(src.subarray(reader.position), o);
+  return out.buffer;
+}

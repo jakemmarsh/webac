@@ -64,8 +64,10 @@ export interface ExprWorldObject { kind: 'wobject'; id: number; name: string; ob
  */
 export interface ExprCoords { kind: 'coords'; ns: number; ew: number; z: number }
 export interface ExprStopwatch { kind: 'stopwatch'; startedAt: number | null; accumulatedMs: number }
+/** A Meta View control reference (uigetcontrol[window, control]; uisetlabel takes it). */
+export interface ExprViewControl { kind: 'viewcontrol'; view: string; control: string }
 
-export type ExprValue = number | string | ExprList | ExprDict | ExprWorldObject | ExprCoords | ExprStopwatch | null;
+export type ExprValue = number | string | ExprList | ExprDict | ExprWorldObject | ExprCoords | ExprStopwatch | ExprViewControl | null;
 
 export type VarScope = 'var' | 'gvar' | 'pvar';
 
@@ -210,6 +212,10 @@ export interface ExprHost {
 
   // UI / scheduling.
   statusHud?(key: string, value: string, color?: number): void;
+  /** Meta Views: is there a control by this name in this open view (uigetcontrol)? */
+  viewControl?(view: string, control: string): boolean;
+  /** Meta Views: set a control's text label (uisetlabel; buttons). Returns whether it was set. */
+  setViewLabel?(view: string, control: string, text: string): boolean;
   /** Run `fn` after `ms` (delayexec). */
   schedule?(ms: number, fn: () => void): void;
 }
@@ -501,6 +507,7 @@ export function exprToString(v: ExprValue): string {
     case 'wobject': return v.name;
     case 'coords': return coordsToString(v);
     case 'stopwatch': return `stopwatch[${v.startedAt === null ? 'stopped' : 'running'}]`;
+    case 'viewcontrol': return `${v.view}.${v.control}`;
   }
 }
 
@@ -522,6 +529,7 @@ function equal(a: ExprValue, c: ExprValue): boolean {
   if (isObj(a) && isObj(c)) {
     if (a.kind === 'wobject' && c.kind === 'wobject') return a.id === c.id;
     if (a.kind === 'coords' && c.kind === 'coords') return a.ns === c.ns && a.ew === c.ew && a.z === c.z;
+    if (a.kind === 'viewcontrol' && c.kind === 'viewcontrol') return a.view === c.view && a.control === c.control;
     return a === c;
   }
   return false;
@@ -911,6 +919,14 @@ const F: Record<string, FnDef> = {
   echo: { min: 1, max: 2, fn: (a, c) => { const t = str(a[0]!); c.host.echo(t, a.length > 1 ? int(a[1]!, c) : undefined); return t; } },
   statushud: { min: 2, max: 2, fn: (a, c) => { need(c, 'statusHud')(str(a[0]!), str(a[1]!)); return 1; } },
   statushudcolored: { min: 3, max: 3, fn: (a, c) => { need(c, 'statusHud')(str(a[0]!), str(a[1]!), int(a[2]!, c)); return 1; } },
+  // Meta Views (wiki Meta_Expressions): a control reference, none when that open view has no such control.
+  uigetcontrol: { min: 2, max: 2, fn: (a, c) => { const view = str(a[0]!), control = str(a[1]!); return need(c, 'viewControl')(view, control) ? { kind: 'viewcontrol', view, control } : null; } },
+  // "Sets the text label of a Meta View control. Works on Buttons." 1 when it was set.
+  uisetlabel: { min: 2, max: 2, fn: (a, c) => {
+    const v = a[0]!;
+    if (!isObj(v) || v.kind !== 'viewcontrol') return err(c, 'expects a view control (uigetcontrol[window, control])');
+    return b(need(c, 'setViewLabel')(v.view, v.control, str(a[1]!)));
+  } },
 
   // Logic
   iif: { min: 3, max: 3, fn: (a) => (truthy(a[0]!) ? a[1]! : a[2]!) },
@@ -1080,13 +1096,14 @@ const F: Record<string, FnDef> = {
 
 /**
  * Documented VTank/UB functions this module deliberately does not run:
- * Virindi Views and UB's UI-control handles (no view system here), salvage
+ * UB's UI-control functions (uisetvisible / uiviewvisible / uiviewexists;
+ * VTank's own uigetcontrol / uisetlabel run on meta views), salvage
  * (ust*), multi-client networking, account hashes, the item-detail blob
  * spelldata/componentdata, and pack slot counts (need container capacity),
  * local/UTC date formatting with .NET format strings.
  */
 export const UNSUPPORTED_FUNCTIONS: readonly string[] = [
-  'uigetcontrol', 'uisetlabel', 'uisetvisible', 'uiviewvisible', 'uiviewexists',
+  'uisetvisible', 'uiviewvisible', 'uiviewexists',
   'ustadd', 'ustopen', 'ustsalvage', 'netclients', 'getaccounthash', 'spelldata', 'componentdata',
   'getfreeitemslots', 'getfreecontainerslots', 'getequippedweapontype', 'getdatetimelocal', 'getdatetimeutc',
 ];
