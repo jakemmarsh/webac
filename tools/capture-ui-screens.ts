@@ -18,7 +18,9 @@
 
 import { chromium, type Page } from 'playwright';
 import { assertHealthy, attachCrashAlarms, deleteObjects, launchBrowser } from './lib/game-session.js';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { CAMERA_RESET_JS, cameraZoomToJs } from './lib/camera-pins.js';
+import { isBlankWorld } from './screen-regression-lib.js';
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -105,7 +107,12 @@ async function webglRenderer(page: Page): Promise<string> {
     return await page.evaluate(() => {
       const g = document.createElement('canvas').getContext('webgl2') ?? document.createElement('canvas').getContext('webgl');
       const e = g?.getExtension('WEBGL_debug_renderer_info');
-      return e ? String(g!.getParameter(e.UNMASKED_RENDERER_WEBGL)) : 'unknown';
+      const r = e ? String(g!.getParameter(e.UNMASKED_RENDERER_WEBGL)) : 'unknown';
+      // Release the probe's context: a live one counts toward Chrome's cap
+      // (16), and the cap evicts the OLDEST context, the world's own
+      // (HARNESS.scene-capture-blank-world).
+      g?.getExtension('WEBGL_lose_context')?.loseContext();
+      return r;
     });
   } catch { return 'unknown'; }
 }
@@ -286,7 +293,8 @@ async function captureScenes(page: Page): Promise<Array<Scene & { file: string }
       }
       if (s.yaw !== undefined) await page.evaluate((y) => (window as any).acDebug?.setPlayerYaw?.(y), s.yaw);
       if (s.cameraDistance !== undefined) {
-        await page.evaluate((d) => { const c = (window as any).__ac?.cameraController; if (c) c.cameraDistance = d; }, s.cameraDistance);
+        const boom = await page.evaluate(cameraZoomToJs(s.cameraDistance)) as number | null;
+        console.log(`[scenes] ${s.name}: camera boom ${boom?.toFixed(2) ?? '?'} m (asked ${s.cameraDistance})`);
       }
       for (const id of s.toggles ?? []) {
         await page.evaluate((elId) => document.getElementById(elId)?.dispatchEvent(new MouseEvent('click', { bubbles: true })), id);
@@ -309,6 +317,15 @@ async function captureScenes(page: Page): Promise<Array<Scene & { file: string }
         await page.waitForTimeout(250); // a frame or two so the canvas shows the hidden state
       }
       await snapHealthy(page, join(SCENE_OUT, file));
+      // HARNESS.scene-capture-blank-world: a world that never drew (white
+      // behind the HUD) gets one more chance; screen-regression reports a
+      // capture still blank as BROKEN rather than diffing it.
+      if (isBlankWorld(readFileSync(join(SCENE_OUT, file)))) {
+        console.log(`[scenes] ${s.name}: WARNING blank world — waiting 3 s and capturing again`);
+        await page.waitForTimeout(3000);
+        await snapHealthy(page, join(SCENE_OUT, file));
+        if (isBlankWorld(readFileSync(join(SCENE_OUT, file)))) console.log(`[scenes] ${s.name}: BROKEN capture — the world is still blank`);
+      }
       if (hideParticles) {
         await page.evaluate(() => {
           (window as any).__ac?.sceneManager?.scene?.traverse((o: any) => { if (o.userData?.acRegressionHidden) { o.visible = true; delete o.userData.acRegressionHidden; } });
@@ -341,7 +358,7 @@ async function captureScenes(page: Page): Promise<Array<Scene & { file: string }
         await page.waitForTimeout(500);
       }
       if (s.cameraDistance !== undefined) {
-        await page.evaluate(() => { const c = (window as any).__ac?.cameraController; if (c) c.cameraDistance = 7; });
+        await page.evaluate(CAMERA_RESET_JS);
       }
     } catch (e) {
       console.log(`[scenes] ${s.name} FAILED: ${String(e).slice(0, 160)}`);

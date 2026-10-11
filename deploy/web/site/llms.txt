@@ -1,0 +1,15 @@
+# webAC
+
+> webAC is a from-scratch Asheron's Call client that runs in the browser at https://playwebac.com. Nothing to install and no game files to download: players pick a world from the public server list and log in with the account they already have on that server.
+
+- Supported servers: ACE (end of retail, 2017), classic Dark Majesty servers, AC1999, and GDLE (GDLE combat, magic and trading are still being tested).
+- Browsers: Chrome, Firefox and Safari on a desktop or laptop with a mouse. Phones are not supported. Needs WebGL 2.
+- The UI, fonts, art and sounds come from the original game data; the goal is to match the retail client exactly.
+- Accounts and data: webAC has no accounts of its own. The login passes through webAC's relay to the chosen server and is never logged or stored. Characters live on the server you play on. No analytics or cookies.
+- Status: public beta (October 2026). Free and open source under AGPL-3.0. Not affiliated with WB Games or Turbine.
+
+## Links
+
+- [Play](https://playwebac.com/)
+- [Source code and README](https://github.com/jakemmarsh/webac)
+- [Report a bug](https://github.com/jakemmarsh/webac/issues)

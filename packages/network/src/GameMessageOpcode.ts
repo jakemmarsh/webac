@@ -6,6 +6,11 @@
 
 export enum GameMessageOpcode {
   None                            = 0x0000,
+  // Communication::PopUpString sent bare, not inside a 0xF7B0 game event:
+  // GDL-family servers (Seedsow, Snowreap, GDL-Classic, GDLE) send it this
+  // way. Retail's UIQueueManager::ProcessNetBlobData @ 0055b000 dispatches
+  // blob type 4 to CM_Communication::DispatchUI_PopUpString either way.
+  PopupString                     = 0x0004,
   InventoryRemoveObject           = 0x0024,
   SetStackSize                    = 0x0197,
   PlayerKilled                    = 0x019E,

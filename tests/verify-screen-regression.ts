@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { PNG } from 'pngjs';
 import {
   diffPair, judge, formatReport, kindFor, mergeNoise, thresholdFor, clusterThresholdFor, largestChangedCluster,
-  DEFAULT_THRESHOLDS, DEFAULT_CLUSTER_FLOORS, type PairDiff,
+  isBlankWorld, dominantColour, DEFAULT_THRESHOLDS, DEFAULT_CLUSTER_FLOORS, type PairDiff,
 } from '../tools/screen-regression-lib';
 
 function png(w: number, h: number, paint: (x: number, y: number) => [number, number, number]): Buffer {
@@ -38,8 +38,12 @@ describe('diffPair', () => {
     expect(PNG.sync.read(d.diffPng!).width).toBe(100);
   });
   it('per-kind thresholds: a 1% change is within scene noise; panels (zero noise) flag even one pixel in 10k', () => {
-    expect(diffPair('scenes/holtburg', 'scene', grey, withBlock).status).toBe('unchanged');
-    expect(diffPair('scenes/holtburg', 'scene', grey, onePixel).status).toBe('unchanged');
+    // Scene fixtures sit on black: a flat non-black frame is a blank world (isBlankWorld).
+    const dark = png(100, 100, () => [0, 0, 0]);
+    const darkBlock = png(100, 100, (x, y) => (x < 10 && y < 10 ? [255, 255, 255] : [0, 0, 0]));
+    const darkPixel = png(100, 100, (x, y) => (x === 50 && y === 50 ? [255, 0, 0] : [0, 0, 0]));
+    expect(diffPair('scenes/holtburg', 'scene', dark, darkBlock).status).toBe('unchanged');
+    expect(diffPair('scenes/holtburg', 'scene', dark, darkPixel).status).toBe('unchanged');
     expect(diffPair('map', 'panel', grey, onePixel).status).toBe('changed');
     expect(DEFAULT_THRESHOLDS.scene).toBeGreaterThan(DEFAULT_THRESHOLDS.panel);
   });
@@ -149,11 +153,12 @@ describe('noise floor', () => {
 
 describe('largest changed cluster (OPS.screen-regression-thresholds)', () => {
   const W = 200, H = 200;
-  const bg = png(W, H, () => [80, 80, 80]);
+  // Scene frames on black: a flat non-black frame would be a blank world (isBlankWorld).
+  const bg = png(W, H, () => [0, 0, 0]);
   // Speckle: 400 isolated pixels on a 10 px lattice = 1% of the frame, no two within one 4x4 cell's reach.
-  const speckle = png(W, H, (x, y) => (x % 10 === 5 && y % 10 === 5 ? [255, 255, 255] : [80, 80, 80]));
+  const speckle = png(W, H, (x, y) => (x % 10 === 5 && y % 10 === 5 ? [255, 255, 255] : [0, 0, 0]));
   // A "panel" appearing: one solid 40x40 block = 4% of the frame... and a smaller 30x30 one = 2.25%.
-  const panel = png(W, H, (x, y) => (x >= 100 && x < 130 && y >= 100 && y < 130 ? [200, 150, 60] : [80, 80, 80]));
+  const panel = png(W, H, (x, y) => (x >= 100 && x < 130 && y >= 100 && y < 130 ? [200, 150, 60] : [0, 0, 0]));
 
   it('largestChangedCluster: 8-connected over 4x4 cells, counts changed pixels', () => {
     const mask = new Uint8Array(20 * 20);
@@ -173,7 +178,7 @@ describe('largest changed cluster (OPS.screen-regression-thresholds)', () => {
     expect(p.largestCluster).toBe(900);
   });
   it('a whole-panel change fails on its cluster even when the frame-wide ratio floor is huge (world-running tolerated 26.7%)', () => {
-    const big = png(W, H, (x, y) => (x >= 20 && x < 60 && y >= 20 && y < 60 ? [200, 150, 60] : [80, 80, 80])); // 1600 px
+    const big = png(W, H, (x, y) => (x >= 20 && x < 60 && y >= 20 && y < 60 ? [200, 150, 60] : [0, 0, 0])); // 1600 px
     const noisyFloor = { 'scenes/world-running': { ratio: 0.1776, cluster: 300, date: '2026-09-26', renderer: 'SwiftShader' } };
     const t = thresholdFor('scenes/world-running', 'scene', noisyFloor);
     const c = clusterThresholdFor('scenes/world-running', 'scene', noisyFloor);
@@ -196,6 +201,60 @@ describe('scene HUD layer (`scenes/<name>.hud`)', () => {
     const v = judge([d('scenes/hud-inventory-over-world.hud'), d('scenes/world-night.hud')], ['scenes/hud-inventory-over-world']);
     expect(v.expected.map((x) => x.name)).toEqual(['scenes/hud-inventory-over-world.hud']);
     expect(v.unexpected.map((x) => x.name)).toEqual(['scenes/world-night.hud']);
+  });
+});
+
+describe('blank world (HARNESS.scene-capture-blank-world)', () => {
+  // The 2026-09-27 failure: the world canvas lost its context and showed the
+  // page background (white then) behind an intact HUD: a dark 20% strip here.
+  // HUD art is textured, never one flat colour.
+  const hud = (x: number, y: number): [number, number, number] => [(x * 13 + y * 7) % 200, (x * 5 + y * 17) % 160, 60 + ((x * y) % 90)];
+  const blank = png(100, 100, (x, y) => (y >= 80 ? hud(x, y) : [255, 255, 255]));
+  const blank2 = png(100, 100, (x, y) => (y >= 80 ? hud(x + 1, y) : [255, 255, 255]));
+  // Today's background is #111 (a live loseContext() on 2026-10-11).
+  const blankDark = png(100, 100, (x, y) => (y >= 80 ? hud(x, y) : [17, 17, 17]));
+  // The trade-over-world shape: the HUD strip AND a centre panel (30% wide) open over the blank world.
+  const blankPanel = png(100, 100, (x, y) => (y >= 80 || (x >= 35 && x < 65 && y >= 20 && y < 80) ? hud(x, y) : [17, 17, 17]));
+  // A real world: textured (no colour repeats much), even when bright.
+  const textured = png(100, 100, (x, y) => [(x * 7 + y * 3) % 256, (x * 3 + y * 11) % 256, 200 + ((x + y) % 50)]);
+  // world-town-far's shape: a flat white sky over the whole top half, textured ground below.
+  const whiteSky = png(100, 100, (x, y) => (y < 50 ? [255, 255, 255] : [(x * 5) % 256, 90 + (y % 40), 40]));
+  // A dungeon's unlit void: pure black over most of the frame.
+  const dungeonVoid = png(100, 100, (x, y) => (x >= 40 && x < 60 ? [120, 100, 80] : [0, 0, 0]));
+
+  it('dominantColour: the most common exact RGB over a row band, and its share', () => {
+    expect(dominantColour(PNG.sync.read(blank))).toEqual({ rgb: 0xffffff, fraction: 0.8 });
+    expect(dominantColour(PNG.sync.read(blank), 50)).toEqual({ rgb: 0xffffff, fraction: 0.6 });
+    expect(dominantColour(PNG.sync.read(blankDark), 0, 80)).toEqual({ rgb: 0x111111, fraction: 1 });
+  });
+  it('isBlankWorld: the page background behind the HUD (white or #111, with or without an open panel) is blank', () => {
+    expect(isBlankWorld(blank)).toBe(true);
+    expect(isBlankWorld(blankDark)).toBe(true);
+    expect(isBlankWorld(blankPanel)).toBe(true);
+  });
+  it('isBlankWorld: a textured world, a flat white sky over real ground, and a black dungeon void are not', () => {
+    expect(isBlankWorld(textured)).toBe(false);
+    expect(isBlankWorld(whiteSky)).toBe(false);
+    expect(isBlankWorld(dungeonVoid)).toBe(false);
+  });
+  it('blank on BOTH sides is broken, not unchanged (it used to hide every world regression in the scene)', () => {
+    const same = diffPair('scenes/hud-combat', 'scene', blank, blank);
+    expect(same).toMatchObject({ status: 'broken', blank: 'both' });
+    expect(diffPair('scenes/hud-combat', 'scene', textured, blank).blank).toBe('head');
+    expect(diffPair('scenes/hud-combat', 'scene', blank2, textured).blank).toBe('base');
+    // A declared scene is still flagged: a blank capture can't show the intended change.
+    const v = judge([same], ['hud-combat']);
+    expect(v.unexpected.map((d) => d.name)).toEqual(['scenes/hud-combat']);
+    expect(v.expected).toEqual([]);
+    expect(formatReport(v, 'a', 'b')).toContain('blank world: both');
+  });
+  it('panels and HUD layers are not judged for a blank world (white DOM is legitimate there)', () => {
+    expect(diffPair('options', 'panel', blank, blank).status).toBe('unchanged');
+    expect(diffPair('scenes/hud-combat.hud', 'hud', blank, blank).status).toBe('unchanged');
+  });
+  it('calibration never records a broken capture as noise', () => {
+    const merged = mergeNoise({}, [diffPair('scenes/hud-combat', 'scene', blank, blank)], { date: '2026-10-11', renderer: 'x' });
+    expect(merged).toEqual({});
   });
 });
 

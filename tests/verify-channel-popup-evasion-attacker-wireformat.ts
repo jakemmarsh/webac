@@ -63,7 +63,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ServerMessageHandler } from '../packages/renderer/src/network/ServerMessageHandler.js';
-import { GameEventType, GameMessageOpcode } from '@ac/network';
+import { GameEventType, GameMessageOpcode, deserializeMessage } from '@ac/network';
 
 // Pack ACE WriteString16L: u16 length + Windows-1252 bytes + 4-byte align.
 function string16L(s: string): Uint8Array {
@@ -150,6 +150,19 @@ describe('PopupString wire-format (GAP.86)', () => {
     handler.handleMessage(event(GameEventType.PopupString, string16L('')));
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({ message: '' });
+  });
+
+  it('a bare top-level 0x0004 (GDL-family servers) raises the same popup', () => {
+    // Seedsow / Snowreap / GDL-Classic CClient::CreateCharacter answers a
+    // heritage past Sho with 0xF643 Corrupt, then this message written as
+    // Write<DWORD>(4) + WriteString, outside any 0xF7B0 game event.
+    const message = "Only Aluvian, Gharu'ndim and Sho heritages are supported.";
+    const wire = concat(u32(0x0004), string16L(message));
+    const msg = deserializeMessage(wire);
+    expect(msg.type).toBe('direct');
+    expect(msg.opcode).toBe(GameMessageOpcode.PopupString);
+    handler.handleMessage(msg);
+    expect(calls).toEqual([{ message }]);
   });
 });
 

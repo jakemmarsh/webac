@@ -17,8 +17,14 @@ export type CaptureKind = 'panel' | 'preworld' | 'scene' | 'hud';
 export interface PairDiff {
   name: string;
   kind: CaptureKind;
-  /** 'changed' | 'unchanged' decided by the kind's threshold; 'missing-*' when one side has no capture. */
-  status: 'changed' | 'unchanged' | 'missing-base' | 'missing-head' | 'size-mismatch';
+  /**
+   * 'changed' | 'unchanged' decided by the kind's threshold; 'missing-*' when
+   * one side has no capture; 'broken' when a scene's world is blank on either
+   * side (`blank` says which), so the pair cannot be judged at all.
+   */
+  status: 'changed' | 'unchanged' | 'missing-base' | 'missing-head' | 'size-mismatch' | 'broken';
+  /** Which side(s) captured a blank world (status 'broken'). */
+  blank?: 'base' | 'head' | 'both';
   changedPixels: number;
   totalPixels: number;
   ratio: number;
@@ -112,6 +118,51 @@ export function largestChangedCluster(mask: Uint8Array, w: number, h: number, ce
   return best;
 }
 
+/**
+ * HARNESS.scene-capture-blank-world: a scene whose WebGL world never drew
+ * (a lost or evicted context; 2026-09-27 'Too many active WebGL contexts')
+ * shows the page background through the canvas behind an intact HUD: white
+ * then, the body's flat #111 now (a forced loseContext() live, 2026-10-11:
+ * 87.5% of each half). Blank on BOTH sides, it diffs as unchanged and hides
+ * any world regression in that scene.
+ *
+ * The test: one exact colour dominates both the top and the bottom half. A
+ * real world is textured and lit, so no single colour covers much of it, and
+ * a flat white sky stays in the top half. Pure black is exempt: a dungeon's
+ * unlit void legitimately fills 93% of a frame (core17hgcca dungeon-far). Over
+ * the 988 world frames under verification/ plus a live 52-scene pass
+ * (2026-10-11), no world frame reached this; only diff images and comparison
+ * sheets did. The bar is low enough that an open centre panel over a blank
+ * world still trips it.
+ */
+export const BLANK_WORLD_RATIO = 0.35;
+
+type Img = { width: number; height: number; data: Uint8Array | Buffer };
+
+/** The most common exact RGB in rows [y0, y1), as 0xRRGGBB, and the fraction of pixels it covers. */
+export function dominantColour(img: Img, y0 = 0, y1 = img.height): { rgb: number; fraction: number } {
+  const n = img.width * Math.max(0, y1 - y0);
+  if (!n) return { rgb: 0, fraction: 0 };
+  const counts = new Map<number, number>();
+  const d = img.data;
+  for (let p = y0 * img.width * 4, end = y1 * img.width * 4; p < end; p += 4) {
+    const k = (d[p] << 16) | (d[p + 1] << 8) | d[p + 2];
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  let rgb = 0, best = 0;
+  for (const [k, c] of counts) if (c > best) { best = c; rgb = k; }
+  return { rgb, fraction: best / n };
+}
+
+/** Whether a whole-frame scene capture shows a blank world. Takes PNG bytes or a decoded PNG. */
+export function isBlankWorld(png: Buffer | Img): boolean {
+  const img = Buffer.isBuffer(png) ? PNG.sync.read(png) : png;
+  const mid = img.height >> 1;
+  const top = dominantColour(img, 0, mid), bottom = dominantColour(img, mid);
+  return top.rgb === bottom.rgb && top.rgb !== 0
+    && Math.min(top.fraction, bottom.fraction) >= BLANK_WORLD_RATIO;
+}
+
 export function diffPair(
   name: string,
   kind: CaptureKind,
@@ -125,6 +176,12 @@ export function diffPair(
   }
   const a = PNG.sync.read(base);
   const b = PNG.sync.read(head);
+  if (kind === 'scene') {
+    const ba = isBlankWorld(a), bb = isBlankWorld(b);
+    if (ba || bb) {
+      return { name, kind, status: 'broken', blank: ba && bb ? 'both' : ba ? 'base' : 'head', changedPixels: 0, totalPixels: a.width * a.height, ratio: 1, largestCluster: 0 };
+    }
+  }
   if (a.width !== b.width || a.height !== b.height) {
     return { name, kind, status: 'size-mismatch', changedPixels: 0, totalPixels: a.width * a.height, ratio: 1, largestCluster: 0 };
   }
@@ -211,7 +268,7 @@ export const BROKEN_CAPTURE_RATIO = 0.25;
 export function mergeNoise(prev: NoiseFloor, diffs: PairDiff[], run: { date: string; renderer: string }): NoiseFloor {
   const out: NoiseFloor = { ...prev };
   for (const d of diffs) {
-    if (d.status === 'missing-base' || d.status === 'missing-head' || d.status === 'size-mismatch') continue;
+    if (d.status === 'missing-base' || d.status === 'missing-head' || d.status === 'size-mismatch' || d.status === 'broken') continue;
     if (d.ratio > BROKEN_CAPTURE_RATIO) continue;
     const measured: NoiseEntry = { ratio: Number(d.ratio.toFixed(6)), cluster: d.largestCluster, date: run.date, renderer: run.renderer };
     const old = noiseEntry(prev[d.name]);
@@ -263,6 +320,8 @@ export function judge(diffs: PairDiff[], expect: string[]): Verdict {
   };
   const v: Verdict = { unexpected: [], expected: [], expectedButUnchanged: [], unchanged: [] };
   for (const d of diffs) {
+    // A blank-world capture can't be judged, declared or not.
+    if (d.status === 'broken') { v.unexpected.push(d); continue; }
     const moved = d.status !== 'unchanged';
     if (moved && declared(d.name)) v.expected.push(d);
     else if (moved) v.unexpected.push(d);
@@ -274,7 +333,7 @@ export function judge(diffs: PairDiff[], expect: string[]): Verdict {
 
 export function formatReport(v: Verdict, baseRef: string, headRef: string): string {
   const row = (d: PairDiff) =>
-    `| ${d.name} | ${d.kind} | ${d.status}${d.reason ? ` (${d.reason})` : ''} | ${(d.ratio * 100).toFixed(3)}% | ${d.changedPixels} | ${d.largestCluster} |`;
+    `| ${d.name} | ${d.kind} | ${d.status}${d.reason ? ` (${d.reason})` : ''}${d.blank ? ` (blank world: ${d.blank}; re-run that capture)` : ''} | ${(d.ratio * 100).toFixed(3)}% | ${d.changedPixels} | ${d.largestCluster} |`;
   const table = (title: string, ds: PairDiff[]) =>
     ds.length ? [`### ${title} (${ds.length})`, '', '| capture | kind | status | changed | pixels | largest cluster (px) |', '|---|---|---|---|---|---|', ...ds.map(row), ''] : [];
   return [

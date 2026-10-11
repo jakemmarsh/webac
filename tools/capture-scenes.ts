@@ -4,6 +4,9 @@
  * on import. Scenes are judged as WHOLE FRAMES against the full-screen retail
  * references in reference/images/hud/.
  */
+import { HOLTBURG_SPOT } from './retail-ab-scenes.js';
+import { ZOOM_FARTHEST } from './lib/camera-pins.js';
+
 // CORE.17.r — the day group every scene pins unless it names its own. The
 // group is the retail hash of the server clock's absolute day
 // (SkyDesc::CalcPresentDayGroup — before CORE.17.r ours was a Math.random()
@@ -25,7 +28,11 @@ export interface Scene {
   /** admin command to reposition before the shot (@telepoi / @teleloc). */
   teleport?: string;
   yaw?: number;
-  /** camera distance (default third-person); larger = more world in frame. */
+  /**
+   * camera boom to zoom out to (default third-person); larger = more world in
+   * frame. Applied as wheel notches (tools/lib/camera-pins.ts), so retail's
+   * CAMERA_FAR_LIMIT caps it; ZOOM_FARTHEST = full zoom-out.
+   */
   cameraDistance?: number;
   /** toolbar toggles to open over the live world. */
   toggles?: string[];
@@ -62,6 +69,14 @@ export interface Scene {
 }
 
 export const HOLTBURG = '@telepoi holtburg';
+// VISUAL.scorecard-world-town-framing — the spot AND heading the retail
+// Holtburg frames were shot from (verification/retail-client/ab/retail-holtburg.png,
+// verification/retail-ab/holtburg/retail.png): south of the lifestone facing
+// north-ish, the lifestone left, the cottages and the oven ahead. `@telepoi
+// holtburg` lands elsewhere, and its yaw 0 faced a hillside and yaw 1.2 the
+// road, so the scorecard's world-at-spawn screen could not be judged
+// like-for-like. The heading comes from the teleport quaternion: no `yaw`.
+export const HOLTBURG_TOWN_SPOT = HOLTBURG_SPOT;
 // CORE.17.o.d — a house interior with storage chests (world DB landblock_instance 1881145392: 0x02000146 at (53.66, -33.66, -5.67)).
 export const STORAGE_HOUSE = '@teleloc 0x02000146 53.6645 -33.6611 -5.674';
 // Interior cell proven reachable by tools/probe-interior-furniture.ts. ACE's
@@ -158,12 +173,16 @@ function chatDragJs(elementId: number, dx: number, dy: number): string {
 }
 
 export const SCENES: Scene[] = [
-  { name: 'world-town-day', teleport: HOLTBURG, timeOfDay: 0.5, yaw: 0, refs: ['rawg_07.jpg', 'rawg_08.jpg', 'gw_01.jpg'],
-    notes: 'Holtburg town at noon, no panels — the baseline "does this read as AC": terrain textures, road blending, building shapes/scale, tree canopies, sky, fog depth, character model + stance' },
+  // The retail-holtburg.png frame has no recorded clock (llvmpipe, 2026-09-26),
+  // so this stays at noon; the sky-timed comparison is the retail A/B scene
+  // `holtburg` (same spot, mac-gpu retail frame, its sky pinned to the retail
+  // frame's own server tick by tools/capture-retail-ab.ts: phase 0.805).
+  { name: 'world-town-day', teleport: HOLTBURG_TOWN_SPOT, timeOfDay: 0.5, refs: ['rawg_07.jpg', 'rawg_08.jpg', 'gw_01.jpg'],
+    notes: 'Holtburg town at noon from the retail A/B spot and heading (retail-client/ab/retail-holtburg.png frames the same lifestone, cottages and oven), no panels — the baseline "does this read as AC": terrain textures, building shapes/scale, sky, fog depth, character model + stance' },
   { name: 'world-town-day-alt', teleport: HOLTBURG, timeOfDay: 0.5, yaw: 2.4, refs: ['rawg_08.jpg', 'shoushi-live.jpg', 'shoushi-live-2.jpg'],
     notes: 'same town, different heading — checks terrain/scenery variety and draw distance rather than one lucky angle' },
-  { name: 'world-town-far', teleport: HOLTBURG, timeOfDay: 0.5, yaw: 1.2, cameraDistance: 18, refs: ['shoushi-live.jpg', 'shoushi-live-2.jpg'],
-    notes: 'camera pulled back — landscape silhouette, terrain LOD, draw distance, horizon/fog falloff' },
+  { name: 'world-town-far', teleport: HOLTBURG_TOWN_SPOT, timeOfDay: 0.5, cameraDistance: ZOOM_FARTHEST, refs: ['shoushi-live.jpg', 'shoushi-live-2.jpg'],
+    notes: 'the world-town-day view with the camera pulled back — the same town in frame, plus landscape silhouette, terrain LOD, draw distance, horizon/fog falloff' },
   { name: 'world-xarabydun-pit', teleport: '@telepoi xarabydun', timeOfDay: 0.5, refs: [],
     notes: 'VISUAL.landblock-statics-missing-vs-retail: the arrival stands on the pit rim (building 0x01002bef) above the dungeon entrance and its two torches (0x02000719); the building portal punch keeps the flat terrain off the pit (retail ref: verification/retail-ab/town-xarabydun/retail.png)' },
   { name: 'world-night', teleport: HOLTBURG, timeOfDay: 0.0, yaw: 0, refs: [],
@@ -724,6 +743,19 @@ export const SIDE_BY_SIDE_SCENES: SideBySideScene[] = [
     pins: { teleport: '@teleloc 0xA9B40019 [84.3 5.0 94] 0.9969 0 0 -0.0785', timeOfDay: 0.994, dayGroup: 'Sunny', settleMs: 4000 },
     ours: {}, zoom: 1, matchHeight: true,
     refs: [{ file: 'verification/night-sky/retail-before-after-0.994-x3.png', crop: { x: 0, y: 0, w: 1600, h: 300 }, label: 'retail at phase 0.994, brightened x3 (top row of the night-sky sheet)' }] },
+  // VISUAL.scorecard-world-town-framing — the scorecard's world-at-spawn
+  // screen, like-for-like: world-town-day from the retail A/B spot against
+  // both retail Holtburg frames (llvmpipe 2026-09-26 HUD/placement; mac-gpu
+  // 2026-10-04 lighting, sky phase 0.805 by its server tick).
+  { name: 'world-town-day', title: 'World at spawn: Holtburg from the retail A/B spot — retail | ours', stage: 'world', worldScene: 'world-town-day',
+    // past a 0x1a notice's 5 s life (gmSpewBoxUI): the teleport's notice sat behind the vitals bar at 2.5 s
+    pins: { settleMs: 6000 },
+    ours: {}, zoom: 1, matchHeight: true,
+    refs: [
+      { file: 'verification/retail-client/ab/retail-holtburg.png', label: 'retail EoL client under Wine, llvmpipe (A/B spot, 2026-09-26)' },
+      { file: 'verification/retail-ab/holtburg/retail.png', label: 'retail EoL client under Wine, mac-gpu (A/B spot, phase 0.805, 2026-10-04)' },
+    ],
+    notes: 'ours is pinned to noon (Sunny); the retail frames carry their own server clock, so sky colour is judged on the retail-ab holtburg scene' },
   { name: 'world-xarabydun-pit', title: 'Xarabydun arrival: the dungeon pit, its entrance and torches — retail | ours', stage: 'world', worldScene: 'world-xarabydun-pit',
     ours: {}, zoom: 1, matchHeight: true,
     refs: [{ file: 'verification/retail-ab/town-xarabydun/retail.png', label: 'retail EoL client under Wine (@telepoi Xarabydun, 2026-10-02 world tour)' }],

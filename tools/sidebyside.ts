@@ -38,6 +38,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Page } from 'playwright';
+import { CAMERA_RESET_JS } from './lib/camera-pins.js';
 import {
   SIDE_BY_SIDE_SCENES, letterboxBox, sideBySidePins, type CropBox, type SideBySideRef, type SideBySideScene,
 } from './capture-scenes.js';
@@ -250,7 +251,7 @@ async function captureLive(rows: SideBySideScene[], args: SideBySideArgs): Promi
         for (const k of pins.holdKeys ?? []) await page.keyboard.up(k);
         if (pins.cleanupJs) { await evalSafe(page, pins.cleanupJs, 'cleanupJs'); await page.waitForTimeout(500); }
         for (const id of (pins.toggles ?? []).slice().reverse()) { await clickSel(page, `#${id}`); await page.waitForTimeout(500); }
-        if (pins.cameraDistance !== undefined) await page.evaluate('(() => { const c = window.__ac && window.__ac.cameraController; if (c) c.cameraDistance = 7; })()');
+        if (pins.cameraDistance !== undefined) await page.evaluate(CAMERA_RESET_JS);
       }
       await page.evaluate('window.acDebug && window.acDebug.freezeTimeOfDay && window.acDebug.freezeTimeOfDay(null)');
     }

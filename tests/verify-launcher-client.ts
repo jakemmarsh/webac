@@ -309,6 +309,48 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     for (const b of overlapping) expect(px(host.style.zIndex)).toBeGreaterThan(px(b.style.zIndex));
   });
 
+  it('arrow keys step the selection through the worlds (not scroll the list), and focus follows the row', async () => {
+    const s = await open();
+    const list = s.mount.querySelector('.launcher-world-list') as HTMLElement;
+    const key = (k: string) => {
+      const target = (domWindow.document.activeElement && list.contains(domWindow.document.activeElement))
+        ? domWindow.document.activeElement as HTMLElement : list;
+      const ev = new domWindow.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
+      target.dispatchEvent(ev);
+      return ev.defaultPrevented as boolean;
+    };
+    s.row('Coldeve').focus();
+    expect(key('ArrowDown')).toBe(true);
+    expect(s.screen.selectedWorld.name).toBe('Seedsow');
+    // The rebuilt row for the new selection holds focus, so the next key lands too.
+    expect(domWindow.document.activeElement).toBe(s.row('Seedsow'));
+    key('ArrowDown');
+    expect(s.screen.selectedWorld.name).toBe('Funky');
+    key('ArrowDown'); // clamps at the end
+    expect(s.screen.selectedWorld.name).toBe('Funky');
+    key('Home');
+    expect(s.screen.selectedWorld.name).toBe('Coldeve');
+    key('ArrowUp'); // clamps at the start
+    expect(s.screen.selectedWorld.name).toBe('Coldeve');
+    key('End');
+    expect(s.screen.selectedWorld.name).toBe('Funky');
+    expect(s.mount.querySelector('.launcher-world-name')?.textContent).toBe('Funky');
+    // Other keys are left alone (Tab still moves focus).
+    expect(key('Tab')).toBe(false);
+    // A click on a row keeps focus in the list, so arrows work right after.
+    s.row('Coldeve').focus();
+    s.row('Coldeve').dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    expect(s.screen.selectedWorld.name).toBe('Coldeve');
+    key('ArrowDown');
+    expect(s.screen.selectedWorld.name).toBe('Seedsow');
+    // Arrows in the account field still move its caret.
+    s.account.focus();
+    const ev = new domWindow.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+    s.account.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
+    expect(s.screen.selectedWorld.name).toBe('Seedsow');
+  });
+
   it('AGPL §13: the launcher shows a Source code link only when sourceUrl is configured', async () => {
     const k = makeKit();
     const screen = new mod.LauncherScreen(k.kit, {

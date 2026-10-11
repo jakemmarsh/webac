@@ -219,7 +219,7 @@ import {
 import { heritageLoreRuns, encodeTextRunsAttr, parseTextRuns } from './HeritageText.js';
 import {
   datFrameHtml, datFrameScrollbarHtml, frameTextInsetStyle, CHARGEN_FRAME_TEXT_MARGINS,
-  HUD_SCROLLBAR_SKIN, CHARGEN_SCROLLBAR_SKIN, listBoxScrollDelta, textScrollDelta, type DatScrollbarSkin,
+  HUD_SCROLLBAR_SKIN, CHARGEN_SCROLLBAR_SKIN, listBoxScrollDelta, textScrollDelta, hideNativeScrollbar, type DatScrollbarSkin,
 } from './DatFrame.js';
 import {
   buildSummaryRows, summaryHowToText, summaryViewCamera, filterNameInput, trimFinishName, escapeHtmlAttr,
@@ -13440,6 +13440,10 @@ export class GameUI {
     // CORE.17.s.a — a getter re-reads the step per click (the chat font can
     // change under the log: RecvNotice_FontSettingsChanged @ 004f4460).
     const stepPx = (): number => (typeof step === 'function' ? step() : step);
+    // The DAT bar is the viewport's only scrollbar: retail draws no other, so
+    // the browser's native one is hidden wherever this widget is bound (the
+    // chargen skill / summary lists showed both side by side).
+    hideNativeScrollbar(viewport);
     const BTN = skin.buttonHeight; // up/down button height (DAT 16x16; chargen 37x17)
     const W = skin.width;
     // VISUAL.chargen-skills-list-rows.b — a non-proportional bar (p130

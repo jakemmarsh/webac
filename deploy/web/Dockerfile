@@ -11,6 +11,8 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig*.json vite.config.ts ./
 COPY packages ./packages
 COPY services ./services
+# vite.config.ts imports its dev-server DAT HEAD plugin; the config must resolve to build.
+COPY tools/lib/vite-head-from-stat.ts ./tools/lib/vite-head-from-stat.ts
 # --ignore-scripts: the web build needs no native modules (better-sqlite3 is
 # for tools/tests only).
 RUN npm ci --ignore-scripts --no-audit --no-fund
@@ -28,5 +30,7 @@ FROM public.ecr.aws/docker/library/caddy:2-alpine
 COPY deploy/web/Caddyfile /etc/caddy/Caddyfile
 COPY deploy/web/entrypoint.sh /usr/local/bin/acjs-entrypoint
 COPY --from=build /app/dist/web /srv
+# Static site files outside the bundle (the link-preview image named by index.html's og:image).
+COPY deploy/web/site/ /srv/
 RUN chmod +x /usr/local/bin/acjs-entrypoint
 ENTRYPOINT ["/usr/local/bin/acjs-entrypoint"]

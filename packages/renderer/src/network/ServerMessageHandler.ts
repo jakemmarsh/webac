@@ -1162,6 +1162,15 @@ export class ServerMessageHandler {
         break;
       }
 
+      // GDL-family servers send PopUpString as a top-level message (GDL's
+      // chargen heritage refusal: "Only Aluvian, Gharu'ndim and Sho
+      // heritages are supported."). Same body and dialog as the 0xF7B0 event.
+      case GameMessageOpcode.PopupString: {
+        const message = r.readString16();
+        this.handlers.onPopupString?.({ message });
+        break;
+      }
+
       // ── Chat ──
       case GameMessageOpcode.HearSpeech:
         this.handleHearSpeech(msg.payload, false);

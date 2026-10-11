@@ -29,6 +29,7 @@ import { chromium, type Browser, type Page } from 'playwright';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cameraZoomToJs } from './camera-pins.js';
 
 /** Repo root (tools/lib/ → ../..). */
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -476,7 +477,7 @@ export async function applyWorldPins(page: Page, s: WorldPins, log: (m: string) 
     if (!pin?.frozen) log('WARNING time-of-day freeze did not take');
   }
   if (s.yaw !== undefined) await page.evaluate(`window.acDebug && window.acDebug.setPlayerYaw && window.acDebug.setPlayerYaw(${s.yaw})`);
-  if (s.cameraDistance !== undefined) await page.evaluate(`(() => { const c = window.__ac && window.__ac.cameraController; if (c) c.cameraDistance = ${s.cameraDistance}; })()`);
+  if (s.cameraDistance !== undefined) await page.evaluate(cameraZoomToJs(s.cameraDistance));
   for (const id of s.toggles ?? []) {
     await clickSel(page, `#${id}`);
     await page.waitForTimeout(700);

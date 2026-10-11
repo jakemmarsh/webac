@@ -16,10 +16,14 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { existsSync } from 'node:fs';
-import { listBoxScrollDelta, textScrollDelta, CHARGEN_SCROLLBAR_SKIN, CHARGEN_FRAME_SCROLLBAR } from '../packages/renderer/src/ui/DatFrame.js';
+import {
+  listBoxScrollDelta, textScrollDelta, CHARGEN_SCROLLBAR_SKIN, CHARGEN_FRAME_SCROLLBAR,
+  hideNativeScrollbar, NATIVE_SCROLLBAR_HIDDEN_CLASS,
+} from '../packages/renderer/src/ui/DatFrame.js';
 import { descRef } from '../packages/renderer/src/ui/DatTextStyle.js';
 import { openDat, DAT_PATHS } from './_harness/dat.js';
 import { mountGameUI, openChargen, type GameUIFixture } from './_harness/gameui.js';
+import { loadDomWindow } from './_harness/dom.js';
 
 const hasDats = existsSync(DAT_PATHS.portal) && existsSync(DAT_PATHS.local);
 
@@ -50,6 +54,25 @@ describe('the chargen scrollbar skin is the 0x100002dc widget', () => {
     expect(CHARGEN_SCROLLBAR_SKIN.thumb).toEqual({ tex: 0x06004d34, height: 39 });
     expect(CHARGEN_SCROLLBAR_SKIN.up[0]).toBe(CHARGEN_FRAME_SCROLLBAR.topButton);
     expect(CHARGEN_SCROLLBAR_SKIN.down[0]).toBe(CHARGEN_FRAME_SCROLLBAR.bottomButton);
+  });
+});
+
+describe('a viewport with a DAT scrollbar hides the native one', () => {
+  it('sets scrollbar-width none, tags the WebKit class, and installs the rule once', async () => {
+    const win = await loadDomWindow();
+    const doc = win.document as Document;
+    const a = doc.createElement('div');
+    const b = doc.createElement('div');
+    hideNativeScrollbar(a);
+    hideNativeScrollbar(b);
+    for (const el of [a, b]) {
+      expect(el.style.getPropertyValue('scrollbar-width')).toBe('none');
+      expect(el.classList.contains(NATIVE_SCROLLBAR_HIDDEN_CLASS)).toBe(true);
+    }
+    const rules = doc.head.querySelectorAll('style#layout-scroll-style');
+    expect(rules.length).toBe(1);
+    expect(rules[0].textContent).toContain(`.${NATIVE_SCROLLBAR_HIDDEN_CLASS}::-webkit-scrollbar { display: none; }`);
+    await win.happyDOM?.close?.();
   });
 });
 
@@ -126,6 +149,9 @@ describe.skipIf(!hasDats)('chargen listbox scrollbars (happy-dom)', () => {
     layOut(bar, list, 1200, 309, 1200 - 309);
     expect(thumb.style.top).toBe(`${17 + 234}px`);
     expect(bar.style.display).toBe('');
+    // The DAT bar is the only one: the browser's native bar is hidden.
+    expect(list.style.getPropertyValue('scrollbar-width')).toBe('none');
+    expect(list.classList.contains(NATIVE_SCROLLBAR_HIDDEN_CLASS)).toBe(true);
   });
 
   it('Skills: the arrows step the list one row (content height / rows), down then up', () => {
@@ -166,6 +192,7 @@ describe.skipIf(!hasDats)('chargen listbox scrollbars (happy-dom)', () => {
     layOut(bar, list, 870, 435, 435);
     expect(thumb.style.height).toBe('39px');
     expect(thumb.style.top).toBe(`${17 + 377}px`);
+    expect(list.style.getPropertyValue('scrollbar-width')).toBe('none');
   });
   // VISUAL.chargen-skills-list-rows.b.a — the 0x100002e6 framed texts' own bar
   // 0x100002e7 (p114) inherits 0x100002dc unchanged: p121 = true, so it hides
@@ -189,6 +216,7 @@ describe.skipIf(!hasDats)('chargen listbox scrollbars (happy-dom)', () => {
     const { container } = openStep(0);
     const { bar, text } = framed(container, descRef(0x21000046, 0x100003c4));
     expect(text.classList.contains('heritage-lore')).toBe(true);
+    expect(text.style.getPropertyValue('scrollbar-width')).toBe('none');
     expect(bar.style.backgroundImage).toContain('tex:6004d33');
     expect(btn(bar, 'up').style.backgroundImage).toContain('tex:6004d35');
     expect(btn(bar, 'down').style.backgroundImage).toContain('tex:6004d36');

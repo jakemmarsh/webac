@@ -154,6 +154,27 @@ export function textScrollDelta(lineHeight: number, regionHeight: number): numbe
   return Math.min(lineHeight, regionHeight);
 }
 
+/** Class + shared stylesheet id that hide WebKit's native scrollbar (shared with LayoutRenderer). */
+export const NATIVE_SCROLLBAR_HIDDEN_CLASS = 'layout-scroll-content';
+const NATIVE_SCROLLBAR_STYLE_ID = 'layout-scroll-style';
+
+/**
+ * Hide the browser's own scrollbar on a viewport that keeps scrolling (wheel,
+ * DAT scrollbar). scrollbar-width covers Firefox / Chromium / Safari 18.2+;
+ * the ::-webkit-scrollbar rule covers older WebKit.
+ */
+export function hideNativeScrollbar(el: HTMLElement): void {
+  el.style.setProperty('scrollbar-width', 'none');
+  el.classList.add(NATIVE_SCROLLBAR_HIDDEN_CLASS);
+  const doc = el.ownerDocument;
+  if (!doc.getElementById(NATIVE_SCROLLBAR_STYLE_ID)) {
+    const style = doc.createElement('style');
+    style.id = NATIVE_SCROLLBAR_STYLE_ID;
+    style.textContent = `.${NATIVE_SCROLLBAR_HIDDEN_CLASS}::-webkit-scrollbar { display: none; }`;
+    doc.head.appendChild(style);
+  }
+}
+
 export interface FrameBox { x: number; y: number; w: number; h: number }
 
 export interface FrameOptions {

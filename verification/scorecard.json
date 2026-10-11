@@ -102,13 +102,11 @@
     "retail-client/ab/retail-holtburg.png",
     "hud/rawg_02.jpg"
    ],
-   "verdict": "close",
-   "judged": "2026-10-08",
-   "evidence": "verification/visual-town-scenery-gaps/holtburg-gap-is-sky.png",
-   "gaps": [
-    "VISUAL.scorecard-world-town-framing"
-   ],
-   "notes": "2026-10-08 re-judge after VISUAL.town-scenery-gaps.a: the 'missing roof behind the oven' at the Holtburg POI is sky in retail too (stars visible; no LandblockInfo building projects into the gap); the cloud A/B pinned the sky from another ACE server's clock. Distant buildings/trees/rocks hold retail's degrade levels. A retail player would still notice the framing gap; the night-sky colour at that A/B's phase is VISUAL.night-sky-clouds-vs-retail.a (not a day-screen gap)."
+   "verdict": "match",
+   "judged": "2026-10-11",
+   "evidence": "verification/sidebyside/world-town-day/world-town-day-sidebyside.png",
+   "gaps": [],
+   "notes": "2026-10-11 re-judge after VISUAL.scorecard-world-town-framing: world-town-day now shoots from the retail A/B spot and heading, so it frames what retail-holtburg.png frames: lifestone left, the blue NPC, both cottages, the oven with its smoke, the two NPCs by the right cottage, the HUD in the same places. Building shapes and scale, terrain texture and the character model match both retail frames. Sky differs only by clock (ours pinned to noon, the retail frames carry their own); the mac-gpu frame at its own phase is the retail-ab holtburg scene. world-town-far now really zooms out (to retail's 10 m far limit; the old 18 m pin was dropped)."
   },
   {
    "id": "world-night",
@@ -140,13 +138,11 @@
     "hud/rawg_09.jpg",
     "hud/rawg_02.jpg"
    ],
-   "verdict": "close",
-   "judged": "2026-10-10",
-   "evidence": "verification/sylsfear-canopy-bright-cards/direct-login-fog-after.png",
-   "gaps": [
-    "VISUAL.dungeon-scene-details"
-   ],
-   "notes": "2026-10-10 re-judged after VISUAL.sylsfear-canopy-bright-cards.a: a direct dungeon login now has retail's SetDefaultDeviceStates fog (white 0..1000 m) and InitializeLights sun; the teleport-in captures (world-dungeon, world-dungeon-stone) keep the frozen outdoor fog, as retail, and were unchanged in the --ui pass. The fog shift is under 1% at room distances, so nothing a player would notice changed. Remaining: VISUAL.dungeon-scene-details."
+   "verdict": "match",
+   "judged": "2026-10-11",
+   "evidence": "verification/dungeon-scene-details/ours-holtburg-dungeon-morning-sun.png",
+   "gaps": [],
+   "notes": "2026-10-11 re-judged live (local ACE, Chrome real GPU, Holtburg Dungeon drop point, sun frozen at the retail A/B's phase 0.177) against verification/retail-ab/dungeon-holtburg-dungeon/retail.png: walls, torches, doorway, cobwebs and floor read the same at a glance (floor near/mid means 41/25/13 and 41/25/12 vs retail 42/26/13 and 43/26/12; walls ~10 brighter, mostly framing). VISUAL.dungeon-scene-details closed as retail (the cobweb tracks the frozen sun)."
   },
   {
    "id": "flow-movement",
@@ -243,9 +239,9 @@
    "judged": "2026-10-11",
    "evidence": "verification/retail-ab/drag-pack-item/sheet.png",
    "gaps": [
-    "VISUAL.drag-source-cell-selection-border"
+    "VISUAL.drag-source-cell-selection-border.a"
    ],
-   "notes": "2026-10-11 re-judge after BUG.drag-source-tooltip-stays: mid-drag the source cell's tooltip is gone as in retail (A/B drag-pack-item, ours SwiftShader vs retail llvmpipe). Still noticeable: the ghosted source cell loses the green selected border retail keeps (VISUAL.drag-source-cell-selection-border)."
+   "notes": "2026-10-11 re-judge after VISUAL.drag-source-cell-selection-border: a held pack-item drag now matches retail at the source cell (the stippled ghost with the ants on top, toolbar naming the item; A/B drag-pack-item, ours SwiftShader vs retail llvmpipe). A retail player could still notice that dragging a side pack (pack column) or a vendor item doesn't select it on the press (VISUAL.drag-source-cell-selection-border.a). That is rare, so it stays close and not match."
   },
   {
    "id": "panel-character",

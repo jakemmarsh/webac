@@ -396,6 +396,8 @@ export class LauncherScreen {
       position: 'absolute', left: '5px', top: '7px', width: '160px', height: '320px',
       overflowY: 'auto', overflowX: 'hidden', boxSizing: 'border-box', scrollbarWidth: 'thin',
     });
+    // Arrow keys step through the worlds instead of scrolling the list.
+    scroll.addEventListener('keydown', (e) => this.onListKey(e));
     listHost.appendChild(scroll);
     this.listEl = scroll;
 
@@ -549,6 +551,8 @@ export class LauncherScreen {
     const list = this.listEl;
     if (!list) return;
     const keep = list.scrollTop;
+    // A row had focus (clicked, or arrowed to): the rebuilt selected row keeps it.
+    const hadFocus = list.contains(document.activeElement);
     list.replaceChildren();
     const rowDesc = this.kit.desc(LAUNCHER_TEXT.body);
     const rowH = LAUNCHER_GEOMETRY.rowHeight;
@@ -626,6 +630,28 @@ export class LauncherScreen {
       list.appendChild(loading);
     }
     list.scrollTop = keep;
+    if (hadFocus) (list.querySelector('.launcher-world-row[aria-selected="true"]') as HTMLElement | null)?.focus({ preventScroll: true });
+  }
+
+  /** ArrowUp/Down, PageUp/Down, Home/End move the selection through the list. */
+  private onListKey(e: KeyboardEvent): void {
+    if (!this.worlds.length) return;
+    const last = this.worlds.length - 1;
+    const cur = this.selected ? this.worlds.indexOf(this.selected) : -1;
+    const page = Math.max(1, Math.floor((this.listEl?.clientHeight || 0) / LAUNCHER_GEOMETRY.rowHeight) - 1);
+    let next: number;
+    switch (e.key) {
+      case 'ArrowDown': next = cur < 0 ? 0 : Math.min(last, cur + 1); break;
+      case 'ArrowUp': next = cur < 0 ? 0 : Math.max(0, cur - 1); break;
+      case 'PageDown': next = Math.min(last, Math.max(0, cur) + page); break;
+      case 'PageUp': next = Math.max(0, cur - page); break;
+      case 'Home': next = 0; break;
+      case 'End': next = last; break;
+      default: return;
+    }
+    e.preventDefault();
+    this.select(this.worlds[next]);
+    this.revealSelected(true);
   }
 
   private renderDetails(): void {
@@ -706,15 +732,19 @@ export class LauncherScreen {
     d.appendChild(body);
   }
 
-  /** Scroll the list so the selected row is visible (a remembered world may sit far down). */
-  private revealSelected(): void {
+  /**
+   * Scroll the list so the selected row is visible (a remembered world may sit
+   * far down): centred, or just enough to bring it in (`nearest`, arrow keys).
+   */
+  private revealSelected(nearest = false): void {
     const list = this.listEl;
     const row = list?.querySelector('.launcher-world-row[aria-selected="true"]') as HTMLElement | null;
     if (!list || !row) return;
     const top = row.offsetTop;
-    if (top < list.scrollTop || top + row.offsetHeight > list.scrollTop + list.clientHeight) {
-      list.scrollTop = Math.max(0, top - Math.floor(list.clientHeight / 2));
-    }
+    const bottom = top + row.offsetHeight;
+    if (top >= list.scrollTop && bottom <= list.scrollTop + list.clientHeight) return;
+    if (!nearest) list.scrollTop = Math.max(0, top - Math.floor(list.clientHeight / 2));
+    else list.scrollTop = top < list.scrollTop ? top : bottom - list.clientHeight;
   }
 
   // ─── Actions ──────────────────────────────────────────

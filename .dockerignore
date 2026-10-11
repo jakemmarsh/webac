@@ -16,3 +16,5 @@ world-db-raw
 tests
 tools
 .claude
+# vite.config.ts imports this plugin (dev-only, but the config must load to build).
+!tools/lib/vite-head-from-stat.ts

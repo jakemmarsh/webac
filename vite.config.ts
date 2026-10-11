@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'path';
 import { existsSync, readFileSync } from 'fs';
+import { headFromStatPlugin } from './tools/lib/vite-head-from-stat';
 
 /**
  * The build id the update notifier compares against /version.json
@@ -33,7 +34,9 @@ export default defineConfig(({ command }) => {
   const buildId = resolveBuildId(command);
   return {
   define: { 'import.meta.env.VITE_ACJS_BUILD_ID': JSON.stringify(buildId) },
-  plugins: [emitBuildId(buildId)],
+  // headFromStatPlugin: a dev HEAD for a DAT answers from stat instead of
+  // reading all 926 MB through sirv (OPS.vite-head-dat-stall).
+  plugins: [emitBuildId(buildId), headFromStatPlugin()],
   root: resolve(__dirname, 'packages/renderer'),
   // Dev serves the DATs (and the weenie side-files) straight out of dat/.
   // A production build must NOT copy them into the bundle (1.4 GB of DATs +

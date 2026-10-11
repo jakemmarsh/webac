@@ -3,7 +3,41 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Asheron's Call — Browser Client</title>
+  <title>webAC — play Asheron's Call in your browser</title>
+  <meta name="description" content="Play Asheron's Call in your browser: nothing to install, use your existing account on ACE, GDLE, classic and AC1999 servers. Free and open source." />
+  <link rel="canonical" href="https://playwebac.com/" />
+  <meta name="theme-color" content="#111111" />
+  <!-- Link previews (Discord, Reddit, Slack, iMessage…). The image ships from deploy/web/site/. -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="webAC" />
+  <meta property="og:url" content="https://playwebac.com/" />
+  <meta property="og:title" content="webAC — play Asheron's Call in your browser" />
+  <meta property="og:description" content="Nothing to install. Log in with your existing account on ACE, GDLE, classic and AC1999 servers." />
+  <meta property="og:image" content="https://playwebac.com/og-image.jpg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="628" />
+  <meta property="og:image:alt" content="The webAC launcher: the Asheron's Call login screen with a list of 49 public worlds" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <!-- What the site is, for search engines and AI answer tools (schema.org). -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "webAC",
+    "alternateName": "webAC: Asheron's Call in the browser",
+    "url": "https://playwebac.com/",
+    "description": "A from-scratch Asheron's Call client that runs in the browser. Nothing to install: log in with your existing account on ACE, GDLE, classic (Dark Majesty) and AC1999 servers.",
+    "applicationCategory": "GameApplication",
+    "genre": "MMORPG",
+    "operatingSystem": "Any (Chrome, Firefox or Safari on a desktop or laptop)",
+    "browserRequirements": "Requires JavaScript and WebGL 2",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+    "image": "https://playwebac.com/og-image.jpg",
+    "sameAs": ["https://github.com/jakemmarsh/webac"]
+  }
+  </script>
   <!-- No favicon of our own: an empty one stops every page load logging /favicon.ico 404. -->
   <link rel="icon" href="data:," />
   <style>
@@ -18,6 +52,15 @@
 </head>
 <body>
   <canvas id="game-canvas"></canvas>
+  <!-- Shown with JavaScript off, and the page's readable text for crawlers. -->
+  <noscript>
+    <main style="max-width: 40em; margin: 3em auto; padding: 0 1em; color: #ddd; font: 16px/1.5 sans-serif;">
+      <h1>webAC: play Asheron's Call in your browser</h1>
+      <p>webAC is a from-scratch Asheron's Call client that runs in your browser. There is nothing to install and no game files to download: pick a world from the public server list, log in with your existing account, and play.</p>
+      <p>It works with ACE servers (end of retail), classic Dark Majesty servers, AC1999 and GDLE. The interface, art and sounds come from the original game data. It runs in Chrome, Firefox and Safari on a desktop or laptop.</p>
+      <p>webAC needs JavaScript and WebGL 2. It is free and open source (AGPL-3.0): <a style="color: #9cf;" href="https://github.com/jakemmarsh/webac">github.com/jakemmarsh/webac</a>. Not affiliated with WB Games or Turbine.</p>
+    </main>
+  </noscript>
   <script type="module" src="./src/main.ts"></script>
 </body>
 </html>
