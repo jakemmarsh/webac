@@ -21,9 +21,10 @@
  * All embedded lengths count line breaks as CRLF, so text is normalised to
  * CRLF before parsing.
  */
-import type { LootAction, LootMatch, LootRule, Route, RoutineAction, RoutineCondition, RoutineProfile, RoutineRule, RoutineState } from './RoutineDoc.js';
+import type { LootAction, LootMatch, LootRule, Route, RoutineAction, RoutineCondition, RoutineProfile, RoutineRule, RoutineState, SalvageCombine } from './RoutineDoc.js';
 import { ALL_MODULES_OFF } from './RoutineDoc.js';
 import { vtCanonicalName, vtFromVTank } from './vtankOptions.js';
+import { ubVerbOf } from './ubVerbs.js';
 
 // ── text reader ──
 
@@ -169,7 +170,7 @@ export function navCoords(ew: number, ns: number): string {
 }
 
 /** VTank's recall node spell ids (metaf NRecall.cs) and their spell names. */
-const RECALL_SPELLS: Record<number, string> = {
+export const RECALL_SPELLS: Record<number, string> = {
   48: 'Primary Portal Recall', 2647: 'Secondary Portal Recall', 1635: 'Lifestone Recall', 1636: 'Lifestone Sending',
   2645: 'Portal Recall', 2931: 'Recall Aphus Lassel', 2023: 'Recall the Sanctuary', 2943: 'Recall to the Singularity Caul',
   3865: 'Glenden Wood Recall', 2041: 'Aerlinthe Recall', 2813: 'Mount Lethe Recall', 2941: "Ulgrim's Recall", 4084: 'Bur Recall',
@@ -179,18 +180,32 @@ const RECALL_SPELLS: Record<number, string> = {
   6327: 'Radiant Blood Stronghold Recall', 6326: 'Eldrytch Web Stronghold Recall',
 };
 
+/** A Use Portal/NPC or NPC Talk point's object: name, class, `True`, then its E/W, N/S and Z. */
+function objectRecord(n: NavNode): { objectClass?: number; at?: [number, number, number] } {
+  const cls = Number(n.extra[1]);
+  const at = [Number(n.extra[3]), Number(n.extra[4]), Number(n.extra[5])];
+  return { ...(Number.isFinite(cls) ? { objectClass: cls } : {}), ...(at.every(Number.isFinite) ? { at: at as [number, number, number] } : {}) };
+}
+
 /** A navroute node's step on arrival, or null for a plain point; `problem` when it can't run. */
-function nodeStep(n: NavNode): { do: RoutineAction[] } | { problem: string } | null {
+function nodeStep(n: NavNode): { do: RoutineAction[]; problem?: string } | { problem: string } | null {
   switch (n.type) {
-    case 0: case 8: return null; // point, checkpoint
+    case 0: return null; // a plain point
+    // Checkpoint: walked to like a point, then held until the server has you there.
+    case 8: return { do: [{ kind: 'checkpoint' }] };
     case 2: { const id = Number(n.extra[0]); return { do: [{ kind: 'cast', spell: RECALL_SPELLS[id] ?? String(id), target: 'self' }] }; }
     case 3: return { do: [{ kind: 'wait', seconds: Math.max(0, Number(n.extra[0]) / 1000) }] };
-    case 4: { const a = chatAction(n.extra[0] ?? '', { routes: [], problems: [], metName: '' }); const bad = a.find((x) => x.kind === 'unsupported'); return bad ? { problem: (bad as { what: string }).what } : { do: a }; }
-    case 5: return { do: [{ kind: 'use-object', name: n.extra[1] ?? '' }] };
-    case 6: return { do: [{ kind: 'use-object', name: n.extra[0] ?? '' }] };
-    case 7: return { do: [{ kind: 'talk-to', name: n.extra[0] ?? '' }] };
+    // A command we don't run (another plugin's /mt …, a /vt we lack) stays on the point as an unsupported step with
+    // its text, so the route keeps it and an export writes it back (2026-10-11: three MossTank routes lost theirs).
+    case 4: { const a = chatAction(n.extra[0] ?? '', { routes: [], problems: [], metName: '' }); const bad = a.find((x) => x.kind === 'unsupported'); return bad ? { do: a, problem: (bad as { what: string }).what } : { do: a }; }
+    // Open Vendor: use the vendor and trade by the loot rules (the Route tab's Open Vendor makes the same two steps).
+    case 5: return { do: [{ kind: 'use-object', name: n.extra[1] ?? '', ...(Number(n.extra[0]) ? { vt: { id: Number(n.extra[0]) } } : {}) }, { kind: 'sell-by-loot-rules', vendor: n.extra[1] ?? '' }] };
+    // Use Portal/NPC and NPC Talk record the object's class and position: kept (vt) so an export writes them back.
+    case 6: return { do: [{ kind: 'use-object', name: n.extra[0] ?? '', vt: objectRecord(n) }] };
+    case 7: return { do: [{ kind: 'talk-to', name: n.extra[0] ?? '', vt: objectRecord(n) }] };
     case 9: return { do: [{ kind: 'jump', heading: normDeg(Number(n.extra[0]) || 0), ...(Number(n.extra[2]) > 0 ? { holdMs: Math.min(5000, Number(n.extra[2])) } : {}), ...(/^true$/i.test(n.extra[1] ?? '') ? { walk: true } : {}) }] };
-    case 1: return { problem: 'a portal step by object id (only valid on the server that recorded it)' };
+    // The deprecated portal point: by object id (valid on the recording server only; the engine falls back to the portal nearest the point).
+    case 1: { const id = Number(n.extra[0]); return Number.isFinite(id) ? { do: [{ kind: 'use-portal', id: id >>> 0 }] } : { problem: `a portal point with no object id ("${n.extra[0] ?? ''}")` }; }
     default: return { problem: `navroute step type ${n.type}` };
   }
 }
@@ -205,18 +220,20 @@ export function navToRoute(name: string, nav: NavRoute): { route: Route | null; 
   nav.nodes.forEach((n, i) => {
     const st = nodeStep(n);
     if (!st) return;
-    if ('problem' in st) problems.push(`route "${name}" point ${i + 1}: walked as a plain point (${st.problem})`);
-    else stops.push({ at: i, do: st.do });
+    if (st.problem) problems.push(`route "${name}" point ${i + 1}: ${'do' in st ? `can't run ${st.problem}; kept for export, skipped when walked` : `walked as a plain point (${st.problem})`}`);
+    if ('do' in st) stops.push({ at: i, do: st.do });
   });
-  const route: Route = { name, mode: nav.mode, points, ...(stops.length ? { stops } : {}) };
+  // VTank's heights ride along (the engine walks map coordinates) so an exported .nav keeps them.
+  const route: Route = { name, mode: nav.mode, points, z: nav.nodes.map((n) => n.z), ...(stops.length ? { stops } : {}) };
   if (problems.length) route.note = problems.map((x) => x.replace(`route "${name}" `, '')).join('; ');
   return { route, problems };
 }
 
 // ── meta → states ──
 
-const unsupportedCondition = (what: string): RoutineCondition => ({ kind: 'unsupported', what });
-const unsupportedAction = (what: string): RoutineAction => ({ kind: 'unsupported', what });
+// `raw` keeps the meta element as read, so an export writes it back (vtankExport.ts).
+const unsupportedCondition = (what: string, raw?: { id: number; data: MetValue }): RoutineCondition => ({ kind: 'unsupported', what, ...(raw ? { raw } : {}) });
+const unsupportedAction = (what: string, raw?: { id: number; data: MetValue }): RoutineAction => ({ kind: 'unsupported', what, ...(raw ? { raw } : {}) });
 
 /** A plain name when the regex is only literal text (our monster names match by substring). */
 function literalName(re: string): string | null {
@@ -246,6 +263,11 @@ export function vtankChatCommand(text: string, routeNames: string[]): RoutineAct
 }
 
 /** A meta Chat action: VTank's own commands become our steps; plugin and server commands can't run. */
+/** VirindiTank's debug commands that the automation window handles (UtilityBelt's: ubVerbs.ts). */
+const WINDOW_CHAT_COMMAND = /^\/(?:vt|vtank)\s+(?:dumpmetavars|listmetafunctions|metafunchelp|testspell|dumpspells|dumpskills|refresh)\b/i;
+/** UtilityBelt's settings the client runs (`/ub opt set` of one reaches them; others stay a routine setting). */
+const UB_SETTINGS_RUN = /^(Aliases\.Enabled|AutoTinker\.\w+|AutoVendor\.\w+|AutoXp\.\w+|EquipmentManager\.Think|GameEvents\.Enabled|InventoryManager\.(IGFailure|IGRange|IGThink|TreatStackAsSingleItem)|Jumper\.\w+|Plugin\.Portal\w+|QuestTracker\.AutoRequest)$/i;
+
 function chatAction(text: string, ctx: ConvertCtx): RoutineAction[] {
   const t = text.trim();
   let m = /^\/(?:vt|vtank)\s+opt\s+set\s+(\S+)\s+(.+)$/i.exec(t);
@@ -264,22 +286,26 @@ function chatAction(text: string, ctx: ConvertCtx): RoutineAction[] {
   if (m) {
     const name = m[1].trim();
     if (ctx.routes.some((r) => r.name === name)) { ctx.usesNav = true; return [{ kind: 'load-route', route: name }]; }
-    return [unsupportedAction(`load navroute file "${name}" (import that .nav too)`)];
+    return [unsupportedAction(`load navroute file "${name}" (import that .nav too)`, { id: 2, data: { t: 's', v: text } })];
   }
   // UtilityBelt's commands that are things a player does.
   m = /^\/ub\s+bc\s+(.+)$/i.exec(t); // broadcast to all your clients: here, the one
-  if (m) return chatAction(m[1], ctx);
+  if (m) return chatAction(m[1], ctx).map((a) => (a.kind === 'unsupported' && a.raw ? { ...a, raw: { id: 2, data: { t: 's', v: text } } } : a));
   m = /^\/ub\s+use[il]?\s+(.+)$/i.exec(t);
   if (m && !/\s+on\s+/i.test(m[1])) return [{ kind: 'use-object', name: m[1].trim() }];
-  if (m) { const [item, target] = m[1].split(/\s+on\s+/i); return [{ kind: 'use-item', item: item.trim(), on: /^(me|self)$/i.test(target.trim()) ? 'self' : 'target' }]; }
+  if (m) { const [item, target] = m[1].split(/\s+on\s+/i); return [/^(me|self)$/i.test(target.trim()) ? { kind: 'use-item', item: item.trim(), on: 'self' } : { kind: 'use-item', item: item.trim(), to: target.trim() }]; }
   m = /^\/ub\s+givei?\s+(?:(\d+)\s+)?(.+?)\s+to\s+(.+)$/i.exec(t);
   if (m) return [{ kind: 'give', item: m[2].trim(), to: m[3].trim(), ...(m[1] ? { count: Number(m[1]) } : {}) }];
   m = /^\/ub\s+combatstate\s+(peace|melee|missile|magic)\b/i.exec(t);
   if (m) return [{ kind: 'combat-mode', mode: m[1].toLowerCase() as 'peace' | 'melee' | 'missile' | 'magic' }];
   m = /^\/ub\s+opt\s+set\s+(\S+)\s+(.+)$/i.exec(t);
+  if (m && UB_SETTINGS_RUN.test(m[1])) return [{ kind: 'say', text: t }];
   if (m) { const lit = settingLiteral(m[2]); return [{ kind: 'set-setting', name: `ub:${m[1]}`, value: lit ?? m[2].trim() }]; }
   if (/^\/ub\s+autovendor\b/i.test(t)) return [{ kind: 'sell-by-loot-rules', vendor: '' }];
-  if (/^\s*[/@]\s*(vt|ub|mt|vtank|utilitybelt|magtools|dt)\b/i.test(t) || /^\s*@/.test(t)) return [unsupportedAction(`chat command "${t}"`)];
+  if (/^\/(?:vt|vtank)\s+stop\s*$/i.test(t)) return [{ kind: 'stop' }];
+  // Commands the automation window runs as typed (VTankWindow.command, metaCommands.ts): kept as the chat line, which reaches it.
+  if (WINDOW_CHAT_COMMAND.test(t) || ubVerbOf(t) !== null) return [{ kind: 'say', text: t }];
+  if (/^\s*[/@]\s*(vt|ub|mt|vtank|utilitybelt|magtools|dt)\b/i.test(t) || /^\s*@/.test(t)) return [unsupportedAction(`chat command "${t}"`, { id: 2, data: { t: 's', v: text } })];
   return [{ kind: 'say', text: t }];
 }
 
@@ -305,7 +331,7 @@ function convertCondition(id: number, data: MetValue, ctx: ConvertCtx): RoutineC
     case 16: return { kind: 'no-monster-within', meters: num(d.get('r')) };
     case 21: {
       const [c] = children(data);
-      if (!c) return unsupportedCondition('an empty Not');
+      if (!c) return unsupportedCondition('an empty Not', { id, data });
       return { kind: 'not', condition: convertCondition(c.id, c.data, ctx) };
     }
     case 24: return { kind: 'burden-above', percent: Math.max(0, num(data) - 1) };
@@ -330,7 +356,7 @@ function convertCondition(id: number, data: MetValue, ctx: ConvertCtx): RoutineC
     // Meta distances are yards (metaf reference: "DistToRteGE … (in yards)"), a game metre: ours as they are.
     case 25: return { kind: 'route-distance-at-least', meters: num(d.get('dist')) };
     case 26: return { kind: 'expression', expr: str(d.get('e')) };
-    default: return unsupportedCondition(`VirindiTank condition type ${id}`);
+    default: return unsupportedCondition(`VirindiTank condition type ${id}`, { id, data });
   }
 }
 
@@ -343,13 +369,13 @@ function convertAction(id: number, data: MetValue, ctx: ConvertCtx): RoutineActi
     case 3: return children(data).flatMap((c) => convertAction(c.id, c.data, ctx));
     case 4: {
       const { name, nav } = parseEmbeddedNav(str(data));
-      if (!nav) return [unsupportedAction(`load navroute "${name}" (empty)`)];
+      if (!nav) return [unsupportedAction(`load navroute "${name}" (empty)`, { id, data })];
       ctx.usesNav = true;
       let routeName = (name && name !== '[None]' ? name : `${ctx.metName} route`).trim();
       for (let n = 2; ctx.routes.some((r) => r.name === routeName); n++) routeName = `${name || ctx.metName} (${n})`;
       const { route, problems } = navToRoute(routeName, nav);
       ctx.problems.push(...problems);
-      if (!route) return [unsupportedAction(`load navroute "${name}"`)];
+      if (!route) return [unsupportedAction(`load navroute "${name}"`, { id, data })];
       ctx.routes.push(route);
       // VTank's Embed Nav loads the route; its macro walks it (the profile's macro is on).
       return [{ kind: 'load-route', route: route.name }];
@@ -368,7 +394,7 @@ function convertAction(id: number, data: MetValue, ctx: ConvertCtx): RoutineActi
     case 13: return [{ kind: 'create-view', name: str(d.get('n')), xml: str(d.get('x')) }];
     case 14: return [{ kind: 'destroy-view', name: str(d.get('n')) }];
     case 15: return [{ kind: 'destroy-all-views' }];
-    default: return [unsupportedAction(`VirindiTank action type ${id}`)];
+    default: return [unsupportedAction(`VirindiTank action type ${id}`, { id, data })];
   }
 }
 
@@ -407,7 +433,7 @@ export function metToProfile(name: string, rules: MetRule[], fileName = `${name}
     // A top-level All is the rule's own condition list (ours are ANDed); anything else is its one condition.
     const when = cond.kind === 'all' ? (cond.conditions.length ? cond.conditions : [{ kind: 'always' } as RoutineCondition]) : [cond];
     const actions = convertAction(mr.act, mr.actData, ctx);
-    const doList = actions.length ? actions : [unsupportedAction('no action')];
+    const doList = actions.length ? actions : [unsupportedAction('no action', { id: mr.act, data: mr.actData })];
     const rule: RoutineRule = { label: `Rule ${i + 1}`, when, do: doList };
     // Only what stops the rule from ever running switches it off; an Any branch it can't test just never holds.
     const blocked = [...when.flatMap(blockersOf), ...unsupportedIn(doList)];
@@ -449,8 +475,68 @@ export function metToProfile(name: string, rules: MetRule[], fileName = `${name}
 export interface UtlRequirement { type: number; lines: string[] }
 export interface UtlRule { name: string; action: number; keepCount?: number; reqs: UtlRequirement[] }
 
-export function parseUtl(text: string): UtlRule[] {
+export function parseUtl(text: string): UtlRule[] { return parseUtlFile(text).rules; }
+
+/**
+ * A .utl's rules and its SalvageCombine block (VTClassic UTLFileExtraBlockManager: after the rules,
+ * `<blockTypeId>`, `<lengthChars>`, that many chars, until the end; unknown blocks are skipped by length).
+ * No block: `salvageCombine` is absent (VTank then uses VTClassic's defaults).
+ */
+export function parseUtlFile(text: string): { rules: UtlRule[]; salvageCombine?: SalvageCombine } {
   const r = new Reader(crlf(text));
+  const rules = utlRules(r);
+  let salvageCombine: SalvageCombine | undefined;
+  // The rules are the profile; a damaged block after them is skipped, not a reason to refuse the file.
+  try {
+    while (!r.done) {
+      const id = r.line().trim();
+      if (id === '') continue;
+      if (r.done) break;
+      const len = r.int();
+      // A block cut short (a hand-edited file) is read as far as it goes.
+      const chunk = r.chars(Math.min(len, Math.max(0, r.text.length - r.pos)));
+      if (id === 'SalvageCombine') salvageCombine = parseSalvageCombineBlock(chunk) ?? salvageCombine;
+    }
+  } catch { /* the blocks read so far stand */ }
+  return { rules, ...(salvageCombine ? { salvageCombine } : {}) };
+}
+
+/**
+ * The SalvageCombine block's body (UTLBlock_SalvageCombine.Read): format version, the default band
+ * string, a count of material overrides and that many (material, bands) line pairs, then (newer blocks
+ * only) a count of value-mode materials and that many (material, value) pairs. Null when it is cut
+ * short before the override count.
+ */
+export function parseSalvageCombineBlock(chunk: string): SalvageCombine | null {
+  const lines = chunk.split('\r\n');
+  if (lines.length < 2) return null;
+  let i = 1;
+  const out: SalvageCombine = { default: lines[i++] };
+  const int = (): number | null => { const l = (lines[i++] ?? '').trim(); return /^-?\d+$/.test(l) ? Number(l) : null; };
+  const n = int();
+  if (n === null) return null;
+  const materials: Record<string, string> = {};
+  for (let k = 0; k < n && i < lines.length; k++) { const m = int(); const bands = lines[i++] ?? ''; if (m !== null) materials[String(m)] = bands; }
+  out.materials = materials;
+  if (i >= lines.length || (lines[i] ?? '').trim() === '') return out;
+  const v = int();
+  if (v === null || v <= 0) return out;
+  const valueModes: Record<string, number> = {};
+  for (let k = 0; k < v && i < lines.length; k++) { const m = int(); const val = int(); if (m !== null && val !== null) valueModes[String(m)] = val; }
+  out.valueModes = valueModes;
+  return out;
+}
+
+/**
+ * Data lines each requirement type reads (VTClassic LootRules.cs, each class's Read(); MIT, Copyright (c)
+ * 2009-2010 VirindiPlugins): what a version-0 .utl, which has no length codes, needs to read one.
+ */
+export const UTL_V0_LINES: Record<number, number> = {
+  0: 1, 1: 2, 2: 2, 3: 2, 4: 2, 5: 2, 6: 1, 7: 1, 8: 1, 9: 3, 10: 1, 11: 2, 12: 2, 13: 2, 14: 5, 15: 6, 16: 6, 17: 2,
+  1000: 2, 1001: 1, 1002: 1, 1003: 1, 1004: 3, 2000: 1, 2001: 1, 2003: 2, 2005: 2, 2006: 1, 2007: 1, 2008: 3, 9999: 1,
+};
+
+function utlRules(r: Reader): UtlRule[] {
   let first = r.line().trim();
   let version = 0;
   if (first === 'UTL') { version = r.int(); first = r.line().trim(); }
@@ -471,7 +557,12 @@ export function parseUtl(text: string): UtlRule[] {
         const chunk = r.chars(len);
         return { type, lines: chunk.split('\r\n').filter((l, j, a) => j < a.length - 1 || l !== '') };
       }
-      throw new Error('version-0 VTClassic profiles (no requirement lengths) are not supported');
+      // Version 0 has no length codes: each requirement reads its own number of lines (UTL_V0_LINES).
+      const n = UTL_V0_LINES[type];
+      if (n === undefined) throw new Error(`version-0 VTClassic profile: requirement type ${type} is unknown, and the file gives no length to skip it`);
+      const lines: string[] = [];
+      for (let k = 0; k < n; k++) lines.push(r.line());
+      return { type, lines };
     });
     rules.push({ name, action, ...(keepCount !== undefined ? { keepCount } : {}), reqs });
   }
@@ -479,13 +570,13 @@ export function parseUtl(text: string): UtlRule[] {
 }
 
 /** Decal ObjectClass → the item type label our loot rules match (only the classes that are one ItemType). */
-const OBJECT_CLASS_TYPES: Record<number, string> = {
+export const OBJECT_CLASS_TYPES: Record<number, string> = {
   1: 'Melee Weapon', 2: 'Armor', 3: 'Clothing', 4: 'Jewelry', 6: 'Food', 7: 'Money', 8: 'Misc', 9: 'Missile Weapon',
   10: 'Container', 11: 'Gem', 12: 'Spell Components', 13: 'Key', 14: 'Portal', 15: 'Promissory Note', 16: 'Mana Stone',
   31: 'Caster', 39: 'Tinkering Material',
 };
 /** Decal object classes that are an ObjectDescriptionFlag rather than an item type: HealingKit, Lockpick, Book. */
-const OBJECT_CLASS_FLAGS: Record<number, number> = { 29: 0x10000, 30: 0x20000, 33: 0x100 };
+export const OBJECT_CLASS_FLAGS: Record<number, number> = { 29: 0x10000, 30: 0x20000, 33: 0x100 };
 /**
  * VTClassic's armour groups → subpalette slots, from ColorSlots.Default.xml
  * (http://www.virindi.net/repos/virindi_public, VTClassic Shared; MIT, Copyright (c) 2009-2010 VirindiPlugins).
@@ -556,7 +647,41 @@ export const VTCLASSIC_COLOR_SLOTS: Record<string, number[]> = {
   "Yoroi Girth (Belt)": [1],
 };
 
-const UTL_ACTIONS: Record<number, LootAction> = { 0: 'ignore', 1: 'keep', 2: 'salvage', 3: 'sell', 10: 'keep-up-to' };
+/**
+ * VTClassic's eLootAction → ours. Read (4) takes the item and reads a scroll you can learn. User1–User5 (5–9) are
+ * for other plugins; VTank loots them like Keep (MOSS LootAction: every action but NoLoot is picked up), so they
+ * import as Keep with their id kept for export.
+ */
+export const UTL_ACTIONS: Record<number, LootAction> = { 0: 'ignore', 1: 'keep', 2: 'salvage', 3: 'sell', 4: 'read', 5: 'keep', 6: 'keep', 7: 'keep', 8: 'keep', 9: 'keep', 10: 'keep-up-to' };
+
+/**
+ * Loot rules imported before Read and User1–5 had actions (before 2026-10-11) were stored switched
+ * off with the note "VTClassic action Read|UserN has no equivalent" and the action id in `vtc`. This
+ * turns them into what the importer makes now, in place, so stored profiles need no re-import.
+ * Returns how many rules changed.
+ */
+export function upgradeStoredLootRules(doc: unknown): number {
+  const profiles = (doc as { profiles?: unknown } | null)?.profiles;
+  if (!Array.isArray(profiles)) return 0;
+  let n = 0;
+  const fix = (rules: unknown) => {
+    if (!Array.isArray(rules)) return;
+    for (const r of rules as LootRule[]) {
+      const id = r?.vtc?.action;
+      if (!r?.disabled || typeof id !== 'number' || id < 4 || id > 9 || !/has no equivalent$/.test(r.note ?? '')) continue;
+      r.action = UTL_ACTIONS[id];
+      delete r.disabled;
+      if (id === 4) { delete r.note; delete r.vtc!.action; if (!r.vtc!.reqs) delete r.vtc; }
+      else r.note = `VTClassic action User${id - 4}: looted and kept`;
+      n++;
+    }
+  };
+  for (const p of profiles as Array<{ loot?: unknown; lootSets?: Record<string, unknown> }>) {
+    fix(p?.loot);
+    for (const set of Object.values(p?.lootSets ?? {})) fix(set);
+  }
+  return n;
+}
 const UTL_REQ_NAMES: Record<number, string> = {
   0: 'spell name matches', 6: 'damage percent', 8: 'spell count', 9: 'spells match', 10: 'minimum damage', 11: 'property flag', 12: 'property equals',
   13: 'property not equal', 14: 'similar colour', 15: 'similar colour on armour type', 16: 'similar colour in slot', 17: 'exact palette in slot',
@@ -573,20 +698,20 @@ const UTL_REQ_NAMES: Record<number, string> = {
  * SalvageWorkmanship → int ItemWorkmanship 105. Below 0x10000 a key is the
  * ACE property id itself.
  */
-const DECAL_INT_KEYS: Record<number, { kind: 'int' | 'did'; key: number }> = {
+export const DECAL_INT_KEYS: Record<number, { kind: 'int' | 'did'; key: number }> = {
   218103814: { kind: 'int', key: 12 }, 218103842: { kind: 'int', key: 44 }, 218103850: { kind: 'did', key: 52 },
   // Type → ItemType 1, Coverage → ClothingPriority 4, EquipableSlots → ValidLocations 9, DamageType 45;
   // Icon → DID Icon 8, IconOverlay → DID IconOverlay 50.
   218103808: { kind: 'int', key: 1 }, 218103821: { kind: 'int', key: 4 }, 218103822: { kind: 'int', key: 9 },
   218103841: { kind: 'int', key: 45 }, 218103809: { kind: 'did', key: 8 }, 218103849: { kind: 'did', key: 50 },
 };
-const DECAL_FLOAT_KEYS: Record<number, { kind: 'float' | 'int'; key: number }> = {
+export const DECAL_FLOAT_KEYS: Record<number, { kind: 'float' | 'int'; key: number }> = {
   167772160: { kind: 'float', key: 13 }, 167772161: { kind: 'float', key: 14 }, 167772162: { kind: 'float', key: 15 },
   167772163: { kind: 'float', key: 18 }, 167772164: { kind: 'float', key: 19 }, 167772165: { kind: 'float', key: 17 },
   167772166: { kind: 'float', key: 16 }, 167772169: { kind: 'int', key: 105 }, 167772171: { kind: 'float', key: 22 },
   167772172: { kind: 'float', key: 62 }, 167772174: { kind: 'float', key: 63 },
 };
-const DECAL_SPELL_COUNT = 218103838;
+export const DECAL_SPELL_COUNT = 218103838;
 const intKey = (k: number): { kind: 'int' | 'did'; key: number } | null => (k < 0x10000 ? { kind: 'int', key: k } : DECAL_INT_KEYS[k] ?? null);
 const floatKey = (k: number): { kind: 'float' | 'int'; key: number } | null => (k < 0x10000 ? { kind: 'float', key: k } : DECAL_FLOAT_KEYS[k] ?? null);
 
@@ -600,9 +725,12 @@ export function utlToLoot(rules: UtlRule[]): ImportResult<LootRule[]> {
   const out = rules.map((u, i): LootRule => {
     const match: LootMatch = {};
     const cant: string[] = [];
+    const raw: UtlRequirement[] = [];
     const names: string[] = [];
     const props: NonNullable<LootMatch['props']> = [];
     let disabled = false;
+    // Each spell requirement must hold: the first is `spells`, any more are `moreSpells` (before 2026-10-11 the last one replaced the others).
+    const spell = (t: NonNullable<LootMatch['spells']>) => { if (!match.spells) match.spells = t; else (match.moreSpells ??= []).push(t); };
     const intTest = (key: number, op: 'le' | 'ge' | 'eq' | 'ne' | 'flag', value: number, label: string) => {
       if (key === DECAL_SPELL_COUNT && op === 'ge') { match.spellCountAtLeast = value; return; }
       const k = intKey(key);
@@ -610,8 +738,9 @@ export function utlToLoot(rules: UtlRule[]): ImportResult<LootRule[]> {
     };
     for (const q of u.reqs) {
       const [a, b] = q.lines;
+      const before = cant.length;
       switch (q.type) {
-        case 0: match.spells = { match: a ?? '', count: 1 }; break;
+        case 0: spell({ match: a ?? '', count: 1 }); break;
         case 1: if (Number(b) === STRING_NAME) names.push(a); else if (Number(b) < 0x10000) props.push({ kind: 'string', key: Number(b), op: 'match', value: a }); else cant.push(`string property ${b} matches /${a}/`); break;
         case 2: if (Number(b) === PROP_VALUE) match.valueAtMost = Math.min(match.valueAtMost ?? Infinity, Number(a)); else if (Number(b) === PROP_BURDEN) match.burdenAtMost = Math.min(match.burdenAtMost ?? Infinity, Number(a)); else intTest(Number(b), 'le', Number(a), 'property ≤'); break;
         case 3: if (Number(b) === PROP_VALUE) match.valueAtLeast = Math.max(match.valueAtLeast ?? -Infinity, Number(a)); else intTest(Number(b), 'ge', Number(a), 'property ≥'); break;
@@ -622,8 +751,8 @@ export function utlToLoot(rules: UtlRule[]): ImportResult<LootRule[]> {
           if (t) match.types = [t]; else if (f) match.descFlags = (match.descFlags ?? 0) | f; else cant.push(`object class ${a}`);
           break;
         }
-        case 8: match.spellCountAtLeast = Number(a); break;
-        case 9: match.spells = { match: a ?? '', ...(b ? { notMatch: b } : {}), count: Math.max(1, Number(q.lines[2]) || 1) }; break;
+        case 8: match.spellCountAtLeast = Math.max(match.spellCountAtLeast ?? -Infinity, Number(a)); break;
+        case 9: spell({ match: a ?? '', ...(b ? { notMatch: b } : {}), count: Math.max(1, Number(q.lines[2]) || 1) }); break;
         case 11: intTest(Number(b), 'flag', Number(a), 'property flag'); break;
         case 12: intTest(Number(b), 'eq', Number(a), 'property equals'); break;
         case 13: intTest(Number(b), 'ne', Number(a), 'property not equal'); break;
@@ -637,16 +766,17 @@ export function utlToLoot(rules: UtlRule[]): ImportResult<LootRule[]> {
           break;
         }
         case 17: (match.palettes ??= []).push({ slot: Number(a), palette: Number(b) }); break;
-        case 2007: match.totalRatingsAtLeast = Number(String(a).replace(',', '.')); break;
-        case 10: match.minDamageAtLeast = Number(String(a).replace(',', '.')); break;
+        case 2007: match.totalRatingsAtLeast = Math.max(match.totalRatingsAtLeast ?? -Infinity, Number(String(a).replace(',', '.'))); break;
+        case 10: match.minDamageAtLeast = Math.max(match.minDamageAtLeast ?? -Infinity, Number(String(a).replace(',', '.'))); break;
         case 1000: (match.characterSkills ??= []).push({ skill: Number(b), atLeast: Number(a) }); break;
-        case 1001: match.freeSlotsAtLeast = Number(a); break;
-        case 1002: match.characterLevelAtLeast = Number(a); break;
-        case 1003: match.characterLevelAtMost = Number(a); break;
+        case 1001: match.freeSlotsAtLeast = Math.max(match.freeSlotsAtLeast ?? -Infinity, Number(a)); break;
+        case 1002: match.characterLevelAtLeast = Math.max(match.characterLevelAtLeast ?? -Infinity, Number(a)); break;
+        case 1003: match.characterLevelAtMost = Math.min(match.characterLevelAtMost ?? Infinity, Number(a)); break;
         case 1004: (match.characterSkills ??= []).push({ skill: Number(a), baseMin: Number(b), baseMax: Number(q.lines[2]) }); break;
         case 9999: if (/^true$/i.test(a ?? '')) disabled = true; break;
         default: cant.push(`${UTL_REQ_NAMES[q.type] ?? `requirement type ${q.type}`}${q.lines.length ? ` (${q.lines.join(', ')})` : ''}`);
       }
+      if (cant.length > before) raw.push({ type: q.type, lines: [...q.lines] });
     }
     // Several name requirements must all match: one regex with a lookahead per pattern.
     if (props.length) match.props = props;
@@ -656,8 +786,12 @@ export function utlToLoot(rules: UtlRule[]): ImportResult<LootRule[]> {
     const rule: LootRule = { label: u.name, action: action ?? 'keep', match };
     if (action === 'keep-up-to') rule.count = Math.max(1, u.keepCount ?? 1);
     if (cant.length) { match.unsupported = cant.join('; '); problems.push(`loot rule ${i + 1} "${u.name}": can't test ${cant.join('; ')}`); }
-    if (!action) { disabled = true; rule.note = `VTClassic action ${u.action === 4 ? 'Read' : `User${u.action - 4}`} has no equivalent`; problems.push(`loot rule ${i + 1} "${u.name}": ${rule.note}`); }
+    const user = u.action >= 5 && u.action <= 9;
+    if (user) rule.note = `VTClassic action User${u.action - 4}: looted and kept`;
+    if (!action) { disabled = true; rule.note = `VTClassic action ${u.action} has no equivalent`; problems.push(`loot rule ${i + 1} "${u.name}": ${rule.note}`); }
     if (disabled) rule.disabled = true;
+    // Kept as written so an export (vtankExport.ts) writes them back.
+    if (!action || user || raw.length) rule.vtc = { ...(!action || user ? { action: u.action } : {}), ...(raw.length ? { reqs: raw } : {}) };
     return rule;
   });
   return { value: out, problems };
@@ -704,10 +838,16 @@ export function importVTank(files: Array<{ name: string; text: string }>, base: 
         if (r.route) p.routes.push(r.route);
         problems.push(...r.problems.map((x) => `${f.name}: ${x}`));
       } else {
-        const r = utlToLoot(parseUtl(f.text));
+        const file = parseUtlFile(f.text);
+        const r = utlToLoot(file.rules);
         // Every loot profile is a named set (/vt loot load switches); the first one is the active rules.
         p.lootSets = { ...(p.lootSets ?? {}), [stem(f.name)]: r.value };
-        if (!typed.some((x) => x.kind === 'utl' && x !== f && typed.indexOf(x) < typed.indexOf(f))) p.loot = r.value;
+        // Its SalvageCombine bands go with it (VTank's CombineSalvage reads the loaded profile's).
+        if (file.salvageCombine) p.salvageCombineSets = { ...(p.salvageCombineSets ?? {}), [stem(f.name)]: file.salvageCombine };
+        if (!typed.some((x) => x.kind === 'utl' && x !== f && typed.indexOf(x) < typed.indexOf(f))) {
+          p.loot = r.value;
+          if (file.salvageCombine) p.salvageCombine = file.salvageCombine; else delete p.salvageCombine;
+        }
         problems.push(...r.problems.map((x) => `${f.name}: ${x}`));
       }
     } catch (e) {
@@ -723,7 +863,7 @@ export function importVTank(files: Array<{ name: string; text: string }>, base: 
       const hit = sets.find((k) => k.toLowerCase() === a.set.toLowerCase());
       if (hit) return { kind: 'load-loot', set: hit };
       missing.push(a.set);
-      return unsupportedAction(`load loot profile "${a.set}" (import ${a.set}.utl too)`);
+      return unsupportedAction(`load loot profile "${a.set}" (import ${a.set}.utl too)`, { id: 2, data: { t: 's', v: `/vt loot load ${a.set}` } });
     });
     return { actions: out, missing };
   };

@@ -62,6 +62,8 @@ export interface AgentSelf {
   /** Facing as a compass bearing, degrees (0 = north, 90 = east). */
   heading: number;
   combatMode: 'peace' | 'melee' | 'missile' | 'magic' | 'unknown';
+  /** The mode the server last put you in (combatMode is the client's, which changes on the request); unset until the server says. */
+  serverMode?: 'peace' | 'melee' | 'missile' | 'magic' | 'unknown';
   /** What the agent's own motor task is doing ("walking to …"), if anything. */
   task: string | null;
   dead: boolean;
@@ -199,6 +201,11 @@ export interface AgentItem {
   fits?: string;
   /** Its weenie class id. */
   wcid?: number;
+  /** From its public description (salvaging): MaterialType, units in a salvage bag (Structure), workmanship (a bag's average) and the ObjectDescriptionFlags (Retained 0x01000000). */
+  materialType?: number;
+  structure?: number;
+  workmanship?: number;
+  objectDescFlags?: number;
 }
 
 export interface AgentSpell {

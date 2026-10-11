@@ -35,7 +35,7 @@ import type {
 // ── Host: what main.ts provides ─────────────────────────────────────────
 
 /** Your fellowship as Auto Fellow Mgmt reads it (AgentHost.fellowshipInfo). */
-export interface FellowshipInfo { leader: boolean; open: boolean; count: number; members?: string[]; handOff?: boolean }
+export interface FellowshipInfo { leader: boolean; open: boolean; count: number; members?: string[]; handOff?: boolean; /** The fellows whose Share Loot is on (VTank's LootFellowCorpses). */ sharing?: string[] }
 
 export interface AgentHostObject {
   guid: number;
@@ -56,6 +56,8 @@ export interface AgentHostObject {
   palettes?: Array<{ id: number; offset: number; length: number }>;
   /** PhysicsState bits (ACE PhysicsState): an open door is Ethereal (0x4, ACE Door.Open). */
   physicsState?: number;
+  /** UiEffects (PropertyInt 18) from its public description: Magical 0x1 glows (VTank's mana-donor look). */
+  uiEffects?: number;
 }
 
 export interface AgentHostSelf {
@@ -73,6 +75,8 @@ export interface AgentHostSelf {
   /** cameraController.playerYaw (radians). */
   yaw: number;
   combatMode: AgentSelf['combatMode'];
+  /** The mode the server last put us in (its movement's stance, or its CombatMode property); unset until it says. */
+  serverMode?: AgentSelf['combatMode'];
   dead: boolean;
   pyreals?: number;
   burden?: string;
@@ -86,6 +90,12 @@ export type AttackHeightName = 'high' | 'medium' | 'low';
 export interface AgentHost {
   screen(): AgentScreen;
   self(): AgentHostSelf | null;
+  /**
+   * Where the server last said you are: its own UpdatePosition echo of you (ACE Player_Tick sends one for each
+   * position it accepts), landblock-local, with when it came (now() ms). Null until one has come; absent: unknown.
+   * VirindiTank's checkpoints wait on it (the client runs a little ahead of the server).
+   */
+  serverSelfPosition?(): { cell: number; x: number; y: number; z: number; at: number } | null;
   objects(): Iterable<AgentHostObject>;
   object(guid: number): AgentHostObject | null;
   isAttackable(guid: number): boolean;
@@ -160,18 +170,37 @@ export interface AgentHost {
   itemSlots?(): Array<{ guid: number; name: string; packSlot: number; stack: number; maxStack: number; wcid: number; isPack: boolean; equipped: boolean }>;
   /** Move an item into a side pack, or merge it onto a stack, as a drag onto the inventory does. */
   placeItem?(guid: number, to: { packSlot: number } | { onto: number }): boolean;
+  /** Split `amount` off a stack into the main pack (a shift-drag's StackableSplitToContainer). */
+  splitStack?(guid: number, amount: number): boolean;
   /** Every skill with its training (the macro's planners). */
   skillList?(): Array<{ id: number; name: string; training: 'untrained' | 'trained' | 'specialized'; base: number; buffed: number }>;
   /** A spell's components by name, as the server will charge them: the formula the client's own cast pre-check walks (personalized, or scarabs and tapers with foci; SpellComponentCheck.appropriateSpellFormula), through the component table. */
   spellComponents?(spellId: number): string[];
+  /**
+   * Put items into the Ust (`toolGuid`) and salvage them, as the salvage panel's Salvage button does
+   * (CreateTinkeringTool, gmSalvageUI::Salvage); bags of one material put in together combine. True once sent.
+   * Absent when the era has no salvaging (EraFeatures 'salvage': the 1999 server has no handler).
+   */
+  salvage?(toolGuid: number, itemGuids: number[]): boolean;
   /** The era's recipe table (VTank AutoCraftItems; tools/build-craft-tables.ts), loaded on first ask. */
   craftTable?(): Promise<Array<[string, string, string, number, number, number, number]> | null>;
-  /** The era's monster table ([name, weak elements, max health]; tools/build-monster-tables.ts), loaded on first ask. */
-  monsterTable?(): Promise<Array<[string, string, number]> | null>;
+  /** The era's monster table ([name, weak elements, max health, species, immunities]; tools/build-monster-tables.ts), loaded on first ask. */
+  monsterTable?(): Promise<Array<[string, string, number, number?, string?]> | null>;
+  /** The era's drains and martyrs ([spellId, kind, factor, cap, multiplier]; tools/build-drain-tables.ts), loaded on first ask. */
+  drainTable?(): Promise<Array<[number, 'd' | 'm' | 'r', number, number, number]> | null>;
+  /** One of your character's int properties as the server last sent it (PlayerDescription / UpdateInt), e.g. SummoningMastery 362. */
+  charInt?(id: number): number | undefined;
+  /**
+   * Is there room ahead of you for something to appear (a summoned pet, VTank's 3 m check)? The same walls,
+   * terrain and solid objects a missile collides with, swept `metres` along the compass `heading`. null: can't tell.
+   */
+  roomAhead?(heading: number, metres: number): boolean | null;
+  /** The era's special ammunition: [name, UseSpecialAmmo mask] (tools/build-ammo-tables.ts). */
+  specialAmmoTable?(): Promise<Array<[string, number]> | null>;
   /** The era's spell table (the macro's planners build spell families from it). */
-  spellTableData?(): { spells: Map<number, { name: string; desc: string; category: number; school: number; bitfield: number; power: number; duration?: number }> } | null;
+  spellTableData?(): { spells: Map<number, { name: string; desc: string; category: number; school: number; bitfield: number; power: number; duration?: number; baseMana?: number }> } | null;
   /** The items in the currently open container (corpse/chest), or null when none is open. */
-  openContainer(): { guid: number; items: Array<{ guid: number; name: string }> } | null;
+  openContainer(): { guid: number; items: Array<{ guid: number; name: string; uiEffects?: number }> } | null;
   /** Open dialogs, oldest first. */
   dialogs(): AgentDialog[];
   /** The open book or note (gmBookUI): its object, title and pages; a page's text is null until the server has sent it. */
@@ -180,6 +209,8 @@ export interface AgentHost {
   bookPage?(index: number): boolean;
   /** Active enchantments by spell name with seconds left (what the effects UI shows). */
   activeSpells(): Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean }>;
+  /** Seconds left on a shared item cooldown (an item's SharedCooldown id; the cooldown enchantment 0x8000 + id), 0 when none. */
+  cooldownRemaining?(cooldownId: number): number;
   /** Free slots in the main pack. */
   freePackSlots(): number;
   /** Burden as a percent of capacity. */
@@ -205,6 +236,8 @@ export interface AgentHost {
   attackHeight?(): AttackHeightName;
   /** The combat bar's power / accuracy level (0..1), as the player set it. */
   attackPower?(): number;
+  /** Set the combat bar's power / accuracy level (0..1), as its slider does. */
+  setAttackPower?(p: number): void;
   setAttackHeight?(h: AttackHeightName): void;
   /** An attack request is in flight or the server's swing chain is running (no new request should go out). */
   attackPending(): boolean;
@@ -229,7 +262,7 @@ export interface AgentHost {
    * outside doorway), ending at `to`; null when there is no route
    * (cellPath.ts findRouteViaOutside over the cell DAT's EnvCell portals).
    */
-  route(fromCell: number, from: { x: number; y: number; z: number }, toCell: number, to: { x: number; y: number; z: number }, opts?: { maxDrop?: number; closed?: Array<{ x: number; y: number; z: number }> }): Array<{ x: number; y: number; z: number; feet?: number; drop?: number; landing?: number }> | null;
+  route(fromCell: number, from: { x: number; y: number; z: number }, toCell: number, to: { x: number; y: number; z: number }, opts?: { maxDrop?: number; closed?: Array<{ x: number; y: number; z: number }>; avoid?: Array<{ x: number; y: number; z: number }> }): Array<{ x: number; y: number; z: number; feet?: number; drop?: number; landing?: number }> | null;
   /** Press a key binding: an action name from the keymap ("Show/Hide Inventory") or a key code ("F9", "Ctrl+KeyI"). */
   press(input: string): AgentResult;
   /** Keymap actions matching `filter`, with their bound keys. */
@@ -344,6 +377,10 @@ const ODF = { Player: 0x8, Attackable: 0x10, Vendor: 0x200, Door: 0x1000, Corpse
 /** ItemType bits (packages/shared game-types.ts). */
 /** PhysicsState.Ethereal: ACE Door.Open sets it, Door.Close clears it. */
 const PHYSICS_ETHEREAL = 0x4;
+/** UtilityBelt's motion names → the retail default keys (KeybindDefaults; Walk is the run/walk hold). */
+const MOTION_KEYS: Record<string, string> = {
+  forward: 'KeyW', backward: 'KeyS', turnright: 'KeyD', turnleft: 'KeyA', straferight: 'KeyC', strafeleft: 'KeyZ', walk: 'ShiftLeft',
+};
 const IT = { Creature: 0x10, Container: 0x200 } as const;
 
 export function classify(o: Pick<AgentHostObject, 'itemType' | 'objectDescFlags' | 'guid'>, attackable: boolean): AgentObjectKind {
@@ -449,6 +486,18 @@ interface Task {
 /** A loot filter's answer for one item: take it, leave it, or ask again (it is being examined). */
 export type LootDecision = 'take' | 'skip' | 'wait';
 
+/** VirindiTank's corpse timings for {@link AgentApi.loot} (CorpseOpenTimeoutSeconds, CorpseItemAppearanceTimeoutSeconds, CorpseLootItemMaxAttempts). */
+export interface LootOptions {
+  /** How long the open may take before it counts as failed (default 20 s). */
+  openTimeoutMs?: number;
+  /** An open corpse that lists nothing waits this long for its items to appear before it counts as empty (default 0). */
+  appearMs?: number;
+  /** How many times an item is picked before it is given up on (default 2). */
+  itemTries?: number;
+  /** Close the corpse when done (a second Use), as VTank does. */
+  close?: boolean;
+}
+
 export interface ObserveOptions { radius?: number; max?: number; filter?: string }
 
 type TargetArg = number | string | null | undefined;
@@ -539,10 +588,41 @@ export class AgentApi {
   /** Every skill with its training (the macro's planners). */
   skillList(): Array<{ id: number; name: string; training: 'untrained' | 'trained' | 'specialized'; base: number; buffed: number }> { return this.host.skillList?.() ?? []; }
   spellTableData(): ReturnType<NonNullable<AgentHost['spellTableData']>> { return this.host.spellTableData?.() ?? null; }
+  /** Whether this era's world can salvage (a Ust and the server's salvage handler). */
+  canSalvage(): boolean { return !!this.host.salvage; }
+
+  /**
+   * Salvage carried items with the Ust `toolGuid` (bags of one material combine), as the salvage panel's
+   * button does, and wait up to `waitMs` for the first of them to leave the pack (the server's answer).
+   */
+  async salvage(toolGuid: number, itemGuids: number[], waitMs = 6000): Promise<AgentResult> {
+    if (!this.host.salvage) return { ok: false, message: 'this era has no salvaging' };
+    if (!itemGuids.length) return { ok: false, message: 'nothing to salvage' };
+    const carried = new Set(this.host.inventory().map((i) => i.guid));
+    const missing = itemGuids.filter((g) => !carried.has(g));
+    if (missing.length) return { ok: false, message: `not carried: ${missing.map((g) => this.nameOf(g)).join(', ')}` };
+    if (!carried.has(toolGuid)) return { ok: false, message: 'no Ust in your pack' };
+    const names = itemGuids.map((g) => this.nameOf(g));
+    if (!this.host.salvage(toolGuid, itemGuids)) return { ok: false, message: `could not salvage ${names.join(', ')}` };
+    const gone = (): boolean => { const now = new Set(this.host.inventory().map((i) => i.guid)); return itemGuids.some((g) => !now.has(g)); };
+    const t0 = this.host.now();
+    while (!gone() && this.host.now() - t0 < waitMs) await sleep(100);
+    return gone() ? { ok: true, message: `salvaged ${names.join(', ')}` } : { ok: false, message: `no answer to salvaging ${names.join(', ')}` };
+  }
+
   /** The era's recipe table, or null (no table for this era, or not loaded). */
   async craftTable(): Promise<Array<[string, string, string, number, number, number, number]> | null> { return (await this.host.craftTable?.()) ?? null; }
   /** The era's monster table (the macro's Auto element and streak finisher), or null (none for this era). */
-  async monsterTable(): Promise<Array<[string, string, number]> | null> { return (await this.host.monsterTable?.()) ?? null; }
+  async monsterTable(): Promise<Array<[string, string, number, number?, string?]> | null> { return (await this.host.monsterTable?.()) ?? null; }
+  /** The era's drain and martyr table (the macro's Drain Auto plan), or null (none for this era). */
+  async drainTable(): Promise<Array<[number, 'd' | 'm' | 'r', number, number, number]> | null> { return (await this.host.drainTable?.()) ?? null; }
+  /** One of your int properties (PropertyInt), or undefined when the server hasn't sent it. */
+  charInt(id: number): number | undefined { return this.host.charInt?.(id); }
+  /** Whether a bolt or arrow from you to `guid` would hit something first (the line-of-fire test); null when the client can't tell. */
+  lineOfFireBlocked(guid: number): boolean | null { const lof = this.host.lineOfFire?.(guid); return lof ? lof.blockedAt !== null : null; }
+  /** Whether there is room `metres` straight ahead of you (null: can't tell). */
+  roomAhead(metres: number): boolean | null { const me = this.self(); return me ? this.host.roomAhead?.(me.heading, metres) ?? null : null; }
+  async specialAmmoTable(): Promise<Array<[string, number]> | null> { return (await this.host.specialAmmoTable?.()) ?? null; }
   /** Your enchantments now, with each spell's family and level from the spell table (the buff planner). */
   activeSpellsNow(): Array<{ spellId?: number; name: string; category?: number; power?: number; remaining: number }> {
     const t = this.host.spellTableData?.();
@@ -551,10 +631,17 @@ export class AgentApi {
       return { ...(e.spellId !== undefined ? { spellId: e.spellId } : {}), name: e.name, remaining: e.remaining < 0 ? Infinity : e.remaining, ...(s ? { category: s.category, power: s.power } : {}) };
     });
   }
+  /** Seconds left on a shared item cooldown (SharedCooldown id), 0 when none or unknown. */
+  cooldownRemaining(cooldownId: number): number { return this.host.cooldownRemaining?.(cooldownId) ?? 0; }
   packs(): ReturnType<NonNullable<AgentHost['packs']>> { return this.host.packs?.() ?? []; }
   spellComponents(spellId: number): string[] { return this.host.spellComponents?.(spellId) ?? []; }
   fellowshipInfo(): FellowshipInfo | null { return this.host.fellowshipInfo?.() ?? null; }
   itemSlots(): ReturnType<NonNullable<AgentHost['itemSlots']>> { return this.host.itemSlots?.() ?? []; }
+  /** Split `amount` off a stack into the main pack (VTank splits a stack before a recipe that uses one on itself; UB's AutoVendor before selling part). */
+  splitStack(guid: number, amount: number): AgentResult {
+    if (!this.host.splitStack) return { ok: false, message: 'splitting stacks is not available' };
+    return this.host.splitStack(guid, amount) ? { ok: true, message: `splitting ${amount} off #${guid.toString(16)}` } : { ok: false, message: 'the split was refused' };
+  }
   placeItem(guid: number, to: { packSlot: number } | { onto: number }): AgentResult {
     if (!this.host.placeItem) return { ok: false, message: 'moving items is not available' };
     return this.host.placeItem(guid, to) ? { ok: true, message: 'onto' in to ? `merging #${guid.toString(16)} onto #${to.onto.toString(16)}` : `moving #${guid.toString(16)} to pack ${to.packSlot}` } : { ok: false, message: 'the move was refused' };
@@ -581,6 +668,13 @@ export class AgentApi {
 
   /** The newest event's seq (where "since now" starts). */
   currentSeq(): number { return this.seqN; }
+  /** Where the server last echoed you (global metres; z as the cell's), and when (now() ms); null when it hasn't (or the host can't say). */
+  serverPosition(): { x: number; y: number; z: number; at: number } | null {
+    const p = this.host.serverSelfPosition?.();
+    if (!p || !p.cell) return null;
+    const g = toGlobal(p.cell, p.x, p.y);
+    return { x: g.x, y: g.y, z: p.z, at: p.at };
+  }
 
   /** The selected target's name, for routines that act "on the target". */
   targetName(): string | null {
@@ -889,6 +983,7 @@ export class AgentApi {
       task: this.task?.label ?? null,
       dead: s.dead,
     };
+    if (s.serverMode) out.serverMode = s.serverMode;
     if (s.pyreals !== undefined) out.pyreals = s.pyreals;
     if (s.burden) out.burden = s.burden;
     if (s.xpTotal !== undefined) out.xp = { total: s.xpTotal, unassigned: s.xpUnassigned ?? 0 };
@@ -1402,16 +1497,35 @@ export class AgentApi {
    * bar), optionally while running forward (W) and/or walking (Shift), as
    * UtilityBelt's /ub jump[s][w] does.
    */
-  jump(opts: { holdMs?: number; forward?: boolean; walk?: boolean } = {}): AgentResult {
+  jump(opts: { holdMs?: number; forward?: boolean; backward?: boolean; strafeLeft?: boolean; strafeRight?: boolean; walk?: boolean } = {}): AgentResult {
     const hold = Math.max(50, Math.min(opts.holdMs ?? 350, 3000));
-    if (opts.walk) this.host.key('ShiftLeft', true);
-    if (opts.forward) this.host.key('KeyW', true);
+    // UB's jump[swzxc]: Shift (walk) and the movement keys held through the jump (the same keys move() presses).
+    const keys = [opts.walk && 'ShiftLeft', opts.forward && 'KeyW', opts.backward && 'KeyS', opts.strafeLeft && 'KeyZ', opts.strafeRight && 'KeyC'].filter((k): k is string => !!k);
+    for (const k of keys) this.host.key(k, true);
     this.host.key('Space', true);
     setTimeout(() => {
       this.host.key('Space', false);
-      setTimeout(() => { if (opts.forward) this.host.key('KeyW', false); if (opts.walk) this.host.key('ShiftLeft', false); }, 400);
+      setTimeout(() => { for (const k of keys) this.host.key(k, false); }, 400);
     }, hold);
-    return { ok: true, message: `jumped${opts.forward ? ' forward' : ''}${opts.holdMs ? ` (held ${hold} ms)` : ''}` };
+    return { ok: true, message: `jumped${opts.forward ? ' forward' : opts.backward ? ' backward' : ''}${opts.holdMs ? ` (held ${hold} ms)` : ''}` };
+  }
+
+  /** Hold (or let go of) a movement key until told otherwise (VTank FastCastBuffs walks back while a buff is cast). */
+  holdMove(direction: 'forward' | 'backward', down: boolean): void {
+    this.host.key(direction === 'forward' ? 'KeyW' : 'KeyS', down);
+  }
+
+  /**
+   * UtilityBelt's setmotion: hold (or let go of) one of the motions UB names
+   * (Forward, Backward, TurnRight, TurnLeft, StrafeRight, StrafeLeft, Walk;
+   * UB Movement.cs) through the client's default movement keys. False for a
+   * name UB doesn't know.
+   */
+  holdMotion(motion: string, down: boolean): boolean {
+    const code = MOTION_KEYS[motion.trim().toLowerCase()];
+    if (!code) return false;
+    this.host.key(code, down);
+    return true;
   }
 
   stopMoving(): AgentResult {
@@ -1486,8 +1600,15 @@ export class AgentApi {
     // Wait for the outcome (cast, fizzle, a refusal) and for the client to be free again, so the next
     // call can cast straight away; the words alone ("You say, …") are not the end of it.
     const said = (): string[] => this.eventsSince(since).filter((e) => e.type === 'chat').map((e) => e.text.replace(/^\(\w+\) /, ''));
-    const outcome = /you cast|fizzle|do not have|don't have|can't|cannot|not enough|unable|refuse|too busy|out of range|resists?|you fail to affect|invalid target|you are not|your spell/i;
-    for (let w = 0; w < 40 && !(said().some((l) => outcome.test(l)) && !this.host.busy()); w++) {
+    // A war bolt's outcome is its damage line ("You scorch Drudge Skulker for 40 points with Flame Bolt I.": ACE
+    // SpellProjectile; no "You cast" for a projectile) or the wall it hit; before 2026-10-11 a bolt that landed was
+    // waited on for the full 8 s.
+    const outcome = /you cast|fizzle|do not have|don't have|can't|cannot|not enough|unable|refuse|too busy|out of range|resists?|you fail to affect|invalid target|you are not|your spell|\bpoints? with\b|hit the environment|you've earned [\d,]+ experience/i;
+    // A killing bolt has no damage line, only one of the many death messages ("Your lightning coruscates over
+    // Chick's mortal remains!", "Electricity tears Chick apart!"): the target dying (or gone) is its outcome too.
+    // Before this, each kill's last bolt was waited on for 8 s and the next cast went at the corpse-to-be.
+    const died = () => !!tg && tg !== me && (this.host.isDying(tg) || !this.host.object(tg));
+    for (let w = 0; w < 40 && !((said().some((l) => outcome.test(l)) || died()) && !this.host.busy()); w++) {
       if (w >= 15 && !said().length) break; // no reply at all after 3 s: no wand, wrong mode, …
       await sleep(200);
     }
@@ -1650,6 +1771,8 @@ export class AgentApi {
   /** The open vendor's merchandise. */
   /** Whether a vendor window is open. */
   vendorOpen(): boolean { return !!this.host.vendor(); }
+  /** The open vendor window's merchandise (UtilityBelt's AutoVendor plans from it), or null. */
+  vendorData(): AgentVendor | null { return this.host.vendor(); }
 
   vendorView(): AgentResult {
     const v = this.host.vendor();
@@ -1838,6 +1961,11 @@ export class AgentApi {
     // Doors the walk used that stayed shut (locked, or needing a key), global: the doorway route goes round them.
     // Seen at the Holtburg drudge statue's Pedestal Weak Spot opening, whose sill is 2 m over the terrain, 2026-10-11.
     const doorsShut: Array<{ x: number; y: number; z: number }> = [];
+    // Floor openings the route fell through that no drop or jump from here reaches (global): the route goes
+    // round them. The AC1999 tutorial balcony's 2 m fence is too high below Jump 65 (2026-10-11).
+    const dropsFailed: Array<{ x: number; y: number; z: number }> = [];
+    // Doors a key from the pack was used on (ACE Key.UseWithTarget unlocks a door whose LockCode it fits).
+    const keysTried = new Set<number>();
     let doorUsed: number | null = null;
     // When the walk used it, and the event seq then (its "The door is locked!" reply), for the wait on its answer.
     let doorUsedAt = 0;
@@ -1965,7 +2093,9 @@ export class AgentApi {
         const shut = this.nearby(12)
           .filter((o) => o.kind === 'door' && !o.open && !doorsTried.has(o.guid))
           .map((o) => ({ o, p: doorPos(o, me) }))
-          .find((dd) => Math.hypot(dd.p.x - aim.x, dd.p.y - aim.y) < 2.5);
+          // Or the doorway just reached: its point can sit beside the door's leaf, so it counts as passed while
+          // the door still blocks the leg after it (the AC1999 tutorial key room's locked door, 2026-10-11).
+          .find((dd) => Math.hypot(dd.p.x - aim.x, dd.p.y - aim.y) < 2.5 || Math.hypot(dd.p.x - from.x, dd.p.y - from.y) < 1.5);
         if (shut) {
           doorDetour = { guid: shut.o.guid, ...shut.p, wide: false };
           this.trace(`walk: the doorway ahead has a closed door; going to open ${shut.o.name} #${shut.o.guid.toString(16)} first`);
@@ -1979,7 +2109,7 @@ export class AgentApi {
     };
     const plan = (): void => {
       const gl = goal();
-      route = gl && !directWide ? this.planRoute(gl, goalLocal(), doorsShut) : [];
+      route = gl && !directWide ? this.planRoute(gl, goalLocal(), doorsShut, dropsFailed) : [];
       planLegs();
     };
     const legText = (p: NavStep): string => `${p.jump ? (isDrop(p.jump) ? `drop ${(p.jump.from.z - p.z).toFixed(1)} m to ` : 'jump to ') : ''}(${p.x.toFixed(1)}, ${p.y.toFixed(1)}${p.jump ? `, z ${p.z.toFixed(1)}` : ''})`;
@@ -2069,6 +2199,20 @@ export class AgentApi {
         // its key) is a wall: route round it rather than back to it. One that said nothing may have been busy
         // swinging (ACE ignores a Use then): it gets a second try.
         if (used && used.cell && used.physicsState !== undefined && !isOpen) {
+          // The 1999 server says nothing for a locked door, only its sound (ac1999 Door.cpp): a door that stayed
+          // shut through two uses is tried with the key too (the AC1999 tutorial's key-room door, 2026-10-11).
+          const locked = lockedSaid || (doorUses.get(used.guid) ?? 0) >= 2;
+          const key = locked && !keysTried.has(used.guid) ? this.host.inventory().find((i) => /\bkey\b/i.test(i.name)) : undefined;
+          if (key) {
+            // A player unlocks it with the key from the pack: ACE Door "To unlock door, use the key on the door."
+            keysTried.add(used.guid);
+            this.host.useWithTarget(key.guid, used.guid);
+            this.trace(`walk: ${used.name} #${used.guid.toString(16)} is locked; using ${key.name} on it, then opening it`);
+            doorUses.delete(used.guid);
+            // Then open it, and wait on its answer again (a Use the server ignores while busy gets a second try).
+            useDoor(used.guid, now);
+            return null;
+          }
           if (!lockedSaid && (doorUses.get(used.guid) ?? 0) < 2) {
             doorsTried.delete(used.guid);
             this.trace(`walk: ${used.name} #${used.guid.toString(16)} did not open yet; trying it again`);
@@ -2078,7 +2222,7 @@ export class AgentApi {
           }
         }
         doorUsed = null;
-        route = this.planRoute(gl, goalLocal(), doorsShut);
+        route = this.planRoute(gl, goalLocal(), doorsShut, dropsFailed);
         if (!route.length) directWide = true;
         prev = null;
         planLegs();
@@ -2103,6 +2247,15 @@ export class AgentApi {
         this.trace(`walk search ${r.status} after ${r.expanded} points${legs.length ? `: ${legs.map(legText).join(' ')}` : ''}`);
         if (noWay && probe) {
           const aim = legAim();
+          // A fall the route takes that no drop or jump reaches (a rail round the opening higher than your jump
+          // clears): route round it, by stairs, ramps and doors, as a player without the Jump for it does.
+          if (aim && aim.drop !== undefined && !doorDetour && !directWide && tier >= 2 && route[0]) {
+            const r0 = route[0];
+            dropsFailed.push({ x: r0.x, y: r0.y, z: r0.z ?? (r0.landing ?? here.z) + (r0.drop ?? 0) });
+            route = this.planRoute(gl, goalLocal(), doorsShut, dropsFailed);
+            this.trace(`walk: no drop or jump gets down through the opening at (${r0.x.toFixed(1)}, ${r0.y.toFixed(1)}); ${route.length ? `routing round it, ${route.length} doorway(s)` : 'no other doorway route'}`);
+            if (route.length) { prev = null; planLegs(); best = Infinity; bestAt = now; return null; }
+          }
           // Escalate the leg first: past the search's box (a ramp round the corner), then on with jumps and drops.
           if (aim && !doorDetour && !directWide && tier < 2) {
             if (tier === 0 && r.status === 'none' && r.boxed) {
@@ -2225,7 +2378,14 @@ export class AgentApi {
           noWay ? `no walkable way from here: the game's collision finds walls all round between you and it${jumpSearch() ? ', and no jump or drop your health can take gets past them' : ''}` : 'blocked',
           shutNames.length ? `tried the door${shutNames.length > 1 ? 's' : ''} ${shutNames.join(', ')}, which stayed shut: locked, or it needs a key` : '',
           openNames.length ? `opened ${openNames.join(', ')}, but the way on is still blocked` : '',
+          dropsFailed.length ? `the way down through the floor opening${dropsFailed.length > 1 ? 's' : ''} is past a rail higher than your jump clears` : '',
         ].filter(Boolean).join('; ');
+        // A locked door and a key lying about (the AC1999 tutorial's key room): a player picks it up and uses it.
+        const keyNear = shutNames.length && !this.host.inventory().some((i) => /\bkey\b/i.test(i.name))
+          ? this.nearby(40).find((o) => /\bkey\b/i.test(o.name) && (o.kind === 'item' || o.kind === 'other')) : undefined;
+        if (keyNear) {
+          return { ok: false, message: `stuck ${d.toFixed(1)} m short (${why})${featText()}. A ${keyNear.name} lies ${keyNear.dist.toFixed(0)} m away: pick it up (ac_pick_up) and walk again, and the walk uses it on the locked door.` };
+        }
         return { ok: false, message: `stuck ${d.toFixed(1)} m short (${why})${featText()}. ac_map shows the room and its exits; try another route or target.` };
       }
       if (stalls <= 2) { plan(); best = Infinity; bestAt = now; if (search || legs.length || (stalls === 1 && route.length)) return null; }
@@ -2257,7 +2417,7 @@ export class AgentApi {
    * only falls the player's health takes are routed (with no jump physics to
    * plan the drop, none).
    */
-  private planRoute(gl: { x: number; y: number }, o: AgentHostObject | null, closed: Array<{ x: number; y: number; z: number }> = []): RouteStep[] {
+  private planRoute(gl: { x: number; y: number }, o: AgentHostObject | null, closed: Array<{ x: number; y: number; z: number }> = [], avoid: Array<{ x: number; y: number; z: number }> = []): RouteStep[] {
     const s = this.host.self();
     if (!s || !s.cell) return [];
     const interior = (c: number): boolean => (c & 0xffff) >= 0x100;
@@ -2273,7 +2433,8 @@ export class AgentApi {
     const maxDrop = this.jumpKit() ? safeDropHeight(fallBudget(s.health)) : 0;
     // Doors a Use did not open, in this landblock's frame.
     const shut = closed.map((c) => ({ x: c.x - origin.x, y: c.y - origin.y, z: c.z }));
-    const pts = this.host.route(s.cell, { x: s.x, y: s.y, z: s.z }, toCell, to, { maxDrop, ...(shut.length ? { closed: shut } : {}) });
+    const skip = avoid.map((c) => ({ x: c.x - origin.x, y: c.y - origin.y, z: c.z }));
+    const pts = this.host.route(s.cell, { x: s.x, y: s.y, z: s.z }, toCell, to, { maxDrop, ...(shut.length ? { closed: shut } : {}), ...(skip.length ? { avoid: skip } : {}) });
     if (!pts) this.trace(`walk route: no doorway route from cell 0x${(s.cell >>> 0).toString(16)} to cell 0x${(toCell >>> 0).toString(16)}${shut.length ? ` (${shut.length} door(s) that would not open left out)` : ''}`);
     // A doorway is reached at its floor (feet height), not at its centroid halfway up the opening.
     return pts ? pts.slice(0, -1).map((p) => ({
@@ -2313,6 +2474,17 @@ export class AgentApi {
     if (!others.length) return '';
     const list = others.map(([g, n]) => `${this.nameOf(g)} #${g.toString(16)} (${n} attack${n === 1 ? '' : 's'} on you in 10 s)`).join(', ');
     return `\n  note: ${list} ${others.length === 1 ? 'is' : 'are'} attacking you, and ${others.length === 1 ? "isn't" : "aren't"} this target`;
+  }
+
+  /**
+   * VirindiTank's /vt setattackbar [0 to 1]: the combat bar's power / accuracy
+   * slider, where the macro's swings take it with AutoAttackPower off.
+   */
+  setAttackBar(power: number): AgentResult {
+    if (!Number.isFinite(power) || power < 0 || power > 1) return { ok: false, message: 'Syntax: /vt setattackbar [0 to 1]' };
+    if (!this.host.setAttackPower) return { ok: false, message: 'this client has no combat bar to set' };
+    this.host.setAttackPower(power);
+    return { ok: true, message: `Attack bar set to ${Math.round(power * 1000) / 1000}.` };
   }
 
   /**
@@ -2436,7 +2608,7 @@ export class AgentApi {
    * (Player.HandleActionPutItemInContainer_Verify finds items only in the container you are viewing). That is
    * how ac_use then ac_loot took one item per pass and claimed them all (Arcanist, Nanto, 2026-10-11).
    */
-  loot(container: TargetArg, match: string | null, decide?: (item: { guid: number; name: string; itemType: number; objectDescFlags: number; palettes: ItemPalette[] }) => LootDecision): Promise<AgentResult> {
+  loot(container: TargetArg, match: string | null, decide?: (item: { guid: number; name: string; itemType: number; objectDescFlags: number; palettes: ItemPalette[]; uiEffects?: number }) => LootDecision, opts: LootOptions = {}): Promise<AgentResult> {
     let g: number | null;
     if (container === null || container === undefined) {
       const open = this.host.openContainer();
@@ -2458,7 +2630,7 @@ export class AgentApi {
     let openedAt = 0;
     let reopens = 0;
     // Items still to try, and the one whose answer we're waiting for.
-    let queue: Array<{ guid: number; name: string }> = [];
+    let queue: Array<{ guid: number; name: string; uiEffects?: number }> = [];
     let pending: { item: { guid: number; name: string }; at: number; seq: number; units: number; tries: number } | null = null;
     let lastAnswer = 0;
     // Names are resolved when reported, not when listed: on some servers (1999) a container lists its
@@ -2469,6 +2641,8 @@ export class AgentApi {
       return now && !/^\?+$/.test(now) ? now : it.name;
     };
     const failed = new Map<number, { item: { guid: number; name: string }; why: string; tries: number }>();
+    /** Picks sent per item (a retried item keeps its count). */
+    const picks = new Map<number, number>();
     const done = new Set<number>();
     const left: string[] = [];
     /** Everything you carry, counted in units (a stack of 40 pyreals is 40): a merge onto a stack adds no item. */
@@ -2492,8 +2666,16 @@ export class AgentApi {
       return { ok: took.length > 0 || (!notTaken.length && !timedOut), message: `${parts.join('; ')}${leftCombat ? ' (switched to peace mode to loot)' : ''}` };
     };
     const isOpen = (): boolean => this.host.openContainer()?.guid === guid;
+    const openTimeout = opts.openTimeoutMs ?? 20_000;
+    const itemTries = Math.max(1, opts.itemTries ?? 2);
+    // VTank closes a finished corpse by using it again (ACE Container.ActOnUse: a Use of the container you view
+    // closes it; the AC1999 server's the same, Container.cpp "actually a close container request").
+    const finish = (r: AgentResult): AgentResult => {
+      if (opts.close && isOpen()) this.host.use(guid);
+      return r;
+    };
     return this.startTask(`looting ${name}`, (now) => {
-      if (now - start > 90_000) return report(true);
+      if (now - start > 90_000) return finish(report(true));
       if (phase === 'settle') {
         // Already open to you (ac_use opened it): a Use now would close it.
         if (isOpen()) { phase = 'open'; openedAt = now; return null; }
@@ -2506,18 +2688,20 @@ export class AgentApi {
       if (phase === 'open') {
         const oc = this.host.openContainer();
         if (oc && oc.guid === guid) {
+          // Its items can follow the open (CorpseItemAppearanceTimeoutSeconds): an empty listing waits for them.
+          if (!oc.items.length && !takenItems.length && now - openedAt < (opts.appearMs ?? 0)) return null;
           const fresh = oc.items.filter((i) => !done.has(i.guid) && (!re || re.test(i.name)));
           // After a re-open, the ones it refused because it had closed get one more try.
-          queue = fresh.filter((i) => { const f = failed.get(i.guid); return !f || f.tries < 2; });
+          queue = fresh.filter((i) => { const f = failed.get(i.guid); return !f || f.tries < itemTries; });
           for (const i of queue) failed.delete(i.guid);
           if (!queue.length && !takenItems.length && !failed.size && !left.length) {
-            return { ok: true, message: oc.items.length ? `${name}: nothing matching /${match}/ (${oc.items.length} items)` : `${name} is empty` };
+            return finish({ ok: true, message: oc.items.length ? `${name}: nothing matching /${match}/ (${oc.items.length} items)` : `${name} is empty` });
           }
           phase = 'take';
           return null;
         }
-        if (now - openedAt > 20_000) {
-          if (takenItems.length || failed.size) return report(false);
+        if (now - openedAt > openTimeout) {
+          if (takenItems.length || failed.size) return finish(report(false));
           return { ok: false, message: `${name} never opened (too far, someone else's corpse, or locked)${this.saidNote(start)}` };
         }
         return null;
@@ -2544,7 +2728,7 @@ export class AgentApi {
       }
       if (!isOpen()) {
         // It closed under us (out of range, reset, someone else): open it again for what's left, at most twice.
-        const remaining = queue.filter((i) => !done.has(i.guid)).length + [...failed.values()].filter((f) => f.tries < 2).length;
+        const remaining = queue.filter((i) => !done.has(i.guid)).length + [...failed.values()].filter((f) => f.tries < itemTries).length;
         if (remaining && reopens < 2 && !this.host.busy()) {
           reopens++;
           this.trace(`loot: ${name} closed with ${remaining} item(s) left; opening it again`);
@@ -2554,19 +2738,25 @@ export class AgentApi {
           return null;
         }
         if (remaining && reopens < 2) return null;
-        return report(false);
+        return finish(report(false));
       }
       if (now - lastAnswer < 300 || this.host.busy()) return null;
+      // CorpseLootItemMaxAttempts: an item the server didn't move is picked again while it is still in the corpse.
+      if (!queue.length && opts.itemTries !== undefined) {
+        const inside = new Set(this.host.openContainer()?.items.map((i) => i.guid) ?? []);
+        for (const f of [...failed.values()]) if (f.tries < itemTries && inside.has(f.item.guid)) { queue.push(f.item); failed.delete(f.item.guid); }
+      }
       const next = queue.shift();
-      if (next === undefined) return report(false);
+      if (next === undefined) return finish(report(false));
       if (done.has(next.guid)) return null;
       if (decide) {
         const o = this.host.object(next.guid);
-        const d = decide({ ...next, itemType: o?.itemType ?? 0, objectDescFlags: o?.objectDescFlags ?? 0, palettes: this.itemPalettes(next.guid) });
+        const d = decide({ ...next, itemType: o?.itemType ?? 0, objectDescFlags: o?.objectDescFlags ?? 0, palettes: this.itemPalettes(next.guid), ...((o?.uiEffects ?? next.uiEffects) !== undefined ? { uiEffects: o?.uiEffects ?? next.uiEffects } : {}) });
         if (d === 'wait') { queue.unshift(next); return null; }
         if (d === 'skip') { left.push(named(next)); done.add(next.guid); return null; }
       }
-      const tries = (failed.get(next.guid)?.tries ?? 0) + 1;
+      const tries = Math.max(failed.get(next.guid)?.tries ?? 0, picks.get(next.guid) ?? 0) + 1;
+      picks.set(next.guid, tries);
       pending = { item: next, at: now, seq: this.seqN, units: units(), tries };
       if (!this.host.pickUp(next.guid)) {
         // The client refused to send it (its own centre-screen notice says why).

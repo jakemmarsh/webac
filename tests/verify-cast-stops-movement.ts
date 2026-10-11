@@ -67,6 +67,17 @@ describe('casting while running: the held keys stop counting, the wire says Read
     return { cam, sync, state, mts, cast };
   }
 
+  it('counts the MoveToStates it sends: none while standing, one for a standing movement event (automation\'s first-action prime)', () => {
+    const r = rig();
+    for (let t = 0; t < 2000; t += 100) r.sync.update(r.state(), POS, t);
+    expect(r.sync.moveToStatesSent).toBe(0);
+    expect(r.mts()).toHaveLength(0);
+    r.sync.sendMovementEventNow(r.state(), POS, 2100);
+    expect(r.sync.moveToStatesSent).toBe(1);
+    expect(r.mts()).toHaveLength(1);
+    expect(r.mts()[0].forwardCommand).toBeFalsy();
+  });
+
   it('W + C held, cast: both stop at once, the keys are still down, one stopped MoveToState goes out', () => {
     const r = rig();
     r.cam.simulateKeyDown('KeyW');

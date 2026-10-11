@@ -171,6 +171,27 @@ describe('ServerObjectManager.lineOfFire: the missile sweep from your body to th
     som.missileEnvironmentSweep = () => null;
     expect(som.lineOfFire(0x80000099)).toBeNull();
   });
+
+  // The automation's Summon Pets asks for 3 m of room ahead before a summon (VTank's room check).
+  it('roomAhead: a wall within the distance along the compass heading takes the room; behind you or past it does not', () => {
+    const som = makeSOM();
+    som.missileEnvironmentSweep = wallAt(102); // a wall 2 m north of you
+    expect(som.roomAhead(0, 3)).toBe(false);
+    expect(som.roomAhead(180, 3)).toBe(true); // facing south: the wall is behind
+    som.missileEnvironmentSweep = wallAt(110);
+    expect(som.roomAhead(0, 3)).toBe(true);
+    // A closed door ahead blocks; a creature never does.
+    som.missileEnvironmentSweep = () => null;
+    put(som, 0x70000001, 100, 101.5, 10, { itemType: ItemType.Misc, physicsState: 0 });
+    put(som, 0x80000081, 100, 101.5, 10);
+    som.missileObjectSweep = (o, from, to) => {
+      if (o.guid !== 0x70000001) throw new Error('creatures are not swept');
+      return { t: (101.5 - from.y) / (to.y - from.y), normal: null };
+    };
+    expect(som.roomAhead(0, 3)).toBe(false);
+    som.missileLocalPlayer = () => null;
+    expect(som.roomAhead(0, 3)).toBeNull();
+  });
 });
 
 describe('isProjectileSpellType: which spells fly as missiles (the spell table MetaSpellType)', () => {

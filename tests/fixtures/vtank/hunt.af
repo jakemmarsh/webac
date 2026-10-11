@@ -1,0 +1,32 @@
+~~ Our own .af fixture: the same meta as hunt.met, written by hand in metaf's form
+~~ (comments, code-folding braces behind comments, blank lines, and the nav section below).
+
+STATE: {Default} ~~ {
+	IF:	Always
+		DO:	EmbedNav loop {Holtburg loop}
+	IF:	MobsInDist_Name 1 25.0 {Drudge}   ~~ one Drudge within 25 yd
+		DO:	DoAll
+				SetState {Fight}
+				Chat {/vt opt set EnableCombat true}
+	IF:	All
+			MainSlotsLE 2
+			Not Death
+		DO:	SetState {Sell}
+~~ }
+
+STATE: {Fight}
+	IF:	Any
+			BlockE 8bb30000
+			ChatMatch {^You have been}
+		DO:	SetState {Default}
+	IF:	NoMobsInDist 30
+		DO:	DoExpr {setvar[done,1]}
+STATE: {Sell}
+	IF:	SecsInStateGE 30
+		DO:	SetState {Default}
+
+NAV: loop circular ~~ {
+	pnt 33.6 42.1 0.39
+	pau 33.7 42.0 0.39 5000
+	rcl 33.65 41.9 0.39 {Lifestone Recall}
+~~ }

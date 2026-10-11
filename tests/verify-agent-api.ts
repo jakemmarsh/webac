@@ -521,6 +521,56 @@ describe('AgentApi', () => {
     expect(Math.hypot(host.me.x - 80, host.me.y - 40)).toBeLessThan(1.6);
   });
 
+  it('walkTo unlocks a locked door with the key in your pack, as a player does; without one it names the key lying nearby (AC1999 tutorial key room, 2026-10-11)', async () => {
+    // One doorway (the west wall of a 7 m box round the goal) with a locked door: ACE "To unlock door, use the key on the door."
+    const setup = (withKey: boolean, silent = false) => {
+      let open = false, locked = true;
+      const inBand = (v: number, c: number, half: number) => Math.abs(v - c) < half;
+      host.wall = (x, y) => {
+        const onWall = (inBand(x, 76.5, 0.4) || inBand(x, 83.5, 0.4)) && y > 36.1 && y < 43.9 || (inBand(y, 36.5, 0.4) || inBand(y, 43.5, 0.4)) && x > 76.1 && x < 83.9;
+        return onWall && !(inBand(x, 76.5, 0.5) && y > 39.4 && y < 40.6 && open);
+      };
+      host.me.x = 70; host.me.y = 40;
+      const door = host.add({ guid: 0x8000004e, name: 'Door', objectDescFlags: 0x1000, physicsState: 0, x: 75.8, y: 40 });
+      host.add({ guid: 0x8000004f, name: 'Straw Drudge', itemType: 0x10, cell: 0xa9b40105, x: 80, y: 40 });
+      if (withKey) host.inv.push({ guid: 0x80000050, name: 'Tutorial Dungeon Key', where: 'pack' });
+      else host.add({ guid: 0x80000050, name: 'Tutorial Dungeon Key', itemType: 0x4000, x: 66, y: 44 });
+      host.route = ((_fc: number, _f: unknown, _tc: number, to: { x: number; y: number; z: number }, opts?: { closed?: unknown[] }) =>
+        (opts?.closed?.length ? null : [{ x: 76.5, y: 40, z: 94 }, to])) as typeof host.route;
+      const use = host.use;
+      host.use = (g: number) => {
+        if (g === door.guid) { if (locked) { if (!silent) api.pushChat('The door is locked!'); } else { open = true; door.physicsState = 0x4; } }
+        return use(g);
+      };
+      const useWith = host.useWithTarget;
+      host.useWithTarget = (src: number, target: number) => { if (src === 0x80000050 && target === door.guid) locked = false; return useWith(src, target); };
+      return door;
+    };
+    const door = setup(true);
+    const r = await (async () => { const p = api.walkTo('Straw Drudge', { within: 1.5 }); run(api, host, 120_000); return p; })();
+    expect(r).toMatchObject({ ok: true });
+    expect(host.sent.filter((x) => x.startsWith('use'))).toEqual([`use ${door.guid.toString(16)}`, `usewith 80000050 ${door.guid.toString(16)}`, `use ${door.guid.toString(16)}`]);
+
+    host = new FakeHost();
+    api = new AgentApi(host);
+    setup(false);
+    const p2 = api.walkTo('Straw Drudge', { within: 1.5 });
+    run(api, host, 120_000);
+    const r2 = await p2;
+    expect(r2.ok).toBe(false);
+    expect(r2.message).toMatch(/tried the door Door, which stayed shut.*A Tutorial Dungeon Key lies \d+ m away: pick it up \(ac_pick_up\) and walk again/);
+    expect(host.sent.some((x) => x.startsWith('usewith'))).toBe(false);
+
+    // The 1999 server says nothing for a locked door (only its sound): two uses that leave it shut, then the key.
+    host = new FakeHost();
+    api = new AgentApi(host);
+    const d3 = setup(true, true);
+    const p3 = api.walkTo('Straw Drudge', { within: 1.5 });
+    run(api, host, 120_000);
+    expect(await p3).toMatchObject({ ok: true });
+    expect(host.sent.filter((x) => x.startsWith('use'))).toEqual([`use ${d3.guid.toString(16)}`, `use ${d3.guid.toString(16)}`, `usewith 80000050 ${d3.guid.toString(16)}`, `use ${d3.guid.toString(16)}`]);
+  });
+
   it('walkTo waits for the server\'s answer before judging a door: one that opens late is walked through, not routed round (Holtburg tower, 2026-10-11)', async () => {
     // One doorway (the west wall of a 7 m box round the goal). The Use is answered late: the server walks you to the
     // door first, and the door's Ethereal state arrives 3 s after the Use (ACE MoveTo, then Door.ActOnUse).
@@ -1085,6 +1135,38 @@ describe('AgentApi', () => {
     // A targeted spell with only an item selected asks for a target instead of casting at the wand.
     expect((await api.cast('Flame Bolt I', null)).message).toMatch(/needs a target/);
     expect(await api.cast('Incantation of Something', null)).toMatchObject({ ok: false });
+  });
+
+  it('a war bolt\'s outcome is its damage line or the wall it hit (ACE sends no "You cast" for a bolt): the cast returns then, not 8 s on', async () => {
+    host.spells = () => [{ id: 27, name: 'Flame Bolt I', school: 'War', level: 1 }];
+    host.add({ guid: 0x80000080, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 25 });
+    for (const line of ['You scorch Drudge Skulker for 9 points with Flame Bolt I.', 'Your missile attack hit the environment.']) {
+      let done = false;
+      const p = api.cast('Flame Bolt I', 'Drudge Skulker').then((r) => { done = true; return r; });
+      setTimeout(() => api.pushChat(line, 0), 1200);
+      await vi.advanceTimersByTimeAsync(1600);
+      expect(done).toBe(true);
+      expect((await p).message).toContain(line);
+    }
+  });
+
+  it('a killing bolt (a death message, no damage line) returns when the target dies, not 8 s on', async () => {
+    host.spells = () => [{ id: 75, name: 'Lightning Bolt I', school: 'War', level: 1 }];
+    host.add({ guid: 0x80000080, name: 'Chick', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 25 });
+    let done = false;
+    const p = api.cast('Lightning Bolt I', 'Chick').then((r) => { done = true; return r; });
+    setTimeout(() => { api.pushChat("Your lightning coruscates over Chick's mortal remains!", 0); host.dying.add(0x80000080); }, 1200);
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(done).toBe(true);
+    expect((await p).message).toContain('mortal remains');
+  });
+
+  it('/vt setattackbar: the combat bar\'s power slider, 0 to 1', () => {
+    expect(api.setAttackBar(0.8)).toEqual({ ok: true, message: 'Attack bar set to 0.8.' });
+    expect(host.barPower).toBe(0.8);
+    expect(api.setAttackBar(1.5)).toEqual({ ok: false, message: 'Syntax: /vt setattackbar [0 to 1]' });
+    expect(api.setAttackBar(Number.NaN).ok).toBe(false);
+    expect(host.barPower).toBe(0.8);
   });
 
   it('a resisted or refused cast is not ok: "X resists your spell", an immune target, and ACE\'s components refusal', async () => {

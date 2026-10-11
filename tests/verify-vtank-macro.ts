@@ -189,6 +189,17 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
     expect(api.routine.history().filter((h) => /no line of fire/.test(h)).length).toBeLessThanOrEqual(1);
   });
 
+  it('UseBreakableTurnTo turns once per monster, then casts: a bearing that never settles within 2° (1 m away) no longer turns for ever', async () => {
+    host.add({ guid: 0x80005001, name: 'Sparring Golem', itemType: 0x10, objectDescFlags: 0x10, x: 90, y: 20 });
+    const spells = host.spells;
+    host.spells = () => spells().map((x) => (/Bolt/.test(x.name) ? { ...x, projectile: true } : x));
+    host.setYaw = () => {}; // the turn never lands within 2°
+    api.routine.start(vt({}));
+    await step(6000);
+    expect(host.sent.some((x) => x.startsWith(`cast ${id('Flame Bolt I')} 80005001`))).toBe(true);
+    expect(api.routine.history().filter((h) => /turning to face Sparring Golem/.test(h)).length).toBeLessThanOrEqual(2);
+  });
+
   it('a wielded wand casts (its item type reaches the planner); before 2026-10-11 every weapon read as melee and the wand swung', async () => {
     host.add({ guid: 0x80005001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 35 });
     host.inv = [{ guid: 0x50000093, name: 'Fire Wand', where: 'equipped', type: 'Caster', slot: 'Held', itemType: 0x8000 }] as never;
@@ -507,6 +518,9 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
       { guid: 0x50000a02, name: 'Fire Grievver Essence (50)', where: 'main pack', uiEffects: 0x20 },
     ] as never;
     for (const g of [0x50000a01, 0x50000a02]) host.appraisalDatas.set(g, { int: { 266: 49052 }, float: {}, string: {}, bool: {}, did: {}, spells: [] });
+    // Summoning trained (VTank summons only then: MOSS SummonPetRule.IsSummoningTrained).
+    const skills = (host as unknown as { skillList: () => unknown[] }).skillList();
+    (host as unknown as { skillList: () => unknown[] }).skillList = () => [...skills, { id: 54, name: 'Summoning', training: 'trained', base: 100, buffed: 100 }];
     const data = emptyVtankData();
     data.items = [{ name: 'Acid Grievver Essence (50)' }, { name: 'Fire Grievver Essence (50)' }];
     data.monsters[0].damage = 6; // Fire: PAuto summons the fire essence
@@ -599,6 +613,366 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
     expect(casts).toEqual([`cast ${two} self`, `cast ${one} self`]);
   });
 
+  it('"You don\'t have enough Mana": no cast is sent again until mana has come up (it had sent two a second)', async () => {
+    const one = id('Strength Self I');
+    const s1 = table.spells.get(one)!;
+    host.spells = () => [{ id: one, name: s1.name, school: 'Creature', level: 1, category: s1.category, power: s1.power, duration: s1.duration ?? 0, self: true, buff: true }];
+    let refuse = true;
+    host.me.mana.current = 2;
+    serverAnswers({ refuse: () => (refuse ? "You don't have enough Mana to cast this spell." : null) });
+    api.routine.start(vt({ settings: { EnableBuffing: true } }));
+    await step(10_000);
+    const casts = () => host.sent.filter((x) => x === `cast ${one} self`).length;
+    expect(casts()).toBe(1);
+    // A mana tick or two is not the spell's cost: still nothing sent.
+    host.me.mana.current = 4;
+    await step(4000);
+    expect(casts()).toBe(1);
+    // Mana comes back: the buff goes out.
+    refuse = false;
+    host.me.mana.current = 30;
+    await step(4000);
+    expect(casts()).toBe(2);
+  });
+
+  describe('the blacklist and ghosts (BlacklistMonster*, DeleteGhostMonsters*)', () => {
+    const two = () => {
+      host.add({ guid: 0x80005001, name: 'Gate Guard', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 35 });
+      host.add({ guid: 0x80005002, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 40 });
+    };
+    const bolt = () => id('Flame Bolt I');
+    const at = (g: number) => host.sent.filter((x) => x === `cast ${bolt()} ${g.toString(16)}`).length;
+
+    it('a monster the server calls an invalid target (GDLE / AC1999 words, and ACE\'s) is blacklisted at once; the next is fought', async () => {
+      for (const words of ['Gate Guard is an invalid target.', 'Flame Bolt I cannot be cast on Gate Guard.']) {
+        host = new FakeHost();
+        const send = host.cast;
+        host.spells = () => [{ id: bolt(), name: 'Flame Bolt I', school: 'War', level: 1, category: table.spells.get(bolt())!.category, power: 1, duration: 0 }];
+        (host as unknown as { spellTableData: () => Table }).spellTableData = () => table;
+        (host as unknown as { skillList: () => unknown[] }).skillList = () => [{ id: 34, name: 'War Magic', training: 'trained', base: 100, buffed: 100 }];
+        api.routine.stop();
+        api = new AgentApi(host);
+        host.cast = (sid, t) => { const r = send(sid, t); api.pushChat(t === 0x80005001 ? words : `You cast Flame Bolt I on ${host.objs.get(t ?? 0)?.name}`, 7); return r; };
+        two();
+        api.routine.start(vt({}));
+        await step(3000);
+        expect(at(0x80005001)).toBe(1);
+        expect(at(0x80005002)).toBeGreaterThan(0);
+        expect(api.routine.history().join('\n')).toMatch(/Gate Guard blacklisted for 120 s: the server says it is an invalid target/);
+      }
+    });
+
+    it('casts the server never answers are misses: one past BlacklistMonsterAttemptCount blacklists it', async () => {
+      two();
+      // No serverAnswers: every cast goes unanswered.
+      api.routine.start(vt({ settings: { EnableBuffing: false, AttackDistance: 30, BlacklistMonsterAttemptCount: 1 } }));
+      await step(12_000);
+      expect(at(0x80005001)).toBe(2);
+      expect(at(0x80005002)).toBeGreaterThan(0);
+      expect(api.routine.history().join('\n')).toMatch(/Gate Guard blacklisted for 120 s: 2 attempts in a row didn't reach it/);
+    });
+
+    it('a bolt the world stops ("Your missile attack hit the environment.", no "You cast" for a bolt on ACE) is a miss; a bolt that lands clears the count', async () => {
+      two();
+      const send = host.cast;
+      let n = 0;
+      let lands = true;
+      // ACE answers a war bolt only with its damage line, or the wall it hit (ProjectileCollisionHelper). Every third lands.
+      host.cast = (sid, t) => { const r = send(sid, t); const who = host.objs.get(t ?? 0)?.name; api.pushChat(lands && ++n % 3 === 0 ? `You scorch ${who} for 9 points with Flame Bolt I.` : 'Your missile attack hit the environment.', 0); return r; };
+      api.routine.start(vt({ settings: { EnableBuffing: false, AttackDistance: 30, BlacklistMonsterAttemptCount: 2 } }));
+      await step(6000);
+      // Two misses, a hit (count cleared), two misses, a hit: never three in a row, never blacklisted.
+      expect(at(0x80005001)).toBeGreaterThanOrEqual(5);
+      expect(at(0x80005002)).toBe(0);
+      lands = false; // from here every bolt hits the wall: the third miss in a row blacklists it
+      await step(6000);
+      expect(at(0x80005002)).toBeGreaterThan(0);
+      expect(api.routine.history().join('\n')).toMatch(/Gate Guard blacklisted for 120 s: 3 attempts in a row/);
+    });
+
+    it('a bow\'s shots that hit the environment count against the monster shot at', async () => {
+      two();
+      host.inv = [{ guid: 0x50000071, name: 'Yumi', where: 'equipped', type: 'MissileWeapon', slot: 'MissileWeapon', itemType: 0x100 }] as never;
+      const attack = host.attack;
+      // Each attack order: two shots into the wall.
+      host.attack = (g, p, h) => { attack(g, p, h); api.pushChat('Your missile attack hit the environment.', 0); api.pushChat('Your missile attack hit the environment.', 0); };
+      api.routine.start(vt({ settings: { EnableBuffing: false, AttackDistance: 30, BlacklistMonsterAttemptCount: 1 } }));
+      await step(15000);
+      expect(host.sent.filter((x) => x.startsWith('attack 80005001')).length).toBe(1);
+      const h = api.routine.history().join('\n');
+      expect(h).toMatch(/Gate Guard blacklisted for 120 s: 2 attempts in a row didn't reach it/);
+      expect(h).toMatch(/attacking Drudge Skulker/);
+    });
+
+    it('HP tracker: a listed monster whose health doesn\'t change for GhostDeleteHPTrackerSeconds is set aside as a ghost', async () => {
+      two();
+      (host as unknown as { monsterTable: () => Promise<Array<[string, string, number]>> }).monsterTable = async () => [['Gate Guard', 'f', 500], ['Drudge Skulker', 'f', 40]];
+      serverAnswers();
+      // The fake's selected target always reports half health: it never changes.
+      api.routine.start(vt({ settings: { EnableBuffing: false, AttackDistance: 30, GhostDeleteHPTrackerSeconds: 3 } }));
+      await step(2500);
+      expect(at(0x80005001)).toBeGreaterThan(0);
+      expect(at(0x80005002)).toBe(0);
+      await step(4000);
+      expect(api.routine.history().join('\n')).toMatch(/ghost monster Gate Guard set aside: its health hasn't changed in 3 s/);
+      expect(at(0x80005002)).toBeGreaterThan(0);
+      // Off: never set aside.
+      api.routine.stop();
+      host.sent.length = 0;
+      api = new AgentApi(host);
+      serverAnswers();
+      api.routine.start(vt({ settings: { EnableBuffing: false, AttackDistance: 30, GhostDeleteHPTrackerSeconds: 3, DeleteGhostMonstersByHPTracker: false } }));
+      await step(6500);
+      expect(at(0x80005002)).toBe(0);
+    });
+  });
+
+  describe('the combat-mode gate (VTank CombatModeGate)', () => {
+    it('nothing is cast in magic mode until the server\'s stance says magic', async () => {
+      host.add({ guid: 0x80005001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 35 });
+      host.me.serverMode = 'peace';
+      // The client switches at once; the server's stance follows 500 ms later.
+      host.setCombatMode = (m: string) => { host.sent.push(`mode ${m}`); host.me.combatMode = m as never; setTimeout(() => { host.me.serverMode = m as never; }, 500); };
+      const serverAt: string[] = [];
+      const send = host.cast;
+      host.cast = (sid, t) => { serverAt.push(String(host.me.serverMode)); return send(sid, t); };
+      serverAnswers();
+      api.routine.start(vt({}));
+      await step(3000);
+      expect(host.sent).toContain('mode magic');
+      expect(serverAt.length).toBeGreaterThan(0);
+      expect(serverAt.every((m) => m === 'magic')).toBe(true);
+    });
+
+    it('drops to peace that never take: at DropToPeaceModeRetryCount the first Items-tab wand is wielded to clear the bugged state', async () => {
+      host.me.combatMode = 'melee';
+      host.setCombatMode = (m: string) => { host.sent.push(`mode ${m}`); }; // stuck: the client never leaves melee
+      host.inv = [{ guid: 0x50000097, name: 'Training Wand', where: 'main pack', type: 'Caster', itemType: 0x8000, fits: 'Held' }] as never;
+      const data = emptyVtankData();
+      data.items = [{ name: 'Training Wand' }];
+      api.routine.start(vt({ vtank: data, settings: { EnableBuffing: false, AttackDistance: 30, IdlePeaceMode: true, DropToPeaceModeRetryCount: 3, AutoCraftItems: false } }));
+      await step(8000);
+      expect(host.sent.filter((x) => x === 'mode peace').length).toBeGreaterThanOrEqual(2);
+      expect(host.sent).toContain('wield 50000097');
+      expect(api.routine.history().join('\n')).toMatch(/Macro detected bugged combat state/);
+    });
+  });
+
+  it('RandomHelperBuffs: a random protection on a player within 18 m, at the best level you cast, every RandomHelperIntervalSeconds', async () => {
+    const armor = id('Armor Other I');
+    const s = table.spells.get(armor)!;
+    host.spells = () => [{ id: armor, name: s.name, school: SCHOOLS[s.school] ?? '', level: 1, category: s.category, power: s.power, duration: s.duration ?? 0, buff: true }];
+    host.add({ guid: 0x50000aaa, name: 'Fellow Player', itemType: 0x10, objectDescFlags: 0x8, x: 80, y: 25 });
+    host.add({ guid: 0x50000bbb, name: 'Far Player', itemType: 0x10, objectDescFlags: 0x8, x: 80, y: 60 });
+    host.me.combatMode = 'magic';
+    let r = 0;
+    const rand = vi.spyOn(Math, 'random').mockImplementation(() => { r = (r + 0.137) % 1; return r; });
+    try {
+      serverAnswers();
+      api.routine.start(vt({ settings: { EnableBuffing: false, AttackDistance: 30, RandomHelperBuffs: true, RandomHelperIntervalSeconds: 5, AutoCraftItems: false } }));
+      await step(2000);
+      expect(host.sent.filter((x) => x.startsWith('cast '))).toEqual([`cast ${armor} 50000aaa`]);
+      await step(5000);
+      expect(host.sent.filter((x) => x === `cast ${armor} 50000aaa`)).toHaveLength(2);
+      expect(host.sent.some((x) => x.endsWith('50000bbb'))).toBe(false);
+    } finally { rand.mockRestore(); }
+    // Off (VTank's default): nothing.
+    api.routine.stop();
+    host.sent.length = 0;
+    api.routine.start(vt({ settings: { EnableBuffing: false, AttackDistance: 30, AutoCraftItems: false } }));
+    await step(3000);
+    expect(host.sent.filter((x) => x.startsWith('cast '))).toEqual([]);
+  });
+
+  describe('VTank parity §1.5–§1.8 in the running macro (item debuffs, immunity, the turn, pets)', () => {
+    const skulker = () => host.add({ guid: 0x80005001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 35 });
+    const imperil = () => `cast ${id('Imperil Other I')} 80005001`;
+
+    it('an item\'s "<item> cast <debuff> on <monster>" line logs the debuff: it is not cast again while it lasts', async () => {
+      skulker();
+      const data = emptyVtankData();
+      data.monsters[0].on = ['I', 'A'];
+      serverAnswers({ resist: (sid) => sid === id('Imperil Other I') });
+      api.routine.start(vt({ vtank: data }));
+      await step(1500);
+      expect(host.sent).toContain(imperil());
+      // A cast-on-strike weapon (or a wand) put Imperil on it: ACE / AC1999 "<item> cast <spell> on <target>".
+      api.pushChat('Imperiling Sword cast Imperil Other I on Drudge Skulker', 7);
+      await step(300);
+      host.sent.length = 0;
+      await step(3000);
+      expect(host.sent).not.toContain(imperil());
+      expect(host.sent).toContain(`cast ${id('Flame Bolt I')} 80005001`);
+    });
+
+    it('"You fail to affect X with Y" (NonProjectileMagicImmune): no more debuffs at it; it is attacked', async () => {
+      skulker();
+      const data = emptyVtankData();
+      data.monsters[0].on = ['I', 'A'];
+      serverAnswers({ refuse: (sid) => (sid === id('Imperil Other I') ? 'You fail to affect Drudge Skulker with Imperil Other I' : null) });
+      api.routine.start(vt({ vtank: data }));
+      await step(4000);
+      // Before 2026-10-11 it recast Imperil at it for ever and never attacked.
+      expect(host.sent.filter((x) => x === imperil()).length).toBeLessThanOrEqual(2);
+      expect(host.sent).toContain(`cast ${id('Flame Bolt I')} 80005001`);
+    });
+
+    it('the AC1999 server\'s "You fail to affect X because X cannot be harmed!" stops the debuffs too', async () => {
+      skulker();
+      const data = emptyVtankData();
+      data.monsters[0].on = ['I', 'A'];
+      serverAnswers({ refuse: (sid) => (sid === id('Imperil Other I') ? 'You fail to affect Drudge Skulker because Drudge Skulker cannot be harmed!' : null) });
+      api.routine.start(vt({ vtank: data }));
+      await step(4000);
+      expect(host.sent.filter((x) => x === imperil()).length).toBeLessThanOrEqual(2);
+      expect(host.sent).toContain(`cast ${id('Flame Bolt I')} 80005001`);
+    });
+
+    it('UseBreakableTurnTo (on by default): the macro faces a monster off to the side itself before the bolt', async () => {
+      host.add({ guid: 0x80005001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 95, y: 20 }); // due east
+      serverAnswers();
+      api.routine.start(vt({}));
+      await step(2500);
+      expect(api.routine.history().some((h) => /turning to face Drudge Skulker/.test(h))).toBe(true);
+      expect(host.sent).toContain(`cast ${id('Flame Bolt I')} 80005001`);
+      expect(Math.abs(api.self()!.heading - 90)).toBeLessThan(3);
+      api.routine.stop();
+      // Off: no turn of ours (the cast's own turn does it).
+      host.me.yaw = 0;
+      const before = api.routine.history().length;
+      api.routine.start(vt({ settings: { EnableBuffing: false, AttackDistance: 30, UseBreakableTurnTo: false } }));
+      await step(1500);
+      expect(api.routine.history().slice(before).some((h) => /turning to face/.test(h))).toBe(false);
+    });
+
+    it('a grenade on the Consumables tab is wielded and thrown in missile mode; once it lands, the row\'s weapon again, with a fresh attack order', async () => {
+      skulker();
+      const SWORD = 0x50000c01, PHIAL = 0x50000c02;
+      host.inv = [
+        { guid: SWORD, name: 'Iron Sword', where: 'equipped', itemType: 0x1, slot: 'MeleeWeapon' },
+        { guid: PHIAL, name: 'Iron Phial of Imperil', where: 'main pack', itemType: 0x100, fits: 'MissileWeapon', stack: 10 },
+      ] as never;
+      // The phial's examination: Spellcraft 400 and its cast-on-strike spell (ACE AppraiseInfo lists the ProcSpell).
+      host.appraised.push(SWORD, PHIAL);
+      host.appraisalDatas.set(SWORD, { int: { 45: 0x1 }, float: {}, string: {}, bool: {}, did: {}, spells: [] });
+      host.appraisalDatas.set(PHIAL, { int: { 106: 400 }, float: {}, string: {}, bool: {}, did: {}, spells: ['Imperil Other I'] });
+      host.wield = (g) => {
+        host.sent.push(`wield ${g.toString(16)}`);
+        host.inv = host.inv.map((i) => ({ ...i, where: i.guid === g ? 'equipped' : 'main pack' })) as never;
+        return true;
+      };
+      const data = emptyVtankData();
+      data.monsters[0].on = ['I', 'A'];
+      data.items = [{ name: 'Iron Sword' }];
+      data.consumables = ['Iron Phial of Imperil'];
+      host.me.combatMode = 'melee';
+      api.routine.start(vt({ vtank: data }));
+      await step(9000);
+      // Your Life Magic 100 against the phial's Spellcraft 400: the phial goes.
+      expect(host.sent).toContain(`wield ${PHIAL.toString(16)}`);
+      expect(host.sent).toContain('mode missile');
+      expect(host.sent.some((x) => x.startsWith('attack 80005001'))).toBe(true);
+      expect(host.sent).not.toContain(imperil());
+      // It lands: the server says so, and the sword comes back for the attack, sent again.
+      api.pushChat('Iron Phial of Imperil cast Imperil Other I on Drudge Skulker', 7);
+      await step(15_000);
+      expect(host.sent).toContain(`wield ${SWORD.toString(16)}`);
+      // A new attack order with the sword, not "still fighting" on the throw's order (the weapon change ended it).
+      const after = api.routine.history().slice(api.routine.history().findIndex((h) => /uses Iron Sword/.test(h)));
+      expect(after.some((h) => /default p1: attacking Drudge Skulker/.test(h))).toBe(true);
+      expect(host.sent).not.toContain(imperil());
+    });
+
+    it('Drain Auto reads the era\'s drain table from the host: at full health a martyr, not a drain (nothing to drain into)', async () => {
+      skulker();
+      const known = ['Drain Health Other I', "Martyr's Hecatomb I", 'Flame Bolt I'].map(id);
+      host.spells = () => known.map((k) => { const sp = table.spells.get(k)!; return { id: k, name: sp.name, school: SCHOOLS[sp.school] ?? '', level: 1, category: sp.category, power: sp.power, duration: sp.duration ?? 0, ...(sp.school === 2 && /Martyr/.test(sp.name) ? { projectile: true } : {}) }; });
+      const data = emptyVtankData();
+      data.monsters[0].on = ['A'];
+      data.monsters[0].damage = 10; // Drain Auto
+      serverAnswers();
+      // No table from the host: the best drain, as before the plan existed.
+      api.routine.start(vt({ vtank: data }));
+      await step(1500);
+      expect(host.sent).toContain(`cast ${id('Drain Health Other I')} 80005001`);
+      api.routine.stop();
+      host.sent.length = 0;
+      const { default: EOL_DRAINS } = await import('../packages/renderer/src/agent/macro/drains/eol.ts');
+      (host as unknown as { drainTable: () => Promise<unknown> }).drainTable = async () => JSON.parse(EOL_DRAINS);
+      api = new AgentApi(host);
+      api.routine.start(vt({ vtank: data }));
+      await step(1500);
+      expect(host.sent).toContain(`cast ${id("Martyr's Hecatomb I")} 80005001`);
+      expect(host.sent).not.toContain(`cast ${id('Drain Health Other I')} 80005001`);
+    });
+
+    describe('Summon Pets and refills', () => {
+      const ESSENCE = 0x50000a02;
+      const withSummoning = () => {
+        const skills = (host as unknown as { skillList: () => unknown[] }).skillList();
+        (host as unknown as { skillList: () => unknown[] }).skillList = () => [...skills, { id: 54, name: 'Summoning', training: 'trained', base: 100, buffed: 100 }];
+      };
+      const essence = (ints: Record<number, number> = {}, floats: Record<number, number> = {}) => {
+        host.inv = [{ guid: ESSENCE, name: 'Fire Grievver Essence (50)', where: 'main pack', uiEffects: 0x20 }] as never;
+        host.appraisalDatas.set(ESSENCE, { int: { 266: 49052, 280: 213, ...ints }, float: { 167: 45, ...floats }, string: {}, bool: {}, did: {}, spells: [] });
+        const data = emptyVtankData();
+        data.items = [{ name: 'Fire Grievver Essence (50)' }];
+        data.monsters[0].damage = 6;
+        return data;
+      };
+      const settings = { EnableBuffing: false, AttackDistance: 30, SummonPets: true };
+
+      it('needs Summoning trained, no summoning cooldown running, and 3 m of room ahead; then summons once per cooldown', async () => {
+        skulker();
+        const data = essence();
+        let cooldown = 30, room: boolean | null = false;
+        (host as unknown as { cooldownRemaining: (id: number) => number }).cooldownRemaining = (cid) => (cid === 213 ? cooldown : 0);
+        (host as unknown as { roomAhead: () => boolean | null }).roomAhead = () => room;
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(2000);
+        expect(host.sent).not.toContain(`use ${ESSENCE.toString(16)}`); // Summoning untrained
+        api.routine.stop();
+        withSummoning();
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(2000);
+        expect(host.sent).not.toContain(`use ${ESSENCE.toString(16)}`); // the cooldown runs
+        cooldown = 0;
+        await step(2000);
+        expect(host.sent).not.toContain(`use ${ESSENCE.toString(16)}`); // no room for the pet
+        room = null; // a client that can't tell counts as room
+        await step(12_000);
+        expect(host.sent.filter((x) => x === `use ${ESSENCE.toString(16)}`)).toHaveLength(1);
+        // The essence's own 45 s CooldownDuration holds the next one even before the client shows the cooldown.
+        await step(20_000);
+        expect(host.sent.filter((x) => x === `use ${ESSENCE.toString(16)}`)).toHaveLength(1);
+      });
+
+      it('an essence of another Summoning Mastery than yours (the server\'s PropertyInt 362 for you) is not used', async () => {
+        skulker();
+        withSummoning();
+        const data = essence({ 362: 3 });
+        let mine = 1;
+        (host as unknown as { charInt: (id: number) => number | undefined }).charInt = (pid) => (pid === 362 ? mine : undefined);
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(3000);
+        expect(host.sent).not.toContain(`use ${ESSENCE.toString(16)}`);
+        mine = 3;
+        await step(12_000);
+        expect(host.sent).toContain(`use ${ESSENCE.toString(16)}`);
+      });
+
+      it('an essence down to PetRefillCount-Normal charges gets an Encapsulated Spirit, in peace mode', async () => {
+        const data = essence({ 92: 1, 91: 50 });
+        host.inv = [...host.inv, { guid: 0x50000b01, name: 'Encapsulated Spirit', where: 'main pack', stack: 5 }] as never;
+        host.me.combatMode = 'melee';
+        api.routine.start(vt({ vtank: data, settings }));
+        await step(3000);
+        expect(host.sent).toContain('mode peace');
+        expect(host.sent).toContain(`usewith 50000b01 ${ESSENCE.toString(16)}`);
+      });
+    });
+  });
+
   it('a profile without VirindiTank data keeps the plain macro (attack nearest)', async () => {
     host.add({ guid: 0x80005002, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 30 });
     api.routine.start(vt({ vtank: undefined, settings: { AttackDistance: 30 } }));
@@ -682,6 +1056,11 @@ describe('the server\'s reply to a cast (castReply.ts): ACE, GDLE / AC1999 and C
     const r = reply(true, 'You cast Acid Bane I on Leather Coat', 'You cast Acid Bane I on Leather Cap, refreshing Acid Bane I', 'You cast Acid Bane I on Studded Leather Boots, surpassing Acid Bane I');
     expect(castTargetsNamed(r, 'Acid Bane I')).toEqual(['Leather Coat', 'Leather Cap', 'Studded Leather Boots']);
     expect(castTargetsNamed(reply(true, 'You cast Strength Self I on yourself'), 'Strength Self I')).toEqual([]);
+  });
+  it('ClassicACE: a full stop, and a metaspell\'s words before the name ("You quickcast extended …")', () => {
+    expect(castConfirmed(reply(true, 'You cast Imperil Other I on Drudge Skulker.'), 'Imperil Other I')).toBe(true);
+    expect(castConfirmed(reply(true, 'You quickcast extended Imperil Other I on Drudge Skulker.'), 'Imperil Other I')).toBe(true);
+    expect(castTargetsNamed(reply(true, 'You cast extended Acid Bane I on Leather Coat.'), 'Acid Bane I')).toEqual(['Leather Coat']);
   });
 });
 

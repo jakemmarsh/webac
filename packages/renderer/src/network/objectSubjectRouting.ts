@@ -130,6 +130,8 @@ export interface InventoryEntrySource extends ItemVisualSource {
   maxStructure?: number;
   /** CORE.17.k.b.b.c.c.a.a.c.a.a.a — WeenieHeaderFlag.MaterialType (0 = not sent). */
   materialType?: number;
+  /** WeenieHeaderFlag.Workmanship float (absent = not sent): a salvage bag's average workmanship. */
+  workmanship?: number;
   targetType?: number;
   clothingPriority?: number;
   ammoType?: number;
@@ -177,6 +179,7 @@ export function buildInventoryEntry(data: InventoryEntrySource): {
   spellDid: number | undefined;
   itemsCapacity: number | undefined;
   materialType: number | undefined;
+  workmanship: number | undefined;
   hookType: number | undefined;
   objectDescFlags: number | undefined;
   visualDesc: ItemVisualDesc | undefined;
@@ -187,6 +190,8 @@ export function buildInventoryEntry(data: InventoryEntrySource): {
     // CORE.17.k.b.b.c.c.a.a.c.a.a.a — gmSalvageUI::IsItemSuitable @ 004cb040
     // reads pwd._material_type and the bitfield's Retained bit (0x01000000).
     materialType: data.materialType || undefined,
+    // PublicWeenieDesc._workmanship: a salvage bag's average (VTank's CombineSalvage bands).
+    workmanship: data.workmanship || undefined,
     // ItemHolder::CheckHookStatus @ 00586e90 — the mounts the item fits.
     hookType: data.hookType || undefined,
     objectDescFlags: data.objectDescFlags,

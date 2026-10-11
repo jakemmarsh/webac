@@ -133,7 +133,9 @@ describe('.met', () => {
     const follow = navToRoute('F', { mode: 'follow', nodes: [], follow: { name: 'Leader', guid: 1 } });
     expect(follow).toEqual({ route: { name: 'F', mode: 'follow', points: [], follow: 'Leader' }, problems: [] });
     const talk = navToRoute('T', { mode: 'once', nodes: [{ type: 7, ew: 33.6, ns: 42.1, z: 0, extra: ['Sean the Speedy', '37', 'True', '33.6', '42.1', '0'] }] });
-    expect(talk.route?.stops).toEqual([{ at: 0, do: [{ kind: 'talk-to', name: 'Sean the Speedy' }] }]);
+    // The point's record of the NPC (class, where it stands) rides along for export.
+    expect(talk.route?.stops).toEqual([{ at: 0, do: [{ kind: 'talk-to', name: 'Sean the Speedy', vt: { objectClass: 37, at: [33.6, 42.1, 0] } }] }]);
+    expect(talk.route?.z).toEqual([0]);
     expect(validateRoutineDoc({ ...emptyRoutineDoc('local-eor', 'a'), profiles: [{ name: 'P', modules: { buffs: false, vitals: false, combat: false, looting: false, navigation: true, inventory: false, service: false }, initialState: 'S', states: [{ name: 'S', rules: [] }], loot: [], buffSets: [], routes: [follow.route!, talk.route!, { name: 'Empty', mode: 'circular', points: [] }] }] })).toEqual([]);
   });
 
@@ -168,7 +170,8 @@ describe('.met', () => {
       { kind: 'set-setting', name: 'ub:VideoPatch', value: true },
       { kind: 'sell-by-loot-rules', vendor: '' },
       { kind: 'say', text: '/f Fellowship present' },
-      { kind: 'unsupported', what: 'chat command "/ub myquests"' },
+      // UtilityBelt's /ub myquests runs here now (agent/ub/ubCommands.ts): the chat line reaches it.
+      { kind: 'say', text: '/ub myquests' },
     ]);
   });
 

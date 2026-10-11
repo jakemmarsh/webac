@@ -15,7 +15,7 @@ import {
   ammoFor, blowPoints, buildCombatFamilies, indexMonsterTable, isFinishingBlow, planCombat,
   type CombatInput, type CombatMonster, type CombatSpellTableEntry,
 } from '../packages/renderer/src/agent/macro/combatPlan.ts';
-import { buildMonsterRows, parseCreatureSql, weakOrder } from '../tools/build-monster-tables.ts';
+import { buildMonsterRows, overlayFiles, parseCreatureSql, weakOrder, type CreatureFacts } from '../tools/build-monster-tables.ts';
 import EOL from '../packages/renderer/src/agent/macro/monsters/eol.ts';
 import DM from '../packages/renderer/src/agent/macro/monsters/dm.ts';
 import AC1999 from '../packages/renderer/src/agent/macro/monsters/ac1999.ts';
@@ -24,7 +24,7 @@ import { AgentApi } from '../packages/renderer/src/agent/AgentApi.ts';
 import { FakeHost, run } from './_harness/agentFake.ts';
 import { openDat } from './_harness/dat.js';
 
-type Row = [string, string, number];
+type Row = [string, string, number, number?, string?];
 const SCHOOL_NAME: Record<number, string> = { 1: 'War Magic', 2: 'Life Magic', 4: 'Creature Enchantment', 5: 'Void Magic' };
 // End-of-retail rows (real anchor ids, categories and powers).
 const TABLE: Array<[number, CombatSpellTableEntry]> = [
@@ -145,27 +145,43 @@ describe('the monster tables (tools/build-monster-tables.ts)', () => {
     "INSERT INTO `weenie_properties_attribute_2nd` (`object_Id`, `type`, `init_Level`, `level_From_C_P`, `c_P_Spent`, `current_Level`)\nVALUES (7,   1,     5, 0, 0, 20) /* MaxHealth */;\n";
 
   it('parses an ACE creature weenie: name, Resist* multipliers, max health; NPCs and non-creatures are left out', () => {
-    expect(parseCreatureSql(SQL)).toEqual({ name: 'Drudge Skulker', resist: [0.75, 0.66, 0.86, 0.75, 1.42, 1.42, 1.42], maxHealth: 20 });
+    expect(parseCreatureSql(SQL)).toEqual({ name: 'Drudge Skulker', resist: [0.75, 0.66, 0.86, 0.75, 1.42, 1.42, 1.42], maxHealth: 20, species: 3, magicImmune: false, drainImmune: false });
     expect(parseCreatureSql(SQL.replace('(7,   1, True ) /* Stuck */', '(7,  19, False) /* Attackable */'))).toBeNull();
     expect(parseCreatureSql(SQL.replace('16) /* ItemType', '1) /* ItemType'))).toBeNull();
     // No current_Level: init + Endurance / 2.
     expect(parseCreatureSql(SQL.replace('0, 0, 20) /* MaxHealth', '0, 0, 0) /* MaxHealth'))?.maxHealth).toBe(20);
+    // VTank's MonsterImmunities, from the creature's own properties: NonProjectileMagicImmune (bool 103), ResistHealthDrain (float 125) 0.
+    const immune = SQL.replace('(7,   1, True ) /* Stuck */', '(7,   1, True ) /* Stuck */\n     , (7, 103, True ) /* NonProjectileMagicImmune */')
+      .replace('(7,  70,    1.42) /* ResistElectric */', '(7,  70,    1.42) /* ResistElectric */\n     , (7, 125,       0) /* ResistHealthDrain */');
+    expect(parseCreatureSql(immune)).toMatchObject({ magicImmune: true, drainImmune: true, species: 3 });
+  });
+
+  it('end of retail is the base world with ACE-World-16PY-Patches over it: a patch file replaces the base weenie of its class id', () => {
+    const files = overlayFiles([['base/Creature/Drudge/00007 Drudge Skulker.sql', 'base/Creature/Drudge/05196 Drudge Skulker.sql'], ['patch/Creature/Drudge/00007 Drudge Skulker.sql', 'patch/Creature/Drudge/35440 Drudge Skulker.sql']]);
+    expect(files.sort()).toEqual(['base/Creature/Drudge/05196 Drudge Skulker.sql', 'patch/Creature/Drudge/00007 Drudge Skulker.sql', 'patch/Creature/Drudge/35440 Drudge Skulker.sql']);
   });
 
   it('orders elements most damaging first, ties in VTank\'s unlisted order; same-named weenies merge by median', () => {
     expect(weakOrder([0.75, 0.66, 0.86, 0.75, 1.42, 1.42, 1.42])).toBe('lcfspab');
     expect(weakOrder([1, 1, 1, 1, 1, 1, 1])).toBe('');
-    const c = (resist: number[], maxHealth: number) => ({ name: 'Rat', resist, maxHealth });
-    expect(buildMonsterRows([c([1, 1, 1, 1, 1, 1, 2], 10), c([1, 1, 1, 1, 1, 1, 2], 30), c([3, 1, 1, 1, 1, 1, 1], 500)])).toEqual([['Rat', 'fpbsalc', 30]]);
+    const c = (resist: number[], maxHealth: number, extra: Partial<CreatureFacts> = {}): CreatureFacts => ({ name: 'Rat', resist, maxHealth, species: 9, magicImmune: false, drainImmune: false, ...extra });
+    expect(buildMonsterRows([c([1, 1, 1, 1, 1, 1, 2], 10), c([1, 1, 1, 1, 1, 1, 2], 30), c([3, 1, 1, 1, 1, 1, 1], 500)])).toEqual([['Rat', 'fpbsalc', 30, 9, '']]);
+    // The most common species; an immunity only when most of the same-named weenies have it.
+    expect(buildMonsterRows([c([1, 1, 1, 1, 1, 1, 1], 10, { species: 4, drainImmune: true }), c([1, 1, 1, 1, 1, 1, 1], 10, { magicImmune: true, drainImmune: true }), c([1, 1, 1, 1, 1, 1, 1], 10)])[0].slice(3)).toEqual([9, 'd']);
   });
 
   it('the shipped tables: a Drudge Skulker is weakest to lightning, cold and fire in every era', () => {
     for (const t of [EOL, DM, AC1999]) {
       const facts = indexMonsterTable(JSON.parse(t) as Row[]);
       expect(facts('Drudge Skulker')?.weak.slice(0, 3)).toEqual(['lightning', 'cold', 'fire']);
-      expect(facts('Drudge Skulker')?.maxHealth).toBe(20);
+      expect(facts('Drudge Skulker')?.species).toBe(3); // CreatureType Drudge
     }
-    expect((JSON.parse(EOL) as Row[]).length).toBeGreaterThan(1000);
+    // End of retail has the patches' Skulker (42 health, ACE-World-16PY-Patches); Dark Majesty and 1999 their own 20.
+    // Before 2026-10-11 end of retail was built from the February 2005 base alone (20, and 1387 names, not 2800+).
+    expect(indexMonsterTable(JSON.parse(EOL) as Row[])('Drudge Skulker')?.maxHealth).toBe(42);
+    expect(indexMonsterTable(JSON.parse(DM) as Row[])('Drudge Skulker')?.maxHealth).toBe(20);
+    expect(indexMonsterTable(JSON.parse(AC1999) as Row[])('Drudge Skulker')?.maxHealth).toBe(20);
+    expect((JSON.parse(EOL) as Row[]).length).toBeGreaterThan(2500);
     expect((JSON.parse(AC1999) as Row[]).length).toBeGreaterThan(150);
     // 1999 knows only its own monsters (no Olthoi Ripper Hive Warrior etc.): the era's own world.
     expect(indexMonsterTable(JSON.parse(AC1999) as Row[])('Tusker Guard')?.weak[0]).toBe('pierce');

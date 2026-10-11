@@ -28,7 +28,7 @@
  * (no dead-end UI). Everything acts through AutomationSource.
  */
 import {
-  ALL_MODULES_OFF, PropertyDataId, PropertyFloat, PropertyInt, PropertyString, ROUTINE_SCHEMA_VERSION, SkillId, emptyRoutineDoc, explainProfile, importVTank, validateRoutineDoc,
+  ALL_MODULES_OFF, PropertyDataId, PropertyFloat, PropertyInt, PropertyString, ROUTINE_SCHEMA_VERSION, SkillId, emptyRoutineDoc, explainProfile, importVTankFiles, validateRoutineDoc, type VtNames,
   type BuffSet, type LootAction, type LootMatch, type LootRule, type Route, type RoutineAction, type RoutineCondition,
   type RoutineDoc, type RoutineProfile, type RoutineRule, type RoutineState,
 } from '@ac/shared';
@@ -437,7 +437,7 @@ export class AutomationPanel {
 
 export type EditorTab = 'routine' | 'combat' | 'buffs' | 'loot' | 'routes';
 const LOOT_ACTIONS: Array<{ value: LootAction; label: string }> = [
-  { value: 'keep', label: 'Keep' }, { value: 'keep-up-to', label: 'Keep up to' }, { value: 'sell', label: 'Sell' }, { value: 'salvage', label: 'Salvage' }, { value: 'ignore', label: 'Leave' },
+  { value: 'keep', label: 'Keep' }, { value: 'keep-up-to', label: 'Keep up to' }, { value: 'sell', label: 'Sell' }, { value: 'salvage', label: 'Salvage' }, { value: 'read', label: 'Read' }, { value: 'ignore', label: 'Leave' },
 ];
 const LOOT_REQS: Array<{ key: keyof LootMatch; label: string; op: string; type: 'text' | 'number' | 'types' }> = [
   { key: 'name', label: 'Name', op: 'matches', type: 'text' },
@@ -516,11 +516,14 @@ export class RoutineEditor {
     return r.ok;
   }
 
-  /** VirindiTank files into the current profile (or a new one). */
-  importFiles(files: Array<{ name: string; text: string }>, redraw: () => void): void {
+  /**
+   * VirindiTank files (.met / .nav / .utl / .usd, and metaf's .af) into the current profile (or a new
+   * one). `names` names a .usd's object and spell ids from the client (vtankUsd.ts).
+   */
+  importFiles(files: Array<{ name: string; text: string }>, redraw: () => void, names: VtNames = {}): void {
     const base = this.profile();
-    const name = base?.name ?? files.find((f) => /\.met$/i.test(f.name))?.name.replace(/\.met$/i, '') ?? 'Imported';
-    const r = importVTank(files, base, name);
+    const name = base?.name ?? files.find((f) => /\.(met|af|usd)$/i.test(f.name))?.name.replace(/\.(met|af|usd)$/i, '') ?? 'Imported';
+    const r = importVTankFiles(files, base, name, names);
     this.doc.profiles = [...this.doc.profiles.filter((p) => p !== base), r.value];
     this.profileName = r.value.name;
     this.stateName = null;
@@ -1157,7 +1160,7 @@ export class RoutineEditor {
         const row = flexRow(8);
         row.appendChild(kit.text(`${pi + 1}.`, { color: c.dim }));
         row.appendChild(kit.input(pt, 160, (v) => { r.points[pi] = v.trim(); this.dirty = true; }));
-        row.appendChild(kit.button('x', () => { r.points.splice(pi, 1); touch(); }, { width: 32 }));
+        row.appendChild(kit.button('x', () => { r.points.splice(pi, 1); r.z?.splice(pi, 1); touch(); }, { width: 32 }));
         t.appendChild(row);
       });
       if (!r.points.length) t.appendChild(kit.text('No points yet.', { color: c.dim }));
@@ -1167,6 +1170,7 @@ export class RoutineEditor {
         const here = this.source.coords();
         if (!here) { this.note = 'Your position is not known yet.'; touch(); return; }
         r.points.push(here);
+        r.z?.push(null); // heights stay one per point (a point recorded here has none)
         touch();
       }), { automation: 'add-point' }));
     }
@@ -1189,7 +1193,7 @@ function firstLootRule(rules: LootRule[], item: { name: string; type?: string; v
     if (m.valueAtMost !== undefined && !(item.value !== undefined && item.value <= m.valueAtMost)) continue;
     if (m.burdenAtMost !== undefined && !(item.burden !== undefined && item.burden <= m.burdenAtMost)) continue;
     // Needs the item examined, or you (level, skills, pack): Try it only knows what the pack shows.
-    if (m.appraisal || m.props?.length || m.palettes?.length || m.colours?.length || m.descFlags !== undefined || m.spells || m.spellCountAtLeast !== undefined || m.minDamageAtLeast !== undefined || m.totalRatingsAtLeast !== undefined) continue;
+    if (m.appraisal || m.props?.length || m.palettes?.length || m.colours?.length || m.descFlags !== undefined || m.spells || m.moreSpells?.length || m.spellCountAtLeast !== undefined || m.minDamageAtLeast !== undefined || m.totalRatingsAtLeast !== undefined) continue;
     if (m.freeSlotsAtLeast !== undefined || m.characterLevelAtLeast !== undefined || m.characterLevelAtMost !== undefined || m.characterSkills?.length) continue;
     return { rule: r, index: i };
   }

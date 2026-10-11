@@ -8,19 +8,30 @@
  * - xp: recruit the teller. Too far: wait 20 s and give one more chance.
  *   Full (9, counting recruits already asked): a place in the waiting line.
  *   When a slot frees (a fellow leaves) the next in line is recruited.
- * - line: the fellowship's size and the waiting line. remove: leave the line.
- * - leader: who leads. startvote giveleader <fellow>: a 2-minute vote,
- *   announced in fellowship chat; fellows tell "vote <n> yes|no"; a majority
- *   of the fellows (you excepted) passes leadership to that fellow.
- * - help: the commands this fellowship can use.
+ *   A fellow is told they are already in; a banned player is refused.
+ * - line (also list, status): the fellowship's size and the waiting line.
+ *   remove: leave the line.
+ * - leader: who leads. location: your landcell (and map coordinates), for
+ *   fellows only.
+ * - startvote kick|ban|giveleader <fellow>, startvote setopen true|false: a
+ *   2-minute vote, announced in fellowship chat; the caller votes yes, fellows
+ *   tell "vote <n> yes|no"; a majority of the fellows (you excepted) passes it.
+ *   kick dismisses the fellow; ban also refuses their xp from then on;
+ *   giveleader hands leadership over; setopen opens or closes the fellowship.
+ *   A caller may start one vote per 4 minutes, and the same vote can't run twice.
+ * - help: the commands this fellowship can use; help startvote / help vote:
+ *   their usage.
  *
  * At most 8 commands per player in 3 minutes (VTank CHG .39); more are
- * ignored. startvote / vote exist only where the client can hand leadership
- * over (FellowshipInfo.handOff: the era's own features; the 1999 client has
- * no Assign New Leader, Absent1999 `fellowshipLeadership`).
+ * ignored. giveleader and setopen exist only where the client can hand
+ * leadership over and open a fellowship (FellowshipInfo.handOff: the era's
+ * own features; the 1999 client has neither, Absent1999
+ * `fellowshipLeadership`); kick and ban dismiss, which every era has.
  *
  * The wiki gives the wording of the recruit, too-far, help, vote-call and
- * vote-total lines; the line / remove / leader / full replies are ours.
+ * vote-total lines; the other replies are ours. The kick / ban / setopen
+ * votes, location, list / status and the "already in" reply are VTank's
+ * (MOSS `FellowshipManager`, read for facts only).
  */
 import type { AgentApi } from '../AgentApi.ts';
 import type { AgentResult } from '../types.ts';
@@ -36,11 +47,14 @@ const RETRY_MS = 20_000;
 const VOTE_MS = 120_000;
 const RATE_N = 8;
 const RATE_MS = 180_000;
+/** A caller may start one vote per 4 minutes. */
+const CALLER_MS = 240_000;
 /** How close a player must be to be recruited (in sight). */
 const REACH = 60;
 
 interface Ask { name: string; at: number; tries: number }
-interface Vote { idx: number; caller: string; target: string; ends: number; ballots: Map<string, boolean> }
+type VoteKind = 'kick' | 'ban' | 'giveleader' | 'setopen';
+interface Vote { idx: number; caller: string; kind: VoteKind; target: string; ends: number; ballots: Map<string, boolean> }
 
 const lc = (s: string) => s.toLowerCase();
 
@@ -57,12 +71,21 @@ export class FellowManager {
   private heard = new Map<string, number[]>();
   private votes: Vote[] = [];
   private nextVote = 1;
+  /** Players a ban vote put out, by lower-case name: their xp is refused while you lead. */
+  private banned = new Set<string>();
+  /** When each caller may start another vote. */
+  private callerReady = new Map<string, number>();
 
   constructor(private readonly api: AgentApi, private readonly now: () => number) {}
 
-  /** The commands `help` lists here: startvote / vote only where leadership can be handed over. */
-  static commands(handOff: boolean): string[] {
-    return handOff ? ['xp', 'line', 'remove', 'leader', 'startvote', 'vote', 'help'] : ['xp', 'line', 'remove', 'leader', 'help'];
+  /** The commands `help` lists. */
+  static commands(): string[] {
+    return ['xp', 'line', 'remove', 'leader', 'location', 'startvote', 'vote', 'help'];
+  }
+
+  /** The vote types this era's fellowship can carry out: giveleader and setopen need the Leader hand-off and Open. */
+  static voteKinds(handOff: boolean): VoteKind[] {
+    return handOff ? ['kick', 'ban', 'giveleader', 'setopen'] : ['kick', 'ban'];
   }
 
   private tell(name: string, text: string): void {
@@ -146,17 +169,22 @@ export class FellowManager {
   private command(name: string, raw: string, c: { info: { count: number }; me: string; members: string[]; isMember: (n: string) => boolean; handOff: boolean; t: number }): void {
     const words = raw.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const cmd = words[0] ?? '';
-    const known = ['xp', 'line', 'remove', 'leader', 'help', ...(c.handOff ? ['startvote', 'vote'] : [])];
+    const known = ['xp', 'line', 'list', 'status', 'remove', 'leader', 'location', 'help', 'startvote', 'vote'];
     if (!known.includes(cmd)) return;
     if (!this.allowed(name, c.t)) return;
     const k = lc(name);
     const place = () => this.line.findIndex((n) => lc(n) === k);
+    const kinds = FellowManager.voteKinds(c.handOff);
     switch (cmd) {
       case 'help':
-        this.tell(name, `Available commands: ${FellowManager.commands(c.handOff).join(', ')}`);
+        if (words[1] === 'startvote') this.tell(name, `Usage: startvote <type> <parameter>. Vote types: ${kinds.map((x) => (x === 'setopen' ? 'setopen true|false' : `${x} <fellow>`)).join(', ')}.`);
+        else if (words[1] === 'vote') this.tell(name, 'Usage: vote <vote number> yes|no');
+        else this.tell(name, `Available commands: ${FellowManager.commands().join(', ')}`);
         return;
       case 'xp': {
-        if (c.isMember(name) || this.offered.has(k) || this.asks.some((a) => lc(a.name) === k)) return;
+        if (c.isMember(name)) { this.tell(name, 'You are already in the fellowship.'); return; }
+        if (this.banned.has(k)) { this.tell(name, 'You have been banned from this fellowship.'); return; }
+        if (this.offered.has(k) || this.asks.some((a) => lc(a.name) === k)) return;
         if (place() >= 0) { this.tell(name, `You are number ${place() + 1} in line.`); return; }
         if (this.line.length || c.info.count + this.offered.size + this.asks.length >= MAX) {
           this.line.push(name);
@@ -167,7 +195,7 @@ export class FellowManager {
         this.asks.push({ name, at: c.t, tries: 0 });
         return;
       }
-      case 'line': {
+      case 'line': case 'list': case 'status': {
         const p = place();
         this.tell(name, `Fellowship: ${c.info.count}/${MAX}. Waiting list: ${this.line.length ? this.line.join(', ') : 'empty'}.${p >= 0 ? ` You are number ${p + 1}.` : ''}`);
         return;
@@ -182,20 +210,35 @@ export class FellowManager {
       case 'leader':
         this.tell(name, `The fellowship leader is ${c.me}.`);
         return;
+      case 'location': {
+        if (!c.isMember(name)) { this.tell(name, 'I only tell fellows where I am.'); return; }
+        const me = this.api.snapshot({ radius: 1, max: 1 }).me;
+        if (!me) return;
+        this.tell(name, `I am in landcell ${me.cell}${me.coords ? ` (${me.coords})` : ''}.`);
+        return;
+      }
       case 'startvote': {
-        if (!c.isMember(name)) return;
-        const target = c.members.find((m) => lc(m) === words.slice(2).join(' ') && lc(m) !== lc(c.me)); // names have spaces
-        if (words[1] !== 'giveleader' || !target) { this.tell(name, 'Usage: startvote giveleader <fellow>'); return; }
-        if (this.votes.some((v) => lc(v.target) === lc(target))) return;
-        const v: Vote = { idx: this.nextVote++, caller: name, target, ends: c.t + VOTE_MS, ballots: new Map() };
+        if (!c.isMember(name) || this.banned.has(k)) return;
+        const kind = words[1] as VoteKind;
+        const param = words.slice(2).join(' '); // names have spaces
+        const usage = () => this.tell(name, `Usage: startvote <type> <parameter>. Vote types: ${kinds.map((x) => (x === 'setopen' ? 'setopen true|false' : `${x} <fellow>`)).join(', ')}.`);
+        if (!kinds.includes(kind) || !param) { usage(); return; }
+        let target: string | undefined;
+        if (kind === 'setopen') target = param === 'true' || param === 'false' ? param : undefined;
+        else target = c.members.find((m) => lc(m) === param && lc(m) !== lc(c.me));
+        if (!target) { usage(); return; }
+        if ((this.callerReady.get(k) ?? 0) > c.t) { this.tell(name, 'You started a vote too recently.'); return; }
+        if (this.votes.some((v) => v.kind === kind && lc(v.target) === lc(target))) { this.tell(name, 'That vote is already running.'); return; }
+        const v: Vote = { idx: this.nextVote++, caller: name, kind, target, ends: c.t + VOTE_MS, ballots: new Map([[k, true]]) };
         this.votes.push(v);
-        this.fellowChat(`${name} has called a new vote: giveleader ${target}! To vote either tell me 'vote ${v.idx} yes' or 'vote ${v.idx} no'. You have 2 minutes.`);
+        this.callerReady.set(k, c.t + CALLER_MS);
+        this.fellowChat(`${name} has called a new vote: ${kind} ${target}! To vote either tell me 'vote ${v.idx} yes' or 'vote ${v.idx} no'. You have 2 minutes.`);
         return;
       }
       case 'vote': {
-        if (!c.isMember(name)) return;
+        if (!c.isMember(name) || this.banned.has(k)) return;
         const v = this.votes.find((x) => String(x.idx) === words[1]);
-        if (!v || (words[2] !== 'yes' && words[2] !== 'no')) return;
+        if (!v || (words[2] !== 'yes' && words[2] !== 'no')) { this.tell(name, 'Usage: vote <vote number> yes|no'); return; }
         v.ballots.set(k, words[2] === 'yes');
         return;
       }
@@ -209,11 +252,20 @@ export class FellowManager {
       // Fellows still in it count; you (the leader) don't vote.
       const voters = members.filter((m) => lc(m) !== lc(me));
       const yes = voters.filter((m) => v.ballots.get(lc(m)) === true).length;
-      this.fellowChat(`Vote total for 'giveleader ${v.target}' (${v.idx}): ${yes}/${voters.length}`);
-      const target = members.find((m) => lc(m) === lc(v.target));
-      if (handOff && target && yes * 2 > voters.length) {
-        this.out.push({ label: `fellow: vote ${v.idx} passed, giving leadership to ${target}`, run: () => this.api.fellowship('leader', target) });
+      this.fellowChat(`Vote total for '${v.kind} ${v.target}' (${v.idx}): ${yes}/${voters.length}`);
+      if (yes * 2 <= voters.length) continue;
+      if (v.kind === 'setopen') {
+        if (handOff) this.out.push({ label: `fellow: vote ${v.idx} passed, ${v.target === 'true' ? 'opening' : 'closing'} the fellowship`, run: () => this.api.fellowship(v.target === 'true' ? 'open' : 'close') });
+        continue;
       }
+      const target = members.find((m) => lc(m) === lc(v.target));
+      if (!target) continue;
+      if (v.kind === 'giveleader') {
+        if (handOff) this.out.push({ label: `fellow: vote ${v.idx} passed, giving leadership to ${target}`, run: () => this.api.fellowship('leader', target) });
+        continue;
+      }
+      if (v.kind === 'ban') this.banned.add(lc(target));
+      this.out.push({ label: `fellow: vote ${v.idx} passed, dismissing ${target}${v.kind === 'ban' ? ' (banned)' : ''}`, run: () => this.api.fellowship('dismiss', target) });
     }
   }
 
@@ -224,5 +276,7 @@ export class FellowManager {
     this.offered.clear();
     this.votes = [];
     this.out = [];
+    this.banned.clear();
+    this.callerReady.clear();
   }
 }

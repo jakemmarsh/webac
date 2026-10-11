@@ -289,6 +289,34 @@ describe('AGENT.walk-drops-jumps — floor openings: up only by a stair, down as
     expect(findRoute(graph(false), W, v(10, 8, 6), H, v(10, -2, 0), [], { maxDrop: 5 })).toBeNull();
   });
 
+  it('a fall goes straight from the walkway to the opening: the doorway into the air is not a point to stand on (AC1999 tutorial balcony, 2026-10-11)', () => {
+    // The walkway's doorway into the air cell (10, 5) is in the air (a rail can stand in it): the route's
+    // first point is the opening the body drops through, then the goal.
+    const fall = findRoute(graph(false), W, v(10, 8, 6), H, v(10, -2, 0))!;
+    expect(fall).toHaveLength(2);
+    expect(fall[0]).toMatchObject({ x: 10, y: 0, z: 6, floor: true, drop: 6, landing: 0 });
+    expect(fall.some((p) => p.x === 10 && p.y === 5)).toBe(false);
+    // A doorway into the air not followed by a fall through it stays (and a walk round never meets one).
+    expect(findRoute(graph(true), W, v(10, 8, 6), H, v(10, -2, 0))).toEqual([
+      expect.objectContaining({ x: 0, y: 10 }), expect.objectContaining({ x: 0, y: 0 }), expect.objectContaining({ x: 10, y: -2 }),
+    ]);
+  });
+
+  it('a fall the walk found no way down through (a rail too high to jump) is avoided: round by the ramp, or no route', () => {
+    const hole = v(10, 0, 6);
+    expect(findRoute(graph(true), W, v(10, 8, 6), H, v(10, -2, 0), [], { maxDrop: 12 })!.some((p) => p.drop !== undefined)).toBe(false);
+    // With the walk round 30 m+ longer the fall is taken; avoided, the ramp is.
+    const far = graph(true);
+    far.doors.get(R)!.splice(0, 2, { a: R, b: H, at: v(0, 0, 1.5), normal: v(0, 1, 0), height: 3, bottom: 0 }, { a: R, b: W, at: v(-40, 10, 7.5), normal: v(0, 1, 0), height: 3, bottom: 6 });
+    far.doors.get(W)!.splice(1, 1, { a: W, b: R, at: v(-40, 10, 7.5), normal: v(0, 1, 0), height: 3, bottom: 6 });
+    far.doors.get(H)!.splice(1, 1, { a: H, b: R, at: v(0, 0, 1.5), normal: v(0, 1, 0), height: 3, bottom: 0 });
+    expect(findRoute(far, W, v(10, 8, 6), H, v(10, -2, 0), [], { maxDrop: 12 })![0]).toMatchObject({ x: 10, y: 0, drop: 6 });
+    const round = findRoute(far, W, v(10, 8, 6), H, v(10, -2, 0), [], { maxDrop: 12, avoid: [hole] })!;
+    expect(round.some((p) => p.drop !== undefined)).toBe(false);
+    expect(round[0]).toMatchObject({ x: -40, y: 10 });
+    expect(findRoute(graph(false), W, v(10, 8, 6), H, v(10, -2, 0), [], { maxDrop: 12, avoid: [hole] })).toBeNull();
+  });
+
   it('never across the air from one walkway to another (a body in it falls)', () => {
     expect(findRoute(graph(false), W, v(10, 8, 6), W2, v(10, -8, 6))).toBeNull();
   });

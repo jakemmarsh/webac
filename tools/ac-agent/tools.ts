@@ -13,8 +13,9 @@ import { listInfos, type DaemonInfo } from './state.ts';
 import { AGENT_ERAS, ERA_IDS } from './eras.ts';
 import { NOTE_KINDS, type Journal, type NoteKind, addNote, formatJournal, loadJournal, saveJournal } from './journal.ts';
 import { RoutineStore } from './routineStore.ts';
-import { EXAMPLE_HUNT_PROFILE, explainProfile, importVTank, validateRoutineDoc, type RoutineDoc } from '../../packages/shared/src/routines/index.ts';
-import { readFileSync } from 'node:fs';
+import { encodeWindows1252 } from '../../packages/shared/src/encoding/Windows1252.ts';
+import { EXAMPLE_HUNT_PROFILE, explainProfile, exportVTankFile, importVTankFiles, validateRoutineDoc, type RoutineDoc } from '../../packages/shared/src/routines/index.ts';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { findDaemon } from './client.ts';
 
@@ -222,6 +223,25 @@ async function observeText(c: ToolCaller, a: Record<string, any>): Promise<strin
   return formatObservation(obs);
 }
 
+/**
+ * ac_routines action=export: one of a profile's VirindiTank files as text (kind met | nav | utl | usd | af;
+ * which= a route or loot set), so Claude can hand a player their .met / .nav / .utl, its .usd settings, or
+ * its meta (or, with which=, a route) in metaf's .af form. The file's text follows a "--- name ---" line, after
+ * what it couldn't hold.
+ */
+export function exportRoutineFile(doc: RoutineDoc, a: Record<string, any>): ToolOutput & { file?: { name: string; text: string } } {
+  const kind = String(a.kind ?? 'met').toLowerCase();
+  if (kind !== 'met' && kind !== 'nav' && kind !== 'utl' && kind !== 'usd' && kind !== 'af') return { text: 'kind must be met, nav, utl, usd or af', isError: true };
+  const want = a.name ? String(a.name).toLowerCase() : null;
+  const p = want ? doc.profiles.find((x) => x.name.toLowerCase() === want) : doc.profiles.length === 1 ? doc.profiles[0] : null;
+  if (!p) return { text: want ? `no profile "${a.name}" (have: ${doc.profiles.map((x) => x.name).join(', ') || 'none'})` : `pass name= (the profile; have: ${doc.profiles.map((x) => x.name).join(', ') || 'none'})`, isError: true };
+  // No game here to name a .usd's items and spells: what the profile kept by id is written back as it was.
+  const f = exportVTankFile(p, kind, a.which === undefined || a.which === '' ? undefined : String(a.which));
+  if (!f) return { text: kind === 'nav' || kind === 'af' ? `"${p.name}" has no route${a.which ? ` "${a.which}"` : 's'} (have: ${p.routes.map((r) => r.name).join(', ') || 'none'})` : `"${p.name}" has no loot set "${a.which}" (have: ${Object.keys(p.lootSets ?? {}).join(', ') || 'only its own rules'})`, isError: true };
+  const head = f.problems.length ? [`not carried over exactly (${f.problems.length}):`, ...f.problems.map((x) => `  ${x}`)] : ['everything carried over'];
+  return { text: [`${f.fileName} from "${p.name}"`, ...head, '', `--- ${f.fileName} ---`, f.text].join('\n'), file: { name: f.fileName, text: f.text } };
+}
+
 /** ac_routines through the hosted connector: the account's routines in the player's own game, text in place of files. */
 async function hostedRoutinesTool(c: ToolCaller, a: Record<string, any>): Promise<ToolOutput> {
   const store = hostedRoutines(c);
@@ -246,6 +266,7 @@ async function hostedRoutinesTool(c: ToolCaller, a: Record<string, any>): Promis
       : `${account} has no routines yet (start from: ac_routines action=example)` };
   }
   if (action === 'show') return { text: JSON.stringify(a.name ? pick(a.name)[0] ?? null : doc, null, 2) };
+  if (action === 'export') { const { file: _f, ...out } = exportRoutineFile(doc, a); return out; }
   if (action === 'explain') {
     const ps = pick(a.name);
     return { text: ps.length ? ps.map(explainProfile).join('\n\n') : `no profile${a.name ? ` "${a.name}"` : 's'} for ${account}` };
@@ -262,9 +283,9 @@ async function hostedRoutinesTool(c: ToolCaller, a: Record<string, any>): Promis
     let files: Array<{ name: string; text: string }>;
     try { files = JSON.parse(String(a.files_json ?? '')); } catch { return { text: 'pass files_json= ([{"name":"Hunt.met","text":"…"}], each VirindiTank file\'s text)', isError: true }; }
     if (!Array.isArray(files) || !files.every((f) => f && typeof f.name === 'string' && typeof f.text === 'string')) return { text: 'files_json must be [{"name","text"}, …]', isError: true };
-    const name = String(a.name ?? files.find((f) => /\.met$/i.test(f.name))?.name.replace(/^.*[\\/]/, '').replace(/\.met$/i, '') ?? 'Imported');
+    const name = String(a.name ?? files.find((f) => /\.(met|af|usd)$/i.test(f.name))?.name.replace(/^.*[\\/]/, '').replace(/\.(met|af|usd)$/i, '') ?? 'Imported');
     const base = doc.profiles.find((p) => p.name.toLowerCase() === name.toLowerCase()) ?? null;
-    const r = importVTank(files, base, base?.name ?? name);
+    const r = importVTankFiles(files, base, base?.name ?? name);
     const put = await store.put({ ...doc, profiles: [...doc.profiles.filter((p) => p !== base), r.value] });
     if (!put.ok) return { text: `not stored:\n${put.issues.map((i) => `${i.path || '(document)'}: ${i.message}`).join('\n')}`, isError: true };
     return { text: [`imported into "${r.value.name}" in ${store.label}`, ...(r.problems.length ? ['', `not carried over exactly (${r.problems.length}):`, ...r.problems.slice(0, 40).map((x) => `  ${x}`)] : []), '', explainProfile(r.value)].join('\n') };
@@ -601,17 +622,20 @@ export const TOOLS: AgentTool[] = [
   },
   {
     name: 'ac_routines',
-    description: 'Read and configure an account\'s automation routines (per account, kept between sessions; no game session needed). action: list (profiles), show (JSON), explain (plain words), example (a worked profile to edit), validate (a document file), set (store a whole document from file= after validating), import (VirindiTank .met / .nav / .utl files from files=, into profile name=: a meta makes the states, a nav adds a route, a loot profile replaces the loot rules; anything that cannot run exactly is switched off and listed). Defaults to the running session\'s account; pass account= (and server=) for any other, e.g. a player who asked you to set up their routines. Routines only do what a player can (no "@" commands).',
+    description: 'Read and configure an account\'s automation routines (per account, kept between sessions; no game session needed). action: list (profiles), show (JSON), explain (plain words), example (a worked profile to edit), validate (a document file), set (store a whole document from file= after validating), import (VirindiTank .met / .nav / .utl / .usd files, or metaf .af text, from files=, into profile name=: a meta makes the states, a nav adds a route, a loot profile replaces the loot rules, a .usd settings file sets the options and the Monsters / Items / Consumables / Buffs tabs; anything that cannot run exactly is switched off and listed), export (profile name= as a VirindiTank file the player can use or share: kind=met its meta, kind=nav a route, kind=utl its loot rules, kind=usd its settings and tabs, kind=af its meta (or with which= a route) in metaf\'s .af text; which= picks the route or loot set; returns the file text after what it could not hold, and out= also writes it locally). Defaults to the running session\'s account; pass account= (and server=) for any other, e.g. a player who asked you to set up their routines. Routines only do what a player can (no "@" commands).',
     props: {
       ...PROFILE_PROP,
-      action: { type: 'string', description: 'list | show | explain | example | validate | set | import', enum: ['list', 'show', 'explain', 'example', 'validate', 'set', 'import'] },
+      action: { type: 'string', description: 'list | show | explain | example | validate | set | import | export', enum: ['list', 'show', 'explain', 'example', 'validate', 'set', 'import', 'export'] },
       account: { type: 'string', description: 'Account name (default: the session\'s).' },
       server: { type: 'string', description: 'Server id (default: local-<era> of the session, else local-eor).' },
       name: { type: 'string', description: 'Profile name for show/explain (default: all).' },
       file: { type: 'string', description: 'For validate/set: path to the whole routine document (JSON).' },
-      files: { type: 'string', description: 'For import: comma-separated paths of VirindiTank .met / .nav / .utl files.' },
+      files: { type: 'string', description: 'For import: comma-separated paths of VirindiTank .met / .nav / .utl / .usd files or metaf .af files.' },
       doc: { type: 'string', description: 'Through the hosted connector (no files): for validate/set, the whole routine document as JSON text.' },
       files_json: { type: 'string', description: 'Through the hosted connector: for import, JSON [{"name":"Hunt.met","text":"…"}] with each VirindiTank file\'s text.' },
+      kind: { type: 'string', description: 'For export: met (the meta, routes embedded), nav (a route), utl (loot rules), usd (settings and the Monsters / Items / Consumables / Buffs tabs) or af (the meta, or with which= a route, in metaf\'s .af text). Default met.', enum: ['met', 'nav', 'utl', 'usd', 'af'] },
+      which: { type: 'string', description: 'For export: the route (kind=nav or af; default the Auto-Navigation route for nav) or loot set (kind=utl; default the one in use).' },
+      out: { type: 'string', description: 'For export, local only: also write the file to this path (Windows-1252, as VirindiTank reads it).' },
     },
     required: ['action'],
     async run(a) {
@@ -642,6 +666,14 @@ export const TOOLS: AgentTool[] = [
           : `${server}/${account} has no routines yet (start from: ac_routines action=example)` };
       }
       if (action === 'show') return { text: JSON.stringify(a.name ? pick(a.name)[0] ?? null : doc, null, 2) };
+      if (action === 'export') {
+        const { file, ...out } = exportRoutineFile(doc, a);
+        if (file && a.out) {
+          try { writeFileSync(String(a.out), encodeWindows1252(file.text)); } catch (e) { return { text: `can't write ${a.out}: ${(e as Error).message}`, isError: true }; }
+          return { ...out, text: `wrote ${a.out}\n${out.text}` };
+        }
+        return out;
+      }
       if (action === 'explain') {
         const ps = pick(a.name);
         return { text: ps.length ? ps.map(explainProfile).join('\n\n') : `no profile${a.name ? ` "${a.name}"` : 's'} for ${server}/${account}` };
@@ -662,9 +694,9 @@ export const TOOLS: AgentTool[] = [
           // VTank writes ASCII / Windows-1252; latin1 keeps every byte.
           try { files.push({ name: f, text: readFileSync(f, 'latin1') }); } catch (e) { return { text: `can't read ${f}: ${(e as Error).message}`, isError: true }; }
         }
-        const name = String(a.name ?? paths.find((f) => /\.met$/i.test(f))?.replace(/^.*[\\/]/, '').replace(/\.met$/i, '') ?? 'Imported');
+        const name = String(a.name ?? paths.find((f) => /\.(met|af|usd)$/i.test(f))?.replace(/^.*[\\/]/, '').replace(/\.(met|af|usd)$/i, '') ?? 'Imported');
         const base = doc.profiles.find((p) => p.name.toLowerCase() === name.toLowerCase()) ?? null;
-        const r = importVTank(files, base, base?.name ?? name);
+        const r = importVTankFiles(files, base, base?.name ?? name);
         const next = { ...doc, profiles: [...doc.profiles.filter((p) => p !== base), r.value] };
         const put = store.put(server, account, next);
         if (!put.ok) return { text: `not stored:\n${put.issues.map((i) => `${i.path || '(document)'}: ${i.message}`).join('\n')}`, isError: true };

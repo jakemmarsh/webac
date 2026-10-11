@@ -9,7 +9,9 @@
  * - success: "You cast {spell} on {target}" with an optional ", refreshing …",
  *   ", surpassing …" or ", but it is surpassed by …" (ACE
  *   WorldObject_Magic.CreateEnchantment; GDLE / AC1999 and ClassicDereth
- *   SpellcastingManager_Effects.cpp; ClassicACE the same as ACE).
+ *   SpellcastingManager_Effects.cpp). ClassicACE ends it with a full stop and may name
+ *   a metaspell first: "You quickcast extended Imperil Other I on Drudge Skulker."
+ *   (WorldObject_Magic.CreateEnchantment, NameWithMetaspellAdjectivesWithoutQuickcast).
  *   An item buff cast on yourself is redirected to each worn piece, one line
  *   per piece naming it (ACE TryCastSpell_WithRedirects).
  * - resist: "{target} resists your spell" (ACE WorldObject_Magic.TryResistSpell;
@@ -28,6 +30,8 @@ export const COMPONENTS_MISSING = /don't have all the components|do not have all
 export const CAST_NOT_LANDED = /resists your spell|you fail to affect|is an invalid target|fizzle|don't have|do not have|can't|cannot|not enough|unable|refuse|too busy|out of range/i;
 
 const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** "You cast" and ClassicACE's metaspell words before the spell's name. */
+const YOU_CAST = 'You (?:quick)?cast (?:(?:delayed|extended|enchained|maximized|empowered) )*';
 
 /** The chat lines of a cast result (its head line dropped), trimmed. */
 export function castReplyLines(res: AgentResult): string[] {
@@ -39,7 +43,7 @@ export function castConfirmed(res: AgentResult, spellName: string): boolean {
   if (!res.ok) return false;
   const lines = castReplyLines(res);
   if (lines.some((l) => CAST_NOT_LANDED.test(l))) return false;
-  const re = new RegExp(`^You cast ${esc(spellName)}(?: on |\\b)`, 'i');
+  const re = new RegExp(`^${YOU_CAST}${esc(spellName)}(?: on |\\b)`, 'i');
   return lines.some((l) => re.test(l));
 }
 
@@ -50,7 +54,7 @@ export function castConfirmed(res: AgentResult, spellName: string): boolean {
  */
 export function castTargetsNamed(res: AgentResult, spellName: string): string[] {
   if (!res.ok) return [];
-  const re = new RegExp(`^You cast ${esc(spellName)} on (.+?)(?:, (?:refreshing|surpassing|but it is surpassed by) .*)?\\.?$`, 'i');
+  const re = new RegExp(`^${YOU_CAST}${esc(spellName)} on (.+?)(?:, (?:refreshing|surpassing|but it is surpassed by) .*)?\\.?$`, 'i');
   const out: string[] = [];
   for (const l of castReplyLines(res)) {
     const m = re.exec(l);

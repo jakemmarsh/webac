@@ -4,7 +4,9 @@
  * its parts; docs/vtank-macro-behavior.md "Crafting"). One table per era, from
  * that era's own world data, so each era crafts what its server allows:
  *
- *   end of retail  world-db-raw/ACE-World-16PY  "3-Core/4 CraftTable" SQL
+ *   end of retail  world-db-raw/ACE-World-16PY  "3-Core/4 CraftTable" SQL, overlaid by
+ *                  ACE-World-16PY-Patches "Database/Patches/4 CraftTable" (by recipe id; the complete
+ *                  ACE world is the two together; before 2026-10-11 the February 2005 base alone was read)
  *   AC1999         reference/ac1999/Server/Database/AC1999-World (the same layout)
  *   Dark Majesty   the ClassicACE CustomDM world in its MySQL container (recipe + cook_book)
  *
@@ -16,6 +18,7 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { overlayFiles } from './build-monster-tables.ts';
 
 export interface CraftRecipe {
   /** The item used ("source"), by name. */
@@ -56,8 +59,8 @@ export function parseRecipeSql(text: string): CraftRecipe[] {
   return pairs.map(([, first, second]) => ({ first, second, result: name, count: Number(amount), skill: Number(skill), difficulty: Number(difficulty), id: Number(id) }));
 }
 
-function fromSqlTree(dir: string): CraftRecipe[] {
-  return sqlFiles(dir).flatMap((f) => parseRecipeSql(readFileSync(f, 'utf8')));
+function fromSqlTree(...dirs: string[]): CraftRecipe[] {
+  return overlayFiles(dirs.map((d) => sqlFiles(d))).flatMap((f) => parseRecipeSql(readFileSync(f, 'utf8')));
 }
 
 function fromClassicAce(): CraftRecipe[] {
@@ -87,7 +90,7 @@ const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(import.me
 const want = process.argv.slice(2);
 const eras = !isMain ? [] : want.length ? want : ['eol', 'ac1999', 'dm'];
 for (const era of eras) {
-  if (era === 'eol') write('eol', fromSqlTree(join(ROOT, 'world-db-raw/ACE-World-16PY/Database/3-Core/4 CraftTable')));
+  if (era === 'eol') write('eol', fromSqlTree(join(ROOT, 'world-db-raw/ACE-World-16PY/Database/3-Core/4 CraftTable'), join(ROOT, 'world-db-raw/ACE-World-16PY-Patches/Database/Patches/4 CraftTable')));
   else if (era === 'ac1999') write('ac1999', fromSqlTree(join(ROOT, 'reference/ac1999/Server/Database/AC1999-World/3-Core/4 CraftTable')));
   else if (era === 'dm') write('dm', fromClassicAce());
 }

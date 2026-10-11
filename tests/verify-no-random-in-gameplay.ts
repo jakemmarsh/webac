@@ -87,6 +87,8 @@ describe('FAITHFUL.216 — server-authoritative gameplay (no client Math.random 
       { dir: 'packages/shared/src/routines/vtankExpr.ts', reason: "VirindiTank meta randint[] — a player's own automation choice (e.g. which emote), not a game rule" },
       { dir: 'packages/renderer/src/agent/macro/combatPlan.ts', reason: "VirindiTank's Random damage type — the player's macro picking which element to cast, a player choice the server then resolves; not a game rule",
         textPattern: /Random damage type|input\.random \?\? Math\.random/ },
+      { dir: 'packages/renderer/src/agent/macro/vtMacro.ts', reason: "VirindiTank's RandomHelperBuffs — the player's macro picking which nearby player and which protection to cast; the server resolves the cast",
+        textPattern: /random: \(\) => number = Math\.random/ },
     ];
     const uses = findRandomUses(resolve(REPO, 'packages'));
     const violations = uses.filter(u => !APPROVED_DIRS.some(d =>

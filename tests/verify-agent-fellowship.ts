@@ -77,7 +77,8 @@ describe('agent fellowship (real GameUI)', () => {
   it('Auto Fellow Mgmt reads leader, size, the fellows\' names, and whether the era\'s client has the Leader hand-off', () => {
     expect(ui.agentFellowshipInfo()).toBeNull();
     lead(SELF);
-    expect(ui.agentFellowshipInfo()).toEqual({ leader: true, open: false, count: 2, members: ['Claude Bulwark', 'Claude Arcanist'], handOff: true });
+    // sharing: the fellows with Share Loot on (VTank's LootFellowCorpses reads it).
+    expect(ui.agentFellowshipInfo()).toEqual({ leader: true, open: false, count: 2, members: ['Claude Bulwark', 'Claude Arcanist'], handOff: true, sharing: ['Claude Bulwark', 'Claude Arcanist'] });
     lead(OTHER);
     expect(ui.agentFellowshipInfo().leader).toBe(false);
     // The 1999 client has no Assign New Leader (Absent1999 fellowshipLeadership): no hand-off there.
@@ -187,5 +188,20 @@ describe('agent fellowship (real GameUI)', () => {
     expect(ui.agentCharacterSheet()).toMatch(/Creature Enchantment 14 \[\+1: 154 xp\]/);
     expect(ui.agentRaise('assess')).toMatchObject({ ok: true, name: 'Assess Creature', cost: 129 });
     expect(skills).toEqual([[31, 54], [27, 129]]);
+  });
+  it('UtilityBelt\'s AutoXp prices the next raises from the same tables, sending nothing (agentRaiseCosts)', () => {
+    const sent: unknown[] = [];
+    ui.setRaiseCallbacks({ onRaiseSkill: (...a: unknown[]) => sent.push(a), onRaiseAttribute: (...a: unknown[]) => sent.push(a) }, { attribute: [0, 110, 277, 501], trainedSkill: [0, 58, 138, 243, 372, 526, 704] });
+    ui.charInfo.attributes.endurance = { base: 11, buffed: 11, raises: 1 };
+    ui.charInfo.skills = [
+      { id: 31, name: 'Creature Enchantment', status: 'Trained', base: 13, effective: 13, raises: 3, pp: 318 },
+      { id: 33, name: 'Life Magic', status: 'Untrained', base: 5, effective: 5, raises: 0 },
+    ];
+    expect(ui.agentRaiseCosts('Endurance', 5)).toEqual([167, 224]);
+    // 372 − 318, then 526 − 372, then 704 − 526: the table's end stops it.
+    expect(ui.agentRaiseCosts('Creature Enchantment', 9)).toEqual([54, 154, 178]);
+    expect(ui.agentRaiseCosts('Life Magic', 3)).toBeNull();
+    expect(ui.agentRaiseCosts('Nonsense', 3)).toBeNull();
+    expect(sent).toEqual([]);
   });
 });

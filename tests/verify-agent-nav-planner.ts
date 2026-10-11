@@ -7,12 +7,16 @@
  * where it would touch either (the real probe is the client's own collision).
  */
 import { existsSync } from 'node:fs';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { resolve } from 'node:path';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getJumpVelocity } from '@ac/shared';
 import { PathSearch, floorPlan, planPath, type NavPoint } from '../packages/renderer/src/agent/navPlanner.ts';
 import type { JumpKit } from '../packages/renderer/src/agent/jumpPlan.ts';
-import { DAT_PATHS } from './_harness/dat.js';
-import { dungeonNav, type DungeonNav } from './_harness/dungeonNav.js';
+import { findRouteViaOutside, loadCellGraph } from '../packages/renderer/src/agent/cellPath.ts';
+import { DAT_PATHS, openDat } from './_harness/dat.js';
+import { ac1999Dats, dungeonNav, type DungeonNav } from './_harness/dungeonNav.js';
+import { DungeonHost } from './_harness/dungeonWalk.js';
+import { ac1999Fixtures, ac1999WorldPresent } from './_harness/ac1999Fixtures.js';
 
 const R = 0.4;
 let probes = 0;
@@ -265,4 +269,138 @@ describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('B
     expect(jump.to.z).toBeCloseTo(0, 1);
     expect(jump.damage).toBe(0);
   });
+});
+
+/**
+ * The AC1999 tutorial dungeon (landblock 0x017E; 0x0179 is the same dungeon), §0.12 of docs/vtank-parity-gaps.md:
+ * you arrive upstairs (z −6: the Life Stone, the QUESTS sign) on a balcony whose fence (statics 0x020003B3/B4 in
+ * 0x017E012E) looks over the training pit 6 m down (0x017E0109–0x0117), and the Tutorial Exit Portal (0x017E014F)
+ * is on the far side of the pit. Without the dungeon's key the way down is over the fence. The doorway route's
+ * point for the balcony's doorway into the air over the pit (0x017E012D) lay in the fence line, so the walk
+ * never got there and never tried the drop: "stuck 10–34 m short (no walkable way …)" live on 2026-10-11.
+ * Object positions: the AC1999 server's landblock_instance (reference/ac1999 …/LandBlockExtendedData/SQL/017E.sql).
+ */
+const AC1999_PORTAL = resolve(__dirname, '..', 'dat-sets/ac1999-retail/portal.dat');
+const AC1999_CELL = resolve(__dirname, '..', 'dat-sets/ac1999-retail/cell.dat');
+describe.skipIf(!existsSync(AC1999_PORTAL) || !existsSync(AC1999_CELL))('AC1999 tutorial dungeon (0x017E): from the balcony down into the training pit and on to the exit', () => {
+  const LB = 0x017e0000;
+  let nav: DungeonNav;
+  let dats: NonNullable<ReturnType<typeof ac1999Dats>>;
+  const EXIT = { cell: LB | 0x14f, x: 59.94109, y: -60.7415, z: -6.063, name: 'Tutorial Exit Portal', itemType: 0x10000000 };
+  const DRUDGE = { cell: LB | 0x10d, x: 26.7907, y: -35.33574, z: -12, name: 'Straw Drudge', itemType: 0x10 };
+  beforeAll(async () => {
+    dats = ac1999Dats()!;
+    nav = await dungeonNav(LB, { dats, statics: true });
+  }, 120_000);
+  afterEach(() => vi.useRealTimers());
+
+  it('the doorway route from the Life Stone drops through the air over the pit, with no stop in the fenced doorway first', () => {
+    const g = loadCellGraph(dats.cell, dats.portal, LB);
+    expect(g.airCells!.has(LB | 0x12d)).toBe(true);
+    const r = findRouteViaOutside(g, LB | 0x139, { x: 37, y: -51, z: -6 }, EXIT.cell, EXIT, { maxDrop: 12 })!;
+    expect(r).not.toBeNull();
+    const drop = r.findIndex((p) => p.drop !== undefined);
+    expect(r[drop]).toMatchObject({ x: 30, y: -40, drop: 6, landing: -12 });
+    // The doorway before the drop is the Life Stone room's into the balcony (35, −50), not the fenced one (30, −45).
+    expect(r.slice(0, drop).map((p) => [Math.round(p.x), Math.round(p.y)])).toEqual([[35, -50]]);
+    // The body can't stand at the fenced doorway's point: it stops at the fence.
+    const at = nav.probe({ x: 0x01 * 192 + 30, y: 0x7e * 192 - 48, z: -6 }, { x: 0x01 * 192 + 30, y: 0x7e * 192 - 45 })!;
+    expect(0x7e * 192 - 45 - at.y).toBeGreaterThan(0.3);
+  });
+
+  it('walks from the Life Stone to the Tutorial Exit Portal: over the fence, through the pit and up its ramp', async () => {
+    vi.useFakeTimers();
+    const host = new DungeonHost(nav, dats, LB);
+    const r = await host.walk(LB | 0x139, { x: 37, y: -51, z: -6 }, EXIT);
+    expect(r, host.traces.join('\n')).toMatchObject({ ok: true });
+    expect(r.message).toMatch(/^arrived .*dropped off a ledge \(6\.0 m\)/);
+    expect(host.me.cell >>> 0).toBe(EXIT.cell >>> 0);
+  }, 120_000);
+
+  it('walks from the balcony (0x017E012E) to the exit, and from 0x017E0138 to a Straw Drudge in the pit', async () => {
+    vi.useFakeTimers();
+    const a = new DungeonHost(nav, dats, LB);
+    const r1 = await a.walk(LB | 0x12e, { x: 28, y: -50, z: -6 }, EXIT);
+    expect(r1, a.traces.join('\n')).toMatchObject({ ok: true });
+    const b = new DungeonHost(nav, dats, LB);
+    const r2 = await b.walk(LB | 0x138, { x: 42, y: -50, z: -6 }, DRUDGE);
+    expect(r2, b.traces.join('\n')).toMatchObject({ ok: true });
+    expect(b.me.z).toBeCloseTo(-12, 1);
+  }, 180_000);
+});
+
+describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('Banderling Ruin (0x01E0), end of retail: the whole walk from the walkway to the hall', () => {
+  // The walkway landing 0x01E00121 (z 6) opens onto the air over the hall (0x01E00120 → 0x01E00105), as the
+  // AC1999 balcony does; here the corner ramps are a walk round shorter than a fall's route penalty, so the
+  // walk goes down them on foot and arrives (end of retail unchanged by the AC1999 fix).
+  it('walks from the walkway landing down to the hall by the ramps', async () => {
+    const LB = 0x01e00000;
+    const nav = await dungeonNav(LB, { statics: true });
+    vi.useFakeTimers();
+    try {
+      const host = new DungeonHost(nav, { portal: openDat(DAT_PATHS.portal), cell: openDat(DAT_PATHS.cell) }, LB);
+      const start = { x: 8.5, y: -28, z: 6 };
+      const cell = nav.col.findCellContaining(0x01 * 192 + start.x, 0xe0 * 192 + start.y, start.z + 0.5);
+      expect(cell >>> 0).toBe((LB | 0x121) >>> 0);
+      const r = await host.walk(cell, start, { cell: LB | 0x105, x: 10, y: -20, z: 0, name: 'Hall Chest' });
+      expect(r, host.traces.join('\n')).toMatchObject({ ok: true });
+      expect(r.message).toMatch(/^arrived \([0-9.]+ m away\)$/);
+      expect(host.launches).toHaveLength(0);
+      expect(host.me.z).toBeCloseTo(0, 1);
+    } finally { vi.useRealTimers(); }
+  }, 180_000);
+});
+
+/**
+ * The live sighting in the second tutorial copy (landblock 0x0179), 2026-10-11: standing at the balcony fence
+ * (cell 0x0179012E, global (225.9, 23186.5), z −6), walk_to the Straw Drudge 10.3 m away and 6 m down. The
+ * fence is 2 m tall (posts 0x020003B4 stacked twice, rails 0x020003B3 at 0.75 and 1.75 m): below Jump 65 no
+ * jump clears it, and the other way down (the ramp, the key room) is behind the locked Door 0x7017900C
+ * (LockCode keytutorial). With the server's placed objects in the collision (signs, doors, the Life Stone)
+ * and Jump 50 the old walk searched 640 points twice and stood at the fence ("no walkable way"), as live.
+ * Now it routes round the fall it can't make, opens the door with the Tutorial Dungeon Key from the pack,
+ * and, with no key, says where the key lies.
+ */
+describe.skipIf(!existsSync(AC1999_PORTAL) || !existsSync(AC1999_CELL) || !ac1999WorldPresent())('AC1999 tutorial (0x0179): from the fence down to a Straw Drudge, with the server\'s objects and the character\'s Jump', () => {
+  const LB = 0x01790000, BX = 0x01 * 192, BY = 0x79 * 192;
+  const AT = { x: 225.9 - BX, y: 23186.5 - BY, z: -6 };
+  const DRUDGE = { cell: LB | 0x10d, x: 33.86359, y: -35.19238, z: -11.99668, name: 'Straw Drudge', itemType: 0x10 };
+  let dats: NonNullable<ReturnType<typeof ac1999Dats>>;
+  let fixtures: ReturnType<typeof ac1999Fixtures>;
+  beforeAll(() => { dats = ac1999Dats()!; fixtures = ac1999Fixtures(LB); });
+  afterEach(() => vi.useRealTimers());
+
+  const walk = async (jumpSkill: number, key: boolean) => {
+    const nav = await dungeonNav(LB, { dats, statics: true, jumpSkill });
+    vi.useFakeTimers();
+    const host = new DungeonHost(nav, dats, LB, { fixtures });
+    if (key) host.inv.push({ guid: 0x7017900b, name: 'Tutorial Dungeon Key', where: 'pack' });
+    try { return { host, r: await host.walk(LB | 0x12e, AT, DRUDGE, { maxMs: 200_000 }) }; } finally { host.dispose(); }
+  };
+
+  it('reads the placed objects: the locked key-room Door, the key, the signs', () => {
+    expect(fixtures.find((f) => f.guid === 0x7017900c)).toMatchObject({ name: 'Door', door: true, locked: true });
+    expect(fixtures.find((f) => f.guid === 0x7017900b)?.name).toBe('Tutorial Dungeon Key');
+    expect(fixtures.filter((f) => f.itemType === 8192).length).toBeGreaterThan(10);
+  });
+
+  it('Jump 100: over the fence and down', async () => {
+    const { host, r } = await walk(100, false);
+    expect(r, host.traces.join('\n')).toMatchObject({ ok: true });
+    expect(r.message).toMatch(/dropped off a ledge \(6\.0 m\)/);
+  }, 120_000);
+
+  it('Jump 50 with the key in the pack: round by the ramp, the key on the locked door, and on to the drudge', async () => {
+    const { host, r } = await walk(50, true);
+    expect(r, host.traces.join('\n')).toMatchObject({ ok: true });
+    expect(host.traces.some((l) => /no drop or jump gets down through the opening/.test(l))).toBe(true);
+    expect(host.sent).toEqual(['use 7017900c', 'usewith 7017900b 7017900c', 'use 7017900c']);
+    expect(host.me.z).toBeCloseTo(-12, 1);
+  }, 120_000);
+
+  it('Jump 50 and no key: stops at the locked door and says the key lies in the room', async () => {
+    const { host, r } = await walk(50, false);
+    expect(r.ok).toBe(false);
+    expect(r.message, host.traces.join('\n')).toMatch(/locked, or it needs a key; the way down through the floor opening is past a rail higher than your jump clears\)\. A Tutorial Dungeon Key lies \d+ m away/);
+  }, 120_000);
 });

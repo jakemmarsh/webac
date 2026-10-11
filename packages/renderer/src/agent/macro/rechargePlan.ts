@@ -18,6 +18,14 @@
  * Kits and food are recognised by ACE item properties (BoosterEnum, BoostValue,
  * HealkitMod, ItemUseable, Structure) and kit success uses ACE's own formula
  * (Healer.cs DoSkillCheck + SkillCheck.GetSkillChance).
+ *
+ * Caster items (2026-10-11): an Items-tab caster whose own spell (its Spell
+ * data id) is a recharge counts beside the spells you know, as VTank's spell
+ * handlers do (MOSS `VitalRecharge.TrySpell`, facts only): the best level
+ * wins, a spell you know wins a tie. It is used on you in magic mode,
+ * wielded first when the item must be (itemUse.ts). With UseHealersHeart on,
+ * the Helper heals a fellow with an Items-tab caster whose spell heals
+ * another (The Healer's Heart, Legendary Seed of Mornings) before any spell.
  */
 import {
   PropertyFloat,
@@ -31,6 +39,7 @@ import {
   type PlanSpell,
   type Stance,
 } from '@ac/shared';
+import { itemSpellId, mustWield, outOfMana, useRequirementProblem } from './itemUse.ts';
 
 export type Vital = 'health' | 'stamina' | 'mana';
 export const VITALS: readonly Vital[] = ['health', 'stamina', 'mana'];
@@ -54,6 +63,9 @@ export interface RechargeFamily {
   /** Transfers: ACE Proportion, 1 − LossPercent, TransferCap (0 = none). */
   transfer?: { proportion: number; give: number; cap: number };
   category: number;
+  /** The spell's difficulty and name (buildRechargeFamilies), so an item's spell can be ranked against the spells you know. */
+  power?: number;
+  name?: string;
 }
 
 export interface RechargeFamilies {
@@ -95,11 +107,20 @@ export interface RechargeInput {
    * keeps the timing (RechargeBoostTimeSeconds, ClearLevelBoostFlagOnCast).
    */
   boost?: number;
+  /**
+   * Items-tab casters (examined: their Spell data id, ItemUseable and use requirements), whose own
+   * spell may recharge you or (UseHealersHeart) heal a fellow.
+   */
+  casterItems?: PlanItem[];
+  /** Your level, for an item's UseRequiresLevel. */
+  level?: number;
 }
 
 export type RechargeAction =
   | { kind: 'cast'; spell: PlanSpell; why: string; target?: number }
   | { kind: 'use'; item: PlanItem; why: string }
+  /** A caster item's own spell, used on you (no target) or a fellow, in magic mode; `wield`: it must be wielded first. */
+  | { kind: 'item'; item: PlanItem; spellName: string; wield: boolean; why: string; target?: number }
   | { kind: 'stance'; to: Stance; why: string };
 
 // ── RechargeHandlerSet (USD default, docs §3) ──
@@ -196,7 +217,7 @@ export function buildRechargeFamilies(spellTable: { spells: Map<number, { name: 
   const bySpell = new Map<number, RechargeFamily>();
   for (const [id, s] of spellTable.spells) {
     const f = rechargeFamilyOf(s);
-    if (f) bySpell.set(id, f);
+    if (f) bySpell.set(id, { ...f, power: s.power, name: s.name });
   }
   return { bySpell };
 }
@@ -284,6 +305,33 @@ function bestSpell(ctx: Ctx, kind: RechargeKind, self: boolean, dest?: Vital): {
   return best;
 }
 
+/** A spell to cast or a caster item to use: the best of `kind` you know, or an Items-tab caster's spell of a higher level. */
+type Source = { spell: PlanSpell; fam: RechargeFamily; item?: undefined } | { item: PlanItem; fam: RechargeFamily; spell?: undefined };
+
+function bestItem(ctx: Ctx, kind: RechargeKind, self: boolean, dest?: Vital): { item: PlanItem; fam: RechargeFamily } | null {
+  const { casterItems, rechargeFamilies, skills, level } = ctx.input;
+  let best: { item: PlanItem; fam: RechargeFamily } | null = null;
+  for (const item of casterItems ?? []) {
+    if (((item.itemType ?? 0) & 0x8000) === 0 || outOfMana(item)) continue;
+    const sid = itemSpellId(item);
+    const fam = sid !== undefined ? rechargeFamilies.bySpell.get(sid) : undefined;
+    if (!fam || fam.kind !== kind || fam.self !== self || (dest && fam.dest !== dest)) continue;
+    if (useRequirementProblem(item, skills, level)) continue;
+    if (!best || (fam.power ?? 0) > (best.fam.power ?? 0)) best = { item, fam };
+  }
+  return best;
+}
+
+function bestSource(ctx: Ctx, kind: RechargeKind, self: boolean, dest?: Vital): Source | null {
+  const spell = bestSpell(ctx, kind, self, dest);
+  const item = bestItem(ctx, kind, self, dest);
+  // A higher level wins; on a tie, the spell you know (MOSS VitalRecharge.Better).
+  if (item && (!spell || (item.fam.power ?? 0) > spell.spell.power)) return item;
+  return spell;
+}
+
+const sourceName = (s: Source): string => (s.spell ? s.spell.name : `${s.item.name} (${s.fam.name ?? 'its spell'})`);
+
 function isKit(it: PlanItem): boolean {
   // Healers carry HealkitMod and a targeted ItemUseable (SourceContainedTargetRemoteOrSelf); food is ItemUseable Contained.
   return it.floats?.[PropertyFloat.HealkitMod] !== undefined || ((it.ints?.[PropertyInt.ItemUseable] ?? 0) >>> 16) !== 0;
@@ -321,35 +369,43 @@ function bestFood(ctx: Ctx, v: Vital): PlanItem | null {
 }
 
 /** Stamina / Mana to Health is used only when it beats a normal heal by its multiplier (StaminaToHealthMultiplier, ManaToHealthMultiplier). */
-function drainToHealth(ctx: Ctx, kind: 'stam-to-health' | 'mana-to-health'): { spell: PlanSpell; why: string } | null {
-  const pick = bestSpell(ctx, kind, true);
+function drainToHealth(ctx: Ctx, kind: 'stam-to-health' | 'mana-to-health'): { source: Source; why: string } | null {
+  const pick = bestSource(ctx, kind, true);
   if (!pick) return null;
   const sourceCur = ctx.input.vitals[pick.fam.source!].cur;
   const gain = transferGain(pick.fam, sourceCur);
   if (gain <= 0) return null;
-  const heal = bestSpell(ctx, 'heal', true);
+  const heal = bestSource(ctx, 'heal', true);
   const healGain = heal ? boostGain(heal.fam) : 0;
   const multName = kind === 'stam-to-health' ? 'StaminaToHealthMultiplier' : 'ManaToHealthMultiplier';
   const mult = num(ctx.input.settings, multName);
   if (gain < healGain * mult) return null;
-  return { spell: pick.spell, why: `${pick.spell.name} gives ~${gain} vs heal ~${healGain} × ${multName} ${mult}` };
+  return { source: pick, why: `${sourceName(pick)} gives ~${gain} vs heal ~${healGain} × ${multName} ${mult}` };
 }
 
-function regularSpell(ctx: Ctx, v: Vital): { spell: PlanSpell; why: string } | null {
-  if (v === 'health') { const p = bestSpell(ctx, 'heal', true); return p && { spell: p.spell, why: p.spell.name }; }
-  if (v === 'stamina') { const p = bestSpell(ctx, 'revitalize', true); return p && { spell: p.spell, why: p.spell.name }; }
+function regularSpell(ctx: Ctx, v: Vital): { source: Source; why: string } | null {
+  if (v === 'health') { const p = bestSource(ctx, 'heal', true); return p && { source: p, why: sourceName(p) }; }
+  if (v === 'stamina') { const p = bestSource(ctx, 'revitalize', true); return p && { source: p, why: sourceName(p) }; }
   // Mana: Stamina to Mana (Mana Boost Self costs more mana than it restores).
-  const p = bestSpell(ctx, 'stam-to-mana', true);
+  const p = bestSource(ctx, 'stam-to-mana', true);
   if (!p || transferGain(p.fam, ctx.input.vitals.stamina.cur) <= 0) return null;
-  return { spell: p.spell, why: p.spell.name };
+  return { source: p, why: sourceName(p) };
+}
+
+/** A caster item's spell: the item goes in your hands first when it must be wielded, then it is used in magic mode. */
+function itemAction(item: PlanItem, fam: RechargeFamily, why: string, target?: number): RechargeAction {
+  return { kind: 'item', item, spellName: fam.name ?? '', wield: mustWield(item) && !item.equipped, why, ...(target !== undefined ? { target } : {}) };
 }
 
 function tryRow(ctx: Ctx, r: RechargeRow, why: string): RechargeAction | null {
   const { stance, settings } = ctx.input;
-  const castOrStance = (c: { spell: PlanSpell; why: string } | null): RechargeAction | null => {
+  const castOrStance = (c: { source: Source; why: string } | null): RechargeAction | null => {
     if (!c) return null;
-    if (stance !== 'magic') return { kind: 'stance', to: 'magic', why: `${why}: ${r.handler} (${c.why}) needs magic stance` };
-    return { kind: 'cast', spell: c.spell, why: `${why}: ${r.handler} (${c.why})` };
+    const w = `${why}: ${r.handler} (${c.why})`;
+    // An item that must be wielded is wielded before the switch to magic mode (it is then the caster in hand).
+    if (c.source.item && mustWield(c.source.item) && !c.source.item.equipped) return itemAction(c.source.item, c.source.fam, w);
+    if (stance !== 'magic') return { kind: 'stance', to: 'magic', why: `${w} needs magic stance` };
+    return c.source.item ? itemAction(c.source.item, c.source.fam, w) : { kind: 'cast', spell: c.source.spell, why: w };
   };
   switch (r.handler) {
     case 'Kit Recharge': {
@@ -379,6 +435,16 @@ function helperAction(ctx: Ctx): RechargeAction | null {
     const range = num(settings, `HelperDistance${VITAL_SUFFIX[v]}`);
     for (const f of fellows) {
       if (f.distance > range || f[v].max <= 0 || pct(f[v]) >= at) continue;
+      // UseHealersHeart: an Items-tab caster that heals another goes first (MOSS TryHealersHeart).
+      if (v === 'health' && bool(settings, 'UseHealersHeart')) {
+        const heart = bestItem(ctx, 'heal', false, 'health');
+        if (heart) {
+          const why = `${f.name} health ${fmt(pct(f.health))} < ${at}% (Recharge-Helper-HitP): ${heart.item.name} (UseHealersHeart)`;
+          if (mustWield(heart.item) && !heart.item.equipped) return itemAction(heart.item, heart.fam, why, f.guid);
+          if (stance !== 'magic') return { kind: 'stance', to: 'magic', why: `${why} needs magic stance` };
+          return itemAction(heart.item, heart.fam, why, f.guid);
+        }
+      }
       const pick = bestSpell(ctx, BOOST_KIND[v], false) ?? bestSpell(ctx, 'infuse', false, v);
       if (!pick) continue;
       const why = `${f.name} ${v} ${fmt(pct(f[v]))} < ${at}% (Recharge-Helper-${VITAL_SUFFIX[v]})`;

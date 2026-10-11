@@ -29,6 +29,8 @@ export class FakeHost implements AgentHost {
   now = () => this.t;
   screen = () => this.screenName;
   self = () => this.me;
+  /** The server's echo of your position (checkpoints); unset = the host can't say. */
+  serverSelfPosition: AgentHost['serverSelfPosition'] = undefined;
   objects = () => this.objs.values();
   object = (g: number) => this.objs.get(g) ?? null;
   isAttackable = (g: number) => (this.objs.get(g)?.objectDescFlags ?? 0) & 0x10 ? true : false;
@@ -83,6 +85,7 @@ export class FakeHost implements AgentHost {
   /** The combat bar's power / accuracy level. */
   barPower = 0.35;
   attackPower = () => this.barPower;
+  setAttackPower = (p: number) => { this.sent.push(`power ${p}`); this.barPower = p; };
   setAttackHeight = (h: 'high' | 'medium' | 'low') => { this.sent.push(`height ${h}`); this.barHeight = h; };
   cancelAttack = () => { this.sent.push('cancel'); };
   cast = (id: number, t: number | null) => { this.sent.push(`cast ${id} ${t === null ? 'self' : t.toString(16)}`); return true; };

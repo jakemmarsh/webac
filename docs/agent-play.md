@@ -315,6 +315,14 @@ uses the client's own movement collision:
    the fall and only when no walk round is within 30 m. A cell with no floor (the air over an atrium or a
    pit) is never crossed. Banderling Ruin (0x01E0), 2026-10-10: the route used to go straight up through
    the atrium's 6 m ceiling opening instead of round by the corner ramps.
+   A doorway into such a floorless cell, when the route's next step is the fall through it, is not a
+   waypoint: the walk goes from the doorway before it straight to the fall, and its search finds the edge
+   (or the rail) to drop or jump from. The AC1999 tutorial's balcony fence stands in its doorway over the
+   training pit, and the walk to that doorway's point never arrived (§0.12 of docs/vtank-parity-gaps.md,
+   2026-10-11).
+   A fall no drop or jump reaches (a rail higher than your Jump clears: that fence is 2 m, too high below
+   Jump 65) is routed round by stairs, ramps and doors. A locked door on the way is unlocked with a key
+   from your pack (use the key on the door, then open it); with no key, the walk says where one lies.
    From the landscape it goes in by a doorway the ground reaches (`CellDoor.grounded`): the terrain is at
    the door's feet, or the walkable surfaces outside it (the building's porch, a landblock static's ramp
    or steps, from LandblockInfo) join a step (StepUpHeight) at a time down to the terrain. A door on a
@@ -394,7 +402,8 @@ WorldFilter / EchoFilter / ACHooks, typed). Front ends sit on top and never reac
 - **Shipped (2026-10-07):** the document format and validator (`packages/shared/src/routines/`), a worked
   example profile, and the store (`services/ws-tcp-bridge/src/routineStore.ts`: `~/.acjs-agent/routines/<server>/<account>.json`,
   `ACJS_ROUTINES_DIR` to move it). Claude configures with `ac_routines action=list|show|explain|example|validate|set`
-  (`account=` / `server=` for any account; no session needed). `set` validates and refuses an invalid document
+  (`account=` / `server=` for any account; no session needed); `action=export kind=met|nav|utl` hands a profile back
+  as a VirindiTank file's text (`out=` also writes it locally; docs/vtank-formats.md §5). `set` validates and refuses an invalid document
   with the path of every problem. `ac_routine run` loads the profile through the game client from the bridge
   (it says "from the bridge"), falling back to the local files on a bridge without `/routines`.
 - Configuring **Jake's** routines needs no game session at all (edit the account's documents through the

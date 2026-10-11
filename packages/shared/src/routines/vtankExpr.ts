@@ -87,6 +87,10 @@ export interface HostObject {
   isDoorOpen?: boolean;
   /** Degrees, 0 = north, 90 = east. */
   heading?: number;
+  /** AC ItemType bits (wobjectgetinternaltype). */
+  itemType?: number;
+  /** Where it is worn or wielded now (EquipMask bits); absent or 0 when it isn't. */
+  equipMask?: number;
 }
 
 export interface HostFellowship {
@@ -218,6 +222,42 @@ export interface ExprHost {
   setViewLabel?(view: string, control: string, text: string): boolean;
   /** Run `fn` after `ms` (delayexec). */
   schedule?(ms: number, fn: () => void): void;
+
+  // UtilityBelt additions (docs/vtank-parity-gaps.md §5).
+  /** Every variable set in a scope, for /vt dumpmetavars. */
+  listVars?(scope: VarScope): Array<[string, ExprValue]>;
+  /** Drop an item you carry on the ground (actiontrydrop). */
+  dropItem?(id: number): boolean;
+  /**
+   * Move an item into a container (yours or a pack) at a slot: the whole item,
+   * or `amount` split off it; `joinStack` lets it join a stack of the same
+   * thing already there (actiontrymove / actiontrysplit).
+   */
+  moveItem?(id: number, containerId: number, slot: number, amount: number | null, joinStack: boolean): boolean;
+  /** Have you opened this corpse (hascorpsebeenopenedbyme / getcorpsesunopenedbyme)? */
+  corpseOpenedByMe?(id: number): boolean;
+  /** Seconds left on a shared item cooldown (its CooldownId), 0 when none. */
+  cooldownRemaining?(cooldownId: number): number;
+  /** A container's capacity (you, or a pack): item slots and pack slots; null when it isn't a container. */
+  containerCapacity?(id: number): { items: number; containers: number } | null;
+  /** An object's current health / stamina / mana (vital 1 / 2 / 3) when the client knows it. */
+  objectVital?(id: number, vital: number): number | null;
+  /** XP and luminance earned since the meter started or was reset, and over how long (xp* / lum*). */
+  xpMeter?(): { xp: number; lum: number; seconds: number };
+  xpReset?(): void;
+  /** The meta (profile) loaded, and whether the macro is on (vtgetmeta / vtmacroenabled). */
+  metaName?(): string;
+  macroEnabled?(): boolean;
+  /** Meta Views: is a view open, is it shown, and show or hide one of its controls. */
+  viewExists?(view: string): boolean;
+  viewVisible?(view: string): boolean;
+  setViewVisible?(view: string, control: string, visible: boolean): boolean;
+  /** Your account's characters, in login-screen order (getcharacterindex / setnextlogin). */
+  characterNames?(): string[];
+  /** Log in as this character the next time you are at character select; null clears it. */
+  setNextLogin?(name: string | null): boolean;
+  /** Wall-clock time in ms since 1970 (getdatetime*; defaults to Date.now). */
+  wallClock?(): number;
 }
 
 export class ExprError extends Error {
@@ -589,6 +629,119 @@ export function formatDotNet(n: number, fmt: string): string {
   return formatNumber(n);
 }
 
+// ─── .NET date formatting (getdatetimelocal / getdatetimeutc) ────────────
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+/** .NET's standard date formats under InvariantCulture, as custom patterns. */
+const DATE_STANDARD: Record<string, string> = {
+  d: 'MM/dd/yyyy', D: 'dddd, dd MMMM yyyy', f: 'dddd, dd MMMM yyyy HH:mm', F: 'dddd, dd MMMM yyyy HH:mm:ss',
+  g: 'MM/dd/yyyy HH:mm', G: 'MM/dd/yyyy HH:mm:ss', m: 'MMMM dd', M: 'MMMM dd', o: "yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fffffffK", O: "yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fffffffK",
+  r: "ddd, dd MMM yyyy HH':'mm':'ss 'GMT'", R: "ddd, dd MMM yyyy HH':'mm':'ss 'GMT'", s: "yyyy'-'MM'-'dd'T'HH':'mm':'ss",
+  t: 'HH:mm', T: 'HH:mm:ss', u: "yyyy'-'MM'-'dd HH':'mm':'ss'Z'", U: 'dddd, dd MMMM yyyy HH:mm:ss', y: 'yyyy MMMM', Y: 'yyyy MMMM',
+};
+
+/**
+ * A date as .NET's DateTime.ToString(format, InvariantCulture) writes it:
+ * the standard one-letter formats and the custom specifiers (d dd ddd dddd,
+ * M MM MMM MMMM, y yy yyyy, h hh H HH, m mm, s ss, f… F…, t tt, z zz zzz, K,
+ * quoted text, `\x` and `%x`). `utc` reads the date's UTC fields.
+ */
+export function formatDotNetDate(date: Date, format: string, utc: boolean): string {
+  const fmt = format.length === 1 ? DATE_STANDARD[format] ?? (() => { throw new Error(`Input string was not in a correct format: '${format}'`); })() : format;
+  const u = utc || format === 'r' || format === 'R' || format === 'u';
+  const Y = u ? date.getUTCFullYear() : date.getFullYear();
+  const Mo = u ? date.getUTCMonth() : date.getMonth();
+  const D = u ? date.getUTCDate() : date.getDate();
+  const W = u ? date.getUTCDay() : date.getDay();
+  const H = u ? date.getUTCHours() : date.getHours();
+  const Mi = u ? date.getUTCMinutes() : date.getMinutes();
+  const S = u ? date.getUTCSeconds() : date.getSeconds();
+  const ms = u ? date.getUTCMilliseconds() : date.getMilliseconds();
+  const off = u ? 0 : -date.getTimezoneOffset();
+  const pad = (n: number, w: number) => String(n).padStart(w, '0');
+  const offset = (full: number) => {
+    const sign = off < 0 ? '-' : '+', h = Math.floor(Math.abs(off) / 60), m = Math.abs(off) % 60;
+    return full === 1 ? `${sign}${h}` : full === 2 ? `${sign}${pad(h, 2)}` : `${sign}${pad(h, 2)}:${pad(m, 2)}`;
+  };
+  let out = '';
+  for (let i = 0; i < fmt.length;) {
+    const ch = fmt[i]!;
+    if (ch === "'" || ch === '"') {
+      const close = fmt.indexOf(ch, i + 1);
+      out += fmt.slice(i + 1, close < 0 ? fmt.length : close);
+      i = close < 0 ? fmt.length : close + 1;
+      continue;
+    }
+    if (ch === '\\') { out += fmt[i + 1] ?? ''; i += 2; continue; }
+    if (ch === '%' && i + 1 < fmt.length) { i++; continue; }
+    let n = 1;
+    while (fmt[i + n] === ch) n++;
+    i += n;
+    switch (ch) {
+      case 'd': out += n === 1 ? D : n === 2 ? pad(D, 2) : n === 3 ? DAY_NAMES[W]!.slice(0, 3) : DAY_NAMES[W]; break;
+      case 'M': out += n === 1 ? Mo + 1 : n === 2 ? pad(Mo + 1, 2) : n === 3 ? MONTH_NAMES[Mo]!.slice(0, 3) : MONTH_NAMES[Mo]; break;
+      case 'y': out += n === 1 ? Y % 100 : n === 2 ? pad(Y % 100, 2) : pad(Y, n); break;
+      case 'h': out += n === 1 ? (H % 12 || 12) : pad(H % 12 || 12, 2); break;
+      case 'H': out += n === 1 ? H : pad(H, 2); break;
+      case 'm': out += n === 1 ? Mi : pad(Mi, 2); break;
+      case 's': out += n === 1 ? S : pad(S, 2); break;
+      case 'f': case 'F': {
+        let frac = pad(ms, 3).padEnd(Math.max(3, n), '0').slice(0, n);
+        if (ch === 'F') frac = frac.replace(/0+$/, '');
+        out += frac;
+        if (ch === 'F' && frac === '' && out.endsWith('.')) out = out.slice(0, -1);
+        break;
+      }
+      case 't': out += n === 1 ? (H < 12 ? 'A' : 'P') : H < 12 ? 'AM' : 'PM'; break;
+      case 'z': out += offset(Math.min(n, 3)); break;
+      case 'K': out += u ? 'Z' : offset(3); break;
+      case 'g': out += 'A.D.'; break;
+      default: out += ch.repeat(n);
+    }
+  }
+  return out;
+}
+
+/**
+ * UtilityBelt's XP meter (xpreset / xpmeter / xptotal / xpavg / lumtotal /
+ * lumavg / xpduration): experience and luminance gained since it started or
+ * was reset. Total experience only grows; available luminance drops when it
+ * is spent, so only rises between samples count. Each read samples; the host
+ * may also sample on its own tick.
+ */
+export class XpMeter {
+  private last: { xp: number; lum: number } | null = null;
+  private startedAt: number | null = null;
+  xp = 0;
+  lum = 0;
+  constructor(private readonly read: () => { xp: number; lum: number } | null, private readonly now: () => number) {}
+  sample(): void {
+    const r = this.read();
+    if (!r) return;
+    if (this.startedAt === null) this.startedAt = this.now();
+    if (this.last) {
+      if (r.xp >= this.last.xp) this.xp += r.xp - this.last.xp;
+      if (r.lum >= this.last.lum) this.lum += r.lum - this.last.lum;
+    }
+    this.last = r;
+  }
+  reset(): void { this.xp = 0; this.lum = 0; this.last = null; this.startedAt = null; this.sample(); }
+  seconds(): number { return this.startedAt === null ? 0 : Math.max(0, (this.now() - this.startedAt) / 1000); }
+  reading(): { xp: number; lum: number; seconds: number } { this.sample(); return { xp: this.xp, lum: this.lum, seconds: this.seconds() }; }
+}
+
+/** UtilityBelt's xpmeter[] line: "1,234 XP, 60s, 74,040 XP/hr" (with "and … LUM" parts when luminance was earned). */
+export function xpMeterText(m: { xp: number; lum: number; seconds: number }): string {
+  const n0 = (v: number) => formatDotNet(Math.round(v), 'N0');
+  const perHour = (v: number) => (m.seconds > 0 ? (v * 3600) / m.seconds : 0);
+  let s = `${n0(m.xp)} XP`;
+  if (m.lum) s += ` and ${n0(m.lum)} LUM`;
+  s += `, ${n0(m.seconds)}s, ${n0(perHour(m.xp))} XP/hr`;
+  if (m.lum) s += ` and ${n0(perHour(m.lum))} LUM/hr`;
+  return s;
+}
+
 // ─── Dereth calendar (ACE DerethDateTime constants) ──────────────────────
 
 const DAY_TICKS = 7620;
@@ -776,6 +929,57 @@ const charProp = (kind: PropKind) => (a: ExprValue[], c: Ctx): ExprValue => need
 const objProp = (kind: PropKind) => (a: ExprValue[], c: Ctx): ExprValue =>
   need(c, 'objectProp')(woId(a[0]!, c), kind, int(a[1]!, c)) ?? (kind === 'string' ? '' : 0);
 
+/** delayexec's pending runs per host: the id each returned, which clearexec cancels. */
+const delayed = new WeakMap<ExprHost, { next: number; live: Set<number> }>();
+function delayedOf(h: ExprHost): { next: number; live: Set<number> } {
+  let d = delayed.get(h);
+  if (!d) { d = { next: 1, live: new Set() }; delayed.set(h, d); }
+  return d;
+}
+
+/** EquipMask bits that hold a weapon, in the order getequippedweapontype reads them. */
+const WEAPON_SLOTS: Array<[number, string]> = [
+  [0x00400000, 'Missile'], // MissileWeapon
+  [0x01000000, 'Wand'], // Held (wands, staffs, orbs)
+  [0x00100000, 'Melee'], // MeleeWeapon
+  [0x02000000, 'Melee'], // TwoHanded (two-handed swords and spears)
+];
+
+/** Free item or pack slots in a container (you when none is given); -1 when it isn't a container. */
+function freeSlots(a: ExprValue[], c: Ctx, packs: boolean): number {
+  const cap = need(c, 'containerCapacity');
+  const id = a.length && !noObj(a[0]!) ? woId(a[0]!, c) : need(c, 'player')().id;
+  const size = cap(id);
+  if (!size) return -1;
+  // A pack takes a pack slot; so does a focus (Decal ObjectClass 38: it needs a pack slot).
+  const isPack = (o: HostObject) => o.objectClass === 10 || o.objectClass === 38;
+  const used = inventory(c).filter((o) => o.containerId === id && !o.equipMask && isPack(o) === packs).length;
+  return Math.max(0, (packs ? size.containers : size.items) - used);
+}
+
+function dateText(c: Ctx, a: ExprValue[], utc: boolean): string {
+  const when = new Date(c.host.wallClock?.() ?? Date.now());
+  try { return formatDotNetDate(when, a.length ? str(a[0]!) : 'hh:mm:ss tt', utc); } catch (e) { c.host.echo((e as Error).message); return ''; }
+}
+
+/** Your account's characters as UB numbers them: by name, A to Z. */
+function roster(c: Ctx): string[] {
+  return [...need(c, 'characterNames')()].sort((x, y) => x.toLowerCase().localeCompare(y.toLowerCase()));
+}
+
+/** setnextlogin's argument: a name, or a number counted on from your character (wrapping round the list). */
+function nextLoginName(c: Ctx, v: ExprValue): string | null {
+  const names = roster(c);
+  if (!names.length) return null;
+  const n = typeof v === 'number' ? v : strToNum(str(v));
+  if (n === null) {
+    const want = str(v).trim().toLowerCase();
+    return names.find((x) => x.toLowerCase() === want) ?? null;
+  }
+  const me = names.findIndex((x) => x.toLowerCase() === (c.host.player?.().name ?? '').toLowerCase());
+  return names[mod((me < 0 ? 0 : me) + Math.trunc(n), names.length)]!;
+}
+
 function fellow(c: Ctx): HostFellowship | null { return need(c, 'fellowship')(); }
 function myId(c: Ctx): number | undefined { return c.host.player?.().id; }
 function questOf(a: ExprValue[], c: Ctx): HostQuest | null { return need(c, 'quest')(str(a[0]!)); }
@@ -902,6 +1106,32 @@ const F: Record<string, FnDef> = {
   wobjectfindalllandscapebynamerx: { min: 1, max: 1, fn: (a, c) => { const r = toRegExp(str(a[0]!), c.pos); return allOf(landscape(c), (o) => r.test(o.name)); } },
   wobjectfindallbycontainer: { min: 1, max: 1, fn: (a, c) => { const id = woId(a[0]!, c); return allOf(allObjects(c), (o) => o.containerId === id); } },
   getobjectinternaltype: { min: 1, max: 1, fn: (a) => internalType(a[0]!) },
+  // UtilityBelt: an object's AC ItemType (0 when the client doesn't know the object).
+  wobjectgetinternaltype: { min: 1, max: 1, fn: (a, c) => (noObj(a[0]!) ? 0 : lookup(c, woId(a[0]!, c))?.itemType ?? 0) },
+  // UB: an object's current health / stamina / mana, 0 while the client hasn't been told it.
+  wobjectgethealthvalue: { min: 1, max: 1, fn: (a, c) => need(c, 'objectVital')(woId(a[0]!, c), 1) ?? 0 },
+  wobjectgetstaminavalue: { min: 1, max: 1, fn: (a, c) => need(c, 'objectVital')(woId(a[0]!, c), 2) ?? 0 },
+  wobjectgetmanavalue: { min: 1, max: 1, fn: (a, c) => need(c, 'objectVital')(woId(a[0]!, c), 3) ?? 0 },
+  // UB: free item / pack slots in a container (yours by default); -1 when it isn't a container.
+  getfreeitemslots: { min: 0, max: 1, fn: (a, c) => freeSlots(a, c, false) },
+  getfreecontainerslots: { min: 0, max: 1, fn: (a, c) => freeSlots(a, c, true) },
+  // UB: "Missile", "Wand", "Melee" or "None", by the slot your weapon is wielded in.
+  getequippedweapontype: {
+    min: 0, max: 0,
+    fn: (_a, c) => {
+      const worn = inventory(c).filter((o) => o.equipMask);
+      for (const [bit, name] of WEAPON_SLOTS) if (worn.some((o) => ((o.equipMask ?? 0) & bit) !== 0)) return name;
+      return 'None';
+    },
+  },
+  // UB: seconds left on a shared item cooldown, by its cooldown id (0 when it isn't running).
+  getcooldownexpiration: { min: 1, max: 1, fn: (a, c) => need(c, 'cooldownRemaining')(int(a[0]!, c)) },
+  // UB: corpses you can see that you haven't opened (their ids), and whether you opened one.
+  getcorpsesunopenedbyme: {
+    min: 0, max: 0,
+    fn: (_a, c) => { const opened = need(c, 'corpseOpenedByMe'); return mkList(landscape(c).filter((o) => o.objectClass === 27 && !opened(o.id)).map((o) => o.id)); },
+  },
+  hascorpsebeenopenedbyme: { min: 1, max: 1, fn: (a, c) => { const opened = need(c, 'corpseOpenedByMe'); return noObj(a[0]!) ? 0 : b(opened(woId(a[0]!, c))); } },
 
   // Actions. A "try" with no object (none / unset variable) is a failed attempt (0), not an error.
   actiontryselect: { min: 1, max: 1, fn: (a, c) => { const f = need(c, 'select'); return noObj(a[0]!) ? 0 : b(f(woId(a[0]!, c))); } },
@@ -912,6 +1142,32 @@ const F: Record<string, FnDef> = {
   setmotion: { min: 2, max: 2, fn: (a, c) => { need(c, 'setMotion')(str(a[0]!), truthy(a[1]!)); return 1; } },
   getmotion: { min: 1, max: 1, fn: (a, c) => b(need(c, 'getMotion')(str(a[0]!))) },
   clearmotion: { min: 0, max: 0, fn: (_a, c) => { need(c, 'clearMotion')(); return 1; } },
+  // UB: drop an item on the ground; move one into a container (slot, and whether it may join a stack there: yes unless 0).
+  actiontrydrop: { min: 1, max: 1, fn: (a, c) => { const f = need(c, 'dropItem'); return noObj(a[0]!) ? 0 : b(f(woId(a[0]!, c))); } },
+  actiontrymove: {
+    min: 2, max: 4,
+    fn: (a, c) => {
+      const f = need(c, 'moveItem');
+      if (noObj(a[0]!) || noObj(a[1]!)) return 0;
+      return b(f(woId(a[0]!, c), woId(a[1]!, c), a.length > 2 ? int(a[2]!, c) : 0, null, a.length < 4 || truthy(a[3]!)));
+    },
+  },
+  // UB: split newStackSize off a stack into a container (you by default) at a slot, joining a stack there only when merge is set.
+  // Nothing while you are busy (0); otherwise 1 whatever the server then does.
+  actiontrysplit: {
+    min: 2, max: 5,
+    fn: (a, c) => {
+      const f = need(c, 'moveItem');
+      if (noObj(a[0]!)) return 0;
+      const item = woId(a[0]!, c);
+      const amount = int(a[1]!, c);
+      const dest = a.length > 2 && !noObj(a[2]!) ? woId(a[2]!, c) : need(c, 'player')().id;
+      if ((c.host.busyState?.() ?? 0) !== 0) return 0;
+      c.host.select?.(item);
+      f(item, dest, a.length > 3 ? int(a[3]!, c) : 0, amount, a.length > 4 && truthy(a[4]!));
+      return 1;
+    },
+  },
 
   // UI
   chatbox: { min: 1, max: 1, fn: (a, c) => { const t = str(a[0]!); need(c, 'chatbox')(t); return t; } },
@@ -928,6 +1184,37 @@ const F: Record<string, FnDef> = {
     return b(need(c, 'setViewLabel')(v.view, v.control, str(a[1]!)));
   } },
 
+  // UB's view functions: show or hide a control (the visible argument comes back), is a view shown, is it open.
+  uisetvisible: { min: 2, max: 2, fn: (a, c) => {
+    const v = a[0]!;
+    if (!isObj(v) || v.kind !== 'viewcontrol') return err(c, 'expects a view control (uigetcontrol[window, control])');
+    need(c, 'setViewVisible')(v.view, v.control, truthy(a[1]!));
+    return a[1]!;
+  } },
+  uiviewvisible: { min: 1, max: 1, fn: (a, c) => b(need(c, 'viewVisible')(str(a[0]!))) },
+  uiviewexists: { min: 1, max: 1, fn: (a, c) => b(need(c, 'viewExists')(str(a[0]!))) },
+
+  // UB's XP meter.
+  xpreset: { min: 0, max: 0, fn: (_a, c) => { need(c, 'xpReset')(); return 1; } },
+  xpmeter: { min: 0, max: 0, fn: (_a, c) => xpMeterText(need(c, 'xpMeter')()) },
+  xpduration: { min: 0, max: 0, fn: (_a, c) => need(c, 'xpMeter')().seconds },
+  xptotal: { min: 0, max: 0, fn: (_a, c) => need(c, 'xpMeter')().xp },
+  xpavg: { min: 0, max: 0, fn: (_a, c) => { const m = need(c, 'xpMeter')(); return m.seconds > 0 ? (m.xp * 3600) / m.seconds : 0; } },
+  lumtotal: { min: 0, max: 0, fn: (_a, c) => need(c, 'xpMeter')().lum },
+  lumavg: { min: 0, max: 0, fn: (_a, c) => { const m = need(c, 'xpMeter')(); return m.seconds > 0 ? (m.lum * 3600) / m.seconds : 0; } },
+
+  // UB's login switching: the character you log in as after this one logs out.
+  // getcharacterindex: a name's place among your characters, A to Z (yours when empty), -1 when not on the account.
+  getcharacterindex: {
+    min: 1, max: 1,
+    fn: (a, c) => {
+      const want = (str(a[0]!).trim() || (c.host.player?.().name ?? '')).toLowerCase();
+      return roster(c).findIndex((n) => n.toLowerCase() === want);
+    },
+  },
+  setnextlogin: { min: 1, max: 1, fn: (a, c) => { const set = need(c, 'setNextLogin'); const name = nextLoginName(c, a[0]!); return name ? b(set(name)) : 0; } },
+  clearnextlogin: { min: 0, max: 0, fn: (_a, c) => b(need(c, 'setNextLogin')(null)) },
+
   // Logic
   iif: { min: 3, max: 3, fn: (a) => (truthy(a[0]!) ? a[1]! : a[2]!) },
   istrue: { min: 1, max: 1, fn: (a) => b(truthy(a[0]!)) },
@@ -940,10 +1227,21 @@ const F: Record<string, FnDef> = {
     },
   },
   exec: { min: 1, max: 1, fn: (a, c) => runExpr(str(a[0]!), c.host) },
+  // UB: delayexec answers an id that clearexec[id] cancels (1 when it was still waiting).
   delayexec: {
     min: 2, max: 2,
-    fn: (a, c) => { const src = str(a[1]!); parseCached(src); need(c, 'schedule')(Math.max(0, num(a[0]!, c)), () => { runExpr(src, c.host); }); return 1; },
+    fn: (a, c) => {
+      const src = str(a[1]!);
+      parseCached(src);
+      const schedule = need(c, 'schedule');
+      const d = delayedOf(c.host);
+      const id = d.next++;
+      d.live.add(id);
+      schedule(Math.max(0, num(a[0]!, c)), () => { if (d.live.delete(id)) runExpr(src, c.host); });
+      return id;
+    },
   },
+  clearexec: { min: 1, max: 1, fn: (a, c) => b(delayedOf(c.host).live.delete(int(a[0]!, c))) },
 
   // Numbers
   randint: { min: 2, max: 2, fn: (a, c) => { const lo = int(a[0]!, c), hi = int(a[1]!, c); const r = c.host.random?.() ?? Math.random(); return hi <= lo ? lo : lo + Math.floor(r * (hi - lo)); } },
@@ -986,7 +1284,10 @@ const F: Record<string, FnDef> = {
     min: 1, max: 1,
     fn: (a, c) => { const s = stopwatch(a[0]!, c); return (s.accumulatedMs + (s.startedAt === null ? 0 : c.host.now() - s.startedAt)) / 1000; },
   },
-  getunixtime: { min: 0, max: 0, fn: (_a, c) => c.host.now() / 1000 },
+  getunixtime: { min: 0, max: 0, fn: (_a, c) => (c.host.wallClock?.() ?? Date.now()) / 1000 },
+  // UB: the date as a .NET format string writes it (default "hh:mm:ss tt"); a bad format answers "".
+  getdatetimelocal: { min: 0, max: 1, fn: (a, c) => dateText(c, a, false) },
+  getdatetimeutc: { min: 0, max: 1, fn: (a, c) => dateText(c, a, true) },
   getgameticks: { min: 0, max: 0, fn: (_a, c) => ticks(c) },
   getgameyear: { min: 0, max: 0, fn: (_a, c) => derethTime(ticks(c)).year },
   getgamemonth: { min: 0, max: 0, fn: (_a, c) => derethTime(ticks(c)).month },
@@ -1006,6 +1307,9 @@ const F: Record<string, FnDef> = {
   uboptset: { min: 2, max: 2, fn: (a, c) => b(need(c, 'ubSetOption')(str(a[0]!), a[1]!)) },
   vtgetmetastate: { min: 0, max: 0, fn: (_a, c) => need(c, 'getMetaState')() },
   vtsetmetastate: { min: 1, max: 1, fn: (a, c) => { need(c, 'setMetaState')(str(a[0]!)); return 1; } },
+  // UB: the meta profile loaded, and whether the macro is running.
+  vtgetmeta: { min: 0, max: 0, fn: (_a, c) => need(c, 'metaName')() },
+  vtmacroenabled: { min: 0, max: 0, fn: (_a, c) => b(need(c, 'macroEnabled')()) },
 
   // Fellowship
   getfellowshipstatus: { min: 0, max: 0, fn: (_a, c) => b(fellow(c) !== null) },
@@ -1095,17 +1399,14 @@ const F: Record<string, FnDef> = {
 };
 
 /**
- * Documented VTank/UB functions this module deliberately does not run:
- * UB's UI-control functions (uisetvisible / uiviewvisible / uiviewexists;
- * VTank's own uigetcontrol / uisetlabel run on meta views), salvage
- * (ust*), multi-client networking, account hashes, the item-detail blob
- * spelldata/componentdata, and pack slot counts (need container capacity),
- * local/UTC date formatting with .NET format strings.
+ * Documented VTank/UB functions this module deliberately does not run: salvage
+ * through the Ust (ust*; the macro's own Salvage loot action does that),
+ * multi-client networking (netclients), the account hash (the browser never
+ * holds the Decal account's name), and the item-detail blobs spelldata /
+ * componentdata.
  */
 export const UNSUPPORTED_FUNCTIONS: readonly string[] = [
-  'uisetvisible', 'uiviewvisible', 'uiviewexists',
   'ustadd', 'ustopen', 'ustsalvage', 'netclients', 'getaccounthash', 'spelldata', 'componentdata',
-  'getfreeitemslots', 'getfreecontainerslots', 'getequippedweapontype', 'getdatetimelocal', 'getdatetimeutc',
 ];
 
 /** Every function name the evaluator implements (host support aside). */

@@ -122,8 +122,9 @@ import { rangedSpeechInRange } from './chat/RangedSpeechGate.js';
 import { PingLatencyTracker } from './network/PingLatencyTracker.js';
 import { GameActions } from './network/GameActions.js';
 import { pageDebugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
-import { AgentApi, agentApiEnabled, automationUiEnabled, fixtureReach, type AgentHost, type AgentHostObject } from './agent/AgentApi.js';
+import { AgentApi, agentApiEnabled, automationUiEnabled, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, type AgentHost, type AgentHostObject } from './agent/AgentApi.js';
 import { createHostAttack } from './agent/hostAttack.js';
+import { modeOfStance } from './agent/macro/modeGate.js';
 import type { AgentScreen, AgentSelf } from './agent/types.js';
 
 /** The agent's tap on every UseDone (its WeenieError code; 0 = done), set when the agent API is on. */
@@ -140,14 +141,26 @@ import { BackgroundTicker } from './scene/BackgroundTicker.js';
 import { installWorkerTimers, makeTimersWorker } from './scene/workerTimers.js';
 import { ClaudeControl, isTakeoverInput } from './agent/claudeControl.js';
 import { UNPAIR_FRAME, pairFrame, pairingLine, parsePairingCommand, readRelayOptIn, readRevokedBefore, relayOptInKey, writeRelayOptIn, writeRevokedBefore } from './agent/claudePairing.js';
-import { VT_COMMAND } from './agent/RoutineEngine.js';
+import { MACRO_DEFAULTS, VT_COMMAND } from './agent/RoutineEngine.js';
+import { vtankExprHost, vtankExpressions, type MetaGame, type MetaGameObject } from './agent/VtankExprHost.js';
+import { QuestTracker } from './agent/questTracker.js';
+import { metaMovePlan } from './agent/metaItemMove.js';
+import { NextLogin } from './agent/nextLogin.js';
+import { UbRuntime } from './agent/ub/ubCommands.js';
+import { createUbHost } from './agent/ub/ubHost.js';
+import { UbStore } from './agent/ub/ubSettings.js';
+import type { TinkerRow } from './agent/ub/tinker.js';
+import { checkSpell, spellCheckText } from './agent/metaSpellCheck.js';
+import { TidyPass, clearBugged } from './agent/macro/inventoryUpkeep.js';
+import { gatherLoadout } from './agent/macro/defaultLoadout.js';
+import { NavLinesOverlay, routeNavPoints } from './scene/NavLines.js';
 import { exposeDebugGlobal, readDebugGlobal, debugBag, debugGlobalsEnabled } from './utils/debugGlobals.js';
 import { resolveUrlLogin } from './launcher/urlLogin.js';
 import { urlOverridesEnabled } from './config/urlOverrides.js';
 import { bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, worldBoxName } from './launcher/worldDirectory.js';
 import { worldKeyOf } from './launcher/launcherStorage.js';
 import { EOR_ERA_ID, eraProfile, string16WireFor, type DatRole, type EraProfile } from './era/EraProfiles.js';
-import { eraClientRules, unsupportedFeatures } from './era/EraFeatures.js';
+import { eraClientRules, unsupportedFeatures, type EraFeature } from './era/EraFeatures.js';
 import { Ac1999World, ac1999ServerKey, type Ac1999PatchEvent } from './era/Ac1999World.js';
 import { eraPortalOverlay, eraStreamPlan, eraUnavailableText, forgetImportedEraFiles, planEraDats, resolveBootEra, stashEraSwitch, takeEraSwitch, type DatSource, type EraDatPlan, type EraStreamPlan, type EraSwitch } from './era/EraBoot.js';
 import { EnvCellRenderer } from './world/EnvCellRenderer.js';
@@ -328,7 +341,7 @@ import {
   tradeClosedLine, allegianceLoginLine, confirmationRequestText} from './ui/ServerMessageText.js';
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED } from './ui/WeenieErrorNotices.js';
 import { connectionLostText, characterErrorNotice, netErrorNotice, linkSampleIsDead } from './ui/ConnectionNotices.js';
-import { CharacterError } from '@ac/shared';
+import { CharacterError, runExpr } from '@ac/shared';
 import { DatLightBudget, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
 import { createViewerLight, updateViewerLight, viewerLightActive } from './effects/ViewerLight.js';
 import { setCellLighting } from './models/RetailLighting.js';
@@ -348,8 +361,8 @@ import { LastOutsideDeathState } from './session/LastOutsideDeathState.js';
 // concurrent agent this round, so they're imported by path. Resolves to the
 // same module instance as the barrel under vite, vitest, and tsc.
 import { buildCharacterDelete, buildCharacterRestore } from '../../network/src/MessageSerializer.js';
-import { buildFriendsCommand1999, friendsCommand1999Plan, setString16Wire } from '@ac/network';
-import { MAP_TELEPORT_ORIGIN } from './ui/MapMarkers.js';
+import { ABSENT_1999, buildFriendsCommand1999, friendsCommand1999Plan, setString16Wire } from '@ac/network';
+import { CELL_LENGTH, MAP_TELEPORT_ORIGIN, mapCoordinateText, mapCoordsOfCell } from './ui/MapMarkers.js';
 import { tradeReceiveContainsIn } from './inventory/TradeReceiveContainId.js';
 import { buildSpellExamineModel, inqSkillLevel, spellRangeMeters } from './ui/examine/SpellExamine.js';
 import { TalkFocus } from './ui/ChatTalkFocus.js';
@@ -380,7 +393,7 @@ const LOGIN_COMPLETE_GRACE_MS = 15_000;
 const quietAppraisals = new Set<number>();
 /** Records a quiet appraisal's examine view for the agent (set when the agent starts). */
 let recordQuietExamine: ((view: Parameters<GameUI['showExaminationWindow']>[0]) => void) | null = null;
-const agentAppraisals = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[] }>();
+const agentAppraisals = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[]; spellIds: number[]; activeSpellIds: number[] }>();
 import { openStreamingDats, type StreamScope, type StreamingDats } from './dat/streaming/StreamingDats.js';
 import { FetchPriority, fileKey, splitFileKey } from './dat/streaming/DatStore.js';
 import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
@@ -3215,6 +3228,8 @@ async function main() {
     return false;
   }
   let pendingTeleport = false;  // Set by PlayerTeleport, consumed by next UpdatePosition
+  /** The server's latest UpdatePosition echo of us (the agent's checkpoints wait on it; AgentHost.serverSelfPosition). */
+  let serverSelfEcho: { cell: number; x: number; y: number; z: number; at: number } | null = null;
   /**
    * BUG.teleport-leaves-stale-objects — is a full cell id loaded for the
    * viewer (CellManager::ChangePosition: the landscape grid of
@@ -3956,6 +3971,12 @@ async function main() {
   let enterCombatModeAction: ((mode: CombatMode) => void) | null = null;
   /** ClientCombatSystem::UseTime's pendingCombatMode step (set with sendChangeCombatMode). */
   let pendingCombatModeTick: (() => void) | null = null;
+  /**
+   * The combat mode the server last put the player in: the stance of its movement for us, or its
+   * CombatMode property (the macro's combat-mode gate, agent/macro/modeGate.ts). Undefined until it says.
+   */
+  let serverCombatMode: AgentSelf['combatMode'] | undefined;
+  const serverModeOf = (m: CombatMode): AgentSelf['combatMode'] => ({ [CombatMode.NonCombat]: 'peace', [CombatMode.Melee]: 'melee', [CombatMode.Missile]: 'missile', [CombatMode.Magic]: 'magic' } as Record<number, AgentSelf['combatMode']>)[m] ?? 'unknown';
   /** CPlayerSystem::loggingOff (session/LogoutFlow.ts DeferredLogOff) and its UseTime check. */
   const deferredLogOff = new DeferredLogOff();
   let deferredLogOffTick: (() => void) | null = null;
@@ -4581,6 +4602,14 @@ async function main() {
   // tracker; see OpenContainerTracker.ts for the full citations.
   let openContainerGuid = 0;
   const openContainer = new OpenContainerTracker();
+  // UB's hascorpsebeenopenedbyme / getcorpsesunopenedbyme: every container whose contents the server showed us.
+  const metaOpenedContainers = new Set<number>();
+  // UB's setnextlogin: the character entered at the next character select (agent/nextLogin.ts).
+  const metaNextLogin = new NextLogin();
+  // UtilityBelt's /ub commands, aliases, game events and quest tracker (agent/ub/ubCommands.ts), once the agent runs.
+  let ubRuntime: UbRuntime | null = null;
+  // UB's /ub clearbugged: the server's last answer to an identify, per item.
+  const metaIdentifyAnswers = new Map<number, { success: boolean; at: number }>();
   // CORE.17.k.c.a — the client's ONE pending inventory request (retail's
   // static ACCWeenieObject::prevRequest / prevRequestObjectID, set by the
   // UIAttempt* entry points after CM_Inventory::Event_*), recorded when a
@@ -5465,6 +5494,7 @@ async function main() {
     playerState.inventory.clear();
     playerState.equipment.clear();
     loginCompleteNotifier.reset(); // a new character session starts from scratch
+    questTracker.reset();
     // BUG.item-shortcut-restore-runs-before-inventory — unresolved deferred
     // toolbar bindings are per-character; drop them so a switch doesn't
     // resolve the old character's shortcut against the new one's guids.
@@ -6907,12 +6937,15 @@ async function main() {
   // ── Wire salvage (Ust/tinkering tool) callback ────────────────────
   // ACE GameActionCreateTinkeringTool wire format: toolGuid u32 + itemCount u32 + itemGuid[itemCount] u32.
   // Triggers Player_Crafting.HandleSalvaging server-side → SalvageOperationsResult reply.
+  // The automation's salvaging (VTank's Salvage loot action, CombineSalvage) sends the same action.
+  const sendSalvage = (toolGuid: number, itemGuids: number[]): boolean => {
+    if (!sendGameAction) return false;
+    sendGameAction(GameActionType.CreateTinkeringTool, buildCreateTinkeringToolPayload(toolGuid, itemGuids));
+    console.log(`[AC] Sent CreateTinkeringTool (salvage): tool=0x${toolGuid.toString(16)} items=${itemGuids.length}`);
+    return true;
+  };
   gameUI.setSalvageCallbacks({
-    onSalvage: (toolGuid: number, itemGuids: number[]) => {
-      if (!sendGameAction) return;
-      sendGameAction(GameActionType.CreateTinkeringTool, buildCreateTinkeringToolPayload(toolGuid, itemGuids));
-      console.log(`[AC] Sent CreateTinkeringTool (salvage): tool=0x${toolGuid.toString(16)} items=${itemGuids.length}`);
-    },
+    onSalvage: (toolGuid: number, itemGuids: number[]) => { sendSalvage(toolGuid, itemGuids); },
   });
 
   // ── Wire attribute/skill raise callbacks ────────────────────────
@@ -7484,6 +7517,16 @@ async function main() {
       loginCompleteOutstanding = false;
       aceConnection.sendMessage(buildLoginComplete(++aceActionSequence), GameMessageGroup.SecureWeenieQueue);
       console.log('[AC] Sent LoginComplete (teleport animation finished)');
+      questTracker.loginComplete(String(aceCharGuid ?? worldCharacterName ?? ''));
+    },
+  });
+  // UtilityBelt's quest list for the meta quest functions: /myquests asked quietly once per character (agent/questTracker.ts).
+  const questTracker = new QuestTracker({
+    send: (text) => {
+      if (!sendGameAction) return false;
+      const w = new BinaryWriter(64);
+      w.writeString16(text);
+      return sendGameAction(GameActionType.Talk, w.toBuffer());
     },
   });
 
@@ -7734,6 +7777,7 @@ async function main() {
     // no style on a combat-mode change). A weapon-table guess made a Lugian
     // Hammer, missing from weenie-combat-styles.json, HandCombat: no swings.
     serverObjectManager.onLocalPlayerStyle = (stanceId) => {
+      serverCombatMode = modeOfStance(stanceId) ?? serverCombatMode;
       if (animController && animController.stanceId !== stanceId) animController.setStance(stanceId);
     };
     serverObjectManager.onLocalPlayerMovement = (type, move) => {
@@ -8573,6 +8617,8 @@ async function main() {
       onUpdatePosition: (data: UpdatePositionData) => {
         // Track sequence numbers from our own position corrections
         if (aceCharGuid !== null && data.guid === aceCharGuid && movementSync) {
+          // Not applied to us (below), but kept: where the server has us (VirindiTank's checkpoints wait for it).
+          serverSelfEcho = { cell: data.landblock >>> 0, x: data.x, y: data.y, z: data.z, at: performance.now() };
           // CORE.2 — retail self-position gate. The decompiled retail client
           // (SmartBox::HandleReceivedPosition @ 00453fd0) applies a received
           // position to the SELF player ONLY when the ObjectForcePosition
@@ -8947,6 +8993,8 @@ async function main() {
         // as sent; Broadcast (0, the ACE default — the login welcome,
         // WorldManager.cs:268) sits on the table's green default. The old
         // resolveChatType(0 -> System) remap here painted it grey.
+        // A quiet /myquests answer (the quest tracker's) never reaches the chat.
+        if (questTracker.onServerLine(data.message)) return;
         gameUI.addSystemMessage(data.message, chatColorFor(data.chatType), data.chatType);
 
         // BUG.login-position-restore-unreachable-positiontypes — ACE never
@@ -9200,6 +9248,7 @@ async function main() {
         const initialCombatMode = desc.propertiesInt.get(PropertyInt.CombatMode);
         if (initialCombatMode !== undefined) {
           const serverMode = initialCombatMode as CombatMode;
+          serverCombatMode = serverModeOf(serverMode);
           combatController.setCombatMode(serverMode);
           gameUI.hudState.combatMode = serverMode;
           updateWorldCursor(); // GAP.84
@@ -9738,6 +9787,7 @@ async function main() {
         // for Missile mode), it sends NonCombat — letting us mirror server truth.
         if (data.key === PropertyInt.CombatMode) {
           const serverMode = val as CombatMode;
+          serverCombatMode = serverModeOf(serverMode);
           combatController.setCombatMode(serverMode);
           gameUI.hudState.combatMode = serverMode;
           updateWorldCursor(); // GAP.84
@@ -10478,12 +10528,15 @@ async function main() {
         // gmExaminationUI::SetAppraiseInfo @ 004adae0 — the awaited
         // appraisal releases the busy count (GAP.client-busy-cursor-count).
         examineAwait.appraisalReceived(data.guid);
+        metaIdentifyAnswers.set(data.guid >>> 0, { success: data.success !== false, at: performance.now() });
+        if (metaIdentifyAnswers.size > 500) metaIdentifyAnswers.delete(metaIdentifyAnswers.keys().next().value!);
         if (agentAppraisals.size > 500) agentAppraisals.delete(agentAppraisals.keys().next().value!);
         agentAppraisals.set(data.guid >>> 0, {
           int: Object.fromEntries(data.propertiesInt ?? []), float: Object.fromEntries(data.propertiesFloat ?? []),
           string: Object.fromEntries(data.propertiesString ?? []), bool: Object.fromEntries(data.propertiesBool ?? []),
           did: Object.fromEntries(data.propertiesDataID ?? []),
           spells: (data.spellBook ?? []).map((id) => spellTable?.spells.get(id)?.name ?? '').filter(Boolean),
+          spellIds: [...(data.spellBook ?? [])], activeSpellIds: [...(data.activeEnchantments ?? [])],
         });
         // Opportunistically cache the item's setupId — gives future
         // equipped-item viz (UI.56 placeholder → real mesh) a path to
@@ -11644,6 +11697,7 @@ async function main() {
       // ── ViewContents (opening a container — corpse, chest, etc.) ──
       onViewContents: (data) => {
         const realContainerGuid = data.containerGuid;
+        metaOpenedContainers.add(realContainerGuid >>> 0);
         // CORE.17.k.c.a — ClientUISystem::OnViewContents @ 00565870 RecordResponse(container) unless the pending request is a pick-up of it.
         if (!(inventoryRequests.pendingObjectId === realContainerGuid && inventoryRequests.pendingRequest === InventoryRequest.PickUp)) {
           inventoryRequests.respond(realContainerGuid);
@@ -13202,6 +13256,8 @@ async function main() {
       // AGENT.vtank-window: VirindiTank's /vt commands, handled by the automation window's model.
       // AGENT.hosted-mcp-connector: /automation pair|unpair|claude connects Claude (its own allowlist, on the bridge).
       if (pairingChat?.(message)) return;
+      // UtilityBelt's aliases (agent/ub/aliases.ts), where the automation is (as /ub itself): an "eat" alias keeps the line.
+      if (gameUI.automationAvailable && ubRuntime?.onChatSend(message)) return;
       if (gameUI.automationAvailable && VT_COMMAND.test(message)) { gameUI.automationCommand(message); return; }
       if (gameUI.automationAvailable && isAutomationCommand(message)) { if (/\bpanel\s*$/i.test(message)) gameUI.toggleAutomationPanel(); else gameUI.toggleAutomationWindow(); return; }
       retailCommands.onChatCommand(message, gameUI.commandSourceWindowId ?? MAIN_CHAT_WINDOW_ID);
@@ -15542,6 +15598,7 @@ async function main() {
         wielderId: o.wielderId || undefined, containerId: (o as { containerId?: number }).containerId || undefined,
         palettes: o.subPalettes?.map((p) => ({ id: p.paletteId >>> 0, offset: p.offset, length: p.length })),
         physicsState: o.physicsState,
+        ...(o.uiEffects ? { uiEffects: o.uiEffects } : {}),
         };
       };
       const carried = (): Set<number> => new Set([...playerState.inventory.getAll().map((i) => i.id >>> 0), ...playerState.equipment.getAll().map((i) => i.id >>> 0)]);
@@ -15582,10 +15639,20 @@ async function main() {
         const services: MovementServices = { ...movementServices, creatureObstacles: fixtures, slide: { slidingNormal: null } };
         return { inDungeon, toWorld, toGlobal, services };
       };
+      // Automation's first action of a session (the macro or an agent acting straight after login, with no movement
+      // key pressed yet) goes after one standing MoveToState, the one a teleport arrival sends
+      // (CommandInterpreter::PlayerTeleported). ClassicACE's run/walk check dereferences the player's
+      // CurrentMoveToState when the server moves the player, and it is null until the first MoveToState: a
+      // ranged first action, or the macro's first wield and switch to magic mode, killed the server (docs/dark-majesty-support.md). A player's own input is left as
+      // retail sends it; this only covers what automation does on the player's behalf.
+      const agentPrimeMoveState = () => {
+        if (movementSync && gameStarted && movementSync.moveToStatesSent === 0) movementSync.sendMovementEventNow(syncMovementStateNow(), syncPositionNow());
+      };
       const agentHost: AgentHost = {
         now: () => performance.now(),
         wallClock: () => Date.now(),
         screen: () => tabScreen(),
+        serverSelfPosition: () => serverSelfEcho,
         self: () => {
           const f = movementSync?.lastSentFrame;
           if (!aceCharGuid || !f || !f.cellId) return null;
@@ -15596,6 +15663,7 @@ async function main() {
             ...gameUI.hudState.shownVitals(),
             cell: f.cellId >>> 0, x: f.x, y: f.y, z: f.z, yaw: cameraController.playerYaw,
             combatMode: modeName(), dead: playerState.isDead,
+            ...(serverCombatMode ? { serverMode: serverCombatMode } : {}),
             pyreals: playerState.coinValue,
             // The inventory strip's burden (server EncumbranceVal / capacity, gmBackpackUI::SetLoadLevel).
             burden: gameUI['burdenMax'] ? `${Math.round((gameUI['burdenCurrent'] / gameUI['burdenMax']) * 100)}% (${gameUI['burdenCurrent']}/${gameUI['burdenMax']})` : undefined,
@@ -15605,6 +15673,8 @@ async function main() {
         // The effects windows' list (fed by the server's Magic update events). PlayerState's
         // EnchantmentManager.getAll() is never filled (the registry is), so reading it showed no buffs ever.
         activeSpells: () => gameUI.agentActiveEnchantments().map((e) => ({ spellId: e.spellId, name: e.name, remaining: e.remaining, beneficial: e.beneficial })),
+        // VTank's buff items wait out their shared cooldown (the item's SharedCooldown → cooldown enchantment 0x8000 + id).
+        cooldownRemaining: (id) => gameUI.agentCooldownRemaining(id),
         freePackSlots: () => Math.max(0, playerState.itemsCapacity - playerState.inventory.getAll().filter((i) => (i.containerId === aceCharGuid || i.containerId === 0) && !playerState.equipment.getAll().some((e) => e.id === i.id)).length),
         burdenPercent: () => (gameUI['burdenMax'] ? (gameUI['burdenCurrent'] / gameUI['burdenMax']) * 100 : 0),
         cameraBoom: () => {
@@ -15617,6 +15687,8 @@ async function main() {
         objects: function* () { for (const o of serverObjectManager?.getAllObjects().values() ?? []) if (!o.outOfWorld && !((o.physicsState ?? 0) & AcePhysicsState.Missile)) yield hostObject(o); },
         object: (guid) => { const o = serverObjectManager?.getObject(guid); return o ? hostObject(o) : null; },
         lineOfFire: (guid) => serverObjectManager?.lineOfFire(guid) ?? null,
+        // Room for a summoned pet to appear (the automation's Summon Pets; VirindiTank's 3 m check).
+        roomAhead: (heading, metres) => serverObjectManager?.roomAhead(heading, metres) ?? null,
         cellSees: (from, to) => {
           if ((from >>> 16) !== (to >>> 16) || (from & 0xffff) < 0x100 || (to & 0xffff) < 0x100) return null;
           if (from === to) return true;
@@ -15649,6 +15721,12 @@ async function main() {
             ...(ammoOf(i.id >>> 0) ? { ammoType: ammoOf(i.id >>> 0) } : {}),
             ...(i.weenieClassId ? { wcid: i.weenieClassId } : {}),
             ...(serverObjectManager?.getObject(i.id >>> 0)?.uiEffects ? { uiEffects: serverObjectManager.getObject(i.id >>> 0)!.uiEffects } : {}),
+            // Salvaging (VTank's Salvage loot action and CombineSalvage): the public description's material,
+            // units, workmanship (a bag's average) and Retained bit.
+            ...(i.materialType ? { materialType: i.materialType } : {}),
+            ...(i.structure ? { structure: i.structure } : {}),
+            ...(i.workmanship ? { workmanship: i.workmanship } : {}),
+            ...(i.objectDescFlags !== undefined ? { objectDescFlags: i.objectDescFlags } : {}),
           }));
           return [...worn, ...held];
         },
@@ -15682,8 +15760,16 @@ async function main() {
           return playerState.inventory.getAll().map((i) => {
             const o = serverObjectManager?.getObject(i.id >>> 0);
             const container = i.containerId === aceCharGuid || i.containerId === 0 ? 0 : sidePackGuids.indexOf(i.containerId);
-            return { guid: i.id >>> 0, name: i.name, packSlot: container < 0 ? -1 : container, stack: i.stackSize || 1, maxStack: o?.maxStackSize ?? 1, wcid: o?.weenieClassId ?? 0, isPack: heldIsContainer(i), equipped: worn.has(i.id >>> 0) };
+            return { guid: i.id >>> 0, name: i.name, packSlot: container < 0 ? -1 : container, stack: i.stackSize || 1, maxStack: o?.maxStackSize ?? 1, wcid: o?.weenieClassId ?? 0, isPack: heldIsContainer(i), equipped: worn.has(i.id >>> 0), burden: i.burden ?? o?.burden };
           });
+        },
+        // A shift-drag of part of a stack into the main pack (metaItemMove's split), as UB's actiontrysplit.
+        splitStack: (guid, amount) => {
+          const it = playerState.inventory.getItem(guid);
+          if (!it || !aceCharGuid || !placementReady()) return false;
+          const asMove = (i: { id: number; weenieClassId: number; stackSize: number; maxStackSize: number }) => ({ id: i.id >>> 0, wcid: i.weenieClassId, stack: i.stackSize || 1, maxStack: i.maxStackSize || 1 });
+          const inside = playerState.inventory.getAll().filter((i) => i.containerId === 0 || i.containerId === aceCharGuid);
+          return runPlacement(guid, metaMovePlan(asMove(it), aceCharGuid, 0, amount, false, inside.map(asMove)), 'split');
         },
         placeItem: (guid, to) => {
           if ('packSlot' in to) return gameUI.agentItemListDrop({ kind: 'world', guid }, { list: 'packs', packSlot: to.packSlot });
@@ -15709,6 +15795,8 @@ async function main() {
         spellTableData: () => spellTable ?? null,
         // The era's recipe table, from that era's world data: end of retail's ACE world, Dark Majesty's ClassicACE
         // world (the classic eras), 1999's AC1999 world (tools/build-craft-tables.ts). Split into its own chunk.
+        // The salvage panel's own action (CreateTinkeringTool); none where the era has no salvaging (1999: EraFeatures).
+        ...(eraUnsupported.has('salvage') ? {} : { salvage: (toolGuid: number, itemGuids: number[]) => sendSalvage(toolGuid, itemGuids) }),
         craftTable: async () => {
           const k = activeEra.login.protocol === 'ac1999' ? 'ac1999' : activeEra.id === EOR_ERA_ID ? 'eol' : 'dm';
           const mod = k === 'ac1999' ? await import('./agent/macro/crafts/ac1999.ts') : k === 'eol' ? await import('./agent/macro/crafts/eol.ts') : await import('./agent/macro/crafts/dm.ts');
@@ -15716,11 +15804,25 @@ async function main() {
         },
         // The era's monster table (Auto's weak element, the streak finisher's max health), the same per-era
         // choice from that era's world data (tools/build-monster-tables.ts). Split into its own chunk.
+        // UseSpecialAmmo's kinds (Raider, SCurrency) by name, from the era's world data (tools/build-ammo-tables.ts).
+        specialAmmoTable: async () => {
+          const k = activeEra.login.protocol === 'ac1999' ? 'ac1999' : activeEra.id === EOR_ERA_ID ? 'eol' : 'dm';
+          const mod = k === 'ac1999' ? await import('./agent/macro/specialAmmo/ac1999.ts') : k === 'eol' ? await import('./agent/macro/specialAmmo/eol.ts') : await import('./agent/macro/specialAmmo/dm.ts');
+          return JSON.parse(mod.default) as Array<[string, number]>;
+        },
         monsterTable: async () => {
           const k = activeEra.login.protocol === 'ac1999' ? 'ac1999' : activeEra.id === EOR_ERA_ID ? 'eol' : 'dm';
           const mod = k === 'ac1999' ? await import('./agent/macro/monsters/ac1999.ts') : k === 'eol' ? await import('./agent/macro/monsters/eol.ts') : await import('./agent/macro/monsters/dm.ts');
-          return JSON.parse(mod.default) as Array<[string, string, number]>;
+          return JSON.parse(mod.default) as Array<[string, string, number, number, string]>;
         },
+        // The era's drains and martyrs (Drain Auto's plan), from that era's spell data (tools/build-drain-tables.ts).
+        drainTable: async () => {
+          const k = activeEra.login.protocol === 'ac1999' ? 'ac1999' : activeEra.id === EOR_ERA_ID ? 'eol' : 'dm';
+          const mod = k === 'ac1999' ? await import('./agent/macro/drains/ac1999.ts') : k === 'eol' ? await import('./agent/macro/drains/eol.ts') : await import('./agent/macro/drains/dm.ts');
+          return JSON.parse(mod.default) as Array<[number, 'd' | 'm' | 'r', number, number, number]>;
+        },
+        // Your int properties as the server last sent them (the macro reads SummoningMastery for its pets).
+        charInt: (id) => playerState.serverIntProps.get(id),
         // The formula the server charges (ACE SpellFormula.GetPlayerFormula / GetCurrentFormula): personalized for
         // the account, or scarabs and tapers with the school's foci or Infused augmentation — what the cast
         // pre-check walks (SpellComponentCheck). The macro counts the pack against it (VTank BuffCastability).
@@ -15737,19 +15839,20 @@ async function main() {
           void worldStreamingDats?.pendingFor(() => appearanceManager.loadPaletteColors(paletteId));
           return null;
         },
-        openContainer: () => (openContainerGuid ? { guid: openContainerGuid >>> 0, items: openContainer.items().map((i) => ({ guid: i.guid >>> 0, name: i.name })) } : null),
+        openContainer: () => (openContainerGuid ? { guid: openContainerGuid >>> 0, items: openContainer.items().map((i) => ({ guid: i.guid >>> 0, name: i.name, ...(i.uiEffects ? { uiEffects: i.uiEffects } : {}) })) } : null),
         dialogs: () => gameUI.agentDialogs(),
         book: () => gameUI.agentBook(),
         bookPage: (index) => gameUI.agentBookPage(index),
         answerDialog: (label, index) => gameUI.agentAnswerDialog(label, index),
         busy: () => busyCount.busy || inventoryRequests.pending !== null || teleportBusy.value,
         select: (guid) => { selectGuid(guid); return selectedObjectId() === guid; },
-        use: (guid) => { if (!sendUseAction || (!serverObjectManager?.getObject(guid) && !inventoryItem(guid))) return false; sendUseAction(guid); return true; },
-        useWithTarget: (src, tgt) => { if (!sendGameAction) return false; sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(src, tgt)); return true; },
-        setCombatMode: (mode) => sendChangeCombatMode({ peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode]),
-        attack: (guid, power, height) => agentHostAttack.attack(guid, power, height),
+        use: (guid) => { if (!sendUseAction || (!serverObjectManager?.getObject(guid) && !inventoryItem(guid))) return false; agentPrimeMoveState(); sendUseAction(guid); return true; },
+        useWithTarget: (src, tgt) => { if (!sendGameAction) return false; agentPrimeMoveState(); sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(src, tgt)); return true; },
+        setCombatMode: (mode) => { agentPrimeMoveState(); return sendChangeCombatMode({ peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode]); },
+        attack: (guid, power, height) => { agentPrimeMoveState(); agentHostAttack.attack(guid, power, height); },
         attackHeight: () => gameUI.getCombatAttackHeight(),
         attackPower: () => gameUI.getCombatPowerLevel(),
+        setAttackPower: (p) => gameUI.adjustCombatPowerLevel(p - gameUI.getCombatPowerLevel()),
         setAttackHeight: (h) => gameUI.setCombatAttackHeight(h),
         attackPending: () => agentHostAttack.pending(),
         cancelAttack: () => { sendGameAction?.(GameActionType.CancelAttack, new Uint8Array(0)); },
@@ -15761,21 +15864,23 @@ async function main() {
           // A target the client could not select (it is gone) is no cast: the spell bar would cast at whatever
           // is selected, yourself included ("You cannot cast this spell upon yourself", 2026-10-10).
           if (target !== null && (selectedObjectId() >>> 0) !== (target >>> 0)) return false;
+          agentPrimeMoveState();
           gameUI['spellCallbacks'].onCastSpell?.(index);
           return true;
         },
         chat: (text) => gameUI.callbacks.onChatSend?.(text),
         key: (code, down) => { if (down) cameraController.simulateKeyDown(code); else cameraController.simulateKeyUp(code); },
         setYaw: (yaw) => { cameraController.playerYaw = yaw; cameraController.cameraYawOffset = 0; },
-        pickUp: (guid) => placeInBackpack(guid),
+        pickUp: (guid) => { agentPrimeMoveState(); return placeInBackpack(guid); },
         drop: (guid) => {
           if (!sendGameAction || !playerState.inventory.getItem(guid)) return false;
+          agentPrimeMoveState();
           const p = new BinaryWriter(4);
           p.writeUInt32(guid);
           return sendGameAction(GameActionType.DropItem, p.toBuffer());
         },
-        give: (target, item, amount) => { if (!sendGameAction) return false; sendGameAction(GameActionType.GiveObjectRequest, buildGiveObjectRequestPayload(target, item, amount)); return true; },
-        wield: (guid) => { const it = playerState.inventory.getItem(guid); return it ? attemptAutoWield(it) : false; },
+        give: (target, item, amount) => { if (!sendGameAction) return false; agentPrimeMoveState(); sendGameAction(GameActionType.GiveObjectRequest, buildGiveObjectRequestPayload(target, item, amount)); return true; },
+        wield: (guid) => { const it = playerState.inventory.getItem(guid); if (!it) return false; agentPrimeMoveState(); return attemptAutoWield(it); },
         appraise: (guid, quiet) => {
           examined.delete(guid);
           if (quiet) quietAppraisals.add(guid >>> 0);
@@ -15912,6 +16017,120 @@ async function main() {
         },
       };
       const agentApi = new AgentApi(agentHost);
+      // VirindiTank / UtilityBelt meta expressions over the client's own state (docs/vtank-parity-gaps.md §5).
+      const metaObject = (id: number): MetaGameObject | null => {
+        const worn = playerState.equipment.getAll().find((e) => e.id >>> 0 === id);
+        const held = worn ?? playerState.inventory.getItem(id);
+        const o = serverObjectManager?.getObject(id);
+        if (!held && !o) return null;
+        const inPack = held && !worn ? (held.containerId === 0 ? aceCharGuid ?? 0 : held.containerId) : (o as { containerId?: number } | undefined)?.containerId ?? 0;
+        return {
+          id, name: held?.name ?? o?.name ?? '', itemType: held?.itemType ?? o?.itemType ?? 0, flags: held?.objectDescFlags ?? o?.objectDescFlags ?? 0,
+          wcid: held?.weenieClassId || o?.weenieClassId || 0, stack: held?.stackSize || o?.stackSize || 1,
+          ...(inPack ? { containerId: inPack >>> 0 } : {}),
+          ...(worn ? { equipMask: worn.slot } : {}),
+        };
+      };
+      const metaGame: MetaGame = {
+        object: metaObject,
+        carried: () => [...new Set([...playerState.equipment.getAll(), ...playerState.inventory.getAll()].map((i) => i.id >>> 0))].map(metaObject).filter((o): o is MetaGameObject => !!o),
+        charProp: (kind, id) => {
+          if (kind === 'int') return playerState.serverIntProps.get(id);
+          if (kind === 'quad') return id === 1 ? Number(playerState.totalXp) : id === 2 ? Number(playerState.availableXp) : id === 6 ? Number(playerState.availableLuminance) : id === 7 ? Number(playerState.maximumLuminance) : undefined;
+          if (kind === 'string' && id === 1) return worldCharacterName ?? undefined;
+          return undefined;
+        },
+        attribute: (id) => (id >= 1 && id <= 6 ? { base: playerState.attributes.getCurrent(id as AttributeId), buffed: playerState.getAttributeCurrent(id as AttributeId) } : null),
+        vitae: () => Math.round((1 - playerState.vitae.vitaePenalty) * 100),
+        burden: () => (gameUI['burdenMax'] ? Math.round((gameUI['burdenCurrent'] / gameUI['burdenMax']) * 100) : 0),
+        busy: () => inventoryRequests.pendingObjectId !== 0,
+        worldName: () => launcherWorldName ?? '',
+        openContainerId: () => openContainerGuid || null,
+        containerCapacity: (id) => {
+          if (id === aceCharGuid) return { items: playerState.itemsCapacity, containers: playerState.containersCapacity };
+          const cap = playerState.inventory.getItem(id)?.itemsCapacity ?? serverObjectManager?.getObject(id)?.itemsCapacity;
+          return cap ? { items: cap, containers: serverObjectManager?.getObject(id)?.containersCapacity ?? 0 } : null;
+        },
+        moveItem: (id, containerId, slot, amount, join) => {
+          const it = playerState.inventory.getItem(id) ?? playerState.equipment.getAll().find((e) => e.id >>> 0 === id);
+          if (!it || !placementReady()) return false;
+          const asMove = (i: { id: number; weenieClassId: number; stackSize: number; maxStackSize: number }) => ({ id: i.id >>> 0, wcid: i.weenieClassId, stack: i.stackSize || 1, maxStack: i.maxStackSize || 1 });
+          const inside = containerId === aceCharGuid ? playerState.inventory.getAll().filter((i) => i.containerId === 0 || i.containerId === aceCharGuid) : playerState.inventory.getByContainer(containerId);
+          return runPlacement(id, metaMovePlan(asMove(it), containerId, slot, amount, join, inside.map(asMove)), 'meta move');
+        },
+        cooldownRemaining: (cid) => gameUI.agentCooldownRemaining(cid),
+        corpseOpened: (id) => metaOpenedContainers.has(id >>> 0),
+        gameTicks: () => skybox.gameClock ?? null,
+        objectVital: (id, v) => {
+          const f = gameUI.agentFellows().find((x) => x.guid === id);
+          const x = f ? (v === 1 ? f.health : v === 2 ? f.stamina : v === 3 ? f.mana : null) : null;
+          return x ? x.cur : null;
+        },
+        pasteChat: (text) => {
+          const input = document.getElementById('chat-input') as HTMLInputElement | null;
+          if (!input) return false;
+          input.value = text.replace(/[\x00-\x1f]/g, '');
+          input.focus();
+          input.setSelectionRange(input.value.length, input.value.length);
+          return true;
+        },
+        viewExists: (v) => gameUI.metaViewExists(v),
+        viewVisible: (v) => gameUI.metaViewVisible(v),
+        setViewVisible: (v, c, on) => gameUI.setMetaViewControlVisible(v, c, on),
+        characterNames: () => gameUI.characterSelectList().map((c) => c.name),
+        setNextLogin: (name) => metaNextLogin.set(name),
+        quest: (name) => questTracker.quest(name),
+        refreshingQuests: () => questTracker.isRefreshing(),
+        // The appraisal's spell book: the item's own spells and the enchantments on it (sent with 0x80000000, AppraiseInfo.EnchantmentMask).
+        objectSpellIds: (id, activeOnly) => {
+          const a = agentAppraisals.get(id >>> 0);
+          return a ? [...new Set(activeOnly ? a.activeSpellIds : [...a.spellIds, ...a.activeSpellIds])] : [];
+        },
+      };
+      const metaHost = vtankExprHost(agentApi, agentApi.routine, (text) => agentApi.routine.echo(text), metaGame);
+      // UtilityBelt's /ub (docs/vtank-parity-gaps.md §11): every action through the agent API; what it lacks, here.
+      ubRuntime = new UbRuntime(createUbHost(agentApi, {
+        print: (text) => gameUI.addSystemMessage(`[UB] ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System),
+        chat: (line) => gameUI.callbacks.onChatSend?.(line),
+        vitae: () => metaGame.vitae?.() ?? 100,
+        position: (guid) => {
+          const o = agentHost.object(guid);
+          if (!o || !o.cell) return null;
+          const indoors = (o.cell & 0xffff) >= 0x100;
+          const g = agentToGlobal(o.cell, o.x, o.y);
+          return { cell: `0x${(o.cell >>> 0).toString(16).toUpperCase().padStart(8, '0')}`, x: o.x, y: o.y, z: o.z, coords: indoors ? null : mapCoordinateText(mapCoordsOfCell(Math.floor(g.x / CELL_LENGTH), Math.floor(g.y / CELL_LENGTH))) };
+        },
+        openContainer: () => {
+          if (!openContainerGuid) return null;
+          const name = serverObjectManager?.getObject(openContainerGuid)?.name ?? '';
+          return { guid: openContainerGuid >>> 0, name, corpse: /^Corpse of /i.test(name), items: openContainer.items().map((i) => ({ guid: i.guid >>> 0, name: i.name })) };
+        },
+        useNow: (guid) => agentHost.use(guid),
+        exitGame: () => gameUI.callbacks.onExitGame?.(),
+        evaluate: (expr) => runExpr(expr, metaHost),
+        vars: (scope) => metaHost.listVars?.(scope) ?? [],
+        setVar: (name, value) => metaHost.setVar('var', name, value),
+        freeSlots: () => {
+          const inMain = playerState.inventory.getAll().filter((i) => (i.containerId === 0 || i.containerId === aceCharGuid) && !heldIsContainer(i)).length;
+          return Math.max(0, playerState.itemsCapacity - inMain);
+        },
+        lootSets: () => agentApi.routine.loadedProfile?.lootSets ?? null,
+        playerOption: (code) => (currentCharacterOptions1 === null || currentCharacterOptions2 === null ? undefined : characterOptionIsSet(code, currentCharacterOptions1, currentCharacterOptions2)),
+        // The Options panel's own toggle: the server's SetCharacterOption, the mirrors, the panel and its local effects.
+        setPlayerOption: (code, on) => { gameUI.callbacks.onCharacterOptionToggle?.(code, on); applyCharacterOptionLocally(code, on); return true; },
+        characters: () => gameUI.characterSelectList().map((c) => c.name),
+        setNextLogin: (name) => { metaNextLogin.set(name); },
+        raiseCosts: (stat, steps) => gameUI.agentRaiseCosts(stat, steps),
+        charInt: (id) => playerState.serverIntProps.get(id),
+        eraLacks: (f) => (unsupportedFeatures(activeEra).has(f as EraFeature) ? (ABSENT_1999 as Record<string, { note: string }>)[f]?.note ?? f : null),
+        // The era's tinkering table (tools/build-tinker-tables.ts), its own chunk like the craft tables.
+        tinkerTable: async () => {
+          const k = activeEra.login.protocol === 'ac1999' ? 'ac1999' : activeEra.id === EOR_ERA_ID ? 'eol' : 'dm';
+          const mod = k === 'ac1999' ? await import('./agent/ub/tinker/ac1999.ts') : k === 'eol' ? await import('./agent/ub/tinker/eol.ts') : await import('./agent/ub/tinker/dm.ts');
+          return JSON.parse(mod.default) as TinkerRow[];
+        },
+      }), new UbStore(() => (worldCharacterName ? { server: launcherWorldName ?? '', character: worldCharacterName } : null), () => { try { return globalThis.localStorage ?? null; } catch { return null; } }), questTracker);
+      agentApi.routine.expressions = vtankExpressions(metaHost);
       relaySurface = agentApi.surface() as unknown as Record<string, unknown>;
       // ac_status also says who has control (the tab's ClaudeControl).
       relaySurface.status = () => ({ ...agentApi.status(), control: claudeControl.paused ? 'paused' : claudeControl.control });
@@ -15929,7 +16148,8 @@ async function main() {
       agentUseDoneTap = (code) => agentApi.pushUseDone(code, Object.entries(WeenieError).find(([, v]) => v === code)?.[0] ?? `0x${code.toString(16)}`, weenieErrorText(code));
       // The agent's steering tick rides the frame step (the rAF frame, or the background beat when the
       // browser stops frames), not a page timer that a covered window throttles to once a second.
-      agentFrameTick = () => agentApi.tick();
+      // UtilityBelt's timers, AutoVendor-on-open, game events and login quest read run only where /ub does.
+      agentFrameTick = () => { agentApi.tick(); if (gameUI.automationAvailable) ubRuntime?.tick(); };
       // AGENT.automation-panel — the player's surface over the same engine: the Automation panel
       // (/automation, or the HUD strip while a routine runs). Reports print as System chat.
       // Dev / URL-override builds only (automationUiEnabled); the agent API itself runs everywhere.
@@ -15944,6 +16164,7 @@ async function main() {
         };
         // VirindiTank's M. Charges When Off: with the macro off, worn items keep their mana by the window's selected profile.
         agentApi.routine.standby = () => gameUI.automationStandbyProfile();
+        const metaTidyPass = new TidyPass(agentApi.routine.tidy, agentApi, (text) => gameUI.addSystemMessage(`[Automation] ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System));
         gameUI.setAutomationSource({
           load: () => routineSync.load(),
           save: (doc) => routineSync.save(doc),
@@ -15960,9 +16181,13 @@ async function main() {
           setState: (name) => agentApi.routine.setState(name),
           forceBuff: () => agentApi.routine.forceBuff(),
           mexec: (expr) => { const x = agentApi.routine.expressions; if (!x) throw new Error('expressions are not available'); return x.run(expr); },
+          setAttackBar: (power) => agentApi.setAttackBar(power),
           jump: (o) => { if (o.heading !== undefined) agentApi.turn(o.heading); return agentApi.jump({ ...(o.holdMs !== undefined ? { holdMs: o.holdMs } : {}), ...(o.walk ? { walk: true } : {}) }); },
           fakeDeath: () => agentApi.routine.fakeDeath(),
-          reverseRoute: () => agentApi.routine.reverseRoute(),
+          reverseRoute: (on) => agentApi.routine.reverseRoute(on),
+          routeReversed: () => agentApi.routine.reversed,
+          testItem: (rules) => agentApi.routine.testItem(rules),
+          propertyDump: () => agentApi.routine.propertyDump(),
           setNearestWaypoint: () => agentApi.routine.setNearestWaypoint(),
           cancelForceBuff: () => agentApi.routine.cancelForceBuff(),
           // The era's own tables decide which controls exist (no Summoning / Void Magic in Dark Majesty or AC1999).
@@ -15973,12 +16198,46 @@ async function main() {
             const g = agentApi.selectedGuid();
             if (g === null) return null;
             const carried = agentApi.inventory().find((i) => i.guid === g);
-            if (carried) return { name: carried.name, kind: 'item' };
+            if (carried) return { name: carried.name, kind: 'item', guid: g };
             const o = agentApi.snapshot({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g);
             return o ? { name: o.name, kind: o.kind } : null;
           },
           resetStats: () => agentApi.routine.resetStats(),
+          // VTank's CopyTo: its /vt … save command in the chat box for the player to name.
+          pasteChat: (text) => metaGame.pasteChat?.(text) ?? false,
+          // [Default] / [By char]: what you carry, examined, and your skills (agent/macro/defaultLoadout.ts).
+          loadout: () => gatherLoadout({
+            inventory: () => agentApi.inventory(),
+            examined: (guid) => agentApi.itemData(guid)?.int ?? null,
+            examine: (guid) => agentHost.appraise(guid, true),
+            skills: () => agentApi.skillList(),
+            mastery: () => playerState.serverIntProps.get(362),
+            sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+          }),
           spellTable: () => agentApi.spellTableData(),
+          // /vt dumpmetavars, testspell, dumpspells, dumpskills; /ub autostack, autocram, count, clearbugged (metaCommands.ts).
+          tools: {
+            metaVars: () => (['var', 'gvar', 'pvar'] as const).flatMap((scope) => (metaHost.listVars?.(scope) ?? []).map(([name, value]) => ({ scope, name, value }))),
+            testSpell: (id) => spellCheckText(checkSpell(agentApi, (n) => agentApi.routine.setting(n) ?? MACRO_DEFAULTS[n], id, 'hunt')),
+            spellRows: () => [...(agentApi.spellTableData()?.spells ?? new Map())].map(([id, s]) => ({ id, name: s.name, school: s.school, power: s.power, category: s.category, ...(s.duration !== undefined ? { duration: s.duration } : {}) })),
+            skillRows: () => agentApi.skillList().map((k) => ({ id: k.id, name: k.name, training: k.training, base: k.base, buffed: k.buffed })),
+            stackCram: (mode) => metaTidyPass.start(mode),
+            carried: () => agentApi.inventory().map((i) => ({ name: i.name, ...(i.stack !== undefined ? { stack: i.stack } : {}), ...(i.type ? { type: i.type } : {}), ...(i.value !== undefined ? { value: i.value } : {}), ...(i.burden !== undefined ? { burden: i.burden } : {}) })),
+            playersWithin: (r) => 1 + agentApi.snapshot({ radius: r, max: 1000 }).nearby.filter((o) => o.kind === 'player' && o.dist <= r).length,
+            // UB's clearbugged also forgets the items stack/cram gave up on.
+            // Every other /ub command (agent/ub/ubCommands.ts).
+            ub: (line, lootRules) => ubRuntime ? ubRuntime.command(line, lootRules) : Promise.resolve(null),
+            clearBugged: () => (agentApi.routine.tidy.clearIgnored(), clearBugged({
+              // Worn items stay, and so does a pack that still lists contents.
+              candidates: () => playerState.inventory.getAll()
+                .filter((i) => !playerState.equipment.getAll().some((e) => e.id === i.id) && !(heldIsContainer(i) && playerState.inventory.getByContainer(i.id).length > 0))
+                .map((i) => ({ guid: i.id >>> 0, name: i.name })),
+              identify: (guid) => agentHost.appraise(guid, true),
+              answer: (guid) => metaIdentifyAnswers.get(guid),
+              forget: (guid) => { if (dropDeletedOwnedItem(playerState.inventory, guid)) { inventoryDirty = true; gameUI.onInventoryItemLeftPlayer(guid); } },
+              now: () => performance.now(),
+            })),
+          },
         step: () => agentApi.routine.stepOnce(),
         history: () => agentApi.routine.history(),
         items: () => agentApi.inventory().filter((i) => i.where !== 'equipped').map((i) => ({ name: i.name, type: i.type, value: i.value, burden: i.burden })),
@@ -16087,6 +16346,14 @@ async function main() {
           // so the probes / captures that create their character still can.
           // &autoenter=false (and every launcher login) stays on the list.
           if (autoEnter && characterSlots.length === 0) gameUI.showCharacterCreate();
+          // UB's setnextlogin (a meta's login switch): after this logout, enter that character.
+          const nextLoginSlot = autoSlot ? null : metaNextLogin.take(characterSlots);
+          if (nextLoginSlot) {
+            console.log(`[AC] ACE: next login (setnextlogin): ${nextLoginSlot.name}`);
+            autoEnterTimer.schedule(() => {
+              if (isAutoEnterTargetStillValid(aceCharList?.characters ?? [], parseInt(nextLoginSlot.id, 10))) gameUI.callbacks.onEnterWorld?.(nextLoginSlot);
+            }, 500);
+          }
           if (autoSlot) {
             console.log(`[AC] ACE: Auto-entering with character: ${autoSlot.name}`);
             // BUG.auto-enter-timer-stale-character-race — RestartableTimer
@@ -17188,9 +17455,32 @@ async function main() {
     frameStep(true);
   }
 
+  // VirindiTank's Show Nav Lines (scene/NavLines.ts): the automation window's loaded route drawn in the world,
+  // looked at four times a second and rebuilt only when it changes; nothing while the switch is off.
+  const navLines = new NavLinesOverlay(sceneManager.scene);
+  let navLinesAt = 0;
+  function updateNavLines(now: number): void {
+    if (now - navLinesAt < 250) return;
+    navLinesAt = now;
+    const want = gameUI.automationNavLines();
+    if (!want || gameUI.worldHiddenByPortalSpace || teleportBusy.value) { navLines.update(null, () => null); return; }
+    const inDungeon = playerInDungeon;
+    const lbX = ((dungeonLandblockId >>> 24) & 0xff) * 192, lbY = ((dungeonLandblockId >>> 16) & 0xff) * 192;
+    const off = inDungeon ? dungeonRenderer.worldToLocal(0, 0) : { localX: 0, localY: 0 };
+    const toWorld = (gx: number, gy: number) => (inDungeon ? { x: gx - lbX - off.localX, z: gy - lbY - off.localY } : { x: gx, z: gy });
+    const points = routeNavPoints(want.route, parseMapCoords, toWorld);
+    navLines.update(
+      { points, circular: want.route.mode === 'circular', current: want.current, radius: want.radius, outdoor: !inDungeon },
+      (x, z, fromY) => (inDungeon
+        ? movementServices.dungeonGroundAt?.(x, z, fromY ?? playerFeetY + 1) ?? null
+        : fromY === null ? outdoorGroundSources.terrainHeight(x, z) : movementServices.groundAt?.(x, z, fromY) ?? null),
+    );
+  }
+
   /** One frame of the game; `draw` false runs everything but the 3D draw (the background beat). */
   function frameStep(draw: boolean) {
     const now = performance.now();
+    if (draw) updateNavLines(now);
     if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(); }
     const dt = (now - lastTime) / 1000;
     lastTime = now;

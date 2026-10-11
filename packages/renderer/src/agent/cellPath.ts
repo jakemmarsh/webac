@@ -397,7 +397,8 @@ export const samePoint = (p: Vec3, q: Vec3): boolean => Math.hypot(p.x - q.x, p.
  */
 export function findRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number, to: Vec3, avoid: Vec3[] = [], opts: RouteOptions = {}): RoutePoint[] | null {
   // Through body-sized openings when there's a way; any opening beats none.
-  return searchRoute(g, fromCell, from, toCell, to, avoid, true, opts) ?? searchRoute(g, fromCell, from, toCell, to, avoid, false, opts);
+  const all = opts.avoid?.length ? [...avoid, ...opts.avoid] : avoid;
+  return searchRoute(g, fromCell, from, toCell, to, all, true, opts) ?? searchRoute(g, fromCell, from, toCell, to, all, false, opts);
 }
 
 /**
@@ -412,6 +413,12 @@ export interface RouteOptions {
    * weenie in the pedestal's opening 0xA9B40178) sent a walk to open it again and again (2026-10-11).
    */
   closed?: Vec3[];
+  /**
+   * Doorways (their centroids, as a route point gives them) the walk found it can't pass: a fall through a
+   * floor opening with a rail round it higher than the player's jump clears. The AC1999 tutorial's balcony
+   * fence is 2 m tall: below Jump 65 the way down is the ramp and the key room's locked door (2026-10-11).
+   */
+  avoid?: Vec3[];
 }
 
 /** How near a doorway a door that would not open stands (seen from above; within 3 m of height). */
@@ -488,9 +495,20 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
     }
   }
   if (!best.has(GOAL)) return null;
-  const route: RoutePoint[] = [];
-  for (let n = GOAL; n !== START; n = prev.get(n)!) route.unshift(posOf(n));
-  return route;
+  const nodes: string[] = [];
+  for (let n = GOAL; n !== START; n = prev.get(n)!) nodes.unshift(n);
+  // A wall doorway into a floorless cell, with the route's next step a fall through that cell's floor
+  // opening, is not a point a body stands on: the cell is air, and a rail or fence often stands in the
+  // doorway itself. The AC1999 tutorial's balcony 0x017E012E looks into the air over the training pit
+  // (0x017E012D) through a doorway whose centre is in the line of its fence (statics 0x020003B3/B4), so the
+  // walk to that point never arrived and the drop was never tried (2026-10-11). The walk goes from the
+  // doorway before straight to the drop: its search finds the edge (or the rail) to drop or jump from.
+  const intoAir = (n: string, m: string): boolean => {
+    if (n === START || n === GOAL || m === GOAL || posOf(n).floor || posOf(m).drop === undefined) return false;
+    const below = door.get(m)?.below;
+    return (cellsOf.get(n) ?? []).some((c) => c !== below && !!g.airCells?.has(c) && (cellsOf.get(m) ?? []).includes(c));
+  };
+  return nodes.filter((n, i) => !intoAir(n, nodes[i + 1])).map(posOf);
 }
 
 const isInterior = (cell: number): boolean => ((cell >>> 0) & 0xffff) >= 0x100;

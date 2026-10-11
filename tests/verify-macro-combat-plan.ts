@@ -10,8 +10,8 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { VT_DAMAGE, VT_DEFAULT_MONSTER, VT_PET_AUTO, type PlanItem, type PlanSkill, type PlanSpell, type VtMonsterRow } from '@ac/shared';
 import {
-  ammoFor, buildCombatFamilies, matchMonsterRow, petDeviceElement, pickTarget, planCombat, planPet,
-  type CombatFamilies, type CombatInput, type CombatMonster, type CombatSpellTableEntry,
+  ammoFor, buildCombatFamilies, matchMonsterRow, petDeviceElement, petUnusable, pickTarget, planCombat, planPet,
+  type CombatElement, type CombatFamilies, type CombatInput, type CombatMonster, type CombatSpellTableEntry,
 } from '../packages/renderer/src/agent/macro/combatPlan.ts';
 import { openDat } from './_harness/dat.js';
 
@@ -129,6 +129,79 @@ describe('pickTarget', () => {
   });
 });
 
+describe('target tie-breaks (VTank, MOSS CombatTargetSelection)', () => {
+  const rows = [row('<DEFAULT>', { on: ['I', 'A'], damage: VT_DAMAGE.Fire })];
+  const spells = [spell(1327), spell(21), spell(84)];
+  // A sword in hand: Imperil is the weapon's debuff (with a wand it would be Magic Yield).
+  const sword = { items: [{ ...SWORD, equipped: true }], itemNames: ['Iron Sword'], wielded: { weapon: 'Iron Sword' }, stance: 'melee' as const };
+  it('urgency: one already Imperiled (+2) beats a nearer one; the attack element\'s vuln adds 1', () => {
+    const ms = [mon(1, 'Rat', 2), mon(2, 'Rat', 8), mon(3, 'Rat', 9)];
+    const base = input({ rows, monsters: ms, spells, ...sword, settings: { AttackDistance: 30, TargetSelectMethod: 1 } });
+    expect(pickTarget(base)?.guid).toBe(1);
+    const imperiled = { ...base, castLog: [{ guid: 2, category: 116, at: base.now, duration: 60 }] };
+    expect(pickTarget(imperiled)?.guid).toBe(2);
+    // Imperil (+2) on 2, Imperil and the fire vuln (+3) on 3: 3.
+    expect(pickTarget({ ...imperiled, castLog: [...imperiled.castLog, { guid: 3, category: 116, at: base.now, duration: 60 }, { guid: 3, category: 110, at: base.now, duration: 60 }] })?.guid).toBe(3);
+    // Magic (a wand): Magic Yield counts, not Imperil. This table has no Yield, so Imperil adds nothing and the nearest wins.
+    expect(pickTarget({ ...imperiled, items: [{ ...WAND, equipped: true }], itemNames: ['Fire Wand'], wielded: { weapon: 'Fire Wand' } })?.guid).toBe(1);
+  });
+  it('the sticky last target: among equals, the one the last combat action went to', () => {
+    const ms = [mon(1, 'Rat', 2), mon(2, 'Rat', 8)];
+    const base = input({ rows, monsters: ms, spells, ...sword, settings: { AttackDistance: 30, TargetSelectMethod: 1 } });
+    expect(pickTarget({ ...base, lastTarget: 2 })?.guid).toBe(2);
+    // Urgency and TargetLock come before it.
+    expect(pickTarget({ ...base, lastTarget: 2, castLog: [{ guid: 1, category: 116, at: base.now, duration: 60 }] })?.guid).toBe(1);
+    expect(pickTarget({ ...base, lastTarget: 2, selectedGuid: 1, settings: { ...base.settings, TargetLock: true } })?.guid).toBe(1);
+  });
+  it('DebuffEachFirst Priority: within a priority, one that needs a debuff first; One: no such tie-break', () => {
+    const ms = [mon(1, 'Rat', 2), mon(2, 'Rat', 8)];
+    const base = input({ rows, monsters: ms, spells, ...sword, castLog: [{ guid: 1, category: 116, at: 100_000, duration: 60 }], settings: { AttackDistance: 30, TargetSelectMethod: 1, DebuffEachFirst: 2 } });
+    // Rat 1 has Imperil (urgency 2) but Rat 2 needs it: the debuff tie-break comes before urgency.
+    expect(pickTarget(base)?.guid).toBe(2);
+    expect(pickTarget({ ...base, settings: { ...base.settings, DebuffEachFirst: 1 } })?.guid).toBe(1);
+  });
+  it('fewer weapon swaps, but only with Both and both within TargetSelectAngleRange', () => {
+    const swordRow = row('Rat', { on: ['A'], weapon: 'Iron Sword' });
+    const items = [{ ...WAND, equipped: true }, SWORD];
+    const ms = [mon(1, 'Rat', 2, 10), mon(2, 'Drudge', 3, 40)];
+    const base = input({ rows: [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Fire }), swordRow], monsters: ms, items, itemNames: ['Fire Wand', 'Iron Sword'] });
+    // Both (default), both within 5 m: the Drudge (keeps the wand) beats the Rat (needs the sword) despite the bigger turn.
+    expect(pickTarget(base)?.guid).toBe(2);
+    // By Angle: no swap rule, the smaller turn wins.
+    expect(pickTarget({ ...base, settings: { AttackDistance: 30, TargetSelectMethod: 2 } })?.guid).toBe(1);
+  });
+  it('By Range breaks a distance tie by the smaller turn; By Angle a turn tie by distance', () => {
+    const ms = [mon(1, 'A', 6, 50), mon(2, 'B', 6, 10), mon(3, 'C', 9, 10)];
+    expect(pickTarget(input({ monsters: ms, settings: { AttackDistance: 30, TargetSelectMethod: 1 } }))?.guid).toBe(2);
+    expect(pickTarget(input({ monsters: ms, settings: { AttackDistance: 30, TargetSelectMethod: 2 } }))?.guid).toBe(2);
+  });
+  it('a debuff-only monster with its debuffs on is no target: the next monster\'s debuffs go out', () => {
+    const debuffOnly = [row('<DEFAULT>', { on: ['I'] })];
+    const ms = [mon(1, 'Rat', 2), mon(2, 'Rat', 8)];
+    const i = input({ rows: debuffOnly, monsters: ms, spells, castLog: [{ guid: 1, category: 116, at: 100_000, duration: 60 }] });
+    expect(planCombat(i)).toMatchObject({ kind: 'cast', spell: { id: 1327 }, target: 2 });
+    expect(planCombat({ ...i, castLog: [...i.castLog, { guid: 2, category: 116, at: 100_000, duration: 60 }] })).toBeNull();
+  });
+});
+
+describe('debuffs within spell range minus SpellRangeFudge', () => {
+  const rows = [row('<DEFAULT>', { on: ['I', 'A'], damage: VT_DAMAGE.Fire })];
+  const ranged = (id: number, range: number): PlanSpell => ({ ...spell(id), range });
+  it('a debuff that doesn\'t reach (range − fudge < distance) is skipped; the attack goes out', () => {
+    const i = input({ rows, monsters: [mon(1, 'Rat', 19.5)], spells: [ranged(1327, 20), spell(84)] });
+    expect(planCombat(i)).toMatchObject({ kind: 'cast', spell: { id: 84 } }); // 20 − 1 < 19.5
+    expect(planCombat({ ...i, settings: { AttackDistance: 30, SpellRangeFudge: 0 } })).toMatchObject({ kind: 'cast', spell: { id: 1327 } });
+    expect(planCombat({ ...i, monsters: [mon(1, 'Rat', 19)] })).toMatchObject({ kind: 'cast', spell: { id: 1327 } });
+  });
+  it('a lower level that reaches is cast instead; a range not known is not held back; attacks never check it', () => {
+    const i = input({ rows, monsters: [mon(1, 'Rat', 15)], spells: [ranged(1327, 10), ranged(1326, 30), { ...spell(84), range: 5 }] });
+    expect(planCombat(i)).toMatchObject({ kind: 'cast', spell: { id: 1326 } });
+    expect(planCombat({ ...i, spells: [spell(1327), spell(84)] })).toMatchObject({ kind: 'cast', spell: { id: 1327 } });
+    const on = { ...i, castLog: [{ guid: 1, category: 116, at: i.now, duration: 60 }] };
+    expect(planCombat(on)).toMatchObject({ kind: 'cast', spell: { id: 84 } });
+  });
+});
+
 describe('planCombat: debuffs', () => {
   const debuffRows = [row('<DEFAULT>', { on: ['I', 'B', 'V', 'A'], damage: VT_DAMAGE.Fire })];
   const known = [spell(25), spell(1326), spell(1327), spell(262), spell(21), spell(84)];
@@ -235,13 +308,14 @@ describe('planCombat: Harm, Drain Auto, Random, Fists', () => {
     // Without Life Magic: nothing to cast with a wand.
     expect(planCombat(input({ rows, spells: [spell(1176)], skills: [skill(34, 'War Magic', 400)] }))).toBeNull();
   });
-  it('Drain Auto drains a healthy (or unreported) target and harms one below half health', () => {
+  it('Drain Auto never casts Harm (VTank\'s plan is drains and martyrs); before the era\'s drain table loads, the best drain', () => {
     const rows = [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.DrainAuto })];
     const spells = [spell(1176), spell(1242), spell(1266)];
     expect(planCombat(input({ rows, spells }))).toMatchObject({ spell: { id: 1242 } });
-    expect(planCombat(input({ rows, spells, monsters: [mon(1, 'Rat', 3, 0, { health: 0.8 })] }))).toMatchObject({ spell: { id: 1242 } });
-    expect(planCombat(input({ rows, spells, monsters: [mon(1, 'Rat', 3, 0, { health: 0.3 })] }))).toMatchObject({ spell: { id: 1176 } });
-    expect(planCombat(input({ rows, spells: [spell(1242)], monsters: [mon(1, 'Rat', 3, 0, { health: 0.3 })] }))).toMatchObject({ spell: { id: 1242 } });
+    // Before 2026-10-11 a target below half health got Harm Other (our guess): VTank's Drain Auto has no Harm.
+    expect(planCombat(input({ rows, spells, monsters: [mon(1, 'Rat', 3, 0, { health: 0.3 })] }))).toMatchObject({ spell: { id: 1242 } });
+    // A monster immune to drains (the era's table) is not drained.
+    expect(planCombat(input({ rows, spells, monsterFacts: () => ({ weak: [], maxHealth: 100, drainImmune: true }) }))).toBeNull();
   });
   it('Auto with neither War nor Void Magic trained is Drain Auto (FAQ)', () => {
     const rows = [row('<DEFAULT>', { on: ['A'], damage: VT_DAMAGE.Auto })];
@@ -277,27 +351,49 @@ describe('planPet: Summon Pets and the PetDmg column', () => {
   it('reads an essence\'s element from its UiEffects (the golem shows only Magical)', () => {
     expect([petDeviceElement(ACID), petDeviceElement(FIRE), petDeviceElement(GOLEM)]).toEqual(['acid', 'fire', null]);
   });
-  it('PAuto: the element your own Dmg type resolves to; else the Auto element; else the first device', () => {
+  // Ranking (MOSS PetAutomation.Rank): a named PetDmg element, then your attack's element, then the monster's weak
+  // elements in order; PAuto: your attack's element, then its weak elements; Auto: its weak elements. Any usable
+  // essence can win; a tie goes to the first on the tab unless a later one needs a higher level.
+  const weakFireFirst = () => ({ weak: ['fire', 'acid'] as CombatElement[], maxHealth: 50 });
+  it('PAuto: the element your own Dmg type resolves to first, then the monster\'s weak elements', () => {
     expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Fire })] })?.device.name).toBe(FIRE.name);
     expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Acid })] })?.device.name).toBe(ACID.name);
-    // Slash has no essence: the Auto element (the fire wand) instead.
-    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Slash })] })?.device.name).toBe(FIRE.name);
-    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Slash })] }, 30, 1, [GOLEM, ACID])?.device.name).toBe(GOLEM.name);
+    // Slash has no essence: the monster's weak elements decide (fire first); with nothing known, the first on the tab.
+    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Slash })], monsterFacts: weakFireFirst })?.device.name).toBe(FIRE.name);
+    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Slash })] })?.device.name).toBe(GOLEM.name);
   });
-  it('Auto uses the Auto element; a named element only that one; None monsters don\'t count', () => {
-    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Acid, petDamage: VT_DAMAGE.Auto })] })?.device.name).toBe(FIRE.name);
+  it('Auto ranks by the monster\'s weak elements; a named element first, else any usable one; None monsters don\'t count', () => {
+    expect(pet({ rows: [row('<DEFAULT>', { damage: VT_DAMAGE.Acid, petDamage: VT_DAMAGE.Auto })], monsterFacts: weakFireFirst })?.device.name).toBe(FIRE.name);
     expect(pet({ rows: [row('<DEFAULT>', { petDamage: VT_DAMAGE.Acid })] })?.device.name).toBe(ACID.name);
-    expect(pet({ rows: [row('<DEFAULT>', { petDamage: VT_DAMAGE.Cold })] })).toBeNull();
+    // No cold essence: the one matching your attack's element (the fire wand) comes next. Before 2026-10-11: no pet.
+    expect(pet({ rows: [row('<DEFAULT>', { petDamage: VT_DAMAGE.Cold })] })?.device.name).toBe(FIRE.name);
     expect(pet({ rows: [row('<DEFAULT>', { petDamage: VT_DAMAGE.None })] })).toBeNull();
   });
-  it('the highest-priority monster in pet range picks the element; Pet Min. Monsters counts only those in range', () => {
+  it('the pet is for the nearest monster that also outranks every nearer one; Pet Min. Monsters counts only those in range', () => {
     const rows = [row('<DEFAULT>', { petDamage: VT_DAMAGE.Fire }), row('Boss', { priority: 3, petDamage: VT_DAMAGE.Acid })];
+    // The nearer Rat holds the pick; the Boss is farther, so it can't take it (MOSS: "nearer AND ranked higher").
+    expect(pet({ rows, monsters: [mon(1, 'Rat', 3), mon(2, 'Boss', 20), mon(3, 'Rat', 45)] }, 30)?.device.name).toBe(FIRE.name);
+    // Seen in the other order, the nearer Boss outranks the Rat that held it.
+    expect(pet({ rows, monsters: [mon(1, 'Rat', 20), mon(2, 'Boss', 3)] }, 30)?.device.name).toBe(ACID.name);
     const monsters = [mon(1, 'Rat', 3), mon(2, 'Boss', 20), mon(3, 'Rat', 45)];
-    expect(pet({ rows, monsters }, 30)?.device.name).toBe(ACID.name);
-    expect(pet({ rows, monsters }, 10)?.device.name).toBe(FIRE.name);
     expect(pet({ rows, monsters }, 30, 3)).toBeNull();
     // A Custom Pet Range past Monster Range (AttackDistance 30) sees the far one too.
     expect(pet({ rows, monsters }, 50, 3)?.count).toBe(3);
+  });
+  it('only a usable essence: level and Summoning requirements, charges left, your Summoning Mastery (MOSS IsUsable)', () => {
+    const rows = [row('<DEFAULT>', { damage: VT_DAMAGE.Fire })];
+    const needs = (extra: Record<number, number>): PlanItem => ({ ...FIRE, ints: { ...FIRE.ints, ...extra } });
+    // UseRequiresLevel 369 above yours, Structure 92 at 0, SummoningMastery 362 not yours: the acid one instead.
+    for (const bad of [needs({ 369: 50 }), needs({ 92: 0 }), needs({ 362: 2 })]) {
+      expect(planPet(input({ rows }), { range: 30, minMonsters: 1, devices: [bad, ACID], level: 20, mastery: 1 })?.device.name).toBe(ACID.name);
+    }
+    // UseRequiresSkillLevel 367 of UseRequiresSkill 366 (Summoning 54) beyond yours.
+    const skilled = needs({ 366: 54, 367: 300 });
+    expect(petUnusable(skilled, [...SKILLS, skill(54, 'Summoning', 250)])).toMatch(/needs 300 Summoning/);
+    expect(petUnusable(skilled, [...SKILLS, skill(54, 'Summoning', 300)])).toBeNull();
+    // A tie goes to the essence that needs the higher level.
+    const low = { ...FIRE, guid: 710, ints: { 266: 1, 369: 50 } }, high = { ...FIRE, guid: 711, ints: { 266: 1, 369: 180 } };
+    expect(planPet(input({ rows }), { range: 30, minMonsters: 1, devices: [low, high], level: 200 })?.device.guid).toBe(711);
   });
   it('no pet device, no summon; the default row is PAuto', () => {
     expect(VT_DEFAULT_MONSTER.petDamage).toBe(VT_PET_AUTO);
@@ -489,10 +585,37 @@ describe('ammunition (VTank: AmmoType, the row\'s element, prismatic per Dmg typ
     expect(ammoFor(archer(VT_DAMAGE.Fire, [glow]), row('x', { damage: VT_DAMAGE.Fire }), BOW)?.guid).toBe(957);
   });
 
+  it('UseSpecialAmmo: special ammunition (the era\'s table: Raider 1, SCurrency 2) is shot only when its kind is allowed', () => {
+    const raider = ammo(960, 'Raider Lightning Arrow', { 44: 60, 45: 0x40 });
+    const chill = ammo(961, 'Spectral Chill Arrow', { 44: 60, 45: 0x8 });
+    const table = new Map([['raider lightning arrow', 1], ['spectral chill arrow', 2]]);
+    const specialAmmo = (n: string) => table.get(n.toLowerCase()) ?? 0;
+    const lightning = ammo(962, 'Lightning Arrow', { 44: 9, 45: 0x40 });
+    const pick = (use: number) => ammoFor(archer(VT_DAMAGE.Lightning, [raider, lightning], { specialAmmo, settings: { UseSpecialAmmo: use } }), row('x', { damage: VT_DAMAGE.Lightning }), BOW)?.name;
+    expect(pick(0)).toBe('Lightning Arrow');
+    expect(pick(1)).toBe('Raider Lightning Arrow');
+    expect(pick(2)).toBe('Lightning Arrow');
+    expect(pick(3)).toBe('Raider Lightning Arrow');
+    expect(ammoFor(archer(VT_DAMAGE.Cold, [chill], { specialAmmo, settings: { UseSpecialAmmo: 2 } }), row('x', { damage: VT_DAMAGE.Cold }), BOW)?.name).toBe('Spectral Chill Arrow');
+    // Without a table (an era with none) every arrow is ordinary.
+    expect(ammoFor(archer(VT_DAMAGE.Lightning, [raider], { settings: { UseSpecialAmmo: 0 } }), row('x', { damage: VT_DAMAGE.Lightning }), BOW)?.name).toBe('Raider Lightning Arrow');
+  });
+
   it('planCombat equips the row\'s ammunition before shooting, then attacks', () => {
     const p = planCombat(archer(VT_DAMAGE.Fire, [ACID, GREATER_FIRE]));
     expect(p).toMatchObject({ kind: 'equip', item: { name: 'Greater Fire Arrow' } });
     const loaded = planCombat(archer(VT_DAMAGE.Fire, [ACID, { ...GREATER_FIRE, equipped: true, slot: 'MissileAmmo' }]));
     expect(loaded).toMatchObject({ kind: 'attack', target: 1 });
+  });
+});
+
+describe.skipIf(!existsSync(EOL) || !existsSync(DM) || !existsSync(Y1999))('RandomHelperBuffs\' spells in every era\'s SpellTable', () => {
+  it('all eleven level-I helper spells exist by name at end of retail, in Dark Majesty and in 1999', async () => {
+    const { HELPER_SPELLS } = await import('../packages/renderer/src/agent/macro/vtMacro.ts');
+    for (const [path, y] of [[EOL, false], [DM, false], [Y1999, true]] as const) {
+      const { table } = await familiesOf(path, y);
+      const names = new Set([...table.spells.values()].map((s) => s.name));
+      expect(HELPER_SPELLS.filter((n) => !names.has(n)), path).toEqual([]);
+    }
   });
 });

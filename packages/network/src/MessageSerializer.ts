@@ -3597,6 +3597,14 @@ export interface CreateObjectData {
    */
   materialType?: number;
   /**
+   * WeenieHeaderFlag.Workmanship (0x01000000) float: PublicWeenieDesc._workmanship.
+   * ACE writes WorldObject.Workmanship (WorldObject_Networking.cs:153), which for a
+   * salvage bag is ItemWorkmanship / NumItemsInMaterial, the bag's average (Decal's
+   * SalvageWorkmanship): the automation's CombineSalvage bands read it. Optional for
+   * fixtures; parseCreateObject sets it only when the flag is sent.
+   */
+  workmanship?: number;
+  /**
    * BUG.weenie-targettype-discarded — WeenieHeaderFlag.TargetType (0x80000)
    * uint. ACE PropertyInt.TargetType (94): ItemType bitmask of legal
    * use-with targets for this item (healing kit → Creature, key → item
@@ -3939,7 +3947,9 @@ export function parseCreateObjectFromReader(r: BinaryReader): CreateObjectData {
     // ran off the buffer and the object never spawned client-side (observed
     // live 2026-07-04: cottages 0x73b9c04e-50, RangeError at payload 140/144).
     if (weenieFlags & WeenieHeaderFlag.PScript) r.readUInt16();     // ushort script DID
-    if (weenieFlags & WeenieHeaderFlag.Workmanship) r.readFloat32(); // float
+    // Captured, not discarded: a salvage bag's average workmanship (CreateObjectData.workmanship).
+    let workmanship: number | undefined;
+    if (weenieFlags & WeenieHeaderFlag.Workmanship) workmanship = r.readFloat32();
     if (weenieFlags & WeenieHeaderFlag.Burden) burden = r.readUInt16();
     // CORE.17.k.b.b.a.g.e — captured, not discarded: pwd._spellID feeds the
     // spell bar's endowment icon (gmSpellcastingUI::UpdateEndowmentIcon @
@@ -4025,6 +4035,7 @@ export function parseCreateObjectFromReader(r: BinaryReader): CreateObjectData {
       structure,
       maxStructure,
       materialType,
+      ...(workmanship !== undefined ? { workmanship } : {}),
       targetType,
       spellDid,
       initialMotion,

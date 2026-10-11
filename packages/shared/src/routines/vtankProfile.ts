@@ -33,8 +33,16 @@ export interface VtMonsterRow {
   /** An Items-tab item by name, or null for <AUTO>. */
   weapon: string | null;
   offhand: string | null;
+  /** Which of same-named Items-tab entries Weapon / Offhand means: that entry's object id (VtItemEntry.id). */
+  weaponId?: number;
+  offhandId?: number;
   /** VT_DAMAGE value or VT_PET_AUTO. */
   petDamage: number;
+  /**
+   * From a VTank `.usd`: the WeaponToUse / SecondaryEquip object ids when no carried item had that id at
+   * import (object ids are the server's, per character). Written back as they were (vtankUsd.ts).
+   */
+  vt?: { weapon?: number; offhand?: number };
 }
 
 export const VT_DEFAULT_MONSTER: VtMonsterRow = { name: '<DEFAULT>', priority: 1, on: ['A', 'S'], damage: VT_DAMAGE.Auto, exVuln: VT_DAMAGE.None, weapon: null, offhand: null, petDamage: VT_PET_AUTO };
@@ -43,7 +51,7 @@ export interface VtankProfileData {
   /** The Monsters tab, `<DEFAULT>` first. */
   monsters: VtMonsterRow[];
   /** Weapons / wands / shields / pets; `noBuffs`: Add (no buffs). */
-  items: Array<{ name: string; noBuffs?: boolean }>;
+  items: VtItemEntry[];
   /** Gems / food / kits / potions / charges / grenades / lockpicks (and peas to split), by name. */
   consumables: string[];
   /** Spell components whose spells are not cast. */
@@ -52,7 +60,68 @@ export interface VtankProfileData {
   extraBuffs: string[];
   /** Blacklisted Buff Families: one spell of each family never cast. */
   blacklistedBuffs: string[];
+  /**
+   * VTank's GemFoodItems table (Name, Spell): the gems and foods used as buffs. Unset: VTank's default
+   * profile's two (Asheron's Benediction 3810, Blackmoor's Favor 3811; buffItems.ts VT_GEM_FOOD_ITEMS).
+   */
+  gemFood?: Array<{ name: string; spell: number }>;
+  /** What a `.usd` holds that the tabs above don't, kept so an export writes it back (vtankUsd.ts). */
+  usd?: VtUsdKeep;
 }
+
+/**
+ * An Items-tab entry. VTank keeps its items by object id, so two weapons of one
+ * name are two entries (MOSS CombatProfileItems: an id means THAT object, a
+ * second object of the same name never stands in for it). `id` is the object
+ * id when the entry was added from the pack; an entry without one (an older
+ * profile, an import) matches by name, as before.
+ */
+export interface VtItemEntry {
+  name: string;
+  id?: number;
+  noBuffs?: boolean;
+  /** The Hands column (MOSS: Auto / 1-Handed / 2-Handed); unset is Auto, which reads the item (a TwoHanded slot). */
+  hands?: 1 | 2;
+}
+
+/** Whether a carried item is this Items-tab entry: by object id when the entry has one, else by name. */
+export function vtItemIs(entry: VtItemEntry, item: { guid: number; name: string }): boolean {
+  if (entry.id !== undefined) return (entry.id >>> 0) === (item.guid >>> 0);
+  return entry.name.toLowerCase() === item.name.toLowerCase();
+}
+
+/**
+ * The parts of a VirindiTank settings file (`.usd`) kept through import and export
+ * (docs/vtank-formats.md §6). Object ids are the server's own (one character's items).
+ */
+export interface VtUsdKeep {
+  /** AssistItems (Object name, Type): each Consumables-tab name's VTank kind (0 health kit … 11 all peas). */
+  assistTypes?: Record<string, number>;
+  /** AssistItems rows whose kind we don't know (outside 0–11), as read. */
+  assistOther?: Array<{ name: string; type: number }>;
+  /** ItemUseSpecifiers (Object id, Uses), as read: no public meaning. */
+  itemUseSpecifiers?: Array<{ object: number; uses: number }>;
+  /** BuffedItems (Object id, Spell id), as read: the Items-tab objects in order and each one's buff spells (-1: none named). */
+  buffedItems?: Array<{ object: number; spell: number }>;
+  /** Object ids the importer named (item name → its id), so an export writes the same ids back. */
+  itemIds?: Record<string, number>;
+  /** Items-tab object ids no carried item had at import (resolved by name when the macro runs). */
+  unnamedItems?: number[];
+  /** Extra Buff Spells / Blacklisted Buff Families exemplar spell ids the importer couldn't name (no spell table there). */
+  unnamedExtraBuffs?: number[];
+  unnamedBlacklistedBuffs?: number[];
+  /** Settings rows whose value isn't a plain option (RechargeHandlerSet's table), as read. */
+  settingsRaw?: Array<{ name: string; value: UsdValue }>;
+  /** Tables we don't read (SettingsCategories, SettingsEnumInfo, a plugin's own), written back unchanged. */
+  tables?: UsdTable[];
+}
+
+/** One typed value of VTank's settings serialisation (`i` int, `s` string, `d` double, `b` bool, `ba` bytes, a nested table). */
+export type UsdValue =
+  | { t: 'i'; v: number } | { t: 's'; v: string } | { t: 'd'; v: number } | { t: 'b'; v: boolean } | { t: 'ba'; v: string }
+  | { t: 'table'; cols: string[]; index: boolean[]; rows: UsdValue[][] };
+/** A named table of a `.usd`: its column names, which column is the index (`y`), and its rows. */
+export interface UsdTable { name: string; cols: string[]; index: boolean[]; rows: UsdValue[][] }
 
 export function emptyVtankData(): VtankProfileData {
   return { monsters: [structuredClone(VT_DEFAULT_MONSTER)], items: [], consumables: [], excludedScarabs: [], extraBuffs: [], blacklistedBuffs: [] };
@@ -78,6 +147,8 @@ export interface PlanSpell {
   duration: number;
   /** The scarab / components it needs, by name, when known. */
   components?: string[];
+  /** How far it reaches for you, metres (the spell examine's Range), when known. */
+  range?: number;
 }
 
 /** A skill of yours (AC skill id), with its training and buffed value. */
@@ -108,6 +179,8 @@ export interface PlanItem {
   /** Examined int properties (ACE PropertyInt), e.g. BoosterEnum 89, BoostValue 90, Structure 92. */
   ints?: Record<number, number>;
   floats?: Record<number, number>;
+  /** Examined data ids (ACE PropertyDataId), e.g. Spell 28: the spell a gem, potion or caster casts when used. */
+  dids?: Record<number, number>;
   equipped?: boolean;
   /** UiEffects (PropertyInt 18) from the object's public description (CreateObject weenie header), e.g. a summoning essence's element. */
   uiEffects?: number;
@@ -117,6 +190,8 @@ export interface PlanItem {
   slot?: string;
   /** AmmoType from the public description (launchers and ammunition). */
   ammoType?: number;
+  /** The spells its examination lists (spell ids, in the server's order: its Spell, a cast-on-strike ProcSpell, then the rest; ACE AppraiseInfo). */
+  spells?: number[];
 }
 
 export type Stance = 'peace' | 'melee' | 'missile' | 'magic';

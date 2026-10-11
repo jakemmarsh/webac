@@ -1,4 +1,4 @@
-# VirindiTank file formats: .met, .nav, .utl
+# VirindiTank file formats: .met, .nav, .utl, .usd (and metaf's .af)
 
 Written 2026-10-07 for the acjs routine importer. Every layout below comes from source code. I then checked it by parsing real files:
 108 `.met`, 108 `.nav` and 92 `.utl` from community repos, all parsing with 0 errors. The reference parsers are in `tools/vtank/` (`python3 -I tools/vtank/metscan.py <files…>`); the community samples are not in the repo (their sources are listed below). Our importer: `packages/shared/src/routines/vtank.ts` (AGENT.vtank-import); its fixtures in `tests/fixtures/vtank/` are our own files, checked with these parsers.
@@ -306,7 +306,7 @@ n × { <materialId (ACE MaterialType)>  <combineString> }
 <nValueModes>
 n × { <materialId> <int value> }      ← MaterialValueModeValues (meaning not traced)
 ```
-This drives salvage-bag combining. It isn't needed for keep/sell/salvage decisions.
+This drives salvage-bag combining. It isn't needed for keep/sell/salvage decisions. Our importer reads it (`parseUtlFile` / `parseSalvageCombineBlock` in packages/shared/src/routines/vtank.ts) into the profile's `salvageCombine` / `salvageCombineSets` (2026-10-11); a damaged block is skipped and the rules still import. Band matching: a workmanship in a gap counts with the range below it, one past the last range is its own band (`GetRangeIndex`). VTClassic's defaults when a file has no block: "1-6, 7-8, 9, 10", and "1-10" for materials 10, 13–19, 21, 22, 25–27, 29, 30, 34–37, 41, 47, 49–52.
 
 ---
 
@@ -325,7 +325,116 @@ This drives salvage-bag combining. It isn't needed for keep/sell/salvage decisio
 
 11. **What our importer maps, and what stays "can't test" (2026-10-07).** Decal keys mapped to ACE properties: Type → PropertyInt ItemType 1, Coverage → ClothingPriority 4, EquipableSlots → ValidLocations 9, DamageType 45, MaxDamage → Damage 44, Variance → PropertyFloat 22, Icon → DID 8, IconOverlay → DID 50, IconUnderlay → DID 52 (rares: 0x06005B0C). Object classes HealingKit 29 / Lockpick 30 / Book 33 → ObjectDescriptionFlags Healer 0x10000 / Lockpick 0x20000 / Book 0x100; Salvage 39 → ItemType TinkeringMaterial (ACE salvage bags). Character requirements 1000–1004, MinDamageGE 10 and SlotExactPalette 17 (`Palettes[slot] & 0xFFFFFF`, our ObjDesc subpalettes in order) run. TotalRatingsGE 2007 runs: the sum of PropertyInt 370–376 and 379, from VTClassic's `ComputedItemInfo.cs`. **Correction (2026-10-07):** the full VTClassic source is public and MIT-licensed at `http://www.virindi.net/repos/virindi_public/trunk/VirindiTankLootPlugins/`, including `VTClassic/VTClassic/ComputedItemInfo.cs`, `VTClassic Shared/ColorXML.cs` and `ColorSlots.Default.xml` (the armour-group slot table). Our first pinned copy was a subset of it. VirindiTank itself (uTank2) is closed source; Virindi publishes only the loot plugin, the View Service Connector, Reporter and the orderer. **Similar colour (14/15/16) runs (2026-10-07), with the example colour inferred clean-room.** VTank's license forbids decompiling it, so we didn't. `PaletteData.ExampleColor` is taken to be the palette's colour at the middle of the subpalette's range, `palette[offset + length/2]` (entries). Evidence: of the corpus's 23 distinct target colours, 21 are exactly that colour for a palette/range pair that a ClothingTable can put on an item (first entry explains 7, last 8, middle−1 9). That includes all 12 distinctive colours, which occur only 1–6 times anywhere in portal.dat. The other two (85,238,17 and 48,128,204) appear nowhere in the DAT, so they were typed by hand. Live, Scribe Renald the Elder's robe shows example cfcfcf, the corpus target 207,207,207. The match test is VTClassic's own: hue diff ≤ maxHue with no wrap-around, and the S/V Euclidean distance ≤ maxSV. Armour groups → slots come from `ColorSlots.Default.xml` (`VTCLASSIC_COLOR_SLOTS`). Test: tests/verify-vtank-import.ts ("the example colour is the middle of the subpalette range", DAT-backed).
 
-## 5. Files
+## 5. Writing them (export, 2026-10-11)
 
-- `tools/vtank/metscan.py`, `navscan.py`, `utlscan.py`: the reference parsers that validated this spec over the corpora (`python3 -I tools/vtank/x.py <files…>`).
-- `tests/fixtures/vtank/`: our own small `.met` / `.nav` / `.utl` files in these formats (All, Any, Not, EmbedNav, a pause and a recall step, KeepUpTo, ObjectClass, a disabled rule, a SalvageCombine block).
+`packages/shared/src/routines/vtankExport.ts` (AGENT.vtank-export, docs/vtank-parity-gaps.md §10.1) writes the routine document back as these files: `exportMet(profile)`, `exportNav(route)`, `exportUtl(name, rules, { blocks })`, and `exportVTank(profile, 'met' | 'nav' | 'utl', which?)`. Each returns `{ fileName, text, problems }`. `problems` lists, one line each, everything written differently or left out. Nothing is dropped silently. It is implemented from this spec. MOSS (openac-mosstank) was read for format facts only.
+
+**Conventions VTank writes, matched:**
+- CRLF everywhere, and a final CRLF.
+- Doubles as .NET Framework's "R": 15 significant digits, else 17. Fixed notation unless the exponent is ≤ −5 or ≥ 15, e.g. `2.08333134651184E-05`, as the corpus has it (`vtNumber`).
+- Ints as signed int32.
+- The `.met` header table as in §1.2. Dict keys are in metaf's order.
+- `ba` content gets no trailing CRLF of its own. An Embed Nav's body ends in one.
+- `.utl` is version 1, `pri` 0, and an empty expression line.
+- Downloads are Windows-1252 (GameUI `vtankKit().download`). A character outside it is written as `?` and reported.
+
+**Round trip.**
+- `import(export(x))` equals `x` for everything the formats hold. tests/verify-vtank-export.ts drives every condition, action, nav node and requirement kind.
+- For files that came from VirindiTank, import → export → import is stable. The test runs the community corpus: 305 files in `reference/vtank-corpus/` (gitignored, copied from the corpora above; skipped when absent). They all come back equal. Since 2026-10-11 that includes the 13 routes with a deprecated type-1 portal-by-id point.
+- Byte-identical output isn't the goal. Our document rounds route points to 0.001 map units (navCoords), a one-action DoAll comes back as the bare action, and requirement order within a `.utl` rule is regrouped.
+
+**Kept on import so they write back (new fields):**
+- `Route.z`: VTank's heights, one per point; null for a point recorded in our client.
+- `use-object` / `talk-to` `vt`: a Use Portal/NPC or NPC Talk point's object class and position, and an Open Vendor point's object id.
+- `use-portal` (type 1): the portal's object id, read unsigned and written back as the int32 it was.
+- `checkpoint` (type 8): a step of its own at the point (2026-10-11; it used to import as a plain point).
+- Unsupported steps' `raw` (the meta element as read, e.g. a `/ub` command we don't run).
+- `LootRule.vtc`: VTClassic's Read / User action ids and the requirements we can't test.
+
+**Importer fixes found by the round trip:**
+- `/ub use X on Y` lost Y (it became "on your selection"). It is now `use-item … to: Y` and the engine uses the item on the object named Y.
+- An Open Vendor point imported as a bare "use". It is now use + sell, as the Route tab's Open Vendor makes it.
+- `/vt stop` is our `stop`.
+- (2026-10-11, found building the loot editor) A rule with two spell requirements kept only the last, so it took items the rule didn't want: 205 of the corpus's 3,919 rules have two or more. The first is `match.spells` and the rest are `match.moreSpells`, and every one must hold. Repeated single-value requirements (Spell Count, Minimum Damage, Total Ratings, the character's level and pack slots) now keep the strictest, as VTClassic's "all must match" means.
+- (2026-10-11) The chat commands the automation window runs itself (`/ub autostack`, `autocram`, `count`, `clearbugged`; `/vt dumpmetavars`, `listmetafunctions`, `metafunchelp`, `testspell`, `dumpspells`, `dumpskills`, `refresh`) import as Chat steps and write back unchanged.
+
+**Ours that VTank says another way (same test, different shape on re-import):**
+- vital below/above → an Expression: `getcharvital_current[1]*100/getcharvital_buffedmax[1]<50`.
+- near → `coordinatedistanceflat[coordinateparse[<escaped coords>],getplayercoordinates[]]<=m`.
+- unassigned XP → `getcharquadprop[2]>n`.
+- monster within (no names) → Not(No monsters within). Several names → Any.
+- A recall cast → `actiontrycastbyid[id]`.
+- Steps UtilityBelt has a command for → a Chat Command (`/ub use`, `/ub give`, `/ub combatstate`, `/ub jump…`, `/ub autovendor`, `/ub mexec`). Every importer-recognised UB command writes back the same way.
+- A loot rule matching several item types → one rule per type, adjacent (first match still wins).
+- A float `eq` → ≤ and ≥.
+
+**Can't be written, so reported:**
+- buff missing (by name), cast (other than recalls), cast buffs, attack, loot, walk to, wait, train, talk to (in a meta) and use-item on your selection. A condition becomes Never; an action is left out.
+- A switched-off rule. VTank has no off switch, so it's written All(Never, …); a loot rule gets DisabledRule true.
+- Rule labels and our own notes.
+- A state with no rules that nothing goes to.
+- `ruleFiring: 'repeat'`.
+- The appraisal-text loot test, a colour test over several slots without an armour group, and bool / unmapped property tests. These loot rules are written switched off, never broader.
+- Heights and object kinds a point recorded here doesn't have. Written as 0 and portal (14) / NPC (37); most community Use Portal/NPC points are portals, 232 of 300.
+- A Follow route's object id (written 0).
+- A route's import note.
+- `.met` export notes the routes it doesn't use and that loot rules are a separate `.utl`. Settings and the Monsters / Items / … tabs are VTank's `.usd` (§6, built 2026-10-11).
+- **Fixed 2026-10-11:** a route Chat point whose command we don't run (`/mt give …`, a `/vt` we lack) used to import as a plain point with its text only in the route's note, so an export dropped the command (MossTank's bobo.met, neftet.met, nav_lockandkeyjaw.nav). It now stays on the point as an unsupported step holding its text: the import still reports it, the walk skips it ("can't run"), and an export writes the same Chat point back (vtank.ts `nodeStep`, vtankExport.ts `stopNodes`; tests/verify-vtank-export.ts).
+
+**SalvageCombine hook:** `salvageCombineBlock({ defaultCombine, materials, values })` builds the §3.5 block, and `exportUtl(name, rules, { blocks: [...] })` writes it after the rules. The routine document doesn't carry salvage-combine settings yet (the salvage work adds the parsing). Once it does, pass them through here.
+
+## 6. `.usd`: VirindiTank settings profile (2026-10-11)
+
+Facts from VTank-written files: MossTank's test fixtures `defaultsettings.usd`, `vt-proof-settings.usd` and `owner-a/b/c.usd` (https://github.com/eriknihlen/openac-mosstank, tests/AcDream.Plugins.MossTank.Tests/Fixtures; read for format facts only, no code used; MossTank is GPL, so the files stay out of the repo in `reference/vtank-mosstank/usd/`, gitignored). Reader / writer: `packages/shared/src/routines/vtankUsd.ts`. Our own fixture: `tests/fixtures/vtank/hunter.usd`. All five real files parse and write back **byte for byte**.
+
+**Layout.** The `.met` typed-value serialisation (§1.1) with one more tag, `b` (`True` / `False`). CRLF.
+```
+<tableCount>
+tableCount × {
+  <tableName>
+  <ncols>
+  ncols × <columnName>
+  ncols × <y|n>          ← y marks the index (key) column
+  <nrows>
+  nrows × ncols typed values (row-major)
+}
+```
+A nested table value is `TABLE` then the same body without a name (RechargeHandlerSet's value). Tables are written sorted by name (ordinal).
+
+| table | columns | what it is | ours |
+|---|---|---|---|
+| Settings | Setting (y), Value, Description, SettingType | every option. SettingType: 1 bool (`b`), 2 double (`d`; ranges in map units = yards / 240), 3 int, 5 string, 6 enum (an int), 7 a table (RechargeHandlerSet) | `profile.settings` (vtFromVTank: ranges × 240); a table value kept in `vtank.usd.settingsRaw` |
+| MyMonsters | MonsterName (y), AttackPriority, DamageType, WeaponToUse, Imperil, Vuln, Yield, GravityW, Attack, Ring, Broadside, Fester, WeakeningCurse, FesteringCurse, Corruption, DestructiveCurse, Corrosion, Streak, SecondaryVuln, SecondaryEquip, PetDamageType | the Monsters tab, `<DEFAULT>` included. Switches are `b`; WeaponToUse is an object id (-1 = `<AUTO>`), SecondaryEquip an object id (0 = `<AUTO>`) | `vtank.monsters`; switch columns → I V Y G A R B F WC FC Cp DC Cs S. The file has no expression flag (VTank tries each name as a name and as an expression): a name with an operator (`= < > ! & \| # ( ) %`) is marked `expr` |
+| BuffedItems | Object, Spell | the Items tab: each listed object id in order, a row per buff spell it gets (-1: none named) | `vtank.items` (names); the rows kept in `usd.buffedItems` |
+| AssistItems | Object (a name), Type | the Consumables tab and each entry's kind: 0 health kit, 1 health food, 2 stamina kit, 3 stamina food, 4 mana kit, 5 mana food, 6 mana charge, 7 grenade, 8 mana stone, 9 pea, 10 lockpick, 11 all peas (MOSS) | `vtank.consumables`; kinds in `usd.assistTypes`, rows of another kind in `usd.assistOther` |
+| GemFoodItems | Name, Spell | gems and foods used as buffs (default: Asheron's Benediction 3810, Blackmoor's Favor 3811) | `vtank.gemFood` (the macro's buff items use it; unset = the default two) |
+| ExtraBuffSpells / AntiExtraBuffSpells | ExemplarId | one spell id per family: Extra Buff Spells / Blacklisted Buff Families | `vtank.extraBuffs` / `blacklistedBuffs` (names) |
+| ItemUseSpecifiers | Object (y), Uses | no public meaning (MOSS reads uses per object, default 3) | kept: `usd.itemUseSpecifiers` |
+| SettingsCategories, SettingsEnumInfo | (UI metadata) | the options' category bits and enum names | kept as read (`usd.tables`); not written for a profile that never had them (owner-a/b/c.usd show VTank files without them, and with a two-column Settings) |
+
+**Ids.** Object ids are the server's, per character; spells are ids. Import names them from what the live client knows (`VtNames`: the era's spell table, the items you carry or wear; GameUI `vtankNames`). Without one (`ac_routines` on the bridge) they are kept by id (`usd.unnamedItems`, a row's `vt.weapon` / `vt.offhand`, `usd.unnamedExtraBuffs` / `unnamedBlacklistedBuffs`) and named when the macro runs (`resolveVtankIds`, vtMacro). Export writes names back as ids the same way; a name with no id is reported and left out.
+
+**Round trip.** import → export → import gives back the same tabs and the same effective settings (each option present, at our default where the file had none), for our fixture and the five real files (tests/verify-vtank-usd.ts). Export writes every option VTank has; Description is our one-line help.
+
+**Can't be written, so reported:** Excluded Scarab Types (where VTank keeps them isn't known; `BlacklistedSpellComps` is a string setting of unknown separator, kept as a setting); Add (no buffs) (not told apart in the tables we know); a Consumables entry with no known kind (kits, peas, lockpicks, stones, charges and grenades are recognised by name); an item or weapon you don't carry.
+
+**Found with the real file:** our HelperDistanceHitP / -Stam / -Mana defaults were 74.496 / 74.496 / 40.008 m (map units truncated to 0.3104 / 0.1667); VTank's file says 0.310416666666667 / 0.166666666666667, i.e. 74.5 / 74.5 / 40 m (vtankOptions.ts fixed 2026-10-11).
+
+## 7. `.af`: metaf's text form (2026-10-11)
+
+metaf (J. Edwards, GPLv3) converts `.met` / `.nav` to a readable text file and back; players write metas in it. Implemented from metaf's published format description only (Bundle/metafREADME.af §4–5 and metafReference.af §6–7 at the pinned commit), not its code: `packages/shared/src/routines/vtankAf.ts`. An `.af` is read into the same rules / nav the `.met` / `.nav` readers produce (`parseAf`), so it imports exactly as its `.met` would; export writes our exported `.met` in `.af` form (`metToAf`, `navToAf`).
+
+- **Lexical.** `~~` starts a comment (outside a string). Blank lines are ignored. A string is `{…}`; a brace inside is doubled (`{{`, `}}`); a string is one line (CreateView XML included). Numbers use `.`. `h` inputs (BlockE / CellE, GUIDs) are hex. metaf's `:file.xml` CreateView reference isn't supported (no files in the browser).
+- **Structure.** `STATE: {name}`, then rules: `IF: <condition>` and `DO: <action>`, the operation on the same line. All / Any / DoAll wrap the following lines indented deeper (siblings at one depth); `Not` takes the operation after it on the same line and adds no indent. Each state is listed once with its rules together (metaf requires it), so a `.met` whose states interleave gets other "Rule N" numbers; each state's order is kept. After the states: `NAV: <tag> <circular|linear|follow|once>` and its nodes. A nav-only file is one `NAV:` and nothing else. A comment-only file is an empty meta.
+- **Operations** (metaf names → §1.3 / §1.4 ids and inputs): Never, Always, All, Any, ChatMatch {r}, MainSlotsLE i, SecsInStateGE i, NavEmpty, Death, VendorOpen, VendorClosed, ItemCountLE / GE i {s}, MobsInDist_Name i d {r}, MobsInDist_Priority i d i, NeedToBuff, NoMobsInDist d, BlockE h, CellE h, IntoPortal, ExitPortal, Not p, PSecsInStateGE i, SecsOnSpellGE i(seconds) i(spell), BuPercentGE i, DistToRteGE d, Expr {s}, ChatCapture {r} {s}; None, SetState {s}, Chat {s}, DoAll, EmbedNav l {name} [{a b c d e f g}], CallState {s} {s}, Return, DoExpr {s}, ChatExpr {s}, SetWatchdog d d {s}, ClearWatchdog, GetOpt {s} {s}, SetOpt {s} {s}, CreateView {s} {s}, DestroyView {s}, DestroyAllViews.
+- **Nav nodes:** `pnt x y z`, `prt x y z h`, `rcl x y z {recall name}` (§2.1's list), `pau x y z ms`, `cht x y z {text}`, `vnd x y z h {name}`, `ptl` / `tlk x y z tx ty tz class {name}`, `chk x y z`, `jmp x y z heading {True|False} ms`, and a follow nav's single `flw h {name}`. x = E/W, y = N/S (§2.2).
+- **EmbedNav transform** `{a b c d e f g}`: x' = a·x + b·y + e, y' = c·x + d·y + f, z' = z + g, applied to every node and a Use / Talk target's position.
+
+**Checked:** our hand-written `tests/fixtures/vtank/hunt.af` / `holtburg-loop.af` import the same as hunt.met / holtburg-loop.nav; every condition, action, node and route type writes and reads back; all 122 corpus metas survive .met → .af → import unchanged; and metaf's own `.af` output (14 of MossTank's fixtures with a `.met` / `.nav` twin, kept in `reference/vtank-mosstank/{af,met,nav}`) imports the same as its twin (tests/verify-vtank-af.ts).
+
+## 8. Files
+
+- `tools/vtank/metscan.py`, `navscan.py`, `utlscan.py`, `usdscan.py`: the reference parsers that validated this spec over the corpora (`python3 -I tools/vtank/x.py <files…>`).
+- `reference/vtank-corpus/` (gitignored): the community .met / .nav / .utl files the export round trip runs over (`ACJS_VTANK_CORPUS` points elsewhere).
+- `tests/fixtures/vtank/`: our own small `.met` / `.nav` / `.utl` files in these formats (All, Any, Not, EmbedNav, a pause and a recall step, KeepUpTo, ObjectClass, a disabled rule, a SalvageCombine block), `hunter.usd` (every settings table, ids, a nested table, a kept table) and `hunt.af` / `holtburg-loop.af` (the .met / .nav above in metaf's form).
+- `reference/vtank-mosstank/` (gitignored): MossTank's VTank-written `.usd` files and metaf `.af` files with their `.met` / `.nav` twins (`ACJS_VTANK_MOSSTANK` points elsewhere). Kept out of `vtank-corpus/` so the export corpus test stays the community files only.

@@ -241,6 +241,11 @@ export interface BuffPlanInput {
    * yourself (end of retail's Aura spells sit on you and show in `active`).
    */
   itemRemaining?: (target: 'weapon' | 'armor', spell: PlanSpell) => number | null;
+  /**
+   * BuffCastRecast: seconds added to both rebuff thresholds because a buff was cast within
+   * BuffCastRecastReset_Seconds (the caller keeps that clock); 0 or absent otherwise.
+   */
+  recastExtra?: number;
 }
 
 export interface PlannedBuff { spell: PlanSpell; target: 'self' | 'weapon' | 'shield' | 'armor'; why: string; remaining: number | null }
@@ -292,8 +297,10 @@ const trained = (s: PlanSkill | undefined): boolean => !!s && (s.training === 't
 export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: PlannedBuff[] } {
   const { families, settings } = input;
   const threshold = num(setting(settings, 'SpellDiffExcessThreshold-Buff'), 5);
-  const rebuffAt = num(setting(settings, 'RebuffTimeRemainingSeconds'), 300);
-  const topoffAt = num(setting(settings, 'IdleBuffTopoffTimeSeconds'), 1200);
+  // BuffCastRecast raises both thresholds for a while after a buff; VTank never goes below 10 s.
+  const recast = Math.max(0, input.recastExtra ?? 0);
+  const rebuffAt = Math.max(10, num(setting(settings, 'RebuffTimeRemainingSeconds'), 300) + recast);
+  const topoffAt = Math.max(10, num(setting(settings, 'IdleBuffTopoffTimeSeconds'), 1200) + recast);
   const topoff = input.idle && bool(setting(settings, 'IdleBuffTopoff'));
   const prots = profileElements(settings, 'BuffProfile_Prots', 'BuffProfile-Prots');
   const banes = profileElements(settings, 'BuffProfile_Banes', 'BuffProfile-Banes');

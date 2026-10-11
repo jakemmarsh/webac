@@ -114,6 +114,10 @@ export interface InventoryItem {
    *  (ACE PropertyInt.MaterialType): PublicWeenieDesc._material_type, the
    *  salvage panel's IsItemSuitable input. 0/undefined = none. */
   materialType?: number;
+  /** WeenieHeaderFlag.Workmanship float (ACE WorldObject.Workmanship): an item's
+   *  workmanship, a salvage bag's average (ItemWorkmanship / NumItemsInMaterial).
+   *  undefined = not sent. */
+  workmanship?: number;
   /** PublicWeenieDesc._hook_type: the housing-hook mounts this item fits
    *  (ItemHolder::CheckHookStatus @ 00586e90). 0/undefined = none. */
   hookType?: number;

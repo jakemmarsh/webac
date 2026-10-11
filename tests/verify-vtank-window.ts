@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
 import {
-  VT_DAMAGE, VT_OPTIONS, emptyRoutineDoc, importVTank, validateRoutineDoc, vtCanonicalName, vtFromVTank, vtOption, vtToVTank,
+  VT_DAMAGE, VT_OPTIONS, emptyRoutineDoc, importVTank, parseMet, parseNav, parseUtl, utlToLoot, validateRoutineDoc, vtCanonicalName, vtFromVTank, vtOption, vtToVTank,
   type RoutineDoc, type RoutineProfile,
 } from '../packages/shared/src/routines/index.js';
 import type { RoutineStatus } from '../packages/renderer/src/agent/RoutineEngine.js';
@@ -26,6 +26,8 @@ beforeAll(async () => {
 afterAll(() => H.teardown());
 
 let lastMenu: { items: MenuItem[]; pick: (v: string) => void } | null = null;
+/** The files the window handed the player (its exported VirindiTank files). */
+const downloads: Array<{ name: string; text: string }> = [];
 function fakeKit(): VTankKit {
   const div = (data: Record<string, string>, onClick?: () => void) => { const d = document.createElement('div'); Object.assign(d.dataset, data); if (onClick) d.addEventListener('click', (e) => { e.stopPropagation(); onClick(); }); return d; };
   return {
@@ -50,6 +52,7 @@ function fakeKit(): VTankKit {
     slider: (value, _min, _max, _w, onChange) => { const i = document.createElement('input'); i.dataset.slider = String(value); i.addEventListener('change', () => onChange(Number(i.value))); return i; },
     textTab: (label, on, onClick) => div({ tab: label, selected: on ? '1' : '0' }, onClick),
     list: () => {},
+    download: (name, text) => { downloads.push({ name, text }); },
   };
 }
 function pick(field: Element | null, label: string): void {
@@ -63,11 +66,13 @@ function pick(field: Element | null, label: string): void {
 function fakeSource(doc: RoutineDoc) {
   const calls: string[] = [];
   const reports: string[] = [];
+  const pasted: string[] = [];
   let status: RoutineStatus = { running: false, paused: false, profile: null, state: null, acting: null, last: [] };
   const live: Record<string, string | number | boolean> = {};
   const saved: RoutineDoc[] = [];
   let selected: { name: string; kind: string } | null = null;
   let coords: string | null = '42.1N, 33.6E';
+  let reversed = false;
   const source: VTankSource = {
     load: async () => ({ ok: true, doc: structuredClone(doc) }),
     save: async (d) => { const issues = validateRoutineDoc(d); if (issues.length) return { ok: false, message: 'not saved', issues }; saved.push(structuredClone(d)); return { ok: true, doc: structuredClone(d) }; },
@@ -94,16 +99,19 @@ function fakeSource(doc: RoutineDoc) {
     forceBuff: () => { calls.push('force buff'); return { ok: true, message: '' }; },
     mexec: (e) => { calls.push(`mexec ${e}`); return 'True'; },
     jump: (o) => { calls.push(`jump ${JSON.stringify(o)}`); return { ok: true, message: 'jumped' }; },
+    setAttackBar: (power) => { calls.push(`bar ${power}`); return Number.isNaN(power) ? { ok: false, message: 'Syntax: /vt setattackbar [0 to 1]' } : { ok: true, message: `Attack bar set to ${power}.` }; },
     fakeDeath: () => { calls.push('fake death'); return { ok: true, message: 'fake death' }; },
-    reverseRoute: () => { calls.push('reverse'); return { ok: true, message: 'reversed' }; },
+    reverseRoute: (on) => { calls.push(on === undefined ? 'reverse' : `reverse ${on}`); reversed = on ?? !reversed; return { ok: true, message: 'reversed' }; },
+    routeReversed: () => reversed,
     // The fake's nearest point to you is point 2 (index 1).
     setNearestWaypoint: () => { calls.push('nearest waypoint'); status = { ...status, nav: { route: 'runback', point: 1, done: false } }; return { ok: true, message: '' }; },
     cancelForceBuff: () => { calls.push('cancel force buff'); return { ok: true, message: '' }; },
     setState: (n) => { calls.push(`state ${n}`); status = { ...status, state: n }; return { ok: true, message: '' }; },
     update: (p) => { calls.push(`update ${p.name}`); return { ok: true, message: '' }; },
     selection: () => selected,
+    pasteChat: (text) => { pasted.push(text); return true; },
   };
-  return { source, calls, reports, saved, live, setStatus: (s: Partial<RoutineStatus>) => { status = { ...status, ...s }; }, select: (s: typeof selected) => { selected = s; }, setCoords: (c: string | null) => { coords = c; } };
+  return { source, calls, reports, saved, live, pasted, setStatus: (s: Partial<RoutineStatus>) => { status = { ...status, ...s }; }, select: (s: typeof selected) => { selected = s; }, setCoords: (c: string | null) => { coords = c; } };
 }
 
 const meta = (): RoutineProfile => ({
@@ -174,7 +182,7 @@ describe('the VirindiTank window', () => {
   it('Options: VTank\'s controls at its places, only those the engine acts on; a change saves and reaches the run', async () => {
     const t = await open();
     const names = Array.from(t.body.querySelectorAll('[data-vtank-option]')).map((e) => (e as HTMLElement).dataset.vtankOption);
-    expect(names).toEqual(['AttackDistance', 'RingDistance', 'ApproachDistance', 'NavCloseStopRange', 'EnableBuffing', 'EnableCombat', 'EnableNav', 'EnableLooting', 'EnableMeta', 'AutoStack', 'AutoCram', 'UseDispelItems', 'CastDispelSelf', 'AutoFellowManagement', 'ManaChargesWhenOff', 'NavPriorityBoost', 'LootPriorityBoost', 'LootOnlyRareCorpses', 'IdlePeaceMode', 'IdleBuffTopoff', 'SummonPets', 'PetRangeMode', 'PetCustomRange', 'PetMonsterDensity']);
+    expect(names).toEqual(['AttackDistance', 'RingDistance', 'ApproachDistance', 'NavCloseStopRange', 'EnableBuffing', 'EnableCombat', 'EnableNav', 'EnableLooting', 'EnableMeta', 'AutoStack', 'AutoCram', 'UseDispelItems', 'CastDispelSelf', 'ShowNavLines', 'AutoFellowManagement', 'ManaChargesWhenOff', 'NavPriorityBoost', 'LootPriorityBoost', 'LootOnlyRareCorpses', 'IdlePeaceMode', 'IdleBuffTopoff', 'SummonPets', 'PetRangeMode', 'PetCustomRange', 'PetMonsterDensity']);
     expect(names.every((n) => vtOption(n!)?.engine)).toBe(true);
     // Values: the profile's, else VTank's default (Follow/Nav Min 2 yd).
     expect((t.body.querySelector('[data-vtank-option="AttackDistance"]') as HTMLInputElement).value).toBe('20');
@@ -220,9 +228,8 @@ describe('the VirindiTank window', () => {
     (t.body.querySelector('[data-vtank="advanced"] [data-check]') as HTMLElement).click();
     const rows = Array.from(t.body.querySelectorAll('[data-vtank-advanced]')).map((e) => (e as HTMLElement).dataset.vtankAdvanced);
     expect(rows).toEqual(VT_OPTIONS.filter((o) => o.engine).map((o) => o.name));
-    // Recharge boost, pea splitting and crafting are engine options, so they're listed; UseSpecialAmmo (not built) isn't.
-    expect(rows).toEqual(expect.arrayContaining(['RechargeBoostTimeSeconds', 'RechargeBoostAmount', 'ClearLevelBoostFlagOnCast', 'SplitPeas', 'SpellCompMin-Critical', 'SpellCompMin-Normal', 'SpellCompMin-Idle', 'AutoCraftItems', 'IdleCraftCount_HealthKits', 'ArrowheadFletchDiffExcessThreshold']));
-    expect(rows).not.toContain('UseSpecialAmmo');
+    // Recharge boost, pea splitting and crafting (UseSpecialAmmo too, since 2026-10-11) are engine options, so they're listed.
+    expect(rows).toEqual(expect.arrayContaining(['RechargeBoostTimeSeconds', 'RechargeBoostAmount', 'ClearLevelBoostFlagOnCast', 'SplitPeas', 'SpellCompMin-Critical', 'SpellCompMin-Normal', 'SpellCompMin-Idle', 'AutoCraftItems', 'IdleCraftCount_HealthKits', 'ArrowheadFletchDiffExcessThreshold', 'UseSpecialAmmo']));
     (t.body.querySelector('[data-vtank-advanced="StopMacroOnDeath"] [data-check]') as HTMLElement).click();
     await flush();
     expect(t.saved.at(-1)!.profiles[0].settings!.StopMacroOnDeath).toBe(false);
@@ -402,12 +409,17 @@ describe('the VirindiTank window', () => {
     expect((t.body.querySelector('[data-vtank="macro-profile"]') as HTMLElement).dataset.field).toBe('Runback');
     pick(t.body.querySelector('[data-vtank="nav-profile"]'), 'runback');
     (t.body.querySelector('[data-vtank="mine-only"] [data-check]') as HTMLElement).click();
-    (t.body.querySelector('[data-vtank="copy-profile"]') as HTMLElement).click();
     await flush();
+    expect(t.saved.at(-1)!.characters).toEqual({ Claude: 'Runback' });
+    // CopyTo pastes VTank's save command for the player to name (Mine only on: savechar); the command makes the copy.
+    (t.body.querySelector('[data-vtank="copy-profile"]') as HTMLElement).click();
+    expect(t.pasted).toEqual(['/vt settings savechar ']);
+    expect(await t.win.command('/vt settings savechar Runback 2')).toEqual(['settings saved as "Runback 2"']);
+    t.redraw();
     const d = t.saved.at(-1)!;
     expect(d.profiles.map((p) => p.name)).toEqual(['Runback', 'Runback 2']);
     expect(d.profiles[0].navRoute).toBe('runback');
-    expect(d.characters).toEqual({ Claude: 'Runback' });
+    expect(d.characters).toEqual({ Claude: 'Runback 2' });
     expect((t.body.querySelector('[data-vtank="macro-profile"]') as HTMLElement).dataset.field).toBe('Runback 2');
   });
 
@@ -434,6 +446,13 @@ describe('VirindiTank\'s /vt commands', () => {
     expect(t.calls).toEqual(['run Runback', 'force buff', 'state dead', 'mexec getvar[x]==0', 'jump {"heading":90,"walk":true,"holdMs":500}', 'fake death', 'reverse', 'pause']);
   });
 
+  it('setattackbar [0 to 1] sets the combat bar; anything else is the syntax line', async () => {
+    const t = await open();
+    expect(await t.win.command('/vt setattackbar 0.75')).toEqual(['Attack bar set to 0.75.']);
+    expect(await t.win.command('/vt setattackbar high')).toEqual(['Syntax: /vt setattackbar [0 to 1]']);
+    expect(t.calls).toEqual(['bar 0.75', 'bar NaN']);
+  });
+
   it('opt get / set in VTank\'s units (ranges ÷ 240), case-insensitive; setinall sets every profile', async () => {
     const t = await open(docWith(meta(), { ...meta(), name: 'Other' }));
     expect(await t.win.command('/vt opt get attackdistance')).toEqual([`AttackDistance = ${20 / 240}`]);
@@ -455,6 +474,131 @@ describe('VirindiTank\'s /vt commands', () => {
     expect(await t.win.command('/vt settings load Runback')).toEqual(['settings "Runback" loaded']);
     expect((await t.win.command('/vt frobnicate'))[0]).toMatch(/^unknown command \/vt frobnicate/);
     expect(validateRoutineDoc(t.saved.at(-1)!)).toEqual([]);
+  });
+
+  it('addnavcheckpoint adds a checkpoint, addnavjump a jump point (VTank\'s heading / shift / ms), both where you stand', async () => {
+    const t = await open();
+    t.setCoords('42.3N, 33.8E');
+    expect(await t.win.command('/vt addnavcheckpoint')).toEqual(['checkpoint 3 added to "runback"']);
+    expect(await t.win.command('/vt addnavjump 450 true 500')).toEqual(['jump 4 added to "runback"']);
+    expect(await t.win.command('/vt addnavjump 90 false 250 forward')).toEqual(['jump 5 added to "runback"']);
+    const r = t.saved.at(-1)!.profiles[0].routes[0];
+    expect(r.points.slice(2)).toEqual(['42.3N, 33.8E', '42.3N, 33.8E', '42.3N, 33.8E']);
+    expect(r.stops!.slice(1)).toEqual([
+      { at: 2, do: [{ kind: 'checkpoint' }] },
+      { at: 3, do: [{ kind: 'jump', heading: 90, holdMs: 500, walk: true }] },
+      { at: 4, do: [{ kind: 'jump', heading: 90, holdMs: 250, forward: true }] },
+    ]);
+    expect(W.waypointText({ coords: '42.3N, 33.8E', step: [{ kind: 'checkpoint' }] })).toBe('Checkpoint 42.3N, 33.8E');
+    expect(W.waypointText({ coords: '42.3N, 33.8E', step: [{ kind: 'jump', heading: 90, holdMs: 500, walk: true }] })).toBe('Jump 90° (walk) 500 ms');
+    expect(W.waypointText({ coords: '42.3N, 33.8E', step: [{ kind: 'use-portal', id: 0x7a9b0012 }] })).toBe('Portal #7a9b0012');
+    // Bad arguments say the syntax; a strafe jump isn't something our jump does.
+    expect(await t.win.command('/vt addnavjump 90 maybe 500')).toEqual(['/vt addnavjump [heading] [shift: true or false] [milliseconds] [forward]']);
+    expect(await t.win.command('/vt addnavjump 90 true 9000')).toEqual(['/vt addnavjump [heading] [shift: true or false] [milliseconds] [forward]']);
+    expect(await t.win.command('/vt addnavjump 90 true 500 strafeleft')).toEqual(['a strafeleft jump isn\'t supported here (forward or in place)']);
+    expect(validateRoutineDoc(t.saved.at(-1)!)).toEqual([]);
+  });
+
+  it('reverseroute [true|false] sets the direction (none flips it); reverseroutequery reads it back', async () => {
+    const t = await open();
+    expect(await t.win.command('/vt reverseroutequery')).toEqual(['reverseroute is false']);
+    await t.win.command('/vt reverseroute true');
+    expect(await t.win.command('/vt reverseroutequery')).toEqual(['reverseroute is true']);
+    await t.win.command('/vt reverseroute');
+    expect(await t.win.command('/vt reverseroutequery')).toEqual(['reverseroute is false']);
+    expect(await t.win.command('/vt reverseroute sideways')).toEqual(['/vt reverseroute [true|false]']);
+    expect(t.calls).toEqual(['reverse true', 'reverse']);
+  });
+});
+
+describe('VirindiTank files out (AGENT.vtank-export): the Profiles tab\'s CopyTo buttons and /vt … save <name>.<ext>', () => {
+  const read = (name: string) => { const d = downloads.filter((x) => x.name === name).at(-1); if (!d) throw new Error(`no download ${name} (have ${downloads.map((x) => x.name).join(', ')})`); return d.text; };
+
+  it('Meta CopyTo pastes /vt meta save; saved as name.met it hands over the profile\'s .met, which imports back to the same states', async () => {
+    downloads.length = 0;
+    const t = await open();
+    (t.body.querySelector('[data-vtank-tab="profiles"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="copy-meta"]') as HTMLElement).click();
+    expect(t.pasted).toEqual(['/vt meta save ']);
+    t.win.message = (await t.win.command('/vt meta save Runback.met')).slice(1).join(' ');
+    t.redraw();
+    expect(downloads.map((d) => d.name)).toEqual(['Runback.met']);
+    const back = importVTank([{ name: 'Runback.met', text: read('Runback.met') }], null, 'Runback').value;
+    expect(back.states).toEqual(meta().states);
+    // The route the meta loads rides inside (Embed Nav); this one was recorded here, so it has no heights: said so.
+    expect(back.routes.map((r) => [r.name, r.mode, r.points])).toEqual([['runback', 'once', ['42.100N, 33.600E', '42.200N, 33.700E']]]);
+    expect(texts(t.body).join('\n')).toContain('Runback.met saved to your downloads; not carried over exactly (1):');
+    expect(texts(t.body).join('\n')).toContain('route "runback": 2 point(s) have no recorded height; written at height 0');
+  });
+
+  it('nav CopyTo pastes /vt nav save: as name.nav the chosen route\'s .nav comes; with [None] it makes a new route (VTank\'s way); loot CopyTo the .utl', async () => {
+    downloads.length = 0;
+    const t = await open(docWith({ ...meta(), loot: [{ label: 'Pyreals', action: 'keep', match: { name: '^Pyreals?$' } }] }));
+    (t.body.querySelector('[data-vtank-tab="profiles"]') as HTMLElement).click();
+    pick(t.body.querySelector('[data-vtank="nav-profile"]'), 'runback');
+    (t.body.querySelector('[data-vtank="copy-nav"]') as HTMLElement).click();
+    expect(t.pasted).toEqual(['/vt nav save ']);
+    await t.win.command('/vt nav save runback.nav');
+    t.redraw();
+    const nav = parseNav(read('runback.nav'));
+    expect(nav.mode).toBe('once');
+    expect(nav.nodes.map((n) => [n.type, n.extra])).toEqual([[0, []], [2, ['1635']]]);
+    (t.body.querySelector('[data-vtank="copy-loot"]') as HTMLElement).click();
+    expect(utlToLoot(parseUtl(read('Runback.utl'))).value).toEqual([{ label: 'Pyreals', action: 'keep', match: { name: '^Pyreals?$' } }]);
+    pick(t.body.querySelector('[data-vtank="nav-profile"]'), '[None]');
+    (t.body.querySelector('[data-vtank="copy-nav"]') as HTMLElement).click();
+    await t.win.command('/vt nav save Route 1');
+    await flush();
+    expect(downloads.map((d) => d.name)).toEqual(['runback.nav', 'Runback.utl']);
+    expect(t.saved.at(-1)!.profiles[0].navRoute).toBe('Route 1');
+    expect(t.saved.at(-1)!.profiles[0].routes.map((r) => r.name)).toEqual(['runback', 'Route 1']);
+  });
+
+  it('/vt nav | meta | loot save <name> stores as before; with the extension it also hands over the file', async () => {
+    downloads.length = 0;
+    const t = await open(docWith({ ...meta(), loot: [{ label: 'Pyreals', action: 'keep', match: { name: '^Pyreals?$' } }] }));
+    expect(await t.win.command('/vt nav save loop2')).toEqual(['nav saved as "loop2"']);
+    expect(downloads).toEqual([]);
+    const nav = await t.win.command('/vt nav save loop3.nav');
+    expect(nav[0]).toBe('nav saved as "loop3"');
+    expect(nav[1]).toMatch(/^loop3\.nav saved to your downloads/);
+    expect(parseNav(read('loop3.nav')).nodes).toHaveLength(2);
+    expect((await t.win.command('/vt meta save Hunt.met'))[0]).toBe('meta saved as "Hunt"');
+    expect(parseMet(read('Hunt.met')).map((r) => r.state)).toEqual(['Default', 'dead', 'dead', 'back']);
+    expect(await t.win.command('/vt loot save Keepers')).toEqual(['loot saved as "Keepers"']);
+    expect((await t.win.command('/vt loot save Keepers.utl'))[1]).toBe('Keepers.utl saved to your downloads.');
+    expect(downloads.map((d) => d.name)).toEqual(['loop3.nav', 'Hunt.met', 'Keepers.utl']);
+    const d = t.saved.at(-1)!;
+    expect(d.profiles[0].lootSet).toBe('Keepers');
+    expect(d.profiles[0].lootSets?.Keepers).toEqual([{ label: 'Pyreals', action: 'keep', match: { name: '^Pyreals?$' } }]);
+    expect(d.profiles.map((p) => p.name)).toEqual(['Runback', 'Hunt']);
+    // The saved meta brings the routes its rules load (before 2026-10-11 it didn't, and the document stopped saving).
+    expect(d.profiles[1].routes.map((r) => r.name)).toEqual(['runback', 'loop2', 'loop3']);
+    expect(validateRoutineDoc(d)).toEqual([]);
+    expect((await t.win.command('/vt loot frob'))[0]).toBe('/vt loot load <name> | new <name> | save <name>[.utl] (with .utl: also download the file)');
+  });
+
+  it('Add Portal/NPC and Add NPC Talk record the object\'s kind, so the exported point says portal or NPC', async () => {
+    downloads.length = 0;
+    const t = await open();
+    (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
+    t.select({ name: 'Portal to Holtburg', kind: 'portal' });
+    (t.body.querySelector('[data-vtank="add-portal"]') as HTMLElement).click();
+    t.select({ name: 'Sean the Speedy', kind: 'npc' });
+    (t.body.querySelector('[data-vtank="add-npc-talk"]') as HTMLElement).click();
+    await t.win.command('/vt nav save errands.nav');
+    expect(parseNav(read('errands.nav')).nodes.slice(2).map((n) => [n.type, n.extra[0], n.extra[1]])).toEqual([[6, 'Portal to Holtburg', '14'], [7, 'Sean the Speedy', '37']]);
+  });
+
+  it('edits keep an imported route\'s heights with their points', async () => {
+    const t = await open(docWith({ ...meta(), routes: [{ name: 'runback', mode: 'once', points: ['42.100N, 33.600E', '42.200N, 33.700E'], z: [0.39, 0.4] }] }));
+    (t.body.querySelector('[data-vtank-tab="route"]') as HTMLElement).click();
+    pick(t.body.querySelector('[data-vtank="insert-mode"]'), 'Insert Above');
+    (t.body.querySelector('[data-vtank-waypoint="1"]') as HTMLElement).click();
+    (t.body.querySelector('[data-vtank="add-point"]') as HTMLElement).click();
+    expect(t.win.profile()!.routes[0].z).toEqual([0.39, null, 0.4]);
+    (t.body.querySelector('[data-vtank="wp-remove"]') as HTMLElement).click();
+    expect(t.win.profile()!.routes[0].z).toEqual([0.39, 0.4]);
   });
 });
 
@@ -567,7 +711,7 @@ describe('the VirindiTank window: Vitals, Monsters, Items, Consumables, Buffs', 
     (t.body.querySelector('[data-vtank="add-item"]') as HTMLElement).click();
     t.select({ name: 'Kite Shield', kind: 'item' });
     (t.body.querySelector('[data-vtank="add-item-nobuffs"]') as HTMLElement).click();
-    expect(texts(t.body)).toEqual(expect.arrayContaining(['Frost Wand', 'Kite Shield', '(no buffs)']));
+    expect(texts(t.body)).toEqual(expect.arrayContaining(['Frost Wand', 'Kite Shield  (no buffs)']));
     show(t, 'consumables');
     t.select({ name: 'Healing Kit', kind: 'item' });
     (t.body.querySelector('[data-vtank="add-consumable"]') as HTMLElement).click();
@@ -618,6 +762,36 @@ describe('GameUI hosts the VirindiTank window', () => {
     expect(ui.automationWindowOpen).toBe(false);
     expect(H.container.querySelector('[data-vtank-dialog]')).toBeNull();
     ui.setAutomationSource(null);
+  });
+
+  it('CopyTo hands the file over as a browser download, named as VTank names it, in Windows-1252', async () => {
+    const ui = H.ui as unknown as { setAutomationSource(s: VTankSource | null): void; toggleAutomationWindow(): void; automationWindowOpen: boolean };
+    const blobs: Blob[] = [];
+    const clicked: string[] = [];
+    const urlApi = URL as unknown as { createObjectURL?: (b: Blob) => string; revokeObjectURL?: (u: string) => void };
+    const anchor = Object.getPrototypeOf(document.createElement('a')) as { click(): void };
+    const saved = { create: urlApi.createObjectURL, revoke: urlApi.revokeObjectURL, click: anchor.click };
+    urlApi.createObjectURL = (b: Blob) => { blobs.push(b); return 'blob:x'; };
+    urlApi.revokeObjectURL = () => {};
+    anchor.click = function (this: HTMLAnchorElement) { clicked.push(this.download); };
+    try {
+      ui.setAutomationSource(fakeSource(docWith({ ...meta(), loot: [{ label: 'Café', action: 'keep', match: { name: 'Café' } }] })).source);
+      ui.toggleAutomationWindow();
+      await new Promise((r) => setTimeout(r, 0));
+      const win = H.container.querySelector('[data-vtank-window]') as HTMLElement;
+      (win.querySelector('[data-vtank-tab="profiles"]') as HTMLElement).click();
+      (win.querySelector('[data-vtank="copy-loot"]') as HTMLElement).click();
+      expect(clicked).toEqual(['Runback.utl']);
+      const bytes = new Uint8Array(await blobs[0].arrayBuffer());
+      expect(Array.from(bytes)).toContain(0xe9); // é, one Windows-1252 byte
+      expect(utlToLoot(parseUtl(Buffer.from(bytes).toString('latin1'))).value[0].label).toBe('Café');
+      ui.toggleAutomationWindow();
+      ui.setAutomationSource(null);
+    } finally {
+      urlApi.createObjectURL = saved.create;
+      urlApi.revokeObjectURL = saved.revoke;
+      anchor.click = saved.click;
+    }
   });
 });
 
@@ -703,5 +877,39 @@ describe('the stand-by profile (M. Charges When Off with the macro off)', () => 
     await flush();
     expect(loads).toBe(2);
     expect(win.standbyProfile()?.name).toBe('Other');
+  });
+});
+
+describe('the window\'s looting controls and commands (docs/vtank-parity-gaps.md §3.7, §3.9)', () => {
+  it('the Approach box sets the corpse approach range too (VTank\'s box writes both); /vt opt set sets only the one', async () => {
+    const t = await open();
+    t.setStatus({ running: true, profile: 'Runback' });
+    const box = t.body.querySelector('[data-vtank-option="ApproachDistance"]') as HTMLInputElement;
+    box.value = '30';
+    box.dispatchEvent(new Event('input'));
+    await flush();
+    const s = t.saved.at(-1)!.profiles.find((p) => p.name === 'Runback')!.settings!;
+    expect(s.ApproachDistance).toBe(30);
+    expect(s['CorpseApproachRange-Max']).toBe(30);
+    expect(t.calls).toEqual(expect.arrayContaining(['set ApproachDistance=30', 'set CorpseApproachRange-Max=30']));
+    await t.win.command(`/vt opt set ApproachDistance ${10 / 240}`);
+    const s2 = t.saved.at(-1)!.profiles.find((p) => p.name === 'Runback')!.settings!;
+    expect(s2.ApproachDistance).toBe(10);
+    expect(s2['CorpseApproachRange-Max']).toBe(30);
+  });
+
+  it('/vt testitem tests the selected item against the loaded loot profile; /vt propertydump dumps it', async () => {
+    const p = meta();
+    p.loot = [{ label: 'Own', action: 'keep', match: { name: 'Pyreal' } }];
+    p.lootSets = { hunt: [{ label: 'Hunt', action: 'sell', match: { name: 'Sword' } }] };
+    p.lootSet = 'hunt';
+    const t = await open(docWith(p));
+    let tested: unknown = null;
+    t.source.testItem = async (rules) => { tested = rules; return ['TestItem: Sword => sell (rule: Hunt)']; };
+    t.source.propertyDump = async () => ['Properties of Sword:', '  Int: Value(19)=80'];
+    expect(await t.win.command('/vt testitem')).toEqual(['TestItem: Sword => sell (rule: Hunt)']);
+    expect(tested).toEqual(p.lootSets.hunt);
+    expect(await t.win.command('/vt propertydump')).toEqual(['Properties of Sword:', '  Int: Value(19)=80']);
+    expect((await t.win.command('/vt nosuch'))[0]).toMatch(/testitem, propertydump, log\)$/);
   });
 });

@@ -6,7 +6,7 @@
  * the account itself: the token decides whose routines these are.
  */
 import type { RoutinesGrant } from '@ac/network';
-import { emptyRoutineDoc, validateRoutineDoc, type RoutineDoc } from '@ac/shared';
+import { emptyRoutineDoc, upgradeStoredLootRules, validateRoutineDoc, type RoutineDoc } from '@ac/shared';
 
 /** Browser storage for a bridge that keeps no routines: one document per server + account, in this browser only. */
 export interface RoutineLocalStore { getItem(key: string): string | null; setItem(key: string, value: string): void }
@@ -123,7 +123,11 @@ export class RoutineSync {
   }
 
   /** The account's routine document (an empty one when none is stored). */
-  load(): Promise<RoutineSyncResult> { return this.call('GET'); }
+  async load(): Promise<RoutineSyncResult> {
+    const r = await this.call('GET');
+    if (r.ok) upgradeStoredLootRules(r.doc); // rules stored by an older importer (vtank.ts)
+    return r;
+  }
 
   /** Validate and store the account's routine document on the bridge. */
   save(doc: unknown): Promise<RoutineSyncResult> { return this.call('PUT', doc); }

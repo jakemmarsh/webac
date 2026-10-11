@@ -12,14 +12,19 @@
  * live game before turning it on.
  */
 import {
-  itemTypeLabel, parseMetaView, VT_DAMAGE, vtCanonicalName, vtDefaults, type MetaView, type MetaViewButton,
+  itemTypeLabel, parseMetaView, SALVAGE_COMBINE_DEFAULTS, VT_DAMAGE, vtCanonicalName, vtDefaults, type MetaView, type MetaViewButton, type SalvageCombine,
   type LootRule, type PropTest, type Route, type RoutineAction, type RoutineCondition, type RoutineProfile, type RoutineRule,
 } from '@ac/shared';
 import { MAP_COORD_ORIGIN, parseMapCoords, type AgentApi, type LootDecision } from './AgentApi.ts';
 import { VtMacro, vtAttackHeight } from './macro/vtMacro.ts';
 import { matchMonsterRow } from './macro/combatPlan.ts';
 import { autoAttackPower, powerItemsToExamine, swingElement, wieldedPair, type PowerItem } from './macro/attackPower.ts';
-import { planInventory } from './macro/inventoryPlan.ts';
+import { InventoryTidy } from './macro/inventoryPlan.ts';
+import { findUst, planSalvageCombine, salvageRefusal } from './macro/salvagePlan.ts';
+import { isRecall, nearestStart, openDoorOnTheWay, runCheckpoint, runRecall, runUseStep, stopsAt, walksTo, type NodeCtx } from './routeNodes.ts';
+import { isCorpseDenial } from './macro/corpseBook.ts';
+import { LootExtras } from './macro/lootExtras.ts';
+import { propertyDumpLines, testItemLine } from './macro/lootTest.ts';
 import type { AgentObservation, AgentResult } from './types.ts';
 
 /** Live facts the conditions read that the observation doesn't carry. */
@@ -43,7 +48,7 @@ export function ruleModules(rule: RoutineRule): Array<keyof RoutineProfile['modu
     if (a.kind === 'cast-buffs') out.add('buffs');
     else if (a.kind === 'attack-nearest') out.add('combat');
     else if (a.kind === 'loot-nearby') out.add('looting');
-    else if (a.kind === 'follow-route' || a.kind === 'walk-to') out.add('navigation');
+    else if (a.kind === 'follow-route' || a.kind === 'walk-to' || a.kind === 'checkpoint' || a.kind === 'use-portal') out.add('navigation');
     else if (a.kind === 'sell-by-loot-rules') out.add('inventory');
     else if (a.kind === 'use-item' || (a.kind === 'cast' && a.target !== 'target')) {
       if (rule.when.some((c) => c.kind === 'vital-below')) out.add('vitals');
@@ -138,12 +143,16 @@ export function lootRuleFor(rules: LootRule[], item: { name: string; value?: num
       if (dmg === undefined || dmg - dmg * variance < m.minDamageAtLeast) continue;
     }
     if (m.props?.length && !(item.props && m.props.every((t) => propHolds(t, item.props!)))) continue;
-    if (m.spells) {
+    // Every spell test must hold (VTClassic: all of a rule's requirements match).
+    const spellTests = m.spells ? [m.spells, ...(m.moreSpells ?? [])] : m.moreSpells ?? [];
+    if (spellTests.length) {
       const names = item.props?.spells;
       if (!names) continue;
-      const yes = new RegExp(m.spells.match, 'i');
-      const no = m.spells.notMatch ? new RegExp(m.spells.notMatch, 'i') : null;
-      if (names.filter((n) => yes.test(n) && !(no && no.test(n))).length < m.spells.count) continue;
+      if (!spellTests.every((t) => {
+        const yes = new RegExp(t.match, 'i');
+        const no = t.notMatch ? new RegExp(t.notMatch, 'i') : null;
+        return names.filter((n) => yes.test(n) && !(no && no.test(n))).length >= t.count;
+      })) continue;
     }
     if (m.spellCountAtLeast !== undefined && !((item.props?.spells?.length ?? -1) >= m.spellCountAtLeast)) continue;
     if (m.name && !new RegExp(m.name, 'i').test(item.name)) continue;
@@ -173,7 +182,7 @@ export function appraisalFacts(text: string): { value?: number; burden?: number;
 function needsExamination(rules: LootRule[], item: { name: string; type: string }): boolean {
   for (const r of rules) {
     const m = r.match;
-    if (m.valueAtLeast !== undefined || m.valueAtMost !== undefined || m.burdenAtMost !== undefined || m.appraisal || m.props?.length || m.spells || m.spellCountAtLeast !== undefined || m.minDamageAtLeast !== undefined || m.totalRatingsAtLeast !== undefined) {
+    if (m.valueAtLeast !== undefined || m.valueAtMost !== undefined || m.burdenAtMost !== undefined || m.appraisal || m.props?.length || m.spells || m.moreSpells?.length || m.spellCountAtLeast !== undefined || m.minDamageAtLeast !== undefined || m.totalRatingsAtLeast !== undefined) {
       if (lootRuleFor([{ ...r, match: { name: m.name, types: m.types } }], item)) return true;
       continue;
     }
@@ -226,8 +235,8 @@ const STEP_MS = 500;
 
 /** VirindiTank's defaults for the settings the macro reads (overridden by the profile's settings, then by set-setting). */
 /** The macro's starting settings: VirindiTank's defaults (vtankOptions.ts; EnableMeta is on there, see its note). */
-/** A VirindiTank command line (/vt … or /vtank …). */
-export const VT_COMMAND = /^\s*\/(vt|vtank)(\s|$)/i;
+/** A VirindiTank command line (/vt … or /vtank …), or a UtilityBelt one (/ub …): the automation window's handler runs both. */
+export const VT_COMMAND = /^\s*\/(vt|vtank|ub)(\s|$)/i;
 
 export const MACRO_DEFAULTS: Record<string, string | number | boolean> = { ...vtDefaults(), BuffSet: '' };
 
@@ -260,6 +269,12 @@ export const CORPSE_OPEN_RANGE_M = 5;
  * death's start, a few seconds before its corpse appears, so 5 s more.
  */
 const RARE_LEAD_MS = 10_000;
+/** A Salvage item the server didn't take after this many sends is kept (reported), not tried for ever. */
+const SALVAGE_TRIES = 3;
+/** How long an item waits for its appraisal (NumTimesTinkered) before it is kept unsalvaged. */
+const SALVAGE_EXAMINE_MS = 10_000;
+/** A bag that won't combine after this many tries is left alone (MOSS: a "bugged salvage bag" after 40). */
+const COMBINE_TRIES = 40;
 
 /**
  * VTank's next corpse (MOSS Looting.CorpseScan SelectCorpse): among those within CORPSE_OPEN_RANGE_M,
@@ -289,8 +304,11 @@ export class RoutineEngine {
    * corpse was looted (or looked for and never found), so it is no longer loot to fetch.
    */
   private kills: Array<{ name: string; at: number; looted?: boolean }> = [];
-  /** Corpses loot-nearby already went through (guid → when), so each kill's corpse is looted once. */
-  private lootedCorpses = new Map<number, number>();
+  /**
+   * VirindiTank's looting beyond the rules (macro/lootExtras.ts): the corpse book (whose corpse, looted,
+   * refused, skipped), unknown scrolls to read and mana donors to drain.
+   */
+  readonly loot: LootExtras;
   /** When the latest rare of yours was announced (Loot Only Rare Corpses looks at kills around then). */
   private rareAt = -Infinity;
   private stopRequested = false;
@@ -299,6 +317,10 @@ export class RoutineEngine {
   private eventMark = 0;
   /** The route the macro walks (load-route / VTank's Embed Nav). */
   private nav: { route: Route; i: number; dir: 1 | -1; done: boolean } | null = null;
+  /** OpenDoors: doors left alone for a while (wouldn't open, or locked past our lockpicks). */
+  private doorSkip = new Map<number, number>();
+  /** The route point NavFarStopRange last held the route at (said once per point). */
+  private farHeld: string | null = null;
   private callStack: string[] = [];
   /**
    * A Follow route's leader: where they have been (global metres, the
@@ -311,12 +333,22 @@ export class RoutineEngine {
   /** Loot Only Rare Corpses: a rare of yours was announced and not looted yet. */
   private rarePending = false;
   private rareMark = 0;
-  /** When the macro last moved an item (Autostack / Autocram wait for the server between moves). */
-  private lastTidyAt = -Infinity;
+  /** Autostack / Autocram (and UB's /ub autostack / autocram passes): one move at a time, each waiting for the server's answer. */
+  private tidyRun: InventoryTidy | null = null;
+  get tidy(): InventoryTidy { return (this.tidyRun ??= new InventoryTidy(this.api, this.now)); }
   /** Wielded weapons the macro asked to examine for the power bar (once each). */
   private powerAsked = new Set<number>();
   /** VirindiTank's planners, for profiles with its tabs (made on first use). */
   private vt: VtMacro | null = null;
+  /** Items a Salvage loot rule took (guid → name, sends tried, when its appraisal was asked for), waiting for the Ust. */
+  private toSalvage = new Map<number, { name: string; tries: number; askedAt?: number }>();
+  /** The "no Ust" warning was given (again only after a Ust has come and gone). */
+  private warnedNoUst = false;
+  /** CombineSalvage: tries per bag, and bags given up on. */
+  private combineTries = new Map<number, number>();
+  private combineSkip = new Set<number>();
+  /** The loot set in use (start's lootSet, then load-loot), whose SalvageCombine bands apply; null: the profile's own loot. */
+  private activeLootSet: string | null = null;
   /** A death already counted (StopMacroOnDeath off holds still while dead). */
   private deadSeen = false;
   /** When the run last resumed from a pause (Seconds in State counts from it, as VTank's does from switching on). */
@@ -357,7 +389,9 @@ export class RoutineEngine {
   /** Player-facing reports ("Kept Pyreals (rule: Money)"); main.ts prints them to chat as [Automation]. */
   onReport: ((text: string) => void) | null = null;
 
-  constructor(private readonly api: AgentApi, private readonly facts: RoutineFacts, private readonly now: () => number) {}
+  constructor(private readonly api: AgentApi, private readonly facts: RoutineFacts, private readonly now: () => number) {
+    this.loot = new LootExtras(api, now, (t) => this.report(t));
+  }
 
   start(profile: RoutineProfile): AgentResult {
     // A copy: the panel's module switches change this run, not the stored document.
@@ -386,8 +420,10 @@ export class RoutineEngine {
     for (const [k, v] of Object.entries(profile.settings ?? {})) this.settings[vtCanonicalName(k)] = v;
     // VirindiTank's Auto-Navigation and Looting profiles: the route and loot set it starts with.
     const navRoute = profile.navRoute ? profile.routes.find((r) => r.name === profile.navRoute) : undefined;
-    if (navRoute) this.nav = { route: navRoute, i: 0, dir: 1, done: navRoute.mode !== 'follow' && navRoute.points.length === 0 };
-    if (profile.lootSet && profile.lootSets?.[profile.lootSet]) this.profile.loot = profile.lootSets[profile.lootSet];
+    this.reversed = false;
+    if (navRoute) this.nav = this.loadNav(navRoute);
+    this.activeLootSet = null;
+    if (profile.lootSet && profile.lootSets?.[profile.lootSet]) { this.profile.loot = profile.lootSets[profile.lootSet]; this.activeLootSet = profile.lootSet; }
     this.note(`started "${profile.name}" in "${this.state}"`);
     return { ok: true, message: `running "${profile.name}" (starts in "${this.state}")` };
   }
@@ -413,6 +449,26 @@ export class RoutineEngine {
       ...(this.nav ? { nav: { route: this.nav.route.name, point: this.nav.i, done: this.nav.done } } : {}),
       ...(this.follow && this.nav?.route.mode === 'follow' ? { follow: { target: this.follow.who, inSight: this.follow.inSight, trail: this.follow.trail.length } } : {}),
     };
+  }
+
+  /** The running profile (UtilityBelt's AutoVendor / equip / ig read its loot sets), or null. */
+  get loadedProfile(): RoutineProfile | null { return this.profile; }
+
+  /** Until when UtilityBelt holds the macro's navigation (its VTank Navigation lock: vendor, give, jump, portal). */
+  private navHeldUntil = 0;
+  /** UtilityBelt's navigation lock: no route walking for `ms` (0 lets go). */
+  holdNav(ms: number): void { this.navHeldUntil = ms > 0 ? this.now() + ms : 0; }
+
+  /**
+   * UtilityBelt's `/ub follow` (Plugin.FollowChar): load a Follow route on this player and switch
+   * navigation on, as UB loads VTank's "UBFollow" nav. Not saved in the profile.
+   */
+  followPlayer(name: string): AgentResult {
+    if (!this.profile) return { ok: false, message: 'no routine is running (start the macro first: /vt start)' };
+    this.reversed = false;
+    this.nav = this.loadNav({ name: 'UBFollow', mode: 'follow', follow: name, points: [] });
+    this.settings.EnableNav = true;
+    return { ok: true, message: `following ${name}` };
   }
 
   /** Hold still (the current action finishes its step; nothing new starts) until resume(). */
@@ -481,10 +537,11 @@ export class RoutineEngine {
     this.stateSince = this.now();
   }
 
-  /** VirindiTank's /vt reverseroute: walk the loaded route the other way (its stops move with their points). */
-  reverseRoute(): AgentResult {
+  /** VirindiTank's /vt reverseroute [true|false]: walk the loaded route the other way (its stops move with their points); no argument flips it. */
+  reverseRoute(on?: boolean): AgentResult {
     if (!this.nav) return { ok: false, message: 'no route loaded' };
     const r = this.nav.route;
+    if (on !== undefined && on === this.reversed) return { ok: true, message: `route "${r.name}" ${on ? 'already reversed' : 'already walked forwards'}` };
     const last = r.points.length - 1;
     this.nav.route = { ...r, points: [...r.points].reverse(), ...(r.stops ? { stops: r.stops.map((st) => ({ ...st, at: last - st.at })) } : {}) };
     this.nav.i = Math.max(0, last - this.nav.i);
@@ -552,7 +609,12 @@ export class RoutineEngine {
     if (!this.profile) return { ok: false, message: 'no routine is running' };
     if (profile.name !== this.profile.name) return { ok: false, message: `"${profile.name}" is not the running routine` };
     const modules = this.profile.modules;
+    const before = this.profile.lootSet;
     this.profile = { ...profile, modules: { ...modules } };
+    // The loot set in use stays loaded, with its edits (before 2026-10-11 an edit while running put the
+    // profile's own rules back in its place); choosing another Looting profile loads that one, as VTank's dropdown does.
+    const set = profile.lootSet !== before ? profile.lootSet ?? null : this.activeLootSet;
+    if (set !== null && profile.lootSets?.[set]) { this.profile.loot = profile.lootSets[set]; this.activeLootSet = set; } else this.activeLootSet = null;
     if (!profile.states.some((s) => s.name === this.state)) this.enterState(profile.initialState, null);
     if (this.nav) { const r = profile.routes.find((x) => x.name === this.nav!.route.name); this.nav = r ? { ...this.nav, route: r, i: Math.min(this.nav.i, Math.max(0, r.points.length - 1)), done: this.nav.done || (r.mode !== 'follow' && r.points.length === 0) } : null; } // a Follow route has no points and never ends
     this.spent.clear();
@@ -857,10 +919,11 @@ export class RoutineEngine {
       }
     }
     // Enable Meta off (VirindiTank): the rules don't run; the macro still does.
-    if (!truthySetting(this.settings.EnableMeta)) { if (p.macro) this.macroStep(p); return; }
+    if (!truthySetting(this.settings.EnableMeta)) { if (p.macro) this.macroStep(p); else this.lootUpkeep(p); return; }
     const verdicts = this.dryRun();
     const at = verdicts.findIndex((v) => v.fires);
-    if (at < 0) { if (p.macro) this.macroStep(p); return; }
+    // No rule acting: the macro, or (a rules-only profile) the loot's salvaging.
+    if (at < 0) { if (p.macro) this.macroStep(p); else this.lootUpkeep(p); return; }
     const rule = p.states.find((s) => s.name === this.state)!.rules[at];
     const key = `${this.state}#${at}`;
     if (p.ruleFiring === 'once') this.spent.add(key);
@@ -882,10 +945,11 @@ export class RoutineEngine {
     const st = this.settings;
     const range = Math.max(0, Number(st.AttackDistance) || 0);
     const approach = Math.max(0, Number(st.ApproachDistance) || 0);
-    const obs = this.api.snapshot({ radius: Math.max(range, approach, 20), max: 30 });
+    const reach = this.corpseReach();
+    const obs = this.api.snapshot({ radius: Math.max(range, approach, reach, 20), max: 30 });
     const combat = truthySetting(st.EnableCombat) && p.modules.combat;
     const looting = truthySetting(st.EnableLooting) && p.modules.looting;
-    const navOn = truthySetting(st.EnableNav) && p.modules.navigation && !!this.nav && !this.nav.done;
+    const navOn = truthySetting(st.EnableNav) && p.modules.navigation && !!this.nav && !this.nav.done && this.now() >= this.navHeldUntil;
     const monsters = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying);
     const inRange = combat && monsters.some((o) => o.dist <= range);
     const near = combat && truthySetting(st.EnableNav) && approach > range ? monsters.filter((o) => o.dist > range && o.dist <= approach).sort((a, b) => a.dist - b.dist)[0] : undefined;
@@ -897,8 +961,10 @@ export class RoutineEngine {
       this.rareMark = Math.max(this.rareMark, e.seq);
       if (myName && e.type === 'chat' && e.text.replace(/^\([a-z]+\) /, '').startsWith(`${myName} has discovered the `)) { this.rarePending = true; this.rareAt = this.now(); }
     }
-    // A kill is loot to fetch until its own corpse is looted (one try per corpse), so every kill of a ring or arc gets looted.
-    const lootDue = looting && (truthySetting(st.LootOnlyRareCorpses) ? this.rarePending : this.killsToLoot().length > 0);
+    // A kill is loot to fetch until its own corpse is looted (one try per corpse), so every kill of a ring or arc gets looted;
+    // with LootFellowCorpses / LootAllCorpses, so is another's corpse once VTank may take it (corpseBook.ts).
+    if (looting) this.loot.book.observe(obs.nearby.filter((o) => o.kind === 'corpse').map((o) => o.guid), this.now(), this.loot.settings(st));
+    const lootDue = looting && (truthySetting(st.LootOnlyRareCorpses) ? this.rarePending : this.killsToLoot().length > 0 || this.othersDue(obs.nearby, reach));
     // A profile with VirindiTank's tabs: its planners decide recharge, combat and buffs (vtMacro.ts).
     if (p.vtank) {
       this.vt ??= new VtMacro(this.api, this.now);
@@ -914,16 +980,14 @@ export class RoutineEngine {
           return;
         }
       }
-      if (lootDue && !inRange) steps.push({ kind: 'loot-nearby', meters: 20 });
-      else if (!inRange && !near && this.now() - this.lastTidyAt > 2500 && (truthySetting(st.AutoStack) || truthySetting(st.AutoCram))) {
-        // Enable Autostack / Autocram: one pack tidy-up at a time when nothing else is to do.
-        const tidy = planInventory({ items: this.api.itemSlots(), packs: this.api.packs(), autostack: truthySetting(st.AutoStack), autocram: truthySetting(st.AutoCram) });
-        if (tidy) {
-          this.lastTidyAt = this.now();
-          const r = tidy.kind === 'merge' ? this.api.placeItem(tidy.from, { onto: tidy.onto }) : this.api.placeItem(tidy.guid, { packSlot: tidy.packSlot });
-          this.note(`${tidy.why}: ${r.message}`);
-          return;
-        }
+      // Salvage (the Salvage loot action, then CombineSalvage) before the next corpse, as VTank's loot pass does.
+      if (!inRange && this.lootUpkeep(p)) return;
+      if (lootDue && !inRange) steps.push({ kind: 'loot-nearby', meters: reach });
+      else if (!inRange && !near && (truthySetting(st.AutoStack) || truthySetting(st.AutoCram))) {
+        // Enable Autostack / Autocram: one pack tidy-up at a time when nothing else is to do; the next waits for the server's answer.
+        const t = this.tidy.step({ autostack: truthySetting(st.AutoStack), autocram: truthySetting(st.AutoCram) });
+        if (t.text) this.note(t.text);
+        if (t.kind === 'moved' || t.kind === 'abandoned') return;
       }
       if (steps.length) { /* loot below */ } else if (near) {
         this.acting = `approach ${near.name}`;
@@ -933,8 +997,14 @@ export class RoutineEngine {
       }
       if (!steps.length && navOn) { void this.walkNav(); return; }
       if (!steps.length) {
-        const mode = obs.me?.combatMode;
-        if (truthySetting(st.IdlePeaceMode) && mode && mode !== 'peace' && mode !== 'unknown') void this.act({ kind: 'combat-mode', mode: 'peace' }, p);
+        // VTank's last rules: RandomHelperBuffs, then Peace Mode When Idle (through the macro's mode gate).
+        const vp = p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> };
+        const last = (p.modules.buffs ? this.vt.helperStep(vp, st) : null) ?? (truthySetting(st.IdlePeaceMode) ? this.vt.peaceStep(vp, st) : null);
+        if (last) {
+          this.acting = last.label;
+          this.busy = true;
+          void last.run().then((r) => this.note(`${last.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.note(`${last.label}: ${String((e as Error)?.message ?? e)}`)).finally(() => { this.busy = false; this.acting = null; });
+        }
         return;
       }
       this.acting = 'macro';
@@ -944,7 +1014,7 @@ export class RoutineEngine {
       return;
     }
     if (inRange) {
-      if (lootDue && truthySetting(st.LootPriorityBoost)) steps.push({ kind: 'loot-nearby', meters: 20 });
+      if (lootDue && truthySetting(st.LootPriorityBoost)) steps.push({ kind: 'loot-nearby', meters: reach });
       steps.push({ kind: 'attack-nearest', meters: range });
     } else if (near) {
       // Approach: run at it until it is within Monster Range.
@@ -952,8 +1022,10 @@ export class RoutineEngine {
       this.busy = true;
       void this.api.walkTo(near.guid, { within: Math.max(1, range - 0.5), timeoutMs: 30_000 }).then((r) => this.note(`approach ${near.name}: ${r.message.split('\n')[0]}`)).finally(() => { this.busy = false; this.acting = null; });
       return;
+    } else if (this.lootUpkeep(p)) {
+      return;
     } else if (lootDue) {
-      steps.push({ kind: 'loot-nearby', meters: 20 });
+      steps.push({ kind: 'loot-nearby', meters: reach });
     } else if (truthySetting(st.EnableBuffing) && p.modules.buffs && this.buffsDue().length) {
       steps.push({ kind: 'cast-buffs', set: this.macroBuffSet()!.name });
     }
@@ -967,6 +1039,132 @@ export class RoutineEngine {
     this.busy = true;
     const looting2 = steps.some((x) => x.kind === 'loot-nearby');
     void this.run(steps, p).finally(() => { if (looting2) this.rarePending = false; this.busy = false; this.acting = null; });
+  }
+
+  /**
+   * How far the macro goes for a corpse (VTank, MOSS CorpseApproach): arm's reach (CORPSE_OPEN_RANGE_M), or out to
+   * CorpseApproachRange-Max when that is further (the Options tab's Approach box sets it too: vtLinkedSettings).
+   */
+  private corpseReach(): number {
+    return Math.max(CORPSE_OPEN_RANGE_M, Number(this.settings['CorpseApproachRange-Max']) || 0);
+  }
+
+  /** LootFellowCorpses / LootAllCorpses: some corpse within reach still to look at, or that VTank may take now. */
+  private othersDue(nearby: ReadonlyArray<{ guid: number; kind: string; dist: number }>, reach: number): boolean {
+    const bs = this.loot.settings(this.settings);
+    if (!bs.lootAll && !bs.lootFellow) return false;
+    const me = this.api.snapshot({ max: 0 }).me?.name ?? '';
+    const ctx = { me, fellows: this.loot.fellows(), settings: bs, now: this.now() };
+    return nearby.some((o) => o.kind === 'corpse' && o.dist <= reach && !this.loot.book.skipped(o.guid, ctx.now, bs)
+      && (this.loot.book.needsDescription(o.guid) || this.loot.book.mayLoot(o.guid, ctx) === true));
+  }
+
+  /**
+   * Between corpses, VTank's loot pass: read an unknown scroll it took, drain a donor into a stone (lootExtras.ts),
+   * then salvage. Only with looting on (the macro's Enable Looting too). True when it started a step.
+   */
+  private lootUpkeep(p: RoutineProfile): boolean {
+    if (p.modules.looting && !(p.macro && !truthySetting(this.settings.EnableLooting))) {
+      const step = this.loot.step(p.vtank?.consumables ?? [], this.settings);
+      if (step) {
+        this.busy = true;
+        this.acting = step.label;
+        void step.run().then((r) => this.note(`${step.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.note(`${step.label}: ${String((e as Error)?.message ?? e)}`)).finally(() => { this.busy = false; this.acting = null; });
+        return true;
+      }
+    }
+    return this.salvageUpkeep(p);
+  }
+
+  /**
+   * VirindiTank's /vt testitem: what the loot rules would do with the selected item were it on a corpse
+   * (examining it first, quietly, for rules that need its properties). `rules`: the window's loot rules; else the run's.
+   */
+  async testItem(rules?: LootRule[]): Promise<string[]> {
+    const g = this.api.selectedGuid();
+    if (g === null) return ['TestItem: select an item first.'];
+    const carried = this.api.inventory().find((i) => i.guid === g);
+    const o = this.api.snapshot({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g);
+    const name = carried?.name ?? o?.name;
+    if (!name) return ['TestItem: select an item first.'];
+    const r = await this.api.appraise(g, { quiet: true });
+    const facts = r.ok ? { ...appraisalFacts(r.message), ...(r.data ? { props: r.data as ItemProps } : {}) } : {};
+    const type = carried?.type ?? (carried?.itemType !== undefined ? itemTypeLabel(carried.itemType) : undefined);
+    const rule = lootRuleFor(rules ?? this.profile?.loot ?? [], { name, ...(type ? { type } : {}), ...(carried?.value !== undefined ? { value: carried.value } : {}), ...(carried?.burden !== undefined ? { burden: carried.burden } : {}), palettes: this.api.itemPalettes(g), ...facts }, this.lootCharacter());
+    return [testItemLine(name, rule && rule.action !== 'ignore' ? { action: rule.action, rule: rule.label ?? rule.action } : null)];
+  }
+
+  /** VirindiTank's /vt propertydump: the selected item's raw properties, as its examination gave them. */
+  async propertyDump(): Promise<string[]> {
+    const g = this.api.selectedGuid();
+    if (g === null) return ['propertydump: select something first.'];
+    const r = await this.api.appraise(g, { quiet: true });
+    const name = this.api.inventory().find((i) => i.guid === g)?.name ?? this.api.snapshot({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g)?.name ?? `#${g.toString(16)}`;
+    if (!r.ok) return [`propertydump: ${r.message}`];
+    return propertyDumpLines(name, (r.data ?? this.api.itemData(g)) as ItemProps | null);
+  }
+
+  /** The SalvageCombine bands in use: the loaded loot set's, else the profile's own, else VTClassic's defaults. */
+  private salvageBands(p: RoutineProfile): SalvageCombine {
+    if (this.activeLootSet !== null) return p.salvageCombineSets?.[this.activeLootSet] ?? SALVAGE_COMBINE_DEFAULTS;
+    return p.salvageCombine ?? SALVAGE_COMBINE_DEFAULTS;
+  }
+
+  /**
+   * VirindiTank's salvaging, with looting on, between corpses (docs/vtank-parity-gaps.md §3.1;
+   * macro/salvagePlan.ts): first each item a Salvage rule took goes into the Ust, one at a time, through
+   * the salvage panel's own action (never a tinkered, retained or worn one; a missing Ust is said once);
+   * then, with CombineSalvage, partial bags of one material in one workmanship band are combined. Only
+   * where the era can salvage (none in 1999: EraFeatures). True when it started a step (the engine is busy).
+   */
+  private salvageUpkeep(p: RoutineProfile): boolean {
+    // Looting on: the module, and for the macro its Enable Looting (a rules-only profile loots by its rules' loot-nearby).
+    if (!p.modules.looting || (p.macro && !truthySetting(this.settings.EnableLooting))) return false;
+    if (!this.api.canSalvage()) { this.toSalvage.clear(); return false; }
+    const inv = this.api.inventory();
+    const carried = new Map(inv.map((i) => [i.guid, i]));
+    for (const g of [...this.toSalvage.keys()]) if (!carried.has(g)) this.toSalvage.delete(g);
+    const ust = findUst(inv.map((i) => ({ ...i, equipped: i.where === 'equipped' })));
+    if (this.toSalvage.size) {
+      if (!ust) {
+        if (!this.warnedNoUst) { this.warnedNoUst = true; this.report('No Ust in your inventory: items marked for salvage are kept until you carry one.'); this.note('salvage: waiting for a Ust'); }
+      } else {
+        this.warnedNoUst = false;
+        for (const [g, m] of this.toSalvage) {
+          const item = { ...carried.get(g)!, equipped: carried.get(g)!.where === 'equipped' };
+          // Whether it was tinkered (or retained) is in its appraisal: look first, quietly.
+          const props = this.api.itemData(g);
+          if (!props) {
+            if (m.askedAt === undefined) { m.askedAt = this.now(); void this.api.appraise(g, { quiet: true }); return false; }
+            if (this.now() - m.askedAt < SALVAGE_EXAMINE_MS) return false;
+          }
+          const why = props ? salvageRefusal(item, props) : 'its appraisal never came';
+          if (why) { this.toSalvage.delete(g); this.report(`Kept ${m.name} unsalvaged: ${why}`); this.note(`salvage: kept ${m.name}: ${why}`); continue; }
+          this.busy = true;
+          this.acting = `salvage ${m.name}`;
+          void this.api.salvage(ust.guid, [g]).then((r) => {
+            this.note(`salvage ${m.name}: ${r.message}`);
+            if (r.ok) { this.toSalvage.delete(g); this.report(`Salvaged ${m.name}`); return; }
+            if (++m.tries >= SALVAGE_TRIES) { this.toSalvage.delete(g); this.report(`Kept ${m.name} unsalvaged: ${r.message}`); }
+          }).finally(() => { this.busy = false; this.acting = null; });
+          return true;
+        }
+      }
+    }
+    if (!ust || !truthySetting(this.settings.CombineSalvage)) return false;
+    const plan = planSalvageCombine(inv.map((i) => ({ ...i, equipped: i.where === 'equipped' })), this.salvageBands(p), this.combineSkip);
+    if (!plan) return false;
+    this.busy = true;
+    this.acting = 'combine salvage';
+    void this.api.salvage(ust.guid, plan.guids).then((r) => {
+      this.note(`combine salvage (${plan.names.join(', ')}): ${r.message}`);
+      if (r.ok) { for (const g of plan.guids) this.combineTries.delete(g); return; }
+      const first = plan.guids[0];
+      const n = (this.combineTries.get(first) ?? 0) + 1;
+      this.combineTries.set(first, n);
+      if (n >= COMBINE_TRIES) { this.combineSkip.add(first); this.combineTries.delete(first); this.note(`combine salvage: gave up on ${plan.names[0]}`); }
+    }).finally(() => { this.busy = false; this.acting = null; });
+    return true;
   }
 
   /**
@@ -993,18 +1191,89 @@ export class RoutineEngine {
     return autoAttackPower({ element: swingElement(damage, wieldedPair(items).weapon), items, settings: this.settings, skills: this.api.skillList() });
   }
 
-  /** A route point's stops (recall, pause, say, use a portal/NPC/vendor, jump), in order. */
-  private async runStops(route: Route, i: number): Promise<void> {
+  /**
+   * A route as the macro starts it (VirindiTank, at Run Macro and at a route load): circular and linear
+   * routes start at the point nearest you that you could be at; a once route at its head.
+   */
+  private loadNav(route: Route): { route: Route; i: number; dir: 1 | -1; done: boolean } {
+    const me = this.api.snapshot({ max: 0 }).me;
+    const i = me && route.points.length ? nearestStart(route, me.pos) : 0;
+    if (i) this.note(`route "${route.name}" starts at point ${i + 1}, the nearest`);
+    return { route, i, dir: 1, done: route.mode !== 'follow' && route.points.length === 0 };
+  }
+
+  /** What the route steps need from the engine (routeNodes.ts). */
+  private nodeCtx(p: RoutineProfile): NodeCtx {
+    const gen = this.gen;
+    return { api: this.api, now: this.now, sleep, alive: () => this.profile === p && !this.stopRequested && this.gen === gen };
+  }
+
+  /**
+   * One visit to a route point, as VirindiTank makes it: a plain point or a checkpoint is walked to (first
+   * past any door on the way, with OpenDoors; not at all while it is beyond NavFarStopRange); then its
+   * steps run where you are, waiting for what they start (a recall's or portal's trip, an NPC's reply,
+   * the server confirming a checkpoint). `advance`: the route moves on (false: this point again next time).
+   */
+  private async visitPoint(route: Route, i: number, within: number): Promise<{ advance: boolean; ok: boolean; message: string }> {
     const p = this.profile;
-    if (!p) return;
-    for (const st of route.stops ?? []) {
-      if (st.at !== i) continue;
-      for (const a of st.do) {
-        if (this.profile !== p) return;
-        const r = await this.act(a, p);
-        if (r) this.note(`route "${route.name}" point ${i + 1}: ${a.kind}: ${r.message.split('\n')[0]}`);
+    if (!p) return { advance: false, ok: false, message: 'stopped' };
+    const pt = route.points[i];
+    const st = this.settings;
+    if (walksTo(route, i)) {
+      const g = parseMapCoords(pt);
+      const me = this.api.snapshot({ max: 0 }).me;
+      if (g && me) {
+        // NavFarStopRange: a point this far off is no leg to walk (VTank stops navigating until you're nearer).
+        const far = Number(st.NavFarStopRange);
+        const d = Math.hypot(g.x - me.pos.x, g.y - me.pos.y);
+        if (Number.isFinite(far) && far > 0 && d > far) {
+          const key = `${route.name}#${i}`;
+          if (this.farHeld !== key) { this.farHeld = key; this.report(`Navigation: point ${i + 1} of "${route.name}" is ${Math.round(d)} m away, past NavFarStopRange (${Math.round(far)} m); holding`); }
+          await sleep(1000);
+          return { advance: false, ok: false, message: `${Math.round(d)} m off, past NavFarStopRange` };
+        }
+        this.farHeld = null;
+        if (truthySetting(st.OpenDoors)) {
+          const h = route.z?.length === route.points.length ? route.z[i] : null;
+          const door = await openDoorOnTheWay(this.nodeCtx(p), { ...g, ...(typeof h === 'number' ? { dz: h * 240 - me.pos.z } : {}) }, {
+            idRange: Math.max(0, Number(st.DoorIDRange) || 0), openRange: Math.max(0.5, Number(st.DoorOpenRange) || 0),
+            threshold: Number(st.DoorLockpickDiffExcessThreshold) || 0, consumables: p.vtank?.consumables ?? [], skip: this.doorSkip,
+          });
+          if (door) { this.note(`route "${route.name}" point ${i + 1}: door: ${door.message}`); if (door.ok === false && /locked door skipped/.test(door.message)) this.report(door.message); }
+        }
       }
+      const r = await this.api.walkTo(pt, { within, timeoutMs: 90_000 });
+      const said = r.message.split('\n')[0];
+      this.note(`route "${route.name}" point ${i + 1}: ${said}`);
+      // As before: a walk that didn't get there moves on without the point's steps.
+      if (!r.ok || !stopsAt(route, i).length) return { advance: true, ok: r.ok, message: said };
     }
+    return this.runStops(route, i, within);
+  }
+
+  /** A route point's stops (recall, pause, say, use a portal/NPC/vendor, jump), in order. */
+  private async runStops(route: Route, i: number, within: number): Promise<{ advance: boolean; ok: boolean; message: string }> {
+    const p = this.profile;
+    if (!p) return { advance: false, ok: false, message: 'stopped' };
+    let last = 'done';
+    let ok = true;
+    for (const a of stopsAt(route, i)) {
+      if (this.profile !== p) return { advance: false, ok: false, message: 'stopped' };
+      const ctx = this.nodeCtx(p);
+      // The steps that wait for what they start (routeNodes.ts); the rest run as a rule's would.
+      const r = a.kind === 'checkpoint' ? await runCheckpoint(ctx, route.points[i], within)
+        : a.kind === 'cast' && a.target !== 'target' && isRecall(a.spell) ? await runRecall(ctx, a.spell)
+        : a.kind === 'use-object' || a.kind === 'use-portal' ? await runUseStep(ctx, a, { point: route.points[i], usePortalDistance: Number(this.settings.UsePortalDistance) || 4 })
+        : await this.act(a, p);
+      if (!r) continue;
+      // A use's reply follows on indented lines ("used X:\n  X tells you …"): keep it on the one history line.
+      last = `${a.kind}: ${r.message.replace(/:?\n\s*/g, (m) => (m.startsWith(':') ? ': ' : '; ')).trim()}`;
+      ok &&= r.ok;
+      this.note(`route "${route.name}" point ${i + 1}: ${last}`);
+      // A checkpoint the server hasn't confirmed holds the route at this point.
+      if (a.kind === 'checkpoint' && !r.ok) return { advance: false, ok: false, message: last };
+    }
+    return { advance: true, ok, message: last };
   }
 
   /**
@@ -1057,6 +1326,9 @@ export class RoutineEngine {
         if (!f || !lead || !obs.me) { await sleep(1000); return; }
         const me = obs.me.pos;
         if (lead.dist <= within) { f.trail = [leaderAt(me, lead)]; await sleep(500); return; }
+        // NavFarStopRange: a leader this far off isn't followed (VTank holds until they are nearer).
+        const far = Number(this.settings.NavFarStopRange);
+        if (Number.isFinite(far) && far > 0 && lead.dist > far) { await sleep(1000); return; }
         // A corner reached, or just passed (a few metres off and nearer the next corner than it is): on to the next one.
         const d = (u: { x: number; y: number }, v: { x: number; y: number }): number => Math.hypot(u.x - v.x, u.y - v.y);
         while (f.trail.length > 1 && (d(f.trail[0], me) <= FOLLOW_CORNER_M || (d(f.trail[0], me) <= 3 && d(me, f.trail[1]) < d(f.trail[0], f.trail[1])))) f.trail.shift();
@@ -1076,9 +1348,10 @@ export class RoutineEngine {
     try {
       // Follow/Nav Min (NavCloseStopRange): how near a waypoint counts as reaching it.
       const within = Math.max(0.5, Number(this.settings.NavCloseStopRange) || 2);
-      const r = await this.api.walkTo(n.route.points[n.i], { within, timeoutMs: 90_000 });
-      this.note(`route "${n.route.name}" point ${n.i + 1}: ${r.message.split('\n')[0]}`);
-      if (r.ok) await this.runStops(n.route, n.i);
+      const route = n.route, at = n.i;
+      const v = await this.visitPoint(route, at, within);
+      // Held (a checkpoint not yet confirmed, a point past NavFarStopRange), or the route changed meanwhile.
+      if (!v.advance || this.nav !== n || n.route !== route) return;
       const last = n.route.points.length - 1;
       if (n.route.mode === 'once') { if (n.i >= last) n.done = true; else n.i++; }
       else if (n.route.mode === 'circular') n.i = n.i >= last ? 0 : n.i + 1;
@@ -1134,7 +1407,7 @@ export class RoutineEngine {
         if (cast) { this.stats.rebuffs++; this.report(`Rebuffed ${cast} of ${due.length} spells (set: ${set.name})`); }
         return { ok: true, message: due.length ? `cast ${due.map((d) => d.spell).join(', ')}` : 'buffs all up', ...(due.length ? {} : { idle: true }) };
       }
-      case 'use-item': return this.api.useOn(a.item, a.on === 'target' ? this.api.targetName() : 'self');
+      case 'use-item': return this.api.useOn(a.item, a.to ?? (a.on === 'target' ? this.api.targetName() : 'self'));
       case 'attack-nearest': {
         const obs = this.api.snapshot({ radius: a.meters ?? 60, max: 30 });
         // A VirindiTank Monsters row with priority -1 means leave that one alone, whoever asks.
@@ -1150,66 +1423,132 @@ export class RoutineEngine {
         return { ok: end?.type === 'target-died', message: end?.type === 'target-died' ? `killed ${m.name}` : end?.type === 'target-lost' ? `${m.name} got away` : end?.type === 'death' ? 'you died' : `fight with ${m.name} went on too long` };
       }
       case 'loot-nearby': {
-        // Only corpses of what this routine killed in the last two minutes: never a player's, never a stranger's.
-        // One corpse per step, each kill's corpse once (a ring's or arc's kills each get theirs; the macro
-        // re-decides between corpses, as VTank's pass does). VTank's pick (MOSS Looting.CorpseScan): within
-        // arm's reach (CORPSE_OPEN_RANGE_M) the least turn to face it, else the nearest. The corpse appears a
-        // second or two after the death starts, so a fresh kill waits up to 5 s for it. Each corpse has the
-        // loot's own limits (20 s to open, 90 s in all: AgentApi.loot).
-        for (const [g, at] of this.lootedCorpses) if (this.now() - at > 600_000) this.lootedCorpses.delete(g);
+        // Corpses of what this routine killed in the last two minutes (by the kill, and by the corpse's own
+        // "Killed by …" once it is examined: never a stranger's kill of the same name), and with
+        // LootFellowCorpses / LootAllCorpses the others VTank may take (corpseBook.ts). One corpse per step, each
+        // once (a ring's or arc's kills each get theirs; the macro re-decides between corpses, as VTank's pass
+        // does). VTank's pick (MOSS Looting.CorpseScan): within arm's reach (CORPSE_OPEN_RANGE_M) the least turn to
+        // face it, else the nearest. The corpse appears a second or two after the death starts, so a fresh kill
+        // waits up to 5 s for it.
+        const st = this.settings;
+        const bs = this.loot.settings(st);
+        const book = this.loot.book;
+        const now = () => this.now();
         const pending = this.killsToLoot();
-        if (!pending.length) return { ok: true, message: 'nothing of ours to loot', idle: true };
+        const others = (bs.lootAll || bs.lootFellow) && !truthySetting(st.LootOnlyRareCorpses);
+        if (!pending.length && !others) return { ok: true, message: 'nothing of ours to loot', idle: true };
+        const meName = this.api.snapshot({ max: 0 }).me?.name ?? '';
+        const ctx = () => ({ me: meName, fellows: this.loot.fellows(), settings: bs, now: now() });
         const wanted = new Set(pending.map((k) => `Corpse of ${k.name}`));
-        const find = () => pickCorpse(this.api.snapshot({ radius: a.meters ?? 20, max: 30 }).nearby.filter((o) => o.kind === 'corpse' && wanted.has(o.name) && !this.lootedCorpses.has(o.guid)));
-        let corpse = find();
-        for (let w = 0; !corpse && w < 10; w++) { await sleep(500); corpse = find(); }
-        // None of them turned up: those kills are done (one look per kill, not two minutes of looks).
-        if (!corpse) { for (const k of pending) k.looted = true; return { ok: true, message: 'no corpse of ours to loot', idle: true }; }
-        // Taken before the loot: a corpse that fails (never opens, someone else's) isn't tried again and again.
-        this.lootedCorpses.set(corpse.guid, this.now());
-        const kill = pending.find((k) => `Corpse of ${k.name}` === corpse!.name);
-        if (kill) kill.looted = true;
+        const look = () => this.api.snapshot({ radius: a.meters ?? 20, max: 30 }).nearby
+          .filter((o) => o.kind === 'corpse' && !book.skipped(o.guid, now(), bs) && (wanted.has(o.name) || others));
+        let cands = look();
+        for (let w = 0; pending.length && !cands.some((c) => wanted.has(c.name)) && w < 10; w++) { await sleep(500); cands = look(); }
+        book.observe(cands.map((c) => c.guid), now(), bs);
+        // Each one not yet described is examined (one look this pass; VTank asks every corpse as it appears).
+        for (const c of cands) if (book.needsDescription(c.guid)) await this.loot.describe(c.guid, st);
+        const c0 = ctx();
+        // Described: VTank's CanLoot. Not described (no answer): your own kill's by name, as before.
+        const lootable = cands.filter((c) => { const may = book.mayLoot(c.guid, c0); return may === true || (may === undefined && wanted.has(c.name)); });
+        const corpse = pickCorpse(lootable);
+        // None of ours turned up: those kills are done (one look per kill, not two minutes of looks).
+        if (!corpse) { for (const k of pending) k.looted = true; return { ok: true, message: pending.length ? `no corpse of ours within ${Math.round(a.meters ?? 20)} m${a.meters !== undefined && p.macro ? ' (VTank walks to corpses only as far as CorpseApproachRange-Max, the Approach box; 0 never walks)' : ''}` : 'no corpse to loot yet', idle: true }; }
+        const kill = pending.find((k) => `Corpse of ${k.name}` === corpse.name && (book.killer(corpse.guid) === undefined || book.isOwn(corpse.guid, meName)));
+        // The macro walks to within CorpseApproachRange-Min first, then opens it (MOSS CorpseApproach).
+        if (p.macro) {
+          const min = Math.max(0.5, Number(st['CorpseApproachRange-Min']) || 0);
+          if (corpse.dist > min) await this.api.walkTo(corpse.guid, { within: min, timeoutMs: 30_000 });
+        }
         // Each item goes through the loot rules, first match wins. A rule on value, burden or appraisal
         // text examines the item first (an Appraise, as a player would); name- and type-only rules don't.
-        // No rule, or ignore: left on the corpse. Salvage is taken (to salvage later), as VTank does.
-        const examined = new Map<number, ReturnType<typeof appraisalFacts> | 'pending'>();
+        // No rule, or ignore: an unknown scroll you can learn, or a mana stone / donor (lootExtras.ts), else
+        // left on the corpse. Salvage is taken (to salvage later), as VTank does.
+        const examined = new Map<number, (ReturnType<typeof appraisalFacts> & { props?: ItemProps; at?: number }) | 'pending'>();
+        const askedAt = new Map<number, number>();
         const me = this.lootCharacter();
         const paletteWaits = new Map<number, number>();
         const needsColours = p.loot.some((r) => !r.disabled && r.match.colours?.length);
-        const decide = (it: { guid: number; name: string; itemType: number; objectDescFlags: number; palettes: ItemPalette[] }): LootDecision => {
+        const consumables = p.vtank?.consumables ?? [];
+        // CorpseItemIDTimeoutSeconds: how long an item's examination is waited for (asked again while it lasts).
+        const idTimeout = Math.max(1, Number(st.CorpseItemIDTimeoutSeconds) || 60) * 1000;
+        this.loot.beginPass();
+        // A rule that leaves the item (none, or Leave) still lets the scroll and mana checks have it (MOSS Looting: NoLoot falls through).
+        const takes = (r: LootRule | null): boolean => !!r && r.action !== 'ignore';
+        const decide = (it: { guid: number; name: string; itemType: number; objectDescFlags: number; palettes: ItemPalette[]; uiEffects?: number }): LootDecision => {
           const item = { name: it.name, type: itemTypeLabel(it.itemType), descFlags: it.objectDescFlags, palettes: it.palettes };
+          const view = { guid: it.guid, name: it.name, itemType: it.itemType, descFlags: it.objectDescFlags, ...(it.uiEffects !== undefined ? { uiEffects: it.uiEffects } : {}) };
           // Colour rules need the item's palettes loaded (streamed builds fetch them on demand); wait up to ~5 s.
           if (needsColours && it.palettes.some((x) => x.example === null) && (paletteWaits.get(it.guid) ?? 0) < 10) {
             paletteWaits.set(it.guid, (paletteWaits.get(it.guid) ?? 0) + 1);
             return 'wait';
           }
           let facts = examined.get(it.guid);
-          if (facts === undefined && needsExamination(p.loot, item)) {
+          if (facts === undefined && (needsExamination(p.loot, item) || (!takes(lootRuleFor(p.loot, item, me)) && this.loot.needsLook(view, consumables, st)))) {
             examined.set(it.guid, 'pending');
-            void this.api.appraise(it.guid, { quiet: true }).then((r) => examined.set(it.guid, r.ok ? { ...appraisalFacts(r.message), ...(r.data ? { props: r.data as ItemProps } : {}) } : { appraisal: '' }));
+            if (!askedAt.has(it.guid)) askedAt.set(it.guid, this.now());
+            void this.api.appraise(it.guid, { quiet: true }).then((r) => {
+              if (r.ok) examined.set(it.guid, { ...appraisalFacts(r.message), ...(r.data ? { props: r.data as ItemProps } : {}) });
+              // No answer: asked again until the ID timeout runs out, then decided without it.
+              else if (this.now() - (askedAt.get(it.guid) ?? 0) < idTimeout) examined.delete(it.guid);
+              else examined.set(it.guid, { appraisal: '' });
+            });
             return 'wait';
           }
           if (facts === 'pending') return 'wait';
           const rule = lootRuleFor(p.loot, { ...item, ...(facts ?? {}) }, me);
-          if (!rule || rule.action === 'ignore') { this.stats.left++; return 'skip'; }
+          if (!rule || rule.action === 'ignore') {
+            const extra = this.loot.itemAction(view, (facts as { props?: ItemProps } | undefined)?.props, consumables, st);
+            if (!extra) { this.stats.left++; return 'skip'; }
+            this.stats.kept++;
+            this.report(`${extra === 'read' ? 'Took to read' : extra === 'stone' ? 'Kept' : 'Took for its mana'} ${it.name} (${extra === 'read' ? 'an unknown scroll' : extra === 'stone' ? 'a mana stone' : 'a mana donor'})`);
+            return 'take';
+          }
           if (rule.action === 'keep-up-to') {
             const held = this.api.inventory().filter((i) => lootRuleFor([rule], { name: i.name, type: i.type, value: i.value, burden: i.burden }))
               .reduce((t, i) => t + (i.stack ?? 1), 0);
             if (held >= (rule.count ?? 1)) { this.stats.left++; return 'skip'; }
           }
           this.stats.kept++;
-          this.report(`${rule.action === 'sell' ? 'Took to sell' : rule.action === 'salvage' ? 'Took to salvage' : 'Kept'} ${it.name} (rule: ${rule.label ?? rule.action})`);
+          this.report(`${rule.action === 'sell' ? 'Took to sell' : rule.action === 'salvage' ? 'Took to salvage' : rule.action === 'read' ? 'Took to read' : 'Kept'} ${it.name} (rule: ${rule.label ?? rule.action})`);
+          // VTank salvages what a Salvage rule took once no corpse is open (salvageUpkeep); a Read rule's scroll is read later.
+          if (rule.action === 'salvage') this.toSalvage.set(it.guid, { name: it.name, tries: 0 });
+          if (rule.action === 'read') this.loot.readTaken(view, (facts as { props?: ItemProps } | undefined)?.props);
           return 'take';
         };
-        return this.api.loot(corpse.guid, null, decide);
+        // VTank's corpse timings (CorpseOpenTimeoutSeconds, CorpseItemAppearanceTimeoutSeconds, CorpseLootItemMaxAttempts)
+        // for the macro; a rule's loot keeps the agent's own. Either way the corpse is closed when done.
+        const opts = p.macro ? {
+          openTimeoutMs: Math.max(250, (Number(st.CorpseOpenTimeoutSeconds) || 1.5) * 1000),
+          appearMs: Math.min(300, Math.max(0, Number(st.CorpseItemAppearanceTimeoutSeconds) || 0)) * 1000,
+          itemTries: Math.min(100, Math.max(1, Math.round(Number(st.CorpseLootItemMaxAttempts) || 20))),
+          close: true,
+        } : { close: true };
+        const since = this.api.currentSeq();
+        const r = await this.api.loot(corpse.guid, null, decide, opts);
+        // Refused by the server ("in use", "no right"): skipped for 10 s, then tried again.
+        if (this.api.eventsSince(since).some((e) => e.type === 'chat' && isCorpseDenial(e.text.replace(/^\([a-z]+\) /, '')))) {
+          book.denied(corpse.guid, now(), bs);
+          return { ...r, message: `${r.message}; refused, skipping it for 10 s` };
+        }
+        // Never opened: an attempt; after BlacklistCorpseOpenAttemptCount it is skipped for BlacklistCorpseOpenTimeoutSeconds.
+        if (!r.ok && /never opened/.test(r.message)) {
+          if (book.openFailed(corpse.guid, now(), bs)) {
+            if (kill) kill.looted = true;
+            return { ...r, message: `${r.message}; skipping it for ${bs.blacklistSeconds} s` };
+          }
+          return r;
+        }
+        book.complete(corpse.guid, now());
+        if (kill) kill.looted = true;
+        return r;
       }
       case 'follow-route': {
         const route = p.routes.find((r) => r.name === a.route);
         if (!route) return { ok: false, message: `no route "${a.route}"` };
         const pos = this.routeIndex.get(route.name) ?? { i: 0, dir: 1 as const };
-        const point = route.points[pos.i];
-        const r = await this.api.walkTo(point, { within: 3, timeoutMs: 90_000 });
-        if (r.ok) await this.runStops(route, pos.i);
+        const v = await this.visitPoint(route, pos.i, 3);
+        const r: AgentResult = { ok: v.ok, message: `point ${pos.i + 1}: ${v.message}` };
+        if (!v.advance) return r;
         let next = pos.i + pos.dir;
         let dir = pos.dir;
         if (next >= route.points.length) { if (route.mode === 'circular') next = 0; else if (route.mode === 'linear') { dir = -1; next = Math.max(0, route.points.length - 2); } else next = route.points.length - 1; }
@@ -1219,6 +1558,9 @@ export class RoutineEngine {
       }
       case 'walk-to': return this.api.walkTo(a.coords, { within: 3, timeoutMs: 120_000 });
       case 'use-object': return this.api.use(a.name);
+      // Route steps (a rule running one has no point): the portal by id or nearest you; a checkpoint where you stand.
+      case 'use-portal': return runUseStep(this.nodeCtx(p), a, { point: null, usePortalDistance: Number(this.settings.UsePortalDistance) || 4 });
+      case 'checkpoint': { const me = this.api.snapshot({ max: 0 }).me; return me ? runCheckpoint(this.nodeCtx(p), mapCoordsText(me.pos), Math.max(0.5, Number(this.settings.NavCloseStopRange) || 2)) : { ok: false, message: 'your position is not known yet' }; }
       case 'create-view': {
         const v = parseMetaView(a.xml);
         if (!v) return { ok: false, message: `view "${a.name}" has no <view>` };
@@ -1276,8 +1618,9 @@ export class RoutineEngine {
       case 'load-route': {
         const route = p.routes.find((r) => r.name === a.route);
         if (!route) return { ok: false, message: `no route "${a.route}"` };
-        this.nav = { route, i: 0, dir: 1, done: route.mode !== 'follow' && route.points.length === 0 };
-        return { ok: true, message: `loaded route "${route.name}" (${route.points.length} points)` };
+        this.reversed = false;
+        this.nav = this.loadNav(route);
+        return { ok: true, message: `loaded route "${route.name}" (${route.points.length} points${this.nav.i ? `; starts at point ${this.nav.i + 1}, the nearest` : ''})` };
       }
       case 'set-setting': this.settings[a.name] = a.value; return { ok: true, message: `${a.name} = ${String(a.value)}` };
       case 'set-watchdog': this.watchdog = { state: a.state, meters: a.meters, seconds: a.seconds, samples: [] }; return { ok: true, message: `watchdog: "${a.state}" if still for ${a.seconds} s` };
@@ -1292,6 +1635,7 @@ export class RoutineEngine {
         const set = p.lootSets?.[a.set];
         if (!set) return { ok: false, message: `no loot set "${a.set}"` };
         p.loot = set;
+        this.activeLootSet = a.set;
         return { ok: true, message: `loot set "${a.set}" (${set.length} rules)` };
       }
       case 'expression': {

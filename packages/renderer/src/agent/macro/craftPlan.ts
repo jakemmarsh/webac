@@ -11,15 +11,20 @@
  *   also needs your current skill ≥ difficulty + ArrowheadFletchDiffExcessThreshold.
  * - A missing ingredient is crafted first when a recipe makes it (no cycles).
  * - One step at a time: the next decision sees the new inventory.
- * - Not built: a recipe that uses an item on another of the same name when
- *   only one stack is carried (VTank splits the stack first).
+ * - A recipe that uses an item on another of the same name, with only one
+ *   stack of it carried, splits one off first (VTank splits the stack; the
+ *   step's `split`), and the next decision crafts.
  */
 import type { PlanSkill } from '@ac/shared';
 
 /** [first, second, result, count, skill, difficulty, recipe id] rows (tools/build-craft-tables.ts). */
 export type CraftRow = [string, string, string, number, number, number, number];
 export interface CraftItem { guid: number; name: string; stack?: number }
-export interface CraftStep { first: CraftItem; second: CraftItem; result: string; count: number; for: string; why: string }
+export interface CraftStep {
+  first: CraftItem; second: CraftItem; result: string; count: number; for: string; why: string;
+  /** Split one off this stack first (the recipe uses the item on another of the same name); then craft. */
+  split?: CraftItem;
+}
 
 export const FLETCHING_SKILL = 37;
 
@@ -67,7 +72,11 @@ export function planCraft(input: {
         if (!a) { const pre = step(first, wanted, visiting); if (pre) return pre; continue; }
         const b = find(second, first.toLowerCase() === second.toLowerCase() ? a.guid : 0);
         if (!b) {
-          if (first.toLowerCase() === second.toLowerCase()) continue; // needs a stack split first (not built)
+          if (first.toLowerCase() === second.toLowerCase()) {
+            // One stack of two or more: split one off, then use one on the other.
+            if ((a.stack ?? 1) >= 2) return { first: a, second: a, result: made, count, for: wanted, split: a, why: `splitting ${a.name} to craft ${made}` };
+            continue;
+          }
           const pre = step(second, wanted, visiting); if (pre) return pre; continue;
         }
         return { first: a, second: b, result: made, count, for: wanted, why: made.toLowerCase() === wanted.toLowerCase() ? `crafting ${made} (${a.name} on ${b.name})` : `crafting ${made} for ${wanted} (${a.name} on ${b.name})` };

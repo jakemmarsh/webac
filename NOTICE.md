@@ -31,6 +31,7 @@ function addresses and describes behaviour in prose.
 | [ACViewer](https://github.com/ACEmulator/ACViewer) | GPL-3.0 | Rendering approach for terrain, models and environments |
 | [aclogview](https://github.com/ACEmulator/aclogview) | — | Reference for message layouts (consulted, not copied) |
 | [GDLEnhanced](https://gitlab.com/Scribble/gdlenhanced) | — | Reference for GDLE server behaviour (consulted, not copied) |
+| [UtilityBelt](https://gitlab.com/utilitybelt/utilitybelt) | MIT (its README) | The `/ub` commands, AutoVendor, equipment profiles, AutoXp, aliases and game events, the quest tracker and tinkering calculator, ported to TypeScript from 5fe9825a (`packages/renderer/src/agent/ub/`) |
 | [three.js](https://threejs.org/) | MIT | 3D rendering |
 | [ws](https://github.com/websockets/ws) | MIT | WebSocket server in the bridge |
 

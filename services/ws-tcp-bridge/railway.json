@@ -8,6 +8,7 @@
       "packages/network/src/era1999/Packet1999.ts",
       "packages/network/src/Hash32.ts",
       "packages/shared/src/routines/**",
+      "packages/shared/src/encoding/Windows1252.ts",
       "packages/renderer/src/agent/format.ts",
       "tools/ac-agent/**"
     ]

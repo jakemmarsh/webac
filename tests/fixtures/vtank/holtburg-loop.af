@@ -1,0 +1,5 @@
+~~ Our own nav-only .af fixture: the route in holtburg-loop.nav.
+NAV: nav0 circular
+	pnt 33.6 42.1 0.39
+	pau 33.7 42 0.39 5000
+	rcl 33.65 41.9 0.39 {Lifestone Recall}

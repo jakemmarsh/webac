@@ -7,6 +7,8 @@
  * play guide it now gets, and the narrower player takeover.
  */
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { AgentApi } from '../packages/renderer/src/agent/AgentApi';
 import { FakeHost } from './_harness/agentFake';
 import { LOCAL_ONLY_TOOLS, TOOLS, TOOL_CALLER, type ToolCaller } from '../tools/ac-agent/tools';
@@ -88,6 +90,35 @@ describe('the hosted connector has the CLI\'s tools', () => {
     const out = await run(t.c, 'ac_routines', { action: 'import', name: 'Patrol', files_json: JSON.stringify([{ name: 'Patrol.nav', text: nav }]) });
     expect(out.text).toMatch(/^imported into "Patrol" in your game/);
     expect((t.routines() as { profiles: Array<{ name: string }> }).profiles.map((p) => p.name)).toEqual(['Patrol']);
+  });
+
+  it('ac_routines export gives the player\'s VirindiTank file back as text (AGENT.vtank-export)', async () => {
+    const t = hostedTab();
+    const nav = 'uTank2 NAV 1.2\r\n4\r\n2\r\n0\r\n33.6\r\n42.1\r\n0.39\r\n0\r\n3\r\n33.7\r\n42\r\n0.39\r\n0\r\n5000\r\n';
+    await run(t.c, 'ac_routines', { action: 'import', name: 'Patrol', files_json: JSON.stringify([{ name: 'Patrol.nav', text: nav }]) });
+    const out = await run(t.c, 'ac_routines', { action: 'export', kind: 'nav' });
+    expect(out.isError).toBeUndefined();
+    expect(out.text).toBe(['Patrol.nav from "Patrol"', 'everything carried over', '', '--- Patrol.nav ---', nav].join('\n'));
+    expect((await run(t.c, 'ac_routines', { action: 'export', kind: 'zip' })).isError).toBe(true);
+  });
+
+  it('ac_routines imports a .usd and metaf .af text, and exports kind=usd / af (docs/vtank-parity-gaps.md §10.2–10.3)', async () => {
+    const t = hostedTab();
+    const fx = (n: string) => readFileSync(resolve(__dirname, 'fixtures/vtank', n), 'latin1');
+    const out = await run(t.c, 'ac_routines', { action: 'import', files_json: JSON.stringify([{ name: 'hunt.af', text: fx('hunt.af') }, { name: 'hunter.usd', text: fx('hunter.usd') }]) });
+    expect(out.text).toMatch(/^imported into "hunt" in your game/);
+    const p = (t.routines() as { profiles: Array<{ name: string; states: unknown[]; settings?: Record<string, unknown>; vtank?: { consumables: string[] } }> }).profiles[0];
+    expect(p.states).toHaveLength(3);
+    expect(p.settings?.AttackDistance).toBe(20);
+    expect(p.vtank?.consumables).toEqual(['Handy Healing Kit', 'Mana Draught']);
+    const usd = await run(t.c, 'ac_routines', { action: 'export', kind: 'usd' });
+    expect(usd.text).toMatch(/^hunt\.usd from "hunt"/);
+    expect(usd.text).toContain('--- hunt.usd ---\n9\r\nAntiExtraBuffSpells\r\n');
+    const af = await run(t.c, 'ac_routines', { action: 'export', kind: 'af' });
+    expect(af.text).toContain('--- hunt.af ---');
+    expect(af.text).toContain('STATE: {Default}');
+    expect((await run(t.c, 'ac_routines', { action: 'export', kind: 'af', which: 'Holtburg loop' })).text).toContain('NAV: nav0 circular');
+    expect((await run(t.c, 'ac_routines', { action: 'export', kind: 'af', which: 'nowhere' })).isError).toBe(true);
   });
 });
 

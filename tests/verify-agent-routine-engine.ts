@@ -178,7 +178,8 @@ describe('looting after a kill', () => {
     host.objs.delete(0x80002002);
     await vi.advanceTimersByTimeAsync(700); // the corpse comes a moment later
     host.add({ guid: 0x80002003, name: 'Corpse of Pumpkin Buffer', objectDescFlags: 0x2000, x: 80, y: 23 });
-    for (let i = 0; i < 30 && !host.sent.includes('use 80002003'); i++) { run(api, host, 100); await vi.advanceTimersByTimeAsync(100); }
+    // (it is examined first for its "Killed by …": no answer here, so it goes by the kill's name, up to 3 s)
+    for (let i = 0; i < 80 && !host.sent.includes('use 80002003'); i++) { run(api, host, 100); await vi.advanceTimersByTimeAsync(100); }
     expect(host.sent).toContain('use 80002003');
     expect(host.sent).not.toContain('use 80002001');
     expect(api.routine.status().last.join('\n')).toContain('attack-nearest: killed Pumpkin Buffer');
@@ -203,8 +204,8 @@ describe('looting every kill of a multi-kill (VTank keeps a corpse list; MOSS Lo
     vi.useFakeTimers();
     const host = new FakeHost();
     const api = new AgentApi(host);
-    // Each corpse opens empty when used.
-    host.use = (g: number) => { host.sent.push(`use ${g.toString(16)}`); host.container = { guid: g, items: [] }; return true; };
+    // Each corpse opens empty when used, and a second use closes it (ACE Container.ActOnUse).
+    host.use = (g: number) => { host.sent.push(`use ${g.toString(16)}`); host.container = host.container?.guid === g ? null : { guid: g, items: [] }; return true; };
     host.add({ guid: 0x80002201, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 23 });
     host.add({ guid: 0x80002202, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 83, y: 24 });
     api.routine.start(profile({ macro: true, states: [{ name: 'Hunt', rules: [] }], settings: { AttackDistance: 20, EnableLooting: true, EnableBuffing: false } }));
@@ -223,10 +224,13 @@ describe('looting every kill of a multi-kill (VTank keeps a corpse list; MOSS Lo
     expect(api.routine.statsNow().kills).toBe(2);
     host.add({ guid: 0x80002211, name: 'Corpse of Drudge Skulker', objectDescFlags: 0x2000, x: 80, y: 23 });
     host.add({ guid: 0x80002212, name: 'Corpse of Drudge Skulker', objectDescFlags: 0x2000, x: 83, y: 24 });
-    await tick(20_000);
+    // Each is examined for its killer (no answer here: 3 s each), and an empty one waits 6 s for items to appear.
+    await tick(60_000);
     const uses = host.sent.filter((x) => x.startsWith('use 800022'));
-    expect(uses.filter((x) => x === 'use 80002211')).toHaveLength(1);
-    expect(uses.filter((x) => x === 'use 80002212')).toHaveLength(1);
+    // Each opened once and closed when done (VTank closes a finished corpse by using it again).
+    expect(uses.filter((x) => x === 'use 80002211')).toHaveLength(2);
+    expect(uses.filter((x) => x === 'use 80002212'), api.routine.history().join('\n') + JSON.stringify(host.sent.slice(-20))).toHaveLength(2);
+    expect(host.container).toBeNull();
     // Both looted: nothing more is due (no third look).
     const looks = api.routine.history().filter((h) => /loot-nearby/.test(h));
     expect(looks, api.routine.history().join('\n')).toHaveLength(2);
@@ -240,7 +244,7 @@ describe('Loot Only Rare Corpses with several kills', () => {
     vi.useFakeTimers();
     const host = new FakeHost();
     const api = new AgentApi(host);
-    host.use = (g: number) => { host.sent.push(`use ${g.toString(16)}`); host.container = { guid: g, items: [] }; return true; };
+    host.use = (g: number) => { host.sent.push(`use ${g.toString(16)}`); host.container = host.container?.guid === g ? null : { guid: g, items: [] }; return true; };
     const tick = async (ms: number) => { for (let t = 0; t < ms; t += 100) { run(api, host, 100); await vi.advanceTimersByTimeAsync(100); } };
     const kill = async (g: number) => {
       for (let i = 0; i < 40 && !host.sent.some((x) => x.startsWith(`attack ${g.toString(16)}`)); i++) await tick(100);
@@ -261,7 +265,8 @@ describe('Loot Only Rare Corpses with several kills', () => {
     host.add({ guid: 0x80002412, name: 'Corpse of Mosswart Worshipper', objectDescFlags: 0x2000, x: 82, y: 23 });
     api.pushChat('Claude Test has discovered the Pearl of Blood Drinking!', 0);
     await tick(15_000);
-    expect(host.sent.filter((x) => x.startsWith('use '))).toEqual(['use 80002412']);
+    // Opened, then closed when done.
+    expect(host.sent.filter((x) => x.startsWith('use '))).toEqual(['use 80002412', 'use 80002412']);
     api.routine.stop();
     vi.useRealTimers();
   });
@@ -397,6 +402,8 @@ describe('looting by the loot rules', () => {
     run(api, host, 200); await vi.advanceTimersByTimeAsync(0);
     host.objs.delete(0x80002102);
     host.add({ guid: 0x80002103, name: 'Corpse of Drudge Skulker', objectDescFlags: 0x2000, x: 80, y: 23 });
+    // Its examination names the killer (ACE Creature_Death: LongDesc "Killed by <name>.").
+    host.appraisals.set(0x80002103, 'Corpse of Drudge Skulker\nKilled by Claude Test.');
     for (let i = 0; i < 40 && !host.sent.includes('use 80002103'); i++) { run(api, host, 100); await vi.advanceTimersByTimeAsync(100); }
     host.container = { guid: 0x80002103, items: items.map(({ guid, name }) => ({ guid, name })) };
     for (let i = 0; i < 200 && !api.routine.status().last.some((l) => l.startsWith('loot-nearby')); i++) { run(api, host, 100); await vi.advanceTimersByTimeAsync(100); }
@@ -404,8 +411,8 @@ describe('looting by the loot rules', () => {
     // Money and gems by name/type, the sword because it's worth 50+ (sell); the rag is worth too little,
     // and five Healing Kits are already held.
     expect(picked).toEqual([0x80003001, 0x80003002, 0x80003003]);
-    // Only the items whose rule needed it were examined.
-    expect(host.appraised).toEqual([0x80003003, 0x80003004]);
+    // The corpse (for its killer), then only the items whose rule needed it.
+    expect(host.appraised).toEqual([0x80002103, 0x80003003, 0x80003004]);
     // A loot rule's look is the automation's own: quiet, no Examine window over the game.
     expect(host.appraiseCalls.every((c) => c.quiet)).toBe(true);
     expect(api.routine.status().last.join('\n')).toMatch(/left 2: Old Rag, Healing Kit/);
@@ -892,7 +899,7 @@ describe('VirindiTank window options in the engine (AGENT.vtank-window)', () => 
     expect(api.routine.setNearestWaypoint().ok).toBe(true);
     expect(api.routine.status().nav).toMatchObject({ route: 'R', point: 1 });
     api.routine.stop();
-    api.routine.start(profile({ macro: true, settings: { EnableCombat: false }, navRoute: 'L', routes: [{ name: 'L', mode: 'linear', points: [M(80, 60), M(80, 24)] }], states: [{ name: 'Hunt', rules: [] }] }));
+    api.routine.start(profile({ macro: true, settings: { EnableCombat: false }, navRoute: 'L', routes: [{ name: 'L', mode: 'linear', points: [M(80, 24), M(80, 60)] }], states: [{ name: 'Hunt', rules: [] }] }));
     expect(api.routine.setNearestWaypoint()).toMatchObject({ ok: false, message: 'the current waypoint is set on circular routes only' });
     expect(api.routine.status().nav).toMatchObject({ route: 'L', point: 0 });
   });
@@ -910,6 +917,33 @@ describe('VirindiTank window options in the engine (AGENT.vtank-window)', () => 
     api.routine.start({ ...say('once'), ruleFiring: 'once' });
     await step(1000);
     expect(api.routine.status().spent).toEqual(['Hunt#0']);
+  });
+
+  it('UtilityBelt\'s /ub follow loads a Follow route on that player and switches navigation on (its UBFollow nav)', async () => {
+    expect(api.routine.followPlayer('Leader').ok).toBe(false); // nothing running
+    host.add({ guid: 0x50000099, name: 'Leader', itemType: 0x10, objectDescFlags: 0x8, x: 80, y: 40 });
+    const calls: Array<[number | string, number | undefined]> = [];
+    const walk = api.walkTo.bind(api);
+    api.walkTo = (t, o = {}) => { calls.push([t, o.within]); return walk(t, o); };
+    api.routine.start(profile({ macro: true, settings: { EnableCombat: false, EnableNav: false }, states: [{ name: 'Hunt', rules: [] }] }));
+    expect(api.routine.followPlayer('Leader')).toMatchObject({ ok: true });
+    expect(api.routine.setting('EnableNav')).toBe(true);
+    expect(api.routine.status().nav).toMatchObject({ route: 'UBFollow', done: false });
+    await step(2000);
+    expect(calls[0]?.[0]).toBe(0x50000099);
+  });
+
+  it('UtilityBelt\'s navigation lock (holdNav) keeps the macro off its route until it lets go', async () => {
+    const calls: Array<number | string> = [];
+    const walk = api.walkTo.bind(api);
+    api.walkTo = (t, o = {}) => { calls.push(t); return walk(t, o); };
+    api.routine.start(profile({ macro: true, settings: { EnableCombat: false, EnableNav: true }, navRoute: 'R', routes: [{ name: 'R', mode: 'once', points: ['10.0N, 10.0E'] }], states: [{ name: 'Hunt', rules: [] }] }));
+    api.routine.holdNav(60_000);
+    await step(3000);
+    expect(calls).toEqual([]);
+    api.routine.holdNav(0);
+    await step(1500);
+    expect(calls.length).toBeGreaterThan(0);
   });
 });
 

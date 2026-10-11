@@ -3343,6 +3343,32 @@ export class ServerObjectManager {
     return { dist, blockedAt: best && best.t < 1 ? Math.round((startOff + best.t * span) * 10) / 10 : null };
   }
 
+  /**
+   * Is there room `dist` metres ahead of our character along the compass
+   * `headingDeg` (0 north, 90 east), at body height? The same walls, terrain
+   * and solid objects {@link lineOfFire} sweeps (creatures left out). The
+   * automation's pet summon asks it (VirindiTank checks 3 m of room before a
+   * summon: the pet appears there). null when our body isn't known.
+   */
+  roomAhead(headingDeg: number, dist: number, radius = 0.4): boolean | null {
+    const me = this.missileLocalPlayer?.();
+    if (!me || !this.missileEnvironmentSweep) return null;
+    const rad = (headingDeg * Math.PI) / 180;
+    const u = { x: Math.sin(rad), y: Math.cos(rad), z: 0 };
+    const startOff = me.radius + radius;
+    const z = me.z + me.height * 0.5;
+    const from = { x: me.x + u.x * startOff, y: me.y + u.y * startOff, z };
+    const to = { x: from.x + u.x * dist, y: from.y + u.y * dist, z };
+    let best = this.missileEnvironmentSweep(from, to, radius);
+    for (const s of this.objects.values()) {
+      if (s.guid === this.playerGuid || !s.mesh || s.wielderId || (s.itemType & ItemType.Creature)) continue;
+      if (classifyMissileObstacle(s.physicsState, PhysicsState.Missile) === 'ignore' || !this.missileObjectSweep) continue;
+      if (Math.hypot(s.worldX - from.x, s.worldZ - from.y) > dist + radius + ServerObjectManager.MISSILE_OBJECT_REACH) continue;
+      best = nearestContact(best, this.missileObjectSweep(s, from, to, radius));
+    }
+    return !(best && best.t < 1);
+  }
+
   /** Coarse cull for {@link missileObjectSweep}: no server object's collision reaches further than this (m) from its origin. */
   private static readonly MISSILE_OBJECT_REACH = 20;
 

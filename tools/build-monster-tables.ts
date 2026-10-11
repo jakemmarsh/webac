@@ -5,12 +5,16 @@
  * behavior.md §4). One table per era, from that era's own world data, so each
  * era fights its own monsters:
  *
- *   end of retail  world-db-raw/ACE-World-16PY  "3-Core/9 WeenieDefaults/SQL/{Creature,Cow}"
+ *   end of retail  world-db-raw/ACE-World-16PY  "3-Core/9 WeenieDefaults/SQL/{Creature,Cow}", overlaid
+ *                  by world-db-raw/ACE-World-16PY-Patches "Database/Patches/9 WeenieDefaults" (the
+ *                  complete ACE world is the two together; a patch file replaces the base weenie of
+ *                  its class id). Before 2026-10-11 the base alone (February 2005) was read.
  *   AC1999         reference/ac1999/Server/Database/AC1999-World (the same layout)
  *   Dark Majesty   the ClassicACE CustomDM world in its MySQL container (plain single-table reads)
  *
  * Kept: weenies whose ItemType has Creature (0x10) and that are not
- * Attackable = False (NPCs, vendors). Each row is [name, weak, maxHealth]:
+ * Attackable = False (NPCs, vendors). Each row is [name, weak, maxHealth,
+ * species, immune]:
  *   weak       the seven elements VTank's damage list names, most damaging
  *              first by the creature's Resist* multipliers (PropertyFloat
  *              64 Slash, 65 Pierce, 66 Bludgeon, 67 Fire, 68 Cold, 69 Acid,
@@ -23,9 +27,18 @@
  *              a Void-only caster's training.
  *   maxHealth  weenie_properties_attribute_2nd MaxHealth (type 1)
  *              current_Level, else init_Level + Endurance / 2.
+ *   species    CreatureType (PropertyInt 2; 0 when unset): what a slayer weapon
+ *              (SlayerCreatureType, PropertyInt 166) names (VTank SpeciesMembers).
+ *   immune     VTank's MonsterImmunities, from the creature's own properties:
+ *              'm' NonProjectileMagicImmune (PropertyBool 103: ACE answers
+ *              "You fail to affect X with Y" to every spell that isn't a
+ *              projectile, so debuffs, drains and Harm never land), 'd'
+ *              ResistHealthDrain (PropertyFloat 125) = 0 (ACE multiplies a
+ *              drain by it, so Drain Health takes nothing).
  * One name, several weenies (e.g. Drudge Skulker at several levels): the
  * median of each multiplier and of max health across them, so one odd quest
- * variant doesn't decide for the common one.
+ * variant doesn't decide for the common one; the most common species; an
+ * immunity when most of them have it.
  *
  *   npx tsx tools/build-monster-tables.ts [eol|ac1999|dm ...]
  */
@@ -38,7 +51,16 @@ export interface CreatureFacts {
   /** Resist multipliers in ELEMENT_ORDER order (1 when the weenie doesn't set one). */
   resist: number[];
   maxHealth: number;
+  /** CreatureType (PropertyInt 2), 0 when unset. */
+  species: number;
+  /** NonProjectileMagicImmune (PropertyBool 103). */
+  magicImmune: boolean;
+  /** ResistHealthDrain (PropertyFloat 125) is 0. */
+  drainImmune: boolean;
 }
+
+/** One table row: [name, weak letters, max health, species (CreatureType), immunity letters ('m' magic, 'd' drain)]. */
+export type MonsterRow = [string, string, number, number, string];
 
 /** VTank's element order for monsters its database doesn't list (MOSS VtankDamageDatabase.UnlistedElementOrder), as letters. */
 export const ELEMENT_ORDER = ['p', 'b', 's', 'a', 'l', 'c', 'f'] as const;
@@ -80,13 +102,18 @@ export function parseCreatureSql(text: string): CreatureFacts | null {
   const name = /\(\d+, *1, *'((?:[^'\\]|\\.|'')*)'\)/.exec(valuesOf(text, 'weenie_properties_string'))?.[1]?.replace(/\\'|''/g, "'");
   if (!name) return null;
   const resist = ELEMENT_ORDER.map(() => 1);
+  let drainImmune = false;
   for (const r of rowsOf(text, 'weenie_properties_float')) {
     const i = RESIST_INDEX[Number(r[1])];
     if (i !== undefined && Number.isFinite(Number(r[2]))) resist[i] = Number(r[2]);
+    if (Number(r[1]) === 125 && Number(r[2]) === 0) drainImmune = true;
   }
   const endurance = Number(rowsOf(text, 'weenie_properties_attribute').find((r) => Number(r[1]) === 2)?.[2] ?? 0);
   const hp = rowsOf(text, 'weenie_properties_attribute_2nd').find((r) => Number(r[1]) === 1);
-  return { name, resist, maxHealth: maxHealthOf(hp ? Number(hp[2]) : 0, hp ? Number(hp[5]) : 0, endurance) };
+  return {
+    name, resist, maxHealth: maxHealthOf(hp ? Number(hp[2]) : 0, hp ? Number(hp[5]) : 0, endurance),
+    species: ints.get(2) ?? 0, magicImmune: /^true$/i.test(bools.get(103) ?? ''), drainImmune,
+  };
 }
 
 function maxHealthOf(init: number, current: number, endurance: number): number {
@@ -101,20 +128,43 @@ export function weakOrder(resist: number[]): string {
 
 const median = (xs: number[]): number => { const s = [...xs].sort((a, b) => a - b); const n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; };
 
-/** One row per name: [name, weak, maxHealth], merging same-named weenies by median. */
-export function buildMonsterRows(all: CreatureFacts[]): Array<[string, string, number]> {
+/** The most common value (the first seen of a tie). */
+const mode = (xs: number[]): number => { const n = new Map<number, number>(); let best = xs[0], most = 0; for (const x of xs) { const k = (n.get(x) ?? 0) + 1; n.set(x, k); if (k > most) { most = k; best = x; } } return best; };
+
+/** One row per name ({@link MonsterRow}), merging same-named weenies: median multipliers and health, the most common species, immunities most of them have. */
+export function buildMonsterRows(all: CreatureFacts[]): MonsterRow[] {
   const byName = new Map<string, CreatureFacts[]>();
   for (const c of all) { const l = byName.get(c.name); if (l) l.push(c); else byName.set(c.name, [c]); }
-  const rows: Array<[string, string, number]> = [];
+  const rows: MonsterRow[] = [];
   for (const [name, cs] of byName) {
     const resist = ELEMENT_ORDER.map((_, i) => median(cs.map((c) => c.resist[i])));
-    rows.push([name, weakOrder(resist), Math.round(median(cs.map((c) => c.maxHealth)))]);
+    const most = (f: (c: CreatureFacts) => boolean): boolean => cs.filter(f).length * 2 > cs.length;
+    const immune = `${most((c) => c.magicImmune) ? 'm' : ''}${most((c) => c.drainImmune) ? 'd' : ''}`;
+    rows.push([name, weakOrder(resist), Math.round(median(cs.map((c) => c.maxHealth))), mode(cs.map((c) => c.species)), immune]);
   }
   return rows.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
 
-function fromSqlTree(dir: string): CreatureFacts[] {
-  return [...sqlFiles(join(dir, 'Creature')), ...sqlFiles(join(dir, 'Cow'))].flatMap((f) => { const c = parseCreatureSql(readFileSync(f, 'utf8')); return c ? [c] : []; });
+/**
+ * The files of the given trees, one per class id (the number a file name starts with); a later tree's
+ * file replaces an earlier one's (ACE-World-16PY-Patches over ACE-World-16PY).
+ */
+export function overlayFiles(trees: string[][]): string[] {
+  const byId = new Map<string, string>();
+  const loose: string[] = [];
+  for (const files of trees) {
+    for (const f of files) {
+      const id = /^(\d+) /.exec(f.slice(f.lastIndexOf('/') + 1))?.[1];
+      if (id) byId.set(String(Number(id)), f); else loose.push(f);
+    }
+  }
+  return [...byId.values(), ...loose];
+}
+
+function fromSqlTree(dir: string, patches?: string): CreatureFacts[] {
+  const creatureFiles = (d: string) => [...sqlFiles(join(d, 'Creature')), ...sqlFiles(join(d, 'Cow'))];
+  const files = overlayFiles([creatureFiles(dir), ...(patches ? [creatureFiles(patches)] : [])]);
+  return files.flatMap((f) => { const c = parseCreatureSql(readFileSync(f, 'utf8')); return c ? [c] : []; });
 }
 
 function fromClassicAce(): CreatureFacts[] {
@@ -134,10 +184,16 @@ function fromClassicAce(): CreatureFacts[] {
   }
   const endurance = new Map(sql('SELECT object_Id, init_Level FROM weenie_properties_attribute WHERE type = 2').map(([id, v]) => [id, Number(v)]));
   const hp = new Map(sql('SELECT object_Id, init_Level, current_Level FROM weenie_properties_attribute_2nd WHERE type = 1').map(([id, i, c]) => [id, [Number(i), Number(c)]]));
+  const species = new Map(sql('SELECT object_Id, value FROM weenie_properties_int WHERE type = 2').map(([id, v]) => [id, Number(v)]));
+  const magicImmune = new Set(sql('SELECT object_Id FROM weenie_properties_bool WHERE type = 103 AND value = 1').map(([id]) => id));
+  const drainImmune = new Set(sql('SELECT object_Id FROM weenie_properties_float WHERE type = 125 AND value = 0').map(([id]) => id));
   const out: CreatureFacts[] = [];
   for (const [id, name] of names) {
     const [init, current] = hp.get(id) ?? [0, 0];
-    out.push({ name, resist: resist.get(id) ?? ELEMENT_ORDER.map(() => 1), maxHealth: maxHealthOf(init, current, endurance.get(id) ?? 0) });
+    out.push({
+      name, resist: resist.get(id) ?? ELEMENT_ORDER.map(() => 1), maxHealth: maxHealthOf(init, current, endurance.get(id) ?? 0),
+      species: species.get(id) ?? 0, magicImmune: magicImmune.has(id), drainImmune: drainImmune.has(id),
+    });
   }
   return out;
 }
@@ -146,7 +202,7 @@ function write(era: string, all: CreatureFacts[]): void {
   const rows = buildMonsterRows(all);
   // A module exporting the table as one JSON string (cheap to type-check; the bundle splits it into its own chunk).
   writeFileSync(join(OUT, `${era}.ts`), `// Generated by tools/build-monster-tables.ts from this era's world data; do not edit.\nexport default ${JSON.stringify(JSON.stringify(rows))};\n`);
-  console.log(`${era}: ${rows.length} monster names from ${all.length} creature weenies`);
+  console.log(`${era}: ${rows.length} monster names from ${all.length} creature weenies; ${rows.filter((r) => r[4].includes('m')).length} magic-immune, ${rows.filter((r) => r[4].includes('d')).length} drain-immune`);
 }
 
 // Run only as a script (tests import the parser without regenerating anything).
@@ -154,7 +210,7 @@ const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(import.me
 const want = process.argv.slice(2);
 const eras = !isMain ? [] : want.length ? want : ['eol', 'ac1999', 'dm'];
 for (const era of eras) {
-  if (era === 'eol') write('eol', fromSqlTree(join(ROOT, 'world-db-raw/ACE-World-16PY/Database/3-Core/9 WeenieDefaults/SQL')));
+  if (era === 'eol') write('eol', fromSqlTree(join(ROOT, 'world-db-raw/ACE-World-16PY/Database/3-Core/9 WeenieDefaults/SQL'), join(ROOT, 'world-db-raw/ACE-World-16PY-Patches/Database/Patches/9 WeenieDefaults')));
   else if (era === 'ac1999') write('ac1999', fromSqlTree(join(ROOT, 'reference/ac1999/Server/Database/AC1999-World/3-Core/9 WeenieDefaults/SQL')));
   else if (era === 'dm') write('dm', fromClassicAce());
 }

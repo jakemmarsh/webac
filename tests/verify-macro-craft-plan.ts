@@ -29,6 +29,19 @@ describe('planCraft (VTank AutoCraftItems: facts from openac-mosstank, docs/vtan
     expect(planCraft({ recipes, items: [item(1, 'Bundle of Arrowheads'), item(2, 'Bundle of Arrowshafts'), item(3, 'Arrow', 40)], skills: fletcher(100), want: [{ name: 'Arrow', count: 1 }], fletchExcess: 10 })).toBeNull();
   });
 
+  it('a recipe on two of the same thing with one stack carried splits one off first, then crafts (VTank splits the stack)', () => {
+    const SAME: CraftRow = ['Lump of Clay', 'Lump of Clay', 'Clay Pot', 1, 0, 0, 902];
+    const r = indexRecipes([SAME]);
+    const one = planCraft({ recipes: r, items: [item(7, 'Lump of Clay', 5)], skills: [], want: [{ name: 'Clay Pot', count: 1 }], fletchExcess: 0 });
+    expect(one).toMatchObject({ split: { guid: 7 }, result: 'Clay Pot', why: 'splitting Lump of Clay to craft Clay Pot' });
+    // After the split: two stacks, so it crafts one on the other.
+    const two = planCraft({ recipes: r, items: [item(7, 'Lump of Clay', 4), item(8, 'Lump of Clay', 1)], skills: [], want: [{ name: 'Clay Pot', count: 1 }], fletchExcess: 0 });
+    expect(two).toMatchObject({ first: { guid: 7 }, second: { guid: 8 } });
+    expect(two?.split).toBeUndefined();
+    // A single one can't be used on itself.
+    expect(planCraft({ recipes: r, items: [item(7, 'Lump of Clay')], skills: [], want: [{ name: 'Clay Pot', count: 1 }], fletchExcess: 0 })).toBeNull();
+  });
+
   it('a missing ingredient is crafted first when a recipe makes it', () => {
     const s = planCraft({ recipes, items: [item(1, 'Bundle of Arrowheads'), item(4, 'Knife'), item(5, 'Wood')], skills: fletcher(100), want: [{ name: 'Arrow', count: 1 }], fletchExcess: 10 });
     expect(s).toMatchObject({ result: 'Bundle of Arrowshafts', for: 'Arrow', first: { guid: 4 }, second: { guid: 5 } });
@@ -73,7 +86,10 @@ describe('the recipe tables (tools/build-craft-tables.ts)', () => {
   it('the shipped end-of-retail and 1999 tables hold real recipes (arrows from heads and shafts by Fletching)', () => {
     const eol = JSON.parse(EOL) as CraftRow[];
     expect(eol.length).toBeGreaterThan(5000);
-    expect(eol).toContainEqual(['Bundle of Arrowheads', 'Bundle of Arrowshafts', 'Arrow', 10, 37, 5, 323]);
+    // End of retail is the base world with ACE-World-16PY-Patches over it: the patched recipe makes 100 arrows
+    // (the February 2005 base made 10; before 2026-10-11 the table was built from the base alone).
+    expect(eol).toContainEqual(['Bundle of Arrowheads', 'Bundle of Arrowshafts', 'Arrow', 100, 37, 5, 323]);
+    expect(eol.length).toBeGreaterThan(10000);
     // Only the skills VTank crafts with (none, Fletching, Alchemy, Cooking).
     expect(new Set(eol.map((r) => r[4]))).toEqual(new Set([0, 37, 38, 39]));
     expect((JSON.parse(AC1999) as CraftRow[]).length).toBeGreaterThan(100);
@@ -116,5 +132,33 @@ describe('the macro crafts (vtMacro, through the agent API)', () => {
     off.routine.start(vt({ AutoCraftItems: false }));
     for (let t = 0; t < 2000; t += 100) { run(off, host, 100); await vi.advanceTimersByTimeAsync(100); }
     expect(host.sent.filter((x) => x.startsWith('usewith'))).toEqual([]);
+  });
+
+  it('UseSpecialAmmo gates crafting special ammunition too (VTank: "craft and use")', async () => {
+    (host as unknown as { specialAmmoTable: () => Promise<Array<[string, number]>> }).specialAmmoTable = async () => [['Arrow', 1]];
+    api.routine.start(vt());
+    await step(2000);
+    expect(host.sent.filter((x) => x.startsWith('usewith'))).toEqual([]);
+    api.routine.stop();
+    const raider = new AgentApi(host);
+    raider.routine.start(vt({ UseSpecialAmmo: 1 }));
+    for (let t = 0; t < 2000; t += 100) { run(raider, host, 100); await vi.advanceTimersByTimeAsync(100); }
+    expect(host.sent).toContain('usewith 50000a10 50000a11');
+  });
+
+  it('one stack of a recipe used on itself: the macro splits one off (the client\'s split), then crafts', async () => {
+    (host as unknown as { craftTable: () => Promise<CraftRow[]> }).craftTable = async () => [['Lump of Clay', 'Lump of Clay', 'Arrow', 1, 0, 0, 902]];
+    host.inv = [{ guid: 0x50000a20, name: 'Lump of Clay', where: 'main pack', stack: 5 }] as never;
+    const splits: string[] = [];
+    (host as unknown as { splitStack: (g: number, n: number) => boolean }).splitStack = (g, n) => {
+      splits.push(`${g.toString(16)} ${n}`);
+      (host.inv as unknown as Array<{ guid: number; name: string; where: string; stack: number }>)[0]!.stack = 4;
+      host.inv.push({ guid: 0x50000a21, name: 'Lump of Clay', where: 'main pack', stack: 1 } as never);
+      return true;
+    };
+    api.routine.start(vt());
+    await step(4000);
+    expect(splits).toEqual(['50000a20 1']);
+    expect(host.sent).toContain('usewith 50000a20 50000a21');
   });
 });

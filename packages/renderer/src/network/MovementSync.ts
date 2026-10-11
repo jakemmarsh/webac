@@ -490,8 +490,12 @@ export class MovementSync {
 
   // ─── MoveToState (GameAction 0xF61C) ───────────────────────
 
+  /** MoveToStates sent this session (automation sends a standing one before its first action when none has gone: agentPrimeMoveState in main.ts). */
+  moveToStatesSent = 0;
+
   private sendMoveToState(state: MovementState, pos: PlayerPosition, now: number): void {
     this.lastSentTime = now; // SendMovementEvent stamps last_sent_position_time
+    this.moveToStatesSent++;
     const motion: RawMotionStateFields = {
       running: state.running,
       currentStance: this.currentStance,

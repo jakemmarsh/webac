@@ -17,11 +17,29 @@ const isNum = (v: unknown, min = -Infinity, max = Infinity): v is number => type
 
 const COORDS = /^\s*\d+(\.\d+)?\s*[NS]\s*[, ]\s*\d+(\.\d+)?\s*[EW]\s*$/i;
 const VITALS = ['health', 'stamina', 'mana'];
-const LOOT_ACTIONS = ['keep', 'keep-up-to', 'salvage', 'sell', 'ignore'];
+const LOOT_ACTIONS = ['keep', 'keep-up-to', 'salvage', 'sell', 'read', 'ignore'];
 const MODULES = ['buffs', 'vitals', 'combat', 'looting', 'navigation', 'inventory', 'service'];
 
 function regexOk(p: string): boolean {
   try { new RegExp(p, 'i'); return true; } catch { return false; }
+}
+
+/** A .utl SalvageCombine block (RoutineDoc SalvageCombine): band strings, material keys as ACE MaterialType ids. */
+function checkSalvageCombine(v: unknown, path: string, out: RoutineIssue[]): void {
+  if (!isObj(v)) { out.push({ path, message: 'must be { "default": "1-6, 7-8, 9, 10", "materials": { "<material id>": "<bands>" } }' }); return; }
+  const bandsOk = (b: unknown): boolean => typeof b === 'string' && /^[\d\s.,;-]*$/.test(b);
+  if (!bandsOk(v.default)) out.push({ path: `${path}.default`, message: 'must be workmanship bands like "1-6, 7-8, 9, 10"' });
+  if (v.materials !== undefined) {
+    if (!isObj(v.materials)) out.push({ path: `${path}.materials`, message: 'must map material ids to bands' });
+    else for (const [k, b] of Object.entries(v.materials)) {
+      if (!/^\d+$/.test(k)) out.push({ path: `${path}.materials.${k}`, message: 'the key must be a material id (ACE MaterialType)' });
+      else if (!bandsOk(b)) out.push({ path: `${path}.materials.${k}`, message: 'must be workmanship bands like "1-10"' });
+    }
+  }
+  if (v.valueModes !== undefined) {
+    if (!isObj(v.valueModes)) out.push({ path: `${path}.valueModes`, message: 'must map material ids to a pyreal value' });
+    else for (const [k, n] of Object.entries(v.valueModes)) if (!/^\d+$/.test(k) || !isNum(n, 0)) out.push({ path: `${path}.valueModes.${k}`, message: 'a material id → a pyreal value ≥ 0' });
+  }
 }
 
 /** VirindiTank's Monsters / Items / Consumables / Buffs tabs (vtankProfile.ts). */
@@ -30,6 +48,10 @@ function checkVtank(v: unknown, path: string, out: RoutineIssue[]): void {
   const strs = (k: string) => { if (!Array.isArray(v[k]) || !(v[k] as unknown[]).every(isStr)) out.push({ path: `${path}.${k}`, message: 'must be a list of names' }); };
   strs('consumables'); strs('excludedScarabs'); strs('extraBuffs'); strs('blacklistedBuffs');
   if (!Array.isArray(v.items) || !v.items.every((x) => isObj(x) && isStr(x.name))) out.push({ path: `${path}.items`, message: 'must be a list of { "name": … }' });
+  else v.items.forEach((x: Record<string, unknown>, i: number) => {
+    if (x.id !== undefined && !isNum(x.id, 0)) out.push({ path: `${path}.items[${i}].id`, message: 'must be an object id' });
+    if (x.hands !== undefined && x.hands !== 1 && x.hands !== 2) out.push({ path: `${path}.items[${i}].hands`, message: 'must be 1 or 2 (unset: Auto)' });
+  });
   if (!Array.isArray(v.monsters) || !v.monsters.length) { out.push({ path: `${path}.monsters`, message: 'needs the <DEFAULT> row first' }); return; }
   v.monsters.forEach((m: unknown, i: number) => {
     const mp = `${path}.monsters[${i}]`;
@@ -38,8 +60,12 @@ function checkVtank(v: unknown, path: string, out: RoutineIssue[]): void {
     if (!Array.isArray(m.on) || !m.on.every((c) => (VT_MONSTER_COLUMNS as readonly string[]).includes(String(c)))) out.push({ path: `${mp}.on`, message: `columns are ${VT_MONSTER_COLUMNS.join(' ')}` });
     for (const k of ['damage', 'exVuln', 'petDamage']) if (!isNum(m[k], 0)) out.push({ path: `${mp}.${k}`, message: 'must be a damage type number' });
     for (const k of ['weapon', 'offhand']) if (m[k] !== null && !isStr(m[k])) out.push({ path: `${mp}.${k}`, message: 'must be an item name or null (<AUTO>)' });
+    for (const k of ['weaponId', 'offhandId']) if (m[k] !== undefined && !isNum(m[k], 0)) out.push({ path: `${mp}.${k}`, message: 'must be an object id' });
   });
   if (isObj(v.monsters[0]) && v.monsters[0].name !== '<DEFAULT>') out.push({ path: `${path}.monsters[0].name`, message: 'the first row is <DEFAULT>' });
+  // A .usd's GemFoodItems and what the import kept (vtankUsd.ts).
+  if (v.gemFood !== undefined && (!Array.isArray(v.gemFood) || !v.gemFood.every((g) => isObj(g) && isStr(g.name) && isNum(g.spell)))) out.push({ path: `${path}.gemFood`, message: 'must be a list of { "name": …, "spell": spell id }' });
+  if (v.usd !== undefined && !isObj(v.usd)) out.push({ path: `${path}.usd`, message: 'must be an object (what a .usd import kept)' });
 }
 
 function checkCondition(c: unknown, path: string, out: RoutineIssue[]): void {
@@ -118,6 +144,7 @@ function checkAction(a: unknown, path: string, p: RoutineProfile, out: RoutineIs
     case 'use-item':
       if (!isStr(a.item)) bad('item is required');
       if (a.on !== undefined && a.on !== 'self' && a.on !== 'target') bad('on must be self or target');
+      if (a.to !== undefined && !isStr(a.to)) bad('to must be an object name');
       return;
     case 'attack-nearest':
       if (a.meters !== undefined && !isNum(a.meters, 0, 500)) bad('meters must be 0..500');
@@ -156,7 +183,8 @@ function checkAction(a: unknown, path: string, p: RoutineProfile, out: RoutineIs
       if (!states.has(a.state as string)) bad(`no state named "${String(a.state)}"`);
       if (!states.has(a.returnTo as string)) bad(`no state named "${String(a.returnTo)}" to return to`);
       return;
-    case 'return': case 'clear-watchdog': return;
+    case 'return': case 'clear-watchdog': case 'checkpoint': return;
+    case 'use-portal': if (!isNum(a.id, 0)) bad('id must be an object id'); return;
     case 'jump':
       if (a.heading !== undefined && !isNum(a.heading, -360, 360)) bad('heading must be degrees');
       if (a.holdMs !== undefined && !isNum(a.holdMs, 0, 5000)) bad('holdMs must be 0..5000');
@@ -238,11 +266,12 @@ function checkProfile(p: unknown, path: string, out: RoutineIssue[]): void {
     if (l.match.characterSkills !== undefined && !(Array.isArray(l.match.characterSkills) && l.match.characterSkills.every((s) => isObj(s) && isNum((s as { skill?: unknown }).skill, 1)))) {
       out.push({ path: `${lp}.match.characterSkills`, message: 'each needs a skill id' });
     }
-    if (l.match.spells !== undefined) {
-      const sp = l.match.spells as unknown;
-      if (!isObj(sp) || !isStr(sp.match) || !regexOk(sp.match) || (sp.notMatch !== undefined && (!isStr(sp.notMatch) || !regexOk(sp.notMatch))) || !isNum(sp.count, 1)) {
-        out.push({ path: `${lp}.match.spells`, message: 'needs match (regex), optional notMatch (regex) and count ≥ 1' });
-      }
+    const spellOk = (sp: unknown): boolean => isObj(sp) && isStr(sp.match) && regexOk(sp.match) && (sp.notMatch === undefined || (isStr(sp.notMatch) && regexOk(sp.notMatch))) && isNum(sp.count, 1);
+    if (l.match.spells !== undefined && !spellOk(l.match.spells)) {
+      out.push({ path: `${lp}.match.spells`, message: 'needs match (regex), optional notMatch (regex) and count ≥ 1' });
+    }
+    if (l.match.moreSpells !== undefined && !(Array.isArray(l.match.moreSpells) && l.match.moreSpells.every(spellOk))) {
+      out.push({ path: `${lp}.match.moreSpells`, message: 'each needs match (regex), optional notMatch (regex) and count ≥ 1' });
     }
   });
   (Array.isArray(p.buffSets) ? p.buffSets : []).forEach((b: unknown, bi: number) => {
@@ -252,6 +281,11 @@ function checkProfile(p: unknown, path: string, out: RoutineIssue[]): void {
   });
   if (p.vtank !== undefined) checkVtank(p.vtank, `${path}.vtank`, out);
   if (p.navRoute !== undefined && !(Array.isArray(p.routes) && p.routes.some((r) => isObj(r) && r.name === p.navRoute))) out.push({ path: `${path}.navRoute`, message: `no route named "${String(p.navRoute)}"` });
+  if (p.salvageCombine !== undefined) checkSalvageCombine(p.salvageCombine, `${path}.salvageCombine`, out);
+  if (p.salvageCombineSets !== undefined) {
+    if (!isObj(p.salvageCombineSets)) out.push({ path: `${path}.salvageCombineSets`, message: 'must map loot set names to SalvageCombine blocks' });
+    else for (const [k, b] of Object.entries(p.salvageCombineSets)) checkSalvageCombine(b, `${path}.salvageCombineSets.${k}`, out);
+  }
   if (p.lootSet !== undefined && !(isObj(p.lootSets) && Array.isArray(p.lootSets[String(p.lootSet)]))) out.push({ path: `${path}.lootSet`, message: `no loot set named "${String(p.lootSet)}"` });
   (Array.isArray(p.routes) ? p.routes : []).forEach((r: unknown, ri: number) => {
     const rp = `${path}.routes[${ri}]`;
@@ -262,6 +296,7 @@ function checkProfile(p: unknown, path: string, out: RoutineIssue[]): void {
     if (!Array.isArray(r.points) || !r.points.every((pt) => isStr(pt) && COORDS.test(pt))) {
       out.push({ path: `${rp}.points`, message: 'needs coordinates like "42.1N, 33.6E"' });
     }
+    if (r.z !== undefined && !(Array.isArray(r.z) && r.z.every((h) => h === null || isNum(h)))) out.push({ path: `${rp}.z`, message: 'must be a list of heights (numbers or null)' });
     if (r.stops !== undefined) {
       if (!Array.isArray(r.stops)) out.push({ path: `${rp}.stops`, message: 'must be a list' });
       else r.stops.forEach((st: unknown, si: number) => {
@@ -340,13 +375,15 @@ function sayAction(a: RoutineAction): string {
     case 'set-state': return `switch to "${a.state}"`;
     case 'cast': return `cast ${a.spell}${a.target === 'target' ? ' at the target' : ' on yourself'}`;
     case 'cast-buffs': return `cast buff set "${a.set}"`;
-    case 'use-item': return `use ${a.item}${a.on ? ` on ${a.on === 'self' ? 'yourself' : 'the target'}` : ''}`;
+    case 'use-item': return `use ${a.item}${a.to ? ` on ${a.to}` : a.on ? ` on ${a.on === 'self' ? 'yourself' : 'the target'}` : ''}`;
     case 'attack-nearest': return `attack the nearest ${a.names?.length ? a.names.join('/') : 'monster'}${a.meters ? ` within ${a.meters} m` : ''}`;
     case 'loot-nearby': return `loot corpses${a.meters ? ` within ${a.meters} m` : ''} by the loot rules`;
     case 'follow-route': return `follow route "${a.route}"`;
     case 'walk-to': return `walk to ${a.coords}`;
     case 'use-object': return `use ${a.name}`;
     case 'talk-to': return `talk to ${a.name} until it answers`;
+    case 'checkpoint': return 'wait until the server has you at the point';
+    case 'use-portal': return `use the portal #${(a.id >>> 0).toString(16)} (or the one nearest the point)`;
     case 'create-view': return `open the view "${a.name}"`;
     case 'destroy-view': return `close the view "${a.name}"`;
     case 'destroy-all-views': return 'close every view';
@@ -385,7 +422,7 @@ export function explainProfile(p: RoutineProfile): string {
     out.push('loot (first match wins):');
     p.loot.forEach((l, i) => {
       const m = l.match;
-      const what = [m.name && `name /${m.name}/`, m.types?.length && m.types.join('/'), m.valueAtLeast !== undefined && `value ≥ ${m.valueAtLeast}`, m.valueAtMost !== undefined && `value ≤ ${m.valueAtMost}`, m.burdenAtMost !== undefined && `burden ≤ ${m.burdenAtMost}`, m.appraisal && `appraisal /${m.appraisal}/`, m.props?.length && `${m.props.length} property test${m.props.length > 1 ? 's' : ''}`, m.spells && `${m.spells.count}+ spells /${m.spells.match}/`, m.spellCountAtLeast !== undefined && `${m.spellCountAtLeast}+ spells`, m.colours?.length && m.colours.map((x) => `colour near rgb(${x.rgb.join(',')})${x.group ? ` on ${x.group}` : x.slots ? ` in slot ${x.slots.join('/')}` : ''}`).join(', '), m.palettes?.length && m.palettes.map((x) => `slot ${x.slot} palette 0x${(x.palette & 0xffffff).toString(16).toUpperCase()}`).join(', '), m.descFlags !== undefined && `object flags 0x${m.descFlags.toString(16)}`, m.totalRatingsAtLeast !== undefined && `total ratings ≥ ${m.totalRatingsAtLeast}`, m.minDamageAtLeast !== undefined && `min damage ≥ ${m.minDamageAtLeast}`, m.freeSlotsAtLeast !== undefined && `you have ${m.freeSlotsAtLeast}+ free slots`, m.characterLevelAtLeast !== undefined && `your level ≥ ${m.characterLevelAtLeast}`, m.characterLevelAtMost !== undefined && `your level ≤ ${m.characterLevelAtMost}`, m.characterSkills?.length && `${m.characterSkills.length} skill test${m.characterSkills.length > 1 ? 's' : ''}`, m.unsupported && `[can't test: ${m.unsupported}]`].filter(Boolean).join(', ') || 'anything';
+      const what = [m.name && `name /${m.name}/`, m.types?.length && m.types.join('/'), m.valueAtLeast !== undefined && `value ≥ ${m.valueAtLeast}`, m.valueAtMost !== undefined && `value ≤ ${m.valueAtMost}`, m.burdenAtMost !== undefined && `burden ≤ ${m.burdenAtMost}`, m.appraisal && `appraisal /${m.appraisal}/`, m.props?.length && `${m.props.length} property test${m.props.length > 1 ? 's' : ''}`, m.spells && `${m.spells.count}+ spells /${m.spells.match}/`, m.moreSpells?.length && m.moreSpells.map((x) => `${x.count}+ spells /${x.match}/`).join(', '), m.spellCountAtLeast !== undefined && `${m.spellCountAtLeast}+ spells`, m.colours?.length && m.colours.map((x) => `colour near rgb(${x.rgb.join(',')})${x.group ? ` on ${x.group}` : x.slots ? ` in slot ${x.slots.join('/')}` : ''}`).join(', '), m.palettes?.length && m.palettes.map((x) => `slot ${x.slot} palette 0x${(x.palette & 0xffffff).toString(16).toUpperCase()}`).join(', '), m.descFlags !== undefined && `object flags 0x${m.descFlags.toString(16)}`, m.totalRatingsAtLeast !== undefined && `total ratings ≥ ${m.totalRatingsAtLeast}`, m.minDamageAtLeast !== undefined && `min damage ≥ ${m.minDamageAtLeast}`, m.freeSlotsAtLeast !== undefined && `you have ${m.freeSlotsAtLeast}+ free slots`, m.characterLevelAtLeast !== undefined && `your level ≥ ${m.characterLevelAtLeast}`, m.characterLevelAtMost !== undefined && `your level ≤ ${m.characterLevelAtMost}`, m.characterSkills?.length && `${m.characterSkills.length} skill test${m.characterSkills.length > 1 ? 's' : ''}`, m.unsupported && `[can't test: ${m.unsupported}]`].filter(Boolean).join(', ') || 'anything';
       out.push(`  ${i + 1}. ${l.disabled ? '[off] ' : ''}${l.label ? `${l.label}: ` : ''}${l.action}${l.action === 'keep-up-to' ? ` ${l.count}` : ''}: ${what}${l.note ? ` (${l.note})` : ''}`);
     });
   }

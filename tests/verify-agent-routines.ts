@@ -3,12 +3,12 @@
  * paths, the plain-language explanation, the store, and the ac_routines
  * tool Claude configures a player's routines with (docs/agent-play.md).
  */
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
-  EXAMPLE_HUNT_PROFILE, ROUTINE_SCHEMA_VERSION, emptyRoutineDoc, explainProfile, validateRoutineDoc, type RoutineDoc,
+  EXAMPLE_HUNT_PROFILE, ROUTINE_SCHEMA_VERSION, emptyRoutineDoc, explainProfile, parseNav, parseUtl, utlToLoot, validateRoutineDoc, type RoutineDoc,
 } from '../packages/shared/src/routines/index.ts';
 import { RoutineStore } from '../tools/ac-agent/routineStore.ts';
 import { TOOL_BY_NAME } from '../tools/ac-agent/tools.ts';
@@ -98,5 +98,26 @@ describe('routine store and ac_routines', () => {
     const refused = await tool.run({ action: 'set', file, account: 'testacjs', server: 'local-eor', profile: 'no-such-session' });
     expect(refused).toMatchObject({ isError: true });
     expect(refused.text).toContain('profiles[0].initialState: no state named "X"');
+  });
+
+  it('export hands Claude a profile\'s VirindiTank file as text (and out= writes it, Windows-1252)', async () => {
+    const tool = TOOL_BY_NAME.get('ac_routines')!;
+    new RoutineStore(dir).put('local-eor', 'testacjs', { ...doc(), profiles: [{ ...structuredClone(EXAMPLE_HUNT_PROFILE), loot: [{ label: 'Café', action: 'keep', match: { name: 'Café' } }] }] });
+    const who = { account: 'testacjs', server: 'local-eor', profile: 'no-such-session' };
+    const nav = await tool.run({ action: 'export', kind: 'nav', ...who });
+    expect(nav.isError).toBeFalsy();
+    const [head, file] = nav.text.split('\n--- Lifestone loop.nav ---\n');
+    expect(head.split('\n')[0]).toBe(`Lifestone loop.nav from "${EXAMPLE_HUNT_PROFILE.name}"`);
+    // Points recorded by hand have no heights: said, not hidden.
+    expect(head).toContain('route "Lifestone loop": 3 point(s) have no recorded height; written at height 0');
+    expect(parseNav(file).nodes).toHaveLength(3);
+    const out = join(dir, 'loot.utl');
+    const utl = await tool.run({ action: 'export', kind: 'utl', out, ...who });
+    expect(utl.text).toMatch(/^wrote /);
+    const bytes = readFileSync(out);
+    expect(bytes.includes(0xe9)).toBe(true); // é as one Windows-1252 byte
+    expect(utlToLoot(parseUtl(bytes.toString('latin1'))).value[0].label).toBe('Café');
+    expect((await tool.run({ action: 'export', kind: 'nav', which: 'nope', ...who })).isError).toBe(true);
+    expect((await tool.run({ action: 'export', name: 'Nobody', ...who })).text).toMatch(/^no profile "Nobody"/);
   });
 });

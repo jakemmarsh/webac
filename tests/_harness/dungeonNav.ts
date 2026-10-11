@@ -7,12 +7,20 @@
  * frame here (cells sit at their landblock offset). Call inside beforeAll.
  */
 import { getJumpVelocity } from '@ac/shared';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { DatDatabase } from '../../packages/dat-parser/src/DatDatabase.js';
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
+import { FileDatBytes } from '../../packages/dat-parser/src/node/FileDatBytes.js';
+import { ac1999CellOverlay, ac1999PortalOverlay } from '../../packages/dat-parser/src/era1999/Ac1999Overlay.js';
+import { LandblockInfo } from '../../packages/dat-parser/src/file-types/LandblockInfo.js';
 import { SetupModel } from '../../packages/dat-parser/src/file-types/SetupModel.js';
 import { stepPlayerMovement, type MovementServices } from '../../packages/renderer/src/player/OutdoorMovement.js';
 import type { NavPoint, NavProbe } from '../../packages/renderer/src/agent/navPlanner.js';
 import type { JumpKit } from '../../packages/renderer/src/agent/jumpPlan.js';
 import { DAT_PATHS, openDat } from './dat.js';
+
+const REPO = resolve(__dirname, '..', '..');
 
 export interface DungeonNav {
   col: import('../../packages/renderer/src/world/DungeonCollision.js').DungeonCollision;
@@ -21,25 +29,69 @@ export interface DungeonNav {
   stepDown: number;
 }
 
-export async function dungeonNav(landblock: number, opts: { jumpSkill?: number; runRate?: number } = {}): Promise<DungeonNav> {
+export interface DungeonNavOptions {
+  jumpSkill?: number;
+  runRate?: number;
+  /** The world portal and cell DATs (default the end-of-retail pair), e.g. an era's overlaid set. */
+  dats?: { portal: DatDatabase; cell: DatDatabase };
+  /**
+   * Build the collision as main.ts does on entering (DungeonCollisionBuild.populateDungeonCollision):
+   * the cells' statics (furniture, fences, columns) and the building shells too, not the cells alone.
+   */
+  statics?: boolean;
+}
+
+/** The AC1999 world portal + cell (dat-sets/ac1999-retail), each through its 1999 overlay; null when absent. */
+export function ac1999Dats(): { portal: DatDatabase; cell: DatDatabase } | null {
+  const portal = resolve(REPO, 'dat-sets/ac1999-retail/portal.dat'), cell = resolve(REPO, 'dat-sets/ac1999-retail/cell.dat');
+  if (!existsSync(portal) || !existsSync(cell)) return null;
+  // Own instances, not openDat's shared cache: the overlay changes every read.
+  const p = new DatDatabase(new FileDatBytes(portal)); p.setOverlay(ac1999PortalOverlay());
+  const c = new DatDatabase(new FileDatBytes(cell)); c.setOverlay(ac1999CellOverlay());
+  return { portal: p, cell: c };
+}
+
+export async function dungeonNav(landblock: number, opts: DungeonNavOptions = {}): Promise<DungeonNav> {
   const { DungeonCollision } = await import('../../packages/renderer/src/world/DungeonCollision.js');
   const { EnvCellRenderer } = await import('../../packages/renderer/src/world/EnvCellRenderer.js');
   const { SetupModelRenderer } = await import('../../packages/renderer/src/models/SetupModelRenderer.js');
   const { ModelRenderer } = await import('../../packages/renderer/src/models/ModelRenderer.js');
   const { MaterialFactory } = await import('../../packages/renderer/src/models/MaterialFactory.js');
   const { TextureManager } = await import('../../packages/renderer/src/models/TextureManager.js');
-  const portalDb = openDat(DAT_PATHS.portal), cellDb = openDat(DAT_PATHS.cell);
+  const portalDb = opts.dats?.portal ?? openDat(DAT_PATHS.portal), cellDb = opts.dats?.cell ?? openDat(DAT_PATHS.cell);
   const stepDown = new SetupModel(new DatReader(portalDb.getFileData(0x02000001)!)).stepDownHeight;
   const mf = new MaterialFactory(portalDb, new TextureManager(portalDb));
   const mr = new ModelRenderer(portalDb, mf);
   const env = new EnvCellRenderer(portalDb, cellDb, mf, new SetupModelRenderer(portalDb, mr), mr);
   const col = new DungeonCollision();
   const lb = (landblock & 0xffff0000) >>> 0;
-  for (let c = 0x100; c <= 0xfffd; c++) {
-    const id = (lb | c) >>> 0;
-    const cd = env.getCellCollisionData(id);
-    if (!cd) break;
-    col.addCell(id, cd.cellStruct, cd.position);
+  if (opts.statics) {
+    const { populateDungeonCollision } = await import('../../packages/renderer/src/world/DungeonCollisionBuild.js');
+    const sr = new SetupModelRenderer(portalDb, mr);
+    const info = (b: number): LandblockInfo | null => {
+      const d = cellDb.getFileData(((b & 0xffff0000) | 0xfffe) >>> 0);
+      return d ? new LandblockInfo(new DatReader(d)) : null;
+    };
+    populateDungeonCollision(col, (lb | 0xffff) >>> 0, {
+      findInteriorCells: (b) => {
+        const n = info(b)?.numCells ?? 0;
+        const out: number[] = [];
+        for (let i = 0; i < n; i++) { const id = ((b & 0xffff0000) | (0x100 + i)) >>> 0; if (cellDb.hasFile(id)) out.push(id); }
+        return out;
+      },
+      getCellCollisionData: (id) => env.getCellCollisionData(id),
+      loadEnvCell: (id) => env.loadEnvCell(id),
+      loadSetupModel: (id) => sr.loadSetupModel(id),
+      loadGfxObj: (id) => mr.loadGfxObj(id),
+      loadLandblockInfo: info,
+    });
+  } else {
+    for (let c = 0x100; c <= 0xfffd; c++) {
+      const id = (lb | c) >>> 0;
+      const cd = env.getCellCollisionData(id);
+      if (!cd) break;
+      col.addCell(id, cd.cellStruct, cd.position);
+    }
   }
   const services = (): MovementServices => ({
     dungeonCollision: col, outdoorCollision: col,

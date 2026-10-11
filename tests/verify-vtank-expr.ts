@@ -54,6 +54,9 @@ function makeHost() {
   let metaState = 'Default';
   let combat = 'Peace';
   let rnd = 0.5;
+  // UtilityBelt additions (§5): the pack you can see into, views, logins, the XP meter.
+  const views = { panel: { visible: true, hidden: new Set<string>() } } as Record<string, { visible: boolean; hidden: Set<string> }>;
+  const ub = { nextLogin: null as string | null, xp: { xp: 0, lum: 0, seconds: 0 }, opened: new Set<number>([101]), macroOn: true, busy: 0 };
 
   const host: ExprHost = {
     getVar: (s, n) => vars[s].get(n),
@@ -119,9 +122,27 @@ function makeHost() {
     gameTicks: () => 5925, // Dawnsong, Morningthaw 2, 10 P.Y.
     statusHud: (k, v, c) => { log.push(`hud:${k}=${v}${c === undefined ? '' : `@${c}`}`); },
     schedule: (ms, fn) => { scheduled.push({ ms, fn }); },
+    wallClock: () => clock.t,
+    listVars: (scope) => [...vars[scope]],
+    dropItem: (id) => { log.push(`drop:${id}`); return true; },
+    moveItem: (id, to, slot, amount, join) => { log.push(`move:${id}->${to}@${slot}${amount === null ? '' : `x${amount}`}${join ? '+join' : ''}`); return true; },
+    corpseOpenedByMe: (id) => ub.opened.has(id),
+    cooldownRemaining: (id) => (id === 3 ? 42.5 : 0),
+    containerCapacity: (id) => (id === 1 ? { items: 102, containers: 7 } : id === 300 ? { items: 24, containers: 0 } : null),
+    objectVital: (id, v) => (id === 104 ? [0, 150, 120, 90][v] ?? null : null),
+    xpMeter: () => ub.xp,
+    xpReset: () => { ub.xp = { xp: 0, lum: 0, seconds: 0 }; },
+    metaName: () => 'Hunt Meta',
+    macroEnabled: () => ub.macroOn,
+    viewExists: (v) => v in views,
+    viewVisible: (v) => views[v]?.visible === true,
+    setViewVisible: (v, c, on) => { const x = views[v]; if (!x) return false; if (on) x.hidden.delete(c); else x.hidden.add(c); return true; },
+    characterNames: () => ['Zed', 'Me', 'alpha'],
+    setNextLogin: (n) => { ub.nextLogin = n; return true; },
   };
   return {
-    host, vars, log, clock, scheduled, fellowship, world, inv,
+    host, vars, log, clock, scheduled, fellowship, world, inv, views, ub,
+    setBusy: (n: number) => { ub.busy = n; host.busyState = () => n; },
     setRandom: (r: number) => { rnd = r; },
   };
 }
@@ -495,6 +516,98 @@ describe('actions, settings, chat, scheduling', () => {
   });
 });
 
+describe('UtilityBelt additions (docs/vtank-parity-gaps.md §5)', () => {
+  cases([
+    ['getfreeitemslots[]', 102 - 3], ['getfreecontainerslots[]', 7 - 1], ['getfreeitemslots[wobjectfindbyid[300]]', 24 - 1], ['getfreeitemslots[wobjectfindbyid[200]]', -1],
+    ['getcooldownexpiration[3]', 42.5], ['getcooldownexpiration[4]', 0],
+    ['wobjectgethealthvalue[wobjectfindbyid[104]]', 150], ['wobjectgetstaminavalue[wobjectfindbyid[104]]', 120], ['wobjectgetmanavalue[wobjectfindbyid[104]]', 90],
+    ['wobjectgethealthvalue[wobjectfindbyid[101]]', 0],
+    ['getcorpsesunopenedbyme[]', { kind: 'list', items: [] }],
+    ['vtgetmeta[]', 'Hunt Meta'], ['vtmacroenabled[]', 1],
+    ['getcharacterindex[alpha]', 0], ['getcharacterindex[``]', 1], ['getcharacterindex[Zed]', 2], ['getcharacterindex[Nobody]', -1],
+    ['uiviewexists[panel]', 1], ['uiviewexists[other]', 0], ['uiviewvisible[panel]', 1], ['uiviewvisible[other]', 0],
+    ['getdatetimeutc[`yyyy-MM-dd HH:mm:ss`]', '1970-01-01 00:16:40'], ['getdatetimeutc[]', '12:16:40 AM'], ['getdatetimeutc[s]', '1970-01-01T00:16:40'],
+    ['getdatetimeutc[`dddd, MMMM d \'at\' h:mm tt`]', 'Thursday, January 1 at 12:16 AM'],
+  ]);
+  it('wobjectgetinternaltype is the object\'s ItemType (0 unknown); getequippedweapontype reads the wielded slot', () => {
+    h.inv[0]!.itemType = 0x80;
+    expect(run('wobjectgetinternaltype[wobjectfindbyid[200]]')).toBe(0x80);
+    expect(run('wobjectgetinternaltype[wobjectfindbyid[201]]')).toBe(0);
+    expect(run('getequippedweapontype[]')).toBe('None');
+    h.inv.push({ id: 400, name: 'Wand', objectClass: 31, itemType: 0x8000, equipMask: 0x01000000 });
+    expect(run('getequippedweapontype[]')).toBe('Wand');
+    h.inv.push({ id: 401, name: 'Bow', objectClass: 9, itemType: 0x100, equipMask: 0x00400000 });
+    expect(run('getequippedweapontype[]')).toBe('Missile');
+    h.inv.splice(-2, 2, { id: 402, name: 'Greatsword', objectClass: 1, itemType: 0x1, equipMask: 0x02000000 });
+    expect(run('getequippedweapontype[]')).toBe('Melee');
+    // A worn item takes no pack slot.
+    expect(run('getfreeitemslots[]')).toBe(99);
+  });
+  it('corpses: unopened ones are listed by id; hascorpsebeenopenedbyme', () => {
+    h.world.push({ id: 110, name: 'Corpse of Drudge', objectClass: 27, coords: at(10, -20.01) }, { id: 111, name: 'Corpse of Rat', objectClass: 27, coords: at(10, -20.01) });
+    h.ub.opened.add(110);
+    expect(run('getcorpsesunopenedbyme[]')).toEqual({ kind: 'list', items: [111] });
+    expect(run('hascorpsebeenopenedbyme[wobjectfindbyid[110]]')).toBe(1);
+    expect(run('hascorpsebeenopenedbyme[wobjectfindbyid[111]]')).toBe(0);
+    expect(run('hascorpsebeenopenedbyme[getvar[none]]')).toBe(0);
+  });
+  it('actiontrydrop / actiontrymove / actiontrysplit: the moves, their defaults, and no move while busy', () => {
+    expect(run('actiontrydrop[wobjectfindbyid[200]]')).toBe(1);
+    expect(run('actiontrydrop[getvar[none]]')).toBe(0);
+    expect(run('actiontrymove[wobjectfindbyid[201],wobjectfindbyid[300]]')).toBe(1);
+    expect(run('actiontrymove[wobjectfindbyid[201],wobjectfindbyid[300],2,0]')).toBe(1);
+    expect(run('actiontrysplit[wobjectfindbyid[201],5]')).toBe(1);
+    expect(run('actiontrysplit[wobjectfindbyid[201],5,wobjectfindbyid[300],3,1]')).toBe(1);
+    expect(h.log).toEqual(['drop:200', 'move:201->300@0+join', 'move:201->300@2', 'select:201', 'move:201->1@0x5', 'select:201', 'move:201->300@3x5+join']);
+    h.setBusy(1);
+    expect(run('actiontrysplit[wobjectfindbyid[201],5]')).toBe(0);
+    expect(h.log).toHaveLength(7);
+  });
+  it('delayexec answers an id; clearexec cancels one still waiting', () => {
+    expect(run('delayexec[100,`setvar[a,1]`]')).toBe(1);
+    expect(run('delayexec[100,`setvar[b,1]`]')).toBe(2);
+    expect(run('clearexec[1]')).toBe(1);
+    expect(run('clearexec[1]')).toBe(0);
+    for (const s of h.scheduled) s.fn();
+    expect([run('testvar[a]'), run('testvar[b]')]).toEqual([0, 1]);
+    expect(run('clearexec[2]')).toBe(0);
+  });
+  it('uisetvisible hides and shows a control and hands back its argument', () => {
+    expect(run('uisetvisible[uigetcontrol[panel,btnTest1],0]')).toBe(0);
+    expect([...h.views.panel!.hidden]).toEqual(['btnTest1']);
+    expect(run('uisetvisible[uigetcontrol[panel,btnTest1],1]')).toBe(1);
+    expect(h.views.panel!.hidden.size).toBe(0);
+    expect(() => run('uisetvisible[panel,1]')).toThrow(/expects a view control/);
+  });
+  it('the XP meter: xpmeter text, totals and per-hour rates; xpreset', () => {
+    h.ub.xp = { xp: 123456, lum: 0, seconds: 3600 };
+    expect(run('xpmeter[]')).toBe('123,456 XP, 3,600s, 123,456 XP/hr');
+    expect([run('xptotal[]'), run('xpavg[]'), run('xpduration[]'), run('lumtotal[]'), run('lumavg[]')]).toEqual([123456, 123456, 3600, 0, 0]);
+    h.ub.xp = { xp: 1000, lum: 500, seconds: 1800 };
+    expect(run('xpmeter[]')).toBe('1,000 XP and 500 LUM, 1,800s, 2,000 XP/hr and 1,000 LUM/hr');
+    expect(run('lumavg[]')).toBe(1000);
+    expect(run('xpreset[]')).toBe(1);
+    expect(run('xptotal[]')).toBe(0);
+  });
+  it('setnextlogin by name or by a number counted on from you (wrapping); clearnextlogin', () => {
+    expect(run('setnextlogin[zed]')).toBe(1);
+    expect(h.ub.nextLogin).toBe('Zed');
+    expect(run('setnextlogin[1]')).toBe(1); // alpha, Me, Zed: one on from Me
+    expect(h.ub.nextLogin).toBe('Zed');
+    expect(run('setnextlogin[2]')).toBe(1); // wraps to alpha
+    expect(h.ub.nextLogin).toBe('alpha');
+    expect(run('setnextlogin[Nobody]')).toBe(0);
+    expect(run('clearnextlogin[]')).toBe(1);
+    expect(h.ub.nextLogin).toBeNull();
+  });
+  it('getdatetimelocal uses local time; a bad standard format answers "" and says why', () => {
+    const d = new Date(1_000_000);
+    expect(run('getdatetimelocal[`HH:mm`]')).toBe(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+    expect(run('getdatetimeutc[q]')).toBe('');
+    expect(h.log.at(-1)).toMatch(/^echo:Input string was not in a correct format/);
+  });
+});
+
 describe('parse errors carry positions; leniency matches what metas ship', () => {
   it('error positions', () => {
     const at = (src: string) => { try { parseExpr(src, { strict: true }); } catch (e) { return (e as ExprError).pos; } return null; };
@@ -515,7 +628,7 @@ describe('parse errors carry positions; leniency matches what metas ship', () =>
     expect(() => run('1+floor[abc]')).toThrow(/floor: expected a number, got string 'abc' \(at 2\)/);
     expect(() => run('getvar[]')).toThrow(/getvar takes 1 argument, got 0/);
     expect(() => run('nosuchfn[1]')).toThrow(/unknown function nosuchfn/);
-    expect(() => run('uiviewexists[v]')).toThrow(/unsupported function uiviewexists/);
+    expect(() => run('ustopen[]')).toThrow(/unsupported function ustopen/);
   });
   it('a host without a capability reports the function as unsupported', () => {
     const bare: ExprHost = {
@@ -544,6 +657,8 @@ describe('coverage', () => {
       'actiontrygiveprofile actiontryequipanywand actiontrycastbyid actiontrycastbyidontarget setmotion getmotion clearmotion',
       'delayexec vtsetsetting vtgetsetting uboptset uboptget vtsetmetastate vtgetmetastate echo chatbox chatboxpaste statushud',
       'statushudcolored wobjectrequestdata getheadingto wobjectfindnearestmonster wobjectisvalid hexstr getquestktprogress uigetcontrol uisetlabel',
+      'wobjectgetinternaltype getequippedweapontype hascorpsebeenopenedbyme actiontrydrop actiontrymove actiontrysplit clearexec uisetvisible',
+      'xpmeter xptotal xpavg xpduration lumtotal lumavg xpreset setnextlogin clearnextlogin getdatetimelocal',
     ].join(' ').split(/\s+/);
     const text = covered.join('\n').toLowerCase();
     const missing = EXPR_FUNCTIONS.filter((f) => !extra.includes(f) && !new RegExp(`\\b${f}\\[`).test(text));

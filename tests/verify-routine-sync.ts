@@ -119,6 +119,19 @@ describe('RoutineSync keeps routines in this browser when the bridge keeps none'
     expect(fetched).toEqual([]);
   });
 
+  it('turns loot rules an older importer stored switched off (Read, User1–5) into today\'s actions on load', async () => {
+    const { sync, items } = local();
+    const old = (id: number, label: string) => ({ label, disabled: true, note: `VTClassic action ${id === 4 ? 'Read' : `User${id - 4}`} has no equivalent`, action: 'keep', match: { name: label }, vtc: { action: id } });
+    const offByPlayer = { label: 'Off by hand', disabled: true, action: 'keep', match: { name: 'x' } };
+    const profile = { ...EXAMPLE_HUNT_PROFILE, loot: [old(4, 'Scrolls'), offByPlayer], lootSets: { Other: [old(6, 'Plugin item')] } };
+    items.set(localRoutinesKey('coldeve', 'Jake'), JSON.stringify({ ...emptyRoutineDoc('coldeve', 'Jake'), profiles: [profile] }));
+    const r = await sync.load() as { doc: { profiles: Array<{ loot: unknown[]; lootSets: Record<string, unknown[]> }> } };
+    const [p] = r.doc.profiles;
+    expect(p.loot[0]).toEqual({ label: 'Scrolls', action: 'read', match: { name: 'Scrolls' } });
+    expect(p.loot[1]).toEqual(offByPlayer);
+    expect(p.lootSets.Other[0]).toEqual({ label: 'Plugin item', note: 'VTClassic action User2: looted and kept', action: 'keep', match: { name: 'Plugin item' }, vtc: { action: 6 } });
+  });
+
   it('refuses an invalid document or another account\'s, as the bridge would', async () => {
     const { sync, items } = local();
     const bad = await sync.save({ ...emptyRoutineDoc('coldeve', 'Jake'), profiles: [{ ...EXAMPLE_HUNT_PROFILE, initialState: 'Nowhere' }] });

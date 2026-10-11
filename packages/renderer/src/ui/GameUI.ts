@@ -20,13 +20,13 @@ import { MagicSchool, magicSchoolColor, magicSchoolColorRGBA, LUMINANCE_MIN_LEVE
 import { contractProgressText, contractTimedText, contractRepeatLeft, type ContractTiming } from '@ac/shared';
 import { TeleportAnimation, TeleportAnimState, PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
 import { PortalSpaceRenderer, portalSpaceHookSound } from '../effects/PortalSpaceRenderer.js';
-import { getAllegianceRankTitle, getDefaultCombatMode } from '@ac/shared';
+import { getAllegianceRankTitle, getDefaultCombatMode, encodeWindows1252 } from '@ac/shared';
 import { SHIPPED_DEFAULT_LANDSCAPE_DRAW_DISTANCE } from '../world/LandscapeDrawDistance.js';
 import { RETAIL_DEGRADE_PREFS } from '../models/DegradeLod.js';
 import { horizontalListCellCount } from '../world/OpenContainerTracker.js';
 import { getFellowshipXpShareDisplayPercent, deltaTimeToString } from '@ac/shared';
 import { ChatMessageType } from '@ac/shared';
-import { cooldownDecile, cooldownOverlayTextureId } from './cooldownMeter.js';
+import { cooldownDecile, cooldownOverlayTextureId, cooldownRemainingSeconds } from './cooldownMeter.js';
 import { structureBarFraction, capacityBarFraction, CAPACITY_BAR_BG_TEXTURE, CAPACITY_BAR_FILL_TEXTURE, STRUCTURE_BAR_BG_TEXTURE, STRUCTURE_BAR_FILL_TEXTURE, STRUCTURE_BAR_X, STRUCTURE_BAR_Y, STRUCTURE_BAR_W, STRUCTURE_BAR_H, STRUCTURE_BAR_ICON_SIZE } from './structureBar.js';
 import { resolveHeritageDisplayName } from '../utils/heritageDisplayName.js';
 import { housePageLines, type HousePageLine } from './HousePanelText.js';
@@ -57,6 +57,8 @@ import { COMBAT_WINDOW } from './CombatWindow.js';
 import { skillFooterTitleRuns, skillRowTone, FOOTER_TITLE_COLORS, argbToCss } from './SkillDisplay.js';
 import { AutomationPanel, hudStripText, type AutomationKit, type RoutineEditor } from './automation/AutomationPanel.js';
 import { VTankWindow, type VTankKit, type VTankSource } from './automation/VTankWindow.js';
+import { UbNet, browserNetChannel, setActiveUbNet } from '../agent/ubNet.js';
+import type { VtNames } from '@ac/shared';
 import { CHARACTER_SETTINGS_PAGE, CHARACTER_SETTINGS_ROWS, characterSettingString, characterSettingsRowForKey } from './CharacterSettingsModel.js';
 import {
   PANELS_WINDOW, panelsWindowPlacement, setPanelsWindowPanelVisibility,
@@ -2295,6 +2297,8 @@ export class GameUI {
   private vtankRedraw: (() => void) | null = null;
   private vtankDialogEl: HTMLDivElement | null = null;
   private vtankDialogRedraw: (() => void) | null = null;
+  /** The open VTank dialog's onClosed (the loot editor unticks Show Editor). */
+  private vtankDialogClosed: (() => void) | null = null;
   vitaePanelSource: (() => VitaePanelSource) | null = null;
   /** Mirrors gmVitaeUI::m_currentVitae (init 1.0) — the last vitae
    *  MULTIPLIER seen, used to detect decreases for the auto-show. */
@@ -19324,6 +19328,41 @@ export class GameUI {
     return nextCost > 0 ? { ...r, message: `${r.message}; the next +1 costs ${nextCost.toLocaleString()} XP` } : r;
   }
 
+  /**
+   * UtilityBelt's AutoXp (agent/ub/autoXp.ts) plans from the same cost tables the Raise button prices with:
+   * the next `steps` raises of an attribute, vital or trained skill, in order (fewer where its table ends),
+   * or null for an untrained skill or an unknown name. Prices only; nothing is sent.
+   */
+  agentRaiseCosts(stat: string, steps: number): number[] | null {
+    const want = stat.trim().toLowerCase();
+    const out: number[] = [];
+    const attr = Object.keys(GameUI.ATTR_WIRE_IDS).find((k) => k === want || (ATTRIBUTE_LABELS[k] ?? '').toLowerCase() === want);
+    const vital = attr ? undefined : Object.keys(GameUI.VITAL_WIRE_IDS).find((k) => k === want || `max ${k}` === want || `maximum ${k}` === want);
+    if (attr || vital) {
+      const table = attr ? this.xpCostTables.attribute : this.xpCostTables.vital;
+      let raises = attr ? this.charInfo.attributes[attr]?.raises ?? 0 : this.charInfo.vitals[vital!]?.raises ?? 0;
+      for (let i = 0; i < steps; i++, raises++) {
+        const c = GameUI.statRaiseCosts(table, raises).cost1;
+        if (c <= 0) break;
+        out.push(c);
+      }
+      return out;
+    }
+    const skill = this.agentFindSkill(want, (s) => s.status === 'Trained' || s.status === 'Specialized');
+    if (!skill || (skill.status !== 'Trained' && skill.status !== 'Specialized')) return null;
+    const table = skill.status === 'Specialized' ? this.xpCostTables.specializedSkill : this.xpCostTables.trainedSkill;
+    let raises = skill.raises;
+    let pp = skill.pp;
+    for (let i = 0; i < steps; i++) {
+      const c = GameUI.skillRaiseCosts(table, raises, pp).cost1;
+      if (c <= 0) break;
+      out.push(c);
+      pp = (pp ?? table?.[raises] ?? 0) + c;
+      raises++;
+    }
+    return out;
+  }
+
   private statFooterModel(kind: 'attributes' | 'skills'): {
     title: string; value: string; tone: 'normal' | 'buffed' | 'debuffed';
     /** A skill's retail title runs (ui/SkillDisplay.ts) — replace title + tone-coloured value. */
@@ -20987,6 +21026,11 @@ export class GameUI {
     return out;
   }
 
+  /** Seconds left on the shared cooldown `cooldownId` (CEnchantmentRegistry::OnCooldown, cooldownMeter.ts), 0 when none. */
+  agentCooldownRemaining(cooldownId: number, nowSec = Date.now() / 1000): number {
+    return cooldownRemainingSeconds(cooldownId, this.activeEnchantments.values(), nowSec);
+  }
+
   removeEnchantment(spellId: number, layerId: number): void {
     const key = `${spellId}:${layerId}`;
     const ench = this.activeEnchantments.get(key);
@@ -21310,11 +21354,62 @@ export class GameUI {
     if (this.automationPanelVisible) this.setPanelsWindowPanel(AUTOMATION_PANEL, false);
     this.closeAutomationEditor();
     this.closeVTankWindow();
+    for (const k of [...this.vtankWindows.keys()]) this.closeVTankAux(k);
     this.automationModel = source ? new AutomationPanel(this.automationKit(), source, (ed) => this.openAutomationEditor(ed)) : null;
-    this.vtankModel = source ? new VTankWindow(this.vtankKit(), source, { open: (t, w, h, draw) => this.openVTankDialog(t, w, h, draw), close: () => this.closeVTankDialog() }) : null;
+    this.vtankModel = source ? new VTankWindow(this.vtankKit(), source, {
+      open: (t, w, h, draw, onClosed) => this.openVTankDialog(t, w, h, draw, onClosed), close: () => this.closeVTankDialog(),
+      // The Action History and the remote: windows of their own beside the main one.
+      window: (key, t, w, h, draw) => this.openVTankAux(key, t, w, h, draw), closeWindow: (key) => this.closeVTankAux(key),
+      showMain: (on) => { if (on) this.openVTankWindow(); else this.closeVTankWindow(); },
+    }) : null;
     if (this.automationTimer) clearInterval(this.automationTimer);
     this.automationTimer = source ? setInterval(() => this.tickAutomation(), 1000) : null;
+    this.startUbNet(source);
     this.updateAutomationStrip();
+  }
+
+  // UtilityBelt networking between this browser's game tabs (agent/ubNet.ts): /ub bc, bct, netclients, vital and cast sharing.
+  private ubNet: UbNet | null = null;
+  private ubNetTimer: ReturnType<typeof setInterval> | null = null;
+  private startUbNet(source: VTankSource | null): void {
+    if (this.ubNetTimer) clearInterval(this.ubNetTimer);
+    this.ubNetTimer = null;
+    this.ubNet?.close();
+    this.ubNet = null;
+    setActiveUbNet(null);
+    const channel = source ? browserNetChannel() : null;
+    if (!source || !channel) return;
+    let store: Storage | null = null;
+    try { store = globalThis.localStorage ?? null; } catch { /* storage blocked: settings stay in memory */ }
+    const net = new UbNet({
+      channel, store,
+      self: () => {
+        const name = source.character();
+        if (!name) return null;
+        const v = (k: string) => ({ cur: this.charInfo.vitals[k]?.current ?? 0, max: this.charInfo.vitals[k]?.max ?? 0 });
+        return { name, world: this.worldName ?? '', vitals: { health: v('health'), stamina: v('stamina'), mana: v('mana') }, coords: source.coords() };
+      },
+      // A broadcast command runs as if typed here (/vt, /ub and retail commands alike).
+      run: (command) => this.callbacks.onChatSend?.(command),
+      report: (line) => source.report(line),
+    });
+    this.ubNet = net;
+    setActiveUbNet(net);
+    net.start();
+    this.ubNetTimer = setInterval(() => net.tick(), 300);
+    // A closed tab says goodbye, so the others drop it at once (else after 10 s of silence).
+    globalThis.addEventListener?.('pagehide', () => { if (this.ubNet === net) net.stop(); }, { once: true });
+  }
+
+  /** Names for a VirindiTank .usd's ids: the spell table, and what you carry or wear (vtankUsd.ts VtNames). */
+  private vtankNames(): VtNames {
+    const items = () => [...this.inventoryItems, ...this.equippedItems];
+    return {
+      spellName: (id) => this.spellTable?.spells.get(id)?.name,
+      spellId: (name) => { const n = name.toLowerCase(); for (const [id, sp] of this.spellTable?.spells ?? []) if (sp.name.toLowerCase() === n) return id; return undefined; },
+      objectName: (guid) => items().find((i) => i.id >>> 0 === guid >>> 0)?.name,
+      objectId: (name) => { const it = items().find((i) => i.name === name); return it ? it.id | 0 : undefined; },
+    };
   }
 
   get automationAvailable(): boolean { return this.automationModel !== null; }
@@ -21358,12 +21453,15 @@ export class GameUI {
   private tickAutomation(): void {
     this.updateAutomationStrip();
     if (!this.automationModel) return;
-    if (!this.automationPanelVisible && !this.automationEditorEl) return;
+    // The VirindiTank window's activity (its status line, the Action History, /vt log) is watched whether or
+    // not a window is open, as VTank logs with its window closed.
+    this.vtankModel?.observe();
+    if (!this.automationPanelVisible && !this.automationEditorEl && !this.vtankEl && !this.vtankWindows.size) return;
     // Redraw only when what the panel shows changed (state, acting rule, counters; the clock on the Stats tab).
     const src = this.automationModel.source;
     const st = src.status();
     const stats = src.stats();
-    const key = JSON.stringify([st.running, st.paused, st.state, st.acting, st.profile, (st.spent ?? []).join(','), stats.kills, stats.kept, stats.left, stats.sold, stats.deaths, stats.rebuffs, Math.floor(stats.xpGained), this.automationModel.onStatsTab ? Math.floor(src.now() / 1000) : 0]);
+    const key = JSON.stringify([st.running, st.paused, st.state, st.acting, st.profile, (st.spent ?? []).join(','), stats.kills, stats.kept, stats.left, stats.sold, stats.deaths, stats.rebuffs, Math.floor(stats.xpGained), this.automationModel.onStatsTab ? Math.floor(src.now() / 1000) : 0, this.vtankModel?.activity.lines.at(-1) ?? '', this.vtankModel?.activity.lines.length ?? 0]);
     if (key === this.automationShownKey) return;
     this.automationShownKey = key;
     if (this.automationPanelVisible) this.renderAutomationBody();
@@ -21372,7 +21470,32 @@ export class GameUI {
     if (ed && this.automationEditorRedraw && !ed.contains(document.activeElement) && !this.automationMenuEl) this.automationEditorRedraw();
     const vt = this.vtankEl;
     if (vt && this.vtankRedraw && !vt.contains(document.activeElement) && !this.automationMenuEl) this.vtankRedraw();
+    for (const w of this.vtankWindows.values()) if (!w.el.contains(document.activeElement) && !this.automationMenuEl) w.redraw();
   }
+
+  /** The VirindiTank window's own small windows (the Action History, the remote), by key. */
+  private vtankWindows = new Map<string, { el: HTMLDivElement; redraw: () => void }>();
+
+  private openVTankAux(key: string, title: string, W: number, H: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void): void {
+    const open = this.vtankWindows.get(key);
+    if (open) { open.redraw(); return; }
+    const { win, body } = this.buildVTankFrame(title, W, H, `acjs.vtank.${key}`, () => this.closeVTankAux(key));
+    win.dataset.vtankAux = key;
+    win.style.zIndex = '9010';
+    const close = () => this.closeVTankAux(key);
+    const redraw = () => draw(body, redraw, close);
+    this.hudContainer.appendChild(win);
+    this.vtankWindows.set(key, { el: win, redraw });
+    redraw();
+  }
+
+  private closeVTankAux(key: string): void {
+    this.vtankWindows.get(key)?.el.remove();
+    this.vtankWindows.delete(key);
+  }
+
+  /** What Show Nav Lines draws (main.ts feeds scene/NavLines.ts): the VirindiTank window's loaded route, or null. */
+  automationNavLines(): ReturnType<VTankWindow['navLinesRoute']> { return this.vtankModel?.navLinesRoute() ?? null; }
 
   /**
    * The panel's shell is the Vitae panel's (layout 0x21000020: title bar
@@ -21470,10 +21593,10 @@ export class GameUI {
       const input = document.createElement('input');
       input.type = 'file';
       input.multiple = true;
-      input.accept = '.met,.nav,.utl';
+      input.accept = '.met,.nav,.utl,.usd,.af';
       input.addEventListener('change', () => {
         const list = Array.from(input.files ?? []);
-        void Promise.all(list.map((f) => f.arrayBuffer().then((b) => ({ name: f.name, text: new TextDecoder('windows-1252').decode(b) })))).then((files) => { if (files.length) editor.importFiles(files, redraw); });
+        void Promise.all(list.map((f) => f.arrayBuffer().then((b) => ({ name: f.name, text: new TextDecoder('windows-1252').decode(b) })))).then((files) => { if (files.length) editor.importFiles(files, redraw, this.vtankNames()); });
       });
       input.click();
     };
@@ -21584,6 +21707,38 @@ export class GameUI {
     const line = `1px solid ${AC_COLORS.tooltipBorder}`;
     return {
       ...base,
+      // An exported VirindiTank file: a browser download (browser UX), in the code page the importer reads (Windows-1252).
+      download: (fileName, text) => {
+        try {
+          const url = URL.createObjectURL(new Blob([encodeWindows1252(text) as BlobPart], { type: 'text/plain' }));
+          const a = document.createElement('a');
+          a.href = url; a.download = fileName;
+          document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch { /* download blocked: nothing to do */ }
+      },
+      // The loot editor's File → Open / Import Ranges: the browser's file picker; VTank's files are Windows-1252.
+      openFile: (accept, onFile) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = accept;
+        input.addEventListener('change', () => {
+          const f = input.files?.[0];
+          if (f) void f.arrayBuffer().then((b) => onFile({ name: f.name, text: new TextDecoder('windows-1252').decode(b) }));
+        });
+        input.click();
+      },
+      // VTank's New / CopyTo paste a command for the player to finish (CHG .172): the chat entry, prefilled, cursor at the end.
+      pasteChat: (text) => {
+        const chatInput = document.getElementById('chat-input') as HTMLInputElement | null;
+        if (!chatInput) return;
+        chatInput.value = text;
+        chatInput.focus();
+        chatInput.setSelectionRange(text.length, text.length);
+      },
+      // A .usd's object and spell ids by name (export), and the tab's UtilityBelt network client.
+      names: () => this.vtankNames(),
+      net: () => this.ubNet,
       input: (value, width, onChange) => {
         const input = document.createElement('input');
         input.type = 'text';
@@ -21790,11 +21945,22 @@ export class GameUI {
     for (const el of win.querySelectorAll<HTMLElement>('[data-meta-view-button]')) if (el.dataset.metaViewButton === control) return el;
     return null;
   }
+  /** UB's uiviewexists / uiviewvisible: a view of this name is open, and shown. */
+  metaViewExists(view: string): boolean { return this.metaViews.has(view); }
+  metaViewVisible(view: string): boolean { const w = this.metaViews.get(view); return !!w && w.style.display !== 'none' && w.isConnected; }
+  /** UB's uisetvisible[control, visible]: show or hide one control of an open view (it keeps its place). */
+  setMetaViewControlVisible(view: string, control: string, visible: boolean): boolean {
+    const b = this.metaViewButton(view, control);
+    if (!b) return false;
+    b.style.visibility = visible ? '' : 'hidden';
+    return true;
+  }
   closeMetaView(name: string): void { this.metaViews.get(name)?.remove(); this.metaViews.delete(name); }
   closeAllMetaViews(): void { for (const n of [...this.metaViews.keys()]) this.closeMetaView(n); }
 
-  private openVTankDialog(title: string, W: number, H: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void): void {
+  private openVTankDialog(title: string, W: number, H: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void, onClosed?: () => void): void {
     this.closeVTankDialog();
+    this.vtankDialogClosed = onClosed ?? null;
     const { win, body } = this.buildVTankFrame(title, W, H, 'acjs.vtankDialog', () => this.closeVTankDialog());
     win.dataset.vtankDialog = '1';
     win.style.zIndex = '9050';
@@ -21810,6 +21976,9 @@ export class GameUI {
     this.vtankDialogEl?.remove();
     this.vtankDialogEl = null;
     this.vtankDialogRedraw = null;
+    const closed = this.vtankDialogClosed;
+    this.vtankDialogClosed = null;
+    closed?.();
   }
 
   /** The options page's tab (0x2100004d:0x1000043a): 3-slice, state 12 open (0x06005d92/94/96), 11 closed (…93/95/97). */
@@ -24197,11 +24366,12 @@ export class GameUI {
    * AGENT.vtank-window — your fellowship's shape for Auto Fellow Mgmt: are you its leader, is it open,
    * how many are in it and who, and whether this era's client has the Leader hand-off (its startvote).
    */
-  agentFellowshipInfo(): { leader: boolean; open: boolean; count: number; members: string[]; handOff: boolean } | null {
+  agentFellowshipInfo(): { leader: boolean; open: boolean; count: number; members: string[]; handOff: boolean; sharing: string[] } | null {
     const f = this.fellowshipData;
     if (!f) return null;
     const self = f.selfGuid ?? this.playerGuid;
-    return { leader: f.leaderGuid === self, open: !!f.open, count: f.fellows.length, members: f.fellows.map((m) => m.name), handOff: this.eraSupports('fellowshipLeadership') };
+    // sharing: the fellows whose Share Loot is on (VTank's LootFellowCorpses loots their kills at once).
+    return { leader: f.leaderGuid === self, open: !!f.open, count: f.fellows.length, members: f.fellows.map((m) => m.name), handOff: this.eraSupports('fellowshipLeadership'), sharing: f.fellows.filter((m) => m.shareLoot).map((m) => m.name) };
   }
 
   agentFellowship(): string {

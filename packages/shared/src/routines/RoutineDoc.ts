@@ -67,20 +67,25 @@ export type RoutineCondition =
   | { kind: 'need-buff' }
   /** A VirindiTank meta expression that must come out true. */
   | { kind: 'expression'; expr: string }
-  /** Something an imported file tested that this engine cannot (kept so the player sees it); never holds. */
-  | { kind: 'unsupported'; what: string };
+  /**
+   * Something an imported file tested that this engine cannot (kept so the player sees it); never holds.
+   * `raw` is the VirindiTank meta condition as read (its type id and typed data), so an export writes it back.
+   */
+  | { kind: 'unsupported'; what: string; raw?: VtMetRaw };
 
 /** What a rule does when it fires, in order. */
 export type RoutineAction =
   | { kind: 'set-state'; state: string }
   | { kind: 'cast'; spell: string; target?: 'self' | 'target' }
   | { kind: 'cast-buffs'; set: string }
-  | { kind: 'use-item'; item: string; on?: 'self' | 'target' }
+  /** Use an item you carry, on yourself, your selection, or (`to`) the nearest object of that name (UtilityBelt's /ub use X on Y). */
+  | { kind: 'use-item'; item: string; on?: 'self' | 'target'; to?: string }
   | { kind: 'attack-nearest'; names?: string[]; meters?: number }
   | { kind: 'loot-nearby'; meters?: number }
   | { kind: 'follow-route'; route: string }
   | { kind: 'walk-to'; coords: string }
-  | { kind: 'use-object'; name: string }
+  /** Use an object by name. `vt`: a VirindiTank route point's record of it (vtank.ts), kept for export. */
+  | { kind: 'use-object'; name: string; vt?: VtObjectRecord }
   | { kind: 'say'; text: string }
   | { kind: 'sell-by-loot-rules'; vendor: string }
   | { kind: 'wait'; seconds: number }
@@ -95,7 +100,17 @@ export type RoutineAction =
   | { kind: 'destroy-view'; name: string }
   | { kind: 'destroy-all-views' }
   /** VirindiTank's NPC Talk: use the NPC until it says something to you (a tell), a few tries. */
-  | { kind: 'talk-to'; name: string }
+  | { kind: 'talk-to'; name: string; vt?: VtObjectRecord }
+  /**
+   * VirindiTank's Checkpoint point (.nav type 8; /vt addnavcheckpoint): on arriving, wait until the server's
+   * own echo of your position is there too, inching forward now and then; the route goes on only then.
+   */
+  | { kind: 'checkpoint' }
+  /**
+   * VirindiTank's deprecated portal point (.nav type 1): use the portal with this object id. An id is valid
+   * only on the server that recorded it, so where none has it the portal standing nearest the point is used.
+   */
+  | { kind: 'use-portal'; id: number }
   /** Make this route the one the macro walks (VirindiTank's Embed Nav). */
   | { kind: 'load-route'; route: string }
   /** Change one of the profile's settings for this run. */
@@ -113,8 +128,18 @@ export type RoutineAction =
   | { kind: 'load-loot'; set: string }
   /** Evaluate a VirindiTank meta expression for its effects. */
   | { kind: 'expression'; expr: string }
-  /** Something an imported file did that this engine cannot; does nothing (fails) when reached. */
-  | { kind: 'unsupported'; what: string };
+  /** Something an imported file did that this engine cannot; does nothing (fails) when reached. `raw`: as for the condition. */
+  | { kind: 'unsupported'; what: string; raw?: VtMetRaw };
+
+/**
+ * What a VirindiTank route point records about the object it uses (Use Portal/NPC, NPC Talk, Open Vendor):
+ * its Decal object class (14 portal, 37 NPC, 10 container), where it stands (map units: E/W, N/S, Z), and its
+ * object id (only valid on the server that recorded it). The engine finds the object by name; an export writes these back.
+ */
+export interface VtObjectRecord { objectClass?: number; at?: [number, number, number]; id?: number }
+
+/** A VirindiTank meta element kept as read: its condition / action type id and its typed value (vtank.ts MetValue). */
+export interface VtMetRaw { id: number; data: unknown }
 
 export interface RoutineRule {
   /** Shown in the editor and in traces ("Low health → heal"). */
@@ -133,7 +158,23 @@ export interface RoutineState {
   rules: RoutineRule[];
 }
 
-export type LootAction = 'keep' | 'keep-up-to' | 'salvage' | 'sell' | 'ignore';
+/** read: VTClassic's Read action (4): take it, and read a scroll you can learn (docs/vtank-macro-behavior.md). */
+export type LootAction = 'keep' | 'keep-up-to' | 'salvage' | 'sell' | 'read' | 'ignore';
+
+/**
+ * A VTClassic loot profile's SalvageCombine block (UTLBlock_SalvageCombine.cs; docs/vtank-formats.md §3.5):
+ * which workmanships of one material may be combined into one bag. A band string is ranges separated by
+ * `,` or `;`, each `a-b` or one number ("1-6, 7-8, 9, 10"); two bags combine when their workmanship falls in
+ * the same range (a gap between ranges counts with the range before it).
+ */
+export interface SalvageCombine {
+  /** The bands for any material without its own. */
+  default: string;
+  /** Bands by material (ACE MaterialType id, as a string key). */
+  materials?: Record<string, string>;
+  /** VTClassic's "value mode" per material (MaterialValueModeValues): combine a band only once its bags are worth this many pyreals together, else two bags under 100 units. */
+  valueModes?: Record<string, number>;
+}
 
 export interface LootMatch {
   /** Case-insensitive regex on the item's name. */
@@ -149,6 +190,11 @@ export interface LootMatch {
   props?: PropTest[];
   /** At least `count` of the item's spells match `match` (and not `notMatch`), case-insensitive regexes. */
   spells?: { match: string; notMatch?: string; count: number };
+  /**
+   * Further spell tests, each of which must hold too (a VTClassic rule's second and later Spell Name Match /
+   * Spell Match and Count requirements: all of a rule's requirements must match).
+   */
+  moreSpells?: Array<{ match: string; notMatch?: string; count: number }>;
   spellCountAtLeast?: number;
   /** The item's ObjectDescriptionFlags include all of these bits (healer 0x10000, lockpick 0x20000, book 0x100). */
   descFlags?: number;
@@ -192,6 +238,11 @@ export interface LootRule {
   count?: number;
   /** All given fields must match. */
   match: LootMatch;
+  /**
+   * What the VTClassic profile had that this engine can't run, kept as written so an export
+   * writes it back: the rule's action id (Read, User1–5) and the requirements behind `match.unsupported`.
+   */
+  vtc?: { action?: number; reqs?: Array<{ type: number; lines: string[] }> };
 }
 
 export interface BuffSet {
@@ -211,6 +262,11 @@ export interface Route {
   follow?: string;
   /** Map coordinates ("42.1N, 33.6E"), walked in order. */
   points: string[];
+  /**
+   * Each point's height as VirindiTank records it (map units: metres / 240), parallel to `points`;
+   * null where unknown (a point recorded here). Kept so an exported .nav has its heights.
+   */
+  z?: Array<number | null>;
   /** What to do on arriving at a point (a VirindiTank route's recall / pause / chat / portal / vendor / jump steps). */
   stops?: Array<{ at: number; do: RoutineAction[] }>;
 }
@@ -228,6 +284,13 @@ export interface RoutineProfile {
   loot: LootRule[];
   /** Other loot rule lists by name (imported VTClassic profiles); load-loot makes one the active `loot`. */
   lootSets?: Record<string, LootRule[]>;
+  /**
+   * The active loot's salvage-bag combining bands (a .utl's SalvageCombine block; VTank's CombineSalvage).
+   * Unset: VTClassic's defaults (salvageCombine.ts SALVAGE_COMBINE_DEFAULTS).
+   */
+  salvageCombine?: SalvageCombine;
+  /** Each loot set's SalvageCombine block, by the loot set's name; load-loot makes it the active one. */
+  salvageCombineSets?: Record<string, SalvageCombine>;
   buffSets: BuffSet[];
   routes: Route[];
   /** The route the macro loads at the start (VirindiTank's Auto-Navigation profile). */

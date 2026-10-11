@@ -18,13 +18,21 @@
  */
 import {
   type RoutineAction, type RoutineCondition, type RoutineDoc, type RoutineProfile, type RoutineRule, type Route, type VtMonsterRow, type VtOption, type VtankProfileData,
-  ROUTINE_SCHEMA_VERSION, VT_DEFAULT_MONSTER, VT_MONSTER_COLUMNS, VT_OPTIONS, emptyVtankData, validateRoutineDoc, vtankChatCommand, vtDisplayValue, vtFromVTank, vtOption, vtStoredValue, vtToVTank,
+  type VTankExport,
+  ROUTINE_SCHEMA_VERSION, VT_DEFAULT_MONSTER, VT_MONSTER_COLUMNS, VT_OPTIONS, activeLoot, emptyVtankData, exportMet, exportNav, exportUtl, exportVTank, validateRoutineDoc, vtankChatCommand, vtDisplayValue, vtFromVTank, vtLinkedSettings, vtOption, vtStoredValue, vtToVTank, exportAf, exportNavAf, exportUsd, type VtNames,
 } from '@ac/shared';
 import type { RoutineStatus } from '../../agent/RoutineEngine.js';
 import { matchMonsterRow } from '../../agent/macro/combatPlan.js';
 import { addAllPeas } from '../../agent/macro/peaPlan.js';
 import { dispelOptionsAvailable } from '../../agent/macro/vtMacro.js';
 import { type AutomationKit, type AutomationSource, type MenuItem, newProfile } from './AutomationPanel.js';
+import { metaCommand, type AutomationTools } from './metaCommands.js';
+import { generateLoadout, type LoadoutInput } from '../../agent/macro/defaultLoadout.js';
+import { VtActivity, vtStatusText } from './vtActivity.js';
+import { VT_ACTION_HELP, VT_CONDITION_HELP } from './metaHelp.js';
+import { renderVTankHistory, renderVTankRemote, VT_HISTORY_SIZE, VT_REMOTE_SIZE } from './VTankRemote.js';
+import { VtLootEditor } from './lootEditor.js';
+import { ubNetCommand, type UbNet } from '../../agent/ubNet.js';
 
 export type VtTab = 'options' | 'profiles' | 'vitals' | 'monsters' | 'items' | 'consumables' | 'buffs' | 'route' | 'meta';
 
@@ -48,10 +56,18 @@ export interface VTankSource extends AutomationSource {
   mexec(expr: string): string;
   /** /vt jump [heading] [shift] [ms]. */
   jump(opts: { heading?: number; walk?: boolean; holdMs?: number }): { ok: boolean; message: string };
+  /** /vt setattackbar [0 to 1]: the combat bar's power slider. */
+  setAttackBar?(power: number): { ok: boolean; message: string };
   /** /vt fakedeath. */
   fakeDeath(): { ok: boolean; message: string };
-  /** /vt reverseroute. */
-  reverseRoute(): { ok: boolean; message: string };
+  /** /vt reverseroute [true|false]: flip the loaded route's direction, or set it. */
+  reverseRoute(on?: boolean): { ok: boolean; message: string };
+  /** /vt reverseroutequery: whether the loaded route is walked backwards. */
+  routeReversed?(): boolean;
+  /** /vt testitem: what these loot rules would do with the selected item (RoutineEngine.testItem). */
+  testItem?(rules: RoutineProfile['loot']): Promise<string[]>;
+  /** /vt propertydump: the selected item's raw properties (RoutineEngine.propertyDump). */
+  propertyDump?(): Promise<string[]>;
   /** VirindiTank's current-waypoint arrow: the running macro's loaded (circular) route walks next to its point nearest you. */
   setNearestWaypoint(): { ok: boolean; message: string };
   /** VirindiTank's Force Buff / Cancel Force Buff. */
@@ -59,8 +75,12 @@ export interface VTankSource extends AutomationSource {
   cancelForceBuff(): { ok: boolean; message: string };
   /** The active era's SpellTable (options that need a spell the era lacks are hidden); null while unknown. */
   spellTable?(): { spells: Map<number, { desc: string }> } | null;
-  /** The selected object's name and kind (Route's Add Portal/NPC, Open Vendor; Items / Consumables' Add: an item you carry is kind 'item'). */
-  selection(): { name: string; kind: string } | null;
+  /** The selected object's name and kind (Route's Add Portal/NPC, Open Vendor; Items / Consumables' Add: an item you carry is kind 'item'), and its object id when known. */
+  selection(): { name: string; kind: string; guid?: number } | null;
+  /** Put text in the chat box for the player to finish (VTank's CopyTo / New paste a /vt command there). False when there is no chat box. */
+  pasteChat?(text: string): boolean;
+  /** What you carry and your skills, examined, for the generated [Default] / [By char] profile (agent/macro/defaultLoadout.ts). */
+  loadout?(): Promise<LoadoutInput>;
   /**
    * Whether the active era's SkillTable (0x0E000004) has a skill, by name
    * ("Summoning", "Void Magic"); undefined when the table isn't loaded. Controls
@@ -70,6 +90,8 @@ export interface VTankSource extends AutomationSource {
   hasSkill?(name: string): boolean | undefined;
   /** Whether the active era's SpellTable has a spell id (Tusker Fists 2934 for the Fists damage type); undefined when unknown. */
   hasSpell?(id: number): boolean | undefined;
+  /** The debug and inventory commands' game side (/vt dumpmetavars, testspell …; /ub autostack, count …: metaCommands.ts). */
+  tools?: AutomationTools;
 }
 
 /** The options that only mean something with the Summoning skill (Summon Pets and its settings). */
@@ -91,12 +113,28 @@ export interface VTankKit extends AutomationKit {
   textTab(label: string, on: boolean, onClick: () => void): HTMLElement;
   /** A list box with VVS's scrollbar (the retail blue track and gold caps). */
   list(host: HTMLElement): void;
+  /** Hand the player a file (a browser download): an exported VirindiTank .met / .nav / .utl / .usd, or a metaf .af. */
+  download(fileName: string, text: string): void;
+  /** Put a command in the chat box for the player to finish, as VTank's New / CopyTo buttons do (CHG .172). */
+  pasteChat?(text: string): void;
+  /** The browser's file picker for one file (VTank's files are Windows-1252 text): the loot editor's File → Open, Import Ranges. */
+  openFile?(accept: string, onFile: (f: { name: string; text: string }) => void): void;
+  /** Names for a .usd's object and spell ids (the spell table, what you carry); vtankUsd.ts. */
+  names?(): VtNames;
+  /** This tab's UtilityBelt network client (/ub bc, bct, netclients; agent/ubNet.ts), null without one. */
+  net?(): UbNet | null;
 }
 
 /** A second window (Edit Meta Rule) the host floats over the world. */
 export interface VTankDialogs {
-  open(title: string, w: number, h: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void): void;
+  /** `onClosed` runs however the dialog goes (its close box, another dialog taking its place, close()). */
+  open(title: string, w: number, h: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void, onClosed?: () => void): void;
   close(): void;
+  /** A window of its own (the Action History, the remote), by key; opening an open one brings it back as it is. */
+  window?(key: string, title: string, w: number, h: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void): void;
+  closeWindow?(key: string): void;
+  /** Show or hide the main window (the remote's M, the Options tab's Remote). */
+  showMain?(on: boolean): void;
 }
 
 /** VirindiTank's Options tab: each option's place (Vtank_Main.PNG). Drawn only when the engine acts on it. */
@@ -110,6 +148,8 @@ export const VT_OPTIONS_LAYOUT: Array<{ name: string; kind: 'range' | 'check' | 
   { name: 'EnableNav', kind: 'check', x: 97, y: 109 }, { name: 'EnableLooting', kind: 'check', x: 97, y: 129 }, { name: 'EnableMeta', kind: 'check', x: 97, y: 149 },
   { name: 'AutoStack', kind: 'check', x: 228, y: 9 }, { name: 'AutoCram', kind: 'check', x: 228, y: 29 },
   { name: 'UseDispelItems', kind: 'check', x: 228, y: 49 }, { name: 'CastDispelSelf', kind: 'check', x: 228, y: 69 },
+  // Show Nav Lines: the free slot under Cast Dispel Self (MOSS's Options tab puts it there; VTank 0.3.1.157 has the slot empty).
+  { name: 'ShowNavLines', kind: 'check', x: 228, y: 89 },
   { name: 'AutoFellowManagement', kind: 'check', x: 228, y: 129 }, { name: 'ManaChargesWhenOff', kind: 'check', x: 228, y: 149 },
   { name: 'NavPriorityBoost', kind: 'check', x: 395, y: 9 }, { name: 'LootPriorityBoost', kind: 'check', x: 395, y: 29 },
   { name: 'LootOnlyRareCorpses', kind: 'check', x: 395, y: 49 }, { name: 'IdlePeaceMode', kind: 'check', x: 395, y: 69 }, { name: 'IdleBuffTopoff', kind: 'check', x: 395, y: 89 },
@@ -334,15 +374,21 @@ export function setRuleCondition(r: RoutineRule, c: RoutineCondition): void {
 
 // ── Route: one VirindiTank waypoint per point, with its step ──
 
-export interface Waypoint { coords: string; step: RoutineAction[] | null }
+/** `z`: the point's VirindiTank height when it has one (an imported route), carried through edits for export. */
+export interface Waypoint { coords: string; step: RoutineAction[] | null; z?: number | null }
 export function routeWaypoints(r: Route): Waypoint[] {
-  return r.points.map((coords, i) => ({ coords, step: r.stops?.find((s) => s.at === i)?.do ?? null }));
+  const z = r.z?.length === r.points.length ? r.z : null;
+  return r.points.map((coords, i) => ({ coords, step: r.stops?.find((s) => s.at === i)?.do ?? null, ...(z ? { z: z[i] } : {}) }));
 }
 export function setRouteWaypoints(r: Route, wps: Waypoint[]): void {
   r.points = wps.map((w) => w.coords);
   const stops = wps.flatMap((w, i) => (w.step ? [{ at: i, do: w.step }] : []));
   if (stops.length) r.stops = stops; else delete r.stops;
+  if (wps.some((w) => typeof w.z === 'number')) r.z = wps.map((w) => (typeof w.z === 'number' ? w.z : null)); else delete r.z;
 }
+
+/** The Decal object class VirindiTank's Use Portal/NPC records for a selection (portal 14, NPC 37, container 10, door 26, lifestone 28). */
+const VT_OBJECT_CLASS: Record<string, number> = { portal: 14, npc: 37, vendor: 37, container: 10, door: 26, lifestone: 28 };
 export function waypointText(w: Waypoint): string {
   const s = w.step?.[0];
   if (!s) return `Point ${w.coords}`;
@@ -353,10 +399,18 @@ export function waypointText(w: Waypoint): string {
     case 'use-object': return `Use: ${s.name}`;
     case 'talk-to': return `NPC Talk: ${s.name}`;
     case 'sell-by-loot-rules': return `Vendor: ${s.vendor}`;
-    case 'jump': return 'Jump';
+    case 'jump': return `Jump ${Math.round(s.heading ?? 0)}°${s.walk ? ' (walk)' : ''}${s.holdMs ? ` ${s.holdMs} ms` : ''}`;
+    case 'checkpoint': return `Checkpoint ${w.coords}`;
+    case 'use-portal': return `Portal #${(s.id >>> 0).toString(16)}`;
     default: return `${s.kind} (${w.coords})`;
   }
 }
+/** The Macro Settings dropdown's generated templates (VTank's [Default] and [By char]; BBG, STD). */
+export const VT_DEFAULT_PROFILE = '[Default]';
+export const VT_BY_CHAR = '[By char]';
+/** The saved profile behind [By char] for a character. */
+export const vtByCharName = (character: string): string => `${VT_BY_CHAR} ${character}`;
+
 /** The recalls Add Recall offers (VirindiTank's list; ACE spell names). */
 export const VT_RECALLS = ['Primary Portal Recall', 'Secondary Portal Recall', 'Lifestone Recall', 'Lifestone Sending', 'Portal Recall', 'Recall the Sanctuary', 'Recall Aphus Lassel', 'Recall to the Singularity Caul', 'Glenden Wood Recall', 'Aerlinthe Recall', 'Mount Lethe Recall', "Ulgrim's Recall", 'Bur Recall', 'Call of the Mhoire Forge', 'Colosseum Recall', 'Facility Hub Recall', 'Return to the Keep'];
 
@@ -380,7 +434,21 @@ export class VTankWindow {
   /** The Meta rule being edited (state + index), or null. */
   private editing: { state: string; index: number } | null = null;
 
-  constructor(private readonly kit: VTankKit, readonly source: VTankSource, private readonly dialogs: VTankDialogs) {}
+  /** VirindiTank Classic's loot editor (Profiles → Looting → New / Show Editor; lootEditor.ts). */
+  readonly loot: VtLootEditor;
+  /** The window's last redraw, for the loot editor's changes. */
+  private redrawWindow: () => void = () => {};
+
+  constructor(private readonly kit: VTankKit, readonly source: VTankSource, private readonly dialogs: VTankDialogs) {
+    this.loot = new VtLootEditor({
+      kit, dialogs,
+      profile: () => this.profile(),
+      changed: () => this.changed(() => {}),
+      redraw: () => this.redrawWindow(),
+      giveFile: (f) => this.giveFile(f),
+      newProfile: () => { this.lootNew(); this.redrawWindow(); },
+    });
+  }
 
   get document(): RoutineDoc | null { return this.doc; }
 
@@ -505,6 +573,7 @@ export class VTankWindow {
   }
 
   render(body: HTMLElement, w: number, h: number, redraw: () => void): void {
+    this.redrawWindow = redraw;
     body.innerHTML = '';
     const { kit } = this;
     const root = el('div', { position: 'absolute', left: '0', top: '0', width: `${w}px`, height: `${h}px` }, { vtank: 'window' });
@@ -549,8 +618,10 @@ export class VTankWindow {
   private optionField(o: VtOption, width: number, redraw: () => void): HTMLElement {
     return tag(this.kit.input(String(vtDisplayValue(o.name, this.value(o.name))), width, (v) => {
       const p = this.macroProfile();
-      p.settings = { ...(p.settings ?? {}), [o.name]: vtStoredValue(o.name, v) };
-      if (this.running()) this.source.setSetting(o.name, vtStoredValue(o.name, v));
+      // The Approach box sets the corpse approach range too (vtLinkedSettings).
+      const set = vtLinkedSettings(o.name, vtStoredValue(o.name, v));
+      p.settings = { ...(p.settings ?? {}), ...set };
+      if (this.running()) for (const [k, x] of Object.entries(set)) this.source.setSetting(k, x);
       this.changed(() => {});
     }), { vtankOption: o.name });
   }
@@ -583,6 +654,13 @@ export class VTankWindow {
     const st = this.source.status();
     const on = this.running() && !st.paused;
     area.appendChild(at(this.check('Run Macro', on, (v) => this.runMacro(v, redraw), { vtank: 'run-macro' }), 620, Math.min(149, h - 24)));
+    // What the macro is doing, the Action History and the remote (MOSS's Options tab: a status line and History
+    // beside Run Macro; here in the free space under Summon Pets, as VTank's tab has no room by Run Macro).
+    area.appendChild(at(tag(kit.flatButton('History', () => this.openHistory(), 60), { vtank: 'history' }), 560, 89));
+    if (this.dialogs.window) area.appendChild(at(tag(kit.flatButton('Remote', () => this.openRemote(), 60), { vtank: 'remote' }), 626, 89));
+    const status = el('div', { position: 'absolute', left: '560px', top: '111px', width: '170px', height: '16px', overflow: 'hidden', whiteSpace: 'nowrap' }, { vtank: 'status' });
+    status.appendChild(kit.text(vtStatusText(st, this.running()), { color: c.dim }));
+    area.appendChild(status);
   }
 
   /** Run Macro: on starts the profile (or resumes it); off pauses it, as VirindiTank's switch does. */
@@ -634,20 +712,21 @@ export class VTankWindow {
     const p = this.profile();
     const ch = this.source.character();
     const label = (t: string, y: number) => area.appendChild(at(kit.text(t, { color: c.text }), 26, y));
-    // Macro Settings: which profile; CopyTo makes a copy under a new name.
+    // Macro Settings: [Default], [By char] (the generated templates, VTank's first two entries), then the saved
+    // profiles; CopyTo pastes VTank's save command into the chat box for the player to name.
     label('Macro Settings', 6);
-    area.appendChild(at(tag(kit.dropdown(p?.name ?? '[None]', (a) => kit.menu(a, doc.profiles.map((x) => ({ label: x.name, value: x.name })), (v) => {
+    const byChar = ch ? vtByCharName(ch) : null;
+    const shownName = p ? (p.name === byChar ? VT_BY_CHAR : p.name) : '[None]';
+    const choices = [VT_DEFAULT_PROFILE, ...(byChar ? [VT_BY_CHAR] : []), ...doc.profiles.filter((x) => x.name !== VT_DEFAULT_PROFILE && !x.name.startsWith(`${VT_BY_CHAR} `)).map((x) => x.name)];
+    area.appendChild(at(tag(kit.dropdown(shownName, (a) => kit.menu(a, choices.map((x) => ({ label: x, value: x })), (v) => {
       if (this.source.status().running) { this.message = 'Turn Run Macro off (and stop) before changing profiles.'; redraw(); return; }
+      if (v === VT_DEFAULT_PROFILE || v === VT_BY_CHAR) { void this.useTemplate(v, redraw); return; }
       this.profileName = v; this.routeName = null; redraw();
     }), 130), { vtank: 'macro-profile' }), 146, 4));
     area.appendChild(at(tag(kit.flatButton('CopyTo', () => {
-      const base = this.ensureProfile();
-      let i = 2;
-      while (doc.profiles.some((x) => x.name === `${base.name} ${i}`)) i++;
-      const copy = { ...structuredClone(base), name: `${base.name} ${i}` };
-      doc.profiles.push(copy);
-      this.profileName = copy.name;
-      this.changed(redraw);
+      // VTank: /vt settings save (Mine Only off) or savechar (Mine Only on), for the player to name (BBG).
+      const mine = !!(ch && p && doc.characters?.[ch] === p.name);
+      this.paste(mine ? '/vt settings savechar ' : '/vt settings save ', redraw);
     }, 40), { vtank: 'copy-profile' }), 285, 4));
     // Enable Auto-Navigation: the route the macro walks.
     const nav = this.value('EnableNav') === true;
@@ -655,17 +734,13 @@ export class VTankWindow {
     area.appendChild(at(tag(kit.dropdown(p?.navRoute ?? '[None]', (a) => kit.menu(a, [{ label: '[None]', value: '' }, ...(p?.routes ?? []).map((r) => ({ label: r.name, value: r.name }))], (v) => {
       const q = this.ensureProfile();
       if (v) q.navRoute = v; else delete q.navRoute;
+      // [None] loads no route (the Route tab shows none, and /vt nav save makes a new empty one: "[None], CopyTo, name it").
+      this.routeName = v;
       this.changed(redraw);
     }), 130), { vtank: 'nav-profile' }), 146, 28));
-    area.appendChild(at(tag(kit.flatButton('New', () => {
-      const q = this.ensureProfile();
-      let i = 1;
-      while (q.routes.some((r) => r.name === `Route ${i}`)) i++;
-      q.routes.push({ name: `Route ${i}`, mode: 'circular', points: [] });
-      q.navRoute = `Route ${i}`;
-      this.routeName = q.navRoute;
-      this.changed(redraw);
-    }, 40), { vtank: 'new-route' }), 285, 28));
+    // CopyTo pastes /vt nav save for the player to name (BBG): a copy of the chosen route, or with [None] a new
+    // empty one ("[None], CopyTo, name it"). Named with VTank's extension (runback.nav) the file comes too.
+    area.appendChild(at(tag(kit.flatButton('CopyTo', () => this.paste('/vt nav save ', redraw), 40), { vtank: 'copy-nav' }), 285, 28));
     // Enable Looting: which loot profile (an imported VTClassic file, or this profile's own rules).
     const loot = this.value('EnableLooting') === true;
     area.appendChild(at(this.check('Enable Looting', loot, (v) => this.setValue('EnableLooting', v, redraw), { vtankOption: 'EnableLooting' }), 10, 54));
@@ -675,9 +750,29 @@ export class VTankWindow {
       if (v) q.lootSet = v; else delete q.lootSet;
       this.changed(redraw);
     }), 130), { vtank: 'loot-profile' }), 146, 52));
+    // New (VTank's place): VTank pastes "/vt loot new " for the player to name the profile (CHG .172); the
+    // command makes the blank VTClassic profile and opens its editor. Without a chat box, a "Loot N" one at once.
+    area.appendChild(at(tag(kit.flatButton('New', () => { this.lootNew(); redraw(); }, 40), { vtank: 'loot-new' }), 285, 52));
+    // CopyTo: the loot rules in use as a VTClassic .utl (with its salvage bands).
+    area.appendChild(at(tag(kit.flatButton('CopyTo', () => {
+      const q = this.profile();
+      if (!q) { this.message = 'No profile to copy from.'; redraw(); return; }
+      const f = exportVTank(q, 'utl');
+      this.message = f ? this.giveFile(f).join(' ') : 'No loot profile.';
+      redraw();
+    }, 40), { vtank: 'copy-loot' }), 330, 52));
+    // Show Editor: the loot profile chosen above in VTClassic's editor (VTank calls the loot plugin's editor here).
+    area.appendChild(at(this.check('Show Editor', this.loot.open, (v) => {
+      if (!v) { this.loot.hide(); redraw(); return; }
+      const q = this.ensureProfile();
+      this.loot.show(q.lootSet && q.lootSets?.[q.lootSet] ? q.lootSet : null);
+      redraw();
+    }, { vtank: 'loot-show-editor' }), 446, 54));
     // Enable Meta Actions: the profile's rules run.
     const meta = this.value('EnableMeta') === true;
     area.appendChild(at(this.check('Enable Meta Actions', meta, (v) => this.setValue('EnableMeta', v, redraw), { vtankOption: 'EnableMeta' }), 10, 78));
+    // CopyTo pastes /vt meta save for the player to name (INF from the other two; with .met the file comes too).
+    area.appendChild(at(tag(kit.flatButton('CopyTo', () => this.paste('/vt meta save ', redraw), 40), { vtank: 'copy-meta' }), 285, 78));
     // Clear profile!: back to VirindiTank's defaults. Clear nav profile!: an empty route.
     area.appendChild(at(tag(kit.flatButton('Clear profile!', () => { const q = this.ensureProfile(); q.settings = {}; if (this.running()) for (const o of VT_OPTIONS) this.source.setSetting(o.name, o.default); this.changed(redraw); }, 98), { vtank: 'clear-profile' }), 336, 4));
     area.appendChild(at(tag(kit.flatButton('Clear nav profile!', () => {
@@ -819,12 +914,13 @@ export class VTankWindow {
     area.appendChild(at(tag(kit.flatButton('Add Portal/NPC', () => needHere((co) => {
       const s = this.source.selection();
       if (!s) { this.message = 'Select the portal or NPC first.'; redraw(); return; }
-      this.addWaypoint({ coords: co, step: [{ kind: 'use-object', name: s.name }] }, redraw);
+      const cls = VT_OBJECT_CLASS[s.kind];
+      this.addWaypoint({ coords: co, step: [{ kind: 'use-object', name: s.name, ...(cls !== undefined ? { vt: { objectClass: cls } } : {}) }] }, redraw);
     }), 86), { vtank: 'add-portal' }), bx, 40));
     area.appendChild(at(tag(kit.flatButton('Add NPC Talk', () => needHere((co) => {
       const s = this.source.selection();
       if (!s || (s.kind !== 'npc' && s.kind !== 'vendor')) { this.message = 'Select the NPC first.'; redraw(); return; }
-      this.addWaypoint({ coords: co, step: [{ kind: 'talk-to', name: s.name }] }, redraw);
+      this.addWaypoint({ coords: co, step: [{ kind: 'talk-to', name: s.name, vt: { objectClass: 37 } }] }, redraw);
     }), 86), { vtank: 'add-npc-talk' }), bx + 94, 40));
     area.appendChild(at(tag(kit.flatButton('Add Recall', () => needHere((co) => this.addWaypoint({ coords: co, step: [{ kind: 'cast', spell: this.recall, target: 'self' }] }, redraw)), 86), { vtank: 'add-recall' }), bx, 62));
     area.appendChild(at(tag(kit.dropdown(this.recall, (a) => kit.menu(a, VT_RECALLS.map((x) => ({ label: x, value: x })), (v) => { this.recall = v; redraw(); }), 210), { vtank: 'recall' }), bx + 94, 62));
@@ -860,23 +956,40 @@ export class VTankWindow {
   private data(): VtankProfileData { return this.macroProfile().vtank!; }
   private dataView(): VtankProfileData { return this.profile()?.vtank ?? emptyVtankData(); }
 
-  /** A list box with a header, rows of names and a delete icon per row. */
-  private nameList(area: HTMLElement, x: number, y: number, w: number, h: number, title: string, names: string[], onRemove: (i: number) => void, key: string, extra?: (i: number) => HTMLElement | null): void {
+  /**
+   * A list box with a header and rows of names. A click on a name removes that row: VTank's lists have no
+   * delete buttons (Vtank_items.PNG, Vtank_consumables.PNG), and MOSS's facts say a name click removes it.
+   * `extra` draws a row's other column (the Items tab's Hands) at `extraX`.
+   */
+  private nameList(area: HTMLElement, x: number, y: number, w: number, h: number, title: string, names: string[], onRemove: (i: number) => void, key: string, extra?: (i: number) => HTMLElement | null, extraX = w - 110): void {
     const { kit } = this;
     area.appendChild(at(kit.text(title, { color: kit.colors.text }), x + 22, y));
     const box = el('div', { position: 'absolute', left: `${x}px`, top: `${y + 16}px`, width: `${w}px`, height: `${h}px` }, { vtankList: key });
     const list = el('div', { display: 'flex', flexDirection: 'column', paddingRight: '18px' });
     names.forEach((nm, i) => {
       const line = el('div', { position: 'relative', height: '18px' }, { vtankRow: `${key}#${i}` });
-      line.appendChild(at(kit.text(nm, { color: kit.colors.text }), 2, 2));
+      const name = el('div', { position: 'absolute', left: '2px', top: '2px', width: `${Math.max(40, extraX - 8)}px`, height: '16px', overflow: 'hidden', whiteSpace: 'nowrap', cursor: 'pointer' }, { vtankRemove: '1' });
+      name.appendChild(kit.text(nm, { color: kit.colors.text }));
+      name.addEventListener('click', (e) => { e.stopPropagation(); onRemove(i); });
+      line.appendChild(name);
       const ex = extra?.(i);
-      if (ex) line.appendChild(at(ex, w - 110, 2));
-      line.appendChild(at(tag(kit.icon(VT_ICON.remove, 14, () => onRemove(i)), { vtankRemove: '1' }), w - 36, 2));
+      if (ex) line.appendChild(at(ex, extraX, 2));
       list.appendChild(line);
     });
     box.appendChild(list);
     area.appendChild(box);
     kit.list(box);
+  }
+
+  /** Take an Items-tab entry off; a Monsters row whose Weapon / Offhand was that entry goes back to <AUTO>. */
+  private removeItem(i: number): void {
+    const d = this.data();
+    const [gone] = d.items.splice(i, 1);
+    if (!gone) return;
+    for (const r of d.monsters) {
+      if (r.weapon === gone.name && (gone.id === undefined ? r.weaponId === undefined : r.weaponId === gone.id)) { r.weapon = null; delete r.weaponId; }
+      if (r.offhand === gone.name && (gone.id === undefined ? r.offhandId === undefined : r.offhandId === gone.id)) { r.offhand = null; delete r.offhandId; }
+    }
   }
 
   /** The selected item you carry, or a message why not. */
@@ -901,7 +1014,12 @@ export class VTankWindow {
     for (const [t, x] of head) area.appendChild(at(kit.text(t, { color: c.text }), x, 0));
     const box = el('div', { position: 'absolute', left: '0', top: '16px', width: `${w}px`, height: `${h - 44}px` }, { vtankList: 'monsters' });
     const list = el('div', { display: 'flex', flexDirection: 'column', paddingRight: '18px' });
-    const items = ['<AUTO>', ...this.dataView().items.map((x) => x.name)];
+    // Weapon / Offhand step through <AUTO> and each Items-tab entry (two same-named weapons are two steps, kept by id).
+    const entries: Array<{ name: string; id?: number }> = [{ name: '<AUTO>' }, ...this.dataView().items.map((x) => ({ name: x.name, ...(x.id !== undefined ? { id: x.id } : {}) }))];
+    const stepFrom = (name: string | null, id: number | undefined) => {
+      const j = entries.findIndex((e, k) => k > 0 && e.name === name && (id === undefined || e.id === id));
+      return entries[((j < 0 ? 0 : j) + 1) % entries.length];
+    };
     rows.forEach((r, i) => {
       const line = el('div', { position: 'relative', height: '18px' }, { vtankMonster: String(i) });
       const edit = (f: (row: VtMonsterRow) => void) => { f(this.data().monsters[i]); this.changed(redraw); };
@@ -916,8 +1034,16 @@ export class VTankWindow {
       cycle('priority', 414, String(r.priority), () => edit((row) => { row.priority = row.priority >= 4 ? -1 : row.priority + 1; }));
       cycle('damage', 436, vtDamageName(r.damage), () => edit((row) => { row.damage = nextIn(this.damageCycle(), row.damage); }));
       cycle('exVuln', 504, vtDamageName(r.exVuln), () => edit((row) => { row.exVuln = nextIn(VT_EXVULN_CYCLE, row.exVuln); }));
-      cycle('weapon', 570, r.weapon ?? '<AUTO>', () => edit((row) => { const j = items.indexOf(row.weapon ?? '<AUTO>'); const nx = items[(j + 1) % items.length]; row.weapon = nx === '<AUTO>' ? null : nx; }));
-      cycle('offhand', 650, r.offhand ?? '<AUTO>', () => edit((row) => { const j = items.indexOf(row.offhand ?? '<AUTO>'); const nx = items[(j + 1) % items.length]; row.offhand = nx === '<AUTO>' ? null : nx; }));
+      cycle('weapon', 570, r.weapon ?? '<AUTO>', () => edit((row) => {
+        const nx = stepFrom(row.weapon, row.weaponId);
+        row.weapon = nx.id === undefined && nx.name === '<AUTO>' ? null : nx.name;
+        if (nx.id !== undefined) row.weaponId = nx.id; else delete row.weaponId;
+      }));
+      cycle('offhand', 650, r.offhand ?? '<AUTO>', () => edit((row) => {
+        const nx = stepFrom(row.offhand, row.offhandId);
+        row.offhand = nx.id === undefined && nx.name === '<AUTO>' ? null : nx.name;
+        if (nx.id !== undefined) row.offhandId = nx.id; else delete row.offhandId;
+      }));
       // PetDmg: which essence's element Summon Pets uses for this monster (combatPlan planPet).
       if (pets) cycle('petDamage', 716, vtPetDamageName(r.petDamage), () => edit((row) => { row.petDamage = nextIn(VT_PET_CYCLE, row.petDamage); }));
       if (i > 0) line.appendChild(at(tag(kit.icon(VT_ICON.remove, 14, () => { this.data().monsters.splice(i, 1); this.changed(redraw); }), { vtankRemove: '1' }), w - 22, 2));
@@ -944,10 +1070,37 @@ export class VTankWindow {
   private renderItems(area: HTMLElement, w: number, h: number, redraw: () => void): void {
     const { kit } = this;
     const d = this.dataView();
-    this.nameList(area, 4, 0, Math.min(430, w - 8), h - 44, this.hasSummoning() ? 'Weapons / Wands / Shields / Pets' : 'Weapons / Wands / Shields', d.items.map((x) => x.name), (i) => { this.data().items.splice(i, 1); this.changed(redraw); }, 'items',
-      (i) => (d.items[i].noBuffs ? kit.text('(no buffs)', { color: kit.colors.dim }) : null));
+    const lw = Math.min(430, w - 8);
+    // The Hands column (Vtank_items.PNG's second header; MOSS: a click cycles Auto / 1-Handed / 2-Handed).
+    // Auto reads the item (a TwoHanded slot) and shows blank, as the screenshot's rows do; 2-Handed keeps the
+    // offhand empty while that weapon is wielded (combatPlan isTwoHanded).
+    area.appendChild(at(tag(kit.text('Hands', { color: kit.colors.text }), { vtankColumn: 'Hands' }), 346, 0));
+    const handsText = (v: 1 | 2 | undefined) => (v === 1 ? '1-Handed' : v === 2 ? '2-Handed' : '');
+    this.nameList(area, 4, 0, lw, h - 44, this.hasSummoning() ? 'Weapons / Wands / Shields / Pets' : 'Weapons / Wands / Shields', d.items.map((x) => (x.noBuffs ? `${x.name}  (no buffs)` : x.name)), (i) => { this.removeItem(i); this.changed(redraw); }, 'items',
+      (i) => {
+        const cell = el('div', { width: '90px', height: '16px', cursor: 'pointer' }, { vtankHands: String(i) });
+        cell.appendChild(kit.text(handsText(d.items[i].hands), { color: kit.colors.text }));
+        cell.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const it = this.data().items[i];
+          const nx = it.hands === undefined ? 1 : it.hands === 1 ? 2 : undefined;
+          if (nx === undefined) delete it.hands; else it.hands = nx;
+          this.changed(redraw);
+        });
+        return cell;
+      }, 342);
     const by = h - 22;
-    const add = (noBuffs: boolean) => { const n = this.selectedItem(redraw); if (!n) return; const dd = this.data(); if (!dd.items.some((x) => x.name === n)) dd.items.push(noBuffs ? { name: n, noBuffs: true } : { name: n }); this.changed(redraw); };
+    // An item added from the pack is kept by its object id too, so two weapons of one name are two rows.
+    const add = (noBuffs: boolean) => {
+      const sel = this.source.selection();
+      const n = this.selectedItem(redraw);
+      if (!n) return;
+      const dd = this.data();
+      const id = sel?.guid !== undefined ? sel.guid >>> 0 : undefined;
+      const dup = dd.items.some((x) => (id !== undefined && x.id !== undefined ? x.id === id : x.name === n));
+      if (!dup) dd.items.push({ name: n, ...(id !== undefined ? { id } : {}), ...(noBuffs ? { noBuffs: true } : {}) });
+      this.changed(redraw);
+    };
     area.appendChild(at(tag(kit.flatButton('Add', () => add(false), 140), { vtank: 'add-item' }), 14, by));
     area.appendChild(at(tag(kit.flatButton('Add (no buffs)', () => add(true), 140), { vtank: 'add-item-nobuffs' }), 174, by));
   }
@@ -1062,6 +1215,9 @@ export class VTankWindow {
   /** Edit Meta Rule (Vtguide-meta.png): condition and its state on the left, the action on the right, Close. */
   editRule(state: string, index: number, redraw: () => void): void {
     this.editing = { state, index };
+    this.ruleHelp = null;
+    // One dialog at a time: the loot editor gives way.
+    this.loot.forget();
     this.dialogs.open('Edit Meta Rule', 630, 458, (body, dredraw, close) => this.renderRuleEditor(body, dredraw, () => { this.editing = null; close(); redraw(); }, redraw));
   }
 
@@ -1085,7 +1241,10 @@ export class VTankWindow {
       const d = VT_CONDITIONS.find((x) => x.id === v)!;
       setRuleCondition(rule, d.make());
       both();
-    }, { search: true, width: 260 }), 300), { vtank: 'rule-condition' }), 4, 4));
+    }, { search: true, width: 260 }), 278), { vtank: 'rule-condition' }), 4, 4));
+    // "?" (VTank 0.3.1.172: help text on its meta pages): what the chosen condition / action does, from its wiki.
+    const help = (which: 'condition' | 'action') => { this.ruleHelp = this.ruleHelp === which ? null : which; dredraw(); };
+    root.appendChild(at(tag(kit.flatButton('?', () => help('condition'), 18, 19), { vtank: 'condition-help' }), 286, 4));
     root.appendChild(at(tag(kit.dropdown(s.name, (a) => kit.menu(a, p.states.map((x) => ({ label: x.name, value: x.name })), (v) => {
       if (v === s.name) return;
       s.rules.splice(ed.index, 1);
@@ -1123,12 +1282,21 @@ export class VTankWindow {
       rule.do = d.id === 'all' ? (rule.do.length ? [...rule.do] : []) : d.make(p);
       if (d.id === 'all' && rule.do.length < 2) rule.do = [...rule.do, ...(rule.do.length ? [] : [{ kind: 'set-state', state: s.name } as RoutineAction]), { kind: 'say', text: '' }];
       both();
-    }, { width: 240 }), 300), { vtank: 'rule-action' }), 312, 4));
+    }, { width: 240 }), 278), { vtank: 'rule-action' }), 312, 4));
+    root.appendChild(at(tag(kit.flatButton('?', () => help('action'), 18, 19), { vtank: 'action-help' }), 594, 4));
     const right = el('div', { position: 'absolute', left: '312px', top: '30px', width: '306px', height: '368px' }, { vtank: 'action-pane' });
     root.appendChild(right);
     this.actionPane(right, p, rule, both);
     root.appendChild(at(tag(kit.flatButton('Close', close, 62), { vtank: 'rule-close' }), 4, 408));
+    if (this.ruleHelp) {
+      const label = this.ruleHelp === 'condition' ? vtCondDef(cond)?.label ?? '' : act?.label ?? '';
+      const text = (this.ruleHelp === 'condition' ? VT_CONDITION_HELP : VT_ACTION_HELP)[label] ?? 'No help for this one.';
+      root.appendChild(tag(at(kit.text(`${label}: ${text}`, { color: c.dim, maxWidth: 540 }), 74, 404), { vtank: 'rule-help' }));
+    }
   }
+
+  /** Which "?" of Edit Meta Rule is showing its help. */
+  private ruleHelp: 'condition' | 'action' | null = null;
 
   private params(host: HTMLElement, p: RoutineProfile, values: Record<string, string | number>, defs: Param[], commit: (v: Record<string, string>) => void): void {
     const { kit } = this;
@@ -1207,6 +1375,146 @@ export class VTankWindow {
 
   menuItems(items: string[]): MenuItem[] { return items.map((x) => ({ label: x, value: x })); }
 
+  // ── CopyTo, the generated profiles, the remote, the history and the nav lines ──
+
+  /** VTank's CopyTo / New: a /vt command in the chat box for the player to finish (CHG .172). */
+  paste(text: string, redraw: () => void): void {
+    const ok = this.source.pasteChat?.(text) ?? false;
+    this.message = ok ? '' : `Type ${text.trim()} <name> in chat.`;
+    redraw();
+  }
+
+  /**
+   * [Default] / [By char]: VTank's generated profile, its options at VTank's defaults and its Items and
+   * Consumables filled from what you carry (defaultLoadout.ts). [Default] is made again each time it is
+   * chosen (VTank's resets at logout); [By char] is this character's own, made once, and selecting it turns
+   * Mine only on (BBG: "[By char]: Creates a profile for that character only, same as Toggling Mine Only").
+   */
+  async useTemplate(which: string, redraw: () => void): Promise<void> {
+    const doc = this.doc;
+    const ch = this.source.character();
+    if (!doc) return;
+    const name = which === VT_BY_CHAR ? (ch ? vtByCharName(ch) : null) : VT_DEFAULT_PROFILE;
+    if (!name) { this.message = 'Log in a character first.'; redraw(); return; }
+    const existing = doc.profiles.find((x) => x.name === name);
+    if (existing && which === VT_BY_CHAR) {
+      this.profileName = name;
+    } else {
+      this.message = 'Examining what you carry…';
+      redraw();
+      const vt = emptyVtankData();
+      let skipped: string[] = [];
+      if (this.source.loadout) {
+        try {
+          const l = generateLoadout(await this.source.loadout());
+          vt.items = l.items;
+          vt.consumables = l.consumables;
+          skipped = l.unexamined;
+        } catch { /* nothing carried is known: an empty template */ }
+      }
+      const p: RoutineProfile = { ...newProfile(name), initialState: 'Default', states: [{ name: 'Default', rules: [] }], macro: true, ruleFiring: 'once', settings: {}, vtank: vt };
+      p.modules = { buffs: true, vitals: true, combat: true, looting: true, navigation: true, inventory: true, service: false };
+      doc.profiles = [...doc.profiles.filter((x) => x.name !== name), p];
+      this.profileName = name;
+      this.message = '';
+      // Said in chat: the window's message line clears with the save that follows.
+      if (skipped.length) this.source.report(`${name}: not examined in time, so left out: ${skipped.slice(0, 4).join(', ')}${skipped.length > 4 ? ` and ${skipped.length - 4} more` : ''}.`);
+    }
+    this.routeName = null;
+    if (which === VT_BY_CHAR && ch) doc.characters = { ...(doc.characters ?? {}), [ch]: name };
+    this.changed(redraw);
+  }
+
+  /** The macro's activity: the status line, the Action History, /vt log (vtActivity.ts). */
+  readonly activity = new VtActivity();
+
+  /** One look at the run (GameUI's automation tick): the history, and /vt log's lines into chat. */
+  observe(): void {
+    this.activity.observe(this.source.status(), this.running(), this.source.history(), (line) => this.source.report(line));
+  }
+
+  /** The Action History window (Options → History). */
+  openHistory(): void {
+    if (!this.dialogs.window) { this.message = this.activity.lines.slice(-3).join(' · '); return; }
+    this.dialogs.window('history', 'Action History', VT_HISTORY_SIZE.w, VT_HISTORY_SIZE.h, (body, redraw) => renderVTankHistory(body, this.kit, this.activity, vtStatusText(this.source.status(), this.running()), redraw));
+  }
+
+  /** The remote (Options → Remote): the main window gives way to it; its M brings the main window back. */
+  openRemote(): void {
+    if (!this.dialogs.window) return;
+    this.dialogs.showMain?.(false);
+    this.dialogs.window('remote', 'Automation', VT_REMOTE_SIZE.w, VT_REMOTE_SIZE.h, (body, redraw, close) => renderVTankRemote(body, this.kit, this, redraw, () => { close(); this.dialogs.showMain?.(true); }));
+  }
+
+  /** Whether a switch is on (the running macro's value, else the profile's, else VTank's default). */
+  isOn(name: string): boolean { const v = this.value(name); return v === true || v === 'true'; }
+
+  /** Is the shown profile the running one (and not paused)? The remote's On. */
+  get macroOn(): boolean { return this.running() && !this.source.status().paused; }
+
+  /**
+   * The remote's FC (VTank's Virindi HUDs remote, BBG: "Select who you want to follow and Press the FC
+   * button"): the selected player becomes the profile's follow route, loaded as its route. The route the
+   * profile had stays in its list.
+   */
+  followSelected(redraw: () => void): void {
+    const s = this.source.selection();
+    if (!s || s.kind !== 'player') { this.message = 'Select the player to follow first.'; redraw(); return; }
+    const p = this.ensureProfile();
+    const name = '[Follow]';
+    const r = p.routes.find((x) => x.name === name);
+    if (r) { r.mode = 'follow'; r.follow = s.name; r.points = []; delete r.stops; delete r.z; } else p.routes.push({ name, mode: 'follow', follow: s.name, points: [] });
+    p.navRoute = name;
+    this.routeName = name;
+    this.message = `Following ${s.name}.${this.isOn('EnableNav') ? '' : ' Turn Enable Navigation on to start.'}`;
+    this.changed(redraw);
+  }
+
+  /**
+   * What Show Nav Lines draws (scene/NavLines.ts): the route the running macro walks with the point it walks
+   * to next, else the shown profile's loaded route; null with the switch off or no route with points.
+   */
+  navLinesRoute(): { route: Route; current: number; radius: number } | null {
+    if (!this.isOn('ShowNavLines')) return null;
+    const st = this.source.status();
+    const running = this.running() ? this.source.current() ?? this.profile() : this.profile();
+    const name = this.running() && st.nav ? st.nav.route : running?.navRoute;
+    const route = name ? running?.routes.find((r) => r.name === name) : undefined;
+    if (!route || route.mode === 'follow' || !route.points.length) return null;
+    const current = this.running() && st.nav && st.nav.route === route.name && !st.nav.done ? st.nav.point : -1;
+    return { route, current, radius: Number(this.value('NavCloseStopRange')) || 0 };
+  }
+
+  /** Looting's New: "/vt loot new " in the chat box to finish (VTank CHG .172); with no chat box, "Loot N" at once. */
+  lootNew(): void {
+    if (this.kit.pasteChat) { this.kit.pasteChat('/vt loot new '); return; }
+    const q = this.ensureProfile();
+    let i = 1;
+    while (q.lootSets?.[`Loot ${i}`]) i++;
+    this.newLootProfile(`Loot ${i}`);
+  }
+
+  /** A blank loot profile under `name`, made the Looting profile and opened in the loot editor. */
+  newLootProfile(name: string): void {
+    const p = this.ensureProfile();
+    p.lootSets = { ...(p.lootSets ?? {}), [name]: [] };
+    p.lootSet = name;
+    this.changed(() => {});
+    this.loot.show(name);
+  }
+
+  /**
+   * Hand the player an exported VirindiTank file (a download named as VTank
+   * names it) and say what it couldn't hold: the first line, then up to five
+   * of the problems (the rest counted).
+   */
+  giveFile(f: VTankExport): string[] {
+    this.kit.download(f.fileName, f.text);
+    if (!f.problems.length) return [`${f.fileName} saved to your downloads.`];
+    const shown = f.problems.slice(0, 5);
+    return [`${f.fileName} saved to your downloads; not carried over exactly (${f.problems.length}):`, ...shown.map((x) => `  ${x}`), ...(f.problems.length > shown.length ? [`  … and ${f.problems.length - shown.length} more`] : [])];
+  }
+
   /**
    * VirindiTank's /vt commands (Virindi_Tank_Commands on its wiki), typed in
    * chat or run by a meta's Chat Command: the profile, option and action
@@ -1216,6 +1524,17 @@ export class VTankWindow {
     if (!this.doc) await this.load(() => {});
     const doc = this.doc;
     if (!doc) return [this.message || 'Your routines have not loaded.'];
+    // UtilityBelt networking between this browser's tabs (ubNet.ts): /ub bc, bct, netclients, its opt keys.
+    const net = this.kit.net?.();
+    const netLines = net ? ubNetCommand(line, net) : null;
+    if (netLines) return netLines;
+    // The debug and inventory commands (metaCommands.ts), and UtilityBelt's /ub lines.
+    const extra = this.source.tools ? await metaCommand(line, this.source.tools, {
+      download: (f, t) => this.kit.download(f, t),
+      lootRules: (n) => { const p = this.profile(); if (!p) return null; return n ? p.lootSets?.[Object.keys(p.lootSets ?? {}).find((k) => k.toLowerCase() === n.toLowerCase()) ?? ''] ?? null : activeLoot(p).rules; },
+    }) : null;
+    if (extra) return extra;
+    if (/^\s*\/ub(\s|$)/i.test(line)) return [`unknown command ${line.trim()} (/ub autostack, autocram, count, clearbugged)`];
     const args = line.trim().replace(/^\/(vt|vtank)\s*/i, '').split(/\s+/).filter(Boolean);
     const [cmd = '', ...rest] = args;
     const tail = line.trim().replace(/^\/(vt|vtank)\s+\S+\s*/i, '');
@@ -1229,7 +1548,20 @@ export class VTankWindow {
       case 'cancelforcebuff': return done(this.source.cancelForceBuff());
       case 'setmetastate': return done(this.source.setState(tail));
       case 'fakedeath': return done(this.source.fakeDeath());
-      case 'reverseroute': return done(this.source.reverseRoute());
+      case 'setattackbar': {
+        if (!this.source.setAttackBar) return ['this client has no combat bar to set'];
+        return done(this.source.setAttackBar(rest.length === 1 && /^\d*\.?\d+$/.test(rest[0]) ? Number(rest[0]) : NaN));
+      }
+      case 'reverseroute': {
+        // VTank: /vt reverseroute [true/false] — no argument flips it.
+        const [v] = rest;
+        if (v !== undefined && !/^(true|false)$/i.test(v)) return ['/vt reverseroute [true|false]'];
+        return done(this.source.reverseRoute(v === undefined ? undefined : /^true$/i.test(v)));
+      }
+      case 'reverseroutequery': return [`reverseroute is ${this.source.routeReversed?.() ? 'true' : 'false'}`];
+      // The loot rules in use (the profile's loaded loot set), as VTank tests against its current loot profile.
+      case 'testitem': return this.source.testItem ? this.source.testItem(activeLoot(this.ensureProfile()).rules) : ['/vt testitem is not available here'];
+      case 'propertydump': return this.source.propertyDump ? this.source.propertyDump() : ['/vt propertydump is not available here'];
       case 'mexec': try { return [this.source.mexec(tail)]; } catch (e) { return [`expression failed: ${(e as Error).message}`]; }
       case 'echo': return [tail];
       case 'jump': {
@@ -1264,14 +1596,18 @@ export class VTankWindow {
           return saved(`settings "${p.name}" loaded`);
         }
         if (/^save(char)?$/i.test(sub) && name) {
+          // With VTank's extension (/vt settings save hunter.usd) the settings file comes too.
+          const file = /\.usd$/i.test(name);
+          const stem = name.replace(/\.usd$/i, '');
           const base = this.ensureProfile();
-          const copy = { ...structuredClone(base), name };
-          doc.profiles = [...doc.profiles.filter((p) => p.name !== name), copy];
-          this.profileName = name;
-          if (/char/i.test(sub)) { const ch = this.source.character(); if (ch) doc.characters = { ...(doc.characters ?? {}), [ch]: name }; }
-          return saved(`settings saved as "${name}"`);
+          const copy = { ...structuredClone(base), name: stem };
+          doc.profiles = [...doc.profiles.filter((p) => p.name !== stem), copy];
+          this.profileName = stem;
+          if (/char/i.test(sub)) { const ch = this.source.character(); if (ch) doc.characters = { ...(doc.characters ?? {}), [ch]: stem }; }
+          const out = await saved(`settings saved as "${stem}"`);
+          return file ? [...out, ...this.giveFile(exportUsd(copy, this.kit.names?.() ?? {}))] : out;
         }
-        return ['/vt settings load|save|loadchar|savechar <name>'];
+        return ['/vt settings load|save|loadchar|savechar <name>[.usd] (with .usd: also download the file)'];
       }
       case 'nav': {
         const [sub = '', ...nm] = rest;
@@ -1286,13 +1622,21 @@ export class VTankWindow {
           return saved(`nav "${r.name}" loaded`);
         }
         if (/^save$/i.test(sub) && name) {
+          // A name with VTank's extension (/vt nav save runback.nav) also hands over the file.
+          const file = /\.nav$/i.test(name);
+          // metaf's form (/vt nav save runback.af): the route as a nav-only .af.
+          const af = /\.af$/i.test(name);
+          const stem = name.replace(/\.(nav|af)$/i, '');
+          // The loaded route; with [None] chosen on the Profiles tab, a new empty one.
           const r = this.route();
-          p.routes = [...p.routes.filter((x) => x.name !== name), { ...(r ? structuredClone(r) : { mode: 'circular' as const, points: [] }), name }];
-          p.navRoute = name;
-          this.routeName = name;
-          return saved(`nav saved as "${name}"`);
+          const copy: Route = { ...(r ? structuredClone(r) : { mode: 'circular' as const, points: [] }), name: stem };
+          p.routes = [...p.routes.filter((x) => x.name !== stem), copy];
+          p.navRoute = stem;
+          this.routeName = stem;
+          const out = await saved(`nav saved as "${stem}"`);
+          return file ? [...out, ...this.giveFile(exportNav(copy))] : af ? [...out, ...this.giveFile(exportNavAf(copy))] : out;
         }
-        return ['/vt nav load|save <name>'];
+        return ['/vt nav load <name> | save <name>[.nav|.af] (with an extension: also download the file)'];
       }
       case 'loot': {
         const [sub = '', ...nm] = rest;
@@ -1303,11 +1647,26 @@ export class VTankWindow {
           p.lootSet = name;
           return saved(`loot "${name}" loaded`);
         }
-        return ['/vt loot load <name>'];
+        if (/^new$/i.test(sub)) {
+          // A blank VTClassic profile, loaded, in its editor (VTClassic LootCore.LoadProfile(newprofile): "Created blank profile <file>.").
+          if (!name) return ['/vt loot new <name>[.utl]'];
+          if (p.lootSets?.[name]) return [`loot profile "${name}" already exists (/vt loot load ${name})`];
+          this.newLootProfile(name);
+          return saved(`Created blank profile ${name}.utl.`);
+        }
+        if (/^save$/i.test(sub) && name) {
+          // The loot rules in use, kept as a named loot profile (and, given as name.utl, downloaded).
+          const rules = structuredClone(activeLoot(p).rules);
+          p.lootSets = { ...(p.lootSets ?? {}), [name]: rules };
+          p.lootSet = name;
+          const out = await saved(`loot saved as "${name}"`);
+          return /\.utl$/i.test(nm.join(' ')) ? [...out, ...this.giveFile(exportUtl(name, rules))] : out;
+        }
+        return ['/vt loot load <name> | new <name> | save <name>[.utl] (with .utl: also download the file)'];
       }
       case 'meta': {
         const [sub = '', ...nm] = rest;
-        const name = nm.join(' ').replace(/\.met$/i, '');
+        const name = nm.join(' ').replace(/\.(met|af)$/i, '');
         const p = this.ensureProfile();
         // Meta profiles are a profile's states: load copies another profile's, save makes a profile of these.
         if (/^load$/i.test(sub)) {
@@ -1325,17 +1684,39 @@ export class VTankWindow {
           const copy: RoutineProfile = existing ?? { ...newProfile(name), states: [], initialState: p.initialState };
           copy.states = structuredClone(p.states);
           copy.initialState = p.initialState;
+          // The routes its rules load come along, as meta load brings them (else the document no longer validates).
+          for (const r of p.routes) if (!copy.routes.some((x) => x.name === r.name)) copy.routes.push(structuredClone(r));
           if (!existing) doc.profiles.push(copy);
-          return saved(`meta saved as "${name}"`);
+          const out = await saved(`meta saved as "${name}"`);
+          // With VTank's extension (/vt meta save hunt.met) the file comes too: this profile's meta, its routes embedded.
+          // metaf's form (/vt meta save hunt.af): the same meta as metaf text.
+          return /\.met$/i.test(nm.join(' ')) ? [...out, ...this.giveFile(exportMet({ ...p, name }))] : /\.af$/i.test(nm.join(' ')) ? [...out, ...this.giveFile(exportAf({ ...p, name }))] : out;
         }
-        return ['/vt meta load|save <name>'];
+        return ['/vt meta load <name> | save <name>[.met|.af] (with an extension: also download the file)'];
       }
       case 'addnavpt': case 'addnavcheckpoint': {
-        const coords = cmd.toLowerCase() === 'addnavpt' && tail ? tail : this.source.coords();
+        const checkpoint = cmd.toLowerCase() === 'addnavcheckpoint';
+        const coords = !checkpoint && tail ? tail : this.source.coords();
         if (!coords) return ['your position is not known yet'];
         const r = this.ensureRoute();
-        setRouteWaypoints(r, [...routeWaypoints(r), { coords, step: null }]);
-        return saved(`point ${r.points.length} added to "${r.name}"`);
+        // A checkpoint is a point the route holds at until the server has you there.
+        setRouteWaypoints(r, [...routeWaypoints(r), { coords, step: checkpoint ? [{ kind: 'checkpoint' }] : null }]);
+        return saved(`${checkpoint ? 'checkpoint' : 'point'} ${r.points.length} added to "${r.name}"`);
+      }
+      case 'addnavjump': {
+        // VTank: /vt addnavjump [heading] [shift: true or false] [milliseconds] (0–5000 ms of charge), then optionally
+        // a direction. Its own jump point jumps in place; a forward one is UtilityBelt's /ub jumpw, which we also walk.
+        const [h, shift, ms, dir] = rest;
+        const heading = Number(h), hold = Number(ms);
+        const usage = ['/vt addnavjump [heading] [shift: true or false] [milliseconds] [forward]'];
+        if (rest.length < 3 || rest.length > 4 || !Number.isFinite(heading) || !/^(true|false)$/i.test(shift ?? '') || !Number.isInteger(hold) || hold < 0 || hold > 5000) return usage;
+        if (dir !== undefined && !/^forward$/i.test(dir)) return [/^(backward|strafeleft|straferight)$/i.test(dir) ? `a ${dir.toLowerCase()} jump isn't supported here (forward or in place)` : usage[0]];
+        const coords = this.source.coords();
+        if (!coords) return ['your position is not known yet'];
+        const r = this.ensureRoute();
+        const jump: RoutineAction = { kind: 'jump', heading: ((heading % 360) + 360) % 360, holdMs: hold, ...(/^true$/i.test(shift) ? { walk: true } : {}), ...(dir ? { forward: true } : {}) };
+        setRouteWaypoints(r, [...routeWaypoints(r), { coords, step: [jump] }]);
+        return saved(`jump ${r.points.length} added to "${r.name}"`);
       }
       case 'testmonster': {
         const sel = this.source.selection();
@@ -1344,7 +1725,11 @@ export class VTankWindow {
         return [`${sel.name}: row ${row.name === '<DEFAULT>' ? '<< DEFAULT >>' : row.name}, priority ${row.priority}, ${row.on.join(' ') || 'no columns'}`];
       }
       case 'listmonstervariables': return ['true, false, name, typeid, species, maxhp, range, hasshield, metastate, setting_<option>'];
-      default: return [`unknown command /vt ${cmd} (start, stop, forcebuff, cancelforcebuff, setmetastate, opt, settings, nav, loot, meta, addnavpt, addnavcheckpoint, reverseroute, mexec, echo, jump, fakedeath, testmonster)`];
+      // VTank's refresh re-reads its profile files: here the routines saved on the account.
+      case 'refresh': { await this.load(() => {}); return [this.message || 'profiles reloaded']; }
+      // VTank's debug logging: /vt log shows the state, /vt log <type> on|off sets it (vtActivity.ts).
+      case 'log': return this.activity.command(rest);
+      default: return [`unknown command /vt ${cmd} (start, stop, forcebuff, cancelforcebuff, setmetastate, opt, settings, nav, loot, meta, addnavpt, addnavcheckpoint, addnavjump, reverseroute, reverseroutequery, mexec, echo, jump, setattackbar, fakedeath, testmonster, refresh, dumpmetavars, listmetafunctions, metafunchelp, testspell, dumpspells, dumpskills, testitem, propertydump, log)`];
     }
   }
 }
