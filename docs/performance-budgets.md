@@ -113,9 +113,10 @@ calibrated from this run; re-calibrate and date it when the scenery pipeline
 changes shape). Sanity check the same day: a local SwiftShader (LLVM) run at
 the same spot reported `renderJs` p50 = 98.7 ms idle against the real GPU's
 91 ms whole-frame — the JS submission cost really is the frame, on either
-renderer. `--ratchet` makes the comparison mechanical: latest
-same-renderer + same-location run, >10% worse on draw calls / geometries /
-triangles / renderJs p50 → exit 2. Between real-GPU runs it additionally
+renderer. `--ratchet` makes the comparison mechanical: the median of the
+last 3 same-renderer + same-location runs (PERF.6, see "Ratchet noise floor"
+below), >10% worse on draw calls / triangles, >25% on renderJs p50, >50% on
+geometries, AND worse than every one of those 3 runs → exit 2. Between real-GPU runs it additionally
 ratchets measured avgFps (>10% drop) and hitch100 (up by more than 2);
 those two are skipped between software-renderer runs — on SwiftShader every
 frame is >100ms, so hitch100 ≡ frames sampled and a FASTER run (more frames
@@ -242,6 +243,38 @@ parameter that is churning.
   marked `renderSampling: 'phase-mean-1s'`). The ratchet never compares a
   mean run against a legacy point-sample run — the first mean-mode run at a
   location starts a fresh baseline chain.
+- **PERF.6 (2026-10-11): every frame, weighted by heading.** The 1/s
+  schedule aliased with the turn: SwiftShader's turning phase does about one
+  revolution per 2.6 s, so 1.3 s samples alternated between two headings
+  (2026-10-10 turning samples 422 / 868 / 439 / 867 / 427 / 1223 …), and
+  which two depended on frame timing. measure-perf now reads renderer.info
+  on EVERY frame together with the camera yaw, and the phase value is the
+  mean of 12 heading sectors' means (`summarizeInfoSamples`; runs marked
+  `renderSampling: 'frame-heading-binned'`, a new baseline chain). Slow,
+  heavy headings no longer count less for drawing fewer frames. Idle and
+  running never turn, so they are one sector: the plain per-frame mean.
+- **Ratchet noise floor (PERF.6).** Same-code SwiftShader runs spread wider
+  than 10%. Consecutive LDD-8 Holtburg pairs 2026-09-26..10-10 (16 pairs
+  within 30 min): idle/running draw calls and triangles median |Δ| 1–3%,
+  max +6–13%; turning draw calls median 7%, max +19%; geometries median
+  5–10%, max +32%; renderJs p50 median 9–27%, max +72%. A single-run
+  baseline therefore fired REGRESSION on 77 of 129 historical runs, and the
+  verdict stopped meaning anything. The ratchet (`compareToHistory`) now:
+  1. compares against the per-metric MEDIAN of the last 3 comparable runs,
+     so one outlier run cannot become the bar;
+  2. reports a metric that is past tolerance but no worse than a value one
+     of those 3 runs itself recorded as `noise` (printed, not failing): the
+     same code has already produced it. A real regression clears every
+     recent run and still exits 2. With one baseline both rules reduce to
+     the old single-run comparison;
+  3. gates geometries at 50% (`GEOMETRY_TOLERANCE`): it is a cumulative
+     upload counter, not a per-frame cost, so a doubling fails and upload
+     order does not. Geometry stability (leaks) is the memory soak's budget.
+  The budgets themselves (10% draw calls / triangles, 25% renderJs) are
+  unchanged. Replaying the 129 historical runs under the new rules flags 52
+  instead of 77 (`tests/verify-perf-ratchet.ts` pins the rules); most of
+  the remainder are real changes (the 2026-10-08 triangle rise is Automatic
+  Degrades) or turning draw calls measured by the old aliased sampler.
 - Real-GPU runs: Jake's machine, visible tab (hidden tabs suspend rAF).
   Headed Playwright (`--headed`) hangs under the local harness (sandboxed
   launch) — it works only from a plain terminal. The harness-safe path is

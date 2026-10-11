@@ -76,8 +76,12 @@
  *      phase and render[phase] carries the phase MEAN of draw calls /
  *      triangles / geometries (textures/programs stay point-sampled — they
  *      are memory counters, not per-frame). Raw samples land in the JSON
- *      under renderSamples. Runs are marked renderSampling:'phase-mean-1s'
- *      and the ratchet never compares across sampling modes.
+ *      under renderSamples. The ratchet never compares across sampling modes.
+ *   3. PERF.6 — every frame is sampled with its camera yaw and the mean is
+ *      taken over 30° heading sectors (renderSampling 'frame-heading-binned';
+ *      the old 1/s schedule, 'phase-mean-1s', aliased with the turn), and
+ *      --ratchet compares against the median of the last 3 comparable runs,
+ *      reporting a value inside those runs' own range as noise.
  */
 
 import { chromium, type Page } from 'playwright';
@@ -87,7 +91,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   isSoftwareRenderer,
-  compareRuns, droppedFrameWarnings, estimateRealGpu, findBaseline, landblockOf, parseDrawDistance, summarizeInfoSamples,
+  compareToHistory, droppedFrameWarnings, estimateRealGpu, findBaselines, landblockOf, parseDrawDistance, summarizeInfoSamples,
   type PerfInfoSample, type PerfInfoSummary, type PerfLocation, type PerfRun, type PerfRenderJsStats,
 } from './perf-ratchet-lib.js';
 import { PROBE_CHARGEN_REOPEN_JS } from './lib/game-session.js';
@@ -243,22 +247,23 @@ async function samplePhase(page: Page, ms: number): Promise<PhaseSamples> {
     const deltas = [];
     const infoSamples = [];
     let last = -1;
-    let lastInfo = -1e12; // first tick always samples (phase-start heading)
     const start = performance.now();
     requestAnimationFrame(function tick(t) {
       if (last >= 0) deltas.push(t - last);
       last = t;
-      if (t - lastInfo >= 1000) {
-        lastInfo = t;
-        const ac = window.__ac;
-        const info = ac && ac.sceneManager && ac.sceneManager.renderer && ac.sceneManager.renderer.info;
-        if (info) infoSamples.push({
-          atMs: Math.round(t - start),
-          drawCalls: info.render.calls,
-          triangles: info.render.triangles,
-          geometries: info.memory.geometries,
-        });
-      }
+      // PERF.6 — every frame, with the camera yaw it was drawn at. The game's
+      // own rAF callback was queued before this one, so this frame's render
+      // has already run: info and yaw describe the same frame.
+      const ac = window.__ac;
+      const info = ac && ac.sceneManager && ac.sceneManager.renderer && ac.sceneManager.renderer.info;
+      const cam = ac && ac.cameraController;
+      if (info) infoSamples.push({
+        atMs: Math.round(t - start),
+        drawCalls: info.render.calls,
+        triangles: info.render.triangles,
+        geometries: info.memory.geometries,
+        yaw: cam && typeof cam.yaw === 'number' ? cam.yaw : undefined,
+      });
       if (t - start < ${ms}) requestAnimationFrame(tick);
       else resolve({ deltas, infoSamples });
     });
@@ -719,7 +724,11 @@ async function main() {
     // CORE.14.e — sampling-mode + reset provenance. Absent renderSampling in
     // old JSON means end-of-phase point sample; the ratchet never compares
     // across sampling modes.
-    renderSampling: allPhasesMeanSampled ? 'phase-mean-1s' : undefined,
+    // PERF.6 — every frame, mean over 30° heading sectors when every sample
+    // carried a yaw ('phase-mean-1s' was a 1/s wall-clock mean that aliased
+    // with the turn; the two never compare).
+    renderSampling: !allPhasesMeanSampled ? undefined
+      : Object.values(renderSamples).every(ss => ss.every(x => typeof x.yaw === 'number')) ? 'frame-heading-binned' : 'frame-mean',
     landscapeDrawDistance,
     reset,
     phases,
@@ -734,11 +743,13 @@ async function main() {
     ratchetVerdict: undefined as PerfRun['ratchetVerdict'],
   };
   // Ratchet BEFORE writing so the verdict lands in the JSON itself.
-  let ratchet: { baseline: PerfRun; v: ReturnType<typeof compareRuns> } | null = null;
+  let ratchet: { v: ReturnType<typeof compareToHistory> } | null = null;
   if (RATCHET) {
-    const baseline = findBaseline(loadPriorRuns(), result as unknown as PerfRun);
-    if (baseline) {
-      ratchet = { baseline, v: compareRuns(baseline, result as unknown as PerfRun) };
+    // PERF.6 — the median of the last RATCHET_HISTORY comparable runs, with
+    // in-spread excursions reported as noise (perf-ratchet-lib compareToHistory).
+    const baselines = findBaselines(loadPriorRuns(), result as unknown as PerfRun);
+    if (baselines.length) {
+      ratchet = { v: compareToHistory(baselines, result as unknown as PerfRun) };
       result.ratchetVerdict = ratchet.v.verdict;
     } else {
       result.ratchetVerdict = 'no-baseline';
@@ -756,7 +767,7 @@ async function main() {
       `  ${String(p.hitch50).padStart(5)}  ${String(p.hitch100).padStart(6)}`,
     );
   }
-  console.log(`\nphase     drawCalls  triangles  geoms  textures  programs  renderJs p50/p95  est.realGPU${allPhasesMeanSampled ? '   (scene costs = phase means, ~1 sample/s)' : ''}`);
+  console.log(`\nphase     drawCalls  triangles  geoms  textures  programs  renderJs p50/p95  est.realGPU${allPhasesMeanSampled ? '   (scene costs = per-frame means over heading sectors)' : ''}`);
   for (const [name, ri] of Object.entries(render)) {
     if (!ri) { console.log(`${name.padEnd(9)} (renderer info unavailable)`); continue; }
     const rj = renderJs[name];
@@ -771,7 +782,7 @@ async function main() {
   if (allPhasesMeanSampled) {
     for (const [name, samples] of Object.entries(renderSamples)) {
       const s = summarizeInfoSamples(samples);
-      if (s) console.log(`  ${name.padEnd(9)} drawCalls spread ${s.spread.drawCalls.min}–${s.spread.drawCalls.max} over ${s.sampleCount} samples`);
+      if (s) console.log(`  ${name.padEnd(9)} drawCalls spread ${s.spread.drawCalls.min}–${s.spread.drawCalls.max} over ${s.sampleCount} frames${s.headingBins ? `, ${s.headingBins} heading sector(s)` : ''}`);
     }
   }
   if (census) {
@@ -790,9 +801,10 @@ async function main() {
       console.log('[perf] ratchet: no comparable baseline (same renderer + same location) — nothing to compare, verdict: no-baseline');
       return;
     }
-    const { baseline, v } = ratchet;
-    console.log(`[perf] ratchet vs ${baseline.utc}: ${v.verdict.toUpperCase()}`);
+    const { v } = ratchet;
+    console.log(`[perf] ratchet vs median of ${v.baselineUtcs?.length ?? 1} run(s) (${(v.baselineUtcs ?? [v.baselineUtc]).join(', ')}): ${v.verdict.toUpperCase()}`);
     for (const f of v.findings) console.log(`  REGRESSION ${f.metric}: ${f.baseline} → ${f.current} (${(f.delta * 100).toFixed(1)}%)`);
+    for (const f of v.noise ?? []) console.log(`  noise      ${f.metric}: ${f.baseline} → ${f.current} (${(f.delta * 100).toFixed(1)}%, inside the baseline runs' own range)`);
     for (const f of v.within) console.log(`  ok         ${f.metric}: ${f.baseline} → ${f.current} (${(f.delta * 100).toFixed(1)}%)`);
     if (v.verdict === 'regression') process.exit(2);
   }

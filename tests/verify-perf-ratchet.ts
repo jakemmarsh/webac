@@ -5,9 +5,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  compareRuns, droppedFrameWarnings, estimateRealGpu, findBaseline, isSoftwareRenderer,
-  landblockOf, parseDrawDistance, sameLocation, summarizeInfoSamples,
-  REAL_GPU_US_PER_DRAW_CALL, type PerfInfoSample, type PerfRun,
+  compareRuns, compareToHistory, droppedFrameWarnings, estimateRealGpu, findBaseline, findBaselines,
+  headingBin, isSoftwareRenderer, landblockOf, medianRun, parseDrawDistance, sameLocation, summarizeInfoSamples,
+  GEOMETRY_TOLERANCE, HEADING_BINS, RATCHET_HISTORY, REAL_GPU_US_PER_DRAW_CALL, type PerfInfoSample, type PerfRun,
 } from '../tools/perf-ratchet-lib.js';
 
 const holtburg = { x: 32592, y: 34586, z: 94, landblock: landblockOf(32592, 34586) };
@@ -113,6 +113,116 @@ describe('perf ratchet: phase-mean scene-cost sampling (CORE.14.e)', () => {
     const s = summarizeInfoSamples([sample(0, 929)]);
     expect(s!.drawCalls).toBe(929);
     expect(s!.spread.drawCalls).toEqual({ min: 929, max: 929 });
+  });
+});
+
+describe('perf ratchet: heading-binned frame sampling (PERF.6)', () => {
+  // A scene whose draw calls depend only on heading: sector b costs 400 + 100·b.
+  const SECTOR = (2 * Math.PI) / HEADING_BINS;
+  const at = (bin: number, i = 0): PerfInfoSample => {
+    const drawCalls = 400 + 100 * bin;
+    return { atMs: i, drawCalls, triangles: drawCalls * 50, geometries: 1800, yaw: (bin + 0.5) * SECTOR };
+  };
+  const everySector = () => Array.from({ length: HEADING_BINS }, (_, b) => b);
+  it('two runs over the same circle agree however their frames fell (aliasing / slow heavy headings)', () => {
+    // Run A: one frame per sector. Run B: the cheap half of the circle drew
+    // 3 frames per sector (fast), the heavy half 1 (slow) — the 2026-10-10
+    // turning samples alternated 422/868/439/867… for exactly this reason.
+    const a = everySector().map(b => at(b));
+    const b = everySector().flatMap(bin => (bin < HEADING_BINS / 2 ? [at(bin), at(bin), at(bin)] : [at(bin)]));
+    const sa = summarizeInfoSamples(a)!, sb = summarizeInfoSamples(b)!;
+    expect(sa.drawCalls).toBe(400 + 100 * (HEADING_BINS - 1) / 2);
+    expect(sb.drawCalls).toBe(sa.drawCalls);
+    expect(sb.headingBins).toBe(HEADING_BINS);
+    // The unweighted frame mean is what drifted run to run.
+    const frameMean = Math.round(b.reduce((s, x) => s + x.drawCalls, 0) / b.length);
+    expect(frameMean).toBeLessThan(sa.drawCalls * 0.9);
+  });
+  it('a phase that never turns is the plain mean (one sector)', () => {
+    const s = summarizeInfoSamples([{ ...at(3), drawCalls: 390 }, { ...at(3), drawCalls: 410 }, { ...at(3), drawCalls: 400 }])!;
+    expect(s.drawCalls).toBe(400);
+    expect(s.headingBins).toBe(1);
+    expect(s.spread.drawCalls).toEqual({ min: 390, max: 410 });
+  });
+  it('samples without a yaw (older JSON, no camera) are the plain mean, unbinned', () => {
+    const s = summarizeInfoSamples([{ atMs: 0, drawCalls: 100, triangles: 1, geometries: 1 }, { atMs: 1, drawCalls: 300, triangles: 1, geometries: 1 }])!;
+    expect(s.drawCalls).toBe(200);
+    expect(s.headingBins).toBeUndefined();
+  });
+  it('headingBin wraps any winding of the yaw into 0..HEADING_BINS-1', () => {
+    expect(headingBin(0)).toBe(0);
+    expect(headingBin(SECTOR * 2.5)).toBe(2);
+    expect(headingBin(SECTOR * 2.5 + 6 * Math.PI)).toBe(2); // three turns later
+    expect(headingBin(-SECTOR * 0.5)).toBe(HEADING_BINS - 1);
+    expect(headingBin(2 * Math.PI - 1e-12)).toBe(HEADING_BINS - 1);
+  });
+});
+
+describe('perf ratchet: median-of-history verdicts (PERF.6)', () => {
+  const r = (utc: string, idle: number, geometries = 1800, extra: Partial<PerfRun> = {}): PerfRun => ({
+    ...run(utc, idle),
+    render: { idle: { drawCalls: idle, triangles: idle * 50, geometries, textures: 800, programs: 40 } },
+    ...extra,
+  });
+  it('findBaselines returns up to RATCHET_HISTORY comparable runs, newest first, skipping regressed runs', () => {
+    const runs = [
+      r('2026-10-01T00:00:00Z', 400), r('2026-10-02T00:00:00Z', 410),
+      r('2026-10-03T00:00:00Z', 900, 1800, { ratchetVerdict: 'regression' }),
+      r('2026-10-04T00:00:00Z', 420), r('2026-10-05T00:00:00Z', 430, 1800, { location: undefined }),
+      r('2026-10-06T00:00:00Z', 440),
+    ];
+    const got = findBaselines(runs, r('2026-10-07T00:00:00Z', 440)).map(x => x.utc.slice(0, 10));
+    expect(RATCHET_HISTORY).toBe(3);
+    expect(got).toEqual(['2026-10-06', '2026-10-04', '2026-10-02']);
+    expect(findBaseline(runs, r('2026-10-07T00:00:00Z', 440))?.utc).toBe('2026-10-06T00:00:00Z');
+  });
+  it('medianRun takes each metric\'s median across the runs', () => {
+    const m = medianRun([r('c', 665), r('b', 523), r('a', 526)]);
+    expect(m.render.idle!.drawCalls).toBe(526);
+    expect(m.utc).toBe('c');
+  });
+  it('one outlier run no longer sets the bar (the 2026-09-24 523 vs 665 pair on the same commit)', () => {
+    const hist = [r('3', 523), r('2', 649), r('1', 526)]; // newest first
+    // Against the newest alone, 600 is +14.7%: the old verdict fired.
+    expect(compareRuns(hist[0], r('4', 600)).verdict).toBe('regression');
+    // Against the median (526) it is still +14% — but 649 is a value the same
+    // code already produced, so it is noise, listed, not a regression.
+    const v = compareToHistory(hist, r('4', 600));
+    expect(v.verdict).toBe('ok');
+    expect(v.noise!.map(f => f.metric)).toEqual(['idle.drawCalls', 'idle.triangles']);
+    expect(v.baselineUtcs).toEqual(['3', '2', '1']);
+  });
+  it('a real regression clears every recent run and still fails', () => {
+    const v = compareToHistory([r('3', 523), r('2', 649), r('1', 526)], r('4', 720));
+    expect(v.verdict).toBe('regression');
+    expect(v.findings[0]).toMatchObject({ metric: 'idle.drawCalls', baseline: 526, current: 720 });
+  });
+  it('with one baseline it is exactly compareRuns (no spread to forgive)', () => {
+    const one = [r('1', 500)];
+    expect(compareToHistory(one, r('2', 560)).verdict).toBe('regression');
+    expect(compareToHistory(one, r('2', 540)).verdict).toBe('ok');
+  });
+  it('geometries gate at GEOMETRY_TOLERANCE (a cumulative upload counter): +32% passes, a doubling fails', () => {
+    expect(GEOMETRY_TOLERANCE).toBe(0.5);
+    const hist = [r('1', 400, 1300)];
+    expect(compareToHistory(hist, r('2', 400, 1716)).verdict).toBe('ok');
+    const v = compareToHistory(hist, r('2', 400, 2600));
+    expect(v.verdict).toBe('regression');
+    expect(v.findings.map(f => f.metric)).toEqual(['idle.geometries']);
+    // compareRuns alone keeps its 10% default for callers that pass nothing.
+    expect(compareRuns(hist[0], r('2', 400, 1500)).verdict).toBe('regression');
+  });
+  it('real-GPU fps (higher is better) is noise only when no lower than a baseline run recorded', () => {
+    const gpu = (utc: string, fps: number): PerfRun => ({
+      ...r(utc, 500), renderer: 'ANGLE Metal Apple M3 Max',
+      phases: [{ phase: 'idle', avgFps: fps, p95Ms: 10, hitch50: 0, hitch100: 0 }],
+    });
+    const hist = [gpu('3', 120), gpu('2', 100), gpu('1', 118)]; // median 118
+    expect(compareToHistory(hist, gpu('4', 101)).verdict).toBe('ok'); // −14%, but ≥ 100
+    expect(compareToHistory(hist, gpu('4', 95)).verdict).toBe('regression');
+  });
+  it('no baselines → no-baseline', () => {
+    expect(compareToHistory([], r('1', 400)).verdict).toBe('no-baseline');
   });
 });
 

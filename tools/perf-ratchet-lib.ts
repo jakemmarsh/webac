@@ -53,6 +53,8 @@ export interface PerfInfoSample {
   drawCalls: number;
   triangles: number;
   geometries: number;
+  /** Total camera yaw (radians) at the sample (PERF.6 frame-yaw sampling). */
+  yaw?: number;
 }
 
 export interface PerfInfoSummary {
@@ -60,28 +62,66 @@ export interface PerfInfoSummary {
   triangles: number;
   geometries: number;
   sampleCount: number;
+  /** Heading sectors the samples covered (PERF.6); absent = unbinned (no yaw). */
+  headingBins?: number;
   /** per-metric min/max across the phase, for the JSON evidence trail */
   spread: Record<'drawCalls' | 'triangles' | 'geometries', { min: number; max: number }>;
 }
 
 /**
- * CORE.14.e — collapse a phase's ~1/s renderer.info samples into the phase
- * MEAN. A single end-of-phase read is point-sampled at whatever camera
- * heading the phase happened to end on (back-to-back identical runs swung
- * turning.drawCalls 1046→228→1144 on heading alone); the mean over the whole
- * phase is heading-stable — for the turning phase it averages the full swept
- * arc, which is rotation-invariant given the same start heading and length.
+ * CORE.14.e — collapse a phase's renderer.info samples into the phase MEAN.
+ * A single end-of-phase read is point-sampled at whatever camera heading the
+ * phase happened to end on (back-to-back identical runs swung
+ * turning.drawCalls 1046→228→1144 on heading alone).
+ *
+ * PERF.6 — when the samples carry the camera yaw, the mean is taken over
+ * HEADING_BINS equal heading sectors (each sector's mean, then the mean of
+ * the sectors the phase visited). The 1/s wall-clock schedule aliased with
+ * the turn: SwiftShader turns ~one revolution per 2.6 s, so 1.3 s samples
+ * alternated between two headings (turning samples 422/868/439/867/427/1223…
+ * on 2026-10-10) and which two depended on frame timing, swinging the
+ * turning mean ±20% on the same code. Sampling every frame and weighting by
+ * heading, not by time, makes the turning number "the average scene over the
+ * circle" — and stops slow (heavy) headings being under-weighted because
+ * they produce fewer frames. A phase that never turns lands in one sector,
+ * where this is the plain mean.
  */
 export function summarizeInfoSamples(samples: PerfInfoSample[]): PerfInfoSummary | null {
   if (!samples.length) return null;
   const metrics = ['drawCalls', 'triangles', 'geometries'] as const;
   const out = { sampleCount: samples.length, spread: {} } as PerfInfoSummary;
+  const binned = samples.every(s => typeof s.yaw === 'number' && Number.isFinite(s.yaw));
+  const groups: PerfInfoSample[][] = [];
+  if (binned) {
+    const bins = new Map<number, PerfInfoSample[]>();
+    for (const smp of samples) {
+      const b = headingBin(smp.yaw as number);
+      let g = bins.get(b);
+      if (!g) bins.set(b, g = []);
+      g.push(smp);
+    }
+    groups.push(...bins.values());
+  } else {
+    groups.push(samples);
+  }
+  out.headingBins = binned ? groups.length : undefined;
   for (const m of metrics) {
     const vals = samples.map(s => s[m]);
-    out[m] = Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
+    const binMeans = groups.map(g => g.reduce((a, s) => a + s[m], 0) / g.length);
+    out[m] = Math.round(binMeans.reduce((a, b) => a + b, 0) / binMeans.length);
     out.spread[m] = { min: Math.min(...vals), max: Math.max(...vals) };
   }
   return out;
+}
+
+/** Heading sectors for summarizeInfoSamples (30° each). */
+export const HEADING_BINS = 12;
+
+/** Sector index 0..HEADING_BINS-1 of a yaw in radians (any winding). */
+export function headingBin(yaw: number): number {
+  const turn = 2 * Math.PI;
+  const norm = ((yaw % turn) + turn) % turn;
+  return Math.min(HEADING_BINS - 1, Math.floor((norm / turn) * HEADING_BINS));
 }
 
 export interface PerfRun {
@@ -193,6 +233,17 @@ export function sameLocation(a: PerfLocation | undefined, b: PerfLocation | unde
  * one regressed run cannot become the bar the next run is held to.
  */
 export function findBaseline(runs: PerfRun[], current: PerfRun): PerfRun | null {
+  return findBaselines(runs, current, 1)[0] ?? null;
+}
+
+/**
+ * PERF.6 — the `n` most recent comparable prior runs (same rules as
+ * findBaseline), newest first. The ratchet compares against their median:
+ * one same-code run is not a stable bar (two runs four minutes apart on
+ * 34db9a9 read idle 523 vs 665 draw calls, and a day's outlier run became
+ * the next cycle's baseline on 2026-10-10).
+ */
+export function findBaselines(runs: PerfRun[], current: PerfRun, n = RATCHET_HISTORY): PerfRun[] {
   const candidates = runs
     .filter(r => r.utc < current.utc && r.renderer === current.renderer && sameLocation(r.location, current.location)
       && r.ratchetVerdict !== 'regression'
@@ -200,8 +251,21 @@ export function findBaseline(runs: PerfRun[], current: PerfRun): PerfRun | null 
       && (r.renderSampling ?? 'point') === (current.renderSampling ?? 'point')
       && (r.landscapeDrawDistance ?? 3) === (current.landscapeDrawDistance ?? 3))
     .sort((a, b) => (a.utc < b.utc ? 1 : -1));
-  return candidates[0] ?? null;
+  return candidates.slice(0, Math.max(1, n));
 }
+
+/**
+ * PERF.6 — geometries is a cumulative GPU-upload counter (three.js uploads
+ * lazily on first draw; docs/performance-budgets.md), not a per-frame cost,
+ * and same-code consecutive runs moved it up to +32% (+56% against one
+ * outlier baseline). It gates at 50%: a doubling still fails, upload-order
+ * noise does not. Geometry STABILITY (leaks) is the memory soak's budget
+ * (perf-soak: within 25% of start after the final GC).
+ */
+export const GEOMETRY_TOLERANCE = 0.5;
+
+/** How many recent comparable runs the ratchet's baseline is the median of. */
+export const RATCHET_HISTORY = 3;
 
 export interface RatchetFinding {
   metric: string;
@@ -214,9 +278,15 @@ export interface RatchetFinding {
 export interface RatchetVerdict {
   verdict: 'ok' | 'regression' | 'no-baseline';
   baselineUtc?: string;
+  /** Every run the baseline was built from (compareToHistory), newest first. */
+  baselineUtcs?: string[];
   findings: RatchetFinding[];
   /** Metrics that moved but stayed inside tolerance, for the log. */
   within: RatchetFinding[];
+  /** Past tolerance against the median, but no worse than a value one of the
+   *  baseline runs itself recorded: inside the measured same-code spread
+   *  (PERF.6), so not a regression. Listed so the log still shows them. */
+  noise?: RatchetFinding[];
 }
 
 /**
@@ -229,7 +299,10 @@ export interface RatchetVerdict {
  * `renderJsTolerance` (default 25%) just above that observed noise floor;
  * the count metrics (draw calls/geometries/triangles) stay at 10%.
  */
-export function compareRuns(baseline: PerfRun, current: PerfRun, tolerance = 0.10, hitchSlack = 2, renderJsTolerance = 0.25): RatchetVerdict {
+export function compareRuns(
+  baseline: PerfRun, current: PerfRun, tolerance = 0.10, hitchSlack = 2, renderJsTolerance = 0.25,
+  geometryTolerance = tolerance,
+): RatchetVerdict {
   const findings: RatchetFinding[] = [];
   const within: RatchetFinding[] = [];
   const check = (metric: string, b: number | undefined, c: number | undefined, absolute = false, tol = tolerance) => {
@@ -248,7 +321,7 @@ export function compareRuns(baseline: PerfRun, current: PerfRun, tolerance = 0.1
     const base = baseline.render[phase];
     if (!cur || !base) continue;
     check(`${phase}.drawCalls`, base.drawCalls, cur.drawCalls);
-    check(`${phase}.geometries`, base.geometries, cur.geometries);
+    check(`${phase}.geometries`, base.geometries, cur.geometries, false, geometryTolerance);
     check(`${phase}.triangles`, base.triangles, cur.triangles);
   }
   // Higher-is-better metric: delta = 1 − current/baseline, positive = worse.
@@ -280,6 +353,104 @@ export function compareRuns(baseline: PerfRun, current: PerfRun, tolerance = 0.1
     }
   }
   return { verdict: findings.length ? 'regression' : 'ok', baselineUtc: baseline.utc, findings, within };
+}
+
+const median = (vals: number[]): number => {
+  const s = [...vals].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+
+/** Numbers present in every baseline, else undefined (no partial medians). */
+const all = (vals: Array<number | undefined>): number[] | undefined =>
+  vals.every(v => typeof v === 'number') ? vals as number[] : undefined;
+
+/**
+ * PERF.6 — a synthetic run whose every metric is the per-metric median of
+ * `baselines` (newest first; utc and the comparability fields come from the
+ * newest). A metric missing from any baseline is left out, so it is not
+ * compared rather than compared against a partial median.
+ */
+export function medianRun(baselines: PerfRun[]): PerfRun {
+  const [newest] = baselines;
+  const render: PerfRun['render'] = {};
+  for (const phase of Object.keys(newest.render)) {
+    const infos = baselines.map(b => b.render[phase]);
+    if (infos.some(i => !i)) { render[phase] = null; continue; }
+    const pick = (k: keyof PerfRenderInfo) => median((infos as PerfRenderInfo[]).map(i => i[k]));
+    render[phase] = {
+      drawCalls: pick('drawCalls'), triangles: pick('triangles'), geometries: pick('geometries'),
+      textures: pick('textures'), programs: pick('programs'),
+    };
+  }
+  const phases: PerfPhaseStats[] = [];
+  for (const p of newest.phases) {
+    const ps = baselines.map(b => b.phases.find(x => x.phase === p.phase));
+    if (ps.some(x => !x)) continue;
+    const pick = (k: 'avgFps' | 'p95Ms' | 'hitch50' | 'hitch100') => median((ps as PerfPhaseStats[]).map(x => x[k]));
+    phases.push({ phase: p.phase, avgFps: pick('avgFps'), p95Ms: pick('p95Ms'), hitch50: pick('hitch50'), hitch100: pick('hitch100') });
+  }
+  let renderJs: PerfRun['renderJs'];
+  if (newest.renderJs) {
+    renderJs = {};
+    for (const phase of Object.keys(newest.renderJs)) {
+      const p50 = all(baselines.map(b => b.renderJs?.[phase]?.p50Ms));
+      const p95 = all(baselines.map(b => b.renderJs?.[phase]?.p95Ms));
+      const frames = all(baselines.map(b => b.renderJs?.[phase]?.frames));
+      renderJs[phase] = p50 && p95 && frames ? { frames: median(frames), p50Ms: median(p50), p95Ms: median(p95) } : null;
+    }
+  }
+  return { ...newest, render, phases, renderJs };
+}
+
+/** The value a finding's metric name (`turning.drawCalls`, `idle.renderJs.p50Ms`, `idle.avgFps`) had in `run`. */
+function metricValue(run: PerfRun, metric: string): number | undefined {
+  const [phase, ...rest] = metric.split('.');
+  const key = rest.join('.');
+  if (key === 'renderJs.p50Ms') return run.renderJs?.[phase]?.p50Ms ?? undefined;
+  if (key === 'avgFps' || key === 'hitch100') return run.phases.find(p => p.phase === phase)?.[key];
+  const info = run.render[phase];
+  return info ? info[key as keyof PerfRenderInfo] : undefined;
+}
+
+/**
+ * PERF.6 — the ratchet verdict against recent history rather than one run.
+ * Same-code SwiftShader runs spread wider than the 10% ratchet (measured over
+ * the 2026-09-26..10-10 LDD-8 Holtburg runs, consecutive pairs: geometries up
+ * to +32%, turning draw calls +19%, renderJs p50 +72%), so a single-run
+ * baseline fired REGRESSION on noise nearly every cycle and the verdict
+ * stopped meaning anything. Two rules make it robust without loosening the
+ * budget:
+ *  1. compare against the per-metric MEDIAN of the last RATCHET_HISTORY
+ *     comparable runs (one outlier baseline no longer sets the bar);
+ *  2. a metric past tolerance against that median still counts as noise when
+ *     it is no worse than a value one of those runs itself recorded — the
+ *     same code has already produced it. A real regression clears every
+ *     recent run and still fails.
+ * With one baseline both rules reduce to compareRuns exactly.
+ */
+export function compareToHistory(
+  baselines: PerfRun[], current: PerfRun,
+  tolerance = 0.10, hitchSlack = 2, renderJsTolerance = 0.25, geometryTolerance = GEOMETRY_TOLERANCE,
+): RatchetVerdict {
+  if (!baselines.length) return { verdict: 'no-baseline', findings: [], within: [] };
+  const v = compareRuns(medianRun(baselines), current, tolerance, hitchSlack, renderJsTolerance, geometryTolerance);
+  const findings: RatchetFinding[] = [];
+  const noise: RatchetFinding[] = [];
+  for (const f of v.findings) {
+    const seen = baselines.map(b => metricValue(b, f.metric)).filter((x): x is number => typeof x === 'number');
+    // avgFps is higher-is-better: "no worse than a recorded value" is ≥ the lowest.
+    const higherIsBetter = f.metric.endsWith('.avgFps');
+    const insideSpread = baselines.length > 1 && seen.length === baselines.length
+      && (higherIsBetter ? f.current >= Math.min(...seen) : f.current <= Math.max(...seen));
+    (insideSpread ? noise : findings).push(f);
+  }
+  return {
+    verdict: findings.length ? 'regression' : 'ok',
+    baselineUtc: baselines[0].utc,
+    baselineUtcs: baselines.map(b => b.utc),
+    findings, within: v.within, noise,
+  };
 }
 
 /**
