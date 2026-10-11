@@ -5,6 +5,10 @@
 //   retail-drive win                 → "pid x y w h" of the client window (on- or off-screen), exit 1 if none
 //   retail-drive front               → activate the client; exit 0 once it is frontmost, 3 if it never is
 //   retail-drive click X Y           → left click at a point inside the window
+//   retail-drive drag hold X0 Y0 X1 Y1 → press the left button at X0,Y0 and drag to X1,Y1, leaving it held
+//   retail-drive drag drop X0 Y0 X1 Y1 → drag the held button from X0,Y0 to X1,Y1 and release it there
+//                                      (the path is tools/retail-ab-scenes.ts dragPath: a single jump
+//                                      never starts a retail drag)
 //   retail-drive key CODE...         → press keys named by KeyboardEvent.code (F12, KeyR, Backslash, Shift+KeyA)
 //   retail-drive type TEXT           → Return (opens chat), TEXT, Return
 //   retail-drive idle                → seconds since the last HID input (any source)
@@ -161,6 +165,22 @@ case "click":
     CGEvent(mouseEventSource: src, mouseType: t, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
     usleep(useconds_t(d))
   }
+case "drag":
+  _ = requireFront()
+  guard args.count == 6, args[1] == "hold" || args[1] == "drop",
+        let x0 = Double(args[2]), let y0 = Double(args[3]), let x1 = Double(args[4]), let y1 = Double(args[5]) else { exit(2) }
+  func mouse(_ t: CGEventType, _ x: Double, _ y: Double) {
+    CGEvent(mouseEventSource: src, mouseType: t, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)?.post(tap: .cghidEventTap)
+  }
+  let hold = args[1] == "hold"
+  if hold { mouse(.mouseMoved, x0, y0); usleep(400000); mouse(.leftMouseDown, x0, y0); usleep(300000) }
+  let n = max(8, Int((hypot(x1 - x0, y1 - y0) / 16).rounded(.up)))
+  for i in 1...n {
+    let f = Double(i) / Double(n)
+    mouse(.leftMouseDragged, (x0 + (x1 - x0) * f).rounded(), (y0 + (y1 - y0) * f).rounded())
+    usleep(hold ? 50000 : 40000)
+  }
+  if !hold { usleep(300000); mouse(.leftMouseUp, x1, y1) }
 case "key":
   _ = requireFront()
   post(shiftKey, true, .maskShift); post(shiftKey, false)   // clear a latched Shift

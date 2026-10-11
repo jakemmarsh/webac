@@ -29,6 +29,8 @@ export type Step =
   | { object: string }                                // click the newest dynamic world object with this name
   | { remove: string }                                // delete the newest dynamic object with this name (a spawn this scene made)
   | { click: [number, number] }                       // a raw frame point (only for points no element names)
+  | { drag: string; layout?: string; to: [number, number] } // press on the first draggable item inside a DAT element, move to a frame point, and HOLD the button
+  | { release: true }                                 // move back to the held drag's origin and let go (the drop lands where it started)
   | { wait: number };
 
 export interface AbScene {
@@ -205,6 +207,18 @@ export const AB_SCENES: AbScene[] = [
     steps: [...at(QUIET_SPOT), { cmd: 'Hello Dereth' }],
     notes: 'A spoken chat line: the chat window text, colors and wrapping.',
   },
+  {
+    name: 'notice-spew', world: false, settleMs: 800,
+    steps: [...at(QUIET_SPOT), { cmd: '/tell Bogus hi' }],
+    region: { x: 400, y: 0, w: 800, h: 120 },
+    notes: 'A 0x1a notice (gmSpewBoxUI, layout 0x21000011): /tell without a comma → "Use comma after the name for targeted chat." (DoTell :363427), centred 20 px down behind the vitals bar, plus its red main-chat copy. Shot inside the row\'s 5 s life. (AutoRun ON/OFF is no use here: its ~95 px text hides entirely behind the 154 px vitals bar.)',
+  },
+  {
+    name: 'drag-pack-item', world: false, settleMs: 1000,
+    steps: [...at(QUIET_SPOT), { key: 'F12' }, { wait: 1500 }, { drag: '0x100001cf', to: [560, 600] }],
+    cleanup: [{ release: true }, { wait: 1200 }, { key: 'F12' }],
+    notes: 'The first backpack item dragged out over open ground, button held: the ghosted source cell, the drag icon, the toolbar naming the item. Released back on its cell. Ours\' drag icon is the browser\'s native drag image, which a page screenshot does not include.',
+  },
   emote('emote-sit', 'KeyG', 'Sit'),
   emote('emote-crouch', 'KeyH', 'Crouch'),
   emote('emote-lay-down', 'KeyB', 'Lay Down'),
@@ -257,8 +271,21 @@ export function toDesign(pt: [number, number], view: { width: number; height: nu
   return [Math.round((pt[0] - lb.x) / lb.scale), Math.round((pt[1] - lb.y) / lb.scale)];
 }
 
+/**
+ * The points a drag moves through after the press, `from` excluded and `to`
+ * included: about one per 16 px, at least 8. Every driver moves along this
+ * path, because a single jump to the target never starts a retail drag.
+ */
+export function dragPath(from: [number, number], to: [number, number]): [number, number][] {
+  const n = Math.max(8, Math.ceil(Math.hypot(to[0] - from[0], to[1] - from[1]) / 16));
+  return Array.from({ length: n }, (_, i) => [
+    Math.round(from[0] + ((to[0] - from[0]) * (i + 1)) / n),
+    Math.round(from[1] + ((to[1] - from[1]) * (i + 1)) / n),
+  ] as [number, number]);
+}
+
 /** Steps whose click point ours resolves and retail replays. */
-export const needsPoint = (st: Step): boolean => 'element' in st || 'object' in st || 'remove' in st;
+export const needsPoint = (st: Step): boolean => 'element' in st || 'object' in st || 'remove' in st || 'drag' in st;
 
 // ── Key names per driver ─────────────────────────────────────────────────
 
@@ -303,6 +330,13 @@ export function validateScenes(scenes: AbScene[]): string[] {
       } else if ('element' in step) {
         if (!/^0x[0-9a-f]{8}$/.test(step.element)) errors.push(`${s.name}: element must be a 0x DAT id, got ${step.element}`);
         if (step.layout !== undefined && !/^0x21[0-9a-f]{6}$/.test(step.layout)) errors.push(`${s.name}: layout must be a 0x21 LayoutDesc id`);
+      } else if ('drag' in step) {
+        if (!/^0x[0-9a-f]{8}$/.test(step.drag)) errors.push(`${s.name}: drag source must be a 0x DAT id, got ${step.drag}`);
+        if (step.layout !== undefined && !/^0x21[0-9a-f]{6}$/.test(step.layout)) errors.push(`${s.name}: layout must be a 0x21 LayoutDesc id`);
+        const [x, y] = step.to;
+        if (!(x >= 0 && y >= 0 && x < VIEWPORT.width && y < VIEWPORT.height)) errors.push(`${s.name}: drag to ${x},${y} outside the frame`);
+      } else if ('release' in step) {
+        if (!s.steps.some((st) => 'drag' in st)) errors.push(`${s.name}: release without a drag`);
       } else if ('object' in step || 'remove' in step) {
         const name = 'object' in step ? step.object : step.remove;
         if (!SPAWN_NAMES.includes(name)) errors.push(`${s.name}: object ${name} is not in SPAWN_NAMES (it would never be swept)`);

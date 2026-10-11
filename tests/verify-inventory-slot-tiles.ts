@@ -195,7 +195,8 @@ describe('CORE.1 — retail inventory panel (behavioral)', () => {
 
   it('selected cell gets the marching-ants overlay 0x06004d09 (not a CSS outline)', () => {
     const cells = gridCells();
-    cells[0].click(); // selects the Dagger
+    // The press selects (UIElement::MouseDown → message 0x1c action 7).
+    cells[0].dispatchEvent(new domWindow.MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
     const overlay = gridCells()[0].querySelector('[data-slot-state="selected"]') as HTMLElement;
     expect(overlay).toBeTruthy();
     expect(overlay.style.backgroundImage).toContain(url(TEX.selected));

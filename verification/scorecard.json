@@ -240,12 +240,12 @@
     "retail-client/ab/retail-inventory-vendor.png"
    ],
    "verdict": "close",
-   "judged": "2026-10-10",
-   "evidence": "verification/trade-state-every-uiitem/sbs-trade-state-salvage.png",
+   "judged": "2026-10-11",
+   "evidence": "verification/retail-ab/drag-pack-item/sheet.png",
    "gaps": [
-    "RECON.inventory-grid-dat-cells.b.a.a"
+    "VISUAL.drag-source-cell-selection-border"
    ],
-   "notes": "2026-10-10 (RECON.inventory-grid-dat-cells.c.b): the trade-state overlay now shows on every UIItem (paperdoll slots, pack column, trade/salvage/slumlord cells), verified live with a worn dirk queued for salvage and a two-client trade. Remaining at a glance: a second drop during a pending one is accepted (.b.a.a, rare)."
+   "notes": "2026-10-11 re-judge after BUG.drag-source-tooltip-stays: mid-drag the source cell's tooltip is gone as in retail (A/B drag-pack-item, ours SwiftShader vs retail llvmpipe). Still noticeable: the ghosted source cell loses the green selected border retail keeps (VISUAL.drag-source-cell-selection-border)."
   },
   {
    "id": "panel-character",

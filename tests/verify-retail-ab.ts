@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { RETAIL_DEFAULT_KEYBINDS } from '../packages/renderer/src/input/KeybindDefaults.generated.ts';
 import {
-  AB_SCENES, MAC_DRIVER_KEYS, PREWORLD, TOUR, VIEWPORT, XDOTOOL_KEYS, letterbox, mayReplaceRetailFrame, needsPoint, retailFrameClock, selectScenes, ticksAt, toDesign, validateScenes,
+  AB_SCENES, MAC_DRIVER_KEYS, PREWORLD, TOUR, VIEWPORT, XDOTOOL_KEYS, dragPath, letterbox, mayReplaceRetailFrame, needsPoint, retailFrameClock, selectScenes, ticksAt, toDesign, validateScenes,
   type AbScene,
 } from '../tools/retail-ab-scenes.ts';
 
@@ -122,6 +122,38 @@ describe('validateScenes', () => {
     expect(validateScenes([ok, ok]).join()).toMatch(/duplicate/);
     expect(validateScenes([{ ...ok, region: { x: 1500, y: 0, w: 200, h: 10 } }]).join()).toMatch(/region outside 1600x900/);
     expect(validateScenes([{ ...ok, steps: [...ok.steps, { wait: 120_000 }] }]).join()).toMatch(/wait/);
+  });
+});
+
+describe('drag steps (GAP.retail-client-reference-frames.a)', () => {
+  const ok: AbScene = { name: 'x', world: false, settleMs: 0, steps: [{ cmd: '@teleloc 0xA9B40019 [84 5 94] 1 0 0 0' }], notes: '' };
+  it('dragPath walks to the target in steps of at most ~16 px, at least 8, ending exactly on it', () => {
+    const p = dragPath([1326, 706], [560, 600]);
+    expect(p.length).toBe(Math.ceil(Math.hypot(766, 106) / 16));
+    expect(p[p.length - 1]).toEqual([560, 600]);
+    expect(p[0]).not.toEqual([1326, 706]);
+    let prev: [number, number] = [1326, 706];
+    for (const pt of p) { expect(Math.hypot(pt[0] - prev[0], pt[1] - prev[1])).toBeLessThanOrEqual(17); prev = pt; }
+    expect(dragPath([10, 10], [12, 10]).length).toBe(8);
+    expect(dragPath([10, 10], [12, 10]).at(-1)).toEqual([12, 10]);
+  });
+  it('a drag source is a resolved point; validation wants a DAT id, an in-frame target and a drag before any release', () => {
+    expect(needsPoint({ drag: '0x100001cf', to: [1, 1] })).toBe(true);
+    expect(needsPoint({ release: true })).toBe(false);
+    const drag = { drag: '0x100001cf', to: [560, 600] as [number, number] };
+    expect(validateScenes([{ ...ok, steps: [...ok.steps, drag], cleanup: [{ release: true }] }])).toEqual([]);
+    expect(validateScenes([{ ...ok, steps: [...ok.steps, { ...drag, drag: 'pack' }] }]).join()).toMatch(/drag source must be a 0x DAT id/);
+    expect(validateScenes([{ ...ok, steps: [...ok.steps, { ...drag, to: [1700, 10] }] }]).join()).toMatch(/drag to 1700,10 outside the frame/);
+    expect(validateScenes([{ ...ok, cleanup: [{ release: true }] }]).join()).toMatch(/release without a drag/);
+  });
+  it('the drag scene holds a backpack item over the world and lets go in cleanup; the notice scene types the comma-less /tell', () => {
+    const drag = AB_SCENES.find((s) => s.name === 'drag-pack-item')!;
+    expect(drag.steps.some((st) => 'drag' in st && st.drag === '0x100001cf')).toBe(true);
+    expect(drag.cleanup?.[0]).toEqual({ release: true });
+    const notice = AB_SCENES.find((s) => s.name === 'notice-spew')!;
+    expect(notice.steps.some((st) => 'cmd' in st && st.cmd === '/tell Bogus hi')).toBe(true);
+    // the strip row lives 5 s (layout 0x21000011 item timer): the shot must land inside it
+    expect(notice.settleMs).toBeLessThan(5000);
   });
 });
 

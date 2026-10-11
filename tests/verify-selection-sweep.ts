@@ -1,9 +1,10 @@
 /**
  * Selection sweep (2026-10-03) — every retail ItemList follows the one global
  * selection (ACCWeenieObject::selectedID) and shares the base gestures of
- * UIElement_ItemList::ListenToElementMessage @ 004e4d50: a left click runs an
- * armed target mode (HandleTargetedUseLeftClick @ 004e24d0) before it would
- * select, a right-click selects and examines. Plus the paperdoll drag rules
+ * UIElement_ItemList::ListenToElementMessage @ 004e4d50: a left press (0x1c
+ * action 7, sent by UIElement::MouseDown @ 00460f10) runs an armed target mode
+ * (HandleTargetedUseLeftClick @ 004e24d0) before it would select, a
+ * right-click selects and examines. Plus the paperdoll drag rules
  * (OnItemListDragOver @ 004a4270, HandlePaperDollDragOver @ 004a3a70,
  * HandleDropRelease @ 004a4d80) and the vendor list notice.
  */
@@ -132,11 +133,36 @@ describe('GameUI — item lists follow the global selection (behavioral)', () =>
   const panel = (): HTMLElement => ui.inventoryPanel;
   const cellOf = (guid: number): HTMLElement => panel().querySelector(`[data-ac-sel-guid="${guid}"]`) as HTMLElement;
   const ants = (el: HTMLElement) => el.querySelector('[data-slot-state="selected"]');
+  const press = (el: HTMLElement, button = 0) => el.dispatchEvent(new domWindow.MouseEvent('mousedown', { bubbles: true, cancelable: true, button }));
 
-  it('an armed target mode takes a pack cell or worn-slot click instead of selecting', () => {
-    armed = true;
-    cellOf(DAGGER).click();
+  it('the press selects (message 0x1c action 7): a press that goes on to drag leaves the ants on the ghosted cell', () => {
+    const cell = cellOf(DAGGER);
+    press(cell, 2); // a right-button press is not action 7
+    expect(ui.hud.target).toBeNull();
+    press(cell);
+    expect(ui.hud.target?.id).toBe(DAGGER);
+    // The browser never sends 'click' once the press turns into a drag.
+    cell.dispatchEvent(new domWindow.Event('dragstart', { bubbles: true }));
+    const dragged = cellOf(DAGGER);
+    expect(dragged.querySelector('[data-waiting-ghost]')).toBeTruthy();
+    expect(ants(dragged)).toBeTruthy();
+    // Overlays 0x10000346 paint in read order: the ghost (3) under the ants (4).
+    const layers = [...dragged.children].filter((c) => (c as HTMLElement).dataset.waitingGhost || (c as HTMLElement).dataset.slotState);
+    expect(layers.map((c) => ((c as HTMLElement).dataset.waitingGhost ? 'ghost' : (c as HTMLElement).dataset.slotState))).toEqual(['ghost', 'selected']);
+    cell.dispatchEvent(new domWindow.Event('dragend', { bubbles: true }));
+    ui.settleItemDragWaiting();
+    // A release alone (a click with no press) does not select.
+    ui.hud.setTarget(null);
     (panel().querySelector('[data-equip-slot="Head"]') as HTMLElement).click();
+    expect(ui.hud.target).toBeNull();
+    press(panel().querySelector('[data-equip-slot="Head"]') as HTMLElement);
+    expect(ui.hud.target?.id).toBe(HELM);
+  });
+
+  it('an armed target mode takes a pack cell or worn-slot press instead of selecting', () => {
+    armed = true;
+    press(cellOf(DAGGER));
+    press(panel().querySelector('[data-equip-slot="Head"]') as HTMLElement);
     expect(targeted).toEqual([DAGGER, HELM]);
     expect(ui.hud.target).toBeNull();
   });
@@ -225,17 +251,19 @@ describe('GameUI — item lists follow the global selection (behavioral)', () =>
     expect(ui.componentRowWcid).toBe(0);
   });
 
-  it('trade cells: click selects, right-click selects and examines, an armed target mode takes the click', () => {
+  it('trade cells: a press selects, right-click selects and examines, an armed target mode takes the press', () => {
     const listEl = domWindow.document.createElement('div');
     const handle = { elements: new Map([[0x1, listEl]]), descs: new Map(), setText: () => {}, setState: () => {}, setVisible: () => {} };
     ui.renderTradeItemList(handle, 0x1, 0x2, [{ name: 'Gem', guid: 0x80003333, iconDid: 0 }], false, () => 0, () => {});
     const cell = listEl.querySelector('[data-ac-trade-cell="item"]') as HTMLElement;
-    cell.click();
+    cell.click(); // the release alone is not action 7
+    expect(selected).toEqual([]);
+    cell.dispatchEvent(new domWindow.MouseEvent('mousedown', { bubbles: true, button: 0 }));
     expect(selected).toEqual([0x80003333]);
     cell.dispatchEvent(new domWindow.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
     expect(examined).toEqual([0x80003333]);
     armed = true;
-    cell.click();
+    cell.dispatchEvent(new domWindow.MouseEvent('mousedown', { bubbles: true, button: 0 }));
     expect(targeted).toEqual([0x80003333]);
   });
 });

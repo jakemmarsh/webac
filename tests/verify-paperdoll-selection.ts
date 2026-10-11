@@ -220,26 +220,28 @@ describe('GameUI — worn-item selection (behavioral)', () => {
   const daggerCell = (): HTMLElement => gridArea().querySelector(`[data-ac-sel-guid="${0x8000aaaa}"]`) as HTMLElement;
   const headSlot = (): HTMLElement => paperdoll().querySelector('[data-equip-slot="Head"]') as HTMLElement;
   const ants = (el: HTMLElement) => el.querySelector('[data-slot-state="selected"]');
+  // The press selects (UIElement::MouseDown → message 0x1c action 7).
+  const press = (el: HTMLElement) => el.dispatchEvent(new domWindow.MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
 
   it('selecting the worn item moves the ants from the pack cell onto its slot', () => {
-    daggerCell().click();
+    press(daggerCell());
     expect(ants(daggerCell())).toBeTruthy();
     expect(ants(headSlot())).toBeNull();
-    headSlot().click();
+    press(headSlot());
     expect(ui.hud.target?.id).toBe(HELM);
     expect(ants(headSlot())).toBeTruthy();
     expect(ants(daggerCell())).toBeNull();
   });
 
   it('a selection made elsewhere (the world) clears the inventory ants on the next HUD update', () => {
-    daggerCell().click();
+    press(daggerCell());
     ui.hud.setTarget({ id: 0x7000beef, name: 'Drudge', level: 1, healthFraction: 1, distance: 3, type: 'monster' });
     ui.refreshInventorySelection();
     expect(ants(daggerCell())).toBeNull();
   });
 
   it('the panel rebuilds with the ants on the selected worn item', () => {
-    headSlot().click();
+    press(headSlot());
     ui.renderInventoryPanel();
     expect(ants(headSlot())).toBeTruthy();
   });

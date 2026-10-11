@@ -191,6 +191,8 @@ describe('CORE.18.c — the strip\'s nested row pads with empty cells; the selec
     return { guid, name, iconDid: 0, stackSize: 1, containerId, isContainer: false, ...extra };
   }
   function click(target: HTMLElement): void { target.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true })); }
+  // An item-list cell selects on the press (UIElement::MouseDown → 0x1c action 7).
+  function press(target: HTMLElement): void { target.dispatchEvent(new domWindow.MouseEvent('mousedown', { bubbles: true, button: 0 })); }
   function dblclick(target: HTMLElement): void { target.dispatchEvent(new domWindow.MouseEvent('dblclick', { bubbles: true })); }
 
   it('a chest (ContainersCapacity -1) with no nested packs shows 13 empty 36-px cells in m_containerList, each the 0x06000f6e recess at (2,2)', () => {
@@ -215,6 +217,7 @@ describe('CORE.18.c — the strip\'s nested row pads with empty cells; the selec
     const cells = nestedCells();
     expect(cells.map(kind)).toEqual([String(POUCH), ...Array(12).fill('empty')]);
     click(cells[5]);
+    press(cells[5]);
     expect(ui.hudState.target).toBeNull();
     expect(nestedCells()[0].dataset.acContainerOpen).toBeUndefined();
   });
@@ -237,11 +240,13 @@ describe('CORE.18.c — the strip\'s nested row pads with empty cells; the selec
     expect(top.contains(a[0])).toBe(true);
   });
 
-  it('a click on a row item selects it (SetSelectedObject): the ants move onto it in place, and the same cell still takes on double-click', () => {
+  it('a press on a row item selects it (SetSelectedObject): the ants move onto it in place, and the same cell still takes on double-click', () => {
     ui.hudState.setTarget({ id: CHEST, name: 'Chest', level: 0, healthFraction: 0, distance: 2, type: 'item' });
     ui.showContainerPanel(CHEST, [item(1, 'Apple'), item(2, 'Pear')], -1, { name: 'Chest' }, -1);
     const pear = el(0x1000006a).querySelectorAll('[data-ac-container-cell="item"]')[1] as HTMLElement;
-    click(pear);
+    click(pear); // the release alone is not action 7
+    expect(ui.hudState.target.id).toBe(CHEST);
+    press(pear);
     expect(ui.hudState.target.id).toBe(2);
     expect(toolbarSelections).toEqual([2]);
     const a = ants();

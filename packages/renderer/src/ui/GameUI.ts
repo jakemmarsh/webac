@@ -13400,7 +13400,14 @@ export class GameUI {
         overlay.style.outline = `1px solid ${state === 'selected' ? AC_COLORS.goldLight : AC_COLORS.onlineGreen}`;
         overlay.style.outlineOffset = '-1px';
       }
-      el.appendChild(overlay);
+      // Overlays 0x10000346's children share zLevel 0, so they paint in read
+      // order: ghost 0x10000349 (3), ants 0x10000342 (4), shortcut tag
+      // 0x1000034a (5), sell-state 0x10000437 (6), trade badge 0x10000438 (7).
+      const above = state === 'selected'
+        ? el.querySelector(':scope > [data-shortcut-tag], :scope > [data-sell-state], :scope > [data-slot-state="trade"]')
+        : null;
+      if (above) el.insertBefore(overlay, above);
+      else el.appendChild(overlay);
     }
   }
 
@@ -14434,6 +14441,19 @@ export class GameUI {
     return 0;
   }
 
+  /**
+   * Message 7 on an item-list cell is the PRESS, not the release:
+   * UIElement::MouseDown @ 00460f10 sends 0x1c with the input action, and
+   * UIElement_ItemList::ListenToElementMessage @ 004e4d50 runs the armed
+   * target mode or SetSelectedObject on action 7. So a press that goes on to
+   * drag has already selected the item, and its ghosted cell keeps the ants
+   * (the retail A/B drag-pack-item frame). A browser 'click' never fires
+   * once the press becomes a drag.
+   */
+  private onItemListPress(cell: HTMLElement, handler: () => void): void {
+    cell.addEventListener('mousedown', (e) => { if (e.button === 0) handler(); });
+  }
+
   /** Message 7's armed-target-mode branch for an item cell: true when the click was consumed. */
   private itemListTargetedClick(guid: number): boolean {
     return guid !== 0 && (this.itemTargetModeClick?.(guid) ?? false);
@@ -14525,8 +14545,10 @@ export class GameUI {
       ...this.texBgStyle(ITEM_WAITING_GHOST_MEDIA, 'transparent'),
       backgroundSize: '32px 32px', backgroundRepeat: 'no-repeat', imageRendering: 'pixelated',
     });
-    // Under the shortcut tag 0x1000034a and the sell-state 0x10000437 that follow it.
-    const above = cell.querySelector(':scope > [data-shortcut-tag], :scope > [data-sell-state]');
+    // Under the ants 0x10000342, the shortcut tag 0x1000034a, the sell-state
+    // 0x10000437 and the trade badge 0x10000438 that follow it in read order:
+    // a held drag's ghosted cell keeps its ants on top (retail A/B drag-pack-item).
+    const above = cell.querySelector(':scope > [data-slot-state], :scope > [data-shortcut-tag], :scope > [data-sell-state]');
     if (above) cell.insertBefore(ghost, above);
     else cell.appendChild(ghost);
   }
@@ -14918,12 +14940,12 @@ export class GameUI {
         // was the discoverable surface for "what can I do with this
         // equipped item?"
         // VISUAL.item-right-click-examine — gmPaperDollUI::
-        // ListenToElementMessage @ 004a5c30: a click (action 7) selects the
+        // ListenToElementMessage @ 004a5c30: a press (0x1c action 7) selects the
         // worn item, a right-click (8) selects and examines it. (The old
         // Unequip/Examine menu was invented; unequip is the double-click or
         // a drag.)
         if (equipped) {
-          slotEl.addEventListener('click', () => {
+          this.onItemListPress(slotEl, () => {
             if (this.itemListTargetedClick(equipped.id)) return;
             this.selectHeldItem(equipped);
           });
@@ -15616,7 +15638,7 @@ export class GameUI {
           const select = () => {
             this.selectHeldItem(item);
           };
-          cell.addEventListener('click', () => {
+          this.onItemListPress(cell, () => {
             if (this.itemListTargetedClick(item.id)) return;
             select();
           });
@@ -16723,7 +16745,7 @@ export class GameUI {
         cell.dataset.acSelGuid = `${item.guid}`;
         this.applyItemTradeStateOverlay(cell, this.tradeStateGuids().has(item.guid));
         if (item.guid === this.containerSelectedGuid()) this.styleSlotTile(cell, 'selected', 0x06004d20, true);
-        cell.addEventListener('click', () => {
+        this.onItemListPress(cell, () => {
           if (this.itemListTargetedClick(item.guid)) return;
           this.selectContainerObject(item.guid, {
             name: item.name, pluralName: item.pluralName, iconDid: item.iconDid, stackSize: item.stackSize,
@@ -27112,12 +27134,12 @@ export class GameUI {
       cell.dataset.guid = String(item.guid);
       this.tagHudTooltip(cell, item.name);
       // Both trade lists are ItemLists (UIElement_ItemList::ListenToElementMessage
-      // @ 004e4d50): a click runs an armed target mode or selects the object,
+      // @ 004e4d50): a press runs an armed target mode or selects the object,
       // a right-click selects and examines it, the ants follow selectedID.
       cell.dataset.acSelGuid = String(item.guid);
       cell.style.cursor = 'pointer';
       const guid = item.guid;
-      cell.addEventListener('click', () => {
+      this.onItemListPress(cell, () => {
         if (this.itemListTargetedClick(guid)) return;
         this.onSelectObject?.(guid);
         this.refreshInventorySelection();
@@ -28776,12 +28798,12 @@ export class GameUI {
         this.removeSalvageItem(item.id);
       });
       // The base ItemList gestures still apply (the salvage flag only
-      // blocks message 10's UseObject): a click runs an armed target mode or
+      // blocks message 10's UseObject): a press runs an armed target mode or
       // selects, a right-click selects and examines, the ants follow selectedID.
       cell.dataset.acSelGuid = String(item.id);
       this.applyItemTradeStateOverlay(cell, this.tradeStateGuids().has(item.id));
       if (item.id === this.containerSelectedGuid()) this.styleSlotTile(cell, 'selected', 0x06004d20, true);
-      cell.addEventListener('click', () => {
+      this.onItemListPress(cell, () => {
         if (this.itemListTargetedClick(item.id)) return;
         this.selectHeldItem(item);
       });
@@ -31845,7 +31867,17 @@ export class GameUI {
     // cleared by StopDragandDrop @ 00459810 / ClearDragandDrop @ 004592e0.
     // The browser's native drag is the same shape: no mousemove arrives
     // between dragstart and dragend / drop.
-    document.addEventListener('dragstart', () => { this.hudDragActive = true; });
+    // BUG.drag-source-tooltip-stays — StartDragandDrop then brings the drag
+    // element to the top under the mouse and calls UpdateMouseOver →
+    // SwitchMouseOver: the source cell is no longer entered, so StopHover
+    // deletes its tooltip as the drag starts. Nothing is entered until the
+    // next real mouse move (after the drop), so no delayed tooltip starts
+    // mid-drag; the smartbox path (startHudTooltipAtMouse) still can.
+    document.addEventListener('dragstart', () => {
+      this.hudDragActive = true;
+      hover.reset();
+      this.scheduleHudTooltipCheck();
+    });
     document.addEventListener('dragend', () => { this.hudDragActive = false; });
     // RECON.inventory-grid-dat-cells.b — capture, then defer past the target's
     // handlers (some stop propagation) so a request the drop sent is recorded.
