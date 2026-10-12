@@ -135,6 +135,13 @@ export interface AgentHost {
   /** One airborne transition of the player's body (feet at from.z) moved (dx, dy) through the collision world; where it ends. Never moves the player. */
   navAirStep?(from: { x: number; y: number; z: number }, dx: number, dy: number): { x: number; y: number };
   /**
+   * The landscape at a global (x, y), for telling a player what is in the way: `sea` when its landblock is all deep
+   * water (CObjCell::get_block_water_type ENTIRELY_WATER: no one wades it), `steep` when the terrain there is too
+   * steep to climb (normal.Z under FloorZ), `wade` the water depth there (0 dry), `height` the terrain. Null indoors
+   * or where the landscape isn't loaded.
+   */
+  navTerrain?(x: number, y: number): { sea: boolean; steep: boolean; wade: number; height: number } | null;
+  /**
    * A standing long jump charged to `power` (0..1) with the player's own Jump skill and load: its
    * forward speed (run, or walk with Shift) and upward speed, m/s, and the seconds a full charge takes.
    */
@@ -320,6 +327,12 @@ export interface WalkOptions {
   /** A fellow's name: wait whenever they are more than stayWithin metres behind (walk at their pace). */
   stayWith?: string;
   stayWithin?: number;
+  /**
+   * Follow the target (a player): walk to within `within` of them, stand while they are that near, and set off
+   * again whenever they move off, until `durationMs` has passed. VirindiTank's Follow nav / UtilityBelt's
+   * `/ub follow`; retail has no follow command (the decomp has none).
+   */
+  follow?: { durationMs: number };
 }
 
 export const LANDBLOCK_SIZE = 192;
@@ -581,6 +594,8 @@ export class AgentApi {
   static readonly ATTACK_RUN_UP_M = 12;
   private lastDialogCount = 0;
   private dyingSeen = new Set<number>();
+  /** Objects that left the client's world lately, by guid: their name, when, and whether they were seen to die. */
+  private gone = new Map<number, { name: string; at: number; died: boolean }>();
   /** Watched targets that vanished without a seen death: guid → name and when (resolved within 3 s). */
   private pendingLoss = new Map<number, { name: string; at: number }>();
   /** Places (NPCs, vendors, portals, lifestones) by guid with their last-known landblock-local position. */
@@ -612,6 +627,8 @@ export class AgentApi {
 
   /** The selected object's guid, or null. */
   selectedGuid(): number | null { return this.host.targetGuid(); }
+  /** The container whose contents are open (a corpse or chest you opened), or null. */
+  openContainerGuid(): number | null { return this.host.openContainer()?.guid ?? null; }
   /** Every skill with its training (the macro's planners). */
   skillList(): Array<{ id: number; name: string; training: 'untrained' | 'trained' | 'specialized'; base: number; buffed: number }> { return this.host.skillList?.() ?? []; }
   spellTableData(): ReturnType<NonNullable<AgentHost['spellTableData']>> { return this.host.spellTableData?.() ?? null; }
@@ -1272,6 +1289,47 @@ export class AgentApi {
   /** stay_with: the walk waits while that fellow is more than this far behind (m), up to STAY_WITH_WAIT_MS. */
   static readonly STAY_WITH_M = 15;
   static readonly STAY_WITH_WAIT_MS = 45_000;
+  /** stay_with: a fellow waited for who hasn't moved this long (2 m) isn't coming: the walk says so instead of waiting on. */
+  static readonly STAY_WITH_STILL_MS = 12_000;
+  /** stay_with: a fellow waited for who got this much farther from where you're going is going elsewhere. */
+  static readonly STAY_WITH_AWAY_M = 10;
+  /** follow: standing within reach of the leader, the walk sets off again once they are this much farther. */
+  static readonly FOLLOW_SLACK_M = 3;
+  /** follow: the leader out of sight this long ends it. */
+  static readonly FOLLOW_LOST_MS = 10_000;
+  /**
+   * A walk going round in circles: back within LOOP_RADIUS_M of where it stood at least LOOP_BACK_MS before, having
+   * been LOOP_AWAY_M or more from there since, and no LOOP_GAIN_M nearer the goal. A goal across water paced Bulwark
+   * back and forth for 90 s, and three goals brought Arcanist back to the same bank, before "timed out" (2026-10-12).
+   */
+  static readonly LOOP_BACK_MS = 30_000;
+  static readonly LOOP_RADIUS_M = 4;
+  static readonly LOOP_AWAY_M = 12;
+  static readonly LOOP_GAIN_M = 5;
+
+  /**
+   * What lies on the line from `from` toward `to` that a player can't cross, from the landscape (host.navTerrain):
+   * open sea (a landblock of deep water: AC has no swimming), or ground rising too steeply to climb. "" when the
+   * line is clear as far as the landscape is loaded, or indoors.
+   */
+  private wayBlocker(from: { x: number; y: number }, to: { x: number; y: number }, maxM = 150): string {
+    const nt = this.host.navTerrain?.bind(this.host);
+    if (!nt) return '';
+    const d = Math.hypot(to.x - from.x, to.y - from.y);
+    if (d < 1) return '';
+    const n = Math.ceil(Math.min(d, maxM) / 2);
+    const way = compassPoint(bearing(from, to));
+    let prev = nt(from.x, from.y);
+    for (let i = 1; i <= n; i++) {
+      const k = Math.min(d, i * 2), p = { x: from.x + ((to.x - from.x) * k) / d, y: from.y + ((to.y - from.y) * k) / d };
+      const t = nt(p.x, p.y);
+      if (!t) return '';
+      if (t.sea) return `open sea ${Math.round(k)} m ${way} (a landblock of deep water: no one can wade it, and AC has no swimming)`;
+      if (t.steep && prev && t.height > prev.height + 0.3) return `ground rising too steeply to climb ${Math.round(k)} m ${way}`;
+      prev = t;
+    }
+    return '';
+  }
   /** A fellow farther than this at a walk's end, and 15 m farther than at its start, is named as left behind. */
   static readonly FELLOW_BEHIND_M = 30;
 
@@ -1828,15 +1886,27 @@ export class AgentApi {
     const had = inv?.stack ?? 1;
     const n = amount ?? had;
     const itemName = this.nameOf(i); // before the give: the item leaves the inventory
-    const since = this.seqN;
     const g = i;
-    if (!this.host.give(t, g, n)) return { ok: false, message: 'give refused' };
     // Given = it left your pack, or its stack shrank by the amount; the server's words alone don't say which.
     const left = (): boolean => { const now = this.host.inventory().find((x) => x.guid === g); return !now || (now.stack ?? 1) <= had - n; };
-    for (let w = 0; w < 40 && !left() && !this.eventsSince(since).some((e) => e.type === 'chat' || e.type === 'use-failed'); w++) await sleep(200);
-    await sleep(800);
-    const replies = this.eventsSince(since).filter((e) => e.type === 'chat' || e.type === 'dialog' || e.type === 'use-failed').map((e) => `  ${e.text.replace(/^\(\w+\) /, '')}`);
-    if (!left()) return { ok: false, message: [`${this.nameOf(t)} did not get your ${itemName}${replies.length ? '; the server said:' : ' (no reply, and it is still in your pack)'}`, ...replies].join('\n') };
+    let since = this.seqN;
+    let replies: string[] = [];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      since = this.seqN;
+      if (!this.host.give(t, g, n)) return { ok: false, message: 'give refused' };
+      for (let w = 0; w < 40 && !left() && !this.eventsSince(since).some((e) => e.type === 'chat' || e.type === 'use-failed'); w++) await sleep(200);
+      await sleep(800);
+      replies = this.eventsSince(since).filter((e) => e.type === 'chat' || e.type === 'dialog' || e.type === 'use-failed').map((e) => `  ${e.text.replace(/^\(\w+\) /, '')}`);
+      // "… can't be given - action cancelled": the server's own walk to them was cut short (ACE GiveObjectRequest's
+      // MoveTo failed: one of you moved). A player clicks again, standing still: once more, after a moment.
+      if (left() || !replies.some((r) => /action cancelled/i.test(r))) break;
+      for (let w = 0; w < 15 && this.host.busy(); w++) await sleep(200);
+      await sleep(1000);
+    }
+    if (!left()) {
+      const why = giveRefusalHint(replies.join(' '));
+      return { ok: false, message: [`${this.nameOf(t)} did not get your ${itemName}${replies.length ? '; the server said:' : ' (no reply, and it is still in your pack)'}`, ...replies, ...(why ? [`  (${why})`] : [])].join('\n') };
+    }
     return { ok: true, message: [`gave ${n} ${itemName} to ${this.nameOf(t)}`, ...replies].join('\n') };
   }
 
@@ -1929,7 +1999,69 @@ export class AgentApi {
   vendorView(): AgentResult {
     const v = this.host.vendor();
     if (!v) return { ok: false, message: 'no vendor window is open (ac_use the vendor first)' };
-    return { ok: true, message: [`${v.name} sells (${v.currency}):`, ...v.items.map((i) => `  #${i.guid.toString(16)} ${i.name}  ${i.price}${i.stack && i.stack > 1 ? `  (stack ${i.stack})` : ''}`)].join('\n') };
+    // A service (ItemType TYPE_SERVICE) is a spell the vendor casts on you as you pay (ACE Vendor.ApplyService), not a
+    // scroll: Arcanist and Bulwark both took the Healer's "Coordination Other IV" for scrolls (2026-10-12).
+    const services = v.items.some((i) => i.service);
+    return { ok: true, message: [`${v.name} sells (${v.currency}):`, ...v.items.map((i) => `  #${i.guid.toString(16)} ${i.name}  ${i.price}${i.stack && i.stack > 1 ? `  (stack ${i.stack})` : ''}${i.service ? `  (service: ${v.name} casts it on you when you buy it; not a scroll)` : ''}`),
+      ...(services ? ['  (a service lands on whoever buys it; buy one at a time, the vendor casts each before the next)'] : [])].join('\n') };
+  }
+
+  /** Buys one after another, each waiting for the last one's answer (ac_buy). */
+  private buyChain: Promise<unknown> = Promise.resolve();
+
+  /**
+   * ac_buy: buy as the vendor bar does and report what happened: paid, the item in your pack, or for a service the
+   * spell the vendor cast on you, else the server's refusal. One at a time, as inventory requests go: the second of two
+   * buys sent back to back at the Healer was lost (ACE Vendor.BuyItems_ValidateTransaction refuses a service while
+   * the vendor IsBusy casting the last one, and a busy player's buy gets YoureTooBusy, 2026-10-12).
+   */
+  buyReported(item: TargetArg, amount = 1): Promise<AgentResult> {
+    // A vendor still finishing the last service's cast answers nothing, as a click on a busy vendor does: a player
+    // clicks again a moment later, so do that once (live, the second of three buys at Thelnoth, 2026-10-12).
+    const job = this.buyChain.then(async () => {
+      const r = await this.buyOnce(item, amount);
+      if (r.ok || !/no answer from/.test(r.message)) return r;
+      await sleep(AgentApi.SERVICE_RETRY_MS);
+      return this.buyOnce(item, amount);
+    });
+    this.buyChain = job.catch(() => {});
+    return job;
+  }
+
+  /** A service's vendor stays busy through its post-cast motion (ACE ApplyService: IsBusy until PostCastTime). */
+  static readonly SERVICE_SETTLE_MS = 2500;
+  /** How long to give a busy vendor before the one retry of a buy it didn't answer. */
+  static readonly SERVICE_RETRY_MS = 3000;
+
+  private async buyOnce(item: TargetArg, amount: number): Promise<AgentResult> {
+    const v = this.host.vendor();
+    if (!v) return { ok: false, message: 'no vendor window is open (ac_use the vendor first)' };
+    const want = typeof item === 'string' ? item.toLowerCase() : null;
+    const it = v.items.find((i) => (want ? i.name.toLowerCase() === want : i.guid === item))
+      ?? (want ? v.items.find((i) => i.name.toLowerCase().includes(want)) : undefined);
+    if (!it) return { ok: false, message: `${v.name} doesn't sell "${item}"` };
+    for (let w = 0; w < 50 && this.host.busy(); w++) await sleep(200);
+    const n = Math.max(1, amount);
+    const since = this.seqN;
+    const purse = this.host.self()?.pyreals ?? 0;
+    const before = new Map(this.host.inventory().map((i) => [i.guid, i.stack ?? 1]));
+    const lines = (): string[] => this.eventsSince(since).filter((e) => e.type === 'chat' || e.type === 'use-failed').map((e) => e.text.replace(/^\(\w+\) /, ''));
+    const paid = (): number => purse - (this.host.self()?.pyreals ?? purse);
+    const got = (): boolean => this.host.inventory().some((i) => (before.get(i.guid) ?? 0) < (i.stack ?? 1));
+    const refused = (): boolean => this.eventsSince(since).some((e) => e.type === 'use-failed');
+    if (!this.host.vendorBuy(it.guid, n)) return { ok: false, message: `${v.name} won't sell ${it.name}: the buy was refused` };
+    const name = `${n > 1 ? `${n} ` : ''}${it.name}`;
+    for (let w = 0; w < 30 && !refused() && !(paid() > 0 && (it.service || got())) && !(v.currency !== 'Pyreals' && got()); w++) await sleep(200);
+    if (it.service && paid() > 0) {
+      // The vendor casts it a moment after you pay (its pre-cast motion), then stays busy through the post-cast one.
+      const cast = (): boolean => lines().some((l) => l.toLowerCase().includes(it.name.toLowerCase()));
+      for (let w = 0; w < 40 && !cast(); w++) await sleep(200);
+      await sleep(AgentApi.SERVICE_SETTLE_MS);
+      return { ok: true, message: [`bought ${name} for ${paid()} pyreals: ${v.name} casts it on you`, ...lines().map((l) => `  ${l}`)].join('\n') };
+    }
+    if (paid() > 0 || got()) return { ok: true, message: [`bought ${name}${paid() > 0 ? ` for ${paid()} pyreals` : ''}`, ...lines().map((l) => `  ${l}`)].join('\n') };
+    const why = lines();
+    return { ok: false, message: [`${name} was not bought (no money taken)`, ...(why.length ? why.map((l) => `  ${l}`) : [`  no answer from ${v.name}: it may be busy (a service it is still casting); try again in a few seconds`])].join('\n') };
   }
 
   buy(item: TargetArg, amount = 1): AgentResult {
@@ -2091,7 +2223,14 @@ export class AgentApi {
       goalLocal = () => this.host.object(g) ?? this.remembered(g);
       // With its floor height: a target in the hall under a walkway is not reached from overhead.
       goal = () => { const o = goalLocal(); return o && o.cell ? { ...toGlobal(o.cell, o.x, o.y), z: o.z } : null; };
-      label = `walking to ${name}`;
+      label = opts.follow ? `following ${name}` : `walking to ${name}`;
+    }
+    {
+      // A spot out in open sea: no walk gets there (CLandCell::find_env_collisions: a landblock all of deep water is
+      // Collided for a player). Said at once, not after a walk round every shore.
+      const g0 = goal(), lc = goalLocal()?.cell;
+      const t = g0 && (!lc || (lc & 0xffff) < 0x100) ? this.host.navTerrain?.(g0.x, g0.y) : null;
+      if (t?.sea) return Promise.resolve({ ok: false, message: `${label}: that spot is out in open sea (a landblock of deep water: no one can wade it, and AC has no swimming). Pick a point on land.` });
     }
     const start = this.host.now();
     // No time limit given: long enough for the distance (a 1.4 km walk took 90 s for 300 m in a headless
@@ -2100,6 +2239,17 @@ export class AgentApi {
       const me = this.me(), g0 = goal();
       if (me && g0) timeoutMs = Math.min(Math.max(timeoutMs, (Math.hypot(g0.x - me.g.x, g0.y - me.g.y) / AgentApi.WALK_BUDGET_MPS + 30) * 1000), AgentApi.WALK_MAX_MS);
     }
+    // Following: the duration is the limit (standing beside the leader is not running out of time).
+    const follow = opts.follow && targetGuid ? { durationMs: Math.min(Math.max(opts.follow.durationMs, 5000), AgentApi.WALK_MAX_MS) } : null;
+    if (follow) timeoutMs = Infinity;
+    // Standing beside the leader (follow), and the leader's last sight, for "out of sight".
+    let standing = false;
+    let leaderLostAt = 0;
+    // Where the walk has been (every 2 s) and how far from the goal it was then: a walk back where it was 30 s ago,
+    // no nearer, is going round in circles.
+    const trail: Array<{ x: number; y: number; d: number; t: number }> = [];
+    // The fellow waited for (stay_with): where they were when the wait began and when they last moved.
+    let waitFellow: { x: number; y: number; toGoal: number; movedAt: number; lastX: number; lastY: number } | null = null;
     // Hit on the way and kept going (fleeing, or the way on led away from them), for the result.
     let underAttack: string | null = null;
     // A walk at a fellow's pace (opts.stayWith): when the wait for them began, and the time spent waiting.
@@ -2340,6 +2490,26 @@ export class AgentApi {
     };
     return this.startTask(label, (now) => {
       const me = this.me();
+      if (follow && me) {
+        if (now - start >= follow.durationMs) {
+          release();
+          const o = this.nearby(600).find((x) => x.guid === targetGuid);
+          return { ok: true, message: `followed ${this.nameOf(targetGuid)} for ${Math.round((now - start) / 1000)} s; ${o ? `they are ${o.dist.toFixed(0)} m ${compassPoint(o.bearing)} of you` : 'they are out of sight now'}${featText()}` };
+        }
+        // The leader out of the client's sight (a portal, a recall, too far for the server to keep you updated): stand,
+        // and after a while say where they were last seen.
+        const lo = this.host.object(targetGuid);
+        if (!lo || lo.lost || (lo.cell && !inUpdateRange(me.s.cell, lo.cell))) {
+          release();
+          leaderLostAt ||= now;
+          if (now - leaderLostAt > AgentApi.FOLLOW_LOST_MS) {
+            const last = lo?.cell ? toGlobal(lo.cell, lo.x, lo.y) : null;
+            return { ok: false, message: `stopped following: ${this.nameOf(targetGuid)} went out of sight${last ? `, last seen ${Math.hypot(last.x - me.g.x, last.y - me.g.y).toFixed(0)} m ${compassPoint(bearing(me.g, last))} of you` : ''} (a portal, a recall, or too far off): ask them where they are${featText()}` };
+          }
+          return null;
+        }
+        leaderLostAt = 0;
+      }
       const gl = goal();
       if (!me || !gl) { release(); return { ok: false, message: 'target vanished or not in world' }; }
       const d = Math.hypot(gl.x - me.g.x, gl.y - me.g.y);
@@ -2367,20 +2537,39 @@ export class AgentApi {
         }
       }
       if (opts.stayWith) {
-        // At a fellow's pace: stand and wait while they are more than stayWithin behind, as a player waits at a corner.
+        // At a fellow's pace: stand and wait while they are more than stayWithin BEHIND (farther from where you're going
+        // than you are), as a player waits at a corner. One ahead of you is no reason to stop: two players both walking
+        // with stay_with used to stand waiting for each other until both gave up (2026-10-12).
         const f = this.fellowsAt().find((x) => x.name.toLowerCase() === opts.stayWith!.toLowerCase());
         const lag = f?.dist;
-        if (lag === undefined) { release(); return { ok: false, message: `stopped ${d.toFixed(1)} m short: ${f ? f.name : opts.stayWith} is out of sight (too far behind, or not a fellow): wait for them or tell them where you are${featText()}` }; }
-        if (lag > stayWithin && !jumping) {
+        if (lag === undefined || f?.bearing === undefined) { release(); return { ok: false, message: `stopped ${d.toFixed(1)} m short: ${f ? f.name : opts.stayWith} is out of sight (too far behind, or not a fellow): wait for them or tell them where you are${featText()}` }; }
+        const fb = f.bearing / DEG;
+        const at = { x: me.g.x + lag * Math.sin(fb), y: me.g.y + lag * Math.cos(fb) };
+        const theirs = Math.hypot(gl.x - at.x, gl.y - at.y);
+        const where = `${lag.toFixed(0)} m ${compassPoint(f.bearing)} of you`;
+        if (lag > stayWithin && theirs - d > stayWithin && !jumping) {
           release();
           credit += now - lastTick;
           lastTick = now;
-          if (!waitingSince) { waitingSince = now; this.trace(`walk: waiting for ${f!.name}, ${lag.toFixed(0)} m behind`); }
-          if (now - waitingSince > AgentApi.STAY_WITH_WAIT_MS) return { ok: false, message: `stopped ${d.toFixed(1)} m short: waited ${Math.round(AgentApi.STAY_WITH_WAIT_MS / 1000)} s for ${f!.name}, still ${lag.toFixed(0)} m behind${featText()}` };
+          if (!waitingSince) {
+            waitingSince = now;
+            waitFellow = { x: at.x, y: at.y, toGoal: theirs, movedAt: now, lastX: at.x, lastY: at.y };
+            this.trace(`walk: waiting for ${f.name}, ${lag.toFixed(0)} m behind`);
+          }
+          const wf = waitFellow!;
+          if (Math.hypot(at.x - wf.lastX, at.y - wf.lastY) > 2) { wf.movedAt = now; wf.lastX = at.x; wf.lastY = at.y; }
+          // What a player would see while waiting: they aren't coming (standing still), or they're off somewhere else.
+          if (theirs - wf.toGoal > AgentApi.STAY_WITH_AWAY_M) {
+            return { ok: false, message: `stopped ${d.toFixed(1)} m short to wait for ${f.name}, but they are going elsewhere: now ${where}, ${(theirs - wf.toGoal).toFixed(0)} m farther from where you're going than when you stopped. Tell them (/f), or go with them${featText()}` };
+          }
+          if (now - wf.movedAt > AgentApi.STAY_WITH_STILL_MS) {
+            return { ok: false, message: `stopped ${d.toFixed(1)} m short: ${f.name} is ${where} and hasn't moved for ${Math.round((now - wf.movedAt) / 1000)} s (fighting, busy, stuck or waiting for you?). Ask them in /f, or walk to them${featText()}` };
+          }
+          if (now - waitingSince > AgentApi.STAY_WITH_WAIT_MS) return { ok: false, message: `stopped ${d.toFixed(1)} m short: waited ${Math.round(AgentApi.STAY_WITH_WAIT_MS / 1000)} s for ${f.name}, still ${where}${featText()}` };
           best = Infinity; bestAt = now;
           return null;
         }
-        if (waitingSince) { waited += now - waitingSince; waitingSince = 0; }
+        if (waitingSince) { waited += now - waitingSince; waitingSince = 0; waitFellow = null; }
       }
       // A fall the plan didn't make: the feet going down much faster than the body moves across (a slide off an
       // edge, a missed landing), told in the result. Walking down a slope or stairs never is.
@@ -2392,7 +2581,18 @@ export class AgentApi {
       lastZ = me.s.z;
       lastXY = { x: me.g.x, y: me.g.y };
       const dz = gl.z === undefined ? 0 : me.s.z - gl.z;
-      if (!jumping && d <= within && Math.abs(dz) < 2.5) {
+      if (follow && !jumping) {
+        // Beside the leader: stand (a player waits beside a friend), and set off again once they move off.
+        if (d <= within || (standing && d <= within + AgentApi.FOLLOW_SLACK_M)) {
+          if (!standing) { standing = true; release(); }
+          credit += now - lastTick;
+          lastTick = now;
+          best = Infinity; bestAt = now; stalls = 0;
+          return null;
+        }
+        if (standing) { standing = false; prev = null; plan(); best = Infinity; bestAt = now; }
+      }
+      if (!follow && !jumping && d <= within && Math.abs(dz) < 2.5) {
         // After a drop or jump, stand a moment first: a landing on an edge slides off (the dam pylons, 2026-10-11).
         if ((feats.drops.length || feats.jumps) && !settleAt) { release(); settleAt = { until: now + AgentApi.LANDING_SETTLE_MS, z: me.s.z }; return null; }
         if (settleAt && now < settleAt.until) return null;
@@ -2406,6 +2606,24 @@ export class AgentApi {
       else if (search && searchCredit < AgentApi.SEARCH_CREDIT_MS) { const c = Math.min(now - lastTick, AgentApi.SEARCH_CREDIT_MS - searchCredit); searchCredit += c; credit += c; }
       lastTick = now;
       if (now - start - credit > timeoutMs) { release(); return { ok: false, message: `timed out ${d.toFixed(1)} m short after ${Math.round(timeoutMs / 1000)} s, still on the way (walk_to again to carry on, or give timeout_s)${featText()}` }; }
+      if (!follow && !jumping && !waitingSince) {
+        const last = trail[trail.length - 1];
+        if (!last || now - last.t >= 2000) {
+          trail.push({ x: me.g.x, y: me.g.y, d, t: now });
+          if (trail.length > 400) trail.shift();
+          const back = trail.findIndex((p) => now - p.t >= AgentApi.LOOP_BACK_MS && Math.hypot(p.x - me.g.x, p.y - me.g.y) <= AgentApi.LOOP_RADIUS_M);
+          if (back >= 0) {
+            const was = trail[back];
+            const away = Math.max(...trail.slice(back).map((p) => Math.hypot(p.x - was.x, p.y - was.y)));
+            if (away >= AgentApi.LOOP_AWAY_M && d > was.d - AgentApi.LOOP_GAIN_M) {
+              release();
+              this.trace(`walk: back at (${me.g.x.toFixed(1)}, ${me.g.y.toFixed(1)}) where it was ${Math.round((now - was.t) / 1000)} s ago, no nearer; giving up`);
+              const blocker = this.wayBlocker(me.g, gl);
+              return { ok: false, message: `stuck ${d.toFixed(1)} m short: the walk went round in circles (back where it was ${Math.round((now - was.t) / 1000)} s ago, no nearer), so no walkable way was found${blocker ? `; in the way: ${blocker}` : ''}${featText()}. ac_map shows what's round you; try another route or target.` };
+            }
+          }
+        }
+      }
       if (now < dodgeUntil) return null;
       if (dodgeKey) { this.host.key(dodgeKey, false); dodgeKey = ''; bestAt = now; }
       const here = { x: me.g.x, y: me.g.y, z: me.s.z };
@@ -2500,6 +2718,24 @@ export class AgentApi {
         legs = r.status === 'found' ? r.path : [];
         noWay = r.status === 'none';
         this.trace(`walk search ${r.status} after ${r.expanded} points${legs.length ? `: ${legs.map(legText).join(' ')}` : ''}`);
+        if (r.status === 'none' && r.enclosed && probe && !doorDetour) {
+          // The search walked every point reachable from here: the floor you stand on is closed in (water, cliffs,
+          // walls all round). No wider search or turned stretch finds more, so say so now, unless a jump might get
+          // out, or a closed door nearby might open a way.
+          const doorHope = this.nearby(35).some((o) => o.kind === 'door' && !o.open && !doorsTried.has(o.guid));
+          if (!doorHope) {
+            const aimNow = legAim() ?? gl;
+            if (!sr.hasJumps && jumpSearch()) {
+              this.trace(`walk: closed in on foot (${r.area} m²); searching with jumps and drops (falls up to ${Math.round(fallBudget(me.s.health))} damage)`);
+              stretchSearch = null; stretch = null; stretchTurns = [];
+              startSearch(here, aimNow, 2);
+              return null;
+            }
+            release();
+            const blocker = this.wayBlocker(here, gl);
+            return { ok: false, message: `stuck ${d.toFixed(1)} m short: no way out of here on foot${sr.hasJumps ? ', nor by any jump or drop your health can take' : ''}. The ground you can reach is closed in (about ${r.area} m²)${blocker ? `; toward it: ${blocker}` : ''}${featText()}. Go back the way you came (ac_trace), or /lifestone if you are trapped.` };
+          }
+        }
         if (sr === stretchSearch) {
           stretchSearch = null;
           if (r.status === 'found') { if (stretchTurn) lastTurn = stretchTurn; }
@@ -2655,6 +2891,7 @@ export class AgentApi {
           shutNames.length ? `tried the door${shutNames.length > 1 ? 's' : ''} ${shutNames.join(', ')}, which stayed shut: locked, or it needs a key` : '',
           openNames.length ? `opened ${openNames.join(', ')}, but the way on is still blocked` : '',
           dropsFailed.length ? `the way down through the floor opening${dropsFailed.length > 1 ? 's' : ''} is past a rail higher than your jump clears` : '',
+          (() => { const b = this.wayBlocker(me.g, gl); return b ? `in the way: ${b}` : ''; })(),
         ].filter(Boolean).join('; ');
         // A locked door and a key lying about (the AC1999 tutorial's key room): a player picks it up and uses it.
         const keyNear = shutNames.length && !this.host.inventory().some((i) => /\bkey\b/i.test(i.name))
@@ -2682,6 +2919,23 @@ export class AgentApi {
       best = Infinity;
       return null;
     }, release).then(after);
+  }
+
+  /**
+   * Follow a player (a fellow, usually): walk to within `within` m of them, stand while they stay that near, and set
+   * off again whenever they move off, until `durationMs` passes, you're hit (as any walk), they go out of sight, or
+   * another action starts. Retail has no follow command (no "follow" anywhere in the decomp's commands); this is
+   * VirindiTank's Follow nav and UtilityBelt's `/ub follow`, which players ran for exactly this. Arcanist scripted
+   * it as a loop of walk_to + wait (2026-10-12).
+   */
+  follow(target: TargetArg, opts: { within?: number; durationMs?: number } = {}): Promise<AgentResult> {
+    const g = this.need(target, 'world', 'player');
+    if (typeof g !== 'number') return Promise.resolve(g);
+    if (g === this.host.self()?.guid) return Promise.resolve({ ok: false, message: 'you can\'t follow yourself' });
+    const o = this.host.object(g);
+    if (!o || !(o.itemType & IT.Creature)) return Promise.resolve({ ok: false, message: `${this.nameOf(g)} isn't someone you can follow` });
+    const within = Math.max(1.5, opts.within ?? 4);
+    return this.walkTo(g, { within, follow: { durationMs: opts.durationMs ?? 120_000 }, onAwayKeepGoing: true });
   }
 
   /**
@@ -2746,6 +3000,11 @@ export class AgentApi {
    * either way (unreachable), 120 s in all, on death, or when another task
    * starts.
    */
+  /** loot: how long it waits for peace mode to take (a change asked for mid-swing waits for a ready position). */
+  static readonly LOOT_PEACE_WAIT_MS = 8000;
+  /** loot: a container still not open this long after the Use gets one more. */
+  static readonly LOOT_REUSE_MS = 6000;
+
   /** How long swings may report nothing about the target before the next height is tried (several swings). */
   static readonly QUIET_SWING_MS = 6000;
   /** The height that last connected, by creature name (this page's session). */
@@ -2796,6 +3055,14 @@ export class AgentApi {
       g = r;
     }
     if (this.host.isDying(g)) return { ok: false, message: `${this.nameOf(g)} is dead (loot its corpse, or pick another target)` };
+    if (!this.host.object(g)) {
+      // Gone from the client's world since you saw it: most often it just died (observe listed #800021c0 "ATTACKING
+      // YOU", and the attack a moment later said it "isn't attackable", 2026-10-12).
+      const was = this.gone.get(g);
+      const corpse = was ? this.nearby(60).find((o) => o.kind === 'corpse' && o.name === `Corpse of ${was.name}`) : undefined;
+      if (was && (was.died || corpse || this.killedRecently(was.name))) return { ok: false, message: `${was.name} #${g.toString(16)} died${corpse ? `: its corpse is #${corpse.guid.toString(16)}, ${corpse.dist.toFixed(0)} m ${compassPoint(corpse.bearing)}` : ''} (loot it, or pick another target)` };
+      return { ok: false, message: `${was?.name ?? `#${g.toString(16)}`} is gone from view (it died, fled out of range, or you moved away): pick another target` };
+    }
     if (!this.host.isAttackable(g)) return { ok: false, message: `${this.nameOf(g)} isn't attackable` };
     const guid = g;
     const name = this.nameOf(guid);
@@ -2883,7 +3150,15 @@ export class AgentApi {
     const far = !!(o && o.cell && me && Math.hypot(toGlobal(o.cell, o.x, o.y).x - me.g.x, toGlobal(o.cell, o.x, o.y).y - me.g.y) > AgentApi.ATTACK_RUN_UP_M);
     if (o && o.cell && (far || this.planRoute(toGlobal(o.cell, o.x, o.y), o).length)) {
       // Attacked on the way: stop walking and fight (the server's own approach closes the rest).
-      void this.walkTo(guid, { within: 2.5, timeoutMs: 90_000 }).then((r) => { if (r.ok || r.attacked) fight(); });
+      void this.walkTo(guid, { within: 2.5, timeoutMs: 90_000 }).then((r) => {
+        if (r.ok || r.attacked) { fight(); return; }
+        // The run-up found no way (across water, up a cliff) or gave out: say so as the attack's own end, so a wait on
+        // target-lost hears it. "running up to Young Banderling" was followed by 40 s of nothing (2026-10-12).
+        if (!/interrupted/.test(r.message) && this.attackTarget === guid) {
+          this.attackTarget = 0;
+          this.push('target-lost', `${name} #${guid.toString(16)}: no attack, you couldn't get to it (${r.message.replace(/^walking to [^:]*: /, '')})`, guid);
+        }
+      });
       return { ok: true, message: `running up to ${name} (#${guid.toString(16)}), then attacking; ac_wait types=target-died,target-lost,vitals-low,death,task-done${this.otherAttackersNote(guid)}` };
     }
     fight();
@@ -2923,6 +3198,7 @@ export class AgentApi {
     const start = this.host.now();
     let phase: 'settle' | 'open' | 'take' = 'settle';
     let openedAt = 0;
+    let uses = 0;
     let reopens = 0;
     // Items still to try, and the one whose answer we're waiting for.
     let queue: Array<{ guid: number; name: string; uiEffects?: number }> = [];
@@ -2974,8 +3250,15 @@ export class AgentApi {
       if (phase === 'settle') {
         // Already open to you (ac_use opened it): a Use now would close it.
         if (isOpen()) { phase = 'open'; openedAt = now; return null; }
-        if (now - start < 1500 || this.host.busy()) return null;
+        // Peace first, really: a mode change asked for mid-swing waits for a ready position (SetCombatMode's
+        // pendingCombatMode) and goes out later, and arriving during the server's walk to the corpse it ended that
+        // MoveTo (ACE: the walk fails unless you already stand within reach), so the Use answered done and nothing
+        // opened. Bulwark's loots right after kills, 3.7 m off, all failed that way (2026-10-12).
+        const s = this.host.self();
+        const peaceful = !leftCombat || (s?.combatMode === 'peace' && (!s.serverMode || s.serverMode === 'peace'));
+        if (now - start < 1500 || this.host.busy() || (!peaceful && now - start < AgentApi.LOOT_PEACE_WAIT_MS)) return null;
         this.host.use(guid);
+        uses = 1;
         phase = 'open';
         openedAt = now;
         return null;
@@ -2995,6 +3278,8 @@ export class AgentApi {
           phase = 'take';
           return null;
         }
+        // A Use the server answered without opening it (its walk there cut short): once more, as a player clicks again.
+        if (uses < 2 && !takenItems.length && now - openedAt > AgentApi.LOOT_REUSE_MS && !this.host.busy()) { this.host.use(guid); uses++; return null; }
         if (now - openedAt > openTimeout) {
           if (takenItems.length || failed.size) return finish(report(false));
           return { ok: false, message: `${name} never opened (too far, someone else's corpse, or locked)${this.saidNote(start)}` };
@@ -3211,7 +3496,10 @@ export class AgentApi {
         if (seen.has(g)) continue;
         // A place going out of view: its last-seen time is saved now, so a reload tells its age right.
         if (this.places.has(g)) placesChanged.n++;
+        const died = this.dyingSeen.has(g) || this.killedRecently(name);
         this.objectRemoved(g, name);
+        this.gone.set(g, { name, at: now, died });
+        if (this.gone.size > 200) this.gone.delete(this.gone.keys().next().value!);
       }
     }
     if (placesChanged.n) this.savePlaces(s);
@@ -3262,6 +3550,7 @@ export class AgentApi {
       use: (t: TargetArg) => this.use(t),
       useOn: (i: TargetArg, t: TargetArg) => this.useOnReported(i, t),
       walkTo: (t: number | string, o?: { within?: number; timeoutMs?: number; flee?: boolean; stayWith?: string; stayWithin?: number }) => this.walkTo(t, { ...(o ? { within: o.within, timeoutMs: o.timeoutMs, flee: o.flee, stayWith: o.stayWith, stayWithin: o.stayWithin } : {}), onAwayKeepGoing: true }),
+      follow: (t: TargetArg, o?: { within?: number | null; durationMs?: number | null }) => this.follow(t, { ...(o?.within != null ? { within: o.within } : {}), ...(o?.durationMs != null ? { durationMs: o.durationMs } : {}) }),
       turn: (t: number | string) => this.turn(t),
       move: (d: string, s?: number) => this.move(d, s),
       jump: (o?: { holdMs?: number; forward?: boolean; walk?: boolean }) => this.jump(o ?? {}),
@@ -3281,7 +3570,7 @@ export class AgentApi {
       press: (k: string) => this.press(k),
       keys: (f?: string) => this.keys(f ?? ''),
       vendor: () => this.vendorView(),
-      buy: (i: TargetArg, n?: number | null) => this.buy(i, n ?? 1),
+      buy: (i: TargetArg, n?: number | null) => this.buyReported(i, n ?? 1),
       sell: (i: TargetArg, n?: number | null) => this.sell(i, n ?? null),
       trade: (a?: string | null, i?: TargetArg) => this.trade(a ?? 'view', i ?? null),
       trace: (s?: number | null) => this.traceView(s ?? 30),
@@ -3324,6 +3613,19 @@ export function agentApiEnabled(search: string): boolean {
  */
 export function automationUiEnabled(urlOverridesAllowed: boolean): boolean {
   return urlOverridesAllowed;
+}
+
+/**
+ * What a give's refusal means and what works instead (ACE Player_Inventory.HandleActionGiveObjectRequest /
+ * GiveObjectToPlayer): coins and trade notes are given like any item, so the reason is never the item.
+ */
+export function giveRefusalHint(said: string): string | null {
+  if (/action cancelled/i.test(said)) return 'the server walks you to them before a give, and that walk was cut short (one of you moved, or turned away): stand still beside them and give again, or open a trade (ac_trade) and add it there';
+  if (/not accepting gifts/i.test(said)) return 'they have "Allow others to give you items" turned off in their options: ask them to turn it on, or use a trade (ac_trade)';
+  if (/too busy to accept gifts/i.test(said)) return 'they are in the middle of something (casting, a use, a swing): wait a moment and give again';
+  if (/too busy/i.test(said)) return 'you are in the middle of something (a cast, a use, an attack): wait a moment and give again';
+  if (/one item at a time/i.test(said)) return 'another move of yours was still going: wait for it, then give again';
+  return null;
 }
 
 /** A combat line saying a swing of ours reached `name`: a hit or graze for points, or its evade. */

@@ -30,6 +30,7 @@ import { AT_CHAR_SELECT_JS, REMOTE_CHROMIUM, REPO, createCharacterIfNeeded, wait
 import { STATE_DIR, accountForProfile, clearInfo, logFile, readInfo, writeInfo } from './state.ts';
 import { type AgentEra, agentEra, eraAccount } from './eras.ts';
 import { createShutdown } from './shutdown.ts';
+import { withCallDeadline } from './callDeadline.ts';
 
 /** `p`, or a rejection after `ms`. */
 const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timed out after ${ms} ms`)), ms))]);
@@ -367,7 +368,12 @@ async function main(): Promise<void> {
     say('in world');
   };
   if (!args.attach) {
-    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    // A new page's own first about:blank can land after our goto starts and cancel it (seen 2026-10-12): go again.
+    await page.goto(url, { waitUntil: 'domcontentloaded' }).catch((e: Error) => {
+      if (!/interrupted by another navigation/.test(e.message)) throw e;
+      say('first navigation was cancelled by the new tab\'s blank page; loading again');
+      return page.goto(url, { waitUntil: 'domcontentloaded' });
+    });
     entering = enter().finally(() => { entering = null; });
     await entering;
   }
@@ -430,15 +436,16 @@ async function main(): Promise<void> {
             if (!ready) throw new Error('nobody is in the world in that tab yet: the human logs in and enters with their character there; try again in a minute');
           }
           if (entering) await entering;
-          return Promise.race([
+          // tools/ac-agent/callDeadline.ts: answered within the HTTP client's patience; a long walk goes on.
+          return withCallDeadline(
             page.evaluate(([m, a]) => {
               const api = (window as any).__acAgent;
               if (!api) throw new Error('agent API not loaded (page still entering the world?)');
               if (typeof api[m as string] !== 'function') throw new Error(`unknown agent method: ${m}`);
               return api[m as string](...(a as unknown[]));
             }, [method, callArgs] as const),
-            new Promise((_, rej) => setTimeout(() => rej(new Error(`${method} timed out after ${timeoutMs} ms`)), timeoutMs)),
-          ]);
+            method, timeoutMs,
+          );
         };
         let result: unknown;
         try {

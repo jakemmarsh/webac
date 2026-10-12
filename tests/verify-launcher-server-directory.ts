@@ -110,6 +110,36 @@ describe('compat overlay', () => {
     // Every committed id key is lower-case (lookups lower-case the id).
     for (const k of Object.keys(SERVER_COMPAT.byId)) expect(k).toBe(k.toLowerCase());
   });
+
+  it('Reefcull and Harvestbud (web-form registration only) carry a registration line and their own form, and stay GDLE beta', () => {
+    // gdleac.com "Step 4: Account Creation" links each world's form; docs/gdle-compat.md.
+    expect(compatFor('A7502AC9-0CEC-4CAF-B81C-B3EB40A4689A', 'GDL')).toEqual({
+      compat: 'beta', note: 'GDLE: beta',
+      registration: 'Register on the Reefcull website first (lower-case names only).',
+      registrationUrl: 'http://reefcull.gdleac.com/',
+    });
+    expect(compatFor('f023fbf9-caab-4745-8205-81c4d7c061ad', 'GDLE')).toMatchObject({
+      compat: 'beta', note: 'GDLE: beta', registrationUrl: 'http://harvestbud.gdleac.com/',
+    });
+    expect(compatFor('f023fbf9-caab-4745-8205-81c4d7c061ad', 'GDLE').registration).toMatch(/^Register on the Harvestbud website first/);
+    // Other worlds create accounts on first login: no registration.
+    expect(compatFor('anything', 'GDLE').registrationUrl).toBeUndefined();
+    expect(compatFor('anything', 'ACE').registration).toBeUndefined();
+  });
+});
+
+describe('buildDirectory registration', () => {
+  it('the /servers rows of the real Reefcull and Harvestbud ids carry registration + registrationUrl; others null', () => {
+    const real: Record<string, string> = { reef: 'a7502ac9-0cec-4caf-b81c-b3eb40a4689a', harvest: 'f023fbf9-caab-4745-8205-81c4d7c061ad' };
+    const servers = fixtureServers().map((s) => ({ ...s, id: real[s.id] ?? s.id }));
+    const rows = buildDirectory(servers, new Map(), new Map(), { now: NOW });
+    const byName = Object.fromEntries(rows.map(e => [e.name, e]));
+    expect(byName.Reefcull).toMatchObject({ compat: 'beta', compatNote: 'GDLE: beta', registrationUrl: 'http://reefcull.gdleac.com/' });
+    expect(byName.Reefcull.registration).toMatch(/Register on the Reefcull website first/);
+    expect(byName.Harvestbud).toMatchObject({ registrationUrl: 'http://harvestbud.gdleac.com/' });
+    expect(byName.Coldeve).toMatchObject({ registration: null, registrationUrl: null });
+    expect(byName['FunkyTown 2.0']).toMatchObject({ compat: 'beta', registration: null, registrationUrl: null });
+  });
 });
 
 describe('buildDirectory', () => {
@@ -191,7 +221,7 @@ describe('GET /servers and /healthz (HTTP handler)', () => {
     expect(body.mode).toBe('multi');
     expect(body.servers.map(s => s.name).slice(0, 2)).toEqual(['Coldeve', 'Reefcull']);
     expect(Object.keys(body.servers[0]).sort()).toEqual([
-      'compat', 'compatNote', 'description', 'discord', 'emu', 'era', 'id', 'lastSeen', 'name', 'online', 'population', 'registration', 'type', 'website',
+      'compat', 'compatNote', 'description', 'discord', 'emu', 'era', 'id', 'lastSeen', 'name', 'online', 'population', 'registration', 'registrationUrl', 'type', 'website',
     ]);
     // /metrics stays behind its token
     expect((await fetch(`${base}/metrics`)).status).toBe(401);

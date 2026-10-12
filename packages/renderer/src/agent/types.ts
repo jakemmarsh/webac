@@ -157,8 +157,11 @@ export interface AgentDialog {
 export interface AgentVendor {
   name: string;
   guid: number;
-  /** What the vendor sells, with the merchandise row's per-unit price. */
-  items: Array<{ guid: number; name: string; price: number; stack?: number }>;
+  /**
+   * What the vendor sells, with the merchandise row's per-unit price. `service`: a buff the vendor casts on you when
+   * you buy it (ItemType TYPE_SERVICE 0x100000, ACE PropertyBool.VendorService: Vendor.ApplyService), not an item.
+   */
+  items: Array<{ guid: number; name: string; price: number; stack?: number; service?: boolean }>;
   /** "Pyreals", or the alternate currency the vendor trades in. */
   currency: string;
 }
@@ -190,6 +193,8 @@ export interface AgentItem {
   name: string;
   /** Where it is: 'pack' (main pack), a side-pack name, or 'equipped'. */
   where: string;
+  /** In a side pack: that pack's guid (two packs can share a name). */
+  inside?: number;
   stack?: number;
   value?: number;
   burden?: number;

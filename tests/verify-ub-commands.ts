@@ -291,6 +291,20 @@ describe('/ub opt and the settings store', () => {
     h.self = { ...h.self, name: 'Other' };
     expect(await ub.command('/ub opt get InventoryManager.IGRange')).toEqual(['InventoryManager.IGRange = 15']);
   });
+
+  it('Nametags: UB\'s names and defaults, off until turned on (scene/Nametags.ts reads them)', async () => {
+    const { ub, storage } = setup();
+    expect(await ub.command('/ub opt get Nametags.Enabled')).toEqual(['Nametags.Enabled = false']);
+    expect(await ub.command('/ub opt get Nametags.MaxRange')).toEqual(['Nametags.MaxRange = 35']);
+    expect(await ub.command('/ub opt get nametags.monster.tagcolor')).toEqual(['Nametags.Monster.TagColor = -65536']);
+    expect(await ub.command('/ub opt get Nametags.AllegiancePlayer.TickerSize')).toEqual(['Nametags.AllegiancePlayer.TickerSize = 0.1']);
+    expect(await ub.command('/ub opt set Nametags.Enabled true')).toEqual(['Nametags.Enabled = true']);
+    expect(await ub.command('/ub opt toggle Nametags.Npc.Enabled')).toEqual(['Nametags.Npc.Enabled = false']);
+    expect(await ub.command('/ub opt set Nametags.Player.TagColor 0xFFFFFFFF')).toEqual(['Nametags.Player.TagColor = 4294967295']);
+    const saved = JSON.parse(storage.getItem(ubStorageKey('Test', 'Tester'))!);
+    expect(saved.settings['Nametags.Enabled']).toBe(true);
+    expect(saved.settings['Nametags.Npc.Enabled']).toBe(false);
+  });
 });
 
 describe('AutoVendor (UB AutoVendor.cs)', () => {

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About webAC — play Asheron's Call in your browser</title>
+<meta name="description" content="webAC is a free, open-source Asheron's Call client that runs in your web browser. Nothing to install: log in with your existing account on ACE, GDLE, classic Dark Majesty and AC1999 servers, on Windows, Mac or Linux.">
+<link rel="canonical" href="https://playwebac.com/about/">
+<meta name="theme-color" content="#111111">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="webAC">
+<meta property="og:url" content="https://playwebac.com/about/">
+<meta property="og:title" content="About webAC — play Asheron's Call in your browser">
+<meta property="og:description" content="A free, open-source Asheron's Call client in your browser. Nothing to install; use your existing account on ACE, GDLE, classic and AC1999 servers.">
+<meta property="og:image" content="https://playwebac.com/og-image.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="628">
+<meta property="og:image:alt" content="The webAC launcher: the Asheron's Call logo, a list of public worlds and the Enter button">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Can I play Asheron's Call in a web browser?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. webAC (https://playwebac.com) is a free, open-source Asheron's Call client that runs in Chrome, Firefox or Safari. Pick a world from the public server list, log in with your account on that server, and play. Nothing to install and no game files to download." }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I play Asheron's Call on a Mac?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. webAC runs in the browser, so it works on a Mac, on Linux and on Windows without Wine, a virtual machine or the original client. You need a desktop or laptop with a mouse and a browser with WebGL 2." }
+    },
+    {
+      "@type": "Question",
+      "name": "Which servers does webAC work with?",
+      "acceptedAnswer": { "@type": "Answer", "text": "ACE (ACEmulator) servers running the end-of-retail game, classic Dark Majesty-era servers, AC1999 (the 1999 launch version), and GDLE servers. The world list is the same community server list ThwargLauncher uses. GDLE support is newer: login, character creation, NPCs, vendors and chat work, and combat, magic and trading are still being tested." }
+    },
+    {
+      "@type": "Question",
+      "name": "Do I need to install anything or download the DAT files?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. webAC streams only the game data it needs as you play, so you are usually in the world in under a minute. There is no launcher, client or DAT download." }
+    },
+    {
+      "@type": "Question",
+      "name": "Do I need a new account?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. Use the account you already have on the server you play on. Most ACE worlds create your account the first time you log in; some ask you to register on their website first, and the launcher says which. webAC has no accounts of its own." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is webAC free?",
+      "acceptedAnswer": { "@type": "Answer", "text": "webAC is free and open source under the AGPL-3.0 license (https://github.com/jakemmarsh/webac). It is a fan project, not affiliated with WB Games or Turbine." }
+    }
+  ]
+}
+</script>
+<style>
+  :root {
+    --night: #050a18;
+    --deep: #0b1838;
+    --panel: rgba(8, 12, 24, 0.92);
+    --gold: #c9a24a;
+    --gold-dim: #7d6328;
+    --title: #f0b33a;
+    --text: #e2e2dc;
+    --muted: #b5b0a2;
+    --green: #8fd14f;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--night); }
+  body {
+    margin: 0;
+    color: var(--text);
+    font: 16px/1.6 Tahoma, Verdana, "Segoe UI", sans-serif;
+    background:
+      radial-gradient(ellipse 80% 50% at 70% 0%, rgba(42, 74, 140, 0.55), transparent 70%),
+      radial-gradient(ellipse 60% 60% at 10% 40%, rgba(24, 48, 104, 0.45), transparent 70%),
+      linear-gradient(180deg, var(--deep) 0%, var(--night) 100%);
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 48px; }
+  a { color: var(--title); }
+  a:hover { color: #ffd27a; }
+  header { text-align: center; margin-bottom: 28px; }
+  h1 {
+    margin: 0 0 6px;
+    font: 600 clamp(2.2rem, 7vw, 3.4rem)/1.1 "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    letter-spacing: 0.04em;
+    color: #e9e6df;
+    text-shadow: 0 2px 0 #000, 0 0 18px rgba(120, 160, 255, 0.35);
+  }
+  .tagline { margin: 0; color: var(--muted); font-size: 1.05rem; }
+  .panel {
+    background: var(--panel);
+    border: 2px solid var(--gold);
+    outline: 1px solid var(--gold-dim);
+    outline-offset: 3px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+    padding: 20px 24px;
+    margin: 0 0 26px;
+  }
+  h2 { margin: 0 0 10px; color: var(--title); font-size: 1.3rem; font-weight: 600; }
+  h3 { margin: 18px 0 4px; color: var(--title); font-size: 1.05rem; font-weight: 600; }
+  p { margin: 0 0 10px; }
+  ul { margin: 0 0 10px; padding-left: 1.2em; }
+  li { margin: 4px 0; }
+  li::marker { color: var(--green); }
+  figure { margin: 0 0 26px; }
+  figure img {
+    display: block; width: 100%; height: auto;
+    border: 2px solid var(--gold); outline: 1px solid var(--gold-dim); outline-offset: 3px;
+  }
+  figcaption { color: var(--muted); font-size: 0.9rem; text-align: center; margin-top: 10px; }
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 640px) { .shots { grid-template-columns: 1fr; } .panel { padding: 16px; } }
+  .play {
+    display: inline-block; margin-top: 18px; padding: 10px 34px;
+    font: 600 1.3rem/1 "Palatino Linotype", Palatino, Georgia, serif; letter-spacing: 0.08em;
+    color: #f3e3b0; text-decoration: none; text-transform: uppercase;
+    background: radial-gradient(circle at 50% 40%, #2a3166, #121838);
+    border: 2px solid var(--gold); border-radius: 999px;
+    box-shadow: 0 0 0 3px #3a2c10, 0 4px 16px rgba(0, 0, 0, 0.6);
+  }
+  .play:hover { color: #fff3c8; border-color: #e8c36a; }
+  footer { text-align: center; color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>webAC</h1>
+    <p class="tagline">Play Asheron's Call in your browser. Nothing to install.</p>
+    <a class="play" href="/">Play now</a>
+  </header>
+
+  <figure>
+    <img src="/og-image.jpg" width="1200" height="628" alt="The webAC launcher: the Asheron's Call logo, the list of public worlds with player counts, and the Enter button">
+    <figcaption>Pick a world, log in with your account on that server, and press Enter.</figcaption>
+  </figure>
+
+  <section class="panel">
+    <h2>What is webAC?</h2>
+    <p>webAC is a free, open-source game client for <strong>Asheron's Call</strong>, Turbine's 1999 MMORPG, that runs entirely in your web browser. It connects to the community's emulator servers, the same worlds you would reach with the original client and ThwargLauncher, and it uses your existing account on those servers.</p>
+    <p>It was written from scratch in TypeScript and WebGL. The interface, fonts, art, models and sounds all come from the original game data, and the goal is to look and behave exactly like the retail client, quirks included.</p>
+  </section>
+
+  <div class="shots">
+    <figure>
+      <img src="/about/combat.jpg" width="1280" height="760" loading="lazy" alt="A character fighting a sparring golem in the Training Academy, with the retail combat bar, vitals, radar and chat">
+      <figcaption>Combat in the Training Academy</figcaption>
+    </figure>
+    <figure>
+      <img src="/about/inventory.jpg" width="1280" height="760" loading="lazy" alt="The inventory panel open beside another player in the Training Academy">
+      <figcaption>Inventory, with other players nearby</figcaption>
+    </figure>
+  </div>
+
+  <section class="panel">
+    <h2>Questions</h2>
+
+    <h3>Can I play Asheron's Call in a web browser?</h3>
+    <p>Yes. Open <a href="/">playwebac.com</a> in Chrome, Firefox or Safari, pick a world from the public server list, log in with your account on that server, and play. There is no client, launcher or game-file download.</p>
+
+    <h3>Can I play Asheron's Call on a Mac?</h3>
+    <p>Yes. Because webAC runs in the browser, it works on a Mac, on Linux and on Windows, without Wine, a virtual machine or the original client. You need a desktop or laptop with a mouse and a browser with WebGL 2. Phones and tablets aren't supported.</p>
+
+    <h3>Which servers does webAC work with?</h3>
+    <ul>
+      <li><strong>ACE</strong> (ACEmulator) servers running the end-of-retail game, as of the January 2017 shutdown.</li>
+      <li><strong>Classic</strong> servers set in the Dark Majesty era.</li>
+      <li><strong>AC1999</strong>, the game as it was at its 1999 launch.</li>
+      <li><strong>GDLE</strong> servers. Login, character creation, NPCs, vendors and chat work; combat, magic and trading are still being tested.</li>
+    </ul>
+    <p>The world list is the community server list that ThwargLauncher also uses.</p>
+
+    <h3>Do I need to install anything or download the DAT files?</h3>
+    <p>No. webAC streams only the game data it needs as you play, so you are usually in the world in under a minute.</p>
+
+    <h3>Do I need a new account?</h3>
+    <p>No. Use the account you already have on the server you play on. Most ACE worlds create your account the first time you log in; some ask you to register on their website first, and the launcher says which.</p>
+
+    <h3>What happens to my login and data?</h3>
+    <ul>
+      <li>Your login travels from your browser to webAC's relay over an encrypted connection, and the relay passes it to the world's server using AC's own protocol. It is never logged or stored.</li>
+      <li>webAC has no accounts database. Your characters live on the server you play on.</li>
+      <li>Basic connection logs (IP address, world, session length) and anonymous crash reports are kept. No analytics, no cookies, no trackers.</li>
+      <li>Your settings, keybinds and window layout are saved in your own browser.</li>
+    </ul>
+
+    <h3>Is webAC free?</h3>
+    <p>Yes. webAC is free and open source under the AGPL-3.0 license. The source code is on <a href="https://github.com/jakemmarsh/webac">GitHub</a>.</p>
+
+    <h3>Is it finished?</h3>
+    <p>It's in public beta. Expect bugs, especially on less common servers, and please <a href="https://github.com/jakemmarsh/webac/issues">report them on GitHub</a>.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Credits</h2>
+    <p>webAC stands on years of community work: the <a href="https://github.com/ACEmulator/ACE">ACE</a> server project, whose source is the reference for the protocol and game rules; GDLE; ACViewer, for the DAT formats; the AC1999 project; and ThwargLauncher's server list. webAC was built with heavy use of an AI coding assistant (Claude); everything you see and hear in the game comes from the original game files.</p>
+  </section>
+
+  <footer>
+    <p><a href="/">Play webAC</a> · <a href="https://github.com/jakemmarsh/webac">Source code (AGPL-3.0)</a> · <a href="https://github.com/jakemmarsh/webac/issues">Report a bug</a></p>
+    <p>Asheron's Call is a trademark of its owners. webAC is a fan project, not affiliated with, endorsed by or sponsored by WB Games or Turbine.</p>
+  </footer>
+</main>
+</body>
+</html>

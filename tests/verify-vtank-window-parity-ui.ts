@@ -30,7 +30,13 @@ beforeAll(async () => {
   H = await mountGameUI();
   W = await import('../packages/renderer/src/ui/automation/VTankWindow.js');
 });
-afterAll(() => H.teardown());
+// A change's save waits 400 ms (VTankWindow.changed): finish every pending one while the DOM still exists, or
+// its redraw runs after teardown and fails with "document is not defined" (an unhandled error in the 2026-10-12 suite).
+const opened: Array<{ win: InstanceType<typeof W.VTankWindow>; redraw: () => void }> = [];
+afterAll(async () => {
+  for (const o of opened) await o.win.saveNow(o.redraw);
+  H.teardown();
+});
 
 let lastMenu: { items: MenuItem[]; pick: (v: string) => void } | null = null;
 function fakeKit(): VTankKit {
@@ -158,6 +164,7 @@ async function open(doc = docWith(profile())) {
   const body = document.createElement('div');
   const redraw = () => win.render(body, 794, 189, redraw);
   await win.load(redraw);
+  opened.push({ win, redraw });
   const show = (tab: string) => q(body, `[data-vtank-tab="${tab}"]`).click();
   return { ...f, win, body, redraw, windows, mainShown, show };
 }
@@ -483,8 +490,10 @@ describe('§9.6 the status line, the Action History and /vt log', () => {
     ui.tickAutomation();
     q(win, '[data-vtank="history"]').click();
     const hist = H.container.querySelector('[data-vtank-aux="history"]') as HTMLElement;
-    expect(hist.textContent).toContain('Action History');
-    expect(hist.textContent).toContain('[11:00:00] something happened');
+    // The window's text is VVS's (canvas runs, vvsText.ts): read from the runs.
+    const runs = Array.from(hist.querySelectorAll<HTMLElement>('[data-ac-run-text]')).map((e) => e.dataset.acRunText);
+    expect(runs).toContain('Action History');
+    expect(runs).toContain('[11:00:00] something happened');
     q(win, '[data-vtank="remote"]').click();
     expect(ui.automationWindowOpen).toBe(false);
     const remote = H.container.querySelector('[data-vtank-aux="remote"]') as HTMLElement;

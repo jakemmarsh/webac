@@ -178,11 +178,12 @@ export type {
 } from './ConnectionData.js';
 
 // Client connection (browser-side)
-export { ClientConnection, parsePairingReply, parseRoutinesGrant, probeBridgeHealth } from './ClientConnection.js';
-export type { ConnectionEventType, ConnectionEvent, ConnectionListener, BridgeHealth, HealthSocketLike, RoutinesGrant, PairingReply } from './ClientConnection.js';
+export { ClientConnection, parsePairingReply, parseRoutinesGrant, probeBridgeHealth, netErrorPayloadOffset, readServerNetError } from './ClientConnection.js';
+export type { ConnectionEventType, ConnectionEvent, ConnectionListener, BridgeHealth, HealthSocketLike, RoutinesGrant, PairingReply, ServerNetError } from './ClientConnection.js';
 export { hostClientConnection, NET_SNAPSHOT_INTERVAL_MS } from './NetWorker.js';
 export { createConnection } from './createConnection.js';
 export { Connection1999, VERSION_1999 } from './era1999/Connection1999.js';
+export { MAX_CREDENTIALS_1999 } from './era1999/Login1999.js';
 export type { DatPatch1999, DatPatchEvent } from './era1999/Connection1999.js';
 export { ABSENT_1999, absent1999FeatureOfAction, absent1999FeatureOfOpcode } from './era1999/Absent1999.js';
 export { buildFriendsCommand1999, friendsCommand1999Plan, FriendsCommand1999 } from './era1999/codecs/Misc1999.js';

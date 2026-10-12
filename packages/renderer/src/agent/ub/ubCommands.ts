@@ -99,6 +99,8 @@ export interface UbHost {
   tinkerTable(): Promise<TinkerRow[]>;
   currentSeq(): number;
   eventsSince(seq: number): Array<{ seq: number; type: string; text: string }>;
+  /** Open or close UB's Dungeon Maps / Landscape Maps window (ui/maps/UbMaps.ts); the line to print. */
+  toggleMap?(which: 'dungeon' | 'landscape'): string;
 }
 
 /** ACE CharacterOption (retail PlayerOption) codes by UB's PlayerOption names (`/ub playeroption`). */
@@ -426,6 +428,11 @@ export class UbRuntime {
     this.add('tinkcalc', false, '/ub tinkcalc', () => this.tinkcalc());
     this.add('autotinker', false, '/ub autotinker [<salvage>|best] [maxTinks] | start | stop', (_v, a) => this.autotinker(a));
     this.add('getjob', false, '/ub getjob', () => this.getjob());
+
+    // Maps (UB opens these windows from its Decal bar; here by command, or the automation window's Options tab).
+    const map = (which: 'dungeon' | 'landscape') => () => [h.toggleMap?.(which) ?? 'Maps are not available in this client'];
+    this.add('dungeonmaps', false, '/ub dungeonmaps', map('dungeon'));
+    this.add('landscapemaps', false, '/ub landscapemaps', map('landscape'));
   }
 
   /** UB's [l][i][p] suffix flags on use / select. */

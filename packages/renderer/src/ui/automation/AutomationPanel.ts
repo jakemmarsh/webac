@@ -104,7 +104,7 @@ export const MODULES: Array<{ key: ModuleKey; name: string; tab: EditorTab }> = 
 
 /** "/automation" (or "@automation"; "/automation panel" for the docked panel): handled before the retail command table. */
 export function isAutomationCommand(line: string): boolean {
-  return /^[/@]automation(\s+panel)?\s*$/i.test(line.trim());
+  return /^[/@]automation(\s+(panel|bar))?\s*$/i.test(line.trim());
 }
 
 /** One-line summary of what a module does in this profile. */

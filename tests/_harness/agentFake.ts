@@ -157,6 +157,10 @@ export class FakeHost implements AgentHost {
   /** Move the body forward along its facing at run speed while W is held. */
   /** A fixture's collision reach (guid → metres); unset = the host doesn't say. */
   objectReach: ((guid: number) => number) | undefined = undefined;
+  /** Your fellows (the fellowship panel's list); unset = no fellowship. */
+  fellows: AgentHost['fellows'] = undefined;
+  /** The landscape at a global point (open sea, too steep, the wade); unset = the host can't say. */
+  navTerrain: AgentHost['navTerrain'] = undefined;
   /** Optional walls (landblock-local x, y → blocked): the body stops at them, and navProbe sees them. */
   wall: ((x: number, y: number) => boolean) | null = null;
   physics(dtMs: number): void {

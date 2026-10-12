@@ -201,7 +201,7 @@ describe.skipIf(!datPresent)('BUG.academy-stairs-fall-through — the Holtburg a
     const services = {
       dungeonCollision: col, outdoorCollision: col,
       terrain: { getHeightAt: () => null, getTriangleNormalAt: () => null, isWalkable: () => true },
-      water: { cellWaterTypeAt: () => null },
+      water: { blockWaterTypeAt: () => null },
       creatureObstacles: null, defaultPlayerRadius: col.playerRadius, edgeSlide: true, stepDownHeight: 0.6,
     } as never;
     const body: InteriorGroundSources = {

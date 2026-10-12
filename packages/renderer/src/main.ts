@@ -49,7 +49,7 @@ import { InventoryRequestTracker, InventoryRequest, characterOptionIsSet, Object
 import type { AttemptFailedObject } from '@ac/shared';
 import { recordInventoryRequestFromAction, handleAttemptFailed, gateInventoryRequestSend, respondToVendorOpen, type InventoryObjectState } from './inventory/InventoryRequests.js';
 import { smartBoxPhysicsSteps, inventoryRequestRefusalText } from '@ac/shared';
-import { WaterMap, canAttackTarget, canUseTarget, canAddToTrade, canOpenTrade, getPlayerFormula, spellComponentsSatisfied, appropriateSpellFormula, SPELL_COMPONENT_DID_MAPPER_ID, resolveAllegiancePatron, DEFAULT_WEAPON_SPEED, resolveCombatManeuverTableDid } from '@ac/shared';
+import { WaterMap, LandWaterType, canAttackTarget, canUseTarget, canAddToTrade, canOpenTrade, getPlayerFormula, spellComponentsSatisfied, appropriateSpellFormula, SPELL_COMPONENT_DID_MAPPER_ID, resolveAllegiancePatron, DEFAULT_WEAPON_SPEED, resolveCombatManeuverTableDid } from '@ac/shared';
 import { SceneManager } from './scene/SceneManager.js';
 import { CameraController } from './scene/CameraController.js';
 import { CAMERA_DEFAULT_PIVOT_Z, CAMERA_IN_HEAD_Y, TRACK_TARGET_OFFSET_Z, blipResetsViewer, cameraPlayerTranslucency } from './scene/RetailCamera.js';
@@ -149,15 +149,18 @@ import { NextLogin } from './agent/nextLogin.js';
 import { UbRuntime } from './agent/ub/ubCommands.js';
 import { createUbHost } from './agent/ub/ubHost.js';
 import { UbStore } from './agent/ub/ubSettings.js';
+import { UbMaps } from './ui/maps/UbMaps.js';
+import { createUbMapHost } from './ui/maps/ubMapHost.js';
 import type { TinkerRow } from './agent/ub/tinker.js';
 import { checkSpell, spellCheckText } from './agent/metaSpellCheck.js';
 import { TidyPass, clearBugged } from './agent/macro/inventoryUpkeep.js';
 import { gatherLoadout } from './agent/macro/defaultLoadout.js';
 import { NavLinesOverlay, routeNavPoints } from './scene/NavLines.js';
+import { NametagAssessQueue, NametagOverlay, chooseNametags, nametagAllegiance, nametagAppraisal, nametagBaseType, nametagNeedsAssess, nametagObjectHeight, nametagTextCanvas, nametagTextureFromCanvas, readNametagSettings, type NametagSource } from './scene/Nametags.js';
 import { exposeDebugGlobal, readDebugGlobal, debugBag, debugGlobalsEnabled } from './utils/debugGlobals.js';
 import { resolveUrlLogin } from './launcher/urlLogin.js';
 import { urlOverridesEnabled } from './config/urlOverrides.js';
-import { bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, worldBoxName } from './launcher/worldDirectory.js';
+import { bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, worldBoxName, type World } from './launcher/worldDirectory.js';
 import { worldKeyOf } from './launcher/launcherStorage.js';
 import { EOR_ERA_ID, eraProfile, string16WireFor, type DatRole, type EraProfile } from './era/EraProfiles.js';
 import { eraClientRules, unsupportedFeatures, type EraFeature } from './era/EraFeatures.js';
@@ -340,7 +343,7 @@ import {
   victimOrKillerLine, playerKilledLine, transientStringLine, channelIndexLines, channelListLines,
   tradeClosedLine, allegianceLoginLine, confirmationRequestText} from './ui/ServerMessageText.js';
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED } from './ui/WeenieErrorNotices.js';
-import { connectionLostText, characterErrorNotice, netErrorNotice, linkSampleIsDead } from './ui/ConnectionNotices.js';
+import { connectionLostText, characterErrorNotice, netErrorNotice, serverNetErrorNotice, linkSampleIsDead, NET_ERROR_STRING_TABLE, type ConnectionNotice } from './ui/ConnectionNotices.js';
 import { CharacterError, runExpr } from '@ac/shared';
 import { DatLightBudget, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
 import { createViewerLight, updateViewerLight, viewerLightActive } from './effects/ViewerLight.js';
@@ -1449,8 +1452,11 @@ async function main() {
   // itself was dead code (confirmed by cross-checking every getString id
   // literal in GameUI.ts against all 15 client_local_English.dat 0x23
   // string tables: 13 ids resolved only via table 3/5, 0 via 4/6-10).
+  // 0x23000010 (NET_ERROR_STRING_TABLE, StringInfo table enum 8) holds the
+  // ID_ConnectionError_* / ID_NetError_* texts the connection-failure
+  // dialogs show, including a server NetError's (GDLE "Client logon failed").
   if (langDb) {
-    for (const stringTableId of [0x23000001, 0x23000002, 0x23000003, 0x23000005, 0x2300000d, 0x2300000e]) {
+    for (const stringTableId of [0x23000001, 0x23000002, 0x23000003, 0x23000005, 0x2300000d, 0x2300000e, NET_ERROR_STRING_TABLE]) {
       try {
         const strData = langDb.getFileData(stringTableId);
         if (strData) {
@@ -7144,6 +7150,8 @@ async function main() {
   let connectUrl = urlLogin.server ? bridgeUrlWithServer(bridgeUrl, urlLogin.server) : bridgeUrl;
   /** The launcher world's name for the World box (null: the server's own ServerName). */
   let launcherWorldName: string | null = null;
+  /** The launcher world (null: URL login or an era reload): its registration note explains a login timeout. */
+  let launcherWorld: World | null = null;
 
   // ── Update notifier (update/UpdateWatcher.ts) ──
   // A new deploy reloads at a natural break: on the launcher before a
@@ -7242,6 +7250,7 @@ async function main() {
       acePassword = choice.password;
       connectUrl = choice.connectUrl;
       launcherWorldName = worldBoxName(choice.world);
+      launcherWorld = choice.world;
       // An end-of-retail world on GDL / GDLE reads strings as Windows-1252, not ACE's UTF-8.
       const wire = string16WireFor(activeEra, choice.world.emu);
       setString16Wire(wire);
@@ -7482,14 +7491,16 @@ async function main() {
    * OK returns a launcher login to the launcher, and relaunches the connect
    * cycle for a URL login (connectionFailureRecovery).
    */
-  const raiseNetError = (token: string): void => {
-    const notice = netErrorNotice(token);
-    console.warn(`[AC] ACE: connection failure ${token}: "${notice.text}"`);
+  const raiseNetError = (notice: ConnectionNotice): void => {
+    console.warn(`[AC] ACE: connection failure ${notice.token || `0x${notice.stringId.toString(16)}`}: "${notice.text}"`);
+    // A login that timed out, or that the server refused (GDLE's
+    // STR_LOGIN_FAILED NetError), on a register-first world: say so, with the link.
+    const text = loginFailureText(notice, launcherWorld, gameStarted);
     if (connectionFailureRecovery({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
-      returnToLauncher(notice.text);
+      returnToLauncher(text);
       return;
     }
-    gameUI.showMessageDialog(notice.text, relaunchConnectCycle);
+    gameUI.showMessageDialog(text, relaunchConnectCycle);
   };
   // BUG.auto-enter-timer-stale-character-race — a CharacterDelete on the
   // auto-entered slot makes ACE send a second, later CharacterList
@@ -13260,7 +13271,13 @@ async function main() {
       // UtilityBelt's aliases (agent/ub/aliases.ts), where the automation is (as /ub itself): an "eat" alias keeps the line.
       if (gameUI.automationAvailable && ubRuntime?.onChatSend(message)) return;
       if (gameUI.automationAvailable && VT_COMMAND.test(message)) { gameUI.automationCommand(message); return; }
-      if (gameUI.automationAvailable && isAutomationCommand(message)) { if (/\bpanel\s*$/i.test(message)) gameUI.toggleAutomationPanel(); else gameUI.toggleAutomationWindow(); return; }
+      if (gameUI.automationAvailable && isAutomationCommand(message)) {
+        // /automation bar shows or hides Virindi Views' bar (automation/VvsBar.ts).
+        if (/\bpanel\s*$/i.test(message)) gameUI.toggleAutomationPanel();
+        else if (/\bbar\s*$/i.test(message)) gameUI.addSystemMessage(gameUI.toggleVvsBar(), chatColorFor(ChatMessageType.System), ChatMessageType.System);
+        else gameUI.toggleAutomationWindow();
+        return;
+      }
       retailCommands.onChatCommand(message, gameUI.commandSourceWindowId ?? MAIN_CHAT_WINDOW_ID);
     };
 
@@ -15718,6 +15735,7 @@ async function main() {
           const held = playerState.inventory.getAll().filter((i) => !wornIds.has(i.id >>> 0)).map((i) => ({
             // A container or a RequiresPackSlot item (a pack, a focus) at the top level sits in the side pack slots, not the main pack.
             guid: i.id >>> 0, name: i.name, where: (!i.containerId || i.containerId === aceCharGuid) && heldIsContainer(i) ? 'pack slots' : packName(i.containerId), ...(i.stackSize > 1 ? { stack: i.stackSize } : {}), value: i.value, burden: i.burden,
+            ...(i.containerId && i.containerId !== aceCharGuid ? { inside: i.containerId >>> 0 } : {}),
             ...((i.itemType ?? serverObjectManager?.getObject(i.id >>> 0)?.itemType) ? { type: itemTypeLabel((i.itemType ?? serverObjectManager?.getObject(i.id >>> 0)?.itemType)!), itemType: (i.itemType ?? serverObjectManager?.getObject(i.id >>> 0)?.itemType)! } : {}),
             // Where it could be worn or wielded (its ValidLocations), so an upgrade in the pack is visible.
             ...(i.validLocations ? { fits: slotNames(i.validLocations) } : {}),
@@ -15916,7 +15934,7 @@ async function main() {
           const v = gameUI['vendorData'];
           return {
             name: v.name, guid: v.vendorGuid >>> 0, currency: v.altCurrencyName ?? 'Pyreals',
-            items: v.buyItems.filter((i) => i.guid).map((i) => ({ guid: i.guid! >>> 0, name: i.name, price: i.price, ...(i.stackSize && i.stackSize > 1 ? { stack: i.stackSize } : {}) })),
+            items: v.buyItems.filter((i) => i.guid).map((i) => ({ guid: i.guid! >>> 0, name: i.name, price: i.price, ...(i.stackSize && i.stackSize > 1 ? { stack: i.stackSize } : {}), ...((i.itemType ?? 0) & ItemType.Service ? { service: true } : {}) })),
           };
         },
         // The vendor bar's Buy / Sell buttons send their whole list in one message (onBuyList / onSellList).
@@ -15980,6 +15998,14 @@ async function main() {
           const w = toWorld(x, y);
           const f = inDungeon ? services.dungeonGroundAt?.(w.x, w.z, fromZ + 0.05) : services.groundAt?.(w.x, w.z, fromZ + 0.05);
           return f ?? null;
+        },
+        // What's in the way, for the walk's answers (AgentApi.wayBlocker): open sea (a landblock all of deep water,
+        // CObjCell::get_block_water_type), unclimbable terrain (TerrainCollision.isWalkable), the wade there.
+        navTerrain: (x, y) => {
+          if (playerInDungeon) return null;
+          const height = terrainCollision.getHeightAt(x, y);
+          if (height === null) return null;
+          return { sea: waterMap.blockWaterTypeAt(x, y) === LandWaterType.EntirelyWater, steep: !terrainCollision.isWalkable(x, y), wade: waterMap.waterDepthAt(x, y), height };
         },
         navAirStep: (from, dx, dy) => {
           const { inDungeon, toWorld, toGlobal, services } = agentNav();
@@ -16092,6 +16118,30 @@ async function main() {
       };
       const metaHost = vtankExprHost(agentApi, agentApi.routine, (text) => agentApi.routine.echo(text), metaGame);
       // UtilityBelt's /ub (docs/vtank-parity-gaps.md §11): every action through the agent API; what it lacks, here.
+      const ubStore = new UbStore(() => (worldCharacterName ? { server: launcherWorldName ?? '', character: worldCharacterName } : null), () => { try { return globalThis.localStorage ?? null; } catch { return null; } });
+      // UB's Dungeon Maps and Landscape Maps (ui/maps/UbMaps.ts): opt-in windows over the era's own DATs and world.
+      const ubMaps = new UbMaps(createUbMapHost({
+        self: () => agentHost.self(),
+        objects: () => agentHost.objects(),
+        icon: (guid) => serverObjectManager?.getObject(guid)?.iconId || undefined,
+        interiorCells: (lb) => dungeonRenderer.findInteriorCells(lb),
+        cellGeometry: (id) => envCellRenderer.getCellCollisionData(id),
+        envCellFlags: (id) => envCellRenderer.loadEnvCell(id)?.flags ?? null,
+        ensureLandblock: worldStreamingDats ? (lb) => worldStreamingDats!.closure.ensureLandblock((lb >>> 16) & 0xffff) : undefined,
+        cellFile: (id) => cellDb.getFileData(id),
+        region: () => regionDesc,
+        textureRgba: (id) => textureManager.getRGBA(id)?.data ?? null,
+        era: () => (activeEra.login.protocol === 'ac1999' ? 'ac1999' : activeEra.id === EOR_ERA_ID ? 'eol' : 'dm'),
+        navRoute: (lb) => {
+          const want = gameUI.automationNavLines();
+          if (!want) return null;
+          const ox = ((lb >>> 24) & 0xff) * 192; const oy = ((lb >>> 16) & 0xff) * 192;
+          const pts = routeNavPoints(want.route, parseMapCoords, (gx, gy) => ({ x: gx - ox, z: gy - oy }));
+          return { points: pts.map((p) => ({ x: p.x, y: p.z, z: p.y })), loops: want.route.mode === 'circular' || want.route.mode === 'linear', current: want.current };
+        },
+      }), gameUI.ubMapUi(), ubStore);
+      gameUI.setUbMaps(ubMaps);
+      gameUI.setUbSettings(ubStore);
       ubRuntime = new UbRuntime(createUbHost(agentApi, {
         print: (text) => gameUI.addSystemMessage(`[UB] ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System),
         chat: (line) => gameUI.callbacks.onChatSend?.(line),
@@ -16132,7 +16182,8 @@ async function main() {
           const mod = k === 'ac1999' ? await import('./agent/ub/tinker/ac1999.ts') : k === 'eol' ? await import('./agent/ub/tinker/eol.ts') : await import('./agent/ub/tinker/dm.ts');
           return JSON.parse(mod.default) as TinkerRow[];
         },
-      }), new UbStore(() => (worldCharacterName ? { server: launcherWorldName ?? '', character: worldCharacterName } : null), () => { try { return globalThis.localStorage ?? null; } catch { return null; } }), questTracker);
+        toggleMap: (which) => ubMaps.toggle(which),
+      }), ubStore, questTracker);
       agentApi.routine.expressions = vtankExpressions(metaHost);
       relaySurface = agentApi.surface() as unknown as Record<string, unknown>;
       // ac_status also says who has control (the tab's ClaudeControl).
@@ -16193,6 +16244,7 @@ async function main() {
           propertyDump: () => agentApi.routine.propertyDump(),
           setNearestWaypoint: () => agentApi.routine.setNearestWaypoint(),
           cancelForceBuff: () => agentApi.routine.cancelForceBuff(),
+          lootThis: () => agentApi.routine.lootThis(),
           // The era's own tables decide which controls exist (no Summoning / Void Magic in Dark Majesty or AC1999).
           hasSkill: (name) => (playerSkillTable ? [...playerSkillTable.skills.values()].some((s) => s.name.toLowerCase() === name.toLowerCase()) : undefined),
           hasSpell: (id) => (spellTable ? spellTable.spells.has(id) : undefined),
@@ -16865,7 +16917,7 @@ async function main() {
             }
             break;
           }
-          if (event.netErrorId) {
+          if (event.netErrorId || event.serverNetError) {
             // A resume attempt that couldn't connect: the next one, or the
             // Disconnected screen once the budget is spent.
             if (sessionLifecycle.resumingAfterDrop) {
@@ -16875,7 +16927,12 @@ async function main() {
             // CORE.17.k.b — a client-side connection failure: the bridge
             // socket never opened (ID_NetError_CantSocket) or the login
             // request budget ran out (ID_ConnectionError_ClientTimedOutServer).
-            raiseNetError(event.netErrorId);
+            // RELEASE.gdle-login-neterror — or the server refused the login
+            // with a NetError (ClientNet::EndState @ 00543380), e.g. GDLE's
+            // STR_LOGIN_FAILED = "Client logon failed".
+            raiseNetError(event.serverNetError
+              ? serverNetErrorNotice(event.serverNetError.stringId, event.serverNetError.tableId)
+              : netErrorNotice(event.netErrorId!));
             break;
           }
           // Anything else (a WebSocket error on a live socket) is followed by
@@ -17297,6 +17354,9 @@ async function main() {
     // keys in combat. The client conveniences below only get a key no active
     // map binds.
     const code = eventToCode(e);
+    // The automation hotkeys (the VHS-style window, ui/automation/vhsHotkeys.ts): a Set waiting
+    // for its key, or a hotkey's key. A key retail binds stays retail's.
+    if (gameUI.automationHotkey(code, e.repeat)) { e.preventDefault(); return; }
     syncActiveInputMaps();
     // A modifier chord with no binding of its own answers as the bare key
     // (KeybindRegistry.resolveOrBare: Shift+1 casts slot 1 while walking).
@@ -17480,10 +17540,75 @@ async function main() {
     );
   }
 
+  // UtilityBelt's Nametags (scene/Nametags.ts): off unless /ub opt set Nametags.Enabled true. The setting is
+  // read four times a second (nothing else runs while off); on, tags are chosen then and only follow their objects per frame.
+  const nametags = new NametagOverlay(sceneManager.scene, (text, css) => {
+    const canvas = nametagTextCanvas(text, css);
+    return canvas ? nametagTextureFromCanvas(canvas) : null;
+  });
+  const nametagAssess = new NametagAssessQueue();
+  // The object's drawn height, measured once: the tag goes over whichever is higher, it or the physics height.
+  // A Sparring Golem's physics cylinder is lower than its trunk, and the tag hung inside it, hidden (2026-10-12).
+  const nametagHeights = new Map<number, number>();
+  const nametagBox = new THREE.Box3();
+  const nametagMeshHeight = (guid: number, mesh: THREE.Object3D): number => {
+    let h = nametagHeights.get(guid);
+    if (h === undefined) {
+      nametagBox.setFromObject(mesh);
+      // Not drawn yet (its parts still loading): no height to keep; measured again next time.
+      if (nametagBox.isEmpty()) return 0;
+      h = Math.max(0.3, nametagBox.max.y - mesh.getWorldPosition(nametagTmp).y);
+      nametagHeights.set(guid, h);
+    }
+    return h;
+  };
+  let nametagsAt = 0;
+  let nametagsOn = false;
+  // World positions: the tags hang in the scene's root, and an object's mesh may sit under an offset parent
+  // (a dungeon's group), so its .position is not where it is drawn (no tag showed in the training hall, 2026-10-12).
+  const nametagTmp = new THREE.Vector3();
+  const nametagPos = (guid: number): { x: number; y: number; z: number } | null => {
+    const m = serverObjectManager?.getObject(guid)?.mesh;
+    return m && m.visible ? m.getWorldPosition(nametagTmp) : null;
+  };
+  function updateNametags(now: number): void {
+    if (now - nametagsAt >= 250) {
+      nametagsAt = now;
+      const store = gameUI.automationAvailable ? ubRuntime?.store : null;
+      const settings = store && store.get('Nametags.Enabled') === true ? readNametagSettings((n) => store.get(n)) : null;
+      nametagsOn = !!settings && !!serverObjectManager && !gameUI.worldHiddenByPortalSpace && !teleportBusy.value;
+      if (!nametagsOn || !settings || !serverObjectManager) { nametags.clear(); if (!settings) nametagAssess.clear(); return; }
+      const sources: NametagSource[] = [];
+      for (const o of serverObjectManager.getAllObjects().values()) {
+        if (!o.mesh?.visible || o.wielderId) continue;
+        const base = nametagBaseType(o.itemType, o.objectDescFlags, o.petOwner);
+        if (!base) continue;
+        const p = o.mesh.getWorldPosition(nametagTmp);
+        sources.push({ guid: o.guid, name: o.name, base, x: p.x, y: p.y, z: p.z, height: nametagObjectHeight(o.collisionHeight, nametagMeshHeight(o.guid, o.mesh)), appraisal: nametagAppraisal(agentAppraisals.get(o.guid >>> 0)) });
+      }
+      // Distances in the same (world) frame as the tags: from your own mesh where there is one.
+      const selfMesh = serverObjectManager.getObject(aceCharGuid ?? myPlayerGuid ?? 0)?.mesh;
+      const sp = selfMesh?.getWorldPosition(new THREE.Vector3());
+      const me = sp ? { x: sp.x, y: sp.y, z: sp.z } : { x: playerWorldX, y: playerFeetY, z: playerWorldZ };
+      const chosen = chooseNametags(sources, settings, me, aceCharGuid ?? myPlayerGuid ?? 0, nametagAllegiance(gameUI['allegianceInfo']));
+      // UB's Assessor: what lacks a level or a destination is appraised quietly (no Examine window), paced per object.
+      for (const e of chosen) {
+        const src = sources.find((s) => s.guid === e.guid)!;
+        if (!nametagNeedsAssess(src.base, src.appraisal, agentAppraisals.has(e.guid >>> 0))) continue;
+        if (!nametagAssess.want(e.guid, e.dist, now)) continue;
+        quietAppraisals.add(e.guid >>> 0);
+        sendIdentifyAction?.(e.guid, true);
+      }
+      nametags.setTags(chosen);
+      nametags.follow(nametagPos); // new tags go to their objects now, not a frame at the origin
+    }
+    if (nametagsOn) nametags.follow(nametagPos);
+  }
+
   /** One frame of the game; `draw` false runs everything but the 3D draw (the background beat). */
   function frameStep(draw: boolean) {
     const now = performance.now();
-    if (draw) updateNavLines(now);
+    if (draw) { updateNavLines(now); updateNametags(now); }
     if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(); }
     const dt = (now - lastTime) / 1000;
     lastTime = now;

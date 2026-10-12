@@ -50,7 +50,7 @@ bash tools/ac1999/start-ac1999.sh status|stop|reset
 | Server news / MOTD | ours (`tools/ac1999/servernews.txt`, `motd.txt`), bind-mounted over upstream's |
 | Client prefix | `~/.acjs-ac1999`, installed from `~/Games/AC1999/AC-Retail.iso` (`AC1999_ISO`). Every launch restores the pristine DATs (`AC1999_KEEP_DATS=1` to keep patched ones) |
 | Relay | `tools/retail-client-udp-relay.mjs 9320 127.0.0.1 9310` (the end-of-retail relay, unchanged). `RELAY_CAPTURE` writes JSONL |
-| Accounts | auto-created on first login. `user:password` must fit 19 characters |
+| Accounts | auto-created on first login. `user:password` must fit 19 characters; the launcher says so before connecting (`worldCredentialsBlock`), since past it the login never leaves the page |
 
 None of this touches the ACE, ClassicACE or GDL containers, nor a personal AC1999 checkout's `ac1999-db` on 3307.
 

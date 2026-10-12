@@ -7,8 +7,8 @@
  */
 export const UB_COMMAND_VERBS: readonly string[] = [
   'alias', 'autocram', 'autostack', 'autotinker', 'autovendor', 'breakallegiance', 'calcdamage', 'clearbugged',
-  'close', 'closestportal', 'combatstate', 'count', 'date', 'delay', 'equip', 'events', 'face', 'fellow', 'follow',
-  'getjob', 'give', 'help', 'id', 'ig', 'jump', 'listgvars', 'listpvars', 'listvars', 'login', 'logout', 'magic',
+  'close', 'closestportal', 'combatstate', 'count', 'date', 'delay', 'dungeonmaps', 'equip', 'events', 'face', 'fellow', 'follow',
+  'getjob', 'give', 'help', 'id', 'ig', 'jump', 'landscapemaps', 'listgvars', 'listpvars', 'listvars', 'login', 'logout', 'magic',
   'melee', 'mexec', 'missile', 'myquests', 'opt', 'peace', 'playeroption', 'portal', 'pos', 'prepclick',
   'propertydump', 'quests', 'quit', 'select', 'simplejump', 'swearallegiance', 'tinkcalc', 'use', 'vendor', 'vitae', 'xp',
 ];

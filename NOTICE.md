@@ -31,7 +31,7 @@ function addresses and describes behaviour in prose.
 | [ACViewer](https://github.com/ACEmulator/ACViewer) | GPL-3.0 | Rendering approach for terrain, models and environments |
 | [aclogview](https://github.com/ACEmulator/aclogview) | — | Reference for message layouts (consulted, not copied) |
 | [GDLEnhanced](https://gitlab.com/Scribble/gdlenhanced) | — | Reference for GDLE server behaviour (consulted, not copied) |
-| [UtilityBelt](https://gitlab.com/utilitybelt/utilitybelt) | MIT (its README) | The `/ub` commands, AutoVendor, equipment profiles, AutoXp, aliases and game events, the quest tracker and tinkering calculator, ported to TypeScript from 5fe9825a (`packages/renderer/src/agent/ub/`) |
+| [UtilityBelt](https://gitlab.com/utilitybelt/utilitybelt) | MIT (its README) | The `/ub` commands, AutoVendor, equipment profiles, AutoXp, aliases and game events, the quest tracker and tinkering calculator, and Nametags, ported to TypeScript from 5fe9825a (`packages/renderer/src/agent/ub/`, `packages/renderer/src/scene/Nametags.ts`); its Dungeon Maps and Landscape Maps windows, settings and town list (`packages/renderer/src/ui/maps/`, `tools/build-map-markers.ts`); its main window's layout (`packages/renderer/src/ui/automation/UbMainWindow.ts`) and its icon, `Resources/icons/utilitybelt.png` (`ubIcon.ts`) |
 | [three.js](https://threejs.org/) | MIT | 3D rendering |
 | [ws](https://github.com/websockets/ws) | MIT | WebSocket server in the bridge |
 

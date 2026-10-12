@@ -7,9 +7,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import {
-  bridgeHttpOrigin, loadWorldDirectory, connectUrlFor, worldEnterBlock, parseCustomBridge, worldFromEntry,
+  bridgeHttpOrigin, loadWorldDirectory, connectUrlFor, worldCredentialsBlock, worldEnterBlock, parseCustomBridge, worldFromEntry,
   localWorld, bridgeUrlWithServer, worldBoxName, LOCAL_WORLD_NAME, type World,
-  eraIdFrom, probeBridgeEra,
+  eraIdFrom, probeBridgeEra, loginTimeoutText, worldRegistrationText,
 } from '../packages/renderer/src/launcher/worldDirectory';
 import {
   loadRememberedLogin, saveRememberedLogin, worldKeyOf, LAUNCHER_STORAGE_KEY,
@@ -28,7 +28,7 @@ function listed(over: Partial<World> = {}): World {
   return {
     id: 'c0ldeve', name: 'Coldeve', emu: 'ACE', type: 'PvE', description: 'A PvE server.', website: null,
     discord: 'https://discord.gg/x', online: true, population: 691, compat: 'ok', compatNote: null,
-    registration: null, kind: 'listed', era: null, ...over,
+    registration: null, registrationUrl: null, kind: 'listed', era: null, ...over,
   };
 }
 
@@ -83,6 +83,34 @@ describe('world directory', () => {
     expect(worldFromEntry({ id: 'x', compat: 'weird' })?.compat).toBe('ok');
   });
 
+  it('register-first worlds: the row keeps its registration note and an http(s) registration link only', () => {
+    const reef = worldFromEntry({
+      id: 'a7502ac9-0cec-4caf-b81c-b3eb40a4689a', name: 'Reefcull', emu: 'GDL', compat: 'beta',
+      registration: 'Register on the Reefcull website first (lower-case names only).',
+      registrationUrl: 'http://reefcull.gdleac.com/',
+    })!;
+    expect(reef.registration).toBe('Register on the Reefcull website first (lower-case names only).');
+    expect(reef.registrationUrl).toBe('http://reefcull.gdleac.com/');
+    expect(worldFromEntry({ id: 'x', registrationUrl: 'javascript:alert(1)' })?.registrationUrl).toBeNull();
+    // An older bridge sends no registrationUrl at all.
+    expect(worldFromEntry({ id: 'x', registration: 'Ask in Discord' })).toMatchObject({ registration: 'Ask in Discord', registrationUrl: null });
+    expect(localWorld().registrationUrl).toBeNull();
+    // A link without text gets the launcher's own line.
+    expect(worldRegistrationText({ name: 'Harvestbud', registration: null, registrationUrl: 'http://harvestbud.gdleac.com/' }))
+      .toBe('Register on the Harvestbud website first.');
+    expect(worldRegistrationText(listed())).toBeNull();
+  });
+
+  it('a login timeout on a register-first world says to register, with the link; other worlds keep the plain text', () => {
+    const base = 'Client timed out the connection';
+    const reef = listed({ name: 'Reefcull', registration: 'Register on the Reefcull website first.', registrationUrl: 'http://reefcull.gdleac.com/' });
+    expect(loginTimeoutText(base, reef)).toBe(
+      'Client timed out the connection\n\nNew account? Register on the Reefcull website first. http://reefcull.gdleac.com/');
+    expect(loginTimeoutText(base, listed())).toBe(base);
+    expect(loginTimeoutText(base, null)).toBe(base);
+    expect(loginTimeoutText(base, listed({ registration: 'Register in our Discord first.' }))).toBe(`${base}\n\nNew account? Register in our Discord first.`);
+  });
+
   it('an unreachable bridge throws (the launcher shows the error)', async () => {
     await expect(loadWorldDirectory(BRIDGE, fakeFetch({ 'https://bridge.example.org/healthz': new Error('offline') }))).rejects.toThrow();
     await expect(loadWorldDirectory('nonsense', fakeFetch({}))).rejects.toThrow(/not a bridge URL/);
@@ -96,6 +124,17 @@ describe('world directory', () => {
     expect(bridgeUrlWithServer('ws://localhost:9095/connect?server=old', 'new id')).toBe('ws://localhost:9095/connect?server=new+id');
     expect(worldBoxName(listed())).toBe('Coldeve');
     expect(worldBoxName(localWorld())).toBeNull();
+  });
+
+  it('ENTER gate: AC1999 credentials must fit the 1999 login field (18 characters together)', () => {
+    const a99 = listed({ name: 'AC1999', era: 'ac1999-retail' });
+    expect(worldCredentialsBlock(a99, 'player1', 'hunter12345')).toBeNull(); // 7 + 11 = 18
+    expect(worldCredentialsBlock(a99, 'player1', 'hunter123456')).toBe(
+      "AC1999 uses the 1999 login, which fits an account name and password of 18 characters together. Yours are 19. Use a shorter account name or password.");
+    // Other eras have no such limit: end of retail and a classic (Dark Majesty) world.
+    expect(worldCredentialsBlock(listed(), 'a'.repeat(30), 'b'.repeat(30))).toBeNull();
+    expect(worldCredentialsBlock(listed({ name: 'Seedsow', era: 'classic-dereth' }), 'a'.repeat(30), 'b'.repeat(30))).toBeNull();
+    expect(worldCredentialsBlock(null, 'a'.repeat(30), 'b')).toBeNull();
   });
 
   it('ENTER gate: incompatible and offline worlds explain instead of connecting', () => {
@@ -437,6 +476,65 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     await Promise.resolve();
     expect(choice?.world.name).toBe('Coldeve');
     expect(choice?.account).toBe('probe');
+  });
+
+  it('a register-first world shows its registration line and a Register link to the page, in a new tab', async () => {
+    const k = makeKit();
+    const reef = listed({
+      id: 'reef', name: 'Reefcull', emu: 'GDL', discord: 'https://discord.gg/3ngsm6e',
+      registration: 'Register on the Reefcull website first (lower-case names only).',
+      registrationUrl: 'http://reefcull.gdleac.com/',
+    });
+    const cold = listed();
+    const screen = new mod.LauncherScreen(k.kit, {
+      bridgeUrl: BRIDGE, storage: new MemStorage(), loadDirectory: async () => ({ mode: 'multi', worlds: [reef, cold] }),
+    });
+    void screen.run();
+    await screen.loaded;
+    expect(screen.selectedWorld.name).toBe('Reefcull');
+    const reg = k.mount.querySelector('a.launcher-register') as HTMLAnchorElement;
+    expect(reg).not.toBeNull();
+    expect(reg.getAttribute('href')).toBe('http://reefcull.gdleac.com/');
+    expect(reg.target).toBe('_blank');
+    expect(reg.rel).toBe('noopener noreferrer');
+    const lines = [...reg.children].map((el) => el.textContent);
+    expect(lines.length).toBeLessThanOrEqual(2); // fits the details box; joined below, so never cut short
+    expect(lines.join(' ')).toBe('Register on the Reefcull website first (lower-case names only).');
+    const links = [...k.mount.querySelectorAll('.launcher-links a')] as HTMLAnchorElement[];
+    expect(links.map((a) => [a.textContent, a.getAttribute('href'), a.target, a.rel])).toEqual([
+      ['Register', 'http://reefcull.gdleac.com/', '_blank', 'noopener noreferrer'],
+      ['Discord', 'https://discord.gg/3ngsm6e', '_blank', 'noopener noreferrer'],
+    ]);
+    // The first-login line does not show for it; a world without registration keeps it.
+    expect(k.mount.querySelector('.launcher-details-body')?.textContent).not.toMatch(/Most worlds create your account/);
+    screen.select(cold);
+    expect(k.mount.querySelector('a.launcher-register')).toBeNull();
+    expect(k.mount.querySelector('.launcher-hint')?.textContent).toMatch(/^New here\? Most worlds/);
+  });
+
+  it('ENTER on AC1999 with credentials over the 1999 field explains instead of connecting, then enters once shortened', async () => {
+    const k = makeKit();
+    const screen = new mod.LauncherScreen(k.kit, {
+      bridgeUrl: BRIDGE, prefillAccount: 'longaccountname', storage: new MemStorage(),
+      loadDirectory: async () => ({ mode: 'multi', worlds: [listed({ id: 'ac1999', name: 'AC1999', era: 'ac1999-retail' })] }),
+    });
+    let choice: any = null;
+    void screen.run().then((c: unknown) => { choice = c; });
+    await screen.loaded;
+    const password = k.mount.querySelector('.launcher-password') as HTMLInputElement;
+    password.value = 'longpassword';
+    (k.mount.querySelector('.launcher-enter') as HTMLElement).click();
+    await Promise.resolve();
+    expect(k.messages).toEqual([
+      'AC1999 uses the 1999 login, which fits an account name and password of 18 characters together. Yours are 27. Use a shorter account name or password.',
+    ]);
+    expect(choice).toBeNull();
+    (k.mount.querySelector('.launcher-account') as HTMLInputElement).value = 'short';
+    password.value = 'pw1234';
+    (k.mount.querySelector('.launcher-enter') as HTMLElement).click();
+    await Promise.resolve();
+    expect(choice?.world.name).toBe('AC1999');
+    expect(choice?.account).toBe('short');
   });
 
   it('ENTER before the list loads still asks for a missing password first', async () => {

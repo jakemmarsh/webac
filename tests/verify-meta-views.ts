@@ -94,7 +94,8 @@ describe('GameUI draws a meta view', () => {
     const clicks: string[] = [];
     ui.openMetaView('panel', parseMetaView(WIKI)!, (b) => clicks.push(b.name));
     const win = H.container.querySelector('[data-meta-view="panel"]') as HTMLElement;
-    expect(win.textContent).toContain('Test View');
+    // VVS's text is canvas runs (vvsText.ts): the title is read from its run.
+    expect(win.querySelector('[data-ac-run-text="Test View"]')).not.toBeNull();
     const b2 = win.querySelector('[data-meta-view-button="btnTest2"]') as HTMLElement;
     expect([b2.style.left, b2.style.top, b2.style.width]).toEqual(['20px', '40px', '50px']);
     b2.click();
@@ -112,7 +113,8 @@ describe('GameUI draws a meta view', () => {
     expect(ui2.metaViewHasControl('gone', 'btnTest1')).toBe(false);
     const b1 = H.container.querySelector('[data-meta-view="panel"] [data-meta-view-button="btnTest1"]') as HTMLElement;
     expect(ui2.setMetaViewLabel('panel', 'btnTest1', 'Stop')).toBe(true);
-    expect(b1.textContent).toBe('Stop');
+    expect(b1.dataset.button).toBe('Stop');
+    expect(b1.querySelector('[data-ac-run-text]')?.getAttribute('data-ac-run-text')).toBe('Stop');
     expect(b1.isConnected).toBe(true);
     expect(ui2.setMetaViewLabel('panel', 'nope', 'x')).toBe(false);
     ui.closeMetaView('panel');

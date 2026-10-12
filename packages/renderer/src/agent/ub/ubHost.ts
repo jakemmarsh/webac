@@ -32,6 +32,8 @@ export interface UbHostExtras {
   charInt(id: number): number | undefined;
   eraLacks(feature: string): string | null;
   tinkerTable(): Promise<TinkerRow[]>;
+  /** UB's map windows (ui/maps/UbMaps.ts). */
+  toggleMap?(which: 'dungeon' | 'landscape'): string;
 }
 
 export function createUbHost(api: AgentApi, x: UbHostExtras): UbHost {
@@ -104,6 +106,7 @@ export function createUbHost(api: AgentApi, x: UbHostExtras): UbHost {
     tinkerTable: x.tinkerTable,
     currentSeq: () => api.currentSeq(),
     eventsSince: (seq) => api.eventsSince(seq),
+    toggleMap: x.toggleMap,
   };
 }
 

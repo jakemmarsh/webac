@@ -61,12 +61,27 @@
  *    `MessageBoxW`; `Client::Run` @ 004117b0 then returns without entering
  *    the loop — the client exits after the box is dismissed.
  *
+ *  - **Server NetError during logon → the same error box.** A NetError
+ *    optional header (flag 0x00100000, `NetError::UnPack @ 004114a0`: u32
+ *    string id, u32 string-table enum) inside the logon context goes to
+ *    `ClientNet::EndState @ 00543380` (`ProcessOptionalHeader @ 005451a0`),
+ *    which fails the logon with that error, and `Client::Init` shows its
+ *    StringInfo text through PopupError like the client-side ones. Outside
+ *    the logon context it is LogOffServer + ServerDied.
+ *
  * ACE never sends the NetError optional headers (it only honours
- * PacketHeaderFlags.NetErrorDisconnect on receive, NetworkSession.cs:325), so
- * the 0x23000010 family only ever arises client-side for us too.
+ * PacketHeaderFlags.NetErrorDisconnect on receive, NetworkSession.cs:318).
+ * GDLE / ClassicDereth do: a refused LoginRequest is answered with
+ * `CNetwork::SendConnectLoginFailure` (reference/classic/ClassicDereth/
+ * Source/Network.cpp: BT_NETERROR, {error, ST_SERVER_ERRORS = 8}), the
+ * error one of STR_LOGIN_FAILED 0x04DF9C54, STR_LOGIN_SERVER_FULL,
+ * STR_LOGIN_CLIENT_VERSION, STR_LOGIN_ACCOUNT_ONLINE, STR_LOGIN_INVALID_AUTH
+ * (NetworkDefs.h). Each is the compute_str_hash of an ID_ConnectionError_*
+ * token in table 0x23000010 — 0x04DF9C54 = "ID_ConnectionError_ClientLogOnFailed"
+ * = "Client logon failed" — so table enum 8 is that table.
  */
 
-import { acStringHash, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
+import { acStringHash, getString, getStringFromTable } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { CharacterError, characterErrorMessage } from '@ac/shared';
 
 /** CPlayerSystem::UseTime — seconds since the last packet before ServerDied (0x7cc5c8). */
@@ -211,11 +226,59 @@ export function connectionLostText(): string {
 /** The ID_ConnectionError_* / ID_NetError_* text for a token (DAT first, documented fallback second). */
 export function netErrorNotice(token: string): ConnectionNotice {
   const stringId = acStringHash(token);
-  const text = getString(stringId) ?? NET_ERROR_FALLBACK[token] ?? NET_ERROR_FALLBACK.ID_ConnectionError_Generic;
+  const text = getStringFromTable(NET_ERROR_STRING_TABLE, stringId) ?? getString(stringId)
+    ?? NET_ERROR_FALLBACK[token] ?? NET_ERROR_FALLBACK.ID_ConnectionError_Generic;
   // Retail: PopupError → MessageBoxW, then Client::Run returns. Ours renders
   // it as the DialogFactory OK message dialog over the connecting screen.
   return Object.freeze({ surface: 'dialog', token, stringId, text });
 }
+
+/**
+ * StringInfo table enums a server NetError names, and the string table each
+ * resolves to: enum 8 (GDLE's ST_SERVER_ERRORS) holds the
+ * ID_ConnectionError_* hashes, which live only in 0x23000010; enum
+ * 0x10000002 is the ID_CHAR_ERROR_* / ID_NetErr_* table.
+ */
+export const NET_ERROR_TABLE_ENUMS: ReadonlyMap<number, number> = new Map([
+  [8, NET_ERROR_STRING_TABLE],
+  [0x10000002, CHAR_ERROR_STRING_TABLE],
+]);
+
+/** compute_str_hash(token) → token, for every ClientNet NetError token. */
+const NET_ERROR_TOKEN_BY_ID: ReadonlyMap<number, string> = new Map(
+  NET_ERROR_TOKENS.map((t) => [acStringHash(t), t] as [number, string]),
+);
+
+/**
+ * The text of a NetError the SERVER sent (string id + table enum, as
+ * `NetError::UnPack` reads them): the table-bound DAT string first, then
+ * the documented wording of the ID_ConnectionError_* token that hashes to
+ * the id. An id no table resolves leaves retail's StringInfo empty
+ * (`StringTable::GetString @ 004300d0` → gsMissingString), which would be a
+ * blank box; ours says ID_ConnectionError_Generic's "There was an error
+ * with this connection" instead, the same fallback as an unknown token.
+ */
+export function serverNetErrorNotice(stringId: number, tableEnum: number): ConnectionNotice {
+  const table = NET_ERROR_TABLE_ENUMS.get(tableEnum);
+  const token = NET_ERROR_TOKEN_BY_ID.get(stringId) ?? '';
+  const text = (table !== undefined ? getStringFromTable(table, stringId) : null)
+    ?? getString(stringId)
+    ?? (token ? NET_ERROR_FALLBACK[token] : undefined)
+    ?? NET_ERROR_FALLBACK.ID_ConnectionError_Generic;
+  return Object.freeze({ surface: 'dialog', token, stringId, text });
+}
+
+/**
+ * The failures a fresh account on a register-first world produces: a world
+ * that answers an unknown account with silence times the login out
+ * (ClientTimedOutServer); GDLE / ClassicDereth refuse it with the
+ * STR_LOGIN_FAILED NetError (ClientLogOnFailed). Both get the world's
+ * registration hint before entering the world.
+ */
+export const LOGIN_REFUSED_TOKENS: ReadonlySet<string> = new Set([
+  'ID_ConnectionError_ClientTimedOutServer',
+  'ID_ConnectionError_ClientLogOnFailed',
+]);
 
 interface CharErrorRow { readonly token: string; readonly surface: ErrorSurface }
 

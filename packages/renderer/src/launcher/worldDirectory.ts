@@ -12,8 +12,9 @@
  * A "Custom…" world is the wss:// URL of a server's own bridge, used as is.
  */
 
-import { probeBridgeHealth } from '@ac/network';
+import { MAX_CREDENTIALS_1999, probeBridgeHealth } from '@ac/network';
 import { eraProfile } from '../era/EraProfiles.js';
+import { LOGIN_REFUSED_TOKENS } from '../ui/ConnectionNotices.js';
 
 export type WorldCompat = 'ok' | 'beta' | 'incompatible';
 
@@ -31,7 +32,10 @@ export interface World {
   population: number | null;
   compat: WorldCompat;
   compatNote: string | null;
+  /** A note for worlds that need an account registered before the first login. */
   registration: string | null;
+  /** Where to register (http/https); the launcher links it. null when unknown. */
+  registrationUrl: string | null;
   kind: 'listed' | 'local' | 'custom';
   /** Custom worlds: the bridge URL to connect to. */
   bridgeUrl?: string;
@@ -66,7 +70,7 @@ export function localWorld(era: string | null = null): World {
     id: null, name: LOCAL_WORLD_NAME, emu: null, type: null,
     description: 'The game server this bridge is pinned to.',
     website: null, discord: null, online: null, population: null,
-    compat: 'ok', compatNote: null, registration: null, kind: 'local', era,
+    compat: 'ok', compatNote: null, registration: null, registrationUrl: null, kind: 'local', era,
   };
 }
 
@@ -107,6 +111,7 @@ export function worldFromEntry(raw: unknown): World | null {
     compat,
     compatNote: str(r.compatNote),
     registration: str(r.registration),
+    registrationUrl: httpUrl(r.registrationUrl),
     kind: 'listed',
     era: eraIdFrom(r.era),
   };
@@ -167,6 +172,55 @@ export function worldEnterBlock(world: World | null): string | null {
 }
 
 /**
+ * Why these credentials can't log into `world`, or null. The 1999 client sends
+ * "account:password" in a 20-byte field (Login1999.ts), so the two together
+ * fit 18 characters; longer, the login was refused before it left the page
+ * and the player read "The account you specified doesn't exist" (2026-10-12).
+ */
+export function worldCredentialsBlock(world: World | null, account: string, password: string): string | null {
+  if (!world?.era || eraProfile(world.era)?.login.protocol !== 'ac1999') return null;
+  const total = account.length + password.length;
+  const max = MAX_CREDENTIALS_1999 - 1;
+  if (total <= max) return null;
+  return `${world.name} uses the 1999 login, which fits an account name and password of ${max} characters together. Yours are ${total}. Use a shorter account name or password.`;
+}
+
+/** The registration line a world carries, in the launcher's words (null: none). */
+export function worldRegistrationText(world: Pick<World, 'name' | 'registration' | 'registrationUrl'>): string | null {
+  if (world.registration) return world.registration;
+  return world.registrationUrl ? `Register on the ${world.name} website first.` : null;
+}
+
+/**
+ * A refused-login failure for a login to `world`: the connection timeout
+ * ("Client timed out the connection", a world that answers an unknown
+ * account with silence) or the server's login-failed NetError ("Client logon
+ * failed", GDLE's STR_LOGIN_FAILED). That is what a new player on a world
+ * that only takes web-registered accounts sees; for those worlds the text
+ * also says to register, and where.
+ */
+export function loginTimeoutText(base: string, world: Pick<World, 'name' | 'registration' | 'registrationUrl'> | null): string {
+  const reg = world ? worldRegistrationText(world) : null;
+  if (!world || !reg) return base;
+  return `${base}\n\nNew account? ${reg}${world.registrationUrl ? ` ${world.registrationUrl}` : ''}`;
+}
+
+/**
+ * The text of a connection-failure dialog (ConnectionNotices'
+ * netErrorNotice / serverNetErrorNotice) for a login to `world`: a refused
+ * login before entering the world (LOGIN_REFUSED_TOKENS: the timeout, or
+ * GDLE's "Client logon failed" NetError) carries the registration hint;
+ * anything else, or anything once in the world, is the notice text alone.
+ */
+export function loginFailureText(
+  notice: { readonly token: string; readonly text: string },
+  world: Pick<World, 'name' | 'registration' | 'registrationUrl'> | null,
+  inWorld: boolean,
+): string {
+  return !inWorld && LOGIN_REFUSED_TOKENS.has(notice.token) ? loginTimeoutText(notice.text, world) : notice.text;
+}
+
+/**
  * A custom (or pinned) bridge's era, so a classic server's own bridge loads
  * the right DATs: its WebSocket "health" answer first (the hosted page's CSP
  * allows wss: to any bridge but not an arbitrary https origin), then its
@@ -215,7 +269,7 @@ export function parseCustomBridge(input: string): { world: World } | { error: st
       id: null, name: u.host, emu: null, type: null,
       description: `Custom bridge ${u.toString()}`,
       website: null, discord: null, online: null, population: null,
-      compat: 'ok', compatNote: null, registration: null, kind: 'custom', bridgeUrl: u.toString(), era: null,
+      compat: 'ok', compatNote: null, registration: null, registrationUrl: null, kind: 'custom', bridgeUrl: u.toString(), era: null,
     },
   };
 }

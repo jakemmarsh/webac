@@ -89,7 +89,7 @@ describe('search and answer-engine basics', () => {
     expect(doc.body.firstElementChild?.id).toBe('game-canvas');
   });
 
-  it('robots.txt allows crawling and names the sitemap, which lists the canonical page', () => {
+  it('robots.txt allows crawling and names the sitemap, which lists the home and about pages', () => {
     const robots = site('robots.txt');
     expect(robots).toMatch(/^User-agent: \*$/m);
     expect(robots).toMatch(/^Allow: \/$/m);
@@ -98,7 +98,10 @@ describe('search and answer-engine basics', () => {
     expect(sitemapUrl).toBe('https://playwebac.com/sitemap.xml');
     const sitemap = new DOMParser().parseFromString(site('sitemap.xml'), 'application/xml');
     const locs = [...sitemap.getElementsByTagName('loc')].map((l) => l.textContent);
-    expect(locs).toEqual([doc.querySelector('link[rel="canonical"]')?.getAttribute('href')]);
+    expect(locs).toEqual([
+      doc.querySelector('link[rel="canonical"]')?.getAttribute('href'),
+      about.querySelector('link[rel="canonical"]')?.getAttribute('href'),
+    ]);
   });
 
   it('llms.txt follows the llmstxt.org shape: H1 name, blockquote summary, link list', () => {
@@ -107,5 +110,43 @@ describe('search and answer-engine basics', () => {
     expect(lines.find((l) => l.startsWith('> '))).toMatch(/Asheron's Call client/);
     expect(lines).toContain('## Links');
     expect(lines.filter((l) => /^- \[[^\]]+\]\(https:\/\/[^)]+\)$/.test(l)).length).toBeGreaterThanOrEqual(3);
+  });
+
+  // SITE.about-page: a plain text page Google indexes (the home page renders a canvas once JS runs).
+  const about = new DOMParser().parseFromString(site('about/index.html'), 'text/html');
+
+  it('the about page is crawlable text with its own canonical URL and preview tags', () => {
+    expect(about.title).toMatch(/webAC/);
+    expect(about.querySelector('link[rel="canonical"]')?.getAttribute('href')).toBe('https://playwebac.com/about/');
+    expect(about.querySelector('meta[name="description"]')?.getAttribute('content')).toMatch(/Asheron's Call/);
+    expect(about.querySelector('meta[property="og:image"]')?.getAttribute('content')).toBe(meta('property', 'og:image'));
+    const text = about.body.textContent ?? '';
+    for (const term of ['ACE', 'Dark Majesty', 'AC1999', 'GDLE', 'Mac', 'AI coding assistant', 'not affiliated']) {
+      expect(text).toContain(term);
+    }
+    expect(text.split(/\s+/).length).toBeGreaterThan(400);
+    expect(about.querySelector('a[href="/"]')).not.toBeNull();
+  });
+
+  it('the about page FAQ JSON-LD matches its visible questions', () => {
+    const ld = JSON.parse(about.querySelector('script[type="application/ld+json"]')?.textContent ?? '');
+    expect(ld['@type']).toBe('FAQPage');
+    const visible = [...about.querySelectorAll('h3')].map((h) => h.textContent);
+    for (const q of ld.mainEntity) {
+      expect(q.acceptedAnswer.text.length).toBeGreaterThan(40);
+      expect(visible).toContain(q.name);
+    }
+  });
+
+  it('the about page only references images the web image ships', () => {
+    for (const img of about.querySelectorAll('img')) {
+      const src = img.getAttribute('src') ?? '';
+      expect(src.startsWith('/')).toBe(true);
+      expect(statSync(resolve(ROOT, 'deploy/web/site', src.slice(1))).size).toBeGreaterThan(10_000);
+    }
+  });
+
+  it('Caddy revalidates the about page like the home page', () => {
+    expect(readFileSync(resolve(ROOT, 'deploy/web/Caddyfile'), 'utf8')).toMatch(/@html path [^\n]*\/about\//);
   });
 });

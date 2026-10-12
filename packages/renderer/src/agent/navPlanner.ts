@@ -55,10 +55,13 @@ export interface PlanOptions {
 /**
  * `boxed`: the search met the edge of its box (start → goal plus the margin) somewhere, so a wider
  * one may find a way it could not (the Banderling Ruin ramp lay 2 m past a 12 m margin, 2026-10-10).
+ * `enclosed`: it walked every point reachable from the start (never met its box, never ran out of
+ * points): the floor you stand on is closed in, so no search from here, however wide, finds a way on
+ * foot (with this search's jumps, if it had any). `area`: that floor, square metres.
  */
 export type PlanResult =
   | { status: 'found'; path: NavStep[]; expanded: number; jumps: number }
-  | { status: 'none'; expanded: number; nearest: NavPoint | null; boxed: boolean };
+  | { status: 'none'; expanded: number; nearest: NavPoint | null; boxed: boolean; enclosed: boolean; area: number };
 
 const DIRS: ReadonlyArray<[number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 
@@ -163,6 +166,9 @@ export class PathSearch {
     return Math.hypot(this.goal.x - p.x, this.goal.y - p.y) <= this.within && (this.goal.z === undefined || Math.abs(this.goal.z - p.z) <= 1.5);
   }
 
+  /** Whether this search may take jumps and drops. */
+  get hasJumps(): boolean { return !!this.jumps; }
+
   /** Probe for about `budgetMs`; the result once the search ends, else null. */
   step(budgetMs = 8, now: () => number = () => performance.now()): PlanResult | null {
     if (this.done) return this.done;
@@ -192,12 +198,18 @@ export class PathSearch {
       }
       if (this.jumps && stuck.length) this.tryJumps(k, p, stuck);
     }
-    return (this.done = { status: 'none', expanded: this.expanded, nearest: this.bestKey === this.key(0, 0, 0) ? null : this.at.get(this.bestKey) ?? null, boxed: this.boxed });
+    // The open set ran dry inside the box, within the node budget and (with jumps) the flight budget: closed in.
+    const exhausted = !this.open.size && this.expanded <= this.maxNodes && !this.boxed && (!this.jumps || this.flights < (this.jumps.maxFlights ?? 1500));
+    return (this.done = this.none(exhausted));
+  }
+
+  private none(enclosed: boolean): PlanResult {
+    return { status: 'none', expanded: this.expanded, nearest: this.bestKey === this.key(0, 0, 0) ? null : this.at.get(this.bestKey) ?? null, boxed: this.boxed, enclosed, area: Math.round(this.closed.size * this.spacing * this.spacing) };
   }
 
   /** End the search now, as if it had found no way (the walk ran out of time to stand searching). */
   abandon(): PlanResult {
-    return this.done ?? (this.done = { status: 'none', expanded: this.expanded, nearest: this.bestKey === this.key(0, 0, 0) ? null : this.at.get(this.bestKey) ?? null, boxed: this.boxed });
+    return this.done ?? (this.done = this.none(false));
   }
 
   private relax(k: number, nk: number, at: NavPoint, cost: number, jump?: JumpSpec): void {

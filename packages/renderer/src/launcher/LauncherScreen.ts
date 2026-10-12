@@ -30,7 +30,7 @@ import type { ElementDesc } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { charselHighlightSlices, charselRowState } from '../ui/CharselListRows.js';
 import { descRef } from '../ui/DatTextStyle.js';
 import {
-  type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeBridgeEra, worldEnterBlock,
+  type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeBridgeEra, worldCredentialsBlock, worldEnterBlock, worldRegistrationText,
 } from './worldDirectory.js';
 import { loadRememberedLogin, saveRememberedLogin, worldKeyOf, type RememberedLogin } from './launcherStorage.js';
 
@@ -707,6 +707,8 @@ export class LauncherScreen {
     if (w.description) body.appendChild(para(w.description, 2, undefined, 'launcher-desc'));
 
     const links: Array<[string, string]> = [];
+    // A register-first world: its registration page leads the links.
+    if (w.registrationUrl) links.push(['Register', w.registrationUrl]);
     if (w.website) links.push(['Website', w.website]);
     if (w.discord) links.push(['Discord', w.discord]);
     if (links.length) {
@@ -725,10 +727,25 @@ export class LauncherScreen {
       body.appendChild(row);
     }
 
-    const hint = w.registration
-      ? `New here? ${w.registration}`
-      : 'New here? Most worlds create your account the first time you log in.';
-    body.appendChild(para(hint, 2, this.dim, 'launcher-hint'));
+    const registration = worldRegistrationText(w);
+    if (registration && w.registrationUrl) {
+      // The whole note is a link to the world's registration page, in the link
+      // colour; 2 lines, the room the details box has below the links row (a
+      // third line was clipped by the box on playwebac.com, 2026-10-12).
+      const a = document.createElement('a');
+      a.className = 'launcher-hint launcher-register';
+      a.href = w.registrationUrl;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      Object.assign(a.style, { textDecoration: 'none', flexShrink: '0' });
+      a.append(...Array.from(para(registration, 2, this.kit.textColor(LAUNCHER_TEXT.label) ?? undefined, 'launcher-register-text').childNodes));
+      body.appendChild(a);
+    } else {
+      const hint = registration
+        ? `New here? ${registration}`
+        : 'New here? Most worlds create your account the first time you log in.';
+      body.appendChild(para(hint, 2, this.dim, 'launcher-hint'));
+    }
     d.appendChild(body);
   }
 
@@ -778,6 +795,9 @@ export class LauncherScreen {
     }
     this.done = true;
     const finish = (): void => {
+      // After any era probe: a custom bridge's era is only known now.
+      const credBlock = worldCredentialsBlock(w, account, password);
+      if (credBlock) { this.done = false; this.kit.message(credBlock, () => this.passwordInput?.focus()); return; }
       saveRememberedLogin({ worldKey: worldKeyOf(w), account, era: w.era }, this.opts.storage === undefined ? undefined : this.opts.storage);
       this.handle?.destroy();
       this.handle = null;

@@ -29,11 +29,11 @@ const DIAG = `(() => {
     const walk = ac.terrainCollision.isWalkable(destX, destZ);
     const destH = ac.terrainCollision.getHeightAt(destX, destZ);
     const curH = ac.terrainCollision.getHeightAt(cs.x, cs.z);
-    const water = ac.waterMap.cellWaterTypeAt(destX, destZ);
+    const water = ac.waterMap.blockWaterTypeAt(destX, destZ);
     out.headings.push({ deg: i * 45, dx: +dx.toFixed(3), dz: +dz.toFixed(3), adjX: +adjX.toFixed(3), adjZ: +adjZ.toFixed(3),
       walkable: walk, destH, curH, water });
   }
-  out.curWater = ac.waterMap.cellWaterTypeAt(cs.x, cs.z);
+  out.curWater = ac.waterMap.blockWaterTypeAt(cs.x, cs.z);
   out.curWalkable = ac.terrainCollision.isWalkable(cs.x, cs.z);
   const oc = ac.outdoorCollision;
   // BUG.scenery-setup-instances-invisible-near-player — drawn scenery

@@ -752,12 +752,13 @@ describe('GameUI hosts the VirindiTank window', () => {
     ui.toggleAutomationWindow();
     expect(ui.automationWindowOpen).toBe(true);
     const win = H.container.querySelector('[data-vtank-window]') as HTMLElement;
-    expect(win.textContent).toContain('Automation');
+    // The title is VVS's text (a canvas run, vvsText.ts).
+    expect(win.querySelector('[data-ac-run-text="Automation"]')).not.toBeNull();
     await new Promise((r) => setTimeout(r, 0));
     expect(win.querySelector('[data-vtank="window"]')).not.toBeNull();
     (win.querySelector('[data-vtank-tab="meta"]') as HTMLElement).click();
     (win.querySelector('[data-vtank="create-rule"]') as HTMLElement).click();
-    expect(H.container.querySelector('[data-vtank-dialog]')?.textContent).toContain('Edit Meta Rule');
+    expect(H.container.querySelector('[data-vtank-dialog] [data-ac-run-text="Edit Meta Rule"]')).not.toBeNull();
     (win.querySelector('[data-vtank-close]') as HTMLElement).click();
     expect(ui.automationWindowOpen).toBe(false);
     expect(H.container.querySelector('[data-vtank-dialog]')).toBeNull();

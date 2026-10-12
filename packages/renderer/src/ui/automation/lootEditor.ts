@@ -15,8 +15,10 @@
  * this engine can't test stay editable and go back out as written (vtc.reqs); File → Save As hands over
  * the .utl (exportVTank).
  *
- * Drawn with the window's own parts (VTankKit: VVS's flat buttons, dropdowns, text boxes, bullets and
- * list boxes, the retail font and colours); no new art.
+ * VTClassic's editor is a Windows Forms program in a window of its own, not a VVS view, so it is drawn
+ * as a Windows form where the host has those parts (VTankKit.desktop, a dialogs.openDesktop frame:
+ * GameUI, matched to a screenshot of the editor running, ACViewer's docs/images/VtankLootEditor.png);
+ * without them, with the window's VVS parts.
  */
 import {
   type LootRule, type RoutineProfile, type SalvageCombine, type UtlRule, type VTankExport,
@@ -67,6 +69,8 @@ function toLoot(u: UtlRule, prev: LootRule | undefined): LootRule {
 let clipboard: UtlRule | null = null;
 
 export class VtLootEditor {
+  /** The parts it is drawn with: a Windows form's, where the host has them (VTClassic's editor is a Windows program). */
+  get kit(): VTankKit { return this.host.kit.desktop?.() ?? this.host.kit; }
   /** The editor is open (VTank's Show Editor box). */
   open = false;
   /** The loot set edited (a name in lootSets), or null for the profile's own rules ([This profile]). */
@@ -108,7 +112,8 @@ export class VtLootEditor {
     this.message = message;
     // The dialog's own close box (or another dialog in its place) unticks Show Editor too.
     const shown = { set };
-    this.host.dialogs.open(`Virindi Tank Loot Editor - ${this.fileName()}`, LOOT_EDITOR_SIZE.w, LOOT_EDITOR_SIZE.h, (body, dredraw, close) => this.render(body, dredraw, () => {
+    const open = this.host.dialogs.openDesktop ?? this.host.dialogs.open;
+    open.call(this.host.dialogs, `Virindi Tank Loot Editor - ${this.fileName()}`, LOOT_EDITOR_SIZE.w, LOOT_EDITOR_SIZE.h, (body, dredraw, close) => this.render(body, dredraw, () => {
       this.open = false;
       close();
       this.host.redraw();
@@ -274,7 +279,7 @@ export class VtLootEditor {
       ...(sc.valueModes ? { values: Object.entries(sc.valueModes).map(([m, value]) => ({ material: Number(m), value })) } : {}),
     }).body;
     const stem = this.fileName().replace(/\.utl$/i, '');
-    this.host.kit.download(`${stem}.ucr`, body);
+    this.kit.download(`${stem}.ucr`, body);
     return `${stem}.ucr saved to your downloads.`;
   }
   /** Combine → Import Ranges: a .ucr's block replaces this profile's. */
@@ -438,7 +443,7 @@ export class VtLootEditor {
 
   render(body: HTMLElement, dredraw: () => void, close: () => void): void {
     body.innerHTML = '';
-    const { kit } = this.host;
+    const { kit } = this;
     const c = kit.colors;
     const rules = this.rules();
     if (!rules) { close(); return; }
@@ -446,7 +451,7 @@ export class VtLootEditor {
     body.appendChild(root);
     // The menu strip: File, Edit, Rule (VTClassic's; Combine's .ucr import/export isn't built).
     const menu = (label: string, x: number, items: Array<{ label: string; value: string }>, pick: (v: string) => void) => {
-      const m = tag(kit.textTab(label, false, () => kit.menu(m, items, pick)), { vtankLootMenu: label.toLowerCase() });
+      const m = tag((kit.menuLabel ?? ((l: string, f: () => void) => kit.textTab(l, false, f)))(label, () => kit.menu(m, items, pick)), { vtankLootMenu: label.toLowerCase() });
       root.appendChild(at(m, x, 0));
     };
     const open = kit.openFile;
@@ -514,14 +519,14 @@ export class VtLootEditor {
       fill(list);
       box.appendChild(list);
       holder.appendChild(box);
-      this.host.kit.list(box);
+      this.kit.list(box);
     };
     draw();
     return draw;
   }
 
   private renderRules(page: HTMLElement, dredraw: () => void): void {
-    const { kit } = this.host;
+    const { kit } = this;
     const c = kit.colors;
     const rules = this.rules() ?? [];
     const text = (t: string, x: number, y: number, color = c.text, maxWidth?: number) => page.appendChild(at(kit.text(t, { color, ...(maxWidth ? { maxWidth } : {}) }), x, y));
@@ -619,7 +624,7 @@ export class VtLootEditor {
 
   /** A Rule-menu form in the page's place, at VTClassic's positions (AddSalvageRulesForm, UpdateWorkReqsForm, SelectMinPackSlotsForm). */
   private renderForm(page: HTMLElement, dredraw: () => void): void {
-    const { kit } = this.host;
+    const { kit } = this;
     const c = kit.colors;
     const f = this.form!;
     const text = (t: string, x: number, y: number, color = c.text, maxWidth?: number) => page.appendChild(at(kit.text(t, { color, ...(maxWidth ? { maxWidth } : {}) }), x, y));
@@ -659,7 +664,7 @@ export class VtLootEditor {
   }
 
   private renderSalvage(page: HTMLElement, dredraw: () => void): void {
-    const { kit } = this.host;
+    const { kit } = this;
     const c = kit.colors;
     const text = (t: string, x: number, y: number, color = c.text) => page.appendChild(at(kit.text(t, { color }), x, y));
     const mats = this.combineMaterials();

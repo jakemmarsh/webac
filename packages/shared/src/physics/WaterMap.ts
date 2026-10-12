@@ -6,15 +6,21 @@
  * enum set). Landscape water is water-textured terrain; the player
  * WADES: the resting plane sinks `waterDepth` below the water surface
  * (ACE ObjectInfo.ValidateWalkable, ObjectInfo.cs:124 adds waterDepth
- * to the contact-plane distance), and cells whose four corner vertices
- * are ALL water ("EntirelyWater") are impassable for players
- * (LandCell.FindEnvCollisions, LandCell.cs:55-59 → TransitionState.Collided).
+ * to the contact-plane distance). Only a LANDBLOCK whose every cell is
+ * fully flooded (an "EntirelyWater" block: open sea) is impassable for
+ * players: CLandCell::find_env_collisions @ 00532f20 returns Collided when
+ * CObjCell::get_block_water_type (the cell's landblock's water_type) is
+ * ENTIRELY_WATER (ACE LandCell.cs:55-59, the 1999 server's LandCell.cpp
+ * likewise). A fully flooded cell of a river or lake is waded 0.9 m deep.
+ * (Until 2026-10-12 the cell's own type was the gate, which walled players
+ * into single 24 m cells of the river east of Holtburg.)
  *
  * Sources:
  *  - ACE Physics/Common/LandDefs.cs:25 WaterType enum
  *  - ACE Physics/Common/LandblockStruct.cs:62 SurfChar (terrain types
  *    0x10 WaterRunning … 0x14 WaterDeepSea are water) + :145 CalcWater
- *    (cell = EntirelyWater iff all 4 corner vertices water, Partially if any)
+ *    (cell = EntirelyWater iff all 4 corner vertices water, Partially if any;
+ *    the block = EntirelyWater iff every cell is, Partially if any has water)
  *  - ACE Physics/Common/ObjCell.cs:473 get_water_depth (EntirelyWater →
  *    0.9; Partially → calc_water_depth)
  *  - ACE Physics/Common/LandblockStruct.cs:655 calc_water_depth (nearest
@@ -53,13 +59,37 @@ const BLOCK_SIZE = 192;
 export class WaterMap {
   /** key (bx<<8|by) → 256-entry corner terrain-type array. */
   private blocks = new Map<number, number[]>();
+  /** key → the landblock's own water type (ACE LandblockStruct.CalcWater's WaterType). */
+  private blockTypes = new Map<number, LandWaterType>();
 
   setLandblock(blockX: number, blockY: number, cellCornerTerrainTypes: number[]): void {
-    this.blocks.set((blockX << 8) | blockY, cellCornerTerrainTypes);
+    const key = (blockX << 8) | blockY;
+    this.blocks.set(key, cellCornerTerrainTypes);
+    // CalcWater: hasWater when any cell has a water vertex; a water block only when every cell is fully flooded.
+    let hasWater = false;
+    let waterBlock = true;
+    for (let cell = 0; cell < 64; cell++) {
+      let n = 0;
+      for (let k = 0; k < 4; k++) if (isWaterTerrainType(cellCornerTerrainTypes[cell * 4 + k])) n++;
+      if (n) hasWater = true;
+      if (n < 4) waterBlock = false;
+    }
+    this.blockTypes.set(key, hasWater ? (waterBlock ? LandWaterType.EntirelyWater : LandWaterType.PartiallyWater) : LandWaterType.NotWater);
   }
 
   removeLandblock(blockX: number, blockY: number): void {
     this.blocks.delete((blockX << 8) | blockY);
+    this.blockTypes.delete((blockX << 8) | blockY);
+  }
+
+  /**
+   * CObjCell::get_block_water_type: the water type of the landblock under a world position (EntirelyWater only for
+   * a block of open sea), or null when it isn't loaded. This, not the cell's type, is what stops a player.
+   */
+  blockWaterTypeAt(worldX: number, worldZ: number): LandWaterType | null {
+    const bx = Math.floor(worldX / BLOCK_SIZE);
+    const by = Math.floor(worldZ / BLOCK_SIZE);
+    return this.blockTypes.get((bx << 8) | by) ?? null;
   }
 
   /** The 4 corner terrain types [SW, SE, NE, NW] of the cell under a world position, or null if unloaded. */
@@ -116,5 +146,6 @@ export class WaterMap {
 
   clear(): void {
     this.blocks.clear();
+    this.blockTypes.clear();
   }
 }

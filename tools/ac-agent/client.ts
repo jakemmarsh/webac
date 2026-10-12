@@ -3,7 +3,7 @@
  * profile and call it. Shared by cli.ts and mcp-server.ts.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, openSync, readFileSync } from 'node:fs';
+import { existsSync, openSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { dirname, resolve } from 'node:path';
@@ -87,6 +87,17 @@ export function findDaemon(profile?: string): DaemonInfo | null {
   return all.length === 1 ? all[0] : null;
 }
 
+/**
+ * Why a daemon that just exited failed, from the log lines it wrote: its last `Error: …` line, else the last
+ * Playwright-style `page.goto: …` line (those print without the prefix), else null.
+ */
+export function daemonExitReason(log: string): string | null {
+  const lines = log.split('\n').reverse();
+  const err = lines.find((l) => /^Error: /.test(l));
+  if (err) return err.slice(7);
+  return lines.find((l) => /^[a-z]\w*\.\w+: \S/.test(l)) ?? null;
+}
+
 export async function startDaemon(opts: StartOptions = {}): Promise<{ info: DaemonInfo; started: boolean }> {
   const era = opts.era && opts.era !== 'eor' ? opts.era : undefined;
   const base = opts.profile ?? DEFAULT_PROFILE;
@@ -104,6 +115,8 @@ export async function startDaemon(opts: StartOptions = {}): Promise<{ info: Daem
   if (era) args.push('--era', era);
   for (const k of ['template', 'heritage', 'gender', 'town', 'seed', 'attributes', 'skills'] as const) if (opts[k] !== undefined) args.push(`--${k}`, String(opts[k]));
   mkdirSync(STATE_DIR, { recursive: true });
+  // Only this start's lines explain its failure; the log keeps every earlier run's errors.
+  const logStart = existsSync(logFile(profile)) ? statSync(logFile(profile)).size : 0;
   const out = openSync(logFile(profile), 'a');
   const child = spawn('npx', args, { cwd: repoRoot(), detached: true, stdio: ['ignore', out, out] });
   child.unref();
@@ -122,8 +135,8 @@ export async function startDaemon(opts: StartOptions = {}): Promise<{ info: Daem
     }
     if (child.exitCode !== null) {
       // The daemon's own last error (e.g. the server refused the character's name) says more than its exit code.
-      const why = readFileSync(logFile(profile), 'utf8').split('\n').reverse().find((l) => /^Error: /.test(l));
-      throw new Error(`${why ? `${why.slice(7)} — ` : ''}daemon exited (code ${child.exitCode}); see ${logFile(profile)}`);
+      const why = daemonExitReason(readFileSync(logFile(profile)).subarray(logStart).toString('utf8'));
+      throw new Error(`${why ? `${why} — ` : ''}daemon exited (code ${child.exitCode}); see ${logFile(profile)}`);
     }
     await new Promise((r) => setTimeout(r, 2000));
   }

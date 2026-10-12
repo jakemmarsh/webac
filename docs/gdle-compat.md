@@ -345,10 +345,34 @@ From `acresources/serverslist` Servers.xml plus `servers.treestats.net/api/serve
 | GDLE Test | GDL | test.gdleac.com:9020 | EoL | no (last seen 2025-02) | n/a |
 | Seedsow / Snowreap | GDL | serafino.ddns.net | classic DM dats | yes | excluded (Tier 3) |
 
+The launcher says so (2026-10-12): Reefcull and Harvestbud carry a
+registration note and a "Register" link to their own forms
+(http://reefcull.gdleac.com/, http://harvestbud.gdleac.com/, as linked from
+gdleac.com "Step 4: Account Creation") in `serverCompat.ts`, and a fresh
+account's "Client timed out the connection" adds the same note and link.
+
 How we know auto-create is off on Reefcull: a correctly formed LoginRequest for
 a fresh account (`acjsprobe5679`) comes back as `BT_NETERROR` (flags
 0x00100000) with `STR_LOGIN_FAILED` (0x04DF9C54) in table 8 (ST_SERVER_ERRORS).
-That is the same reply the `acservertracker` probe account gets. With
+That is the same reply the `acservertracker` probe account gets.
+
+The client shows that reply (RELEASE.gdle-login-neterror, 2026-10-12). It is
+`CNetwork::SendConnectLoginFailure` (reference/classic/ClassicDereth/Source/
+Network.cpp): a connectionless seq-0 packet, flags exactly 0x00100000, payload
+{error, 8}, one per LoginRequest (five 28-byte replies = the "~140 bytes" seen
+live). Before, the reorder gate dropped it as a duplicate of seq 0 and the
+login sat out its 25 s budget ("Client timed out the connection"). Now
+`ClientConnection` reads the NetError optional header and, in the logon
+context, ends the login at once as retail does (`ClientNet::
+ProcessOptionalHeader` @ 005451a0 → `EndState` @ 00543380; outside the logon
+context it is ServerDied). The error ids are compute_str_hash values of
+ID_ConnectionError_* tokens in string table 0x23000010 (table enum 8):
+STR_LOGIN_FAILED = "Client logon failed", STR_LOGIN_SERVER_FULL = "Server
+Full", STR_LOGIN_CLIENT_VERSION = NetVersionMismatch, STR_LOGIN_ACCOUNT_ONLINE
+= "Player already logged on", STR_LOGIN_INVALID_AUTH = BadCryptoKey. The
+dialog shows that text, and on a register-first world "Client logon failed"
+carries the same "New account? …" note and link as the timeout
+(`loginFailureText`). With
 `auto_create_accounts=1`, GDLE would have created the account and answered
 with ConnectRequest. The probe tool is a ~40-line Python sender kept only in
 the session scratchpad; it is not needed to reproduce any of this.

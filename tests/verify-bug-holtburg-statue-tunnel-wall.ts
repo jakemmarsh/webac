@@ -77,7 +77,7 @@ describe('stepPlayerMovement — the terrain\'s rules skip a body on a cell floo
         getHeightAt: (x) => 66 + x,
         getTriangleNormalAt: () => ({ x: -0.7071, y: 0.7071, z: 0 }),
       },
-      water: { cellWaterTypeAt: () => water },
+      water: { blockWaterTypeAt: () => water },
       creatureObstacles: null, defaultPlayerRadius: 0.48, edgeSlide: true, stepDownHeight: 0.6,
       groundAt: (x) => (tunnelFloor ? 60 : 66 + x),
     };
@@ -89,7 +89,7 @@ describe('stepPlayerMovement — the terrain\'s rules skip a body on a cell floo
     expect(stepPlayerMovement(state(60), 0.1, 0, 1 / 30, services(true)).x).toBeCloseTo(0.1, 9);
   });
 
-  it('into an EntirelyWater land cell: refused on the terrain, walked in the tunnel under it', () => {
+  it('into an EntirelyWater landblock (open sea): refused on the terrain, walked in the tunnel under it', () => {
     expect(stepPlayerMovement(state(66), 0, 0.1, 1 / 30, services(false, LandWaterType.EntirelyWater)).z).toBe(0);
     expect(stepPlayerMovement(state(60), 0, 0.1, 1 / 30, services(true, LandWaterType.EntirelyWater)).z).toBeCloseTo(0.1, 9);
   });

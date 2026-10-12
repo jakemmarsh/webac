@@ -96,7 +96,7 @@ export async function dungeonNav(landblock: number, opts: DungeonNavOptions = {}
   const services = (): MovementServices => ({
     dungeonCollision: col, outdoorCollision: col,
     terrain: { getHeightAt: () => null, getTriangleNormalAt: () => null, isWalkable: () => true },
-    water: { cellWaterTypeAt: () => null }, creatureObstacles: null, defaultPlayerRadius: col.playerRadius,
+    water: { blockWaterTypeAt: () => null }, creatureObstacles: null, defaultPlayerRadius: col.playerRadius,
     edgeSlide: true, stepDownHeight: stepDown, slide: { slidingNormal: null },
     dungeonGroundAt: (x, z, fromY) => col.getFloorHeight(x, z, fromY, Infinity),
   } as MovementServices);

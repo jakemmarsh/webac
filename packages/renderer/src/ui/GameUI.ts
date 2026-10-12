@@ -57,6 +57,15 @@ import { COMBAT_WINDOW } from './CombatWindow.js';
 import { skillFooterTitleRuns, skillRowTone, FOOTER_TITLE_COLORS, argbToCss } from './SkillDisplay.js';
 import { AutomationPanel, hudStripText, type AutomationKit, type RoutineEditor } from './automation/AutomationPanel.js';
 import { VTankWindow, type VTankKit, type VTankSource } from './automation/VTankWindow.js';
+import { renderVvsText, vvsFieldStyle, VVS_COLORS, VVS_TAB_PX } from './automation/vvsText.js';
+import { renderUbMainWindow, UB_MAIN_SIZE, type UbMainSource } from './automation/UbMainWindow.js';
+import { renderVvsBar, VVS_BAR, type VvsBarEntry } from './automation/VvsBar.js';
+import { UB_ICON_PNG } from './automation/ubIcon.js';
+import type { UbMapUi, UbMapWhich } from './maps/UbMaps.js';
+/** UtilityBelt's map windows as GameUI drives them (UbMaps). */
+type UbMapsControl = { toggle(which: UbMapWhich): string; closeAll(): void; close(which: UbMapWhich): void; isOpen(which: UbMapWhich): boolean };
+/** UtilityBelt's settings as the main window reads and flips them (agent/ub/ubSettings.ts UbStore). */
+type UbSettingsControl = { name(n: string): string | null; get(n: string): unknown; bool(n: string): boolean; setValue(k: string, v: boolean): void; display(k: string): string };
 import { UbNet, browserNetChannel, setActiveUbNet } from '../agent/ubNet.js';
 import type { VtNames } from '@ac/shared';
 import { CHARACTER_SETTINGS_PAGE, CHARACTER_SETTINGS_ROWS, characterSettingString, characterSettingsRowForKey } from './CharacterSettingsModel.js';
@@ -21355,17 +21364,21 @@ export class GameUI {
     this.closeAutomationEditor();
     this.closeVTankWindow();
     for (const k of [...this.vtankWindows.keys()]) this.closeVTankAux(k);
+    this.ubMaps?.closeAll();
     this.automationModel = source ? new AutomationPanel(this.automationKit(), source, (ed) => this.openAutomationEditor(ed)) : null;
     this.vtankModel = source ? new VTankWindow(this.vtankKit(), source, {
       open: (t, w, h, draw, onClosed) => this.openVTankDialog(t, w, h, draw, onClosed), close: () => this.closeVTankDialog(),
+      openDesktop: (t, w, h, draw, onClosed) => this.openDesktopDialog(t, w, h, draw, onClosed),
       // The Action History and the remote: windows of their own beside the main one.
       window: (key, t, w, h, draw) => this.openVTankAux(key, t, w, h, draw), closeWindow: (key) => this.closeVTankAux(key),
       showMain: (on) => { if (on) this.openVTankWindow(); else this.closeVTankWindow(); },
+      isOpen: (key) => (key === 'main' ? this.vtankEl !== null : this.vtankWindows.has(key)),
     }) : null;
     if (this.automationTimer) clearInterval(this.automationTimer);
     this.automationTimer = source ? setInterval(() => this.tickAutomation(), 1000) : null;
     this.startUbNet(source);
     this.updateAutomationStrip();
+    this.refreshVvsBar();
   }
 
   // UtilityBelt networking between this browser's game tabs (agent/ubNet.ts): /ub bc, bct, netclients, vital and cast sharing.
@@ -21413,6 +21426,9 @@ export class GameUI {
   }
 
   get automationAvailable(): boolean { return this.automationModel !== null; }
+
+  /** A key pressed in the world, offered to the automation hotkeys (vhsHotkeys.ts) before retail's unbound-key handling. */
+  automationHotkey(code: string, repeat = false): boolean { return this.vtankModel?.hotkeys.onKey(code, repeat) ?? false; }
 
   /** The routine engine's stand-by profile (M. Charges When Off while the macro is off): the VirindiTank window's selection. */
   automationStandbyProfile(): ReturnType<VTankWindow['standbyProfile']> { return this.vtankModel?.standbyProfile() ?? null; }
@@ -21487,11 +21503,181 @@ export class GameUI {
     this.hudContainer.appendChild(win);
     this.vtankWindows.set(key, { el: win, redraw });
     redraw();
+    this.vvsWindowShown();
   }
 
   private closeVTankAux(key: string): void {
     this.vtankWindows.get(key)?.el.remove();
     this.vtankWindows.delete(key);
+    this.refreshVvsBar();
+  }
+
+  // ── UtilityBelt's Dungeon Maps and Landscape Maps (ui/maps/UbMaps.ts; opt-in, not retail UI) ──
+
+  private ubMaps: UbMapsControl | null = null;
+  private ubMapEls = new Map<string, HTMLElement>();
+  private ubMapImages = new Map<number, HTMLImageElement>();
+
+  /** main.ts hands the maps over once /ub exists (the automation window's Options tab opens them too). */
+  setUbMaps(maps: UbMapsControl | null): void {
+    this.ubMaps?.closeAll();
+    this.ubMaps = maps;
+  }
+
+  // ── UtilityBelt's main window (automation/UbMainWindow.ts; opt-in plugin window, not retail UI) ──
+
+  private ubSettings: UbSettingsControl | null = null;
+  /** main.ts hands over UB's settings (agent/ub/ubSettings.ts UbStore) once /ub exists. */
+  setUbSettings(store: UbSettingsControl | null): void { this.ubSettings = store; }
+
+  /** The Main page's source: UB's settings, and VTank.VitalSharing from this tab's UB network. */
+  private ubMainSource(): UbMainSource {
+    const store = this.ubSettings;
+    const isBool = (s: string) => { const k = store?.name(s); if (!k) return null; try { return typeof store!.get(k) === 'boolean' ? k : null; } catch { return null; } };
+    return {
+      has: (s) => (s === 'VTank.VitalSharing' ? !!this.ubNet : !!isBool(s)),
+      value: (s) => (s === 'VTank.VitalSharing' ? !!this.ubNet?.vitalSharing : !!store && store.bool(s)),
+      toggle: (s) => {
+        if (s === 'VTank.VitalSharing') {
+          if (!this.ubNet) return [];
+          this.ubNet.setVitalSharing(!this.ubNet.vitalSharing);
+          return [`VTank.VitalSharing = ${this.ubNet.vitalSharing}`];
+        }
+        const k = isBool(s);
+        if (!store || !k) return [];
+        const on = !store.bool(k);
+        store.setValue(k, on);
+        // UB hides a map window whose Enabled goes off (DungeonMaps.cs / LandscapeMaps.cs PropertyChanged).
+        if (!on && k === 'DungeonMaps.Enabled') this.ubMaps?.close('dungeon');
+        if (!on && k === 'LandscapeMaps.Enabled') this.ubMaps?.close('landscape');
+        this.refreshVvsBar();
+        return [store.display(k)];
+      },
+    };
+  }
+
+  /** Open or close UtilityBelt's main window. */
+  toggleUbMainWindow(): void {
+    if (this.vtankWindows.has('ub-main')) { this.closeVTankAux('ub-main'); return; }
+    const src = this.ubMainSource();
+    const say = (lines: string[]) => { for (const l of lines) this.addSystemMessage(`[UB] ${l}`, chatColorFor(ChatMessageType.System), ChatMessageType.System); };
+    this.openVTankAux('ub-main', 'UtilityBelt', UB_MAIN_SIZE.w + 12, UB_MAIN_SIZE.h + 35, (body, redraw) => renderUbMainWindow(body, this.vtankKit(), src, redraw, say));
+  }
+  get ubMainWindowOpen(): boolean { return this.vtankWindows.has('ub-main'); }
+
+  // ── Virindi Views' bar (automation/VvsBar.ts): where the plugin windows open from, as with Decal + VVS ──
+
+  private vvsBarEl: HTMLDivElement | null = null;
+  private static readonly VVS_BAR_KEY = 'acjs.vvsBar';
+
+  /** 'on' / 'off' as the player left it; null until a plugin window first opens (retail's screen has no bar). */
+  private vvsBarSetting(): string | null { try { return globalThis.localStorage?.getItem(GameUI.VVS_BAR_KEY) ?? null; } catch { return null; } }
+
+  /** A plugin window opened: the bar appears the first time (the player has "installed" the plugins), then follows it. */
+  private vvsWindowShown(): void {
+    if (this.vvsBarSetting() === null) { try { globalThis.localStorage?.setItem(GameUI.VVS_BAR_KEY, 'on'); } catch { /* storage blocked: this page only */ this.vvsBarSessionOn = true; } }
+    this.refreshVvsBar();
+  }
+  private vvsBarSessionOn = false;
+
+  /** `/automation bar`: show or hide the bar; the line to print. */
+  toggleVvsBar(): string {
+    const on = !(this.vvsBarSetting() === 'on' || this.vvsBarSessionOn);
+    try { globalThis.localStorage?.setItem(GameUI.VVS_BAR_KEY, on ? 'on' : 'off'); } catch { /* storage blocked */ }
+    this.vvsBarSessionOn = on;
+    this.refreshVvsBar();
+    return on ? 'Virindi Views bar shown' : 'Virindi Views bar hidden (/automation bar shows it)';
+  }
+
+  /** The bar's entries: VirindiTank's window, the hotkeys, UtilityBelt's window and its maps while they are enabled. */
+  private vvsBarEntries(): VvsBarEntry[] {
+    const out: VvsBarEntry[] = [];
+    if (this.vtankModel) {
+      out.push({ id: 'vtank', plugin: 'VirindiTank', title: 'Automation', icon: null, open: this.vtankEl !== null, toggle: () => this.toggleAutomationWindow() });
+      out.push({ id: 'vhs', plugin: 'Virindi Hotkey System', title: 'Hotkeys', icon: null, open: this.vtankWindows.has('hotkeys'), toggle: () => { if (this.vtankWindows.has('hotkeys')) this.closeVTankAux('hotkeys'); else this.vtankModel?.openHotkeys(); } });
+    }
+    const store = this.ubSettings;
+    if (store) {
+      out.push({ id: 'ub', plugin: 'UtilityBelt', title: 'UtilityBelt', icon: { url: UB_ICON_PNG }, open: this.vtankWindows.has('ub-main'), toggle: () => this.toggleUbMainWindow() });
+      const maps = this.ubMaps;
+      // UB's map views are in the bar while enabled (LandscapeMaps.cs `view.ShowInBar = Enabled`); icon="7923" / "13249".
+      if (maps && store.bool('DungeonMaps.Enabled')) out.push({ id: 'ub-dungeon', plugin: 'UtilityBelt', title: 'Dungeon Maps', icon: { dat: 0x06001ef3 }, open: maps.isOpen('dungeon'), toggle: () => { maps.toggle('dungeon'); this.refreshVvsBar(); } });
+      if (maps && store.bool('LandscapeMaps.Enabled')) out.push({ id: 'ub-landscape', plugin: 'UtilityBelt', title: 'Landscape Maps', icon: { dat: 0x060033c1 }, open: maps.isOpen('landscape'), toggle: () => { maps.toggle('landscape'); this.refreshVvsBar(); } });
+    }
+    return out;
+  }
+
+  /** Draw (or remove) the bar for what is open now. */
+  refreshVvsBar(): void {
+    const show = this.automationAvailable && (this.vvsBarSetting() === 'on' || this.vvsBarSessionOn);
+    if (!show) { this.vvsBarEl?.remove(); this.vvsBarEl = null; return; }
+    let bar = this.vvsBarEl;
+    if (!bar) {
+      bar = document.createElement('div');
+      // Its place: as the player left it (ctrl+drag, as VVS's), else right of the vitals at the top.
+      let pos = { x: Math.round(this.hudLogicalWidth() / 2) + 90, y: 2 };
+      try {
+        const saved = JSON.parse(globalThis.localStorage?.getItem(`${GameUI.VVS_BAR_KEY}.pos`) ?? 'null') as { x: number; y: number } | null;
+        if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) pos = saved;
+      } catch { /* storage blocked */ }
+      Object.assign(bar.style, { position: 'absolute', left: `${Math.max(0, Math.min(pos.x, this.hudLogicalWidth() - 40))}px`, top: `${Math.max(0, Math.min(pos.y, this.hudLogicalHeight() - VVS_BAR.height))}px`, zIndex: '8995', pointerEvents: 'auto' });
+      bar.addEventListener('pointerdown', (ev) => {
+        if (!ev.ctrlKey) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const sx = ev.clientX; const sy = ev.clientY;
+        const ox = parseInt(bar!.style.left, 10); const oy = parseInt(bar!.style.top, 10);
+        const scale = this.hudScaleFactor();
+        const move = (e: PointerEvent) => { bar!.style.left = `${Math.max(0, Math.round(ox + (e.clientX - sx) / scale))}px`; bar!.style.top = `${Math.max(0, Math.round(oy + (e.clientY - sy) / scale))}px`; };
+        const up = () => {
+          window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+          try { globalThis.localStorage?.setItem(`${GameUI.VVS_BAR_KEY}.pos`, JSON.stringify({ x: parseInt(bar!.style.left, 10), y: parseInt(bar!.style.top, 10) })); } catch { /* storage blocked */ }
+        };
+        window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+      }, true);
+      this.hudContainer.appendChild(bar);
+      this.vvsBarEl = bar;
+    }
+    renderVvsBar(bar, this.vvsBarEntries(), (id) => this.getTexURL(id));
+  }
+
+  /** What the map windows are drawn with: the automation window's kit and VVS frame, the DAT font, portal.dat art. */
+  ubMapUi(): UbMapUi {
+    return {
+      kit: this.vtankKit(),
+      open: (key, title, w, h, onClose) => {
+        if (this.ubMapEls.has(key)) return null;
+        const { win, body } = this.buildVTankFrame(title, w, h, `acjs.ub.${key}`, onClose);
+        win.dataset.ubMapWindow = key;
+        win.style.zIndex = '9010';
+        this.hudContainer.appendChild(win);
+        this.ubMapEls.set(key, win);
+        this.vvsWindowShown();
+        return { body, root: win };
+      },
+      close: (key) => { this.ubMapEls.get(key)?.remove(); this.ubMapEls.delete(key); this.refreshVvsBar(); },
+      bare: (key, at, x, y, w, h) => {
+        const d = document.createElement('div');
+        d.dataset.ubMapBare = key;
+        Object.assign(d.style, { position: 'absolute', left: `${(parseInt(at.style.left, 10) || 0) + x}px`, top: `${(parseInt(at.style.top, 10) || 0) + y}px`, width: `${w}px`, height: `${h}px`, pointerEvents: 'none', zIndex: '8990' });
+        this.hudContainer.appendChild(d);
+        return d;
+      },
+      // UB's labels: the VVS theme's font at LabelFontSize 10 with a 1 px shadow (TextureCache.GetText).
+      textCanvas: (text, color) => renderVvsText(text, color, { px: 10, shadow: AC_COLORS.black }),
+      image: (id, onLoad) => {
+        let img = this.ubMapImages.get(id);
+        if (!img) {
+          const url = this.getTexURL(id);
+          if (!url) return null;
+          img = new Image();
+          img.addEventListener('load', onLoad, { once: true });
+          img.src = url;
+          this.ubMapImages.set(id, img);
+        }
+        return img.complete && img.naturalWidth > 0 ? img : null;
+      },
+      canvas: (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; },
+    };
   }
 
   /** What Show Nav Lines draws (main.ts feeds scene/NavLines.ts): the VirindiTank window's loaded route, or null. */
@@ -21704,9 +21890,24 @@ export class GameUI {
    */
   private vtankKit(): VTankKit {
     const base = this.automationKit();
-    const line = `1px solid ${AC_COLORS.tooltipBorder}`;
+    // VVS's 1 px tan line and its Times New Roman text (vvsText.ts: both matched by pixel to the wiki's screenshots).
+    const line = `1px solid ${VVS_COLORS.line}`;
+    const vvsText = (text: string, color?: string, maxWidth?: number) => renderVvsText(text, color ?? VVS_COLORS.text, { maxWidth });
     return {
       ...base,
+      text: (text, o = {}) => vvsText(text, o.color, o.maxWidth),
+      header: (text) => vvsText(text),
+      menu: (anchor, items, onPick, o = {}) => this.openAutomationMenu(anchor, items, onPick, { ...o, vvs: true }),
+      // VVS's list rows are plain text on black, 18 px apart (the Meta and Route tabs' screenshots); no row art.
+      // The screenshots show no selected row, so ours marks one with a goldenrod line (the open tab's colour).
+      row: (selected, onClick) => {
+        const r = document.createElement('div');
+        r.dataset.selected = selected ? '1' : '0';
+        Object.assign(r.style, { position: 'relative', display: 'flex', alignItems: 'center', gap: '6px', minHeight: '18px', padding: '0 4px', boxSizing: 'border-box', cursor: onClick ? 'pointer' : 'default', ...(selected ? { outline: `1px solid ${VVS_COLORS.tabOn}`, outlineOffset: '-1px' } : {}) });
+        if (onClick) r.addEventListener('click', onClick);
+        return r;
+      },
+      colors: { ...base.colors, text: VVS_COLORS.text },
       // An exported VirindiTank file: a browser download (browser UX), in the code page the importer reads (Windows-1252).
       download: (fileName, text) => {
         try {
@@ -21739,11 +21940,15 @@ export class GameUI {
       // A .usd's object and spell ids by name (export), and the tab's UtilityBelt network client.
       names: () => this.vtankNames(),
       net: () => this.ubNet,
+      // The hotkey window (vhsHotkeys.ts): kept per character in browser storage; never on a retail key.
+      storage: () => { try { return globalThis.localStorage ?? null; } catch { return null; } },
+      world: () => this.worldName ?? '',
+      retailKeys: () => this.keybindRegistry,
       input: (value, width, onChange) => {
         const input = document.createElement('input');
         input.type = 'text';
         input.value = value;
-        Object.assign(input.style, { position: 'relative', width: `${width}px`, height: '17px', boxSizing: 'border-box', background: AC_COLORS.black, border: line, outline: 'none', color: AC_COLORS.white, padding: '0 3px', flexShrink: '0' });
+        Object.assign(input.style, { position: 'relative', width: `${width}px`, height: '17px', boxSizing: 'border-box', background: AC_COLORS.black, border: line, outline: 'none', padding: '0 3px', flexShrink: '0', ...vvsFieldStyle() });
         input.addEventListener('input', () => onChange(input.value));
         // keyup still bubbles: a movement key held into this field must release.
         for (const ev of ['keydown', 'keypress'] as const) input.addEventListener(ev, (e) => e.stopPropagation());
@@ -21761,7 +21966,7 @@ export class GameUI {
         const b = document.createElement('div');
         b.dataset.button = label;
         Object.assign(b.style, { position: 'relative', width: `${width}px`, height: `${height}px`, boxSizing: 'border-box', border: line, background: AC_COLORS.black, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: '0' });
-        b.appendChild(this.renderACText(label, AC_COLORS.white));
+        b.appendChild(vvsText(label));
         b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
         return b;
       },
@@ -21771,7 +21976,7 @@ export class GameUI {
         Object.assign(f.style, { position: 'relative', width: `${width}px`, height: '19px', cursor: 'pointer', flexShrink: '0', display: 'flex', alignItems: 'center' });
         const t = document.createElement('div');
         Object.assign(t.style, { flexGrow: '1', minWidth: '0', overflow: 'hidden' });
-        t.appendChild(this.renderACText(text, AC_COLORS.white, 1, width - 22));
+        t.appendChild(vvsText(text));
         f.appendChild(t);
         const arrow = document.createElement('div');
         const url = this.getTexURL(0x060012b1);
@@ -21809,7 +22014,7 @@ export class GameUI {
         return host;
       },
       textTab: (label, on, onClick) => {
-        const t = this.renderACText(label, on ? AC_COLORS.gold : AC_COLORS.socialOfflineGray);
+        const t = renderVvsText(label, on ? VVS_COLORS.tabOn : VVS_COLORS.tabOff, { px: VVS_TAB_PX });
         t.dataset.tab = label;
         t.dataset.selected = on ? '1' : '0';
         t.style.position = 'relative';
@@ -21818,7 +22023,176 @@ export class GameUI {
         return t;
       },
       list: (host) => this.addPanelScrollbar(host, { track: null, up: 0x06004c6c, down: 0x06004c69, thumb: 0x06004c63 }),
+      desktop: () => this.desktopKit(),
     };
+  }
+
+  /**
+   * A Windows form's parts, for the plugins' desktop programs (VTClassic's loot editor is a Windows Forms
+   * program, not a VVS view). Matched to the one screenshot of it running (ACViewer docs/images/
+   * VtankLootEditor.png, Windows 11 at 150%): the form 240 grey, its tab page 249, buttons 253 in a
+   * 201 grey line with rounded corners, white list and text boxes in a 150/154/162 line, the selected
+   * row 205/205/255, Segoe UI 9 pt. The host's own system font stands in where Segoe UI isn't installed.
+   */
+  private desktopKit(): VTankKit {
+    const vt = this.vtankKit();
+    const FONT = '12px "Segoe UI", Tahoma, "Microsoft Sans Serif", system-ui, sans-serif';
+    const C = { form: 'rgb(240, 240, 240)', page: 'rgb(249, 249, 249)', button: 'rgb(253, 253, 253)', buttonLine: 'rgb(201, 201, 201)', boxLine: 'rgb(150, 154, 162)', white: 'rgb(255, 255, 255)', selected: 'rgb(205, 205, 255)', text: 'rgb(0, 0, 0)', dim: 'rgb(109, 109, 109)' };
+    const span = (text: string, color: string = C.text, maxWidth?: number) => {
+      const t = document.createElement('span');
+      t.textContent = text;
+      Object.assign(t.style, { font: FONT, color, display: 'block', whiteSpace: maxWidth ? 'normal' : 'nowrap', ...(maxWidth ? { maxWidth: `${maxWidth}px` } : {}) });
+      t.dataset.acRunText = text;
+      return t;
+    };
+    const kit: VTankKit = {
+      ...vt,
+      colors: { text: C.text, dim: C.dim, gold: C.text, good: 'rgb(0, 128, 0)', warn: 'rgb(160, 90, 0)', bad: 'rgb(200, 0, 0)' },
+      text: (text, o = {}) => span(text, o.color ?? C.text, o.maxWidth),
+      header: (text) => { const t = span(text); t.style.fontWeight = '600'; return t; },
+      flatButton: (label, onClick, width, height = 20) => {
+        const b = document.createElement('div');
+        b.dataset.button = label;
+        Object.assign(b.style, { position: 'relative', width: `${width}px`, height: `${height}px`, boxSizing: 'border-box', border: `1px solid ${C.buttonLine}`, borderRadius: '3px', background: C.button, cursor: 'default', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: '0' });
+        b.appendChild(span(label));
+        b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+        return b;
+      },
+      dropdown: (text, onClick, width) => {
+        const f = document.createElement('div');
+        f.dataset.field = text;
+        Object.assign(f.style, { position: 'relative', width: `${width}px`, height: '21px', boxSizing: 'border-box', border: `1px solid ${C.buttonLine}`, borderRadius: '3px', background: C.button, display: 'flex', alignItems: 'center', padding: '0 18px 0 4px', overflow: 'hidden', flexShrink: '0' });
+        f.appendChild(span(text));
+        // The combo box's chevron: two strokes of the line colour.
+        const chev = document.createElement('div');
+        Object.assign(chev.style, { position: 'absolute', right: '6px', top: '5px', width: '5px', height: '5px', borderRight: `1px solid ${C.text}`, borderBottom: `1px solid ${C.text}`, transform: 'rotate(45deg)' });
+        f.appendChild(chev);
+        f.addEventListener('click', (e) => { e.stopPropagation(); onClick(f); });
+        return f;
+      },
+      input: (value, width, onChange) => {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = value;
+        Object.assign(input.style, { position: 'relative', width: `${width}px`, height: '21px', boxSizing: 'border-box', background: C.white, border: `1px solid ${C.boxLine}`, outline: 'none', color: C.text, font: FONT, padding: '0 3px', flexShrink: '0' });
+        input.addEventListener('input', () => onChange(input.value));
+        for (const ev of ['keydown', 'keypress'] as const) input.addEventListener(ev, (e) => e.stopPropagation());
+        return input;
+      },
+      check: (on, onChange) => {
+        const c = document.createElement('input');
+        c.type = 'checkbox';
+        c.checked = on;
+        c.dataset.check = on ? '1' : '0';
+        Object.assign(c.style, { margin: '0', flexShrink: '0' });
+        c.addEventListener('click', (e) => { e.stopPropagation(); onChange(c.checked); });
+        return c;
+      },
+      slider: (value, min, max, width, onChange) => {
+        const r = document.createElement('input');
+        r.type = 'range';
+        r.min = String(min); r.max = String(max); r.step = '1'; r.value = String(value);
+        r.dataset.slider = String(value);
+        Object.assign(r.style, { width: `${width}px`, margin: '0', flexShrink: '0' });
+        r.addEventListener('change', () => onChange(Number(r.value)));
+        return r;
+      },
+      row: (selected, onClick) => {
+        const r = document.createElement('div');
+        r.dataset.selected = selected ? '1' : '0';
+        Object.assign(r.style, { position: 'relative', display: 'flex', alignItems: 'center', gap: '6px', minHeight: '15px', padding: '0 3px', boxSizing: 'border-box', cursor: 'default', ...(selected ? { background: C.selected } : {}) });
+        if (onClick) r.addEventListener('click', onClick);
+        return r;
+      },
+      list: (host) => { Object.assign(host.style, { overflowY: 'auto', overflowX: 'hidden', background: C.white, border: `1px solid ${C.boxLine}`, boxSizing: 'border-box' }); },
+      // A tab page's tab: the open one on the page's colour, joined to it; the others on the form's.
+      textTab: (label, on, onClick) => {
+        const t = document.createElement('div');
+        t.dataset.tab = label;
+        t.dataset.selected = on ? '1' : '0';
+        Object.assign(t.style, { position: 'relative', padding: '2px 6px', border: `1px solid ${C.buttonLine}`, borderBottom: on ? `1px solid ${C.page}` : `1px solid ${C.buttonLine}`, background: on ? C.page : C.form, cursor: 'default' });
+        t.appendChild(span(label));
+        t.addEventListener('click', onClick);
+        return t;
+      },
+      menuLabel: (label, onClick) => {
+        const t = span(label);
+        t.style.padding = '0 6px';
+        t.style.cursor = 'default';
+        t.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+        return t;
+      },
+      menu: (anchor, items, onPick) => this.openDesktopMenu(anchor, items, onPick, FONT, C),
+    };
+    return kit;
+  }
+
+  /** A Windows menu or combo box list under `anchor`: white, a grey line, a row per item; closes on a pick or a click elsewhere. */
+  private openDesktopMenu(anchor: HTMLElement, items: Array<{ label: string; value: string }>, onPick: (value: string) => void, font: string, C: { white: string; boxLine: string; selected: string; text: string }): void {
+    this.automationMenuEl?.remove();
+    const menu = document.createElement('div');
+    menu.dataset.automationMenu = '1';
+    const hud = this.hudContainer.getBoundingClientRect();
+    const a = anchor.getBoundingClientRect();
+    const scale = this.hudScaleFactor();
+    Object.assign(menu.style, { position: 'absolute', left: `${(a.left - hud.left) / scale}px`, top: `${(a.bottom - hud.top) / scale}px`, minWidth: `${Math.max(120, a.width / scale)}px`, maxHeight: '300px', overflowY: 'auto', zIndex: '9100', pointerEvents: 'auto', background: C.white, border: `1px solid ${C.boxLine}`, boxSizing: 'border-box', padding: '2px 0' });
+    const close = () => { menu.remove(); if (this.automationMenuEl === menu) this.automationMenuEl = null; window.removeEventListener('pointerdown', outside, true); };
+    const outside = (e: Event) => { if (!menu.contains(e.target as Node)) close(); };
+    for (const i of items) {
+      const r = document.createElement('div');
+      r.textContent = i.label;
+      r.dataset.menuItem = i.value;
+      Object.assign(r.style, { font, color: C.text, padding: '2px 20px 2px 8px', whiteSpace: 'nowrap', cursor: 'default' });
+      r.addEventListener('mouseenter', () => { r.style.background = C.selected; });
+      r.addEventListener('mouseleave', () => { r.style.background = ''; });
+      r.addEventListener('click', (e) => { e.stopPropagation(); close(); onPick(i.value); });
+      menu.appendChild(r);
+    }
+    this.hudContainer.appendChild(menu);
+    this.automationMenuEl = menu;
+    setTimeout(() => window.addEventListener('pointerdown', outside, true), 0);
+  }
+
+  /** A Windows program's window over the world: a light title bar with the title and a close glyph, the form's grey body. */
+  private openDesktopDialog(title: string, W: number, H: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void, onClosed?: () => void): void {
+    this.closeVTankDialog();
+    this.vtankDialogClosed = onClosed ?? null;
+    const win = document.createElement('div');
+    win.dataset.vtankDialog = '1';
+    win.dataset.desktop = '1';
+    let pos = { x: Math.max(0, Math.round((this.hudLogicalWidth() - W) / 2)), y: 40 };
+    try { const saved = JSON.parse(globalThis.localStorage?.getItem('acjs.desktopDialog') ?? 'null') as { x: number; y: number } | null; if (saved && Number.isFinite(saved.x)) pos = saved; } catch { /* storage blocked */ }
+    Object.assign(win.style, { position: 'absolute', left: `${pos.x}px`, top: `${pos.y}px`, width: `${W}px`, height: `${H}px`, zIndex: '9050', pointerEvents: 'auto', background: 'rgb(240, 240, 240)', border: '1px solid rgb(177, 177, 177)', boxSizing: 'border-box', boxShadow: '0 4px 16px rgba(0, 0, 0, 0.45)' });
+    const bar = document.createElement('div');
+    Object.assign(bar.style, { position: 'absolute', left: '0', right: '0', top: '0', height: '28px', background: 'rgb(240, 243, 249)', display: 'flex', alignItems: 'center', paddingLeft: '8px', font: '12px "Segoe UI", Tahoma, system-ui, sans-serif', color: 'rgb(0, 0, 0)', cursor: 'default', userSelect: 'none' });
+    bar.textContent = title;
+    const x = document.createElement('div');
+    x.dataset.vtankClose = '1';
+    x.textContent = '\u2715';
+    Object.assign(x.style, { position: 'absolute', right: '0', top: '0', width: '44px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '12px system-ui, sans-serif' });
+    x.addEventListener('mouseenter', () => { x.style.background = 'rgb(196, 43, 28)'; x.style.color = 'rgb(255, 255, 255)'; });
+    x.addEventListener('mouseleave', () => { x.style.background = ''; x.style.color = ''; });
+    x.addEventListener('click', (e) => { e.stopPropagation(); this.closeVTankDialog(); });
+    bar.appendChild(x);
+    bar.addEventListener('pointerdown', (ev) => {
+      if (ev.target === x) return;
+      const sx = ev.clientX; const sy = ev.clientY;
+      const ox = parseInt(win.style.left, 10); const oy = parseInt(win.style.top, 10);
+      const scale = this.hudScaleFactor();
+      const move = (e: PointerEvent) => { win.style.left = `${Math.round(ox + (e.clientX - sx) / scale)}px`; win.style.top = `${Math.max(0, Math.round(oy + (e.clientY - sy) / scale))}px`; };
+      const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); try { globalThis.localStorage?.setItem('acjs.desktopDialog', JSON.stringify({ x: parseInt(win.style.left, 10), y: parseInt(win.style.top, 10) })); } catch { /* storage blocked */ } };
+      window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+    });
+    win.appendChild(bar);
+    const body = document.createElement('div');
+    Object.assign(body.style, { position: 'absolute', left: '6px', top: '29px', width: `${W - 12}px`, height: `${H - 35}px` });
+    win.appendChild(body);
+    const close = () => this.closeVTankDialog();
+    const redraw = () => draw(body, redraw, close);
+    this.hudContainer.appendChild(win);
+    this.vtankDialogEl = win;
+    this.vtankDialogRedraw = redraw;
+    redraw();
   }
 
   /**
@@ -21852,7 +22226,7 @@ export class GameUI {
     piece({ right: '0', bottom: '0', width: '5px', height: '5px', transform: 'scale(-1,-1)' }, corner, 'no-repeat');
     const bar = document.createElement('div');
     Object.assign(bar.style, { position: 'absolute', left: '5px', right: '5px', top: '3px', height: '18px', cursor: 'move', display: 'flex', alignItems: 'center', justifyContent: 'center' });
-    bar.appendChild(this.renderACText(title, AC_COLORS.white));
+    bar.appendChild(renderVvsText(title));
     win.appendChild(bar);
     piece({ left: '5px', right: '5px', top: '22px', height: '5px' }, this.getTexURL(0x060074c1), 'repeat-x');
     const close = document.createElement('div');
@@ -21894,6 +22268,7 @@ export class GameUI {
     this.vtankRedraw = redraw;
     redraw();
     void model.load(redraw);
+    this.vvsWindowShown();
   }
 
   private closeVTankWindow(): void {
@@ -21903,6 +22278,7 @@ export class GameUI {
     this.vtankRedraw = null;
     this.automationMenuEl?.remove();
     this.automationMenuEl = null;
+    this.refreshVvsBar();
   }
 
   private metaViews = new Map<string, HTMLDivElement>();
@@ -21935,7 +22311,7 @@ export class GameUI {
   setMetaViewLabel(view: string, control: string, text: string): boolean {
     const b = this.metaViewButton(view, control);
     if (!b) return false;
-    b.replaceChildren(this.renderACText(text, AC_COLORS.white));
+    b.replaceChildren(renderVvsText(text));
     b.dataset.button = text;
     return true;
   }
@@ -22044,7 +22420,7 @@ export class GameUI {
    * column on the left; with search, a filter field on top. Closes on a pick,
    * Escape or a click elsewhere.
    */
-  private openAutomationMenu(anchor: HTMLElement, items: Array<{ label: string; value: string; hint?: string; group?: string }>, onPick: (value: string) => void, o: { search?: boolean; groups?: string[]; width?: number }): void {
+  private openAutomationMenu(anchor: HTMLElement, items: Array<{ label: string; value: string; hint?: string; group?: string }>, onPick: (value: string) => void, o: { search?: boolean; groups?: string[]; width?: number; vvs?: boolean }): void {
     this.automationMenuEl?.remove();
     const menu = document.createElement('div');
     menu.dataset.automationMenu = '1';
@@ -22056,7 +22432,9 @@ export class GameUI {
     const scale = this.hudScaleFactor();
     const left = Math.max(0, Math.min((a.left - hud.left) / scale, this.hudLogicalWidth() - W - 4));
     const top = (a.bottom - hud.top) / scale + 1;
-    const plate = this.buildDialogPlate(W, 10);
+    // A VVS window's dropdown (o.vvs) opens VVS's list: black, a 1 px tan line, its Times New Roman rows (vvsText.ts).
+    const plate = o.vvs ? document.createElement('div') : this.buildDialogPlate(W, 10);
+    if (o.vvs) Object.assign(plate.style, { position: 'relative', width: `${W}px`, boxSizing: 'border-box', background: AC_COLORS.black, border: `1px solid ${VVS_COLORS.line}` });
     Object.assign(menu.style, { position: 'absolute', left: `${left}px`, top: `${top}px`, zIndex: '9100', pointerEvents: 'auto' });
     plate.style.height = 'auto';
     menu.appendChild(plate);
@@ -22087,12 +22465,14 @@ export class GameUI {
     listBox.append(list, listBar);
     const rowEl = (label: string, hint: string | undefined, hl: boolean, w: number, click: () => void) => {
       const r = document.createElement('div');
-      const t0 = this.getTexURL(0x060012b3);
-      const t1 = this.getTexURL(0x060012b4);
+      const t0 = o.vvs ? null : this.getTexURL(0x060012b3);
+      const t1 = o.vvs ? null : this.getTexURL(0x060012b4);
       Object.assign(r.style, { position: 'relative', height: '18px', width: `${w}px`, flexShrink: '0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 4px', boxSizing: 'border-box', cursor: 'pointer',
         ...(t0 ? { backgroundImage: `url(${hl && t1 ? t1 : t0})`, backgroundSize: '100% 100%' } : {}) });
-      r.appendChild(this.renderACText(label, AC_COLORS.white));
-      if (hint) r.appendChild(this.renderACText(hint, AC_COLORS.textMed));
+      r.appendChild(o.vvs ? renderVvsText(label) : this.renderACText(label, AC_COLORS.white));
+      if (hint) r.appendChild(o.vvs ? renderVvsText(hint, VVS_COLORS.tabOff) : this.renderACText(hint, AC_COLORS.textMed));
+      // VVS's open list has no hover art in any screenshot we have; only the chosen group is marked, in the open tab's goldenrod.
+      if (o.vvs && hl) r.style.outline = `1px solid ${VVS_COLORS.tabOn}`;
       if (t0 && t1 && !hl) { r.addEventListener('mouseenter', () => { r.style.backgroundImage = `url(${t1})`; }); r.addEventListener('mouseleave', () => { r.style.backgroundImage = `url(${t0})`; }); }
       r.addEventListener('click', (e) => { e.stopPropagation(); click(); });
       return r;

@@ -33,6 +33,8 @@ import { VT_ACTION_HELP, VT_CONDITION_HELP } from './metaHelp.js';
 import { renderVTankHistory, renderVTankRemote, VT_HISTORY_SIZE, VT_REMOTE_SIZE } from './VTankRemote.js';
 import { VtLootEditor } from './lootEditor.js';
 import { ubNetCommand, type UbNet } from '../../agent/ubNet.js';
+import { VhsHotkeys, type RetailKeys, type VhsStorage } from './vhsHotkeys.js';
+import { renderVhsAddVvs, renderVhsWindow, VHS_ADD_VVS_SIZE, VHS_SIZE, vtankHotkeys } from './VhsWindow.js';
 
 export type VtTab = 'options' | 'profiles' | 'vitals' | 'monsters' | 'items' | 'consumables' | 'buffs' | 'route' | 'meta';
 
@@ -73,6 +75,8 @@ export interface VTankSource extends AutomationSource {
   /** VirindiTank's Force Buff / Cancel Force Buff. */
   forceBuff(): { ok: boolean; message: string };
   cancelForceBuff(): { ok: boolean; message: string };
+  /** VirindiTank's "Loot this Container" hotkey: the open (else selected) container, looted by the loot rules (RoutineEngine.lootThis). */
+  lootThis?(): { ok: boolean; message: string };
   /** The active era's SpellTable (options that need a spell the era lacks are hidden); null while unknown. */
   spellTable?(): { spells: Map<number, { desc: string }> } | null;
   /** The selected object's name and kind (Route's Add Portal/NPC, Open Vendor; Items / Consumables' Add: an item you carry is kind 'item'), and its object id when known. */
@@ -123,18 +127,31 @@ export interface VTankKit extends AutomationKit {
   names?(): VtNames;
   /** This tab's UtilityBelt network client (/ub bc, bct, netclients; agent/ubNet.ts), null without one. */
   net?(): UbNet | null;
+  /** Where the hotkeys are kept (browser storage), and the world they are kept under (vhsHotkeys.ts). */
+  storage?(): VhsStorage | null;
+  world?(): string;
+  /** Retail's key bindings (the Keyboard Config's KeybindRegistry): a hotkey never takes one of its keys. */
+  retailKeys?(): RetailKeys | null;
+  /** The same parts as a Windows form draws them, for the plugins' desktop programs (VTClassic's loot editor). */
+  desktop?(): VTankKit;
+  /** A menu-strip entry (File, Edit, …) where the kit has one; else a text tab stands in. */
+  menuLabel?(label: string, onClick: () => void): HTMLElement;
 }
 
 /** A second window (Edit Meta Rule) the host floats over the world. */
 export interface VTankDialogs {
   /** `onClosed` runs however the dialog goes (its close box, another dialog taking its place, close()). */
   open(title: string, w: number, h: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void, onClosed?: () => void): void;
+  /** The same, in a Windows program's frame (the plugins' desktop programs: VTClassic's loot editor). */
+  openDesktop?(title: string, w: number, h: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void, onClosed?: () => void): void;
   close(): void;
   /** A window of its own (the Action History, the remote), by key; opening an open one brings it back as it is. */
   window?(key: string, title: string, w: number, h: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void): void;
   closeWindow?(key: string): void;
   /** Show or hide the main window (the remote's M, the Options tab's Remote). */
   showMain?(on: boolean): void;
+  /** Whether a window is open: 'main', or a window() key. */
+  isOpen?(key: string): boolean;
 }
 
 /** VirindiTank's Options tab: each option's place (Vtank_Main.PNG). Drawn only when the engine acts on it. */
@@ -448,7 +465,17 @@ export class VTankWindow {
       giveFile: (f) => this.giveFile(f),
       newProfile: () => { this.lootNew(); this.redrawWindow(); },
     });
+    this.hotkeys = new VhsHotkeys({
+      list: () => vtankHotkeys(this),
+      storage: () => this.kit.storage?.() ?? null,
+      who: () => { const ch = this.source.character(); return ch ? { world: this.kit.world?.() ?? '', character: ch } : null; },
+      retail: () => this.kit.retailKeys?.() ?? null,
+      report: (line) => this.source.report(line),
+    });
   }
+
+  /** The hotkeys (the Virindi Hotkey System's window, vhsHotkeys.ts / VhsWindow.ts). */
+  readonly hotkeys: VhsHotkeys;
 
   get document(): RoutineDoc | null { return this.doc; }
 
@@ -658,6 +685,7 @@ export class VTankWindow {
     // beside Run Macro; here in the free space under Summon Pets, as VTank's tab has no room by Run Macro).
     area.appendChild(at(tag(kit.flatButton('History', () => this.openHistory(), 60), { vtank: 'history' }), 560, 89));
     if (this.dialogs.window) area.appendChild(at(tag(kit.flatButton('Remote', () => this.openRemote(), 60), { vtank: 'remote' }), 626, 89));
+    if (this.dialogs.window) area.appendChild(at(tag(kit.flatButton('Hotkeys', () => this.openHotkeys(), 60), { vtank: 'hotkeys' }), 692, 89));
     const status = el('div', { position: 'absolute', left: '560px', top: '111px', width: '170px', height: '16px', overflow: 'hidden', whiteSpace: 'nowrap' }, { vtank: 'status' });
     status.appendChild(kit.text(vtStatusText(st, this.running()), { color: c.dim }));
     area.appendChild(status);
@@ -1446,6 +1474,45 @@ export class VTankWindow {
     this.dialogs.window('remote', 'Automation', VT_REMOTE_SIZE.w, VT_REMOTE_SIZE.h, (body, redraw, close) => renderVTankRemote(body, this.kit, this, redraw, () => { close(); this.dialogs.showMain?.(true); }));
   }
 
+  /** The hotkey window (Options → Hotkeys, /vt hotkeys): VHS's list with Set, Unset, Reset and Add VVS. */
+  openHotkeys(): void {
+    if (!this.dialogs.window) return;
+    this.dialogs.window('hotkeys', 'Hotkeys', VHS_SIZE.w, VHS_SIZE.h, (body, redraw) => {
+      this.hotkeys.onChange = redraw;
+      this.hotkeys.windowOpen = () => body.isConnected;
+      renderVhsWindow(body, this.kit, this.hotkeys, redraw, () => this.openAddVvs());
+    });
+  }
+
+  /** VHS's Add VVS: the windows a hotkey can open or close. */
+  private openAddVvs(): void {
+    if (!this.dialogs.window) return;
+    const titles = this.vvsWindows().map((w) => w.title);
+    this.dialogs.window('hotkeys-vvs', 'Add VVS...', VHS_ADD_VVS_SIZE.w, VHS_ADD_VVS_SIZE.h, (body, redraw, close) => renderVhsAddVvs(body, this.kit, this.hotkeys, titles, redraw, close));
+  }
+
+  /** The VVS-style windows a hotkey can open or close (Add VVS): the main window, the Action History, the remote, the hotkeys. */
+  vvsWindows(): Array<{ title: string; toggle(): void }> {
+    const d = this.dialogs;
+    if (!d.window || !d.closeWindow || !d.isOpen) return [];
+    const open = (k: string) => d.isOpen!(k);
+    return [
+      { title: 'Automation', toggle: () => d.showMain?.(!open('main')) },
+      { title: 'Action History', toggle: () => { if (open('history')) d.closeWindow!('history'); else this.openHistory(); } },
+      { title: 'Remote', toggle: () => { if (open('remote')) { d.closeWindow!('remote'); d.showMain?.(true); } else this.openRemote(); } },
+      { title: 'Hotkeys', toggle: () => { if (open('hotkeys')) d.closeWindow!('hotkeys'); else this.openHotkeys(); } },
+    ];
+  }
+
+  /** The meta states a hotkey can set: the running profile's, else the shown one's. */
+  metaStates(): string[] {
+    const p = (this.source.status().running ? this.source.current() : null) ?? this.profile();
+    return p ? p.states.map((s) => s.name) : [];
+  }
+
+  /** Whether this tab has UtilityBelt's network (VitalSharing's hotkey). */
+  ubNetAvailable(): boolean { return !!this.kit.net?.(); }
+
   /** Whether a switch is on (the running macro's value, else the profile's, else VTank's default). */
   isOn(name: string): boolean { const v = this.value(name); return v === true || v === 'true'; }
 
@@ -1564,6 +1631,8 @@ export class VTankWindow {
       case 'propertydump': return this.source.propertyDump ? this.source.propertyDump() : ['/vt propertydump is not available here'];
       case 'mexec': try { return [this.source.mexec(tail)]; } catch (e) { return [`expression failed: ${(e as Error).message}`]; }
       case 'echo': return [tail];
+      // Ours: VHS opened from Decal's bar and had no chat command.
+      case 'hotkeys': this.openHotkeys(); return this.dialogs.window ? [] : ['/vt hotkeys is not available here'];
       case 'jump': {
         const [h, shift, ms] = rest;
         return done(this.source.jump({ ...(h !== undefined ? { heading: Number(h) } : {}), ...(shift !== undefined ? { walk: /^true$/i.test(shift) } : {}), ...(ms !== undefined ? { holdMs: Number(ms) } : {}) }));

@@ -12,10 +12,47 @@
  * `AutoVendor.NeverSell` is ours: names AutoVendor never sells, on top of the
  * items UB itself never sells (worn, retained, attuned, inscribed, tinkered,
  * imbued, packs, foci, rares, zero value).
+ *
+ * Nametags (UB Tools/Nametags.cs, Lib/Settings/NametagDisplay.cs; drawn by
+ * scene/Nametags.ts): `Nametags.Enabled`, `Nametags.MaxRange` and, per tag
+ * type, `Nametags.<Type>.Enabled / TagColor / TagSize / TickerColor /
+ * TickerSize` with UB's defaults (colours are UB's signed ARGB ints), except
+ * `Nametags.Enabled`: UB turns it on, here it starts off (Jake, 2026-10-12)
+ * because nametags are not retail UI.
  */
 import type { LootRule } from '@ac/shared';
+import { UB_MAP_SETTING_DEFAULTS } from '../../ui/maps/ubMapSettings.ts';
 
 export type UbSettingValue = boolean | number | string | string[];
+
+/** UB's nametag types (the `NametagDisplay` fields of Nametags.cs), in UB's order. */
+export const UB_NAMETAG_TYPES = ['Player', 'Pet', 'AllegiancePlayer', 'Portal', 'Npc', 'Vendor', 'Monster'] as const;
+export type UbNametagType = (typeof UB_NAMETAG_TYPES)[number];
+
+/** UB's per-type defaults: `new NametagDisplay(enabled, tagColor, tagSize, tickerColor, tickerSize)`. */
+const NAMETAG_DISPLAY_DEFAULTS: Record<UbNametagType, [boolean, number, number, number, number]> = {
+  Player: [true, -16711681, 0.15, -16711681, 0.1],
+  Pet: [true, -16711681, 0.15, -16711681, 0.1],
+  AllegiancePlayer: [true, -16711936, 0.15, -16711936, 0.1],
+  Portal: [true, -16711936, 0.15, -16711936, 0.1],
+  Npc: [true, -256, 0.15, -256, 0.1],
+  Vendor: [true, -65281, 0.15, -65281, 0.1],
+  Monster: [true, -65536, 0.15, -65536, 0.1],
+};
+
+function nametagDefaults(): Record<string, UbSettingValue> {
+  // UB's Enabled defaults to true; ours is off until the player turns it on (not retail UI).
+  const out: Record<string, UbSettingValue> = { 'Nametags.Enabled': false, 'Nametags.MaxRange': 35 };
+  for (const t of UB_NAMETAG_TYPES) {
+    const [enabled, tagColor, tagSize, tickerColor, tickerSize] = NAMETAG_DISPLAY_DEFAULTS[t];
+    out[`Nametags.${t}.Enabled`] = enabled;
+    out[`Nametags.${t}.TagColor`] = tagColor;
+    out[`Nametags.${t}.TagSize`] = tagSize;
+    out[`Nametags.${t}.TickerColor`] = tickerColor;
+    out[`Nametags.${t}.TickerSize`] = tickerSize;
+  }
+  return out;
+}
 
 /** UB's settings this client runs, with UB's defaults. */
 export const UB_SETTING_DEFAULTS: Readonly<Record<string, UbSettingValue>> = Object.freeze({
@@ -45,9 +82,12 @@ export const UB_SETTING_DEFAULTS: Readonly<Record<string, UbSettingValue>> = Obj
   'Jumper.PauseNav': true,
   'Jumper.ThinkComplete': false,
   'Jumper.ThinkFail': false,
+  ...nametagDefaults(),
   'Plugin.PortalAttempts': 3,
   'Plugin.PortalThink': false,
   'Plugin.PortalTimeout': 5000,
+  // Dungeon Maps and Landscape Maps (ui/maps/ubMapSettings.ts).
+  ...UB_MAP_SETTING_DEFAULTS,
 });
 
 /** UB's AutoXp default policy (AutoXp.cs `Policy`): weight per target; higher spends more there. */

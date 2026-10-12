@@ -11,5 +11,6 @@
 ## Links
 
 - [Play](https://playwebac.com/)
+- [About and FAQ](https://playwebac.com/about/)
 - [Source code and README](https://github.com/jakemmarsh/webac)
 - [Report a bug](https://github.com/jakemmarsh/webac/issues)

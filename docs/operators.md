@@ -47,12 +47,49 @@ Pick one:
    by real address. See the bridge [README](../services/ws-tcp-bridge/README.md)
    for every option.
 
+## If your world blocks VPNs or proxies
+
+The hosted bridge runs in a cloud data centre, so IP-reputation and anti-VPN
+checks flag every browser player. Seen on Conquest (2026-10-12): the server
+says "VPN/Proxy connections are not permitted on this server" in chat and
+leaves the character in portal space. To let browser players in, exempt the
+bridge's egress address from the check (as of 2026-10-12, `50.18.108.214`;
+it can change when the hosting moves, so open an issue to confirm the current
+one), or run your own bridge as above. The bridge logs each session's real
+address if you want to screen players yourself.
+
+**Survey, 2026-10-12** (`tools/probe-world-access.ts`: one throwaway account
+and character per online world through playwebac.com, listening 25 s in the
+world). Of 34 online worlds:
+- **27 let webAC players in:** ACPrime, Asheron4Fun.com, BartleSkeetHG,
+  Buadren AC, Coldeve, Derptide, Doctide, DreamWeave, Drunkenfell, Eversong,
+  Frostcull, FrostfACE, Harvestagain, InfiniteLeaftide, Jellocull, LeafDawn,
+  Leafdawning, Levistras, Mistwood, Morgentau, PortalStorm, Shadowgain,
+  Shadowland, Soulclaim, Sundering, The Tower, Thistlecrown.
+- **2 block the bridge as a VPN:** Conquest (in the world: chat line, held in
+  portal space) and AChard (at login: "You have been booted… Connections from
+  VPN / proxy disallowed by server policy").
+- **1 unclear:** Modclaim completes the handshake but never sends the
+  character list (2+ minutes, twice); a silent block or a server problem.
+- **2 need web registration first** (no first-login account creation, not an
+  IP block): Reefcull and Harvestbud (GDLE web form). A fresh account times
+  out with "Client timed out the connection".
+- Seedsow and Snowreap (same host) timed out during the survey, but a fresh
+  account's first login on Seedsow worked minutes later through
+  playwebac.com, and a local GDL-Classic server creates and logs in a fresh
+  account on the first try: a transient server-side stall, not a webAC bug
+  and not registration.
+
 ## Accounts and registration
 
 If your world creates accounts on first login, the launcher tells new
 players that. If you require web or Discord registration, the launcher can
-show a one-line note with your link; open an issue with the text and a
-source (your website or Discord) and we'll add it.
+show a note with your link (the bridge's `registration` text plus
+`registrationUrl`, in services/ws-tcp-bridge/src/serverCompat.ts): the note
+and a "Register" link appear in the world's details, and a first login that
+times out repeats the note with the link. Reefcull and Harvestbud have one.
+Open an issue with the text and a source (your website or Discord) and
+we'll add it.
 
 ## GDLE worlds
 

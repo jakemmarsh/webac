@@ -44,6 +44,8 @@ export interface DirectoryEntry {
   compat: Compat;
   compatNote: string | null;
   registration: string | null;
+  /** Where to register (http/https), or null. */
+  registrationUrl: string | null;
   /** The era profile the server needs; null = end of retail. */
   era: string | null;
 }
@@ -145,6 +147,7 @@ export function buildDirectory(
       compat: c.compat,
       compatNote: c.note ?? null,
       registration: c.registration ?? null,
+      registrationUrl: c.registrationUrl ?? null,
       era: c.era ?? null,
     };
   });

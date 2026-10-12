@@ -193,6 +193,15 @@ agents check the live server's world DB with read-only SELECTs:
 portal destinations in `weenie_properties_position` position_Type 2, levels in `weenie_properties_int`
 type 25, and NPC dialogue in `weenie_properties_emote_action.message`.
 
+**Adventure first, but levelling is the game's goal (Jake, 2026-10-12).** Over about four hours of two sittings the
+Opus pair went from level 12 to 14 with roughly 37 killing blows between them: most of the time went to lore
+detours, a destination across a river they couldn't reach, shopping and buffing stops, and corpse runs, and after
+two deaths to level-20–30 monsters they hunted level-8 drudges. Jake: "i do still want the emphasis to be on
+open-ended adventure that makes them actually enjoy themselves, but leveling is ultimately the goal of the game".
+The brief keeps the open-ended adventure and adds: pick adventures that also pay XP (XP quests, dungeons and
+hunting grounds near their level), hunt when between ideas, keep detours quick, check `ac_character` (total XP and
+XP to next level) at the start, and report XP before and after with roughly how much of the session was fighting.
+
 ## What a player sees that the agent is told (2026-10-11)
 
 The agent only knows what the tools say, so anything a player reads off the screen has to reach it as text. Information,
@@ -236,8 +245,11 @@ here, not having to hardcode behavior").
   tool's time), stops it, and names an open dialog; a walk judges a door only after the server answered the Use,
   gives a door that ignored its Use (ACE ignores a Use while the door swings) a second try, and never blames a door
   that opened.
-- **Purse.** Above level 5 a death drops half your coins and trade notes aren't coins (ACE
-  `Player_Death.GetNumCoinsDropped`); observe says so beside a purse of 1,000 or more. 412 vendors sell trade notes.
+- **Purse.** Above level 5 a death takes half your coins and trade notes aren't coins (ACE
+  `Player_Death.GetNumCoinsDropped`; with ACE's default `corpse_destroy_pyreals` they are destroyed, not left on the
+  corpse); observe says "half are lost if you die" beside a purse of 1,000 or more. 412 vendors sell trade notes. On
+  ACE a vendor takes only pyreals for a sale (`Player_Commerce.SpendCurrency` spends coin stacks), so sell a trade note
+  back when you need cash.
 
 - **The evening's batch (2026-10-11, Arcanist + Bulwark).** A stack's value is the stack's own (ACE `Value =
   StackUnitValue × StackSize`; the inventory had squared it). Nanto's upstairs Journeyman Scriveners did open their
@@ -262,6 +274,32 @@ here, not having to hardcode behavior").
   no level, quietly, once each (routines' own looks don't). The daemon's shutdown has a 30 s deadline, a second
   SIGTERM ends it at once, and the bridge and Vite are killed as process groups (`tools/ac-agent/shutdown.ts`:
   browser.close hung and left the daemon up for 20 minutes, deaf to SIGTERM).
+
+- **The river batch (2026-10-12, Arcanist + Bulwark around Holtburg).** Most of the session went into the river
+  east of Holtburg: walks stalled at z 27.55, every search "none", and ac_map drew 24 m rectangles of `#`. The client
+  stopped a player at every fully flooded *cell*; retail (`CLandCell::find_env_collisions` @ 00532f20,
+  `get_block_water_type`; ACE `LandCell.cs`; the 1999 server's `LandCell.cpp`) stops one only where the whole
+  *landblock* is water (open sea), and a flooded cell is waded 0.9 m deep. Fixed in `OutdoorMovement` / `WaterMap`
+  for every era (tests/verify-agent-river-holtburg.ts walks the real DAT terrain). Walks now also answer promptly
+  when there is no way: a search that walked every point it could reach says the ground is closed in (with its
+  area), a walk back where it stood 30 s ago, no nearer, stops ("went round in circles"), a coordinate out in open
+  sea is refused before a step, and a stuck walk names open sea or an unclimbable slope on the line to the goal
+  (host `navTerrain`). An attack whose run-up finds no way ends as `target-lost` with the reason. `stay_with` waits
+  only for a fellow *behind* you (two players both walking with it used to wait for each other), and says when they
+  stand still (12 s) or head elsewhere instead of waiting 45 s. **`ac_follow`** follows a player (within N m,
+  re-aiming, standing while they stand, for duration_s): retail has no follow command (none in the decomp), this is
+  VirindiTank's Follow nav / `/ub follow`. `ac_buy` waits for each buy's answer and queues the next (ACE refuses a
+  service while the vendor `IsBusy` casting the last one); `ac_vendor` marks services (ItemType TYPE_SERVICE
+  0x100000: "service: casts it on you when you buy it; not a scroll"). `ac_loot` waits for peace mode to really take
+  (a mode change asked mid-swing goes out later and cut the server's walk to the corpse short) and Uses once more if
+  nothing opened. `ac_attack` on a monster that just died says so and where its corpse is. `ac_give` that the
+  server cancels ("… can't be given - action cancelled": its walk to them was cut short; coins are not special)
+  tries once more, then says what works. `ac_inventory` lists each side pack's contents under it and says when a
+  pack is empty. The daemon answers any call within 240 s ("still in progress" for a long walk): Node's fetch gives
+  up after 300 s with a bare "fetch failed". Checked, not bugs: chat lines and `seq` printed twice came from the
+  agent's own `sed` ranges overlapping; a focus still burns Prismatic Tapers (ACE `SpellFormula.GetFociFormula`: the
+  scarab plus tapers by power); an Orb wielded with too little Arcane Lore stays wielded with its spells off (ACE
+  `TryActivateSpells` → `CheckUseRequirements`).
 
 ## What makes it play, not automation (Claude's view, 2026-10-07)
 

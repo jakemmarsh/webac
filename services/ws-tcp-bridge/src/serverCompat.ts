@@ -15,7 +15,8 @@
  * Keyed by Servers.xml id (case-insensitive). Evidence for each entry is the
  * listing's own description, 2026-10-04 snapshot of acresources/serverslist.
  * `registration` is a per-server note for worlds that do not create accounts
- * on first login; add one only with a source (the server's site or Discord).
+ * on first login, and `registrationUrl` the page where players register (the
+ * launcher links it); add one only with a source (the server's site or Discord).
  */
 
 export type Compat = 'ok' | 'beta' | 'incompatible';
@@ -29,7 +30,10 @@ export interface CompatEntry {
   era?: string;
   /** Short reason shown as a chip and when ENTER is refused. */
   note?: string;
+  /** One line telling a new player to register before the first login. */
   registration?: string;
+  /** Where to register (http/https); the launcher links it. */
+  registrationUrl?: string;
 }
 
 export interface CompatOverlay {
@@ -83,6 +87,23 @@ export const AC1999_COMPAT: CompatEntry = { compat: 'beta', note: AC1999_ERA_NOT
  */
 export const NO_PROBE_ERAS: ReadonlySet<string> = new Set([AC1999_ERA]);
 
+const GDLE_BETA: CompatEntry = { compat: 'beta', note: 'GDLE: beta' };
+
+/**
+ * GDLE worlds whose accounts exist only after a web-form registration (email
+ * plus reCAPTCHA; first-login auto-create is off): a fresh account's login
+ * just times out. Source: gdleac.com "Step 4: Account Creation" links each
+ * world's form, and the forms say not to use capital letters
+ * (docs/gdle-compat.md, "Public servers").
+ */
+function gdleWebRegistration(name: string, url: string): CompatEntry {
+  return {
+    ...GDLE_BETA,
+    registration: `Register on the ${name} website first (lower-case names only).`,
+    registrationUrl: url,
+  };
+}
+
 export const SERVER_COMPAT: CompatOverlay = {
   byId: {
     // "A PVE Dark Majesty server must use classic AC .dats"
@@ -94,10 +115,13 @@ export const SERVER_COMPAT: CompatOverlay = {
     '4db379b0-587a-4775-9b7f-879e0f15ba4b': CLASSICACE_CUSTOMDM, // Dekarutide
     // "... CustomDM Client ..." (its public fork expects "c111"; detection corrects it)
     '3f1f41ec-c7fd-4ed9-b47d-25b0d94219c1': CLASSICACE_CUSTOMDM, // Unfamiliar Shores
+    // Web-form registration only (byId wins over byEmu, so these repeat GDLE_BETA).
+    'a7502ac9-0cec-4caf-b81c-b3eb40a4689a': gdleWebRegistration('Reefcull', 'http://reefcull.gdleac.com/'),
+    'f023fbf9-caab-4745-8205-81c4d7c061ad': gdleWebRegistration('Harvestbud', 'http://harvestbud.gdleac.com/'),
   },
   byEmu: {
-    GDL: { compat: 'beta', note: 'GDLE: beta' },
-    GDLE: { compat: 'beta', note: 'GDLE: beta' },
+    GDL: GDLE_BETA,
+    GDLE: GDLE_BETA,
     AC1999: AC1999_COMPAT,
   },
 };

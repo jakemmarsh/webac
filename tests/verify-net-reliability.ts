@@ -237,13 +237,17 @@ function connectHarness(): Harness {
   const ws = FakeWebSocket.last!;
   ws.open();
   ws.receive(connectRequest());
-  // The handshake sends the first ACK; the shared ACK/NAK stamp (retail
-  // ReceiverData::timeStamp_) then holds NAKs for 0.6 s — start past it.
+  // The server's first packet (ACE's first flush after the ConnectResponse)
+  // moves the client to cs_Connected (CONN.charlist-wait-timeout); its first
+  // service pass then ACKs, and the shared ACK/NAK stamp (retail
+  // ReceiverData::timeStamp_) holds NAKs for 0.6 s — start past it.
+  const server = new SimAceServer();
+  ws.receive(server.ackOnly());
   vi.advanceTimersByTime(700);
   const delivered = new Set<number>();
   const clientPackets = () => ws.sent.filter(p => p.length >= PACKET_HEADER_SIZE).map(p => ({ h: readPacketHeader(p, 0), p }));
   return {
-    conn, ws, server: new SimAceServer(), tags, events, delivered,
+    conn, ws, server, tags, events, delivered,
     deliver(p) { delivered.add(readPacketHeader(p, 0).sequence); ws.receive(p); },
     acksSent: () => clientPackets().filter(x => x.h.flags === PacketHeaderFlags.AckSequence)
       .map(x => new DataView(x.p.buffer, x.p.byteOffset + PACKET_HEADER_SIZE).getUint32(0, true)),
@@ -545,7 +549,7 @@ describe('NET.duplicate-connectrequest-rekeys + session end', () => {
     const lastSeq = () => readPacketHeader(h.ws.sent.at(-1)!, 0).sequence;
     expect(lastSeq()).toBe(2);
     h.ws.receive(connectRequest(0x11)); // same cookie
-    expect(connectResponsesIn(h, 1000)).toBe(2); // one 500 ms timer, not two
+    expect(connectResponsesIn(h, 1000)).toBe(0); // no resend timer restarted on a joined session
     h.conn.sendMessage(message(2));
     expect(lastSeq()).toBe(3); // sequence (and ISAAC stream) continued
     const crypto = new CryptoSystem(CLIENT_SEED);
@@ -717,5 +721,82 @@ describe('RELEASE.gdle-30s-idle-drop — retail\'s ~3 s sequenced TimeSync + Ech
     const resent = seqd().filter(p => readPacketHeader(p, 0).sequence === 2);
     expect(resent).toHaveLength(2);
     expect(resent[1].slice(PACKET_HEADER_SIZE)).toEqual(action.slice(PACKET_HEADER_SIZE));
+  });
+});
+
+// CONN.charlist-wait-timeout — retail's handshake half-state. After the
+// ConnectAck the receiver stays in cs_ConnectionRequestAcked until the
+// server's first packet without the ConnectRequest flag
+// (ClientNet::ProcessPacket @ 00545100); meanwhile ClientNet::ProcessConnection
+// @ 00545450 only resends the ConnectAck every 0.333 s
+// (HANDSHAKE_WAIT_FOR_CONNECTION_TIMEOUT), uncapped, with no PAK and no
+// keepalive, bounded by the 140 s no-data drop. Modclaim (2026-10-12) left
+// char select on "Please Wait" for good: our ACK + TimeSync/Echo traffic
+// kept a server session that never took the ConnectResponse alive.
+describe('CONN.charlist-wait-timeout — cs_ConnectionRequestAcked until the server\'s first packet', () => {
+  function handshakeOnly(): { conn: ClientConnection; ws: FakeWebSocket; events: ConnectionEvent[] } {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const conn = new ClientConnection('ws://sim');
+    conn.autoReconnect = false;
+    const events: ConnectionEvent[] = [];
+    conn.on(e => events.push(e));
+    conn.connect('acct', 'pw');
+    const ws = FakeWebSocket.last!;
+    ws.open();
+    ws.receive(connectRequest());
+    return { conn, ws, events };
+  }
+  const flagsSent = (ws: FakeWebSocket, from = 0) =>
+    ws.sent.slice(from).filter(p => p.length >= PACKET_HEADER_SIZE).map(p => readPacketHeader(p, 0).flags);
+
+  it('resends the ConnectResponse every 0.333 s with no cap, and sends nothing else', () => {
+    const { ws, events } = handshakeOnly();
+    const start = ws.sent.length;
+    vi.advanceTimersByTime(60_000);
+    const sent = flagsSent(ws, start);
+    expect(sent.every(f => f === PacketHeaderFlags.ConnectResponse)).toBe(true);
+    // 60 s / 0.333 s = 180 resends; the old client gave up after 20 (10 s).
+    expect(sent.length).toBeGreaterThanOrEqual(179);
+    expect(sent.length).toBeLessThanOrEqual(181);
+    expect(events.some(e => e.type === 'handshakeComplete')).toBe(true);
+    expect(events.some(e => e.type === 'disconnected')).toBe(false);
+  });
+
+  it('a server that never answers the handshake ends in one ServerDied-shaped disconnect at 140 s', () => {
+    const { conn, ws, events } = handshakeOnly();
+    vi.advanceTimersByTime(139_000);
+    expect(events.filter(e => e.type === 'disconnected')).toHaveLength(0);
+    vi.advanceTimersByTime(2_000);
+    const d = events.filter(e => e.type === 'disconnected');
+    expect(d).toHaveLength(1);
+    expect(d[0]).toMatchObject({ everOpened: true, deliberate: false });
+    expect(conn.isConnected).toBe(false);
+    const n = ws.sent.length;
+    vi.advanceTimersByTime(10_000);
+    expect(ws.sent.length).toBe(n); // resends stopped with the session
+  });
+
+  it('the first non-ConnectRequest server packet stops the resends and starts the ACK + keepalive service', () => {
+    const { ws } = handshakeOnly();
+    vi.advanceTimersByTime(1_000);
+    const server = new SimAceServer();
+    ws.receive(server.ackOnly()); // any packet, not only a blob (ACE's first flush may be a TimeSync)
+    const from = ws.sent.length;
+    vi.advanceTimersByTime(7_000);
+    const sent = flagsSent(ws, from);
+    expect(sent).not.toContain(PacketHeaderFlags.ConnectResponse);
+    expect(sent).toContain(PacketHeaderFlags.AckSequence);
+    expect(sent.filter(f => f === (PacketHeaderFlags.TimeSync | PacketHeaderFlags.EchoRequest | PacketHeaderFlags.EncryptedChecksum))).toHaveLength(2);
+  });
+
+  it('a duplicate ConnectRequest during the half-state does not stack a second resend timer', () => {
+    const { ws } = handshakeOnly();
+    ws.receive(connectRequest()); // same cookie
+    const from = ws.sent.length;
+    vi.advanceTimersByTime(3_330);
+    const n = flagsSent(ws, from).filter(f => f === PacketHeaderFlags.ConnectResponse).length;
+    expect(n).toBeGreaterThanOrEqual(9);
+    expect(n).toBeLessThanOrEqual(10);
   });
 });

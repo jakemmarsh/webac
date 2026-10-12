@@ -14,7 +14,7 @@
  *   reports the end. Stopping it there made a 30 m walk to a vendor a
  *   failure (Jake, 2026-10-10: Claude gave up after "use" failed at 60 s).
  */
-import { READ_METHODS } from './claudeControl.js';
+import { READ_METHODS, stillInProgressMessage } from './claudeControl.js';
 
 export interface RelayCall { id: number; method: string; args: unknown[]; deadlineMs: number }
 
@@ -77,7 +77,7 @@ export class TabRelay {
         if (READ_METHODS.has(call.method)) { this.reply(call.id, false, `${call.method} took longer than ${s} s`); return; }
         // Still walking / using: it keeps going (the player can always take over); its task-done event says when it ends.
         ok = true;
-        this.reply(call.id, true, { ok: true, message: `${call.method} is still in progress after ${s} s and keeps going: ac_wait types=task-done to hear when it finishes, or ac_observe to see where you are` });
+        this.reply(call.id, true, { ok: true, message: stillInProgressMessage(call.method, s) });
         return;
       }
       ok = true;

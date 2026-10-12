@@ -89,8 +89,9 @@ export function formatObservation(obs: AgentObservation): string {
   const v = (x: { cur: number; max: number }): string => `${x.cur}/${x.max}`;
   out.push(`${me.name} (L${me.level})${me.dead ? '  ** DEAD **' : ''}  HP ${v(me.health)}  ST ${v(me.stamina)}  MA ${v(me.mana)}  mode ${me.combatMode}`);
   out.push(`at ${me.coords ?? 'indoors'}  cell ${me.cell}  facing ${Math.round(me.heading)}° (${compassPoint(me.heading)})${me.task ? `  task: ${me.task}` : ''}`);
-  // ACE Player_Death.GetNumCoinsDropped: above level 5 a death drops half your coins; trade notes are not coins.
-  const coinRisk = me.pyreals !== undefined && me.pyreals >= 1000 && me.level > 5 ? ' (half drop if you die; trade notes, bought from most vendors, don\'t)' : '';
+  // ACE Player_Death.GetNumCoinsDropped: above level 5 a death takes half your coins (onto the corpse, or destroyed
+  // outright where the server sets corpse_destroy_pyreals, ACE's default); trade notes are not coins.
+  const coinRisk = me.pyreals !== undefined && me.pyreals >= 1000 && me.level > 5 ? ' (half are lost if you die; trade notes, bought from most vendors, aren\'t coins)' : '';
   if (me.pyreals !== undefined || me.burden || me.xp) out.push(`pyreals ${me.pyreals ?? '?'}${coinRisk}${me.burden ? `  burden ${me.burden}` : ''}${me.xp ? `  unassigned xp ${me.xp.unassigned.toLocaleString('en-US')}${me.xp.unassigned >= 1000 ? ' (spend it: ac_raise)' : ''}` : ''}`);
   for (const [i, d] of obs.dialogs.entries()) out.push(`DIALOG ${i} [${d.buttons.join(' / ')}]: ${d.text.replace(/\s+/g, ' ')}`);
   if (obs.dialogs.length) out.push('  (answer or dismiss each with ac_dialog, e.g. button=OK; a dialog stays up until you do)');
@@ -134,15 +135,24 @@ export const FOCI_WCIDS: ReadonlyMap<number, string> = new Map([
 
 export function formatInventory(items: AgentItem[]): string {
   if (!items.length) return '(empty)';
+  // A side pack's contents are listed under it (by its guid: two Sacks are two packs), right after the pack slots,
+  // and each pack says how much it holds: "inventory never lists the Sack's contents" (Arcanist, 2026-10-12).
+  const key = (it: AgentItem): string => (it.inside !== undefined ? `${it.where} #${it.inside.toString(16)}` : it.where);
   const groups = new Map<string, AgentItem[]>();
   for (const it of items) {
-    const g = groups.get(it.where) ?? [];
+    const g = groups.get(key(it)) ?? [];
     g.push(it);
-    groups.set(it.where, g);
+    groups.set(key(it), g);
   }
+  const packs = items.filter((it) => it.where === 'pack slots' && it.itemType !== undefined && (it.itemType & 0x200) !== 0);
+  const held = (pack: AgentItem): number => items.filter((x) => x.inside === pack.guid).length;
+  const order = [...groups.keys()].filter((k) => !packs.some((p) => k.endsWith(` #${p.guid.toString(16)}`)));
+  const at = order.indexOf('pack slots');
+  order.splice(at < 0 ? order.length : at + 1, 0, ...packs.map((p) => `${p.name} #${p.guid.toString(16)}`).filter((k) => groups.has(k)));
   const out: string[] = [];
-  for (const [where, list] of groups) {
-    out.push(`${where}:`);
+  for (const where of order) {
+    const list = groups.get(where)!;
+    out.push(`${where.replace(/ #([0-9a-f]+)$/, ' (side pack #$1)')}:`);
     for (const it of list) {
       const school = it.wcid !== undefined ? FOCI_WCIDS.get(it.wcid) : undefined;
       const extra = [
@@ -151,6 +161,7 @@ export function formatInventory(items: AgentItem[]): string {
         // The public description's Value is already the whole stack's (ACE sets Value = StackUnitValue × StackSize).
         it.value ? `value ${it.value.toLocaleString('en-US')}` : '',
         school ? (it.where === 'pack slots' || it.where === 'main pack' ? `${school} focus: in use` : `${school} focus: NOT in use inside ${it.where}; it counts only in your own pack slots`) : '',
+        packs.includes(it) ? (held(it) ? `holds ${held(it)}, listed under it` : 'empty') : '',
       ].filter(Boolean).join(', ');
       out.push(`  #${it.guid.toString(16)} ${it.name}${extra ? `  (${extra})` : ''}`);
     }

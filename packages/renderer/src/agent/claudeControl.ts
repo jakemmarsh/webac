@@ -23,6 +23,14 @@ export const READ_METHODS = new Set([
 ]);
 
 /**
+ * An acting call past the time its caller waits keeps going in the game: what the call answers then (ok). The hosted
+ * relay (relayTab.ts) and the local daemon (tools/ac-agent/callDeadline.ts) say the same.
+ */
+export function stillInProgressMessage(method: string, seconds: number): string {
+  return `${method} is still in progress after ${seconds} s and keeps going: ac_wait types=task-done to hear when it finishes, or ac_observe to see where you are`;
+}
+
+/**
  * The keys that move or fight with retail's default bindings (KeyMap 0x14000002): walk / turn / strafe /
  * back, jump, the arrow keys, combat mode and the attack-height keys. Typing, opening panels, the camera,
  * clicking chat or the tab itself is not taking over (Jake, 2026-10-10: the takeover was too twitchy).

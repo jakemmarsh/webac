@@ -21,7 +21,8 @@ first; the launcher says which.
 
 - A desktop browser with WebGL2: current Chrome, Edge, Firefox or Safari.
   Phones and tablets are not supported.
-- About 4 GB of free memory.
+- A computer with 8 GB of RAM or more. In Chrome the whole browser uses about
+  2.4 GB with the game in the world (measured 2026-10-12 on playwebac.com).
 - The game data streams on demand, about 50 MB to reach the starting town.
   Nothing is installed.
 

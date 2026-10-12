@@ -187,6 +187,10 @@ describe('ClientConnection.getPacketLossPercentage — retail counters on the li
     ws.open();
     let received = 0;
     ws.receive(connectRequest()); received++;
+    // The server's first packet moves the session to cs_Connected (the
+    // heartbeat and PAKs start there — CONN.charlist-wait-timeout).
+    const ack0 = new Uint8Array(4);
+    ws.receive(packet(1, PacketHeaderFlags.AckSequence, ack0)); received++;
     vi.advanceTimersByTime(4100);
     expect(conn.getPacketLossPercentage()).toBe(0);
 

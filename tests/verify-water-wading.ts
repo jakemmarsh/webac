@@ -10,8 +10,10 @@
  *    calc_water_depth (LandblockStruct.cs:655): nearest corner vertex of the
  *    24m cell (+9 when X%24 ≥ 12, +1 when Y%24 ≥ 12) → 0.44999999 water /
  *    0.1 dry.
- *  - LandCell.cs:55-59 — EntirelyWater cells are Collided (impassable) for
- *    players. AC1 has no swimming (zero swim MotionCommands in retail).
+ *  - LandCell.cs:55-59 / CLandCell::find_env_collisions @ 00532f20 — a land
+ *    cell whose LANDBLOCK is EntirelyWater (get_block_water_type: every cell
+ *    fully flooded, open sea) is Collided for players; a fully flooded cell
+ *    of a river or lake is waded 0.9 m deep. AC1 has no swimming.
  */
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
@@ -62,6 +64,28 @@ describe('GAP.6 — WaterMap cell classification (ACE CalcCellWater)', () => {
     m.setLandblock(1, 1, uniformBlock(GRASS, GRASS, GRASS, GRASS));
     expect(m.cellWaterTypeAt(1 * 192 + 12, 1 * 192 + 12)).toBe(LandWaterType.NotWater);
     expect(m.cellWaterTypeAt(50 * 192, 50 * 192)).toBe(null);
+  });
+});
+
+describe('GAP.6 — the landblock\'s water type (ACE CalcWater; the gate get_block_water_type reads)', () => {
+  it('every cell fully flooded → EntirelyWater (open sea); one dry vertex anywhere → PartiallyWater', () => {
+    const m = new WaterMap();
+    m.setLandblock(1, 1, uniformBlock(WATER, WATER, WATER, WATER));
+    expect(m.blockWaterTypeAt(1 * 192 + 5, 1 * 192 + 180)).toBe(LandWaterType.EntirelyWater);
+    const shore = uniformBlock(WATER, WATER, WATER, WATER);
+    shore[63 * 4 + 2] = GRASS; // the NE corner of the last cell
+    m.setLandblock(2, 1, shore);
+    expect(m.cellWaterTypeAt(2 * 192 + 12, 1 * 192 + 12)).toBe(LandWaterType.EntirelyWater);
+    expect(m.blockWaterTypeAt(2 * 192 + 12, 1 * 192 + 12)).toBe(LandWaterType.PartiallyWater);
+  });
+
+  it('no water → NotWater; unloaded → null; removed → null', () => {
+    const m = new WaterMap();
+    m.setLandblock(3, 3, uniformBlock(GRASS, GRASS, GRASS, GRASS));
+    expect(m.blockWaterTypeAt(3 * 192 + 1, 3 * 192 + 1)).toBe(LandWaterType.NotWater);
+    expect(m.blockWaterTypeAt(9 * 192, 9 * 192)).toBe(null);
+    m.removeLandblock(3, 3);
+    expect(m.blockWaterTypeAt(3 * 192 + 1, 3 * 192 + 1)).toBe(null);
   });
 });
 
@@ -139,5 +163,34 @@ describe.skipIf(!existsSync(CELL_DAT))('GAP.6 — DAT integration: the lake nort
     expect(classify(0xa8, 0xb6)).toEqual({ full: 10, partial: 42, none: 12 });
     // Holtburg's own block is bone dry — discriminating negative.
     expect(classify(0xa9, 0xb4)).toEqual({ full: 0, partial: 0, none: 64 });
+  });
+});
+
+describe.skipIf(!existsSync(CELL_DAT))('GAP.6 — DAT: the river east of Holtburg is waded, open water stops you', () => {
+  const blockType = async (bx: number, by: number): Promise<{ block: LandWaterType | null; flooded: number }> => {
+    const { DatReader } = await import('../packages/dat-parser/src/DatReader');
+    const { CellLandblock } = await import('../packages/dat-parser/src/file-types/CellLandblock');
+    const { LandblockMesh } = await import('../packages/renderer/src/terrain/LandblockMesh.js');
+    const db = openDat(CELL_DAT);
+    const lb = CellLandblock.read(new DatReader(db.getFileData(((bx << 24) | (by << 16) | 0xffff) >>> 0)!));
+    const m = new WaterMap();
+    m.setLandblock(bx, by, new LandblockMesh({ heights: lb.heights, terrain: lb.terrain }).cellCornerTerrainTypes);
+    let flooded = 0;
+    for (let col = 0; col < 8; col++) for (let row = 0; row < 8; row++) {
+      if (m.cellWaterTypeAt(bx * 192 + col * 24 + 12, by * 192 + row * 24 + 12) === LandWaterType.EntirelyWater) flooded++;
+    }
+    return { block: m.blockWaterTypeAt(bx * 192 + 96, by * 192 + 96), flooded };
+  };
+
+  it('0xACB3 / 0xADB3 / 0xABB4 / 0xACB4 hold fully flooded cells but dry land too: PartiallyWater blocks (2026-10-12: the old per-cell gate walled two players into single 24 m cells there)', async () => {
+    for (const [bx, by] of [[0xac, 0xb3], [0xad, 0xb3], [0xab, 0xb4], [0xac, 0xb4]]) {
+      const t = await blockType(bx, by);
+      expect(t.flooded, `0x${bx.toString(16)}${by.toString(16)} flooded cells`).toBeGreaterThan(10);
+      expect(t.block, `0x${bx.toString(16)}${by.toString(16)}`).toBe(LandWaterType.PartiallyWater);
+    }
+  });
+
+  it('0xB0B0 is all water: an EntirelyWater block, the only water a player cannot wade', async () => {
+    expect((await blockType(0xb0, 0xb0)).block).toBe(LandWaterType.EntirelyWater);
   });
 });

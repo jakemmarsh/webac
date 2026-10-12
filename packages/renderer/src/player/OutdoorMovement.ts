@@ -7,15 +7,15 @@
  * Grounded: the camera controller's input delta for the substep is wall-slid
  * through the active collision world (dungeon cells, or the outdoor
  * building / static / scenery world), then — outdoors — GAP.5 rejects
- * ascending onto unwalkable terrain and GAP.6 rejects entering an
- * EntirelyWater cell; finally the player is pushed out of creature
+ * ascending onto unwalkable terrain and GAP.6 rejects entering a
+ * landblock of open sea (EntirelyWater); finally the player is pushed out of creature
  * cylinders (only when it moved — retail never displaces an idle player).
  *
  * Airborne: the preserved jump momentum drives the step instead of input.
  * ACE runs every airborne transition through the same environment +
  * object collision as a grounded one — LandCell.FindEnvCollisions returns
  * Collided for a non-viewer, non-missile object entering an EntirelyWater
- * cell regardless of contact (LandCell.cs:54-58), and FindObjCollisions
+ * landblock regardless of contact (LandCell.cs:54-58), and FindObjCollisions
  * stops the sphere at walls. The in-closure code this replaces applied jump
  * momentum with no check at all, so a jump carried the player through
  * building walls and out over deep water (fixed here: the momentum delta is
@@ -82,8 +82,12 @@ export interface MovementTerrain {
 }
 
 export interface MovementWater {
-  /** GAP.6 — the land cell's water classification (shared/physics/WaterMap). */
-  cellWaterTypeAt(worldX: number, worldZ: number): LandWaterType | null;
+  /**
+   * GAP.6 — the water type of the LANDBLOCK under a world position (shared/physics/WaterMap): retail's gate is
+   * CObjCell::get_block_water_type, so only a block of open sea (every cell fully flooded) stops a player; a
+   * flooded cell of a river or lake is waded.
+   */
+  blockWaterTypeAt(worldX: number, worldZ: number): LandWaterType | null;
 }
 
 /**
@@ -394,13 +398,13 @@ function outdoorAdjustedStep(
       if (destH !== null && curH !== null && destH > curH + 0.001
         && !onCellFloorUnderTerrain(services, destX, destZ, state.floorY)) return [0, 0];
     }
-    // GAP.6 — fully-flooded cells are impassable: ACE
-    // LandCell.FindEnvCollisions returns Collided for any
-    // non-missile, non-viewer object entering an EntirelyWater
-    // cell (LandCell.cs:54-58). AC1 has no swimming — deep water
-    // is a hard wall, matching the server (which would reject the
-    // transition and force-correct us anyway).
-    if (services.water.cellWaterTypeAt(destX, destZ) === LandWaterType.EntirelyWater
+    // GAP.6 — open sea is impassable: CLandCell::find_env_collisions
+    // @ 00532f20 (ACE LandCell.cs:54-58) returns Collided for any
+    // non-missile, non-viewer object on a land cell whose LANDBLOCK
+    // is EntirelyWater (get_block_water_type). AC1 has no swimming;
+    // a fully flooded cell inside a block with any dry land (a river,
+    // a lake) is waded, 0.9 m deep (get_water_depth).
+    if (services.water.blockWaterTypeAt(destX, destZ) === LandWaterType.EntirelyWater
       && !onCellFloorUnderTerrain(services, destX, destZ, state.floorY)) return [0, 0];
     if (slopeGate && stepDownRefused(services.outdoorCollision, state.x, state.z, destX, destZ, state.floorY, services)) return [0, 0];
     if (!slopeGate || !services.edgeSlide || (services.outdoorCollision.lastStepUp ?? 0) > 0) return [adjX, adjZ];

@@ -39,6 +39,9 @@ export interface ErrorReporterOptions {
 
 export const MAX_REPORTS = 20;
 
+/** Browser warnings delivered as window errors that are not failures (see install()). */
+export const BENIGN_ERROR = /^ResizeObserver loop (completed with undelivered notifications|limit exceeded)/;
+
 /** Drop query strings and fragments from URLs (they carried ?account=&password= in dev links). */
 export function stripUrlQueries(text: string): string {
   return text.replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#'"`)]*)[?#][^\s'"`)]*?(?=(?::\d+){1,2}(?=[\s)'"`]|$)|[\s'"`)]|$)/gi, '$1');
@@ -103,6 +106,10 @@ export class ErrorReporter {
     win.addEventListener('error', (ev: Event) => {
       const e = ev as ErrorEvent;
       if (!e.message && !e.error) return; // a resource load error (img/script 404), not a script error
+      // Chrome raises a benign window error when ResizeObserver callbacks change
+      // layout within one frame; nothing failed (the first report from a real
+      // player, 2026-10-12, was this). Not a crash: don't report it.
+      if (BENIGN_ERROR.test(e.message ?? '')) return;
       this.report('error', e.message || String(e.error), {
         stack: e.error instanceof Error ? e.error.stack ?? null : null,
         source: e.filename || null, line: e.lineno || null, column: e.colno || null,

@@ -43,6 +43,9 @@ describe('RELEASE.error-reporting — ErrorReporter', () => {
     const listeners = new Map<string, (ev: Event) => void>();
     r.install({ addEventListener: (t: string, l: (ev: Event) => void) => { listeners.set(t, l); } } as never);
     listeners.get('error')!({ message: '', error: null } as unknown as Event); // <img> 404
+    // Chrome's benign ResizeObserver window errors (both wordings) are not crashes.
+    listeners.get('error')!({ message: 'ResizeObserver loop completed with undelivered notifications.', error: null } as unknown as Event);
+    listeners.get('error')!({ message: 'ResizeObserver loop limit exceeded', error: null } as unknown as Event);
     listeners.get('error')!({ message: 'ReferenceError: x is not defined', error: new ReferenceError('x is not defined'), filename: 'https://a/b.js', lineno: 3, colno: 4 } as unknown as Event);
     listeners.get('unhandledrejection')!({ reason: new Error('nope') } as unknown as Event);
     expect(sent.map(s => [s.body.kind, s.body.message])).toEqual([

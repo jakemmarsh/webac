@@ -3,12 +3,12 @@
  * (player/OutdoorMovement.stepPlayerMovement), lifted out of main.ts
  * animate(), driven against the REAL collision services main.ts wires in:
  * DungeonCollision (the outdoor world: cylinder obstacles stand in for a
- * wall), shared TerrainCollision (GAP.5 slope) and shared WaterMap (GAP.6
- * EntirelyWater cells).
+ * wall), shared TerrainCollision (GAP.5 slope) and shared WaterMap (GAP.6:
+ * a landblock of open sea stops a player; a river's flooded cells are waded).
  *
  * Also pins the airborne fix: ACE collides every transition, airborne ones
  * included — LandCell.FindEnvCollisions returns Collided for a non-viewer,
- * non-missile object entering an EntirelyWater cell (LandCell.cs:54-58) and
+ * non-missile object entering an EntirelyWater landblock (LandCell.cs:54-58) and
  * FindObjCollisions stops the sphere at walls — where the in-closure code
  * applied jump momentum with no check at all.
  */
@@ -25,16 +25,20 @@ import { DungeonCollision } from '../packages/renderer/src/world/DungeonCollisio
 import { TerrainCollision } from '../packages/shared/src/physics/TerrainCollision.js';
 import { WaterMap, LandWaterType } from '../packages/shared/src/physics/WaterMap.js';
 
-// Landblock (10, 10): world X/Z 1920..2112. Cells with column >= 4
-// (X >= 2016) are deep water (all four corners terrain type 0x14 —
-// WaterDeepSea); columns 0..3 are dry grass (0x00).
+// Landblock (10, 10): world X/Z 1920..2112, dry grass (0x00) in columns
+// 0..3 and fully flooded cells (all four corners terrain type 0x14 —
+// WaterDeepSea) in columns >= 4: a lake shore, waded. Landblock (11, 10),
+// X 2112..2304, is all water: open sea (an EntirelyWater block), which
+// stops a player (CLandCell::find_env_collisions' get_block_water_type).
 const BX = 10, BY = 10;
 const BLOCK_X0 = BX * 192, BLOCK_Z0 = BY * 192;
-const WATER_EDGE_X = BLOCK_X0 + 4 * 24; // 2016
+const LAKE_EDGE_X = BLOCK_X0 + 4 * 24; // 2016
+const WATER_EDGE_X = BLOCK_X0 + 192; // 2112: the sea block's west edge
 
 function flatTerrain(): TerrainCollision {
   const t = new TerrainCollision();
   t.setLandblock(BX, BY, { heights: new Array(81).fill(10), blockX: BX, blockY: BY });
+  t.setLandblock(BX + 1, BY, { heights: new Array(81).fill(10), blockX: BX + 1, blockY: BY });
   return t;
 }
 
@@ -48,6 +52,7 @@ function waterMap(): WaterMap {
     }
   }
   w.setLandblock(BX, BY, corners);
+  w.setLandblock(BX + 1, BY, new Array(256).fill(0x14));
   return w;
 }
 
@@ -112,9 +117,21 @@ describe('stepPlayerMovement — grounded outdoor', () => {
     expect(s.x).toBeGreaterThan(post.x + minDist); // made it past the post
   });
 
-  it('GAP.6 — entering an EntirelyWater cell is blocked (LandCell.cs:54-58)', () => {
+  it('GAP.6 — a fully flooded cell in a block with dry land (a lake, a river) is waded, not a wall', () => {
     const sv = services();
-    expect(sv.water.cellWaterTypeAt(WATER_EDGE_X + 0.5, BLOCK_Z0 + 40)).toBe(LandWaterType.EntirelyWater);
+    const w = sv.water as WaterMap;
+    expect(w.cellWaterTypeAt(LAKE_EDGE_X + 0.5, BLOCK_Z0 + 40)).toBe(LandWaterType.EntirelyWater);
+    expect(w.blockWaterTypeAt(LAKE_EDGE_X + 0.5, BLOCK_Z0 + 40)).toBe(LandWaterType.PartiallyWater);
+    const s = state({ x: LAKE_EDGE_X - 0.3 });
+    const r = stepPlayerMovement(s, 0.5, 0, 0.05, sv);
+    expect(r.x).toBeCloseTo(s.x + 0.5, 9);
+    // …0.9 m deep (get_water_depth for an ENTIRELY_WATER cell).
+    expect(w.waterDepthAt(r.x, r.z)).toBeCloseTo(0.9, 6);
+  });
+
+  it('GAP.6 — entering a landblock of open sea is blocked (find_env_collisions: get_block_water_type)', () => {
+    const sv = services();
+    expect((sv.water as WaterMap).blockWaterTypeAt(WATER_EDGE_X + 0.5, BLOCK_Z0 + 40)).toBe(LandWaterType.EntirelyWater);
     const s = state({ x: WATER_EDGE_X - 0.3 });
     // A sub-radius move is one transition step: the whole step is rejected.
     const r = stepPlayerMovement(s, 0.4, 0, 0.05, sv);
@@ -127,7 +144,7 @@ describe('stepPlayerMovement — grounded outdoor', () => {
     expect(far.x).toBeLessThan(WATER_EDGE_X);
   });
 
-  it('GAP.6 — leaving an EntirelyWater cell for dry land is allowed', () => {
+  it('GAP.6 — leaving the open sea for land is allowed', () => {
     const s = state({ x: WATER_EDGE_X + 0.2 });
     const r = stepPlayerMovement(s, -0.5, 0, 0.05, services());
     expect(r.x).toBeCloseTo(s.x - 0.5, 9);
@@ -323,7 +340,7 @@ describe('stepPlayerMovement — airborne (jump momentum)', () => {
       s = { ...s, x: r.x, z: r.z };
     }
     expect(s.x).toBeLessThan(WATER_EDGE_X);
-    expect(services().water.cellWaterTypeAt(s.x, s.z)).toBe(LandWaterType.NotWater);
+    expect(services().water.blockWaterTypeAt(s.x, s.z)).toBe(LandWaterType.PartiallyWater);
   });
 
   it('the slope rule does not gate an airborne step (it is a contact-plane rule)', () => {

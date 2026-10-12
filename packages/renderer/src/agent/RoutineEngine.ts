@@ -590,6 +590,21 @@ export class RoutineEngine {
     return { ok: true, message: 'force buff cancelled' };
   }
 
+  /**
+   * VirindiTank's "Loot this Container" hotkey (its changelog, 0.3.1.11x): the container you have open, else
+   * the selected corpse or chest, looted with the profile's loot rules, as the macro loots its own corpses.
+   * Paused or not, it runs as soon as the macro is between actions.
+   */
+  lootThis(): AgentResult {
+    if (!this.profile) return { ok: false, message: 'no routine is running' };
+    const guid = this.api.openContainerGuid() ?? this.api.selectedGuid();
+    if (guid === null) return { ok: false, message: 'Open or select a corpse or chest first.' };
+    this.lootThisGuid = guid;
+    this.note(`loot this container: ${guid >>> 0}`);
+    return { ok: true, message: 'looting this container' };
+  }
+  private lootThisGuid: number | null = null;
+
   /** Put the running routine in a state by hand (VirindiTank's Current State menu). */
   setState(name: string): AgentResult {
     if (!this.profile) return { ok: false, message: 'no routine is running' };
@@ -884,6 +899,17 @@ export class RoutineEngine {
     }
     if (!this.paused) this.watchLeader(p);
     if (this.busy) return;
+    if (this.lootThisGuid !== null) {
+      const guid = this.lootThisGuid;
+      this.lootThisGuid = null;
+      const at = this.api.snapshot({ radius: 60, max: 60 }).nearby.find((o) => o.guid === guid);
+      this.busy = true;
+      void this.lootOne({ guid, dist: at?.dist ?? 0 }, undefined, p)
+        .then((r) => this.report(`Loot this Container: ${r.message}`))
+        .catch((e) => this.note(`error: ${String((e as Error)?.message ?? e)}`))
+        .finally(() => { this.busy = false; });
+      return;
+    }
     if (this.paused) { this.offUpkeep(p, this.settings); return; }
     const t = this.now();
     if (t - this.lastStep < STEP_MS) return;
@@ -1381,6 +1407,105 @@ export class RoutineEngine {
     await this.api.waitFor({ types: types as never }, ms);
   }
 
+  /**
+   * Loot one corpse or chest with the profile's loot rules: the macro walks to it first, each item goes
+   * through the rules, and the corpse book learns how it went. The macro's looting and VirindiTank's
+   * "Loot this Container" hotkey (lootThis) both come here.
+   */
+  private async lootOne(corpse: { guid: number; dist: number }, kill: { looted?: boolean } | undefined, p: RoutineProfile): Promise<AgentResult> {
+    const st = this.settings;
+    const bs = this.loot.settings(st);
+    const book = this.loot.book;
+    const now = () => this.now();
+    // The macro walks to within CorpseApproachRange-Min first, then opens it (MOSS CorpseApproach).
+    if (p.macro) {
+      const min = Math.max(0.5, Number(st['CorpseApproachRange-Min']) || 0);
+      if (corpse.dist > min) await this.api.walkTo(corpse.guid, { within: min, timeoutMs: 30_000 });
+    }
+    // Each item goes through the loot rules, first match wins. A rule on value, burden or appraisal
+    // text examines the item first (an Appraise, as a player would); name- and type-only rules don't.
+    // No rule, or ignore: an unknown scroll you can learn, or a mana stone / donor (lootExtras.ts), else
+    // left on the corpse. Salvage is taken (to salvage later), as VTank does.
+    const examined = new Map<number, (ReturnType<typeof appraisalFacts> & { props?: ItemProps; at?: number }) | 'pending'>();
+    const askedAt = new Map<number, number>();
+    const me = this.lootCharacter();
+    const paletteWaits = new Map<number, number>();
+    const needsColours = p.loot.some((r) => !r.disabled && r.match.colours?.length);
+    const consumables = p.vtank?.consumables ?? [];
+    // CorpseItemIDTimeoutSeconds: how long an item's examination is waited for (asked again while it lasts).
+    const idTimeout = Math.max(1, Number(st.CorpseItemIDTimeoutSeconds) || 60) * 1000;
+    this.loot.beginPass();
+    // A rule that leaves the item (none, or Leave) still lets the scroll and mana checks have it (MOSS Looting: NoLoot falls through).
+    const takes = (r: LootRule | null): boolean => !!r && r.action !== 'ignore';
+    const decide = (it: { guid: number; name: string; itemType: number; objectDescFlags: number; palettes: ItemPalette[]; uiEffects?: number }): LootDecision => {
+      const item = { name: it.name, type: itemTypeLabel(it.itemType), descFlags: it.objectDescFlags, palettes: it.palettes };
+      const view = { guid: it.guid, name: it.name, itemType: it.itemType, descFlags: it.objectDescFlags, ...(it.uiEffects !== undefined ? { uiEffects: it.uiEffects } : {}) };
+      // Colour rules need the item's palettes loaded (streamed builds fetch them on demand); wait up to ~5 s.
+      if (needsColours && it.palettes.some((x) => x.example === null) && (paletteWaits.get(it.guid) ?? 0) < 10) {
+        paletteWaits.set(it.guid, (paletteWaits.get(it.guid) ?? 0) + 1);
+        return 'wait';
+      }
+      let facts = examined.get(it.guid);
+      if (facts === undefined && (needsExamination(p.loot, item) || (!takes(lootRuleFor(p.loot, item, me)) && this.loot.needsLook(view, consumables, st)))) {
+        examined.set(it.guid, 'pending');
+        if (!askedAt.has(it.guid)) askedAt.set(it.guid, this.now());
+        void this.api.appraise(it.guid, { quiet: true }).then((r) => {
+          if (r.ok) examined.set(it.guid, { ...appraisalFacts(r.message), ...(r.data ? { props: r.data as ItemProps } : {}) });
+          // No answer: asked again until the ID timeout runs out, then decided without it.
+          else if (this.now() - (askedAt.get(it.guid) ?? 0) < idTimeout) examined.delete(it.guid);
+          else examined.set(it.guid, { appraisal: '' });
+        });
+        return 'wait';
+      }
+      if (facts === 'pending') return 'wait';
+      const rule = lootRuleFor(p.loot, { ...item, ...(facts ?? {}) }, me);
+      if (!rule || rule.action === 'ignore') {
+        const extra = this.loot.itemAction(view, (facts as { props?: ItemProps } | undefined)?.props, consumables, st);
+        if (!extra) { this.stats.left++; return 'skip'; }
+        this.stats.kept++;
+        this.report(`${extra === 'read' ? 'Took to read' : extra === 'stone' ? 'Kept' : 'Took for its mana'} ${it.name} (${extra === 'read' ? 'an unknown scroll' : extra === 'stone' ? 'a mana stone' : 'a mana donor'})`);
+        return 'take';
+      }
+      if (rule.action === 'keep-up-to') {
+        const held = this.api.inventory().filter((i) => lootRuleFor([rule], { name: i.name, type: i.type, value: i.value, burden: i.burden }))
+          .reduce((t, i) => t + (i.stack ?? 1), 0);
+        if (held >= (rule.count ?? 1)) { this.stats.left++; return 'skip'; }
+      }
+      this.stats.kept++;
+      this.report(`${rule.action === 'sell' ? 'Took to sell' : rule.action === 'salvage' ? 'Took to salvage' : rule.action === 'read' ? 'Took to read' : 'Kept'} ${it.name} (rule: ${rule.label ?? rule.action})`);
+      // VTank salvages what a Salvage rule took once no corpse is open (salvageUpkeep); a Read rule's scroll is read later.
+      if (rule.action === 'salvage') this.toSalvage.set(it.guid, { name: it.name, tries: 0 });
+      if (rule.action === 'read') this.loot.readTaken(view, (facts as { props?: ItemProps } | undefined)?.props);
+      return 'take';
+    };
+    // VTank's corpse timings (CorpseOpenTimeoutSeconds, CorpseItemAppearanceTimeoutSeconds, CorpseLootItemMaxAttempts)
+    // for the macro; a rule's loot keeps the agent's own. Either way the corpse is closed when done.
+    const opts = p.macro ? {
+      openTimeoutMs: Math.max(250, (Number(st.CorpseOpenTimeoutSeconds) || 1.5) * 1000),
+      appearMs: Math.min(300, Math.max(0, Number(st.CorpseItemAppearanceTimeoutSeconds) || 0)) * 1000,
+      itemTries: Math.min(100, Math.max(1, Math.round(Number(st.CorpseLootItemMaxAttempts) || 20))),
+      close: true,
+    } : { close: true };
+    const since = this.api.currentSeq();
+    const r = await this.api.loot(corpse.guid, null, decide, opts);
+    // Refused by the server ("in use", "no right"): skipped for 10 s, then tried again.
+    if (this.api.eventsSince(since).some((e) => e.type === 'chat' && isCorpseDenial(e.text.replace(/^\([a-z]+\) /, '')))) {
+      book.denied(corpse.guid, now(), bs);
+      return { ...r, message: `${r.message}; refused, skipping it for 10 s` };
+    }
+    // Never opened: an attempt; after BlacklistCorpseOpenAttemptCount it is skipped for BlacklistCorpseOpenTimeoutSeconds.
+    if (!r.ok && /never opened/.test(r.message)) {
+      if (book.openFailed(corpse.guid, now(), bs)) {
+        if (kill) kill.looted = true;
+        return { ...r, message: `${r.message}; skipping it for ${bs.blacklistSeconds} s` };
+      }
+      return r;
+    }
+    book.complete(corpse.guid, now());
+    if (kill) kill.looted = true;
+    return r;
+  }
+
   private async act(a: RoutineAction, p: RoutineProfile): Promise<AgentResult | null> {
     switch (a.kind) {
       case 'set-state':
@@ -1454,93 +1579,7 @@ export class RoutineEngine {
         // None of ours turned up: those kills are done (one look per kill, not two minutes of looks).
         if (!corpse) { for (const k of pending) k.looted = true; return { ok: true, message: pending.length ? `no corpse of ours within ${Math.round(a.meters ?? 20)} m${a.meters !== undefined && p.macro ? ' (VTank walks to corpses only as far as CorpseApproachRange-Max, the Approach box; 0 never walks)' : ''}` : 'no corpse to loot yet', idle: true }; }
         const kill = pending.find((k) => `Corpse of ${k.name}` === corpse.name && (book.killer(corpse.guid) === undefined || book.isOwn(corpse.guid, meName)));
-        // The macro walks to within CorpseApproachRange-Min first, then opens it (MOSS CorpseApproach).
-        if (p.macro) {
-          const min = Math.max(0.5, Number(st['CorpseApproachRange-Min']) || 0);
-          if (corpse.dist > min) await this.api.walkTo(corpse.guid, { within: min, timeoutMs: 30_000 });
-        }
-        // Each item goes through the loot rules, first match wins. A rule on value, burden or appraisal
-        // text examines the item first (an Appraise, as a player would); name- and type-only rules don't.
-        // No rule, or ignore: an unknown scroll you can learn, or a mana stone / donor (lootExtras.ts), else
-        // left on the corpse. Salvage is taken (to salvage later), as VTank does.
-        const examined = new Map<number, (ReturnType<typeof appraisalFacts> & { props?: ItemProps; at?: number }) | 'pending'>();
-        const askedAt = new Map<number, number>();
-        const me = this.lootCharacter();
-        const paletteWaits = new Map<number, number>();
-        const needsColours = p.loot.some((r) => !r.disabled && r.match.colours?.length);
-        const consumables = p.vtank?.consumables ?? [];
-        // CorpseItemIDTimeoutSeconds: how long an item's examination is waited for (asked again while it lasts).
-        const idTimeout = Math.max(1, Number(st.CorpseItemIDTimeoutSeconds) || 60) * 1000;
-        this.loot.beginPass();
-        // A rule that leaves the item (none, or Leave) still lets the scroll and mana checks have it (MOSS Looting: NoLoot falls through).
-        const takes = (r: LootRule | null): boolean => !!r && r.action !== 'ignore';
-        const decide = (it: { guid: number; name: string; itemType: number; objectDescFlags: number; palettes: ItemPalette[]; uiEffects?: number }): LootDecision => {
-          const item = { name: it.name, type: itemTypeLabel(it.itemType), descFlags: it.objectDescFlags, palettes: it.palettes };
-          const view = { guid: it.guid, name: it.name, itemType: it.itemType, descFlags: it.objectDescFlags, ...(it.uiEffects !== undefined ? { uiEffects: it.uiEffects } : {}) };
-          // Colour rules need the item's palettes loaded (streamed builds fetch them on demand); wait up to ~5 s.
-          if (needsColours && it.palettes.some((x) => x.example === null) && (paletteWaits.get(it.guid) ?? 0) < 10) {
-            paletteWaits.set(it.guid, (paletteWaits.get(it.guid) ?? 0) + 1);
-            return 'wait';
-          }
-          let facts = examined.get(it.guid);
-          if (facts === undefined && (needsExamination(p.loot, item) || (!takes(lootRuleFor(p.loot, item, me)) && this.loot.needsLook(view, consumables, st)))) {
-            examined.set(it.guid, 'pending');
-            if (!askedAt.has(it.guid)) askedAt.set(it.guid, this.now());
-            void this.api.appraise(it.guid, { quiet: true }).then((r) => {
-              if (r.ok) examined.set(it.guid, { ...appraisalFacts(r.message), ...(r.data ? { props: r.data as ItemProps } : {}) });
-              // No answer: asked again until the ID timeout runs out, then decided without it.
-              else if (this.now() - (askedAt.get(it.guid) ?? 0) < idTimeout) examined.delete(it.guid);
-              else examined.set(it.guid, { appraisal: '' });
-            });
-            return 'wait';
-          }
-          if (facts === 'pending') return 'wait';
-          const rule = lootRuleFor(p.loot, { ...item, ...(facts ?? {}) }, me);
-          if (!rule || rule.action === 'ignore') {
-            const extra = this.loot.itemAction(view, (facts as { props?: ItemProps } | undefined)?.props, consumables, st);
-            if (!extra) { this.stats.left++; return 'skip'; }
-            this.stats.kept++;
-            this.report(`${extra === 'read' ? 'Took to read' : extra === 'stone' ? 'Kept' : 'Took for its mana'} ${it.name} (${extra === 'read' ? 'an unknown scroll' : extra === 'stone' ? 'a mana stone' : 'a mana donor'})`);
-            return 'take';
-          }
-          if (rule.action === 'keep-up-to') {
-            const held = this.api.inventory().filter((i) => lootRuleFor([rule], { name: i.name, type: i.type, value: i.value, burden: i.burden }))
-              .reduce((t, i) => t + (i.stack ?? 1), 0);
-            if (held >= (rule.count ?? 1)) { this.stats.left++; return 'skip'; }
-          }
-          this.stats.kept++;
-          this.report(`${rule.action === 'sell' ? 'Took to sell' : rule.action === 'salvage' ? 'Took to salvage' : rule.action === 'read' ? 'Took to read' : 'Kept'} ${it.name} (rule: ${rule.label ?? rule.action})`);
-          // VTank salvages what a Salvage rule took once no corpse is open (salvageUpkeep); a Read rule's scroll is read later.
-          if (rule.action === 'salvage') this.toSalvage.set(it.guid, { name: it.name, tries: 0 });
-          if (rule.action === 'read') this.loot.readTaken(view, (facts as { props?: ItemProps } | undefined)?.props);
-          return 'take';
-        };
-        // VTank's corpse timings (CorpseOpenTimeoutSeconds, CorpseItemAppearanceTimeoutSeconds, CorpseLootItemMaxAttempts)
-        // for the macro; a rule's loot keeps the agent's own. Either way the corpse is closed when done.
-        const opts = p.macro ? {
-          openTimeoutMs: Math.max(250, (Number(st.CorpseOpenTimeoutSeconds) || 1.5) * 1000),
-          appearMs: Math.min(300, Math.max(0, Number(st.CorpseItemAppearanceTimeoutSeconds) || 0)) * 1000,
-          itemTries: Math.min(100, Math.max(1, Math.round(Number(st.CorpseLootItemMaxAttempts) || 20))),
-          close: true,
-        } : { close: true };
-        const since = this.api.currentSeq();
-        const r = await this.api.loot(corpse.guid, null, decide, opts);
-        // Refused by the server ("in use", "no right"): skipped for 10 s, then tried again.
-        if (this.api.eventsSince(since).some((e) => e.type === 'chat' && isCorpseDenial(e.text.replace(/^\([a-z]+\) /, '')))) {
-          book.denied(corpse.guid, now(), bs);
-          return { ...r, message: `${r.message}; refused, skipping it for 10 s` };
-        }
-        // Never opened: an attempt; after BlacklistCorpseOpenAttemptCount it is skipped for BlacklistCorpseOpenTimeoutSeconds.
-        if (!r.ok && /never opened/.test(r.message)) {
-          if (book.openFailed(corpse.guid, now(), bs)) {
-            if (kill) kill.looted = true;
-            return { ...r, message: `${r.message}; skipping it for ${bs.blacklistSeconds} s` };
-          }
-          return r;
-        }
-        book.complete(corpse.guid, now());
-        if (kill) kill.looted = true;
-        return r;
+        return this.lootOne(corpse, kill, p);
       }
       case 'follow-route': {
         const route = p.routes.find((r) => r.name === a.route);

@@ -183,6 +183,65 @@ export interface ConnectionEvent {
    * 'ID_ConnectionError_ClientTimedOutServer'.
    */
   netErrorId?: string;
+  /**
+   * RELEASE.gdle-login-neterror — on type==='error' from a server NetError
+   * optional header (flag 0x00100000) that ended the login: the string id
+   * and string-table enum it carries (`NetError::UnPack @ 004114a0`), e.g.
+   * GDLE's refused login = STR_LOGIN_FAILED 0x04DF9C54 in table enum 8.
+   */
+  serverNetError?: ServerNetError;
+}
+
+/** A NetError optional header's payload (`NetError::UnPack @ 004114a0`: u32 m_stringID, u32 m_tableID). */
+export interface ServerNetError {
+  stringId: number;
+  tableId: number;
+}
+
+/**
+ * Byte offset of the NetError optional header in a server packet, or -1 when
+ * an optional header ahead of it has a size we can't step over. Optional
+ * headers follow the 20-byte header in ascending flag order (the order ACE's
+ * PacketHeaderOptional reads them and the retail COptionalHeaderFactory
+ * registers them); the ones a server can put ahead of 0x00100000 are
+ * ServerSwitch (8 bytes), LogonServerAddr (a 16-byte sockaddr_in,
+ * `COnePrimHeader<512,7,sockaddr_in>`), the two retransmit lists (u32 count
+ * + count × u32) and AckSequence (4 bytes).
+ */
+export function netErrorPayloadOffset(data: Uint8Array): number {
+  if (data.length < PACKET_HEADER_SIZE) return -1;
+  const flags = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(4, true);
+  if (!(flags & PacketHeaderFlags.NetError)) return -1;
+  let o = PACKET_HEADER_SIZE;
+  const list = (): boolean => {
+    if (o + 4 > data.length) return false;
+    const n = new DataView(data.buffer, data.byteOffset + o, 4).getUint32(0, true);
+    o += 4 + n * 4;
+    return o <= data.length;
+  };
+  if (flags & PacketHeaderFlags.ServerSwitch) o += 8;
+  if (flags & PacketHeaderFlags.LogonServerAddr) o += 16;
+  if (flags & (PacketHeaderFlags.Referral | PacketHeaderFlags.LoginRequest |
+    PacketHeaderFlags.WorldLoginRequest | PacketHeaderFlags.ConnectRequest | PacketHeaderFlags.ConnectResponse)) return -1;
+  if ((flags & PacketHeaderFlags.RequestRetransmit) && !list()) return -1;
+  if ((flags & PacketHeaderFlags.RejectRetransmit) && !list()) return -1;
+  if (flags & PacketHeaderFlags.AckSequence) o += 4;
+  return o <= data.length ? o : -1;
+}
+
+/**
+ * The NetError a server packet carries, or null. `NetError::UnPack @
+ * 004114a0` reads m_stringID when at least 4 bytes remain and m_tableID when
+ * 4 more do (an absent field stays 0).
+ */
+export function readServerNetError(data: Uint8Array): ServerNetError | null {
+  const o = netErrorPayloadOffset(data);
+  if (o < 0 || o + 4 > data.length) return null;
+  const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  return {
+    stringId: v.getUint32(o, true),
+    tableId: o + 8 <= data.length ? v.getUint32(o + 4, true) : 0,
+  };
 }
 
 export type ConnectionListener = (event: ConnectionEvent) => void;
@@ -380,14 +439,28 @@ export class ClientConnection {
    *  later onclose of a socket we closed ourselves doesn't report it twice). */
   private sessionEndedFor: unknown = null;
 
-  // ConnectResponse retry timer — ACE sets session state AFTER sending ConnectRequest,
-  // so on localhost the ConnectResponse can arrive before ACE is ready. Retry until we
-  // get a response (character list) from the world port.
+  /**
+   * CONN.charlist-wait-timeout — retail's handshake half-state. After the
+   * ConnectAck (our ConnectResponse) the receiver sits in
+   * cs_ConnectionRequestAcked until the server's first packet without the
+   * ConnectRequest flag arrives (ClientNet::ProcessPacket @ 00545100 → state
+   * cs_Connected). In that state ClientNet::ProcessConnection @ 00545450 only
+   * resends the ConnectAck (ClientNet::SendConnectAck @ 005440f0) every
+   * HANDSHAKE_WAIT_FOR_CONNECTION_TIMEOUT = 0.333 s, with no retry cap; it
+   * sends no PAK/NAK and runs no link heartbeat (those are the cs_Connected
+   * case). The only bound is the 140 s no-data drop (SERVER_DEAD_MS) that
+   * ends in ServerDied. Ours used to stop resending after 10 s and treat the
+   * session as connected the moment the ConnectResponse went out: our ACKs and
+   * TimeSync/Echo keepalives then kept a server that never took the
+   * ConnectResponse (ACE session stuck in AuthConnectResponse) answering
+   * EchoResponses forever, so char select waited on "Please Wait" for good.
+   */
   private connectResponseRetryTimer: ReturnType<typeof setInterval> | null = null;
   private connectResponsePayload: Uint8Array | null = null;
-  private static readonly CONNECT_RESPONSE_RETRY_INTERVAL = 500; // ms
-  private static readonly CONNECT_RESPONSE_MAX_RETRIES = 20; // 10 seconds total
-  private connectResponseRetryCount: number = 0;
+  static readonly CONNECT_RESPONSE_RETRY_INTERVAL = 333; // HANDSHAKE_WAIT_FOR_CONNECTION_TIMEOUT 0.333333333 s
+  /** True between our ConnectResponse and the server's first non-ConnectRequest
+   *  packet (retail cs_ConnectionRequestAcked). */
+  private awaitingServerConnect: boolean = false;
 
   // LoginRequest retry — if ACE rejects login because old session still exists,
   // retry until the old session times out or gets booted.
@@ -583,6 +656,7 @@ export class ClientConnection {
     this.resetSequencingState();
     this.preHandshakeQueue = [];
     this.sessionPastLogin = false;
+    this.awaitingServerConnect = false;
     this.lastPacketReceivedAt = Date.now();
     this.serverTimeoutEmitted = false;
     this.linkStatusAverages = new LinkStatusAverages();
@@ -663,6 +737,56 @@ export class ClientConnection {
     if (!socket) return;
     this.handleSocketEnded(socket);
     try { socket.close(); } catch { /* already closing */ }
+  }
+
+  /**
+   * A NetError optional header, as `ClientNet::ProcessOptionalHeader @
+   * 005451a0` case 0x100000 handles it:
+   *  - inside the logon context (m_LogonData.hCurrentContext valid: our
+   *    LoginRequest is unanswered, or the ConnectResponse awaits the
+   *    server's first packet) → `EndState @ 00543380` with that error: the
+   *    logon ends at once, failed unless the error is ID_NetError_None
+   *    (0, 0), and `Client::Init` shows the error's StringInfo text
+   *    (PopupError @ 00554c40). We stop the login, close the socket without
+   *    a 'disconnected' (nothing to tear down, no reconnect) and report the
+   *    error with its string id + table.
+   *  - outside it → `LogOffServer` + `ECM_Login::SendNotice_ServerDied`:
+   *    the same path as a server Disconnect.
+   * (0x200000 NetErrorDisconnect only notifies plugins in retail and is
+   * left alone.)
+   */
+  private handleServerNetError(netError: ServerNetError): void {
+    const inLogon = this.connectionData.state === SessionState.AuthLoginRequest || this.awaitingServerConnect;
+    if (!inLogon) {
+      this.endSessionFromServer();
+      return;
+    }
+    if (netError.stringId === 0 && netError.tableId === 0) return; // ID_NetError_None → EndStateOK
+    console.warn(`[AC:NET] Login refused by the server: NetError 0x${netError.stringId.toString(16)} (table ${netError.tableId})`);
+    this.stopLoginRetry();
+    this.stopConnectResponseRetry();
+    this.awaitingServerConnect = false;
+    if (this.loginRejectRetryTimer) { clearTimeout(this.loginRejectRetryTimer); this.loginRejectRetryTimer = null; }
+    if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
+    const socket = this.ws;
+    if (socket) {
+      // Detached: its close reports nothing and schedules no reconnect, and a
+      // late frame on it (the server answers every LoginRequest resend) can't
+      // reach the next login.
+      this.sessionEndedFor = socket;
+      this.deliberateClose = true;
+      this.ws = null;
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onclose = null;
+      socket.onerror = null;
+      try { socket.close(); } catch { /* already closing */ }
+    }
+    this.emit({
+      type: 'error',
+      error: `Login refused by the server (NetError 0x${netError.stringId.toString(16)}, table ${netError.tableId})`,
+      serverNetError: { stringId: netError.stringId, tableId: netError.tableId },
+    });
   }
 
   /** Attempt auto-reconnect with exponential backoff. */
@@ -856,8 +980,8 @@ export class ClientConnection {
   /** Start the post-handshake receiver service (ACK/NAK cadence, etc.). */
   private startKeepalive(): void {
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
-    // Send first ACK immediately
-    this.sendAck();
+    // No ACK yet: retail PAKs only in cs_Connected (handlePacket sends the
+    // first one when the server's first packet arrives).
     this.lastServiceAt = Date.now();
     this.lastFlowKeepaliveAt = this.lastServiceAt;
     this.echoEpochMs = performance.now();
@@ -874,6 +998,15 @@ export class ClientConnection {
   private serviceReceiver(now: number = Date.now()): void {
     const clockStalled = now - this.lastServiceAt > ClientConnection.SERVER_DEAD_MS;
     this.lastServiceAt = now;
+
+    // cs_ConnectionRequestAcked: only the ConnectAck resend (its own timer)
+    // and the no-data drop run until the server's first packet.
+    if (this.awaitingServerConnect) {
+      this.lastFlowKeepaliveAt = now;
+      this.checkServerTimeout(now);
+      if (!clockStalled) this.checkServerDead(now);
+      return;
+    }
 
     const anyMissing = this.requestMissingServerSeqs(now);
     if (!anyMissing && now - this.lastAckNakSentAt >= ClientConnection.ACK_INTERVAL_MS) {
@@ -1129,6 +1262,31 @@ export class ClientConnection {
       return;
     }
 
+    // RELEASE.gdle-login-neterror — a NetError optional header. GDLE /
+    // ClassicDereth answer a refused LoginRequest with a connectionless
+    // seq-0 packet whose only flag is 0x00100000 (CNetwork::
+    // SendConnectLoginFailure). It never reached a handler here: the reorder
+    // gate dropped it as a duplicate of seq 0, and the login sat out its
+    // 25 s request budget before "Client timed out the connection".
+    if (hasFlag(header, PacketHeaderFlags.NetError)) {
+      const netError = readServerNetError(data);
+      if (netError) {
+        this.handleServerNetError(netError);
+        return;
+      }
+    }
+
+    // ClientNet::ProcessPacket @ 00545100: the first server packet without
+    // the ConnectRequest flag moves the receiver to cs_Connected — stop
+    // resending the ConnectResponse and start the PAK / keepalive service.
+    if (this.awaitingServerConnect) {
+      this.awaitingServerConnect = false;
+      this.stopConnectResponseRetry();
+      this.echoEpochMs = performance.now();
+      this.lastFlowKeepaliveAt = Date.now();
+      this.sendAck(); // the cs_Connected pass's first PAK (EnqueuePak)
+    }
+
     // NET.ack-only-seq-marks-lost-received — ACE FlushPackets stamps an
     // ACK-only packet (flags exactly AckSequence) and a NAK with
     // PacketSequence.CurrentValue: the seq of the server's LAST REAL packet,
@@ -1376,8 +1534,6 @@ export class ClientConnection {
 
     // Handle BlobFragments
     if (hasFlag(header, PacketHeaderFlags.BlobFragments)) {
-      // Server is sending us real data — handshake succeeded, stop retrying ConnectResponse
-      this.stopConnectResponseRetry();
       const endOffset = PACKET_HEADER_SIZE + header.size;
       PKT_DEBUG && console.log(`[AC:PKT:DBG] BlobFragments: offset=${offset} endOffset=${endOffset} dataLen=${data.length}`);
       const fragments: Fragment[] = [];
@@ -1453,20 +1609,14 @@ export class ClientConnection {
 
     this.startKeepalive();
 
-    // Start ConnectResponse retry timer. On localhost (through relay), the
-    // ConnectResponse can arrive at ACE's world port before the session state
-    // is set to AuthConnectResponse (race condition). Retry until we receive
-    // server data with blob fragments (indicating the handshake succeeded).
-    this.connectResponseRetryCount = 0;
+    // Resend the ConnectResponse every 0.333 s until the server's first
+    // packet (retail ProcessConnection, cs_ConnectionRequestAcked; no cap).
+    // Also covers ACE's localhost race, where the ConnectResponse can reach
+    // the world port before the session is in AuthConnectResponse.
+    this.awaitingServerConnect = true;
     this.connectResponseRetryTimer = setInterval(() => {
-      this.connectResponseRetryCount++;
-      if (this.connectResponseRetryCount >= ClientConnection.CONNECT_RESPONSE_MAX_RETRIES) {
-        console.warn('[AC:PKT] ConnectResponse retry limit reached — giving up');
-        this.stopConnectResponseRetry();
-        return;
-      }
       if (this.connectResponsePayload) {
-        PKT_DEBUG && console.log(`[AC:PKT] Retrying ConnectResponse (attempt ${this.connectResponseRetryCount})`);
+        PKT_DEBUG && console.log('[AC:PKT] Resending ConnectResponse (no server packet yet)');
         this.sendPacket(PacketHeaderFlags.ConnectResponse, this.connectResponsePayload, 0);
       }
     }, ClientConnection.CONNECT_RESPONSE_RETRY_INTERVAL);
