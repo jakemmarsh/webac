@@ -11,9 +11,15 @@
  * (CObjectMaint::AddObjectToBeDestroyed @ 00508f70 / UseTime @ 005089b0 →
  * DeleteObject @ 00508460). Back in a loaded cell it leaves the queue
  * (prepare_to_enter_world @ 00511fa0). Which cells are loaded:
- * CellManager::ChangePosition @ 004559b0 (landscape grid of mid_radius
- * around an outdoor / SeenOutside viewer; a sealed env-cell viewer releases
- * the landscape).
+ * CellManager::ChangePosition @ 004559b0 (the full-detail 3×3 of the
+ * landscape grid around an outdoor / SeenOutside viewer — LScape::get_landblock
+ * @ 00505e40 has no cells elsewhere; a sealed env-cell viewer releases the
+ * landscape).
+ *
+ * BUG.ghost-objects (2026-10-11) — the ring was the whole Landscape Draw
+ * Distance (8 blocks): objects the server stopped mentioning (ACE / GDLE
+ * update only the 3×3) stayed forever — monsters that died while the player
+ * was away, a fellow who went to the lifestone, an NPC twice under two guids.
  *
  * BUG.default-script-80-cap — every object plays its Setup DefaultScript
  * (no 80-script cap).
@@ -40,17 +46,28 @@ function viewer(over: Partial<ViewerLoadPoint> = {}): ViewerLoadPoint {
 }
 
 describe('ObjectMaint.isCellLoaded — CellManager::ChangePosition', () => {
-  it('outdoors: the LScape grid of mid_radius blocks around the viewer (Chebyshev), land and SeenOutside cells', () => {
+  it('outdoors: the full-detail 3×3 of the LScape grid around the viewer (Chebyshev), land and SeenOutside cells', () => {
     const v = viewer();
     expect(isCellLoaded(0xA9B40021, v)).toBe(true);
-    expect(isCellLoaded(0xB1B4FFFF, v)).toBe(true); // 8 blocks east
-    expect(isCellLoaded(0xB2B4FFFF, v)).toBe(false); // 9 blocks east
-    expect(isCellLoaded(0xA1ACFFFF, v)).toBe(true); // 8 west, 8 south
-    expect(isCellLoaded(0xA9BD0001, v)).toBe(false); // 9 north
+    expect(isCellLoaded(0xAAB4FFFF, v)).toBe(true); // 1 block east
+    expect(isCellLoaded(0xA8B3003A, v)).toBe(true); // 1 west, 1 south
+    expect(isCellLoaded(0xABB4FFFF, v)).toBe(false); // 2 blocks east: terrain only, no cells
+    expect(isCellLoaded(0xB1B4FFFF, v)).toBe(false); // 8 blocks east, the grid's edge
+    expect(isCellLoaded(0xA9B60001, v)).toBe(false); // 2 north
     expect(isCellLoaded(0xA9B40105, v)).toBe(true); // a building interior
+    expect(isCellLoaded(0xAAB50105, v)).toBe(true); // a building interior on a neighbouring block
+    expect(isCellLoaded(0xABB40105, v)).toBe(false); // a building 2 blocks off (CEnvCell::release_visible)
     expect(isCellLoaded(0xA9B40105, viewer({ isSeenOutside: () => false }))).toBe(false); // a dungeon under the town
     expect(isCellLoaded(0, v)).toBe(false);
-    expect(isCellLoaded(0xB2B4FFFF, viewer({ midRadius: 25 }))).toBe(true);
+  });
+
+  it('whatever the Landscape Draw Distance: objects live on the full-detail blocks only', () => {
+    for (const midRadius of [1, 3, 5, 8, 11, 15, 25]) {
+      const v = viewer({ midRadius });
+      expect(isCellLoaded(0xAAB5FFFF, v)).toBe(true);
+      expect(isCellLoaded(0xABB4FFFF, v)).toBe(false);
+      expect(isCellLoaded(0xB2B4FFFF, v)).toBe(false);
+    }
   });
 
   it('a sealed dungeon viewer releases the landscape: only its landblock\'s env cells stay', () => {
@@ -343,5 +360,98 @@ describe('ServerObjectManager.onBulkRemoval', () => {
     som.updateObjectMaint(() => true, 1);
     expect(reports).toEqual([]);
     expect(som.getAllObjects().size).toBe(0);
+  });
+});
+
+// BUG.ghost-objects — two agents near Holtburg (2026-10-11): after deaths,
+// lifestone recalls and portal trips each client kept monsters that had died
+// meanwhile (melee → AttackDone 0x36, spells → TargetNotAcquired), the
+// partner standing where they had last been, and Alcott twice under two guids.
+// ACE / GDLE only ever tell a client about the 3×3 landblocks around it and
+// send no DeleteObject for an object it no longer knows; retail's client
+// keeps objects only on those same full-detail blocks.
+describe('BUG.ghost-objects — what the server stops mentioning does not stay', () => {
+  const S = 0xA9AE0000; // six blocks south of Holtburg, where the fight was
+  const at = (block: number, cell = 0x0012) => ((block & 0xFFFF0000) | cell) >>> 0;
+  const named = (som: ServerObjectManager, name: string) => [...som.getAllObjects().values()].filter((o) => o.name === name);
+
+  it('a death six blocks out: the monster and the fellow there leave with the area and are gone 25 s later; back there, the fresh creates are the only copies', () => {
+    const { som } = rig();
+    let v = viewer({ viewerCellId: at(S, 0xFFFF) });
+    const loaded = (id: number) => isCellLoaded(id, v);
+    som.createObject(createData(0x8000e941, at(S), { name: 'Mite Sentry' }) as never);
+    som.createObject(createData(0x50000002, at(S, 0x0013), { name: 'Claude Bulwark' }) as never);
+    som.updateObjectMaint(loaded, 0);
+    expect(som.lostObjectCount).toBe(0);
+
+    // Dead: the server puts you at the Holtburg lifestone (ACE Player.Teleport). It says nothing more of S.
+    v = viewer();
+    som.updateObjectMaint(loaded, 5);
+    expect(som.getObject(0x8000e941)!.lostCell).toBe(true);
+    expect(som.getObject(0x50000002)!.lostCell).toBe(true);
+    expect(som.getObject(0x8000e941)!.mesh!.visible).toBe(false);
+    som.updateObjectMaint(loaded, 5 + NONVISIBLE_OBJECT_DESTRUCTION_TIME);
+    expect(som.getObject(0x8000e941)).toBeUndefined();
+    expect(som.getObject(0x50000002)).toBeUndefined();
+
+    // The Sentry died meanwhile (no DeleteObject: you no longer knew it). Walking back, the server sends what is
+    // there now: its corpse and the fellow. Nothing of the old picture is left to swing at.
+    v = viewer({ viewerCellId: at(S, 0xFFFF) });
+    som.createObject(createData(0x8000f939, at(S, 0x0020), { name: 'Corpse of Mite Sentry' }) as never);
+    som.createObject(createData(0x50000002, at(S, 0x0031), { name: 'Claude Bulwark' }) as never);
+    som.updateObjectMaint(loaded, 60);
+    expect(named(som, 'Mite Sentry')).toHaveLength(0);
+    expect(named(som, 'Claude Bulwark')).toHaveLength(1);
+    expect(som.getObject(0x50000002)!.objCellId).toBe(at(S, 0x0031));
+  });
+
+  it('an NPC re-spawned under a new guid while you were away is listed once (Alcott #8000e8b2 / #8000f3c6)', () => {
+    const { som } = rig();
+    let v = viewer();
+    const loaded = (id: number) => isCellLoaded(id, v);
+    som.createObject(createData(0x8000e8b2, 0xA9B40021, { name: 'Alcott' }) as never);
+    som.updateObjectMaint(loaded, 0);
+    // Off hunting six blocks south (inside the old 8-block ring, outside the 3×3): Holtburg unloads on the server.
+    v = viewer({ viewerCellId: at(S, 0xFFFF) });
+    som.updateObjectMaint(loaded, 10);
+    som.updateObjectMaint(loaded, 10 + NONVISIBLE_OBJECT_DESTRUCTION_TIME);
+    expect(named(som, 'Alcott')).toHaveLength(0);
+    // Back at the lifestone: the reloaded block's Alcott has a new dynamic guid.
+    v = viewer();
+    som.createObject(createData(0x8000f3c6, 0xA9B40021, { name: 'Alcott' }) as never);
+    som.updateObjectMaint(loaded, 100);
+    expect(named(som, 'Alcott').map((o) => o.guid)).toEqual([0x8000f3c6]);
+  });
+
+  it('a fellow the server places at a far lifestone leaves your world, though the cell they stood in is still yours', () => {
+    const { som } = rig();
+    const v = viewer({ viewerCellId: at(S, 0xFFFF) });
+    const loaded = (id: number) => isCellLoaded(id, v);
+    const fellow = som.createObject(createData(0x50000002, at(S, 0x0013), { name: 'Claude Bulwark' }) as never)!;
+    som.updateObjectMaint(loaded, 0);
+    // ACE Player.Teleport broadcasts the destination (SendUpdatePosition with the new Location) to who knows them.
+    som.updatePosition({ guid: fellow.guid, flags: 0x4, landblock: 0xA9B40021, x: 10, y: 10, z: 0, rw: 1, rx: 0, ry: 0, rz: 0 } as never);
+    som.updateObjectMaint(loaded, 1);
+    expect(fellow.lostCell).toBe(true);
+    expect(fellow.mesh!.visible).toBe(false);
+    som.updateObjectMaint(loaded, 1 + NONVISIBLE_OBJECT_DESTRUCTION_TIME);
+    expect(som.getObject(fellow.guid)).toBeUndefined();
+  });
+
+  it('a block step keeps the 3×3 around you: the column left behind waits 25 s, and stepping back in time keeps it', () => {
+    const { som } = rig();
+    let v = viewer();
+    const loaded = (id: number) => isCellLoaded(id, v);
+    const west = som.createObject(createData(0x80000100, 0xA8B40021, { name: 'Drudge Skulker' }) as never)!;
+    som.updateObjectMaint(loaded, 0);
+    expect(west.lostCell).toBeFalsy();
+    v = viewer({ viewerCellId: 0xAAB4FFFF }); // one block east: the western column is two blocks off
+    som.updateObjectMaint(loaded, 1);
+    expect(west.lostCell).toBe(true);
+    v = viewer(); // back within 25 s (ACE's own queue kept it known too: no new create comes)
+    som.updateObjectMaint(loaded, 20);
+    expect(west.lostCell).toBe(false);
+    som.updateObjectMaint(loaded, 100);
+    expect(som.getObject(west.guid)).toBeDefined();
   });
 });

@@ -239,6 +239,30 @@ here, not having to hardcode behavior").
 - **Purse.** Above level 5 a death drops half your coins and trade notes aren't coins (ACE
   `Player_Death.GetNumCoinsDropped`); observe says so beside a purse of 1,000 or more. 412 vendors sell trade notes.
 
+- **The evening's batch (2026-10-11, Arcanist + Bulwark).** A stack's value is the stack's own (ACE `Value =
+  StackUnitValue × StackSize`; the inventory had squared it). Nanto's upstairs Journeyman Scriveners did open their
+  shops: ACE sent ApproachVendor (its Open emote, "Isn't it wonderful…", rides with it), and our vendor bar's range
+  check (gmVendorUI's ObjectsInRange, UseRadius 3) measured from the terrain under the building (z 94), not the
+  floor the player stood on (z 99), so the bar closed itself at once; it now uses the character's true feet (the
+  ranged-speech check had the same bug). `ac_use` on a vendor waits for that vendor's own window (another's still
+  open is no answer) and says when none opened; a use far off keeps waiting while the server's walk closes in and
+  reports "you are still N m from it" instead of "used". `ac_give amount=` takes from a stack that holds the
+  amount, says when none does, and is a failure unless the item left the pack (the server's refusal is the reply).
+  Your own name is "you" (`use_on target=<your name>`). A far walk whose 35 m stretch ends in a lake or a wall
+  goes as far as the search reached, then tries stretches turned 45° and 90° aside, keeping to the side that
+  worked; a walk from inside a building to one in another landblock routes out of ours first. Being hit stops a
+  walk unless the way on leads away from every attacker (or `flee=true`): you can run. ("You're too busy!" for a
+  healing kit is ACE's IsBusy, set by the kit's own heal or another action in flight: checked, server behaviour.)
+  A drop or jump never lands where a drop of over a metre lies within 0.45 m (jumpPlan.stableLanding: the dam
+  pylons at 42.3N 78.35W turned a planned 4.8 m drop into a 28 m fall), the arrival after one waits 1.2 s to see
+  the body stays, and an unplanned fall is told. The CLI prints ac_look's text after the screenshot path.
+  A walk names a fellow it left far behind, and `stay_with=<fellow>` waits whenever they fall `stay_within` m
+  back. Monster levels: CreateObject carries none and the retail selection asks only for health, but ACE's
+  appraisal sends Level even on a failed Assess, so ac_observe / ac_look examine the nearest three monsters with
+  no level, quietly, once each (routines' own looks don't). The daemon's shutdown has a 30 s deadline, a second
+  SIGTERM ends it at once, and the bridge and Vite are killed as process groups (`tools/ac-agent/shutdown.ts`:
+  browser.close hung and left the daemon up for 20 minutes, deaf to SIGTERM).
+
 ## What makes it play, not automation (Claude's view, 2026-10-07)
 
 Jake asked whether a Claude would enjoy playing this way. The honest answer after a session through the

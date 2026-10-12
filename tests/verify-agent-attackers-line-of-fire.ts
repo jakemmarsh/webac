@@ -221,7 +221,8 @@ describe('inventory and purse facts', () => {
     const text = formatInventory([
       { guid: 0x80003328, name: 'Academy Coat', where: 'equipped', slot: 'ChestArmor+AbdomenArmor' },
       { guid: 0x80000d74, name: 'Leather Cuirass', where: 'main pack', type: 'Armor', fits: 'ChestArmor+AbdomenArmor', value: 120 },
-      { guid: 0x80001c79, name: 'Lead Pea', where: 'main pack', stack: 3, value: 10 },
+      // A stack's Value is already the whole stack's (ACE: StackUnitValue × StackSize): shown as it is, never × the stack again.
+      { guid: 0x80001c79, name: 'Lead Pea', where: 'main pack', stack: 3, value: 30 },
       { guid: 0x80003574, name: 'Foci of Strife', where: 'pack slots', wcid: 15271, type: 'Misc' },
       { guid: 0x80009999, name: 'Foci of Verdancy', where: 'Sack', wcid: 15270 },
     ]);

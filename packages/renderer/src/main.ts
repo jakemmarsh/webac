@@ -3178,11 +3178,13 @@ async function main() {
   const objectRangeChecks = new ObjectRangeChecks();
   function playerRangeBody(): RangeBody {
     const coll = playerInDungeon ? dungeonCollision : outdoorCollision;
-    const feetY = playerInDungeon
-      ? dungeonFloorY
-      : (terrainCollision.getHeightAt(playerWorldX, playerWorldZ) ?? 0);
+    // The character's true feet (last frame), not the terrain under it: on a
+    // building's upper floor the terrain is metres below, and a vendor up
+    // there (Nanto's Journeyman Scriveners, floor z 99 over terrain 94,
+    // UseRadius 3) was out of range the moment its bar opened, so the bar
+    // closed itself at once (2026-10-11 agent play).
     return {
-      x: playerWorldX, y: feetY, z: playerWorldZ,
+      x: playerWorldX, y: playerFeetY, z: playerWorldZ,
       radius: coll?.playerRadius ?? DungeonCollision.PLAYER_RADIUS,
       height: coll?.playerHeight ?? DungeonCollision.PLAYER_HEIGHT,
     };
@@ -3232,9 +3234,10 @@ async function main() {
   let serverSelfEcho: { cell: number; x: number; y: number; z: number; at: number } | null = null;
   /**
    * BUG.teleport-leaves-stale-objects — is a full cell id loaded for the
-   * viewer (CellManager::ChangePosition: the landscape grid of
-   * LandscapeDrawDistance blocks around an outdoor / SeenOutside viewer, or
-   * only the dungeon's env cells around a sealed one)? world/ObjectMaint.ts.
+   * viewer (CellManager::ChangePosition: the full-detail 3×3 of the
+   * landscape grid around an outdoor / SeenOutside viewer — the only blocks
+   * with object cells, BUG.ghost-objects — or only the dungeon's env cells
+   * around a sealed one)? world/ObjectMaint.ts.
    */
   function objectCellLoaded(cellId: number): boolean {
     const viewerCellId = playerInDungeon && dungeonLandblockId
@@ -8843,9 +8846,7 @@ async function main() {
         // player→player distance is 0, always in range).
         if (typeof data.range === 'number' && data.senderGuid !== aceCharGuid) {
           const senderObj = serverObjectManager?.getObject(data.senderGuid);
-          const playerFeetY = playerInDungeon
-            ? dungeonFloorY
-            : (terrainCollision.getHeightAt(playerWorldX, playerWorldZ) ?? 0);
+          // The character's true feet (an upper floor is not the terrain under it).
           const inRange = rangedSpeechInRange(
             { x: playerWorldX, y: playerFeetY, z: playerWorldZ },
             senderObj ? { x: senderObj.worldX, y: senderObj.worldY, z: senderObj.worldZ } : null,
@@ -15599,6 +15600,8 @@ async function main() {
         palettes: o.subPalettes?.map((p) => ({ id: p.paletteId >>> 0, offset: p.offset, length: p.length })),
         physicsState: o.physicsState,
         ...(o.uiEffects ? { uiEffects: o.uiEffects } : {}),
+        // BUG.ghost-objects — its cell is released (world/ObjectMaint.ts): only where it was last seen.
+        ...(o.lostCell ? { lost: true } : {}),
         };
       };
       const carried = (): Set<number> => new Set([...playerState.inventory.getAll().map((i) => i.id >>> 0), ...playerState.equipment.getAll().map((i) => i.id >>> 0)]);

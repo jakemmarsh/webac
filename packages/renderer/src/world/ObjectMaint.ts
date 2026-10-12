@@ -1,4 +1,5 @@
 import { isInteriorCellIndex } from '@ac/shared';
+import { objectRingRadius } from './LandscapeDrawDistance.js';
 
 /**
  * ObjectMaint — which server objects are "in the world" for this client, and
@@ -32,10 +33,34 @@ import { isInteriorCellIndex } from '@ac/shared';
  *    releases the whole landscape (`LScape::release_all`) — every outdoor
  *    object leaves visibility — and only env cells stay
  *    (`CEnvCell::flush_cells` @ 0052def0 keeps the viewer's visible cells).
+ *  - …but only the FULL-DETAIL blocks of that grid have cells an object can
+ *    stand in (BUG.ghost-objects, 2026-10-11): `LScape::get_landblock`
+ *    @ 00505e40 returns null for any block whose side_cell_count is not 8,
+ *    `CLandBlock::init_dyn_objs` @ 0052f3b0 runs only on those, and a block
+ *    that drops out of full detail releases its objects
+ *    (`CLandBlock::notify_change_size` @ 005302c0 → `release_objs` @ 0052f350
+ *    → `CObjCell::release_objects`) and its building cells
+ *    (`CEnvCell::release_visible`). Full detail is the 3×3 around the viewer
+ *    (`LScape::get_block_orient` @ 00504f90, LandscapeDrawDistance.ts
+ *    `objectRingRadius`), whatever the Landscape Draw Distance: the rest of
+ *    the grid is terrain only.
+ *  - A teleport (`SmartBox::TeleportPlayer` @ 00453910 → PlayerPositionUpdated
+ *    (1) → `ChangePosition(…, 1)`) releases the whole landscape at once; what
+ *    the destination's 3×3 loads again comes back, the rest is queued.
  *
- * ACE mirrors this on the server (ObjectMaint.cs DestructionQueue, 25 s) and
- * never sends a DeleteObject for an object that merely left visibility; it
- * re-sends the CreateObject once its own queue dropped the object.
+ * ACE mirrors this on the server (ObjectMaint.cs DestructionQueue, 25 s; the
+ * visible set outdoors is the player's landblock + its adjacents,
+ * ObjectMaint.GetVisibleObjects — the same 3×3) and never sends a
+ * DeleteObject for an object that merely left visibility: one that dies,
+ * moves or is re-spawned (a landblock reload re-mints dynamic guids) while
+ * the player is away is simply never mentioned again (Landblock.cs
+ * RemoveWorldObjectInternal sends DeleteObject only to players that still
+ * know it). It re-sends the CreateObject once its own queue dropped the
+ * object. GDLE (Dark Majesty / AC1999 servers) does the same with its 3×3
+ * ExchangePVS and 25 s awareness cache (WorldLandBlock.cpp, Player.cpp
+ * AlreadyMadeAwareOf). A client that keeps objects past the 3×3 therefore
+ * shows ghosts: monsters that died while the player was away, a fellow who
+ * recalled to a lifestone, an NPC twice under two guids.
  *
  * Approximation: the env cells kept are the viewer's whole LANDBLOCK (retail
  * keeps the viewer cell's visible-cell set), so an object in a far room of
@@ -50,7 +75,10 @@ export interface ViewerLoadPoint {
   viewerCellId: number;
   /** The viewer is in an env cell WITHOUT SeenOutside (a dungeon) — the landscape is released. */
   sealed: boolean;
-  /** LScape mid_radius in landblocks (Render.LandscapeDrawDistance). */
+  /**
+   * LScape mid_radius in landblocks (Render.LandscapeDrawDistance). Only its
+   * full-detail ring holds object cells (objectRingRadius: the 3×3).
+   */
   midRadius: number;
   /** EnvCell SeenOutside flag for a full env-cell id. */
   isSeenOutside: (cellId: number) => boolean;
@@ -73,7 +101,8 @@ export function isCellLoaded(cellId: number, v: ViewerLoadPoint): boolean {
     // LScape::release_all — only the dungeon's env cells.
     return interior && bx === vx && by === vy;
   }
-  if (Math.max(Math.abs(bx - vx), Math.abs(by - vy)) > v.midRadius) return false;
+  // LScape::get_landblock: a block outside the full-detail ring has no cells.
+  if (Math.max(Math.abs(bx - vx), Math.abs(by - vy)) > objectRingRadius(v.midRadius)) return false;
   if (!interior) return true;
   // An env cell under the landscape grid: a building interior (SeenOutside)
   // is part of the outdoor world; a sealed dungeon cell is not loaded.

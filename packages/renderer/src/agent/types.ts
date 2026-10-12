@@ -41,6 +41,11 @@ export interface AgentObject {
    * bolt or arrow would hit that instead (the client's own missile collision; creatures are not counted).
    */
   lineOfFireBlockedAt?: number;
+  /**
+   * The target only: the client released it (its cell is out of the 3×3 landblocks the server keeps you updated
+   * on: CPhysicsObj::leave_visibility): not drawn, frozen where it was last seen, deleted 25 s later. Not there to act on.
+   */
+  outOfSight?: boolean;
 }
 
 export interface AgentVital { cur: number; max: number }

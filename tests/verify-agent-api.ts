@@ -1371,7 +1371,9 @@ describe('walk_to drops and jumps (AGENT.walk-drops-jumps)', () => {
     expect(at(-6, 0)).toBe('v'); // x 74: the 3 m step down
     expect(at(0, 11)).toBe('!'); // y 31: over the pit
     expect(grid.join('')).toContain('J'); // the far ledge
-    expect(at(-5, 13)).toBe('J'); // landing spots on the far ledge, every other column from the edges tried
+    // Landing spots on the far ledge (y 33), every other column from the edges tried; only ones the body
+    // stands on with no part over the pit (jumpPlan.stableLanding), so not every column the old marks had.
+    expect([-5, -4, -3].map((dx) => at(dx, 13))).toContain('J');
     expect(grid.slice(0, 3).join('')).not.toContain('.'); // the far side is not walkable from here
   });
 

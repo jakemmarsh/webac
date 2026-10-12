@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { getJumpVelocity } from '@ac/shared';
-import { dropDamage, fallBudget, fallDamage, jumpOptions, reaimJump, safeDropHeight, simulateFlight, type JumpKit } from '../packages/renderer/src/agent/jumpPlan.ts';
+import { LANDING_MARGIN_M, dropDamage, fallBudget, fallDamage, jumpOptions, reaimJump, safeDropHeight, simulateFlight, stableLanding, type JumpKit } from '../packages/renderer/src/agent/jumpPlan.ts';
 import { airborneReferenceY, headroomClamp } from '../packages/renderer/src/world/fallPhysics.ts';
 import { jumpChargeSeconds } from '../packages/renderer/src/animation/CharacterAnimController.ts';
 import { MotionStance } from '../packages/renderer/src/animation/MotionCommands.ts';
@@ -100,10 +100,30 @@ describe('jump options and re-aiming', () => {
   it('re-aims from where the body really stopped, landing near the planned spot', () => {
     const kit = kitFor((x) => gap(x));
     const plan = jumpOptions(kit, { x: -0.1, y: 0, z: 0 }, { x: 1, y: 0 }, { maxDamage: 20 })[0];
+    // Never on the pit's lip: an edge landing slides the body off (stableLanding).
     const again = reaimJump(kit, { x: -0.6, y: 0.2, z: 0 }, plan, 20)!;
     expect(again).not.toBeNull();
+    expect(again.to.x).toBeGreaterThanOrEqual(2.5 + LANDING_MARGIN_M);
     expect(Math.hypot(again.to.x - plan.to.x, again.to.y - plan.to.y)).toBeLessThan(1.5);
     expect(again.power).toBeGreaterThanOrEqual(plan.power);
+  });
+});
+
+describe('landings that hold the body (2026-10-11: the dam pylons at 42.3N 78.35W)', () => {
+  // Pylon tops 0.8 m wide every 3 m, 23 m over the riverbed (the dam: a "4.8 m drop" became a 28 m fall).
+  const dam = (x: number): number[] => ((((x % 3) + 3) % 3) < 0.8 ? [23, 0] : [0]);
+  it('a pylon top with a long drop all round is no landing; flat ground and a floor beside a wall are', () => {
+    const kit = kitFor((x) => dam(x));
+    expect(stableLanding(kit, { x: 0.4, y: 0, z: 23 })).toBe(false);
+    expect(stableLanding(kit, { x: 1.5, y: 0, z: 0 })).toBe(true);
+    // A wall's footing (no floor at all under it) is not a drop.
+    expect(stableLanding({ floor: (x) => (x > 0.3 ? null : 5) }, { x: 0, y: 0, z: 5 })).toBe(true);
+  });
+  it('the planner never lands on a pylon: from a ledge at 27.9 m it drops to the ground, not onto a pylon top', () => {
+    const kit = kitFor((x) => (x < 0 ? [27.9, 0] : dam(x)));
+    const opts = jumpOptions(kit, { x: -0.1, y: 0, z: 27.9 }, { x: 1, y: 0 }, { maxDamage: 200 });
+    expect(opts.length).toBeGreaterThan(0);
+    for (const o of opts) expect(o.to.z).toBe(0);
   });
 });
 

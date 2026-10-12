@@ -46,6 +46,7 @@ export function formatObject(o: AgentObject): string {
   if (o.stack && o.stack > 1) bits.push(`x${o.stack}`);
   if (o.open) bits.push('open');
   if (o.dying) bits.push('dying');
+  if (o.outOfSight) bits.push('OUT OF SIGHT: only where it was last seen (it may have moved, died or gone)');
   if (o.attackingYou) bits.push(`ATTACKING YOU (${o.attackingYou}× in 10 s)`);
   if (o.lineOfFireBlockedAt !== undefined) bits.push(`no line of fire: blocked ${o.lineOfFireBlockedAt.toFixed(1)} m along it (a bolt or arrow would hit that)`);
   if (o.seenAgo !== undefined) bits.push(`last seen ${seenAgoText(o.seenAgo)} ago`);
@@ -147,7 +148,8 @@ export function formatInventory(items: AgentItem[]): string {
       const extra = [
         it.slot, it.stack && it.stack > 1 ? `x${it.stack}` : '', it.type,
         it.fits && it.where !== 'equipped' ? `fits ${it.fits}` : '',
-        it.value ? `value ${(it.value * (it.stack ?? 1)).toLocaleString('en-US')}` : '',
+        // The public description's Value is already the whole stack's (ACE sets Value = StackUnitValue × StackSize).
+        it.value ? `value ${it.value.toLocaleString('en-US')}` : '',
         school ? (it.where === 'pack slots' || it.where === 'main pack' ? `${school} focus: in use` : `${school} focus: NOT in use inside ${it.where}; it counts only in your own pack slots`) : '',
       ].filter(Boolean).join(', ');
       out.push(`  #${it.guid.toString(16)} ${it.name}${extra ? `  (${extra})` : ''}`);

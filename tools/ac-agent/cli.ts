@@ -16,7 +16,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './state.ts';
-import { TOOLS, TOOL_BY_NAME, type AgentTool } from './tools.ts';
+import { TOOLS, TOOL_BY_NAME, type AgentTool, type ToolOutput } from './tools.ts';
 
 export function parseCliArgs(tool: AgentTool, rest: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -40,6 +40,16 @@ export function parseCliArgs(tool: AgentTool, rest: string[]): Record<string, un
   return out;
 }
 
+/**
+ * What the CLI prints for a tool's output: a screenshot is saved (`save` returns its path) and the path printed,
+ * then the text beside it. ac_look's observation was dropped and only the path printed (2026-10-11).
+ */
+export function cliOutput(out: ToolOutput, save: (jpegBase64: string) => string): string {
+  if (!out.jpegBase64) return out.text;
+  const path = save(out.jpegBase64);
+  return out.text && out.text !== 'screenshot' ? `${path}\n${out.text}` : path;
+}
+
 function help(): string {
   return TOOLS.map((t) => {
     const args = Object.entries(t.props).filter(([k]) => k !== 'profile')
@@ -57,13 +67,11 @@ async function main(): Promise<void> {
   const tool = TOOL_BY_NAME.get(`ac_${cmd}`) ?? TOOL_BY_NAME.get(cmd);
   if (!tool) throw new Error(`unknown command "${cmd}" (try help)`);
   const out = await tool.run(parseCliArgs(tool, rest));
-  if (out.jpegBase64) {
+  console.log(cliOutput(out, (b64) => {
     const f = join(STATE_DIR, `screenshot-${Date.now()}.jpg`);
-    writeFileSync(f, Buffer.from(out.jpegBase64, 'base64'));
-    console.log(f);
-  } else {
-    console.log(out.text);
-  }
+    writeFileSync(f, Buffer.from(b64, 'base64'));
+    return f;
+  }));
   if (out.isError) process.exitCode = 1;
 }
 

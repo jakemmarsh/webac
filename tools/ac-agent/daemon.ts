@@ -29,6 +29,10 @@ import { chromium, type Browser, type Page } from 'playwright';
 import { AT_CHAR_SELECT_JS, REMOTE_CHROMIUM, REPO, createCharacterIfNeeded, waitForWorld } from '../lib/game-session.ts';
 import { STATE_DIR, accountForProfile, clearInfo, logFile, readInfo, writeInfo } from './state.ts';
 import { type AgentEra, agentEra, eraAccount } from './eras.ts';
+import { createShutdown } from './shutdown.ts';
+
+/** `p`, or a rejection after `ms`. */
+const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timed out after ${ms} ms`)), ms))]);
 
 interface Args {
   profile: string;
@@ -223,7 +227,7 @@ async function main(): Promise<void> {
     const port = await freePort(9127);
     // Pinned to this era's local server; BRIDGE_ERA selects AC1999's session protocol (and labels the others).
     bridgeChild = spawn('npx', ['tsx', 'services/ws-tcp-bridge/src/bridge.ts', String(port), '127.0.0.1', String(args.era.ports[0]), String(args.era.ports[1])], {
-      cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
       env: { ...process.env, ...(args.era.bridgeEra ? { BRIDGE_ERA: args.era.bridgeEra } : {}) },
     });
     bridgeChild.stdout?.on('data', (d) => appendFileSync(log, `[bridge] ${d}`));
@@ -243,7 +247,7 @@ async function main(): Promise<void> {
     // whatever Vite comes back on that port, dropping the player mid-session (acjs-ea, 1999 run).
     const cfg = join(dir, 'vite.agent.config.mjs');
     writeFileSync(cfg, "import base from './vite.config.ts';\nexport default async (env) => { const c = typeof base === 'function' ? await base(env) : base; return { ...c, server: { ...(c.server ?? {}), hmr: false } }; };\n");
-    viteChild = spawn('npx', ['vite', '--config', cfg, '--port', String(port), '--strictPort'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    viteChild = spawn('npx', ['vite', '--config', cfg, '--port', String(port), '--strictPort'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     viteChild.stdout?.on('data', (d) => appendFileSync(log, `[vite] ${d}`));
     viteChild.stderr?.on('data', (d) => appendFileSync(log, `[vite] ${d}`));
     base = `http://localhost:${port}/`;
@@ -386,30 +390,31 @@ async function main(): Promise<void> {
     res.writeHead(code, { 'content-type': 'application/json' });
     res.end(JSON.stringify(obj));
   };
-  let shuttingDown = false;
-  const shutdown = async (why: string): Promise<void> => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    say(`shutting down (${why})`);
-    clearInfo(args.profile);
-    if (args.attach) {
-      // The human's own session and browser: leave both as they are and only let go of the tab.
-      say('detached; the game and browser stay as they were');
-      process.exit(0);
-    }
-    // A real logout, waited out: ACE saves the character (position included) only when its logout
-    // completes and the client is back at character select; closing the window first loses the session's progress.
-    await page.evaluate('window.__acAgent && window.__acAgent.logout && window.__acAgent.logout()').catch(() => {});
-    for (let i = 0; i < 40; i++) {
-      if (await page.evaluate(AT_CHAR_SELECT_JS).catch(() => false)) break;
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    await new Promise((r) => setTimeout(r, 1000));
-    await browser.close().catch(() => {});
-    bridgeChild?.kill();
-    viteChild?.kill();
-    process.exit(0);
-  };
+  // tools/ac-agent/shutdown.ts: a deadline, a second signal ends it at once, children killed as process groups.
+  const shutdown = createShutdown({
+    say,
+    children: () => [bridgeChild, viteChild],
+    exit: (code) => process.exit(code),
+    steps: async () => {
+      clearInfo(args.profile);
+      if (args.attach) {
+        // The human's own session and browser: leave both as they are and only let go of the tab.
+        say('detached; the game and browser stay as they were');
+        return;
+      }
+      server.close();
+      // A real logout, waited out: ACE saves the character (position included) only when its logout
+      // completes and the client is back at character select; closing the window first loses the session's progress.
+      await withTimeout(page.evaluate('window.__acAgent && window.__acAgent.logout && window.__acAgent.logout()'), 5000).catch(() => {});
+      for (let i = 0; i < 40; i++) {
+        if (await withTimeout(page.evaluate(AT_CHAR_SELECT_JS), 2000).catch(() => false)) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+      // Playwright's close can wait forever on a browser that stopped answering (2026-10-12).
+      await withTimeout(browser.close(), 10_000).catch(() => say('the browser did not close in 10 s; leaving it to the exit'));
+    },
+  });
 
   const server = createServer(async (req, res) => {
     try {

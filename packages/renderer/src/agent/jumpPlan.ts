@@ -137,6 +137,27 @@ export function simulateFlight(kit: Pick<JumpKit, 'floor' | 'airStep' | 'bodyHei
   return null;
 }
 
+/** How far round a landing it must not drop away (m): about the body's radius (0.48), so no part of it hangs over a drop. */
+export const LANDING_MARGIN_M = 0.45;
+/** A drop beside a landing deeper than this makes it an edge (m). */
+const LANDING_EDGE_DROP_M = 1;
+
+/**
+ * Whether a landing spot holds the body: eight points LANDING_MARGIN_M out round it, none over a drop of
+ * more than a metre. A landing on a pylon's lip or a ledge's rim slides
+ * the body off (CTransition::edge_slide only holds it while it walks): the dam at 42.3N 78.35W, planned
+ * as a 4.8 m drop, became a 28 m fall and 47 damage (2026-10-11).
+ */
+export function stableLanding(kit: Pick<JumpKit, 'floor'>, at: NavPoint): boolean {
+  for (let k = 0; k < 8; k++) {
+    const a = (k * Math.PI) / 4;
+    const f = kit.floor(at.x + LANDING_MARGIN_M * Math.cos(a), at.y + LANDING_MARGIN_M * Math.sin(a), at.z + 0.5);
+    // No floor at all there is a wall's footing or the world's edge, not a drop: only a floor found far below is.
+    if (f !== null && f < at.z - LANDING_EDGE_DROP_M) return false;
+  }
+  return true;
+}
+
 /** The charge powers tried, gentlest first. A press shorter than ~0.15 s can't fit the forward key in after the charge starts. */
 const POWERS = [0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1];
 /** A jump must land the same way when the key is held a frame or two longer or shorter. */
@@ -163,6 +184,7 @@ export function jumpOptions(kit: JumpKit, from: NavPoint, dir: { x: number; y: n
       if (!to || Math.hypot(to.x - from.x, to.y - from.y) < minDistance) continue;
       const damage = fallDamage(to.vz);
       if (damage > opts.maxDamage) continue;
+      if (!stableLanding(kit, to)) continue;
       if (out.some((o) => Math.hypot(o.to.x - to.x, o.to.y - to.y) < 1 && Math.abs(o.to.z - to.z) < 0.5)) continue;
       const steady = [power - POWER_SLOP, power + POWER_SLOP].filter((p) => p > 0 && p <= 1).every((p) => {
         const o = fly(p, walk);
@@ -190,7 +212,7 @@ export function reaimJump(kit: JumpKit, here: NavPoint, plan: JumpSpec, maxDamag
   for (let power = 0.15; power <= 1.0001; power += 0.025) {
     const l = kit.launch(power, plan.walk);
     const to = simulateFlight(kit, here, u.x * l.forward, u.y * l.forward, l.up);
-    if (!to || Math.abs(to.z - plan.to.z) > 0.5 || fallDamage(to.vz) > maxDamage) continue;
+    if (!to || Math.abs(to.z - plan.to.z) > 0.5 || fallDamage(to.vz) > maxDamage || !stableLanding(kit, to)) continue;
     const err = Math.hypot(to.x - plan.to.x, to.y - plan.to.y);
     if (err < bestErr) { bestErr = err; best = { from: here, to: { x: to.x, y: to.y, z: to.z }, dir: u, power, holdMs: Math.round(power * kit.chargeSeconds * 1000), walk: plan.walk, flight: to.t, damage: fallDamage(to.vz) }; }
   }
