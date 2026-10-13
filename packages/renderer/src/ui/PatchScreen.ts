@@ -369,6 +369,54 @@ export class PatchEventGate {
   }
 }
 
+/**
+ * One streamed set's openStreamingDats progress (done, total) as patch
+ * events: on its first report it adds its total (plus `wholeBytes`, whole
+ * DATs this boot also downloads) to the meter's running total and sends one
+ * Begin with that total; every report sends the new bytes as Downloaded.
+ *
+ * The set's total grows after that Begin (openStreamingDats adds the pre-world
+ * art to DatStore.open's manifest + packs), and the Begin is not re-sent, so
+ * the meter's events are unchanged; `grew` hears the added bytes so the boot
+ * telemetry's total covers the same bytes its Downloaded count does
+ * (a warm boot reported doneKB 6570 of totalKB 5835, build 83c4ab48).
+ */
+export class StreamedPatchFeed {
+  private begun = false;
+  private reported = 0;
+  /** The set's own total as of its Begin, raised by every later growth. */
+  private setTotal = 0;
+
+  constructor(private readonly o: {
+    wholeBytes: number;
+    /** Add bytes to the meter's running announced total; returns the new running total. */
+    announce: (bytes: number) => number;
+    emit: (event: PatchEvent) => void;
+    grew?: (bytes: number) => void;
+  }) {}
+
+  /** openStreamingDats' onProgress. */
+  onProgress(done: number, total: number): void {
+    if (!this.begun) {
+      this.begun = true;
+      this.setTotal = total;
+      this.o.emit({ kind: 'begin', expected: this.o.announce(Math.max(0, this.o.wholeBytes) + total) });
+    } else if (total > this.setTotal) {
+      this.o.grew?.(total - this.setTotal);
+      this.setTotal = total;
+    }
+    if (done > this.reported) { this.o.emit({ kind: 'downloaded', bytes: done - this.reported }); this.reported = done; }
+  }
+
+  /** The set resolved: a set that never reported still announces the whole DATs. */
+  finish(): void {
+    const whole = Math.max(0, this.o.wholeBytes);
+    if (this.begun || whole === 0) return;
+    this.begun = true;
+    this.o.emit({ kind: 'begin', expected: this.o.announce(whole) });
+  }
+}
+
 /** The part of ACFontRenderer the splash draws with (a fake stands in under test). */
 export type PatchFont = Pick<ACFontRenderer, 'isReady' | 'renderTextToCanvas' | 'outlinePadding'>;
 

@@ -30,7 +30,7 @@ import { Connection1999, VERSION_1999 } from '../packages/network/src/era1999/Co
 import { buildPacket1999, F1999, HEADER_SIZE_1999, readHeader1999 } from '../packages/network/src/era1999/Packet1999.js';
 import type { ConnectionEvent } from '../packages/network/src/index.js';
 import { serverNetErrorNotice, netErrorNotice, characterErrorNotice } from '../packages/renderer/src/ui/ConnectionNotices.js';
-import { loginFailureText } from '../packages/renderer/src/launcher/worldDirectory.js';
+import { loginFailureText, LOGON_FAILED_HINT } from '../packages/renderer/src/launcher/worldDirectory.js';
 import {
   SessionLifecycle, IN_WORLD_RETRY_BUDGET, IN_WORLD_RETRY_DELAY_MS,
 } from '../packages/renderer/src/session/SessionLifecycle.js';
@@ -159,11 +159,11 @@ describe('Connection1999: a refused login names the server reason', () => {
     expect(errors(events)).toHaveLength(1); // no timeout on top
   });
 
-  it('a login-failed refusal on a world with a registration line carries the hint; an auto-create world shows the text alone', () => {
+  it('a login-failed refusal on a world with a registration line carries the registration hint; an auto-create world (auto_create_accounts=1) the taken-name hint', () => {
     const { events, sock } = start();
     sock.deliver(refusal1999(STR_LOGIN_FAILED));
     const n = serverNetErrorNotice(errors(events)[0].serverNetError!.stringId, ST_SERVER_ERRORS);
-    expect(loginFailureText(n, { name: 'AC1999', registration: null, registrationUrl: null }, false)).toBe('Client logon failed');
+    expect(loginFailureText(n, { name: 'AC1999', registration: null, registrationUrl: null }, false)).toBe(`Client logon failed\n\n${LOGON_FAILED_HINT}`);
     expect(loginFailureText(n, { name: 'W', registration: 'Register first.', registrationUrl: null }, false))
       .toBe('Client logon failed\n\nNew account? Register first.');
   });

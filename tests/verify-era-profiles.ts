@@ -187,7 +187,7 @@ describe('AC1999 (docs/ac1999-support-scope.md Phase 2.4)', () => {
 describe('boot era', () => {
   const sw = (over: Partial<EraSwitch> = {}): EraSwitch => ({
     era: 'classic-dereth', worldKey: 'seed', worldName: 'Seedsow', connectUrl: 'wss://b/connect?server=seed',
-    account: 'bael', password: 'pw', at: 1_000_000, ...over,
+    account: 'bael', password: 'pw', at: 1_000_000, world: null, ...over,
   });
 
   it('?era beats a pending switch; nothing else picks a classic boot; unknown ids fall through', () => {

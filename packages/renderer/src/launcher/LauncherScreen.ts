@@ -30,11 +30,18 @@ import type { ElementDesc } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { charselHighlightSlices, charselRowState } from '../ui/CharselListRows.js';
 import { descRef } from '../ui/DatTextStyle.js';
 import {
-  type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeBridgeEra, worldEnterBlock, worldRegistrationText,
+  type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeCustomBridge, worldEnterBlock, worldRegistrationText,
 } from './worldDirectory.js';
 import { loadRememberedLogin, saveRememberedLogin, worldKeyOf, type RememberedLogin } from './launcherStorage.js';
 
 export const CHARSEL_LAYOUT = 0x21000004;
+
+/** The launcher's custom-bridge era probe: the era, or a rejection when the bridge did not answer. */
+async function defaultProbeEra(bridgeUrl: string): Promise<string | null> {
+  const r = await probeCustomBridge(bridgeUrl);
+  if (!r.reachable) throw new Error(`no answer from ${bridgeUrl}`);
+  return r.era;
+}
 const EL_MAIN = 0x1000039a;
 const EL_WORLD_BOX = 0x1000039b;
 const EL_LIST = 0x1000039c;
@@ -141,7 +148,11 @@ export interface LauncherOptions {
    * players of the hosted client are offered its source; null hides the link.
    */
   sourceUrl?: string | null;
-  /** A custom bridge's era from its /healthz (worldDirectory.probeBridgeEra; tests pass a fake). */
+  /**
+   * A custom bridge's era from its /healthz (worldDirectory.probeCustomBridge;
+   * tests pass a fake). Rejects when the bridge answered neither probe: the
+   * world is then World.eraUnknown.
+   */
   probeEra?: (bridgeUrl: string) => Promise<string | null>;
 }
 
@@ -836,9 +847,10 @@ export class LauncherScreen {
   /** Ask a custom world's own bridge which era it serves (its /healthz `era`). */
   private probeCustomEra(w: World): void {
     if (w.kind !== 'custom' || !w.bridgeUrl) return;
-    const probe = (this.opts.probeEra ?? ((u: string) => probeBridgeEra(u)))(w.bridgeUrl)
-      .then((era) => { w.era = era; })
-      .catch(() => { /* unknown: end of retail */ });
+    const probe = (this.opts.probeEra ?? defaultProbeEra)(w.bridgeUrl)
+      .then((era) => { w.era = era; w.eraUnknown = false; })
+      // Unreachable: the era is unknown, not end of retail (ENTER stays in this page's era).
+      .catch(() => { w.era = null; w.eraUnknown = true; });
     this.eraProbes.push(probe);
   }
 

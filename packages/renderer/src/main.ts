@@ -27,7 +27,7 @@ import { SkillTable } from '@ac/dat-parser/file-types/SkillTable.js';
 import { SecondaryAttributeTable } from '@ac/dat-parser/file-types/SecondaryAttributeTable.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, CombatStyle, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken,  PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
+import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken,  PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
@@ -40,7 +40,7 @@ import {
   buildPatchCancelButton, buildPatchCopyright, buildEpilogueFrame, renderPatchLabel,
   PATCH_CANCEL_FONT, PATCH_CANCEL_PRESS_SOUND, PATCH_COPYRIGHT, PATCH_CONNECT_TEXT, PATCH_TITLE_IMAGE,
   PATCH_METER_BG_FRAMES, PATCH_METER_OV_FRAMES, loadPatchSplashFiles,
-  PatchStatus, PatchEventGate, connectTextForLevel, patchProgressText, type PatchEvent,
+  PatchStatus, PatchEventGate, StreamedPatchFeed, connectTextForLevel, patchProgressText, type PatchEvent,
   PatchStatusLatch, patchFailureText, patchBootPlan, QuietPatchProgress, QUIET_PATCH_REVEAL_MS, type PatchBootPlan } from './ui/PatchScreen.js';
 import { loadDatWithCache, interrogateDat, fetchHeadMeta, OpfsDatBlobStore } from './dat/DatCache.js';
 import { PhysicsState as AcePhysicsState, EnvironChangeType, ENVIRON_FOG, ENVIRON_SOUND, isEnvironFog, isEnvironSound, OptimisticEquipmentTracker, CHARACTER_OPTION_BIT_MAP, resolveAutoWield, UISlotSide } from '@ac/shared';
@@ -167,12 +167,12 @@ import { NametagAssessQueue, NametagOverlay, chooseNametags, nametagAllegiance, 
 import { exposeDebugGlobal, readDebugGlobal, debugBag, debugGlobalsEnabled } from './utils/debugGlobals.js';
 import { resolveUrlLogin } from './launcher/urlLogin.js';
 import { urlOverridesEnabled } from './config/urlOverrides.js';
-import { bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, worldBoxName, type World } from './launcher/worldDirectory.js';
-import { worldKeyOf } from './launcher/launcherStorage.js';
-import { EOR_ERA_ID, eraProfile, string16WireFor, type DatRole, type EraProfile } from './era/EraProfiles.js';
+import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, type World } from './launcher/worldDirectory.js';
+import { eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
+import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
 import { eraClientRules, unsupportedFeatures, type EraFeature } from './era/EraFeatures.js';
 import { Ac1999World, ac1999ServerKey, type Ac1999PatchEvent } from './era/Ac1999World.js';
-import { eraPortalOverlay, eraStreamPlan, eraUnavailableText, forgetImportedEraFiles, planEraDats, resolveBootEra, stashEraSwitch, takeEraSwitch, type DatSource, type EraDatPlan, type EraStreamPlan, type EraSwitch } from './era/EraBoot.js';
+import { eraPortalOverlay, eraStreamPlan, eraUnavailableText, forgetImportedEraFiles, eraSwitchReloadUrl, planEraDats, resolveBootEra, stashEraSwitch, takeEraSwitch, type DatSource, type EraDatPlan, type EraStreamPlan, type EraSwitch } from './era/EraBoot.js';
 import { EnvCellRenderer } from './world/EnvCellRenderer.js';
 import {
   applySurfaceCellVisibility, objectCellDrawn, type SurfaceView} from './world/buildingCells.js';
@@ -383,13 +383,14 @@ import { FramerateMeter, framerateMeterTemplate } from './ui/FramerateMeter.js';
 import { string2command } from './chat/commands/RetailCommandStrings.js';
 import { RETAIL_VERBOSE_VERSION } from './chat/commands/EmoteStatusCommands.js';
 import { type RuntimeConfig, assetUrl, loadRuntimeConfig, resolveRuntimeConfig } from './config/RuntimeConfig.js';
-import { accountBannedText, accountBootedText, accountBootSurface, connectionFailureRecovery } from './session/AccountBoot.js';
+import { startWeenieSideTables, skippedWeenieSideTables, wieldLocationFromMask as wieldLocationFor } from './boot/WeenieSideTables.js';
+import { accountBannedText, accountBootSurface, connectionFailureRecovery } from './session/AccountBoot.js';
 import { characterMessageAccount } from './session/ServerAccountName.js';
 import { logOffCharacter, closeSessionOnUnload } from './session/PlayerModuleSave.js';
 import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLogOff, type RequestLogOffDeps } from './session/LogoutFlow.js';
 import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
-import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, serverIdFromUrl, type ChargenStepName, type PreworldScreen } from './telemetry/PreworldReporter.js';
+import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen } from './boot/Capability.js';
 import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
 
@@ -1099,17 +1100,19 @@ async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope;
   // Each boot ADDS its bytes to the announced total when it learns them (so
   // two boots in flight never overwrite each other); a later Begin
   // re-announces the running total; the received bytes keep counting.
-  const wholeBytes = Math.max(0, opts.wholeBytes ?? 0);
-  let begun = false;
-  let reported = 0;
+  const feed = new StreamedPatchFeed({
+    wholeBytes: Math.max(0, opts.wholeBytes ?? 0),
+    announce: (bytes) => (patchMeterAnnounced += bytes),
+    emit: onPatchEvent,
+    // The pre-world art joins the set's total after its Begin: the meter keeps
+    // its Begin; the boot telemetry counts the bytes in its total (onPatchEvent's guard).
+    grew: (bytes) => { if (!patchCancelled && patchScreenActive) preworldReporter?.bootPatchGrew(bytes); },
+  });
   const s = await openStreamingDats({
     pointerUrl,
     bypassCache: datCacheBypass,
     scope,
-    onProgress: (done, total) => {
-      if (!begun) { begun = true; patchMeterAnnounced += wholeBytes + total; onPatchEvent({ kind: 'begin', expected: patchMeterAnnounced }); }
-      if (done > reported) { onPatchEvent({ kind: 'downloaded', bytes: done - reported }); reported = done; }
-    },
+    onProgress: (done, total) => feed.onProgress(done, total),
     onBootPacks: (store) => {
       noteSetCache(scope, store.stats);
       console.log(`[AC:DatStream] boot packs resident in ${Math.round(performance.now() - t0)} ms (net ${store.stats.netBytes} B / ${store.stats.netObjects} objects, cache ${store.stats.cacheBytes} B)`);
@@ -1123,7 +1126,7 @@ async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope;
     },
   });
   if (patchCancelled) throw patchAbortError();
-  if (!begun && wholeBytes > 0) { patchMeterAnnounced += wholeBytes; onPatchEvent({ kind: 'begin', expected: patchMeterAnnounced }); }
+  feed.finish();
   const st = s.store.stats;
   noteSetCache(scope, st);
   console.log(`[AC:DatStream] set ${s.store.pointer.set}${opts.scope && opts.scope !== 'all' ? ` (${opts.scope})` : ''}: char-select set resident in ${Math.round(performance.now() - t0)} ms (net ${st.netBytes} B / ${st.netObjects} objects, cache ${st.cacheBytes} B / ${st.cacheObjects} objects, ${s.bootReport.preWorldArtFiles} pre-world art files); ${s.bootReport.worldCached ? 'world + terrain packs loaded from the object cache too (warm profile)' : 'world + terrain packs continue in the background'}`);
@@ -1236,7 +1239,7 @@ async function main() {
       activeEra = eraProfile(EOR_ERA_ID)!;
       eraDatPlan = { era: activeEra, sources: (await planEraDats(activeEra, runtimeConfig, eraDatProbes()) as EraDatPlan).sources };
     }
-    pendingEraLogin = pending && pending.era === activeEra.id ? pending : null;
+    pendingEraLogin = resumableEraSwitch(pending, activeEra);
     // ERA.switch-no-splash — resuming an era-switch ENTER is the second half
     // of that ENTER, not a new launch: no patch splash (PatchScreen.patchBootPlan).
     patchPlan = patchBootPlan({ resumingEraSwitch: !!pendingEraLogin, streamedInterface: !!runtimeConfig.datSet });
@@ -1252,6 +1255,16 @@ async function main() {
     // Free classic DATs players imported before the sets were hosted.
     void forgetImportedEraFiles(datCacheStore).then((n) => { if (n) console.log(`[AC:Era] removed ${n} imported classic DAT file(s) from browser storage`); });
   }
+
+  // BOOT.side-tables-off-critical-path — the weenie side-files start now, in
+  // parallel and beside the patch download; boot waits for them (bounded) at
+  // side_tables below. The era is fixed for the page load (a switch reloads).
+  // They are keyed on end-of-retail wcids; a 1999 world's wcids differ, so
+  // they are not loaded there (every lookup misses to its default, which only
+  // picks an animation; the server sends the stats).
+  const weenieSideTables = unsupportedFeatures(activeEra).has('eolWcidTables')
+    ? skippedWeenieSideTables()
+    : startWeenieSideTables({ url: (path) => assetUrl(runtimeConfig, path) });
 
   preworldReporter.bootStage('patch_check');
   // ── CORE.17.k.b.b.a.a.a — gmDataPatchUI's two meters ──────────────
@@ -1417,56 +1430,16 @@ async function main() {
   const eraUnsupported = unsupportedFeatures(activeEra);
   // The era's own client-code rules (a cast / attack stopping the player).
   const eraRules = eraClientRules(activeEra);
-  // The three weenie side-files below are keyed on end-of-retail wcids; a
-  // 1999 world's wcids differ, so they are not loaded there (every lookup
-  // misses to its default, which only picks an animation; the server sends
-  // the stats).
-  const loadEolWcidTables = !eraUnsupported.has('eolWcidTables');
-
-  // CombatStyle map (PropertyInt.DefaultCombatStyle = 46). Used to route
-  // Bow/Crossbow MissileWeapons to LeftHand per ACE Creature_Equipment.cs:84-95.
-  // Only ~3k weenies have a non-zero combat style; the file stays tiny.
-  const weenieCombatStyles = new Map<number, number>();
-  if (loadEolWcidTables) try {
-    const csResp = await fetch(assetUrl(runtimeConfig, '/weenie-combat-styles.json'));
-    if (csResp.ok) {
-      const data = await csResp.json() as Record<string, number>;
-      for (const [k, v] of Object.entries(data)) weenieCombatStyles.set(Number(k), v);
-      console.log(`[AC] Loaded ${weenieCombatStyles.size} weenie → combatStyle entries`);
-    }
-  } catch {
-    console.warn('[AC] weenie-combat-styles.json not found — bow/crossbow routing will fall back to RightHand');
-  }
-
-  // GAP.9 — W_AttackType map (PropertyInt.AttackType = 47): the equipped
-  // weapon's attack-type flags drive the ACE-exact swing-animation selection
-  // (shared/combat/SwingAnimation.ts). Same export pipeline as combat styles
-  // (tools/export-weenie-setups.ts).
-  const weenieAttackTypes = new Map<number, number>();
-  if (loadEolWcidTables) try {
-    const atResp = await fetch(assetUrl(runtimeConfig, '/weenie-attack-types.json'));
-    if (atResp.ok) {
-      const data = await atResp.json() as Record<string, number>;
-      for (const [k, v] of Object.entries(data)) weenieAttackTypes.set(Number(k), v);
-      console.log(`[AC] Loaded ${weenieAttackTypes.size} weenie → attackType entries`);
-    }
-  } catch {
-    console.warn('[AC] weenie-attack-types.json not found — weapon swings will use thrust/slash defaults');
-  }
-
-  // BUG.melee-swing-speed-ignores-quickness-weapon — WeaponTime map
-  // (PropertyInt.WeaponTime = 49) for Creature_Combat.cs:510 GetAnimSpeed.
-  const weenieWeaponTimes = new Map<number, number>();
-  if (loadEolWcidTables) try {
-    const wtResp = await fetch(assetUrl(runtimeConfig, '/weenie-weapon-time.json'));
-    if (wtResp.ok) {
-      const data = await wtResp.json() as Record<string, number>;
-      for (const [k, v] of Object.entries(data)) weenieWeaponTimes.set(Number(k), v);
-      console.log(`[AC] Loaded ${weenieWeaponTimes.size} weenie → weaponTime entries`);
-    }
-  } catch {
-    console.warn('[AC] weenie-weapon-time.json not found — melee swing speed will use the unarmed default');
-  }
+  // BOOT.side-tables-off-critical-path — the three weenie side-files
+  // (combat style for bow/crossbow → LeftHand per ACE Creature_Equipment.cs:84-95;
+  // GAP.9 attack type for the swing animation; weapon time for
+  // Creature_Combat.cs:510 GetAnimSpeed) were fetched beside the patch above
+  // (boot/WeenieSideTables.ts). Wait out what is left of their bound; a
+  // table still on its way applies to the same Map when it lands.
+  await weenieSideTables.waitForBoot();
+  const weenieCombatStyles = weenieSideTables.combatStyles;
+  const weenieAttackTypes = weenieSideTables.attackTypes;
+  const weenieWeaponTimes = weenieSideTables.weaponTimes;
 
   preworldReporter.bootStage('dat_parse');
   const cellDb = worldStreamingDats ? worldStreamingDats.cell : new DatDatabase(cellBuf!);
@@ -3033,22 +3006,7 @@ async function main() {
   }
 
   function wieldLocationFromMask(slot: number, wcid?: number): ParentLocation {
-    switch (slot) {
-      case EquipMask.MeleeWeapon:
-      case EquipMask.Held:
-      case EquipMask.TwoHanded:
-        return ParentLocation.RightHand;
-      case EquipMask.MissileWeapon: {
-        const cs = wcid ? weenieCombatStyles.get(wcid) ?? 0 : 0;
-        return (cs & (CombatStyle.Bow | CombatStyle.Crossbow)) !== 0
-          ? ParentLocation.LeftHand
-          : ParentLocation.RightHand;
-      }
-      case EquipMask.Shield:
-        return ParentLocation.Shield;
-      default:
-        return ParentLocation.None;
-    }
+    return wieldLocationFor(slot, wcid, weenieCombatStyles);
   }
 
   /**
@@ -7276,7 +7234,7 @@ async function main() {
     return sessionConnected() ? 'char-select' : 'loading';
   };
   reportScreen = updateScreen;
-  preworldServer = () => serverIdFromUrl(connectUrl);
+  preworldServer = () => preworldServerFor(connectUrl, launcherWorld);
   // The launcher closed on a world of another era: still the server select until the reload (switchEraFor).
   let eraSwitchPending = false;
   preworldScreen = () => preworldScreenFor({
@@ -7334,7 +7292,7 @@ async function main() {
    * hosted files answer, then stash the login and reload into that era.
    * Resolves false when they can't be reached (the launcher shows again).
    */
-  const switchEraFor = async (choice: { world: { era: string | null; name: string }; account: string; password: string; connectUrl: string; worldKey: string }, target: EraProfile): Promise<boolean> => {
+  const switchEraFor = async (choice: LauncherEnter, target: EraProfile): Promise<boolean> => {
     const plan = await planEraDats(target, runtimeConfig, eraDatProbes());
     if ('missing' in plan) {
       console.warn(`[AC:Era] ${target.name}: no hosted ${plan.missing.join(', ')}`);
@@ -7344,14 +7302,26 @@ async function main() {
       });
       return false;
     }
-    stashEraSwitch({
-      era: target.id, worldKey: choice.worldKey, worldName: choice.world.name, connectUrl: choice.connectUrl,
-      account: choice.account, password: choice.password, at: Date.now(),
-    });
+    stashEraSwitch(eraSwitchFor(choice, target, Date.now()));
     console.log(`[AC:Era] ${choice.world.name} needs ${target.name} — reloading into its data`);
     preworldReporter?.leavingForReload('era_switch');
+    // A page opened with ?era= would boot that era again and drop the switch (eraSwitchReloadUrl).
+    const reloadUrl = eraSwitchReloadUrl(window.location.href);
+    if (reloadUrl !== window.location.href) window.history.replaceState(window.history.state, '', reloadUrl);
     window.location.reload();
     return true;
+  };
+
+  /** Log in with a launcher ENTER's world and credentials (now, or resumed after an era reload). */
+  const useLauncherLogin = (login: LauncherLogin): void => {
+    aceAccount = login.account;
+    acePassword = login.password;
+    connectUrl = login.connectUrl;
+    launcherWorldName = login.worldName;
+    launcherWorld = login.world;
+    // An end-of-retail world on GDL / GDLE reads strings as Windows-1252, not ACE's UTF-8.
+    setString16Wire(login.wire);
+    if (login.world) console.log(`[AC] ${login.world.name}: ${login.world.emu ?? 'unknown'} server, strings as ${login.wire === 'ace' ? 'UTF-8' : 'Windows-1252'}`);
   };
 
   const runLauncher = async (): Promise<void> => {
@@ -7364,24 +7334,16 @@ async function main() {
         sourceUrl: runtimeConfig.sourceUrl,
       });
       launcherActive = false;
-      const target = eraProfile(choice.world.era) ?? activeEra;
+      const target = launcherEraTarget(choice.world, activeEra);
       if (target.id !== activeEra.id) {
         eraSwitchPending = true;
-        const leaving = await switchEraFor({ ...choice, worldKey: worldKeyOf(choice.world) }, target);
+        const leaving = await switchEraFor(choice, target);
         eraSwitchPending = leaving;
         // A reload is under way: never connect from this page.
         if (leaving) await new Promise<never>(() => {});
         continue;
       }
-      aceAccount = choice.account;
-      acePassword = choice.password;
-      connectUrl = choice.connectUrl;
-      launcherWorldName = worldBoxName(choice.world);
-      launcherWorld = choice.world;
-      // An end-of-retail world on GDL / GDLE reads strings as Windows-1252, not ACE's UTF-8.
-      const wire = string16WireFor(activeEra, choice.world.emu);
-      setString16Wire(wire);
-      console.log(`[AC] ${choice.world.name}: ${choice.world.emu ?? 'unknown'} server, strings as ${wire === 'ace' ? 'UTF-8' : 'Windows-1252'}`);
+      useLauncherLogin(launcherLogin(activeEra, choice));
       return;
     }
   };
@@ -7394,11 +7356,9 @@ async function main() {
     await new Promise<never>(() => {});
   }
   if (pendingEraLogin) {
-    // The era reload of a launcher ENTER: log in where the player was going.
-    aceAccount = pendingEraLogin.account;
-    acePassword = pendingEraLogin.password;
-    connectUrl = pendingEraLogin.connectUrl;
-    launcherWorldName = pendingEraLogin.worldName;
+    // The era reload of a launcher ENTER: log in where the player was going,
+    // exactly as that ENTER would have on a page of this era.
+    useLauncherLogin(eraSwitchLogin(activeEra, pendingEraLogin));
     pendingEraLogin = null;
   } else if (!urlLogin.autoLogin) await runLauncher();
 
@@ -7439,6 +7399,9 @@ async function main() {
     inThread: (url) => createConnection(url, { loginProfile: activeEra.login }),
   });
   console.log(`[AC] network connection: ${netInWorker ? 'worker' : 'page'}`);
+  // Every connect attempt (page load, launcher ENTER, relaunch, resume) starts a fresh pre-world session for the
+  // reporter: a socket that never opens must not inherit the last session's character list (screen="char-select").
+  reportConnectAttempts(aceConnection, () => preworldReporter?.connectAttempt());
   sessionConnected = () => aceConnection.isConnected;
   // Disable auto-reconnect — prevents cascading duplicate sessions
   aceConnection.autoReconnect = false;
@@ -7621,8 +7584,10 @@ async function main() {
    */
   const raiseNetError = (notice: ConnectionNotice): void => {
     console.warn(`[AC] ACE: connection failure ${notice.token || `0x${notice.stringId.toString(16)}`}: "${notice.text}"`);
-    // A login that timed out, or that the server refused (GDLE's
-    // STR_LOGIN_FAILED NetError), on a register-first world: say so, with the link.
+    // A login that timed out, or that the server refused (GDLE's / AC1999's
+    // STR_LOGIN_FAILED NetError), on a register-first world: say so, with the
+    // link. On an auto-create world STR_LOGIN_FAILED is a wrong password for a
+    // name someone already owns: say that instead.
     const text = loginFailureText(notice, launcherWorld, gameStarted);
     if (connectionFailureRecovery({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
       returnToLauncher(text);
@@ -11535,8 +11500,10 @@ async function main() {
       // Surface to chat at minimum so the player knows their session ended.
       onAccountBoot: (data) => {
         // CPlayerSystem::Handle_AccountBooted @ 00562a70. A refused login
-        // (wrong password) used to leave "Please Wait" up forever.
-        const text = accountBootedText(data.reason);
+        // (wrong password) used to leave "Please Wait" up forever. Before the
+        // world, ACE's wrong-password boot also gets the launcher's
+        // name-taken / saved-password hint (accountBootLoginText).
+        const text = accountBootLoginText(data.reason, launcherWorld, gameStarted);
         console.warn(`[AC] AccountBoot: ${text}`);
         // RELEASE.preworld-outcomes — a closed code for the reason, never its text.
         if (!gameStarted) preworldReporter?.accountBoot(data.reason);

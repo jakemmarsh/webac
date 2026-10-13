@@ -16,21 +16,31 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { ParentEventData } from '@ac/renderer/network/ServerMessageHandler.js';
+import { CombatStyle, EquipMask, ParentLocation } from '@ac/shared';
+import { wieldLocationFromMask } from '../packages/renderer/src/boot/WeenieSideTables';
 
 describe('wieldLocationFromMask + bow/crossbow routing (UI.65)', () => {
-  it('routes Bow/Crossbow MissileWeapons to LeftHand via weenieCombatStyles', () => {
-    const fs = require('fs');
-    const main = fs.readFileSync('packages/renderer/src/main.ts', 'utf8');
+  it('routes Bow/Crossbow MissileWeapons to LeftHand via the combat-style table', () => {
+    // BOOT.side-tables-off-critical-path converted this from a main.ts
+    // source pin to the shipped helper (boot/WeenieSideTables.ts).
+    const styles = new Map<number, number>([[306, CombatStyle.Bow], [30310, CombatStyle.Crossbow], [12463, CombatStyle.Atlatl]]);
+    expect(wieldLocationFromMask(EquipMask.MissileWeapon, 306, styles)).toBe(ParentLocation.LeftHand);
+    expect(wieldLocationFromMask(EquipMask.MissileWeapon, 30310, styles)).toBe(ParentLocation.LeftHand);
+    expect(wieldLocationFromMask(EquipMask.MissileWeapon, 12463, styles)).toBe(ParentLocation.RightHand);
+    expect(wieldLocationFromMask(EquipMask.MissileWeapon, 999, styles)).toBe(ParentLocation.RightHand);
+    expect(wieldLocationFromMask(EquipMask.MissileWeapon, undefined, styles)).toBe(ParentLocation.RightHand);
+    expect(wieldLocationFromMask(EquipMask.MeleeWeapon, 306, styles)).toBe(ParentLocation.RightHand);
+    expect(wieldLocationFromMask(EquipMask.TwoHanded, 1, styles)).toBe(ParentLocation.RightHand);
+    expect(wieldLocationFromMask(EquipMask.Held, 1, styles)).toBe(ParentLocation.RightHand);
+    expect(wieldLocationFromMask(EquipMask.Shield, 1, styles)).toBe(ParentLocation.Shield);
+    expect(wieldLocationFromMask(EquipMask.ChestArmor, 1, styles)).toBe(ParentLocation.None);
+  });
 
-    // Helper takes optional wcid for combat-style lookup. Return type is
-    // `ParentLocation` (FAITHFUL.101 enum extraction); was `number` pre-fix.
-    expect(main).toContain('function wieldLocationFromMask(slot: number, wcid?: number): ParentLocation');
-    // CombatStyle.Bow | CombatStyle.Crossbow — both bits trigger LeftHand=2.
-    // FAITHFUL.72 moved this from bare hex (0x10|0x20) to symbolic enum.
-    expect(main).toMatch(/cs\s*&\s*\(CombatStyle\.Bow\s*\|\s*CombatStyle\.Crossbow\)/);
-    // weenieCombatStyles map exists and is fed from /weenie-combat-styles.json
-    expect(main).toContain('const weenieCombatStyles = new Map<number, number>()');
-    expect(main).toContain('/weenie-combat-styles.json');
+  it('a combat-style table that lands after boot applies to the next wield (same Map)', () => {
+    const styles = new Map<number, number>();
+    expect(wieldLocationFromMask(EquipMask.MissileWeapon, 306, styles)).toBe(ParentLocation.RightHand);
+    styles.set(306, CombatStyle.Bow);
+    expect(wieldLocationFromMask(EquipMask.MissileWeapon, 306, styles)).toBe(ParentLocation.LeftHand);
   });
 
   it('passes weenieClassId at every wieldLocationFromMask call site', () => {

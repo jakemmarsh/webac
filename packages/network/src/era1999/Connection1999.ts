@@ -195,6 +195,11 @@ export class Connection1999 implements NetConnection {
     this.account = account;
     this.password = password;
     this.deliberate = false;
+    // Per socket, as ClientConnection's wsEverOpened: the last session's open
+    // must not make this socket's failure read as a dropped session (a
+    // never-opened socket after leaving char select for the launcher raised
+    // the Disconnected screen instead of CantSocket, 2026-10-13).
+    this.everOpened = false;
     this.adapter = new Adapter1999(codecs1999(), { account, log: (m) => console.log(m) });
     // ?proto=ac1999 tells the bridge this session speaks the 1999 protocol (one port, its own
     // disconnect) even where it can't tell from the world (a Custom… bridge pinned to end of retail).
@@ -234,7 +239,13 @@ export class Connection1999 implements NetConnection {
       }
       this.handleDatagram(new Uint8Array(ev.data as ArrayBuffer));
     };
-    ws.onerror = () => { if (ws === this.ws) this.emit({ type: 'error', error: 'Bridge connection error' }); };
+    ws.onerror = () => {
+      if (ws !== this.ws) return;
+      // A socket that never opened is retail ClientNet::InitAddresses' ID_NetError_CantSocket, as on
+      // ClientConnection: without it the page kept "Please Wait" up forever (an unreachable Custom… bridge).
+      if (!this.everOpened) { this.emit({ type: 'error', error: 'Bridge connection error', netErrorId: 'ID_NetError_CantSocket' }); return; }
+      this.emit({ type: 'error', error: 'Bridge connection error' });
+    };
     ws.onclose = () => { if (ws === this.ws) this.ended(); };
   }
 

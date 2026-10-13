@@ -27,6 +27,7 @@
  * session_close carry the same id.
  */
 import type { ConnectionEvent } from '@ac/network';
+import { PASSWORD_MISMATCH_BOOT_REASON } from '../session/AccountBoot.js';
 import { CharacterError, CharacterGenerationVerificationResponse, characterCreateErrorToken } from '@ac/shared';
 
 export type PreworldOutcome =
@@ -155,13 +156,24 @@ export interface PreworldEvent {
   count: number | null;
   pageMs: number;
   screenMs: number;
+  /**
+   * Since this connect attempt's socket opened and its login request went out
+   * (loginStarted). Null when the attempt's socket never opened (a
+   * CantSocket): connectAttempt clears the previous session's mark, so a
+   * failed reconnect never reports time since an older login.
+   */
   sinceLoginMs: number | null;
   sinceEnterMs: number | null;
   /** RELEASE.preworld-boot-stage — set only while the screen is 'boot' (else null). */
   stage: BootStage | null;
-  /** Download percent (0–100) over the bytes the patch announced; null before it announced any. */
+  /**
+   * Download percent (0–100) over the bytes the patch announced plus what a
+   * streamed set added after its Begin (bootPatchGrew); null before any Begin.
+   * Equals the meter's percent except while a set's pre-world art loads (the
+   * meter, whose Begin never grew, already reads 100 there).
+   */
   progress: number | null;
-  /** Bytes downloaded / announced, in KiB (null before the patch announced a total). */
+  /** Bytes downloaded / announced (with bootPatchGrew's), in KiB (null before the patch announced a total). */
   doneKB: number | null;
   totalKB: number | null;
   cache: BootCacheState | null;
@@ -189,6 +201,20 @@ export interface PreworldReporterOptions {
 
 /** A page sends at most this many events (the bridge also caps each address). */
 export const MAX_PREWORLD_EVENTS = 40;
+
+/**
+ * Tell `onAttempt` whenever `conn.connect` starts a connect attempt, so every
+ * path that connects (each call site in main.ts, and any later one) resets
+ * the reporter's per-session state before the attempt can fail. Returns `conn`.
+ */
+export function reportConnectAttempts<C extends { connect(account: string, password: string): void }>(conn: C, onAttempt: () => void): C {
+  const connect = conn.connect.bind(conn);
+  conn.connect = (account: string, password: string): void => {
+    try { onAttempt(); } catch { /* reporting must never throw */ }
+    connect(account, password);
+  };
+  return conn;
+}
 
 const PRE_WORLD = new Set<PreworldScreen>(['boot', 'server-select', 'connecting', 'char-select', 'chargen', 'portal-space', 'disconnected']);
 
@@ -236,7 +262,7 @@ function safeToken(t: string | null | undefined): string | null {
 export function bootReasonToken(reason: string | null | undefined): string {
   const r = reason ?? '';
   if (r === '') return 'boot_no_reason';
-  if (r === ' because the password entered for this account was not correct') return 'boot_password_mismatch';
+  if (r === PASSWORD_MISMATCH_BOOT_REASON) return 'boot_password_mismatch';
   if (r.startsWith(' because your client is not the correct version') || r.startsWith(' because you are not running the correct executable file version')) return 'boot_client_version';
   if (r.startsWith(' because ') && r.includes('DAT files are newer')) return 'boot_dat_newer';
   if (r.startsWith(' because ') && r.includes('DAT files are incomplete')) return 'boot_dat_incomplete';
@@ -256,6 +282,20 @@ export function serverIdFromUrl(url: string): string | null {
   } catch { return null; }
 }
 
+/** The `server` token for a login through a custom bridge (no ?server= on our bridge to name it). */
+export const CUSTOM_BRIDGE_SERVER = 'custom-bridge';
+
+/**
+ * The `server` field for a pre-world event: the multi-mode bridge's
+ * `?server=<id>`, or `custom-bridge` for a launcher Custom… world (its
+ * address is something the player typed, so never logged). A connect_failed
+ * with no server at all left a 1999 → custom-bridge failure (2026-10-13)
+ * looking like a broken era-switch login to a listed world.
+ */
+export function preworldServerFor(connectUrl: string, world: { kind: string } | null): string | null {
+  return serverIdFromUrl(connectUrl) ?? (world?.kind === 'custom' ? CUSTOM_BRIDGE_SERVER : null);
+}
+
 export class PreworldReporter {
   readonly trace: string;
   private readonly now: () => number;
@@ -272,6 +312,12 @@ export class PreworldReporter {
   private stage: BootStage = 'capability';
   private patchTotal = -1;
   private patchDone = 0;
+  /**
+   * Bytes a streamed set added to its own total after its one Begin (the
+   * pre-world art, StreamingDats.openStreamingDats): the meter's Begin never
+   * carries them, but its Downloaded events do, so the reporter's total adds them.
+   */
+  private patchGrown = 0;
   private cache: BootCacheState | null = null;
   private caps: CapabilityIssue[] = [];
   private bootSlowSent = false;
@@ -304,6 +350,20 @@ export class PreworldReporter {
 
   // ── Where the page decides an outcome ────────────────────────────────
 
+  /**
+   * A new connect attempt begins (NetConnection.connect: the page load, the
+   * launcher's ENTER after the World box, the Disconnected screen's relaunch,
+   * the auto-resume). The previous session's state goes: its character list
+   * no longer makes the screen char select, and its login / enter marks no
+   * longer time this attempt. loginStarted alone cannot do this, because a
+   * socket that never opens never fires 'connected'.
+   */
+  connectAttempt(): void {
+    this.loginAt = null;
+    this.charListSeen = false;
+    this.enterAt = null;
+  }
+
   /** The bridge socket opened and the login request is going out (both eras' 'connected'). */
   loginStarted(): void {
     this.loginAt = this.now();
@@ -311,7 +371,7 @@ export class PreworldReporter {
     this.enterAt = null;
   }
 
-  /** This session's character list arrived (reset by loginStarted): char select / chargen are real screens. */
+  /** This session's character list arrived (reset by connectAttempt / loginStarted): char select / chargen are real screens. */
   get characterListReceived(): boolean {
     return this.charListSeen;
   }
@@ -420,8 +480,18 @@ export class PreworldReporter {
       this.patchDone += Math.max(0, Math.trunc(event.bytes));
     } else if (event.kind === 'end') {
       if (this.patchTotal < 0) this.patchTotal = 0;
-      this.patchDone = Math.max(this.patchDone, this.patchTotal);
+      this.patchDone = Math.max(this.patchDone, this.patchTotal + this.patchGrown);
     }
+  }
+
+  /**
+   * A streamed set's byte total grew after its Begin (StreamedPatchFeed's
+   * `grew`): the extra bytes join the announced total, so done and total
+   * describe the same download. Every Begin re-announces only the meter's
+   * running total, which never includes these, so they stay added on top.
+   */
+  bootPatchGrew(bytes: number): void {
+    if (Number.isFinite(bytes) && bytes > 0) this.patchGrown += Math.trunc(bytes);
   }
 
   /** The DAT cache's verdict (a later call replaces an earlier one). */
@@ -431,7 +501,7 @@ export class PreworldReporter {
 
   /** The boot's state right now: what boot events carry. */
   bootSnapshot(): Pick<PreworldEvent, 'stage' | 'progress' | 'doneKB' | 'totalKB' | 'cache' | 'caps'> {
-    const total = this.patchTotal;
+    const total = this.patchTotal < 0 ? -1 : this.patchTotal + this.patchGrown;
     return {
       stage: this.stage,
       progress: total < 0 ? null : total === 0 ? 100 : Math.min(100, Math.trunc((this.patchDone * 100) / total)),

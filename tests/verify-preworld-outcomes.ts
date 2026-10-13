@@ -18,7 +18,7 @@ import { Connection1999, VERSION_1999 } from '../packages/network/src/era1999/Co
 import { buildPacket1999, F1999 } from '../packages/network/src/era1999/Packet1999.js';
 import { characterErrorNotice, netErrorNotice, serverNetErrorNotice } from '../packages/renderer/src/ui/ConnectionNotices.js';
 import {
-  PreworldReporter, MAX_PREWORLD_EVENTS, chargenStepName, serverIdFromUrl, bootReasonToken, preworldScreenFor, RELOAD_REASONS,
+  PreworldReporter, MAX_PREWORLD_EVENTS, reportConnectAttempts, chargenStepName, serverIdFromUrl, bootReasonToken, preworldScreenFor, RELOAD_REASONS,
   type PreworldEvent, type PreworldScreenState, type PreworldScreen, type ChargenStepName,
 } from '../packages/renderer/src/telemetry/PreworldReporter.js';
 import { CreateStep } from '../packages/renderer/src/ui/CharacterCreate.js';
@@ -548,6 +548,60 @@ describe('which screen the player is on (preworldScreenFor), and deliberate relo
     h.r.loginStarted();
     h.r.connectionError({ characterError: CharacterError.AccountLogin });
     expect(h.sent[2].body).toMatchObject({ outcome: 'login_refused', screen: 'connecting' });
+  });
+
+  // Live 2026-10-13 (build ddd6bf5e, every era): char select → World box → launcher → Custom… wss://nothing.invalid →
+  // ENTER showed CantSocket but reported screen="char-select": the last session's list leaked into the new attempt,
+  // because only 'connected' (which a never-opened socket never fires) reset it.
+  for (const era of ['eor', 'dm', 'ac1999'] as const) {
+    it(`${era}: a reconnect whose socket never opens reports from connecting, not the previous session's char select`, () => {
+      const h = mainLike();
+      const conn = reportConnectAttempts(
+        era === 'ac1999' ? new Connection1999(h.r.tagUrl('wss://bridge.example/connect?server=ac1999'))
+          : new ClientConnection(h.r.tagUrl(`wss://bridge.example/connect?server=${era === 'dm' ? 'classic' : 'coldeve'}`)),
+        () => h.r.connectAttempt());
+      conn.autoReconnect = false;
+      wireLikeMain(conn, h.r);
+      // The first session reaches char select.
+      conn.connect(ACCOUNT, PASSWORD);
+      h.clock.t += 50;
+      FakeSocket.sockets[0].open();
+      h.clock.t += 400;
+      h.r.characterList(2);
+      expect(h.sent[0].body).toMatchObject({ outcome: 'char_list', screen: 'char-select', sinceLoginMs: 400 });
+      // leaveForLauncher: log off, the launcher picks a custom world, ENTER connects there.
+      conn.disconnect();
+      h.st.launcherActive = true;
+      h.clock.t += 30_000;
+      h.st.launcherActive = false;
+      conn.setUrl(h.r.tagUrl('wss://nothing.invalid'));
+      conn.connect(ACCOUNT, PASSWORD);
+      FakeSocket.sockets[1].onerror?.();
+      const failed = h.sent.at(-1)!.body;
+      // No login went out on this attempt: sinceLoginMs is null, not the time since the first session's login.
+      expect([failed.outcome, failed.screen, failed.token, failed.sinceLoginMs]).toEqual(['connect_failed', 'connecting', 'ID_NetError_CantSocket', null]);
+      expectClean(h as unknown as Harness);
+    });
+  }
+
+  it('connectAttempt resets only per-session state; an attempt that opens times its login from the open', () => {
+    const h = mainLike();
+    const conn = reportConnectAttempts(new ClientConnection('wss://bridge.example/connect?server=coldeve'), () => h.r.connectAttempt());
+    conn.autoReconnect = false;
+    wireLikeMain(conn, h.r);
+    conn.connect(ACCOUNT, PASSWORD);
+    FakeSocket.sockets[0].open();
+    h.r.characterList(1);
+    h.r.enterRequested();
+    conn.disconnect();
+    conn.connect(ACCOUNT, PASSWORD);
+    expect(h.r.characterListReceived).toBe(false);
+    h.clock.t += 70;
+    FakeSocket.sockets[1].open();
+    h.clock.t += 30;
+    h.r.connectionError({ characterError: CharacterError.AccountLogin });
+    // Before this attempt's list: a login refusal (not the old session's enter refusal), timed from this socket's open.
+    expect(h.sent.at(-1)!.body).toMatchObject({ outcome: 'login_refused', screen: 'connecting', sinceLoginMs: 30 });
   });
 
   it("an era switch's reload sends one page_reload from the server select, never page_left / page_hidden", () => {

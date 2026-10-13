@@ -848,6 +848,28 @@ describe('ERA.dm-support: LauncherScreen era handling (fake kit)', () => {
     answer('classicace-customdm');
     await expect(done).resolves.toMatchObject({ world: { kind: 'custom', era: 'classicace-customdm' }, connectUrl: 'wss://classic.example.net/bridge' });
   });
+
+  it('ERA.switch-login: a custom bridge that never answers is era-unknown, not end of retail', async () => {
+    const entries: Array<(t: string) => void> = [];
+    const k = kit(entries);
+    const screen = new mod.LauncherScreen(k.kit, {
+      bridgeUrl: BRIDGE, storage: null,
+      loadDirectory: async () => ({ mode: 'multi', worlds: [] }),
+      probeEra: () => Promise.reject(new Error('no answer')),
+    });
+    const done = screen.run();
+    await screen.loaded;
+    (k.mount.querySelector('.launcher-custom') as HTMLElement).click();
+    entries[0]('wss://ac1999.example.net:9000');
+    (k.mount.querySelector('.launcher-account') as HTMLInputElement).value = 'bael';
+    (k.mount.querySelector('.launcher-password') as HTMLInputElement).value = 'pw';
+    screen.attemptEnter();
+    const choice = await done;
+    expect(choice.world).toMatchObject({ kind: 'custom', era: null, eraUnknown: true });
+    const { launcherEraTarget } = await import('../packages/renderer/src/launcher/launcherLogin');
+    // ENTER from an AC1999 page stays in AC1999 (no reload into end of retail for an unknown bridge).
+    expect(launcherEraTarget(choice.world, ERA_PROFILES['ac1999-retail']).id).toBe('ac1999-retail');
+  });
 });
 
 describe('ERA.ac1999: a world\'s era is its compat chip, the same mechanism for every era', () => {

@@ -15,6 +15,7 @@
 import { probeBridgeHealth } from '@ac/network';
 import { eraProfile } from '../era/EraProfiles.js';
 import { LOGIN_REFUSED_TOKENS } from '../ui/ConnectionNotices.js';
+import { accountBootedText, PASSWORD_MISMATCH_BOOT_REASON } from '../session/AccountBoot.js';
 
 export type WorldCompat = 'ok' | 'beta' | 'incompatible';
 
@@ -51,6 +52,14 @@ export interface World {
    * end of retail. Entering a world of another era reloads into its DATs.
    */
   era: string | null;
+  /**
+   * A custom bridge that answered neither era probe (unreachable, or refused
+   * by the page's CSP, e.g. ws://localhost on playwebac.com): its era is not
+   * known, so ENTER stays in this page's era instead of reloading into end
+   * of retail for a server that may be nothing of the kind (launcherLogin.ts
+   * launcherEraTarget).
+   */
+  eraUnknown?: boolean;
 }
 
 export interface WorldDirectory {
@@ -207,18 +216,60 @@ export function loginTimeoutText(base: string, world: Pick<World, 'name' | 'regi
 }
 
 /**
+ * The launcher's line under a wrong-password refusal on a world that creates
+ * accounts on first login (ACE / ClassicACE AllowAutoAccountCreate, GDLE and
+ * the AC1999 server's auto_create_accounts=1, all on by default). There an
+ * unknown name is simply created, so the refusal means the name already
+ * exists: a newcomer who picks a common name gets someone else's account.
+ * The other cause seen live (2026-10-13): the browser keeps one saved
+ * password per account name per site, so the same name on two worlds
+ * autofills the other world's password.
+ */
+export const ACCOUNT_NAME_TAKEN_HINT =
+  "If you're new to this world, that account name may already belong to someone else: try a different account name. "
+  + '(Your browser may also have filled in a password saved for another world.)';
+
+/** The same hint after a refusal whose own text does not say "password" (GDLE / AC1999 "Client logon failed"). */
+export const LOGON_FAILED_HINT = `That usually means a wrong password for this account name. ${ACCOUNT_NAME_TAKEN_HINT}`;
+
+/**
  * The text of a connection-failure dialog (ConnectionNotices'
  * netErrorNotice / serverNetErrorNotice) for a login to `world`: a refused
  * login before entering the world (LOGIN_REFUSED_TOKENS: the timeout, or
- * GDLE's "Client logon failed" NetError) carries the registration hint;
- * anything else, or anything once in the world, is the notice text alone.
+ * GDLE's / the AC1999 server's "Client logon failed" NetError) carries the
+ * registration hint on a register-first world. On any other world "Client
+ * logon failed" (STR_LOGIN_FAILED) is a wrong password for an existing
+ * account (AuthenticateUserQuery::PerformQuery auto-creates unknown names),
+ * so it carries LOGON_FAILED_HINT. Anything else, or anything once in the
+ * world, is the notice text alone.
  */
 export function loginFailureText(
   notice: { readonly token: string; readonly text: string },
   world: Pick<World, 'name' | 'registration' | 'registrationUrl'> | null,
   inWorld: boolean,
 ): string {
-  return !inWorld && LOGIN_REFUSED_TOKENS.has(notice.token) ? loginTimeoutText(notice.text, world) : notice.text;
+  if (inWorld || !LOGIN_REFUSED_TOKENS.has(notice.token)) return notice.text;
+  if (world && worldRegistrationText(world)) return loginTimeoutText(notice.text, world);
+  return notice.token === 'ID_ConnectionError_ClientLogOnFailed' ? `${notice.text}\n\n${LOGON_FAILED_HINT}` : notice.text;
+}
+
+/**
+ * The text of an AccountBoot (0xF7DC) for a login to `world`: retail's
+ * "You have been booted from Asheron's Call%s." with the server's reason
+ * (accountBootedText), plus ACCOUNT_NAME_TAKEN_HINT when it is ACE's
+ * wrong-password boot before the world on a world that is not
+ * register-first (a register-first world never hands a newcomer a taken
+ * name; its registration refuses it).
+ */
+export function accountBootLoginText(
+  reason: string | undefined | null,
+  world: Pick<World, 'name' | 'registration' | 'registrationUrl'> | null,
+  inWorld: boolean,
+): string {
+  const text = accountBootedText(reason);
+  if (inWorld || reason !== PASSWORD_MISMATCH_BOOT_REASON) return text;
+  if (world && worldRegistrationText(world)) return text;
+  return `${text}\n\n${ACCOUNT_NAME_TAKEN_HINT}`;
 }
 
 /**
@@ -232,20 +283,34 @@ export async function probeBridgeEra(
   fetchFn: typeof fetch = fetch,
   health: (url: string) => Promise<Record<string, unknown>> = async (u) => ({ ...(await probeBridgeHealth(u)) }),
 ): Promise<string | null> {
+  return (await probeCustomBridge(bridgeUrl, fetchFn, health)).era;
+}
+
+/**
+ * probeBridgeEra, also saying whether the bridge answered at all: `reachable`
+ * is false when neither its WebSocket health probe nor its /healthz answered
+ * (an HTTP error status still counts as an answer). The launcher must not
+ * read an unreachable bridge as an end-of-retail one (World.eraUnknown).
+ */
+export async function probeCustomBridge(
+  bridgeUrl: string,
+  fetchFn: typeof fetch = fetch,
+  health: (url: string) => Promise<Record<string, unknown>> = async (u) => ({ ...(await probeBridgeHealth(u)) }),
+): Promise<{ reachable: boolean; era: string | null }> {
   try {
     const viaWs = await health(bridgeUrl);
-    if (viaWs && typeof viaWs === 'object') return eraIdFrom(viaWs.era);
+    if (viaWs && typeof viaWs === 'object') return { reachable: true, era: eraIdFrom(viaWs.era) };
   } catch {
     /* fall back to /healthz */
   }
   const origin = bridgeHttpOrigin(bridgeUrl);
-  if (!origin) return null;
+  if (!origin) return { reachable: false, era: null };
   try {
     const resp = await fetchFn(`${origin}/healthz`, { cache: 'no-store' });
-    if (!resp.ok) return null;
-    return eraIdFrom(((await resp.json()) as { era?: unknown }).era);
+    if (!resp.ok) return { reachable: true, era: null };
+    return { reachable: true, era: eraIdFrom(((await resp.json()) as { era?: unknown }).era) };
   } catch {
-    return null;
+    return { reachable: false, era: null };
   }
 }
 

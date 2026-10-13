@@ -29,6 +29,7 @@ import { assetUrl, datSetForEra, type RuntimeConfig } from '../config/RuntimeCon
 import type { DatBlobStore } from '../dat/DatCache.js';
 import { skillTableWithout, type DatOverlay } from '@ac/dat-parser';
 import { EOR_DAT_ROLES, EOR_ERA_ID, ERA_PROFILES, datFileName, eraProfile, ownRoles, type DatRole, type EorDatRole, type EraProfile } from './EraProfiles.js';
+import type { World } from '../launcher/worldDirectory.js';
 
 export const ERA_SWITCH_KEY = 'acjs.eraSwitch.v1';
 /** A stashed switch older than this is ignored (a stale tab, a crashed reload). */
@@ -43,6 +44,14 @@ export interface EraSwitch {
   account: string;
   password: string;
   at: number;
+  /**
+   * The launcher world itself, so the page after the reload logs in exactly
+   * as the launcher's own ENTER would: its emulator picks the string wire
+   * (GDL / GDLE read Windows-1252), its registration note explains a refused
+   * login, its kind names a custom bridge in the pre-world telemetry. Absent
+   * from a switch stashed by an older build: the login still resumes.
+   */
+  world?: World | null;
 }
 
 type SessionLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -82,9 +91,47 @@ export function takeEraSwitch(storage: SessionLike | null = defaultSession(), no
       && typeof v.account === 'string' && typeof v.password === 'string' && typeof v.at === 'number';
     if (!ok || now - v.at! > ERA_SWITCH_MAX_AGE_MS || v.at! > now + 5000) return null;
     return { era: v.era!, worldKey: v.worldKey!, worldName: typeof v.worldName === 'string' ? v.worldName : null,
-      connectUrl: v.connectUrl!, account: v.account!, password: v.password!, at: v.at! };
+      connectUrl: v.connectUrl!, account: v.account!, password: v.password!, at: v.at!, world: stashedWorld(v.world) };
   } catch {
     return null;
+  }
+}
+
+const strOrNull = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+
+/** A stashed launcher world, or null when it is missing or not world-shaped. */
+function stashedWorld(raw: unknown): World | null {
+  const r = raw as Record<string, unknown> | null | undefined;
+  if (!r || typeof r !== 'object' || typeof r.name !== 'string') return null;
+  if (r.kind !== 'listed' && r.kind !== 'local' && r.kind !== 'custom') return null;
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const compat = r.compat === 'beta' || r.compat === 'incompatible' ? r.compat : 'ok';
+  return {
+    id: strOrNull(r.id), name: r.name, emu: strOrNull(r.emu), type: strOrNull(r.type),
+    description: strOrNull(r.description), website: strOrNull(r.website), discord: strOrNull(r.discord),
+    online: typeof r.online === 'boolean' ? r.online : null, population: num(r.population),
+    compat, compatNote: strOrNull(r.compatNote), compatReason: strOrNull(r.compatReason),
+    registration: strOrNull(r.registration), registrationUrl: strOrNull(r.registrationUrl),
+    kind: r.kind, ...(typeof r.bridgeUrl === 'string' ? { bridgeUrl: r.bridgeUrl } : {}),
+    era: strOrNull(r.era), ...(r.eraUnknown === true ? { eraUnknown: true } : {}),
+  };
+}
+
+/**
+ * The address the era-switch reload loads: this page's, without `?era=`.
+ * `?era=` outranks a pending switch (resolveBootEra), so a page opened as
+ * `/?era=ac1999-retail` reloaded into the 1999 era again on ENTER on an
+ * end-of-retail world, dropped the stashed login (it named another era) and
+ * showed the launcher again, every time.
+ */
+export function eraSwitchReloadUrl(href: string): string {
+  try {
+    const u = new URL(href);
+    if (!u.searchParams.has('era')) return href;
+    u.searchParams.delete('era');
+    return u.toString();
+  } catch {
+    return href;
   }
 }
 
@@ -169,18 +216,23 @@ export async function planEraDats(
   const missing: DatRole[] = [];
   // A world served by the era's own streamed set (eraStreamPlan) needs no hosted whole file.
   const streamedWorld = era.own.worldPortal && eraStreamPlan(era, cfg).world;
-  for (const role of ownRoles(era)) {
-    if (streamedWorld && (role === 'worldPortal' || role === 'cell')) {
-      sources[role] = { kind: 'url', url: hostedDatUrls(cfg, eraDatsKey(era), role)[0], cacheNamespace: eraDatsKey(era) };
-      continue;
-    }
-    let found: string | null = null;
+  // BOOT.side-tables-off-critical-path sweep — the roles probe in parallel
+  // (each role still tries its own URLs in preference order): these HEADs
+  // block the `era` boot stage, and one after another a cold edge paid
+  // each round trip in turn.
+  const roles = ownRoles(era);
+  const found = await Promise.all(roles.map(async (role): Promise<string | null> => {
+    if (streamedWorld && (role === 'worldPortal' || role === 'cell')) return hostedDatUrls(cfg, eraDatsKey(era), role)[0];
     for (const url of hostedDatUrls(cfg, eraDatsKey(era), role)) {
-      if (await probes.headOk(url).catch(() => false)) { found = url; break; }
+      if (await probes.headOk(url).catch(() => false)) return url;
     }
-    if (found) sources[role] = { kind: 'url', url: found, cacheNamespace: eraDatsKey(era) };
+    return null;
+  }));
+  roles.forEach((role, i) => {
+    const url = found[i];
+    if (url) sources[role] = { kind: 'url', url, cacheNamespace: eraDatsKey(era) };
     else missing.push(role);
-  }
+  });
   return missing.length ? { era, missing } : { era, sources };
 }
 

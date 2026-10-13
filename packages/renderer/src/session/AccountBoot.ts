@@ -6,6 +6,14 @@
  * Conduct Violations". Retail then moves the UI flow to its disconnected
  * state (UIFlow vtable +0x20, mode 0x10000002).
  */
+/**
+ * ACE's (and ClassicACE's) wrong-password boot reason
+ * (AuthenticationHandler.cs:174, ClassicACE :217): an EXISTING account name
+ * with another password. ACE answers an unknown name by creating it
+ * (auto-create worlds) or with CharacterError.AccountDoesntExist, never this.
+ */
+export const PASSWORD_MISMATCH_BOOT_REASON = ' because the password entered for this account was not correct';
+
 export function accountBootedText(reason: string | undefined | null): string {
   const r = reason && reason.length > 0 ? reason : ' for Code of Conduct Violations';
   return `You have been booted from Asheron's Call${r}.`;
