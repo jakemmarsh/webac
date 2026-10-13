@@ -68,6 +68,8 @@ export interface MetaGame {
   quest?(name: string): HostQuest | null;
   /** The quest list is being asked for (isrefreshingquests). */
   refreshingQuests?(): boolean;
+  /** Virindi HUDs' Status HUD: VTank's statushud / statushudcolored write an entry under "VTank" (color: RGB number). */
+  statusHud?(key: string, value: string, color?: number): void;
   /** Spell ids from an object's appraisal; `activeOnly`: the enchantments on it. */
   objectSpellIds?(id: number, activeOnly: boolean): number[];
 }
@@ -250,6 +252,7 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
     },
     busyState: () => (game.busy?.() ? 1 : 0),
     ...(charProp ? { charProp } : {}),
+    ...(game.statusHud ? { statusHud: (k: string, v: string, c?: number) => game.statusHud!(k, v, c) } : {}),
     ...(xp ? { xpMeter: () => xp.reading(), xpReset: () => xp.reset() } : {}),
     ...(game.attribute ? { attribute: (a: number) => game.attribute!(a) } : {}),
     ...(game.vitae ? { vitae: () => game.vitae!() } : {}),

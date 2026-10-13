@@ -49,6 +49,38 @@ describe('the player and Claude', () => {
     expect(said).toHaveLength(2); // one announcement, one take-over line
   });
 
+  it('a walk Claude started that outlives its last call still yields to the player (BUG.recall-not-cancelled-by-moving sweep)', () => {
+    // The real AgentApi task flag and RoutineEngine status stand behind stillActing in main.ts.
+    let t = 1_000_000;
+    let walking = false;
+    let routineRunning = false;
+    const did: string[] = [];
+    const control = new ClaudeControl({
+      stopMoving: () => { did.push('stop'); walking = false; },
+      pauseRoutine: () => did.push('pause-routine'),
+      say: () => {},
+      stillActing: (claudeRoutine) => walking || (claudeRoutine && routineRunning),
+    }, () => t);
+    expect(control.gate('walkTo')).toBeNull();
+    walking = true;
+    t += CLAUDE_ACTIVE_MS + 5000; // the walk keeps holding W long after the call
+    control.playerInput();
+    expect(control.control).toBe('player');
+    expect(did).toEqual(['stop']);
+    // Idle Claude with nothing in flight: the player's keys are just play.
+    control.resume();
+    t += CLAUDE_ACTIVE_MS + 1;
+    control.playerInput();
+    expect(control.control).toBe('claude');
+    // A routine Claude started still runs: the player's key takes over and pauses it.
+    expect(control.gate('routineStart')).toBeNull();
+    routineRunning = true;
+    t += CLAUDE_ACTIVE_MS + 1;
+    control.playerInput();
+    expect(control.control).toBe('player');
+    expect(did).toEqual(['stop', 'stop', 'pause-routine']);
+  });
+
   it('player input while Claude is idle (or never acted) changes nothing; a routine the player started is never paused', async () => {
     const { control, did, call, advance } = setup();
     control.playerInput();

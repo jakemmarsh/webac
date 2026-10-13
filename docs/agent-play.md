@@ -25,7 +25,7 @@ in the cloud) uses the CLI; it is the same tool table (`tools/ac-agent/tools.ts`
 Prereqs: ACE + its DB in Docker (`npm run check-stack`). The daemon starts its own bridge (9127+) and, unless
 you pass `base=`, its own Vite on a **snapshot of the committed HEAD** (a sparse worktree under
 `$TMPDIR/acjs-agent/tree-<sha>`, Vite on 3127+), so other sessions saving files can't reload the game under
-the player. The snapshot links `node_modules` and `dat/` from the checkout you start from, or from the main checkout when that is a fresh `git worktree` without them (before 2026-10-11 such a snapshot had no `node_modules` and Vite failed with "Cannot find package 'vite'"; the daemon now repairs those trees). To verify *uncommitted* work, pass `base=http://localhost:<your vite>/`. Logs:
+the player. A new daemon prunes old snapshots: it keeps the 3 newest plus any a live daemon serves (before 2026-10-12 none were ever removed: 57 trees, 2.9 GB). The snapshot links `node_modules` and `dat/` from the checkout you start from, or from the main checkout when that is a fresh `git worktree` without them (before 2026-10-11 such a snapshot had no `node_modules` and Vite failed with "Cannot find package 'vite'"; the daemon now repairs those trees). To verify *uncommitted* work, pass `base=http://localhost:<your vite>/`. Logs:
 `$TMPDIR/acjs-agent/<profile>.log` (daemon, bridge, Vite, and the client's `[AC] Sent …` / server refusal
 lines, the first place to look when an action "did nothing").
 
@@ -216,6 +216,56 @@ here, not having to hardcode behavior").
   doors; not creatures) from your body to the target, like ACE's `IsDirectVisible`: the target line shows
   `no line of fire: blocked D m along it`, and `ac_cast` refuses a projectile spell (MetaSpellType Projectile /
   LifeProjectile / EnchantmentProjectile) with no line. (Arcanist cast round a corner and hit nothing.)
+- **Repeat casting (2026-10-12).** `ac_cast repeat=true` keeps casting one spell at one target, each cast through the
+  single cast's own path (busy wait, line-of-fire check, outcome wait), so no faster than the client allows, and answers
+  one summary: each cast's result, damage dealt, resists and fizzles, your vitals, and why it stopped. It stops, saying
+  so, when the target dies or goes, your mana is below the spell's cost (the spell table's BaseMana, or the least a cast
+  took this run, since Mana Conversion only lowers it; else the server's "not enough Mana"), the server or client
+  refuses a cast (no line of fire, out of range, "too busy" twice running, no reply twice), your health is below
+  `until_health` (default 50%), a monster that wasn't hitting you when it started (attackersOfMe) and isn't the target
+  starts to, or after `max_casts` (20) / `max_s` (120). It is a task like a walk: another action, `ac_stop_moving` or
+  your death ends it with the summary so far, and a long one answers "still in progress" with the summary on
+  task-done. A single cast replaces it. Why: Bulwark's `ac_attack` is one call and the server keeps swinging (a
+  level-8 drudge in ~5 s), while each `ac_cast` was one bolt per tool call, and with 5–8 s of thinking between calls
+  Arcanist got a bolt off every 10–15 s: over 7 minutes Bulwark landed 6 killing blows to Arcanist's 3 bolts, and the
+  mage looked stuck to the human watching. A retail player keeps pressing the bolt key, VirindiTank and our routines
+  cast repeatedly too: a tool gap, not a play decision. Nothing era-specific (the same cast path in all three eras).
+- **Ranged attacks shoot from where you stand (2026-10-12).** `ac_attack` with a launcher or thrown weapon (missile
+  mode, or peace mode with one wielded) no longer runs up to the target: Jake's archer Azreath (Shortbow, Range 65 yd)
+  was run 48 m in to ~1 m of a Virindi Observer it could hit from 53.7 m. The server never walks you to a missile target
+  (ACE Player_Missile turns and fires); it refuses with "Out of Range!" + AttackDone when TargetInRange fails (3D
+  distance over min(MaximumVelocity² / 9.8, 85 yd)) or when no ballistic arc reaches the aim point
+  (Creature_Missile.GetProjectileVelocity → Trajectory.solve_ballistic_arc, at MaximumVelocity × 1.2 with Use Fast
+  Missiles; uphill the reach shrinks: a 24.9 m/s Shortbow reaches ~40 m across at +19 m). The agent applies the same
+  two tests (`missileShot`, packages/shared/src/combat/MissileRange.ts) with the launcher's MaximumVelocity from its
+  appraisal (WeaponProfile MaxVelocity; an unappraised launcher is examined quietly first, up to 2 s, and with no reply
+  it says it assumes ACE's default 20 m/s), the body and target heights and the attack height: in reach (97%) with a
+  clear line (`lineOfFire`; unknown, doorways between count as blocked) it shoots at once and says "shooting at X from
+  here: 53.7 m away, within your Shortbow's ~59 m"; otherwise it walks only until both hold (90% of the reach), saying
+  why ("out of your Shortbow's ~59 m", "no clear line of fire"). A server "Out of Range!" anyway (its view of you lags,
+  the target moved) closes in under the distance it was said at, twice, then ends as `target-lost`. Melee keeps its
+  run-up; magic mode is unchanged. All three eras: combat mode and the appraisal's MaxVelocity come the same way (the
+  1999 codec maps its weapon profile onto the EoL one; a 1999 or Classic thrown weapon's velocity is the server's
+  Strength-based figure). The 1999 server's own gate is a flat 80 m plus its trajectory; ClassicACE is ACE's.
+- **Idle characters are logged out (2026-10-12).** Jake: "you should always log out if you stop controlling them
+  otherwise they might die to stuff? unless ive taken over". Whoever stops driving a profile runs `stop` (briefs end
+  with it), and the daemon itself logs an agent-started character out after 15 minutes (`--idle-logout-min`,
+  `AC_IDLE_LOGOUT_MIN`; 0 = never) with no agent call, nothing Claude started still acting (`acting()`: a task or
+  a running routine) and no trusted key/mouse/wheel input in its window (a human who took over). It never touches an
+  attached tab (the human's own login), and players' own sessions never run the daemon at all.
+- **Leaving a fight and planning trips (2026-10-12, Jake's archer Azreath on Coldeve, via acjs-1b).** He died after two
+  Virindi Executors and an Observer joined a tusker fight; vitals-low woke him only at 14% health, and he had tried /ls
+  to escape. The hosted guide and the play skill now say: decide your leave rules before a fight (a second attacker, any
+  caster, 60% health) and check in every few seconds; leave early with `ac_walk_to flee=true`. /ls is no escape: ACE
+  (Player_Location.HandleActionTeleToLifestone) plays the NonCombat LifestoneRecall motion, waits its length and cancels
+  if you moved more than RecallMoveThreshold (8 m) by then; damage doesn't stop it; on the client a jump cuts the
+  animation short (CMotionInterp::LeaveGround @ 00528b00 → RemoveLinkAnimations). Plan trips (destination, route,
+  spawns, entry requirements: the Temple of Forgetfulness guardian wants an Archmage herb, and its portal drops you at
+  Far Horizon Cottages 92.9N 2.4W, a run from 88.8N 0.0E). Archers shoot from range.
+- **Follow through the hits (2026-10-12).** `ac_follow flee=true` keeps following while you're hit, as `ac_walk_to
+  flee=true` does; without it the first hit ends the follow (as before). Arcanist died four times in an hour in Holtburg
+  Dungeon: separated from Bulwark, drudge spawners refilled next to the 67-HP mage, its follow ended at the first hit,
+  and the next decision (10–20 s away) came after Bulwark had walked on or the mage was dead.
 - **Inventory.** Pack items show their type, what they fit (ValidLocations) and value, so an upgrade or something to
   sell is visible without appraising everything. Top-level containers and RequiresBackpackSlot items (packs, foci)
   are listed under `pack slots`, as the retail pack column shows them; a focus counts only there (ACE `HasFoci`).
@@ -300,6 +350,110 @@ here, not having to hardcode behavior").
   agent's own `sed` ranges overlapping; a focus still burns Prismatic Tapers (ACE `SpellFormula.GetFociFormula`: the
   scarab plus tapers by power); an Orb wielded with too little Arcane Lore stays wielded with its spells off (ACE
   `TryActivateSpells` → `CheckUseRequirements`).
+
+- **The night batch (2026-10-12, Arcanist + Bulwark in Dungeon Fern 0x01B3 and Holtburg Dungeon 0x01F6).** Fleeing
+  didn't move: `walk_to "15m east" flee=true` aimed into the rock past a corridor wall and stood still through four
+  escalating searches (box, wider, jumps, straight for the goal; ~250 points a second headless) while drudges killed the
+  mage, and the result said "you kept going". Under attack a search now stands at most 1.5 s; no way to the point means
+  the farthest open point it reached (an offset like "15m east" is a direction: walked as far as the way goes, attacked
+  or not), else an answer at once with the open ways (`Open ways from here: N 20+ m, S 12 m…`, a straight probe each
+  compass point). A stall under attack is 1.2 s, and hemmed in by monsters (they block a body; the probe leaves them
+  out) says who and where it's open. "You kept going N m" only when the body got 3 m or more from the first hit; else
+  "you did NOT get away". A cast stops the player with W still held (CommandInterpreter::MaybeStopCompletely: a held key
+  moves nothing until pressed again), so a walk whose body hasn't moved for 0.5 s lets W go and presses it again.
+  A dungeon is its own space (host `cellSealed`: an interior cell without SeenOutside): a walk from one to another
+  landblock, or to map coordinates, is refused with where the place is ("stopped 34360 m short" six times, for a sign
+  outside by the portal). Attack lines are placed when they come, on the nearest of that name within reach (a swing
+  8 m, a spell 60 m), never moved onto another of the name later; none in reach is `hit by, but not placed`. ac_wait:
+  vitals-low at half health by default (`vitals_below=`, `mana_below=`, `stamina_below=` per wait; it was 35%, and woke
+  an archer at 14%), any single hit over a quarter of max health, `attackers-up` and `cast-at-you` (a spell landing on,
+  failing on or resisted by you, or a creature within 40 m speaking spell words: ACE Monster_Magic broadcasts them).
+  `ac_pick_up` waits for the item in the pack or the server's refusal (a walk_to straight after cancelled ACE's walk to
+  the note: "can't be picked up - action cancelled"); a note or book on the ground is read from the pack (ACE's torn
+  notes are ItemUseable Contained; ac_use from the pack shows the pages). Shopkeeper Renald the Elder stands in a booth
+  (0xA9B40141) reached only through counters: the route ends at the street outside his service window 0x14F
+  (`cellPath.counterSpot`), not through the shop's 1 m counter sill. A buy you can't afford says the price and your
+  purse (ACE BuyItems_ValidateTransaction refuses with no words); trade notes don't pay (SpendCurrency). A vendor id from
+  an earlier listing is found again by its name (ACE re-ids the stock on every open), and a decimal id is read as one.
+  A portal whose server walk never moved you is walked into; walk_to a portal stops beside it. A dying creature is
+  `DYING`, never "hp 32%". The line of fire names what blocks it and counts only objects in the world (not held items or
+  released ones); an offline sweep of Dungeon Fern's cells and statics from the DAT (30,000 pairs with a clear waist-high
+  line) found no false eye-line blocks, so the liches' "blocked 1.5 m" came from an object: the blocker's name will say.
+  Checked, not ours: Bulwark's corpse went in 15 s because it was empty (ACE `Corpse.RecalculateDecayTime`: no items,
+  EmptyDecayTime 15 s, with corpse_destroy_pyreals on; a corpse with items lasts max(1 h, level × 5 min)); "Your Arcane
+  Lore skill is too low to use that item's magic" is the retail client's own line (decomp :360421); a Risen Soldier
+  hitting for 0–2 is its world-DB claws (body parts 2–3 damage, variance 0.75).
+
+- **The late batch (2026-10-12: Arcanist in Dungeon Fern, Jake's Azreath and prod session).** `ac_follow` stood
+  Arcanist under the ledge Bulwark had walked up a ramp onto, 6 m overhead: "beside the leader" was across the ground
+  only. Indoors (a building or dungeon) a leader 2.5 m or more up or down is not beside you: the follow says so in an
+  `[Agent]` line, takes the floor-aware planner's way up (or down), and a follow that finds none ends "X is 6 m above
+  you on a ledge or upper floor; no way up to them was found from here". Out on the landscape a fellow up a slope is
+  still beside you. A walk to an object right overhead now searches for the way to its floor instead of standing under
+  it. Arrows: ACE spawns the missile 2 × (your radius + the arrow's 0.1 m) in front of you at Height × 0.8454, tilted
+  by the aim motion (GetAimLevel: normalized z × 90 snapped to 15°), and flies it on the low `solve_ballistic_arc` to the
+  target's Height / GetAimHeight (Player_Missile.LaunchMissile, Creature_Missile.GetProjectileSpawnOrigin /
+  CalculateProjectileVelocity; `missileArc` in packages/shared/src/combat/MissileRange.ts). `ServerObjectManager
+  .missileArcOfFire` sweeps that arc (and the server's IsProjectileVisible check, spawn point back to your eye) with
+  lineOfFire's own sweeps; the archer's clear-shot test, observe's target line in missile mode ("your arrow's arc
+  would hit that") and the macro's line check in missile mode use it. War bolts keep the straight line (ACE
+  CalculateProjectileVelocity: gravity only for Arc spells). A long level shot lobs at AimHigh45 and its apex finds a
+  dungeon ceiling the eye line clears. Two "Your missile attack hit the environment." in a row (ACE
+  ProjectileCollisionHelper.OnCollideEnvironment) stop the shooting: the attack says so, walks off that spot (2.5 m at
+  least) to where the arc is clear, and after two moves gives up as target-lost; such shots no longer count as the
+  "server won't attack it" empties. `ac_sell amount=1` of a 38-note stack reported "not sold" while the sale went
+  through: it stopped waiting at the client's own "Splitting the Trade Notes (250,000) before selling them" notice. It
+  now waits for the coins, the item leaving, or a refusal (ACE Player_Commerce texts). `ac_use` of a portal keeps
+  walking while hit and runs into it (`flee=true` does the same for a door, lifestone or NPC); a walk hemmed in by
+  creatures while hit steps round them (the open direction nearest the way on that no creature stands in, up to three
+  tries, said in an `[Agent]` line) before it says who blocks. The guides say to commit to an exit early: monsters
+  body-block. All three eras share this code; nothing era-specific (the 1999 server's missile flight is its own, but
+  the "hit the environment" words are the same, targetTracker.HIT_ENVIRONMENT).
+
+- **What a kind of creature was seen doing (2026-10-12).** Jake's archer judged Tusker Worshippers (level-V bolts) from a
+  world-DB read, and the pair met Dungeon Fern's liches (Frost Bolt II for 40) as if they were drudges. observe now
+  adds `seen: casts Frost Bolt II (40), Drain Health Other II; hits up to 6` to every monster of a name, and its target
+  line, built only from the server's lines this session (a spell's damage line, "X cast S on you", "… due to X casting
+  S on you", "X fails to affect you with S", spell words heard, a blow's damage). Per kind, kept for the session
+  (`AgentApi.seenText`). Fellows' fights don't reach your chat (retail shows only your own combat lines), so only what
+  hit you counts. Same in all three eras.
+
+- **The Holtburg Dungeon batch (2026-10-13, Arcanist + Bulwark, Dungeon Fern and Holtburg Dungeon 0x01F6).** About a
+  third of the session was "where are you?". `ac_follow` stood still (12 s, three times) beside a fellow `walk_to` reached
+  at once: a walk took any point within the goal's reach as reached, doorways included, and a follow's reach is 4 m, so
+  the doorway 0x01F60224 → 0x0233 two metres off counted as passed and no way round was searched, while a row of
+  bookshelves (statics 0x02000183) stands in that doorway; W pushed into the shelves. A doorway (or a door to open) is
+  now reached on it (`legWithin`), and a doorway no search gets into is routed round through the others first (it joins
+  the walk's `closed` list), before wider searches (tests: the real 0x01F6 cells and statics). Fellows read "out of sight
+  (was 0 m away)" crossing 0x01F60289 / 0x027A → 0x0269: the agent hid a creature whose cell isn't in your cell's
+  VisibleCells, but those lists aren't even symmetric (ACE PlayerCommands /objsend's note) and ACE keeps sending a
+  mover's positions to every player that knows it. A creature the server placed in the last 5 s (`heardAt`, set with
+  `ServerObject.serverPlaceAt`) is in view whatever the PVS says; `stay_with` walks on through a fellow beside you
+  dropping from view for up to 10 s; `map` and `fellows:` read the same list. The fellows line says `up/down N m`.
+  Names: a corpse "Corpse of X" ranks under anything else unless "corpse" is asked for (a cast at "Claude Bulwark" took
+  his corpse; with only the corpse here the answer says he isn't in view), remembered places in your landblock come before
+  ones elsewhere ("Surface" took Dungeon Fern's exit), and a creature or place whose name the query has words beyond is
+  no match ("Holtburg Dungeon Directions", a sign, took the "Holtburg Dungeon" portal; an item named with its material
+  still matches). The cast's no-line-of-fire refusal and the archer's clear-line test name the blocker. A cast's reply
+  leads with its outcome (fizzle, resist, damage) on the line after the head, before the incantation (a fizzle printed
+  last was cut off by `| head`); a bolt with no damage line, no resist and no kill says `no hit seen` and the distance, and
+  `repeat` stops after two such bolts running. Point-blank bolts at a Spikey Armoredillo (7 at under 2 m, no damage line,
+  00:19:46–00:20:48Z): not explained offline. ACE's spawn (WorldObject_Magic.CalculateProjectileOrigins: forward
+  physics radius + projectile radius when the cylinder distance is under 0.6 m, at 2/3 of your Height, aimed at 2/3 of
+  the target's) puts a Flame Bolt (Setup 0x0200040D, radius 0.14) just outside the armoredillo's 0.91 m sphere (Setup
+  0x02000004 × 0.8) on a line into it, so the geometry alone doesn't say it misses; the agent now says when bolts did
+  nothing rather than guessing why. `until_health` takes a fraction or a percent (0.4 was 0.4%). `ac_pick_up` waits on
+  while the server's walk to the item keeps moving you (up to 45 s), and a no-answer says how far it is. The blank
+  Parchment was blank: weenie 365 has no page data (max 1 page; vendors sell it), so "(it has no writing)" is right. The
+  attack's first answer says how far the target is, on which floor, and which fellow you'd be left far from. An attack
+  whose swings report nothing at all three heights (a ghost, #80004cf6) ends with `target-lost` instead of cycling
+  heights for 120 s (each change had reset the 20 s give-up), and every attack end now raises an event its suggested
+  wait hears. `/tell Name text` without a comma is retail's "Use comma after the name for targeted chat." (DoTell
+  @ 00577e40); `ac_say` now says how to write it. `*blush*` is not in the end-of-retail ChatPoseTable (0x0E000007), so it
+  prints as typed: retail. A `use_on` cut short by your death says so. Checked: 2–3 fizzles of 5 Level III buffs at skill
+  110–120 is ACE's (and retail's) sigmoid, SkillCheck.GetMagicSkillChance (factor 0.07, difficulty = Power 100):
+  67–80% success before Vitae, about 48% with 10% Vitae on the skill. All three eras share this code (the walk, names,
+  casts and attack messages); nothing era-specific.
 
 ## What makes it play, not automation (Claude's view, 2026-10-07)
 

@@ -104,6 +104,9 @@ export function renderVvsBar(host: HTMLElement, entries: readonly VvsBarEntry[],
     if (e.open) slot.style.background = VVS_BAR.colors.underlay;
     const url = e.icon ? ('dat' in e.icon ? iconUrl(e.icon.dat) : e.icon.url) : null;
     if (url) Object.assign(slot.style, { backgroundImage: `url(${url})`, backgroundSize: '100% 100%' });
+    // An icon whose image hasn't arrived yet (streamed DATs) stays empty until the host redraws; only a view
+    // with no icon at all gets VVS's coral box.
+    else if (e.icon) slot.dataset.iconPending = '1';
     else {
       const box = document.createElement('div');
       Object.assign(box.style, { position: 'absolute', left: '3px', top: '3px', width: '10px', height: '10px', background: VVS_BAR.colors.noIcon, pointerEvents: 'none' });

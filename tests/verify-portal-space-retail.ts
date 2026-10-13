@@ -280,3 +280,85 @@ describe('GameUI drives it (happy-dom)', () => {
     expect(ui.portalSpaceState).toBe(TeleportAnimState.Off);
   });
 });
+
+// 2026-10-12 (Coldeve): Chrome stops requestAnimationFrame in a hidden or
+// covered tab, so the teleport loop never reached TAS_OFF and LoginComplete
+// never went out; ACE held the player in portal space for 6 min until the
+// tab was looked at. main.ts pumps the loop on the BackgroundTicker beat.
+describe('the teleport loop keeps running when rAF stops (hidden tab)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let H: any;
+  let origRaf: typeof requestAnimationFrame;
+  let origCancel: typeof cancelAnimationFrame;
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextId = 1;
+  beforeAll(async () => {
+    const { mountGameUI } = await import('./_harness/gameui.js');
+    H = await mountGameUI();
+    // After the mount: the harness installs happy-dom's own rAF. This one only fires when a test says so.
+    origRaf = globalThis.requestAnimationFrame;
+    origCancel = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => { const id = nextId++; frames.set(id, cb); return id; }) as typeof requestAnimationFrame;
+    globalThis.cancelAnimationFrame = ((id: number) => { frames.delete(id); }) as typeof cancelAnimationFrame;
+    H.ui.setUIHost({ gameFov: 90, setViewDistanceRatio: () => {} });
+    H.ui.playUISound = () => {};
+  });
+  afterAll(() => {
+    globalThis.requestAnimationFrame = origRaf;
+    globalThis.cancelAnimationFrame = origCancel;
+    H?.teardown();
+  });
+
+  function arrive(): { finished: number[]; inProgress: boolean[]; setClock: (t: number) => void } {
+    const ui = H.ui;
+    ui.hidePortalSpace(); // each test starts from a torn-down loop
+    frames.clear();
+    const finished: number[] = [];
+    const inProgress: boolean[] = [];
+    let t = 1000;
+    ui.portalClock = () => t;
+    ui.callbacks.onTeleportAnimationFinished = () => finished.push(t);
+    ui.callbacks.onTeleportInProgressChanged = (v: boolean) => inProgress.push(v);
+    ui.showPortalSpace();
+    ui.endPortalSpace();
+    return { finished, inProgress, setClock: (v) => { t = v; } };
+  }
+
+  it('hidden: no frame ever fires, the background beat alone finishes the animation once', () => {
+    const { finished, inProgress, setClock } = arrive();
+    expect(frames.size).toBe(1); // the loop asked for a frame the hidden tab never delivers
+    for (let s = 0; s <= 12; s += 0.05) { setClock(1000 + s); H.ui.pumpTeleportLoop(); }
+    expect(finished).toHaveLength(1);
+    expect(H.ui.portalSpaceState).toBe(TeleportAnimState.Off);
+    expect(inProgress.at(-1)).toBe(false);
+    expect(frames.size).toBe(0); // the pending frame was cancelled: a later visible frame can't re-finish it
+    H.ui.pumpTeleportLoop();
+    expect(finished).toHaveLength(1);
+  });
+
+  it('visible: rAF frames finish it exactly as before; the pump is a no-op once off', () => {
+    const { finished, setClock } = arrive();
+    for (let s = 0; s <= 12 && frames.size > 0; s += 1 / 60) {
+      setClock(1000 + s);
+      const [id, cb] = [...frames][0];
+      frames.delete(id);
+      cb(0);
+    }
+    expect(finished).toHaveLength(1);
+    expect(H.ui.portalSpaceState).toBe(TeleportAnimState.Off);
+    expect(frames.size).toBe(0);
+    H.ui.pumpTeleportLoop();
+    expect(finished).toHaveLength(1);
+  });
+
+  it('a pump between frames shares the same loop: one finish, no orphaned frame', () => {
+    const { finished, setClock } = arrive();
+    for (let s = 0; s <= 12; s += 0.1) {
+      setClock(1000 + s);
+      if (Math.round(s * 10) % 2 === 0) H.ui.pumpTeleportLoop();
+      else if (frames.size > 0) { const [id, cb] = [...frames][0]; frames.delete(id); cb(0); }
+    }
+    expect(finished).toHaveLength(1);
+    expect(frames.size).toBe(0);
+  });
+});

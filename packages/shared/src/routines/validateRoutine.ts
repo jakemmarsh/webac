@@ -123,6 +123,16 @@ function checkCondition(c: unknown, path: string, out: RoutineIssue[]): void {
       if (!isNum(c.meters, 0, 500)) bad('meters must be 0..500');
       return;
     case 'expression': if (!isStr(c.expr)) bad('expr is required'); return;
+    // Beyond VTank, Jake 2026-10-12.
+    case 'attackers-at-least': if (!isNum(c.count, 1, 50)) bad('count must be 1..50'); return;
+    case 'being-cast-at': if (c.seconds !== undefined && !isNum(c.seconds, 1, 60)) bad('seconds must be 1..60'); return;
+    case 'no-monster-near':
+      if (!isNum(c.meters, 0, 500)) bad('meters must be 0..500');
+      if ((c.coords === undefined) === (c.object === undefined)) bad('give either coords or object (not both)');
+      if (c.coords !== undefined && (!isStr(c.coords) || !COORDS.test(c.coords))) bad('coords must look like "42.1N, 33.6E"');
+      if (c.object !== undefined && !isStr(c.object)) bad('object must be a name');
+      return;
+    case 'my-corpse-within': if (!isNum(c.meters, 0, 500)) bad('meters must be 0..500'); return;
     default: out.push({ path, message: `unknown condition kind "${String(k)}"` });
   }
 }
@@ -203,6 +213,30 @@ function checkAction(a: unknown, path: string, p: RoutineProfile, out: RoutineIs
       if (!isNum(a.seconds, 1)) bad('seconds must be ≥ 1');
       return;
     case 'expression': if (!isStr(a.expr)) bad('expr is required'); return;
+    // Beyond VTank, Jake 2026-10-12.
+    case 'pull':
+      if (!isStr(a.pattern) || !regexOk(a.pattern)) bad('pattern must be a valid regex');
+      if (!isStr(a.back) || !COORDS.test(a.back)) bad('back must look like "42.1N, 33.6E"');
+      if (a.meters !== undefined && !isNum(a.meters, 1, 500)) bad('meters must be 1..500');
+      if (a.holdMeters !== undefined && !isNum(a.holdMeters, 1, 500)) bad('holdMeters must be 1..500');
+      return;
+    case 'hold-position':
+      if (!isNum(a.meters, 1, 500)) bad('meters must be 1..500');
+      if (a.coords !== undefined && (!isStr(a.coords) || !COORDS.test(a.coords))) bad('coords must look like "42.1N, 33.6E" (leave it out for where you stand)');
+      return;
+    case 'release-position': return;
+    case 'loot-corpse':
+      if (!isStr(a.name)) bad('name is required ("Corpse of …")');
+      if (a.meters !== undefined && !isNum(a.meters, 1, 200)) bad('meters must be 1..200');
+      return;
+    case 'recall':
+      if (!isStr(a.via)) bad('via is required: a recall command ("/ls") or a recall spell');
+      if (a.abortAttackers !== undefined && !isNum(a.abortAttackers, 1, 50)) bad('abortAttackers must be 1..50');
+      return;
+    case 'flee-to':
+      if (a.portal !== undefined && typeof a.portal !== 'string') bad('portal must be a name');
+      if (!(a.portal && (!a.coords || a.coords === '')) && (!isStr(a.coords) || !COORDS.test(a.coords))) bad('coords must look like "42.1N, 33.6E" (or be empty when a portal is named)');
+      return;
     default: out.push({ path, message: `unknown action kind "${String(k)}"` });
   }
 }
@@ -367,6 +401,10 @@ function sayCondition(c: RoutineCondition): string {
     case 'need-buff': return 'the buff set needs a rebuff';
     case 'monster-count': return `at least ${c.count} monsters matching /${c.pattern}/ within ${c.meters} m`;
     case 'expression': return `expression ${c.expr}`;
+    case 'attackers-at-least': return `${c.count}+ creatures attacking you (last 10 s)`;
+    case 'being-cast-at': return `a spell came at you in the last ${c.seconds ?? 5} s`;
+    case 'no-monster-near': return `no monster within ${c.meters} m of ${c.coords ?? `the ${c.object}`}`;
+    case 'my-corpse-within': return `your corpse within ${c.meters} m`;
   }
 }
 
@@ -404,6 +442,12 @@ function sayAction(a: RoutineAction): string {
     case 'jump': return `jump${a.forward ? ' forward' : ''}${a.heading !== undefined ? ` facing ${a.heading}°` : ''}${a.holdMs ? ` (hold ${a.holdMs} ms)` : ''}`;
     case 'load-loot': return `use loot set "${a.set}"`;
     case 'expression': return `run expression ${a.expr}`;
+    case 'pull': return `pull the nearest /${a.pattern}/${a.meters ? ` within ${a.meters} m` : ''} back to ${a.back}${a.holdMeters ? ` and hold there (${a.holdMeters} m)` : ''}`;
+    case 'hold-position': return `hold position (fight nothing more than ${a.meters} m from ${a.coords ?? 'here'})`;
+    case 'release-position': return 'release the held position';
+    case 'loot-corpse': return `loot ${a.name} by the loot rules`;
+    case 'recall': return `recall (${a.via}), giving up if ${a.abortAttackers ?? 1}+ creatures attack first`;
+    case 'flee-to': return a.portal ? `${a.coords ? `run to ${a.coords}, then ` : ''}use ${a.portal}, not stopping when hit` : `run to ${a.coords}, not stopping when hit`;
   }
 }
 

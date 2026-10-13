@@ -168,12 +168,14 @@ describe('GameUI: the bar, UB\'s window and the windows\' VVS text', () => {
     ui.setUbSettings(store);
     ui.setUbMaps({ toggle: (w: string) => { if (open.has(w)) open.delete(w); else open.add(w); return ''; }, closeAll: () => {}, close: (w: string) => { closed.push(w); open.delete(w); }, isOpen: (w: string) => open.has(w) });
     ui.setAutomationSource(source());
+    // The bar is preview UI (the bridge's BRIDGE_PREVIEW_ACCOUNTS); verify-virindi-reporter.ts tests the gate.
+    (ui as unknown as { setPreviewFeatures(on: boolean): void }).setPreviewFeatures(true);
     const bar = () => ui.hudContainer.querySelector('[data-vvs-bar]') as HTMLElement | null;
     expect(bar()).toBeNull();
     ui.toggleAutomationWindow();
     await new Promise((r) => setTimeout(r, 10));
     const ids = () => Array.from(bar()!.querySelectorAll('[data-vvs-bar-entry]')).map((e) => `${(e as HTMLElement).dataset.vvsBarEntry}:${(e as HTMLElement).dataset.open}`);
-    expect(ids()).toEqual(['vtank:1', 'vhs:0', 'ub:0', 'ub-dungeon:0', 'ub-landscape:0']);
+    expect(ids()).toEqual(['vtank:1', 'vhs:0', 'ub:0', 'ub-dungeon:0', 'ub-landscape:0', 'vcs:0']);
 
     // The VirindiTank window's text is VVS's.
     const win = ui.hudContainer.querySelector('[data-vtank-window]') as HTMLElement;
@@ -190,7 +192,7 @@ describe('GameUI: the bar, UB\'s window and the windows\' VVS text', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(settings['DungeonMaps.Enabled']).toBe(false);
     expect(closed).toEqual(['dungeon']);
-    expect(ids()).toEqual(['vtank:1', 'vhs:0', 'ub:1', 'ub-landscape:0']);
+    expect(ids()).toEqual(['vtank:1', 'vhs:0', 'ub:1', 'ub-landscape:0', 'vcs:0']);
 
     // /automation bar hides it, and again shows it.
     expect(ui.toggleVvsBar()).toMatch(/hidden/);

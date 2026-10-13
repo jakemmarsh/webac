@@ -9,10 +9,9 @@
  *       [--era classic-dereth] [--out <dir>]
  * Exits 1 on a failed check.
  */
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright';
+import { createRunProfile } from './lib/temp-profile.js';
 import { SWIFTSHADER_ARGS, waitFor } from './lib/game-session.js';
 
 const args = process.argv.slice(2);
@@ -28,8 +27,10 @@ mkdirSync(out, { recursive: true });
 let failed = false;
 const check = (ok: boolean, what: string) => { console.log(`${ok ? 'PASS' : 'FAIL'} ${what}`); if (!ok) failed = true; };
 
-const profile = mkdtempSync(join(tmpdir(), 'acjs-prod-smoke-'));
-const ctx = await chromium.launchPersistentContext(profile, { args: SWIFTSHADER_ARGS, viewport: { width: 1280, height: 720 } });
+// Deleted at exit, on a signal or a thrown error (tools/lib/temp-profile.ts): it holds a ~1 GB DAT cache.
+const profile = createRunProfile('acjs-prod-smoke-', { tool: 'probe-era-prod-smoke' });
+const ctx = await chromium.launchPersistentContext(profile.dir, { args: SWIFTSHADER_ARGS, viewport: { width: 1280, height: 720 } });
+profile.setCloser(() => ctx.close());
 const page = ctx.pages()[0] ?? await ctx.newPage();
 page.setDefaultTimeout(60_000);
 const lines: string[] = [];
@@ -60,6 +61,5 @@ check(classicRequests.some((u) => u.includes('/v1/raw/')), 'its own files came f
 check(await page.locator('[data-element-id="0x15"]').count() === 0, 'no data-files prompt');
 await page.screenshot({ path: `${out}/prod-era-boot.png` });
 console.log(lines.join('\n'));
-await ctx.close();
-rmSync(profile, { recursive: true, force: true }); // the profile holds a ~1 GB DAT cache
+await profile.dispose(); // closes the browser and removes the profile
 process.exit(failed ? 1 : 0);

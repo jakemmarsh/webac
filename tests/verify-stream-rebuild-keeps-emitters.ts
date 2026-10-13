@@ -130,6 +130,37 @@ describe('a streamed GfxObj rebuild keeps the object\'s part emitters running', 
     sys.dispose();
   });
 
+  it('an emitter born before its parent joined the scene stops once the parent leaves it (login bubbles left behind by a teardown)', () => {
+    // The local player's Hidden script starts on its model before the model is
+    // added to the scene; a world teardown before UnHide removed the model and
+    // the bubbles stayed where the player had stood (Coldeve, 2026-10-12).
+    const scene = new THREE.Scene();
+    const mesh = portalMesh(0);
+    const src = makeEmitterFrameSource(mesh.children[0], { x: 0, y: 0, z: 0 }, 0);
+    const sys = new ParticleSystem(PORTAL_SWIRL, 0xffffff, undefined, src);
+    const pos = new THREE.Vector3(); const quat = new THREE.Quaternion();
+    expect(src.getFrame(pos, quat)).toBe(true); // a bare frame before placement
+    sys.update(0.5);
+    expect(sys.isStopped).toBe(false);
+    scene.add(mesh);
+    sys.update(0.5);
+    expect(sys.isStopped).toBe(false);
+    expect(sys.activeCount).toBeGreaterThan(0);
+    scene.remove(mesh);
+    expect(src.getFrame(pos, quat)).toBe(false);
+    sys.update(0.1);
+    expect(sys.isStopped).toBe(true);
+    sys.dispose();
+  });
+
+  it('a frame never placed in a scene stays a bare frame', () => {
+    const node = new THREE.Group(); node.position.set(1, 2, 3);
+    const src = makeEmitterFrameSource(node, { x: 0, y: 0, z: 0 });
+    const pos = new THREE.Vector3(); const quat = new THREE.Quaternion();
+    for (let i = 0; i < 3; i++) expect(src.getFrame(pos, quat)).toBe(true);
+    expect(pos.x).toBeCloseTo(1, 5);
+  });
+
   it('a parent that really despawned (no rebuild) still stops its emitter', () => {
     const scene = new THREE.Scene();
     const mesh = portalMesh(0); scene.add(mesh);

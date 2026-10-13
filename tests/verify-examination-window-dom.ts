@@ -161,4 +161,35 @@ describe.skipIf(!domWindow)('GameUI.showExaminationWindow (real GameUI in happy-
     ui.showExaminationWindow(itemView());
     expect(ui.examineUseTime(200, false)).toBe(0);
   });
+
+  const drudge = (level: string) => ({ guid: 0x80001ca1, title: 'Drudge Skulker', page: 'creature', creature: { page: 'creature', headerPanel: 0x1000014d, level, stats: [], miscInfo: [], creatureDisplayName: 'Drudge', allegianceName: '' } });
+
+  it('a re-appraisal refills the open creature page in place: same window, same close button', () => {
+    ui.showExaminationWindow(drudge('8'));
+    const handle = ui.examinePanelHandle;
+    const wrapper = ui.examinePanel;
+    expect(ui.refreshExaminationWindow(drudge('9'))).toBe(true);
+    expect(ui.examinePanelHandle).toBe(handle);
+    expect(ui.examinePanel).toBe(wrapper);
+    expect(wrapper.isConnected).toBe(true);
+    expect(texts.get(0x1000014c)).toBe('9');
+  });
+
+  it('a re-appraisal landing after the close button does not reopen the window', () => {
+    ui.showExaminationWindow(drudge('8'));
+    ui.hideExaminePanel();
+    rendered = null;
+    expect(ui.refreshExaminationWindow(drudge('9'))).toBe(false);
+    expect(ui.examinePanelHandle).toBeNull();
+    expect(rendered).toBeNull();
+    expect(ui.examinedGuid).toBeNull();
+  });
+
+  it('a reply for another object does not replace the open window', () => {
+    ui.showExaminationWindow(drudge('8'));
+    const handle = ui.examinePanelHandle;
+    expect(ui.refreshExaminationWindow(itemView())).toBe(false);
+    expect(ui.examinePanelHandle).toBe(handle);
+    expect(ui.examinedGuid).toBe(0x80001ca1);
+  });
 });

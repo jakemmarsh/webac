@@ -291,7 +291,9 @@ describe('the VirindiTank window', () => {
     expect(rule.when).toEqual([{ kind: 'free-slots-below', slots: 5 }]);
     // Chat Command takes VTank's own commands.
     (dlg().querySelector('[data-vtank="rule-action"]') as HTMLElement).click();
-    expect(lastMenu!.items.map((i) => i.label).slice(-6)).toEqual(['Clear Watchdog', 'Get VT Option', 'Set VT Option', 'Create View', 'Destroy View', 'Destroy All Views']);
+    expect(lastMenu!.items.map((i) => i.label).slice(-12, -6)).toEqual(['Clear Watchdog', 'Get VT Option', 'Set VT Option', 'Create View', 'Destroy View', 'Destroy All Views']);
+    // Then ours, which VTank never had (beyond VTank, Jake 2026-10-12; tests/verify-routine-beyond-vtank.ts).
+    expect(lastMenu!.items.map((i) => i.label).slice(-6)).toEqual(['Pull Monster', 'Hold Position', 'Release Position', 'Loot Corpse', 'Recall Unless Attacked', 'Flee To']);
     pick(dlg().querySelector('[data-vtank="rule-action"]'), 'Chat Command');
     const cmd = dlg().querySelector('[data-vtank-param="text"]') as HTMLInputElement;
     cmd.value = '/vt opt set enablecombat false';

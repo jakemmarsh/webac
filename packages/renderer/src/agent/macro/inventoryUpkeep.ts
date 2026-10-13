@@ -28,7 +28,7 @@ export class TidyPass {
     const name = mode === 'stack' ? 'AutoStack' : 'AutoCram';
     const opts = { autostack: mode === 'stack', autocram: mode === 'cram' };
     this.run = null;
-    if (!planInventory({ items: this.api.itemSlots(), packs: this.api.packs(), ...opts, ignored: this.tidy.ignored })) return `${name} - nothing to do`;
+    if (!planInventory({ items: this.api.itemSlots(), packs: this.api.packs(), ...opts, ignored: this.tidy.ignored, ...(this.tidy.keepIn ? { keepIn: this.tidy.keepIn() } : {}) })) return `${name} - nothing to do`;
     const gen = ++this.gen;
     this.run = { mode, gen };
     void (async () => {

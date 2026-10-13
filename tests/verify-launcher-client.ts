@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import {
-  bridgeHttpOrigin, loadWorldDirectory, connectUrlFor, worldCredentialsBlock, worldEnterBlock, parseCustomBridge, worldFromEntry,
+  bridgeHttpOrigin, loadWorldDirectory, connectUrlFor, worldEnterBlock, parseCustomBridge, worldFromEntry,
   localWorld, bridgeUrlWithServer, worldBoxName, LOCAL_WORLD_NAME, type World,
   eraIdFrom, probeBridgeEra, loginTimeoutText, worldRegistrationText,
 } from '../packages/renderer/src/launcher/worldDirectory';
@@ -27,7 +27,7 @@ const BRIDGE = 'wss://bridge.example.org/connect';
 function listed(over: Partial<World> = {}): World {
   return {
     id: 'c0ldeve', name: 'Coldeve', emu: 'ACE', type: 'PvE', description: 'A PvE server.', website: null,
-    discord: 'https://discord.gg/x', online: true, population: 691, compat: 'ok', compatNote: null,
+    discord: 'https://discord.gg/x', online: true, population: 691, compat: 'ok', compatNote: null, compatReason: null,
     registration: null, registrationUrl: null, kind: 'listed', era: null, ...over,
   };
 }
@@ -81,6 +81,11 @@ describe('world directory', () => {
     expect(dir.worlds[0]).toMatchObject({ website: null, discord: 'https://discord.gg/x', kind: 'listed', population: 691 });
     expect(dir.worlds[1]).toMatchObject({ compat: 'incompatible', population: null });
     expect(worldFromEntry({ id: 'x', compat: 'weird' })?.compat).toBe('ok');
+    // A bridge that predates compatReason: null; a reason on a world that is not refused is dropped.
+    expect(dir.worlds[1].compatReason).toBeNull();
+    expect(worldFromEntry({ id: 'x', compat: 'incompatible', compatReason: " Its VPN check refuses webAC players. We're working on a fix. " })?.compatReason)
+      .toBe("Its VPN check refuses webAC players. We're working on a fix.");
+    expect(worldFromEntry({ id: 'x', compat: 'beta', compatReason: 'stray' })?.compatReason).toBeNull();
   });
 
   it('register-first worlds: the row keeps its registration note and an http(s) registration link only', () => {
@@ -126,22 +131,18 @@ describe('world directory', () => {
     expect(worldBoxName(localWorld())).toBeNull();
   });
 
-  it('ENTER gate: AC1999 credentials must fit the 1999 login field (18 characters together)', () => {
-    const a99 = listed({ name: 'AC1999', era: 'ac1999-retail' });
-    expect(worldCredentialsBlock(a99, 'player1', 'hunter12345')).toBeNull(); // 7 + 11 = 18
-    expect(worldCredentialsBlock(a99, 'player1', 'hunter123456')).toBe(
-      "AC1999 uses the 1999 login, which fits an account name and password of 18 characters together. Yours are 19. Use a shorter account name or password.");
-    // Other eras have no such limit: end of retail and a classic (Dark Majesty) world.
-    expect(worldCredentialsBlock(listed(), 'a'.repeat(30), 'b'.repeat(30))).toBeNull();
-    expect(worldCredentialsBlock(listed({ name: 'Seedsow', era: 'classic-dereth' }), 'a'.repeat(30), 'b'.repeat(30))).toBeNull();
-    expect(worldCredentialsBlock(null, 'a'.repeat(30), 'b')).toBeNull();
-  });
-
   it('ENTER gate: incompatible and offline worlds explain instead of connecting', () => {
     expect(worldEnterBlock(listed())).toBeNull();
     expect(worldEnterBlock(listed({ compat: 'beta' }))).toBeNull();
     expect(worldEnterBlock(listed({ online: null }))).toBeNull();
-    expect(worldEnterBlock(listed({ name: 'Seedsow', compat: 'incompatible' }))).toMatch(/Seedsow needs the classic/);
+    // A world whose VPN check refuses the bridge: the bridge's reason, never the old classic-data text.
+    expect(worldEnterBlock(listed({ name: 'Conquest', compat: 'incompatible', compatNote: 'Blocks webAC', compatReason: "Its VPN check refuses webAC players. We're working on a fix." })))
+      .toBe("Conquest can't be played from webAC yet: its VPN check refuses webAC players. We're working on a fix. Pick another world for now.");
+    // An older bridge (no reason): its chip; nothing at all: the bare refusal.
+    expect(worldEnterBlock(listed({ name: 'Oddity', compat: 'incompatible', compatNote: 'Unsupported client version' })))
+      .toBe("Oddity can't be played from webAC (Unsupported client version). Pick another world.");
+    expect(worldEnterBlock(listed({ name: 'Oddity', compat: 'incompatible' }))).toBe("Oddity can't be played from webAC. Pick another world.");
+    expect(worldEnterBlock(listed({ name: 'Seedsow', compat: 'incompatible' }))).not.toMatch(/classic/);
     expect(worldEnterBlock(listed({ name: 'Funky', online: false }))).toMatch(/Funky is offline/);
     expect(worldEnterBlock(null)).toMatch(/Pick a world/);
     // An era this build lacks (usually a page loaded before the deploy that added it): reload, never another era's data.
@@ -295,7 +296,7 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
 
   const worlds = (): World[] => [
     listed(),
-    listed({ id: 'seed', name: 'Seedsow', compat: 'incompatible', compatNote: 'Classic data: coming later', population: 35 }),
+    listed({ id: 'conq', name: 'Conquest', compat: 'incompatible', compatNote: 'Blocks webAC', compatReason: "Its VPN check refuses webAC players. We're working on a fix.", population: 35 }),
     listed({ id: 'funky', name: 'Funky', online: false, population: null }),
   ];
 
@@ -317,10 +318,10 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
 
   it('lists the worlds with the header count, selects the first enterable one, and fits above ENTER', async () => {
     const s = await open();
-    expect(s.rows().map(r => r.dataset.world)).toEqual(['c0ldeve', 'seed', 'funky']);
+    expect(s.rows().map(r => r.dataset.world)).toEqual(['c0ldeve', 'conq', 'funky']);
     expect(s.mount.querySelector('.launcher-list-header')?.textContent).toBe('Public worlds · 3');
     expect(s.screen.selectedWorld.name).toBe('Coldeve');
-    expect(s.row('Seedsow').dataset.blocked).toBe('true');
+    expect(s.row('Conquest').dataset.blocked).toBe('true');
     expect(s.mount.querySelector('.launcher-world-name')?.textContent).toBe('Coldeve');
     expect(s.mount.querySelector('.launcher-hint')?.textContent).toMatch(/^New here\?/);
     const g = LAUNCHER_GEOMETRY;
@@ -363,9 +364,9 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     };
     s.row('Coldeve').focus();
     expect(key('ArrowDown')).toBe(true);
-    expect(s.screen.selectedWorld.name).toBe('Seedsow');
+    expect(s.screen.selectedWorld.name).toBe('Conquest');
     // The rebuilt row for the new selection holds focus, so the next key lands too.
-    expect(domWindow.document.activeElement).toBe(s.row('Seedsow'));
+    expect(domWindow.document.activeElement).toBe(s.row('Conquest'));
     key('ArrowDown');
     expect(s.screen.selectedWorld.name).toBe('Funky');
     key('ArrowDown'); // clamps at the end
@@ -384,13 +385,13 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     s.row('Coldeve').dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
     expect(s.screen.selectedWorld.name).toBe('Coldeve');
     key('ArrowDown');
-    expect(s.screen.selectedWorld.name).toBe('Seedsow');
+    expect(s.screen.selectedWorld.name).toBe('Conquest');
     // Arrows in the account field still move its caret.
     s.account.focus();
     const ev = new domWindow.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
     s.account.dispatchEvent(ev);
     expect(ev.defaultPrevented).toBe(false);
-    expect(s.screen.selectedWorld.name).toBe('Seedsow');
+    expect(s.screen.selectedWorld.name).toBe('Conquest');
   });
 
   it('AGPL §13: the launcher shows a Source code link only when sourceUrl is configured', async () => {
@@ -512,29 +513,39 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(k.mount.querySelector('.launcher-hint')?.textContent).toMatch(/^New here\? Most worlds/);
   });
 
-  it('ENTER on AC1999 with credentials over the 1999 field explains instead of connecting, then enters once shortened', async () => {
+  it('ENTER on AC1999 with credentials longer than the 1999 field connects, as the retail client did (it truncated them)', async () => {
+    // Player report 2026-10-12: a 10-character account and password logged in with the
+    // AC1999 launcher but webAC refused them. Retail sent the first 20 characters
+    // (Login1999.ts), so the launcher must not stand in the way.
     const k = makeKit();
     const screen = new mod.LauncherScreen(k.kit, {
-      bridgeUrl: BRIDGE, prefillAccount: 'longaccountname', storage: new MemStorage(),
+      bridgeUrl: BRIDGE, prefillAccount: 'tencharact', storage: new MemStorage(),
       loadDirectory: async () => ({ mode: 'multi', worlds: [listed({ id: 'ac1999', name: 'AC1999', era: 'ac1999-retail' })] }),
     });
     let choice: any = null;
     void screen.run().then((c: unknown) => { choice = c; });
     await screen.loaded;
-    const password = k.mount.querySelector('.launcher-password') as HTMLInputElement;
-    password.value = 'longpassword';
+    (k.mount.querySelector('.launcher-password') as HTMLInputElement).value = 'tencharpwd';
     (k.mount.querySelector('.launcher-enter') as HTMLElement).click();
     await Promise.resolve();
-    expect(k.messages).toEqual([
-      'AC1999 uses the 1999 login, which fits an account name and password of 18 characters together. Yours are 27. Use a shorter account name or password.',
-    ]);
-    expect(choice).toBeNull();
-    (k.mount.querySelector('.launcher-account') as HTMLInputElement).value = 'short';
-    password.value = 'pw1234';
-    (k.mount.querySelector('.launcher-enter') as HTMLElement).click();
-    await Promise.resolve();
+    expect(k.messages).toEqual([]);
     expect(choice?.world.name).toBe('AC1999');
-    expect(choice?.account).toBe('short');
+    expect(choice?.account).toBe('tencharact');
+    expect(choice?.password).toBe('tencharpwd');
+  });
+
+  it('the account and password fields take the whole string: no cap cuts a typed or pasted login (retail and ACE have none)', async () => {
+    const k = makeKit();
+    const screen = new mod.LauncherScreen(k.kit, {
+      bridgeUrl: BRIDGE, storage: new MemStorage(),
+      loadDirectory: async () => ({ mode: 'multi', worlds: [listed()] }),
+    });
+    void screen.run();
+    await screen.loaded;
+    const account = k.mount.querySelector('.launcher-account') as HTMLInputElement;
+    const password = k.mount.querySelector('.launcher-password') as HTMLInputElement;
+    expect(account.hasAttribute('maxlength')).toBe(false);
+    expect(password.hasAttribute('maxlength')).toBe(false);
   });
 
   it('ENTER before the list loads still asks for a missing password first', async () => {
@@ -548,12 +559,34 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(k.messages).toEqual(['Enter a password.']);
   });
 
+  it('a world whose VPN check refuses webAC says so in its details before ENTER', async () => {
+    const s = await open();
+    s.row('Conquest').click();
+    expect(s.screen.selectedWorld.name).toBe('Conquest');
+    expect(s.mount.querySelector('.launcher-meta')?.textContent).toContain('Blocks webAC');
+    const hint = s.mount.querySelector('.launcher-hint') as HTMLElement;
+    expect(hint.classList.contains('launcher-blocked')).toBe(true);
+    expect([...hint.children].map((c) => c.textContent).join(' ')).toContain("Its VPN check refuses webAC players. We're working on a fix.");
+    // Whole, not cut short ("…"): the note has 2 lines, a 3rd is clipped by the box.
+    expect(hint.textContent).not.toContain('…');
+    expect(hint.children.length).toBeLessThanOrEqual(2);
+    // No longer than the Reefcull registration note, which fits the box's 2 lines on playwebac.com.
+    expect("Its VPN check refuses webAC players. We're working on a fix.".length)
+      .toBeLessThanOrEqual('Register on the Reefcull website first (lower-case names only).'.length);
+    expect(s.mount.textContent).not.toMatch(/New here\?/);
+    // Back on an open world, the new-player hint returns.
+    s.row('Coldeve').click();
+    expect(s.mount.querySelector('.launcher-blocked')).toBeNull();
+    expect(s.mount.querySelector('.launcher-hint')?.textContent).toMatch(/^New here\?/);
+  });
+
   it('double-clicking an incompatible or offline world explains instead of connecting', async () => {
     const s = await open();
     s.account.value = 'probe';
-    s.dbl(s.row('Seedsow'));
-    expect(s.screen.selectedWorld.name).toBe('Seedsow');
-    expect(s.messages[0]).toMatch(/classic Asheron's Call data/);
+    s.password.value = 'pw';
+    s.dbl(s.row('Conquest'));
+    expect(s.screen.selectedWorld.name).toBe('Conquest');
+    expect(s.messages[0]).toBe("Conquest can't be played from webAC yet: its VPN check refuses webAC players. We're working on a fix. Pick another world for now.");
     s.dbl(s.row('Funky'));
     expect(s.messages[1]).toMatch(/offline/);
     (s.mount.querySelector('.launcher-enter') as HTMLElement).click();

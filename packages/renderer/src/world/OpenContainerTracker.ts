@@ -122,6 +122,11 @@ export class OpenContainerTracker {
    *  (itemListCapacity of the bitfield + _containersCapacity): the size rule
    *  of m_containerList, which reads _containersCapacity (containerList set). */
   private containerCapacities = new Map<number, number>();
+  /** RELEASE.gdle-contents-before-viewcontents — contained objects seen before their container's 0x196 (insertion order; capped). */
+  private early = new Map<number, { guid: number; containerId: number; name: string; pluralName?: string; iconDid: number; stackSize: number; itemType: number; objectDescFlags?: number; itemsCapacity?: number } & IconLook>();
+  /** …and the 0x196 lists of nested containers not yet known (GDLE sends a pack's list before the pack). */
+  private earlyLists = new Map<number, Array<{ guid: number; containerType: number }>>();
+  private static readonly EARLY_CAP = 2048;
 
   /** Guid of the currently open container, 0 when none. */
   get openGuid(): number {
@@ -192,6 +197,21 @@ export class OpenContainerTracker {
       this.clear();
       this.mainGuid = containerGuid;
     }
+    this.listContents(containerGuid, items);
+    // RELEASE.gdle-contents-before-viewcontents — the nested containers'
+    // own lists that arrived before them, then every object whose
+    // CreateObject came before this ViewContents.
+    for (const sub of [...this.subGuids]) {
+      const early = this.earlyLists.get(sub);
+      if (!early) continue;
+      this.earlyLists.delete(sub);
+      this.listContents(sub, early);
+    }
+    this.adoptEarlyObjects();
+    return isSub ? 'sub' : 'opened';
+  }
+
+  private listContents(containerGuid: number, items: ReadonlyArray<{ guid: number; containerType: number }>): void {
     for (const item of items) {
       this.types.set(item.guid, item.containerType);
       this.parents.set(item.guid, containerGuid);
@@ -199,7 +219,82 @@ export class OpenContainerTracker {
         if (!this.subGuids.includes(item.guid)) this.subGuids.push(item.guid);
       }
     }
-    return isSub ? 'sub' : 'opened';
+  }
+
+  /**
+   * RELEASE.gdle-contents-before-viewcontents — GDLE-based servers (GDL-
+   * Classic / Seedsow, the AC1999 server) open a container with
+   * CContainerWeenie::MakeAwareViewContent (Seedsow Source/Container.cpp
+   * :1014-1050): a CreateObject for every pack and item FIRST (each pack's
+   * own contents and 0x196 before the pack), then the container's 0x196 —
+   * all through one FIFO (PacketController QueueNetMessage / FlushQueued
+   * NetMessages). ACE sends the 0x196 first (Container.cs SendInventory).
+   * Retail handles either order: a CreateObject makes the weenie object
+   * whatever its container, and ACCObjectMaint::ViewObjectContents @
+   * 00558a70 only records the id lists, which the container UI resolves
+   * against the objects it already holds. Pre-fix a contained object that
+   * arrived before its container's 0x196 was never listed: every first open
+   * of a GDLE corpse or chest showed an empty strip.
+   *
+   * Record a CreateObject whose container is not (yet) the open one.
+   */
+  noteContainedObject(d: { guid: number; containerId: number; name: string; pluralName?: string; iconDid: number; stackSize: number; itemType: number; objectDescFlags?: number; itemsCapacity?: number } & IconLook): void {
+    if (!d.containerId) return;
+    this.early.delete(d.guid);
+    this.early.set(d.guid, { ...d });
+    if (this.early.size > OpenContainerTracker.EARLY_CAP) {
+      const oldest = this.early.keys().next().value;
+      if (oldest !== undefined) this.early.delete(oldest);
+    }
+  }
+
+  /**
+   * A CreateObject that may belong to an external container: tracked when it
+   * belongs to the open one (true — the panel must refresh), else, when it
+   * names a container, kept for that container's 0x196 (false).
+   */
+  acceptCreateObject(d: { guid: number; containerId: number; name: string; pluralName?: string; iconDid: number; stackSize: number; itemType: number; objectDescFlags?: number; itemsCapacity?: number } & IconLook): boolean {
+    if (this.trackCreateObject(d)) return true;
+    this.noteContainedObject(d);
+    return false;
+  }
+
+  /** Whether CreateObjects already named this guid as their container (a GDLE nested pack whose 0x196 precedes its own CreateObject). */
+  hasEarlyContentsFor(containerGuid: number): boolean {
+    for (const r of this.early.values()) if (r.containerId === containerGuid) return true;
+    return false;
+  }
+
+  /** Keep a not-yet-known nested container's 0x196 list for when its parent is opened. */
+  noteEarlyContentsList(containerGuid: number, items: ReadonlyArray<{ guid: number; containerType: number }>): void {
+    this.earlyLists.set(containerGuid, items.map((i) => ({ guid: i.guid, containerType: i.containerType })));
+    if (this.earlyLists.size > OpenContainerTracker.EARLY_CAP) {
+      const oldest = this.earlyLists.keys().next().value;
+      if (oldest !== undefined) this.earlyLists.delete(oldest);
+    }
+  }
+
+  /** The object is gone (DeleteObject): drop any early record of it. */
+  forgetEarly(guid: number): void {
+    this.early.delete(guid);
+    this.earlyLists.delete(guid);
+  }
+
+  /** How many early objects the last viewContents listed (0 against ACE's order). */
+  adoptedOnLastView = 0;
+
+  private adoptEarlyObjects(): void {
+    this.adoptedOnLastView = 0;
+    if (this.mainGuid === 0) return;
+    for (const [guid, r] of [...this.early]) {
+      // Only what a 0x196 listed (ViewObjectContents' id lists decide): a
+      // record kept from an earlier open of an item since taken by someone
+      // else is not listed again, and stays out.
+      const listed = this.parents.get(guid);
+      if (listed === undefined) continue;
+      this.early.delete(guid);
+      if (this.trackCreateObject({ ...r, containerId: listed })) this.adoptedOnLastView++;
+    }
   }
 
   /**
@@ -212,6 +307,7 @@ export class OpenContainerTracker {
       || this.subGuids.includes(d.containerId)
       || this.parents.has(d.guid);
     if (!belongs) return false;
+    this.early.delete(d.guid);
     if (!this.parents.has(d.guid)) this.parents.set(d.guid, d.containerId);
     this.data.set(d.guid, { name: d.name, pluralName: d.pluralName ?? '', iconDid: d.iconDid, stackSize: d.stackSize, itemType: d.itemType, ...iconLookOf(d) });
     // CORE.17.o.b — a nested container's own list capacity (its tab's grid).
@@ -262,6 +358,34 @@ export class OpenContainerTracker {
     this.types.delete(guid);
     this.data.delete(guid);
     this.capacities.delete(guid);
+    this.early.delete(guid);
+  }
+
+  /**
+   * RELEASE.open-container-stale-members — ACCWeenieObject::ServerSaysMoveItem
+   * for an object this list holds: retail's UIElement_ItemList::RecvNotice_
+   * ServerSaysMoveItem @ 004e5110 drops the cell when the object leaves the
+   * list's container and adds it where it lands. `newContainer` 0 is the
+   * removal ACCWeenieObject::Remove @ 0058dd20 runs from ObjectBeingDeleted
+   * @ 0058e4d0 (a DeleteObject), which also destroys a deleted pack's
+   * contents. Moves inside the open container (into / out of a nested pack)
+   * re-parent. Returns true when the list changed.
+   */
+  serverSaysMove(guid: number, newContainer: number): boolean {
+    if (!this.parents.has(guid)) {
+      this.early.delete(guid);
+      return false;
+    }
+    const staysInside = newContainer !== 0 && newContainer !== guid
+      && (newContainer === this.mainGuid || this.subGuids.includes(newContainer));
+    if (!staysInside) {
+      if (guid === this.mainGuid) return false; // the open container itself: its own close path
+      this.remove(guid);
+      return true;
+    }
+    if (this.parents.get(guid) === newContainer) return false;
+    this.parents.set(guid, newContainer);
+    return true;
   }
 
   /** Update a tracked stack's size; returns false when the guid isn't tracked. */

@@ -13,7 +13,7 @@
  */
 import {
   itemTypeLabel, parseMetaView, SALVAGE_COMBINE_DEFAULTS, VT_DAMAGE, vtCanonicalName, vtDefaults, type MetaView, type MetaViewButton, type SalvageCombine,
-  type LootRule, type PropTest, type Route, type RoutineAction, type RoutineCondition, type RoutineProfile, type RoutineRule,
+  type LootRule, type PropTest, type Route, type RoutineAction, type RoutineCondition, type RoutineProfile, type RoutineRule, type VtVcsCategory,
 } from '@ac/shared';
 import { MAP_COORD_ORIGIN, parseMapCoords, type AgentApi, type LootDecision } from './AgentApi.ts';
 import { VtMacro, vtAttackHeight } from './macro/vtMacro.ts';
@@ -21,7 +21,8 @@ import { matchMonsterRow } from './macro/combatPlan.ts';
 import { autoAttackPower, powerItemsToExamine, swingElement, wieldedPair, type PowerItem } from './macro/attackPower.ts';
 import { InventoryTidy } from './macro/inventoryPlan.ts';
 import { findUst, planSalvageCombine, salvageRefusal } from './macro/salvagePlan.ts';
-import { isRecall, nearestStart, openDoorOnTheWay, runCheckpoint, runRecall, runUseStep, stopsAt, walksTo, type NodeCtx } from './routeNodes.ts';
+import { isRecall, nearestStart, objectAt, openDoorOnTheWay, runCheckpoint, runRecall, runUseStep, stopsAt, walksTo, type NodeCtx } from './routeNodes.ts';
+import { BEING_CAST_AT_S, PULL_LAND_MS, RECALL_MOVE_M, RECALL_WAIT_MS, awayWord, holdAllows, pullLanded } from './beyondVtank.ts';
 import { isCorpseDenial } from './macro/corpseBook.ts';
 import { LootExtras } from './macro/lootExtras.ts';
 import { propertyDumpLines, testItemLine } from './macro/lootTest.ts';
@@ -46,8 +47,8 @@ export function ruleModules(rule: RoutineRule): Array<keyof RoutineProfile['modu
   const out = new Set<keyof RoutineProfile['modules']>();
   for (const a of rule.do) {
     if (a.kind === 'cast-buffs') out.add('buffs');
-    else if (a.kind === 'attack-nearest') out.add('combat');
-    else if (a.kind === 'loot-nearby') out.add('looting');
+    else if (a.kind === 'attack-nearest' || a.kind === 'pull') out.add('combat');
+    else if (a.kind === 'loot-nearby' || a.kind === 'loot-corpse') out.add('looting');
     else if (a.kind === 'follow-route' || a.kind === 'walk-to' || a.kind === 'checkpoint' || a.kind === 'use-portal') out.add('navigation');
     else if (a.kind === 'sell-by-loot-rules') out.add('inventory');
     else if (a.kind === 'use-item' || (a.kind === 'cast' && a.target !== 'target')) {
@@ -179,7 +180,7 @@ export function appraisalFacts(text: string): { value?: number; burden?: number;
 }
 
 /** Whether deciding this item needs its examination: some rule on value/burden/appraisal comes before the first rule its name and type settle. */
-function needsExamination(rules: LootRule[], item: { name: string; type: string }): boolean {
+export function needsExamination(rules: LootRule[], item: { name: string; type: string }): boolean {
   for (const r of rules) {
     const m = r.match;
     if (m.valueAtLeast !== undefined || m.valueAtMost !== undefined || m.burdenAtMost !== undefined || m.appraisal || m.props?.length || m.spells || m.moreSpells?.length || m.spellCountAtLeast !== undefined || m.minDamageAtLeast !== undefined || m.totalRatingsAtLeast !== undefined) {
@@ -354,6 +355,8 @@ export class RoutineEngine {
   /** When the run last resumed from a pause (Seconds in State counts from it, as VTank's does from switching on). */
   private resumedAt = -Infinity;
   private watchdog: { state: string; meters: number; seconds: number; samples: Array<{ t: number; x: number; y: number }> } | null = null;
+  /** hold-position's anchor (beyond VTank, Jake 2026-10-12): attack-nearest and the macro fight nothing farther than `meters` from it. */
+  private hold: { x: number; y: number; meters: number } | null = null;
   private settings: Record<string, string | number | boolean> = {};
   /** The profile a dry run is checking (another one than the running profile, maybe). */
   private checking: RoutineProfile | null = null;
@@ -386,8 +389,12 @@ export class RoutineEngine {
   onVtCommand: ((line: string) => void) | null = null;
   /** VirindiTank's /vt fakedeath: the meta's Character Death fires as if you had died. */
   fakeDeath(): AgentResult { this.api.push('death', 'fake death (/vt fakedeath)'); return { ok: true, message: 'fake death' }; }
-  /** Player-facing reports ("Kept Pyreals (rule: Money)"); main.ts prints them to chat as [Automation]. */
-  onReport: ((text: string) => void) | null = null;
+  /**
+   * Player-facing reports ("Kept Pyreals (rule: Money)"); main.ts prints them to chat as [Automation].
+   * `category` is VTank's Virindi Chat System category when the line's source says it (Echo, MetaUpdates,
+   * Errors, Warnings); otherwise main.ts files it under CommandLine.
+   */
+  onReport: ((text: string, category?: VtVcsCategory) => void) | null = null;
 
   constructor(private readonly api: AgentApi, private readonly facts: RoutineFacts, private readonly now: () => number) {
     this.loot = new LootExtras(api, now, (t) => this.report(t));
@@ -416,6 +423,7 @@ export class RoutineEngine {
     this.rarePending = false;
     this.rareMark = this.api.currentSeq();
     this.watchdog = null;
+    this.hold = null;
     this.settings = { ...MACRO_DEFAULTS };
     for (const [k, v] of Object.entries(profile.settings ?? {})) this.settings[vtCanonicalName(k)] = v;
     // VirindiTank's Auto-Navigation and Looting profiles: the route and loot set it starts with.
@@ -501,7 +509,7 @@ export class RoutineEngine {
   /** A line an expression prints for the player (echo): the run's log, and chat when the panel shows reports. */
   echo(text: string): void {
     this.note(`echo: ${text}`);
-    this.report(text);
+    this.report(text, 'Echo');
   }
 
   /** A setting as the macro and expressions see it (profile's, then set-setting's). */
@@ -530,7 +538,7 @@ export class RoutineEngine {
 
   private enterState(name: string, rule: string | null): void {
     this.clockState();
-    if (name !== this.state) { this.report(`→ ${name}`); this.lastChange = { from: this.state, to: name, rule }; }
+    if (name !== this.state) { this.report(`→ ${name}`, 'MetaUpdates'); this.lastChange = { from: this.state, to: name, rule }; }
     this.state = name;
     this.eventMark = this.api.currentSeq();
     this.spent.clear();
@@ -694,8 +702,8 @@ export class RoutineEngine {
     };
   }
 
-  private report(text: string): void {
-    try { this.onReport?.(text); } catch { /* a report never stops the routine */ }
+  private report(text: string, category?: VtVcsCategory): void {
+    try { this.onReport?.(text, category); } catch { /* a report never stops the routine */ }
   }
 
   private note(s: string): void {
@@ -789,6 +797,40 @@ export class RoutineEngine {
         try { re = new RegExp(c.pattern, 'i'); } catch { return { ok: false, why: `bad pattern /${c.pattern}/` }; }
         const n = obs.nearby.filter((o) => o.kind === 'monster' && o.dist <= c.meters && re.test(o.name)).length;
         return { ok: n >= c.count, why: `${n} matching within ${c.meters} m` };
+      }
+      // Beyond VTank, Jake 2026-10-12 (beyondVtank.ts).
+      case 'attackers-at-least': {
+        const att = [...this.api.attackersOfMe()];
+        const names = att.map(([g]) => obs.nearby.find((o) => o.guid === g)?.name ?? `#${g.toString(16)}`);
+        return { ok: att.length >= c.count, why: att.length ? `${att.length} attacking you (${names.join(', ')})` : 'nothing attacking you' };
+      }
+      case 'being-cast-at': {
+        const secs = c.seconds ?? BEING_CAST_AT_S;
+        const now = this.now();
+        const hit = this.api.eventsSince(0).filter((e) => e.type === 'cast-at-you' && now - e.t <= secs * 1000).pop();
+        return { ok: !!hit, why: hit ? `cast at: ${hit.text.slice(0, 60)}` : `no spell at you in ${secs} s` };
+      }
+      case 'no-monster-near': {
+        if (!me) return { ok: false, why: 'not in world' };
+        let at: { x: number; y: number } | null;
+        let label: string;
+        if (c.coords) { at = parseMapCoords(c.coords); label = c.coords; } else {
+          const want = (c.object ?? '').toLowerCase();
+          const o = obs.nearby.find((x) => x.name.toLowerCase() === want) ?? obs.nearby.find((x) => x.name.toLowerCase().includes(want));
+          at = o ? objectAt(me.pos, o) : null;
+          label = o ? o.name : `the ${c.object}`;
+          if (!o) return { ok: false, why: `${c.object} not in sight` };
+        }
+        if (!at) return { ok: false, why: 'not on the landscape' };
+        const m = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying).map((o) => ({ o, d: Math.hypot(objectAt(me.pos, o).x - at!.x, objectAt(me.pos, o).y - at!.y) }))
+          .filter((x) => x.d <= c.meters).sort((a, b) => a.d - b.d);
+        return { ok: m.length === 0, why: m.length ? `${m[0].o.name} ${Math.round(m[0].d)} m from ${label}` : `none within ${c.meters} m of ${label}` };
+      }
+      case 'my-corpse-within': {
+        if (!me) return { ok: false, why: 'not in world' };
+        const mine = `corpse of ${me.name}`.toLowerCase();
+        const k = obs.nearby.filter((o) => o.kind === 'corpse' && o.name.toLowerCase() === mine && o.dist <= c.meters).sort((a, b) => a.dist - b.dist)[0];
+        return { ok: !!k, why: k ? `your corpse ${Math.round(k.dist)} m away` : `no corpse of yours within ${c.meters} m` };
       }
       case 'expression': {
         if (!this.expressions) return { ok: false, why: `can't run expressions yet: ${c.expr}` };
@@ -921,7 +963,7 @@ export class RoutineEngine {
         // StopMacroOnDeath (VTank, on by default): stop; off: hold still until you're back.
         if (!this.deadSeen) { this.deadSeen = true; this.stats.deaths++; }
         if (truthySetting(this.settings.StopMacroOnDeath)) {
-          this.report(`You died: stopped "${p.name}"`);
+          this.report(`You died: stopped "${p.name}"`, 'Errors');
           this.stop('stopped: you died');
         }
         return;
@@ -976,7 +1018,7 @@ export class RoutineEngine {
     const combat = truthySetting(st.EnableCombat) && p.modules.combat;
     const looting = truthySetting(st.EnableLooting) && p.modules.looting;
     const navOn = truthySetting(st.EnableNav) && p.modules.navigation && !!this.nav && !this.nav.done && this.now() >= this.navHeldUntil;
-    const monsters = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying);
+    const monsters = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying && (!this.hold || !obs.me || holdAllows(this.hold, obs.me.pos, o)));
     const inRange = combat && monsters.some((o) => o.dist <= range);
     const near = combat && truthySetting(st.EnableNav) && approach > range ? monsters.filter((o) => o.dist > range && o.dist <= approach).sort((a, b) => a.dist - b.dist)[0] : undefined;
     if (navOn && truthySetting(st.NavPriorityBoost)) { void this.walkNav(); return; }
@@ -994,6 +1036,7 @@ export class RoutineEngine {
     // A profile with VirindiTank's tabs: its planners decide recharge, combat and buffs (vtMacro.ts).
     if (p.vtank) {
       this.vt ??= new VtMacro(this.api, this.now);
+      this.vt.allowTarget = (o) => this.holdOk(o);
       for (const name of this.vt.kills()) { this.kills.push({ name, at: this.now() }); this.kills = this.kills.slice(-KILLS_KEPT); this.stats.kills++; }
       // A corpse of ours waiting and nothing in range: only recharging comes before the loot (buffs wait for idle);
       // with Boost Loot Priority it comes first outright.
@@ -1153,7 +1196,7 @@ export class RoutineEngine {
     const ust = findUst(inv.map((i) => ({ ...i, equipped: i.where === 'equipped' })));
     if (this.toSalvage.size) {
       if (!ust) {
-        if (!this.warnedNoUst) { this.warnedNoUst = true; this.report('No Ust in your inventory: items marked for salvage are kept until you carry one.'); this.note('salvage: waiting for a Ust'); }
+        if (!this.warnedNoUst) { this.warnedNoUst = true; this.report('No Ust in your inventory: items marked for salvage are kept until you carry one.', 'Warnings'); this.note('salvage: waiting for a Ust'); }
       } else {
         this.warnedNoUst = false;
         for (const [g, m] of this.toSalvage) {
@@ -1165,13 +1208,13 @@ export class RoutineEngine {
             if (this.now() - m.askedAt < SALVAGE_EXAMINE_MS) return false;
           }
           const why = props ? salvageRefusal(item, props) : 'its appraisal never came';
-          if (why) { this.toSalvage.delete(g); this.report(`Kept ${m.name} unsalvaged: ${why}`); this.note(`salvage: kept ${m.name}: ${why}`); continue; }
+          if (why) { this.toSalvage.delete(g); this.report(`Kept ${m.name} unsalvaged: ${why}`, 'Warnings'); this.note(`salvage: kept ${m.name}: ${why}`); continue; }
           this.busy = true;
           this.acting = `salvage ${m.name}`;
           void this.api.salvage(ust.guid, [g]).then((r) => {
             this.note(`salvage ${m.name}: ${r.message}`);
             if (r.ok) { this.toSalvage.delete(g); this.report(`Salvaged ${m.name}`); return; }
-            if (++m.tries >= SALVAGE_TRIES) { this.toSalvage.delete(g); this.report(`Kept ${m.name} unsalvaged: ${r.message}`); }
+            if (++m.tries >= SALVAGE_TRIES) { this.toSalvage.delete(g); this.report(`Kept ${m.name} unsalvaged: ${r.message}`, 'Warnings'); }
           }).finally(() => { this.busy = false; this.acting = null; });
           return true;
         }
@@ -1254,7 +1297,7 @@ export class RoutineEngine {
         const d = Math.hypot(g.x - me.pos.x, g.y - me.pos.y);
         if (Number.isFinite(far) && far > 0 && d > far) {
           const key = `${route.name}#${i}`;
-          if (this.farHeld !== key) { this.farHeld = key; this.report(`Navigation: point ${i + 1} of "${route.name}" is ${Math.round(d)} m away, past NavFarStopRange (${Math.round(far)} m); holding`); }
+          if (this.farHeld !== key) { this.farHeld = key; this.report(`Navigation: point ${i + 1} of "${route.name}" is ${Math.round(d)} m away, past NavFarStopRange (${Math.round(far)} m); holding`, 'Warnings'); }
           await sleep(1000);
           return { advance: false, ok: false, message: `${Math.round(d)} m off, past NavFarStopRange` };
         }
@@ -1322,7 +1365,7 @@ export class RoutineEngine {
       if (f.inSight) {
         f.inSight = false;
         f.trail = [];
-        this.report(`Follow: ${f.who} is out of sight; standing still`);
+        this.report(`Follow: ${f.who} is out of sight; standing still`, 'Warnings');
       }
       if (f.walking) { f.walking = null; this.api.stopMoving(); }
       return;
@@ -1506,6 +1549,78 @@ export class RoutineEngine {
     return r;
   }
 
+  /** Whether a monster stands within the held position's range (always, with none held). */
+  private holdOk(o: { dist: number; bearing: number }): boolean {
+    const me = this.api.snapshot({ max: 0 }).me;
+    return !this.hold || !me || holdAllows(this.hold, me.pos, o);
+  }
+
+  /**
+   * pull (beyond VTank, Jake 2026-10-12): one attack order on the nearest match, broken off as soon as a swing or shot
+   * lands on it (a chat line naming it) or it turns on you, then a run back to the fallback point that keeps going while
+   * hit. A plain attack, as the attack button sends: the server walks a melee character in and a missile one shoots.
+   */
+  private async pull(a: Extract<RoutineAction, { kind: 'pull' }>): Promise<AgentResult> {
+    let re: RegExp;
+    try { re = new RegExp(a.pattern, 'i'); } catch { return { ok: false, message: `bad pattern /${a.pattern}/` }; }
+    const m = this.api.snapshot({ radius: a.meters ?? 60, max: 60 }).nearby.find((o) => o.kind === 'monster' && !o.dying && re.test(o.name));
+    if (!m) return { ok: false, message: `nothing matching /${a.pattern}/ within ${a.meters ?? 60} m`, idle: true };
+    const since = this.api.currentSeq();
+    const r = this.api.attack(m.guid);
+    if (!r.ok) return r;
+    const t0 = this.now();
+    let landed: string | null = null;
+    while (this.now() - t0 < PULL_LAND_MS && !this.stopRequested) {
+      landed = pullLanded(m, this.api.eventsSince(since), this.api.attackersOfMe());
+      if (landed) break;
+      await this.api.waitFor({ types: ['chat', 'attacked', 'target-died', 'target-lost', 'death'] as never }, 500);
+    }
+    this.api.stopAttacking();
+    if (!landed) return { ok: false, message: `${m.name}: no swing or shot landed in ${PULL_LAND_MS / 1000} s; not pulled` };
+    const back = await this.api.walkTo(a.back, { within: 2, timeoutMs: 120_000, flee: true });
+    if (a.holdMeters) { const at = parseMapCoords(a.back); if (at) this.hold = { x: at.x, y: at.y, meters: a.holdMeters }; }
+    return { ok: back.ok, message: `pulled ${m.name} (${landed}); back to ${a.back}: ${back.message.split('\n')[0]}` };
+  }
+
+  /**
+   * recall (beyond VTank, Jake 2026-10-12): a recall command or spell that gives up when abortAttackers or more creatures
+   * are on you before it takes you. Retail breaks the kneel with a jump (CMotionInterp::LeaveGround →
+   * RemoveLinkAnimations); ACE cancels a recall when you end it more than 8 m from where it began
+   * (Player_Location.RecallMoveThreshold), so the jump is followed by a run that far from the attackers.
+   */
+  private async recall(a: Extract<RoutineAction, { kind: 'recall' }>): Promise<AgentResult> {
+    const limit = a.abortAttackers ?? 1;
+    const count = () => this.api.attackersOfMe().size;
+    if (count() >= limit) return { ok: false, message: `not recalling: ${count()} creature(s) attacking you` };
+    const mark = this.api.currentSeq();
+    const command = a.via.trim().startsWith('/');
+    this.api.stopMoving();
+    // A spell's cast resolves when it lands or fails; a failure (fizzle, no such spell) is the recall's answer.
+    const cast: { r: AgentResult | null } = { r: null };
+    if (command) { const r = this.api.say(a.via.trim()); if (!r.ok) return r; } else void this.api.cast(/^\d+$/.test(a.via.trim()) ? Number(a.via) : a.via.trim(), 'self').then((r) => { cast.r = r; });
+    const t0 = this.now();
+    const entered = () => this.api.status().screen === 'portal-space' || this.api.eventsSince(mark).some((e) => e.type === 'portal' && /entered/.test(e.text));
+    while (this.now() - t0 < RECALL_WAIT_MS && !this.stopRequested) {
+      if (entered()) {
+        await this.api.waitFor({ types: ['portal'] as never }, 30_000);
+        return { ok: true, message: `recalled (${a.via})` };
+      }
+      const n = count();
+      if (n >= limit) {
+        // The client's own abort: a jump cuts the kneel; then far enough that the server cancels it too.
+        this.api.jump();
+        const seen = this.api.snapshot({ radius: 80, max: 60 }).nearby;
+        const away = awayWord([...this.api.attackersOfMe().keys()].map((g) => seen.find((o) => o.guid === g)).filter((o): o is NonNullable<typeof o> => !!o));
+        await sleep(400);
+        const run = away ? await this.api.walkTo(`${RECALL_MOVE_M}m ${away}`, { within: 1, timeoutMs: 15_000, flee: true }) : null;
+        return { ok: false, message: `recall aborted: ${n} creature(s) attacking you${run ? `; ran ${away}: ${run.message.split('\n')[0]}` : ''}` };
+      }
+      if (cast.r && !cast.r.ok && !entered()) return cast.r;
+      await this.api.waitFor({ types: ['portal', 'attacked', 'attackers-up'] as never }, 250);
+    }
+    return { ok: false, message: `${a.via}: no portal space in ${RECALL_WAIT_MS / 1000} s` };
+  }
+
   private async act(a: RoutineAction, p: RoutineProfile): Promise<AgentResult | null> {
     switch (a.kind) {
       case 'set-state':
@@ -1537,12 +1652,25 @@ export class RoutineEngine {
         const obs = this.api.snapshot({ radius: a.meters ?? 60, max: 30 });
         // A VirindiTank Monsters row with priority -1 means leave that one alone, whoever asks.
         const ignored = (o: { guid: number; name: string; dist: number; relBearing: number }) => !!p.vtank && matchMonsterRow(p.vtank.monsters, o, { settings: this.settings }).priority < 0;
-        const m = obs.nearby.find((o) => o.kind === 'monster' && !o.dying && !ignored(o) && (!a.names?.length || a.names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))));
-        if (!m) return { ok: false, message: 'no monster in reach' };
+        const m = obs.nearby.find((o) => o.kind === 'monster' && !o.dying && !ignored(o) && this.holdOk(o) && (!a.names?.length || a.names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))));
+        if (!m) return { ok: false, message: this.hold ? `no monster in reach within ${this.hold.meters} m of the held position` : 'no monster in reach' };
         const since = this.api.currentSeq();
         const r = this.api.attack(m.guid, p.macro ? { height: vtAttackHeight(this.settings), power: this.macroAttackPower(p, m) } : {});
         if (!r.ok) return r;
-        await this.waitDone(['target-died', 'target-lost', 'death'], 120_000);
+        if (!this.hold) await this.waitDone(['target-died', 'target-lost', 'death'], 120_000);
+        else {
+          // Holding position: the fight is watched, and broken off once the target goes past the anchor's range (no chase down a ledge).
+          const t0 = this.now();
+          while (this.now() - t0 < 120_000) {
+            const ev = await this.api.waitFor({ types: ['target-died', 'target-lost', 'death'] as never }, 500);
+            if (ev.length) break;
+            const o = this.api.snapshot({ radius: 120, max: 60 }).nearby.find((x) => x.guid === m.guid);
+            if (o && !o.dying && this.hold && !this.holdOk(o)) {
+              this.api.stopAttacking();
+              return { ok: false, message: `${m.name} went past the held position's ${this.hold.meters} m: left it` };
+            }
+          }
+        }
         const end = this.api.eventsSince(since).find((e) => (e.type === 'target-died' || e.type === 'target-lost' || e.type === 'death') && (e.type === 'death' || e.guid === m.guid));
         if (end?.type === 'target-died') { this.kills.push({ name: m.name, at: this.now() }); this.kills = this.kills.slice(-KILLS_KEPT); this.stats.kills++; }
         return { ok: end?.type === 'target-died', message: end?.type === 'target-died' ? `killed ${m.name}` : end?.type === 'target-lost' ? `${m.name} got away` : end?.type === 'death' ? 'you died' : `fight with ${m.name} went on too long` };
@@ -1596,6 +1724,31 @@ export class RoutineEngine {
         return r;
       }
       case 'walk-to': return this.api.walkTo(a.coords, { within: 3, timeoutMs: 120_000 });
+      // Beyond VTank, Jake 2026-10-12 (beyondVtank.ts; docs/automation-vtank-window.md).
+      case 'flee-to': {
+        // Through a portal too (acjs-1b, 2026-10-12): AgentApi.use with flee keeps walking to it through hits.
+        if (a.coords) {
+          const r = await this.api.walkTo(a.coords, { within: 3, timeoutMs: 120_000, flee: true });
+          if (!r.ok || !a.portal) return r;
+        }
+        return a.portal ? this.api.use(a.portal, { flee: true }) : { ok: false, message: 'flee-to needs coords or a portal' };
+      }
+      case 'hold-position': {
+        const me = this.api.snapshot({ max: 0 }).me;
+        const at = a.coords ? parseMapCoords(a.coords) : me ? { x: me.pos.x, y: me.pos.y } : null;
+        if (!at) return { ok: false, message: a.coords ? `can't read ${a.coords}` : 'your position is not known yet' };
+        this.hold = { x: at.x, y: at.y, meters: a.meters };
+        return { ok: true, message: `holding position: nothing fought more than ${a.meters} m from ${a.coords ?? 'here'}` };
+      }
+      case 'release-position': this.hold = null; return { ok: true, message: 'position released' };
+      case 'pull': return this.pull(a);
+      case 'loot-corpse': {
+        const want = a.name.trim().toLowerCase();
+        const c = this.api.snapshot({ radius: a.meters ?? 40, max: 60 }).nearby.filter((o) => o.kind === 'corpse' && o.name.toLowerCase() === want).sort((x, y) => x.dist - y.dist)[0];
+        if (!c) return { ok: true, message: `no ${a.name} within ${a.meters ?? 40} m`, idle: true };
+        return this.lootOne(c, undefined, p);
+      }
+      case 'recall': return this.recall(a);
       case 'use-object': return this.api.use(a.name);
       // Route steps (a rule running one has no point): the portal by id or nearest you; a checkpoint where you stand.
       case 'use-portal': return runUseStep(this.nodeCtx(p), a, { point: null, usePortalDistance: Number(this.settings.UsePortalDistance) || 4 });
@@ -1623,7 +1776,7 @@ export class RoutineEngine {
           if (said.length) return { ok: true, message: `${a.name} answered${uses > 1 ? ` (after ${uses} uses)` : ''}` };
           if (this.now() - started >= TALK_GIVE_UP_MS) {
             const why = `${a.name} didn't answer in ${Math.round((this.now() - started) / 1000)} s (${uses} uses); NPC Talk gave up`;
-            this.report(why);
+            this.report(why, 'Warnings');
             return { ok: false, message: why };
           }
         }

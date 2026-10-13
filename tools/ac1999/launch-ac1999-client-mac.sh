@@ -39,7 +39,8 @@ ACCOUNT="${AC1999_ACCOUNT:-acjs1999}"; PASSWORD="${AC1999_PASSWORD:-$ACCOUNT}"
 SERVER_PORT="${AC1999_PORT:-9310}"
 RELAY_PORT="${AC1999_RELAY_PORT:-9320}"
 RES="${AC1999_RESOLUTION:-800x600}"
-(( ${#ACCOUNT} + 1 + ${#PASSWORD} <= 19 )) || { echo "[ac1999] '$ACCOUNT:$PASSWORD' is over the client's 19 characters" >&2; exit 1; }
+# The client sends the first 20 characters of account:password and drops the rest (measured 2026-10-12).
+(( ${#ACCOUNT} + 1 + ${#PASSWORD} <= 20 )) || echo "[ac1999] note: the client sends only the first 20 characters of '$ACCOUNT:$PASSWORD'" >&2
 [[ -f "$ZTICKET" ]] || { echo "[ac1999] no $ZTICKET (run tools/ac1999/start-ac1999.sh first)" >&2; exit 1; }
 wine() { WINEDEBUG="${WINEDEBUG:--all}" "$WBIN/wine" "$@" </dev/null; }
 

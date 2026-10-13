@@ -41,31 +41,38 @@ export class TabRelay {
 
   /** The tab's relay state, for the bridge (sent on login, on change and every few seconds). */
   sendState(character: string | null, screen: string | null, revokedBefore = 0): void {
-    this.send(JSON.stringify({ agentState: { relay: this.on ? 'on' : 'off', character, screen, ...(revokedBefore ? { revokedBefore } : {}) } }));
+    this.send(this.stateFrame(character, screen, revokedBefore));
   }
 
-  handle(call: RelayCall): Promise<void> {
-    if (READ_METHODS.has(call.method)) return this.run(call).catch(() => {});
-    this.chain = this.chain.then(() => this.run(call)).catch(() => {});
+  /** The state frame itself (also sent up a relay link, relayLink.ts). */
+  stateFrame(character: string | null, screen: string | null, revokedBefore = 0): string {
+    return JSON.stringify({ agentState: { relay: this.on ? 'on' : 'off', character, screen, ...(revokedBefore ? { revokedBefore } : {}) } });
+  }
+
+  /** Run a call; its answer goes back the way it came (`send`: the game socket by default, or a relay link). */
+  handle(call: RelayCall, send: (text: string) => void = this.send): Promise<void> {
+    if (READ_METHODS.has(call.method)) return this.run(call, send).catch(() => {});
+    this.chain = this.chain.then(() => this.run(call, send)).catch(() => {});
     return this.chain;
   }
 
-  private reply(id: number, ok: boolean, body: unknown): void {
+  private reply(id: number, ok: boolean, body: unknown, send: (text: string) => void = this.send): void {
     let text: string;
     try { text = JSON.stringify({ agentResult: ok ? { id, ok: true, result: body } : { id, ok: false, error: String(body) } }); }
     catch { text = JSON.stringify({ agentResult: { id, ok: false, error: 'the answer could not be sent (not serialisable)' } }); }
-    if (text.length <= RESULT_PART_CHARS) { this.send(text); return; }
+    if (text.length <= RESULT_PART_CHARS) { send(text); return; }
     const n = Math.ceil(text.length / RESULT_PART_CHARS);
-    for (let i = 0; i < n; i++) this.send(JSON.stringify({ agentResultPart: { id, i, n, data: text.slice(i * RESULT_PART_CHARS, (i + 1) * RESULT_PART_CHARS) } }));
+    for (let i = 0; i < n; i++) send(JSON.stringify({ agentResultPart: { id, i, n, data: text.slice(i * RESULT_PART_CHARS, (i + 1) * RESULT_PART_CHARS) } }));
   }
 
-  private async run(call: RelayCall): Promise<void> {
+  private async run(call: RelayCall, send: (text: string) => void): Promise<void> {
+    const reply = (id: number, ok: boolean, body: unknown) => this.reply(id, ok, body, send);
     const api = this.surface();
-    if (!this.on || !api) { this.reply(call.id, false, 'Claude is switched off in this tab'); return; }
+    if (!this.on || !api) { reply(call.id, false, 'Claude is switched off in this tab'); return; }
     const fn = api[call.method];
-    if (typeof fn !== 'function' || call.method.startsWith('_')) { this.reply(call.id, false, `unknown method ${call.method}`); return; }
+    if (typeof fn !== 'function' || call.method.startsWith('_')) { reply(call.id, false, `unknown method ${call.method}`); return; }
     const refused = this.control?.gate(call.method) ?? null;
-    if (refused) { this.control?.done(call.method, false, 0); this.reply(call.id, false, refused); return; }
+    if (refused) { this.control?.done(call.method, false, 0); reply(call.id, false, refused); return; }
     const start = this.now();
     let ok = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -74,16 +81,16 @@ export class TabRelay {
       const out = await Promise.race([Promise.resolve((fn as (...a: unknown[]) => unknown)(...call.args)), deadline]);
       if (out === 'deadline') {
         const s = Math.round(call.deadlineMs / 1000);
-        if (READ_METHODS.has(call.method)) { this.reply(call.id, false, `${call.method} took longer than ${s} s`); return; }
+        if (READ_METHODS.has(call.method)) { reply(call.id, false, `${call.method} took longer than ${s} s`); return; }
         // Still walking / using: it keeps going (the player can always take over); its task-done event says when it ends.
         ok = true;
-        this.reply(call.id, true, { ok: true, message: stillInProgressMessage(call.method, s) });
+        reply(call.id, true, { ok: true, message: stillInProgressMessage(call.method, s) });
         return;
       }
       ok = true;
-      this.reply(call.id, true, out === undefined ? null : out);
+      reply(call.id, true, out === undefined ? null : out);
     } catch (e) {
-      this.reply(call.id, false, (e as Error)?.message ?? String(e));
+      reply(call.id, false, (e as Error)?.message ?? String(e));
     } finally { if (timer) clearTimeout(timer); this.control?.done(call.method, ok, Math.round(this.now() - start)); }
   }
 }

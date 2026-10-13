@@ -56,6 +56,7 @@ import type { ServerRegistry } from './serverList.js';
 import type { ServerDirectory } from './serverDirectory.js';
 import { sanitizeClientError } from './clientErrors.js';
 import { type LookupFn, resolveTarget } from './targets.js';
+import { encodeSppHeader, stripSppHeader } from './spp.js';
 import { compatFor } from './serverCompat.js';
 import { RoutineTokens, handleRoutines, readCharacterListAccount, readCharacterListAccount1999 } from './routines.js';
 import { AgentRelay, accountKey, type RelayPeer } from './relay.js';
@@ -78,6 +79,8 @@ interface Target {
   worldPort: number;
   /** Source addresses replies are accepted from. */
   sourceAddrs: Set<string>;
+  /** The server trusts the bridge and takes each player's address in a Simple Proxy Protocol header (spp.ts). */
+  spp: boolean;
 }
 
 interface Session {
@@ -96,6 +99,13 @@ interface Session {
   time1999: number;
   /** The account the server's CharacterList named (proof of login; AGENT.routine-store-auth). */
   account: string | null;
+  /**
+   * A relay link (no game traffic): the account key another bridge vouched for with a relay-link ticket
+   * (oauth.ts relayTicket). The tab opens one when its game session's bridge drains (docs/hosted-agent-connector.md §4.5).
+   */
+  relayLinkKey: string | null;
+  /** The bridge started draining: tell this session's tab, so it links its relay to the new deployment. */
+  notifyDraining(): void;
   packetsUp: number;
   packetsDown: number;
   bytesFromBrowser: number;
@@ -132,6 +142,9 @@ export interface BridgeServer {
   metrics: BridgeMetrics;
   snapshot(): BridgeSnapshot;
 }
+
+/** Bridge → tab when it starts draining (docs/hosted-agent-connector.md §4.5). */
+export const DRAINING_FRAME = JSON.stringify({ bridgeDraining: true });
 
 type Admission =
   | { ok: true; target: Target | null; protocol: SessionProtocol; release: () => void }
@@ -187,6 +200,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       authPort: config.aceAuthPort,
       worldPort: config.aceWorldPort,
       sourceAddrs: initialAceAddresses(config.aceHost),
+      spp: config.spp.pinned,
     };
     serverNames.set('pinned', pinned.name);
     const t = pinned;
@@ -313,6 +327,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
           authPort: entry.port,
           worldPort: entry.port + 1,
           sourceAddrs: new Set([res.address]),
+          spp: config.spp.servers.has(entry.id.toLowerCase()),
         };
       } else {
         target = null; // probe-only session
@@ -354,7 +369,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         return;
       }
       if (socket.destroyed) { a.release(); return; }
-      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, a.target, a.protocol, a.release));
+      const proxy = { address: req.socket.localAddress ?? '', port: req.socket.localPort ?? 0 };
+      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, proxy, a.target, a.protocol, a.release));
     }, (err) => {
       metrics.reject('internal');
       log('error', 'admit_failed', { ip, error: err as Error });
@@ -364,7 +380,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
 
   // ─── Session ───────────────────────────────────────
 
-  function openSession(ws: WebSocket, ip: string, target: Target | null, protocol: SessionProtocol, release: () => void): void {
+  function openSession(
+    ws: WebSocket, ip: string, proxy: { address: string; port: number }, target: Target | null, protocol: SessionProtocol, release: () => void,
+  ): void {
     const id = ++sessionCounter;
     const upLink = makeImpairedLink(config.impairment);
     const downLink = makeImpairedLink(config.impairment && { ...config.impairment, seed: config.impairment.seed + 1 });
@@ -378,16 +396,31 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     let isAlive = true;
 
     const session: Session = {
-      id, ip, ws, target, udp: null, closed: false, openedAt: now(), aceSessionId: null, protocol, time1999: 0, account: null,
+      id, ip, ws, target, udp: null, closed: false, openedAt: now(), aceSessionId: null, protocol, time1999: 0, account: null, relayLinkKey: null,
       packetsUp: 0, packetsDown: 0, bytesFromBrowser: 0, bytesToServer: 0, bytesFromServer: 0, bytesToBrowser: 0, dropped: 0,
       close: (reason, code) => cleanup(reason, code),
+      notifyDraining: () => { if (relayOn && relayKeyOf() && ws.readyState === WebSocket.OPEN) ws.send(DRAINING_FRAME); },
     };
     // The relay's handle on this session's tab (text frames on the game WebSocket).
     const relayPeer: RelayPeer = { send: (t) => { if (ws.readyState === WebSocket.OPEN) ws.send(t); } };
+    /** The relay account this session answers for: its logged-in account, or the one its relay link was vouched for. */
+    const relayKeyOf = (): string | null => (session.target && session.account ? accountKey(routinesServer(session.target), session.account) : session.relayLinkKey);
+    /** The server named the account: register the tab, and if this bridge is already draining, say so (it logged in late). */
+    const accountRead = (account: string): void => {
+      session.account = account;
+      log('info', 'session_account', { session: id });
+      if (!relayOn || !session.target) return;
+      relay.register(relayPeer, accountKey(routinesServer(session.target), account));
+      if (draining) session.notifyDraining();
+    };
     sessions.add(session);
     metrics.connects++;
     log('info', 'session_open', { session: id, ip, server: target?.key ?? null, protocol, active: sessions.size });
     const is1999 = protocol === 'ac1999';
+    // The player's address for a server that trusts the bridge (spp.ts). The
+    // browser's own source port never reaches the bridge (the edge proxies it), so 0.
+    const sppHeader = target?.spp ? encodeSppHeader({ address: ip, port: 0 }, proxy) : null;
+    const withSpp = (buf: Buffer): Buffer => (sppHeader ? Buffer.concat([sppHeader, buf]) : buf);
 
     ws.on('pong', () => { isAlive = true; });
     const pingInterval = setInterval(() => {
@@ -407,7 +440,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         if (session.closed) return;
         session.bytesToServer += buf.length;
         metrics.addBytes('udp_out', buf.length);
-        udp.send(buf, port, t.sendHost);
+        udp.send(withSpp(buf), port, t.sendHost);
       });
     };
 
@@ -423,10 +456,17 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         log('error', 'udp_error', { session: id, error: err });
         void cleanup('udp_error');
       });
-      udp.on('message', (msg: Buffer, rinfo: dgram.RemoteInfo) => {
+      udp.on('message', (datagram: Buffer, rinfo: dgram.RemoteInfo) => {
         if (!config.allowAnyUdpSource && !isFromAce(rinfo, t.sourceAddrs, sourcePorts)) {
           metrics.drop('foreign_udp');
           warnForeign('warn', 'udp_foreign_source', { session: id, from: `${rinfo.address}:${rinfo.port}` });
+          return;
+        }
+        // A server that trusts the bridge echoes the SPP header on every reply.
+        const msg = t.spp ? stripSppHeader(datagram) : datagram;
+        if (!msg) {
+          metrics.drop('spp_missing');
+          warnForeign('warn', 'udp_spp_missing', { session: id, from: `${rinfo.address}:${rinfo.port}`, len: datagram.length });
           return;
         }
         lastServerResponse.set(t.key, now());
@@ -448,7 +488,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
           // Read the account when something needs it: the routines store or the automation allowlist.
           if (session.account === null && (routineStore || config.automationAccounts.length || relayOn)) {
             const account = readCharacterListAccount1999(msg);
-            if (account) { session.account = account; log('info', 'session_account', { session: id }); if (relayOn && session.target) relay.register(relayPeer, accountKey(routinesServer(session.target), account)); }
+            if (account) accountRead(account);
           }
         } else {
           // The client's session id comes from the server's ConnectRequest
@@ -461,7 +501,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
           // Read the account when something needs it: the routines store or the automation allowlist.
           if (session.account === null && (routineStore || config.automationAccounts.length || relayOn)) {
             const account = readCharacterListAccount(msg);
-            if (account) { session.account = account; log('info', 'session_account', { session: id }); if (relayOn && session.target) relay.register(relayPeer, accountKey(routinesServer(session.target), account)); }
+            if (account) accountRead(account);
           }
         }
         // Backpressure: drop the datagram (UDP semantics; the client NAKs).
@@ -502,12 +542,29 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       // Text "health" → JSON status, then close (probeBridgeHealth / check-stack).
       if (!isBinary) {
         // The relay's frames from the tab (agentResult / agentState).
-        if (relayOn && relay.onText(relayPeer, buf.toString('utf8'))) return;
-        // A pairing code typed in the game, or an unpair (step 3): only from a session the server has logged in.
+        if (relayOn && relay.onText(relayPeer, buf.toString('utf8'), relayKeyOf())) return;
         const pairText = buf.toString('utf8');
+        // Relay link (docs/hosted-agent-connector.md §4.5): a logged-in session asks for a ticket that vouches for
+        // its account; the tab hands it to the new deployment over a second socket, which then carries the relay.
+        if (pairText === 'relayTicket') {
+          const key = session.target && session.account ? accountKey(routinesServer(session.target), session.account) : null;
+          const ticket = key && oauth ? oauth.relayTicket(key) : null;
+          ws.send(JSON.stringify({ relayTicket: { ticket, draining } }));
+          return;
+        }
+        if (pairText.startsWith('{"relayHello"')) {
+          let ticket = '';
+          try { ticket = String((JSON.parse(pairText) as { relayHello?: unknown }).relayHello ?? ''); } catch { /* not JSON */ }
+          const key = oauth && relayOn ? oauth.openRelayTicket(ticket) : null;
+          if (key) { session.relayLinkKey = key; relay.register(relayPeer, key); }
+          log('info', 'relay_link', { session: id, ok: !!key });
+          ws.send(JSON.stringify({ relayLinked: key ? { ok: true } : { ok: false, message: 'the relay-link ticket was refused' } }));
+          return;
+        }
+        // A pairing code typed in the game, or an unpair (step 3): only from a session the server has logged in (or a relay link it vouched for).
         if (pairText.startsWith('{"pair"') || pairText.startsWith('{"unpair"')) {
           const unpair = pairText.startsWith('{"unpair"');
-          const key = session.target && session.account ? accountKey(routinesServer(session.target), session.account) : null;
+          const key = relayKeyOf();
           let r: { ok: boolean; message: string; at?: number };
           if (!oauth) r = { ok: false, message: 'this server has no Claude connector' };
           else if (!key) r = { ok: false, message: 'log in first' };
@@ -539,12 +596,14 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
             : !session.account ? 'not logged in yet' : null;
           // AGENT.automation-allowlist — whether this (server-reported) account gets the automation UI.
           const automation = !!session.target && !!session.account && automationAllowed(config.automationAccounts, routinesServer(session.target), session.account);
+          // Preview UI (BRIDGE_PREVIEW_ACCOUNTS): the same rule over its own list; an empty list is nobody.
+          const preview = !!session.target && !!session.account && automationAllowed(config.previewAccounts, routinesServer(session.target), session.account);
           // A bridge that keeps no routines still names the logged-in account, so the page keeps them in
           // its own browser storage under it (AGENT.automation-allowlist; RoutineSync's local mode).
           const who = session.target && session.account ? { server: routinesServer(session.target), account: session.account } : {};
           ws.send(JSON.stringify(reason || !session.target || !session.account
-            ? { routines: null, reason, automation, ...who }
-            : { routines: { token: routineTokens.issue(id, routinesServer(session.target), session.account), server: routinesServer(session.target), account: session.account }, automation }));
+            ? { routines: null, reason, automation, preview, ...who }
+            : { routines: { token: routineTokens.issue(id, routinesServer(session.target), session.account), server: routinesServer(session.target), account: session.account }, automation, preview }));
         }
         return;
       }
@@ -603,7 +662,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
             ? buildDisconnectPacket1999(session.aceSessionId, session.time1999)
             : buildDisconnectPacket(session.aceSessionId);
           log('info', 'session_disconnect_sent', { session: id, aceSessionId: session.aceSessionId, protocol });
-          try { udp.send(pkt, session.target.authPort, session.target.sendHost, done); } catch { done(); }
+          try { udp.send(withSpp(pkt), session.target.authPort, session.target.sendHost, done); } catch { done(); }
         } else {
           done();
         }
@@ -633,6 +692,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       draining = true;
       const started = now();
       log('info', 'bridge_draining', { sessions: sessions.size, maxSeconds: Math.round(maxMs / 1000) });
+      // The game keeps playing here, but /mcp now reaches the new deployment: each paired tab links its relay there.
+      for (const s of sessions) s.notifyDraining();
       const check = () => {
         if (sessions.size === 0) { resolve('empty'); return; }
         if (now() - started >= maxMs) { resolve('timeout'); return; }

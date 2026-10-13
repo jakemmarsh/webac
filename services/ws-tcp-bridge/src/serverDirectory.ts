@@ -43,6 +43,8 @@ export interface DirectoryEntry {
   population: number | null;
   compat: Compat;
   compatNote: string | null;
+  /** compat 'incompatible': why nobody can play there from webAC (CompatEntry.reason); else null. */
+  compatReason: string | null;
   registration: string | null;
   /** Where to register (http/https), or null. */
   registrationUrl: string | null;
@@ -103,10 +105,17 @@ export function compareEntries(a: DirectoryEntry, b: DirectoryEntry): number {
  * classic world is never entered as end of retail. GDL/GDLE servers are
  * never probed, so their overlay era always stands. A detected classic era
  * makes the world beta with its data-set note; a server that refused every
- * known login version is incompatible.
+ * known login version is incompatible. An overlay block with a reason (a
+ * world whose VPN check refuses the bridge) stands whatever detection says:
+ * the probe may read that refusal as a version mismatch, and the reason is
+ * what players need to see.
  */
 export function withDetection(c: CompatEntry, d: Detection | undefined): CompatEntry {
   if (!d) return c;
+  if (c.compat === 'incompatible' && c.reason) {
+    const detected = withDetection({ ...c, compat: 'ok', note: undefined, reason: undefined }, d);
+    return { ...detected, compat: 'incompatible', note: c.note, reason: c.reason };
+  }
   // Drop what the overlay said about the era (its era, beta label and data note).
   const { era: overlayEra, note, compat, ...rest } = c;
   const base: CompatEntry = overlayEra === undefined ? c : { ...rest, compat: 'ok' };
@@ -146,6 +155,7 @@ export function buildDirectory(
       population: online !== false && fresh ? pc!.count : null,
       compat: c.compat,
       compatNote: c.note ?? null,
+      compatReason: c.compat === 'incompatible' ? c.reason ?? null : null,
       registration: c.registration ?? null,
       registrationUrl: c.registrationUrl ?? null,
       era: c.era ?? null,

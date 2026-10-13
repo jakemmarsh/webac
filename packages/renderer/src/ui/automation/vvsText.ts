@@ -38,9 +38,9 @@ export const VVS_COLORS = {
   line: 'rgb(143, 120, 84)',
 } as const;
 
-/** The CSS font for `px`. */
-export function vvsFont(px: number = VVS_TEXT_PX): string {
-  return `${px}px ${VVS_FONT_FACE}`;
+/** The CSS font for `px`; bold and italic as a Decal view's `fontstyle` asks (GoArrow's headings). */
+export function vvsFont(px: number = VVS_TEXT_PX, style: { bold?: boolean; italic?: boolean } = {}): string {
+  return `${style.italic ? 'italic ' : ''}${style.bold ? 'bold ' : ''}${px}px ${VVS_FONT_FACE}`;
 }
 
 /** Each letter's x in a line, Windows-style (see above). The last entry is the line's width. */
@@ -76,13 +76,14 @@ export function vvsLineHeight(px: number): number {
  * the run in data-ac-run-text, as the DAT-font runs do, for tests and the
  * capture tools.
  */
-export function renderVvsText(text: string, color: string = VVS_COLORS.text, opts: { px?: number; maxWidth?: number; shadow?: string } = {}): HTMLCanvasElement {
+export function renderVvsText(text: string, color: string = VVS_COLORS.text, opts: { px?: number; maxWidth?: number; shadow?: string; bold?: boolean; italic?: boolean } = {}): HTMLCanvasElement {
   const px = opts.px ?? VVS_TEXT_PX;
+  const font = vvsFont(px, opts);
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   const lineH = vvsLineHeight(px);
   const ascent = Math.round(px * 0.891);
-  if (ctx) ctx.font = vvsFont(px);
+  if (ctx) ctx.font = font;
   const adv = new Map<string, number>();
   const advance = (ch: string) => { let a = adv.get(ch); if (a === undefined) { a = ctx ? ctx.measureText(ch).width : px / 2; adv.set(ch, a); } return a; };
   const measure = (s: string) => vvsGlyphXs(s, advance, px).at(-1)!;
@@ -92,7 +93,7 @@ export function renderVvsText(text: string, color: string = VVS_COLORS.text, opt
   canvas.height = Math.max(1, lineH * lines.length) + pad;
   if (ctx) {
     // Resizing the canvas reset its state.
-    ctx.font = vvsFont(px);
+    ctx.font = font;
     ctx.textBaseline = 'alphabetic';
     const draw = (fill: string, d: number) => {
       ctx.fillStyle = fill;
@@ -107,6 +108,8 @@ export function renderVvsText(text: string, color: string = VVS_COLORS.text, opt
   Object.assign(canvas.style, { display: 'block', width: `${canvas.width}px`, height: `${canvas.height}px` });
   canvas.dataset.acRunText = text;
   canvas.dataset.vvsText = String(px);
+  if (opts.bold) canvas.dataset.vvsBold = '1';
+  if (opts.italic) canvas.dataset.vvsItalic = '1';
   return canvas;
 }
 

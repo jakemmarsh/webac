@@ -695,6 +695,9 @@ export class VtMacro {
   }
 
   /** What the macro should do now, or null. `range`: Monster Range (metres). */
+  /** The routine's hold-position (beyond VTank, Jake 2026-10-12): a monster this refuses is no target. */
+  allowTarget?: (o: { dist: number; bearing: number }) => boolean;
+
   decide(p: RoutineProfile & { vtank: VtankProfileData }, settings: Record<string, string | number | boolean>, ctx: { combat: boolean; buffing: boolean; idle: boolean }): VtStep | null {
     p = this.resolved(p);
     const fam = this.families();
@@ -733,7 +736,7 @@ export class VtMacro {
     // UseProjectileAwareness: each monster within Monster Range gets the client's line-of-fire test (a bolt or an
     // arrow at it would hit a wall, the ground or an object first); the planner then fights another (combatPlan).
     const aware = opt(settings, 'UseProjectileAwareness') === true;
-    const near: CombatMonster[] = seen.filter((o) => !this.blocked.has(o.guid) && !this.targets.excluded(o.guid)).map((o) => {
+    const near: CombatMonster[] = seen.filter((o) => !this.blocked.has(o.guid) && !this.targets.excluded(o.guid) && (this.allowTarget?.(o) ?? true)).map((o) => {
       const blow = this.blows.get(o.guid);
       const lof = aware && o.dist <= range ? this.lineOfFire(o.guid) : null;
       return {

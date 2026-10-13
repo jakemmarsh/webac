@@ -74,8 +74,39 @@ describe('login and grant', () => {
     expect(Array.from(packet)).toEqual(Array.from(login));
   });
 
-  it('refuses credentials over the 20-byte field', () => {
-    expect(() => buildLoginBody1999({ version: '4.35752', account: 'a'.repeat(10), password: 'b'.repeat(10), portalIteration: 1, cellIteration: 1 })).toThrow(/19/);
+  // The credential field is 20 bytes. The retail client writes the first 20 characters of
+  // account:password and drops the rest, with no terminator at 20 or more (measured 2026-10-12,
+  // client.exe 4.35752 under Wine: "lenprobeab:pwprobe123" stored the password "pwprobe12").
+  const credField = (account: string, password: string): number[] => {
+    const body = buildLoginBody1999({ version: '4.35752', account, password, portalIteration: 102, cellIteration: 67 });
+    const ref = buildLoginBody1999({ version: '4.35752', account: 'a', password: 'b', portalIteration: 102, cellIteration: 67 });
+    // Everything outside the 20 credential bytes (body offsets 20..40 for this version) is unchanged.
+    expect(body.length).toBe(ref.length);
+    expect(Array.from(body.subarray(0, 20))).toEqual(Array.from(ref.subarray(0, 20)));
+    expect(Array.from(body.subarray(40))).toEqual(Array.from(ref.subarray(40)));
+    return Array.from(body.subarray(20, 40));
+  };
+  const bytes = (s: string): number[] => Array.from(s, (c) => c.charCodeAt(0));
+
+  it('truncates credentials past the 20-byte field to the first 20 characters, no terminator, as the retail client', () => {
+    expect(credField('aaaaaaaaaa', 'bbbbbbbbbb')).toEqual(bytes('aaaaaaaaaa:bbbbbbbbb'));
+    expect(credField('lenprobeab', 'pwprobe123')).toEqual(bytes('lenprobeab:pwprobe12'));
+  });
+
+  it('19 characters end in one NUL; exactly 20 have none', () => {
+    expect(credField('aaaaaaaaa', 'bbbbbbbbb')).toEqual([...bytes('aaaaaaaaa:bbbbbbbbb'), 0]);
+    expect(credField('aaaaaaaaaa', 'bbbbbbbbb')).toEqual(bytes('aaaaaaaaaa:bbbbbbbbb'));
+    expect(credField('ab', 'cd')).toEqual([...bytes('ab:cd'), ...new Array(15).fill(0)]);
+  });
+
+  it('an account name of 20 or more characters fills the field with no colon, as retail sent it', () => {
+    expect(credField('x'.repeat(20), 'pw')).toEqual(bytes('x'.repeat(20)));
+    expect(credField('x'.repeat(25), 'pw')).toEqual(bytes('x'.repeat(20)));
+    expect(credField('x'.repeat(19), 'pw')).toEqual(bytes(`${'x'.repeat(19)}:`));
+  });
+
+  it('non-ASCII characters keep their low byte (Latin-1), unchanged by truncation', () => {
+    expect(credField('caf\u00e9', 'p\u00e4ss')).toEqual([...bytes('caf\u00e9:p\u00e4ss'), ...new Array(11).fill(0)]);
   });
 
   it('reads the grant: slot, version, world clock delta', () => {

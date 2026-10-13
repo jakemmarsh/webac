@@ -30,7 +30,7 @@ import type { ElementDesc } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { charselHighlightSlices, charselRowState } from '../ui/CharselListRows.js';
 import { descRef } from '../ui/DatTextStyle.js';
 import {
-  type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeBridgeEra, worldCredentialsBlock, worldEnterBlock, worldRegistrationText,
+  type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeBridgeEra, worldEnterBlock, worldRegistrationText,
 } from './worldDirectory.js';
 import { loadRememberedLogin, saveRememberedLogin, worldKeyOf, type RememberedLogin } from './launcherStorage.js';
 
@@ -456,7 +456,10 @@ export class LauncherScreen {
       input.setAttribute('autocomplete', autocomplete);
       input.spellcheck = false;
       input.autocapitalize = 'off';
-      input.maxLength = type === 'password' ? 64 : 50;
+      // No maxLength: an input's cap silently cuts what is typed or pasted, and
+      // retail sent the whole string (the EoL client keeps -a/-v in a PStringBase;
+      // ACE reads String16L/String32L with no cap, refusing an account over 50
+      // itself). A cut account name auto-created a different account.
       input.value = value;
       Object.assign(input.style, {
         position: 'absolute', left: '0', top: '0', width: '100%', height: '100%', zIndex: '5',
@@ -728,7 +731,11 @@ export class LauncherScreen {
     }
 
     const registration = worldRegistrationText(w);
-    if (registration && w.registrationUrl) {
+    if (w.compat === 'incompatible') {
+      // Nobody can play there from webAC (e.g. a VPN check that refuses the
+      // bridge): say so where the new-player hint goes, before ENTER is tried.
+      body.appendChild(para(w.compatReason ?? "This world can't be played from webAC.", 2, this.warn, 'launcher-hint launcher-blocked'));
+    } else if (registration && w.registrationUrl) {
       // The whole note is a link to the world's registration page, in the link
       // colour; 2 lines, the room the details box has below the links row (a
       // third line was clipped by the box on playwebac.com, 2026-10-12).
@@ -795,9 +802,6 @@ export class LauncherScreen {
     }
     this.done = true;
     const finish = (): void => {
-      // After any era probe: a custom bridge's era is only known now.
-      const credBlock = worldCredentialsBlock(w, account, password);
-      if (credBlock) { this.done = false; this.kit.message(credBlock, () => this.passwordInput?.focus()); return; }
       saveRememberedLogin({ worldKey: worldKeyOf(w), account, era: w.era }, this.opts.storage === undefined ? undefined : this.opts.storage);
       this.handle?.destroy();
       this.handle = null;

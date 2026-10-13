@@ -149,7 +149,8 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     heritages: DARK_MAJESTY_HERITAGES,
   },
   /**
-   * Classic Dereth 1.1 (Seedsow, GDL-Classic; 1.0 servers use the profile below): replaces only the
+   * Classic Dereth 1.1 (GDL-Classic on its README's set; 1.0 servers such as Seedsow and
+   * Snowreap use the profile below): replaces only the
    * portal and cell. The portal keeps the end-of-retail iteration 2072 —
    * identified by its SkillTable (0x0E000004; end of retail 5876).
    * Seedsow takes only auth type 1 ("account:password") and ignores the
@@ -171,14 +172,16 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     heritages: DARK_MAJESTY_HERITAGES,
   },
   /**
-   * Classic Dereth 1.0 (Snowreap): the 1.1 files minus one thing. The two
+   * Classic Dereth 1.0 (Snowreap, Seedsow): the 1.1 files minus one thing. The two
    * sets differ only in the SkillTable, and 1.0's is 1.1's without its last
    * entry, Salvaging (40; trained, cost 0, so chargen trains it for every
    * character). A GDL server on 1.0 has no skill 40 and refuses a create
    * that trains it as Corrupt (CClient::CreateCharacter, "trained or
    * specialized skill the table lacks": reference/classic/ClassicDereth/
    * Source/Client.cpp ~500), shown as "The server cannot create your new
-   * character at this time" (Jake on Snowreap, 2026-10-11). Both report
+   * character at this time" (Jake on Snowreap, 2026-10-11; Seedsow on
+   * 2026-10-12: Corrupt with Salvaging trained, Ok without, same account,
+   * tools/probe-gdl-chargen.ts). Both report
    * portal 2072 / cell 4, so DDD can't tell them apart: the bridge's compat
    * overlay names this era per server.
    */

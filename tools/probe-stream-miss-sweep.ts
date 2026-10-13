@@ -17,10 +17,10 @@
  *     [--set <pointer url>]                                               (end of retail: datSet)
  * Local servers only (an admin account: the teleports use @teleloc).
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium, type Page } from 'playwright';
+import { createRunProfile } from './lib/temp-profile.js';
 import { SWIFTSHADER_ARGS, waitFor, AT_CHAR_SELECT_JS, IN_CHARGEN_JS, IN_WORLD_JS } from './lib/game-session.js';
 
 const args = process.argv.slice(2);
@@ -65,8 +65,9 @@ const ev = <T = unknown>(js: string) => page.evaluate(js) as Promise<T>;
 const snap = (name: string) => page.screenshot({ path: join(out, `${name}.png`) }).catch(() => {});
 const settle = (ms = 4000) => page.waitForTimeout(ms);
 
-const profile = mkdtempSync(join(tmpdir(), 'acjs-miss-sweep-'));
-const ctx = await chromium.launchPersistentContext(profile, { args: SWIFTSHADER_ARGS, viewport: { width: 1280, height: 720 } });
+const profile = createRunProfile('acjs-miss-sweep-', { tool: 'probe-stream-miss-sweep' }); // deleted at exit / signal / crash
+const ctx = await chromium.launchPersistentContext(profile.dir, { args: SWIFTSHADER_ARGS, viewport: { width: 1280, height: 720 } });
+profile.setCloser(() => ctx.close());
 page = ctx.pages()[0] ?? await ctx.newPage();
 page.setDefaultTimeout(120_000);
 await page.addInitScript('window.__missTrace = []');
@@ -128,6 +129,5 @@ try {
 } finally {
   writeFileSync(join(out, 'misses.json'), JSON.stringify({ url, era: era || 'eor', set, phases }, null, 1));
   writeFileSync(join(out, 'console.log'), consoleLines.join('\n'));
-  await ctx.close();
-  rmSync(profile, { recursive: true, force: true }); // the profile holds a ~1 GB DAT cache
+  await profile.dispose(); // closes the browser; the profile holds a ~1 GB DAT cache
 }

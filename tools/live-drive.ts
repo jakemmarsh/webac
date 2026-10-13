@@ -5,7 +5,7 @@
  * Built for playing a deployed page (https://playwebac.com), where URL login
  * and ?agent are off: you log in through the launcher with clicks and keys.
  *
- *   npx tsx tools/live-drive.ts serve [--url https://playwebac.com/] [--gpu] [--out dir] [--port 9477] [--throttle kbit/s]
+ *   npx tsx tools/live-drive.ts serve [--url https://playwebac.com/] [--gpu] [--out dir] [--port 9477] [--throttle kbit/s] [--profile dir]
  *   npx tsx tools/live-drive.ts shot [name]            → prints the PNG path
  *   npx tsx tools/live-drive.ts click <x> <y> [right|double]
  *   npx tsx tools/live-drive.ts drag <x0> <y0> <x1> <y1>
@@ -23,12 +23,22 @@
  *
  * One live session at a time (CLAUDE.md machine safety): `serve` refuses to
  * start when its port is taken. The console log is <out>/console.log.
+ *
+ * The browser profile is a fresh $TMPDIR/live-drive-profile-* per run and is
+ * DELETED when the server stops (`stop`, Ctrl-C / SIGTERM, the browser
+ * closing, any exit); profiles left by a crashed run are swept at the next
+ * `serve` (tools/lib/temp-profile.ts). Each one fills with the game's OPFS
+ * DAT cache (up to ~2.4 GB): 129 leaked ones filled the Mac's disk on
+ * 2026-10-12. To keep a warm DAT cache between runs on purpose, pass
+ * `--profile <dir>`: that directory is reused and never deleted (pick one
+ * fixed path and remove it when done, not a new one per run).
  */
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium, type Page } from 'playwright';
+import { createRunProfile } from './lib/temp-profile.js';
 import { GPU_ARGS, SWIFTSHADER_ARGS, DEFAULT_VIEWPORT, REMOTE_CHROMIUM } from './lib/game-session.js';
 
 const args = process.argv.slice(2);
@@ -41,13 +51,24 @@ async function serve(): Promise<void> {
   mkdirSync(out, { recursive: true });
   const LOG = join(out, 'console.log');
   const gpu = args.includes('--gpu');
-  const profile = mkdtempSync(join(tmpdir(), 'live-drive-profile-'));
-  const ctx = await chromium.launchPersistentContext(profile, {
+  const persist = opt('profile', '');
+  if (persist) mkdirSync(persist, { recursive: true });
+  const profile = createRunProfile('live-drive-profile-', { persistDir: persist || undefined, tool: 'live-drive' });
+  const ctx = await chromium.launchPersistentContext(profile.dir, {
     headless: true,
     // The cloud container's preinstalled Chromium (the game-session recipe); Playwright's own may be absent.
     ...(gpu ? { channel: 'chromium', args: GPU_ARGS } : { args: SWIFTSHADER_ARGS, ...(existsSync(REMOTE_CHROMIUM) ? { executablePath: REMOTE_CHROMIUM } : {}) }),
     viewport: { ...DEFAULT_VIEWPORT },
   });
+  profile.setCloser(() => ctx.close());
+  // The browser going away (crash, killed, closed) ends the server and takes the temp profile with it.
+  let stopping = false;
+  const shutdown = async (code: number): Promise<never> => {
+    stopping = true;
+    await profile.dispose();
+    process.exit(code);
+  };
+  ctx.on('close', () => { if (!stopping) { console.error('live-drive: the browser closed; stopping'); void shutdown(1); } });
   // Long tasks (main-thread stalls ≥ 50 ms) from the first script on: window.__ldLongTasks, read with
   // eval, e.g. to tell a network wait from a blocked main thread next to performance resource timings.
   await ctx.addInitScript(() => {
@@ -143,7 +164,7 @@ async function serve(): Promise<void> {
         const lines = readFileSync(LOG, 'utf8').split('\n').filter((l) => l && (!re || re.test(l)));
         return lines.slice(-Number(a[1] ?? 40)).join('\n');
       }
-      case 'stop': setTimeout(() => void ctx.close().then(() => process.exit(0)), 100); return 'stopping';
+      case 'stop': setTimeout(() => void shutdown(0), 100); return 'stopping';
       default: throw new Error(`unknown op ${op}`);
     }
   };
@@ -158,7 +179,7 @@ async function serve(): Promise<void> {
         (e) => { res.writeHead(500); res.end(String(e?.message ?? e)); },
       );
     });
-  }).listen(port, '127.0.0.1', () => console.log(`live-drive on :${port} → ${url} (${gpu ? 'GPU' : 'SwiftShader'}), out ${out}`));
+  }).listen(port, '127.0.0.1', () => console.log(`live-drive on :${port} → ${url} (${gpu ? 'GPU' : 'SwiftShader'}), out ${out}, profile ${profile.dir}${profile.temporary ? ' (deleted at stop)' : ' (kept)'}`));
 }
 
 async function client(op: string, a: string[]): Promise<void> {

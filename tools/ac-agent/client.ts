@@ -78,9 +78,15 @@ async function http(info: DaemonInfo, path: string, payload?: unknown, timeoutMs
   return res.json();
 }
 
-/** The live daemon for a profile; with no explicit profile and exactly one daemon running, that one. */
-export function findDaemon(profile?: string): DaemonInfo | null {
+/**
+ * The live daemon for a profile; with no profile named (no argument, no
+ * AC_AGENT_PROFILE) and exactly one daemon running, that one. A named profile
+ * never falls back: the one running daemon is often another session's, and
+ * `stop` on it ended that session's player (2026-10-12).
+ */
+export function findDaemon(profile?: string, envProfile: string | undefined = process.env.AC_AGENT_PROFILE): DaemonInfo | null {
   if (profile) return readInfo(profile);
+  if (envProfile) return readInfo(envProfile);
   const own = readInfo(DEFAULT_PROFILE);
   if (own) return own;
   const all = listInfos();
@@ -157,8 +163,8 @@ export class AgentClient {
   }
 
   /** Click the game window at screenshot pixel (x, y). */
-  async click(x: number, y: number, button: 'left' | 'right' = 'left'): Promise<void> {
-    const r = await http(this.info, '/click', { x, y, button });
+  async click(x: number, y: number, button: 'left' | 'right' = 'left', modifiers: string[] = []): Promise<void> {
+    const r = await http(this.info, '/click', { x, y, button, modifiers });
     if (!r.ok) throw new Error(r.error ?? 'click failed');
   }
 

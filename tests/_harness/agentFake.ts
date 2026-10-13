@@ -6,6 +6,7 @@
 import { expect, vi } from 'vitest';
 import { compassToYaw, type AgentApi, type FellowshipInfo, type AgentHost, type AgentHostObject, type AgentHostSelf } from '../../packages/renderer/src/agent/AgentApi.ts';
 import { getJumpVelocity } from '@ac/shared';
+import type { AgentItem } from '../../packages/renderer/src/agent/types.ts';
 
 export const HOLTBURG = 0xa9b40019; // landblock 0xA9,0xB4 outdoor cell
 
@@ -23,7 +24,7 @@ export class FakeHost implements AgentHost {
   target: number | null = null;
   dying = new Set<number>();
   container: { guid: number; items: Array<{ guid: number; name: string }> } | null = null;
-  inv: Array<{ guid: number; name: string; where: string; stack?: number }> = [];
+  inv: AgentItem[] = [];
   screenName: ReturnType<AgentHost['screen']> = 'world';
 
   now = () => this.t;
@@ -107,7 +108,7 @@ export class FakeHost implements AgentHost {
   appraise = (g: number, quiet?: boolean) => { this.appraised.push(g); this.appraiseCalls.push({ guid: g, quiet: !!quiet }); };
   appraisal = (g: number) => (this.appraised.includes(g) ? this.appraisals.get(g) ?? null : null);
   /** Identify data by guid (int/float/… properties and spell names), shown once appraised. */
-  appraisalDatas = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[] }>();
+  appraisalDatas = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[]; maxVelocity?: number }>();
   appraisalData = (g: number) => (this.appraised.includes(g) ? this.appraisalDatas.get(g) ?? null : null);
   /** Palettes by id (0xRRGGBB entries); a missing one reads as not loaded yet. */
   palettes = new Map<number, number[]>();
@@ -144,6 +145,9 @@ export class FakeHost implements AgentHost {
   tradeOpen: { partner: string; yours: string[]; theirs: string[]; youAccepted: boolean; theyAccepted: boolean } | null = null;
   trade = () => this.tradeOpen;
   tradeAction = (a: string, g?: number) => { this.sent.push(`trade ${a}${g ? ` ${g.toString(16)}` : ''}`); return true; };
+  /** The straight line of fire (a bolt) and an arrow's arc to a target; unset = the host can't say. */
+  lineOfFire: AgentHost['lineOfFire'] = undefined;
+  missileLineOfFire: AgentHost['missileLineOfFire'] = undefined;
   routeTo: Array<{ x: number; y: number; z: number }> | null = null;
   route = (_fc: number, _f: unknown, _tc: number, to: { x: number; y: number; z: number }) => (this.routeTo ? [...this.routeTo, to] : null);
   logout = () => {};
@@ -159,6 +163,8 @@ export class FakeHost implements AgentHost {
   objectReach: ((guid: number) => number) | undefined = undefined;
   /** Your fellows (the fellowship panel's list); unset = no fellowship. */
   fellows: AgentHost['fellows'] = undefined;
+  /** Whether an interior cell is a dungeon's (not SeenOutside); unset = the host can't say. */
+  cellSealed: AgentHost['cellSealed'] = undefined;
   /** The landscape at a global point (open sea, too steep, the wade); unset = the host can't say. */
   navTerrain: AgentHost['navTerrain'] = undefined;
   /** Optional walls (landblock-local x, y → blocked): the body stops at them, and navProbe sees them. */

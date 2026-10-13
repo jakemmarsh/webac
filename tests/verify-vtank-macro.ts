@@ -100,6 +100,22 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
     expect(casts.filter((x) => x === `cast ${id('Imperil Other I')} 80005001`)).toHaveLength(1);
   });
 
+  it('Hold Position (beyond VTank, Jake 2026-10-12): a monster past the anchor is no target of the macro; released, it is', async () => {
+    host.add({ guid: 0x80005001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 35 });
+    const data = emptyVtankData();
+    data.monsters[0].on = ['A'];
+    serverAnswers();
+    const p = vt({ vtank: data });
+    api.routine.start(p);
+    const act = (api.routine as unknown as { act(a: unknown, p: RoutineProfile): Promise<unknown> }).act.bind(api.routine);
+    await act({ kind: 'hold-position', meters: 10 }, p);
+    await step(3000);
+    expect(host.sent.some((x) => x.startsWith('cast ') || x.startsWith('attack '))).toBe(false);
+    await act({ kind: 'release-position' }, p);
+    await step(3000);
+    expect(host.sent).toContain(`cast ${id('Flame Bolt I')} 80005001`);
+  });
+
   it('a resisted debuff is cast again; only the server\'s "You cast …" line counts it on (VTank DebuffScheduler)', async () => {
     host.add({ guid: 0x80005001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 35 });
     const data = emptyVtankData();
@@ -701,7 +717,8 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
       expect(host.sent.filter((x) => x.startsWith('attack 80005001')).length).toBe(1);
       const h = api.routine.history().join('\n');
       expect(h).toMatch(/Gate Guard blacklisted for 120 s: 2 attempts in a row didn't reach it/);
-      expect(h).toMatch(/attacking Drudge Skulker/);
+      // A bow's order shoots from where you stand when it reaches (2026-10-12): "… shooting at Drudge Skulker …".
+      expect(h).toMatch(/(attacking|shooting at) Drudge Skulker/);
     });
 
     it('HP tracker: a listed monster whose health doesn\'t change for GhostDeleteHPTrackerSeconds is set aside as a ghost', async () => {
@@ -879,7 +896,9 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
       expect(host.sent).toContain(`wield ${SWORD.toString(16)}`);
       // A new attack order with the sword, not "still fighting" on the throw's order (the weapon change ended it).
       const after = api.routine.history().slice(api.routine.history().findIndex((h) => /uses Iron Sword/.test(h)));
-      expect(after.some((h) => /default p1: attacking Drudge Skulker/.test(h))).toBe(true);
+      // The throw now goes from where you stand (an archer's or thrower's attack no longer runs in first, 2026-10-12),
+      // so the sword's order runs up to the skulker.
+      expect(after.some((h) => /default p1: (attacking|running up to) Drudge Skulker/.test(h))).toBe(true);
       expect(host.sent).not.toContain(imperil());
     });
 

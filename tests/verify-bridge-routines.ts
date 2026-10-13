@@ -127,7 +127,7 @@ describe('/routines through the bridge', () => {
     const ws = await open(`ws://127.0.0.1:${port}/`);
 
     // No token before the server has logged the session in, and none without one.
-    expect(await textReply(ws, 'routines')).toEqual({ routines: null, reason: 'not logged in yet', automation: false });
+    expect(await textReply(ws, 'routines')).toEqual({ routines: null, reason: 'not logged in yet', automation: false, preview: false });
     expect((await fetch(base)).status).toBe(401);
 
     // The client's packets open the UDP leg; the server answers with the CharacterList.
@@ -182,13 +182,18 @@ describe('/routines through the bridge', () => {
     expect(automationAllowed(['coldeve:*'], 'local-eor', 'anyone')).toBe(false);
     expect(automationAllowed(['*:*'], 'local-eor', 'anyone')).toBe(true);
     expect(config({ BRIDGE_AUTOMATION_ACCOUNTS: ' local-eor:agentclaude , jake ' }, 9000).automationAccounts).toEqual(['local-eor:agentclaude', 'jake']);
+    // Preview UI (the Virindi Views bar): its own list, else the connector's; neither is nobody.
+    expect(config({ BRIDGE_PREVIEW_ACCOUNTS: 'jake' }, 9000).previewAccounts).toEqual(['jake']);
+    expect(config({ BRIDGE_MCP_ACCOUNTS: 'coldeve:jake' }, 9000).previewAccounts).toEqual(['coldeve:jake']);
+    expect(config({ BRIDGE_PREVIEW_ACCOUNTS: '', BRIDGE_MCP_ACCOUNTS: 'jake' }, 9000).previewAccounts).toEqual([]);
+    expect(config({}, 9000).previewAccounts).toEqual([]);
 
     // On the wire: a production bridge (no routines kept) still says whether this account has the UI.
     udp = dgram.createSocket('udp4');
     const got: dgram.RemoteInfo[] = [];
     udp.on('message', (_m, r) => got.push(r));
     await new Promise<void>((r) => udp!.bind(0, '127.0.0.1', () => r()));
-    bridge = createBridgeServer(config({ BRIDGE_ROUTINES_DIR: 'none', BRIDGE_AUTOMATION_ACCOUNTS: 'local-eor:agentclaude' }, udp.address().port), { log: silent });
+    bridge = createBridgeServer(config({ BRIDGE_ROUTINES_DIR: 'none', BRIDGE_AUTOMATION_ACCOUNTS: 'local-eor:agentclaude', BRIDGE_PREVIEW_ACCOUNTS: 'agentclaude' }, udp.address().port), { log: silent });
     const port = await bridge.listen();
     const login = async (account: string) => {
       const ws = await open(`ws://127.0.0.1:${port}/`);
@@ -204,9 +209,9 @@ describe('/routines through the bridge', () => {
       return r;
     };
     // It names the account (as the server reported it) so the page keeps routines in its own storage.
-    expect(await login('agentclaude')).toEqual({ routines: null, reason: 'routines are not kept on this bridge', automation: true, server: 'local-eor', account: 'agentclaude' });
+    expect(await login('agentclaude')).toEqual({ routines: null, reason: 'routines are not kept on this bridge', automation: true, preview: true, server: 'local-eor', account: 'agentclaude' });
     const other = await login('somebodyelse');
-    expect(other).toMatchObject({ routines: null, automation: false });
+    expect(other).toMatchObject({ routines: null, automation: false, preview: false });
   });
 
   it('a production bridge keeps no routines unless BRIDGE_ROUTINES_DIR names a volume', async () => {
@@ -217,7 +222,7 @@ describe('/routines through the bridge', () => {
     const port = await bridge.listen();
     expect((await fetch(`http://127.0.0.1:${port}/routines`)).status).toBe(404);
     const ws = await open(`ws://127.0.0.1:${port}/`);
-    expect(await textReply(ws, 'routines')).toEqual({ routines: null, reason: 'routines are not kept on this bridge', automation: false });
+    expect(await textReply(ws, 'routines')).toEqual({ routines: null, reason: 'routines are not kept on this bridge', automation: false, preview: false });
     ws.close();
   });
 });

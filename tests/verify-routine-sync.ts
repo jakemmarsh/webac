@@ -64,10 +64,13 @@ afterEach(() => {
 describe('the routines grant over the game socket', () => {
   it('reads the bridge\'s answer, and nothing else, as a grant', () => {
     expect(parseRoutinesGrant('{"routines":{"token":"ab","server":"local-eor","account":"agentclaude"}}'))
-      .toEqual({ grant: { token: 'ab', server: 'local-eor', account: 'agentclaude' }, reason: null, automation: false });
-    expect(parseRoutinesGrant('{"routines":null,"reason":"not logged in yet"}')).toEqual({ grant: null, reason: 'not logged in yet', automation: false });
+      .toEqual({ grant: { token: 'ab', server: 'local-eor', account: 'agentclaude' }, reason: null, automation: false, preview: false });
+    expect(parseRoutinesGrant('{"routines":null,"reason":"not logged in yet"}')).toEqual({ grant: null, reason: 'not logged in yet', automation: false, preview: false });
     // AGENT.automation-allowlist — the bridge's allowlist answer rides along, with or without a grant.
     expect(parseRoutinesGrant('{"routines":null,"reason":"routines are not kept on this bridge","automation":true}')?.automation).toBe(true);
+    // Preview UI (BRIDGE_PREVIEW_ACCOUNTS): off unless the bridge says so.
+    expect(parseRoutinesGrant('{"routines":null,"reason":"x","automation":true}')?.preview).toBe(false);
+    expect(parseRoutinesGrant('{"routines":null,"reason":"x","preview":true}')?.preview).toBe(true);
     expect(parseRoutinesGrant('{"bridge":"ok"}')).toBeNull();
     expect(parseRoutinesGrant('not json')).toBeNull();
   });
@@ -84,6 +87,7 @@ describe('the routines grant over the game socket', () => {
     s.ws.onmessage!({ data: '{"routines":null,"reason":"routines are not kept on this bridge","automation":true}' });
     await Promise.resolve();
     expect(s.events.filter((e) => e.type === 'automationAccess').map((e) => e.data)).toEqual([false, true]);
+    expect(s.events.filter((e) => e.type === 'previewAccess').map((e) => e.data)).toEqual([false, false]);
     // A text frame is never fed to the packet parser (it used to be read as an empty packet).
     expect(s.events.some((e) => e.type === 'error')).toBe(false);
     s.stop();

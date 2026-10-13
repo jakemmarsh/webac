@@ -154,6 +154,46 @@ describe('agent play reports 2026-10-12', () => {
       api.stopMoving();
       expect((await q).message).toMatch(/following Claude Bulwark: interrupted \(stopped\)/);
     });
+    it('follow: being hit ends it (a fresh decision while the tank walks on); flee=true keeps following through the hits (Arcanist, 2026-10-12)', async () => {
+      const SERVANT = 0x80003c31;
+      const run = async (flee: boolean) => {
+        host.me.x = 80; host.me.y = 0;
+        fellow(80, 40);
+        host.add({ guid: SERVANT, name: 'Drudge Servant', itemType: 0x10, objectDescFlags: 0x10, x: 81.5, y: 0 });
+        const t0 = host.t;
+        let hit = t0;
+        const r = await settle(api, host, api.follow('Claude Bulwark', { within: 4, durationMs: 30_000, ...(flee ? { flee: true } : {}) }), 40_000, () => {
+          // The servant keeps up at your side (not behind, which walking on already leaves), hitting every second.
+          const o = host.objs.get(SERVANT)!; o.x = host.me.x + 1.5; o.y = host.me.y;
+          if (host.t - hit >= 1000) { hit = host.t; api.pushChat('The Drudge Servant hits your leg for 6 points of bludgeoning damage!', 0x15); }
+        });
+        return { r: r!, took: host.t - t0 };
+      };
+      const stopped = await run(false);
+      expect(stopped.r.message).toMatch(/under attack/);
+      expect(stopped.took).toBeLessThan(15_000);
+      const kept = await run(true);
+      expect(kept.r.message).toMatch(/^followed Claude Bulwark for (29|30) s/);
+      expect(Math.hypot(host.me.x - 80, host.me.y - 40)).toBeLessThan(4 + 3.5);
+    });
+    it('follow: a leader walking away as fast as you never reads as a stall (live: "stuck 85.6 m short" after covering 90 m)', async () => {
+      host.me.x = 80; host.me.y = 0;
+      fellow(80, 30);
+      const r = await settle(api, host, api.follow('Claude Bulwark', { within: 4, durationMs: 40_000 }), 60_000, () => {
+        // At your own run speed (4 m/s in the fake), away from you, for 30 s.
+        if (host.t < 30_000) host.objs.get(BUL)!.y += 0.4;
+      });
+      expect(r!.message).not.toMatch(/stuck|stall/);
+      expect(r!.message).toMatch(/^followed Claude Bulwark for (39|40) s/);
+      expect(host.me.y).toBeGreaterThan(100);
+    });
+    it('the ac_follow tool passes flee=true through', async () => {
+      const seen: unknown[][] = [];
+      const caller: ToolCaller = { notice: null, call: async <T,>(m: string, a?: unknown[]) => { seen.push([m, ...(a ?? [])]); return { ok: true, message: 'followed' } as T; } };
+      const tool = TOOLS.find((t) => t.name === 'ac_follow')!;
+      await TOOL_CALLER.run(caller, () => tool.run({ target: 'Claude Bulwark', flee: true }));
+      expect(seen[0]).toEqual(['follow', 'Claude Bulwark', { within: null, durationMs: null, flee: true }]);
+    });
     it('the ac_follow tool passes within and duration through', async () => {
       const seen: unknown[][] = [];
       const caller: ToolCaller = { notice: null, call: async <T,>(m: string, a?: unknown[]) => { seen.push([m, ...(a ?? [])]); return { ok: true, message: 'followed' } as T; } };

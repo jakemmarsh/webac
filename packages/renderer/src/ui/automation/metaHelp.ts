@@ -35,6 +35,12 @@ export const VT_CONDITION_HELP: Record<string, string> = {
   'Dist Any Route Pt >=': 'Act if your character moves a certain distance away from any point in your route.',
   'Expression': 'Act upon an expression.',
   'Chat Message Capture': 'Allows you to perform a Regular Expression match on incoming chatbox text and save matched substrings to Meta variables for later use.',
+  // Beyond VTank, Jake 2026-10-12: ours (VirindiTank had none of these), worded like the wiki's.
+  'Attacked By Count >=': 'Act upon X or more creatures attacking you (their hits, misses and evades in the last 10 seconds).',
+  'Being Cast At': 'Act upon a spell cast at you (landed, resisted or failed), or a creature nearby speaking a spell, in the last X seconds (5 when blank).',
+  'No Monsters Near Point': 'Act upon no monsters within range of a point (map coordinates), not of you.',
+  'No Monsters Near Object': 'Act upon no monsters within range of the nearest object of that name. Never true while the object is out of sight.',
+  'My Corpse Within Distance': 'Act upon your own corpse (Corpse of <your name>) lying within range.',
 };
 
 export const VT_ACTION_HELP: Record<string, string> = {
@@ -54,4 +60,11 @@ export const VT_ACTION_HELP: Record<string, string> = {
   'Create View': 'Creates a new Meta View using XML.',
   'Destroy View': 'Destroys the specified meta view.',
   'Destroy All Views': 'Destroys all meta views.',
+  // Beyond VTank, Jake 2026-10-12: ours (VirindiTank had none of these), worded like the wiki's.
+  'Pull Monster': 'Attacks the nearest monster matching the name until one swing or shot lands, then runs back to the point (not stopping when hit). Then hold > 0 also holds position there.',
+  'Hold Position': 'Fight nothing farther than Range from here (or the point given): the macro and its attacks never chase past it, e.g. down a ledge.',
+  'Release Position': 'Clears Hold Position.',
+  'Loot Corpse': 'Loots the corpse of that name (e.g. Corpse of Azreath Lightbringer) by the loot profile, not only your own kills.',
+  'Recall Unless Attacked': 'Recalls (/ls, /hr, /mp, or a recall spell). If that many creatures attack you before it takes you, jumps to break the recall and runs clear.',
+  'Flee To': 'Runs to the point and keeps going while hit (moving to a point stops to fight back).',
 };

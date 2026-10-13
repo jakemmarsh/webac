@@ -22,9 +22,9 @@
  * resent at most once a second. The real client resends everything every
  * frame instead (LoginComplete ×872 in one session); we don't copy that.
  */
-import { CharacterError, characterErrorMessage } from '@ac/shared';
+import { characterErrorMessage } from '@ac/shared';
 import {
-  parseAgentCall, parsePairingReply, parseRoutinesGrant, probeBridgeHealth, type BridgeHealth, type ConnectionEvent, type ConnectionListener,
+  parseAgentCall, parsePairingReply, parseRelayLinkNotice, parseRoutinesGrant, probeBridgeHealth, type BridgeHealth, type ConnectionEvent, type ConnectionListener,
 } from '../ClientConnection.js';
 import type { GameMessageGroup } from '../GameMessageGroup.js';
 import { EOR_LOGIN_PROFILE, type LoginProfile } from '../LoginProfile.js';
@@ -207,7 +207,8 @@ export class Connection1999 implements NetConnection {
       this.emit({ type: 'connected' });
       this.sendLogin();
       this.loginTimer = setInterval(() => {
-        if (this.granted || this.loginSends >= LOGIN_MAX_SENDS) { this.stopLoginTimer(); return; }
+        if (this.granted) { this.stopLoginTimer(); return; }
+        if (this.loginSends >= LOGIN_MAX_SENDS) { this.loginTimedOut(); return; }
         this.sendLogin();
       }, LOGIN_RESEND_MS);
       this.serviceTimer = setInterval(() => this.service(), SERVICE_MS);
@@ -221,11 +222,14 @@ export class Connection1999 implements NetConnection {
         if (grant) {
           this.emit({ type: 'routinesGrant', data: grant.grant, error: grant.reason ?? undefined });
           this.emit({ type: 'automationAccess', data: grant.automation });
+          this.emit({ type: 'previewAccess', data: grant.preview });
         }
         const call = grant ? null : parseAgentCall(ev.data);
         if (call) this.emit({ type: 'agentCall', data: call });
         const pairing = grant || call ? null : parsePairingReply(ev.data);
         if (pairing) this.emit({ type: 'agentPairing', data: pairing });
+        const link = grant || call || pairing ? null : parseRelayLinkNotice(ev.data);
+        if (link) this.emit({ type: 'relayLink', data: link });
         return;
       }
       this.handleDatagram(new Uint8Array(ev.data as ArrayBuffer));
@@ -277,19 +281,12 @@ export class Connection1999 implements NetConnection {
 
   private sendLogin(): void {
     this.loginSends++;
-    let body: Uint8Array;
-    try {
-      body = buildLoginBody1999({
-        version: this.loginProfile.clientVersion || VERSION_1999,
-        account: this.account, password: this.password,
-        portalIteration: this.datIterations.portal, cellIteration: this.datIterations.cell,
-      });
-    } catch (err) {
-      // The 1999 credential field holds 19 characters; say so instead of sending a truncated login.
-      this.emit({ type: 'error', error: (err as Error).message, characterError: CharacterError.AccountDoesntExist });
-      this.disconnect();
-      return;
-    }
+    // Credentials past the 20-byte field are truncated, as the retail client did (Login1999.ts).
+    const body = buildLoginBody1999({
+      version: this.loginProfile.clientVersion || VERSION_1999,
+      account: this.account, password: this.password,
+      portalIteration: this.datIterations.portal, cellIteration: this.datIterations.cell,
+    });
     this.raw(buildPacket1999({ sequence: 1, flags: F1999.Checksum, recipient: 0, time: 0, body }));
   }
 
@@ -311,7 +308,7 @@ export class Connection1999 implements NetConnection {
         if (this.checksumFailures <= 5) console.warn(`[1999] checksum mismatch seq ${h.sequence} flags 0x${h.flags.toString(16)}`);
       }
     }
-    if (h.flags & F1999.NetError) { this.loginRefused(b); return; }
+    if (h.flags & F1999.NetError) { this.onNetError(b); return; }
     if (h.flags & F1999.Disconnect) { this.ws?.close(); return; }
     const body = b.subarray(HEADER_SIZE_1999);
 
@@ -345,7 +342,14 @@ export class Connection1999 implements NetConnection {
     if (!grant) return;
     const expected = this.loginProfile.clientVersion || VERSION_1999;
     if (parseFloat(grant.version) !== parseFloat(expected)) {
-      this.emit({ type: 'error', error: `Server version ${grant.version} does not match this client (${expected})` });
+      // The AC1999 server's answer to a build it doesn't serve (Network.cpp:576 SendVersionRejectGrant):
+      // a grant carrying its own version, which the 1999 client's exact check refuses with "You do not
+      // have the current version of Asheron's Call installed." (Net_RecvLogonAccept @ 0x418550). This
+      // used to raise no notice at all.
+      this.emit({
+        type: 'error', error: `Server version ${grant.version} does not match this client (${expected})`,
+        netErrorId: 'ID_ConnectionError_NetVersionMismatch',
+      });
       this.disconnect();
       return;
     }
@@ -356,10 +360,55 @@ export class Connection1999 implements NetConnection {
     this.emit({ type: 'handshakeComplete' });
   }
 
-  private loginRefused(b: Uint8Array): void {
-    const v = new DataView(b.buffer, b.byteOffset);
-    const stringId = b.length >= 24 ? v.getUint32(20, true) : 0;
-    this.emit({ type: 'error', error: `Login refused by the server (0x${stringId.toString(16)})`, characterError: CharacterError.AccountDoesntExist });
+  /**
+   * A NetError packet (flag 0x100000, connectionless): the AC1999 server's
+   * login refusal. CNetwork::SendConnectLoginFailure (reference/ac1999/
+   * Server/Source/Network.cpp:555) sends 28 bytes: the 20-byte header (seq
+   * 0, flags exactly 0x100000) and {u32 error, u32 ST_SERVER_ERRORS = 8},
+   * the error one of NetworkDefs.h:139-142, each the compute_str_hash of an
+   * ID_ConnectionError_* token in table 0x23000010:
+   *   STR_LOGIN_FAILED 0x04DF9C54 (ClientLogOnFailed): a wrong password for an
+   *     existing account, a failed account query, or a failed auto-create
+   *     (AuthenticateUserQuery::PerformQuery, Network.cpp:1222-1237);
+   *   STR_LOGIN_SERVER_FULL 0x00F9982C (ServerFull, Network.cpp:692);
+   *   STR_LOGIN_ACCOUNT_ONLINE 0x0C559B1E (PlayerAlreadyLoggedOn, Network.cpp:661);
+   *   STR_LOGIN_INVALID_AUTH 0x082E3779 (BadCryptoKey): no "account:password"
+   *     credential in the request (Network.cpp:1216).
+   * The page shows it as it shows GDLE's refusal (serverNetError →
+   * serverNetErrorNotice). It used to be CharacterError.AccountDoesntExist
+   * for every reason: "The account you specified doesn't exist." for a
+   * wrong password too (2026-10-12, live). The 1999 client itself ignored a
+   * NetError at login and sat waiting (reference/ac1999/knowledge/kb/
+   * networking/connection-handshake.md); the server's string ids name the
+   * reason, so they are shown.
+   * After the grant (the server never sends one there: SendCriticalError has
+   * no caller) it ends the session like a server Disconnect.
+   */
+  private onNetError(b: Uint8Array): void {
+    if (this.granted) { this.ws?.close(); return; }
+    const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    const stringId = b.length >= HEADER_SIZE_1999 + 4 ? v.getUint32(HEADER_SIZE_1999, true) : 0;
+    const tableId = b.length >= HEADER_SIZE_1999 + 8 ? v.getUint32(HEADER_SIZE_1999 + 4, true) : 0;
+    if (stringId === 0 && tableId === 0) return; // ID_NetError_None
+    console.warn(`[1999] login refused by the server: NetError 0x${stringId.toString(16)} (table ${tableId})`);
+    this.emit({
+      type: 'error',
+      error: `Login refused by the server (NetError 0x${stringId.toString(16)}, table ${tableId})`,
+      serverNetError: { stringId, tableId },
+    });
+    this.disconnect();
+  }
+
+  /**
+   * Every LoginRequest went unanswered (LOGIN_MAX_SENDS, LOGIN_RESEND_MS
+   * apart): the end-of-retail lane's ClientTimedOutServer. The 1999 client
+   * gave up too ("Server has not responded. Please try again later.", its
+   * client.exe strings); this lane used to stop resending and leave the
+   * connecting screen up with nothing said.
+   */
+  private loginTimedOut(): void {
+    this.stopLoginTimer();
+    this.emit({ type: 'error', error: 'Login timed out', netErrorId: 'ID_ConnectionError_ClientTimedOutServer' });
     this.disconnect();
   }
 

@@ -86,23 +86,41 @@ export function parsePairingReply(text: string): PairingReply | null {
   } catch { return null; }
 }
 
-export function parseRoutinesGrant(text: string): { grant: RoutinesGrant | null; reason: string | null; automation: boolean } | null {
+/**
+ * The relay link (docs/hosted-agent-connector.md §4.5): the bridge says it is draining (a deploy; /mcp now
+ * reaches the new deployment), or answers the tab's 'relayTicket' request with a ticket for its account.
+ */
+export type RelayLinkNotice = { kind: 'draining' } | { kind: 'ticket'; ticket: string | null; draining: boolean };
+export function parseRelayLinkNotice(text: string): RelayLinkNotice | null {
+  if (!text.startsWith('{"bridgeDraining"') && !text.startsWith('{"relayTicket"')) return null;
+  try {
+    const j = JSON.parse(text) as { bridgeDraining?: unknown; relayTicket?: { ticket?: unknown; draining?: unknown } };
+    if (j.bridgeDraining === true) return { kind: 'draining' };
+    const t = j.relayTicket;
+    if (!t || typeof t !== 'object') return null;
+    return { kind: 'ticket', ticket: typeof t.ticket === 'string' && t.ticket ? t.ticket : null, draining: t.draining === true };
+  } catch { return null; }
+}
+
+export function parseRoutinesGrant(text: string): { grant: RoutinesGrant | null; reason: string | null; automation: boolean; preview: boolean } | null {
   let j: unknown;
   try { j = JSON.parse(text); } catch { return null; }
   if (!j || typeof j !== 'object' || !('routines' in j)) return null;
-  const o = j as { routines: unknown; reason?: unknown; automation?: unknown; server?: unknown; account?: unknown };
+  const o = j as { routines: unknown; reason?: unknown; automation?: unknown; preview?: unknown; server?: unknown; account?: unknown };
   const r = o.routines;
   const reason = typeof o.reason === 'string' ? o.reason : null;
   // AGENT.automation-allowlist — the bridge allowlists this account for the automation UI.
   const automation = o.automation === true;
+  // Preview features (the Virindi Views bar): accounts the bridge lets try UI before everyone gets it.
+  const preview = o.preview === true;
   if (r && typeof r === 'object' && typeof (r as RoutinesGrant).token === 'string' && typeof (r as RoutinesGrant).account === 'string' && typeof (r as RoutinesGrant).server === 'string') {
     const g = r as RoutinesGrant;
-    return { grant: { token: g.token, server: g.server, account: g.account }, reason: null, automation };
+    return { grant: { token: g.token, server: g.server, account: g.account }, reason: null, automation, preview };
   }
   if (r === null && typeof o.server === 'string' && typeof o.account === 'string' && reason === 'routines are not kept on this bridge') {
-    return { grant: { token: '', server: o.server, account: o.account, local: true }, reason: null, automation };
+    return { grant: { token: '', server: o.server, account: o.account, local: true }, reason: null, automation, preview };
   }
-  return { grant: null, reason: reason ?? 'no grant', automation };
+  return { grant: null, reason: reason ?? 'no grant', automation, preview };
 }
 
 export type ConnectionEventType =
@@ -151,10 +169,14 @@ export type ConnectionEventType =
   // AGENT.automation-allowlist — sent with every routines answer: data = true when the bridge
   // allowlists this account for the automation UI.
   | 'automationAccess'
+  // Sent with every routines answer: data = true when the bridge lets this account see preview UI (BRIDGE_PREVIEW_ACCOUNTS).
+  | 'previewAccess'
   // AGENT.hosted-mcp-connector — a relay call from the bridge's /mcp (data = { id, method, args, deadlineMs }).
   | 'agentCall'
   // Step 3: the bridge's answer to a pairing code or an unpair (data = PairingReply).
   | 'agentPairing'
+  // The bridge is draining, or its relay-link ticket (data = RelayLinkNotice; docs/hosted-agent-connector.md §4.5).
+  | 'relayLink'
   | 'message';
 
 export interface ConnectionEvent {
@@ -563,12 +585,15 @@ export class ClientConnection {
     if (grant) {
       this.emit({ type: 'routinesGrant', data: grant.grant, error: grant.reason ?? undefined });
       this.emit({ type: 'automationAccess', data: grant.automation });
+      this.emit({ type: 'previewAccess', data: grant.preview });
       return;
     }
     const call = parseAgentCall(text);
     if (call) { this.emit({ type: 'agentCall', data: call }); return; }
     const pairing = parsePairingReply(text);
-    if (pairing) this.emit({ type: 'agentPairing', data: pairing });
+    if (pairing) { this.emit({ type: 'agentPairing', data: pairing }); return; }
+    const link = parseRelayLinkNotice(text);
+    if (link) this.emit({ type: 'relayLink', data: link });
   }
 
   /** AGENT.hosted-mcp-connector — a text frame to the bridge (a relay answer or the tab's relay state). */
@@ -722,6 +747,14 @@ export class ClientConnection {
    */
   private handleSocketEnded(socket: unknown): void {
     if (this.sessionEndedFor === socket) return;
+    // A socket we already left (disconnect() closed it, then connect() opened
+    // the next one) whose close event arrives late says nothing about the
+    // live session. A socket on a dead network path (a VPN dropping, a
+    // network change) takes up to a minute to report its close, so it landed
+    // after the next login had entered the world, reported that session as
+    // dropped, and the page tore it down and logged in again
+    // (2026-10-12, Coldeve: bridge sessions 12 → 13 two seconds apart).
+    if (this.ws !== null && this.ws !== socket) return;
     this.sessionEndedFor = socket;
     if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
     this.stopConnectResponseRetry();

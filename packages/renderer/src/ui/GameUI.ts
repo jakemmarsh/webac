@@ -13,8 +13,9 @@ import { authoredMaterialCopy, morphTranslucencyToOriginal, drawAllParts } from 
 // ui/ChargenAttributeSliders.ts (p134 = value × 0.01 over the 0x100002ea
 // scrollbar's active width); ATTRIBUTE_MAX is no longer read here.
 import { fellowshipUpdateLine, fellowAddedLine, fellowQuitLine, fellowDismissedLine, fellowshipDisbandedLine } from './fellowshipChatLines.js';
+import { defaultChargenSkillClasses, chargenTotalNumSkills } from './chargenSkillDefaults.js';
 import { Heritage, Gender, SkillAdvancementClass, EquipMask, DEFAULT_ATTRIBUTE_CREDITS, Sound, CombatMode, ItemType, COINSTACK_WCID, playerKillerStatusLabel, skillIdLabel, skillAdvancementClassLabel, characterOptionIsSet, CHARACTER_OPTION_BIT_MAP, chatColorFor, shopSellPrice, shopBuyPrice } from '@ac/shared';
-import type { InventoryItem, EquippedItem, SpellDefinition, NameFilterRules, TabooPredicate } from '@ac/shared';
+import type { InventoryItem, EquippedItem, SpellDefinition, NameFilterRules, TabooPredicate, MtChatLine, MtChatSpeech } from '@ac/shared';
 import { SPELLBOOK_FILTERS_DEFAULT, isSpellbookFilteredOut, spellbookLevelBit, spellbookOrder, spellbookSchoolBit, toggleSpellbookFilter, spellbookDeleteConfirmText } from './spellbookFilter.js';
 import { MagicSchool, magicSchoolColor, magicSchoolColorRGBA, LUMINANCE_MIN_LEVEL, getAppropriateName, StartingTown, SPELL_COMPONENT_DID_MAPPER_ID } from '@ac/shared';
 import { contractProgressText, contractTimedText, contractRepeatLeft, type ContractTiming } from '@ac/shared';
@@ -61,6 +62,16 @@ import { renderVvsText, vvsFieldStyle, VVS_COLORS, VVS_TAB_PX } from './automati
 import { renderUbMainWindow, UB_MAIN_SIZE, type UbMainSource } from './automation/UbMainWindow.js';
 import { renderVvsBar, VVS_BAR, type VvsBarEntry } from './automation/VvsBar.js';
 import { UB_ICON_PNG } from './automation/ubIcon.js';
+import { MagToolsWindow, MT_FRAME, MT_WINDOW } from './magtools/MagToolsWindow.js';
+import type { MagToolsRuntime } from '../agent/magtools/magToolsRuntime.js';
+import { mtOptionWired } from '../agent/magtools/mtWired.js';
+import type { GoArrowRuntime } from './goarrow/goArrowRuntime.js';
+import { renderGoArrowWindow } from './goarrow/GoArrowWindow.js';
+import { goArrowGlyphUrl } from './goarrow/ArrowHud.js';
+import { VCS_FRAME, VCS_TITLE, VcsActions, newVcsUiState, renderVcsWindow, vcsAcPreset } from './automation/VcsWindow.js';
+import { VcsModel, VCS_MAIN, VCS_MAGTOOLS_PRESETS, VCS_VTANK_PRESETS } from '@ac/shared';
+import { REPORTER_ICON, REPORTER_SIZE, STATUS_HUD_CONFIG_SIZE, StatusHudModel, VIRINDI_UIS_SIZE, renderReporterWindow, renderStatusHud, renderStatusHudConfig, renderVirindiUis } from './automation/StatusHud.js';
+import { REPORTER_HUD_PLUGIN, ReporterXp, type ReporterReads } from '@ac/shared';
 import type { UbMapUi, UbMapWhich } from './maps/UbMaps.js';
 /** UtilityBelt's map windows as GameUI drives them (UbMaps). */
 type UbMapsControl = { toggle(which: UbMapWhich): string; closeAll(): void; close(which: UbMapWhich): void; isOpen(which: UbMapWhich): boolean };
@@ -441,6 +452,7 @@ import { STYLE_ARROW_PREV, STYLE_ARROW_NEXT, stepChargenStyle, clampChargenColor
 import { appearanceHeritageRules, appearanceUpdateRandomize, APPEARANCE_ROWS, APPEARANCE_CLOTHES_BUTTON, APPEARANCE_FACE_STACK, APPEARANCE_CLOTHES_STACK } from './ChargenAppearanceHeritage.js';
 import type { PaperdollDropTarget } from '../inventory/PaperdollDragObject.js';
 import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
+import { PanelPressGuard } from './PanelPressGuard.js';
 
 /* ------------------------------------------------------------------ */
 /*  Skill name lookup (from ACE Skill enum)                            */
@@ -2865,6 +2877,8 @@ export class GameUI {
       : 'medium';
   // Examine panel
   private examinePanel: HTMLDivElement | null = null;
+  /** Holds a panel's rebuild while a press inside it waits for its click (PanelPressGuard). */
+  private readonly pressGuard = new PanelPressGuard();
   private examinePanelHandle: PanelHandle | null = null;
   /** gmExaminationUI::current_appraisal_ID — the object the open window shows. */
   private examineCurrentGuid = 0;
@@ -3773,6 +3787,8 @@ export class GameUI {
    */
   onStreamedFilesArrived(): void {
     this.reloadMissedDatAssets();
+    // The plugin windows' art that streamed in late: the bar's icons and the VVS windows' frames and icons.
+    if (this.vvsBarEl?.querySelector('[data-icon-pending]')) this.refreshVvsBar();
     for (const cb of [...this.filesArrivedListeners]) {
       try { cb(); } catch (e) { console.warn('[GameUI] files-arrived listener failed', e); }
     }
@@ -4603,21 +4619,7 @@ export class GameUI {
    * characters were missing nearly all skill records.
    */
   defaultChargenSkillClasses(heritage: number): number[] {
-    const total = this.chargenTotalNumSkills();
-    const out: number[] = new Array(total).fill(SkillAdvancementClass.Inactive);
-    if (!this.skillTable) return out;
-    const hgSkills = this.charGen?.heritageGroups.get(heritage)?.skills;
-    for (const [id, s] of this.skillTable.skills) {
-      if (id < 1 || id >= total) continue; // retail loop covers ids 1..totalNumSkills-1
-      const cg = hgSkills?.find(k => k.skillNum === id);
-      const trainedCost = cg ? cg.normalCost : s.trainedCost;
-      const specializedCost = cg ? cg.primaryCost : s.specializedCost;
-      if (trainedCost < 0 || specializedCost < 0) continue; // stays Inactive
-      out[id] = trainedCost < 1
-        ? (specializedCost < 1 ? SkillAdvancementClass.Specialized : SkillAdvancementClass.Trained)
-        : SkillAdvancementClass.Untrained;
-    }
-    return out;
+    return defaultChargenSkillClasses(this.skillTable?.skills, this.charGen?.heritageGroups.get(heritage)?.skills);
   }
 
   /**
@@ -4628,10 +4630,7 @@ export class GameUI {
    * PlayerFactory boots a create whose count does not match its ruleset.
    */
   chargenTotalNumSkills(): number {
-    if (!this.skillTable || this.skillTable.skills.size === 0) return 55;
-    let max = 0;
-    for (const id of this.skillTable.skills.keys()) if (id > max) max = id;
-    return max + 1;
+    return chargenTotalNumSkills(this.skillTable?.skills);
   }
 
   /**
@@ -5591,6 +5590,24 @@ export class GameUI {
     this.teleportLoopId = requestAnimationFrame(tick);
   }
 
+  /**
+   * One teleport-loop pass off the rAF clock (main.ts calls it on the
+   * background ticker's beat while rAF is silent). Chrome stops rAF in a
+   * hidden or covered tab, so the animation never reached TAS_OFF and
+   * LoginComplete never went out: ACE kept the player in portal space until
+   * the tab was looked at (6 min on Coldeve, 2026-10-12). Retail's UseTime
+   * kept running when minimized. The clock is wall time, so the extra passes
+   * change nothing in a visible tab.
+   */
+  pumpTeleportLoop(): void {
+    if (this.teleportLoopId === null) return;
+    this.teleportTick(this.portalClock());
+    if (this.teleportAnim.state === TeleportAnimState.Off && this.teleportLoopId !== null) {
+      cancelAnimationFrame(this.teleportLoopId);
+      this.teleportLoopId = null;
+    }
+  }
+
   /** One gmSmartBoxUI::UseTime pass (exposed for tests). */
   teleportTick(now: number): void {
     // gmSmartBoxUI::UseTime's teleport-in-progress mismatch: a logoff sets
@@ -5739,6 +5756,8 @@ export class GameUI {
 
   /** gmSpewBoxUI::RecvNotice_DisplayFinalStringInfo + Update for one string. */
   spewNotice(text: string): void {
+    // Mag-Tools' Status Text filters (preview UI).
+    if (this.statusTextFilter?.(text)) return;
     if (!this.spewBoxEl || !this.spewBoxEl.isConnected) { this.pendingSpew.push(text); return; }
     this.spewBox.push(text, Date.now());
     this.refreshSpewBox();
@@ -11080,7 +11099,7 @@ export class GameUI {
     if (this.chatMessages && this.pendingSystemMessages.length > 0) {
       const pending = this.pendingSystemMessages;
       this.pendingSystemMessages = [];
-      for (const { text, color, type, targetWindowId } of pending) this.addSystemMessage(text, color, type, targetWindowId);
+      for (const { text, color, type, targetWindowId, speech, preset } of pending) this.addSystemMessage(text, color, type, targetWindowId, speech ?? null, preset ?? null);
     }
 
     const chatInput = document.getElementById('chat-input') as HTMLInputElement;
@@ -12622,6 +12641,10 @@ export class GameUI {
   // provide the canonical local display.
   addChatMessage(sender: string, text: string, color = AC_COLORS.textMed, type: number = ChatMessageType.Broadcast): void {
     if (!this.chatMessages) return;
+    // Mag-Tools' chat filters (preview UI): a hidden line still reaches the sniffers (the combat tracker reads evades).
+    if (this.chatLineFilter?.({ text: `${sender}: ${text}`, type })) { this.callbacks.onChatLine?.(`${sender}: ${text}`); return; }
+    // Virindi Chat System (preview UI): its rules see the whole line; a routed line shows as a system line.
+    if (this.vcsHandle(`${sender}: ${text}`, color, type, 0, null, null)) return;
     // CORE.17.s — wrap the body at the hosting log's inner width (see
     // buildSystemChatLine); the sender prefix keeps its own canvas.
     const makeLine = (log: HTMLElement): HTMLElement => {
@@ -12681,7 +12704,7 @@ export class GameUI {
   // Wait..." addSystemMessage() call would otherwise be silently dropped on
   // the single most common path. Queue calls that arrive before the chat
   // log exists and flush them once renderHUD() wires it up.
-  private pendingSystemMessages: Array<{ text: string; color: string; type?: number; targetWindowId?: number }> = [];
+  private pendingSystemMessages: Array<{ text: string; color: string; type?: number; targetWindowId?: number; speech?: MtChatSpeech | null; preset?: { plugin: string; category: string } | null }> = [];
 
   /**
    * BUG.main-chat-shows-error-lines-in-retail — retail
@@ -12724,13 +12747,24 @@ export class GameUI {
    * in every window whose type filter passes; a window id = shown in THAT
    * window whatever its filter, and in no other.
    */
-  addSystemMessage(text: string, color = AC_COLORS.white, type: number = ChatMessageType.Broadcast, targetWindowId = 0): void {
-    if (!this.chatMessages) { this.pendingSystemMessages.push({ text, color, type, targetWindowId }); return; }
+  addSystemMessage(text: string, color = AC_COLORS.white, type: number = ChatMessageType.Broadcast, targetWindowId = 0, speech: MtChatSpeech | null = null, preset: { plugin: string; category: string } | null = null): void {
+    // Mag-Tools' chat filters (preview UI): a hidden line still reaches the sniffers (the combat tracker reads evades).
+    if (this.chatLineFilter?.({ text, type, speech })) { this.callbacks.onChatLine?.(text); return; }
+    if (!this.chatMessages) { this.pendingSystemMessages.push({ text, color, type, targetWindowId, speech, preset }); return; }
+    // Virindi Chat System (preview UI): after Mag-Tools has hidden what it hides. `preset` is a plugin line's
+    // VCS category; unset, the plugin's own window and colour stand.
+    if (this.vcsHandle(text, color, type, targetWindowId, speech, preset)) return;
+    this.showSystemLine(text, color, type, targetWindowId, true);
+  }
+
+  /** Show a line (retail's AddTextToScroll routing); `sniff` hands it to onChatLine. */
+  private showSystemLine(text: string, color: string, type: number, targetWindowId: number, sniff: boolean): void {
+    if (!this.chatMessages) return;
     if (targetWindowId !== 0 && targetWindowId !== MAIN_CHAT_WINDOW_ID) {
       const inst = this.floatyChatInstances.find((i) => i.def.windowId === targetWindowId);
       if (inst) {
         this.appendLineToFloaty(inst, (log) => this.buildSystemChatLine(text, color, type, GameUI.chatLogWrapWidth(log)));
-        this.callbacks.onChatLine?.(text);
+        if (sniff) this.callbacks.onChatLine?.(text);
         return;
       }
       targetWindowId = 0; // no such window: fall back to the filtered broadcast
@@ -12750,7 +12784,7 @@ export class GameUI {
       this.maybeScrollChatToBottom(wasAtBottom);
     }
     // FAITHFUL.270 — emit sniffer line for /logging dump (no-op if unsubscribed).
-    this.callbacks.onChatLine?.(text);
+    if (sniff) this.callbacks.onChatLine?.(text);
     // A line targeted at the main window shows nowhere else.
     if (targetWindowId === MAIN_CHAT_WINDOW_ID) return;
     // CORE.3.c — route into floating chat windows by text type
@@ -14775,6 +14809,7 @@ export class GameUI {
   }
 
   private renderInventoryPanel(): void {
+    if (this.pressGuard.defer(this.inventoryPanel, () => this.renderInventoryPanel())) return;
     // Clean up old panel
     if (this.inventoryPanelHandle) {
       this.inventoryPanelHandle.close();
@@ -18019,6 +18054,7 @@ export class GameUI {
   }
 
   private renderMagicPanel(): void {
+    if (this.pressGuard.defer(this.magicPanel, () => this.renderMagicPanel())) return;
     if (this.magicPanelHandle) {
       this.magicPanelHandle.close();
       this.magicPanelHandle = null;
@@ -18605,6 +18641,7 @@ export class GameUI {
    * the rebuild; a tab switch starts at the top.
    */
   private renderCharPanel(): void {
+    if (this.pressGuard.defer(this.charPanel, () => this.renderCharPanel())) return;
     const tab = this.charPanelTab;
     // Key by the element-id PATH: the three tab panes inherit the same list
     // template, so a bare id (0x1000023d) names a hidden pane's list too.
@@ -21360,6 +21397,8 @@ export class GameUI {
    * while a routine runs. null takes it all away.
    */
   setAutomationSource(source: VTankSource | null): void {
+    // VTank's six VCS presets (it registers them when it loads).
+    if (source) for (const p of VCS_VTANK_PRESETS) this.vcs.register(p.plugin, p.category, p.description);
     if (this.automationPanelVisible) this.setPanelsWindowPanel(AUTOMATION_PANEL, false);
     this.closeAutomationEditor();
     this.closeVTankWindow();
@@ -21468,6 +21507,7 @@ export class GameUI {
   /** Once a second: the open panel's status / stats and the HUD strip follow the run. */
   private tickAutomation(): void {
     this.updateAutomationStrip();
+    this.tickReporter();
     if (!this.automationModel) return;
     // The VirindiTank window's activity (its status line, the Action History, /vt log) is watched whether or
     // not a window is open, as VTank logs with its window closed.
@@ -21492,10 +21532,10 @@ export class GameUI {
   /** The VirindiTank window's own small windows (the Action History, the remote), by key. */
   private vtankWindows = new Map<string, { el: HTMLDivElement; redraw: () => void }>();
 
-  private openVTankAux(key: string, title: string, W: number, H: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void): void {
+  private openVTankAux(key: string, title: string, W: number, H: number, draw: (body: HTMLElement, redraw: () => void, close: () => void) => void, frame: { icon?: number | string | 'none'; titleExtra?: HTMLElement } = {}): void {
     const open = this.vtankWindows.get(key);
     if (open) { open.redraw(); return; }
-    const { win, body } = this.buildVTankFrame(title, W, H, `acjs.vtank.${key}`, () => this.closeVTankAux(key));
+    const { win, body } = this.buildVTankFrame(title, W, H, `acjs.vtank.${key}`, () => this.closeVTankAux(key), frame);
     win.dataset.vtankAux = key;
     win.style.zIndex = '9010';
     const close = () => this.closeVTankAux(key);
@@ -21561,7 +21601,7 @@ export class GameUI {
     if (this.vtankWindows.has('ub-main')) { this.closeVTankAux('ub-main'); return; }
     const src = this.ubMainSource();
     const say = (lines: string[]) => { for (const l of lines) this.addSystemMessage(`[UB] ${l}`, chatColorFor(ChatMessageType.System), ChatMessageType.System); };
-    this.openVTankAux('ub-main', 'UtilityBelt', UB_MAIN_SIZE.w + 12, UB_MAIN_SIZE.h + 35, (body, redraw) => renderUbMainWindow(body, this.vtankKit(), src, redraw, say));
+    this.openVTankAux('ub-main', 'UtilityBelt', UB_MAIN_SIZE.w + 12, UB_MAIN_SIZE.h + 35, (body, redraw) => renderUbMainWindow(body, this.vtankKit(), src, redraw, say), { icon: UB_ICON_PNG });
   }
   get ubMainWindowOpen(): boolean { return this.vtankWindows.has('ub-main'); }
 
@@ -21589,6 +21629,221 @@ export class GameUI {
     return on ? 'Virindi Views bar shown' : 'Virindi Views bar hidden (/automation bar shows it)';
   }
 
+  // ── Virindi Reporter and Virindi HUDs' Status HUD (automation/StatusHud.ts, @ac/shared virindiReporter.ts) ──
+
+  /** The Status HUD's entries (Reporter's, VTank's statushud), the HUD's choice kept per character. */
+  readonly statusHud = new StatusHudModel(() => { try { return globalThis.localStorage ?? null; } catch { return null; } }, () => `${this.worldName ?? ''}.${this.charInfo?.name ?? ''}`);
+  private reporter: ReporterXp | null = null;
+  private reporterResetPending = false;
+
+  /** main.ts hands over the character's experience reads once in the world (null when it leaves). */
+  setReporterReads(reads: ReporterReads | null): void {
+    this.reporter = reads ? new ReporterXp(reads) : null;
+    this.reporterResetPending = !!reads;
+    this.statusHud.onChange = () => this.redrawStatusWindows();
+    this.refreshVvsBar();
+  }
+
+  /** A character entered the world (Reporter resets at Decal's LoginComplete). */
+  reporterLogin(): void { this.reporterResetPending = true; }
+
+  /** Once a second: Reporter's samples, and its eight Status HUD entries. */
+  private tickReporter(): void {
+    const r = this.reporter;
+    if (!r) return;
+    if (this.reporterResetPending) { r.reset(); if (r.started) this.reporterResetPending = false; }
+    if (!r.started) return;
+    r.tick();
+    for (const [entry, value] of r.hudEntries()) this.statusHud.update(REPORTER_HUD_PLUGIN, entry, value);
+  }
+
+  private reporterSay(line: string): void { this.addSystemMessage(`[VR] ${line}`, chatColorFor(ChatMessageType.OutgoingTell), ChatMessageType.OutgoingTell); }
+
+  toggleReporterWindow(): void {
+    if (this.vtankWindows.has('reporter')) { this.closeVTankAux('reporter'); return; }
+    const r = this.reporter;
+    if (!r) return;
+    this.openVTankAux('reporter', 'VirindiReporter', REPORTER_SIZE.w, REPORTER_SIZE.h, (body) => renderReporterWindow(body, this.vtankKit(), {
+      reset: () => r.reset(),
+      report: () => this.reporterSay(r.report()),
+      // Report /a and /f go through the chat parser as typed: no [VR] prefix (Reporter's InvokeChatParser).
+      reportA: () => this.callbacks.onChatSend?.(`/a ${r.report()}`),
+      reportF: () => this.callbacks.onChatSend?.(`/f ${r.report()}`),
+    }), { icon: REPORTER_ICON });
+  }
+
+  /** The Status HUD: sized to its rows; a Ctrl+click on the eye opens its config. */
+  toggleStatusHud(): void {
+    if (this.vtankWindows.has('status-hud')) { this.closeVTankAux('status-hud'); return; }
+    // VHUDs' eye button is Virindi's art: a plain 13 px VVS button in its place (ours), beside the close box.
+    const eye = this.vtankKit().flatButton('', () => {}, 13, 13);
+    eye.dataset.statusHudEye = '1';
+    Object.assign(eye.style, { position: 'absolute', right: '24px', top: '6px' });
+    // Ctrl+click opens the config. On a Mac, Ctrl+click is the system's right-click and no click event follows,
+    // so it is taken on the press, and the context menu it would open is suppressed.
+    eye.addEventListener('mousedown', (e) => { if (e.ctrlKey && e.button === 0) { e.preventDefault(); e.stopPropagation(); this.openStatusHudConfig(); } }, true);
+    eye.addEventListener('contextmenu', (e) => { if (e.ctrlKey) e.preventDefault(); });
+    this.openVTankAux('status-hud', 'StatusHUD', 140, 52, (body) => {
+      const size = renderStatusHud(body, this.statusHud);
+      const w = this.vtankWindows.get('status-hud')?.el;
+      if (w) { w.style.width = `${size.w}px`; w.style.height = `${size.h}px`; body.style.width = `${size.w - 12}px`; body.style.height = `${size.h - 35}px`; }
+    }, { icon: 'none', titleExtra: eye });
+  }
+
+  private openStatusHudConfig(): void {
+    if (this.vtankWindows.has('status-hud-config')) return;
+    this.openVTankAux('status-hud-config', 'StatusHUD Config', STATUS_HUD_CONFIG_SIZE.w, STATUS_HUD_CONFIG_SIZE.h, (body, redraw, close) => renderStatusHudConfig(body, this.vtankKit(), this.statusHud, redraw, close), { icon: 'none' });
+  }
+
+  /** The Virindi UIs menu: the HUDs this client has (VT MiniRemote, Status HUD), each shown or hidden. */
+  toggleVirindiUis(): void {
+    if (this.vtankWindows.has('virindi-uis')) { this.closeVTankAux('virindi-uis'); return; }
+    this.openVTankAux('virindi-uis', 'Virindi UIs', VIRINDI_UIS_SIZE.w, VIRINDI_UIS_SIZE.h, (body, redraw) => renderVirindiUis(body, this.vtankKit(), [
+      ...(this.vtankModel ? [{ label: 'VT MiniRemote', on: this.vtankWindows.has('remote'), toggle: () => { if (this.vtankWindows.has('remote')) this.closeVTankAux('remote'); else this.vtankModel?.openRemote(); } }] : []),
+      { label: 'Status HUD', on: this.vtankWindows.has('status-hud'), toggle: () => this.toggleStatusHud() },
+    ], redraw), { icon: 'none' });
+  }
+
+  private redrawStatusWindows(): void {
+    for (const k of ['status-hud', 'status-hud-config']) this.vtankWindows.get(k)?.redraw();
+  }
+
+  // ── Virindi Chat System 5 (@ac/shared vcs5.ts, automation/VcsWindow.ts; preview UI) ──
+
+  /** VCS's presets and rules, kept per character in this browser. */
+  readonly vcs = new VcsModel(() => { try { return globalThis.localStorage ?? null; } catch { return null; } }, () => `${this.worldName ?? ''}.${this.charInfo?.name ?? ''}`);
+  private vcsUi = newVcsUiState();
+  private readonly vcsActions = new VcsActions({
+    playWave: (wave) => this.playVcsWave(wave),
+    // ChatBox Do and tell forwarding run as though typed in the chat box.
+    chat: (line) => this.callbacks.onChatSend?.(line),
+    now: () => performance.now(),
+  });
+
+  private playVcsWave(wave: number): void {
+    this.audioManager?.init();
+    // VCS played its alerts even with AC's sounds off ([W]: "You can keep AC sounds off and still receive the alert"): a
+    // category of its own, outside the Options page's interface / effects / ambient switches, straight to the output.
+    void this.soundPlayer?.playSound(wave, 'plugin', 1, 'ui');
+  }
+
+  /** The Sound picker's waves: the interface's sound table (the era's own portal.dat), one row per wave. */
+  private vcsSounds(): Array<{ label: string; wave: number }> {
+    if (!this.soundPlayer) return [];
+    this.uiSoundTableId ??= resolveUiSoundTable(this.uiPortalDb);
+    const table = this.soundPlayer.loadSoundTable(this.uiSoundTableId, 'ui');
+    const out: Array<{ label: string; wave: number }> = [];
+    const seen = new Set<number>();
+    for (const [key, d] of table?.data ?? []) {
+      const waves = d.data.map((x) => x.soundId).filter((w) => w && !seen.has(w));
+      waves.forEach((w, i) => { seen.add(w); out.push({ label: `${Sound[key] ?? `Sound ${key}`}${waves.length > 1 ? ` ${i + 1}` : ''}`, wave: w }); });
+    }
+    return out.sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  /** Open or close VCS's window. */
+  toggleVcsWindow(): void {
+    if (this.vtankWindows.has('vcs')) { this.closeVTankAux('vcs'); return; }
+    if (!this.previewFeatures) return;
+    this.openVTankAux('vcs', VCS_TITLE, VCS_FRAME.w, VCS_FRAME.h, (body, redraw) => renderVcsWindow(body, this.vtankKit(), this.vcs, this.vcsUi, { sounds: () => this.vcsSounds(), playWave: (w) => this.playVcsWave(w) }, redraw), { icon: 'none' });
+  }
+
+  /**
+   * VCS's choke point (preview UI only): after Mag-Tools' filters, a line with a set preset, or one a
+   * pattern matches, is routed, recoloured or hidden here and its action fired. True when VCS handled it.
+   */
+  private vcsHandle(text: string, color: string, type: number, targetWindowId: number, speech: MtChatSpeech | null, preset: { plugin: string; category: string } | null): boolean {
+    if (!this.previewFeatures) return false;
+    const r = this.vcs.route({ text, color, preset: preset ?? vcsAcPreset(text, type, speech) });
+    if (!r) return false;
+    if (r.action) this.vcsActions.fire(r.action, text, type, speech);
+    if (r.hide) { this.callbacks.onChatLine?.(text); return true; }
+    if (!r.windows.length) { this.showSystemLine(text, r.color, type, targetWindowId, true); return true; }
+    for (const w of r.windows) {
+      const id = w === VCS_MAIN ? MAIN_CHAT_WINDOW_ID : w;
+      // A floating window that isn't built shows nothing (a targeted line never falls back to every window here).
+      if (id !== MAIN_CHAT_WINDOW_ID && !this.floatyChatInstances.some((i) => i.def.windowId === id)) continue;
+      this.showSystemLine(text, r.color, type, id, false);
+    }
+    this.callbacks.onChatLine?.(text);
+    return true;
+  }
+
+  // ── Mag-Tools (agent/magtools/magToolsRuntime.ts, ui/magtools/MagToolsWindow.ts) ──
+
+  private magTools: MagToolsRuntime | null = null;
+  /** True hides a chat line (Mag-Tools' Misc → Filters, an Autopack trigger line); checked first by addChatMessage / addSystemMessage. */
+  chatLineFilter: ((line: MtChatLine) => boolean) | null = null;
+  /** True hides a status-bar (spew box) text (Mag-Tools' Status Text filters). */
+  statusTextFilter: ((text: string) => boolean) | null = null;
+  setMagTools(rt: MagToolsRuntime | null): void {
+    this.magTools = rt;
+    // Mag-Tools' three VCS presets (PluginCore: VCS_Connector.InitializeCategory).
+    if (rt) for (const p of VCS_MAGTOOLS_PRESETS) this.vcs.register(p.plugin, p.category, p.description);
+    this.chatLineFilter = rt ? (line) => rt.filterChat(line) : null;
+    this.statusTextFilter = rt ? (text) => rt.statusTextHidden(text) : null;
+    if (rt) rt.onChange = () => this.vtankWindows.get('magtools')?.redraw();
+    this.refreshVvsBar();
+  }
+
+  toggleMagToolsWindow(): void {
+    if (this.vtankWindows.has('magtools')) { this.closeVTankAux('magtools'); return; }
+    const rt = this.magTools;
+    if (!rt) return;
+    rt.x.appraiseWorn?.();
+    let win: MagToolsWindow | null = null;
+    const redraw = () => this.vtankWindows.get('magtools')?.redraw();
+    const kit = this.vtankKit();
+    win = new MagToolsWindow(kit, {
+      mana: rt.mana,
+      combat: { current: rt.combat.current, persistent: rt.combat.persistent, clearPersistent: () => rt.clearPersistent() },
+      options: rt.options,
+      // Trackers → Corpse / Player / Inv. Items, Loggers, Tools → Inventory / Character / Server (magToolsRuntime feeds them).
+      corpses: { tracker: rt.corpses, select: (id) => rt.selectObject(id) },
+      players: { tracker: rt.players, select: (id) => rt.selectObject(id) },
+      inventoryTracker: rt.inventoryTracker,
+      chatLog: { logger: rt.chatLogger, fileName: () => rt.chatLogFileName(), download: (name, text) => kit.download(name, text) },
+      inventory: { items: () => rt.inventoryToolItems(), select: (id) => rt.selectInventoryItem(id), copy: (which) => { void rt.copyInventory(which, (name, text) => kit.download(name, text)); } },
+      commands: { lists: rt.commandLists, character: () => rt.characterScope(), server: () => rt.serverScope() },
+      redraw,
+      // Only options whose feature runs here (no dead-end UI): magToolsRuntime mtOptionWired.
+      optionShown: (d) => mtOptionWired(d),
+    });
+    this.openVTankAux('magtools', MT_WINDOW.title, MT_FRAME.w, MT_FRAME.h, (body) => win!.render(body), { icon: MT_WINDOW.icon });
+    // The mana column counts down between appraisals: redraw once a second while open.
+    const tick = setInterval(() => { if (!this.vtankWindows.has('magtools')) { clearInterval(tick); return; } redraw(); }, 1000);
+  }
+
+  // ── GoArrow (ui/goarrow/; preview UI) ──
+
+  private goArrow: GoArrowRuntime | null = null;
+  setGoArrow(rt: GoArrowRuntime | null): void {
+    this.goArrow?.hud?.dispose();
+    if (this.goArrow) this.goArrow.hud = null;
+    this.goArrow = rt;
+    if (rt) {
+      rt.mount(() => this.hudContainer);
+      rt.onRedraw = () => this.vtankWindows.get('goarrow')?.redraw();
+      rt.onResize = (w, h) => {
+        const win = this.vtankWindows.get('goarrow')?.el;
+        if (!win) return;
+        win.style.width = `${w}px`; win.style.height = `${h}px`;
+        const body = win.lastElementChild as HTMLElement | null;
+        if (body) { body.style.width = `${w - 12}px`; body.style.height = `${h - 35}px`; }
+      };
+    }
+    this.refreshVvsBar();
+  }
+
+  /** GoArrow's window ("GoArrow", 272 × 338 on the Atlas tab; resized per tab), icon 8064 = 0x06001F80. */
+  toggleGoArrowWindow(): void {
+    if (this.vtankWindows.has('goarrow')) { this.closeVTankAux('goarrow'); return; }
+    const rt = this.goArrow;
+    if (!rt) return;
+    void rt.ensureData();
+    this.openVTankAux('goarrow', 'GoArrow', 272 + 12, 338 + 35, (body, redraw) => renderGoArrowWindow(body, this.vtankKit(), rt.model, redraw), { icon: 0x06001f80 });
+  }
+
   /** The bar's entries: VirindiTank's window, the hotkeys, UtilityBelt's window and its maps while they are enabled. */
   private vvsBarEntries(): VvsBarEntry[] {
     const out: VvsBarEntry[] = [];
@@ -21604,12 +21859,34 @@ export class GameUI {
       if (maps && store.bool('DungeonMaps.Enabled')) out.push({ id: 'ub-dungeon', plugin: 'UtilityBelt', title: 'Dungeon Maps', icon: { dat: 0x06001ef3 }, open: maps.isOpen('dungeon'), toggle: () => { maps.toggle('dungeon'); this.refreshVvsBar(); } });
       if (maps && store.bool('LandscapeMaps.Enabled')) out.push({ id: 'ub-landscape', plugin: 'UtilityBelt', title: 'Landscape Maps', icon: { dat: 0x060033c1 }, open: maps.isOpen('landscape'), toggle: () => { maps.toggle('landscape'); this.refreshVvsBar(); } });
     }
+    if (this.goArrow) {
+      const rt = this.goArrow;
+      out.push({ id: 'goarrow', plugin: 'GoArrow', title: 'GoArrow', icon: { dat: 0x06001f80 }, open: this.vtankWindows.has('goarrow'), toggle: () => this.toggleGoArrowWindow() });
+      // GoArrow's VVS bar button for its arrow ("GoArrow: Arrow"), with its MIT toolbar glyph.
+      out.push({ id: 'goarrow-arrow', plugin: 'GoArrow', title: 'GoArrow: Arrow', icon: { url: goArrowGlyphUrl() }, open: rt.settings().visible, toggle: () => { rt.saveSettings({ visible: !rt.settings().visible }); this.refreshVvsBar(); } });
+    }
+    // Virindi Chat System 5: its snow globe is Virindi's art, so VVS's no-icon box.
+    if (this.previewFeatures) out.push({ id: 'vcs', plugin: 'Virindi Chat System', title: VCS_TITLE, icon: null, open: this.vtankWindows.has('vcs'), toggle: () => this.toggleVcsWindow() });
+    if (this.magTools) out.push({ id: 'magtools', plugin: 'Mag-Tools', title: 'Mag-Tools', icon: { dat: MT_WINDOW.icon }, open: this.vtankWindows.has('magtools'), toggle: () => this.toggleMagToolsWindow() });
+    if (this.reporter) {
+      out.push({ id: 'reporter', plugin: 'VirindiReporter', title: 'VirindiReporter', icon: { dat: REPORTER_ICON }, open: this.vtankWindows.has('reporter'), toggle: () => this.toggleReporterWindow() });
+      // Virindi HUDs' entry opens the Virindi UIs menu; its eye icon is Virindi's art, so VVS's no-icon box.
+      out.push({ id: 'vhuds', plugin: 'Virindi HUDs', title: 'Virindi UIs', icon: null, open: this.vtankWindows.has('virindi-uis'), toggle: () => this.toggleVirindiUis() });
+    }
     return out;
   }
 
+  /**
+   * Preview UI (2026-10-12, Jake: gate the bar to him until it's trusted): on for the accounts the bridge
+   * names (BRIDGE_PREVIEW_ACCOUNTS) and on dev builds. The windows themselves stay for everyone.
+   */
+  private previewFeatures = false;
+  setPreviewFeatures(on: boolean): void { this.previewFeatures = on; this.refreshVvsBar(); }
+  get previewFeaturesOn(): boolean { return this.previewFeatures; }
+
   /** Draw (or remove) the bar for what is open now. */
   refreshVvsBar(): void {
-    const show = this.automationAvailable && (this.vvsBarSetting() === 'on' || this.vvsBarSessionOn);
+    const show = this.previewFeatures && this.automationAvailable && (this.vvsBarSetting() === 'on' || this.vvsBarSessionOn);
     if (!show) { this.vvsBarEl?.remove(); this.vvsBarEl = null; return; }
     let bar = this.vvsBarEl;
     if (!bar) {
@@ -22200,7 +22477,7 @@ export class GameUI {
    * edges 0x06006129/2a/2b, the title line 0x060074c1, close 0x06006215,
    * dragged by its title bar; its place kept per browser under `key`.
    */
-  private buildVTankFrame(title: string, W: number, H: number, key: string, onClose: () => void): { win: HTMLDivElement; body: HTMLDivElement } {
+  private buildVTankFrame(title: string, W: number, H: number, key: string, onClose: () => void, opts: { icon?: number | string | 'none'; titleExtra?: HTMLElement } = {}): { win: HTMLDivElement; body: HTMLDivElement } {
     const win = document.createElement('div');
     let pos = { x: Math.max(0, Math.round((this.hudLogicalWidth() - W) / 2)), y: 60 };
     try {
@@ -22235,6 +22512,17 @@ export class GameUI {
     Object.assign(close.style, { position: 'absolute', right: '6px', top: '5px', width: '14px', height: '14px', cursor: 'pointer', ...(closeUrl ? { backgroundImage: `url(${closeUrl})`, backgroundSize: '100% 100%' } : { border: `1px solid ${AC_COLORS.tooltipBorder}` }) });
     close.addEventListener('click', (e) => { e.stopPropagation(); onClose(); });
     win.appendChild(close);
+    // VVS draws a view's icon at the title's left: a portal.dat id, an image URL, or ('none') VVS's coral box for a view without one.
+    if (opts.icon !== undefined) {
+      const ic = document.createElement('div');
+      ic.dataset.vvsTitleIcon = typeof opts.icon === 'number' ? `0x${opts.icon.toString(16)}` : opts.icon === 'none' ? 'none' : 'image';
+      const url = typeof opts.icon === 'number' ? this.getTexURL(opts.icon) : opts.icon === 'none' ? null : opts.icon;
+      Object.assign(ic.style, { position: 'absolute', left: '6px', top: '4px', width: '16px', height: '16px', pointerEvents: 'none' });
+      if (url) Object.assign(ic.style, { backgroundImage: `url(${url})`, backgroundSize: '100% 100%' });
+      else { const box = document.createElement('div'); Object.assign(box.style, { position: 'absolute', left: '3px', top: '3px', width: '10px', height: '10px', background: VVS_BAR.colors.noIcon }); ic.appendChild(box); }
+      win.appendChild(ic);
+    }
+    if (opts.titleExtra) win.appendChild(opts.titleExtra);
     bar.addEventListener('pointerdown', (ev) => {
       const sx = ev.clientX; const sy = ev.clientY;
       const ox = parseInt(win.style.left, 10); const oy = parseInt(win.style.top, 10);
@@ -22260,7 +22548,8 @@ export class GameUI {
     // VTank's window is about 800 x 218 at 800 x 600; never wider than the HUD.
     const W = Math.min(806, this.hudLogicalWidth() - 8);
     const H = 224;
-    const { win, body } = this.buildVTankFrame('Automation', W, H, 'acjs.vtankWindow', () => this.closeVTankWindow());
+    // VTank's tank icon is Virindi's art: VVS's no-icon box in its place, as on the bar.
+    const { win, body } = this.buildVTankFrame('Automation', W, H, 'acjs.vtankWindow', () => this.closeVTankWindow(), { icon: 'none' });
     win.dataset.vtankWindow = '1';
     const redraw = () => model.render(body, W - 12, H - 35, redraw);
     this.hudContainer.appendChild(win);
@@ -22581,6 +22870,7 @@ export class GameUI {
   }
 
   private renderVitaePanel(): void {
+    if (this.pressGuard.defer(this.vitaePanel, () => this.renderVitaePanel())) return;
     if (this.vitaePanelHandle) { this.vitaePanelHandle.close(); this.vitaePanelHandle = null; }
     if (this.vitaePanel) this.vitaePanel.remove();
     if (!this.layoutRenderer || !this.vitaePanelSource) return;
@@ -23661,6 +23951,7 @@ export class GameUI {
 
   /** Render the social panel. */
   private renderSocialPanel(): void {
+    if (this.pressGuard.defer(this.socialPanel, () => this.renderSocialPanel())) return;
     if (this.socialPanelHandle) {
       this.socialPanelHandle.close();
       this.socialPanelHandle = null;
@@ -29842,6 +30133,7 @@ export class GameUI {
   } as const;
 
   private renderContractPanel(): void {
+    if (this.pressGuard.defer(this.contractPanel, () => this.renderContractPanel())) return;
     if (this.contractPanelHandle) {
       this.contractPanelHandle.close();
       this.contractPanelHandle = null;
@@ -31619,6 +31911,7 @@ export class GameUI {
    * layout 0x2100001a.
    */
   showExaminationWindow(view: ExaminationView): void {
+    if (this.pressGuard.defer(this.examinePanel, () => this.showExaminationWindow(view))) return;
     this.hideExaminePanel();
     const lr = this.layoutRenderer;
     if (!lr) return;
@@ -31662,6 +31955,34 @@ export class GameUI {
     if (view.page === 'item' && view.item) this.fillExamineItemPage(handle, view.item, view.inscription);
     else if (view.page === 'spell' && view.spell) this.fillExamineSpellPage(handle, view.spell);
     else if (view.creature) this.fillExamineCreaturePage(handle, view.creature, view.previewMesh ?? null);
+  }
+
+  /**
+   * gmExaminationUI::SetAppraiseInfo @ 004adae0 for a reply that is not the
+   * one a player's examine awaits: it refills the current object's page in
+   * place and never shows a hidden window. So UseTime's 0.75 s re-appraisal
+   * leaves the window (its close button under the cursor, its drag, its 3D
+   * viewport) alone, and a reply landing after the close button doesn't
+   * reopen it. False (nothing drawn) when that object's window isn't up.
+   */
+  refreshExaminationWindow(view: ExaminationView): boolean {
+    const handle = this.examinePanelHandle;
+    if (!handle || view.guid !== this.examineCurrentGuid) return false;
+    // Only the creature / character pages refill in place (UseTime re-appraises nothing else).
+    if (view.page !== this.examineCurrentPage || !view.creature || view.page === 'item' || view.page === 'spell') {
+      this.showExaminationWindow(view);
+      return true;
+    }
+    const title = view.page === 'character' && view.creature.page === 'character' ? view.creature.windowTitle : view.title;
+    handle.setText(EXAMINATION_WINDOW.title, title);
+    // The viewport keeps its figure (replaceExaminePreview redraws a rebuilt mesh).
+    this.fillExamineCreaturePage(handle, view.creature, null);
+    return true;
+  }
+
+  /** The guid whose examine window is up, or null. */
+  get examinedGuid(): number | null {
+    return this.examinePanelHandle ? this.examineCurrentGuid : null;
   }
 
   /**

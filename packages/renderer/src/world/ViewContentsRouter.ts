@@ -33,6 +33,9 @@ import type { OpenContainerTracker } from './OpenContainerTracker';
  *    container (panel state must not be reset).
  *  - 'opened': (re)opens an external container — show panel, lid motion,
  *    open chime.
+ *  - 'deferred': a GDLE nested pack's list that came before the pack itself
+ *    (RELEASE.gdle-contents-before-viewcontents); the tracker keeps it and
+ *    the caller does nothing else.
  */
 export interface ViewContentsContext {
   /** Player character guid, null before login completes. */
@@ -53,7 +56,7 @@ export function routeViewContents(
   ctx: ViewContentsContext,
   containerGuid: number,
   items: Array<{ guid: number; containerType: number }>,
-): 'own-pack' | 'sub' | 'opened' {
+): 'own-pack' | 'sub' | 'opened' | 'deferred' {
   const t = ctx.tracker;
   // The already-open external container (refresh) or one of its tracked
   // nested containers. Checked FIRST: Container.SendInventory sends the
@@ -65,6 +68,14 @@ export function routeViewContents(
     const isOwnPack = (ctx.charGuid !== null && containerGuid === ctx.charGuid)
       || ctx.sidePackGuids.includes(containerGuid)
       || ctx.hasInventoryItem(containerGuid);
+    // RELEASE.gdle-contents-before-viewcontents — a GDLE nested pack's 0x196
+    // arrives before the pack's own CreateObject (MakeAwareViewContent
+    // recurses into packs first), after its items' CreateObjects named it as
+    // their container: kept for when the outer container is opened.
+    if (!isOwnPack && !ctx.isKnownWorldObject(containerGuid) && t.hasEarlyContentsFor(containerGuid)) {
+      t.noteEarlyContentsList(containerGuid, items);
+      return 'deferred';
+    }
     if (isOwnPack || !ctx.isKnownWorldObject(containerGuid)) {
       for (let i = 0; i < items.length; i++) ctx.setSlotForItem(items[i].guid, i);
       return 'own-pack';

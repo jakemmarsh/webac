@@ -95,6 +95,8 @@ Hosting egress is roughly `bytesToServer + bytesToBrowser`.
 | `BRIDGE_METRICS_TOKEN` | — | Bearer token for `/metrics` |
 | `BRIDGE_ROUTINES_DIR` | dev: `~/.acjs-agent/routines`; production: off | Where `/routines` keeps each account's automation routines (`<server>/<account>.json`). A session gets a token for them with the text message `routines` once its server's CharacterList has named the account (`src/routines.ts`). Production keeps none unless this names a volume; `none` turns it off |
 | `BRIDGE_ALLOW_ANY_UDP_SOURCE` | off | Accept reply datagrams from any source (default: only the target's IP on base/base+1) |
+| `BRIDGE_SPP` | off | Pinned mode: the target trusts this bridge and reads each player's real address from a [Simple Proxy Protocol](https://developers.cloudflare.com/spectrum/reference/simple-proxy-protocol-header/) header on every datagram. Needs a server running the proposed ACE `TrustedProxyAddresses` (ACEmulator/ACE#4508, not merged; stock ACE has no support). Turn on only together with the server (docs/operators.md) |
+| `BRIDGE_SPP_SERVERS` | unset | Multi mode: comma-separated server ids that trust this bridge (as `BRIDGE_SPP`); era probes skip them |
 | `BRIDGE_CAPTURE` | — | Append inbound datagrams to a replay-corpus file. **Refused when `NODE_ENV=production`** |
 | `BRIDGE_DEBUG` | off | Per-packet debug logs |
 | `BRIDGE_LATENCY_MS` / `BRIDGE_JITTER_MS` / `BRIDGE_LOSS_PCT` / `BRIDGE_IMPAIR_SEED` | off | Simulated network impairment (test harness) |

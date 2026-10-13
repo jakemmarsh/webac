@@ -13,7 +13,7 @@ import { CLIENT_ERROR_MAX_BODY } from './clientErrors.js';
 import type { IncomingMessage, ServerResponse } from 'http';
 
 export type ByteDirection = 'ws_in' | 'udp_out' | 'udp_in' | 'ws_out';
-export type DropReason = 'rate_limited' | 'backpressure' | 'foreign_udp';
+export type DropReason = 'rate_limited' | 'backpressure' | 'foreign_udp' | 'spp_missing';
 
 export class BridgeMetrics {
   readonly startedAt: number;
@@ -21,7 +21,7 @@ export class BridgeMetrics {
   sessionsClosed = 0;
   readonly rejects = new Map<string, number>();
   readonly bytes: Record<ByteDirection, number> = { ws_in: 0, udp_out: 0, udp_in: 0, ws_out: 0 };
-  readonly drops: Record<DropReason, number> = { rate_limited: 0, backpressure: 0, foreign_udp: 0 };
+  readonly drops: Record<DropReason, number> = { rate_limited: 0, backpressure: 0, foreign_udp: 0, spp_missing: 0 };
   readonly closes = new Map<string, number>();
   /** RELEASE.error-reporting — accepted client crash reports by kind. */
   readonly clientErrors = new Map<string, number>();

@@ -13,6 +13,7 @@ import { DatStore, fileKey } from '../packages/renderer/src/dat/streaming/DatSto
 import { appearanceRoots, arrivalCellOf, queuedObjectRoots } from '../packages/renderer/src/dat/streaming/ArrivalEvents.js';
 import { MemoryObjectCache } from '../packages/renderer/src/dat/streaming/ObjectCache.js';
 import { FakeBucket, buildManifest, buildPack } from './_harness/datSet.js';
+import { TeleportAnimation, TeleportAnimState } from '../packages/renderer/src/effects/PortalSpaceModel.js';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -342,6 +343,52 @@ describe('GatedEventQueue', () => {
     expect(seen).toEqual([]);
     q.push({ type: 'message', n: 3 });
     expect(seen).toEqual([3]);
+  });
+
+  it('clear() mid-hold still ends the hold through afterRelease, once (the next login opens its own tunnel)', async () => {
+    // Coldeve 2026-10-12: a session that ended while the login gate held left
+    // main.ts's "the gate opened the tunnel" flag set; the next login skipped
+    // its tunnel, the animation never finished and LoginComplete never went
+    // out (ACE kept the player Teleporting: Hidden, too busy, no attacks).
+    let tunnelOpenedByGate = false;
+    let afterRelease = 0;
+    let open!: () => void;
+    const seen: number[] = [];
+    const q = new GatedEventQueue<Ev>({
+      dispatch: (e) => seen.push(e.n),
+      gateFor: (e) => {
+        if (e.type !== 'arrive') return null;
+        tunnelOpenedByGate = true;
+        return new Promise<void>((r) => { open = r; });
+      },
+      afterRelease: () => { afterRelease++; tunnelOpenedByGate = false; },
+    });
+    q.push({ type: 'arrive', n: 1 });
+    expect(tunnelOpenedByGate).toBe(true);
+    q.clear();
+    expect(afterRelease).toBe(1);
+    expect(tunnelOpenedByGate).toBe(false);
+    open(); // the dropped session's prefetch settles later: nothing more happens
+    await new Promise((r) => setTimeout(r, 0));
+    expect(afterRelease).toBe(1);
+    expect(seen).toEqual([]);
+    q.clear(); // not holding: no hook
+    expect(afterRelease).toBe(1);
+  });
+
+  it('why it matters: ending an animation that is Off never finishes it, so nothing sends LoginComplete', () => {
+    const anim = new TeleportAnimation();
+    anim.end(0);
+    let finished = false;
+    for (let t = 0; t < 30; t += 0.1) if (anim.update(t, 0).finished) finished = true;
+    expect(finished).toBe(false);
+    // Begun first (what showArrivalTunnel now guarantees), the same end finishes.
+    const ok = new TeleportAnimation();
+    ok.begin(TeleportAnimState.Tunnel, 0);
+    ok.end(0.1);
+    let done = false;
+    for (let t = 0.1; t < 30; t += 0.05) if (ok.update(t, 0).finished) { done = true; break; }
+    expect(done).toBe(true);
   });
 });
 

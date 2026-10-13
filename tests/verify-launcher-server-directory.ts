@@ -9,10 +9,10 @@ import * as http from 'http';
 import type { AddressInfo } from 'net';
 import { parseServersXml, normalizeLinkUrl, type ServerEntry } from '../services/ws-tcp-bridge/src/serverList';
 import {
-  parseTreeStatsStatus, parsePlayerCounts, buildDirectory, compareEntries, ServerDirectory,
+  parseTreeStatsStatus, parsePlayerCounts, buildDirectory, compareEntries, ServerDirectory, withDetection,
   POPULATION_MAX_AGE_MS, TREESTATS_STATUS_URL, TREESTATS_COUNTS_URL, type DirectoryEntry,
 } from '../services/ws-tcp-bridge/src/serverDirectory';
-import { compatFor, SERVER_COMPAT } from '../services/ws-tcp-bridge/src/serverCompat';
+import { compatFor, SERVER_COMPAT, VPN_BLOCK } from '../services/ws-tcp-bridge/src/serverCompat';
 import { BridgeMetrics, makeHttpHandler, type BridgeSnapshot } from '../services/ws-tcp-bridge/src/metrics';
 
 const NOW = Date.parse('2026-10-04T16:15:00Z');
@@ -98,8 +98,9 @@ describe('TreeStats feeds', () => {
 describe('compat overlay', () => {
   it('undetectable classic servers name their era by id; GDL/GDLE are beta by emu; the rest ok', () => {
     // ERA.dm-support: the client loads the era's DATs and login for these.
-    expect(compatFor('394C58D0-885D-466B-B17F-D7E0B96FE3E2', 'GDL')).toEqual({ compat: 'beta', note: 'Dark Majesty era', era: 'classic-dereth' });
-    // Snowreap runs Classic Dereth 1.0 data (no Salvaging): the 1.1 set minus that skill.
+    // Seedsow and Snowreap (same host) run Classic Dereth 1.0 data (no Salvaging): the 1.1 set
+    // minus that skill. Seedsow answered a 1.1 create with Corrupt on 2026-10-12.
+    expect(compatFor('394C58D0-885D-466B-B17F-D7E0B96FE3E2', 'GDL')).toEqual({ compat: 'beta', note: 'Dark Majesty era', era: 'classic-dereth-1-0' });
     expect(compatFor('eea962c0-cf9f-481e-9736-0eb058acc1d8', 'GDL')).toEqual({ compat: 'beta', note: 'Dark Majesty era', era: 'classic-dereth-1-0' });
     // ClassicACE worlds keep a fallback era until live detection (eraDetect.ts) answers.
     expect(compatFor('4db379b0-587a-4775-9b7f-879e0f15ba4b', 'ACE')).toEqual({ compat: 'beta', note: 'Dark Majesty era', era: 'classicace-customdm' }); // Dekarutide
@@ -128,6 +129,56 @@ describe('compat overlay', () => {
   });
 });
 
+describe('worlds whose VPN check refuses the bridge (survey 2026-10-12, docs/operators.md)', () => {
+  const CONQUEST = '2d7bfb40-7726-4951-b65f-b4948807e602';
+  const ACHARD = '9D17CE44-7DB5-40C1-B7BB-A01C9DE21D00'; // Servers.xml spells it upper-case
+
+  it('Conquest and AChard are refused with a reason; no other world is', () => {
+    for (const id of [CONQUEST, ACHARD]) {
+      expect(compatFor(id, 'ACE')).toEqual({
+        compat: 'incompatible', note: 'Blocks webAC', reason: "Its VPN check refuses webAC players. We're working on a fix.",
+      });
+    }
+    const blocked = Object.entries(SERVER_COMPAT.byId).filter(([, c]) => c === VPN_BLOCK).map(([id]) => id).sort();
+    expect(blocked).toEqual([CONQUEST, ACHARD.toLowerCase()].sort());
+    // Only a refused world carries a reason.
+    for (const c of [...Object.values(SERVER_COMPAT.byId), ...Object.values(SERVER_COMPAT.byEmu)]) {
+      if (c.reason) expect(c.compat).toBe('incompatible');
+    }
+  });
+
+  it('their /servers rows say why; open worlds carry compatReason null', () => {
+    const servers: ServerEntry[] = [
+      ...fixtureServers(),
+      { id: ACHARD, name: 'AChard', emu: 'ACE', host: 'achard.example.org', port: 9000, source: 'list' },
+      { id: CONQUEST, name: 'Conquest', emu: 'ACE', host: 'conquest.example.org', port: 9000, source: 'list' },
+    ];
+    const byName = Object.fromEntries(buildDirectory(servers, new Map(), new Map(), { now: NOW }).map(e => [e.name, e]));
+    for (const n of ['AChard', 'Conquest']) {
+      expect(byName[n]).toMatchObject({
+        compat: 'incompatible', compatNote: 'Blocks webAC', compatReason: "Its VPN check refuses webAC players. We're working on a fix.", era: null,
+      });
+    }
+    expect(byName.Coldeve.compatReason).toBeNull();
+    expect(byName.Seedsow.compatReason).toBeNull();
+  });
+
+  it('the block stands over live era detection (AChard boots the probe as it boots players)', () => {
+    const blocked = { ...VPN_BLOCK };
+    // The probe is booted for every literal: still the VPN reason, not "Unsupported client version".
+    expect(withDetection(blocked, { kind: 'unsupported', classicAce: false, at: 0 }))
+      .toEqual({ compat: 'incompatible', note: 'Blocks webAC', reason: "Its VPN check refuses webAC players. We're working on a fix." });
+    // Detected end of retail, or a classic era: the era is kept, the block too.
+    expect(withDetection(blocked, { kind: 'era', era: null, version: '1802', note: null, at: 0 }))
+      .toMatchObject({ compat: 'incompatible', note: 'Blocks webAC', reason: "Its VPN check refuses webAC players. We're working on a fix." });
+    expect(withDetection(blocked, { kind: 'era', era: 'classicace-customdm', version: 'c118', note: 'Dark Majesty era', at: 0 }))
+      .toEqual({ compat: 'incompatible', note: 'Blocks webAC', reason: "Its VPN check refuses webAC players. We're working on a fix.", era: 'classicace-customdm' });
+    // A detection-only refusal (no overlay reason) is unchanged.
+    expect(withDetection({ compat: 'ok' }, { kind: 'unsupported', classicAce: false, at: 0 }))
+      .toEqual({ compat: 'incompatible', note: 'Unsupported client version' });
+  });
+});
+
 describe('buildDirectory registration', () => {
   it('the /servers rows of the real Reefcull and Harvestbud ids carry registration + registrationUrl; others null', () => {
     const real: Record<string, string> = { reef: 'a7502ac9-0cec-4caf-b81c-b3eb40a4689a', harvest: 'f023fbf9-caab-4745-8205-81c4d7c061ad' };
@@ -149,7 +200,7 @@ describe('buildDirectory', () => {
   it('merges status, fresh population and compat per server', () => {
     const byName = Object.fromEntries(dir().map(e => [e.name, e]));
     expect(byName.Coldeve).toMatchObject({ online: true, population: 691, compat: 'ok', compatNote: null, emu: 'ACE', type: 'PvE' });
-    expect(byName.Seedsow).toMatchObject({ online: true, population: 35, compat: 'beta', compatNote: 'Dark Majesty era', era: 'classic-dereth' });
+    expect(byName.Seedsow).toMatchObject({ online: true, population: 35, compat: 'beta', compatNote: 'Dark Majesty era', era: 'classic-dereth-1-0' });
     expect(byName.Coldeve.era).toBeNull();
     expect(byName.Reefcull).toMatchObject({ population: 164, compat: 'beta', compatNote: 'GDLE: beta' });
     expect(byName.Harvestbud.population).toBeNull(); // count older than POPULATION_MAX_AGE_MS
@@ -221,7 +272,7 @@ describe('GET /servers and /healthz (HTTP handler)', () => {
     expect(body.mode).toBe('multi');
     expect(body.servers.map(s => s.name).slice(0, 2)).toEqual(['Coldeve', 'Reefcull']);
     expect(Object.keys(body.servers[0]).sort()).toEqual([
-      'compat', 'compatNote', 'description', 'discord', 'emu', 'era', 'id', 'lastSeen', 'name', 'online', 'population', 'registration', 'registrationUrl', 'type', 'website',
+      'compat', 'compatNote', 'compatReason', 'description', 'discord', 'emu', 'era', 'id', 'lastSeen', 'name', 'online', 'population', 'registration', 'registrationUrl', 'type', 'website',
     ]);
     // /metrics stays behind its token
     expect((await fetch(`${base}/metrics`)).status).toBe(401);

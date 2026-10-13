@@ -52,6 +52,8 @@ export function parseGuid(v: unknown): number {
 /** A target that is a guid or a name to search for nearby. */
 function guidOrName(v: unknown): number | string {
   const s = String(v ?? '').trim();
+  // An object id in decimal (a JSON number: 2147494839 is 0x80002AB7): nine or ten digits are never an 8-digit hex id.
+  if (/^\d{9,10}$/.test(s) && Number(s) <= 0xffffffff) return Number(s);
   return /^(#|0x)?[0-9a-f]+$/i.test(s) && (/^(#|0x)/i.test(s) || s.length >= 6) ? parseGuid(s) : s;
 }
 
@@ -187,6 +189,16 @@ function act(name: string, description: string, props: Props, required: string[]
   };
 }
 
+/** ac_cast's repeat arguments as the page's CastRepeatOptions (null: a single cast). */
+export function castRepeatArgs(a: Record<string, any>): { repeat: true; untilHealth?: number; maxCasts?: number; maxMs?: number } | null {
+  if (!(a.repeat === true || a.repeat === 'true')) return null;
+  const num = (v: unknown): number | undefined => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? undefined : Number(v));
+  const h = num(a.until_health), n = num(a.max_casts), t = num(a.max_s);
+  // A fraction (0.4) or a percent (40), as vitals_below takes: until_health=0.4 was read as 0.4% (2026-10-12).
+  const frac = h === undefined ? undefined : Math.min(Math.max(h > 1 ? h / 100 : h, 0), 1);
+  return { repeat: true, ...(frac !== undefined ? { untilHealth: frac } : {}), ...(n !== undefined ? { maxCasts: n } : {}), ...(t !== undefined ? { maxMs: t * 1000 } : {}) };
+}
+
 /**
  * AC_AGENT_ATTACH (e.g. "chrome", set in Claude Desktop's config) makes a bare ac_start play the human's own
  * logged-in character on the live servers; naming a local-server choice (era, base, profile, a new
@@ -203,7 +215,7 @@ export function defaultAttach(a: Record<string, unknown>, env: string | undefine
  * tool lists it: it means a chat line that is a tell, so it waits for those (a types=tell wait never
  * woke, 2026-10-10); beside "chat" it adds nothing. Other names pass through.
  */
-export function waitFilter(a: Record<string, any>): { types?: string[]; chatMatch?: string; sinceSeq?: number } {
+export function waitFilter(a: Record<string, any>): { types?: string[]; chatMatch?: string; sinceSeq?: number; healthBelow?: number; manaBelow?: number; staminaBelow?: number } {
   let types = a.types ? String(a.types).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : undefined;
   let chatMatch: string | undefined = a.chat_match === undefined || a.chat_match === '' ? undefined : String(a.chat_match);
   if (types?.some((t) => t === 'tell' || t === 'tells')) {
@@ -215,7 +227,19 @@ export function waitFilter(a: Record<string, any>): { types?: string[]; chatMatc
     if (!types.length) types = undefined;
   }
   const since = a.since_seq === undefined || a.since_seq === '' ? undefined : Number(a.since_seq);
-  return { ...(types ? { types } : {}), ...(chatMatch ? { chatMatch } : {}), ...(since !== undefined && Number.isFinite(since) ? { sinceSeq: since } : {}) };
+  // A vital mark as a fraction (0.6) or a percentage (60).
+  const mark = (v: unknown): number | undefined => {
+    if (v === undefined || v === null || v === '') return undefined;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return undefined;
+    return Math.min(n > 1 ? n / 100 : n, 1);
+  };
+  const marks = { healthBelow: mark(a.vitals_below ?? a.health_below), manaBelow: mark(a.mana_below), staminaBelow: mark(a.stamina_below) };
+  if (types && Object.values(marks).some((m) => m !== undefined) && !types.includes('vitals-low')) types = [...types, 'vitals-low'];
+  return {
+    ...(types ? { types } : {}), ...(chatMatch ? { chatMatch } : {}), ...(since !== undefined && Number.isFinite(since) ? { sinceSeq: since } : {}),
+    ...Object.fromEntries(Object.entries(marks).filter(([, m]) => m !== undefined)),
+  };
 }
 
 async function observeText(c: ToolCaller, a: Record<string, any>): Promise<string> {
@@ -418,20 +442,25 @@ export const TOOLS: AgentTool[] = [
       x: { type: 'number', description: 'Pixels from the screenshot\'s left edge.' },
       y: { type: 'number', description: 'Pixels from the screenshot\'s top edge.' },
       button: { type: 'string', description: 'left (default) or right.', enum: ['left', 'right'] },
+      modifiers: { type: 'string', description: 'Keys held during the click, comma-separated: ctrl, shift, alt (e.g. ctrl for a Ctrl+click).' },
     },
     required: ['x', 'y'],
     async run(a) {
       const c = requireClient(a.profile);
-      await c.click(Number(a.x), Number(a.y), a.button === 'right' ? 'right' : 'left');
+      const mods = typeof a.modifiers === 'string' ? a.modifiers.split(',').map((m: string) => m.trim()).filter(Boolean) : [];
+      await c.click(Number(a.x), Number(a.y), a.button === 'right' ? 'right' : 'left', mods);
       return withNotice(c, { text: `clicked (${Math.round(Number(a.x))}, ${Math.round(Number(a.y))})` });
     },
   },
   {
     name: 'ac_wait',
-    description: 'Sleep until something happens instead of polling: returns as soon as a matching event arrives (chat, tell, death, target-died, task-done, vitals-low, attacked, object-added, level-up, portal), or after timeout. It counts from your last ac_observe or ac_wait, so something that arrived since then (a tell between your observe and this wait) returns at once. Use after starting a walk or an attack.',
+    description: 'Sleep until something happens instead of polling: returns as soon as a matching event arrives (chat, tell, death, target-died, task-done, vitals-low, attacked, attackers-up, cast-at-you, object-added, level-up, portal), or after timeout. It counts from your last ac_observe or ac_wait, so something that arrived since then (a tell between your observe and this wait) returns at once. Use after starting a walk or an attack.',
     props: {
       ...PROFILE_PROP,
-      types: { type: 'string', description: 'Comma-separated event types to wake on (default: any): chat, dialog, task-done, target-died, target-lost, vitals-low, attacked (any incoming attack, even a 0-damage hit or a miss), death, object-added, portal, level-up, screen.' },
+      types: { type: 'string', description: 'Comma-separated event types to wake on (default: any): chat, dialog, task-done, target-died, target-lost, vitals-low (health below half, or below vitals_below; also any single hit taking over a quarter of your health), attacked (any incoming attack, even a 0-damage hit or a miss), attackers-up (one more creature is attacking you than a moment ago), cast-at-you (a spell landed on, missed or was resisted by you, or a creature nearby spoke a spell\'s words), death, object-added, portal, level-up, screen.' },
+      vitals_below: { type: 'number', description: 'vitals-low mark for health for this wait: a fraction (0.6) or percent (60). Default 0.5. Wakes when health falls below it (or a further tenth below where it was, if it already was).' },
+      mana_below: { type: 'number', description: 'Likewise for mana (no mark unless given).' },
+      stamina_below: { type: 'number', description: 'Likewise for stamina (no mark unless given).' },
       chat_match: { type: 'string', description: 'Wake on chat lines matching this regex (case-insensitive), e.g. a partner\'s name. Alone it waits only for such a line; with types it also wakes on those types.' },
       timeout_s: { type: 'number', description: 'Seconds (default 20, max 300).' },
       since_seq: { type: 'number', description: 'Only events after this seq (default: since your last ac_observe or ac_wait).' },
@@ -537,7 +566,10 @@ export const TOOLS: AgentTool[] = [
   },
   act('ac_say', 'Type a line into chat exactly as a player would: plain text is said aloud; "/tell Name, msg", "/f msg", emotes like "*wave*" and the retail "/" commands work. "@" server commands are refused (agents play as players).', { text: { type: 'string', description: 'The chat line.' } }, ['text'], (a) => [String(a.text)]),
   act('ac_select', 'Select an object (it becomes your target).', { target: { type: 'string', description: 'Object id (#…) or a name to find nearby.' } }, ['target'], (a) => [guidOrName(a.target)]),
-  act('ac_use', 'Use an object the way double-clicking does: talk to an NPC, open a door/chest/corpse, enter a portal, use a lifestone, eat/drink an item. You walk to it automatically.', { target: { type: 'string', description: 'Object id (#…) or a name to find nearby.' } }, ['target'], (a) => [guidOrName(a.target)], 120_000),
+  act('ac_use', 'Use an object the way double-clicking does: talk to an NPC, open a door/chest/corpse, enter a portal, use a lifestone, eat/drink an item. You walk to it automatically. A portal is walked to through any hits (asking for it is asking to get there); flee=true does the same for anything else (a door, a lifestone).', {
+    target: { type: 'string', description: 'Object id (#…) or a name to find nearby.' },
+    flee: { type: 'boolean', description: 'Keep walking to it while monsters hit you, as walk_to flee=true does (always so for a portal). Default: being hit stops the walk.' },
+  }, ['target'], (a) => [guidOrName(a.target), ...(a.flee === true || a.flee === 'true' ? [{ flee: true }] : [])], 120_000),
   act('ac_use_on', 'Use an item from your pack on a target (e.g. a healing kit on yourself, a key on a door, a tool on another item).', {
     item: { type: 'string', description: 'Item id or name in your inventory.' },
     target: { type: 'string', description: 'Target id or name ("self" for yourself).' },
@@ -550,11 +582,12 @@ export const TOOLS: AgentTool[] = [
     stay_with: { type: 'string', description: 'A fellow\'s name: stop and wait whenever they are more than stay_within metres behind you (farther from where you\'re going), then go on. Ends early, saying so, if they stand still or head elsewhere.' },
     stay_within: { type: 'number', description: 'With stay_with: how far behind they may fall, metres (default 15).' },
   }, ['target'], (a) => [/[NS]\s*,?\s*[\d.]+\s*[EW]/i.test(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, ...(a.timeout_s !== undefined ? { timeoutMs: Number(a.timeout_s) * 1000 } : {}), ...(a.flee ? { flee: true } : {}), ...(a.stay_with ? { stayWith: String(a.stay_with) } : {}), ...(a.stay_within !== undefined ? { stayWithin: Number(a.stay_within) } : {}) }], 320_000),
-  act('ac_follow', 'Follow a player (your fellow): walk to within `within` metres of them, stand while they stay near, and set off again whenever they move, re-aiming as they go, until duration_s ends, you are hit, they go out of sight, or you start something else (any action, or ac_stop_moving). Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
+  act('ac_follow', 'Follow a player (your fellow): walk to within `within` metres of them, stand while they stay near, and set off again whenever they move, re-aiming as they go, until duration_s ends, you are hit (unless flee=true), they go out of sight, or you start something else (any action, or ac_stop_moving). Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
     target: { type: 'string', description: 'The player to follow: name or id.' },
     within: { type: 'number', description: 'How close to keep, metres (default 4).' },
     duration_s: { type: 'number', description: 'How long to follow (default 120, at most 600).' },
-  }, ['target'], (a) => [guidOrName(a.target), { within: a.within ?? null, durationMs: a.duration_s !== undefined ? Math.min(Number(a.duration_s), 600) * 1000 : null }], 640_000),
+    flee: { type: 'boolean', description: 'Keep following while you are hit (e.g. running to your tank with monsters on you), as walk_to flee=true does. Default: being hit stops it.' },
+  }, ['target'], (a) => [guidOrName(a.target), { within: a.within ?? null, durationMs: a.duration_s !== undefined ? Math.min(Number(a.duration_s), 600) * 1000 : null, ...(a.flee === true || a.flee === 'true' ? { flee: true } : {}) }], 640_000),
   act('ac_turn', 'Turn to face a compass bearing (0 = north, 90 = east) or an object.', { toward: { type: 'string', description: 'Bearing in degrees, or an object id / name.' } }, ['toward'], (a) => [/^-?\d+(\.\d+)?$/.test(String(a.toward)) && String(a.toward).length < 6 ? Number(a.toward) : guidOrName(a.toward)]),
   act('ac_move', 'Hold a movement key for a while (fine control, e.g. backing off or strafing around an obstacle).', {
     direction: { type: 'string', description: 'forward | backward | strafe_left | strafe_right | turn_left | turn_right', enum: ['forward', 'backward', 'strafe_left', 'strafe_right', 'turn_left', 'turn_right'] },
@@ -593,15 +626,19 @@ export const TOOLS: AgentTool[] = [
   }, [], (a) => [{ holdMs: a.hold_ms === undefined ? undefined : Number(a.hold_ms), forward: a.forward === true || a.forward === 'true', walk: a.walk === true || a.walk === 'true' }]),
   act('ac_stop_moving', 'Stop any movement or walk task.', {}, [], () => []),
   act('ac_combat_mode', 'Switch stance: peace, melee, missile or magic (wields what you have equipped for it).', { mode: { type: 'string', description: 'peace | melee | missile | magic', enum: ['peace', 'melee', 'missile', 'magic'] } }, ['mode'], (a) => [String(a.mode)]),
-  act('ac_attack', 'Attack a creature with your melee or missile weapon (switches to the right stance, faces it and keeps swinging until it dies, you stop, or the timeout). Use ac_wait for target-died.', {
+  act('ac_attack', 'Attack a creature with your melee or missile weapon (switches to the right stance, faces it and keeps swinging until it dies, you stop, or the timeout). Melee runs up to it first. With a bow, crossbow, atlatl or thrown weapon it shoots from where you stand when the target is in your weapon\'s reach (its examine Range; less uphill, where the arc falls short) with a clear line, and otherwise closes in only until it is: the reply says which, with the distance and your reach. "Out of Range!" from the server closes in further (twice at most). Use ac_wait for target-died.', {
     target: { type: 'string', description: 'Creature id or name (default: current target, else the nearest monster).' },
     height: { type: 'string', description: 'high | medium | low (default medium)', enum: ['high', 'medium', 'low'] },
     power: { type: 'number', description: 'Power/accuracy 0..1 (default 0.6).' },
   }, [], (a) => [a.target === undefined ? null : guidOrName(a.target), { height: a.height, power: a.power }]),
-  act('ac_cast', 'Cast a spell by name or id at a target (or yourself). Switches to magic stance first.', {
+  act('ac_cast', 'Cast a spell by name or id at a target (or yourself). Switches to magic stance first. One cast per call, unless repeat=true: then it keeps casting the same spell at the same target, each as soon as the client lets you (as a player pressing the bolt key again does), and answers one summary (each cast\'s result, damage dealt, your vitals, why it stopped). It stops when the target dies or goes, your mana won\'t pay for another, the server refuses a cast (no line of fire, out of range, too busy twice), your health falls below until_health (default 50%), a monster other than the target starts attacking you, or after max_casts / max_s; any other action or ac_stop_moving stops it too. A long repeat answers "still in progress": ac_wait types=task-done,target-died hears the summary.', {
     spell: { type: 'string', description: 'Spell name (e.g. "Flame Bolt I") or id.' },
     target: { type: 'string', description: 'Target id/name, or "self" (default: current target for hostile spells, else self).' },
-  }, ['spell'], (a) => [/^\d+$/.test(String(a.spell)) ? Number(a.spell) : String(a.spell), a.target === undefined ? null : (String(a.target) === 'self' ? 'self' : guidOrName(a.target))]),
+    repeat: { type: 'boolean', description: 'Keep casting it at the target until a stop condition (not on yourself).' },
+    until_health: { type: 'number', description: 'With repeat: stop when your health is below this, a fraction (0.4) or percent (40) (default 0.5; 0 never stops for health).' },
+    max_casts: { type: 'number', description: 'With repeat: stop after this many casts (default 20, at most 100).' },
+    max_s: { type: 'number', description: 'With repeat: stop after this many seconds (default 120, at most 600).' },
+  }, ['spell'], (a) => [/^\d+$/.test(String(a.spell)) ? Number(a.spell) : String(a.spell), a.target === undefined ? null : (String(a.target) === 'self' ? 'self' : guidOrName(a.target)), castRepeatArgs(a)], 640_000),
   act('ac_pick_up', 'Pick up an item from the ground or from an open container/corpse into your pack.', { item: { type: 'string', description: 'Item id or name.' } }, ['item'], (a) => [guidOrName(a.item)]),
   act('ac_loot', 'Open a corpse/chest and take everything (or only items whose name matches).', {
     target: { type: 'string', description: 'Corpse/chest id or name (default: nearest corpse).' },

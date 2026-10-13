@@ -66,3 +66,22 @@ export function removeItemLeavingPlayer(
   }
   return removed;
 }
+
+/**
+ * BUG.death-items-stay-equipped — ServerSaysMoveItem @ 0058dbb0 clears the
+ * player wield location for ANY contain-in of a worn item: the main pack, a
+ * side pack, or an off-player container (ACE DequipToPack /
+ * DequipToOffPlayerContainer, Player_Inventory.cs:1288, then ServerSaysContainId).
+ * Pre-fix only a contain-in to the main pack unequipped, so a worn item put
+ * straight into a side pack or an open chest stayed on the equipment list.
+ * Confirms any optimistic unequip for it. True when it was worn.
+ */
+export function clearWieldOnContainIn(
+  equipment: Pick<PlayerState['equipment'], 'unequipItem'>,
+  pending: { confirm(itemId: number): void },
+  itemGuid: number,
+): boolean {
+  const worn = equipment.unequipItem(itemGuid) !== undefined;
+  pending.confirm(itemGuid);
+  return worn;
+}

@@ -58,6 +58,9 @@ async function main(): Promise<void> {
     // BRIDGE_ERA_PROBE=off disables it (no probe logins leave the bridge).
     const detector = process.env.BRIDGE_ERA_PROBE === 'off' ? undefined : new EraDetector({
       probe: udpProbeLogin(),
+      // A server that trusts the bridge (BRIDGE_SPP_SERVERS) drops datagrams without
+      // the SPP header, so a probe would time out and mislabel it; its era comes from the overlay.
+      busy: (s) => config.spp.servers.has(s.id.toLowerCase()),
       resolve: async (host) => {
         const r = await resolveTarget(host, { allowPrivate: config.allowPrivateTargets });
         return r.ok ? r.address : null;

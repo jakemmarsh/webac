@@ -7,7 +7,8 @@
  *   u32 0x075BCD15
  *   u16 versionLength (counting the NUL), the version + NUL, zero pad to 4
  *   u32 0xBEEFBEEF
- *   char[20] "account:password" (NUL-padded; 19 characters at most)
+ *   char[20] the first 20 characters of "account:password": NUL-padded when
+ *            shorter, no terminator when 20 or longer, the rest dropped
  *   u32 0, u32 0xBEEFBEEF, 24 zero bytes, u32 1, u32 0
  *   u32 portal iteration, u32 cell iteration   (the DAT headers', 102/67 on the retail CD)
  *   u32 0, u32 0xFFFFFFFF
@@ -15,16 +16,27 @@
 
 const LOGIN_MAGIC = 0x075bcd15;
 const BEEF = 0xbeefbeef;
-/** The credential field is 20 bytes including its NUL. */
-export const MAX_CREDENTIALS_1999 = 19;
+/**
+ * The credential field's size. The retail client truncates silently: measured
+ * 2026-10-12 (client.exe 4.35752 under Wine against the local 1999 server),
+ * `-a "lenprobeab:pwprobe123"` (21 characters) sent exactly the first 20,
+ * "lenprobeab:pwprobe12", no NUL, and the server stored the password
+ * "pwprobe12". So an account made with longer credentials HAS the truncated
+ * password, and logging in means truncating the same way every time; a
+ * refusal here locked those players out (player report, 2026-10-12).
+ *
+ * The server (reference/ac1999 Network.cpp) copies the 20 bytes into a
+ * 21-byte zeroed buffer and splits on the first ':'. An account name of 20
+ * or more characters leaves no ':' in the field; the server then skips that
+ * 0xBEEFBEEF marker, finds no credential and logs "no 0xBEEFBEEF credential
+ * found", so the login fails there, exactly as it did for the retail client.
+ */
+export const CREDENTIAL_BYTES_1999 = 20;
 
 export function buildLoginBody1999(opts: {
   version: string; account: string; password: string; portalIteration: number; cellIteration: number;
 }): Uint8Array {
   const creds = `${opts.account}:${opts.password}`;
-  if (creds.length > MAX_CREDENTIALS_1999) {
-    throw new Error(`account:password is ${creds.length} characters; the 1999 client allows ${MAX_CREDENTIALS_1999}`);
-  }
   const ascii = (s: string): number[] => Array.from(s, (c) => c.charCodeAt(0) & 0xff);
   const out: number[] = [];
   const u32 = (v: number): void => { out.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff); };
@@ -34,7 +46,7 @@ export function buildLoginBody1999(opts: {
   while (out.length % 4) out.push(0);
   u32(BEEF);
   const credBytes = ascii(creds);
-  for (let i = 0; i < 20; i++) out.push(credBytes[i] ?? 0);
+  for (let i = 0; i < CREDENTIAL_BYTES_1999; i++) out.push(credBytes[i] ?? 0);
   u32(0);
   u32(BEEF);
   for (let i = 0; i < 24; i++) out.push(0);

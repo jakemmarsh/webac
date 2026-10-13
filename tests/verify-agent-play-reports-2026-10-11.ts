@@ -85,7 +85,7 @@ describe('agent play reports 2026-10-11', () => {
     await vi.advanceTimersByTimeAsync(4000);
     const r = await p;
     expect(r.ok).toBe(false);
-    expect(r.message).toBe('casting Focus Other I at Claude Bulwark\n  Out of Range!\n  (Focus Other I reaches 6 m for you, longer as your Creature Enchantment ranks grow; Claude Bulwark is 11.0 m away)');
+    expect(r.message).toBe('casting Focus Other I at Claude Bulwark #80000b20\n  Out of Range!\n  (Focus Other I reaches 6 m for you, longer as your Creature Enchantment ranks grow; Claude Bulwark is 11.0 m away)');
     const { formatSpells } = await import('../packages/renderer/src/agent/format.ts');
     expect(formatSpells(host.spells())).toBe('  1427  Focus Other I  [Creature Enchantment L1]  range 6 m');
   });

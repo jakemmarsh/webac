@@ -248,7 +248,11 @@ export interface GatedEventQueueOptions<E> {
    * `queued()` is live: events keep queuing while the promise runs.
    */
   beforeRelease?: (queued: () => readonly E[]) => Promise<unknown> | null;
-  /** After a hold's gating event has been dispatched. */
+  /**
+   * After a hold ends: its gating event has been dispatched, or clear()
+   * dropped it (the session ended mid-hold). Whatever the hold set up (the
+   * tunnel it opened) is undone here either way.
+   */
   afterRelease?: () => void;
 }
 
@@ -275,10 +279,19 @@ export class GatedEventQueue<E> {
     this.drain();
   };
 
-  /** Drop everything held (the session ended). */
+  /**
+   * Drop everything held (the session ended). A hold in progress still ends
+   * through afterRelease: skipped, main.ts kept "the gate opened the tunnel"
+   * set across the drop, the next login skipped its own tunnel, the
+   * animation never finished, LoginComplete never went out, and ACE kept the
+   * player Teleporting: Hidden, too busy for every action, no attacks, no
+   * movement (Coldeve, 2026-10-12, a resume after a network change).
+   */
   clear(): void {
+    const wasHolding = this.holding;
     this.queue.length = 0;
     this.holding = false;
+    if (wasHolding) this.opts.afterRelease?.();
   }
 
   private drain(): void {

@@ -146,3 +146,94 @@ export function interiorGroundY(
   return fallbackY;
 }
 
+/** A collision world as objectLandingZ reads it (DungeonCollision). */
+export interface SurfaceCollision {
+  /** Whether cell `cellId`'s BSP is registered. */
+  hasCell(cellId: number): boolean;
+  /** Whether any source is registered. */
+  readonly hasCells: boolean;
+  /** The highest walkable surface at or below `fromY` (DungeonCollision.floorBelow). */
+  floorBelow(worldX: number, worldZ: number, fromY: number): number | null;
+  /** Does any of these spheres (AC landblock-global centres) overlap a registered source as it stands? */
+  spheresOverlap(spheres: readonly { x: number; y: number; z: number; radius: number }[]): boolean;
+  /** The registered interior cell holding the point, 0 for none. */
+  findCellContaining(acX: number, acY: number, acZ: number, preferredCellId?: number): number;
+}
+
+/** The collision worlds a server object can stand in. */
+export interface ObjectSurfaceSources {
+  /** The interior (dungeon) collision world, when one is built. */
+  readonly dungeon: SurfaceCollision | null;
+  /** The outdoor collision world: buildings, their cells, statics. */
+  readonly outdoor: SurfaceCollision;
+  /** Terrain heightmap height at (x, y), or null before the block loads. */
+  terrainHeight(worldX: number, worldZ: number): number | null;
+}
+
+/** An object's physics sphere relative to its origin (rotated and scaled; AC axes). */
+export interface ObjectSphereOffset {
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+}
+
+/** The sweep step a falling object's spheres are tested at (m). */
+const LANDING_SWEEP_STEP = 0.02;
+
+/**
+ * BUG.gravity-item-placed-midair — where a Gravity object placed at
+ * (x, y, z) in `cell` comes to rest: the stand-in for the transitions
+ * `CPhysicsObj::UpdateObjectInternal @ 005156b0` runs as it falls. Its
+ * spheres drop straight down until the lowest one rests on the walkable
+ * surface beneath (a desk top, a floor; DungeonCollision.floorBelow), or
+ * until they first meet any other geometry on the way (a branch, a
+ * shelf's edge — retail's transition stops there too), tested every
+ * LANDING_SWEEP_STEP. Returns the origin z it rests at:
+ *  - z itself when it already touches something (resting, or sunk into a
+ *    wall or the floor — a transition that starts in collision never
+ *    moves), when nothing walkable lies under it, or when the resting
+ *    point leaves its interior cell (a position that does not match the
+ *    cell's geometry);
+ *  - null while the collision world holding the cell is not resident (an
+ *    interior cell answers once its BSP is registered; its statics — the
+ *    desk — are added in the same pass, DungeonCollisionBuild).
+ */
+export function objectLandingZ(
+  src: ObjectSurfaceSources, cell: number, x: number, y: number, z: number,
+  spheres: readonly ObjectSphereOffset[],
+): number | null {
+  if (spheres.length === 0) return z;
+  const interior = (cell & 0xffff) >= 0x100;
+  let world: SurfaceCollision | null = null;
+  if (interior) {
+    if (src.dungeon?.hasCell(cell)) world = src.dungeon;
+    else if (src.outdoor.hasCell(cell)) world = src.outdoor;
+    else return null;
+  } else {
+    world = src.outdoor.hasCells ? src.outdoor : null;
+  }
+  let bottom = Infinity, top = -Infinity;
+  for (const s of spheres) { bottom = Math.min(bottom, s.z - s.radius); top = Math.max(top, s.z); }
+  const at = (oz: number) => spheres.map((s) => ({ x: x + s.x, y: y + s.y, z: oz + s.z, radius: s.radius }));
+  if (world?.spheresOverlap(at(z))) return z;
+  let surface = world ? world.floorBelow(x, y, z + top) : null;
+  if (!interior) {
+    const terrain = src.terrainHeight(x, y);
+    if (terrain === null && surface === null) return null;
+    if (terrain !== null && terrain <= z + top && (surface === null || terrain > surface)) surface = terrain;
+  }
+  if (surface === null) return z;
+  const rest = surface - bottom;
+  if (rest >= z) return z;
+  if (interior && world!.findCellContaining(x, y, rest + top, cell) !== cell) return z;
+  // The spheres meet nothing on the way down (the last step stops short of
+  // the surface, whose own polygon the resting sphere touches).
+  if (world) {
+    for (let oz = z - LANDING_SWEEP_STEP; oz > rest + LANDING_SWEEP_STEP; oz -= LANDING_SWEEP_STEP) {
+      if (world.spheresOverlap(at(oz))) return oz + LANDING_SWEEP_STEP;
+    }
+  }
+  return rest;
+}
+

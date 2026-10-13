@@ -57,6 +57,8 @@ const ACCESS_MS = 3_600_000;
 const REFRESH_MS = 30 * 24 * 3_600_000;
 const PAIR_MS = 10 * 60_000;
 const CODE_MS = 60_000;
+/** A relay-link ticket is used at once (the tab asks for one just before linking). */
+export const RELAY_TICKET_MS = 5 * 60_000;
 
 /** Redirect URIs a client may use (exact for Claude's, loopback any port for Claude Code). */
 export function redirectAllowed(uri: string): boolean {
@@ -277,6 +279,23 @@ export class OAuthServer {
   /** The player unpaired in the game: every grant for the account made before now ends. */
   revokeAccount(key: string): void {
     this.revokedBefore.set(key, this.now());
+  }
+
+  /**
+   * A relay-link ticket (`l1.…`, RELAY_TICKET_MS): the bridge that logged a tab in vouches for its account, so
+   * the tab can link its relay to another bridge sharing the secret (the new deployment during a drain, server.ts).
+   * Null without a configured secret: the other bridge couldn't open it.
+   */
+  relayTicket(key: string): string | null {
+    if (!this.persistent) return null;
+    return this.sealer.seal('l1', { k: key, e: this.now() + RELAY_TICKET_MS });
+  }
+
+  /** The account key a relay-link ticket names, or null (forged, expired, or the account no longer allowed). */
+  openRelayTicket(tok: string): string | null {
+    const t = this.sealer.open<{ k: unknown; e: unknown }>('l1', tok);
+    if (!t || typeof t.k !== 'string' || typeof t.e !== 'number' || t.e < this.now() || !this.allowed(t.k)) return null;
+    return t.k;
   }
 
   /** An access token's live account keys, character scope and grant time, or null. */

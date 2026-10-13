@@ -1373,6 +1373,21 @@ export class DungeonCollision {
   }
 
   /**
+   * BUG.gravity-item-placed-midair — the highest walkable surface (cell
+   * floors, static objects' tops, building floors) at or below `fromY`
+   * under (worldX, worldZ), or null when none lies there (or in raycast
+   * mode). What a falling object's transition lands on.
+   */
+  floorBelow(worldX: number, worldZ: number, fromY: number): number | null {
+    if (this.cells.size === 0) return null;
+    let best: number | null = null;
+    for (const y of this.floorCandidates(worldX, worldZ, fromY, fromY, -Infinity)) {
+      if (best === null || y > best) best = y;
+    }
+    return best;
+  }
+
+  /**
    * RECON.transition-stepup-stepdown-port.e — the ground the player's body
    * stands on at (worldX, worldZ) after a step whose floor search starts at
    * `fromY` (the last ground plus any step-up lift): the contact plane

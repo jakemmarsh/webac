@@ -15,16 +15,26 @@
  *
  * One test account and at most one character per world (Jake OK'd throwaway
  * accounts on third-party worlds, 2026-10-11). Credentials go to
- * <out>/accounts.txt, never to the repo. One live browser at a time.
+ * <out>/accounts.txt, never to the repo. One live browser at a time. The
+ * browser profile is a per-run temp dir, deleted at exit (tools/lib/temp-profile.ts);
+ * <out> keeps only the report, accounts and screenshots.
  *
  *   npx tsx tools/probe-world-access.ts [--url https://playwebac.com/] [--out dir]
- *       [--only Name,Name] [--skip Name,Name] [--emu ACE,GDL,GDLE]
+ *       [--only Name,Name] [--skip Name,Name] [--emu ACE,GDL,GDLE] [--recheck-blocked]
+ *
+ * Worlds the bridge marks as refused (compat 'incompatible', e.g. the VPN
+ * blocks in services/ws-tcp-bridge/src/serverCompat.ts) are reported as
+ * `launcher-refused` and skipped, since the launcher refuses ENTER. To check
+ * whether an operator has lifted a block, pass --recheck-blocked (with
+ * --only Name): the page's /servers answer is rewritten so the world is
+ * enterable, then the world is probed like any other.
  */
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes, randomInt } from 'node:crypto';
 import { chromium, type Page } from 'playwright';
 import { GPU_ARGS, DEFAULT_VIEWPORT } from './lib/game-session.js';
+import { createRunProfile } from './lib/temp-profile.js';
 
 const args = process.argv.slice(2);
 const opt = (name: string, dflt: string): string => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] ?? dflt : dflt; };
@@ -35,14 +45,15 @@ const only = new Set(list(opt('only', '')).map((s) => s.toLowerCase()));
 const skip = new Set(list(opt('skip', '')).map((s) => s.toLowerCase()));
 const emus = new Set(list(opt('emu', 'ACE,GDL,GDLE')));
 const BRIDGE = opt('bridge-http', 'https://bridge.playwebac.com');
+const recheckBlocked = args.includes('--recheck-blocked');
 
 /** Server text that means the world refused us. */
 export const BLOCK_PATTERN = /vpn|proxy|not permitted|banned|blocked|too many (connections|accounts|sessions)|same ip|multiple accounts|ip address/i;
 
-interface World { id: string; name: string; emu: string; online: boolean; population: number | null; era: string | null }
+interface World { id: string; name: string; emu: string; online: boolean; population: number | null; era: string | null; compat?: string; compatReason?: string | null }
 interface Result {
   world: string; emu: string; population: number | null;
-  outcome: 'skipped' | 'login-failed' | 'no-char-select' | 'create-failed' | 'in-world' | 'error';
+  outcome: 'skipped' | 'launcher-refused' | 'login-failed' | 'no-char-select' | 'create-failed' | 'in-world' | 'error';
   blocked: boolean; serverText: string[]; failure?: string; seconds: number; shot?: string;
 }
 
@@ -67,11 +78,23 @@ async function main(): Promise<void> {
     emus.has(w.emu) && (only.size === 0 || only.has(w.name.toLowerCase())) && !skip.has(w.name.toLowerCase()));
   console.log(`${worlds.length} worlds → ${out}`);
 
-  const ctx = await chromium.launchPersistentContext(join(out, 'profile'), {
+  // Each world fills the profile's OPFS DAT cache: a temp profile, removed at exit / signal / crash.
+  const profile = createRunProfile('acjs-world-access-profile-', { tool: 'probe-world-access' });
+  const ctx = await chromium.launchPersistentContext(profile.dir, {
     headless: true, channel: 'chromium', args: GPU_ARGS, viewport: { ...DEFAULT_VIEWPORT },
   });
+  profile.setCloser(() => ctx.close());
   const page: Page = ctx.pages()[0] ?? await ctx.newPage();
   page.on('dialog', (d) => void d.dismiss());
+  if (recheckBlocked) {
+    // The launcher refuses ENTER on a refused world; let it through to see whether the block is gone.
+    await page.route('**/servers', async (route) => {
+      const resp = await route.fetch();
+      const body = (await resp.json()) as { servers?: World[] };
+      for (const w of body.servers ?? []) if (w.compat === 'incompatible') { w.compat = 'ok'; w.compatReason = null; }
+      await route.fulfill({ response: resp, json: body });
+    });
+  }
   const consoleLines: string[] = [];
   page.on('console', (m) => { if (m.text().startsWith('[AC] ACE')) consoleLines.push(m.text()); });
   const frames: string[] = [];
@@ -86,6 +109,11 @@ async function main(): Promise<void> {
     consoleLines.length = 0; frames.length = 0;
     try {
       if (!w.online) { r.outcome = 'skipped'; r.failure = 'offline'; results.push(r); continue; }
+      if (w.compat === 'incompatible' && !recheckBlocked) {
+        r.outcome = 'launcher-refused'; r.failure = w.compatReason ?? 'compat incompatible'; results.push(r);
+        console.log(`${w.name.padEnd(20)} launcher-refused ${r.failure}`);
+        continue;
+      }
       await page.goto(url, { waitUntil: 'load', timeout: 120_000 });
       await page.waitForSelector('.launcher-account', { timeout: 120_000 });
       await page.waitForTimeout(1500);
@@ -137,7 +165,7 @@ async function main(): Promise<void> {
     console.log(`${w.name.padEnd(20)} ${r.outcome.padEnd(15)} ${r.blocked ? 'BLOCKED' : ''} ${r.failure ?? ''}`.trimEnd());
     writeFileSync(join(out, 'report.json'), JSON.stringify(results, null, 2));
   }
-  await ctx.close();
+  await profile.dispose();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await main();

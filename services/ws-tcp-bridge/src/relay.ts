@@ -93,10 +93,15 @@ export class AgentRelay {
     e.pending.clear();
   }
 
-  /** A text frame from a session; true when it was the relay's. */
-  onText(peer: RelayPeer, text: string): boolean {
+  /**
+   * A text frame from a session; true when it was the relay's. `ownKey` is the account the session is logged
+   * in as (or linked for): a state frame from a session the relay has lost (no entry for it, and none for the
+   * account) registers it again, so `/automation claude on` (which sends the state) always relinks the tab.
+   */
+  onText(peer: RelayPeer, text: string, ownKey: string | null = null): boolean {
     const f = parseRelayFrame(text);
     if (!f) return false;
+    if (f.kind === 'state' && ownKey && !this.byPeer.has(peer) && !this.byKey.has(ownKey)) this.register(peer, ownKey);
     const e = this.byPeer.get(peer);
     if (!e) return true;
     e.updatedAt = this.now();
@@ -127,6 +132,9 @@ export class AgentRelay {
   }
 
   entry(key: string): RelayEntry | undefined { return this.byKey.get(key); }
+
+  /** Whether this session is the one the relay calls for its account. */
+  holds(peer: RelayPeer): boolean { return this.byPeer.has(peer); }
 
   /** Why this account's next call must wait, or null (and the call is counted). */
   overLimit(key: string): string | null {

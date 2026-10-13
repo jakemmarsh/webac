@@ -27,6 +27,21 @@
 /** Delays before each automatic resume attempt; after the last, the Disconnected screen. */
 export const RESUME_DELAYS_MS: readonly number[] = Object.freeze([2000, 5000, 10000]);
 
+/** Wait before re-asking to enter after a "character still in the world" refusal (CharacterError 0x0D). */
+export const IN_WORLD_RETRY_DELAY_MS = 3000;
+/**
+ * Retries of that refusal before retail's dialog: 25 × 3 s = 75 s. The AC1999
+ * server holds a character for at most about 22 s after its session ends
+ * (BeginLogout: 5 s, +2 s from portal space, +15 s for a PK, then the save;
+ * Player.cpp:172-188), and a re-login from a new port ends the old session at
+ * once (Network.cpp:664-682). Measured on the local server 2026-10-13: every
+ * genuine stale refusal cleared on the first retry.
+ */
+export const IN_WORLD_RETRY_BUDGET = 25;
+
+/** What to do with a "character still in the world" refusal (CharacterError 0x0D). */
+export type CharacterInWorldVerdict = 'retry' | 'ignore' | 'dialog';
+
 export interface AutoEnterSlotLike {
   /** Character guid as a decimal string (CharacterSlot.id). */
   id: string;
@@ -40,6 +55,8 @@ export class SessionLifecycle {
   private inWorldFlag = false;
   private resumeAttempts = 0;
   private resuming = false;
+  private inWorldRetries = 0;
+  private enterInFlight = false;
 
   /** An automatic resume after an unexpected drop is under way (not yet back in the world). */
   get resumingAfterDrop(): boolean {
@@ -82,18 +99,80 @@ export class SessionLifecycle {
   noteEnterWorldRequested(guid: number): void {
     this.lastEnteredGuid = guid;
     this.manualLogout = false;
+    this.inWorldRetries = 0;
+    this.enterInFlight = true;
+  }
+
+  /** An enter-world request is out and neither the world nor a refusal has answered it. */
+  get enterWorldPending(): boolean {
+    return this.enterInFlight;
+  }
+
+  /**
+   * Whether a new enter-world request may go out: not while one is under way
+   * and not from the world. Retail's EnterGame was refused while its Entering
+   * World dialog was up (gmCharacterManagementUI). A second request is
+   * answered by the AC1999 server with LoginError(13) once the first has
+   * entered (ClientEvents.cpp:209, m_pPlayer set), and that refusal used to
+   * start the retry loop below from inside the world (BUG.ac1999-in-world-enter-retry).
+   */
+  mayRequestEnterWorld(): boolean {
+    return !this.inWorldFlag && !this.enterInFlight;
   }
 
   /** PlayerCreate arrived — we are in the world. */
   noteWorldEntered(): void {
     this.inWorldFlag = true;
+    this.inWorldRetries = 0;
+    this.enterInFlight = false;
     this.endResume();
+  }
+
+  /** The server refused the enter for good (its dialog is shown): the player may try again. */
+  noteEnterRefused(): void {
+    this.enterInFlight = false;
+  }
+
+  /**
+   * The server refused an enter-world with "character still in the world"
+   * (CharacterError 0x0D).
+   *
+   * - 'ignore' when we are already in the world or have no enter under way:
+   *   the refusal answers a duplicate request (the AC1999 server answers a
+   *   second 0xF657 with 13 while the first one's player is in the world,
+   *   ClientEvents.cpp:209). Retrying it from the world sent 0xF657 every 3 s
+   *   and, once the budget ran out, put retail's "still in the world" dialog
+   *   over the world (prod 2026-10-13: a player relogged five times in six
+   *   minutes; 159 of 175 refusals in three days of the local server's log
+   *   were these).
+   * - 'retry' (another IN_WORLD_RETRY_DELAY_MS wait) while the budget lasts:
+   *   the previous session's character is still logging out.
+   * - 'dialog' once the budget is spent: the AC1999 server answers 13 for
+   *   characters it will never admit too (not this account's, pending
+   *   deletion, failed to load: ClientEvents.cpp:193-221). The enter is over,
+   *   and the player's next try starts a fresh budget.
+   */
+  characterInWorldRefusal(): CharacterInWorldVerdict {
+    if (this.inWorldFlag || !this.enterInFlight) return 'ignore';
+    if (this.inWorldRetries >= IN_WORLD_RETRY_BUDGET) {
+      this.inWorldRetries = 0;
+      this.enterInFlight = false;
+      return 'dialog';
+    }
+    this.inWorldRetries++;
+    return 'retry';
+  }
+
+  /** A scheduled retry may still go out: the enter is still under way and we are not in the world. */
+  mayRetryEnterWorld(): boolean {
+    return this.enterInFlight && !this.inWorldFlag;
   }
 
   /** The player deliberately logged off (or the server logged us off) —
    *  the next CharacterList should stay at character select. */
   noteLoggedOut(): void {
     this.inWorldFlag = false;
+    this.enterInFlight = false;
     this.manualLogout = true;
     this.endResume();
   }
@@ -102,6 +181,7 @@ export class SessionLifecycle {
    *  reconnect should resume the last-entered character. */
   noteDisconnected(): void {
     this.inWorldFlag = false;
+    this.enterInFlight = false;
   }
 
   /**

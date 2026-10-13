@@ -23,11 +23,11 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
-import { appendFileSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
 import { AT_CHAR_SELECT_JS, REMOTE_CHROMIUM, REPO, createCharacterIfNeeded, waitForWorld } from '../lib/game-session.ts';
-import { STATE_DIR, accountForProfile, clearInfo, logFile, readInfo, writeInfo } from './state.ts';
+import { STATE_DIR, accountForProfile, clearInfo, listInfos, logFile, pickStaleSnapshots, readInfo, writeInfo } from './state.ts';
 import { type AgentEra, agentEra, eraAccount } from './eras.ts';
 import { createShutdown } from './shutdown.ts';
 import { withCallDeadline } from './callDeadline.ts';
@@ -51,6 +51,9 @@ interface Args {
   port: number;
   /** A Chrome DevTools endpoint (http://127.0.0.1:9222): drive the game tab a human logged in there. */
   attach: string | null;
+  /** Log out after this long with no agent call, nothing Claude started still acting, and no input from a human in the
+   *  window (0 = never). Never applies to an attached tab, which is the human's own login. */
+  idleLogoutMs: number;
 }
 
 export function parseArgs(argv: string[]): Args {
@@ -79,7 +82,23 @@ export function parseArgs(argv: string[]): Args {
     bridge: get('bridge') ?? null,
     port: Number(get('port') ?? 0),
     attach: get('attach') ?? null,
+    idleLogoutMs: Math.max(0, Number(get('idle-logout-min') ?? process.env.AC_IDLE_LOGOUT_MIN ?? IDLE_LOGOUT_MIN)) * 60_000,
   };
+}
+
+/** Minutes an agent-started character may stand idle in the world before the daemon logs it out (Jake, 2026-10-12). */
+export const IDLE_LOGOUT_MIN = 15;
+
+/**
+ * Why to log out now, or null: nothing has driven the character for `idleMs` (no agent call, no human input in the
+ * window, and no walk, fight or routine Claude started still going). A character left standing in the world gets
+ * killed (Jake: "you should always log out if you stop controlling them … unless I've taken over").
+ */
+export function idleLogoutReason(s: { now: number; lastCallAt: number; lastInputAt: number; acting: boolean; idleMs: number; attached: boolean }): string | null {
+  if (s.attached || s.idleMs <= 0 || s.acting) return null;
+  const since = s.now - Math.max(s.lastCallAt, s.lastInputAt);
+  if (since < s.idleMs) return null;
+  return `idle ${Math.round(since / 60_000)} min (no agent call, nothing Claude started still acting, no input in the window): logging out so the character isn't left standing in the world`;
 }
 
 /**
@@ -176,6 +195,8 @@ function ensureSnapshot(say: (s: string) => void): string {
   if (existsSync(join(dir, 'package.json'))) {
     // A tree made from a checkout without its own node_modules (an older daemon) has none: repair it.
     linkShared();
+    // Marks it recently used, so a concurrent prune (pickStaleSnapshots' grace) leaves it alone.
+    try { const now = new Date(); utimesSync(dir, now, now); } catch { /* best effort */ }
   } else {
     say(`creating game snapshot of ${sha.slice(0, 12)} in ${dir}`);
     const git = (...a: string[]): void => {
@@ -188,7 +209,42 @@ function ensureSnapshot(say: (s: string) => void): string {
     git('-C', dir, 'checkout', '-q');
     linkShared();
   }
+  pruneSnapshots(dir, say);
   return dir;
+}
+
+/** The working directory of a live process (lsof), or null. */
+function processCwd(pid: number): string | null {
+  const r = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' });
+  const line = r.status === 0 ? r.stdout.split('\n').find((l) => l.startsWith('n')) : undefined;
+  return line ? line.slice(1) : null;
+}
+
+/**
+ * Remove snapshot trees no live daemon serves, keeping the newest few
+ * (pickStaleSnapshots). A live daemon whose tree can't be told (an older
+ * daemon with no `snapshot` field and an unreadable Vite cwd) stops the prune.
+ */
+function pruneSnapshots(current: string, say: (s: string) => void): void {
+  const inUse = new Set<string>([basename(current)]);
+  for (const info of listInfos()) {
+    const dir = info.snapshot ?? (info.vitePid ? processCwd(info.vitePid) : null);
+    if (dir) inUse.add(basename(dir));
+    else if (info.vitePid) return;
+  }
+  const now = Date.now();
+  const trees = readdirSync(STATE_DIR).filter((n) => n.startsWith('tree-')).flatMap((name) => {
+    try { return [{ name, ageMs: now - statSync(join(STATE_DIR, name)).mtimeMs }]; } catch { return []; }
+  });
+  const stale = pickStaleSnapshots(trees, inUse);
+  for (const name of stale) {
+    const dir = join(STATE_DIR, name);
+    if (spawnSync('git', ['-C', REPO, 'worktree', 'remove', '--force', dir]).status !== 0) rmSync(dir, { recursive: true, force: true });
+  }
+  if (stale.length) {
+    spawnSync('git', ['-C', REPO, 'worktree', 'prune']);
+    say(`removed ${stale.length} old game snapshot(s) no daemon serves`);
+  }
 }
 
 /** The account's access level on its era's server; -1 when it doesn't exist yet (or the DB isn't reachable). */
@@ -241,8 +297,10 @@ async function main(): Promise<void> {
   // ── Game page: a named origin, or our own Vite on a snapshot of HEAD ──
   let viteChild: ChildProcess | null = null;
   let base = args.base;
+  let snapshot: string | null = null;
   if (!base && !args.attach) {
     const dir = ensureSnapshot(say);
+    snapshot = dir;
     const port = await freePort(3127);
     // HMR off: a page whose Vite went away (its daemon stopped) would otherwise poll and reload into
     // whatever Vite comes back on that port, dropping the player mid-session (acjs-ea, 1999 run).
@@ -288,6 +346,12 @@ async function main(): Promise<void> {
       args: ['--ignore-gpu-blocklist', `--window-size=1290,860`],
     });
     page = await browser.newPage({ viewport: { width: 1280, height: 760 } });
+    // A human's own keys, clicks and wheel in this window (trusted events; the agent drives the game through its API,
+    // not DOM input) keep the idle logout away: they may have taken over.
+    await page.addInitScript(() => {
+      const mark = (e: Event): void => { if (e.isTrusted) (window as unknown as { __acLastHumanInput?: number }).__acLastHumanInput = Date.now(); };
+      for (const t of ['keydown', 'mousedown', 'wheel', 'touchstart']) window.addEventListener(t, mark, { capture: true, passive: true });
+    });
     // The human's own tab answers its own dialogs.
     page.on('dialog', (d) => void d.dismiss());
   }
@@ -422,12 +486,14 @@ async function main(): Promise<void> {
     },
   });
 
+  let lastCallAt = Date.now();
   const server = createServer(async (req, res) => {
     try {
       if (req.method === 'GET' && req.url === '/status') {
         return send(res, 200, { ready, attached: !!args.attach, profile: args.profile, account: args.attach ? 'own-login' : args.account, character, url });
       }
       if (req.method === 'POST' && req.url === '/call') {
+        lastCallAt = Date.now();
         const { method, args: callArgs = [], timeoutMs = 120_000 } = await body(req);
         const run = async (): Promise<unknown> => {
           if (entering && args.attach) {
@@ -465,10 +531,14 @@ async function main(): Promise<void> {
         return send(res, 200, { ok: true, jpegBase64: buf.toString('base64') });
       }
       if (req.method === 'POST' && req.url === '/click') {
+        lastCallAt = Date.now();
         // A mouse click on the game window at a screenshot position: the player's own input path.
-        const { x, y, button = 'left' } = await body(req);
+        const { x, y, button = 'left', modifiers = [] } = await body(req);
         if (!Number.isFinite(x) || !Number.isFinite(y)) return send(res, 200, { ok: false, error: 'x and y (screenshot pixels) are required' });
-        await page.mouse.click(Number(x), Number(y), { button: button === 'right' ? 'right' : 'left' });
+        // Held keys for the click (Ctrl+click on a VVS eye, Shift+click): pressed before, released after.
+        const held = (Array.isArray(modifiers) ? modifiers : []).map((m: string) => ({ ctrl: 'Control', control: 'Control', shift: 'Shift', alt: 'Alt' } as Record<string, string>)[String(m).toLowerCase()]).filter((k): k is string => !!k);
+        for (const k of held) await page.keyboard.down(k);
+        try { await page.mouse.click(Number(x), Number(y), { button: button === 'right' ? 'right' : 'left' }); } finally { for (const k of held.reverse()) await page.keyboard.up(k); }
         return send(res, 200, { ok: true });
       }
       if (req.method === 'POST' && req.url === '/shutdown') {
@@ -485,7 +555,7 @@ async function main(): Promise<void> {
   const port = (server.address() as { port: number }).port;
   writeInfo({
     profile: args.profile, era: args.eraKey, pid: process.pid, port, account: args.attach ? 'own-login' : args.account, character, url,
-    bridgePid: bridgeChild?.pid ?? 0, vitePid: viteChild?.pid ?? 0, startedAt: new Date().toISOString(), logFile: log,
+    bridgePid: bridgeChild?.pid ?? 0, vitePid: viteChild?.pid ?? 0, snapshot: snapshot ?? undefined, startedAt: new Date().toISOString(), logFile: log,
   });
   say(`control API on http://127.0.0.1:${port} (state ${STATE_DIR})`);
   if (args.attach) {
@@ -493,6 +563,18 @@ async function main(): Promise<void> {
     await entering;
   }
 
+  if (!args.attach && args.idleLogoutMs > 0) {
+    const timer = setInterval(() => {
+      void (async () => {
+        if (!ready) return;
+        const st = await withTimeout(page.evaluate('(() => { const a = window.__acAgent; const x = a && a.acting ? a.acting() : null; return { input: window.__acLastHumanInput || 0, acting: !!(x && (x.task || x.routine)) }; })()'), 5000).catch(() => null) as { input: number; acting: boolean } | null;
+        if (!st) return;
+        const why = idleLogoutReason({ now: Date.now(), lastCallAt, lastInputAt: st.input, acting: st.acting, idleMs: args.idleLogoutMs, attached: false });
+        if (why) { clearInterval(timer); say(why); void shutdown('idle'); }
+      })();
+    }, 30_000);
+    timer.unref();
+  }
   browser.on('disconnected', () => void shutdown('browser closed'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

@@ -22,7 +22,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:?usage: $0 <out.jsonl.gz>}"
 # A fresh account and character per capture (accounts auto-create; names must be
-# unique per server; "user:password" must fit the client's 19 characters).
+# unique per server; "user:password" kept within the client's 20-byte field so the
+# capture carries it whole: the client truncates longer ones silently).
 SUFFIX="$(LC_ALL=C tr -dc 'a-z' </dev/urandom | head -c 4 || true)"  # tr exits on SIGPIPE
 ACCOUNT="${AC1999_ACCOUNT:-acjs$SUFFIX}"
 CHAR="${AC1999_CHAR:-Acjs$SUFFIX}"

@@ -138,6 +138,9 @@ function settingText(name: string, v: string | number | boolean): string {
 const KIND_NAMES: Partial<Record<RoutineAction['kind'], string>> = {
   cast: 'casting a spell', 'cast-buffs': 'casting a buff set', 'attack-nearest': 'attacking', 'loot-nearby': 'looting',
   'walk-to': 'walking to coordinates', wait: 'waiting', train: 'spending XP', 'follow-route': 'following a route', 'talk-to': 'talking to an NPC',
+  // Beyond VTank, Jake 2026-10-12.
+  pull: 'pulling a monster', 'hold-position': 'holding position', 'release-position': 'releasing the held position',
+  'loot-corpse': 'looting a named corpse', recall: 'an abortable recall', 'flee-to': 'fleeing to coordinates',
 };
 const what = (a: RoutineAction): string => (a.kind === 'unsupported' ? a.what : a.kind === 'cast' ? `casting ${a.spell}` : KIND_NAMES[a.kind] ?? a.kind);
 
@@ -331,6 +334,11 @@ function metCondition(c: RoutineCondition, where: string, ctx: MetCtx): [number,
     case 'near': return [26, kv([['e', S(`coordinatedistanceflat[coordinateparse[${vtExprString(c.coords)}],getplayercoordinates[]]<=${vtNumber(c.meters)}`)]])];
     case 'unassigned-xp-above': return [26, kv([['e', S(`getcharquadprop[2]>${vtNumber(c.xp)}`)]])];
     case 'buff-missing': return never(`"${c.spell}" missing (VTank's buff test is its own buff list)`);
+    // Beyond VTank, Jake 2026-10-12: no VirindiTank condition (nor meta expression) can say these.
+    case 'attackers-at-least': return never(`${c.count}+ creatures attacking you`);
+    case 'being-cast-at': return never('a spell coming at you');
+    case 'no-monster-near': return never(`no monster within ${c.meters} m of ${c.coords ?? c.object}`);
+    case 'my-corpse-within': return never(`your corpse within ${c.meters} m`);
     case 'unsupported': {
       const raw = c.raw as { id: number; data: MetValue } | undefined;
       if (raw) return [raw.id, raw.data];

@@ -58,6 +58,27 @@ it can change when the hosting moves, so open an issue to confirm the current
 one), or run your own bridge as above. The bridge logs each session's real
 address if you want to screen players yourself.
 
+**What players see until then.** A world whose check refuses the bridge is
+listed with a "Blocks webAC" chip and the line "Its VPN check refuses webAC
+players. We're working on a fix." in its details, and ENTER is refused with
+that reason, so nobody makes an account there only to sit in portal space or
+be booted
+(`VPN_BLOCK` entries in services/ws-tcp-bridge/src/serverCompat.ts; Conquest
+and AChard as of 2026-10-12).
+
+**The long-term fix** we're working on: a change to the server software
+([ACEmulator/ACE#4508](https://github.com/ACEmulator/ACE/pull/4508), not merged yet;
+see "Seeing players' real IP addresses" below) so a trusted relay such as the bridge can pass each
+player's real address, and a world's VPN check judges the player instead of
+the bridge. Until a world runs it, exempting the bridge is the way in.
+
+**Getting the block lifted.** Exempt the bridge's address as above, then
+open an issue. We re-check the world through the deployed page
+(`npx tsx tools/probe-world-access.ts --only <World> --recheck-blocked`,
+which lets the probe past the launcher's refusal) and remove the entry once
+a fresh account reaches the world without the VPN message. The launcher
+picks that up on the next bridge deploy.
+
 **Survey, 2026-10-12** (`tools/probe-world-access.ts`: one throwaway account
 and character per online world through playwebac.com, listening 25 s in the
 world). Of 34 online worlds:
@@ -68,9 +89,11 @@ world). Of 34 online worlds:
   Shadowland, Soulclaim, Sundering, The Tower, Thistlecrown.
 - **2 block the bridge as a VPN:** Conquest (in the world: chat line, held in
   portal space) and AChard (at login: "You have been booted… Connections from
-  VPN / proxy disallowed by server policy").
+  VPN / proxy disallowed by server policy"). Both are now marked "Blocks
+  webAC" and refused at ENTER (above).
 - **1 unclear:** Modclaim completes the handshake but never sends the
   character list (2+ minutes, twice); a silent block or a server problem.
+  Not marked: nothing it sent names a VPN or IP check.
 - **2 need web registration first** (no first-login account creation, not an
   IP block): Reefcull and Harvestbud (GDLE web form). A fresh account times
   out with "Client timed out the connection".
@@ -79,6 +102,51 @@ world). Of 34 online worlds:
   playwebac.com, and a local GDL-Classic server creates and logs in a fresh
   account on the first try: a transient server-side stall, not a webAC bug
   and not registration.
+- Seedsow and Snowreap run Classic Dereth **1.0** data (no Salvaging skill).
+  A client on the 1.1 files trains Salvaging at creation and the server
+  answers Corrupt ("The server cannot create your new character at this
+  time"). webAC sends the 1.0 skill list to both since 2026-10-12
+  (docs/dark-majesty-support.md, "Seedsow is 1.0 too"). If you run a GDL world
+  on 1.1 data, tell us and we will list it with the 1.1 era.
+
+## Seeing players' real IP addresses (proposed, not available yet)
+
+**Status (2026-10-12): no server can use this today.** Stock ACE has no support for
+it. We've proposed it upstream in
+[ACEmulator/ACE#4508](https://github.com/ACEmulator/ACE/pull/4508), which is not
+merged. Until a server runs that change and we've finished our side (below), every
+browser player still reaches your world from the bridge's address, as described above.
+
+How it would work: allowlisting the bridge, as above, takes per-IP rules off
+browser players entirely. To apply your rules to each browser player by their
+*own* address, the bridge would tell your server who each player is. It prepends a
+38-byte [Simple Proxy Protocol](https://developers.cloudflare.com/spectrum/reference/simple-proxy-protocol-header/)
+header (the format Cloudflare Spectrum uses for UDP) to every datagram, carrying
+the player's real address. A server running the proposed change, with the bridge
+listed as trusted, uses that address for `MaximumAllowedSessionsPerIPAddress`,
+the unlimited-sessions allowlist, account IPs and admin displays. A player with
+three native clients open and a fourth in the browser then counts as four
+sessions from one address. The server echoes the header on its replies, as the
+spec requires, and the bridge strips it.
+
+- **ACE:** needs the `TrustedProxyAddresses` setting from ACE#4508. If you want it
+  before that is merged (or if it isn't), the PR's single commit applies to an
+  ACE fork as is. You would list the bridge's egress addresses there. Datagrams
+  from a listed address must carry the header; everyone else's are handled
+  exactly as before. Other emulators (GDLE, ClassicACE forks) have no
+  equivalent yet.
+- **Bridge addresses (not done yet).** The hosted bridge doesn't send from fixed
+  addresses yet. Its address can change on a deploy, so we have to turn on
+  Railway static outbound IPs before any server can trust it. Railway may share those addresses with its other
+  customers, who could then send forged headers to a trusting server. The worst
+  case is someone dodging your per-IP limits or IP bans, which a VPN does already.
+- **Turn it on at the same time on both sides.** A server that trusts the
+  bridge drops datagrams without the header. One that doesn't trust it reads
+  the header as a broken packet. Tell us when your server is ready, and we add
+  your server id to the bridge's `BRIDGE_SPP_SERVERS` (a self-hosted bridge
+  pinned to one server: `BRIDGE_SPP=1`).
+- The bridge skips its era-detection login on these servers (that probe would
+  carry no player address); your world's era comes from the launcher list instead.
 
 ## Accounts and registration
 
@@ -95,8 +163,9 @@ we'll add it.
 
 GDLE worlds that use the end-of-retail data files work and are labelled
 "beta" in the launcher. See [gdle-compat.md](gdle-compat.md) for what has
-been tested. Worlds that need the classic (Dark Majesty) data files are
-listed but can't be entered yet.
+been tested. Worlds that need the classic (Dark Majesty) data files load
+that era's data and are labelled "Dark Majesty era"
+([dark-majesty-support.md](dark-majesty-support.md)).
 
 ## Opting out
 

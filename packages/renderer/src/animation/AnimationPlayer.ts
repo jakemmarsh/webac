@@ -130,6 +130,15 @@ export class AnimationPlayer {
   private hookListeners: HookCallback[] = [];
   private completeCallback: (() => void) | null = null;
   private overshoot = 0;
+  /** Whole frames stepped over with a root-motion sink since the last takeSteps() (MOVE.chunked-motion-judder). */
+  private steps = 0;
+  /** Counts play() calls: a new node restarts the step interval (MOVE.chunked-motion-judder). */
+  private epoch = 0;
+
+  /** Changes each time a node is put on the player (play), restarting the step interval. */
+  get nodeEpoch(): number {
+    return this.epoch;
+  }
 
   /**
    * Start playing an animation from its starting frame.
@@ -153,6 +162,7 @@ export class AnimationPlayer {
     this.completeCallback = onComplete ?? null;
     this.overshoot = 0;
     this.frameNumber = this.startingFrame();
+    this.epoch++;
   }
 
   pause(): void {
@@ -343,10 +353,37 @@ export class AnimationPlayer {
   }
 
   /**
+   * MOVE.chunked-motion-judder — how many whole frames moved the body (each
+   * `stepMotion`: a frame stepped over, or a node's starting frame on
+   * arrival) since the last call, and reset the count. The body's root
+   * offset only changes on these steps (update_internal).
+   */
+  takeSteps(): number {
+    const n = this.steps;
+    this.steps = 0;
+    return n;
+  }
+
+  /**
+   * MOVE.chunked-motion-judder — the elapsed fraction [0, 1) of the interval
+   * to the next whole frame (the frame number's fraction; mirrored for a
+   * node playing backwards), or null when the sequence is not stepping
+   * (nothing playing, or a framerate-0 node, which moves by elapsed time).
+   */
+  get stepPhase(): number | null {
+    if (!this.playing || !this.animation) return null;
+    const rate = this.framerate * this.speed;
+    if (rate === 0 || !Number.isFinite(rate)) return null;
+    const f = this.frameNumber - Math.floor(this.frameNumber);
+    return rate > 0 ? f : Math.min(1 - f, 1 - 1e-9);
+  }
+
+  /**
    * One stepped-over frame of `update_internal`: the frame's root pos-frame
    * (when the animation has them) and the sequence physics for 1 / rate.
    */
   private stepMotion(motion: SequenceMotion, frameIndex: number, rate: number, time: number, backward: boolean): void {
+    this.steps++;
     const pos = this.animation?.posFrames[frameIndex];
     if (pos) {
       if (backward) subtractFrame(motion.frame, pos);

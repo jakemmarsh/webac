@@ -56,6 +56,8 @@ describe('who is attacking you', () => {
   });
 
   it('no "under attack by" line when the attacker is your target', () => {
+    // Beside you: a swing comes from melee reach (a line is pinned only on a creature of its name within it).
+    host.objs.get(0x80000082)!.x = 83;
     api.pushChat('The Mosswart hits your leg for 3 points of slashing damage!', 0x15);
     host.target = 0x80000082;
     const obs = api.observe();

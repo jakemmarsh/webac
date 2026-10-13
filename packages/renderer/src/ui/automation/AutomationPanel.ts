@@ -170,6 +170,12 @@ export const CONDITIONS: CondDef[] = [
   { id: 'portal-out', label: 'Came out of a portal', group: 'Location', make: () => ({ kind: 'portal-exited' }), is: (c) => c.kind === 'portal-exited', parts: [] },
   { id: 'route-done', label: 'Route finished', group: 'Routine', make: () => ({ kind: 'route-done' }), is: (c) => c.kind === 'route-done', parts: [] },
   { id: 'expr', label: 'Expression', group: 'Routine', hint: 'VirindiTank syntax', make: () => ({ kind: 'expression', expr: '' }), is: (c) => c.kind === 'expression', parts: [{ key: 'expr', type: 'text', width: 240 }] },
+  // Beyond VTank, Jake 2026-10-12 (agent/beyondVtank.ts): neither VirindiTank nor UtilityBelt had these; keep them in a parity audit.
+  { id: 'attackers', label: 'Attacked by', group: 'Nearby', hint: 'count', make: () => ({ kind: 'attackers-at-least', count: 2 }), is: (c) => c.kind === 'attackers-at-least', parts: ['at least', { key: 'count', type: 'number', width: 36 }, 'creatures'] },
+  { id: 'cast-at', label: 'Being cast at', group: 'Nearby', hint: 'seconds', make: () => ({ kind: 'being-cast-at' }), is: (c) => c.kind === 'being-cast-at', parts: ['in the last', { key: 'seconds', type: 'number', width: 36 }, 's (5 when blank)'] },
+  { id: 'nomon-point', label: 'No monsters near point', group: 'Nearby', hint: 'map coordinates', make: () => ({ kind: 'no-monster-near', meters: 10, coords: '' }), is: (c) => c.kind === 'no-monster-near' && c.object === undefined, parts: ['within', { key: 'meters', type: 'number', width: 40 }, 'm of', { key: 'coords', type: 'text', width: 120 }] },
+  { id: 'nomon-object', label: 'No monsters near object', group: 'Nearby', hint: 'name', make: () => ({ kind: 'no-monster-near', meters: 10, object: '' }), is: (c) => c.kind === 'no-monster-near' && c.object !== undefined, parts: ['within', { key: 'meters', type: 'number', width: 40 }, 'm of', { key: 'object', type: 'text', width: 130 }] },
+  { id: 'my-corpse', label: 'My corpse within', group: 'Character', hint: 'distance', make: () => ({ kind: 'my-corpse-within', meters: 30 }), is: (c) => c.kind === 'my-corpse-within', parts: [{ key: 'meters', type: 'number', width: 40 }, 'm'] },
   { id: 'unsupported', label: "Can't run", group: '', make: () => ({ kind: 'unsupported', what: '' }), is: (c) => c.kind === 'unsupported', parts: [{ key: 'what', type: 'readonly' }] },
 ];
 
@@ -195,6 +201,13 @@ export const ACTIONS: ActDef[] = [
   { id: 'watchdog', label: 'Watchdog', group: 'Routine', hint: 'if you stop moving', make: (p) => ({ kind: 'set-watchdog', state: p.states[0]?.name ?? '', meters: 5, seconds: 60 }), is: (a) => a.kind === 'set-watchdog', parts: ['go to', { key: 'state', type: 'state' }, 'if not', { key: 'meters', type: 'number', width: 36 }, 'm in', { key: 'seconds', type: 'number', width: 44 }, 's'] },
   { id: 'clear-watchdog', label: 'Clear watchdog', group: 'Routine', make: () => ({ kind: 'clear-watchdog' }), is: (a) => a.kind === 'clear-watchdog', parts: [] },
   { id: 'expr', label: 'Expression', group: 'Routine', hint: 'VirindiTank syntax', make: () => ({ kind: 'expression', expr: '' }), is: (a) => a.kind === 'expression', parts: [{ key: 'expr', type: 'text', width: 240 }] },
+  // Beyond VTank, Jake 2026-10-12 (agent/beyondVtank.ts).
+  { id: 'pull', label: 'Pull', group: 'Combat', hint: 'one hit, then back', make: () => ({ kind: 'pull', pattern: '', back: '' }), is: (a) => a.kind === 'pull', parts: ['the nearest', { key: 'pattern', type: 'text', width: 110 }, 'within', { key: 'meters', type: 'number', width: 36 }, 'm, back to', { key: 'back', type: 'text', width: 120 }, 'then hold', { key: 'holdMeters', type: 'number', width: 36 }, 'm'] },
+  { id: 'hold', label: 'Hold position', group: 'Combat', hint: 'no chasing', make: () => ({ kind: 'hold-position', meters: 15 }), is: (a) => a.kind === 'hold-position', parts: ['fight only within', { key: 'meters', type: 'number', width: 40 }, 'm of', { key: 'coords', type: 'text', width: 120 }, '(blank: here)'] },
+  { id: 'release', label: 'Release position', group: 'Combat', make: () => ({ kind: 'release-position' }), is: (a) => a.kind === 'release-position', parts: [] },
+  { id: 'loot-corpse', label: 'Loot corpse', group: 'Loot', hint: 'by name', make: () => ({ kind: 'loot-corpse', name: 'Corpse of ' }), is: (a) => a.kind === 'loot-corpse', parts: [{ key: 'name', type: 'text', width: 200 }] },
+  { id: 'recall', label: 'Recall', group: 'Movement', hint: 'unless attacked', make: () => ({ kind: 'recall', via: '/ls' }), is: (a) => a.kind === 'recall', parts: [{ key: 'via', type: 'text', width: 120 }, 'giving up at', { key: 'abortAttackers', type: 'number', width: 36 }, 'attackers'] },
+  { id: 'flee', label: 'Flee to', group: 'Movement', hint: 'map coordinates', make: () => ({ kind: 'flee-to', coords: '' }), is: (a) => a.kind === 'flee-to', parts: [{ key: 'coords', type: 'text', width: 120 }, { key: 'portal', type: 'text', width: 120 }] },
   { id: 'unsupported', label: "Can't run", group: '', make: () => ({ kind: 'unsupported', what: '' }), is: (a) => a.kind === 'unsupported', parts: [{ key: 'what', type: 'readonly' }] },
 ];
 

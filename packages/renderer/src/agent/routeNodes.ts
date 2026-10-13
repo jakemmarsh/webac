@@ -103,7 +103,7 @@ export function isRecall(spell: string): boolean {
 }
 
 /** Where a seen object stands, in global metres, from your position and its distance and bearing. */
-function objectAt(me: { x: number; y: number }, o: { dist: number; bearing: number }): { x: number; y: number } {
+export function objectAt(me: { x: number; y: number }, o: { dist: number; bearing: number }): { x: number; y: number } {
   const r = (o.bearing * Math.PI) / 180;
   return { x: me.x + o.dist * Math.sin(r), y: me.y + o.dist * Math.cos(r) };
 }

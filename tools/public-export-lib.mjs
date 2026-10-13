@@ -94,7 +94,8 @@ export const FORBIDDEN_EXTENSIONS = /\.(exe|dll|pdb|dat|iso|zip|7z|webm|mp4|avi|
 
 /** Images allowed in the public tree; any other image fails the export. */
 export const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp|tga|ico)$/i;
-export const ALLOWED_IMAGES = ['docs/mockups/', 'deploy/web/'];
+// GoArrow's arrow, close box and glyph are MIT (Ben Howell 2007, Xanius 2018; LICENSE.txt beside them, NOTICE.md).
+export const ALLOWED_IMAGES = ['docs/mockups/', 'deploy/web/', 'packages/renderer/src/ui/goarrow/arrows/'];
 
 /** Line hits of `patterns` in `text`: [{ line, text }]. */
 export function scanText(text, patterns) {

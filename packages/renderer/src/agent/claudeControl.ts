@@ -58,6 +58,13 @@ export interface ControlHooks {
   pauseRoutine(): void;
   /** Tell the player (a chat line). */
   say(text: string): void;
+  /**
+   * Claude is still acting between calls: its walk / use task is in flight (the agent API's hasTask), or
+   * the routine Claude started still runs (`claudeRoutine` says whether Claude started it). Player input
+   * takes over then however long ago Claude's last call was: a walk that outlived CLAUDE_ACTIVE_MS kept
+   * holding W, so the player's own W press was an auto-repeat (CameraController.pressKey) and moved nothing.
+   */
+  stillActing?(claudeRoutine: boolean): boolean;
 }
 
 export interface HistoryEntry { at: number; method: string; ok: boolean; ms: number }
@@ -103,7 +110,8 @@ export class ClaudeControl {
   playerInput(): void {
     const t = this.now();
     this.lastPlayerAt = t;
-    if (this.control === 'player' || this.paused || t - this.lastActAt > CLAUDE_ACTIVE_MS) return;
+    if (this.control === 'player' || this.paused) return;
+    if (t - this.lastActAt > CLAUDE_ACTIVE_MS && !this.hooks.stillActing?.(this.claudeRoutine)) return;
     this.control = 'player';
     this.hooks.stopMoving();
     if (this.claudeRoutine) this.hooks.pauseRoutine();

@@ -33,9 +33,8 @@
  */
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { chromium } from 'playwright';
+import { createRunProfile } from './lib/temp-profile.js';
 import { shot, waitFor, AT_CHAR_SELECT_JS, IN_CHARGEN_JS, IN_WORLD_JS, PROBE_CHARGEN_REOPEN_JS, SWIFTSHADER_ARGS } from './lib/game-session.js';
 
 const args = process.argv.slice(2);
@@ -57,8 +56,10 @@ const log = (s: string) => { console.log(`[era ${new Date().toISOString().slice(
 // A persistent profile, like a player's: an incognito context keeps OPFS in
 // memory and refuses the classic files (~1.2 GB) on top of the end-of-retail
 // cache (QuotaExceededError at ~2.2 GB, 2026-10-06).
-const profile = mkdtempSync(join(tmpdir(), 'acjs-era-probe-'));
-const browser = await chromium.launchPersistentContext(profile, { args: SWIFTSHADER_ARGS, viewport: { width: 1280, height: 720 } });
+// Deleted at exit, on a signal or a crash (tools/lib/temp-profile.ts): it holds the streamed/whole DATs (1-2 GB).
+const profile = createRunProfile('acjs-era-probe-', { tool: 'probe-era-switch' });
+const browser = await chromium.launchPersistentContext(profile.dir, { args: SWIFTSHADER_ARGS, viewport: { width: 1280, height: 720 } });
+profile.setCloser(() => browser.close());
 const page = browser.pages()[0] ?? await browser.newPage();
 page.setDefaultTimeout(60_000);
 page.on('dialog', (d) => void d.dismiss());
@@ -180,9 +181,8 @@ try {
   log(`ERROR ${(e as Error).message}`);
   failed = true;
 } finally {
-  await browser.close();
-  // The fresh profile holds the streamed/whole DATs (1-2 GB): never leave it behind.
-  rmSync(profile, { recursive: true, force: true });
+  // Closes the browser, then removes the fresh profile (1-2 GB of DATs): never leave it behind.
+  await profile.dispose();
 }
 log(failed ? 'RESULT: FAIL' : 'RESULT: PASS');
 process.exit(failed ? 1 : 0);

@@ -12,6 +12,10 @@
  *   one partial stack is left (VTank stacks toward one item, "also into side
  *   packs", CHG .157). What you wear or wield never moves: arrows stay in the
  *   ammo slot (CHG .159).
+ * - `keepIn` (Mag-Tools Autopack's placement, @ac/shared mtAutopackPlacement):
+ *   an item a Keep # rule placed only ever moves to a pack in its list, so the
+ *   tidy never undoes Autopack (neither a cram nor a merge onto a stack in
+ *   another pack). Placement wins; the tidy works around it.
  * - Autocram: the first item in the main pack moves to the first side pack
  *   with room. Packs, foci (they take a pack slot) and worn things stay.
  */
@@ -24,8 +28,9 @@ export interface InvItem {
 export interface InvPack { slot: number; guid: number; capacity: number; count: number }
 export type InvAction = { kind: 'merge'; from: number; onto: number; why: string } | { kind: 'move'; guid: number; packSlot: number; why: string };
 
-export function planInventory(input: { items: InvItem[]; packs: InvPack[]; autostack: boolean; autocram: boolean; ignored?: ReadonlySet<number> }): InvAction | null {
+export function planInventory(input: { items: InvItem[]; packs: InvPack[]; autostack: boolean; autocram: boolean; ignored?: ReadonlySet<number>; keepIn?: ReadonlyMap<number, readonly number[]> }): InvAction | null {
   const ignored = input.ignored ?? new Set<number>();
+  const allowed = (i: InvItem, packSlot: number) => { const k = input.keepIn?.get(i.guid); return !k || k.includes(packSlot); };
   const loose = input.items.filter((i) => !i.equipped && !i.isPack && !ignored.has(i.guid) && i.packSlot >= 0);
   if (input.autostack) {
     const packWeight = new Map(input.packs.map((p) => [p.slot, input.items.find((i) => i.guid === p.guid)?.burden ?? 0]));
@@ -41,17 +46,23 @@ export function planInventory(input: { items: InvItem[]; packs: InvPack[]; autos
     for (const g of [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)) {
       if (g.length < 2) continue;
       g.sort((a, b) => rank(a) - rank(b) || a.guid - b.guid);
-      const from = g[0]!;
-      for (let k = g.length - 1; k >= 1; k--) {
-        const onto = g[k]!;
-        if (onto.stack >= onto.maxStack) continue;
-        return { kind: 'merge', from: from.guid, onto: onto.guid, why: `stack ${from.name} (${from.stack}) onto ${onto.stack}` };
+      // The first item that may go onto a later one with room (without keepIn, always the first: the rest
+      // can only reach a subset of its candidates).
+      for (let f = 0; f < g.length - 1; f++) {
+        const from = g[f]!;
+        for (let k = g.length - 1; k > f; k--) {
+          const onto = g[k]!;
+          if (onto.stack >= onto.maxStack) continue;
+          if (onto.packSlot !== from.packSlot && !allowed(from, onto.packSlot)) continue;
+          return { kind: 'merge', from: from.guid, onto: onto.guid, why: `stack ${from.name} (${from.stack}) onto ${onto.stack}` };
+        }
+        if (!input.keepIn?.size) break;
       }
     }
   }
   if (input.autocram) {
     const side = input.packs.filter((p) => p.slot > 0 && p.count < p.capacity && !ignored.has(p.guid)).sort((a, b) => a.slot - b.slot)[0];
-    const item = loose.find((i) => i.packSlot === 0);
+    const item = side ? loose.find((i) => i.packSlot === 0 && allowed(i, side.slot)) : undefined;
     if (side && item) return { kind: 'move', guid: item.guid, packSlot: side.slot, why: `cram ${item.name} into side pack ${side.slot}` };
   }
   return null;
@@ -75,6 +86,8 @@ export class InventoryTidy {
   private pending: { guids: number[]; sig: string; at: number; key: string } | null = null;
   private readonly failures = new Map<string, number>();
   readonly ignored = new Set<number>();
+  /** Mag-Tools Autopack's placement (`planInventory` keepIn), read each step; the lead sets it when Mag-Tools runs. */
+  keepIn: (() => ReadonlyMap<number, readonly number[]>) | null = null;
   constructor(private readonly api: TidyApi, private readonly now: () => number, private readonly opts: { waitMs?: number; abandonAfter?: number } = {}) {}
 
   private sig(guids: number[], items: InvItem[]): string {
@@ -110,7 +123,7 @@ export class InventoryTidy {
       }
     }
     for (const g of [...this.ignored]) if (!items.some((i) => i.guid === g) && !this.api.packs().some((p) => p.guid === g)) this.ignored.delete(g);
-    const plan = planInventory({ items, packs: this.api.packs(), ...mode, ignored: this.ignored });
+    const plan = planInventory({ items, packs: this.api.packs(), ...mode, ignored: this.ignored, ...(this.keepIn ? { keepIn: this.keepIn() } : {}) });
     if (!plan) return { kind: 'idle' };
     const guids = plan.kind === 'merge' ? [plan.from, plan.onto] : [plan.guid];
     const r = plan.kind === 'merge' ? this.api.placeItem(plan.from, { onto: plan.onto }) : this.api.placeItem(plan.guid, { packSlot: plan.packSlot });

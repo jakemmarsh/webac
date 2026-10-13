@@ -133,7 +133,8 @@ export function emitterParentNode(anchor: THREE.Object3D, partIndex: number): TH
 /**
  * ParticleEmitter::SetParenting @ 0051c190 — the frame an emitter follows:
  * the parent node's live world transform, with the hook's offset in the
- * parent's local frame (AC axes). Gone once the node leaves the scene graph.
+ * parent's local frame (AC axes). Gone once the node leaves the scene graph
+ * (after having been in it, whether at the emitter's birth or since).
  */
 export function makeEmitterFrameSource(node: THREE.Object3D, offset: { x: number; y: number; z: number }, partIndex?: number): ParticleFrameSource {
   const inScene = (): boolean => {
@@ -158,7 +159,12 @@ export function makeEmitterFrameSource(node: THREE.Object3D, offset: { x: number
       wasInScene = inScene();
     },
     getFrame(outPos, outQuat) {
-      if (wasInScene && !inScene()) return false;
+      // Placed after the emitter started (the local player's Hidden-script
+      // bubbles start before its model joins the scene): from then on its
+      // leaving the scene ends the emitter too. Unlatched, a world teardown
+      // mid-login left those bubbles standing where the player had been.
+      if (!wasInScene) wasInScene = inScene();
+      else if (!inScene()) return false;
       node.updateWorldMatrix(true, false);
       node.matrixWorld.decompose(outPos, outQuat, EMITTER_SCALE_SCRATCH);
       return true;

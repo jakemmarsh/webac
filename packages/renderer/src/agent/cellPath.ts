@@ -381,7 +381,9 @@ const dist = (p: Vec3, q: Vec3): number => Math.hypot(p.x - q.x, p.y - q.y, p.z 
  * `feet` is a wall doorway's floor height, where a body's feet pass through it. The centroid is
  * 1.25–1.55 m above that in a 2.5–3.1 m door: the Holtburg tavern, 2026-10-09.
  */
-export type RoutePoint = Vec3 & { floor?: boolean; feet?: number; drop?: number; landing?: number };
+export type RoutePoint = Vec3 & { floor?: boolean; feet?: number; drop?: number; landing?: number;
+  /** The route's end: where a body stands to deal with a goal across a counter or window (counterSpot), not the goal itself. */
+  across?: boolean };
 const withFeet = (d: CellDoor, p: Vec3): RoutePoint => (d.bottom === undefined ? p : { ...p, feet: d.bottom });
 
 /** Two points within 1 cm: the same doorway (each side's copy of a door shares its centroid). */
@@ -398,7 +400,7 @@ export const samePoint = (p: Vec3, q: Vec3): boolean => Math.hypot(p.x - q.x, p.
 export function findRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number, to: Vec3, avoid: Vec3[] = [], opts: RouteOptions = {}): RoutePoint[] | null {
   // Through body-sized openings when there's a way; any opening beats none.
   const all = opts.avoid?.length ? [...avoid, ...opts.avoid] : avoid;
-  return searchRoute(g, fromCell, from, toCell, to, all, true, opts) ?? searchRoute(g, fromCell, from, toCell, to, all, false, opts);
+  return searchRoute(g, fromCell, from, toCell, to, all, true, opts) ?? (opts.bodyOnly ? null : searchRoute(g, fromCell, from, toCell, to, all, false, opts));
 }
 
 /**
@@ -419,6 +421,8 @@ export interface RouteOptions {
    * fence is 2 m tall: below Jump 65 the way down is the ramp and the key room's locked door (2026-10-11).
    */
   avoid?: Vec3[];
+  /** Only openings a body walks through (no window or counter as a last resort). */
+  bodyOnly?: boolean;
 }
 
 /** How near a doorway a door that would not open stands (seen from above; within 3 m of height). */
@@ -537,8 +541,62 @@ export function doorstep(g: CellGraph, d: CellDoor): RoutePoint {
  * findRoute; outdoor to outdoor is a straight line ([to]).
  */
 export function findRouteViaOutside(g: CellGraph, fromCell: number, from: Vec3, toCell: number, to: Vec3, opts: RouteOptions = {}): RoutePoint[] | null {
-  const r = routeViaOutside(g, fromCell, from, toCell, to, opts);
-  return r && r.filter((p, i) => i === 0 || !samePoint(p, r[i - 1]));
+  // A goal behind a counter (a shopkeeper in his booth): no body walks to it; the route goes to where a player stands
+  // to deal with it, across the counter. The route used to climb through the counter as "any opening beats none"
+  // and the walk stood at it for 45 s (Renald the Elder, behind Holtburg's street window 0xA9B4014F, 2026-10-12).
+  let r = isInterior(toCell) && !opts.bodyOnly ? routeViaOutside(g, fromCell, from, toCell, to, { ...opts, bodyOnly: true }) : null;
+  if (!r && isInterior(toCell)) {
+    const spot = counterSpot(g, toCell, to);
+    if (spot) {
+      const there = spot.cell === toCell ? null : routeViaOutside(g, fromCell, from, spot.cell, spot.at, { ...opts, bodyOnly: true });
+      if (there) r = [...there.slice(0, -1), { ...spot.at, across: true }];
+    }
+  }
+  r ??= routeViaOutside(g, fromCell, from, toCell, to, opts);
+  return r && r.filter((p, i) => i === 0 || !samePoint(p, r![i - 1]));
+}
+
+/** How far beyond a counter or window's plane a body stands to deal across it (its radius, 0.48 m, and a margin). */
+export const COUNTER_STAND_M = 0.8;
+
+/**
+ * Where a player stands to deal with someone at `to` in `toCell` when only counters and windows lead there: the cells
+ * reached from `toCell` through too-low openings (the booth, the thin cell of a service window) are the far side; each
+ * too-low opening out of them onto a cell outside that set, or onto the landscape, has a standing spot COUNTER_STAND_M
+ * past its plane. The spot nearest the goal (the service window it stands at). Null when none.
+ */
+export function counterSpot(g: CellGraph, toCell: number, to: Vec3): { cell: number; at: RoutePoint } | null {
+  toCell >>>= 0;
+  const behind = new Set<number>([toCell]);
+  const queue = [toCell];
+  while (queue.length) {
+    const c = queue.shift()!;
+    for (const d of g.doors.get(c) ?? []) if (d.b !== 0xFFFF && tooLow(d) && !behind.has(d.b >>> 0)) { behind.add(d.b >>> 0); queue.push(d.b >>> 0); }
+  }
+  let best: { cell: number; at: RoutePoint; d: number } | null = null;
+  for (const c of behind) {
+    const centre = g.centers?.get(c);
+    for (const d of g.doors.get(c) ?? []) {
+      if (!tooLow(d) || (d.b !== 0xFFFF && behind.has(d.b >>> 0))) continue;
+      const h = Math.hypot(d.normal.x, d.normal.y);
+      if (!centre || h < 0.5) continue;
+      const nx = d.normal.x / h, ny = d.normal.y / h;
+      // Away from the booth's side of the opening.
+      const side = (centre.x - d.at.x) * nx + (centre.y - d.at.y) * ny > 0 ? -1 : 1;
+      const feet = d.b === 0xFFFF ? undefined : (g.doors.get(d.b >>> 0) ?? []).length ? counterFloor(g, d) : undefined;
+      const at: RoutePoint = { x: d.at.x + side * nx * COUNTER_STAND_M, y: d.at.y + side * ny * COUNTER_STAND_M, z: feet ?? to.z };
+      const cell = d.b === 0xFFFF ? ((toCell & 0xffff0000) | 0x0001) >>> 0 : d.b >>> 0;
+      const dd = Math.hypot(at.x - to.x, at.y - to.y);
+      if (!best || dd < best.d) best = { cell, at, d: dd };
+    }
+  }
+  return best && { cell: best.cell, at: best.at };
+}
+
+/** The floor a body stands on in front of a counter: the lowest walk-in doorway's sill of the cell on the far side, else the goal's. */
+function counterFloor(g: CellGraph, d: CellDoor): number | undefined {
+  const sills = (g.doors.get(d.b >>> 0) ?? []).filter((x) => !tooLow(x) && Math.abs(x.normal.z) <= 0.7 && x.bottom !== undefined).map((x) => x.bottom!);
+  return sills.length ? Math.min(...sills) : undefined;
 }
 
 /**

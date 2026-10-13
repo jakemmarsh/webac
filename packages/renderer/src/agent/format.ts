@@ -42,13 +42,14 @@ export function formatObject(o: AgentObject): string {
     `${o.dist.toFixed(1)}m ${relativeDirection(o.relBearing)} (${compassPoint(o.bearing)})`,
   ];
   if (Math.abs(o.dz) >= 2) bits.push(`${o.dz > 0 ? 'up' : 'down'} ${Math.abs(o.dz).toFixed(0)}m`);
-  if (o.health !== undefined) bits.push(`hp ${pct(o.health)}`);
+  if (o.health !== undefined && !o.dying) bits.push(`hp ${pct(o.health)}`);
   if (o.stack && o.stack > 1) bits.push(`x${o.stack}`);
   if (o.open) bits.push('open');
-  if (o.dying) bits.push('dying');
+  if (o.dying) bits.push('DYING (dead: not a target)');
   if (o.outOfSight) bits.push('OUT OF SIGHT: only where it was last seen (it may have moved, died or gone)');
   if (o.attackingYou) bits.push(`ATTACKING YOU (${o.attackingYou}× in 10 s)`);
-  if (o.lineOfFireBlockedAt !== undefined) bits.push(`no line of fire: blocked ${o.lineOfFireBlockedAt.toFixed(1)} m along it (a bolt or arrow would hit that)`);
+  if (o.seen) bits.push(`seen: ${o.seen}`);
+  if (o.lineOfFireBlockedAt !== undefined) bits.push(`no line of fire: blocked ${o.lineOfFireBlockedAt.toFixed(1)} m along it${o.lineOfFireBlocker ? ` by ${o.lineOfFireBlocker}` : ''} (${o.lineOfFireArc ? 'your arrow\'s arc would hit that' : 'a bolt or arrow would hit that'})`);
   if (o.seenAgo !== undefined) bits.push(`last seen ${seenAgoText(o.seenAgo)} ago`);
   return bits.join('  ');
 }
@@ -100,11 +101,12 @@ export function formatObservation(obs: AgentObservation): string {
   if (bad.length) out.push(formatBuffs(bad).replace(/^buffs/, 'debuffs'));
   if (obs.buffsMissing?.length) out.push(`  buffs you know that aren't up: ${obs.buffsMissing.slice(0, 10).join(', ')}${obs.buffsMissing.length > 10 ? ` +${obs.buffsMissing.length - 10} more` : ''} (ac_cast; "… Other" ones go on a fellow with target=)`);
   if (obs.fellowshipAlone) out.push('fellowship: only you are in it, so /f reaches no one (a fellow who logs out leaves it): recruit your partner (in sight), or quit it (ac_fellowship action=quit) if they lead one');
-  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
+  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
   if (obs.windows?.length) out.push(`windows open: ${obs.windows.join(', ')}  (ac_close name=… or all, when done with them)`);
   out.push(`target: ${obs.target ? formatObject(obs.target) : 'none'}`);
   const attackers = obs.nearby.filter((o) => o.attackingYou && o.guid !== obs.target?.guid);
   if (attackers.length) out.push(`under attack by: ${attackers.map((o) => `${o.name} #${o.guid.toString(16)} ${o.dist.toFixed(1)}m (${o.attackingYou}× in 10 s)`).join(', ')}${obs.target ? ' (not your target)' : ''}`);
+  if (obs.attackersUnplaced?.length) out.push(`hit by, but not placed: ${obs.attackersUnplaced.map((u) => `${u.name} (${u.count}× in 10 s)`).join(', ')} (none of that name within reach of you: out of sight, or attacking from afar)`);
   out.push(`nearby (${obs.nearby.length}${obs.nearbyTotal > obs.nearby.length ? ` of ${obs.nearbyTotal}` : ''}, nearest first):`);
   for (const o of obs.nearby) out.push(`  ${formatObject(o)}`);
   if (obs.remembered?.length) {

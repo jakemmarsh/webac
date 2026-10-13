@@ -19,6 +19,8 @@
  *   toggles, with UB's titles and descriptions, those whose setting this
  *   port has. UB registers them unbound and says "Toggle Hotkey Pressed:
  *   <setting> = True" (UtilityBelt.cs).
+ * - Mag-Tools' (preview UI; VTankSource.pluginHotkeys): Pack Inventory (its
+ *   default Ctrl+P, PluginCore.cs) and One Touch Heal (no default key).
  * - VVS toggles the player added: "Toggle:<window>", "Toggle window:
  *   <window>" (VHS_Main.jpg).
  *
@@ -96,6 +98,8 @@ export function vtankHotkeys(win: VTankWindow): VhsHotkey[] {
     if (!has) continue;
     out.push({ id: `UtilityBelt/${t.title}`, plugin: 'UtilityBelt', name: t.title, description: t.description, defaultCode: null, run: async () => ubToggleLine(await win.command(`/ub opt toggle ${t.setting}`)) });
   }
+  // Other plugins' (Mag-Tools' Pack Inventory and One Touch Heal, preview UI).
+  for (const h of win.source.pluginHotkeys?.() ?? []) out.push(h);
   // The windows added with Add VVS.
   const windows = win.vvsWindows();
   for (const title of win.hotkeys.vvs) {

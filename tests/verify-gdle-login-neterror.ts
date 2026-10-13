@@ -21,8 +21,9 @@
  * The tests drive the real ClientConnection over a fake socket with that
  * packet built byte for byte, the real ConnectionNotices resolution (DAT
  * table 0x23000010 when dat/ is present) and the launcher's text rule. The
- * AC1999 lane (Connection1999) keeps its own NetError handling; it is pinned
- * unchanged at the end.
+ * AC1999 lane (Connection1999) now reports the same serverNetError
+ * (tests/verify-ac1999-login-refusal.ts has its server's bytes); a short pin
+ * is at the end.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
@@ -285,8 +286,8 @@ describe.skipIf(!existsSync(DAT_PATHS.local))('DAT: table 0x23000010 holds the G
   });
 });
 
-describe('AC1999 lane unchanged: Connection1999 keeps its own NetError refusal', () => {
-  it('a 1999 NetError packet is still CharacterError.AccountDoesntExist + disconnect', () => {
+describe('AC1999 lane: Connection1999 reports the same serverNetError (RELEASE.ac1999-login-refusal-reasons)', () => {
+  it('a 1999 NetError packet is the server string id + table, not a CharacterError, + disconnect', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const conn = new Connection1999('ws://bridge');
@@ -301,8 +302,9 @@ describe('AC1999 lane unchanged: Connection1999 keeps its own NetError refusal',
     v.setUint32(20, STR_LOGIN_FAILED, true);
     sock.deliver(p);
     const err = events.find((e) => e.type === 'error');
-    expect(err?.characterError).toBe(CharacterError.AccountDoesntExist);
-    expect(err?.serverNetError).toBeUndefined();
+    expect(err?.characterError).toBeUndefined();
+    expect(err?.serverNetError).toEqual({ stringId: STR_LOGIN_FAILED, tableId: 0 });
+    expect(CharacterError.AccountDoesntExist).toBe(0x0a); // no longer what a refusal reads as
     expect(sock.closed).toBe(true);
   });
 });

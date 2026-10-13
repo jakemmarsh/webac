@@ -19,20 +19,22 @@ import {
   type BaseProperty, type ElementDesc, type LayoutDescData,
 } from '../packages/dat-parser/src/file-types/LayoutDesc.js';
 import {
-  OWN_UI_OBJECT_PROPERTY, OWNED_OBJECT_Z_BASE, liftedOwnedObjects, applyOwnedObjectLayers,
+  OWN_UI_OBJECT_PROPERTY, OWNED_OBJECT_Z_BASE, liftedOwnedObjects, applyOwnedObjectLayers, hitTargetsOverOwnedObjects,
 } from '../packages/renderer/src/ui/LayoutPaintOrder.js';
 import { LayoutRenderer } from '../packages/renderer/src/ui/LayoutRenderer.js';
 
 interface Node {
   elementId: number; zLevel: number; uiReadOrder: number; type: number; baseElement: number;
+  x?: number; y?: number; width?: number; height?: number;
   properties: Map<number, BaseProperty>; children: Map<number, Node>;
 }
 
-function n(elementId: number, zLevel: number, uiReadOrder: number, opts: { own?: boolean; kids?: Node[]; type?: number; base?: number } = {}): Node {
+function n(elementId: number, zLevel: number, uiReadOrder: number, opts: { own?: boolean; kids?: Node[]; type?: number; base?: number; rect?: [number, number, number, number] } = {}): Node {
   const properties = new Map<number, BaseProperty>();
   if (opts.own) properties.set(OWN_UI_OBJECT_PROPERTY, { id: OWN_UI_OBJECT_PROPERTY, propertyType: 9, valueEnum: 3 } as BaseProperty);
   return {
     elementId, zLevel, uiReadOrder, type: opts.type ?? 3, baseElement: opts.base ?? 0, properties,
+    ...(opts.rect ? { x: opts.rect[0], y: opts.rect[1], width: opts.rect[2], height: opts.rect[3] } : {}),
     children: new Map((opts.kids ?? []).map((k) => [k.elementId, k])),
   };
 }
@@ -96,6 +98,52 @@ describe('liftedOwnedObjects', () => {
   });
 });
 
+// webac#1 — retail hit-tests the element tree (MouseHitTester::Recurse @
+// 00459370, children tail → head), so a lifted owner must not bury a button
+// that is in front of it in the tree.
+describe('hitTargetsOverOwnedObjects', () => {
+  // The main chat shape (layout 0x2100006f): the log area 0x10 holds the
+  // owning text 0x11 (21,5 368x73); the maximize box 0x46f (368,5 16x16) is a
+  // later sibling of the log area.
+  const chat = () => {
+    const text = n(0x11, 0, 1, { own: true, rect: [16, 0, 368, 73] });
+    const log = n(0x10, 0, 1, { rect: [5, 5, 400, 73], kids: [text] });
+    const max = n(0x46f, 0, 2, { type: 1, rect: [368, 5, 16, 16] });
+    const send = n(0x19, 0, 3, { type: 1, rect: [360, 83, 40, 17] });
+    return { root: n(0x600, 0, 0, { rect: [0, 0, 410, 100], kids: [log, max, send] }), text, max, send };
+  };
+
+  it('raises a button in front of an owner that overlaps it', () => {
+    const { root, max } = chat();
+    expect(hitTargetsOverOwnedObjects([root]).map((h) => h.desc)).toEqual([max]);
+  });
+
+  it('leaves a button outside the owner alone', () => {
+    const { root, send } = chat();
+    expect(hitTargetsOverOwnedObjects([root]).map((h) => h.desc)).not.toContain(send);
+  });
+
+  it('leaves a button that is behind the owner in the tree alone (retail hits the owner first)', () => {
+    const text = n(0x11, 0, 2, { own: true, rect: [0, 0, 100, 100] });
+    const btn = n(0x46f, 0, 1, { type: 1, rect: [10, 10, 16, 16] });
+    expect(hitTargetsOverOwnedObjects([n(1, 0, 0, { kids: [btn, text] })])).toEqual([]);
+  });
+
+  it('leaves a button inside the owner alone (it is lifted with it)', () => {
+    const btn = n(0x46f, 0, 1, { type: 1, rect: [10, 10, 16, 16] });
+    const text = n(0x11, 0, 1, { own: true, rect: [0, 0, 100, 100], kids: [btn] });
+    expect(hitTargetsOverOwnedObjects([n(1, 0, 0, { kids: [text] })])).toEqual([]);
+  });
+
+  it('applyOwnedObjectLayers puts the raised button above every lifted layer', () => {
+    const { root, text, max } = chat();
+    const container = document.createElement('div');
+    const dom = new Map<Node, HTMLElement>([root, text, max].map((d) => [d, document.createElement('div')]));
+    applyOwnedObjectLayers(container, [root], dom);
+    expect(Number(dom.get(max)!.style.zIndex)).toBeGreaterThan(Number(dom.get(text)!.style.zIndex));
+  });
+});
+
 const DAT = resolve(__dirname, '..', 'dat');
 const HAVE_DATS = existsSync(resolve(DAT, 'client_portal.dat')) && existsSync(resolve(DAT, 'client_local_English.dat'));
 
@@ -132,6 +180,18 @@ describe.skipIf(!HAVE_DATS)('owned-object layers in real layouts (DAT)', () => {
   it('examine page (0x2100006b): the z99 model lifts with the misc list and allegiance line', () => {
     const lifted = ids(liftedOwnedObjects([...resolved(0x2100006b).elements.values()] as unknown as Node[]));
     expect(lifted).toEqual(expect.arrayContaining([0x10000148, 0x1000053a, 0x10000335]));
+  });
+
+  it('main chat (0x2100006f): the maximize box 0x1000046f stays clickable over the lifted log text 0x10000011 (webac#1)', () => {
+    const host = document.createElement('div');
+    const handle = renderer.render(0x2100006f, host)!;
+    expect(handle).toBeTruthy();
+    const text = handle.elements.get(0x10000011)!;
+    const maximize = handle.elements.get(0x1000046f)!;
+    expect(Number(text.style.zIndex)).toBeGreaterThanOrEqual(OWNED_OBJECT_Z_BASE);
+    expect(Number(maximize.style.zIndex)).toBeGreaterThan(Number(text.style.zIndex));
+    // The Send button sits below the log, outside it: no raise needed.
+    expect(handle.elements.get(0x10000019)!.style.zIndex).toBe('');
   });
 
   it('a layout with no owners renders without isolation (0x21000040 dialog)', () => {

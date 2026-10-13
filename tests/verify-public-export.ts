@@ -85,6 +85,8 @@ describe('classifyFile', () => {
     expect(classifyFile('packages/renderer/public/client_portal.dat', null).action).toBe('fail');
     expect(classifyFile('packages/renderer/src/shot.png', null).action).toBe('fail');
     expect(classifyFile('docs/mockups/automation/a.png', null).action).toBe('keep');
+    // GoArrow's MIT arrow art ships (its licence beside it).
+    expect(classifyFile('packages/renderer/src/ui/goarrow/arrows/chrome.png', null).action).toBe('keep');
   });
 });
 

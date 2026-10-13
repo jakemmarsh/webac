@@ -3,10 +3,10 @@
  * paths, the plain-language explanation, the store, and the ac_routines
  * tool Claude configures a player's routines with (docs/agent-play.md).
  */
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   EXAMPLE_HUNT_PROFILE, ROUTINE_SCHEMA_VERSION, emptyRoutineDoc, explainProfile, parseNav, parseUtl, utlToLoot, validateRoutineDoc, type RoutineDoc,
 } from '../packages/shared/src/routines/index.ts';
@@ -69,6 +69,7 @@ describe('routine store and ac_routines', () => {
     dir = mkdtempSync(join(tmpdir(), 'acjs-routines-'));
     process.env.ACJS_ROUTINES_DIR = dir;
   });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
   it('stores valid documents per server/account and refuses invalid or mismatched ones', () => {
     const s = new RoutineStore(dir);

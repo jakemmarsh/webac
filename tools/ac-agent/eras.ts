@@ -33,7 +33,11 @@ export interface AgentEra {
    * accounts (defaults by client era id).
    */
   accountTag?: string;
-  /** Account-name limits (GDL wants lower case; the 1999 login packs user:password into 19 chars). */
+  /**
+   * Account-name limit. AC1999 keeps agent accounts short so account:password
+   * fits the 1999 login's 20-byte field untruncated (longer would still work, as
+   * retail truncated identically, but existing agent accounts are named at 8).
+   */
   maxAccountLength?: number;
   notes?: string;
 }

@@ -44,7 +44,10 @@
  * No collision world is simulated for remote objects: an object on the
  * ground outdoors follows the terrain height under it, and an airborne one
  * lands on the terrain (outdoors) or back at the height it last stood at
- * (indoors) — the stand-in for `transition()`'s contact test.
+ * (indoors) — the stand-in for `transition()`'s contact test. The one
+ * exception is a non-Static Gravity object entering the world over a
+ * surface (BUG.gravity-item-placed-midair, `enterWorld`): it falls onto
+ * the collision world's surface beneath it (env.landingZ).
  */
 import {
   combineFrame, identityFrame, quatMultiply, quatNormalized, rotateVector,
@@ -53,6 +56,19 @@ import {
 import { headingFromTo, headingOfQuat, quatForHeading } from './Heading.js';
 import { PhysicsState } from '@ac/shared';
 import { MIN_QUANTUM, MAX_QUANTUM, HUGE_QUANTUM } from './MissilePhysics.js';
+import { StepSmoother, type StepVector } from '../animation/StepSmoother.js';
+
+/** How the object's sequence stepped this frame (AnimationPlayer.takeSteps / stepPhase / nodeEpoch). */
+export interface SequenceStepInfo { steps: number; phase: number | null; epoch?: number }
+
+/** A heading angle (radians, counter-clockwise about +z) for the draw lag. */
+function yawOf(q: SeqQuat): number {
+  const f = rotateVector(q, { x: 0, y: 1, z: 0 });
+  return Math.atan2(f.y, f.x);
+}
+function wrapAngle(a: number): number {
+  return a - 2 * Math.PI * Math.round(a / (2 * Math.PI));
+}
 
 /** `F_EPSILON`. */
 export const F_EPSILON = 0.0002;
@@ -395,7 +411,44 @@ export class ConstraintManager {
 export interface RemotePhysicsEnv {
   /** AC ground height (z) under (x, y) outdoors, or null (no terrain there / unknown). */
   terrainHeight(x: number, y: number): number | null;
+  /**
+   * Where an object placed at (x, y, z) in `cell` with these spheres
+   * (offsets from its origin, rotated and scaled) comes to rest falling
+   * straight down through the collision world that holds the cell — its
+   * origin z (z itself = it stays). Null = that cell's collision is not
+   * resident yet (outdoorGround.objectLandingZ).
+   */
+  landingZ?(cell: number, x: number, y: number, z: number, spheres: readonly { x: number; y: number; z: number; radius: number }[]): number | null;
 }
+
+/** One of the object's physics spheres (Setup `Spheres`, object-local, unscaled). */
+export interface PlacementSphere {
+  origin: SeqV3;
+  radius: number;
+}
+
+/** What `CPhysicsObj::enter_world`'s placement reads from the object's Setup. */
+export interface PlacementShape {
+  /** CPartArray::GetSphere — the Setup's spheres (not its cylspheres). */
+  spheres: readonly PlacementSphere[];
+  /** Setup StepDownHeight (× the object's scale.z = object_info.step_down_height). */
+  stepDownHeight: number;
+}
+
+/**
+ * How far `CTransition::find_placement_position @ 0050c170` steps a placed
+ * object down looking for a contact plane: the object's step-down height,
+ * cut to half its sphere radius for a one-sphere object whose diameter is
+ * under it; a height over the sphere's diameter is tried as two halves.
+ */
+export function placementStepDownReach(numSphere: number, radius: number, stepDownHeight: number): number {
+  let h = stepDownHeight;
+  if (numSphere < 2 && radius * 2 < h) h = radius * 0.5;
+  return h <= radius * 2 ? h : h * 0.5;
+}
+
+/** How long an object waits for its Setup / cell collision before its placement is given up (s). */
+const PLACEMENT_WAIT_LIMIT = 10;
 
 /** Receiving a position (the PositionPack fields HandleReceivedPosition uses). */
 export interface ReceivedPosition extends PhysPosition {
@@ -429,8 +482,29 @@ export class RemotePhysicsObject implements PositionHost {
   onWalkable = true;
   /** The height the object last stood at (the indoor landing floor). */
   groundZ: number;
+  /**
+   * BUG.gravity-item-placed-midair — the object's world-entry placement
+   * still to resolve (`enterWorld`): its Setup shape provider, and the
+   * time it started waiting.
+   */
+  private placement: { shape: () => PlacementShape | null; since: number | null } | null = null;
+  /**
+   * Set by a placement that found no contact: the origin z the object's
+   * fall ends at (env.landingZ — its spheres on the desk top or floor).
+   */
+  private settle: { landZ: number } | null = null;
   /** Elapsed time not yet stepped by the physics (under MIN_QUANTUM). */
   private physicsCarry = 0;
+  /**
+   * MOVE.chunked-motion-judder — the object moves in whole steps (its
+   * sequence's animation frames, its velocity's MIN_QUANTUM updates); these
+   * place the DRAWN object between them (drawPosition / drawOrientation).
+   * `pos` / `orient` stay the simulated position.
+   */
+  private readonly sequenceDraw = new StepSmoother();
+  private readonly quantumDraw = new StepSmoother();
+  /** The time the last physics update consumed — the length of the quantum interval being drawn across. */
+  private lastQuantum = MIN_QUANTUM;
   /** Placed in a cell yet (`CPhysicsObj::cell`) — false until a first position arrives. */
   inCell: boolean;
   stamps: PhysicsStamps;
@@ -480,8 +554,29 @@ export class RemotePhysicsObject implements PositionHost {
     this.orient = { ...p.orient };
     this.inCell = true;
     if (this.contact) this.groundZ = this.pos.z;
+    this.resetDraw();
   }
-  setHeading(heading: number): void { this.orient = quatForHeading(heading); }
+  setHeading(heading: number): void { this.orient = quatForHeading(heading); this.resetDraw(); }
+
+  /** Draw the object exactly where it is (a snap, a teleport). */
+  resetDraw(): void {
+    this.sequenceDraw.reset();
+    this.quantumDraw.reset();
+  }
+
+  /** MOVE.chunked-motion-judder — where to draw the object: its position less the step lags. */
+  drawPosition(): SeqV3 {
+    const a = this.sequenceDraw.lag, b = this.quantumDraw.lag;
+    return { x: this.pos.x - a.x - b.x, y: this.pos.y - a.y - b.y, z: this.pos.z - a.z - b.z };
+  }
+
+  /** MOVE.chunked-motion-judder — the orientation to draw: turned back about +z by the step lags. */
+  drawOrientation(): SeqQuat {
+    const yaw = this.sequenceDraw.lag.yaw + this.quantumDraw.lag.yaw;
+    if (Math.abs(yaw) < 1e-9) return this.orient;
+    const h = -yaw / 2;
+    return quatNormalized(quatMultiply({ w: Math.cos(h), x: 0, y: 0, z: Math.sin(h) }, this.orient));
+  }
   hasContact(): boolean { return this.contact; }
   adjustedMaxSpeed(): number { return this.motion.adjustedMaxSpeed(); }
   maxSpeed(): number { return this.motion.maxSpeed(); }
@@ -520,6 +615,82 @@ export class RemotePhysicsObject implements PositionHost {
 
   setState(state: number): void {
     this.state = state;
+    this.calcAcceleration();
+  }
+
+  /**
+   * BUG.gravity-item-placed-midair — `CPhysicsObj::enter_world @ 00516170`
+   * (SmartBox::HandleCreateObject, for a parentless object with a cell)
+   * sets the object's position with Placement | Slide: `SetPositionInternal`
+   * → `CTransition::find_placement_position @ 0050c170` inserts its spheres
+   * at the server's frame, then steps them down by the placement reach
+   * (placementStepDownReach) looking for a contact plane. Found, the object
+   * rests on it; not found, the contact is cleared, `calc_acceleration`
+   * gives a Gravity object −9.8 m/s², and a non-Static object is made
+   * Active, so `UpdateObjectInternal @ 005156b0` drops it until its
+   * transition lands it on the surface beneath (the Academy's Application
+   * Form, sent at z 1.5 over a 0.92 m desk, falls onto the desk). A Static
+   * object never becomes Active; an object without Gravity has no
+   * acceleration; an object without spheres keeps its origin in
+   * UpdateObjectInternal and stays where the server put it.
+   *
+   * Resolved on the object's first physics frame whose Setup and cell
+   * collision are resident (`env.landingZ` answers), so a streamed
+   * cell's desk is in the collision world before the item is judged.
+   */
+  enterWorld(shape: () => PlacementShape | null): void {
+    if ((this.state & PhysicsState.Static) !== 0 || (this.state & PhysicsState.Gravity) === 0) return;
+    this.placement = { shape, since: null };
+  }
+
+  /** Whether the world-entry placement is still waiting on the Setup or the cell's collision. */
+  get placementPending(): boolean { return this.placement !== null; }
+
+  /** Whether the object is falling onto the surface beneath its placement. */
+  get settling(): boolean { return this.settle !== null; }
+
+  /** The spheres relative to the origin: rotated by the object's orientation and scaled (CPartArray::GetSphere × m_scale). */
+  private sphereOffsets(spheres: readonly PlacementSphere[]): { x: number; y: number; z: number; radius: number }[] {
+    return spheres.map((s) => ({
+      ...rotateVector(this.orient, { x: s.origin.x * this.scale, y: s.origin.y * this.scale, z: s.origin.z * this.scale }),
+      radius: s.radius * this.scale,
+    }));
+  }
+
+  /** Resolve a pending enterWorld placement (see there). */
+  private resolvePlacement(env: RemotePhysicsEnv, now: number): void {
+    const p = this.placement;
+    if (!p) return;
+    if (p.since === null) p.since = now;
+    if (now - p.since > PLACEMENT_WAIT_LIMIT) { this.placement = null; return; }
+    const shape = p.shape();
+    if (!shape) return;
+    // UpdateObjectInternal @ 005156b0: an object without spheres keeps its
+    // origin (set_frame with m_position's origin; only the orientation
+    // moves), so it stays at the server's frame.
+    if (shape.spheres.length === 0) { this.placement = null; return; }
+    const offsets = this.sphereOffsets(shape.spheres);
+    const landZ = env.landingZ?.(this.cell, this.pos.x, this.pos.y, this.pos.z, offsets) ?? null;
+    if (landZ === null) return;
+    this.placement = null;
+    const gap = this.pos.z - landZ;
+    // Resting (or held where it starts): the server's frame stands.
+    if (gap <= F_EPSILON) return;
+    let radius = 0;
+    for (const s of offsets) radius = Math.max(radius, s.radius);
+    const reach = placementStepDownReach(offsets.length, radius, shape.stepDownHeight * this.scale);
+    if (gap <= reach) {
+      // step_down found the contact plane: the spheres rest on it.
+      this.pos = { ...this.pos, z: landZ };
+      this.groundZ = this.pos.z;
+      this.resetDraw();
+      return;
+    }
+    // No contact within the reach: Gravity takes the object down.
+    this.contact = false;
+    this.onWalkable = false;
+    this.settle = { landZ };
+    this.groundZ = landZ;
     this.calcAcceleration();
   }
 
@@ -580,8 +751,13 @@ export class RemotePhysicsObject implements PositionHost {
    * One frame: `UpdatePositionInternal` with the sequence's offset
    * (`motionOffset`, object-local — null when the object has no sequence).
    */
-  update(dt: number, motionOffset: SequenceFrame | null, env: RemotePhysicsEnv, now: number): void {
+  update(dt: number, motionOffset: SequenceFrame | null, env: RemotePhysicsEnv, now: number, sequenceStep?: SequenceStepInfo): void {
     if (!(dt > 0)) return;
+    this.resolvePlacement(env, now);
+    const startX = this.pos.x, startY = this.pos.y, startZ = this.pos.z, startYaw = yawOf(this.orient);
+    const quantumMoved: StepVector = { x: 0, y: 0, z: 0, yaw: 0 };
+    let quantumRan = false;
+    let settled = false;
     const hidden = (this.state & PhysicsState.Hidden) !== 0;
     const offset = motionOffset && !hidden ? motionOffset : identityFrame();
     if (!hidden) {
@@ -604,8 +780,15 @@ export class RemotePhysicsObject implements PositionHost {
       if (this.physicsCarry >= MIN_QUANTUM) {
         let rem = this.physicsCarry;
         this.physicsCarry = 0;
+        this.lastQuantum = Math.min(rem, MAX_QUANTUM);
+        const bx = frame.origin.x, by = frame.origin.y, bz = frame.origin.z, byaw = yawOf(frame.orientation);
         while (rem > MAX_QUANTUM) { this.updatePhysicsInternal(MAX_QUANTUM, frame); rem -= MAX_QUANTUM; }
         this.updatePhysicsInternal(rem, frame);
+        quantumRan = true;
+        quantumMoved.x = frame.origin.x - bx;
+        quantumMoved.y = frame.origin.y - by;
+        quantumMoved.z = frame.origin.z - bz;
+        quantumMoved.yaw = wrapAngle(yawOf(frame.orientation) - byaw);
       }
     }
     const outdoor = isOutdoorCell(this.cell);
@@ -626,8 +809,14 @@ export class RemotePhysicsObject implements PositionHost {
         this.calcAcceleration();
       }
     } else {
-      const ground = (outdoor ? env.terrainHeight(frame.origin.x, frame.origin.y) : null) ?? this.groundZ;
+      // A settling object (enterWorld) lands where its placement found its
+      // spheres come to rest (env.landingZ: the desk top, the floor).
+      const ground = this.settle
+        ? this.settle.landZ
+        : (outdoor ? env.terrainHeight(frame.origin.x, frame.origin.y) : null) ?? this.groundZ;
       if (frame.origin.z <= ground && this.velocity.z <= 0) {
+        settled = this.settle !== null;
+        this.settle = null;
         frame.origin.z = ground;
         this.velocity = { x: this.velocity.x, y: this.velocity.y, z: 0 };
         this.contact = true;
@@ -641,6 +830,30 @@ export class RemotePhysicsObject implements PositionHost {
     if (this.contact) this.groundZ = this.pos.z;
     this.interp.useTime();
     this.sticky.useTime(now);
+
+    // MOVE.chunked-motion-judder — the draw lags. The velocity's share moved
+    // in MIN_QUANTUM updates (phase = the carried time's share of one); the
+    // rest of the frame's move is the sequence's whole-frame steps, unless
+    // the interpolation / sticky managers replaced the offset with their own
+    // per-frame (continuous) move.
+    // BUG.gravity-item-placed-midair — a settling fall ends drawn exactly
+    // on the desk (no quantum lag left hovering it over the landing).
+    if (hidden || settled) {
+      this.resetDraw();
+      return;
+    }
+    this.quantumDraw.update(quantumRan ? 1 : 0, quantumMoved, Math.min(this.physicsCarry / this.lastQuantum, 1), dt);
+    if (sequenceStep && !interpolated && !stuck) {
+      const seqMoved: StepVector = {
+        x: this.pos.x - startX - quantumMoved.x,
+        y: this.pos.y - startY - quantumMoved.y,
+        z: this.pos.z - startZ - quantumMoved.z,
+        yaw: wrapAngle(yawOf(this.orient) - startYaw - quantumMoved.yaw),
+      };
+      this.sequenceDraw.update(sequenceStep.steps, seqMoved, sequenceStep.phase, dt, sequenceStep.epoch);
+    } else {
+      this.sequenceDraw.update(0, null, null, dt);
+    }
   }
 
   /** `UpdatePhysicsInternal @ 00510700` (+ `calc_friction @ 0050ee70` on a flat walkable plane). */

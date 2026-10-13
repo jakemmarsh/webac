@@ -185,7 +185,7 @@ Each item ships on its own, before any 1999 code exists.
   - Verify inbound checksums (we don't today), with the server's measured `isaac(2)=0x182600f3` and `isaac(3)=0x300b4a8d` as test vectors. Trust the server code over the KB prose where they disagree (`kb/.../04-checksum.md` says XOR).
 - **Login:** `0x075BCD15`, a u16 version length that includes the NUL, align4 against the stream, `0xBEEFBEEF`, `char[20] "user:password"`, … then the portal and cell iterations: whatever the loaded DATs' headers say (102/67 for the retail CD, confirmed in a live login).
   - The server requires exact version equality, and the grant's version must `strtod`-equal ours.
-  - The 20-byte credential field caps `user:password` at 19 characters. Refuse longer input in the login form instead of truncating it.
+  - The 20-byte credential field holds the first 20 characters of `user:password`, with no terminator at 20 or more; the retail client truncates longer input silently (measured 2026-10-12, client.exe 4.35752 under Wine: `lenprobeab:pwprobe123` stored the password `pwprobe12`). Truncate the same way; never refuse, since accounts made by the retail client already hold the truncated password. (This line used to say "refuse longer input"; that refusal locked out a player, 2026-10-12.)
 - **Handshake:**
   - send LoginRequest (seq 1, flags 0x2);
   - receive the grant 0x202 `{f64 0, f64 worldClockDelta, u32 adoptRecid, version, seeds 0,0}`;
@@ -315,7 +315,7 @@ Phases 1 and 2 don't touch each other and can run side by side, and so can 3 and
 - **Adapter semantic drift.** Fields that look alike but mean different things (1999 PWD bit 0x200000 means "issuing vendor", not burden; the SoundType enum shift; property ids). Golden vectors from real captures, not from the KB alone.
 - **The server's NAK path is untested.** The real client hides any problem by resending everything. If the NAKs don't work, Phase 3 needs timed resends, and AC1999 should hear about it.
 - **A moving target.** AC1999 lands about 1,500 commits in 4 months. Its server may change layouts as it fixes the 1999 client. Pin the server commit in `start-ac1999.sh` and re-run the replay corpus when bumping it.
-- **The 19-character credential limit** (20-byte field) and auto-created accounts: say so at login. Never probe their server.
+- **The 20-byte credential field** truncates `user:password` silently, as retail did (measured 2026-10-12); don't refuse on length. Auto-created accounts: say so at login. Never probe their server.
 - **Memory.** End-of-retail portal (~935 MB) + 1999 portal and cell + local + highres, all whole DATs. Measure in Phase 2 with `measure-perf`. If needed, stream the end-of-retail UI portal through the existing `boot` + `ui` packs (`StreamingDats.ts:177` already computes layout art ids) instead of loading it whole. **Done 2026-10-06** ([dat-streaming.md §6.11](dat-streaming.md)): the interface streams end of retail's set and the world its own set.
 
 ## 7. Regression guard (every phase)

@@ -21,6 +21,8 @@ export interface DaemonInfo {
   bridgePid: number;
   /** The Vite this daemon serves its game snapshot from (0 = it uses a named base). */
   vitePid?: number;
+  /** The snapshot tree (STATE_DIR/tree-<sha>) that Vite serves; pruning never removes one a live daemon names. */
+  snapshot?: string;
   startedAt: string;
   logFile: string;
 }
@@ -88,4 +90,23 @@ export function accountForProfile(profile: string): string {
 export function defaultCharacterName(profile: string): string {
   const word = profile.replace(/[^A-Za-z]/g, '').toLowerCase() || 'agent';
   return word === 'claude' ? 'Claude' : `Claude ${word[0].toUpperCase()}${word.slice(1)}`.slice(0, 32);
+}
+
+/**
+ * Which game snapshot trees (STATE_DIR/tree-<sha>, one per commit a daemon
+ * started on, ~75 MB each) to remove (pure). Kept: the `keepNewest` most
+ * recently used, any a live daemon serves (`inUse`), and any touched within
+ * `graceMs` (a daemon between creating its tree and advertising it). Before
+ * 2026-10-12 nothing pruned them: 57 trees, 2.9 GB in $TMPDIR/acjs-agent.
+ */
+export function pickStaleSnapshots(
+  trees: ReadonlyArray<{ name: string; ageMs: number }>,
+  inUse: ReadonlySet<string>,
+  opts: { keepNewest?: number; graceMs?: number } = {},
+): string[] {
+  const keepNewest = opts.keepNewest ?? 3;
+  const grace = opts.graceMs ?? 3600_000;
+  return [...trees].sort((a, b) => a.ageMs - b.ageMs)
+    .filter((t, i) => i >= keepNewest && !inUse.has(t.name) && t.ageMs > grace)
+    .map((t) => t.name);
 }

@@ -12,7 +12,7 @@
  * A "Custom…" world is the wss:// URL of a server's own bridge, used as is.
  */
 
-import { MAX_CREDENTIALS_1999, probeBridgeHealth } from '@ac/network';
+import { probeBridgeHealth } from '@ac/network';
 import { eraProfile } from '../era/EraProfiles.js';
 import { LOGIN_REFUSED_TOKENS } from '../ui/ConnectionNotices.js';
 
@@ -32,6 +32,12 @@ export interface World {
   population: number | null;
   compat: WorldCompat;
   compatNote: string | null;
+  /**
+   * compat 'incompatible': the bridge's one-sentence reason nobody can play
+   * there from webAC (e.g. a VPN check that refuses the bridge). null from a
+   * bridge that predates it, or for any other world.
+   */
+  compatReason: string | null;
   /** A note for worlds that need an account registered before the first login. */
   registration: string | null;
   /** Where to register (http/https); the launcher links it. null when unknown. */
@@ -70,7 +76,7 @@ export function localWorld(era: string | null = null): World {
     id: null, name: LOCAL_WORLD_NAME, emu: null, type: null,
     description: 'The game server this bridge is pinned to.',
     website: null, discord: null, online: null, population: null,
-    compat: 'ok', compatNote: null, registration: null, registrationUrl: null, kind: 'local', era,
+    compat: 'ok', compatNote: null, compatReason: null, registration: null, registrationUrl: null, kind: 'local', era,
   };
 }
 
@@ -110,6 +116,7 @@ export function worldFromEntry(raw: unknown): World | null {
     population: r.population !== null && r.population !== undefined && Number.isFinite(pop) && pop >= 0 ? Math.round(pop) : null,
     compat,
     compatNote: str(r.compatNote),
+    compatReason: compat === 'incompatible' ? str(r.compatReason) : null,
     registration: str(r.registration),
     registrationUrl: httpUrl(r.registrationUrl),
     kind: 'listed',
@@ -162,27 +169,21 @@ export function worldBoxName(world: World): string | null {
 export function worldEnterBlock(world: World | null): string | null {
   if (!world) return 'Pick a world first.';
   if (world.compat === 'incompatible') {
-    return `${world.name} needs the classic Asheron's Call data files, which this client cannot load yet. Support is planned after launch. Pick another world.`;
+    // The bridge's reason (a VPN check that refuses every webAC player), else
+    // its chip (an older bridge; "Unsupported client version"). Classic data
+    // is supported now, so this no longer blames it.
+    if (world.compatReason) {
+      const why = world.compatReason.charAt(0).toLowerCase() + world.compatReason.slice(1);
+      return `${world.name} can't be played from webAC yet: ${why} Pick another world for now.`;
+    }
+    const why = world.compatNote ? ` (${world.compatNote}).` : '.';
+    return `${world.name} can't be played from webAC${why} Pick another world.`;
   }
   if (world.online === false) return `${world.name} is offline right now. Pick another world.`;
   if (world.era && !eraProfile(world.era)) {
     return `${world.name} needs a kind of game data (${world.era}) this version of the client does not know. Reload the page to update, or pick another world.`;
   }
   return null;
-}
-
-/**
- * Why these credentials can't log into `world`, or null. The 1999 client sends
- * "account:password" in a 20-byte field (Login1999.ts), so the two together
- * fit 18 characters; longer, the login was refused before it left the page
- * and the player read "The account you specified doesn't exist" (2026-10-12).
- */
-export function worldCredentialsBlock(world: World | null, account: string, password: string): string | null {
-  if (!world?.era || eraProfile(world.era)?.login.protocol !== 'ac1999') return null;
-  const total = account.length + password.length;
-  const max = MAX_CREDENTIALS_1999 - 1;
-  if (total <= max) return null;
-  return `${world.name} uses the 1999 login, which fits an account name and password of ${max} characters together. Yours are ${total}. Use a shorter account name or password.`;
 }
 
 /** The registration line a world carries, in the launcher's words (null: none). */
@@ -269,7 +270,7 @@ export function parseCustomBridge(input: string): { world: World } | { error: st
       id: null, name: u.host, emu: null, type: null,
       description: `Custom bridge ${u.toString()}`,
       website: null, discord: null, online: null, population: null,
-      compat: 'ok', compatNote: null, registration: null, registrationUrl: null, kind: 'custom', bridgeUrl: u.toString(), era: null,
+      compat: 'ok', compatNote: null, compatReason: null, registration: null, registrationUrl: null, kind: 'custom', bridgeUrl: u.toString(), era: null,
     },
   };
 }

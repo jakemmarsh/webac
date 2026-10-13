@@ -28,8 +28,15 @@ export interface CompatEntry {
    * absent = end of retail. The client loads that era's DATs and login.
    */
   era?: string;
-  /** Short reason shown as a chip and when ENTER is refused. */
+  /** Short reason shown as a chip in the launcher's world details. */
   note?: string;
+  /**
+   * compat 'incompatible' only: one sentence saying why nobody can play
+   * there from webAC, shown in the world details and when ENTER is refused
+   * (DirectoryEntry.compatReason). A page that predates it refuses ENTER
+   * on `compat` alone.
+   */
+  reason?: string;
   /** One line telling a new player to register before the first login. */
   registration?: string;
   /** Where to register (http/https); the launcher links it. */
@@ -56,13 +63,16 @@ export interface CompatOverlay {
  */
 export const CLASSIC_ERA_NOTE = 'Dark Majesty era';
 
-const CLASSIC_DERETH: CompatEntry = { compat: 'beta', note: CLASSIC_ERA_NOTE, era: 'classic-dereth' };
 /**
  * Classic Dereth 1.0 data (no Salvaging skill): the client serves the 1.1
  * set's SkillTable without it (renderer era/EraProfiles.ts
  * 'classic-dereth-1-0'). Both sets report the same DDD iterations, so only
  * the server's refusal tells them apart: Snowreap answered every 1.1 create
- * (Salvaging trained) with Corrupt (Jake, 2026-10-11).
+ * (Salvaging trained) with Corrupt (Jake, 2026-10-11), and so does Seedsow
+ * (same host): on 2026-10-12 a create with Salvaging trained got Corrupt (5)
+ * and the same create without it got Ok, one account, minutes apart
+ * (tools/probe-gdl-chargen.ts). Classic Dereth 1.1 ('classic-dereth') stays
+ * the era of a GDL-Classic server on its README's 1.1 set (our local one).
  */
 const CLASSIC_DERETH_1_0: CompatEntry = { compat: 'beta', note: CLASSIC_ERA_NOTE, era: 'classic-dereth-1-0' };
 const CLASSICACE_CUSTOMDM: CompatEntry = { compat: 'beta', note: CLASSIC_ERA_NOTE, era: 'classicace-customdm' };
@@ -104,10 +114,26 @@ function gdleWebRegistration(name: string, url: string): CompatEntry {
   };
 }
 
+/**
+ * A world whose anti-VPN / IP-reputation check refuses the hosted bridge's
+ * egress (a cloud data-centre address), so it refuses every webAC player.
+ * Listed, but ENTER is refused with this reason instead of leaving players
+ * held in portal space or booted at login. Remove the entry once the
+ * operator exempts the bridge (docs/operators.md, "If your world blocks VPNs
+ * or proxies"); tools/probe-world-access.ts re-checks a world.
+ */
+export const VPN_BLOCK: CompatEntry = {
+  compat: 'incompatible',
+  note: 'Blocks webAC',
+  // Fits the launcher's 2-line details note. The long-term fix: an ACE change so a
+  // trusted relay (the bridge) can pass the player's real address to the VPN check.
+  reason: "Its VPN check refuses webAC players. We're working on a fix.",
+};
+
 export const SERVER_COMPAT: CompatOverlay = {
   byId: {
     // "A PVE Dark Majesty server must use classic AC .dats"
-    '394c58d0-885d-466b-b17f-d7e0b96fe3e2': CLASSIC_DERETH, // Seedsow
+    '394c58d0-885d-466b-b17f-d7e0b96fe3e2': CLASSIC_DERETH_1_0, // Seedsow (1.0 data, 2026-10-12)
     // "A PVP Dark Majesty server must use classic AC .dats"
     'eea962c0-cf9f-481e-9736-0eb058acc1d8': CLASSIC_DERETH_1_0, // Snowreap
     // ClassicACE: detected live once they answer; until then, their listings'
@@ -118,6 +144,13 @@ export const SERVER_COMPAT: CompatOverlay = {
     // Web-form registration only (byId wins over byEmu, so these repeat GDLE_BETA).
     'a7502ac9-0cec-4caf-b81c-b3eb40a4689a': gdleWebRegistration('Reefcull', 'http://reefcull.gdleac.com/'),
     'f023fbf9-caab-4745-8205-81c4d7c061ad': gdleWebRegistration('Harvestbud', 'http://harvestbud.gdleac.com/'),
+    // VPN/proxy checks that refuse the bridge (tools/probe-world-access.ts, 2026-10-12).
+    // In the world, chat: "VPN/Proxy connections are not permitted on this
+    // server. Please disconnect from your VPN and try again."; held in portal space.
+    '2d7bfb40-7726-4951-b65f-b4948807e602': VPN_BLOCK, // Conquest
+    // At login: "You have been booted from Asheron's Call Connections from
+    // VPN / proxy disallowed by server policy."
+    '9d17ce44-7db5-40c1-b7bb-a01c9de21d00': VPN_BLOCK, // AChard
   },
   byEmu: {
     GDL: GDLE_BETA,

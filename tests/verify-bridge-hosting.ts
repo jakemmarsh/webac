@@ -721,8 +721,12 @@ describe('ERA.dm-support: the web entrypoint passes ACJS_ERA_ASSET_BASES through
     const env: Record<string, string> = { PATH: process.env.PATH ?? '', ACJS_ASSET_BASE: 'https://dats.example.org/raw' };
     if (value !== undefined) env.ACJS_ERA_ASSET_BASES = value;
     if (eraDatSets !== undefined) env.ACJS_ERA_DAT_SETS = eraDatSets;
-    execFileSync('sh', [path.join(dir, 'ep.sh')], { env, stdio: ['ignore', 'ignore', 'ignore'] });
-    return { config: JSON.parse(fs.readFileSync(path.join(dir, 'srv/config.json'), 'utf8')), csp: fs.readFileSync(path.join(dir, 'csp'), 'utf8') };
+    try {
+      execFileSync('sh', [path.join(dir, 'ep.sh')], { env, stdio: ['ignore', 'ignore', 'ignore'] });
+      return { config: JSON.parse(fs.readFileSync(path.join(dir, 'srv/config.json'), 'utf8')), csp: fs.readFileSync(path.join(dir, 'csp'), 'utf8') };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   };
 
   it('a valid object lands in config.json and its origins in connect-src', () => {

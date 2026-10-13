@@ -9,7 +9,7 @@ import { addCreatureObstacles, creatureBlockRadius, blocksLocalPlayer, partArray
 import type { ObjectPhysicsModel } from './ObjectCollision.js';
 import { DungeonCollision } from './DungeonCollision.js';
 import { MoveToManager, performServerMovement, type MoveToHost } from '../controllers/MoveToManager.js';
-import { RemotePhysicsObject, type RemotePhysicsEnv } from './RemotePhysics.js';
+import { RemotePhysicsObject, type RemotePhysicsEnv, type SequenceStepInfo } from './RemotePhysics.js';
 import {
   readyMotion, adjustMotion, applyInterpretedMotion, removeInterpretedMotion, resolveMotion,
   sequencePhysicsFor, adjustedMaxSpeed, maxSpeed, HoldKey, type InterpretedMotion,
@@ -35,7 +35,7 @@ import type { UpdatePositionData, AutonomousPositionData, ObjDescEventData, Move
 import { wavePrefetch } from '../audio/WavePrefetch.js';
 import type { TerrainCollision } from '@ac/shared';
 import { showableOnRadar } from '../ui/RadarBlips.js';
-import { PhysicsState, ItemType, MovementType, ObjectDescriptionFlag, isInteriorCellIndex, landblockX, landblockY, PropertyInt, HUGE_QUANTUM, type PlayScript } from '@ac/shared';
+import { PhysicsState, ItemType, MovementType, ObjectDescriptionFlag, isInteriorCellIndex, landblockX, landblockY, PropertyInt, HUGE_QUANTUM, type PlayScript, missileArc, missileArcPoint, DEFAULT_PROJECTILE_RADIUS } from '@ac/shared';
 import { hiddenEdgeScript, PHYSICS_STATE_CTOR_DEFAULT } from '../effects/HiddenStateScripts.js';
 import { setObjectLighting, restoreObjectLighting, type LightingCopies, type LightingLevels } from './SelectionLighting.js';
 import { setCellLighting } from '../models/RetailLighting.js';
@@ -50,6 +50,7 @@ import { AnimatedEntity, collectPartObjects, applyPartTransforms } from '../anim
 import { AnimationPlayer } from '../animation/AnimationPlayer.js';
 import { Animation } from '@ac/dat-parser/file-types/Animation.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
+import { readDidMapper } from '@ac/dat-parser/file-types/DidMapper.js';
 import { AnimationHookType, type AnimationHook, type EtherealHookData } from '@ac/dat-parser/file-types/AnimationHook.js';
 import { MotionManager } from '../animation/MotionManager.js';
 import { MotionCommand, MotionStance, motionCommandFromWireIndex, isSubstateCommand, isActionCommand } from '../animation/MotionCommands.js';
@@ -333,6 +334,8 @@ export interface ServerObject {
    * body is not being stepped (agent/livePlace.ts).
    */
   serverPlace?: { cell: number; worldX: number; worldY: number; worldZ: number };
+  /** AGENT — performance.now() ms when the server last set serverPlace (the agent's "still being placed" test). */
+  serverPlaceAt?: number;
   /** AGENT — performance.now() ms when the physics body last moved worldX/Y/Z (syncBodyToMesh). */
   bodySyncedAt?: number;
   /**
@@ -557,6 +560,19 @@ export function applyPropertyDataIdUpdate(obj: ServerObject, key: number, val: n
 }
 
 /** Convert AC landblock position to world coordinates. */
+/**
+ * ACCWeenieObject::IsStorage @ 0058cbe0's wcid: DBObj::GetDIDByEnum with
+ * enum 12 / 0x10000001 through the DAT header's master map (master[12] →
+ * a DidMapper, its [0x10000001]). 0 when the DAT has no master map (AC1999).
+ */
+export function storageWcidOf(db: { masterMapId: number; getFileData(id: number): ArrayBuffer | null | undefined }): number {
+  const read = (id: number | undefined) => {
+    if (!id) return null;
+    try { const d = db.getFileData(id); return d ? readDidMapper(new DatReader(d)) : null; } catch { return null; }
+  };
+  return read(read(db.masterMapId)?.client.enumToId.get(12))?.client.enumToId.get(0x10000001) ?? 0;
+}
+
 function acPositionToWorld(pos: ACPosition): { x: number; y: number; z: number } {
   const lbX = landblockX(pos.landblock);
   const lbY = landblockY(pos.landblock);
@@ -706,6 +722,12 @@ export class ServerObjectManager {
   }
   private portalDb: DatDatabase | null = null;
   private terrainCollision: TerrainCollision | null = null;
+  /**
+   * BUG.gravity-item-placed-midair — where a Gravity object entering the
+   * world comes to rest (outdoorGround.objectLandingZ). Null = no
+   * collision world wired (objects stay at the server's frame).
+   */
+  private objectLandingQuery: NonNullable<RemotePhysicsEnv['landingZ']> | null = null;
   /** AnimatedEntity instances for objects with motion tables (idle animations). */
   private animatedObjects = new Map<number, AnimatedEntity>();
   /** CMotionInterp::server_action_stamp per object (0 on a new object — the ctor's). */
@@ -947,11 +969,40 @@ export class ServerObjectManager {
   /** Set the portal DAT database for animation loading. */
   setPortalDb(db: DatDatabase): void {
     this.portalDb = db;
+    this.storageWcid = null;
   }
 
   /** Set terrain collision for ground-clamping objects. */
   setTerrainCollision(tc: TerrainCollision): void {
     this.terrainCollision = tc;
+  }
+
+  /** The house storage chest's wcid (resolved once from the portal DAT; 0 = none / unknown). */
+  private storageWcid: number | null = null;
+
+  /**
+   * BUG.gravity-item-placed-midair — CPhysicsObj::SetPositionInternal
+   * @ 00515bd0 puts a hook, the house storage chest or a corpse in its cell
+   * with ForceIntoCell @ 00515660 (weenie vtable +0x74 / +0x78 / +0x7c =
+   * ACCWeenieObject::IsHook @ 0058c660 / IsStorage @ 0058cbe0 / IsCorpse
+   * @ 0058c8e0), which never runs calc_acceleration: their acceleration
+   * stays zero and they never fall, Gravity or not. IsHook: hook type and
+   * hook item types both set; IsCorpse: PublicWeenieDesc bit 0x2000;
+   * IsStorage: the wcid GetDIDByEnum(0x10000001, 12) names — master map
+   * [12] → DidMapper 0x25000015 [0x10000001] = 9687 in the end-of-retail
+   * and Dark Majesty DATs (the 400 house storage chests ACE places 0.326 m
+   * up, their mesh hanging under the origin).
+   */
+  private forcedIntoCell(data: CreateObjectData): boolean {
+    if ((data.hookType ?? 0) !== 0 && (data.hookItemTypes ?? 0) !== 0) return true;
+    if (((data.objectDescFlags ?? 0) & ObjectDescriptionFlag.Corpse) !== 0) return true;
+    if (this.storageWcid === null && this.portalDb) this.storageWcid = storageWcidOf(this.portalDb);
+    return !!this.storageWcid && data.weenieClassId === this.storageWcid;
+  }
+
+  /** Wire the landing query (AC landblock-global x / y / z) a placed Gravity object falls by. */
+  setObjectLandingQuery(q: NonNullable<RemotePhysicsEnv['landingZ']> | null): void {
+    this.objectLandingQuery = q;
   }
 
   setPlayerGuid(guid: number): void {
@@ -1241,6 +1292,7 @@ export class ServerObjectManager {
       obj.worldY = wp.y;
       obj.worldZ = wp.z;
       obj.serverPlace = { cell: data.position.landblock >>> 0, worldX: wp.x, worldY: wp.y, worldZ: wp.z };
+      obj.serverPlaceAt = performance.now();
     }
     // The object's physics: its CreateObject position, velocity, omega and
     // update timestamps (CPhysicsObj::set_description / makeObject).
@@ -1261,6 +1313,20 @@ export class ServerObjectManager {
       obj.motionState = readyMotion();
       obj.myRunRate = 1;
       this.bindPhysics(obj);
+      // BUG.gravity-item-placed-midair — SmartBox::HandleCreateObject calls
+      // CPhysicsObj::enter_world for a parentless object with a cell: a
+      // Gravity item the server sends over a surface (the Academy's
+      // Application Form at z 1.5 over a 0.92 m desk) falls onto it
+      // (RemotePhysicsObject.enterWorld). Creatures are left to the server's
+      // position stream (their heights come with contact every update).
+      if (!obj.outOfWorld && data.setupId && (data.itemType & ItemType.Creature) === 0 && !this.forcedIntoCell(data)) {
+        const setupId = data.setupId;
+        obj.physics.enterWorld(() => {
+          let setup: ReturnType<SetupModelRenderer['loadSetupModel']> | null = null;
+          try { setup = this.setupModelRenderer.loadSetupModel(setupId); } catch { setup = null; }
+          return setup ? { spheres: setup.spheres ?? [], stepDownHeight: setup.stepDownHeight ?? 0 } : null;
+        });
+      }
     }
 
     this.buildObjectMesh(obj, data, isMissile);
@@ -1726,6 +1792,7 @@ export class ServerObjectManager {
     if (r === 'stale') return;
     // Where the server says it is, for the agent's observations (an airborne one the body ignores included).
     obj.serverPlace = { cell: cell >>> 0, worldX: newX, worldY: newY, worldZ: newZ };
+    obj.serverPlaceAt = performance.now();
     if (r === 'ignored') return;
     // SmartBox::HandleReceivedPosition @ 00453fd0: an object without
     // animations takes the position's placement (SetPlacementFrame; 0 when
@@ -2429,6 +2496,7 @@ export class ServerObjectManager {
     obj.worldY = clampedY;
     obj.worldZ = wz;
     obj.serverPlace = { cell: landblock >>> 0, worldX: wx, worldY: clampedY, worldZ: wz };
+    obj.serverPlaceAt = performance.now();
     obj.physics?.interp.stopInterpolating();
     obj.physics?.setPositionSimple({ cell: landblock >>> 0, pos: { x: wx, y: wz, z: clampedY }, orient: { w: qw, x: qx, y: qy, z: qz } });
 
@@ -2837,15 +2905,20 @@ export class ServerObjectManager {
       obj.moveTo?.useTime();
       const anim = this.animatedObjects.get(obj.guid);
       let offset = null;
+      let seqStep: SequenceStepInfo | undefined;
       if (anim && obj.guid !== this.localPlayerGuid) {
         const mm = anim.motionManager;
         const physics = sequencePhysicsFor(mm.activeMotionTable, mm.currentStyleId, this.appliedMotionState(obj));
         const motion = { frame: identityFrame(), velocity: physics.velocity, omega: physics.omega };
+        // MOVE.chunked-motion-judder — how the sequence stepped, for the draw lag.
+        const player = mm.animationPlayer as AnimationPlayer | undefined;
+        player?.takeSteps();
         anim.update(deltaTime, motion);
         offset = motion.frame;
+        if (player) seqStep = { steps: player.takeSteps(), phase: player.stepPhase, epoch: player.nodeEpoch };
         stepped.add(obj.guid);
       }
-      body.update(deltaTime, offset, env, now);
+      body.update(deltaTime, offset, env, now, seqStep);
       this.syncBodyToMesh(obj);
     }
 
@@ -2882,14 +2955,18 @@ export class ServerObjectManager {
     obj.worldZ = body.pos.y;
     obj.bodySyncedAt = performance.now();
     if (!obj.mesh || obj.wielderId || obj.outOfWorld) return;
-    obj.mesh.position.set(obj.worldX, obj.worldY, obj.worldZ);
-    const [qx, qy, qz, qw] = acQuatToThree(body.orient);
+    // MOVE.chunked-motion-judder — the mesh is drawn between the body's
+    // whole-frame steps; worldX / Y / Z stay the simulated position.
+    const draw = body.drawPosition();
+    obj.mesh.position.set(draw.x, draw.z, draw.y);
+    const [qx, qy, qz, qw] = acQuatToThree(body.drawOrientation());
     obj.mesh.quaternion.set(qx, qy, qz, qw);
   }
 
   /** What remote physics reads from the world: the terrain height (AC z) outdoors. */
   private readonly physicsEnv: RemotePhysicsEnv = {
     terrainHeight: (x, y) => this.terrainCollision?.getHeightAt(x, y) ?? null,
+    landingZ: (cell, x, y, z, spheres) => this.objectLandingQuery?.(cell, x, y, z, spheres) ?? null,
   };
 
   /** Whether this client knows object `id` (CObjectMaint::GetObjectA) — us included. */
@@ -3287,7 +3364,7 @@ export class ServerObjectManager {
         // missile crosses, with its Setup's BSP / CylSpheres / Spheres.
         // A wielded / held object is parented to its wielder, not in a cell
         // (CPhysicsObj::set_parent leaves the cell's object list).
-        if (o.wielderId) continue;
+        if (o.wielderId || !ServerObjectManager.inWorldForMissiles(o)) continue;
         if (!this.missileObjectSweep || d > reach + ServerObjectManager.MISSILE_OBJECT_REACH) continue;
         best = nearestContact(best, applyObstacleKind(this.missileObjectSweep(o, from, to, radius), kind, o.guid));
       }
@@ -3315,7 +3392,7 @@ export class ServerObjectManager {
    * along the line, or null when it reaches the target. null when the
    * target or our body isn't known.
    */
-  lineOfFire(guid: number, radius = 0.1): { dist: number; blockedAt: number | null } | null {
+  lineOfFire(guid: number, radius = 0.1): { dist: number; blockedAt: number | null; blocker?: string } | null {
     const o = this.objects.get(guid);
     const me = this.missileLocalPlayer?.();
     if (!o || !me || !this.missileEnvironmentSweep) return null;
@@ -3332,15 +3409,80 @@ export class ServerObjectManager {
     const from = { x: eye.x + u.x * startOff, y: eye.y + u.y * startOff, z: eye.z + u.z * startOff };
     const to = { x: target.x - u.x * endOff, y: target.y - u.y * endOff, z: target.z - u.z * endOff };
     const span = len - startOff - endOff;
-    let best = this.missileEnvironmentSweep(from, to, radius);
-    const reach = span + radius;
+    const best = this.missileSegmentContact(from, to, radius, guid);
+    if (!best || best.t >= 1) return { dist, blockedAt: null };
+    return { dist, blockedAt: Math.round((startOff + best.t * span) * 10) / 10, blocker: this.missileBlockerName(best) };
+  }
+
+  /**
+   * The first wall, ground or solid object (creatures left out) a missile sphere of `radius` meets from `from` to `to`
+   * (AC world axes), with the object's guid; `exclude` (the target) and our own body are not obstacles.
+   */
+  private missileSegmentContact(from: V3, to: V3, radius: number, exclude: number): MissileContact | null {
+    if (!this.missileEnvironmentSweep) return null;
+    let best: MissileContact | null = this.missileEnvironmentSweep(from, to, radius);
+    const reach = Math.hypot(to.x - from.x, to.y - from.y) + radius;
     for (const s of this.objects.values()) {
-      if (s.guid === guid || s.guid === this.playerGuid || !s.mesh || s.wielderId || (s.itemType & ItemType.Creature)) continue;
+      if (s.guid === exclude || s.guid === this.playerGuid || !s.mesh || s.wielderId || (s.itemType & ItemType.Creature)) continue;
+      // Only objects in a cell: a held item (physics parent), one carried in a pack or a corpse, or one released out
+      // of range has no place in the world for a bolt to hit (CPhysicsObj::set_parent / leave_world leave the cell).
+      if (!ServerObjectManager.inWorldForMissiles(s)) continue;
       if (classifyMissileObstacle(s.physicsState, PhysicsState.Missile) === 'ignore' || !this.missileObjectSweep) continue;
       if (Math.hypot(s.worldX - from.x, s.worldZ - from.y) > reach + ServerObjectManager.MISSILE_OBJECT_REACH) continue;
-      best = nearestContact(best, this.missileObjectSweep(s, from, to, radius));
+      const hit = this.missileObjectSweep(s, from, to, radius);
+      if (hit) best = nearestContact(best, { ...hit, objectGuid: s.guid });
     }
-    return { dist, blockedAt: best && best.t < 1 ? Math.round((startOff + best.t * span) * 10) / 10 : null };
+    return best;
+  }
+
+  /** What a missile contact is, as a player would see it: the object's name, else the wall / floor / ceiling its normal says. */
+  private missileBlockerName(c: MissileContact): string {
+    const n = c.normal;
+    return c.objectGuid !== undefined ? (this.objects.get(c.objectGuid)?.name || 'an object')
+      : n && Math.abs(n.z) > 0.7 ? (n.z < 0 ? 'the ceiling' : 'the floor or ground') : 'a wall';
+  }
+
+  /**
+   * Would an arrow, bolt or thrown weapon reach `guid` from here? Unlike a bolt (which flies straight: lineOfFire), a
+   * missile flies the server's arc ({@link missileArc}: ACE Player_Missile spawns it 2 × (your radius + its own) in
+   * front of you at Height × 0.8454, tilted by the aim motion, and launches it on the low solve_ballistic_arc to the
+   * target's Height / GetAimHeight). This samples that arc and sweeps each piece against the same walls, terrain and
+   * solid objects lineOfFire does, plus the server's first check (WorldObject.IsProjectileVisible: from the spawn point
+   * back to your eye, so a spawn point through a wall or over a lip is caught). `blockedAt` is the ground distance (m)
+   * from you to the first contact, null when the arc reaches the target. `noArc`: no arc reaches it at this speed (the
+   * server's "Out of Range!"). null when the target or our body isn't known.
+   */
+  missileArcOfFire(guid: number, shot: { speed: number; aim?: 'high' | 'medium' | 'low'; projectileRadius?: number }): { dist: number; blockedAt: number | null; blocker?: string; noArc?: boolean } | null {
+    const o = this.objects.get(guid);
+    const me = this.missileLocalPlayer?.();
+    if (!o || !me || !this.missileEnvironmentSweep) return null;
+    const radius = shot.projectileRadius ?? DEFAULT_PROJECTILE_RADIUS;
+    const feet = { x: o.worldX, y: o.worldZ, z: o.worldY };
+    const dist = Math.hypot(feet.x - me.x, feet.y - me.y);
+    const arc = missileArc({
+      from: { x: me.x, y: me.y, z: me.z }, to: feet, speed: shot.speed, shooterHeight: me.height, shooterRadius: me.radius,
+      targetHeight: Math.max(o.collisionHeight, 0.6), aim: shot.aim ?? 'medium', projectileRadius: radius,
+    });
+    if (!arc) return { dist, blockedAt: null, noArc: true };
+    const ground = (p: V3): number => Math.round(Math.hypot(p.x - me.x, p.y - me.y) * 10) / 10;
+    // IsProjectileVisible: the spawn point must see you (at eye height less the projectile's own height).
+    const eye = { x: me.x, y: me.y, z: me.z + me.height - radius * 2 };
+    const back = this.missileSegmentContact(eye, arc.origin, radius, guid);
+    if (back && back.t < 1) return { dist, blockedAt: ground({ x: eye.x + (arc.origin.x - eye.x) * back.t, y: eye.y + (arc.origin.y - eye.y) * back.t, z: 0 }), blocker: this.missileBlockerName(back) };
+    // The arc, in pieces of about a metre, up to the target's surface (it is no obstacle to itself).
+    const endOff = Math.max(o.collisionRadius, 0.3) + radius;
+    const len = Math.hypot(arc.aim.x - arc.origin.x, arc.aim.y - arc.origin.y, arc.aim.z - arc.origin.z);
+    if (len <= endOff) return { dist, blockedAt: null };
+    const tEnd = arc.time * (1 - endOff / len);
+    const n = Math.max(6, Math.ceil((len - endOff) / 1));
+    let prev = arc.origin;
+    for (let i = 1; i <= n; i++) {
+      const p = missileArcPoint(arc, (tEnd * i) / n);
+      const c = this.missileSegmentContact(prev, p, radius, guid);
+      if (c && c.t < 1) return { dist, blockedAt: ground({ x: prev.x + (p.x - prev.x) * c.t, y: prev.y + (p.y - prev.y) * c.t, z: 0 }), blocker: this.missileBlockerName(c) };
+      prev = p;
+    }
+    return { dist, blockedAt: null };
   }
 
   /**
@@ -3367,6 +3509,11 @@ export class ServerObjectManager {
       best = nearestContact(best, this.missileObjectSweep(s, from, to, radius));
     }
     return !(best && best.t < 1);
+  }
+
+  /** An object a missile can hit: in a cell (not held, carried, out of the world, or released out of range). */
+  static inWorldForMissiles(o: ServerObject): boolean {
+    return !o.outOfWorld && !o.lostCell;
   }
 
   /** Coarse cull for {@link missileObjectSweep}: no server object's collision reaches further than this (m) from its origin. */

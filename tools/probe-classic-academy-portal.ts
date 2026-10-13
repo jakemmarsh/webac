@@ -21,14 +21,16 @@
  * Outpost Training Academy portal; '@teleloc 0xA5B40033 [148.0 62.0 51.0]
  * 1 0 0 0' with YAW=1.2 faces the academy pyramid's doorway.
  */
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { chromium } from 'playwright';
+import { createRunProfile } from './lib/temp-profile.js';
 import { shot, waitFor, chatLine, AT_CHAR_SELECT_JS, IN_CHARGEN_JS, IN_WORLD_JS, SWIFTSHADER_ARGS } from './lib/game-session.js';
 const out = process.argv[2]; const base = process.env.BASE ?? 'http://localhost:3021/'; const bridge = process.env.BRIDGE ?? 'ws://localhost:9192';
-const profile = process.env.PROFILE ?? mkdtempSync(join(tmpdir(), 'acjs-infil-'));
-const browser = await chromium.launchPersistentContext(profile, { args: SWIFTSHADER_ARGS, viewport: { width: 1280, height: 720 } });
+// PROFILE=<dir> reuses (and keeps) a warm profile; otherwise a fresh one, deleted at exit / signal / crash.
+const profile = createRunProfile('acjs-infil-', { persistDir: process.env.PROFILE, tool: 'probe-classic-academy-portal' });
+const browser = await chromium.launchPersistentContext(profile.dir, { args: SWIFTSHADER_ARGS, viewport: { width: 1280, height: 720 } });
+profile.setCloser(() => browser.close());
 const page = browser.pages()[0] ?? await browser.newPage();
 page.setDefaultTimeout(120_000);
 const logs: string[] = [];
@@ -123,3 +125,4 @@ if (process.env.CHECK_ANIM) {
 if (process.env.HOLD) await page.waitForTimeout(Number(process.env.HOLD));
 writeFileSync(join(out, 'console.txt'), logs.join('\n'));
 await browser.close();
+await profile.dispose();

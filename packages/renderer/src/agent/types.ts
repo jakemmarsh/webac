@@ -37,10 +37,19 @@ export interface AgentObject {
   /** Monsters only: how many of its attacks on you (hits, misses, evades) the last 10 s of combat lines named. */
   attackingYou?: number;
   /**
+   * Monsters only: what this kind of creature (by name) was seen doing to you this session, from the server's own
+   * lines: "casts Frost Bolt II (40), Drain Health Other II; hits up to 6". Nothing hidden: only what a player saw.
+   */
+  seen?: string;
+  /**
    * The target only: a wall, the ground or a solid object stands this far (m) along the straight line to it, so a
    * bolt or arrow would hit that instead (the client's own missile collision; creatures are not counted).
    */
   lineOfFireBlockedAt?: number;
+  /** What stands there: an object's name, "a wall", "the ceiling", "the floor or ground". */
+  lineOfFireBlocker?: string;
+  /** The blocked line is a missile's arc (a bow or thrown weapon ready), not a bolt's straight line. */
+  lineOfFireArc?: boolean;
   /**
    * The target only: the client released it (its cell is out of the 3×3 landblocks the server keeps you updated
    * on: CPhysicsObj::leave_visibility): not drawn, frozen where it was last seen, deleted 25 s later. Not there to act on.
@@ -94,7 +103,11 @@ export interface AgentEvent {
     | 'chat' | 'object-added' | 'object-removed' | 'death' | 'target-died' | 'target-lost' | 'task-done'
     | 'vitals-low' | 'level-up' | 'portal' | 'screen' | 'dialog' | 'attacked'
     /** The server failed a use (UseDone with a WeenieError): its name, for codes retail shows no text for. */
-    | 'use-failed';
+    | 'use-failed'
+    /** More creatures attacking you than a moment ago (the attack lines of the last 10 s, each placed on its creature). */
+    | 'attackers-up'
+    /** A spell came at you (landed, resisted, failed to affect you), or a creature nearby spoke a spell's words. */
+    | 'cast-at-you';
   text: string;
   guid?: number;
   /** Chat lines: the ChatMessageType the line came in as (Chat Message Capture's colour filter). */
@@ -137,12 +150,17 @@ export interface AgentObservation {
    * Your fellows (not you): health %, and distance and compass direction when in view, else out of sight.
    * Without it a player stood waiting for a partner 490 m away to buff him (Bulwark, 2026-10-10).
    */
-  fellows?: Array<{ name: string; healthPct: number; dist?: number; bearing?: number }>;
+  fellows?: Array<{ name: string; healthPct: number; dist?: number; bearing?: number; /** Metres up (+) or down (−) when 2 m or more. */ dz?: number }>;
   /**
    * In a fellowship with nobody else in it: a fellow logged out (the server takes them out, as retail did) and /f
    * reaches no one. Arcanist and Bulwark each sat in a separate fellowship waiting on the other's /f, 2026-10-10.
    */
   fellowshipAlone?: boolean;
+  /**
+   * Attack lines of the last 10 s naming a creature none of whose name stands within reach (a swing from 8 m, a spell
+   * from 60 m): out of sight, or a missile from afar. Named, never pinned on a far one of that name.
+   */
+  attackersUnplaced?: Array<{ name: string; count: number }>;
   /** Chat / system lines since the previous observe (or the last N on the first call). */
   chat: AgentChatLine[];
   /** Highest event seq seen; pass it to waitFor/events to get only newer ones. */
@@ -251,4 +269,9 @@ export interface AgentWaitFilter {
   chatMatch?: string;
   /** Only events newer than this seq (default: now). */
   sinceSeq?: number;
+  /** Wake (as vitals-low) when health falls below this fraction of its max (default mark without it: 0.5). */
+  healthBelow?: number;
+  /** Likewise for mana and stamina (no default mark for them). */
+  manaBelow?: number;
+  staminaBelow?: number;
 }

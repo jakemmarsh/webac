@@ -697,7 +697,8 @@ describe('AgentApi', () => {
     await vi.advanceTimersByTimeAsync(400);
     const r = await p;
     expect(r.ok).toBe(true);
-    expect(r.message).toMatch(/casting Heal Self I on yourself\n {2}You say[\s\S]*You cast Heal Self I/);
+    // The outcome leads (a fizzle printed last was cut off by `| head`, 2026-10-12), then the incantation.
+    expect(r.message).toMatch(/^casting Heal Self I on yourself\n {2}You cast Heal Self I[^\n]*\n {2}You say/);
   });
 
   it('a walk that carries you through a portal ends there instead of reporting thousands of metres short', async () => {
@@ -890,6 +891,43 @@ describe('AgentApi', () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(await sold).toMatchObject({ ok: true, message: 'sold 2 of Grapes for 4 pyreals' });
     expect(host.sent).toEqual(['sell 80000c20 x2']);
+  });
+
+  it('one note off a stack: the client\'s split notices are no answer; the sale\'s coins are (Jake, Archmage Cindrue, 2026-10-12)', async () => {
+    host.vendorOpen = { name: 'Archmage Cindrue', guid: 0x80000c00, currency: 'Pyreals', items: [] };
+    host.me = { ...host.me, pyreals: 23_924 };
+    host.inv.push({ guid: 0x80000c30, name: 'Trade Note (250,000)', where: 'main pack', stack: 38 });
+    host.vendorSell = (g: number, n: number) => {
+      host.sent.push(`sell ${g.toString(16)} x${n}`);
+      // The split goes first (its notice, then the split-off note arriving), and the sale lands seconds later.
+      setTimeout(() => api.pushChat('Splitting the Trade Notes (250,000) before selling them', 0x1a), 200);
+      setTimeout(() => api.pushChat('Trade Note (250,000)', 0x1a), 400);
+      setTimeout(() => { host.me = { ...host.me, pyreals: 268_320 }; host.inv = host.inv.map((i) => (i.guid === g ? { ...i, stack: 37 } : i)); }, 2500);
+      return true;
+    };
+    const sold = api.sell('Trade Note (250,000)', 1);
+    await vi.advanceTimersByTimeAsync(5000);
+    const r = await sold;
+    expect(r.ok).toBe(true);
+    expect(r.message).toMatch(/^sold 1 of Trade Note \(250,000\) for 244396 pyreals/);
+    expect(r.message).not.toMatch(/was not sold/);
+  });
+
+  it('a split stack the vendor then refuses: the refusal is the answer, not a wait', async () => {
+    host.vendorOpen = { name: 'Archmage Cindrue', guid: 0x80000c00, currency: 'Pyreals', items: [] };
+    host.me = { ...host.me, pyreals: 100 };
+    host.inv.push({ guid: 0x80000c31, name: 'Pyreal Mote', where: 'main pack', stack: 10 });
+    host.vendorSell = (g: number, n: number) => {
+      host.sent.push(`sell ${g.toString(16)} x${n}`);
+      setTimeout(() => api.pushChat('Splitting the Pyreal Motes before selling them', 0x1a), 200);
+      setTimeout(() => api.pushChat('The Pyreal Mote is unsellable.', 0x1a), 900);
+      return true;
+    };
+    const sold = api.sell('Pyreal Mote', 1);
+    await vi.advanceTimersByTimeAsync(2000);
+    const r = await sold;
+    expect(r).toMatchObject({ ok: false });
+    expect(r.message).toMatch(/^Pyreal Mote was not sold\n.*\nThe Pyreal Mote is unsellable\.$/);
   });
 
   it('trades only with an open trade window', () => {

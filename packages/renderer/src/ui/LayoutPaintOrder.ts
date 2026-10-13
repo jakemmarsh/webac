@@ -82,7 +82,8 @@ export function ownsUIObject(desc: Pick<ElementDesc, 'properties'>): boolean {
  */
 export const OWNED_OBJECT_Z_BASE = 100;
 
-type OwnedObjectDesc = Pick<ElementDesc, 'zLevel' | 'uiReadOrder' | 'properties' | 'type' | 'baseElement'> & {
+type OwnedObjectDesc = Pick<ElementDesc, 'zLevel' | 'uiReadOrder' | 'properties' | 'type' | 'baseElement'>
+  & Partial<Pick<ElementDesc, 'x' | 'y' | 'width' | 'height'>> & {
   children: ReadonlyMap<number, OwnedObjectDesc>;
 };
 
@@ -133,12 +134,64 @@ export function applyOwnedObjectLayers<T extends OwnedObjectDesc>(
   domByDesc: ReadonlyMap<T, HTMLElement>,
 ): number {
   let n = 0;
-  for (const { desc, rank } of liftedOwnedObjects(roots)) {
+  const lifted = liftedOwnedObjects(roots);
+  for (const { desc, rank } of lifted) {
     const el = domByDesc.get(desc);
     if (!el) continue;
     el.style.zIndex = String(OWNED_OBJECT_Z_BASE + rank);
     n++;
   }
+  // The lift is a paint order only: keep retail's hit order for the
+  // buttons it would otherwise bury (see hitTargetsOverOwnedObjects).
+  for (const { desc, rank } of hitTargetsOverOwnedObjects(roots)) {
+    const el = domByDesc.get(desc);
+    if (el) el.style.zIndex = String(OWNED_OBJECT_Z_BASE + lifted.length + rank);
+  }
   if (n) container.style.isolation = 'isolate';
   return n;
+}
+
+/** `UIElement_Button` — the DAT element type of a push button. */
+const BUTTON_ELEMENT_TYPE = 1;
+
+/**
+ * The buttons a {@link liftedOwnedObjects} element would cover, with their
+ * rank in tree order. Retail picks the element under the mouse from the
+ * element tree, not from the object draw order: `MouseHitTester<…>::Recurse
+ * @ 00459370` walks each element's children tail → head (front first, the
+ * same order DrawChildren paints) and descends into the first one the point
+ * is over. So a button that comes after an owner in the pre-order paint walk
+ * (in front of it in the tree, and not inside it) takes the click even where
+ * the owner's object draws over it. A CSS z-index moves the hit order along
+ * with the paint order, so these buttons go above the lifted layers: the main
+ * chat's maximize box 0x1000046f (368,5 16x16) sits inside the log text
+ * 0x10000011 (21,5 368x73, attribute 0xcd) and was unclickable under it
+ * (webac#1). Rects are the DAT's x/y/width/height, relative to the parent.
+ */
+export function hitTargetsOverOwnedObjects<T extends OwnedObjectDesc>(roots: ReadonlyArray<T>): Array<{ desc: T; rank: number }> {
+  type Placed = { desc: T; x: number; y: number; w: number; h: number; inLifted: boolean; owner: boolean; ownerEnd: number };
+  const seq: Placed[] = [];
+  const walk = (sibs: ReadonlyArray<T>, ox: number, oy: number, inLifted: boolean): void => {
+    for (const i of retailPaintOrder(sibs)) {
+      const d = sibs[i];
+      if (d.type === 11 && d.baseElement !== 0) continue; // rendered hidden (LayoutRenderer)
+      const x = ox + (d.x ?? 0), y = oy + (d.y ?? 0);
+      const owner = ownsUIObject(d);
+      const p: Placed = { desc: d, x, y, w: d.width ?? 0, h: d.height ?? 0, inLifted, owner, ownerEnd: 0 };
+      seq.push(p);
+      walk([...d.children.values()] as T[], x, y, inLifted || owner);
+      p.ownerEnd = seq.length; // seq[index+1 .. ownerEnd) are this element's descendants
+    }
+  };
+  for (const r of retailPaintOrder(roots)) walk([...roots[r].children.values()] as T[], roots[r].x ?? 0, roots[r].y ?? 0, false);
+
+  const found: Array<{ desc: T; rank: number }> = [];
+  for (let b = 0; b < seq.length; b++) {
+    const btn = seq[b];
+    if (btn.desc.type !== BUTTON_ELEMENT_TYPE || btn.inLifted || btn.owner || btn.w <= 0 || btn.h <= 0) continue;
+    const covered = seq.slice(0, b).some((o) => o.owner && o.ownerEnd <= b && o.w > 0 && o.h > 0
+      && btn.x < o.x + o.w && o.x < btn.x + btn.w && btn.y < o.y + o.h && o.y < btn.y + btn.h);
+    if (covered) found.push({ desc: btn.desc, rank: found.length });
+  }
+  return found;
 }

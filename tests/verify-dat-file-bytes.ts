@@ -3,7 +3,7 @@
  * in-memory ArrayBuffer path the browser uses.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { existsSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatDatabase, ArrayBufferDatBytes } from '../packages/dat-parser/src/DatDatabase.js';
@@ -59,6 +59,7 @@ describe('FileDatBytes vs in-memory DatDatabase', () => {
       }
     }
     expect(new Uint8Array(file.getFileData(0x01000002)!)[149]).toBe((149 * 7) & 0xff);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

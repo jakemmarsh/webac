@@ -67,6 +67,15 @@ export type RoutineCondition =
   | { kind: 'need-buff' }
   /** A VirindiTank meta expression that must come out true. */
   | { kind: 'expression'; expr: string }
+  // Beyond VTank, Jake 2026-10-12: neither VirindiTank nor UtilityBelt had these (an export writes them as Never).
+  /** At least `count` creatures attacking you: the attack lines of the last 10 s, each placed on its creature (AgentApi.attackersOfMe). */
+  | { kind: 'attackers-at-least'; count: number }
+  /** A spell came at you (landed, resisted, failed to affect you) or a creature nearby spoke a spell's words, in the last `seconds` (default 5). */
+  | { kind: 'being-cast-at'; seconds?: number }
+  /** VTank's No Monsters Within Distance, measured from a point (`coords`) or from the nearest object named `object` instead of from you. */
+  | { kind: 'no-monster-near'; meters: number; coords?: string; object?: string }
+  /** Your own corpse ("Corpse of <your name>") lies within range. */
+  | { kind: 'my-corpse-within'; meters: number }
   /**
    * Something an imported file tested that this engine cannot (kept so the player sees it); never holds.
    * `raw` is the VirindiTank meta condition as read (its type id and typed data), so an export writes it back.
@@ -128,6 +137,28 @@ export type RoutineAction =
   | { kind: 'load-loot'; set: string }
   /** Evaluate a VirindiTank meta expression for its effects. */
   | { kind: 'expression'; expr: string }
+  // Beyond VTank, Jake 2026-10-12: neither VirindiTank nor UtilityBelt had these (an export leaves them out, saying so).
+  /**
+   * Pull: attack the nearest monster whose name matches `pattern` (within `meters`, default 60) until one swing or shot
+   * lands on it or it turns on you, then break off and run back to `back` (map coordinates), keeping going while hit.
+   * `holdMeters` also holds position there (as hold-position).
+   */
+  | { kind: 'pull'; pattern: string; back: string; meters?: number; holdMeters?: number }
+  /** Hold position: attack-nearest and the macro's fighting leave alone monsters more than `meters` from here (or `coords`): no chasing down a ledge. */
+  | { kind: 'hold-position'; meters: number; coords?: string }
+  /** Drop the hold-position anchor. */
+  | { kind: 'release-position' }
+  /** Loot the corpse of this name ("Corpse of Azreath Lightbringer") through the loot rules, not just a kill of yours. */
+  | { kind: 'loot-corpse'; name: string; meters?: number }
+  /**
+   * A recall that gives up when `abortAttackers` (default 1) or more creatures are attacking you before it takes you:
+   * `via` is a recall command ("/ls", "/hr", "/mp") or a recall spell's name. Aborted with a jump (retail's own way to
+   * break the kneel), then a run past the server's 8 m recall-move limit.
+   */
+  | { kind: 'recall'; via: string; abortAttackers?: number }
+  /** Run to map coordinates and keep going while hit (walk-to stops to fight back; this doesn't). */
+  /** Run to `coords` without stopping when hit, then (with `portal`) use that portal, still not stopping; coords may be empty with a portal. */
+  | { kind: 'flee-to'; coords: string; portal?: string }
   /** Something an imported file did that this engine cannot; does nothing (fails) when reached. `raw`: as for the condition. */
   | { kind: 'unsupported'; what: string; raw?: VtMetRaw };
 

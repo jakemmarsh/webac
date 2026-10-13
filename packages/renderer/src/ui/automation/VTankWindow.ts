@@ -33,7 +33,7 @@ import { VT_ACTION_HELP, VT_CONDITION_HELP } from './metaHelp.js';
 import { renderVTankHistory, renderVTankRemote, VT_HISTORY_SIZE, VT_REMOTE_SIZE } from './VTankRemote.js';
 import { VtLootEditor } from './lootEditor.js';
 import { ubNetCommand, type UbNet } from '../../agent/ubNet.js';
-import { VhsHotkeys, type RetailKeys, type VhsStorage } from './vhsHotkeys.js';
+import { VhsHotkeys, type RetailKeys, type VhsHotkey, type VhsStorage } from './vhsHotkeys.js';
 import { renderVhsAddVvs, renderVhsWindow, VHS_ADD_VVS_SIZE, VHS_SIZE, vtankHotkeys } from './VhsWindow.js';
 
 export type VtTab = 'options' | 'profiles' | 'vitals' | 'monsters' | 'items' | 'consumables' | 'buffs' | 'route' | 'meta';
@@ -96,6 +96,8 @@ export interface VTankSource extends AutomationSource {
   hasSpell?(id: number): boolean | undefined;
   /** The debug and inventory commands' game side (/vt dumpmetavars, testspell …; /ub autostack, count …: metaCommands.ts). */
   tools?: AutomationTools;
+  /** Other plugins' hotkeys for the hotkey window (Mag-Tools' Pack Inventory and One Touch Heal; none without preview UI). */
+  pluginHotkeys?(): VhsHotkey[];
 }
 
 /** The options that only mean something with the Summoning skill (Summon Pets and its settings). */
@@ -277,6 +279,20 @@ export const VT_CONDITIONS: VtCondDef[] = [
     params: [{ key: 'pattern', label: 'Pattern (regex)', type: 'text' }, { key: 'colors', label: 'Color ids (;)', type: 'text' }],
     get: (c) => ({ pattern: (c as { pattern: string }).pattern, colors: ((c as { colors?: number[] }).colors ?? []).join(';') }),
     set: (v) => { const colors = (v.colors ?? '').split(';').map((x) => x.trim()).filter(Boolean).map(Number).filter((x) => Number.isFinite(x) && x >= 0); return { kind: 'chat-capture', pattern: v.pattern ?? '', ...(colors.length ? { colors } : {}) }; } },
+  // Beyond VTank, Jake 2026-10-12 (agent/beyondVtank.ts): neither VirindiTank nor UtilityBelt had these; keep them in a parity audit.
+  { id: 'attackers', label: 'Attacked By Count >=', make: () => ({ kind: 'attackers-at-least', count: 2 }), is: (c) => c.kind === 'attackers-at-least',
+    params: [{ key: 'count', label: 'Count', type: 'number' }], get: (c) => ({ count: (c as { count: number }).count }), set: (v) => ({ kind: 'attackers-at-least', count: Math.max(1, Math.round(n(v.count, 1))) }) },
+  { id: 'castat', label: 'Being Cast At', make: () => ({ kind: 'being-cast-at' }), is: (c) => c.kind === 'being-cast-at',
+    params: [{ key: 'seconds', label: 'Within (s)', type: 'number' }], get: (c) => ({ seconds: (c as { seconds?: number }).seconds ?? 5 }),
+    set: (v) => { const sec = Math.min(60, Math.max(1, n(v.seconds, 5))); return sec === 5 ? { kind: 'being-cast-at' } : { kind: 'being-cast-at', seconds: sec }; } },
+  { id: 'nomonpt', label: 'No Monsters Near Point', make: () => ({ kind: 'no-monster-near', meters: 10, coords: '' }), is: (c) => c.kind === 'no-monster-near' && c.object === undefined,
+    params: [{ key: 'coords', label: 'Point (42.1N, 33.6E)', type: 'text' }, { key: 'meters', label: 'Distance', type: 'number' }],
+    get: (c) => ({ coords: (c as { coords?: string }).coords ?? '', meters: (c as { meters: number }).meters }), set: (v) => ({ kind: 'no-monster-near', meters: n(v.meters, 10), coords: v.coords ?? '' }) },
+  { id: 'nomonobj', label: 'No Monsters Near Object', make: () => ({ kind: 'no-monster-near', meters: 10, object: '' }), is: (c) => c.kind === 'no-monster-near' && c.object !== undefined,
+    params: [{ key: 'object', label: 'Object name', type: 'text' }, { key: 'meters', label: 'Distance', type: 'number' }],
+    get: (c) => ({ object: (c as { object?: string }).object ?? '', meters: (c as { meters: number }).meters }), set: (v) => ({ kind: 'no-monster-near', meters: n(v.meters, 10), object: v.object ?? '' }) },
+  { id: 'mycorpse', label: 'My Corpse Within Distance', make: () => ({ kind: 'my-corpse-within', meters: 30 }), is: (c) => c.kind === 'my-corpse-within',
+    params: [{ key: 'meters', label: 'Distance', type: 'number' }], get: (c) => ({ meters: (c as { meters: number }).meters }), set: (v) => ({ kind: 'my-corpse-within', meters: n(v.meters, 30) }) },
 ];
 
 const one = (a: RoutineAction[], kind: RoutineAction['kind']) => a.length === 1 && a[0].kind === kind;
@@ -320,6 +336,26 @@ export const VT_ACTIONS: VtActDef[] = [
   { id: 'destroyview', label: 'Destroy View', make: () => [{ kind: 'destroy-view', name: 'View' }], is: (a) => one(a, 'destroy-view'),
     params: [{ key: 'name', label: 'View name', type: 'text' }], get: (a) => ({ name: (a[0] as { name: string }).name }), set: (v) => [{ kind: 'destroy-view', name: v.name ?? '' }] },
   { id: 'destroyall', label: 'Destroy All Views', make: () => [{ kind: 'destroy-all-views' }], is: (a) => one(a, 'destroy-all-views') },
+  // Beyond VTank, Jake 2026-10-12 (agent/beyondVtank.ts): neither VirindiTank nor UtilityBelt had these; keep them in a parity audit.
+  { id: 'pull', label: 'Pull Monster', make: () => [{ kind: 'pull', pattern: '', back: '' }], is: (a) => one(a, 'pull'),
+    params: [{ key: 'pattern', label: 'Name (regex)', type: 'text' }, { key: 'meters', label: 'Within', type: 'number' }, { key: 'back', label: 'Back to (coords)', type: 'text' }, { key: 'holdMeters', label: 'Then hold (m)', type: 'number' }],
+    get: (a) => { const x = a[0] as Extract<RoutineAction, { kind: 'pull' }>; return { pattern: x.pattern, meters: x.meters ?? 60, back: x.back, holdMeters: x.holdMeters ?? 0 }; },
+    set: (v) => { const hold = n(v.holdMeters, 0); const m = n(v.meters, 60); return [{ kind: 'pull', pattern: v.pattern ?? '', back: v.back ?? '', ...(m !== 60 ? { meters: m } : {}), ...(hold > 0 ? { holdMeters: hold } : {}) }]; } },
+  { id: 'hold', label: 'Hold Position', make: () => [{ kind: 'hold-position', meters: 15 }], is: (a) => one(a, 'hold-position'),
+    params: [{ key: 'meters', label: 'Range', type: 'number' }, { key: 'coords', label: 'At (blank: here)', type: 'text' }],
+    get: (a) => { const x = a[0] as Extract<RoutineAction, { kind: 'hold-position' }>; return { meters: x.meters, coords: x.coords ?? '' }; },
+    set: (v) => { const at = (v.coords ?? '').trim(); return [{ kind: 'hold-position', meters: Math.max(1, n(v.meters, 15)), ...(at ? { coords: at } : {}) }]; } },
+  { id: 'release', label: 'Release Position', make: () => [{ kind: 'release-position' }], is: (a) => one(a, 'release-position') },
+  { id: 'lootcorpse', label: 'Loot Corpse', make: () => [{ kind: 'loot-corpse', name: 'Corpse of ' }], is: (a) => one(a, 'loot-corpse'),
+    params: [{ key: 'name', label: 'Corpse name', type: 'text' }], get: (a) => ({ name: (a[0] as { name: string }).name }), set: (v) => [{ kind: 'loot-corpse', name: v.name ?? '' }] },
+  { id: 'recall', label: 'Recall Unless Attacked', make: () => [{ kind: 'recall', via: '/ls' }], is: (a) => one(a, 'recall'),
+    params: [{ key: 'via', label: 'Command or spell', type: 'text' }, { key: 'abortAttackers', label: 'Abort at attackers', type: 'number' }],
+    get: (a) => { const x = a[0] as Extract<RoutineAction, { kind: 'recall' }>; return { via: x.via, abortAttackers: x.abortAttackers ?? 1 }; },
+    set: (v) => { const k = Math.max(1, Math.round(n(v.abortAttackers, 1))); return [{ kind: 'recall', via: v.via ?? '', ...(k !== 1 ? { abortAttackers: k } : {}) }]; } },
+  { id: 'flee', label: 'Flee To', make: () => [{ kind: 'flee-to', coords: '' }], is: (a) => one(a, 'flee-to'),
+    params: [{ key: 'coords', label: 'Coords', type: 'text' }, { key: 'portal', label: 'Then portal', type: 'text' }],
+    get: (a) => ({ coords: (a[0] as { coords: string }).coords, portal: (a[0] as { portal?: string }).portal ?? '' }),
+    set: (v) => [{ kind: 'flee-to', coords: v.coords ?? '', ...(v.portal ? { portal: v.portal } : {}) }] },
 ];
 
 export const vtCondDef = (c: RoutineCondition): VtCondDef | undefined => VT_CONDITIONS.find((d) => d.is(c));

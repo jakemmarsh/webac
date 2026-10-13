@@ -107,6 +107,14 @@ export interface BridgeConfig {
   /** BRIDGE_CLIENT_IP_HEADER: trusted single-value client-IP header set by the
    *  edge (Railway: x-real-ip); only consulted when trustProxyHops > 0. */
   clientIpHeader?: string;
+  /**
+   * Simple Proxy Protocol (spp.ts): servers that trust this bridge and read
+   * each player's real address from a header on every datagram. Pinned mode:
+   * BRIDGE_SPP=1. Multi mode: BRIDGE_SPP_SERVERS, comma-separated server ids
+   * (lower-cased). Turn it on only once the server trusts the bridge's address:
+   * a server that doesn't would read the header as a broken packet.
+   */
+  spp: { pinned: boolean; servers: Set<string> };
   limits: BridgeLimits;
   /** Multi mode: allow targets that resolve to private/loopback/link-local
    *  addresses (BRIDGE_ALLOW_PRIVATE_TARGETS=1; local development only). */
@@ -144,6 +152,12 @@ export interface BridgeConfig {
    * automation UI open to all players), and `server:*` every account on that server.
    */
   automationAccounts: string[];
+  /**
+   * BRIDGE_PREVIEW_ACCOUNTS: accounts that see preview UI before every player does (the Virindi Views bar,
+   * 2026-10-12), in BRIDGE_AUTOMATION_ACCOUNTS' format. Unset: the connector's BRIDGE_MCP_ACCOUNTS.
+   * Empty: nobody.
+   */
+  previewAccounts: string[];
   /**
    * AGENT.hosted-mcp-connector — BRIDGE_MCP_DEV_TOKENS: `token=server:account,…`. Each bearer token
    * lets an MCP client (Claude Code) play that account's own open tab through /mcp. Empty: no /mcp.
@@ -309,6 +323,10 @@ export function resolveBridgeConfig(
     mode,
     trustProxyHops,
     clientIpHeader: env.BRIDGE_CLIENT_IP_HEADER?.trim().toLowerCase() || undefined,
+    spp: {
+      pinned: truthy(env.BRIDGE_SPP),
+      servers: new Set((env.BRIDGE_SPP_SERVERS ?? '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean)),
+    },
     limits: {
       maxSessionsPerIp: positiveInt(env.BRIDGE_MAX_SESSIONS_PER_IP, d.maxSessionsPerIp),
       connectRatePerIp: positiveInt(env.BRIDGE_CONNECT_RATE_PER_IP, d.connectRatePerIp),
@@ -339,6 +357,7 @@ export function resolveBridgeConfig(
     mcpOAuth: (env.BRIDGE_MCP ?? '').toLowerCase() === 'on',
     mcpPublicUrl: (env.BRIDGE_PUBLIC_URL ?? '').replace(/\/+$/, ''),
     mcpAccounts: (env.BRIDGE_MCP_ACCOUNTS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
+    previewAccounts: (env.BRIDGE_PREVIEW_ACCOUNTS ?? env.BRIDGE_MCP_ACCOUNTS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
     mcpSecret: env.BRIDGE_MCP_SECRET || null,
     mcpConnectPage: /^https?:\/\//.test(env.BRIDGE_CONNECT_PAGE ?? '') ? env.BRIDGE_CONNECT_PAGE! : null,
   };

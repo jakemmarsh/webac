@@ -26,10 +26,9 @@
  * (docs/gpu-worker.md). Each gate (hold → released) is recorded in result.json
  * `gates` and printed as one `gate: …` headline line.
  */
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { chromium, type Page } from 'playwright';
+import { createRunProfile } from './lib/temp-profile.js';
 import { firstGateSince, gateHeadline, type GateSpan } from './lib/stream-gate.js';
 import { AT_CHAR_SELECT_JS, DEFAULT_VIEWPORT, GPU_ARGS, REMOTE_CHROMIUM, IN_CHARGEN_JS, IN_WORLD_JS, SWIFTSHADER_ARGS, createCharacterIfNeeded, gameUrl } from './lib/game-session.js';
 
@@ -117,13 +116,15 @@ async function session(label: string, ctx: Awaited<ReturnType<typeof chromium.la
 
 async function main(): Promise<void> {
   mkdirSync(OUT, { recursive: true });
-  const profile = mkdtempSync(join(tmpdir(), 'acjs-stream-probe-'));
-  const ctx = await chromium.launchPersistentContext(profile, { headless: true, viewport: DEFAULT_VIEWPORT,
+  // Deleted when the probe ends, on a signal or a crash (tools/lib/temp-profile.ts): it holds the OPFS DAT cache.
+  const profile = createRunProfile('acjs-stream-probe-', { tool: 'probe-dat-streaming' });
+  const ctx = await chromium.launchPersistentContext(profile.dir, { headless: true, viewport: DEFAULT_VIEWPORT,
     ...(GPU ? { channel: 'chromium', args: GPU_ARGS } : { args: SWIFTSHADER_ARGS,
       // Cloud containers: the remote Chromium build.
       ...(existsSync(REMOTE_CHROMIUM) ? { executablePath: REMOTE_CHROMIUM } : {}) }),
     // Cloud containers: the agent proxy for the DAT host.
     ...(process.env.HTTPS_PROXY ? { proxy: { server: process.env.HTTPS_PROXY, bypass: 'localhost,127.0.0.1' } } : {}) });
+  profile.setCloser(() => ctx.close());
   if (EDGE_BUST) {
     const tag = `edgebust${Date.now().toString(36)}`;
     await ctx.route((u) => u.host === DAT_HOST && u.pathname.startsWith('/v1/o/'), (route) => route.continue({ url: `${route.request().url()}?${tag}` }));
@@ -208,7 +209,7 @@ async function main(): Promise<void> {
     result.headline = gateHeadline(gates);
     console.log(`${result.headline}  [${GPU ? 'gpu' : 'swiftshader'}: ${result.renderer ?? '?'}]`);
   };
-  if (RAW) { finish(); await ctx.close(); writeFileSync(`${OUT}/result.json`, JSON.stringify(result, null, 2) + '\n'); console.log(`wrote ${OUT}/result.json`); return; }
+  if (RAW) { finish(); await profile.dispose(); writeFileSync(`${OUT}/result.json`, JSON.stringify(result, null, 2) + '\n'); console.log(`wrote ${OUT}/result.json`); return; }
   // 3. warm: same profile (OPFS populated).
   await new Promise((r) => setTimeout(r, 8000)); // ACE's logout save
   const warm = await session('warm', ctx, url);
@@ -219,7 +220,7 @@ async function main(): Promise<void> {
     await warm.page.screenshot({ path: `${OUT}/warm-in-world.png` });
   }
   await warm.page.close();
-  await ctx.close();
+  await profile.dispose();
   finish();
   if (REQ_LOG) writeFileSync(`${OUT}/requests.json`, JSON.stringify(requests) + "\n");
   writeFileSync(`${OUT}/result.json`, JSON.stringify(result, null, 2) + '\n');

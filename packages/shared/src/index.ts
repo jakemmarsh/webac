@@ -98,7 +98,12 @@ export {
 } from './combat/SwingAnimation.js';
 export type { CombatManeuverRow, SwingAnimationInput } from './combat/SwingAnimation.js';
 export { getAnimSpeed, MIN_ATTACK_SPEED, MAX_ATTACK_SPEED, DEFAULT_WEAPON_SPEED } from './combat/AnimSpeed.js';
-export { getMaxMissileRange, MISSILE_RANGE_CAP, DEFAULT_MAX_VELOCITY, METERS_TO_YARDS } from './combat/MissileRange.js';
+export {
+  getMaxMissileRange, MISSILE_RANGE_CAP, DEFAULT_MAX_VELOCITY, METERS_TO_YARDS,
+  getProjectileSpeed, missileAimDivisor, missileArcGroundReach, missileShot, MISSILE_GRAVITY, PROJ_SPAWN_HEIGHT, FAST_MISSILE_MODIFIER, PHYSICS_MAX_VELOCITY,
+  DEFAULT_PROJECTILE_RADIUS, solveBallisticArc, missileAimLevelDeg, missileArc, missileArcPoint,
+} from './combat/MissileRange.js';
+export type { MissileShot, MissileArc } from './combat/MissileRange.js';
 export { isAmmoLauncherCombatStyle, canFireMissile } from './combat/MissileAmmo.js';
 export { canAttackTarget } from './combat/AttackTargetGate.js';
 export { canUseTarget, targetResolves, type TargetLocations } from './systems/UseTargetGate.js';
@@ -224,3 +229,6 @@ export {
 } from './util/round.js';
 export { SELF_EMOTE_SPEAKER, substituteEmotePronoun, composeHeardEmoteLine, composeSelfEmoteLine, isOwnSoulEmoteEcho } from './emote-lines.js';
 export * from './routines/index.js';
+export * from './goarrow/index.js';
+export * from './magtools/index.js';
+export * from './vcs5/vcs5.js';
