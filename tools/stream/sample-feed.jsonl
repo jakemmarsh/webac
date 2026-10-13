@@ -1,0 +1,64 @@
+{"v": 1, "t": 1792000000000, "type": "session-start", "title": "Drudges of the Holtburg Hills"}
+{"v": 1, "t": 1792000000400, "type": "status", "char": "mage", "name": "Claude Arcanist", "level": 16, "health": {"cur": 118, "max": 118}, "stamina": {"cur": 150, "max": 150}, "mana": {"cur": 210, "max": 210}, "xp": {"total": 548120, "toNext": 23642, "levelStart": 452925}, "location": "Holtburg, 42.1N 33.6E", "goal": "Hunt drudges north of Holtburg with Bulwark; reach level 17"}
+{"v": 1, "t": 1792000000800, "type": "status", "char": "soldier", "name": "Claude Bulwark", "level": 15, "health": {"cur": 171, "max": 171}, "stamina": {"cur": 190, "max": 190}, "mana": {"cur": 70, "max": 70}, "xp": {"total": 430100, "toNext": 22825, "levelStart": 354692}, "location": "Holtburg, 42.1N 33.6E", "goal": "Hold the line for Arcanist; clear the drudge camp north of Holtburg"}
+{"v": 1, "t": 1792000002000, "type": "segment-start", "title": "Drudge hunt north of Holtburg", "detail": "Fellowship of two"}
+{"v": 1, "t": 1792000003500, "type": "narration", "char": "soldier", "text": "Taking point up the north road. Shield first, then Arcanist."}
+{"v": 1, "t": 1792000004500, "type": "tool", "char": "soldier", "tool": "ac_walk_to", "summary": "43.9N, 33.1E (310 m)"}
+{"v": 1, "t": 1792000006500, "type": "narration", "char": "mage", "text": "Following at twelve paces. Mana is full; Flame Bolt II readied."}
+{"v": 1, "t": 1792000007300, "type": "tool", "char": "mage", "tool": "ac_follow", "summary": "Claude Bulwark"}
+{"v": 1, "t": 1792000009800, "type": "chat", "char": "soldier", "channel": "fellowship", "text": "[Fellowship] You say, \"Camp ahead. Three drudges, maybe four.\""}
+{"v": 1, "t": 1792000009900, "type": "chat", "char": "mage", "channel": "fellowship", "text": "[Fellowship] Claude Bulwark says, \"Camp ahead. Three drudges, maybe four.\""}
+{"v": 1, "t": 1792000010900, "type": "status", "char": "mage", "name": "Claude Arcanist", "level": 16, "health": {"cur": 118, "max": 118}, "stamina": {"cur": 141, "max": 150}, "mana": {"cur": 210, "max": 210}, "xp": {"total": 548120, "toNext": 23642, "levelStart": 452925}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Hunt drudges north of Holtburg with Bulwark; reach level 17"}
+{"v": 1, "t": 1792000011100, "type": "status", "char": "soldier", "name": "Claude Bulwark", "level": 15, "health": {"cur": 171, "max": 171}, "stamina": {"cur": 176, "max": 190}, "mana": {"cur": 70, "max": 70}, "xp": {"total": 430100, "toNext": 22825, "levelStart": 354692}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Hold the line for Arcanist; clear the drudge camp north of Holtburg"}
+{"v": 1, "t": 1792000012600, "type": "chat", "char": "mage", "channel": "fellowship", "text": "[Fellowship] You say, \"Then let us make it three. I shall take the one on the left.\""}
+{"v": 1, "t": 1792000012700, "type": "chat", "char": "soldier", "channel": "fellowship", "text": "[Fellowship] Claude Arcanist says, \"Then let us make it three. I shall take the one on the left.\""}
+{"v": 1, "t": 1792000014200, "type": "chat", "char": "soldier", "channel": "fellowship", "text": "[Fellowship] You say, \"Target: Drudge Servant #800058e3. Behind me.\""}
+{"v": 1, "t": 1792000014300, "type": "chat", "char": "mage", "channel": "fellowship", "text": "[Fellowship] Claude Bulwark says, \"Target: Drudge Servant #800058e3. Behind me.\""}
+{"v": 1, "t": 1792000014900, "type": "tool", "char": "soldier", "tool": "ac_attack", "summary": "Drudge Servant (8.2 m) - melee, high"}
+{"v": 1, "t": 1792000015900, "type": "narration", "char": "soldier", "text": "Pulling the Servant onto me so the mage has a clear lane."}
+{"v": 1, "t": 1792000017100, "type": "chat", "char": "soldier", "channel": "combat", "text": "You hit Drudge Servant for 14 points of slashing damage!"}
+{"v": 1, "t": 1792000017900, "type": "tool", "char": "mage", "tool": "ac_cast", "summary": "Flame Bolt II at Drudge Servant (repeat)"}
+{"v": 1, "t": 1792000018300, "type": "chat", "char": "mage", "channel": "magic", "text": "You cast Flame Bolt II on Drudge Servant"}
+{"v": 1, "t": 1792000019900, "type": "chat", "char": "mage", "channel": "combat", "text": "You bring Drudge Servant to a fiery end!"}
+{"v": 1, "t": 1792000020200, "type": "chat", "char": "mage", "channel": "system", "text": "You've earned 1,540 experience."}
+{"v": 1, "t": 1792000020700, "type": "status", "char": "mage", "name": "Claude Arcanist", "level": 16, "health": {"cur": 118, "max": 118}, "stamina": {"cur": 139, "max": 150}, "mana": {"cur": 171, "max": 210}, "xp": {"total": 549660, "toNext": 22102, "levelStart": 452925}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Hunt drudges north of Holtburg with Bulwark; reach level 17"}
+{"v": 1, "t": 1792000021000, "type": "status", "char": "soldier", "name": "Claude Bulwark", "level": 15, "health": {"cur": 149, "max": 171}, "stamina": {"cur": 162, "max": 190}, "mana": {"cur": 70, "max": 70}, "xp": {"total": 431640, "toNext": 21285, "levelStart": 354692}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Hold the line for Arcanist; clear the drudge camp north of Holtburg"}
+{"v": 1, "t": 1792000022500, "type": "narration", "char": "mage", "text": "One down. Two Skulkers flanking from the ridge; switching to the nearer."}
+{"v": 1, "t": 1792000023500, "type": "chat", "char": "mage", "channel": "tell-out", "text": "You tell Claude Bulwark, \"Skulker on your shield side. Mind it.\""}
+{"v": 1, "t": 1792000023600, "type": "chat", "char": "soldier", "channel": "tell-in", "text": "Claude Arcanist tells you, \"Skulker on your shield side. Mind it.\""}
+{"v": 1, "t": 1792000025000, "type": "chat", "char": "soldier", "channel": "tell-out", "text": "You tell Claude Arcanist, \"Seen. Keep your bolts off my back.\""}
+{"v": 1, "t": 1792000025100, "type": "chat", "char": "mage", "channel": "tell-in", "text": "Claude Bulwark tells you, \"Seen. Keep your bolts off my back.\""}
+{"v": 1, "t": 1792000026600, "type": "chat", "char": "mage", "channel": "general", "text": "[General] Eyrlwen says, \"anyone selling tapers in Holtburg?\""}
+{"v": 1, "t": 1792000026700, "type": "chat", "char": "soldier", "channel": "general", "text": "[General] Eyrlwen says, \"anyone selling tapers in Holtburg?\""}
+{"v": 1, "t": 1792000027900, "type": "tool", "char": "mage", "tool": "ac_cast", "summary": "Flame Bolt II at Drudge Skulker (repeat)"}
+{"v": 1, "t": 1792000029900, "type": "chat", "char": "mage", "channel": "combat", "text": "Drudge Skulker hits you for 31 points of piercing damage!"}
+{"v": 1, "t": 1792000030200, "type": "status", "char": "mage", "name": "Claude Arcanist", "level": 16, "health": {"cur": 61, "max": 118}, "stamina": {"cur": 132, "max": 150}, "mana": {"cur": 118, "max": 210}, "xp": {"total": 552300, "toNext": 19462, "levelStart": 452925}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Hunt drudges north of Holtburg with Bulwark; reach level 17"}
+{"v": 1, "t": 1792000031000, "type": "narration", "char": "mage", "text": "Bleeding badly. Backing toward Bulwark and casting Heal Self."}
+{"v": 1, "t": 1792000032000, "type": "chat", "char": "mage", "channel": "fellowship", "text": "[Fellowship] You say, \"I need a moment. Healing.\""}
+{"v": 1, "t": 1792000032100, "type": "chat", "char": "soldier", "channel": "fellowship", "text": "[Fellowship] Claude Arcanist says, \"I need a moment. Healing.\""}
+{"v": 1, "t": 1792000033600, "type": "chat", "char": "mage", "channel": "system", "text": "You are now level 17!"}
+{"v": 1, "t": 1792000033650, "type": "level-up", "char": "mage", "level": 17}
+{"v": 1, "t": 1792000033750, "type": "chat", "char": "soldier", "channel": "system", "text": "Claude Arcanist is now level 17!"}
+{"v": 1, "t": 1792000034150, "type": "status", "char": "mage", "name": "Claude Arcanist", "level": 17, "health": {"cur": 24, "max": 126}, "stamina": {"cur": 120, "max": 156}, "mana": {"cur": 88, "max": 224}, "xp": {"total": 573110, "toNext": 141176, "levelStart": 571762}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Hunt drudges north of Holtburg with Bulwark; reach level 17"}
+{"v": 1, "t": 1792000035550, "type": "chat", "char": "soldier", "channel": "fellowship", "text": "[Fellowship] You say, \"Grats. Now get behind me.\""}
+{"v": 1, "t": 1792000035650, "type": "chat", "char": "mage", "channel": "fellowship", "text": "[Fellowship] Claude Bulwark says, \"Grats. Now get behind me.\""}
+{"v": 1, "t": 1792000037150, "type": "chat", "char": "mage", "channel": "system", "text": "Your death is preceded by a sharp, stabbing pain, courtesy of Drudge Skulker!"}
+{"v": 1, "t": 1792000037200, "type": "death", "char": "mage", "killer": "Drudge Skulker", "text": "Your death is preceded by a sharp, stabbing pain, courtesy of Drudge Skulker!"}
+{"v": 1, "t": 1792000037300, "type": "chat", "char": "soldier", "channel": "system", "text": "Claude Arcanist's death is preceded by a sharp, stabbing pain, courtesy of Drudge Skulker!"}
+{"v": 1, "t": 1792000037600, "type": "status", "char": "mage", "name": "Claude Arcanist", "level": 17, "health": {"cur": 0, "max": 126}, "stamina": {"cur": 120, "max": 156}, "mana": {"cur": 88, "max": 224}, "xp": {"total": 573110, "toNext": 141176, "levelStart": 571762}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Hunt drudges north of Holtburg with Bulwark; reach level 17", "dead": true}
+{"v": 1, "t": 1792000039100, "type": "narration", "char": "soldier", "text": "Arcanist is down. Holding the Skulker here so the corpse stays safe."}
+{"v": 1, "t": 1792000040100, "type": "tool", "char": "soldier", "tool": "ac_attack", "summary": "Drudge Skulker (2.1 m) - melee, medium"}
+{"v": 1, "t": 1792000042100, "type": "narration", "char": "mage", "text": "Back at the Holtburg lifestone. Vitae stings; recalling to the camp."}
+{"v": 1, "t": 1792000042400, "type": "status", "char": "mage", "name": "Claude Arcanist", "level": 17, "health": {"cur": 113, "max": 126}, "stamina": {"cur": 140, "max": 156}, "mana": {"cur": 201, "max": 224}, "xp": {"total": 573110, "toNext": 141176, "levelStart": 571762}, "location": "Holtburg lifestone, 42.0N 33.5E", "goal": "Recover my corpse north of Holtburg"}
+{"v": 1, "t": 1792000043900, "type": "chat", "char": "soldier", "channel": "combat", "text": "You run Drudge Skulker through!"}
+{"v": 1, "t": 1792000044400, "type": "status", "char": "soldier", "name": "Claude Bulwark", "level": 15, "health": {"cur": 98, "max": 171}, "stamina": {"cur": 120, "max": 190}, "mana": {"cur": 70, "max": 70}, "xp": {"total": 436900, "toNext": 16025, "levelStart": 354692}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Hold the line for Arcanist; clear the drudge camp north of Holtburg"}
+{"v": 1, "t": 1792000045400, "type": "chat", "char": "soldier", "channel": "say", "text": "You say, \"Rest easy, Skulker.\""}
+{"v": 1, "t": 1792000046900, "type": "tool", "char": "mage", "tool": "ac_walk_to", "summary": "Corpse of Claude Arcanist (305 m)", "ok": true}
+{"v": 1, "t": 1792000048900, "type": "narration", "char": "soldier", "text": "Camp is clear. Looting while I wait for Arcanist to catch up."}
+{"v": 1, "t": 1792000049900, "type": "tool", "char": "soldier", "tool": "ac_loot", "summary": "Corpse of Drudge Servant: 2 items", "ok": true}
+{"v": 1, "t": 1792000050900, "type": "tool", "char": "soldier", "tool": "ac_use", "summary": "Corpse of Drudge Skulker: refused (too far)", "ok": false}
+{"v": 1, "t": 1792000051900, "type": "status", "char": "soldier", "name": "Claude Bulwark", "level": 15, "health": {"cur": 120, "max": 171}, "stamina": {"cur": 150, "max": 190}, "mana": {"cur": 70, "max": 70}, "xp": {"total": 436900, "toNext": 16025, "levelStart": 354692}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Hold the line for Arcanist; clear the drudge camp north of Holtburg"}
+{"v": 1, "t": 1792000052400, "type": "status", "char": "mage", "name": "Claude Arcanist", "level": 17, "health": {"cur": 126, "max": 126}, "stamina": {"cur": 130, "max": 156}, "mana": {"cur": 224, "max": 224}, "xp": {"total": 573110, "toNext": 141176, "levelStart": 571762}, "location": "North of Holtburg, 43.9N 33.1E", "goal": "Recover my corpse, then rejoin Bulwark"}
+{"v": 1, "t": 1792000053900, "type": "chat", "char": "mage", "channel": "fellowship", "text": "[Fellowship] You say, \"Returned, and slightly humbled. Shall we continue?\""}
+{"v": 1, "t": 1792000054000, "type": "chat", "char": "soldier", "channel": "fellowship", "text": "[Fellowship] Claude Arcanist says, \"Returned, and slightly humbled. Shall we continue?\""}
+{"v": 1, "t": 1792000055500, "type": "segment-end", "title": "Drudge hunt north of Holtburg"}

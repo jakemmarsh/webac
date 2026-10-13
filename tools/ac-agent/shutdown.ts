@@ -76,3 +76,19 @@ export function createShutdown(deps: ShutdownDeps): (why: string) => Promise<voi
     await finish(0);
   };
 }
+
+/** Most a shutdown waits for agent calls still running before it logs the character out, ms. */
+export const CALLS_SETTLE_MS = 10_000;
+
+/**
+ * Wait (at most `maxMs`) until no agent call is running. A player's last action (a goodbye in /f, a note) still on its
+ * way when the stop arrived would otherwise run against a character already back at character select ("sent" from
+ * that screen, Bulwark 2026-10-13). True when the calls finished, false when it gave up.
+ */
+export async function waitForCalls(running: () => number, maxMs = CALLS_SETTLE_MS, sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)), stepMs = 200): Promise<boolean> {
+  for (let waited = 0; running() > 0; waited += stepMs) {
+    if (waited >= maxMs) return false;
+    await sleep(stepMs);
+  }
+  return true;
+}

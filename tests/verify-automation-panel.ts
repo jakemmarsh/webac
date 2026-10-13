@@ -288,6 +288,18 @@ describe('the routine editor (mock board 2)', () => {
     expect(p.routes[0]).toEqual({ name: 'Route 1', mode: 'circular', points: ['42.1N, 33.6E'] });
   });
 
+  it('"Add where I stand" keeps your height (VTank\'s Z, metres / 240): the storey of a point recorded in a dungeon (2026-10-13)', async () => {
+    const t = await editor(docWith());
+    pickFrom(t.body.querySelector('[data-automation="editor-profile"]'), 'new');
+    click(t.body, '[data-automation-editor-tab="routes"]');
+    click(t.body, '[data-automation="add-route"]');
+    click(t.body, '[data-automation="add-point"]');
+    // A point with no height known, then one 30 m down in a dungeon: heights stay one per point.
+    t.source.height = () => -30;
+    click(t.body, '[data-automation="add-point"]');
+    expect(t.ed.doc.profiles[0].routes[0]).toEqual({ name: 'Route 1', mode: 'circular', points: ['42.1N, 33.6E', '42.1N, 33.6E'], z: [null, -0.125] });
+  });
+
   it('Combat: the macro and its settings (fight range, loot, route, buff set)', async () => {
     const t = await editor(undefined, 'combat');
     const p = t.ed.doc.profiles[0];

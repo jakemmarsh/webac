@@ -84,7 +84,10 @@ export interface AutomationSource {
   history(): string[];
   report(text: string): void;
   character(): string | null;
+  /** Where you stand as map coordinates, indoors and in dungeons too (a dungeon's own frame, as VirindiTank records). */
   coords(): string | null;
+  /** Your feet's height (global metres): a recorded point's storey (VTank's Z). Absent / null: not known. */
+  height?(): number | null;
   /** What you carry (for loot rules' Try it). */
   items(): Array<{ name: string; type?: string; value?: number; burden?: number }>;
   /** Spells you know (for buff sets). */
@@ -1182,8 +1185,12 @@ export class RoutineEditor {
       right.appendChild(tag(kit.button('Add where I stand', () => {
         const here = this.source.coords();
         if (!here) { this.note = 'Your position is not known yet.'; touch(); return; }
+        // Heights stay one per point: a point recorded here keeps yours (VTank's Z, map units: metres / 240), the
+        // storey a walk to it takes in a dungeon.
+        const h = this.source.height?.() ?? null;
+        if (h !== null && !r.z) r.z = r.points.map(() => null);
         r.points.push(here);
-        r.z?.push(null); // heights stay one per point (a point recorded here has none)
+        r.z?.push(h === null ? null : h / 240);
         touch();
       }), { automation: 'add-point' }));
     }

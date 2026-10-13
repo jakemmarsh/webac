@@ -16,7 +16,7 @@ export type Control = 'claude' | 'player';
 
 /** Agent-surface methods that only read: answered even while the player has control. */
 export const READ_METHODS = new Set([
-  'version', 'observe', 'self', 'events', 'waitFor', 'inventory', 'spells', 'characterSheet', 'allegiance', 'map', 'probe', 'where',
+  'version', 'observe', 'self', 'vitals', 'events', 'waitFor', 'inventory', 'spells', 'characterSheet', 'allegiance', 'map', 'probe', 'where',
   'itemPalettes', 'keys', 'vendor', 'trace', 'status', 'goal', 'routineStats', 'routineStatus', 'routineDryRun', 'routinesLoad',
   // Not game actions: the screenshot, the journal and the routine store.
   'screenshot', 'journalLoad', 'journalSave', 'routinesSave',

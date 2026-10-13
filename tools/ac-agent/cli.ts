@@ -17,6 +17,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './state.ts';
 import { TOOLS, TOOL_BY_NAME, type AgentTool, type ToolOutput } from './tools.ts';
+import { requireClient } from './client.ts';
 
 export function parseCliArgs(tool: AgentTool, rest: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -50,18 +51,38 @@ export function cliOutput(out: ToolOutput, save: (jpegBase64: string) => string)
   return out.text && out.text !== 'screenshot' ? `${path}\n${out.text}` : path;
 }
 
-function help(): string {
-  return TOOLS.map((t) => {
+/**
+ * `vitals [profile=…]`: the character at a glance as JSON (tools/stream's status line), for scripts and overlays, not
+ * a player tool: it reads the daemon's /vitals, which never takes the agent's chat and never counts as activity.
+ */
+export const VITALS_HELP = `${'vitals'.padEnd(14)} [profile=…]\n${' '.repeat(15)}For scripts and stream overlays: the character's vitals, level, XP, location, task and goal as JSON, read without touching the player's chat or idle timer.`;
+
+/**
+ * Every tool's arguments and description, or only the named ones (`help observe wait`; `profile=…` and the `ac_`
+ * prefix are ignored). The full list is ~14 KB: a stream player reads one tool's entry instead of keeping all of it
+ * in its context for the rest of the segment.
+ */
+export function help(only: string[] = []): string {
+  const want = only.filter((w) => !w.includes('=')).map((w) => w.replace(/^ac_/, '').toLowerCase());
+  const tools = want.length ? TOOLS.filter((t) => want.includes(t.name.replace(/^ac_/, ''))) : TOOLS;
+  const unknown = want.filter((w) => w !== 'vitals' && !tools.some((t) => t.name === `ac_${w}`));
+  if (want.length && unknown.length) return `unknown tool${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')} (have: ${TOOLS.map((t) => t.name.replace(/^ac_/, '')).join(', ')}, vitals)`;
+  return [...tools.map((t) => {
     const args = Object.entries(t.props).filter(([k]) => k !== 'profile')
       .map(([k]) => ((t.required ?? []).includes(k) ? `${k}=…` : `[${k}=…]`)).join(' ');
     return `${t.name.replace(/^ac_/, '').padEnd(14)} ${args}\n${' '.repeat(15)}${t.description}`;
-  }).join('\n');
+  }), ...(!want.length || want.includes('vitals') ? [VITALS_HELP] : [])].join('\n');
 }
 
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd || cmd === 'help' || cmd === '--help') {
-    console.log(help());
+    console.log(help(rest));
+    return;
+  }
+  if (cmd === 'vitals') {
+    const profile = rest.find((t) => t.startsWith('profile='))?.slice(8);
+    console.log(JSON.stringify(await requireClient(profile).vitals()));
     return;
   }
   const tool = TOOL_BY_NAME.get(`ac_${cmd}`) ?? TOOL_BY_NAME.get(cmd);

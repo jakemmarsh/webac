@@ -29,8 +29,9 @@ import { chromium, type Browser, type Page } from 'playwright';
 import { AT_CHAR_SELECT_JS, REMOTE_CHROMIUM, REPO, createCharacterIfNeeded, waitForWorld } from '../lib/game-session.ts';
 import { STATE_DIR, accountForProfile, clearInfo, listInfos, logFile, pickStaleSnapshots, readInfo, writeInfo } from './state.ts';
 import { type AgentEra, agentEra, eraAccount } from './eras.ts';
-import { createShutdown } from './shutdown.ts';
+import { CALLS_SETTLE_MS, SHUTDOWN_DEADLINE_MS, createShutdown, killTree, waitForCalls } from './shutdown.ts';
 import { withCallDeadline } from './callDeadline.ts';
+import { withStateLock } from './stateLock.ts';
 
 /** `p`, or a rejection after `ms`. */
 const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timed out after ${ms} ms`)), ms))]);
@@ -51,6 +52,11 @@ interface Args {
   port: number;
   /** A Chrome DevTools endpoint (http://127.0.0.1:9222): drive the game tab a human logged in there. */
   attach: string | null;
+  /**
+   * Attached, the character whose tab to drive (`--attach-character`): with several game tabs in one browser (a
+   * stream's two characters, each logged in by the human) only the tab in the world as this character is picked.
+   */
+  attachCharacter: string | null;
   /** Log out after this long with no agent call, nothing Claude started still acting, and no input from a human in the
    *  window (0 = never). Never applies to an attached tab, which is the human's own login. */
   idleLogoutMs: number;
@@ -82,6 +88,7 @@ export function parseArgs(argv: string[]): Args {
     bridge: get('bridge') ?? null,
     port: Number(get('port') ?? 0),
     attach: get('attach') ?? null,
+    attachCharacter: get('attach-character') ?? null,
     idleLogoutMs: Math.max(0, Number(get('idle-logout-min') ?? process.env.AC_IDLE_LOGOUT_MIN ?? IDLE_LOGOUT_MIN)) * 60_000,
   };
 }
@@ -130,8 +137,18 @@ export function parseSkillChoices(text: string): Record<string, string> {
 import { defaultCharacterName } from './state.ts';
 export { defaultCharacterName };
 
-/** The game tab to drive in an attached browser: the one with the agent API on, else any game page. */
-export function pickGameTab<T extends { url(): string }>(pages: T[], hasApi: boolean[]): T | null {
+/**
+ * The game tab to drive in an attached browser: the one with the agent API on, else any game page. With `want` (a
+ * character name) only the tab in the world as that character (`names[i]`, the API's self().name, null before
+ * entering) is taken, so two daemons attached to one Chrome drive two tabs, never the same one; until the human has
+ * entered with that character there is none.
+ */
+export function pickGameTab<T extends { url(): string }>(pages: T[], hasApi: boolean[], names: Array<string | null> = [], want: string | null = null): T | null {
+  if (want) {
+    const w = want.trim().toLowerCase();
+    const i = names.findIndex((n, k) => hasApi[k] && !!n && n.trim().toLowerCase() === w);
+    return i > -1 ? pages[i] : null;
+  }
   const i = hasApi.findIndex(Boolean);
   if (i > -1) return pages[i];
   return pages.find((p) => /playwebac\.com|[?&](ace|agent)(=|&|$)/.test(p.url())) ?? null;
@@ -203,6 +220,11 @@ function ensureSnapshot(say: (s: string) => void): string {
       const r = spawnSync('git', a, { encoding: 'utf8' });
       if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
     };
+    // A tree a crashed start left half made (no package.json): remove it, or `worktree add` refuses the path.
+    if (existsSync(dir)) {
+      if (spawnSync('git', ['-C', REPO, 'worktree', 'remove', '--force', dir]).status !== 0) rmSync(dir, { recursive: true, force: true });
+      spawnSync('git', ['-C', REPO, 'worktree', 'prune']);
+    }
     git('-C', REPO, 'worktree', 'add', '--no-checkout', '--detach', dir, sha);
     // CI's sparse pattern: no verification images (~50 MB instead of ~3.6 GB).
     git('-C', dir, 'sparse-checkout', 'set', '--no-cone', '/*', '!/verification/**/*.png', '!/verification/**/*.jpg', '!/verification/**/*.jpeg', '!/verification/**/*.html', '!/verification/**/*.webm', '!/verification/**/*.gif');
@@ -277,44 +299,71 @@ async function main(): Promise<void> {
     if (process.stdout.isTTY) console.log(line);
   };
 
-  // ── Bridge: our own child on a free port unless one was named ──
-  let bridgeChild: ChildProcess | null = null;
+  // ── Bridge, snapshot and Vite: under the state dir's start lock (tools/ac-agent/stateLock.ts) ──
+  // Two daemons started together (a stream's pair) otherwise race: both `git worktree add` the same tree, and both
+  // take the same "free" port, so one page runs on the other's bridge and drops when that daemon stops (2026-10-13).
+  // (Typed with `as`: the start below assigns them inside a closure, which TypeScript's narrowing doesn't see.)
+  let bridgeChild = null as ChildProcess | null;
   let bridge = args.bridge;
-  if (!bridge && !args.attach) {
-    const port = await freePort(9127);
-    // Pinned to this era's local server; BRIDGE_ERA selects AC1999's session protocol (and labels the others).
-    bridgeChild = spawn('npx', ['tsx', 'services/ws-tcp-bridge/src/bridge.ts', String(port), '127.0.0.1', String(args.era.ports[0]), String(args.era.ports[1])], {
-      cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
-      env: { ...process.env, ...(args.era.bridgeEra ? { BRIDGE_ERA: args.era.bridgeEra } : {}) },
-    });
-    bridgeChild.stdout?.on('data', (d) => appendFileSync(log, `[bridge] ${d}`));
-    bridgeChild.stderr?.on('data', (d) => appendFileSync(log, `[bridge] ${d}`));
-    for (let i = 0; i < 60 && (await portFree(port)); i++) await new Promise((r) => setTimeout(r, 500));
-    bridge = `ws://localhost:${port}`;
-    say(`bridge started on ${bridge} (pid ${bridgeChild.pid})`);
-  }
-
-  // ── Game page: a named origin, or our own Vite on a snapshot of HEAD ──
-  let viteChild: ChildProcess | null = null;
+  let viteChild = null as ChildProcess | null;
   let base = args.base;
-  let snapshot: string | null = null;
-  if (!base && !args.attach) {
-    const dir = ensureSnapshot(say);
-    snapshot = dir;
-    const port = await freePort(3127);
-    // HMR off: a page whose Vite went away (its daemon stopped) would otherwise poll and reload into
-    // whatever Vite comes back on that port, dropping the player mid-session (acjs-ea, 1999 run).
-    const cfg = join(dir, 'vite.agent.config.mjs');
-    writeFileSync(cfg, "import base from './vite.config.ts';\nexport default async (env) => { const c = typeof base === 'function' ? await base(env) : base; return { ...c, server: { ...(c.server ?? {}), hmr: false } }; };\n");
-    viteChild = spawn('npx', ['vite', '--config', cfg, '--port', String(port), '--strictPort'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
-    viteChild.stdout?.on('data', (d) => appendFileSync(log, `[vite] ${d}`));
-    viteChild.stderr?.on('data', (d) => appendFileSync(log, `[vite] ${d}`));
-    base = `http://localhost:${port}/`;
-    for (let i = 0; i < 120; i++) {
-      if (await fetch(base, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok).catch(() => false)) break;
-      await new Promise((r) => setTimeout(r, 500));
+  let snapshot = null as string | null;
+  const needStart = (!bridge || !base) && !args.attach;
+  const startLocked = async (): Promise<void> => {
+    if (!bridge && !args.attach) {
+      // Our own child on a free port unless one was named. A port someone else bound meanwhile kills the child
+      // (EADDRINUSE): then the next port, never a "bridge started" on a port that is another process's bridge.
+      for (let from = 9127, tries = 0; ; tries++) {
+        const port = await freePort(from);
+        // Pinned to this era's local server; BRIDGE_ERA selects AC1999's session protocol (and labels the others).
+        const child = spawn('npx', ['tsx', 'services/ws-tcp-bridge/src/bridge.ts', String(port), '127.0.0.1', String(args.era.ports[0]), String(args.era.ports[1])], {
+          cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+          env: { ...process.env, ...(args.era.bridgeEra ? { BRIDGE_ERA: args.era.bridgeEra } : {}) },
+        });
+        child.stdout?.on('data', (d) => appendFileSync(log, `[bridge] ${d}`));
+        child.stderr?.on('data', (d) => appendFileSync(log, `[bridge] ${d}`));
+        for (let i = 0; i < 60 && child.exitCode === null && (await portFree(port)); i++) await new Promise((r) => setTimeout(r, 500));
+        if (child.exitCode === null && child.signalCode === null) {
+          bridgeChild = child;
+          bridge = `ws://localhost:${port}`;
+          say(`bridge started on ${bridge} (pid ${child.pid})`);
+          break;
+        }
+        say(`bridge on ${port} exited (code ${child.exitCode}): trying the next port`);
+        if (tries >= 4) throw new Error('the bridge would not start (see the [bridge] lines in this log)');
+        from = port + 1;
+      }
     }
-    say(`game snapshot served on ${base} (pid ${viteChild.pid})`);
+
+    // ── Game page: a named origin, or our own Vite on a snapshot of HEAD ──
+    if (!base && !args.attach) {
+      const dir = ensureSnapshot(say);
+      snapshot = dir;
+      const port = await freePort(3127);
+      // HMR off: a page whose Vite went away (its daemon stopped) would otherwise poll and reload into
+      // whatever Vite comes back on that port, dropping the player mid-session (acjs-ea, 1999 run).
+      const cfg = join(dir, 'vite.agent.config.mjs');
+      writeFileSync(cfg, "import base from './vite.config.ts';\nexport default async (env) => { const c = typeof base === 'function' ? await base(env) : base; return { ...c, server: { ...(c.server ?? {}), hmr: false } }; };\n");
+      viteChild = spawn('npx', ['vite', '--config', cfg, '--port', String(port), '--strictPort'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      viteChild.stdout?.on('data', (d) => appendFileSync(log, `[vite] ${d}`));
+      viteChild.stderr?.on('data', (d) => appendFileSync(log, `[vite] ${d}`));
+      base = `http://localhost:${port}/`;
+      for (let i = 0; i < 120; i++) {
+        if (await fetch(base, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok).catch(() => false)) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      if (viteChild.exitCode !== null) throw new Error(`Vite exited (code ${viteChild.exitCode}) on port ${port}; see the [vite] lines in this log`);
+      say(`game snapshot served on ${base} (pid ${viteChild.pid})`);
+    }
+  };
+  if (needStart) {
+    try {
+      await withStateLock('daemon-start', startLocked, { onWait: (o) => say(`waiting for another daemon's start${o ? ` (pid ${o.pid})` : ''}`) });
+    } catch (e) {
+      // A half start (the bridge up, Vite not): end what we started before the error ends us.
+      for (const c of [bridgeChild, viteChild]) if (c) await killTree(c, 2000, (pid, sig) => process.kill(pid, sig)).catch(() => {});
+      throw e;
+    }
   }
   // A base may carry its own query (e.g. ?datSet=<production set> to play on the streamed DATs).
   let url = args.attach ?? `${base}${base!.includes('?') ? '&' : '?'}ace&agent&bridge=${bridge}&account=${encodeURIComponent(args.account)}&password=${encodeURIComponent(args.account)}${args.era.id ? `&era=${args.era.id}` : ''}${process.env.AC_EXTRA_QUERY ? `&${process.env.AC_EXTRA_QUERY}` : ''}`;
@@ -328,9 +377,12 @@ async function main(): Promise<void> {
     for (let i = 0; i < 600 && !found; i++) {
       const pages = browser.contexts().flatMap((c) => c.pages());
       const hasApi = await Promise.all(pages.map((p) => p.evaluate('!!window.__acAgent').catch(() => false) as Promise<boolean>));
-      found = pickGameTab(pages, hasApi);
+      const names = args.attachCharacter
+        ? await Promise.all(pages.map((p) => p.evaluate('(() => { const a = window.__acAgent; const me = a && a.self && a.self(); return me ? me.name : null; })()').catch(() => null) as Promise<string | null>))
+        : [];
+      found = pickGameTab(pages, hasApi, names, args.attachCharacter);
       if (!found) {
-        if (i === 0) say(`no game tab in ${args.attach} yet: open https://playwebac.com/?agent there`);
+        if (i === 0) say(args.attachCharacter ? `no game tab in ${args.attach} is in the world as "${args.attachCharacter}" yet: log in and enter with that character in a tab at https://playwebac.com/?agent` : `no game tab in ${args.attach} yet: open https://playwebac.com/?agent there`);
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
@@ -384,6 +436,12 @@ async function main(): Promise<void> {
     for (;;) {
       const st = await page.evaluate('(() => { const a = window.__acAgent; if (!a) return { api: false }; const me = a.self && a.self(); return { api: true, name: me ? me.name : null }; })()')
         .catch(() => ({ api: false })) as { api: boolean; name?: string | null };
+      // Attached for one named character (a stream's two tabs): another character entered in this tab is not ours.
+      if (st.name && args.attachCharacter && st.name.toLowerCase() !== args.attachCharacter.toLowerCase()) {
+        if (!warned) { say(`this tab is in the world as "${st.name}", not "${args.attachCharacter}": waiting for ${args.attachCharacter}`); warned = true; }
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
       if (st.name) { character = st.name; break; }
       // The API loads with the world; before that only the address says whether it will.
       if (!st.api && !warned && !/[?&]agent(=|&|$)/.test(page.url())) { say(`the tab has no ?agent in its address, so the agent API won't load: reload it at ${page.url().split('?')[0]}?agent`); warned = true; }
@@ -463,6 +521,8 @@ async function main(): Promise<void> {
   // tools/ac-agent/shutdown.ts: a deadline, a second signal ends it at once, children killed as process groups.
   const shutdown = createShutdown({
     say,
+    // The orderly part may first let a running agent call finish (waitForCalls).
+    deadlineMs: SHUTDOWN_DEADLINE_MS + CALLS_SETTLE_MS,
     children: () => [bridgeChild, viteChild],
     exit: (code) => process.exit(code),
     steps: async () => {
@@ -473,6 +533,8 @@ async function main(): Promise<void> {
         return;
       }
       server.close();
+      // The player's last action (a goodbye, a note) finishes first; then the logout.
+      if (inFlight > 0 && !(await waitForCalls(() => inFlight))) say(`${inFlight} agent call(s) still running after ${CALLS_SETTLE_MS / 1000} s: logging out anyway`);
       // A real logout, waited out: ACE saves the character (position included) only when its logout
       // completes and the client is back at character select; closing the window first loses the session's progress.
       await withTimeout(page.evaluate('window.__acAgent && window.__acAgent.logout && window.__acAgent.logout()'), 5000).catch(() => {});
@@ -487,44 +549,58 @@ async function main(): Promise<void> {
   });
 
   let lastCallAt = Date.now();
+  /** Agent calls (/call) being answered now: a shutdown lets them finish before it logs out. */
+  let inFlight = 0;
   const server = createServer(async (req, res) => {
     try {
       if (req.method === 'GET' && req.url === '/status') {
-        return send(res, 200, { ready, attached: !!args.attach, profile: args.profile, account: args.attach ? 'own-login' : args.account, character, url });
+        return send(res, 200, { ready, attached: !!args.attach, profile: args.profile, account: args.attach ? 'own-login' : args.account, character, url, busy: inFlight });
+      }
+      // The character at a glance for a stream overlay (tools/stream/): read-only, and not an agent call, so polling it
+      // neither eats the agent's chat (observe would) nor holds off the idle logout.
+      if (req.method === 'GET' && req.url === '/vitals') {
+        if (!ready || entering) return send(res, 200, { ok: true, result: null });
+        const v = await withTimeout(page.evaluate('(() => { const a = window.__acAgent; return a && a.vitals ? a.vitals() : null; })()'), 5000).catch(() => null);
+        return send(res, 200, { ok: true, result: v });
       }
       if (req.method === 'POST' && req.url === '/call') {
         lastCallAt = Date.now();
-        const { method, args: callArgs = [], timeoutMs = 120_000 } = await body(req);
-        const run = async (): Promise<unknown> => {
-          if (entering && args.attach) {
-            // The human is still logging in: say so soon instead of holding the call for minutes.
-            await Promise.race([entering, new Promise((r) => setTimeout(r, Math.min(timeoutMs, 15_000)))]);
-            if (!ready) throw new Error('nobody is in the world in that tab yet: the human logs in and enters with their character there; try again in a minute');
-          }
-          if (entering) await entering;
-          // tools/ac-agent/callDeadline.ts: answered within the HTTP client's patience; a long walk goes on.
-          return withCallDeadline(
-            page.evaluate(([m, a]) => {
-              const api = (window as any).__acAgent;
-              if (!api) throw new Error('agent API not loaded (page still entering the world?)');
-              if (typeof api[m as string] !== 'function') throw new Error(`unknown agent method: ${m}`);
-              return api[m as string](...(a as unknown[]));
-            }, [method, callArgs] as const),
-            method, timeoutMs,
-          );
-        };
-        let result: unknown;
+        inFlight++;
         try {
-          result = await run();
-        } catch (e) {
-          // A reload under the call: wait for the re-entry (the load handler starts it) and run it once more.
-          if (!/Execution context was destroyed|agent API not loaded|navigat/i.test(String((e as Error)?.message ?? e))) throw e;
-          for (let i = 0; i < 20 && !entering && !ready; i++) await new Promise((r) => setTimeout(r, 500));
-          result = await run();
+          const { method, args: callArgs = [], timeoutMs = 120_000 } = await body(req);
+          const run = async (): Promise<unknown> => {
+            if (entering && args.attach) {
+              // The human is still logging in: say so soon instead of holding the call for minutes.
+              await Promise.race([entering, new Promise((r) => setTimeout(r, Math.min(timeoutMs, 15_000)))]);
+              if (!ready) throw new Error('nobody is in the world in that tab yet: the human logs in and enters with their character there; try again in a minute');
+            }
+            if (entering) await entering;
+            // tools/ac-agent/callDeadline.ts: answered within the HTTP client's patience; a long walk goes on.
+            return withCallDeadline(
+              page.evaluate(([m, a]) => {
+                const api = (window as any).__acAgent;
+                if (!api) throw new Error('agent API not loaded (page still entering the world?)');
+                if (typeof api[m as string] !== 'function') throw new Error(`unknown agent method: ${m}`);
+                return api[m as string](...(a as unknown[]));
+              }, [method, callArgs] as const),
+              method, timeoutMs,
+            );
+          };
+          let result: unknown;
+          try {
+            result = await run();
+          } catch (e) {
+            // A reload under the call: wait for the re-entry (the load handler starts it) and run it once more.
+            if (!/Execution context was destroyed|agent API not loaded|navigat/i.test(String((e as Error)?.message ?? e))) throw e;
+            for (let i = 0; i < 20 && !entering && !ready; i++) await new Promise((r) => setTimeout(r, 500));
+            result = await run();
+          }
+          const n = notice;
+          notice = null;
+          return send(res, 200, { ok: true, result, ...(n ? { notice: n } : {}) });
+        } finally {
+          inFlight--;
         }
-        const n = notice;
-        notice = null;
-        return send(res, 200, { ok: true, result, ...(n ? { notice: n } : {}) });
       }
       if (req.method === 'POST' && req.url === '/screenshot') {
         const buf = await page.screenshot({ type: 'jpeg', quality: 70 });
@@ -533,12 +609,23 @@ async function main(): Promise<void> {
       if (req.method === 'POST' && req.url === '/click') {
         lastCallAt = Date.now();
         // A mouse click on the game window at a screenshot position: the player's own input path.
-        const { x, y, button = 'left', modifiers = [] } = await body(req);
+        const { x, y, button = 'left', modifiers = [], toX, toY, text } = await body(req);
         if (!Number.isFinite(x) || !Number.isFinite(y)) return send(res, 200, { ok: false, error: 'x and y (screenshot pixels) are required' });
         // Held keys for the click (Ctrl+click on a VVS eye, Shift+click): pressed before, released after.
         const held = (Array.isArray(modifiers) ? modifiers : []).map((m: string) => ({ ctrl: 'Control', control: 'Control', shift: 'Shift', alt: 'Alt' } as Record<string, string>)[String(m).toLowerCase()]).filter((k): k is string => !!k);
         for (const k of held) await page.keyboard.down(k);
-        try { await page.mouse.click(Number(x), Number(y), { button: button === 'right' ? 'right' : 'left' }); } finally { for (const k of held.reverse()) await page.keyboard.up(k); }
+        const btn = button === 'right' ? 'right' : 'left';
+        try {
+          if (Number.isFinite(toX) && Number.isFinite(toY)) {
+            // A drag (moving a window or the VVS bar): press at (x, y), move in steps, release at (toX, toY).
+            await page.mouse.move(Number(x), Number(y));
+            await page.mouse.down({ button: btn });
+            await page.mouse.move(Number(toX), Number(toY), { steps: 10 });
+            await page.mouse.up({ button: btn });
+          } else await page.mouse.click(Number(x), Number(y), { button: btn });
+        } finally { for (const k of held.reverse()) await page.keyboard.up(k); }
+        // Then type into what the click focused (a text box), with the real keyboard: \n presses Enter.
+        if (typeof text === 'string' && text.length) for (const [i, part] of text.split('\n').entries()) { if (i > 0) await page.keyboard.press('Enter'); if (part) await page.keyboard.type(part, { delay: 15 }); }
         return send(res, 200, { ok: true });
       }
       if (req.method === 'POST' && req.url === '/shutdown') {

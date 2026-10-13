@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920, height=1080">
+<title>Arcanist &amp; Bulwark Overlay</title>
+<link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+<!--
+  1920x1080 OBS browser source. The two game windows are separate OBS captures placed over the
+  .game-region boxes (left: Arcanist, right: Bulwark by default); those boxes stay fully transparent.
+  ?layout     outlines the capture regions and labels their pixel rectangles.
+  ?left=<profile>&right=<profile>  swaps which character is drawn on which side.
+-->
+<div id="stage">
+  <header id="topbar">
+    <div class="brand">
+      <span class="brand-mark">&#x2726;</span>
+      <span class="brand-title">Arcanist <span class="amp">&amp;</span> Bulwark</span>
+      <span class="brand-sub">two Claudes in Dereth</span>
+    </div>
+    <div id="segment" class="segment"><span class="segment-title"></span><span class="segment-time"></span></div>
+    <div class="session">
+      <span id="feed-dot" class="feed-dot" title="feed"></span>
+      <span class="session-label">Session</span>
+      <span id="session-clock" class="session-clock">0:00</span>
+    </div>
+  </header>
+
+  <section class="game-region" data-slot="0"><div class="region-label"></div><div class="callouts"></div></section>
+  <section class="game-region" data-slot="1"><div class="region-label"></div><div class="callouts"></div></section>
+
+  <section class="card" data-slot="0"></section>
+  <section class="card" data-slot="1"></section>
+
+  <section id="chat" class="panel">
+    <h2 class="panel-title">Chat</h2>
+    <ol id="chat-lines" class="chat-lines"></ol>
+  </section>
+
+  <section id="narration" class="panel">
+    <h2 class="panel-title">Thinking aloud</h2>
+    <ol id="narration-lines" class="narration-lines"></ol>
+  </section>
+</div>
+<template id="card-template">
+  <div class="card-head">
+    <div class="who">
+      <div class="name"></div>
+      <div class="title"></div>
+    </div>
+    <div class="badges">
+      <div class="deaths" title="deaths this session"><span class="deaths-glyph">&#x2620;</span><span class="deaths-n">0</span></div>
+      <div class="level"><span class="level-label">Level</span><span class="level-n">&ndash;</span></div>
+    </div>
+  </div>
+  <div class="vitals">
+    <div class="vital health"><div class="vital-fill"></div><span class="vital-label">Health</span><span class="vital-n"></span></div>
+    <div class="vital stamina"><div class="vital-fill"></div><span class="vital-label">Stamina</span><span class="vital-n"></span></div>
+    <div class="vital mana"><div class="vital-fill"></div><span class="vital-label">Mana</span><span class="vital-n"></span></div>
+  </div>
+  <div class="xp">
+    <div class="xp-bar"><div class="xp-fill"></div></div>
+    <div class="xp-text"><span class="xp-next"></span><span class="xp-session"></span></div>
+  </div>
+  <div class="line location"><span class="glyph">&#x25C8;</span><span class="text"></span></div>
+  <div class="line goal"><span class="glyph">&#x27A4;</span><span class="text"></span></div>
+  <div class="line tool"><span class="text"></span></div>
+</template>
+<script type="module" src="app.ts"></script>
+</body>
+</html>

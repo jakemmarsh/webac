@@ -6,7 +6,7 @@
  * dropped. The fastest loop for the 1999 adapter (docs/ac1999-support-scope.md
  * Phase 3–4).
  *
- *   npx tsx tools/ac1999/probe-connection.ts ws://localhost:9101 <account> [--seconds 20] [--name Acjsprobe] [--resume]
+ *   npx tsx tools/ac1999/probe-connection.ts ws://localhost:9101 <account> [--seconds 20] [--name Acjsprobe] [--resume] [--iterations 102/67]
  *
  * --social: once in the world, exercise the social codecs (Misc1999.ts): create a
  * fellowship, ask for a fellowship update, query age and birth, list @friends,
@@ -40,7 +40,10 @@ const name = opt('--name') ?? `Acjs${account.slice(-4).replace(/[^a-z]/gi, 'x')}
 if (!url || !account) { console.error('usage: probe-connection.ts <bridge ws url> <account> [--seconds N] [--name Name]'); process.exit(2); }
 
 const conn = new Connection1999(url);
-conn.datIterations = { portal: 102, cell: 67, language: 0 };
+// --iterations P/C: the DAT iterations the login reports (default the retail CD's 102/67). A returning
+// browser reports the server's iterations from its stored patches instead.
+const [itPortal, itCell] = (opt('--iterations') ?? '102/67').split('/').map(Number);
+conn.datIterations = { portal: itPortal, cell: itCell, language: 0 };
 const seen = new Map<string, number>();
 const note = (k: string) => seen.set(k, (seen.get(k) ?? 0) + 1);
 let entered = false;

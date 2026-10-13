@@ -1,0 +1,218 @@
+/* Stream overlay, 1920x1080, transparent everywhere except the panels. */
+:root {
+  --ink: #efe6cf;
+  --ink-dim: #b9ad90;
+  --ink-faint: #8a8170;
+  --gold: #d8b46a;
+  --gold-deep: #9c7a3a;
+  --panel-top: rgba(14, 22, 40, 0.86);
+  --panel-bot: rgba(8, 12, 24, 0.90);
+  --edge: rgba(216, 180, 106, 0.55);
+  --slot0: #8ec5ff;      /* Arcanist: arcane blue */
+  --slot0-deep: #3a6db0;
+  --slot1: #f0b268;      /* Bulwark: bronze */
+  --slot1-deep: #a2652a;
+  --other: #d9d2c0;
+  --health: #c9423a;
+  --stamina: #d6a53a;
+  --mana: #3d7fd6;
+  --serif: "Palatino Linotype", "Book Antiqua", Palatino, "Iowan Old Style", Georgia, serif;
+  --sans: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+
+  /* Capture regions: OBS places the two game captures exactly here. */
+  --region-y: 76px;
+  --region-w: 924px;
+  --region-h: 520px;
+  --region0-x: 24px;
+  --region1-x: 972px;
+}
+
+html, body {
+  margin: 0;
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--serif);
+  -webkit-font-smoothing: antialiased;
+}
+
+#stage { position: relative; width: 1920px; height: 1080px; }
+
+.panel, #topbar, .card {
+  background: linear-gradient(180deg, var(--panel-top), var(--panel-bot));
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255, 230, 170, 0.08), 0 6px 18px rgba(0,0,0,0.45);
+}
+
+/* ---------- Top bar ---------- */
+#topbar {
+  position: absolute; left: 24px; top: 12px; width: 1872px; height: 52px; box-sizing: border-box;
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 20px;
+}
+.brand { display: flex; align-items: baseline; gap: 12px; white-space: nowrap; }
+.brand-mark { color: var(--gold); font-size: 22px; }
+.brand-title { font-size: 26px; letter-spacing: 0.06em; font-variant: small-caps; color: var(--ink); }
+.brand-title .amp { color: var(--gold); font-style: italic; }
+.brand-sub { font-size: 17px; color: var(--ink-faint); font-style: italic; }
+.segment { display: flex; gap: 14px; align-items: baseline; font-size: 22px; white-space: nowrap; max-width: 900px; overflow: hidden; }
+.segment-title { color: var(--gold); font-variant: small-caps; letter-spacing: 0.04em; text-overflow: ellipsis; overflow: hidden; }
+.segment-time { color: var(--ink-faint); font-family: var(--sans); font-size: 17px; font-variant-numeric: tabular-nums; }
+.session { justify-self: end; display: flex; align-items: center; gap: 12px; }
+.session-label { color: var(--ink-faint); font-variant: small-caps; font-size: 19px; letter-spacing: 0.08em; }
+.session-clock { font-family: var(--sans); font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
+.feed-dot { width: 10px; height: 10px; border-radius: 50%; background: #5fbf6a; box-shadow: 0 0 6px #5fbf6a; }
+.feed-dot.off { background: #c9423a; box-shadow: 0 0 6px #c9423a; }
+
+/* ---------- Game capture regions (transparent; outlined only in ?layout) ---------- */
+.game-region {
+  position: absolute; top: var(--region-y); width: var(--region-w); height: var(--region-h);
+  box-sizing: border-box; pointer-events: none;
+}
+.game-region[data-slot="0"] { left: var(--region0-x); }
+.game-region[data-slot="1"] { left: var(--region1-x); }
+.region-label { display: none; }
+body.layout .game-region {
+  outline: 3px dashed rgba(255, 64, 160, 0.9);
+  outline-offset: -3px;
+  background: repeating-linear-gradient(45deg, rgba(255,64,160,0.10) 0 24px, rgba(255,64,160,0.03) 24px 48px);
+}
+body.layout .region-label {
+  display: block; position: absolute; left: 16px; top: 12px; padding: 6px 12px; border-radius: 4px;
+  background: rgba(0,0,0,0.75); color: #ff9fd0; font: 600 20px/1.3 var(--sans);
+}
+body.layout #stage { background: #20242c; }
+
+/* ---------- Callouts ---------- */
+.callouts { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.callout {
+  text-align: center; animation: callout-life 6s ease-out forwards; will-change: transform, opacity;
+  padding: 18px 56px 22px; border-radius: 10px;
+  background: radial-gradient(ellipse at center, rgba(6,8,16,0.82) 0%, rgba(6,8,16,0.55) 60%, rgba(6,8,16,0) 100%);
+}
+.callout-text { font-size: 112px; line-height: 1; letter-spacing: 0.08em; font-variant: small-caps; font-weight: 700; }
+.callout-sub { margin-top: 10px; font-size: 32px; color: var(--ink); font-style: italic; }
+.callout.level-up .callout-text {
+  color: #ffe2a0;
+  text-shadow: 0 0 18px rgba(255, 200, 90, 0.9), 0 0 42px rgba(255, 170, 40, 0.6), 0 3px 0 #6b4a12;
+}
+.callout.death .callout-text {
+  color: #ff8a7a;
+  text-shadow: 0 0 18px rgba(220, 40, 30, 0.9), 0 0 42px rgba(160, 0, 0, 0.7), 0 3px 0 #3a0806;
+}
+@keyframes callout-life {
+  0% { opacity: 0; transform: scale(0.6); }
+  8% { opacity: 1; transform: scale(1.08); }
+  14% { transform: scale(1); }
+  82% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.04) translateY(-12px); }
+}
+
+/* ---------- Character cards ----------
+   Every size below comes from CARD_LAYOUT in model.ts (app.ts sets the --card-* / --row-* /
+   --font-* variables); each row is a fixed-height single line so the card can't overflow. */
+.card {
+  position: absolute; top: var(--card-top); width: var(--region-w); height: var(--card-h); box-sizing: border-box;
+  padding: var(--card-pad-top) 18px var(--card-pad-bottom); display: flex; flex-direction: column; gap: var(--card-gap);
+  overflow: hidden;
+}
+.card > * { flex: none; min-width: 0; }
+.card[data-slot="0"] { left: var(--region0-x); border-top: var(--card-border) solid var(--slot0-deep); }
+.card[data-slot="1"] { left: var(--region1-x); border-top: var(--card-border) solid var(--slot1-deep); }
+.card.dead { box-shadow: 0 0 0 1px rgba(0,0,0,0.6), inset 0 0 40px rgba(180, 20, 20, 0.35), 0 6px 18px rgba(0,0,0,0.45); }
+.card-head { height: var(--row-head); display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.who { display: flex; align-items: baseline; gap: 14px; min-width: 0; overflow: hidden; }
+.name { font-size: var(--font-head); line-height: var(--row-head); font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; }
+.card[data-slot="0"] .name { color: var(--slot0); }
+.card[data-slot="1"] .name { color: var(--slot1); }
+.title { font-size: 18px; color: var(--ink-faint); font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.badges { display: flex; align-items: center; gap: 18px; flex: none; }
+.deaths { display: flex; align-items: center; gap: 6px; font-family: var(--sans); font-size: 21px; color: var(--ink-dim); }
+.deaths-glyph { color: #d8d0c0; font-size: 21px; }
+.deaths.some .deaths-n { color: #ff8a7a; font-weight: 700; }
+.level {
+  display: flex; align-items: baseline; gap: 8px; height: calc(var(--row-head) - 4px); box-sizing: border-box; padding: 0 12px;
+  border: 1px solid var(--edge); border-radius: 5px; background: rgba(216,180,106,0.10);
+  line-height: calc(var(--row-head) - 6px);
+}
+.level-label { font-size: 15px; color: var(--gold); font-variant: small-caps; letter-spacing: 0.1em; }
+.level-n { font-family: var(--sans); font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.vitals { height: var(--row-vitals); display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.vital {
+  position: relative; height: 100%; box-sizing: border-box; border-radius: 4px; overflow: hidden;
+  background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.12);
+}
+.vital-fill { position: absolute; inset: 0 auto 0 0; width: 0%; transition: width 0.6s ease-out; }
+.health .vital-fill { background: linear-gradient(180deg, #e0605a, var(--health) 55%, #7c1f1a); }
+.stamina .vital-fill { background: linear-gradient(180deg, #ecc363, var(--stamina) 55%, #7e5a12); }
+.mana .vital-fill { background: linear-gradient(180deg, #6aa3ee, var(--mana) 55%, #1c3f7a); }
+.vital.low { animation: vital-pulse 1s ease-in-out infinite; }
+@keyframes vital-pulse { 50% { border-color: rgba(255, 120, 100, 0.95); } }
+.vital-label, .vital-n {
+  position: absolute; top: 0; line-height: calc(var(--row-vitals) - 2px); font-family: var(--sans); font-size: var(--font-vitals); font-weight: 600;
+  text-shadow: 0 1px 2px #000, 0 0 3px #000; white-space: nowrap;
+}
+.vital-label { left: 10px; letter-spacing: 0.04em; }
+.vital-n { right: 10px; font-variant-numeric: tabular-nums; }
+
+.xp { height: var(--row-xp); display: flex; flex-direction: column; gap: 2px; }
+.xp-bar { flex: none; height: 8px; box-sizing: border-box; border-radius: 4px; background: rgba(0,0,0,0.55); border: 1px solid rgba(216,180,106,0.35); overflow: hidden; }
+.xp-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--gold-deep), #f1d48d); transition: width 0.8s ease-out; }
+.xp.unknown .xp-fill { width: 100% !important; background: repeating-linear-gradient(90deg, rgba(216,180,106,0.18) 0 8px, transparent 8px 16px); }
+.xp-text {
+  flex: none; height: calc(var(--row-xp) - 10px); line-height: calc(var(--row-xp) - 10px); display: flex; justify-content: space-between;
+  font-family: var(--sans); font-size: var(--font-xp); color: var(--ink-dim); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden;
+}
+.xp-session { color: var(--gold); font-weight: 600; }
+
+.line { display: flex; gap: 10px; align-items: baseline; white-space: nowrap; overflow: hidden; }
+.line .text { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.line .glyph { color: var(--gold); font-size: 15px; width: 18px; flex: none; text-align: center; }
+.location { height: var(--row-location); line-height: var(--row-location); font-size: var(--font-location); }
+.goal { height: var(--row-goal); line-height: var(--row-goal); font-size: var(--font-goal); }
+.location .text { color: var(--ink); }
+.goal .text { color: var(--ink-dim); font-style: italic; }
+.tool { height: var(--row-tool); line-height: var(--row-tool); font-family: var(--sans); font-size: var(--font-tool); color: var(--ink-faint); padding-left: 28px; }
+.tool.failed .text { color: #d98a7a; }
+
+/* ---------- Bottom row: chat + narration ---------- */
+#chat { position: absolute; left: 24px; top: var(--bottom-top); width: 1100px; height: 240px; box-sizing: border-box; }
+#narration { position: absolute; left: 1140px; top: var(--bottom-top); width: 756px; height: 240px; box-sizing: border-box; }
+.panel { padding: 30px 16px 10px; overflow: hidden; }
+.panel-title {
+  position: absolute; left: 16px; top: 6px; margin: 0; font-size: 16px; font-weight: 400;
+  color: var(--gold); font-variant: small-caps; letter-spacing: 0.14em;
+}
+.chat-lines, .narration-lines {
+  list-style: none; margin: 0; padding: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden;
+}
+.chat-lines li {
+  font-family: var(--sans); font-size: 19px; line-height: 26px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  text-shadow: 0 1px 2px #000; transition: opacity 1s linear;
+}
+.chat-lines .tag { display: inline-block; min-width: 34px; margin-right: 8px; font-size: 13px; font-weight: 700; letter-spacing: 0.08em; color: var(--ink-faint); text-transform: uppercase; }
+.chat-lines .tag.fellowship { color: #9fd49a; }
+.chat-lines .tag.tell { color: #d8a0e8; }
+.chat-lines .spk { font-weight: 700; display: inline; }
+.chat-lines .spk.s0 { color: var(--slot0); }
+.chat-lines .spk.s1 { color: var(--slot1); }
+.chat-lines .spk.other { color: var(--other); }
+.chat-lines .arrow { color: var(--ink-faint); margin: 0 6px; }
+.chat-lines .body { color: var(--ink); }
+.chat-lines li.system .body { color: #e6d58a; font-style: italic; }
+.chat-lines li.tell .body { color: #ecd6f2; }
+
+.narration-lines li { display: flex; gap: 12px; align-items: baseline; padding: 3px 0; opacity: 0.6; transition: opacity 0.6s; }
+.narration-lines li.newest { opacity: 1; }
+.narration-lines .chip {
+  flex: none; font-family: var(--sans); font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 3px; color: #0b0f1a;
+}
+.narration-lines .chip.s0 { background: var(--slot0); }
+.narration-lines .chip.s1 { background: var(--slot1); }
+.narration-lines .chip.other { background: var(--other); }
+.narration-lines .text { font-size: 21px; line-height: 1.3; font-style: italic; color: var(--ink); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.narration-lines li.newest .text { font-size: 23px; }

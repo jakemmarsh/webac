@@ -652,8 +652,14 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     (s.mount.querySelector('.launcher-custom') as HTMLElement).click();
     s.entries[0]('ws://evil.example.org');
     expect(s.messages[0]).toMatch(/wss:\/\//);
+    // A game server's own address (what AC players type) is refused up front, adding no row.
+    const rowsBefore = s.rows().length;
     (s.mount.querySelector('.launcher-custom') as HTMLElement).click();
-    s.entries[1]('wss://play.example.net/bridge');
+    s.entries[1]('play.example.net:9000');
+    expect(s.messages[1]).toMatch(/game server's address/);
+    expect(s.rows().length).toBe(rowsBefore);
+    (s.mount.querySelector('.launcher-custom') as HTMLElement).click();
+    s.entries[2]('wss://play.example.net/bridge');
     expect(s.rows()[0].dataset.world).toBe('custom:wss://play.example.net/bridge');
     s.account.value = 'me';
     s.password.value = 'pw';

@@ -35,7 +35,12 @@ export function capabilityProblems(env: CapabilityEnv): CapabilityProblem[] {
       id: 'webgl2', hard: true,
       text: 'This browser could not start WebGL 2, which the game needs to draw the world. '
         + 'Use a current Chrome, Edge, Firefox or Safari on a desktop or laptop, and make sure hardware acceleration '
-        + '(graphics acceleration) is turned on in the browser settings.',
+        + '(graphics acceleration) is turned on in the browser settings. '
+        // A browser that ran the game before turns WebGL off for the site after a graphics crash (Chrome:
+        // chrome://gpu shows it), until it restarts (live 2026-10-13: Chrome 155 on Windows, minutes after playing).
+        + 'If the game worked before in this browser, quit the browser completely and start it again: after a '
+        + 'graphics crash the browser turns graphics off for the site until it restarts (in Chrome, chrome://gpu shows it). '
+        + 'If it keeps happening, update your graphics driver.',
     });
   }
   if (!env.websocket) {

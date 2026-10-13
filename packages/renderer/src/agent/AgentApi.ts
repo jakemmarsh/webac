@@ -22,16 +22,18 @@ import { PathSearch, floorPlan, straightWalk, type JumpSearch, type NavPoint, ty
 import { compassPoint } from './format.ts';
 import { fallBudget, isDrop, reaimJump, safeDropHeight, type JumpKit, type JumpSpec } from './jumpPlan.js';
 import { CELL_LENGTH, mapCoordinateText, mapCoordsOfCell } from '../ui/MapMarkers.js';
-import type { RoutineProfile } from '@ac/shared';
+import type { PlanSpell, RoutineProfile } from '@ac/shared';
 import { missileShot, getProjectileSpeed, DEFAULT_MAX_VELOCITY, type MissileShot } from '@ac/shared';
 import { RoutineEngine, type ItemPalette } from './RoutineEngine.ts';
 import type { RoutineSyncResult } from './RoutineSync.ts';
 import { vtankExprHost, vtankExpressions } from './VtankExprHost.ts';
 import { CAST_NOT_LANDED } from './macro/castReply.ts';
+import { buildCombatFamilies, casterAttackSpell, indexMonsterTable, type CombatFamilies, type MonsterFacts } from './macro/combatPlan.ts';
+import { fullSchoolName } from './macro/vtMacro.ts';
 import { HIT_ENVIRONMENT } from './macro/targetTracker.ts';
 import type {
   AgentChatKind, AgentChatLine, AgentDialog, AgentEvent, AgentTrade, AgentTracePoint, AgentVendor, AgentItem, AgentObject, AgentObjectKind, AgentObservation,
-  AgentResult, AgentScreen, AgentSelf, AgentStatus, AgentSpell, AgentWaitFilter,
+  AgentResult, AgentScreen, AgentSelf, AgentStatus, AgentSpell, AgentVitals, AgentWaitFilter,
 } from './types.ts';
 
 // ── Host: what main.ts provides ─────────────────────────────────────────
@@ -101,6 +103,10 @@ export interface AgentHostSelf {
   burden?: string;
   xpTotal?: number;
   xpUnassigned?: number;
+  /** The character panel's "XP for next level" (0 at the level cap). */
+  xpToNext?: number;
+  /** Total XP at which the current level began (the portal XpTable 0x0E000018's CharacterLevelXPList[level]). */
+  xpLevelStart?: number;
 }
 
 export type CombatModeName = 'peace' | 'melee' | 'missile' | 'magic';
@@ -302,6 +308,12 @@ export interface AgentHost {
    * (cellPath.ts findRouteViaOutside over the cell DAT's EnvCell portals).
    */
   route(fromCell: number, from: { x: number; y: number; z: number }, toCell: number, to: { x: number; y: number; z: number }, opts?: { maxDrop?: number; closed?: Array<{ x: number; y: number; z: number }>; avoid?: Array<{ x: number; y: number; z: number }> }): Array<{ x: number; y: number; z: number; feet?: number; drop?: number; landing?: number; across?: boolean }> | null;
+  /**
+   * The interior cells of `landblock` (0xXXYY0000) with a walkable floor under landblock-local (x, y), one entry per
+   * cell and floor height (cellPath.ts floorsAt over the cell DAT's EnvCells): where a map coordinate in a dungeon or
+   * a building is. Empty: no cell there (the landscape). Absent / null: unknown.
+   */
+  floorsAt?(landblock: number, x: number, y: number): Array<{ cell: number; z: number }> | null;
   /** Press a key binding: an action name from the keymap ("Show/Hide Inventory") or a key code ("F9", "Ctrl+KeyI"). */
   press(input: string): AgentResult;
   /** Keymap actions matching `filter`, with their bound keys. */
@@ -369,6 +381,11 @@ export interface WalkOptions {
    * keeps clear of every other portal: walk_to "Holtburg Dungeon" walked into the portal unasked (2026-10-12).
    */
   enterPortal?: boolean;
+  /**
+   * A map-coordinate goal's height (global z, metres): which storey of a dungeon or building the point is on. A
+   * VirindiTank nav point carries one (its Z, map units × 240). Without it the storey nearest your feet is taken.
+   */
+  z?: number;
 }
 
 /**
@@ -1282,6 +1299,23 @@ export class AgentApi {
     if (s.burden) out.burden = s.burden;
     if (s.xpTotal !== undefined) out.xp = { total: s.xpTotal, unassigned: s.xpUnassigned ?? 0 };
     return out;
+  }
+
+  /**
+   * The character at a glance for a stream overlay (tools/stream/supervisor.ts): vitals, level, XP, where, the task
+   * and goal line. Reads only: it leaves the chat since the player's last look, the look cursor and every event alone,
+   * so polling it never takes a line from the agent's own next observe or wait.
+   */
+  vitals(): AgentVitals | null {
+    const me = this.self();
+    if (!me) return null;
+    const host = this.host.self();
+    return {
+      name: me.name, level: me.level, health: me.health, stamina: me.stamina, mana: me.mana,
+      xp: me.xp ? { ...me.xp, toNext: host?.xpToNext ?? null, levelStart: host?.xpLevelStart ?? null } : null,
+      coords: me.coords, cell: me.cell, indoors: me.indoors, dead: me.dead, combatMode: me.combatMode,
+      task: me.task, goal: this.goal,
+    };
   }
 
   /** An observation that leaves the unread chat for the player's own next observe (routines read it this way). */
@@ -2209,7 +2243,7 @@ export class AgentApi {
    * or `maxMs`. Each is information; what to do next is the caller's. A melee player's attack keeps swinging the same
    * way; one bolt per tool call left a war mage idle between calls (Arcanist 3 bolts to Bulwark's 6 kills).
    */
-  castRepeat(spell: number | string, target: TargetArg, opts: CastRepeatOptions = {}): Promise<AgentResult> {
+  castRepeat(spell: number | string, target: TargetArg, opts: CastRepeatOptions = {}, own: { keepOnAttackers?: boolean } = {}): Promise<AgentResult> {
     const s = this.findSpell(spell);
     if ('ok' in s) return Promise.resolve(s);
     const t = this.castTarget(s, target);
@@ -2269,7 +2303,8 @@ export class AgentApi {
         if (v && v.health.max && v.health.current / v.health.max < untilHealth) {
           return finish(summary(`your health is ${v.health.current}/${v.health.max} (${pct(v.health.current / v.health.max)}), below the ${pct(untilHealth)} you set (until_health)`));
         }
-        const fresh = [...this.attackersOfMe()].filter(([g]) => g !== tg && !attackersAtStart.has(g));
+        // A caster's attack (castAttack) keeps on its target whoever else joins in, as a swing does.
+        const fresh = own.keepOnAttackers ? [] : [...this.attackersOfMe()].filter(([g]) => g !== tg && !attackersAtStart.has(g));
         if (fresh.length) {
           return finish(summary(`${fresh.map(([g, n]) => `${this.nameOf(g)} #${g.toString(16)} (${n}× in 10 s)`).join(', ')} started attacking you, and ${fresh.length === 1 ? "isn't" : "aren't"} your target`));
         }
@@ -2532,17 +2567,22 @@ export class AgentApi {
     let spent = 0;
     let done = 0;
     let stop = '';
+    const costs: number[] = [];
     for (let i = 0; i < Math.max(1, Math.min(times, 50)); i++) {
       const r = this.host.raise(stat);
       if (!r.ok) { stop = r.message; break; }
       first ??= r;
       last = r;
       spent += Number(r.cost ?? 0);
+      costs.push(Number(r.cost ?? 0));
       done++;
     }
     if (!first || !last) return { ok: false, message: stop };
     const head = first.from !== undefined && last.to !== undefined ? `${String(first.name)} ${String(first.from)} → ${String(last.to)}` : `${String(first.name)} raised`;
-    const summary = `${head} (${done} raise${done > 1 ? 's' : ''}, ${spent.toLocaleString()} XP)`;
+    // Each raise's price when there are a few: a first raise that only finished a rank the skill had part-filled by
+    // use (21 XP) beside the full steps after it read as "about 800 a raise, not the 21 listed" (2026-10-13).
+    const each = done > 1 && done <= 5 ? `: ${costs.map((c) => c.toLocaleString()).join(' + ')} =` : ',';
+    const summary = `${head} (${done} raise${done > 1 ? 's' : ''}${each} ${spent.toLocaleString()} XP)`;
     return { ok: true, message: stop ? `${summary}; stopped: ${stop}` : summary };
   }
 
@@ -2815,6 +2855,45 @@ export class AgentApi {
     return (cell & 0xffff) >= 0x100 && this.host.cellSealed?.(cell) === true;
   }
 
+  /** Outside a dungeon, a building's storey this near the height asked for (your feet, or the walk's z) holds a map coordinate. */
+  static readonly COORDS_STOREY_M = 3;
+  /**
+   * How far past its landblock's square a dungeon's rooms may lie (landblock-local metres). A dungeon's cells sit at
+   * their EnvCell frames, which run well outside 0–192: the Training Academy 0x7202 spans y −255 to 5, the eaters' hive
+   * 0x039D's floor at (51, −56) is its room 0x039D0156 (2026-10-13, cell DAT).
+   */
+  static readonly DUNGEON_REACH_M = 384;
+
+  /**
+   * Where a map coordinate (global metres) is, when it is in the space you are in: the interior cell whose floor is
+   * under it (host.floorsAt), on the storey nearest `z` (global height; your feet when not given), landblock-local
+   * with that floor's height. Decal and VirindiTank give a dungeon position as map coordinates of the dungeon
+   * landblock's own frame (origin + the EnvCell-frame position, / 240 − 101.95, as ACE Position.GetMapCoords;
+   * RoutineEngine mapCoordsText the same), so a nav route recorded in a dungeon walks there. The point can fall in a
+   * neighbouring landblock's square (a dungeon's frames run negative), so it is never placed by dividing by 192.
+   * In a dungeon only its own rooms count: none under a point within DUNGEON_REACH_M of the landblock is 'no-room', one
+   * farther off is the landscape (null). Elsewhere only buildings' rooms within COORDS_STOREY_M of the height count,
+   * else null (the landscape). A host that can't say keeps a dungeon walk to a near point in your own cell.
+   */
+  private coordsCell(g: { x: number; y: number }, z?: number): { cell: number; x: number; y: number; z: number } | 'no-room' | null {
+    const s = this.host.self();
+    if (!s || !s.cell) return null;
+    const lb = (s.cell & 0xffff0000) >>> 0;
+    const o = toGlobal(lb, 0, 0), x = g.x - o.x, y = g.y - o.y;
+    const dungeon = this.inDungeon(s.cell);
+    const R = AgentApi.DUNGEON_REACH_M;
+    const near = x >= -R && y >= -R && x <= LANDBLOCK_SIZE + R && y <= LANDBLOCK_SIZE + R;
+    const floors = this.host.floorsAt?.(lb, x, y);
+    if (!floors) return dungeon && near ? { cell: s.cell, x, y, z: s.z } : null;
+    const ref = z ?? s.z;
+    const best = floors
+      .filter((f) => (f.cell & 0xffff) >= 0x100 && (dungeon ? this.host.cellSealed?.(f.cell) !== false : this.host.cellSealed?.(f.cell) !== true))
+      .filter((f) => dungeon || Math.abs(f.z - ref) <= AgentApi.COORDS_STOREY_M)
+      .sort((a, b) => Math.abs(a.z - ref) - Math.abs(b.z - ref))[0];
+    if (best) return { cell: best.cell, x, y, z: best.z };
+    return dungeon && near ? 'no-room' : null;
+  }
+
   /**
    * Why a walk from `from` can't reach a place in cell `to`: one of them in a dungeon, the other in another landblock
    * (the landscape, a building in town, another dungeon). Null when they share a space (the same landblock, or both on
@@ -2864,6 +2943,8 @@ export class AgentApi {
     let timeoutMs = opts.timeoutMs ?? 60_000;
     let goal: () => { x: number; y: number; z?: number } | null;
     let goalLocal: () => AgentHostObject | null = () => null;
+    // A map-coordinate goal: where it is (coordsCell).
+    let coordsAt: () => ReturnType<AgentApi['coordsCell']> = () => null;
     let label: string;
     let targetGuid = 0;
     const coords = typeof target === 'string' ? parseMapCoords(target) : null;
@@ -2879,14 +2960,29 @@ export class AgentApi {
       const b = offset.bearing ?? normDeg(meNow.heading + (offset.turn ?? 0));
       const to = { x: meNow.g.x + offset.dist * Math.sin(b / DEG), y: meNow.g.y + offset.dist * Math.cos(b / DEG) };
       goal = () => to;
-      // Indoors the point is in your own building or dungeon (not the landscape a coordinate means): no doorway route out.
+      // Indoors the point is in your own building or dungeon (not the landscape): the room whose floor is under it, on
+      // your storey (coordsCell), else your own cell. No doorway route out.
       if ((meNow.s.cell & 0xffff) >= 0x100) {
-        const cell = meNow.s.cell, o = toGlobal(cell, 0, 0), z = meNow.s.z;
+        const at = this.coordsCell(to);
+        const cell = typeof at === 'object' && at ? at.cell : meNow.s.cell, o = toGlobal(cell, 0, 0), z = typeof at === 'object' && at ? at.z : meNow.s.z;
         goalLocal = () => ({ guid: 0, name: String(target), itemType: 0, objectDescFlags: 0, cell, x: to.x - o.x, y: to.y - o.y, z });
       }
       label = `walking ${offset.dist} m ${compassPoint(b)}`;
     } else if (coords) {
-      goal = () => coords;
+      // In a dungeon or a building, a map coordinate is the room whose floor is under it (VirindiTank's nav points in a
+      // dungeon are that dungeon landblock's own frame, as ACE Position.GetMapCoords). Worked out once per landblock
+      // you are in: a walk into the point's landblock finds the building it is in on arrival.
+      let at: ReturnType<AgentApi['coordsCell']> = null;
+      let atLb = -1;
+      const where = (): { cell: number; x: number; y: number; z: number } | null => {
+        const s = this.host.self();
+        const lb = s?.cell ? (s.cell & 0xffff0000) >>> 0 : 0;
+        if (lb !== atLb) { atLb = lb; at = this.coordsCell(coords, opts.z); }
+        return typeof at === 'object' ? at : null;
+      };
+      coordsAt = () => { where(); return at; };
+      goalLocal = () => { const r = where(); return r ? { guid: 0, name: String(target), itemType: 0, objectDescFlags: 0, cell: r.cell, x: r.x, y: r.y, z: r.z } : null; };
+      goal = () => { const r = where(); return r ? { ...coords, z: r.z } : coords; };
       label = `walking to ${target}`;
     } else {
       const g = this.need(target, 'world', 'object');
@@ -2911,7 +3007,10 @@ export class AgentApi {
       // outside, by the portal) from inside the dungeon and stalled six times "34360 m short" (2026-10-12).
       const me0 = this.me();
       const tc = coords ? null : goalLocal()?.cell ?? null;
-      const why = me0 ? (coords ? (this.inDungeon(me0.s.cell) ? 'map coordinates are the landscape, and you are in a dungeon' : null) : tc ? this.otherSpace(me0.s.cell, tc) : null) : null;
+      // Map coordinates in your own dungeon's landblock are that dungeon (coordsCell); anywhere else they are the landscape.
+      const ca = coords ? coordsAt() : null;
+      if (ca === 'no-room') return Promise.resolve({ ok: false, message: `${label}: that point is in this dungeon's landblock, but no room of the dungeon is under it (rock between the corridors). Pick a point in a room or corridor (ac_map shows them).` });
+      const why = me0 ? (coords ? (this.inDungeon(me0.s.cell) && !ca ? 'map coordinates are the landscape, and you are in a dungeon' : null) : tc ? this.otherSpace(me0.s.cell, tc) : null) : null;
       if (why) {
         const where = tc && (tc & 0xffff) < 0x100 ? (() => { const o = goalLocal()!; const g = toGlobal(tc, o.x, o.y); return ` (it is at ${mapCoordinateText(mapCoordsOfCell(Math.floor(g.x / CELL_LENGTH), Math.floor(g.y / CELL_LENGTH)))})`; })() : '';
         return Promise.resolve({ ok: false, message: `${label}: ${why}${where}. No walk gets there from here: leave by the way out (a portal: ac_observe filter=portal; or /lifestone), then walk.` });
@@ -3911,6 +4010,143 @@ export class AgentApi {
     return this.host.inventory().find((i) => i.where === 'equipped' && ((i.itemType ?? 0) & 0x100) !== 0 && !/Ammo/i.test(i.slot ?? '')) ?? null;
   }
 
+  /** The wielded caster (ItemType Caster 0x8000: a wand, staff or orb). */
+  private wieldedCaster(): AgentItem | null {
+    return this.host.inventory().find((i) => i.where === 'equipped' && ((i.itemType ?? 0) & 0x8000) !== 0) ?? null;
+  }
+
+  /**
+   * Attacking would cast: a caster wielded (ACE enters magic mode only with one: Player_Combat HandleActionChangeCombatMode),
+   * or magic mode with no melee or missile weapon wielded (a server that lets you cast bare-handed). A weapon wielder
+   * still in magic mode from a buff swings, as before (the swing's own stance change takes it out of magic mode).
+   */
+  private casterStance(): boolean {
+    if (this.wieldedCaster()) return true;
+    return this.host.self()?.combatMode === 'magic'
+      && !this.host.inventory().some((i) => i.where === 'equipped' && ((i.itemType ?? 0) & 0x101) !== 0 && !/Ammo/i.test(i.slot ?? ''));
+  }
+
+  /** The era's monster table, by name, for the attack spell's element (loaded on a caster's first attack; null until then). */
+  private monsterFacts: ((name: string) => MonsterFacts | undefined) | null = null;
+  private monsterFactsAsked = false;
+  private combatFamilies: { table: unknown; fam: CombatFamilies } | null = null;
+
+  /**
+   * The spell a caster attacks `guid` with: the macro's own choice (casterAttackSpell → planCombat, its <DEFAULT> row) over
+   * the spells you know, your magic skills and the era's spell table, or why there is none.
+   */
+  private casterSpellFor(guid: number): { spell: PlanSpell; why: string; projectile: boolean } | AgentResult {
+    const table = this.host.spellTableData?.();
+    if (!table) return { ok: false, message: 'the spell table is not loaded yet: no attack spell can be chosen (try again in a moment)' };
+    if (this.combatFamilies?.table !== table) this.combatFamilies = { table, fam: buildCombatFamilies(table) };
+    if (!this.monsterFactsAsked) {
+      this.monsterFactsAsked = true;
+      void this.monsterTable().then((t) => { if (t) this.monsterFacts = indexMonsterTable(t); }, () => undefined);
+    }
+    const spells: PlanSpell[] = this.host.spells().flatMap((s) => (s.category === undefined || s.power === undefined ? [] : [{
+      id: s.id, name: s.name, school: fullSchoolName(s.school), category: s.category, power: s.power, self: !!s.self, buff: !!s.buff, duration: s.duration ?? 0,
+      ...(s.range !== undefined ? { range: s.range } : {}),
+    }]));
+    const o = this.host.object(guid), me = this.me();
+    const at = o && o.cell ? toGlobal(o.cell, o.x, o.y) : null;
+    const dist = at && me ? Math.hypot(at.x - me.g.x, at.y - me.g.y) : 0;
+    const relBearing = at && me ? Math.round(relDeg(bearing(me.g, at) - me.heading)) : 0;
+    const caster = this.wieldedCaster();
+    const v = this.host.self();
+    const health = this.host.targetGuid() === guid ? this.host.targetHealth() : undefined;
+    const pick = casterAttackSpell({
+      spells, skills: this.skillList(), items: caster ? [{ guid: caster.guid, name: caster.name, equipped: true, ...(caster.itemType ? { itemType: caster.itemType } : {}) }] : [], itemNames: [],
+      wielded: { ...(caster ? { weapon: caster.name } : {}) }, settings: {}, families: this.combatFamilies.fam,
+      ...(this.monsterFacts ? { monsterFacts: this.monsterFacts } : {}),
+      ...(v ? { vitals: { health: v.health.current, maxHealth: v.health.max } } : {}),
+    }, { guid, name: this.nameOf(guid), dist, relBearing, ...(health !== undefined ? { health } : {}) });
+    if (pick) return pick;
+    const known = spells.filter((s) => /^(war|void) magic$/i.test(s.school) && !s.self && !s.buff).map((s) => s.name);
+    return {
+      ok: false,
+      message: `you wield ${caster ? `a caster (${caster.name})` : 'nothing but are in magic mode'}, so an attack is a spell, and you know no attack spell you can cast at ${this.nameOf(guid)}`
+        + (known.length ? ` (${known.slice(0, 4).join(', ')}: your War / Void Magic skill is too low for them, or they are untrained)` : ' (no War or Void Magic bolt known: learn one, or wield a melee or missile weapon and attack with that)'),
+    };
+  }
+
+  /** Closing in for a spell that couldn't reach, before the attack gives up on the target. */
+  static readonly CAST_ATTACK_CLOSE_INS = 2;
+
+  /**
+   * A caster's attack: magic mode, then the chosen spell cast again and again at the target through ac_cast repeat's own
+   * path (each cast waits out "too busy", checks the line of fire, reads the outcome) until it dies, closing in first
+   * when the spell's range or a wall stands between you. Its end is a target-died / target-lost event, as a swing's is.
+   */
+  private castAttack(guid: number, name: string): AgentResult {
+    const pick = this.casterSpellFor(guid);
+    if ('ok' in pick) { if (this.attackTarget === guid) this.attackTarget = 0; return pick; }
+    const startSeq = this.seqN;
+    const live = (): boolean => this.attackTarget === guid;
+    const lost = (why: string): void => { if (live()) { this.attackTarget = 0; this.push('target-lost', `${name} #${guid.toString(16)}: ${why}`, guid); } };
+    const dead = (): boolean => this.host.isDying(guid) || this.killedRecently(name, startSeq) || this.dyingSeen.has(guid) || !!this.gone.get(guid)?.died;
+    const blockedWhy = (): string | null => {
+      const o = this.host.object(guid), me = this.me();
+      if (!o || !o.cell || !me) return null;
+      const t = toGlobal(o.cell, o.x, o.y);
+      const d = Math.hypot(t.x - me.g.x, t.y - me.g.y);
+      if (pick.spell.range !== undefined && d > pick.spell.range) return `${d.toFixed(1)} m away, beyond ${pick.spell.name}'s ${pick.spell.range} m`;
+      const lof = pick.projectile ? this.host.lineOfFire?.(guid) : null;
+      if (lof && lof.blockedAt !== null) return `${lof.blocker ?? 'a wall, the ground or an object'} ${lof.blockedAt.toFixed(1)} m along the line would take the bolt`;
+      return null;
+    };
+    const closeIn = async (why: string): Promise<boolean> => {
+      this.push('chat', `(system) [Agent] closing in on ${name}: ${why}`);
+      let checked = -Infinity;
+      const r = await this.walkTo(guid, { within: 2.5, timeoutMs: 90_000, until: () => {
+        const now = this.host.now();
+        if (now - checked < 250) return null;
+        checked = now;
+        return blockedWhy() ? null : `${name} is within reach of ${pick.spell.name} with a clear line`;
+      } });
+      if (r.ok || r.attacked) return true;
+      if (!/interrupted/.test(r.message)) lost(`no cast, you couldn't get within reach of it (${r.message.replace(/^walking to [^:]*: /, '')})`);
+      return false;
+    };
+    const fight = async (): Promise<void> => {
+      if (this.host.self()?.combatMode !== 'magic') {
+        this.host.setCombatMode('magic');
+        for (let w = 0; w < 50 && this.host.self()?.combatMode !== 'magic'; w++) { await sleep(100); if (!live()) return; }
+        if (this.host.self()?.combatMode !== 'magic') { lost(`the server didn't put you in magic mode in 5 s${this.wieldedCaster() ? '' : ' (no wand, staff or orb wielded)'}`); return; }
+      }
+      for (let closeIns = 0; live(); ) {
+        const far = blockedWhy();
+        if (far) {
+          if (closeIns++ >= AgentApi.CAST_ATTACK_CLOSE_INS) { lost(`still no cast: ${far}`); return; }
+          if (!(await closeIn(far)) || !live()) return;
+          continue;
+        }
+        this.turn(guid);
+        const r = await this.castRepeat(pick.spell.id, guid, { untilHealth: 0, maxCasts: 100, maxMs: 120_000 }, { keepOnAttackers: true });
+        if (/stopped: interrupted/.test(r.message.split('\n')[0])) return; // another order (or a pull breaking off) ended it
+        if (dead()) {
+          // objectRemoved settles it when the client has already let the target go; else it is said here, once.
+          if (this.host.object(guid) && live() && !this.eventsSince(startSeq).some((e) => (e.type === 'target-died' || e.type === 'target-lost') && e.guid === guid)) {
+            this.attackTarget = 0;
+            if (this.watchedTarget === guid) this.watchedTarget = 0;
+            this.push('target-died', `${name} #${guid.toString(16)} died`, guid);
+          }
+          return;
+        }
+        const why = (/stopped: (.*)$/.exec(r.message.split('\n')[0])?.[1] ?? r.message.split('\n')[0]);
+        if (/out of range|line of fire/i.test(why) && closeIns < AgentApi.CAST_ATTACK_CLOSE_INS) {
+          closeIns++;
+          if (!(await closeIn(why)) || !live()) return;
+          continue;
+        }
+        lost(`the casts at it stopped: ${why}`);
+        return;
+      }
+    };
+    void fight().catch((e) => lost(`error: ${String((e as Error)?.message ?? e)}`));
+    const how = this.host.self()?.combatMode === 'magic' ? '' : ' (switching to magic mode first)';
+    return { ok: true, message: `casting ${pick.spell.name} at ${name} (#${guid.toString(16)}): ${pick.why}, chosen as the macro chooses${how}${this.targetWhere(guid)}; ac_wait types=target-died,target-lost,vitals-low,death,task-done${this.otherAttackersNote(guid)}` };
+  }
+
   /** Attacking would shoot: missile mode, or peace mode with a missile weapon wielded (the attack enters its stance). */
   private missileStance(): boolean {
     const m = this.host.self()?.combatMode;
@@ -4045,6 +4281,10 @@ export class AgentApi {
     const power = Math.min(Math.max((opts.power === 'bar' ? this.host.attackPower?.() : opts.power) ?? 0.6, 0), 1);
     this.host.select(guid);
     this.attackTarget = guid;
+    // A caster (a wand, staff or orb wielded, or already in magic mode): the attack is spells, chosen as the macro chooses
+    // them. Before 2026-10-13 it sent the attack key's swing, which a caster has none of: the host asked for magic mode
+    // every 1.5 s and nothing was ever cast (a routine's pull of a Sparring Golem, ac_attack with a Training Wand).
+    if (this.casterStance()) return this.castAttack(guid, name);
     // An archer (a launcher or thrown weapon in missile mode, or wielded in peace mode, which the attack enters):
     // the server never walks you to a missile target (ACE Player_Missile only turns and fires, and answers "Out of
     // Range!" + AttackDone past the launcher's reach), so the attack shoots from where you stand, closing in only as
@@ -4644,6 +4884,8 @@ export class AgentApi {
       observe: (o?: ObserveOptions) => this.observe({ ...(o ?? {}), levels: true }),
       // Who and where you are without reading the chat (observe consumes it): a daemon attached to a player's own tab waits on this.
       self: () => this.self(),
+      // A stream overlay's status line (tools/stream/): reads only, like self, so polling it never eats the agent's chat.
+      vitals: () => this.vitals(),
       events: (since?: number) => this.eventsSince(since),
       waitFor: (f?: AgentWaitFilter, ms?: number) => this.waitFor(f, ms),
       // ac_wait: from the player's last look (observe / wait), so nothing that came in since is missed.

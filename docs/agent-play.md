@@ -87,7 +87,7 @@ Claude plays the character in a game tab you logged in yourself. No daemon, no P
 
 Start with `ac_status`: it shows the account, the characters this connection may play, whether the tab is open with Claude on, the screen and the goal. At character select, `ac_enter_world character=<name>` enters the way the player does. `ac_goal` puts a line in the player's chat. Hosted, `ac_wait` waits at most 25 s per call, and each account gets a 20-call burst, then 10 calls a second (50,000 a day).
 
-The connector serves the CLI's tools. Only `ac_start` / `ac_stop` / `ac_sessions` (the player logs in; `ac_status` / `ac_enter_world` stand in) and `ac_click` stay local. How the others work through the tab:
+The connector serves the CLI's tools. Only `ac_start` / `ac_stop` / `ac_sessions` (the player logs in; `ac_status` / `ac_enter_world` stand in) and `ac_click` stay local (`ac_click` also drags: `to_x` / `to_y` release point, e.g. `modifiers=ctrl` to move the VVS bar; and `text=` types into the box the click focused with the real keyboard, `\n` for Enter: `ac_press` sends synthetic key events to the page and can't fill a text box). How the others work through the tab:
 - `ac_look` / `ac_screenshot`: the tab's own 3D view. Panels and chat aren't in it.
 - `ac_journal` / `ac_note`: kept in the player's browser, per character.
 - `ac_routines` / `ac_routine`: the game's own routine store. Pass `doc=` / `files_json=` text in place of file paths.
@@ -146,7 +146,10 @@ observation in one call.
 ### Waiting and reading
 
 `ac_wait` counts from your last `ac_observe` or `ac_wait`, not from the moment it's called, so a tell that came in
-between them returns at once. `chat_match` alone waits only for a matching line; `types=tell` waits for tells.
+between them returns at once. `chat_match` alone waits only for a matching line (never your own "You say" / "You
+tell" lines); `types=tell` waits for tells sent to you (not your own). Together they are OR: `types=…,tell
+chat_match="] Name says"` wakes on any tell to you and on Name's /f and channel lines. (Until 2026-10-13 they were AND,
+so that wait, the stream brief's own, slept through every /f line: "missed chat wakeups" in the second rehearsal.)
 `ac_use` on a letter or book returns its text, every page. Item names match the way the game says them in chat:
 "Pine Lugian Hammer" finds your "Lugian Hammer". A name in your pack beats one you wear, so `ac_drop` takes the
 spare. Drops and equips made together go out one at a time, as the client allows (2026-10-10).
@@ -202,6 +205,159 @@ The brief keeps the open-ended adventure and adds: pick adventures that also pay
 hunting grounds near their level), hunt when between ideas, keep detours quick, check `ac_character` (total XP and
 XP to next level) at the start, and report XP before and after with roughly how much of the session was fighting.
 
+## Streaming (2026-10-13)
+
+`tools/stream/supervisor.ts` keeps Claude Arcanist (profile `mage`) and Claude Bulwark (`soldier`) playing for a
+stream with no human or lead session launching each run (Jake, 2026-10-13).
+
+```bash
+npx tsx tools/stream/supervisor.ts                 # run (tools/stream/cast.json; --config <file> for another)
+npx tsx tools/stream/supervisor.ts stop            # or touch $TMPDIR/acjs-agent/stream/STOP, or Ctrl-C it
+npx tsx tools/stream/supervisor.ts status          # today's segments, minutes and cost per character
+```
+
+**What it does.** For each character in the cast it starts the play daemon if none is running (`cli.ts start
+profile=… character=…`), then plays it as a headless Claude Code session in **segments**:
+- `claude -p --input-format stream-json --output-format stream-json --verbose --model <model>`, the shared brief
+  (`tools/stream/brief.md`, with `{{CHARACTER}}`, `{{PROFILE}}` and `{{PARTNER}}` filled in) plus the character's
+  personality as `--append-system-prompt`, and an opening message with the journal (`formatJournal`), the partner,
+  the segment's length and the report the character wrote at the end of its last segment.
+- The session runs in its own small directory, `stream/player/<profile>/` (`tools/stream/player.ts`), not the repo, so
+  none of the repo's coding context loads (see **Cost** below). It holds two wrappers, the only commands a player runs:
+  `./ac <tool> …` (the agent CLI by absolute path through the repo's own `node_modules/.bin/tsx`, no npx; it refuses
+  `start` / `stop` and appends `profile=<profile>`, which wins, so a call can't drive the partner) and
+  `./world-query "SELECT …"`. `AC_AGENT_PROFILE=<profile>` is set too.
+- After `segment.minutes` (75) the supervisor sends "[supervisor] Wrap up now", a numbered list: finish the fight
+  (start no new one) and get somewhere safe (nothing on you, not mid-dungeon pack), check with `observe`, `note
+  kind=goal` and `goal` for next time, a goodbye in /f, and only then the report, which ends the segment. (Rehearsal
+  2026-10-13: characters left mid-fight woke up dead or under attack in the next session.) A player still going `wrapUpMinutes` + 1 min later is
+  ended (SIGTERM). A player whose turn ends early (it wrote a report at minute 20, or gave up) is told to keep playing,
+  `maxNudges` times, and then the segment ends.
+- The next segment starts after `restartPauseSeconds`. A segment shorter than `quickExitMinutes` (a crash) backs off
+  (30 s, doubling, up to `maxBackoffSeconds`), and `maxQuickExits` in a row halt that character.
+- Characters stay in the world between segments. The players never run `start` or `stop` (their permissions refuse
+  both). A daemon that dies mid-segment (a crash, the 15-minute idle logout) is started again and the player told.
+- **Stopping** (the stop file, `stop`, SIGINT/SIGTERM) tells each player "the stream is ending" and gives it
+  `stopGraceSeconds` to say goodbye and write a report. Then the session ends and every character is logged out:
+  `cli.ts stop profile=…` for each. Jake: "you should always log out if you stop controlling them". A character
+  halted by a cap is logged out the same way.
+
+**Limits** (cast.json): `maxSegments` per run per character; `daily.maxSegments` / `maxMinutes` / `maxUsd` per local
+day per character. These are counted from the segment log, so they survive a supervisor restart. `segment.budgetUsd`
+becomes `claude --max-budget-usd` for each segment. Each segment's tokens, cost (when `claude -p` reports
+`total_cost_usd`), turns, session id and end reason go to `stream/segments.jsonl`.
+
+**Permissions** (no `--dangerously-skip-permissions`):
+- `--tools Bash,Read` and `--permission-mode dontAsk --permission-prompts none`: anything not allowed is refused,
+  never prompted.
+- `--allowedTools` (matching the wrappers in the player's directory exactly):
+  - `Bash(./ac:*)`
+  - `Bash(./world-query:*)`: a read-only world-DB query (`tools/stream/world-query.ts`). It takes one SELECT / SHOW /
+    DESCRIBE, runs it inside a READ ONLY transaction and clips the output. It replaces the brief's old
+    `docker exec ace-db mysql`, which could write.
+  - `Bash(date)`
+  - `Read`
+- `--disallowedTools` `./ac start` and `./ac stop` (and the wrapper refuses both itself).
+- `--strict-mcp-config` (no MCP servers: the repo's `ac` server runs an older build), `--no-chrome` and
+  `--disable-slash-commands` (no skills list).
+
+The brief therefore asks for one CLI call per Bash command: no `cd`, pipes or other programs.
+
+**Files** (all under `$TMPDIR/acjs-agent/stream/`; `ACJS_AGENT_STATE_DIR` moves `$TMPDIR/acjs-agent`):
+- `feed.jsonl` (or `$ACJS_STREAM_FEED`): the overlay's event feed, one JSON object per line, `v: 1`, `t` epoch ms,
+  `type`, `char` = profile. The shapes are in `tools/stream/feed-types.ts` (owned by the overlay, `tools/stream/overlay-server.ts`):
+  - `chat`: every line of `<profile>.chat.log`, with a channel (say / tell-in / tell-out / fellowship / general …;
+    combat / magic / system by wording, since the log keeps no chat type). A line between cast members is written
+    once, from the speaker's log. A character's own spell words ("You say, "Zojak Quaguz"", which retail prints as
+    speech) are `magic`, which the overlay's chat panel leaves out: an incantation-shaped say (two or three
+    capitalised words) within 5 s of that character's "Casting …" line, or one already seen that way
+    (`isIncantation`). Real /say speech stays `say`.
+  - `narration`: the player's own text between tool calls, as one short line (`narrationLine`: at most 240
+    characters, cut at a sentence; line breaks flattened). A block with markdown headings, lists or tables, or a long
+    multi-paragraph one, is not narration: the end-of-segment report went to the ticker whole in the second rehearsal
+    (2026-10-13). The report goes to `reports/` only.
+  - `tool`: each CLI call, summarized, with object ids turned into the names observe printed
+    ("casts Flame Bolt III at Drudge Servant (repeat)").
+  - `segment-start` / `segment-end`, `session-start`.
+  - `death` (the "Your corpse is located at" line, the killer from the line before it), `level-up`.
+  - `status` every `statusEverySeconds`.
+- `segments.jsonl`, `reports/<profile>-…-seg<N>.md` (each final report), `sessions/<profile>-<day>-seg<N>.jsonl`
+  (the raw stream-json), `supervisor.log`.
+
+**Cost (rehearsal 2026-10-13, Opus 5.5, 12-minute segments, two segments per character).** $2.11–6.18 per segment
+per character ($14.49 for the four), 86–208 model calls each, 5.5–21.3 M cache-read tokens per segment. Each call
+re-reads the whole context, and that re-read was most of the bill:
+- The first call was already ~38–41k tokens: Claude Code's prompt and tools, the brief, and ~61 KB of instructions
+  that had nothing to do with playing: the repo's CLAUDE.md (36 KB), `~/.claude/CLAUDE.md` (9 KB) and the project's
+  auto-memory index (15 KB), plus the auto-memory instructions (~2 KB) and the worktree's git status. The account's
+  own CLAUDE.md loads from any directory, so a new directory alone isn't enough.
+- The context then grew ~5–10k tokens a minute, to 90–160k by the wrap-up. In Bulwark's 208-call segment: 144 bare
+  `wait`s (77 KB of results: a bare wait wakes on every chat line, his partner's spell words included), 17 `observe`s
+  (63 KB, 25 objects each), one `help` (14 KB, kept in context for every later call) and two `npm warn` lines (~170
+  bytes) on every single result.
+
+Trims (applied):
+- The player directory plus `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (`playerEnv`)
+  and `--disable-slash-commands`: about 64 KB less on every call (system prompt + reminders went from ~80.5 KB to
+  ~16.5 KB of text, about 16–18k tokens fewer; the brief itself grew 1.3 KB). The first call should drop from ~39k to
+  ~21–23k tokens.
+- `./ac` instead of `npx tsx tools/ac-agent/cli.ts … profile=…`: no npm warnings and ~40 characters less per call,
+  and 0.4 s per call instead of npx's start-up.
+- The brief: `./ac help <tool>` instead of the full 14 KB list (the tool names are in the brief), waits with `types=`
+  and `chat_match="] <partner> says"` in a fight (with `tell` in types: any tell, or the partner's /f lines),
+  `observe max=10`, one /f line instead of three.
+- `segment.autoCompactTokens` (100000, the smallest Claude Code accepts; `CLAUDE_CODE_AUTO_COMPACT_WINDOW`): a
+  segment's cost otherwise grows with the square of its length, and at 75 minutes the context would reach the
+  model's default window.
+
+Replayed over the rehearsal's own 510 calls, the first three trims alone remove ~12 M of its 45 M input tokens (27%);
+fewer wake-ups and the compaction cap come on top and are measured at the next rehearsal (`segments.jsonl`). The model
+(`model` in cast.json) and its effort (`effort`, null = the account's default, which is `high` here) are Jake's call.
+
+**Status without stealing chat.** `observe` consumes the agent's "chat since your last look", so the overlay never
+calls it. The daemon has a read-only `GET /vitals` (`AgentClient.vitals()`, `cli.ts vitals profile=…`). It is not
+an agent call, so it doesn't hold off the idle logout. It returns the API's `vitals()`: health / stamina / mana,
+level, XP total, to-next and the level's start (the client's XpTable 0x0E000018), coords or cell, task, goal and
+dead. It reads only, and `READ_METHODS` lists it.
+
+**The goal line.** The overlay's line under each name is the player's `./ac goal text=…` (the agent API's goal,
+carried by `/vitals` into each `status`). Nobody set one in the rehearsal, so the brief now asks for it at the start
+and whenever the plan changes, and the wrap-up asks for it again.
+
+**Starting two daemons at once.** The rehearsal's two daemons raced: both `git worktree add`ed the same snapshot (one
+died: "could not lock config file … config.worktree"), and both took bridge port 9151, so Bulwark's page ran on
+Arcanist's bridge and fell to character select when Arcanist's daemon stopped, mid wrap-up (his "sent" goodbye came
+from character select). The daemon now makes its snapshot and starts its bridge and Vite under a state-dir lock
+(`tools/ac-agent/stateLock.ts`, `STATE_DIR/daemon-start.lock`, an exclusive mkdir with the owner's pid; a dead or
+5-minute-old owner is taken over); a bridge that exits on its port is retried on the next, and a half-made snapshot
+is removed and made again. A daemon's shutdown also lets a running agent call finish (up to 10 s) before it logs out,
+and `/status` reports `busy` (calls running).
+
+**Public servers (attach).** There the daemon does not log in itself: Jake logs each character in, and the
+supervisor attaches. In cast.json a character gets
+`"attach": { "endpoint": "http://127.0.0.1:9222", "logoutOnStop": true }` (`"chrome"` opens the agent Chrome).
+- **Two characters in one Chrome:** open two tabs at `https://playwebac.com/?agent`, log each account in and enter
+  with its character. The supervisor starts each daemon with `attach=<endpoint> character=<name>`
+  (`--attach-character`). `pickGameTab` then takes only the tab whose `__acAgent.self()` is that character, so the
+  two daemons never share a tab. Until the character is in the world, the daemon waits and the supervisor holds that
+  character's segment. If another character enters in a tab, its daemon waits rather than drive the wrong one.
+- Each character still needs its own profile.
+- Chrome throttles hidden tabs. The page's worker clock keeps a hidden tab playing ("Covered or hidden windows",
+  above), but for the stream each tab is best in its own visible window.
+- A daemon's `stop` never logs an attached tab out. So when the stream stops (or a character halts) the supervisor
+  first calls the game's own `logout` through the API and waits for character select. `logoutOnStop: false` leaves
+  the tab logged in.
+- On a public server its rules on bots come first.
+
+**Settled by the rehearsal (2026-10-13):** a stream-json message sent mid-turn reaches the player (each wrap-up was
+answered with a report within a minute); `total_cost_usd` is reported on this login.
+
+**Not yet settled** (verify live):
+- that `Bash(./ac:*)` / `Bash(./world-query:*)` allow every player command under `dontAsk` from the player directory;
+- that the first call's size drops as estimated with `CLAUDE_CODE_DISABLE_CLAUDE_MDS` / `CLAUDE_CODE_DISABLE_AUTO_MEMORY`
+  (the session transcript under `~/.claude/projects/<player dir>/` shows the `instructions` attachment, or its absence);
+- how play holds up across an auto-compaction at 100k (the summary keeps the plan? the next call's size?).
+
 ## What a player sees that the agent is told (2026-10-11)
 
 The agent only knows what the tools say, so anything a player reads off the screen has to reach it as text. Information,
@@ -230,6 +386,16 @@ here, not having to hardcode behavior").
   Arcanist got a bolt off every 10–15 s: over 7 minutes Bulwark landed 6 killing blows to Arcanist's 3 bolts, and the
   mage looked stuck to the human watching. A retail player keeps pressing the bolt key, VirindiTank and our routines
   cast repeatedly too: a tool gap, not a play decision. Nothing era-specific (the same cast path in all three eras).
+- **A caster's attack casts (2026-10-13).** `ac_attack`, and a routine's `pull` and `attack-nearest` (all `AgentApi.attack`),
+  with a wand, staff or orb wielded (or already in magic mode) fight with spells: magic mode, then the attack spell the
+  VirindiTank macro would pick for its `<DEFAULT>` row (`combatPlan.casterAttackSpell` → `planCombat`: Auto element from
+  the era's monster table, bolt / arc / streak finisher, Drain Auto with neither War nor Void trained), cast again and
+  again through `ac_cast repeat`'s path until the target dies, closing in only when the spell's range or a wall is in
+  the way. The spell, its family and your skill all come from the era's spell table and your known spells, so it is the
+  same in all three eras. Before, the attack sent the attack key's swing, which magic mode has none of (no attack event
+  in magic mode: retail ExecuteAttack, ACE Player_Melee), and nothing was ever cast: a mage's routine pull of a Sparring
+  Golem said "no swing or shot landed in 25 s; not pulled" while the VTank macro profile fought the same golem fine.
+  No castable attack spell: the attack says so at once.
 - **Ranged attacks shoot from where you stand (2026-10-12).** `ac_attack` with a launcher or thrown weapon (missile
   mode, or peace mode with one wielded) no longer runs up to the target: Jake's archer Azreath (Shortbow, Range 65 yd)
   was run 48 m in to ~1 m of a Virindi Observer it could hit from 53.7 m. The server never walks you to a missile target
@@ -362,8 +528,15 @@ here, not having to hardcode behavior").
   "you did NOT get away". A cast stops the player with W still held (CommandInterpreter::MaybeStopCompletely: a held key
   moves nothing until pressed again), so a walk whose body hasn't moved for 0.5 s lets W go and presses it again.
   A dungeon is its own space (host `cellSealed`: an interior cell without SeenOutside): a walk from one to another
-  landblock, or to map coordinates, is refused with where the place is ("stopped 34360 m short" six times, for a sign
-  outside by the portal). Attack lines are placed when they come, on the nearest of that name within reach (a swing
+  landblock, or to landscape map coordinates, is refused with where the place is ("stopped 34360 m short" six times,
+  for a sign outside by the portal). Map coordinates of the dungeon you are in DO walk (2026-10-13): Decal and
+  VirindiTank give a dungeon position as coordinates of its landblock's own frame (origin + the EnvCell-frame position;
+  a VTank dungeon .nav is a list of them, with Z = metres / 240), and so does `mapCoordsText(me.pos)`. `coordsCell`
+  asks host `floorsAt` (cellPath `floorsAt`: the cells' walkable floors under the point) for the room, on the storey
+  nearest the walk's `z` (a route point's VTank Z) or your feet, and the walk routes to that cell like any in-dungeon
+  goal. The point is never placed by dividing by 192: dungeon frames run outside 0–192 (the Training Academy 0x7202
+  spans local y −255..5; a hive route's point at 0x039D is local (51, −56), room 0x039D0156 at z −30, VTank Z −0.125).
+  In a building the same lookup puts a coordinate inside it in its room (within 3 m of your storey). Attack lines are placed when they come, on the nearest of that name within reach (a swing
   8 m, a spell 60 m), never moved onto another of the name later; none in reach is `hit by, but not placed`. ac_wait:
   vitals-low at half health by default (`vitals_below=`, `mana_below=`, `stamina_below=` per wait; it was 35%, and woke
   an archer at 14%), any single hit over a quarter of max health, `attackers-up` and `cast-at-you` (a spell landing on,

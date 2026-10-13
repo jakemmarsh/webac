@@ -26,7 +26,7 @@
  * milliseconds; spell and castLog `duration` in seconds; DebuffPrecastSeconds
  * in seconds.
  */
-import { PropertyInt, VT_DAMAGE, VT_PET_AUTO, vtOption, type PlanItem, type PlanSkill, type PlanSpell, type Stance, type VtMonsterColumn, type VtMonsterRow } from '@ac/shared';
+import { PropertyInt, VT_DAMAGE, VT_DEFAULT_MONSTER, VT_PET_AUTO, vtOption, type PlanItem, type PlanSkill, type PlanSpell, type Stance, type VtMonsterColumn, type VtMonsterRow } from '@ac/shared';
 import { pickLadderWeapon, weaponElement } from './weaponLadder.ts';
 import { debuffSources, type DebuffSource, type DebuffSpellInfo } from './itemDebuffs.ts';
 import { planDrain, type DrainRow } from './drainPlan.ts';
@@ -1160,4 +1160,25 @@ function planTarget(input: CombatInput, list: Candidate[], top: Candidate, each:
   }
   const stance: Stance = kind === 'missile' ? 'missile' : 'melee';
   return needStance(input, stance, `to attack with ${weapon?.name ?? 'bare hands'}`) ?? { kind: 'attack', target: top.m.guid, why: `${top.row.name === '<DEFAULT>' ? 'default' : top.row.name} p${top.row.priority}`, element };
+}
+
+/**
+ * The attack spell a caster fights ONE monster with outside the macro (a routine's pull and attack-nearest, ac_attack):
+ * the macro's own choice (planCombat) for its <DEFAULT> Monsters row (Auto damage, A and S on), with VTank's default
+ * settings, the monster as the only candidate and you already in magic mode. So the element (the era's monster table,
+ * else VTank's unlisted order), bolt / arc / streak finisher and the Drain Auto fallback for a mage with neither War
+ * nor Void trained are exactly the macro's; the spells, their families and your skills come from the era's tables.
+ * Null: nothing you know and can cast attacks it. Before 2026-10-13 a wand wielder's attack only ever asked for magic
+ * mode and swung at nothing (Sparring Golem: "no swing or shot landed in 25 s; not pulled").
+ */
+export function casterAttackSpell(
+  input: Omit<CombatInput, 'monsters' | 'rows' | 'stance' | 'castLog' | 'now' | 'selectedGuid'> & { castLog?: CombatInput['castLog']; now?: number },
+  m: CombatMonster,
+): { spell: PlanSpell; why: string; projectile: boolean } | null {
+  const a = planCombat({
+    ...input, rows: [VT_DEFAULT_MONSTER], monsters: [m], stance: 'magic', castLog: input.castLog ?? [], now: input.now ?? 0, selectedGuid: m.guid,
+    // The one monster asked about is the target, wherever it stands (the macro's AttackDistance is the macro's own reach).
+    settings: { ...input.settings, AttackDistance: Number.MAX_SAFE_INTEGER, AttackMinimumDistance: 0 },
+  });
+  return a?.kind === 'cast' ? { spell: a.spell, why: a.why, projectile: !!a.projectile } : null;
 }

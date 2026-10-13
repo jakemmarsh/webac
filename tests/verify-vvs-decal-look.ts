@@ -152,7 +152,7 @@ type Ui = {
 };
 
 describe('GameUI: the bar, UB\'s window and the windows\' VVS text', () => {
-  it('the bar appears once a plugin window opens, lists the plugins\' windows, and opens UB\'s window', async () => {
+  it('the bar is up from login for a preview player, lists the plugins\' windows, and opens UB\'s window', async () => {
     const ui = H.ui as unknown as Ui;
     try { globalThis.localStorage?.removeItem('acjs.vvsBar'); } catch { /* none */ }
     const settings: Record<string, boolean> = { 'AutoVendor.Enabled': true, 'DungeonMaps.Enabled': true, 'LandscapeMaps.Enabled': true };
@@ -171,7 +171,8 @@ describe('GameUI: the bar, UB\'s window and the windows\' VVS text', () => {
     // The bar is preview UI (the bridge's BRIDGE_PREVIEW_ACCOUNTS); verify-virindi-reporter.ts tests the gate.
     (ui as unknown as { setPreviewFeatures(on: boolean): void }).setPreviewFeatures(true);
     const bar = () => ui.hudContainer.querySelector('[data-vvs-bar]') as HTMLElement | null;
-    expect(bar()).toBeNull();
+    // Up before any plugin window has opened (Jake, 2026-10-13: "i dont even see it").
+    expect(bar()).not.toBeNull();
     ui.toggleAutomationWindow();
     await new Promise((r) => setTimeout(r, 10));
     const ids = () => Array.from(bar()!.querySelectorAll('[data-vvs-bar-entry]')).map((e) => `${(e as HTMLElement).dataset.vvsBarEntry}:${(e as HTMLElement).dataset.open}`);
@@ -199,9 +200,36 @@ describe('GameUI: the bar, UB\'s window and the windows\' VVS text', () => {
     expect(bar()).toBeNull();
     expect(ui.toggleVvsBar()).toMatch(/shown/);
     expect(bar()).not.toBeNull();
+    // Hidden stays hidden across a refresh and opening a window (kept as 'off').
+    expect(ui.toggleVvsBar()).toMatch(/hidden/);
+    ui.refreshVvsBar();
+    expect(bar()).toBeNull();
+    expect(globalThis.localStorage?.getItem('acjs.vvsBar')).toBe('off');
+    expect(ui.toggleVvsBar()).toMatch(/shown/);
+    // Either order at login: the preview flag before the automation source still draws it.
+    ui.setAutomationSource(null);
+    expect(bar()).toBeNull();
+    ui.setAutomationSource(source());
+    expect(bar()).not.toBeNull();
     ui.setAutomationSource(null);
     ui.setUbSettings(null);
     ui.setUbMaps(null);
+  });
+
+  it('the bar and open plugin windows survive the world\'s HUD build (drawn before it at login)', async () => {
+    const ui = H.ui as unknown as Ui & { showGame(): void; toggleHotkeysForTest?: never };
+    try { globalThis.localStorage?.removeItem('acjs.vvsBar'); } catch { /* none */ }
+    ui.setAutomationSource(source());
+    (ui as unknown as { setPreviewFeatures(on: boolean): void }).setPreviewFeatures(true);
+    ui.toggleAutomationWindow();
+    await new Promise((r) => setTimeout(r, 10));
+    // Entering the world rebuilds the HUD layer (renderHUD empties it).
+    ui.showGame();
+    const bar = ui.hudContainer.querySelector('[data-vvs-bar]') as HTMLElement | null;
+    expect(bar?.isConnected).toBe(true);
+    expect(ui.hudContainer.querySelector('[data-vtank-window]')).not.toBeNull();
+    expect((bar!.querySelector('[data-vvs-bar-entry="vtank"]') as HTMLElement).dataset.open).toBe('1');
+    ui.setAutomationSource(null);
   });
 
   it('the loot editor opens in a Windows program\'s frame, drawn with a Windows form\'s parts', async () => {

@@ -22,6 +22,7 @@ import {
   type PreworldEvent, type PreworldScreenState, type PreworldScreen, type ChargenStepName,
 } from '../packages/renderer/src/telemetry/PreworldReporter.js';
 import { CreateStep } from '../packages/renderer/src/ui/CharacterCreate.js';
+import { installUnloadSessionClose, logOffCharacter } from '../packages/renderer/src/session/PlayerModuleSave.js';
 import { CharacterError, CharacterGenerationVerificationResponse, characterCreateErrorToken } from '../packages/shared/src/index.js';
 
 const ACCOUNT = 'secretacct77';
@@ -426,6 +427,22 @@ describe('AC1999 — Connection1999', () => {
     expectClean(h); expectClean(h2);
   });
 
+  // BUG.ac1999-post-grant-silence: the grant, then nothing (a session the server dropped at once, e.g. a
+  // banned account) was a 60 s 'dropped' on the connecting screen; now a login refusal with its token.
+  it('a grant followed by silence is a login refusal (ServerClosedConnection) at 8 s, not a drop at 60 s', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const { sock } = start1999(h);
+    sock.deliver(grant1999('4.35752'));
+    vi.advanceTimersByTime(7_000);
+    expect(h.sent).toHaveLength(0);
+    vi.advanceTimersByTime(60_000);
+    expect(h.sent.map(s => [s.body.outcome, s.body.screen, s.body.token])).toEqual([
+      ['login_refused', 'connecting', 'ID_ConnectionError_ServerClosedConnection'],
+    ]);
+    expectClean(h);
+  });
+
   it('a CharacterError after the enter request is an enter refusal; chargen replies come through too', () => {
     const h = harness();
     const { conn, sock } = start1999(h);
@@ -637,6 +654,140 @@ describe('which screen the player is on (preworldScreenFor), and deliberate relo
     h2.r.leavingForReload('update');
     h2.r.leavingForReload('epilogue');
     expect(h2.sent.map(s => [s.body.outcome, s.body.token, s.body.screen])).toEqual([['page_reload', 'update', 'server-select']]);
+  });
+});
+
+// Production 2026-10-13 (build aaa40225): enter_ok, ~4 min in the world, then the tab closed. The unload's own
+// logoff tore the world down before pagehide, so the reporter read 'connecting' and sent page_left — every
+// in-world tab close was counted as a pre-world walk-away.
+describe('closing the tab: the screen is the one the player left, not the one the unload logoff leaves', () => {
+  /**
+   * main.ts's pieces: the reporter installed on the page, the screen from preworldScreenFor over main's state,
+   * a real connection, its 'disconnected' handled as main.ts does (teardownWorldState; ServerDied → dropped only
+   * for a pre-world drop the page did not cause), and the real unload wiring.
+   */
+  function page(era: 'eor' | 'ac1999') {
+    const sent: Array<{ body: PreworldEvent; raw: string }> = [];
+    const clock = { t: 1000 };
+    const st: PreworldScreenState = {
+      gameStarted: false, disconnected: false, launcherActive: false, eraSwitchPending: false,
+      uiScreen: 'character-select', portalSpace: false, charListReceived: false,
+    };
+    let r: PreworldReporter;
+    r = new PreworldReporter({
+      endpoint: 'https://bridge.example/client-preworld', build: 'abc1234', era: () => era, server: () => era === 'ac1999' ? 'ac1999' : 'coldeve',
+      screen: () => preworldScreenFor({ ...st, charListReceived: r.characterListReceived }),
+      now: () => clock.t, trace: 'feedc0de12345678', send: (_u, raw) => sent.push({ body: JSON.parse(raw) as PreworldEvent, raw }),
+    });
+    const winL = new Map<string, Array<() => void>>();
+    const docL = new Map<string, () => void>();
+    const win = {
+      addEventListener: (t: string, l: () => void) => { winL.set(t, [...(winL.get(t) ?? []), l]); },
+      setInterval: () => 1,
+    };
+    const doc = { visibilityState: 'visible', addEventListener: (t: string, l: () => void) => { docL.set(t, l); } };
+    // main(): the reporter installs at boot, the unload wiring later (after the connection exists).
+    r.install(win as never, doc as never);
+    const conn = reportConnectAttempts(
+      era === 'ac1999' ? new Connection1999(r.tagUrl('wss://bridge.example/connect?server=ac1999'))
+        : new ClientConnection(r.tagUrl('wss://bridge.example/connect?server=coldeve')),
+      () => r.connectAttempt());
+    conn.autoReconnect = false;
+    wireLikeMain(conn, r);
+    let inWorld = false;
+    conn.on((e) => {
+      if (e.type !== 'disconnected') return;
+      const droppedInWorld = inWorld;
+      inWorld = false;
+      if (st.gameStarted) st.gameStarted = false; // teardownWorldState
+      if (e.everOpened && !e.deliberate && !droppedInWorld) r.dropped();
+    });
+    const flushes: string[] = [];
+    const module = { flushChatOptionsSave: () => { flushes.push(`flush@${st.gameStarted ? 'world' : 'pre'}`); } };
+    let stamped = false;
+    installUnloadSessionClose(win, { module, connection: conn, reporter: r, after: () => { stamped = true; } });
+    const closeTab = (): void => {
+      // The browser's order on a tab close: beforeunload, pagehide, then visibilitychange (hidden).
+      for (const l of winL.get('beforeunload') ?? []) l();
+      for (const l of winL.get('pagehide') ?? []) l();
+      doc.visibilityState = 'hidden';
+      docL.get('visibilitychange')!();
+    };
+    const login = (): void => {
+      conn.connect(ACCOUNT, PASSWORD);
+      clock.t += 50;
+      FakeSocket.sockets.at(-1)!.open();
+      clock.t += 400;
+      r.characterList(13);
+    };
+    const enterWorld = (): void => {
+      r.enterRequested();
+      clock.t += 7000;
+      st.gameStarted = true; inWorld = true;
+      r.enteredWorld();
+    };
+    return { r, sent, clock, st, conn, closeTab, login, enterWorld, flushes, stamped: () => stamped, setDisconnectedScreen: (v: boolean) => { st.disconnected = v; } };
+  }
+
+  for (const era of ['eor', 'ac1999'] as const) {
+    it(`${era}: a tab closed in the world reports no page_left, page_hidden or dropped; the save still goes out first`, () => {
+      const p = page(era);
+      p.login();
+      p.enterWorld();
+      p.clock.t += 250_000;
+      p.closeTab();
+      expect(p.sent.map(s => [s.body.outcome, s.body.screen])).toEqual([['char_list', 'char-select'], ['enter_ok', 'world']]);
+      // The unload still saved and closed the session, in that order, and ran main's sessionStorage stamp.
+      expect(p.flushes).toEqual(['flush@world']);
+      expect(p.st.gameStarted).toBe(false);
+      expect(p.stamped()).toBe(true);
+      expectClean(p as unknown as Harness);
+    });
+
+    it(`${era}: logging out to char select, then closing the tab, is a char-select page_left`, () => {
+      const p = page(era);
+      p.login();
+      p.enterWorld();
+      p.clock.t += 60_000;
+      // Logout: SaveToServer + the logoff request; the world tears down and the server's character list comes back.
+      logOffCharacter({ flushChatOptionsSave: () => {} }, p.conn);
+      p.st.gameStarted = false;
+      p.r.characterList(13);
+      p.clock.t += 30_000;
+      p.closeTab();
+      expect(p.sent.map(s => [s.body.outcome, s.body.screen])).toEqual([
+        ['char_list', 'char-select'], ['enter_ok', 'world'], ['char_list', 'char-select'], ['page_left', 'char-select'],
+      ]);
+      expect(p.sent.at(-1)!.body.screenMs).toBe(30_000);
+    });
+
+    it(`${era}: a tab closed on char select or chargen before the world reports that screen; the unload's disconnect is never dropped`, () => {
+      const p = page(era);
+      p.login();
+      p.st.uiScreen = 'character-create';
+      p.clock.t += 12_000;
+      p.closeTab();
+      expect(p.sent.map(s => [s.body.outcome, s.body.screen])).toEqual([['char_list', 'char-select'], ['page_left', 'chargen']]);
+      const q = page(era);
+      q.conn.connect(ACCOUNT, PASSWORD);
+      FakeSocket.sockets.at(-1)!.open();
+      q.closeTab();
+      expect(q.sent.map(s => [s.body.outcome, s.body.screen])).toEqual([['page_left', 'connecting']]);
+    });
+  }
+
+  it('a server drop before the world is still reported as dropped; pageUnloading fixes the screen once', () => {
+    const p = page('eor');
+    p.login();
+    FakeSocket.sockets.at(-1)!.close();
+    expect(p.sent.map(s => s.body.outcome)).toEqual(['char_list', 'dropped']);
+    const q = page('eor');
+    q.st.launcherActive = true;
+    q.r.pageUnloading();
+    q.st.launcherActive = false; q.st.gameStarted = true;
+    q.r.pageUnloading();
+    q.r.pageLeft();
+    expect(q.sent.map(s => [s.body.outcome, s.body.screen])).toEqual([['page_left', 'server-select']]);
   });
 });
 

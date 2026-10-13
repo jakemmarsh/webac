@@ -183,8 +183,9 @@ describe('agent fellowship (real GameUI)', () => {
     ];
     const sheet = ui.agentCharacterSheet();
     expect(sheet).toMatch(/Assess Creature 13 \[\+1: 129 xp\]/);
-    expect(sheet).toMatch(/Creature Enchantment 13 \[\+1: 54 xp\]/);
-    expect(ui.agentRaise('creature')).toMatchObject({ ok: true, name: 'Creature Enchantment', cost: 54, message: 'raised Creature Enchantment 13 → 14 (54 XP); the next +1 costs 154 XP' });
+    // The part-filled rank's +1, then the full step after it (stream rehearsal 2, 2026-10-13).
+    expect(sheet).toMatch(/Creature Enchantment 13 \[\+1: 54 xp, then 154\]/);
+    expect(ui.agentRaise('creature')).toMatchObject({ ok: true, name: 'Creature Enchantment', cost: 54, message: 'raised Creature Enchantment 13 → 14 (54 XP), the rest of a rank using it had part-filled; the next +1 costs 154 XP' });
     expect(ui.agentCharacterSheet()).toMatch(/Creature Enchantment 14 \[\+1: 154 xp\]/);
     expect(ui.agentRaise('assess')).toMatchObject({ ok: true, name: 'Assess Creature', cost: 129 });
     expect(skills).toEqual([[31, 54], [27, 129]]);

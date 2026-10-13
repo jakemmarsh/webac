@@ -34,3 +34,21 @@ export function closeSessionOnUnload(module: PlayerModuleFlush, connection: { di
   module.flushChatOptionsSave();
   connection.disconnect();
 }
+
+/**
+ * main.ts's beforeunload: the pre-world reporter reads the screen FIRST
+ * (PreworldReporter.pageUnloading), then the save + disconnect, then
+ * `after`. The disconnect tears the world down, so a reporter that read the
+ * screen later saw 'connecting' and counted every in-world tab close as a
+ * pre-world walk-away.
+ */
+export function installUnloadSessionClose(
+  win: { addEventListener(type: 'beforeunload', listener: () => void): void },
+  o: { module: PlayerModuleFlush; connection: { disconnect(): void }; reporter?: { pageUnloading(): void } | null; after?: () => void },
+): void {
+  win.addEventListener('beforeunload', () => {
+    try { o.reporter?.pageUnloading(); } catch { /* reporting must never block the save */ }
+    closeSessionOnUnload(o.module, o.connection);
+    o.after?.();
+  });
+}

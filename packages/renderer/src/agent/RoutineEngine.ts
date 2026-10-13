@@ -551,7 +551,8 @@ export class RoutineEngine {
     const r = this.nav.route;
     if (on !== undefined && on === this.reversed) return { ok: true, message: `route "${r.name}" ${on ? 'already reversed' : 'already walked forwards'}` };
     const last = r.points.length - 1;
-    this.nav.route = { ...r, points: [...r.points].reverse(), ...(r.stops ? { stops: r.stops.map((st) => ({ ...st, at: last - st.at })) } : {}) };
+    // Each point's height goes with it (VTank's Z: the storey of a dungeon point).
+    this.nav.route = { ...r, points: [...r.points].reverse(), ...(r.z ? { z: [...r.z].reverse() } : {}), ...(r.stops ? { stops: r.stops.map((st) => ({ ...st, at: last - st.at })) } : {}) };
     this.nav.i = Math.max(0, last - this.nav.i);
     this.reversed = !this.reversed;
     return { ok: true, message: `route "${r.name}" reversed` };
@@ -821,7 +822,7 @@ export class RoutineEngine {
           label = o ? o.name : `the ${c.object}`;
           if (!o) return { ok: false, why: `${c.object} not in sight` };
         }
-        if (!at) return { ok: false, why: 'not on the landscape' };
+        if (!at) return { ok: false, why: `can't read the coordinates "${c.coords}"` };
         const m = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying).map((o) => ({ o, d: Math.hypot(objectAt(me.pos, o).x - at!.x, objectAt(me.pos, o).y - at!.y) }))
           .filter((x) => x.d <= c.meters).sort((a, b) => a.d - b.d);
         return { ok: m.length === 0, why: m.length ? `${m[0].o.name} ${Math.round(m[0].d)} m from ${label}` : `none within ${c.meters} m of ${label}` };
@@ -843,7 +844,7 @@ export class RoutineEngine {
       }
       case 'near': {
         const goal = parseMapCoords(c.coords);
-        if (!me || !goal) return { ok: false, why: 'not on the landscape' };
+        if (!me || !goal) return { ok: false, why: !me ? 'not in world' : `can't read the coordinates "${c.coords}"` };
         const d = Math.hypot(goal.x - me.pos.x, goal.y - me.pos.y);
         return { ok: d <= c.meters, why: `${Math.round(d)} m from ${c.coords}` };
       }
@@ -971,19 +972,19 @@ export class RoutineEngine {
     }
     if (me && !me.dead) this.deadSeen = false;
     if (this.watchdog && me) {
-      const g = parseMapCoords(me.coords ?? '');
-      if (g) {
-        const w = this.watchdog;
-        w.samples.push({ t, x: g.x, y: g.y });
-        while (w.samples.length && t - w.samples[0].t > w.seconds * 1000) w.samples.shift();
-        const first = w.samples[0];
-        if (first && t - first.t >= w.seconds * 1000 - STEP_MS && Math.hypot(g.x - first.x, g.y - first.y) < w.meters) {
-          const target = w.state;
-          this.watchdog = null;
-          this.note(`watchdog: no ${w.meters} m in ${w.seconds} s → "${target}"`);
-          void this.act({ kind: 'set-state', state: target }, p);
-          return;
-        }
+      // Where you are (global metres), indoors and in dungeons too: the radar's text (me.coords) is the 24 m cell and
+      // none at all indoors, so a watchdog in a dungeon never sampled.
+      const g = me.pos;
+      const w = this.watchdog;
+      w.samples.push({ t, x: g.x, y: g.y });
+      while (w.samples.length && t - w.samples[0].t > w.seconds * 1000) w.samples.shift();
+      const first = w.samples[0];
+      if (first && t - first.t >= w.seconds * 1000 - STEP_MS && Math.hypot(g.x - first.x, g.y - first.y) < w.meters) {
+        const target = w.state;
+        this.watchdog = null;
+        this.note(`watchdog: no ${w.meters} m in ${w.seconds} s → "${target}"`);
+        void this.act({ kind: 'set-state', state: target }, p);
+        return;
       }
     }
     // Enable Meta off (VirindiTank): the rules don't run; the macro still does.
@@ -1311,7 +1312,9 @@ export class RoutineEngine {
           if (door) { this.note(`route "${route.name}" point ${i + 1}: door: ${door.message}`); if (door.ok === false && /locked door skipped/.test(door.message)) this.report(door.message); }
         }
       }
-      const r = await this.api.walkTo(pt, { within, timeoutMs: 90_000 });
+      // VTank's height (map units: metres / 240) says which storey of a dungeon the point is on.
+      const hz = route.z?.length === route.points.length ? route.z[i] : null;
+      const r = await this.api.walkTo(pt, { within, timeoutMs: 90_000, ...(typeof hz === 'number' ? { z: hz * 240 } : {}) });
       const said = r.message.split('\n')[0];
       this.note(`route "${route.name}" point ${i + 1}: ${said}`);
       // As before: a walk that didn't get there moves on without the point's steps.
@@ -1558,7 +1561,8 @@ export class RoutineEngine {
   /**
    * pull (beyond VTank, Jake 2026-10-12): one attack order on the nearest match, broken off as soon as a swing or shot
    * lands on it (a chat line naming it) or it turns on you, then a run back to the fallback point that keeps going while
-   * hit. A plain attack, as the attack button sends: the server walks a melee character in and a missile one shoots.
+   * hit. A plain attack, as the attack button sends: the server walks a melee character in and a missile one shoots; a
+   * caster casts the macro's attack spell (AgentApi.attack), and the bolt's damage line is its landing.
    */
   private async pull(a: Extract<RoutineAction, { kind: 'pull' }>): Promise<AgentResult> {
     let re: RegExp;

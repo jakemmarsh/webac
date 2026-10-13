@@ -65,6 +65,18 @@ function grant1999(version: string): Uint8Array {
   return buildPacket1999({ sequence: 0, flags: F1999.Connect | F1999.Checksum, recipient: SERVER_ID, time: 0, body });
 }
 
+/** The server's connect-progress ServerSwitch (CPacketController::SendConnectProgress): seq 0, flags 0x102, an 8-byte 0.0. */
+function serverSwitch1999(): Uint8Array {
+  return buildPacket1999({ sequence: 0, flags: F1999.ServerSwitch | F1999.Checksum, recipient: SERVER_ID, time: 0, body: new Uint8Array(8) });
+}
+
+/** The server→client datagrams of the real client's captured session (tests/fixtures/ac1999-session-001.jsonl.gz), in order. */
+function capturedS2C(): Uint8Array[] {
+  return gunzipSync(readFileSync(resolve(__dirname, 'fixtures', 'ac1999-session-001.jsonl.gz')))
+    .toString().trim().split('\n').map((l) => JSON.parse(l))
+    .filter((j) => j.d === 's2c').map((j) => new Uint8Array(Buffer.from(j.b, 'base64')));
+}
+
 class FakeSocket {
   static OPEN = 1;
   static sockets: FakeSocket[] = [];
@@ -195,6 +207,7 @@ describe('Connection1999: the other login outcomes', () => {
     const { events, sock } = start();
     sock.deliver(grant1999(VERSION_1999));
     expect(events.some((e) => e.type === 'handshakeComplete')).toBe(true);
+    sock.deliver(serverSwitch1999()); // the session goes on (the post-grant wait is pinned below)
     vi.advanceTimersByTime(20_000);
     expect(sock.sent.filter((p) => readHeader1999(p).sequence === 1)).toHaveLength(1);
     expect(errors(events)).toHaveLength(0);
@@ -230,6 +243,89 @@ describe('Connection1999: the other login outcomes', () => {
     const d = events.filter((e) => e.type === 'disconnected');
     expect(d).toHaveLength(1);
     expect(d[0].deliberate).toBe(false);
+  });
+});
+
+// BUG.ac1999-post-grant-silence. Live 2026-10-13 (playwebac.com, the public AC1999 server): a returning
+// player's three logins each got the 59-byte grant and nothing more; the page sat on the connecting screen
+// until the 60 s server timeout, then the player gave up after 6 s. Reproduced on the local server with
+// accounts.banned = 1: CNetwork::AcceptClientLogin sends the grant, then its ban check's KickBannedClient
+// kills the session before the 0xF7C1 can flush (reference/ac1999 Network.cpp:768-782), and our ack is
+// discarded ("[NET-DROP] ... no matching session"). Upstream's deploy/disable-extra-ip-accounts.sql
+// (2026-10-12) bans every account past the first two created from one IP, and every account made through
+// the bridge has the bridge's IP.
+describe('Connection1999: a grant followed by silence ends in a clear notice, not a 60 s hang', () => {
+  const isAck = (p: Uint8Array): boolean => { const h = readHeader1999(p); return h.sequence === 0 && h.flags === (F1999.Connect | F1999.Checksum) && p.length === HEADER_SIZE_1999; };
+
+  it("the captured grant (59 bytes, flags 0x202), then nothing: the ack is resent every 2 s, then at 8 s ServerClosedConnection", () => {
+    vi.useFakeTimers();
+    const grant = capturedS2C()[0];
+    expect(grant.length).toBe(59); // the prod session's one datagram, and the local server's 'TX connect-grant ... len= 59'
+    expect(readHeader1999(grant).flags).toBe(F1999.Connect | F1999.Checksum);
+    const { events, sock } = start();
+    sock.deliver(grant);
+    expect(events.some((e) => e.type === 'handshakeComplete')).toBe(true);
+    expect(sock.sent.filter(isAck)).toHaveLength(1);
+    vi.advanceTimersByTime(7_900);
+    expect(sock.sent.filter(isAck)).toHaveLength(4); // 0, 2, 4, 6 s
+    expect(errors(events)).toHaveLength(0);
+    vi.advanceTimersByTime(200);
+    const errs = errors(events);
+    expect(errs).toHaveLength(1);
+    expect(errs[0].netErrorId).toBe('ID_ConnectionError_ServerClosedConnection');
+    expect(netErrorNotice(errs[0].netErrorId!)).toMatchObject({ surface: 'dialog', text: 'Server has closed this connection' });
+    // The session ends deliberately (no Disconnected screen on top), telling the server to free the slot.
+    expect(sock.closed).toBe(true);
+    expect(readHeader1999(sock.sent.at(-1)!).flags & F1999.Disconnect).toBeTruthy();
+    const d = events.filter((e) => e.type === 'disconnected');
+    expect(d).toHaveLength(1);
+    expect(d[0].deliberate).toBe(true);
+    // Nothing more: no server timeout later.
+    vi.advanceTimersByTime(120_000);
+    expect(errors(events)).toHaveLength(1);
+    expect(events.some((e) => e.type === 'serverTimeout')).toBe(false);
+  });
+
+  it('a lost ack recovers: the server answers a resent ack, the resends stop and no notice is raised', () => {
+    vi.useFakeTimers();
+    const { events, sock } = start();
+    sock.deliver(grant1999(VERSION_1999));
+    vi.advanceTimersByTime(3_000);
+    expect(sock.sent.filter(isAck)).toHaveLength(2);
+    sock.deliver(serverSwitch1999());
+    const acks = sock.sent.filter(isAck).length;
+    vi.advanceTimersByTime(30_000);
+    expect(sock.sent.filter(isAck)).toHaveLength(acks);
+    expect(errors(events)).toHaveLength(0);
+  });
+
+  it("the server's keepalive (a bare 0x202) counts as the session answering", () => {
+    vi.useFakeTimers();
+    const { events, sock } = start();
+    sock.deliver(grant1999(VERSION_1999));
+    sock.deliver(buildPacket1999({ sequence: 0, flags: F1999.Connect | F1999.Checksum, recipient: SERVER_ID, time: 0 }));
+    vi.advanceTimersByTime(30_000);
+    expect(errors(events)).toHaveLength(0);
+  });
+
+  it('a repeated grant does not count as the session answering', () => {
+    vi.useFakeTimers();
+    const { events, sock } = start();
+    sock.deliver(grant1999(VERSION_1999));
+    vi.advanceTimersByTime(1_000);
+    sock.deliver(grant1999(VERSION_1999));
+    vi.advanceTimersByTime(7_100);
+    expect(errors(events).map((e) => e.netErrorId)).toEqual(['ID_ConnectionError_ServerClosedConnection']);
+  });
+
+  it('the captured session after the grant (sequenced data, then the ServerSwitch) raises nothing', () => {
+    vi.useFakeTimers();
+    const { events, sock } = start();
+    const s2c = capturedS2C();
+    for (const b of s2c.slice(0, 6)) sock.deliver(b);
+    vi.advanceTimersByTime(30_000);
+    expect(errors(events)).toHaveLength(0);
+    expect(sock.sent.filter(isAck)).toHaveLength(1);
   });
 });
 
@@ -311,9 +407,7 @@ describe('a "still in the world" refusal that answers a duplicate enter is ignor
 // The real session (tests/fixtures/ac1999-session-001.jsonl.gz) still logs in through the new paths.
 describe('the captured 1999 session still logs in', () => {
   it('reaches the character list with no error', () => {
-    const s2c: Uint8Array[] = gunzipSync(readFileSync(resolve(__dirname, 'fixtures', 'ac1999-session-001.jsonl.gz')))
-      .toString().trim().split('\n').map((l) => JSON.parse(l))
-      .filter((j) => j.d === 's2c').map((j) => new Uint8Array(Buffer.from(j.b, 'base64')));
+    const s2c = capturedS2C();
     const conn = new Connection1999('ws://bridge');
     conn.datIterations = { portal: 102, cell: 67, language: 0 };
     const events: ConnectionEvent[] = [];

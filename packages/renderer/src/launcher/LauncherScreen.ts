@@ -830,7 +830,7 @@ export class LauncherScreen {
   }
 
   private promptCustom(): void {
-    this.kit.textEntry('Enter the wss:// address of a server\'s own bridge.', (typed) => {
+    this.kit.textEntry('Enter the wss:// address of a server\'s own webAC bridge (not its game server address).', (typed) => {
       if (!typed.trim()) return;
       const r = parseCustomBridge(typed);
       if ('error' in r) { this.kit.message(r.error); return; }

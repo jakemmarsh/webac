@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentApi, bestNameMatch, nameMatchScore } from '../packages/renderer/src/agent/AgentApi.ts';
 import { formatObject, seenAgoText } from '../packages/renderer/src/agent/format.ts';
-import { waitFilter } from '../tools/ac-agent/tools.ts';
+import { INCOMING_TELL, waitFilter } from '../tools/ac-agent/tools.ts';
 import { FakeHost, run } from './_harness/agentFake.ts';
 
 const REFUSAL = 'You can only move or use one item at a time';
@@ -172,8 +172,15 @@ describe('agent play reports 2026-10-10', () => {
   });
 
   it('ac_wait types=tell waits for tells; other types and chat_match pass through (item 7)', () => {
-    expect(waitFilter({ types: 'tell' })).toEqual({ chatMatch: '^\\(tell\\) ' });
-    expect(waitFilter({ types: 'tell,death', chat_match: 'Bulwark' })).toEqual({ types: ['death'], chatMatch: '^\\(tell\\) .*(?:Bulwark)' });
+    expect(waitFilter({ types: 'tell' })).toEqual({ chatMatch: INCOMING_TELL });
+    // tell + chat_match is OR (stream rehearsal 2, 2026-10-13): any tell to you, or a line matching chat_match.
+    const both = waitFilter({ types: 'tell,death', chat_match: 'Bulwark' });
+    expect(both.types).toEqual(['death']);
+    const re = new RegExp(both.chatMatch!, 'i');
+    expect(re.test('(tell) Bulwark tells you, "hi"')).toBe(true);
+    expect(re.test('(tell) Alcott tells you, "hi"')).toBe(true);
+    expect(re.test('(channel) [Fellowship] Claude Bulwark says, "pulling"')).toBe(true);
+    expect(re.test('(tell) You tell Bulwark, "hi"')).toBe(false);
     expect(waitFilter({ types: 'chat, target-died', since_seq: '42' })).toEqual({ types: ['chat', 'target-died'], sinceSeq: 42 });
     expect(new RegExp(waitFilter({ types: 'tell' }).chatMatch!, 'i').test('(tell) Bulwark tells you, "hi"')).toBe(true);
     expect(new RegExp(waitFilter({ types: 'tell' }).chatMatch!, 'i').test('(say) Bulwark says, "tell me"')).toBe(false);

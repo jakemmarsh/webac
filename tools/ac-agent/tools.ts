@@ -210,20 +210,37 @@ export function defaultAttach(a: Record<string, unknown>, env: string | undefine
   return local ? undefined : env;
 }
 
+/** A tell someone sent you: the wait's line for "tell" (your own "You tell …" echo is a (tell) line too). */
+export const INCOMING_TELL = '^\\(tell\\) (?!You tell\\b)';
+/** Your own speech as the wait sees it: "(say) You say, …", "(channel) [Fellowship] You say, …", "(tell) You tell …". */
+const OWN_SPEECH = '\\([\\w-]+\\) (?:\\[[^\\]]*\\] )?You (?:say|tell)\\b';
+
 /**
  * ac_wait's arguments as the page's wait filter. "tell" (and "tells") is not an event type but the
- * tool lists it: it means a chat line that is a tell, so it waits for those (a types=tell wait never
+ * tool lists it: it means a tell someone sent you, so it waits for those (a types=tell wait never
  * woke, 2026-10-10); beside "chat" it adds nothing. Other names pass through.
+ *
+ * chat_match wakes on chat lines matching it, never on your own speech (a wait for "Arcanist" woke on
+ * Bulwark's own "You tell Claude Arcanist, …", 2026-10-13). With "tell" it is OR, as the tool says
+ * ("with types it also wakes on those types"): a tell from anyone OR a matching line. It used to be
+ * AND (a tell that also matched), so the stream brief's `types=…,tell chat_match="] <partner> says"`
+ * slept through every one of the partner's /f lines and woke on no tell either ("missed chat wakeups",
+ * second stream rehearsal 2026-10-13).
  */
 export function waitFilter(a: Record<string, any>): { types?: string[]; chatMatch?: string; sinceSeq?: number; healthBelow?: number; manaBelow?: number; staminaBelow?: number } {
   let types = a.types ? String(a.types).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : undefined;
-  let chatMatch: string | undefined = a.chat_match === undefined || a.chat_match === '' ? undefined : String(a.chat_match);
+  const raw: string | undefined = a.chat_match === undefined || a.chat_match === '' ? undefined : String(a.chat_match);
+  // An invalid regex is matched as plain text (the page's own fallback can't see inside the wrapper below).
+  const valid = (re: string): boolean => { try { new RegExp(re, 'i'); return true; } catch { return false; } };
+  const userMatch = raw === undefined ? undefined : valid(raw) ? raw : raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Lookaheads from the line's start, so the player's own pattern (anchors, alternation) means what it says.
+  let chatMatch = userMatch === undefined ? undefined : `^(?!${OWN_SPEECH})(?=[\\s\\S]*?(?:${userMatch}))`;
   if (types?.some((t) => t === 'tell' || t === 'tells')) {
     const anyChat = types.includes('chat');
     types = types.filter((t) => t !== 'tell' && t !== 'tells');
     // "chat" already wakes on every line, a tell included. Narrowing chat to tells there made a
     // types=chat,tell wait sleep through fellowship lines (Arcanist, 2026-10-11).
-    if (!anyChat) chatMatch = chatMatch ? `^\\(tell\\) .*(?:${chatMatch})` : '^\\(tell\\) ';
+    if (!anyChat) chatMatch = chatMatch ? `${INCOMING_TELL}|${chatMatch}` : INCOMING_TELL;
     if (!types.length) types = undefined;
   }
   const since = a.since_seq === undefined || a.since_seq === '' ? undefined : Number(a.since_seq);
@@ -334,11 +351,11 @@ export const TOOLS: AgentTool[] = [
       headless: { type: 'boolean', description: 'No visible window (default false: a window opens so a human can watch).' },
       era: { type: 'string', description: `Which era's local server to play: ${ERA_IDS.map((k) => `${k} (${AGENT_ERAS[k].label})`).join(', ')}. Default eor. Each era is its own session (profile claude-<era>).`, enum: ERA_IDS },
       base: { type: 'string', description: 'Game page origin to use, e.g. your own Vite to verify uncommitted work (default: a snapshot of the committed tree on its own Vite, which other sessions\' file saves can\'t reload).' },
-      attach: { type: 'string', description: 'Play the human\'s OWN character instead, on any server (playwebac.com included): "chrome" opens (or reuses) a Chrome window at https://playwebac.com/?agent where the human logs in and enters the world themselves; or a DevTools endpoint like http://127.0.0.1:9222. Profile "me". Stopping never logs them out.' },
+      attach: { type: 'string', description: 'Play the human\'s OWN character instead, on any server (playwebac.com included): "chrome" opens (or reuses) a Chrome window at https://playwebac.com/?agent where the human logs in and enters the world themselves; or a DevTools endpoint like http://127.0.0.1:9222. Profile "me". Stopping never logs them out. With character=, only the tab in the world as that character is driven (several game tabs in one Chrome: give each its own profile=).' },
     },
     async run(a) {
       const attach = a.attach ?? defaultAttach(a);
-      const { info, started } = await startDaemon({ profile: a.profile, character: a.character, headless: a.headless, base: a.base, era: a.era, template: a.template, heritage: a.heritage, gender: a.gender, town: a.town, seed: a.seed, attributes: a.attributes, skills: a.skills, attach });
+      const { info, started } = await startDaemon({ profile: a.profile, character: a.character, headless: a.headless, base: a.base, era: a.era, template: a.template, heritage: a.heritage, gender: a.gender, town: a.town, seed: a.seed, attributes: a.attributes, skills: a.skills, attach, ...(attach && a.character ? { attachCharacter: a.character } : {}) });
       const c = new AgentClient(info);
       const st = await c.status().catch(() => null);
       if (st?.attached && !st.ready) {
@@ -443,13 +460,18 @@ export const TOOLS: AgentTool[] = [
       y: { type: 'number', description: 'Pixels from the screenshot\'s top edge.' },
       button: { type: 'string', description: 'left (default) or right.', enum: ['left', 'right'] },
       modifiers: { type: 'string', description: 'Keys held during the click, comma-separated: ctrl, shift, alt (e.g. ctrl for a Ctrl+click).' },
+      to_x: { type: 'number', description: 'Drag instead of click: press at (x, y) and release here (with to_y), e.g. to move a window or, with modifiers=ctrl, the VVS bar.' },
+      to_y: { type: 'number', description: 'The drag\'s release point, with to_x.' },
+      text: { type: 'string', description: 'Then type this into what the click focused (a text box in a plugin window), with the real keyboard; "\\n" presses Enter.' },
     },
     required: ['x', 'y'],
     async run(a) {
       const c = requireClient(a.profile);
       const mods = typeof a.modifiers === 'string' ? a.modifiers.split(',').map((m: string) => m.trim()).filter(Boolean) : [];
-      await c.click(Number(a.x), Number(a.y), a.button === 'right' ? 'right' : 'left', mods);
-      return withNotice(c, { text: `clicked (${Math.round(Number(a.x))}, ${Math.round(Number(a.y))})` });
+      const to = a.to_x !== undefined && a.to_y !== undefined ? { x: Number(a.to_x), y: Number(a.to_y) } : undefined;
+      const text = typeof a.text === 'string' ? a.text.replace(/\\n/g, '\n') : undefined;
+      await c.click(Number(a.x), Number(a.y), a.button === 'right' ? 'right' : 'left', mods, to, text);
+      return withNotice(c, { text: to ? `dragged (${Math.round(Number(a.x))}, ${Math.round(Number(a.y))}) to (${Math.round(to.x)}, ${Math.round(to.y)})` : `clicked (${Math.round(Number(a.x))}, ${Math.round(Number(a.y))})` });
     },
   },
   {
@@ -461,7 +483,7 @@ export const TOOLS: AgentTool[] = [
       vitals_below: { type: 'number', description: 'vitals-low mark for health for this wait: a fraction (0.6) or percent (60). Default 0.5. Wakes when health falls below it (or a further tenth below where it was, if it already was).' },
       mana_below: { type: 'number', description: 'Likewise for mana (no mark unless given).' },
       stamina_below: { type: 'number', description: 'Likewise for stamina (no mark unless given).' },
-      chat_match: { type: 'string', description: 'Wake on chat lines matching this regex (case-insensitive), e.g. a partner\'s name. Alone it waits only for such a line; with types it also wakes on those types.' },
+      chat_match: { type: 'string', description: 'Wake on chat lines matching this regex (case-insensitive), e.g. a partner\'s name or "] Name says" for their /f and channel lines; never on your own speech. Alone it waits only for such a line; with types it also wakes on those types (with tell: any tell to you, or a matching line).' },
       timeout_s: { type: 'number', description: 'Seconds (default 20, max 300).' },
       since_seq: { type: 'number', description: 'Only events after this seq (default: since your last ac_observe or ac_wait).' },
     },
@@ -626,7 +648,7 @@ export const TOOLS: AgentTool[] = [
   }, [], (a) => [{ holdMs: a.hold_ms === undefined ? undefined : Number(a.hold_ms), forward: a.forward === true || a.forward === 'true', walk: a.walk === true || a.walk === 'true' }]),
   act('ac_stop_moving', 'Stop any movement or walk task.', {}, [], () => []),
   act('ac_combat_mode', 'Switch stance: peace, melee, missile or magic (wields what you have equipped for it).', { mode: { type: 'string', description: 'peace | melee | missile | magic', enum: ['peace', 'melee', 'missile', 'magic'] } }, ['mode'], (a) => [String(a.mode)]),
-  act('ac_attack', 'Attack a creature with your melee or missile weapon (switches to the right stance, faces it and keeps swinging until it dies, you stop, or the timeout). Melee runs up to it first. With a bow, crossbow, atlatl or thrown weapon it shoots from where you stand when the target is in your weapon\'s reach (its examine Range; less uphill, where the arc falls short) with a clear line, and otherwise closes in only until it is: the reply says which, with the distance and your reach. "Out of Range!" from the server closes in further (twice at most). Use ac_wait for target-died.', {
+  act('ac_attack', 'Attack a creature with your weapon (switches to the right stance, faces it and keeps swinging until it dies, you stop, or the timeout). Melee runs up to it first. With a bow, crossbow, atlatl or thrown weapon it shoots from where you stand when the target is in your weapon\'s reach (its examine Range; less uphill, where the arc falls short) with a clear line, and otherwise closes in only until it is: the reply says which, with the distance and your reach. "Out of Range!" from the server closes in further (twice at most). With a wand, staff or orb wielded (or in magic mode) it fights with spells: the best War or Void attack spell you know and can cast (bolt, arc, or a streak to finish), chosen as the VirindiTank macro chooses, cast again and again until it dies, closing in first only when the spell can\'t reach or a wall is in the way; the reply names the spell, or says why there is none. Use ac_wait for target-died.', {
     target: { type: 'string', description: 'Creature id or name (default: current target, else the nearest monster).' },
     height: { type: 'string', description: 'high | medium | low (default medium)', enum: ['high', 'medium', 'low'] },
     power: { type: 'number', description: 'Power/accuracy 0..1 (default 0.6).' },

@@ -86,6 +86,33 @@ export interface AgentSelf {
   xp?: { total: number; unassigned: number };
 }
 
+/**
+ * What a stream overlay (tools/stream/) shows about a character, read without touching anything a player's own
+ * look consumes (observe's chat since last look): vitals, level, XP, where, what Claude is doing and its goal line.
+ */
+export interface AgentVitals {
+  name: string;
+  level: number;
+  health: AgentVital;
+  stamina: AgentVital;
+  mana: AgentVital;
+  /**
+   * toNext: what the character panel's "XP for next level" shows; levelStart: the total XP the current level began at
+   * (the portal XpTable's level list), for a progress bar. Null when the client doesn't know it yet.
+   */
+  xp: { total: number; unassigned: number; toNext: number | null; levelStart: number | null } | null;
+  /** Map coordinates "42.1N, 33.6E", or null indoors / in a dungeon (then `cell` says where). */
+  coords: string | null;
+  cell: string;
+  indoors: boolean;
+  dead: boolean;
+  combatMode: AgentSelf['combatMode'];
+  /** The agent's own motor task ("walking to …"), if any. */
+  task: string | null;
+  /** Claude's goal line (ac_goal), if set. */
+  goal: string | null;
+}
+
 export type AgentChatKind = 'tell' | 'say' | 'emote' | 'channel' | 'system' | 'combat' | 'magic' | 'other';
 
 export interface AgentChatLine {

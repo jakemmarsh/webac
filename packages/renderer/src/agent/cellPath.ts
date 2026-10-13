@@ -158,6 +158,8 @@ export interface CellGraph {
    * it): whether a body standing on the landscape is already up there (CellDoor.grounded).
    */
   exitFloors?: Map<CellDoor, FloorPoly[]>;
+  /** Cell id → its walkable polygons (its own and its statics'), landblock frame: which cell a point stands in (floorsAt). */
+  floors?: Map<number, FloorPoly[]>;
   /**
    * False when a file it needed was not readable yet (a streamed set's miss: the read returns null and
    * the fetch starts), so the graph may lack doors. Don't keep it; build it again on the next route.
@@ -277,12 +279,30 @@ export function loadCellGraph(cellDat: DatDatabase, portalDat: DatDatabase, land
       for (const e of doors.get(d.b) ?? []) if (e.b === c && samePoint(e.at, d.at)) e.climb = true;
     }
   }
-  const graph: CellGraph = { landblock: lb, doors, centers, airCells, complete };
+  const graph: CellGraph = { landblock: lb, doors, centers, airCells, floors, complete };
   if (info && opts.landHeightTable) {
     const r = groundExits(graph, cellDat, portalDat, info, opts.landHeightTable);
     if (!r) graph.complete = false;
   }
   return graph;
+}
+
+/**
+ * Every floor of the landblock's cells under (x, y) (landblock frame): one entry per cell and floor height, highest
+ * first. A map coordinate names a point seen from above (VirindiTank's nav points and Decal's coordinates are a dungeon
+ * landblock's own frame / 240, as ACE Position.GetMapCoords), so a point in a dungeon is in the cell whose floor is
+ * under it; on a dungeon's stacked floors there is one per storey, and the caller picks the storey (its height).
+ */
+export function floorsAt(g: CellGraph, x: number, y: number): Array<{ cell: number; z: number }> {
+  const out: Array<{ cell: number; z: number }> = [];
+  for (const [cell, fl] of g.floors ?? []) {
+    for (const f of fl) {
+      if (!insideXY(f.pts, x, y)) continue;
+      const z = zOn(f, x, y);
+      if (!out.some((o) => o.cell === cell && Math.abs(o.z - z) < 0.05)) out.push({ cell, z });
+    }
+  }
+  return out.sort((a, b) => b.z - a.z);
 }
 
 /** Height of polygon `f`'s plane at (x, y). */

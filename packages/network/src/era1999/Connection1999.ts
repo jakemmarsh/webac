@@ -62,6 +62,28 @@ const NAK_MIN_MS = 250;
 const OUR_RESEND_MIN_MS = 1000;
 const SERVICE_MS = 100;
 const SERVER_TIMEOUT_MS = 60_000;
+/**
+ * After the grant the AC1999 server answers our 0x202 ack within milliseconds:
+ * its next main-loop tick sends the 0x102 ServerSwitch (connect progress), then
+ * the DDD begins and the character list (CClient::UpdateLoginScreen). If
+ * nothing follows, the ack is resent this often (a lost ack leaves the server
+ * waiting on bConnectAcked forever; a repeat is harmless, OnConnectAck is
+ * idempotent) ...
+ */
+const POST_GRANT_ACK_RESEND_MS = 2000;
+/**
+ * ... and after this long with nothing at all the session is over: the
+ * server killed it right after the grant. Measured: a banned account (the
+ * accounts.banned column) gets the grant, then CNetwork::AcceptClientLogin's
+ * ban check calls KickBannedClient, whose 0xF7C1 can't flush before the ack
+ * marks the peer alive, and Kill drops the session within milliseconds; the
+ * ack that follows is discarded as "[NET-DROP] no matching session"
+ * (reference/ac1999 Network.cpp:768-782, reproduced on the local server
+ * 2026-10-13). The page used to sit on the connecting screen until the 60 s
+ * server timeout (live 2026-10-13: three attempts, 59 bytes from the server
+ * each, the player gave up after 6 s).
+ */
+const POST_GRANT_WAIT_MS = 8000;
 /** A server data packet's body budget (the 484-byte datagram less the header and our flow word). */
 const MAX_DATA_BODY = MAX_DATAGRAM_1999 - HEADER_SIZE_1999 - 4;
 
@@ -85,6 +107,10 @@ export class Connection1999 implements NetConnection {
 
   private recipient = 0;
   private granted = false;
+  /** When the grant arrived, our last ack after it, and whether the server has sent anything since. */
+  private grantedAt = 0;
+  private lastAckAt = 0;
+  private sessionAnswered = false;
   private serverTime = 0;
   private loginSends = 0;
   private loginTimer: ReturnType<typeof setInterval> | null = null;
@@ -147,6 +173,9 @@ export class Connection1999 implements NetConnection {
     this.clientKeys = new Isaac1999Keys(() => c.next());
     this.recipient = 0;
     this.granted = false;
+    this.grantedAt = 0;
+    this.lastAckAt = 0;
+    this.sessionAnswered = false;
     this.serverTime = 0;
     this.loginSends = 0;
     this.held.clear();
@@ -323,10 +352,14 @@ export class Connection1999 implements NetConnection {
     if (h.flags & F1999.Disconnect) { this.ws?.close(); return; }
     const body = b.subarray(HEADER_SIZE_1999);
 
-    if ((h.flags & F1999.Connect) && h.sequence === 0) {
-      if (body.length >= 24 && !this.granted) { this.onGrant(body); return; }
-      if (body.length === 0) { this.sendControl(F1999.Connect | F1999.Checksum); return; }
+    const connect = (h.flags & F1999.Connect) !== 0 && h.sequence === 0;
+    if (connect && body.length >= 24) {
+      if (!this.granted) this.onGrant(body);
+      return; // a repeated grant is not the session answering our ack
     }
+    // Anything else after the grant (ServerSwitch, keepalive, data) means the session is live.
+    if (this.granted) this.sessionAnswered = true;
+    if (connect && body.length === 0) { this.sendControl(F1999.Connect | F1999.Checksum); return; }
     if ((h.flags & F1999.ServerSwitch) && h.sequence === 0) { this.sendControl(F1999.ServerSwitch | F1999.Checksum); return; }
     if ((h.flags & F1999.ResendList) && h.sequence === 0) {
       const list = readSeqList1999(body);
@@ -366,6 +399,7 @@ export class Connection1999 implements NetConnection {
     }
     this.recipient = grant.adoptRecipient;
     this.granted = true;
+    this.grantedAt = this.lastAckAt = Date.now();
     this.stopLoginTimer();
     this.sendControl(F1999.Connect | F1999.Checksum);
     this.emit({ type: 'handshakeComplete' });
@@ -420,6 +454,19 @@ export class Connection1999 implements NetConnection {
   private loginTimedOut(): void {
     this.stopLoginTimer();
     this.emit({ type: 'error', error: 'Login timed out', netErrorId: 'ID_ConnectionError_ClientTimedOutServer' });
+    this.disconnect();
+  }
+
+  /**
+   * The grant came but the server has sent nothing since, ack resends
+   * included, for POST_GRANT_WAIT_MS: it dropped the session (see the
+   * constant). Retail's ID_ConnectionError_ServerClosedConnection, "Server
+   * has closed this connection", instead of the connecting screen until the
+   * 60 s timeout.
+   */
+  private sessionNeverStarted(): void {
+    console.warn(`[1999] the server granted the connection, then sent nothing for ${POST_GRANT_WAIT_MS / 1000} s`);
+    this.emit({ type: 'error', error: 'Server closed the connection after the grant', netErrorId: 'ID_ConnectionError_ServerClosedConnection' });
     this.disconnect();
   }
 
@@ -590,6 +637,14 @@ export class Connection1999 implements NetConnection {
 
   private service(now = Date.now()): void {
     if (!this.granted) return;
+    if (!this.sessionAnswered) {
+      if (now - this.grantedAt >= POST_GRANT_WAIT_MS) { this.sessionNeverStarted(); return; }
+      if (now - this.lastAckAt >= POST_GRANT_ACK_RESEND_MS) {
+        this.lastAckAt = now;
+        this.sendControl(F1999.Connect | F1999.Checksum);
+      }
+      return;
+    }
     if (this.highestServerSeq >= this.nextServerSeq && now - this.lastNakAt >= NAK_MIN_MS) {
       const missing: number[] = [];
       for (let s = this.nextServerSeq; s < this.highestServerSeq && missing.length < 0x71; s++) {

@@ -135,7 +135,7 @@ let agentUseDoneTap: ((code: number) => void) | null = null;
 /** The agent's tap on every AttackDone (its WeenieError code), set when the agent API is on. */
 let agentAttackDoneTap: ((code: number) => void) | null = null;
 import { examineText } from './agent/examineText.js';
-import { findRouteViaOutside, loadCellGraph, type CellGraph } from './agent/cellPath.js';
+import { floorsAt, findRouteViaOutside, loadCellGraph, type CellGraph } from './agent/cellPath.js';
 import { RoutineSync } from './agent/RoutineSync.js';
 import { isAutomationCommand } from './ui/automation/AutomationPanel.js';
 import { bridgeConnectApi } from './launcher/ConnectScreen.js';
@@ -145,7 +145,7 @@ import { BackgroundTicker } from './scene/BackgroundTicker.js';
 import { installWorkerTimers, makeTimersWorker } from './scene/workerTimers.js';
 import { ClaudeControl, isTakeoverInput } from './agent/claudeControl.js';
 import { UNPAIR_FRAME, pairFrame, pairingLine, parsePairingCommand, readRelayOptIn, readRevokedBefore, relayOptInKey, writeRelayOptIn, writeRevokedBefore } from './agent/claudePairing.js';
-import { MACRO_DEFAULTS, VT_COMMAND } from './agent/RoutineEngine.js';
+import { MACRO_DEFAULTS, VT_COMMAND, mapCoordsText } from './agent/RoutineEngine.js';
 import { vtankExprHost, vtankExpressions, type MetaGame, type MetaGameObject } from './agent/VtankExprHost.js';
 import { QuestTracker } from './agent/questTracker.js';
 import { metaMovePlan } from './agent/metaItemMove.js';
@@ -386,7 +386,7 @@ import { type RuntimeConfig, assetUrl, loadRuntimeConfig, resolveRuntimeConfig }
 import { startWeenieSideTables, skippedWeenieSideTables, wieldLocationFromMask as wieldLocationFor } from './boot/WeenieSideTables.js';
 import { accountBannedText, accountBootSurface, connectionFailureRecovery } from './session/AccountBoot.js';
 import { characterMessageAccount } from './session/ServerAccountName.js';
-import { logOffCharacter, closeSessionOnUnload } from './session/PlayerModuleSave.js';
+import { logOffCharacter, installUnloadSessionClose } from './session/PlayerModuleSave.js';
 import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLogOff, type RequestLogOffDeps } from './session/LogoutFlow.js';
 import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
@@ -7406,11 +7406,12 @@ async function main() {
   // Disable auto-reconnect — prevents cascading duplicate sessions
   aceConnection.autoReconnect = false;
   // Clean up on page unload to prevent zombie WebSocket connections
-  window.addEventListener('beforeunload', () => {
-    // The dirty PlayerModule goes out before the socket closes (the
-    // pagehide flush runs after this handler, with no connection left).
-    closeSessionOnUnload(gameUI, aceConnection);
-    sessionStorage.setItem('aceDisconnectTime', Date.now().toString());
+  // The dirty PlayerModule goes out before the socket closes (the pagehide
+  // flush runs after this handler, with no connection left); the pre-world
+  // reporter reads the screen before the disconnect tears the world down.
+  installUnloadSessionClose(window, {
+    module: gameUI, connection: aceConnection, reporter: { pageUnloading: () => preworldReporter?.pageUnloading() },
+    after: () => sessionStorage.setItem('aceDisconnectTime', Date.now().toString()),
   });
   // Expose for debugging
   exposeDebugGlobal('__aceConnection', aceConnection);
@@ -15831,6 +15832,15 @@ async function main() {
       agentStarted = true;
       const examined = new Map<number, string>();
       const agentCellGraphs = new Map<number, CellGraph>();
+      // A landblock's cell graph for the agent's routes and map coordinates. One read while a streamed file was still in
+      // flight may lack doors or floors: kept only when complete. The region's LandHeightTable: the terrain under each
+      // outside doorway (which doors the landscape walks up to).
+      const agentCellGraph = (cell: number): CellGraph => {
+        const lb = (cell & 0xffff0000) >>> 0;
+        let g = agentCellGraphs.get(lb);
+        if (!g) { g = loadCellGraph(cellDb, worldPortalDb, lb, { landHeightTable }); if (g.complete !== false) agentCellGraphs.set(lb, g); }
+        return g;
+      };
       const showExamination = gameUI.showExaminationWindow.bind(gameUI);
       gameUI.showExaminationWindow = (view) => { examined.set(view.guid, examineText(view)); showExamination(view); };
       recordQuietExamine = (view) => { examined.set(view.guid, examineText(view)); };
@@ -15931,6 +15941,9 @@ async function main() {
             // The inventory strip's burden (server EncumbranceVal / capacity, gmBackpackUI::SetLoadLevel).
             burden: gameUI['burdenMax'] ? `${Math.round((gameUI['burdenCurrent'] / gameUI['burdenMax']) * 100)}% (${gameUI['burdenCurrent']}/${gameUI['burdenMax']})` : undefined,
             xpTotal: Number(playerState.totalXp), xpUnassigned: Number(playerState.availableXp),
+            xpToNext: gameUI['charInfo'].xpToNextLevel,
+            // The portal XpTable's (0x0E000018) total for the current level, the start of the panel's XP meter.
+            xpLevelStart: (() => { const t = gameUI['levelXpTable']; return t && playerState.level >= 0 && playerState.level < t.length ? Number(t[playerState.level]) : undefined; })(),
           };
         },
         // The effects windows' list (fed by the server's Magic update events). PlayerState's
@@ -16203,14 +16216,9 @@ async function main() {
           ({ accept: cb.onAcceptTrade, decline: cb.onDeclineTrade, reset: cb.onResetTrade, close: cb.onCloseTrade })[action]?.();
           return true;
         },
-        route: (fromCell, from, toCell, to, opts) => {
-          const lb = (fromCell & 0xffff0000) >>> 0;
-          let g = agentCellGraphs.get(lb);
-          // A graph read while a streamed file was still in flight may lack doors: kept only when complete.
-          // The region's LandHeightTable: the terrain under each outside doorway (which doors the landscape walks up to).
-          if (!g) { g = loadCellGraph(cellDb, worldPortalDb, lb, { landHeightTable }); if (g.complete !== false) agentCellGraphs.set(lb, g); }
-          return findRouteViaOutside(g, fromCell, from, toCell, to, opts);
-        },
+        route: (fromCell, from, toCell, to, opts) => findRouteViaOutside(agentCellGraph(fromCell), fromCell, from, toCell, to, opts),
+        // Which room a map coordinate is in (a dungeon's nav point, a spot inside a building): the cells' floors under it.
+        floorsAt: (lb, x, y) => floorsAt(agentCellGraph(lb), x, y),
         // AGENT navigation — the player's body walked from `from` toward `to` by the same substep
         // the held movement keys run (stepPlayerMovement through these collision services), with
         // the floor followed like the real move's; creatures left out (they move) and the shared
@@ -16652,7 +16660,9 @@ async function main() {
           // The VirindiTank window's lines: /vt answers (CommandLine) and `/vt log` (Logging).
           report: (text) => gameUI.addSystemMessage(`[Automation] ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System, 0, null, { plugin: 'VTank', category: vtVcsCategory(text) }),
           character: () => agentApi.snapshot({ max: 0 }).me?.name ?? null,
-          coords: () => agentApi.snapshot({ max: 0 }).me?.coords ?? null,
+          // Precise to centimetres and indoors too (a dungeon's own frame), not the radar's 24 m cell (null indoors).
+          coords: () => { const me = agentApi.snapshot({ max: 0 }).me; return me ? mapCoordsText(me.pos) : null; },
+          height: () => agentApi.snapshot({ max: 0 }).me?.pos.z ?? null,
           now: () => performance.now(),
         });
       }

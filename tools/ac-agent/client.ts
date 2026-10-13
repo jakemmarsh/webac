@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { type DaemonInfo, accountForProfile, listInfos, logFile, readInfo, STATE_DIR } from './state.ts';
 import { agentEra, eraAccount } from './eras.ts';
 import { defaultCharacterName } from './state.ts';
+import type { AgentVitals } from '../../packages/renderer/src/agent/types.ts';
 
 // The repo root (game-session.ts has the same; importing it would load Playwright, which the bridge doesn't carry).
 // Worked out only when a daemon is started: the bridge bundles this module as CommonJS, where import.meta is empty.
@@ -43,6 +44,8 @@ export interface StartOptions {
    * open if needed) the agent Chrome on 127.0.0.1:9222 at https://playwebac.com/?agent.
    */
   attach?: string;
+  /** Attached: drive only the tab in the world as this character (several game tabs in one Chrome, e.g. a stream's two). */
+  attachCharacter?: string;
 }
 
 export const AGENT_CHROME_PORT = 9222;
@@ -112,6 +115,7 @@ export async function startDaemon(opts: StartOptions = {}): Promise<{ info: Daem
   if (existing) return { info: existing, started: false };
   const args = ['tsx', 'tools/ac-agent/daemon.ts', '--profile', profile];
   if (opts.attach) args.push('--attach', opts.attach === 'chrome' ? await ensureAgentChrome() : opts.attach);
+  if (opts.attach && opts.attachCharacter) args.push('--attach-character', opts.attachCharacter);
   // The character and account come from the base profile, not the era-suffixed session name.
   args.push('--character', opts.character ?? defaultCharacterName(base));
   args.push('--account', eraAccount(accountForProfile(base), agentEra(era)));
@@ -163,8 +167,8 @@ export class AgentClient {
   }
 
   /** Click the game window at screenshot pixel (x, y). */
-  async click(x: number, y: number, button: 'left' | 'right' = 'left', modifiers: string[] = []): Promise<void> {
-    const r = await http(this.info, '/click', { x, y, button, modifiers });
+  async click(x: number, y: number, button: 'left' | 'right' = 'left', modifiers: string[] = [], to?: { x: number; y: number }, text?: string): Promise<void> {
+    const r = await http(this.info, '/click', { x, y, button, modifiers, ...(to ? { toX: to.x, toY: to.y } : {}), ...(text ? { text } : {}) });
     if (!r.ok) throw new Error(r.error ?? 'click failed');
   }
 
@@ -176,6 +180,15 @@ export class AgentClient {
 
   async status(): Promise<any> {
     return http(this.info, '/status', undefined, 5000);
+  }
+
+  /**
+   * The character at a glance (vitals, level, XP, where, task, goal), or null outside the world. Read-only and not
+   * an agent call: it never takes the agent's chat (observe does) and never holds off the daemon's idle logout.
+   */
+  async vitals(): Promise<AgentVitals | null> {
+    const r = await http(this.info, '/vitals', undefined, 8000);
+    return r?.ok ? (r.result as AgentVitals | null) : null;
   }
 
   async shutdown(): Promise<void> {

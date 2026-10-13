@@ -62,6 +62,8 @@ import { renderVvsText, vvsFieldStyle, VVS_COLORS, VVS_TAB_PX } from './automati
 import { renderUbMainWindow, UB_MAIN_SIZE, type UbMainSource } from './automation/UbMainWindow.js';
 import { renderVvsBar, VVS_BAR, type VvsBarEntry } from './automation/VvsBar.js';
 import { UB_ICON_PNG } from './automation/ubIcon.js';
+import { redrawKeepingFocus } from './automation/keepFocus.js';
+import { VTANK_ICON_PNG, VHS_ICON_PNG, VIRINDI_UIS_ICON_PNG, VCS_ICON_PNG } from './automation/virindiIcons.js';
 import { MagToolsWindow, MT_FRAME, MT_WINDOW } from './magtools/MagToolsWindow.js';
 import type { MagToolsRuntime } from '../agent/magtools/magToolsRuntime.js';
 import { mtOptionWired } from '../agent/magtools/mtWired.js';
@@ -5419,6 +5421,9 @@ export class GameUI {
     this.hudContainer.style.display = 'block';
     this.renderHUD();
     this.renderViewportFrame();
+    // renderHUD empties the HUD layer. The plugins' bar and windows can already exist by then (the bar is drawn when
+    // the automation source arrives, before the world): put back what is still live, or it stays "open" but unseen.
+    this.reattachPluginLayers();
     // A login hold that reported before the HUD existed (renderHUD rebuilt the power bar).
     if (this.runtimeDDD) this.setRuntimeDDDStatus(true, this.runtimeDDD.done, this.runtimeDDD.total);
     // BUG.config-prefs-applied-on-open — retail applies the saved preferences
@@ -8520,12 +8525,19 @@ export class GameUI {
     // 0x100003de — the EoL CharacterGenerator's own template order); the
     // lit row is the wizard's template_, which FitTemplateToCharacter
     // re-derives from the attributes + skills after every change.
+    //
+    // The 1999 rows reuse the Custom / Bow Hunter descs, whose p73 names an
+    // end-of-retail profession ("Selects Bow Hunter as a profession…") on
+    // every 1999 row. The 1999 client has no per-profession tooltip text to
+    // put there instead, so its rows carry the press but no tooltip.
     const professionBtn = (label: string, templateIndex: number, y: number, elementId: number, w: number): string => {
       const selected = this.wizard.templateIndex === templateIndex;
-      const rowStyle = this.datTextStyleFor(descRef(0x21000047, elementId));
+      const ref = descRef(0x21000047, elementId);
+      const rowStyle = this.datTextStyleFor(ref);
       const stateId = selected ? CHARGEN_ROW_STATE_SELECTED : PROFESSION_ROW_STATE_NORMAL;
+      const tooltipAttrs = this.chargen1999 ? `data-ac-press="${ref}"` : this.datTooltipAttrs(ref);
       return `
-      <button class="template-btn ac-btn" data-template="${templateIndex}" data-profession="${this.chargen1999 ? label : SUMMARY_PROFESSIONS[templateIndex] ?? label}" data-label="${label}" data-element="0x${elementId.toString(16)}" data-ac-state="${stateId.toString(16)}" ${this.datTooltipAttrs(descRef(0x21000047, elementId))} style="
+      <button class="template-btn ac-btn" data-template="${templateIndex}" data-profession="${this.chargen1999 ? label : SUMMARY_PROFESSIONS[templateIndex] ?? label}" data-label="${label}" data-element="0x${elementId.toString(16)}" data-ac-state="${stateId.toString(16)}" ${tooltipAttrs} style="
         position:absolute;left:17px;top:${y}px;width:${w}px;height:54px;cursor:pointer;
         background:transparent;border:none;text-align:left;overflow:visible;
         padding:${rowStyle?.marginTop ?? 7}px 0 0 ${rowStyle?.marginLeft ?? 60}px;display:flex;align-items:center;
@@ -19150,6 +19162,15 @@ export class GameUI {
     };
   }
 
+  /**
+   * XP a skill already holds toward its next rank (_pp beyond table[level]): what using it earned (ACE
+   * Proficiency.OnSuccessUse spends it into the skill). 0 without a _pp or at a rank boundary.
+   */
+  static skillPartFilled(table: number[] | undefined, level: number, pp?: number): number {
+    if (!table || pp === undefined || level < 0 || level + 1 >= table.length) return 0;
+    return Math.max(0, Math.min(pp, table[level + 1]) - table[level]);
+  }
+
   static statRaiseCosts(table: number[] | undefined, raises: number): { cost1: number; cost10: number } {
     if (!table || raises < 0 || raises >= table.length) return { cost1: 0, cost10: 0 };
     const cost1 = raises + 1 < table.length ? table[raises + 1] - table[raises] : 0;
@@ -19328,6 +19349,17 @@ export class GameUI {
     const c = this.charInfo;
     // The XP one more raise costs (the attribute / skill panels' raise cost), so a player sees it before spending.
     const next = (cost: number): string => (cost > 0 ? ` [+1: ${cost.toLocaleString('en-US')} xp]` : '');
+    // A skill used in a fight earns XP into its next rank (ACE Proficiency.OnSuccessUse → HandleActionRaiseSkill), and
+    // retail prices the raise as the rest of it (gmSkillUI::GetCostToRaise: table[level + 1] - _pp), so a +1 can be
+    // tiny and the next one the full step: "21 xp" then 1,660 for Shield read as a wrong estimate (2026-10-13).
+    let partFilled = false;
+    const skillNext = (table: number[] | undefined, s: { raises: number; pp?: number }): string => {
+      const { cost1 } = GameUI.skillRaiseCosts(table, s.raises, s.pp);
+      if (cost1 <= 0) return '';
+      const after = GameUI.skillPartFilled(table, s.raises, s.pp) > 0 ? GameUI.skillRaiseCosts(table, s.raises + 1).cost1 : 0;
+      if (after > 0) partFilled = true;
+      return ` [+1: ${cost1.toLocaleString('en-US')} xp${after > 0 ? `, then ${after.toLocaleString('en-US')}` : ''}]`;
+    };
     const out = [
       `${c.name}  level ${c.level}  ${c.heritage} ${c.gender}  ${c.pkStatus}`,
       `XP ${c.totalXp.toLocaleString()} total, ${c.unassignedXp.toLocaleString()} unassigned, ${c.xpToNextLevel.toLocaleString()} to next level; ${c.skillCredits} skill credits`,
@@ -19337,9 +19369,10 @@ export class GameUI {
     for (const status of ['Specialized', 'Trained']) {
       const list = c.skills.filter((s) => s.status === status);
       const table = status === 'Specialized' ? this.xpCostTables.specializedSkill : this.xpCostTables.trainedSkill;
-      if (list.length) out.push(`${status} skills: ` + list.map((s) => `${s.name} ${s.effective}${s.effective !== s.base ? ` (base ${s.base})` : ''}${next(GameUI.skillRaiseCosts(table, s.raises, s.pp).cost1)}`).join(', '));
+      if (list.length) out.push(`${status} skills: ` + list.map((s) => `${s.name} ${s.effective}${s.effective !== s.base ? ` (base ${s.base})` : ''}${skillNext(table, s)}`).join(', '));
     }
-    out.push('[+1: N xp] is what one more raise costs, what ac_raise spends (the panels\' raise buttons show the same).');
+    out.push('[+1: N xp] is what one more raise costs, what ac_raise spends (the panels\' raise buttons show the same).'
+      + (partFilled ? ' "then N" follows a +1 that only finishes a rank the skill part-filled by being used: the raise after costs the full step.' : ''));
     // Untrained and Unusable rows can be trained with credits (gmSkillUI's untrained footer:
     // "Skill Credits To Train"), so each shows its SkillTable trainedCost: what ac_train_skill spends.
     const trainCost = (id: number) => this.skillTable?.skills.get(id)?.trainedCost ?? 0;
@@ -19449,6 +19482,7 @@ export class GameUI {
     if (at) return at;
     const no = afford(cost1, skill.name);
     if (no) return no;
+    const partFilled = GameUI.skillPartFilled(table, skill.raises, skill.pp) > 0;
     this.raiseCallbacks.onRaiseSkill?.(skill.id, cost1);
     const from = skill.base;
     skill.pp = (skill.pp ?? table?.[skill.raises] ?? 0) + cost1;
@@ -19457,7 +19491,8 @@ export class GameUI {
     skill.effective++;
     // The price of the one after, from the same table: a rank's cost is the XP from what the skill has spent up to
     // the next rank (ACE SpendSkillXp ranks by ExperienceSpent), so XP already in the skill makes a raise cheaper.
-    const r = raised(skill.name, from, cost1);
+    const r0 = raised(skill.name, from, cost1);
+    const r = partFilled ? { ...r0, message: `${r0.message}, the rest of a rank using it had part-filled` } : r0;
     const nextCost = GameUI.skillRaiseCosts(table, skill.raises, skill.pp).cost1;
     return nextCost > 0 ? { ...r, message: `${r.message}; the next +1 costs ${nextCost.toLocaleString()} XP` } : r;
   }
@@ -21497,7 +21532,7 @@ export class GameUI {
       open: (t, w, h, draw, onClosed) => this.openVTankDialog(t, w, h, draw, onClosed), close: () => this.closeVTankDialog(),
       openDesktop: (t, w, h, draw, onClosed) => this.openDesktopDialog(t, w, h, draw, onClosed),
       // The Action History and the remote: windows of their own beside the main one.
-      window: (key, t, w, h, draw) => this.openVTankAux(key, t, w, h, draw), closeWindow: (key) => this.closeVTankAux(key),
+      window: (key, t, w, h, draw) => this.openVTankAux(key, t, w, h, draw, key === 'hotkeys' ? { icon: VHS_ICON_PNG } : {}), closeWindow: (key) => this.closeVTankAux(key),
       showMain: (on) => { if (on) this.openVTankWindow(); else this.closeVTankWindow(); },
       isOpen: (key) => (key === 'main' ? this.vtankEl !== null : this.vtankWindows.has(key)),
     }) : null;
@@ -21505,6 +21540,8 @@ export class GameUI {
     this.automationTimer = source ? setInterval(() => this.tickAutomation(), 1000) : null;
     this.startUbNet(source);
     this.updateAutomationStrip();
+    // The bar is up from login for a preview player: whichever of this and the bridge's preview flag comes second draws it.
+    this.refreshVvsBar();
     this.refreshVvsBar();
   }
 
@@ -21627,7 +21664,7 @@ export class GameUI {
     win.dataset.vtankAux = key;
     win.style.zIndex = '9010';
     const close = () => this.closeVTankAux(key);
-    const redraw = () => draw(body, redraw, close);
+    const redraw = () => redrawKeepingFocus(body, () => draw(body, redraw, close));
     this.hudContainer.appendChild(win);
     this.vtankWindows.set(key, { el: win, redraw });
     redraw();
@@ -21701,18 +21738,19 @@ export class GameUI {
   /** 'on' / 'off' as the player left it; null until a plugin window first opens (retail's screen has no bar). */
   private vvsBarSetting(): string | null { try { return globalThis.localStorage?.getItem(GameUI.VVS_BAR_KEY) ?? null; } catch { return null; } }
 
-  /** A plugin window opened: the bar appears the first time (the player has "installed" the plugins), then follows it. */
+  /** A plugin window opened: the bar marks it open. */
   private vvsWindowShown(): void {
-    if (this.vvsBarSetting() === null) { try { globalThis.localStorage?.setItem(GameUI.VVS_BAR_KEY, 'on'); } catch { /* storage blocked: this page only */ this.vvsBarSessionOn = true; } }
     this.refreshVvsBar();
   }
-  private vvsBarSessionOn = false;
+  /** The bar is up from login, as VVS's is with plugins installed, until `/automation bar` hides it (kept). Where storage is blocked, this page's choice. */
+  private vvsBarChoice: boolean | null = null;
+  private vvsBarShown(): boolean { return this.vvsBarChoice ?? this.vvsBarSetting() !== 'off'; }
 
   /** `/automation bar`: show or hide the bar; the line to print. */
   toggleVvsBar(): string {
-    const on = !(this.vvsBarSetting() === 'on' || this.vvsBarSessionOn);
+    const on = !this.vvsBarShown();
     try { globalThis.localStorage?.setItem(GameUI.VVS_BAR_KEY, on ? 'on' : 'off'); } catch { /* storage blocked */ }
-    this.vvsBarSessionOn = on;
+    this.vvsBarChoice = on;
     this.refreshVvsBar();
     return on ? 'Virindi Views bar shown' : 'Virindi Views bar hidden (/automation bar shows it)';
   }
@@ -21789,7 +21827,7 @@ export class GameUI {
     this.openVTankAux('virindi-uis', 'Virindi UIs', VIRINDI_UIS_SIZE.w, VIRINDI_UIS_SIZE.h, (body, redraw) => renderVirindiUis(body, this.vtankKit(), [
       ...(this.vtankModel ? [{ label: 'VT MiniRemote', on: this.vtankWindows.has('remote'), toggle: () => { if (this.vtankWindows.has('remote')) this.closeVTankAux('remote'); else this.vtankModel?.openRemote(); } }] : []),
       { label: 'Status HUD', on: this.vtankWindows.has('status-hud'), toggle: () => this.toggleStatusHud() },
-    ], redraw), { icon: 'none' });
+    ], redraw), { icon: VIRINDI_UIS_ICON_PNG });
   }
 
   private redrawStatusWindows(): void {
@@ -21833,7 +21871,7 @@ export class GameUI {
   toggleVcsWindow(): void {
     if (this.vtankWindows.has('vcs')) { this.closeVTankAux('vcs'); return; }
     if (!this.previewFeatures) return;
-    this.openVTankAux('vcs', VCS_TITLE, VCS_FRAME.w, VCS_FRAME.h, (body, redraw) => renderVcsWindow(body, this.vtankKit(), this.vcs, this.vcsUi, { sounds: () => this.vcsSounds(), playWave: (w) => this.playVcsWave(w) }, redraw), { icon: 'none' });
+    this.openVTankAux('vcs', VCS_TITLE, VCS_FRAME.w, VCS_FRAME.h, (body, redraw) => renderVcsWindow(body, this.vtankKit(), this.vcs, this.vcsUi, { sounds: () => this.vcsSounds(), playWave: (w) => this.playVcsWave(w) }, redraw), { icon: VCS_ICON_PNG });
   }
 
   /**
@@ -21936,8 +21974,8 @@ export class GameUI {
   private vvsBarEntries(): VvsBarEntry[] {
     const out: VvsBarEntry[] = [];
     if (this.vtankModel) {
-      out.push({ id: 'vtank', plugin: 'VirindiTank', title: 'Automation', icon: null, open: this.vtankEl !== null, toggle: () => this.toggleAutomationWindow() });
-      out.push({ id: 'vhs', plugin: 'Virindi Hotkey System', title: 'Hotkeys', icon: null, open: this.vtankWindows.has('hotkeys'), toggle: () => { if (this.vtankWindows.has('hotkeys')) this.closeVTankAux('hotkeys'); else this.vtankModel?.openHotkeys(); } });
+      out.push({ id: 'vtank', plugin: 'VirindiTank', title: 'Automation', icon: { url: VTANK_ICON_PNG }, open: this.vtankEl !== null, toggle: () => this.toggleAutomationWindow() });
+      out.push({ id: 'vhs', plugin: 'Virindi Hotkey System', title: 'Hotkeys', icon: { url: VHS_ICON_PNG }, open: this.vtankWindows.has('hotkeys'), toggle: () => { if (this.vtankWindows.has('hotkeys')) this.closeVTankAux('hotkeys'); else this.vtankModel?.openHotkeys(); } });
     }
     const store = this.ubSettings;
     if (store) {
@@ -21953,13 +21991,13 @@ export class GameUI {
       // GoArrow's VVS bar button for its arrow ("GoArrow: Arrow"), with its MIT toolbar glyph.
       out.push({ id: 'goarrow-arrow', plugin: 'GoArrow', title: 'GoArrow: Arrow', icon: { url: goArrowGlyphUrl() }, open: rt.settings().visible, toggle: () => { rt.saveSettings({ visible: !rt.settings().visible }); this.refreshVvsBar(); } });
     }
-    // Virindi Chat System 5: its snow globe is Virindi's art, so VVS's no-icon box.
-    if (this.previewFeatures) out.push({ id: 'vcs', plugin: 'Virindi Chat System', title: VCS_TITLE, icon: null, open: this.vtankWindows.has('vcs'), toggle: () => this.toggleVcsWindow() });
+    // Virindi Chat System 5: its snow globe is Virindi's art, so our own stand-in (virindiIcons.ts).
+    if (this.previewFeatures) out.push({ id: 'vcs', plugin: 'Virindi Chat System', title: VCS_TITLE, icon: { url: VCS_ICON_PNG }, open: this.vtankWindows.has('vcs'), toggle: () => this.toggleVcsWindow() });
     if (this.magTools) out.push({ id: 'magtools', plugin: 'Mag-Tools', title: 'Mag-Tools', icon: { dat: MT_WINDOW.icon }, open: this.vtankWindows.has('magtools'), toggle: () => this.toggleMagToolsWindow() });
     if (this.reporter) {
       out.push({ id: 'reporter', plugin: 'VirindiReporter', title: 'VirindiReporter', icon: { dat: REPORTER_ICON }, open: this.vtankWindows.has('reporter'), toggle: () => this.toggleReporterWindow() });
-      // Virindi HUDs' entry opens the Virindi UIs menu; its eye icon is Virindi's art, so VVS's no-icon box.
-      out.push({ id: 'vhuds', plugin: 'Virindi HUDs', title: 'Virindi UIs', icon: null, open: this.vtankWindows.has('virindi-uis'), toggle: () => this.toggleVirindiUis() });
+      // Virindi HUDs' entry opens the Virindi UIs menu; its icon is Virindi's art, so our own stand-in (virindiIcons.ts).
+      out.push({ id: 'vhuds', plugin: 'Virindi HUDs', title: 'Virindi UIs', icon: { url: VIRINDI_UIS_ICON_PNG }, open: this.vtankWindows.has('virindi-uis'), toggle: () => this.toggleVirindiUis() });
     }
     return out;
   }
@@ -21972,9 +22010,17 @@ export class GameUI {
   setPreviewFeatures(on: boolean): void { this.previewFeatures = on; this.refreshVvsBar(); }
   get previewFeaturesOn(): boolean { return this.previewFeatures; }
 
+  /** Put the plugin elements renderHUD swept off the HUD layer back on it (the bar, VirindiTank's windows, UB's maps, meta views). */
+  private reattachPluginLayers(): void {
+    const els: Array<HTMLElement | null> = [this.vtankEl, this.vtankDialogEl, ...[...this.vtankWindows.values()].map((w) => w.el), ...this.ubMapEls.values(), ...this.metaViews.values()];
+    for (const el of els) if (el && !el.isConnected) this.hudContainer.appendChild(el);
+    if (this.vvsBarEl && !this.vvsBarEl.isConnected) { this.vvsBarEl = null; }
+    this.refreshVvsBar();
+  }
+
   /** Draw (or remove) the bar for what is open now. */
   refreshVvsBar(): void {
-    const show = this.previewFeatures && this.automationAvailable && (this.vvsBarSetting() === 'on' || this.vvsBarSessionOn);
+    const show = this.previewFeatures && this.automationAvailable && this.vvsBarShown();
     if (!show) { this.vvsBarEl?.remove(); this.vvsBarEl = null; return; }
     let bar = this.vvsBarEl;
     if (!bar) {
@@ -22160,7 +22206,7 @@ export class GameUI {
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     };
-    const redraw = () => editor.render(area, W - 28, H - 24, redraw, close, pickFiles, exportDoc);
+    const redraw = () => redrawKeepingFocus(area, () => editor.render(area, W - 28, H - 24, redraw, close, pickFiles, exportDoc));
     redraw();
     this.hudContainer.appendChild(win);
     this.automationEditorEl = win;
@@ -22553,7 +22599,7 @@ export class GameUI {
     Object.assign(body.style, { position: 'absolute', left: '6px', top: '29px', width: `${W - 12}px`, height: `${H - 35}px` });
     win.appendChild(body);
     const close = () => this.closeVTankDialog();
-    const redraw = () => draw(body, redraw, close);
+    const redraw = () => redrawKeepingFocus(body, () => draw(body, redraw, close));
     this.hudContainer.appendChild(win);
     this.vtankDialogEl = win;
     this.vtankDialogRedraw = redraw;
@@ -22636,10 +22682,10 @@ export class GameUI {
     // VTank's window is about 800 x 218 at 800 x 600; never wider than the HUD.
     const W = Math.min(806, this.hudLogicalWidth() - 8);
     const H = 224;
-    // VTank's tank icon is Virindi's art: VVS's no-icon box in its place, as on the bar.
-    const { win, body } = this.buildVTankFrame('Automation', W, H, 'acjs.vtankWindow', () => this.closeVTankWindow(), { icon: 'none' });
+    // VTank's tank icon is Virindi's art: our own stand-in (virindiIcons.ts), as on the bar.
+    const { win, body } = this.buildVTankFrame('Automation', W, H, 'acjs.vtankWindow', () => this.closeVTankWindow(), { icon: VTANK_ICON_PNG });
     win.dataset.vtankWindow = '1';
-    const redraw = () => model.render(body, W - 12, H - 35, redraw);
+    const redraw = () => redrawKeepingFocus(body, () => model.render(body, W - 12, H - 35, redraw));
     this.hudContainer.appendChild(win);
     this.vtankEl = win;
     this.vtankRedraw = redraw;
@@ -22718,7 +22764,7 @@ export class GameUI {
     win.dataset.vtankDialog = '1';
     win.style.zIndex = '9050';
     const close = () => this.closeVTankDialog();
-    const redraw = () => draw(body, redraw, close);
+    const redraw = () => redrawKeepingFocus(body, () => draw(body, redraw, close));
     this.hudContainer.appendChild(win);
     this.vtankDialogEl = win;
     this.vtankDialogRedraw = redraw;

@@ -1035,7 +1035,7 @@ describe('AgentApi', () => {
   });
 
   it('raise reports from → to and the total XP, and why it stopped', () => {
-    expect(api.raise('Heavy Weapons', 5).message).toBe('Heavy Weapons 77 → 80 (3 raises, 60 XP); stopped: raising Heavy Weapons costs 90 XP; you have 10 unassigned');
+    expect(api.raise('Heavy Weapons', 5).message).toBe('Heavy Weapons 77 → 80 (3 raises: 20 + 20 + 20 = 60 XP); stopped: raising Heavy Weapons costs 90 XP; you have 10 unassigned');
   });
 
   it('move accepts left/right as strafes and names the valid directions', async () => {

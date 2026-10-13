@@ -240,14 +240,18 @@ export const LOGON_FAILED_HINT = `That usually means a wrong password for this a
  * registration hint on a register-first world. On any other world "Client
  * logon failed" (STR_LOGIN_FAILED) is a wrong password for an existing
  * account (AuthenticateUserQuery::PerformQuery auto-creates unknown names),
- * so it carries LOGON_FAILED_HINT. Anything else, or anything once in the
- * world, is the notice text alone.
+ * so it carries LOGON_FAILED_HINT. A Custom… world whose bridge never
+ * answered (CantSocket) gets customBridgeUnansweredText. Anything else, or
+ * anything once in the world, is the notice text alone.
  */
 export function loginFailureText(
   notice: { readonly token: string; readonly text: string },
-  world: Pick<World, 'name' | 'registration' | 'registrationUrl'> | null,
+  world: (Pick<World, 'name' | 'registration' | 'registrationUrl'> & Partial<Pick<World, 'kind' | 'bridgeUrl'>>) | null,
   inWorld: boolean,
 ): string {
+  // A Custom… world's bridge that never answered: say that, not retail's
+  // "make sure you have a working network" (listed worlds keep retail's text).
+  if (!inWorld && world?.kind === 'custom' && notice.token === 'ID_NetError_CantSocket') return customBridgeUnansweredText(world);
   if (inWorld || !LOGIN_REFUSED_TOKENS.has(notice.token)) return notice.text;
   if (world && worldRegistrationText(world)) return loginTimeoutText(notice.text, world);
   return notice.token === 'ID_ConnectionError_ClientLogOnFailed' ? `${notice.text}\n\n${LOGON_FAILED_HINT}` : notice.text;
@@ -315,11 +319,58 @@ export async function probeCustomBridge(
 }
 
 /**
+ * What Custom… says to an AC game server's own address (what AC players
+ * habitually type: `host:9000`, `1.2.3.4:9050`, `udp://…`). webAC reaches a
+ * server only through a WebSocket bridge, so trying it as `wss://host:9000`
+ * found nothing and the player got retail's CantSocket "Make sure you have a
+ * working network" (production 2026-10-12/13, server=custom-bridge).
+ */
+export const GAME_SERVER_ADDRESS_ERROR =
+  "That looks like a game server's address. Custom… needs the server's own webAC bridge (a wss:// address). "
+  + 'Most servers are already in the world list.';
+
+/** The port range AC game servers listen on (ACE 9000/9001, GDLE 9050, others nearby). */
+const GAME_PORT_MIN = 9000;
+const GAME_PORT_MAX = 9999;
+
+/**
+ * True for a Custom… entry that is an AC game server's address rather than a
+ * bridge's: a udp:// / tcp:// address, or a scheme-less one with a port in
+ * AC's game range or a bare IPv4 host with a port (a wss:// bridge has a
+ * TLS hostname). A plain hostname (bridge on 443), a scheme-less hostname on
+ * another port, and anything written as ws(s):// are left to the parser.
+ */
+export function looksLikeGameServerAddress(input: string): boolean {
+  const v = input.trim();
+  if (/^(udp|tcp):\/\//i.test(v)) return true;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return false;
+  const m = /^([^/:?#\s]+):(\d{1,5})(?:[/?#]|$)/.exec(v);
+  if (!m) return false;
+  const port = Number(m[2]);
+  if (port >= GAME_PORT_MIN && port <= GAME_PORT_MAX) return true;
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(m[1]);
+}
+
+/**
+ * The connect-failure text for a Custom… world whose bridge never answered
+ * (ID_NetError_CantSocket): retail's "Couldn't create local socket. Make
+ * sure you have a working network." blames the player's network, when the
+ * usual cause is an address with no webAC bridge behind it.
+ */
+export function customBridgeUnansweredText(world: Pick<World, 'name' | 'bridgeUrl'>): string {
+  let host = world.name;
+  try { if (world.bridgeUrl) host = new URL(world.bridgeUrl).host || host; } catch { /* keep the name */ }
+  return `No webAC bridge answered at ${host}. A Custom… world needs the wss:// address of the server's own webAC bridge, `
+    + "not its game server address. Check the address with the server's operators, or pick a world from the list.";
+}
+
+/**
  * A "Custom…" bridge address → a custom world, or an error message. wss://
  * always; ws:// only for localhost (a browser on https refuses ws:// anyway).
  */
 export function parseCustomBridge(input: string): { world: World } | { error: string } {
   const v = input.trim();
+  if (looksLikeGameServerAddress(v)) return { error: GAME_SERVER_ADDRESS_ERROR };
   let u: URL;
   try {
     u = new URL(/^[a-z]+:\/\//i.test(v) ? v : `wss://${v}`);

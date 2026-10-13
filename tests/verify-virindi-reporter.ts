@@ -175,6 +175,10 @@ describe('GameUI: Reporter and the Status HUD', () => {
     ui.setPreviewFeatures(true);
     const ids = Array.from(ui.hudContainer.querySelectorAll<HTMLElement>('[data-vvs-bar-entry]')).map((e) => e.dataset.vvsBarEntry);
     expect(ids).toEqual(expect.arrayContaining(['vtank', 'vhs', 'reporter', 'vhuds']));
+    // VTank, the Hotkey System and Virindi UIs show our own stand-in icons, each a different image, never the coral box.
+    const bg = ['vtank', 'vhs', 'vhuds'].map((id) => ui.hudContainer.querySelector<HTMLElement>(`[data-vvs-bar-entry="${id}"]`)!.style.backgroundImage);
+    expect(bg.every((b) => b.startsWith('url(') && b.includes('data:image/png'))).toBe(true);
+    expect(new Set(bg).size).toBe(3);
     ui.toggleAutomationWindow();
     ui.setPreviewFeatures(false);
     ui.setAutomationSource(null);

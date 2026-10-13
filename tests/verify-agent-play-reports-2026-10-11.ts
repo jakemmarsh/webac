@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentApi, compassToYaw, parseOffset } from '../packages/renderer/src/agent/AgentApi.ts';
-import { TOOLS, waitFilter } from '../tools/ac-agent/tools.ts';
+import { INCOMING_TELL, TOOLS, waitFilter } from '../tools/ac-agent/tools.ts';
 import { FakeHost, HOLTBURG, run } from './_harness/agentFake.ts';
 
 describe('agent play reports 2026-10-11', () => {
@@ -24,7 +24,7 @@ describe('agent play reports 2026-10-11', () => {
   it('ac_wait types=chat,tell wakes on every chat line, a fellowship one included (types=tell alone still means tells)', async () => {
     expect(waitFilter({ types: 'chat,tell' })).toEqual({ types: ['chat'] });
     expect(waitFilter({ types: 'tell,chat,death' })).toEqual({ types: ['chat', 'death'] });
-    expect(waitFilter({ types: 'tell' })).toEqual({ chatMatch: '^\\(tell\\) ' });
+    expect(waitFilter({ types: 'tell' })).toEqual({ chatMatch: INCOMING_TELL });
     api.observe();
     const w = api.wait(waitFilter({ types: 'chat,tell,task-done' }) as Parameters<AgentApi['wait']>[0], 45_000);
     await vi.advanceTimersByTimeAsync(5000);

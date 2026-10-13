@@ -242,6 +242,12 @@ export function chargenStepName(step: number): ChargenStepName | null {
 }
 
 /** A code-shaped token (ID_NetError_CantSocket, CharacterError names); anything else is dropped. */
+/** Client-side NetErrors that report the server refusing the login (see connectionError). */
+const SERVER_REFUSAL_NET_ERRORS: ReadonlySet<string> = new Set([
+  'ID_ConnectionError_NetVersionMismatch',
+  'ID_ConnectionError_ServerClosedConnection',
+]);
+
 function safeToken(t: string | null | undefined): string | null {
   return t && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(t) ? t : null;
 }
@@ -309,6 +315,8 @@ export class PreworldReporter {
   private screenSince: number;
   private readonly hiddenOn = new Set<string>();
   private left = false;
+  /** The screen when the page began to unload (pageUnloading): every later sample reads it. */
+  private unloadSample: { screen: PreworldScreen; step: ChargenStepName | null } | null = null;
   private stage: BootStage = 'capability';
   private patchTotal = -1;
   private patchDone = 0;
@@ -428,10 +436,12 @@ export class PreworldReporter {
       });
       return;
     }
-    // The AC1999 server's version-reject grant is the server saying no; the rest are the client giving up
-    // (no socket: ID_NetError_CantSocket; no answer: ID_ConnectionError_ClientTimedOutServer).
+    // The AC1999 server's version-reject grant, and its grant followed by silence (a session it dropped
+    // at once, e.g. a banned account: ID_ConnectionError_ServerClosedConnection), are the server saying
+    // no; the rest are the client giving up (no socket: ID_NetError_CantSocket; no answer:
+    // ID_ConnectionError_ClientTimedOutServer).
     if (event.netErrorId) {
-      this.report(event.netErrorId === 'ID_ConnectionError_NetVersionMismatch' ? 'login_refused' : 'connect_failed', { token: safeToken(event.netErrorId) });
+      this.report(SERVER_REFUSAL_NET_ERRORS.has(event.netErrorId) ? 'login_refused' : 'connect_failed', { token: safeToken(event.netErrorId) });
     }
   }
 
@@ -533,6 +543,7 @@ export class PreworldReporter {
 
   /** Re-read the screen; resets the time-on-screen clock when it changed. Cheap; call often. */
   sample(): { screen: PreworldScreen; step: ChargenStepName | null } {
+    if (this.unloadSample) return { ...this.unloadSample };
     let screen: PreworldScreen = 'boot';
     let step: ChargenStepName | null = null;
     try { screen = this.opts.screen(); } catch { /* keep boot */ }
@@ -561,6 +572,24 @@ export class PreworldReporter {
     if (!PRE_WORLD.has(screen)) return;
     this.left = true;
     this.report('page_left', {});
+  }
+
+  /**
+   * The page began to unload (beforeunload), called BEFORE the unload path
+   * logs the character off (session/PlayerModuleSave.ts
+   * installUnloadSessionClose). That logoff tears the world down
+   * (gameStarted false, the session gone), so a screen read afterwards says
+   * 'connecting' and every in-world tab close used to report a pre-world
+   * page_left (production, build aaa40225). The screen is fixed here, as the
+   * player left it: from the world nothing more is reported (no page_left,
+   * no page_hidden); from a pre-world screen the pagehide that follows
+   * reports that screen.
+   */
+  pageUnloading(): void {
+    if (this.unloadSample) return;
+    const s = this.sample();
+    this.unloadSample = s;
+    if (!PRE_WORLD.has(s.screen)) this.left = true;
   }
 
   /**

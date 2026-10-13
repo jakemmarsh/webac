@@ -10,6 +10,7 @@ import {
 } from '@ac/shared';
 import { VcsActions, VCS_ACTION_MIN_MS, vcsAcPreset } from '../packages/renderer/src/ui/automation/VcsWindow.js';
 import { evasionAttackerLine, evasionDefenderLine } from '../packages/renderer/src/ui/ServerMessageText.js';
+import { VCS_ICON_PNG } from '../packages/renderer/src/ui/automation/virindiIcons.js';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
 
 class Mem { m = new Map<string, string>(); getItem(k: string) { return this.m.get(k) ?? null; } setItem(k: string, v: string) { this.m.set(k, v); } }
@@ -243,10 +244,13 @@ describe('GameUI hosting', () => {
     await new Promise((r) => setTimeout(r, 5));
     const entry = ui.hudContainer.querySelector<HTMLElement>('[data-vvs-bar-entry="vcs"]');
     expect(entry).not.toBeNull();
-    expect(entry!.children.length).toBe(1); // the coral no-icon box
+    // Our own stand-in globe (virindiIcons.ts), not VVS's coral no-icon box.
+    expect(entry!.style.backgroundImage).toContain(VCS_ICON_PNG.slice(0, 40));
+    expect(entry!.children.length).toBe(0);
     entry!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     const win = () => ui.hudContainer.querySelector<HTMLElement>('[data-vtank-aux="vcs"]')!;
     expect(win()).not.toBeNull();
+    expect(win().querySelector<HTMLElement>('[data-vvs-title-icon]')?.dataset.vvsTitleIcon).toBe('image');
     expect(Array.from(win().querySelectorAll<HTMLElement>('[data-vcs-tab]')).map((t) => t.dataset.vcsTab)).toEqual(['Presets', 'Patterns', 'Actions']);
     // VTank's six rows come before AC's four.
     const rows = Array.from(win().querySelectorAll<HTMLElement>('[data-vcs-preset]')).map((r) => r.dataset.vcsPreset);

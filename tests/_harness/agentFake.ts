@@ -165,6 +165,8 @@ export class FakeHost implements AgentHost {
   fellows: AgentHost['fellows'] = undefined;
   /** Whether an interior cell is a dungeon's (not SeenOutside); unset = the host can't say. */
   cellSealed: AgentHost['cellSealed'] = undefined;
+  /** The rooms' floors under a landblock-local point (map coordinates in a dungeon); unset = the host can't say. */
+  floorsAt: AgentHost['floorsAt'] = undefined;
   /** The landscape at a global point (open sea, too steep, the wade); unset = the host can't say. */
   navTerrain: AgentHost['navTerrain'] = undefined;
   /** Optional walls (landblock-local x, y → blocked): the body stops at them, and navProbe sees them. */
