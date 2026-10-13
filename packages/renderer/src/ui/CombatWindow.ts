@@ -1,3 +1,5 @@
+import { CombatMode } from '@ac/shared';
+
 /**
  * The EoL combat window (gmFloatyCombatUI) that hosts the spell bar and the
  * melee combat bar (BUG.spellbar-classic-clip):
@@ -23,3 +25,57 @@ export const COMBAT_WINDOW = {
   bottom: 110,
   body: { x: 5, y: 5, w: 600, h: 80 },
 } as const;
+
+/** Resize limits of the window root 0x100006a4 (p63 / p62 min, p61 / p60 max). */
+export const COMBAT_WINDOW_LIMITS = { minW: 410, minH: 70, maxW: 3000, maxH: 90 } as const;
+
+/** The frame round the body: 5 px on every side (body (5,5) in a 610x90 window). */
+const COMBAT_WINDOW_FRAME = COMBAT_WINDOW.width - COMBAT_WINDOW.body.w;
+
+export interface CombatWindowGeometry { x?: number; y?: number; w?: number; h?: number }
+
+export interface CombatWindowPlacement {
+  /** Null when nothing is persisted: the authored centred-above-the-bottom slot stands. */
+  x: number | null;
+  y: number | null;
+  w: number;
+  h: number;
+  body: { w: number; h: number };
+}
+
+const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * gmFloatyCombatPanelUI::UpdateFromPlayerModule @ 004d4e10: with options
+ * 0x10000086/87 persisted under WindowID 15 it calls MoveTo(x, y), with
+ * 0x10000088/89 ResizeTo(w, h). MoveTo @ 004d5190 clamps x into
+ * [0, parentW − w] and y into [0, parentH − h] (the low bound wins), so a
+ * position saved on a bigger screen (a retail 1920x1200 layout, a larger
+ * browser window) lands on this one; ResizeTo is held to the root's
+ * min/max size. Without the clamp a long-played character's combat and
+ * spell bars sat below the bottom of the screen (webac#2).
+ */
+export function combatWindowPlacement(geo: CombatWindowGeometry, screenW: number, screenH: number): CombatWindowPlacement {
+  const L = COMBAT_WINDOW_LIMITS;
+  const w = finite(geo.w) ? Math.round(Math.max(L.minW, Math.min(L.maxW, geo.w))) : COMBAT_WINDOW.width;
+  const h = finite(geo.h) ? Math.round(Math.max(L.minH, Math.min(L.maxH, geo.h))) : COMBAT_WINDOW.height;
+  const body = { w: w - COMBAT_WINDOW_FRAME, h: h - COMBAT_WINDOW_FRAME };
+  if (!finite(geo.x) || !finite(geo.y)) return { x: null, y: null, w, h, body };
+  return {
+    x: Math.round(Math.max(0, Math.min(geo.x, screenW - w))),
+    y: Math.round(Math.max(0, Math.min(geo.y, screenH - h))),
+    w, h, body,
+  };
+}
+
+/**
+ * gmCombatUI::RecvNotice_SetCombatMode @ 004cc620: the melee/missile combat
+ * bar page shows only in melee (state 0x10000003) or missile (0x10000004)
+ * mode AND with the Advanced Combat Interface option OFF; with it on the
+ * page hides (SetVisible(0)) and attacks charge on the floaty power bar
+ * instead (PBM_ADVANCED_COMBAT, gmPowerbarUI::RecvNotice_BeginPowerbar
+ * @ 004da730).
+ */
+export function combatBarPageVisible(combatMode: CombatMode, advancedCombatUI: boolean): boolean {
+  return !advancedCombatUI && (combatMode === CombatMode.Melee || combatMode === CombatMode.Missile);
+}

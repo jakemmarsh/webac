@@ -389,6 +389,7 @@ import { logOffCharacter, closeSessionOnUnload } from './session/PlayerModuleSav
 import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLogOff, type RequestLogOffDeps } from './session/LogoutFlow.js';
 import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
+import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, serverIdFromUrl, type ChargenStepName, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen } from './boot/Capability.js';
 import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
 
@@ -769,6 +770,12 @@ let runtimeConfig: RuntimeConfig = resolveRuntimeConfig(null, typeof location !=
 let errorReporter: ErrorReporter | null = null;
 /** The screen name crash reports carry; main() points it at updateScreen once that exists. */
 let reportScreen: () => string = () => 'boot';
+/** RELEASE.preworld-outcomes — pre-world outcome events to the bridge (telemetry/PreworldReporter.ts); set at boot. */
+let preworldReporter: PreworldReporter | null = null;
+/** The pre-world screen and launcher world id those events carry; the ACE section points them at its state. */
+let preworldScreen: () => PreworldScreen = () => 'boot';
+let preworldServer: () => string | null = () => null;
+let preworldChargenStep: () => ChargenStepName | null = () => null;
 
 // ─── Era (docs/dark-majesty-support.md, era/EraBoot.ts) ──────────────
 // One era's DATs per page load. main() resolves the boot era before any DAT
@@ -876,7 +883,7 @@ function cancelPatch(): void {
   splashScaleCleanup?.();
   splashScaleCleanup = null;
   loadingOverlay.replaceChildren(buildEpilogueFrame({
-    onExit: () => { console.log('[AC] epilogue: Device::Done — relaunching'); window.location.reload(); },
+    onExit: () => { console.log('[AC] epilogue: Device::Done — relaunching'); preworldReporter?.leavingForReload('epilogue'); window.location.reload(); },
   }));
 }
 
@@ -931,6 +938,8 @@ function setPatchConnectLevel(level: number): void {
 /** gmDataPatchUI::OnDDDEvent, held by the gate until the connect level is 1.0. */
 function onPatchEvent(event: PatchEvent): void {
   if (patchCancelled || !patchScreenActive) return;
+  // RELEASE.preworld-boot-stage — the boot's own progress, ahead of the connect gate.
+  preworldReporter?.bootPatchEvent(event);
   if (quietPatch) {
     // An era-switch boot: no meters, no connect gate — just the line for a slow download.
     quietPatch.onEvent(event);
@@ -1058,6 +1067,30 @@ let blockingForCells: () => boolean = () => false;
 /** Bytes the patch meter's DDD_PatchtimeBegin has announced so far (whole DATs + every set opened). */
 let patchMeterAnnounced = 0;
 
+/**
+ * RELEASE.preworld-boot-stage — what this boot's DAT loads served from the
+ * network vs the browser cache: whole DATs by file (the interrogation), each
+ * streamed set by bytes (its store's stats). Feeds the reporter's cold / warm verdict.
+ */
+const bootCacheTally = { whole: { net: 0, cache: 0 }, sets: new Map<string, { net: number; cache: number }>() };
+function noteBootCache(): void {
+  let net = bootCacheTally.whole.net;
+  let cache = bootCacheTally.whole.cache;
+  for (const t of bootCacheTally.sets.values()) { net += t.net; cache += t.cache; }
+  preworldReporter?.bootCache(bootCacheVerdict({ storage: datCacheStore.available, fromNetwork: net, fromCache: cache }));
+}
+function noteWholeCache(interrogations: ReadonlyArray<{ source: 'network' | 'cache' }>): void {
+  bootCacheTally.whole = {
+    net: interrogations.filter((i) => i.source === 'network').length,
+    cache: interrogations.filter((i) => i.source === 'cache').length,
+  };
+  noteBootCache();
+}
+function noteSetCache(scope: string, stats: { netBytes: number; cacheBytes: number }): void {
+  bootCacheTally.sets.set(scope, { net: stats.netBytes, cache: stats.cacheBytes });
+  noteBootCache();
+}
+
 async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope; wholeBytes?: number } = {}): Promise<StreamingDats> {
   const t0 = performance.now();
   const scope = opts.scope ?? 'all';
@@ -1078,6 +1111,7 @@ async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope;
       if (done > reported) { onPatchEvent({ kind: 'downloaded', bytes: done - reported }); reported = done; }
     },
     onBootPacks: (store) => {
+      noteSetCache(scope, store.stats);
       console.log(`[AC:DatStream] boot packs resident in ${Math.round(performance.now() - t0)} ms (net ${store.stats.netBytes} B / ${store.stats.netObjects} objects, cache ${store.stats.cacheBytes} B)`);
       if (scope === 'world' || !patchPlan.splash) return; // the splash is the interface's
       try {
@@ -1091,6 +1125,7 @@ async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope;
   if (patchCancelled) throw patchAbortError();
   if (!begun && wholeBytes > 0) { patchMeterAnnounced += wholeBytes; onPatchEvent({ kind: 'begin', expected: patchMeterAnnounced }); }
   const st = s.store.stats;
+  noteSetCache(scope, st);
   console.log(`[AC:DatStream] set ${s.store.pointer.set}${opts.scope && opts.scope !== 'all' ? ` (${opts.scope})` : ''}: char-select set resident in ${Math.round(performance.now() - t0)} ms (net ${st.netBytes} B / ${st.netObjects} objects, cache ${st.cacheBytes} B / ${st.cacheObjects} objects, ${s.bootReport.preWorldArtFiles} pre-world art files); ${s.bootReport.worldCached ? 'world + terrain packs loaded from the object cache too (warm profile)' : 'world + terrain packs continue in the background'}`);
   return s;
 }
@@ -1151,16 +1186,30 @@ async function main() {
   });
   errorReporter.install(window);
   errorReporter.watchCanvas(canvas);
+  preworldReporter = new PreworldReporter({
+    endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
+    build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
+    era: () => activeEra.id,
+    server: () => preworldServer(),
+    screen: () => preworldScreen(),
+    chargenStep: () => preworldChargenStep(),
+  });
+  preworldReporter.install(window, document);
 
   // RELEASE.capability-check — before the patch screen downloads anything.
+  // RELEASE.preworld-boot-stage — each await below names its boot stage on the reporter.
+  preworldReporter.bootStage('capability');
   const capabilityIssues = capabilityProblems(probeCapabilities(window));
+  preworldReporter.capabilityIssues(capabilityIssues.map(p => p.id));
   if (capabilityIssues.length > 0) {
     console.warn(`[AC] browser capability: ${capabilityIssues.map(p => `${p.id}${p.hard ? ' (blocking)' : ''}`).join(', ')}`);
     if (capabilityIssues.some(p => p.hard)) {
       errorReporter.report('boot', `unsupported browser: ${capabilityIssues.filter(p => p.hard).map(p => p.id).join(', ')}`);
     }
+    preworldReporter.bootStage('capability_prompt');
     await showCapabilityScreen(document, capabilityIssues);
   }
+  preworldReporter.bootStage('era');
 
   // ── Era: which DAT set this page load uses (era/EraBoot.ts) ──
   {
@@ -1204,6 +1253,7 @@ async function main() {
     void forgetImportedEraFiles(datCacheStore).then((n) => { if (n) console.log(`[AC:Era] removed ${n} imported classic DAT file(s) from browser storage`); });
   }
 
+  preworldReporter.bootStage('patch_check');
   // ── CORE.17.k.b.b.a.a.a — gmDataPatchUI's two meters ──────────────
   // The ctor: SetConnectLevel(0.0) → "Connect progress" at 0; the patch
   // text is its own p23 "Update progress" until the first DDD event.
@@ -1263,6 +1313,8 @@ async function main() {
   if (runtimeConfig.datSet) {
     onPatchEvent({ kind: 'interrogation' });
     interrogations = await interrogate();
+    noteWholeCache(interrogations);
+    preworldReporter.bootStage('patch_download');
     const wholeBytes = interrogations.reduce((sum, i) => sum + (i.source === 'network' ? Math.max(i.size, 0) : 0), 0);
     // An era's own world set (AC1999) boots beside the interface set, not after it:
     // its boot packs are small, and waiting in line cost ~30 s on a cold edge (2026-10-06).
@@ -1279,6 +1331,8 @@ async function main() {
     if (patchCancelled) throw patchAbortError();
     onPatchEvent({ kind: 'interrogation' });
     interrogations = await interrogate();
+    noteWholeCache(interrogations);
+    preworldReporter.bootStage('patch_download');
   }
   if (patchCancelled) throw patchAbortError();
   const patchExpectedBytes = interrogations.reduce((sum, i) => sum + (i.source === 'network' ? Math.max(i.size, 0) : 0), 0);
@@ -1356,6 +1410,7 @@ async function main() {
   // has no text of its own (retail sits on this line until UseTime queues
   // the character screen).
   onPatchEvent({ kind: 'end' });
+  preworldReporter.bootStage('side_tables');
   await new Promise(r => setTimeout(r, 50));
 
   // The era's missing features (era/EraFeatures.ts): fixed for the page load.
@@ -1413,6 +1468,7 @@ async function main() {
     console.warn('[AC] weenie-weapon-time.json not found — melee swing speed will use the unarmed default');
   }
 
+  preworldReporter.bootStage('dat_parse');
   const cellDb = worldStreamingDats ? worldStreamingDats.cell : new DatDatabase(cellBuf!);
   const langDb = streamed ? streamed.local : langBuf ? new DatDatabase(langBuf) : null;
   const worldPortalDb = worldPortalBuf ? new DatDatabase(worldPortalBuf)
@@ -1782,6 +1838,7 @@ async function main() {
   }
 
   // ── Scene setup ─────────────────────────────────────────────────
+  preworldReporter.bootStage('renderer_init');
   await new Promise(r => setTimeout(r, 50));
 
   // VISUAL.fog-sky-tint-towns — D3D linear range fog (RetailFog.ts), before any program compiles.
@@ -2012,6 +2069,7 @@ async function main() {
   // character select; they build once it is resident (streamedWorldReady,
   // awaited before chargen and before entering the world). Whole DATs: now.
   const deferredWorldInit: Array<{ label: string; run: () => void }> = [];
+  preworldReporter.bootStage('world_init');
   // A warm profile had the world packs locally and boot loaded them: build now (+ the sky's closure first).
   const worldInline = !worldStreamingDats || worldStreamingDats.worldPacksResident();
   if (worldStreamingDats && worldInline) {
@@ -4802,7 +4860,9 @@ async function main() {
   // gmDataPatchUI::UseTime queues the character screen only once BOTH levels
   // are 1.0: the patch is done above, the connect probe settles here (its
   // 3 s timeout bounds a dead bridge).
+  preworldReporter.bootStage('bridge_probe');
   await connectProbe;
+  preworldReporter.bootStage('ui_init');
   if (patchCancelled) throw patchAbortError();
   patchScreenActive = false;
   if (quietPatchTimer !== null) { clearTimeout(quietPatchTimer); quietPatchTimer = null; }
@@ -5100,6 +5160,7 @@ async function main() {
     gameplayUi.enter();
     gameLoop.start();
     gameStarted = true;
+    preworldReporter?.enteredWorld();
     // CORE.17.k — retail gmUIElement_LinkStatusIndicator::UseTime: feed the
     // LinkStatusHolder sample (connected + seconds since the last packet)
     // to the 4-state model every frame-ish; the model itself re-evaluates
@@ -7215,6 +7276,20 @@ async function main() {
     return sessionConnected() ? 'char-select' : 'loading';
   };
   reportScreen = updateScreen;
+  preworldServer = () => serverIdFromUrl(connectUrl);
+  // The launcher closed on a world of another era: still the server select until the reload (switchEraFor).
+  let eraSwitchPending = false;
+  preworldScreen = () => preworldScreenFor({
+    gameStarted,
+    disconnected: gameUI.disconnectedScreenShown,
+    launcherActive,
+    eraSwitchPending,
+    uiScreen: gameUI.ui.currentScreen ?? null,
+    portalSpace: gameUI.worldHiddenByPortalSpace,
+    charListReceived: preworldReporter?.characterListReceived ?? false,
+  });
+  gameUI.onRelaunch = () => preworldReporter?.leavingForReload('epilogue');
+  preworldChargenStep = () => chargenStepName(gameUI.chargenStep);
   const applyUpdatePolicy = (): void => {
     const action = decideUpdateAction({
       pending: updateWatcher.pendingVersion,
@@ -7224,6 +7299,7 @@ async function main() {
     });
     if (action.kind === 'reload') {
       console.log('[AC] update: new build — reloading at the launcher');
+      preworldReporter?.leavingForReload('update');
       window.location.reload();
     } else if (action.kind === 'notify') {
       updateNotified = true;
@@ -7248,6 +7324,7 @@ async function main() {
   const reloadIfUpdatePending = (): boolean => {
     if (!reloadAtBreak(updateWatcher.pendingVersion)) return false;
     console.log('[AC] update: new build — reloading on the way to the launcher');
+    preworldReporter?.leavingForReload('update');
     window.location.reload();
     return true;
   };
@@ -7272,6 +7349,7 @@ async function main() {
       account: choice.account, password: choice.password, at: Date.now(),
     });
     console.log(`[AC:Era] ${choice.world.name} needs ${target.name} — reloading into its data`);
+    preworldReporter?.leavingForReload('era_switch');
     window.location.reload();
     return true;
   };
@@ -7288,7 +7366,9 @@ async function main() {
       launcherActive = false;
       const target = eraProfile(choice.world.era) ?? activeEra;
       if (target.id !== activeEra.id) {
+        eraSwitchPending = true;
         const leaving = await switchEraFor({ ...choice, worldKey: worldKeyOf(choice.world) }, target);
+        eraSwitchPending = leaving;
         // A reload is under way: never connect from this page.
         if (leaving) await new Promise<never>(() => {});
         continue;
@@ -7352,7 +7432,8 @@ async function main() {
   // RELEASE.gdle-30s-idle-drop — the session connection runs in a Web Worker
   // so ACKs and the ~3 s keepalive keep flowing through long main-thread
   // tasks (network/NetWorkerClient.ts); ?networker=0 keeps it on the page.
-  const { connection: aceConnection, inWorker: netInWorker } = createNetConnection(connectUrl, {
+  // RELEASE.preworld-outcomes — the page's trace id rides on the socket URL (the bridge logs it on session_open).
+  const { connection: aceConnection, inWorker: netInWorker } = createNetConnection(preworldReporter?.tagUrl(connectUrl) ?? connectUrl, {
     search: window.location.search,
     loginProfile: activeEra.login,
     inThread: (url) => createConnection(url, { loginProfile: activeEra.login }),
@@ -7497,7 +7578,7 @@ async function main() {
     sessionStorage.setItem('aceDisconnectTime', Date.now().toString());
     if (reloadIfUpdatePending()) return;
     void runLauncher().then(() => {
-      aceConnection.setUrl(connectUrl);
+      aceConnection.setUrl(preworldReporter?.tagUrl(connectUrl) ?? connectUrl);
       exposeDebugGlobal('__aceAccount', aceAccount);
       gameUI.showConnectingScreen();
       gameUI.setWorldName(launcherWorldName ?? '');
@@ -11457,6 +11538,8 @@ async function main() {
         // (wrong password) used to leave "Please Wait" up forever.
         const text = accountBootedText(data.reason);
         console.warn(`[AC] AccountBoot: ${text}`);
+        // RELEASE.preworld-outcomes — a closed code for the reason, never its text.
+        if (!gameStarted) preworldReporter?.accountBoot(data.reason);
         if (accountBootSurface({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
           returnToLauncher(text);
         } else {
@@ -11470,6 +11553,7 @@ async function main() {
         // before it drops the session, so a chat line was never seen.
         const text = accountBannedText(data.secondsUntilExpiry, data.reason, Date.now());
         console.warn(`[AC] AccountBanned: ${text}`);
+        if (!gameStarted) preworldReporter?.accountBanned(data.secondsUntilExpiry);
         if (accountBootSurface({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
           returnToLauncher(text);
         } else {
@@ -12744,6 +12828,13 @@ async function main() {
       autoRepeat: () => !!gameUI.optionsSettings.repeatAttacks,
       sendAttack: (_mode, target, height, power) => initiateMeleeAttack(target, power, height),
       setPowerBarLevel: (level) => gameUI.setCombatPowerBarLevel(level),
+      // webac#2 — the Advanced Combat Interface option (CharacterOptions1
+      // 0x1000): SetCombatMode latches it; its builds drive the floaty power
+      // bar (PBM_ADVANCED_COMBAT) and the combat bar page hides.
+      advancedCombatUI: () => !!gameUI.optionsSettings.advancedCombatUI,
+      beginAdvancedPowerBar: (mode) => gameUI.showPowerBar(mode),
+      setAdvancedPowerBarLevel: (level) => gameUI.setPowerBarLevelIfShowing(['melee', 'missile'], level),
+      finishAdvancedPowerBar: () => gameUI.finishPowerBar(['melee', 'missile']),
       showError: (text) => gameUI.displayErrorText(text),
       sendCancelAttack: () => { if (sendGameAction) sendGameAction(GameActionType.CancelAttack, new Uint8Array(0)); },
       autoTarget: () => !!gameUI.optionsSettings.autoTarget,
@@ -12935,6 +13026,7 @@ async function main() {
         return;
       }
       sessionLifecycle.noteEnterWorldRequested(parseInt(slot.id, 10));
+      preworldReporter?.enterRequested();
       // RELEASE.streaming-charselect-weight — the world packs (portal space,
       // terrain materials, HUD art) load behind character select: resident first.
       if (streamedWorldReady) await streamedWorldReady;
@@ -16616,6 +16708,7 @@ async function main() {
       switch (event.type) {
         case 'connected':
           console.log('[AC] ACE: WebSocket connected to bridge');
+          preworldReporter?.loginStarted();
           // FAITHFUL.260 — light the 'connection' status-bar indicator so the
           // player can see at a glance that the WS-to-bridge link is up.
           gameUI.setIndicatorActive('connection', true);
@@ -16652,6 +16745,7 @@ async function main() {
           if (launcherActive) break;
           aceCharList = parseCharacterList(event.data as Uint8Array);
           aceServerAccount = aceCharList.accountName || null;
+          preworldReporter?.characterList(aceCharList.characters.length);
           console.log(`[AC] ACE: Got character list — ${aceCharList.characters.length} characters on account "${aceCharList.accountName}" (${aceCharList.slotCount} slots)`);
           // CPlayerSystem::m_accountHasThroneofDestiny — the chargen Random
           // rolls (heritage / town) read it (CORE.17.k.b.b.a.f.d).
@@ -16725,6 +16819,7 @@ async function main() {
           // Handle_CharGenVerificationResponse @ 0055e8b0: every reply puts
           // the verification state back to UNDEF (FINISH may send again).
           gameUI.noteCharGenVerificationResponse();
+          preworldReporter?.chargenResult(response.responseCode);
           if (response.responseCode === CharacterGenerationVerificationResponse.Ok) {
             // Success!
             console.log(`[AC] ACE: Character created! GUID=0x${response.characterGuid?.toString(16)} (${response.characterGuid}) name="${response.characterName}"`);
@@ -16746,6 +16841,7 @@ async function main() {
               // Remember it as the character to resume after a drop, as a
               // character-select entry does (it never was on this path).
               sessionLifecycle.noteEnterWorldRequested(aceCharGuid);
+              preworldReporter?.enterRequested();
               const requestMsg = buildCharacterEnterWorldRequest();
               aceConnection.sendMessage(requestMsg, GameMessageGroup.UIQueue);
             }
@@ -17134,6 +17230,7 @@ async function main() {
           if (event.everOpened && !event.deliberate) {
             // In the world (or mid-resume): reconnect and re-enter on our own first.
             if (droppedInWorld && scheduleResume()) break;
+            if (!droppedInWorld) preworldReporter?.dropped();
             raiseServerDied();
           }
           break;
@@ -17208,6 +17305,7 @@ async function main() {
             // The enter is over (a refusal the player can answer by trying again).
             if (!sessionLifecycle.inWorld) sessionLifecycle.noteEnterRefused();
             const notice = characterErrorNotice(code);
+            if (!gameStarted) preworldReporter?.connectionError(event, notice.token || null);
             if (notice.surface === 'disconnected') {
               raiseServerDied(notice.text);
             } else if (notice.surface === 'dialog') {
@@ -17237,9 +17335,11 @@ async function main() {
             // RELEASE.gdle-login-neterror — or the server refused the login
             // with a NetError (ClientNet::EndState @ 00543380), e.g. GDLE's
             // STR_LOGIN_FAILED = "Client logon failed".
-            raiseNetError(event.serverNetError
+            const netNotice = event.serverNetError
               ? serverNetErrorNotice(event.serverNetError.stringId, event.serverNetError.tableId)
-              : netErrorNotice(event.netErrorId!));
+              : netErrorNotice(event.netErrorId!);
+            if (!gameStarted) preworldReporter?.connectionError(event, netNotice.token || null);
+            raiseNetError(netNotice);
             break;
           }
           // Anything else (a WebSocket error on a live socket) is followed by
@@ -19153,6 +19253,8 @@ main().catch(err => {
   if (isPatchAbort(err)) { console.log('[AC] patch cancelled — epilogue'); return; }
   console.error('[AC] Fatal error:', err);
   errorReporter?.report('boot', err instanceof Error ? `${err.name}: ${err.message}` : String(err), { stack: err instanceof Error ? err.stack ?? null : null });
+  // RELEASE.preworld-boot-stage — the stage it died in (the error's class name only, never its text).
+  preworldReporter?.bootFailed(err instanceof Error ? err.name : null);
   showPatchError(patchFailureText(err));
 });
 

@@ -55,6 +55,7 @@ import { BridgeMetrics, type BridgeSnapshot, makeHttpHandler } from './metrics.j
 import type { ServerRegistry } from './serverList.js';
 import type { ServerDirectory } from './serverDirectory.js';
 import { sanitizeClientError } from './clientErrors.js';
+import { sanitizeClientPreworld, traceFromUrl } from './clientPreworld.js';
 import { type LookupFn, resolveTarget } from './targets.js';
 import { encodeSppHeader, stripSppHeader } from './spp.js';
 import { compatFor } from './serverCompat.js';
@@ -165,7 +166,10 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
   // RELEASE.error-reporting — a page sends at most a handful of reports; this
   // caps a broken or hostile client at 30 per 10 minutes per address.
   const clientErrorRate = new SlidingWindowCounter(30, 10 * 60_000, now);
-  const sweepTimer = setInterval(() => { connectRate.sweep(); clientErrorRate.sweep(); }, limits.connectRateWindowMs);
+  // RELEASE.preworld-outcomes — a pre-world visit sends a few events (list, create, enter, leave);
+  // retried logins send more. 60 per 10 minutes per address.
+  const clientPreworldRate = new SlidingWindowCounter(60, 10 * 60_000, now);
+  const sweepTimer = setInterval(() => { connectRate.sweep(); clientErrorRate.sweep(); clientPreworldRate.sweep(); }, limits.connectRateWindowMs);
   sweepTimer.unref?.();
   const sessions = new Set<Session>();
   /** Admitted-but-not-yet-open upgrades count against the global cap too. */
@@ -241,6 +245,16 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       if (!report) return 400;
       metrics.clientError(report.kind);
       log('warn', 'client_error', { ip, ...report });
+      return 204;
+    },
+    clientPreworld: (body, req) => {
+      const ip = clientIp(req.socket.remoteAddress, req.headers, config.trustProxyHops, config.clientIpHeader);
+      if (!clientPreworldRate.hit(ip)) return 429;
+      const ev = sanitizeClientPreworld(body);
+      if (!ev) return 400;
+      metrics.clientPreworldEvent(ev.outcome);
+      // One line, only the fields the event carries.
+      log('info', 'client_preworld', { ip, ...Object.fromEntries(Object.entries(ev).filter(([, v]) => v !== null)) });
       return 204;
     },
     servers: deps.directory ? () => deps.directory!.body() : null,
@@ -370,7 +384,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       }
       if (socket.destroyed) { a.release(); return; }
       const proxy = { address: req.socket.localAddress ?? '', port: req.socket.localPort ?? 0 };
-      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, proxy, a.target, a.protocol, a.release));
+      const trace = traceFromUrl(req.url);
+      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, proxy, a.target, a.protocol, a.release, trace));
     }, (err) => {
       metrics.reject('internal');
       log('error', 'admit_failed', { ip, error: err as Error });
@@ -382,6 +397,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
 
   function openSession(
     ws: WebSocket, ip: string, proxy: { address: string; port: number }, target: Target | null, protocol: SessionProtocol, release: () => void,
+    trace: string | null = null,
   ): void {
     const id = ++sessionCounter;
     const upLink = makeImpairedLink(config.impairment);
@@ -415,7 +431,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     };
     sessions.add(session);
     metrics.connects++;
-    log('info', 'session_open', { session: id, ip, server: target?.key ?? null, protocol, active: sessions.size });
+    // trace: the page's random id (RELEASE.preworld-outcomes), also on its client_preworld lines.
+    log('info', 'session_open', { session: id, ip, server: target?.key ?? null, protocol, active: sessions.size, ...(trace ? { trace } : {}) });
     const is1999 = protocol === 'ac1999';
     // The player's address for a server that trusts the bridge (spp.ts). The
     // browser's own source port never reaches the bridge (the edge proxies it), so 0.
@@ -641,7 +658,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       downLink.close();
       metrics.close(reason);
       log('info', 'session_close', {
-        session: id, ip, server: session.target?.key ?? null, reason,
+        session: id, ip, server: session.target?.key ?? null, reason, ...(trace ? { trace } : {}),
         durationMs: now() - session.openedAt,
         bytesFromBrowser: session.bytesFromBrowser, bytesToServer: session.bytesToServer,
         bytesFromServer: session.bytesFromServer, bytesToBrowser: session.bytesToBrowser,

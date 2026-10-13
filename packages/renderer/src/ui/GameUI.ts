@@ -54,7 +54,7 @@ import { SPELL_PAGE, spellComponentListRect, type SpellExamineModel } from './ex
 import { APPRAISAL_COLOR_ARGB, type ItemAppraisalText } from './examine/ItemAppraisalText.js';
 import { CREATURE_EXAMINE_ELEMENTS, STAT_VALUE_COLORS, MISC_INFO_COLORS, type CreaturePageModel, type CharacterPageModel } from './examine/CreatureAppraisalText.js';
 import { wheelScrollPixels } from './wheelScroll.js';
-import { COMBAT_WINDOW } from './CombatWindow.js';
+import { COMBAT_WINDOW, combatWindowPlacement, combatBarPageVisible } from './CombatWindow.js';
 import { skillFooterTitleRuns, skillRowTone, FOOTER_TITLE_COLORS, argbToCss } from './SkillDisplay.js';
 import { AutomationPanel, hudStripText, type AutomationKit, type RoutineEditor } from './automation/AutomationPanel.js';
 import { VTankWindow, type VTankKit, type VTankSource } from './automation/VTankWindow.js';
@@ -1827,6 +1827,8 @@ export class GameUI {
     this.chatHistoryState.saveTo(localStorage);
   }
   private lastCombatMode: CombatMode = CombatMode.NonCombat;
+  /** The Advanced Combat Interface option as of the last combat-mode change (gmCombatUI::RecvNotice_SetCombatMode). */
+  private combatBarAdvancedLatched = false;
   // Inventory panel
   private inventoryPanel: HTMLDivElement | null = null;
   private inventoryPanelHandle: PanelHandle | null = null;
@@ -3197,6 +3199,7 @@ export class GameUI {
         // CORE.17.a — the vitals cluster window carries L3/R3 edges, so
         // the same cascade re-centers it on the new display width.
         this.reanchorVitalsCluster();
+        this.reclampFloatyWindowsToScreen();
         this.resizeViewportFrame();
       });
     });
@@ -5308,7 +5311,7 @@ export class GameUI {
           this.hideMessageDialog();
           this.screenContainer.innerHTML = '';
           this.screenContainer.style.display = 'block';
-          this.screenContainer.appendChild(buildEpilogueFrame({ onExit: () => window.location.reload() }));
+          this.screenContainer.appendChild(buildEpilogueFrame({ onExit: () => { this.onRelaunch?.(); window.location.reload(); } }));
         });
         this.confirmExitContext = true;
       },
@@ -5711,6 +5714,11 @@ export class GameUI {
    * the still-opaque tunnel, so the canvas holds a current frame, not the
    * pre-teleport one, the moment the tunnel unmounts.
    */
+  /** The chargen wizard's current page (RELEASE.preworld-outcomes reports it when a player leaves chargen). */
+  get chargenStep(): CreateStep {
+    return this.wizard.currentStep;
+  }
+
   get worldHiddenByPortalSpace(): boolean {
     return this.portalSpaceOverlay !== null && this.teleportAnim.state !== TeleportAnimState.TunnelFadeOut;
   }
@@ -10111,6 +10119,22 @@ export class GameUI {
     this.powerBarMode = null;
   }
 
+  /**
+   * gmPowerbarUI::RecvNotice_SetPowerbarLevel @ 004da550: the fill follows
+   * only while the bar is in the notice's mode (a jump bar ignores an
+   * attack's level).
+   */
+  setPowerBarLevelIfShowing(modes: readonly PowerBarMode[], fraction: number): void {
+    if (this.powerBarMode !== null && modes.includes(this.powerBarMode)) this.setPowerBarFill(fraction);
+  }
+
+  /** gmPowerbarUI::RecvNotice_FinishPowerbar @ 004da580: empty and hide the bar if it is in that mode. */
+  finishPowerBar(modes: readonly PowerBarMode[]): void {
+    if (this.powerBarMode === null || !modes.includes(this.powerBarMode)) return;
+    this.setPowerBarFill(0);
+    this.hidePowerBar();
+  }
+
   isPowerBarVisible(): boolean { return this.powerBarMode !== null; }
 
   /**
@@ -11842,6 +11866,7 @@ export class GameUI {
     this.updateSpellBarVisibility();
 
     // ── Combat bar (above bottom bar, shown in melee/missile combat mode) ──
+    this.combatBarAdvancedLatched = !!this.optionsSettings.advancedCombatUI;
     this.renderCombatBar();
   }
 
@@ -12182,6 +12207,9 @@ export class GameUI {
     if (this.hud.combatMode !== this.lastCombatMode) {
       this.lastCombatMode = this.hud.combatMode;
       this.drawCombatMode();
+      // gmCombatUI::RecvNotice_SetCombatMode @ 004cc620 reads the Advanced
+      // Combat Interface option at each mode change.
+      this.combatBarAdvancedLatched = !!this.optionsSettings.advancedCombatUI;
       // Re-render combat bar (updates mode label, show/hide)
       this.renderCombatBar();
       // Show/hide spell bar based on combat mode (only visible in Magic mode)
@@ -17649,41 +17677,101 @@ export class GameUI {
    * (5,5) whose two page slots are 0x10000061 (the spellcasting subtree) and
    * 0x1000005c (the melee combat bar). Returns the window and its body.
    */
-  private mountCombatWindow(previous: HTMLElement | null): { wrapper: HTMLDivElement; body: HTMLDivElement } {
+  private mountCombatWindow(previous: HTMLElement | null): { wrapper: HTMLDivElement; body: HTMLDivElement; bodyW: number; bodyH: number } {
     if (previous) previous.remove();
     const C = COMBAT_WINDOW;
+    // webac#2 — gmFloatyCombatPanelUI::UpdateFromPlayerModule @ 004d4e10
+    // restores the persisted rect through MoveTo @ 004d5190, which clamps it
+    // onto the screen, and ResizeTo (the root's 410..3000 x 70..90 limits).
+    // The raw stored x/y used to land the window off-screen whenever it was
+    // saved on a bigger screen (a long-played character's retail layout).
     const geo = this.getFloatyWindowGeometry(C.windowId);
+    const at = combatWindowPlacement(geo, this.hudLogicalWidth(), this.hudLogicalHeight());
+    if (at.x !== null || typeof geo.w === 'number' || typeof geo.h === 'number') {
+      // Re-seed the live geometry with the clamped values (retail's restore
+      // funnels through MoveTo/ResizeTo, which re-write the options).
+      const seeded: FloatyWindowState = at.x !== null && at.y !== null ? { x: at.x, y: at.y } : {};
+      if (typeof geo.w === 'number' || typeof geo.h === 'number') { seeded.w = at.w; seeded.h = at.h; }
+      this.floatyWindowGeometry.set(C.windowId, seeded);
+    }
     const wrapper = document.createElement('div');
     wrapper.dataset.combatWindow = '1';
     Object.assign(wrapper.style, {
-      position: 'absolute', width: `${C.width}px`, height: `${C.height}px`,
+      position: 'absolute', width: `${at.w}px`, height: `${at.h}px`,
       pointerEvents: 'none', zIndex: zLayer(ZLayer.HUD_COMBAT_BAR),
     });
-    if (typeof geo.x === 'number' && typeof geo.y === 'number') {
-      wrapper.style.left = `${geo.x}px`; wrapper.style.top = `${geo.y}px`;
+    if (at.x !== null && at.y !== null) {
+      wrapper.style.left = `${at.x}px`; wrapper.style.top = `${at.y}px`;
     } else {
-      wrapper.style.left = '50%'; wrapper.style.marginLeft = `-${C.width / 2}px`; wrapper.style.bottom = `${C.bottom}px`;
+      wrapper.style.left = '50%'; wrapper.style.marginLeft = `-${at.w / 2}px`; wrapper.style.bottom = `${C.bottom}px`;
     }
     this.hudContainer.appendChild(wrapper);
     const lr = this.layoutRenderer;
     if (lr && typeof lr.render === 'function') {
       const host = document.createElement('div');
-      Object.assign(host.style, { position: 'absolute', left: '0', top: '0', width: `${C.width}px`, height: `${C.height}px`, pointerEvents: 'none' });
+      Object.assign(host.style, { position: 'absolute', left: '0', top: '0', width: `${at.w}px`, height: `${at.h}px`, pointerEvents: 'none' });
       wrapper.appendChild(host);
       const frame = lr.render(C.layout, host, { subtreeElementId: C.root, omitChildIds: [...C.pageSlots] });
       if (frame) {
         frame.setVisible?.(C.root, true);
-        this.wireFloatyWindowBorders({ handle: frame, container: wrapper, windowId: C.windowId, rootElId: C.root, defaultW: C.width, defaultH: C.height });
+        if (at.w !== C.width || at.h !== C.height) frame.resizeSubtree?.(at.w, at.h);
+        this.wireFloatyWindowBorders({
+          handle: frame, container: wrapper, windowId: C.windowId, rootElId: C.root, defaultW: C.width, defaultH: C.height,
+          // A resize re-lays the shown page out at the new body size (the
+          // DAT edges reflow it, as at restore).
+          onResizeEnd: () => this.rerenderCombatWindowPage(),
+        });
       }
     }
     const body = document.createElement('div');
     body.dataset.combatWindowBody = '1';
     Object.assign(body.style, {
-      position: 'absolute', left: `${C.body.x}px`, top: `${C.body.y}px`, width: `${C.body.w}px`, height: `${C.body.h}px`,
+      position: 'absolute', left: `${C.body.x}px`, top: `${C.body.y}px`, width: `${at.body.w}px`, height: `${at.body.h}px`,
       pointerEvents: 'none', overflow: 'hidden',
     });
     wrapper.appendChild(body);
-    return { wrapper, body };
+    return { wrapper, body, bodyW: at.body.w, bodyH: at.body.h };
+  }
+
+  /** The combat window was resized: rebuild both pages at the new size, keeping which one shows. */
+  private rerenderCombatWindowPage(): void {
+    this.renderSpellBarPanel();
+    this.updateSpellBarVisibility();
+    this.renderCombatBar();
+  }
+
+  /**
+   * The browser window changed size (the browser-UX exception: our HUD
+   * follows the window). Every floaty window at a persisted position is put
+   * back at that position clamped onto the new screen, the clamp its MoveTo
+   * applies on restore (gmFloatyCombatPanelUI::MoveTo @ 004d5190, gmRadarUI::
+   * MoveTo @ 004d81a0, …), so shrinking the window never strands one off
+   * screen and growing it back returns it. Windows still at their authored
+   * CSS-anchored default follow on their own. The vitals cluster has its own
+   * re-anchor (reanchorVitalsCluster).
+   */
+  private reclampFloatyWindowsToScreen(): void {
+    const sw = this.hudLogicalWidth(), sh = this.hudLogicalHeight();
+    const place = (el: HTMLElement | null | undefined, windowId: number | null): void => {
+      if (!el || !el.style.left.endsWith('px') || !el.style.top.endsWith('px')) return;
+      const geo = windowId === null ? {} : (this.floatyWindowGeometry.get(windowId) ?? this.getFloatyWindowGeometry(windowId));
+      const x0 = typeof geo.x === 'number' ? geo.x : parseInt(el.style.left, 10);
+      const y0 = typeof geo.y === 'number' ? geo.y : parseInt(el.style.top, 10);
+      const w = parseInt(el.style.width, 10) || el.offsetWidth || 0;
+      const h = parseInt(el.style.height, 10) || el.offsetHeight || 0;
+      if (!Number.isFinite(x0) || !Number.isFinite(y0)) return;
+      const { x, y } = clampWindowPosition(x0, y0, w, h, sw, sh);
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+    };
+    place(this.combatBar, COMBAT_WINDOW.windowId);
+    place(this.spellBarPanelEl, COMBAT_WINDOW.windowId);
+    place(this.radarContainer, RADAR_WINDOW_ID);
+    place(this.indicatorsContainer, INDICATORS_WINDOW_ID);
+    place(this.hudContainer.querySelector<HTMLElement>('#hud-toolbar-window'), TOOLBAR_WINDOW_ID);
+    place(this.powerBarContainer, POWERBAR_WINDOW_ID);
+    place(this.chatContainer, MAIN_CHAT_WINDOW_ID);
+    for (const inst of this.floatyChatInstances) place(inst.panelEl, inst.def.windowId);
   }
 
   /** The shortcut cells the open tab's list shows: its reflowed width / 32 (UpdateEmptySlots @ 004e3700 pads the visible area). */
@@ -17715,12 +17803,12 @@ export class GameUI {
     // button follows the right edge, the tab page and its shortcut list shrink
     // by 200 px (13 visible cells, reddit-shutdown.jpg). We used to clip the
     // whole 800-wide classic layout by hand.
-    const { wrapper: container, body } = this.mountCombatWindow(this.spellBarPanelEl);
+    const { wrapper: container, body, bodyW, bodyH } = this.mountCombatWindow(this.spellBarPanelEl);
     this.spellBarPanelEl = container;
     const handle = this.layoutRenderer.render(0x21000010, body, { subtreeElementId: 0x1000009f });
     if (!handle) return;
     this.spellBarHandle = handle;
-    handle.resizeSubtree?.(COMBAT_WINDOW.body.w, COMBAT_WINDOW.body.h);
+    handle.resizeSubtree?.(bodyW, bodyH);
 
     // Set up tab elements with their DAT states, labels and click handlers.
     // CORE.17.k.b.b.c.a — the tab base 0x21000010:0x1000048f defines 0xb
@@ -27426,10 +27514,10 @@ export class GameUI {
     // 0x21000073:0x100006a4 (ui/CombatWindow.ts), reflowed by its DAT edges
     // (the power track 707 → 507 px). It used to clip the classic 800-wide
     // layout by hand.
-    const { wrapper: bar, body } = this.mountCombatWindow(this.combatBar);
+    const { wrapper: bar, body, bodyW, bodyH } = this.mountCombatWindow(this.combatBar);
     this.combatBar = bar;
     Object.assign(bar.style, {
-      display: (this.hud.combatMode === CombatMode.Melee || this.hud.combatMode === CombatMode.Missile) ? 'block' : 'none',
+      display: combatBarPageVisible(this.hud.combatMode, this.combatBarAdvancedLatched) ? 'block' : 'none',
       // CORE.11.a — above the chat band (HUD_CHAT_BAND): retail draws the
       // combat bar (zLevel 0) in front of the chat band (zLevel 900 =
       // further back), keeping the checkbox row legible over the chat art.
@@ -27441,7 +27529,7 @@ export class GameUI {
     if (this.layoutRenderer) {
       const handle = this.layoutRenderer.render(COMBAT_WINDOW.combatPage.layout, body, { subtreeElementId: COMBAT_WINDOW.combatPage.root });
       if (handle) {
-        handle.resizeSubtree?.(COMBAT_WINDOW.body.w, COMBAT_WINDOW.body.h);
+        handle.resizeSubtree?.(bodyW, bodyH);
 
         // NO opaque backing under the body slices: 0x06004cc2 is a uniform
         // black alpha-175 scrim (every pixel 0,0,0,175) — retail composites
@@ -33925,6 +34013,9 @@ export class GameUI {
     const inner = document.getElementById('disconnected-inner');
     if (inner) inner.remove();
   }
+
+  /** Called just before the launcher's epilogue relaunches by reloading the page (telemetry: a deliberate reload). */
+  onRelaunch: (() => void) | null = null;
 
   /** Whether the Disconnected screen is the current screen (gmUIFlow's mode == 0x10000002 guard). */
   get disconnectedScreenShown(): boolean {

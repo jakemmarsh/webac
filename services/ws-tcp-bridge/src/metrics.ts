@@ -10,6 +10,7 @@
  * Hosting egress ≈ udp_out + ws_out.
  */
 import { CLIENT_ERROR_MAX_BODY } from './clientErrors.js';
+import { CLIENT_PREWORLD_MAX_BODY } from './clientPreworld.js';
 import type { IncomingMessage, ServerResponse } from 'http';
 
 export type ByteDirection = 'ws_in' | 'udp_out' | 'udp_in' | 'ws_out';
@@ -33,6 +34,9 @@ export class BridgeMetrics {
   addBytes(dir: ByteDirection, n: number): void { this.bytes[dir] += n; }
   drop(reason: DropReason): void { this.drops[reason]++; }
   clientError(kind: string): void { this.clientErrors.set(kind, (this.clientErrors.get(kind) ?? 0) + 1); }
+  /** RELEASE.preworld-outcomes — accepted pre-world outcome events by outcome. */
+  readonly clientPreworld = new Map<string, number>();
+  clientPreworldEvent(outcome: string): void { this.clientPreworld.set(outcome, (this.clientPreworld.get(outcome) ?? 0) + 1); }
 }
 
 export interface ServerSessionCount { id: string; name: string; sessions: number }
@@ -82,6 +86,8 @@ export function renderPrometheus(m: BridgeMetrics, s: BridgeSnapshot): string {
   metric('acbridge_connects_total', 'counter', 'Accepted WebSocket sessions.', [[{}, m.connects]]);
   metric('acbridge_client_errors_total', 'counter', 'Crash reports accepted from web clients, by kind.',
     [...m.clientErrors].map(([kind, n]) => [{ kind }, n]));
+  metric('acbridge_client_preworld_total', 'counter', 'Pre-world outcome events accepted from web clients, by outcome.',
+    [...m.clientPreworld].map(([outcome, n]) => [{ outcome }, n]));
   metric('acbridge_sessions_closed_total', 'counter', 'Closed sessions by reason.',
     [...m.closes.entries()].map(([r, v]) => [{ reason: r }, v]));
   metric('acbridge_rejects_total', 'counter', 'Rejected connection attempts by reason.',
@@ -109,6 +115,7 @@ export function metricsJson(m: BridgeMetrics, s: BridgeSnapshot): Record<string,
     bytes: { ...m.bytes },
     drops: { ...m.drops },
     clientErrors: Object.fromEntries(m.clientErrors),
+    clientPreworld: Object.fromEntries(m.clientPreworld),
   };
 }
 
@@ -133,6 +140,8 @@ export function makeHttpHandler(
      * accepted, 400 not a report, 429 rate-limited). Absent = 404.
      */
     clientErrors?: ((body: unknown, req: IncomingMessage) => number) | null;
+    /** RELEASE.preworld-outcomes — POST /client-preworld, the same contract (clientPreworld.ts). */
+    clientPreworld?: ((body: unknown, req: IncomingMessage) => number) | null;
   },
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
@@ -142,7 +151,8 @@ export function makeHttpHandler(
       res.end(req.method === 'HEAD' ? undefined : body);
     };
     const cors = { 'access-control-allow-origin': '*' };
-    if (url.pathname === '/client-errors' && opts.clientErrors) {
+    // Small JSON reports from the web client: CORS-open POST, a size cap, the route's own verdict.
+    const postRoute = (maxBody: number, handle: (body: unknown, req: IncomingMessage) => number): void => {
       const corsPost = { ...cors, 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' };
       if (req.method === 'OPTIONS') { res.writeHead(204, corsPost); res.end(); return; }
       if (req.method !== 'POST') return send(405, 'text/plain', 'method not allowed\n', corsPost);
@@ -151,19 +161,20 @@ export function makeHttpHandler(
       let tooBig = false;
       req.on('data', (c: Buffer) => {
         size += c.length;
-        if (size > CLIENT_ERROR_MAX_BODY) { tooBig = true; return; }
+        if (size > maxBody) { tooBig = true; return; }
         chunks.push(c);
       });
       req.on('end', () => {
         if (tooBig) return send(413, 'text/plain', 'too large\n', corsPost);
         let body: unknown = null;
         try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = null; }
-        const status = opts.clientErrors!(body, req);
+        const status = handle(body, req);
         res.writeHead(status, { 'cache-control': 'no-store', ...corsPost });
         res.end();
       });
-      return;
-    }
+    };
+    if (url.pathname === '/client-errors' && opts.clientErrors) return postRoute(CLIENT_ERROR_MAX_BODY, opts.clientErrors);
+    if (url.pathname === '/client-preworld' && opts.clientPreworld) return postRoute(CLIENT_PREWORLD_MAX_BODY, opts.clientPreworld);
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(405, 'text/plain', 'method not allowed\n');
     if (url.pathname === '/healthz') {
       return send(200, 'application/json', JSON.stringify(healthzBody(snapshot())), cors);

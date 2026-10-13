@@ -94,8 +94,24 @@ export interface AttackRequestDeps {
   autoRepeat(): boolean;
   /** CM_Combat::Event_TargetedMelee/MissileAttack. */
   sendAttack(mode: 'melee' | 'missile', target: number, height: AttackHeightName, power: number): void;
-  /** CM_Character::SendNotice_SetPowerbarLevel(PBM_COMBAT, level). */
+  /** CM_Character::SendNotice_SetPowerbarLevel(PBM_COMBAT, level): the combat bar's meter. */
   setPowerBarLevel(level: number): void;
+  /**
+   * PlayerModule::AdvancedCombatUI — the "Advanced Combat Interface"
+   * option, latched into m_bAdvancedCombatMode by SetCombatMode @ 0056be30
+   * (latchAdvancedCombatMode). Absent → off.
+   */
+  advancedCombatUI?(): boolean;
+  /**
+   * PBM_ADVANCED_COMBAT: SendNotice_BeginPowerbar(2) — gmPowerbarUI::
+   * RecvNotice_BeginPowerbar @ 004da730 shows the floaty power bar in its
+   * melee (0x10000043) or missile (0x10000044) state.
+   */
+  beginAdvancedPowerBar?(mode: 'melee' | 'missile'): void;
+  /** SendNotice_SetPowerbarLevel(PBM_ADVANCED_COMBAT, level): the floaty bar's fill. */
+  setAdvancedPowerBarLevel?(level: number): void;
+  /** SendNotice_FinishPowerbar(PBM_ADVANCED_COMBAT) — @ 004da580 empties and hides the floaty bar. */
+  finishAdvancedPowerBar?(): void;
   /** AddTextToScroll(text, 0x1a): the spew box. */
   showError(text: string): void;
   /** CM_Combat::Event_CancelAttack. */
@@ -130,7 +146,7 @@ export interface AttackRequestDeps {
 }
 
 export class AttackRequestController {
-  /** m_bAdvancedCombatMode — the "Advanced Combat Interface" option (off). */
+  /** m_bAdvancedCombatMode — the "Advanced Combat Interface" option, latched at each SetCombatMode. */
   advancedCombatMode = false;
   attackRequestInProgress = false;
   buildInProgress = false;
@@ -148,11 +164,37 @@ export class AttackRequestController {
   targetWillinglyLost = false;
   /** lastAttackedTime: the last Defender / EvasionDefender notification. */
   lastAttackedTime = 0;
-  /** powerBarMode === PBM_COMBAT (the only mode this controller drives). */
-  private barShown = false;
+  /**
+   * powerBarMode: PBM_UNDEF (0), PBM_COMBAT (1, the combat bar's meter) or
+   * PBM_ADVANCED_COMBAT (2, the floaty power bar). The jump bar (PBM_JUMP)
+   * is the movement code's.
+   */
+  powerBarMode: 0 | 1 | 2 = 0;
   latestPowerBarLevel = 0;
 
-  constructor(private readonly deps: AttackRequestDeps) {}
+  constructor(private readonly deps: AttackRequestDeps) {
+    this.latchAdvancedCombatMode();
+  }
+
+  /**
+   * SetCombatMode @ 0056be30: `m_bAdvancedCombatMode =
+   * PlayerModule::AdvancedCombatUI()` on every mode change, so toggling the
+   * option takes effect at the next combat-mode change.
+   */
+  latchAdvancedCombatMode(): void {
+    this.advancedCombatMode = !!this.deps.advancedCombatUI?.();
+  }
+
+  /** The bar a build drives: (m_bAdvancedCombatMode != 0) + PBM_COMBAT. */
+  private openPowerBar(): void {
+    this.powerBarMode = this.advancedCombatMode ? 2 : 1;
+    if (this.powerBarMode === 1) {
+      this.deps.setPowerBarLevel(0);
+    } else {
+      const mode = this.deps.combatMode();
+      if (mode) this.deps.beginAdvancedPowerBar?.(mode);
+    }
+  }
 
   /** SetRequestedAttackHeight @ 0056c8f0 — the key / button press. */
   setRequestedAttackHeight(height: AttackHeightName): void {
@@ -214,7 +256,7 @@ export class AttackRequestController {
 
   /** UseTime @ 0056c1f0 — once per frame. */
   useTime(): void {
-    if (this.buildInProgress && this.barShown) {
+    if (this.buildInProgress && this.powerBarMode !== 0) {
       const level = this.getPowerBarLevel();
       if (this.deps.inReadyPosition()) {
         if (this.attackRequestInProgress || this.advancedCombatMode || level < this.requestedAttackPower) {
@@ -306,10 +348,7 @@ export class AttackRequestController {
     this.attackInProgress = true;
     this.attackServerResponsePending = true;
     if (!this.attackRequestInProgress) {
-      if (!this.barShown && !this.advancedCombatMode) {
-        this.barShown = true;
-        this.deps.setPowerBarLevel(0);
-      }
+      if (this.powerBarMode === 0) this.openPowerBar();
       this.setPowerBarLevel(this.requestedAttackPower);
       this.buildInProgress = false;
       this.buildStartTime = 0;
@@ -334,6 +373,7 @@ export class AttackRequestController {
    * AutoTarget when the option is on and no attackable target remains.
    */
   onCombatModeSet(): void {
+    this.latchAdvancedCombatMode();
     if (this.deps.combatMode() === null) return;
     const selected = this.selectedId();
     const playerId = this.deps.playerId?.() ?? 0;
@@ -370,11 +410,11 @@ export class AttackRequestController {
    */
   onSelectionChanged(selectedId: number): void {
     if (this.deps.autoRepeat()
-      && (this.attackInProgress || this.barShown)
+      && (this.attackInProgress || this.powerBarMode === 1)
       && (this.attackServerResponsePending || this.attackRequestInProgress || this.attackInProgress || this.repeatAttacking)) {
       this.deps.sendCancelAttack();
       this.repeatAttacking = false;
-      if (this.buildInProgress && this.barShown) this.hidePowerBar();
+      if (this.buildInProgress && this.powerBarMode === 1) this.hidePowerBar();
     }
     if (selectedId !== 0) return;
     if (this.targetWillinglyLost) {
@@ -437,32 +477,36 @@ export class AttackRequestController {
   /** AttemptStartBuildingAttack @ 0056bb00. */
   private attemptStartBuildingAttack(): void {
     if (this.deps.inReadyPosition() && !this.buildInProgress) {
-      this.barShown = true;
+      this.openPowerBar();
       this.startPowerBarBuild();
     }
   }
 
   /** StartPowerBarBuild @ 0056adb0. */
   private startPowerBarBuild(): void {
-    this.barShown = true;
+    if (this.powerBarMode === 0) this.powerBarMode = this.advancedCombatMode ? 2 : 1;
     this.buildInProgress = true;
     this.buildStartTime = this.deps.now();
     this.setPowerBarLevel(0);
   }
 
-  /** HidePowerBar @ 0056a8b0 (PBM_COMBAT: the meter back to 0.0). */
+  /**
+   * HidePowerBar @ 0056a8b0: PBM_COMBAT sets the meter back to 0.0; any
+   * other mode is SendNotice_FinishPowerbar (the floaty bar hides).
+   */
   private hidePowerBar(): void {
     this.buildInProgress = false;
     this.buildStartTime = 0;
-    if (this.barShown) this.deps.setPowerBarLevel(0);
+    if (this.powerBarMode === 1) this.deps.setPowerBarLevel(0);
+    else if (this.powerBarMode === 2) this.deps.finishAdvancedPowerBar?.();
     this.latestPowerBarLevel = 0;
-    this.barShown = false;
+    this.powerBarMode = 0;
   }
 
   /** AbortAutomaticAttack's local half: the repeat ends and a combat build's bar hides. */
   private stopRepeating(): void {
     this.repeatAttacking = false;
-    if (this.buildInProgress && this.barShown) this.hidePowerBar();
+    if (this.buildInProgress && this.powerBarMode === 1) this.hidePowerBar();
   }
 
   /**
@@ -471,7 +515,7 @@ export class AttackRequestController {
    * bar is up (powerBarMode == PBM_COMBAT).
    */
   repeatAttackInProgress(): boolean {
-    return this.deps.autoRepeat() && (this.attackInProgress || this.barShown);
+    return this.deps.autoRepeat() && (this.attackInProgress || this.powerBarMode === 1);
   }
 
   /**
@@ -497,12 +541,19 @@ export class AttackRequestController {
       this.deps.sendCancelAttack();
       this.repeatAttacking = false;
     }
-    this.hidePowerBar();
+    // SendNotice_SetPowerbarLevel(powerBarMode, 0.0), then the bar becomes
+    // the jump bar (BeginPowerbar(PBM_JUMP), the caller's): no Finish.
+    if (this.powerBarMode !== 0) this.setPowerBarLevel(0);
+    this.buildInProgress = false;
+    this.buildStartTime = 0;
+    this.latestPowerBarLevel = 0;
+    this.powerBarMode = 0;
   }
 
-  /** SetPowerBarLevel @ 0056a890. */
+  /** SetPowerBarLevel @ 0056a890: SendNotice_SetPowerbarLevel(powerBarMode, level). */
   private setPowerBarLevel(level: number): void {
-    this.deps.setPowerBarLevel(level);
+    if (this.powerBarMode === 2) this.deps.setAdvancedPowerBarLevel?.(level);
+    else this.deps.setPowerBarLevel(level);
     this.latestPowerBarLevel = level;
   }
 }

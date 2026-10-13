@@ -412,3 +412,86 @@ describe('commenceJump', () => {
     expect(state.cancels).toBe(0);
   });
 });
+
+/**
+ * webac#2 — "Enabling/Disabling Advanced combat does not do anything". The
+ * Advanced Combat Interface option (PlayerModule::AdvancedCombatUI) is
+ * latched into m_bAdvancedCombatMode by SetCombatMode @ 0056be30; its builds
+ * open the floaty power bar (AttemptStartBuildingAttack @ 0056bb00:
+ * powerBarMode = advanced + PBM_COMBAT → SendNotice_BeginPowerbar(2)), need
+ * no target to start (StartAttackRequest @ 0056c040), swing at the bar's
+ * power alone (EndAttackRequest @ 0056c0e0) and end with FinishPowerbar
+ * (HidePowerBar @ 0056a8b0).
+ */
+describe('AttackRequestController — Advanced Combat Interface (PBM_ADVANCED_COMBAT)', () => {
+  function advanced(on = true) {
+    const ev: string[] = [];
+    const opt = { on };
+    const h = harness({
+      advancedCombatUI: () => opt.on,
+      beginAdvancedPowerBar: (mode) => ev.push(`begin:${mode}`),
+      setAdvancedPowerBarLevel: (l) => ev.push(`level:${l.toFixed(2)}`),
+      finishAdvancedPowerBar: () => ev.push('finish'),
+    });
+    return { ...h, ev, opt };
+  }
+
+  it('latches the option at construction and at each combat-mode change, not on a mid-mode toggle', () => {
+    const h = advanced(false);
+    expect(h.c.advancedCombatMode).toBe(false);
+    h.opt.on = true;
+    expect(h.c.advancedCombatMode).toBe(false);
+    h.c.onCombatModeSet();
+    expect(h.c.advancedCombatMode).toBe(true);
+    h.state.mode = null;
+    h.opt.on = false;
+    h.c.onCombatModeSet(); // leaving combat latches too
+    expect(h.c.advancedCombatMode).toBe(false);
+  });
+
+  it('a press opens the floaty bar in the combat mode, builds it, and never touches the combat bar meter', () => {
+    const h = advanced();
+    h.c.setRequestedAttackHeight('high');
+    expect(h.ev[0]).toBe('begin:melee');
+    expect(h.c.powerBarMode).toBe(2);
+    h.state.t += 0.4; h.c.useTime();
+    expect(h.ev[h.ev.length - 1]).toBe('level:0.40');
+    expect(h.state.bar).toEqual([]);
+  });
+
+  it('missile mode opens the missile (Accuracy) state', () => {
+    const h = advanced();
+    h.state.mode = 'missile';
+    h.c.setRequestedAttackHeight('low');
+    expect(h.ev[0]).toBe('begin:missile');
+  });
+
+  it('needs no selected target to start building', () => {
+    const h = advanced();
+    h.state.target = 0;
+    h.c.setRequestedAttackHeight('medium');
+    expect(h.state.errors).toEqual([]);
+    expect(h.c.attackRequestInProgress).toBe(true);
+  });
+
+  it('release swings once at the bar power (the slider plays no part), AttackDone finishes the bar', () => {
+    const h = advanced();
+    h.state.slider = 0.9;
+    h.c.setRequestedAttackHeight('high');
+    h.state.t += 0.3; h.c.useTime();
+    h.c.endAttackRequest();
+    expect(h.state.sent).toHaveLength(1);
+    expect(h.state.sent[0].power).toBeCloseTo(0.3);
+    h.c.handleAttackDone(0);
+    expect(h.ev[h.ev.length - 1]).toBe('finish');
+    expect(h.c.powerBarMode).toBe(0);
+  });
+
+  it('with the option off the classic combat-bar meter is unchanged (no floaty bar)', () => {
+    const h = advanced(false);
+    h.c.setRequestedAttackHeight('high');
+    expect(h.ev).toEqual([]);
+    expect(h.c.powerBarMode).toBe(1);
+    expect(h.lastBar()).toBe(0);
+  });
+});
