@@ -86,6 +86,11 @@ describe('world directory', () => {
     expect(worldFromEntry({ id: 'x', compat: 'incompatible', compatReason: " Its VPN check refuses webAC players. We're working on a fix. " })?.compatReason)
       .toBe("Its VPN check refuses webAC players. We're working on a fix.");
     expect(worldFromEntry({ id: 'x', compat: 'beta', compatReason: 'stray' })?.compatReason).toBeNull();
+    // A bridge that predates compatWarning / perIpLimits: null; a refused world drops a stray warning.
+    expect(dir.worlds[0]).toMatchObject({ compatWarning: null, perIpLimits: null });
+    expect(worldFromEntry({ id: 'x', compat: 'beta', compatWarning: ' W. ', perIpLimits: { accounts: 2, sessions: 2 } }))
+      .toMatchObject({ compatWarning: 'W.', perIpLimits: { accounts: 2, sessions: 2 } });
+    expect(worldFromEntry({ id: 'x', compat: 'incompatible', compatWarning: 'W.' })?.compatWarning).toBeNull();
   });
 
   it('register-first worlds: the row keeps its registration note and an http(s) registration link only', () => {
@@ -578,6 +583,41 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     s.row('Coldeve').click();
     expect(s.mount.querySelector('.launcher-blocked')).toBeNull();
     expect(s.mount.querySelector('.launcher-hint')?.textContent).toMatch(/^New here\?/);
+  });
+
+  it('a world limited from webAC (AC1999\'s per-address account cap) warns in its details, and ENTER still connects', async () => {
+    const k = makeKit();
+    const warning = "Existing accounts only: webAC can't create new ones here yet.";
+    const ac = listed({
+      id: 'ac1999', name: 'AC1999', emu: 'AC1999', era: 'ac1999-retail', compat: 'beta', compatNote: '1999 launch era',
+      compatWarning: warning, perIpLimits: { accounts: 2, sessions: 2 },
+    });
+    const screen = new mod.LauncherScreen(k.kit, {
+      bridgeUrl: BRIDGE, prefillAccount: 'olduser', storage: new MemStorage(), loadDirectory: async () => ({ mode: 'multi', worlds: [ac, listed()] }),
+    });
+    let choice: any = null;
+    void screen.run().then((c: unknown) => { choice = c; });
+    await screen.loaded;
+    expect(screen.selectedWorld.name).toBe('AC1999');
+    const hint = k.mount.querySelector('.launcher-hint') as HTMLElement;
+    expect(hint.classList.contains('launcher-warning')).toBe(true);
+    expect([...hint.children].map((c) => c.textContent).join(' ')).toBe(warning);
+    // Whole, in the 2 lines the box has (the 64-character Reefcull note fits on playwebac.com).
+    expect(hint.textContent).not.toContain('…');
+    expect(hint.children.length).toBeLessThanOrEqual(2);
+    // It replaces the new-player line ("most worlds create your account…"), which would be wrong here.
+    expect(k.mount.textContent).not.toMatch(/New here\?/);
+    expect(k.mount.querySelector('.launcher-meta')?.textContent).toContain('1999 launch era');
+    // Existing accounts work: not a block.
+    (k.mount.querySelector('.launcher-password') as HTMLInputElement).value = 'pw';
+    (k.mount.querySelector('.launcher-enter') as HTMLElement).click();
+    await Promise.resolve();
+    expect(k.messages).toEqual([]);
+    expect(choice?.world.name).toBe('AC1999');
+    // An ordinary world keeps the new-player line.
+    screen.select(listed());
+    expect(k.mount.querySelector('.launcher-warning')).toBeNull();
+    expect(k.mount.querySelector('.launcher-hint')?.textContent).toMatch(/^New here\?/);
   });
 
   it('double-clicking an incompatible or offline world explains instead of connecting', async () => {

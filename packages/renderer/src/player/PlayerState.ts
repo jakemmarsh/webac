@@ -264,6 +264,17 @@ export class PlayerState {
    */
   serverIntProps: Map<number, number> = new Map();
 
+  /**
+   * One PrivateUpdatePropertyInt into the int mirror. A removed quality
+   * (GDLE's 0x01D1 PrivateRemoveIntEvent; GAP.gdle-qualities-remove-events)
+   * leaves the mirror, as retail's CBaseQualities::RemoveInt drops the key
+   * (InqInt then fails) — not a stored 0.
+   */
+  applyServerIntProp(key: number, value: number, removed = false): void {
+    if (removed) this.serverIntProps.delete(key);
+    else this.serverIntProps.set(key, value);
+  }
+
   // Core systems — mutable so initFromCreation can replace them
   attributes: AttributeSystem;
   vitals: VitalSystem;

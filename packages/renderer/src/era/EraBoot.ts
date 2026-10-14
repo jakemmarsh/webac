@@ -29,7 +29,7 @@ import { assetUrl, datSetForEra, type RuntimeConfig } from '../config/RuntimeCon
 import type { DatBlobStore } from '../dat/DatCache.js';
 import { skillTableWithout, type DatOverlay } from '@ac/dat-parser';
 import { EOR_DAT_ROLES, EOR_ERA_ID, ERA_PROFILES, datFileName, eraProfile, ownRoles, type DatRole, type EorDatRole, type EraProfile } from './EraProfiles.js';
-import type { World } from '../launcher/worldDirectory.js';
+import { perIpLimitsFrom, type World } from '../launcher/worldDirectory.js';
 
 export const ERA_SWITCH_KEY = 'acjs.eraSwitch.v1';
 /** A stashed switch older than this is ignored (a stale tab, a crashed reload). */
@@ -114,6 +114,10 @@ function stashedWorld(raw: unknown): World | null {
     registration: strOrNull(r.registration), registrationUrl: strOrNull(r.registrationUrl),
     kind: r.kind, ...(typeof r.bridgeUrl === 'string' ? { bridgeUrl: r.bridgeUrl } : {}),
     era: strOrNull(r.era), ...(r.eraUnknown === true ? { eraUnknown: true } : {}),
+    // The per-address caps outlive the era reload, so a refused login in the
+    // new era still explains itself (loginFailureText).
+    ...('compatWarning' in r ? { compatWarning: strOrNull(r.compatWarning) } : {}),
+    ...('perIpLimits' in r ? { perIpLimits: perIpLimitsFrom(r.perIpLimits) } : {}),
   };
 }
 

@@ -5424,6 +5424,14 @@ export class GameUI {
     // renderHUD empties the HUD layer. The plugins' bar and windows can already exist by then (the bar is drawn when
     // the automation source arrives, before the world): put back what is still live, or it stays "open" but unseen.
     this.reattachPluginLayers();
+    // GDLE.first-login-tutorial-book — a book the server opened before the HUD
+    // existed: GDLE (Classic Dereth, Seedsow) Uses the new character's tutorial
+    // book in SetLoginPlayerQualities (Player.cpp, FIRST_ENTER_WORLD_DONE_BOOL),
+    // so its BookDataResponse arrives before the player's CreateObject and so
+    // before this; renderHUD just swept its window off the HUD layer. Retail's
+    // gmBookUI lives in the gameplay UI built at BeginEnterWorld (before any
+    // login event), so the book showed: draw it again.
+    if (this.book.open) this.renderBookPanel();
     // A login hold that reported before the HUD existed (renderHUD rebuilt the power bar).
     if (this.runtimeDDD) this.setRuntimeDDDStatus(true, this.runtimeDDD.done, this.runtimeDDD.total);
     // BUG.config-prefs-applied-on-open — retail applies the saved preferences
@@ -13264,7 +13272,8 @@ export class GameUI {
       onResize: (_w, nh) => { host.style.height = `${nh}px`; },
       // A finished resize redraws whichever panel the window shows.
       onResizeEnd: () => {
-        if (this.inventoryVisible) this.renderInventoryPanel();
+        if (this.book.open && this.bookPanelHandle) this.renderBookPanel();
+        else if (this.inventoryVisible) this.renderInventoryPanel();
         else if (this.charPanelVisible) this.renderCharPanel();
         else if (this.optionsPanelVisible) this.renderOptionsPanel();
         else if (this.magicVisible) this.renderMagicPanel();

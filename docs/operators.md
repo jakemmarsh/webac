@@ -47,6 +47,48 @@ Pick one:
    by real address. See the bridge [README](../services/ws-tcp-bridge/README.md)
    for every option.
 
+## If your world limits accounts per IP (AC1999 servers)
+
+The AC1999 server can cap both the accounts created from one address and the
+sessions online at once from one address (`max_accounts_per_ip` and
+`max_sessions_per_ip` in `server.cfg`, both 2 by default since upstream
+commit 11e7463f "Enforce a two account limit"; 0 = unlimited). Every browser
+player shares the bridge's address, so for browser players together:
+
+- **New accounts are refused once the bridge's address has created its
+  quota.** Auto-create answers a new name with the same login-failed error it
+  sends for a wrong password (`STR_LOGIN_FAILED`). Existing accounts still log
+  in. Seen on the public AC1999 world on 2026-10-13: a fresh account through
+  the hosted bridge was refused while returning players kept playing.
+- **Only that many browser players can be online at once.** The next one gets
+  `STR_LOGIN_SERVER_FULL` ("Server Full"). Admin accounts skip this cap.
+- **`deploy/disable-extra-ip-accounts.sql` bans browser players' accounts.**
+  It disables (`banned=1`) every account past the first N created from one
+  address, and for the bridge's address that is every browser player but the
+  first two. Those players then get a connection that the server closes with
+  no reason.
+
+To let browser players create accounts and play together, add an
+`ip_limit_overrides` row for the bridge's egress address (as of 2026-10-12,
+`50.18.108.214`; open an issue to confirm the current one). The server reads
+it on every login, so no restart is needed. `-1` keeps the config default and
+`0` means unlimited:
+
+```sql
+INSERT INTO ip_limit_overrides (ip_address, max_accounts, max_sessions, note)
+VALUES ('50.18.108.214', 0, 0, 'webAC bridge: every browser player shares this address');
+```
+
+With the row in place, the SQL script skips that address (a `max_accounts`
+of 0 is unlimited), and accounts it already disabled can be re-enabled by
+setting `banned=0`. Running your own bridge (above) also works: your server
+then sees your bridge's address, which you can exempt the same way.
+
+The launcher marks a world with these caps ("Existing accounts only: webAC
+can't create new ones here yet.") and explains its refusals in these terms
+(`perIpLimits` in `services/ws-tcp-bridge/src/serverCompat.ts`). We remove the
+mark once the world exempts the bridge.
+
 ## If your world blocks VPNs or proxies
 
 The hosted bridge runs in a cloud data centre, so IP-reputation and anti-VPN

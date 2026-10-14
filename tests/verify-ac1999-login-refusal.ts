@@ -30,7 +30,11 @@ import { Connection1999, VERSION_1999 } from '../packages/network/src/era1999/Co
 import { buildPacket1999, F1999, HEADER_SIZE_1999, readHeader1999 } from '../packages/network/src/era1999/Packet1999.js';
 import type { ConnectionEvent } from '../packages/network/src/index.js';
 import { serverNetErrorNotice, netErrorNotice, characterErrorNotice } from '../packages/renderer/src/ui/ConnectionNotices.js';
-import { loginFailureText, LOGON_FAILED_HINT } from '../packages/renderer/src/launcher/worldDirectory.js';
+import {
+  loginFailureText, LOGON_FAILED_HINT, perIpLimitsFrom, perIpLogonFailedText, perIpServerFullText, worldFromEntry,
+} from '../packages/renderer/src/launcher/worldDirectory.js';
+import { buildDirectory } from '../services/ws-tcp-bridge/src/serverDirectory.js';
+import { AC1999_PUBLIC_SERVER, AC1999_LOCAL_ID } from '../services/ws-tcp-bridge/src/serverList.js';
 import {
   SessionLifecycle, IN_WORLD_RETRY_BUDGET, IN_WORLD_RETRY_DELAY_MS,
 } from '../packages/renderer/src/session/SessionLifecycle.js';
@@ -185,6 +189,81 @@ describe('Connection1999: a refused login names the server reason', () => {
     sock.deliver(refusal1999(0, 0));
     expect(errors(events)).toHaveLength(0);
     expect(sock.closed).toBe(false);
+  });
+});
+
+/**
+ * The public AC1999 server caps accounts created and sessions online per IP
+ * address at two each (upstream 11e7463f), and every webAC player reaches it
+ * from the bridge's one address. Its STR_LOGIN_FAILED is then a refused new
+ * account as often as a wrong password, and its STR_LOGIN_SERVER_FULL the
+ * session cap: the launcher says so (2026-10-13: three visitors retried other
+ * names after "that account name may already belong to someone else" and
+ * gave up). The world comes from the bridge's real /servers row, through
+ * JSON, as the page receives it.
+ */
+describe('a refusal on a world whose per-IP caps every webAC player shares', () => {
+  const rows = buildDirectory(
+    [{ ...AC1999_PUBLIC_SERVER }, { id: AC1999_LOCAL_ID, name: 'AC1999 (local)', emu: 'AC1999', host: '127.0.0.1', port: 9310, source: 'overlay' }],
+    new Map(), new Map(), { now: 0 },
+  );
+  const fromRow = (id: string) => worldFromEntry(JSON.parse(JSON.stringify(rows.find((r) => r.id === id))))!;
+  const LOGON_TEXT = "This server allows two accounts per network address, and every webAC player shares ours, so new accounts can't be created through webAC here yet. If this is an account you already have, check its password.";
+  const FULL_TEXT = 'Two webAC players are already on this server; it allows two per network address, and every webAC player shares ours. Try again later.';
+
+  const refusedWith = (id: number) => {
+    FakeSocket.sockets = []; // a fresh login each time (start() drives sockets[0])
+    const { events, sock } = start();
+    sock.deliver(refusal1999(id));
+    const e = errors(events)[0].serverNetError!;
+    return serverNetErrorNotice(e.stringId, e.tableId);
+  };
+
+  it('the public world arrives with its caps and its warning', () => {
+    const pub = fromRow('ac1999');
+    expect(pub.perIpLimits).toEqual({ accounts: 2, sessions: 2 });
+    expect(pub.compatWarning).toBe("Existing accounts only: webAC can't create new ones here yet.");
+    expect(fromRow(AC1999_LOCAL_ID).perIpLimits).toBeNull();
+  });
+
+  it('ClientLogOnFailed: no new accounts through webAC here (or a wrong password), not "that name may belong to someone else"', () => {
+    const text = loginFailureText(refusedWith(STR_LOGIN_FAILED), fromRow('ac1999'), false);
+    expect(text).toBe(`Client logon failed\n\n${LOGON_TEXT}`);
+    expect(text).not.toContain(LOGON_FAILED_HINT);
+    expect(text).not.toMatch(/different account name/);
+    // The local server (no caps) keeps the taken-name hint.
+    expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), fromRow(AC1999_LOCAL_ID), false)).toBe(`Client logon failed\n\n${LOGON_FAILED_HINT}`);
+  });
+
+  it('ServerFull: two webAC players are already on; the local server keeps the bare "Server Full"', () => {
+    expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), fromRow('ac1999'), false)).toBe(`Server Full\n\n${FULL_TEXT}`);
+    expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), fromRow(AC1999_LOCAL_ID), false)).toBe('Server Full');
+  });
+
+  it('the other refusals, and anything once in the world, are unchanged there', () => {
+    const pub = fromRow('ac1999');
+    expect(loginFailureText(refusedWith(STR_LOGIN_ACCOUNT_ONLINE), pub, false)).toBe('Player already logged on');
+    expect(loginFailureText(refusedWith(STR_LOGIN_INVALID_AUTH), pub, false)).toBe('Invalid or corrupted authentication');
+    expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), pub, true)).toBe('Client logon failed');
+    expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), pub, true)).toBe('Server Full');
+    expect(loginFailureText(netErrorNotice('ID_ConnectionError_ClientTimedOutServer'), pub, false)).toBe('Client timed out the connection');
+  });
+
+  it('the caps drive the wording (another server adopting the rule is flagged in the bridge only); a 0 cap is unlimited', () => {
+    expect(perIpLogonFailedText({ accounts: 1, sessions: 3 })).toMatch(/^This server allows one account per network address,/);
+    expect(perIpServerFullText({ accounts: 1, sessions: 3 })).toMatch(/^Three webAC players are already on this server; it allows three per network address/);
+    expect(perIpServerFullText({ accounts: 0, sessions: 1 })).toMatch(/^One webAC player is already on this server; it allows one per/);
+    expect(perIpServerFullText({ accounts: 0, sessions: 12 })).toMatch(/^12 webAC players are .* allows 12 per/);
+    const sessionsOnly = { name: 'S', registration: null, registrationUrl: null, perIpLimits: { accounts: 0, sessions: 2 } };
+    expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), sessionsOnly, false)).toBe(`Client logon failed\n\n${LOGON_FAILED_HINT}`);
+    expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), sessionsOnly, false)).toBe(`Server Full\n\n${FULL_TEXT}`);
+  });
+
+  it('perIpLimitsFrom keeps only whole, non-negative caps', () => {
+    expect(perIpLimitsFrom({ accounts: 2, sessions: 2 })).toEqual({ accounts: 2, sessions: 2 });
+    for (const bad of [null, undefined, 'x', {}, { accounts: 2 }, { accounts: -1, sessions: 2 }, { accounts: 1.5, sessions: 2 }, { accounts: '2', sessions: 2 }, { accounts: 0, sessions: 0 }]) {
+      expect(perIpLimitsFrom(bad)).toBeNull();
+    }
   });
 });
 

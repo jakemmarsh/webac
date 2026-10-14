@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import {
   ac1999Overlay, AC1999_PUBLIC_SERVER, AC1999_LOCAL_ID, ServerRegistry, mergeOverlays, parseOverlay, type ServerEntry,
 } from '../services/ws-tcp-bridge/src/serverList';
-import { compatFor, AC1999_ERA, AC1999_ERA_NOTE, NO_PROBE_ERAS } from '../services/ws-tcp-bridge/src/serverCompat';
+import { compatFor, AC1999_COMPAT, AC1999_ERA, AC1999_ERA_NOTE, AC1999_PUBLIC_COMPAT, NO_PROBE_ERAS, SERVER_COMPAT } from '../services/ws-tcp-bridge/src/serverCompat';
 import { buildDirectory, ServerDirectory } from '../services/ws-tcp-bridge/src/serverDirectory';
 import { EraDetector, type Detection } from '../services/ws-tcp-bridge/src/eraDetect';
 import type { ProbeLogin } from '../services/ws-tcp-bridge/src/loginProbe';
@@ -48,7 +48,8 @@ describe('AC1999 rows (not in Servers.xml)', () => {
 
   it('their directory rows carry era ac1999-retail, beta, with the "1999 launch era" chip', () => {
     expect(AC1999_ERA_NOTE).toBe('1999 launch era');
-    expect(compatFor('ac1999', 'AC1999')).toEqual({ compat: 'beta', note: '1999 launch era', era: AC1999_ERA });
+    expect(compatFor('ac1999', 'AC1999')).toMatchObject({ compat: 'beta', note: '1999 launch era', era: AC1999_ERA });
+    expect(compatFor(AC1999_LOCAL_ID, 'AC1999')).toEqual({ compat: 'beta', note: '1999 launch era', era: AC1999_ERA });
     expect(AC1999_ERA).toBe('ac1999-retail');
     const rows = buildDirectory(registry({ BRIDGE_AC1999_LOCAL: '127.0.0.1:9310' }).all(), new Map(), new Map(), { now: 0 });
     for (const row of rows) {
@@ -77,5 +78,54 @@ describe('AC1999 rows are never era-probed', () => {
     expect(calls).toEqual(['cold.example.org:1802']);
     expect(NO_PROBE_ERAS.has(AC1999_ERA)).toBe(true);
     expect(dir.body().servers.find((s) => s.id === 'old')?.era).toBe(AC1999_ERA);
+  });
+});
+
+/**
+ * Upstream 11e7463f "Enforce a two account limit" (reference/ac1999:
+ * server.cfg.example max_accounts_per_ip=2 / max_sessions_per_ip=2,
+ * DatabaseIO.cpp CreateAccount, Network.cpp AcceptClientLogin) runs on the
+ * public server, and every webAC player shares the bridge's one egress
+ * address: a fresh account through the production bridge was refused with
+ * STR_LOGIN_FAILED on 2026-10-13 while existing accounts kept playing.
+ */
+describe('the public AC1999 server caps accounts and sessions per IP address', () => {
+  const WARNING = "Existing accounts only: webAC can't create new ones here yet.";
+
+  it('its compat entry: still enterable (beta, not incompatible), with the warning and the 2 / 2 caps', () => {
+    expect(compatFor('ac1999', 'AC1999')).toBe(AC1999_PUBLIC_COMPAT);
+    expect(compatFor('AC1999', 'AC1999')).toBe(AC1999_PUBLIC_COMPAT); // ids are case-insensitive
+    expect(AC1999_PUBLIC_COMPAT).toEqual({
+      compat: 'beta', note: '1999 launch era', era: AC1999_ERA, warning: WARNING, perIpLimits: { accounts: 2, sessions: 2 },
+    });
+    expect(AC1999_PUBLIC_COMPAT.reason).toBeUndefined();
+    // Keyed by the listed server's id; our local server and any other AC1999 row keep the plain entry.
+    expect(SERVER_COMPAT.byId[AC1999_PUBLIC_SERVER.id]).toBe(AC1999_PUBLIC_COMPAT);
+    expect(compatFor(AC1999_LOCAL_ID, 'AC1999')).toBe(AC1999_COMPAT);
+    expect(AC1999_COMPAT.perIpLimits).toBeUndefined();
+    // Fits the launcher's 2-line details note (no longer than the Reefcull registration note, which does).
+    expect(WARNING.length).toBeLessThanOrEqual('Register on the Reefcull website first (lower-case names only).'.length);
+  });
+
+  it('its /servers row carries compatWarning and perIpLimits; the local row and ordinary worlds carry null', () => {
+    const rows = buildDirectory(registry({ BRIDGE_AC1999_LOCAL: '127.0.0.1:9310' }).all(), new Map(), new Map(), { now: 0 });
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(byId.ac1999).toMatchObject({
+      compat: 'beta', compatNote: '1999 launch era', compatReason: null, era: AC1999_ERA,
+      compatWarning: WARNING, perIpLimits: { accounts: 2, sessions: 2 },
+    });
+    // A copy: a consumer mutating the row never edits the overlay.
+    expect(byId.ac1999.perIpLimits).not.toBe(AC1999_PUBLIC_COMPAT.perIpLimits);
+    expect(byId[AC1999_LOCAL_ID]).toMatchObject({ compatWarning: null, perIpLimits: null });
+    const ace: ServerEntry = { id: '59544be2-9435-400d-a589-30b2a39ed071', name: 'Coldeve', emu: 'ACE', host: 'c.example.org', port: 9000, source: 'list' };
+    expect(buildDirectory([ace], new Map(), new Map(), { now: 0 })[0]).toMatchObject({ compatWarning: null, perIpLimits: null });
+    // Through JSON as /servers sends it.
+    expect(JSON.parse(JSON.stringify(byId.ac1999))).toMatchObject({ compatWarning: WARNING, perIpLimits: { accounts: 2, sessions: 2 } });
+  });
+
+  it('a refused world never carries the warning (its reason is what shows)', () => {
+    const overlay = { byId: { x: { compat: 'incompatible' as const, reason: 'R.', warning: 'W.' } }, byEmu: {} };
+    const row = buildDirectory([{ id: 'x', name: 'X', emu: 'ACE', host: 'h', port: 1, source: 'list' }], new Map(), new Map(), { now: 0, compat: overlay })[0];
+    expect(row).toMatchObject({ compat: 'incompatible', compatReason: 'R.', compatWarning: null });
   });
 });

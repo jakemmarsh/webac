@@ -16,7 +16,7 @@
  */
 import type { Logger } from './log.js';
 import type { FetchText, ServerEntry } from './serverList.js';
-import { type Compat, type CompatEntry, type CompatOverlay, NO_PROBE_ERAS, SERVER_COMPAT, compatFor } from './serverCompat.js';
+import { type Compat, type CompatEntry, type CompatOverlay, type PerIpLimits, NO_PROBE_ERAS, SERVER_COMPAT, compatFor } from './serverCompat.js';
 import type { Detection, EraDetector } from './eraDetect.js';
 
 export const TREESTATS_STATUS_URL = 'https://servers.treestats.net/api/servers/';
@@ -50,6 +50,10 @@ export interface DirectoryEntry {
   registrationUrl: string | null;
   /** The era profile the server needs; null = end of retail. */
   era: string | null;
+  /** CompatEntry.warning: a short note for a world that is enterable but limited from webAC; else null. */
+  compatWarning: string | null;
+  /** CompatEntry.perIpLimits: the server's per-address caps, which all webAC players share; else null. */
+  perIpLimits: PerIpLimits | null;
 }
 
 export interface DirectoryBody {
@@ -159,6 +163,8 @@ export function buildDirectory(
       registration: c.registration ?? null,
       registrationUrl: c.registrationUrl ?? null,
       era: c.era ?? null,
+      compatWarning: c.compat === 'incompatible' ? null : c.warning ?? null,
+      perIpLimits: c.perIpLimits ? { ...c.perIpLimits } : null,
     };
   });
   return entries.sort(compareEntries);

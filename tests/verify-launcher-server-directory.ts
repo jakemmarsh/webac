@@ -272,8 +272,10 @@ describe('GET /servers and /healthz (HTTP handler)', () => {
     expect(body.mode).toBe('multi');
     expect(body.servers.map(s => s.name).slice(0, 2)).toEqual(['Coldeve', 'Reefcull']);
     expect(Object.keys(body.servers[0]).sort()).toEqual([
-      'compat', 'compatNote', 'compatReason', 'description', 'discord', 'emu', 'era', 'id', 'lastSeen', 'name', 'online', 'population', 'registration', 'registrationUrl', 'type', 'website',
+      'compat', 'compatNote', 'compatReason', 'compatWarning', 'description', 'discord', 'emu', 'era', 'id', 'lastSeen', 'name', 'online', 'perIpLimits', 'population', 'registration', 'registrationUrl', 'type', 'website',
     ]);
+    // An ordinary world carries neither the warning nor per-address caps.
+    expect(body.servers[0]).toMatchObject({ compatWarning: null, perIpLimits: null });
     // /metrics stays behind its token
     expect((await fetch(`${base}/metrics`)).status).toBe(401);
   });

@@ -82,7 +82,8 @@
  *        still prepends GDLE's u8 timestamp, so both widths are accepted) → the zero value as an
  *        update (0 / false / 0.0 / "" ), since neither ACE nor our handler has a remove; position
  *        removes are dropped.
- *   0x02CF / 0x02D0 / 0x02DB / 0x02DC: the AC1999 server still sends these GDLE leftovers in the
+ *   0x02CF / 0x02D0 / 0x02DB / 0x02DC / 0x02B8 / 0x02B9 (Int64 removes, handled end-of-retail-side
+ *        by ServerMessageHandler): the AC1999 server still sends these GDLE leftovers in the
  *        end-of-retail layout (a 1999 client drops them); they pass through with the key renumbered.
  *
  * Lossy: the attribute raise count (1999 sends only the folded value), the spellbook's per-spell
@@ -101,6 +102,7 @@ const OP = {
   PrivBool: 0x02d1, PubBool: 0x02d2, PrivFloat: 0x02d3, PubFloat: 0x02d4,
   PrivString: 0x02d5, PubString: 0x02d6, PrivDid: 0x02d7, PubDid: 0x02d8,
   PrivIid: 0x02d9, PubIid: 0x02da, PrivPosition: 0x02db, PubPosition: 0x02dc,
+  PrivRemoveInt64: 0x02b8, PubRemoveInt64: 0x02b9,
   PrivSkill: 0x02dd, PrivAttribute: 0x02e3, PrivVital: 0x02e7, PubVital: 0x02e8, PrivVitalCurrent: 0x02e9,
 } as const;
 
@@ -685,6 +687,9 @@ export function registerPlayer1999(c: Codecs1999): Player1999State {
   // [u32 op][u8 seq]([u32 guid] public)[u32 key][value].
   for (const [op, kind, keyAt] of [
     [OP.PrivInt64, 'int64', 5], [OP.PubInt64, 'int64', 9], [OP.PrivPosition, 'position', 5], [OP.PubPosition, 'position', 9],
+    // GAP.gdle-qualities-remove-events — the Int64 removes (WeenieObject.cpp
+    // NotifyInt64StatUpdated): [u8 seq]([u32 guid])[u32 key], no value.
+    [OP.PrivRemoveInt64, 'int64', 5], [OP.PubRemoveInt64, 'int64', 9],
   ] as const) {
     c.inbound.set(op, (_r, ctx, raw) => {
       const out = raw.slice();

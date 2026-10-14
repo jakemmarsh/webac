@@ -69,7 +69,6 @@
     "verify-property-int-dispatch.ts",
     "verify-property-int64-dispatch.ts",
     "verify-public-property-consumer-coverage.ts",
-    "verify-public-property-dataid-mirrors.ts",
     "verify-public-property-int-level.ts",
     "verify-public-property-string-did-consumers.ts",
     "verify-public-update-bool-locked-uihidden.ts",

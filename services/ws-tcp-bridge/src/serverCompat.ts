@@ -41,6 +41,31 @@ export interface CompatEntry {
   registration?: string;
   /** Where to register (http/https); the launcher links it. */
   registrationUrl?: string;
+  /**
+   * A short warning (at most the 2 lines the launcher's details box has, the
+   * length of the Reefcull registration note) for a world players CAN enter
+   * but where something they'd expect doesn't work from webAC. Shown in warn
+   * colour where the new-player hint goes. Unlike `reason` it never refuses
+   * ENTER.
+   */
+  warning?: string;
+  /**
+   * The server caps accounts created from, and sessions online at once from,
+   * one IP address. Every webAC player reaches it from the bridge's single
+   * egress address, so the caps apply to all webAC players together. The
+   * launcher reads its login refusals in that light (a ClientLogOnFailed is a
+   * refused new account, a ServerFull is the session cap): renderer
+   * launcher/worldDirectory.ts loginFailureText.
+   */
+  perIpLimits?: PerIpLimits;
+}
+
+/** Per-IP caps (0 = unlimited), as the server's own config names them. */
+export interface PerIpLimits {
+  /** max_accounts_per_ip: accounts ever created from one address. */
+  accounts: number;
+  /** max_sessions_per_ip: clients online at once from one address. */
+  sessions: number;
 }
 
 export interface CompatOverlay {
@@ -90,6 +115,26 @@ export const AC1999_ERA_NOTE = '1999 launch era';
  * (one UDP port), so beta until one has been played end to end through us.
  */
 export const AC1999_COMPAT: CompatEntry = { compat: 'beta', note: AC1999_ERA_NOTE, era: AC1999_ERA };
+
+/**
+ * The public AC1999 server (ac1999.cobradragon.com) since upstream commit
+ * 11e7463f "Enforce a two account limit" (2026-10-12): max_accounts_per_ip=2
+ * and max_sessions_per_ip=2 (Server/Bin/server.cfg.example; DatabaseIO.cpp
+ * CreateAccount counts accounts.created_ip_address, Network.cpp
+ * AcceptClientLogin counts live clients). The bridge's one egress address
+ * used its two accounts long ago, so a new account through webAC is refused
+ * with STR_LOGIN_FAILED (ClientLogOnFailed; a fresh account through the
+ * production bridge, 2026-10-13), and a third webAC player online at once
+ * gets STR_LOGIN_SERVER_FULL. Existing accounts still log in, so the world
+ * stays enterable. An `ip_limit_overrides` row for the bridge's address lifts
+ * both (docs/operators.md); drop `perIpLimits` and `warning` once it exists.
+ * Only the public id: our local server (ac1999-local) keeps AC1999_COMPAT.
+ */
+export const AC1999_PUBLIC_COMPAT: CompatEntry = {
+  ...AC1999_COMPAT,
+  warning: "Existing accounts only: webAC can't create new ones here yet.",
+  perIpLimits: { accounts: 2, sessions: 2 },
+};
 
 /**
  * Eras the end-of-retail login probe (eraDetect.ts) must never touch: a 1999
@@ -151,6 +196,8 @@ export const SERVER_COMPAT: CompatOverlay = {
     // At login: "You have been booted from Asheron's Call Connections from
     // VPN / proxy disallowed by server policy."
     '9d17ce44-7db5-40c1-b7bb-a01c9de21d00': VPN_BLOCK, // AChard
+    // Two accounts / two sessions per IP (AC1999_PUBLIC_COMPAT). serverList.AC1999_PUBLIC_SERVER.id.
+    ac1999: AC1999_PUBLIC_COMPAT,
   },
   byEmu: {
     GDL: GDLE_BETA,

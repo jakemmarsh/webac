@@ -26,18 +26,13 @@
  * BUG.icon-overlay-underlay-dropped pulled the switch out of main.ts into
  * `applyPropertyDataIdUpdate` (packages/renderer/src/world/
  * ServerObjectManager.ts) so it's a plain function main.ts delegates to —
- * this suite now drives that real function directly. The Number.isFinite/
- * val>0 guard stays in main.ts's closure (not extracted, since it's a
- * generic wire-sanity check rather than PropertyDataId-specific mapping
- * logic) so that one assertion remains a narrow text check.
+ * this suite now drives that real function directly. The value guard moved
+ * with the rest of the consumer into network/applyPublicPropertyDataId.ts
+ * (GAP.gdle-qualities-remove-events), so it is driven for real too.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { applyPropertyDataIdUpdate, type ServerObject } from '../packages/renderer/src/world/ServerObjectManager.js';
-
-const REPO = resolve(__dirname, '..');
-const MAIN = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf8');
+import { applyPublicPropertyDataIdUpdate } from '../packages/renderer/src/network/applyPublicPropertyDataId.js';
 
 function baseObj(): ServerObject {
   return {
@@ -67,14 +62,14 @@ describe('PublicUpdatePropertyDataID mirrors Setup/MotionTable/SoundTable/Icon (
     expect(obj[field]).toBe(0x06001234);
   });
 
-  it('main.ts still guards against non-finite + non-positive values before delegating', () => {
-    const block = MAIN.match(/onPublicUpdatePropertyDataID:[\s\S]+?\n      \},/)?.[0] ?? '';
-    const code = block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-    expect(code).toMatch(/Number\.isFinite\(val\)/);
-    expect(code).toMatch(/val\s*>\s*0/);
-  });
-
-  it('cites FAITHFUL.380 in the docblock', () => {
-    expect(MAIN).toMatch(/FAITHFUL\.380/);
+  it('the consumer skips non-finite and zero values for Setup (an object never loses its Setup)', () => {
+    const obj = baseObj();
+    obj.setupId = 0x02000001;
+    const deps = { getObject: () => obj, inventory: { applyPublicPropertyDataId: () => false }, onInventoryItemChanged: () => {}, log: () => {} };
+    applyPublicPropertyDataIdUpdate({ guid: 1, key: 1, value: Number.NaN }, deps);
+    applyPublicPropertyDataIdUpdate({ guid: 1, key: 1, value: 0 }, deps);
+    expect(obj.setupId).toBe(0x02000001);
+    applyPublicPropertyDataIdUpdate({ guid: 1, key: 1, value: 0x02000002 }, deps);
+    expect(obj.setupId).toBe(0x02000002);
   });
 });

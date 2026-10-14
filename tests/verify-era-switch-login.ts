@@ -44,7 +44,10 @@ const ROWS = {
   },
   dm: { id: '394C58D0-885D-466B-B17F-D7E0B96FE3E2', name: 'Seedsow', emu: 'GDLE', online: true, compat: 'beta', era: 'classic-dereth-1-0' },
   dmAce: { id: '4db379b0-587a-4775-9b7f-879e0f15ba4b', name: 'Dekarutide', emu: 'ACE', online: true, compat: 'beta', era: 'classicace-customdm' },
-  ac1999: { id: 'ac1999', name: 'AC1999', emu: 'AC1999', online: true, compat: 'beta', era: 'ac1999-retail' },
+  ac1999: {
+    id: 'ac1999', name: 'AC1999', emu: 'AC1999', online: true, compat: 'beta', era: 'ac1999-retail',
+    compatWarning: "Existing accounts only: webAC can't create new ones here yet.", perIpLimits: { accounts: 2, sessions: 2 },
+  },
 };
 const world = (row: Record<string, unknown>): World => worldFromEntry(row)!;
 const era = (id: string): EraProfile => eraProfile(id)!;
@@ -94,6 +97,9 @@ describe('ERA.switch-login: every direction resumes the chosen world after the e
         expect(r.login).toMatchObject({ account: 'bael', password: 'pw', worldName: row.name });
         expect(r.login.wire).toBe(string16WireFor(worldEra, w.emu));
         expect(r.login.world?.registration ?? null).toBe((row as { registration?: string }).registration ?? null);
+        // The per-address caps survive the reload, so a refused login there still explains itself.
+        expect(r.login.world?.perIpLimits ?? null).toEqual((row as { perIpLimits?: unknown }).perIpLimits ?? null);
+        expect(r.login.world?.compatWarning ?? null).toBe((row as { compatWarning?: string }).compatWarning ?? null);
       });
     }
   }

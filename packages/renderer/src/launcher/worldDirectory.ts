@@ -60,6 +60,35 @@ export interface World {
    * launcherEraTarget).
    */
   eraUnknown?: boolean;
+  /**
+   * The bridge's short warning for a world that can be entered but is
+   * limited from webAC (the public AC1999 server's per-address account cap):
+   * shown in the details box where the new-player hint goes. null/absent: none.
+   */
+  compatWarning?: string | null;
+  /**
+   * The server's per-address caps (accounts created, sessions at once), which
+   * every webAC player shares through the bridge's one address; they change
+   * what its login refusals mean (loginFailureText). null/absent: none known.
+   */
+  perIpLimits?: PerIpLimits | null;
+}
+
+/** A server's per-IP caps (0 = unlimited): the bridge's CompatEntry.perIpLimits. */
+export interface PerIpLimits {
+  accounts: number;
+  sessions: number;
+}
+
+/** A /servers row's (or a stashed world's) perIpLimits, or null when absent or malformed. */
+export function perIpLimitsFrom(v: unknown): PerIpLimits | null {
+  const r = v as Record<string, unknown> | null | undefined;
+  if (!r || typeof r !== 'object') return null;
+  const n = (x: unknown): number | null => (typeof x === 'number' && Number.isInteger(x) && x >= 0 ? x : null);
+  const accounts = n(r.accounts);
+  const sessions = n(r.sessions);
+  if (accounts === null || sessions === null || (accounts === 0 && sessions === 0)) return null;
+  return { accounts, sessions };
 }
 
 export interface WorldDirectory {
@@ -130,6 +159,8 @@ export function worldFromEntry(raw: unknown): World | null {
     registrationUrl: httpUrl(r.registrationUrl),
     kind: 'listed',
     era: eraIdFrom(r.era),
+    compatWarning: compat === 'incompatible' ? null : str(r.compatWarning),
+    perIpLimits: perIpLimitsFrom(r.perIpLimits),
   };
 }
 
@@ -232,6 +263,36 @@ export const ACCOUNT_NAME_TAKEN_HINT =
 /** The same hint after a refusal whose own text does not say "password" (GDLE / AC1999 "Client logon failed"). */
 export const LOGON_FAILED_HINT = `That usually means a wrong password for this account name. ${ACCOUNT_NAME_TAKEN_HINT}`;
 
+const COUNT_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+const countWord = (n: number): string => COUNT_WORDS[n] ?? String(n);
+const capitalized = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * The launcher's line under a ClientLogOnFailed on a world that caps the
+ * accounts created from one address (the AC1999 server's
+ * max_accounts_per_ip): its auto-create refuses a new name once the bridge's
+ * address has used its quota, with the same STR_LOGIN_FAILED it sends for a
+ * wrong password, so the refusal is either. Replaces LOGON_FAILED_HINT, whose
+ * "try a different account name" sends a newcomer round in circles there.
+ */
+export function perIpLogonFailedText(limits: PerIpLimits): string {
+  const n = countWord(limits.accounts);
+  return `This server allows ${n} account${limits.accounts === 1 ? '' : 's'} per network address, and every webAC player shares ours, `
+    + "so new accounts can't be created through webAC here yet. "
+    + 'If this is an account you already have, check its password.';
+}
+
+/**
+ * The line under a ServerFull on a world that caps the sessions online at
+ * once from one address (max_sessions_per_ip): every webAC player counts
+ * against the same cap, so the server is "full" for webAC only.
+ */
+export function perIpServerFullText(limits: PerIpLimits): string {
+  const n = limits.sessions;
+  const who = n === 1 ? 'One webAC player is' : `${capitalized(countWord(n))} webAC players are`;
+  return `${who} already on this server; it allows ${countWord(n)} per network address, and every webAC player shares ours. Try again later.`;
+}
+
 /**
  * The text of a connection-failure dialog (ConnectionNotices'
  * netErrorNotice / serverNetErrorNotice) for a login to `world`: a refused
@@ -246,12 +307,20 @@ export const LOGON_FAILED_HINT = `That usually means a wrong password for this a
  */
 export function loginFailureText(
   notice: { readonly token: string; readonly text: string },
-  world: (Pick<World, 'name' | 'registration' | 'registrationUrl'> & Partial<Pick<World, 'kind' | 'bridgeUrl'>>) | null,
+  world: (Pick<World, 'name' | 'registration' | 'registrationUrl'> & Partial<Pick<World, 'kind' | 'bridgeUrl' | 'perIpLimits'>>) | null,
   inWorld: boolean,
 ): string {
   // A Custom… world's bridge that never answered: say that, not retail's
   // "make sure you have a working network" (listed worlds keep retail's text).
   if (!inWorld && world?.kind === 'custom' && notice.token === 'ID_NetError_CantSocket') return customBridgeUnansweredText(world);
+  // A world whose per-address caps every webAC player shares (perIpLimits):
+  // its refused create and its session cap read as that, not as a taken name
+  // or a full server.
+  const limits = world?.perIpLimits;
+  if (!inWorld && limits) {
+    if (notice.token === 'ID_ConnectionError_ClientLogOnFailed' && limits.accounts > 0) return `${notice.text}\n\n${perIpLogonFailedText(limits)}`;
+    if (notice.token === 'ID_ConnectionError_ServerFull' && limits.sessions > 0) return `${notice.text}\n\n${perIpServerFullText(limits)}`;
+  }
   if (inWorld || !LOGIN_REFUSED_TOKENS.has(notice.token)) return notice.text;
   if (world && worldRegistrationText(world)) return loginTimeoutText(notice.text, world);
   return notice.token === 'ID_ConnectionError_ClientLogOnFailed' ? `${notice.text}\n\n${LOGON_FAILED_HINT}` : notice.text;

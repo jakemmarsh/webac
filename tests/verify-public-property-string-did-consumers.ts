@@ -25,6 +25,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { applyPropertyDataIdUpdate, type ServerObject } from '../packages/renderer/src/world/ServerObjectManager.js';
+import { applyPublicPropertyDataIdUpdate } from '../packages/renderer/src/network/applyPublicPropertyDataId.js';
 
 const REPO = resolve(__dirname, '..');
 const MAIN = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf8');
@@ -78,11 +79,15 @@ describe('PublicUpdatePropertyDataID consumes Icon=8 (FAITHFUL.378)', () => {
     expect(obj.iconId).toBe(0x06005678);
   });
 
-  it('main.ts guards against non-finite + non-positive values before delegating', () => {
-    const block = MAIN.match(/onPublicUpdatePropertyDataID:[\s\S]+?\n      \},/)?.[0] ?? '';
-    const code = block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-    expect(code).toMatch(/Number\.isFinite\(val\)/);
-    expect(code).toMatch(/val\s*>\s*0/);
+  it('the real consumer guards against non-finite + zero Icon values', () => {
+    const obj = baseObj();
+    obj.iconId = 0x06001111;
+    const deps = { getObject: () => obj, inventory: { applyPublicPropertyDataId: () => false }, onInventoryItemChanged: () => {}, log: () => {} };
+    applyPublicPropertyDataIdUpdate({ guid: 1, key: 8, value: Number.NaN }, deps);
+    applyPublicPropertyDataIdUpdate({ guid: 1, key: 8, value: 0 }, deps);
+    expect(obj.iconId).toBe(0x06001111);
+    applyPublicPropertyDataIdUpdate({ guid: 1, key: 8, value: 0x06005678 }, deps);
+    expect(obj.iconId).toBe(0x06005678);
   });
 });
 

@@ -746,6 +746,11 @@ export class LauncherScreen {
       // Nobody can play there from webAC (e.g. a VPN check that refuses the
       // bridge): say so where the new-player hint goes, before ENTER is tried.
       body.appendChild(para(w.compatReason ?? "This world can't be played from webAC.", 2, this.warn, 'launcher-hint launcher-blocked'));
+    } else if (w.compatWarning) {
+      // Enterable, but something a newcomer expects doesn't work from webAC
+      // (AC1999: no new accounts, its per-address cap): warn where the
+      // new-player hint goes, in the 2 lines the box has.
+      body.appendChild(para(w.compatWarning, 2, this.warn, 'launcher-hint launcher-warning'));
     } else if (registration && w.registrationUrl) {
       // The whole note is a link to the world's registration page, in the link
       // colour; 2 lines, the room the details box has below the links row (a

@@ -27,7 +27,7 @@ import { SkillTable } from '@ac/dat-parser/file-types/SkillTable.js';
 import { SecondaryAttributeTable } from '@ac/dat-parser/file-types/SecondaryAttributeTable.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken,  PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
+import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken,  PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
@@ -92,6 +92,7 @@ import { SkyboxRenderer, aceEmuTicksNow } from './effects/SkyboxRenderer.js';
 import { SpellEffects } from './effects/SpellEffects.js';
 import { hiddenEdgeScript, PHYSICS_STATE_CTOR_DEFAULT } from './effects/HiddenStateScripts.js';
 import { AudioManager } from './audio/AudioManager.js';
+import { installFirstGestureAudio } from './audio/FirstGestureAudio.js';
 import { SoundPlayer } from './audio/SoundPlayer.js';
 import { MusicPlayer } from './audio/MusicPlayer.js';
 import { AmbientSoundManager } from './audio/AmbientSoundManager.js';
@@ -326,7 +327,8 @@ import { applyServerWieldObject } from './inventory/ServerWieldObject.js';
 import { SelectionHistory, giveSelectedObject, dropSelectedObject } from './inventory/GiveDropCommands.js';
 import type { ObjDescEventData, UpdatePositionData, AutonomousPositionData, HearSpeechData, PropertyUpdateData, VitalUpdateData, TurbineChatData, CombatNotificationData, TransientStringData, TellData, IdentifyResponseData, VendorInfoData, BookDataResponse, BookPageDataResponse, BookPageEditResponse, SkillUpdateData } from './network/ServerMessageHandler.js';
 import { sweepHeightfield, nearestContact } from './world/MissilePhysics.js';
-import { ServerObjectManager, isSequenceNewer, applyPublicUpdatePropertyInt, applyPublicUpdatePropertyIntToHudTarget, applyPropertyDataIdUpdate, TRANSLUCENCY_ORIGINAL_KEY } from './world/ServerObjectManager.js';
+import { applyPublicPropertyDataIdUpdate } from './network/applyPublicPropertyDataId.js';
+import { ServerObjectManager, isSequenceNewer, applyPublicUpdatePropertyInt, applyPublicUpdatePropertyIntToHudTarget, TRANSLUCENCY_ORIGINAL_KEY } from './world/ServerObjectManager.js';
 import { type AppearanceData, buildAppearanceOverrides, transplantPartChildren } from './models/AppearanceOverrides.js';
 import { attachHeldChild, buildWieldedItemMesh, heldCopiesUnder, heldCopyGuidAt, stripHeldCopies, itemVisualDescOf, wieldedMeshesBuiltWithMiss, WIELDED_PLACEMENT_KEY } from './models/WieldedItemVisual.js';
 import { SelectionLighting, SearchReason, lightingLevelsForMode, applyPlayerModelLighting, type LightingCopies } from './world/SelectionLighting.js';
@@ -1993,16 +1995,13 @@ async function main() {
   const musicPlayer = new MusicPlayer(audioManager, (waveId) => soundPlayer.decodeWave(waveId));
   const ambientSoundManager = new AmbientSoundManager(soundPlayer, audioManager);
   ambientSoundManager.viewerHeading = viewerHeading;
-  let audioInitialized = false;
-  const initAudio = () => {
-    if (!audioInitialized) {
-      audioInitialized = audioManager.init();
-      // Apply the persisted Config "Sound Options" (volumes, the three
-      // enables, Sound Features, play-only-when-active) to the new graph.
-      if (audioInitialized && gameUI) gameUI.applySoundCategories();
-    }
-  };
-  document.addEventListener('click', initAudio, { once: true });
+  // The first click opens the AudioContext and applies the persisted Config
+  // "Sound Options" (volumes, the three enables, Sound Features,
+  // play-only-when-active) to the new graph. The click can come long before
+  // the GameUI exists (BUG.boot-click-tdz): it reads this slot, filled once
+  // the GameUI is built, never the later `gameUI` const.
+  let gameUIForAudio: GameUI | null = null;
+  const firstGestureAudio = installFirstGestureAudio(document, audioManager, () => gameUIForAudio?.applySoundCategories());
 
   // Load ambient sounds from RegionDesc
   if (regionDesc?.soundInfo) {
@@ -5811,6 +5810,9 @@ async function main() {
   }, worldPortalDb, textureManager, soundPlayer, audioManager, langDb, layoutRenderer,
   streamedWorldReady ? { worldArtReady: streamedWorldReady } : undefined,
   sharedPortal ? null : { portalDb: uiPortalDb, textureManager: uiTextureManager });
+  gameUIForAudio = gameUI;
+  // A click during the boot opened the context before the GameUI existed: its saved Sound Options apply now.
+  if (firstGestureAudio.initialized) gameUI.applySoundCategories();
 
   // VividTargetIndicator (retail's selection triangles, ui/VividTargetIndicator.ts):
   // gmSmartBoxUI's corner group 0x10000038 / off-screen arrow 0x10000045, part
@@ -7806,7 +7808,7 @@ async function main() {
       // static's Setup default), GetSound's uniform variant +
       // PlayProbability, at the object's position (audio/RetailSound).
       playSoundTableSound: (anchor, soundType, pos) => {
-        if (!audioInitialized) return;
+        if (!firstGestureAudio.initialized) return;
         const tableId = resolveAnchorSoundTable(anchor.userData,
           (setupId) => setupModelRenderer.loadSetupModel(setupId)?.defaultSoundTable ?? 0);
         if (!tableId) return;
@@ -9793,7 +9795,9 @@ async function main() {
       onPrivateUpdatePropertyInt: (data: PropertyUpdateData) => {
         const val = data.value as number;
         // Keep the generic int mirror current (Character Information report).
-        playerState.serverIntProps.set(data.key, val);
+        // A removed quality (GDLE 0x01D1) leaves the mirror, as retail's
+        // CBaseQualities::RemoveInt drops the key (InqInt then fails).
+        playerState.applyServerIntProp(data.key, val, data.removed);
         // CORE.17.d — the radar's Threat blip shape compares the local
         // player's own PK / PKLite bits against each object's.
         if (data.key === PropertyInt.PlayerKillerStatus) playerPKStatus = val;
@@ -10223,39 +10227,13 @@ async function main() {
         console.log(`[Property] PublicString: guid=0x${data.guid.toString(16)} key=${data.key} value=${val}`);
       },
       onPublicUpdatePropertyDataID: (data: PropertyUpdateData) => {
-        const val = data.value as number;
-        // FAITHFUL.378 — PropertyDataId.Icon (8) live-updates the
-        // mirrored ServerObject.iconId. ACE broadcasts this when an
-        // item swaps icon mid-life (charges depleted, condition flip).
-        // Per PropertyDataId.cs:14 `Icon = 8`. Pre-fix every update was
-        // console-only; the inventory tooltip + radar dot stayed
-        // pinned to the original icon DID.
-        //
-        // FAITHFUL.380 — Mirror Setup (1), MotionTable (2),
-        // SoundTable (3) so subsequent appearance-rebuild + animation
-        // playback paths see the server-current values. Per
-        // reference/ACE/Source/ACE.Entity/Enum/Properties/PropertyDataId.cs:6-8.
-        // ACE broadcasts these on polymorph spells, mount/dismount,
-        // weapon swap (sound table for hit sounds), etc. Pre-fix the
-        // mirrors stayed frozen at the CreateObject-time values,
-        // so a model rebuild triggered by FAITHFUL.276's appearance
-        // path would resurrect the stale setup.
-        //
-        // BUG.icon-overlay-underlay-dropped — also mirrors IconOverlay (50)
-        // and IconUnderlay (52) so a live overlay/underlay swap (e.g. an
-        // Aetheria tier-up) updates the rendered icon without waiting for
-        // the object to leave + re-enter visual range.
-        if (Number.isFinite(val) && val > 0) {
-          const obj = serverObjectManager?.getObject(data.guid);
-          if (obj) applyPropertyDataIdUpdate(obj, data.key, val);
-          // Our own items have no ServerObject (CorePlating sets a pack
-          // item's IconOverlay this way).
-          else if (playerState.inventory.applyPublicPropertyDataId(data.guid, data.key, val)) {
-            syncWornCopy(data.guid);
-            inventoryDirty = true;
-          }
-        }
-        console.log(`[Property] PublicDID: guid=0x${data.guid.toString(16)} key=${data.key} value=${val}`);
+        // FAITHFUL.378 / .380, BUG.icon-overlay-underlay-dropped and GDLE's
+        // 0x01DA remove: network/applyPublicPropertyDataId.ts.
+        applyPublicPropertyDataIdUpdate(data, {
+          getObject: (guid) => serverObjectManager?.getObject(guid),
+          inventory: playerState.inventory,
+          onInventoryItemChanged: (guid) => { syncWornCopy(guid); inventoryDirty = true; },
+        });
       },
       onPublicUpdatePropertyInstanceID: (data: PropertyUpdateData) => {
         const val = data.value as number;
@@ -11429,6 +11407,16 @@ async function main() {
           console.log(`[AC] PrivateUpdatePosition (positionType=${data.positionType}): landblock=0x${data.landblockId.toString(16)} pos=(${data.x.toFixed(1)}, ${data.y.toFixed(1)}, ${data.z.toFixed(1)})`);
         }
       },
+      // GAP.gdle-qualities-remove-events — GDLE's 0x01DD PrivateRemovePosition.
+      // The only position quality we keep for the local player is the
+      // LastOutsideDeath corpse cache (/corpse); a removed one is forgotten.
+      onPrivateRemovePosition: (data) => {
+        if (data.positionType === POSTYPE_LAST_OUTSIDE_DEATH) lastOutsideDeathState.clear();
+        console.log(`[AC] PrivateRemovePosition positionType=${data.positionType}`);
+      },
+      onPublicRemovePosition: (data) => {
+        console.log(`[AC] PublicRemovePosition guid=0x${data.guid.toString(16)} positionType=${data.positionType}`);
+      },
       onTransientString: (data) => {
         // Same retail handler as onCommunicationTransientString
         // (DECOMP.transient-string-notice): the 0x1a spew-box notice.
@@ -11603,7 +11591,7 @@ async function main() {
           }
         } else if (isEnvironSound(t)) {
           const sound = ENVIRON_SOUND[t as EnvironChangeType];
-          if (sound !== undefined && audioInitialized) {
+          if (sound !== undefined && firstGestureAudio.initialized) {
             // SWEEP1006 environs — PlaySoundFromCenter(SoundType, table) @ 00550950
             // is gated by interface_sounds_enabled (the 'ui' category's mute),
             // at the effects volume (playFromCenter applies it).
@@ -11849,7 +11837,7 @@ async function main() {
         // PlayProbability, played at the object at the server's volume
         // (FAITHFUL.393's wire float), attenuated to the viewer. An unknown
         // object's message is queued until it is created.
-        if (!audioInitialized) return;
+        if (!firstGestureAudio.initialized) return;
         const r = pendingPlayScripts.inOrder(data.guid, () => playServerSound(data.guid, data.soundId, data.volume), performance.now());
         if ('queued' in r) return;
         console.log(`[AC] Sound 0x${data.soundId.toString(16)} on 0x${data.guid.toString(16)} vol ${data.volume}: ${r.played ? `wave 0x${r.waveId.toString(16)} at the object` : `nothing (${r.reason})`}`);

@@ -30,7 +30,8 @@ const VARIANTS = [
   'Bool',    // FAITHFUL.158/.196
   'Float',   // FAITHFUL.158/.196
   'String',  // FAITHFUL.158/.196
-  'DataID',  // FAITHFUL.158/.196
+  // DataID: its consumer is network/applyPublicPropertyDataId.ts, driven
+  // behaviorally in verify-public-property-dataid-consumer.ts.
 ] as const;
 
 describe('Public property update consumers (FAITHFUL.277)', () => {

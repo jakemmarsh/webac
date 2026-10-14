@@ -123,6 +123,23 @@ export interface PropertyUpdateData {
   guid: number;
   key: number;
   value: number | bigint | boolean | string;
+  /**
+   * GAP.gdle-qualities-remove-events — set when the server REMOVED the
+   * quality (0x01D1–0x01DC, 0x02B8/0x02B9) rather than updating it. `value`
+   * then holds the type's default (0 / 0n / false / 0.0 / "" / 0), what
+   * retail's InqX falls back to once the key is gone and what ACE itself
+   * sends for a removal (Player_Properties.cs UpdateProperty `value ?? 0`),
+   * so every update consumer already handles it. Stores keyed by property
+   * (e.g. PlayerState.serverIntProps) delete the key instead.
+   */
+  removed?: boolean;
+}
+
+/** GAP.gdle-qualities-remove-events — a removed PositionType (0x01DD / 0x01DE). */
+export interface PositionRemoveData {
+  /** 0 for the private (local player) form. */
+  guid: number;
+  positionType: number;
 }
 
 export interface VitalUpdateData {
@@ -503,6 +520,12 @@ export interface ServerMessageHandlers {
   onPublicUpdatePropertyString?: HandlerFn<PropertyUpdateData>;
   onPublicUpdatePropertyDataID?: HandlerFn<PropertyUpdateData>;
   onPublicUpdatePropertyInstanceID?: HandlerFn<PropertyUpdateData>;
+
+  // Qualities remove events for positions (GAP.gdle-qualities-remove-events).
+  // The scalar removes (int/int64/bool/float/string/DID/IID) arrive through
+  // the matching onPrivate/PublicUpdateProperty* handler with `removed: true`.
+  onPrivateRemovePosition?: HandlerFn<PositionRemoveData>;
+  onPublicRemovePosition?: HandlerFn<PositionRemoveData>;
 
   // Session/account lifecycle (FAITHFUL.168)
   onAccountBoot?: HandlerFn<{ reason: string }>;
@@ -1254,9 +1277,20 @@ export class ServerMessageHandler {
         // ACE GameMessagePublicUpdatePropertyString.cs has a DIFFERENT field order
         // from the other public-update variants: seq(u8) + property(u32) + guid(u32)
         // + Align(4) + WriteString16L.
+        //
+        // Retail reads the OTHER order: UIQueueManager::HandleStringUpdateEvents
+        // @ 0055a980 takes the u32 @+5 as the object and @+9 as the key
+        // (Handle_Qualities__UpdateString(seq, guid, key, str), the same order
+        // as UpdateInt), and GDL-family servers write seq + guid + key
+        // (WeenieObject.cpp NotifyStringStatUpdated 0x2D6). A guid is never
+        // below 0x10000 on either server and a PropertyString key never above
+        // it, so the pair tells which order it is.
         const seq = r.readUInt8();
-        const key = r.readUInt32();
-        const guid = r.readUInt32();
+        const first = r.readUInt32();
+        const second = r.readUInt32();
+        const aceOrder = first < 0x10000 && second >= 0x10000;
+        const key = aceOrder ? first : second;
+        const guid = aceOrder ? second : first;
         r.align(4);
         const value = r.readString16();
         this.handlers.onPublicUpdatePropertyString?.({ guid, key, value });
@@ -1342,6 +1376,42 @@ export class ServerMessageHandler {
         const key = r.readUInt32();
         const value = r.readUInt32();
         this.handlers.onPrivateUpdatePropertyInstanceID?.({ guid: 0, key, value });
+        break;
+      }
+
+      // ── Qualities remove events (GAP.gdle-qualities-remove-events) ──
+      // Retail: UIQueueManager dispatch → CM_Qualities::DispatchUI_[Private]
+      // Remove*Event reads u8 seq @+4, then (public) u32 guid @+5 and u32 key
+      // @+9, or (private) u32 key @+5 → ClientObjMaintSystem::<T>::RemoveStat
+      // @ 00558470.. (CBaseQualities::RemoveX + QualityRegistrar::
+      // CallRemoveHandler). GDLE WeenieObject.cpp Notify*StatUpdated sends them
+      // when the quality is gone. Each is delivered to the matching update
+      // handler with the type's default value and `removed: true`.
+      case GameMessageOpcode.PrivateRemovePropertyInt:
+      case GameMessageOpcode.PrivateRemovePropertyInt64:
+      case GameMessageOpcode.PrivateRemovePropertyBool:
+      case GameMessageOpcode.PrivateRemovePropertyFloat:
+      case GameMessageOpcode.PrivateRemovePropertyString:
+      case GameMessageOpcode.PrivateRemovePropertyDataID:
+      case GameMessageOpcode.PrivateRemovePropertyInstanceID:
+      case GameMessageOpcode.PrivateRemovePosition: {
+        r.readUInt8(); // seq
+        const key = r.readUInt32();
+        this.dispatchQualityRemove(msg.opcode, 0, key);
+        break;
+      }
+      case GameMessageOpcode.PublicRemovePropertyInt:
+      case GameMessageOpcode.PublicRemovePropertyInt64:
+      case GameMessageOpcode.PublicRemovePropertyBool:
+      case GameMessageOpcode.PublicRemovePropertyFloat:
+      case GameMessageOpcode.PublicRemovePropertyString:
+      case GameMessageOpcode.PublicRemovePropertyDataID:
+      case GameMessageOpcode.PublicRemovePropertyInstanceID:
+      case GameMessageOpcode.PublicRemovePosition: {
+        r.readUInt8(); // seq
+        const guid = r.readUInt32();
+        const key = r.readUInt32();
+        this.dispatchQualityRemove(msg.opcode, guid, key);
         break;
       }
 
@@ -1747,6 +1817,30 @@ export class ServerMessageHandler {
 
       default:
         this.logUnhandled('direct', msg.opcode);
+    }
+  }
+
+  /** GAP.gdle-qualities-remove-events — route one parsed remove event. */
+  private dispatchQualityRemove(opcode: number, guid: number, key: number): void {
+    const h = this.handlers;
+    const d = (value: PropertyUpdateData['value']): PropertyUpdateData => ({ guid, key, value, removed: true });
+    switch (opcode) {
+      case GameMessageOpcode.PrivateRemovePropertyInt: h.onPrivateUpdatePropertyInt?.(d(0)); break;
+      case GameMessageOpcode.PublicRemovePropertyInt: h.onPublicUpdatePropertyInt?.(d(0)); break;
+      case GameMessageOpcode.PrivateRemovePropertyInt64: h.onPrivateUpdatePropertyInt64?.(d(0n)); break;
+      case GameMessageOpcode.PublicRemovePropertyInt64: h.onPublicUpdatePropertyInt64?.(d(0n)); break;
+      case GameMessageOpcode.PrivateRemovePropertyBool: h.onPrivateUpdatePropertyBool?.(d(false)); break;
+      case GameMessageOpcode.PublicRemovePropertyBool: h.onPublicUpdatePropertyBool?.(d(false)); break;
+      case GameMessageOpcode.PrivateRemovePropertyFloat: h.onPrivateUpdatePropertyFloat?.(d(0)); break;
+      case GameMessageOpcode.PublicRemovePropertyFloat: h.onPublicUpdatePropertyFloat?.(d(0)); break;
+      case GameMessageOpcode.PrivateRemovePropertyString: h.onPrivateUpdatePropertyString?.(d('')); break;
+      case GameMessageOpcode.PublicRemovePropertyString: h.onPublicUpdatePropertyString?.(d('')); break;
+      case GameMessageOpcode.PrivateRemovePropertyDataID: h.onPrivateUpdatePropertyDataID?.(d(0)); break;
+      case GameMessageOpcode.PublicRemovePropertyDataID: h.onPublicUpdatePropertyDataID?.(d(0)); break;
+      case GameMessageOpcode.PrivateRemovePropertyInstanceID: h.onPrivateUpdatePropertyInstanceID?.(d(0)); break;
+      case GameMessageOpcode.PublicRemovePropertyInstanceID: h.onPublicUpdatePropertyInstanceID?.(d(0)); break;
+      case GameMessageOpcode.PrivateRemovePosition: h.onPrivateRemovePosition?.({ guid: 0, positionType: key }); break;
+      case GameMessageOpcode.PublicRemovePosition: h.onPublicRemovePosition?.({ guid, positionType: key }); break;
     }
   }
 

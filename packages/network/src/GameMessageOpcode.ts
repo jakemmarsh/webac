@@ -14,6 +14,28 @@ export enum GameMessageOpcode {
   InventoryRemoveObject           = 0x0024,
   SetStackSize                    = 0x0197,
   PlayerKilled                    = 0x019E,
+  // Qualities remove events (GAP.gdle-qualities-remove-events). Retail's
+  // UIQueueManager dispatch (0x1d1..0x1de, 0x2b8/0x2b9) → CM_Qualities::
+  // DispatchUI_[Private]Remove*Event → ClientObjMaintSystem::<T>::RemoveStat.
+  // Private: u8 seq + u32 key; public: u8 seq + u32 guid + u32 key. GDL-family
+  // servers send them (WeenieObject.cpp Notify*StatUpdated when the quality
+  // is gone); ACE never does (it sends the update with the default value).
+  PrivateRemovePropertyInt        = 0x01D1,
+  PublicRemovePropertyInt         = 0x01D2,
+  PrivateRemovePropertyBool       = 0x01D3,
+  PublicRemovePropertyBool        = 0x01D4,
+  PrivateRemovePropertyFloat      = 0x01D5,
+  PublicRemovePropertyFloat       = 0x01D6,
+  PrivateRemovePropertyString     = 0x01D7,
+  PublicRemovePropertyString      = 0x01D8,
+  PrivateRemovePropertyDataID     = 0x01D9,
+  PublicRemovePropertyDataID      = 0x01DA,
+  PrivateRemovePropertyInstanceID = 0x01DB,
+  PublicRemovePropertyInstanceID  = 0x01DC,
+  PrivateRemovePosition           = 0x01DD,
+  PublicRemovePosition            = 0x01DE,
+  PrivateRemovePropertyInt64      = 0x02B8,
+  PublicRemovePropertyInt64       = 0x02B9,
   EmoteText                       = 0x01E0,
   SoulEmote                       = 0x01E2,
   HearSpeech                      = 0x02BB,
