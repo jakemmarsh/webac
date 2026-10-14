@@ -22,7 +22,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import type { AgentVitals } from '../../packages/renderer/src/agent/types.ts';
+import type { AgentItem, AgentVitals } from '../../packages/renderer/src/agent/types.ts';
 import { AgentClient } from '../ac-agent/client.ts';
 import { formatJournal, loadJournal } from '../ac-agent/journal.ts';
 import { STATE_DIR, logFile, pidAlive, readInfo } from '../ac-agent/state.ts';
@@ -31,7 +31,7 @@ import { type ChatParseState, FeedWriter, FileTail, type SegmentUsage, addUsage,
 import { type SegmentRecord, afterTurn, dayUsage, endReason, localDay, nextSegment } from './policy.ts';
 import { preparePlayerDir } from './player.ts';
 import { TOOLS } from '../ac-agent/tools.ts';
-import { clipReport, nudgeMessage, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
+import { type SessionTally, clipReport, nudgeMessage, readinessBrief, sessionSoFar, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
 
 export const STREAM_DIR = join(STATE_DIR, 'stream');
 export const STOP_FILE = join(STREAM_DIR, 'STOP');
@@ -61,6 +61,13 @@ export interface SupervisorDeps {
   daemonStatus(profile: string): Promise<DaemonState | null>;
   /** The daemon's read-only /vitals (null outside the world or with no daemon). */
   vitals(profile: string): Promise<AgentVitals | null>;
+  /**
+   * The character's inventory through the daemon (the agent API's `inventory`, a read: it never takes the agent's
+   * chat), for the opening message's readiness block; null when it can't be read.
+   */
+  inventory(profile: string): Promise<AgentItem[] | null>;
+  /** The character sheet text (the agent API's `characterSheet`, a read), for unspent XP and skill credits; null when unreadable. */
+  characterSheet(profile: string): Promise<string | null>;
   /** One agent-API call through the daemon (the stop flow's logout of an attached tab). */
   callAgent(profile: string, method: string, args?: unknown[]): Promise<unknown>;
   journal(profile: string): string;
@@ -145,6 +152,8 @@ export class StreamSupervisor {
   private chatState = new Map<string, ChatParseState>();
   /** Spell words the cast has spoken (feed.ts isIncantation), shared so each is known from either log. */
   private incantations = new Set<string>();
+  /** Each profile's deaths and level-ups since this session's session-start (the feed's own events). */
+  private tally = new Map<string, SessionTally>();
   readonly halted = new Map<string, string>();
 
   constructor(readonly cfg: StreamConfig, readonly deps: SupervisorDeps) {}
@@ -200,7 +209,15 @@ export class StreamSupervisor {
       const st = this.chatState.get(c.profile) ?? { incantations: this.incantations };
       this.chatState.set(c.profile, st);
       for (const line of this.deps.chatLines(c.profile)) {
-        for (const { t, draft } of parseChatLine(line, c.profile, c.character, cast, st)) this.deps.feed.write(draft, t);
+        for (const { t, draft } of parseChatLine(line, c.profile, c.character, cast, st)) {
+          this.deps.feed.write(draft, t);
+          if (draft.type === 'death' || draft.type === 'level-up') {
+            const tl = this.tally.get(c.profile) ?? { deaths: [], levels: [] };
+            this.tally.set(c.profile, tl);
+            if (draft.type === 'death') tl.deaths.push(draft.killer ?? null);
+            else tl.levels.push(draft.level);
+          }
+        }
       }
     }
   }
@@ -299,6 +316,14 @@ export class StreamSupervisor {
   async runSegment(c: CharacterConfig, segment: number, lastReport: string | null): Promise<SegmentRecord> {
     const { deps, cfg } = this;
     const partner = this.partnerOf(c);
+    // What the opening says beside the journal: this character's readiness (gear gaps, unspent XP, kits and potions)
+    // and the session's deaths and levels.
+    this.pumpChat(); // the latest deaths and level-ups into the tally
+    const readiness = readinessBrief({
+      items: await deps.inventory(c.profile).catch(() => null),
+      sheet: await deps.characterSheet(c.profile).catch(() => null),
+      session: sessionSoFar(cfg.characters.map((o) => ({ character: o.character, tally: this.tally.get(o.profile) }))),
+    });
     const startMs = deps.now();
     const deadline = startMs + cfg.segment.minutes * 60_000;
     const hardDeadline = deadline + cfg.segment.wrapUpMinutes * 60_000 + 60_000;
@@ -307,7 +332,7 @@ export class StreamSupervisor {
     this.active.set(c.profile, { proc, c });
     deps.log(`${c.character}: segment ${segment} started (${c.model}, ${cfg.segment.minutes} min)`);
     deps.feed.write({ type: 'segment-start', char: c.profile, title: `${c.character}: segment ${segment}`, detail: `${c.model}, ${cfg.segment.minutes} min` });
-    proc.send(userLine(segmentOpening({ c, partner, segment, nowMs: startMs, playMinutes: cfg.segment.minutes, journal: deps.journal(c.profile), lastReport })));
+    proc.send(userLine(segmentOpening({ c, partner, segment, nowMs: startMs, playMinutes: cfg.segment.minutes, journal: deps.journal(c.profile), lastReport, readiness })));
 
     const names = new Map<string, string>();
     let usage: SegmentUsage | null = null;
@@ -463,6 +488,8 @@ export function realDeps(cfg: StreamConfig): SupervisorDeps {
       return s ? { ready: !!s.ready, attached: !!s.attached } : null;
     },
     vitals: async (p) => client(p)?.vitals() ?? null,
+    inventory: async (p) => { const c = client(p); return c ? c.call<AgentItem[]>('inventory', [], 15_000).catch(() => null) : null; },
+    characterSheet: async (p) => { const c = client(p); return c ? c.call<string>('characterSheet', [], 15_000).catch(() => null) : null; },
     callAgent: async (p, m, a = []) => { const c = client(p); if (!c) throw new Error(`no daemon for ${p}`); return c.call(m, a, 15_000); },
     journal: (p) => {
       const i = readInfo(p);

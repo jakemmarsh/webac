@@ -343,7 +343,8 @@ export async function openDoorOnTheWay(ctx: NodeCtx, goal: { x: number; y: numbe
   if (!me) return null;
   const t = ctx.now();
   for (const [g, until] of o.skip) if (until <= t) o.skip.delete(g);
-  const door = api.nearby(o.idRange).filter((d) => d.kind === 'door' && d.open === false && !o.skip.has(d.guid))
+  // A door only its lever or switch opens (ItemUseable No) is no door to open by hand: the nav walk goes round or stops.
+  const door = api.nearby(o.idRange).filter((d) => d.kind === 'door' && d.open === false && !d.notByHand && !o.skip.has(d.guid))
     .filter((d) => doorOnRoute({ ...objectAt(me, d), dz: d.dz }, me, goal))[0];
   if (!door) return null;
   if (!api.itemData(door.guid)) void api.appraise(door.guid, { quiet: true });

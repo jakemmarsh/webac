@@ -12,7 +12,8 @@ import { MagToolsWindow } from '../packages/renderer/src/ui/magtools/MagToolsWin
 import { MagToolsRuntime, mtOptionWired, mtSenderClass, type MagToolsExtras } from '../packages/renderer/src/agent/magtools/magToolsRuntime.js';
 import type { AgentApi } from '../packages/renderer/src/agent/AgentApi.js';
 import { vtankHotkeys } from '../packages/renderer/src/ui/automation/VhsWindow.js';
-import type { VTankWindow } from '../packages/renderer/src/ui/automation/VTankWindow.js';
+import { VTankWindow, type VTankKit, type VTankSource } from '../packages/renderer/src/ui/automation/VTankWindow.js';
+import { emptyRoutineDoc, EXAMPLE_HUNT_PROFILE, type RoutineDoc } from '../packages/shared/src/routines/index.js';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
 
 class Mem { m = new Map<string, string>(); getItem(k: string) { return this.m.get(k) ?? null; } setItem(k: string, v: string) { this.m.set(k, v); } removeItem(k: string) { this.m.delete(k); } }
@@ -364,6 +365,72 @@ describe('Autopack', () => {
     busy = false;
     m.rt.tick();
     expect(m.g.calls).toEqual(['place 30 {"packSlot":1}']);
+  });
+});
+
+describe('the routines changed elsewhere since they loaded (Claude\'s ac_routines set, another tab)', () => {
+  /** The VirindiTank window model over a store whose document changes behind the page's back, and Mag-Tools reading it as main.ts wires it. */
+  function wired() {
+    let stored: RoutineDoc = { ...emptyRoutineDoc('local-eor', 'acct'), updatedAt: '2026-10-14T10:00:00.000Z', profiles: [{ ...structuredClone(EXAMPLE_HUNT_PROFILE), name: 'Mine' }], characters: { Tester: 'Mine' } };
+    let now = 1_700_000_000_000;
+    const checks: string[] = [];
+    const source = {
+      character: () => 'Tester',
+      now: () => now,
+      status: () => ({ running: false, paused: false, profile: null, state: null, acting: null, last: [] }),
+      report: () => {},
+      load: async () => ({ ok: true as const, doc: structuredClone(stored) }),
+      check: async (since: string) => { checks.push(since); return stored.updatedAt === since ? { ok: true as const, unchanged: true as const } : { ok: true as const, doc: structuredClone(stored) }; },
+    } as unknown as VTankSource;
+    const win = new VTankWindow({} as VTankKit, source, { open: () => {}, close: () => {} });
+    const m = runtime({ lootSets: () => win.standbyProfile()?.lootSets ?? null, freshenRoutines: () => win.refreshStored(1000) });
+    m.g.state.slots = [
+      { guid: 0x40, name: 'Bread', packSlot: 0, stack: 1, maxStack: 100, isPack: false, equipped: false },
+      { guid: 0x41, name: 'Pyreal', packSlot: 0, stack: 5, maxStack: 25000, isPack: false, equipped: false },
+      { guid: 0x7001, name: 'Pack', packSlot: 0, stack: 1, maxStack: 1, isPack: true, equipped: false },
+    ];
+    const change = (sets: Record<string, LootRule[]>) => { stored = { ...structuredClone(stored), updatedAt: new Date(now).toISOString() }; stored.profiles[0].lootSets = sets; };
+    return { win, m, checks, change, advance: (ms: number) => { now += ms; } };
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('/mt autopack after a Default.AutoPack was stored elsewhere packs by it (the live repro: it did nothing until the window reopened)', async () => {
+    const w = wired();
+    await w.win.load(() => {});
+    expect(w.m.rt.autopackRules()).toBeNull();
+    w.advance(10_000);
+    w.change({ 'Default.AutoPack': [keepUpTo('Bread', 1)] });
+    expect(w.m.rt.chat('/mt autopack')).toBe(true);
+    await settle();
+    expect(w.m.rt.autopacker.running).toBe(true);
+    w.m.rt.tick();
+    expect(w.m.g.calls).toEqual(['place 40 {"packSlot":1}']);
+    expect(w.checks).toHaveLength(1);
+  });
+
+  it('a trade I open uses the partner\'s loot set as stored now', async () => {
+    const w = wired();
+    w.m.on('AutoTradeAdd.Enabled');
+    await w.win.load(() => {});
+    w.advance(10_000);
+    w.change({ Mule: [keep('Pyreal')] });
+    w.m.rt.tradeOpened({ initiatorGuid: 0x5001, partnerGuid: 0x6001, partner: 'Mule' });
+    await settle();
+    for (let i = 0; i < 3; i++) w.m.rt.tick();
+    expect(w.m.g.calls).toEqual(['trade add 41']);
+  });
+
+  it('a trade closed before the re-check answers adds nothing', async () => {
+    const w = wired();
+    w.m.on('AutoTradeAdd.Enabled');
+    await w.win.load(() => {});
+    w.advance(10_000);
+    w.change({ Mule: [keep('Pyreal')] });
+    w.m.rt.tradeOpened({ initiatorGuid: 0x5001, partnerGuid: 0x6001, partner: 'Mule' });
+    w.m.rt.tradeClosed();
+    await settle();
+    for (let i = 0; i < 3; i++) w.m.rt.tick();
+    expect(w.m.g.calls).toEqual([]);
   });
 });
 

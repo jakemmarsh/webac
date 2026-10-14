@@ -12,6 +12,7 @@ import { buildCreatureModeCamera, placeCreatureModeCamera, distantLightPosition 
 import { currentObjectAmbientScale, setCellLighting, CULL_NONE_DEFINE } from '../models/RetailLighting.js';
 import { TELEPORT_ANIM_FPS, fovForViewDistanceRatio } from './PortalSpaceModel.js';
 import { datMissEpoch, noDatMissSince } from '@ac/dat-parser/streaming/DatMiss.js';
+import { renderPixelRatio, renderAdaptConfig, contextAntialias } from '../scene/RenderScale.js';
 
 /**
  * PortalSpaceRenderer — retail's portal-space viewport, drawn as the client
@@ -147,9 +148,10 @@ export class PortalSpaceRenderer {
   ) {
     this.gameFovDeg = gameFovDeg;
     this.aspect = width / height;
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    this.renderer = new THREE.WebGLRenderer({ antialias: contextAntialias(), alpha: false });
     this.renderer.setSize(width, height);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // PERF.render-adapt — software rendering: no MSAA and a ~720p buffer, as the world (RenderScale.ts).
+    this.renderer.setPixelRatio(renderPixelRatio(Math.min(window.devicePixelRatio, 2), width, height, renderAdaptConfig().software));
     this.renderer.setClearColor(0x000000, 1);
     this.domElement = this.renderer.domElement;
 
@@ -306,6 +308,7 @@ export class PortalSpaceRenderer {
 
   resize(width: number, height: number): void {
     this.aspect = width / height;
+    if (renderAdaptConfig().software) this.renderer.setPixelRatio(renderPixelRatio(Math.min(window.devicePixelRatio, 2), width, height, true));
     this.renderer.setSize(width, height);
     placeCreatureModeCamera(this.camera, [...PORTAL_CAMERA_POSITION], portalSpaceVerticalFovDeg(this.gameFovDeg, this.aspect), this.aspect);
     this.baseQuat.copy(this.camera.quaternion);

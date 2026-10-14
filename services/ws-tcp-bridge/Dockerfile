@@ -25,6 +25,7 @@ COPY packages/shared/src/routines ./packages/shared/src/routines
 COPY packages/shared/src/encoding/Windows1252.ts ./packages/shared/src/encoding/Windows1252.ts
 # The hosted connector's /mcp serves the ac-agent tool table (tools/ac-agent; no Playwright in it).
 COPY packages/renderer/src/agent/format.ts ./packages/renderer/src/agent/format.ts
+COPY packages/renderer/src/agent/gear.ts ./packages/renderer/src/agent/gear.ts
 COPY tools/ac-agent/client.ts ./tools/ac-agent/client.ts
 COPY tools/ac-agent/eras.ts ./tools/ac-agent/eras.ts
 COPY tools/ac-agent/hostedGuide.ts ./tools/ac-agent/hostedGuide.ts

@@ -35,7 +35,7 @@ export const BOOT_STAGES = [
   'renderer_init', 'world_init', 'bridge_probe', 'ui_init',
 ] as const;
 export const BOOT_CACHE_STATES = ['cold', 'warm', 'partial', 'off'] as const;
-export const CAPABILITY_ISSUES = ['webgl2', 'websocket', 'memory', 'pointer'] as const;
+export const CAPABILITY_ISSUES = ['webgl2', 'websocket', 'memory', 'pointer', 'software_gpu'] as const;
 /** The largest download a boot announces, in KiB (16 GiB: every whole DAT is ~1.4 GB). */
 const MAX_KB = 16 * 1024 * 1024;
 

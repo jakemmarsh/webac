@@ -3046,6 +3046,8 @@ export class GameUI {
     vital?: number[];
     trainedSkill?: number[];
     specializedSkill?: number[];
+    /** XpTable.characterLevelSkillCreditList: the skill credits reaching each level grants (ACE Player_Xp: index = the new level). */
+    levelSkillCredits?: number[];
   } = {};
   // CORE.7 — retail select-to-raise state (gmStatManagementUI family).
   // selectedStatRow mirrors gmAttributeUI.m_SelectedIndex (the attributes
@@ -19403,6 +19405,23 @@ export class GameUI {
     return s ? { base: s.base, buffed: s.effective } : null;
   }
 
+  /**
+   * AGENT — the levels ahead that grant skill credits, from this era's XpTable characterLevelSkillCreditList (ACE
+   * Player_Xp: on reaching level L, AvailableSkillCredits += list[L]), nearest first; at most `count`.
+   */
+  static nextSkillCreditLevels(list: readonly number[] | undefined, level: number, count = 2): Array<{ level: number; credits: number }> {
+    const out: Array<{ level: number; credits: number }> = [];
+    if (!list) return out;
+    for (let l = Math.max(0, level) + 1; l < list.length && out.length < count; l++) if (list[l] > 0) out.push({ level: l, credits: list[l] });
+    return out;
+  }
+
+  /** The sheet's "Next skill credits" line (none when the table isn't loaded or no level ahead grants one). */
+  private static nextSkillCreditsLine(list: readonly number[] | undefined, level: number): string[] {
+    const next = GameUI.nextSkillCreditLevels(list, level);
+    return next.length ? [`Next skill credits: ${next.map((n) => `level ${n.level} (+${n.credits})`).join(', ')}`] : [];
+  }
+
   /** AGENT — the character panel's data as text for an agent player (docs/agent-play.md). */
   agentCharacterSheet(): string {
     const c = this.charInfo;
@@ -19422,6 +19441,7 @@ export class GameUI {
     const out = [
       `${c.name}  level ${c.level}  ${c.heritage} ${c.gender}  ${c.pkStatus}`,
       `XP ${c.totalXp.toLocaleString()} total, ${c.unassignedXp.toLocaleString()} unassigned, ${c.xpToNextLevel.toLocaleString()} to next level; ${c.skillCredits} skill credits`,
+      ...GameUI.nextSkillCreditsLine(this.xpCostTables.levelSkillCredits, c.level),
       'Attributes: ' + Object.entries(c.attributes).map(([k, a]) => `${ATTRIBUTE_LABELS[k] ?? k} ${a.buffed}${a.buffed !== a.base ? ` (base ${a.base})` : ''}${next(GameUI.statRaiseCosts(this.xpCostTables.attribute, a.raises ?? 0).cost1)}`).join(', '),
       'Vitals: ' + Object.entries(c.vitals).map(([k, v]) => `${k} ${v.current}/${v.max}${next(GameUI.statRaiseCosts(this.xpCostTables.vital, v.raises ?? 0).cost1)}`).join(', '),
     ];
@@ -21656,6 +21676,26 @@ export class GameUI {
   /** The routine engine's stand-by profile (M. Charges When Off while the macro is off): the VirindiTank window's selection. */
   automationStandbyProfile(): ReturnType<VTankWindow['standbyProfile']> { return this.vtankModel?.standbyProfile() ?? null; }
 
+  /**
+   * Re-check the account's stored routines before a plugin acts on the stand-by loot sets for the player
+   * (Mag-Tools Autopack, Auto Add To Trade): null when there is nothing to wait for (no window model, nothing
+   * loaded yet, or checked within the last second). VTankWindow.refreshStored.
+   */
+  automationRefreshStored(): Promise<boolean> | null { return this.vtankModel?.refreshStored(1000) ?? null; }
+
+  /** The page stored the account's routines (RoutineSync.onStored): the window model takes them in. */
+  automationStoredElsewhere(doc: Parameters<VTankWindow['storedElsewhere']>[0]): void {
+    this.vtankModel?.storedElsewhere(doc);
+    this.automationPanelTakes(doc);
+  }
+
+  /** The Automation panel's copy follows the stored document too (its switches save the whole document at once). */
+  private automationPanelTakes(doc: Parameters<VTankWindow['storedElsewhere']>[0]): void {
+    if (!this.automationModel) return;
+    this.automationModel.storedElsewhere(structuredClone(doc));
+    if (this.automationPanelVisible) this.renderAutomationBody();
+  }
+
   toggleAutomationPanel(): void {
     if (!this.automationModel) return;
     this.setPanelsWindowPanel(AUTOMATION_PANEL, !this.automationPanelVisible);
@@ -21696,6 +21736,8 @@ export class GameUI {
     // The VirindiTank window's activity (its status line, the Action History, /vt log) is watched whether or
     // not a window is open, as VTank logs with its window closed.
     this.vtankModel?.observe();
+    // Routines changed outside this page (another tab or device, the bridge's files): a cheap re-check every 30 s.
+    void this.vtankModel?.refreshStored(30_000)?.then((changed) => { const d = this.vtankModel?.document; if (changed && d) this.automationPanelTakes(d); });
     if (!this.automationPanelVisible && !this.automationEditorEl && !this.vtankEl && !this.vtankWindows.size) return;
     // Redraw only when what the panel shows changed (state, acting rule, counters; the clock on the Stats tab).
     const src = this.automationModel.source;
@@ -22752,7 +22794,8 @@ export class GameUI {
     this.vtankEl = win;
     this.vtankRedraw = redraw;
     redraw();
-    void model.load(redraw);
+    // Loaded once per character; reopened, it re-checks the stored document (changed in another tab, or by Claude).
+    void model.opened(redraw);
     this.vvsWindowShown();
   }
 

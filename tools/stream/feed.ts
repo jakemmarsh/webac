@@ -250,6 +250,7 @@ export function summarizeCliCall(tool: string, a: Record<string, string>, name: 
     case 'sell': return `sells ${name(a.item ?? a._0 ?? '')}`;
     case 'trade': return `trade: ${a.action ?? a._0 ?? 'view'}`;
     case 'inventory': return 'checks the pack';
+    case 'gear': return 'checks the gear';
     case 'character': return 'checks the character sheet';
     case 'spells': return 'checks the spellbook';
     case 'raise': return `raises ${a.stat ?? a._0 ?? ''}${a.times ? ` ×${a.times}` : ''}`;

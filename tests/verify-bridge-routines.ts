@@ -151,6 +151,12 @@ describe('/routines through the bridge', () => {
     const file = join(dir, 'local-eor', 'agentclaude.json');
     expect(JSON.parse(readFileSync(file, 'utf8')).profiles[0].name).toBe(EXAMPLE_HUNT_PROFILE.name);
     expect((await (await fetch(base, { headers: auth })).json()).profiles).toHaveLength(1);
+    // ?since= (the page re-checking for a change made elsewhere): the same document is not sent again; a newer one is.
+    const stamped = JSON.parse(readFileSync(file, 'utf8')).updatedAt as string;
+    expect(await (await fetch(`${base}?since=${encodeURIComponent(stamped)}`, { headers: auth })).json()).toEqual({ unchanged: true, updatedAt: stamped });
+    const newer = await (await fetch(`${base}?since=${encodeURIComponent('2000-01-01T00:00:00.000Z')}`, { headers: auth })).json();
+    expect(newer.profiles).toHaveLength(1);
+    expect(newer.updatedAt).toBe(stamped);
 
     // Invalid documents and other accounts' documents are refused, and nothing is written for them.
     const bad = await fetch(base, { method: 'PUT', headers: auth, body: JSON.stringify({ ...doc, profiles: [{ ...EXAMPLE_HUNT_PROFILE, initialState: 'Nowhere' }] }) });

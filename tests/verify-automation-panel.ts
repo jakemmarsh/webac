@@ -132,6 +132,19 @@ describe('the Automation panel (mock board 1)', () => {
     expect(t.editor()).not.toBeNull();
   });
 
+  it('a document stored elsewhere replaces the panel\'s copy, so its next switch saves on top of it, not the old one', async () => {
+    const t = await open();
+    const newer = structuredClone(t.panel.document!);
+    newer.profiles[0].description = 'set by Claude';
+    newer.updatedAt = '2099-01-01T00:00:00.000Z';
+    t.panel.storedElsewhere(newer);
+    t.redraw();
+    click(t.body.querySelector('[data-automation-module="combat"]') as HTMLElement, '[data-module-switch]');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(t.saved[0].profiles[0].description).toBe('set by Claude');
+    expect(t.saved[0].profiles[0].modules.combat).toBe(false);
+  });
+
   it('the Stats tab: this session, rows, Reset, Report to chat', async () => {
     const t = await open();
     click(t.body, '[data-automation-tab="stats"]');
@@ -429,5 +442,23 @@ describe('GameUI hosts the panel', () => {
     expect(H.container.querySelector('[data-layout="21000020"]')).toBeNull();
     ui.setAutomationSource(null);
     expect(H.container.querySelector('[data-automation-strip]')).toBeNull();
+  });
+
+  it('a document the page stored (RoutineSync.onStored) reaches the stand-by profile the plugins read', async () => {
+    const ui = H.ui as unknown as {
+      setAutomationSource(s: AutomationSource | null): void; automationStandbyProfile(): RoutineProfile | null; automationStoredElsewhere(d: RoutineDoc): void;
+    };
+    const doc = docWith(structuredClone(EXAMPLE_HUNT_PROFILE));
+    const f = fakeSource(doc);
+    ui.setAutomationSource(f.source);
+    expect(ui.automationStandbyProfile()).toBeNull();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ui.automationStandbyProfile()?.lootSets?.['Default.AutoPack']).toBeUndefined();
+    const newer = structuredClone(doc);
+    newer.profiles[0].lootSets = { 'Default.AutoPack': [] };
+    newer.updatedAt = '2099-01-01T00:00:00.000Z';
+    ui.automationStoredElsewhere(newer);
+    expect(ui.automationStandbyProfile()?.lootSets?.['Default.AutoPack']).toEqual([]);
+    ui.setAutomationSource(null);
   });
 });

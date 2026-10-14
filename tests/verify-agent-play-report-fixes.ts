@@ -117,6 +117,8 @@ describe('agent play reports 2026-10-10', () => {
     host.wallClock = () => wall;
     host.add({ guid: 0x80000e01, name: 'Portal to Holtburg', objectDescFlags: 0x40000, x: 80, y: 60 });
     run(api, host, 200);
+    host.objs.get(0x80000e01)!.lost = true; // out of range: released first, deleted 25 s later (world/ObjectMaint.ts)
+    run(api, host, 200);
     host.objs.delete(0x80000e01);
     run(api, host, 200);
     expect(api.observe().remembered[0]).toMatchObject({ name: 'Portal to Holtburg', seenAgo: 0 });

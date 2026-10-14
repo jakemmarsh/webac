@@ -1004,6 +1004,8 @@ describe('AgentApi', () => {
   it('forgets a remembered NPC once it is back in view under a new id (relog, respawn)', () => {
     host.add({ guid: 0x80000e40, name: 'Tirenia', itemType: 0x10, x: 80, y: 60 });
     run(api, host, 200);
+    host.objs.get(0x80000e40)!.lost = true; // walked out of range: released first (world/ObjectMaint.ts), deleted 25 s later
+    run(api, host, 200);
     host.objs.delete(0x80000e40);
     run(api, host, 200);
     expect(api.observe().remembered.map((o) => o.name)).toEqual(['Tirenia']);
@@ -1014,8 +1016,30 @@ describe('AgentApi', () => {
     expect(obs.nearby.filter((o) => o.name === 'Tirenia').map((o) => o.guid)).toEqual([0x80000e41]);
   });
 
+  // A summoned Gateway rots at the end of its PortalLifetime (ACE WorldObject_Magic.SummonPortal → TimeToRot) and
+  // the server deletes it in view: it was kept as a remembered place, listed (and saved) at a spot with nothing there.
+  it('forgets a remembered place the server removed while in view; keeps one released out of range or dropped mid-portal', async () => {
+    host.add({ guid: 0x80000e50, name: 'Gateway', itemType: 0x10000, objectDescFlags: 0x40000, x: 80, y: 30 });
+    run(api, host, 200);
+    host.objs.delete(0x80000e50); // DeleteObject while held in view
+    run(api, host, 200);
+    expect(api.observe().remembered.map((o) => o.name)).toEqual([]);
+    await expect(api.walkTo('Gateway')).resolves.toMatchObject({ ok: false });
+    // Portal space (a teleport) or a logout clears the list without it being the server's word on the place.
+    host.add({ guid: 0x80000e51, name: 'Town Crier', itemType: 0x10, x: 80, y: 60 });
+    run(api, host, 200);
+    host.screenName = 'portal-space';
+    host.objs.delete(0x80000e51);
+    run(api, host, 200);
+    host.screenName = 'world';
+    run(api, host, 200);
+    expect(api.observe().remembered.map((o) => o.name)).toEqual(['Town Crier']);
+  });
+
   it('remembers NPCs that leave view and can walk back to them', async () => {
     host.add({ guid: 0x80000e30, name: 'Academy Blacksmith', itemType: 0x10, x: 80, y: 60 });
+    run(api, host, 200);
+    host.objs.get(0x80000e30)!.lost = true; // walked out of range: released first (world/ObjectMaint.ts), deleted 25 s later
     run(api, host, 200);
     host.objs.delete(0x80000e30);
     run(api, host, 200);
@@ -1024,6 +1048,8 @@ describe('AgentApi', () => {
     expect(formatObservation(obs)).toContain('remembered, out of view');
     // A place in another space (a dungeon landblock) is not listed from here.
     host.add({ guid: 0x80000e31, name: 'Training Master', itemType: 0x10, cell: 0x86020240, x: 10, y: 10 });
+    run(api, host, 200);
+    host.objs.get(0x80000e31)!.lost = true; // walked out of range: released first (world/ObjectMaint.ts), deleted 25 s later
     run(api, host, 200);
     host.objs.delete(0x80000e31);
     run(api, host, 200);

@@ -282,14 +282,23 @@ describe('the brief as a player gets it: what dead air is, and how mana comes ba
     for (const spell of ['Mana Boost Self', 'Stamina to Mana Self', 'Health to Mana Self', 'Mana Renewal Self']) expect(sys).toContain(spell);
     expect(sys).toMatch(/mana potion/);
   });
+  it('a caster\'s routine mana is Stamina to Mana Self between fights, Mana Conversion cuts costs, potions are the emergency (Jake 2026-10-14)', () => {
+    expect(sys).toContain('For a caster the routine way to get it back is **Stamina to Mana Self** (Life Magic, `spells filter=Mana`): stamina refills fast, so cast it between fights and walk on.');
+    expect(sys).toContain('Mana Conversion lowers what each spell costs.');
+    expect(sys).toContain('Mana potions are for emergencies, a quick refill mid-fight');
+    expect(sys.indexOf('Stamina to Mana Self')).toBeLessThan(sys.indexOf('Mana potions are for emergencies'));
+    expect(sys).not.toMatch(/Temple of Forgetfulness|Warden of Forgetfulness/);
+  });
   it('buffs as judgement, not a gate: pull anyway when buffing stalls, and go to a partner who isn\'t coming', () => {
     expect(sys).not.toMatch(/never pulls unbuffed/);
     expect(sys).toMatch(/If buffing stalls \(Arcanist out of mana, fizzling, or far away\), pull anyway with healing kits and potions ready, and say so in \/f/);
     expect(sys).toMatch(/stay within ~15 m \(if your partner isn't coming, go to them\)/);
   });
-  it('no longer pushes 30–60 s waits; says a wait with nothing running is a still picture, and calls answer by 30 s', () => {
+  it('no longer pushes 30–60 s waits; calls answer by 30 s; preparing is good play, and dead air is only standing idle', () => {
     expect(sys).not.toMatch(/30–60 s/);
-    expect(sys).toMatch(/With nothing running, a wait or a long think is a still picture/);
     expect(sys).toContain(`still running after ${PLAYER_REPLY_S} s answers "still in progress"`);
+    // Jake 2026-10-14: "i want to optimize for good players over entertainment; entertainment follows".
+    expect(sys).toMatch(/Preparing \(shopping, buffing, appraising, equipping, healing up\) is good play, not dead air; dead air is standing idle with nothing being done/);
+    expect(sys).not.toMatch(/still picture|shopping and buffing stops|Variety is the show|matters as much as the rules/);
   });
 });

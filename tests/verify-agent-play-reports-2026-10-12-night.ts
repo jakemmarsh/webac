@@ -6,7 +6,7 @@
  * walks inside a dungeon aimed at the landscape 34 km off, "ATTACKING YOU" on the wrong monster, a pick-up reported
  * done that the server cancelled, bolts refused for no reason seen, a shopkeeper behind his counter no walk reached,
  * an unaffordable service read as "busy", a portal Use that never walked, stale vendor ids, a dead target at "hp 32%".
- * Plus ac_wait's vitals-low mark (50% by default, per wait), a big single hit, attackers-up and cast-at-you
+ * Plus ac_wait's vitals-low mark (60% by default since 2026-10-14, per wait), a big single hit, attackers-up and cast-at-you
  * (Azreath on Coldeve, the same day).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -167,8 +167,12 @@ describe('agent play reports 2026-10-12 (night)', () => {
       host.me.cell = 0xa8b50030; host.me.x = 108; host.me.y = 170; host.me.z = 28;
       host.add({ guid: 0x7a8b5001, name: 'Holtburg Dungeon Directions', itemType: 0x10, cell: 0xa8b50030, x: 110.6, y: 173.4, z: 28 });
       run(api, host, 200, { physics: false });
+      // Through portal space: the teleport drops the landscape's objects (not the server removing them).
+      host.screenName = 'portal-space';
       host.objs.delete(0x7a8b5001);
       intoDungeon();
+      run(api, host, 200, { physics: false });
+      host.screenName = 'world';
       run(api, host, 200, { physics: false });
       const r = await api.walkTo('Holtburg Dungeon Directions');
       expect(r.ok).toBe(false);
@@ -243,15 +247,25 @@ describe('agent play reports 2026-10-12 (night)', () => {
     });
   });
 
-  describe('A. vitals-low: half your health by default, a mark per wait, and a big single hit', () => {
-    it('crosses 50% by default', async () => {
+  describe('A. vitals-low: 60% of your health by default, a mark per wait, and a big single hit', () => {
+    it('crosses 60% by default (raised from 50% on 2026-10-14: an 85-HP mage is two hits from dead at half)', async () => {
       host.me.health = { current: 180, max: 180 };
       run(api, host, 100, { physics: false });
       const w = api.wait({ types: ['vitals-low'] }, 5000);
-      host.me.health = { current: 85, max: 180 };
+      host.me.health = { current: 105, max: 180 };
       run(api, host, 100, { physics: false });
       const evs = await w;
-      expect(evs.some((e) => /health 85\/180 \(47%\): below half/.test(e.text))).toBe(true);
+      expect(evs.some((e) => /health 105\/180 \(58%\): below 60%/.test(e.text))).toBe(true);
+    });
+    it('a health still above 60% does not wake it', async () => {
+      host.me.health = { current: 180, max: 180 };
+      run(api, host, 100, { physics: false });
+      const w = api.wait({ types: ['vitals-low'] }, 300);
+      host.me.health = { current: 150, max: 180 }; // two steps, each under a quarter (a big single drop wakes it anyway)
+      run(api, host, 100, { physics: false });
+      host.me.health = { current: 130, max: 180 }; // 72%
+      run(api, host, 300, { physics: false }); // past the wait's 300 ms
+      expect(await w).toEqual([]);
     });
     it('a hit taking over a quarter of your health at once wakes it, whatever the level', async () => {
       host.me.health = { current: 180, max: 180 };

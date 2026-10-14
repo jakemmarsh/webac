@@ -883,6 +883,116 @@ describe('the stand-by profile (M. Charges When Off with the macro off)', () => 
   });
 });
 
+describe('routines changed outside this page (another tab, Claude through the connector, the bridge\'s files)', () => {
+  const pack = (name: string) => ({ action: 'keep', match: { name } }) as RoutineProfile['loot'][number];
+  /** A store whose document changes behind the window's back, re-checked as RoutineSync.check does. */
+  function outside() {
+    const first = docWith({ ...meta(), name: 'Mine' });
+    first.characters = { Claude: 'Mine' };
+    first.updatedAt = '2026-10-14T10:00:00.000Z';
+    let stored = structuredClone(first);
+    const f = fakeSource(first);
+    let t = 1_700_000_000_000;
+    const checks: string[] = [];
+    f.source.now = () => t;
+    f.source.load = async () => ({ ok: true, doc: structuredClone(stored) });
+    f.source.check = async (since) => { checks.push(since); return stored.updatedAt === since ? { ok: true, unchanged: true } : { ok: true, doc: structuredClone(stored) }; };
+    f.source.save = async (d) => { stored = { ...structuredClone(d), updatedAt: new Date(t).toISOString() }; f.saved.push(structuredClone(d)); return { ok: true, doc: structuredClone(stored) }; };
+    const win = new W.VTankWindow(fakeKit(), f.source, { open: () => {}, close: () => {} });
+    /** `ac_routines set` adding a Default.AutoPack loot set to the stored document. */
+    const setElsewhere = (at = '2026-10-14T10:05:00.000Z') => {
+      const next = structuredClone(stored);
+      next.profiles[0].lootSets = { 'Default.AutoPack': [pack('Bread')] };
+      next.updatedAt = at;
+      stored = next;
+      return next;
+    };
+    return { ...f, win, checks, setElsewhere, advance: (ms: number) => { t += ms; }, stored: () => stored };
+  }
+
+  it('the stand-by loot sets (what Mag-Tools Autopack reads) follow a change stored elsewhere once re-checked, not before', async () => {
+    const o = outside();
+    expect(o.win.standbyProfile()).toBeNull();
+    await flush();
+    expect(o.win.standbyProfile()?.lootSets?.['Default.AutoPack']).toBeUndefined();
+    o.setElsewhere();
+    // Before the fix this copy stayed until relog or reopening the window: the live repro's silent /mt autopack.
+    expect(o.win.standbyProfile()?.lootSets?.['Default.AutoPack']).toBeUndefined();
+    expect(await o.win.refreshStored()).toBe(true);
+    expect(o.win.standbyProfile()?.lootSets?.['Default.AutoPack']).toEqual([pack('Bread')]);
+    // It asked "changed since the copy I have?", and the copy now carries the store's stamp.
+    expect(o.checks).toEqual(['2026-10-14T10:00:00.000Z']);
+    expect(o.win.document?.updatedAt).toBe('2026-10-14T10:05:00.000Z');
+    // The 30 s re-check is skipped inside 30 s, and an unchanged store changes nothing.
+    expect(o.win.refreshStored(30_000)).toBeNull();
+    o.advance(30_000);
+    expect(await o.win.refreshStored(30_000)).toBe(false);
+    expect(o.checks).toEqual(['2026-10-14T10:00:00.000Z', '2026-10-14T10:05:00.000Z']);
+    // Nothing to re-check before the first load or with no character in the world.
+    o.source.character = () => null;
+    expect(o.win.refreshStored()).toBeNull();
+  });
+
+  it('a document this page stored for Claude (RoutineSync.onStored) is taken in at once, with no fetch', async () => {
+    const o = outside();
+    await o.win.load(() => {});
+    o.win.storedElsewhere(o.setElsewhere());
+    expect(o.win.standbyProfile()?.lootSets?.['Default.AutoPack']).toEqual([pack('Bread')]);
+    expect(o.checks).toEqual([]);
+  });
+
+  it('never takes it in over unsaved edits: the window says so, keeps its edit, and its save is what is stored', async () => {
+    const o = outside();
+    await o.win.load(() => {});
+    o.win.setValue('EnableCombat', false, () => {});
+    o.setElsewhere();
+    expect(await o.win.refreshStored()).toBe(false);
+    expect(o.win.message).toMatch(/changed elsewhere; your edits here are kept/);
+    expect(o.win.profile()?.settings?.EnableCombat).toBe(false);
+    o.win.storedElsewhere(o.stored());
+    expect(o.win.profile()?.settings?.EnableCombat).toBe(false);
+    await flush();
+    expect(o.stored().profiles[0].settings?.EnableCombat).toBe(false);
+    expect(o.win.message).toBe('');
+    // Saved: the next change elsewhere is taken in again.
+    o.setElsewhere('2026-10-14T11:00:00.000Z');
+    o.stored().profiles[0].description = 'set by Claude';
+    o.advance(10);
+    expect(await o.win.refreshStored()).toBe(true);
+    expect(o.win.profile()?.description).toBe('set by Claude');
+  });
+
+  it('the running macro takes its new profile, as with an edit made in the window; the shown profile stays shown', async () => {
+    const o = outside();
+    await o.win.load(() => {});
+    o.setStatus({ running: true, profile: 'Mine' });
+    o.setElsewhere();
+    expect(await o.win.refreshStored()).toBe(true);
+    expect(o.calls).toContain('update Mine');
+    expect(o.win.profile()?.name).toBe('Mine');
+  });
+
+  it('reopening the window re-checks instead of reloading, and a /vt command re-checks before it reads (and saves) the document', async () => {
+    const o = outside();
+    let loads = 0;
+    const load = o.source.load;
+    o.source.load = () => { loads++; return load(); };
+    await o.win.opened(() => {});
+    expect(loads).toBe(1);
+    o.setElsewhere();
+    await o.win.opened(() => {});
+    expect(loads).toBe(1);
+    expect(o.win.standbyProfile()?.lootSets?.['Default.AutoPack']).toEqual([pack('Bread')]);
+    // Claude changes it again; a /vt command 5 s later reads the new document, so its save can't put the old one back.
+    o.setElsewhere('2026-10-14T12:00:00.000Z');
+    o.stored().profiles[0].description = 'newer';
+    o.advance(5_000);
+    await o.win.command('/vt opt set AttackDistance 0.05');
+    expect(o.stored().profiles[0].description).toBe('newer');
+    expect(o.win.profile()?.description).toBe('newer');
+  });
+});
+
 describe('the window\'s looting controls and commands (docs/vtank-parity-gaps.md §3.7, §3.9)', () => {
   it('the Approach box sets the corpse approach range too (VTank\'s box writes both); /vt opt set sets only the one', async () => {
     const t = await open();

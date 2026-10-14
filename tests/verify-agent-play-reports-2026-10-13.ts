@@ -112,12 +112,18 @@ describe('agent play reports 2026-10-13', () => {
       host.me = { ...host.me, cell: 0x01b30120, x: 40, y: -10, z: 0 };
       host.add({ guid: FERN_SURFACE, name: 'Surface', itemType: 0x10000, objectDescFlags: 0x40000, cell: 0x01b30120, x: 40, y: -1, z: 0 });
       run(api, host, 200, { physics: false });
+      // Through portal space to Holtburg Dungeon: the teleport drops Fern's objects (not the server removing them).
+      host.screenName = 'portal-space';
       host.objs.delete(FERN_SURFACE);
+      run(api, host, 200, { physics: false });
+      host.screenName = 'world';
       host.me = { ...host.me, cell: 0x01f60224, x: 34, y: -48, z: 0 };
       host.add({ guid: HOLTBURG_SURFACE, name: 'Surface', itemType: 0x10000, objectDescFlags: 0x40000, cell: 0x01f6022e, x: 38.86, y: 1.4, z: 0.07 });
       run(api, host, 200, { physics: false });
       expect(api.resolve('Surface', 'world')).toBe(HOLTBURG_SURFACE);
       // Both only remembered now: the one in this landblock first.
+      host.objs.get(HOLTBURG_SURFACE)!.lost = true; // released out of range first (world/ObjectMaint.ts)
+      run(api, host, 200, { physics: false });
       host.objs.delete(HOLTBURG_SURFACE);
       run(api, host, 200, { physics: false });
       expect(api.resolve('Surface', 'world')).toBe(HOLTBURG_SURFACE);

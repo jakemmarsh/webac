@@ -22,7 +22,7 @@ export interface UbHostExtras {
   vars(scope: VarScope): Array<[string, ExprValue]>;
   setVar(name: string, value: string): void;
   freeSlots(): number;
-  /** The running routine profile's loot sets (and their names). */
+  /** The loot sets by name: the running routine's profile, else the VirindiTank window's selection (pluginLootSets). */
   lootSets(): Record<string, LootRule[]> | null;
   playerOption(code: number): boolean | undefined;
   setPlayerOption(code: number, on: boolean): boolean;

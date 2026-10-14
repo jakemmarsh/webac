@@ -31,11 +31,16 @@ export type RoutineSyncResult =
   | { ok: true; doc: unknown; account: string; server: string }
   | { ok: false; message: string; issues?: Array<{ path: string; message: string }> };
 
+/** check(): the stored document is still the one stamped `since`, or the newer one, or why it couldn't tell. */
+export type RoutineCheckResult = { ok: true; unchanged: true } | RoutineSyncResult;
+
 const GRANT_WAIT_MS = 5000;
 
 export class RoutineSync {
   private grant: RoutinesGrant | null = null;
   private waiters: Array<(g: { grant: RoutinesGrant | null; reason: string | null }) => void> = [];
+  /** Told of every document this page stores (the VirindiTank window, Claude through the connector). */
+  private storedListeners: Array<(doc: RoutineDoc) => void> = [];
 
   constructor(
     private readonly connection: () => RoutineSyncConnection | null,
@@ -44,7 +49,7 @@ export class RoutineSync {
   ) {}
 
   /** The bridge keeps none: load / save in this browser (validated as the bridge would). */
-  private localCall(grant: RoutinesGrant, method: 'GET' | 'PUT', body?: unknown): RoutineSyncResult {
+  private localCall(grant: RoutinesGrant, method: 'GET' | 'PUT', body?: unknown, since?: string): RoutineCheckResult {
     const store = this.storage();
     if (!store) return { ok: false, message: 'this browser blocks storage, so routines can\'t be kept' };
     const key = localRoutinesKey(grant.server, grant.account);
@@ -52,7 +57,9 @@ export class RoutineSync {
     try {
       if (method === 'GET') {
         const raw = store.getItem(key);
-        return { ok: true, doc: raw ? JSON.parse(raw) : emptyRoutineDoc(grant.server, grant.account), ...who };
+        const doc = raw ? JSON.parse(raw) as RoutineDoc : emptyRoutineDoc(grant.server, grant.account);
+        if (since !== undefined && raw && doc.updatedAt === since) return { ok: true, unchanged: true };
+        return { ok: true, doc, ...who };
       }
       const issues = validateRoutineDoc(body);
       if (issues.length) return { ok: false, message: 'not saved: the routine has problems', issues };
@@ -93,7 +100,7 @@ export class RoutineSync {
     });
   }
 
-  private async call(method: 'GET' | 'PUT', body?: unknown): Promise<RoutineSyncResult> {
+  private async call(method: 'GET' | 'PUT', body?: unknown, since?: string): Promise<RoutineCheckResult> {
     const conn = this.connection();
     if (!conn) return { ok: false, message: 'not connected' };
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -102,10 +109,13 @@ export class RoutineSync {
         if (!g.grant) return { ok: false, message: `no routines token: ${g.reason ?? 'refused'}` };
       }
       const grant = this.grant!;
-      if (grant.local) return this.localCall(grant, method, body);
+      if (grant.local) return this.localCall(grant, method, body, since);
       let res: Response;
+      // ?since=<updatedAt>: a bridge that has the same document answers {unchanged: true} instead of sending it again
+      // (a query, not If-None-Match: an older bridge's CORS allows no such header, and it just ignores the query).
+      const url = routinesHttpUrl(conn.bridgeUrl) + (since !== undefined ? `?since=${encodeURIComponent(since)}` : '');
       try {
-        res = await this.fetchFn(routinesHttpUrl(conn.bridgeUrl), {
+        res = await this.fetchFn(url, {
           method,
           headers: { authorization: `Bearer ${grant.token}`, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -114,7 +124,8 @@ export class RoutineSync {
         return { ok: false, message: `bridge unreachable: ${(e as Error).message}` };
       }
       if (res.status === 401 && attempt === 0) { this.grant = null; continue; } // expired: ask again once
-      const json = await res.json().catch(() => null) as { error?: string; issues?: Array<{ path: string; message: string }> } | null;
+      const json = await res.json().catch(() => null) as { error?: string; unchanged?: boolean; updatedAt?: string; issues?: Array<{ path: string; message: string }> } | null;
+      if (res.ok && since !== undefined && json?.unchanged === true) return { ok: true, unchanged: true };
       if (res.ok) return { ok: true, doc: json, account: grant.account, server: grant.server };
       if (res.status === 422 && json?.issues) return { ok: false, message: 'not saved: the routine has problems', issues: json.issues };
       return { ok: false, message: json?.error ?? `bridge answered ${res.status}` };
@@ -124,11 +135,32 @@ export class RoutineSync {
 
   /** The account's routine document (an empty one when none is stored). */
   async load(): Promise<RoutineSyncResult> {
-    const r = await this.call('GET');
+    const r = await this.call('GET') as RoutineSyncResult;
     if (r.ok) upgradeStoredLootRules(r.doc); // rules stored by an older importer (vtank.ts)
     return r;
   }
 
-  /** Validate and store the account's routine document on the bridge. */
-  save(doc: unknown): Promise<RoutineSyncResult> { return this.call('PUT', doc); }
+  /**
+   * The stored document only if it changed since the one stamped `since` (its updatedAt): another tab or
+   * device, or `ac_routines set` writing the bridge's files directly. A bridge with the same document answers
+   * {unchanged} with no body to speak of; an older bridge sends the whole document (the caller compares).
+   */
+  async check(since: string): Promise<RoutineCheckResult> {
+    const r = await this.call('GET', undefined, since);
+    if (r.ok && !('unchanged' in r)) upgradeStoredLootRules(r.doc);
+    return r;
+  }
+
+  /** Validate and store the account's routine document on the bridge. Listeners hear of what was stored. */
+  async save(doc: unknown): Promise<RoutineSyncResult> {
+    const r = await this.call('PUT', doc) as RoutineSyncResult;
+    if (r.ok && r.doc && typeof r.doc === 'object') for (const f of [...this.storedListeners]) { try { f(r.doc as RoutineDoc); } catch { /* a listener's fault stays its own */ } }
+    return r;
+  }
+
+  /** Hear of every document this page stores (whoever saved it: the window, or Claude through the connector). */
+  onStored(f: (doc: RoutineDoc) => void): () => void {
+    this.storedListeners.push(f);
+    return () => { this.storedListeners = this.storedListeners.filter((x) => x !== f); };
+  }
 }

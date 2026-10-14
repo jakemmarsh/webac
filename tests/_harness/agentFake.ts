@@ -160,7 +160,6 @@ export class FakeHost implements AgentHost {
 
   /** The RunAsDefaultMovement option (on: Shift walks; off: Shift runs, and the body walks without it). */
   runDefault = true;
-  runIsDefault = () => this.runDefault;
   /** Move the body forward along its facing at run speed while W is held. */
   /** A fixture's collision reach (guid → metres); unset = the host doesn't say. */
   objectReach: ((guid: number) => number) | undefined = undefined;

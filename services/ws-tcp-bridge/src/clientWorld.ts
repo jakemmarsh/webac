@@ -57,6 +57,12 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   dpr: number | null;
   canvasW: number | null;
   canvasH: number | null;
+  /** Dynamic resolution's scale at the event, percent of full (renderer scene/DynamicResolution.ts). */
+  renderScalePct: number | null;
+  /** The world context had no MSAA (software rendering). */
+  msaaOff: boolean | null;
+  /** Adaptive draw-distance steps below the player's setting. */
+  drawDistanceSteps: number | null;
   worldDrawnMs: number | null;
   screen: typeof WORLD_SCREENS[number] | null;
   unresolvedMisses: number | null;
@@ -81,6 +87,11 @@ function uint(v: unknown, max: number): number | null {
 }
 function bool(v: unknown): boolean | null {
   return typeof v === 'boolean' ? v : null;
+}
+/** A whole percent 1..100 (the render scale). */
+function pct(v: unknown): number | null {
+  const n = uint(v, 100);
+  return n !== null && n >= 1 ? n : null;
 }
 /** A device pixel ratio in quarter steps, 0.25–8. */
 function dpr(v: unknown): number | null {
@@ -138,6 +149,9 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
     dpr: dpr(b.dpr),
     canvasW: px100(b.canvasW),
     canvasH: px100(b.canvasH),
+    renderScalePct: pct(b.renderScalePct),
+    msaaOff: bool(b.msaaOff),
+    drawDistanceSteps: uint(b.drawDistanceSteps, 5),
     worldDrawnMs: uint(b.worldDrawnMs, MINUTE_MS),
     screen: pick(b.screen, WORLD_SCREENS),
     unresolvedMisses: uint(b.unresolvedMisses, 1_000_000),

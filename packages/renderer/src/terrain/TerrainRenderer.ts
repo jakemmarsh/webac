@@ -1,3 +1,4 @@
+import { averageTextureColor } from '../remaster/GrassField.js';
 import * as THREE from 'three';
 import { TERRAIN_RENDER_ORDER } from '../world/PortalPunch.js';
 import { freezeStaticTransform } from '../utils/freezeStatic.js';
@@ -1119,6 +1120,21 @@ export class TerrainRenderer {
     this.attachments.clear();
     this.terrainManager.clear();
   }
+
+  /**
+   * REMASTER grass (RemasterMode.ts): the average colour of a terrain type's
+   * DAT texture (linear), or null before the terrain materials exist.
+   */
+  terrainTypeColor(terrainType: number): THREE.Color | null {
+    const cached = this.terrainTypeColors.get(terrainType);
+    if (cached !== undefined) return cached;
+    const map = (this.terrainMaterials.get(terrainType) as THREE.MeshLambertMaterial | undefined)?.map as THREE.DataTexture | null | undefined;
+    const data = map?.image?.data as ArrayLike<number> | undefined;
+    const color = data && data.length >= 4 ? averageTextureColor(data) : null;
+    if (color) this.terrainTypeColors.set(terrainType, color);
+    return color;
+  }
+  private terrainTypeColors = new Map<number, THREE.Color>();
 
   /**
    * Get terrain texture IDs from landblock terrain data.

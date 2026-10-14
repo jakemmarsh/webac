@@ -10,7 +10,8 @@
  * when the player leaves sooner (tab closed, page hidden, logout, a drop),
  * whichever comes first. It says how the minute rendered (frames, median /
  * p95 / longest frame, a lost WebGL context, the GPU's class, the pixel
- * ratio and canvas size), when the world was first drawn after enter_ok,
+ * ratio and canvas size, the dynamic-resolution scale it settled on, whether
+ * MSAA was off for software rendering and any adaptive draw-distance steps), when the world was first drawn after enter_ok,
  * where the player was at exit (world / portal space / …) with the streamed
  * DAT misses still unresolved, the first movement and world click, the
  * number of keypresses, the blocking window open at exit (welcome popup,
@@ -79,6 +80,12 @@ export interface FirstMinuteEvent {
   /** The canvas's CSS size, rounded down to 100 px. */
   canvasW: number | null;
   canvasH: number | null;
+  /** PERF.render-adapt — the world buffer's scale at the event, percent of full (scene/DynamicResolution.ts). */
+  renderScalePct: number;
+  /** The world context was created without MSAA (software rendering, scene/RenderScale.ts). */
+  msaaOff: boolean;
+  /** Adaptive draw-distance steps below the player's setting at the event (0 = none). */
+  drawDistanceSteps: number;
   /** enter_ok → the first frame that drew the world with no portal space over it; null if never. */
   worldDrawnMs: number | null;
   screen: WorldScreen;
@@ -118,6 +125,12 @@ export interface WorldReporterSources {
   canvas?: () => { width: number; height: number } | null;
   dpr?: () => number;
   hidden?: () => boolean;
+  /** Dynamic resolution's scale, 0..1 (1 = full; DynamicResolution.scale). */
+  renderScale?: () => number;
+  /** The world context has no MSAA (RenderScale.contextAntialias false). */
+  msaaOff?: () => boolean;
+  /** Adaptive draw-distance steps (DynamicResolution.distanceSteps). */
+  drawDistanceSteps?: () => number;
 }
 
 export interface WorldReporterOptions {
@@ -176,6 +189,14 @@ function histQuantile(hist: Uint32Array, n: number, q: number): number | null {
   }
   return hist.length - 1;
 }
+
+/** A scale 0..1 as a whole percent (1..100); anything unusable reads as full. */
+function scalePct(v: number): number {
+  return Number.isFinite(v) && v > 0 ? Math.min(100, Math.max(1, Math.round(v * 100))) : 100;
+}
+
+/** The draw-distance ladder has six entries: at most five steps down. */
+export const MAX_DRAW_DISTANCE_STEPS = 5;
 
 function safe<T>(f: (() => T) | undefined, fallback: T): T {
   if (!f) return fallback;
@@ -378,6 +399,9 @@ export class WorldReporter {
       dpr: Number.isFinite(dpr) && dpr > 0 ? Math.min(8, Math.max(0.25, Math.round(dpr * 4) / 4)) : null,
       canvasW: canvas ? Math.max(0, Math.floor(canvas.width / 100) * 100) : null,
       canvasH: canvas ? Math.max(0, Math.floor(canvas.height / 100) * 100) : null,
+      renderScalePct: scalePct(safe(this.src.renderScale, 1)),
+      msaaOff: safe(this.src.msaaOff, false) === true,
+      drawDistanceSteps: Math.min(MAX_DRAW_DISTANCE_STEPS, Math.max(0, Math.floor(safe(this.src.drawDistanceSteps, 0)) || 0)),
       worldDrawnMs: rel(this.worldDrawnAt),
       screen: (WORLD_SCREENS as readonly string[]).includes(screen) ? screen : 'world',
       unresolvedMisses: safe(this.src.unresolvedMisses, null),

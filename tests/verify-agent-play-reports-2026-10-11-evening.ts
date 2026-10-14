@@ -218,7 +218,7 @@ describe('agent play reports 2026-10-11 (evening)', () => {
       fellow(18);
       const p = api.walkTo('40m north', { within: 1 });
       run(api, host, 15_000);
-      expect((await p).message).toMatch(/Claude Bulwark is 4\d m away now \(was 2 m\): they fell behind \(stay_with=Claude Bulwark walks at their pace\)/);
+      expect((await p).message).toMatch(/Claude Bulwark is 4\d m away now \(was 2 m\): they fell behind \(stay_with=Claude Bulwark waits for them\)/);
     });
     it('stay_with waits while the fellow is farther behind than stay_within, then goes on', async () => {
       fellow(18);

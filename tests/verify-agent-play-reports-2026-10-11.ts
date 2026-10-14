@@ -39,6 +39,9 @@ describe('agent play reports 2026-10-11', () => {
     host.add({ guid: 0x80000b02, name: 'Town Crier', itemType: 0x10, x: 80, y: 40 }); // 20 m off
     host.add({ guid: 0x80000b03, name: 'Holtburg Grocer', objectDescFlags: 0x200, itemType: 0x10, cell: 0x10100019, x: 10, y: 10 }); // ~40 km off
     run(api, host, 200);
+    // Out of range: released first, deleted 25 s later (world/ObjectMaint.ts); a delete in view is the server's removal.
+    for (const g of [0x80000b01, 0x80000b02, 0x80000b03]) host.objs.get(g)!.lost = true;
+    run(api, host, 200);
     for (const g of [0x80000b01, 0x80000b02, 0x80000b03]) host.objs.delete(g);
     run(api, host, 200);
     expect(api.observe().remembered.map((o) => o.name)).toEqual(['Town Crier', 'Nanto Grocer']);

@@ -209,7 +209,8 @@ describe('beyond-VTank conditions on the engine', () => {
 
   it('my corpse within R: the next death\'s line replaces it, and it rots on ACE\'s player-corpse timer', () => {
     api.pushChat(corpseLine(80 - 288, 20 + 312), 0);
-    api.pushChat(corpseLine(80, 60), 0); // died again, 40 m north
+    // Died again, 80 m north: past CORPSE_SIGHT_M, so only the rot timer forgets it (standing at it would prove it gone).
+    api.pushChat(corpseLine(80, 100), 0);
     expect(fires({ kind: 'my-corpse-within', meters: 100 }).fires).toBe(true);
     // Level 5: max(3600, 5 × 300) s (ACE Corpse.RecalculateDecayTime).
     expect(AgentApi.corpseRotSeconds(5)).toBe(3600);
@@ -239,6 +240,68 @@ describe('beyond-VTank conditions on the engine', () => {
     host.objs.delete(0x80002003);
     run(api, host, 200);
     expect(fires({ kind: 'my-corpse-within', meters: 100 })).toMatchObject({ fires: true, why: ['✓ your corpse 42 m away (where the server said it is)'] });
+  });
+
+  // BUG.my-corpse-rotted-empty (local ACE, 2026-10-14): ACE's default corpse_destroy_pyreals left a level-8 death's
+  // corpse empty, it rotted in 10 s, and "my corpse within 300" held 11 m from a spot with nothing there.
+  it('my corpse within R: standing at the reported spot with no corpse there forgets it (rotted empty)', () => {
+    api.pushChat(corpseLine(80, 30), 0); // 10 m north of you
+    run(api, host, AgentApi.CORPSE_ABSENT_GRACE_MS - 500);
+    // Within the grace (its CreateObject may still be on the way): kept.
+    expect(api.myCorpse()).not.toBeNull();
+    expect(fires({ kind: 'my-corpse-within', meters: 300 }).fires).toBe(true);
+    run(api, host, 1000);
+    expect(api.myCorpse()).toBeNull();
+    expect(fires({ kind: 'my-corpse-within', meters: 300 })).toMatchObject({ fires: false, why: ['✗ no corpse of yours within 300 m'] });
+  });
+
+  it('my corpse within R: a reported corpse past the sight margin, or while in portal space, or while dead, is kept', () => {
+    // 100 m off (past CORPSE_SIGHT_M, inside 112.5 m): the client may not hold it yet.
+    expect(AgentApi.CORPSE_SIGHT_M).toBeLessThan(100);
+    api.pushChat(corpseLine(80, 120), 0);
+    run(api, host, 30_000);
+    expect(api.myCorpse()).not.toBeNull();
+    expect(fires({ kind: 'my-corpse-within', meters: 300 }).fires).toBe(true);
+    // At the spot, but in portal space or dead: nothing is streaming in, so nothing is proved.
+    api.pushChat(corpseLine(80, 25), 0);
+    host.screenName = 'portal-space';
+    run(api, host, 30_000);
+    expect(api.myCorpse()).not.toBeNull();
+    host.screenName = 'world';
+    host.me.dead = true;
+    run(api, host, 30_000);
+    expect(api.myCorpse()).not.toBeNull();
+    host.me.dead = false;
+    // Arrived (the portal set you down): the grace counts from now.
+    run(api, host, AgentApi.CORPSE_ABSENT_GRACE_MS - 500);
+    expect(api.myCorpse()).not.toBeNull();
+    run(api, host, 1000);
+    expect(api.myCorpse()).toBeNull();
+  });
+
+  it('my corpse within R: a teleport onto the spot restarts the grace', () => {
+    api.pushChat(corpseLine(80, 30), 0);
+    run(api, host, 3000);
+    // Recalled and back (a 100 m jump within one look, still beside the spot): objects stream in again.
+    host.me.y = 75; api.tick(); host.me.y = 25; api.tick();
+    run(api, host, AgentApi.CORPSE_ABSENT_GRACE_MS - 500);
+    expect(api.myCorpse()).not.toBeNull();
+    run(api, host, 1000);
+    expect(api.myCorpse()).toBeNull();
+  });
+
+  it('my corpse within R: a matching corpse at the spot is tied and kept past the grace', () => {
+    api.pushChat(corpseLine(80, 30), 0);
+    host.add({ guid: 0x80002004, name: `Corpse of ${host.me.name}`, objectDescFlags: 0x2000, x: 82, y: 33 });
+    run(api, host, 30_000);
+    expect(api.myCorpse()).toMatchObject({ guid: 0x80002004, x: OX + 82, y: OY + 33 });
+    expect(fires({ kind: 'my-corpse-within', meters: 300 })).toMatchObject({ fires: true, why: ['✓ your corpse 13 m away'] });
+    // Someone else's corpse at the spot doesn't keep yours.
+    api.pushChat(corpseLine(80 - 300, 30), 0);
+    host.add({ guid: 0x80002005, name: 'Corpse of Drudge Skulker', objectDescFlags: 0x2000, x: 82, y: 33 });
+    host.me.x = 80 - 300;
+    run(api, host, 30_000);
+    expect(api.myCorpse()).toBeNull();
   });
 
   it('my corpse within R: a corpse in view past the 120 m shared look holds', () => {

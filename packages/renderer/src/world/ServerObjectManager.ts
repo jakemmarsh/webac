@@ -35,7 +35,7 @@ import type { UpdatePositionData, AutonomousPositionData, ObjDescEventData, Move
 import { wavePrefetch } from '../audio/WavePrefetch.js';
 import type { TerrainCollision } from '@ac/shared';
 import { showableOnRadar } from '../ui/RadarBlips.js';
-import { PhysicsState, ItemType, MovementType, ObjectDescriptionFlag, isInteriorCellIndex, landblockX, landblockY, PropertyInt, HUGE_QUANTUM, type PlayScript, missileArc, missileArcPoint, DEFAULT_PROJECTILE_RADIUS } from '@ac/shared';
+import { PhysicsState, ItemType, MovementType, ObjectDescriptionFlag, isInteriorCellIndex, landblockX, landblockY, PropertyInt, HUGE_QUANTUM, type PlayScript, missileArc, missileArcPoint, DEFAULT_PROJECTILE_RADIUS, boltLaunch } from '@ac/shared';
 import { hiddenEdgeScript, PHYSICS_STATE_CTOR_DEFAULT } from '../effects/HiddenStateScripts.js';
 import { setObjectLighting, restoreObjectLighting, type LightingCopies, type LightingLevels } from './SelectionLighting.js';
 import { setCellLighting } from '../models/RetailLighting.js';
@@ -946,8 +946,10 @@ export class ServerObjectManager {
    * AC world axes (x east, y north, z = feet), per-heritage Setup radius /
    * height — wired by main.ts (our own CreateObject never reaches the
    * objects map). Null → missiles pass through us until the server says.
+   * `physicsRadius`: the first collision sphere's radius (ACE GetPhysicsRadius, 0.48 for a human), which places the
+   * server's projectile spawn points; the Setup radius when not given.
    */
-  missileLocalPlayer: (() => { x: number; y: number; z: number; radius: number; height: number } | null) | null = null;
+  missileLocalPlayer: (() => { x: number; y: number; z: number; radius: number; height: number; physicsRadius?: number } | null) | null = null;
   /**
    * `ACCWeenieObject::DoCollision(AtkCollisionProfile)` @ 0058c3a0 — a
    * ScriptedCollision missile that hits an object plays its PhysicsDesc
@@ -3383,35 +3385,51 @@ export class ServerObjectManager {
   }
 
   /**
-   * Is there a clear line of fire from our character to `guid`? The
-   * straight line a bolt or arrow flies, from just in front of our upper
-   * body to the target's middle, swept through the same walls, terrain and
-   * solid objects (closed doors, …) our missiles collide with; creatures
-   * are left out, since they move. As ACE's IsDirectVisible: start past our
-   * own radius, at body height. `blockedAt` is the obstacle's distance (m)
-   * along the line, or null when it reaches the target. null when the
-   * target or our body isn't known.
+   * Is there a clear line of fire from our character to `guid` for a bolt? The path the server flies one
+   * ({@link boltLaunch}, ACE WorldObject_Magic): it spawns ahead of you at two thirds of your height, must see back to
+   * your eye from there (IsProjectileVisible), then flies straight at the target's two-thirds point until it touches
+   * the target. Both legs are swept through the same walls, terrain and solid objects (closed doors, …) our missiles
+   * collide with; creatures other than the target are left out (they move, and a targeted bolt passes them). So an
+   * obstacle hugging either body (a closed door you and a monster are both pressed against) blocks: the old
+   * eye-to-target line skipped its first 0.6 m and stopped 0.7 m short of the target, and a skeleton clawing at the
+   * mage through a timed door took its bolts in silence (2026-10-14). `blockedAt` is the ground distance (m) from you to where the bolt dies, null when it reaches the
+   * target. null when the target or our body isn't known.
    */
-  lineOfFire(guid: number, radius = 0.1): { dist: number; blockedAt: number | null; blocker?: string } | null {
+  lineOfFire(guid: number, radius = DEFAULT_PROJECTILE_RADIUS): { dist: number; blockedAt: number | null; blocker?: string } | null {
     const o = this.objects.get(guid);
     const me = this.missileLocalPlayer?.();
     if (!o || !me || !this.missileEnvironmentSweep) return null;
-    const target = { x: o.worldX, y: o.worldZ, z: o.worldY + Math.max(o.collisionHeight, 0.6) * 0.5 };
-    const eye = { x: me.x, y: me.y, z: me.z + me.height * 0.75 };
-    const dx = target.x - eye.x, dy = target.y - eye.y, dz = target.z - eye.z;
-    const len = Math.hypot(dx, dy, dz);
-    const dist = Math.hypot(dx, dy);
-    // Start past our own body and stop at the target's surface, so neither counts as the obstacle.
-    const startOff = me.radius + radius;
-    const endOff = Math.max(o.collisionRadius, 0.3);
-    if (len <= startOff + endOff) return { dist, blockedAt: null };
-    const u = { x: dx / len, y: dy / len, z: dz / len };
-    const from = { x: eye.x + u.x * startOff, y: eye.y + u.y * startOff, z: eye.z + u.z * startOff };
-    const to = { x: target.x - u.x * endOff, y: target.y - u.y * endOff, z: target.z - u.z * endOff };
-    const span = len - startOff - endOff;
-    const best = this.missileSegmentContact(from, to, radius, guid);
+    const feet = { x: o.worldX, y: o.worldZ, z: o.worldY };
+    const dist = Math.hypot(feet.x - me.x, feet.y - me.y);
+    const bolt = boltLaunch({
+      from: { x: me.x, y: me.y, z: me.z }, to: feet,
+      casterHeight: me.height, casterRadius: me.radius, casterPhysicsRadius: me.physicsRadius ?? me.radius,
+      targetHeight: Math.max(o.collisionHeight, 0.6), targetRadius: Math.max(o.collisionRadius, 0), projectileRadius: radius,
+    });
+    const ground = (a: V3, b: V3, t: number): number => Math.round(Math.hypot(a.x + (b.x - a.x) * t - me.x, a.y + (b.y - a.y) * t - me.y) * 10) / 10;
+    // IsProjectileVisible: swept outward from your eye to the spawn point (a wall or door it crosses is met face on).
+    const back = this.missileSegmentContact(bolt.eye, bolt.origin, radius, guid);
+    if (back && back.t < 1) return { dist, blockedAt: ground(bolt.eye, bolt.origin, back.t), blocker: this.missileBlockerName(back) };
+    // The flight, to the target's two-thirds point. A spawn point already inside the target hits at once (ACE's entry
+    // collision). Otherwise an obstacle anywhere up to that point blocks, even one our copy of the target overlaps:
+    // the server's target can't stand inside a closed door, so a door our view puts through its body is in front of
+    // it (dungeon 0x0145's timed Door #70145010: our skeleton 0.1 m past the door's plane, its front already through it).
+    if (this.missileTargetContact(o, bolt.origin, bolt.aim, radius) === 0) return { dist, blockedAt: null };
+    const best = this.missileSegmentContact(bolt.origin, bolt.aim, radius, guid);
     if (!best || best.t >= 1) return { dist, blockedAt: null };
-    return { dist, blockedAt: Math.round((startOff + best.t * span) * 10) / 10, blocker: this.missileBlockerName(best) };
+    return { dist, blockedAt: ground(bolt.origin, bolt.aim, best.t), blocker: this.missileBlockerName(best) };
+  }
+
+  /**
+   * How far along `from` → `to` (0..1) a missile sphere of `radius` first touches `o`'s own collision shape (its Setup
+   * CylSpheres / Spheres × scale, else its bounding cylinder); 1 when it never does, 0 when it starts inside.
+   */
+  private missileTargetContact(o: ServerObject, from: V3, to: V3, radius: number): number {
+    const shapes = (o.itemType & ItemType.Creature) && !(o.physicsState & PhysicsState.HasPhysicsBSP) ? this.creatureMissileShapes(o) : null;
+    const cylinders = shapes ? shapes.cylinders
+      : o.collisionRadius > 0 && o.collisionHeight > 0 ? [{ guid: o.guid, x: o.worldX, y: o.worldZ, z: o.worldY, radius: o.collisionRadius, height: o.collisionHeight }] : [];
+    const hit = nearestContact(sweepCylinders(from, to, radius, cylinders), sweepSpheres(from, to, radius, shapes?.spheres ?? []));
+    return hit ? hit.t : 1;
   }
 
   /**
@@ -3460,7 +3478,8 @@ export class ServerObjectManager {
     const feet = { x: o.worldX, y: o.worldZ, z: o.worldY };
     const dist = Math.hypot(feet.x - me.x, feet.y - me.y);
     const arc = missileArc({
-      from: { x: me.x, y: me.y, z: me.z }, to: feet, speed: shot.speed, shooterHeight: me.height, shooterRadius: me.radius,
+      // GetProjectileSpawnOrigin: your physics radius (the first collision sphere's), not the Setup radius.
+      from: { x: me.x, y: me.y, z: me.z }, to: feet, speed: shot.speed, shooterHeight: me.height, shooterRadius: me.physicsRadius ?? me.radius,
       targetHeight: Math.max(o.collisionHeight, 0.6), aim: shot.aim ?? 'medium', projectileRadius: radius,
     });
     if (!arc) return { dist, blockedAt: null, noArc: true };

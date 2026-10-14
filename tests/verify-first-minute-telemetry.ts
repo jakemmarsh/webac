@@ -25,7 +25,7 @@ import { CLIENT_PREWORLD_MAX_BODY } from '../services/ws-tcp-bridge/src/clientPr
 
 const FIRST_MINUTE_KEYS = [
   'outcome', 'era', 'server', 'trace', 'build', 'exit', 'leftAfterMs', 'resumed', 'startedHidden', 'frames', 'worldFrames',
-  'frameMedianMs', 'frameP95Ms', 'frameMaxMs', 'contextLost', 'gpu', 'dpr', 'canvasW', 'canvasH', 'worldDrawnMs', 'screen',
+  'frameMedianMs', 'frameP95Ms', 'frameMaxMs', 'contextLost', 'gpu', 'dpr', 'canvasW', 'canvasH', 'renderScalePct', 'msaaOff', 'drawDistanceSteps', 'worldDrawnMs', 'screen',
   'unresolvedMisses', 'firstMoveMs', 'firstClickMs', 'keys', 'modal', 'modalMs', 'errors',
 ].sort();
 const WORLD_LEFT_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors'].sort();
@@ -95,7 +95,7 @@ describe('WorldReporter — first_minute', () => {
     expect(ev).toMatchObject({
       outcome: 'first_minute', era: 'eor', server: 'coldeve', trace: 'feedc0de12345678', build: 'abc1234',
       exit: 'closed_tab', resumed: false, startedHidden: false, contextLost: false, gpu: 'integrated',
-      dpr: 1.25, canvasW: 1300, canvasH: 700, screen: 'world', unresolvedMisses: 3, keys: 3, modal: 'popup', errors: 3,
+      dpr: 1.25, canvasW: 1300, canvasH: 700, renderScalePct: 100, msaaOff: false, drawDistanceSteps: 0, screen: 'world', unresolvedMisses: 3, keys: 3, modal: 'popup', errors: 3,
       frameMaxMs: 400,
     });
     // More 16 ms frames than 33 ms ones: the median is 16; the 33 ms frames are >5 %, so p95 is 33.

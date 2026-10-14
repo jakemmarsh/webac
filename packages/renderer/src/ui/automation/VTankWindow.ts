@@ -54,6 +54,11 @@ export interface VTankSource extends AutomationSource {
   setSetting(name: string, value: string | number | boolean): void;
   setState(name: string): { ok: boolean; message: string };
   update(profile: RoutineProfile): { ok: boolean; message: string };
+  /**
+   * The stored document only if it changed since the one stamped `since` (its updatedAt): another tab or device,
+   * or Claude through the connector. Absent: the window re-checks with a whole load. (RoutineSync.check.)
+   */
+  check?(since: string): Promise<{ ok: true; unchanged: true } | { ok: true; doc: unknown } | { ok: false; message: string }>;
   /** /vt mexec: run a meta expression, its value as text. */
   mexec(expr: string): string;
   /** /vt jump [heading] [shift] [ms]. */
@@ -517,6 +522,80 @@ export class VTankWindow {
 
   /** The character the loaded document's selection was made for. */
   private loadedFor: string | null = null;
+  /** Edits not yet stored: set by every change, cleared by the save that stores the last of them. */
+  private unsaved = false;
+  private editGen = 0;
+  private saving = false;
+  private lastCheck = -Infinity;
+  private checking: Promise<boolean> | null = null;
+
+  /**
+   * Edits here that the store doesn't have yet, or an editor open on the document (the meta rule editor, the
+   * loot editor): a document changed elsewhere is not taken in over them.
+   */
+  get busyEditing(): boolean { return this.unsaved || this.saving || this.saveTimer !== null || this.editing !== null || this.loot.open; }
+
+  /**
+   * The routines may have changed outside this page (another tab or device, `ac_routines set` writing the
+   * bridge's files): re-check the stored document and take it in when it differs and nothing here is unsaved.
+   * Cheap: the bridge answers "unchanged" to a document it has. `maxAgeMs` skips a check made that recently
+   * (null then, as with no document or character yet; standbyProfile loads those). Resolves true when the
+   * document was replaced. Called as the window opens, before a plugin uses the loot sets for a player's
+   * action (Mag-Tools Autopack, Auto Add To Trade), and every 30 s (GameUI's automation tick).
+   */
+  refreshStored(maxAgeMs = 0): Promise<boolean> | null {
+    const ch = this.source.character();
+    if (!this.doc || !ch || this.loadedFor !== ch) return null;
+    if (this.checking) return this.checking;
+    const t = this.source.now();
+    if (t - this.lastCheck < maxAgeMs) return null;
+    this.lastCheck = t;
+    const since = this.doc.updatedAt;
+    this.checking = Promise.resolve().then(() => (this.source.check ? this.source.check(since) : this.source.load())).then((r) => {
+      if (!r.ok || 'unchanged' in r || this.loadedFor !== this.source.character()) return false;
+      return this.adoptStored(r.doc as RoutineDoc);
+    }, () => false).finally(() => { this.checking = null; });
+    return this.checking;
+  }
+
+  /**
+   * A document this page stored (RoutineSync's onStored: Claude's `ac_routines set` through the connector
+   * lands here). The window's own saves are its document already.
+   */
+  storedElsewhere(doc: RoutineDoc): void {
+    if (this.saving || !this.doc || this.loadedFor !== this.source.character()) return;
+    this.adoptStored(structuredClone(doc));
+  }
+
+  /** Take in a stored document that differs from this one, unless edits here are unsaved (said on the message line). */
+  private adoptStored(stored: RoutineDoc): boolean {
+    if (!this.doc || !stored || !Array.isArray(stored.profiles)) return false;
+    const body = (d: RoutineDoc) => JSON.stringify({ ...d, updatedAt: '' });
+    if (body(stored) === body(this.doc)) {
+      if (!this.busyEditing) this.doc.updatedAt = stored.updatedAt;
+      return false;
+    }
+    if (this.busyEditing) {
+      // A refused save's line stays: it says why these edits aren't stored.
+      if (!this.message) this.message = 'Your routines were changed elsewhere; your edits here are kept and replace them when saved.';
+      this.redrawWindow();
+      return false;
+    }
+    this.doc = stored;
+    const ch = this.source.character();
+    if (!this.profileName || !stored.profiles.some((p) => p.name === this.profileName)) {
+      this.profileName = this.source.status().profile ?? (ch ? stored.characters?.[ch] : undefined) ?? stored.profiles[0]?.name ?? null;
+    }
+    const p = this.profile();
+    if (this.routeName !== null && !p?.routes.some((r) => r.name === this.routeName)) { this.routeName = null; this.waypoint = -1; }
+    // The running macro takes its new profile as it takes an edit made here.
+    const st = this.source.status();
+    const run = st.running ? stored.profiles.find((x) => x.name === st.profile) : undefined;
+    if (run) this.source.update(run);
+    this.message = '';
+    this.redrawWindow();
+    return true;
+  }
   private standbyTry = -Infinity;
   private standbyLoading = false;
 
@@ -541,6 +620,14 @@ export class VTankWindow {
     return this.profile();
   }
 
+  /** The window opened: the first load (or a new character's), else a re-check that keeps unsaved edits. */
+  async opened(redraw: () => void): Promise<void> {
+    const ch = this.source.character();
+    if (!this.doc || !ch || this.loadedFor !== ch) { await this.load(redraw); return; }
+    redraw();
+    await this.refreshStored();
+  }
+
   async load(redraw: () => void): Promise<void> {
     this.message = 'Loading…';
     redraw();
@@ -550,6 +637,8 @@ export class VTankWindow {
       const ch = this.source.character();
       this.loadedFor = ch;
       this.standbyTry = -Infinity;
+      this.lastCheck = this.source.now();
+      this.unsaved = false;
       this.profileName = this.source.status().profile ?? (ch ? this.doc.characters?.[ch] : undefined) ?? this.doc.profiles[0]?.name ?? null;
       this.message = '';
     } else this.message = r.message;
@@ -574,6 +663,8 @@ export class VTankWindow {
 
   /** VirindiTank saves every change at once: apply it to the run, then save the account's document (debounced). */
   changed(redraw: () => void): void {
+    this.unsaved = true;
+    this.editGen++;
     const p = this.profile();
     if (p && this.running()) this.source.update(p);
     if (this.saveTimer) clearTimeout(this.saveTimer);
@@ -588,7 +679,18 @@ export class VTankWindow {
     this.doc.updatedAt = new Date(this.source.now() > 1e12 ? this.source.now() : Date.now()).toISOString();
     const issues = validateRoutineDoc(this.doc);
     if (issues.length) { this.message = `Not saved: ${issues[0].path}: ${issues[0].message}`; redraw(); return false; }
-    const r = await this.source.save(this.doc);
+    const doc = this.doc;
+    const gen = this.editGen;
+    this.unsaved = true;
+    this.saving = true;
+    let r: Awaited<ReturnType<VTankSource['save']>>;
+    try { r = await this.source.save(doc); } finally { this.saving = false; }
+    if (r.ok && gen === this.editGen) {
+      this.unsaved = false;
+      // The store's stamp: the next re-check (refreshStored) asks "changed since this one?".
+      const at = (r.doc as RoutineDoc | null)?.updatedAt;
+      if (doc === this.doc && typeof at === 'string') doc.updatedAt = at;
+    }
     // The store's own check (a bridge on an older build can refuse what this one allows): name the field.
     this.message = r.ok ? '' : r.issues?.length ? `${r.message} (${r.issues[0].path}: ${r.issues[0].message})` : r.message;
     redraw();
@@ -1625,6 +1727,8 @@ export class VTankWindow {
    */
   async command(line: string): Promise<string[]> {
     if (!this.doc) await this.load(() => {});
+    // A command reads the document and may save it: take in one stored elsewhere first, so it isn't saved over.
+    else await this.refreshStored(5000);
     const doc = this.doc;
     if (!doc) return [this.message || 'Your routines have not loaded.'];
     // UtilityBelt networking between this browser's tabs (ubNet.ts): /ub bc, bct, netclients, its opt keys.

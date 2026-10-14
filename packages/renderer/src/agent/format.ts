@@ -3,6 +3,7 @@
  * Text, not JSON: a dozen nearby objects as JSON is ~3× the tokens and
  * harder to scan. Pure functions; the CLI and the MCP server both use them.
  */
+import { emptySlotsText, formatGear, gearNote, hasGearData } from './gear.ts';
 import type { AgentChatLine, AgentEvent, AgentItem, AgentObject, AgentObservation, AgentSpell, AgentTracePoint } from './types.ts';
 
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -45,9 +46,12 @@ export function formatObject(o: AgentObject): string {
   if (o.health !== undefined && !o.dying) bits.push(`hp ${pct(o.health)}`);
   if (o.stack && o.stack > 1) bits.push(`x${o.stack}`);
   if (o.open) bits.push('open');
+  else if (o.open === false) bits.push('closed');
+  if (o.notByHand) bits.push('opened by a lever or switch, not by hand');
   if (o.dying) bits.push('DYING (dead: not a target)');
   if (o.outOfSight) bits.push('OUT OF SIGHT: only where it was last seen (it may have moved, died or gone)');
   if (o.attackingYou) bits.push(`ATTACKING YOU (${o.attackingYou}× in 10 s)`);
+  else if (o.comingAtYou) bits.push(`COMING AT YOU (${o.comingAtYou})`);
   if (o.seen) bits.push(`seen: ${o.seen}`);
   if (o.lineOfFireBlockedAt !== undefined) bits.push(`no line of fire: blocked ${o.lineOfFireBlockedAt.toFixed(1)} m along it${o.lineOfFireBlocker ? ` by ${o.lineOfFireBlocker}` : ''} (${o.lineOfFireArc ? 'your arrow\'s arc would hit that' : 'a bolt or arrow would hit that'})`);
   if (o.seenAgo !== undefined) bits.push(`last seen ${seenAgoText(o.seenAgo)} ago`);
@@ -101,7 +105,8 @@ export function formatObservation(obs: AgentObservation): string {
   if (bad.length) out.push(formatBuffs(bad).replace(/^buffs/, 'debuffs'));
   if (obs.buffsMissing?.length) out.push(`  buffs you know that aren't up: ${obs.buffsMissing.slice(0, 10).join(', ')}${obs.buffsMissing.length > 10 ? ` +${obs.buffsMissing.length - 10} more` : ''} (ac_cast; "… Other" ones go on a fellow with target=)`);
   if (obs.fellowshipAlone) out.push('fellowship: only you are in it, so /f reaches no one (a fellow who logs out leaves it): recruit your partner (in sight), or quit it (ac_fellowship action=quit) if they lead one');
-  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
+  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
+  if (obs.gearEmpty?.slots.length) out.push(`gear: ${emptySlotsText(obs.gearEmpty.slots)}${obs.gearEmpty.packFits.length ? `; in your pack that would cover one: ${obs.gearEmpty.packFits.slice(0, 4).join(', ')}` : ''} (ac_inventory / ac_gear show every gear slot)`);
   if (obs.windows?.length) out.push(`windows open: ${obs.windows.join(', ')}  (ac_close name=… or all, when done with them)`);
   out.push(`target: ${obs.target ? formatObject(obs.target) : 'none'}`);
   const attackers = obs.nearby.filter((o) => o.attackingYou && o.guid !== obs.target?.guid);
@@ -151,7 +156,8 @@ export function formatInventory(items: AgentItem[]): string {
   const order = [...groups.keys()].filter((k) => !packs.some((p) => k.endsWith(` #${p.guid.toString(16)}`)));
   const at = order.indexOf('pack slots');
   order.splice(at < 0 ? order.length : at + 1, 0, ...packs.map((p) => `${p.name} #${p.guid.toString(16)}`).filter((k) => groups.has(k)));
-  const out: string[] = [];
+  // The paperdoll first: every slot, worn or EMPTY ("he doesn't even have gloves!", Jake 2026-10-14).
+  const out: string[] = hasGearData(items) ? [formatGear(items, { packList: false }), ''] : [];
   for (const where of order) {
     const list = groups.get(where)!;
     out.push(`${where.replace(/ #([0-9a-f]+)$/, ' (side pack #$1)')}:`);
@@ -165,7 +171,8 @@ export function formatInventory(items: AgentItem[]): string {
         school ? (it.where === 'pack slots' || it.where === 'main pack' ? `${school} focus: in use` : `${school} focus: NOT in use inside ${it.where}; it counts only in your own pack slots`) : '',
         packs.includes(it) ? (held(it) ? `holds ${held(it)}, listed under it` : 'empty') : '',
       ].filter(Boolean).join(', ');
-      out.push(`  #${it.guid.toString(16)} ${it.name}${extra ? `  (${extra})` : ''}`);
+      const note = gearNote(it, items);
+      out.push(`  #${it.guid.toString(16)} ${it.name}${extra ? `  (${extra})` : ''}${note ? `\n      wear: ${note}` : ''}`);
     }
   }
   return out.join('\n');

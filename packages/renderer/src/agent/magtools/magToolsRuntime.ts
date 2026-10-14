@@ -51,6 +51,12 @@ export interface MagToolsExtras {
   sendChat?(line: string): void;
   /** The loot sets of the routine document in use: Autopack's `<Character>.AutoPack` / `Default.AutoPack`, Auto Add To Trade's `<Partner>`. */
   lootSets?(): Record<string, LootRule[]> | null;
+  /**
+   * Re-check the stored routine document before an action of the player's reads the loot sets (it may have
+   * changed in another tab, or by Claude through the connector): a promise to wait for, or null when there is
+   * nothing to wait for. GameUI.automationRefreshStored.
+   */
+  freshenRoutines?(): Promise<unknown> | null;
   /** VirindiTank's tidy has a move out: Autopack waits so their moves never cross. */
   tidyBusy?(): boolean;
   /** An object in the world (the corpse and player trackers): its name, Decal ObjectClass, place (cell-local metres) and burden. */
@@ -421,9 +427,14 @@ export class MagToolsRuntime {
     return lootSetNamed(sets, `${this.x.character?.() || this.x.me()}.AutoPack`) ?? lootSetNamed(sets, 'Default.AutoPack');
   }
 
-  /** `/mt autopack`, the Pack Inventory hotkey or a trigger line. Silent without a profile. */
+  /** `/mt autopack`, the Pack Inventory hotkey or a trigger line. Silent without a profile. True when it started, or starts once the stored routines are re-checked. */
   startAutopack(): boolean {
-    return this.x.enabled() && this.autopacker.start();
+    if (!this.x.enabled()) return false;
+    // The routines changed elsewhere since they loaded: start with the stored AutoPack profile, not the old copy.
+    const fresh = this.x.freshenRoutines?.() ?? null;
+    if (!fresh) return this.autopacker.start();
+    void fresh.catch(() => {}).then(() => { if (this.x.enabled()) this.autopacker.start(); });
+    return true;
   }
 
   private packItems(): MtPackItem[] {
@@ -466,7 +477,15 @@ export class MagToolsRuntime {
 
   /** RegisterTrade: a trade window opened (Auto Add To Trade runs only when I initiated). */
   tradeOpened(e: { initiatorGuid: number; partnerGuid: number; partner: string }): void {
-    this.trading = { partner: e.partner, partnerGuid: e.partnerGuid >>> 0 };
+    const trading = { partner: e.partner, partnerGuid: e.partnerGuid >>> 0 };
+    this.trading = trading;
+    // The partner's loot set as stored now (it may have changed elsewhere since the routines loaded).
+    const fresh = this.x.freshenRoutines?.() ?? null;
+    if (fresh) { this.tradeAdd.ended(); void fresh.catch(() => {}).then(() => { if (this.trading === trading) this.tradeAddOpened(e); }); return; }
+    this.tradeAddOpened(e);
+  }
+
+  private tradeAddOpened(e: { initiatorGuid: number; partner: string }): void {
     const me = this.api.self();
     this.tradeAdd.opened({ enabled: this.x.enabled() && this.options.bool('AutoTradeAdd.Enabled'), iInitiated: !!me && (e.initiatorGuid >>> 0) === (me.guid >>> 0), partner: e.partner });
   }

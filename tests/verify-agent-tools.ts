@@ -223,7 +223,7 @@ describe('every action tool reaches an in-page method', async () => {
   it('ac_<name> calls the surface method <camelName> (act() in tools.ts), or is one of the composite tools', () => {
     const surface = new AgentApi(new FakeHost()).surface() as Record<string, unknown>;
     // Tools that run their own sequence of calls, or no page call at all.
-    const composite = new Set(['ac_start', 'ac_stop', 'ac_sessions', 'ac_observe', 'ac_screenshot', 'ac_look', 'ac_character', 'ac_journal', 'ac_note', 'ac_allegiance', 'ac_routines', 'ac_routine', 'ac_keys', 'ac_click', 'ac_wait', 'ac_trace', 'ac_inventory', 'ac_spells', 'ac_vendor', 'ac_appraise']);
+    const composite = new Set(['ac_start', 'ac_stop', 'ac_sessions', 'ac_observe', 'ac_screenshot', 'ac_look', 'ac_character', 'ac_journal', 'ac_note', 'ac_allegiance', 'ac_routines', 'ac_routine', 'ac_keys', 'ac_click', 'ac_wait', 'ac_trace', 'ac_inventory', 'ac_gear', 'ac_spells', 'ac_vendor', 'ac_appraise']);
     const missing = TOOLS.filter((t) => !composite.has(t.name))
       .map((t) => t.name.replace(/^ac_/, '').replace(/_([a-z])/g, (_, x: string) => x.toUpperCase()))
       .filter((m) => typeof surface[m] !== 'function');

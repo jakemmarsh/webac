@@ -136,6 +136,7 @@ describe('through the window and GameUI', () => {
     const source = {
       load: async () => { loads++; return { ok: true, doc: { schemaVersion: 1, profiles: [] } }; },
       character: () => 'Claude', status: () => ({ running: false, paused: false, profile: null, state: null, acting: null, last: [] }),
+      now: () => 0,
       tools: f.tools,
     } as unknown as VTankSource;
     const win = new W.VTankWindow({ download: () => {} } as never, source, { open: () => {}, close: () => {} });

@@ -262,6 +262,15 @@ describe('route points in the engine', () => {
     expect(host.me.y).toBeGreaterThan(37);
   });
 
+  it('OpenDoors: a door only a lever opens (ItemUseable No) is never used by hand', async () => {
+    const door = 0x70145013;
+    host.add({ guid: door, name: 'Door', objectDescFlags: 0x1000, x: 80, y: 30, physicsState: 0, useability: 0x1 });
+    api.routine.start(navProfile({ name: 'D', mode: 'once', points: [M(80, 40)] }, { OpenDoors: true }));
+    await step(15_000);
+    expect(host.sent).not.toContain(`use ${door.toString(16)}`);
+    expect(log()).not.toContain('door: Door');
+  });
+
   it('OpenDoors: a locked door is picked with a Consumables lockpick when your skill is up to it; else it is skipped and said', async () => {
     const door = 0x7a9b0201;
     host.add({ guid: door, name: 'Vault Door', objectDescFlags: 0x1000, x: 80, y: 30, physicsState: 0 });

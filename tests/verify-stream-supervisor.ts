@@ -7,7 +7,7 @@ import { FeedWriter, FileTail, cliCalls, feedPath, isIncantation, parseChatLine,
 import type { FeedEvent } from '../tools/stream/feed-types.ts';
 import { afterTurn, dayUsage, endReason, nextSegment, type SegmentRecord } from '../tools/stream/policy.ts';
 import { StreamSupervisor, claudeArgs, playerEnv, startArgs, type PlayerProcess, type SupervisorDeps, type DaemonState } from '../tools/stream/supervisor.ts';
-import { playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from '../tools/stream/prompt.ts';
+import { creditsLine, nextCreditLevels, readinessBrief, recoveryCounts, unspent, playerToolNames, segmentOpening, sessionSoFar, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from '../tools/stream/prompt.ts';
 import { playerScripts, preparePlayerDir } from '../tools/stream/player.ts';
 import { TOOLS, TOOL_BY_NAME } from '../tools/ac-agent/tools.ts';
 import { help, parseCliArgs } from '../tools/ac-agent/cli.ts';
@@ -20,6 +20,8 @@ import { READ_METHODS } from '../packages/renderer/src/agent/claudeControl.ts';
 import { FakeHost } from './_harness/agentFake.ts';
 import { parseFeedLine } from '../tools/stream/feed-tail.ts';
 import { applyEvent, createState } from '../tools/stream/overlay/model.ts';
+import { HOSTED_GUIDE } from '../tools/ac-agent/hostedGuide.ts';
+import type { AgentItem } from '../packages/renderer/src/agent/types.ts';
 
 // Jake (2026-10-13): run Claude Arcanist and Claude Bulwark continuously for a stream, with no human or lead session
 // launching each run. tools/stream/supervisor.ts plays each as a headless `claude -p` session in segments, feeds an
@@ -312,7 +314,7 @@ function fakeProc(onSend: (text: string, p: FakeProc) => void): FakeProc {
 
 const result = (text = '') => ({ type: 'result', subtype: 'success', is_error: false, result: text, total_cost_usd: 1, num_turns: 3, usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 } });
 
-function harness(cfgOver: Record<string, unknown>, script: (profile: string, text: string, p: FakeProc) => void, opts: { stopAfterSpawns?: number; daemons?: Record<string, DaemonState | null> } = {}) {
+function harness(cfgOver: Record<string, unknown>, script: (profile: string, text: string, p: FakeProc) => void, opts: { stopAfterSpawns?: number; daemons?: Record<string, DaemonState | null>; inventory?: Record<string, AgentItem[]>; sheets?: Record<string, string>; chat?: Record<string, string[]> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acjs-sup-'));
   let now = Date.UTC(2026, 9, 13, 20);
   const cli: string[][] = [];
@@ -342,10 +344,12 @@ function harness(cfgOver: Record<string, unknown>, script: (profile: string, tex
     },
     daemonStatus: async (p) => daemons[p] ?? null,
     vitals: async () => ({ name: 'X', level: 5, health: { cur: 1, max: 1 }, stamina: { cur: 1, max: 1 }, mana: { cur: 1, max: 1 }, xp: null, coords: '1N, 1E', cell: '0x1', indoors: false, dead: false, combatMode: 'peace', task: null, goal: null }),
+    inventory: async (p) => opts.inventory?.[p] ?? null,
+    characterSheet: async (p) => opts.sheets?.[p] ?? null,
     callAgent: async (p, m) => { agentCalls.push(`${p}:${m}`); if (m === 'logout') screen = 'character-select'; return m === 'status' ? { screen } : { ok: true }; },
     journal: (p) => `${p} journal`,
     brief: () => 'Brief for {{CHARACTER}} ({{PROFILE}}) with {{PARTNER}}.',
-    chatLines: () => [],
+    chatLines: (p) => opts.chat?.[p]?.splice(0) ?? [],
     stopRequested: () => stop,
     feed: new FeedWriter(join(dir, 'feed.jsonl'), () => now),
     segments: { read: () => segs, append: (r) => segs.push(r) },
@@ -624,6 +628,34 @@ describe('player sessions: a small working directory, not the repo', () => {
     expect(sys).toMatch(/The tools: observe, look, note, .*train_skill\./);
     expect(playerToolNames(TOOLS.map((t) => t.name))).not.toMatch(/\b(start|stop|sessions)\b/);
   });
+  it('the brief leads with good play: the firm readiness rule first, then playing well together, the stream last (Jake 2026-10-14)', () => {
+    const sys = systemPrompt(readFileSync(join(__dirname, '..', 'tools', 'stream', 'brief.md'), 'utf8'), cfg.characters[0], 'Claude Bulwark', playerToolNames(TOOLS.map((t) => t.name)));
+    expect(sys).toMatch(/\*\*Readiness is survival\.\*\* Gear, stats, buffs and useables are always paramount/);
+    expect(sys).toMatch(/no EMPTY armor slots and no clothing-only body parts you can fix/);
+    expect(sys).toMatch(/healing kits plus health and mana potions in the pack/);
+    expect(sys).toContain('Adventuring in missing or low-level gear is a death wish.');
+    const at = (x: string) => sys.indexOf(x);
+    expect(at('**Readiness is survival.**')).toBeGreaterThan(-1);
+    expect(at('**Readiness is survival.**')).toBeLessThan(at('**Play well together.**'));
+    expect(at('**Play well together.**')).toBeLessThan(at('**On stream.**'));
+    expect(at('**On stream.**')).toBeLessThan(at('**Report**'));
+    // Talk like two friends playing, not role-players.
+    expect(sys).toMatch(/like two friends playing AC together, not role-players/);
+    expect(sys).toMatch(/OOM, brb, gg/);
+    expect(sys).not.toMatch(/Stay in your character's voice|emote\s*\(`\/e/);
+  });
+  it('the cast\'s personalities are temperaments, not parts to perform', () => {
+    for (const c of cfg.characters) {
+      expect(c.personality).toMatch(/^Temperament, not a part to perform/);
+      expect(c.personality).not.toMatch(/theatrical|library|with flair|guardsman/i);
+    }
+    expect(cfg.characters.find((c) => c.profile === 'mage')!.personality).toMatch(/tin can/);
+    expect(cfg.characters.find((c) => c.profile === 'soldier')!.personality).toMatch(/grudge list/);
+  });
+  it('the hosted connector\'s guide carries the same readiness rule', () => {
+    expect(HOSTED_GUIDE).toMatch(/Readiness is survival: gear, stats, buffs and useables come first\./);
+    expect(HOSTED_GUIDE).toMatch(/Adventuring in missing or low-level gear is a death wish/);
+  });
   it('the wrap-up asks for the fight finished, somewhere safe, a goal note, a goodbye, and the report last', () => {
     const w = wrapUpMessage(5);
     const order = ['Finish the fight', 'somewhere safe', 'observe max=5', 'note kind=goal', 'goal text=', 'goodbye', 'report as your final message'].map((x) => w.indexOf(x));
@@ -684,5 +716,143 @@ describe('feed: a character\'s own spell words are magic, not speech', () => {
         ['fellowship', 'Claude Arcanist', 'Pull the left one.'],
       ]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+// Jake, watching the stream 2026-10-14: "the mage dies so much lol are they upgrading their gear". Arcanist died three
+// times to Bulwark's none with bare hands, clothing-only legs, a cloak and a helm in his pack and nothing appraised,
+// and neither player looked at gear all segment: they act on the opening message. Then: "gear, stats, buffs, and
+// useables (heal kits, potions) are always paramount to survival". So the opening carries a readiness block of facts.
+describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, the session\'s deaths)', () => {
+  // EquipMask (ACE EquipMask.cs) and CoverageMask (ClothingPriority, ACE CoverageMask.cs).
+  const COAT = 0x200 | 0x400 | 0x800 | 0x1000, COAT_COVER = 0x400 | 0x800 | 0x1000 | 0x2000;
+  /** Claude Arcanist on 2026-10-14, read live through `gear`. */
+  const arcanistInv = (): AgentItem[] => [
+    { guid: 0x80001001, name: 'Studded Leather Coat', where: 'equipped', mask: COAT, validLocations: COAT, coverage: COAT_COVER },
+    { guid: 0x80001002, name: 'Shirt', where: 'equipped', mask: 0x2 | 0x8 | 0x10, validLocations: 0x2 | 0x8 | 0x10, coverage: 0x8 | 0x20 | 0x40 },
+    { guid: 0x80001003, name: 'Pants', where: 'equipped', mask: 0x4 | 0x40 | 0x80, validLocations: 0x4 | 0x40 | 0x80, coverage: 0x10 | 0x2 | 0x4 },
+    { guid: 0x80001004, name: 'Leather Boots', where: 'equipped', mask: 0x100, validLocations: 0x100, coverage: 0x10000 },
+    { guid: 0x80001005, name: 'Wand', where: 'equipped', mask: 0x1000000, validLocations: 0x1000000 },
+    { guid: 0x80002001, name: 'Chevron Cloak', where: 'main pack', validLocations: 0x8000000 },
+    { guid: 0x80002002, name: 'Pathwarden Helm', where: 'main pack', validLocations: 0x1, coverage: 0x4000 },
+    { guid: 0x80002003, name: 'Pyreal', where: 'main pack', stack: 300 },
+    { guid: 0x80002004, name: 'Mana Potion', where: 'main pack', stack: 2 },
+  ];
+  const ARMOR_ALL = 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000 | 0x4000, COVER_ALL = 0x400 | 0x800 | 0x1000 | 0x2000 | 0x100 | 0x200;
+  /** Every body part armored and appraised, nothing in the pack that fills a slot; kits and potions carried. */
+  const completeInv = (): AgentItem[] => [
+    { guid: 1, name: 'Platemail Hauberk', where: 'equipped', mask: ARMOR_ALL, validLocations: ARMOR_ALL, coverage: COVER_ALL, appraised: true, armorLevel: 120 },
+    { guid: 2, name: 'Helm', where: 'equipped', mask: 0x1, validLocations: 0x1, coverage: 0x4000, appraised: true, armorLevel: 80 },
+    { guid: 3, name: 'Gauntlets', where: 'equipped', mask: 0x20, validLocations: 0x20, coverage: 0x8000, appraised: true, armorLevel: 80 },
+    { guid: 4, name: 'Sollerets', where: 'equipped', mask: 0x100, validLocations: 0x100, coverage: 0x10000, appraised: true, armorLevel: 80 },
+    { guid: 5, name: 'Sword', where: 'equipped', mask: 0x100000, validLocations: 0x100000 },
+    { guid: 6, name: 'Pyreal', where: 'main pack', stack: 10 },
+    { guid: 7, name: 'Adept Healing Kit', where: 'main pack' },
+    { guid: 8, name: 'Plain Healing Kit', where: 'Sack', stack: 2 },
+    { guid: 9, name: 'Potion of Healing', where: 'main pack', stack: 3 },
+    { guid: 10, name: 'Healing Tonic', where: 'main pack' },
+    { guid: 11, name: 'Enhanced Mana Elixir', where: 'main pack' },
+    { guid: 12, name: 'Mana Stone', where: 'main pack' }, // not a potion
+    { guid: 13, name: 'Stamina Potion', where: 'main pack' }, // neither health nor mana
+  ];
+  /** GameUI.agentCharacterSheet's XP line. */
+  const sheet = (xp: string, credits: number, next = 'Next skill credits: level 20 (+1), level 23 (+1)\n') => `Claude Arcanist  level 19  Aluvian Male  NPK\nXP 1,900,000 total, ${xp} unassigned, 210,000 to next level; ${credits} skill credits\n${next}Attributes: Strength 10`;
+
+  it('Arcanist\'s block: bare hands and head, clothing-only legs, the cloak and helm in the pack, unappraised pieces, unspent XP, kits and potions', () => {
+    const r = readinessBrief({ items: arcanistInv(), sheet: sheet('612,345', 2), session: null })!;
+    expect(r.split('\n')).toEqual([
+      'Your readiness right now (`./ac gear`, `./ac character`, `./ac inventory` for the whole picture):',
+      '- gear: nothing worn: no helm or hat (head), no gloves (hands)',
+      '- gear: clothing only, no armor over it: upper legs, lower legs',
+      '- gear: in your pack, would fill an empty slot: Pathwarden Helm #80002002 (head); Chevron Cloak #80002001 (cloak)',
+      '- gear: 4 worn pieces with unknown armor level (Studded Leather Coat, Shirt, Pants, Leather Boots): appraise to compare',
+      '- unspent: 612,345 XP',
+      '- skill credits: 2 now; next at level 20 (+1) and 23 (+1)',
+      '- in your pack: 0 healing kits, 0 health potions, 2 mana potions',
+    ]);
+  });
+
+  it('no gear lines when the gear is complete (or the tab can\'t say where items go); kits and potions counted by stack', () => {
+    expect(recoveryCounts(completeInv())).toEqual({ kits: 3, health: 4, mana: 1 });
+    expect(readinessBrief({ items: completeInv(), sheet: sheet('0', 0), session: null })!.split('\n').slice(1)).toEqual([
+      '- unspent: 0 XP',
+      '- skill credits: 0 now; next at level 20 (+1) and 23 (+1)',
+      '- in your pack: 3 healing kits, 4 health potions, 1 mana potion',
+    ]);
+    expect(readinessBrief({ items: [{ guid: 1, name: 'Robe', where: 'equipped' }], sheet: null, session: null })).not.toMatch(/gear:/);
+    expect(readinessBrief({ items: null, sheet: null, session: null })).toBeNull();
+    expect(unspent('sheet')).toBeNull();
+  });
+
+  // Jake 2026-10-14 ("lets just get the credits ASAP"): when the next credits come, from the sheet's line that
+  // GameUI.agentCharacterSheet prints from the era's XpTable characterLevelSkillCreditList.
+  it('the credit line: credits now and the next two levels that grant them; just the count when the sheet names none', () => {
+    const arc = `Claude Arcanist  level 21  Aluvian Male  NPK\nXP 2,400,000 total, 0 unassigned, 300,000 to next level; 6 skill credits\nNext skill credits: level 23 (+1), level 26 (+1)\nAttributes: Focus 100`;
+    expect(nextCreditLevels(arc)).toEqual([{ level: 23, credits: 1 }, { level: 26, credits: 1 }]);
+    expect(readinessBrief({ items: null, sheet: arc, session: null })!.split('\n').slice(1)).toEqual([
+      '- unspent: 0 XP',
+      '- skill credits: 6 now; next at level 23 (+1) and 26 (+1)',
+    ]);
+    expect(creditsLine(1, [{ level: 300, credits: 2 }])).toBe('skill credits: 1 now; next at level 300 (+2)');
+    // An older tab's sheet (no line) or a character past the table's last credit level.
+    expect(readinessBrief({ items: null, sheet: sheet('5', 3, ''), session: null })!.split('\n').slice(1)).toEqual(['- unspent: 5 XP', '- skill credits: 3 now']);
+    expect(nextCreditLevels(null)).toEqual([]);
+  });
+
+  it('a character\'s goal is in every segment\'s opening (start notes only the first); the cast plans Item Enchantment at 26, no Temple', () => {
+    const cfg = parseStreamConfig(CAST);
+    const [arc, bul] = cfg.characters;
+    expect(arc.goal).toMatch(/Item Enchantment is your priority\. Training it costs 8 skill credits; you have 6, and the next credits come at levels 23 and 26/);
+    expect(arc.goal).toMatch(/efficient XP to level 26, and train Item Enchantment \(`train_skill`\) the moment the credits arrive\. No Temple of Forgetfulness\./);
+    expect(bul.goal).toMatch(/Help Claude Arcanist level efficiently/);
+    for (const segment of [1, 3]) {
+      const o = segmentOpening({ c: arc, partner: 'Claude Bulwark', segment, nowMs: 0, playMinutes: 75, journal: '', lastReport: null, readiness: 'Your readiness right now:\n- skill credits: 6 now; next at level 23 (+1) and 26 (+1)' });
+      expect(o).toContain(`\n\nThe plan for now: ${arc.goal}\n`);
+      expect(o.indexOf('The plan for now:')).toBeLessThan(o.indexOf('Your readiness right now'));
+    }
+    const none = segmentOpening({ c: { ...arc, goal: '' }, partner: 'Claude Bulwark', segment: 2, nowMs: 0, playMinutes: 75, journal: '', lastReport: null });
+    expect(none).not.toContain('The plan for now');
+    expect(() => cfgWith({ characters: [{ ...CAST.characters[0], goal: 5 }, CAST.characters[1]] })).toThrow(/goal/);
+  });
+
+  it('the session line: deaths with killers and levels gained per character, nothing before anything happened', () => {
+    expect(sessionSoFar([{ character: 'Claude Arcanist', tally: undefined }, { character: 'Claude Bulwark', tally: { deaths: [], levels: [] } }])).toBeNull();
+    expect(sessionSoFar([
+      { character: 'Claude Arcanist', tally: { deaths: ['Banderling Striker', 'Mud Golem', null], levels: [] } },
+      { character: 'Claude Bulwark', tally: { deaths: [], levels: [20, 21] } },
+    ])).toBe('deaths and levels this session: Claude Arcanist: 3 deaths (Banderling Striker, Mud Golem, unknown); Claude Bulwark: 0 deaths, level 19 → 21');
+  });
+
+  it('the supervisor\'s opening carries readiness (reads of the daemon\'s inventory and sheet) and the deaths its chat logs showed since session-start', async () => {
+    const at = (s: number, text: string) => `2026-10-14T20:00:${String(s).padStart(2, '0')}.000Z ${text}`;
+    const chat = {
+      mage: [
+        at(1, 'Banderling Striker splits you apart!'), at(2, 'Your corpse is located at (36.5N, 35.9E).'),
+        at(20, 'Your death is preceded by a sharp, stabbing pain, courtesy of Mud Golem!'), at(21, 'Your corpse is located at (36.0N, 35.0E).'),
+        at(40, 'Your corpse is located at (36.1N, 35.1E).'),
+      ],
+      soldier: [at(50, 'You are now level 21!')],
+    };
+    const h = harness({ maxSegments: 2, segment: { ...CAST.segment, minutes: 1, restartPauseSeconds: 0 } }, (_p, text, p) => {
+      if (/Wrap up now/.test(text)) p.emit(result('report'));
+    }, { inventory: { mage: arcanistInv(), soldier: completeInv() }, sheets: { mage: sheet('612,345', 2) }, chat });
+    try {
+      await new StreamSupervisor(h.cfg, h.deps).run();
+      const openings = (profile: string) => h.procs.filter((x) => x.profile === profile).map((x) => x.p.sent[0]);
+      const [mage1, mage2] = openings('mage');
+      const [soldier1] = openings('soldier');
+      for (const o of [mage1, soldier1]) expect(o).toContain('\n- deaths and levels this session: Claude Arcanist: 3 deaths (Banderling Striker, Mud Golem, unknown); Claude Bulwark: 0 deaths, level 20 → 21');
+      expect(mage1).toMatch(/Your readiness right now[^\n]*\n- gear: nothing worn: no helm or hat \(head\), no gloves \(hands\)\n- gear: clothing only, no armor over it: upper legs, lower legs\n- gear: in your pack, would fill an empty slot: Pathwarden Helm #80002002 \(head\); Chevron Cloak #80002001 \(cloak\)/);
+      expect(mage1).toContain('\n- unspent: 612,345 XP\n- skill credits: 2 now; next at level 20 (+1) and 23 (+1)\n- in your pack: 0 healing kits, 0 health potions, 2 mana potions\n');
+      expect(mage1.indexOf('Your readiness right now')).toBeLessThan(mage1.indexOf('Your journal:'));
+      expect(mage2).toContain('Your readiness right now');
+      expect(soldier1).toContain('- in your pack: 3 healing kits, 4 health potions, 1 mana potion');
+      expect(soldier1).not.toContain('- gear:');
+      expect(soldier1).not.toContain('- unspent:'); // no sheet read for it here
+      // The feed got the same deaths the opening counted.
+      expect(h.feed().filter((e) => e.type === 'death').map((e) => (e as { killer?: string }).killer ?? null)).toEqual(['Banderling Striker', 'Mud Golem', null]);
+      // Reads, not agent calls: the stop flow's agent calls (logout of an attached tab) see nothing new.
+      expect(h.agentCalls).toEqual([]);
+    } finally { h.cleanup(); }
   });
 });

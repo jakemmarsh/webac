@@ -138,6 +138,65 @@ describe('1. the agent sheet and raise summary explain a part-filled rank (real 
   });
 });
 
+// Jake 2026-10-14, "lets just get the credits ASAP": the sheet names the next levels that grant skill credits, from the
+// era's own XpTable characterLevelSkillCreditList (ACE Player_Xp: reaching level L adds list[L]); the stream's
+// readiness block reads that line.
+describe('the agent sheet names the next skill-credit levels from the loaded XpTable (real GameUI)', () => {
+  const saved: Partial<Record<(typeof DOM_GLOBALS)[number], unknown>> = {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let ui: any, GameUI: any;
+  beforeAll(async () => {
+    installDomGlobals(domWindow, DOM_GLOBALS, saved);
+    GameUI = (await import('../packages/renderer/src/ui/GameUI.js')).GameUI;
+    const container = domWindow.document.createElement('div');
+    domWindow.document.body.appendChild(container);
+    ui = new GameUI(container);
+  });
+  afterAll(() => restoreDomGlobals(DOM_GLOBALS, saved));
+
+  it('a fake table: the two nearest levels above the character\'s, with what each grants; none past the last or without a table', () => {
+    const credits = [0, 0, 1, 0, 0, 2, 0, 0, 1];
+    ui.setRaiseCallbacks({}, { levelSkillCredits: credits });
+    ui.charInfo.level = 2;
+    ui.charInfo.skillCredits = 6;
+    const sheet: string = ui.agentCharacterSheet();
+    expect(sheet.split('\n')[1]).toMatch(/; 6 skill credits$/);
+    expect(sheet.split('\n')[2]).toBe('Next skill credits: level 5 (+2), level 8 (+1)');
+    ui.charInfo.level = 5;
+    expect(ui.agentCharacterSheet()).toContain('\nNext skill credits: level 8 (+1)\n');
+    ui.charInfo.level = 8;
+    expect(ui.agentCharacterSheet()).not.toContain('Next skill credits');
+    ui.setRaiseCallbacks({}, {});
+    ui.charInfo.level = 2;
+    expect(ui.agentCharacterSheet()).not.toContain('Next skill credits');
+  });
+
+  describe.skipIf(!existsSync(DAT_PATHS.portal))('end of retail: a level-21 Arcanist\'s next credits are at 23 and 26', () => {
+    let t: XpTable;
+    beforeAll(() => { t = xpTableOf(DAT_PATHS.portal, false); });
+    it('one credit at 16, 18, 20, 23, 26, 29, 32, 35, 40 … 60', () => {
+      const at = t.characterLevelSkillCreditList.map((c, l) => (c > 0 ? l : -1)).filter((l) => l >= 16 && l <= 60);
+      expect(at).toEqual([16, 18, 20, 23, 26, 29, 32, 35, 40, 45, 50, 55, 60]);
+      expect(GameUI.nextSkillCreditLevels(t.characterLevelSkillCreditList, 21)).toEqual([{ level: 23, credits: 1 }, { level: 26, credits: 1 }]);
+    });
+  });
+
+  for (const [era, path, is1999] of ERA_PORTALS) {
+    describe.skipIf(!existsSync(path))(`each era's credit levels come from its own portal: ${era}`, () => {
+      let t: XpTable;
+      beforeAll(() => { t = xpTableOf(path, is1999); });
+      it('the sheet line lists exactly the table\'s next granting levels', () => {
+        const list = t.characterLevelSkillCreditList;
+        const want = list.map((c, l) => ({ level: l, credits: c })).filter((x) => x.level > 10 && x.credits > 0).slice(0, 2);
+        expect(want.length).toBeGreaterThan(0);
+        ui.setRaiseCallbacks({}, { levelSkillCredits: list });
+        ui.charInfo.level = 10;
+        expect(ui.agentCharacterSheet()).toContain(`\nNext skill credits: ${want.map((x) => `level ${x.level} (+${x.credits})`).join(', ')}\n`);
+      });
+    });
+  }
+});
+
 describe('2. narration: short lines only, never the end-of-segment report', () => {
   const report = '## Report: Segment 1 (17:20–17:32)\n\n**Story:** We started at the Holtburg lifestone with my mana at 25% and no fellowship. I sent Bulwark a tell, re-formed **Scholar and Shield**.\n\n## Bugs\n- the wait slept\n- costs';
   const assistant = (text: string) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } });

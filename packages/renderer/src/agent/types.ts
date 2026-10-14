@@ -28,14 +28,26 @@ export interface AgentObject {
   stack?: number;
   /** Creature level, when the server has sent it. */
   level?: number;
-  /** Doors only: true when it stands open (Using an open door closes it). */
+  /** Doors only: true when it stands open (Using an open door closes it), false when shut. */
   open?: boolean;
+  /**
+   * Doors only: it won't open by hand. Its ItemUseable is No (a "doordungeonactivated" door), or a Use of it got
+   * retail's "You can't open or close this Door that way": something linked to it (a lever, switch or pressure plate)
+   * opens it.
+   */
+  notByHand?: boolean;
   /** Monsters only: its death has begun (the corpse follows); not a target. */
   dying?: boolean;
   /** Set on a remembered place that is out of view: seconds since it was last seen. */
   seenAgo?: number;
   /** Monsters only: how many of its attacks on you (hits, misses, evades) the last 10 s of combat lines named. */
   attackingYou?: number;
+  /**
+   * Monsters only, when not yet attacking you: it is coming at you, and how the client knows: "running at you" (its
+   * server MoveToObject is aimed at you: ACE Monster_Navigation chasing its AttackTarget), "turned to face you" (a
+   * TurnToObject at you, before a charge or a spell), or "closing, 6 m nearer in 3 s" (its own movement toward you).
+   */
+  comingAtYou?: string;
   /**
    * Monsters only: what this kind of creature (by name) was seen doing to you this session, from the server's own
    * lines: "casts Frost Bolt II (40), Drain Health Other II; hits up to 6". Nothing hidden: only what a player saw.
@@ -134,7 +146,13 @@ export interface AgentEvent {
     /** More creatures attacking you than a moment ago (the attack lines of the last 10 s, each placed on its creature). */
     | 'attackers-up'
     /** A spell came at you (landed, resisted, failed to affect you), or a creature nearby spoke a spell's words. */
-    | 'cast-at-you';
+    | 'cast-at-you'
+    /** A monster started coming at you (its MoveTo / TurnTo aimed at you, or closing on you), before it lands a hit. */
+    | 'aggro'
+    /** A monster started coming at (or fighting) one of your fellows. */
+    | 'fellow-aggro'
+    /** A fellow's health fell below the mark (60% by default, fellow_below per wait), or a single drop took a quarter of it. */
+    | 'fellow-low';
   text: string;
   guid?: number;
   /** Chat lines: the ChatMessageType the line came in as (Chat Message Capture's colour filter). */
@@ -177,12 +195,21 @@ export interface AgentObservation {
    * Your fellows (not you): health %, and distance and compass direction when in view, else out of sight.
    * Without it a player stood waiting for a partner 490 m away to buff him (Bulwark, 2026-10-10).
    */
-  fellows?: Array<{ name: string; healthPct: number; dist?: number; bearing?: number; /** Metres up (+) or down (−) when 2 m or more. */ dz?: number }>;
+  fellows?: Array<{
+    name: string; healthPct: number; dist?: number; bearing?: number; /** Metres up (+) or down (−) when 2 m or more. */ dz?: number;
+    /** Monsters on them or coming at them, as the client sees it: "Rust Gromnie L8 on them, Shadow L26 running at them 20 m off". */
+    threats?: string;
+  }>;
   /**
    * In a fellowship with nobody else in it: a fellow logged out (the server takes them out, as retail did) and /f
    * reaches no one. Arcanist and Bulwark each sat in a separate fellowship waiting on the other's /f, 2026-10-10.
    */
   fellowshipAlone?: boolean;
+  /**
+   * Body slots nothing you wear covers (the paperdoll's bare spots: head, hands, feet …), and the pack items that would
+   * cover one. A player sees them at a glance; Arcanist played to level 19 with no gloves (2026-10-14).
+   */
+  gearEmpty?: { slots: string[]; packFits: string[] };
   /**
    * Attack lines of the last 10 s naming a creature none of whose name stands within reach (a swing from 8 m, a spell
    * from 60 m): out of sight, or a missile from afar. Named, never pinned on a far one of that name.
@@ -261,6 +288,18 @@ export interface AgentItem {
   structure?: number;
   workmanship?: number;
   objectDescFlags?: number;
+  /** Worn: the EquipMask slots it occupies (its CurrentWieldedLocation; a coat holds several). */
+  mask?: number;
+  /** The EquipMask slots it can be worn or wielded in (ValidLocations, PropertyInt 9), as a number. */
+  validLocations?: number;
+  /** The body it covers (ClothingPriority, PropertyInt 4: ACE CoverageMask), when the public description sent one. */
+  coverage?: number;
+  /** An appraisal of it has arrived (its armor level and wield requirements are then known). */
+  appraised?: boolean;
+  /** ArmorLevel (PropertyInt 28) from its appraisal: what the examine window shows, enchantments included. */
+  armorLevel?: number;
+  /** Its wield requirements from its appraisal, in the examine window's words; `met` when your character sheet says. */
+  wieldReqs?: Array<{ text: string; met?: boolean }>;
 }
 
 export interface AgentSpell {
@@ -301,4 +340,6 @@ export interface AgentWaitFilter {
   /** Likewise for mana and stamina (no default mark for them). */
   manaBelow?: number;
   staminaBelow?: number;
+  /** Wake (as fellow-low) when a fellow's health falls below this fraction (default mark without it: 0.6). */
+  fellowBelow?: number;
 }

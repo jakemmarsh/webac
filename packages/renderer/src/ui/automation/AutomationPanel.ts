@@ -316,6 +316,20 @@ export class AutomationPanel {
   }
 
   get document(): RoutineDoc | null { return this.doc; }
+
+  /**
+   * The account's routines as stored now (this page stored them, or a re-check found them changed elsewhere):
+   * the panel's copy is replaced, as its own switches save at once and would otherwise put the old one back.
+   * An open editor keeps its own copy (it has Save).
+   */
+  storedElsewhere(doc: RoutineDoc): void {
+    if (!this.doc || this.loading || !Array.isArray(doc?.profiles)) return;
+    this.doc = doc;
+    if (!doc.profiles.some((p) => p.name === this.selected)) {
+      const ch = this.source.character();
+      this.selected = this.source.status().profile ?? (ch ? doc.characters?.[ch] : undefined) ?? doc.profiles[0]?.name ?? null;
+    }
+  }
   get onStatsTab(): boolean { return this.tab === 'stats'; }
 
   private profile(): RoutineProfile | null {

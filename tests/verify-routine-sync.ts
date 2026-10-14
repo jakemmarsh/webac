@@ -136,6 +136,18 @@ describe('RoutineSync keeps routines in this browser when the bridge keeps none'
     expect(p.lootSets.Other[0]).toEqual({ label: 'Plugin item', note: 'VTClassic action User2: looted and kept', action: 'keep', match: { name: 'Plugin item' }, vtc: { action: 6 } });
   });
 
+  it('check(since) answers unchanged for the same stored document and the newer one after another tab saved', async () => {
+    const { sync, items, fetched } = local();
+    const doc = { ...emptyRoutineDoc('coldeve', 'Jake'), profiles: [EXAMPLE_HUNT_PROFILE] };
+    const saved = await sync.save(doc) as { ok: true; doc: { updatedAt: string } };
+    expect(await sync.check(saved.doc.updatedAt)).toEqual({ ok: true, unchanged: true });
+    // Another tab of this browser stores a newer document under the same key.
+    const newer = { ...doc, updatedAt: '2099-01-01T00:00:00.000Z', profiles: [{ ...EXAMPLE_HUNT_PROFILE, description: 'from the other tab' }] };
+    items.set(localRoutinesKey('coldeve', 'Jake'), JSON.stringify(newer));
+    expect(await sync.check(saved.doc.updatedAt)).toMatchObject({ ok: true, doc: { updatedAt: newer.updatedAt, profiles: [{ description: 'from the other tab' }] } });
+    expect(fetched).toEqual([]);
+  });
+
   it('refuses an invalid document or another account\'s, as the bridge would', async () => {
     const { sync, items } = local();
     const bad = await sync.save({ ...emptyRoutineDoc('coldeve', 'Jake'), profiles: [{ ...EXAMPLE_HUNT_PROFILE, initialState: 'Nowhere' }] });
@@ -173,6 +185,33 @@ describe('RoutineSync', () => {
     expect(s.asked()).toBe(1);
     expect(s.requests[0].url).toBe('https://bridge.example/routines');
     expect((s.requests[0].init.headers as Record<string, string>).authorization).toBe(`Bearer ${grant.token}`);
+  });
+
+  it('check(since) asks with ?since= and takes {unchanged} as no change; an older bridge\'s whole document is passed on', async () => {
+    const at = '2026-10-14T10:00:00.000Z';
+    const s = setup([{ status: 200, body: { unchanged: true, updatedAt: at } }, { status: 200, body: { updatedAt: '2026-10-14T10:05:00.000Z', profiles: [] } }]);
+    expect(await s.sync.check(at)).toEqual({ ok: true, unchanged: true });
+    expect(s.requests[0].url).toBe(`https://bridge.example/routines?since=${encodeURIComponent(at)}`);
+    // No new header (an older bridge's CORS preflight would refuse one).
+    expect(Object.keys(s.requests[0].init.headers as Record<string, string>)).toEqual(['authorization']);
+    expect(await s.sync.check(at)).toMatchObject({ ok: true, doc: { updatedAt: '2026-10-14T10:05:00.000Z' } });
+    // A plain load is never answered {unchanged}: it asks without ?since=.
+    const l = setup([{ status: 200, body: { profiles: [] } }]);
+    await l.sync.load();
+    expect(l.requests[0].url).toBe('https://bridge.example/routines');
+  });
+
+  it('tells its listeners of every document it stores (the connector\'s set reaches the window), and only those', async () => {
+    const stored = { updatedAt: '2026-10-14T10:00:00.000Z', profiles: [] };
+    const s = setup([{ status: 200, body: stored }, { status: 422, body: { issues: [{ path: 'x', message: 'bad' }] } }, { status: 200, body: stored }]);
+    const heard: unknown[] = [];
+    const off = s.sync.onStored((d) => heard.push(d));
+    await s.sync.save({ profiles: [] });
+    await s.sync.save({ profiles: [] });
+    expect(heard).toEqual([stored]);
+    off();
+    await s.sync.save({ profiles: [] });
+    expect(heard).toHaveLength(1);
   });
 
   it('an expired token is replaced once; a refused save reports the routine\'s problems', async () => {

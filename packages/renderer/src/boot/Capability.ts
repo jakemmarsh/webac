@@ -8,6 +8,8 @@
  * not a retail screen (CLAUDE.md, browser-UX exception), and it draws before
  * any DAT is loaded, so it uses plain CSS named colours.
  */
+import { classifyGpu, unmaskedRenderer } from '../telemetry/WorldReporter.js';
+import { renderAdaptConfigFor, type RenderAdaptConfig } from '../scene/RenderScale.js';
 
 export interface CapabilityProblem {
   id: 'webgl2' | 'websocket' | 'memory' | 'pointer';
@@ -23,6 +25,22 @@ export interface CapabilityEnv {
   deviceMemoryGb: number | null;
   /** A mouse or trackpad is present (`(pointer: fine)` or `(any-pointer: fine)`). */
   finePointer: boolean;
+  /**
+   * PERF.render-adapt — the probe context draws without the graphics card
+   * (classifyGpu 'software': SwiftShader / llvmpipe / Basic Render Driver).
+   * Not a problem shown to the player (some have no GPU at all): the client
+   * adapts instead (scene/RenderScale.ts) and reports it. Absent = false.
+   */
+  softwareGpu?: boolean;
+  /** navigator.webdriver (an automated browser). Absent = false. */
+  webdriver?: boolean;
+  /** `?renderAdapt=` from the page URL, or null. */
+  renderAdapt?: string | null;
+}
+
+/** The render adaptation this browser gets (scene/RenderScale.ts). */
+export function renderAdaptFor(env: CapabilityEnv): RenderAdaptConfig {
+  return renderAdaptConfigFor({ software: env.softwareGpu === true, webdriver: env.webdriver === true, override: env.renderAdapt ?? null });
 }
 
 /** Below this the streamed client (~1–2 GB in world) is likely to be killed by the browser. */
@@ -64,11 +82,15 @@ export function capabilityProblems(env: CapabilityEnv): CapabilityProblem[] {
 /** Probe the real browser. */
 export function probeCapabilities(win: Window & typeof globalThis): CapabilityEnv {
   let webgl2 = false;
+  let rendererString: string | null = null;
   try {
     const gl = win.document.createElement('canvas').getContext('webgl2');
     webgl2 = !!gl;
+    rendererString = unmaskedRenderer(gl);
     gl?.getExtension('WEBGL_lose_context')?.loseContext();
   } catch { webgl2 = false; }
+  let renderAdapt: string | null = null;
+  try { renderAdapt = new URLSearchParams(win.location?.search ?? '').get('renderAdapt'); } catch { renderAdapt = null; }
   const mem = (win.navigator as Navigator & { deviceMemory?: number }).deviceMemory;
   const mq = (q: string) => { try { return win.matchMedia(q).matches; } catch { return true; } };
   return {
@@ -76,6 +98,9 @@ export function probeCapabilities(win: Window & typeof globalThis): CapabilityEn
     websocket: typeof win.WebSocket === 'function',
     deviceMemoryGb: typeof mem === 'number' && mem > 0 ? mem : null,
     finePointer: mq('(pointer: fine)') || mq('(any-pointer: fine)'),
+    softwareGpu: webgl2 && classifyGpu(rendererString) === 'software',
+    webdriver: win.navigator.webdriver === true,
+    renderAdapt,
   };
 }
 

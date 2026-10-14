@@ -132,7 +132,7 @@ export function bootCacheVerdict(o: { storage: boolean; fromNetwork: number; fro
 }
 
 /** Boot/Capability.ts CapabilityProblem ids. */
-export const CAPABILITY_ISSUES = ['webgl2', 'websocket', 'memory', 'pointer'] as const;
+export const CAPABILITY_ISSUES = ['webgl2', 'websocket', 'memory', 'pointer', 'software_gpu'] as const;
 export type CapabilityIssue = typeof CAPABILITY_ISSUES[number];
 
 /** A boot still on screen 'boot' this long after the reporter started sends one boot_slow. */

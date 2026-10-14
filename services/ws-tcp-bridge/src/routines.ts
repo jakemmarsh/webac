@@ -172,7 +172,8 @@ export class RoutineTokens {
 
 /**
  * GET /routines → the token's account document (an empty one when none is
- * stored); PUT /routines with a document → validated and stored, 422 with
+ * stored), or {unchanged: true} when ?since= names its updatedAt; PUT /routines
+ * with a document → validated and stored, 422 with
  * the issues when invalid. 401 without a valid token. CORS is open (the page
  * and the bridge differ in origin); the bearer token is the gate.
  */
@@ -188,7 +189,13 @@ export function handleRoutines(req: IncomingMessage, res: ServerResponse, tokens
   const auth = /^Bearer\s+([0-9a-f]{48})$/i.exec(req.headers.authorization ?? '');
   const who = auth ? tokens.lookup(auth[1].toLowerCase()) : null;
   if (!who) return send(401, { error: 'log in to the game first: the token comes from your session' });
-  if (req.method === 'GET') return send(200, store.get(who.server, who.account));
+  if (req.method === 'GET') {
+    const doc = store.get(who.server, who.account);
+    // ?since=<updatedAt> (the page re-checking for a change made elsewhere): the same document is not sent again.
+    const since = new URL(req.url ?? '/', 'http://bridge').searchParams.get('since');
+    if (since !== null && since === doc.updatedAt) return send(200, { unchanged: true, updatedAt: doc.updatedAt });
+    return send(200, doc);
+  }
   const chunks: Buffer[] = [];
   let size = 0;
   let tooBig = false;

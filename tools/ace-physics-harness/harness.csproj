@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>CS0618;CS8632</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="/work/ace/ACE.Server.dll" />
+    <Reference Include="/work/ace/ACE.Entity.dll" />
+    <Reference Include="/work/ace/ACE.DatLoader.dll" />
+    <Reference Include="/work/ace/ACE.Common.dll" />
+    <Reference Include="/work/ace/0Harmony.dll" />
+    <Reference Include="/work/ace/log4net.dll" />
+  </ItemGroup>
+</Project>

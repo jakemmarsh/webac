@@ -114,3 +114,29 @@ export function objectRingRadius(landscapeRadius: number): number {
  * building three to five blocks synchronously. Nothing in this band draws.
  */
 export const OBJECT_PREFETCH_RINGS = 1;
+
+/**
+ * PERF.render-adapt — dynamic resolution's last resort (scene/DynamicResolution.ts):
+ * when the buffer is at its floor and frames are still slow, the world steps
+ * down the menu's ladder from the PLAYER's chosen distance, `steps` entries,
+ * never below the ladder's first value. The player's setting is the ceiling
+ * and is never rewritten (the menu keeps showing it).
+ */
+export function adaptedDrawDistance(player: number, steps: number): number {
+  const vals = LANDSCAPE_DRAW_DISTANCE_VALUES;
+  if (steps <= 0 || player <= vals[0]) return player;
+  let i = vals.length - 1;
+  while (i > 0 && vals[i] > player) i--;
+  // A non-ladder value (between entries) counts as its own top step.
+  const top = vals[i] === player ? i : i + 1;
+  return vals[Math.max(0, top - steps)];
+}
+
+/** How many adaptive steps a player's distance has below it. */
+export function adaptiveDrawDistanceSteps(player: number): number {
+  const vals = LANDSCAPE_DRAW_DISTANCE_VALUES;
+  if (player <= vals[0]) return 0;
+  let i = vals.length - 1;
+  while (i > 0 && vals[i] > player) i--;
+  return vals[i] === player ? i : i + 1;
+}

@@ -223,7 +223,8 @@ profile=… character=…`), then plays it as a headless Claude Code session in 
 - `claude -p --input-format stream-json --output-format stream-json --verbose --model <model>`, the shared brief
   (`tools/stream/brief.md`, with `{{CHARACTER}}`, `{{PROFILE}}` and `{{PARTNER}}` filled in) plus the character's
   personality as `--append-system-prompt`, and an opening message with the journal (`formatJournal`), the partner,
-  the segment's length and the report the character wrote at the end of its last segment.
+  the segment's length, the report the character wrote at the end of its last segment, and a **readiness** block
+  (see "Good players first" below).
 - The session runs in its own small directory, `stream/player/<profile>/` (`tools/stream/player.ts`), not the repo, so
   none of the repo's coding context loads (see **Cost** below). It holds two wrappers, the only commands a player runs:
   `./ac <tool> …` (the agent CLI by absolute path through the repo's own `node_modules/.bin/tsx`, no npx; it refuses
@@ -360,6 +361,67 @@ answered with a report within a minute); `total_cost_usd` is reported on this lo
   (the session transcript under `~/.claude/projects/<player dir>/` shows the `instructions` attachment, or its absence);
 - how play holds up across an auto-compaction at 100k (the summary keeps the plan? the next call's size?).
 
+### Good players first (2026-10-14)
+
+Jake, watching the stream: "the mage dies so much lol are they upgrading their gear". Claude Arcanist (level 19, ~83
+HP) died three times that day (Banderling Striker, Mud Golem, one unattributed), Bulwark none. Read through `gear`:
+hands EMPTY, legs clothing only, the cloak slot EMPTY with a Chevron Cloak in his pack, a Pathwarden Helm in the
+pack, and no worn armor appraised. The brief's Gear paragraph and observe's `gear:` line were there, and in the whole
+segment neither player called gear, appraise, equip or buy: they act on what's in front of them, chiefly the
+segment's opening message. Then Jake: "gear, stats, buffs, and useables (heal kits, potions) are always paramount to
+survival. adventuring in missing/low-level gear is a death wish", and "i want to optimize for good players over
+entertainment; entertainment follows". The brief's stream pressure had been overriding what Claude already knows about
+playing well: "Earlier sessions lost hours to … long shopping and buffing stops" and the dead-air framing pushed speed
+over preparation. Last, the pair should talk like two friends playing AC, not role-players.
+
+What changed:
+- **The opening message's readiness block** (`readinessBrief` in `tools/stream/prompt.ts`): facts only, a few lines.
+  Gear gaps from the daemon's `inventory` read (`gearView`: bare body parts, clothing-only parts, pack items that
+  would fill an empty slot including the cloak, worn pieces never appraised), unassigned XP and skill credits from
+  the `characterSheet` read, healing kits and health / mana potions in the pack (by name: ACE's Healer weenies are
+  "… Healing Kit", "… Health Kit", "Renegade Herbal Kit", "… Healing Tissue"; its restoring potions "Potion of
+  Healing", "Healing Tonic", "Mana Potion", "… Elixir", "… Draught"), and every character's deaths (with killers) and
+  levels since session-start, tallied from the same chat-log events the feed writes. Both reads are agent-API reads
+  (`READ_METHODS`) and don't take the player's chat. Example (Arcanist's 2026-10-14 gear):
+  ```
+  Your readiness right now (`./ac gear`, `./ac character`, `./ac inventory` for the whole picture):
+  - gear: nothing worn: no helm or hat (head), no gloves (hands)
+  - gear: clothing only, no armor over it: upper legs, lower legs
+  - gear: in your pack, would fill an empty slot: Pathwarden Helm #80002002 (head); Chevron Cloak #80002001 (cloak)
+  - gear: 4 worn pieces with unknown armor level (Studded Leather Coat, Shirt, Pants, Leather Boots): appraise to compare
+  - unspent: 612,345 XP
+  - skill credits: 2 now; next at level 23 (+1) and 26 (+1)
+  - in your pack: 0 healing kits, 0 health potions, 2 mana potions
+  - deaths and levels this session: Claude Arcanist: 3 deaths (Banderling Striker, Mud Golem, unknown); Claude Bulwark: 0 deaths
+  ```
+- **The brief, restructured around playing AC well:** the tool and permission facts; a firm **Readiness is survival**
+  rule (no fixable EMPTY or clothing-only slots, XP and credits spent, buffs up, kits and potions carried, "adventuring
+  in missing or low-level gear is a death wish"); **Play well together** (find each other, fellowship, stay together,
+  buffs, tactics with leave rules, progression, move on when a place stops paying, dungeon jumps), where their own AC
+  and RPG knowledge leads and the brief gives the facts that differ; Gear and Mana facts; using the tools well;
+  keep playing / remember; and one short **On stream** section near the end (talk in /f like friends playing, the goal
+  line, narration welcome, "preparing is good play, not dead air; dead air is standing idle with nothing being done").
+  Gone: "On stream (this matters as much as the rules below)", "Variety is the show", the line blaming shopping and
+  buffing stops, and the "still picture" dead-air framing.
+- **Talk like players, not role-players:** the brief asks for game talk (targets, mana and health, loot, where next),
+  shorthand (OOM, brb, gg), natural teasing and the odd real excitement, no theatrical in-character speech, emotes
+  only when a real player would. `cast.json` personalities are temperaments now (Arcanist the curious one, a bit
+  cocky about damage; Bulwark dry, deadpan, protective, with a grudge list), not characters to perform.
+- The readiness rule is mirrored in `.claude/skills/play/SKILL.md` and `tools/ac-agent/hostedGuide.ts`.
+- **Skill credits ahead and a standing goal** (Jake, 2026-10-14: "lets just get the credits ASAP no temple"). The
+  readiness block's credit line names the next two levels that grant credits. They come from the era's own XpTable
+  `characterLevelSkillCreditList` (portal 0x0E000018; ACE `Player_Xp` adds `list[newLevel]` on each level-up). The
+  client already loads it for the raise costs (`setRaiseCallbacks` → `levelSkillCredits`), and the character sheet
+  prints a `Next skill credits: level 23 (+1), level 26 (+1)` line that `readinessBrief` reads. End of retail grants
+  one credit at levels 2–10, 12, 14, 16, 18, 20, 23, 26, 29, 32, 35, 40 … 275. AC1999's table differs and comes
+  through the same path. A character's `goal` in `cast.json` is a standing plan in every segment's opening ("The
+  plan for now: …"), where `startNotes` shows in the first segment only. Arcanist's: Item Enchantment (8 credits,
+  EoL SkillTable) as soon as the credits arrive, so efficient XP to level 26, and no Temple of Forgetfulness.
+  Bulwark's: help him level efficiently.
+- **Mana for casters** (Jake: "the mage should rely on stamina to mana most of the time"): the brief's Mana facts make
+  Stamina to Mana Self the routine source, cast between fights since stamina refills fast. Mana Conversion lowers
+  costs, and potions are for emergencies mid-fight.
+
 ### Dead air (measured 2026-10-14)
 
 Dead air is time a viewer watches a character doing nothing visible. Measure every rehearsal the same way:
@@ -408,7 +470,8 @@ The causes, in idle stretches of 10 s or more:
   gaps. Gaps between pulls were 2–4 s, so a ready-made hunt routine would win little. None was built.
 
 Changes made after this measurement:
-- **The brief (`brief.md`):** a "Dead air" paragraph and the mana facts above (regeneration is the same standing or
+- **The brief (`brief.md`):** a "Dead air" paragraph (replaced the same day by "preparing is good play, not dead air":
+  see "Good players first") and the mana facts above (regeneration is the same standing or
   walking; mana potions; Mana Boost Self, Stamina to Mana Self, Health to Mana Self, Mana Renewal Self, all in the
   end-of-retail SpellTable). The two "keep `wait` to 30–60 s" lines are gone; rule 4 now says go to the partner rather
   than wait.
@@ -462,9 +525,18 @@ here, not having to hardcode behavior").
   kept starting on new monsters while one chased him.)
 - **Line of fire.** A war bolt flies straight and the server says nothing when it hits a wall ("You cast …" only means it
   left your hands). `ServerObjectManager.lineOfFire` sweeps the client's own missile collision (walls, terrain, closed
-  doors; not creatures) from your body to the target, like ACE's `IsDirectVisible`: the target line shows
+  doors; not creatures) along the bolt's real path (`boltLaunch`, ACE WorldObject_Magic): from your eye to the spawn
+  point (ACE's `IsProjectileVisible`: 0.58 m ahead at 2/3 of your height when the target is within 0.6 m cylinder
+  distance, else 1.16 m), then from there to the target's 2/3-height point: the target line shows
   `no line of fire: blocked D m along it`, and `ac_cast` refuses a projectile spell (MetaSpellType Projectile /
-  LifeProjectile / EnchantmentProjectile) with no line. (Arcanist cast round a corner and hit nothing.)
+  LifeProjectile / EnchantmentProjectile) with no line. (Arcanist cast round a corner and hit nothing.) There is no
+  minimum bolt distance in ACE or retail: ACE's own physics (the live server's ACE.Server.dll driven offline over the
+  EoL DATs by `tools/ace-physics-harness/run.sh`, 2026-10-14) hits a still target at 0.6–3.5 m on open ground and at 1.4–2.4 m in every one of 2797 spots of
+  dungeon 0x0145 where 3–4 m shots hit. The "point-blank misses" were a closed door between you: ACE monster melee
+  checks distance only (`GetDistanceToTarget`: cylinder distance ≤ 0.75 m), so a skeleton pressed against Door
+  #70145010 (the lever-timed door at the foot of 0x0145's stairs) clawed the mage through it while every bolt died on
+  the door in silence. The old check swept the eye-to-target-middle line minus its first 0.58 m and last 0.71 m, which
+  is where such a door stands; a bolt that still does nothing names what is in its way.
 - **Repeat casting (2026-10-12).** `ac_cast repeat=true` keeps casting one spell at one target, each cast through the
   single cast's own path (busy wait, line-of-fire check, outcome wait), so no faster than the client allows, and answers
   one summary: each cast's result, damage dealt, resists and fizzles, your vitals, and why it stopped. It stops, saying
@@ -521,6 +593,43 @@ here, not having to hardcode behavior").
   animation short (CMotionInterp::LeaveGround @ 00528b00 → RemoveLinkAnimations). Plan trips (destination, route,
   spawns, entry requirements: the Temple of Forgetfulness guardian wants an Archmage herb, and its portal drops you at
   Far Horizon Cottages 92.9N 2.4W, a run from 88.8N 0.0E). Archers shoot from range.
+- **Monsters coming at you, and at your fellow (stream day 2026-10-14).** Jake: "as they run to destinations they make
+  no effort to avoid mobs and dont stop until they're actually hit which might be once they're mobbed". At 19:44 UTC in
+  Dryreach Arcanist's `walk_to` ran on while two Shadows and a Shadow Child closed from behind: the first word was a
+  23-point crit, 85 → 28 HP in four seconds, dead eight seconds after the first hit. At 19:29 the pair came out of the
+  Bone Lair into five Mud Golems; Bulwark read "none are attacking" and raised skills 2 m from the mage while they killed
+  her ("I was counting skill points while the mud ate you"): nothing told him his partner was being hit. What the client
+  knows: the server's MoveToObject / TurnToObject for a creature carries its target (ACE Creature_Navigation.MoveTo /
+  TurnTo; Monster_Navigation chases its AttackTarget with a MoveToObject, after a TurnTo; the 1999 server's AttackEventData
+  MoveToObject / TurnToObject likewise), our client runs it on the creature's MoveToManager, and a melee monster at its target is stuck to it
+  (StickTo). The host passes it as `AgentHostObject.seeks` (main.ts), and `AgentApi.comingAt(who)` reads it: aimed at
+  them (running at / turned to face / on them), its last aim at them while within 6 m (a swing's motion cancels the
+  MoveTo on the client), or its own place closing on them by 4 m within 3 s inside 40 m (sampled every 250 ms); a monster
+  walking home (MoveToPosition) or aimed at someone else is not. Information and capability, not decisions:
+  - observe: `COMING AT YOU (running at you)` on a monster not yet hitting you; a fellow's line adds
+    `MONSTERS AT THEM: Mud Golem L8 on them, Shadow L26 running at them 20 m off`.
+  - `ac_wait` types `aggro` (a monster started coming at you, with its level, distance and how; its level is looked up
+    quietly when unknown), `fellow-aggro` (one started coming at or fighting a fellow) and `fellow-low` (a fellow's
+    health below 60%, `fellow_below=` per wait, or a quarter of it in one drop; the fellowship panel's vitals).
+  - `ac_walk_to` and `ac_follow` answer when a monster starts coming at you: `stopped 31.0 m short: Shadow #8000b6e1
+    (level 26) is coming at you, 24 m E (running at you). Fight it …, get away from it …, or walk on anyway
+    (stop_on_aggro=false)`. One already coming when you set off doesn't stop it; flee never does. Routines' own walks
+    (api.walkTo without the tool) are unchanged.
+  - `ac_walk_to` keeps 10 m clear of monsters near the way outdoors (15 m of one more than 5 levels above you; not in a
+    dungeon or building, whose corridors keep no one 10 m clear): each is a disk the
+    planner routes round, as portals are (`portalAvoid.avoidDisks`). A leg blocked only by monsters gets one quick search
+    round them (a 20 m margin, 2500 points); any search that finds no way while keeping clear plans again without them at
+    once (wider searches and jumps are for walls). The result names what it went round, or "no way on kept clear of …:
+    the walk went past them". Not the target, not a monster beside the destination, none once you're hit, off with flee
+    and for a follow; `avoid_monsters=false` walks straight.
+  - A walk or follow to a fellow with monsters on them (on them, or within 10 m of them) keeps going through hits and new
+    aggro, as a portal's does: the hits are the price of getting there. What to do on arrival is the agent's call.
+  - Heal earlier (Jake: "the mage's threshold for healing seems too low"): `vitals-low` defaults to 60% (was 50%) and
+    `ac_cast repeat`'s `until_health` to 60%; the brief, the play skill and the hosted guide say to heal a fragile caster
+    at about 70% and the tank at about 60%, between pulls, kits and potions for emergencies, and the stream's leave rule
+    is "/f RUN" with the caster below about 50% (the tank below about 35%) or more than two monsters on you.
+  All three eras: the MoveTo / TurnTo movement types, the fellowship vitals and the client's position updates are the
+  same path in each (tests/verify-agent-aggro-avoid.ts).
 - **Follow through the hits (2026-10-12).** `ac_follow flee=true` keeps following while you're hit, as `ac_walk_to
   flee=true` does; without it the first hit ends the follow (as before). Arcanist died four times in an hour in Holtburg
   Dungeon: separated from Bulwark, drudge spawners refilled next to the 67-HP mage, its follow ended at the first hit,
@@ -528,6 +637,24 @@ here, not having to hardcode behavior").
 - **Inventory.** Pack items show their type, what they fit (ValidLocations) and value, so an upgrade or something to
   sell is visible without appraising everything. Top-level containers and RequiresBackpackSlot items (packs, foci)
   are listed under `pack slots`, as the retail pack column shows them; a focus counts only there (ACE `HasFoci`).
+- **Gear slots (2026-10-14).** `ac_gear`, and the top of `ac_inventory`, is the paperdoll as text (agent/gear.ts):
+  the nine body parts (head, chest, abdomen, upper/lower arms, hands, upper/lower legs, feet) and the neck, two wrists,
+  two rings, shield, weapon and ammo slots (cloak, trinket and sigils only when used), each with what is worn there and
+  its Armor Level, or **EMPTY** with any pack item that would fit. One item covers several parts (a robe, a coat), and a
+  part with only clothing on it says no armor is over it. Each wearable pack item says the parts it covers, the EMPTY
+  ones it fills, what it would replace (any worn item sharing an EquipMask bit: ACE TryEquipObject's eviction) and what
+  that leaves bare, its AL against the replaced item's ("AL 60 vs your 20"), and its wield requirements with whether
+  you meet them (ACE `CheckWieldRequirement`: level, buffed / base skill, training; attributes are named only). The
+  numbers: EquipMask ValidLocations / CurrentWieldedLocation, CoverageMask ClothingPriority (ACE
+  `GetArmorLayers` adds every covering item's AL), ArmorLevel 28 from the appraisals the client holds (with the
+  item's armor enchantments, as ACE AppraiseInfo sends it); an unexamined item says "appraise it to see its armor
+  level". Observe adds `gear: no helm or hat (head), no gloves (hands); in your pack that would cover one: …` while a
+  body part is bare. Armor costs a caster nothing in AC (ACE `GetCastingPreCheckStatus`: skill against spell power;
+  only burden), which the brief says. Why: Arcanist reached level 19 with no gloves; the inventory left empty slots
+  out and showed no armor level, so nothing prompted an upgrade. The same data in all three eras (AC1999's
+  ObjectCreate carries ValidLocations / Location / Priority and its appraisal ArmorLevel 28, pinned in
+  verify-ac1999-objects / -inventory). An older tab without the numbers keeps the plain list, and `ac_gear` says to
+  reload.
 - **What a use did.** `ac_use` and `ac_use_on` wait for the result and report everything a player would see: chat
   replies, the centre-screen notices ("You're too busy!"), a refusal the server sends with no text (UseDone's
   WeenieError by name), and what changed: vitals, items used up or gained, a spell learned, a buff on you. A scroll
@@ -554,6 +681,23 @@ here, not having to hardcode behavior").
   tool's time), stops it, and names an open dialog; a walk judges a door only after the server answered the Use,
   gives a door that ignored its Use (ACE ignores a Use while the door swings) a second try, and never blames a door
   that opened.
+- **Doors a lever opens (2026-10-14).** A door whose ItemUseable is No (ACE `doordungeonactivated`, Usable 1; the server
+  sends it in the CreateObject) opens only through what is linked to it: a Lever (`leverboxswitch`, a Switch) or a
+  Pressure Plate whose `ActivationTarget` is the door (`landblock_instance_link` parent = the door). Retail's own
+  `ItemHolder::UseObject` refuses a Use of it with "You can't open or close this Door that way" and sends nothing
+  (`input/UseObject.ts`). The link toggles the door (ACE `Door.ActOnUse` closes an open door for any activator but a
+  Switch or PressurePlate object, and a lever passes the player on), and it shuts itself after its ResetInterval (300 s
+  for the skeleton dungeon's door 0x70145013). Observe marks such a door `opened by a lever or switch, not by hand` and
+  every door `open` / `closed`; a walk never uses one: a shut one in the doorway ahead is routed round (and through
+  again once it stands open), and the answer names it with the levers, switches and plates in view within 30 m of it
+  (the client never learns which one is linked). `ac_use` on it answers the same at once; a door whose Use got that
+  line is remembered for the session. `ac_use` on anything reports a door within 40 m that swung open or shut. Before:
+  Bulwark's walks walked to and used door 0x70145013 about sixty times in an hour (skeleton dungeon, landblock 0x0145,
+  2026-10-14), counted the silent refusals as a locked door and tried the Academy Library Key on it. Same in every era:
+  the useability comes from the server's object data, and the 1999 client has the same line ("… that way.",
+  reference/ac1999 modules.csv). A routine's OpenDoors (`routeNodes.openDoorOnTheWay`) skips such a door too, and
+  `ac_loot` stops at a container's refusal (ACE Chest "The Chest is locked", Corpse "You do not yet have the right to
+  loot …", "… is already in use by …") instead of a second Use and a 20 s wait.
 - **Purse.** Above level 5 a death takes half your coins and trade notes aren't coins (ACE
   `Player_Death.GetNumCoinsDropped`; with ACE's default `corpse_destroy_pyreals` they are destroyed, not left on the
   corpse); observe says "half are lost if you die" beside a purse of 1,000 or more. 412 vendors sell trade notes. On
@@ -577,11 +721,19 @@ here, not having to hardcode behavior").
   A drop or jump never lands where a drop of over a metre lies within 0.45 m (jumpPlan.stableLanding: the dam
   pylons at 42.3N 78.35W turned a planned 4.8 m drop into a 28 m fall), the arrival after one waits 1.2 s to see
   the body stays, and an unplanned fall is told. The CLI prints ac_look's text after the screenshot path.
-  A walk names a fellow it left far behind, and `stay_with=<fellow>` keeps their pace: half of `stay_within` m
-  ahead it walks (Shift, running being the default; W is pressed again so a movement event carries the hold key)
-  until they catch up (3 m), and past `stay_within` it stops until they are within half of it: one pause, not a
-  stop every second at the leash's edge (Bulwark, stream day 2026-10-14). `ac_follow` and a routine's Follow leg
-  walk within 4 m beyond `within` of the leader for the same reason. Monster levels: CreateObject carries none and the retail selection asks only for health, but ACE's
+  A walk names a fellow it left far behind, and `stay_with=<fellow>` keeps you together: the walk runs as always,
+  and when the fellow is more than `stay_within` m behind (15 by default) it stops once and waits until they are
+  within 4 m (or have come within half the leash and stopped there), then runs on together: one stop per gap, not
+  a stop every second at the leash's edge (Bulwark, stream day 2026-10-14). There is no walking pace: a run eased
+  to a walk (Shift) to let a slower fellow catch up was removed the same day, because on stream the pair walked
+  most of the time (Arcanist walked ~25 s, ran ~2 s, walked again, as Bulwark's run is a little slower than his;
+  Jake: "why do they keep shift walking!!"). Players run, and the one ahead stops a moment. Over 500 m behind a
+  fellow at 3.5 m/s the walk went from 74 s walking / 66 s running to 125 s running and 6 stops of ~3 s. The
+  distances are straight-line: a fellow off to the side counts as behind (only one more than half the leash
+  nearer the goal is ahead, no reason to wait), and a wait ends the walk if they pass you on another way by a
+  leash. Measured along the way alone, Arcanist 50 m abeam on her own parallel route read ~0 m behind: no stop
+  (20:00 UTC). `ac_follow` and a routine's Follow leg run too: up to within `within` of the leader, stand, and
+  run again once they are 3 m past it; only a jump's take-off still slows to a walk. Monster levels: CreateObject carries none and the retail selection asks only for health, but ACE's
   appraisal sends Level even on a failed Assess, so ac_observe / ac_look examine the nearest three monsters with
   no level, quietly, once each (routines' own looks don't). The daemon's shutdown has a 30 s deadline, a second
   SIGTERM ends it at once, and the bridge and Vite are killed as process groups (`tools/ac-agent/shutdown.ts`:
@@ -707,11 +859,10 @@ here, not having to hardcode behavior").
   leads with its outcome (fizzle, resist, damage) on the line after the head, before the incantation (a fizzle printed
   last was cut off by `| head`); a bolt with no damage line, no resist and no kill says `no hit seen` and the distance, and
   `repeat` stops after two such bolts running. Point-blank bolts at a Spikey Armoredillo (7 at under 2 m, no damage line,
-  00:19:46–00:20:48Z): not explained offline. ACE's spawn (WorldObject_Magic.CalculateProjectileOrigins: forward
-  physics radius + projectile radius when the cylinder distance is under 0.6 m, at 2/3 of your Height, aimed at 2/3 of
-  the target's) puts a Flame Bolt (Setup 0x0200040D, radius 0.14) just outside the armoredillo's 0.91 m sphere (Setup
-  0x02000004 × 0.8) on a line into it, so the geometry alone doesn't say it misses; the agent now says when bolts did
-  nothing rather than guessing why. `until_health` takes a fraction or a percent (0.4 was 0.4%). `ac_pick_up` waits on
+  00:19:46–00:20:48Z) and at Skeleton Warriors (2026-10-14, 1.5–1.6 m, twice at Door #70145010): not a distance
+  limit (see Line of fire: ACE's own physics hits at point blank) but an obstacle between the bodies, a closed door
+  above all, which the old line-of-fire sweep could not see that close. It now sweeps the bolt's real path, and a bolt
+  that still does nothing names what is in its way ("Door 1.4 m from you is in the bolt's way"). `until_health` takes a fraction or a percent (0.4 was 0.4%). `ac_pick_up` waits on
   while the server's walk to the item keeps moving you (up to 45 s), and a no-answer says how far it is. The blank
   Parchment was blank: weenie 365 has no page data (max 1 page; vendors sell it), so "(it has no writing)" is right. The
   attack's first answer says how far the target is, on which floor, and which fellow you'd be left far from. An attack
@@ -828,7 +979,9 @@ uses the client's own movement collision:
    for a bludgeon weakness. Each jump costs 8 m of path, so a walk round that isn't much longer wins.
    The walk then goes to the take-off (the last metres at a walk), stops, re-aims the charge from where
    it actually stands, faces the way and jumps. A landing off the plan re-plans from there.
-4. **Attacked.** A hit, miss or evade line aimed at you (the `attacked` event), or health falling below
+4. **Attacked, or about to be.** A monster starting to come at you ends an ac_walk_to / ac_follow first (stop_on_aggro;
+   see "Monsters coming at you" above), and ac_walk_to keeps clear of monsters near the way (avoid_monsters).
+   A hit, miss or evade line aimed at you (the `attacked` event), or health falling below
    half since the walk began, ends the walk at once: `stopped 12.3 m short: you're under attack (…)`.
    Fight, heal or run, then walk again (`attack`'s own run-up fights instead). Crossing a landblock edge
    or stepping out of a doorway goes on; only a teleport (40 m in one tick) ends a walk as "went through a
@@ -981,6 +1134,13 @@ identify themselves.
 - **A rule that does nothing must not starve the others.** A first rule whose condition held but whose
   action had nothing to do (a met training plan) fired twice a second and the Fight rule under it never ran;
   such a rule now rests 30 s.
+- **A corpse line can name a corpse that is already gone (2026-10-14).** ACE sends "Your corpse is located at (…)"
+  whenever the death dropped anything, but its default `corpse_destroy_pyreals` destroys dropped coins, so a level
+  6–10 death that drops only pyreals leaves an empty corpse that rots in about 10 s (Corpse.EmptyDecayTime). The
+  agent forgets the line's spot once it has stood within 60 m of it for 5 s with no "Corpse of <you>" there
+  (`AgentApi.CORPSE_SIGHT_M` / `CORPSE_ABSENT_GRACE_MS`), so `my-corpse-within` stops sending you back to nothing.
+  The same shape for remembered places: one the server deletes while it is in view (a summoned Gateway rotting)
+  is forgotten; one released out of range, or dropped by a teleport, is kept.
 
 - Headed Chromium launched by Playwright on macOS gets the real GPU (`ANGLE Metal Renderer: Apple M3 Max`),
   so a watchable window is free; game-session.ts's "headed hangs" note is about its own harness.

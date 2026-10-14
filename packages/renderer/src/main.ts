@@ -5,6 +5,11 @@
  * Loads DAT files, presents character creation / selection,
  * then runs the game with HUD, terrain, models, and game logic.
  */
+import { remaster } from './remaster/RemasterMode.js';
+import { GrassField } from './remaster/GrassField.js';
+import { registerLifestone } from './remaster/remodels/Lifestone.js';
+// REMASTER assets (opt-in): replacement models register before any DAT part is built.
+if (remaster()?.assets) registerLifestone();
 import { outdoorGroundY, floorSearchFromY, traceGroundAlongPath, interiorGroundY, objectLandingZ, type OutdoorGroundSources, type ObjectSurfaceSources } from './world/outdoorGround.js';
 import * as THREE from 'three';
 import { installCpuBacked2dCanvases } from './ui/CanvasBacking.js';
@@ -58,7 +63,7 @@ import { RendererWarmup } from './scene/RendererWarmup.js';
 import { applyViewerFade } from './scene/ViewerFade.js';
 import { yawFromAcQuaternion } from './scene/AcHeading.js';
 import { TerrainManager } from './terrain/TerrainManager.js';
-import { normalizeLandscapeDrawDistance } from './world/LandscapeDrawDistance.js';
+import { normalizeLandscapeDrawDistance, adaptedDrawDistance, adaptiveDrawDistanceSteps } from './world/LandscapeDrawDistance.js';
 import { isCellLoaded as isObjectCellLoaded } from './world/ObjectMaint.js';
 import { textureSamplerPrefs, type TexturePrefValues } from './models/TextureSamplerPrefs.js';
 import { detailTexturing } from './models/DetailTexturing.js';
@@ -128,6 +133,7 @@ import { GameActions } from './network/GameActions.js';
 import { pageDebugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
 import { AgentApi, agentApiEnabled, automationUiEnabled, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, yawToCompass, type AgentHost, type AgentHostObject } from './agent/AgentApi.js';
 import { createHostAttack } from './agent/hostAttack.js';
+import { pluginLootSets } from './agent/pluginLootSets.js';
 import { modeOfStance } from './agent/macro/modeGate.js';
 import type { AgentScreen, AgentSelf } from './agent/types.js';
 
@@ -232,7 +238,7 @@ import { WORLD_SELECT_EVENT, isWorldSelectPress, releaseChatFocus, selectionAfte
 import { escapeAction } from './controllers/EscapeAction.js';
 import { maybeStopCompletely as maybeStopCompletelyImpl, stopCompletely as stopCompletelyImpl, type StopCompletelyDeps } from './controllers/StopCompletely.js';
 import { GameLoop } from './GameLoop.js';
-import { MoveToManager, performServerMovement, approachAnimInput, PLAYER_TURN_OMEGA, type MoveToHost } from './controllers/MoveToManager.js';
+import { MoveToManager, MoveType, performServerMovement, approachAnimInput, PLAYER_TURN_OMEGA, type MoveToHost } from './controllers/MoveToManager.js';
 import { adjustMotion, applyInterpretedMotion, removeInterpretedMotion, readyMotion, HoldKey, sequenceRootVelocity } from './world/RemoteMotion.js';
 import { localSequenceStep } from './player/LocalSequenceStep.js';
 import { headingForYaw, yawForHeading } from './world/Heading.js';
@@ -395,7 +401,8 @@ import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
 import { WorldReporter, classifyGpu, unmaskedRenderer } from './telemetry/WorldReporter.js';
 import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type PreworldScreen } from './telemetry/PreworldReporter.js';
-import { capabilityProblems, probeCapabilities, showCapabilityScreen } from './boot/Capability.js';
+import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
+import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
 import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
 
 /** How long a LoginComplete may wait on contained objects before the safety valve sends it. */
@@ -1222,8 +1229,13 @@ async function main() {
   // RELEASE.capability-check — before the patch screen downloads anything.
   // RELEASE.preworld-boot-stage — each await below names its boot stage on the reporter.
   preworldReporter.bootStage('capability');
-  const capabilityIssues = capabilityProblems(probeCapabilities(window));
-  preworldReporter.capabilityIssues(capabilityIssues.map(p => p.id));
+  const capabilityEnv = probeCapabilities(window);
+  // PERF.render-adapt — dynamic resolution; software WebGL also loses MSAA and starts at ~720p
+  // (scene/RenderScale.ts), decided before any renderer exists. Software rendering is reported
+  // (caps: software_gpu), never shown: some players have no GPU to turn on.
+  setRenderAdaptConfig(renderAdaptFor(capabilityEnv));
+  const capabilityIssues = capabilityProblems(capabilityEnv);
+  preworldReporter.capabilityIssues([...capabilityIssues.map(p => p.id), ...(capabilityEnv.softwareGpu ? ['software_gpu'] : [])]);
   if (capabilityIssues.length > 0) {
     console.warn(`[AC] browser capability: ${capabilityIssues.map(p => `${p.id}${p.hard ? ' (blocking)' : ''}`).join(', ')}`);
     if (capabilityIssues.some(p => p.hard)) {
@@ -1852,6 +1864,12 @@ async function main() {
   const cameraController = new CameraController(sceneManager.camera);
   // RELEASE.first-minute — the GPU's class (integrated / discrete / software); the renderer string stays here.
   worldReporter?.setGpu(classifyGpu(unmaskedRenderer(sceneManager.renderer?.getContext())));
+  // PERF.render-adapt — what the buffer settled on (RenderScale.ts / DynamicResolution.ts).
+  worldReporter?.setSources({
+    renderScale: () => sceneManager.dynamicResolution?.scale ?? 1,
+    msaaOff: () => !contextAntialias(),
+    drawDistanceSteps: () => sceneManager.dynamicResolution?.distanceSteps ?? 0,
+  });
 
   // ── Rebindable keyboard system (VISUAL.127) ────────────────────────────
   // One registry drives BOTH movement (via CameraController.keyTranslator) and
@@ -2406,6 +2424,15 @@ async function main() {
   // sheet poked through land at y=0 and was dropped.
 
   // (Landblock object state lives in landblockObjects — see above.)
+
+  // REMASTER grass (opt-in, remaster/RemasterMode.ts): visual only, read-only on the landscape.
+  const remasterGrass = remaster()?.grass
+    ? new GrassField(sceneManager.scene, {
+      landblock: (fileId) => terrainManager.getMesh(fileId),
+      terrainColor: (tt) => terrainRenderer.terrainTypeColor(tt),
+      buildingBoxes: () => landblockObjects.buildingShells.map(s => s.bbox),
+    })
+    : null;
   function setLandscapeVisible(visible: boolean): void {
     landblockObjects.setLandscapeVisible(visible);
   }
@@ -2639,7 +2666,21 @@ async function main() {
     return changed;
   }
 
+  /** PERF.render-adapt — the player's own Landscape Draw Distance (the ceiling of any adaptive step down). */
+  let playerDrawDistance = initialLandscapeDrawDistance;
+  sceneManager.dynamicResolution?.setMaxDistanceSteps(adaptiveDrawDistanceSteps(playerDrawDistance));
+  sceneManager.onDrawDistanceSteps = (steps) => {
+    applyLandscapeDrawDistance(adaptedDrawDistance(playerDrawDistance, steps));
+  };
+
   function setLandscapeDrawDistance(blocks: number): boolean {
+    playerDrawDistance = normalizeLandscapeDrawDistance(blocks);
+    const dyn = sceneManager.dynamicResolution;
+    dyn?.setMaxDistanceSteps(adaptiveDrawDistanceSteps(playerDrawDistance));
+    return applyLandscapeDrawDistance(adaptedDrawDistance(playerDrawDistance, dyn?.distanceSteps ?? 0));
+  }
+
+  function applyLandscapeDrawDistance(blocks: number): boolean {
     const r = normalizeLandscapeDrawDistance(blocks);
     if (r === landblockObjects.loadRadius && r === terrainManager.getLoadRadius()) return false;
     terrainManager.setLoadRadius(r);
@@ -7088,6 +7129,7 @@ async function main() {
         vital: xpTable.vitalXpList,
         trainedSkill: xpTable.trainedSkillXpList,
         specializedSkill: xpTable.specializedSkillXpList,
+        levelSkillCredits: xpTable.characterLevelSkillCreditList,
       },
     );
   }
@@ -8015,7 +8057,9 @@ async function main() {
     // current jump offset), THREE → AC axes.
     serverObjectManager.missileLocalPlayer = () => {
       const b = playerRangeBody();
-      return { x: b.x, y: b.z, z: b.y + playerWorldY, radius: b.radius, height: b.height };
+      // The first body sphere's radius (ACE GetPhysicsRadius) places the server's projectile spawn points.
+      const coll = playerInDungeon ? dungeonCollision : outdoorCollision;
+      return { x: b.x, y: b.z, z: b.y + playerWorldY, radius: b.radius, height: b.height, physicsRadius: coll?.transitionSphereRadius ?? DungeonCollision.BODY_SPHERE_RADIUS };
     };
     // BUG.teleport-leaves-stale-objects — an object whose cell is released
     // (CPhysicsObj::leave_visibility) freezes: its scripts, emitters and
@@ -15731,6 +15775,9 @@ async function main() {
     // what the client shows (the no-cheating rule).
     // AGENT.routine-store-auth — this account's automation routines, through the bridge (agent/RoutineSync.ts).
     const routineSync = new RoutineSync(() => aceConnection);
+    // Whatever this page stores (Claude's `ac_routines set` through the connector too) reaches the VirindiTank
+    // window's model at once, so the plugins' stand-by loot sets aren't the copy loaded at login.
+    routineSync.onStored((doc) => gameUI.automationStoredElsewhere(doc));
     // AGENT.automation-allowlist — the automation UI shows on dev / URL-override builds, and on
     // playwebac.com for accounts the bridge allowlists (BRIDGE_AUTOMATION_ACCOUNTS, checked against
     // the account the server reported). The bridge's answer to the routines request carries it.
@@ -15898,11 +15945,23 @@ async function main() {
         palettes: o.subPalettes?.map((p) => ({ id: p.paletteId >>> 0, offset: p.offset, length: p.length })),
         physicsState: o.physicsState,
         ...(o.uiEffects ? { uiEffects: o.uiEffects } : {}),
+        // ItemUseable: a door with the No bit opens only by its lever or switch (agent: notByHand).
+        ...(o.usable ? { useability: o.usable >>> 0 } : {}),
         ...(o.collisionHeight ? { height: o.collisionHeight } : {}),
         // BUG.ghost-objects — its cell is released (world/ObjectMaint.ts): only where it was last seen.
         ...(o.lostCell ? { lost: true } : {}),
         // When the server last placed it (the agent's now() is performance.now() too).
         ...(o.serverPlaceAt !== undefined ? { heardAt: o.serverPlaceAt } : {}),
+        // Its server MoveTo / TurnTo aim (a monster chasing or facing its target), or what it is stuck to.
+        ...((): Pick<AgentHostObject, 'seeks'> => {
+          const mt = o.moveTo;
+          if (mt?.isMovingTo()) {
+            if (mt.movementType === MoveType.MoveToPosition) return { seeks: { guid: 0, kind: 'position' } };
+            if (mt.topLevelObjectId) return { seeks: { guid: mt.topLevelObjectId >>> 0, kind: mt.movementType === MoveType.TurnToObject ? 'turn' : 'move' } };
+          }
+          const stuck = o.physics?.stickyObjectId() ?? 0;
+          return stuck ? { seeks: { guid: stuck >>> 0, kind: 'stick' } } : {};
+        })(),
         };
       };
       const carried = (): Set<number> => new Set([...playerState.inventory.getAll().map((i) => i.id >>> 0), ...playerState.equipment.getAll().map((i) => i.id >>> 0)]);
@@ -16025,7 +16084,10 @@ async function main() {
           const typeBits = (id: number): number | undefined => playerState.inventory.getItem(id)?.itemType ?? serverObjectManager?.getObject(id)?.itemType;
           // AmmoType from the public description (launchers and ammunition; the macro matches them by it).
           const ammoOf = (id: number): number | undefined => (playerState.inventory.getItem(id) as { ammoType?: number } | undefined)?.ammoType || serverObjectManager?.getObject(id)?.ammoType || undefined;
-          const worn = playerState.equipment.getAll().map((e) => ({ guid: e.id >>> 0, name: e.name, where: 'equipped', slot: slotNames(e.slot) || String(e.slot), ...(e.stackSize > 1 ? { stack: e.stackSize } : {}), ...(typeBits(e.id >>> 0) ? { itemType: typeBits(e.id >>> 0) } : {}), ...(ammoOf(e.id >>> 0) ? { ammoType: ammoOf(e.id >>> 0) } : {}) }));
+          // The paperdoll's numbers for the gear view (agent/gear.ts): the EquipMask slots each item is worn in
+          // (CurrentWieldedLocation) or could be (ValidLocations), and the body it covers (ClothingPriority).
+          const gearNums = (i: { validLocations?: number; clothingPriority?: number }) => ({ ...(i.validLocations ? { validLocations: i.validLocations >>> 0 } : {}), ...(i.clothingPriority ? { coverage: i.clothingPriority >>> 0 } : {}) });
+          const worn = playerState.equipment.getAll().map((e) => ({ guid: e.id >>> 0, name: e.name, where: 'equipped', slot: slotNames(e.slot) || String(e.slot), mask: Number(e.slot) >>> 0, ...gearNums(e), ...(e.stackSize > 1 ? { stack: e.stackSize } : {}), ...(typeBits(e.id >>> 0) ? { itemType: typeBits(e.id >>> 0) } : {}), ...(ammoOf(e.id >>> 0) ? { ammoType: ammoOf(e.id >>> 0) } : {}) }));
           const wornIds = new Set(worn.map((w) => w.guid));
           const held = playerState.inventory.getAll().filter((i) => !wornIds.has(i.id >>> 0)).map((i) => ({
             // A container or a RequiresPackSlot item (a pack, a focus) at the top level sits in the side pack slots, not the main pack.
@@ -16034,6 +16096,7 @@ async function main() {
             ...((i.itemType ?? serverObjectManager?.getObject(i.id >>> 0)?.itemType) ? { type: itemTypeLabel((i.itemType ?? serverObjectManager?.getObject(i.id >>> 0)?.itemType)!), itemType: (i.itemType ?? serverObjectManager?.getObject(i.id >>> 0)?.itemType)! } : {}),
             // Where it could be worn or wielded (its ValidLocations), so an upgrade in the pack is visible.
             ...(i.validLocations ? { fits: slotNames(i.validLocations) } : {}),
+            ...gearNums(i),
             ...(ammoOf(i.id >>> 0) ? { ammoType: ammoOf(i.id >>> 0) } : {}),
             ...(i.weenieClassId ? { wcid: i.weenieClassId } : {}),
             ...(serverObjectManager?.getObject(i.id >>> 0)?.uiEffects ? { uiEffects: serverObjectManager.getObject(i.id >>> 0)!.uiEffects } : {}),
@@ -16186,7 +16249,6 @@ async function main() {
         },
         chat: (text) => gameUI.callbacks.onChatSend?.(text),
         key: (code, down) => { if (down) cameraController.simulateKeyDown(code); else cameraController.simulateKeyUp(code); },
-        runIsDefault: () => cameraController.runIsDefault,
         setYaw: (yaw) => { cameraController.playerYaw = yaw; cameraController.cameraYawOffset = 0; },
         pickUp: (guid) => { agentPrimeMoveState(); return placeInBackpack(guid); },
         drop: (guid) => {
@@ -16470,7 +16532,7 @@ async function main() {
           const inMain = playerState.inventory.getAll().filter((i) => (i.containerId === 0 || i.containerId === aceCharGuid) && !heldIsContainer(i)).length;
           return Math.max(0, playerState.itemsCapacity - inMain);
         },
-        lootSets: () => agentApi.routine.loadedProfile?.lootSets ?? null,
+        lootSets: () => pluginLootSets(agentApi.routine.loadedProfile, () => gameUI.automationStandbyProfile()),
         playerOption: (code) => (currentCharacterOptions1 === null || currentCharacterOptions2 === null ? undefined : characterOptionIsSet(code, currentCharacterOptions1, currentCharacterOptions2)),
         // The Options panel's own toggle: the server's SetCharacterOption, the mirrors, the panel and its local effects.
         setPlayerOption: (code, on) => { gameUI.callbacks.onCharacterOptionToggle?.(code, on); applyCharacterOptionLocally(code, on); return true; },
@@ -16513,7 +16575,9 @@ async function main() {
         character: () => worldCharacterName ?? playerState.name ?? '',
         // Login / periodic commands that aren't /mt go out as typed (other plugins' commands and the game's).
         sendChat: (line) => gameUI.callbacks.onChatSend?.(line),
-        lootSets: () => (agentApi.routine.loadedProfile ?? gameUI.automationStandbyProfile())?.lootSets ?? null,
+        lootSets: () => pluginLootSets(agentApi.routine.loadedProfile, () => gameUI.automationStandbyProfile()),
+        // Autopack / Auto Add To Trade re-check the stored routines first (changed in another tab, or by Claude).
+        freshenRoutines: () => gameUI.automationRefreshStored(),
         tidyBusy: () => agentApi.routine.tidy.waiting,
         object: (guid) => {
           const o = agentHost.object(guid);
@@ -16613,6 +16677,7 @@ async function main() {
         gameUI.setAutomationSource({
           load: () => routineSync.load(),
           save: (doc) => routineSync.save(doc),
+          check: (since) => routineSync.check(since),
           status: () => agentApi.routine.status(),
           stats: () => agentApi.routine.statsNow(),
           current: () => agentApi.routine.current(),
@@ -19140,10 +19205,16 @@ async function main() {
     // The opaque tunnel covers the canvas then, and a frame drawn under it
     // only competed with the portal-space gate's prefetch (the full sky's
     // layers held the warm login gate ~1.5 s on SwiftShader, 2026-10-05).
+    if (draw && !gameUI.worldHiddenByPortalSpace) remasterGrass?.update(sceneManager.camera);
     if ((!draw && !sceneManager.capturePending) || gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
     else sceneManager.render();
     // RELEASE.first-minute — counters only (WorldReporter.frame); the world counts as drawn once no portal space covers it.
     if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering);
+    // PERF.render-adapt — dynamic resolution measures only frames that drew the world in a visible tab.
+    if (draw) {
+      sceneManager.dynamicResolution?.frame(now, gameStarted && !gameUI.portalSpaceCovering
+        && !gameUI.worldHiddenByPortalSpace && document.visibilityState === 'visible');
+    }
     // SceneTool::UpdateFPSCounter runs after every flip; gmSmartBoxUI::UseTime redraws the meter each frame.
     if (framerateMeter) {
       framerateMeter.frame(now / 1000);

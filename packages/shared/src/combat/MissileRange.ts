@@ -181,3 +181,70 @@ export function missileArcPoint(arc: Pick<MissileArc, 'origin' | 'velocity'>, t:
     z: arc.origin.z + arc.velocity.z * t - 0.5 * MISSILE_GRAVITY * t * t,
   };
 }
+
+/** ACE WorldObject_Magic.ProjHeight: a war or life bolt leaves at, and aims at, two thirds of the caster's / target's Height. */
+export const SPELL_PROJ_HEIGHT = 2 / 3;
+/** CalculateProjectileOrigins: a target within this cylinder distance (m) gets the bolt spawned one radius sum ahead, not two. */
+export const SPELL_PROJ_CLOSE_CYL_DIST = 0.6;
+
+/**
+ * ACE Position.CylinderDistance: the gap between two upright cylinders (feet at `a` / `b`, global metres, z up); negative
+ * when they overlap.
+ */
+export function cylinderDistance(a: V3, aRadius: number, aHeight: number, b: V3, bRadius: number, bHeight: number): number {
+  const reach = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) - (aRadius + bRadius);
+  const diffZ = a.z <= b.z ? b.z - (a.z + aHeight) : a.z - (b.z + bHeight);
+  if (diffZ > 0 && reach > 0) return Math.hypot(diffZ, reach);
+  if (diffZ < 0 && reach < 0) return -Math.hypot(diffZ, reach);
+  return reach;
+}
+
+/** Where the server starts a targeted bolt and where it sends it ({@link boltLaunch}). */
+export interface BoltLaunch {
+  /** The spawn point (global, z up). */
+  origin: V3;
+  /** The point it flies straight at: the target's feet + Height × 2/3. */
+  aim: V3;
+  /** Where ACE's IsProjectileVisible looks back to from the spawn point: your feet + your Height less the bolt's own. */
+  eye: V3;
+  /** The target was within 0.6 m (cylinder distance): the bolt spawned one radius sum ahead of you, not two. */
+  close: boolean;
+}
+
+/**
+ * Where ACE launches a single targeted spell projectile (a war bolt, streak or life projectile with no spread, CreateOffset
+ * 0, not a Strike or Arc), from the server's own maths (WorldObject_Magic.cs):
+ * - CalculatePreOffset: start at your Height × 2/3, then tilt the spawn toward the target's Height × 2/3 point by
+ *   (your physics radius + the bolt's radius);
+ * - CalculateProjectileOrigins: 2 × that radius sum ahead of you, or 1 × when the target's cylinder is within 0.6 m;
+ * - CalculateProjectileVelocity: straight from there at the target's feet + Height × 2/3 (no lead for a still target);
+ * - LaunchSpellProjectiles → IsProjectileVisible: the spawn point must see back to your eye (feet + Height − the bolt's
+ *   Height), else the server drops the bolt as "hit the environment" and tells you nothing.
+ * Facing plays no part: ACE turns the offsets toward the target. `from` / `to` are the feet, global metres, z up;
+ * `casterRadius` / `targetRadius` the Setup radii (GetRadius, for the cylinder distance), `casterPhysicsRadius` the
+ * first collision sphere's (GetPhysicsRadius: 0.48 for a human, where the Setup radius is 0.68).
+ */
+export function boltLaunch(o: {
+  from: V3; to: V3;
+  casterHeight: number; casterRadius: number; casterPhysicsRadius: number;
+  targetHeight: number; targetRadius: number;
+  projectileRadius?: number; projectileHeight?: number;
+}): BoltLaunch {
+  const pr = o.projectileRadius ?? DEFAULT_PROJECTILE_RADIUS;
+  const startZ = o.from.z + o.casterHeight * SPELL_PROJ_HEIGHT;
+  const aim = { x: o.to.x, y: o.to.y, z: o.to.z + o.targetHeight * SPELL_PROJ_HEIGHT };
+  const gdx = aim.x - o.from.x, gdy = aim.y - o.from.y, gdz = aim.z - startZ;
+  const ground = Math.hypot(gdx, gdy);
+  const len = Math.hypot(ground, gdz);
+  // localDir: the start → aim direction in the frame turned to face the target (x across, y ahead, z up).
+  const dirY = len > 0 ? ground / len : 1, dirZ = len > 0 ? gdz / len : 0;
+  const rs = o.casterPhysicsRadius + pr;
+  const close = cylinderDistance(o.from, o.casterRadius, o.casterHeight, o.to, o.targetRadius, o.targetHeight) < SPELL_PROJ_CLOSE_CYL_DIST;
+  const radsum = close ? rs : rs * 2;
+  const ahead = radsum + rs * dirY - rs;
+  const up = o.casterHeight * SPELL_PROJ_HEIGHT + rs * dirZ;
+  const fx = ground > 0 ? gdx / ground : 0, fy = ground > 0 ? gdy / ground : 1;
+  const origin = { x: o.from.x + fx * ahead, y: o.from.y + fy * ahead, z: o.from.z + up };
+  const eye = { x: o.from.x, y: o.from.y, z: o.from.z + o.casterHeight - (o.projectileHeight ?? pr * 2) };
+  return { origin, aim, eye, close };
+}

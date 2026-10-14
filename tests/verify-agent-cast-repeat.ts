@@ -81,7 +81,7 @@ describe('ac_cast repeat', () => {
     expect(lines[2]).toBe('  2: You scorch Drudge Skulker for 12 points with Flame Bolt I.');
     expect(lines[3]).toMatch(/^ {2}3: Your flames consume Drudge Skulker's mortal remains!/);
     expect(r.message).toContain('23 damage in 2 hits');
-    expect(r.message).toContain('limits: health below 50% (until_health), 20 casts, 120 s');
+    expect(r.message).toContain('limits: health below 60% (until_health), 20 casts, 120 s');
     expect(r.message).toContain('you: health 50/50, stamina 80/80, mana 30/60');
     // The summary also reaches ac_wait types=task-done, and the task is over.
     const done = api.eventsSince().filter((e) => e.type === 'task-done');

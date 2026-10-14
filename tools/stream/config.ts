@@ -25,6 +25,8 @@ export interface CharacterConfig {
   personality: string;
   /** Extra notes for this character's first segment (e.g. "you lead the first plan"). */
   startNotes: string;
+  /** A standing goal from the stream's plan (Jake's call), in every segment's opening; '' for none. */
+  goal: string;
   /** Play a character the human logged in on a public server instead of a local daemon login. */
   attach: AttachConfig | null;
   /** Local daemon options (ignored when attached). */
@@ -160,7 +162,7 @@ export function parseStreamConfig(raw: unknown): StreamConfig {
   const characters = (raw.characters as unknown[]).map((c, i): CharacterConfig => {
     const p = `characters[${i}]`;
     if (!isObj(c)) return fail(p, 'must be an object');
-    only(c, p, ['profile', 'character', 'model', 'personality', 'startNotes', 'attach', 'era', 'headless', 'effort']);
+    only(c, p, ['profile', 'character', 'model', 'personality', 'startNotes', 'goal', 'attach', 'era', 'headless', 'effort']);
     const profile = str(c, 'profile', p);
     if (!/^[a-z0-9_-]+$/i.test(profile)) fail(`${p}.profile`, 'must be letters, digits, - or _');
     let attach: AttachConfig | null = null;
@@ -173,7 +175,7 @@ export function parseStreamConfig(raw: unknown): StreamConfig {
     if (c.effort !== undefined && c.effort !== null && !(EFFORT_LEVELS as readonly unknown[]).includes(c.effort)) fail(`${p}.effort`, `must be one of ${EFFORT_LEVELS.join(', ')} or null`);
     return {
       profile, character: str(c, 'character', p), model: str(c, 'model', p, 'claude-opus-5-5'),
-      personality: text(c, 'personality', p), startNotes: text(c, 'startNotes', p), attach,
+      personality: text(c, 'personality', p), startNotes: text(c, 'startNotes', p), goal: text(c, 'goal', p), attach,
       era: (c.era as string | null | undefined) ?? null, headless: c.headless === true,
       effort: (c.effort as string | null | undefined) ?? null,
     };

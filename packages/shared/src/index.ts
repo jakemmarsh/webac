@@ -102,8 +102,9 @@ export {
   getMaxMissileRange, MISSILE_RANGE_CAP, DEFAULT_MAX_VELOCITY, METERS_TO_YARDS,
   getProjectileSpeed, missileAimDivisor, missileArcGroundReach, missileShot, MISSILE_GRAVITY, PROJ_SPAWN_HEIGHT, FAST_MISSILE_MODIFIER, PHYSICS_MAX_VELOCITY,
   DEFAULT_PROJECTILE_RADIUS, solveBallisticArc, missileAimLevelDeg, missileArc, missileArcPoint,
+  SPELL_PROJ_HEIGHT, SPELL_PROJ_CLOSE_CYL_DIST, cylinderDistance, boltLaunch,
 } from './combat/MissileRange.js';
-export type { MissileShot, MissileArc } from './combat/MissileRange.js';
+export type { MissileShot, MissileArc, BoltLaunch } from './combat/MissileRange.js';
 export { isAmmoLauncherCombatStyle, canFireMissile } from './combat/MissileAmmo.js';
 export { canAttackTarget } from './combat/AttackTargetGate.js';
 export { canUseTarget, targetResolves, type TargetLocations } from './systems/UseTargetGate.js';

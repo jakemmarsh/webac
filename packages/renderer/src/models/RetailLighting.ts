@@ -72,6 +72,8 @@ import {
   detailTexturing, markDetail, patchDetailFragment, patchDetailVertex, RETAIL_OUTGOING_LINE,
   DETAIL_MAP_UNIFORM, DETAIL_TILING_UNIFORM, DETAIL_ON_UNIFORM, DETAIL_CACHE_KEY, type DetailKind,
 } from './DetailTexturing.js';
+import { remaster } from '../remaster/RemasterMode.js';
+import { patchRemasterFragment, patchRemasterVertex, remasterCacheKey } from '../remaster/RemasterLighting.js';
 
 /** `LScape::min_ambient` — the floor on the DAT ambient level. */
 export const LSCAPE_LIGHT_MINIMUM = 0.2;
@@ -270,6 +272,11 @@ export function retailObjectAmbientScale(dirBright: number, ambLevel: number): n
 /** Per light tick: publish the DAT-derived levels to the object materials. */
 export function setRetailLightLevels(dirBright: number, ambLevel: number): void {
   objectAmbientScale.value = retailObjectAmbientScale(dirBright, ambLevel);
+}
+
+/** REMASTER replacement assets share the live object ambient scale uniform (AssetOverrides.ts). */
+export function objectAmbientScaleUniform(): { value: number } {
+  return objectAmbientScale;
 }
 
 export function currentObjectAmbientScale(): number {
@@ -678,6 +685,24 @@ export function applyRetailLighting<T extends THREE.Material>(material: T, kind:
   // Objects and cells share SmartBox::SetWorldAmbientLight's calc_object_light level
   // (CellManager::ChangePosition sets it for outdoor and seen_outside cells alike).
   const scale = kind === 'landscape' ? landscapeAmbientScale : objectAmbientScale;
+  // REMASTER — the opt-in modern shading (off by default; RemasterMode.ts):
+  // the same DAT light levels, applied per pixel with shadows. The sky keeps
+  // the retail equation.
+  if (remaster()?.lighting && kind !== 'sky') {
+    if (kind === 'cellobject') installPartSphere(material);
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.acAmbientScale = scale;
+      shader.uniforms[MIP_BIAS_UNIFORM] = mipBiasUniform;
+      shader.vertexShader = patchRemasterVertex(shader.vertexShader);
+      shader.fragmentShader = patchSamplerBias(patchRemasterFragment(shader.fragmentShader, kind));
+    };
+    const remasterKey = `${remasterCacheKey(kind)}|${SAMPLER_BIAS_CACHE_KEY}`;
+    material.customProgramCacheKey = () => remasterKey;
+    material.needsUpdate = true;
+    patched.set(material, kind);
+    markSamplerBias(material);
+    return material;
+  }
   const detailUniforms = detail ? detailTexturing.uniformsFor(detail) : null;
   const skyDiffuse = kind === 'sky' ? skyDiffuseUniform(material) : null;
   const partSphere = kind === 'cellobject' ? installPartSphere(material) : null;
