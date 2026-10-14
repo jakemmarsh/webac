@@ -158,6 +158,9 @@ export class FakeHost implements AgentHost {
     return full;
   }
 
+  /** The RunAsDefaultMovement option (on: Shift walks; off: Shift runs, and the body walks without it). */
+  runDefault = true;
+  runIsDefault = () => this.runDefault;
   /** Move the body forward along its facing at run speed while W is held. */
   /** A fixture's collision reach (guid → metres); unset = the host doesn't say. */
   objectReach: ((guid: number) => number) | undefined = undefined;
@@ -174,7 +177,8 @@ export class FakeHost implements AgentHost {
   physics(dtMs: number): void {
     if (this.floors) return this.physics3d(dtMs);
     if (!this.keys.has('KeyW')) return;
-    const speed = 4; // m/s
+    // Run speed, or a walk (3.12 m/s) with the hold-run key flipping it (Shift with running the default).
+    const speed = this.keys.has('ShiftLeft') === this.runDefault ? 3.12 : 4; // m/s
     const step = (speed * dtMs) / 1000;
     const nx = this.me.x + -Math.sin(this.me.yaw) * step;
     const ny = this.me.y + -Math.cos(this.me.yaw) * step;

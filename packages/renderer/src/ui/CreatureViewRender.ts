@@ -31,10 +31,30 @@ export function buildCreatureModeScene(model: THREE.Object3D, direction: AcVec3,
   return scene;
 }
 
-/** Render `scene` from `camera` offscreen at the canvas size and copy it into the canvas (transparent clear). */
+/**
+ * The renderer's WebGL context is lost right now (a GPU reset, a driver
+ * crash, the browser reclaiming the context). Its draws and reads are
+ * no-ops then: a readback returns zeros.
+ */
+export function rendererContextLost(renderer: Pick<THREE.WebGLRenderer, 'getContext'>): boolean {
+  try {
+    return renderer.getContext()?.isContextLost?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Render `scene` from `camera` offscreen at the canvas size and copy it into
+ * the canvas (transparent clear). False, and the canvas untouched, while the
+ * renderer's context is lost: the readback would be all zeros and would wipe
+ * the last good frame. The view redraws when the context comes back
+ * (GameUI.redrawRendererViews).
+ */
 export function renderSceneToCanvas(
   renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera, canvas: HTMLCanvasElement,
-): void {
+): boolean {
+  if (rendererContextLost(renderer)) return false;
   const w = canvas.width, h = canvas.height;
   const renderTarget = new THREE.WebGLRenderTarget(w, h, { format: THREE.RGBAFormat });
   const prevTarget = renderer.getRenderTarget();
@@ -49,10 +69,13 @@ export function renderSceneToCanvas(
   const pixels = new Uint8Array(w * h * 4);
   renderer.readRenderTargetPixels(renderTarget, 0, 0, w, h, pixels);
   renderTarget.dispose();
+  // Lost during the draw: keep what the canvas showed.
+  if (rendererContextLost(renderer)) return false;
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
+  if (!ctx) return false;
   const imageData = ctx.createImageData(w, h);
   // VISUAL.paperdoll-doll-dark — the target holds linear colour.
   copyRenderTargetToImageData(pixels, w, h, imageData.data);
   ctx.putImageData(imageData, 0, 0);
+  return true;
 }

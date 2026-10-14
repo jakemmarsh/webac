@@ -365,7 +365,7 @@ function groundExits(g: CellGraph, cellDat: DatDatabase, portalDat: DatDatabase,
   };
   const exitFloors = new Map<CellDoor, FloorPoly[]>();
   for (const list of g.doors.values()) for (const d of list) {
-    if (d.b !== 0xFFFF || !walkableExit(d) || d.bottom === undefined) continue;
+    if (d.b !== 0xFFFF || !(walkableExit(d) || lowDoorway(d)) || d.bottom === undefined) continue;
     const c = g.centers?.get(d.a);
     const h = Math.hypot(d.normal.x, d.normal.y);
     if (!c) continue;
@@ -630,6 +630,22 @@ export const OPENING_MIN_HEIGHT_M = 1.83;
 /** An upright portal (|normal.z| ≤ 0.7) too low for a body: a window, a counter, a vent. */
 const tooLow = (d: CellDoor): boolean => Math.abs(d.normal.z) <= 0.7 && d.height !== undefined && d.height < OPENING_MIN_HEIGHT_M;
 
+/**
+ * The shortest outside opening tried as a way in when no doorway the landscape reaches leads there: a body ducks
+ * through a slightly low one, given its sill is on the ground (CellDoor.grounded). The tunnel under Holtburg's drudge
+ * statue (A9B4) is entered through cell 0x177's outside portal, 1.79 m tall, its sill on the ramp's top at z 66.21
+ * over the town at z 66: the body walks through it (verify-bug-holtburg-statue-tunnel-wall), as players did live.
+ * Taken only as a window, the route had nothing but the statue's other opening (0x178's, sill at z 68 over a floorless
+ * cell, grounded false), which no walk reaches: every search toward it found no way, minutes of standing in the
+ * stream rehearsals of 2026-10-13. House windows (1.68 m) stay below it.
+ */
+export const LOW_DOOR_MIN_M = 1.75;
+
+/** An upright outside opening a little under a body's height (LOW_DOOR_MIN_M up to OPENING_MIN_HEIGHT_M). */
+export function lowDoorway(d: CellDoor): boolean {
+  return Math.abs(d.normal.z) <= 0.7 && d.height !== undefined && d.height >= LOW_DOOR_MIN_M && d.height < OPENING_MIN_HEIGHT_M;
+}
+
 /** An outside doorway a body can walk through: an upright opening as tall as a body, not a window, counter or roof hole. */
 export function walkableExit(d: CellDoor): boolean {
   return Math.abs(d.normal.z) <= 0.7 && !tooLow(d);
@@ -652,7 +668,10 @@ function routeViaOutside(g: CellGraph, fromCell: number, from: Vec3, toCell: num
   const reachable = (e: CellDoor, outdoorEnd: Vec3 | null): boolean => e.grounded !== false || (outdoorEnd !== null && standsOutside(g, e, outdoorEnd));
   const outdoorEnd = fromIn ? (toIn ? null : to) : from;
   const preferred = exits.filter((e) => reachable(e, outdoorEnd));
+  // Next, a slightly low opening whose sill is on the ground (LOW_DOOR_MIN_M), before a doorway no walk reaches.
+  const low = doors.length ? all.filter((e) => lowDoorway(e) && (e.grounded === true || (outdoorEnd !== null && standsOutside(g, e, outdoorEnd)))) : [];
   return (preferred.length ? bestViaExits(g, fromCell, from, toCell, to, preferred, opts) : null)
+    ?? (low.length ? bestViaExits(g, fromCell, from, toCell, to, low, opts) : null)
     ?? (preferred.length < exits.length ? bestViaExits(g, fromCell, from, toCell, to, exits, opts) : null);
 }
 

@@ -30,7 +30,7 @@ import { AT_CHAR_SELECT_JS, REMOTE_CHROMIUM, REPO, createCharacterIfNeeded, wait
 import { STATE_DIR, accountForProfile, clearInfo, listInfos, logFile, pickStaleSnapshots, readInfo, writeInfo } from './state.ts';
 import { type AgentEra, agentEra, eraAccount } from './eras.ts';
 import { CALLS_SETTLE_MS, SHUTDOWN_DEADLINE_MS, createShutdown, killTree, waitForCalls } from './shutdown.ts';
-import { withCallDeadline } from './callDeadline.ts';
+import { replyDeadlineMs, withCallDeadline } from './callDeadline.ts';
 import { withStateLock } from './stateLock.ts';
 
 /** `p`, or a rejection after `ms`. */
@@ -60,6 +60,17 @@ interface Args {
   /** Log out after this long with no agent call, nothing Claude started still acting, and no input from a human in the
    *  window (0 = never). Never applies to an attached tab, which is the human's own login. */
   idleLogoutMs: number;
+}
+
+/**
+ * The daemon log's line for a page console message, or null for one it leaves out: the client's agent trace, what it
+ * sent and what the server refused. Timestamped like the daemon's own lines, so a walk's searches and stalls line up
+ * with the chat log and the player's tool calls (tools/stream/dead-air.ts; untimed, the rehearsal of 2026-10-13
+ * couldn't tell a 105 s "arrived" walk that stood searching from one that ran).
+ */
+export function pageLogLine(text: string, now: Date = new Date()): string | null {
+  if (!/\[AC:Agent\]|\[AC\] Sent|WeenieError|UseDone|ServerSaveFailed|error/i.test(text) || text.startsWith('[AC:Chat]')) return null;
+  return `${now.toISOString()} [page] ${text.slice(0, 300)}\n`;
 }
 
 export function parseArgs(argv: string[]): Args {
@@ -413,7 +424,7 @@ async function main(): Promise<void> {
   // The server's answer to a character create it refused (the client shows the retail error dialog): stop and say why.
   let createRefused: string | null = null;
   page.on('console', (m) => { const r = /Character creation failed \(code \d+\): (.*)/.exec(m.text()); if (r) createRefused = r[1]; });
-  page.on('console', (m) => { if (/\[AC:Agent\]|\[AC\] Sent|WeenieError|UseDone|ServerSaveFailed|error/i.test(m.text()) && !m.text().startsWith('[AC:Chat]')) appendFileSync(log, `[page] ${m.text().slice(0, 300)}\n`); });
+  page.on('console', (m) => { const line = pageLogLine(m.text()); if (line) appendFileSync(log, line); });
   // Every chat line and centre notice the player saw (theirs included), timestamped, beside the log: what was said.
   const chatLog = log.replace(/\.log$/, '.chat.log');
   page.on('console', (m) => { const t = m.text(); if (t.startsWith('[AC:Chat] ')) appendFileSync(chatLog, `${new Date().toISOString()} ${t.slice(10)}\n`); });
@@ -567,7 +578,7 @@ async function main(): Promise<void> {
         lastCallAt = Date.now();
         inFlight++;
         try {
-          const { method, args: callArgs = [], timeoutMs = 120_000 } = await body(req);
+          const { method, args: callArgs = [], timeoutMs = 120_000, replyMs } = await body(req);
           const run = async (): Promise<unknown> => {
             if (entering && args.attach) {
               // The human is still logging in: say so soon instead of holding the call for minutes.
@@ -583,7 +594,7 @@ async function main(): Promise<void> {
                 if (typeof api[m as string] !== 'function') throw new Error(`unknown agent method: ${m}`);
                 return api[m as string](...(a as unknown[]));
               }, [method, callArgs] as const),
-              method, timeoutMs,
+              method, timeoutMs, replyDeadlineMs(method, replyMs),
             );
           };
           let result: unknown;

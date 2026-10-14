@@ -1428,7 +1428,9 @@ export class RoutineEngine {
           if (this.follow === f && f.inSight && f.trail[0] === corner) f.trail.shift();
         } else {
           f.walking = 'lead';
-          await this.api.walkTo(lead.guid, { within, timeoutMs: 15_000 });
+          // At a walk near them (pace): a leader slower than your run is kept pace with, not run up to, stood beside
+          // and run up to again every second (the follow's stop-start, 2026-10-14).
+          await this.api.walkTo(lead.guid, { within, timeoutMs: 15_000, pace: FOLLOW_PACE_M });
         }
       } finally { if (this.follow) this.follow.walking = null; this.busy = false; this.acting = null; }
       return;
@@ -1887,6 +1889,8 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 export const FOLLOW_SAMPLE_MS = 250;
 const FOLLOW_SIGHT_M = 250;
 const FOLLOW_CORNER_M = 1;
+/** A Follow route's straight leg at the leader walks (Shift) within this much beyond Follow/Nav Min of them (m); AgentApi.FOLLOW_PACE_M. */
+const FOLLOW_PACE_M = 4;
 
 /** The Follow route's leader among what you see: the player of that name first, else a creature (VirindiTank follows the selection). */
 export function findLeader<T extends { name: string; kind: string; dying?: boolean }>(nearby: T[], who: string): T | undefined {

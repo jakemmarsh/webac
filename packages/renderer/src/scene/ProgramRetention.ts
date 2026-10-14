@@ -29,6 +29,8 @@ export interface RetainableProgram {
 export class ProgramRetention {
   private readonly retained = new WeakSet<RetainableProgram>();
   private count = 0;
+  /** The list `count` was taken over: a WebGL context restore gives the renderer a new, empty one. */
+  private list: readonly RetainableProgram[] | null = null;
 
   /** `programs` returns the renderer's live program list (`renderer.info.programs`). */
   constructor(private readonly programs: () => readonly RetainableProgram[] | null | undefined) {}
@@ -41,7 +43,11 @@ export class ProgramRetention {
    */
   retainNew(): number {
     const list = this.programs();
-    if (!list || list.length === this.count) return 0;
+    if (!list) return 0;
+    // A context restore (WebGLRenderer.initGLContext) starts a new program
+    // list: count from zero, or the length shortcut skips its first programs.
+    if (list !== this.list) { this.list = list; this.count = 0; }
+    if (list.length === this.count) return 0;
     let added = 0;
     for (const p of list) {
       if (this.retained.has(p)) continue;

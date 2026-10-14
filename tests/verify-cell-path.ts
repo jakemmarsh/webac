@@ -4,7 +4,7 @@
  */
 import { existsSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { type CellDoor, type CellGraph, type FloorPoly, OPENING_MIN_HEIGHT_M, findRoute, findRouteViaOutside, frameToParent, loadCellGraph, onLevel, walkableExit, yawToward } from '../tools/lib/cell-path.ts';
+import { type CellDoor, type CellGraph, type FloorPoly, OPENING_MIN_HEIGHT_M, findRoute, findRouteViaOutside, frameToParent, loadCellGraph, lowDoorway, onLevel, walkableExit, yawToward } from '../tools/lib/cell-path.ts';
 import { DAT_PATHS, openDat } from './_harness/dat.js';
 import { DatReader } from '../packages/dat-parser/src/DatReader.ts';
 import { RegionDesc } from '../packages/dat-parser/src/file-types/RegionDesc.ts';
@@ -410,6 +410,21 @@ describe('findRouteViaOutside: doorways the landscape walks up to, and doors tha
   it('with no grounded door at all, any door (the walk may still jump or find a way)', () => {
     const g2: CellGraph = { landblock: LB, doors: new Map([[hall, [high]]]) };
     expect(findRouteViaOutside(g2, outside, v(11, -4, 94), hall, v(5, 0, 96))).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+  });
+  it('a slightly low opening on the ground before a door no walk reaches; a window never (the drudge statue\'s tunnel, 2026-10-14)', () => {
+    // The statue: 0x178's tall opening sits over the town (grounded false); 0x177's is 1.79 m tall with its sill on the ground.
+    const duck: CellDoor = { a: hall, b: 0xFFFF, at: v(0, -10, 96.9), normal: v(0, 1), height: 1.79, bottom: 96, grounded: true };
+    const window: CellDoor = { ...duck, height: 1.68 };
+    const route = (doors: CellDoor[]) => findRouteViaOutside({ landblock: LB, doors: new Map([[hall, doors]]) }, outside, v(11, -4, 94), hall, v(5, 0, 96));
+    expect(lowDoorway(duck)).toBe(true);
+    expect(lowDoorway(window)).toBe(false);
+    expect(walkableExit(duck)).toBe(false);
+    expect(route([high, duck])).toEqual([{ ...v(0, -10, 96.9), feet: 96 }, v(5, 0, 96)]);
+    // A 1.68 m window on the ground is not a way in while any door exists.
+    expect(route([high, window])).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+    // A door the ground reaches still comes first, and a low opening off the ground is no better than the porch door.
+    expect(route([high, low, duck])).toEqual([{ ...v(0, -10, 97.25), feet: 96 }, v(5, 0, 96)]);
+    expect(route([high, { ...duck, grounded: false }])).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
   });
   it('leaves out a doorway by a door that would not open, and has no route when it was the only one', () => {
     expect(findRouteViaOutside(g, outside, v(1, -14, 94), hall, v(5, 0, 96), { closed: [v(0.2, -10.7, 96)] })).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);

@@ -153,6 +153,14 @@ export async function startDaemon(opts: StartOptions = {}): Promise<{ info: Daem
   throw new Error(`daemon for "${profile}" not in world after ${Math.round((opts.timeoutMs ?? 300_000) / 1000)} s; see ${logFile(profile)}`);
 }
 
+// Kept here, not in callDeadline.ts: the bridge image copies client.ts, and callDeadline.ts imports the renderer's
+// claudeControl.ts, which the image doesn't (tests/verify-bridge-docker-inputs.ts).
+/** AC_AGENT_REPLY_S as the replyMs a /call carries, or undefined (the daemon's own deadline). */
+export function replyMsFromEnv(env: string | undefined = process.env.AC_AGENT_REPLY_S): number | undefined {
+  const n = Number(env);
+  return env && Number.isFinite(n) && n > 0 ? Math.round(n * 1000) : undefined;
+}
+
 export class AgentClient {
   /** The daemon's last "the session reloaded" notice, consumed by the tool that prints it. */
   notice: string | null = null;
@@ -160,7 +168,9 @@ export class AgentClient {
   constructor(readonly info: DaemonInfo) {}
 
   async call<T = any>(method: string, args: unknown[] = [], timeoutMs = 120_000): Promise<T> {
-    const r = await http(this.info, '/call', { method, args, timeoutMs }, timeoutMs + 10_000);
+    // AC_AGENT_REPLY_S (a stream player's wrapper sets it): an acting call answers "still in progress" by then.
+    const replyMs = replyMsFromEnv();
+    const r = await http(this.info, '/call', { method, args, timeoutMs, ...(replyMs ? { replyMs } : {}) }, timeoutMs + 10_000);
     if (r.notice) this.notice = r.notice;
     if (!r.ok) throw new Error(r.error ?? 'call failed');
     return r.result as T;

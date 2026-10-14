@@ -177,7 +177,9 @@ requests. Both confirm with `show` before leaving town. Then the brief sets the 
   has the caster train Creature Enchantment and Life Magic with credits, buy and `use` every buff scroll a magic
   vendor sells at their level (attribute buffs, the tank's weapon and defense masteries, armor, regeneration and
   protections), and rebuff the whole fellowship before each outing, whenever a buff drops and after a death. The
-  tank refuses to pull unbuffed. It is not the caster's main job (Jake: "not MAIN job, just an important job! it
+  tank gets buffed whenever the caster can cast them, and if buffing stalls (the caster out of mana, fizzling or far
+  away) pulls anyway with kits and potions and says so in /f (2026-10-14: "never pull unbuffed" held Bulwark at the
+  Foundry entry for 4 minutes in the second stream rehearsal). It is not the caster's main job (Jake: "not MAIN job, just an important job! it
   should still help fight, heal, etc"): the caster still fights the called target and heals;
 - the tank calls each target in `/f`, the caster attacks only that target and heals the tank below 50%;
 - "/f RUN" when either is below 35% or more than two monsters are on them;
@@ -358,6 +360,97 @@ answered with a report within a minute); `total_cost_usd` is reported on this lo
   (the session transcript under `~/.claude/projects/<player dir>/` shows the `instructions` attachment, or its absence);
 - how play holds up across an auto-compaction at 100k (the summary keeps the plan? the next call's size?).
 
+### Dead air (measured 2026-10-14)
+
+Dead air is time a viewer watches a character doing nothing visible. Measure every rehearsal the same way:
+
+```bash
+npx tsx tools/stream/dead-air.ts $TMPDIR/acjs-agent/stream          # [--logs <dir>] [--top 8] [--min 10] [--json]
+```
+
+It classifies every second of each segment from three sources. The session stream-json gives each tool call's start,
+end and result. `<profile>.chat.log` gives the character's own swings, casts, damage, speech and portal space, and the
+partner's lines. The daemon log's walk trace shows searches that found nothing and stalls; it has timestamps from
+2026-10-14 on (`pageLogLine`). Visible classes are fighting, talking and moving. Dead-air classes are stuck, waiting
+(inside a `wait`), tools (any other call) and thinking (between calls). The report gives:
+- each segment's split, up to the wrap-up and in full;
+- the seconds both players were idle at once (what a viewer of both windows sees);
+- the idle stretches of 10 s or more with their cause, the player's own words and calls;
+- the model's gaps between calls and the time per tool;
+- the waits that slept on after the partner spoke.
+
+The tool has two known gaps. A walk that "arrived" counts as moving unless the timed trace shows its failed searches.
+A follow beside a leader who stands still also counts as moving.
+
+| | rehearsal 1 (4 × 12 min) | rehearsal 2 (2 × 12 min, after the cost trim) |
+|---|---|---|
+| visible, per character | 72% (fighting 38, moving 26, talking 9) | 48% (fighting 15, moving 28, talking 6) |
+| waiting / thinking / tools / stuck | 11 / 10 / 4 / 3% | 37 / 6 / 4 / 5% |
+| both players idle at once | 7% / 6% | 29% |
+| waits that slept after the partner spoke | 9 waits, 0:57 | 11 waits, 3:52 |
+
+The causes, in idle stretches of 10 s or more:
+- **Waiting for the partner:** 5:09 in rehearsal 2, 2:51 in rehearsal 1. In rehearsal 2 most of it was the fight wait
+  `types=…,tell chat_match="] <partner> says"`, which slept through every one of the partner's /f lines (the AND bug,
+  fixed in 04639865 after that rehearsal). Bulwark also held the Foundry entry for 4 minutes while Arcanist was stuck
+  topside.
+- **Waiting for mana:** 3:12 and 1:00. Arcanist began at 25% mana and both stood in town ("let it regen", "meditate").
+  On ACE, standing doesn't restore mana faster: `GetStanceMod` changes only health and stamina (sit ×2.5, crouch ×2,
+  sleep ×3, combat stance or running ×0.5). AC has no meditation.
+- **Stuck walk / portal hand-off:** 3:02 and 1:37. This was the Holtburg pedestal pit to the Mannikin Foundry portal,
+  in every entry of both rehearsals: `use` on the portal timed out at 45 s 19 m away, then a walk took 55–105 s. The
+  trace shows 6–12 doorway searches that found nothing ("no doorway route … 1 door(s) that would not open left out",
+  "no way into the doorway … something stands in it") before "searching wide straight for the goal, jumps and drops
+  included" found the way in 16 points.
+- **Buffing:** 1:36 in rehearsal 1 (Bulwark standing while being buffed; the caster's casts are visible, so the pair
+  was rarely idle).
+- **The model's thinking:** a median of 1.6–2.2 s between calls, 6–10% of the time, spread out rather than in long
+  gaps. Gaps between pulls were 2–4 s, so a ready-made hunt routine would win little. None was built.
+
+Changes made after this measurement:
+- **The brief (`brief.md`):** a "Dead air" paragraph and the mana facts above (regeneration is the same standing or
+  walking; mana potions; Mana Boost Self, Stamina to Mana Self, Health to Mana Self, Mana Renewal Self, all in the
+  end-of-retail SpellTable). The two "keep `wait` to 30–60 s" lines are gone; rule 4 now says go to the partner rather
+  than wait.
+- **A 30 s reply for a player's acting calls:** the `./ac` wrapper sets `AC_AGENT_REPLY_S=30` (`PLAYER_REPLY_S`), the
+  client sends it as `replyMs`, and the daemon answers a walk, follow, use or cast repeat still running at that point
+  with "still in progress" (`replyDeadlineMs`). Waits and reads keep the daemon's 240 s. Before this, a 120 s follow
+  held Arcanist beside a leader who had stopped, and `claude -p` pushed it to the background. Another queued Bulwark's
+  "/f Belay the Mosswart" for two minutes.
+- **`follow`:** when the leader vanishes beside a portal, the reply names the portal, says where it is, and says to
+  `ac_use` it. "Last seen" now comes from where the leader last stood in sight; it used to read "23954 m SW" from the
+  leader's new dungeon cell.
+- **The feed:** a war spell's damage and kill lines ("You burn … for 43 points with Flame Bolt III", "… is incinerated
+  by your assault!") are combat, not system. 13 of them reached the overlay's chat in rehearsal 2.
+
+**What the next rehearsal should show:**
+- visible time back to at least rehearsal 1's ~70%;
+- "both idle at once" under 10%;
+- "slept on after the partner spoke" near 0;
+- no "waiting for mana" stretches;
+- calls blocking more than about 30 s gone from the tool times (except waits).
+
+**The pedestal walk, fixed after the measurement (2026-10-14).** On the real A9B4 DATs, the cell route's first doorway
+into the statue's tunnel has its sill (feet) at z 68, 2 m above the town's ground at z 66. A search toward it can never
+reach its floor ("none after 1829 points" offline, 1827 live), while the wide search for the portal walks down the ramp
+in 16 points (`tests/verify-agent-walk-ladder.ts`). The walk ran that doorway's whole ladder (the box, wider, with
+jumps and drops), went to open the pedestal, and then ran the ladder again. Now a leg whose ladder found no way once
+goes straight to the wide search when the walk comes back to it (`AgentApi.LEG_LADDER_RERUNS`, 0). The door detour
+still runs once. In the fake-host repro this took 6 failed searches (25,661 points) down to 3 (14,175). At the
+pedestal's ~4.5 ms a point, that is about 50 s less standing in the 105 s walk. Each "walk search" trace line now says
+how long it stood and how far into the walk it was. The brief also no longer has Bulwark refuse to pull unbuffed.
+
+**The root cause, fixed in the cell router.** The tunnel's real way in is cell 0x177's outside portal: 1.79 m tall,
+with its sill on the ramp's top at z 66.21, over the town at z 66. The body walks through it
+(`verify-bug-holtburg-statue-tunnel-wall`). `cellPath` took it for a window because it is under `OPENING_MIN_HEIGHT_M`
+(1.83), so the only route left went in by 0x178's opening, whose sill is at z 68 over a floorless cell
+(`grounded: false`). Now `routeViaOutside` tries a slightly low opening (`lowDoorway`: from `LOW_DOOR_MIN_M` 1.75 up to
+1.83) whose sill is on the ground, after the doorways the ground reaches and before a doorway no walk reaches.
+`groundExits` now also measures whether those low openings are on the ground. House windows (1.68 m) stay windows,
+and the tavern's 1.80 m bar openings are interior, so their route is unchanged. On the real DATs every leg of the route
+from the town to the portal is now found by the first search, with no failed searches (the DAT test in
+`verify-agent-walk-ladder.ts`, which also keeps the old route's first-leg failure as the "before").
+
 ## What a player sees that the agent is told (2026-10-11)
 
 The agent only knows what the tools say, so anything a player reads off the screen has to reach it as text. Information,
@@ -484,8 +577,11 @@ here, not having to hardcode behavior").
   A drop or jump never lands where a drop of over a metre lies within 0.45 m (jumpPlan.stableLanding: the dam
   pylons at 42.3N 78.35W turned a planned 4.8 m drop into a 28 m fall), the arrival after one waits 1.2 s to see
   the body stays, and an unplanned fall is told. The CLI prints ac_look's text after the screenshot path.
-  A walk names a fellow it left far behind, and `stay_with=<fellow>` waits whenever they fall `stay_within` m
-  back. Monster levels: CreateObject carries none and the retail selection asks only for health, but ACE's
+  A walk names a fellow it left far behind, and `stay_with=<fellow>` keeps their pace: half of `stay_within` m
+  ahead it walks (Shift, running being the default; W is pressed again so a movement event carries the hold key)
+  until they catch up (3 m), and past `stay_within` it stops until they are within half of it: one pause, not a
+  stop every second at the leash's edge (Bulwark, stream day 2026-10-14). `ac_follow` and a routine's Follow leg
+  walk within 4 m beyond `within` of the leader for the same reason. Monster levels: CreateObject carries none and the retail selection asks only for health, but ACE's
   appraisal sends Level even on a failed Assess, so ac_observe / ac_look examine the nearest three monsters with
   no level, quietly, once each (routines' own looks don't). The daemon's shutdown has a 30 s deadline, a second
   SIGTERM ends it at once, and the bridge and Vite are killed as process groups (`tools/ac-agent/shutdown.ts`:

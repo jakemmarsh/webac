@@ -22,6 +22,15 @@ export interface PlayerDir {
   worldQuery: string;
 }
 
+/**
+ * How long a player's acting call (walk_to, follow, use, a cast repeat …) holds before it answers "still in progress"
+ * and keeps going in the game. The daemon's own deadline (240 s) is past `claude -p`'s 120 s Bash limit: in the
+ * rehearsals of 2026-10-13 a follow held the player 120 s (half of it standing beside a leader who had stopped, his
+ * /f lines unanswered) and was pushed to the background, and another queued the player's own /f line for two minutes.
+ * Most walks there took 5–35 s, so 30 s lets those answer whole.
+ */
+export const PLAYER_REPLY_S = 30;
+
 /** Quote for /bin/sh (single quotes; a ' inside closes, escapes and reopens). */
 export function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -37,6 +46,9 @@ export function playerScripts(repo: string, profile: string): { ac: string; worl
     'case "$1" in',
     '  start|stop) echo "error: the stream supervisor starts and stops your game session; never run start or stop" >&2; exit 2 ;;',
     'esac',
+    // An acting call answers "still in progress" after PLAYER_REPLY_S and keeps going in the game (callDeadline.ts),
+    // so the player can talk and react while a walk or follow runs instead of sitting blocked for minutes.
+    `AC_AGENT_REPLY_S=${PLAYER_REPLY_S}; export AC_AGENT_REPLY_S`,
     // profile= last: parseCliArgs keeps the last value, so this character's profile always wins.
     `exec ${tsx} ${shQuote(join(repo, 'tools', 'ac-agent', 'cli.ts'))} "$@" profile=${profile}`,
     '',

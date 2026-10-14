@@ -30,7 +30,13 @@ export const A9B4 = { BX: 0xa9, BY: 0xb4, OX: 0xa9 * 192, OY: 0xb4 * 192, START:
  * at the replay's current time (the recording's SetStates), else the world
  * DB's.
  */
-export async function buildA9b4World(options: { interiors?: boolean } = {}): Promise<(slide?: SlideState, stateOf?: (guid: number) => number | undefined) => MovementServices> {
+/** A server object the caller adds to the world's blockers (world DB landblock_instance; global render coordinates). */
+export interface A9b4Blocker {
+  guid: number; worldX: number; worldY: number; worldZ: number; collisionRadius: number; setupId: number;
+  quat: { w: number; x: number; y: number; z: number }; scale: number; physicsState: number;
+}
+
+export async function buildA9b4World(options: { interiors?: boolean; blockers?: A9b4Blocker[] } = {}): Promise<(slide?: SlideState, stateOf?: (guid: number) => number | undefined) => MovementServices> {
   const { BX, BY, OX, OY } = A9B4;
   const portalDb = openDat(DAT_PATHS.portal);
   const cellDb = openDat(DAT_PATHS.cell);
@@ -119,6 +125,7 @@ export async function buildA9b4World(options: { interiors?: boolean } = {}): Pro
   ];
   const blockers = [
     ...doors,
+    ...(options.blockers ?? []),
     { guid: 0x8000b698, worldX: OX + 97, worldY: 94.005, worldZ: OY + 27, collisionRadius: 0.48, setupId: 0x02000001,
       quat: { w: 0.16847099, x: 0, y: 0, z: -0.98570698 }, scale: 1, physicsState: 0x600418 },
     { guid: 0x8000b490, worldX: OX + 91.519, worldY: 94, worldZ: OY + 37.745, collisionRadius: 2.048, setupId: 0x0200124b,

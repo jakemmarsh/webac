@@ -86,7 +86,7 @@ export function renderPrometheus(m: BridgeMetrics, s: BridgeSnapshot): string {
   metric('acbridge_connects_total', 'counter', 'Accepted WebSocket sessions.', [[{}, m.connects]]);
   metric('acbridge_client_errors_total', 'counter', 'Crash reports accepted from web clients, by kind.',
     [...m.clientErrors].map(([kind, n]) => [{ kind }, n]));
-  metric('acbridge_client_preworld_total', 'counter', 'Pre-world outcome events accepted from web clients, by outcome.',
+  metric('acbridge_client_preworld_total', 'counter', 'Pre-world outcome and in-world (first_minute, world_left) events accepted from web clients, by outcome.',
     [...m.clientPreworld].map(([outcome, n]) => [{ outcome }, n]));
   metric('acbridge_sessions_closed_total', 'counter', 'Closed sessions by reason.',
     [...m.closes.entries()].map(([r, v]) => [{ reason: r }, v]));

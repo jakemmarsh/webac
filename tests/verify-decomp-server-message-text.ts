@@ -271,5 +271,14 @@ describe('GameUI (happy-dom): the teleport animation end and the PopupString dia
     expect(ui.popupStringDialogCount).toBe(1);
     expect(doc.querySelectorAll('.ac-popup-string-dialog').length).toBe(1);
     expect(doc.querySelector('.ac-popup-string-dialog .ac-message-dialog-text')!.textContent).toContain('Message of the day');
+    // RELEASE.first-minute — the welcome popup is the blocking window the first-minute report names.
+    expect(ui.openBlockingWindow()).toBe('popup');
+    (doc.querySelector('.ac-popup-string-dialog .ac-dialog-button') as HTMLElement).dispatchEvent(new H.win.MouseEvent('click', { bubbles: true }));
+    expect(ui.popupStringDialogCount).toBe(0);
+    expect(ui.openBlockingWindow()).toBeNull();
+    expect(ui.showMessageDialog('Your character is being deleted.')).toBe(true);
+    expect(ui.openBlockingWindow()).toBe('message');
+    ui.hideMessageDialog();
+    expect(ui.openBlockingWindow()).toBeNull();
   });
 });

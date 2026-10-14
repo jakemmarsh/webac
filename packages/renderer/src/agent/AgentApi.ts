@@ -288,6 +288,11 @@ export interface AgentHost {
   cast(spellId: number, target: number | null): boolean;
   chat(text: string): void;
   key(code: string, down: boolean): void;
+  /**
+   * The RunAsDefaultMovement option (CameraController.runIsDefault): Shift held walks when it is on, runs when it is off.
+   * Unset: the host can't say (taken as on, retail's default).
+   */
+  runIsDefault?(): boolean;
   setYaw(yaw: number): void;
   pickUp(guid: number): boolean;
   drop(guid: number): boolean;
@@ -386,6 +391,12 @@ export interface WalkOptions {
    * VirindiTank nav point carries one (its Z, map units × 240). Without it the storey nearest your feet is taken.
    */
   z?: number;
+  /**
+   * Walk (the hold-run key, Shift, when running is the default) while within `within + pace` metres of the target, as a
+   * player eases off running behind someone; run again past `within + 2 × pace`. A follower faster than its leader keeps
+   * moving at their pace instead of running up, stopping and running up again (the follow's stop-start, 2026-10-14).
+   */
+  pace?: number;
 }
 
 /**
@@ -1728,12 +1739,23 @@ export class AgentApi {
   static readonly STAY_WITH_AWAY_M = 10;
   /** stay_with: a fellow within stay_within this recently who drops from view is taken as still with you (ms). */
   static readonly STAY_WITH_GRACE_MS = 10_000;
+  /**
+   * stay_with: a fellow this near (or this little behind) has caught up: a run eased to a walk to let them (more than
+   * half of stay_within behind) runs again, and a walk stopped for them (more than stay_within behind) goes on only once
+   * they are within half of it. One pause and one restart, not a stop every second at the leash's edge (Bulwark ahead of
+   * Arcanist, 4 km, "waiting for Claude Arcanist, 16 m behind" once a second for minutes, 2026-10-14).
+   */
+  static readonly STAY_WITH_CAUGHT_M = 3;
+  /** follow: within this much beyond `within` of the leader, the follow walks (Shift) instead of running (m). */
+  static readonly FOLLOW_PACE_M = 4;
   /** follow: standing within reach of the leader, the walk sets off again once they are this much farther. */
   static readonly FOLLOW_SLACK_M = 3;
   /** Feet this far apart in height are different floors (a ledge, a storey): the walk's arrival takes the same (2.5 m). */
   static readonly FLOOR_APART_M = 2.5;
   /** follow: the leader out of sight this long ends it. */
   static readonly FOLLOW_LOST_MS = 10_000;
+  /** A portal this close to where a followed leader was last seen is taken as the one they went through. */
+  static readonly FOLLOW_PORTAL_BESIDE_M = 6;
   /**
    * A walk going round in circles: back within LOOP_RADIUS_M of where it stood at least LOOP_BACK_MS before, having
    * been LOOP_AWAY_M or more from there since, and no LOOP_GAIN_M nearer the goal. A goal across water paced Bulwark
@@ -2627,6 +2649,15 @@ export class AgentApi {
    * take minutes a few ms a frame: Arcanist stood 4 minutes outside the Holtburg archmage's house, 2026-10-10.
    */
   static readonly SEARCH_WALL_MS = 30_000;
+  /**
+   * How many more times a leg whose whole ladder of searches (the box, wider, with jumps and drops) found no way may
+   * run that ladder again in one walk, after a door detour or a replan brings the walk back to it; past that the
+   * walk goes straight to the wide search for the goal. At the Holtburg drudge statue the pedestal's doorway (where
+   * the Pedestal Weak Spot stands) took the ladder three times in one walk, 6–12 searches and up to 105 s standing,
+   * before the wide search found the way down in 16 points (stream rehearsals, 2026-10-13). A setting so a test can
+   * compare the old order.
+   */
+  static LEG_LADDER_RERUNS = 0;
   static readonly SEARCH_CREDIT_MS = 90_000;
   /**
    * The share of each frame a standing search may use (the body isn't moving, so a slower frame costs nothing),
@@ -3117,6 +3148,9 @@ export class AgentApi {
     // Standing beside the leader (follow), and the leader's last sight, for "out of sight".
     let standing = false;
     let leaderLostAt = 0;
+    // Where the leader last stood in sight (global metres): their object's cell moves on with them through a portal
+    // before the client lets them go, so "last seen" read from it named a dungeon 23,954 m off (rehearsal 2026-10-13).
+    let leaderSeen: { x: number; y: number } | null = null;
     // Following a leader a storey up or down: which way it was said (-1 they're above, 1 below, 0 not), and since when.
     let floorApartSaid = 0;
     let floorApartAt = 0;
@@ -3141,6 +3175,13 @@ export class AgentApi {
     const stayWithin = opts.stayWithin ?? AgentApi.STAY_WITH_M;
     let waitingSince = 0;
     let waited = 0;
+    // Walking (Shift, running the default) at a slower companion's pace: ahead of a stay_with fellow, or near a leader
+    // (opts.pace). `pacedHeld` is the pace the keys last carried, so a change re-presses W and a movement event
+    // carries the new hold key (SetHoldRun @ 006b3370 sends nothing by itself; the next movement event carries it).
+    let paced = false;
+    let pacedHeld = false;
+    // Running is the default (Shift walks): only then is a paced walk a Shift away. Off, the walk already walks.
+    const canPace = (): boolean => this.host.runIsDefault?.() !== false && !underAttack && !opts.flee;
     // When and how near the stay_with fellow was last in view.
     let stayLastSeen: { at: number; dist: number } | null = null;
     // Where your fellows were when the walk began: one left far behind is named in the result.
@@ -3211,6 +3252,10 @@ export class AgentApi {
     let doorDetour: { guid: number; x: number; y: number; wide: boolean } | null = null;
     // The last resort ran: a wide search for the goal itself, the doorway route dropped.
     let directWide = false;
+    // Legs (by their aim, to the half metre) whose whole ladder of searches found no way, and how often.
+    const legsExhausted = new Map<string, number>();
+    const aimKey = (a: { x: number; y: number; drop?: number }): string => `${Math.round(a.x * 2)},${Math.round(a.y * 2)}${a.drop !== undefined ? 'd' : ''}`;
+    const exhausted = (a: { x: number; y: number; drop?: number }): boolean => (legsExhausted.get(aimKey(a)) ?? 0) > AgentApi.LEG_LADDER_RERUNS;
     // The end of the current 35 m stretch toward a far goal; the next stretch is planned on reaching it.
     let stretch: { x: number; y: number } | null = null;
     // The search for the current stretch, the turns (degrees off the line to the goal) still to try when it finds
@@ -3282,6 +3327,17 @@ export class AgentApi {
       const box = t >= 1 || directWide || doorDetour?.wide ? wideOpts : { margin: 12, maxNodes: 4000 };
       search = new PathSearch(probe!, from, aim, { within: legWithin(aim), ...box, ...(jumps ? { jumps } : {}) });
     };
+    /** The last resort, now: a wide search straight for the goal (jumps and drops when you can take them), the route dropped. */
+    const goWide = (from: NavStep, why: string): boolean => {
+      const gl = goal();
+      if (!probe || !gl || directWide) return false;
+      directWide = true;
+      route = []; legs = []; doorDetour = null; tier = 0;
+      const jumps = jumpSearch();
+      this.trace(`walk: ${why}; searching wide straight for the goal${jumps ? ', jumps and drops included' : ''} (${((this.host.now() - start) / 1000).toFixed(1)} s into the walk)`);
+      search = new PathSearch(probe, from, gl, { within: Math.max(1, within - 0.2), ...wideOpts, ...(jumps ? { jumps } : {}) });
+      return true;
+    };
     const planLegs = (): void => {
       legs = [];
       search = null;
@@ -3307,6 +3363,8 @@ export class AgentApi {
       }
       stretch = null;
       if (aim.drop === undefined && straightWalk(probe, from, aim)) { this.trace(`walk leg straight ${far.toFixed(1)} m to (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)}), ${route.length} doorway(s) ahead`); return; }
+      // Back at a leg whose every search already found no way (after a door detour or a replan): not again.
+      if (!doorDetour && exhausted(aim) && goWide(from, `every search toward (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)}) already found no way`)) return;
       if (aim.drop !== undefined) {
         // A floor opening the route goes down through: only a drop gets there.
         if (jumpSearch()) {
@@ -3414,12 +3472,18 @@ export class AgentApi {
           release();
           leaderLostAt ||= now;
           if (now - leaderLostAt > AgentApi.FOLLOW_LOST_MS) {
-            const last = lo?.cell ? toGlobal(lo.cell, lo.x, lo.y) : null;
-            return { ok: false, message: `stopped following: ${this.nameOf(targetGuid)} went out of sight${last ? `, last seen ${Math.hypot(last.x - me.g.x, last.y - me.g.y).toFixed(0)} m ${compassPoint(bearing(me.g, last))} of you` : ''} (a portal, a recall, or too far off): ask them where they are${featText()}` };
+            const last = leaderSeen;
+            const where = (p: { x: number; y: number }): string => `${Math.hypot(p.x - me.g.x, p.y - me.g.y).toFixed(0)} m ${compassPoint(bearing(me.g, p))} of you`;
+            // A portal they stood beside when they vanished is most likely where they went.
+            const portal = last ? this.portalBeside(last, AgentApi.FOLLOW_PORTAL_BESIDE_M) : null;
+            const name = this.nameOf(targetGuid);
+            if (portal) return { ok: false, message: `stopped following: ${name} went out of sight beside ${portal.name} #${portal.guid.toString(16)} (${where(portal.g)}): they most likely went through it. ac_use it to follow, or ask them where they are${featText()}` };
+            return { ok: false, message: `stopped following: ${name} went out of sight${last ? `, last seen ${where(last)}` : ''} (a portal, a recall, or too far off): ask them where they are${featText()}` };
           }
           return null;
         }
         leaderLostAt = 0;
+        if (lo.cell) leaderSeen = toGlobal(lo.cell, lo.x, lo.y);
       }
       const gl = goal();
       if (!me || !gl) { release(); return { ok: false, message: 'target vanished or not in world' }; }
@@ -3465,7 +3529,12 @@ export class AgentApi {
           const at = { x: me.g.x + lag * Math.sin(fb), y: me.g.y + lag * Math.cos(fb) };
           const theirs = Math.hypot(gl.x - at.x, gl.y - at.y);
           const where = `${lag.toFixed(0)} m ${compassPoint(f.bearing)} of you`;
-          if (lag > stayWithin && theirs - d > stayWithin && !jumping) {
+          const behind = theirs - d;
+          // Stopped for them, the walk goes on once they are within half the leash: at the leash's edge it stopped
+          // and set off again every second as they gained a metre and lost it (2026-10-14).
+          const leash = waitingSince ? stayWithin / 2 : stayWithin;
+          if (lag > leash && behind > leash && !jumping) {
+            paced = false;
             release();
             credit += now - lastTick;
             lastTick = now;
@@ -3487,7 +3556,11 @@ export class AgentApi {
             best = Infinity; bestAt = now;
             return null;
           }
-          if (waitingSince) { waited += now - waitingSince; waitingSince = 0; waitFellow = null; }
+          if (waitingSince) { waited += now - waitingSince; waitingSince = 0; waitFellow = null; this.trace(`walk: ${f.name} caught up (${lag.toFixed(0)} m); on`); }
+          // Ahead of them by more than half the leash: walk, so they gain on you while you keep moving, until they
+          // have caught up. A faster runner moves at the pair's pace, never stopping, while they keep coming.
+          const pace = canPace() && (paced ? lag > AgentApi.STAY_WITH_CAUGHT_M && behind > AgentApi.STAY_WITH_CAUGHT_M : lag > stayWithin / 2 && behind > stayWithin / 2);
+          if (pace !== paced) { paced = pace; this.trace(`walk: ${pace ? `walking to let ${f.name} catch up, ${lag.toFixed(0)} m behind` : `running again, ${f.name} ${lag.toFixed(0)} m away`}`); }
         }
       }
       // A fall the plan didn't make: the feet going down much faster than the body moves across (a slide off an
@@ -3521,6 +3594,11 @@ export class AgentApi {
           return null;
         }
         if (standing) { standing = false; prev = null; plan(); best = Infinity; bestAt = now; }
+      }
+      if (opts.pace && !opts.stayWith && !jumping) {
+        // Near the one you follow: walk, so a leader slower than your run is kept pace with rather than run up to,
+        // stood beside and run up to again; run again once they are pulling away.
+        paced = canPace() && (paced ? d <= within + 2 * opts.pace : d <= within + opts.pace);
       }
       if (opts.until && !follow && !jumping) {
         const why = opts.until();
@@ -3668,7 +3746,7 @@ export class AgentApi {
         search = null;
         legs = r.status === 'found' ? r.path : [];
         noWay = r.status === 'none';
-        this.trace(`walk search ${r.status} after ${r.expanded} points${legs.length ? `: ${legs.map(legText).join(' ')}` : ''}`);
+        this.trace(`walk search ${r.status} after ${r.expanded} points in ${((now - timedAt) / 1000).toFixed(1)} s (${((now - start) / 1000).toFixed(1)} s into the walk)${legs.length ? `: ${legs.map(legText).join(' ')}` : ''}`);
         if (r.status === 'none' && (underAttack || offset) && probe && !doorDetour && sr !== stretchSearch && !partial) {
           // No way to the point. An offset ("15m east") is a direction: walk as far as the way goes that way, as a
           // player holding W would. Under attack, the same for any goal, at once: no wider searches, no jumps, no
@@ -3754,6 +3832,12 @@ export class AgentApi {
             this.trace(`walk: no drop or jump gets down through the opening at (${r0.x.toFixed(1)}, ${r0.y.toFixed(1)}); ${route.length ? `routing round it, ${route.length} doorway(s)` : 'no other doorway route'}`);
             if (route.length) { prev = null; planLegs(); best = Infinity; bestAt = now; return null; }
           }
+          // The leg's ladder is spent when its last rung found no way (jumps and drops, or wider when you can't jump).
+          if (aim && !doorDetour && !directWide && sr !== stretchSearch && (tier >= 2 || (tier >= 1 && !jumpSearch()))) {
+            const k = aimKey(aim);
+            legsExhausted.set(k, (legsExhausted.get(k) ?? 0) + 1);
+          }
+          if (aim && !doorDetour && !directWide && sr !== stretchSearch && exhausted(aim) && legsExhausted.get(aimKey(aim))! > AgentApi.LEG_LADDER_RERUNS + 1 && goWide(here, `the searches toward (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)}) found no way again`)) return null;
           // Escalate the leg first: past the search's box (a ramp round the corner), then on with jumps and drops.
           if (aim && !doorDetour && !directWide && tier < 2) {
             if (tier === 0 && r.status === 'none' && r.boxed) {
@@ -3855,7 +3939,13 @@ export class AgentApi {
       this.host.setYaw(compassToYaw(bearing(me.g, aim)));
       // The last metres to a jump's take-off at a walk, so the body stops on it.
       const slow = (legs[1]?.jump && da < 3) || (takeoff && da < 3);
-      this.host.key('ShiftLeft', !!slow);
+      this.host.key('ShiftLeft', !!slow || paced);
+      if (paced !== pacedHeld) {
+        // Shift alone changes no MoveToState (SetHoldRun @ 006b3370 only sets the local hold key): pressing forward
+        // again is the movement event that carries the walk (or the run) to the server, as a player's next key does.
+        pacedHeld = paced;
+        if (moved > 0.05) this.host.key('KeyW', false);
+      }
       // A cast or an attack request stops the player (CommandInterpreter::MaybeStopCompletely clears the command lists:
       // "a movement key still held moves nothing until it is pressed again"), and a key already down is no new press.
       // Holding W through it, the body stood still: the walk lets go and presses again when the body hasn't moved for
@@ -3944,6 +4034,18 @@ export class AgentApi {
     }, release).then(after);
   }
 
+  /** The nearest portal within `radius` m of a spot (global metres), with its name and place; null when none. */
+  private portalBeside(at: { x: number; y: number }, radius: number): { guid: number; name: string; g: { x: number; y: number } } | null {
+    let best: { guid: number; name: string; g: { x: number; y: number }; d: number } | null = null;
+    for (const o of this.host.objects()) {
+      if (!o.cell || o.wielderId || o.containerId || classify(o, false) !== 'portal') continue;
+      const g = toGlobal(o.cell, o.x, o.y);
+      const d = Math.hypot(g.x - at.x, g.y - at.y);
+      if (d <= radius && (!best || d < best.d)) best = { guid: o.guid, name: o.name, g, d };
+    }
+    return best && { guid: best.guid, name: best.name, g: best.g };
+  }
+
   /**
    * Follow a player (a fellow, usually): walk to within `within` m of them, stand while they stay that near, and set
    * off again whenever they move off, until `durationMs` passes, you're hit (as any walk), they go out of sight, or
@@ -3959,7 +4061,7 @@ export class AgentApi {
     const o = this.host.object(g);
     if (!o || !(o.itemType & IT.Creature)) return Promise.resolve({ ok: false, message: `${this.nameOf(g)} isn't someone you can follow` });
     const within = Math.max(1.5, opts.within ?? 4);
-    return this.walkTo(g, { within, follow: { durationMs: opts.durationMs ?? 120_000 }, onAwayKeepGoing: true, ...(opts.flee ? { flee: true } : {}) });
+    return this.walkTo(g, { within, follow: { durationMs: opts.durationMs ?? 120_000 }, pace: AgentApi.FOLLOW_PACE_M, onAwayKeepGoing: true, ...(opts.flee ? { flee: true } : {}) });
   }
 
   /** Sidesteps a walk under attack tries round creatures in its way before it says it is hemmed in. */

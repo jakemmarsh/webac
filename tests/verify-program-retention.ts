@@ -86,6 +86,21 @@ describe('ProgramRetention', () => {
     expect(a.usedTimes).toBe(2);
   });
 
+  it('a WebGL context restore (a new, empty program list) retains the new list\'s programs from its first one', () => {
+    let cache = new ProgramCache();
+    const retention = new ProgramRetention(() => cache.programs);
+    cache.acquire('k1'); cache.acquire('k2');
+    expect(retention.retainNew()).toBe(2);
+    // initGLContext: a new WebGLPrograms, recompiling as materials draw again.
+    // Both recompile on the first frame back: the new list is as long as the old count.
+    cache = new ProgramCache();
+    const a = cache.acquire('k1');
+    const b = cache.acquire('k2');
+    expect(retention.retainNew()).toBe(2);
+    expect(a.usedTimes).toBe(2);
+    expect(b.usedTimes).toBe(2);
+  });
+
   it('tolerates a missing renderer', () => {
     expect(new ProgramRetention(() => null).retainNew()).toBe(0);
   });

@@ -264,7 +264,7 @@ import {
   type ViewButtonKey,
 } from './ChargenAppearanceView.js';
 import { mirrorCameraX } from '../scene/WorldMirror.js';
-import { buildCreatureModeScene, renderSceneToCanvas } from './CreatureViewRender.js';
+import { buildCreatureModeScene, renderSceneToCanvas, rendererContextLost } from './CreatureViewRender.js';
 import { BarberModel, BARBER_STRINGS, type BarberData, type BarberApplyResult } from './BarberModel.js';
 import { BarberPanel, barberPreviewRenderer } from './BarberPanel.js';
 import { AppearanceManager } from '../models/AppearanceManager.js';
@@ -1450,7 +1450,48 @@ export class GameUI {
   /** DEBT.main-ts-extractions — main.ts hands GameUI its world services (replaces the window.__ac reach-backs). */
   setUIHost(host: UIHost | null): void {
     this.uiHost = host;
+    this.watchRendererContext(host?.renderer?.domElement ?? null);
   }
+
+  /** The canvas whose `webglcontextrestored` redraws the offscreen views, and its listener's remover. */
+  private rendererContextCanvas: HTMLCanvasElement | null = null;
+  private unwatchRendererContext: (() => void) | null = null;
+
+  /**
+   * BUG.chargen-preview-blank — the chargen / summary / barber / paperdoll /
+   * examine views are one-shot renders through the shared renderer into 2D
+   * canvases, redrawn only when their page changes. While the context is
+   * lost (a GPU reset) a render draws nothing; when THREE restores it the
+   * world loop redraws itself but those views stayed blank until the next
+   * click. Redraw them on `webglcontextrestored`.
+   */
+  private watchRendererContext(canvas: HTMLCanvasElement | null): void {
+    if (canvas === this.rendererContextCanvas) return;
+    this.unwatchRendererContext?.();
+    this.unwatchRendererContext = null;
+    this.rendererContextCanvas = canvas;
+    if (!canvas?.addEventListener) return;
+    const self = new WeakRef(this);
+    const restored = (): void => { self.deref()?.redrawRendererViews(); };
+    canvas.addEventListener('webglcontextrestored', restored);
+    this.unwatchRendererContext = () => canvas.removeEventListener('webglcontextrestored', restored);
+  }
+
+  /** Redraw every open offscreen view (the renderer's context came back). */
+  redrawRendererViews(): void {
+    const step = (label: string, fn: () => void): void => {
+      try { fn(); } catch (e) { console.warn(`[GameUI] ${label} redraw after context restore failed`, e); }
+    };
+    if (this.screenContainer.querySelector('.chargen-preview-canvas')) step('chargen preview', () => this.renderChargenPreview(false));
+    if (this.screenContainer.querySelector('.chargen-summary-canvas')) step('chargen summary', () => this.renderChargenSummaryView(false));
+    step('barber', () => this.barberPanel?.paint());
+    step('paperdoll', () => this.onPlayerObjDescChanged());
+    const examine = this.examinePreviewLast;
+    if (examine?.canvas.isConnected) step('examine', () => this.renderExaminePreview(examine.canvas, examine.model));
+  }
+
+  /** The examine viewport's last figure (redrawn when the renderer's context comes back). */
+  private examinePreviewLast: { canvas: HTMLCanvasElement; model: THREE.Group } | null = null;
 
   // DAT asset references
   private portalDb: DatDatabase | null;
@@ -7366,6 +7407,7 @@ export class GameUI {
    * WebGL renderer isn't available (e.g. DOM tests).
    */
   private renderExaminePreview(canvas: HTMLCanvasElement, model: THREE.Group): void {
+    this.examinePreviewLast = { canvas, model };
     const renderer = this.uiHost?.renderer;
     if (!renderer) return;
     const w = canvas.width, h = canvas.height;
@@ -13424,6 +13466,14 @@ export class GameUI {
     renderer.setRenderTarget(currentTarget);
     renderer.setClearAlpha(currentClear);
 
+    // A lost context draws and reads nothing: keep the portrait already
+    // showing (redrawRendererViews repaints it when the context returns).
+    if (rendererContextLost(renderer)) {
+      renderTarget.dispose();
+      scene.remove(clone);
+      for (const m of dollMaterials) m.dispose();
+      return;
+    }
     // Read pixels into a canvas
     const pixels = new Uint8Array(width * 2 * height * 2 * 4);
     renderer.readRenderTargetPixels(renderTarget, 0, 0, width * 2, height * 2, pixels);
@@ -33872,6 +33922,22 @@ export class GameUI {
     });
     dialog.classList.add('ac-popup-string-dialog');
     this.popupStringDialogs.push(dialog);
+  }
+
+  /**
+   * RELEASE.first-minute — the blocking window on screen, as a closed class
+   * (telemetry/WorldReporter.ts reports whether one was open when a new
+   * player left, and for how long): a PopupString (the server's welcome
+   * popup), the OK message dialog, a confirmation, another DialogFactory
+   * dialog, or the book window (GDLE's tutorial book). Null when none.
+   */
+  openBlockingWindow(): 'popup' | 'message' | 'confirm' | 'dialog' | 'book' | null {
+    if (this.popupStringDialogs.some((d) => d.isConnected)) return 'popup';
+    if (this.messageDialog?.isConnected) return 'message';
+    if (this.confirmationDialog?.isConnected) return 'confirm';
+    if (this.agentDialogEntries.some((d) => d.el.isConnected && d.el.style.display !== 'none')) return 'dialog';
+    if (this.bookPanelHandle !== null) return 'book';
+    return null;
   }
 
   /** How many PopupString dialogs are open (tests / probes). */

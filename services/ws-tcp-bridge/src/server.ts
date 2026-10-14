@@ -56,6 +56,7 @@ import type { ServerRegistry } from './serverList.js';
 import type { ServerDirectory } from './serverDirectory.js';
 import { sanitizeClientError } from './clientErrors.js';
 import { sanitizeClientPreworld, traceFromUrl } from './clientPreworld.js';
+import { isWorldOutcome, sanitizeClientWorld } from './clientWorld.js';
 import { type LookupFn, resolveTarget } from './targets.js';
 import { encodeSppHeader, stripSppHeader } from './spp.js';
 import { compatFor } from './serverCompat.js';
@@ -250,6 +251,14 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     clientPreworld: (body, req) => {
       const ip = clientIp(req.socket.remoteAddress, req.headers, config.trustProxyHops, config.clientIpHeader);
       if (!clientPreworldRate.hit(ip)) return 429;
+      // RELEASE.first-minute — the page's in-world events share the route (clientWorld.ts): one client_world line.
+      if (body && typeof body === 'object' && isWorldOutcome((body as { outcome?: unknown }).outcome)) {
+        const wev = sanitizeClientWorld(body);
+        if (!wev) return 400;
+        metrics.clientPreworldEvent(wev.outcome);
+        log('info', 'client_world', { ip, ...Object.fromEntries(Object.entries(wev).filter(([, v]) => v !== null)) });
+        return 204;
+      }
       const ev = sanitizeClientPreworld(body);
       if (!ev) return 400;
       metrics.clientPreworldEvent(ev.outcome);

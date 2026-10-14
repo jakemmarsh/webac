@@ -80,18 +80,31 @@ export function installMirrorAwareCulling(renderer: MirrorCullingRenderer): void
   tagged[CULLING_INSTALLED] = true;
 
   let mirrored = false;
+  // BUG.chargen-preview-blank — a context restore (WebGLRenderer
+  // onContextRestore → initGLContext) replaces `renderer.state` with a new
+  // WebGLState. Patching only the first one left every later frame culling
+  // the mirrored world's FRONT faces: after a GPU reset the chargen figure
+  // and the world drew inside out (the backs of the far polygons, flat and
+  // dark). Patch whichever state object is current before each draw.
+  const patched = new WeakSet<object>();
+  const patchState = (): void => {
+    const state = renderer.state;
+    if (!state || patched.has(state)) return;
+    patched.add(state);
+    const setMaterial = state.setMaterial.bind(state);
+    state.setMaterial = (material, frontFaceCW) => {
+      setMaterial(material, mirrored ? !frontFaceCW : frontFaceCW);
+    };
+  };
+  patchState();
   const renderBufferDirect = renderer.renderBufferDirect.bind(renderer);
   renderer.renderBufferDirect = (camera, scene, geometry, material, object, group) => {
+    patchState();
     mirrored = isMirroredCamera(camera);
     try {
       renderBufferDirect(camera, scene, geometry, material, object, group);
     } finally {
       mirrored = false;
     }
-  };
-  const state = renderer.state;
-  const setMaterial = state.setMaterial.bind(state);
-  state.setMaterial = (material, frontFaceCW) => {
-    setMaterial(material, mirrored ? !frontFaceCW : frontFaceCW);
   };
 }

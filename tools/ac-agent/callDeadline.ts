@@ -10,6 +10,22 @@
 import { READ_METHODS, stillInProgressMessage } from '../../packages/renderer/src/agent/claudeControl.ts';
 
 export const DAEMON_REPLY_MS = 240_000;
+/** The shortest reply deadline a caller may ask for. */
+export const MIN_REPLY_MS = 5000;
+
+/**
+ * The reply deadline for one call: the caller's own (`replyMs`, from AC_AGENT_REPLY_S: a stream player sets 30 s) for an
+ * acting call, else DAEMON_REPLY_MS. A stream player's session (`claude -p`) sends a Bash command still running at
+ * 120 s to the background, and while a call runs the player can neither talk nor react: a 120 s follow beside a
+ * leader who had stopped, and a /f line queued behind it for two minutes (rehearsals of 2026-10-13). A wait and a
+ * read keep the daemon's deadline: a wait is meant to sleep its timeout, and a read cut short is an error.
+ */
+export function replyDeadlineMs(method: string, replyMs?: unknown): number {
+  const n = Number(replyMs);
+  if (replyMs === undefined || replyMs === null || !Number.isFinite(n) || n <= 0) return DAEMON_REPLY_MS;
+  if (method === 'wait' || READ_METHODS.has(method)) return DAEMON_REPLY_MS;
+  return Math.min(Math.max(n, MIN_REPLY_MS), DAEMON_REPLY_MS);
+}
 
 export async function withCallDeadline<T>(work: Promise<T>, method: string, timeoutMs: number, replyMs = DAEMON_REPLY_MS): Promise<T | { ok: true; message: string }> {
   const ms = Math.max(1000, Math.min(timeoutMs, replyMs));

@@ -57,6 +57,7 @@ function defaultSend(url: string, body: string): void {
 export class ErrorReporter {
   private readonly seen = new Map<string, number>();
   private sent = 0;
+  private reports = 0;
   private readonly send: (url: string, body: string) => void;
 
   constructor(private readonly opts: ErrorReporterOptions) {
@@ -72,7 +73,15 @@ export class ErrorReporter {
     } catch { return null; }
   }
 
+  /**
+   * Every error the page reported (repeats and ones past MAX_REPORTS
+   * included), sent or not: RELEASE.first-minute counts the errors in a
+   * player's first minute in the world from it (WorldReporter).
+   */
+  get reportCount(): number { return this.reports; }
+
   report(kind: ErrorKind, message: string, detail: { stack?: string | null; source?: string | null; line?: number | null; column?: number | null } = {}): void {
+    this.reports++;
     if (!this.opts.endpoint) return;
     const msg = stripUrlQueries(String(message || 'Unknown error')).slice(0, 500);
     const source = detail.source ? stripUrlQueries(detail.source) : null;

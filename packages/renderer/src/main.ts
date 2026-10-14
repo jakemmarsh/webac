@@ -393,6 +393,7 @@ import { logOffCharacter, installUnloadSessionClose } from './session/PlayerModu
 import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLogOff, type RequestLogOffDeps } from './session/LogoutFlow.js';
 import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
+import { WorldReporter, classifyGpu, unmaskedRenderer } from './telemetry/WorldReporter.js';
 import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen } from './boot/Capability.js';
 import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
@@ -780,6 +781,8 @@ let preworldReporter: PreworldReporter | null = null;
 let preworldScreen: () => PreworldScreen = () => 'boot';
 let preworldServer: () => string | null = () => null;
 let preworldChargenStep: () => ChargenStepName | null = () => null;
+/** RELEASE.first-minute — the first minute in the world, and the session's end (telemetry/WorldReporter.ts); set at boot. */
+let worldReporter: WorldReporter | null = null;
 
 // ─── Era (docs/dark-majesty-support.md, era/EraBoot.ts) ──────────────
 // One era's DATs per page load. main() resolves the boot era before any DAT
@@ -1201,6 +1204,20 @@ async function main() {
     chargenStep: () => preworldChargenStep(),
   });
   preworldReporter.install(window, document);
+  worldReporter = new WorldReporter({
+    endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
+    build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
+    trace: preworldReporter.trace,
+    era: () => activeEra.id,
+    server: () => preworldServer(),
+  });
+  worldReporter.setSources({
+    errors: () => errorReporter?.reportCount ?? 0,
+    dpr: () => window.devicePixelRatio,
+    canvas: () => ({ width: canvas.clientWidth, height: canvas.clientHeight }),
+    hidden: () => document.visibilityState === 'hidden',
+  });
+  worldReporter.install(window, document, canvas);
 
   // RELEASE.capability-check — before the patch screen downloads anything.
   // RELEASE.preworld-boot-stage — each await below names its boot stage on the reporter.
@@ -1833,6 +1850,8 @@ async function main() {
   }
 
   const cameraController = new CameraController(sceneManager.camera);
+  // RELEASE.first-minute — the GPU's class (integrated / discrete / software); the renderer string stays here.
+  worldReporter?.setGpu(classifyGpu(unmaskedRenderer(sceneManager.renderer?.getContext())));
 
   // ── Rebindable keyboard system (VISUAL.127) ────────────────────────────
   // One registry drives BOTH movement (via CameraController.keyTranslator) and
@@ -4832,6 +4851,8 @@ async function main() {
   setTimeout(() => { loadingOverlay.remove(); splashScaleCleanup?.(); splashScaleCleanup = null; }, 500);
 
   let gameStarted = false;
+  /** RELEASE.first-minute — the next world entry is the automatic resume after an in-world drop. */
+  let worldResumePending = false;
   // FAITHFUL.498 — Map<lowercase, originalCase> instead of Set<lowercase>.
   // Pre-fix `/squelch list` rendered names as the lowercase storage key
   // (e.g. "Squelched: bob, frith") instead of the original proper-noun
@@ -5119,6 +5140,8 @@ async function main() {
     gameLoop.start();
     gameStarted = true;
     preworldReporter?.enteredWorld();
+    worldReporter?.enteredWorld(worldResumePending);
+    worldResumePending = false;
     // CORE.17.k — retail gmUIElement_LinkStatusIndicator::UseTime: feed the
     // LinkStatusHolder sample (connected + seconds since the last packet)
     // to the 4-state model every frame-ish; the model itself re-evaluates
@@ -5533,6 +5556,9 @@ async function main() {
    * Idempotent; safe to call when nothing is up.
    */
   function teardownWorldState(): void {
+    // RELEASE.first-minute — every way out of the world comes through here; the call sites
+    // name the exit first, so this only closes a session none of them named.
+    worldReporter?.left('disconnected');
     // Combat/target chain — same 4-step clear as FAITHFUL.459-461 plus the
     // FAITHFUL.463 melee-approach trio.
     currentTargetGuid = null;
@@ -7250,6 +7276,19 @@ async function main() {
     charListReceived: preworldReporter?.characterListReceived ?? false,
   });
   gameUI.onRelaunch = () => preworldReporter?.leavingForReload('epilogue');
+  worldReporter?.setSources({
+    screen: () => {
+      if (gameUI.disconnectedScreenShown) return 'disconnected';
+      if (gameStarted) return gameUI.portalSpaceCovering ? 'portal_space' : 'world';
+      return sessionConnected() ? 'char_select' : 'connecting';
+    },
+    modal: () => gameUI.openBlockingWindow(),
+    moving: () => cameraController.isMoving,
+    unresolvedMisses: () => {
+      const stores = [...new Set([streamingDats, worldStreamingDats])].filter((x): x is StreamingDats => !!x);
+      return stores.length ? stores.reduce((n, sd) => n + sd.store.stats.unresolvedMisses, 0) : null;
+    },
+  });
   preworldChargenStep = () => chargenStepName(gameUI.chargenStep);
   const applyUpdatePolicy = (): void => {
     const action = decideUpdateAction({
@@ -7413,7 +7452,7 @@ async function main() {
   // flush runs after this handler, with no connection left); the pre-world
   // reporter reads the screen before the disconnect tears the world down.
   installUnloadSessionClose(window, {
-    module: gameUI, connection: aceConnection, reporter: { pageUnloading: () => preworldReporter?.pageUnloading() },
+    module: gameUI, connection: aceConnection, reporter: { pageUnloading: () => { preworldReporter?.pageUnloading(); worldReporter?.left('closed_tab'); } },
     after: () => sessionStorage.setItem('aceDisconnectTime', Date.now().toString()),
   });
   // Expose for debugging
@@ -7567,6 +7606,8 @@ async function main() {
   const raiseServerDied = (text: string = connectionLostText()): void => {
     if (serverDiedShown || gameUI.disconnectedScreenShown) return;
     serverDiedShown = true;
+    worldResumePending = false;
+    worldReporter?.left('disconnected');
     sessionLifecycle.noteDisconnected();
     sessionLifecycle.endResume();
     if (gameStarted || gameplayUi.isShown) teardownWorldState();
@@ -11539,6 +11580,7 @@ async function main() {
         // SessionLifecycle logout intent keeps auto-enter from
         // immediately re-entering.
         sessionLifecycle.noteLoggedOut();
+        worldReporter?.left('logout');
         gameUI.noteLogOffExecuted(); // ExecuteLogOff: logOffRequested = false
         magTools?.loggedOut();
         if (gameStarted || gameplayUi.isShown) teardownWorldState();
@@ -16144,6 +16186,7 @@ async function main() {
         },
         chat: (text) => gameUI.callbacks.onChatSend?.(text),
         key: (code, down) => { if (down) cameraController.simulateKeyDown(code); else cameraController.simulateKeyUp(code); },
+        runIsDefault: () => cameraController.runIsDefault,
         setYaw: (yaw) => { cameraController.playerYaw = yaw; cameraController.cameraYawOffset = 0; },
         pickUp: (guid) => { agentPrimeMoveState(); return placeInBackpack(guid); },
         drop: (guid) => {
@@ -17182,6 +17225,8 @@ async function main() {
           // deliberate logout: keep the last-entered character so
           // /reconnect resumes it.
           const droppedInWorld = sessionLifecycle.inWorld || sessionLifecycle.resumingAfterDrop;
+          // RELEASE.first-minute — the world session ended under the player (a no-op after a tab close).
+          worldReporter?.left('disconnected');
           sessionLifecycle.noteDisconnected();
           if (gameStarted || gameplayUi.isShown) teardownWorldState();
           // FAITHFUL.260 — drop the 'connection' indicator on disconnect.
@@ -17197,7 +17242,7 @@ async function main() {
           // chat line was a client diagnostic retail never printed.
           if (event.everOpened && !event.deliberate) {
             // In the world (or mid-resume): reconnect and re-enter on our own first.
-            if (droppedInWorld && scheduleResume()) break;
+            if (droppedInWorld && scheduleResume()) { worldResumePending = true; break; }
             if (!droppedInWorld) preworldReporter?.dropped();
             raiseServerDied();
           }
@@ -19097,6 +19142,8 @@ async function main() {
     // layers held the warm login gate ~1.5 s on SwiftShader, 2026-10-05).
     if ((!draw && !sceneManager.capturePending) || gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
     else sceneManager.render();
+    // RELEASE.first-minute — counters only (WorldReporter.frame); the world counts as drawn once no portal space covers it.
+    if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering);
     // SceneTool::UpdateFPSCounter runs after every flip; gmSmartBoxUI::UseTime redraws the meter each frame.
     if (framerateMeter) {
       framerateMeter.frame(now / 1000);

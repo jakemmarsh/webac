@@ -74,7 +74,13 @@ const CORPSE = /^Your corpse is located at \(([^)]+)\)/;
 const KILLED_BY = [/courtesy of (.+?)[!.]?$/i, /^(?!You\b|Your\b)(.+?) \w+ you\b(?![^!]*\bfor \d+ points?)[^"]*!$/];
 const CHANNELS: ReadonlySet<string> = new Set(['fellowship', 'allegiance', 'general', 'trade', 'lfg', 'roleplay', 'society']);
 const MAGIC = /^(Casting |You cast |Your spell |With .+ you restore|The spell consumed|You resist the spell|You learn |You fail to affect|.+ casts .+ on you)|\bspell\b/i;
-const COMBAT = /\bfor \d+ points? of [\w ]*damage|\bevaded\b|^You (killed|slay)\b|\bdied!$|deafening silence of death|^Critical hit|\bslays you\b|\bkills you\b/i;
+const COMBAT = /\bfor \d+ points? (?:of [\w ]*damage|with )|\bevaded\b|^You (killed|slay)\b|\bdied!$|deafening silence of death|^Critical hit|\bslays you\b|\bkills you\b/i;
+/**
+ * A kill, as the killer reads it (ACE Strings.cs, the "{0}" side of each damage type's death messages): a war spell's
+ * kill ("… is incinerated by your assault!", "You bring … to a fiery end!") went to the overlay's chat as system
+ * text, as did its damage line ("You burn … for 43 points with Flame Bolt III."), 13 lines in rehearsal 2 (2026-10-13).
+ */
+const KILL = /by your (?:assault|attack)!$|(?:corpse falls|corpse smolders|last strength dissolves|last strength withers) before you!$|^You (?:split|cleave|run|beat|flatten|bring|reduce|obliterate|smite|knock|send) .+!$|^Your (?:killing blow|attack stops|assault sends|lightning coruscates)\b|with dire consequences!$|^The deadly force of your attack\b/;
 
 /** A chat channel by its bracketed name ("[Fellowship]" → fellowship), else other. */
 function channelOf(bracket: string | undefined, fallback: ChatChannel): ChatChannel {
@@ -85,7 +91,7 @@ function channelOf(bracket: string | undefined, fallback: ChatChannel): ChatChan
 
 /** A line nobody said: its likely channel (the chat log keeps no chat type, so by its wording). */
 export function systemChannel(text: string): ChatChannel {
-  if (COMBAT.test(text)) return 'combat';
+  if (COMBAT.test(text) || KILL.test(text)) return 'combat';
   if (MAGIC.test(text)) return 'magic';
   return 'system';
 }
