@@ -494,4 +494,37 @@ describe('GameUI hands the window the runtime\'s sources', () => {
     H.ui.toggleMagToolsWindow();
     H.ui.setMagTools(null);
   });
+
+  it('Misc → Options\' whitelist editor feeds Auto Trade Accept: a partner added there is accepted', () => {
+    const m = runtime();
+    m.on('AutoTradeAccept.Enabled');
+    H.ui.setMagTools(m.rt);
+    H.ui.toggleMagToolsWindow();
+    const el = () => H.ui.vtankWindows.get('magtools')!.el as HTMLElement;
+    el().querySelector<HTMLElement>('[data-mt-tab="   Misc   "]')!.click();
+    const type = (v: string) => { const f = el().querySelector<HTMLInputElement>('input[name="AutoTradeAcceptWhitelistText"]')!; f.value = v; f.dispatchEvent(new Event('input')); };
+    const add = () => el().querySelector<HTMLElement>('[data-mt-page="misc/options"] [data-mt-button="Add"]')!.click();
+    type('Mule.*');
+    add();
+    type('Bad[');
+    add();
+    expect(m.rt.tradeWhitelist()).toEqual(['Mule.*']);
+    expect(m.printed).toContain('<{Mag-Tools}>: Auto Trade Accept - "Bad[" is not a valid regular expression.');
+    const rows = [...el().querySelectorAll<HTMLElement>('[data-mt-list="AutoTradeAcceptWhitelist"] [data-mt-row]')];
+    expect(rows.map((r) => r.querySelector<HTMLElement>('[data-mt-cell="0"]')!.dataset.text)).toEqual(['Mule.*']);
+    // The trade path reads what the editor wrote.
+    m.rt.tradeOpened({ initiatorGuid: 0x6001, partnerGuid: 0x6001, partner: 'Mule Two' });
+    m.rt.tradeAcceptedBy(0x6001);
+    expect(m.g.calls).toEqual(['trade accept']);
+    // The delete icon takes it out again: the next partner's Accept isn't answered.
+    rows[0]!.querySelector<HTMLElement>('[data-mt-cell="1"] [data-icon]')!.click();
+    expect(m.rt.tradeWhitelist()).toEqual([]);
+    m.rt.tradeClosed();
+    m.advance(5000);
+    m.rt.tradeOpened({ initiatorGuid: 0x6001, partnerGuid: 0x6001, partner: 'Mule Two' });
+    m.rt.tradeAcceptedBy(0x6001);
+    expect(m.g.calls).toEqual(['trade accept']);
+    H.ui.toggleMagToolsWindow();
+    H.ui.setMagTools(null);
+  });
 });

@@ -7,11 +7,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  AttackConditions, DamageType, formatAttackerChat, MtCombatParser, MtCombatTracker, MtManaTracker, MtOptions,
-  type MtOptionStorage, type MtWornItem,
+  AttackConditions, DamageType, formatAttackerChat, MT_TRADE_WHITELIST_KEY, MtCombatParser, MtCombatTracker, MtManaTracker, MtOptions,
+  mtTradeWhitelistMatches, readMtTradeWhitelist, writeMtTradeWhitelist, type MtOptionStorage, type MtWornItem,
 } from '@ac/shared';
 import {
-  MagToolsWindow, MT_ABOUT_THANKS, MT_FRAME, MT_WINDOW, type MagToolsHost,
+  MagToolsWindow, MT_ABOUT_THANKS, MT_FRAME, MT_TRADE_WHITELIST_LABEL, MT_WINDOW, type MagToolsHost,
 } from '../packages/renderer/src/ui/magtools/MagToolsWindow.ts';
 import type { VTankKit } from '../packages/renderer/src/ui/automation/VTankWindow.ts';
 
@@ -24,7 +24,7 @@ function fakeKit(icons: number[]): VTankKit {
     check: (on: boolean, onChange: (v: boolean) => void) => div({ check: on ? '1' : '0' }, () => onChange(!on)),
     input: (value: string, _w: number, onChange: (v: string) => void) => { const i = document.createElement('input'); i.value = value; i.addEventListener('input', () => onChange(i.value)); return i; },
     row: (_sel: boolean, onClick?: () => void) => div({ row: '1' }, onClick),
-    icon: (id: number) => { icons.push(id); return div({ icon: String(id) }); },
+    icon: (id: number, _size: number, onClick?: () => void) => { icons.push(id); return div({ icon: String(id) }, onClick); },
     list: () => {},
     colors: { text: 'white', dim: 'grey', gold: 'gold', good: 'green', warn: 'yellow', bad: 'red' },
   };
@@ -208,5 +208,85 @@ describe('Mag-Tools main window (spec §2)', () => {
     const u = setup();
     const r = u.body.querySelector<HTMLElement>('[data-mt-option="ManaManagement.AutoRecharge"]')!;
     expect([r.style.left, r.style.top, r.dataset.on]).toEqual(['125px', '386px', '1']);
+  });
+
+  describe('Auto Trade Accept whitelist editor (Misc → Options; ours, spec §3.4)', () => {
+    const withWhitelist = () => {
+      const t = setup();
+      const printed: string[] = [];
+      const store: MtOptionStorage = { get: (k) => t.stored.get(k), set: (k, v) => { t.stored.set(k, v); } };
+      t.host.tradeWhitelist = { read: () => readMtTradeWhitelist(store), write: (p) => writeMtTradeWhitelist(store, p), print: (l) => printed.push(l) };
+      t.win.render(t.body);
+      t.click('[data-mt-tab="   Misc   "]');
+      const field = () => t.body.querySelector<HTMLInputElement>('input[name="AutoTradeAcceptWhitelistText"]')!;
+      const type = (v: string) => { const f = field(); f.value = v; f.dispatchEvent(new Event('input')); };
+      const add = () => t.click('[data-mt-page="misc/options"] [data-mt-button="Add"]');
+      const rows = () => [...t.body.querySelectorAll<HTMLElement>('[data-mt-list="AutoTradeAcceptWhitelist"] [data-mt-row]')]
+        .map((r) => r.querySelector<HTMLElement>('[data-mt-cell="0"]')!.dataset.text);
+      const stored = () => JSON.parse(t.stored.get(MT_TRADE_WHITELIST_KEY) ?? '[]') as string[];
+      return { t, printed, field, type, add, rows, stored };
+    };
+
+    it('sits right of the option list with its label, a named text box, Add and a list', () => {
+      const w = withWhitelist();
+      const label = w.t.body.querySelector<HTMLElement>('[data-mt="AutoTradeAcceptWhitelistLabel"]')!;
+      expect(label.textContent).toBe(MT_TRADE_WHITELIST_LABEL);
+      expect([label.style.left, label.style.top]).toEqual(['225px', '45px']);
+      expect(w.field()).not.toBeNull();
+      const list = w.t.body.querySelector<HTMLElement>('[data-mt-list="AutoTradeAcceptWhitelist"]')!;
+      // The label wraps to three VVS lines (45..~81): the box sits below it (live, 2026-10-13: "(regex):" ran into it at 80).
+      const box = w.t.body.querySelector<HTMLElement>('[data-mt="AutoTradeAcceptWhitelistText"]');
+      expect(box?.style.top).toBe('90px');
+      expect([list.style.left, list.style.top, list.style.width]).toEqual(['222px', '135px', '98px']);
+      // Gone with its option (optionShown) or without a source.
+      w.t.host.optionShown = (d) => d.path !== 'AutoTradeAccept.Enabled';
+      w.t.win.render(w.t.body);
+      expect(w.t.body.querySelector('[data-mt-list="AutoTradeAcceptWhitelist"]')).toBeNull();
+    });
+
+    it('Add stores the typed regex and lists it; blanks and duplicates are ignored', () => {
+      const w = withWhitelist();
+      w.type('  Hero.*  ');
+      w.add();
+      expect(w.stored()).toEqual(['Hero.*']);
+      expect(w.rows()).toEqual(['Hero.*']);
+      expect(w.field().value).toBe('');
+      w.type('Mule|Bank');
+      w.add();
+      w.type('Hero.*');
+      w.add();
+      w.type('   ');
+      w.add();
+      expect(w.stored()).toEqual(['Hero.*', 'Mule|Bank']);
+      expect(w.rows()).toEqual(['Hero.*', 'Mule|Bank']);
+      expect(w.printed).toEqual([]);
+      // The stored entries keep the full-name regex semantics.
+      expect(mtTradeWhitelistMatches('Heroic Mule', w.stored())).toBe(true);
+      expect(mtTradeWhitelistMatches('Mulex', w.stored())).toBe(false);
+    });
+
+    it('the delete icon removes its entry', () => {
+      const w = withWhitelist();
+      for (const v of ['Alpha', 'Beta', 'Gamma']) { w.type(v); w.add(); }
+      const beta = w.t.body.querySelectorAll<HTMLElement>('[data-mt-list="AutoTradeAcceptWhitelist"] [data-mt-row]')[1]!;
+      (beta.querySelector('[data-mt-cell="1"] [data-icon]') as HTMLElement).click();
+      expect(w.stored()).toEqual(['Alpha', 'Gamma']);
+      expect(w.rows()).toEqual(['Alpha', 'Gamma']);
+    });
+
+    it('refuses an invalid regex with a Mag-Tools chat line and keeps the text to fix', () => {
+      const w = withWhitelist();
+      w.type('Hero[');
+      w.add();
+      w.type('a)(b');
+      w.add();
+      expect(w.t.stored.has(MT_TRADE_WHITELIST_KEY)).toBe(false);
+      expect(w.rows()).toEqual([]);
+      expect(w.printed).toEqual([
+        '<{Mag-Tools}>: Auto Trade Accept - "Hero[" is not a valid regular expression.',
+        '<{Mag-Tools}>: Auto Trade Accept - "a)(b" is not a valid regular expression.',
+      ]);
+      expect(w.field().value).toBe('a)(b');
+    });
   });
 });

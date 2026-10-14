@@ -21931,6 +21931,8 @@ export class GameUI {
       chatLog: { logger: rt.chatLogger, fileName: () => rt.chatLogFileName(), download: (name, text) => kit.download(name, text) },
       inventory: { items: () => rt.inventoryToolItems(), select: (id) => rt.selectInventoryItem(id), copy: (which) => { void rt.copyInventory(which, (name, text) => kit.download(name, text)); } },
       commands: { lists: rt.commandLists, character: () => rt.characterScope(), server: () => rt.serverScope() },
+      // Misc → Options' Auto Trade Accept whitelist editor (the regexes the accept path reads).
+      tradeWhitelist: { read: () => rt.tradeWhitelist(), write: (p) => rt.setTradeWhitelist(p), print: (line) => rt.x.print(line) },
       redraw,
       // Only options whose feature runs here (no dead-end UI): magToolsRuntime mtOptionWired.
       optionShown: (d) => mtOptionWired(d),
@@ -21988,8 +21990,9 @@ export class GameUI {
     if (this.goArrow) {
       const rt = this.goArrow;
       out.push({ id: 'goarrow', plugin: 'GoArrow', title: 'GoArrow', icon: { dat: 0x06001f80 }, open: this.vtankWindows.has('goarrow'), toggle: () => this.toggleGoArrowWindow() });
-      // GoArrow's VVS bar button for its arrow ("GoArrow: Arrow"), with its MIT toolbar glyph.
-      out.push({ id: 'goarrow-arrow', plugin: 'GoArrow', title: 'GoArrow: Arrow', icon: { url: goArrowGlyphUrl() }, open: rt.settings().visible, toggle: () => { rt.saveSettings({ visible: !rt.settings().visible }); this.refreshVvsBar(); } });
+      // GoArrow's VVS bar button for its arrow ("GoArrow: Arrow"), with its MIT toolbar glyph. It works the Show Arrow box, so
+      // switching it on indoors says why nothing appears ("…not visible because you are indoors").
+      out.push({ id: 'goarrow-arrow', plugin: 'GoArrow', title: 'GoArrow: Arrow', icon: { url: goArrowGlyphUrl() }, open: rt.settings().visible, toggle: () => { rt.model.setShowArrow(!rt.settings().visible); this.refreshVvsBar(); } });
     }
     // Virindi Chat System 5: its snow globe is Virindi's art, so our own stand-in (virindiIcons.ts).
     if (this.previewFeatures) out.push({ id: 'vcs', plugin: 'Virindi Chat System', title: VCS_TITLE, icon: { url: VCS_ICON_PNG }, open: this.vtankWindows.has('vcs'), toggle: () => this.toggleVcsWindow() });

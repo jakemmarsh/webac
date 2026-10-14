@@ -719,6 +719,70 @@ export class AgentApi {
     }
   }
   private lastDead = false;
+
+  /**
+   * Your corpse as the server last placed it, for a routine's "my corpse within" past the objects your client
+   * knows (a corpse 425 m back at the lifestone never held at 500 m, Dark Majesty 2026-10-13). An outdoor death
+   * that drops items sends "Your corpse is located at (19.9S, 0.1W)." (ACE Creature_Death.OnDeath →
+   * GameMessageSystemChat, Broadcast; ClassicACE the same; AC1999's server doesn't send it, so there only a corpse in
+   * view counts). x, y: AC global metres (parseMapCoords: the line's 0.1 map units are 24 m, so it is ±12 m).
+   * `guid`: the "Corpse of <you>" object seen at that spot (its exact place then replaces the line's); `lost`:
+   * whether the client had let it go out of range when last looked at. Forgotten when the next such line replaces
+   * it, when it rots (ACE Corpse.RecalculateDecayTime: max(1 h, 5 min × your level) for a corpse holding items), or
+   * when it leaves the client while in view (looted empty, ACE drops TimeToRot to Corpse.EmptyDecayTime 15 s;
+   * or a server's per-player corpse cap rotting it early, ACE Landblock.AddWorldObjectInternal).
+   */
+  private corpseMark: { x: number; y: number; at: number; rotMs: number; guid: number | null; lost: boolean } | null = null;
+  /** The server's corpse line ("located at(90.9S, 96.0W)" in the retail capture quoted by ClassicDereth Player.cpp: no space). */
+  static readonly CORPSE_LINE = /^Your corpse is located at\s*\(([^)]*)\)\.?$/i;
+  /** A corpse seen this close to the line's spot is the one the line named (the line's coordinates are ±12 m). */
+  static readonly CORPSE_MATCH_M = 24;
+  /** ACE Corpse.RecalculateDecayTime for a player corpse with items: max(3600, level × 300) seconds. */
+  static corpseRotSeconds(level: number): number { return Math.max(3600, (level || 1) * 300); }
+
+  /** Where your corpse is (global metres) as the server said or the client sees it; null when there's none to go back to. */
+  myCorpse(): { x: number; y: number; guid: number | null; at: number } | null {
+    this.settleCorpse();
+    const c = this.corpseMark;
+    return c ? { x: c.x, y: c.y, guid: c.guid, at: c.at } : null;
+  }
+
+  private noteCorpseLine(line: string): void {
+    const m = AgentApi.CORPSE_LINE.exec(line.trim());
+    const p = m ? parseMapCoords(m[1]) : null;
+    if (!p) return;
+    this.corpseMark = { x: p.x, y: p.y, at: this.host.now(), rotMs: AgentApi.corpseRotSeconds(this.host.self()?.level ?? 1) * 1000, guid: null, lost: false };
+  }
+
+  /** Ties the remembered corpse to the object in view, and forgets it once it rotted or left the client while in view. */
+  private settleCorpse(): void {
+    const c = this.corpseMark;
+    if (!c) return;
+    if (this.host.now() - c.at > c.rotMs) { this.corpseMark = null; return; }
+    if (c.guid !== null) {
+      const o = this.host.object(c.guid);
+      if (!o) {
+        // Gone from the client. In view (not released out of range, not mid-portal): the server removed it.
+        if (!c.lost && this.host.screen() === 'world') this.corpseMark = null;
+        else c.guid = null;
+        return;
+      }
+      c.lost = !!o.lost;
+      if (o.cell && !o.containerId && !o.wielderId) { const g = toGlobal(o.cell, o.x, o.y); c.x = g.x; c.y = g.y; }
+      return;
+    }
+    const me = this.host.self();
+    if (!me) return;
+    const mine = `corpse of ${me.name}`.toLowerCase();
+    for (const o of this.host.objects()) {
+      if (o.lost || !o.cell || o.containerId || o.wielderId || o.name.toLowerCase() !== mine) continue;
+      const g = toGlobal(o.cell, o.x, o.y);
+      if (Math.hypot(g.x - c.x, g.y - c.y) > AgentApi.CORPSE_MATCH_M) continue;
+      c.guid = o.guid; c.lost = false; c.x = g.x; c.y = g.y;
+      return;
+    }
+  }
+
   private lastScreen: AgentScreen = 'unknown';
   private watchedTarget = 0;
   private attackTarget = 0;
@@ -887,6 +951,7 @@ export class AgentApi {
     const clean = text.replace(/\s+$/, '');
     if (!clean) return;
     this.push('chat', `(${chatKindOf(type, clean)}) ${clean}`, undefined, type);
+    this.noteCorpseLine(clean);
     // Something attacked you: every incoming swing or spell is a CombatEnemy (0x15) line ("… hits you",
     // "… misses you", "You evaded …"), a 0-damage hit included, so an agent can wait on being attacked
     // instead of on vitals-low.
@@ -1009,13 +1074,29 @@ export class AgentApi {
   }
 
   /**
-   * The server ended an attack sequence (AttackDone; ACE Player.OnAttackDone always says ActionCancelled). Ends
-   * that come with no swing between them mean the server would not attack the target at all: ACE ends at once,
-   * silently, when it can't find it (dead and gone on its side), or can't reach it.
+   * The server ended an attack, or one swing of it (AttackDone and its WeenieError code). Ends that come with no
+   * swing between them mean the server would not attack the target at all: ACE ends at once, silently, with
+   * ActionCancelled (Player_Melee.OnAttackDone) when it can't find it (dead and gone on its side) or can't reach it.
+   * Code 0 is different: a swing that finished (ACE Player_Melee.Attack sends it between repeat swings; the AC1999
+   * server's AttackManager::OnAttackDone after every swing). A finished swing that named the target in no line passed
+   * over or under it: the AC1999 server's CMeleeAttackEvent::ConeHitHeight returns UNDEF_ATTACK_HEIGHT for a swing above
+   * the target's height and HandlePerformAttack then does nothing (no hit, no evade, no line), so a medium swing at a
+   * Desert Rabbit ends with AttackDone 0 and nothing else (2026-10-13). The attack tries the other heights for those.
+   * `code` undefined: the host didn't say (counted as an end at once).
    */
-  pushAttackDone(): void { this.attackDones.push({ at: this.host.now(), seq: this.seqN }); if (this.attackDones.length > 20) this.attackDones.shift(); }
-  private attackDones: Array<{ at: number; seq: number }> = [];
+  pushAttackDone(code?: number): void {
+    this.attackDones.push({ at: this.host.now(), seq: this.seqN, ord: ++this.meleeOrd, swung: code === AgentApi.ATTACK_DONE_SWUNG });
+    if (this.attackDones.length > 20) this.attackDones.shift();
+  }
+  /** A TargetedMeleeAttack went out at this height (main.ts's send): ends before it say nothing about that height. */
+  noteMeleeSent(height: string): void { this.meleeSends.push({ height, seq: this.seqN, ord: ++this.meleeOrd }); if (this.meleeSends.length > 20) this.meleeSends.shift(); }
+  /** Orders melee sends and AttackDones against each other (both can fall between the same two events). */
+  private meleeOrd = 0;
+  private meleeSends: Array<{ height: string; seq: number; ord: number }> = [];
+  private attackDones: Array<{ at: number; seq: number; ord: number; swung: boolean }> = [];
   static readonly EMPTY_ATTACKS_TO_STOP = 3;
+  /** AttackDone's code for a swing that finished (WeenieError None); every other code ends the attack. */
+  static readonly ATTACK_DONE_SWUNG = 0;
 
   static readonly USE_VITAL_MIN_CHANGE = 5;
   /** A use-report line that only says a vital changed. */
@@ -4281,6 +4362,7 @@ export class AgentApi {
     const power = Math.min(Math.max((opts.power === 'bar' ? this.host.attackPower?.() : opts.power) ?? 0.6, 0), 1);
     this.host.select(guid);
     this.attackTarget = guid;
+    this.meleeSends = []; // a new attack: earlier requests say nothing about it
     // A caster (a wand, staff or orb wielded, or already in magic mode): the attack is spells, chosen as the macro chooses
     // them. Before 2026-10-13 it sent the attack key's swing, which a caster has none of: the host asked for magic mode
     // every 1.5 s and nothing was ever cast (a routine's pull of a Sparring Golem, ac_attack with a Training Wand).
@@ -4310,23 +4392,44 @@ export class AgentApi {
       let quietSince: number | null = null;
       // Heights tried in a row with nothing reported.
       let quietHeights = 0;
+      // Attack ends from this seq on are the current height's (a height change starts the count again).
+      let heightSeq = startSeq;
       // Shots in a row the server answered "Your missile attack hit the environment." (ACE ProjectileCollisionHelper /
       // Creature_Missile: the arrow met a wall, the ground or a lip before the target); a blow or evade resets it.
       let envHits = 0;
       let envSeq = startSeq;
       const envLine = (text: string): boolean => HIT_ENVIRONMENT.test(text.replace(/^\([a-z]+\) /i, '').trim());
+      // As a player does: try the next height on the combat bar (medium → low → high → medium).
+      const nextHeight = (why: string, now: number): void => {
+        height = height === 'medium' ? 'low' : height === 'low' ? 'high' : 'medium';
+        this.host.setAttackHeight?.(height);
+        this.host.cancelAttack();
+        quietSince = null;
+        heightSeq = this.seqN;
+        lastActivity = now; // each height gets its own try before the 20 s give-up
+        sent = false;
+        this.push('chat', `(system) [Agent] ${why}: attacking ${height} instead`);
+      };
+      // The height of a swing that reached it is kept for its kind, the killing blow's too (a one-hit kill ends the
+      // task on its death before the swing check below sees the line: a rabbit killed by its first low swing, 2026-10-13).
+      const noteReach = (): void => {
+        if (this.events.some((e) => e.seq > lastCombatSeq && e.type === 'chat' && e.text.startsWith('(combat)') && swingReached(e.text, name))) AgentApi.reachHeights.set(name.toLowerCase(), height);
+      };
       void this.startTask(`attacking ${name}`, (now) => {
         if (this.host.isDying(guid) || (!this.host.object(guid) && this.dyingSeen.has(guid))) {
+          noteReach();
           if (this.attackTarget === guid) { this.attackTarget = 0; this.dyingSeen.delete(guid); this.push('target-died', `${name} #${guid.toString(16)} died`, guid); }
           return { ok: true, message: `${name} is dead` };
         }
         if (!this.host.object(guid)) {
+          noteReach();
           // objectRemoved (tick) decides died vs lost: the death start, a kill line or the corpse.
           return this.killedRecently(name) ? { ok: true, message: `${name} is dead` } : { ok: false, message: `${name} is gone (dead or out of view: see the target-died / target-lost event)` };
         }
         if (this.host.self()?.dead) return { ok: false, message: 'you died' };
         // A kill line naming it is its death, even while the client still shows it (its death start missed).
         if (this.killedRecently(name, startSeq)) {
+          noteReach();
           this.host.cancelAttack();
           if (this.attackTarget === guid) { this.attackTarget = 0; this.push('target-died', `${name} #${guid.toString(16)} died`, guid); }
           return { ok: true, message: `${name} is dead` };
@@ -4374,18 +4477,41 @@ export class AgentApi {
         // Only a combat line naming THIS target is a swing: another creature hitting you meanwhile ("Banderling
         // Scout nicks your foot", "You evaded Banderling Scout!") said nothing about it, and counting those kept
         // Bulwark swinging at a phantom Mite Sentry for a minute (2026-10-11, soldier.log AttackDone 0x36 × 30).
-        const ends = this.attackDones.filter((d) => d.at >= start);
+        const ends = this.attackDones.filter((d) => d.at >= start && d.seq > heightSeq);
+        // After a height change only ends after the first request sent at the new height say anything about it. The AC1999
+        // server repeats a swing on its own (several AttackDones per request), so ends kept coming at the old height after
+        // the bar moved; counting them skipped "low" on a Desert Rabbit before a low swing was ever sent (medium → high →
+        // "won't attack it at any height", though low kills it; live, 2026-10-13). Hosts that report no sends count as before.
+        if (quietHeights > 0 && this.meleeSends.length) {
+          const first = this.meleeSends.find((m) => m.seq >= heightSeq && m.height === height);
+          for (let i = ends.length - 1; i >= 0; i--) if (!first || ends[i].ord < first.ord) ends.splice(i, 1);
+          // The old height's swing in flight when the bar moved can still end after that request: the first end is its.
+          ends.shift();
+        }
         let empty = 0;
+        // Of those, swings that finished (AttackDone 0) and named the target in no line: whiffs over or under it.
+        let whiffs = 0;
         for (let i = ends.length - 1; i >= 0; i--) {
-          const after = ends[i].seq, before = i > 0 ? ends[i - 1].seq : startSeq;
+          const after = ends[i].seq, before = i > 0 ? ends[i - 1].seq : heightSeq;
           // A shot that hit the environment was a shot (the env-hit rule above answers for those).
           if (this.events.some((e) => e.seq > before && e.seq <= after && e.type === 'chat' && (combatLineNames(e.text, name) || (ranged && envLine(e.text))))) break;
           empty++;
+          if (ends[i].swung) whiffs++;
         }
-        if (empty >= AgentApi.EMPTY_ATTACKS_TO_STOP) {
+        // Melee swings that finished and hit nothing: the AC1999 server's cone height test (see pushAttackDone). Try the
+        // other heights, as a player does on the combat bar, before calling the target gone: the first height gets the
+        // usual three ends, each other height one swing. ACE never ends a swing with 0 and no line (no cone height test;
+        // its gone-target ends are ActionCancelled), so this never runs there.
+        if (!ranged && whiffs >= (quietHeights === 0 ? AgentApi.EMPTY_ATTACKS_TO_STOP : 1) && ++quietHeights < 3) {
+          nextHeight(`swings at ${name} hit nothing at ${height} height`, now);
+          return null;
+        }
+        const everyHeight = !ranged && quietHeights >= 3;
+        if (everyHeight || empty >= AgentApi.EMPTY_ATTACKS_TO_STOP) {
+          const n = everyHeight ? this.attackDones.filter((d) => d.at >= start).length : empty;
           this.host.cancelAttack();
-          if (this.attackTarget === guid) { this.attackTarget = 0; this.push('target-lost', `${name} #${guid.toString(16)}: the server won't attack it`, guid); }
-          return { ok: false, message: `the server ended ${empty} attacks on ${name} at once, with no swing: it is probably dead or gone on the server's side (the client still shows it), or out of reach. Pick another target, or walk_to it if it should be there.` };
+          if (this.attackTarget === guid) { this.attackTarget = 0; this.push('target-lost', `${name} #${guid.toString(16)}: the server won't attack it${everyHeight ? ' at any height' : ''}`, guid); }
+          return { ok: false, message: `the server ended ${n} attacks on ${name}${everyHeight ? ' at all three heights' : ''} at once, with no swing: it is probably dead or gone on the server's side (the client still shows it), or out of reach. Pick another target, or walk_to it if it should be there.` };
         }
         // Every end of the attack is an event the attack's suggested wait hears (target-died / target-lost): an attack
         // that gave up quietly left \`ac_wait types=target-died,target-lost,…\` asleep for 45 s with no hits (a "phantom"
@@ -4407,14 +4533,7 @@ export class AgentApi {
             return { ok: false, message: `swings at ${name} at all three heights reported nothing (no hit, no evade) for ${Math.round((now - start) / 1000)} s: it may not be there on the server's side, or your swings can't reach it. Pick another target, or walk_to it and look (ac_look)` };
           }
           if (now - quietSince >= AgentApi.QUIET_SWING_MS) {
-            // As a player does: try the next height on the combat bar (medium → low → high).
-            height = height === 'medium' ? 'low' : height === 'low' ? 'high' : 'medium';
-            this.host.setAttackHeight?.(height);
-            this.host.cancelAttack();
-            quietSince = null;
-            lastActivity = now; // each height gets its own try before the 20 s give-up
-            sent = false;
-            this.push('chat', `(system) [Agent] swings at ${name} report nothing: attacking ${height} instead`);
+            nextHeight(`swings at ${name} report nothing`, now);
             return null;
           }
         } else quietSince = null;
@@ -4777,6 +4896,7 @@ export class AgentApi {
 
   /** Step the running task and the watchers. main.ts calls this ~10×/s. */
   tick(): void {
+    this.settleCorpse();
     this.routine.tick();
     const now = this.host.now();
     const t = this.task;

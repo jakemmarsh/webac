@@ -134,6 +134,7 @@ import type { AgentScreen, AgentSelf } from './agent/types.js';
 let agentUseDoneTap: ((code: number) => void) | null = null;
 /** The agent's tap on every AttackDone (its WeenieError code), set when the agent API is on. */
 let agentAttackDoneTap: ((code: number) => void) | null = null;
+let agentMeleeSentTap: ((height: string) => void) | null = null;
 import { examineText } from './agent/examineText.js';
 import { floorsAt, findRouteViaOutside, loadCellGraph, type CellGraph } from './agent/cellPath.js';
 import { RoutineSync } from './agent/RoutineSync.js';
@@ -12713,6 +12714,7 @@ async function main() {
       // ForwardCommand ServerObjectManager plays on our character), so it
       // shows the motion the server actually chose, when it actually swings.
       console.log(`[AC] Sent TargetedMeleeAttack: target=0x${targetGuid.toString(16)} height=${attackHeight} power=${powerLevel.toFixed(2)}`);
+      agentMeleeSentTap?.(attackHeight === AttackHeight.High ? 'high' : attackHeight === AttackHeight.Low ? 'low' : 'medium');
     };
 
     // Helper: send TargetedMissileAttack (0x000A) to ACE server.
@@ -16554,7 +16556,8 @@ async function main() {
         }
         addSystemMessage(text, color, type, targetWindowId, speech, preset);
       };
-      agentAttackDoneTap = () => agentApi.pushAttackDone();
+      agentAttackDoneTap = (code) => agentApi.pushAttackDone(code);
+      agentMeleeSentTap = (h) => agentApi.noteMeleeSent(h);
       agentUseDoneTap = (code) => agentApi.pushUseDone(code, Object.entries(WeenieError).find(([, v]) => v === code)?.[0] ?? `0x${code.toString(16)}`, weenieErrorText(code));
       // The agent's steering tick rides the frame step (the rAF frame, or the background beat when the
       // browser stops frames), not a page timer that a covered window throttles to once a second.

@@ -36,7 +36,8 @@
  *   and per server. Each tab is drawn only while its scope is known (in the world).
  * - Misc → Options and Misc → Filters: the Enabled / Option lists from MtOptions (and the
  *   `Target Output Window:` box), each row the setting's label; turning a child on turns its
- *   parent on (the core does that).
+ *   parent on (the core does that). Options also carries Auto Trade Accept's whitelist editor (ours; upstream had
+ *   none, spec §3.4) in the free column right of the list, when the host gives `tradeWhitelist`.
  * - Misc → About: Mag-Tools' thanks text, and our note that this is a rebuild.
  *
  * Left out (No Dead-End UI): Tools → Tinkering (incomplete upstream: it only appraises salvage, spec
@@ -52,6 +53,7 @@ import {
   MT_CHAT_LOG_COLUMNS, MT_CHAT_LOGGER_CHANNELS, MT_COMBAT_DETAIL_WIDTHS, MT_COMBAT_MONSTER_WIDTHS, MT_CORPSE_COLUMNS,
   MT_ICON_DELETE, MT_ICON_DOWN, MT_ICON_UP, MT_INV_COLUMNS, MT_INVENTORY_LIST_COLUMNS, MT_INVENTORY_SEARCH_HINT,
   MT_LOGIN_LIST_COLUMNS, MT_MANA_COLUMNS, MT_PERIODIC_LIST_COLUMNS, MT_PLAYER_COLUMNS, MT_TRACKER_HEADER, mtInventorySearch,
+  mtLine, mtTradeWhitelistAdd,
 } from '@ac/shared';
 import type { VTankKit } from '../automation/VTankWindow.js';
 
@@ -182,6 +184,19 @@ export interface MagToolsCommandSource {
   server(): MtCommandScope | null;
 }
 
+/** Auto Trade Accept's whitelist (magToolsRuntime tradeWhitelist / setTradeWhitelist) and the chat line for a refused entry. */
+export interface MagToolsTradeWhitelistSource {
+  read(): string[];
+  write(patterns: readonly string[]): void;
+  /** Print a whole chat line (the window passes a `<{Mag-Tools}>: ` line). */
+  print(line: string): void;
+}
+
+/** The whitelist editor's label (ours: upstream had no UI). */
+export const MT_TRADE_WHITELIST_LABEL = 'Auto Trade Accept from (regex):';
+/** Its list's columns: the regex, then the delete icon (inside the 98 px column, less the scrollbar). */
+const MT_TRADE_WHITELIST_COLUMNS = [62, 16] as const;
+
 /** What the window is given. Models in, redraw out; the window keeps only which tab and row are picked. */
 export interface MagToolsHost {
   mana: MagToolsManaSource;
@@ -193,6 +208,8 @@ export interface MagToolsHost {
   chatLog?: MagToolsChatLogSource;
   inventory?: MagToolsInventorySource;
   commands?: MagToolsCommandSource;
+  /** Misc → Options' Auto Trade Accept whitelist; absent, the editor isn't drawn. */
+  tradeWhitelist?: MagToolsTradeWhitelistSource;
   /** Re-render the window (the host calls render again). */
   redraw(): void;
   /**
@@ -627,11 +644,44 @@ export class MagToolsWindow {
         });
         area.appendChild(tag(at(field, 272, 17), { mt: 'OutputWindow' }));
       }
+      this.renderTradeWhitelist(area);
     } else if (this.misc === 'filters') {
       this.renderOptionList(area, 'Misc/Filters', ah);
     } else {
       this.renderAbout(area);
     }
+  }
+
+  /**
+   * Auto Trade Accept's whitelist editor. Upstream had no UI (users hand-edited Mag-Tools.xml's
+   * `<AutoTradeAccept><Whitelist><Add>…`; spec §3.4), so the place is ours: the free column right of the
+   * option list on Misc → Options, the page that holds `Auto Trade Accept Enabled`, under the Output
+   * Window box (which ends at y 33). Its own sub-tab would part it from its checkbox. Built like Tools →
+   * Character's lists: label 225,45 (95, wraps to three lines in the VVS font); text 225,90 (90); Add 225,110; list 222,135,98,200 with
+   * the delete icon. Drawn only while the option itself is (so never for a feature that doesn't run).
+   */
+  private renderTradeWhitelist(area: HTMLElement): void {
+    const { kit, host } = this;
+    const src = host.tradeWhitelist;
+    const def = host.options.def('AutoTradeAccept.Enabled');
+    if (!src || !def || !this.shown(def)) return;
+    const key = 'AutoTradeAcceptWhitelistText';
+    if (this.boxes[key] === undefined) this.boxes[key] = '';
+    area.appendChild(tag(at(kit.text(MT_TRADE_WHITELIST_LABEL, { color: kit.colors.text, maxWidth: 95 }), 225, 45), { mt: 'AutoTradeAcceptWhitelistLabel' }));
+    const field = kit.input(this.boxes[key]!, 90, (v) => { this.boxes[key] = v; });
+    // A stable name so the 1 s redraw puts focus back in this box (automation/keepFocus.ts).
+    inputOf(field)?.setAttribute('name', key);
+    area.appendChild(tag(at(field, 225, 90), { mt: key }));
+    this.button(area, 'Add', 225, 110, 40, () => {
+      const r = mtTradeWhitelistAdd(src.read(), this.boxes[key] ?? '');
+      if (r.error) { src.print(mtLine(r.error)); return; }
+      if (r.changed) src.write(r.list);
+      this.boxes[key] = '';
+    });
+    const patterns = src.read();
+    this.grid(area, 'AutoTradeAcceptWhitelist', 222, 135, 98, 200, patterns.map((p): Cell[] => [
+      p, { icon: MT_ICON_DELETE, onClick: () => { const now = src.read(); const j = now.indexOf(p); if (j >= 0) { now.splice(j, 1); src.write(now); } } },
+    ]), MT_TRADE_WHITELIST_COLUMNS);
   }
 
   /** OptionList / FiltersList 0,0,218,460: an Enabled check column and an Option text column. */

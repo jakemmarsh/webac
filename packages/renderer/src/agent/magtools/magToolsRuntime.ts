@@ -10,7 +10,7 @@
  * at once (`/mt vendor addbuy` buys; `buy` / `clearbuy` have nothing left to do).
  */
 import { MtCombatParser, MtCombatTracker, MtManaTracker, MtCommands, MtIdentWatcher, MtOptions, type MtCombatSnapshot, type MtManaReads, mtItemInfoLine, mtLootVerdict, mtPrintsItem, type LootRule, type MtHost, type MtItemData, type MtObject, type MtOptionStorage, type MtSpellInfo } from '@ac/shared';
-import { MtAutopacker, MtAutoTradeAccept, MtAutoTradeAdd, MtChatFilter, MtLoginCommands, mtAutopackPlacement, mtAutopackRulePacks, mtEnabledFilters, mtHidesStatusText, mtIsAutopackTrigger, mtLogOutOnDeath, mtMinuteOfDay, mtOneTouchHeal, mtOpenMainPackOnLogin, mtTradeRuleVerdict, readMtTradeWhitelist, type MtChatLine, type MtKeepPacks, type MtPackItem, type MtSenderClass, type MtTradeVerdict } from '@ac/shared';
+import { MtAutopacker, MtAutoTradeAccept, MtAutoTradeAdd, MtChatFilter, MtLoginCommands, mtAutopackPlacement, mtAutopackRulePacks, mtEnabledFilters, mtHidesStatusText, mtIsAutopackTrigger, mtLogOutOnDeath, mtMinuteOfDay, mtOneTouchHeal, mtOpenMainPackOnLogin, mtTradeRuleVerdict, readMtTradeWhitelist, writeMtTradeWhitelist, type MtChatLine, type MtKeepPacks, type MtPackItem, type MtSenderClass, type MtTradeVerdict } from '@ac/shared';
 import type { AgentApi } from '../AgentApi.ts';
 import { lootRuleFor, needsExamination, type ItemProps } from '../RoutineEngine.ts';
 import { decalObjectClass } from '../decalObjectClass.ts';
@@ -334,6 +334,9 @@ export class MagToolsRuntime {
   readonly autopacker: MtAutopacker;
   readonly tradeAdd: MtAutoTradeAdd;
   private readonly tradeAccept: MtAutoTradeAccept;
+  /** Auto Trade Accept's whitelist (global, the regexes the accept path reads): Misc → Options' editor reads and writes it here. */
+  tradeWhitelist(): string[] { return readMtTradeWhitelist(this.storage); }
+  setTradeWhitelist(patterns: readonly string[]): void { writeMtTradeWhitelist(this.storage, patterns); }
   /** Set at login until the first Login Complete (later teleports send LoginComplete again; Mag-Tools' event is once per login). */
   private awaitingLoginComplete = false;
   private trading: { partner: string; partnerGuid: number } | null = null;

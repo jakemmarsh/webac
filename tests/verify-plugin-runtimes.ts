@@ -104,3 +104,31 @@ describe('GoArrow in the game', () => {
     expect(off.rt.chat('/goarrow to 1N, 1E')).toBe(false);
   });
 });
+
+describe('GoArrow on the VVS bar', () => {
+  it('the bar\'s "GoArrow: Arrow" works the Show Arrow box: switched on in a dungeon, it says why nothing shows', async () => {
+    const { mountGameUI } = await import('./_harness/gameui.js');
+    const H = await mountGameUI();
+    try {
+      const ui = H.ui as unknown as { setPreviewFeatures(on: boolean): void; setAutomationSource(s: unknown): void; setGoArrow(rt: GoArrowRuntime | null): void; hudContainer: HTMLElement };
+      const { rt, said } = goArrow({ self: () => ({ cell: 0x01030100, x: 10, y: 10, headingRadians: 0 }), seenOutside: () => false });
+      const { emptyRoutineDoc } = await import('../packages/shared/src/routines/index.js');
+      const base: Record<string, unknown> = {
+        load: async () => ({ ok: true, doc: emptyRoutineDoc('local-eor', 'tester') }),
+        status: () => ({ running: false, paused: false, profile: null, state: null, acting: null, last: [] }),
+        stats: () => ({ startedAt: 0, xpGained: 0, kills: 0, deaths: 0, kept: 0, left: 0, sold: 0, rebuffs: 0, stateTime: {} }),
+        current: () => null, character: () => 'T', coords: () => null, now: () => 0, items: () => [], spells: () => [], buffs: () => [], history: () => [], setting: () => undefined, report: () => {}, spellTable: () => null, selection: () => null,
+      };
+      ui.setAutomationSource(new Proxy(base, { get: (t, k) => (k in t ? t[k as string] : () => ({ ok: true, message: '' })) }));
+      ui.setPreviewFeatures(true);
+      ui.setGoArrow(rt);
+      rt.frame?.();
+      const entry = ui.hudContainer.querySelector<HTMLElement>('[data-vvs-bar-entry="goarrow-arrow"]');
+      expect(entry).not.toBeNull();
+      entry!.click();
+      expect(rt.settings().visible).toBe(true);
+      expect(said.some((t) => /not visible because you are indoors/.test(t))).toBe(true);
+      ui.setGoArrow(null); ui.setAutomationSource(null); ui.setPreviewFeatures(false);
+    } finally { H.teardown(); }
+  });
+});

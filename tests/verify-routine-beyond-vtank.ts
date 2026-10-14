@@ -5,7 +5,7 @@
  * exports as "not VirindiTank" and has a meta-editor entry with help text.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentApi } from '../packages/renderer/src/agent/AgentApi.ts';
+import { AgentApi, MAP_COORD_ORIGIN, parseMapCoords } from '../packages/renderer/src/agent/AgentApi.ts';
 import { mapCoordsText } from '../packages/renderer/src/agent/RoutineEngine.ts';
 import { BEING_CAST_AT_S, awayWord, holdAllows, pullLanded } from '../packages/renderer/src/agent/beyondVtank.ts';
 import { ALL_MODULES_OFF, explainProfile, validateRoutineDoc, emptyRoutineDoc, type RoutineAction, type RoutineCondition, type RoutineProfile } from '../packages/shared/src/routines/index.ts';
@@ -179,6 +179,90 @@ describe('beyond-VTank conditions on the engine', () => {
     expect(fires({ kind: 'my-corpse-within', meters: 30 })).toMatchObject({ fires: true, why: ['✓ your corpse 25 m away'] });
     expect(fires({ kind: 'my-corpse-within', meters: 10 }).fires).toBe(false);
   });
+
+  // BUG.my-corpse-within-beyond-sight (Dark Majesty, 2026-10-13): a corpse 425 m back never held at 500 m.
+  /** The server's corpse line for a landblock-local point: ACE GetMapCoordStr, one decimal (±12 m). */
+  const corpseLine = (x: number, y: number): string => {
+    const ns = (OY + y) / 240 - MAP_COORD_ORIGIN, ew = (OX + x) / 240 - MAP_COORD_ORIGIN;
+    return `Your corpse is located at (${Math.abs(ns).toFixed(1)}${ns < 0 ? 'S' : 'N'}, ${Math.abs(ew).toFixed(1)}${ew < 0 ? 'W' : 'E'}).`;
+  };
+  const meG = () => ({ x: OX + host.me.x, y: OY + host.me.y });
+
+  it('my corpse within R: the server\'s "Your corpse is located at" line counts past the objects in view', () => {
+    // You at (80, 20); the corpse 288 m west and 312 m north, far past anything the client holds (the live case: 425 m).
+    const line = corpseLine(80 - 288, 20 + 312);
+    api.pushChat(line, 0);
+    const g = parseMapCoords(line)!;
+    const d = Math.round(Math.hypot(g.x - meG().x, g.y - meG().y));
+    expect(d).toBeGreaterThan(400);
+    expect(d).toBeLessThan(450);
+    expect(fires({ kind: 'my-corpse-within', meters: 500 })).toMatchObject({ fires: true, why: [`✓ your corpse ${d} m away (where the server said it is)`] });
+    expect(fires({ kind: 'my-corpse-within', meters: 100 })).toMatchObject({ fires: false, why: [`✗ your corpse ${d} m away (where the server said it is)`] });
+    // Only the server's own line: someone saying it doesn't count.
+    const other = new AgentApi(new FakeHost());
+    other.pushChat(`Bulwark says, "${corpseLine(80, 40)}"`, 2);
+    expect(other.myCorpse()).toBeNull();
+    // A death without the space (the retail capture quoted in ClassicDereth Player.cpp) parses too.
+    other.pushChat('Your corpse is located at(42.1N, 33.6E).', 0);
+    expect(other.myCorpse()).toMatchObject(parseMapCoords('42.1N, 33.6E')!);
+  });
+
+  it('my corpse within R: the next death\'s line replaces it, and it rots on ACE\'s player-corpse timer', () => {
+    api.pushChat(corpseLine(80 - 288, 20 + 312), 0);
+    api.pushChat(corpseLine(80, 60), 0); // died again, 40 m north
+    expect(fires({ kind: 'my-corpse-within', meters: 100 }).fires).toBe(true);
+    // Level 5: max(3600, 5 × 300) s (ACE Corpse.RecalculateDecayTime).
+    expect(AgentApi.corpseRotSeconds(5)).toBe(3600);
+    expect(AgentApi.corpseRotSeconds(30)).toBe(9000);
+    host.t += 3600 * 1000 - 1000;
+    expect(fires({ kind: 'my-corpse-within', meters: 100 }).fires).toBe(true);
+    host.t += 2000;
+    expect(fires({ kind: 'my-corpse-within', meters: 100 })).toMatchObject({ fires: false, why: ['✗ no corpse of yours within 100 m'] });
+  });
+
+  it('my corpse within R: a corpse the server removes while in view (looted empty) stops holding; one the client let go out of range does not', () => {
+    api.pushChat(corpseLine(80, 60), 0);
+    host.add({ guid: 0x80002002, name: `Corpse of ${host.me.name}`, objectDescFlags: 0x2000, x: 81, y: 62 });
+    run(api, host, 200);
+    expect(api.myCorpse()).toMatchObject({ guid: 0x80002002, x: OX + 81, y: OY + 62 });
+    expect(fires({ kind: 'my-corpse-within', meters: 100 })).toMatchObject({ fires: true, why: ['✓ your corpse 42 m away'] });
+    host.objs.delete(0x80002002); // looted empty: ACE rots it in Corpse.EmptyDecayTime and deletes it
+    run(api, host, 200);
+    expect(fires({ kind: 'my-corpse-within', meters: 100 })).toMatchObject({ fires: false, why: ['✗ no corpse of yours within 100 m'] });
+
+    // Released out of range (lost), then the client's object upkeep deletes it: still there, where it was.
+    api.pushChat(corpseLine(80, 60), 0);
+    const k = host.add({ guid: 0x80002003, name: `Corpse of ${host.me.name}`, objectDescFlags: 0x2000, x: 81, y: 62 });
+    run(api, host, 200);
+    k.lost = true;
+    run(api, host, 200);
+    host.objs.delete(0x80002003);
+    run(api, host, 200);
+    expect(fires({ kind: 'my-corpse-within', meters: 100 })).toMatchObject({ fires: true, why: ['✓ your corpse 42 m away (where the server said it is)'] });
+  });
+
+  it('my corpse within R: a corpse in view past the 120 m shared look holds', () => {
+    host.add({ guid: 0x80002002, name: `Corpse of ${host.me.name}`, objectDescFlags: 0x2000, x: 80, y: 170 });
+    expect(fires({ kind: 'my-corpse-within', meters: 200 })).toMatchObject({ fires: true, why: ['✓ your corpse 150 m away'] });
+    expect(fires({ kind: 'my-corpse-within', meters: 100 }).fires).toBe(false);
+  });
+
+  it('monster conditions see as far as they say, past the 120 m shared look and past its 60 objects', () => {
+    host.add({ guid: 0x80001001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 180 });
+    expect(fires({ kind: 'monster-within', meters: 200 })).toMatchObject({ fires: true, why: ['✓ Drudge Skulker at 160 m'] });
+    expect(fires({ kind: 'no-monster-within', meters: 200 }).fires).toBe(false);
+    expect(fires({ kind: 'monster-within', meters: 150 }).fires).toBe(false);
+    expect(fires({ kind: 'monster-count', pattern: 'Drudge', count: 1, meters: 200 }).fires).toBe(true);
+    // A lifestone 150 m off with the drudge beside it.
+    host.add({ guid: 0x80003001, name: 'Lifestone', itemType: 0x80, x: 80, y: 170 });
+    expect(fires({ kind: 'no-monster-near', meters: 20, object: 'Lifestone' })).toMatchObject({ fires: false, why: ['✗ Drudge Skulker 10 m from Lifestone'] });
+    expect(fires({ kind: 'no-monster-near', meters: 20, coords: at(80, 175) }).fires).toBe(false);
+    // 61 corpses at your feet fill the shared look's 60: the drudge 30 m off still counts.
+    host.objs.get(0x80001001)!.y = 50;
+    for (let i = 0; i < 61; i++) host.add({ guid: 0x80004000 + i, name: 'Corpse of Mite', objectDescFlags: 0x2000, x: 80, y: 21 });
+    expect(fires({ kind: 'monster-within', meters: 40 }).fires).toBe(true);
+    expect(fires({ kind: 'monster-count', pattern: 'Drudge', count: 1, meters: 40 }).fires).toBe(true);
+  });
 });
 
 describe('beyond-VTank actions on the engine', () => {
@@ -220,7 +304,8 @@ describe('beyond-VTank actions on the engine', () => {
     api.routine.start(p);
     expect((await engine(api).act({ kind: 'hold-position', meters: 10 }, p))?.message).toMatch(/holding position/);
     const r = await engine(api).act({ kind: 'attack-nearest', meters: 60 }, p);
-    expect(r).toMatchObject({ ok: false, message: 'no monster in reach within 10 m of the held position' });
+    // Idle: its rule rests, so a rule below it ("clear: move on") runs instead of this one firing twice a second (live, 2026-10-13).
+    expect(r).toMatchObject({ ok: false, message: 'no monster in reach within 10 m of the held position', idle: true });
     expect(host.sent.some((s) => s.startsWith('attack'))).toBe(false);
     await engine(api).act({ kind: 'release-position' }, p);
     const fight = engine(api).act({ kind: 'attack-nearest', meters: 60 }, p);
@@ -244,6 +329,19 @@ describe('beyond-VTank actions on the engine', () => {
     for (let i = 0; i < 6; i++) { run(api, host, 200); await vi.advanceTimersByTimeAsync(0); }
     expect(await fight).toMatchObject({ ok: false, message: "Drudge Skulker went past the held position's 10 m: left it" });
     expect(host.sent).toContain('cancel');
+  });
+
+  it('hold position breaks off a target that runs past a held range wider than 120 m', async () => {
+    host.add({ guid: 0x80001001, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 25 });
+    const p = profile([], []);
+    api.routine.start(p);
+    await engine(api).act({ kind: 'hold-position', meters: 130 }, p);
+    const fight = engine(api).act({ kind: 'attack-nearest', meters: 60 }, p);
+    run(api, host, 300);
+    expect(host.sent.some((s) => s.startsWith('attack 80001001'))).toBe(true);
+    host.objs.get(0x80001001)!.y = 170; // 150 m off: past the 130 m hold, and past a 120 m look
+    for (let i = 0; i < 6; i++) { run(api, host, 200); await vi.advanceTimersByTimeAsync(0); }
+    expect(await fight).toMatchObject({ ok: false, message: "Drudge Skulker went past the held position's 130 m: left it" });
   });
 
   it('the macro, holding position, fights nothing past the anchor; released, it does', async () => {

@@ -32,6 +32,21 @@ export function mtTradeWhitelistMatches(name: string, patterns: readonly string[
   return false;
 }
 
+/**
+ * The whitelist editor's Add (ours: upstream had no UI, users hand-edited Mag-Tools.xml; spec §3.4). The
+ * text is trimmed; a blank or an entry already listed is ignored (`changed: false`, no error); text that
+ * isn't a regex, on its own or wrapped as mtTradeWhitelistMatches wraps it, is refused with an error
+ * message (the caller prints it as a Mag-Tools line). Otherwise the list with the entry appended.
+ */
+export function mtTradeWhitelistAdd(list: readonly string[], text: string): { list: string[]; changed: boolean; error?: string } {
+  const p = text.trim();
+  if (p === '' || list.includes(p)) return { list: [...list], changed: false };
+  try { new RegExp(p); new RegExp(`^(?:${p})$`); } catch {
+    return { list: [...list], changed: false, error: `Auto Trade Accept - "${p}" is not a valid regular expression.` };
+  }
+  return { list: [...list, p], changed: true };
+}
+
 /** At least this long between two auto-accepts. */
 export const MT_AUTO_ACCEPT_GAP_MS = 2000;
 

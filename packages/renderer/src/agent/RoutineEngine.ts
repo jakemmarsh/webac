@@ -26,7 +26,7 @@ import { BEING_CAST_AT_S, PULL_LAND_MS, RECALL_MOVE_M, RECALL_WAIT_MS, awayWord,
 import { isCorpseDenial } from './macro/corpseBook.ts';
 import { LootExtras } from './macro/lootExtras.ts';
 import { propertyDumpLines, testItemLine } from './macro/lootTest.ts';
-import type { AgentObservation, AgentResult } from './types.ts';
+import type { AgentObject, AgentObservation, AgentResult } from './types.ts';
 
 /** Live facts the conditions read that the observation doesn't carry. */
 export interface RoutineFacts {
@@ -233,6 +233,8 @@ export interface RoutineStats {
 const emptyStats = (): RoutineStats => ({ startedAt: null, xpGained: 0, kills: 0, deaths: 0, kept: 0, left: 0, sold: 0, rebuffs: 0, stateTime: {} });
 
 const STEP_MS = 500;
+/** The shared look the rules are checked against (metres); a condition reaching farther asks for its own range. */
+const RULE_SIGHT_M = 120;
 
 /** VirindiTank's defaults for the settings the macro reads (overridden by the profile's settings, then by set-setting). */
 /** The macro's starting settings: VirindiTank's defaults (vtankOptions.ts; EnableMeta is on there, see its note). */
@@ -718,7 +720,13 @@ export class RoutineEngine {
   check(c: RoutineCondition, obs: AgentObservation): { ok: boolean; why: string } {
     const me = obs.me;
     const pct = (v: { cur: number; max: number }): number => (v.max ? (v.cur / v.max) * 100 : 100);
-    const monsters = (names?: string[], meters = 60) => obs.nearby.filter((o) => o.kind === 'monster' && o.dist <= meters
+    // What the client knows within `meters` of you: the shared observation (RULE_SIGHT_M, 60 objects) when it covers
+    // that, else the condition's own range. Each condition reaches as far as it says, up to the objects the server has
+    // sent (ACE ObjectMaint: a creature first reaches the client within 112.5 m, then stays while in your landblock or
+    // the 8 around it); a 500 m one read only 120 m before (my-corpse-within, 2026-10-13).
+    const within = (meters: number): AgentObject[] => (meters <= RULE_SIGHT_M && obs.nearby.length >= obs.nearbyTotal
+      ? obs.nearby.filter((o) => o.dist <= meters) : this.api.nearby(meters));
+    const monsters = (names?: string[], meters = 60) => within(meters).filter((o) => o.kind === 'monster'
       && (!names?.length || names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))));
     switch (c.kind) {
       case 'always': return { ok: true, why: 'always' };
@@ -764,7 +772,7 @@ export class RoutineEngine {
       case 'monster-priority-count': {
         const rows = (this.checking ?? this.profile)?.vtank?.monsters;
         if (!rows) return { ok: false, why: 'no Monsters tab in this profile' };
-        const n = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying && o.dist <= c.meters && matchMonsterRow(rows, o, { settings: this.settings }).priority === c.priority).length;
+        const n = within(c.meters).filter((o) => o.kind === 'monster' && !o.dying && matchMonsterRow(rows, o, { settings: this.settings }).priority === c.priority).length;
         return { ok: n >= c.count, why: `${n} of priority ${c.priority} within ${c.meters} m` };
       }
       case 'route-distance-at-least': {
@@ -796,7 +804,7 @@ export class RoutineEngine {
       case 'monster-count': {
         let re: RegExp;
         try { re = new RegExp(c.pattern, 'i'); } catch { return { ok: false, why: `bad pattern /${c.pattern}/` }; }
-        const n = obs.nearby.filter((o) => o.kind === 'monster' && o.dist <= c.meters && re.test(o.name)).length;
+        const n = within(c.meters).filter((o) => o.kind === 'monster' && re.test(o.name)).length;
         return { ok: n >= c.count, why: `${n} matching within ${c.meters} m` };
       }
       // Beyond VTank, Jake 2026-10-12 (beyondVtank.ts).
@@ -817,21 +825,29 @@ export class RoutineEngine {
         let label: string;
         if (c.coords) { at = parseMapCoords(c.coords); label = c.coords; } else {
           const want = (c.object ?? '').toLowerCase();
-          const o = obs.nearby.find((x) => x.name.toLowerCase() === want) ?? obs.nearby.find((x) => x.name.toLowerCase().includes(want));
+          // The object wherever the client knows it, not only within the shared observation's 120 m.
+          const known = obs.nearby.length >= obs.nearbyTotal && obs.nearby.some((x) => x.name.toLowerCase() === want) ? obs.nearby : this.api.nearby(Infinity);
+          const o = known.find((x) => x.name.toLowerCase() === want) ?? known.find((x) => x.name.toLowerCase().includes(want));
           at = o ? objectAt(me.pos, o) : null;
           label = o ? o.name : `the ${c.object}`;
           if (!o) return { ok: false, why: `${c.object} not in sight` };
         }
         if (!at) return { ok: false, why: `can't read the coordinates "${c.coords}"` };
-        const m = obs.nearby.filter((o) => o.kind === 'monster' && !o.dying).map((o) => ({ o, d: Math.hypot(objectAt(me.pos, o).x - at!.x, objectAt(me.pos, o).y - at!.y) }))
+        // Every monster within `meters` of the point is within (your distance to it + meters) of you.
+        const m = within(Math.hypot(at.x - me.pos.x, at.y - me.pos.y) + c.meters).filter((o) => o.kind === 'monster' && !o.dying).map((o) => ({ o, d: Math.hypot(objectAt(me.pos, o).x - at!.x, objectAt(me.pos, o).y - at!.y) }))
           .filter((x) => x.d <= c.meters).sort((a, b) => a.d - b.d);
         return { ok: m.length === 0, why: m.length ? `${m[0].o.name} ${Math.round(m[0].d)} m from ${label}` : `none within ${c.meters} m of ${label}` };
       }
       case 'my-corpse-within': {
         if (!me) return { ok: false, why: 'not in world' };
         const mine = `corpse of ${me.name}`.toLowerCase();
-        const k = obs.nearby.filter((o) => o.kind === 'corpse' && o.name.toLowerCase() === mine && o.dist <= c.meters).sort((a, b) => a.dist - b.dist)[0];
-        return { ok: !!k, why: k ? `your corpse ${Math.round(k.dist)} m away` : `no corpse of yours within ${c.meters} m` };
+        const k = within(c.meters).find((o) => o.kind === 'corpse' && o.name.toLowerCase() === mine);
+        if (k) return { ok: true, why: `your corpse ${Math.round(k.dist)} m away` };
+        // Out of the client's sight: where the server said it is ("Your corpse is located at (…)").
+        const told = this.api.myCorpse();
+        if (!told) return { ok: false, why: `no corpse of yours within ${c.meters} m` };
+        const d = Math.hypot(told.x - me.pos.x, told.y - me.pos.y);
+        return { ok: d <= c.meters, why: `your corpse ${Math.round(d)} m away (where the server said it is)` };
       }
       case 'expression': {
         if (!this.expressions) return { ok: false, why: `can't run expressions yet: ${c.expr}` };
@@ -888,7 +904,7 @@ export class RoutineEngine {
   dryRun(other?: RoutineProfile): Array<{ rule: string; fires: boolean; enabled: boolean; off?: boolean; why: string[] }> {
     const p = other ?? this.profile;
     if (!p) return [];
-    const obs = this.api.snapshot({ max: 60, radius: 120 });
+    const obs = this.api.snapshot({ max: 60, radius: RULE_SIGHT_M });
     const stateName = other && other !== this.profile ? other.initialState : this.state;
     const st = p.states.find((s) => s.name === stateName);
     const t = this.now();
@@ -1657,7 +1673,9 @@ export class RoutineEngine {
         // A VirindiTank Monsters row with priority -1 means leave that one alone, whoever asks.
         const ignored = (o: { guid: number; name: string; dist: number; relBearing: number }) => !!p.vtank && matchMonsterRow(p.vtank.monsters, o, { settings: this.settings }).priority < 0;
         const m = obs.nearby.find((o) => o.kind === 'monster' && !o.dying && !ignored(o) && this.holdOk(o) && (!a.names?.length || a.names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))));
-        if (!m) return { ok: false, message: this.hold ? `no monster in reach within ${this.hold.meters} m of the held position` : 'no monster in reach' };
+        // Nothing to fight is nothing to do: the rule rests, so the rules below it (a "clear" / move-on rule) get their turn
+        // (2026-10-13: a monster-within rule saw a creature the held position put out of reach, and fired twice a second).
+        if (!m) return { ok: false, message: this.hold ? `no monster in reach within ${this.hold.meters} m of the held position` : 'no monster in reach', idle: true };
         const since = this.api.currentSeq();
         const r = this.api.attack(m.guid, p.macro ? { height: vtAttackHeight(this.settings), power: this.macroAttackPower(p, m) } : {});
         if (!r.ok) return r;
@@ -1668,7 +1686,8 @@ export class RoutineEngine {
           while (this.now() - t0 < 120_000) {
             const ev = await this.api.waitFor({ types: ['target-died', 'target-lost', 'death'] as never }, 500);
             if (ev.length) break;
-            const o = this.api.snapshot({ radius: 120, max: 60 }).nearby.find((x) => x.guid === m.guid);
+            // The target wherever the client knows it: a held range reaches 500 m, past a 120 m look.
+            const o = this.api.nearby(Infinity).find((x) => x.guid === m.guid);
             if (o && !o.dying && this.hold && !this.holdOk(o)) {
               this.api.stopAttacking();
               return { ok: false, message: `${m.name} went past the held position's ${this.hold.meters} m: left it` };

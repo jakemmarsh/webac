@@ -10,7 +10,7 @@ import {
   MtLoginCommands, MtOptions, MT_FILTER_FIELDS, WeenieErrorWithString, formatWeenieErrorWithString, mtAutopackPlacement,
   mtAutopackRulePacks, mtCommandListKey, mtEnabledFilters, mtHidesStatusText, mtIsAutopackTrigger, mtKeepPackDigits,
   mtLogOutOnDeath, mtMinuteOfDay, mtOneTouchHeal, mtOpenMainPackOnLogin, mtParsePeriodic, mtPeriodicDue, mtPlanAutopack,
-  mtTradeRuleVerdict, mtTradeWhitelistMatches, readMtCommands, readMtTradeWhitelist, weenieErrorText, writeMtCommands,
+  mtTradeRuleVerdict, mtTradeWhitelistAdd, mtTradeWhitelistMatches, readMtCommands, readMtTradeWhitelist, weenieErrorText, writeMtCommands,
   writeMtTradeWhitelist, type MtChatLine, type MtFilterField, type MtKeepPacks, type MtOptionStorage, type MtPackInfo,
   type MtPackItem, type MtTradeItem,
 } from '@ac/shared';
@@ -226,6 +226,16 @@ describe('Auto trade accept (§9.3, §3.4)', () => {
     expect(mtTradeWhitelistMatches('Bob', ['Mule|Bob'])).toBe(true); // alternation stays anchored (a full match)
     expect(mtTradeWhitelistMatches('xBob', ['Mule|Bob'])).toBe(false);
     expect(mtTradeWhitelistMatches('Bob', ['(bad'])).toBe(false);
+  });
+
+  it('the editor\'s Add trims, ignores blanks and duplicates, and refuses text that isn\'t a regex', () => {
+    expect(mtTradeWhitelistAdd(['Hero.*'], '  Mule  ')).toEqual({ list: ['Hero.*', 'Mule'], changed: true });
+    expect(mtTradeWhitelistAdd(['Hero.*'], 'Hero.*')).toEqual({ list: ['Hero.*'], changed: false });
+    expect(mtTradeWhitelistAdd([], '   ')).toEqual({ list: [], changed: false });
+    expect(mtTradeWhitelistAdd([], '(bad').error).toBe('Auto Trade Accept - "(bad" is not a valid regular expression.');
+    // Valid only once wrapped (^(?:a)(b)$) is still refused: on its own it isn't a regex.
+    expect(mtTradeWhitelistAdd([], 'a)(b')).toMatchObject({ list: [], changed: false });
+    expect(mtTradeWhitelistAdd([], 'a)(b').error).toBeDefined();
   });
 
   it('accepts when the partner accepted, is whitelisted, the option is on, and 2 s have passed', () => {
