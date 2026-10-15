@@ -29,13 +29,14 @@
 import type { ConnectionEvent } from '@ac/network';
 import { PASSWORD_MISMATCH_BOOT_REASON } from '../session/AccountBoot.js';
 import { CharacterError, CharacterGenerationVerificationResponse, characterCreateErrorToken } from '@ac/shared';
+import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
 export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
   | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed';
 
 export type PreworldScreen =
-  | 'boot' | 'server-select' | 'connecting' | 'char-select' | 'chargen' | 'portal-space' | 'disconnected' | 'world';
+  | 'boot' | 'server-select' | 'connecting' | 'resuming' | 'char-select' | 'chargen' | 'portal-space' | 'disconnected' | 'world';
 
 /**
  * Why the page reloaded itself (page_reload's token): a world of another era
@@ -61,25 +62,43 @@ export interface PreworldScreenState {
   portalSpace: boolean;
   /** This session's character list arrived (PreworldReporter.characterListReceived). */
   charListReceived: boolean;
+  /**
+   * GameUI's connecting screen is up (showConnectingScreen: Please Wait over
+   * an empty select screen). Its uiScreen is 'character-select', and between
+   * a drop and the next connect the last session's list still counts, so
+   * this alone keeps it from reading as char select.
+   */
+  connectingScreen?: boolean;
+  /**
+   * The automatic resume after an in-world drop is under way
+   * (SessionLifecycle.resumingAfterDrop): the connecting screen with the
+   * reconnecting notice, not a first connect.
+   */
+  resuming?: boolean;
 }
 
 /**
  * The pre-world screen the player is actually on. Character select and
  * chargen count only once this session's character list arrived: before
  * that GameUI's screen is its 'character-select' default while the page is
- * still connecting (a wrong password used to read screen="char-select").
+ * still connecting (a wrong password used to read screen="char-select"),
+ * and never while the connecting screen is up (a drop's resume and the
+ * Disconnected screen's relaunch show it while the last list still counts).
+ * The connecting screen of the automatic resume after an in-world drop is
+ * 'resuming': production (2026-10-14, AC1999) had a page_left on
+ * "connecting" from a player who had been in the world for eleven minutes.
  * An era switch leaves from the server select, not char select.
  */
 export function preworldScreenFor(s: PreworldScreenState): PreworldScreen {
   if (s.gameStarted) return 'world';
   if (s.disconnected) return 'disconnected';
   if (s.launcherActive || s.eraSwitchPending) return 'server-select';
-  if (s.charListReceived) {
+  if (s.charListReceived && !s.connectingScreen) {
     if (s.uiScreen === 'character-create') return 'chargen';
     if (s.uiScreen === 'character-select' && !s.portalSpace) return 'char-select';
   }
   if (s.portalSpace) return 'portal-space';
-  return 'connecting';
+  return s.resuming ? 'resuming' : 'connecting';
 }
 
 /** The chargen wizard's pages (CharacterCreate.ts CreateStep, in order). */
@@ -195,8 +214,12 @@ export interface PreworldReporterOptions {
   now?: () => number;
   /** A random id for this page load; generated when absent. */
   trace?: string;
-  /** Transport; defaults to navigator.sendBeacon, falling back to fetch keepalive. */
-  send?: (url: string, body: string) => void;
+  /**
+   * Transport; defaults to fetch keepalive while the page is visible and
+   * sendBeacon once it is hidden (TelemetryOutbox.defaultTelemetrySend). A
+   * returned promise that rejects keeps the event in the outbox to go again.
+   */
+  send?: TelemetrySend;
 }
 
 /** A page sends at most this many events (the bridge also caps each address). */
@@ -216,14 +239,7 @@ export function reportConnectAttempts<C extends { connect(account: string, passw
   return conn;
 }
 
-const PRE_WORLD = new Set<PreworldScreen>(['boot', 'server-select', 'connecting', 'char-select', 'chargen', 'portal-space', 'disconnected']);
-
-function defaultSend(url: string, body: string): void {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.sendBeacon?.(url, new Blob([body], { type: 'text/plain' }))) return;
-  } catch { /* fall through */ }
-  void fetch(url, { method: 'POST', body, headers: { 'content-type': 'text/plain' }, keepalive: true, mode: 'cors' }).catch(() => {});
-}
+const PRE_WORLD = new Set<PreworldScreen>(['boot', 'server-select', 'connecting', 'resuming', 'char-select', 'chargen', 'portal-space', 'disconnected']);
 
 function randomTrace(): string {
   const bytes = new Uint8Array(8);
@@ -305,7 +321,7 @@ export function preworldServerFor(connectUrl: string, world: { kind: string } | 
 export class PreworldReporter {
   readonly trace: string;
   private readonly now: () => number;
-  private readonly send: (url: string, body: string) => void;
+  private readonly outbox: TelemetryOutbox;
   private readonly startedAt: number;
   private sent = 0;
   private loginAt: number | null = null;
@@ -332,7 +348,7 @@ export class PreworldReporter {
 
   constructor(private readonly opts: PreworldReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
-    this.send = opts.send ?? defaultSend;
+    this.outbox = new TelemetryOutbox(opts.send ?? defaultTelemetrySend, this.now, true);
     this.trace = opts.trace && /^[a-z0-9]{8,32}$/.test(opts.trace) ? opts.trace : randomTrace();
     this.startedAt = this.now();
     this.screenSince = this.startedAt;
@@ -532,6 +548,7 @@ export class PreworldReporter {
    * BOOT_SLOW_MS send one boot_slow (so a visitor who waits it out is heard too).
    */
   tick(): void {
+    this.outbox.retry();
     const { screen } = this.sample();
     if (this.bootSlowSent || this.left || screen !== 'boot') return;
     if (this.now() - this.startedAt < BOOT_SLOW_MS) return;
@@ -612,8 +629,10 @@ export class PreworldReporter {
    * showed, and the boot_slow check.
    */
   install(win: Pick<Window, 'addEventListener' | 'setInterval'>, doc: Pick<Document, 'addEventListener'> & { visibilityState?: string }): void {
-    win.addEventListener('pagehide', () => this.pageLeft());
-    doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') this.pageHidden(); });
+    // Events the network refused (a drop is when it is gone) go again: online, hidden, leaving, the tick.
+    win.addEventListener('pagehide', () => { this.pageLeft(); this.outbox.retry(true); });
+    doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') { this.pageHidden(); this.outbox.retry(true); } });
+    this.outbox.install(win);
     win.setInterval(() => { this.tick(); }, 1000);
   }
 
@@ -647,6 +666,6 @@ export class PreworldReporter {
         : { stage: null, progress: null, doneKB: null, totalKB: null, cache: null, caps: null }),
     };
     this.sent++;
-    try { this.send(this.opts.endpoint, JSON.stringify(body)); } catch { /* reporting must never throw */ }
+    this.outbox.post(this.opts.endpoint, JSON.stringify(body));
   }
 }

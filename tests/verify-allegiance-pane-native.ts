@@ -343,6 +343,41 @@ describe('CORE.5.c.d.a — allegiance tab, DAT-native pane (behavioral)', () => 
     expect(sent).toEqual([true, false]);
   });
 
+  it('AGENT: an agent keeps its fellows\' vitals coming with the pane closed (ACE sends them only while "shown"), once per fellowship and session', async () => {
+    // ACE Fellowship.OnVitalUpdate sends FellowUpdateType.Vitals only to fellows whose Player.FellowshipPanelOpen is set
+    // (HandleFellowshipUpdateRequest). Bulwark read Arcanist at 98% through three deaths with the pane closed (2026-10-15).
+    const sent: boolean[] = [];
+    ui.callbacks.onFellowshipPaneVisibility = (v: boolean) => sent.push(v);
+    if (ui.socialPanelVisible) ui.toggleSocialPanel();
+    await Promise.resolve();
+    ui.setFellowshipData(null);
+    sent.length = 0;
+    const fellowship = (name: string) => ({ fellowshipName: name, leaderGuid: 1, shareXP: true, evenShare: true, open: false, isLocked: false, selfGuid: 2,
+      fellows: [1, 2].map((guid) => ({ guid, name: `F${guid}`, level: 24, healthCurrent: 100, healthMax: 105, staminaCurrent: 1, staminaMax: 1, manaCurrent: 1, manaMax: 1, shareLoot: false })) });
+    ui.setFellowVitalsWanted(true); // no fellowship yet: nothing to ask for
+    expect(sent).toEqual([]);
+    ui.applyFellowshipFullUpdate(fellowship('Arcade')); // joined: ask
+    ui.applyFellowshipFullUpdate(fellowship('Arcade')); // the server's answer: no second ask (no loop)
+    expect(sent).toEqual([true]);
+    ui.socialTab = 'fellowship';
+    ui.toggleSocialPanel(); // the pane shown and hidden: the agent's want keeps it on
+    await Promise.resolve();
+    ui.toggleSocialPanel();
+    await Promise.resolve();
+    expect(sent).toEqual([true]);
+    // A new world session (relog, reconnect): the server's flag starts off, so the next fellowship asks again.
+    ui.noteWorldSessionStart();
+    ui.applyFellowshipFullUpdate(fellowship('Arcade'));
+    expect(sent).toEqual([true, true]);
+    ui.applyFellowshipDisband(2); // no fellowship: the ask goes off with it
+    expect(sent).toEqual([true, true, false]);
+    // A player's own client (no agent) keeps retail's pane-only requests.
+    ui.setFellowVitalsWanted(false);
+    ui.applyFellowshipFullUpdate(fellowship('Players'));
+    expect(sent).toEqual([true, true, false]);
+    ui.setFellowshipData(null);
+  });
+
   it('AGENT: the open Social panel is listed by tab and closes through its own toggle; unknown names list what is open', () => {
     expect(ui.agentOpenWindows()).toContain('Social (allegiance)');
     expect(ui.agentCloseWindow('trade')).toMatch(/^no open window "trade" \(open: .*Social \(allegiance\)/);

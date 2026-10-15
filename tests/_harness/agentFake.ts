@@ -165,6 +165,8 @@ export class FakeHost implements AgentHost {
   objectReach: ((guid: number) => number) | undefined = undefined;
   /** Your fellows (the fellowship panel's list); unset = no fellowship. */
   fellows: AgentHost['fellows'] = undefined;
+  /** The agent's ask for its fellows' vitals (the shown fellowship pane's updates); unset = the host has none. */
+  wantFellowVitals: AgentHost['wantFellowVitals'] = undefined;
   /** Whether an interior cell is a dungeon's (not SeenOutside); unset = the host can't say. */
   cellSealed: AgentHost['cellSealed'] = undefined;
   /** The rooms' floors under a landblock-local point (map coordinates in a dungeon); unset = the host can't say. */

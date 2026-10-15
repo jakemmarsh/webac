@@ -7308,6 +7308,8 @@ async function main() {
   preworldServer = () => preworldServerFor(connectUrl, launcherWorld);
   // The launcher closed on a world of another era: still the server select until the reload (switchEraFor).
   let eraSwitchPending = false;
+  // The drop's automatic resume (sessionLifecycle, made below; read through this so the 1 s tick never meets its TDZ).
+  let resumingAfterDrop: () => boolean = () => false;
   preworldScreen = () => preworldScreenFor({
     gameStarted,
     disconnected: gameUI.disconnectedScreenShown,
@@ -7316,6 +7318,8 @@ async function main() {
     uiScreen: gameUI.ui.currentScreen ?? null,
     portalSpace: gameUI.worldHiddenByPortalSpace,
     charListReceived: preworldReporter?.characterListReceived ?? false,
+    connectingScreen: gameUI.connectingScreenShown,
+    resuming: resumingAfterDrop(),
   });
   gameUI.onRelaunch = () => preworldReporter?.leavingForReload('epilogue');
   worldReporter?.setSources({
@@ -7539,6 +7543,7 @@ async function main() {
   // ASSESS — session-loop policy (auto-enter resume, logout intent); see
   // session/SessionLifecycle.ts for the ACE Session.cs anchoring.
   const sessionLifecycle = new SessionLifecycle();
+  resumingAfterDrop = () => sessionLifecycle.resumingAfterDrop;
 
   // ── CORE.17.k.b — retail connection-loss reporting ─────────────────────
   // gmUIFlow::RecvNotice_ServerDied @ 0047a9a0 queues the Disconnected UI
@@ -13070,6 +13075,8 @@ async function main() {
         return;
       }
       sessionLifecycle.noteEnterWorldRequested(parseInt(slot.id, 10));
+      // A new world session: the server's fellowship-pane flag starts off (GameUI re-sends what is shown / wanted).
+      gameUI.noteWorldSessionStart();
       preworldReporter?.enterRequested();
       // RELEASE.streaming-charselect-weight — the world packs (portal space,
       // terrain materials, HUD art) load behind character select: resident first.
@@ -16160,6 +16167,8 @@ async function main() {
         },
         // What showing the panes asks the server for: the fellowship's full update (and its fellows'
         // updates while "shown"), the allegiance's AllegianceUpdate.
+        // An agent playing gets its fellows' vitals as a player with the fellowship pane up does (GameUI.setFellowVitalsWanted).
+        wantFellowVitals: () => gameUI.setFellowVitalsWanted(true),
         refreshSocial: (what) => {
           if (what === 'allegiance') gameUI.callbacks.onAllegianceUpdate?.();
           else gameUI.callbacks.onFellowshipPaneVisibility?.(true);
@@ -16917,6 +16926,7 @@ async function main() {
               // Remember it as the character to resume after a drop, as a
               // character-select entry does (it never was on this path).
               sessionLifecycle.noteEnterWorldRequested(aceCharGuid);
+              gameUI.noteWorldSessionStart();
               preworldReporter?.enterRequested();
               const requestMsg = buildCharacterEnterWorldRequest();
               aceConnection.sendMessage(requestMsg, GameMessageGroup.UIQueue);

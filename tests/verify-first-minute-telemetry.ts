@@ -27,8 +27,9 @@ const FIRST_MINUTE_KEYS = [
   'outcome', 'era', 'server', 'trace', 'build', 'exit', 'leftAfterMs', 'resumed', 'startedHidden', 'frames', 'worldFrames',
   'frameMedianMs', 'frameP95Ms', 'frameMaxMs', 'contextLost', 'gpu', 'dpr', 'canvasW', 'canvasH', 'renderScalePct', 'msaaOff', 'drawDistanceSteps', 'worldDrawnMs', 'screen',
   'unresolvedMisses', 'firstMoveMs', 'firstClickMs', 'keys', 'modal', 'modalMs', 'errors',
+  'eid', // BUG.telemetry-duplicate-resend — the outbox's event id (verify-telemetry-duplicate-resend.ts)
 ].sort();
-const WORLD_LEFT_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors'].sort();
+const WORLD_LEFT_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
 
 interface Rig {
   r: WorldReporter;
@@ -313,7 +314,7 @@ describe('sanitizeClientWorld', () => {
   it("world_left keeps only a real session end and its own fields", () => {
     expect(sanitizeClientWorld({ outcome: 'world_left', exit: 'still_in', sessionMs: 5 })).toMatchObject({ exit: null, sessionMs: 5 });
     expect(sanitizeClientWorld({ outcome: 'world_left', exit: 'hidden' })!.exit).toBeNull();
-    const left = sanitizeClientWorld({ outcome: 'world_left', exit: 'logout', sessionMs: 90_000, keys: 5, frames: 10, gpu: 'discrete' })!;
+    const left = sanitizeClientWorld({ outcome: 'world_left', exit: 'logout', sessionMs: 90_000, keys: 5, frames: 10, gpu: 'discrete', eid: 'abcdef012345' })!;
     expect(left).toMatchObject({ exit: 'logout', sessionMs: 90_000 });
     expect(Object.keys(left).sort()).toEqual(WORLD_LEFT_KEYS);
   });

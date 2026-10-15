@@ -10,6 +10,7 @@
  * bump a count sent with the next distinct report, and a page sends at most
  * MAX_REPORTS.
  */
+import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
 export type ErrorKind = 'error' | 'unhandledrejection' | 'webglcontextlost' | 'boot';
 
@@ -33,8 +34,8 @@ export interface ErrorReporterOptions {
   /** The current screen name (launcher / char-select / world / …). */
   screen: () => string;
   userAgent?: string;
-  /** Transport; defaults to navigator.sendBeacon, falling back to fetch keepalive. */
-  send?: (url: string, body: string) => void;
+  /** As PreworldReporterOptions.send (TelemetryOutbox): a rejected promise keeps the report to go again. */
+  send?: TelemetrySend;
 }
 
 export const MAX_REPORTS = 20;
@@ -47,21 +48,14 @@ export function stripUrlQueries(text: string): string {
   return text.replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#'"`)]*)[?#][^\s'"`)]*?(?=(?::\d+){1,2}(?=[\s)'"`]|$)|[\s'"`)]|$)/gi, '$1');
 }
 
-function defaultSend(url: string, body: string): void {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.sendBeacon?.(url, new Blob([body], { type: 'text/plain' }))) return;
-  } catch { /* fall through */ }
-  void fetch(url, { method: 'POST', body, headers: { 'content-type': 'text/plain' }, keepalive: true, mode: 'cors' }).catch(() => {});
-}
-
 export class ErrorReporter {
   private readonly seen = new Map<string, number>();
   private sent = 0;
   private reports = 0;
-  private readonly send: (url: string, body: string) => void;
+  private readonly outbox: TelemetryOutbox;
 
   constructor(private readonly opts: ErrorReporterOptions) {
-    this.send = opts.send ?? defaultSend;
+    this.outbox = new TelemetryOutbox(opts.send ?? defaultTelemetrySend, () => Date.now());
   }
 
   /** The bridge's report URL for a ws(s):// bridge URL (null when it isn't one). */
@@ -103,7 +97,8 @@ export class ErrorReporter {
       userAgent: (this.opts.userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent : '')).slice(0, 300),
       count: 1,
     };
-    try { this.send(this.opts.endpoint, JSON.stringify(body)); } catch { /* reporting must never throw */ }
+    this.outbox.retry();
+    this.outbox.post(this.opts.endpoint, JSON.stringify(body));
   }
 
   private safeScreen(): string {
@@ -112,6 +107,9 @@ export class ErrorReporter {
 
   /** Listen for uncaught errors and unhandled rejections on `win`. */
   install(win: Pick<Window, 'addEventListener'>): void {
+    // Reports the network refused go again when it is back, as the page leaves, and before the next report.
+    this.outbox.install(win);
+    win.addEventListener('pagehide', () => this.outbox.retry(true));
     win.addEventListener('error', (ev: Event) => {
       const e = ev as ErrorEvent;
       if (!e.message && !e.error) return; // a resource load error (img/script 404), not a script error

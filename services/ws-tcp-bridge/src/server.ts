@@ -57,6 +57,7 @@ import type { ServerDirectory } from './serverDirectory.js';
 import { sanitizeClientError } from './clientErrors.js';
 import { sanitizeClientPreworld, traceFromUrl } from './clientPreworld.js';
 import { isWorldOutcome, sanitizeClientWorld } from './clientWorld.js';
+import { RecentEventIds } from './eventIds.js';
 import { type LookupFn, resolveTarget } from './targets.js';
 import { encodeSppHeader, stripSppHeader } from './spp.js';
 import { compatFor } from './serverCompat.js';
@@ -170,6 +171,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
   // RELEASE.preworld-outcomes — a pre-world visit sends a few events (list, create, enter, leave);
   // retried logins send more. 60 per 10 minutes per address.
   const clientPreworldRate = new SlidingWindowCounter(60, 10 * 60_000, now);
+  // BUG.telemetry-duplicate-resend — a page resends an event whose send failed after delivery
+  // (TelemetryOutbox); each event id is logged once.
+  const recentEventIds = new RecentEventIds(now);
   const sweepTimer = setInterval(() => { connectRate.sweep(); clientErrorRate.sweep(); clientPreworldRate.sweep(); }, limits.connectRateWindowMs);
   sweepTimer.unref?.();
   const sessions = new Set<Session>();
@@ -244,6 +248,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       if (!clientErrorRate.hit(ip)) return 429;
       const report = sanitizeClientError(body);
       if (!report) return 400;
+      if (recentEventIds.repeat(report.eid)) return 204;
       metrics.clientError(report.kind);
       log('warn', 'client_error', { ip, ...report });
       return 204;
@@ -255,12 +260,14 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       if (body && typeof body === 'object' && isWorldOutcome((body as { outcome?: unknown }).outcome)) {
         const wev = sanitizeClientWorld(body);
         if (!wev) return 400;
+        if (recentEventIds.repeat(wev.eid)) return 204;
         metrics.clientPreworldEvent(wev.outcome);
         log('info', 'client_world', { ip, ...Object.fromEntries(Object.entries(wev).filter(([, v]) => v !== null)) });
         return 204;
       }
       const ev = sanitizeClientPreworld(body);
       if (!ev) return 400;
+      if (recentEventIds.repeat(ev.eid)) return 204;
       metrics.clientPreworldEvent(ev.outcome);
       // One line, only the fields the event carries.
       log('info', 'client_preworld', { ip, ...Object.fromEntries(Object.entries(ev).filter(([, v]) => v !== null)) });

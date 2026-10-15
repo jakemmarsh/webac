@@ -206,6 +206,11 @@ export interface AgentObservation {
    */
   fellowshipAlone?: boolean;
   /**
+   * Your deaths since this client started, each with where, what killed you at what level against yours and what it
+   * cost (the "You've lost …" line), and your fellows' deaths as you saw them; absent before the first.
+   */
+  deaths?: string;
+  /**
    * Body slots nothing you wear covers (the paperdoll's bare spots: head, hands, feet …), and the pack items that would
    * cover one. A player sees them at a glance; Arcanist played to level 19 with no gloves (2026-10-14).
    */

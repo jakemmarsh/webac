@@ -79,6 +79,12 @@ INSERT INTO ip_limit_overrides (ip_address, max_accounts, max_sessions, note)
 VALUES ('50.18.108.214', 0, 0, 'webAC bridge: every browser player shares this address');
 ```
 
+A better fix keeps the limits per person: adamplumb/ac1999!3 (opened
+2026-10-15, not merged yet) adds `trusted_proxy_addresses` to server.cfg, the
+same Simple Proxy Protocol trust as ACE's `TrustedProxyAddresses` below. With
+the bridge's address listed and the bridge sending the header for AC1999
+(`BRIDGE_SPP_SERVERS`), every limit applies to each browser player's own IP.
+
 With the row in place, the SQL script skips that address (a `max_accounts`
 of 0 is unlimited), and accounts it already disabled can be re-enabled by
 setting `banned=0`. Running your own bridge (above) also works: your server

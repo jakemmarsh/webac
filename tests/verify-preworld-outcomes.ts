@@ -34,6 +34,8 @@ const SCHEMA_KEYS = [
   'step', 'table', 'token', 'trace',
   // RELEASE.preworld-boot-stage (null off the boot screen; verify-preworld-boot-stage.ts)
   'stage', 'progress', 'doneKB', 'totalKB', 'cache', 'caps',
+  // BUG.telemetry-duplicate-resend — the outbox's event id (verify-telemetry-duplicate-resend.ts)
+  'eid',
 ].sort();
 
 // NetworkDefs.h (GDLE and the AC1999 server share them)

@@ -28,6 +28,7 @@
  * and never leaves the page; no key identity, typed text, name or chat is
  * ever an input to this module.
  */
+import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
 /** How the player left (closed set; `still_in` = in the world at 60 s). */
 export const WORLD_EXITS = ['closed_tab', 'hidden', 'logout', 'disconnected', 'still_in'] as const;
@@ -140,7 +141,8 @@ export interface WorldReporterOptions {
   era: () => string;
   server: () => string | null;
   now?: () => number;
-  send?: (url: string, body: string) => void;
+  /** As PreworldReporterOptions.send: a rejected promise keeps the event to go again. */
+  send?: TelemetrySend;
 }
 
 /**
@@ -171,13 +173,6 @@ export function unmaskedRenderer(gl: { getExtension(name: string): unknown; getP
   } catch { return null; }
 }
 
-function defaultSend(url: string, body: string): void {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.sendBeacon?.(url, new Blob([body], { type: 'text/plain' }))) return;
-  } catch { /* fall through */ }
-  void fetch(url, { method: 'POST', body, headers: { 'content-type': 'text/plain' }, keepalive: true, mode: 'cors' }).catch(() => {});
-}
-
 /** The `q` quantile (0..1) of a 1 ms histogram holding `n` samples. */
 function histQuantile(hist: Uint32Array, n: number, q: number): number | null {
   if (n === 0) return null;
@@ -205,7 +200,7 @@ function safe<T>(f: (() => T) | undefined, fallback: T): T {
 
 export class WorldReporter {
   private readonly now: () => number;
-  private readonly send: (url: string, body: string) => void;
+  private readonly outbox: TelemetryOutbox;
   private src: WorldReporterSources = {};
   private sent = 0;
   private gpu: GpuClass = 'unknown';
@@ -233,8 +228,11 @@ export class WorldReporter {
 
   constructor(private readonly opts: WorldReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
-    this.send = opts.send ?? defaultSend;
+    this.outbox = new TelemetryOutbox(opts.send ?? defaultTelemetrySend, this.now, true);
   }
+
+  /** Events the network refused, waiting to go again (TelemetryOutbox). */
+  get pendingSends(): number { return this.outbox.pending; }
 
   /** main.ts's state readers (set once the game objects exist). */
   setSources(src: WorldReporterSources): void {
@@ -317,6 +315,7 @@ export class WorldReporter {
 
   /** The 1 s tick: the blocking window's open time, and the 60 s mark. */
   tick(): void {
+    this.outbox.retry();
     if (this.enterAt === null) return;
     const at = this.now();
     this.pollModal(at);
@@ -352,11 +351,14 @@ export class WorldReporter {
     doc: Pick<Document, 'addEventListener'> & { visibilityState?: string },
     canvas?: Pick<HTMLCanvasElement, 'addEventListener'> | null,
   ): void {
-    win.addEventListener('pagehide', () => this.left('closed_tab'));
-    doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') this.hidden(); });
+    // A drop's world_left goes out when the network may be gone: it waits and goes again
+    // (online, hidden, leaving, the tick).
+    win.addEventListener('pagehide', () => { this.left('closed_tab'); this.outbox.retry(true); });
+    doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') { this.hidden(); this.outbox.retry(true); } });
     doc.addEventListener('keydown', ((e: KeyboardEvent) => { if (!e.repeat) this.keyDown(); }) as EventListener, true);
     canvas?.addEventListener('pointerdown', () => this.worldClick());
     canvas?.addEventListener('webglcontextlost', () => this.contextLostNow());
+    this.outbox.install(win);
     win.setInterval(() => this.tick(), 1000);
   }
 
@@ -417,6 +419,6 @@ export class WorldReporter {
   private post(ev: WorldEvent): void {
     if (!this.opts.endpoint || this.sent >= MAX_WORLD_EVENTS) return;
     this.sent++;
-    try { this.send(this.opts.endpoint, JSON.stringify(ev)); } catch { /* reporting must never throw */ }
+    this.outbox.post(this.opts.endpoint, JSON.stringify(ev));
   }
 }

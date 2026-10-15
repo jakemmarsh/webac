@@ -9,6 +9,7 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import type { AgentVitals } from '../../packages/renderer/src/agent/types.ts';
+import { parseDeathLoss, parseVictimDeathLine } from '../../packages/renderer/src/agent/deathLines.ts';
 import { FEED_VERSION, defaultFeedPath, type ChatChannel, type FeedEvent, type FeedStatus } from './feed-types.ts';
 
 type OmitBase<T> = T extends unknown ? Omit<T, 'v' | 't'> : never;
@@ -36,6 +37,8 @@ export class FeedWriter {
 export interface ChatParseState {
   /** The last line that said who killed this character, and when (ms), for the death event that follows it. */
   killer?: { name: string; text: string; at: number };
+  /** When this character's last death event was written (ms): its other lines within DEATH_LINES_MS are the same death. */
+  deathAt?: number;
   /** When this character last began a cast ("Casting Flame Bolt III"), ms. */
   castingAt?: number;
   /**
@@ -69,8 +72,15 @@ const HEARD = /^(?:\[([A-Za-z][\w ]*)\] )?(.+?) says, "([\s\S]*)"$/;
 const TELLS_YOU = /^(.+?) tells you, "([\s\S]*)"$/;
 const LEVEL = /^You are now level (\d+)!/;
 const CORPSE = /^Your corpse is located at \(([^)]+)\)/;
-// ACE's death messages vary by damage type ("X slays you viciously…", "X splits you apart!", "Your death is preceded by a
-// sharp, stabbing pain, courtesy of X!"); a "<name> <verb> you…!" line just before the corpse line names the killer.
+/**
+ * A death's own lines: the victim line (each damage type's DeathMessage.Victim, ACE Strings.cs / AC1999
+ * WeenieObject.cpp: deathLines.ts), then "You've lost …" when it dropped anything, then "Your corpse is located at (…)"
+ * only outdoors with something dropped (ACE Creature_Death). The victim line is the death; a loss or corpse line with
+ * no victim line before it (a wording not in the tables) is one too. All three Olthoi Arcade deaths (2026-10-15) were
+ * in a dungeon, so no corpse line came and the feed, which keyed on it alone, wrote none of them.
+ */
+export const DEATH_LINES_MS = 15_000;
+// Fallback for a victim line in no table: a "<name> <verb> you…!" line just before the loss / corpse line names the killer.
 const KILLED_BY = [/courtesy of (.+?)[!.]?$/i, /^(?!You\b|Your\b)(.+?) \w+ you\b(?![^!]*\bfor \d+ points?)[^"]*!$/];
 const CHANNELS: ReadonlySet<string> = new Set(['fellowship', 'allegiance', 'general', 'trade', 'lfg', 'roleplay', 'society']);
 const MAGIC = /^(Casting |You cast |Your spell |With .+ you restore|The spell consumed|You resist the spell|You learn |You fail to affect|.+ casts .+ on you)|\bspell\b/i;
@@ -127,10 +137,21 @@ export function parseChatLine(line: string, char: string, me: string, cast: read
   }
   else chat(systemChannel(text));
   if ((r = LEVEL.exec(text))) out.push({ t, draft: { type: 'level-up', char, level: Number(r[1]) } });
-  if ((r = CORPSE.exec(text))) {
-    const k = state.killer && t - state.killer.at < 15_000 ? state.killer : undefined;
+  const victim = parseVictimDeathLine(text);
+  const sameDeath = state.deathAt !== undefined && t - state.deathAt >= 0 && t - state.deathAt < DEATH_LINES_MS;
+  if (victim) {
     state.killer = undefined;
-    out.push({ t, draft: { type: 'death', char, text: k ? k.text : text, ...(k ? { killer: k.name } : {}) } });
+    if (!sameDeath) {
+      state.deathAt = t;
+      out.push({ t, draft: { type: 'death', char, text, ...(victim.killer ? { killer: victim.killer } : {}) } });
+    }
+  } else if (CORPSE.test(text) || parseDeathLoss(text)) {
+    if (!sameDeath) {
+      const k = state.killer && t - state.killer.at < DEATH_LINES_MS ? state.killer : undefined;
+      state.killer = undefined;
+      state.deathAt = t;
+      out.push({ t, draft: { type: 'death', char, text: k ? k.text : text, ...(k ? { killer: k.name } : {}) } });
+    }
   } else {
     for (const re of KILLED_BY) {
       const km = re.exec(text);
@@ -352,7 +373,10 @@ export function parseStreamJsonLine(line: string, char: string, names: Map<strin
           if (s) out.drafts.push({ type: 'tool', char, tool: `ac_${c.tool}`, summary: s });
         }
         if (!calls.length && !/^\s*date\b/.test(cmd)) {
-          const what = /world-query|ace_world|sqlite3/.test(cmd) ? 'checks the world database' : `runs: ${clip(String(b.input?.description ?? cmd), 80)}`;
+          const words = /world-query/.test(cmd) ? shellWords(cmd) : [];
+          const wq = words.findIndex((w) => /world-query(\.ts)?$/.test(w));
+          const what = wq >= 0 && words[wq + 1] === 'lore' ? `looks up ${clip(words.slice(wq + 2).join(' '), 60)}`
+            : /world-query|ace_world|sqlite3/.test(cmd) ? 'checks the world database' : `runs: ${clip(String(b.input?.description ?? cmd), 80)}`;
           out.drafts.push({ type: 'tool', char, tool: 'bash', summary: what });
         }
       } else if (b.name === 'Read') {

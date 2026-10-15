@@ -91,6 +91,7 @@ describe('POST /client-preworld', () => {
       expect(line[2]).toEqual({
         ip: expect.any(String), outcome: 'login_refused', era: 'eor', server: 'coldeve', trace: 'feedc0de12345678', build: 'abc1234',
         screen: 'connecting', code: 0x14, token: 'ID_CHAR_ERROR_ACCOUNT_DOESNT_EXIST', pageMs: 0, screenMs: 0,
+        eid: expect.stringMatching(/^[0-9a-f]{12}$/), // BUG.telemetry-duplicate-resend
       });
       expect(bridge.metrics.clientPreworld.get('login_refused')).toBe(1);
       expect(renderPrometheus(bridge.metrics, { mode: 'pinned', era: null, sessions: 0, perServer: [], serversList: null, uptimeSeconds: 0, draining: false }))

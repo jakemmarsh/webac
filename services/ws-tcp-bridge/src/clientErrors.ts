@@ -10,6 +10,8 @@
  * shaped like `password=` / `account=` again in case a message carried one.
  */
 
+import { eidField } from './eventIds.js';
+
 export type ClientErrorKind = 'error' | 'unhandledrejection' | 'webglcontextlost' | 'boot';
 
 export interface ClientErrorReport {
@@ -27,6 +29,8 @@ export interface ClientErrorReport {
   userAgent: string | null;
   /** Times this error repeated on the page before this report (client-side dedupe). */
   count: number;
+  /** The page's id for this report, the same on every resend (eventIds.ts): the bridge logs each once. */
+  eid?: string;
 }
 
 export const CLIENT_ERROR_MAX_BODY = 16 * 1024;
@@ -68,5 +72,6 @@ export function sanitizeClientError(body: unknown): ClientErrorReport | null {
     screen: text(b.screen, 32),
     userAgent: text(b.userAgent, 300),
     count: Math.max(1, Math.min(int(b.count) ?? 1, 1e6)),
+    ...eidField(b.eid),
   };
 }

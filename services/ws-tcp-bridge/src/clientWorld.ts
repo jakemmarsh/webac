@@ -13,7 +13,8 @@
  * boolean, or a member of a closed list; anything else is dropped, so no
  * name, typed text or GPU string can reach the log through this route.
  */
-import { TRACE_PATTERN } from './clientPreworld.js';
+import { TRACE_PATTERN, lateField } from './clientPreworld.js';
+import { eidField } from './eventIds.js';
 
 export const WORLD_OUTCOMES = ['first_minute', 'world_left'] as const;
 export type WorldOutcome = typeof WORLD_OUTCOMES[number];
@@ -29,6 +30,14 @@ interface WorldIds {
   server: string | null;
   trace: string | null;
   build: string | null;
+  /**
+   * The event went out late (renderer telemetry/TelemetryOutbox.ts): the
+   * network refused its first send, typically the world_left of a drop, and
+   * this is how long it waited. Absent on an event that went at once.
+   */
+  lateMs?: number;
+  /** The page's id for this event, the same on every resend (eventIds.ts): the bridge logs each once. */
+  eid?: string;
 }
 
 /** A session that outlived its first minute ended. */
@@ -123,6 +132,8 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
     server: match(b.server, /^[A-Za-z0-9._-]{1,64}$/),
     trace: match(b.trace, TRACE_PATTERN),
     build: match(b.build, /^[A-Za-z0-9._-]{1,64}$/),
+    ...lateField(b.lateMs, SESSION_MS),
+    ...eidField(b.eid),
   };
   if (outcome === 'world_left') {
     return {

@@ -21,6 +21,7 @@ import { avoidDisks, type AvoidDisk } from './portalAvoid.js';
 import { PathSearch, floorPlan, straightWalk, type JumpSearch, type NavPoint, type NavProbe, type NavStep } from './navPlanner.js';
 import { compassPoint } from './format.ts';
 import { gearEmptyFacts } from './gear.ts';
+import { lossText, parseDeathBroadcast, parseDeathLoss, parseFellowDied, parseVictimDeathLine, type DeathLoss } from './deathLines.ts';
 import { APPRAISAL_SKILL_NAMES, ATTRIBUTE_NAMES, VITAL_NAMES } from '../ui/examine/appraisalFormat.js';
 import { fallBudget, isDrop, reaimJump, safeDropHeight, type JumpKit, type JumpSpec } from './jumpPlan.js';
 import { CELL_LENGTH, mapCoordinateText, mapCoordsOfCell } from '../ui/MapMarkers.js';
@@ -210,6 +211,11 @@ export interface AgentHost {
   fellows?(): Array<{ guid: number; name: string; health: { cur: number; max: number }; stamina: { cur: number; max: number }; mana: { cur: number; max: number } }>;
   /** Ask the server for what the pane would show (fellowship full update / AllegianceUpdate). */
   refreshSocial?(what: 'fellowship' | 'allegiance'): void;
+  /**
+   * Keep the fellows' vitals coming as they do while the fellowship pane is shown (ACE sends them only then:
+   * Fellowship.OnVitalUpdate checks Player.FellowshipPanelOpen). Called on the agent's looks; idempotent.
+   */
+  wantFellowVitals?(): void;
   /** A fellowship-pane action (create name / recruit the selection / quit / leader name / dismiss name / open / close / disband); null once sent, else why not. */
   fellowshipAction?(action: string, arg?: string): string | null;
   /** The allegiance pane as text (patron, vassals, monarch). */
@@ -1014,12 +1020,160 @@ export class AgentApi {
     }
   }
 
+  // ── deaths this session ──
+
+  /**
+   * Your deaths since this client started (newest last), and your fellows' as you saw them, so each death reads
+   * against the ones before it: a player feels "third time this hour, same pack, same place"; the agent got each death
+   * as a fresh "you died" (Arcanist died three times in an hour to Olthoi packs in the Olthoi Arcade and went back
+   * each time, 2026-10-15). Facts only: how many, where, what killed you at what level against yours, what each
+   * cost (the "You've lost …" line: ACE Player_Death.DropMessage, AC1999 sendLostItemMessage).
+   */
+  private deathLog: Array<{ at: number; wall: number; lb: number; place: string; killer: string | null; killerLevel?: number; myLevel: number; loss: DeathLoss | null }> = [];
+  private fellowDeathLog: Array<{ at: number; wall: number; name: string; lb: number; killer: string | null }> = [];
+  /** The last victim line ("Olthoi Harvester slays you …"), for the death it announces. */
+  private victimLine: { killer: string | null; at: number } | null = null;
+  /** The last bystander line naming a fellow's killer, for the "Your fellow … has died!" that follows. */
+  private fellowKillLine: { victim: string; killer: string; at: number } | null = null;
+  /** How long a death's lines (victim line, "You've lost …") count as that death's. */
+  static readonly DEATH_LINE_MS = 10_000;
+
+  /** "0x5B43": a cell's landblock. */
+  private static lbText(lb: number): string { return `0x${lb.toString(16).toUpperCase().padStart(4, '0')}`; }
+
+  /** Where a cell is, as a player would say it: outdoors near map coordinates, or inside (a dungeon or building). */
+  private placeOfCell(cell: number, coords: string | null): string {
+    const lb = AgentApi.lbText(cell >>> 16);
+    return (cell & 0xffff) >= 0x100 ? `inside landblock ${lb}` : `outdoors${coords ? ` near ${coords}` : ''} (landblock ${lb})`;
+  }
+
+  /** A creature's level as you know it (examined), by name, nearest first; undefined when not known. */
+  private levelByName(name: string): number | undefined {
+    const n = name.toLowerCase();
+    return this.nearby(120).find((o) => o.name.toLowerCase() === n && o.level)?.level;
+  }
+
+  private static ordinal(n: number): string {
+    const s = ['th', 'st', 'nd', 'rd'], v = n % 100;
+    return `${n}${s[(v - 20) % 10] ?? s[v] ?? s[0]}`;
+  }
+
+  /** The killer as known now: the victim line's, else whoever hit you most in the last few seconds. */
+  private killerNow(): string | null {
+    const now = this.host.now();
+    if (this.victimLine && now - this.victimLine.at < AgentApi.DEATH_LINE_MS && this.victimLine.killer) return this.victimLine.killer;
+    const counts = new Map<string, number>();
+    for (const l of this.attackLines) if (now - l.at < 10_000 && l.name) counts.set(l.name, (counts.get(l.name) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  }
+
+  /** Your death: logged, and the death event's text (the tally, what killed you against your level, what earlier ones cost). */
+  private recordDeath(s: NonNullable<ReturnType<AgentHost['self']>>): string {
+    const killer = this.killerNow();
+    const self = this.self();
+    const myLevel = self?.level ?? s.level ?? 0;
+    const lb = (s.cell >>> 16) & 0xffff;
+    const rec = { at: this.host.now(), wall: this.wallNow(), lb, place: this.placeOfCell(s.cell >>> 0, self?.coords ?? null), killer, ...(killer && this.levelByName(killer) ? { killerLevel: this.levelByName(killer) } : {}), myLevel, loss: null };
+    this.deathLog.push(rec);
+    if (this.deathLog.length > 50) this.deathLog.shift();
+    const n = this.deathLog.length;
+    const here = this.deathLog.filter((d) => d.lb === lb).length;
+    const out = [`you died: your ${AgentApi.ordinal(n)} death this session, the ${AgentApi.ordinal(here)} ${rec.place}`];
+    out.push(killer ? `killed by ${killer} (${rec.killerLevel ? `level ${rec.killerLevel}` : 'level not known'}; you are level ${myLevel})` : `killer not named (you are level ${myLevel})`);
+    const earlier = this.deathLog.slice(0, -1);
+    if (earlier.length) out.push(`before this: ${earlier.map((d) => this.deathText(d, true)).join('; ')}`);
+    out.push(`what this one cost comes in the "You've lost …" line (observe's deaths line lists it)`);
+    return out.join('; ');
+  }
+
+  /** One logged death: "26 min ago, Olthoi Gardener (level 21; you level 24) inside landblock 0x5B43: lost 1,556 pyreals and Necklace". */
+  private deathText(d: AgentApi['deathLog'][number], withPlace: boolean): string {
+    const ago = Math.max(0, Math.round((this.wallNow() - d.wall) / 60_000));
+    const who = d.killer ? `${d.killer} (${d.killerLevel ? `level ${d.killerLevel}` : 'level not known'}; you level ${d.myLevel})` : `killer not named (you level ${d.myLevel})`;
+    return `${ago} min ago, ${who}${withPlace ? ` ${d.place}` : ''}: ${d.loss ? `lost ${lossText(d.loss)}` : 'nothing dropped (or its line not in yet)'}`;
+  }
+
+  /** A death line in chat: the victim line (killer), "You've lost …" (cost), a fellow's death. */
+  private noteDeathLine(line: string): void {
+    const now = this.host.now();
+    const v = parseVictimDeathLine(line);
+    if (v) {
+      this.victimLine = { killer: v.killer, at: now };
+      // The line can come after the client's own death state (still dead): name the killer on the death just logged.
+      const last = this.deathLog[this.deathLog.length - 1];
+      if (last && this.lastDead && now - last.at < AgentApi.DEATH_LINE_MS && v.killer && last.killer !== v.killer) {
+        last.killer = v.killer;
+        const lvl = this.levelByName(v.killer);
+        if (lvl) last.killerLevel = lvl; else delete last.killerLevel;
+      }
+      return;
+    }
+    const loss = parseDeathLoss(line);
+    if (loss) {
+      const last = this.deathLog[this.deathLog.length - 1];
+      if (last && now - last.at < AgentApi.DEATH_LINE_MS && !last.loss) last.loss = loss;
+      return;
+    }
+    const fellows = (this.host.fellows?.() ?? []).map((f) => f.name);
+    const b = parseDeathBroadcast(line, fellows);
+    if (b) { this.fellowKillLine = { ...b, at: now }; this.fellowDied(b.victim, b.killer); return; }
+    const fellow = parseFellowDied(line);
+    if (fellow) {
+      const k = this.fellowKillLine && this.fellowKillLine.victim === fellow && now - this.fellowKillLine.at < AgentApi.DEATH_LINE_MS ? this.fellowKillLine.killer : null;
+      this.fellowDied(fellow, k);
+    }
+  }
+
+  /**
+   * A fellow died (ACE's "Your fellow … has died!", or the bystander's line naming them in AC1999, which has no
+   * fellow line; ACE sends the bystander line first, then the fellow line): a fellow-low event with their tally as you
+   * saw it. One event per death: a second signal within DEATH_LINE_MS is the same death.
+   */
+  private fellowDied(name: string, killer: string | null): void {
+    const now = this.host.now();
+    const last = [...this.fellowDeathLog].reverse().find((d) => d.name === name);
+    if (last && now - last.at < AgentApi.DEATH_LINE_MS) {
+      if (killer && !last.killer) last.killer = killer;
+      return;
+    }
+    const me = this.me();
+    const lb = me ? (me.s.cell >>> 16) & 0xffff : 0;
+    this.fellowDeathLog.push({ at: now, wall: this.wallNow(), name, lb, killer });
+    if (this.fellowDeathLog.length > 50) this.fellowDeathLog.shift();
+    const theirs = this.fellowDeathLog.filter((d) => d.name === name);
+    const here = theirs.filter((d) => d.lb === lb).length;
+    const guid = (this.host.fellows?.() ?? []).find((f) => f.name === name)?.guid;
+    const lvl = killer ? this.levelByName(killer) : undefined;
+    this.push('fellow-low', `your fellow ${name} died${killer ? `, killed by ${killer} (${lvl ? `level ${lvl}` : 'level not known'})` : ''}: their ${AgentApi.ordinal(theirs.length)} death this session that you saw, the ${AgentApi.ordinal(here)} in this landblock (${AgentApi.lbText(lb)}); they are back at their lifestone`, guid);
+  }
+
+  /** Observe's deaths line: your deaths this session with what each cost, and your fellows' as you saw them. */
+  private deathsLine(): string | null {
+    if (!this.deathLog.length && !this.fellowDeathLog.length) return null;
+    const parts: string[] = [];
+    if (this.deathLog.length) {
+      const me = this.me();
+      const lb = me ? (me.s.cell >>> 16) & 0xffff : -1;
+      const here = this.deathLog.filter((d) => d.lb === lb).length;
+      const pyreals = this.deathLog.reduce((a, d) => a + (d.loss?.pyreals ?? 0), 0);
+      parts.push(`you ${this.deathLog.length} (${here} in this landblock; ${pyreals.toLocaleString('en-US')} pyreals lost in all): ${this.deathLog.map((d) => this.deathText(d, true)).join('; ')}`);
+    }
+    const byName = new Map<string, AgentApi['fellowDeathLog']>();
+    for (const d of this.fellowDeathLog) byName.set(d.name, [...(byName.get(d.name) ?? []), d]);
+    for (const [name, ds] of byName) {
+      const last = ds[ds.length - 1];
+      parts.push(`${name} ${ds.length} (last ${Math.max(0, Math.round((this.wallNow() - last.wall) / 60_000))} min ago${last.killer ? `, ${last.killer}` : ''})`);
+    }
+    return `deaths this session: ${parts.join('; ')}`;
+  }
+
   /** A chat/system line the client displayed. main.ts taps gameUI.addSystemMessage into this. */
   pushChat(text: string, type?: number): void {
     const clean = text.replace(/\s+$/, '');
     if (!clean) return;
     this.push('chat', `(${chatKindOf(type, clean)}) ${clean}`, undefined, type);
     this.noteCorpseLine(clean);
+    this.noteDeathLine(clean);
     // Something attacked you: every incoming swing or spell is a CombatEnemy (0x15) line ("… hits you",
     // "… misses you", "You evaded …"), a 0-damage hit included, so an agent can wait on being attacked
     // instead of on vitals-low.
@@ -1729,6 +1883,7 @@ export class AgentApi {
   }
 
   observe(opts: ObserveOptions = {}): AgentObservation {
+    this.host.wantFellowVitals?.();
     const radius = opts.radius ?? 60;
     const max = opts.max ?? 25;
     const all = this.nearby(radius, opts.filter);
@@ -1774,6 +1929,7 @@ export class AgentApi {
       buffsMissing: this.missingBuffs(),
       fellows: this.fellowsAt(),
       fellowshipAlone: (this.host.fellowshipInfo?.()?.count ?? 0) === 1,
+      ...(() => { const d = this.deathsLine(); return d ? { deaths: d } : {}; })(),
       ...(() => { const g = gearEmptyFacts(this.host.inventory()); return g ? { gearEmpty: g } : {}; })(),
       ...(() => { const u = this.attackersUnplaced(); return u.length ? { attackersUnplaced: u } : {}; })(),
       remembered: this.rememberedPlaces({ ...(opts.radius !== undefined ? { radius: opts.radius } : {}), ...(opts.filter ? { filter: opts.filter } : {}) }),
@@ -5531,7 +5687,7 @@ export class AgentApi {
       this.checkVitalWaits(s);
       this.lastHealthFrac = frac;
       this.lastHealthCur = s.health.current;
-      if (s.dead && !this.lastDead) { this.push('death', 'you died'); this.cancelTask('you died'); }
+      if (s.dead && !this.lastDead) { this.push('death', this.recordDeath(s)); this.cancelTask('you died'); }
       this.lastDead = s.dead;
     }
     for (const g of [this.attackTarget, this.watchedTarget]) if (g && this.host.isDying(g)) this.dyingSeen.add(g);

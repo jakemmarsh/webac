@@ -16,6 +16,8 @@
  * the address itself, as it does for client_error.
  */
 
+import { eidField } from './eventIds.js';
+
 export const PREWORLD_OUTCOMES = [
   'login_refused', 'connect_failed', 'char_list', 'char_error', 'chargen_ok', 'chargen_refused',
   'enter_refused', 'enter_ok', 'dropped', 'page_hidden', 'page_left', 'page_reload', 'boot_slow', 'boot_failed',
@@ -23,7 +25,7 @@ export const PREWORLD_OUTCOMES = [
 export type PreworldOutcome = typeof PREWORLD_OUTCOMES[number];
 
 export const PREWORLD_SCREENS = [
-  'boot', 'server-select', 'connecting', 'char-select', 'chargen', 'portal-space', 'disconnected', 'world',
+  'boot', 'server-select', 'connecting', 'resuming', 'char-select', 'chargen', 'portal-space', 'disconnected', 'world',
 ] as const;
 export type PreworldScreen = typeof PREWORLD_SCREENS[number];
 
@@ -61,6 +63,14 @@ export interface ClientPreworldEvent {
   totalKB: number | null;
   cache: typeof BOOT_CACHE_STATES[number] | null;
   caps: Array<typeof CAPABILITY_ISSUES[number]> | null;
+  /**
+   * The event went out late: the network refused its first send (renderer
+   * telemetry/TelemetryOutbox.ts) and this is how long it waited. Absent on
+   * an event that went at once; the log line's time is when it arrived.
+   */
+  lateMs?: number;
+  /** The page's id for this event, the same on every resend (eventIds.ts): the bridge logs each once. */
+  eid?: string;
 }
 
 export const CLIENT_PREWORLD_MAX_BODY = 2 * 1024;
@@ -96,6 +106,12 @@ export function traceFromUrl(url: string | undefined): string | null {
 
 const MAX_MS = 7 * 24 * 3600_000;
 
+/** `{ lateMs }` when the event carries a valid one (it went out late), else nothing. */
+export function lateField(v: unknown, max: number): { lateMs?: number } {
+  const n = uint(v, max);
+  return n === null ? {} : { lateMs: n };
+}
+
 /** Validate a posted body field by field; null when it is not an event. Unknown fields are dropped. */
 export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
@@ -124,5 +140,7 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     totalKB: uint(b.totalKB, MAX_KB),
     cache: pick(b.cache, BOOT_CACHE_STATES),
     caps: pickList(b.caps, CAPABILITY_ISSUES),
+    ...lateField(b.lateMs, MAX_MS),
+    ...eidField(b.eid),
   };
 }

@@ -138,22 +138,66 @@ describe('feed: chat lines', () => {
     expect(parse('Your spell fizzled.')[0]).toMatchObject({ channel: 'magic' });
     expect(parse('You have entered the General channel.')[0]).toMatchObject({ channel: 'system' });
   });
-  it('a level-up and a death (with the killer from the line before the corpse line)', () => {
+  it('a level-up and a death: the victim line is the death (killer named), its corpse line the same death', () => {
     expect(parse('You are now level 16!')).toEqual([
       { type: 'chat', char: 'mage', channel: 'system', text: 'You are now level 16!' },
       { type: 'level-up', char: 'mage', level: 16 },
     ]);
     const st: ChatParseState = {};
-    parse('Spikey Armoredillo splits you apart!', st, '2026-10-13T20:00:00.000Z');
-    const d = parse('Your corpse is located at (36.5N, 35.9E).', st, '2026-10-13T20:00:02.000Z');
-    expect(d[1]).toEqual({ type: 'death', char: 'mage', killer: 'Spikey Armoredillo', text: 'Spikey Armoredillo splits you apart!' });
+    expect(parse('Spikey Armoredillo splits you apart!', st, '2026-10-13T20:00:00.000Z')[1]).toEqual({ type: 'death', char: 'mage', killer: 'Spikey Armoredillo', text: 'Spikey Armoredillo splits you apart!' });
+    expect(parse('Your corpse is located at (36.5N, 35.9E).', st, '2026-10-13T20:00:02.000Z').map((d) => d.type)).toEqual(['chat']);
     const st2: ChatParseState = {};
-    parse('Your death is preceded by a sharp, stabbing pain, courtesy of Mudlurk Mosswart!', st2);
-    expect(parse('Your corpse is located at (42.2N, 35.2E).', st2)[1]).toMatchObject({ type: 'death', killer: 'Mudlurk Mosswart' });
-    // A hit is not a killer; with no killer line the death still comes.
+    expect(parse('Your death is preceded by a sharp, stabbing pain, courtesy of Mudlurk Mosswart!', st2)[1]).toMatchObject({ type: 'death', killer: 'Mudlurk Mosswart' });
+    // A hit is not a killer; with no victim line the corpse line is the death.
     const st3: ChatParseState = {};
     parse('Drudge Skulker hits you for 0 points of bludgeoning damage!', st3);
     expect(parse('Your corpse is located at (1.0N, 2.0E).', st3)[1]).toEqual({ type: 'death', char: 'mage', text: 'Your corpse is located at (1.0N, 2.0E).' });
+    // The killer's name, not the template's words ("The force of Mud Golem's assault flattens you!" once named "force of Mud Golem's assault").
+    expect(parse("The force of Mud Golem's assault flattens you!", {})[1]).toMatchObject({ type: 'death', killer: 'Mud Golem' });
+  });
+  it('the three Olthoi Arcade deaths (2026-10-15, a dungeon: no corpse line), each once, from the real mage.chat.log lines', () => {
+    // Each death's lines as Arcanist's log has them: the victim line, then "You've lost …" two seconds later.
+    const lines = [
+      ['2026-10-15T00:44:01.781Z', 'Olthoi Harvester blisters your lower leg for 6 points of acid damage!'],
+      ['2026-10-15T00:44:02.410Z', "You are utterly destroyed by Olthoi Harvester's attack!"],
+      ['2026-10-15T00:44:04.475Z', "You've lost 4,948 Pyreals, your Necklace, your Bracelet, and your Malachite!"],
+      ['2026-10-15T00:44:04.707Z', 'In Portal Space - Please Wait...'],
+      ['2026-10-15T01:25:56.079Z', 'Olthoi Gardener nicks your upper arm for 11 points of piercing damage!'],
+      ['2026-10-15T01:25:57.029Z', 'Olthoi Gardener reduces you to a sizzling, oozing mass!'],
+      ['2026-10-15T01:25:59.078Z', "You've lost 1,556 Pyreals, and your Necklace!"],
+      ['2026-10-15T01:45:07.287Z', 'You say, "Malar Zhapaj"'],
+      ['2026-10-15T01:45:07.370Z', 'Olthoi Harvester slays you viciously enough to impart death several times over!'],
+      ['2026-10-15T01:45:09.377Z', "You've lost 778 Pyreals, your Bracelet, and your Necklace!"],
+    ];
+    const st: ChatParseState = {};
+    const deaths = lines.flatMap(([at, text]) => parse(text, st, at)).filter((d) => d.type === 'death');
+    expect(deaths).toEqual([
+      { type: 'death', char: 'mage', killer: 'Olthoi Harvester', text: "You are utterly destroyed by Olthoi Harvester's attack!" },
+      { type: 'death', char: 'mage', killer: 'Olthoi Gardener', text: 'Olthoi Gardener reduces you to a sizzling, oozing mass!' },
+      { type: 'death', char: 'mage', killer: 'Olthoi Harvester', text: 'Olthoi Harvester slays you viciously enough to impart death several times over!' },
+    ]);
+    // A loss line with no victim line before it (a wording in no table) is still a death, once.
+    const st2: ChatParseState = {};
+    const d2 = [parse("You've lost 778 Pyreals, your Bracelet, and your Necklace!", st2, '2026-10-15T02:00:00.000Z'), parse('Your corpse is located at (1.0N, 2.0E).', st2, '2026-10-15T02:00:01.000Z')].flat().filter((d) => d.type === 'death');
+    expect(d2).toHaveLength(1);
+    // The partner's view of it (Bulwark's log) is no death of his: the overlay hears it from Arcanist's own log.
+    const sst: ChatParseState = {};
+    const bul = (text: string) => parseChatLine(`2026-10-15T00:44:02.410Z ${text}`, 'soldier', 'Claude Bulwark', cast, sst).map((x) => x.draft);
+    expect([...bul("Claude Arcanist is utterly destroyed by Olthoi Harvester's attack!"), ...bul('Your fellow Claude Arcanist has died!')].filter((d) => d.type === 'death')).toEqual([]);
+  });
+  it('the Olthoi Arcade deaths reach the overlay: three SLAIN callouts with killers, counted once each', () => {
+    const st = createState();
+    const t = (iso: string) => Date.parse(iso);
+    const ps: ChatParseState = {};
+    for (const [at, text] of [
+      ['2026-10-15T00:44:02.410Z', "You are utterly destroyed by Olthoi Harvester's attack!"],
+      ['2026-10-15T00:44:04.475Z', "You've lost 4,948 Pyreals, your Necklace, your Bracelet, and your Malachite!"],
+      ['2026-10-15T01:25:57.029Z', 'Olthoi Gardener reduces you to a sizzling, oozing mass!'],
+      ['2026-10-15T01:25:59.078Z', "You've lost 1,556 Pyreals, and your Necklace!"],
+      ['2026-10-15T01:45:07.370Z', 'Olthoi Harvester slays you viciously enough to impart death several times over!'],
+      ['2026-10-15T01:45:09.377Z', "You've lost 778 Pyreals, your Bracelet, and your Necklace!"],
+    ]) for (const x of parseChatLine(`${at} ${text}`, 'mage', 'Claude Arcanist', cast, ps)) applyEvent(st, { v: 1, t: x.t, ...x.draft } as FeedEvent, t(at));
+    expect(st.chars.mage.deaths).toBe(3);
   });
   it('stamps each line with the time the game printed it', () => {
     expect(parseChatLine('2026-10-13T20:00:05.000Z You are now level 3!', 'mage', 'X', [], {})[0].t).toBe(Date.parse('2026-10-13T20:00:05.000Z'));

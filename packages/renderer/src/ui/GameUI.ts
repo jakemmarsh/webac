@@ -5289,6 +5289,11 @@ export class GameUI {
    * populates the list/world name only once the character set arrives
    * (showCharacterSelect clears the mode).
    */
+  /** The connecting screen (showConnectingScreen) is up: Please Wait, no character list of this connect yet. */
+  get connectingScreenShown(): boolean {
+    return this.connectingMode;
+  }
+
   showConnectingScreen(): void {
     this.connectingMode = true;
     this.selectedAvatarId = undefined;
@@ -20896,8 +20901,33 @@ export class GameUI {
   /** Show / hide the social panel in its panels-window slot (setPanelsWindowPanel drives it). */
   /** The fellowship pane's visibility last told to the server (gmFellowshipUI::OnVisibilityChanged). */
   private fellowshipPaneShownSent = false;
+  /**
+   * An agent is playing (AgentApi's first look): keep the fellows' updates coming as the shown pane gets them. ACE sends a
+   * fellow's vitals (FellowshipUpdateFellow, FellowUpdateType.Vitals: Fellowship.OnVitalUpdate from Player_Tick) only to
+   * fellows whose client said the pane is shown (Player.FellowshipPanelOpen, HandleFellowshipUpdateRequest), and the
+   * EoL client sends that from gmFellowshipUI::OnVisibilityChanged alone. A player keeps the pane up to watch a
+   * fellow's health; the agent can't look at a pane, so its client asks for the same updates with the pane closed
+   * (nothing drawn). Without it the agent's `fellows:` line and fellow-low froze at the join's full update: Bulwark
+   * read Arcanist at 98% through the three Olthoi Arcade deaths (2026-10-15, "your health bar never moved on my end").
+   */
+  private fellowVitalsWanted = false;
+  /** The agent's request for the fellows' updates (see {@link fellowVitalsWanted}); idempotent. */
+  setFellowVitalsWanted(on: boolean): void {
+    if (this.fellowVitalsWanted === on) return;
+    this.fellowVitalsWanted = on;
+    this.syncFellowshipPaneVisibility();
+  }
+  /**
+   * A new world session: the server's flag starts false (a new Player object), so the next want is sent again.
+   * main.ts calls it as it enters the world.
+   */
+  noteWorldSessionStart(): void {
+    this.fellowshipPaneShownSent = false;
+  }
   private syncFellowshipPaneVisibility(): void {
-    const shown = this.socialPanelVisible && this.socialTab === 'fellowship';
+    // The pane shown, or an agent wanting its updates while in a fellowship (a want with no fellowship waits for the
+    // join's full update: setFellowshipData syncs again).
+    const shown = (this.socialPanelVisible && this.socialTab === 'fellowship') || (this.fellowVitalsWanted && !!this.fellowshipData);
     if (shown === this.fellowshipPaneShownSent) return;
     this.fellowshipPaneShownSent = shown;
     this.callbacks.onFellowshipPaneVisibility?.(shown);
@@ -20935,6 +20965,8 @@ export class GameUI {
     fellows: Array<{ guid: number; name: string; level: number; healthCurrent: number; healthMax: number; staminaCurrent: number; staminaMax: number; manaCurrent: number; manaMax: number; shareLoot: boolean }>;
   } | null): void {
     this.fellowshipData = data;
+    // Joining (or leaving) changes what an agent's want asks for: the fellows' updates start with the fellowship.
+    if (this.fellowVitalsWanted) this.syncFellowshipPaneVisibility();
     // CORE.5.c.d.b — drop a stale row selection when the member left (retail
     // UpdateFellowSelection re-resolves m_iidSelectedFellow against the list).
     if (this.selectedFellowGuid !== null && (!data || !data.fellows.some(f => f.guid === this.selectedFellowGuid))) {

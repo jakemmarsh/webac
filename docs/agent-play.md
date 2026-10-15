@@ -230,6 +230,18 @@ profile=… character=…`), then plays it as a headless Claude Code session in 
   `./ac <tool> …` (the agent CLI by absolute path through the repo's own `node_modules/.bin/tsx`, no npx; it refuses
   `start` / `stop` and appends `profile=<profile>`, which wins, so a call can't drive the partner) and
   `./world-query "SELECT …"`. `AC_AGENT_PROFILE=<profile>` is set too.
+- **Monster lookup:** `./world-query lore "<monster>"` (`tools/stream/lore.ts`, read-only like the rest) is the
+  players' wiki: per version of that name, its level, XP per kill, max health and spawn-point count, the damage it
+  takes per element best-first (ResistSlash…ResistElectric, PropertyFloat 64–70, absent = 100%), the war bolt that
+  hurts it most and least, and its attacks (melee damage types, wielded weapons, MISSILE, spells with their cast
+  chance), then a "defend with" line: the protections that cover the most of its expected damage per attack
+  (Blade/Piercing/Bludgeoning/Fire/Cold/Acid/Lightning Protection and Armor, Life; Invulnerability vs melee,
+  Impregnability vs missile, Magic Resistance vs its spells and debuffs, Creature) and the Item Enchantment banes for
+  armor. Spell names and schools are the DAT SpellTable's (checked by the test); whether a monster's spell is cast at
+  you is the DAT's Beneficial flag, read from `dat/client_portal.dat` (`ACJS_PORTAL_DAT` for another era). Names match case-insensitively: exact, else prefix, else substring; more than three names lists them.
+  Brief rule 5 tells a player to look a monster up before fighting a new kind (Jake 2026-10-14: Arcanist kept
+  casting Flame Bolt at Olthoi, which take 75% fire and 100% pierce/bludgeon; a brief line naming the float types
+  was ignored). The feed shows the call as "looks up <name>".
 - After `segment.minutes` (75) the supervisor sends "[supervisor] Wrap up now", a numbered list: finish the fight
   (start no new one) and get somewhere safe (nothing on you, not mid-dungeon pack), check with `observe`, `note
   kind=goal` and `goal` for next time, a goodbye in /f, and only then the report, which ends the segment. (Rehearsal
@@ -282,7 +294,10 @@ The brief therefore asks for one CLI call per Bash command: no `cd`, pipes or ot
   - `tool`: each CLI call, summarized, with object ids turned into the names observe printed
     ("casts Flame Bolt III at Drudge Servant (repeat)").
   - `segment-start` / `segment-end`, `session-start`.
-  - `death` (the "Your corpse is located at" line, the killer from the line before it), `level-up`.
+  - `death` (the victim line, e.g. "Olthoi Harvester slays you viciously …", killer from ACE's / AC1999's death
+    templates in `agent/deathLines.ts`; with no such line, the "You've lost …" or "Your corpse is located at" line;
+    one event per death within 15 s), `level-up`. The corpse line comes only outdoors and only when something dropped
+    (ACE Creature_Death), so keying on it alone missed all three Olthoi Arcade deaths (2026-10-15).
   - `status` every `statusEverySeconds`.
 - `segments.jsonl`, `reports/<profile>-…-seg<N>.md` (each final report), `sessions/<profile>-<day>-seg<N>.jsonl`
   (the raw stream-json), `supervisor.log`.
@@ -630,6 +645,30 @@ here, not having to hardcode behavior").
     is "/f RUN" with the caster below about 50% (the tank below about 35%) or more than two monsters on you.
   All three eras: the MoveTo / TurnTo movement types, the fellowship vitals and the client's position updates are the
   same path in each (tests/verify-agent-aggro-avoid.ts).
+- **Deaths read against each other, and fellows' health that moves (2026-10-15, Olthoi Arcade).** Arcanist (L24 mage)
+  died three times in an hour to packs of ~10 Olthoi (00:44, 01:25, 01:45 UTC; 4,948, 1,556 and 778 pyreals plus
+  jewellery) and the pair went back each time (Jake: "are they not re-evaluating?"). Three causes, all fixed:
+  - **Fellows' vitals froze.** ACE sends a fellow's vitals (FellowshipUpdateFellow, FellowUpdateType.Vitals, from
+    Player_Tick via Fellowship.OnVitalUpdate) only to fellows whose client said the fellowship pane is shown
+    (Player.FellowshipPanelOpen, set by HandleFellowshipUpdateRequest); the EoL client sends that request only from
+    gmFellowshipUI::OnVisibilityChanged, and retail's QueryHealth / UpdateHealth covers only the one selected object
+    (Player.HandleTargetVitals). The agent never shows the pane, so after each (re)forming its `fellows:` line and
+    fellow-low read the join's full update: Bulwark saw Arcanist at 98% through the 01:45 death ("your health bar never
+    moved on my end"); the session logs show the line moving only after an `ac_fellowship action=show`. Now the agent's
+    first look asks for the same updates a player gets by keeping the pane up (`GameUI.setFellowVitalsWanted`: the
+    request goes out while in a fellowship, pane drawn or not, again after each new world session, off when the
+    fellowship ends). A player's own client keeps retail's pane-only requests. Same request in all three eras (AC1999's
+    0xA6 FellowshipUpdate).
+  - **Each death was a fresh "you died".** The `death` event now says which death this is this session and in this
+    landblock, what killed you at what level against yours (examined levels), and what the earlier ones cost; observe
+    adds `deaths this session: you 3 (3 in this landblock; 7,282 pyreals lost in all): …` with each death's cost from
+    the "You've lost …" line, and your fellows' deaths. A fellow's death is a `fellow-low` event ("your fellow Claude
+    Arcanist died, killed by Olthoi Harvester (level 20): their 3rd death this session that you saw, the 3rd in this
+    landblock"), from ACE's bystander line plus "Your fellow … has died!" (Fellowship.OnDeath; AC1999 has only the
+    bystander line), once per death. Facts only.
+  - **The overlay missed all three** (the feed keyed on the corpse line, which a dungeon death never gets).
+  Tests: tests/verify-agent-death-tally.ts, tests/verify-stream-supervisor.ts (the real lines),
+  tests/verify-allegiance-pane-native.ts (the vitals request).
 - **Follow through the hits (2026-10-12).** `ac_follow flee=true` keeps following while you're hit, as `ac_walk_to
   flee=true` does; without it the first hit ends the follow (as before). Arcanist died four times in an hour in Holtburg
   Dungeon: separated from Bulwark, drudge spawners refilled next to the 67-HP mage, its follow ended at the first hit,
