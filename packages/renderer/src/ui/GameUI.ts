@@ -1279,6 +1279,26 @@ export const CHARGEN_NAME_REFUSED_TOKEN = 'ID_Character_Err_NameBanned';
 /** The Please Wait box Create Character raises while the streamed world art is still loading. */
 export const CHARGEN_WORLD_ART_WAIT_ID = 'chargen-pleasewait';
 
+/**
+ * BUG.stale-wait-plate-modal (2026-10-14) — an element is on screen: in the
+ * document and neither it nor any ancestor is display:none / [hidden].
+ * `isConnected` plus the element's own style.display is not enough: a dialog
+ * left inside a hidden screen container (char select's Entering World plate
+ * after the world starts) stays connected with display intact. Browsers
+ * answer with checkVisibility() (it also sees stylesheet rules); elsewhere
+ * (happy-dom) the ancestor walk reads computed display.
+ */
+export function isElementDisplayed(el: HTMLElement | null | undefined): boolean {
+  if (!el || !el.isConnected) return false;
+  const check = (el as HTMLElement & { checkVisibility?: () => boolean }).checkVisibility;
+  if (typeof check === 'function') return check.call(el);
+  for (let n: HTMLElement | null = el; n; n = n.parentElement) {
+    if (n.hidden || n.style.display === 'none') return false;
+    if (typeof getComputedStyle === 'function' && getComputedStyle(n).display === 'none') return false;
+  }
+  return true;
+}
+
 export class GameUI {
   private container: HTMLElement;
   private uiManager: UIManager;
@@ -5461,6 +5481,14 @@ export class GameUI {
   showGame(): void {
     this.uiManager.setScreen('game');
     this.screenContainer.style.display = 'none';
+    // BUG.stale-wait-plate-modal (2026-10-14) — char select's wait dialogs
+    // (Entering World, Please Wait) belong to that screen: retail's
+    // gmCharacterManagementUI dtor @ 004ec080 closes them when gameplay
+    // replaces it. Hiding the container left them in the document, so every
+    // world session after a char-select entry reported a 'dialog' modal for
+    // its whole length (first-minute telemetry) and agents read an "Entering
+    // World" dialog. The container is hidden, so nothing visible changes.
+    for (const id of ['charsel-enteringworld', 'charsel-pleasewait']) this.screenContainer.querySelector(`#${id}`)?.remove();
     this.hudContainer.style.display = 'block';
     this.renderHUD();
     this.renderViewportFrame();
@@ -33475,13 +33503,13 @@ export class GameUI {
   /** AGENT — open dialogs, oldest first: their text and button labels (what a player reads on screen). */
   agentDialogs(): Array<{ text: string; buttons: string[] }> {
     this.agentDialogEntries = this.agentDialogEntries.filter((d) => d.el.isConnected);
-    return this.agentDialogEntries.filter((d) => d.el.style.display !== 'none')
+    return this.agentDialogEntries.filter((d) => isElementDisplayed(d.el))
       .map((d) => ({ text: d.text, buttons: d.buttons.map((b) => b.label) }));
   }
 
   /** AGENT — press a button on an open dialog (the newest one with that label unless `index` picks one); false when none matches. */
   agentAnswerDialog(label: string, index?: number | null): boolean {
-    const open = this.agentDialogEntries.filter((d) => d.el.isConnected && d.el.style.display !== 'none');
+    const open = this.agentDialogEntries.filter((d) => isElementDisplayed(d.el));
     const want = label.trim().toLowerCase();
     const pool = index != null ? [open[index]].filter(Boolean) : [...open].reverse(); // null: an omitted arg after JSON
     for (const d of pool) {
@@ -33978,7 +34006,7 @@ export class GameUI {
     if (this.popupStringDialogs.some((d) => d.isConnected)) return 'popup';
     if (this.messageDialog?.isConnected) return 'message';
     if (this.confirmationDialog?.isConnected) return 'confirm';
-    if (this.agentDialogEntries.some((d) => d.el.isConnected && d.el.style.display !== 'none')) return 'dialog';
+    if (this.agentDialogEntries.some((d) => isElementDisplayed(d.el))) return 'dialog';
     if (this.bookPanelHandle !== null) return 'book';
     return null;
   }
