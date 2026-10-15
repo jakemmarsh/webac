@@ -61,7 +61,12 @@ Each session speaks end of retail unless something says 1999
 Logs are one JSON object per line. Every session's `session_close` line
 carries `durationMs`, `bytesFromBrowser`, `bytesToServer`, `bytesFromServer`,
 `bytesToBrowser` and packet counts. Use these to measure per-player bandwidth.
-Hosting egress is roughly `bytesToServer + bytesToBrowser`.
+Hosting egress is roughly `bytesToServer + bytesToBrowser`. A `reason: ws_close`
+line also carries `peerCloseCode`, the browser socket's close code: 1005 = the
+page's own code closed it (ClientConnection ending a session it judged dead or
+the server ended), 1001 = the page went away (tab closed, reload), 1006 = the
+connection dropped with no close frame (an edge proxy, the network, or the
+bridge's own ping timeout, which logs `session_ping_timeout` first).
 
 ## Environment variables
 

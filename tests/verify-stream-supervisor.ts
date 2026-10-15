@@ -886,7 +886,7 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
     }, {
       inventory: { mage: arcanistInv(), soldier: completeInv() },
       sheets: { mage: `${sheet('612,345', 2)}\nSpecialized skills: War Magic 200\nTrained skills: Item Enchantment 166` },
-      spells: { mage: [{ id: 27, name: 'Flame Bolt I', school: 'War Magic', level: 1 }] },
+      spells: { mage: [{ id: 27, name: 'Flame Bolt I', school: 'War', level: 1 }] },
       chat,
     });
     try {

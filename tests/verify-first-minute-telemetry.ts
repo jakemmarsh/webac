@@ -29,7 +29,10 @@ const FIRST_MINUTE_KEYS = [
   'unresolvedMisses', 'firstMoveMs', 'firstClickMs', 'keys', 'modal', 'modalMs', 'errors',
   'eid', // BUG.telemetry-duplicate-resend — the outbox's event id (verify-telemetry-duplicate-resend.ts)
 ].sort();
-const WORLD_LEFT_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
+const WORLD_LEFT_BASE_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
+// BUG.hidden-tab-session-drop: the page adds hiddenMs / freezes / frozenMs to every world_left (endCause / closeCode
+// on a drop only); the bridge keeps them only when sent, so an older page's event keeps the base keys.
+const WORLD_LEFT_KEYS = [...WORLD_LEFT_BASE_KEYS, 'hiddenMs', 'freezes', 'frozenMs'].sort();
 
 interface Rig {
   r: WorldReporter;
@@ -316,7 +319,7 @@ describe('sanitizeClientWorld', () => {
     expect(sanitizeClientWorld({ outcome: 'world_left', exit: 'hidden' })!.exit).toBeNull();
     const left = sanitizeClientWorld({ outcome: 'world_left', exit: 'logout', sessionMs: 90_000, keys: 5, frames: 10, gpu: 'discrete', eid: 'abcdef012345' })!;
     expect(left).toMatchObject({ exit: 'logout', sessionMs: 90_000 });
-    expect(Object.keys(left).sort()).toEqual(WORLD_LEFT_KEYS);
+    expect(Object.keys(left).sort()).toEqual(WORLD_LEFT_BASE_KEYS);
   });
 });
 

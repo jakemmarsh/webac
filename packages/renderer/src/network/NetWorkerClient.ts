@@ -17,6 +17,14 @@ export interface NetWorkerEndpoint {
   addEventListener(type: 'message', listener: (ev: MessageEvent<NetReply>) => void): void;
 }
 
+/**
+ * How far the page ages the worker's last link sample by its own clock: a few
+ * snapshot intervals (NET_SNAPSHOT_INTERVAL_MS 250 ms; a background worker may
+ * tick at 1 Hz). Beyond that, a stale sample means the page was not running,
+ * not that the server went quiet.
+ */
+export const SNAPSHOT_EXTRAPOLATION_MAX_MS = 2000;
+
 export class NetWorkerClient implements NetConnection {
   private listeners: ConnectionListener[] = [];
   private snap: NetSnapshot = { connected: false, link: { connected: false, secondsSinceLastPacket: 0 }, at: 0, loss: 0 };
@@ -86,10 +94,25 @@ export class NetWorkerClient implements NetConnection {
   /** The bridge's text health probe needs no session: it runs on the page. */
   checkHealth(): Promise<BridgeHealth> { return probeBridgeHealth(this.url); }
 
+  /**
+   * The worker's link sample, aged by at most SNAPSHOT_EXTRAPOLATION_MAX_MS.
+   *
+   * BUG.hidden-tab-session-drop — the worker refreshes the sample every
+   * NET_SNAPSHOT_INTERVAL_MS, so a silent server shows up in the samples
+   * themselves (secondsSinceLastPacket grows in each). Ageing a sample by the
+   * page's own clock only covers the gap between two of them. When the page
+   * itself stalled (a frozen background tab, a long main-thread task) its
+   * timers can run before the worker's queued samples are delivered, and an
+   * unbounded age made a healthy session read as silent for the whole stall:
+   * the 40 s DISCONNECT_TIME check (main.ts link tick) then raised ServerDied
+   * on a live session. Retail ran its network layer in the same frame as that
+   * check, so the check never saw a sample older than the frame.
+   */
   getLinkStatus(now: number = Date.now()): { connected: boolean; secondsSinceLastPacket: number } {
     const { link, at } = this.snap;
     if (!link.connected) return { connected: false, secondsSinceLastPacket: 0 };
-    return { connected: true, secondsSinceLastPacket: link.secondsSinceLastPacket + Math.max(0, now - at) / 1000 };
+    const age = Math.min(Math.max(0, now - at), SNAPSHOT_EXTRAPOLATION_MAX_MS);
+    return { connected: true, secondsSinceLastPacket: link.secondsSinceLastPacket + age / 1000 };
   }
 
   getPacketLossPercentage(): number { return this.snap.loss; }

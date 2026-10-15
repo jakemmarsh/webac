@@ -13,13 +13,16 @@
 import { fileURLToPath } from 'node:url';
 import { MIN_POWER_BY_LEVEL } from '../../packages/shared/src/magic/SpellFormula.ts';
 
-/** The magic schools by the SpellTable's school number (MagicSchool) and the skill / AgentSpell.school name. */
+/**
+ * The magic schools by the SpellTable's school number (MagicSchool), the skill name the character sheet uses, and the
+ * short name the agent API's `spells` reports (main.ts schoolName: "War", "Life", "Item", "Creature", "Void").
+ */
 export const SCHOOLS = [
-  { id: 1, name: 'War Magic' },
-  { id: 2, name: 'Life Magic' },
-  { id: 3, name: 'Item Enchantment' },
-  { id: 4, name: 'Creature Enchantment' },
-  { id: 5, name: 'Void Magic' },
+  { id: 1, name: 'War Magic', short: 'War' },
+  { id: 2, name: 'Life Magic', short: 'Life' },
+  { id: 3, name: 'Item Enchantment', short: 'Item' },
+  { id: 4, name: 'Creature Enchantment', short: 'Creature' },
+  { id: 5, name: 'Void Magic', short: 'Void' },
 ] as const;
 export type SchoolName = (typeof SCHOOLS)[number]['name'];
 
@@ -104,7 +107,8 @@ export function spellGaps(sheet: string | null, known: readonly KnownSpell[] | n
     }
     const staples = STAPLES[school].filter((f) => !table || names.has(f));
     const display = (f: string): string => names.get(f) ?? f;
-    const mine = known.filter((k) => k.school === school);
+    const short = SCHOOLS.find((s) => s.name === school)!.short;
+    const mine = known.filter((k) => k.school === short || k.school === school);
     const best = new Map<string, number>();
     for (const k of mine) {
       const f = spellFamily(k.name);

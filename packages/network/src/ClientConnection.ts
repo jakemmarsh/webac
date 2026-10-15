@@ -179,6 +179,16 @@ export type ConnectionEventType =
   | 'relayLink'
   | 'message';
 
+/**
+ * Why a session ended (ConnectionEvent.endCause):
+ *  - 'socket_closed': the WebSocket closed under us (the bridge, an edge proxy or the network);
+ *  - 'server_disconnect': the server sent a Disconnect packet;
+ *  - 'server_net_error': the server sent a NetError after the logon;
+ *  - 'server_silent': nothing from the server for the dead-connection time (the client closed it);
+ *  - 'local': our own disconnect().
+ */
+export type DisconnectCause = 'socket_closed' | 'server_disconnect' | 'server_net_error' | 'server_silent' | 'local';
+
 export interface ConnectionEvent {
   type: ConnectionEventType;
   data?: unknown;
@@ -195,6 +205,14 @@ export interface ConnectionEvent {
    */
   everOpened?: boolean;
   deliberate?: boolean;
+  /**
+   * BUG.hidden-tab-session-drop — on type==='disconnected': what ended the
+   * session, so a drop report can tell a network/edge close from one the
+   * client made (telemetry only; the page's handling does not branch on it).
+   */
+  endCause?: DisconnectCause;
+  /** On type==='disconnected' with endCause 'socket_closed': the WebSocket CloseEvent code (1006 = the connection dropped with no close frame). */
+  closeCode?: number;
   /** CORE.17.k.b — on type==='error' from a CharacterError (0xF659): the code. */
   characterError?: number;
   /** CORE.17.k.b — on a CharacterError.Logon: a timed fresh login is already scheduled. */
@@ -711,7 +729,7 @@ export class ClientConnection {
     };
 
     const socket = this.ws;
-    this.ws.onclose = () => this.handleSocketEnded(socket);
+    this.ws.onclose = (ev: CloseEvent) => this.handleSocketEnded(socket, 'socket_closed', ev?.code);
 
     this.ws.onerror = () => {
       if (!this.wsEverOpened) {
@@ -745,7 +763,7 @@ export class ClientConnection {
    * session we end ourselves doesn't emit 'disconnected' again when the
    * socket's onclose fires afterwards.
    */
-  private handleSocketEnded(socket: unknown): void {
+  private handleSocketEnded(socket: unknown, cause: DisconnectCause, closeCode?: number): void {
     if (this.sessionEndedFor === socket) return;
     // A socket we already left (disconnect() closed it, then connect() opened
     // the next one) whose close event arrives late says nothing about the
@@ -759,16 +777,20 @@ export class ClientConnection {
     if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
     this.stopConnectResponseRetry();
     this.stopLoginRetry();
-    this.emit({ type: 'disconnected', everOpened: this.wsEverOpened, deliberate: this.deliberateClose });
+    const endCause: DisconnectCause = this.deliberateClose ? 'local' : cause;
+    this.emit({
+      type: 'disconnected', everOpened: this.wsEverOpened, deliberate: this.deliberateClose, endCause,
+      ...(endCause === 'socket_closed' && typeof closeCode === 'number' ? { closeCode } : {}),
+    });
     if (this.ws === socket) this.ws = null;
     this.attemptReconnect();
   }
 
   /** The server ended (or abandoned) the session: close our socket and report it once. */
-  private endSessionFromServer(): void {
+  private endSessionFromServer(cause: DisconnectCause): void {
     const socket = this.ws;
     if (!socket) return;
-    this.handleSocketEnded(socket);
+    this.handleSocketEnded(socket, cause);
     try { socket.close(); } catch { /* already closing */ }
   }
 
@@ -791,7 +813,7 @@ export class ClientConnection {
   private handleServerNetError(netError: ServerNetError): void {
     const inLogon = this.connectionData.state === SessionState.AuthLoginRequest || this.awaitingServerConnect;
     if (!inLogon) {
-      this.endSessionFromServer();
+      this.endSessionFromServer('server_net_error');
       return;
     }
     if (netError.stringId === 0 && netError.tableId === 0) return; // ID_NetError_None → EndStateOK
@@ -1115,7 +1137,7 @@ export class ClientConnection {
     if (this.connectionData.state < SessionState.AuthConnected) return;
     if (now - this.lastPacketReceivedAt <= ClientConnection.SERVER_DEAD_MS) return;
     console.warn(`[AC:NET] No packet from server for ${ClientConnection.SERVER_DEAD_MS / 1000}s — ending the session`);
-    this.endSessionFromServer();
+    this.endSessionFromServer('server_silent');
   }
 
   /**
@@ -1358,7 +1380,7 @@ export class ClientConnection {
     // live session: everOpened, not deliberate → ServerDied in the renderer.
     // Reported once: the socket's own onclose that follows is suppressed.
     if (hasFlag(header, PacketHeaderFlags.Disconnect)) {
-      this.endSessionFromServer();
+      this.endSessionFromServer('server_disconnect');
       return;
     }
 

@@ -34,6 +34,7 @@ import {
 import { GameMessageOpcode } from '../GameMessageOpcode.js';
 import { ISAAC } from '../ISAAC.js';
 import type { NetConnection } from '../NetWorker.js';
+import type { DisconnectCause } from '../ClientConnection.js';
 import { Adapter1999, Group1999 } from './Adapter1999.js';
 import { codecs1999 } from './codecs/index.js';
 import { buildLoginBody1999, readGrant1999 } from './Login1999.js';
@@ -124,6 +125,17 @@ export class Connection1999 implements NetConnection {
   private lastNakAt = 0;
   private readonly partial = new Map<number, Map<number, Uint8Array>>();
   private lastPacketAt = 0;
+  /**
+   * BUG.hidden-tab-session-drop — when the service tick last ran. A tick that
+   * comes more than SERVER_TIMEOUT_MS after the previous one means this
+   * thread itself was stopped (a frozen background tab, a sleeping machine):
+   * the silence it measured was ours, and the server's queued packets may
+   * still be waiting behind this tick, so that tick skips the timeout (as
+   * ClientConnection's clockStalled, retail ClientNet::ProcessConnection).
+   */
+  private lastServiceAt = 0;
+  /** What ended the session, set before we close the socket ourselves (ConnectionEvent.endCause). */
+  private endCause: DisconnectCause | null = null;
   private checksumFailures = 0;
   private received = 0;
   private lost = 0;
@@ -184,6 +196,8 @@ export class Connection1999 implements NetConnection {
     this.lastNakAt = 0;
     this.partial.clear();
     this.lastPacketAt = 0;
+    this.lastServiceAt = 0;
+    this.endCause = null;
     this.sequence = 1;
     this.fragmentSequence = 2;
     this.flowBytes = 0;
@@ -275,7 +289,7 @@ export class Connection1999 implements NetConnection {
       if (!this.everOpened) { this.emit({ type: 'error', error: 'Bridge connection error', netErrorId: 'ID_NetError_CantSocket' }); return; }
       this.emit({ type: 'error', error: 'Bridge connection error' });
     };
-    ws.onclose = () => { if (ws === this.ws) this.ended(); };
+    ws.onclose = (ev: CloseEvent) => { if (ws === this.ws) this.ended(ev?.code); };
   }
 
   private stopLoginTimer(): void {
@@ -283,14 +297,28 @@ export class Connection1999 implements NetConnection {
     this.loginTimer = null;
   }
 
-  private ended(): void {
+  private ended(closeCode?: number): void {
     this.stopLoginTimer();
     if (this.serviceTimer) clearInterval(this.serviceTimer);
     this.serviceTimer = null;
     const wasOpen = this.ws !== null;
     this.ws = null;
     this.granted = false;
-    if (wasOpen) this.emit({ type: 'disconnected', everOpened: this.everOpened, deliberate: this.deliberate });
+    const endCause: DisconnectCause = this.deliberate ? 'local' : this.endCause ?? 'socket_closed';
+    this.endCause = null;
+    if (wasOpen) {
+      this.emit({
+        type: 'disconnected', everOpened: this.everOpened, deliberate: this.deliberate, endCause,
+        ...(endCause === 'socket_closed' && typeof closeCode === 'number' ? { closeCode } : {}),
+      });
+    }
+  }
+
+  /** The server ended the session (or went silent): close our socket; its onclose reports `cause`. */
+  private closeFromServer(cause: DisconnectCause): void {
+    if (!this.ws) return;
+    this.endCause ??= cause;
+    this.ws.close();
   }
 
   disconnect(): void {
@@ -349,7 +377,7 @@ export class Connection1999 implements NetConnection {
       }
     }
     if (h.flags & F1999.NetError) { this.onNetError(b); return; }
-    if (h.flags & F1999.Disconnect) { this.ws?.close(); return; }
+    if (h.flags & F1999.Disconnect) { this.closeFromServer('server_disconnect'); return; }
     const body = b.subarray(HEADER_SIZE_1999);
 
     const connect = (h.flags & F1999.Connect) !== 0 && h.sequence === 0;
@@ -430,7 +458,7 @@ export class Connection1999 implements NetConnection {
    * no caller) it ends the session like a server Disconnect.
    */
   private onNetError(b: Uint8Array): void {
-    if (this.granted) { this.ws?.close(); return; }
+    if (this.granted) { this.closeFromServer('server_net_error'); return; }
     const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
     const stringId = b.length >= HEADER_SIZE_1999 + 4 ? v.getUint32(HEADER_SIZE_1999, true) : 0;
     const tableId = b.length >= HEADER_SIZE_1999 + 8 ? v.getUint32(HEADER_SIZE_1999 + 4, true) : 0;
@@ -636,6 +664,8 @@ export class Connection1999 implements NetConnection {
   // ── Service ─────────────────────────────────────────────
 
   private service(now = Date.now()): void {
+    const clockStalled = this.lastServiceAt !== 0 && now - this.lastServiceAt > SERVER_TIMEOUT_MS;
+    this.lastServiceAt = now;
     if (!this.granted) return;
     if (!this.sessionAnswered) {
       if (now - this.grantedAt >= POST_GRANT_WAIT_MS) { this.sessionNeverStarted(); return; }
@@ -656,9 +686,9 @@ export class Connection1999 implements NetConnection {
         this.sendControl(F1999.ResendList | F1999.Checksum, buildSeqList1999(missing));
       }
     }
-    if (this.lastPacketAt && now - this.lastPacketAt > SERVER_TIMEOUT_MS) {
+    if (!clockStalled && this.endCause === null && this.lastPacketAt && now - this.lastPacketAt > SERVER_TIMEOUT_MS) {
       this.emit({ type: 'serverTimeout' });
-      this.ws?.close();
+      this.closeFromServer('server_silent');
     }
   }
 }

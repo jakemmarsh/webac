@@ -399,7 +399,7 @@ import { logOffCharacter, installUnloadSessionClose } from './session/PlayerModu
 import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLogOff, type RequestLogOffDeps } from './session/LogoutFlow.js';
 import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
-import { WorldReporter, classifyGpu, unmaskedRenderer } from './telemetry/WorldReporter.js';
+import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
 import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
@@ -5196,7 +5196,7 @@ async function main() {
       // the last packet || !connected` raises ServerDied — the Disconnected
       // screen, not a chat line. The socket-close path handles the
       // !connected half; this catches a server that simply went silent.
-      if (sample.connected && linkSampleIsDead(sample)) raiseServerDied();
+      if (sample.connected && linkSampleIsDead(sample)) raiseServerDied(undefined, 'link_dead');
     }, LINK_STATUS_TICK_MS);
     // Reveal the WebGL canvas — kept hidden during pre-play to avoid sky bleed-through
     sceneManager.setWorldShown(true);
@@ -7650,11 +7650,11 @@ async function main() {
    * drop the dead session and the world, then show the Disconnected screen
    * with `text`. Idempotent while the screen is up (gmUIFlow's mode guard).
    */
-  const raiseServerDied = (text: string = connectionLostText()): void => {
+  const raiseServerDied = (text: string = connectionLostText(), endCause?: WorldEndCause): void => {
     if (serverDiedShown || gameUI.disconnectedScreenShown) return;
     serverDiedShown = true;
     worldResumePending = false;
-    worldReporter?.left('disconnected');
+    worldReporter?.left('disconnected', endCause ? { endCause } : undefined);
     sessionLifecycle.noteDisconnected();
     sessionLifecycle.endResume();
     if (gameStarted || gameplayUi.isShown) teardownWorldState();
@@ -11590,7 +11590,7 @@ async function main() {
         if (accountBootSurface({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
           returnToLauncher(text);
         } else {
-          raiseServerDied(text);
+          raiseServerDied(text, 'server_boot');
         }
       },
       onAccountBanned: (data) => {
@@ -11604,7 +11604,7 @@ async function main() {
         if (accountBootSurface({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
           returnToLauncher(text);
         } else {
-          raiseServerDied(text);
+          raiseServerDied(text, 'server_boot');
         }
       },
       onCharacterDelete: () => {
@@ -17301,7 +17301,8 @@ async function main() {
           // /reconnect resumes it.
           const droppedInWorld = sessionLifecycle.inWorld || sessionLifecycle.resumingAfterDrop;
           // RELEASE.first-minute — the world session ended under the player (a no-op after a tab close).
-          worldReporter?.left('disconnected');
+          // BUG.hidden-tab-session-drop — with what ended it (a network close vs the client's own verdict).
+          worldReporter?.left('disconnected', { endCause: event.endCause, closeCode: event.closeCode });
           sessionLifecycle.noteDisconnected();
           if (gameStarted || gameplayUi.isShown) teardownWorldState();
           // FAITHFUL.260 — drop the 'connection' indicator on disconnect.
@@ -17318,7 +17319,7 @@ async function main() {
           if (event.everOpened && !event.deliberate) {
             // In the world (or mid-resume): reconnect and re-enter on our own first.
             if (droppedInWorld && scheduleResume()) { worldResumePending = true; break; }
-            if (!droppedInWorld) preworldReporter?.dropped();
+            if (!droppedInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null);
             raiseServerDied();
           }
           break;

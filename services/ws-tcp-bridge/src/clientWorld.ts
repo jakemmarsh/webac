@@ -24,6 +24,8 @@ export const WORLD_LEFT_EXITS = ['closed_tab', 'logout', 'disconnected'] as cons
 export const WORLD_SCREENS = ['world', 'portal_space', 'disconnected', 'char_select', 'connecting'] as const;
 export const WORLD_MODALS = ['popup', 'message', 'confirm', 'dialog', 'book'] as const;
 export const GPU_CLASSES = ['integrated', 'discrete', 'software', 'unknown'] as const;
+/** BUG.hidden-tab-session-drop — what ended a dropped session (renderer WorldReporter WORLD_END_CAUSES). */
+export const WORLD_END_CAUSES = ['socket_closed', 'server_disconnect', 'server_net_error', 'server_silent', 'local', 'link_dead', 'server_boot'] as const;
 
 interface WorldIds {
   era: string | null;
@@ -47,6 +49,13 @@ export interface ClientWorldLeftEvent extends WorldIds {
   sessionMs: number | null;
   contextLost: boolean | null;
   errors: number | null;
+  /** Exit 'disconnected': what ended the session, and the browser socket's close code. */
+  endCause?: typeof WORLD_END_CAUSES[number] | null;
+  closeCode?: number | null;
+  /** How long the page had been hidden at the end (null = visible), and its page-lifecycle freezes. */
+  hiddenMs?: number | null;
+  freezes?: number | null;
+  frozenMs?: number | null;
 }
 
 /** The first minute after enter_ok (renderer WorldReporter FirstMinuteEvent). */
@@ -81,6 +90,8 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   modal: typeof WORLD_MODALS[number] | null;
   modalMs: number | null;
   errors: number | null;
+  endCause?: typeof WORLD_END_CAUSES[number] | null;
+  closeCode?: number | null;
 }
 
 export type ClientWorldEvent = ClientFirstMinuteEvent | ClientWorldLeftEvent;
@@ -110,6 +121,19 @@ function dpr(v: unknown): number | null {
 function px100(v: unknown): number | null {
   const n = uint(v, 16_000);
   return n !== null && n % 100 === 0 ? n : null;
+}
+
+/** A WebSocket close code (1000–4999). */
+function closeCode(v: unknown): number | null {
+  const n = uint(v, 4999);
+  return n !== null && n >= 1000 ? n : null;
+}
+/** The drop fields, present only when the page sent them (older pages do not). */
+function dropFields(b: Record<string, unknown>): { endCause?: typeof WORLD_END_CAUSES[number] | null; closeCode?: number | null } {
+  return {
+    ...('endCause' in b ? { endCause: pick(b.endCause, WORLD_END_CAUSES) } : {}),
+    ...('closeCode' in b ? { closeCode: closeCode(b.closeCode) } : {}),
+  };
 }
 
 const MINUTE_MS = 120_000; // a first-minute timing (60 s, with slack for a late tick)
@@ -142,6 +166,10 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
       sessionMs: uint(b.sessionMs, SESSION_MS),
       contextLost: bool(b.contextLost),
       errors: uint(b.errors, 100_000),
+      ...dropFields(b),
+      ...('hiddenMs' in b ? { hiddenMs: uint(b.hiddenMs, SESSION_MS) } : {}),
+      ...('freezes' in b ? { freezes: uint(b.freezes, 100_000) } : {}),
+      ...('frozenMs' in b ? { frozenMs: uint(b.frozenMs, SESSION_MS) } : {}),
     };
   }
   return {
@@ -172,5 +200,6 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
     modal: pick(b.modal, WORLD_MODALS),
     modalMs: uint(b.modalMs, SESSION_MS),
     errors: uint(b.errors, 100_000),
+    ...dropFields(b),
   };
 }

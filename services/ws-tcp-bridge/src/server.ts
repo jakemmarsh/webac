@@ -662,7 +662,14 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       }
     });
 
-    function cleanup(reason: string, code?: number): Promise<void> {
+    /**
+     * `peerCloseCode`: the browser socket's close code on a 'ws_close'
+     * (BUG.hidden-tab-session-drop). 1005 = the page closed it (close() with
+     * no code: ClientConnection's own end of a session), 1001 = the page went
+     * away, 1006 = the connection dropped with no close frame (an edge proxy,
+     * the network, our ping timeout's terminate()).
+     */
+    function cleanup(reason: string, code?: number, peerCloseCode?: number): Promise<void> {
       relay.remove(relayPeer);
       if (session.closed) return Promise.resolve();
       session.closed = true;
@@ -679,6 +686,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         bytesFromBrowser: session.bytesFromBrowser, bytesToServer: session.bytesToServer,
         bytesFromServer: session.bytesFromServer, bytesToBrowser: session.bytesToBrowser,
         packetsUp: session.packetsUp, packetsDown: session.packetsDown, dropped: session.dropped,
+        ...(typeof peerCloseCode === 'number' ? { peerCloseCode } : {}),
         active: sessions.size,
       });
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
@@ -702,7 +710,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       });
     }
 
-    ws.on('close', () => { void cleanup('ws_close'); });
+    ws.on('close', (peerCloseCode: number) => { void cleanup('ws_close', undefined, peerCloseCode); });
     ws.on('error', (err) => {
       log('warn', 'ws_error', { session: id, error: err });
       void cleanup('ws_error');

@@ -191,6 +191,9 @@ describe('lore: what the player is told and what viewers see', () => {
     expect(tactics.indexOf('./world-query lore')).toBeLessThan(tactics.indexOf('Pull one at a time'));
     expect(sys).not.toMatch(/types 64–70|weenie_properties_float/);
   });
+  it('the player is told how Impenetrability and the Banes land on someone else (ACE: only their shield), so it isn\'t reported as a bug', () => {
+    expect(sys).toContain('Impenetrability and the Banes cast on yourself cover every piece of armor you wear, but cast on anyone else they land only on that person\'s shield (retail rules, not a bug)');
+  });
   it('the feed says "looks up <name>" for a lookup, and still "checks the world database" for a query', () => {
     const call = (command: string) => parseStreamJsonLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] } }), 'mage').drafts[0];
     expect(call('./world-query lore "Olthoi Gardener"')).toMatchObject({ tool: 'bash', summary: 'looks up Olthoi Gardener' });

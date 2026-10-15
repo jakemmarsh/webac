@@ -20,8 +20,9 @@ const SHEET = [
   'Trained skills: Item Enchantment 166 [+1: 1,234 xp, then 2,000], Life Magic 140 [+1: 2,222 xp], Arcane Lore 90',
 ].join('\n');
 
-/** A spell the way the agent API's `spells` reports it (school by name, level from power). */
-const k = (name: string, school: string, power: number): KnownSpell => ({ name, school, level: spellLevelFromPower(power) });
+/** A spell the way the agent API's `spells` reports it: the school by its short name ("War", "Item"), level from power. */
+const SHORT: Record<string, string> = { 'War Magic': 'War', 'Life Magic': 'Life', 'Item Enchantment': 'Item', 'Creature Enchantment': 'Creature', 'Void Magic': 'Void' };
+const k = (name: string, school: string, power: number): KnownSpell => ({ name, school: SHORT[school] ?? school, level: spellLevelFromPower(power) });
 const ALL_LEVELS = (base: string, school: string, maxLevel: number): KnownSpell[] =>
   [1, 50, 100, 150, 200, 250].slice(0, maxLevel).map((p, i) => k(`${base} ${['I', 'II', 'III', 'IV', 'V', 'VI'][i]}`, school, p));
 
@@ -67,7 +68,7 @@ describe('stream readiness: spells you could have', () => {
     ];
     const sheet = SHEET.replace('Life Magic 140', 'Life Magic 160');
     expect(spellGaps(sheet, known, null).filter((l) => l.includes('Life Magic'))).toEqual([
-      `- spells: Life Magic trained (160): ${known.filter((s) => s.school === 'Life Magic').length} Life Magic spells known; none of Armor; below your level: Heal (II), Revitalize (IV), Stamina to Mana (IV), Blade Protection (IV)…; you can learn up to level V from scrolls at a mage shop`,
+      `- spells: Life Magic trained (160): ${known.filter((s) => s.school === 'Life').length} Life Magic spells known; none of Armor; below your level: Heal (II), Revitalize (IV), Stamina to Mana (IV), Blade Protection (IV)…; you can learn up to level V from scrolls at a mage shop`,
     ]);
   });
 
@@ -113,5 +114,19 @@ describe.skipIf(!existsSync(DAT_PATHS.portal))('stream readiness: the staples ar
     expect(spellGaps('Trained skills: Item Enchantment 166', [], table)).toEqual([
       '- spells: Item Enchantment trained (166) but no Item Enchantment spells known: buy and read scrolls at a mage shop (Impenetrability, the Banes, Aura of Blood Drinker, Aura of Swift Killer…; you can learn up to level V)',
     ]);
+  });
+
+  it('reads the agent API\'s short school names, as the live `spells` reply gives them (a 2026-10-15 stream bug: every school read as empty)', () => {
+    // Records shaped exactly like the live reply (main.ts schoolName), not the sheet's skill names.
+    const live = [
+      { id: 64, name: 'Shock Wave I', school: 'War', level: 1 },
+      { id: 1024, name: 'Bludgeoning Protection Other I', school: 'Life', level: 1 },
+      { id: 2, name: 'Strength Self I', school: 'Creature', level: 1 },
+      { id: 1, name: 'Impenetrability III', school: 'Item', level: 3 },
+    ];
+    const lines = spellGaps('Trained skills: War Magic 100, Life Magic 100, Creature Enchantment 100, Item Enchantment 100', live, null);
+    expect(lines.some((l) => l.includes('no War Magic spells known'))).toBe(false);
+    expect(lines.some((l) => l.includes('no Item Enchantment spells known'))).toBe(false);
+    expect(lines.find((l) => l.includes('Item Enchantment'))).toContain('1 Item Enchantment spell known');
   });
 });

@@ -46,6 +46,21 @@ export type WorldModal = typeof WORLD_MODALS[number];
 export const GPU_CLASSES = ['integrated', 'discrete', 'software', 'unknown'] as const;
 export type GpuClass = typeof GPU_CLASSES[number];
 
+/**
+ * BUG.hidden-tab-session-drop — what ended a dropped session, closed set: the
+ * connection's ConnectionEvent.endCause (@ac/network DisconnectCause), or the
+ * page's own verdicts: 'link_dead' = the 40 s DISCONNECT_TIME link check
+ * (main.ts link tick), 'server_boot' = an AccountBoot / AccountBanned.
+ */
+export const WORLD_END_CAUSES = ['socket_closed', 'server_disconnect', 'server_net_error', 'server_silent', 'local', 'link_dead', 'server_boot'] as const;
+export type WorldEndCause = typeof WORLD_END_CAUSES[number];
+
+/** A drop's detail, from the 'disconnected' event (exit 'disconnected' only). */
+export interface WorldDropDetail {
+  endCause?: string | null;
+  closeCode?: number | null;
+}
+
 /** The first-minute window. */
 export const FIRST_MINUTE_MS = 60_000;
 /** A page sends at most this many world events (relogs, resumes). */
@@ -98,6 +113,9 @@ export interface FirstMinuteEvent {
   modal: WorldModal | null;
   modalMs: number | null;
   errors: number;
+  /** Exit 'disconnected': what ended the session, and the socket's close code (1006 = dropped with no close frame). */
+  endCause?: WorldEndCause | null;
+  closeCode?: number | null;
 }
 
 export interface WorldLeftEvent {
@@ -110,6 +128,14 @@ export interface WorldLeftEvent {
   sessionMs: number;
   contextLost: boolean;
   errors: number;
+  /** Exit 'disconnected': what ended the session, and the socket's close code. */
+  endCause?: WorldEndCause | null;
+  closeCode?: number | null;
+  /** How long the page had been hidden when the session ended; null when it was visible. */
+  hiddenMs?: number | null;
+  /** Page-lifecycle freezes (document 'freeze') during the session, and their total length so far. */
+  freezes?: number;
+  frozenMs?: number;
 }
 
 export type WorldEvent = FirstMinuteEvent | WorldLeftEvent;
@@ -193,6 +219,16 @@ function scalePct(v: number): number {
 /** The draw-distance ladder has six entries: at most five steps down. */
 export const MAX_DRAW_DISTANCE_STEPS = 5;
 
+/** A drop's endCause (closed set) and close code (a WebSocket code, 1000–4999). */
+function dropFields(drop: WorldDropDetail | undefined): { endCause: WorldEndCause | null; closeCode: number | null } {
+  const cause = drop?.endCause;
+  const code = drop?.closeCode;
+  return {
+    endCause: (WORLD_END_CAUSES as readonly string[]).includes(cause ?? '') ? cause as WorldEndCause : null,
+    closeCode: typeof code === 'number' && Number.isInteger(code) && code >= 1000 && code <= 4999 ? code : null,
+  };
+}
+
 function safe<T>(f: (() => T) | undefined, fallback: T): T {
   if (!f) return fallback;
   try { return f(); } catch { return fallback; }
@@ -225,6 +261,12 @@ export class WorldReporter {
   private keys = 0;
   private modal: WorldModal | null = null;
   private modalSince = 0;
+  /** When the page last went hidden (null while visible); page-wide, not per session. */
+  private hiddenSince: number | null = null;
+  /** Page-lifecycle freezes this session ('freeze' → 'resume'). */
+  private freezes = 0;
+  private frozenMs = 0;
+  private frozenAt: number | null = null;
 
   constructor(private readonly opts: WorldReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -253,6 +295,9 @@ export class WorldReporter {
     this.enterAt = at;
     this.resumed = resumed;
     this.startedHidden = safe(this.src.hidden, false);
+    if (this.startedHidden && this.hiddenSince === null) this.hiddenSince = at;
+    this.freezes = 0;
+    this.frozenMs = 0;
     this.minuteSent = false;
     this.errorsAtEnter = safe(this.src.errors, 0);
     this.contextLost = false;
@@ -324,22 +369,52 @@ export class WorldReporter {
 
   /** The page went to the background: the first minute ends there (the session goes on). */
   hidden(): void {
+    if (this.hiddenSince === null) this.hiddenSince = this.now();
     if (this.enterAt === null || this.minuteSent) return;
     this.sendFirstMinute('hidden', this.now());
   }
 
-  /** The world session ended (tab closed / logout / drop). Idempotent: only the first call of a session counts. */
-  left(exit: 'closed_tab' | 'logout' | 'disconnected'): void {
+  /** The page is visible again. */
+  visible(): void {
+    this.hiddenSince = null;
+  }
+
+  /** document 'freeze' (Chrome's page lifecycle: the page and its workers stop running). */
+  frozen(): void {
+    if (this.frozenAt === null) this.frozenAt = this.now();
+  }
+
+  /** document 'resume' after a freeze. */
+  pageResumed(): void {
+    if (this.frozenAt === null) return;
+    if (this.enterAt !== null) {
+      this.freezes++;
+      this.frozenMs += Math.max(0, this.now() - Math.max(this.frozenAt, this.enterAt));
+    }
+    this.frozenAt = null;
+  }
+
+  /**
+   * The world session ended (tab closed / logout / drop). Idempotent: only the
+   * first call of a session counts. `drop`: the 'disconnected' event's
+   * endCause / closeCode (BUG.hidden-tab-session-drop).
+   */
+  left(exit: 'closed_tab' | 'logout' | 'disconnected', drop?: WorldDropDetail): void {
     if (this.enterAt === null) return;
     const at = this.now();
+    const detail = exit === 'disconnected' ? dropFields(drop) : {};
     if (!this.minuteSent) {
-      this.sendFirstMinute(exit, at);
+      this.sendFirstMinute(exit, at, detail);
     } else {
       this.post({
         outcome: 'world_left', ...this.ids(), exit,
         sessionMs: Math.round(at - this.enterAt),
         contextLost: this.contextLost,
         errors: this.errorsSince(),
+        ...detail,
+        hiddenMs: this.hiddenSince === null ? null : Math.max(0, Math.round(at - Math.max(this.hiddenSince, this.enterAt))),
+        freezes: this.freezes,
+        frozenMs: Math.round(this.frozenMs),
       });
     }
     this.enterAt = null;
@@ -354,7 +429,11 @@ export class WorldReporter {
     // A drop's world_left goes out when the network may be gone: it waits and goes again
     // (online, hidden, leaving, the tick).
     win.addEventListener('pagehide', () => { this.left('closed_tab'); this.outbox.retry(true); });
-    doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') { this.hidden(); this.outbox.retry(true); } });
+    doc.addEventListener('visibilitychange', () => {
+      if (doc.visibilityState === 'hidden') { this.hidden(); this.outbox.retry(true); } else this.visible();
+    });
+    doc.addEventListener('freeze', () => this.frozen());
+    doc.addEventListener('resume', () => this.pageResumed());
     doc.addEventListener('keydown', ((e: KeyboardEvent) => { if (!e.repeat) this.keyDown(); }) as EventListener, true);
     canvas?.addEventListener('pointerdown', () => this.worldClick());
     canvas?.addEventListener('webglcontextlost', () => this.contextLostNow());
@@ -378,7 +457,7 @@ export class WorldReporter {
     return { era: safe(this.opts.era, 'unknown'), server: safe(this.opts.server, null), trace: this.opts.trace, build: this.opts.build };
   }
 
-  private sendFirstMinute(exit: WorldExit, at: number): void {
+  private sendFirstMinute(exit: WorldExit, at: number, detail: Pick<FirstMinuteEvent, 'endCause' | 'closeCode'> = {}): void {
     const enterAt = this.enterAt!;
     this.minuteSent = true;
     this.pollModal(at);
@@ -413,6 +492,7 @@ export class WorldReporter {
       modal: this.modal,
       modalMs: this.modal !== null ? Math.max(0, Math.round(at - this.modalSince)) : null,
       errors: this.errorsSince(),
+      ...detail,
     });
   }
 

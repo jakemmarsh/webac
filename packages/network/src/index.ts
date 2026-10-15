@@ -179,7 +179,7 @@ export type {
 
 // Client connection (browser-side)
 export { ClientConnection, parseAgentCall, parsePairingReply, parseRelayLinkNotice, parseRoutinesGrant, probeBridgeHealth, netErrorPayloadOffset, readServerNetError } from './ClientConnection.js';
-export type { ConnectionEventType, ConnectionEvent, ConnectionListener, BridgeHealth, HealthSocketLike, RoutinesGrant, PairingReply, RelayLinkNotice, AgentCallFrame, ServerNetError } from './ClientConnection.js';
+export type { ConnectionEventType, ConnectionEvent, ConnectionListener, DisconnectCause, BridgeHealth, HealthSocketLike, RoutinesGrant, PairingReply, RelayLinkNotice, AgentCallFrame, ServerNetError } from './ClientConnection.js';
 export { hostClientConnection, NET_SNAPSHOT_INTERVAL_MS } from './NetWorker.js';
 export { createConnection } from './createConnection.js';
 export { Connection1999, VERSION_1999 } from './era1999/Connection1999.js';
