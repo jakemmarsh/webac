@@ -64,6 +64,38 @@ const OTHER_SLOTS: readonly OtherSlot[] = [
 
 const worn = (items: readonly AgentItem[]): AgentItem[] => items.filter((i) => i.where === 'equipped');
 
+const SHIELD_BIT = 0x200000;
+/**
+ * The wielded weapon that takes the shield hand too, or null: a caster (ItemType Caster 0x8000: an orb, wand or
+ * staff, wielded Held 0x1000000), a two-handed weapon (TwoHanded 0x2000000), or a launcher (MissileWeapon 0x400000
+ * with an AmmoType; a thrown weapon has none). Retail's BlocksUseOfShield @ 0055d3e0 (AutoWield dequips a shield for
+ * one of these), and ACE CheckWeaponCollision refuses a shield beside one: "The Large Round Shield can't be wielded"
+ * with an Orb held (stream, 2026-10-15). AutoWield's shield branch doesn't check (retail), so the server answers.
+ */
+export function shieldHandTakenBy(items: readonly AgentItem[]): AgentItem | null {
+  return worn(items).find((w) => {
+    const m = w.mask ?? 0;
+    if (m & 0x2000000) return true;
+    if ((w.itemType ?? 0) & 0x8000) return true;
+    return (m & 0x400000) !== 0 && (w.ammoType ?? 0) > 0;
+  }) ?? null;
+}
+
+/** "Orb #800012ab (a caster)" */
+function shieldBlockerText(b: AgentItem): string {
+  const m = b.mask ?? 0;
+  const what = (b.itemType ?? 0) & 0x8000 ? 'a caster' : m & 0x2000000 ? 'a two-handed weapon' : 'a bow or launcher';
+  return `${b.name} #${b.guid.toString(16)} (${what})`;
+}
+
+/** Why a shield can't go on now (the weapon that takes its hand), or null. */
+export function shieldRefusal(it: AgentItem, items: readonly AgentItem[]): string | null {
+  const vl = it.validLocations ?? 0;
+  if (!(vl & SHIELD_BIT) || (vl & (0x100000 | 0x400000 | 0x1000000 | 0x2000000))) return null;
+  const b = shieldHandTakenBy(items);
+  return b ? `your ${shieldBlockerText(b)} takes the shield hand too, and the server refuses a shield beside it; equip a one-handed weapon first (it replaces the ${b.name}), then the shield` : null;
+}
+
 /** The tab knows gear slots (an older tab's items carry no EquipMask numbers). */
 export function hasGearData(items: readonly AgentItem[]): boolean {
   return items.some((i) => (i.where === 'equipped' && i.mask !== undefined) || i.validLocations !== undefined);
@@ -136,6 +168,12 @@ export function gearView(items: readonly AgentItem[]): GearView {
     const anyBits = slot.bits.reduce((a, b) => a | b, 0);
     const fits = items.filter((i) => i.where !== 'equipped' && ((i.validLocations ?? 0) & anyBits) !== 0);
     if (slot.optional && !cells.some(Boolean) && !fits.length) continue;
+    // An empty shield slot beside a caster, two-hander or launcher is not free: that weapon takes the hand.
+    const blocker = slot.name === 'shield' && !cells.some(Boolean) ? shieldHandTakenBy(items) : null;
+    if (blocker) {
+      lines.push(`  ${pad(slot.name)}none: your ${shieldBlockerText(blocker)} takes this hand too (no shield beside it)`);
+      continue;
+    }
     const empties = cells.filter((c) => !c).length;
     if (empties) emptyOther.push(slot.name);
     if (empties && fits.length) packFills.push({ slot: slot.name, items: fits.map(tag) });
@@ -174,7 +212,9 @@ export function gearNote(it: AgentItem, items: readonly AgentItem[]): string {
     const groups = OTHER_SLOTS.filter((s) => s.bits.some((b) => (vl & b) !== 0));
     for (const g of groups) {
       const cells = g.bits.filter((b) => (vl & b) !== 0).map((b) => on.find((w) => ((w.mask ?? 0) & b) !== 0));
-      if (cells.some((c) => !c)) out.push(`fills your EMPTY ${g.name} slot`);
+      const blocked = g.name === 'shield' ? shieldRefusal(it, items) : null;
+      if (blocked) out.push(`can't go on now: ${blocked}`);
+      else if (cells.some((c) => !c)) out.push(`fills your EMPTY ${g.name} slot`);
       else out.push(`replaces your ${[...new Set(cells.map((c) => tag(c!)))].join(' or ')}`);
       if (g.name === 'shield') armorish = true;
     }

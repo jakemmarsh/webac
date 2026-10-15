@@ -4,9 +4,6 @@ import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { GfxObj } from '@ac/dat-parser/file-types/GfxObj.js';
 import type { Surface } from '@ac/dat-parser/file-types/Surface.js';
 import { buildGfxObjGeometry, type GfxObjGeometry } from './GfxObjMesh.js';
-import { remaster } from '../remaster/RemasterMode.js';
-import { tessellatePn, raycastAgainstDat } from '../remaster/PnTessellation.js';
-import { applyAssetOverride } from '../remaster/AssetOverrides.js';
 import { prepareSurfaceMesh, type MaterialFactory } from './MaterialFactory.js';
 import { LruMap } from '../utils/LruMap.js';
 import { DRAWING_SPHERE_KEY } from './RetailLighting.js';
@@ -25,7 +22,6 @@ export class ModelRenderer {
   // cache reference and GC reclaims orphans. 4096 entries (typically tens of
   // KB each) far exceeds the distinct GfxObjs a session touches.
   private geometryCache = new LruMap<number, GfxObjGeometry>(4096);
-  private remasterGeometryCache = new LruMap<number, GfxObjGeometry>(4096);
 
   constructor(portalDb: DatDatabase, materialFactory: MaterialFactory) {
     this.portalDb = portalDb;
@@ -57,22 +53,6 @@ export class ModelRenderer {
   }
 
   /**
-   * The geometry DRAWN for a GfxObj: the DAT geometry, or under REMASTER
-   * models (opt-in, RemasterMode.ts) its curved PN-triangle version. Only
-   * drawing uses it; raycasts keep hitting the DAT geometry (createMesh).
-   */
-  getRenderGeometry(gfxObjId: number): GfxObjGeometry | null {
-    const dat = this.getGeometry(gfxObjId);
-    if (!dat || !remaster()?.models) return dat;
-    let smooth = this.remasterGeometryCache.get(gfxObjId);
-    if (!smooth) {
-      smooth = tessellatePn(dat);
-      this.remasterGeometryCache.set(gfxObjId, smooth);
-    }
-    return smooth;
-  }
-
-  /**
    * Create a Three.js object from a GfxObj ID.
    * Returns a Group with child meshes, one per unique surface.
    * Optionally accepts texture overrides (SurfaceTexture substitutions)
@@ -100,9 +80,8 @@ export class ModelRenderer {
     // ASSESS: route through the geometry cache — this path rebuilt the
     // typed arrays from scratch on every call (every appearance rebuild).
     // The cached arrays are immutable; per-mesh BufferAttributes share them.
-    const datGeom = this.getGeometry(gfxObjId);
-    const geomData = this.getRenderGeometry(gfxObjId);
-    if (!datGeom || !geomData || geomData.indices.length === 0) return null;
+    const geomData = this.getGeometry(gfxObjId);
+    if (!geomData || geomData.indices.length === 0) return null;
 
     const group = new THREE.Group();
     group.name = `gfxobj_${gfxObjId.toString(16).padStart(8, '0')}`;
@@ -112,31 +91,30 @@ export class ModelRenderer {
     // retail culls them (GfxObjGeometry.doubleSided); a batch with no
     // stippled polygon samples CLAMP (GfxObjGeometry.clampUV).
     // Key: surfaceId * 4 + clampUV * 2 + doubleSided.
+    const surfaceGroups = new Map<number, number[]>();
     /** Per group: its lowest surface index (retail's batch / attribute order). */
     const groupBatch = new Map<number, number>();
-    const groupTriangles = (g: GfxObjGeometry): Map<number, number[]> => {
-      const groups = new Map<number, number[]>();
-      for (let tri = 0; tri < g.surfaceIndices.length; tri++) {
-        const surfIdx = g.surfaceIndices[tri];
-        const surfaceId = gfxObj.surfaces[surfIdx] ?? 0;
-        const key = surfaceId * 4 + (g.clampUV[tri] ? 2 : 0) + (g.doubleSided[tri] ? 1 : 0);
-        let list = groups.get(key);
-        if (!list) {
-          list = [];
-          groups.set(key, list);
-        }
-        const b = groupBatch.get(key);
-        if (b === undefined || surfIdx < b) groupBatch.set(key, surfIdx);
-        // Each triangle is 3 indices
-        const base = tri * 3;
-        list.push(g.indices[base], g.indices[base + 1], g.indices[base + 2]);
+    const triCount = geomData.surfaceIndices.length;
+
+    for (let tri = 0; tri < triCount; tri++) {
+      const surfIdx = geomData.surfaceIndices[tri];
+      const surfaceId = gfxObj.surfaces[surfIdx] ?? 0;
+      const key = surfaceId * 4 + (geomData.clampUV[tri] ? 2 : 0) + (geomData.doubleSided[tri] ? 1 : 0);
+      let list = surfaceGroups.get(key);
+      if (!list) {
+        list = [];
+        surfaceGroups.set(key, list);
       }
-      return groups;
-    };
-    const surfaceGroups = groupTriangles(geomData);
-    // REMASTER models: raycasts (picking, camera and wall rays) hit the DAT
-    // triangles, never the smoothed ones, so the mode changes only pixels.
-    const datGroups = geomData !== datGeom ? groupTriangles(datGeom) : null;
+      const b = groupBatch.get(key);
+      if (b === undefined || surfIdx < b) groupBatch.set(key, surfIdx);
+      // Each triangle is 3 indices
+      const base = tri * 3;
+      list.push(
+        geomData.indices[base],
+        geomData.indices[base + 1],
+        geomData.indices[base + 2],
+      );
+    }
 
     // VISUAL.dungeon-lighting-saturation — the drawing-BSP root sphere the
     // cell pass picks this part's lights by (Render::viewconeCheck), in the
@@ -159,8 +137,6 @@ export class ModelRenderer {
 
       const material = this.materialFactory.getMaterial(surfaceId, undefined, textureOverrides, paletteColors, !bothFaces, clampUV);
       const mesh = new THREE.Mesh(bufferGeom, material);
-      const datIndices = datGroups?.get(key);
-      if (datIndices) raycastAgainstDat(mesh, datGeom, datIndices);
       // VISUAL.night-sky-vs-retail — the DAT Surface behind this sub-mesh
       // (GameSky reads its luminosity: the D3D material's starting Emissive).
       mesh.userData.surfaceId = surfaceId;
@@ -172,8 +148,6 @@ export class ModelRenderer {
       group.add(mesh);
     }
 
-    // REMASTER assets (opt-in): a remodelled part draws in place of the DAT meshes (kept for raycasts).
-    applyAssetOverride(group, gfxObjId);
     return group;
   }
 

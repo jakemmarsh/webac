@@ -295,9 +295,8 @@ interface SkyObjectEntry {
   mesh: THREE.Group;
   skyObj: SkyObject;
   index: number;
-  /** Unlit (DAT Additive surface) materials — the sun/moon glows, rain streaks. */
-  materials: THREE.MeshBasicMaterial[];
-  /** VISUAL.night-sky-vs-retail — retail-lit materials (every non-additive surface). */
+  /** VISUAL.night-sky-vs-retail — retail-lit materials (every surface, DAT
+   *  Additive ones included — BUG.rain-invisible-thunder-audible). */
   litMaterials: LitSkyMaterial[];
   /** VISUAL.night-sky-vs-retail — sticky GameSky::UseTime material state. */
   state: SkyMaterialState;
@@ -570,6 +569,13 @@ export class SkyboxRenderer {
     if (this.gameClockTicks === null || serverTicks > this.gameClockTicks) {
       this.gameClockTicks = serverTicks;
     }
+    // BUG.login-sky-wrong-day — the server's day takes over at once, not on
+    // the next frame: the group seeded from the wall-clock estimate (a local
+    // ACE whose clock stopped while its VM slept ran 31 days behind it) had
+    // already built its sky objects, and a Rainy one started its thunder
+    // script before the re-roll. Retail sets Timer from the server before
+    // the sky exists.
+    this.useDay(this.absoluteDayOf(this.gameClockTicks));
   }
 
   /** Current game clock estimate (null before the first server sync). */
@@ -697,7 +703,6 @@ export class SkyboxRenderer {
       //   0x1004c42/0x1004c44): additive per their DAT surface bit.
       const useAdditive = isArc;
 
-      const materials: THREE.MeshBasicMaterial[] = [];
       const litMaterials: LitSkyMaterial[] = [];
       mesh.traverse(child => {
         if (child instanceof THREE.Mesh && child.material) {
@@ -751,77 +756,49 @@ export class SkyboxRenderer {
           // GameSky::Draw's sky flag): Emissive (luminosity) + the world
           // ambient + Diffuse · the sun, clamped, × the texel. At night the
           // region's purple ambient (Sunny 0xC864FF × 0.40) is what tints the
-          // clouds and dims the stars. Additive surfaces stay on the unlit
-          // path below (the sun/moon glows and rain streaks, Surface lum 1).
-          if (!srcAdditive) {
-            const surface = typeof child.userData.surfaceId === 'number'
-              ? modelRenderer.getSurface?.(child.userData.surfaceId) ?? null : null;
-            const litMat = new THREE.MeshLambertMaterial({
-              map,
-              transparent: isBaseSky ? false : isForeground,
-              side: THREE.FrontSide,
-              depthWrite: false,
-              depthTest: false,
-              fog: this.fogOverrideActive,
-              ...(isBaseSky ? { blending: THREE.NormalBlending } : {
-                blending: THREE.CustomBlending,
-                blendEquation: THREE.AddEquation,
-                blendSrc: THREE.SrcAlphaFactor,
-                blendDst: useAdditive ? THREE.OneFactor : THREE.OneMinusSrcAlphaFactor,
-              }),
-            });
-            applyRetailLighting(litMat, 'sky');
-            const surfaceLuminosity = surface?.luminosity ?? 0;
-            litMat.emissive.setScalar(surfaceLuminosity);
-            litMat.userData.skyDatAdditive = false;
-            child.material = litMat;
-            litMaterials.push({ material: litMat, surfaceLuminosity });
-            origMat.dispose();
-            return;
-          }
-          const basicMat = isBaseSky
-            // CORE.9.d — the base sky box renders truly opaque (NormalBlending
-            // + transparent:false = blending off in three.js): its DXT1 face
-            // textures ARE the sky, brightness driven per-frame from
-            // SkyObjectReplace.luminosity/100 like retail's Emissive.
-            ? new THREE.MeshBasicMaterial({
-                map,
-                transparent: false,
-                side: THREE.FrontSide,
-                depthWrite: false,
-                depthTest: false,
-                fog: this.fogOverrideActive && !srcAdditive,
-                blending: THREE.NormalBlending,
-              })
-            : new THREE.MeshBasicMaterial({
-                map,
-                // CORE.9 — after-sky objects (properties&0x1) must run in the
-                // transparent pass so they composite OVER the already-drawn
-                // world, replicating retail's after_sky_cell draw with
-                // DEPTHTEST_ALWAYS (GameSky::Draw).
-                transparent: isForeground,
-                side: THREE.FrontSide,
-                depthWrite: false,
-                depthTest: false,
-                fog: this.fogOverrideActive && !srcAdditive,
-                blending: THREE.CustomBlending,
-                blendEquation: THREE.AddEquation,
-                blendSrc: THREE.SrcAlphaFactor,
-                // Additive: src*a + dst — dark=invisible, bright=glow (sun,
-                // moon, and any surface whose DAT Additive bit is set —
-                // the rain streaks)
-                // Alpha: src*a + dst*(1-a) — proper compositing (clouds and
-                // the star-dome overlay)
-                blendDst: (useAdditive || srcAdditive) ? THREE.OneFactor : THREE.OneMinusSrcAlphaFactor,
-              });
-          // BUG.sky-emitters-fog-on-environs — GameSky::Draw @ 00506ff0
-          // draws the sky with SetFFFogEnable(LScape::m_override_enabled)
-          // and D3DPolyRender::SetSurface @ 0059c4d0 keeps fog off for an
-          // Additive (0x10000) surface: unfogged normally, fogged under an
-          // Environs fog unless the DAT surface is additive.
-          basicMat.userData.skyDatAdditive = srcAdditive;
-          child.material = basicMat;
-          materials.push(basicMat);
+          // clouds and dims the stars.
+          // BUG.rain-invisible-thunder-audible — DAT Additive surfaces are lit
+          // too: RenderMeshSubset @ 0059ca10 sets the FF lighting state with no
+          // regard to the surface type, and SetSurface @ 0059c4d0 lets the
+          // Additive bit (0x10000) choose only the blend (SRCALPHA/ONE) and the
+          // fog. They used to take an unlit path whose brightness was the
+          // replace luminosity — 0 at every keyframe for the Rainy rain domes
+          // (0x1004c42/0x1004c44), which retail reads as "keep the Surface's
+          // own" (0.148, GameSky::UseTime) — floored to 0.1: the streaks
+          // were near-invisible while the storm's thunder played. The sun and
+          // moon glows (Surface lum 1, no replace) light to full, as before.
+          const surface = typeof child.userData.surfaceId === 'number'
+            ? modelRenderer.getSurface?.(child.userData.surfaceId) ?? null : null;
+          const litMat = new THREE.MeshLambertMaterial({
+            map,
+            transparent: isBaseSky ? false : isForeground,
+            // BUG.rain-invisible-thunder-audible — the polygon's own cull mode
+            // (GfxObjMesh: SidesType 1 → DoubleSide), as RenderMeshSubset culls
+            // per polygon. The rain domes are SidesType 1 cylinders around the
+            // viewer; forced FrontSide, every face seen from inside was culled
+            // and no rain ever drew while the storm's thunder played.
+            side: origMat.side,
+            depthWrite: false,
+            depthTest: false,
+            // BUG.sky-emitters-fog-on-environs — GameSky::Draw @ 00506ff0
+            // draws the sky with SetFFFogEnable(LScape::m_override_enabled)
+            // and SetSurface keeps fog off for an Additive (0x10000) surface.
+            fog: this.fogOverrideActive && !srcAdditive,
+            ...(isBaseSky ? { blending: THREE.NormalBlending } : {
+              blending: THREE.CustomBlending,
+              blendEquation: THREE.AddEquation,
+              blendSrc: THREE.SrcAlphaFactor,
+              // Additive: src*a + dst (sun/moon arcs and any DAT Additive
+              // surface — the rain streaks); alpha: src*a + dst*(1-a).
+              blendDst: (useAdditive || srcAdditive) ? THREE.OneFactor : THREE.OneMinusSrcAlphaFactor,
+            }),
+          });
+          applyRetailLighting(litMat, 'sky');
+          const surfaceLuminosity = surface?.luminosity ?? 0;
+          litMat.emissive.setScalar(surfaceLuminosity);
+          litMat.userData.skyDatAdditive = srcAdditive;
+          child.material = litMat;
+          litMaterials.push({ material: litMat, surfaceLuminosity });
           origMat.dispose();
         }
       });
@@ -856,7 +833,7 @@ export class SkyboxRenderer {
       });
 
       this.skyObjectEntries.push({
-        mesh: pivot, skyObj, index: i, materials, litMaterials, isBaseSky, isStaticOverlay, isWeather,
+        mesh: pivot, skyObj, index: i, litMaterials, isBaseSky, isStaticOverlay, isWeather,
         state: { luminosity: null, diffuse: null, translucency: null },
         // Retail's GameSky::Draw applies the props&0x2 fog-override hide to
         // the before-sky pass only (after-sky objects have no such check).
@@ -1316,7 +1293,7 @@ export class SkyboxRenderer {
     // m_override_enabled (GameSky::Draw @ 00506ff0); Additive surfaces stay
     // unfogged (SetSurface @ 0059c4d0).
     for (const e of this.skyObjectEntries) {
-      for (const m of [...e.materials, ...e.litMaterials.map(l => l.material)]) {
+      for (const m of e.litMaterials.map(l => l.material)) {
         m.fog = active && m.userData.skyDatAdditive !== true;
         m.needsUpdate = true;
       }
@@ -1634,7 +1611,7 @@ export class SkyboxRenderer {
     const t = this.timeOfDay;
 
     for (const entry of this.skyObjectEntries) {
-      const { mesh, skyObj, index, materials } = entry;
+      const { mesh, skyObj, index } = entry;
 
       // CORE.9 — weather objects (properties&0x4) are not drawn while
       // weather is disabled (retail LScape::weather_enabled gate in
@@ -1661,8 +1638,6 @@ export class SkyboxRenderer {
 
       // --- Interpolate SkyObjectReplace properties ---
       const prevReplace = prev.skyObjReplace.find(r => r.objectIndex === index);
-      const nextReplace = next.skyObjReplace.find(r => r.objectIndex === index);
-      const hasReplace = prevReplace !== undefined || nextReplace !== undefined;
 
       // VISUAL.night-sky-vs-retail — the lit materials follow GetSky +
       // GameSky::UseTime exactly (skyReplaceAt / applySkyReplace): sticky
@@ -1679,56 +1654,7 @@ export class SkyboxRenderer {
       // sky never takes a translucency (its replace column is -1).
       const litVisible = entry.isBaseSky || translucency < 1;
 
-      // Unlit (DAT Additive) materials keep the pre-existing model.
-      // Transparency: 0=fully opaque, 100=invisible, -1=always visible
-      let opacity = 1.0;
-      if (hasReplace) {
-        let transparency = -1;
-        if (prevReplace !== undefined && nextReplace !== undefined) {
-          transparency = lerp(prevReplace.transparent, nextReplace.transparent, frac);
-        } else if (prevReplace) {
-          transparency = prevReplace.transparent;
-        }
-        if (transparency >= 0) {
-          opacity = Math.max(0, 1.0 - transparency / 100);
-        }
-      }
-      let lumScale = 1.0;
-      if (hasReplace) {
-        let luminosity = 100; // default full bright
-        if (prevReplace !== undefined && nextReplace !== undefined) {
-          luminosity = lerp(prevReplace.luminosity, nextReplace.luminosity, frac);
-        } else if (prevReplace) {
-          luminosity = prevReplace.luminosity;
-        }
-        lumScale = luminosity / 100;
-      }
-
-      let basicVisible = false;
-      if (entry.materials.length > 0) {
-        if (entry.isBaseSky) {
-          // CORE.17.e — Emissive = lum/100 modulated the 8-bit texel in gamma
-          // space: store the factor as sRGB so three.js's linear multiply +
-          // output encode lands on the retail value.
-          for (const mat of entry.materials) mat.color.setRGB(lumScale, lumScale, lumScale, THREE.SRGBColorSpace);
-          basicVisible = true;
-        } else if (entry.isStaticOverlay) {
-          for (const mat of entry.materials) {
-            const sc = lumScale > 0 ? lumScale : 1.0;
-            mat.color.setRGB(sc, sc, sc, THREE.SRGBColorSpace);
-            mat.opacity = opacity;
-          }
-          basicVisible = opacity > 0.01;
-        } else {
-          // Clouds: opacity controls visibility; luminosity modulates
-          // brightness (but 0 = base brightness, not invisible). No replace
-          // data (sun, moon, celestial): full brightness.
-          const colorScale = hasReplace ? opacity * Math.max(0.1, lumScale) : opacity;
-          for (const mat of entry.materials) mat.color.setScalar(colorScale);
-          basicVisible = colorScale > 0.01;
-        }
-      }
-      mesh.visible = (entry.litMaterials.length > 0 && litVisible) || basicVisible;
+      mesh.visible = entry.litMaterials.length > 0 && litVisible;
 
       // --- Arc rotation for objects with begin/end angles ---
       if (skyObj.beginAngle !== 0 || skyObj.endAngle !== 0) {
@@ -1766,7 +1692,7 @@ export class SkyboxRenderer {
 
       // --- Cloud UV scrolling ---
       if (skyObj.texVelocityX !== 0 || skyObj.texVelocityY !== 0) {
-        for (const mat of [...materials, ...entry.litMaterials.map(l => l.material)]) {
+        for (const mat of entry.litMaterials.map(l => l.material)) {
           if (mat.map) {
             mat.map.offset.x = (this.cloudUvTime * skyObj.texVelocityX) % 1.0;
             mat.map.offset.y = (this.cloudUvTime * skyObj.texVelocityY) % 1.0;

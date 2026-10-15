@@ -58,7 +58,8 @@ describe('the gear view: the paperdoll as text', () => {
     expect(text).toContain('  feet:       Sandals #80001002 (AL 10)');
     expect(text).toContain('  rings:      EMPTY, EMPTY  (in your pack: Copper Ring #80002003)');
     expect(text).toContain('  weapon:     Wand #80001003');
-    expect(text).toContain('  shield:     EMPTY');
+    // A wand (ItemType Caster) takes the shield hand too: retail BlocksUseOfShield, ACE CheckWeaponCollision.
+    expect(text).toContain('  shield:     none: your Wand #80001003 (a caster) takes this hand too (no shield beside it)');
     expect(text).toContain('  neck:       EMPTY');
     // Later eras' slots show only when something uses them.
     expect(text).not.toContain('cloak:');

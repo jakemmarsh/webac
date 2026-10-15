@@ -5,11 +5,6 @@
  * Loads DAT files, presents character creation / selection,
  * then runs the game with HUD, terrain, models, and game logic.
  */
-import { remaster } from './remaster/RemasterMode.js';
-import { GrassField } from './remaster/GrassField.js';
-import { registerLifestone } from './remaster/remodels/Lifestone.js';
-// REMASTER assets (opt-in): replacement models register before any DAT part is built.
-if (remaster()?.assets) registerLifestone();
 import { outdoorGroundY, floorSearchFromY, traceGroundAlongPath, interiorGroundY, objectLandingZ, type OutdoorGroundSources, type ObjectSurfaceSources } from './world/outdoorGround.js';
 import * as THREE from 'three';
 import { installCpuBacked2dCanvases } from './ui/CanvasBacking.js';
@@ -2424,15 +2419,6 @@ async function main() {
   // sheet poked through land at y=0 and was dropped.
 
   // (Landblock object state lives in landblockObjects — see above.)
-
-  // REMASTER grass (opt-in, remaster/RemasterMode.ts): visual only, read-only on the landscape.
-  const remasterGrass = remaster()?.grass
-    ? new GrassField(sceneManager.scene, {
-      landblock: (fileId) => terrainManager.getMesh(fileId),
-      terrainColor: (tt) => terrainRenderer.terrainTypeColor(tt),
-      buildingBoxes: () => landblockObjects.buildingShells.map(s => s.bbox),
-    })
-    : null;
   function setLandscapeVisible(visible: boolean): void {
     landblockObjects.setLandscapeVisible(visible);
   }
@@ -14950,11 +14936,33 @@ async function main() {
       /** Inspect sky-object state (sun/moons/stars from RegionDesc). */
       skyObjects: () => {
         const entries = (skybox as unknown as { skyObjectEntries: Array<{
-          mesh: { visible: boolean; position: { x: number; y: number; z: number } };
+          mesh: THREE.Object3D;
           skyObj: { defaultGFXObjectId: number; properties: number };
           isBaseSky: boolean;
         }> }).skyObjectEntries;
         if (!entries) return { count: 0 };
+        // Every draw input of each sky object's meshes, for diagnosing one that is
+        // "visible" but draws nothing (BUG.rain-invisible-thunder-audible).
+        const meshes = (root: THREE.Object3D) => {
+          const out: unknown[] = [];
+          root.traverse(o => {
+            if (!(o instanceof THREE.Mesh)) return;
+            let shown = true;
+            for (let p: THREE.Object3D | null = o; p; p = p.parent) shown &&= p.visible;
+            const m = o.material as THREE.MeshLambertMaterial;
+            const s = new THREE.Vector3(); o.getWorldScale(s);
+            const w = new THREE.Vector3(); o.getWorldPosition(w);
+            out.push({
+              shown, renderOrder: o.renderOrder, frustumCulled: o.frustumCulled, layers: o.layers.mask,
+              worldPos: [w.x, w.y, w.z].map(v => +v.toFixed(1)), worldScale: +s.x.toFixed(3),
+              material: m.type, opacity: m.opacity, transparent: m.transparent, visible: m.visible,
+              blending: m.blending, blendDst: m.blendDst, depthTest: m.depthTest, side: m.side,
+              color: m.color?.getHexString(), emissive: m.emissive?.getHexString(),
+              map: m.map ? { w: (m.map.image as { width?: number } | undefined)?.width ?? null, offset: [m.map.offset.x, m.map.offset.y] } : null,
+            });
+          });
+          return out;
+        };
         return {
           count: entries.length,
           objects: entries.map(e => ({
@@ -14962,6 +14970,7 @@ async function main() {
             visible: e.mesh.visible,
             isBaseSky: e.isBaseSky,
             properties: '0x' + e.skyObj.properties.toString(16),
+            meshes: meshes(e.mesh),
           })),
         };
       },
@@ -15001,6 +15010,11 @@ async function main() {
       pinDayGroup: (which: number | string | null) => {
         const ok = skybox.pinDayGroup(which);
         return { ok, name: skybox.dayGroupName, index: skybox.dayGroupIndex, pinned: skybox.isDayGroupPinned };
+      },
+      /** The weather gate (properties&0x4 sky objects; retail LScape::weather_enabled), for A/B captures. */
+      setWeatherEnabled: (enabled: boolean) => {
+        skybox.setWeatherEnabled(enabled);
+        return enabled;
       },
       /** Inspect the weenie GeneratorTable (FAITHFUL.209). */
       generatorInfo: (weenieId?: number) => {
@@ -16061,6 +16075,7 @@ async function main() {
         objects: function* () { for (const o of serverObjectManager?.getAllObjects().values() ?? []) if (!o.outOfWorld && !((o.physicsState ?? 0) & AcePhysicsState.Missile)) yield hostObject(o); },
         object: (guid) => { const o = serverObjectManager?.getObject(guid); return o ? hostObject(o) : null; },
         lineOfFire: (guid) => serverObjectManager?.lineOfFire(guid) ?? null,
+        lineOfFireOpenSpot: (guid) => serverObjectManager?.openLineSpot(guid) ?? null,
         // An arrow's or bolt's real path: the server's ballistic arc from its spawn point (ServerObjectManager.missileArcOfFire).
         missileLineOfFire: (guid, shot) => serverObjectManager?.missileArcOfFire(guid, shot) ?? null,
         // Room for a summoned pet to appear (the automation's Summon Pets; VirindiTank's 3 m check).
@@ -16269,6 +16284,7 @@ async function main() {
         },
         give: (target, item, amount) => { if (!sendGameAction) return false; agentPrimeMoveState(); sendGameAction(GameActionType.GiveObjectRequest, buildGiveObjectRequestPayload(target, item, amount)); return true; },
         wield: (guid) => { const it = playerState.inventory.getItem(guid); if (!it) return false; agentPrimeMoveState(); return attemptAutoWield(it); },
+        inventoryPending: (guid) => pendingEquipmentActions.hasPending(guid),
         appraise: (guid, quiet) => {
           examined.delete(guid);
           if (quiet) quietAppraisals.add(guid >>> 0);
@@ -19216,7 +19232,6 @@ async function main() {
     // The opaque tunnel covers the canvas then, and a frame drawn under it
     // only competed with the portal-space gate's prefetch (the full sky's
     // layers held the warm login gate ~1.5 s on SwiftShader, 2026-10-05).
-    if (draw && !gameUI.worldHiddenByPortalSpace) remasterGrass?.update(sceneManager.camera);
     if ((!draw && !sceneManager.capturePending) || gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
     else sceneManager.render();
     // RELEASE.first-minute — counters only (WorldReporter.frame); the world counts as drawn once no portal space covers it.

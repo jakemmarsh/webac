@@ -102,10 +102,9 @@ describe.skipIf(!existsSync(PORTAL))('the cloud dome surface 0x08000023 (DAT)', 
     sky.initSkyObjects(modelRenderer);
     sky.updateTimeOfDay(0.02);
     const entries = (sky as unknown as {
-      skyObjectEntries: Array<{ materials: THREE.Material[]; litMaterials: Array<{ material: THREE.MeshLambertMaterial }> }>;
+      skyObjectEntries: Array<{ litMaterials: Array<{ material: THREE.MeshLambertMaterial }> }>;
     }).skyObjectEntries;
     expect(entries).toHaveLength(1);
-    expect(entries[0].materials).toHaveLength(0);
     expect(entries[0].litMaterials).toHaveLength(1);
     const lit = entries[0].litMaterials[0].material;
     expect(lit.blending).toBe(THREE.CustomBlending);

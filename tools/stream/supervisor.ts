@@ -129,10 +129,12 @@ export function playerEnv(cfg: StreamConfig, c: CharacterConfig): Record<string,
   };
 }
 
-/** A segment's end for viewers: why, how long, what it cost. */
+/**
+ * A segment's end for viewers: why, how long, how many tokens. No dollar figure: `claude -p` reports an API-price
+ * estimate even when the players run on a claude.ai subscription, where nothing is billed per token (2026-10-15).
+ */
 export function segmentDetail(reason: string, minutes: number, usage: SegmentUsage | null): string {
   const bits = [`${reason} after ${minutes.toFixed(1)} min`];
-  if (usage?.costUsd != null) bits.push(`$${usage.costUsd.toFixed(2)}`);
   if (usage) bits.push(`${Math.round((usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens + usage.outputTokens) / 1000)}k tokens`);
   return bits.join(', ');
 }
@@ -471,7 +473,7 @@ export class StreamSupervisor {
     const reason = endReason({ stopping: this.stopping, wrapUpSent, killed, sawResult, exitCode, resultSubtype });
     const minutes = (endMs - startMs) / 60_000;
     deps.feed.write({ type: 'segment-end', char: c.profile, title: `${c.character}: segment ${segment}`, detail: segmentDetail(reason, minutes, usage) });
-    deps.log(`${c.character}: segment ${segment} ended: ${reason} after ${minutes.toFixed(1)} min${usage?.costUsd != null ? `, $${usage.costUsd.toFixed(2)}` : ''}${exitCode ? ` (exit ${exitCode})` : ''}`);
+    deps.log(`${c.character}: segment ${segment} ended: ${reason} after ${minutes.toFixed(1)} min${usage?.costUsd != null ? `, $${usage.costUsd.toFixed(2)} API-equivalent` : ''}${exitCode ? ` (exit ${exitCode})` : ''}`);
     return {
       profile: c.profile, character: c.character, segment, start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString(),
       minutes, reason, model, sessionId, usage, finalText: clipReport(finalText, 20_000),
@@ -612,7 +614,7 @@ async function main(): Promise<void> {
     const cfg = readConfig(cfgPath);
     for (const c of cfg.characters) {
       const u = dayUsage(recs, c.profile, localDay(new Date()));
-      console.log(`${c.character} (${c.profile}): today ${u.segments} segments, ${Math.round(u.minutes)} min, $${u.usd.toFixed(2)}; daemon ${readInfo(c.profile) ? 'running' : 'not running'}`);
+      console.log(`${c.character} (${c.profile}): today ${u.segments} segments, ${Math.round(u.minutes)} min, $${u.usd.toFixed(2)} API-equivalent; daemon ${readInfo(c.profile) ? 'running' : 'not running'}`);
     }
     console.log(`feed: ${feedPath()}`);
     return;

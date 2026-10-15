@@ -174,7 +174,8 @@ class Program {
       FollowFloor = false;
       var lb = Convert.ToUInt32(args[1], 16); var setupS = Convert.ToUInt32(args[2], 16); var scaleS = float.Parse(args[3]);
       float cx0 = float.Parse(args[4]), cx1 = float.Parse(args[5]), cy0 = float.Parse(args[6]), cy1 = float.Parse(args[7]);
-      float rmax = float.Parse(args[8]); float st = 0.5f;
+      float rmax = float.Parse(args[8]); float st = float.TryParse(Environment.GetEnvironmentVariable("STEP"), out var stv) ? stv : 0.5f;
+      var all = Environment.GetEnvironmentVariable("ALL") == "1";
       int hits = 0, misses = 0;
       var missByD = new SortedDictionary<int, (int h, int m)>();
       for (var cx = cx0; cx <= cx1 + 1e-3; cx += st) for (var cy = cy0; cy <= cy1 + 1e-3; cy += st)
@@ -191,11 +192,28 @@ class Program {
             var hit = r.Contains("OnCollideObject");
             var key = (int)MathF.Round(dd);
             missByD.TryGetValue(key, out var e); missByD[key] = hit ? (e.h + 1, e.m) : (e.h, e.m + 1);
-            if (hit) hits++; else { misses++; Console.WriteLine($"MISS c=({cx},{cy},{cl.lo:0.0}) t=({tx},{ty},{tl.lo:0.0}) D={dd:0.00} :: {r}"); }
+            if (hit) { hits++; if (all) Console.WriteLine($"HIT c=({cx},{cy},{cl.lo:0.00},{cl.cell:X8}) t=({tx},{ty},{tl.lo:0.00},{tl.cell:X8}) D={dd:0.00} :: {r}"); } else { misses++; Console.WriteLine($"MISS c=({cx},{cy},{cl.lo:0.00},{cl.cell:X8}) t=({tx},{ty},{tl.lo:0.00},{tl.cell:X8}) D={dd:0.00} :: {r}"); }
           }
         }
       }
       foreach (var kv in missByD) Console.WriteLine($"D~{kv.Key}: hits {kv.Value.h} misses {kv.Value.m}");
+      return;
+    }
+    if (mode == "pairs") {
+      // args: lb setup scale file; each line "cx cy cz tx ty tz": caster and target feet near those heights (an A/B
+      // of one client check against ACE, e.g. tools' line-of-fire spot suggestions). Prints HIT / MISS per line.
+      var lb = Convert.ToUInt32(args[1], 16); var setupS = Convert.ToUInt32(args[2], 16); var scaleS = float.Parse(args[3]);
+      foreach (var line in System.IO.File.ReadAllLines(args[4])) {
+        var f = line.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(float.Parse).ToArray();
+        if (f.Length < 6) continue;
+        var cf = FloorAt(lb, f[0], f[1], f[2] + 0.3f); var tf = FloorAt(lb, f[3], f[4], f[5] + 0.3f);
+        if (cf == null || tf == null) { Console.WriteLine($"NOFLOOR {line}"); continue; }
+        siteCache["X"] = new Vector3(f[0], f[1], cf.Value.z); siteCell = cf.Value.cell;
+        TargetOverride = (tf.Value.cell, new Vector3(f[3], f[4], tf.Value.z));
+        var r = Shot(setupS, scaleS, 0, 0, "X");
+        TargetOverride = null;
+        Console.WriteLine($"{(r.Contains("OnCollideObject") ? "HIT" : "MISS")} {line} :: {r}");
+      }
       return;
     }
     if (mode == "hmap") {
@@ -286,7 +304,12 @@ class Program {
     }
   }
 
+  static Dictionary<(uint, float, float), List<(uint cell, float lo, float hi)>> columnCache = new();
   static List<(uint cell, float lo, float hi)> Column(uint lb, float x, float y) {
+    if (columnCache.TryGetValue((lb, x, y), out var hit)) return hit;
+    return columnCache[(lb, x, y)] = ColumnUncached(lb, x, y);
+  }
+  static List<(uint cell, float lo, float hi)> ColumnUncached(uint lb, float x, float y) {
     var info = DatManager.CellDat.ReadFromDat<ACE.DatLoader.FileTypes.LandblockInfo>((lb << 16) | 0xFFFE);
     var res = new List<(uint, float, float)>();
     for (uint c = 0x100; c < 0x100 + info.NumCells; c++) {
@@ -407,7 +430,8 @@ class Program {
     var entered = sp.enter_world(spPos);
     var entryEvents = string.Join(";", Rec.Events); Rec.Events.Clear();
     var gap = Vector3.Distance(spawn, target.Position.Frame.Origin);
-    var info = $"realD={realDist:0.00} dz={(target.Position.Frame.Origin.Z - caster.Position.Frame.Origin.Z):0.00} cylDist={cylDist:0.00} spawnAhead={new Vector2(spawn.X - caster.Position.Frame.Origin.X, spawn.Y - caster.Position.Frame.Origin.Y).Length():0.00} z={(spawn.Z - caster.Position.Frame.Origin.Z):0.00}";
+    var cpo = caster.Position.Frame.Origin; var tpo = target.Position.Frame.Origin;
+    var info = $"cp=({cpo.X:0.000},{cpo.Y:0.000},{cpo.Z:0.000},{caster.CurCell?.ID:X8}) tp=({tpo.X:0.000},{tpo.Y:0.000},{tpo.Z:0.000},{target.CurCell?.ID:X8}) realD={realDist:0.00} dz={(target.Position.Frame.Origin.Z - caster.Position.Frame.Origin.Z):0.00} cylDist={cylDist:0.00} spawnAhead={new Vector2(spawn.X - caster.Position.Frame.Origin.X, spawn.Y - caster.Position.Frame.Origin.Y).Length():0.00} z={(spawn.Z - caster.Position.Frame.Origin.Z):0.00}";
     if (!entered) { Cleanup(caster, target, sp); return $"{info} | ENTRY FAILED events=[{entryEvents}]"; }
     if (entryEvents.Length > 0) { Cleanup(caster, target, sp); return $"{info} | entry collision [{entryEvents}]"; }
     // IsProjectileVisible (caster is a Creature, not ethereal)

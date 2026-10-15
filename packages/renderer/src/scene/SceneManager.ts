@@ -1,5 +1,3 @@
-import { remaster } from '../remaster/RemasterMode.js';
-import { RemasterPipeline } from '../remaster/RemasterPipeline.js';
 import * as THREE from 'three';
 import { mirrorCameraX, installMirrorAwareCulling, type MirrorCullingRenderer } from './WorldMirror.js';
 import { retailVerticalFovDeg } from './RetailCamera.js';
@@ -169,8 +167,6 @@ export class SceneManager {
     installMirrorAwareCulling(this.renderer as unknown as MirrorCullingRenderer);
     this.renderer.setClearColor(this.clearColor);
     this.renderer.setPixelRatio(window.devicePixelRatio);
-    const rm = remaster();
-    if (rm) this.remasterPipeline = new RemasterPipeline(this.renderer, this.scene, this.camera, rm);
     this.resize(canvas.clientWidth, canvas.clientHeight);
   }
 
@@ -182,8 +178,6 @@ export class SceneManager {
   dynamicResolution: DynamicResolution | null = null;
   /** The world's draw-distance steps changed (main.ts applies them under the player's own setting). */
   onDrawDistanceSteps: ((steps: number) => void) | null = null;
-  private cssWidth = 0;
-  private cssHeight = 0;
 
   private devicePixelRatio(): number {
     const d = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
@@ -203,7 +197,6 @@ export class SceneManager {
         start: renderPixelRatio(dpr, width, height, cfg.software),
         onChange: (ratio, steps) => {
           this.renderer?.setPixelRatio(ratio);
-          this.remasterPipeline?.setSize(this.cssWidth, this.cssHeight);
           if (steps !== lastSteps) { lastSteps = steps; this.onDrawDistanceSteps?.(steps); }
         },
       });
@@ -213,9 +206,6 @@ export class SceneManager {
     return this.dynamicResolution.ratio;
   }
 
-  /** REMASTER (opt-in, RemasterMode.ts): the shadow + post pipeline; null = the retail draw. */
-  remasterPipeline: RemasterPipeline | null = null;
-
   /**
    * Resize the renderer and update camera aspect ratio.
    */
@@ -224,13 +214,10 @@ export class SceneManager {
     this.camera.aspect = this.aspect;
     this.applyGameFov();
     this.camera.updateProjectionMatrix();
-    this.cssWidth = width;
-    this.cssHeight = height;
     // PERF.render-adapt — the buffer follows dynamic resolution; the canvas
     // keeps its CSS size. With adaptation off (automation) nothing here runs.
     if (this.renderer && renderAdaptConfig().dynamic) this.renderer.setPixelRatio(this.adaptPixelRatio(width, height));
     this.renderer?.setSize(width, height);
-    this.remasterPipeline?.setSize(width, height);
   }
 
   /** CORE.18.b — set the Config Field of View preference (degrees) and re-project. */
@@ -326,8 +313,7 @@ export class SceneManager {
       this.skipDraw();
       return;
     }
-    if (this.remasterPipeline) this.remasterPipeline.render();
-    else this.renderer?.render(this.scene, this.camera);
+    this.renderer?.render(this.scene, this.camera);
     if (this.pendingCaptures.length) this.flushCaptures();
     // PERF.gpu-soak-frame-hitches-28a525da — no program is ever relinked.
     this.programRetention.retainNew();

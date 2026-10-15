@@ -101,6 +101,8 @@ export class FakeHost implements AgentHost {
   bookPage: AgentHost['bookPage'] = undefined;
   give = (t: number, i: number, n: number) => { this.sent.push(`give ${i.toString(16)} to ${t.toString(16)} x${n}`); return true; };
   wield = (g: number) => { this.sent.push(`wield ${g.toString(16)}`); return true; };
+  /** Whether the client's optimistic wield of an item still waits for the server; unset = the host can't say. */
+  inventoryPending: AgentHost['inventoryPending'] = undefined;
   appraised: number[] = [];
   appraisals = new Map<number, string>();
   /** Every appraise call, with whether it was quiet (the automation's own looks: no Examine window). */
@@ -147,6 +149,7 @@ export class FakeHost implements AgentHost {
   tradeAction = (a: string, g?: number) => { this.sent.push(`trade ${a}${g ? ` ${g.toString(16)}` : ''}`); return true; };
   /** The straight line of fire (a bolt) and an arrow's arc to a target; unset = the host can't say. */
   lineOfFire: AgentHost['lineOfFire'] = undefined;
+  lineOfFireOpenSpot: AgentHost['lineOfFireOpenSpot'] = undefined;
   missileLineOfFire: AgentHost['missileLineOfFire'] = undefined;
   routeTo: Array<{ x: number; y: number; z: number }> | null = null;
   route = (_fc: number, _f: unknown, _tc: number, to: { x: number; y: number; z: number }) => (this.routeTo ? [...this.routeTo, to] : null);

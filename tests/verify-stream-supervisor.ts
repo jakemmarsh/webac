@@ -6,7 +6,7 @@ import { parseStreamConfig, DEFAULT_ALLOWED_TOOLS, DEFAULT_AUTO_COMPACT_TOKENS }
 import { FeedWriter, FileTail, cliCalls, feedPath, isIncantation, parseChatLine, parseStreamJsonLine, shellWords, statusDraft, summarizeCliCall, type ChatParseState } from '../tools/stream/feed.ts';
 import type { FeedEvent } from '../tools/stream/feed-types.ts';
 import { afterTurn, dayUsage, endReason, nextSegment, type SegmentRecord } from '../tools/stream/policy.ts';
-import { StreamSupervisor, claudeArgs, playerEnv, startArgs, type PlayerProcess, type SupervisorDeps, type DaemonState } from '../tools/stream/supervisor.ts';
+import { StreamSupervisor, claudeArgs, segmentDetail, playerEnv, startArgs, type PlayerProcess, type SupervisorDeps, type DaemonState } from '../tools/stream/supervisor.ts';
 import { creditsLine, nextCreditLevels, readinessBrief, recoveryCounts, unspent, playerToolNames, segmentOpening, sessionSoFar, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from '../tools/stream/prompt.ts';
 import { playerScripts, preparePlayerDir } from '../tools/stream/player.ts';
 import { TOOLS, TOOL_BY_NAME } from '../tools/ac-agent/tools.ts';
@@ -321,7 +321,7 @@ describe('restart policy and caps', () => {
     expect(n({ segmentsThisRun: 8 })).toMatchObject({ action: 'halt', why: expect.stringMatching(/maxSegments/) });
     expect(n({ today: { segments: 16, minutes: 0, usd: 0 } })).toMatchObject({ action: 'halt', why: expect.stringMatching(/daily/) });
     expect(n({ today: { segments: 1, minutes: 720, usd: 0 } }).action).toBe('halt');
-    expect(nextSegment({ cfg: cfgWith({ daily: { maxUsd: 50 } }), stopping: false, segmentsThisRun: 1, quickExits: 0, last: 'done', today: { segments: 1, minutes: 1, usd: 50 } }).action).toBe('halt');
+    expect(nextSegment({ cfg: cfgWith({ daily: { maxUsd: 50 } }), stopping: false, segmentsThisRun: 1, quickExits: 0, last: 'done', today: { segments: 1, minutes: 1, usd: 50 } })).toEqual({ action: 'halt', why: 'daily cap: $50.00 API-equivalent today (daily.maxUsd)' });
     expect(n({ last: 'budget' }).action).toBe('halt');
     expect(n({ stopping: true }).action).toBe('halt');
   });
@@ -439,7 +439,7 @@ describe('stream supervisor (fake players, daemons and clock)', () => {
       expect(kinds).toContain('narration');
       expect(h.feed().find((e) => e.type === 'tool')).toMatchObject({ char: 'mage', tool: 'ac_observe', summary: 'looks around' });
       expect(h.feed().filter((e) => e.type === 'segment-start')).toHaveLength(2);
-      expect(h.feed().filter((e) => e.type === 'segment-end' && 'char' in e && e.char === 'mage')[0]).toMatchObject({ title: 'Claude Arcanist: segment 1', detail: expect.stringMatching(/^quit-early after .* min, \$3\.00/) });
+      expect(h.feed().filter((e) => e.type === 'segment-end' && 'char' in e && e.char === 'mage')[0]).toMatchObject({ title: 'Claude Arcanist: segment 1', detail: expect.stringMatching(/^quit-early after .* min, \d+k tokens$/) });
       expect(kinds).toContain('status');
       expect(h.feed().at(-1)).toMatchObject({ type: 'segment-end', title: 'Stream over' });
     } finally { h.cleanup(); }
@@ -1037,5 +1037,13 @@ describe('stuck: the server stopped playing a character, so the supervisor logs 
         expect(h.feed().some((e) => e.type === 'tool' && e.tool === 'relog')).toBe(false);
       } finally { h.cleanup(); }
     }
+  });
+});
+
+describe('stream cost is an API-price estimate, not money (players run on a claude.ai subscription, 2026-10-15)', () => {
+  it('viewers see why, how long and the tokens, never a dollar figure', () => {
+    const usage = { inputTokens: 1000, outputTokens: 2000, cacheReadTokens: 10_000, cacheCreationTokens: 3000, costUsd: 12.93, turns: 40 };
+    expect(segmentDetail('done', 61, usage)).toBe('done after 61.0 min, 16k tokens');
+    expect(segmentDetail('done', 61, usage)).not.toContain('$');
   });
 });

@@ -1,7 +1,7 @@
 /**
  * ac_cast repeat=true (2026-10-12): a caster keeps casting one spell at one target, as a melee player's ac_attack
  * keeps swinging. Each cast goes through the single cast's own path; the repeat stops, saying why, when the target
- * dies, mana runs short, a cast is refused, health falls below until_health, a new monster starts attacking, after
+ * dies, mana runs short, a cast is refused, health falls below until_health, a dangerous new monster starts attacking, after
  * max_casts, or when another task replaces it. Arcanist (war mage) got 3 bolts off in 7 minutes to Bulwark's 6 kills,
  * one bolt per tool call. docs/agent-play.md "Repeat casting".
  */
@@ -156,16 +156,18 @@ describe('ac_cast repeat', () => {
     expect(r.message).toMatch(/1 time \(repeat\); stopped: out of mana \(the server: You don't have enough Mana/);
   });
 
-  it('stops when a monster other than the target starts attacking you, and names it', async () => {
+  it('stops when a monster other than the target starts attacking you and hits hard, and names it', async () => {
     host.objs.get(MOSSWART)!.x = 83; // within a swing's reach (8 m): a melee line is credited only to a creature there
     reply = (n) => {
       host.me.mana.current -= 10;
       api.pushChat('You scorch Drudge Skulker for 12 points with Flame Bolt I.', 0x16);
-      if (n === 2) api.pushChat('The Mosswart hits your chest for 4 points of bludgeoning damage!', 0x15);
+      // 8 of 50 health: a tenth or more (AgentApi.CAST_REPEAT_ATTACKER_HIT_FRAC); a 1-point lurker is cast on through
+      // (tests/verify-agent-stream-reports-2026-10-15.ts).
+      if (n === 2) api.pushChat('The Mosswart hits your chest for 8 points of bludgeoning damage!', 0x15);
     };
     const r = await settle(api.cast('Flame Bolt I', 'Drudge Skulker', { repeat: true }));
     expect(castsSent).toBe(2);
-    expect(r.message).toMatch(/2 times \(repeat\); stopped: Mosswart #80000082 \(1× in 10 s\) started attacking you, and isn't your target/);
+    expect(r.message).toMatch(/2 times \(repeat\); stopped: Mosswart #80000082 \(1× in 10 s; one hit of its took 8 of your 50 health \(16%\)\) started attacking you, and isn't your target/);
   });
 
   it('a monster already attacking you when it started, or the target itself hitting you, does not stop it', async () => {

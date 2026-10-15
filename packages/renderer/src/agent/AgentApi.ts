@@ -20,7 +20,7 @@
 import { avoidDisks, type AvoidDisk } from './portalAvoid.js';
 import { PathSearch, floorPlan, straightWalk, type JumpSearch, type NavPoint, type NavProbe, type NavStep } from './navPlanner.js';
 import { compassPoint } from './format.ts';
-import { gearEmptyFacts } from './gear.ts';
+import { gearEmptyFacts, shieldRefusal } from './gear.ts';
 import { lossText, parseDeathBroadcast, parseDeathLoss, parseFellowDied, parseVictimDeathLine, type DeathLoss } from './deathLines.ts';
 import { APPRAISAL_SKILL_NAMES, ATTRIBUTE_NAMES, VITAL_NAMES } from '../ui/examine/appraisalFormat.js';
 import { fallBudget, isDrop, reaimJump, safeDropHeight, type JumpKit, type JumpSpec } from './jumpPlan.js';
@@ -146,7 +146,12 @@ export interface AgentHost {
    * The straight line a bolt or arrow would fly from you to `guid`: `blockedAt` is the distance (m) of the first
    * wall, ground or solid object on it (creatures left out), null when it reaches the target. Absent / null: unknown.
    */
-  lineOfFire?(guid: number): { dist: number; blockedAt: number | null; blocker?: string } | null;
+  lineOfFire?(guid: number): { dist: number; blockedAt: number | null; blocker?: string; beforeSpawn?: boolean; spawnAhead?: number } | null;
+  /**
+   * The nearest spot (metres east / north of you, within a few metres, reachable in a straight step on your floor) from
+   * which a bolt's line to `guid` is open; null when there is none or it isn't known.
+   */
+  lineOfFireOpenSpot?(guid: number): { dx: number; dy: number; dist: number } | null;
   /**
    * The path an arrow, bolt or thrown weapon flies to `guid` (the server's ballistic arc from its spawn point in front of
    * you, at `speed` m/s, aimed at `aim` height): `blockedAt` is the ground distance (m) to the first wall, ground or solid
@@ -316,6 +321,11 @@ export interface AgentHost {
   drop(guid: number): boolean;
   give(target: number, item: number, amount: number): boolean;
   wield(guid: number): boolean;
+  /**
+   * The client moved this item on its own before the server answered (an optimistic equip, rolled back if the server
+   * refuses: main.ts pendingEquipmentActions) and no answer has come yet. Unset: the host can't say.
+   */
+  inventoryPending?(guid: number): boolean;
   /** `quiet`: the automation's own look (no Examine window), as VirindiTank's background IDs. */
   appraise(guid: number, quiet?: boolean): void;
   /** Appraisal text once the server has answered, else null. */
@@ -480,6 +490,13 @@ export function parseMapCoords(text: string): { x: number; y: number } | null {
   const ns = Number(m[1]) * (/s/i.test(m[2]) ? -1 : 1);
   const ew = Number(m[3]) * (/w/i.test(m[4]) ? -1 : 1);
   return { x: (ew + MAP_COORD_ORIGIN) * 240, y: (ns + MAP_COORD_ORIGIN) * 240 };
+}
+
+/** The compass point word ("northeast") for an offset `dx` east, `dy` north: one parseOffset reads back. */
+export function compassWord(dx: number, dy: number): string {
+  const names = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'];
+  const deg = ((Math.atan2(dx, dy) * 180) / Math.PI + 360) % 360;
+  return names[Math.round(deg / 45) % 8];
 }
 
 /**
@@ -648,6 +665,8 @@ interface CastInfo {
 /** A cast line that ends a repeat: the server or client refusing it (a resist or a fizzle is a cast that went out). */
 const CAST_REPEAT_REFUSAL = /don't have|do not have|can't|cannot|not enough|unable|refuse|out of range|you fail to affect|invalid target|you are not/i;
 const NOT_ENOUGH_MANA = /enough ?mana|insufficient_?mana/i;
+/** A line refusing an inventory request: ServerSaysAttemptFailed ("The X can't be wielded - …"), the one-at-a-time and busy notices, wield requirements. */
+const INVENTORY_REFUSAL = /can't be|cannot|can not|you can only|too busy|too encumbered|unable to|not experienced enough|must unwield|already wearing|you need|you must/i;
 /** A combat line about something hitting (or missing) you: "Drudge Servant stabs your lower arm for 11 points…",
  *  "Critical hit! Lich scorches you for 30 points with Flame Bolt II.", "You evaded Drudge Servant!". */
 const incomingCombat = (line: string): boolean => {
@@ -1011,13 +1030,50 @@ export class AgentApi {
     const e: AgentEvent = { seq: ++this.seqN, t: Math.round(this.host.now()), type, text, ...(guid !== undefined ? { guid } : {}), ...(chatType !== undefined ? { chatType } : {}) };
     this.events.push(e);
     if (this.events.length > RING) this.events.splice(0, this.events.length - RING);
+    if (type === 'target-died' && guid !== undefined) this.noteDead(guid);
+    if (this.staleThreat(e)) return;
     for (const w of [...this.waiters]) {
       if (e.seq > w.since && this.matches(e, w.filter)) {
         clearTimeout(w.timer);
         this.waiters.splice(this.waiters.indexOf(w), 1);
-        w.resolve(this.events.filter((x) => x.seq > w.since && this.matches(x, w.filter)));
+        w.resolve(this.deliverable(this.events.filter((x) => x.seq > w.since && this.matches(x, w.filter))));
       }
     }
+  }
+
+  /** The threat events about one creature: none is delivered once it is dead or gone (staleThreat). */
+  static readonly THREAT_EVENTS: ReadonlySet<AgentEvent['type']> = new Set(['aggro', 'attackers-up', 'cast-at-you', 'fellow-aggro']);
+  /** Creatures known dead (a target-died, a cast or attack that saw the kill): guid → the newest event seq then. */
+  private deadAtSeq = new Map<number, number>();
+
+  /** A creature died: threat events about it from before now are dropped from every wait (staleThreat). */
+  private noteDead(guid: number): void {
+    this.deadAtSeq.set(guid >>> 0, this.seqN);
+    if (this.deadAtSeq.size > 300) this.deadAtSeq.delete(this.deadAtSeq.keys().next().value!);
+  }
+
+  /**
+   * An aggro / attackers-up / cast-at-you event about a creature that is dead or gone by the time a wait returns it.
+   * The events queue between a player's looks, so a wait after a fight handed back "coming at you" for Brigands
+   * already killed, and aggro + attackers-up for a Hea Hunter its cast had reported dead (stream, 2026-10-15). Dead:
+   * the client saw its death start, a kill was reported for it (target-died, a cast's or attack's kill), its health
+   * reads 0, or it left the client's world. Events from after a reported kill stay when the creature is plainly still
+   * there and alive (a kill line read by name can name its twin).
+   */
+  private staleThreat(e: AgentEvent): boolean {
+    if (!AgentApi.THREAT_EVENTS.has(e.type) || e.guid === undefined) return false;
+    const g = e.guid >>> 0;
+    const o = this.host.object(g);
+    if (!o) return true;
+    if (this.host.isDying(g) || this.dyingSeen.has(g) || this.gone.get(g)?.died) return true;
+    if (g === this.host.targetGuid() && this.host.targetHealth() === 0) return true;
+    const dead = this.deadAtSeq.get(g);
+    return dead !== undefined && e.seq <= dead;
+  }
+
+  /** Events as a wait hands them back: threat events about creatures dead or gone by now left out. */
+  private deliverable(evs: AgentEvent[]): AgentEvent[] {
+    return evs.filter((e) => !this.staleThreat(e));
   }
 
   // ── deaths this session ──
@@ -1193,7 +1249,10 @@ export class AgentApi {
     const cast = AgentApi.castAtYou(clean, type);
     if (cast) {
       const who = cast.words ? this.nearby(AgentApi.CAST_WORDS_RANGE_M).find((o) => o.kind === 'monster' && !o.dying && o.name.toLowerCase() === cast.caster.toLowerCase()) : null;
-      if (!cast.words) this.push('cast-at-you', clean);
+      // A spell that came at you: credited to the nearest creature of the caster's name (a dying one too), so a wait
+      // after it died leaves the line out (staleThreat).
+      const caster = cast.words ? null : this.nearby(80).find((o) => o.kind === 'monster' && o.name.toLowerCase() === cast.caster.replace(/^the /i, '').toLowerCase());
+      if (!cast.words) this.push('cast-at-you', clean, caster?.guid);
       else if (who) this.push('cast-at-you', `${who.name} #${who.guid.toString(16)} ${who.dist.toFixed(0)} m ${compassPoint(who.bearing)} is casting ("${cast.words}"; at whom the words don't say)`, who.guid);
     }
   }
@@ -1674,7 +1733,7 @@ export class AgentApi {
   /** Resolve with the matching events as soon as one arrives (or [] after timeoutMs). */
   waitFor(filter: AgentWaitFilter = {}, timeoutMs = 20_000): Promise<AgentEvent[]> {
     const since = filter.sinceSeq ?? this.seqN;
-    const already = this.events.filter((e) => e.seq > since && this.matches(e, filter));
+    const already = this.deliverable(this.events.filter((e) => e.seq > since && this.matches(e, filter)));
     if (already.length) return Promise.resolve(already);
     return new Promise((resolve) => {
       const w = { filter, since, resolve, timer: setTimeout(() => { this.waiters.splice(this.waiters.indexOf(w), 1); this.vitalWaitStart.delete(w); this.fellowWaitStart.delete(w); resolve([]); }, timeoutMs) };
@@ -2116,19 +2175,45 @@ export class AgentApi {
     return { ok: true, message: this.goal ? `goal: ${this.goal}` : 'goal cleared' };
   }
 
+  /** The client's tell commands (ChatCommands: DoTell under tell / t / send / whisper / w), typed with "/" or "@" (OnChatCommand makes "/" an "@"). */
+  static readonly TELL_COMMAND = /^\s*[/@](?:tell|t|send|whisper|w)\s+(\S.*)$/i;
+
+  /**
+   * Players' names you know now: your fellows, players in view, and whoever you exchanged tells with lately (the
+   * "X tells you, …" and "You tell X, …" lines), longest first.
+   */
+  private knownPlayerNames(): string[] {
+    const names = new Set<string>([...(this.host.fellows?.() ?? []).map((f) => f.name), ...this.nearby(200).filter((o) => o.kind === 'player').map((o) => o.name)]);
+    for (const e of this.events) {
+      if (e.type !== 'chat') continue;
+      const m = /^\(\w+\) (?:(.+?) tells you, "|You tell (.+?), ")/.exec(e.text);
+      const n = (m?.[1] ?? m?.[2])?.replace(/^\[[^\]]*\] /, '').trim();
+      if (n) names.add(n);
+    }
+    return [...names].filter(Boolean).sort((a, b) => b.length - a.length);
+  }
+
   say(text: string): AgentResult {
-    if (/^\s*@/.test(text)) return { ok: false, message: 'refused: "@" server commands are not available to agents (play as a player; retail "/" commands work)' };
+    const tell = AgentApi.TELL_COMMAND.exec(text);
+    if (/^\s*@/.test(text) && !tell) return { ok: false, message: 'refused: "@" server commands are not available to agents (play as a player; retail "/" commands work)' };
     this.host.chat(text);
-    // Retail's /tell takes the name up to a comma (DoTell @ 00577e40: "Use comma after the name for targeted chat."),
-    // and a name has spaces: "/tell Claude Arcanist hello" failed (2026-10-12).
-    const tell = /^\s*\/(?:tell|t|send|whisper|w)\s+(\S.*)$/i.exec(text);
-    if (tell && !tell[1].includes(',')) {
-      const body = tell[1].trim();
-      // The name, when it's one you know (a fellow, a player in view); else say where the comma goes in words.
-      const known = [...(this.host.fellows?.() ?? []).map((f) => f.name), ...this.nearby(200).filter((o) => o.kind === 'player').map((o) => o.name)]
-        .sort((a, b) => b.length - a.length).find((n) => body.toLowerCase().startsWith(`${n.toLowerCase()} `) || body.toLowerCase() === n.toLowerCase());
-      const example = known ? `/tell ${known}, ${body.slice(known.length).trim() || '…'}` : '/tell Their Name, your message';
-      return { ok: false, message: `sent: ${text}\n  not delivered: a tell needs a comma after the name (names with spaces too), as retail's /tell does: ${example}` };
+    if (!tell) return { ok: true, message: `sent: ${text}` };
+    // Retail's /tell takes the name up to the first comma, untrimmed (DoTell @ 00577e40): no comma at all and the
+    // client answers "Use comma after the name for targeted chat." and sends nothing; "/tell Claude Bulwark hi, there"
+    // goes to a "Claude Bulwark hi" and the server answers "That person is not available now". Names have spaces:
+    // "/tell Claude Arcanist hello" failed (2026-10-12). The text is sent as typed (that is retail); the hint comes
+    // every time the name part isn't the player it starts with (stream, 2026-10-15: twice "not available", hint on try 3).
+    const body = tell[1].trim();
+    const comma = body.indexOf(',');
+    const namePart = (comma < 0 ? body : body.slice(0, comma)).trim().toLowerCase();
+    const known = this.knownPlayerNames();
+    const meant = known.find((n) => namePart === n.toLowerCase() || namePart.startsWith(`${n.toLowerCase()} `));
+    const example = (n: string): string => `/tell ${n}, ${body.slice(n.length).replace(/^\s*,?\s*/, '').trim() || '…'}`;
+    if (comma < 1) {
+      return { ok: false, message: `sent: ${text}\n  not delivered: a tell needs a comma after the name (names with spaces too), as retail's /tell does: ${meant ? example(meant) : '/tell Their Name, your message'}` };
+    }
+    if (meant && namePart !== meant.toLowerCase() && !known.some((n) => n.toLowerCase() === namePart)) {
+      return { ok: false, message: `sent: ${text}\n  likely not delivered: the name is everything before the first comma ("${body.slice(0, comma).trim()}"), and you know no player by that name; for ${meant}: ${example(meant)}` };
     }
     return { ok: true, message: `sent: ${text}` };
   }
@@ -2754,7 +2839,16 @@ export class AgentApi {
       const lof = this.host.lineOfFire?.(tg);
       if (lof && lof.blockedAt !== null) {
         // What blocks it, by name (lineOfFire's blocker: an object's name, a wall, the floor or ceiling).
-        return { ok: false, message: `${s.name} not cast: no line of fire to ${this.nameOf(tg)} (${lof.dist.toFixed(1)} m away): ${lof.blocker ?? 'a wall, the ground or an object'} ${lof.blockedAt.toFixed(1)} m along the line would take the bolt. Move to where the line to it is open (round the corner, into its room, or closer), then cast.` };
+        const what = lof.blocker ?? 'a wall, the ground or an object';
+        // Pressed against a wall or corner: the server starts the bolt ~1.2 m ahead of you, past the wall, and drops it
+        // when that spot can't see back to you (ACE IsProjectileVisible). Getting nearer the target doesn't help there;
+        // stepping off the wall does. Many "a wall 0.4 m along the line" refusals in a cave (2026-10-15) were that.
+        const where = lof.beforeSpawn && lof.spawnAhead !== undefined && lof.blockedAt < lof.spawnAhead
+          ? `${what} ${lof.blockedAt.toFixed(1)} m from you, between you and where the bolt starts (${lof.spawnAhead.toFixed(1)} m ahead of you), would take it: you are against a wall or corner on that side`
+          : `${what} ${lof.blockedAt.toFixed(1)} m along the line would take the bolt`;
+        const spot = this.host.lineOfFireOpenSpot?.(tg);
+        const go = spot ? ` The line is open from ${spot.dist} m ${compassWord(spot.dx, spot.dy)} of you (walk_to "${spot.dist}m ${compassWord(spot.dx, spot.dy)}"), if it stays put.` : ' No spot within 3 m of you has an open line: go round the corner, into its room, or let it come to you.';
+        return { ok: false, message: `${s.name} not cast: no line of fire to ${this.nameOf(tg)} (${lof.dist.toFixed(1)} m away): ${where}.${go} Then cast.` };
       }
     }
     if (tg && tg !== me) this.host.select(tg);
@@ -2816,7 +2910,7 @@ export class AgentApi {
     // meanwhile are not the cast's outcome.
     const key = lines.filter((l) => outcome.test(l) && !/^you say\b/i.test(l) && !incomingCombat(l));
     let verdict = '';
-    if (!key.length && died()) verdict = `${tname} died`;
+    if (!key.length && died()) { verdict = `${tname} died`; this.noteDead(tg!); }
     if (!key.length && !verdict && s.projectile && tg && tg !== me) {
       // A bolt that went out ("Casting …") with no damage line, no resist and no kill: nothing the server told you of
       // landed. Seven point-blank Flame Bolts at a Spikey Armoredillo read as casts while it killed the mage (2026-10-12).
@@ -2850,6 +2944,32 @@ export class AgentApi {
    */
   static readonly CAST_REPEAT_HEALTH = 0.6;
   static readonly CAST_REPEAT_MAX_CASTS = 20;
+  /** A new attacker whose biggest hit on you took this share of your health or more stops a repeat cast. */
+  static readonly CAST_REPEAT_ATTACKER_HIT_FRAC = 0.1;
+
+  /**
+   * Why a monster that started attacking you during a repeat cast is real danger, or null when it isn't, from what
+   * you were shown: it casts spells (a spell of its kind came at you, or its words were heard), one of its kind's hits
+   * took CAST_REPEAT_ATTACKER_HIT_FRAC of your health or more, or its level (examined) is above yours. Your falling
+   * health is until_health's to watch.
+   */
+  private attackerDanger(g: number): string | null {
+    const name = this.nameOf(g);
+    const seen = this.seenKinds.get(name.toLowerCase());
+    if (seen && (seen.spells.size || seen.words)) return seen.spells.size ? `it casts ${[...seen.spells.keys()].slice(0, 2).join(', ')}` : 'it casts spells';
+    const max = this.host.self()?.health.max ?? 0;
+    if (seen && max > 0 && seen.maxHit >= max * AgentApi.CAST_REPEAT_ATTACKER_HIT_FRAC) return `one hit of its took ${seen.maxHit} of your ${max} health (${Math.round((100 * seen.maxHit) / max)}%)`;
+    const lvl = this.nearby(80).find((o) => o.guid === g)?.level;
+    const mine = this.self()?.level ?? this.host.self()?.level;
+    if (lvl && mine && lvl > mine) return `level ${lvl}, above your ${mine}`;
+    return null;
+  }
+
+  /** "hits up to 1" / "no damage to you yet": what a kind of monster was seen doing to you, for a repeat's summary. */
+  private attackerSeenText(name: string): string {
+    const seen = this.seenKinds.get(name.toLowerCase());
+    return seen && seen.maxHit > 0 ? `hits up to ${seen.maxHit}` : 'no damage to you yet';
+  }
   static readonly CAST_REPEAT_MAX_MS = 120_000;
 
   /**
@@ -2859,7 +2979,8 @@ export class AgentApi {
    * way). It runs as a task: another action, ac_stop_moving or your death ends it, and its task-done event carries
    * the summary. It stops, and says why, when the target dies or goes, your mana won't pay for another cast, the
    * server or client refuses a cast (no line of fire, out of range, "too busy" twice running, no reply twice running),
-   * your health is below `untilHealth`, a monster other than the target starts attacking you, or after `maxCasts`
+   * your health is below `untilHealth`, a monster other than the target that is real danger starts attacking you
+   * (attackerDanger: a caster, a hard hitter, one above your level; milder ones are cast on through and named), or after `maxCasts`
    * or `maxMs`. Each is information; what to do next is the caller's. A melee player's attack keeps swinging the same
    * way; one bolt per tool call left a war mage idle between calls (Arcanist 3 bolts to Bulwark's 6 kills).
    */
@@ -2881,6 +3002,8 @@ export class AgentApi {
     // Monsters already hitting you when it starts were in the observation the caller decided on: only new ones stop it.
     const attackersAtStart = new Set(this.attackersOfMe().keys());
     const casts: string[] = [];
+    /** Monsters that started attacking you during it and were cast on through (not danger enough to stop). */
+    const joined = new Map<number, { name: string; n: number }>();
     let damage = 0, hits = 0, resisted = 0, fizzled = 0, minSpent = Infinity;
     let cancelled = false;
     const pct = (f: number): string => `${Math.round(f * 100)}%`;
@@ -2894,7 +3017,8 @@ export class AgentApi {
           `cast ${s.name} at ${name} ${casts.length} time${casts.length === 1 ? '' : 's'} (repeat); stopped: ${why}`,
           ...casts.map((c, i) => `  ${i + 1}: ${c}`),
           ...(tally ? [`  ${tally}`] : []),
-          `  limits: health below ${pct(untilHealth)} (until_health), ${maxCasts} casts, ${Math.round(maxMs / 1000)} s`,
+          ...(joined.size ? [`  joined in meanwhile: ${[...joined].map(([g, j]) => `${j.name} #${g.toString(16)} (${this.attackerSeenText(j.name)})`).join(', ')}`] : []),
+          `  limits: health below ${pct(untilHealth)} (until_health), ${maxCasts} casts, ${Math.round(maxMs / 1000)} s; a new attacker stops it only when it casts, hits for ${pct(AgentApi.CAST_REPEAT_ATTACKER_HIT_FRAC)}+ of your health, or is above your level`,
           ...(vit ? [`  ${vit}`] : []),
         ].join('\n'),
       };
@@ -2906,7 +3030,7 @@ export class AgentApi {
     const finish = (r: AgentResult): void => { if (this.task === task) { this.task = null; task.resolve(r); } };
     const targetGone = (): string | null => {
       const o = this.host.object(tg);
-      if (this.host.isDying(tg) || this.killedRecently(name, startSeq) || (!o && (this.dyingSeen.has(tg) || this.gone.get(tg)?.died))) return `${name} died`;
+      if (this.host.isDying(tg) || this.killedRecently(name, startSeq) || (!o && (this.dyingSeen.has(tg) || this.gone.get(tg)?.died))) { this.noteDead(tg); return `${name} died`; }
       if (!o) return `${name} is gone from view (it died out of sight, fled, or you moved away)`;
       if (o.lost) return `${name} is out of sight (your client let it go)`;
       return null;
@@ -2923,10 +3047,14 @@ export class AgentApi {
         if (v && v.health.max && v.health.current / v.health.max < untilHealth) {
           return finish(summary(`your health is ${v.health.current}/${v.health.max} (${pct(v.health.current / v.health.max)}), below the ${pct(untilHealth)} you set (until_health)`));
         }
-        // A caster's attack (castAttack) keeps on its target whoever else joins in, as a swing does.
+        // A caster's attack (castAttack) keeps on its target whoever else joins in, as a swing does. Otherwise a
+        // new attacker stops it only when it is real danger (attackerDanger); a mild one is cast on through and
+        // named in the summary. Three lurkers hitting for 1 each stopped every repeat (Arcanist, 2026-10-15).
         const fresh = own.keepOnAttackers ? [] : [...this.attackersOfMe()].filter(([g]) => g !== tg && !attackersAtStart.has(g));
-        if (fresh.length) {
-          return finish(summary(`${fresh.map(([g, n]) => `${this.nameOf(g)} #${g.toString(16)} (${n}× in 10 s)`).join(', ')} started attacking you, and ${fresh.length === 1 ? "isn't" : "aren't"} your target`));
+        for (const [g, n] of fresh) if (!joined.has(g)) joined.set(g, { name: this.nameOf(g), n });
+        const danger = fresh.map(([g, n]) => ({ g, n, why: this.attackerDanger(g) })).filter((d) => d.why);
+        if (danger.length) {
+          return finish(summary(`${danger.map(({ g, n, why }) => `${this.nameOf(g)} #${g.toString(16)} (${n}× in 10 s; ${why})`).join(', ')} started attacking you, and ${danger.length === 1 ? "isn't" : "aren't"} your target`));
         }
         // Mana: the spell table's cost is the most a cast takes (Mana Conversion only lowers it: ACE
         // Creature_Magic.GetManaCost), and the least one took this run is the cheapest seen; below both, the server
@@ -3057,7 +3185,7 @@ export class AgentApi {
    * and reports what the client and server said; a refusal says why.
    */
   /** `label` says what happened when it worked ("dropped X"); `failed` names it when it didn't ("not dropped: X"). */
-  private async inventoryRequest(label: string, failed: string, send: () => boolean, done: () => boolean, settleMs = 4000): Promise<AgentResult> {
+  private async inventoryRequest(label: string, failed: string, send: () => boolean, done: () => boolean, settleMs = 4000, opts: { optimistic?: number } = {}): Promise<AgentResult> {
     for (let w = 0; w < 50 && this.host.busy(); w++) await sleep(200);
     const since = this.seqN;
     const said = (): string[] => this.eventsSince(since).filter((e) => e.type === 'chat').map((e) => e.text.replace(/^\(\w+\) /, ''));
@@ -3065,13 +3193,29 @@ export class AgentApi {
       const why = said();
       return { ok: false, message: `${failed}: refused${why.length ? ` (${why.join('; ')})` : ''}` };
     }
-    for (let w = 0; w < settleMs / 200 && !done() && !said().length; w++) await sleep(200);
+    // Done only once the server has answered. The client wields optimistically (the paperdoll shows it at once and
+    // rolls it back on the server's refusal), so "equipped Large Round Shield" came back while the server said "The
+    // Large Round Shield can't be wielded" (stream, 2026-10-15): an optimistic move counts only once the host says
+    // the server confirmed it, or (a host that can't say) when no refusal came within AgentApi.INVENTORY_CONFIRM_MS.
+    const g = opts.optimistic;
+    const pending = (): boolean => g !== undefined && !!this.host.inventoryPending?.(g);
+    const confirmed = (): boolean => done() && !pending();
+    for (let w = 0; w < settleMs / 200 && !confirmed() && !said().length; w++) await sleep(200);
+    if (g !== undefined && !this.host.inventoryPending && confirmed() && !said().length) {
+      for (let w = 0; w < AgentApi.INVENTORY_CONFIRM_MS / 200 && !said().length; w++) await sleep(200);
+    }
     const lines = said();
-    if (done()) return { ok: true, message: [label, ...lines.map((l) => `  ${l}`)].join('\n') };
-    return lines.length
-      ? { ok: false, message: `${failed}: ${lines.join('; ')}` }
-      : { ok: true, message: `${label} (no answer from the server yet)` };
+    const refusal = lines.find((l) => INVENTORY_REFUSAL.test(l));
+    if (confirmed() && !refusal) return { ok: true, message: [label, ...lines.map((l) => `  ${l}`)].join('\n') };
+    if (lines.length) return { ok: false, message: `${failed}: ${lines.join('; ')}` };
+    const secs = Math.round(settleMs / 1000);
+    return done()
+      ? { ok: false, message: `${failed} yet: the client shows it, but the server has not confirmed it in ${secs} s (ac_inventory in a moment shows whether it stayed)` }
+      : { ok: false, message: `${failed}: no answer from the server in ${secs} s (ac_inventory in a moment shows whether it went through)` };
   }
+
+  /** After an optimistic equip looks done, how long a host that can't say whether the server answered waits for a refusal (ms). */
+  static readonly INVENTORY_CONFIRM_MS = 1200;
 
   drop(t: TargetArg): Promise<AgentResult> {
     const g = this.need(t, 'inventory', 'item');
@@ -3137,9 +3281,15 @@ export class AgentApi {
     const g = this.need(t, 'inventory', 'item');
     if (typeof g !== 'number') return Promise.resolve(g);
     const name = this.nameOf(g);
-    if (this.host.inventory().find((i) => i.guid === g)?.where === 'equipped') return Promise.resolve({ ok: true, message: `${name} is already equipped` });
+    const inv = this.host.inventory();
+    const it = inv.find((i) => i.guid === g);
+    if (it?.where === 'equipped') return Promise.resolve({ ok: true, message: `${name} is already equipped` });
+    // A shield beside a held caster, two-hander or launcher: the server refuses it (ACE CheckWeaponCollision), and
+    // retail's AutoWield sends it anyway. Said before sending, as the paperdoll would show the hand taken.
+    const blocked = it ? shieldRefusal(it, inv) : null;
+    if (blocked) return Promise.resolve({ ok: false, message: `not equipped: ${name}: ${blocked}` });
     return this.inventoryRequest(`equipped ${name}`, `not equipped: ${name}`, () => this.host.wield(g),
-      () => this.host.inventory().find((i) => i.guid === g)?.where === 'equipped');
+      () => this.host.inventory().find((i) => i.guid === g)?.where === 'equipped', 4000, { optimistic: g });
   }
 
   async appraise(t: TargetArg, opts: { quiet?: boolean } = {}): Promise<AgentResult> {

@@ -2139,7 +2139,15 @@ export class ServerObjectManager {
     // a LightingOn (0x800) edge builds / destroys the Setup lights.
     this.syncLights(obj);
     // …and a Hidden (0x4000) edge runs set_hidden's Hidden / UnHide script.
-    if (hiddenScript !== null) this.onHiddenStateScript?.(guid, hiddenScript);
+    if (hiddenScript !== null) {
+      this.onHiddenStateScript?.(guid, hiddenScript);
+      // CPhysicsObj::set_hidden @ 00514c60 ends both branches with
+      // CPartArray::RemoveLinkAnimations: what a teleporting object was
+      // still playing (a lifestone recall frozen while this client sat in
+      // portal space) is dropped, not resumed on arrival
+      // (BUG.recall-replays-on-arrival).
+      this.animatedObjects.get(guid)?.motionManager.removeAllLinkAnimations();
+    }
   }
 
   /**
@@ -3395,10 +3403,19 @@ export class ServerObjectManager {
    * mage through a timed door took its bolts in silence (2026-10-14). `blockedAt` is the ground distance (m) from you to where the bolt dies, null when it reaches the
    * target. null when the target or our body isn't known.
    */
-  lineOfFire(guid: number, radius = DEFAULT_PROJECTILE_RADIUS): { dist: number; blockedAt: number | null; blocker?: string } | null {
+  lineOfFire(guid: number, radius = DEFAULT_PROJECTILE_RADIUS): { dist: number; blockedAt: number | null; blocker?: string; beforeSpawn?: boolean; spawnAhead?: number } | null {
     const o = this.objects.get(guid);
     const me = this.missileLocalPlayer?.();
     if (!o || !me || !this.missileEnvironmentSweep) return null;
+    return this.boltPathFrom(me, o, radius);
+  }
+
+  /**
+   * {@link lineOfFire} from a caster body at `me` (feet, AC global metres). `beforeSpawn`: the blocker stands between
+   * you and the spawn point (`spawnAhead` m out, ground distance): the bolt starts past it and can't see back to you
+   * (ACE IsProjectileVisible), so stepping off the wall, not nearer the target, opens the line.
+   */
+  private boltPathFrom(me: { x: number; y: number; z: number; radius: number; height: number; physicsRadius?: number }, o: ServerObject, radius: number): { dist: number; blockedAt: number | null; blocker?: string; beforeSpawn?: boolean; spawnAhead?: number } {
     const feet = { x: o.worldX, y: o.worldZ, z: o.worldY };
     const dist = Math.hypot(feet.x - me.x, feet.y - me.y);
     const bolt = boltLaunch({
@@ -3406,10 +3423,14 @@ export class ServerObjectManager {
       casterHeight: me.height, casterRadius: me.radius, casterPhysicsRadius: me.physicsRadius ?? me.radius,
       targetHeight: Math.max(o.collisionHeight, 0.6), targetRadius: Math.max(o.collisionRadius, 0), projectileRadius: radius,
     });
+    const guid = o.guid;
     const ground = (a: V3, b: V3, t: number): number => Math.round(Math.hypot(a.x + (b.x - a.x) * t - me.x, a.y + (b.y - a.y) * t - me.y) * 10) / 10;
     // IsProjectileVisible: swept outward from your eye to the spawn point (a wall or door it crosses is met face on).
     const back = this.missileSegmentContact(bolt.eye, bolt.origin, radius, guid);
-    if (back && back.t < 1) return { dist, blockedAt: ground(bolt.eye, bolt.origin, back.t), blocker: this.missileBlockerName(back) };
+    if (back && back.t < 1) {
+      const spawnAhead = Math.round(Math.hypot(bolt.origin.x - me.x, bolt.origin.y - me.y) * 10) / 10;
+      return { dist, blockedAt: ground(bolt.eye, bolt.origin, back.t), blocker: this.missileBlockerName(back), beforeSpawn: true, spawnAhead };
+    }
     // The flight, to the target's two-thirds point. A spawn point already inside the target hits at once (ACE's entry
     // collision). Otherwise an obstacle anywhere up to that point blocks, even one our copy of the target overlaps:
     // the server's target can't stand inside a closed door, so a door our view puts through its body is in front of
@@ -3418,6 +3439,46 @@ export class ServerObjectManager {
     const best = this.missileSegmentContact(bolt.origin, bolt.aim, radius, guid);
     if (!best || best.t >= 1) return { dist, blockedAt: null };
     return { dist, blockedAt: ground(bolt.origin, bolt.aim, best.t), blocker: this.missileBlockerName(best) };
+  }
+
+  /**
+   * The nearest spot within `maxDist` m that you can step to in a straight line on your own floor and from which a
+   * bolt reaches `guid` ({@link lineOfFire} from there): rings every 0.5 m, the 8 compass points (what walk_to's "1.5m northeast" takes), nearest ring first and, on a
+   * ring, the bearing nearest the target's. `dx` / `dy` are metres east / north of you. null when there is none, or
+   * the target or our body isn't known. For a refusal's advice only: the target may move meanwhile.
+   */
+  openLineSpot(guid: number, maxDist = 3, radius = DEFAULT_PROJECTILE_RADIUS): { dx: number; dy: number; dist: number } | null {
+    const o = this.objects.get(guid);
+    const me = this.missileLocalPlayer?.();
+    if (!o || !me || !this.missileEnvironmentSweep) return null;
+    const toTarget = Math.atan2(o.worldX - me.x, o.worldZ - me.y);
+    // Your body's sphere (GetPhysicsRadius) at knee height for the step: a wall, pillar or closed door in the way stops it.
+    const bodyR = Math.min(me.physicsRadius ?? me.radius, 0.48);
+    const stepZ = me.z + bodyR + 0.25;
+    for (let ring = 0.5; ring <= maxDist + 1e-6; ring += 0.5) {
+      const bearings: number[] = [];
+      for (let i = 0; i < 8; i++) bearings.push((i * Math.PI) / 4);
+      const off = (b: number) => Math.abs(Math.atan2(Math.sin(b - toTarget), Math.cos(b - toTarget)));
+      bearings.sort((a, b) => off(a) - off(b));
+      for (const b of bearings) {
+        const dx = Math.sin(b) * ring, dy = Math.cos(b) * ring;
+        const at = { x: me.x + dx, y: me.y + dy };
+        // The step there, clear of walls and solid objects.
+        const step = this.missileSegmentContact({ x: me.x, y: me.y, z: stepZ }, { x: at.x, y: at.y, z: stepZ }, bodyR, guid);
+        if (step && step.t < 1) continue;
+        // Floor under it at about your height (no ledge or hole): a sphere dropped from above your knee lands on it.
+        const top = me.z + 0.6, drop = 1.2, fr = 0.2;
+        const floor = this.missileSegmentContact({ x: at.x, y: at.y, z: top }, { x: at.x, y: at.y, z: top - drop }, fr, guid);
+        if (!floor || !floor.normal || floor.normal.z < 0.7) continue;
+        const floorZ = top - drop * floor.t - fr;
+        if (Math.abs(floorZ - me.z) > 0.5) continue;
+        // A few cm of margin on the bolt: a line that only just grazes past a corner is no advice to walk to.
+        if (this.boltPathFrom({ ...me, x: at.x, y: at.y, z: floorZ }, o, radius + ServerObjectManager.OPEN_SPOT_MARGIN).blockedAt === null) {
+          return { dx: Math.round(dx * 10) / 10 || 0, dy: Math.round(dy * 10) / 10 || 0, dist: ring };
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -3529,6 +3590,9 @@ export class ServerObjectManager {
     }
     return !(best && best.t < 1);
   }
+
+  /** openLineSpot's margin (m) on the bolt's radius: suggested spots clear corners by this much more than ACE needs. */
+  static readonly OPEN_SPOT_MARGIN = 0.05;
 
   /** An object a missile can hit: in a cell (not held, carried, out of the world, or released out of range). */
   static inWorldForMissiles(o: ServerObject): boolean {

@@ -17,7 +17,13 @@
  *    it is set (× 0.01), so a -1 keeps the previous one.
  * The Sunny night ambient is 0xC864FF × 0.40 — the purple.
  */
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
+import { existsSync } from 'node:fs';
+import type { DatDatabase } from '../packages/dat-parser/src/DatDatabase.js';
+import { DatReader } from '../packages/dat-parser/src/DatReader.js';
+import { GfxObj } from '../packages/dat-parser/src/file-types/GfxObj.js';
+import { buildGfxObjGeometry } from '../packages/renderer/src/models/GfxObjMesh.js';
+import { DAT_PATHS, openDat } from './_harness/dat.js';
 import * as THREE from 'three';
 import {
   SkyboxRenderer, skyReplaceAt, applySkyReplace, type SkyMaterialState,
@@ -76,12 +82,16 @@ function sunnySkyDesc() {
 }
 
 /** Surface luminosity per GfxObj, as in the DAT (box 1, stars 0, clouds 0, sun glow 1 additive). */
-const SURFACES: Record<number, { luminosity: number; additive: boolean }> = {
+const SURFACES: Record<number, { luminosity: number; additive: boolean; doubleSided?: boolean }> = {
   0x010015ee: { luminosity: 1, additive: false },
   0x010015ef: { luminosity: 0, additive: false },
   0x01001f67: { luminosity: 1, additive: false },
   0x01001f6a: { luminosity: 1, additive: true },
   0x01004c36: { luminosity: 0, additive: false },
+  // The Rainy rain dome 0x1004c42: surface 0x80000c5, type 0x10112
+  // (Additive | Alpha | Translucent | Base1Image), luminosity 0.148438.
+  // Its polygons are SidesType 1 (no culling): GfxObjMesh gives it DoubleSide.
+  0x01004c42: { luminosity: 0.1484380066394806, additive: true, doubleSided: true },
 };
 
 function stubModelRenderer() {
@@ -92,6 +102,7 @@ function stubModelRenderer() {
       const mat = s?.additive
         ? new THREE.MeshBasicMaterial({ blending: THREE.AdditiveBlending, transparent: true })
         : new THREE.MeshLambertMaterial();
+      mat.side = s?.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
       const mesh = new THREE.Mesh(new THREE.BufferGeometry(), mat);
       mesh.userData.surfaceId = gfxId; // the stub keys surfaces by GfxObj id
       g.add(mesh);
@@ -201,17 +212,26 @@ describe('VISUAL.night-sky-vs-retail: SkyboxRenderer lights its sky objects', ()
     return sky;
   }
 
-  it('non-additive surfaces get the retail-lit sky material; additive ones stay unlit', () => {
+  it('a one-sided sky part keeps its front-face culling', () => {
+    expect(entry(sunnyAt(0.5), 0).litMaterials[0].material.side).toBe(THREE.FrontSide);
+  });
+
+  it('every surface gets the retail-lit sky material, DAT Additive ones included', () => {
+    // BUG.rain-invisible-thunder-audible — RenderMeshSubset @ 0059ca10 lights
+    // every sky part whatever its surface type; SetSurface @ 0059c4d0 lets
+    // the Additive bit pick only the blend (SRCALPHA/ONE) and the fog.
     const sky = sunnyAt(0.994);
-    for (const i of [0, 1, 4]) {
+    for (const i of [0, 1, 3, 4]) {
       const e = entry(sky, i);
       expect(e.litMaterials).toHaveLength(1);
       expect(retailLightingKindOf(e.litMaterials[0].material)).toBe('sky');
-      expect(e.materials).toHaveLength(0);
     }
-    const glow = entry(sky, 3);
-    expect(glow.litMaterials).toHaveLength(0);
-    expect(glow.materials[0]).toBeInstanceOf(THREE.MeshBasicMaterial);
+    const glow = entry(sky, 3).litMaterials[0].material;
+    expect(glow.blendSrc).toBe(THREE.SrcAlphaFactor);
+    expect(glow.blendDst).toBe(THREE.OneFactor);
+    expect(glow.userData.skyDatAdditive).toBe(true);
+    // The sun glow (Surface lum 1, no replace column) stays full bright.
+    expect(glow.emissive.r).toBe(1);
   });
 
   it('phase 0.994: stars keep Emissive 0 (lit only by the ambient), opaque', () => {
@@ -249,5 +269,77 @@ describe('VISUAL.night-sky-vs-retail: SkyboxRenderer lights its sky objects', ()
     const stars = entry(sunnyAt(0.5), 1);
     expect(stars.state.translucency).toBe(1);
     expect(stars.mesh.visible).toBe(false);
+  });
+});
+
+describe('BUG.rain-invisible-thunder-audible: the Rainy rain domes draw while the storm plays', () => {
+  // Rainy (RegionDesc 0x13000000 day groups 3/7/9/15/16): the rain domes
+  // 0x1004c42 (props 4) / 0x1004c44 (props 5) have no time window (0–0) and a
+  // replace column of transparent 0, luminosity 0, max_bright 0 from 0.02 to
+  // 0.999 — on through every thunder window of Setup 0x2000ba6 (0.03–0.19,
+  // 0.40–0.50, 0.91–0.98). A luminosity of 0 is never applied (GameSky::
+  // UseTime @ 005075b0), so the dome keeps its Surface's Emissive 0.148.
+  // The old unlit path drew it at max(0.1, 0/100) = 10% — invisible rain.
+  function rainyAt(t: number): SkyboxRenderer {
+    const rows = (tr: number) => [{ objectIndex: 0, gfxObjId: 0, rotate: 0, transparent: tr, luminosity: 0, maxBright: 0 }];
+    const sky = new SkyboxRenderer({
+      tickSize: 30, lightTickSize: 30,
+      dayGroups: [{
+        chanceOfOccur: 5, dayName: 'Rainy',
+        skyObjects: [skyObject({ defaultGFXObjectId: 0x01004c42, texVelocityX: 0.02, texVelocityY: -2, properties: 4 })],
+        skyTime: [
+          timeEntry(0, rows(100)), timeEntry(0.02, rows(0)), timeEntry(0.5, rows(0)),
+          timeEntry(0.96, rows(0)), timeEntry(0.999, rows(100)),
+        ],
+      }],
+    } as never);
+    sky.initSkyObjects(stubModelRenderer());
+    sky.updateTimeOfDay(t);
+    return sky;
+  }
+
+  it('at night (a thunder window, phase 0.95) the dome is lit with its Surface Emissive, opaque, additive', () => {
+    const dome = entry(rainyAt(0.95), 0);
+    expect(dome.litMaterials).toHaveLength(1);
+    const m = dome.litMaterials[0].material;
+    expect(retailLightingKindOf(m)).toBe('sky');
+    expect(m.emissive.r).toBeCloseTo(0.148438, 5);
+    expect(skyDiffuseOf(m)).toBe(1);
+    expect(m.opacity).toBe(1);
+    expect(m.blendDst).toBe(THREE.OneFactor);
+    expect(m.fog).toBe(false);
+    expect(dome.mesh.visible).toBe(true);
+  });
+
+  it('at noon too: a 0 luminosity never dims it', () => {
+    const dome = entry(rainyAt(0.5), 0);
+    expect(dome.litMaterials[0].material.emissive.r).toBeCloseTo(0.148438, 5);
+    expect(dome.mesh.visible).toBe(true);
+  });
+
+  it('keeps its polygons\' cull mode: double-sided, so it shows from inside (the viewer stands in it)', () => {
+    // The dome is a 113 m-radius cylinder centred on the viewer (skyObjectFrame,
+    // props&0x4). Forced FrontSide, every face seen from inside was culled.
+    expect(entry(rainyAt(0.95), 0).litMaterials[0].material.side).toBe(THREE.DoubleSide);
+  });
+
+  it('the DisableMostWeatherEffects gate still hides it', () => {
+    const sky = rainyAt(0.95);
+    sky.setWeatherEnabled(false);
+    expect(entry(sky, 0).mesh.visible).toBe(false);
+  });
+});
+
+describe.skipIf(!existsSync(DAT_PATHS.portal))('BUG.rain-invisible-thunder-audible: the real rain domes are double-sided', () => {
+  let portal: DatDatabase;
+  beforeAll(() => { portal = openDat(DAT_PATHS.portal); });
+
+  it('GfxObjMesh builds 0x1004c42 / 0x1004c44 as double-sided batches (SidesType 1 polygons)', () => {
+    for (const id of [0x01004c42, 0x01004c44]) {
+      const gfx = new GfxObj(new DatReader(portal.getFileData(id)!));
+      const geo = buildGfxObjGeometry(gfx);
+      expect(geo.doubleSided.length).toBeGreaterThan(0);
+      expect(geo.doubleSided.every(Boolean)).toBe(true);
+    }
   });
 });

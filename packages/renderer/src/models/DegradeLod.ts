@@ -1,4 +1,3 @@
-import { REMASTER_ASSET_KEY } from '../remaster/AssetOverrides.js';
 import * as THREE from 'three';
 import type { DatDatabase } from '@ac/dat-parser/DatDatabase.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
@@ -628,8 +627,6 @@ export class DegradeLod {
     build: (gfxObjId: number) => THREE.Object3D | null,
     object: THREE.Object3D | null = null,
   ): boolean {
-    // REMASTER assets: a remodelled part is its own model; the DAT degrade chain would swap the old meshes back in.
-    if (part.children.some(c => c.userData[REMASTER_ASSET_KEY])) return false;
     const chain = this.chainFor(gfxObjId);
     if (!chain) return false;
     const entry: PartEntry = {

@@ -278,6 +278,9 @@ profile=… character=…`), then plays it as a headless Claude Code session in 
 day per character. These are counted from the segment log, so they survive a supervisor restart. `segment.budgetUsd`
 becomes `claude --max-budget-usd` for each segment. Each segment's tokens, cost (when `claude -p` reports
 `total_cost_usd`), turns, session id and end reason go to `stream/segments.jsonl`.
+That cost is `claude -p`'s API-price estimate: on a claude.ai subscription login (`claude auth status`, authMethod
+claude.ai) nothing is billed per token, so logs call it "API-equivalent", viewers never see it, and the caps guard
+subscription usage rather than a dollar budget (2026-10-15).
 
 **Permissions** (no `--dangerously-skip-permissions`):
 - `--tools Bash,Read` and `--permission-mode dontAsk --permission-prompts none`: anything not allowed is refused,
@@ -584,14 +587,50 @@ here, not having to hardcode behavior").
   #70145010 (the lever-timed door at the foot of 0x0145's stairs) clawed the mage through it while every bolt died on
   the door in silence. The old check swept the eye-to-target-middle line minus its first 0.58 m and last 0.71 m, which
   is where such a door stands; a bolt that still does nothing names what is in its way.
+  Against a wall or door jamb with the target round the corner, the refusal is real too (dungeon 0x0286, 2026-10-15:
+  "a wall 0.4 m along the line" for dillos 3–5 m off): ACE starts the bolt 1.16 m ahead, past the wall, and drops it
+  when the spawn point can't see back to your eye. On 96,000 placements in that cave our check and ACE agreed on
+  99.96% (disagreements: corners grazed ≥ 1.2 m out; every refusal under 0.8 m was an ACE miss too). The refusal now
+  says the wall is between you and where the bolt starts and names the nearest spot within 3 m on your floor with an
+  open line (`ServerObjectManager.openLineSpot`: the 8 compass points every 0.5 m, a 5 cm margin; ACE hit from all 436
+  spots it named). A/B any such check with `ALL=1 STEP=… run.sh grid <lb> <setup> <scale> x0 x1 y0 y1 r` (every shot,
+  with ACE's placed positions) and `run.sh pairs <lb> <setup> <scale> /work/pairs.txt`.
+- **Stream reports, 2026-10-15 (Arcanist / Bulwark).** Four fixes, each with its sweep
+  (tests/verify-agent-stream-reports-2026-10-15.ts):
+  - *Waits never hand back threats from the dead.* Events queue between looks, so `ac_wait types=aggro` after a fight
+    returned five "coming at you" from Brigands already killed, and aggro + attackers-up for a Hea Hunter its cast had
+    reported dead. `aggro`, `attackers-up`, `cast-at-you` and `fellow-aggro` about a creature that is dead or gone when
+    the wait returns are left out (`AgentApi.staleThreat`): its death start seen, a kill reported for it (target-died, a
+    cast's kill: events from before it are dropped), health 0, or gone from the client's world. A spell line is credited
+    to its caster's guid so it drops too. The hit lines themselves (`attacked`) stay: they happened.
+  - *A tell's name ends at the first comma, and the answer says so every time.* Retail's DoTell (00577e40) takes the
+    name up to the first comma and sends nothing without one ("Use comma after the name for targeted chat."), so
+    "/tell Claude Bulwark hi, ready?" goes to a "Claude Bulwark hi" and the server answers "That person is not
+    available now". That is retail and is sent as typed; `ac_say` now adds the hint whenever the name part starts with a
+    player you know (fellows, players in view, anyone you exchanged tells with) without being that name, for /tell, /t,
+    /send, /whisper, /w and their "@" forms (which `say` now lets through, as retail's "/" is an "@"). The old hint only
+    looked for any comma in the whole line, so a message with a comma in it got none.
+  - *Equip is done when the server says so.* The client wields optimistically (the paperdoll at once, rolled back on
+    InventoryServerSaveFailed), so `equip` read "equipped Large Round Shield" while the server said "The Large Round
+    Shield can't be wielded". It now waits for the server's WieldObject (host `inventoryPending`, main.ts
+    pendingEquipmentActions), reports a refusal line as a failure, and never reports "no answer" as success (drop
+    too: `inventoryRequest`). Gear: a caster (ItemType Caster, wielded Held), a two-hander or a launcher takes the shield
+    hand too (retail BlocksUseOfShield @ 0055d3e0; ACE CheckWeaponCollision refuses a shield beside one), so `ac_gear`
+    shows the shield slot as taken by it, never EMPTY, and `equip` of a shield beside one says to wield a one-handed
+    weapon first. Checked, retail: AutoWield's shield branch sends the wield without that check, so the server's
+    refusal is what a player got.
+  - *Repeat casts cast on through mild newcomers* (the rule above): three lurkers hitting for 1 each had stopped every
+    repeat. Swept: castAttack already kept on through attackers; walks stop on hits by design.
 - **Repeat casting (2026-10-12).** `ac_cast repeat=true` keeps casting one spell at one target, each cast through the
   single cast's own path (busy wait, line-of-fire check, outcome wait), so no faster than the client allows, and answers
   one summary: each cast's result, damage dealt, resists and fizzles, your vitals, and why it stopped. It stops, saying
   so, when the target dies or goes, your mana is below the spell's cost (the spell table's BaseMana, or the least a cast
   took this run, since Mana Conversion only lowers it; else the server's "not enough Mana"), the server or client
   refuses a cast (no line of fire, out of range, "too busy" twice running, no reply twice), your health is below
-  `until_health` (default 50%), a monster that wasn't hitting you when it started (attackersOfMe) and isn't the target
-  starts to, or after `max_casts` (20) / `max_s` (120). It is a task like a walk: another action, `ac_stop_moving` or
+  `until_health` (default 60% since 2026-10-14), a monster that wasn't hitting you when it started (attackersOfMe), isn't the target
+  and is real danger starts to (since 2026-10-15: it casts, one hit of its kind took 10% or more of your health, or its
+  examined level is above yours; milder ones are cast on through and named under "joined in meanwhile"), or after
+  `max_casts` (20) / `max_s` (120). It is a task like a walk: another action, `ac_stop_moving` or
   your death ends it with the summary so far, and a long one answers "still in progress" with the summary on
   task-done. A single cast replaces it. Why: Bulwark's `ac_attack` is one call and the server keeps swinging (a
   level-8 drudge in ~5 s), while each `ac_cast` was one bolt per tool call, and with 5–8 s of thinking between calls

@@ -81,7 +81,7 @@ export function nextSegment(s: {
   if (s.segmentsThisRun >= cfg.maxSegments) return { action: 'halt', why: `played ${s.segmentsThisRun} segments, the run's maxSegments` };
   if (s.today.segments >= cfg.daily.maxSegments) return { action: 'halt', why: `daily cap: ${s.today.segments} segments today (daily.maxSegments)` };
   if (s.today.minutes >= cfg.daily.maxMinutes) return { action: 'halt', why: `daily cap: ${Math.round(s.today.minutes)} minutes today (daily.maxMinutes)` };
-  if (cfg.daily.maxUsd !== null && s.today.usd >= cfg.daily.maxUsd) return { action: 'halt', why: `daily cap: $${s.today.usd.toFixed(2)} today (daily.maxUsd)` };
+  if (cfg.daily.maxUsd !== null && s.today.usd >= cfg.daily.maxUsd) return { action: 'halt', why: `daily cap: $${s.today.usd.toFixed(2)} API-equivalent today (daily.maxUsd)` };
   if (s.quickExits >= cfg.segment.maxQuickExits) return { action: 'halt', why: `${s.quickExits} segments in a row ended within ${cfg.segment.quickExitMinutes} min (crashing?): see the supervisor log` };
   if (s.last === null) return { action: 'start', delayMs: 0 };
   const base = cfg.segment.restartPauseSeconds * 1000;

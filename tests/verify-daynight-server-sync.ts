@@ -187,6 +187,26 @@ describe('SkyboxRenderer — server-synced game clock drives the phase', () => {
     expect(rolls).toBeLessThanOrEqual(1);
   });
 
+  it('BUG.login-sky-wrong-day: the sync itself switches to the server day\'s group, before any frame', () => {
+    // A local ACE whose clock stopped while its VM slept ran 31 days behind
+    // the wall-clock estimate the sky is seeded from; the estimate's group had
+    // built its sky objects (and a Rainy one's thunder script) until the next
+    // frame's re-roll.
+    const sky = new SkyboxRenderer(makeSkyDesc(['Sunny', 'Rainy']), EOL_GAME_TIME);
+    const seeded = sky.currentAbsoluteDay;
+    let k = seeded - 31;
+    while (retailDayGroupIndex(k, 2) === retailDayGroupIndex(seeded, 2)) k--;
+    const changes: string[] = [];
+    sky.onDayGroupChange = (name) => { changes.push(name); };
+    // the server clock at the middle of day k (absoluteDayFromClock inverted for EoL GameTime)
+    const year = Math.floor(k / 360) - EOL_GAME_TIME.zeroYear;
+    const ticks = (year * 360 + (k % 360)) * 7620 - 3600 + 3810;
+    expect(absoluteDayFromClock(ticks, EOL_GAME_TIME)).toBe(k);
+    sky.syncGameClock(ticks);
+    expect(sky.currentAbsoluteDay).toBe(k);
+    expect(changes).toEqual([['Sunny', 'Rainy'][retailDayGroupIndex(k, 2)]]);
+  });
+
   it('crossing the day boundary through the synced clock takes the next day\'s hashed group', () => {
     const sky = new SkyboxRenderer(makeSkyDesc(['Sunny', 'Rainy']), EOL_GAME_TIME);
     // the first day >= 7 whose hash differs from the day after it
