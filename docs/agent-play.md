@@ -242,6 +242,16 @@ profile=… character=…`), then plays it as a headless Claude Code session in 
   Brief rule 5 tells a player to look a monster up before fighting a new kind (Jake 2026-10-14: Arcanist kept
   casting Flame Bolt at Olthoi, which take 75% fire and 100% pierce/bludgeon; a brief line naming the float types
   was ignored). The feed shows the call as "looks up <name>".
+- **Shop lookup:** `./world-query sells "<item>"` (`tools/stream/shops.ts`, read-only) answers "who sells X and
+  where": every shop whose stock (create list, DestinationType.Shop 4) holds an item whose name contains the text,
+  grouped by vendor kind, with the price you pay (ACE Vendor.GetSellCost: ceil(SellPrice float 38 × Value int 19 −
+  0.1)) and every placement as the retail map readout the agent prints ("41.6N, 34.0E"; building interiors use their
+  landblock the same way, and the cell DAT's EnvCell SeenOutside flag says "inside a building" or "underground"),
+  with the nearest town from the retail map's town notes (gmMapUI s_rgLocations). Spell families list lowest tier
+  first, with who can learn each scroll (Player.CanReadScroll: spell power under 50 or 300+ anyone, else the school
+  trained and skill ≥ power − 50, power from the DAT SpellTable). 25 lines at most, then "N more". Added 2026-10-15:
+  Claude Arcanist trained Item Enchantment, asked the Holtburg healer and an Archmage for Impenetrability scrolls, and
+  gave up, though Holtburg's scriveners sell them. The feed shows it as "looks for a shop selling <item>".
 - After `segment.minutes` (75) the supervisor sends "[supervisor] Wrap up now", a numbered list: finish the fight
   (start no new one) and get somewhere safe (nothing on you, not mid-dungeon pack), check with `observe`, `note
   kind=goal` and `goal` for next time, a goodbye in /f, and only then the report, which ends the segment. (Rehearsal
@@ -252,6 +262,13 @@ profile=… character=…`), then plays it as a headless Claude Code session in 
   (30 s, doubling, up to `maxBackoffSeconds`), and `maxQuickExits` in a row halt that character.
 - Characters stay in the world between segments. The players never run `start` or `stop` (their permissions refuse
   both). A daemon that dies mid-segment (a crash, the 15-minute idle logout) is started again and the player told.
+- **Stuck characters** (`tools/stream/stuck.ts`, cast.json `stuckMinutes`, default 5, 0 = off). When no vital has
+  risen for `stuckMinutes` while one is below its maximum (the daemon's `/vitals`, polled with status) and at least
+  three server actions since were refused ("You're too busy!" in the chat log; "no reply", "interrupted", "Action
+  cancelled" in the player's tool results) with none answered, the supervisor logs the character out and back in
+  (`cli.ts stop`, then `start`), tells its player "[supervisor] Your client was stuck …", and the feed shows a `relog`
+  tool line. An attached tab's player is told instead. Why: 2026-10-15 ACE dropped Claude Bulwark from a landblock
+  it unloaded as he portalled in and he played a dead session for four hours (docs/ace-server-ops.md §7).
 - **Stopping** (the stop file, `stop`, SIGINT/SIGTERM) tells each player "the stream is ending" and gives it
   `stopGraceSeconds` to say goodbye and write a report. Then the session ends and every character is logged out:
   `cli.ts stop profile=…` for each. Jake: "you should always log out if you stop controlling them". A character
@@ -436,6 +453,21 @@ What changed:
 - **Mana for casters** (Jake: "the mage should rely on stamina to mana most of the time"): the brief's Mana facts make
   Stamina to Mana Self the routine source, cast between fights since stamina refills fast. Mana Conversion lowers
   costs, and potions are for emergencies mid-fight.
+- **Spells you could have** (Jake 2026-10-15: "is arcanist using item magic? armor doesnt seem buffed"). Arcanist had
+  trained Item Enchantment (166) and knew no Item Enchantment spell: training a school teaches nothing, its spells
+  come from scrolls bought at a mage shop or archmage and read (`use`), and he never bought one. The readiness block
+  now has a `spells:` line per trained or specialized magic school with a gap (`tools/stream/spellGaps.ts`): the
+  known spells come from the agent API's `spells` read (`READ_METHODS`, like `inventory`), the schools and effective
+  skills from the sheet's Specialized / Trained lines, and the staple families (Item: Impenetrability, the Banes, the
+  weapon auras; Life: Heal, Revitalize, Stamina to Mana, Armor, the Protections; Creature: the attribute buffs,
+  Invulnerability, Impregnability, Magic Resistance; War: the bolts; Void: Nether Bolt / Streak / Arc and the
+  curses) are kept to the ones the era's DAT SpellTable has and named as it names them ("Aura of Blood Drinker" at
+  end of retail; `ACJS_PORTAL_DAT` for another era). The learnable level is ACE `CanReadScroll` (power ≤ skill + 50,
+  levels I–VI). A school missing nothing and with every staple at that level gets no line. Arcanist's, with the EoL
+  table:
+  ```
+  - spells: Item Enchantment trained (166) but no Item Enchantment spells known: buy and read scrolls at a mage shop (Impenetrability, the Banes, Aura of Blood Drinker, Aura of Swift Killer…; you can learn up to level V)
+  ```
 
 ### Dead air (measured 2026-10-14)
 

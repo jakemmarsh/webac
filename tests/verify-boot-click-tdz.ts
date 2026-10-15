@@ -10,31 +10,45 @@
  * through the callback main() passes (a nullable slot filled once the GameUI
  * exists). These tests drive the real installer the way main() wires it.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { installFirstGestureAudio } from '../packages/renderer/src/audio/FirstGestureAudio.js';
+import { AudioManager } from '../packages/renderer/src/audio/AudioManager.js';
 
 type Listener = () => void;
 function fakeDocument() {
-  const listeners: Array<{ type: string; fn: Listener; once: boolean }> = [];
+  const listeners: Array<{ type: string; fn: Listener }> = [];
   return {
     listeners,
-    addEventListener(type: string, fn: EventListenerOrEventListenerObject, opts?: boolean | AddEventListenerOptions) {
-      listeners.push({ type, fn: fn as Listener, once: typeof opts === 'object' && !!opts.once });
+    addEventListener(type: string, fn: EventListenerOrEventListenerObject) {
+      listeners.push({ type, fn: fn as Listener });
+    },
+    removeEventListener(type: string, fn: EventListenerOrEventListenerObject) {
+      const i = listeners.findIndex((l) => l.type === type && l.fn === fn);
+      if (i > -1) listeners.splice(i, 1);
     },
     /** Dispatch like the browser: a listener's throw propagates here (prod reported it as an uncaught error). */
-    click() {
-      for (const l of [...listeners]) {
-        if (l.type !== 'click') continue;
-        if (l.once) listeners.splice(listeners.indexOf(l), 1);
-        l.fn();
-      }
+    fire(type: string) {
+      for (const l of [...listeners]) if (l.type === type) l.fn();
     },
+    click() { this.fire('click'); },
   };
 }
 
 function fakeAudio(opens = true) {
   return { inits: 0, init() { this.inits++; return opens; } };
 }
+
+/** An AudioManager-shaped source whose context starts suspended (opened before any gesture). */
+function suspendedAudio() {
+  return {
+    inits: 0, resumes: 0, state: 'suspended' as 'suspended' | 'running',
+    init() { this.inits++; return true; },
+    async resume() { this.resumes++; this.state = 'running'; },
+    get isRunning() { return this.state === 'running'; },
+  };
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 0));
 
 describe('BUG.boot-click-tdz — the first-click audio handler during the boot', () => {
   it('a click before the GameUI exists opens audio without touching the UI and without throwing', () => {
@@ -43,8 +57,7 @@ describe('BUG.boot-click-tdz — the first-click audio handler during the boot',
     // main()'s wiring: the slot is declared before the listener, filled after `new GameUI`.
     let ui: { applied: number; applySoundCategories(): void } | null = null;
     const gesture = installFirstGestureAudio(doc, audio, () => ui?.applySoundCategories());
-    expect(doc.listeners).toHaveLength(1);
-    expect(doc.listeners[0]).toMatchObject({ type: 'click', once: true });
+    expect(doc.listeners.map((l) => l.type)).toEqual(['click', 'keydown', 'pointerdown']);
     expect(() => doc.click()).not.toThrow();
     expect(audio.inits).toBe(1);
     expect(gesture.initialized).toBe(true);
@@ -76,7 +89,7 @@ describe('BUG.boot-click-tdz — the first-click audio handler during the boot',
     expect(ui.applied).toBe(1);
   });
 
-  it('only the first click counts; a context that fails to open applies nothing', () => {
+  it('a context that fails to open applies nothing and stops listening', () => {
     const doc = fakeDocument();
     const audio = fakeAudio(false);
     let applied = 0;
@@ -86,5 +99,68 @@ describe('BUG.boot-click-tdz — the first-click audio handler during the boot',
     expect(audio.inits).toBe(1);
     expect(applied).toBe(0);
     expect(gesture.initialized).toBe(false);
+    expect(doc.listeners).toHaveLength(0);
+  });
+});
+
+describe('BUG.combat-sounds-need-a-click — the gesture resumes a context world entry opened', () => {
+  it('a key press (no click) resumes the suspended context, then the listeners go', async () => {
+    const doc = fakeDocument();
+    const audio = suspendedAudio();
+    let applied = 0;
+    const gesture = installFirstGestureAudio(doc, audio, () => { applied++; });
+    doc.fire('keydown');
+    await settle();
+    expect(audio.resumes).toBe(1);
+    expect(audio.isRunning).toBe(true);
+    expect(gesture.initialized).toBe(true);
+    expect(applied).toBe(1);
+    expect(doc.listeners).toHaveLength(0);
+  });
+
+  it('a resume the browser refuses keeps listening; the next gesture tries again', async () => {
+    const doc = fakeDocument();
+    const audio = suspendedAudio();
+    let refuse = true;
+    audio.resume = async function () { this.resumes++; if (refuse) throw new Error('NotAllowedError'); this.state = 'running'; };
+    installFirstGestureAudio(doc, audio, () => {});
+    doc.click();
+    await settle();
+    expect(audio.isRunning).toBe(false);
+    expect(doc.listeners).toHaveLength(3);
+    refuse = false;
+    doc.fire('pointerdown');
+    await settle();
+    expect(audio.inits).toBe(1);
+    expect(audio.resumes).toBe(2);
+    expect(audio.isRunning).toBe(true);
+    expect(doc.listeners).toHaveLength(0);
+  });
+});
+
+describe('BUG.combat-sounds-need-a-click — AudioManager.isRunning is the one sound gate', () => {
+  const realCtx = (globalThis as { AudioContext?: unknown }).AudioContext;
+  afterEach(() => { (globalThis as { AudioContext?: unknown }).AudioContext = realCtx; });
+  function fakeContext(state: 'suspended' | 'running') {
+    const node = () => ({ gain: { value: 1 }, connect() {} });
+    return class { state = state; destination = {}; createGain = node; async resume() { this.state = 'running'; } };
+  }
+
+  it('false before init, false while the context is suspended, true once it runs', async () => {
+    (globalThis as { AudioContext?: unknown }).AudioContext = fakeContext('suspended');
+    const am = new AudioManager();
+    expect(am.isRunning).toBe(false);
+    expect(am.init()).toBe(true);
+    expect(am.isInitialized).toBe(true);
+    expect(am.isRunning).toBe(false);
+    await am.resume();
+    expect(am.isRunning).toBe(true);
+  });
+
+  it('a context opened without a gesture but already running (agent windows) plays: no click needed', () => {
+    (globalThis as { AudioContext?: unknown }).AudioContext = fakeContext('running');
+    const am = new AudioManager();
+    am.init();
+    expect(am.isRunning).toBe(true);
   });
 });

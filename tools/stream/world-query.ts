@@ -6,6 +6,7 @@
  *
  *   npx tsx tools/stream/world-query.ts "SELECT … FROM weenie_properties_string WHERE type = 1 AND value LIKE '%Drudge%' LIMIT 20"
  *   npx tsx tools/stream/world-query.ts lore "Olthoi Gardener"     a wiki-style monster lookup (tools/stream/lore.ts)
+ *   npx tsx tools/stream/world-query.ts sells "Impenetrability"    which shops sell it, the price, and where (tools/stream/shops.ts)
  *
  * ACJS_WORLD_DB_CONTAINER / ACJS_WORLD_DB / ACJS_WORLD_DB_PASSWORD pick another server's DB (default: end of retail's ace-db).
  */
@@ -17,6 +18,7 @@ import { FileDatBytes } from '../../packages/dat-parser/src/node/FileDatBytes.js
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
 import { SpellTable } from '../../packages/dat-parser/src/file-types/SpellTable.js';
 import { formatLore, loreDetailSql, loreNameSql, parseLoreRows, pickLoreNames } from './lore.ts';
+import { formatShops, parseShopOffers, parseShopVendors, shopOfferSql, shopVendorSql, type ShopDatInfo } from './shops.ts';
 
 export const WORLD_QUERY_MAX_CHARS = 8000;
 
@@ -63,24 +65,43 @@ function lore(query: string): string {
   const pick = pickLoreNames(query, rows);
   if (!pick.wcids.length) return pick.note ?? '(nothing found)';
   const creatures = parseLoreRows(runReadOnly(loreDetailSql(pick.wcids), false));
-  const flags = spellFlags();
-  for (const c of creatures) for (const s of c.spells) { const f = s.id !== undefined ? flags?.get(s.id) : undefined; if (f !== undefined) s.flags = f; }
+  const flags = spellTable();
+  for (const c of creatures) for (const s of c.spells) { const f = s.id !== undefined ? flags?.get(s.id)?.bitfield : undefined; if (f !== undefined) s.flags = f; }
   return formatLore(pick, creatures);
 }
 
-/**
- * Each spell's SpellBase.bitfield from the portal DAT's SpellTable (0x0E00000E), read on demand (~60 ms): whether a
- * monster's spell is cast at you (not Beneficial). ACJS_PORTAL_DAT picks another era's portal.dat. Null when the
- * DAT isn't there (lore then judges by the spell's kind and name).
- */
-function spellFlags(): Map<number, number> | null {
-  const path = process.env.ACJS_PORTAL_DAT ?? fileURLToPath(new URL('../../dat/client_portal.dat', import.meta.url));
+/** `sells "<item>"`: two reads, the shop offers whose item name contains it, then those vendors and their placements. */
+function sells(query: string): string {
+  const offers = query.trim() ? parseShopOffers(runReadOnly([shopOfferSql(query)], false)) : [];
+  const vendors = parseShopVendors(offers.length ? runReadOnly(shopVendorSql(offers.map((o) => o.vendor)), false) : '');
+  const spells = offers.some((o) => o.spell) ? spellTable() : null;
+  const cells = datAt(process.env.ACJS_CELL_DAT, '../../dat/client_cell_1.dat');
+  const dat: ShopDatInfo = {
+    spell: (id) => spells?.get(id),
+    envCellFlags: (cell) => {
+      const data = cells?.getFileData(cell);
+      return data && data.byteLength >= 8 ? new DataView(data).getUint32(4, true) : undefined;
+    },
+  };
+  return formatShops(query, offers, vendors, dat);
+}
+
+function datAt(env: string | undefined, fallback: string): DatDatabase | null {
+  const path = env ?? fileURLToPath(new URL(fallback, import.meta.url));
   if (!existsSync(path)) return null;
+  try { return new DatDatabase(new FileDatBytes(path)); } catch { return null; }
+}
+
+/**
+ * The portal DAT's SpellTable (0x0E00000E), read on demand (~60 ms): each spell's SpellBase.bitfield (whether a
+ * monster's spell is cast at you: not Beneficial), power and school (who can learn a scroll). ACJS_PORTAL_DAT picks
+ * another era's portal.dat. Null when the DAT isn't there (lore then judges by the spell's kind and name).
+ */
+function spellTable(): Map<number, { bitfield: number; power: number; school: number }> | null {
   try {
-    const db = new DatDatabase(new FileDatBytes(path));
-    const data = db.getFileData(0x0e00000e);
+    const data = datAt(process.env.ACJS_PORTAL_DAT, '../../dat/client_portal.dat')?.getFileData(0x0e00000e);
     if (!data) return null;
-    return new Map([...new SpellTable(new DatReader(data)).spells].map(([id, s]) => [id, s.bitfield]));
+    return new Map([...new SpellTable(new DatReader(data)).spells].map(([id, s]) => [id, { bitfield: s.bitfield, power: s.power, school: s.school }]));
   } catch {
     return null;
   }
@@ -89,6 +110,10 @@ function spellFlags(): Map<number, number> | null {
 function main(): void {
   if (process.argv[2] === 'lore') {
     console.log(clipOutput(lore(process.argv.slice(3).join(' '))));
+    return;
+  }
+  if (process.argv[2] === 'sells') {
+    console.log(clipOutput(sells(process.argv.slice(3).join(' '))));
     return;
   }
   const sql = process.argv.slice(2).join(' ');

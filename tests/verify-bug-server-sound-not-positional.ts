@@ -125,7 +125,7 @@ describe('AmbientSoundManager — Ambient::Play / UseTime', () => {
     } as never;
     // Ambient slider at 1 (DECOMP.volume-pref-routing: it applies twice, so
     // 1 keeps GetAttenuation(distance, desc volume)).
-    const audio = { isInitialized: true, getCategoryVolume: () => 1 } as never;
+    const audio = { isInitialized: true, isRunning: true, getCategoryVolume: () => 1 } as never;
     const mgr = new AmbientSoundManager(player, audio, rng);
     const plays: AmbientPlay[] = [];
     mgr.onPlay = (p) => plays.push(p);

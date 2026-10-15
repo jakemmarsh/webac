@@ -21,7 +21,8 @@ import { FakeHost } from './_harness/agentFake.ts';
 import { parseFeedLine } from '../tools/stream/feed-tail.ts';
 import { applyEvent, createState } from '../tools/stream/overlay/model.ts';
 import { HOSTED_GUIDE } from '../tools/ac-agent/hostedGuide.ts';
-import type { AgentItem } from '../packages/renderer/src/agent/types.ts';
+import type { AgentItem, AgentSpell, AgentVitals } from '../packages/renderer/src/agent/types.ts';
+import { StuckWatch, classifyResult, isBusyChatLine } from '../tools/stream/stuck.ts';
 
 // Jake (2026-10-13): run Claude Arcanist and Claude Bulwark continuously for a stream, with no human or lead session
 // launching each run. tools/stream/supervisor.ts plays each as a headless `claude -p` session in segments, feeds an
@@ -40,6 +41,7 @@ describe('stream config (tools/stream/cast.json)', () => {
   it('fills defaults, including permissions that allow only the agent CLI, the world query, date and Read', () => {
     const cfg = parseStreamConfig({ characters: [{ profile: 'mage', character: 'Claude Arcanist' }] });
     expect(cfg.segment.minutes).toBe(75);
+    expect(cfg.stuckMinutes).toBe(5); // the stuck safety net (stuck.ts), on by default
     expect(cfg.allowedTools).toEqual(DEFAULT_ALLOWED_TOOLS);
     expect(cfg.allowedTools).toEqual(['Bash(./ac:*)', 'Bash(./world-query:*)', 'Bash(date)', 'Bash(date:*)', 'Read']);
     expect(cfg.disallowedTools).toEqual(['Bash(./ac start:*)', 'Bash(./ac stop:*)']);
@@ -358,7 +360,7 @@ function fakeProc(onSend: (text: string, p: FakeProc) => void): FakeProc {
 
 const result = (text = '') => ({ type: 'result', subtype: 'success', is_error: false, result: text, total_cost_usd: 1, num_turns: 3, usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 } });
 
-function harness(cfgOver: Record<string, unknown>, script: (profile: string, text: string, p: FakeProc) => void, opts: { stopAfterSpawns?: number; daemons?: Record<string, DaemonState | null>; inventory?: Record<string, AgentItem[]>; sheets?: Record<string, string>; chat?: Record<string, string[]> } = {}) {
+function harness(cfgOver: Record<string, unknown>, script: (profile: string, text: string, p: FakeProc) => void, opts: { stopAfterSpawns?: number; daemons?: Record<string, DaemonState | null>; inventory?: Record<string, AgentItem[]>; sheets?: Record<string, string>; spells?: Record<string, AgentSpell[]>; chat?: Record<string, string[]>; vitals?: (profile: string) => AgentVitals | null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acjs-sup-'));
   let now = Date.UTC(2026, 9, 13, 20);
   const cli: string[][] = [];
@@ -387,9 +389,11 @@ function harness(cfgOver: Record<string, unknown>, script: (profile: string, tex
       return { code: 0, out: '' };
     },
     daemonStatus: async (p) => daemons[p] ?? null,
-    vitals: async () => ({ name: 'X', level: 5, health: { cur: 1, max: 1 }, stamina: { cur: 1, max: 1 }, mana: { cur: 1, max: 1 }, xp: null, coords: '1N, 1E', cell: '0x1', indoors: false, dead: false, combatMode: 'peace', task: null, goal: null }),
+    vitals: async (p) => opts.vitals ? opts.vitals(p) : ({ name: 'X', level: 5, health: { cur: 1, max: 1 }, stamina: { cur: 1, max: 1 }, mana: { cur: 1, max: 1 }, xp: null, coords: '1N, 1E', cell: '0x1', indoors: false, dead: false, combatMode: 'peace', task: null, goal: null }),
     inventory: async (p) => opts.inventory?.[p] ?? null,
     characterSheet: async (p) => opts.sheets?.[p] ?? null,
+    spells: async (p) => opts.spells?.[p] ?? null,
+    spellTable: async () => [{ name: 'Impenetrability I', school: 3, power: 1 }, { name: 'Blade Bane I', school: 3, power: 1 }],
     callAgent: async (p, m) => { agentCalls.push(`${p}:${m}`); if (m === 'logout') screen = 'character-select'; return m === 'status' ? { screen } : { ok: true }; },
     journal: (p) => `${p} journal`,
     brief: () => 'Brief for {{CHARACTER}} ({{PROFILE}}) with {{PARTNER}}.',
@@ -879,7 +883,12 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
     };
     const h = harness({ maxSegments: 2, segment: { ...CAST.segment, minutes: 1, restartPauseSeconds: 0 } }, (_p, text, p) => {
       if (/Wrap up now/.test(text)) p.emit(result('report'));
-    }, { inventory: { mage: arcanistInv(), soldier: completeInv() }, sheets: { mage: sheet('612,345', 2) }, chat });
+    }, {
+      inventory: { mage: arcanistInv(), soldier: completeInv() },
+      sheets: { mage: `${sheet('612,345', 2)}\nSpecialized skills: War Magic 200\nTrained skills: Item Enchantment 166` },
+      spells: { mage: [{ id: 27, name: 'Flame Bolt I', school: 'War Magic', level: 1 }] },
+      chat,
+    });
     try {
       await new StreamSupervisor(h.cfg, h.deps).run();
       const openings = (profile: string) => h.procs.filter((x) => x.profile === profile).map((x) => x.p.sent[0]);
@@ -887,8 +896,11 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
       const [soldier1] = openings('soldier');
       for (const o of [mage1, soldier1]) expect(o).toContain('\n- deaths and levels this session: Claude Arcanist: 3 deaths (Banderling Striker, Mud Golem, unknown); Claude Bulwark: 0 deaths, level 20 → 21');
       expect(mage1).toMatch(/Your readiness right now[^\n]*\n- gear: nothing worn: no helm or hat \(head\), no gloves \(hands\)\n- gear: clothing only, no armor over it: upper legs, lower legs\n- gear: in your pack, would fill an empty slot: Pathwarden Helm #80002002 \(head\); Chevron Cloak #80002001 \(cloak\)/);
-      expect(mage1).toContain('\n- unspent: 612,345 XP\n- skill credits: 2 now; next at level 20 (+1) and 23 (+1)\n- in your pack: 0 healing kits, 0 health potions, 2 mana potions\n');
+      expect(mage1).toContain('\n- unspent: 612,345 XP\n- skill credits: 2 now; next at level 20 (+1) and 23 (+1)\n- spells: Item Enchantment trained (166) but no Item Enchantment spells known: buy and read scrolls at a mage shop (Impenetrability, Blade Bane; you can learn up to level V)\n- in your pack: 0 healing kits, 0 health potions, 2 mana potions\n');
       expect(mage1.indexOf('Your readiness right now')).toBeLessThan(mage1.indexOf('Your journal:'));
+      // The spells line above: the known spells (a read) against the sheet's schools and the era's table (War has no
+      // staple in the fake table, so no War line).
+      expect(mage1).not.toContain('- spells: War Magic');
       expect(mage2).toContain('Your readiness right now');
       expect(soldier1).toContain('- in your pack: 3 healing kits, 4 health potions, 1 mana potion');
       expect(soldier1).not.toContain('- gear:');
@@ -898,5 +910,132 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
       // Reads, not agent calls: the stop flow's agent calls (logout of an attached tab) see nothing new.
       expect(h.agentCalls).toEqual([]);
     } finally { h.cleanup(); }
+  });
+});
+
+// 2026-10-15: Claude Bulwark portalled into Tumerok Cavern 4 min 57 s after the last player left it; ACE unloaded the
+// landblock with him just added (Landblock.Unload: CurrentLandblock = null) and never ticked him again. For four hours
+// HP stayed 121/135 and mana 5/10, buffs showed "0s", and every use, recall and gem answered "You're too busy!" (the /ls
+// at 10:14 set IsBusy; the chain that clears it was dropped). Only a logout and login cleared it. tools/stream/stuck.ts
+// is the supervisor's safety net; these lines are the real ones from soldier.chat.log and the seg9 session.
+describe('stuck: the server stopped playing a character, so the supervisor logs it out and back in', () => {
+  const vit = (hp: number, st: number, mp: number, over: Partial<AgentVitals> = {}): AgentVitals => ({
+    name: 'Claude Bulwark', level: 27, health: { cur: hp, max: 135 }, stamina: { cur: st, max: 190 }, mana: { cur: mp, max: 10 },
+    xp: null, coords: null, cell: '0x0292021C', indoors: true, dead: false, combatMode: 'peace', task: null, goal: null, ...over,
+  });
+  const MIN = 60_000;
+
+  it('reads the real refusals: the chat log\'s "You\'re too busy!", "no reply", "interrupted", and a gem the server refused', () => {
+    expect(isBusyChatLine("2026-10-15T10:23:10.819Z You're too busy!")).toBe(true);
+    expect(isBusyChatLine('2026-10-15T10:24:18.510Z [Fellowship] You say, "Still desynced: server says \'too busy\' to /ls"')).toBe(false);
+    expect(classifyResult(['use'], 'used Door; no reply within 10 s (it may need you closer, or simply does nothing)')).toBe('refused');
+    expect(classifyResult(['wait'], '  [22228] task-done: walking to Exit to the Surface: interrupted (ac_use stopped waiting for it)')).toBe('refused');
+    expect(classifyResult(['use'], "used Facility Hub Portal Gem:\n  You're too busy!")).toBe('refused');
+    // The server answering is life; a walk "arriving", a look or a call still going says nothing either way.
+    expect(classifyResult(['attack'], 'attacking Hea Hunter: it died')).toBe('ok');
+    expect(classifyResult(['walk_to'], 'arrived (0.8 m away)')).toBeNull();
+    expect(classifyResult(['observe'], 'Claude Bulwark (L27)  HP 121/135')).toBeNull();
+    expect(classifyResult(['use'], 'use is still in progress after 30 s and keeps going')).toBeNull();
+  });
+
+  it('the incident: vitals that never rise (stamina may fall: a jump) and three refusals since → stuck after 5 minutes, not before', () => {
+    const w = new StuckWatch(5);
+    const t0 = Date.parse('2026-10-15T10:22:00Z');
+    w.vitals(vit(121, 118, 5), t0);
+    w.refused("You're too busy!", t0 + 70_000);
+    w.vitals(vit(121, 118, 5), t0 + 2 * MIN);
+    w.refused('use: used Door; no reply within 10 s', t0 + 3 * MIN);
+    w.vitals(vit(121, 114, 5), t0 + 3 * MIN); // the jump's stamina
+    w.refused("You're too busy!", t0 + 4 * MIN);
+    expect(w.verdict(t0 + 4.5 * MIN)).toBeNull(); // not five minutes yet
+    w.vitals(vit(121, 114, 5), t0 + 5 * MIN);
+    expect(w.verdict(t0 + 5 * MIN)?.why).toMatch(/no vital has risen for 5 min \(health 121\/135, stamina 114\/190, mana 5\/10\) and the server refused all 3 actions/);
+    // After the relog it starts over and stays quiet for a full window.
+    w.reset(t0 + 6 * MIN);
+    w.vitals(vit(121, 114, 5), t0 + 6 * MIN);
+    for (let i = 0; i < 5; i++) w.refused("You're too busy!", t0 + 7 * MIN);
+    expect(w.verdict(t0 + 10 * MIN)).toBeNull();
+  });
+
+  it('not stuck: vitals regenerating, an action the server answered, full vitals, a dead character, refusals from before the freeze', () => {
+    const t0 = 0;
+    const regen = new StuckWatch(5);
+    for (let i = 0; i <= 6; i++) { regen.vitals(vit(100 + i, 118, 5), t0 + i * MIN); regen.refused("You're too busy!", t0 + i * MIN + 1); }
+    expect(regen.verdict(t0 + 6 * MIN)).toBeNull();
+
+    const answered = new StuckWatch(5);
+    answered.vitals(vit(121, 118, 5), t0);
+    for (let i = 1; i <= 3; i++) answered.refused("You're too busy!", t0 + i * MIN);
+    answered.answered(); // e.g. an attack the server carried out
+    answered.vitals(vit(121, 118, 5), t0 + 6 * MIN);
+    expect(answered.verdict(t0 + 6 * MIN)).toBeNull();
+
+    const full = new StuckWatch(5);
+    full.vitals(vit(135, 190, 10), t0);
+    for (let i = 1; i <= 4; i++) full.refused("You're too busy!", t0 + i * MIN);
+    full.vitals(vit(135, 190, 10), t0 + 6 * MIN);
+    expect(full.verdict(t0 + 6 * MIN)).toBeNull();
+
+    const dead = new StuckWatch(5);
+    dead.vitals(vit(0, 118, 5, { dead: true }), t0);
+    for (let i = 1; i <= 4; i++) dead.refused("You're too busy!", t0 + i * MIN);
+    dead.vitals(vit(0, 118, 5, { dead: true }), t0 + 6 * MIN);
+    expect(dead.verdict(t0 + 6 * MIN)).toBeNull();
+
+    const before = new StuckWatch(5);
+    for (let i = 0; i < 3; i++) before.refused("You're too busy!", t0 + i);
+    before.vitals(vit(121, 118, 5), t0 + MIN);
+    before.vitals(vit(121, 118, 5), t0 + 7 * MIN);
+    expect(before.verdict(t0 + 7 * MIN)).toBeNull();
+  });
+
+  it('the feed parser hands each agent call\'s tool_use id and its result to the supervisor', () => {
+    const use = parseStreamJsonLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: './ac use target=#70292049' } }] } }), 'soldier');
+    expect(use.calls).toEqual([{ id: 'toolu_1', tools: ['use'] }]);
+    const res = parseStreamJsonLine(JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: [{ type: 'text', text: 'used Door; no reply within 10 s' }] }] } }), 'soldier');
+    expect(res.results).toEqual([{ id: 'toolu_1', text: 'used Door; no reply within 10 s' }]);
+  });
+
+  it('the supervisor: frozen vitals and refused actions → cli stop, then start, the player is told, the feed says so; once', async () => {
+    const t0 = Date.UTC(2026, 9, 13, 20);
+    const at = (m: number) => new Date(t0 + m * MIN).toISOString();
+    let id = 0;
+    const h = harness({ maxSegments: 1, characters: [CAST.characters[1]], segment: { ...CAST.segment, minutes: 30, maxNudges: 0 } }, (_p, text, p) => {
+      if (/Segment 1/.test(text)) {
+        // Two door uses the server never answers (the seg9 results).
+        for (let i = 0; i < 2; i++) {
+          const tid = `toolu_${++id}`;
+          p.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: tid, name: 'Bash', input: { command: './ac use target=#70292049' } }] } });
+          p.emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: tid, content: 'used Door; no reply within 10 s (it may need you closer, or simply does nothing)' }] } });
+        }
+      }
+      if (/client was stuck/.test(text)) p.emit(result('relogged, carrying on'));
+    }, {
+      vitals: () => vit(121, 118, 5),
+      chat: { soldier: [`${at(2)} You're too busy!`, `${at(3)} You're too busy!`] },
+    });
+    try {
+      await new StreamSupervisor(h.cfg, h.deps).run();
+      const cli = h.cli.map((a) => a.join(' '));
+      const relog = cli.indexOf('stop profile=soldier');
+      expect(relog).toBeGreaterThanOrEqual(0);
+      expect(cli[relog + 1]).toBe('start profile=soldier character=Claude Bulwark');
+      expect(cli.filter((a) => a === 'start profile=soldier character=Claude Bulwark')).toHaveLength(1); // once
+      expect(h.procs[0].p.sent.some((t) => /\[supervisor\] Your client was stuck \(no vital has risen for \d+ min .*\); you've been logged out and back in/.test(t))).toBe(true);
+      expect(h.feed().find((e) => e.type === 'tool' && e.tool === 'relog')).toMatchObject({ char: 'soldier', summary: expect.stringMatching(/stuck .*logging out and back in/) });
+    } finally { h.cleanup(); }
+  });
+
+  it('the supervisor leaves a healthy character alone (the same refusals, but its vitals regenerate), and stuckMinutes 0 turns it off', async () => {
+    for (const [over, vitals] of [[{}, (() => { let hp = 100; return () => vit(Math.min(135, hp++), 118, 5); })()], [{ stuckMinutes: 0 }, () => vit(121, 118, 5)]] as const) {
+      const h = harness({ maxSegments: 1, characters: [CAST.characters[1]], segment: { ...CAST.segment, minutes: 10, maxNudges: 0 }, ...over }, (_p, text, p) => {
+        if (/Wrap up now/.test(text)) p.emit(result('done'));
+      }, { vitals, chat: { soldier: [1, 2, 3, 4].map((m) => `${new Date(Date.UTC(2026, 9, 13, 20) + m * MIN).toISOString()} You're too busy!`) } });
+      try {
+        await new StreamSupervisor(h.cfg, h.deps).run();
+        expect(h.cli.filter((a) => a[0] === 'start')).toEqual([]);
+        expect(h.feed().some((e) => e.type === 'tool' && e.tool === 'relog')).toBe(false);
+      } finally { h.cleanup(); }
+    }
   });
 });

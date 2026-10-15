@@ -7896,7 +7896,7 @@ async function main() {
       // static's Setup default), GetSound's uniform variant +
       // PlayProbability, at the object's position (audio/RetailSound).
       playSoundTableSound: (anchor, soundType, pos) => {
-        if (!firstGestureAudio.initialized) return;
+        if (!audioManager.isRunning) return;
         const tableId = resolveAnchorSoundTable(anchor.userData,
           (setupId) => setupModelRenderer.loadSetupModel(setupId)?.defaultSoundTable ?? 0);
         if (!tableId) return;
@@ -11682,7 +11682,7 @@ async function main() {
           }
         } else if (isEnvironSound(t)) {
           const sound = ENVIRON_SOUND[t as EnvironChangeType];
-          if (sound !== undefined && firstGestureAudio.initialized) {
+          if (sound !== undefined && audioManager.isRunning) {
             // SWEEP1006 environs — PlaySoundFromCenter(SoundType, table) @ 00550950
             // is gated by interface_sounds_enabled (the 'ui' category's mute),
             // at the effects volume (playFromCenter applies it).
@@ -11928,7 +11928,7 @@ async function main() {
         // PlayProbability, played at the object at the server's volume
         // (FAITHFUL.393's wire float), attenuated to the viewer. An unknown
         // object's message is queued until it is created.
-        if (!firstGestureAudio.initialized) return;
+        if (!audioManager.isRunning) return;
         const r = pendingPlayScripts.inOrder(data.guid, () => playServerSound(data.guid, data.soundId, data.volume), performance.now());
         if ('queued' in r) return;
         console.log(`[AC] Sound 0x${data.soundId.toString(16)} on 0x${data.guid.toString(16)} vol ${data.volume}: ${r.played ? `wave 0x${r.waveId.toString(16)} at the object` : `nothing (${r.reason})`}`);

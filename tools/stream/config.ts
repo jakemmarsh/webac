@@ -70,6 +70,11 @@ export interface StreamConfig {
   daily: { maxSegments: number; maxMinutes: number; maxUsd: number | null };
   /** Seconds between status reads (the daemon's read-only /vitals) per character. */
   statusEverySeconds: number;
+  /**
+   * Minutes a character may stay stuck (no vital regenerating, every server action refused: tools/stream/stuck.ts)
+   * before the supervisor logs it out and back in; 0 turns the safety net off.
+   */
+  stuckMinutes: number;
   /** Seconds the players get to say goodbye when the stream stops, before their sessions end. */
   stopGraceSeconds: number;
   /** Permission rules for each player session (`--allowedTools` / `--disallowedTools`), and its permission mode. */
@@ -149,7 +154,7 @@ function compactWindow(s: Record<string, unknown>): number | null {
 
 export function parseStreamConfig(raw: unknown): StreamConfig {
   if (!isObj(raw)) return fail('', 'must be a JSON object');
-  only(raw, 'config', ['claudeBin', 'brief', 'segment', 'maxSegments', 'daily', 'statusEverySeconds', 'stopGraceSeconds', 'allowedTools', 'disallowedTools', 'tools', 'permissionMode', 'extraArgs', 'characters']);
+  only(raw, 'config', ['claudeBin', 'brief', 'segment', 'maxSegments', 'daily', 'statusEverySeconds', 'stuckMinutes', 'stopGraceSeconds', 'allowedTools', 'disallowedTools', 'tools', 'permissionMode', 'extraArgs', 'characters']);
   const seg = raw.segment ?? {};
   if (!isObj(seg)) fail('segment', 'must be an object');
   const s = seg as Record<string, unknown>;
@@ -201,6 +206,7 @@ export function parseStreamConfig(raw: unknown): StreamConfig {
     maxSegments: num(raw, 'maxSegments', 'config', 8, 1),
     daily: { maxSegments: num(d, 'maxSegments', 'daily', 16, 1), maxMinutes: num(d, 'maxMinutes', 'daily', 720, 1), maxUsd: numOrNull(d, 'maxUsd', 'daily', null) },
     statusEverySeconds: num(raw, 'statusEverySeconds', 'config', 15, 2),
+    stuckMinutes: num(raw, 'stuckMinutes', 'config', 5, 0),
     stopGraceSeconds: num(raw, 'stopGraceSeconds', 'config', 120, 0),
     allowedTools: strs(raw, 'allowedTools', 'config', DEFAULT_ALLOWED_TOOLS),
     disallowedTools: strs(raw, 'disallowedTools', 'config', DEFAULT_DISALLOWED_TOOLS),

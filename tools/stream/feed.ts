@@ -311,6 +311,10 @@ export interface StreamJsonOutcome {
   init?: { sessionId: string; model?: string };
   /** The turn ended (a `result` line): its usage, and the text it ended on (the player's report). */
   result?: { usage: SegmentUsage; text: string; isError: boolean; subtype?: string; sessionId?: string };
+  /** The agent CLI calls this line made, by tool_use id (for matching their results: stuck.ts). */
+  calls?: Array<{ id: string; tools: string[] }>;
+  /** The tool results this line carried, by tool_use id. */
+  results?: Array<{ id: string; text: string }>;
 }
 
 /** The longest narration line the overlay's ticker shows (the rehearsals' own lines ran 30–180 characters). */
@@ -368,6 +372,7 @@ export function parseStreamJsonLine(line: string, char: string, names: Map<strin
       if (b.name === 'Bash') {
         const cmd = String(b.input?.command ?? '');
         const calls = cliCalls(cmd);
+        if (calls.length && typeof b.id === 'string') (out.calls ??= []).push({ id: b.id, tools: calls.map((c) => c.tool) });
         for (const c of calls) {
           const s = summarizeCliCall(c.tool, c.args, named);
           if (s) out.drafts.push({ type: 'tool', char, tool: `ac_${c.tool}`, summary: s });
@@ -376,6 +381,7 @@ export function parseStreamJsonLine(line: string, char: string, names: Map<strin
           const words = /world-query/.test(cmd) ? shellWords(cmd) : [];
           const wq = words.findIndex((w) => /world-query(\.ts)?$/.test(w));
           const what = wq >= 0 && words[wq + 1] === 'lore' ? `looks up ${clip(words.slice(wq + 2).join(' '), 60)}`
+            : wq >= 0 && words[wq + 1] === 'sells' ? `looks for a shop selling ${clip(words.slice(wq + 2).join(' '), 60)}`
             : /world-query|ace_world|sqlite3/.test(cmd) ? 'checks the world database' : `runs: ${clip(String(b.input?.description ?? cmd), 80)}`;
           out.drafts.push({ type: 'tool', char, tool: 'bash', summary: what });
         }
@@ -392,6 +398,7 @@ export function parseStreamJsonLine(line: string, char: string, names: Map<strin
       const c = b.content;
       const text = typeof c === 'string' ? c : Array.isArray(c) ? c.map((x: any) => (x?.type === 'text' ? x.text : '')).join('\n') : '';
       learnNames(text, names);
+      if (typeof b.tool_use_id === 'string') (out.results ??= []).push({ id: b.tool_use_id, text });
     }
     return out;
   }

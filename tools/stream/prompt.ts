@@ -6,6 +6,7 @@
 import type { AgentItem } from '../../packages/renderer/src/agent/types.ts';
 import { emptySlotsText, gearView, hasGearData } from '../../packages/renderer/src/agent/gear.ts';
 import type { CharacterConfig } from './config.ts';
+import { type KnownSpell, type TableSpell, spellGaps } from './spellGaps.ts';
 
 /** Tools a player has no use for (the supervisor starts and stops sessions) or that aren't for one character. */
 const NOT_FOR_PLAYERS = new Set(['start', 'stop', 'sessions', 'enter_world', 'status', 'click', 'trace', 'keys']);
@@ -109,16 +110,24 @@ export function creditsLine(credits: number, next: ReadonlyArray<{ level: number
 }
 
 /**
- * The opening message's readiness block: gear gaps, unspent XP, skill credits and the levels that grant the next ones, the healing kits and potions in the
- * pack, and the session's deaths. Facts, a few lines; null when none of it could be read.
+ * The opening message's readiness block: gear gaps, unspent XP, skill credits and the levels that grant the next ones, the
+ * spells each trained magic school lacks (spellGaps.ts), the healing kits and potions in the pack, and the session's deaths. Facts, a few lines; null when none of it could be read.
  */
-export function readinessBrief(r: { items: readonly AgentItem[] | null; sheet: string | null; session: string | null }): string | null {
+export function readinessBrief(r: {
+  items: readonly AgentItem[] | null;
+  sheet: string | null;
+  session: string | null;
+  /** The known spells (the agent API's `spells` read) and the era's DAT spell table, for the spells line (spellGaps.ts). */
+  spells?: readonly KnownSpell[] | null;
+  table?: readonly TableSpell[] | null;
+}): string | null {
   const out = gearGaps(r.items);
   const u = unspent(r.sheet);
   if (u) {
     out.push(`- unspent: ${u.xp.toLocaleString('en-US')} XP`);
     out.push(`- ${creditsLine(u.credits, nextCreditLevels(r.sheet))}`);
   }
+  out.push(...spellGaps(r.sheet, r.spells ?? null, r.table ?? null));
   if (r.items) {
     const c = recoveryCounts(r.items);
     const pl = (k: number, one: string, many: string): string => `${k} ${k === 1 ? one : many}`;

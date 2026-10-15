@@ -417,7 +417,7 @@ export class AmbientSoundManager {
       ? retailSoundPan(-dx, -dy, distance, this.viewerHeading())
       : 0;
     this.onPlay?.({ sType: s.sType, waveId: picked.waveId, amplitude, distance, dx, dy, pan });
-    if (!this.audioManager.isInitialized) return;
+    if (!this.audioManager.isRunning) return;
     const gain = this.soundPlayer.levelThroughCategory(amplitude, AudioManager.CATEGORY_AMBIENT);
     void this.soundPlayer.playSound(picked.waveId, AudioManager.CATEGORY_AMBIENT, gain, 'world', pan).then((src) => {
       if (!src) return;

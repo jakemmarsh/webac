@@ -22,7 +22,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import type { AgentItem, AgentVitals } from '../../packages/renderer/src/agent/types.ts';
+import type { AgentItem, AgentSpell, AgentVitals } from '../../packages/renderer/src/agent/types.ts';
 import { AgentClient } from '../ac-agent/client.ts';
 import { formatJournal, loadJournal } from '../ac-agent/journal.ts';
 import { STATE_DIR, logFile, pidAlive, readInfo } from '../ac-agent/state.ts';
@@ -30,6 +30,8 @@ import { type CharacterConfig, type StreamConfig, parseStreamConfig } from './co
 import { type ChatParseState, FeedWriter, FileTail, type SegmentUsage, addUsage, feedPath, parseChatLine, parseStreamJsonLine, statusDraft } from './feed.ts';
 import { type SegmentRecord, afterTurn, dayUsage, endReason, localDay, nextSegment } from './policy.ts';
 import { preparePlayerDir } from './player.ts';
+import { type TableSpell, loadSpellTableRows } from './spellGaps.ts';
+import { StuckWatch, classifyResult, isBusyChatLine } from './stuck.ts';
 import { TOOLS } from '../ac-agent/tools.ts';
 import { type SessionTally, clipReport, nudgeMessage, readinessBrief, sessionSoFar, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
 
@@ -68,6 +70,10 @@ export interface SupervisorDeps {
   inventory(profile: string): Promise<AgentItem[] | null>;
   /** The character sheet text (the agent API's `characterSheet`, a read), for unspent XP and skill credits; null when unreadable. */
   characterSheet(profile: string): Promise<string | null>;
+  /** The character's known spells (the agent API's `spells`, a read like inventory), for the readiness spells line; null when unreadable. */
+  spells?(profile: string): Promise<AgentSpell[] | null>;
+  /** The era's DAT spell table (name, school, power), for the spells line's family names; null when the DAT isn't there. */
+  spellTable?(): Promise<TableSpell[] | null>;
   /** One agent-API call through the daemon (the stop flow's logout of an attached tab). */
   callAgent(profile: string, method: string, args?: unknown[]): Promise<unknown>;
   journal(profile: string): string;
@@ -155,12 +161,21 @@ export class StreamSupervisor {
   /** Each profile's deaths and level-ups since this session's session-start (the feed's own events). */
   private tally = new Map<string, SessionTally>();
   readonly halted = new Map<string, string>();
+  /** Each character's stuck watch (stuck.ts): the server has stopped playing it. */
+  private stuck = new Map<string, StuckWatch>();
 
   constructor(readonly cfg: StreamConfig, readonly deps: SupervisorDeps) {}
 
   private partnerOf(c: CharacterConfig): string {
     const others = this.cfg.characters.filter((o) => o !== c).map((o) => o.character);
     return others.length ? others.join(' and ') : 'nobody (you play alone this time)';
+  }
+
+  private watch(profile: string): StuckWatch | null {
+    if (this.cfg.stuckMinutes <= 0) return null;
+    let w = this.stuck.get(profile);
+    if (!w) { w = new StuckWatch(this.cfg.stuckMinutes); this.stuck.set(profile, w); }
+    return w;
   }
 
   requestStop(why: string): void {
@@ -209,6 +224,7 @@ export class StreamSupervisor {
       const st = this.chatState.get(c.profile) ?? { incantations: this.incantations };
       this.chatState.set(c.profile, st);
       for (const line of this.deps.chatLines(c.profile)) {
+        if (isBusyChatLine(line)) this.watch(c.profile)?.refused("You're too busy!", Date.parse(line.slice(0, line.indexOf(' '))) || this.deps.now());
         for (const { t, draft } of parseChatLine(line, c.profile, c.character, cast, st)) {
           this.deps.feed.write(draft, t);
           if (draft.type === 'death' || draft.type === 'level-up') {
@@ -231,8 +247,47 @@ export class StreamSupervisor {
         if (this.active.has(c.profile) && !this.stopping && !c.attach) void this.restartDaemon(c);
         continue;
       }
-      const v = statusDraft(c.profile, await this.deps.vitals(c.profile).catch(() => null));
+      const vit = await this.deps.vitals(c.profile).catch(() => null);
+      const v = statusDraft(c.profile, vit);
       if (v) this.deps.feed.write(v);
+      const w = this.watch(c.profile);
+      if (!w || this.restarting.has(c.profile)) continue;
+      w.vitals(vit, this.deps.now());
+      const stuck = w.verdict(this.deps.now());
+      if (stuck && !this.stopping) void this.relogStuck(c, stuck.why);
+    }
+  }
+
+  /**
+   * The server has stopped playing this character (stuck.ts): log it out and back in, the way the stream starts it
+   * (`cli.ts stop`, then `start`), and tell its player. An attached tab is the human's own login, so its player is
+   * told instead.
+   */
+  async relogStuck(c: CharacterConfig, why: string): Promise<void> {
+    const { deps } = this;
+    if (this.restarting.has(c.profile)) return;
+    this.restarting.add(c.profile);
+    const tell = (text: string): void => this.active.get(c.profile)?.proc.send(userLine(text));
+    try {
+      deps.log(`${c.character}: stuck: ${why}`);
+      if (c.attach) {
+        tell(`[supervisor] Your client looks stuck: ${why}. Only a logout and login clears that; ask the human who logged you in.`);
+        deps.feed.write({ type: 'tool', char: c.profile, tool: 'relog', summary: 'is stuck (the server stopped answering); waiting for a relog', ok: false });
+        return;
+      }
+      deps.feed.write({ type: 'tool', char: c.profile, tool: 'relog', summary: 'was stuck (the server stopped answering): logging out and back in' });
+      const stop = await deps.runCli(['stop', `profile=${c.profile}`]);
+      if (stop.code !== 0) deps.log(`${c.character}: stop failed: ${stop.out.slice(-500)}`);
+      const start = await deps.runCli(startArgs(c));
+      if (start.code !== 0 || !(await this.waitReady(c))) {
+        deps.log(`${c.character}: relog failed: ${start.out.slice(-500)}`);
+        return;
+      }
+      deps.log(`${c.character}: logged out and back in`);
+      tell(`[supervisor] Your client was stuck (${why}); you've been logged out and back in. Observe before acting: you may be somewhere else now.`);
+    } finally {
+      this.watch(c.profile)?.reset(deps.now());
+      this.restarting.delete(c.profile);
     }
   }
 
@@ -322,6 +377,8 @@ export class StreamSupervisor {
     const readiness = readinessBrief({
       items: await deps.inventory(c.profile).catch(() => null),
       sheet: await deps.characterSheet(c.profile).catch(() => null),
+      spells: await deps.spells?.(c.profile).catch(() => null) ?? null,
+      table: await deps.spellTable?.().catch(() => null) ?? null,
       session: sessionSoFar(cfg.characters.map((o) => ({ character: o.character, tally: this.tally.get(o.profile) }))),
     });
     const startMs = deps.now();
@@ -335,6 +392,7 @@ export class StreamSupervisor {
     proc.send(userLine(segmentOpening({ c, partner, segment, nowMs: startMs, playMinutes: cfg.segment.minutes, journal: deps.journal(c.profile), lastReport, readiness })));
 
     const names = new Map<string, string>();
+    const callTools = new Map<string, string[]>();
     let usage: SegmentUsage | null = null;
     let sessionId: string | null = null;
     let model = c.model;
@@ -365,6 +423,15 @@ export class StreamSupervisor {
         deps.rawLine(c.profile, segment, line);
         const o = parseStreamJsonLine(line, c.profile, names);
         for (const d of o.drafts) deps.feed.write(d);
+        for (const k of o.calls ?? []) callTools.set(k.id, k.tools);
+        for (const r of o.results ?? []) {
+          const tools = callTools.get(r.id);
+          if (!tools) continue;
+          callTools.delete(r.id);
+          const kind = classifyResult(tools, r.text);
+          if (kind === 'refused') this.watch(c.profile)?.refused(`${tools.join('+')}: ${r.text.replace(/\s+/g, ' ').slice(0, 80)}`, deps.now());
+          else if (kind === 'ok') this.watch(c.profile)?.answered();
+        }
         if (o.init) { sessionId = o.init.sessionId || sessionId; model = o.init.model ?? model; }
         if (o.result) {
           sawResult = true;
@@ -469,6 +536,7 @@ export function realDeps(cfg: StreamConfig): SupervisorDeps {
   mkdirSync(join(STREAM_DIR, 'sessions'), { recursive: true });
   const segFile = join(STREAM_DIR, 'segments.jsonl');
   const tails = new Map<string, FileTail>();
+  let spellRows: Promise<TableSpell[] | null> | undefined; // read once: the DAT spell table does not change in a run
   const client = (profile: string): AgentClient | null => { const i = readInfo(profile); return i ? new AgentClient(i) : null; };
   const log = (m: string): void => {
     const line = `${new Date().toISOString()} ${m}`;
@@ -490,6 +558,8 @@ export function realDeps(cfg: StreamConfig): SupervisorDeps {
     vitals: async (p) => client(p)?.vitals() ?? null,
     inventory: async (p) => { const c = client(p); return c ? c.call<AgentItem[]>('inventory', [], 15_000).catch(() => null) : null; },
     characterSheet: async (p) => { const c = client(p); return c ? c.call<string>('characterSheet', [], 15_000).catch(() => null) : null; },
+    spells: async (p) => { const c = client(p); return c ? c.call<AgentSpell[]>('spells', ['', 1000], 15_000).catch(() => null) : null; },
+    spellTable: () => (spellRows ??= loadSpellTableRows()),
     callAgent: async (p, m, a = []) => { const c = client(p); if (!c) throw new Error(`no daemon for ${p}`); return c.call(m, a, 15_000); },
     journal: (p) => {
       const i = readInfo(p);

@@ -157,7 +157,7 @@ describe('AmbientSoundManager pans an intermittent sound by its bearing from the
       playSound: (_w: number, _c: string, _g: number, _s: string, pan = 0) => { pans.push(pan); return Promise.resolve(null); },
       levelThroughCategory: (amp: number) => amp,
     } as never;
-    const audio = { isInitialized: true, getCategoryVolume: () => 1 } as never;
+    const audio = { isInitialized: true, isRunning: true, getCategoryVolume: () => 1 } as never;
     // Rolls: PlayNow 0, direction 0, heading 0.5 (no jitter), distance r = 1.
     const mgr = new AmbientSoundManager(player, audio, seq(0, 0, 0.5, 1, 0, 0));
     mgr.viewerHeading = () => heading;

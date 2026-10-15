@@ -47,7 +47,7 @@ function rig(stbs: SoundDesc['stbDesc'], rng: () => number = () => 0) {
     playSound: () => Promise.resolve(null),
     levelThroughCategory: (amp: number) => amp,
   } as never;
-  const audio = { isInitialized: true, getCategoryVolume: () => 1 } as never;
+  const audio = { isInitialized: true, isRunning: true, getCategoryVolume: () => 1 } as never;
   const mgr = new AmbientSoundManager(player, audio, rng);
   const plays: AmbientPlay[] = [];
   mgr.onPlay = (p) => plays.push(p);

@@ -71,6 +71,22 @@ export class AudioManager {
     return this.initialized;
   }
 
+  /**
+   * The context is open AND its clock runs, so a sound started now is heard
+   * now. This is the one gate every world / effect sound checks. World entry
+   * opens the context (main.ts) whether or not the page has had a user
+   * gesture; without one the browser starts it suspended, and a source
+   * started then waits on a frozen clock, holds a retail voice slot and
+   * plays late in a burst on resume (FirstGestureAudio resumes it).
+   * BUG.combat-sounds-need-a-click: server Sound messages and SoundTable
+   * hooks used to wait for a document click instead, so a running context
+   * that no one had clicked (agent windows, keyboard-only play) played
+   * ambient but no swings or hits.
+   */
+  get isRunning(): boolean {
+    return this.initialized && this.context?.state === 'running';
+  }
+
   get audioContext(): AudioContext | null {
     return this.context;
   }
