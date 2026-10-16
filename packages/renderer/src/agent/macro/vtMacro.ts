@@ -877,7 +877,7 @@ export class VtMacro {
           // A swing or throw for a weapon's or grenade's debuff is logged when the server says it went on (noteSpellLine).
           const power = same ? 'bar' : autoAttackPower({ element: c.element ?? null, items: this.items(), settings, skills });
           acted(c.target, true);
-          const res = same ? { ok: true, message: `still fighting #${c.target.toString(16)}` } : this.api.attack(c.target, { height: vtAttackHeight(settings), power });
+          const res = same ? { ok: true, message: `still fighting #${c.target.toString(16)}` } : this.api.attack(c.target, { height: vtAttackHeight(settings), power, far: true });
           if (!same && res.ok) this.lastAttack = { guid: c.target, at: this.now() };
           if (!res.ok) return res;
           const ev = await this.api.waitFor({ types: ['target-died', 'target-lost', 'death', 'vitals-low'] }, 10_000);

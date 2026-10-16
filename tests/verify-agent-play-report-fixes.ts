@@ -76,7 +76,10 @@ describe('agent play reports 2026-10-10', () => {
     host.drop = () => { setTimeout(() => api.pushChat("The Pathwarden Token can't be dropped", 0x1a), 300); return true; };
     const t = api.drop('Pathwarden Token');
     await vi.advanceTimersByTimeAsync(1000);
-    expect(await t).toEqual({ ok: false, message: "not dropped: Pathwarden Token: The Pathwarden Token can't be dropped" });
+    // ACE's AttunedItem refusal, explained since 2026-10-16 (verify-stream-reports-2026-10-16-1325.ts item 6).
+    const rt = await t;
+    expect(rt.ok).toBe(false);
+    expect(rt.message).toMatch(/^not dropped: Pathwarden Token: The Pathwarden Token can't be dropped\n {2}\(it is attuned \(bound to you\)/);
   });
 
   it('names match the way players say them: with the material, any word order, plurals (item 6)', () => {
@@ -217,7 +220,7 @@ describe('agent play reports 2026-10-10', () => {
     host.spells = () => [{ id: 0x5c, name: 'Lightning Streak II', school: 'War', level: 2 }];
     host.add({ guid: 0x80000b01, name: 'Drudge Slinker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 30 });
     host.objs.delete(0x80000b01); // it died and its object left before the cast
-    expect(await api.cast('Lightning Streak II', 0x80000b01)).toEqual({ ok: false, message: 'Lightning Streak II not cast: target gone (#80000b01 is dead or out of view)' });
+    expect(await api.cast('Lightning Streak II', 0x80000b01)).toEqual({ ok: false, targetGone: true, message: 'Lightning Streak II not cast: target gone (#80000b01 is dead or out of view)' });
     // The selected target is dying (its death animation): refused too.
     host.add({ guid: 0x80000b02, name: 'Drudge Sneaker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 30 });
     host.target = 0x80000b02;

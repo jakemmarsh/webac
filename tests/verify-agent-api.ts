@@ -374,13 +374,29 @@ describe('AgentApi', () => {
     expect(near).toContain('Far Door');
     expect(api.observe().fellows).toEqual([
       { name: 'Claude Bulwark', healthPct: 100 },
-      { name: 'Claude Arcanist', healthPct: 100, dist: expect.closeTo(212, 0), bearing: expect.closeTo(180, 0) },
+      { name: 'Claude Arcanist', healthPct: 100, dist: expect.closeTo(212, 0), bearing: expect.closeTo(180, 0), coords: '41.3N, 33.6E' },
     ]);
     expect(api.resolve('Claude Arcanist', 'world')).toBe(0x50000002);
     expect(api.resolve('Claude Bulwark', 'world')).toBeNull();
     expect(inUpdateRange(0xa9b40019, 0xa9b30020)).toBe(true);
     expect(inUpdateRange(0xa9b40019, 0xaab50001)).toBe(true);
     expect(inUpdateRange(0xa9b40019, 0xa9b20020)).toBe(false);
+  });
+
+  it('a fellow in view 50 m or more off on the landscape gets map coordinates (Bulwark ran 400 m SW in 56 s and "401 m SW" read as a glitch, 2026-10-16)', () => {
+    host.add({ guid: 0x50000002, name: 'Claude Arcanist', itemType: 0x10, objectDescFlags: 0x8 | 0x10, x: 80, y: 32 }); // 12 m north
+    host.add({ guid: 0x50000003, name: 'Claude Bulwark', itemType: 0x10, objectDescFlags: 0x8 | 0x10, cell: 0xa9b30020, x: 80, y: 0 }); // 212 m S
+    const vit = (cur: number, max: number) => ({ cur, max });
+    (host as unknown as { fellows: AgentHost['fellows'] }).fellows = () => [
+      { guid: 0x50000002, name: 'Claude Arcanist', health: vit(1, 1), stamina: vit(1, 1), mana: vit(1, 1) },
+      { guid: 0x50000003, name: 'Claude Bulwark', health: vit(1, 1), stamina: vit(1, 1), mana: vit(1, 1) },
+    ];
+    const obs = api.observe();
+    expect(obs.fellows).toEqual([
+      { name: 'Claude Arcanist', healthPct: 100, dist: expect.closeTo(12, 0), bearing: expect.closeTo(0, 0) },
+      { name: 'Claude Bulwark', healthPct: 100, dist: expect.closeTo(212, 0), bearing: expect.closeTo(180, 0), coords: '41.3N, 33.6E' },
+    ]);
+    expect(formatObservation(obs)).toMatch(/fellows: Claude Arcanist 100% HP, 12 m N; Claude Bulwark 100% HP, 212 m S, at 41\.3N, 33\.6E/);
   });
 
   it('observe says when you are alone in a fellowship (a fellow logged out and /f reaches no one, 2026-10-10)', () => {
@@ -812,7 +828,7 @@ describe('AgentApi', () => {
     host.me.dead = false;
     host.add({ guid: 0x80000048, name: 'Drudge Slinker', itemType: 0x10, objectDescFlags: 0x10, x: 81, y: 22 });
     host.dying.add(0x80000048);
-    expect(api.attack('Drudge Slinker')).toEqual({ ok: false, message: 'Drudge Slinker is dead (loot its corpse, or pick another target)' });
+    expect(api.attack('Drudge Slinker')).toEqual({ ok: false, targetGone: true, message: 'Drudge Slinker is dead (loot its corpse, or pick another target)' });
     // A bare attack with the dead one still selected goes for the next live monster.
     host.target = 0x80000048;
     host.add({ guid: 0x80000049, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 82, y: 22 });

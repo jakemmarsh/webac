@@ -118,7 +118,7 @@ const LORE_MAX_NAMES = 3;
  * Which creature names `query` means, from every (wcid, name) containing it: an exact name (case-insensitive) wins,
  * else names starting with it, else names containing it. More than LORE_MAX_NAMES distinct names → list them instead.
  */
-export function pickLoreNames(query: string, rows: { wcid: number; name: string }[]): LorePick {
+export function pickLoreNames(query: string, rows: { wcid: number; name: string }[], maxNames = LORE_MAX_NAMES): LorePick {
   const q = query.trim().toLowerCase();
   if (!q) return { names: [], wcids: [], note: 'give a monster name: ./world-query lore "Olthoi Gardener"' };
   const byName = new Map<string, { name: string; wcids: number[] }>();
@@ -136,7 +136,7 @@ export function pickLoreNames(query: string, rows: { wcid: number; name: string 
   const tier = exact.length ? exact : prefix.length ? prefix : all;
   const how = exact.length ? 'exact' : prefix.length ? 'starting with' : 'containing';
   const sorted = tier.map(([, e]) => e).sort((a, b) => a.name.localeCompare(b.name));
-  if (sorted.length > LORE_MAX_NAMES) {
+  if (sorted.length > maxNames) {
     const shown = sorted.slice(0, 40).map((e) => e.name);
     return {
       names: [], wcids: [],

@@ -426,6 +426,57 @@ export function resetAppearance(a: AppearanceState): void {
   a.skinColor = 0;
 }
 
+/** The colour count each clothing slot's chosen item offers (CharGenState::num<Slot>Colors, set by Set<Slot>Style). */
+export interface ClothingColorCounts {
+  readonly headgear: number;
+  readonly shirt: number;
+  readonly pants: number;
+  readonly footwear: number;
+}
+
+/**
+ * BUG.chargen-finish-silent — CharGenState::ConstrainAllByGender @ 005c5b80
+ * (run by SetGender @ 005c64a0 and, through ConstrainAllByHeritage, by
+ * SetHeritageGroup @ 005c67a0): every appearance index at or past the new
+ * heritage / gender's list is pulled back to the list's last entry; the
+ * Set<Slot>Style calls that follow hold each clothing colour inside the
+ * chosen item's colours (0 .. num−1, only while a style is chosen). Without
+ * a heritage or a gender (`lists` null) everything goes back to −1, as
+ * Reset leaves it.
+ *
+ * Without it a face or outfit picked for one heritage / gender went out
+ * with the next one's out-of-range index: ACE's PlayerFactory.Create threw
+ * (sex.HairStyleList[i], EyeColorList[i], …), its handler logged the
+ * exception and answered nothing, and FINISH sat pending for good — "FINISH
+ * does nothing" (Reddit, Coldeve, 2026-10-16; every Olthoi: two-entry lists).
+ */
+export function constrainAppearance(a: AppearanceState, lists: AppearanceRollLists | null, colorCounts?: ClothingColorCounts | null): void {
+  if (!lists) { resetAppearance(a); return; }
+  const top = (v: number, count: number): number => (count <= v ? count - 1 : v);
+  a.eyesStrip = top(a.eyesStrip, lists.eyeStripCount);
+  a.noseStyle = top(a.noseStyle, lists.noseStripCount);
+  a.mouthStyle = top(a.mouthStyle, lists.mouthStripCount);
+  a.hairStyle = top(a.hairStyle, lists.hairStyleCount);
+  a.eyeColor = top(a.eyeColor, lists.eyeColorCount);
+  a.hairColor = top(a.hairColor, lists.hairColorCount);
+  a.headgearStyle = top(a.headgearStyle, lists.headgearCount);
+  a.shirtStyle = top(a.shirtStyle, lists.shirtCount);
+  a.pantsStyle = top(a.pantsStyle, lists.pantsCount);
+  a.footwearStyle = top(a.footwearStyle, lists.footwearCount);
+  if (!colorCounts) return;
+  // Set<Slot>Style(style): with a style chosen, colour < 0 → 0, colour >= num → num − 1.
+  const color = (style: number, c: number, n: number): number => {
+    if (style === -1) return c;
+    let v = c < 0 ? 0 : c;
+    if (n <= v) v = n - 1;
+    return v;
+  };
+  a.headgearColor = color(a.headgearStyle, a.headgearColor, colorCounts.headgear);
+  a.shirtColor = color(a.shirtStyle, a.shirtColor, colorCounts.shirt);
+  a.pantsColor = color(a.pantsStyle, a.pantsColor, colorCounts.pants);
+  a.footwearColor = color(a.footwearStyle, a.footwearColor, colorCounts.footwear);
+}
+
 /** The ID_CharGen_RandomizeWarning string (table 0x23000002) MakeRandomizeWarningDialog shows. */
 export const RANDOMIZE_WARNING_STRING_ID = 158536663;
 export const RANDOMIZE_WARNING_FALLBACK = 'Warning!\n\nRandomizing your character will reset all customizations you have made to appearance and abilities. Do you wish to continue?';

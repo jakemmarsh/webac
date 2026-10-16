@@ -50,7 +50,14 @@ export function formatObject(o: AgentObject): string {
   if (o.notByHand) bits.push('opened by a lever or switch, not by hand');
   if (o.dying) bits.push('DYING (dead: not a target)');
   if (o.outOfSight) bits.push('OUT OF SIGHT: only where it was last seen (it may have moved, died or gone)');
-  if (o.otherFloor !== undefined) bits.push(`ON ANOTHER FLOOR, ${Math.abs(o.otherFloor)} m ${o.otherFloor > 0 ? 'up' : 'down'}: no walk or melee reaches it from this floor, and a bolt or arrow only through an opening`);
+  if (o.otherFloor !== undefined) {
+    // Whether a walk gets there is the walk planner's answer (the doorway route walk_to takes), not the height's.
+    const w = o.otherFloorWay;
+    const way = w === 'none' ? 'no walk reaches it from here (no doorway route from your floor)'
+      : w ? `a walk gets there by the doorways (about ${Math.round(w.len)} m${w.drops ? `, ${w.drops === 1 ? 'a drop' : `${w.drops} drops`}` : ''}${w.leaps ? `, ${w.leaps === 1 ? 'a jump across a gap' : `${w.leaps} jumps across gaps`}` : ''}), not a step`
+        : 'not a step from this floor (walk_to finds out whether a way gets there)';
+    bits.push(`ON ANOTHER FLOOR, ${Math.abs(o.otherFloor)} m ${o.otherFloor > 0 ? 'up' : 'down'}: no melee from here; ${way}; a bolt or arrow only through an opening`);
+  }
   if (o.attackingYou) bits.push(`ATTACKING YOU (${o.attackingYou}× in 10 s)`);
   else if (o.comingAtYou) bits.push(`COMING AT YOU (${o.comingAtYou})`);
   if (o.seen) bits.push(`seen: ${o.seen}`);
@@ -89,7 +96,9 @@ export function formatObservation(obs: AgentObservation): string {
   const out: string[] = [];
   const me = obs.me;
   if (obs.screen !== 'world' || !me) {
-    out.push(`screen: ${obs.screen}${me ? '' : ' (not in world)'}`);
+    // Portal space lasts until the world has faded in at the far end (the client's LoginComplete): the place below may
+    // already be the destination. Said, so it doesn't read as a second trip (Bulwark, Holtburg, 2026-10-16).
+    out.push(`screen: ${obs.screen}${me ? (obs.screen === 'portal-space' ? ' (until the world has faded in where you arrive: ac_wait types=portal for the arrival)' : '') : ' (not in world)'}`);
     if (!me) return out.join('\n');
   }
   const v = (x: { cur: number; max: number }): string => `${x.cur}/${x.max}`;
@@ -108,7 +117,10 @@ export function formatObservation(obs: AgentObservation): string {
   if (obs.buffsMissing?.length) out.push(`  buffs you know that aren't up: ${obs.buffsMissing.slice(0, 10).join(', ')}${obs.buffsMissing.length > 10 ? ` +${obs.buffsMissing.length - 10} more` : ''} (ac_cast; "… Other" ones go on a fellow with target=)`);
   if (obs.deaths) out.push(obs.deaths);
   if (obs.fellowshipAlone) out.push('fellowship: only you are in it, so /f reaches no one (a fellow who logs out leaves it): recruit your partner (in sight), or quit it (ac_fellowship action=quit) if they lead one');
-  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}` : f.lastSeen ? `out of sight, last seen ${f.lastSeen} (walk_to ${f.name} goes there; they may have moved on)` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
+  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.coords ? `, at ${f.coords}` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}` : f.lastSeen ? `out of sight, last seen ${f.lastSeen} (walk_to ${f.name} goes there; they may have moved on)` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
+  if (obs.gearManaOut?.length) {
+    out.push(`gear out of mana (its spells are off): ${obs.gearManaOut.map((m) => `${m.name} #${m.guid.toString(16)}${m.mana ? ` (mana ${m.mana.cur}/${m.mana.max})` : ''}`).join(', ')}: ac_use_on a charged mana stone on an empty one, then ac_unequip and ac_equip it (the server turns its spells back on only on a wield with mana in it)`);
+  }
   if (obs.gearEmpty?.slots.length) out.push(`gear: ${emptySlotsText(obs.gearEmpty.slots)}${obs.gearEmpty.packFits.length ? `; in your pack that would cover one: ${obs.gearEmpty.packFits.slice(0, 4).join(', ')}` : ''} (ac_inventory / ac_gear show every gear slot)`);
   if (obs.windows?.length) out.push(`windows open: ${obs.windows.join(', ')}  (ac_close name=… or all, when done with them)`);
   out.push(`target: ${obs.target ? formatObject(obs.target) : obs.targetLeftBehind ? `none (your last target, ${obs.targetLeftBehind}, was left behind in another place: you went through a portal or far away since; pick a new one)` : 'none'}`);
@@ -176,6 +188,7 @@ export function formatInventory(items: AgentItem[]): string {
         // The public description's Value is already the whole stack's (ACE sets Value = StackUnitValue × StackSize).
         it.value ? `value ${it.value.toLocaleString('en-US')}` : '',
         it.unsellable ? 'unsellable: no vendor buys it' : '',
+        itemMarks(it),
         school ? (it.where === 'pack slots' || it.where === 'main pack' ? `${school} focus: in use` : `${school} focus: NOT in use inside ${it.where}; it counts only in your own pack slots`) : '',
         packs.includes(it) ? (held(it) ? `holds ${held(it)}, listed under it` : 'empty') : '',
       ].filter(Boolean).join(', ');
@@ -184,6 +197,19 @@ export function formatInventory(items: AgentItem[]): string {
     }
   }
   return out.join('\n');
+}
+
+/**
+ * An item's binding and mana, as its appraisal (or the server's refusal) showed them: "attuned: can't be dropped, given
+ * or traded", "bonded: kept when you die", "mana 288/1089". The Pathwarden Helm was listed as junk to drop and refused
+ * three times (Arcanist, 2026-10-16).
+ */
+export function itemMarks(it: AgentItem): string {
+  return [
+    it.attuned ? "attuned: can't be dropped, given or traded" : '',
+    it.bonded ? 'bonded: kept when you die' : '',
+    it.mana ? `mana ${it.mana.cur.toLocaleString('en-US')}/${it.mana.max.toLocaleString('en-US')}${it.mana.cur <= 0 && it.where === 'equipped' ? ' OUT: its spells are off' : ''}` : '',
+  ].filter(Boolean).join(', ');
 }
 
 /** Free item slots at or under which the packs read LOW (a loot warns first: AgentApi.PACK_SLOTS_LOW). */
@@ -243,7 +269,8 @@ const KEEP_TYPES = 0x40 | 0x40000 | 0x4000 | 0x800 | 0x2000 | 0x200 | 0x1000 | 0
  * a value-0 Misc can still be a quest or crafting piece (an attuned one can't be dropped at all), so the list says so.
  */
 export function isJunk(it: AgentItem): boolean {
-  if (it.where === 'equipped') return false;
+  // Attuned: the server won't let it be dropped (or given, or traded), so it is no junk to clear out.
+  if (it.where === 'equipped' || it.attuned) return false;
   const t = it.itemType ?? 0;
   if (t & 0x400) return true;
   if (!t || (t & KEEP_TYPES)) return false;
@@ -271,7 +298,7 @@ const KIND_ALIASES: Readonly<Record<string, string>> = {
 
 /** What a filtered list adds about its kind. */
 const KIND_NOTES: Readonly<Record<string, string>> = {
-  junk: 'junk = carried, worth nothing to any vendor (ACE refuses Value 0: "has no value and cannot be sold") and not money, a key, gem, writable, pack, component, mana stone or salvage. Such an item can still be a quest or crafting piece: ac_appraise one before dropping it if unsure (an attuned one cannot be dropped)',
+  junk: 'junk = carried, worth nothing to any vendor (ACE refuses Value 0: "has no value and cannot be sold") and not money, a key, gem, writable, pack, component, mana stone or salvage. Such an item can still be a quest or crafting piece: ac_appraise one before dropping it if unsure. Attuned items (bound to you: the server refuses dropping, giving or trading them) are left out',
   sell: 'sell = carried, not worn, a vendor pays its value (not money, trade notes, packs, Retained items or ones an appraisal or a vendor showed unsellable); each vendor buys only its own trades\' kinds: ac_vendor shows them. Most valuable first',
 };
 
@@ -296,6 +323,7 @@ export function formatInventoryFiltered(items: AgentItem[], filter: string): str
     const extra = [it.where === 'equipped' ? `worn${it.slot ? `: ${it.slot}` : ''}` : `in ${it.where}${it.inside !== undefined ? ` #${it.inside.toString(16)}` : ''}`,
       it.stack && it.stack > 1 ? `x${it.stack}` : '', it.type, it.value ? `value ${it.value.toLocaleString('en-US')}` : kind === 'junk' ? 'no value' : '',
       it.unsellable ? 'unsellable: no vendor buys it' : '',
+      itemMarks(it),
       it.burden ? `burden ${it.burden.toLocaleString('en-US')}` : ''].filter(Boolean).join(', ');
     return `  #${it.guid.toString(16)} ${it.name}  (${extra})`;
   });
@@ -313,6 +341,9 @@ export function formatSpells(spells: AgentSpell[], max = Infinity): string {
   if (!spells.length) return '(no matching spells)';
   const shown = spells.slice(0, Math.max(1, max));
   const more = spells.length - shown.length;
-  return shown.map((s) => `  ${s.id}  ${s.name}  [${s.school}${s.level ? ` L${s.level}` : ''}]${s.range ? `  range ${s.range} m` : ''}`).join('\n')
+  // A spell your skill makes a gamble says its odds (the fizzle formula; 90% or better says nothing).
+  const odds = (s: AgentSpell): string => (s.castChance !== undefined && s.castChance < 0.9
+    ? `  ${s.castChance < 0.01 ? 'under 1%' : `${Math.round(s.castChance * 100)}%`} to cast (your skill ${s.schoolSkill ?? '?'} vs difficulty ${s.power ?? '?'})` : '');
+  return shown.map((s) => `  ${s.id}  ${s.name}  [${s.school}${s.level ? ` L${s.level}` : ''}]${s.range ? `  range ${s.range} m` : ''}${odds(s)}`).join('\n')
     + (more > 0 ? `\n  … ${more} more match (${spells.length} in all): narrow the filter or pass max=${spells.length}` : '');
 }

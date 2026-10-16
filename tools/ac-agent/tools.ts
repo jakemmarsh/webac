@@ -67,7 +67,9 @@ function guidOrName(v: unknown): number | string {
  */
 export const AC_WAIT_MAX_S = 100;
 
-const result = (r: AgentResult): ToolOutput => ({ text: r.message, isError: !r.ok });
+// A target that died or went before the cast or swing (targetGone) is an expected outcome, not an error: the CLI's exit
+// code stays 0 and MCP's isError unset ("gone from view" read as a failure in a stream player's Bash, 2026-10-16 12:53).
+export const result = (r: AgentResult): ToolOutput => ({ text: r.message, isError: !r.ok && !r.targetGone });
 
 /**
  * What a game tool calls: one agent-API method by name. The local daemon
@@ -730,10 +732,10 @@ export const TOOLS: AgentTool[] = [
     stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you (default true; one already coming when you set off doesn\'t stop it). false walks on until hit. flee=true never stops for it.' },
     avoid_monsters: { type: 'boolean', description: 'Outdoors, route round monsters near the way, 10 m clear (15 m of one well above your level), as a player goes round a camp. Indoors, stop before coming within their wake range (18 m on ACE, 40 m on GDLE servers) of 2 or more monsters not yet awake, naming them. Default true; off with flee. false walks the straight way, and on into them.' },
   }, ['target'], (a) => [/[NS]\s*,?\s*[\d.]+\s*[EW]/i.test(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, ...(a.timeout_s !== undefined ? { timeoutMs: Number(a.timeout_s) * 1000 } : {}), ...(a.flee ? { flee: true } : {}), ...(a.stay_with ? { stayWith: String(a.stay_with) } : {}), ...(a.stay_within !== undefined ? { stayWithin: Number(a.stay_within) } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}), ...(a.avoid_monsters === false || a.avoid_monsters === 'false' ? { avoidMonsters: false } : {}) }], 320_000),
-  act('ac_follow', 'Follow a player (your fellow): run to within `within` metres of them, stand while they stay near, and run again once they are 3 m past that (never a walk), re-aiming as they go, until duration_s ends, you are hit (unless flee=true, or they have monsters on them: then the follow goes on through the hits to them), a monster starts coming at you (unless stop_on_aggro=false), they go out of sight, or you start something else (any action, or ac_stop_moving). One already out of your sight when asked (a dungeon shows you only the rooms in sight of yours) is first walked to where they were last seen, then followed if they are in sight from there. Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
+  act('ac_follow', 'Follow a player (your fellow): run to within `within` metres of them, stand while they stay near, and run again once they are 3 m past that (never a walk), re-aiming as they go, until they stop (they stand beside you 30 s: they arrived, or are busy there; at most 10 minutes, then it says "still following" and you follow again) or duration_s ends when you give one, you are hit (unless flee=true, or they have monsters on them: then the follow goes on through the hits to them), a monster starts coming at you (unless stop_on_aggro=false), they go out of sight, or you start something else (any action, or ac_stop_moving). One already out of your sight when asked (a dungeon shows you only the rooms in sight of yours) is first walked to where they were last seen, then followed if they are in sight from there. Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
     target: { type: 'string', description: 'The player to follow: name or id.' },
     within: { type: 'number', description: 'How close to keep, metres (default 4).' },
-    duration_s: { type: 'number', description: 'How long to follow (default 120, at most 600).' },
+    duration_s: { type: 'number', description: 'Follow this long, seconds (at most 600), whether they stop or not. Default: until they stop beside you (30 s standing), at most 600.' },
     flee: { type: 'boolean', description: 'Keep following while you are hit (e.g. running to your tank with monsters on you), as walk_to flee=true does. Default: being hit stops it.' },
     stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you, and indoors before following them within wake range (18 m on ACE) of 2 or more monsters not yet awake (default true). false follows on until hit.' },
   }, ['target'], (a) => [guidOrName(a.target), { within: a.within ?? null, durationMs: a.duration_s !== undefined ? Math.min(Number(a.duration_s), 600) * 1000 : null, ...(a.flee === true || a.flee === 'true' ? { flee: true } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}) }], 640_000),
@@ -786,11 +788,13 @@ export const TOOLS: AgentTool[] = [
   }, [], (a) => [{ holdMs: a.hold_ms === undefined ? undefined : Number(a.hold_ms), forward: a.forward === true || a.forward === 'true', walk: a.walk === true || a.walk === 'true' }]),
   act('ac_stop_moving', 'Stop any movement or walk task.', {}, [], () => []),
   act('ac_combat_mode', 'Switch stance: peace, melee, missile or magic (wields what you have equipped for it).', { mode: { type: 'string', description: 'peace | melee | missile | magic', enum: ['peace', 'melee', 'missile', 'magic'] } }, ['mode'], (a) => [String(a.mode)]),
-  act('ac_attack', 'Attack a creature with your weapon (switches to the right stance, faces it and keeps swinging until it dies, you stop, or the timeout). Melee runs up to it first. With a bow, crossbow, atlatl or thrown weapon it shoots from where you stand when the target is in your weapon\'s reach (its examine Range; less uphill, where the arc falls short) with a clear line, and otherwise closes in only until it is: the reply says which, with the distance and your reach. "Out of Range!" from the server closes in further (twice at most). With a wand, staff or orb wielded (or in magic mode) it fights with spells: the best War or Void attack spell you know and can cast (bolt, arc, or a streak to finish), chosen as the VirindiTank macro chooses, cast again and again until it dies, closing in first only when the spell can\'t reach or a wall is in the way; the reply names the spell, or says why there is none. Use ac_wait for target-died.', {
+  act('ac_attack', 'Attack a creature with your weapon (switches to the right stance, faces it and keeps swinging until it dies, you stop, or the timeout). Melee runs up to it first; indoors, a target on another floor whose run-up would leave a fellow on your floor behind is refused unless far=true. With a bow, crossbow, atlatl or thrown weapon it shoots from where you stand when the target is in your weapon\'s reach (its examine Range; less uphill, where the arc falls short) with a clear line, and otherwise closes in only until it is: the reply says which, with the distance and your reach. "Out of Range!" from the server closes in further (twice at most). With a wand, staff or orb wielded (or in magic mode) it fights with spells: the best War or Void attack spell you know and can cast (bolt, arc, or a streak to finish), chosen as the VirindiTank macro chooses, cast again and again until it dies, closing in first only when the spell can\'t reach or a wall is in the way; the reply names the spell, or says why there is none. Use ac_wait for target-died.', {
     target: { type: 'string', description: 'Creature id or name (default: current target, else the nearest monster).' },
     height: { type: 'string', description: 'high | medium | low (default medium)', enum: ['high', 'medium', 'low'] },
     power: { type: 'number', description: 'Power/accuracy 0..1 (default 0.6).' },
-  }, [], (a) => [a.target === undefined ? null : guidOrName(a.target), { height: a.height, power: a.power }]),
+    next: { type: 'boolean', description: 'Opt-in chaining: when this target dies, attack the next monster on you (or on a fellow within 30 m) at once, and so on while next=true holds; the target-died event names each next one (never one on another floor from a fellow beside you). Default off: the client\'s Auto Target only selects the next attacker, it never swings at it.' },
+    far: { type: 'boolean', description: 'Melee only: go for a target on another floor (a storey up or down indoors) even though the run there leaves a fellow standing on your floor behind. Default off: such an attack is refused with where it is, the way there, and what to do instead.' },
+  }, [], (a) => [a.target === undefined ? null : guidOrName(a.target), { height: a.height, power: a.power, ...(a.next === true || a.next === 'true' ? { next: true } : {}), ...(a.far === true || a.far === 'true' ? { far: true } : {}) }]),
   act('ac_cast', 'Cast a spell by name or id at a target (or yourself). Switches to magic stance first. One cast per call, unless repeat=true: then it keeps casting the same spell at the same target, each as soon as the client lets you (as a player pressing the bolt key again does), and answers one summary (each cast\'s result, damage dealt, your vitals, why it stopped). It stops when the target dies or goes, your mana won\'t pay for another, the server refuses a cast (no line of fire, out of range, too busy twice), your health falls below until_health (default 60%: heal before the next bolt, a fragile caster earlier still), a monster other than the target that is real danger starts attacking you (it casts spells, one of its hits took 10% or more of your health, or it is above your level; a milder one is cast on through and named under "joined in meanwhile"), or after max_casts / max_s; any other action or ac_stop_moving stops it too. A long repeat answers "still in progress": ac_wait types=task-done,target-died hears the summary.', {
     spell: { type: 'string', description: 'Spell name (e.g. "Flame Bolt I") or id.' },
     target: { type: 'string', description: 'Target id/name, or "self" (default: current target for hostile spells, else self).' },
@@ -1005,13 +1009,16 @@ export function withArgAliases(t: Pick<AgentTool, 'name' | 'props' | 'aliases'>,
   return out;
 }
 
+// distance= is within= for the walks: "follow distance=" was refused as an unknown argument (Arcanist, 2026-10-16).
+for (const t of TOOLS) if (t.name === 'ac_walk_to' || t.name === 'ac_follow') t.aliases = { distance: 'within' };
+
 // Each one-object tool lists its alias (so the CLI and an MCP schema with additionalProperties: false take it) and
-// reads its arguments through withArgAliases.
+// reads its arguments through withArgAliases. An alias has its argument's type (distance= is a number, as within=).
 for (const t of TOOLS) {
   const al = argAliases(t);
   if (!Object.keys(al).length) continue;
   t.aliases = al;
-  for (const [alias, real] of Object.entries(al)) t.props = { ...t.props, [alias]: { type: 'string', description: `Same as ${real} (either name works).` } };
+  for (const [alias, real] of Object.entries(al)) t.props = { ...t.props, [alias]: { type: t.props[real]?.type ?? 'string', description: `Same as ${real} (either name works).` } };
   const run = t.run.bind(t);
   t.run = (a) => run(withArgAliases(t, a));
 }

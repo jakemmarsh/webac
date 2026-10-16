@@ -69,6 +69,11 @@ export interface AgentObject {
   outOfSight?: boolean;
   /** Indoors, on a floor this many metres above (+) or below (−) yours: in view maybe, but no step reaches it. */
   otherFloor?: number;
+  /**
+   * With otherFloor: whether a walk gets there by the doorways as walk_to plans it (AgentApi.floorRoute): the route's
+   * length and the drops / leaps it takes, or 'none' (no doorway route from your floor). Absent: not known.
+   */
+  otherFloorWay?: { len: number; drops: number; leaps: number } | 'none';
 }
 
 export interface AgentVital { cur: number; max: number }
@@ -173,6 +178,8 @@ export interface AgentEvent {
   guid?: number;
   /** Chat lines: the ChatMessageType the line came in as (Chat Message Capture's colour filter). */
   chatType?: number;
+  /** fellow-aggro: the fellow it is about (where they are is said again as of the read, when it is old by then). */
+  fellow?: number;
 }
 
 export type AgentScreen = 'world' | 'portal-space' | 'character-select' | 'character-create' | 'loading' | 'unknown';
@@ -221,6 +228,8 @@ export interface AgentObservation {
    */
   fellows?: Array<{
     name: string; healthPct: number; dist?: number; bearing?: number; /** Metres up (+) or down (−) when 2 m or more. */ dz?: number;
+    /** Their map coordinates ("40.3N, 32.5E"), when in view 50 m or more away on the landscape. */
+    coords?: string;
     /** Monsters on them or coming at them, as the client sees it: "Rust Gromnie L8 on them, Shadow L26 running at them 20 m off". */
     threats?: string;
     /** Out of sight but last placed in the space you're in: "43 m SE of you, 6 m down, 4 s ago" (walk_to / follow go there). */
@@ -241,6 +250,11 @@ export interface AgentObservation {
    * cover one. A player sees them at a glance; Arcanist played to level 19 with no gloves (2026-10-14).
    */
   gearEmpty?: { slots: string[]; packFits: string[] };
+  /**
+   * Worn items whose spells the server turned off when their mana ran out ("Your X is out of Mana."), not wielded again
+   * since, with their mana when an appraisal showed it. A refill alone doesn't turn them back on (ACE: only a wield does).
+   */
+  gearManaOut?: Array<{ guid: number; name: string; mana?: { cur: number; max: number } }>;
   /**
    * Attack lines of the last 10 s naming a creature none of whose name stands within reach (a swing from 8 m, a spell
    * from 60 m): out of sight, or a missile from afar. Named, never pinned on a far one of that name.
@@ -332,6 +346,18 @@ export interface AgentItem {
    * answered "The X is unsellable." (ACE Player_Commerce refuses !IsSellable || Retained with those words).
    */
   unsellable?: boolean;
+  /**
+   * Attuned (PropertyInt 114, from its appraisal or the server's AttunedItem refusal "The X can't be dropped"): bound to
+   * you; ACE refuses dropping, giving or trading it (Player_Inventory IsAttunedOrContainsAttuned), as retail did.
+   */
+  attuned?: boolean;
+  /** Bonded (PropertyInt 33 ≥ 1, from its appraisal): it never drops when you die (ACE Player_Death). */
+  bonded?: boolean;
+  /**
+   * Its mana from its appraisal (ItemCurMana 107 / ItemMaxMana 108): a wielded item's spells burn it (ManaRate), and at
+   * 0 the server turns them off ("Your X is out of Mana."); refilled, they come back only when it is wielded again.
+   */
+  mana?: { cur: number; max: number };
   /** ArmorLevel (PropertyInt 28) from its appraisal: what the examine window shows, enchantments included. */
   armorLevel?: number;
   /** Its wield requirements from its appraisal, in the examine window's words; `met` when your character sheet says. */
@@ -357,12 +383,24 @@ export interface AgentSpell {
   projectile?: boolean;
   /** How far it reaches for you, metres (the spell examine's Range: its range grows with your ranks in the school's skill). */
   range?: number;
+  /**
+   * The chance a cast gets past the skill roll now (0..1): the school's buffed skill against the spell's power by the
+   * fizzle formula (magicSkillChance). Unset when the host can't say the skill.
+   */
+  castChance?: number;
+  /** The school's buffed skill that chance is for. */
+  schoolSkill?: number;
 }
 
 /** Result of every action: ok + a human line the LLM can read. */
 export interface AgentResult {
   ok: boolean;
   message: string;
+  /**
+   * Not done because the target had died or gone first (a fellow's kill landed before your cast or swing): an expected
+   * outcome in a fight, which the tools answer as no error (ok stays false for the page's own callers).
+   */
+  targetGone?: boolean;
   [k: string]: unknown;
 }
 

@@ -598,6 +598,11 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
     // Floor on both sides: a leap from a ledge to a ledge, never on into more air.
     return w <= reach && floorSide(n, c) && floorSide(m, c) ? w : undefined;
   };
+  /** Whether doorways `n` and `m` of floorless cell `c` stand on one bridge through it (bridgeAcross). */
+  const bridged = (n: string, m: string, c: number): boolean => {
+    const dn = door.get(n), dm = door.get(m);
+    return !!dn && !!dm && bridgeAcross(g, c, dn, dm);
+  };
   // Cells a node touches: start/goal are inside one cell, a door joins two.
   const cellsAt = (n: string): number[] => (n === START ? [fromCell] : n === GOAL ? [toCell] : cellsOf.get(n) ?? []);
   while (open.size) {
@@ -616,7 +621,7 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
         // In a cell with no floor the only way on is down through its floor opening (from where we
         // stand, any way: a body reported in one is at its edge, or already falling), or a jump across it.
         let leap: number | undefined;
-        if (n !== START && g.airCells?.has(c) && m !== GOAL && !(dm && dm.below !== undefined && dm.below !== c)) {
+        if (n !== START && g.airCells?.has(c) && m !== GOAL && !(dm && dm.below !== undefined && dm.below !== c) && !bridged(n, m, c)) {
           leap = leapAcross(n, m, c);
           if (leap === undefined) continue;
         }
@@ -652,6 +657,41 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
     return { ...far, x: far.x + (dx / l) * LEAP_LAND_M, y: far.y + (dy / l) * LEAP_LAND_M, leap: leapTo.get(n)! };
   };
   return nodes.map((n, i) => (leapTo.has(n) ? leapPoint(n, i) : posOf(n))).filter((_, i) => !intoAir(nodes[i], nodes[i + 1]) && !leapTo.has(nodes[i + 1]));
+}
+
+/** A doorway's feet within this height of a bridge's deck stands on it (m). */
+export const BRIDGE_LEVEL_M = 0.5;
+/** …and its doorway this near the deck's edge, seen from above (m): a body's step onto it. */
+export const BRIDGE_NEAR_M = 1;
+
+/**
+ * A walkway through a floorless cell: the cell under one of its floor openings has its floor right at the opening
+ * (the landing is the opening's own height), and doorways `a` and `b` of the air cell both stand at that height beside
+ * that floor. A body walks along it from one to the other, as along any floor. Mountain Keep's pits (landblock 0x01D2)
+ * are crossed at −6 by bridges: the deck of 0x01D20124 (x 85–95, y −72 to −68) lies at the floor opening of the air cell
+ * 0x01D201FF, between that cell's west doorway to 0x01D201FB and its east one into 0x01D20201 (bottoms −6). The route
+ * took the air cell as "down only", so every route across the pit wanted a 7.1 m leap or a fall (2026-10-16).
+ */
+export function bridgeAcross(g: CellGraph, air: number, a: CellDoor, b: CellDoor): boolean {
+  air >>>= 0;
+  const feet = (d: CellDoor): number => (Math.abs(d.normal.z) > 0.7 ? d.at.z : d.bottom ?? d.at.z);
+  for (const e of g.doors.get(air) ?? []) {
+    // A floor opening down into a cell whose floor is right there (landing at the opening): that cell's floor is a deck.
+    if (Math.abs(e.normal.z) <= 0.7 || e.below === undefined || e.below === air || e.landing === null || e.landing === undefined) continue;
+    if (Math.abs(e.landing - e.at.z) > BRIDGE_LEVEL_M) continue;
+    const deck = (g.floors?.get(e.below >>> 0) ?? []).filter((p) => p.pts.every((q) => Math.abs(q.z - e.landing!) <= BRIDGE_LEVEL_M));
+    if (!deck.length) continue;
+    const on = (d: CellDoor): boolean => {
+      if (d === e || (d.a === e.a && d.b === e.b) || (d.a === e.b && d.b === e.a)) return true;
+      if (Math.abs(feet(d) - e.landing!) > BRIDGE_LEVEL_M) return false;
+      return deck.some((p) => {
+        const xs = p.pts.map((q) => q.x), ys = p.pts.map((q) => q.y);
+        return d.at.x >= Math.min(...xs) - BRIDGE_NEAR_M && d.at.x <= Math.max(...xs) + BRIDGE_NEAR_M && d.at.y >= Math.min(...ys) - BRIDGE_NEAR_M && d.at.y <= Math.max(...ys) + BRIDGE_NEAR_M;
+      });
+    };
+    if (on(a) && on(b)) return true;
+  }
+  return false;
 }
 
 /** How far past a leap's far lip its route point lies (m): where the body stands after landing. */

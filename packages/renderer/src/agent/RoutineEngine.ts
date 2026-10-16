@@ -1588,7 +1588,7 @@ export class RoutineEngine {
     const m = this.api.snapshot({ radius: a.meters ?? 60, max: 60 }).nearby.find((o) => o.kind === 'monster' && !o.dying && re.test(o.name));
     if (!m) return { ok: false, message: `nothing matching /${a.pattern}/ within ${a.meters ?? 60} m`, idle: true };
     const since = this.api.currentSeq();
-    const r = this.api.attack(m.guid);
+    const r = this.api.attack(m.guid, { far: true }); // a routine's targets are its rules' (no floor refusal)
     if (!r.ok) return r;
     const t0 = this.now();
     let landed: string | null = null;
@@ -1679,7 +1679,7 @@ export class RoutineEngine {
         // (2026-10-13: a monster-within rule saw a creature the held position put out of reach, and fired twice a second).
         if (!m) return { ok: false, message: this.hold ? `no monster in reach within ${this.hold.meters} m of the held position` : 'no monster in reach', idle: true };
         const since = this.api.currentSeq();
-        const r = this.api.attack(m.guid, p.macro ? { height: vtAttackHeight(this.settings), power: this.macroAttackPower(p, m) } : {});
+        const r = this.api.attack(m.guid, p.macro ? { height: vtAttackHeight(this.settings), power: this.macroAttackPower(p, m), far: true } : { far: true });
         if (!r.ok) return r;
         if (!this.hold) await this.waitDone(['target-died', 'target-lost', 'death'], 120_000);
         else {

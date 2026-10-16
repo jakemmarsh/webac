@@ -254,7 +254,8 @@ describe('5 and 10. observe: creatures in rooms out of sight, and a target on an
     expect(obs.target?.otherFloor).toBe(-20);
     const text = formatObservation(obs);
     expect(text).toContain('also in range, in rooms out of sight of yours (1; where the server last placed them, they may have moved):\n  #8000e860  Broken Doll  [monster]  14.0m behind (S)');
-    expect(text).toMatch(/target: #8000e57a {2}Battered Doll .* {2}ON ANOTHER FLOOR, 20 m down: no walk or melee reaches it from this floor/);
+    // Whether a walk gets there is the planner's answer (floorRoute); one room with no doorway between can't say.
+    expect(text).toMatch(/target: #8000e57a {2}Battered Doll .* {2}ON ANOTHER FLOOR, 20 m down: no melee from here; not a step from this floor \(walk_to finds out whether a way gets there\)/);
   });
 });
 

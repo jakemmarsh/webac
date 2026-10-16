@@ -229,7 +229,11 @@ describe('agent play reports 2026-10-13', () => {
     host.fellows = () => [fellow(ARCANIST, 'Claude Arcanist')];
     host.add({ guid: ARCANIST, name: 'Claude Arcanist', itemType: 0x10, objectDescFlags: 0x8, cell: CELL, x: 31, y: -50, z: 0 });
     host.add({ guid: 0x80004cf6, name: 'Spikey Armoredillo', itemType: 0x10, objectDescFlags: 0x10, cell: CELL, x: 30, y: -15, z: 6 });
-    const r = api.attack('Spikey Armoredillo');
+    // Since 2026-10-16 (Mountain Keep) a melee run-up off the floor a fellow stands on is refused unless far=true.
+    const no = api.attack('Spikey Armoredillo');
+    expect(no.ok).toBe(false);
+    expect(no.message).toMatch(/^Spikey Armoredillo #80004cf6 is on a floor above \(6 m up, 35 m N\).*: running up to it leaves Claude Arcanist \(1 m from you\) behind on this floor/);
+    const r = api.attack('Spikey Armoredillo', { far: true });
     expect(r.ok).toBe(true);
     expect(r.message).toMatch(/^running up to Spikey Armoredillo \(#80004cf6\): 35 m N, 6 m above you \(another floor: the way there climbs\); Claude Arcanist \(1 m from you now\) would be 35 m from you there, on another floor, then attacking/);
     api.stopMoving();

@@ -81,14 +81,15 @@ describe('agent play reports 2026-10-11', () => {
 
   it('a cast refused "Out of Range!" fails and says how far the spell reaches for you; ac_spells lists each range', async () => {
     host.spells = () => [{ id: 1427, name: 'Focus Other I', school: 'Creature Enchantment', level: 1, buff: true, range: 6 }];
-    host.add({ guid: 0x80000b20, name: 'Claude Bulwark', objectDescFlags: 0x8, itemType: 0x10, x: 80, y: 31 });
+    // 6.5 m: inside the metre of slack, so the server judges it (farther is refused before it is sent: 2026-10-16 tests).
+    host.add({ guid: 0x80000b20, name: 'Claude Bulwark', objectDescFlags: 0x8, itemType: 0x10, x: 80, y: 26.5 });
     const cast = host.cast;
     host.cast = (id: number, t: number | null) => { setTimeout(() => api.pushChat('Out of Range!'), 300); return cast(id, t); };
     const p = api.cast('Focus Other I', 'Claude Bulwark');
     await vi.advanceTimersByTimeAsync(4000);
     const r = await p;
     expect(r.ok).toBe(false);
-    expect(r.message).toBe('casting Focus Other I at Claude Bulwark #80000b20\n  Out of Range!\n  (Focus Other I reaches 6 m for you, longer as your Creature Enchantment ranks grow; Claude Bulwark is 11.0 m away)');
+    expect(r.message).toBe('casting Focus Other I at Claude Bulwark #80000b20\n  Out of Range!\n  (Focus Other I reaches 6 m for you (longer as your Creature Enchantment ranks grow); Claude Bulwark is 6.5 m away: walk 2 m closer (ac_walk_to target=#80000b20 within=4))');
     const { formatSpells } = await import('../packages/renderer/src/agent/format.ts');
     expect(formatSpells(host.spells())).toBe('  1427  Focus Other I  [Creature Enchantment L1]  range 6 m');
   });

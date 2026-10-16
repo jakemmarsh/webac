@@ -21,7 +21,8 @@ import { MagicSchool, magicSchoolColor, magicSchoolColorRGBA, LUMINANCE_MIN_LEVE
 import { contractProgressText, contractTimedText, contractRepeatLeft, type ContractTiming } from '@ac/shared';
 import { TeleportAnimation, TeleportAnimState, PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
 import { PortalSpaceRenderer, portalSpaceHookSound } from '../effects/PortalSpaceRenderer.js';
-import { getAllegianceRankTitle, getDefaultCombatMode, encodeWindows1252 } from '@ac/shared';
+import { getAllegianceRankTitle, getDefaultCombatMode, encodeWindows1252, characterCreateErrorToken, CharacterGenerationVerificationResponse } from '@ac/shared';
+import type { ChargenBlockReason } from '../telemetry/PreworldReporter.js';
 import { SHIPPED_DEFAULT_LANDSCAPE_DRAW_DISTANCE } from '../world/LandscapeDrawDistance.js';
 import { RETAIL_DEGRADE_PREFS } from '../models/DegradeLod.js';
 import { horizontalListCellCount } from '../world/OpenContainerTracker.js';
@@ -1028,7 +1029,14 @@ export interface GameUIStreamingOptions {
 }
 
 export interface GameUICallbacks {
-  onCharacterCreated?: (wizard: CharacterCreateWizard) => void;
+  /** FINISH's CharacterCreate. Returning false means nothing went out (no session to send on). */
+  onCharacterCreated?: (wizard: CharacterCreateWizard) => boolean | void;
+  /**
+   * BUG.chargen-finish-silent — what FINISH did, for telemetry: 'sent' (a
+   * CharacterCreate went out), 'blocked' + why nothing went out, or
+   * 'no_reply' (the server never answered within CHARGEN_REPLY_TIMEOUT_MS).
+   */
+  onChargenFinish?: (outcome: 'sent' | 'blocked' | 'no_reply', reason?: ChargenBlockReason) => void;
   onEnterWorld?: (slot: CharacterSlot) => void;
   /** ASSESS: real CharacterDelete wire flow (0xF655). Returns true if the
    *  send was issued, so the UI leaves the list for the server to refresh. */
@@ -1278,6 +1286,14 @@ export function chargenTooltipTargetAt(root: HTMLElement, target: Element | null
 /** The CharGenVerificationResponse NameBanned text FINISH shows for a name the DAT name rules refuse. */
 export const CHARGEN_NAME_REFUSED_TOKEN = 'ID_Character_Err_NameBanned';
 
+/**
+ * BUG.chargen-finish-silent — how long FINISH waits for the
+ * CharGenVerificationResponse before giving up (retail had no timer: its
+ * server always answered; ACE answers nothing when its handler throws).
+ * A create normally answers in well under a second.
+ */
+export const CHARGEN_REPLY_TIMEOUT_MS = 20_000;
+
 /** The Please Wait box Create Character raises while the streamed world art is still loading. */
 export const CHARGEN_WORLD_ART_WAIT_ID = 'chargen-pleasewait';
 
@@ -1430,6 +1446,13 @@ export class GameUI {
       // The EoL portal.dat lists five starter areas (Holtburg, Shoushi, Yaraq, Sanamar, OlthoiLair).
       starterAreaCount: this.charGen?.starterAreas.length ?? 5,
       heritageListed: (h) => heritageListed(h, getString, this.chargenHeritageDefined),
+      clothingColorCounts: (h, g, a) => {
+        const colors = this.uiHost?.characterModelBuilder?.getChargenClothingColors(h, g, a as unknown as import('@ac/shared').AppearanceInfo);
+        return colors ? {
+          headgear: colors.headgear.templateIds.length, shirt: colors.shirt.templateIds.length,
+          pants: colors.pants.templateIds.length, footwear: colors.footwear.templateIds.length,
+        } : null;
+      },
     };
   }
 
@@ -5239,6 +5262,10 @@ export class GameUI {
   /* ================================================================ */
 
   showCharacterSelect(characters: CharacterSlot[] = [], slotCount?: number): void {
+    // MakeDialogInCurrentUI dialogs belong to the UI they were made in: a
+    // server PopupString from the world (the Society Greeter's welcome) goes
+    // with gmGamePlayUI at logoff, as UIFlow::UseNewMode destroys it.
+    this.closePopupStringDialogs();
     // UIPersistantData::m_iidSelectedAvatar outlives the screen: the
     // gmCharacterManagementUI ctor @ 004ec8f0 restores it into
     // m_iidSelectedCharacter (:226815) before RebuildCharacterList, so the
@@ -5414,9 +5441,11 @@ export class GameUI {
       }
       return;
     }
+    this.closePopupStringDialogs();
     this.uiManager.setScreen('character-create');
     // A new gmCharGenMainUI / CharGenState: no CharacterCreate in flight.
     this.chargenVerificationPending = false;
+    this.clearChargenReplyTimer();
     // Use CharGen data for credits if available
     if (this.charGen) {
       const firstHeritage = this.charGen.heritageGroups.get(Heritage.Aluvian);
@@ -7036,11 +7065,15 @@ export class GameUI {
    * the CharGenResult is sent.
    */
   private doChargenFinish(fromButton: boolean): boolean {
+    const blocked = (reason: ChargenBlockReason): false => {
+      this.callbacks.onChargenFinish?.('blocked', reason);
+      return false;
+    };
     const name = trimFinishName(this.wizard.name);
     this.wizard.setName(name);
     if (!this.chargenNameEntered || name.length === 0) {
-      this.showMessageDialog(getString(acStringHash(SUMMARY_TOKENS.noNameWarning)) ?? 'You must enter a name for this character!');
-      return false;
+      this.showChargenFinishDialog(getString(acStringHash(SUMMARY_TOKENS.noNameWarning)) ?? 'You must enter a name for this character!');
+      return blocked('no_name');
     }
     // Retail's server refused a name outside the DAT NameFilterTable /
     // TabooTable rules (CharGenVerificationResponse NameBanned → the dialog
@@ -7049,8 +7082,8 @@ export class GameUI {
     // created "Name ]Brenna Qaeol" (2026-10-08). The same verdict and text,
     // given before the request goes out.
     if (!this.wizard.nameValid) {
-      this.showMessageDialog(getStringFromTable(0x23000002, acStringHash(CHARGEN_NAME_REFUSED_TOKEN)) ?? 'That name is not allowed. Please choose another name.');
-      return false;
+      this.showChargenFinishDialog(getStringFromTable(0x23000002, acStringHash(CHARGEN_NAME_REFUSED_TOKEN)) ?? 'That name is not allowed. Please choose another name.');
+      return blocked('name_banned');
     }
     if (fromButton && this.wizard.attributesRemaining > 0) {
       this.showConfirmationDialog(
@@ -7058,16 +7091,77 @@ export class GameUI {
           ?? 'Warning!\n\nYou have not used up your entire available Attribute Credits.  If you do not use them now you will lose them.  Do you wish to continue?',
         (accepted) => { if (accepted) this.doChargenFinish(false); },
       );
-      return false;
+      return blocked('credit_warning');
     }
     // DoFinish :223958-223972 — after the name and credit dialogs: only with
     // the verification state UNDEF_CG_VERIFICATION_RESPONSE (0) does it go to
     // CG_VERIFICATION_RESPONSE_PENDING (2) and SendCharGenResult; while a
     // reply is pending a second FINISH sends nothing.
-    if (this.chargenVerificationPending) return false;
+    if (this.chargenVerificationPending) return blocked('pending');
     this.chargenVerificationPending = true;
-    this.callbacks.onCharacterCreated?.(this.wizard);
+    // BUG.chargen-finish-silent — an exception building the request, or a
+    // host with no session to send on, left the state PENDING with nothing
+    // sent and every later FINISH silent. Either now ends in retail's
+    // catch-all refusal (RecvNotice_CharGenVerificationResponse's default
+    // case, ID_Character_Err_NameDBDown) with FINISH usable again; the
+    // exception still reaches the page's error reporting.
+    let sent: boolean | void;
+    try {
+      sent = this.callbacks.onCharacterCreated?.(this.wizard);
+    } catch (e) {
+      this.chargenVerificationPending = false;
+      console.error('[GameUI] CharacterCreate could not be built', e);
+      setTimeout(() => { throw e; }, 0);
+      this.showChargenFailureDialog();
+      return blocked('exception');
+    }
+    if (sent === false) {
+      this.chargenVerificationPending = false;
+      this.showChargenFailureDialog();
+      return blocked('not_sent');
+    }
+    this.callbacks.onChargenFinish?.('sent');
+    // A server that never answers (ACE logs an exception in its handler and
+    // replies nothing) must not leave FINISH dead: retail's server always
+    // answered, so retail had no timer; ours gives up after
+    // CHARGEN_REPLY_TIMEOUT_MS with the same catch-all refusal.
+    this.clearChargenReplyTimer();
+    this.chargenReplyTimer = setTimeout(() => {
+      this.chargenReplyTimer = null;
+      if (!this.chargenVerificationPending) return;
+      this.chargenVerificationPending = false;
+      console.warn(`[GameUI] no CharGenVerificationResponse in ${CHARGEN_REPLY_TIMEOUT_MS / 1000} s; FINISH is usable again`);
+      this.callbacks.onChargenFinish?.('no_reply');
+      if (this.uiManager.currentScreen === 'character-create') this.showChargenFailureDialog();
+    }, CHARGEN_REPLY_TIMEOUT_MS);
     return true;
+  }
+
+  private chargenReplyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private clearChargenReplyTimer(): void {
+    if (this.chargenReplyTimer !== null) { clearTimeout(this.chargenReplyTimer); this.chargenReplyTimer = null; }
+  }
+
+  /**
+   * The OK dialog FINISH raises. showMessageDialog refuses a second dialog
+   * while `messageDialog` is set (MakeErrorMessageDialog's context), so a
+   * dialog left detached, or another one still up, swallowed FINISH's
+   * feedback: a detached one no longer counts, and a live one is replaced
+   * so the player reads why nothing was sent.
+   */
+  private showChargenFinishDialog(text: string): void {
+    if (this.messageDialog && !this.messageDialog.isConnected) this.messageDialog = null;
+    if (this.showMessageDialog(text) === false) {
+      this.hideMessageDialog();
+      this.showMessageDialog(text);
+    }
+  }
+
+  /** RecvNotice_CharGenVerificationResponse's default case: ID_Character_Err_NameDBDown (table 0x23000002). */
+  private showChargenFailureDialog(): void {
+    const token = characterCreateErrorToken(CharacterGenerationVerificationResponse.Corrupt) ?? 'ID_Character_Err_NameDBDown';
+    this.showChargenFinishDialog(getStringFromTable(0x23000002, acStringHash(token)) ?? token);
   }
 
   /* ── CORE.17.k.b.b.a.d — chargen hover tooltips (layout 0x21000041) ── */
@@ -9350,7 +9444,9 @@ export class GameUI {
     // Gender selection (Race + Appearance steps)
     this.screenContainer.querySelectorAll('.gender-btn').forEach(el => {
       el.addEventListener('click', () => {
-        this.wizard.setGender(parseInt((el as HTMLElement).dataset.gender || '1'));
+        // CharGenState::SetGender: ConstrainAllByGender holds the face /
+        // clothes to the new gender's lists (BUG.chargen-finish-silent).
+        this.wizard.setGender(parseInt((el as HTMLElement).dataset.gender || '1'), this.chargenRollDeps());
         // CORE.17.k.b.b.a.e — gmCGAppearancePage::ListenToElementMessage
         // 0x100003a7 / a8: SetGender then Update (the camera back on the
         // face), even for the gender already chosen.
@@ -19323,7 +19419,7 @@ export class GameUI {
     if (c.gender) {
       const g = /^f/i.test(c.gender) ? 2 : /^m/i.test(c.gender) ? 1 : 0;
       if (!g) return `gender must be male or female`;
-      this.wizard.setGender(g);
+      this.wizard.setGender(g, deps);
     }
     if (c.template) {
       const err = this.agentChooseTemplate(c.template);
@@ -33988,6 +34084,7 @@ export class GameUI {
    */
   noteCharGenVerificationResponse(): void {
     this.chargenVerificationPending = false;
+    this.clearChargenReplyTimer();
   }
 
   /** A CharacterCreate is in flight (CG_VERIFICATION_RESPONSE_PENDING; tests / probes). */
@@ -34034,6 +34131,12 @@ export class GameUI {
 
   /** The open PopupString dialogs, oldest first. */
   private popupStringDialogs: HTMLDivElement[] = [];
+
+  /** Close every open PopupString dialog (the UI they were made in is going away). */
+  closePopupStringDialogs(): void {
+    for (const d of this.popupStringDialogs) d.remove();
+    this.popupStringDialogs = [];
+  }
 
   /**
    * DECOMP.popup-string-dialog — `ClientCommunicationSystem::Handle_
@@ -34183,8 +34286,7 @@ export class GameUI {
     this.hideConfirmationDialog();
     this.hideMessageDialog();
     // MakeDialogInCurrentUI dialogs belong to the UI they were made in.
-    for (const d of this.popupStringDialogs) d.remove();
-    this.popupStringDialogs = [];
+    this.closePopupStringDialogs();
     this.connectingMode = false;
     this.uiManager.setScreen('disconnected');
     if (this.charselHandle) {

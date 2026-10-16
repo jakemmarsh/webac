@@ -33,7 +33,16 @@ import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './Tel
 
 export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
+  | 'chargen_sent' | 'chargen_blocked'
   | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed';
+
+/**
+ * Why FINISH sent no CharacterCreate (chargen_blocked's token): the no-name /
+ * banned-name / unspent-credit dialogs, a request still pending, the host
+ * having nothing to send on, or an exception building it.
+ */
+export const CHARGEN_BLOCK_REASONS = ['no_name', 'name_banned', 'credit_warning', 'pending', 'not_sent', 'exception'] as const;
+export type ChargenBlockReason = typeof CHARGEN_BLOCK_REASONS[number];
 
 export type PreworldScreen =
   | 'boot' | 'server-select' | 'connecting' | 'resuming' | 'char-select' | 'chargen' | 'portal-space' | 'disconnected' | 'world';
@@ -327,6 +336,8 @@ export class PreworldReporter {
   private loginAt: number | null = null;
   private enterAt: number | null = null;
   private charListSeen = false;
+  /** The chargen_blocked reasons already reported this page. */
+  private readonly chargenBlockSeen = new Set<string>();
   private screenKey = '';
   private screenSince: number;
   private readonly hiddenOn = new Set<string>();
@@ -410,6 +421,27 @@ export class PreworldReporter {
   chargenResult(responseCode: number): void {
     if (responseCode === CharacterGenerationVerificationResponse.Ok) this.report('chargen_ok', { code: responseCode });
     else this.report('chargen_refused', { code: responseCode >>> 0, token: safeToken(characterCreateErrorToken(responseCode)) });
+  }
+
+  /** BUG.chargen-finish-silent — FINISH sent a CharacterCreate (the reply comes as chargen_ok / chargen_refused). */
+  chargenSent(): void {
+    this.report('chargen_sent', {});
+  }
+
+  /**
+   * BUG.chargen-finish-silent — FINISH was pressed and the client sent
+   * nothing: `reason` is a closed token (ChargenBlockReason). Each reason
+   * once per page, so a player clicking on a dialog cannot spend the cap.
+   */
+  chargenBlocked(reason: ChargenBlockReason): void {
+    if (this.chargenBlockSeen.has(reason)) return;
+    this.chargenBlockSeen.add(reason);
+    this.report('chargen_blocked', { token: safeToken(reason) });
+  }
+
+  /** BUG.chargen-finish-silent — a CharacterCreate went unanswered (CHARGEN_REPLY_TIMEOUT_MS): chargen_refused, token "timeout". */
+  chargenNoReply(): void {
+    this.report('chargen_refused', { token: 'timeout' });
   }
 
   /** CharacterEnterWorldRequest went out (character select, or straight after creation). */

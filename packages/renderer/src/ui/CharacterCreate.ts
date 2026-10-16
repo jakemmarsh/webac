@@ -25,14 +25,15 @@ import {
 } from './ChargenAttributeSliders.js';
 import type { AttributeCreditsState, AttributeKey } from './ChargenAttributeSliders.js';
 import {
-  CUSTOM_TEMPLATE, OLTHOI_HERITAGES, applyTemplateSkills, fitTemplateToCharacter, skillLevelOf, setSkillLevel,
+  CUSTOM_TEMPLATE, OLTHOI_HERITAGES, applyTemplateSkills, fitTemplateToCharacter, skillLevelOf, setSkillLevel, resetSkillLevels,
 } from './ChargenTemplates.js';
 import type { ChargenSkillCosts, ChargenSkillState, ChargenTemplate } from './ChargenTemplates.js';
 import {
   randomizeHeritageGroup, randomizeStartArea, randomizeTemplate, randomizeSkills, randomizeAppearance,
   randomizeHeadgear, randomizeShirt, randomizeTrousers, randomizeFootwear, randomizeClothing, resetAppearance, rollDice,
+  constrainAppearance,
 } from './ChargenRandomize.js';
-import type { AppearanceRollLists, ChargenRandomSource } from './ChargenRandomize.js';
+import type { AppearanceRollLists, ChargenRandomSource, ClothingColorCounts } from './ChargenRandomize.js';
 
 /** The HeritageGroup_CG fields CharGenState::SetHeritageGroup reads. */
 export interface ChargenHeritageData {
@@ -56,6 +57,8 @@ export interface ChargenRollDeps {
   readonly starterAreaCount: number;
   /** The heritage page lists this heritage (HeritageRows.ts); absent = all listed. */
   heritageListed?(heritage: number): boolean;
+  /** num<Slot>Colors for the appearance's chosen clothing (Set<Slot>Style's StoreColorInformation); absent = colours left alone. */
+  clothingColorCounts?(heritage: number, gender: number, appearance: AppearanceState): ClothingColorCounts | null;
 }
 
 /**
@@ -376,9 +379,50 @@ export class CharacterCreateWizard {
 
   // ── Gender ────────────────────────────────────────────────────────
 
-  /** Set the gender. */
-  setGender(g: Gender): void {
+  /**
+   * CharGenState::SetGender @ 005c64a0 — the gender, then
+   * ConstrainAllByGender and the four Set<Slot>Style calls
+   * (constrainAllByGender). Without `deps` (no CharGen data) only the gender.
+   */
+  setGender(g: Gender, deps?: ChargenRollDeps): void {
     this.gender = g;
+    if (deps) this.constrainAllByGender(deps);
+  }
+
+  /** CharGenState::ConstrainAllByGender @ 005c5b80 + the Set<Slot>Style calls after it (constrainAppearance). */
+  constrainAllByGender(deps: ChargenRollDeps): void {
+    const valid = this.heritage !== Heritage.Invalid && this.gender !== Gender.Invalid;
+    const lists = valid ? deps.listsFor(this.heritage, this.gender) : null;
+    // No Sex_CG record (no CharGen data loaded): nothing to hold the indices to.
+    if (lists && Object.values(lists).every((n) => n === 0)) return;
+    // The style clamp first: the colour counts are the clamped items' (SetHeadgearStyle(num − 1) re-reads them).
+    constrainAppearance(this.appearance, lists);
+    if (lists) constrainAppearance(this.appearance, lists, deps.clothingColorCounts?.(this.heritage, this.gender, this.appearance) ?? null);
+  }
+
+  /**
+   * CharGenState::ConstrainAllByHeritage @ 005c6590 (SetHeritageGroup's
+   * tail): ConstrainAllByGender, a template_ past the heritage's list → −1,
+   * and the skill credits re-counted from the levels held
+   * (UpdateRemainingSkillCredits @ 005c37c0), every level reset when they
+   * no longer fit.
+   */
+  constrainAllByHeritage(deps: ChargenRollDeps): void {
+    if (this.heritage === Heritage.Invalid) return; // Reset's branch: RandomizeCharacter already reset all of it.
+    this.constrainAllByGender(deps);
+    if (deps.templatesFor(this.heritage).length <= this.templateIndex) this.templateIndex = -1;
+    const costs = deps.costsFor(this.heritage);
+    let used = 0;
+    for (const [id, level] of this.skills) {
+      if (level === SkillAdvancementClass.Trained) used += costs.trainedCost(id);
+      else if (level === SkillAdvancementClass.Specialized) used += costs.specializedCost(id);
+    }
+    this.skillCreditsUsed = used;
+    if (this.skillCreditsRemaining < 0) {
+      const state = this.skillState();
+      resetSkillLevels(state, costs);
+      this.storeSkillState(state);
+    }
   }
 
   // ── Attributes ────────────────────────────────────────────────────
@@ -591,6 +635,7 @@ export class CharacterCreateWizard {
     this.skillCreditsUsed = 0;
     this.applyTemplate(deps.templatesFor(heritage), deps.costsFor(heritage));
     this.randomizeStartArea(group.primaryStartAreas, deps.starterAreaCount, src);
+    this.constrainAllByHeritage(deps);
   }
 
   /** CharGenState::RandomizeStartArea @ 005c59e0 — an empty list leaves the start area alone. */

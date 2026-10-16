@@ -7,6 +7,10 @@
  *   npx tsx tools/stream/world-query.ts "SELECT … FROM weenie_properties_string WHERE type = 1 AND value LIKE '%Drudge%' LIMIT 20"
  *   npx tsx tools/stream/world-query.ts lore "Olthoi Gardener"     a wiki-style monster lookup (tools/stream/lore.ts)
  *   npx tsx tools/stream/world-query.ts sells "Impenetrability"    which shops sell it, the price, and where (tools/stream/shops.ts)
+ *   npx tsx tools/stream/world-query.ts spawns "Grievver"          where a creature is placed or generated (tools/stream/spawns.ts);
+ *                                       add `near 42.1N 33.6E` for the nearest first
+ *
+ * WORLD_QUERY_USAGE (printed with no arguments, and after a failed query) says how monsters spawn and the SQL dialect.
  *
  * ACJS_WORLD_DB_CONTAINER / ACJS_WORLD_DB / ACJS_WORLD_DB_PASSWORD pick another server's DB (default: end of retail's ace-db).
  */
@@ -19,8 +23,19 @@ import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
 import { SpellTable } from '../../packages/dat-parser/src/file-types/SpellTable.js';
 import { formatLore, loreDetailSql, loreNameSql, parseLoreRows, pickLoreNames } from './lore.ts';
 import { formatShops, parseShopOffers, parseShopVendors, shopOfferSql, shopVendorSql, type ShopDatInfo } from './shops.ts';
+import { SPAWN_MAX_DEPTH, SPAWNS_MAX_NAMES, formatSpawns, parseSpawnsQuery, parseGenProfiles, parseSpawnPlaces, spawnParentSql, spawnPlaceSql, spawnSources, type GenProfile } from './spawns.ts';
 
 export const WORLD_QUERY_MAX_CHARS = 8000;
+
+/** Usage, how monsters spawn (ACE Landblock.CreateWorldObjects / SpawnEncounters, WorldObject_Generators) and the dialect. */
+export const WORLD_QUERY_USAGE = [
+  'usage: ./world-query "SELECT … LIMIT 20" | lore "<monster>" | sells "<item>" | spawns "<monster>" [near 42.1N 33.6E]',
+  'How monsters spawn: a landblock_instance row places a creature or a generator; a generator\'s weenie_properties_generator',
+  'profiles name what it makes, often another generator (chains); most outdoor monsters come from the encounter table',
+  '(landblock, cell_X, cell_Y → a generator wcid), not landblock_instance. `spawns "<monster>"` follows all three.',
+  'SQL is MySQL 8: CONCAT(), HEX(), LPAD(), LOWER(), CAST(x AS UNSIGNED); there is no printf() (that is SQLite).',
+  'A cell id XXYYcccc is a decimal number in the DB: landblock = obj_Cell_Id >> 16 (HEX() to read it); encounter.landblock is XXYY.',
+].join('\n');
 
 /** Why `sql` may not run, or null: a single SELECT / SHOW / DESCRIBE / EXPLAIN / WITH statement that writes nothing. */
 export function worldQueryRefusal(sql: string): string | null {
@@ -82,7 +97,7 @@ function runReadOnly(stmts: string[], table: boolean): string {
   const sql = `START TRANSACTION READ ONLY; ${stmts.map((s) => `${s};`).join(' ')} ROLLBACK;`;
   const r = spawnSync('docker', ['exec', container, 'mysql', '-uroot', `-p${pw}`, ...format, db, '-e', sql], { encoding: 'utf8', maxBuffer: 32 << 20 });
   const err = (r.stderr ?? '').split('\n').filter((l) => l && !/Using a password on the command line/.test(l)).join('\n');
-  if (r.status !== 0) { console.error(err || `mysql exited ${r.status}`); process.exit(1); }
+  if (r.status !== 0) { console.error(`${err || `mysql exited ${r.status}`}\n\n${WORLD_QUERY_USAGE}`); process.exit(1); }
   return r.stdout ?? '';
 }
 
@@ -116,6 +131,40 @@ function sells(query: string): string {
   return formatShops(query, offers, vendors, dat);
 }
 
+/**
+ * `spawns "<monster>"`: the creatures named (as lore picks them), then the generators that make them, level by level
+ * up to SPAWN_MAX_DEPTH, then where each is placed or rolled as an outdoor encounter.
+ */
+function spawns(arg: string): string {
+  const { name: query, near } = parseSpawnsQuery(arg);
+  const rows = query.trim() ? runReadOnly([loreNameSql(query)], false).split('\n').filter(Boolean).map((l) => {
+    const [id, name = ''] = l.split('\t');
+    return { wcid: Number(id), name };
+  }) : [];
+  const pick = pickLoreNames(query, rows, SPAWNS_MAX_NAMES);
+  if (!pick.wcids.length) return formatSpawns(query, pick, []);
+  const profiles: GenProfile[] = [];
+  const gens = new Set<number>();
+  let frontier = pick.wcids;
+  for (let depth = 0; depth < SPAWN_MAX_DEPTH && frontier.length && gens.size < 2000; depth++) {
+    const found = parseGenProfiles(runReadOnly([spawnParentSql(frontier)], false)).filter((p) => !gens.has(p.gen));
+    profiles.push(...found);
+    frontier = [...new Set(found.map((p) => p.gen))];
+    for (const g of frontier) gens.add(g);
+  }
+  const places = parseSpawnPlaces(runReadOnly(spawnPlaceSql([...pick.wcids, ...gens]), false));
+  const names = new Map(rows.map((r) => [r.wcid, r.name.trim()]));
+  const nameOf = (w: number) => places.names.get(w) ?? names.get(w) ?? `wcid ${w}`;
+  const cells = datAt(process.env.ACJS_CELL_DAT, '../../dat/client_cell_1.dat');
+  const dat: ShopDatInfo = {
+    envCellFlags: (cell) => {
+      const data = cells?.getFileData(cell);
+      return data && data.byteLength >= 8 ? new DataView(data).getUint32(4, true) : undefined;
+    },
+  };
+  return formatSpawns(query, pick, spawnSources(pick.wcids, profiles, places, nameOf), dat, near);
+}
+
 function datAt(env: string | undefined, fallback: string): DatDatabase | null {
   const path = env ?? fileURLToPath(new URL(fallback, import.meta.url));
   if (!existsSync(path)) return null;
@@ -146,7 +195,12 @@ function main(): void {
     console.log(clipOutput(sells(process.argv.slice(3).join(' '))));
     return;
   }
+  if (process.argv[2] === 'spawns') {
+    console.log(clipOutput(spawns(process.argv.slice(3).join(' '))));
+    return;
+  }
   const sql = process.argv.slice(2).join(' ');
+  if (!sql.trim() || /^(help|-h|--help)$/.test(sql.trim())) { console.log(WORLD_QUERY_USAGE); return; }
   const why = worldQueryRefusal(sql);
   if (why) { console.error(`refused: ${why}`); process.exit(2); }
   const out = runReadOnly([sql.trim().replace(/;\s*$/, '')], true);

@@ -654,8 +654,20 @@ export class DegradeLod {
   /** Registered part count (pruned lazily as objects leave the scene). */
   get partCount(): number { return this.parts.size; }
 
-  /** Per-frame: CPhysicsPart::UpdateViewerDistance for every registered part. */
-  updateParts(viewerPos: THREE.Vector3): void {
+  /**
+   * Per-frame: CPhysicsPart::UpdateViewerDistance for every registered part.
+   *
+   * `worldScene` — the scene `viewerPos` belongs to. A part in another
+   * scene (the chargen appearance / summary views, the barber, the examine
+   * portrait, portal space: CreatureMode viewports with their own camera a
+   * few metres away) is drawn at level 0, never degraded by the WORLD
+   * camera's distance. BUG.chargen-preview-after-sweep: after a world
+   * session the camera stayed where the player had been, hundreds of metres
+   * from those views' origin, so every body part with a DIDDegrade went to
+   * its last (INVALID) level and the next chargen showed only the head.
+   * Without `worldScene` every scene counts (the old behaviour).
+   */
+  updateParts(viewerPos: THREE.Vector3, worldScene?: THREE.Object3D | null): void {
     // REND.per-frame-allocations — the ancestor walk below is memoized per
     // PARENT for this call only: a setup's parts share one parent, so the
     // chain is walked once per object instead of once per part. Rebuilt
@@ -682,7 +694,11 @@ export class DegradeLod {
             if (!root.parent) break;
             root = root.parent;
           }
-          if ((root as THREE.Scene).isScene) bits |= ANC_IN_SCENE;
+          if ((root as THREE.Scene).isScene) {
+            bits |= ANC_IN_SCENE;
+            // Another scene's viewport: its own camera, so level 0 here.
+            if (worldScene && root !== worldScene) bits |= ANC_EXCLUDED;
+          }
           memo.set(parent, bits);
         }
       }

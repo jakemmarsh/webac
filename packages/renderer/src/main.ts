@@ -43,7 +43,7 @@ import {
   PatchStatus, PatchEventGate, StreamedPatchFeed, connectTextForLevel, patchProgressText, type PatchEvent,
   PatchStatusLatch, patchFailureText, patchBootPlan, QuietPatchProgress, QUIET_PATCH_REVEAL_MS, type PatchBootPlan } from './ui/PatchScreen.js';
 import { loadDatWithCache, interrogateDat, fetchHeadMeta, OpfsDatBlobStore } from './dat/DatCache.js';
-import { PhysicsState as AcePhysicsState, EnvironChangeType, ENVIRON_FOG, ENVIRON_SOUND, isEnvironFog, isEnvironSound, OptimisticEquipmentTracker, CHARACTER_OPTION_BIT_MAP, resolveAutoWield, UISlotSide } from '@ac/shared';
+import { PhysicsState as AcePhysicsState, EnvironChangeType, ENVIRON_FOG, ENVIRON_SOUND, isEnvironFog, isEnvironSound, OptimisticEquipmentTracker, CHARACTER_OPTION_BIT_MAP, resolveAutoWield, autoWieldRetryDue, UISlotSide } from '@ac/shared';
 import type { InventoryItem, MtChatSpeech } from '@ac/shared';
 import { InventoryRequestTracker, InventoryRequest, characterOptionIsSet, ObjectDescriptionFlag, itemTypeLabel, vtVcsCategory } from '@ac/shared';
 import type { AttemptFailedObject } from '@ac/shared';
@@ -4296,6 +4296,8 @@ async function main() {
     side: UISlotSide;
     blockingId: number;
     seenBlockers: Set<number>;
+    /** The container the blocker's dequip went to (a side pack when the main pack is full): its landing there retries. */
+    containerId: number;
   } | null = null;
 
   /**
@@ -4362,12 +4364,13 @@ async function main() {
       // PutItemInContainer back to the player, then retry from
       // onInventoryPut when the server confirms the move.
       seenBlockers.add(res.blockingId);
-      pendingAutoWield = { itemId: item.id, side, blockingId: res.blockingId, seenBlockers };
+      pendingAutoWield = { itemId: item.id, side, blockingId: res.blockingId, seenBlockers, containerId: aceCharGuid ?? 0 };
       // SWEEP1006B — CPlayerSystem::AutoWield (decomp :344680):
       // AttemptToPlaceInContainer(blocker, player, 0, autoMerge = 1, 0) —
       // runPlacement takes the blocker off the paperdoll when it is put.
       if (sendGameAction && aceCharGuid) {
         const r = attemptToPlaceInContainer(res.blockingId, aceCharGuid, 0, true, 0, placementWorld());
+        if (r.kind === 'put' && pendingAutoWield) pendingAutoWield.containerId = r.containerId;
         if (!runPlacement(res.blockingId, r, `auto-dequip for wield of 0x${item.id.toString(16)}`) || r.kind !== 'put') pendingAutoWield = null;
       }
       return true;
@@ -8755,19 +8758,18 @@ async function main() {
           inventoryDirty = true;
         }
       }
-      if (aceCharGuid !== null && data.containerGuid === aceCharGuid) {
-        // BUG.equip-no-auto-dequip-conflicting — retail retry point
-        // (CPlayerSystem @ LAB_005633cf): the auto-dequipped blocker just
-        // landed in the pack, so re-run AutoWield for the blocked item.
-        // Chained conflicts unwind one dequip per confirmation, exactly
-        // like retail; seenBlockers guards against ping-ponging on a
-        // blocker the server refuses to keep dequipped.
-        if (pendingAutoWield && data.itemGuid === pendingAutoWield.blockingId) {
-          const pending = pendingAutoWield;
-          pendingAutoWield = null;
-          const blocked = playerState.inventory.getItem(pending.itemId);
-          if (blocked) attemptAutoWield(blocked, pending.side, pending.seenBlockers);
-        }
+      // BUG.equip-no-auto-dequip-conflicting — retail retry point
+      // (CPlayerSystem @ LAB_005633cf): the auto-dequipped blocker just
+      // landed in the container its dequip chose (the main pack, or a side
+      // pack when the main one is full: autoWieldRetryDue), so re-run
+      // AutoWield for the blocked item. Chained conflicts unwind one dequip
+      // per confirmation, exactly like retail; seenBlockers guards against
+      // ping-ponging on a blocker the server refuses to keep dequipped.
+      if (aceCharGuid !== null && autoWieldRetryDue(pendingAutoWield, data.itemGuid, data.containerGuid)) {
+        const pending = pendingAutoWield!;
+        pendingAutoWield = null;
+        const blocked = playerState.inventory.getItem(pending.itemId);
+        if (blocked) attemptAutoWield(blocked, pending.side, pending.seenBlockers);
       }
       // GAP.18 — server-confirmed container move: retag the item's
       // containerId when it lands in the main pack or any of our side
@@ -13042,7 +13044,8 @@ async function main() {
 
     // Override onCharacterCreated to send to ACE server
     gameUI.callbacks.onCharacterCreated = (wizard: CharacterCreateWizard) => {
-      if (!aceCharList) return;
+      // No character list yet: no session to create on (GameUI shows the refusal).
+      if (!aceCharList) return false;
 
       const info = wizard.getCharacterInfo();
       aceCharHeritage = info.heritage;
@@ -13105,6 +13108,13 @@ async function main() {
       });
 
       aceConnection.sendMessage(createMsg, GameMessageGroup.UIQueue);
+      return true;
+    };
+    // BUG.chargen-finish-silent — what each FINISH did, for the pre-world telemetry.
+    gameUI.callbacks.onChargenFinish = (outcome, reason) => {
+      if (outcome === 'sent') preworldReporter?.chargenSent();
+      else if (outcome === 'no_reply') preworldReporter?.chargenNoReply();
+      else if (reason) preworldReporter?.chargenBlocked(reason);
     };
 
     // Override onEnterWorld to send to ACE server
@@ -16042,6 +16052,12 @@ async function main() {
           const stuck = o.physics?.stickyObjectId() ?? 0;
           return stuck ? { seeks: { guid: stuck >>> 0, kind: 'stick' } } : {};
         })(),
+        // A creature's drawn stance (its motion style): a fellow with a weapon out is fighting (stay_with waits for them).
+        ...((): Pick<AgentHostObject, 'combatStance'> => {
+          if (!((o.itemType ?? 0) & 0x10)) return {};
+          const style = serverObjectManager?.getAnimated(o.guid)?.motionManager.currentStyleId ?? 0;
+          return style && (style >>> 0) !== (MotionStance.NonCombat >>> 0) ? { combatStance: true } : {};
+        })(),
         };
       };
       const carried = (): Set<number> => new Set([...playerState.inventory.getAll().map((i) => i.id >>> 0), ...playerState.equipment.getAll().map((i) => i.id >>> 0)]);
@@ -16133,6 +16149,8 @@ async function main() {
         },
         // In-flight projectiles (PhysicsState.Missile) and objects that left the world aren't things to observe or act on.
         objects: function* () { for (const o of serverObjectManager?.getAllObjects().values() ?? []) if (!o.outOfWorld && !((o.physicsState ?? 0) & AcePhysicsState.Missile)) yield hostObject(o); },
+        // What creatures hold (out of the world, so not in objects()): a monster's bow or javelins says it shoots.
+        wielded: function* () { for (const o of serverObjectManager?.getAllObjects().values() ?? []) if (o.wielderId) yield hostObject(o); },
         object: (guid) => { const o = serverObjectManager?.getObject(guid); return o ? hostObject(o) : null; },
         lineOfFire: (guid) => serverObjectManager?.lineOfFire(guid) ?? null,
         lineOfFireOpenSpot: (guid) => serverObjectManager?.openLineSpot(guid) ?? null,
@@ -19288,7 +19306,9 @@ async function main() {
     // every registered per-object part (Render::viewer_pos = the camera).
     sceneManager.camera.getWorldPosition(datLightViewerPos);
     degradeLod.tick(dt);
-    degradeLod.updateParts(datLightViewerPos);
+    // BUG.chargen-preview-after-sweep — only the world scene's parts take the
+    // world camera's distance; the UI viewports' own scenes stay at level 0.
+    degradeLod.updateParts(datLightViewerPos, sceneManager.scene);
     sceneryPool.updateLod(datLightViewerPos);
     staticsPool.updateLod(datLightViewerPos);
     buildingsPool.updateLod(datLightViewerPos);

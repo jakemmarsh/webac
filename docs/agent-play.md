@@ -687,6 +687,23 @@ here, not having to hardcode behavior").
   Arcanist got a bolt off every 10–15 s: over 7 minutes Bulwark landed 6 killing blows to Arcanist's 3 bolts, and the
   mage looked stuck to the human watching. A retail player keeps pressing the bolt key, VirindiTank and our routines
   cast repeatedly too: a tool gap, not a play decision. Nothing era-specific (the same cast path in all three eras).
+- **Opt-in chaining: `ac_attack next=true` (2026-10-16).** When the target dies, the attack goes straight on to the
+  next monster on you (the one hitting you most, else one standing on you, else the one on a fellow nearest you within
+  30 m), with the same height and power and `next=true` again, and the target-died event names it ("next=true: attacking
+  Essa Sclavus #800051ad now (on you, 6× in 10 s)"); nothing left on anyone ends the chain and says so. Any order of
+  yours in between (another attack without `next`, a walk, a cast) wins. Default unchanged: retail's Auto Target only
+  selects the next attacker (AttackRequest.autoTarget), it never swings at it, so a plain `ac_attack` stops at the kill.
+  Why: Bulwark re-issued `ac_attack` after every Essa at the Sclavus camp (report 12:56Z, "re-attacking after every
+  single kill"). The same in all three eras (the attack path is shared).
+- **A melee attack doesn't leave your fellow's floor (2026-10-16).** Indoors, `ac_attack` at a monster a storey up or
+  down (4 m or more, observe's "ON ANOTHER FLOOR") is refused while a fellow in view stands on your floor within 30 m: the run-up would be a climb or a
+  drop away from them. The refusal says where it is, the way there (`floorRoute`: the doorway route's length, its drops
+  and leaps, or that none reaches it) and what to do instead (let it come, have a caster bolt it through an opening, a
+  monster on your floor it names); `far=true` goes anyway. With no target given, a monster on your floor is taken first;
+  `next=true` never chains onto one the refusal would stop; routines and the macro keep their own targets (far). Why:
+  Bulwark's attacks on Mu-miyahs 6–12 m up or down pulled him off Arcanist's floor three times in Mountain Keep
+  (0x01D2, 2026-10-16 15:12–15:20Z), and the reply named the floor change only once he was on his way. Shared by all
+  three eras (floors and doorways from each era's cell DAT).
 - **A caster's attack casts (2026-10-13).** `ac_attack`, and a routine's `pull` and `attack-nearest` (all `AgentApi.attack`),
   with a wand, staff or orb wielded (or already in magic mode) fight with spells: magic mode, then the attack spell the
   VirindiTank macro would pick for its `<DEFAULT>` row (`combatPlan.casterAttackSpell` → `planCombat`: Auto element from
@@ -848,7 +865,8 @@ here, not having to hardcode behavior").
   item at a time and waits for each answer (the client allows one inventory request: IsPlayerReadyToMakeInventoryRequest),
   reopens a container that closed with items left, and reports only what reached your pack, with the server's reason
   for each refusal. (Arcanist took one item per pass, four passes, each claiming all four.)
-- **Range and price.** `ac_spells` shows each spell's range for you and an "Out of Range!" cast says it: retail's
+- **Range and price.** `ac_spells` shows each spell's range for you, a cast at a target more than a metre past it is
+  refused before it is sent with the metres to close ("walk 35 m closer"), and an "Out of Range!" cast says it: retail's
   DetermineSpellRange reads InqSkillLevel (ranks + init level, no attributes or buffs), as ACE's check does, so the
   spell examine's Range line now uses that too. A skill raise names the next one's price; "creature" picks Creature
   Enchantment over Assess Creature. A cheaper first raise is XP already in the skill (cost = table[rank+1] − spent).
@@ -943,7 +961,8 @@ here, not having to hardcode behavior").
   "Exit" in the doll dungeon had taken the one across the rift).
   A walk names a fellow it left far behind, and `stay_with=<fellow>` keeps you together: the walk runs as always,
   and when the fellow is more than `stay_within` m behind (15 by default) it stops once and waits until they are
-  within 4 m (or have come back within three quarters of the leash and stopped there, not casting), then runs on together: one stop per gap, not
+  within 4 m (or have come back within the leash and stopped there, not casting; a fellow heard casting in the last
+  30 s is in a round of buffs and waited for), then runs on together: one stop per gap, not
   a stop every second at the leash's edge (Bulwark, stream day 2026-10-14). There is no walking pace: a run eased
   to a walk (Shift) to let a slower fellow catch up was removed the same day, because on stream the pair walked
   most of the time (Arcanist walked ~25 s, ran ~2 s, walked again, as Bulwark's run is a little slower than his;
@@ -971,7 +990,7 @@ here, not having to hardcode behavior").
   (host `navTerrain`). An attack whose run-up finds no way ends as `target-lost` with the reason. `stay_with` waits
   only for a fellow *behind* you (two players both walking with it used to wait for each other), and says when they
   stand still (12 s) or head elsewhere instead of waiting 45 s. **`ac_follow`** follows a player (within N m,
-  re-aiming, standing while they stand, for duration_s): retail has no follow command (none in the decomp), this is
+  re-aiming, standing while they stand; with no duration_s it runs until they have stood beside you 30 s, at most 10 minutes, then answers "still following": the old 120 s default ended a follow every two minutes mid-journey, Bulwark 2026-10-16): retail has no follow command (none in the decomp), this is
   VirindiTank's Follow nav / `/ub follow`. `ac_buy` waits for each buy's answer and queues the next (ACE refuses a
   service while the vendor `IsBusy` casting the last one); `ac_vendor` marks services (ItemType TYPE_SERVICE
   0x100000: "service: casts it on you when you buy it; not a scroll"), and with `target=<the vendor>` opens that vendor first with ac_use's own use (walk there, use) when it isn't the open one: eleven `vendor target=…` calls were refused as an unknown argument in one segment (2026-10-16). A give that went through drops a busy notice from its reply ("You can only move or use one item at a time" was another give's, sent a quarter-second later). `ac_loot` waits for peace mode to really take
@@ -1005,7 +1024,7 @@ here, not having to hardcode behavior").
   goal. The point is never placed by dividing by 192: dungeon frames run outside 0–192 (the Training Academy 0x7202
   spans local y −255..5; a hive route's point at 0x039D is local (51, −56), room 0x039D0156 at z −30, VTank Z −0.125).
   In a building the same lookup puts a coordinate inside it in its room (within 3 m of your storey). Attack lines are placed when they come, on the nearest of that name within reach (a swing
-  8 m, a spell 60 m, a shot 78 m from a monster wielding a bow, crossbow, atlatl or thrown weapon or turned to face you: ACE's ranged monsters TurnTo and stand, and a Sata Sclavus's arrows from 22 m read as melee lines, 2026-10-16), never moved onto another of the name later; none in reach is `hit by, but not placed` (in a dungeon ACE shows you no monster in a cell yours can't see, yet its melee checks distance only, so it can hit you through a wall or shut door). ac_wait:
+  8 m, a spell 60 m, a shot 78 m from a monster wielding a bow, crossbow, atlatl or thrown weapon (read from the host's `wielded()`: held items are out of the world, so `objects()` never lists them) or turned to face you: ACE's ranged monsters TurnTo and stand, and a Sata Sclavus's arrows from 22 m read as melee lines, 2026-10-16), never moved onto another of the name later; none in reach is `hit by, but not placed` (in a dungeon ACE shows you no monster in a cell yours can't see, yet its melee checks distance only, so it can hit you through a wall or shut door). ac_wait:
   vitals-low at half health by default (`vitals_below=`, `mana_below=`, `stamina_below=` per wait; it was 35%, and woke
   an archer at 14%), any single hit over a quarter of max health, `attackers-up` and `cast-at-you` (a spell landing on,
   failing on or resisted by you, or a creature within 40 m speaking spell words: ACE Monster_Magic broadcasts them).

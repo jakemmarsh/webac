@@ -324,3 +324,22 @@ export function resolveAutoWield(
 
   return finishBlocked();
 }
+
+/** An auto-wield waiting on its blocker's dequip: the item to wield, the blocker, and the container the dequip sent it to. */
+export interface PendingAutoWieldRetry {
+  itemId: number;
+  blockingId: number;
+  /** Where the dequip's PutItemInContainer sent the blocker (the main pack, or a side pack when the main one is full). */
+  containerId: number;
+}
+
+/**
+ * Whether a server move (ServerSaysMoveItem: item → container) is the dequip an auto-wield waits on, so the wield is
+ * tried again: CPlayerSystem::RecvNotice_ServerSaysMoveItem @ 00563260 (LAB_005633cf) retries AutoWield when the
+ * blocker lands and the move's container is the one its dequip chose (`blockedID == param_5`), a side pack included.
+ * Ours retried only for the main pack, so with the main pack full (111/102) the Leather Boots went into the Sack and the
+ * Shoes were never wielded: "no answer from the server in 4 s" (Bulwark, 2026-10-16 07:31 and 12:24).
+ */
+export function autoWieldRetryDue(pending: PendingAutoWieldRetry | null, itemGuid: number, containerGuid: number): boolean {
+  return !!pending && (itemGuid >>> 0) === (pending.blockingId >>> 0) && (containerGuid >>> 0) === (pending.containerId >>> 0);
+}
