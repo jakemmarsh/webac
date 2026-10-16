@@ -1078,7 +1078,13 @@ uses the client's own movement collision:
    a streamed cell still in flight leaves it incomplete (rebuilt next time) instead of silently cut short.
 2. **Each leg.** A straight walk when the probe says it arrives; else a path search round walls, door
    frames and furniture (`agent/navPlanner.ts`, a 12 m box round the leg). When that search ran into its
-   box, a **wider** one (35 m); when there's still no way on foot, one that may **jump and drop**.
+   box, a **wider** one (35 m); out on the landscape, when that too ran into its box, a **far** one (a 2 m
+   grid, 80 m round start and goal: a town wall whose gate is 80 m off); when there's still no way on foot,
+   one that may **jump and drop**. The far search's way round is kept as waypoints (each leg planned again
+   from where a stall leaves the body), and the walk's time limit grows with it. Arwic, 2026-10-15: the
+   north wall (landblock 0xC6A9, face at local y ≈ 98) has no gate; the gates are west (y 70–75) and south
+   (x 46–50), and every walk to the Mines portal 43 m beyond it ended in one corner
+   (tests/verify-agent-walk-town-wall.ts).
 3. **Jumps and drops** (`agent/jumpPlan.ts`). A player can't walk off a ledge (the client's edge slide
    stops it), so going down a level, across a gap or up onto a platform is a jump. Where the walk stops
    short, the planner flies the jumps the client would: a standing long jump (charge started standing
@@ -1101,6 +1107,14 @@ uses the client's own movement collision:
    doorway (`RouteOptions.closed`), and it is never tried twice. No way at all: a closed door **on the way** (in a doorway still ahead on the route, or ahead
    on the line to the leg's aim; never the one you stand in or one off to the side), then a wide search
    straight for the goal (jumps included). Stalls back off, sidestep, and give up on the fifth.
+   A walk that ends stuck where an earlier walk toward (about) the same goal ended says so ("this route
+   keeps ending here …: walk 2 toward there to stop at this spot"), with the open ways from there.
+6. **Uses, pick-ups, loots and melee run-ups.** The server walks you to an object in a straight line (ACE
+   MoveTo). When the client's own collision stops that line short (a wall, a fence, a building between),
+   the walk above goes first and the request after; with a clear line the server's walk is used as before.
+   A turn or jump by hand (`ac_turn`, `ac_jump`) ends a walk or follow under way, as `ac_move` already
+   did: the walk no longer steers the body back after the player moves it. `ac_turn` takes compass words
+   (`east`, `NW`) and `left` / `right` / `back`.
 
 The trace (browser console, `[AC:Agent] walk …`) logs each leg, search, jump (`walk drop 6.0 m from … facing
 0°, walking, jump key held 150 ms (power 0.15); landing … in 1.4 s`) and landing. The result says what the

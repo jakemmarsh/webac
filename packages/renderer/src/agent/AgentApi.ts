@@ -650,8 +650,8 @@ interface Task {
   resolve: (r: AgentResult) => void;
   /** What the task answers when it is stopped (replaced, stopped, you died); default "<label>: interrupted (why)". */
   interrupted?(why: string): AgentResult;
-  /** A cast repeat (a single cast replaces it). */
-  kind?: 'cast-repeat';
+  /** A cast repeat (a single cast replaces it); a walk or follow (a turn or jump by hand replaces it). */
+  kind?: 'cast-repeat' | 'walk';
 }
 
 /** What one cast of a repeat did: whether it went out, the chat lines after it, the server's refusals. */
@@ -688,6 +688,8 @@ export interface LootOptions {
   itemTries?: number;
   /** Close the corpse when done (a second Use), as VTank does. */
   close?: boolean;
+  /** Internal: the walk round a wall to it is done (loot walks there first when the server's straight walk would stop short). */
+  walked?: boolean;
 }
 
 export interface ObserveOptions {
@@ -1786,6 +1788,8 @@ export class AgentApi {
    * ItemUseable is No): kept for the session, so no later walk tries one by hand again.
    */
   private doorsRefusedByHand = new Set<number>();
+  /** Where walks ended stuck (global metres), with their goal and how many ended there: a repeat says so (DEAD_END_M). */
+  private deadEnds: Array<{ x: number; y: number; gx: number; gy: number; n: number; at: number }> = [];
   /** The client's own refusal of a Use on a door that only its lever or switch opens (UseObject.ts, 0x7e2af8). */
   static readonly DOOR_NOT_BY_HAND = /can't open or close this .+ that way/i;
   /** Names of the things a player pulls, pushes or steps on to open a door that won't open by hand. */
@@ -2505,11 +2509,29 @@ export class AgentApi {
   private approach(guid: number, within: number, flee = false): Promise<AgentResult> | null {
     const o = this.host.object(guid) ?? this.remembered(guid);
     if (!o || !o.cell) return null;
-    // Under attack the server's own straight MoveTo is no way out either: walk it ourselves, through the hits.
-    if (!this.planRoute(toGlobal(o.cell, o.x, o.y), o).length && !(flee && this.attackersOfMe().size)) return null;
+    // Under attack the server's own straight MoveTo is no way out either: walk it ourselves, through the hits. Nor is it
+    // round a wall: outdoors its straight line toward the Arwic Mines portal slid Arcanist into the town wall's corner on
+    // every use (2026-10-15), so a line the client's own collision stops short is walked by the planner first.
+    if (!this.planRoute(toGlobal(o.cell, o.x, o.y), o).length && !(flee && this.attackersOfMe().size) && !this.straightStopsShort(o, within)) return null;
     // A portal under attack is run into, as a player escaping does: no stop beside it for the server's walk to finish.
     const into = flee && classify(o, false) === 'portal';
     return this.walkTo(guid, { within: into ? 0.5 : within, timeoutMs: 90_000, ...(flee ? { flee: true } : {}), ...(into ? { enterPortal: true } : {}) });
+  }
+
+  /**
+   * Whether a straight walk from where you stand toward `o` (the server's MoveTo is one: ACE moves you in a line) stops
+   * more than `within` (plus the object's own reach) short of it in the client's own collision: a wall, a fence, a
+   * building between. False when there's no probe to ask, or you're already that near.
+   */
+  private straightStopsShort(o: AgentHostObject, within: number): boolean {
+    const probe = this.host.navProbe?.bind(this.host);
+    const me = this.me();
+    if (!probe || !me || !o.cell) return false;
+    const g = toGlobal(o.cell, o.x, o.y);
+    const reach = within + (this.host.objectReach?.(o.guid) ?? 0) + 0.5;
+    if (Math.hypot(g.x - me.g.x, g.y - me.g.y) <= reach) return false;
+    const end = probe({ x: me.g.x, y: me.g.y, z: me.s.z }, g);
+    return !end || Math.hypot(end.x - g.x, end.y - g.y) > reach;
   }
 
   /** A corpse that appeared since the last few ticks (not one lying there from before). */
@@ -2707,7 +2729,11 @@ export class AgentApi {
     const me = this.me();
     if (!me) return { ok: false, message: 'not in world' };
     let deg: number;
+    // A compass word ("east", "NE") or your own left / right / back, as walk_to's offsets take them. "turn toward=east"
+    // looked for an object named east and answered "object has no position" (Arcanist, Arwic, 2026-10-15).
+    const word = typeof toward === 'string' ? parseOffset(`1 m ${toward}`) : null;
     if (typeof toward === 'number') deg = toward;
+    else if (word) deg = word.bearing ?? normDeg(me.heading + (word.turn ?? 0));
     else {
       const g = this.need(toward, 'world', 'object');
       if (typeof g !== 'number') return g;
@@ -2715,6 +2741,7 @@ export class AgentApi {
       if (!o || !o.cell) return { ok: false, message: 'object has no position' };
       deg = bearing(me.g, toGlobal(o.cell, o.x, o.y));
     }
+    this.manualMoveCancels('turn');
     this.host.setYaw(compassToYaw(deg));
     return { ok: true, message: `facing ${Math.round(normDeg(deg))}°` };
   }
@@ -2726,6 +2753,7 @@ export class AgentApi {
    */
   jump(opts: { holdMs?: number; forward?: boolean; backward?: boolean; strafeLeft?: boolean; strafeRight?: boolean; walk?: boolean } = {}): AgentResult {
     const hold = Math.max(50, Math.min(opts.holdMs ?? 350, 3000));
+    this.manualMoveCancels('jump');
     // UB's jump[swzxc]: Shift (walk) and the movement keys held through the jump (the same keys move() presses).
     const keys = [opts.walk && 'ShiftLeft', opts.forward && 'KeyW', opts.backward && 'KeyS', opts.strafeLeft && 'KeyZ', opts.strafeRight && 'KeyC'].filter((k): k is string => !!k);
     for (const k of keys) this.host.key(k, true);
@@ -2753,6 +2781,16 @@ export class AgentApi {
     if (!code) return false;
     this.host.key(code, down);
     return true;
+  }
+
+  /**
+   * A turn or jump by hand ends a walk or follow under way, as a player's own movement keys override autonomous movement
+   * (retail's MoveToManager is cancelled by the player's input). Before, the walk set the heading again on its next
+   * tick and kept steering: Arcanist's jumps over a wall in Arwic were turned straight back at the wall ("a leftover
+   * walk_to task is still running and may be fighting my manual moves", 2026-10-15). ac_move already replaced the task.
+   */
+  private manualMoveCancels(what: string): void {
+    if (this.task?.kind === 'walk') this.cancelTask(`replaced by ${what}`);
   }
 
   /** Break off an attack as the client's Cancel Attack does: the agent stops watching it and the server stops swinging. */
@@ -3144,6 +3182,12 @@ export class AgentApi {
     const g = this.need(t, 'world', 'item');
     if (typeof g !== 'number') return g;
     const name = this.nameOf(g);
+    // The server walks you to it in a straight line: round a wall, the planner's way first (as ac_use does).
+    const lying = this.host.object(g);
+    if (lying && this.straightStopsShort(lying, 1.5)) {
+      const w = await this.walkTo(g, { within: 1.5 });
+      if (!w.ok) return { ok: false, message: `couldn't reach ${name}: ${w.message}` };
+    }
     for (let w = 0; w < 50 && this.host.busy(); w++) await sleep(200);
     const since = this.seqN;
     if (!this.host.pickUp(g)) return { ok: false, message: `pick-up of ${name} refused by the client (busy with another item, or not reachable)` };
@@ -3317,6 +3361,23 @@ export class AgentApi {
    * take minutes a few ms a frame: Arcanist stood 4 minutes outside the Holtburg archmage's house, 2026-10-10.
    */
   static readonly SEARCH_WALL_MS = 30_000;
+  /**
+   * The far search, outdoors: when the wide box (35 m) holds no way, one A* on a 2 m grid with an 80 m margin round
+   * start and goal. Arwic's north wall (landblock 0xC6A9, the wall line at local y ≈ 98) has its gates 80 m west and
+   * south of the corner the Mines portal walks pushed into; this grid finds the west gate in about 1,800 points (about
+   * 15,000 probes, 6 s of probing in node, tests/verify-agent-walk-town-wall.ts). 2 m still threads a 4 m gate; 3 m
+   * can't leave the 2 m alley the walk had wandered into.
+   */
+  static readonly FAR_SPACING_M = 2;
+  static readonly FAR_MARGIN_M = 80;
+  static FAR_MAX_NODES = 4000;
+  static readonly FAR_SEARCH_WALL_MS = 60_000;
+  /** A waypoint of the far search's way round is passed this near (its grid is 2 m). */
+  static readonly FAR_WAYPOINT_M = 1;
+  /** A failed walk that ends within this of where an earlier one toward (about) the same goal ended says so. */
+  static readonly DEAD_END_M = 4;
+  static readonly DEAD_END_GOAL_M = 15;
+  static readonly DEAD_END_MS = 30 * 60_000;
   /**
    * How many more times a leg whose whole ladder of searches (the box, wider, with jumps and drops) found no way may
    * run that ladder again in one walk, after a door detour or a replan brings the walk back to it; past that the
@@ -4035,15 +4096,25 @@ export class AgentApi {
     };
     const jumpSearch = (): JumpSearch | null => this.jumpSearch();
     const wideOpts = { spacing: 1, margin: 35, maxNodes: 6000 };
+    // The far search (outdoors, once per leg): a coarse grid over a much bigger area, for a wall whose way through lies
+    // outside the wide box. Its own wall clock: it is the one search that may stand longer.
+    const farOpts = { spacing: AgentApi.FAR_SPACING_M, margin: AgentApi.FAR_MARGIN_M, maxNodes: AgentApi.FAR_MAX_NODES };
+    const farTried = new Set<string>();
+    let farSearch: PathSearch | null = null;
+    // The way round the far search found (global, the goal excluded): waypoints walked one by one as doorways are, each
+    // leg planned again from where the body is when it stalls on a corner (a gate post), so a stall never throws the
+    // way round away for a stretch straight back at the wall.
+    let farRoute: NavPoint[] = [];
     // The point the current leg heads for: the door to open, the next doorway (the floor under a
     // floor opening the route falls through), or the goal.
     const legAim = (): { x: number; y: number; z?: number; drop?: number } | null => {
       if (doorDetour) return { x: doorDetour.x, y: doorDetour.y };
       const r = route[0];
       if (r) return r.drop !== undefined ? { x: r.x, y: r.y, z: r.landing, drop: r.drop } : r;
+      if (farRoute[0]) return farRoute[0];
       return goal();
     };
-    const legWithin = (aim: { drop?: number }): number => (doorDetour ? 1.6 : aim.drop !== undefined ? 3 : route.length ? 0.6 : Math.max(0.6, within - 0.2));
+    const legWithin = (aim: { drop?: number }): number => (doorDetour ? 1.6 : aim.drop !== undefined ? 3 : route.length ? 0.6 : farRoute.length ? AgentApi.FAR_WAYPOINT_M : Math.max(0.6, within - 0.2));
     const startSearch = (from: NavStep, aim: { x: number; y: number; z?: number; drop?: number }, t: number): void => {
       tier = t;
       const jumps = t >= 2 ? jumpSearch() : null;
@@ -4055,7 +4126,7 @@ export class AgentApi {
       const gl = goal();
       if (!probe || !gl || directWide) return false;
       directWide = true;
-      route = []; legs = []; doorDetour = null; tier = 0;
+      route = []; legs = []; doorDetour = null; tier = 0; farRoute = [];
       const jumps = jumpSearch();
       this.trace(`walk: ${why}; searching wide straight for the goal${jumps ? ', jumps and drops included' : ''} (${((this.host.now() - start) / 1000).toFixed(1)} s into the walk)`);
       search = new PathSearch(probe, from, gl, { within: Math.max(1, within - 0.2), ...wideOpts, ...(jumps ? { jumps } : {}) });
@@ -4075,9 +4146,9 @@ export class AgentApi {
       // Only the goal is reached `within` its reach: a doorway on the route (or a door to open) is reached on it. A follow
       // (within 4 m) took a doorway 2 m off, behind a row of bookshelves in Holtburg Dungeon 0x01F60224, as reached, so no
       // way round was ever searched and the body pushed into the shelves for 12 s, three times (2026-10-12).
-      const reach = route.length || doorDetour ? legWithin(aim) : within;
+      const reach = route.length || doorDetour || farRoute.length ? legWithin(aim) : within;
       if (far <= reach && aim.drop === undefined && !otherFloor) return;
-      if (far > 60) {
+      if (far > 60 && !farRoute.length) {
         // A far goal: plan the next 35 m toward it (legs end there; the next stretch is planned on arrival).
         // Straight on first, always; then the side the last detour took (round a lake, keep to its shore).
         stretchTurns = [...new Set([0, lastTurn, ...STRETCH_TURNS])];
@@ -4208,6 +4279,20 @@ export class AgentApi {
         if (Math.abs(dz) >= AgentApi.FLOOR_APART_M) {
           r = { ...r, message: `${this.nameOf(targetGuid)} is ${Math.abs(dz).toFixed(0)} m ${dz > 0 ? 'above you on a ledge or upper floor' : 'below you on a lower floor'}; no way ${dz > 0 ? 'up' : 'down'} to them was found from here (${r.message}). Ask them to come back to you, or find the ramp or stairs (ac_map, ac_trace for their way)` };
         }
+      }
+      // The same dead end again: a walk toward (about) the same goal that ends stuck where an earlier one did. Arcanist's
+      // walks, follows and uses toward the Arwic Mines portal ended in one wall corner six times in 15 minutes, each
+      // answer as fresh as the first (2026-10-15).
+      const meEnd = this.me(), glEnd = goal();
+      if (!r.ok && /^stuck /.test(r.message) && meEnd && glEnd) {
+        const now = this.host.now();
+        this.deadEnds = this.deadEnds.filter((e) => now - e.at < AgentApi.DEAD_END_MS);
+        const seen = this.deadEnds.find((e) => Math.hypot(e.x - meEnd.g.x, e.y - meEnd.g.y) <= AgentApi.DEAD_END_M && Math.hypot(e.gx - glEnd.x, e.gy - glEnd.y) <= AgentApi.DEAD_END_GOAL_M);
+        if (seen) {
+          seen.n++; seen.at = now;
+          const here = (meEnd.s.cell & 0xffff) < 0x100 ? ` (${mapCoordinateText(mapCoordsOfCell(Math.floor(meEnd.g.x / CELL_LENGTH), Math.floor(meEnd.g.y / CELL_LENGTH)))})` : '';
+          notes.push(`this route keeps ending here${here}: walk ${seen.n} toward there to stop at this spot, so the way isn't through here. Open ways from here: ${this.openWays(probe, { x: meEnd.g.x, y: meEnd.g.y, z: meEnd.s.z })}. Walk well off along one of those first (or to a gate or a fellow who got there), then on`);
+        } else this.deadEnds.push({ x: meEnd.g.x, y: meEnd.g.y, gx: glEnd.x, gy: glEnd.y, n: 1, at: now });
       }
       return notes.length ? { ...r, message: `${r.message}\n  ${notes.join('\n  ')}` } : r;
     };
@@ -4511,7 +4596,7 @@ export class AgentApi {
           r = sr.abandon();
           this.trace(`walk search stopped after ${((now - timedAt) / 1000).toFixed(1)} s: under attack`);
         }
-        if (!r && now - timedAt > AgentApi.SEARCH_WALL_MS) {
+        if (!r && now - timedAt > (sr === farSearch ? AgentApi.FAR_SEARCH_WALL_MS : AgentApi.SEARCH_WALL_MS)) {
           r = sr.abandon();
           this.trace(`walk search stopped after ${Math.round((now - timedAt) / 1000)} s standing still`);
         }
@@ -4519,6 +4604,23 @@ export class AgentApi {
         search = null;
         legs = r.status === 'found' ? r.path : [];
         noWay = r.status === 'none';
+        if (sr === farSearch) {
+          farSearch = null;
+          if (r.status === 'found') {
+            let len = 0, p0: { x: number; y: number } = here;
+            for (const q of r.path) { len += Math.hypot(q.x - p0.x, q.y - p0.y); p0 = q; }
+            this.trace(`walk: the way round is ${len.toFixed(0)} m (the goal is ${d.toFixed(0)} m off)`);
+            // A way round far longer than the straight distance (out by a gate and back): time for it, unless one was given.
+            if (opts.timeoutMs === undefined && !follow) timeoutMs = Math.min(Math.max(timeoutMs, (now - start - credit) + (len / AgentApi.WALK_BUDGET_MPS + 30) * 1000), AgentApi.WALK_MAX_MS);
+            // Its points are waypoints (the last one is beside the goal: the goal itself ends the walk).
+            farRoute = r.path.slice(0, -1).map((q) => ({ x: q.x, y: q.y, z: q.z }));
+            legs = [];
+            tier = 0;
+            planLegs();
+            best = Infinity; bestAt = now;
+            return null;
+          }
+        }
         this.trace(`walk search ${r.status} after ${r.expanded} points in ${((now - timedAt) / 1000).toFixed(1)} s (${((now - start) / 1000).toFixed(1)} s into the walk)${legs.length ? `: ${legs.map(legText).join(' ')}` : ''}`);
         // Any search that found no way while keeping clear of monsters (a stretch after its turned tries): plan again
         // without them at once. Wider searches and jumps are for walls; standing through them while monsters close is not.
@@ -4633,6 +4735,17 @@ export class AgentApi {
               startSearch(here, aim, 1);
               return null;
             }
+            // Out on the landscape, a wall longer than the wide box: a town wall whose gate is 80 m off (Arwic's north
+            // wall, its gates west and south; the Mines portal 43 m north of a corner of it). The wide box never
+            // reached the gate, so every walk there pushed into the same corner (Arcanist, 2026-10-15). One coarse
+            // search over a far bigger area, before jumps: walking round by the gate beats any jump.
+            if (tier === 1 && r.status === 'none' && r.boxed && (me.s.cell & 0xffff) < 0x100 && !route.length && !farTried.has(aimKey(gl))) {
+              farTried.add(aimKey(gl));
+              farRoute = [];
+              this.trace(`walk: no way within ${wideOpts.margin} m; searching ${farOpts.margin} m round on a ${farOpts.spacing} m grid (a gate or a wall's end farther off)`);
+              farSearch = search = new PathSearch(probe, here, gl, { within: Math.max(within - 0.2, farOpts.spacing), ...farOpts });
+              return null;
+            }
             if (jumpSearch()) {
               this.trace(`walk: no way on foot; searching with jumps and drops (falls up to ${Math.round(fallBudget(me.s.health))} damage)`);
               startSearch(here, aim, 2);
@@ -4723,9 +4836,10 @@ export class AgentApi {
       // 0.8 m of it, but off its axis, the jamb still stands between (a 0.96 m body in a 1.5–1.9 m door).
       // A floor opening the route drops through is passed once we're down on its landing.
       while (!legs.length && route.length && (route[0].drop !== undefined ? passedRoute(route[0], here) : passed(route[0], route[1] ?? gl, 0.3))) { route.shift(); best = Infinity; advanced = true; }
+      while (!legs.length && !route.length && !doorDetour && farRoute.length && passed(farRoute[0], farRoute[1] ?? gl, AgentApi.FAR_WAYPOINT_M)) { farRoute.shift(); best = Infinity; advanced = true; }
       if (advanced) { planLegs(); if (search) return null; }
       const takeoff = legs[0]?.jump ? legs[0].jump.from : null;
-      const aim = takeoff ?? legs[0] ?? (doorDetour ? { x: doorDetour.x, y: doorDetour.y } : null) ?? route[0] ?? gl;
+      const aim = takeoff ?? legs[0] ?? (doorDetour ? { x: doorDetour.x, y: doorDetour.y } : null) ?? route[0] ?? farRoute[0] ?? gl;
       const da = Math.hypot(aim.x - me.g.x, aim.y - me.g.y);
       this.host.setYaw(compassToYaw(bearing(me.g, aim)));
       // The last metres to a jump's take-off at a walk, so the body stops on it.
@@ -4817,7 +4931,7 @@ export class AgentApi {
       dodgeUntil = now + (stalls >= 3 ? 1600 : 900);
       best = Infinity;
       return null;
-    }, release).then(after);
+    }, release, { kind: 'walk' }).then(after);
   }
 
   /** The nearest portal within `radius` m of a spot (global metres), with its name and place; null when none. */
@@ -5503,7 +5617,7 @@ export class AgentApi {
     const o = this.host.object(guid);
     const me = this.me();
     const far = !!(o && o.cell && me && Math.hypot(toGlobal(o.cell, o.x, o.y).x - me.g.x, toGlobal(o.cell, o.x, o.y).y - me.g.y) > AgentApi.ATTACK_RUN_UP_M);
-    if (o && o.cell && (far || this.planRoute(toGlobal(o.cell, o.x, o.y), o).length)) {
+    if (o && o.cell && (far || this.planRoute(toGlobal(o.cell, o.x, o.y), o).length || this.straightStopsShort(o, 2.5))) {
       // Attacked on the way: stop walking and fight (the server's own approach closes the rest).
       void this.walkTo(guid, { within: 2.5, timeoutMs: 90_000 }).then((r) => {
         if (r.ok || r.attacked) { fight(); return; }
@@ -5546,6 +5660,12 @@ export class AgentApi {
     }
     const guid = g;
     const name = this.nameOf(guid);
+    // The server walks you to it in a straight line: round a wall (a corpse over a fence, beyond a building's corner)
+    // the planner's way first, as ac_use does (Arwic, 2026-10-15).
+    const lying = this.host.object(guid);
+    if (!opts.walked && lying && this.host.openContainer()?.guid !== guid && this.straightStopsShort(lying, 2)) {
+      return this.walkTo(guid, { within: 2 }).then((w) => (w.ok ? this.loot(guid, match, decide, { ...opts, walked: true }) : { ok: false, message: `couldn't reach ${name}: ${w.message}` }));
+    }
     let re: RegExp | null = null;
     if (match) { try { re = new RegExp(match, 'i'); } catch { re = new RegExp(match.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); } }
     const leftCombat = this.host.self()?.combatMode !== 'peace';

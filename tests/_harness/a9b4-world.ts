@@ -37,7 +37,47 @@ export interface A9b4Blocker {
 }
 
 export async function buildA9b4World(options: { interiors?: boolean; blockers?: A9b4Blocker[] } = {}): Promise<(slide?: SlideState, stateOf?: (guid: number) => number | undefined) => MovementServices> {
-  const { BX, BY, OX, OY } = A9B4;
+  const { OX, OY } = A9B4;
+  // The server's doors next to the lane (ACE world DB landblock_instance, A9B4;
+  // closed: state 0x10008 HasPhysicsBSP), registered per step as main.ts registers
+  // every server object (creatureObstacles → addCreatureObstacles). Retail runs
+  // into the grocer's door 3 m left of the start (sweep-pair-WZ-lifo,
+  // sweep-alt-W-A), and retail's slide along it stops at the shop sign.
+  const doors = [
+    { guid: 0x7a9b401f, worldX: OX + 81.67, worldY: 94, worldZ: OY + 33.63, collisionRadius: 0, setupId: 0x020019ff,
+      quat: { w: 0.923879, x: 0, y: 0, z: 0.382684 }, scale: 1, physicsState: 0x10008 },
+    { guid: 0x7a9b401e, worldX: OX + 75.73, worldY: 94, worldZ: OY + 33.73, collisionRadius: 0, setupId: 0x020019ff,
+      quat: { w: 0.92388, x: 0, y: 0, z: -0.382683 }, scale: 1, physicsState: 0x10008 },
+    // The shop sign (state 0x418: IgnoreCollisions but not Ethereal — retail's
+    // FindObjCollisions @ 0050f050 skips a target only when it is both).
+    { guid: 0x7a9b402b, worldX: OX + 83.09, worldY: 94.08, worldZ: OY + 34.45, collisionRadius: 0, setupId: 0x02000290,
+      quat: { w: 0.926529, x: 0, y: 0, z: 0.376224 }, scale: 1, physicsState: 0x418 },
+    // The lifestone (Setup 0x020002EE) and Alcott (human 0x02000001) behind
+    // the start: a backpedal with a left strafe ends against them
+    // (sweep-pair-XZ-lifo-run).
+    { guid: 0x7a9b404f, worldX: OX + 81.33, worldY: 94, worldZ: OY + 11.8, collisionRadius: 0, setupId: 0x020002ee,
+      quat: { w: 0.839091, x: 0, y: 0, z: -0.543991 }, scale: 1, physicsState: 0x408 },
+    { guid: 0x8000edf0, worldX: OX + 83.3, worldY: 94, worldZ: OY + 14.04, collisionRadius: 0.48, setupId: 0x02000001,
+      quat: { w: 0.861654, x: 0, y: 0, z: -0.507496 }, scale: 1, physicsState: 0x408 },
+  ];
+  const blockers = [
+    ...doors,
+    ...(options.blockers ?? []),
+    { guid: 0x8000b698, worldX: OX + 97, worldY: 94.005, worldZ: OY + 27, collisionRadius: 0.48, setupId: 0x02000001,
+      quat: { w: 0.16847099, x: 0, y: 0, z: -0.98570698 }, scale: 1, physicsState: 0x600418 },
+    { guid: 0x8000b490, worldX: OX + 91.519, worldY: 94, worldZ: OY + 37.745, collisionRadius: 2.048, setupId: 0x0200124b,
+      quat: { w: 0, x: 0, y: 0, z: -1 }, scale: 1.4, physicsState: 0x600418 },
+  ];
+  return buildLandblockWorld(A9B4.BX, A9B4.BY, { interiors: options.interiors, blockers });
+}
+
+/**
+ * Any landblock's collision world, built as buildA9b4World builds Holtburg's: its terrain (with the block's real
+ * WaterMap), every LandblockInfo building and static, its procedural scenery, with `interiors` its walkable
+ * interior cells and their statics, and `blockers` (server objects: doors, NPCs) as main.ts registers them.
+ */
+export async function buildLandblockWorld(BX: number, BY: number, options: { interiors?: boolean; blockers?: A9b4Blocker[] } = {}): Promise<(slide?: SlideState, stateOf?: (guid: number) => number | undefined) => MovementServices> {
+  const OX = BX * 192, OY = BY * 192;
   const portalDb = openDat(DAT_PATHS.portal);
   const cellDb = openDat(DAT_PATHS.cell);
   const { DatReader } = await import('../../packages/dat-parser/src/DatReader.js');
@@ -61,7 +101,11 @@ export async function buildA9b4World(options: { interiors?: boolean; blockers?: 
   const lb = CellLandblock.read(new DatReader(cellDb.getFileData(lbId)!));
   terrain.setLandblock(BX, BY, { heights: lb.heights.map((h: number) => table[h]), blockX: BX, blockY: BY });
   const water = new WaterMap();
-  water.setLandblock(BX, BY, new Array(256).fill(1));
+  if (BX === A9B4.BX && BY === A9B4.BY) water.setLandblock(BX, BY, new Array(256).fill(1));
+  else {
+    const { LandblockMesh } = await import('../../packages/renderer/src/terrain/LandblockMesh.js');
+    water.setLandblock(BX, BY, new LandblockMesh({ heights: lb.heights, terrain: lb.terrain }).cellCornerTerrainTypes);
+  }
   const collider = new DungeonCollision();
   const info = new LandblockInfo(new DatReader(cellDb.getFileData(((lbId & 0xffff0000) | 0xfffe) >>> 0)!));
   let n = 0;
@@ -101,36 +145,7 @@ export async function buildA9b4World(options: { interiors?: boolean; blockers?: 
   });
   const built = scenery(BX, BY);
   sceneryCount = built?.entries.length ?? 0;
-  // The server's doors next to the lane (ACE world DB landblock_instance, A9B4;
-  // closed: state 0x10008 HasPhysicsBSP), registered per step as main.ts registers
-  // every server object (creatureObstacles → addCreatureObstacles). Retail runs
-  // into the grocer's door 3 m left of the start (sweep-pair-WZ-lifo,
-  // sweep-alt-W-A), and retail's slide along it stops at the shop sign.
-  const doors = [
-    { guid: 0x7a9b401f, worldX: OX + 81.67, worldY: 94, worldZ: OY + 33.63, collisionRadius: 0, setupId: 0x020019ff,
-      quat: { w: 0.923879, x: 0, y: 0, z: 0.382684 }, scale: 1, physicsState: 0x10008 },
-    { guid: 0x7a9b401e, worldX: OX + 75.73, worldY: 94, worldZ: OY + 33.73, collisionRadius: 0, setupId: 0x020019ff,
-      quat: { w: 0.92388, x: 0, y: 0, z: -0.382683 }, scale: 1, physicsState: 0x10008 },
-    // The shop sign (state 0x418: IgnoreCollisions but not Ethereal — retail's
-    // FindObjCollisions @ 0050f050 skips a target only when it is both).
-    { guid: 0x7a9b402b, worldX: OX + 83.09, worldY: 94.08, worldZ: OY + 34.45, collisionRadius: 0, setupId: 0x02000290,
-      quat: { w: 0.926529, x: 0, y: 0, z: 0.376224 }, scale: 1, physicsState: 0x418 },
-    // The lifestone (Setup 0x020002EE) and Alcott (human 0x02000001) behind
-    // the start: a backpedal with a left strafe ends against them
-    // (sweep-pair-XZ-lifo-run).
-    { guid: 0x7a9b404f, worldX: OX + 81.33, worldY: 94, worldZ: OY + 11.8, collisionRadius: 0, setupId: 0x020002ee,
-      quat: { w: 0.839091, x: 0, y: 0, z: -0.543991 }, scale: 1, physicsState: 0x408 },
-    { guid: 0x8000edf0, worldX: OX + 83.3, worldY: 94, worldZ: OY + 14.04, collisionRadius: 0.48, setupId: 0x02000001,
-      quat: { w: 0.861654, x: 0, y: 0, z: -0.507496 }, scale: 1, physicsState: 0x408 },
-  ];
-  const blockers = [
-    ...doors,
-    ...(options.blockers ?? []),
-    { guid: 0x8000b698, worldX: OX + 97, worldY: 94.005, worldZ: OY + 27, collisionRadius: 0.48, setupId: 0x02000001,
-      quat: { w: 0.16847099, x: 0, y: 0, z: -0.98570698 }, scale: 1, physicsState: 0x600418 },
-    { guid: 0x8000b490, worldX: OX + 91.519, worldY: 94, worldZ: OY + 37.745, collisionRadius: 2.048, setupId: 0x0200124b,
-      quat: { w: 0, x: 0, y: 0, z: -1 }, scale: 1.4, physicsState: 0x600418 },
-  ];
+  const blockers = options.blockers ?? [];
   return (slide, stateOf) => ({
     dungeonCollision: null, outdoorCollision: collider, terrain, water,
     creatureObstacles: (c, x, z, range) => {
