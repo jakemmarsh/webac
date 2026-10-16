@@ -35,6 +35,7 @@ import { GameMessageOpcode } from '../GameMessageOpcode.js';
 import { ISAAC } from '../ISAAC.js';
 import type { NetConnection } from '../NetWorker.js';
 import type { DisconnectCause } from '../ClientConnection.js';
+import { bridgeRefusalFromClose } from '../BridgeRefusal.js';
 import { Adapter1999, Group1999 } from './Adapter1999.js';
 import { codecs1999 } from './codecs/index.js';
 import { buildLoginBody1999, readGrant1999 } from './Login1999.js';
@@ -261,9 +262,12 @@ export class Connection1999 implements NetConnection {
       }, LOGIN_RESEND_MS);
       this.serviceTimer = setInterval(() => this.service(), SERVICE_MS);
     };
+    let serverReached = false;
     ws.onmessage = (ev) => {
       // A closed session's socket can still deliver queued frames; only the current one counts.
       if (ws !== this.ws) return;
+      // BUG.multi-tab-login-pingpong — as ClientConnection: the page's tab guard claims the account here.
+      if (typeof ev.data !== 'string' && !serverReached) { serverReached = true; this.emit({ type: 'serverReached' }); }
       if (typeof ev.data === 'string') {
         // Bridge text: the routines grant (AGENT.routine-store-auth); health answers are ignored.
         const grant = parseRoutinesGrant(ev.data);
@@ -289,7 +293,20 @@ export class Connection1999 implements NetConnection {
       if (!this.everOpened) { this.emit({ type: 'error', error: 'Bridge connection error', netErrorId: 'ID_NetError_CantSocket' }); return; }
       this.emit({ type: 'error', error: 'Bridge connection error' });
     };
-    ws.onclose = (ev: CloseEvent) => { if (ws === this.ws) this.ended(ev?.code); };
+    ws.onclose = (ev: CloseEvent) => {
+      if (ws !== this.ws) return;
+      // BUG.multi-tab-login-pingpong — the bridge refused the connection (BridgeRefusal.ts):
+      // no session existed, so no 'disconnected'; the page shows why.
+      const refusal = bridgeRefusalFromClose(ev?.code);
+      if (refusal) {
+        this.deliberate = true;
+        this.ws = null;
+        this.ended();
+        this.emit({ type: 'error', error: `Bridge refused the connection (${refusal})`, bridgeRefusal: refusal });
+        return;
+      }
+      this.ended(ev?.code);
+    };
   }
 
   private stopLoginTimer(): void {

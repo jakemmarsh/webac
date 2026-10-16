@@ -16,7 +16,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './state.ts';
-import { TOOLS, TOOL_BY_NAME, missingRequired, type AgentTool, type ToolOutput } from './tools.ts';
+import { TOOLS, TOOL_BY_NAME, missingRequired, unknownArgMessage, type AgentTool, type ToolOutput } from './tools.ts';
 import { requireClient } from './client.ts';
 
 export function parseCliArgs(tool: AgentTool, rest: string[]): Record<string, unknown> {
@@ -35,7 +35,7 @@ export function parseCliArgs(tool: AgentTool, rest: string[]): Record<string, un
       raw = tok;
     }
     const type = tool.props[key]?.type;
-    if (!type) throw new Error(`${tool.name}: unknown argument "${key}" (have: ${Object.keys(tool.props).join(', ')})`);
+    if (!type) throw new Error(unknownArgMessage(tool, key, out));
     out[key] = type === 'number' ? Number(raw) : type === 'boolean' ? /^(1|true|yes)$/i.test(raw) : raw;
   }
   return out;

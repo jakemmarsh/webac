@@ -34,6 +34,22 @@ export function afterTurn(s: { nowMs: number; deadlineMs: number; stopping: bool
   return s.nudges < s.maxNudges ? 'nudge' : 'end';
 }
 
+/**
+ * Whether to ask a quiet player to say what they're doing: their turn is running (not between turns, not wrapping up),
+ * they have neither written a line nor made a call that acts for `quietMs`, and nothing of theirs is running in the game
+ * (`task` null from the daemon's vitals: no walk, follow, fight or repeat cast; undefined = unknown, never nudged). A
+ * running task counts as activity (the supervisor stamps `lastActiveMs` when it sees one), so a walk that ends doesn't
+ * set one off at once. At most one per `quietMs`.
+ */
+export function quietNudge(s: { nowMs: number; quietMs: number | null; inTurn: boolean; wrapUpSent: boolean; stopping: boolean; lastActiveMs: number; lastNudgeMs: number; task: string | null | undefined }): boolean {
+  if (s.quietMs === null || s.quietMs <= 0 || !s.inTurn || s.wrapUpSent || s.stopping) return false;
+  if (s.task !== null) return false;
+  return s.nowMs - s.lastActiveMs >= s.quietMs && s.nowMs - s.lastNudgeMs >= s.quietMs;
+}
+
+/** Agent CLI tools that only look or wait: a player making only these calls is quiet (quietNudge). */
+export const QUIET_TOOLS: ReadonlySet<string> = new Set(['wait', 'observe', 'look', 'status', 'trace', 'map', 'vitals', 'sessions', 'help']);
+
 /** Why a segment ended, from how its session ended. */
 export function endReason(s: { stopping: boolean; wrapUpSent: boolean; killed: boolean; sawResult: boolean; exitCode: number | null; resultSubtype?: string }): SegmentEndReason {
   if (s.stopping) return 'stopping';

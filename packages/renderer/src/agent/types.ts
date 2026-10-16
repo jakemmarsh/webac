@@ -98,6 +98,20 @@ export interface AgentSelf {
   burden?: string;
   pyreals?: number;
   xp?: { total: number; unassigned: number };
+  /** Item slots: the main pack's and each side pack's (AgentPackSlots); unset when the host can't say. */
+  packSlots?: AgentPackSlots;
+}
+
+/**
+ * Item slots in the main pack and each side pack (ACE Container.GetFreeInventorySlots: ItemCapacity minus the items
+ * that don't take a pack slot of their own; side packs and foci sit in the container slots). A loot or pick-up that
+ * finds no slot in any of them is refused with the client's "<you> is completely full!" (ItemHolder::
+ * AttemptToPlaceInContainer), whatever your burden.
+ */
+export interface AgentPackSlots {
+  packs: Array<{ name: string; used: number; capacity: number; main: boolean }>;
+  /** Free slots in all of them. */
+  free: number;
 }
 
 /**
@@ -209,6 +223,8 @@ export interface AgentObservation {
     name: string; healthPct: number; dist?: number; bearing?: number; /** Metres up (+) or down (−) when 2 m or more. */ dz?: number;
     /** Monsters on them or coming at them, as the client sees it: "Rust Gromnie L8 on them, Shadow L26 running at them 20 m off". */
     threats?: string;
+    /** Out of sight but last placed in the space you're in: "43 m SE of you, 6 m down, 4 s ago" (walk_to / follow go there). */
+    lastSeen?: string;
   }>;
   /**
    * In a fellowship with nobody else in it: a fellow logged out (the server takes them out, as retail did) and /f
@@ -311,6 +327,11 @@ export interface AgentItem {
   coverage?: number;
   /** An appraisal of it has arrived (its armor level and wield requirements are then known). */
   appraised?: boolean;
+  /**
+   * No vendor will buy it: its appraisal said IsSellable false (PropertyBool 69) or Retained (91), or a vendor already
+   * answered "The X is unsellable." (ACE Player_Commerce refuses !IsSellable || Retained with those words).
+   */
+  unsellable?: boolean;
   /** ArmorLevel (PropertyInt 28) from its appraisal: what the examine window shows, enchantments included. */
   armorLevel?: number;
   /** Its wield requirements from its appraisal, in the examine window's words; `met` when your character sheet says. */

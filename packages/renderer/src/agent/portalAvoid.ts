@@ -8,7 +8,9 @@
 import type { NavPoint, NavProbe } from './navPlanner.js';
 
 /** A circle on the floor to keep out of: centre, radius (the body's radius included) and floor height. */
-export interface AvoidDisk { x: number; y: number; z: number; r: number }
+export interface AvoidDisk { x: number; y: number; z: number; r: number;
+  /** How far above or below a probe's path the disk still counts (default FLOOR_SPAN_M): a standing body's height. */
+  span?: number }
 
 /** Disks more than this far above or below a probe's path are on another floor. */
 const FLOOR_SPAN_M = 3;
@@ -25,7 +27,8 @@ export function avoidDisks(probe: NavProbe, disks: () => AvoidDisk[]): NavProbe 
     if (len < 1e-6) return got;
     let tStop = Infinity;
     for (const d of disks()) {
-      if (Math.abs(from.z - d.z) > FLOOR_SPAN_M && Math.abs(got.z - d.z) > FLOOR_SPAN_M) continue;
+      const span = d.span ?? FLOOR_SPAN_M;
+      if (Math.abs(from.z - d.z) > span && Math.abs(got.z - d.z) > span) continue;
       const fx = from.x - d.x;
       const fy = from.y - d.y;
       const inside = Math.hypot(fx, fy) < d.r;

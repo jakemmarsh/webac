@@ -4,7 +4,7 @@
  * harder to scan. Pure functions; the CLI and the MCP server both use them.
  */
 import { emptySlotsText, formatGear, gearNote, hasGearData } from './gear.ts';
-import type { AgentChatLine, AgentEvent, AgentItem, AgentObject, AgentObservation, AgentSpell, AgentTracePoint } from './types.ts';
+import type { AgentChatLine, AgentEvent, AgentItem, AgentObject, AgentObservation, AgentPackSlots, AgentSpell, AgentTracePoint } from './types.ts';
 
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 
@@ -99,6 +99,7 @@ export function formatObservation(obs: AgentObservation): string {
   // outright where the server sets corpse_destroy_pyreals, ACE's default); trade notes are not coins.
   const coinRisk = me.pyreals !== undefined && me.pyreals >= 1000 && me.level > 5 ? ' (half are lost if you die; trade notes, bought from most vendors, aren\'t coins)' : '';
   if (me.pyreals !== undefined || me.burden || me.xp) out.push(`pyreals ${me.pyreals ?? '?'}${coinRisk}${me.burden ? `  burden ${me.burden}` : ''}${me.xp ? `  unassigned xp ${me.xp.unassigned.toLocaleString('en-US')}${me.xp.unassigned >= 1000 ? ' (spend it: ac_raise)' : ''}` : ''}`);
+  if (me.packSlots) out.push(packSlotsText(me.packSlots));
   for (const [i, d] of obs.dialogs.entries()) out.push(`DIALOG ${i} [${d.buttons.join(' / ')}]: ${d.text.replace(/\s+/g, ' ')}`);
   if (obs.dialogs.length) out.push('  (answer or dismiss each with ac_dialog, e.g. button=OK; a dialog stays up until you do)');
   out.push(formatBuffs((obs.buffs ?? []).filter((b) => b.beneficial !== false)));
@@ -107,7 +108,7 @@ export function formatObservation(obs: AgentObservation): string {
   if (obs.buffsMissing?.length) out.push(`  buffs you know that aren't up: ${obs.buffsMissing.slice(0, 10).join(', ')}${obs.buffsMissing.length > 10 ? ` +${obs.buffsMissing.length - 10} more` : ''} (ac_cast; "… Other" ones go on a fellow with target=)`);
   if (obs.deaths) out.push(obs.deaths);
   if (obs.fellowshipAlone) out.push('fellowship: only you are in it, so /f reaches no one (a fellow who logs out leaves it): recruit your partner (in sight), or quit it (ac_fellowship action=quit) if they lead one');
-  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
+  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}` : f.lastSeen ? `out of sight, last seen ${f.lastSeen} (walk_to ${f.name} goes there; they may have moved on)` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
   if (obs.gearEmpty?.slots.length) out.push(`gear: ${emptySlotsText(obs.gearEmpty.slots)}${obs.gearEmpty.packFits.length ? `; in your pack that would cover one: ${obs.gearEmpty.packFits.slice(0, 4).join(', ')}` : ''} (ac_inventory / ac_gear show every gear slot)`);
   if (obs.windows?.length) out.push(`windows open: ${obs.windows.join(', ')}  (ac_close name=… or all, when done with them)`);
   out.push(`target: ${obs.target ? formatObject(obs.target) : obs.targetLeftBehind ? `none (your last target, ${obs.targetLeftBehind}, was left behind in another place: you went through a portal or far away since; pick a new one)` : 'none'}`);
@@ -174,6 +175,7 @@ export function formatInventory(items: AgentItem[]): string {
         it.fits && it.where !== 'equipped' ? `fits ${it.fits}` : '',
         // The public description's Value is already the whole stack's (ACE sets Value = StackUnitValue × StackSize).
         it.value ? `value ${it.value.toLocaleString('en-US')}` : '',
+        it.unsellable ? 'unsellable: no vendor buys it' : '',
         school ? (it.where === 'pack slots' || it.where === 'main pack' ? `${school} focus: in use` : `${school} focus: NOT in use inside ${it.where}; it counts only in your own pack slots`) : '',
         packs.includes(it) ? (held(it) ? `holds ${held(it)}, listed under it` : 'empty') : '',
       ].filter(Boolean).join(', ');
@@ -182,6 +184,20 @@ export function formatInventory(items: AgentItem[]): string {
     }
   }
   return out.join('\n');
+}
+
+/** Free item slots at or under which the packs read LOW (a loot warns first: AgentApi.PACK_SLOTS_LOW). */
+export const PACK_SLOTS_LOW = 5;
+
+/**
+ * "pack slots: main pack 98/102, Sack 20/24 (8 free)", and LOW with what to do when few are left: a loot that finds
+ * no slot is refused per item ("… is completely full!") whatever the burden (Bulwark at 60%, 2026-10-16).
+ */
+export function packSlotsText(p: AgentPackSlots): string {
+  const each = p.packs.map((x) => `${x.name} ${x.used}/${x.capacity}${x.used >= x.capacity ? ' FULL' : ''}`).join(', ');
+  const head = `pack slots: ${each ? `${each} (${p.free} free)` : `${p.free} free in the main pack`}`;
+  if (p.free > PACK_SLOTS_LOW) return head;
+  return `${head}  LOW: an item with no slot left is refused ("… is completely full!") whatever your burden; drop or sell some first (ac_inventory filter=junk lists what no vendor buys, filter=sell what they do)`;
 }
 
 /**
@@ -201,7 +217,8 @@ export const INVENTORY_KINDS: Readonly<Record<string, (it: AgentItem) => boolean
   potion: (it) => /\b(potion|draught|elixir|tonic|philter|brew)\b/i.test(it.name),
   food: (it) => ((it.itemType ?? 0) & 0x20) !== 0 && !/\b(potion|draught|elixir|tonic|philter|brew)\b/i.test(it.name),
   salvage: (it) => ((it.itemType ?? 0) & 0x40000000) !== 0 || /^salvage(d)?\b|\bsalvage$/i.test(it.name),
-  junk: (it) => ((it.itemType ?? 0) & 0x400) !== 0,
+  junk: (it) => isJunk(it),
+  sell: (it) => isSellable(it),
   gem: (it) => ((it.itemType ?? 0) & 0x800) !== 0,
   key: (it) => ((it.itemType ?? 0) & 0x4000) !== 0,
   component: (it) => ((it.itemType ?? 0) & 0x1000) !== 0,
@@ -210,10 +227,52 @@ export const INVENTORY_KINDS: Readonly<Record<string, (it: AgentItem) => boolean
   money: (it) => ((it.itemType ?? 0) & (0x40 | 0x40000)) !== 0,
   worn: (it) => it.where === 'equipped',
 };
+/**
+ * Item kinds a player keeps whatever a vendor says: money and trade notes (Money 0x40, PromissoryNote 0x40000), keys
+ * and lockpicks (0x4000), gems (portal gems and quest stones are Gems: 0x800), books, notes and scrolls (Writable
+ * 0x2000), packs (0x200), spell components (0x1000), mana stones (0x80000) and salvage (0x40000000).
+ */
+const KEEP_TYPES = 0x40 | 0x40000 | 0x4000 | 0x800 | 0x2000 | 0x200 | 0x1000 | 0x80000 | 0x40000000;
+
+/**
+ * Junk: what no vendor will buy, so it only takes a slot and burden. ACE's sale (Player_Commerce
+ * VerifySellItems) refuses an item of Value < 1 ("The X has no value and cannot be sold"), and the client knows an
+ * item's Value from its public description (no Value there = 0). So: in a pack (not worn), worth nothing, and not a
+ * kind players keep anyway (KEEP_TYPES); plus anything the server types Useless (0x400). The Undead Arm / Leg /
+ * Thighbone and Skeletal Torso a Lich drops are Misc with Value 0 (ACE weenies 22028 / 22032 / 7041 / 22047);
+ * a value-0 Misc can still be a quest or crafting piece (an attuned one can't be dropped at all), so the list says so.
+ */
+export function isJunk(it: AgentItem): boolean {
+  if (it.where === 'equipped') return false;
+  const t = it.itemType ?? 0;
+  if (t & 0x400) return true;
+  if (!t || (t & KEEP_TYPES)) return false;
+  return !(it.value && it.value > 0);
+}
+
+/**
+ * Sellable: what a vendor pays for (Value ≥ 1, not money or trade notes, not a pack, not Retained: ACE refuses a
+ * Retained item, ObjectDescriptionFlags 0x01000000), in a pack (worn gear is not offered). A vendor still buys only
+ * its own trades' kinds (ac_vendor shows what one buys).
+ */
+export function isSellable(it: AgentItem): boolean {
+  if (it.where === 'equipped' || !(it.value && it.value > 0) || it.unsellable) return false;
+  const t = it.itemType ?? 0;
+  if (t & (0x40 | 0x40000 | 0x200)) return false;
+  return ((it.objectDescFlags ?? 0) & 0x01000000) === 0;
+}
+
 const KIND_ALIASES: Readonly<Record<string, string>> = {
   weapons: 'weapon', armour: 'armor', scrolls: 'scroll', kits: 'kit', 'healing kit': 'kit', potions: 'potion', comps: 'component',
   components: 'component', comp: 'component', gems: 'gem', keys: 'key', packs: 'pack', 'mana stone': 'manastone', 'mana stones': 'manastone',
   equipped: 'worn', wielded: 'worn', coins: 'money', pyreals: 'money', notes: 'money', books: 'book',
+  trash: 'junk', useless: 'junk', sellable: 'sell', 'to sell': 'sell', vendor: 'sell',
+};
+
+/** What a filtered list adds about its kind. */
+const KIND_NOTES: Readonly<Record<string, string>> = {
+  junk: 'junk = carried, worth nothing to any vendor (ACE refuses Value 0: "has no value and cannot be sold") and not money, a key, gem, writable, pack, component, mana stone or salvage. Such an item can still be a quest or crafting piece: ac_appraise one before dropping it if unsure (an attuned one cannot be dropped)',
+  sell: 'sell = carried, not worn, a vendor pays its value (not money, trade notes, packs, Retained items or ones an appraisal or a vendor showed unsellable); each vendor buys only its own trades\' kinds: ac_vendor shows them. Most valuable first',
 };
 
 /** The items an ac_inventory filter= keeps: a kind word (INVENTORY_KINDS), else those whose name holds the text. */
@@ -229,13 +288,19 @@ export function filterInventory(items: AgentItem[], filter: string): { items: Ag
 export function formatInventoryFiltered(items: AgentItem[], filter: string): string {
   const { items: hit, kind } = filterInventory(items, filter);
   const what = kind ? `${kind} items` : `items named like "${filter.trim()}"`;
-  if (!hit.length) return `no ${what} in your inventory (kinds: ${Object.keys(INVENTORY_KINDS).join(', ')}; any other text matches names)`;
-  const lines = hit.map((it) => {
+  if (!hit.length) return `no ${what} in your inventory (kinds: ${Object.keys(INVENTORY_KINDS).join(', ')}; any other text matches names)${KIND_NOTES[kind ?? ''] ? `\n(${KIND_NOTES[kind!]})` : ''}`;
+  // To sell: the most valuable first, each with its value per burden unit (a light, dear item is the one to keep
+  // carrying to a vendor; heavy cheap ones free the most burden).
+  const shown = kind === 'sell' ? [...hit].sort((a, b) => (b.value ?? 0) - (a.value ?? 0)) : hit;
+  const lines = shown.map((it) => {
     const extra = [it.where === 'equipped' ? `worn${it.slot ? `: ${it.slot}` : ''}` : `in ${it.where}${it.inside !== undefined ? ` #${it.inside.toString(16)}` : ''}`,
-      it.stack && it.stack > 1 ? `x${it.stack}` : '', it.type, it.value ? `value ${it.value.toLocaleString('en-US')}` : ''].filter(Boolean).join(', ');
+      it.stack && it.stack > 1 ? `x${it.stack}` : '', it.type, it.value ? `value ${it.value.toLocaleString('en-US')}` : kind === 'junk' ? 'no value' : '',
+      it.unsellable ? 'unsellable: no vendor buys it' : '',
+      it.burden ? `burden ${it.burden.toLocaleString('en-US')}` : ''].filter(Boolean).join(', ');
     return `  #${it.guid.toString(16)} ${it.name}  (${extra})`;
   });
-  return [`${hit.length} ${what}:`, ...lines].join('\n');
+  const total = kind === 'sell' ? `, worth ${hit.reduce((t, it) => t + (it.value ?? 0), 0).toLocaleString('en-US')} in all` : '';
+  return [`${hit.length} ${what}${total}:`, ...lines, ...(KIND_NOTES[kind ?? ''] ? [`(${KIND_NOTES[kind!]})`] : [])].join('\n');
 }
 
 export function formatTrace(points: AgentTracePoint[]): string {
@@ -243,7 +308,11 @@ export function formatTrace(points: AgentTracePoint[]): string {
   return points.map((p) => `  -${p.ago.toFixed(1)}s  ${p.cell}  (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, z ${p.z.toFixed(2)})  facing ${p.heading}°  ${p.mode}${p.camera ? `  camera ${p.camera[0].toFixed(2)}${p.camera[1] - p.camera[0] > 0.005 ? `–${p.camera[1].toFixed(2)}` : ''}m` : ''}${p.task ? `  [${p.task}]` : ''}`).join('\n');
 }
 
-export function formatSpells(spells: AgentSpell[]): string {
+/** The spell list, the first `max` of them, then how many more matched (a silent cut hid spells, 2026-10-16). */
+export function formatSpells(spells: AgentSpell[], max = Infinity): string {
   if (!spells.length) return '(no matching spells)';
-  return spells.map((s) => `  ${s.id}  ${s.name}  [${s.school}${s.level ? ` L${s.level}` : ''}]${s.range ? `  range ${s.range} m` : ''}`).join('\n');
+  const shown = spells.slice(0, Math.max(1, max));
+  const more = spells.length - shown.length;
+  return shown.map((s) => `  ${s.id}  ${s.name}  [${s.school}${s.level ? ` L${s.level}` : ''}]${s.range ? `  range ${s.range} m` : ''}`).join('\n')
+    + (more > 0 ? `\n  … ${more} more match (${spells.length} in all): narrow the filter or pass max=${spells.length}` : '');
 }

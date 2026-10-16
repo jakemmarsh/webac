@@ -5,9 +5,9 @@
  * front ends get it.
  */
 import {
-  formatEvents, formatInventory, formatInventoryFiltered, formatObservation, formatSpells, formatTrace,
+  formatEvents, formatInventory, formatInventoryFiltered, formatObservation, formatSpells, formatTrace, packSlotsText,
 } from '../../packages/renderer/src/agent/format.ts';
-import type { AgentEvent, AgentItem, AgentObservation, AgentResult, AgentSpell, AgentStatus, AgentTracePoint } from '../../packages/renderer/src/agent/types.ts';
+import type { AgentEvent, AgentItem, AgentPackSlots, AgentObservation, AgentResult, AgentSpell, AgentStatus, AgentTracePoint } from '../../packages/renderer/src/agent/types.ts';
 import { formatGear } from '../../packages/renderer/src/agent/gear.ts';
 import { AgentClient, DEFAULT_PROFILE, requireClient, startDaemon } from './client.ts';
 import { listInfos, type DaemonInfo } from './state.ts';
@@ -59,6 +59,13 @@ function guidOrName(v: unknown): number | string {
   if (/^\d{9,10}$/.test(s) && Number(s) <= 0xffffffff) return Number(s);
   return /^(#|0x)?[0-9a-f]+$/i.test(s) && (/^(#|0x)/i.test(s) || s.length >= 6) ? parseGuid(s) : s;
 }
+
+/**
+ * The longest one ac_wait runs, in seconds. The stream players' Bash tool gives up on a command at 120 s and
+ * backgrounds it (a `wait timeout_s=120`, 2026-10-16), so a wait plus the CLI's start-up and the RPC's 5 s margin
+ * stays well under that. The hosted connector caps lower still (its maxWaitMs).
+ */
+export const AC_WAIT_MAX_S = 100;
 
 const result = (r: AgentResult): ToolOutput => ({ text: r.message, isError: !r.ok });
 
@@ -358,9 +365,78 @@ export function missingRequired(t: AgentTool, args0: Record<string, unknown>): s
   const a = withArgAliases(t, args0);
   const missing = (t.required ?? []).filter((k) => a[k] === undefined || a[k] === null || a[k] === '');
   if (!missing.length) return null;
+  return `${t.name}: missing ${missing.join(', ')} (usage: ${usageLine(t)})`;
+}
+
+/** "raise stat=… [times=…]": a tool's arguments as the CLI takes them (required bare, optional in brackets). */
+export function usageLine(t: AgentTool): string {
   const aliases = argAliases(t);
   const args = Object.keys(t.props).filter((k) => k !== 'profile' && !(k in aliases)).map((k) => ((t.required ?? []).includes(k) ? `${k}=…` : `[${k}=…]`)).join(' ');
-  return `${t.name}: missing ${missing.join(', ')} (usage: ${t.name.replace(/^ac_/, '')} ${args})`;
+  return `${t.name.replace(/^ac_/, '')} ${args}`;
+}
+
+/** Argument names players reach for that mean the same thing (a group's words point at whichever one a tool takes). */
+const ARG_SYNONYMS: readonly (readonly string[])[] = [
+  ['target', 'item', 'object', 'name', 'who', 'what', 'thing', 'npc', 'monster', 'creature', 'corpse', 'container', 'chest', 'id', 'guid', 'recipient', 'to'],
+  ['stat', 'skill', 'attribute', 'attr', 'vital', 'stat_name'],
+  ['spell', 'spell_name', 'magic'],
+  ['text', 'message', 'msg', 'say', 'line', 'words'],
+  ['times', 'count', 'n', 'repeat_count', 'raises'],
+  ['amount', 'quantity', 'qty', 'number', 'stack'],
+  ['timeout_s', 'timeout', 'seconds', 'secs', 'wait', 'time'],
+  ['filter', 'kind', 'type', 'search', 'query', 'match'],
+  ['radius', 'range', 'distance', 'within'],
+  ['action', 'do', 'command', 'cmd', 'op'],
+  ['key', 'keys', 'binding'],
+  ['slot', 'location', 'where'],
+];
+
+function editDistance(a: string, b: string): number {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)] as number[]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+
+/**
+ * The argument a tool takes that an unknown one most likely meant: a near spelling ("spel" → spell), a word that
+ * means the same (target= on raise → stat=, the stream's `raise target="Magic Defense"`, 2026-10-16), else the one
+ * required argument still missing. Null when nothing fits.
+ */
+export function closestArg(t: AgentTool, key: string, given: Record<string, unknown> = {}): string | null {
+  const k = key.toLowerCase();
+  const aliases = argAliases(t);
+  const names = Object.keys(t.props).filter((n) => n !== 'profile' && !(n in aliases));
+  if (!names.length) return null;
+  const near = names.map((n) => ({ n, d: editDistance(k, n) })).filter((x) => x.d <= Math.max(1, Math.floor(Math.min(k.length, x.n.length) / 3))).sort((a, b) => a.d - b.d);
+  if (near.length) return near[0].n;
+  const prefix = names.find((n) => k.length >= 3 && (n.startsWith(k) || k.startsWith(n)) && n.length >= 3);
+  if (prefix) return prefix;
+  const group = ARG_SYNONYMS.find((g) => g.includes(k));
+  if (group) {
+    const same = names.find((n) => group.includes(n) && given[n] === undefined);
+    if (same) return same;
+  }
+  const missing = (t.required ?? []).filter((n) => given[n] === undefined && !(n in aliases));
+  // A word for "the thing to act on" (target=, name=) means the one required argument still missing.
+  if (missing.length === 1 && group) return missing[0];
+  return null;
+}
+
+/** The refusal for an argument a tool doesn't take, naming the one it most likely meant (closestArg) and the usage. */
+export function unknownArgMessage(t: AgentTool, key: string, given: Record<string, unknown> = {}): string {
+  const best = closestArg(t, key, given);
+  const short = t.name.replace(/^ac_/, '');
+  return `${t.name}: unknown argument "${key}"${best ? `: ${short} takes ${best}=, not ${key}=` : ''} (usage: ${usageLine(t)})`;
+}
+
+/**
+ * The first argument of a call a tool doesn't take, as unknownArgMessage words it; null when all are known. `extra`
+ * names keys a front end handles itself (the hosted connector's account).
+ */
+export function unknownArgs(t: AgentTool, args: Record<string, unknown>, extra: readonly string[] = []): string | null {
+  const bad = Object.keys(args).find((k) => !(k in t.props) && k !== 'profile' && !extra.includes(k) && args[k] !== undefined);
+  return bad ? unknownArgMessage(t, bad, args) : null;
 }
 
 export const TOOLS: AgentTool[] = [
@@ -514,27 +590,34 @@ export const TOOLS: AgentTool[] = [
       mana_below: { type: 'number', description: 'Likewise for mana (no mark unless given).' },
       stamina_below: { type: 'number', description: 'Likewise for stamina (no mark unless given).' },
       chat_match: { type: 'string', description: 'Wake on chat lines matching this regex (case-insensitive), e.g. a partner\'s name or "] Name says" for their /f and channel lines; never on your own speech. Alone it waits only for such a line; with types it also wakes on those types (with tell: any tell to you, or a matching line).' },
-      timeout_s: { type: 'number', description: 'Seconds (default 20, max 300).' },
+      timeout_s: { type: 'number', description: `Seconds (default 20, max ${AC_WAIT_MAX_S}: a call always answers before a 120 s tool limit; a longer value is cut to ${AC_WAIT_MAX_S} s and the reply says so; call it again to keep waiting).` },
       since_seq: { type: 'number', description: 'Only events after this seq (default: since your last ac_observe or ac_wait).' },
     },
     async run(a) {
       const c = callerFor(a.profile);
-      const timeout = Math.min(Math.max(Number(a.timeout_s ?? 20), 1) * 1000, c.maxWaitMs ?? 300_000);
+      const asked = Math.max(Number(a.timeout_s ?? 20) || 20, 1) * 1000;
+      const timeout = Math.min(asked, c.maxWaitMs ?? AC_WAIT_MAX_S * 1000);
       const filter = waitFilter(a);
       // A page from before ac_wait counted from the last look (an older playwebac.com build, local or through
       // the hosted relay, whose errors read "unknown agent method: wait" / "unknown method wait"): its waitFor.
       const evs = await c.call<AgentEvent[]>('wait', [filter, timeout], timeout + 5000)
         .catch((e: Error) => { if (/unknown (?:agent )?method:? wait\b/.test(String(e?.message ?? e))) return c.call<AgentEvent[]>('waitFor', [filter, timeout], timeout + 5000); throw e; });
-      return withNotice(c, { text: evs.length ? formatEvents(evs) : `(nothing within ${timeout / 1000} s)` });
+      const capped = asked > timeout ? `\n(timeout_s=${asked / 1000} was cut to ${timeout / 1000} s, the longest one wait runs: call ac_wait again to keep waiting)` : '';
+      return withNotice(c, { text: (evs.length ? formatEvents(evs) : `(nothing within ${timeout / 1000} s)`) + capped });
     },
   },
   {
     name: 'ac_inventory',
     description: 'Your inventory: first the gear slots (the paperdoll: head, chest … feet, neck, wrists, rings, shield, weapon, ammo, each with what you wear there and its armor level, or EMPTY), then the main pack and side packs with ids; each wearable pack item says the slots it would fill (EMPTY ones named), what it would replace, its armor level against yours, and its wield requirements once appraised.',
-    props: { ...PROFILE_PROP, filter: { type: 'string', description: 'Only some items, each with where it is: a kind (weapon, armor, clothing, jewelry, scroll, book, kit, potion, food, salvage, junk, gem, key, component, pack, manastone, money, worn) or text in the name ("Healing"). Default: everything, gear first.' } },
+    props: { ...PROFILE_PROP, filter: { type: 'string', description: 'Only some items, each with where it is: a kind (weapon, armor, clothing, jewelry, scroll, book, kit, potion, food, salvage, gem, key, component, pack, manastone, money, worn; junk = carried items no vendor buys (value 0) that aren\'t money, keys, gems, writables, packs, components, mana stones or salvage; sell = what a vendor pays for, most valuable first) or text in the name ("Healing"). Default: everything, gear first. The first line counts your pack slots (main pack and each side pack): a loot finding none free is refused per item ("… is completely full!") whatever your burden.' } },
     async run(a) {
-      const items = await callerFor(a.profile).call<AgentItem[]>('inventory');
-      return { text: a.filter === undefined || String(a.filter).trim() === '' ? formatInventory(items) : formatInventoryFiltered(items, String(a.filter)) };
+      const c = callerFor(a.profile);
+      const items = await c.call<AgentItem[]>('inventory');
+      // Pages from before packSlots (an older playwebac.com build) answer without the line.
+      const slots = await c.call<AgentPackSlots | null>('packSlots').catch(() => null);
+      const body = a.filter === undefined || String(a.filter).trim() === '' ? formatInventory(items) : formatInventoryFiltered(items, String(a.filter));
+      const known = !!slots && Array.isArray(slots.packs) && typeof slots.free === 'number';
+      return { text: known ? `${packSlotsText(slots!)}\n${body}` : body };
     },
   },
   {
@@ -545,9 +628,11 @@ export const TOOLS: AgentTool[] = [
   },
   {
     name: 'ac_spells',
-    description: 'Spells in your spellbook, optionally filtered by name/school text.',
+    description: 'Spells in your spellbook, optionally filtered by name/school text. Lists the first `max`, then says how many more match (narrow the filter or raise max to see them).',
     props: { ...PROFILE_PROP, filter: { type: 'string', description: 'Text to match (e.g. "Flame Bolt", "Life", "Self").' }, max: { type: 'number', description: 'Default 40.' } },
-    async run(a) { return { text: formatSpells(await callerFor(a.profile).call<AgentSpell[]>('spells', [a.filter ?? '', a.max ?? 40])) }; },
+    // Every match from the page, cut here so the reply can say what was left out: filter=Other stopped at 40 with
+    // the Swift Killer Others and silently dropped every Blood Drinker Other after them (2026-10-16).
+    async run(a) { return { text: formatSpells(await callerFor(a.profile).call<AgentSpell[]>('spells', [a.filter ?? '', 100_000]), Number(a.max ?? 40) || 40) }; },
   },
   {
     name: 'ac_status',
@@ -635,8 +720,8 @@ export const TOOLS: AgentTool[] = [
     item: { type: 'string', description: 'Item id or name in your inventory.' },
     target: { type: 'string', description: 'Target id or name ("self" for yourself).' },
   }, ['item', 'target'], (a) => [guidOrName(a.item), String(a.target) === 'self' ? 'self' : guidOrName(a.target)]),
-  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), or a distance and direction from where you stand ("10m north", "25 m NE", "5m ahead", "3 m left"). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after. Being hit stops it unless the way on leads away from everything hitting you, you are going to a fellow with monsters on them, or flee=true (running away). A monster starting to come at you (running at you, turning to face you, closing in) stops it too, while it is still metres off, naming it, its level and distance (stop_on_aggro=false walks on). Outdoors it keeps 10 m clear of monsters near the way (15 m of one well above your level) and says which it went round; when no way keeps clear it walks past them and says so (avoid_monsters=false walks straight). It names a fellow left far behind; stay_with=<fellow> keeps you together: you run as always, and stop to wait whenever they fall stay_within behind, until they are beside you (and it says when they stopped or went elsewhere). To keep up with someone, use ac_follow.', {
-    target: { type: 'string', description: 'Object id (#…), nearby object name (of several with that name, the one a walk reaches), map coordinates like "42.1N, 33.6E", an offset like "10m north" / "5m ahead" (compass N…NW, or ahead / back / left / right of your facing), or a cell id of the dungeon or building you are in (0x039C0104: that room).' },
+  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), a distance and direction from where you stand ("10m north", "25 m NE", "10m NNW", "10m 330°", "5m ahead", "3 m left"; map coordinates: 0.1 = 24 m), or a room of the dungeon or building you are in by its cell id (target=0x01850148: a room of your dungeon, or a room or outdoor cell of any landblock on the landscape, through its building\'s door; world-query and lore print cell ids in hex). A fellow out of your sight in a dungeon is walked to where they were last seen (it says so, and whether they are there now). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after. Being hit stops it unless the way on leads away from everything hitting you, you are going to a fellow with monsters on them, or flee=true (running away). A monster starting to come at you (running at you, turning to face you, closing in) stops it too, while it is still metres off, naming it, its level and distance (stop_on_aggro=false walks on). Outdoors it keeps 10 m clear of monsters near the way (15 m of one well above your level) and says which it went round; when no way keeps clear it walks past them and says so (avoid_monsters=false walks straight). It names a fellow left far behind; stay_with=<fellow> keeps you together: you run as always, and stop to wait whenever they fall stay_within behind, until they are beside you (and it says when they stopped or went elsewhere). To keep up with someone, use ac_follow.', {
+    target: { type: 'string', description: 'Object id (#…), nearby object name (of several with that name, the one a walk reaches), map coordinates like "42.1N, 33.6E", an offset like "10m north" / "5m ahead" (compass N…NW, or ahead / back / left / right of your facing), or a cell id (0x039C0104: that room; a building\'s room or an outdoor cell of any landblock on the landscape too).' },
     within: { type: 'number', description: 'Stop this close, metres (default 2: beside it, on its floor). 5 or more is a range to stand at (a bolt\'s, a pull\'s): the straight distance, whatever floor it is on, and the answer says when the line to it is blocked.' },
     timeout_s: { type: 'number', description: 'Give up after this long (default: by distance, about 3 m/s + 30 s, 60 s to 10 min).' },
     flee: { type: 'boolean', description: 'Keep going while monsters hit you (running away). Default: stop when hit, unless the way on leads away from every attacker.' },
@@ -645,14 +730,14 @@ export const TOOLS: AgentTool[] = [
     stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you (default true; one already coming when you set off doesn\'t stop it). false walks on until hit. flee=true never stops for it.' },
     avoid_monsters: { type: 'boolean', description: 'Outdoors, route round monsters near the way, 10 m clear (15 m of one well above your level), as a player goes round a camp. Indoors, stop before coming within their wake range (18 m on ACE, 40 m on GDLE servers) of 2 or more monsters not yet awake, naming them. Default true; off with flee. false walks the straight way, and on into them.' },
   }, ['target'], (a) => [/[NS]\s*,?\s*[\d.]+\s*[EW]/i.test(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, ...(a.timeout_s !== undefined ? { timeoutMs: Number(a.timeout_s) * 1000 } : {}), ...(a.flee ? { flee: true } : {}), ...(a.stay_with ? { stayWith: String(a.stay_with) } : {}), ...(a.stay_within !== undefined ? { stayWithin: Number(a.stay_within) } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}), ...(a.avoid_monsters === false || a.avoid_monsters === 'false' ? { avoidMonsters: false } : {}) }], 320_000),
-  act('ac_follow', 'Follow a player (your fellow): run to within `within` metres of them, stand while they stay near, and run again once they are 3 m past that (never a walk), re-aiming as they go, until duration_s ends, you are hit (unless flee=true, or they have monsters on them: then the follow goes on through the hits to them), a monster starts coming at you (unless stop_on_aggro=false), they go out of sight, or you start something else (any action, or ac_stop_moving). Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
+  act('ac_follow', 'Follow a player (your fellow): run to within `within` metres of them, stand while they stay near, and run again once they are 3 m past that (never a walk), re-aiming as they go, until duration_s ends, you are hit (unless flee=true, or they have monsters on them: then the follow goes on through the hits to them), a monster starts coming at you (unless stop_on_aggro=false), they go out of sight, or you start something else (any action, or ac_stop_moving). One already out of your sight when asked (a dungeon shows you only the rooms in sight of yours) is first walked to where they were last seen, then followed if they are in sight from there. Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
     target: { type: 'string', description: 'The player to follow: name or id.' },
     within: { type: 'number', description: 'How close to keep, metres (default 4).' },
     duration_s: { type: 'number', description: 'How long to follow (default 120, at most 600).' },
     flee: { type: 'boolean', description: 'Keep following while you are hit (e.g. running to your tank with monsters on you), as walk_to flee=true does. Default: being hit stops it.' },
     stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you, and indoors before following them within wake range (18 m on ACE) of 2 or more monsters not yet awake (default true). false follows on until hit.' },
   }, ['target'], (a) => [guidOrName(a.target), { within: a.within ?? null, durationMs: a.duration_s !== undefined ? Math.min(Number(a.duration_s), 600) * 1000 : null, ...(a.flee === true || a.flee === 'true' ? { flee: true } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}) }], 640_000),
-  act('ac_turn', 'Turn to face a compass bearing (0 = north, 90 = east) or an object.', { toward: { type: 'string', description: 'Bearing in degrees, or an object id / name.' } }, ['toward'], (a) => [/^-?\d+(\.\d+)?$/.test(String(a.toward)) && String(a.toward).length < 6 ? Number(a.toward) : guidOrName(a.toward)]),
+  act('ac_turn', 'Turn to face a compass bearing (0 = north, 90 = east), a compass point (N, NNW, west-southwest: all 16), your left / right / back, or an object.', { toward: { type: 'string', description: 'Bearing in degrees ("330" or "330°"), a compass point, left / right / back, or an object id / name.' } }, ['toward'], (a) => [/^-?\d+(\.\d+)?$/.test(String(a.toward)) && String(a.toward).length < 6 ? Number(a.toward) : guidOrName(a.toward)]),
   act('ac_move', 'Hold a movement key for a while (fine control, e.g. backing off or strafing around an obstacle).', {
     direction: { type: 'string', description: 'forward | backward | strafe_left | strafe_right | turn_left | turn_right', enum: ['forward', 'backward', 'strafe_left', 'strafe_right', 'turn_left', 'turn_right'] },
     seconds: { type: 'number', description: 'How long (default 1, max 10).' },
@@ -670,7 +755,18 @@ export const TOOLS: AgentTool[] = [
   act('ac_press', 'Press a key binding as the keyboard would: a keymap action name (e.g. "Show/Hide Inventory", "Toggle Autorun") or a key code ("F9", "Ctrl+KeyI"). Use ac_keys to look names up.', {
     key: { type: 'string', description: 'Action name or key code.' },
   }, ['key'], (a) => [String(a.key)]),
-  act('ac_vendor', 'List what the open vendor sells, with prices. Open a vendor with ac_use first.', {}, [], () => []),
+  {
+    // Without target= a read of the open window ('vendor', READ_METHODS); with one, an action ('vendorAt': walks there
+    // and uses the vendor as ac_use does, so it takes its turn with the other acting calls and the player's control).
+    name: 'ac_vendor',
+    description: 'List what a vendor sells, with prices: the open vendor window, or target=<the vendor> (opened first with the same use ac_use makes, walking there, when it isn\'t the one open).',
+    props: { ...PROFILE_PROP, target: { type: 'string', description: 'The vendor: name or id. Default: the vendor window already open.' } },
+    async run(a) {
+      const c = callerFor(a.profile);
+      const has = a.target !== undefined && a.target !== null && a.target !== '';
+      return withNotice(c, result(await c.call<AgentResult>(has ? 'vendorAt' : 'vendor', has ? [guidOrName(a.target)] : [], 120_000)));
+    },
+  },
   act('ac_buy', 'Buy from the open vendor.', {
     item: { type: 'string', description: 'Merchandise name or id (from ac_vendor).' },
     amount: { type: 'number', description: 'How many (default 1).' },
@@ -710,7 +806,7 @@ export const TOOLS: AgentTool[] = [
     match: { type: 'string', description: 'Regex of item names to take (default: all).' },
   }, [], (a) => { const t = a.target ?? a.container; return [t === undefined ? null : guidOrName(t), a.match ?? null]; }, 90_000),
   act('ac_drop', 'Drop an item from your inventory on the ground.', { item: { type: 'string', description: 'Item id or name.' } }, ['item'], (a) => [guidOrName(a.item)]),
-  act('ac_give', 'Give an item to an NPC or player (quest turn-ins work this way).', {
+  act('ac_give', 'Give an item to an NPC or player (quest turn-ins work this way). A give refused because one of you was busy ("too busy to accept gifts", "one item at a time") is tried once more after 3 s; the reply says so.', {
     item: { type: 'string', description: 'Item id or name.' },
     target: { type: 'string', description: 'Recipient id or name.' },
     amount: { type: 'number', description: 'For stacks (default: whole stack).' },

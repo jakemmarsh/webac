@@ -347,6 +347,18 @@ export function floorsAt(g: CellGraph, x: number, y: number): Array<{ cell: numb
  * graph doesn't hold or one with no floor (the air over a pit). `walk_to target="0x039C0104"` named a cell, and the
  * walk took the id for an object and answered "target vanished" (Bulwark, Hollow Lair 0x039C, 2026-10-16).
  */
+/**
+ * The first and last interior cell ids of the graph's landblock (0xXXYY0100 … its last EnvCell): what a cell id of
+ * this dungeon can be. Null for a landblock with none. Bulwark noted the Horrible Mu-miyahs' cells as 0x01850248 /
+ * 024E / 0214 from the world DB's decimal obj_Cell_Id (25493832 = 0x01850148), cells Daiklos (0x0100–0x0210) has not
+ * (2026-10-16).
+ */
+export function cellIdRange(g: CellGraph): { first: number; last: number } | null {
+  let first = Infinity, last = -Infinity;
+  for (const c of g.doors.keys()) { if ((c & 0xffff) < 0x100) continue; first = Math.min(first, c >>> 0); last = Math.max(last, c >>> 0); }
+  return Number.isFinite(first) ? { first, last } : null;
+}
+
 export function cellStandPoint(g: CellGraph, cell: number): Vec3 | null {
   const fl = g.floors?.get(cell >>> 0);
   if (!fl || !fl.length) return null;

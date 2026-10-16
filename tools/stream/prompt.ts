@@ -170,6 +170,11 @@ export function nudgeMessage(minutesLeft: number, partner: string): string {
   return `[supervisor] The stream is still live and this segment has about ${Math.max(1, Math.round(minutesLeft))} minutes left. Keep playing: observe, check on ${partner}, and pick the next thing to do. Don't stop or write a report until I say wrap up.`;
 }
 
+/** Sent when a player has been quiet with nothing running in the game (policy.ts quietNudge). */
+export function quietMessage(quietMinutes: number): string {
+  return `[supervisor] Nothing has been said or done for about ${Math.max(1, Math.round(quietMinutes))} minutes and nothing of yours is running (no walk, follow, fight or repeat cast). Say in a few words what you're doing or waiting for, then carry on. (No need to answer this while a walk or fight is running: I only ask when nothing is.)`;
+}
+
 /**
  * The end of a segment. Characters stay in the world between segments and are logged out when the stream stops, and
  * one left mid-fight woke up dead or under attack (rehearsal 2026-10-13): so finish the fight and stand somewhere safe

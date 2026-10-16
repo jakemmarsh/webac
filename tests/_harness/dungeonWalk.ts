@@ -13,7 +13,7 @@
 import { vi } from 'vitest';
 import { AgentApi, compassToYaw, type AgentHost } from '../../packages/renderer/src/agent/AgentApi.ts';
 import type { AgentResult } from '../../packages/renderer/src/agent/types.ts';
-import { cellStandPoint, findRouteViaOutside, floorsAt, loadCellGraph } from '../../packages/renderer/src/agent/cellPath.ts';
+import { cellIdRange, cellStandPoint, findRouteViaOutside, floorsAt, loadCellGraph } from '../../packages/renderer/src/agent/cellPath.ts';
 import { simulateFlight } from '../../packages/renderer/src/agent/jumpPlan.ts';
 import type { DatDatabase } from '../../packages/dat-parser/src/DatDatabase.js';
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
@@ -42,7 +42,16 @@ export class DungeonHost extends FakeHost {
   private readonly fixtureKeys = new Map<number, CollisionKey[]>();
   private readonly locked = new Set<number>();
 
-  constructor(private readonly nav: DungeonNav, dats: { portal: DatDatabase; cell: DatDatabase }, landblock: number, opts: { fixtures?: Ac1999Fixture[]; rooms?: boolean } = {}) {
+  /** Each door's collision, to put back when a Use swings it shut again (ACE Door.ActOnUse toggles). */
+  private readonly doorShapes = new Map<number, () => CollisionKey[]>();
+  /** Creature fixtures (opts.creatures): in the collision only for the body's own step. */
+  private readonly creatureShapes: Array<() => CollisionKey[]> = [];
+
+  /**
+   * `creatures`: creature fixtures collide too (by their Setup's shapes), as the live client's body meets an NPC
+   * standing in the way; the probe the walk plans with still leaves them out (main.ts navProbe). Default off.
+   */
+  constructor(private readonly nav: DungeonNav, dats: { portal: DatDatabase; cell: DatDatabase }, landblock: number, opts: { fixtures?: Ac1999Fixture[]; rooms?: boolean; creatures?: boolean } = {}) {
     super();
     this.bx = ((landblock >>> 24) & 0xff) * 192;
     this.by = ((landblock >>> 16) & 0xff) * 192;
@@ -52,6 +61,7 @@ export class DungeonHost extends FakeHost {
       this.cellSealed = () => true;
       this.floorsAt = (_lb, x, y) => floorsAt(this.graph, x, y);
       this.cellPoint = (c) => cellStandPoint(this.graph, c);
+      this.cellRange = () => cellIdRange(this.graph);
     }
     const sources = {
       loadSetupModel: (id: number) => { const d = dats.portal.getFileData(id); return d ? new SetupModel(new DatReader(d)) : null; },
@@ -59,28 +69,39 @@ export class DungeonHost extends FakeHost {
     };
     const ODF_DOOR = 0x1000, ODF_LIFESTONE = 0x4000, ODF_PORTAL = 0x40000, HAS_PHYSICS_BSP = 0x10000, ETHEREAL = 0x4;
     for (const f of opts.fixtures ?? []) {
-      if (f.itemType & 0x10) continue; // creatures: the live fixtures leave them out
+      if ((f.itemType & 0x10) && !opts.creatures) continue; // creatures: the live fixtures leave them out
       const model = resolveObjectPhysics(f.setupId, sources);
       // The server's PhysicsState, with HasPhysicsBSP where the Setup's parts carry a physics BSP (ACE PhysicsObj).
       const physicsState = (f.physicsState | (model?.hasPhysicsBSP ? HAS_PHYSICS_BSP : 0)) >>> 0;
       const flags = f.door ? ODF_DOOR : f.itemType === 0x10000000 ? ODF_LIFESTONE : f.itemType === 0x10000 ? ODF_PORTAL : 0;
       this.add({ guid: f.guid, name: f.name, cell: f.cell, x: f.x, y: f.y, z: f.z, itemType: f.itemType, objectDescFlags: flags, physicsState });
       if (f.locked) this.locked.add(f.guid);
-      if (physicsState & ETHEREAL) continue;
-      this.fixtureKeys.set(f.guid, addCreatureObstacles(nav.col, [{
+      const shape = (): CollisionKey[] => addCreatureObstacles(nav.col, [{
         guid: f.guid, worldX: this.bx + f.x, worldY: f.z, worldZ: this.by + f.y, collisionRadius: 0,
-        setupId: f.setupId, quat: f.quat, scale: 1, physicsState,
-      }], () => model));
+        setupId: f.setupId, quat: f.quat, scale: 1, physicsState: physicsState & ~ETHEREAL,
+      }], () => model);
+      if (f.door) this.doorShapes.set(f.guid, shape);
+      if (physicsState & ETHEREAL) continue;
+      // A creature blocks the body only while it moves (physics, below): the walk's probe leaves creatures out, as live.
+      if (f.itemType & 0x10) { this.creatureShapes.push(shape); continue; }
+      this.fixtureKeys.set(f.guid, shape());
     }
   }
 
-  /** Using a door opens it (it turns Ethereal and stops colliding) unless it is locked. */
+  /**
+   * Using a shut door opens it (it turns Ethereal and stops colliding) unless it is locked; using an open one swings it
+   * shut again (ACE Door.ActOnUse: IsOpen ? Close : Open), from any floor (the server measures no storey).
+   */
   override use = (g: number): boolean => {
     this.sent.push(`use ${g.toString(16)}`);
     const o = this.objs.get(g);
     if (o && (o.objectDescFlags & 0x1000)) {
       if (this.locked.has(g)) this.api?.pushChat('The door is locked!');
-      else {
+      else if ((o.physicsState ?? 0) & 0x4) {
+        o.physicsState = ((o.physicsState ?? 0) & ~0x4) >>> 0;
+        const shape = this.doorShapes.get(g);
+        if (shape) this.fixtureKeys.set(g, shape());
+      } else {
         for (const k of this.fixtureKeys.get(g) ?? []) this.nav.col.removeKey(k);
         this.fixtureKeys.delete(g);
         o.physicsState = ((o.physicsState ?? 0) | 0x4) >>> 0;
@@ -148,7 +169,13 @@ export class DungeonHost extends FakeHost {
     if (this.keys.has('KeyZ')) { vx -= fy * 2; vy += fx * 2; }
     if (!vx && !vy) return;
     const from = { x: this.bx + this.me.x, y: this.by + this.me.y, z: this.me.z };
-    const got = this.nav.probe(from, { x: from.x + (vx * dtMs) / 1000, y: from.y + (vy * dtMs) / 1000 });
+    const bodies = this.creatureShapes.flatMap((s) => s());
+    let got: ReturnType<DungeonNav['probe']>;
+    try {
+      got = this.nav.probe(from, { x: from.x + (vx * dtMs) / 1000, y: from.y + (vy * dtMs) / 1000 });
+    } finally {
+      for (const k of bodies) this.nav.col.removeKey(k);
+    }
     if (!got) return;
     this.me.x = got.x - this.bx; this.me.y = got.y - this.by; this.me.z = got.z;
     this.updateCell();

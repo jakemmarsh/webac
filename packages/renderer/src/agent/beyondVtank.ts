@@ -38,7 +38,8 @@ export function pullLanded(target: { guid: number; name: string }, events: reado
   if (attackers.has(target.guid)) return `${target.name} turned on you`;
   const name = target.name.toLowerCase();
   for (const e of events) {
-    if (e.type !== 'chat' || e.chatType === 0x15) continue;
+    // Not someone's words: a fellow's "/f pull the Drudge Skulker, you tank" named it with "you" (2026-10-16 sweep).
+    if (e.type !== 'chat' || e.chatType === 0x15 || /^\((say|tell|emote|channel)\) /.test(e.text)) continue;
     const line = e.text.replace(/^\([a-z]+\) /, '');
     if (line.toLowerCase().includes(name) && /\byou(r)?\b/i.test(line)) return line.length > 60 ? `${line.slice(0, 57)}…` : line;
   }

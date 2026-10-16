@@ -1553,7 +1553,7 @@ export class RoutineEngine {
     const since = this.api.currentSeq();
     const r = await this.api.loot(corpse.guid, null, decide, opts);
     // Refused by the server ("in use", "no right"): skipped for 10 s, then tried again.
-    if (this.api.eventsSince(since).some((e) => e.type === 'chat' && isCorpseDenial(e.text.replace(/^\([a-z]+\) /, '')))) {
+    if (this.api.eventsSince(since).some((e) => e.type === 'chat' && !/^\((say|tell|emote|channel)\) /.test(e.text) && isCorpseDenial(e.text.replace(/^\([a-z]+\) /, '')))) {
       book.denied(corpse.guid, now(), bs);
       return { ...r, message: `${r.message}; refused, skipping it for 10 s` };
     }

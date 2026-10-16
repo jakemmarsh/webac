@@ -138,7 +138,7 @@ let agentUseDoneTap: ((code: number) => void) | null = null;
 let agentAttackDoneTap: ((code: number) => void) | null = null;
 let agentMeleeSentTap: ((height: string) => void) | null = null;
 import { examineText } from './agent/examineText.js';
-import { cellStandPoint, floorsAt, findRouteViaOutside, loadCellGraph, routeBarrier, type CellGraph } from './agent/cellPath.js';
+import { cellIdRange, cellStandPoint, floorsAt, findRouteViaOutside, loadCellGraph, routeBarrier, type CellGraph } from './agent/cellPath.js';
 import { RoutineSync } from './agent/RoutineSync.js';
 import { isAutomationCommand } from './ui/automation/AutomationPanel.js';
 import { bridgeConnectApi } from './launcher/ConnectScreen.js';
@@ -256,7 +256,7 @@ import type { CharacterCreateWizard } from './ui/CharacterCreate.js';
 import { characterCreateAppearance } from './ui/CharacterCreate.js';
 import type { CharacterSlot } from './ui/CharacterSelect.js';
 import {
-  createConnection, probeBridgeHealth, GameMessageGroup, GameActionType, GameMessageOpcode,
+  createConnection, probeBridgeHealth, bridgeRefusalOf, GameMessageGroup, GameActionType, GameMessageOpcode,
   BinaryWriter, serializeGameAction, serializeDirectMessage,
   parseCharacterList, buildCharacterCreate, buildCharacterEnterWorldRequest,
   buildCharacterEnterWorld, buildLoginComplete, parseCreateObject,
@@ -354,7 +354,7 @@ import {
   victimOrKillerLine, playerKilledLine, transientStringLine, channelIndexLines, channelListLines,
   tradeClosedLine, allegianceLoginLine, confirmationRequestText} from './ui/ServerMessageText.js';
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED } from './ui/WeenieErrorNotices.js';
-import { connectionLostText, characterErrorNotice, netErrorNotice, serverNetErrorNotice, linkSampleIsDead, NET_ERROR_STRING_TABLE, type ConnectionNotice } from './ui/ConnectionNotices.js';
+import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkSampleIsDead, NET_ERROR_STRING_TABLE, type ConnectionNotice } from './ui/ConnectionNotices.js';
 import { CharacterError, runExpr } from '@ac/shared';
 import { DatLightBudget, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
 import { createViewerLight, updateViewerLight, viewerLightActive } from './effects/ViewerLight.js';
@@ -368,6 +368,7 @@ import { ItemShortcutRestorer, isShortcutEligible, quickslotCommand, CREATE_SHOR
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
 import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid, IN_WORLD_RETRY_DELAY_MS } from './session/SessionLifecycle.js';
+import { AccountTabGuard, accountSessionKey, openSessionChannel } from './session/AccountTabGuard.js';
 import { SquelchState } from './session/SquelchState.js';
 import { LastOutsideDeathState } from './session/LastOutsideDeathState.js';
 // ASSESS — relative import: the new delete/restore builders live in
@@ -1321,7 +1322,14 @@ async function main() {
       return true;
     },
     (err: Error) => {
-      console.warn(`[AC] patch screen: bridge probe failed (${err.message}) — connect level stays 0.0`);
+      // BUG.multi-tab-login-pingpong — a probe the bridge refused (its per-IP
+      // cap) rejects too now (it used to never settle, and the patch screen
+      // waited on it forever). The launch goes on; the login's own connect
+      // meets the same refusal and shows its dialog.
+      const refusal = bridgeRefusalOf(err);
+      console.warn(refusal
+        ? `[AC] patch screen: the bridge refused the connection (${refusal}) — connect level stays 0.0`
+        : `[AC] patch screen: bridge probe failed (${err.message}) — connect level stays 0.0`);
       return false;
     },
   );
@@ -7501,6 +7509,16 @@ async function main() {
   // reporter: a socket that never opens must not inherit the last session's character list (screen="char-select").
   reportConnectAttempts(aceConnection, () => preworldReporter?.connectAttempt());
   sessionConnected = () => aceConnection.isConnected;
+  // BUG.multi-tab-login-pingpong — one session per account + server across
+  // this browser's tabs: the latest login wins, and a tab that held the same
+  // account stands down (stops its retries and resume, closes its session,
+  // says why) instead of logging back in and booting the other tab
+  // (session/AccountTabGuard.ts). standDownForOtherTab is defined below.
+  const accountTabGuard = new AccountTabGuard({
+    channel: openSessionChannel(),
+    onStandDown: () => standDownForOtherTab(),
+  });
+  accountTabGuard.watch(aceConnection, () => (aceAccount ? accountSessionKey(connectUrl, aceAccount) : null));
   // Disable auto-reconnect — prevents cascading duplicate sessions
   aceConnection.autoReconnect = false;
   // Clean up on page unload to prevent zombie WebSocket connections
@@ -7619,6 +7637,7 @@ async function main() {
    */
   /** A refused launcher login: say why, then let the player fix it in the launcher. */
   const returnToLauncher = (text: string): void => {
+    accountTabGuard.release();
     sessionLifecycle.noteDisconnected();
     aceConnection.autoReconnect = false;
     aceConnection.disconnect();
@@ -7636,6 +7655,7 @@ async function main() {
   const leaveForLauncher = (why: string): void => {
     console.log(`[AC] ACE: ${why} — leaving this world for the launcher`);
     exitToLauncherAfterLogOff = false;
+    accountTabGuard.release();
     sessionLifecycle.noteLoggedOut();
     aceConnection.disconnect();
     sessionStorage.setItem('aceDisconnectTime', Date.now().toString());
@@ -7676,6 +7696,21 @@ async function main() {
     gameUI.setIndicatorActive('connection', false);
     console.log(`[AC] ACE: ServerDied — showing the Disconnected screen: "${text}"`);
     gameUI.showDisconnectedScreen(text, relaunchConnectCycle);
+  };
+  /**
+   * BUG.multi-tab-login-pingpong — another tab of this browser logged in to
+   * the account this tab held (AccountTabGuard). Stand down: no resume, no
+   * fresh-login retry (disconnect() cancels the pending one), the session
+   * closed (its bridge slot freed, its character logged off), and retail's
+   * account-in-use text on the Disconnected screen, whose button is the only
+   * way back in from this tab. Nothing more to do on the launcher or on a
+   * screen that already says the session is over.
+   */
+  const standDownForOtherTab = (): void => {
+    worldResumePending = false;
+    sessionLifecycle.endResume();
+    if (launcherActive || gameUI.disconnectedScreenShown) return;
+    raiseServerDied(characterErrorNotice(CharacterError.Logon).text);
   };
   /**
    * A client-side connection failure (ID_ConnectionError_* / ID_NetError_*):
@@ -16087,7 +16122,8 @@ async function main() {
         activeSpells: () => gameUI.agentActiveEnchantments().map((e) => ({ spellId: e.spellId, name: e.name, remaining: e.remaining, beneficial: e.beneficial })),
         // VTank's buff items wait out their shared cooldown (the item's SharedCooldown → cooldown enchantment 0x8000 + id).
         cooldownRemaining: (id) => gameUI.agentCooldownRemaining(id),
-        freePackSlots: () => Math.max(0, playerState.itemsCapacity - playerState.inventory.getAll().filter((i) => (i.containerId === aceCharGuid || i.containerId === 0) && !playerState.equipment.getAll().some((e) => e.id === i.id)).length),
+        // Side packs and foci sit in the container slots, not item slots (ACE Container.CountPackItems: !UseBackpackSlot).
+        freePackSlots: () => Math.max(0, playerState.itemsCapacity - playerState.inventory.getAll().filter((i) => (i.containerId === aceCharGuid || i.containerId === 0) && !heldIsContainer(i) && !playerState.equipment.getAll().some((e) => e.id === i.id)).length),
         burdenPercent: () => (gameUI['burdenMax'] ? (gameUI['burdenCurrent'] / gameUI['burdenMax']) * 100 : 0),
         cameraBoom: () => {
           const r = Number.isFinite(agentCameraBoom.min) ? { min: agentCameraBoom.min, max: agentCameraBoom.max } : null;
@@ -16378,6 +16414,7 @@ async function main() {
         floorsAt: (lb, x, y) => floorsAt(agentCellGraph(lb), x, y),
         // Where to stand in a cell named by its id (walk_to target="0x039C0104"): its floor under its middle.
         cellPoint: (cell) => cellStandPoint(agentCellGraph(cell), cell),
+        cellRange: (cell) => cellIdRange(agentCellGraph(cell)),
         // AGENT navigation — the player's body walked from `from` toward `to` by the same substep
         // the held movement keys run (stepPlayerMovement through these collision services), with
         // the floor followed like the real move's; creatures left out (they move) and the shared
@@ -17469,6 +17506,18 @@ async function main() {
             }
             break;
           }
+          // BUG.multi-tab-login-pingpong — the bridge refused the connection
+          // (its per-IP session cap): say so plainly, never retail's "Couldn't
+          // create local socket", and don't resume into the same refusal.
+          if (event.bridgeRefusal) {
+            gameUI.setIndicatorActive('connection', false);
+            worldResumePending = false;
+            sessionLifecycle.endResume();
+            const refusalNotice = connectionFailureNotice(event)!;
+            if (!gameStarted) preworldReporter?.connectionError(event, refusalNotice.token);
+            raiseNetError(refusalNotice);
+            break;
+          }
           if (event.netErrorId || event.serverNetError) {
             // A resume attempt that couldn't connect: the next one, or the
             // Disconnected screen once the budget is spent.
@@ -17482,9 +17531,7 @@ async function main() {
             // RELEASE.gdle-login-neterror — or the server refused the login
             // with a NetError (ClientNet::EndState @ 00543380), e.g. GDLE's
             // STR_LOGIN_FAILED = "Client logon failed".
-            const netNotice = event.serverNetError
-              ? serverNetErrorNotice(event.serverNetError.stringId, event.serverNetError.tableId)
-              : netErrorNotice(event.netErrorId!);
+            const netNotice = connectionFailureNotice(event)!;
             if (!gameStarted) preworldReporter?.connectionError(event, netNotice.token || null);
             raiseNetError(netNotice);
             break;
@@ -17616,16 +17663,11 @@ async function main() {
     exposeDebugGlobal('__sessionEventGate', sessionEventGate);
     aceConnection.on(sessionEventGate.push);
 
-  // Pre-flight health check — log to console only (never in-game chat)
-  aceConnection.checkHealth().then(status => {
-    if (status.ace === 'ok') {
-      console.log(`[AC] Pre-flight: bridge OK, ACE OK (${status.sessions} active sessions)`);
-    } else {
-      console.warn(`[AC] Pre-flight: bridge OK, ACE ${status.ace} — login may fail`);
-    }
-  }).catch(() => {
-    console.warn('[AC] Pre-flight: bridge unreachable — connection will likely fail');
-  });
+  // BUG.multi-tab-login-pingpong — no console-only pre-flight health probe
+  // here any more: it opened a second socket beside the login's, and that
+  // second bridge session counts against the per-IP cap, so a player one
+  // window short of the cap was refused by their own probe. The patch
+  // screen's probe already reported the bridge.
 
   // Connect regardless — services might come up
   aceConnection.connect(aceAccount, acePassword);

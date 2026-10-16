@@ -83,6 +83,7 @@
 
 import { acStringHash, getString, getStringFromTable } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { CharacterError, characterErrorMessage } from '@ac/shared';
+import type { BridgeRefusal } from '@ac/network';
 
 /** CPlayerSystem::UseTime — seconds since the last packet before ServerDied (0x7cc5c8). */
 export const DISCONNECT_TIME_S = 40.0;
@@ -231,6 +232,41 @@ export function netErrorNotice(token: string): ConnectionNotice {
   // Retail: PopupError → MessageBoxW, then Client::Run returns. Ours renders
   // it as the DialogFactory OK message dialog over the connecting screen.
   return Object.freeze({ surface: 'dialog', token, stringId, text });
+}
+
+/**
+ * BUG.multi-tab-login-pingpong — the bridge refused the connection and said
+ * why with its close code (@ac/network BridgeRefusal). Retail had no bridge
+ * and no per-address cap, so there is no DAT string for it; the text is
+ * plain English, and the token is ours (telemetry reads it). Shown as the
+ * same OK dialog as a client-side NetError.
+ */
+export const BRIDGE_IP_CAP_TOKEN = 'BRIDGE_IP_CAP';
+export const BRIDGE_IP_CAP_TEXT = 'Too many game windows are open from your network. Close some webAC tabs and try again.';
+
+export function bridgeRefusalNotice(refusal: BridgeRefusal): ConnectionNotice {
+  switch (refusal) {
+    case 'ip_cap':
+    default:
+      return Object.freeze({ surface: 'dialog', token: BRIDGE_IP_CAP_TOKEN, stringId: 0, text: BRIDGE_IP_CAP_TEXT });
+  }
+}
+
+/**
+ * The OK-dialog notice for a connection 'error' event that ended the connect
+ * (main.ts raiseNetError): the bridge's refusal (BUG.multi-tab-login-pingpong),
+ * a server NetError that ended the logon, or a client-side NetError. null for
+ * any other error (a CharacterError, a WebSocket error on a live socket).
+ */
+export function connectionFailureNotice(event: {
+  bridgeRefusal?: BridgeRefusal;
+  serverNetError?: { stringId: number; tableId: number };
+  netErrorId?: string;
+}): ConnectionNotice | null {
+  if (event.bridgeRefusal) return bridgeRefusalNotice(event.bridgeRefusal);
+  if (event.serverNetError) return serverNetErrorNotice(event.serverNetError.stringId, event.serverNetError.tableId);
+  if (event.netErrorId) return netErrorNotice(event.netErrorId);
+  return null;
 }
 
 /**

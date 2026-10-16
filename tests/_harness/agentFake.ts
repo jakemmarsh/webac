@@ -66,10 +66,12 @@ export class FakeHost implements AgentHost {
   busy = () => false;
   dialogList: Array<{ text: string; buttons: string[] }> = [];
   cameraBoom = () => ({ min: 2.5, max: 2.75 });
-  buffs: Array<{ name: string; remaining: number; beneficial?: boolean }> = [];
+  buffs: Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean }> = [];
   activeSpells = () => this.buffs;
   freeSlots = 50;
   freePackSlots = () => this.freeSlots;
+  /** The main pack and side packs with their item slots (AgentHost.packs); unset = the host can't say. */
+  packs: AgentHost['packs'] = undefined;
   burdenPercent = () => 30;
   dialogs = () => this.dialogList;
   answerDialog = (label: string, index?: number) => { expect(index).toBeUndefined(); const i = this.dialogList.findIndex((d) => d.buttons.includes(label)); if (i < 0) return false; this.dialogList.splice(i, 1); return true; };
@@ -112,7 +114,7 @@ export class FakeHost implements AgentHost {
   appraise = (g: number, quiet?: boolean) => { this.appraised.push(g); this.appraiseCalls.push({ guid: g, quiet: !!quiet }); };
   appraisal = (g: number) => (this.appraised.includes(g) ? this.appraisals.get(g) ?? null : null);
   /** Identify data by guid (int/float/… properties and spell names), shown once appraised. */
-  appraisalDatas = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[]; maxVelocity?: number }>();
+  appraisalDatas = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[]; spellIds?: number[]; activeSpellIds?: number[]; maxVelocity?: number }>();
   appraisalData = (g: number) => (this.appraised.includes(g) ? this.appraisalDatas.get(g) ?? null : null);
   /** Palettes by id (0xRRGGBB entries); a missing one reads as not loaded yet. */
   palettes = new Map<number, number[]>();
@@ -180,6 +182,7 @@ export class FakeHost implements AgentHost {
   floorsAt: AgentHost['floorsAt'] = undefined;
   /** Where to stand in an interior cell named by its id (walk_to target=0xXXYYCCCC); unset = the host can't say. */
   cellPoint: AgentHost['cellPoint'] = undefined;
+  cellRange: AgentHost['cellRange'] = undefined;
   /** The landscape at a global point (open sea, too steep, the wade); unset = the host can't say. */
   navTerrain: AgentHost['navTerrain'] = undefined;
   /** Optional walls (landblock-local x, y → blocked): the body stops at them, and navProbe sees them. */

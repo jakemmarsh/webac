@@ -149,6 +149,20 @@ export interface BridgeServer {
 /** Bridge → tab when it starts draining (docs/hosted-agent-connector.md §4.5). */
 export const DRAINING_FRAME = JSON.stringify({ bridgeDraining: true });
 
+/**
+ * BUG.multi-tab-login-pingpong — the WebSocket close code (and reason) for a
+ * connection refused because its address already holds maxSessionsPerIp
+ * sessions. A browser cannot read an HTTP 429 on a refused upgrade (it sees
+ * only a failed socket, which the client reported as retail's "Couldn't create
+ * local socket" — a player locked out by their own open tabs had no idea why),
+ * so the bridge accepts the upgrade and closes it at once with this code. The
+ * client maps it to a plain message (@ac/network BRIDGE_CLOSE_IP_CAP, the same
+ * value). Only the cap: the per-IP connect-rate refusal stays a bare 429 so a
+ * flood never costs a handshake.
+ */
+export const CLOSE_IP_CAP = 4429;
+export const CLOSE_IP_CAP_REASON = 'ip_cap';
+
 type Admission =
   | { ok: true; target: Target | null; protocol: SessionProtocol; release: () => void }
   | { ok: false; status: number; reason: string; message: string };
@@ -395,6 +409,13 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       if (!a.ok) {
         metrics.reject(a.reason);
         log('warn', 'connect_rejected', { ip, reason: a.reason, status: a.status, origin: req.headers.origin, url: req.url });
+        if (a.reason === 'ip_cap' && !socket.destroyed) {
+          // Accepted only to say why: closed at once, never counted as a session.
+          try {
+            wss.handleUpgrade(req, socket, head, (ws) => ws.close(CLOSE_IP_CAP, CLOSE_IP_CAP_REASON));
+          } catch { rejectUpgrade(socket, a.status, a.message); }
+          return;
+        }
         rejectUpgrade(socket, a.status, a.message);
         return;
       }

@@ -38,6 +38,7 @@ import { GameMessageGroup } from './GameMessageGroup.js';
 import { NetAuthType } from './NetAuthType.js';
 import { type LoginProfile, EOR_LOGIN_PROFILE, isValidClientVersion } from './LoginProfile.js';
 import { AuthFlags } from './AuthFlags.js';
+import { type BridgeRefusal, BridgeRefusalError, bridgeRefusalFromClose } from './BridgeRefusal.js';
 import { CharacterError, characterErrorMessage } from '@ac/shared';
 import {
   BinaryWriter, BinaryReader, deserializeMessage,
@@ -177,6 +178,11 @@ export type ConnectionEventType =
   | 'agentPairing'
   // The bridge is draining, or its relay-link ticket (data = RelayLinkNotice; docs/hosted-agent-connector.md §4.5).
   | 'relayLink'
+  // BUG.multi-tab-login-pingpong — the first game frame from the server on
+  // this socket (whatever it says: a ConnectRequest, a CharacterError). The
+  // page's tab guard claims the account then: a login the bridge refused
+  // before reaching the server never displaces another tab.
+  | 'serverReached'
   | 'message';
 
 /**
@@ -230,6 +236,13 @@ export interface ConnectionEvent {
    * GDLE's refused login = STR_LOGIN_FAILED 0x04DF9C54 in table enum 8.
    */
   serverNetError?: ServerNetError;
+  /**
+   * BUG.multi-tab-login-pingpong — on type==='error': the bridge refused this
+   * connection and said why with its close code (BridgeRefusal.ts), e.g.
+   * 'ip_cap' when the player's address already holds the bridge's per-IP
+   * session cap. No 'disconnected' follows.
+   */
+  bridgeRefusal?: BridgeRefusal;
 }
 
 /** A NetError optional header's payload (`NetError::UnPack @ 004114a0`: u32 m_stringID, u32 m_tableID). */
@@ -307,9 +320,11 @@ export interface HealthSocketLike {
  * Probe the bridge without opening a game session: one WebSocket, the text
  * "health", the bridge's JSON status back, then close — the bridge answers
  * a text message before any UDP packet reaches ACE, so no ACE session is
- * created. Rejects on a connection error, an unparsable answer, or after
- * `timeoutMs`. The patch screen's connect meter (CORE.17.k.b.b.a.a.a) and
- * the pre-flight check at login both use it.
+ * created. Rejects on a connection error, an unparsable answer, a close
+ * before the answer (BUG.multi-tab-login-pingpong: the bridge's per-IP cap
+ * close rejects with a BridgeRefusalError; before, the promise never settled
+ * and the patch screen waited on it forever), or after `timeoutMs`. The
+ * patch screen's connect meter (CORE.17.k.b.b.a.a.a) uses it.
  */
 export function probeBridgeHealth(
   url: string,
@@ -318,7 +333,9 @@ export function probeBridgeHealth(
 ): Promise<BridgeHealth> {
   return new Promise((resolve, reject) => {
     const ws = new socketCtor(url);
+    let settled = false;
     const timeout = setTimeout(() => {
+      settled = true;
       ws.close();
       reject(new Error('Bridge not reachable'));
     }, timeoutMs);
@@ -328,6 +345,8 @@ export function probeBridgeHealth(
     };
     ws.onmessage = (event) => {
       clearTimeout(timeout);
+      if (settled) return;
+      settled = true;
       try {
         const data = JSON.parse(typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data as ArrayBuffer));
         resolve(data);
@@ -342,11 +361,17 @@ export function probeBridgeHealth(
       // close() on a socket that never connected, which re-entered this
       // handler until the stack overflowed.
       ws.onerror = null;
+      const first = !settled;
+      settled = true;
       ws.close();
-      reject(new Error('Bridge not reachable'));
+      if (first) reject(new Error('Bridge not reachable'));
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       clearTimeout(timeout);
+      if (settled) return;
+      settled = true;
+      const refusal = bridgeRefusalFromClose((ev as { code?: number } | null)?.code);
+      reject(refusal ? new BridgeRefusalError(refusal) : new Error('Bridge not reachable'));
     };
   });
 }
@@ -667,6 +692,13 @@ export class ClientConnection {
       return false;
     }
     this.loginRejectRetryAttempts++;
+    // BUG.multi-tab-login-pingpong — the refused login's socket is done (ACE
+    // terminated that session); close it now rather than at the retry, so the
+    // wait doesn't hold one of the player's bridge sessions (per-IP cap).
+    this.stopLoginRetry();
+    this.stopConnectResponseRetry();
+    if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
+    this.detachSocket();
     this.emit({
       type: 'loginRetry',
       reconnectAttempt: this.loginRejectRetryAttempts,
@@ -718,8 +750,10 @@ export class ClientConnection {
       this.startLoginRetry(account, password);
     };
 
+    let serverReached = false;
     this.ws.onmessage = (event: MessageEvent) => {
       if (typeof event.data === 'string') { this.handleBridgeText(event.data); return; }
+      if (!serverReached) { serverReached = true; this.emit({ type: 'serverReached' }); }
       const data = new Uint8Array(event.data as ArrayBuffer);
       try {
         this.handlePacket(data);
@@ -729,7 +763,11 @@ export class ClientConnection {
     };
 
     const socket = this.ws;
-    this.ws.onclose = (ev: CloseEvent) => this.handleSocketEnded(socket, 'socket_closed', ev?.code);
+    this.ws.onclose = (ev: CloseEvent) => {
+      const refusal = bridgeRefusalFromClose(ev?.code);
+      if (refusal && this.ws === socket) { this.handleBridgeRefusal(socket, refusal); return; }
+      this.handleSocketEnded(socket, 'socket_closed', ev?.code);
+    };
 
     this.ws.onerror = () => {
       if (!this.wsEverOpened) {
@@ -786,6 +824,23 @@ export class ClientConnection {
     this.attemptReconnect();
   }
 
+  /**
+   * BUG.multi-tab-login-pingpong — the bridge refused this connection with a
+   * readable close code (BridgeRefusal.ts): no session ever existed, so no
+   * 'disconnected' (nothing to resume, no ServerDied) and no reconnect; the
+   * login stops and the page shows why.
+   */
+  private handleBridgeRefusal(socket: WebSocket, refusal: BridgeRefusal): void {
+    this.sessionEndedFor = socket;
+    this.ws = null;
+    this.stopLoginRetry();
+    this.stopConnectResponseRetry();
+    if (this.loginRejectRetryTimer) { clearTimeout(this.loginRejectRetryTimer); this.loginRejectRetryTimer = null; }
+    if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
+    console.warn(`[AC:NET] The bridge refused this connection: ${refusal}`);
+    this.emit({ type: 'error', error: `Bridge refused the connection (${refusal})`, bridgeRefusal: refusal });
+  }
+
   /** The server ended (or abandoned) the session: close our socket and report it once. */
   private endSessionFromServer(cause: DisconnectCause): void {
     const socket = this.ws;
@@ -823,25 +878,31 @@ export class ClientConnection {
     this.awaitingServerConnect = false;
     if (this.loginRejectRetryTimer) { clearTimeout(this.loginRejectRetryTimer); this.loginRejectRetryTimer = null; }
     if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
-    const socket = this.ws;
-    if (socket) {
-      // Detached: its close reports nothing and schedules no reconnect, and a
-      // late frame on it (the server answers every LoginRequest resend) can't
-      // reach the next login.
-      this.sessionEndedFor = socket;
-      this.deliberateClose = true;
-      this.ws = null;
-      socket.onopen = null;
-      socket.onmessage = null;
-      socket.onclose = null;
-      socket.onerror = null;
-      try { socket.close(); } catch { /* already closing */ }
-    }
+    this.detachSocket();
     this.emit({
       type: 'error',
       error: `Login refused by the server (NetError 0x${netError.stringId.toString(16)}, table ${netError.tableId})`,
       serverNetError: { stringId: netError.stringId, tableId: netError.tableId },
     });
+  }
+
+  /**
+   * Close the current socket without reporting it: its close emits no
+   * 'disconnected' and schedules no reconnect, and a late frame on it (the
+   * server answers every LoginRequest resend) can't reach the next login.
+   * For a login that ended before any session existed.
+   */
+  private detachSocket(): void {
+    const socket = this.ws;
+    if (!socket) return;
+    this.sessionEndedFor = socket;
+    this.deliberateClose = true;
+    this.ws = null;
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onclose = null;
+    socket.onerror = null;
+    try { socket.close(); } catch { /* already closing */ }
   }
 
   /** Attempt auto-reconnect with exponential backoff. */
@@ -887,6 +948,10 @@ export class ClientConnection {
         // CORE.17.k.b — retail ClientNet::LogonUseTime @ 00544a10 ends the
         // logon with ID_ConnectionError_ClientTimedOutServer once its login
         // request budget is spent.
+        // BUG.multi-tab-login-pingpong — and the socket goes with it: the
+        // error dialog can sit for hours, and an open socket held one of the
+        // player's bridge sessions (per-IP cap) the whole time.
+        this.detachSocket();
         this.emit({ type: 'error', error: 'Login timed out', netErrorId: 'ID_ConnectionError_ClientTimedOutServer' });
         return;
       }

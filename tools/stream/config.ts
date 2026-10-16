@@ -48,6 +48,12 @@ export interface StreamConfig {
     wrapUpMinutes: number;
     /** A player whose turn ends early is told to keep playing this many times per segment, then the segment ends. */
     maxNudges: number;
+    /**
+     * A player who has said and done nothing for this long, with nothing of theirs running in the game (no walk, follow,
+     * fight or repeat cast: the daemon's vitals `task`), is asked to say what they're doing (policy.ts quietNudge);
+     * null = never. It replaces Claude Code's own silent-turn reminder, which asked during long walks too.
+     */
+    quietNudgeSeconds: number | null;
     /** Pause before the next segment after a normal end. */
     restartPauseSeconds: number;
     /** A segment shorter than this is a crash/quick quit: the pause doubles each time (up to maxBackoffSeconds). */
@@ -107,6 +113,13 @@ export const DEFAULT_DISALLOWED_TOOLS = [
 ];
 
 /** The rehearsal's context grew past 160k tokens in 12 minutes; compacting at the smallest window keeps a turn's re-read bounded. */
+/**
+ * How long a player may go without a word or an action, nothing of theirs running, before the supervisor asks what
+ * they're doing (seconds). Claude Code's own reminder asked every few silent turns, long walks included: "The repeated
+ * 'say what you're doing' nudges while waiting on long walks felt like dead air I couldn't do much about" (Arcanist,
+ * 2026-10-16 11:01 UTC report).
+ */
+export const DEFAULT_QUIET_NUDGE_SECONDS = 180;
 export const DEFAULT_AUTO_COMPACT_TOKENS = 100_000;
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 
@@ -158,7 +171,7 @@ export function parseStreamConfig(raw: unknown): StreamConfig {
   const seg = raw.segment ?? {};
   if (!isObj(seg)) fail('segment', 'must be an object');
   const s = seg as Record<string, unknown>;
-  only(s, 'segment', ['minutes', 'wrapUpMinutes', 'maxNudges', 'restartPauseSeconds', 'quickExitMinutes', 'maxBackoffSeconds', 'maxQuickExits', 'budgetUsd', 'autoCompactTokens']);
+  only(s, 'segment', ['minutes', 'wrapUpMinutes', 'maxNudges', 'quietNudgeSeconds', 'restartPauseSeconds', 'quickExitMinutes', 'maxBackoffSeconds', 'maxQuickExits', 'budgetUsd', 'autoCompactTokens']);
   const daily = raw.daily ?? {};
   if (!isObj(daily)) fail('daily', 'must be an object');
   const d = daily as Record<string, unknown>;
@@ -196,6 +209,7 @@ export function parseStreamConfig(raw: unknown): StreamConfig {
       minutes: num(s, 'minutes', 'segment', 75, 1),
       wrapUpMinutes: num(s, 'wrapUpMinutes', 'segment', 5, 0),
       maxNudges: num(s, 'maxNudges', 'segment', 2, 0),
+      quietNudgeSeconds: numOrNull(s, 'quietNudgeSeconds', 'segment', DEFAULT_QUIET_NUDGE_SECONDS),
       restartPauseSeconds: num(s, 'restartPauseSeconds', 'segment', 20, 0),
       quickExitMinutes: num(s, 'quickExitMinutes', 'segment', 3, 0),
       maxBackoffSeconds: num(s, 'maxBackoffSeconds', 'segment', 600, 0),

@@ -89,7 +89,8 @@ describe('a fellow out of sight in a dungeon (Bulwark, 2026-10-11)', () => {
   it('a fellow in a cell out of sight is out of sight, not at its last position', () => {
     host.add({ guid: 0x50000002, name: 'Claude Arcanist', itemType: 0x10, cell: (DUNGEON | 0x0130) >>> 0, x: 80, y: 40 });
     const obs = api.observe();
-    expect(obs.fellows).toEqual([{ name: 'Claude Arcanist', healthPct: 100 }]);
+    // No distance as if in view; where the client last placed her, said as that (2026-10-16 09:29Z: walk_to goes there).
+    expect(obs.fellows).toEqual([{ name: 'Claude Arcanist', healthPct: 100, lastSeen: '20 m N of you' }]);
     expect(obs.nearby.some((o) => o.name === 'Claude Arcanist')).toBe(false);
     host.objs.get(0x50000002)!.cell = (DUNGEON | 0x0111) >>> 0;
     expect(api.observe().fellows?.[0].dist).toBeCloseTo(20, 0);

@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseStreamConfig, DEFAULT_ALLOWED_TOOLS, DEFAULT_AUTO_COMPACT_TOKENS } from '../tools/stream/config.ts';
+import { parseStreamConfig, DEFAULT_ALLOWED_TOOLS, DEFAULT_AUTO_COMPACT_TOKENS, DEFAULT_QUIET_NUDGE_SECONDS } from '../tools/stream/config.ts';
 import { FeedWriter, FileTail, cliCalls, feedPath, isIncantation, parseChatLine, parseStreamJsonLine, shellWords, statusDraft, summarizeCliCall, type ChatParseState } from '../tools/stream/feed.ts';
 import type { FeedEvent } from '../tools/stream/feed-types.ts';
-import { afterTurn, dayUsage, endReason, nextSegment, type SegmentRecord } from '../tools/stream/policy.ts';
+import { QUIET_TOOLS, afterTurn, dayUsage, endReason, nextSegment, quietNudge, type SegmentRecord } from '../tools/stream/policy.ts';
 import { StreamSupervisor, claudeArgs, segmentDetail, playerEnv, startArgs, type PlayerProcess, type SupervisorDeps, type DaemonState } from '../tools/stream/supervisor.ts';
 import { creditsLine, nextCreditLevels, readinessBrief, recoveryCounts, unspent, playerToolNames, segmentOpening, sessionSoFar, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from '../tools/stream/prompt.ts';
 import { playerScripts, preparePlayerDir } from '../tools/stream/player.ts';
@@ -302,6 +302,20 @@ describe('restart policy and caps', () => {
     expect(afterTurn({ ...base, stopping: true })).toBe('end');
     expect(afterTurn({ ...base, resultSubtype: 'error_max_budget_usd' })).toBe('end');
   });
+  it('a quiet player is asked what they are doing only with nothing running (Arcanist, 2026-10-16: nudged through long walks)', () => {
+    const q = { nowMs: 200_000, quietMs: 180_000, inTurn: true, wrapUpSent: false, stopping: false, lastActiveMs: 0, lastNudgeMs: -Infinity, task: null };
+    expect(quietNudge(q)).toBe(true);
+    expect(quietNudge({ ...q, task: 'walking to Renald the Eldest' })).toBe(false); // a walk, follow, fight or repeat cast running
+    expect(quietNudge({ ...q, task: undefined })).toBe(false); // the daemon's vitals unknown: never on a guess
+    expect(quietNudge({ ...q, lastActiveMs: 30_000 })).toBe(false); // spoke or acted 170 s ago
+    expect(quietNudge({ ...q, lastNudgeMs: 100_000 })).toBe(false); // asked 100 s ago
+    expect(quietNudge({ ...q, inTurn: false })).toBe(false);
+    expect(quietNudge({ ...q, wrapUpSent: true })).toBe(false);
+    expect(quietNudge({ ...q, stopping: true })).toBe(false);
+    expect(quietNudge({ ...q, quietMs: null })).toBe(false);
+    expect(parseStreamConfig({ characters: [{ profile: 'mage', character: 'Claude Arcanist' }] }).segment.quietNudgeSeconds).toBe(DEFAULT_QUIET_NUDGE_SECONDS);
+    expect(QUIET_TOOLS.has('wait') && QUIET_TOOLS.has('observe') && !QUIET_TOOLS.has('cast') && !QUIET_TOOLS.has('say')).toBe(true);
+  });
   it('why a segment ended', () => {
     const b = { stopping: false, wrapUpSent: true, killed: false, sawResult: true, exitCode: 0 };
     expect(endReason(b)).toBe('done');
@@ -423,7 +437,7 @@ describe('stream supervisor (fake players, daemons and clock)', () => {
       await sup.run();
       expect(h.procs.map((x) => x.profile).sort()).toEqual(['mage', 'soldier']);
       const mage = h.procs.find((x) => x.profile === 'mage')!;
-      expect(mage.env).toEqual({ AC_AGENT_PROFILE: 'mage', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '100000' });
+      expect(mage.env).toEqual({ AC_AGENT_PROFILE: 'mage', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_SILENT_TURN_REMINDER: '0', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '100000' });
       expect(mage.args[mage.args.indexOf('--append-system-prompt') + 1]).toMatch(/^Brief for Claude Arcanist \(mage\) with Claude Bulwark\./);
       expect(mage.p.sent[0]).toMatch(/Segment 1[\s\S]*mage journal/);
       expect(mage.p.sent.slice(1).every((t) => /still live/.test(t))).toBe(true);
@@ -485,6 +499,45 @@ describe('stream supervisor (fake players, daemons and clock)', () => {
       expect(h.agentCalls).toContain('mage:status');
       expect(h.agentCalls.some((c) => c.startsWith('soldier:'))).toBe(false); // a local daemon's own stop logs it out
       expect(h.cli.filter((a) => a[0] === 'stop').map((a) => a[1]).sort()).toEqual(['profile=mage', 'profile=soldier']);
+    } finally { h.cleanup(); }
+  });
+
+  it('a player silent with nothing running is asked what they are doing; one on a long walk is not', async () => {
+    const seg = { ...CAST.segment, minutes: 8, restartPauseSeconds: 0 };
+    const play = (_p: string, text: string, p: FakeProc) => {
+      if (/Segment 1/.test(text)) p.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: './ac wait types=aggro timeout_s=85' } }] } });
+      if (/Wrap up now/.test(text)) p.emit(result('report'));
+    };
+    const idle = harness({ maxSegments: 1, characters: [CAST.characters[0]], segment: seg }, play);
+    const walking = harness({ maxSegments: 1, characters: [CAST.characters[0]], segment: seg }, play,
+      { vitals: () => ({ name: 'X', level: 5, health: { cur: 1, max: 1 }, stamina: { cur: 1, max: 1 }, mana: { cur: 1, max: 1 }, xp: null, coords: '1N, 1E', cell: '0x1', indoors: false, dead: false, combatMode: 'peace', task: 'walking to Renald the Eldest', goal: null }) });
+    try {
+      await new StreamSupervisor(idle.cfg, idle.deps).run();
+      const asked = idle.procs[0].p.sent.filter((t) => /Nothing has been said or done/.test(t));
+      expect(asked.length).toBeGreaterThanOrEqual(2); // every 3 min of the 8, never closer together
+      expect(asked.length).toBeLessThanOrEqual(3);
+      expect(asked[0]).toMatch(/^\[supervisor\] Nothing has been said or done for about 3 minutes and nothing of yours is running/);
+      expect(idle.procs[0].p.sent.findIndex((t) => /Wrap up now/.test(t))).toBe(idle.procs[0].p.sent.length - 1); // none after the wrap-up
+      await new StreamSupervisor(walking.cfg, walking.deps).run();
+      expect(walking.procs[0].p.sent.some((t) => /Nothing has been said or done/.test(t))).toBe(false);
+    } finally { idle.cleanup(); walking.cleanup(); }
+  });
+
+  it('narration and acting calls count as activity: a player who talks every minute is never asked', async () => {
+    const seg = { ...CAST.segment, minutes: 8, restartPauseSeconds: 0 };
+    const h = harness({ maxSegments: 1, characters: [CAST.characters[0]], segment: seg }, (_p, text, p) => {
+      if (/Wrap up now/.test(text)) p.emit(result('report'));
+    });
+    // Talks once a minute of the fake clock: a hook on the clock the supervisor's own sleeps advance.
+    const sleep = h.deps.sleep;
+    let last = h.deps.now();
+    h.deps.sleep = async (ms) => {
+      await sleep(ms);
+      if (h.deps.now() - last >= 60_000 && h.procs[0]) { last = h.deps.now(); h.procs[0].p.emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'Bolting the Essa on Bulwark.' }] } }); }
+    };
+    try {
+      await new StreamSupervisor(h.cfg, h.deps).run();
+      expect(h.procs[0].p.sent.some((t) => /Nothing has been said or done/.test(t))).toBe(false);
     } finally { h.cleanup(); }
   });
 
@@ -621,8 +674,11 @@ describe('player sessions: a small working directory, not the repo', () => {
   const cfg = parseStreamConfig(CAST);
   it('the session env turns off CLAUDE.md files and auto-memory and bounds the context', () => {
     expect(playerEnv(cfg, cfg.characters[1])).toEqual({
-      AC_AGENT_PROFILE: 'soldier', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '100000',
+      AC_AGENT_PROFILE: 'soldier', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_SILENT_TURN_REMINDER: '0', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '100000',
     });
+    // quietNudgeSeconds null: no supervisor quiet nudge, so Claude Code's own reminder stays as it is.
+    const quietOff = cfgWith({ segment: { ...CAST.segment, quietNudgeSeconds: null } });
+    expect(playerEnv(quietOff, quietOff.characters[0])).not.toHaveProperty('CLAUDE_CODE_SILENT_TURN_REMINDER');
     const off = cfgWith({ segment: { ...CAST.segment, autoCompactTokens: null } });
     expect(playerEnv(off, off.characters[0])).not.toHaveProperty('CLAUDE_CODE_AUTO_COMPACT_WINDOW');
   });

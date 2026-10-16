@@ -92,7 +92,7 @@ describe('1. waits leave out threat events about creatures that are dead or gone
   });
 
   it('a spell line is credited to its caster, and dropped once the caster is dead', async () => {
-    api.pushChat('Brigand casts Drain Health Other I and drains 4 points of your health.', 0x1f);
+    api.pushChat('Brigand casts Drain Health Other I and drains 4 points of your health.', 0x07); // Magic (ACE WorldObject_Magic); AdminTell (0x1f) is someone's words
     const before = api.events_(0).filter((e) => e.type === 'cast-at-you');
     expect(before.map((e) => e.guid)).toEqual([BRIGAND]);
     host.objs.delete(BRIGAND);
@@ -308,7 +308,7 @@ describe('4. cast repeat stops for a dangerous new attacker, not for every one',
 
   it('a new attacker seen casting, or one above your level, stops it however light its blows', async () => {
     creature(host, 0x80000083, 'Shadow', 83, 20);
-    api.pushChat('Shadow casts Drain Health Other I and drains 2 points of your health.', 0x1f); // seen before the repeat
+    api.pushChat('Shadow casts Drain Health Other I and drains 2 points of your health.', 0x07); // seen before the repeat (Magic)
     reply = (n) => {
       api.pushChat('You scorch Drudge Skulker for 12 points with Flame Bolt I.', 0x16);
       if (n === 1) api.pushChat('The Shadow misses you!', 0x15);

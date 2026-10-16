@@ -163,7 +163,10 @@ off the paperdoll into the main pack (2026-10-16: there was no way to take the d
 nothing to do, waits up to 17 s for the server's answer and ignores other chat; an id that isn't in your inventory is
 refused before it is sent (the server's "Item not found!" names an object the client can't resolve, which left its
 one pending inventory request stuck for ten minutes of "You can only move or use one item at a time"). A give still
-going at 25 s ends with a `task-done` event. In a dungeon, `ac_observe` lists creatures in rooms your room can't see
+going at 25 s ends with a `task-done` event. A task (walk, follow, use, …) that ended within 15 s answered its own
+call, so once a newer task has started its `task-done` is not handed to `ac_wait` (a follow stopped for aggro at 4 s,
+a second follow with stop_on_aggro=false, and the wait gave the first one's "stopped … coming at you": Bulwark,
+2026-10-16). In a dungeon, `ac_observe` lists creatures in rooms your room can't see
 under "also in range, in rooms out of sight of yours"; a target on another floor says so. A bare `routines` lists the
 profiles, a bare `routine` shows its status, and any tool missing a required argument answers with its usage line.
 
@@ -179,6 +182,20 @@ The one-object tools take `item=` and `target=` alike (pick_up, drop, equip, une
 loot, attack); `ac_inventory filter=` lists only a kind (weapon, armor, scroll, kit, potion, salvage, junk …) or names
 holding the text. A give the server answered "You give …" is done even before the pack shows it, and one that fails
 far from the recipient says how far.
+
+From the Daiklos reports (2026-10-16, 07:29 UTC): a `vitals-low` (or `fellow-low`) event is dropped from a wait once
+the vital it names is back above the level it fell below (a heal between the fall and the wait woke the wait at once on
+"health 93/156 (60%)" at full health), as threat events about dead creatures are. `ac_observe` and `ac_inventory` count
+pack slots ("pack slots: main pack 102/102 FULL, Sack 20/24 (4 free)"; side packs and foci take container slots, not
+item slots): an item with no slot left is refused per item ("… is completely full!") whatever your burden, so at 5 free
+or fewer the line says LOW, and a loot that began low or hit a full pack ends naming junk to drop and the cheapest
+things to sell. `ac_inventory filter=junk` is what no vendor buys (Value 0: ACE "has no value and cannot be sold"; the
+undead arms, legs and thighbones a Lich drops) that isn't money, a key, gem, writable, pack, component, mana stone or
+salvage (it can still be a quest or crafting piece); `filter=sell` is what a vendor pays for (not an item an appraisal or a vendor showed unsellable: ACE IsSellable false or Retained, marked "unsellable" in the listing), most valuable first,
+with the total. An argument a tool doesn't take is refused on the CLI and over MCP naming the one it most likely
+meant ("ac_raise: unknown argument "target": raise takes stat=, not target="). A give refused because one of you was
+busy ("too busy to accept gifts" while reading a scroll, "one item at a time") is tried once more after 3 s, and the
+reply says so.
 
 ### Several players at once
 
@@ -284,6 +301,13 @@ profile=… character=…`), then plays it as a headless Claude Code session in 
   2026-10-13: characters left mid-fight woke up dead or under attack in the next session.) A player still going `wrapUpMinutes` + 1 min later is
   ended (SIGTERM). A player whose turn ends early (it wrote a report at minute 20, or gave up) is told to keep playing,
   `maxNudges` times, and then the segment ends.
+- **Quiet players** (`policy.ts` `quietNudge`, cast.json `segment.quietNudgeSeconds`, default 180, null = off). A
+  player who has written no line and made no acting call (anything but wait / observe / look / status / trace / map)
+  for that long, while the daemon's `/vitals` shows no `task` of theirs running (walk, follow, fight, repeat cast), is
+  sent "[supervisor] Nothing has been said or done …: say in a few words what you're doing". A running task counts as
+  activity, so a long walk never sets it off. The player session runs with `CLAUDE_CODE_SILENT_TURN_REMINDER=0`:
+  Claude Code's own "The user hasn't heard from you in a while" reminder came every few silent turns, long walks
+  included, and Arcanist called it dead air he could do nothing about (2026-10-16 11:01 UTC report).
 - The next segment starts after `restartPauseSeconds`. A segment shorter than `quickExitMinutes` (a crash) backs off
   (30 s, doubling, up to `maxBackoffSeconds`), and `maxQuickExits` in a row halt that character.
 - Characters stay in the world between segments. The players never run `start` or `stop` (their permissions refuse
@@ -737,7 +761,15 @@ here, not having to hardcode behavior").
   - `ac_walk_to` and `ac_follow` answer when a monster starts coming at you: `stopped 31.0 m short: Shadow #8000b6e1
     (level 26) is coming at you, 24 m E (running at you). Fight it …, get away from it …, or walk on anyway
     (stop_on_aggro=false)`. One already coming when you set off doesn't stop it; flee never does. Routines' own walks
-    (api.walkTo without the tool) are unchanged.
+    (api.walkTo without the tool) are unchanged. A monster under half your level (`trivialFoe`: its examined level, else
+    the level one of its name showed) neither stops a walk / follow nor is kept clear of (the pack stop's rule); one of
+    unknown level is examined quietly and gets `AGGRO_LEVEL_WAIT_MS` (1.5 s) for the answer before it stops the walk; one
+    that hits you stops it as any hit does (Bulwark L33's follows stopped for L8 trash, 2026-10-16).
+  - NPCs and shopkeepers on your storey are disks the walk's probe keeps out of (their body radius + 0.45 m), since the
+    probe leaves creatures out and a standing NPC blocks the body like a wall; not the walk's own target, not one on the
+    goal. Doors are matched to a doorway (and to the stall fallbacks) only on its storey (`DOOR_STOREY_M` 1.5 m), and on
+    ACE a door that stays shut without "The door is locked!" is never called locked (the GDLE family is silent, so two
+    silent Uses still try a key there). The Holtburg scriveners, 0xA9B30102 (2026-10-16).
   - `ac_walk_to` keeps 10 m clear of monsters near the way outdoors (15 m of one more than 5 levels above you; not in a
     dungeon or building, whose corridors keep no one 10 m clear): each is a disk the
     planner routes round, as portals are (`portalAvoid.avoidDisks`). A leg blocked only by monsters gets one quick search
@@ -942,7 +974,7 @@ here, not having to hardcode behavior").
   re-aiming, standing while they stand, for duration_s): retail has no follow command (none in the decomp), this is
   VirindiTank's Follow nav / `/ub follow`. `ac_buy` waits for each buy's answer and queues the next (ACE refuses a
   service while the vendor `IsBusy` casting the last one); `ac_vendor` marks services (ItemType TYPE_SERVICE
-  0x100000: "service: casts it on you when you buy it; not a scroll"). `ac_loot` waits for peace mode to really take
+  0x100000: "service: casts it on you when you buy it; not a scroll"), and with `target=<the vendor>` opens that vendor first with ac_use's own use (walk there, use) when it isn't the open one: eleven `vendor target=…` calls were refused as an unknown argument in one segment (2026-10-16). A give that went through drops a busy notice from its reply ("You can only move or use one item at a time" was another give's, sent a quarter-second later). `ac_loot` waits for peace mode to really take
   (a mode change asked mid-swing goes out later and cut the server's walk to the corpse short) and Uses once more if
   nothing opened. `ac_attack` on a monster that just died says so and where its corpse is. `ac_give` that the
   server cancels ("… can't be given - action cancelled": its walk to them was cut short; coins are not special)
@@ -973,7 +1005,7 @@ here, not having to hardcode behavior").
   goal. The point is never placed by dividing by 192: dungeon frames run outside 0–192 (the Training Academy 0x7202
   spans local y −255..5; a hive route's point at 0x039D is local (51, −56), room 0x039D0156 at z −30, VTank Z −0.125).
   In a building the same lookup puts a coordinate inside it in its room (within 3 m of your storey). Attack lines are placed when they come, on the nearest of that name within reach (a swing
-  8 m, a spell 60 m), never moved onto another of the name later; none in reach is `hit by, but not placed` (in a dungeon ACE shows you no monster in a cell yours can't see, yet its melee checks distance only, so it can hit you through a wall or shut door). ac_wait:
+  8 m, a spell 60 m, a shot 78 m from a monster wielding a bow, crossbow, atlatl or thrown weapon or turned to face you: ACE's ranged monsters TurnTo and stand, and a Sata Sclavus's arrows from 22 m read as melee lines, 2026-10-16), never moved onto another of the name later; none in reach is `hit by, but not placed` (in a dungeon ACE shows you no monster in a cell yours can't see, yet its melee checks distance only, so it can hit you through a wall or shut door). ac_wait:
   vitals-low at half health by default (`vitals_below=`, `mana_below=`, `stamina_below=` per wait; it was 35%, and woke
   an archer at 14%), any single hit over a quarter of max health, `attackers-up` and `cast-at-you` (a spell landing on,
   failing on or resisted by you, or a creature within 40 m speaking spell words: ACE Monster_Magic broadcasts them).
@@ -1050,7 +1082,11 @@ here, not having to hardcode behavior").
   00:19:46–00:20:48Z) and at Skeleton Warriors (2026-10-14, 1.5–1.6 m, twice at Door #70145010): not a distance
   limit (see Line of fire: ACE's own physics hits at point blank) but an obstacle between the bodies, a closed door
   above all, which the old line-of-fire sweep could not see that close. It now sweeps the bolt's real path, and a bolt
-  that still does nothing names what is in its way ("Door 1.4 m from you is in the bolt's way"). `until_health` takes a fraction or a percent (0.4 was 0.4%). `ac_pick_up` waits on
+  that still does nothing names what is in its way ("Door 1.4 m from you is in the bolt's way"). A close one (under
+  2.5 m) with nothing in our view's way says the server has a wall or door between you, or the creature elsewhere, and
+  to step back about 3 m so it follows you out; two from the same spots and the next cast at it is refused until you or
+  it move (a Drudge Lurker "wedged in a wall" in Daiklos, 2026-10-16: two Flame Bolts at 1.6 m did nothing, the first
+  two from 4 m back killed it). `until_health` takes a fraction or a percent (0.4 was 0.4%). `ac_pick_up` waits on
   while the server's walk to the item keeps moving you (up to 45 s), and a no-answer says how far it is. The blank
   Parchment was blank: weenie 365 has no page data (max 1 page; vendors sell it), so "(it has no writing)" is right. The
   attack's first answer says how far the target is, on which floor, and which fellow you'd be left far from. An attack
@@ -1131,6 +1167,16 @@ provide.**
 
 ## Walking: `ac_walk_to` and `ac_map`
 
+Targets: an object, a remembered place, map coordinates, an offset ("10m NNW"), or a room by its cell id
+(`target=0x01850148`: the floor under the cell's middle; an id the landblock hasn't says which ids it has). From
+the landscape, a building's room or an outdoor cell (0xXXYY0001–0040) of any landblock is a target too: the walk crosses
+the landscape and takes the building's doorways once in its landblock; a cell of a landblock not loaded yet is walked
+toward by the landblock's middle until it loads (a dungeon's cell then says which portal took you there, if one did). `./world-query` prints cell columns in hex and `lore` lists the rooms a monster is
+placed in: Bulwark converted the DB's decimal 25493832 to "0x01850248" by hand and Daiklos's Mu-miyah floor
+read as unreachable, though the doorway route walks there (2026-10-16). A fellow out of your sight in a
+dungeon (ACE stops placing a player in a room yours can't see; the fellowship's updates carry no place) is
+walked to where the client last placed them, and `ac_follow` follows on from there when they are in sight.
+
 `walkTo` (packages/renderer/src/agent/AgentApi.ts) gets you there the way a player would, and every check
 uses the client's own movement collision:
 
@@ -1175,7 +1221,14 @@ uses the client's own movement collision:
    The walk then goes to the take-off (the last metres at a walk), stops, re-aims the charge from where
    it actually stands, faces the way and jumps. A landing off the plan re-plans from there.
 4. **Attacked, or about to be.** A monster starting to come at you ends an ac_walk_to / ac_follow first (stop_on_aggro;
-   see "Monsters coming at you" above), and ac_walk_to keeps clear of monsters near the way (avoid_monsters). Indoors
+   see "Monsters coming at you" above), and ac_walk_to keeps clear of monsters near the way (avoid_monsters). A kind
+   of creature seen only buffing you (every spell it cast on you beneficial by the spell table, no blow landed:
+   `harmlessKind`) is no threat to any of these, nor to aggro events: Holtburg's Pumpkin Buffer turns to face you to
+   cast its Incantations. One harmful spell or blow and it counts again. Its stacked buffs read
+   "…cast X on you, refreshing Y" (ACE's suffix), and what each kind did to you is kept per character in
+   browser storage (`acAgent.seenKinds.<name>`), so a page reload doesn't make it a stranger again. A
+   third party is never told of a creature's cast on someone else (ACE sends the Magic line to the
+   caster and the target only), so a fellow's buffer counts once it has buffed you. Indoors
    both stop before taking you within the server's wake range (ACE 18 m, GDLE 40 m) of two or more monsters not yet awake, naming them: a
    pit's pack, before the ramp down or the drop in (Hollow Lair, 2026-10-16).
    A hit, miss or evade line aimed at you (the `attacked` event), or health falling below
@@ -1192,7 +1245,15 @@ uses the client's own movement collision:
    keeps ending here …: walk 2 toward there to stop at this spot"), with the open ways from there.
 6. **Arrival.** `within` (default 2) under 5 m means beside it on its floor; 5 m or more is a range to stand at, by
    the straight distance whatever floor it is on, with a note when the line to it is blocked. It is judged along the
-   stretch run since the last tick, so a slow frame rate never hops the body either side of the goal.
+   stretch run since the last tick, so a slow frame rate never hops the body either side of the goal. An offset with
+   no `within` ("1m north", a line-of-fire hint's spot) is a step: arrived within a quarter of it (0.25 m to 2 m),
+   and the last metres of one 5 m or shorter at a walk. Before, "1m north" answered "arrived (1.0 m away)" standing
+   still (Daiklos, 2026-10-16). Offsets and `ac_turn` take all 16 compass points (`NNW`, `west-southwest`) and
+   degrees (`"10m 330°"`, `"10 m bearing 330"`). A walk to map coordinates that ends short adds how far the point is,
+   where you are and the map's scale: 0.1 is 24 m, 1.0 is 240 m ("1489 m short" of Daiklos from Holtburg was right).
+   With `stay_with`, a fellow who passes you on your own way (within the leash of your line to the goal) leads: the
+   walk goes on after them. Only one going past on a parallel way, farther off your line, ends it ("went on past you
+   on another way").
 7. **Uses, pick-ups, loots and melee run-ups.** The server walks you to an object in a straight line (ACE
    MoveTo). When the client's own collision stops that line short (a wall, a fence, a building between),
    the walk above goes first and the request after; with a clear line the server's walk is used as before.

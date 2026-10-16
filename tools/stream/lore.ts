@@ -49,6 +49,8 @@ export interface LoreCreature {
   wielded: { name: string; weenieType: number; damage?: number; damageType?: number; variance?: number }[];
   /** Placements (landblock_instance) + generator slots that make it: 0 = not in the world as such. */
   spawns: number;
+  /** The interior cells (dungeon or building rooms) it is placed in (landblock_instance obj_Cell_Id), when any. */
+  cells?: number[];
 }
 
 export interface LoreSpell {
@@ -96,6 +98,7 @@ export function loreDetailSql(wcids: number[]): string[] {
     `SELECT 'w', c.object_Id, iw.type, COALESCE(s.value, iw.class_Name), ${WEAPON_COLS} FROM weenie_properties_create_list c JOIN weenie iw ON iw.class_Id = c.weenie_Class_Id LEFT JOIN weenie_properties_string s ON s.object_Id = iw.class_Id AND s.type = 1 WHERE c.object_Id IN (${ids}) AND (c.destination_Type & 2) <> 0`,
     `SELECT DISTINCT 'w', d.object_Id, iw.type, COALESCE(s.value, iw.class_Name), ${WEAPON_COLS} FROM weenie_properties_d_i_d d JOIN treasure_wielded t ON t.treasure_Type = d.value JOIN weenie iw ON iw.class_Id = t.weenie_Class_Id LEFT JOIN weenie_properties_string s ON s.object_Id = iw.class_Id AND s.type = 1 WHERE d.object_Id IN (${ids}) AND d.type = 32`,
     `SELECT 'p', weenie_Class_Id, COUNT(*), 0 FROM landblock_instance WHERE weenie_Class_Id IN (${ids}) GROUP BY weenie_Class_Id`,
+    `SELECT DISTINCT 'c', weenie_Class_Id, obj_Cell_Id, 0 FROM landblock_instance WHERE weenie_Class_Id IN (${ids}) AND (obj_Cell_Id & 0xFFFF) >= 0x100 ORDER BY obj_Cell_Id LIMIT 300`,
     `SELECT 'p', weenie_Class_Id, COUNT(*), 0 FROM weenie_properties_generator WHERE weenie_Class_Id IN (${ids}) GROUP BY weenie_Class_Id`,
   ];
 }
@@ -184,9 +187,33 @@ export function parseLoreRows(tsv: string): LoreCreature[] {
         c.wielded.push({ name: b, weenieType: Number(a), ...(damage !== undefined && { damage }), ...(damageType !== undefined && { damageType }), ...(variance !== undefined && { variance }) });
       } break;
       case 'p': c.spawns += Number(a); break;
+      case 'c': { const cell = Number(a) >>> 0; if (Number.isFinite(Number(a)) && !(c.cells ??= []).includes(cell)) c.cells.push(cell); break; }
     }
   }
   return [...by.values()].filter((c) => c.name).sort((x, y) => x.wcid - y.wcid);
+}
+
+const LORE_ROOM_LANDBLOCKS = 6;
+const LORE_ROOM_CELLS = 4;
+const hexCell = (n: number): string => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
+
+/**
+ * "  placed in rooms: 0x0185: 0x01850114, 0x01850148, 0x0185014E; …" for the dungeon / building cells a creature is
+ * placed in, by landblock, with how walk_to takes one. Null when none. Bulwark read the Horrible Mu-miyahs' cells from a
+ * hand query as decimals, converted them wrongly and never walked there (Daiklos, 2026-10-16).
+ */
+export function placedRooms(cells: number[]): string | null {
+  const by = new Map<number, number[]>();
+  for (const c of [...new Set(cells.map((x) => x >>> 0))].sort((a, b) => a - b)) {
+    if ((c & 0xffff) < 0x100) continue;
+    const lb = c >>> 16;
+    by.set(lb, [...(by.get(lb) ?? []), c]);
+  }
+  if (!by.size) return null;
+  const lbs = [...by.entries()].slice(0, LORE_ROOM_LANDBLOCKS).map(([lb, cs]) =>
+    `0x${lb.toString(16).toUpperCase().padStart(4, '0')}: ${cs.slice(0, LORE_ROOM_CELLS).map(hexCell).join(', ')}${cs.length > LORE_ROOM_CELLS ? ` +${cs.length - LORE_ROOM_CELLS} more` : ''}`);
+  const first = [...by.values()][0][0];
+  return `  placed in rooms (landblock: cells): ${lbs.join('; ')}${by.size > LORE_ROOM_LANDBLOCKS ? `; +${by.size - LORE_ROOM_LANDBLOCKS} more landblocks` : ''}. From inside that dungeon, \`walk_to target=${hexCell(first)}\` walks to the room`;
 }
 
 /** Max health as ACE computes it (CreatureVital.Base): MaxHealth init + ranks + round(Endurance / 2). */
@@ -295,6 +322,8 @@ export function formatLore(pick: LorePick, creatures: LoreCreature[]): string {
     if (split.some((x) => own(x).length)) out.push(...common);
     for (const x of split) out.push(x.head, ...own(x));
     if (!split.some((x) => own(x).length)) out.push(...common);
+    const rooms = placedRooms(mine.flatMap((c) => c.cells ?? []));
+    if (rooms) out.push(rooms);
   }
   return out.join('\n');
 }

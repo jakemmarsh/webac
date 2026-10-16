@@ -145,7 +145,7 @@ describe('the tools through a hosted caller', () => {
     expect(await TOOL_CALLER.run(on.c, () => tool('ac_status').run({}))).toMatchObject({ text: expect.stringContaining('screen: world; in the world: Jake\ngoal: level to 10') });
     const waits = caller('on', null);
     waits.c.call = async <T>(method: string, args: unknown[] = [], timeoutMs?: number) => { waits.calls.push({ method, args, timeoutMs }); return [] as T; };
-    expect((await TOOL_CALLER.run(waits.c, () => tool('ac_wait').run({ timeout_s: 120 }))).text).toBe('(nothing within 20 s)');
+    expect((await TOOL_CALLER.run(waits.c, () => tool('ac_wait').run({ timeout_s: 120 }))).text).toBe('(nothing within 20 s)\n(timeout_s=120 was cut to 20 s, the longest one wait runs: call ac_wait again to keep waiting)');
     // ac_wait asks the page's wait (counting from the last look), capped at the hosted 20 s.
     expect(waits.calls[0]).toMatchObject({ method: 'wait', args: [expect.anything(), 20_000] });
     // A tab on an older build through the relay ("unknown method wait") falls back to waitFor.
@@ -155,7 +155,7 @@ describe('the tools through a hosted caller', () => {
       if (method === 'wait') throw new Error('unknown method wait');
       return [] as T;
     };
-    expect((await TOOL_CALLER.run(old.c, () => tool('ac_wait').run({ timeout_s: 120 }))).text).toBe('(nothing within 20 s)');
+    expect((await TOOL_CALLER.run(old.c, () => tool('ac_wait').run({ timeout_s: 120 }))).text).toBe('(nothing within 20 s)\n(timeout_s=120 was cut to 20 s, the longest one wait runs: call ac_wait again to keep waiting)');
     expect(old.calls.map((c) => c.method)).toEqual(['wait', 'waitFor']);
   });
 

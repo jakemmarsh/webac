@@ -28,12 +28,12 @@ import { formatJournal, loadJournal } from '../ac-agent/journal.ts';
 import { STATE_DIR, logFile, pidAlive, readInfo } from '../ac-agent/state.ts';
 import { type CharacterConfig, type StreamConfig, parseStreamConfig } from './config.ts';
 import { type ChatParseState, FeedWriter, FileTail, type SegmentUsage, addUsage, feedPath, parseChatLine, parseStreamJsonLine, statusDraft } from './feed.ts';
-import { type SegmentRecord, afterTurn, dayUsage, endReason, localDay, nextSegment } from './policy.ts';
+import { type SegmentRecord, QUIET_TOOLS, afterTurn, dayUsage, endReason, localDay, nextSegment, quietNudge } from './policy.ts';
 import { preparePlayerDir } from './player.ts';
 import { type TableSpell, loadSpellTableRows } from './spellGaps.ts';
 import { StuckWatch, classifyResult, isBusyChatLine } from './stuck.ts';
 import { TOOLS } from '../ac-agent/tools.ts';
-import { type SessionTally, clipReport, nudgeMessage, readinessBrief, sessionSoFar, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
+import { type SessionTally, clipReport, nudgeMessage, quietMessage, readinessBrief, sessionSoFar, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
 
 export const STREAM_DIR = join(STATE_DIR, 'stream');
 export const STOP_FILE = join(STREAM_DIR, 'STOP');
@@ -125,6 +125,9 @@ export function playerEnv(cfg: StreamConfig, c: CharacterConfig): Record<string,
     AC_AGENT_PROFILE: c.profile,
     CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1',
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+    // Claude Code's own "The user hasn't heard from you in a while" reminder came every few silent turns, during long
+    // walks too (Arcanist, 2026-10-16); the supervisor's quiet nudge asks only when nothing of theirs is running.
+    ...(cfg.segment.quietNudgeSeconds !== null ? { CLAUDE_CODE_SILENT_TURN_REMINDER: '0' } : {}),
     ...(cfg.segment.autoCompactTokens !== null ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(cfg.segment.autoCompactTokens) } : {}),
   };
 }
@@ -165,6 +168,8 @@ export class StreamSupervisor {
   readonly halted = new Map<string, string>();
   /** Each character's stuck watch (stuck.ts): the server has stopped playing it. */
   private stuck = new Map<string, StuckWatch>();
+  /** Each character's running task as the last status poll read it (null: none; absent: unknown), and when. */
+  private tasks = new Map<string, { task: string | null; at: number }>();
 
   constructor(readonly cfg: StreamConfig, readonly deps: SupervisorDeps) {}
 
@@ -250,6 +255,8 @@ export class StreamSupervisor {
         continue;
       }
       const vit = await this.deps.vitals(c.profile).catch(() => null);
+      if (vit) this.tasks.set(c.profile, { task: vit.task ?? null, at: this.deps.now() });
+      else this.tasks.delete(c.profile);
       const v = statusDraft(c.profile, vit);
       if (v) this.deps.feed.write(v);
       const w = this.watch(c.profile);
@@ -406,6 +413,11 @@ export class StreamSupervisor {
     let inputClosed = false;
     let killed = false;
     let nudges = 0;
+    // The quiet nudge (policy.ts quietNudge): when the player last spoke or acted, or had a task running.
+    let inTurn = true;
+    let lastActive = startMs;
+    let lastQuietNudge = -Infinity;
+    this.tasks.delete(c.profile);
 
     // stdout lines into a queue the loop below reads between clock ticks.
     const queue: string[] = [];
@@ -426,6 +438,7 @@ export class StreamSupervisor {
         const o = parseStreamJsonLine(line, c.profile, names);
         for (const d of o.drafts) deps.feed.write(d);
         for (const k of o.calls ?? []) callTools.set(k.id, k.tools);
+        if (o.drafts.some((d) => d.type === 'narration') || (o.calls ?? []).some((k) => k.tools.some((t) => !QUIET_TOOLS.has(t)))) lastActive = deps.now();
         for (const r of o.results ?? []) {
           const tools = callTools.get(r.id);
           if (!tools) continue;
@@ -441,7 +454,10 @@ export class StreamSupervisor {
           resultSubtype = o.result.subtype;
           if (o.result.text.trim()) finalText = o.result.text;
           const next = afterTurn({ nowMs: deps.now(), deadlineMs: deadline, stopping: this.stopping || stopSentAt !== null, wrapUpSent, nudges, maxNudges: cfg.segment.maxNudges, resultSubtype });
+          inTurn = false;
           if (next === 'nudge' && !inputClosed) {
+            inTurn = true;
+            lastActive = deps.now();
             nudges++;
             deps.log(`${c.character}: turn ended with ${Math.round((deadline - deps.now()) / 60_000)} min left; nudge ${nudges}`);
             proc.send(userLine(nudgeMessage((deadline - deps.now()) / 60_000, partner)));
@@ -450,6 +466,14 @@ export class StreamSupervisor {
       }
       if (eof) break;
       const now = deps.now();
+      const seen = this.tasks.get(c.profile);
+      if (seen?.task) lastActive = Math.max(lastActive, seen.at);
+      const quietMs = cfg.segment.quietNudgeSeconds === null ? null : cfg.segment.quietNudgeSeconds * 1000;
+      if (!inputClosed && quietNudge({ nowMs: now, quietMs, inTurn, wrapUpSent, stopping: this.stopping || stopSentAt !== null, lastActiveMs: lastActive, lastNudgeMs: lastQuietNudge, task: seen ? seen.task : undefined })) {
+        lastQuietNudge = now;
+        deps.log(`${c.character}: quiet ${Math.round((now - lastActive) / 1000)} s with nothing running; asked what they're doing`);
+        proc.send(userLine(quietMessage((now - lastActive) / 60_000)));
+      }
       if (this.stopping && stopSentAt === null && !inputClosed) {
         stopSentAt = now;
         proc.send(userLine(streamEndingMessage(cfg.stopGraceSeconds)));

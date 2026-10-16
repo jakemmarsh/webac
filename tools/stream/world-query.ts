@@ -43,6 +43,36 @@ export function clipOutput(out: string, max = WORLD_QUERY_MAX_CHARS): string {
   return out.length <= max ? out : `${out.slice(0, max)}\n… (${out.length - max} more characters cut: add a LIMIT or narrow the WHERE)`;
 }
 
+/**
+ * mysql's boxed table with each cell-id column (a header with "cell" in it: obj_Cell_Id, dest_cell …) in hex. The DB
+ * keeps a cell id as a decimal number, and Bulwark turned 25493832 (0x01850148, a Horrible Mu-miyah's room in Daiklos)
+ * into "0x01850248" by hand, a cell Daiklos hasn't, so the bottom floor read as unreachable (2026-10-16). A footnote
+ * says walk_to takes such an id. Other columns, and a table with no cell column, are as mysql printed them.
+ */
+export function hexCellColumns(table: string): string {
+  const lines = table.replace(/\n+$/, '').split('\n');
+  const rows = lines.map((l) => (/^\|.*\|$/.test(l) ? l.slice(1, -1).split('|').map((c) => c.trim()) : null));
+  const header = rows.find((r) => r !== null);
+  if (!header) return table;
+  const cols = header.map((h, i) => (/cell/i.test(h) ? i : -1)).filter((i) => i >= 0);
+  if (!cols.length) return table;
+  let first: string | null = null;
+  const cellHex = (v: string): string => {
+    if (!/^\d+$/.test(v)) return v;
+    const n = Number(v);
+    if (n < 0x10000 || n > 0xffffffff) return v;
+    const h = `0x${n.toString(16).toUpperCase().padStart(8, '0')}`;
+    first ??= h;
+    return h;
+  };
+  const out = rows.map((r) => (r && r !== header ? r.map((c, i) => (cols.includes(i) ? cellHex(c) : c)) : r));
+  if (first === null) return table;
+  const widths = header.map((_, i) => Math.max(...out.filter((r): r is string[] => r !== null).map((r) => (r[i] ?? '').length)));
+  const rule = `+${widths.map((w) => '-'.repeat(w + 2)).join('+')}+`;
+  const text = out.map((r) => (r ? `| ${r.map((c, i) => c.padEnd(widths[i])).join(' | ')} |` : rule)).join('\n');
+  return `${text}\n(cell ids in hex: \`walk_to target=${first}\` walks to that room when you're in that dungeon or building, landblock 0x${(first as string).slice(2, 6)})`;
+}
+
 /** Run `stmts` inside one READ ONLY transaction; `table` = mysql's boxed output, else tab-separated rows, no header. */
 function runReadOnly(stmts: string[], table: boolean): string {
   const container = process.env.ACJS_WORLD_DB_CONTAINER ?? 'ace-db';
@@ -120,7 +150,7 @@ function main(): void {
   const why = worldQueryRefusal(sql);
   if (why) { console.error(`refused: ${why}`); process.exit(2); }
   const out = runReadOnly([sql.trim().replace(/;\s*$/, '')], true);
-  console.log(clipOutput(out || '(no rows)'));
+  console.log(clipOutput(out ? hexCellColumns(out) : '(no rows)'));
 }
 
 if (process.argv[1] && /world-query\.ts$/.test(process.argv[1])) main();

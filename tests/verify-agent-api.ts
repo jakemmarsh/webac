@@ -563,6 +563,7 @@ describe('AgentApi', () => {
 
     // The 1999 server says nothing for a locked door (only its sound): two uses that leave it shut, then the key.
     host = new FakeHost();
+    host.fallFamily = 'gdle';
     api = new AgentApi(host);
     const d3 = setup(true, true);
     const p3 = api.walkTo('Straw Drudge', { within: 1.5 });

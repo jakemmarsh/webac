@@ -27,7 +27,8 @@ import {
 } from '../services/ws-tcp-bridge/src/limits';
 import { BridgeMetrics, renderPrometheus, healthzBody } from '../services/ws-tcp-bridge/src/metrics';
 import { formatLogLine, rateLimitedLog, type LogLevel } from '../services/ws-tcp-bridge/src/log';
-import { createBridgeServer, type BridgeServer } from '../services/ws-tcp-bridge/src/server';
+import { createBridgeServer, CLOSE_IP_CAP, CLOSE_IP_CAP_REASON, type BridgeServer } from '../services/ws-tcp-bridge/src/server';
+import { BRIDGE_CLOSE_IP_CAP } from '../packages/network/src/BridgeRefusal';
 import { sanitizeClientError, scrubText } from '../services/ws-tcp-bridge/src/clientErrors';
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'servers-list-sample.xml');
@@ -523,7 +524,15 @@ describe('bridge end to end (multi mode)', () => {
     const a = { 'x-forwarded-for': '6.6.6.6, 198.51.100.7' };
     await connect(url, a);
     const second = await connect(url, a);
-    await expect(open(url, a)).rejects.toThrow('status 429');
+    // BUG.multi-tab-login-pingpong — refused with a close the browser can read
+    // (an HTTP 429 on the upgrade reached the page as a bare socket failure).
+    const refused = await open(url, a);
+    const closed = await new Promise<{ code: number; reason: string }>((resolve) => {
+      refused.once('close', (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+    expect(closed).toEqual({ code: CLOSE_IP_CAP, reason: CLOSE_IP_CAP_REASON });
+    expect(CLOSE_IP_CAP).toBe(BRIDGE_CLOSE_IP_CAP); // the client maps the same code
+    expect(bridge!.snapshot().sessions).toBe(2); // never counted as a session
     await connect(url, { 'x-forwarded-for': '198.51.100.8' }); // another player is fine
     expect(bridge!.metrics.rejects.get('ip_cap')).toBe(1);
     second.close();
