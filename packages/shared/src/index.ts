@@ -17,7 +17,7 @@ export type {
   PhysicsPolygon, CollisionHit, WalkableFloor, WalkablePath,
 } from './physics/CollisionBSP.js';
 export {
-  getRunRate, getClientRunRate, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, integrateAirborneStep,
+  getRunRate, getClientRunRate, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, integrateAirborneStep,
   getEncumbranceCapacity, getBurden, getBurdenMod, BACKWARDS_FACTOR, SIDESTEP_FACTOR,
   RUN_ANIM_SPEED, WALK_ANIM_SPEED, SIDESTEP_ANIM_SPEED, MAX_SIDESTEP_ANIM_RATE,
   RUN_TURN_FACTOR,

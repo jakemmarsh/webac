@@ -67,6 +67,8 @@ export interface AgentObject {
    * on: CPhysicsObj::leave_visibility): not drawn, frozen where it was last seen, deleted 25 s later. Not there to act on.
    */
   outOfSight?: boolean;
+  /** Indoors, on a floor this many metres above (+) or below (−) yours: in view maybe, but no step reaches it. */
+  otherFloor?: number;
 }
 
 export interface AgentVital { cur: number; max: number }
@@ -178,11 +180,19 @@ export interface AgentObservation {
   screen: AgentScreen;
   me: AgentSelf | null;
   target: AgentObject | null;
+  /** Your selection is somewhere you no longer are (left behind by a portal): its name and id; `target` is then null. */
+  targetLeftBehind?: string;
   nearby: AgentObject[];
   /** Total objects in range before the `max` cut. */
   nearbyTotal: number;
   /** NPCs, vendors, portals and lifestones seen earlier and now out of view, nearest first (last-known positions). */
   remembered: AgentObject[];
+  /**
+   * Creatures in range the client still holds in dungeon rooms your room can't see (not in its VisibleCells), where the
+   * server last placed them: left out of `nearby` (they may have moved), but there. "filter=monster showed 0
+   * monsters" with dolls standing in the next rooms (Bulwark, Stable Rift, 2026-10-16).
+   */
+  unseen?: AgentObject[];
   /** Open dialogs (popups, confirmations), oldest first; answer with ac_dialog. */
   dialogs: AgentDialog[];
   /** Open windows (Inventory, Social (fellowship), Container …); close with ac_close. */
@@ -320,6 +330,8 @@ export interface AgentSpell {
   category?: number;
   power?: number;
   duration?: number;
+  /** What it is cast on (the spell table's NonComponentTargetType, ACE ItemType bits: Creature 0x10, Armor | Clothing 0x6 …). */
+  targetType?: number;
   /** It flies to its target as a missile (the spell table's MetaSpellType Projectile / LifeProjectile / EnchantmentProjectile): walls stop it. */
   projectile?: boolean;
   /** How far it reaches for you, metres (the spell examine's Range: its range grows with your ranks in the school's skill). */

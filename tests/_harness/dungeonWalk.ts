@@ -13,7 +13,7 @@
 import { vi } from 'vitest';
 import { AgentApi, compassToYaw, type AgentHost } from '../../packages/renderer/src/agent/AgentApi.ts';
 import type { AgentResult } from '../../packages/renderer/src/agent/types.ts';
-import { findRouteViaOutside, loadCellGraph } from '../../packages/renderer/src/agent/cellPath.ts';
+import { cellStandPoint, findRouteViaOutside, floorsAt, loadCellGraph } from '../../packages/renderer/src/agent/cellPath.ts';
 import { simulateFlight } from '../../packages/renderer/src/agent/jumpPlan.ts';
 import type { DatDatabase } from '../../packages/dat-parser/src/DatDatabase.js';
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
@@ -42,11 +42,17 @@ export class DungeonHost extends FakeHost {
   private readonly fixtureKeys = new Map<number, CollisionKey[]>();
   private readonly locked = new Set<number>();
 
-  constructor(private readonly nav: DungeonNav, dats: { portal: DatDatabase; cell: DatDatabase }, landblock: number, opts: { fixtures?: Ac1999Fixture[] } = {}) {
+  constructor(private readonly nav: DungeonNav, dats: { portal: DatDatabase; cell: DatDatabase }, landblock: number, opts: { fixtures?: Ac1999Fixture[]; rooms?: boolean } = {}) {
     super();
     this.bx = ((landblock >>> 24) & 0xff) * 192;
     this.by = ((landblock >>> 16) & 0xff) * 192;
     this.graph = loadCellGraph(dats.cell, dats.portal, landblock);
+    if (opts.rooms) {
+      // The rooms as main.ts answers them: a dungeon's cells (sealed), the floors under a point, where to stand in a cell.
+      this.cellSealed = () => true;
+      this.floorsAt = (_lb, x, y) => floorsAt(this.graph, x, y);
+      this.cellPoint = (c) => cellStandPoint(this.graph, c);
+    }
     const sources = {
       loadSetupModel: (id: number) => { const d = dats.portal.getFileData(id); return d ? new SetupModel(new DatReader(d)) : null; },
       loadGfxObj: (id: number) => { const d = dats.portal.getFileData(id); return d ? new GfxObj(new DatReader(d)) : null; },
@@ -153,8 +159,35 @@ export class DungeonHost extends FakeHost {
     if (c) this.me.cell = c >>> 0;
   }
 
+  /**
+   * Stand at (cell, x, y, z) and walk_to `target` as given (an offset "20m east", a cell id, map coordinates), the page
+   * ticking every `tickMs` (a slow frame rate moves the body metres between ticks), until the walk ends.
+   */
+  async walkTarget(cell: number, at: { x: number; y: number; z: number }, target: number | string, opts: { within?: number; maxMs?: number; timeoutMs?: number; tickMs?: number } = {}): Promise<AgentResult> {
+    this.me = { ...this.me, cell: cell >>> 0, ...at, yaw: compassToYaw(0) };
+    const api = new AgentApi(this);
+    this.api = api;
+    const log = console.log;
+    console.log = (...a: unknown[]) => { this.traces.push(a.join(' ')); };
+    try {
+      let r: AgentResult | null = null;
+      void api.walkTo(target, { ...(opts.within !== undefined ? { within: opts.within } : {}), timeoutMs: opts.timeoutMs ?? 180_000 }).then((x) => { r = x; });
+      const maxMs = opts.maxMs ?? 300_000, tick = opts.tickMs ?? 100;
+      for (let t = 0; t < maxMs && !r; t += tick) {
+        this.t += tick;
+        vi.advanceTimersByTime(tick);
+        this.physics(tick);
+        api.tick();
+        await Promise.resolve();
+      }
+      return r ?? { ok: false, message: 'the walk had not ended' };
+    } finally {
+      console.log = log;
+    }
+  }
+
   /** Stand at (cell, x, y, z), walk to `target` (an object placed there), and run the clock until the walk ends. */
-  async walk(cell: number, at: { x: number; y: number; z: number }, target: DungeonWalkTarget, opts: { within?: number; maxMs?: number } = {}): Promise<AgentResult> {
+  async walk(cell: number, at: { x: number; y: number; z: number }, target: DungeonWalkTarget, opts: { within?: number; maxMs?: number; timeoutMs?: number } = {}): Promise<AgentResult> {
     this.me = { ...this.me, cell: cell >>> 0, ...at, yaw: compassToYaw(0) };
     const guid = 0x7f000001;
     this.add({ guid, cell: target.cell >>> 0, x: target.x, y: target.y, z: target.z, name: target.name, itemType: target.itemType ?? 0 });
@@ -164,7 +197,7 @@ export class DungeonHost extends FakeHost {
     console.log = (...a: unknown[]) => { this.traces.push(a.join(' ')); };
     try {
       let r: AgentResult | null = null;
-      void api.walkTo(guid, { within: opts.within ?? 2, timeoutMs: 180_000 }).then((x) => { r = x; });
+      void api.walkTo(guid, { within: opts.within ?? 2, timeoutMs: opts.timeoutMs ?? 180_000 }).then((x) => { r = x; });
       const maxMs = opts.maxMs ?? 300_000;
       for (let t = 0; t < maxMs && !r; t += 100) {
         this.t += 100;

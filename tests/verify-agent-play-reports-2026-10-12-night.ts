@@ -209,7 +209,7 @@ describe('agent play reports 2026-10-12 (night)', () => {
       hit();
       const obs = api.observe();
       expect(obs.nearby.find((o) => o.guid === DRUDGE)?.attackingYou).toBeUndefined();
-      expect(formatObservation(obs)).toMatch(/hit by, but not placed: Drudge Servant \(1× in 10 s\) \(none of that name within reach of you/);
+      expect(formatObservation(obs)).toMatch(/hit by, but not placed: Drudge Servant \(1× in 10 s\) \(none of that name in sight within reach/);
     });
     it('the one that hit you died: its lines are not moved onto another of its name standing off', () => {
       drudge(80, 21.5);

@@ -619,6 +619,96 @@ describe('AgentApi', () => {
     expect(r.message).toMatch(/opened Door, but the way on is still blocked/);
   });
 
+  // The Training Academy start room (end of retail, cells 0x720201B1 → 0x720201AD, 2026-10-16): ACE Door.ActOnUse swings a
+  // door open on one Use and shut on the next. Box walls round the goal, one doorway in the west wall, its door toggling.
+  const academyBox = (): { door: AgentHostObject; isOpen: () => boolean } => {
+    const inBand = (v: number, c: number, half: number) => Math.abs(v - c) < half;
+    const door = host.add({ guid: 0x77202033, name: 'Door', objectDescFlags: 0x1000, physicsState: 0, x: 75.8, y: 40 });
+    const isOpen = () => ((door.physicsState ?? 0) & 0x4) !== 0;
+    host.wall = (x, y) => {
+      const onWall = (inBand(x, 76.5, 0.4) || inBand(x, 83.5, 0.4)) && y > 36.1 && y < 43.9 || (inBand(y, 36.5, 0.4) || inBand(y, 43.5, 0.4)) && x > 76.1 && x < 83.9;
+      const gap = inBand(x, 76.5, 0.5) && y > 39.4 && y < 40.6;
+      return onWall && !(gap && isOpen());
+    };
+    host.add({ guid: 0x8000c42f, name: 'Society Greeter', itemType: 0x10, cell: 0xa9b40105, x: 80, y: 40 });
+    host.route = ((_fc: number, _f: unknown, _tc: number, to: { x: number; y: number; z: number }, opts?: { closed?: Array<{ x: number; y: number; z: number }> }) =>
+      (opts?.closed?.some((c) => Math.hypot(c.x - 76.5, c.y - 40) <= 2.5) ? null : [{ x: 76.5, y: 40, z: 94 }, to])) as typeof host.route;
+    return { door, isOpen };
+  };
+
+  it('a door the stall fallback opened is not Used again at the detour\'s end, which would swing it shut (Training Academy, 2026-10-16)', async () => {
+    const { door, isOpen } = academyBox();
+    host.me.x = 72.6; host.me.y = 40; // 3.2 m from the door: the detour's end (2.5 m) isn't reached standing here
+    const use = host.use;
+    host.use = (g: number) => { if (g === door.guid) door.physicsState = (door.physicsState ?? 0) ^ 0x4; return use(g); };
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Society Greeter', { within: 1.5 });
+    // Held where it stands at first (the jamb, in the live case), so the stall fallback Uses the door the detour was for.
+    run(api, host, 12_000, { physics: false });
+    run(api, host, 50_000);
+    const r = await p;
+    log.mockRestore();
+    expect(host.sent.filter((x) => x === `use ${door.guid.toString(16)}`)).toHaveLength(1);
+    expect(isOpen()).toBe(true);
+    expect(r).toMatchObject({ ok: true });
+    expect(lines.filter((l) => /did not open/.test(l))).toEqual([]);
+  });
+
+  it('a door that opened for the walk and swung shut before it got through is opened again, not routed round (Training Academy, 2026-10-16)', async () => {
+    const { door, isOpen } = academyBox();
+    host.me.x = 72.6; host.me.y = 40;
+    let uses = 0;
+    const use = host.use;
+    // The first Use opens it and it swings shut 4 s later (its timer) while the body is still held; the next opens it.
+    host.use = (g: number) => {
+      if (g === door.guid) { uses++; door.physicsState = 0x4; if (uses === 1) setTimeout(() => { door.physicsState = 0; }, 4000); }
+      return use(g);
+    };
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Society Greeter', { within: 1.5 });
+    run(api, host, 12_000, { physics: false });
+    run(api, host, 60_000);
+    const r = await p;
+    log.mockRestore();
+    expect(r).toMatchObject({ ok: true });
+    expect(uses).toBe(2);
+    expect(isOpen()).toBe(true);
+    expect(lines.filter((l) => /routing round it|once more before giving up/.test(l))).toEqual([]);
+  });
+
+  it('a stuck walk tries the shut door beside it once more before giving up, unless it said it is locked', async () => {
+    const { door } = academyBox();
+    host.me.x = 74; host.me.y = 40;
+    let uses = 0;
+    const use = host.use;
+    // Two Uses go unanswered (the door busy swinging, as ACE ignores a Use then); the third opens it.
+    host.use = (g: number) => { if (g === door.guid && ++uses >= 3) door.physicsState = 0x4; return use(g); };
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Society Greeter', { within: 1.5, timeoutMs: 120_000 });
+    run(api, host, 120_000);
+    const r = await p;
+    log.mockRestore();
+    expect(uses).toBe(3);
+    expect(lines.some((l) => /trying it once more before giving up/.test(l))).toBe(true);
+    expect(r).toMatchObject({ ok: true });
+
+    // A door that answered "locked" gets no last try.
+    host = new FakeHost();
+    api = new AgentApi(host);
+    const b = academyBox();
+    host.me.x = 74; host.me.y = 40;
+    const use2 = host.use;
+    host.use = (g: number) => { if (g === b.door.guid) api.pushChat('The door is locked!'); return use2(g); };
+    const p2 = api.walkTo('Society Greeter', { within: 1.5, timeoutMs: 120_000 });
+    run(api, host, 120_000);
+    const r2 = await p2;
+    expect(r2.ok).toBe(false);
+    expect(host.sent.filter((x) => x === `use ${b.door.guid.toString(16)}`)).toHaveLength(1);
+  });
+
   it('a fixture reaches as far as its part-array radius, a creature as far as its body; radius-less things reach 0', () => {
     expect(fixtureReach({ itemType: 0, collisionRadius: 1.6 })).toBe(1.6); // the lifestone (Setup radius × scale)
     expect(fixtureReach({ itemType: 0x10, collisionRadius: 0.6 })).toBe(0); // a creature with no blocking shape
@@ -732,11 +822,12 @@ describe('AgentApi', () => {
     host.add({ guid: 0x80000040, name: 'Door', objectDescFlags: 0x1000, x: 81, y: 21 });
     host.add({ guid: 0x80000041, name: 'Far Thing', x: 80, y: 120 });
     const p = api.walkTo('Far Thing');
-    run(api, host, 40_000, { physics: false }); // the body never moves
+    run(api, host, 80_000, { physics: false }); // the body never moves
     const r = await p;
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/^stuck .* tried the door Door, which stayed shut: locked, or it needs a key\)\. ac_map shows the room/);
-    expect(host.sent).toContain('use 80000040');
+    // Once on the stall, and once more before giving up (it never said it was locked).
+    expect(host.sent.filter((x) => x === 'use 80000040')).toHaveLength(2);
     expect([...host.keys]).toEqual([]);
   });
 
@@ -1365,6 +1456,68 @@ describe('walk_to drops and jumps (AGENT.walk-drops-jumps)', () => {
     expect(host.me.z).toBe(88);
   });
 
+  // AC1999 start dungeon 0x017E012E, 2026-10-16: every drop launched straight up (the server's [FALLDMG] lines read
+  // v=(0,0,-3.7)) and came down on its take-off; the walk planned the same drop again every 4 s for minutes.
+  const noCarry = (): void => {
+    const key = host.key;
+    // The forward key never reaches the launch: the leap goes straight up.
+    host.key = (code: string, down: boolean) => { if (code === 'KeyW' && down && host.keys.has('Space')) return; key(code, down); };
+  };
+
+  it('a drop that comes down on its own take-off twice ends the walk, saying the drop didn\'t happen', async () => {
+    host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y < 30 ? [94, 88] : [88]) : []);
+    host.add({ guid: 0x80000065, name: 'Straw Drudge', x: 80, y: 45, z: 88 });
+    noCarry();
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Straw Drudge', { within: 1.5, timeoutMs: 300_000 });
+    run(api, host, 120_000);
+    const r = await p;
+    log.mockRestore();
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/the drop didn't happen: 2 times from \([0-9.]+, [0-9.]+\) the body went up and came down where it took off, not 6\.0 m down/);
+    expect(host.launches).toHaveLength(2);
+    expect(host.launches.every((l) => l.forward === 0)).toBe(true);
+    expect(lines.filter((l) => /landed off the plan/.test(l))).toHaveLength(2);
+    expect(host.me.z).toBe(94);
+  });
+
+  it('with no stamina the same failure says so: rest or drink a stamina potion', async () => {
+    host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y < 30 ? [94, 88] : [88]) : []);
+    host.add({ guid: 0x80000066, name: 'Straw Drudge', x: 80, y: 45, z: 88 });
+    host.me.stamina = { current: 0, max: 50 };
+    noCarry();
+    const p = api.walkTo('Straw Drudge', { within: 1.5, timeoutMs: 300_000 });
+    run(api, host, 120_000);
+    const r = await p;
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/couldn't drop: no stamina \(0\/50\).*drink a stamina potion/);
+    expect(host.launches).toHaveLength(2);
+  });
+
+  it('jumps that keep landing off the plan somewhere else end the walk after a few, not every 4 s for minutes', async () => {
+    // The gap again; each launch comes down off the plan, 3 m back from its take-off, not on the far ledge.
+    host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y < 30 || y > 32.5 ? [94, 50] : [50]) : []);
+    host.add({ guid: 0x80000067, name: 'Far Ledge Post', x: 80, y: 40, z: 94 });
+    let tries = 0;
+    const key = host.key;
+    host.key = (code: string, down: boolean) => {
+      key(code, down);
+      // Every launch is pushed back 3 m back from its take-off (anything the plan didn't see).
+      if (code === 'Space' && !down && host.airborne) { tries++; host.airborne = null; host.me.y -= 3; }
+    };
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Far Ledge Post', { within: 1.5, timeoutMs: 600_000 });
+    run(api, host, 240_000);
+    const r = await p;
+    log.mockRestore();
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/kept landing off the plan/);
+    expect(tries).toBeLessThanOrEqual(6);
+    expect(lines.filter((l) => /landed off the plan/.test(l)).length).toBeLessThanOrEqual(6);
+  });
+
   it('never takes a drop whose fall would hurt more than half your health', async () => {
     // 40 m down: ACE HandleFallingDamage deals ~95 points; the character has 50.
     host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y < 30 ? [94, 54] : [54]) : []);
@@ -1376,6 +1529,55 @@ describe('walk_to drops and jumps (AGENT.walk-drops-jumps)', () => {
     expect(r.message).toMatch(/no jump or drop your health can take/);
     expect(host.launches).toEqual([]);
     expect(host.me.z).toBe(94);
+  });
+
+  // AGENT.fall-damage-per-era — the AC1999 start dungeon, 2026-10-16: "Claude" (L1, 25/25 health, Jump 85) took a
+  // 7.8 m drop the walk billed at 0 (ACE's curve); the 1999 server's [FALLDMG] said ratio 0.530, damage 21, 4/25 left.
+  const dungeonDrop = (): void => {
+    host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y < 30 ? [94, 86.2] : [86.2]) : []);
+    host.add({ guid: 0x80000068, name: 'Cellar Chest', x: 80, y: 45, z: 86.2 });
+    host.jumpSkill = 85;
+  };
+  it('on a GDLE-family server (AC1999) a 7.8 m drop is refused at 25 health: the server bills it ~21', async () => {
+    dungeonDrop();
+    host.fallFamily = 'gdle';
+    host.me.health = { current: 25, max: 25 };
+    const p = api.walkTo('Cellar Chest', { within: 1.5, timeoutMs: 60_000 });
+    run(api, host, 70_000);
+    const r = await p;
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/no jump or drop your health can take/);
+    expect(host.launches).toEqual([]);
+    expect(host.me.z).toBe(94);
+  });
+  it('the same drop with health to spare is taken, and the trace names the damage it costs', async () => {
+    dungeonDrop();
+    host.fallFamily = 'gdle';
+    host.me.health = { current: 80, max: 80 };
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Cellar Chest', { within: 1.5, timeoutMs: 60_000 });
+    run(api, host, 40_000);
+    const r = await p;
+    log.mockRestore();
+    expect(r).toMatchObject({ ok: true });
+    const drop = lines.find((l) => /walk drop 7\.8 m/.test(l));
+    const billed = Number(/about (\d+) fall damage/.exec(drop ?? '')?.[1]);
+    // At least the server's 21, and within the 32 (40% of 80) the walk may spend.
+    expect(billed).toBeGreaterThanOrEqual(21);
+    expect(billed).toBeLessThanOrEqual(32);
+    expect(host.me.z).toBe(86.2);
+  });
+  it('on an ACE server the same 7.8 m drop is free and taken at 25 health', async () => {
+    dungeonDrop();
+    host.fallFamily = 'ace';
+    host.me.health = { current: 25, max: 25 };
+    const p = api.walkTo('Cellar Chest', { within: 1.5, timeoutMs: 60_000 });
+    run(api, host, 40_000);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true });
+    expect(host.launches).toHaveLength(1);
+    expect(host.me.z).toBe(86.2);
   });
 
   it('jumps a gap over a deadly pit to the floor beyond', async () => {

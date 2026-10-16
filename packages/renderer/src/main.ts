@@ -27,7 +27,7 @@ import { SkillTable } from '@ac/dat-parser/file-types/SkillTable.js';
 import { SecondaryAttributeTable } from '@ac/dat-parser/file-types/SecondaryAttributeTable.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken,  PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
+import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken,  PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
@@ -138,7 +138,7 @@ let agentUseDoneTap: ((code: number) => void) | null = null;
 let agentAttackDoneTap: ((code: number) => void) | null = null;
 let agentMeleeSentTap: ((height: string) => void) | null = null;
 import { examineText } from './agent/examineText.js';
-import { floorsAt, findRouteViaOutside, loadCellGraph, type CellGraph } from './agent/cellPath.js';
+import { cellStandPoint, floorsAt, findRouteViaOutside, loadCellGraph, routeBarrier, type CellGraph } from './agent/cellPath.js';
 import { RoutineSync } from './agent/RoutineSync.js';
 import { isAutomationCommand } from './ui/automation/AutomationPanel.js';
 import { bridgeConnectApi } from './launcher/ConnectScreen.js';
@@ -245,7 +245,7 @@ import { CombatController, shouldClearMeleeChainOnModeChange, clearAutoAttackCha
 import {
   ObjectRangeChecks, objectsInRange, selectedObjectRadarRadius, shouldWatchSelectedObject,
   MAX_LORD_DISTANCE, CHECK_LORD_INTERVAL_S, CHECK_GROUND_OBJECT_INTERVAL_S, CHECK_TRADE_INTERVAL_S, CHECK_SELECTED_OBJECT_INTERVAL_S, TRADE_RANGE,
-  type ObjectRangeHandler, type RangeBody} from './world/ObjectRangeChecks.js';
+  type ObjectRangeHandler, type RangeBody, inAnotherSpace} from './world/ObjectRangeChecks.js';
 import { slumlordFailedTransactionQuery, type SlumlordDragItem } from './ui/SlumlordPanel.js';
 import type { TradeDragItem } from './ui/SecureTradePanel.js';
 import { salvageResultChatLines } from './ui/SalvagePanel.js';
@@ -375,7 +375,7 @@ import { LastOutsideDeathState } from './session/LastOutsideDeathState.js';
 // concurrent agent this round, so they're imported by path. Resolves to the
 // same module instance as the barrel under vite, vitest, and tsc.
 import { buildCharacterDelete, buildCharacterRestore } from '../../network/src/MessageSerializer.js';
-import { ABSENT_1999, buildFriendsCommand1999, friendsCommand1999Plan, setString16Wire } from '@ac/network';
+import { ABSENT_1999, buildFriendsCommand1999, friendsCommand1999Plan, getString16Wire, setString16Wire } from '@ac/network';
 import { CELL_LENGTH, MAP_TELEPORT_ORIGIN, mapCoordinateText, mapCoordsOfCell } from './ui/MapMarkers.js';
 import { tradeReceiveContainsIn } from './inventory/TradeReceiveContainId.js';
 import { buildSpellExamineModel, inqSkillLevel, spellRangeMeters } from './ui/examine/SpellExamine.js';
@@ -3282,6 +3282,8 @@ async function main() {
     // its copy is drawn (UpdateChild), not at its own stale mesh.
     const drawn = obj ? serverObjectManager!.drawnRoot(obj) : null;
     if (!obj || !drawn) return null;
+    // In another dungeon (or the landscape seen from one): retail's CObjectMaint has no such object.
+    if (!obj.wielderId && inAnotherSpace(obj.position?.landblock, movementSync?.lastSentFrame?.cellId, (c) => !isCellSeenOutside(c))) return null;
     const at = obj.wielderId ? drawn.getWorldPosition(rangeBodyScratch) : drawn.position;
     return { x: at.x, y: at.y, z: at.z, radius: obj.collisionRadius, height: obj.collisionHeight };
   }
@@ -3335,7 +3337,26 @@ async function main() {
       sealed: playerInDungeon && !!dungeonLandblockId && !isCellSeenOutside(dungeonLandblockId),
       midRadius: landblockObjects.loadRadius,
       isSeenOutside: isCellSeenOutside,
+      visibleCells: envCellVisibleCells,
     });
+  }
+  /**
+   * A dungeon cell's VisibleCells (its stab list), what a sealed viewer keeps
+   * (ObjectMaint.isCellLoaded, CEnvCell::grab_visible_cells). Read once per
+   * cell: the DAT never changes. null = unreadable (the whole landblock stays).
+   */
+  const envCellVisibleCache = new Map<number, ReadonlySet<number> | null>();
+  function envCellVisibleCells(cellId: number): ReadonlySet<number> | null {
+    const id = cellId >>> 0;
+    if (envCellVisibleCache.has(id)) return envCellVisibleCache.get(id)!;
+    let out: ReadonlySet<number> | null = null;
+    try {
+      const env = envCellRenderer.loadEnvCell(id);
+      if (env) out = new Set(env.visibleCells);
+    } catch { /* unreadable: null */ }
+    // An unreadable cell (a streamed file still in flight) is asked again later.
+    if (out) envCellVisibleCache.set(id, out);
+    return out;
   }
   // BUG.6 — a teleport can be processed BEFORE the player's own CreateObject
   // on a failed first spawn: ACE WorldManager.DoPlayerEnterWorld's failure
@@ -6340,7 +6361,7 @@ async function main() {
    * it is already on the player: a ring dragged to the other ring slot, a
    * robe dropped back on the figure — "The %s is already being worn").
    */
-  function dropHeldOnPaperdoll(item: InventoryItem, target: PaperdollDropTarget, worn: boolean): void {
+  function dropHeldOnPaperdoll(item: InventoryItem, target: PaperdollDropTarget, worn: boolean): boolean {
     // GAP.world-drag-drop.a.a — gmPaperDollUI::AcceptDragObject @ 004a3b10
     // / AcceptPaperDollDragObject @ 004a4a70 → CPlayerSystem::AutoWear /
     // AutoWield: the client picks the location (or refuses, out loud or
@@ -6355,10 +6376,11 @@ async function main() {
         sendGameAction(GameActionType.StackableMerge, buildStackableMergePayload(item.id, outcome.merge.targetId, outcome.merge.amount));
         console.log(`[AC] Sent StackableMerge (paperdoll drop): from=0x${item.id.toString(16)} to=0x${outcome.merge.targetId.toString(16)} amount=${outcome.merge.amount}`);
         afterAttemptMerge(item.id, outcome.merge.targetId);
+        return true;
       }
-      return;
+      return false;
     }
-    if (outcome.wieldLocation === null) return;
+    if (outcome.wieldLocation === null) return false;
     const loc = outcome.wieldLocation as EquipMask;
     // CORE.10.d — ACCWeenieObject::UIAttemptWield @ 0058d590: a partial
     // split of the selected stack wields via StackableSplitToWield (the
@@ -6369,24 +6391,26 @@ async function main() {
       if (sendGameAction) {
         sendGameAction(GameActionType.StackableSplitToWield, buildStackableSplitToWieldPayload(item.id, loc, split.amount));
         console.log(`[AC] Sent StackableSplitToWield: item=0x${item.id.toString(16)} slot=0x${loc.toString(16)} amount=${split.amount}`);
+        return true;
       }
-      return;
+      return false;
     }
     // Send GetAndWieldItem to ACE server (CORE.17.k.c.a.a — a refused
     // request leaves the paperdoll alone: nothing was sent).
     if (sendGameAction) {
-      if (!sendGameAction(GameActionType.GetAndWieldItem, buildGetAndWieldItemPayload(item.id, loc))) return;
+      if (!sendGameAction(GameActionType.GetAndWieldItem, buildGetAndWieldItemPayload(item.id, loc))) return false;
       console.log(`[AC] Sent GetAndWieldItem: item=0x${item.id.toString(16)} slot=0x${loc.toString(16)}`);
     }
     // Also update local state optimistically — BUG.equip-unequip-
     // optimistic-no-rollback: record what this displaced so a rejection
     // can be reverted.
     // A worn item moving slots waits for the server's wield confirmation.
-    if (worn) return;
+    if (worn) return true;
     const dropEvicted = playerState.equipment.getSlot(loc);
     inventoryController.equipItem(item.id, loc);
     pendingEquipmentActions.recordEquip(item.id, loc, dropEvicted);
     inventoryDirty = true;
+    return true;
   }
 
   gameUI.setDragCallbacks({
@@ -16109,7 +16133,7 @@ async function main() {
           // The paperdoll's numbers for the gear view (agent/gear.ts): the EquipMask slots each item is worn in
           // (CurrentWieldedLocation) or could be (ValidLocations), and the body it covers (ClothingPriority).
           const gearNums = (i: { validLocations?: number; clothingPriority?: number }) => ({ ...(i.validLocations ? { validLocations: i.validLocations >>> 0 } : {}), ...(i.clothingPriority ? { coverage: i.clothingPriority >>> 0 } : {}) });
-          const worn = playerState.equipment.getAll().map((e) => ({ guid: e.id >>> 0, name: e.name, where: 'equipped', slot: slotNames(e.slot) || String(e.slot), mask: Number(e.slot) >>> 0, ...gearNums(e), ...(e.stackSize > 1 ? { stack: e.stackSize } : {}), ...(typeBits(e.id >>> 0) ? { itemType: typeBits(e.id >>> 0) } : {}), ...(ammoOf(e.id >>> 0) ? { ammoType: ammoOf(e.id >>> 0) } : {}) }));
+          const worn = playerState.equipment.getAll().map((e) => ({ guid: e.id >>> 0, name: e.name, where: 'equipped', slot: slotNames(e.slot) || String(e.slot), mask: Number(e.slot) >>> 0, ...gearNums(e), ...(e.stackSize > 1 ? { stack: e.stackSize } : {}), ...(typeBits(e.id >>> 0) ? { itemType: typeBits(e.id >>> 0) } : {}), ...(ammoOf(e.id >>> 0) ? { ammoType: ammoOf(e.id >>> 0) } : {}), ...(playerState.inventory.getItem(e.id)?.materialType ? { materialType: playerState.inventory.getItem(e.id)!.materialType } : {}) }));
           const wornIds = new Set(worn.map((w) => w.guid));
           const held = playerState.inventory.getAll().filter((i) => !wornIds.has(i.id >>> 0)).map((i) => ({
             // A container or a RequiresPackSlot item (a pack, a focus) at the top level sits in the side pack slots, not the main pack.
@@ -16136,7 +16160,7 @@ async function main() {
           ...(((spellTable?.spells.get(s.id)?.bitfield ?? 0) & SPELL_FLAG_SELF_TARGETED) ? { self: true } : {}),
           // SpellFlags.Beneficial (0x4) with a duration: an enchantment that helps (ACE SpellFlags.cs).
           ...(((spellTable?.spells.get(s.id)?.bitfield ?? 0) & 0x4) && (spellTable?.spells.get(s.id)?.duration ?? 0) !== 0 ? { buff: true } : {}),
-          ...(spellTable?.spells.get(s.id) ? { category: spellTable.spells.get(s.id)!.category, power: spellTable.spells.get(s.id)!.power, duration: spellTable.spells.get(s.id)!.duration ?? 0 } : {}),
+          ...(spellTable?.spells.get(s.id) ? { category: spellTable.spells.get(s.id)!.category, power: spellTable.spells.get(s.id)!.power, duration: spellTable.spells.get(s.id)!.duration ?? 0, targetType: spellTable.spells.get(s.id)!.nonComponentTargetType >>> 0 } : {}),
           // A missile spell (bolts, streaks, arcs, life and enchantment projectiles): walls stop it.
           ...(isProjectileSpellType(spellTable?.spells.get(s.id)?.metaSpellType ?? 0) ? { projectile: true } : {}),
           // How far it reaches for you: the spell examine's Range line (DetermineSpellRange), the server's check too.
@@ -16250,7 +16274,8 @@ async function main() {
         busy: () => busyCount.busy || inventoryRequests.pending !== null || teleportBusy.value,
         select: (guid) => { selectGuid(guid); return selectedObjectId() === guid; },
         use: (guid) => { if (!sendUseAction || (!serverObjectManager?.getObject(guid) && !inventoryItem(guid))) return false; agentPrimeMoveState(); sendUseAction(guid); return true; },
-        useWithTarget: (src, tgt) => { if (!sendGameAction) return false; agentPrimeMoveState(); sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(src, tgt)); return true; },
+        // The send's own answer: the client's gate (a pending request, a swing under way) refuses it with its line.
+        useWithTarget: (src, tgt) => { if (!sendGameAction) return false; agentPrimeMoveState(); return sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(src, tgt)); },
         setCombatMode: (mode) => { agentPrimeMoveState(); return sendChangeCombatMode({ peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode]); },
         attack: (guid, power, height) => { agentPrimeMoveState(); agentHostAttack.attack(guid, power, height); },
         attackHeight: () => gameUI.getCombatAttackHeight(),
@@ -16259,6 +16284,8 @@ async function main() {
         setAttackHeight: (h) => gameUI.setCombatAttackHeight(h),
         attackPending: () => agentHostAttack.pending(),
         cancelAttack: () => { sendGameAction?.(GameActionType.CancelAttack, new Uint8Array(0)); },
+        // ACCWeenieObject::attackInProgress (CommenceAttack → AttackDone): every use and item move is refused meanwhile.
+        attacking: () => inventoryRequests.attackInProgress,
         cast: (spellId, target) => {
           // The spell bar / spellbook's own cast (component, target and compatibility checks included).
           const index = magicController.knownSpells.findIndex((s) => s.id === spellId);
@@ -16282,8 +16309,16 @@ async function main() {
           p.writeUInt32(guid);
           return sendGameAction(GameActionType.DropItem, p.toBuffer());
         },
-        give: (target, item, amount) => { if (!sendGameAction) return false; agentPrimeMoveState(); sendGameAction(GameActionType.GiveObjectRequest, buildGiveObjectRequestPayload(target, item, amount)); return true; },
+        give: (target, item, amount) => { if (!sendGameAction) return false; agentPrimeMoveState(); return sendGameAction(GameActionType.GiveObjectRequest, buildGiveObjectRequestPayload(target, item, amount)) !== false; },
         wield: (guid) => { const it = playerState.inventory.getItem(guid); if (!it) return false; agentPrimeMoveState(); return attemptAutoWield(it); },
+        // The drag onto one paperdoll slot (gmPaperDollUI::HandleDropRelease → AcceptDragObject), worn or carried.
+        wieldAt: (guid, mask) => {
+          const worn = playerState.equipment.getAll().find((e) => e.id === guid);
+          const it = playerState.inventory.getItem(guid) ?? worn;
+          if (!it) return false;
+          agentPrimeMoveState();
+          return dropHeldOnPaperdoll(it as InventoryItem, { kind: 'slot', mask }, !!worn);
+        },
         inventoryPending: (guid) => pendingEquipmentActions.hasPending(guid),
         appraise: (guid, quiet) => {
           examined.delete(guid);
@@ -16337,8 +16372,12 @@ async function main() {
           return true;
         },
         route: (fromCell, from, toCell, to, opts) => findRouteViaOutside(agentCellGraph(fromCell), fromCell, from, toCell, to, opts),
+        // What floorless cell (a rift, a shaft) stands between two rooms no doorway route joins: the walk's answer names it.
+        routeBarrier: (fromCell, toCell, opts) => routeBarrier(agentCellGraph(fromCell), fromCell, toCell, opts),
         // Which room a map coordinate is in (a dungeon's nav point, a spot inside a building): the cells' floors under it.
         floorsAt: (lb, x, y) => floorsAt(agentCellGraph(lb), x, y),
+        // Where to stand in a cell named by its id (walk_to target="0x039C0104"): its floor under its middle.
+        cellPoint: (cell) => cellStandPoint(agentCellGraph(cell), cell),
         // AGENT navigation — the player's body walked from `from` toward `to` by the same substep
         // the held movement keys run (stepPlayerMovement through these collision services), with
         // the floor followed like the real move's; creatures left out (they move) and the shared
@@ -16400,9 +16439,9 @@ async function main() {
           // value and the load into getJumpVelocity; the held keys' state velocity forward
           // (get_leave_ground_velocity). `walk` is Shift held: a walk when running is the default.
           const SKILL_ID_JUMP = 22;
-          const jumpSkill = playerSkillTable
+          const jumpSkill = jumpSkillWithStamina(playerSkillTable
             ? playerState.getSkillCurrent(SKILL_ID_JUMP, playerSkillTable.skills)
-            : Math.max(200, playerState.skills.getRaises(SKILL_ID_JUMP));
+            : Math.max(200, playerState.skills.getRaises(SKILL_ID_JUMP)), playerState.stamina.current);
           const running = cameraController.runIsDefault !== walk;
           return {
             forward: running ? RUN_ANIM_SPEED * cameraController.runRate : WALK_ANIM_SPEED,
@@ -16410,6 +16449,9 @@ async function main() {
             chargeSeconds: jumpChargeSeconds(animController?.stanceId ?? MotionStance.NonCombat),
           };
         },
+        // The string wire names the server family (EraProfiles.string16WireFor): ACE / ClassicACE read
+        // UTF-8, GDLE-family servers (the AC1999 server, GDL-Classic, GDLE) Windows-1252; their fall damage differs.
+        fallServer: () => (getString16Wire() === 'ace' ? 'ace' : 'gdle'),
         logout: () => gameUI.callbacks.onLogout?.(),
         accountRoutines: routineSync,
         characterList: () => gameUI.characterSelectList(),
@@ -18482,9 +18524,10 @@ async function main() {
           // SkillTable-failed-to-load fallback uses a mid-range constant so
           // jumping stays playable — a degraded default, NOT retail behavior.
           const SKILL_ID_JUMP = 22;
-          const jumpSkill = playerSkillTable
+          // At 0 stamina the launch uses Jump 0 (CACQualities::InqJumpVelocity @ 00592980).
+          const jumpSkill = jumpSkillWithStamina(playerSkillTable
             ? playerState.getSkillCurrent(SKILL_ID_JUMP, playerSkillTable.skills)
-            : Math.max(200, playerState.skills.getRaises(SKILL_ID_JUMP));
+            : Math.max(200, playerState.skills.getRaises(SKILL_ID_JUMP)), playerState.stamina.current);
           // FAITHFUL.231 — burden now actually fed into the formulas
           // instead of hardcoded 0. ACE's burdenMod scales jump height
           // DOWN as the player becomes more loaded; the height + stamina
@@ -18705,7 +18748,9 @@ async function main() {
                 + ` ${removed.slice(0, 8).map((r) => `0x${(r.guid >>> 0).toString(16)}:${r.reason}`).join(' ')}`);
             };
           }
-          serverObjectManager.updateObjectMaint(objectCellLoaded, performance.now() / 1000);
+          // In a dungeon the expired are deleted only after a cell change of ours (ACE forgets them only then).
+          serverObjectManager.updateObjectMaint(objectCellLoaded, performance.now() / 1000,
+            playerInDungeon && dungeonLandblockId && (dungeonLandblockId & 0xffff) >= 0x100 ? dungeonLandblockId : undefined);
         }
         // PERF.browser-memory-crash — after landblocks unload, release the
         // pooled meshes, templates, materials and textures nothing drawn

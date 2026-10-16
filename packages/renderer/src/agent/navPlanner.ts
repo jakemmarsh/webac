@@ -376,9 +376,17 @@ export function floorPlan(
         if (n && n.z > p.z - 1) continue; // walked on to, on this floor
         const f = js.kit.floor(center.x + ni * spacing, center.y + nj * spacing, p.z);
         if (f === null || p.z - f <= 1) continue;
+        // Open air that way, at knee or head height (as the walk's jump search asks): a floor far below behind a wall
+        // or solid rock is no ledge. The doll dungeon's balcony 0x029002E2 and the rock beside its rift showed rows of
+        // 'v' over the halls 18–24 m down that no body gets over (2026-10-16).
+        const out = (h: number): boolean => {
+          const to = js.kit.airStep({ x: p.x, y: p.y, z: p.z + h }, di * spacing * 0.8, dj * spacing * 0.8);
+          return Math.hypot(to.x - p.x, to.y - p.y) > 0.5 * spacing;
+        };
+        if (!out(0.8) && !out(1.6)) continue;
         edges.push({ p, i, j, di, dj });
         if (cellAt(ni, nj) !== '#' && cellAt(ni, nj) !== ':') continue;
-        const safe = dropDamage(p.z - f) <= js.maxDamage;
+        const safe = dropDamage(p.z - f, js.kit.fall) <= js.maxDamage;
         setAt(ni, nj, safe ? 'v' : '!');
         if (safe) drops++; else deadly++;
       }

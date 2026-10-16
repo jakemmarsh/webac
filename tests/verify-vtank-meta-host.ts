@@ -34,7 +34,8 @@ function setup(extra: Partial<MetaGame> = {}) {
     { id: 6, name: 'Heal Self I', school: 'Life Magic', level: 1, power: 1 },
   ];
   h.spellComponents = (id: number) => (id === 27 ? ['Lead Scarab', 'Copper Scarab'] : []);
-  host.inv = [{ guid: 0x8000_0100, name: 'Lead Scarab', where: 'pack', stack: 3 }];
+  // The client's own pack list holds what the meta's carried() does (an item used by id must be in it: AgentApi.need).
+  host.inv = [{ guid: 0x8000_0100, name: 'Lead Scarab', where: 'pack', stack: 3 }, { guid: 0x8000_0101, name: 'Mana Stone', where: 'pack' }];
   const items: MetaGameObject[] = [
     { id: 0x8000_0100, name: 'Lead Scarab', itemType: 0x1000, flags: 0, wcid: 691, containerId: ME, stack: 3 },
     { id: 0x8000_0101, name: 'Mana Stone', itemType: 0x80000, flags: 0, wcid: 2434, containerId: ME },

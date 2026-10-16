@@ -43,7 +43,11 @@ export interface Vec3 { x: number; y: number; z: number }
  * hall 0xE63D: four doors 5 m up on porches no stair reaches, and a ground door up a ramp static, 2026-10-11).
  * undefined: not known (no terrain to measure against).
  */
-export interface CellDoor { a: number; b: number; at: Vec3; normal: Vec3; height?: number; bottom?: number; below?: number; climb?: boolean; landing?: number | null; grounded?: boolean }
+/**
+ * `landingCell`: the cell whose floor the fall lands on. Under a shaft (the cell below has no floor under the opening:
+ * an air cell, or a storey with a hole of its own) it is farther down than `below` (cellPath shaftLanding).
+ */
+export interface CellDoor { a: number; b: number; at: Vec3; normal: Vec3; height?: number; bottom?: number; below?: number; climb?: boolean; landing?: number | null; landingCell?: number; grounded?: boolean }
 
 /** PhysicsGlobals.FloorZ: the least normal.z a walkable polygon has (ACE ObjectInfo.GetWalkableZ). */
 const FLOOR_Z = 0.66417414618662751;
@@ -128,6 +132,28 @@ function insideXY(pts: Vec3[], x: number, y: number): boolean {
     if ((a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
   }
   return inside;
+}
+
+/** How far (seen from above) a shaft's next floor opening may be from the one fallen through: the same shaft. */
+const SHAFT_REACH_M = 6;
+
+/**
+ * The floor a body falling through horizontal portal `d` lands on when the cell below has no floor under it: down
+ * through each cell's own floor opening under the point (at most 16 storeys) to the first floor there. Null when a
+ * cell on the way has no floor and no opening under the point (it lands nowhere known).
+ */
+function shaftLanding(doors: Map<number, CellDoor[]>, floors: Map<number, FloorPoly[]>, d: CellDoor): { z: number; cell: number } | null {
+  let cell = d.below!, top = d.at.z;
+  for (let i = 0; i < 16; i++) {
+    const down = (doors.get(cell) ?? [])
+      .filter((e) => e.b !== 0xFFFF && Math.abs(e.normal.z) > 0.7 && e.below === e.b && e.at.z < top - 0.01)
+      .sort((p, q) => Math.hypot(p.at.x - d.at.x, p.at.y - d.at.y) - Math.hypot(q.at.x - d.at.x, q.at.y - d.at.y))[0];
+    if (!down || Math.hypot(down.at.x - d.at.x, down.at.y - d.at.y) > SHAFT_REACH_M) return null;
+    const f = floorUnder(floors.get(down.b) ?? [], d.at.x, d.at.y, down.at.z);
+    if (f !== null) return { z: f, cell: down.b };
+    cell = down.b; top = down.at.z;
+  }
+  return null;
 }
 
 /** The highest walkable height at (x, y) at or under `top` among `floors`, or null. */
@@ -263,6 +289,16 @@ export function loadCellGraph(cellDat: DatDatabase, portalDat: DatDatabase, land
     d.below = below;
     d.climb = top >= d.at.z - CLIMB_REACH_M;
     d.landing = floorUnder(fl, d.at.x, d.at.y, d.at.z);
+    if (d.landing !== null) d.landingCell = below;
+  }
+  // A fall down a shaft: no floor of the cell below lies under the opening (an air cell, or a storey with its own hole
+  // there), so the body falls on through that cell's floor opening to the first floor under the point. The doll
+  // dungeon's rift 0x029002E7 falls through 0x0298, 0x0235, 0x01EE, the edge slivers of 0x01B6, 0x0155 and 0x012C onto
+  // 0x010B's floor 42 m down (2026-10-16); with "no landing" every such shaft was unroutable and its depth unknown.
+  for (const list of doors.values()) for (const d of list) {
+    if (d.below === undefined || d.climb || d.landing !== null || d.b === 0xFFFF) continue;
+    const l = shaftLanding(doors, floors, d);
+    if (l) { d.landing = l.z; d.landingCell = l.cell; }
   }
   const airCells = new Set([...floors].filter(([, f]) => f.length === 0).map(([c]) => c));
   // A thin floorless cell a stair climbs straight through (the archmage tower's 0.2 m slab 0xA9B4011E between
@@ -305,8 +341,32 @@ export function floorsAt(g: CellGraph, x: number, y: number): Array<{ cell: numb
   return out.sort((a, b) => b.z - a.z);
 }
 
+/**
+ * Where a body stands in cell `cell` (landblock frame): on its floor under the middle of its geometry when there is
+ * floor there, else on the middle of its largest walkable polygon (a ramp's, a ring corridor's). Null for a cell the
+ * graph doesn't hold or one with no floor (the air over a pit). `walk_to target="0x039C0104"` named a cell, and the
+ * walk took the id for an object and answered "target vanished" (Bulwark, Hollow Lair 0x039C, 2026-10-16).
+ */
+export function cellStandPoint(g: CellGraph, cell: number): Vec3 | null {
+  const fl = g.floors?.get(cell >>> 0);
+  if (!fl || !fl.length) return null;
+  const c = g.centers?.get(cell >>> 0);
+  if (c) {
+    const under = fl.filter((f) => insideXY(f.pts, c.x, c.y)).map((f) => zOn(f, c.x, c.y)).sort((a, b) => Math.abs(a - c.z) - Math.abs(b - c.z));
+    if (under.length) return { x: c.x, y: c.y, z: under[0] };
+  }
+  const area = (f: FloorPoly): number => {
+    let s = 0;
+    for (let i = 0, j = f.pts.length - 1; i < f.pts.length; j = i++) s += (f.pts[j].x + f.pts[i].x) * (f.pts[j].y - f.pts[i].y);
+    return Math.abs(s) / 2;
+  };
+  const big = [...fl].sort((a, b) => area(b) - area(a))[0];
+  const x = big.pts.reduce((s, p) => s + p.x, 0) / big.pts.length, y = big.pts.reduce((s, p) => s + p.y, 0) / big.pts.length;
+  return { x, y, z: zOn(big, x, y) };
+}
+
 /** Height of polygon `f`'s plane at (x, y). */
-const zOn = (f: FloorPoly, x: number, y: number): number => (f.d - f.n.x * x - f.n.y * y) / f.n.z;
+const zOn =(f: FloorPoly, x: number, y: number): number => (f.d - f.n.x * x - f.n.y * y) / f.n.z;
 
 /** How far apart (seen from above) two surfaces' edges may be and still join: a body's foot crosses the seam. */
 const SEAM_M = 0.25;
@@ -403,7 +463,12 @@ const dist = (p: Vec3, q: Vec3): number => Math.hypot(p.x - q.x, p.y - q.y, p.z 
  */
 export type RoutePoint = Vec3 & { floor?: boolean; feet?: number; drop?: number; landing?: number;
   /** The route's end: where a body stands to deal with a goal across a counter or window (counterSpot), not the goal itself. */
-  across?: boolean };
+  across?: boolean;
+  /**
+   * Reached by a running jump across a floorless cell (RouteOptions.jumpAcross): the gap's width, metres. The doorway
+   * at the near lip is left out of the route: the walk's jump search finds the edge and the leap (navPlanner).
+   */
+  leap?: number };
 const withFeet = (d: CellDoor, p: Vec3): RoutePoint => (d.bottom === undefined ? p : { ...p, feet: d.bottom });
 
 /** Two points within 1 cm: the same doorway (each side's copy of a door shares its centroid). */
@@ -443,7 +508,19 @@ export interface RouteOptions {
   avoid?: Vec3[];
   /** Only openings a body walks through (no window or counter as a last resort). */
   bodyOnly?: boolean;
+  /**
+   * The widest gap (metres, seen from above) the player's running jump crosses with room to land: a route may go
+   * across a floorless cell from one wall doorway to another at the same height (LEAP_RISE_M) no farther apart.
+   * The doll dungeon's upper floor (landblock 0x0290) is two halves joined only across the 10 m rift 0x029002E7 over a
+   * 42 m shaft; the far half's ramps are the way down to its lower floors (2026-10-16). Unset: no leaps.
+   */
+  jumpAcross?: number;
 }
+
+/** A leap's two doorways may differ this much in sill height (m): across, not up onto a ledge. */
+export const LEAP_RISE_M = 1;
+/** A leap across a gap costs this much extra route length: a walk round up to this much longer is taken instead. */
+export const LEAP_PENALTY_M = 20;
 
 /** How near a doorway a door that would not open stands (seen from above; within 3 m of height). */
 export const CLOSED_DOOR_M = 2.5;
@@ -495,6 +572,20 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
   const open = new Set<string>([START]);
   const done = new Set<string>();
   const posOf = (n: string): RoutePoint => (n === START ? from : n === GOAL ? to : pos.get(n)!);
+  // Doors reached by a leap across an air cell, and the gap's width.
+  const leapTo = new Map<string, number>();
+  const floorSide = (n: string, c: number): boolean => (cellsOf.get(n) ?? []).some((x) => x !== c && !g.airCells?.has(x));
+  /** From wall doorway `n` into air cell `c` across to wall doorway `m` of it: the gap's width when a jump makes it. */
+  const leapAcross = (n: string, m: string, c: number): number | undefined => {
+    const reach = opts.jumpAcross;
+    if (!reach || n === START || m === GOAL) return undefined;
+    const dn = door.get(n), dm = door.get(m);
+    if (!dn || !dm || Math.abs(dn.normal.z) > 0.7 || Math.abs(dm.normal.z) > 0.7) return undefined;
+    if (Math.abs((dn.bottom ?? dn.at.z) - (dm.bottom ?? dm.at.z)) > LEAP_RISE_M) return undefined;
+    const w = Math.hypot(dn.at.x - dm.at.x, dn.at.y - dm.at.y);
+    // Floor on both sides: a leap from a ledge to a ledge, never on into more air.
+    return w <= reach && floorSide(n, c) && floorSide(m, c) ? w : undefined;
+  };
   // Cells a node touches: start/goal are inside one cell, a door joins two.
   const cellsAt = (n: string): number[] => (n === START ? [fromCell] : n === GOAL ? [toCell] : cellsOf.get(n) ?? []);
   while (open.size) {
@@ -511,10 +602,17 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
         const dm = door.get(m);
         if (dm && !passable(dm, c, maxDrop)) continue;
         // In a cell with no floor the only way on is down through its floor opening (from where we
-        // stand, any way: a body reported in one is at its edge, or already falling).
-        if (n !== START && g.airCells?.has(c) && m !== GOAL && !(dm && dm.below !== undefined && dm.below !== c)) continue;
-        const d = nd + dist(posOf(n), posOf(m)) + (posOf(m).drop !== undefined ? DROP_PENALTY_M : 0);
-        if (d < (best.get(m) ?? Infinity)) { best.set(m, d); prev.set(m, n); open.add(m); }
+        // stand, any way: a body reported in one is at its edge, or already falling), or a jump across it.
+        let leap: number | undefined;
+        if (n !== START && g.airCells?.has(c) && m !== GOAL && !(dm && dm.below !== undefined && dm.below !== c)) {
+          leap = leapAcross(n, m, c);
+          if (leap === undefined) continue;
+        }
+        const d = nd + dist(posOf(n), posOf(m)) + (posOf(m).drop !== undefined ? DROP_PENALTY_M : 0) + (leap !== undefined ? LEAP_PENALTY_M : 0);
+        if (d < (best.get(m) ?? Infinity)) {
+          best.set(m, d); prev.set(m, n); open.add(m);
+          if (leap !== undefined) leapTo.set(m, leap); else leapTo.delete(m);
+        }
       }
     }
   }
@@ -532,7 +630,118 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
     const below = door.get(m)?.below;
     return (cellsOf.get(n) ?? []).some((c) => c !== below && !!g.airCells?.has(c) && (cellsOf.get(m) ?? []).includes(c));
   };
-  return nodes.filter((n, i) => !intoAir(n, nodes[i + 1])).map(posOf);
+  // The doorway at a leap's near lip is no point to stand on either (a body stops a radius short of it): the walk goes
+  // from the doorway before straight for the far side, and its jump search finds the edge and the leap.
+  // The leap's point is LEAP_LAND_M past the far lip (on along the leap), not the lip's own doorway: a landing is a
+  // radius or so past the edge, and a point on the edge itself is one the walk can't get within reach of.
+  const leapPoint = (n: string, i: number): RoutePoint => {
+    const lip = posOf(nodes[i - 1] ?? START), far = posOf(n);
+    const dx = far.x - lip.x, dy = far.y - lip.y, l = Math.hypot(dx, dy) || 1;
+    return { ...far, x: far.x + (dx / l) * LEAP_LAND_M, y: far.y + (dy / l) * LEAP_LAND_M, leap: leapTo.get(n)! };
+  };
+  return nodes.map((n, i) => (leapTo.has(n) ? leapPoint(n, i) : posOf(n))).filter((_, i) => !intoAir(nodes[i], nodes[i + 1]) && !leapTo.has(nodes[i + 1]));
+}
+
+/** How far past a leap's far lip its route point lies (m): where the body stands after landing. */
+export const LEAP_LAND_M = 1.5;
+
+/** A floorless cell between where you are and where you want to be, and the two ways past it a body may have. */
+export interface RouteGap {
+  /** The floorless cell (a rift, a shaft, a pit's air). */
+  air: number;
+  /** The doorway into it from your side (its sill: feet height), landblock frame. */
+  from: Vec3;
+  /** Across: the doorway on the far side at your height, and the open air between the two (seen from above), m. */
+  to?: Vec3;
+  width?: number;
+  /** Whether the far side leads on foot to the goal's cell. */
+  acrossToGoal: boolean;
+  /** Down: the floor a fall into it lands on, and how far below the sill (null: no floor found under it). */
+  landing: number | null;
+  depth: number | null;
+  /** Whether the floor it lands on leads on foot to the goal's cell. */
+  downToGoal: boolean;
+}
+
+/**
+ * The cells a body gets to from `start` on foot: through every wall doorway a body fits (no window or counter), up or
+ * down a floor opening where a stair climbs through it, and down one as a fall no deeper than `maxDrop` onto a known
+ * floor (one way); never into a cell with no floor.
+ */
+function onFoot(g: CellGraph, start: number, maxDrop: number): Set<number> {
+  const seen = new Set<number>([start >>> 0]);
+  const queue = [start >>> 0];
+  while (queue.length) {
+    const c = queue.pop()!;
+    for (const d of g.doors.get(c) ?? []) {
+      const b = d.b >>> 0;
+      if (d.b === 0xFFFF || seen.has(b) || g.airCells?.has(b) || !g.doors.has(b) || tooLow(d)) continue;
+      if (d.below !== undefined && !d.climb && !(d.below === b && d.landing !== null && d.landing !== undefined && d.at.z - d.landing <= maxDrop)) continue;
+      seen.add(b);
+      queue.push(b);
+    }
+  }
+  return seen;
+}
+
+/**
+ * Why no doorway route joins `fromCell` to `toCell` when a floorless cell stands between: the gaps beside the part
+ * of the dungeon you can walk (each air cell a wall doorway of it opens into), with the width across to a floor at
+ * your height and the fall into it (its shaft's floor, cellPath shaftLanding). Those leading to the goal come first,
+ * then the narrowest. Null when the goal is walkable from here, or no gap borders where you can walk. `maxDrop`: the
+ * falls through floor openings that count as walking on (the walk's own, jumpPlan.safeDropHeight; default 12 m).
+ * The doll dungeon (0x0290): the entrance half of the upper floor meets the rest only at the 10 m rift 0x029002E7
+ * over a 42 m shaft (2026-10-16).
+ */
+export function routeBarrier(g: CellGraph, fromCell: number, toCell: number, opts: { maxDrop?: number } = {}): RouteGap[] | null {
+  fromCell >>>= 0; toCell >>>= 0;
+  const maxDrop = opts.maxDrop ?? 12;
+  if (!g.doors.has(fromCell)) return null;
+  const mine = onFoot(g, fromCell, maxDrop);
+  if (mine.has(toCell)) return null;
+  const reaches = new Map<number, boolean>();
+  const leadsToGoal = (cell: number | undefined): boolean => {
+    if (cell === undefined) return false;
+    cell >>>= 0;
+    if (!reaches.has(cell)) reaches.set(cell, onFoot(g, cell, maxDrop).has(toCell));
+    return reaches.get(cell)!;
+  };
+  const out: RouteGap[] = [];
+  for (const [c, list] of g.doors) {
+    if (!mine.has(c)) continue;
+    for (const d of list) {
+      const air = d.b >>> 0;
+      if (d.b === 0xFFFF || !g.airCells?.has(air) || Math.abs(d.normal.z) > 0.7 || tooLow(d)) continue;
+      const feet = d.bottom ?? d.at.z;
+      const gap: RouteGap = { air, from: { x: d.at.x, y: d.at.y, z: feet }, acrossToGoal: false, landing: null, depth: null, downToGoal: false };
+      // Across: the nearest doorway of the air cell onto another floor at this height, the goal's side first.
+      for (const e of g.doors.get(air) ?? []) {
+        const far = e.b >>> 0;
+        if (e.b === 0xFFFF || far === c || g.airCells?.has(far) || Math.abs(e.normal.z) > 0.7 || tooLow(e) || mine.has(far)) continue;
+        if (Math.abs((e.bottom ?? e.at.z) - feet) > LEAP_RISE_M) continue;
+        const w = Math.hypot(e.at.x - d.at.x, e.at.y - d.at.y);
+        const toGoal = leadsToGoal(far);
+        if (gap.width === undefined || (toGoal && !gap.acrossToGoal) || (toGoal === gap.acrossToGoal && w < gap.width)) {
+          gap.width = w; gap.to = { x: e.at.x, y: e.at.y, z: e.bottom ?? e.at.z }; gap.acrossToGoal = toGoal;
+        }
+      }
+      // Down: its floor opening's landing (a shaft's floor farther down).
+      const down = (g.doors.get(air) ?? []).filter((e) => e.b !== 0xFFFF && Math.abs(e.normal.z) > 0.7 && e.below === e.b)
+        .sort((p, q) => Math.hypot(p.at.x - d.at.x, p.at.y - d.at.y) - Math.hypot(q.at.x - d.at.x, q.at.y - d.at.y))[0];
+      if (down && down.landing !== null && down.landing !== undefined) {
+        gap.landing = down.landing;
+        gap.depth = feet - down.landing;
+        gap.downToGoal = leadsToGoal(down.landingCell);
+      }
+      if (gap.width === undefined && gap.depth === null) continue;
+      const same = out.findIndex((o) => o.air === air);
+      if (same < 0) out.push(gap);
+      else if ((gap.acrossToGoal && !out[same].acrossToGoal) || (gap.width ?? Infinity) < (out[same].width ?? Infinity)) out[same] = gap;
+    }
+  }
+  if (!out.length) return null;
+  const rank = (q: RouteGap): number => (q.acrossToGoal || q.downToGoal ? 0 : 1);
+  return out.sort((p, q) => rank(p) - rank(q) || (p.width ?? Infinity) - (q.width ?? Infinity));
 }
 
 const isInterior = (cell: number): boolean => ((cell >>> 0) & 0xffff) >= 0x100;

@@ -50,6 +50,7 @@ export function formatObject(o: AgentObject): string {
   if (o.notByHand) bits.push('opened by a lever or switch, not by hand');
   if (o.dying) bits.push('DYING (dead: not a target)');
   if (o.outOfSight) bits.push('OUT OF SIGHT: only where it was last seen (it may have moved, died or gone)');
+  if (o.otherFloor !== undefined) bits.push(`ON ANOTHER FLOOR, ${Math.abs(o.otherFloor)} m ${o.otherFloor > 0 ? 'up' : 'down'}: no walk or melee reaches it from this floor, and a bolt or arrow only through an opening`);
   if (o.attackingYou) bits.push(`ATTACKING YOU (${o.attackingYou}× in 10 s)`);
   else if (o.comingAtYou) bits.push(`COMING AT YOU (${o.comingAtYou})`);
   if (o.seen) bits.push(`seen: ${o.seen}`);
@@ -109,12 +110,16 @@ export function formatObservation(obs: AgentObservation): string {
   if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
   if (obs.gearEmpty?.slots.length) out.push(`gear: ${emptySlotsText(obs.gearEmpty.slots)}${obs.gearEmpty.packFits.length ? `; in your pack that would cover one: ${obs.gearEmpty.packFits.slice(0, 4).join(', ')}` : ''} (ac_inventory / ac_gear show every gear slot)`);
   if (obs.windows?.length) out.push(`windows open: ${obs.windows.join(', ')}  (ac_close name=… or all, when done with them)`);
-  out.push(`target: ${obs.target ? formatObject(obs.target) : 'none'}`);
+  out.push(`target: ${obs.target ? formatObject(obs.target) : obs.targetLeftBehind ? `none (your last target, ${obs.targetLeftBehind}, was left behind in another place: you went through a portal or far away since; pick a new one)` : 'none'}`);
   const attackers = obs.nearby.filter((o) => o.attackingYou && o.guid !== obs.target?.guid);
   if (attackers.length) out.push(`under attack by: ${attackers.map((o) => `${o.name} #${o.guid.toString(16)} ${o.dist.toFixed(1)}m (${o.attackingYou}× in 10 s)`).join(', ')}${obs.target ? ' (not your target)' : ''}`);
-  if (obs.attackersUnplaced?.length) out.push(`hit by, but not placed: ${obs.attackersUnplaced.map((u) => `${u.name} (${u.count}× in 10 s)`).join(', ')} (none of that name within reach of you: out of sight, or attacking from afar)`);
+  if (obs.attackersUnplaced?.length) out.push(`hit by, but not placed: ${obs.attackersUnplaced.map((u) => `${u.name} (${u.count}× in 10 s)`).join(', ')} (none of that name in sight within reach: a monster in a cell yours can't see is not shown to you, yet its melee reaches through a wall or shut door (the server checks distance only); step away from the wall, or into its room)`);
   out.push(`nearby (${obs.nearby.length}${obs.nearbyTotal > obs.nearby.length ? ` of ${obs.nearbyTotal}` : ''}, nearest first):`);
   for (const o of obs.nearby) out.push(`  ${formatObject(o)}`);
+  if (obs.unseen?.length) {
+    out.push(`also in range, in rooms out of sight of yours (${obs.unseen.length}; where the server last placed them, they may have moved):`);
+    for (const o of obs.unseen) out.push(`  ${formatObject(o)}`);
+  }
   if (obs.remembered?.length) {
     out.push('remembered, out of view (walk_to / use them by name):');
     for (const o of obs.remembered) out.push(`  ${formatObject(o)}`);
@@ -177,6 +182,60 @@ export function formatInventory(items: AgentItem[]): string {
     }
   }
   return out.join('\n');
+}
+
+/**
+ * ac_inventory filter= kinds, by the item's ItemType bits (ACE ItemType: MeleeWeapon 0x1, Armor 0x2, Clothing 0x4,
+ * Jewelry 0x8, Food 0x20, Money 0x40, Misc 0x80, MissileWeapon 0x100, Container 0x200, Useless 0x400, Gem 0x800,
+ * SpellComponents 0x1000, Writable 0x2000, Key 0x4000, Caster 0x8000, PromissoryNote 0x40000, ManaStone 0x80000,
+ * TinkeringMaterial 0x40000000) and, where a type covers several kinds, its name.
+ */
+export const INVENTORY_KINDS: Readonly<Record<string, (it: AgentItem) => boolean>> = {
+  weapon: (it) => ((it.itemType ?? 0) & (0x1 | 0x100 | 0x8000)) !== 0,
+  armor: (it) => ((it.itemType ?? 0) & 0x2) !== 0,
+  clothing: (it) => ((it.itemType ?? 0) & 0x4) !== 0,
+  jewelry: (it) => ((it.itemType ?? 0) & 0x8) !== 0,
+  scroll: (it) => /^scroll of /i.test(it.name),
+  book: (it) => ((it.itemType ?? 0) & 0x2000) !== 0 && !/^scroll of /i.test(it.name),
+  kit: (it) => /\bkit\b/i.test(it.name),
+  potion: (it) => /\b(potion|draught|elixir|tonic|philter|brew)\b/i.test(it.name),
+  food: (it) => ((it.itemType ?? 0) & 0x20) !== 0 && !/\b(potion|draught|elixir|tonic|philter|brew)\b/i.test(it.name),
+  salvage: (it) => ((it.itemType ?? 0) & 0x40000000) !== 0 || /^salvage(d)?\b|\bsalvage$/i.test(it.name),
+  junk: (it) => ((it.itemType ?? 0) & 0x400) !== 0,
+  gem: (it) => ((it.itemType ?? 0) & 0x800) !== 0,
+  key: (it) => ((it.itemType ?? 0) & 0x4000) !== 0,
+  component: (it) => ((it.itemType ?? 0) & 0x1000) !== 0,
+  pack: (it) => ((it.itemType ?? 0) & 0x200) !== 0,
+  manastone: (it) => ((it.itemType ?? 0) & 0x80000) !== 0,
+  money: (it) => ((it.itemType ?? 0) & (0x40 | 0x40000)) !== 0,
+  worn: (it) => it.where === 'equipped',
+};
+const KIND_ALIASES: Readonly<Record<string, string>> = {
+  weapons: 'weapon', armour: 'armor', scrolls: 'scroll', kits: 'kit', 'healing kit': 'kit', potions: 'potion', comps: 'component',
+  components: 'component', comp: 'component', gems: 'gem', keys: 'key', packs: 'pack', 'mana stone': 'manastone', 'mana stones': 'manastone',
+  equipped: 'worn', wielded: 'worn', coins: 'money', pyreals: 'money', notes: 'money', books: 'book',
+};
+
+/** The items an ac_inventory filter= keeps: a kind word (INVENTORY_KINDS), else those whose name holds the text. */
+export function filterInventory(items: AgentItem[], filter: string): { items: AgentItem[]; kind: string | null } {
+  const f = filter.trim().toLowerCase();
+  if (!f) return { items, kind: null };
+  const kind = INVENTORY_KINDS[f] ? f : KIND_ALIASES[f] ?? null;
+  if (kind) return { items: items.filter(INVENTORY_KINDS[kind]), kind };
+  return { items: items.filter((it) => it.name.toLowerCase().includes(f)), kind: null };
+}
+
+/** ac_inventory filter=: the matching items, each with where it is (no paperdoll), or what was looked for. */
+export function formatInventoryFiltered(items: AgentItem[], filter: string): string {
+  const { items: hit, kind } = filterInventory(items, filter);
+  const what = kind ? `${kind} items` : `items named like "${filter.trim()}"`;
+  if (!hit.length) return `no ${what} in your inventory (kinds: ${Object.keys(INVENTORY_KINDS).join(', ')}; any other text matches names)`;
+  const lines = hit.map((it) => {
+    const extra = [it.where === 'equipped' ? `worn${it.slot ? `: ${it.slot}` : ''}` : `in ${it.where}${it.inside !== undefined ? ` #${it.inside.toString(16)}` : ''}`,
+      it.stack && it.stack > 1 ? `x${it.stack}` : '', it.type, it.value ? `value ${it.value.toLocaleString('en-US')}` : ''].filter(Boolean).join(', ');
+    return `  #${it.guid.toString(16)} ${it.name}  (${extra})`;
+  });
+  return [`${hit.length} ${what}:`, ...lines].join('\n');
 }
 
 export function formatTrace(points: AgentTracePoint[]): string {

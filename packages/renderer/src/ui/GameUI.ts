@@ -500,6 +500,8 @@ function formatModifierPct(value: number, decimals: number = 1): string {
   return `${sign}${magnitude.toFixed(decimals)}%`;
 }
 // Legacy proxy — reads live DAT strings on each access.
+/** The character sheet's attribute keys as PropertyAttribute ids (ACE PropertyAttribute.cs), an enchantment's StatModKey. */
+const ATTRIBUTE_IDS: Readonly<Record<string, number>> = { strength: 1, endurance: 2, quickness: 3, coordination: 4, focus: 5, self: 6 };
 const ATTRIBUTE_LABELS = new Proxy({} as Record<string, string>, {
   get: (_, attr: string) => attributeLabel(attr),
 });
@@ -2319,7 +2321,7 @@ export class GameUI {
     spellId: number; layer: number; name: string; iconId: number;
     isBeneficial: boolean; isVitae: boolean; isCooldown: boolean;
     duration: number; startTime: number; appliedAt: number; casterGuid: number;
-    spellCategory?: number; powerLevel?: number; statModType?: number;
+    spellCategory?: number; powerLevel?: number; statModType?: number; statModKey?: number; statModValue?: number;
   }> = new Map();
   // GAP.indicator-bar-interactive — the retail Positive / Negative Effects
   // windows (gmEffectsUI, 0x2100001b:0x1000011f / 0x10000121 — see
@@ -19455,6 +19457,27 @@ export class GameUI {
     return next.length ? [`Next skill credits: ${next.map((n) => `level ${n.level} (+${n.credits})`).join(', ')}`] : [];
   }
 
+  /**
+   * AGENT — the enchantments on you that change one attribute (`statType` 0x1, EnchantmentTypeFlags.Attribute) or
+   * skill (0x10), by key: "; Slowness Other II -15, 41s left". Vitae (every attribute and skill) is named too. An
+   * agent read "Quickness 79 (base 94)" with no debuff listed: Slowness Other II from a Battered Doll had landed a
+   * minute before, and only the effects window showed it (Arcanist, 2026-10-16).
+   */
+  statCauses(statType: number, key: number, nowSec = Date.now() / 1000): string {
+    const out: string[] = [];
+    for (const e of this.activeEnchantments.values()) {
+      if (e.isCooldown) continue;
+      const type = e.statModType ?? 0;
+      const vitae = e.isVitae || (type & 0x800000) !== 0;
+      if (!vitae && (!(type & statType) || (e.statModKey ?? -1) !== key)) continue;
+      const v = e.statModValue ?? 0;
+      const amount = (type & 0x4000) || vitae ? formatModifierPct(v, 0) : `${v >= 0 ? '+' : '-'}${Math.round(Math.abs(v))}`;
+      const left = e.duration < 0 ? '' : `, ${Math.max(0, Math.round(e.startTime + e.duration - (nowSec - e.appliedAt)))}s left`;
+      out.push(`${vitae ? 'Vitae' : e.name} ${amount}${left}`);
+    }
+    return out.length ? `; ${out.join(', ')}` : '';
+  }
+
   /** AGENT — the character panel's data as text for an agent player (docs/agent-play.md). */
   agentCharacterSheet(): string {
     const c = this.charInfo;
@@ -19475,13 +19498,13 @@ export class GameUI {
       `${c.name}  level ${c.level}  ${c.heritage} ${c.gender}  ${c.pkStatus}`,
       `XP ${c.totalXp.toLocaleString()} total, ${c.unassignedXp.toLocaleString()} unassigned, ${c.xpToNextLevel.toLocaleString()} to next level; ${c.skillCredits} skill credits`,
       ...GameUI.nextSkillCreditsLine(this.xpCostTables.levelSkillCredits, c.level),
-      'Attributes: ' + Object.entries(c.attributes).map(([k, a]) => `${ATTRIBUTE_LABELS[k] ?? k} ${a.buffed}${a.buffed !== a.base ? ` (base ${a.base})` : ''}${next(GameUI.statRaiseCosts(this.xpCostTables.attribute, a.raises ?? 0).cost1)}`).join(', '),
+      'Attributes: ' + Object.entries(c.attributes).map(([k, a]) => `${ATTRIBUTE_LABELS[k] ?? k} ${a.buffed}${a.buffed !== a.base ? ` (base ${a.base}${this.statCauses(0x1, ATTRIBUTE_IDS[k] ?? 0)})` : ''}${next(GameUI.statRaiseCosts(this.xpCostTables.attribute, a.raises ?? 0).cost1)}`).join(', '),
       'Vitals: ' + Object.entries(c.vitals).map(([k, v]) => `${k} ${v.current}/${v.max}${next(GameUI.statRaiseCosts(this.xpCostTables.vital, v.raises ?? 0).cost1)}`).join(', '),
     ];
     for (const status of ['Specialized', 'Trained']) {
       const list = c.skills.filter((s) => s.status === status);
       const table = status === 'Specialized' ? this.xpCostTables.specializedSkill : this.xpCostTables.trainedSkill;
-      if (list.length) out.push(`${status} skills: ` + list.map((s) => `${s.name} ${s.effective}${s.effective !== s.base ? ` (base ${s.base})` : ''}${skillNext(table, s)}`).join(', '));
+      if (list.length) out.push(`${status} skills: ` + list.map((s) => `${s.name} ${s.effective}${s.effective !== s.base ? ` (base ${s.base}${this.statCauses(0x10, s.id)})` : ''}${skillNext(table, s)}`).join(', '));
     }
     out.push('[+1: N xp] is what one more raise costs, what ac_raise spends (the panels\' raise buttons show the same).'
       + (partFilled ? ' "then N" follows a +1 that only finishes a rank the skill part-filled by being used: the raise after costs the full step.' : ''));
@@ -21308,6 +21331,8 @@ export class GameUI {
     duration: number; startTime: number; casterGuid: number;
     /** GAP.indicator-bar-interactive — the Duel keys (Enchantment::Duel @ 005cace0) + list choice (mult vs add). */
     spellCategory?: number; powerLevel?: number; statModType?: number;
+    /** What it changes (EnchantmentTypeFlags in statModType; the attribute / skill id) and by how much. */
+    statModKey?: number; statModValue?: number;
   }): void {
     const key = `${data.spellId}:${data.layer}`;
     this.activeEnchantments.set(key, {

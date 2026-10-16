@@ -6,7 +6,7 @@
 import { expect, vi } from 'vitest';
 import { compassToYaw, type AgentApi, type FellowshipInfo, type AgentHost, type AgentHostObject, type AgentHostSelf } from '../../packages/renderer/src/agent/AgentApi.ts';
 import { getJumpVelocity } from '@ac/shared';
-import type { AgentItem } from '../../packages/renderer/src/agent/types.ts';
+import type { AgentItem, AgentSpell } from '../../packages/renderer/src/agent/types.ts';
 
 export const HOLTBURG = 0xa9b40019; // landblock 0xA9,0xB4 outdoor cell
 
@@ -40,7 +40,7 @@ export class FakeHost implements AgentHost {
   targetHealth = () => (this.target ? 0.5 : undefined);
   carriedGuids = () => new Set(this.inv.map((i) => i.guid));
   inventory = () => this.inv;
-  spells = () => [{ id: 27, name: 'Flame Bolt I', school: 'War', level: 1 }, { id: 6, name: 'Heal Self I', school: 'Life', level: 1 }];
+  spells: () => AgentSpell[] = () => [{ id: 27, name: 'Flame Bolt I', school: 'War', level: 1 }, { id: 6, name: 'Heal Self I', school: 'Life', level: 1 }];
   characterSheet = () => 'sheet';
   windowList: string[] = [];
   openWindows = () => this.windowList;
@@ -89,6 +89,8 @@ export class FakeHost implements AgentHost {
   setAttackPower = (p: number) => { this.sent.push(`power ${p}`); this.barPower = p; };
   setAttackHeight = (h: 'high' | 'medium' | 'low') => { this.sent.push(`height ${h}`); this.barHeight = h; };
   cancelAttack = () => { this.sent.push('cancel'); };
+  /** A swing under way (the client's attackInProgress); unset = the host can't say. */
+  attacking: AgentHost['attacking'] = undefined;
   cast = (id: number, t: number | null) => { this.sent.push(`cast ${id} ${t === null ? 'self' : t.toString(16)}`); return true; };
   chat = (text: string) => { this.chats.push(text); };
   setYaw = (y: number) => { this.me.yaw = y; };
@@ -152,6 +154,8 @@ export class FakeHost implements AgentHost {
   lineOfFireOpenSpot: AgentHost['lineOfFireOpenSpot'] = undefined;
   missileLineOfFire: AgentHost['missileLineOfFire'] = undefined;
   routeTo: Array<{ x: number; y: number; z: number }> | null = null;
+  /** The floorless cells between two rooms no route joins (cellPath routeBarrier); unset = the host can't say. */
+  routeBarrier: AgentHost['routeBarrier'] = undefined;
   route = (_fc: number, _f: unknown, _tc: number, to: { x: number; y: number; z: number }) => (this.routeTo ? [...this.routeTo, to] : null);
   logout = () => {};
 
@@ -174,6 +178,8 @@ export class FakeHost implements AgentHost {
   cellSealed: AgentHost['cellSealed'] = undefined;
   /** The rooms' floors under a landblock-local point (map coordinates in a dungeon); unset = the host can't say. */
   floorsAt: AgentHost['floorsAt'] = undefined;
+  /** Where to stand in an interior cell named by its id (walk_to target=0xXXYYCCCC); unset = the host can't say. */
+  cellPoint: AgentHost['cellPoint'] = undefined;
   /** The landscape at a global point (open sea, too steep, the wade); unset = the host can't say. */
   navTerrain: AgentHost['navTerrain'] = undefined;
   /** Optional walls (landblock-local x, y → blocked): the body stops at them, and navProbe sees them. */
@@ -203,6 +209,11 @@ export class FakeHost implements AgentHost {
   floors: ((x: number, y: number) => number[]) | null = null;
   static readonly STEP = 0.6;
   jumpSkill = 100;
+  /** The server family billing fall damage (AgentHost.fallServer); null leaves the hook out (ACE's). */
+  fallFamily: 'ace' | 'gdle' | null = null;
+  get fallServer(): AgentHost['fallServer'] {
+    return this.fallFamily ? () => this.fallFamily as 'ace' | 'gdle' : undefined;
+  }
   airborne: { vx: number; vy: number; vz: number } | null = null;
   private chargeAt: number | null = null;
   /** Every launch: power, forward speed, where from. */

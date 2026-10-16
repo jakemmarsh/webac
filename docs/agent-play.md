@@ -153,6 +153,32 @@ so that wait, the stream brief's own, slept through every /f line: "missed chat 
 `ac_use` on a letter or book returns its text, every page. Item names match the way the game says them in chat:
 "Pine Lugian Hammer" finds your "Lugian Hammer". A name in your pack beats one you wear, so `ac_drop` takes the
 spare. Drops and equips made together go out one at a time, as the client allows (2026-10-10).
+A material name finds an item too ("Bronze Bracelet" is your "Bracelet" of bronze, as the server's lines say it).
+
+`ac_equip item=… slot=left wrist` is the drag onto that paperdoll slot: whatever holds the slot comes off into the
+pack first. Without `slot=` it is the double-click (the client picks, and with both wrists or both rings taken it
+replaces the right one); the reply names the slot it went to and what it took off. `ac_unequip item=…` is the drag
+off the paperdoll into the main pack (2026-10-16: there was no way to take the dead bracelet off but dropping it).
+`ac_give` walks up beside the recipient first, so ACE's own walk (15 s, then "can't be given - action cancelled") has
+nothing to do, waits up to 17 s for the server's answer and ignores other chat; an id that isn't in your inventory is
+refused before it is sent (the server's "Item not found!" names an object the client can't resolve, which left its
+one pending inventory request stuck for ten minutes of "You can only move or use one item at a time"). A give still
+going at 25 s ends with a `task-done` event. In a dungeon, `ac_observe` lists creatures in rooms your room can't see
+under "also in range, in rooms out of sight of yours"; a target on another floor says so. A bare `routines` lists the
+profiles, a bare `routine` shows its status, and any tool missing a required argument answers with its usage line.
+
+From the Tusker-dungeon reports (2026-10-16): `ac_cast` matches a spell by family and level as players say it
+("Swift Killer V" is Aura of Swift Killer Other V at a fellow, Self at yourself; "Aura of" and Self/Other may be left
+out) and lists the candidates when several fit; Impenetrability and the Banes with no target go on your own armor,
+as cast on yourself (ACE redirects a self cast to every worn piece); a fizzle says the school's skill against the
+spell's difficulty and the chance a cast lands (ACE SkillCheck.GetMagicSkillChance). A use, use_on, give, pick-up or
+item move during a swing breaks the attack off first (the client's Cancel Attack) and says so: the client refuses
+them while you swing. A portal that took you during the walk to it is a use that worked. After a portal a selection
+left in another place shows as "none (your last target … was left behind)" and the client drops it as retail does.
+The one-object tools take `item=` and `target=` alike (pick_up, drop, equip, unequip, sell, appraise, select, use,
+loot, attack); `ac_inventory filter=` lists only a kind (weapon, armor, scroll, kit, potion, salvage, junk …) or names
+holding the text. A give the server answered "You give …" is done even before the pack shows it, and one that fails
+far from the recipient says how far.
 
 ### Several players at once
 
@@ -697,6 +723,17 @@ here, not having to hardcode behavior").
   - `ac_wait` types `aggro` (a monster started coming at you, with its level, distance and how; its level is looked up
     quietly when unknown), `fellow-aggro` (one started coming at or fighting a fellow) and `fellow-low` (a fellow's
     health below 60%, `fellow_below=` per wait, or a quarter of it in one drop; the fellowship panel's vitals).
+  - *A monster that can't reach you stops re-raising it (2026-10-16, Tumerok Cave).* Shore Armoredillos behind the
+    cave's walls re-raised "running at you" every minute or two from the same 11–14 m (ACE re-sends a MoveToObject it
+    can't path; each pause past the 10 s forget window made it "new" again), and Arcanist dropped `aggro` from his waits,
+    which hides real threats. Now (`AgentApi.aggroVerdict`, per monster and per you / fellow): once a monster has raised
+    aggro and its own place gets no 3 m nearer where they stand for 20 s (`AGGRO_STALL_MS` / `AGGRO_STALL_CLOSE_M`), its
+    next re-raise is one line instead: `Shore Armoredillo #8000dd45 (level 30) keeps facing you, 12 m N (running at you),
+    but it hasn't come closer in 24 s (no line of fire: a wall in the way): stuck, or it can't path round to you. No
+    more aggro for it until it closes in or attacks.` It is then quiet until it comes 3 m nearer (an aggro at once, no
+    forget window), is on them or attacks; you walking toward it doesn't count. observe still marks it `COMING AT YOU
+    (running at you, no closer in 40 s)`, and a held monster doesn't stop an `ac_walk_to` / `ac_follow`. A real chase
+    closes metres a second, so it never holds. fellow-aggro is held the same way.
   - `ac_walk_to` and `ac_follow` answer when a monster starts coming at you: `stopped 31.0 m short: Shadow #8000b6e1
     (level 26) is coming at you, 24 m E (running at you). Fight it …, get away from it …, or walk on anyway
     (stop_on_aggro=false)`. One already coming when you set off doesn't stop it; flee never does. Routines' own walks
@@ -830,10 +867,51 @@ here, not having to hardcode behavior").
   healing kit is ACE's IsBusy, set by the kit's own heal or another action in flight: checked, server behaviour.)
   A drop or jump never lands where a drop of over a metre lies within 0.45 m (jumpPlan.stableLanding: the dam
   pylons at 42.3N 78.35W turned a planned 4.8 m drop into a 28 m fall), the arrival after one waits 1.2 s to see
-  the body stays, and an unplanned fall is told. The CLI prints ac_look's text after the screenshot path.
+  the body stays, and an unplanned fall is told. A player can't walk off a ledge (CTransition::edge_slide @
+  0050b3d0 holds every EdgeSlide body, ACE PhysicsGlobals.DefaultState), so a drop is always a jump; a jump or drop
+  that comes down on its own take-off twice ends the walk ("the drop didn't happen", or "couldn't jump: no stamina"
+  when stamina is 0: retail jumps with Jump 0 then, CACQualities::InqJumpVelocity @ 00592980), and one take-off
+  landing off the plan 3 times, or 6 off-plan landings in a walk, end it too (the AC1999 start dungeon walk planned
+  the same drop every 4 s for minutes, 2026-10-16). A door is Used once per errand: the stall fallback's Use ends
+  the detour to the same door, a door already open is never Used (that swings it shut), a door that opened for the
+  walk and swung shut again is opened again, and a stuck walk Uses a shut door within 4 m once more before giving up
+  unless it said "locked" (Training Academy 0x7202, 2026-10-16). The CLI prints ac_look's text after the screenshot path.
+  Rifts and shafts (the doll dungeon 0x0290, 2026-10-16): the doorway route may leap a floorless cell from one wall
+  doorway to another at the same height when your full running jump (forward speed × time in the air: Jump and Run
+  skill, burden, stamina) carries it with a metre to spare (`cellPath` RouteOptions.jumpAcross, `AgentApi.jumpReach`
+  − `LEAP_MARGIN_M`); its route point lies 1.5 m past the far lip and the leg goes straight to the search that may
+  jump. A fall through a stack of floorless cells lands on the first floor under the opening (`shaftLanding`; it was
+  "no landing" before, so such shafts were never routed or measured). With no route, the answer names what stands
+  between (`routeBarrier`): "the only way from this part of the dungeon to there is across the gap at cell
+  0x029002E7: 10.0 m of open air over a 42 m drop; your longest jump … carries about 10.1 m, short of …; dropping in
+  is a 42 m fall: about 103 damage against the 131 health you have". A follow that finds no way to the leader ends
+  as soon as the search that may jump finds none ("couldn't follow …"), and one that got nowhere in its time is no
+  longer an ok "followed for 25 s". The loop detector ("went round in circles") skips a goal that moved since and a
+  point a storey above or below (winding ramps). An offset walk ("3m north") stays on your storey, and one walled
+  within a few metres answers at once. The map draws 'v' only where open air lets the body over the edge (not over a
+  hall behind rock or a balcony rail).
+- **Hollow Lair (0x039C, 2026-10-16, Arcanist + Bulwark, end of retail).** (1) `within` of `RANGED_WITHIN_M` (5 m) or
+  more is a range: arrival is the straight distance, floors and all, and the answer says when the line to the target is
+  blocked (host.lineOfFire) and where it opens. Before, every arrival needed the target's floor (|dz| < 2.5), so
+  `walk_to <Tusker in the pit> within=30` ran down the ramp to its foot (0x039C0109) and stopped 21.6 m off. Below 5 m
+  arrival still means beside it on its floor. (2) Indoors a walk_to (avoid_monsters) or follow (stop_on_aggro) stops
+  before it comes within the server's wake range + 4 m (straight) of `PACK_MIN` (2) or more monsters not yet awake
+  (none coming at you or a fellow; ACE wakes a monster within VisualAwarenessRange_Default 18 m, and AlertFriendly wakes
+  its kind near it; the GDLE family's MonsterAI from 40 m), and before a drop that lands among them, naming them; monsters already that near at the start, monsters
+  on a fellow you're going to, and flee don't stop it. (3) Arrival (and a follow's "beside them", a door detour's door,
+  a partial point) is judged along the stretch run since the last tick (`onTheWay`): at a low frame rate the body ran
+  8 m between ticks either side of a goal 4 m off ("20m east" in 0x039C019C: stalls at 662.0 and 670.1 round 666.1)
+  until "in circles". An offset point a body's width past a floor's edge is that floor's room (`storeyCellNear`), and
+  one with no room near it is the cell you're in now, never the start cell (the stall's replan had routed back three
+  doorways to it). (4) A cell id of your landblock is a target (`cellPoint` → cellPath `cellStandPoint`: the floor
+  under the cell's middle); an id nothing answers to says so at once (was "target vanished"). (5) `stay_with`: a fellow
+  heard casting (their spell words or casts, last 8 s) or with monsters on them is waited for quietly, up to 120 s,
+  and one back within three quarters of the leash who stops has stopped beside you. (6) Of several objects with the
+  name asked for, walk_to and use take the one a walk reaches, nearest by the doorway route (`reachableNamesake`:
+  "Exit" in the doll dungeon had taken the one across the rift).
   A walk names a fellow it left far behind, and `stay_with=<fellow>` keeps you together: the walk runs as always,
   and when the fellow is more than `stay_within` m behind (15 by default) it stops once and waits until they are
-  within 4 m (or have come within half the leash and stopped there), then runs on together: one stop per gap, not
+  within 4 m (or have come back within three quarters of the leash and stopped there, not casting), then runs on together: one stop per gap, not
   a stop every second at the leash's edge (Bulwark, stream day 2026-10-14). There is no walking pace: a run eased
   to a walk (Shift) to let a slower fellow catch up was removed the same day, because on stream the pair walked
   most of the time (Arcanist walked ~25 s, ran ~2 s, walked again, as Bulwark's run is a little slower than his;
@@ -895,7 +973,7 @@ here, not having to hardcode behavior").
   goal. The point is never placed by dividing by 192: dungeon frames run outside 0–192 (the Training Academy 0x7202
   spans local y −255..5; a hive route's point at 0x039D is local (51, −56), room 0x039D0156 at z −30, VTank Z −0.125).
   In a building the same lookup puts a coordinate inside it in its room (within 3 m of your storey). Attack lines are placed when they come, on the nearest of that name within reach (a swing
-  8 m, a spell 60 m), never moved onto another of the name later; none in reach is `hit by, but not placed`. ac_wait:
+  8 m, a spell 60 m), never moved onto another of the name later; none in reach is `hit by, but not placed` (in a dungeon ACE shows you no monster in a cell yours can't see, yet its melee checks distance only, so it can hit you through a wall or shut door). ac_wait:
   vitals-low at half health by default (`vitals_below=`, `mana_below=`, `stamina_below=` per wait; it was 35%, and woke
   an archer at 14%), any single hit over a quarter of max health, `attackers-up` and `cast-at-you` (a spell landing on,
   failing on or resisted by you, or a creature within 40 m speaking spell words: ACE Monster_Magic broadcasts them).
@@ -977,7 +1055,8 @@ here, not having to hardcode behavior").
   Parchment was blank: weenie 365 has no page data (max 1 page; vendors sell it), so "(it has no writing)" is right. The
   attack's first answer says how far the target is, on which floor, and which fellow you'd be left far from. An attack
   whose swings report nothing at all three heights (a ghost, #80004cf6) ends with `target-lost` instead of cycling
-  heights for 120 s (each change had reset the 20 s give-up), and every attack end now raises an event its suggested
+  heights for 120 s (attacks ACE ends ActionCancelled never cycle heights; two in a row with a shut door or wall on the line
+  to the target end it naming that: Silver Rats behind Arwic Mines doors, 2026-10-15) (each change had reset the 20 s give-up), and every attack end now raises an event its suggested
   wait hears. `/tell Name text` without a comma is retail's "Use comma after the name for targeted chat." (DoTell
   @ 00577e40); `ac_say` now says how to write it. `*blush*` is not in the end-of-retail ChatPoseTable (0x0E000007), so it
   prints as typed: retail. A `use_on` cut short by your death says so. Checked: 2–3 fizzles of 5 Level III buffs at skill
@@ -1096,7 +1175,9 @@ uses the client's own movement collision:
    The walk then goes to the take-off (the last metres at a walk), stops, re-aims the charge from where
    it actually stands, faces the way and jumps. A landing off the plan re-plans from there.
 4. **Attacked, or about to be.** A monster starting to come at you ends an ac_walk_to / ac_follow first (stop_on_aggro;
-   see "Monsters coming at you" above), and ac_walk_to keeps clear of monsters near the way (avoid_monsters).
+   see "Monsters coming at you" above), and ac_walk_to keeps clear of monsters near the way (avoid_monsters). Indoors
+   both stop before taking you within the server's wake range (ACE 18 m, GDLE 40 m) of two or more monsters not yet awake, naming them: a
+   pit's pack, before the ramp down or the drop in (Hollow Lair, 2026-10-16).
    A hit, miss or evade line aimed at you (the `attacked` event), or health falling below
    half since the walk began, ends the walk at once: `stopped 12.3 m short: you're under attack (…)`.
    Fight, heal or run, then walk again (`attack`'s own run-up fights instead). Crossing a landblock edge
@@ -1109,7 +1190,10 @@ uses the client's own movement collision:
    straight for the goal (jumps included). Stalls back off, sidestep, and give up on the fifth.
    A walk that ends stuck where an earlier walk toward (about) the same goal ended says so ("this route
    keeps ending here …: walk 2 toward there to stop at this spot"), with the open ways from there.
-6. **Uses, pick-ups, loots and melee run-ups.** The server walks you to an object in a straight line (ACE
+6. **Arrival.** `within` (default 2) under 5 m means beside it on its floor; 5 m or more is a range to stand at, by
+   the straight distance whatever floor it is on, with a note when the line to it is blocked. It is judged along the
+   stretch run since the last tick, so a slow frame rate never hops the body either side of the goal.
+7. **Uses, pick-ups, loots and melee run-ups.** The server walks you to an object in a straight line (ACE
    MoveTo). When the client's own collision stops that line short (a wall, a fence, a building between),
    the walk above goes first and the request after; with a clear line the server's walk is used as before.
    A turn or jump by hand (`ac_turn`, `ac_jump`) ends a walk or follow under way, as `ac_move` already

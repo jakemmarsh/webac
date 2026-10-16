@@ -455,3 +455,93 @@ describe('BUG.ghost-objects — what the server stops mentioning does not stay',
     expect(som.getObject(west.guid)).toBeDefined();
   });
 });
+
+/**
+ * Arwic Mines (0x01E3), stream players 2026-10-15: the client kept the dungeon's whole landblock, ACE only the player
+ * cell's visible cells (ObjectMaint.GetVisibleObjects(EnvCell)) and forgets an object 25 s after it left them. A Drudge
+ * Hoarder (#8000b387, 0x01E301F2) and a Drudge Slave (#8000aa82) that died while out of sight stayed, alive and
+ * targetable ("the server has no Drudge Hoarder where you are", TargetNotAcquired). Retail keeps the viewer cell and its
+ * stab list (CEnvCell::grab_visible_cells @ 0052e220; flush_cells @ 0052def0 releases the rest).
+ */
+describe('a sealed viewer keeps its own cell and that cell\'s visible cells (Arwic Mines, 2026-10-15)', () => {
+  const ARWIC = 0x01E30000;
+  const c = (i: number) => (ARWIC | i) >>> 0;
+  // 0x0200 sees the Hoarder's room 0x01F2; 0x029A (east) sees 0x0296 and 0x029C, not 0x01F2 nor 0x0200.
+  const stabs: Record<number, number[]> = { [c(0x0200)]: [0x01F2, 0x0203], [c(0x029A)]: [0x0296, 0x029C], [c(0x029C)]: [0x029A] };
+  const sealedAt = (cell: number, over: Partial<ViewerLoadPoint> = {}) => viewer({ viewerCellId: cell, sealed: true, visibleCells: (id) => stabs[id] ?? null, ...over });
+
+  it('isCellLoaded: the viewer cell and its stab list only; without a stab list, the whole landblock as before', () => {
+    const v = sealedAt(c(0x029A));
+    expect(isCellLoaded(c(0x029A), v)).toBe(true);
+    expect(isCellLoaded(c(0x0296), v)).toBe(true);
+    expect(isCellLoaded(c(0x029C), v)).toBe(true);
+    expect(isCellLoaded(c(0x01F2), v)).toBe(false);
+    expect(isCellLoaded(c(0x0200), v)).toBe(false);
+    expect(isCellLoaded(0x01E4029A, v)).toBe(false);
+    expect(isCellLoaded(0x01E3FFFF, v)).toBe(false);
+    expect(isCellLoaded(c(0x01F2), sealedAt(c(0x0200)))).toBe(true);
+    // An unreadable cell (null), no reader, or a viewer known only by its landblock: the whole landblock stays.
+    expect(isCellLoaded(c(0x01F2), sealedAt(c(0x0333)))).toBe(true);
+    expect(isCellLoaded(c(0x01F2), sealedAt(c(0x029A), { visibleCells: undefined }))).toBe(true);
+    expect(isCellLoaded(c(0x01F2), sealedAt(0x01E3FFFF))).toBe(true);
+    // A Set works as well as the DAT's array.
+    expect(isCellLoaded(c(0x0296), sealedAt(c(0x029A), { visibleCells: () => new Set([0x0296]) }))).toBe(true);
+  });
+
+  it('a Hoarder out of sight leaves the world; it is deleted once you change cell after its 25 s (when ACE forgets it too)', () => {
+    const { som } = rig();
+    let v = sealedAt(c(0x0200));
+    const loaded = (id: number) => isCellLoaded(id, v);
+    const hoarder = som.createObject(createData(0x8000b387, c(0x01F2), { name: 'Drudge Hoarder' }) as never)!;
+    som.updateObjectMaint(loaded, 0, c(0x0200));
+    expect(hoarder.lostCell).toBeFalsy();
+    // East into 0x029A: its room is out of sight. Hidden, frozen, queued.
+    v = sealedAt(c(0x029A));
+    som.updateObjectMaint(loaded, 10, c(0x029A));
+    expect(hoarder.lostCell).toBe(true);
+    expect(hoarder.mesh!.visible).toBe(false);
+    // 25 s on, still standing in 0x029A: ACE has not run its DestroyObjects (it does on your cell change), so it still
+    // counts the Hoarder as known and would send no CreateObject if it walked back: keep the copy, hidden.
+    som.updateObjectMaint(loaded, 10 + NONVISIBLE_OBJECT_DESTRUCTION_TIME + 5, c(0x029A));
+    expect(som.getObject(hoarder.guid)).toBeDefined();
+    expect(hoarder.lostCell).toBe(true);
+    // Step into 0x029C: both sides forget it. It died meanwhile; nothing of it is left to target.
+    v = sealedAt(c(0x029C));
+    som.updateObjectMaint(loaded, 50, c(0x029C));
+    expect(som.getObject(hoarder.guid)).toBeUndefined();
+    v = sealedAt(c(0x0200));
+    som.updateObjectMaint(loaded, 60, c(0x0200));
+    expect(som.getObject(hoarder.guid)).toBeUndefined();
+  });
+
+  it('one that walks back into view before you change cell carries on (the server still updates it)', () => {
+    const { som } = rig();
+    let v = sealedAt(c(0x029A));
+    const loaded = (id: number) => isCellLoaded(id, v);
+    const slave = som.createObject(createData(0x8000b634, c(0x0296), { name: 'Drudge Slave' }) as never)!;
+    som.updateObjectMaint(loaded, 0, c(0x029A));
+    som.updatePosition({ guid: slave.guid, flags: 0x4, landblock: c(0x01F2), x: 10, y: 10, z: 0, rw: 1, rx: 0, ry: 0, rz: 0 } as never);
+    som.updateObjectMaint(loaded, 1, c(0x029A));
+    expect(slave.lostCell).toBe(true);
+    som.updateObjectMaint(loaded, 40, c(0x029A));
+    som.updatePosition({ guid: slave.guid, flags: 0x4, landblock: c(0x029C), x: 10, y: 10, z: 0, rw: 1, rx: 0, ry: 0, rz: 0 } as never);
+    som.updateObjectMaint(loaded, 41, c(0x029A));
+    expect(som.getObject(slave.guid)).toBeDefined();
+    expect(slave.lostCell).toBe(false);
+    expect(slave.mesh!.visible).toBe(true);
+    void v;
+  });
+
+  it('outdoors (no viewer cell given) the 25 s are retail\'s clock alone', () => {
+    const { som } = rig();
+    let v = sealedAt(c(0x0200));
+    const loaded = (id: number) => isCellLoaded(id, v);
+    const o = som.createObject(createData(0x8000b388, c(0x01F2), { name: 'Drudge Slave' }) as never)!;
+    som.updateObjectMaint(loaded, 0);
+    v = sealedAt(c(0x029A));
+    som.updateObjectMaint(loaded, 1);
+    expect(o.lostCell).toBe(true);
+    som.updateObjectMaint(loaded, 1 + NONVISIBLE_OBJECT_DESTRUCTION_TIME);
+    expect(som.getObject(o.guid)).toBeUndefined();
+  });
+});

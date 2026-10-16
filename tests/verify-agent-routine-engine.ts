@@ -608,7 +608,8 @@ describe('VirindiTank meta features (AGENT.vtank-engine-support)', () => {
         { kind: 'sell-by-loot-rules', vendor: '' }, { kind: 'stop' },
       ] }] }],
     }));
-    await step(8000);
+    // The fake never answers the give: it waits out ACE's 15 s walk (AgentApi.GIVE_ANSWER_MS) before the next step.
+    await step(25_000);
     expect(api.routine.history().join('\n')).toContain('load-loot: loot set "Other" (1 rules)');
     expect(host.sent).toContain('mode magic');
     expect(host.sent.some((x) => x.startsWith('give 50000020 to 80003301 x3'))).toBe(true);

@@ -2305,8 +2305,22 @@ export class ServerObjectManager {
    * item follows its wielder (prepare_to_leave_visibility queues the
    * children with the parent). The local player and carried / contained
    * items (no cell) are never queued. `nowSec` is any monotonic clock.
+   *
+   * `viewerCell` (the viewer's own cell, given in a dungeon): an expired
+   * object is deleted only once the viewer has changed cell since it
+   * expired. ACE expires its copy of the queue only then
+   * (PhysicsObj.handle_visible_cells → ObjMaint.DestroyObjects, run from
+   * enter_cell_server on the player's cell change), and until it does it
+   * still counts the object as known: one that walks back into view is
+   * never re-sent (handle_visible_obj: prevKnown, no CreateObject), so a
+   * client that had already deleted it would be hit by an unseen monster.
+   * Held this way the object stays hidden (lostCell) as retail's would, and
+   * either side forgets it at the same moment.
    */
-  updateObjectMaint(isLoaded: (cellId: number) => boolean, nowSec: number): void {
+  private maintViewer: { cell: number; changedAt: number } | null = null;
+  updateObjectMaint(isLoaded: (cellId: number) => boolean, nowSec: number, viewerCell?: number): void {
+    if (viewerCell === undefined) this.maintViewer = null;
+    else if (!this.maintViewer || this.maintViewer.cell !== (viewerCell >>> 0)) this.maintViewer = { cell: viewerCell >>> 0, changedAt: nowSec };
     const left: Array<{ guid: number; cell: number }> = [];
     const destroyed: number[] = [];
     const leave = (obj: ServerObject) => {
@@ -2347,6 +2361,7 @@ export class ServerObjectManager {
     // CObjectMaint::UseTime — delete every object whose time ran out.
     for (const [guid, at] of [...this.destructionQueue]) {
       if (nowSec < at) continue;
+      if (this.maintViewer && this.maintViewer.changedAt < at) continue;
       this.destructionQueue.delete(guid);
       if (this.objects.get(guid)?.lostCell) { this.forceDelete(guid, 'maint'); destroyed.push(guid); }
     }

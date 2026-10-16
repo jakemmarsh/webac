@@ -15,7 +15,7 @@
  *   MovementSystem.GetJumpHeight(burden, GetCreatureSkill(Jump).Current, …)
  */
 import { describe, it, expect } from 'vitest';
-import { getJumpHeight, getJumpVelocity, SkillSystem, AttributeSystem, SkillAdvancementClass } from '@ac/shared';
+import { getJumpHeight, getJumpVelocity, jumpSkillWithStamina, SkillSystem, AttributeSystem, SkillAdvancementClass } from '@ac/shared';
 import type { SkillBase } from '@ac/dat-parser/file-types/SkillTable.js';
 
 const SKILL_ID_JUMP = 22;
@@ -93,5 +93,16 @@ describe('FORMULA.20: getJumpVelocity matches ACE launch formula v0 = sqrt(heigh
     const h = getJumpHeight(0, 400, 1.0);
     const v0 = getJumpVelocity(0, 400, 1.0);
     expect((v0 * v0) / (2 * 9.8)).toBeCloseTo(h, 6);
+  });
+});
+
+describe('jumpSkillWithStamina: no stamina, Jump 0 (CACQualities::InqJumpVelocity @ 00592980)', () => {
+  it('keeps the skill while any stamina is left and drops it to 0 at none, so the jump is the 0.35 m floor', () => {
+    expect(jumpSkillWithStamina(85, 50)).toBe(85);
+    expect(jumpSkillWithStamina(85, 1)).toBe(85);
+    expect(jumpSkillWithStamina(85, 0)).toBe(0);
+    expect(getJumpHeight(0, jumpSkillWithStamina(85, 0), 0.9)).toBeCloseTo(0.35, 6);
+    // The AC1999 server's own max at 0 stamina, from its [JUMP] warnings (2026-10-16): 2.619 m/s.
+    expect(getJumpVelocity(0, jumpSkillWithStamina(85, 0), 1)).toBeCloseTo(2.619, 3);
   });
 });

@@ -216,7 +216,7 @@ describe('3. equip waits for the server, and an Orb takes the shield hand', () =
       setTimeout(() => { pending = false; }, 500);
       return g > 0;
     };
-    expect(await settle(api.equip('Large Round Shield'))).toEqual({ ok: true, message: 'equipped Large Round Shield' });
+    expect(await settle(api.equip('Large Round Shield'))).toEqual({ ok: true, message: 'equipped Large Round Shield (shield hand)' });
   });
 
   it('equip: a host that can\'t say whether the server answered waits a moment for a refusal', async () => {

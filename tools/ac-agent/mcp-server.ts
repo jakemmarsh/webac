@@ -8,7 +8,7 @@
  */
 import { HOSTED_GUIDE } from './hostedGuide.ts';
 import { createInterface } from 'node:readline';
-import { LOCAL_ONLY_TOOLS, TOOLS, TOOL_BY_NAME, inputSchema, type ToolOutput } from './tools.ts';
+import { LOCAL_ONLY_TOOLS, TOOLS, TOOL_BY_NAME, inputSchema, missingRequired, type ToolOutput } from './tools.ts';
 
 const SERVER_INFO = { name: 'acjs-agent', version: '0.1.0' };
 const DEFAULT_PROTOCOL = '2025-06-18';
@@ -72,7 +72,10 @@ export async function handle(req: RpcRequest, opts: { hosted?: boolean } = {}): 
       const tool = TOOL_BY_NAME.get(req.params?.name);
       if (!tool || (opts.hosted && LOCAL_ONLY_TOOLS.has(tool.name))) return fail(-32602, `unknown tool: ${req.params?.name}`);
       try {
-        return reply(toolContent(await tool.run(opts.hosted ? hostedArgs(req.params?.arguments ?? {}) : req.params?.arguments ?? {})));
+        const args = opts.hosted ? hostedArgs(req.params?.arguments ?? {}) : req.params?.arguments ?? {};
+        const missing = missingRequired(tool, args);
+        if (missing) return reply(toolContent({ text: missing, isError: true }));
+        return reply(toolContent(await tool.run(args)));
       } catch (e) {
         return reply(toolContent({ text: `error: ${(e as Error)?.message ?? e}`, isError: true }));
       }

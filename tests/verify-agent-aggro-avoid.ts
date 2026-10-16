@@ -143,6 +143,91 @@ describe('monsters coming at you, and at your fellows', () => {
     });
   });
 
+  describe('a monster that cannot reach you stops re-raising aggro (Tumerok Cave, 2026-10-16)', () => {
+    // Stream 02:41–03:09 UTC: Shore Armoredillos behind the cave's walls re-raised "running at you" every minute or two
+    // from the same 11–14 m (ACE re-sends a MoveToObject it can't path), and at 03:04 Arcanist dropped aggro from his
+    // waits: "The wall-stuck dillos keep setting off aggro alerts, so I'll wait on chat and vitals only".
+    const DILLO = 0x8000dd45;
+    /** One server chase that gets nowhere: MoveToObject at you for a second, then nothing for 11 s (no move, no aim). */
+    const chase = (d: AgentHostObject): void => {
+      d.seeks = { guid: host.me.guid, kind: 'move' };
+      run(api, host, 1000, { physics: false });
+      d.seeks = undefined;
+      run(api, host, 11_000, { physics: false });
+    };
+    let seen = 0;
+    /** The aggro lines since the last call. */
+    const aggros = (): string[] => {
+      const evs = api.eventsSince(seen);
+      if (evs.length) seen = evs[evs.length - 1].seq;
+      return evs.filter((e) => e.type === 'aggro').map((e) => e.text);
+    };
+    beforeEach(() => { seen = 0; });
+
+    it('raises it, says once that it is getting no closer (naming the wall), then stays quiet however often it re-aims', () => {
+      host.lineOfFire = () => ({ dist: 12, blockedAt: 4, blocker: 'a wall' });
+      const d = monster(DILLO, 'Shore Armoredillo', 80, 32, { level: 30 });
+      run(api, host, 500, { physics: false });
+      for (let i = 0; i < 10; i++) chase(d);
+      const said = aggros();
+      expect(said.filter((t) => / is coming at you/.test(t))).toEqual([
+        'Shore Armoredillo #8000dd45 (level 30) is coming at you, 12 m N (running at you)',
+        'Shore Armoredillo #8000dd45 (level 30) is coming at you, 12 m N (running at you)',
+      ]);
+      expect(said.filter((t) => /keeps facing you/.test(t))).toEqual([
+        "Shore Armoredillo #8000dd45 (level 30) keeps facing you, 12 m N (running at you), but it hasn't come closer in 24 s (no line of fire: a wall in the way): stuck, or it can't path round to you. No more aggro for it until it closes in or attacks.",
+      ]);
+      expect(said).toHaveLength(3);
+      // observe still marks it, and says how long it has come no nearer.
+      d.seeks = { guid: host.me.guid, kind: 'move' };
+      run(api, host, 300, { physics: false });
+      expect(formatObservation(api.observe())).toMatch(/Shore Armoredillo .*COMING AT YOU \(running at you, no closer in \d+ s\)/);
+    });
+
+    it('you walking up to it is not it closing in; it coming 3 m nearer raises aggro at once', () => {
+      const d = monster(DILLO, 'Shore Armoredillo', 80, 40, { level: 30 });
+      run(api, host, 500, { physics: false });
+      for (let i = 0; i < 4; i++) chase(d);
+      expect(aggros()).toHaveLength(3);
+      host.me.y = 26; // you go 6 m nearer it; it hasn't moved
+      for (let i = 0; i < 3; i++) chase(d);
+      expect(aggros()).toEqual([]);
+      // It comes on: the line is there within a sample of it being 3 m nearer (14 m → 11 m), not after a forget window.
+      d.seeks = { guid: host.me.guid, kind: 'move' };
+      for (let i = 0; i < 3; i++) { d.y -= 1; run(api, host, 250, { physics: false }); }
+      expect(aggros()).toEqual(['Shore Armoredillo #8000dd45 (level 30) is coming at you, 11 m N (running at you)']);
+      for (let i = 0; i < 4; i++) { d.y -= 1; run(api, host, 250, { physics: false }); }
+      expect(aggros()).toEqual([]); // the same chase, once
+    });
+
+    it('a held one is no reason to stop a walk', async () => {
+      const d = monster(DILLO, 'Shore Armoredillo', 100, 20, { level: 30 });
+      run(api, host, 500, { physics: false });
+      for (let i = 0; i < 4; i++) chase(d);
+      host.add({ guid: 0x80000070, name: 'Near Post', x: 80, y: 45 });
+      let n = 0;
+      const r = await settle(api, host, surface.walkTo('Near Post'), 20_000, () => { if (++n === 5) d.seeks = { guid: host.me.guid, kind: 'move' }; });
+      expect(r).toMatchObject({ ok: true });
+    });
+
+    it('fellow-aggro is held the same way for a monster that never gets nearer your fellow', () => {
+      const vitals = { cur: 85, max: 85 };
+      host.fellows = () => [{ guid: ARCANIST, name: 'Claude Arcanist', health: vitals, stamina: vitals, mana: vitals }];
+      host.add({ guid: ARCANIST, name: 'Claude Arcanist', itemType: 0x10, objectDescFlags: 0x8, x: 80, y: 40 });
+      const d = monster(DILLO, 'Shore Armoredillo', 80, 52, { level: 30 });
+      run(api, host, 500, { physics: false });
+      for (let i = 0; i < 8; i++) {
+        d.seeks = { guid: ARCANIST, kind: 'move' };
+        run(api, host, 1000, { physics: false });
+        d.seeks = undefined;
+        run(api, host, 11_000, { physics: false });
+      }
+      const said = api.eventsSince().filter((e) => e.type === 'fellow-aggro').map((e) => e.text);
+      expect(said).toHaveLength(3);
+      expect(said[2]).toBe("Shore Armoredillo #8000dd45 (level 30) keeps facing your fellow Claude Arcanist, 12 m from them (running at them), but it hasn't come closer to them in 24 s: stuck, or it can't path round to them. No more fellow-aggro for it until it closes in on them.");
+    });
+  });
+
   describe('walk_to and follow answer when a monster starts coming at you', () => {
     it('stops metres short, naming it, its level, distance and how, with the keys up', async () => {
       host.add({ guid: 0x80000070, name: 'Far Post', x: 80, y: 120 });

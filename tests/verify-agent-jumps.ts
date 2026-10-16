@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { getJumpVelocity } from '@ac/shared';
-import { LANDING_MARGIN_M, dropDamage, fallBudget, fallDamage, jumpOptions, reaimJump, safeDropHeight, simulateFlight, stableLanding, type JumpKit } from '../packages/renderer/src/agent/jumpPlan.ts';
+import { ACE_FALL_MODEL, FALL_SPEED_MARGIN, LANDING_MARGIN_M, dropDamage, expectedFallDamage, fallBudget, fallDamage, fallModelFor, gdleFallModel, jumpOptions, reaimJump, safeDropHeight, simulateFlight, stableLanding, type JumpKit } from '../packages/renderer/src/agent/jumpPlan.ts';
 import { airborneReferenceY, headroomClamp } from '../packages/renderer/src/world/fallPhysics.ts';
 import { jumpChargeSeconds } from '../packages/renderer/src/animation/CharacterAnimController.ts';
 import { MotionStance } from '../packages/renderer/src/animation/MotionCommands.ts';
@@ -37,16 +37,75 @@ function kitFor(floors: (x: number, y: number) => number[], skill = 100): JumpKi
 describe('fall damage (ACE Player_Move.cs HandleFallingDamage)', () => {
   it('is nothing until the landing is faster than 15.75 m/s (a 12.66 m fall), then grows with the overspeed', () => {
     expect(fallDamage(-15.7)).toBe(0);
-    expect(dropDamage(12.6)).toBe(0);
     // A 20 m fall lands at 19.80 m/s: (19.80 − 15.754) / 11.254 × 87.29 = 31.4.
-    expect(dropDamage(20)).toBeCloseTo(31.4, 1);
+    expect(fallDamage(-Math.sqrt(2 * 9.8 * 20))).toBeCloseTo(31.4, 1);
     expect(fallDamage(-11.25434 - 4.5 - 11.25434)).toBeCloseTo(87.29381, 4);
+    // ClassicACE's is ACE's; a GDLE jump velocity never reaches it.
+    expect(fallModelFor('ace', 5.26)).toBe(ACE_FALL_MODEL);
   });
-  it('the safe drop height inverts it, and the budget is half your health with room for a bludgeon weakness', () => {
+  it('the planner bills a landing FALL_SPEED_MARGIN faster than it flies it', () => {
+    expect(FALL_SPEED_MARGIN).toBe(0.4);
+    expect(dropDamage(12)).toBe(0);
+    expect(dropDamage(12.6)).toBeGreaterThan(0); // 15.715 m/s + 0.4 is past ACE's 15.754
+    expect(dropDamage(20)).toBeCloseTo(fallDamage(-Math.sqrt(2 * 9.8 * 20) - 0.4), 6);
+    expect(expectedFallDamage(3)).toBe(0); // still rising
+  });
+  it('the safe drop height inverts it, and the budget is 40% of your health now (half, with room for a bludgeon weakness)', () => {
     expect(fallBudget({ current: 100, max: 100 })).toBe(40);
     expect(fallBudget({ current: 20, max: 100 })).toBe(8);
-    expect(safeDropHeight(0)).toBeCloseTo(12.66, 2);
+    expect(safeDropHeight(0)).toBeCloseTo(((15.75434 - 0.4) ** 2) / 19.6, 3); // 12.03 m
     expect(dropDamage(safeDropHeight(31.4))).toBeCloseTo(31.4, 3);
+  });
+});
+
+describe('fall damage on GDLE-family servers (the AC1999 server, GDL-Classic: WeenieObject.cpp DoCollision)', () => {
+  // The player's own full-power jump: sqrt(19.6 × GetJumpHeight(load, Jump, 1)).
+  const jv85 = getJumpVelocity(0, 85, 1);
+  it('divides by the player\'s own jump velocity and bills (int)(ratio × 40): the start-dungeon [FALLDMG] line', () => {
+    // 2026-10-16: Claude, Jump 85, burden under capacity: jumpV=5.26, vz=-12.55, ratio=0.530, damage=21 (25 → 4 health).
+    expect(jv85).toBeCloseTo(5.26, 2);
+    const m = gdleFallModel(jv85);
+    expect(-(m.jumpVelocity - 12.55 + 4.5) / m.jumpVelocity).toBeCloseTo(0.530, 3);
+    expect(fallDamage(-12.55, m)).toBe(21);
+    // ACE's curve, which the planner used, says that landing is free.
+    expect(fallDamage(-12.55)).toBe(0);
+  });
+  it('matches the knowledge-base samples (Jump 104, jV 5.76): a max jump in place is free, a building drop 34', () => {
+    const m = gdleFallModel(5.76);
+    expect(fallDamage(-5.89, m)).toBe(0);
+    expect(fallDamage(-15.19, m)).toBe(34);
+  });
+  it('a burdened or untrained jump floors at 2.62 m/s, where 5 m costs ~42', () => {
+    const m = gdleFallModel(0);
+    expect(m.jumpVelocity).toBeCloseTo(2.619, 3);
+    expect(fallDamage(-Math.sqrt(19.6 * 5), m)).toBe(42);
+  });
+  it('the safe drop height for 25 health at Jump 85 is well under the dungeon\'s 7.8 m', () => {
+    const m = fallModelFor('gdle', jv85);
+    const budget = fallBudget({ current: 25, max: 25 });
+    expect(safeDropHeight(budget, m)).toBeLessThan(6.5);
+    expect(safeDropHeight(budget, m)).toBeGreaterThan(4.9);
+    expect(dropDamage(7.8, m)).toBeGreaterThan(budget);
+    expect(safeDropHeight(budget)).toBeGreaterThan(12); // ACE: no damage at all that deep
+  });
+  it('the planner refuses the 7.8 m drop at 25 health and takes it with health to spare, billing about 21', () => {
+    // A ledge at z −4.2 over a floor at −12.0 (the start dungeon's numbers), Jump 85.
+    const kit: JumpKit = { ...kitFor((x) => (x < 0 ? [-4.2, -12] : [-12]), 85), fall: gdleFallModel(jv85) };
+    const from = { x: -0.1, y: 0, z: -4.2 };
+    const down = (maxDamage: number) => jumpOptions(kit, from, { x: 1, y: 0 }, { maxDamage }).filter((o) => o.to.z === -12);
+    expect(down(fallBudget({ current: 25, max: 25 }))).toEqual([]);
+    const ok = down(fallBudget({ current: 80, max: 80 }));
+    expect(ok.length).toBeGreaterThan(0);
+    // The gentlest (a walking 0.15 charge, as the live walk flew it) bills about what the server did; a harder
+    // charge goes higher and bills more, never past the budget.
+    expect(ok[0].power).toBe(0.15);
+    expect(ok[0].damage).toBeGreaterThanOrEqual(21);
+    expect(ok[0].damage).toBeLessThanOrEqual(26);
+    for (const o of ok) expect(o.damage).toBeLessThanOrEqual(fallBudget({ current: 80, max: 80 }));
+    // On ACE the same drop costs nothing, and a 25-health character takes it.
+    const ace: JumpKit = { ...kit, fall: undefined };
+    expect(jumpOptions(ace, from, { x: 1, y: 0 }, { maxDamage: 10 }).filter((o) => o.to.z === -12).every((o) => o.damage === 0)).toBe(true);
+    expect(jumpOptions(ace, from, { x: 1, y: 0 }, { maxDamage: 10 }).some((o) => o.to.z === -12)).toBe(true);
   });
 });
 

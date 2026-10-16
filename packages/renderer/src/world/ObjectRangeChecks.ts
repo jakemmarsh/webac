@@ -111,6 +111,21 @@ export function shouldWatchSelectedObject(o: SelectedObjectOwnership): boolean {
   return !o.ownedByPlayer && !o.inGroundContainer && !o.ownedByVendor && !o.ownedByTradePartner;
 }
 
+/**
+ * Whether an object stands in another space than the player's: a different landblock where either cell is a sealed
+ * dungeon cell (an interior cell without SeenOutside). Retail's CObjectMaint holds no such object (a dungeon's objects
+ * are released on the teleport out, and nothing outside it reaches a player inside), so ObjectsInRange's
+ * GetObjectA misses it and the entry reads "out of range". Ours keeps the old dungeon's objects at their render
+ * positions, which a new dungeon can overlap: a selection left 36 km behind stayed selected through a portal
+ * (stream, 2026-10-16). `sealed` answers the dungeon question for a cell.
+ */
+export function inAnotherSpace(objectCell: number | null | undefined, playerCell: number | null | undefined, sealed: (cell: number) => boolean): boolean {
+  if (!objectCell || !playerCell) return false;
+  if ((((objectCell ^ playerCell) >>> 16) & 0xffff) === 0) return false;
+  const dungeon = (c: number): boolean => (c & 0xffff) >= 0x100 && sealed(c >>> 0);
+  return dungeon(playerCell >>> 0) || dungeon(objectCell >>> 0);
+}
+
 /** ObjectRangeHandler — the two virtuals CalculateObjectRangeChecks calls. */
 export interface ObjectRangeHandler {
   /** vtable slot 0: the object left the range (or no longer exists). */

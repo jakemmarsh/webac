@@ -5,7 +5,7 @@
  * front ends get it.
  */
 import {
-  formatEvents, formatInventory, formatObservation, formatSpells, formatTrace,
+  formatEvents, formatInventory, formatInventoryFiltered, formatObservation, formatSpells, formatTrace,
 } from '../../packages/renderer/src/agent/format.ts';
 import type { AgentEvent, AgentItem, AgentObservation, AgentResult, AgentSpell, AgentStatus, AgentTracePoint } from '../../packages/renderer/src/agent/types.ts';
 import { formatGear } from '../../packages/renderer/src/agent/gear.ts';
@@ -35,6 +35,8 @@ export interface AgentTool {
   description: string;
   props: Props;
   required?: string[];
+  /** Other names an argument goes by (alias → the argument), e.g. pick_up's target= for item= (argAliases). */
+  aliases?: Record<string, string>;
   run(args: Record<string, any>): Promise<ToolOutput>;
 }
 
@@ -292,7 +294,7 @@ export function exportRoutineFile(doc: RoutineDoc, a: Record<string, any>): Tool
 async function hostedRoutinesTool(c: ToolCaller, a: Record<string, any>): Promise<ToolOutput> {
   const store = hostedRoutines(c);
   const account = c.connection?.().account ?? 'this account';
-  const action = String(a.action);
+  const action = routinesAction(a.action);
   if (action === 'example') return { text: JSON.stringify(EXAMPLE_HUNT_PROFILE, null, 2) };
   const parseDoc = (): { body: unknown } | ToolOutput => {
     if (!a.doc) return { text: 'pass doc= (the whole routine document as JSON text)', isError: true };
@@ -336,7 +338,29 @@ async function hostedRoutinesTool(c: ToolCaller, a: Record<string, any>): Promis
     if (!put.ok) return { text: `not stored:\n${put.issues.map((i) => `${i.path || '(document)'}: ${i.message}`).join('\n')}`, isError: true };
     return { text: [`imported into "${r.value.name}" in ${store.label}`, ...(r.problems.length ? ['', `not carried over exactly (${r.problems.length}):`, ...r.problems.slice(0, 40).map((x) => `  ${x}`)] : []), '', explainProfile(r.value)].join('\n') };
   }
-  return { text: `unknown action ${action}`, isError: true };
+  return { text: `unknown action "${action}" (${ROUTINES_ACTIONS.join(', ')})`, isError: true };
+}
+
+/** ac_routines' actions; list is what a bare `routines` does (both stream players typed `./ac routines`, 2026-10-16). */
+export const ROUTINES_ACTIONS = ['list', 'show', 'explain', 'example', 'validate', 'set', 'import', 'export'] as const;
+/** ac_routine's actions; status is what a bare `routine` does. */
+export const ROUTINE_ACTIONS = ['run', 'pause', 'resume', 'stop', 'status', 'dryrun'] as const;
+/** The action asked for, or the default when none was given ("unknown action undefined" before, 2026-10-16). */
+export function routinesAction(a: unknown, fallback = 'list'): string {
+  return a === undefined || a === null || String(a).trim() === '' ? fallback : String(a).trim().toLowerCase();
+}
+
+/**
+ * The required arguments a call left out, with a usage line: the MCP clients check the schema, the CLI didn't, so
+ * `./ac raise` sent the stat "undefined" and `./ac routines` read as action "undefined" (2026-10-16). Null: all there.
+ */
+export function missingRequired(t: AgentTool, args0: Record<string, unknown>): string | null {
+  const a = withArgAliases(t, args0);
+  const missing = (t.required ?? []).filter((k) => a[k] === undefined || a[k] === null || a[k] === '');
+  if (!missing.length) return null;
+  const aliases = argAliases(t);
+  const args = Object.keys(t.props).filter((k) => k !== 'profile' && !(k in aliases)).map((k) => ((t.required ?? []).includes(k) ? `${k}=…` : `[${k}=…]`)).join(' ');
+  return `${t.name}: missing ${missing.join(', ')} (usage: ${t.name.replace(/^ac_/, '')} ${args})`;
 }
 
 export const TOOLS: AgentTool[] = [
@@ -484,7 +508,7 @@ export const TOOLS: AgentTool[] = [
     description: 'Sleep until something happens instead of polling: returns as soon as a matching event arrives (chat, tell, death, target-died, task-done, vitals-low, attacked, attackers-up, cast-at-you, aggro, fellow-aggro, fellow-low, object-added, level-up, portal), or after timeout. It counts from your last ac_observe or ac_wait, so something that arrived since then (a tell between your observe and this wait) returns at once. Use after starting a walk or an attack.',
     props: {
       ...PROFILE_PROP,
-      types: { type: 'string', description: 'Comma-separated event types to wake on (default: any): chat, dialog, task-done, target-died, target-lost, vitals-low (health below half, or below vitals_below; also any single hit taking over a quarter of your health), attacked (any incoming attack, even a 0-damage hit or a miss), attackers-up (one more creature is attacking you than a moment ago), cast-at-you (a spell landed on, missed or was resisted by you, or a creature nearby spoke a spell\'s words), aggro (a monster started coming at you: running at you, turned to face you, or closing in; its name, level and distance, before it hits), fellow-aggro (a monster started coming at or fighting one of your fellows), fellow-low (a fellow\'s health fell below 60%, or below fellow_below, or one hit took a quarter of it), death, object-added, portal, level-up, screen.' },
+      types: { type: 'string', description: 'Comma-separated event types to wake on (default: any): chat, dialog, task-done, target-died, target-lost, vitals-low (health below half, or below vitals_below; also any single hit taking over a quarter of your health), attacked (any incoming attack, even a 0-damage hit or a miss), attackers-up (one more creature is attacking you than a moment ago), cast-at-you (a spell landed on, missed or was resisted by you, or a creature nearby spoke a spell\'s words), aggro (a monster started coming at you: running at you, turned to face you, or closing in; its name, level and distance, before it hits; one that then gets no closer for 20 s, stuck or behind a wall it can\'t path round, is said once and then stays quiet until it comes 3 m nearer or attacks), fellow-aggro (a monster started coming at or fighting one of your fellows), fellow-low (a fellow\'s health fell below 60%, or below fellow_below, or one hit took a quarter of it), death, object-added, portal, level-up, screen.' },
       vitals_below: { type: 'number', description: 'vitals-low mark for health for this wait: a fraction (0.7) or percent (70). Default 0.6. Wakes when health falls below it (or a further tenth below where it was, if it already was). Heal early: a fragile caster at about 70%, a tank at about 60%, before the next pull.' },
       fellow_below: { type: 'number', description: 'fellow-low mark for your fellows\' health for this wait: a fraction (0.7) or percent (70). Default 0.6 (always on). A fragile caster partner at about 70% is the time to heal them.' },
       mana_below: { type: 'number', description: 'Likewise for mana (no mark unless given).' },
@@ -507,8 +531,11 @@ export const TOOLS: AgentTool[] = [
   {
     name: 'ac_inventory',
     description: 'Your inventory: first the gear slots (the paperdoll: head, chest … feet, neck, wrists, rings, shield, weapon, ammo, each with what you wear there and its armor level, or EMPTY), then the main pack and side packs with ids; each wearable pack item says the slots it would fill (EMPTY ones named), what it would replace, its armor level against yours, and its wield requirements once appraised.',
-    props: { ...PROFILE_PROP },
-    async run(a) { return { text: formatInventory(await callerFor(a.profile).call<AgentItem[]>('inventory')) }; },
+    props: { ...PROFILE_PROP, filter: { type: 'string', description: 'Only some items, each with where it is: a kind (weapon, armor, clothing, jewelry, scroll, book, kit, potion, food, salvage, junk, gem, key, component, pack, manastone, money, worn) or text in the name ("Healing"). Default: everything, gear first.' } },
+    async run(a) {
+      const items = await callerFor(a.profile).call<AgentItem[]>('inventory');
+      return { text: a.filter === undefined || String(a.filter).trim() === '' ? formatInventory(items) : formatInventoryFiltered(items, String(a.filter)) };
+    },
   },
   {
     name: 'ac_gear',
@@ -609,21 +636,21 @@ export const TOOLS: AgentTool[] = [
     target: { type: 'string', description: 'Target id or name ("self" for yourself).' },
   }, ['item', 'target'], (a) => [guidOrName(a.item), String(a.target) === 'self' ? 'self' : guidOrName(a.target)]),
   act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), or a distance and direction from where you stand ("10m north", "25 m NE", "5m ahead", "3 m left"). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after. Being hit stops it unless the way on leads away from everything hitting you, you are going to a fellow with monsters on them, or flee=true (running away). A monster starting to come at you (running at you, turning to face you, closing in) stops it too, while it is still metres off, naming it, its level and distance (stop_on_aggro=false walks on). Outdoors it keeps 10 m clear of monsters near the way (15 m of one well above your level) and says which it went round; when no way keeps clear it walks past them and says so (avoid_monsters=false walks straight). It names a fellow left far behind; stay_with=<fellow> keeps you together: you run as always, and stop to wait whenever they fall stay_within behind, until they are beside you (and it says when they stopped or went elsewhere). To keep up with someone, use ac_follow.', {
-    target: { type: 'string', description: 'Object id (#…), nearby object name, map coordinates like "42.1N, 33.6E", or an offset like "10m north" / "5m ahead" (compass N…NW, or ahead / back / left / right of your facing).' },
-    within: { type: 'number', description: 'Stop this close, metres (default 2).' },
+    target: { type: 'string', description: 'Object id (#…), nearby object name (of several with that name, the one a walk reaches), map coordinates like "42.1N, 33.6E", an offset like "10m north" / "5m ahead" (compass N…NW, or ahead / back / left / right of your facing), or a cell id of the dungeon or building you are in (0x039C0104: that room).' },
+    within: { type: 'number', description: 'Stop this close, metres (default 2: beside it, on its floor). 5 or more is a range to stand at (a bolt\'s, a pull\'s): the straight distance, whatever floor it is on, and the answer says when the line to it is blocked.' },
     timeout_s: { type: 'number', description: 'Give up after this long (default: by distance, about 3 m/s + 30 s, 60 s to 10 min).' },
     flee: { type: 'boolean', description: 'Keep going while monsters hit you (running away). Default: stop when hit, unless the way on leads away from every attacker.' },
-    stay_with: { type: 'string', description: 'A fellow\'s name: stay together. You run as always (never a walk to let them catch up); when they are more than stay_within metres behind you stop once and wait until they are within 4 m (or have stopped near you), then run on together. Ends early, saying so, if they stand still, head elsewhere or go on past you another way.' },
+    stay_with: { type: 'string', description: 'A fellow\'s name: stay together. You run as always (never a walk to let them catch up); when they are more than stay_within metres behind you stop once and wait until they are within 4 m (or have stopped near you), then run on together. While they are casting or fighting you wait on quietly. Ends early, saying so, if they stand still doing nothing, head elsewhere or go on past you another way.' },
     stay_within: { type: 'number', description: 'With stay_with: how far behind they may fall, metres (default 15).' },
     stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you (default true; one already coming when you set off doesn\'t stop it). false walks on until hit. flee=true never stops for it.' },
-    avoid_monsters: { type: 'boolean', description: 'Outdoors, route round monsters near the way, 10 m clear (15 m of one well above your level), as a player goes round a camp (default true; off with flee; not in dungeons). false walks the straight way.' },
+    avoid_monsters: { type: 'boolean', description: 'Outdoors, route round monsters near the way, 10 m clear (15 m of one well above your level), as a player goes round a camp. Indoors, stop before coming within their wake range (18 m on ACE, 40 m on GDLE servers) of 2 or more monsters not yet awake, naming them. Default true; off with flee. false walks the straight way, and on into them.' },
   }, ['target'], (a) => [/[NS]\s*,?\s*[\d.]+\s*[EW]/i.test(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, ...(a.timeout_s !== undefined ? { timeoutMs: Number(a.timeout_s) * 1000 } : {}), ...(a.flee ? { flee: true } : {}), ...(a.stay_with ? { stayWith: String(a.stay_with) } : {}), ...(a.stay_within !== undefined ? { stayWithin: Number(a.stay_within) } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}), ...(a.avoid_monsters === false || a.avoid_monsters === 'false' ? { avoidMonsters: false } : {}) }], 320_000),
   act('ac_follow', 'Follow a player (your fellow): run to within `within` metres of them, stand while they stay near, and run again once they are 3 m past that (never a walk), re-aiming as they go, until duration_s ends, you are hit (unless flee=true, or they have monsters on them: then the follow goes on through the hits to them), a monster starts coming at you (unless stop_on_aggro=false), they go out of sight, or you start something else (any action, or ac_stop_moving). Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
     target: { type: 'string', description: 'The player to follow: name or id.' },
     within: { type: 'number', description: 'How close to keep, metres (default 4).' },
     duration_s: { type: 'number', description: 'How long to follow (default 120, at most 600).' },
     flee: { type: 'boolean', description: 'Keep following while you are hit (e.g. running to your tank with monsters on you), as walk_to flee=true does. Default: being hit stops it.' },
-    stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you (default true). false follows on until hit.' },
+    stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you, and indoors before following them within wake range (18 m on ACE) of 2 or more monsters not yet awake (default true). false follows on until hit.' },
   }, ['target'], (a) => [guidOrName(a.target), { within: a.within ?? null, durationMs: a.duration_s !== undefined ? Math.min(Number(a.duration_s), 600) * 1000 : null, ...(a.flee === true || a.flee === 'true' ? { flee: true } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}) }], 640_000),
   act('ac_turn', 'Turn to face a compass bearing (0 = north, 90 = east) or an object.', { toward: { type: 'string', description: 'Bearing in degrees, or an object id / name.' } }, ['toward'], (a) => [/^-?\d+(\.\d+)?$/.test(String(a.toward)) && String(a.toward).length < 6 ? Number(a.toward) : guidOrName(a.toward)]),
   act('ac_move', 'Hold a movement key for a while (fine control, e.g. backing off or strafing around an obstacle).', {
@@ -688,7 +715,11 @@ export const TOOLS: AgentTool[] = [
     target: { type: 'string', description: 'Recipient id or name.' },
     amount: { type: 'number', description: 'For stacks (default: whole stack).' },
   }, ['item', 'target'], (a) => [guidOrName(a.item), guidOrName(a.target), a.amount ?? null]),
-  act('ac_equip', 'Wield or wear an item from your pack.', { item: { type: 'string', description: 'Item id or name.' } }, ['item'], (a) => [guidOrName(a.item)]),
+  act('ac_equip', 'Wield or wear an item from your pack. Without slot= the client picks the place, as a double-click does (with both wrists or both rings taken it replaces the RIGHT one). slot= puts it on that paperdoll slot, as dragging it there does: whatever is in that slot is taken off into your pack first. The reply names the slot it went to and anything it took off.', {
+    item: { type: 'string', description: 'Item id or name (its material too: "Bronze Bracelet").' },
+    slot: { type: 'string', description: 'Paperdoll slot: left wrist, right wrist, left ring, right ring, neck, weapon, shield, missile, ammo, held, two-handed, trinket, cloak (or an EquipMask name, e.g. WristWearLeft). Armor and clothing go where they fit whatever you name.' },
+  }, ['item'], (a) => [guidOrName(a.item), a.slot ?? null]),
+  act('ac_unequip', 'Take off a worn or wielded item into your main pack (the drag off the paperdoll). ac_inventory shows what is worn where.', { item: { type: 'string', description: 'Item id or name.' } }, ['item'], (a) => [guidOrName(a.item)]),
   act('ac_appraise', 'Examine (ID) an object: full properties once the server answers.', { target: { type: 'string', description: 'Object id or name.' } }, ['target'], (a) => [guidOrName(a.target)], 20_000),
   {
     name: 'ac_keys',
@@ -707,7 +738,7 @@ export const TOOLS: AgentTool[] = [
     description: 'Read and configure an account\'s automation routines (per account, kept between sessions; no game session needed). action: list (profiles), show (JSON), explain (plain words), example (a worked profile to edit), validate (a document file), set (store a whole document from file= after validating), import (VirindiTank .met / .nav / .utl / .usd files, or metaf .af text, from files=, into profile name=: a meta makes the states, a nav adds a route, a loot profile replaces the loot rules, a .usd settings file sets the options and the Monsters / Items / Consumables / Buffs tabs; anything that cannot run exactly is switched off and listed), export (profile name= as a VirindiTank file the player can use or share: kind=met its meta, kind=nav a route, kind=utl its loot rules, kind=usd its settings and tabs, kind=af its meta (or with which= a route) in metaf\'s .af text; which= picks the route or loot set; returns the file text after what it could not hold, and out= also writes it locally). Defaults to the running session\'s account; pass account= (and server=) for any other, e.g. a player who asked you to set up their routines. Routines only do what a player can (no "@" commands).',
     props: {
       ...PROFILE_PROP,
-      action: { type: 'string', description: 'list | show | explain | example | validate | set | import | export', enum: ['list', 'show', 'explain', 'example', 'validate', 'set', 'import', 'export'] },
+      action: { type: 'string', description: 'list (the default) | show | explain | example | validate | set | import | export', enum: [...ROUTINES_ACTIONS] },
       account: { type: 'string', description: 'Account name (default: the session\'s).' },
       server: { type: 'string', description: 'Server id (default: local-<era> of the session, else local-eor).' },
       name: { type: 'string', description: 'Profile name for show/explain (default: all).' },
@@ -719,14 +750,13 @@ export const TOOLS: AgentTool[] = [
       which: { type: 'string', description: 'For export: the route (kind=nav or af; default the Auto-Navigation route for nav) or loot set (kind=utl; default the one in use).' },
       out: { type: 'string', description: 'For export, local only: also write the file to this path (Windows-1252, as VirindiTank reads it).' },
     },
-    required: ['action'],
     async run(a) {
       if (isHosted()) return hostedRoutinesTool(callerFor(a.profile), a);
       const info = findDaemon(a.profile);
       const account = String(a.account ?? info?.account ?? '');
       const server = String(a.server ?? `local-${info?.era ?? 'eor'}`);
       const store = new RoutineStore();
-      const action = String(a.action);
+      const action = routinesAction(a.action);
       if (action === 'example') return { text: JSON.stringify(EXAMPLE_HUNT_PROFILE, null, 2) };
       const readFile = (): { body: unknown } | { text: string; isError: true } => {
         if (!a.file) return { text: 'pass file= (a JSON routine document)', isError: true };
@@ -787,7 +817,7 @@ export const TOOLS: AgentTool[] = [
           ...(r.problems.length ? ['', `not carried over exactly (${r.problems.length}):`, ...r.problems.slice(0, 40).map((x) => `  ${x}`), ...(r.problems.length > 40 ? [`  … and ${r.problems.length - 40} more`] : [])] : []),
           '', explainProfile(r.value)].join('\n') };
       }
-      return { text: `unknown action ${action}`, isError: true };
+      return { text: `unknown action "${action}" (${ROUTINES_ACTIONS.join(', ')})`, isError: true };
     },
   },
   {
@@ -795,14 +825,13 @@ export const TOOLS: AgentTool[] = [
     description: 'Run one of the account\'s stored routines on your character (ac_routines configures them): action=dryrun shows which rule of the current state would fire now and why (check before running), run starts it, status shows its state, recent actions and this run\'s stats, pause/resume hold it, stop stops it. The routine acts through the same player actions as the other tools.',
     props: {
       ...PROFILE_PROP,
-      action: { type: 'string', description: 'run | pause | resume | stop | status | dryrun', enum: ['run', 'pause', 'resume', 'stop', 'status', 'dryrun'] },
+      action: { type: 'string', description: 'run | pause | resume | stop | status (the default) | dryrun', enum: [...ROUTINE_ACTIONS] },
       name: { type: 'string', description: 'For run/dryrun: the profile name (default: the one assigned to this character, else the only one).' },
       server: { type: 'string', description: 'Server id the routines are stored under (default local-<era>).' },
     },
-    required: ['action'],
     async run(a) {
       const c = callerFor(a.profile);
-      const action = String(a.action);
+      const action = routinesAction(a.action, 'status');
       if (action === 'stop') return result(await c.call<AgentResult>('routineStop'));
       if (action === 'pause') return result(await c.call<AgentResult>('routinePause'));
       if (action === 'resume') return result(await c.call<AgentResult>('routineResume'));
@@ -839,7 +868,7 @@ export const TOOLS: AgentTool[] = [
         const first = v.findIndex((x) => x.fires);
         return { text: [`"${prof.name}", state "${prof.initialState}"${running ? ' (running)' : ''}:`, ...v.map((x, i) => `  ${i === first ? '▶' : ' '} ${x.rule}${x.off ? ' [off]' : x.enabled ? '' : ' [module off]'}: ${x.why.join(', ')}`), first < 0 ? '  (no rule would fire now)' : ''].join('\n') };
       }
-      return { text: `unknown action ${action}`, isError: true };
+      return { text: `unknown action "${action}" (${ROUTINE_ACTIONS.join(', ')})`, isError: true };
     },
   },
   act('ac_raise', 'Spend unassigned XP to raise an attribute, vital or skill by one step (or several with times).', {
@@ -851,9 +880,53 @@ export const TOOLS: AgentTool[] = [
   }, ['skill'], (a) => [String(a.skill)]),
 ];
 
+/**
+ * The tools that name one object and take it as item= or target= alike: pick_up took only item= while use, loot and
+ * appraise take target= ("ac_pick_up: unknown argument \"target\"", Bulwark 2026-10-16). give and use_on name two
+ * (item= the thing, target= whom), so they keep both meanings apart.
+ */
+export const ONE_OBJECT_TOOLS = ['ac_pick_up', 'ac_drop', 'ac_equip', 'ac_unequip', 'ac_sell', 'ac_appraise', 'ac_select', 'ac_use', 'ac_loot', 'ac_attack'] as const;
+
+/** The other name each one-object tool takes for its object (alias → the argument it means). */
+export function argAliases(t: Pick<AgentTool, 'name' | 'props' | 'aliases'>): Record<string, string> {
+  if (t.aliases) return t.aliases;
+  if (!(ONE_OBJECT_TOOLS as readonly string[]).includes(t.name)) return {};
+  if (t.props.item && !t.props.target) return { target: 'item' };
+  if (t.props.target && !t.props.item) return { item: 'target' };
+  return {};
+}
+
+/** A call's arguments with an alias moved onto the argument it means (the canonical one wins when both are given). */
+export function withArgAliases(t: Pick<AgentTool, 'name' | 'props' | 'aliases'>, a: Record<string, any>): Record<string, any> {
+  const al = argAliases(t);
+  if (!Object.keys(al).some((k) => a[k] !== undefined)) return a;
+  const out = { ...a };
+  for (const [alias, real] of Object.entries(al)) {
+    if (out[alias] === undefined) continue;
+    if (out[real] === undefined || out[real] === null || out[real] === '') out[real] = out[alias];
+    delete out[alias];
+  }
+  return out;
+}
+
+// Each one-object tool lists its alias (so the CLI and an MCP schema with additionalProperties: false take it) and
+// reads its arguments through withArgAliases.
+for (const t of TOOLS) {
+  const al = argAliases(t);
+  if (!Object.keys(al).length) continue;
+  t.aliases = al;
+  for (const [alias, real] of Object.entries(al)) t.props = { ...t.props, [alias]: { type: 'string', description: `Same as ${real} (either name works).` } };
+  const run = t.run.bind(t);
+  t.run = (a) => run(withArgAliases(t, a));
+}
+
 export const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
-/** JSON Schema for a tool's arguments (MCP inputSchema). */
+/**
+ * JSON Schema for a tool's arguments (MCP inputSchema). A required argument that has an alias is left to
+ * missingRequired (either name satisfies it), so a client that checks the schema takes the alias alone.
+ */
 export function inputSchema(t: AgentTool): Record<string, unknown> {
-  return { type: 'object', properties: t.props, required: t.required ?? [], additionalProperties: false };
+  const aliased = new Set(Object.values(argAliases(t)));
+  return { type: 'object', properties: t.props, required: (t.required ?? []).filter((k) => !aliased.has(k)), additionalProperties: false };
 }

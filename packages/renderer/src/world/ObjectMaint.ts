@@ -62,9 +62,18 @@ import { objectRingRadius } from './LandscapeDrawDistance.js';
  * shows ghosts: monsters that died while the player was away, a fellow who
  * recalled to a lifestone, an NPC twice under two guids.
  *
- * Approximation: the env cells kept are the viewer's whole LANDBLOCK (retail
- * keeps the viewer cell's visible-cell set), so an object in a far room of
- * the same dungeon stays.
+ * A sealed viewer keeps only its own cell and that cell's visible cells
+ * (`CEnvCell::grab_visible_cells` @ 0052e220 adds the cell and its stab
+ * list to visible_cell_table; `release_cells` moves the old set to
+ * cell_flush_table and `flush_cells` @ 0052def0 releases the objects of every
+ * cell not grabbed again). ACE keys the dungeon's updates on the same set
+ * (ObjectMaint.GetVisibleObjects(EnvCell): the cell + VisibleCells) and
+ * forgets an object 25 s after it left it. Keeping the whole landblock (the
+ * approximation before 2026-10-15) left ghosts in every far room: drudges
+ * that died while out of sight stayed alive and targetable ("the server has
+ * no Drudge Hoarder where you are", Arwic Mines 0x01E301F2, stream players
+ * 2026-10-15). Without the viewer cell's stab list (`visibleCells` absent or
+ * the cell unreadable) the whole landblock stays, as before.
  */
 
 /** CObjectMaint::AddObjectToBeDestroyed — seconds a non-visible object survives (globals: 25). */
@@ -82,6 +91,12 @@ export interface ViewerLoadPoint {
   midRadius: number;
   /** EnvCell SeenOutside flag for a full env-cell id. */
   isSeenOutside: (cellId: number) => boolean;
+  /**
+   * The viewer env cell's VisibleCells (its stab list: cell indices, low 16
+   * bits) — what a sealed viewer keeps besides its own cell; null when the
+   * cell can't be read.
+   */
+  visibleCells?: (cellId: number) => ReadonlySet<number> | readonly number[] | null;
 }
 
 /**
@@ -98,8 +113,13 @@ export function isCellLoaded(cellId: number, v: ViewerLoadPoint): boolean {
   const vy = (v.viewerCellId >>> 16) & 0xFF;
   const interior = isInteriorCellIndex(index);
   if (v.sealed) {
-    // LScape::release_all — only the dungeon's env cells.
-    return interior && bx === vx && by === vy;
+    // LScape::release_all — only the dungeon's env cells, and of those the
+    // viewer cell and its visible cells (CEnvCell::grab_visible_cells).
+    if (!interior || bx !== vx || by !== vy) return false;
+    if (id === (v.viewerCellId >>> 0) || !isInteriorCellIndex(v.viewerCellId & 0xFFFF)) return true;
+    const seen = v.visibleCells?.(v.viewerCellId >>> 0);
+    if (!seen) return true;
+    return Array.isArray(seen) ? seen.includes(index) : (seen as ReadonlySet<number>).has(index);
   }
   // LScape::get_landblock: a block outside the full-detail ring has no cells.
   if (Math.max(Math.abs(bx - vx), Math.abs(by - vy)) > objectRingRadius(v.midRadius)) return false;

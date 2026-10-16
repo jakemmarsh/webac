@@ -132,6 +132,18 @@ export function getJumpVelocity(burden: number, jumpSkill: number, power: number
 }
 
 /**
+ * The Jump skill a launch uses: the skill, or 0 with no stamina left.
+ * CACQualities::InqJumpVelocity @ 00592980 reads the current Stamina
+ * (InqAttribute2nd 4) and, when it is 0, jumps with skill 0 (`if (local_1c
+ * == 0) local_20 = 0`), so the jump is getJumpHeight's 0.35 m floor; the
+ * AC1999 server's own InqJumpVelocity does the same (Qualities.cpp,
+ * `if (!stamina) jumpskill = 0`). Retail never refuses the jump.
+ */
+export function jumpSkillWithStamina(jumpSkill: number, staminaCurrent: number): number {
+  return staminaCurrent > 0 ? jumpSkill : 0;
+}
+
+/**
  * Advance one airborne integration step.
  *
  * ACE PhysicsObj.cs:1854-1858 (UpdatePositionInternal):

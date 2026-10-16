@@ -16,7 +16,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './state.ts';
-import { TOOLS, TOOL_BY_NAME, type AgentTool, type ToolOutput } from './tools.ts';
+import { TOOLS, TOOL_BY_NAME, missingRequired, type AgentTool, type ToolOutput } from './tools.ts';
 import { requireClient } from './client.ts';
 
 export function parseCliArgs(tool: AgentTool, rest: string[]): Record<string, unknown> {
@@ -87,7 +87,10 @@ async function main(): Promise<void> {
   }
   const tool = TOOL_BY_NAME.get(`ac_${cmd}`) ?? TOOL_BY_NAME.get(cmd);
   if (!tool) throw new Error(`unknown command "${cmd}" (try help)`);
-  const out = await tool.run(parseCliArgs(tool, rest));
+  const args = parseCliArgs(tool, rest);
+  const missing = missingRequired(tool, args);
+  if (missing) throw new Error(missing);
+  const out = await tool.run(args);
   console.log(cliOutput(out, (b64) => {
     const f = join(STATE_DIR, `screenshot-${Date.now()}.jpg`);
     writeFileSync(f, Buffer.from(b64, 'base64'));
