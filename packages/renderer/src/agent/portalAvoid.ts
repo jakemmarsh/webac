@@ -52,3 +52,38 @@ export function avoidDisks(probe: NavProbe, disks: () => AvoidDisk[]): NavProbe 
     return p;
   };
 }
+
+/** How far ahead of the body (along its heading) a portal's disk slows the run to a walk. */
+export const PORTAL_SLOW_LOOKAHEAD_M = 4;
+
+/**
+ * The planner's disks keep the planned way out of every portal, but the body runs metres between two looks of the walk
+ * (a slow frame at run speed) and carries on past a waypoint in the direction it was heading. A waypoint the search put
+ * 2.8 m from a portal's centre (0.9 m outside its touch) was overrun into it: Bulwark, standing in the ring of seven
+ * housing portals SE of Holtburg (landblock 0xABB1), set off north, ran 2 m east to the search's first point and went
+ * through the Holtburg Wilderness Settlement Portal (2026-10-16 21:18:33Z, WeenieError ITeleported). So each tick:
+ * - `inside`: the body is already within a disk and its heading takes it nearer the portal: let go of forward now.
+ * - `near`: the next PORTAL_SLOW_LOOKAHEAD_M along the heading cross a disk: walk, don't run (a walk moves 0.3 m a look).
+ * `aim` is where the walk is heading; disks on another floor (span) are ignored, as avoidDisks does.
+ */
+export function portalGuard<D extends AvoidDisk>(me: NavPoint, aim: { x: number; y: number }, disks: readonly D[], lookahead = PORTAL_SLOW_LOOKAHEAD_M): { kind: 'inside' | 'near'; disk: D } | null {
+  const dx = aim.x - me.x;
+  const dy = aim.y - me.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6) return null;
+  const ux = dx / len, uy = dy / len;
+  let near: D | null = null;
+  for (const d of disks) {
+    if (Math.abs(me.z - d.z) > (d.span ?? FLOOR_SPAN_M)) continue;
+    const fx = me.x - d.x, fy = me.y - d.y;
+    const dist = Math.hypot(fx, fy);
+    // Heading nearer its centre: the component of the heading toward it.
+    const inward = fx * ux + fy * uy < 0;
+    if (dist < d.r) { if (inward) return { kind: 'inside', disk: d }; continue; }
+    if (!inward || near) continue;
+    // Closest approach of the heading's next `lookahead` metres to the centre.
+    const t = Math.min(lookahead, Math.max(0, -(fx * ux + fy * uy)));
+    if (Math.hypot(fx + ux * t, fy + uy * t) < d.r) near = d;
+  }
+  return near ? { kind: 'near', disk: near } : null;
+}

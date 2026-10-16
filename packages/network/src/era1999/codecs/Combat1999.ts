@@ -51,6 +51,8 @@
  *   identical payloads → passed through (ClientEvents.cpp reads exactly ACE's fields):
  *   0x08 TargetedMeleeAttack {target, height, f32 power}, 0x0A TargetedMissileAttack (same),
  *   0x48 CastUntargetedSpell {spell}, 0x4A CastTargetedSpell {target, spell},
+ *   0x4B ResearchSpell {SpellFormula 8 × u32, target} (1999 only: the Spell Research panel's Test;
+ *   CM_Magic_Event_ResearchSpell @ 0x57c440, server case RESEARCH_SPELL_EVENT),
  *   0x44 RaiseVital / 0x45 RaiseAttribute / 0x46 RaiseSkill {id, u32 xp}, 0x47 TrainSkill
  *   {skill, credits}, 0x1BF QueryHealth {guid}, 0x1E9 Ping {}, 0x1A8 RemoveSpell {spell}.
  *   0x53 ChangeCombatMode  EoL CombatMode bits 1/2/4/8 → 1999 SEQUENTIAL 1 peace, 2 melee,
@@ -92,7 +94,7 @@ export const EOL_EVENT = {
 export const EOL_ACTION = {
   TargetedMeleeAttack: 0x08, TargetedMissileAttack: 0x0a, RaiseVital: 0x44, RaiseAttribute: 0x45,
   RaiseSkill: 0x46, TrainSkill: 0x47, CastUntargetedSpell: 0x48, CastTargetedSpell: 0x4a,
-  ChangeCombatMode: 0x53, TeleToLifestone: 0x63, RemoveSpell: 0x1a8, QueryHealth: 0x1bf,
+  ResearchSpell: 0x4b, ChangeCombatMode: 0x53, TeleToLifestone: 0x63, RemoveSpell: 0x1a8, QueryHealth: 0x1bf,
   AddSpellFavorite: 0x1e3, RemoveSpellFavorite: 0x1e4, Ping: 0x1e9, SetDesiredComponentLevel: 0x224,
   Suicide: 0x279, SpellbookFilter: 0x286,
 } as const;
@@ -221,7 +223,7 @@ export function registerCombat1999(c: Codecs1999, opts: Combat1999Options = {}):
 
   for (const type of [
     EOL_ACTION.TargetedMeleeAttack, EOL_ACTION.TargetedMissileAttack, EOL_ACTION.CastUntargetedSpell,
-    EOL_ACTION.CastTargetedSpell, EOL_ACTION.RaiseVital, EOL_ACTION.RaiseAttribute, EOL_ACTION.RaiseSkill,
+    EOL_ACTION.CastTargetedSpell, EOL_ACTION.ResearchSpell, EOL_ACTION.RaiseVital, EOL_ACTION.RaiseAttribute, EOL_ACTION.RaiseSkill,
     EOL_ACTION.TrainSkill, EOL_ACTION.QueryHealth, EOL_ACTION.Ping, EOL_ACTION.RemoveSpell,
   ]) out(type, same);
 

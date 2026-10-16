@@ -39,6 +39,27 @@ export const IN_WORLD_RETRY_DELAY_MS = 3000;
  */
 export const IN_WORLD_RETRY_BUDGET = 25;
 
+/**
+ * Waits before the first retries when the refused character was created in
+ * this session moments ago. Retail enters a new character at once:
+ * gmCharGenMainUI::RecvNotice_CharGenVerificationResponse @ 004e9030 sets
+ * m_bAwaitingCharSetForLogin, gmCharGenMainUI::Update @ 004e8460 calls
+ * CPlayerSystem::LogOnCharacter @ 0055f890 (0xF7C8) on the next frame, and
+ * CPlayerSystem::UseTime @ 00563110 sends 0xF657 the frame after ServerReady.
+ * Retail has no retry for 0x0D (gmUIFlow::RecvNotice_CharacterError @ 0047a7c0:
+ * the char-select dialog). But GDLE (and the AC1999 server, its ancestor)
+ * refuses with 0x0D while the new character's first save is still queued
+ * (ClientEvents.cpp CClientEvents::LoginCharacter:
+ * `g_pDBIO->GetNumPendingSaves(char_weenie_id) > 0`), a few ms after the
+ * create reply. A client close to the server (the AWS bridge to OVH Quebec,
+ * ~15 ms) lost that race every time (6/6, 2026-10-16), retail included. The
+ * save clears in milliseconds, so a just-created character retries sooner
+ * than the 3 s stale-session wait; after these, the usual cadence and budget.
+ */
+export const JUST_CREATED_RETRY_DELAYS_MS: readonly number[] = Object.freeze([500, 1000, 2000, 2000]);
+/** A refusal counts as the new-character save race only this soon after the create reply. */
+export const JUST_CREATED_WINDOW_MS = 10_000;
+
 /** What to do with a "character still in the world" refusal (CharacterError 0x0D). */
 export type CharacterInWorldVerdict = 'retry' | 'ignore' | 'dialog';
 
@@ -57,6 +78,8 @@ export class SessionLifecycle {
   private resuming = false;
   private inWorldRetries = 0;
   private enterInFlight = false;
+  private createdGuid: number | null = null;
+  private createdAt = 0;
 
   /** An automatic resume after an unexpected drop is under way (not yet back in the world). */
   get resumingAfterDrop(): boolean {
@@ -97,10 +120,34 @@ export class SessionLifecycle {
   /** Player picked a character (or auto-enter fired) — remember it for
    *  reconnect resume and clear any prior logout intent. */
   noteEnterWorldRequested(guid: number): void {
+    if (guid !== this.createdGuid) this.createdGuid = null;
     this.lastEnteredGuid = guid;
     this.manualLogout = false;
     this.inWorldRetries = 0;
     this.enterInFlight = true;
+  }
+
+  /**
+   * The server accepted a new character (CharacterCreateResponse OK) and we
+   * are entering with it: its refusals within JUST_CREATED_WINDOW_MS get the
+   * short JUST_CREATED_RETRY_DELAYS_MS waits (see there).
+   */
+  noteCharacterCreated(guid: number, now: number = Date.now()): void {
+    this.createdGuid = guid;
+    this.createdAt = now;
+  }
+
+  /**
+   * The wait before the retry that characterInWorldRefusal() just granted:
+   * short for the character created moments ago, else IN_WORLD_RETRY_DELAY_MS.
+   */
+  inWorldRetryDelay(now: number = Date.now()): number {
+    const n = this.inWorldRetries - 1;
+    if (this.createdGuid !== null && this.createdGuid === this.lastEnteredGuid
+      && now - this.createdAt <= JUST_CREATED_WINDOW_MS && n >= 0 && n < JUST_CREATED_RETRY_DELAYS_MS.length) {
+      return JUST_CREATED_RETRY_DELAYS_MS[n];
+    }
+    return IN_WORLD_RETRY_DELAY_MS;
   }
 
   /** An enter-world request is out and neither the world nor a refusal has answered it. */
@@ -122,6 +169,7 @@ export class SessionLifecycle {
 
   /** PlayerCreate arrived — we are in the world. */
   noteWorldEntered(): void {
+    this.createdGuid = null;
     this.inWorldFlag = true;
     this.inWorldRetries = 0;
     this.enterInFlight = false;

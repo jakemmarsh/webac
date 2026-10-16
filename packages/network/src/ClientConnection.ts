@@ -54,6 +54,7 @@ import { FragmentAssembler } from './FragmentAssembler.js';
 import { MAX_SERVER_PACKET_SIZE } from './PacketBuilder.js';
 import { LinkStatusAverages } from './LinkStatusAverages.js';
 import { type NetDiagnostics, hex32, msAgo } from './NetDiagnostics.js';
+import { ThreadStallClock, silenceIsOwnStall, type LinkSample } from './ThreadStall.js';
 import type { GameMessage, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData } from './MessageSerializer.js';
 
 /**
@@ -192,9 +193,12 @@ export type ConnectionEventType =
  *  - 'server_disconnect': the server sent a Disconnect packet;
  *  - 'server_net_error': the server sent a NetError after the logon;
  *  - 'server_silent': nothing from the server for the dead-connection time (the client closed it);
+ *  - 'client_suspended': the same drop, but the silence is our own: the connection's tick loop
+ *    itself stopped for longer than that time inside it (a sleeping machine, a frozen tab), and
+ *    the server stayed quiet for less than that time once we ran again;
  *  - 'local': our own disconnect().
  */
-export type DisconnectCause = 'socket_closed' | 'server_disconnect' | 'server_net_error' | 'server_silent' | 'local';
+export type DisconnectCause = 'socket_closed' | 'server_disconnect' | 'server_net_error' | 'server_silent' | 'client_suspended' | 'local';
 
 export interface ConnectionEvent {
   type: ConnectionEventType;
@@ -395,6 +399,23 @@ export class ClientConnection {
   // incoming 0xF643 (aliased opcode) is known to be its response rather
   // than an unsolicited CharacterRestoreResponse. Cleared once consumed.
   private awaitingCharacterCreateResponse: boolean = false;
+  /**
+   * The server answered our enter-world request (0xF7C8) with ServerReady
+   * (0xF7DF) and has not sent CharacterLogOff (0xF653) since. GDLE (Seedsow,
+   * Snowreap, ...) sets bInWorld when it answers 0xF7C8 (Client.cpp
+   * CClient::EnterWorld) and clears it only in ExitWorld (which sends 0xF653);
+   * while it is set, every further 0xF7C8 is ignored (Client.cpp `case 0xF7C8:
+   * if (!m_vars.bInWorld)`) and only 0xF657 is handled. So after a refused
+   * enter (CharacterError 0x0D) a resent 0xF7C8 waited for a ServerReady that
+   * never came: a brand-new character near the server never entered (2026-10-16).
+   * A request while this is set is answered here as ready, so the retry (or
+   * the player's next Enter) goes straight to 0xF657. ACE answers 0xF7C8
+   * statelessly (CharacterHandler.cs CharacterEnterWorldRequest) and accepts
+   * 0xF657 in AuthConnected, so skipping the repeat request is harmless there.
+   * Same flag as Connection1999.enterWorldGranted (the AC1999 server is GDLE's
+   * ancestor; BUG.ac1999-enter-world-retry-hangs).
+   */
+  private enterWorldGranted = false;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 5;
   private reconnectDelay: number = 2000; // ms, doubles each attempt
@@ -506,6 +527,10 @@ export class ClientConnection {
    *  it skips the check when its own clock stalled that long. */
   private static readonly SERVER_DEAD_MS = 140_000;
   private lastServiceAt: number = 0;
+  /** NET.client-suspended-endcause — this thread's own stops (sleep, a frozen
+   *  tab), fed by the service tick: a silence they explain drops as
+   *  'client_suspended', and the link sample carries the latest for the page. */
+  private readonly stallClock = new ThreadStallClock();
 
   // ── OBS.dm-stall-diagnostics — what getDiagnostics() reports (this session) ──
   private diagRxMsgAt = 0;
@@ -618,11 +643,12 @@ export class ClientConnection {
    * last packet arrived from it. Drives the HUD Link Indicator's 4-state
    * model (LinkStatusModel.ts); retail never reports link trouble in chat.
    */
-  getLinkStatus(now: number = Date.now()): { connected: boolean; secondsSinceLastPacket: number } {
+  getLinkStatus(now: number = Date.now()): LinkSample {
     const connected = this.isConnected && this.connectionData.state >= SessionState.AuthConnected;
     return {
       connected,
       secondsSinceLastPacket: connected ? Math.max(0, (now - this.lastPacketReceivedAt) / 1000) : 0,
+      stall: connected ? this.stallClock.latest(now) : null,
     };
   }
 
@@ -817,6 +843,7 @@ export class ClientConnection {
     this.resetDiagnostics();
     this.preHandshakeQueue = [];
     this.sessionPastLogin = false;
+    this.enterWorldGranted = false;
     this.awaitingServerConnect = false;
     this.lastPacketReceivedAt = Date.now();
     this.serverTimeoutEmitted = false;
@@ -1191,6 +1218,7 @@ export class ClientConnection {
     // No ACK yet: retail PAKs only in cs_Connected (handlePacket sends the
     // first one when the server's first packet arrives).
     this.lastServiceAt = Date.now();
+    this.stallClock.reset(this.lastServiceAt);
     this.lastFlowKeepaliveAt = this.lastServiceAt;
     this.echoEpochMs = performance.now();
     this.keepaliveTimer = setInterval(() => {
@@ -1207,6 +1235,7 @@ export class ClientConnection {
     const clockStalled = now - this.lastServiceAt > ClientConnection.SERVER_DEAD_MS;
     if (now - this.lastServiceAt > this.diagTickGapMax) this.diagTickGapMax = now - this.lastServiceAt;
     this.lastServiceAt = now;
+    this.stallClock.tick(now);
 
     // cs_ConnectionRequestAcked: only the ConnectAck resend (its own timer)
     // and the no-data drop run until the server's first packet.
@@ -1286,12 +1315,20 @@ export class ClientConnection {
    * retail's dead-connection drop (ClientNet::ProcessConnection @ 00545450,
    * 140.0 s → RemoveConnection → SendNotice_ServerDied). Reported as a
    * non-deliberate 'disconnected' so the renderer raises ServerDied.
+   * The drop is the same either way; its cause says whose silence it was:
+   * 'client_suspended' when our own tick loop stopped past the limit inside
+   * the silence and the server has been quiet less than the limit since we
+   * woke (2026-10-16 production: a laptop slept 29 min and the drop read
+   * 'server_silent', sending triage after a healthy server).
    */
   private checkServerDead(now: number = Date.now()): void {
     if (this.connectionData.state < SessionState.AuthConnected) return;
     if (now - this.lastPacketReceivedAt <= ClientConnection.SERVER_DEAD_MS) return;
-    console.warn(`[AC:NET] No packet from server for ${ClientConnection.SERVER_DEAD_MS / 1000}s — ending the session`);
-    this.endSessionFromServer('server_silent');
+    const suspended = silenceIsOwnStall(this.stallClock.latest(now), now - this.lastPacketReceivedAt, ClientConnection.SERVER_DEAD_MS);
+    console.warn(suspended
+      ? `[AC:NET] No packet from server across a ${Math.round(this.diagTickGapMax / 1000)}s stop of this thread — ending the session`
+      : `[AC:NET] No packet from server for ${ClientConnection.SERVER_DEAD_MS / 1000}s — ending the session`);
+    this.endSessionFromServer(suspended ? 'client_suspended' : 'server_silent');
   }
 
   /**
@@ -1323,6 +1360,11 @@ export class ClientConnection {
       // until it arrives; see the CharacterCreateResponse case below.
       if (opcode === GameMessageOpcode.CharacterCreate) {
         this.awaitingCharacterCreateResponse = true;
+      }
+      // See enterWorldGranted: the server already said ready and ignores a repeat.
+      if (opcode === GameMessageOpcode.CharacterEnterWorldRequest && this.enterWorldGranted) {
+        setTimeout(() => this.emit({ type: 'enterWorldReady' }), 0);
+        return;
       }
     }
     const fragId = ++this.fragmentSequence;
@@ -2053,7 +2095,13 @@ export class ClientConnection {
           break;
 
         case GameMessageOpcode.CharacterEnterWorldServerReady:
+          this.enterWorldGranted = true;
           this.emit({ type: 'enterWorldReady' });
+          break;
+
+        case GameMessageOpcode.CharacterLogOff:
+          // The server left the world (GDLE ExitWorld / ACE logoff): the next enter asks again.
+          this.enterWorldGranted = false;
           break;
 
         case GameMessageOpcode.PlayerCreate:

@@ -28,6 +28,7 @@ import { udpProbeLogin } from './loginProbe.js';
 import { resolveTarget } from './targets.js';
 import { defaultFetchText } from './serverList.js';
 import { isAc1999Era } from './protocol.js';
+import { startEgress } from './egress.js';
 
 async function main(): Promise<void> {
   const config = resolveBridgeConfig(process.argv.slice(2), process.env);
@@ -74,6 +75,8 @@ async function main(): Promise<void> {
       fetchText: defaultFetchText,
       log,
       detector,
+      // A world whose sessions each get their own address no longer shares its per-address caps.
+      egressWorlds: config.egress ? new Set(config.egress.worlds.keys()) : undefined,
     });
     directory.start();
     if (config.allowPrivateTargets) {
@@ -83,7 +86,9 @@ async function main(): Promise<void> {
     }
   }
 
-  const bridge = createBridgeServer(config, { registry, directory, log });
+  // Per-session egress addresses (egress.ts): before listening, so the first session already has its slots.
+  const egress = await startEgress(config.egress, log);
+  const bridge = createBridgeServer(config, { registry, directory, log, egress });
   const port = await bridge.listen();
   log('info', 'bridge_listening', {
     url: `ws://${config.wsHost}:${port}`,

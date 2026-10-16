@@ -37,6 +37,13 @@ export interface TargetLocations {
   worn(guid: number): boolean;
   inOpenContainer(guid: number): boolean;
   inWorld(guid: number): boolean;
+  /**
+   * The open vendor's merchandise: ACE FindObject's LastUsedContainer, which for a vendor answers
+   * Vendor.TryGetItemForSale (Player_Inventory.cs:558-568; LastOpenedContainerId is set by ApproachVendor,
+   * Vendor.cs:295). IdentifyObject searches Everywhere, so an examine of a shop item is answered; Use
+   * (MyInventory | MyEquippedItems | Landblock) never looks there, so its gate leaves this out.
+   */
+  forSale?(guid: number): boolean;
 }
 
 /**
@@ -50,5 +57,5 @@ export interface TargetLocations {
  */
 export function targetResolves(guid: number, selfGuid: number | null, where: TargetLocations): boolean {
   if (selfGuid !== null && guid === selfGuid) return true;
-  return where.inPack(guid) || where.worn(guid) || where.inOpenContainer(guid) || where.inWorld(guid);
+  return where.inPack(guid) || where.worn(guid) || where.inOpenContainer(guid) || where.inWorld(guid) || !!where.forSale?.(guid);
 }

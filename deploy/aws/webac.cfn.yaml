@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  playwebac.com on one EC2 instance: the static web client and the WebSocket-to-UDP
+  bridge behind nginx, plus per-session egress addresses for per-IP-limited worlds
+  (docs/aws-hosting.md). Create or update with tools/aws-stack.sh.
+
+Parameters:
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      Amazon Linux 2023 arm64. tools/aws-stack.sh resolves the latest one on create and
+      keeps the stack's current value on updates, because a new AMI replaces the instance.
+  InstanceType:
+    Type: String
+    Default: t4g.small
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1a
+  EgressSlots:
+    Type: Number
+    Default: 3
+    Description: >-
+      Secondary private IPv4s on the primary interface. Each one can carry a per-session
+      Elastic IP for an egress world (BRIDGE_EGRESS_SERVERS). t4g.small allows 3 here
+      (4 per interface); more capacity means another interface (docs/aws-hosting.md).
+  RepoSsh:
+    Type: String
+    Default: git@github.com:jakemmarsh/acjs.git
+  BudgetEmail:
+    Type: String
+    Description: Where the monthly cost alert goes.
+  BudgetUsd:
+    Type: Number
+    Default: 30
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.60.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: webac }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: webac }]
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.60.1.0/24
+      AvailabilityZone: !Ref AvailabilityZone
+      MapPublicIpOnLaunch: false
+      Tags: [{ Key: Name, Value: webac }]
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: webac }]
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: webac web + bridge (HTTPS, and HTTP for the redirect)
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        # The bridge's per-session UDP sockets (Linux ephemeral ports). Return traffic on a flow
+        # the bridge opened passes anyway; this keeps parity with Railway (no inbound filtering)
+        # for a server that answers from a port the bridge never wrote to, which a security group
+        # would treat as new inbound and drop. The bridge itself drops datagrams that don't come
+        # from its session's server (isFromAce).
+        - { IpProtocol: udp, FromPort: 32768, ToPort: 60999, CidrIp: 0.0.0.0/0 }
+      SecurityGroupEgress:
+        - { IpProtocol: '-1', CidrIp: 0.0.0.0/0 }
+      Tags: [{ Key: Name, Value: webac }]
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - { Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }
+      ManagedPolicyArns:
+        # Shell and remote commands through Systems Manager (no SSH port).
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: webac-host
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters, ssm:GetParametersByPath]
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/webac/*
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/webac/*
+              # Per-session egress addresses (services/ws-tcp-bridge/src/egress.ts).
+              - Effect: Allow
+                Action: [ec2:DescribeAddresses, ec2:DescribeNetworkInterfaces]
+                Resource: '*'
+              - Effect: Allow
+                Action: ec2:AllocateAddress
+                Resource: '*'
+                Condition:
+                  ForAllValues:StringEquals: { 'aws:TagKeys': ['webac:egress', 'webac:egress-instance'] }
+              - Effect: Allow
+                Action: ec2:CreateTags
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:elastic-ip/*
+                Condition:
+                  StringEquals: { 'ec2:CreateAction': AllocateAddress }
+              - Effect: Allow
+                # Only addresses the bridge allocated itself: never the instance's own address.
+                Action: [ec2:AssociateAddress, ec2:DisassociateAddress, ec2:ReleaseAddress]
+                Resource: '*'
+                Condition:
+                  StringLike: { 'ec2:ResourceTag/webac:egress': '*' }
+              # Associate/Disassociate also authorize against the interface and instance (untagged).
+              - Effect: Allow
+                Action: [ec2:AssociateAddress, ec2:DisassociateAddress]
+                Resource:
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+
+  BridgeLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /webac/bridge, RetentionInDays: 30 }
+  WebLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /webac/web, RetentionInDays: 30 }
+  HostLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /webac/host, RetentionInDays: 30 }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: GatewayAttachment
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        # 2: the web container (bridge network) can reach IMDS through one extra hop.
+        HttpPutResponseHopLimit: 2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeType: gp3, VolumeSize: 20, Encrypted: true, DeleteOnTermination: true }
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          SubnetId: !Ref Subnet
+          GroupSet: [!Ref SecurityGroup]
+          AssociatePublicIpAddress: false
+          SecondaryPrivateIpAddressCount: !Ref EgressSlots
+      Tags: [{ Key: Name, Value: webac }]
+      # Kept tiny on purpose: changing UserData stops the instance. Everything else lives
+      # in the repo (deploy/aws/host/bootstrap.sh) and the deploy agent re-runs it.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee -a /var/log/webac-userdata.log) 2>&1
+          dnf install -y git
+          install -d -m 700 /root/.ssh
+          aws ssm get-parameter --region ${AWS::Region} --name /webac/github-deploy-key --with-decryption \
+            --query Parameter.Value --output text > /root/.ssh/webac_deploy
+          chmod 600 /root/.ssh/webac_deploy
+          export GIT_SSH_COMMAND="ssh -i /root/.ssh/webac_deploy -o StrictHostKeyChecking=accept-new"
+          install -d /opt/webac
+          [ -d /opt/webac/repo/.git ] || git clone --filter=blob:none --no-checkout ${RepoSsh} /opt/webac/repo
+          cd /opt/webac/repo
+          git sparse-checkout set --no-cone /deploy/ /services/ws-tcp-bridge/railway.json
+          git checkout -f origin/main
+          bash deploy/aws/host/bootstrap.sh
+
+  PublicAddress:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: webac }]
+
+  PublicAddressAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt PublicAddress.AllocationId
+      InstanceId: !Ref Instance
+
+  CostAlert:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: webac-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit: { Amount: !Ref BudgetUsd, Unit: USD }
+      NotificationsWithSubscribers:
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 80 }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]
+        - Notification: { NotificationType: FORECASTED, ComparisonOperator: GREATER_THAN, Threshold: 100 }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]
+
+Outputs:
+  PublicIp:
+    Value: !Ref PublicAddress
+  InstanceId:
+    Value: !Ref Instance

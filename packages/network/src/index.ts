@@ -88,6 +88,7 @@ export {
   buildAllegianceChatBootPayload, parseAllegianceChatBootPayload,
   buildAllegianceChatGagPayload, parseAllegianceChatGagPayload,
   buildCastTargetedSpellPayload, parseCastTargetedSpellPayload,
+  buildResearchSpellPayload, parseResearchSpellPayload, SPELL_FORMULA_SLOTS,
   buildAddSpellFavoritePayload, parseAddSpellFavoritePayload,
   buildRemoveSpellFavoritePayload, parseRemoveSpellFavoritePayload,
   buildChessJoinPayload, parseChessJoinPayload,
@@ -179,12 +180,13 @@ export type {
 
 // Client connection (browser-side)
 export { ClientConnection, parseAgentCall, parsePairingReply, parseRelayLinkNotice, parseRoutinesGrant, probeBridgeHealth, netErrorPayloadOffset, readServerNetError } from './ClientConnection.js';
-export { BRIDGE_CLOSE_IP_CAP, BridgeRefusalError, bridgeRefusalFromClose, bridgeRefusalOf, type BridgeRefusal } from './BridgeRefusal.js';
+export { BRIDGE_CLOSE_IP_CAP, BRIDGE_CLOSE_WORLD_FULL, BRIDGE_CLOSE_NEW_ACCOUNT_CAP, BRIDGE_CLOSE_NEW_ACCOUNT_UNAVAILABLE, BridgeRefusalError, bridgeRefusalFromClose, bridgeRefusalOf, type BridgeRefusal } from './BridgeRefusal.js';
 export type { ConnectionEventType, ConnectionEvent, ConnectionListener, DisconnectCause, BridgeHealth, HealthSocketLike, RoutinesGrant, PairingReply, RelayLinkNotice, AgentCallFrame, ServerNetError } from './ClientConnection.js';
 export { hostClientConnection, NET_SNAPSHOT_INTERVAL_MS } from './NetWorker.js';
 export { createConnection } from './createConnection.js';
 export { hex32, msAgo, boundNetDiagnostics, NET_DIAG_END_CAUSES, NET_DIAG_MAX_MS, NET_DIAG_MAX_COUNT } from './NetDiagnostics.js';
 export type { NetDiagnostics } from './NetDiagnostics.js';
+export { ThreadStallClock, silenceIsOwnStall, THREAD_STALL_MIN_MS, type ThreadStall, type LinkSample } from './ThreadStall.js';
 export { Connection1999, VERSION_1999 } from './era1999/Connection1999.js';
 export { CREDENTIAL_BYTES_1999 } from './era1999/Login1999.js';
 export type { DatPatch1999, DatPatchEvent } from './era1999/Connection1999.js';

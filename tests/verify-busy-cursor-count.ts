@@ -56,6 +56,8 @@ describe('BusyCount (m_cBusy)', () => {
     expect([...BUSY_COUNT_ACTIONS].sort()).toEqual([
       GameActionType.Use, GameActionType.UseWithTarget,
       GameActionType.CastUntargetedSpell, GameActionType.CastTargetedSpell,
+      // 1999 research (the research send @ 0x4d1e90 → PanelUI_IncrementBusyCount); only a 1999 world sends it.
+      GameActionType.ResearchSpell,
       GameActionType.Buy, GameActionType.Sell,
     ].sort());
     const { busy } = counter();

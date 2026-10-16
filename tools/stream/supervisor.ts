@@ -29,10 +29,9 @@ import { STATE_DIR, logFile, pidAlive, readInfo } from '../ac-agent/state.ts';
 import { type CharacterConfig, type StreamConfig, parseStreamConfig } from './config.ts';
 import { type ChatParseState, FeedWriter, FileTail, type SegmentUsage, addUsage, feedPath, parseChatLine, parseStreamJsonLine, statusDraft } from './feed.ts';
 import { type SegmentRecord, QUIET_TOOLS, afterTurn, dayUsage, endReason, localDay, nextSegment, quietNudge } from './policy.ts';
+import { loadOwnTime } from './own-time.ts';
 import { preparePlayerDir } from './player.ts';
 import { type TableSpell, loadSpellTableRows } from './spellGaps.ts';
-import { eraClientRules } from '../../packages/renderer/src/era/EraFeatures.ts';
-import { eraProfile } from '../../packages/renderer/src/era/EraProfiles.ts';
 import { StuckWatch, classifyResult, isBusyChatLine } from './stuck.ts';
 import { TOOLS } from '../ac-agent/tools.ts';
 import { type SessionTally, clipReport, nudgeMessage, quietMessage, readinessBrief, sessionSoFar, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
@@ -76,6 +75,11 @@ export interface SupervisorDeps {
   spells?(profile: string): Promise<AgentSpell[] | null>;
   /** The era's DAT spell table (name, school, power), for the spells line's family names; null when the DAT isn't there. */
   spellTable?(): Promise<TableSpell[] | null>;
+  /**
+   * Where the character's time went in its previous segment (own-time.ts loadOwnTime: travel, fights, buffs, trips, XP per
+   * hour by spot, waiting, refused casts, time apart), for the opening; null when there is no previous segment.
+   */
+  ownTime?(profile: string, character: string, cast: readonly string[]): string | null;
   /** One agent-API call through the daemon (the stop flow's logout of an attached tab). */
   callAgent(profile: string, method: string, args?: unknown[]): Promise<unknown>;
   journal(profile: string): string;
@@ -390,9 +394,10 @@ export class StreamSupervisor {
       sheet: await deps.characterSheet(c.profile).catch(() => null),
       spells: await deps.spells?.(c.profile).catch(() => null) ?? null,
       table: await deps.spellTable?.().catch(() => null) ?? null,
-      needsCaster: eraClientRules(eraProfile(c.era)).combatModeCheck === 'eor',
       session: sessionSoFar(cfg.characters.map((o) => ({ character: o.character, tally: this.tally.get(o.profile) }))),
     });
+    let ownTime: string | null = null;
+    try { ownTime = deps.ownTime?.(c.profile, c.character, cfg.characters.map((o) => o.character)) ?? null; } catch (e) { deps.log(`${c.character}: own time: ${(e as Error).message}`); }
     const startMs = deps.now();
     const deadline = startMs + cfg.segment.minutes * 60_000;
     const hardDeadline = deadline + cfg.segment.wrapUpMinutes * 60_000 + 60_000;
@@ -401,7 +406,7 @@ export class StreamSupervisor {
     this.active.set(c.profile, { proc, c });
     deps.log(`${c.character}: segment ${segment} started (${c.model}, ${cfg.segment.minutes} min)`);
     deps.feed.write({ type: 'segment-start', char: c.profile, title: `${c.character}: segment ${segment}`, detail: `${c.model}, ${cfg.segment.minutes} min` });
-    proc.send(userLine(segmentOpening({ c, partner, segment, nowMs: startMs, playMinutes: cfg.segment.minutes, journal: deps.journal(c.profile), lastReport, readiness })));
+    proc.send(userLine(segmentOpening({ c, partner, segment, nowMs: startMs, playMinutes: cfg.segment.minutes, journal: deps.journal(c.profile), lastReport, readiness, ownTime })));
 
     const names = new Map<string, string>();
     const callTools = new Map<string, string[]>();
@@ -589,6 +594,7 @@ export function realDeps(cfg: StreamConfig): SupervisorDeps {
     characterSheet: async (p) => { const c = client(p); return c ? c.call<string>('characterSheet', [], 15_000).catch(() => null) : null; },
     spells: async (p) => { const c = client(p); return c ? c.call<AgentSpell[]>('spells', ['', 1000], 15_000).catch(() => null) : null; },
     spellTable: () => (spellRows ??= loadSpellTableRows()),
+    ownTime: (p, character, cast) => loadOwnTime({ streamDir: STREAM_DIR, feedFile: feedPath(), profile: p, character, cast, nowMs: Date.now() }),
     callAgent: async (p, m, a = []) => { const c = client(p); if (!c) throw new Error(`no daemon for ${p}`); return c.call(m, a, 15_000); },
     journal: (p) => {
       const i = readInfo(p);

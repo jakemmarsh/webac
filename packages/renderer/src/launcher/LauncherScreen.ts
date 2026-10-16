@@ -286,7 +286,9 @@ export class LauncherScreen {
     this.favorites = this.favorites.includes(k) ? this.favorites.filter((x) => x !== k) : [...this.favorites, k];
     saveFavoriteWorlds(this.favorites, this.opts.storage === undefined ? undefined : this.opts.storage);
     this.refresh();
-    this.revealSelected(true);
+    // Centred, not `nearest`: a row starred near the top shows the whole
+    // favourites group above it, not the list cut one row short.
+    this.revealSelected();
   }
 
   /** The list as drawn: favourites first (directory order kept within each group). */
@@ -648,7 +650,15 @@ export class LauncherScreen {
         heart.style.backgroundImage = u ? `url(${u})` : 'none';
       };
       heartArt(fav);
-      heart.addEventListener('click', (e) => { e.stopPropagation(); this.toggleFavorite(w); });
+      // The heart selects its own world too: the list then follows the row
+      // to its new place instead of scrolling back to another selection
+      // (Jake, 2026-10-16: "it jumps back to my focused right on heart/unheart").
+      heart.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.selected = w;
+        this.toggleFavorite(w);
+        (this.listEl?.querySelector('.launcher-world-row[aria-selected="true"]') as HTMLElement | null)?.focus({ preventScroll: true });
+      });
       heart.addEventListener('dblclick', (e) => e.stopPropagation());
       row.addEventListener('mouseenter', () => { paint(true); heartArt(true); });
       row.addEventListener('mouseleave', () => { paint(false); heartArt(fav); });

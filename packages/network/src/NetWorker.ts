@@ -18,6 +18,7 @@ import { createConnection } from './createConnection.js';
 import type { GameMessageGroup } from './GameMessageGroup.js';
 import type { LoginProfile } from './LoginProfile.js';
 import type { NetDiagnostics } from './NetDiagnostics.js';
+import type { LinkSample } from './ThreadStall.js';
 
 /** What the page uses of a session connection (ClientConnection or NetWorkerClient). */
 export interface NetConnection {
@@ -36,7 +37,7 @@ export interface NetConnection {
   /** A text frame to the bridge (the hosted connector's relay answers and state). */
   sendBridgeText(text: string): void;
   checkHealth(): Promise<BridgeHealth>;
-  getLinkStatus(now?: number): { connected: boolean; secondsSinceLastPacket: number };
+  getLinkStatus(now?: number): LinkSample;
   getPacketLossPercentage(): number;
   /** OBS.dm-stall-diagnostics — the connection's sequencing state now (NetDiagnostics.ts). */
   getDiagnostics(now?: number): NetDiagnostics;
@@ -47,7 +48,7 @@ export interface NetConnection {
 /** The worker's view of its connection, sent with every event and on a timer. */
 export interface NetSnapshot {
   connected: boolean;
-  link: { connected: boolean; secondsSinceLastPacket: number };
+  link: LinkSample;
   /** Date.now() when `link` was sampled. */
   at: number;
   loss: number;

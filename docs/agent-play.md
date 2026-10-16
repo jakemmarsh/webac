@@ -183,6 +183,18 @@ loot, attack); `ac_inventory filter=` lists only a kind (weapon, armor, scroll, 
 holding the text. A give the server answered "You give …" is done even before the pack shows it, and one that fails
 far from the recipient says how far.
 
+**Critical health (2026-10-16, Arcanist at 19:58Z, end of retail).** Below the critical line (`AgentApi.CRITICAL_HEALTH`
+40% of max, or one hit of `CRITICAL_HIT_FRAC` 20% that leaves you under 60%) three things happen. (1) Any walk stops,
+flee=true included: "stopped … m short: health 26/146 (18%), below the critical 40% … Heal or keep running?". Heal there
+(a cast needs you standing), or ask the walk again: one asked already under the line runs on until health falls another
+`CRITICAL_RUN_ON_FRAC` (10%) of max. A run into a portal (`use` on a portal) and a routine's own walks don't stop for it.
+(2) Under 40%, every `ac_wait` wakes, whatever its types (as it does on your death): a `vitals-low` saying CRITICAL, again at each further
+10% fall. A wait with no types already woke on everything. A fellow's health still needs `fellow-low`. (3) `ac_cast
+spell="Heal Self"` (a family with no level) casts the highest level you know with a 75% or better chance past the fizzle
+roll (`SPELL_PICK_MIN_CHANCE`; else the likeliest), naming it in the reply. It used to answer "fits 4 of your spells:
+name one", a round trip at 26 HP. Why: a flee walk took Arcanist from 146 to 26 HP in 33 s while it answered "still in
+progress" and his `types=task-done,fellow-low,death` wait slept on.
+
 From the Daiklos reports (2026-10-16, 07:29 UTC): a `vitals-low` (or `fellow-low`) event is dropped from a wait once
 the vital it names is back above the level it fell below (a heal between the fall and the wait woke the wait at once on
 "health 93/156 (60%)" at full health), as threat events about dead creatures are. `ac_observe` and `ac_inventory` count
@@ -460,6 +472,28 @@ playing well: "Earlier sessions lost hours to … long shopping and buffing stop
 over preparation. Last, the pair should talk like two friends playing AC, not role-players.
 
 What changed:
+- **Where the last segment's time went** (`tools/stream/own-time.ts`, 2026-10-16): right under the readiness block,
+  from the character's previous segment (segments.jsonl + its sessions/ stream-json + the feed's status and chat
+  lines), one short line each, each left out when its data isn't there, the whole block absent on a first segment
+  (or one that ended over 3 h ago). Facts only, no advice words: Jake wants the players to draw their own
+  conclusions (e.g. that a 10-minute walk to the same dungeon every hour is worth a Portal Tie).
+  ```
+  - last hour: travelling 8 min (1 portal trip), fighting 13 min, buffing 2 min, waiting/idle 37 min; longest trip Holtburg → Mountain Keep (54.7N 32.9E), 8 min, 2nd time today
+  - XP per hour: Mountain Keep 747k/h over 48 min (today 747k/h over 1.6 h), Holtburg 0/h over 5 min (today 0/h over 11 min)
+  - waiting: 6 min with no monster in sight, 5 min resting (mana)
+  - offensive casts refused for no line of fire or out of range: Mountain Keep 20% (10/50)
+  - apart from Claude Bulwark (over 30 m, another floor or out of sight): 7 min (different floors 2)
+  ```
+  Each second gets one kind, first match: fighting (combat chat lines, an attack until it ends, a cast at a
+  monster), travelling (walk_to / follow / a portal use / portal space; a walk that answered "in progress" runs
+  through its waits until task-done), buffing (casts at yourself or a cast member), shopping, looting/gear, else
+  waiting/idle. A trip is travel legs joined across pauses under 60 s with no fight between; it is named by its last
+  named walk or portal target (else the place it ended), and moving about inside one place isn't a trip. Places: a
+  town within 3 map units, else coordinates; indoors, the portal that led into that landblock. XP per hour: status
+  samples' total XP per spot (interior place, or nearest town area). Waiting splits idle seconds into "resting"
+  (a vital under half) and "no monster in sight" (the last look listed none, held up to 5 min). Refusals: offensive
+  casts by place (indoors by name, else "outdoors"). Apart: the looks' `fellows:` line (over 30 m, 4 m+ up or down,
+  or out of sight), each held up to 2 min.
 - **The opening message's readiness block** (`readinessBrief` in `tools/stream/prompt.ts`): facts only, a few lines.
   Gear gaps from the daemon's `inventory` read (`gearView`: bare body parts, clothing-only parts, pack items that
   would fill an empty slot including the cloak, worn pieces never appraised), unassigned XP and skill credits from
@@ -1210,6 +1244,25 @@ placed in: Bulwark converted the DB's decimal 25493832 to "0x01850248" by hand a
 read as unreachable, though the doorway route walks there (2026-10-16). A fellow out of your sight in a
 dungeon (ACE stops placing a player in a room yours can't see; the fellowship's updates carry no place) is
 walked to where the client last placed them, and `ac_follow` follows on from there when they are in sight.
+A monster the client has let go (out of the rooms in sight of yours) that you saw in the last minute, in the landblock
+you are in, is walked to the same way: `X #id is out of sight (your client let it go); going to where it was last seen:
+20 m N of you, 4 s ago`, then whether it is in sight from there (`AgentApi.monsterLastSeen`, 2026-10-16).
+
+**Portals are never entered unasked.** The planner keeps out of every portal's disk (its part radius + 0.8 m), but a
+body at a run carries metres past a waypoint between two looks, and Bulwark, standing in the ring of seven housing
+portals SE of Holtburg (landblock 0xABB1: 27 such rings stand by towns, 354 outdoor portal pairs under 12 m apart),
+ran past a waypoint 2.8 m from the Holtburg Wilderness Settlement Portal and through it (2026-10-16 21:18Z). Each tick
+`portalGuard` (agent/portalAvoid.ts) walks instead of running when a portal's disk lies on the next 4 m of the heading,
+and lets go of forward and plans again when the body is inside a disk heading nearer. If the only way on goes through
+a portal, the walk stops saying so (`kept out of <portal> …: ac_use a portal to go through it`). A portal that still
+takes you is named in "went through a portal on the way (X, which this walk was not sent to …)": report it.
+
+**`line=true` (casters, archers).** `within` alone counts as arrived across a wall: "arrived (5.0 m away)" and the next
+bolt refused "no line of fire" (Arcanist, Mountain Keep, 2026-10-16). With `line=true` the walk also needs an open line
+of fire (`AgentHost.lineOfFire`): within range but walled off, it closes in 1.5 m at a time (round the wall, as the
+planner goes) until the line opens, and at worst stops beside the target saying the line is still shut. It is an
+option, not the default, because walk_to doesn't know you mean to shoot (a fellow, an NPC or a melee approach needs no
+line). Without it, an arrival beside a monster still says when the line is shut and suggests line=true.
 
 `walkTo` (packages/renderer/src/agent/AgentApi.ts) gets you there the way a player would, and every check
 uses the client's own movement collision:

@@ -7,9 +7,10 @@
  * Held caster (0x1000000). ACE answers a forced request with NonCombat
  * (Player_Combat.cs HandleActionChangeCombatMode_Inner, caster == null) and
  * then casts anyway in the magic stance (Player_Magic.cs, LastCombatMode).
- * The 1999 client.exe (UI::SetCombatMode @ 0x4d04c0) lets a bare-handed mage
- * into magic mode and refuses only melee / missile while a Held item is
- * wielded. The spell bar itself follows the HUD's combat mode, whatever route
+ * The 1999 client.exe asks for magic only with a caster held
+ * (PanelUI::GetDefaultCombatMode @ 0x4f9130; BUG.ac1999-magic-mode-refused,
+ * tests/verify-ac1999-magic-mode-refused.ts), and its UI::SetCombatMode
+ * @ 0x4d04c0 refuses melee / missile while a Held item is wielded. The spell bar itself follows the HUD's combat mode, whatever route
  * set it (the server's CombatMode property included).
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -39,13 +40,14 @@ describe('CompatibleCombatMode by era', () => {
       .toEqual({ text: "You can't enter magic mode while wielding the Flaming Tachi" });
   });
 
-  it('1999: magic bare-handed is fine; melee / missile are refused only while a Held item is wielded', () => {
+  it('1999: magic needs a held caster too; melee / missile are refused while a Held item is wielded', () => {
     expect(eraClientRules(eraProfile('ac1999-retail')).combatModeCheck).toBe('ac1999');
-    expect(compatibleCombatMode(CombatMode.Magic, 0, 'ac1999')).toBe(true);
-    expect(compatibleCombatMode(CombatMode.Magic, MELEE, 'ac1999')).toBe(true);
+    expect(compatibleCombatMode(CombatMode.Magic, 0, 'ac1999')).toBe(false);
+    expect(compatibleCombatMode(CombatMode.Magic, MELEE, 'ac1999')).toBe(false);
+    expect(compatibleCombatMode(CombatMode.Magic, HELD, 'ac1999')).toBe(true);
     expect(compatibleCombatMode(CombatMode.Melee, HELD, 'ac1999')).toBe(false);
     expect(compatibleCombatMode(CombatMode.Missile, HELD, 'ac1999')).toBe(false);
-    expect(compatibleCombatMode(CombatMode.Missile, 0, 'ac1999')).toBe(true);
+    expect(compatibleCombatMode(CombatMode.Missile, MISSILE, 'ac1999')).toBe(true);
     expect(incompatibleCombatModeRefusal(CombatMode.Melee, HELD, 'Wand', 'ac1999'))
       .toEqual({ text: "You can't enter combat mode while wielding the Wand" });
   });
@@ -53,7 +55,7 @@ describe('CompatibleCombatMode by era', () => {
   it("the automation's reason names the missing caster", () => {
     expect(combatModeRefusalReason(CombatMode.Magic, 0, null, 'eor')).toMatch(/magic mode needs a wielded wand, staff or orb, and none is wielded.*wield one first/);
     expect(combatModeRefusalReason(CombatMode.Magic, HELD, 'Orb', 'eor')).toBeNull();
-    expect(combatModeRefusalReason(CombatMode.Magic, 0, null, 'ac1999')).toBeNull();
+    expect(combatModeRefusalReason(CombatMode.Magic, 0, null, 'ac1999')).toMatch(/^magic mode needs a wielded wand/);
     expect(combatModeRefusalReason(CombatMode.Missile, MELEE, 'Tachi', 'eor')).toBe("You can't enter missile mode while wielding the Tachi");
   });
 });
@@ -109,7 +111,7 @@ describe("observe's gear line names a missing caster where the era needs one", (
     host.inv = [{ guid: 0x80000001, name: 'Cup', where: 'main pack', itemType: 0x800 }, { guid: 0x80000002, name: 'Flaming Tachi', where: 'main pack', itemType: 0x1 }];
     return host;
   };
-  it('end of retail, none owned: "buy one"; with an Orb in the pack: "wield it"; wielded or 1999: nothing', () => {
+  it('none owned: "buy one"; with an Orb in the pack: "wield it"; wielded (or a client needing none): nothing', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const h = mage(true);
     expect(casterLine(h)).toMatch(/^gear: no wand, staff or orb wielded: you can't enter magic mode or cast without one; you carry none: buy one/);

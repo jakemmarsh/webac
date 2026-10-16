@@ -40,15 +40,23 @@ export const DEFAULT_VIEWPORT = { width: 1568, height: 775 } as const;
 /** Cloud containers pin a pre-installed Chromium here (see capture-ui-screens.ts). */
 export const REMOTE_CHROMIUM = '/opt/pw-browsers/chromium';
 
+/**
+ * AC_HOST_RESOLVER_RULES: Chrome's --host-resolver-rules for every launch, e.g.
+ * "MAP playwebac.com 184.193.176.126, MAP bridge.playwebac.com 184.193.176.126"
+ * to play the real hostnames against a new host before DNS points there
+ * (docs/aws-hosting.md, cutover). Empty = normal DNS.
+ */
+export const HOST_RESOLVER_ARGS = process.env.AC_HOST_RESOLVER_RULES ? [`--host-resolver-rules=${process.env.AC_HOST_RESOLVER_RULES}`] : [];
+
 /** SwiftShader flags: headless WebGL without a GPU. */
-export const SWIFTSHADER_ARGS = ['--enable-unsafe-swiftshader', '--use-angle=swiftshader'];
+export const SWIFTSHADER_ARGS = ['--enable-unsafe-swiftshader', '--use-angle=swiftshader', ...HOST_RESOLVER_ARGS];
 /**
  * Real-GPU launch: the full-Chromium headless channel with the blocklist off
  * — the recipe tools/measure-perf.ts --gpu proved (CORE.14.d). A headed launch
  * hangs under the local harness, so this stays headless; no SwiftShader
  * opt-in, so a machine without a GPU fails loudly instead of falling back.
  */
-export const GPU_ARGS = ['--ignore-gpu-blocklist'];
+export const GPU_ARGS = ['--ignore-gpu-blocklist', ...HOST_RESOLVER_ARGS];
 
 export interface SessionOptions {
   /** Real GPU instead of SwiftShader (also `--gpu` / AC_GPU=1). */

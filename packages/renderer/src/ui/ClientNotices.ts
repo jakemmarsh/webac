@@ -123,6 +123,11 @@ export const CLIENT_NOTICES = Object.freeze({
   castTargetRefused: ui('castTargetRefused', 'spew', 'This spell cannot be cast on %s', 'ObjectCompatibleWithSpellTargetType @ 00567230, SendNotice_DisplayStringInfo(0x1a)'),
   // ObjectCompatibleWithSpell @ 00567c30 on a compatible target: "Casting %hs" (.rdata 0x7ce8f0).
   castingSpell: ui('castingSpell', 'spew', 'Casting %hs', 'ObjectCompatibleWithSpell @ 00567c30, SendNotice_DisplayStringInfo(0x1a)'),
+  // AC1999.spell-research-panel — the 1999 client.exe's research panel (ui/SpellResearch1999.ts).
+  // It prints through the UI vtable +0x114 (UI_SetStatusText: the status line, our spew).
+  researchNeedsMagicMode: ui('researchNeedsMagicMode', 'spew', 'You must first enter magic mode to test spell formulae', '1999 CreateSpellPanel_ListenToMessage @ 0x5ab784 (string 0x60e93c), UI vtable +0x114'),
+  researchNoTarget: ui('researchNoTarget', 'spew', 'You must first select a target for the spell', '1999 CreateSpellPanel_ListenToMessage @ 0x5ab7cb (string 0x613910), UI vtable +0x114'),
+  researchNotEnoughComponent: ui('researchNotEnoughComponent', 'spew', 'You do not have enough of this component', '1999 FormulaRow drop @ 0x5ac723 (string 0x613b7c), UI vtable +0x114'),
   // CORE.17.k.b.b.a.g.c — gmSpellcastingUI::Cast @ 004c6050 with no selected shortcut.
   castNoSpellSelected: ui('castNoSpellSelected', 'spew', 'You must select a spell to cast', 'gmSpellcastingUI::Cast @ 004c6050, 0x1a'),
 

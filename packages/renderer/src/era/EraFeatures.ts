@@ -143,15 +143,31 @@ export interface EraClientRules {
    * change (controllers/CombatModeChange.ts compatibleCombatMode). End of
    * retail's ClientCombatSystem::CompatibleCombatMode @ 0056a580 lets magic
    * mode in only with a caster in the Held slot (0x1000000), so a bare-handed
-   * player can't enter it; the 1999 client.exe's UI::SetCombatMode @ 0x4d04c0
-   * (inlined check) refuses only melee / missile while a Held item is wielded,
-   * so a 1999 mage enters magic mode bare-handed.
+   * player can't enter it. The 1999 client.exe asks only for the mode
+   * PanelUI::GetDefaultCombatMode @ 0x4f9130 picks (magic only with a caster
+   * held, missile only with a missile weapon), and its UI::SetCombatMode
+   * @ 0x4d04c0 also refuses melee / missile while a Held item is wielded, with
+   * its own "You can't enter combat mode while wielding the %s" line.
    */
   combatModeCheck: 'eor' | 'ac1999';
+  /**
+   * The Spell Research panel: MagicPanBase's third tab, "Create Spell"
+   * (CreateSpellPanel, ctor @ 0x5ab060, built by MagicPanBase @ 0x54c500 at
+   * +0x104 beside Spellbook and Components). The 1999 client.exe learns spells
+   * by researching a formula (0x4B ResearchSpell); the panel was cut before
+   * the 2005 client and end of retail has no research message, so only a 1999
+   * world builds it (ui/SpellResearch1999.ts).
+   */
+  spellResearch: boolean;
+  /**
+   * Splitpea, the 1999 taper program (reference/plugin-specs/splitpea.md): a VVS-bar plugin for the
+   * 1999 spell research system. Only the 1999 client researches spells (RandomizeVersion1 tapers).
+   */
+  splitpea: boolean;
 }
 
-const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const });
-const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const });
+const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false });
+const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true });
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {

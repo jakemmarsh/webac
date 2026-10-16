@@ -135,7 +135,7 @@ export function buildDirectory(
   servers: readonly ServerEntry[],
   status: ReadonlyMap<string, ServerStatus>,
   counts: ReadonlyMap<string, PlayerCount>,
-  opts: { now: number; compat?: CompatOverlay; detected?: (id: string) => Detection | undefined },
+  opts: { now: number; compat?: CompatOverlay; detected?: (id: string) => Detection | undefined; egressWorlds?: ReadonlySet<string> },
 ): DirectoryEntry[] {
   const entries = servers.map((s): DirectoryEntry => {
     const st = status.get(s.id.toLowerCase());
@@ -145,7 +145,11 @@ export function buildDirectory(
     const overlay = compatFor(s.id, s.emu, opts.compat ?? SERVER_COMPAT);
     // A never-probed era (AC1999) is the overlay's alone.
     const unprobed = overlay.era !== undefined && NO_PROBE_ERAS.has(overlay.era);
-    const c = withDetection(overlay, unprobed ? undefined : opts.detected?.(s.id));
+    const detected = withDetection(overlay, unprobed ? undefined : opts.detected?.(s.id));
+    // An egress world (BRIDGE_EGRESS_SERVERS, egress.ts): every session leaves from its own address and
+    // the bridge applies the per-address caps per player, so the shared-cap warning and limits no longer hold.
+    const egress = opts.egressWorlds?.has(s.id.toLowerCase()) ?? false;
+    const c: CompatEntry = egress ? { ...detected, warning: undefined, perIpLimits: undefined } : detected;
     return {
       id: s.id,
       name: s.name,
@@ -182,6 +186,8 @@ export interface ServerDirectoryOptions {
   compat?: CompatOverlay;
   /** Live era detection, swept after each feed refresh. */
   detector?: EraDetector;
+  /** BRIDGE_EGRESS_SERVERS world ids (lower-case): their rows drop the shared per-address warning and limits. */
+  egressWorlds?: ReadonlySet<string>;
 }
 
 /** Cached TreeStats feeds + the merged body for GET /servers. */
@@ -266,7 +272,7 @@ export class ServerDirectory {
       mode: 'multi',
       updatedAt: this.updatedAt === null ? null : new Date(this.updatedAt).toISOString(),
       servers: buildDirectory(this.opts.servers(), this.status, this.counts, {
-        now: this.now(), compat: this.opts.compat, detected: this.opts.detector && ((id) => this.opts.detector!.get(id)),
+        now: this.now(), compat: this.opts.compat, detected: this.opts.detector && ((id) => this.opts.detector!.get(id)), egressWorlds: this.opts.egressWorlds,
       }),
     };
   }

@@ -26,7 +26,7 @@ export const WORLD_SCREENS = ['world', 'portal_space', 'disconnected', 'char_sel
 export const WORLD_MODALS = ['popup', 'message', 'confirm', 'dialog', 'book'] as const;
 export const GPU_CLASSES = ['integrated', 'discrete', 'software', 'unknown'] as const;
 /** BUG.hidden-tab-session-drop — what ended a dropped session (renderer WorldReporter WORLD_END_CAUSES). */
-export const WORLD_END_CAUSES = ['socket_closed', 'server_disconnect', 'server_net_error', 'server_silent', 'local', 'link_dead', 'server_boot'] as const;
+export const WORLD_END_CAUSES = ['socket_closed', 'server_disconnect', 'server_net_error', 'server_silent', 'client_suspended', 'local', 'link_dead', 'server_boot'] as const;
 
 interface WorldIds {
   era: string | null;

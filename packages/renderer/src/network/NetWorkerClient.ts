@@ -8,7 +8,7 @@
 import {
   probeBridgeHealth, EOR_LOGIN_PROFILE,
   type BridgeHealth, type ConnectionEvent, type ConnectionListener, type GameMessageGroup, type LoginProfile,
-  type NetCommand, type NetConnection, type NetDiagnostics, type NetReply, type NetSnapshot,
+  type LinkSample, type NetCommand, type NetConnection, type NetDiagnostics, type NetReply, type NetSnapshot,
 } from '@ac/network';
 
 /** The page's end of the worker (a Worker, or a MessagePort in tests). */
@@ -115,12 +115,15 @@ export class NetWorkerClient implements NetConnection {
    * the 40 s DISCONNECT_TIME check (main.ts link tick) then raised ServerDied
    * on a live session. Retail ran its network layer in the same frame as that
    * check, so the check never saw a sample older than the frame.
+   * The worker thread's latest stop (NET.client-suspended-endcause) ages by
+   * the same amount.
    */
-  getLinkStatus(now: number = Date.now()): { connected: boolean; secondsSinceLastPacket: number } {
+  getLinkStatus(now: number = Date.now()): LinkSample {
     const { link, at } = this.snap;
     if (!link.connected) return { connected: false, secondsSinceLastPacket: 0 };
     const age = Math.min(Math.max(0, now - at), SNAPSHOT_EXTRAPOLATION_MAX_MS);
-    return { connected: true, secondsSinceLastPacket: link.secondsSinceLastPacket + age / 1000 };
+    const stall = link.stall ? { agoMs: link.stall.agoMs + age, lengthMs: link.stall.lengthMs } : null;
+    return { connected: true, secondsSinceLastPacket: link.secondsSinceLastPacket + age / 1000, stall };
   }
 
   getPacketLossPercentage(): number { return this.snap.loss; }

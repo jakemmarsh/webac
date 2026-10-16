@@ -53,7 +53,8 @@ Each session speaks end of retail unless something says 1999
 - `GET /metrics`: Prometheus text (`?format=json` for JSON). Includes active
   sessions (total and per server), connects, closes by reason, rejects by
   reason (`origin`, `global_cap`, `ip_rate`, `ip_cap`, `unknown_server`,
-  `server_cap`, `private_target`, `dns_failed`, ...), bytes by direction
+  `server_cap`, `private_target`, `dns_failed`, `egress_ip_cap`, `egress_full`,
+  `egress_new_account_cap`, `egress_new_account_unavailable`, ...), bytes by direction
   (`ws_in` browser→bridge, `udp_out` bridge→server, `udp_in` server→bridge,
   `ws_out` bridge→browser) and dropped messages. Set `BRIDGE_METRICS_TOKEN` to
   require `Authorization: Bearer <token>`.
@@ -102,6 +103,11 @@ bridge's own ping timeout, which logs `session_ping_timeout` first).
 | `BRIDGE_ALLOW_ANY_UDP_SOURCE` | off | Accept reply datagrams from any source (default: only the target's IP on base/base+1) |
 | `BRIDGE_SPP` | off | Pinned mode: the target trusts this bridge and reads each player's real address from a [Simple Proxy Protocol](https://developers.cloudflare.com/spectrum/reference/simple-proxy-protocol-header/) header on every datagram. Needs a server running the proposed ACE `TrustedProxyAddresses` (ACEmulator/ACE#4508, not merged; stock ACE has no support). Turn on only together with the server (docs/operators.md) |
 | `BRIDGE_SPP_SERVERS` | unset | Multi mode: comma-separated server ids that trust this bridge (as `BRIDGE_SPP`); era probes skip them |
+| `BRIDGE_EGRESS_SERVERS` | unset (off) | Per-session egress addresses (below): comma list of `<server id>:<sessionsPerAddress>[:<newAccountsPerRealIp>[:<accountsPerAddress>]]`, e.g. `ac1999:2:2:2` (pinned mode: `pinned:…`). `accountsPerAddress` (the world's lifetime account creations per source address) defaults to `newAccountsPerRealIp`. Unset = off: no egress code runs and the AWS SDK is never loaded. A malformed entry stops the bridge from starting |
+| `BRIDGE_EGRESS_PROVIDER` | aws | `aws`: an Elastic IP per slot (secondary private IPv4) while it carries sessions. `static`: the slots are used as they are (tests, dev with loopback aliases, a host whose addresses are already public) |
+| `BRIDGE_EGRESS_SLOTS` | aws: discovered | Comma list of local IPv4s to bind sessions to. `aws` default: every secondary private IPv4 on every ENI of the instance (IMDSv2), never an ENI's primary address. Required for `static` |
+| `BRIDGE_EGRESS_DIR` | `/var/lib/webac/egress` | State shared by every bridge process on the host (both sides of a blue/green drain): lock files, the hash salt, the account sets. Must be writable by the bridge's user (uid 1000 in the image) |
+| `BRIDGE_EGRESS_GRACE_SECONDS` | 120 | How long a slot keeps its address after its last session ends (a new session inside it reuses the address) |
 | `BRIDGE_CAPTURE` | — | Append inbound datagrams to a replay-corpus file. **Refused when `NODE_ENV=production`** |
 | `BRIDGE_DEBUG` | off | Per-packet debug logs |
 | `BRIDGE_LATENCY_MS` / `BRIDGE_JITTER_MS` / `BRIDGE_LOSS_PCT` / `BRIDGE_IMPAIR_SEED` | off | Simulated network impairment (test harness) |
@@ -125,14 +131,20 @@ docker build -f services/ws-tcp-bridge/Dockerfile -t acjs-bridge .
 docker run -p 8080:8080 -e BRIDGE_MODE=multi acjs-bridge
 ```
 
-The image bundles `src/` plus `ws` into one file on `node:20-slim` and runs
+The image bundles `src/` plus `ws` and `@aws-sdk/client-ec2` into one file on `node:20-slim` and runs
 as the `node` user with `NODE_ENV=production`, `BRIDGE_HOST=0.0.0.0` and
 `PORT=8080`. `Dockerfile.dockerignore` limits the build context to
 `services/ws-tcp-bridge/src` (BuildKit uses it in place of the root
 `.dockerignore`). SIGTERM sends each session's Disconnect to its server
 before exiting.
 
-## Deploying on Railway
+## Deploying
+
+playwebac.com runs the bridge on AWS (docs/aws-hosting.md: one EC2 host, nginx in
+front, blue/green deploys that drain the old container). The Railway recipe below
+still works for a self-hosted bridge.
+
+### On Railway
 
 1. Create a service from this repo. Leave the root directory at the repo
    root. `services/ws-tcp-bridge/railway.json` sets the Dockerfile path and
@@ -149,7 +161,155 @@ before exiting.
 
 Every player behind a shared bridge appears to the game server as the
 bridge's egress IP. On servers that limit sessions per IP, ask the operator
-to allowlist that IP (see `docs/release-plan.md`, "Per-IP session limits").
+to allowlist that IP (see `docs/release-plan.md`, "Per-IP session limits"),
+or give that server per-session egress addresses (next section).
+
+## Per-session egress addresses (`src/egress.ts`)
+
+For a world whose per-source-address caps every webAC player would share
+(AC1999: 2 live sessions and 2 accounts created per address, ever), the
+bridge gives each session to it a local address of its own (a "slot") and
+binds the session's UDP socket to it. On AWS (`BRIDGE_EGRESS_PROVIDER=aws`)
+a slot is a secondary private IPv4 of the instance; when it gets its first
+session the bridge allocates an Elastic IP (tag `webac:egress` = the slot's
+private IP) and associates it before the WebSocket upgrade completes, and
+after the slot's last session plus the grace period it disassociates and
+releases it, so the cost ($0.005/hour per address) follows play time.
+
+Slot choice for a session to world W from real IP R (an IPv6 player is
+keyed by their /64): refuse when R already holds W's per-address session
+limit on W (all bridge processes counted); otherwise a slot with no session
+on W (one player per address), else one with fewer than the limit (sharing up
+to the world's own cap), else refuse. A slot carries sessions to different
+worlds independently.
+
+Because every fresh address also resets the world's lifetime account cap,
+the bridge applies it per real IP. The login (the 1999 or end-of-retail
+LoginRequest) is read before it is forwarded. A known account (one that has
+reached a character list through this bridge) always logs in. A login for an
+unknown account is refused when R's markers are at `newAccountsPerRealIp`;
+otherwise it goes through and leaves a `pending` marker for R right away,
+because the server creates the account while handling that login. The
+account's first character list resolves the marker: no characters (a just
+auto-created account has none) and still unknown makes it `created`, kept
+for good; characters listed, or already known, drops it. A marker whose
+character list never comes (the session closed first) stays counted, for at
+most 30 days, unless the server explicitly refused that login in a way that
+proves it made no account: the AC1999/GDLE NetError ClientLogOnFailed,
+BadCryptoKey or PlayerAlreadyLoggedOn, or ACE's CharacterError
+AccountDoesntExist / Logon, AccountBanned, or a wrong-password AccountBoot.
+Then the markers that login wrote (real IP and address) are dropped
+(`egress_login_refused`). ServerFull and ACE's LogonServerFull / ServerCrash1
+don't count as refusals (both servers send them after auto-creating), nor
+does a silent drop. Every login of one session counts, so trying several names
+doesn't multiply the allowance. Edges: an existing account first seen
+through webAC after R reached its limit is refused (the gate can't tell it
+from a creation before the server answers; it logs in from any other
+network, after which it is known); an existing account with no characters,
+first seen through webAC, counts as created; and a login whose answer never
+came keeps counting for its 30 days.
+
+The world also counts account creations per SOURCE address, for life
+(AC1999 `max_accounts_per_ip`), and AWS hands a recently released Elastic IP
+back to the same account, so egress addresses would wear out. The bridge
+keeps the same markers per public address and world
+(`accounts/<world>/by-addr/<public ip>/`, written and resolved together with
+the real IP's). A login for an unknown account on an address that has made
+`accountsPerAddress` creations (created plus pending) moves the session,
+before the login is forwarded, to another slot whose address has both
+session and creation room, else to a free slot with a newly allocated
+address (`moved`; a socket already bound to the old address is replaced,
+since nothing of this login has left it). An allocation that comes back
+spent (recycled) is kept while the bridge allocates again (up to 5 tries),
+then released. When nothing with room can be had, the login is refused with
+`new_account_unavailable` (4504) and the real IP keeps its allowance. Known
+accounts ignore address history. Slot choice prefers a held address with
+creation room, then a spent held one, then a new allocation; idle spent
+addresses are released before other idle ones.
+
+The 1999 login is read as the release client's (`4.35752`) codec writes it
+and the AC1999 server's release mode reads it (u16 version length). A world
+on another codec (preview, Sep-2000 sentinel) would leave logins unparsed,
+which are forwarded (the rule then doesn't apply): don't list such a world
+with an account limit until the parser learns its codec.
+
+Ghost sessions: when a player's tab dies without a clean disconnect, the
+world keeps their old session up to its own timeout (60 s for ACE) while the
+bridge has already freed the slot, so a new player put on that address in
+that window counts against the world's per-address cap with the ghost. With
+`sessionsPerAddress` 2 this only matters when every other slot is full.
+
+Refusals close the WebSocket with codes the client maps to plain messages
+(`packages/network/src/BridgeRefusal.ts`): the per-real-IP session cap is the
+bridge's `ip_cap` (4429), no free slot or an AWS failure (address quota,
+throttling) is `world_full` (4503), the new-account limit is
+`new_account_cap` (4403), and no address that may still create accounts is
+`new_account_unavailable` (4504). An egress world's `/servers` row drops its
+shared-cap warning and `perIpLimits`.
+
+State lives in `BRIDGE_EGRESS_DIR`, shared by both bridge processes of a
+blue/green deploy: a lock file per live session (exclusive create, refreshed
+every 30 s, stale after 120 s), per-slot address records, and the account
+sets. Real IPs and account names are stored only as salted hashes (the salt
+file is created once in the dir). Mutexes hold a random token, are touched
+while held, are taken over once stale (`alloc.lock` after 5 s, slot and
+reconcile locks after 60 s), and are deleted only by their token's owner.
+Every lock wait is async: no world's traffic stops while one waits.
+
+A reconciler runs at start and every 5 minutes (one process at a time). It
+only looks at this instance's addresses: tagged ones associated with one of
+its ENIs, or unassociated ones tagged `webac:egress-instance` = its instance
+id (every allocation carries both tags). It releases any whose slot has no
+live session and is past its grace, and any no slot record names; it adopts
+an associated address whose record was lost while sessions use it; it
+forgets a record whose address is gone only after two consecutive listings
+miss it and never under live sessions. A failing slot is logged and skipped.
+Before a disassociate the slot's record is rewritten to claim no association,
+so a crash between disassociate and release leaves an unassociated
+allocation, which the next session on the slot or the reconciler gives back.
+
+On shutdown (SIGTERM, after the drain), the bridge waits for AWS work under
+way, then releases at once, without the grace, every address whose slot no
+bridge process has a session on, so a bridge with no successor leaves
+nothing billing; slots the other process still uses are left to it. The
+whole step gives up after 20 s (`egress_stop_deadline`); the next
+reconciler frees whatever is left.
+
+Every EC2 call gives up after 10 s (the SDK's HTTP handler has no timeout of
+its own), so a stalled endpoint refuses that session as `world_full` instead
+of holding a slot lock or the admission. The first reconcile at startup is
+waited for at most 15 s and goes on in the background. When a slot's
+allocation fails, the player falls back to another slot that already holds
+an address with room (`egress_fallback`). If a failed call actually took
+effect at AWS (an associate whose answer timed out), the bridge gives back
+every address tagged for that slot that no record names, under the slot's
+lock, and the reconciler releases such an orphan at once.
+
+If egress can't start (no IMDS, no secondary IPs, a `BRIDGE_EGRESS_SLOTS`
+address that isn't one), the bridge logs `egress_start_failed` at error
+level and keeps running: its egress worlds are refused as `world_full`, every
+other world works, and it retries after 30 s, 2 min, then every 10 min
+(`egress_start_recovered` when one works).
+
+Logs: `egress_start` (or `egress_start_failed`), `egress_acquire` /
+`egress_associate` (slot, public IP, timings), `egress_session_end`,
+`egress_release` (`why`: idle, shutdown, orphan, unfinished, failed_attach),
+`egress_fallback`, `egress_moved` (a new-account login left a spent address), `egress_stop_deadline`, `egress_refused`
+(reason, e.g. `aws:AddressLimitExceeded`), `egress_reconcile`,
+`egress_account_known` (`created` true when it counted), `egress_session_error`
+(a state-dir failure that closed one session as `world_full`);
+these carry only the hashed real IP. `session_open` / `session_close` carry
+`egressSlot` and `egressIp` next to the session's `ip`, which maps an
+operator's report about an address back to a player.
+
+AWS setup: IMDS must allow `instance-id` and the ENI listing; the instance
+role needs `ec2:AllocateAddress`, `ec2:CreateTags` (both tags on create), `ec2:AssociateAddress`, `ec2:DisassociateAddress`,
+`ec2:ReleaseAddress` and `ec2:DescribeAddresses`; IMDSv2 must be reachable
+from the container (host networking, hop limit 2 if bridged); the secondary
+private IPs must be configured on the OS interfaces (Amazon Linux 2023's
+amazon-ec2-net-utils does this, including the policy routing a secondary ENI
+needs); and the account's Elastic IP quota (default 5 per region) bounds the
+concurrent slots. The region comes from `AWS_REGION` or IMDS.
 
 ## Running a bridge next to your own server (operators)
 

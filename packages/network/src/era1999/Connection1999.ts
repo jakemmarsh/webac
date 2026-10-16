@@ -40,6 +40,7 @@ import { bridgeRefusalFromClose } from '../BridgeRefusal.js';
 import { Adapter1999, Group1999 } from './Adapter1999.js';
 import { codecs1999 } from './codecs/index.js';
 import { buildLoginBody1999, readGrant1999 } from './Login1999.js';
+import { ThreadStallClock, silenceIsOwnStall, type LinkSample } from '../ThreadStall.js';
 import {
   buildPacket1999, buildSeqList1999, checksum1999, F1999, fragmentMessage1999, HEADER_SIZE_1999, Isaac1999Keys,
   MAX_DATAGRAM_1999, optionBytes1999, readFragments1999, readHeader1999, readSeqList1999, type Fragment1999,
@@ -136,6 +137,12 @@ export class Connection1999 implements NetConnection {
    * ClientConnection's clockStalled, retail ClientNet::ProcessConnection).
    */
   private lastServiceAt = 0;
+  /**
+   * NET.client-suspended-endcause — this thread's own stops, fed by the
+   * service tick: a timeout whose silence they explain ends as
+   * 'client_suspended', not 'server_silent' (as ClientConnection.checkServerDead).
+   */
+  private readonly stallClock = new ThreadStallClock();
   /** What ended the session, set before we close the socket ourselves (ConnectionEvent.endCause). */
   private endCause: DisconnectCause | null = null;
   private checksumFailures = 0;
@@ -208,6 +215,7 @@ export class Connection1999 implements NetConnection {
     this.partial.clear();
     this.lastPacketAt = 0;
     this.lastServiceAt = 0;
+    this.stallClock.reset();
     this.endCause = null;
     this.sequence = 1;
     this.fragmentSequence = 2;
@@ -229,8 +237,12 @@ export class Connection1999 implements NetConnection {
 
   setUrl(url: string): void { this.url = url; }
   checkHealth(): Promise<BridgeHealth> { return probeBridgeHealth(this.url); }
-  getLinkStatus(now = Date.now()): { connected: boolean; secondsSinceLastPacket: number } {
-    return { connected: this.isConnected, secondsSinceLastPacket: this.lastPacketAt ? (now - this.lastPacketAt) / 1000 : 0 };
+  getLinkStatus(now = Date.now()): LinkSample {
+    return {
+      connected: this.isConnected,
+      secondsSinceLastPacket: this.lastPacketAt ? (now - this.lastPacketAt) / 1000 : 0,
+      stall: this.isConnected ? this.stallClock.latest(now) : null,
+    };
   }
   getPacketLossPercentage(): number { return this.received ? (100 * this.lost) / (this.received + this.lost) : 0; }
 
@@ -748,6 +760,7 @@ export class Connection1999 implements NetConnection {
     const clockStalled = this.lastServiceAt !== 0 && now - this.lastServiceAt > SERVER_TIMEOUT_MS;
     if (this.lastServiceAt !== 0 && now - this.lastServiceAt > this.diag.tickGapMax) this.diag.tickGapMax = now - this.lastServiceAt;
     this.lastServiceAt = now;
+    this.stallClock.tick(now);
     if (!this.granted) return;
     if (!this.sessionAnswered) {
       if (now - this.grantedAt >= POST_GRANT_WAIT_MS) { this.sessionNeverStarted(); return; }
@@ -772,7 +785,8 @@ export class Connection1999 implements NetConnection {
     }
     if (!clockStalled && this.endCause === null && this.lastPacketAt && now - this.lastPacketAt > SERVER_TIMEOUT_MS) {
       this.emit({ type: 'serverTimeout' });
-      this.closeFromServer('server_silent');
+      const suspended = silenceIsOwnStall(this.stallClock.latest(now), now - this.lastPacketAt, SERVER_TIMEOUT_MS);
+      this.closeFromServer(suspended ? 'client_suspended' : 'server_silent');
     }
   }
 }

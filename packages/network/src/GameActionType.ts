@@ -43,7 +43,14 @@ export enum GameActionType {
   TrainSkill                           = 0x0047,
   CastUntargetedSpell                  = 0x0048,
   CastTargetedSpell                    = 0x004A,
-  ChangeCombatMode                     = 0x0053,
+  /**
+   * 1999 only (not in ACE's enum): the Spell Research panel's "Test" —
+   * CM_Magic_Event_ResearchSpell @ 0x57c440 in the 1999 client.exe, read by
+   * the AC1999 server's ProcessEvent case RESEARCH_SPELL_EVENT. Only a 1999
+   * world sends it (eraClientRules().spellResearch).
+   */
+  ResearchSpell                        = 0x004B,
+  ChangeCombatMode                    = 0x0053,
   StackableMerge                       = 0x0054,
   StackableSplitToContainer            = 0x0055,
   StackableSplitTo3D                   = 0x0056,

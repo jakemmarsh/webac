@@ -18,6 +18,7 @@
  *     and contained items); a child part's physics parent otherwise.
  */
 import { CombatMode } from '@ac/shared';
+import { modeOfStance } from '../agent/macro/modeGate.js';
 
 /** Which era's CompatibleCombatMode applies (era/EraFeatures.ts EraClientRules.combatModeCheck). */
 export type CombatModeCheck = 'eor' | 'ac1999';
@@ -122,13 +123,27 @@ export function getAttackTarget(selected: number, l: AttackTargetLookup): number
  * only when neither MeleeWeapon (0x100000) nor TwoHanded (0x2000000) is worn
  * while something in 0x3500000 (a missile weapon or a caster) is. Peace and
  * every other mode are always compatible.
+ *
+ * 1999 (client.exe linked 1999-10-09, dat-sets/ac1999-retail): UI::SetCombatMode
+ * @ 0x4d04c0 itself refuses only melee / missile while a Held item is wielded,
+ * but it is only ever asked for the mode PanelUI::GetDefaultCombatMode
+ * @ 0x4f9130 picks (the toggle @ 0x4f6b36 / 0x502077; the other callers are the
+ * pending retry and the server's CombatMode int). That chooser gives missile
+ * only with a missile weapon worn (0x500000 slot, CombatUse 2) and magic only
+ * with a Caster (ItemType 0x8000) in the Held slot; bare-handed it gives melee,
+ * and UI_CastSpell @ 0x4d1bd0 never changes the mode. So no 1999 path asks for
+ * magic without a caster or missile without a missile weapon, and the AC1999
+ * server refuses both (Player.cpp CPlayerWeenie::ChangeCombatMode,
+ * "no-held-item" / "no-missile-weapon").
  */
 export function compatibleCombatMode(mode: CombatMode, inventoryMask: number, check: CombatModeCheck = 'eor'): boolean {
   const m = inventoryMask >>> 0;
-  // 1999 UI::SetCombatMode @ 0x4d04c0 (CompatibleCombatMode inlined): only
-  // melee / missile are refused, and only while a Held item (0x1000000) is
-  // wielded; magic needs no caster.
-  if (check === 'ac1999') return !((mode === CombatMode.Melee || mode === CombatMode.Missile) && (m & 0x1000000) !== 0);
+  if (check === 'ac1999') {
+    if ((mode === CombatMode.Melee || mode === CombatMode.Missile) && (m & 0x1000000) !== 0) return false;
+    if (mode === CombatMode.Missile) return (m & 0x400000) !== 0;
+    if (mode === CombatMode.Magic) return (m & 0x1000000) !== 0;
+    return true;
+  }
   if (mode === CombatMode.Missile) return (m & 0x400000) !== 0;
   if (mode === CombatMode.Magic) return (m & 0x1000000) !== 0;
   if (mode === CombatMode.Melee) return (m & 0x100000) !== 0 || (m & 0x2000000) !== 0 || (m & 0x3500000) === 0;
@@ -157,8 +172,14 @@ export function incompatibleCombatModeRefusal(
 ): { text: string | null } | null {
   if (compatibleCombatMode(mode, inventoryMask, check)) return null;
   if (readyWeaponName === null) return { text: null };
-  // The 1999 line names no mode: "You can't enter combat mode while wielding the <item>".
-  return { text: `You can't enter ${check === 'ac1999' ? 'combat' : combatModeName(mode)} mode while wielding the ${readyWeaponName}` };
+  if (check === 'ac1999') {
+    // The 1999 line names no mode, and only UI::SetCombatMode's Held check
+    // prints it ("You can't enter combat mode while wielding the <item>");
+    // the client never asks for the other refused modes, so it has no line.
+    if ((inventoryMask & 0x1000000) === 0 || mode === CombatMode.Magic) return { text: null };
+    return { text: `You can't enter combat mode while wielding the ${readyWeaponName}` };
+  }
+  return { text: `You can't enter ${combatModeName(mode)} mode while wielding the ${readyWeaponName}` };
 }
 
 /**
@@ -182,3 +203,121 @@ export function combatModeRefusalReason(
 
 /** The worn slots whose object is the ready weapon: TwoHanded, MeleeWeapon, MissileWeapon, Held. */
 export const READY_WEAPON_SLOTS = 0x2000000 | 0x100000 | 0x400000 | 0x1000000;
+
+/** WeenieError.ActionCancelled (WERROR_INTERRUPTED, "Action cancelled!"): GDLE's and the AC1999 server's answer to a refused mode. */
+export const MODE_REFUSED_ERROR = 0x0036;
+/** How long a sent mode change waits for the server's word before a later ActionCancelled is no longer read as its refusal. */
+export const MODE_REFUSAL_WINDOW_MS = 3000;
+
+/**
+ * BUG.ac1999-magic-mode-refused — a requested combat mode the server has not
+ * taken yet. The client commits a mode when it sends it (SetCombatMode
+ * @ 0056be30; the 1999 UI::SetCombatMode @ 0x4d04c0 writes UI+0x5a4 before
+ * sending), and the server's word follows:
+ *
+ *   - ACE answers every request with the CombatMode int, NonCombat for a
+ *     refusal (Player_Combat.cs HandleActionChangeCombatMode_Inner), which the
+ *     client already follows (OnQualityChanged → SetCombatMode(mode, false)).
+ *   - GDLE (the classic servers) and the AC1999 server take a change with a
+ *     movement in the new stance (Monster.cpp ChangeCombatMode → DoMotion) and
+ *     refuse one with only an ActionCancelled (Player.cpp
+ *     CPlayerWeenie::ChangeCombatMode → NotifyWeenieError(WERROR_INTERRUPTED)):
+ *     no stance, no CombatMode int. The client was left showing the refused
+ *     mode (a magic stance and spell bar over a peace body, every cast failing
+ *     with MagicGeneralFailure, 2026-10-16).
+ *
+ * So an ActionCancelled that arrives while a change is still unconfirmed puts
+ * the client back in the mode the server kept. The server's stance in the
+ * requested mode, or any CombatMode int, confirms it; a change nobody answers
+ * (the server already in that stance) stops waiting after the window.
+ */
+export class UnconfirmedCombatMode {
+  private pending: { from: CombatMode; fromStance: number; to: CombatMode; at: number } | null = null;
+
+  constructor(private readonly windowMs = MODE_REFUSAL_WINDOW_MS) {}
+
+  /** A change from `from` (the body in `fromStance`) to `to` was sent. A change sent while one waits keeps the first `from`: the server never took it. */
+  sent(from: CombatMode, fromStance: number, to: CombatMode, now: number): void {
+    if (this.pending && now - this.pending.at <= this.windowMs) this.pending = { ...this.pending, to, at: now };
+    else this.pending = { from, fromStance, to, at: now };
+  }
+
+  /** The server's movement put the player in a stance meaning `mode` (null: not a stance): the change is taken when it is the requested one. */
+  stance(mode: CombatMode | null): void {
+    if (this.pending && mode === this.pending.to) this.pending = null;
+  }
+
+  /** The server's CombatMode int arrived: the server has said the mode itself. */
+  serverMode(): void {
+    this.pending = null;
+  }
+
+  /** The mode the client waits on, or null. */
+  get waiting(): CombatMode | null {
+    return this.pending?.to ?? null;
+  }
+
+  /**
+   * A WeenieError arrived. When it is the refusal and a change is unconfirmed,
+   * the mode (and body stance) the server kept, to put back; else null.
+   */
+  refused(errorType: number, now: number): { mode: CombatMode; stance: number } | null {
+    const p = this.pending;
+    if (!p || errorType >>> 0 !== MODE_REFUSED_ERROR) return null;
+    this.pending = null;
+    if (now - p.at > this.windowMs) return null;
+    return { mode: p.from, stance: p.fromStance };
+  }
+
+  clear(): void {
+    this.pending = null;
+  }
+}
+
+/** What following a refused mode touches: the client's mode (controller, HUD, cursor) and the body's stance. */
+export interface CombatModeFollower {
+  setMode(mode: CombatMode): void;
+  stance(): number;
+  setStance(stance: number): void;
+}
+
+/**
+ * onWeenieError's step for a refused mode: when `errorType` refuses the change
+ * `tracker` waits on, the client goes back to the mode and stance the server
+ * kept. True when it did.
+ */
+export function followModeRefusal(tracker: UnconfirmedCombatMode, errorType: number, now: number, client: CombatModeFollower): boolean {
+  const kept = tracker.refused(errorType, now);
+  if (!kept) return false;
+  client.setMode(kept.mode);
+  if (kept.stance && client.stance() !== kept.stance) client.setStance(kept.stance);
+  return true;
+}
+
+/**
+ * The cast's auto-switch into magic mode (main.ts sendCastSpellAction) sends
+ * the cast only once the server has taken the mode: not while the change is
+ * unconfirmed (up to MODE_REFUSAL_WINDOW_MS), and never once the client is
+ * back out of magic (refused). A cast sent into a refused mode fails
+ * (MagicGeneralFailure on the AC1999 server, 2026-10-16).
+ */
+export function castOnceMagicTaken(deps: {
+  mode(): CombatMode;
+  waiting(): CombatMode | null;
+  schedule(fn: () => void, ms: number): void;
+  cast(): void;
+  suppressed(): void;
+}, waitedMs = 0): void {
+  if (deps.mode() !== CombatMode.Magic) { deps.suppressed(); return; }
+  if (deps.waiting() === CombatMode.Magic && waitedMs < MODE_REFUSAL_WINDOW_MS) {
+    deps.schedule(() => castOnceMagicTaken(deps, waitedMs + 100), 100);
+    return;
+  }
+  deps.cast();
+}
+
+/** The combat mode a player stance (MotionStance id) means, or null for a non-stance (agent/macro/modeGate.ts modeOfStance). */
+export function combatModeOfStance(stance: number): CombatMode | null {
+  const name = modeOfStance(stance);
+  return name === null ? null : { peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[name];
+}

@@ -8,14 +8,17 @@
 # Hash32.ts it imports; packages/shared/src/routines, the routine document
 # /routines validates and exports, with the Windows-1252 encoder the export
 # writes files in), so the
-# build stage bundles src/bridge.ts + that file + ws into one CommonJS file and
+# build stage bundles src/bridge.ts + that file + ws (+ @aws-sdk/client-ec2) into one CommonJS file and
 # the runtime image is just node + that file (no node_modules). Env vars:
 # services/ws-tcp-bridge/README.md.
 
 FROM public.ecr.aws/docker/library/node:20-slim AS build
 WORKDIR /build
-# Versions pinned to the repo's package-lock.json.
-RUN npm install --no-save --no-audit --no-fund esbuild@0.28.2 ws@8.22.0
+# Versions pinned to the repo's package-lock.json (every dependency in
+# services/ws-tcp-bridge/package.json, bundled: the runtime image has no node_modules).
+# @aws-sdk/client-ec2 is the per-session egress provider's (src/egress.ts); it is
+# loaded only when BRIDGE_EGRESS_SERVERS turns the feature on.
+RUN npm install --no-save --no-audit --no-fund esbuild@0.28.2 ws@8.22.0 @aws-sdk/client-ec2@3.1145.0
 # Repo-relative layout, so src/protocol.ts's ../../../packages import resolves.
 COPY services/ws-tcp-bridge/src ./services/ws-tcp-bridge/src
 COPY packages/network/src/era1999/Packet1999.ts ./packages/network/src/era1999/Packet1999.ts

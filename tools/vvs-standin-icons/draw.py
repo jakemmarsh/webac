@@ -59,3 +59,13 @@ for _ in range(14):
     x, y = 8 + r * math.cos(a), 7 + r * math.sin(a)
     d.ellipse([S(x - .35), S(y - .35), S(x + .35), S(y + .35)], fill=(255, 255, 255, 230))
 done(im, 'vcs')
+
+# Splitpea (the 1999 taper program; its own icon is unknown): a green pea split in two, a lit taper in the split
+im = canvas(); d = ImageDraw.Draw(im)
+radial(d, 8, 9, 6.6, (200, 240, 130), (40, 110, 30), 6, 7)
+d.rectangle([S(6.6), S(0), S(9.4), S(16)], fill=(16, 14, 10, 255))   # the split
+d.rectangle([S(7.3), S(6.5), S(8.7), S(15)], fill=(200, 40, 40, 255))  # a red taper
+d.rectangle([S(7.3), S(6.5), S(7.8), S(15)], fill=(240, 110, 100, 255))
+d.polygon([(S(8), S(1.2)), (S(9.2), S(4.4)), (S(8), S(6.2)), (S(6.8), S(4.4))], fill=(255, 190, 50, 255))  # flame
+d.polygon([(S(8), S(3.0)), (S(8.55), S(4.5)), (S(8), S(5.4)), (S(7.45), S(4.5))], fill=(255, 250, 210, 255))
+done(im, 'splitpea')

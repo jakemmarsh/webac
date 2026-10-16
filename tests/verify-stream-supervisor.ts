@@ -969,6 +969,39 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
   });
 });
 
+describe('segment opening: where the last segment\'s time went (own-time.ts, Jake 2026-10-16)', () => {
+  it('the supervisor asks for each character\'s block (with the cast) and puts it right after readiness; nothing when there is none', async () => {
+    const h = harness({ maxSegments: 1, segment: { ...CAST.segment, minutes: 1, restartPauseSeconds: 0 } }, (_p, text, p) => {
+      if (/Wrap up now/.test(text)) p.emit(result('report'));
+    }, { sheets: { mage: 'XP 1,900,000 total, 5 unassigned, 1 to next level; 3 skill credits' } });
+    const asked: Array<[string, string, readonly string[]]> = [];
+    h.deps.ownTime = (profile, character, cast) => {
+      asked.push([profile, character, cast]);
+      return profile === 'mage' ? '- last hour: travelling 8 min (1 portal trip), fighting 13 min, waiting/idle 39 min' : null;
+    };
+    try {
+      await new StreamSupervisor(h.cfg, h.deps).run();
+      const opening = (profile: string) => h.procs.find((x) => x.profile === profile)!.p.sent[0];
+      expect(asked.map((a) => a.slice(0, 2)).sort()).toEqual([['mage', 'Claude Arcanist'], ['soldier', 'Claude Bulwark']]);
+      expect(asked[0][2]).toEqual(['Claude Arcanist', 'Claude Bulwark']);
+      expect(opening('mage')).toMatch(/Your readiness right now[^\n]*\n- unspent: 5 XP\n- skill credits: 3 now\n- last hour: travelling 8 min \(1 portal trip\), fighting 13 min, waiting\/idle 39 min\n\nYour journal:/);
+      expect(opening('soldier')).not.toContain('last hour');
+    } finally { h.cleanup(); }
+  });
+
+  it('a block that fails to read is logged and left out; the segment still starts', async () => {
+    const h = harness({ maxSegments: 1, segment: { ...CAST.segment, minutes: 1, restartPauseSeconds: 0 } }, (_p, text, p) => {
+      if (/Wrap up now/.test(text)) p.emit(result('report'));
+    });
+    h.deps.ownTime = () => { throw new Error('bad feed'); };
+    try {
+      await new StreamSupervisor(h.cfg, h.deps).run();
+      expect(h.procs.map((x) => x.profile).sort()).toEqual(['mage', 'soldier']);
+      expect(h.procs[0].p.sent[0]).not.toContain('last hour');
+    } finally { h.cleanup(); }
+  });
+});
+
 // 2026-10-15: Claude Bulwark portalled into Tumerok Cavern 4 min 57 s after the last player left it; ACE unloaded the
 // landblock with him just added (Landblock.Unload: CurrentLandblock = null) and never ticked him again. For four hours
 // HP stayed 121/135 and mana 5/10, buffs showed "0s", and every use, recall and gem answered "You're too busy!" (the /ls

@@ -64,7 +64,8 @@ import { renderUbMainWindow, UB_MAIN_SIZE, type UbMainSource } from './automatio
 import { renderVvsBar, VVS_BAR, type VvsBarEntry } from './automation/VvsBar.js';
 import { UB_ICON_PNG } from './automation/ubIcon.js';
 import { redrawKeepingFocus } from './automation/keepFocus.js';
-import { VTANK_ICON_PNG, VHS_ICON_PNG, VIRINDI_UIS_ICON_PNG, VCS_ICON_PNG } from './automation/virindiIcons.js';
+import { VTANK_ICON_PNG, VHS_ICON_PNG, VIRINDI_UIS_ICON_PNG, VCS_ICON_PNG, SPLITPEA_ICON_PNG } from './automation/virindiIcons.js';
+import { SPLITPEA_EDIT_KEY, SPLITPEA_FRAME, type SplitpeaPlugin } from './splitpea/SplitpeaPlugin.js';
 import { MagToolsWindow, MT_FRAME, MT_WINDOW } from './magtools/MagToolsWindow.js';
 import type { MagToolsRuntime } from '../agent/magtools/magToolsRuntime.js';
 import { mtOptionWired } from '../agent/magtools/mtWired.js';
@@ -124,6 +125,7 @@ import { SpellTable } from '@ac/dat-parser/file-types/SpellTable.js';
 import { SpellComponentTable } from '@ac/dat-parser/file-types/SpellComponentTable.js';
 import { readDualDidMapper } from '@ac/dat-parser/file-types/DualDidMapper.js';
 import { buildComponentRows, desiredLevelFromText, compositeSpellComponentIcon } from './SpellComponentList.js';
+import { ResearchFormula, researchGridCells, researchComponentSignature, researchButtonLeft, ownedComponentCounts, RESEARCH_LAYOUT, RESEARCH_TAB_WIDTH, RESEARCH_TEXT } from './SpellResearch1999.js';
 import { fillComponentList, desiredCompIterationOrder, determineComponentCategory, componentNameFromWcid, getNumComponent } from './FillComponentList.js';
 import type { TextureManager } from '../models/TextureManager.js';
 import { getString, getStringParts, getStringFromTable, acStringHash } from '@ac/dat-parser/file-types/LayoutDesc.js';
@@ -2169,10 +2171,16 @@ export class GameUI {
   // initialization order makes restoring inline impossible since
   // activeSpellBarTab is declared above the optionsSettings IIFE).
   private activeSpellBarTab: number = 0; // 0-7, which spell bar tab is active
-  private magicPanelTab: 'spells' | 'components' = 'spells'; // VISUAL.139 — 'foci' removed (foci retired from AC in 2010; not an EoL page)
+  private magicPanelTab: 'spells' | 'components' | 'research' = 'spells'; // VISUAL.139 — 'foci' removed (foci retired from AC in 2010; not an EoL page)
   private spellComponents: Array<{ name: string; quantity: number; icon?: number }> = [];
   private spellCallbacks: {
     onCastSpell?: (spellIndex: number) => void;
+    /**
+     * AC1999.spell-research-panel — the 1999 research panel's Test button
+     * (CreateSpellPanel_ListenToMessage @ 0x5ab710): main decides (magic
+     * mode, selection) and sends 0x4B ResearchSpell (SpellResearch1999.ts).
+     */
+    onResearchSpell?: (formula: ResearchFormula) => void;
     /**
      * FAITHFUL.383 — Round-trip spell-bar assignments to ACE so they
      * survive logout. ACE Player_Character.cs:295-305
@@ -2226,6 +2234,26 @@ export class GameUI {
   eraSupports(feature: EraFeature): boolean {
     return !this.eraUnsupported.has(feature);
   }
+
+  /**
+   * AC1999.spell-research-panel — whether the magic panel has the 1999
+   * "Create Spell" tab (eraClientRules().spellResearch; SpellResearch1999.ts).
+   * Set once per page load from the era profile, like setUnsupportedFeatures.
+   */
+  private spellResearchEnabled = false;
+  /** The research panel's formula row: it outlives re-renders (the 1999 panel is built once per session). */
+  readonly researchFormula = new ResearchFormula();
+  /** The carried components the research panel last drew (researchComponentSignature). */
+  private researchComponentSig = '';
+  /** A drag the research panel started: a grid icon (its wcid) or a formula slot (its index). */
+  private researchDrag: { kind: 'grid'; wcid: number } | { kind: 'slot'; index: number; dropped: boolean } | null = null;
+  setSpellResearch(enabled: boolean): void {
+    this.spellResearchEnabled = enabled;
+    if (!enabled && this.magicPanelTab === 'research') this.magicPanelTab = 'spells';
+    if (this.magicVisible) this.renderMagicPanel();
+  }
+  /** Whether the magic panel shows the research tab. */
+  get hasSpellResearch(): boolean { return this.spellResearchEnabled; }
   private charInfo: {
     name: string; level: number; heritage: string; gender: string; pkStatus: string;
     heritageId: number; genderId: number;
@@ -13234,6 +13262,18 @@ export class GameUI {
     // + UpdateCastButtonTooltip (a caster wielded / unwielded).
     this.updateEndowmentIcon();
     this.updateCastButtonTooltip();
+    // AC1999.spell-research-panel — PanelUI_UpdateSpellComponentUI @ 0x4fe3e0:
+    // a ComponentTracker change repaints the research panel (1999
+    // CreateSpellPanel_UpdateComponents @ 0x5ab980), its formula row dropping
+    // components that left the pack. Only when the components changed.
+    if (this.spellResearchEnabled) {
+      const sig = researchComponentSignature(items);
+      if (sig !== this.researchComponentSig) {
+        this.researchComponentSig = sig;
+        this.researchFormula.prune((wcid) => ownedComponentCounts(items).get(wcid) ?? 0);
+        if (this.magicVisible && this.magicPanelTab === 'research') this.renderMagicPanel();
+      }
+    }
   }
 
   /** Update burden display values (called when PropertyInt.EncumbranceVal updates). */
@@ -17180,6 +17220,7 @@ export class GameUI {
   setSpellData(spells: SpellDefinition[], spellBars?: Array<Array<SpellDefinition | null>>): void {
     this.knownSpells = spells;
     if (spellBars) this.spellBarSlots = spellBars;
+    this.splitpea?.spellbookChanged();
     // RELEASE.streaming-regression-gate — streamed DATs: fetch every known spell's icon art now.
     if (this.datPrefetch) this.datPrefetch(this.spellIconFileIds(spells.map((sp) => sp.id)));
     this.refreshSpellBarPanel();
@@ -18418,7 +18459,44 @@ export class GameUI {
       { id: 0x100002a9, key: 'spells', str: 49867858, fallback: 'Spellbook' },
       { id: 0x100002aa, key: 'components', str: 79360818, fallback: 'Components' },
     ];
-    for (const { id, key: tab, str, fallback } of MAGIC_TABS) {
+    // AC1999.spell-research-panel — a 1999 world's magic panel has THREE tabs
+    // (MagicPanBase @ 0x54c500: Spellbook, Components, Create Spell), each
+    // RESEARCH_TAB_WIDTH (0x5c) wide where end of retail's two are 138: the
+    // same DAT tab art, re-laid at the 1999 width, and the DAT pair hidden.
+    if (this.spellResearchEnabled && this.layoutRenderer && panelRootEl) {
+      const tabs1999: Array<{ key: 'spells' | 'components' | 'research'; id: number; text: string }> = [
+        { key: 'spells', id: MAGIC_TABS[0].id, text: getString(MAGIC_TABS[0].str) ?? MAGIC_TABS[0].fallback },
+        { key: 'components', id: MAGIC_TABS[1].id, text: getString(MAGIC_TABS[1].str) ?? MAGIC_TABS[1].fallback },
+        { key: 'research', id: MAGIC_TABS[1].id, text: RESEARCH_TEXT.tab },
+      ];
+      for (const { id } of MAGIC_TABS) handle.setVisible(id, false);
+      tabs1999.forEach(({ key: tab, id, text }, i) => {
+        const host = document.createElement('div');
+        host.dataset.magicTab = tab; // capture-harness hook
+        Object.assign(host.style, {
+          position: 'absolute', left: `${i * RESEARCH_TAB_WIDTH}px`, top: '0',
+          width: `${RESEARCH_TAB_WIDTH}px`, height: '25px', overflow: 'hidden', cursor: 'pointer',
+        });
+        panelRootEl.appendChild(host);
+        const th = this.layoutRenderer!.render(0x21000034, host, { subtreeElementId: id, width: RESEARCH_TAB_WIDTH, height: 25 });
+        if (!th) return;
+        th.resizeSubtree?.(RESEARCH_TAB_WIDTH, 25);
+        th.setState(id, this.magicPanelTab === tab ? UIState.Open : UIState.Closed);
+        th.setText(id, text);
+        th.onClick(id, () => {
+          this.magicPanelTab = tab;
+          // FAITHFUL.453 persists the two pages every era has; the research
+          // page is a 1999 world's alone, so it is not written to the
+          // options a later end-of-retail session reads.
+          if (tab !== 'research') {
+            this.optionsSettings.magicPanelTab = tab;
+            this.saveOptionsSettings();
+          }
+          this.renderMagicPanel();
+        });
+      });
+    }
+    for (const { id, key: tab, str, fallback } of this.spellResearchEnabled ? [] : MAGIC_TABS) {
       const tabEl = handle.elements.get(id);
       if (!tabEl) continue;
       const isActive = this.magicPanelTab === tab;
@@ -18457,10 +18535,16 @@ export class GameUI {
     // into ITS page and hide the other (previously both rendered stacked,
     // which the old fixed-362 truncation happened to mask).
     const onComponents = this.magicPanelTab === 'components';
+    const onResearch = this.magicPanelTab === 'research' && this.spellResearchEnabled;
     const spellsPageEl = handle.elements.get(0x100002ac);
     const compsPageEl = handle.elements.get(0x100002ad);
-    if (spellsPageEl) spellsPageEl.style.display = onComponents ? 'none' : '';
+    if (spellsPageEl) spellsPageEl.style.display = onComponents || onResearch ? 'none' : '';
     if (compsPageEl) compsPageEl.style.display = onComponents ? '' : 'none';
+    if (onResearch) {
+      // The page area the two DAT pages fill: (0,25) 300 x (panel - 25).
+      if (panelRootEl) this.renderResearchTab(panelRootEl, 25, magicH - 25);
+      return;
+    }
     const contentEl = onComponents ? compsPageEl : spellsPageEl;
     if (!contentEl) return;
     this.clearCharPanelPage(contentEl);
@@ -18684,6 +18768,196 @@ export class GameUI {
     });
 
     contentEl.appendChild(magicContent);
+  }
+
+  /**
+   * AC1999.spell-research-panel — the 1999 "Create Spell" page
+   * (CreateSpellPanel, ctor @ 0x5ab060; model + evidence in
+   * SpellResearch1999.ts). The 1999 client builds it in code, so the geometry
+   * is RESEARCH_LAYOUT (the ctor's) and the art the interface DAT's: the
+   * panel's own tiled 0x06001399, the component icons (the components page's,
+   * CompositeSpellComponentIcon), the white caption text 0x2100003f:0x10000376,
+   * the spellbook page's push button 0x21000032:0x100002a5 and the HUD
+   * scrollbar.
+   */
+  /**
+   * Splitpea's "Load into Research": a spell's formula (SpellComponentTable ids in slot order, 0 where a taper
+   * is still open) into the Create Spell tab's FORMULA row, as clicks on the grid would put it there. Refused
+   * (false) unless that tab is open. Open tapers and components you don't carry are left out; the row keeps
+   * the rest in order, and the player inserts the missing ones by dropping them on their slot.
+   */
+  loadResearchFormula(scids: readonly number[]): boolean {
+    if (!this.spellResearchEnabled || !this.magicVisible || this.magicPanelTab !== 'research') return false;
+    const items = this.inventoryItems.map((i) => ({ id: i.id, name: i.name, weenieClassId: i.weenieClassId, itemType: i.itemType, stackSize: i.stackSize }));
+    const owned = ownedComponentCounts(items);
+    const wcidOf = new Map<number, number>();
+    for (const [wcid, scid] of this.componentScidByWcid) if ((owned.get(wcid) ?? 0) > 0 || !wcidOf.has(scid)) wcidOf.set(scid, wcid);
+    this.researchFormula.clear();
+    for (const scid of scids) {
+      const wcid = scid ? wcidOf.get(scid) : undefined;
+      if (wcid !== undefined) this.researchFormula.add(wcid, owned.get(wcid) ?? 0);
+    }
+    this.renderMagicPanel();
+    return true;
+  }
+
+  private renderResearchTab(parent: HTMLElement, top: number, pageH: number): void {
+    const lr = this.layoutRenderer;
+    if (!lr) return;
+    const L = RESEARCH_LAYOUT;
+    const formula = this.researchFormula;
+    const items = this.inventoryItems.map((i) => ({ id: i.id, name: i.name, weenieClassId: i.weenieClassId, itemType: i.itemType, stackSize: i.stackSize }));
+    const owned = ownedComponentCounts(items);
+    const ownedOf = (wcid: number): number => owned.get(wcid) ?? 0;
+    formula.prune(ownedOf);
+    this.researchComponentSig = researchComponentSignature(items);
+    const table = this.spellComponentTable;
+    const cells = researchGridCells(items, (wcid) => this.componentScidByWcid.get(wcid), (scid) => table?.components.get(scid)?.category);
+    const iconUrlOf = (wcid: number): string | null => {
+      const scid = this.componentScidByWcid.get(wcid);
+      const did = scid !== undefined ? table?.components.get(scid)?.icon ?? 0 : 0;
+      return did ? this.chargenWheelImageURL(did, 'spellcomp', compositeSpellComponentIcon, 'world') : null;
+    };
+    const rerender = (): void => { if (this.magicVisible) this.renderMagicPanel(); };
+
+    const page = document.createElement('div');
+    page.dataset.magicPage = 'research';
+    Object.assign(page.style, {
+      position: 'absolute', left: '0', top: `${top}px`, width: '300px', height: `${pageH}px`,
+      overflow: 'hidden', pointerEvents: 'auto',
+    });
+    // Region_SetImage(0x06001399) + Region_SetTileImageState(1): the panel's own tiled background.
+    const bg = this.getTexURL(L.background);
+    if (bg) Object.assign(page.style, { backgroundImage: `url(${bg})`, backgroundRepeat: 'repeat' });
+    parent.appendChild(page);
+    const box = (r: { x: number; y: number; w: number; h: number }): HTMLDivElement => {
+      const el = document.createElement('div');
+      Object.assign(el.style, { position: 'absolute', left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+      page.appendChild(el);
+      return el;
+    };
+    // The two TextRegion captions: centred across the panel.
+    for (const [text, r] of [[RESEARCH_TEXT.formula, L.formulaLabel], [RESEARCH_TEXT.components, L.componentsLabel]] as const) {
+      const el = box(r);
+      Object.assign(el.style, { display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' });
+      el.appendChild(this.renderDatText(text, '0x2100003f:0x10000376'));
+    }
+    const iconCell = (wcid: number): HTMLDivElement => {
+      const cell = document.createElement('div');
+      Object.assign(cell.style, { width: `${L.cell}px`, height: `${L.cell}px`, flexShrink: '0' });
+      const url = iconUrlOf(wcid);
+      if (url) Object.assign(cell.style, { backgroundImage: `url(${url})`, backgroundSize: '100% 100%' });
+      return cell;
+    };
+
+    // ── FORMULA row: eight 32 px slots, filled in placement order ──
+    const row = box(L.formulaRow);
+    row.className = 'ac-research-formula';
+    Object.assign(row.style, { display: 'flex' });
+    formula.wcids.forEach((wcid, index) => {
+      const cell = iconCell(wcid);
+      cell.dataset.researchSlot = String(index);
+      cell.dataset.compWcid = String(wcid);
+      // Picking an icon up out of the row takes it out (FormulaRow @ 0x5ac5e0);
+      // dropped back on the row it goes in at the drop slot.
+      cell.draggable = true;
+      cell.addEventListener('dragstart', (e) => {
+        this.researchDrag = { kind: 'slot', index, dropped: false };
+        e.dataTransfer?.setData('text/research-slot', String(index));
+      });
+      cell.addEventListener('dragend', () => {
+        const d = this.researchDrag;
+        this.researchDrag = null;
+        if (d?.kind === 'slot' && !d.dropped) { formula.removeAt(d.index); rerender(); }
+      });
+      row.appendChild(cell);
+    });
+    const slotAt = (e: DragEvent): number => Math.floor((e.clientX - row.getBoundingClientRect().left) / L.cell);
+    const draggedComponent = (): { wcid: number } | null => {
+      if (this.researchDrag?.kind === 'grid') return { wcid: this.researchDrag.wcid };
+      if (this.dragItemIndex >= 0 && this.dragSourceSlot === null) {
+        const it = this.inventoryItems[this.dragItemIndex];
+        if (it && this.componentScidByWcid.has(it.weenieClassId) && ((it.itemType ?? 0) & 0x1000) !== 0) return { wcid: it.weenieClassId };
+      }
+      return null;
+    };
+    row.addEventListener('dragover', (e) => {
+      if (this.researchDrag || draggedComponent()) e.preventDefault();
+    });
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const d = this.researchDrag;
+      if (d?.kind === 'slot') {
+        d.dropped = true;
+        formula.move(d.index, slotAt(e));
+        rerender();
+        return;
+      }
+      const comp = draggedComponent();
+      if (this.dragItemIndex >= 0) this.dragItemIndex = -1;
+      this.researchDrag = null;
+      if (!comp) return;
+      // FormulaRow drop @ 0x5ac6b0: at the slot under the pointer, clamped to the end.
+      const res = formula.add(comp.wcid, ownedOf(comp.wcid), slotAt(e));
+      if (res === 'not-enough') raiseClientNotice(this, CLIENT_NOTICES.researchNotEnoughComponent);
+      if (res === 'added') rerender();
+    });
+
+    // ── COMPONENTS grid: 8 columns of 32 px icons, scrolled by the bar beside it ──
+    const grid = box(L.grid);
+    grid.className = 'ac-research-components';
+    Object.assign(grid.style, { display: 'flex', flexWrap: 'wrap', alignContent: 'flex-start', overflowY: 'auto', overflowX: 'hidden' });
+    for (const c of cells) {
+      const cell = iconCell(c.wcid);
+      cell.dataset.compWcid = String(c.wcid);
+      cell.style.cursor = 'pointer';
+      this.tagHudTooltip(cell, RESEARCH_TEXT.cellTip);
+      // A click appends it when the row has room and the player owns more of
+      // it than the row uses (CreateSpellPanel_ListenToMessage, grid branch).
+      cell.addEventListener('click', () => {
+        if (formula.add(c.wcid, c.numItems) === 'added') rerender();
+      });
+      cell.draggable = true;
+      cell.addEventListener('dragstart', (e) => {
+        this.researchDrag = { kind: 'grid', wcid: c.wcid };
+        e.dataTransfer?.setData('text/research-wcid', String(c.wcid));
+      });
+      cell.addEventListener('dragend', () => { if (this.researchDrag?.kind === 'grid') this.researchDrag = null; });
+      grid.appendChild(cell);
+    }
+    const bar = box({ ...L.scrollbar, w: HUD_SCROLLBAR_SKIN.width });
+    this.bindDatScrollbarWidget(bar, grid, L.cell, false);
+
+    // ── Test / Clear: the spellbook page's push button art ──
+    // The art (0x06004cda / 0x06004cdb) is one 100x32 image, not a 3-slice:
+    // stretched to the 1999 button's 0x6e the element is wider than its
+    // image, and UIRegion::DrawSelf tiles a too-small image from the left
+    // (applyRetailImageBlit), so the image's left edge repeated past the
+    // button. The button keeps the DAT element's own size and is centred in
+    // the 1999 slot (researchButtonLeft).
+    const button = (r: { x: number; y: number; w: number }, text: string, tip: string, onClick: () => void): void => {
+      const host = box({ x: r.x, y: r.y, w: r.w, h: 32 });
+      host.dataset.researchButton = text;
+      const inner = document.createElement('div');
+      Object.assign(inner.style, { position: 'absolute', top: '0' });
+      host.appendChild(inner);
+      const bh = lr.render(0x21000032, inner, { subtreeElementId: 0x100002a5 });
+      if (!bh) return;
+      const desc = bh.descs.get(0x100002a5);
+      const artW = desc?.width || r.w;
+      Object.assign(inner.style, { left: `${researchButtonLeft(r.w, artW)}px`, width: `${artW}px`, height: `${desc?.height || 32}px` });
+      bh.setText(0x100002a6, text);
+      bh.onClick(0x100002a5, onClick);
+      this.tagHudTooltip(host, tip);
+    };
+    button(L.test, RESEARCH_TEXT.test, RESEARCH_TEXT.testTip, () => this.spellCallbacks.onResearchSpell?.(formula));
+    button(L.clear, RESEARCH_TEXT.clear, RESEARCH_TEXT.clearTip, () => {
+      // Clear is disabled while the row is empty (ctor SetDisabled(1)).
+      if (formula.count === 0) return;
+      formula.clear();
+      rerender();
+    });
   }
 
   /**
@@ -22254,6 +22528,26 @@ export class GameUI {
     this.openVTankAux('goarrow', 'GoArrow', 272 + 12, 338 + 35, (body, redraw) => renderGoArrowWindow(body, this.vtankKit(), rt.model, redraw), { icon: 0x06001f80 });
   }
 
+  // ── Splitpea (ui/splitpea/SplitpeaPlugin.ts; AC1999 only, preview UI) ──
+
+  private splitpea: SplitpeaPlugin | null = null;
+  /** Splitpea for this era (createSplitpea: null outside AC1999). The research panel links through `splitpeaPlugin.research`. */
+  setSplitpea(p: SplitpeaPlugin | null): void {
+    if (!p) { this.closeVTankAux(SPLITPEA_EDIT_KEY); this.closeVTankAux('splitpea'); }
+    this.splitpea = p;
+    if (p) p.research = { loadFormula: (scids) => this.loadResearchFormula(scids) };
+    if (p) p.host = { kit: this.vtankKit(), redraw: () => this.vtankWindows.get('splitpea')?.redraw(), openAux: (k, t, w, h, draw) => this.openVTankAux(k, t, w, h, draw, { icon: 'none' }), closeAux: (k) => this.closeVTankAux(k) };
+    this.refreshVvsBar();
+  }
+  get splitpeaPlugin(): SplitpeaPlugin | null { return this.splitpea; }
+
+  toggleSplitpeaWindow(): void {
+    if (this.vtankWindows.has('splitpea')) { this.closeVTankAux(SPLITPEA_EDIT_KEY); this.closeVTankAux('splitpea'); return; }
+    const sp = this.splitpea;
+    if (!sp) return;
+    this.openVTankAux('splitpea', sp.title(), SPLITPEA_FRAME.w, SPLITPEA_FRAME.h, (body, redraw) => sp.render(body, redraw), { icon: SPLITPEA_ICON_PNG });
+  }
+
   /** The bar's entries: VirindiTank's window, the hotkeys, UtilityBelt's window and its maps while they are enabled. */
   private vvsBarEntries(): VvsBarEntry[] {
     const out: VvsBarEntry[] = [];
@@ -22284,6 +22578,8 @@ export class GameUI {
       // Virindi HUDs' entry opens the Virindi UIs menu; its icon is Virindi's art, so our own stand-in (virindiIcons.ts).
       out.push({ id: 'vhuds', plugin: 'Virindi HUDs', title: 'Virindi UIs', icon: { url: VIRINDI_UIS_ICON_PNG }, open: this.vtankWindows.has('virindi-uis'), toggle: () => this.toggleVirindiUis() });
     }
+    // Splitpea: set only in AC1999 (createSplitpea); our own stand-in icon (virindiIcons.ts).
+    if (this.splitpea) out.push({ id: 'splitpea', plugin: 'Splitpea', title: 'Splitpea', icon: { url: SPLITPEA_ICON_PNG }, open: this.vtankWindows.has('splitpea'), toggle: () => this.toggleSplitpeaWindow() });
     return out;
   }
 
@@ -22655,6 +22951,16 @@ export class GameUI {
         d.dataset.icon = `0x${id.toString(16)}`;
         const url = this.getTexURL(id);
         Object.assign(d.style, { width: `${size}px`, height: `${size}px`, flexShrink: '0', cursor: onClick ? 'pointer' : 'default', ...(url ? { backgroundImage: `url(${url})`, backgroundSize: '100% 100%' } : { border: line }) });
+        if (!url && id) {
+          // A streamed icon not here yet: fill it in when its file lands (onStreamedFilesArrived), so a plugin
+          // window drawn early doesn't keep an empty box until its next redraw (Splitpea's tapers, 2026-10-16).
+          d.dataset.acIconPending = '1';
+          this.pendingIconEls.set(d, () => {
+            const u = this.getTexURL(id);
+            if (u) Object.assign(d.style, { backgroundImage: `url(${u})`, backgroundSize: '100% 100%', border: '' });
+            return null;
+          });
+        }
         if (onClick) d.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
         return d;
       },
@@ -28854,6 +29160,10 @@ export class GameUI {
   /** FAITHFUL.470 — accessor for the vendor-visible flag so main.ts
    *  can re-compute the sell tab whenever inventory changes. */
   get isVendorVisible(): boolean { return this.vendorVisible; }
+  /** The open vendor's merchandise row for `guid` (what an examine of a shop item resolves to); undefined when not on sale here. */
+  vendorStockItem(guid: number): (typeof this.vendorData.buyItems)[number] | undefined {
+    return this.vendorVisible && guid ? this.vendorData.buyItems.find((i) => i.guid === guid) : undefined;
+  }
   /** ACCWeenieObject::IsOwnedByObject(ClientUISystem::vendorID) — a row of the open vendor's stock. */
   vendorHasItem(guid: number): boolean {
     return this.vendorVisible && this.vendorData.buyItems.some((i) => i.guid === guid);

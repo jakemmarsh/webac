@@ -119,6 +119,18 @@ describe('CORE.10.f — split-stack focus + vendor splitSize seeding (behavioral
     expect(ui.uiManager.inputFocused).toBe(false);
   });
 
+  it("an examine of a shop item resolves to the open vendor's merchandise row (IdentifyObject reaches ACE's Vendor.TryGetItemForSale), and only while it is open", async () => {
+    const { targetResolves } = await import('@ac/shared');
+    const where = { inPack: () => false, worn: () => false, inOpenContainer: () => false, inWorld: () => false, forSale: (g: number) => !!ui.vendorStockItem(g) };
+    expect(targetResolves(0x80001111, 0x50000001, where)).toBe(false); // no vendor open: the gate drops it, as before
+    openVendor();
+    expect(ui.vendorStockItem(0x80001111)?.name).toBe('Healing Potion');
+    expect(targetResolves(0x80001111, 0x50000001, where)).toBe(true);
+    expect(targetResolves(0x80009999, 0x50000001, where)).toBe(false);
+    ui.hideVendorWindow();
+    expect(ui.vendorStockItem(0x80001111)).toBeUndefined();
+  });
+
   it('vendor branch: a stack in the OPEN vendor container with itemType in mask 0xdc41cb0 seeds splitSize=1', () => {
     clearTarget();
     openVendor();

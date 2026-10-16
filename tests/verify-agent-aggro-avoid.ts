@@ -115,6 +115,28 @@ describe('monsters coming at you, and at your fellows', () => {
       expect(formatObservation(api.observe())).toMatch(/fellows: Claude Arcanist 71% HP, 20 m N, MONSTERS AT THEM: Mud Golem L8 on them/);
     });
 
+    it("a fellow's threats are on their storey and near them: not a monster a floor over them, nor one far off (Mountain Keep, 2026-10-16)", async () => {
+      const vitals = { cur: 60, max: 85 };
+      host.fellows = () => [{ guid: ARCANIST, name: 'Claude Arcanist', health: vitals, stamina: vitals, mana: vitals }];
+      host.add({ guid: ARCANIST, name: 'Claude Arcanist', itemType: 0x10, objectDescFlags: 0x8, x: 80, y: 40, z: 94 });
+      run(api, host, 300, { physics: false });
+      const w = api.wait({ types: ['fellow-aggro'] }, 5000);
+      // A Dread 6 m up, 2 m across, stuck "running at" her through the floor; one on her floor 30 m off; one at her.
+      monster(SHADOW, 'Dread Mu-miyah', 82, 40, { level: 60, z: 100, seeks: { guid: ARCANIST, kind: 'move' } });
+      monster(CHILD, 'Dread Mu-miyah', 80, 70, { level: 60, z: 94, seeks: { guid: ARCANIST, kind: 'move' } });
+      monster(GOLEM, 'Mud Golem', 81, 41, { level: 8, z: 94.5, seeks: { guid: ARCANIST, kind: 'stick' } });
+      run(api, host, 300, { physics: false });
+      const evs = await w;
+      expect(evs.map((e) => e.text).join('\n')).not.toMatch(/Dread/);
+      const line = formatObservation(api.observe()).split('\n').find((l) => l.startsWith('fellows:'))!;
+      expect(line).toMatch(/MONSTERS AT THEM: Mud Golem L8 on them$/);
+      // On her floor and near, the Dread counts.
+      const dread = host.object(SHADOW)!;
+      dread.z = 94; dread.x = 80; dread.y = 50;
+      run(api, host, 300, { physics: false });
+      expect(formatObservation(api.observe())).toMatch(/MONSTERS AT THEM: Mud Golem L8 on them, Dread Mu-miyah L60 running at them 10 m off/);
+    });
+
     it('fellow-low wakes at 60% by default, at a fellow_below mark per wait, and on a single big drop', async () => {
       const v = { cur: 85, max: 85 };
       host.fellows = () => [{ guid: ARCANIST, name: 'Claude Arcanist', health: { ...v }, stamina: v, mana: v }];

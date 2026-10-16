@@ -50,7 +50,7 @@ const recheckBlocked = args.includes('--recheck-blocked');
 /** Server text that means the world refused us. */
 export const BLOCK_PATTERN = /vpn|proxy|not permitted|banned|blocked|too many (connections|accounts|sessions)|same ip|multiple accounts|ip address/i;
 
-interface World { id: string; name: string; emu: string; online: boolean; population: number | null; era: string | null; compat?: string; compatReason?: string | null }
+interface World { id: string; name: string; emu: string; online: boolean | null; population: number | null; era: string | null; compat?: string; compatReason?: string | null }
 interface Result {
   world: string; emu: string; population: number | null;
   outcome: 'skipped' | 'launcher-refused' | 'login-failed' | 'no-char-select' | 'create-failed' | 'in-world' | 'error';
@@ -108,7 +108,8 @@ async function main(): Promise<void> {
     const r: Result = { world: w.name, emu: w.emu, population: w.population, outcome: 'error', blocked: false, serverText: [], seconds: 0 };
     consoleLines.length = 0; frames.length = 0;
     try {
-      if (!w.online) { r.outcome = 'skipped'; r.failure = 'offline'; results.push(r); continue; }
+      // null = no status source (AC1999): the launcher lets players in, so probe it.
+      if (w.online === false) { r.outcome = 'skipped'; r.failure = 'offline'; results.push(r); continue; }
       if (w.compat === 'incompatible' && !recheckBlocked) {
         r.outcome = 'launcher-refused'; r.failure = w.compatReason ?? 'compat incompatible'; results.push(r);
         console.log(`${w.name.padEnd(20)} launcher-refused ${r.failure}`);

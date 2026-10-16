@@ -257,3 +257,27 @@ describe('UB\'s nametags (scene/Nametags.ts)', () => {
     expect(t.texture.magFilter).toBe(THREE.LinearFilter);
   });
 });
+
+describe('the VVS kit\'s icons on streamed DATs', () => {
+  it('an icon drawn before its file streamed in fills in when the files arrive, without a window redraw', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ui = H.ui as any;
+    const realGet = ui.getTexURL;
+    let resident = false;
+    ui.getTexURL = (id: number) => (id === 0x0600139e && resident ? 'data:image/png;base64,AAAA' : realGet.call(ui, id));
+    try {
+      const kit = ui.vtankKit() as VTankKit;
+      const icon = kit.icon(0x0600139e, 16);
+      ui.hudContainer.appendChild(icon);
+      expect(icon.style.backgroundImage).toBe('');
+      expect(icon.dataset.acIconPending).toBe('1');
+      resident = true;
+      ui.onStreamedFilesArrived();
+      expect(icon.style.backgroundImage).toContain('data:image/png');
+      expect(icon.dataset.acIconPending).toBeUndefined();
+      icon.remove();
+    } finally {
+      ui.getTexURL = realGet;
+    }
+  });
+});

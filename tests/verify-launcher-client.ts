@@ -427,7 +427,7 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(s.screen.selectedWorld.name).toBe('Conquest');
   });
 
-  it('favourites: a heart click stars a world without selecting it, the list sorts favourites first, and it persists', async () => {
+  it('favourites: a heart click stars and selects its world, the list sorts favourites first, and it persists', async () => {
     const storage = new MemStorage();
     const s = await open(storage);
     expect(s.rows().map(r => r.dataset.world)).toEqual(['c0ldeve', 'conq', 'funky']);
@@ -441,7 +441,13 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(s.rows().map(r => r.dataset.world)).toEqual(['funky', 'c0ldeve', 'conq']);
     expect(s.row('Funky').dataset.favorite).toBe('true');
     expect(s.row('Funky').querySelector('.launcher-fav')?.getAttribute('aria-pressed')).toBe('true');
-    expect(s.screen.selectedWorld.name).toBe('Coldeve'); // starring never selects
+    // The hearted world is selected and its rebuilt row holds focus, so the
+    // list follows it to the top instead of jumping back to Coldeve.
+    expect(s.screen.selectedWorld.name).toBe('Funky');
+    expect(s.row('Funky').getAttribute('aria-selected')).toBe('true');
+    expect(domWindow.document.activeElement).toBe(s.row('Funky'));
+    expect(s.mount.querySelector('.launcher-world-name')?.textContent).toBe('Funky');
+    expect(s.mount.querySelector('.launcher-fav-link')?.textContent).toBe('Unfavorite');
     expect(loadFavoriteWorlds(storage)).toEqual(['funky']);
     // A double-click on the heart neither enters nor selects the world.
     s.account.value = 'me';
@@ -451,7 +457,7 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     s.dbl(s.row('Funky').querySelector('.launcher-fav') as HTMLElement);
     await Promise.resolve();
     expect(entered).toBe(false);
-    expect(s.screen.selectedWorld.name).toBe('Coldeve');
+    expect(s.screen.selectedWorld.name).toBe('Funky');
     // Favourites keep the directory's order among themselves.
     (s.row('Coldeve').querySelector('.launcher-fav') as HTMLElement).dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
     expect(s.rows().map(r => r.dataset.world)).toEqual(['c0ldeve', 'funky', 'conq']);
@@ -462,8 +468,13 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(again.rows().map(r => r.dataset.world)).toEqual(['c0ldeve', 'funky', 'conq']);
     expect(again.screen.selectedWorld.name).toBe('Coldeve');
     // Unstarring drops it back to its directory place.
+    // Unhearting selects that world too, and focus follows it back down.
+    again.row('Funky').dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    expect(again.screen.selectedWorld.name).toBe('Funky');
     (again.row('Coldeve').querySelector('.launcher-fav') as HTMLElement).dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
     expect(again.rows().map(r => r.dataset.world)).toEqual(['funky', 'c0ldeve', 'conq']);
+    expect(again.screen.selectedWorld.name).toBe('Coldeve');
+    expect(domWindow.document.activeElement).toBe(again.row('Coldeve'));
     expect(loadFavoriteWorlds(storage)).toEqual(['funky']);
   });
 

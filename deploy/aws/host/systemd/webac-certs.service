@@ -1,0 +1,6 @@
+[Unit]
+Description=Renew the webac TLS certificate (acme.sh, DNS-01 through Cloudflare)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '[ -x /root/.acme.sh/acme.sh ] && CF_Token="$(cat /etc/webac/cf.token)" /root/.acme.sh/acme.sh --cron --home /root/.acme.sh || true'

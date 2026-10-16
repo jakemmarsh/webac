@@ -152,53 +152,65 @@ export function getPlayerFormula(
 }
 
 function randomizeVersion1(formula: number[], accountName: string): number[] {
-  const comps = [...formula];
-  let hasTaper1 = false;
-  let hasTaper2 = false;
-  let hasTaper3 = false;
+  return randomizeVersion1ForSeed(formula, computeAccountHash(accountName) % VERSION1_SEED_MODULUS);
+}
 
-  const key = computeAccountHash(accountName);
-  const seed = key % 0x13D573;
+/** RandomizeVersion1's seed is the account hash mod this: 1,299,827 possible seeds per account. */
+export const VERSION1_SEED_MODULUS = 0x13D573;
+/** Tapers are the 12 components from Red Taper (63) on. */
+export const TAPER_COLOR_COUNT = 0xC;
+export { LOWEST_TAPER_ID };
 
+/** One account-keyed taper RandomizeVersion1 writes: comps[slot] = (mul · ⌊seed / div⌋) mod 12 + Red Taper. */
+export interface Version1PersonalTaper { slot: number; mul: number; div: number }
+
+/** The tapers RandomizeVersion1 writes into a formula of this length (ACE SpellTable.cs GetSpellFormula, lines 58-172). */
+export interface Version1Tapers {
+  /** Taper 1 (slot 1, formulas past 5 components): the same for every account. */
+  taper1: { slot: number; id: number } | null;
+  /** Taper 2 (slot 3, past 6) and taper 3 (slot 6, past 7), keyed by the account's seed. */
+  personal: Version1PersonalTaper[];
+}
+
+/** Where RandomizeVersion1 puts its tapers in `formula`, and the terms of each. */
+export function version1Tapers(formula: readonly number[]): Version1Tapers {
+  const comps = formula;
   const scarab = comps[0];
   let herbIndex = 1;
-  if (comps.length > 5) {
-    herbIndex = 2;
-    hasTaper1 = true;
-  }
+  const hasTaper1 = comps.length > 5;
+  if (hasTaper1) herbIndex = 2;
   const herb = comps[herbIndex];
-
   let powderIndex = herbIndex + 1;
-  if (comps.length > 6) {
-    powderIndex++;
-    hasTaper2 = true;
-  }
+  const hasTaper2 = comps.length > 6;
+  if (hasTaper2) powderIndex++;
   const powder = comps[powderIndex];
-
   const potionIndex = powderIndex + 1;
   const potion = comps[potionIndex];
-
   let talismanIndex = potionIndex + 1;
-  if (comps.length > 7) {
-    talismanIndex++;
-    hasTaper3 = true;
-  }
+  const hasTaper3 = comps.length > 7;
+  if (hasTaper3) talismanIndex++;
   const talisman = comps[talismanIndex];
 
-  if (hasTaper1) {
-    comps[1] = (powder + 2 * herb + potion + talisman + scarab) % 0xC + LOWEST_TAPER_ID;
-  }
+  const personal: Version1PersonalTaper[] = [];
+  if (hasTaper2) personal.push({ slot: 3, mul: scarab + herb + talisman + 2 * (powder + potion), div: scarab + (powder + potion) });
+  if (hasTaper3) personal.push({ slot: 6, mul: powder + 2 * talisman + potion + herb + scarab, div: talisman + scarab });
+  return {
+    taper1: hasTaper1 ? { slot: 1, id: (powder + 2 * herb + potion + talisman + scarab) % TAPER_COLOR_COUNT + LOWEST_TAPER_ID } : null,
+    personal,
+  };
+}
 
-  if (hasTaper2) {
-    comps[3] = ((scarab + herb + talisman + 2 * (powder + potion)) *
-      Math.floor(seed / (scarab + (powder + potion)))) % 0xC + LOWEST_TAPER_ID;
-  }
+/** The taper component a personal taper term gives for `seed`. */
+export function version1TaperForSeed(t: { mul: number; div: number }, seed: number): number {
+  return (t.mul * Math.floor(seed / t.div)) % TAPER_COLOR_COUNT + LOWEST_TAPER_ID;
+}
 
-  if (hasTaper3) {
-    comps[6] = ((powder + 2 * talisman + potion + herb + scarab) *
-      Math.floor(seed / (talisman + scarab))) % 0xC + LOWEST_TAPER_ID;
-  }
-
+/** RandomizeVersion1 for a known seed (the account hash mod VERSION1_SEED_MODULUS). */
+export function randomizeVersion1ForSeed(formula: readonly number[], seed: number): number[] {
+  const comps = [...formula];
+  const t = version1Tapers(formula);
+  if (t.taper1) comps[t.taper1.slot] = t.taper1.id;
+  for (const p of t.personal) comps[p.slot] = version1TaperForSeed(p, seed);
   return comps;
 }
 

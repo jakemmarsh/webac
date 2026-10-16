@@ -33,6 +33,7 @@ import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
 import { closeCurrentContainer, releaseGroundObject as releaseGroundObjectState } from './world/CloseCurrentContainer.js';
 import { createLoadingOverlay, revealLoadingPlaceholder } from './ui/LoadingOverlay.js';
+import { testResearchFormula } from './ui/SpellResearch1999.js';
 import { attachPreworldScale } from './ui/PreworldScale.js';
 import { buildVendorSellRows } from './ui/VendorSellDrag.js';
 import { useObjectSelectTargetText, spellCastTargetCheck, restoreSpellBars, type SpellTargetObject } from './ui/SpellShortcutBar.js';
@@ -283,6 +284,7 @@ import {
   buildAllegianceChatBootPayload,
   buildAllegianceChatGagPayload,
   buildCastTargetedSpellPayload,
+  buildResearchSpellPayload,
   buildChessJoinPayload,
   buildChessMovePayload,
   buildStackableSplitTo3DPayload,
@@ -336,7 +338,7 @@ import { SelectionLighting, SearchReason, lightingLevelsForMode, applyPlayerMode
 import { worldHoverTooltipText } from './ui/WorldHoverTooltip.js';
 import { selfHitUnderRay } from './world/PickOcclusion.js';
 import { WorldHoverFind } from './controllers/WorldHoverFind.js';
-import { PendingCombatMode, playerInReadyPosition, getAttackTarget, incompatibleCombatModeRefusal, combatModeRefusalReason, READY_WEAPON_SLOTS } from './controllers/CombatModeChange.js';
+import { PendingCombatMode, playerInReadyPosition, getAttackTarget, incompatibleCombatModeRefusal, combatModeRefusalReason, READY_WEAPON_SLOTS, UnconfirmedCombatMode, combatModeOfStance, followModeRefusal, castOnceMagicTaken } from './controllers/CombatModeChange.js';
 import { tracksCombatTarget, isObjectAttackable } from './input/InteractionSystem.js';
 import { selectionQueryFor } from './ui/ToolbarSelection.js';
 import { PHYSICS_STATE_KEY } from './models/ObjectTranslucency.js';
@@ -354,7 +356,7 @@ import {
   victimOrKillerLine, playerKilledLine, transientStringLine, channelIndexLines, channelListLines,
   tradeClosedLine, allegianceLoginLine, confirmationRequestText} from './ui/ServerMessageText.js';
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED } from './ui/WeenieErrorNotices.js';
-import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkSampleIsDead, NET_ERROR_STRING_TABLE, type ConnectionNotice } from './ui/ConnectionNotices.js';
+import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkDeadCause, linkSampleIsDead, NET_ERROR_STRING_TABLE, type ConnectionNotice } from './ui/ConnectionNotices.js';
 import { CharacterError, runExpr } from '@ac/shared';
 import { DatLightBudget, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
 import { createViewerLight, updateViewerLight, viewerLightActive } from './effects/ViewerLight.js';
@@ -367,7 +369,8 @@ import { routeObjectSubject, buildInventoryEntry, WorldObjectRecords, PendingCon
 import { ItemShortcutRestorer, isShortcutEligible, quickslotCommand, CREATE_SHORTCUT_ACTION, type ShortcutTarget } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
-import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid, IN_WORLD_RETRY_DELAY_MS } from './session/SessionLifecycle.js';
+import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from './session/SessionLifecycle.js';
+import { handleUnexpectedDrop } from './session/UnexpectedDrop.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel } from './session/AccountTabGuard.js';
 import { SquelchState } from './session/SquelchState.js';
 import { LastOutsideDeathState } from './session/LastOutsideDeathState.js';
@@ -391,6 +394,7 @@ import { type RuntimeConfig, assetUrl, loadRuntimeConfig, resolveRuntimeConfig }
 import { startWeenieSideTables, skippedWeenieSideTables, wieldLocationFromMask as wieldLocationFor } from './boot/WeenieSideTables.js';
 import { accountBannedText, accountBootSurface, connectionFailureRecovery } from './session/AccountBoot.js';
 import { characterMessageAccount } from './session/ServerAccountName.js';
+import { createSplitpea } from './ui/splitpea/SplitpeaPlugin.js';
 import { logOffCharacter, installUnloadSessionClose } from './session/PlayerModuleSave.js';
 import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLogOff, type RequestLogOffDeps } from './session/LogoutFlow.js';
 import { createNetConnection } from './network/NetWorkerClient.js';
@@ -4095,6 +4099,12 @@ async function main() {
    * CombatMode property (the macro's combat-mode gate, agent/macro/modeGate.ts). Undefined until it says.
    */
   let serverCombatMode: AgentSelf['combatMode'] | undefined;
+  /**
+   * BUG.ac1999-magic-mode-refused — a sent mode change the server hasn't taken
+   * yet; GDLE and the AC1999 server refuse one with only an ActionCancelled,
+   * which puts the client back in the mode the server kept (onWeenieError).
+   */
+  const unconfirmedCombatMode = new UnconfirmedCombatMode();
   const serverModeOf = (m: CombatMode): AgentSelf['combatMode'] => ({ [CombatMode.NonCombat]: 'peace', [CombatMode.Melee]: 'melee', [CombatMode.Missile]: 'missile', [CombatMode.Magic]: 'magic' } as Record<number, AgentSelf['combatMode']>)[m] ?? 'unknown';
   /** CPlayerSystem::loggingOff (session/LogoutFlow.ts DeferredLogOff) and its UseTime check. */
   const deferredLogOff = new DeferredLogOff();
@@ -4768,6 +4778,8 @@ async function main() {
     inOpenContainer: (g) => openContainer.has(g),
     inWorld: (g) => !!serverObjectManager?.getObject(g),
   };
+  /** IdentifyObject's search (ACE Everywhere): the same, and the open vendor's merchandise (an examine of a shop item). */
+  const identifyLocations: TargetLocations = { ...targetLocations, forSale: (g) => !!gameUI.vendorStockItem(g) };
   /** CObjectMaint::GetWeenieObject for the failed-attempt line: name / plural / stack of anything the client knows, the player included. */
   const resolveAttemptFailedObject = (guid: number): AttemptFailedObject | undefined => {
     const own = playerState.inventory.getItem(guid) ?? playerState.equipment.getAll().find((e) => e.id === guid);
@@ -5214,12 +5226,30 @@ async function main() {
       // the last packet || !connected` raises ServerDied — the Disconnected
       // screen, not a chat line. The socket-close path handles the
       // !connected half; this catches a server that simply went silent.
+      // BUG.link-dead-no-resume — an in-world drop resumes first, as the
+      // connection's own 'disconnected' does (UnexpectedDrop.ts).
       if (sample.connected && linkSampleIsDead(sample)) {
         // OBS.dm-stall-diagnostics — say which way traffic stopped, in the
         // player's console and in the world_left / first_minute event.
+        // NET.client-suspended-endcause — or our own receiving thread stopped across it.
         const net = aceConnection.getDiagnostics();
-        console.warn(`[AC:NET] No server data for ${Math.round(sample.secondsSinceLastPacket)} s (link_dead) — connection diagnostics: ${JSON.stringify(net)}`);
-        raiseServerDied(undefined, 'link_dead', net);
+        const cause = linkDeadCause(sample);
+        console.warn(`[AC:NET] No server data for ${Math.round(sample.secondsSinceLastPacket)} s (${cause}) — connection diagnostics: ${JSON.stringify(net)}`);
+        const verdict = handleUnexpectedDrop({
+          lifecycle: sessionLifecycle,
+          reportLeft: () => worldReporter?.left('disconnected', { endCause: cause, net }),
+          teardownWorld: () => {
+            if (linkStatusIntervalId !== null) { clearInterval(linkStatusIntervalId); linkStatusIntervalId = null; }
+            if (gameStarted || gameplayUi.isShown) teardownWorldState();
+            gameUI.setIndicatorActive('connection', false);
+            pingLatencyTracker.reset();
+          },
+          // Closes the dead socket itself (a deliberate close: its
+          // 'disconnected' reports and schedules nothing more).
+          scheduleResume,
+          raiseServerDied: () => raiseServerDied(undefined, cause, net),
+        });
+        if (verdict === 'resuming') worldResumePending = true;
       }
     }, LINK_STATUS_TICK_MS);
     // Reveal the WebGL canvas — kept hidden during pre-play to avoid sky bleed-through
@@ -6018,6 +6048,8 @@ async function main() {
   // the era fixes the features this page load's world lacks; their controls
   // are never built. End of retail / classic eras: nothing hidden.
   gameUI.setUnsupportedFeatures(eraUnsupported);
+  // AC1999.spell-research-panel — the 1999 client.exe's "Create Spell" tab (eraClientRules).
+  gameUI.setSpellResearch(eraRules.spellResearch);
 
   // FAITHFUL.270 — restore the persisted logging-on state's HUD indicator.
   // (gameUI exists now; setIndicatorActive is a no-op until indicators are
@@ -7164,6 +7196,28 @@ async function main() {
   // ── Wire spell casting callbacks ──────────────────────────────
   gameUI.spellTargetObjectFor = spellTargetObjectFor;
   gameUI.setSpellCallbacks({
+    // AC1999.spell-research-panel — Test on the 1999 research panel
+    // (CreateSpellPanel_ListenToMessage @ 0x5ab710 → the research send @
+    // 0x4d1e90): magic mode and a selection, then 0x4B with the row's
+    // components and the selected object; the busy count rises with the send
+    // (BUSY_COUNT_ACTIONS) and the server's one UseDone lowers it.
+    onResearchSpell: (formula) => {
+      const scidByWcid = new Map([...spellComponentWcids].map(([scid, wcid]) => [wcid, scid]));
+      const result = testResearchFormula({
+        formula,
+        scidOf: (wcid) => scidByWcid.get(wcid),
+        inMagicMode: combatController.mode === CombatMode.Magic,
+        selectedId: selectedObjectId(),
+      });
+      if (result.kind === 'nothing') return;
+      if (result.kind === 'refuse') {
+        raiseClientNotice(gameUI, result.reason === 'magicMode' ? CN.researchNeedsMagicMode : CN.researchNoTarget);
+        return;
+      }
+      if (!sendGameAction) return;
+      console.log(`[AC] ResearchSpell: comps=[${result.components.join(',')}] target=0x${result.target.toString(16)}`);
+      sendGameAction(GameActionType.ResearchSpell, buildResearchSpellPayload(result.components, result.target));
+    },
     onCastSpell: (spellIndex: number) => {
       const spells = magicController.knownSpells;
       if (spellIndex < 0 || spellIndex >= spells.length) return;
@@ -8042,6 +8096,7 @@ async function main() {
     // Hammer, missing from weenie-combat-styles.json, HandCombat: no swings.
     serverObjectManager.onLocalPlayerStyle = (stanceId) => {
       serverCombatMode = modeOfStance(stanceId) ?? serverCombatMode;
+      unconfirmedCombatMode.stance(combatModeOfStance(stanceId));
       if (animController && animController.stanceId !== stanceId) animController.setStance(stanceId);
     };
     serverObjectManager.onLocalPlayerMovement = (type, move) => {
@@ -9555,6 +9610,7 @@ async function main() {
         if (initialCombatMode !== undefined) {
           const serverMode = initialCombatMode as CombatMode;
           serverCombatMode = serverModeOf(serverMode);
+          unconfirmedCombatMode.serverMode();
           combatController.setCombatMode(serverMode);
           gameUI.hudState.combatMode = serverMode;
           updateWorldCursor(); // GAP.84
@@ -10096,6 +10152,7 @@ async function main() {
         if (data.key === PropertyInt.CombatMode) {
           const serverMode = val as CombatMode;
           serverCombatMode = serverModeOf(serverMode);
+          unconfirmedCombatMode.serverMode();
           combatController.setCombatMode(serverMode);
           gameUI.hudState.combatMode = serverMode;
           updateWorldCursor(); // GAP.84
@@ -10849,7 +10906,9 @@ async function main() {
         // inside an open corpse or chest (appraised before looting), which the container view holds.
         const held = playerState.inventory.getItem(data.guid) ?? playerState.equipment.getAll().find(e => e.id === data.guid);
         const isSelf = aceCharGuid !== null && data.guid === aceCharGuid;
-        const header = resolveExamineHeader(data.guid, obj, examineHeldItem(data.guid, held, openContainer.items()), data.propertiesString, isSelf ? playerState.name || undefined : undefined);
+        // A shop item (examined in a vendor's window) is named and drawn from its merchandise row.
+        const stock = gameUI.vendorStockItem(data.guid);
+        const header = resolveExamineHeader(data.guid, obj, examineHeldItem(data.guid, held, stock ? [...openContainer.items(), { ...stock, guid: data.guid }] : openContainer.items()), data.propertiesString, isSelf ? playerState.name || undefined : undefined);
         const name = header.name;
         const iconId = header.iconId;
         // GAP.24 — persons/monsters get a 3D model preview in the examine
@@ -12208,6 +12267,21 @@ async function main() {
         // the ACE <summary> says). Pre-fix every code went to chat in the
         // Help colour. Map: @ac/shared WeenieErrorSink.ts (generated).
         deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType));
+        // BUG.ac1999-magic-mode-refused — GDLE and the AC1999 server refuse a
+        // combat mode with only this ActionCancelled (Player.cpp
+        // CPlayerWeenie::ChangeCombatMode): no stance, no CombatMode int. The
+        // client follows the server, back to the mode it kept.
+        followModeRefusal(unconfirmedCombatMode, data.errorType, performance.now(), {
+          setMode: (mode) => {
+            combatController.setCombatMode(mode);
+            gameUI.hudState.combatMode = mode;
+            updateWorldCursor(); // GAP.84
+            attackRequest?.reset();
+            console.log(`[AC] ChangeCombatMode refused by the server: back to ${CombatMode[mode]}`);
+          },
+          stance: () => animController?.stanceId ?? 0,
+          setStance: (stance) => animController?.setStance(stance),
+        });
         // BUG.duplicate-local-sounds — no UI_GeneralError chime: nothing in
         // the retail client plays it (audio/RetailLocalSounds).
         // FAITHFUL.222 — drain the FIFO pending-cast queue when the
@@ -12733,7 +12807,7 @@ async function main() {
       // container and the landblock. Only 3D objects counted, so examining
       // any pack or worn item — the magnifier, E, a right-click — was
       // silently dropped here.
-      if (!canUseTarget(targetResolves(guid, aceCharGuid, targetLocations))) {
+      if (!canUseTarget(targetResolves(guid, aceCharGuid, identifyLocations))) {
         console.log(`[AC] Identify suppressed: target 0x${guid.toString(16)} no longer resolves`);
         return;
       }
@@ -12790,6 +12864,7 @@ async function main() {
       if (shouldClearMeleeChainOnModeChange(mode)) {
         meleeApproachTarget = resetMeleeChain();
       }
+      unconfirmedCombatMode.sent(combatController.mode, animController?.stanceId ?? 0, mode, performance.now());
       combatController.setCombatMode(mode);
       attackRequest?.reset();
       gameUI.hudState.combatMode = mode;
@@ -13054,8 +13129,18 @@ async function main() {
           console.log(`[AC] Cast suppressed: spell ${spellId} — magic mode refused`);
           return;
         }
-        // Delay the cast to let the server process the mode change
-        setTimeout(() => sendCastAction(spellId, targetGuid), 500);
+        // The cast waits for the server to take the mode: GDLE and the AC1999
+        // server refuse one with only an ActionCancelled (the client is then
+        // back in the old mode), and a cast sent anyway fails
+        // (MagicGeneralFailure, BUG.ac1999-magic-mode-refused).
+        const castGate = {
+          mode: () => combatController.mode,
+          waiting: () => unconfirmedCombatMode.waiting,
+          schedule: (fn: () => void, ms: number) => { setTimeout(fn, ms); },
+          cast: () => sendCastAction(spellId, targetGuid),
+          suppressed: () => console.log(`[AC] Cast suppressed: spell ${spellId} — not in magic mode (the server refused it)`),
+        };
+        setTimeout(() => castOnceMagicTaken(castGate, 500), 500);
       } else {
         sendCastAction(spellId, targetGuid);
       }
@@ -14574,7 +14659,8 @@ async function main() {
           console.log(`[AC] Debug: auto-entered ${CombatMode[plan.mode]} combat mode, attacking in 1s...`);
           // Delay attack to let ACE process the mode change
           setTimeout(() => {
-            if (sendAttackAction) sendAttackAction(target);
+            // A mode the server refused (back in peace) is no attack.
+            if (combatController.mode === plan.mode && sendAttackAction) sendAttackAction(target);
           }, 1000);
           return;
         }
@@ -16354,7 +16440,7 @@ async function main() {
         use: (guid) => { if (!sendUseAction || (!serverObjectManager?.getObject(guid) && !inventoryItem(guid))) return false; agentPrimeMoveState(); sendUseAction(guid); return true; },
         // The send's own answer: the client's gate (a pending request, a swing under way) refuses it with its line.
         useWithTarget: (src, tgt) => { if (!sendGameAction) return false; agentPrimeMoveState(); return sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(src, tgt)); },
-        magicNeedsCaster: () => eraRules.combatModeCheck === 'eor',
+        magicNeedsCaster: () => true, // every era: the 1999 client asks for magic only with a caster held too
         combatModeRefusal: (mode) => {
           const m = { peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode];
           if (m === combatController.mode) return null;
@@ -16795,6 +16881,20 @@ async function main() {
         enabled: () => gameUI.previewFeaturesOn,
       });
       gameUI.setGoArrow(goArrow);
+      // Splitpea, AC1999 only (eraClientRules().splitpea). The spellbook read is the personal formula the client
+      // already shows and casts for a spell you know; the solver itself only ever sees tapers.
+      gameUI.setSplitpea(createSplitpea(activeEra, {
+        account: () => characterMessageAccount(aceServerAccount, aceAccount),
+        server: () => launcherWorldName ?? '',
+        spells: () => spellTable?.spells ?? null,
+        component: (id) => { const c = spellComponentTable?.components.get(id); return c ? { name: c.name, icon: c.icon } : null; },
+        spellbook: () => magicController.knownSpells.flatMap((k) => {
+          const sp = spellTable?.spells.get(k.id);
+          return sp ? [{ id: k.id, formula: getPlayerFormula(sp.formula, sp.formulaVersion, characterMessageAccount(aceServerAccount, aceAccount)) }] : [];
+        }),
+        carries: (cid) => { const w = spellComponentWcids.get(cid); return !!w && playerState.inventory.hasItem(w, 1); },
+        storage: () => { try { return globalThis.localStorage ?? null; } catch { return null; } },
+      }));
       agentApi.routine.expressions = vtankExpressions(metaHost);
       relaySurface = agentApi.surface() as unknown as Record<string, unknown>;
       claudeStillActing = (claudeRoutine) => agentApi.hasTask || (claudeRoutine && agentApi.routine.status().running);
@@ -17076,6 +17176,8 @@ async function main() {
               // Remember it as the character to resume after a drop, as a
               // character-select entry does (it never was on this path).
               sessionLifecycle.noteEnterWorldRequested(aceCharGuid);
+              // GDLE can refuse it (0x0D) while the new character's first save is queued: quick retries (SessionLifecycle.noteCharacterCreated).
+              sessionLifecycle.noteCharacterCreated(aceCharGuid);
               gameUI.noteWorldSessionStart();
               preworldReporter?.enterRequested();
               const requestMsg = buildCharacterEnterWorldRequest();
@@ -17455,7 +17557,7 @@ async function main() {
           // OBS.dm-stall-diagnostics — with the connection's state at the drop (the worker's
           // snapshot that came with this event); WorldReporter keeps it only for a silent / closed session.
           const dropNet = aceConnection.getDiagnostics();
-          if (event.endCause === 'server_silent' || event.endCause === 'socket_closed') {
+          if (event.endCause === 'server_silent' || event.endCause === 'client_suspended' || event.endCause === 'socket_closed') {
             console.warn(`[AC:NET] Session ended (${event.endCause}${event.closeCode ? ` ${event.closeCode}` : ''}) — connection diagnostics: ${JSON.stringify(dropNet)}`);
           }
           worldReporter?.left('disconnected', { endCause: event.endCause, closeCode: event.closeCode, net: dropNet });
@@ -17513,7 +17615,11 @@ async function main() {
             // the previous session. Retry the enter world sequence after a
             // delay (the retail dialog for this code would sit over a world
             // the retry enters three seconds later — a deliberate deviation
-            // for the phantom-session case, console only). Bounded
+            // for the phantom-session case, console only; sooner for a character
+            // created moments ago, refused while GDLE's first save is queued:
+            // SessionLifecycle.inWorldRetryDelay). The retry's 0xF7C8 is answered
+            // locally once the server said ready (ClientConnection.enterWorldGranted:
+            // GDLE ignores a repeat), so it goes straight to 0xF657. Bounded
             // (SessionLifecycle.characterInWorldRefusal): a refusal that
             // never clears gets the retail dialog below instead of a silent loop.
             // BUG.ac1999-in-world-enter-retry — a refusal that answers a
@@ -17525,7 +17631,7 @@ async function main() {
               break;
             }
             if (inWorldVerdict === 'retry') {
-              const retryDelay = IN_WORLD_RETRY_DELAY_MS;
+              const retryDelay = sessionLifecycle.inWorldRetryDelay();
               console.log(`[AC] ACE: Character still in world, retrying enter world in ${retryDelay}ms...`);
               setTimeout(() => {
                 if (aceCharGuid !== null && sessionLifecycle.mayRetryEnterWorld()) {

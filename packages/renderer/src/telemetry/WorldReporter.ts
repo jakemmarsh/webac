@@ -53,7 +53,7 @@ export type GpuClass = typeof GPU_CLASSES[number];
  * page's own verdicts: 'link_dead' = the 40 s DISCONNECT_TIME link check
  * (main.ts link tick), 'server_boot' = an AccountBoot / AccountBanned.
  */
-export const WORLD_END_CAUSES = ['socket_closed', 'server_disconnect', 'server_net_error', 'server_silent', 'local', 'link_dead', 'server_boot'] as const;
+export const WORLD_END_CAUSES = ['socket_closed', 'server_disconnect', 'server_net_error', 'server_silent', 'client_suspended', 'local', 'link_dead', 'server_boot'] as const;
 export type WorldEndCause = typeof WORLD_END_CAUSES[number];
 
 /** A drop's detail, from the 'disconnected' event (exit 'disconnected' only). */

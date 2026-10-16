@@ -51,25 +51,45 @@ function optionalHeaderSize(flags: number, buf: Buffer, start: number): number |
  * (GameMessageCharacterList.cs).
  */
 export function readCharacterListAccount(buf: Buffer): string | null {
-  if (buf.length < HEADER_SIZE) return null;
-  const flags = readPacketFlags(buf);
-  if (!(flags & FLAG_BLOB_FRAGMENTS)) return null;
-  const opt = optionalHeaderSize(flags, buf, HEADER_SIZE);
-  if (opt === null) return null;
-  let frag = HEADER_SIZE + opt;
-  while (frag + FRAGMENT_HEADER_SIZE <= buf.length) {
-    const count = buf.readUInt16LE(frag + 8);
-    const size = buf.readUInt16LE(frag + 10);
-    if (size < FRAGMENT_HEADER_SIZE) return null;
-    const end = Math.min(buf.length, frag + size);
-    const data = frag + FRAGMENT_HEADER_SIZE;
-    if (count === 1 && data + 4 <= end && buf.readUInt32LE(data) === OPCODE_CHARACTER_LIST) return parseCharacterList(buf, data + 4, end);
-    frag += size;
+  return readCharacterList(buf)?.account ?? null;
+}
+
+/** A CharacterList's account and how many characters it lists (a freshly created account lists none: egress.ts). */
+export interface CharacterListInfo { account: string; characters: number }
+
+/** readCharacterListAccount, with the character count. */
+export function readCharacterList(buf: Buffer): CharacterListInfo | null {
+  for (const m of readSingleFragmentMessages(buf)) {
+    if (m.length >= 4 && m.readUInt32LE(0) === OPCODE_CHARACTER_LIST) return parseCharacterList(m, 4, m.length);
   }
   return null;
 }
 
-function parseCharacterList(buf: Buffer, start: number, end: number): string | null {
+/**
+ * Every single-fragment game message (opcode first) in an end-of-retail
+ * server datagram, as views into it. Login-time messages (CharacterList,
+ * CharacterError, AccountBoot) are a few hundred bytes: one fragment.
+ */
+export function readSingleFragmentMessages(buf: Buffer): Buffer[] {
+  const out: Buffer[] = [];
+  if (buf.length < HEADER_SIZE) return out;
+  const flags = readPacketFlags(buf);
+  if (!(flags & FLAG_BLOB_FRAGMENTS)) return out;
+  const opt = optionalHeaderSize(flags, buf, HEADER_SIZE);
+  if (opt === null) return out;
+  let frag = HEADER_SIZE + opt;
+  while (frag + FRAGMENT_HEADER_SIZE <= buf.length) {
+    const count = buf.readUInt16LE(frag + 8);
+    const size = buf.readUInt16LE(frag + 10);
+    if (size < FRAGMENT_HEADER_SIZE) return out;
+    const end = Math.min(buf.length, frag + size);
+    if (count === 1) out.push(buf.subarray(frag + FRAGMENT_HEADER_SIZE, end));
+    frag += size;
+  }
+  return out;
+}
+
+function parseCharacterList(buf: Buffer, start: number, end: number): CharacterListInfo | null {
   let pos = start;
   const u32 = (): number | null => { if (pos + 4 > end) return null; const v = buf.readUInt32LE(pos); pos += 4; return v; };
   const str16 = (): string | null => {
@@ -88,7 +108,7 @@ function parseCharacterList(buf: Buffer, start: number, end: number): string | n
   }
   if (u32() === null || u32() === null) return null;
   const account = str16();
-  return account && /^[\x20-\x7e]{1,64}$/.test(account) ? account : null;
+  return account && /^[\x20-\x7e]{1,64}$/.test(account) ? { account, characters: count } : null;
 }
 
 /**
@@ -97,6 +117,11 @@ function parseCharacterList(buf: Buffer, start: number, end: number): string | n
  * char[20] account (codecs/CharSelect1999.ts), in 0x800 fragments.
  */
 export function readCharacterListAccount1999(buf: Buffer): string | null {
+  return readCharacterList1999(buf)?.account ?? null;
+}
+
+/** readCharacterListAccount1999, with the character count. */
+export function readCharacterList1999(buf: Buffer): CharacterListInfo | null {
   if (buf.length < HEADER_SIZE_1999) return null;
   const flags = buf.readUInt32LE(4);
   if (!(flags & F1999.Referral)) return null;
@@ -121,7 +146,7 @@ export function readCharacterListAccount1999(buf: Buffer): string | null {
     const raw = d.subarray(pos, pos + 20);
     const z = raw.indexOf(0);
     const account = raw.toString('latin1', 0, z >= 0 ? z : 20);
-    return /^[\x20-\x7e]{1,20}$/.test(account) ? account : null;
+    return /^[\x20-\x7e]{1,20}$/.test(account) ? { account, characters: count } : null;
   }
   return null;
 }

@@ -1,0 +1,10 @@
+[Unit]
+Description=webac deploy agent: deploy the newest CI-green build of web and bridge (deploy/aws/host/deploy-agent.sh)
+After=docker.service nginx.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/webac/repo/deploy/aws/host/deploy-agent.sh
+# A web build can take a few minutes on a small instance.
+TimeoutStartSec=30min

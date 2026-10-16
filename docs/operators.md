@@ -183,11 +183,11 @@ spec requires, and the bridge strips it.
   from a listed address must carry the header; everyone else's are handled
   exactly as before. Other emulators (GDLE, ClassicACE forks) have no
   equivalent yet.
-- **Bridge addresses (not done yet).** The hosted bridge doesn't send from fixed
-  addresses yet. Its address can change on a deploy, so we have to turn on
-  Railway static outbound IPs before any server can trust it. Railway may share those addresses with its other
-  customers, who could then send forged headers to a trusting server. The worst
-  case is someone dodging your per-IP limits or IP bans, which a VPN does already.
+- **Bridge addresses.** Since 2026-10-16 the hosted bridge runs on AWS and sends
+  from one dedicated address of its own, **184.193.176.126** (an Elastic IP; no
+  other customer shares it), for every world except those listed under
+  "Per-session addresses" below. That is the address to list in
+  `TrustedProxyAddresses` or an IP-limit exception.
 - **Turn it on at the same time on both sides.** A server that trusts the
   bridge drops datagrams without the header. One that doesn't trust it reads
   the header as a broken packet. Tell us when your server is ready, and we add
@@ -219,3 +219,27 @@ that era's data and are labelled "Dark Majesty era"
 
 If you don't want your world listed in the browser launcher, open an issue
 and we'll add it to the bridge's denylist the same day.
+
+## Per-session addresses (worlds that limit per IP in code)
+
+A world whose server enforces per-IP limits in code would otherwise see every
+webAC player as the one bridge address. For such worlds (AC1999 today) the
+bridge gives **each session its own public address** from AWS (us-east-1
+Elastic IPs, allocated when the session opens and released a couple of minutes
+after it ends). So the server sees one address per webAC
+player, which is what its per-IP rules assume.
+
+The bridge applies the world's own limits per **real player address** on its
+side as well: at most the world's session limit at once from one player
+address, and at most the world's new-account limit created from one player
+address. An account counts as new when the bridge hasn't seen it before and the
+server shows it with no characters. It also never lets one Elastic IP create
+more accounts than the world allows per address. Each session's log line records
+the player's real address next to the address the server saw (`ip=` and
+`egressIp=`). If you see something from one of those addresses that you want
+dealt with, tell us the address and time and we'll map it to the player and
+apply your decision (including a ban) on our side.
+
+If your server adopts real-IP forwarding (Simple Proxy Protocol, above), we'll
+switch your world back to the single fixed address and send you the player's
+real IP instead.

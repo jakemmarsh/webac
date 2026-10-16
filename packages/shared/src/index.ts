@@ -148,7 +148,9 @@ export { ProjectileSpellType } from './magic/SpellProjectile.js';
 export {
   Scarab, ComponentType, MIN_POWER_BY_LEVEL, MAX_SPELL_LEVEL, spellLevelFromPower, isScarab,
   computeAccountHash, getPlayerFormula, getCastGestureSequence,
+  VERSION1_SEED_MODULUS, TAPER_COLOR_COUNT, LOWEST_TAPER_ID, version1Tapers, version1TaperForSeed, randomizeVersion1ForSeed,
 } from './magic/SpellFormula.js';
+export type { Version1Tapers, Version1PersonalTaper } from './magic/SpellFormula.js';
 export type { SpellComponentGestureInfo } from './magic/SpellFormula.js';
 export { SPELL_FLAG_SELF_TARGETED, resolveCastTarget, targetTypeFromComponentId, spellFormulaTargetingType, inqSpellTargetType } from './magic/CastTargeting.js';
 export type { CastTargetResolution } from './magic/CastTargeting.js';
@@ -232,4 +234,5 @@ export { SELF_EMOTE_SPEAKER, substituteEmotePronoun, composeHeardEmoteLine, comp
 export * from './routines/index.js';
 export * from './goarrow/index.js';
 export * from './magtools/index.js';
+export * from './splitpea/index.js';
 export * from './vcs5/vcs5.js';

@@ -83,7 +83,7 @@
 
 import { acStringHash, getString, getStringFromTable } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { CharacterError, characterErrorMessage } from '@ac/shared';
-import type { BridgeRefusal } from '@ac/network';
+import { silenceIsOwnStall, type BridgeRefusal, type LinkSample } from '@ac/network';
 
 /** CPlayerSystem::UseTime — seconds since the last packet before ServerDied (0x7cc5c8). */
 export const DISCONNECT_TIME_S = 40.0;
@@ -244,8 +244,27 @@ export function netErrorNotice(token: string): ConnectionNotice {
 export const BRIDGE_IP_CAP_TOKEN = 'BRIDGE_IP_CAP';
 export const BRIDGE_IP_CAP_TEXT = 'Too many game windows are open from your network. Close some webAC tabs and try again.';
 
+/** A world whose sessions each get their own address from the bridge has none free (BRIDGE_CLOSE_WORLD_FULL). */
+export const BRIDGE_WORLD_FULL_TOKEN = 'BRIDGE_WORLD_FULL';
+export const BRIDGE_WORLD_FULL_TEXT = 'This server is full for webAC players right now. Try again in a few minutes.';
+/** That world's new-account limit per network, which the bridge applies (BRIDGE_CLOSE_NEW_ACCOUNT_CAP). */
+export const BRIDGE_NEW_ACCOUNT_CAP_TOKEN = 'BRIDGE_NEW_ACCOUNT_CAP';
+export const BRIDGE_NEW_ACCOUNT_CAP_TEXT = 'This server limits how many new accounts one network can create, and yours has reached it. '
+  + 'Log in with an account you already made here.';
+
+/** No bridge address may still create an account on that world (BRIDGE_CLOSE_NEW_ACCOUNT_UNAVAILABLE). */
+export const BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TOKEN = 'BRIDGE_NEW_ACCOUNT_UNAVAILABLE';
+export const BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TEXT = "New accounts can't be made through webAC on this server right now. "
+  + 'Try again later, or log in with an existing account.';
+
 export function bridgeRefusalNotice(refusal: BridgeRefusal): ConnectionNotice {
   switch (refusal) {
+    case 'new_account_unavailable':
+      return Object.freeze({ surface: 'dialog', token: BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TOKEN, stringId: 0, text: BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TEXT });
+    case 'world_full':
+      return Object.freeze({ surface: 'dialog', token: BRIDGE_WORLD_FULL_TOKEN, stringId: 0, text: BRIDGE_WORLD_FULL_TEXT });
+    case 'new_account_cap':
+      return Object.freeze({ surface: 'dialog', token: BRIDGE_NEW_ACCOUNT_CAP_TOKEN, stringId: 0, text: BRIDGE_NEW_ACCOUNT_CAP_TEXT });
     case 'ip_cap':
     default:
       return Object.freeze({ surface: 'dialog', token: BRIDGE_IP_CAP_TOKEN, stringId: 0, text: BRIDGE_IP_CAP_TEXT });
@@ -374,4 +393,17 @@ export function characterErrorCodesHandled(): number[] {
  */
 export function linkSampleIsDead(sample: { connected: boolean; secondsSinceLastPacket: number }): boolean {
   return !sample.connected || sample.secondsSinceLastPacket > DISCONNECT_TIME_S;
+}
+
+/**
+ * NET.client-suspended-endcause — what a dead link sample (linkSampleIsDead)
+ * reports: 'client_suspended' when the receiving thread's own stop (a sleeping
+ * machine, a frozen worker) longer than DISCONNECT_TIME ended inside the
+ * silence and the quiet since is within it, else 'link_dead'. The stop is the
+ * worker's (the thread that measures receives), not the page timer's: a
+ * throttled hidden page whose worker kept running heard a really silent server.
+ */
+export function linkDeadCause(sample: LinkSample): 'link_dead' | 'client_suspended' {
+  return sample.connected && silenceIsOwnStall(sample.stall, sample.secondsSinceLastPacket * 1000, DISCONNECT_TIME_S * 1000)
+    ? 'client_suspended' : 'link_dead';
 }

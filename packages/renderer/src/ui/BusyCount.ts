@@ -49,6 +49,9 @@ export const BUSY_COUNT_ACTIONS: ReadonlySet<GameActionType> = new Set([
   GameActionType.UseWithTarget,
   GameActionType.CastUntargetedSpell,
   GameActionType.CastTargetedSpell,
+  // 1999 only: the research send @ 0x4d1e90 sends 0x4B then PanelUI_IncrementBusyCount;
+  // the AC1999 server answers every research submission with one UseDone.
+  GameActionType.ResearchSpell,
   GameActionType.Buy,
   GameActionType.Sell,
 ]);

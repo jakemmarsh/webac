@@ -32,7 +32,8 @@ import {
 } from '@ac/network';
 import { Connection1999 } from '../packages/network/src/era1999/Connection1999.js';
 import { NetWorkerClient, SNAPSHOT_EXTRAPOLATION_MAX_MS, type NetWorkerEndpoint } from '../packages/renderer/src/network/NetWorkerClient.js';
-import { linkSampleIsDead } from '../packages/renderer/src/ui/ConnectionNotices.js';
+import { linkDeadCause, linkSampleIsDead } from '../packages/renderer/src/ui/ConnectionNotices.js';
+import { ThreadStallClock, silenceIsOwnStall } from '../packages/network/src/ThreadStall.js';
 import { WorldReporter, type WorldEvent } from '../packages/renderer/src/telemetry/WorldReporter.js';
 import { sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld.js';
 import { resolveBridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil.js';
@@ -164,13 +165,58 @@ describe('the page link check reads the worker, not the page clock', () => {
     s.ws.receive(serverMessage(2));
     vi.advanceTimersByTime(41_000);
     expect(linkSampleIsDead(s.client.getLinkStatus(Date.now()))).toBe(true);
-    // And for a page that was stopped through the silence, once its inbox runs.
+    expect(linkDeadCause(s.client.getLinkStatus(Date.now()))).toBe('link_dead');
+    // And for a page that was stopped through the silence, once its inbox runs:
+    // its worker kept running, so the silence was the server's (link_dead).
     const t = workerSession();
     t.ws.receive(serverMessage(2));
     t.state.blocked = true;
     vi.advanceTimersByTime(41_000);
     t.unblock();
     expect(linkSampleIsDead(t.client.getLinkStatus(Date.now()))).toBe(true);
+    expect(linkDeadCause(t.client.getLinkStatus(Date.now()))).toBe('link_dead');
+  });
+
+  it('a machine asleep 60 s (worker stopped too): the page\'s 40 s check reads client_suspended', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    vi.advanceTimersByTime(1000);
+    vi.setSystemTime(Date.now() + 60_000); // asleep: neither thread ran
+    vi.advanceTimersByTime(300); // the worker's first tick and snapshot after waking
+    const sample = s.client.getLinkStatus(Date.now());
+    expect(linkSampleIsDead(sample)).toBe(true);
+    expect(sample.stall).toMatchObject({ lengthMs: expect.any(Number) });
+    expect(sample.stall!.lengthMs).toBeGreaterThan(60_000);
+    expect(linkDeadCause(sample)).toBe('client_suspended');
+    // Heard after waking, then 41 s of real silence: the server's (link_dead).
+    s.ws.receive(serverMessage(3));
+    vi.advanceTimersByTime(41_000);
+    const later = s.client.getLinkStatus(Date.now());
+    expect(linkSampleIsDead(later)).toBe(true);
+    expect(linkDeadCause(later)).toBe('link_dead');
+  });
+
+  it('ThreadStallClock: a stop counts once it passes 40 s, before the loop ticks again too; silenceIsOwnStall needs it inside the silence', () => {
+    const c = new ThreadStallClock();
+    c.reset(1000);
+    c.tick(2000);
+    expect(c.latest(2000)).toBeNull();
+    expect(c.latest(2000 + 40_000)).toBeNull(); // 40 s exactly is not a stop
+    expect(c.latest(2000 + 50_000)).toEqual({ agoMs: 0, lengthMs: 50_000 }); // still asleep / no tick yet
+    c.tick(2000 + 50_000);
+    c.tick(2000 + 51_000); // a short gap does not replace it
+    expect(c.latest(2000 + 55_000)).toEqual({ agoMs: 5000, lengthMs: 50_000 });
+    // Silence 52 s (last receive before the stop), limit 40 s: ours.
+    expect(silenceIsOwnStall(c.latest(57_000), 52_000, 40_000)).toBe(true);
+    // Last receive after the stop ended: the server's.
+    expect(silenceIsOwnStall(c.latest(57_000), 4000, 40_000)).toBe(false);
+    // A stop shorter than the limit explains nothing.
+    expect(silenceIsOwnStall({ agoMs: 1000, lengthMs: 50_000 }, 160_000, 140_000)).toBe(false);
+    // More than the limit of quiet since waking: the server's.
+    expect(silenceIsOwnStall({ agoMs: 45_000, lengthMs: 600_000 }, 700_000, 40_000)).toBe(false);
+    expect(silenceIsOwnStall(null, 700_000, 40_000)).toBe(false);
+    c.reset();
+    expect(c.latest(10_000_000)).toBeNull();
   });
 });
 
@@ -194,6 +240,32 @@ describe('the worker drop measures silence by received data', () => {
     expect(s.ws.closedByUs).toBe(true);
     expect(s.disconnects()).toEqual([expect.objectContaining({ everOpened: true, deliberate: false, endCause: 'server_silent' })]);
     expect(s.disconnects()[0]).not.toHaveProperty('closeCode');
+  });
+
+  it('a laptop asleep 29 min: the drop after waking reads client_suspended, not server_silent', () => {
+    // 2026-10-16 production: tickGapMaxMs 1744556, txAgoMs 66 — our thread was
+    // stopped, the server was not silent. The drop itself is unchanged.
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    vi.advanceTimersByTime(1000);
+    vi.setSystemTime(Date.now() + 1_744_556); // asleep: no timer ran
+    vi.advanceTimersByTime(100); // the first tick after waking skips the check
+    expect(s.disconnects()).toHaveLength(0);
+    vi.advanceTimersByTime(2000); // nothing queued arrived: the next tick drops it
+    expect(s.ws.closedByUs).toBe(true);
+    expect(s.disconnects()).toEqual([expect.objectContaining({ everOpened: true, deliberate: false, endCause: 'client_suspended' })]);
+    expect(s.client.getDiagnostics().tickGapMaxMs).toBeGreaterThan(140_000);
+  });
+
+  it('a server that stays silent 140 s after we woke and heard it reads server_silent again', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    vi.advanceTimersByTime(1000);
+    vi.setSystemTime(Date.now() + 600_000);
+    vi.advanceTimersByTime(100);
+    s.ws.receive(serverMessage(3)); // the server was alive across the sleep
+    vi.advanceTimersByTime(141_000);
+    expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'server_silent' })]);
   });
 
   it('every other end names itself: a remote close with its code, a server Disconnect, our own disconnect()', () => {
@@ -274,6 +346,30 @@ describe('Connection1999 timeout', () => {
     expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'server_silent' })]);
   });
 
+  it('a thread stopped 70 s with nothing queued: the drop on the next tick reads client_suspended', () => {
+    const s = session1999();
+    vi.advanceTimersByTime(500);
+    vi.setSystemTime(Date.now() + 70_000);
+    vi.advanceTimersByTime(100); // the stalled tick skips the timeout
+    expect(s.disconnects()).toHaveLength(0);
+    // The page's 40 s check, if it runs first, says the same.
+    expect(linkDeadCause(s.conn.getLinkStatus(Date.now()))).toBe('client_suspended');
+    vi.advanceTimersByTime(1000);
+    expect(s.sock.closedByUs).toBe(true);
+    expect(s.events.filter(e => e.type === 'serverTimeout')).toHaveLength(1);
+    expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'client_suspended' })]);
+  });
+
+  it('heard after the stop, then 60 s of real silence: server_silent', () => {
+    const s = session1999();
+    vi.advanceTimersByTime(500);
+    vi.setSystemTime(Date.now() + 70_000);
+    vi.advanceTimersByTime(100);
+    s.sock.deliver(s.next);
+    vi.advanceTimersByTime(61_000);
+    expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'server_silent' })]);
+  });
+
   it('a remote close reports its code; our own disconnect() reads local', () => {
     const a = session1999();
     a.sock.readyState = 3;
@@ -342,6 +438,13 @@ describe('world telemetry carries the drop detail', () => {
     a.r.left('disconnected', { endCause: 'server_disconnect' });
     expect(a.events[0]).toMatchObject({ outcome: 'first_minute', exit: 'disconnected', endCause: 'server_disconnect', closeCode: null });
     expect(sanitizeClientWorld(a.events[0])).toMatchObject({ endCause: 'server_disconnect' });
+    // Our own stopped thread: the page keeps the cause and the bridge lets it through.
+    const c = reporter();
+    c.r.enteredWorld();
+    c.clock.t = 10_000;
+    c.r.left('disconnected', { endCause: 'client_suspended' });
+    expect(c.events[0]).toMatchObject({ outcome: 'first_minute', endCause: 'client_suspended' });
+    expect(sanitizeClientWorld(c.events[0])).toMatchObject({ endCause: 'client_suspended' });
     const b = reporter();
     b.r.enteredWorld();
     b.clock.t = 10_000;

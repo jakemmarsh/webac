@@ -25,7 +25,7 @@
  * Admission, in order (rejections answer the upgrade with an HTTP status and
  * count in /metrics rejects{reason}): origin → global cap → per-IP new
  * connection rate → per-IP concurrent cap → [multi] server id → per-server
- * cap → DNS + public-address check.
+ * cap → DNS + public-address check → [egress world] an egress slot (egress.ts).
  */
 import * as http from 'http';
 import type { Duplex } from 'stream';
@@ -61,7 +61,7 @@ import { RecentEventIds } from './eventIds.js';
 import { type LookupFn, resolveTarget } from './targets.js';
 import { encodeSppHeader, stripSppHeader } from './spp.js';
 import { compatFor } from './serverCompat.js';
-import { RoutineTokens, handleRoutines, readCharacterListAccount, readCharacterListAccount1999 } from './routines.js';
+import { RoutineTokens, handleRoutines, readCharacterList, readCharacterList1999 } from './routines.js';
 import { AgentRelay, accountKey, type RelayPeer } from './relay.js';
 import { handleMcp, parseMcpTokens } from './mcpHttp.js';
 import { OAuthServer } from './oauth.js';
@@ -70,6 +70,7 @@ import { RoutineStore } from './routineStore.js';
 import {
   type SessionProtocol, sessionProtocol, readGrant1999Ids, readTime1999, buildDisconnectPacket1999,
 } from './protocol.js';
+import { type EgressLease, type EgressManager, readLoginAccount, readLoginRefusal } from './egress.js';
 
 /** Where a session's datagrams go. */
 interface Target {
@@ -127,6 +128,8 @@ export interface BridgeDeps {
   log?: Logger;
   lookup?: LookupFn;
   now?: () => number;
+  /** Per-session egress addresses for BRIDGE_EGRESS_SERVERS worlds (egress.ts startEgress), already started. */
+  egress?: EgressManager | null;
 }
 
 export interface BridgeServer {
@@ -162,9 +165,44 @@ export const DRAINING_FRAME = JSON.stringify({ bridgeDraining: true });
  */
 export const CLOSE_IP_CAP = 4429;
 export const CLOSE_IP_CAP_REASON = 'ip_cap';
+/**
+ * An egress world (egress.ts) has no slot for this session: every egress
+ * address already carries the world's per-address session limit, or the
+ * cloud refused a new address. The client says the world is full through
+ * webAC right now (@ac/network BRIDGE_CLOSE_WORLD_FULL).
+ */
+export const CLOSE_WORLD_FULL = 4503;
+export const CLOSE_WORLD_FULL_REASON = 'world_full';
+/**
+ * An egress world's login named an account the bridge has never seen reach
+ * the character list (the server would create it), and the player's real
+ * address has already introduced the world's limit of new accounts. The login
+ * is not forwarded (@ac/network BRIDGE_CLOSE_NEW_ACCOUNT_CAP).
+ */
+export const CLOSE_NEW_ACCOUNT_CAP = 4403;
+export const CLOSE_NEW_ACCOUNT_CAP_REASON = 'new_account_cap';
+/**
+ * An egress world's login named a new account, and no egress address the
+ * world still lets create accounts (accountsPerAddress) could be had: every
+ * slot's address has made its creations and no fresh one could be allocated.
+ * The login is not forwarded (@ac/network BRIDGE_CLOSE_NEW_ACCOUNT_UNAVAILABLE).
+ */
+export const CLOSE_NEW_ACCOUNT_UNAVAILABLE = 4504;
+export const CLOSE_NEW_ACCOUNT_UNAVAILABLE_REASON = 'new_account_unavailable';
+
+/**
+ * Refusals the browser must be able to read (it can't see an HTTP status on
+ * a refused upgrade): accepted only to be closed at once with these codes.
+ * An egress world's per-real-IP session cap reads as the bridge's own ip_cap.
+ */
+const READABLE_REFUSALS: Readonly<Record<string, readonly [number, string]>> = {
+  ip_cap: [CLOSE_IP_CAP, CLOSE_IP_CAP_REASON],
+  egress_ip_cap: [CLOSE_IP_CAP, CLOSE_IP_CAP_REASON],
+  egress_full: [CLOSE_WORLD_FULL, CLOSE_WORLD_FULL_REASON],
+};
 
 type Admission =
-  | { ok: true; target: Target | null; protocol: SessionProtocol; release: () => void }
+  | { ok: true; target: Target | null; protocol: SessionProtocol; egress: EgressLease | null; release: () => void }
   | { ok: false; status: number; reason: string; message: string };
 
 export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}): BridgeServer {
@@ -173,6 +211,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
   const metrics = new BridgeMetrics(now);
   const registry = deps.registry;
   if (config.mode === 'multi' && !registry) throw new Error('multi mode needs a ServerRegistry');
+  const egress = deps.egress ?? null;
 
   const limits = config.limits;
   const perIp = new KeyedCounter();
@@ -378,6 +417,29 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       }
     }
 
+    // An egress world: a slot of its own address, attached before the upgrade completes, so the
+    // session's first datagram already leaves from it. The world's per-address rules apply per real IP.
+    let lease: EgressLease | null = null;
+    if (egress && target && egress.isEgressWorld(target.key)) {
+      perIp.inc(ip);
+      if (serverKey) perServer.inc(serverKey);
+      pending++;
+      const got = await egress.acquire(target.key, ip);
+      pending--;
+      perIp.dec(ip);
+      if (serverKey) perServer.dec(serverKey);
+      if (!got.ok) {
+        return got.refusal === 'ip_cap'
+          ? { ok: false, status: 429, reason: 'egress_ip_cap', message: 'Too many sessions to this server from this address' }
+          : { ok: false, status: 503, reason: 'egress_full', message: 'No free egress address for this server' };
+      }
+      lease = got.lease;
+      if (shuttingDown || draining) {
+        lease.release();
+        return { ok: false, status: 503, reason: shuttingDown ? 'shutting_down' : 'draining', message: 'Bridge is not taking new sessions' };
+      }
+    }
+
     perIp.inc(ip);
     if (serverKey) perServer.inc(serverKey);
     let released = false;
@@ -385,11 +447,13 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       ok: true,
       target,
       protocol: sessionProtocol(era, req.url),
+      egress: lease,
       release: () => {
         if (released) return;
         released = true;
         perIp.dec(ip);
         if (serverKey) perServer.dec(serverKey);
+        lease?.release();
       },
     };
   }
@@ -409,10 +473,11 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       if (!a.ok) {
         metrics.reject(a.reason);
         log('warn', 'connect_rejected', { ip, reason: a.reason, status: a.status, origin: req.headers.origin, url: req.url });
-        if (a.reason === 'ip_cap' && !socket.destroyed) {
+        const readable = READABLE_REFUSALS[a.reason];
+        if (readable && !socket.destroyed) {
           // Accepted only to say why: closed at once, never counted as a session.
           try {
-            wss.handleUpgrade(req, socket, head, (ws) => ws.close(CLOSE_IP_CAP, CLOSE_IP_CAP_REASON));
+            wss.handleUpgrade(req, socket, head, (ws) => ws.close(readable[0], readable[1]));
           } catch { rejectUpgrade(socket, a.status, a.message); }
           return;
         }
@@ -420,9 +485,12 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         return;
       }
       if (socket.destroyed) { a.release(); return; }
+      // An upgrade that never completes (ws aborts it on a bad request) frees what admission took,
+      // the egress slot included; once the session opened, its cleanup does (release is idempotent).
+      socket.once('close', a.release);
       const proxy = { address: req.socket.localAddress ?? '', port: req.socket.localPort ?? 0 };
       const trace = traceFromUrl(req.url);
-      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, proxy, a.target, a.protocol, a.release, trace));
+      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, proxy, a.target, a.protocol, a.release, trace, a.egress));
     }, (err) => {
       metrics.reject('internal');
       log('error', 'admit_failed', { ip, error: err as Error });
@@ -434,7 +502,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
 
   function openSession(
     ws: WebSocket, ip: string, proxy: { address: string; port: number }, target: Target | null, protocol: SessionProtocol, release: () => void,
-    trace: string | null = null,
+    trace: string | null = null, lease: EgressLease | null = null,
   ): void {
     const id = ++sessionCounter;
     const upLink = makeImpairedLink(config.impairment);
@@ -459,9 +527,13 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     /** The relay account this session answers for: its logged-in account, or the one its relay link was vouched for. */
     const relayKeyOf = (): string | null => (session.target && session.account ? accountKey(routinesServer(session.target), session.account) : session.relayLinkKey);
     /** The server named the account: register the tab, and if this bridge is already draining, say so (it logged in late). */
-    const accountRead = (account: string): void => {
+    const accountRead = (account: string, characters: number): void => {
       session.account = account;
       log('info', 'session_account', { session: id });
+      // An egress world's new-account rule: the account is known now (and counts against the real IP if this login made it).
+      if (lease?.accountRule) {
+        try { egress!.accountConfirmed(lease, account, characters); } catch (err) { egressFailure('account_confirm', err); }
+      }
       if (!relayOn || !session.target) return;
       relay.register(relayPeer, accountKey(routinesServer(session.target), account));
       if (draining) session.notifyDraining();
@@ -469,7 +541,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     sessions.add(session);
     metrics.connects++;
     // trace: the page's random id (RELEASE.preworld-outcomes), also on its client_preworld lines.
-    log('info', 'session_open', { session: id, ip, server: target?.key ?? null, protocol, active: sessions.size, ...(trace ? { trace } : {}) });
+    // egressIp: the address the game server sees for this session (an operator's report names it; this line maps it to `ip`).
+    const egressFields = () => (lease ? { egressSlot: lease.localAddress, egressIp: lease.publicIp ?? lease.localAddress } : {});
+    log('info', 'session_open', { session: id, ip, server: target?.key ?? null, protocol, active: sessions.size, ...egressFields(), ...(trace ? { trace } : {}) });
     const is1999 = protocol === 'ac1999';
     // The player's address for a server that trusts the bridge (spp.ts). The
     // browser's own source port never reaches the bridge (the edge proxies it), so 0.
@@ -505,7 +579,10 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       const sourcePorts = is1999 ? [t.authPort] : [t.authPort, t.worldPort];
       const udp = dgram.createSocket('udp4');
       session.udp = udp;
-      udp.bind(0, () => log('debug', 'udp_bound', { session: id, port: udp.address().port }));
+      // An egress session leaves from its slot's address (sends queue until the bind completes).
+      const bound = () => log('debug', 'udp_bound', { session: id, address: udp.address().address, port: udp.address().port });
+      if (lease) udp.bind({ port: 0, address: lease.localAddress }, bound);
+      else udp.bind(0, bound);
       udp.on('error', (err) => {
         log('error', 'udp_error', { session: id, error: err });
         void cleanup('udp_error');
@@ -525,6 +602,11 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         }
         lastServerResponse.set(t.key, now());
         if (session.closed) return;
+        // An egress world's new-account rule: the server refused the login outright (no account made), so
+        // the pending markers that login left are dropped. Only before the character list.
+        if (lease?.accountRule && session.account === null && readLoginRefusal(msg, protocol)) {
+          try { egress!.loginRefused(lease); } catch (err) { egressFailure('login_refused', err); }
+        }
         session.bytesFromServer += msg.length;
         session.packetsDown++;
         metrics.addBytes('udp_in', msg.length);
@@ -540,9 +622,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
             log('info', 'session_server_id', { session: id, aceSessionId: grant.slot, serverRecipient: grant.serverRecipient, protocol });
           }
           // Read the account when something needs it: the routines store or the automation allowlist.
-          if (session.account === null && (routineStore || config.automationAccounts.length || relayOn)) {
-            const account = readCharacterListAccount1999(msg);
-            if (account) accountRead(account);
+          if (session.account === null && (routineStore || config.automationAccounts.length || relayOn || lease?.accountRule)) {
+            const list = readCharacterList1999(msg);
+            if (list) accountRead(list.account, list.characters);
           }
         } else {
           // The client's session id comes from the server's ConnectRequest
@@ -553,9 +635,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
             log('info', 'session_server_id', { session: id, aceSessionId: clientId });
           }
           // Read the account when something needs it: the routines store or the automation allowlist.
-          if (session.account === null && (routineStore || config.automationAccounts.length || relayOn)) {
-            const account = readCharacterListAccount(msg);
-            if (account) accountRead(account);
+          if (session.account === null && (routineStore || config.automationAccounts.length || relayOn || lease?.accountRule)) {
+            const list = readCharacterList(msg);
+            if (list) accountRead(list.account, list.characters);
           }
         }
         // Backpressure: drop the datagram (UDP semantics; the client NAKs).
@@ -664,6 +746,68 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
 
       if (isProbe || !session.target) return; // probe-only session: forward nothing
       if (buf.length < 20) return;
+      handleGame(buf);
+    });
+
+    /**
+     * Egress state failed under this session (the state dir, a lock held too
+     * long): close only this session, as a full world, never the bridge.
+     */
+    function egressFailure(step: string, err: unknown): void {
+      log('error', 'egress_session_error', { session: id, step, error: err as Error });
+      void cleanup('egress_error', CLOSE_WORLD_FULL);
+    }
+
+    // An egress world's new-account rule runs before a login reaches the server (which would
+    // create the account). The check is async (a cross-process lock): packets behind it wait,
+    // in order, and go once it allows the login.
+    let loginCheck = false;
+    const waiting: Buffer[] = [];
+    const MAX_WAITING = 64;
+
+    function handleGame(buf: Buffer): void {
+      if (session.closed || !session.target) return;
+      if (loginCheck) {
+        if (waiting.length < MAX_WAITING) waiting.push(buf);
+        return;
+      }
+      if (lease?.accountRule) {
+        const login = readLoginAccount(buf, protocol);
+        if (login.login && login.account !== null && !egress!.loginAllowed(lease, login.account)) {
+          const account = login.account;
+          loginCheck = true;
+          egress!.checkLogin(lease, account).then((verdict) => {
+            loginCheck = false;
+            if (session.closed) return;
+            if (verdict === 'new_account_cap' || verdict === 'new_account_unavailable') {
+              metrics.reject(`egress_${verdict}`);
+              log('warn', 'connect_rejected', { session: id, ip, reason: `egress_${verdict}`, server: session.target?.key ?? null });
+              void cleanup(verdict, verdict === 'new_account_cap' ? CLOSE_NEW_ACCOUNT_CAP : CLOSE_NEW_ACCOUNT_UNAVAILABLE);
+              return;
+            }
+            if (verdict === 'moved') {
+              // The session's address had made the world's account creations: it is on another slot
+              // now. Nothing of this login has left yet, so a socket bound to the old address is
+              // replaced (ensureUdp binds the new one).
+              const old = session.udp;
+              session.udp = null;
+              if (old) { old.removeAllListeners('error'); old.on('error', () => {}); try { old.close(); } catch { /* closed */ } }
+              log('info', 'session_egress_moved', { session: id, ip, ...egressFields() });
+            }
+            forwardGame(buf);
+            for (const b of waiting.splice(0)) handleGame(b);
+          }, (err) => {
+            loginCheck = false;
+            egressFailure('login_check', err);
+          });
+          return;
+        }
+      }
+      forwardGame(buf);
+    }
+
+    function forwardGame(buf: Buffer): void {
+      if (session.closed || !session.target) return;
       ensureUdp();
       const flags = readPacketFlags(buf);
       session.packetsUp++;
@@ -681,7 +825,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       } else {
         sendUdp(buf, session.target.authPort);
       }
-    });
+    }
 
     /**
      * `peerCloseCode`: the browser socket's close code on a 'ws_close'
@@ -702,7 +846,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       downLink.close();
       metrics.close(reason);
       log('info', 'session_close', {
-        session: id, ip, server: session.target?.key ?? null, reason, ...(trace ? { trace } : {}),
+        session: id, ip, server: session.target?.key ?? null, reason, ...egressFields(), ...(trace ? { trace } : {}),
         durationMs: now() - session.openedAt,
         bytesFromBrowser: session.bytesFromBrowser, bytesToServer: session.bytesToServer,
         bytesFromServer: session.bytesFromServer, bytesToBrowser: session.bytesToBrowser,
@@ -711,7 +855,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         active: sessions.size,
       });
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        try { ws.close(code ?? 1000); } catch { /* ignore */ }
+        const reasonText = code === CLOSE_NEW_ACCOUNT_CAP ? CLOSE_NEW_ACCOUNT_CAP_REASON
+          : code === CLOSE_NEW_ACCOUNT_UNAVAILABLE ? CLOSE_NEW_ACCOUNT_UNAVAILABLE_REASON : undefined;
+        try { ws.close(code ?? 1000, reasonText); } catch { /* ignore */ }
       }
       const udp = session.udp;
       if (!udp) return Promise.resolve();
@@ -770,6 +916,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       deps.directory?.stop();
       const closing = [...sessions].map(s => s.close('shutdown', 1001));
       await Promise.race([Promise.all(closing), new Promise(r => setTimeout(r, 3000))]);
+      // Waits for AWS work under way and gives back the addresses no process uses (egress.ts stop).
+      await egress?.stop().catch((err) => log('error', 'egress_stop_failed', { error: err as Error }));
       for (const c of wss.clients) c.terminate();
       await new Promise<void>((resolve) => {
         httpServer.close(() => resolve());

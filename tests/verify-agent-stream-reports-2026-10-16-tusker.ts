@@ -122,9 +122,17 @@ describe('1–2. spell names as players say them, and item buffs that go on you'
       expect(host.sent).toContain('cast 2626 500000a4');
     });
 
-    it('a name that fits several says which', async () => {
+    it('a family named without a level casts the highest you can land, saying so (was "fits 2 of your spells: name one")', async () => {
+      // Asking which one cost Arcanist a round trip at 26/146 (2026-10-16 19:58:44Z): verify-agent-critical-health.ts.
       const r = await settle(api, host, api.cast('Flame Bolt', 'Claude Bulwark'), 2000);
-      expect(r).toEqual({ ok: false, message: '"Flame Bolt" fits 2 of your spells: Flame Bolt I, Flame Bolt IV. Name one (spell="Flame Bolt I")' });
+      expect(r?.message.split('\n')[0]).toBe('casting Flame Bolt IV at Claude Bulwark #500000a4 (no level named: the highest of yours you can land)');
+      expect(host.sent.filter((x) => x.startsWith('cast'))).toEqual(['cast ' + SPELLS.find((x) => x.name === 'Flame Bolt IV')!.id + ' 500000a4']);
+    });
+
+    it('a name that fits different spells still says which', async () => {
+      const r = await settle(api, host, api.cast('IV', null), 2000);
+      expect(r?.ok).toBe(false);
+      expect(r?.message).toMatch(/^"IV" fits \d+ of your spells: .*Name one/);
       expect(host.sent.filter((x) => x.startsWith('cast'))).toEqual([]);
     });
 

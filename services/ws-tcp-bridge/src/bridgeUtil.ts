@@ -176,6 +176,80 @@ export interface BridgeConfig {
   mcpSecret: string | null;
   /** BRIDGE_CONNECT_PAGE: the game's connect screen (e.g. https://playwebac.com/); authorize redirects there. Unset: the bridge's plain page. */
   mcpConnectPage: string | null;
+  /**
+   * Per-session egress addresses (egress.ts): worlds whose per-address caps every webAC player
+   * would otherwise share get their sessions spread over the instance's own addresses, and the
+   * bridge applies those caps per real player address itself. null = off (BRIDGE_EGRESS_SERVERS unset).
+   */
+  egress: EgressConfig | null;
+}
+
+/** One egress world (BRIDGE_EGRESS_SERVERS entry `<targetKey>:<sessionsPerAddress>[:<newAccountsPerRealIp>[:<accountsPerAddress>]]`). */
+export interface EgressWorld {
+  /** The target key (multi mode: the server id; pinned: 'pinned'), lower-cased. */
+  key: string;
+  /** The world's own concurrent-session cap per source address: the most sessions one egress address (and one real IP) carries. */
+  sessionsPerAddress: number;
+  /** New accounts one real IP may introduce to the world through this bridge (null = no rule). */
+  newAccountsPerRealIp: number | null;
+  /**
+   * The world's lifetime account-creation cap per source address (AC1999 max_accounts_per_ip):
+   * a login for an unknown account moves to an egress address that hasn't made this many.
+   * Defaults to newAccountsPerRealIp; null = no rule.
+   */
+  accountsPerAddress: number | null;
+}
+
+export interface EgressConfig {
+  worlds: Map<string, EgressWorld>;
+  /** BRIDGE_EGRESS_PROVIDER: 'aws' (Elastic IPs on secondary private IPs) or 'static' (local addresses as they are). */
+  provider: 'aws' | 'static';
+  /** BRIDGE_EGRESS_DIR: state shared by every bridge process on the host (locks, salt, account sets). */
+  dir: string;
+  /** BRIDGE_EGRESS_SLOTS: explicit local IPv4s; null = discover (aws: IMDSv2 secondary private IPs). */
+  slots: string[] | null;
+  /** BRIDGE_EGRESS_GRACE_SECONDS × 1000: how long an idle slot keeps its public address. */
+  graceMs: number;
+}
+
+export const DEFAULT_EGRESS_DIR = '/var/lib/webac/egress';
+export const DEFAULT_EGRESS_GRACE_MS = 120_000;
+
+/** BRIDGE_EGRESS_SERVERS → worlds; throws on a malformed entry (a typo must not silently turn the feature off). */
+export function parseEgressServers(raw: string | undefined): Map<string, EgressWorld> {
+  const worlds = new Map<string, EgressWorld>();
+  for (const part of (raw ?? '').split(',').map((x) => x.trim()).filter(Boolean)) {
+    const m = /^([A-Za-z0-9._-]+):(\d+)(?::(\d+)(?::(\d+))?)?$/.exec(part);
+    const sessions = m ? parseInt(m[2], 10) : 0;
+    if (!m || sessions < 1) throw new Error(`BRIDGE_EGRESS_SERVERS entry must be <server>:<sessionsPerAddress>[:<newAccountsPerRealIp>[:<accountsPerAddress>]], got "${part}"`);
+    const perIp = m[3] === undefined ? null : parseInt(m[3], 10);
+    worlds.set(m[1].toLowerCase(), {
+      key: m[1].toLowerCase(), sessionsPerAddress: sessions, newAccountsPerRealIp: perIp,
+      accountsPerAddress: m[4] === undefined ? perIp : parseInt(m[4], 10),
+    });
+  }
+  return worlds;
+}
+
+/** The egress settings, or null when BRIDGE_EGRESS_SERVERS names no world. */
+export function resolveEgressConfig(env: Record<string, string | undefined>): EgressConfig | null {
+  const worlds = parseEgressServers(env.BRIDGE_EGRESS_SERVERS);
+  if (worlds.size === 0) return null;
+  const provider = (env.BRIDGE_EGRESS_PROVIDER ?? 'aws').trim().toLowerCase();
+  if (provider !== 'aws' && provider !== 'static') throw new Error(`BRIDGE_EGRESS_PROVIDER must be aws or static, got "${env.BRIDGE_EGRESS_PROVIDER}"`);
+  const slotsRaw = (env.BRIDGE_EGRESS_SLOTS ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  for (const s of slotsRaw) {
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) throw new Error(`BRIDGE_EGRESS_SLOTS must list IPv4 addresses, got "${s}"`);
+  }
+  if (provider === 'static' && slotsRaw.length === 0) throw new Error('BRIDGE_EGRESS_PROVIDER=static needs BRIDGE_EGRESS_SLOTS');
+  const grace = env.BRIDGE_EGRESS_GRACE_SECONDS === undefined ? NaN : Number(env.BRIDGE_EGRESS_GRACE_SECONDS);
+  return {
+    worlds,
+    provider,
+    dir: env.BRIDGE_EGRESS_DIR?.trim() || DEFAULT_EGRESS_DIR,
+    slots: slotsRaw.length ? slotsRaw : null,
+    graceMs: Number.isFinite(grace) && grace >= 0 ? Math.round(grace * 1000) : DEFAULT_EGRESS_GRACE_MS,
+  };
 }
 
 /** Whether `account` on `server` is on the automation allowlist. */
@@ -360,6 +434,7 @@ export function resolveBridgeConfig(
     previewAccounts: (env.BRIDGE_PREVIEW_ACCOUNTS ?? env.BRIDGE_MCP_ACCOUNTS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
     mcpSecret: env.BRIDGE_MCP_SECRET || null,
     mcpConnectPage: /^https?:\/\//.test(env.BRIDGE_CONNECT_PAGE ?? '') ? env.BRIDGE_CONNECT_PAGE! : null,
+    egress: resolveEgressConfig(env),
   };
 }
 

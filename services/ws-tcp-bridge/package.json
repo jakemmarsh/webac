@@ -17,6 +17,7 @@
     "start:prod": "node dist/bridge.cjs"
   },
   "dependencies": {
+    "@aws-sdk/client-ec2": "3.1145.0",
     "ws": "^8.16.0"
   }
 }

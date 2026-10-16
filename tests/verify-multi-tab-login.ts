@@ -24,7 +24,8 @@ import {
   PacketHeaderFlags, type PacketHeaderData,
   PACKET_HEADER_SIZE, FRAGMENT_HEADER_SIZE,
   writePacketHeader, fragmentMessage, writeFragment,
-  GameMessageGroup, BRIDGE_CLOSE_IP_CAP, bridgeRefusalFromClose, bridgeRefusalOf,
+  GameMessageGroup, BRIDGE_CLOSE_IP_CAP, BRIDGE_CLOSE_WORLD_FULL, BRIDGE_CLOSE_NEW_ACCOUNT_CAP, BRIDGE_CLOSE_NEW_ACCOUNT_UNAVAILABLE,
+  bridgeRefusalFromClose, bridgeRefusalOf,
   probeBridgeHealth, hostClientConnection, type HealthSocketLike, type NetCommand, type NetReply,
 } from '@ac/network';
 import { NetWorkerClient, type NetWorkerEndpoint } from '../packages/renderer/src/network/NetWorkerClient';
@@ -33,7 +34,12 @@ import { loginFailureText } from '../packages/renderer/src/launcher/worldDirecto
 import {
   AccountTabGuard, accountSessionKey, type SessionChannelLike,
 } from '../packages/renderer/src/session/AccountTabGuard';
-import { bridgeRefusalNotice, connectionFailureNotice, BRIDGE_IP_CAP_TEXT, BRIDGE_IP_CAP_TOKEN } from '../packages/renderer/src/ui/ConnectionNotices';
+import {
+  bridgeRefusalNotice, connectionFailureNotice, BRIDGE_IP_CAP_TEXT, BRIDGE_IP_CAP_TOKEN,
+  BRIDGE_WORLD_FULL_TEXT, BRIDGE_WORLD_FULL_TOKEN, BRIDGE_NEW_ACCOUNT_CAP_TEXT, BRIDGE_NEW_ACCOUNT_CAP_TOKEN,
+  BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TEXT, BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TOKEN,
+} from '../packages/renderer/src/ui/ConnectionNotices';
+import { CLOSE_WORLD_FULL, CLOSE_NEW_ACCOUNT_CAP, CLOSE_NEW_ACCOUNT_UNAVAILABLE } from '../services/ws-tcp-bridge/src/server';
 
 const CHARACTER_ERROR = 0xF659;
 const CHARACTER_LIST = 0xF658;
@@ -287,6 +293,57 @@ describe('the bridge per-IP cap close (BUG.multi-tab-login-pingpong)', () => {
     expect(bridgeRefusalFromClose(BRIDGE_CLOSE_IP_CAP)).toBe('ip_cap');
     expect(bridgeRefusalNotice('ip_cap')).toMatchObject({ surface: 'dialog', token: BRIDGE_IP_CAP_TOKEN, text: BRIDGE_IP_CAP_TEXT });
     expect(BRIDGE_IP_CAP_TEXT).toMatch(/Too many game windows/);
+  });
+
+  // Per-session egress worlds (services/ws-tcp-bridge/src/egress.ts): no free address, and the
+  // per-network new-account limit the bridge applies (closed after the socket opened, before the login left).
+  for (const [code, refusal, token, text] of [
+    [BRIDGE_CLOSE_WORLD_FULL, 'world_full', BRIDGE_WORLD_FULL_TOKEN, BRIDGE_WORLD_FULL_TEXT],
+    [BRIDGE_CLOSE_NEW_ACCOUNT_CAP, 'new_account_cap', BRIDGE_NEW_ACCOUNT_CAP_TOKEN, BRIDGE_NEW_ACCOUNT_CAP_TEXT],
+    [BRIDGE_CLOSE_NEW_ACCOUNT_UNAVAILABLE, 'new_account_unavailable', BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TOKEN, BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TEXT],
+  ] as const) {
+    it(`the egress refusal ${refusal} (${code}) reaches both connections as a plain dialog, with no reconnect`, () => {
+      vi.useFakeTimers();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      expect(bridgeRefusalFromClose(code)).toBe(refusal);
+      const eor = new ClientConnection(URL_COLDEVE);
+      const eorEvents: ConnectionEvent[] = [];
+      eor.on(e => eorEvents.push(e));
+      eor.connect('Player1', 'pw');
+      const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+      ws.open();
+      ws.bridgeCloses(code, refusal);
+      const err = eorEvents.find(e => e.type === 'error');
+      expect(err).toMatchObject({ bridgeRefusal: refusal });
+      expect(eorEvents.some(e => e.type === 'disconnected')).toBe(false);
+      vi.advanceTimersByTime(120_000);
+      expect(FakeWebSocket.instances.length).toBe(1); // no retry into the same refusal
+      expect(connectionFailureNotice(err!)).toMatchObject({ surface: 'dialog', token, text });
+      // The launcher shows the text as is, also on a world with per-address limits.
+      const world = { name: 'AC1999', registration: null, registrationUrl: null, kind: 'listed' as const, perIpLimits: { accounts: 2, sessions: 2 } };
+      expect(loginFailureText(connectionFailureNotice(err!)!, world, false)).toBe(text);
+
+      const old = new Connection1999('wss://bridge.example/connect?server=ac1999');
+      const oldEvents: ConnectionEvent[] = [];
+      old.on(e => oldEvents.push(e));
+      old.connect('Player1', 'pw');
+      const ws99 = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+      ws99.open();
+      ws99.bridgeCloses(code, refusal);
+      expect(oldEvents.find(e => e.type === 'error')).toMatchObject({ bridgeRefusal: refusal });
+      expect(oldEvents.some(e => e.type === 'disconnected')).toBe(false);
+      old.disconnect();
+    });
+  }
+
+  it('the bridge closes with the codes the client maps', () => {
+    expect(CLOSE_WORLD_FULL).toBe(BRIDGE_CLOSE_WORLD_FULL);
+    expect(CLOSE_NEW_ACCOUNT_CAP).toBe(BRIDGE_CLOSE_NEW_ACCOUNT_CAP);
+    expect(CLOSE_NEW_ACCOUNT_UNAVAILABLE).toBe(BRIDGE_CLOSE_NEW_ACCOUNT_UNAVAILABLE);
+    expect(BRIDGE_NEW_ACCOUNT_UNAVAILABLE_TEXT).toMatch(/log in with an existing account/);
+    expect(BRIDGE_WORLD_FULL_TEXT).toMatch(/full for webAC players/);
+    expect(BRIDGE_NEW_ACCOUNT_CAP_TEXT).toMatch(/new accounts/);
   });
 });
 

@@ -40,6 +40,8 @@ export function segmentOpening(s: {
   lastReport: string | null;
   /** readinessBrief() for the character, or null. */
   readiness?: string | null;
+  /** own-time.ts ownTimeBlock() from the character's previous segment (where its time went), or null. */
+  ownTime?: string | null;
 }): string {
   const lines = [
     `[supervisor] Segment ${s.segment} of the stream starts now (${clock(s.nowMs)}). You are ${s.c.character} (profile ${s.c.profile}), in the world now; ${s.partner} is playing too.`,
@@ -48,6 +50,11 @@ export function segmentOpening(s: {
   if (s.segment === 1 && s.c.startNotes.trim()) lines.push('', s.c.startNotes.trim());
   if (s.c.goal?.trim()) lines.push('', `The plan for now: ${s.c.goal.trim()}`);
   if (s.readiness?.trim()) lines.push('', s.readiness.trim());
+  if (s.ownTime?.trim()) {
+    // Facts only, right under readiness (or on their own when readiness couldn't be read).
+    if (s.readiness?.trim()) lines.push(s.ownTime.trim());
+    else lines.push('', 'Your last segment:', s.ownTime.trim());
+  }
   lines.push('', 'Your journal:', s.journal.trim() || '(empty)');
   if (s.lastReport?.trim()) lines.push('', 'What you wrote at the end of your last segment:', clipReport(s.lastReport));
   return lines.join('\n');
@@ -120,7 +127,7 @@ export function readinessBrief(r: {
   /** The known spells (the agent API's `spells` read) and the era's DAT spell table, for the spells line (spellGaps.ts). */
   spells?: readonly KnownSpell[] | null;
   table?: readonly TableSpell[] | null;
-  /** The era's client needs a wielded caster for magic mode (EraClientRules.combatModeCheck 'eor'; not 1999). Default true. */
+  /** The client needs a wielded caster for magic mode: every era's does (1999's toggle asks for magic only with a caster held). Default true. */
   needsCaster?: boolean;
 }): string | null {
   const out = gearGaps(r.items);

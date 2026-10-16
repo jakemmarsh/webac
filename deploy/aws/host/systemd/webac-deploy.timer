@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the webac deploy agent every minute (and at boot, which restarts the live containers)
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+
+[Install]
+WantedBy=timers.target

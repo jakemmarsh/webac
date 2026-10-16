@@ -16,6 +16,9 @@ COPY tools/lib/vite-head-from-stat.ts ./tools/lib/vite-head-from-stat.ts
 # --ignore-scripts: the web build needs no native modules (better-sqlite3 is
 # for tools/tests only).
 RUN npm ci --ignore-scripts --no-audit --no-fund
+# The vite build peaks near 2.7 GB. On a 2 GB host (with swap) Node's default heap
+# limit, sized from physical memory, aborts it (exit 134); give it room explicitly.
+ENV NODE_OPTIONS=--max-old-space-size=3584
 # Update notifier build id. A GitHub-triggered Railway build (auto-deploy on
 # push to main) gets the commit as RAILWAY_GIT_COMMIT_SHA, and that wins: the
 # ACJS_BUILD_ID service variable is only refreshed by tools/deploy-railway.sh

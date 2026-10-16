@@ -1633,6 +1633,35 @@ export function parseCastTargetedSpellPayload(data: Uint8Array): {
   };
 }
 
+/** A SpellFormula's fixed component count (1999 SpellFormula: vtable + `_comps u32[8]`). */
+export const SPELL_FORMULA_SLOTS = 8;
+
+/**
+ * Build a ResearchSpell GameAction payload (outbound, GameActionType.ResearchSpell, 1999 only).
+ *
+ * Wire format, the 1999 client's CM_Magic_Event_ResearchSpell @ 0x57c440 and
+ * the AC1999 server's reader (ClientEvents.cpp case RESEARCH_SPELL_EVENT):
+ *   [SpellFormula: 8 × uint32 component ids, slot order 0..7, empty slots 0]
+ *   [uint32 targetGuid — the selected object]
+ * SpellFormula::Pack @ 0x5d9360 writes all eight dwords (no count, version or
+ * seed); the server's DEFINE_UNPACK(SpellFormula) reads exactly eight
+ * (PhatSDK/SpellTable.cpp), then ReadUInt32 for the target.
+ */
+export function buildResearchSpellPayload(components: readonly number[], targetGuid: number): Uint8Array {
+  if (components.length > SPELL_FORMULA_SLOTS) throw new Error(`a spell formula holds ${SPELL_FORMULA_SLOTS} components, got ${components.length}`);
+  const writer = new BinaryWriter(4 * (SPELL_FORMULA_SLOTS + 1));
+  for (let i = 0; i < SPELL_FORMULA_SLOTS; i++) writer.writeUInt32((components[i] ?? 0) >>> 0);
+  writer.writeUInt32(targetGuid >>> 0);
+  return writer.toBuffer();
+}
+
+/** Parse a ResearchSpell payload back out (test round trip; the server's read order). */
+export function parseResearchSpellPayload(data: Uint8Array): { components: number[]; targetGuid: number } {
+  const reader = new BinaryReader(data);
+  const components = Array.from({ length: SPELL_FORMULA_SLOTS }, () => reader.readUInt32());
+  return { components, targetGuid: reader.readUInt32() };
+}
+
 /**
  * Build an AddSpellFavorite GameAction payload (outbound, GameActionType.AddSpellFavorite).
  *

@@ -376,6 +376,16 @@ describe('OBS.dm-stall-diagnostics — WorldReporter / PreworldReporter carry th
     const second = w.events.filter(e => e.outcome === 'world_left')[1] as WorldLeftEvent;
     expect(second.endCause).toBe('server_disconnect');
     expect('net' in second).toBe(false);
+
+    // A drop after our own thread was stopped (sleep / frozen tab) carries it too.
+    w.r.enteredWorld();
+    w.clock.t += 240_000;
+    w.r.tick();
+    w.r.left('disconnected', { endCause: 'client_suspended', net: fullDiag() });
+    const third = w.events.filter(e => e.outcome === 'world_left')[2] as WorldLeftEvent;
+    expect(third.endCause).toBe('client_suspended');
+    expect(third.net).toMatchObject({ rxAck: 1234 });
+    expect(sanitizeClientWorld(third)).toMatchObject({ endCause: 'client_suspended', net: { rxAck: 1234 } });
   });
 
   it('a drop inside the first minute puts net on first_minute; the page bounds every field and drops unknown ones', () => {
@@ -453,5 +463,7 @@ describe('OBS.dm-stall-diagnostics — the bridge validates net field by field',
     expect(pre && 'net' in pre).toBe(false);
     const dropped = sanitizeClientPreworld({ ...base, outcome: 'dropped', token: 'server_silent', net: { rxAck: 5 } });
     expect(dropped?.net).toEqual({ rxAck: 5 });
+    const suspended = sanitizeClientPreworld({ ...base, outcome: 'dropped', token: 'client_suspended', net: { rxAck: 5 } });
+    expect(suspended).toMatchObject({ token: 'client_suspended', net: { rxAck: 5 } });
   });
 });

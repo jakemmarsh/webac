@@ -21,6 +21,12 @@ describe('targetResolves', () => {
     const w = where({ inPack: [0x800009e4], worn: [0x80000f4f], inOpenContainer: [0x80000500] });
     for (const g of [0x800009e4, 0x80000f4f, 0x80000500]) expect(canUseTarget(targetResolves(g, 0x50000003, w))).toBe(true);
   });
+  it("a shop item resolves only through forSale (IdentifyObject's search); the Use gate, without it, still drops it", () => {
+    const useGate = where({});
+    const identifyGate: TargetLocations = { ...useGate, forSale: (g) => g === 0x8000e3e7 };
+    expect(targetResolves(0x8000e3e7, 0x50000003, identifyGate)).toBe(true);
+    expect(targetResolves(0x8000e3e7, 0x50000003, useGate)).toBe(false);
+  });
   it('ourselves and world objects resolve; a vanished guid does not', () => {
     const w = where({ inWorld: [0x80000100] });
     expect(targetResolves(0x50000003, 0x50000003, w)).toBe(true);

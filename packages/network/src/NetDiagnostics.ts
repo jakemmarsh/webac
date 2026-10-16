@@ -10,7 +10,7 @@
  * classic servers, Connection1999 for AC1999) answer getDiagnostics() with
  * this shape; the network worker ships it with every snapshot, and the page
  * attaches it to the telemetry of a session that ended link_dead /
- * server_silent / socket_closed and logs it to the console on link_dead.
+ * server_silent / client_suspended / socket_closed and logs it to the console on link_dead.
  *
  * Every field is a bounded integer or a hex code (no packet contents):
  * times are "ms ago" at the moment it was sampled (null = never), counters
@@ -109,5 +109,5 @@ export function boundNetDiagnostics(d: unknown): Record<string, number | string 
   return out;
 }
 
-/** The end causes whose telemetry carries the diagnostics: the session went silent or its socket closed under it. */
-export const NET_DIAG_END_CAUSES: readonly string[] = ['link_dead', 'server_silent', 'socket_closed'];
+/** The end causes whose telemetry carries the diagnostics: the session went silent (ours or the server's) or its socket closed under it. */
+export const NET_DIAG_END_CAUSES: readonly string[] = ['link_dead', 'server_silent', 'client_suspended', 'socket_closed'];

@@ -26,7 +26,8 @@ import { createServer as createNetServer } from 'node:net';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
-import { AT_CHAR_SELECT_JS, REMOTE_CHROMIUM, REPO, createCharacterIfNeeded, waitForWorld } from '../lib/game-session.ts';
+import { AT_CHAR_SELECT_JS, HOST_RESOLVER_ARGS, REMOTE_CHROMIUM, REPO, createCharacterIfNeeded, waitForWorld } from '../lib/game-session.ts';
+import { READ_PAGE_STORAGE_JS, pageStorageFile, pickAgentStorage, readPageStorage, restorePageStorageScript, writePageStorage, type SavedPageStorage } from './pageStorage.ts';
 import { STATE_DIR, accountForProfile, clearInfo, listInfos, logFile, pickStaleSnapshots, readInfo, writeInfo } from './state.ts';
 import { type AgentEra, agentEra, eraAccount } from './eras.ts';
 import { CALLS_SETTLE_MS, SHUTDOWN_DEADLINE_MS, createShutdown, killTree, waitForCalls } from './shutdown.ts';
@@ -303,6 +304,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const log = logFile(args.profile);
   mkdirSync(dirname(log), { recursive: true });
+  const storageFile = pageStorageFile(STATE_DIR, args.profile);
   const say = (s: string): void => {
     const line = `${new Date().toISOString()} ${s}`;
     // Started by the CLI, stdout is the log itself: write it once. Run by hand, echo to the terminal too.
@@ -406,7 +408,7 @@ async function main(): Promise<void> {
       headless: args.headless,
       // The cloud container's preinstalled Chromium (a pinned Playwright may expect another build).
       ...(existsSync(REMOTE_CHROMIUM) ? { executablePath: REMOTE_CHROMIUM } : args.headless ? { channel: 'chromium' } : {}),
-      args: ['--ignore-gpu-blocklist', `--window-size=1290,860`],
+      args: ['--ignore-gpu-blocklist', `--window-size=1290,860`, ...HOST_RESOLVER_ARGS],
     });
     page = await browser.newPage({ viewport: { width: 1280, height: 760 } });
     // A human's own keys, clicks and wheel in this window (trusted events; the agent drives the game through its API,
@@ -417,6 +419,10 @@ async function main(): Promise<void> {
     });
     // The human's own tab answers its own dialogs.
     page.on('dialog', (d) => void d.dismiss());
+    // The agent API's memory (creatures seen only buffing you, remembered places) from the last launch: this
+    // context's localStorage starts empty (pageStorage.ts).
+    const saved = readPageStorage(storageFile);
+    if (saved) { await page.addInitScript({ content: restorePageStorageScript(saved) }); say(`restoring ${saved.items.length} agent memory entr${saved.items.length === 1 ? 'y' : 'ies'} for ${saved.origin}`); }
   }
   page.setDefaultTimeout(120_000);
   page.on('crash', () => say('PAGE CRASHED'));
@@ -529,6 +535,13 @@ async function main(): Promise<void> {
     res.writeHead(code, { 'content-type': 'application/json' });
     res.end(JSON.stringify(obj));
   };
+  // The agent API's memory, kept for the next launch (pageStorage.ts): every minute, and at shutdown.
+  const saveStorage = async (): Promise<void> => {
+    if (args.attach) return;
+    const got = await withTimeout(page.evaluate(READ_PAGE_STORAGE_JS) as Promise<SavedPageStorage | null>, 3000).catch(() => null);
+    if (got && /^https?:/.test(got.origin)) { try { writePageStorage(storageFile, { origin: got.origin, items: pickAgentStorage(got.items) }); } catch { /* state dir unwritable */ } }
+  };
+  const storageTimer = setInterval(() => void saveStorage(), 60_000);
   // tools/ac-agent/shutdown.ts: a deadline, a second signal ends it at once, children killed as process groups.
   const shutdown = createShutdown({
     say,
@@ -544,6 +557,8 @@ async function main(): Promise<void> {
         return;
       }
       server.close();
+      clearInterval(storageTimer);
+      await saveStorage();
       // The player's last action (a goodbye, a note) finishes first; then the logout.
       if (inFlight > 0 && !(await waitForCalls(() => inFlight))) say(`${inFlight} agent call(s) still running after ${CALLS_SETTLE_MS / 1000} s: logging out anyway`);
       // A real logout, waited out: ACE saves the character (position included) only when its logout

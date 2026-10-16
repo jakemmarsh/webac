@@ -68,6 +68,9 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # contents: write only for the ci-green push at the end (the AWS host's deploy signal).
+    permissions:
+      contents: write
     steps:
       # The tracked tree is ~2.7 GB, ~2.6 GB of it verification evidence
       # (png/jpg/side-by-side html) that no test reads (the paths filter
@@ -124,6 +127,13 @@ jobs:
         run: |
           set -o pipefail
           npm test 2>&1 | tee vitest-output.log
+
+      # The AWS host deploys the commit this branch names (deploy/aws/host/deploy-agent.sh,
+      # docs/aws-hosting.md): each main commit that passed moves it forward. A plain push
+      # only fast-forwards, so an older run finishing late can't move it back.
+      - name: Mark this commit deployable (ci-green)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: git push origin "HEAD:refs/heads/ci-green" || echo "ci-green is already past this commit"
 
       # ASSESS: CI has no DAT files / world DB, so DAT-gated suites skip via
       # describe.skipIf — green CI does NOT imply full coverage. Surface the
