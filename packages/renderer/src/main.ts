@@ -313,7 +313,7 @@ import {
   buildChangeStoragePermissionPayload,
   buildAddFriendPayload,
   buildRemoveFriendPayload} from '@ac/network';
-import type { ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant, PairingReply, RelayLinkNotice } from '@ac/network';
+import type { NetDiagnostics, ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant, PairingReply, RelayLinkNotice } from '@ac/network';
 import { ServerMessageHandler } from './network/ServerMessageHandler.js';
 import { applySetStackSize } from './network/applySetStackSize.js';
 import { getObjectSplitSize } from './inventory/dragSplit.js';
@@ -336,7 +336,7 @@ import { SelectionLighting, SearchReason, lightingLevelsForMode, applyPlayerMode
 import { worldHoverTooltipText } from './ui/WorldHoverTooltip.js';
 import { selfHitUnderRay } from './world/PickOcclusion.js';
 import { WorldHoverFind } from './controllers/WorldHoverFind.js';
-import { PendingCombatMode, playerInReadyPosition, getAttackTarget, incompatibleCombatModeRefusal, READY_WEAPON_SLOTS } from './controllers/CombatModeChange.js';
+import { PendingCombatMode, playerInReadyPosition, getAttackTarget, incompatibleCombatModeRefusal, combatModeRefusalReason, READY_WEAPON_SLOTS } from './controllers/CombatModeChange.js';
 import { tracksCombatTarget, isObjectAttackable } from './input/InteractionSystem.js';
 import { selectionQueryFor } from './ui/ToolbarSelection.js';
 import { PHYSICS_STATE_KEY } from './models/ObjectTranslucency.js';
@@ -5214,7 +5214,13 @@ async function main() {
       // the last packet || !connected` raises ServerDied — the Disconnected
       // screen, not a chat line. The socket-close path handles the
       // !connected half; this catches a server that simply went silent.
-      if (sample.connected && linkSampleIsDead(sample)) raiseServerDied(undefined, 'link_dead');
+      if (sample.connected && linkSampleIsDead(sample)) {
+        // OBS.dm-stall-diagnostics — say which way traffic stopped, in the
+        // player's console and in the world_left / first_minute event.
+        const net = aceConnection.getDiagnostics();
+        console.warn(`[AC:NET] No server data for ${Math.round(sample.secondsSinceLastPacket)} s (link_dead) — connection diagnostics: ${JSON.stringify(net)}`);
+        raiseServerDied(undefined, 'link_dead', net);
+      }
     }, LINK_STATUS_TICK_MS);
     // Reveal the WebGL canvas — kept hidden during pre-play to avoid sky bleed-through
     sceneManager.setWorldShown(true);
@@ -7683,11 +7689,11 @@ async function main() {
    * drop the dead session and the world, then show the Disconnected screen
    * with `text`. Idempotent while the screen is up (gmUIFlow's mode guard).
    */
-  const raiseServerDied = (text: string = connectionLostText(), endCause?: WorldEndCause): void => {
+  const raiseServerDied = (text: string = connectionLostText(), endCause?: WorldEndCause, net?: NetDiagnostics): void => {
     if (serverDiedShown || gameUI.disconnectedScreenShown) return;
     serverDiedShown = true;
     worldResumePending = false;
-    worldReporter?.left('disconnected', endCause ? { endCause } : undefined);
+    worldReporter?.left('disconnected', endCause ? { endCause, net } : undefined);
     sessionLifecycle.noteDisconnected();
     sessionLifecycle.endResume();
     if (gameStarted || gameplayUi.isShown) teardownWorldState();
@@ -12756,7 +12762,19 @@ async function main() {
       hasCombatTable: true,
     });
     // Helper: send ChangeCombatMode to ACE server
-    const sendChangeCombatMode = (mode: CombatMode) => {
+    const sendChangeCombatMode = (mode: CombatMode): boolean => {
+      // SetCombatMode @ 0056be30 (param_2 = true, every client request):
+      // CompatibleCombatMode and the portal-space check come first, for every
+      // route in (toolbar, keys, cast, automation). A bare-handed end-of-retail
+      // player can't enter magic mode; skipping this let the automation ask
+      // anyway, ACE answered NonCombat (Player_Combat.cs caster == null) and
+      // then put the stance in magic on each cast (Player_Magic.cs
+      // LastCombatMode), so the character stood in magic stance with no spell
+      // bar and re-asked before every cast (Claude Arcanist, 2026-10-16).
+      if (mode !== combatController.mode && gameUI.callbacks.refuseCombatModeChange?.(mode)) {
+        gameUI.hudState.combatMode = combatController.mode;
+        return false;
+      }
       // SetCombatMode @ 0056be30: a requested change made while the player
       // is not in a ready position waits in pendingCombatMode; UseTime
       // applies it (pendingCombatModeTick, from animate). The HUD keeps
@@ -12764,7 +12782,7 @@ async function main() {
       if (mode !== combatController.mode && !pendingCombatMode.request(mode, playerReadyForCombatModeChange())) {
         gameUI.hudState.combatMode = combatController.mode;
         console.log(`[AC] ChangeCombatMode ${CombatMode[mode]} pending: player not in a ready position`);
-        return;
+        return true;
       }
       // FAITHFUL.464 — cancel an in-progress melee swing chain when
       // switching AWAY from Melee (see shouldClearMeleeChainOnModeChange
@@ -12794,6 +12812,7 @@ async function main() {
       // tail: entering melee / missile swaps the selection for its attack
       // target and runs Auto Target (AttackRequestController.onCombatModeSet).
       attackRequest?.onCombatModeSet();
+      return true;
     };
     // CORE.12.a — expose to the outer-scope context-menu handler.
     enterCombatModeAction = sendChangeCombatMode;
@@ -13029,7 +13048,12 @@ async function main() {
     // Wire up spell casting for ACE server — auto-switches to Magic mode if needed
     sendCastSpellAction = (spellId: number, targetGuid: number | null) => {
       if (combatController.mode !== CombatMode.Magic) {
-        sendChangeCombatMode(CombatMode.Magic);
+        // Retail casts only from the spellcasting bar, which exists only in
+        // magic mode; a mode the client refuses (no caster) is no cast.
+        if (!sendChangeCombatMode(CombatMode.Magic)) {
+          console.log(`[AC] Cast suppressed: spell ${spellId} — magic mode refused`);
+          return;
+        }
         // Delay the cast to let the server process the mode change
         setTimeout(() => sendCastAction(spellId, targetGuid), 500);
       } else {
@@ -13240,7 +13264,7 @@ async function main() {
       const worn = playerState.equipment.getAll();
       const inventoryMask = worn.reduce((m, e) => (m | (e.slot ?? 0)) >>> 0, 0);
       const ready = worn.find((e) => ((e.slot ?? 0) & READY_WEAPON_SLOTS) !== 0);
-      const incompatible = incompatibleCombatModeRefusal(mode as CombatMode, inventoryMask, ready?.name ?? null);
+      const incompatible = incompatibleCombatModeRefusal(mode as CombatMode, inventoryMask, ready?.name ?? null, eraRules.combatModeCheck);
       if (incompatible) {
         if (incompatible.text) raiseClientNotice(gameUI, CN.combatModeIncompatible, { text: incompatible.text });
         return true;
@@ -16330,7 +16354,17 @@ async function main() {
         use: (guid) => { if (!sendUseAction || (!serverObjectManager?.getObject(guid) && !inventoryItem(guid))) return false; agentPrimeMoveState(); sendUseAction(guid); return true; },
         // The send's own answer: the client's gate (a pending request, a swing under way) refuses it with its line.
         useWithTarget: (src, tgt) => { if (!sendGameAction) return false; agentPrimeMoveState(); return sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(src, tgt)); },
-        setCombatMode: (mode) => { agentPrimeMoveState(); return sendChangeCombatMode({ peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode]); },
+        magicNeedsCaster: () => eraRules.combatModeCheck === 'eor',
+        combatModeRefusal: (mode) => {
+          const m = { peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode];
+          if (m === combatController.mode) return null;
+          const worn = playerState.equipment.getAll();
+          const inventoryMask = worn.reduce((acc, e) => (acc | (e.slot ?? 0)) >>> 0, 0);
+          const ready = worn.find((e) => ((e.slot ?? 0) & READY_WEAPON_SLOTS) !== 0);
+          return combatModeRefusalReason(m, inventoryMask, ready?.name ?? null, eraRules.combatModeCheck)
+            ?? (teleportBusy.value ? "you can't enter combat mode while in portal space" : null);
+        },
+        setCombatMode: (mode) => { agentPrimeMoveState(); sendChangeCombatMode({ peace: CombatMode.NonCombat, melee: CombatMode.Melee, missile: CombatMode.Missile, magic: CombatMode.Magic }[mode]); },
         attack: (guid, power, height) => { agentPrimeMoveState(); agentHostAttack.attack(guid, power, height); },
         attackHeight: () => gameUI.getCombatAttackHeight(),
         attackPower: () => gameUI.getCombatPowerLevel(),
@@ -16385,6 +16419,9 @@ async function main() {
         playerOption: (code) => (currentCharacterOptions1 === null || currentCharacterOptions2 === null ? undefined : characterOptionIsSet(code, currentCharacterOptions1, currentCharacterOptions2)),
         raise: (stat, upTo) => gameUI.agentRaise(stat, upTo),
         trainSkill: (skill) => gameUI.agentTrainSkill(skill),
+        // Retail's Stop Moving action (ACT.StopMoving → CameraController.stopMoving: TakeControlFromServer, which
+        // aborts an automatic attack and stops a server MoveTo where the body is): the agent's stop_moving.
+        stopMovingAction: () => cameraController.stopMoving(),
         press: (input) => {
           // An action name resolves to its first bound key; a code is pressed as given.
           const action = keybinds.actions().find((a) => a.name.toLowerCase() === input.trim().toLowerCase())
@@ -17415,7 +17452,13 @@ async function main() {
           const droppedInWorld = sessionLifecycle.inWorld || sessionLifecycle.resumingAfterDrop;
           // RELEASE.first-minute — the world session ended under the player (a no-op after a tab close).
           // BUG.hidden-tab-session-drop — with what ended it (a network close vs the client's own verdict).
-          worldReporter?.left('disconnected', { endCause: event.endCause, closeCode: event.closeCode });
+          // OBS.dm-stall-diagnostics — with the connection's state at the drop (the worker's
+          // snapshot that came with this event); WorldReporter keeps it only for a silent / closed session.
+          const dropNet = aceConnection.getDiagnostics();
+          if (event.endCause === 'server_silent' || event.endCause === 'socket_closed') {
+            console.warn(`[AC:NET] Session ended (${event.endCause}${event.closeCode ? ` ${event.closeCode}` : ''}) — connection diagnostics: ${JSON.stringify(dropNet)}`);
+          }
+          worldReporter?.left('disconnected', { endCause: event.endCause, closeCode: event.closeCode, net: dropNet });
           sessionLifecycle.noteDisconnected();
           if (gameStarted || gameplayUi.isShown) teardownWorldState();
           // FAITHFUL.260 — drop the 'connection' indicator on disconnect.
@@ -17432,7 +17475,7 @@ async function main() {
           if (event.everOpened && !event.deliberate) {
             // In the world (or mid-resume): reconnect and re-enter on our own first.
             if (droppedInWorld && scheduleResume()) { worldResumePending = true; break; }
-            if (!droppedInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null);
+            if (!droppedInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
             raiseServerDied();
           }
           break;

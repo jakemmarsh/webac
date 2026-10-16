@@ -54,6 +54,7 @@ export function formatObject(o: AgentObject): string {
     // Whether a walk gets there is the walk planner's answer (the doorway route walk_to takes), not the height's.
     const w = o.otherFloorWay;
     const way = w === 'none' ? 'no walk reaches it from here (no doorway route from your floor)'
+      : w && 'locked' in w ? `no walk reaches it from here but through ${w.locked}`
       : w ? `a walk gets there by the doorways (about ${Math.round(w.len)} m${w.drops ? `, ${w.drops === 1 ? 'a drop' : `${w.drops} drops`}` : ''}${w.leaps ? `, ${w.leaps === 1 ? 'a jump across a gap' : `${w.leaps} jumps across gaps`}` : ''}), not a step`
         : 'not a step from this floor (walk_to finds out whether a way gets there)';
     bits.push(`ON ANOTHER FLOOR, ${Math.abs(o.otherFloor)} m ${o.otherFloor > 0 ? 'up' : 'down'}: no melee from here; ${way}; a bolt or arrow only through an opening`);
@@ -122,6 +123,7 @@ export function formatObservation(obs: AgentObservation): string {
     out.push(`gear out of mana (its spells are off): ${obs.gearManaOut.map((m) => `${m.name} #${m.guid.toString(16)}${m.mana ? ` (mana ${m.mana.cur}/${m.mana.max})` : ''}`).join(', ')}: ac_use_on a charged mana stone on an empty one, then ac_unequip and ac_equip it (the server turns its spells back on only on a wield with mana in it)`);
   }
   if (obs.gearEmpty?.slots.length) out.push(`gear: ${emptySlotsText(obs.gearEmpty.slots)}${obs.gearEmpty.packFits.length ? `; in your pack that would cover one: ${obs.gearEmpty.packFits.slice(0, 4).join(', ')}` : ''} (ac_inventory / ac_gear show every gear slot)`);
+  if (obs.casterGap) out.push(`gear: ${obs.casterGap}`);
   if (obs.windows?.length) out.push(`windows open: ${obs.windows.join(', ')}  (ac_close name=… or all, when done with them)`);
   out.push(`target: ${obs.target ? formatObject(obs.target) : obs.targetLeftBehind ? `none (your last target, ${obs.targetLeftBehind}, was left behind in another place: you went through a portal or far away since; pick a new one)` : 'none'}`);
   const attackers = obs.nearby.filter((o) => o.attackingYou && o.guid !== obs.target?.guid);

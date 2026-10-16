@@ -32,7 +32,7 @@ import { descRef } from '../ui/DatTextStyle.js';
 import {
   type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeCustomBridge, worldEnterBlock, worldRegistrationText,
 } from './worldDirectory.js';
-import { loadRememberedLogin, saveRememberedLogin, worldKeyOf, type RememberedLogin } from './launcherStorage.js';
+import { loadFavoriteWorlds, loadRememberedLogin, saveFavoriteWorlds, saveRememberedLogin, worldKeyOf, type RememberedLogin } from './launcherStorage.js';
 
 export const CHARSEL_LAYOUT = 0x21000004;
 
@@ -272,6 +272,27 @@ export class LauncherScreen {
   constructor(private readonly kit: LauncherKit, private readonly opts: LauncherOptions) {
     this.remembered = loadRememberedLogin(opts.storage === undefined ? undefined : opts.storage);
     this.account = opts.prefillAccount ?? this.remembered.account ?? '';
+    this.favorites = loadFavoriteWorlds(opts.storage === undefined ? undefined : opts.storage);
+  }
+
+  /** Favourite world keys (worldKeyOf), oldest first; launcherStorage keeps them. */
+  private favorites: string[];
+
+  isFavorite(w: World): boolean { return this.favorites.includes(worldKeyOf(w)); }
+
+  /** Star or unstar a world; the list re-sorts with favourites first. */
+  toggleFavorite(w: World): void {
+    const k = worldKeyOf(w);
+    this.favorites = this.favorites.includes(k) ? this.favorites.filter((x) => x !== k) : [...this.favorites, k];
+    saveFavoriteWorlds(this.favorites, this.opts.storage === undefined ? undefined : this.opts.storage);
+    this.refresh();
+    this.revealSelected(true);
+  }
+
+  /** The list as drawn: favourites first (directory order kept within each group). */
+  get orderedWorlds(): World[] {
+    const fav = this.worlds.filter((w) => this.isFavorite(w));
+    return fav.length ? [...fav, ...this.worlds.filter((w) => !this.isFavorite(w))] : this.worlds;
   }
 
   /** Greyed text: the plate label's disabled-state colour (0xffa8966d). */
@@ -306,17 +327,22 @@ export class LauncherScreen {
         const custom = this.worlds.filter((w) => w.kind === 'custom');
         this.worlds = [...custom, ...dir.worlds];
         const key = this.remembered.worldKey;
-        if (key?.startsWith('custom:') && !custom.length) {
-          const r = parseCustomBridge(key.slice('custom:'.length));
-          if ('world' in r) {
-            this.worlds.unshift(r.world);
-            this.probeCustomEra(r.world);
+        // The remembered custom bridge, then any favourite ones: a custom
+        // world is not in the directory, so it is rebuilt from its key.
+        if (!custom.length) {
+          const keys = [...(key?.startsWith('custom:') ? [key] : []), ...this.favorites.filter((k) => k.startsWith('custom:') && k !== key)];
+          for (const k of keys.reverse()) {
+            const r = parseCustomBridge(k.slice('custom:'.length));
+            if ('world' in r) {
+              this.worlds.unshift(r.world);
+              this.probeCustomEra(r.world);
+            }
           }
         }
         if (!this.selected) {
           this.selected = this.worlds.find((w) => key !== null && worldKeyOf(w) === key)
-            ?? this.worlds.find((w) => worldEnterBlock(w) === null)
-            ?? this.worlds[0] ?? null;
+            ?? this.orderedWorlds.find((w) => worldEnterBlock(w) === null)
+            ?? this.orderedWorlds[0] ?? null;
         }
         this.loadError = null;
       } catch (err) {
@@ -570,8 +596,11 @@ export class LauncherScreen {
     list.replaceChildren();
     const rowDesc = this.kit.desc(LAUNCHER_TEXT.body);
     const rowH = LAUNCHER_GEOMETRY.rowHeight;
-    for (const w of this.worlds) {
+    const ordered = this.orderedWorlds;
+    const favCount = ordered.filter((w) => this.isFavorite(w)).length;
+    ordered.forEach((w, i) => {
       const selected = w === this.selected;
+      const fav = i < favCount;
       const row = document.createElement('div');
       row.className = 'launcher-world-row';
       row.setAttribute('role', 'option');
@@ -584,6 +613,7 @@ export class LauncherScreen {
         position: 'relative', width: '100%', height: `${rowH}px`, boxSizing: 'border-box', cursor: 'pointer',
         display: 'flex', alignItems: 'center', gap: '4px', padding: '0 4px 0 3px', overflow: 'hidden', outline: 'none',
       });
+      if (fav) row.dataset.favorite = 'true';
       const paint = (rollover: boolean): void => {
         const state = charselRowState(selected, rollover);
         row.dataset.state = `0x${state.toString(16)}`;
@@ -602,9 +632,29 @@ export class LauncherScreen {
         }
       };
       paint(false);
-      row.addEventListener('mouseenter', () => paint(true));
-      row.addEventListener('mouseleave', () => paint(false));
+      // The heart: the health ornament pair (0x06007491 bright / 0x06007490
+      // depleted, layout 0x2100006c). Bright on a favourite; the depleted
+      // heart appears on hover so any row can be starred.
+      const heart = document.createElement('span');
+      heart.className = 'launcher-fav';
+      heart.setAttribute('role', 'button');
+      heart.setAttribute('aria-label', fav ? `Remove ${w.name} from favorites` : `Add ${w.name} to favorites`);
+      heart.setAttribute('aria-pressed', String(fav));
+      Object.assign(heart.style, {
+        position: 'relative', flex: '0 0 11px', width: '11px', height: '10px', backgroundSize: '100% 100%', cursor: 'pointer',
+      });
+      const heartArt = (show: boolean): void => {
+        const u = show ? this.listTex(fav ? 0x06007491 : 0x06007490) : null;
+        heart.style.backgroundImage = u ? `url(${u})` : 'none';
+      };
+      heartArt(fav);
+      heart.addEventListener('click', (e) => { e.stopPropagation(); this.toggleFavorite(w); });
+      heart.addEventListener('dblclick', (e) => e.stopPropagation());
+      row.addEventListener('mouseenter', () => { paint(true); heartArt(true); });
+      row.addEventListener('mouseleave', () => { paint(false); heartArt(fav); });
 
+      // Left edge: the list's overlay scrollbar covers the right one.
+      row.appendChild(heart);
       const dot = document.createElement('span');
       dot.className = 'launcher-dot';
       Object.assign(dot.style, { position: 'relative', flex: '0 0 9px', width: '9px', height: '9px', backgroundSize: '100% 100%' });
@@ -637,7 +687,7 @@ export class LauncherScreen {
         if (k === 'Enter') { e.preventDefault(); this.select(w); this.attemptEnter(); } else if (k === ' ') { e.preventDefault(); this.select(w); }
       });
       list.appendChild(row);
-    }
+    });
     if (this.worlds.length === 0 && !this.loadError && this.mode === null) {
       const loading = this.kit.text('Loading worlds…', LAUNCHER_TEXT.body, { color: this.dim });
       loading.style.margin = '2px 4px';
@@ -649,9 +699,15 @@ export class LauncherScreen {
 
   /** ArrowUp/Down, PageUp/Down, Home/End move the selection through the list. */
   private onListKey(e: KeyboardEvent): void {
-    if (!this.worlds.length) return;
-    const last = this.worlds.length - 1;
-    const cur = this.selected ? this.worlds.indexOf(this.selected) : -1;
+    const worlds = this.orderedWorlds;
+    if (!worlds.length) return;
+    // F stars the selected world (Ctrl/Cmd+F stays the browser's find).
+    if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (this.selected) { e.preventDefault(); this.toggleFavorite(this.selected); }
+      return;
+    }
+    const last = worlds.length - 1;
+    const cur = this.selected ? worlds.indexOf(this.selected) : -1;
     const page = Math.max(1, Math.floor((this.listEl?.clientHeight || 0) / LAUNCHER_GEOMETRY.rowHeight) - 1);
     let next: number;
     switch (e.key) {
@@ -664,7 +720,7 @@ export class LauncherScreen {
       default: return;
     }
     e.preventDefault();
-    this.select(this.worlds[next]);
+    this.select(worlds[next]);
     this.revealSelected(true);
   }
 
@@ -725,7 +781,7 @@ export class LauncherScreen {
     if (w.registrationUrl) links.push(['Register', w.registrationUrl]);
     if (w.website) links.push(['Website', w.website]);
     if (w.discord) links.push(['Discord', w.discord]);
-    if (links.length) {
+    {
       const row = document.createElement('div');
       row.className = 'launcher-links';
       Object.assign(row.style, { display: 'flex', flexShrink: '0', gap: '12px' });
@@ -738,6 +794,13 @@ export class LauncherScreen {
         a.appendChild(this.kit.text(label, LAUNCHER_TEXT.body, { color: this.kit.textColor(LAUNCHER_TEXT.label) ?? undefined }));
         row.appendChild(a);
       }
+      const fav = document.createElement('a');
+      fav.className = 'launcher-fav-link';
+      fav.href = '#';
+      fav.style.textDecoration = 'none';
+      fav.addEventListener('click', (e) => { e.preventDefault(); this.toggleFavorite(w); });
+      fav.appendChild(this.kit.text(this.isFavorite(w) ? 'Unfavorite' : 'Favorite', LAUNCHER_TEXT.body, { color: this.kit.textColor(LAUNCHER_TEXT.label) ?? undefined }));
+      row.appendChild(fav);
       body.appendChild(row);
     }
 

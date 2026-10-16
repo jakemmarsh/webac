@@ -912,9 +912,58 @@ export function walkableExit(d: CellDoor): boolean {
   return Math.abs(d.normal.z) <= 0.7 && !tooLow(d);
 }
 
+/**
+ * The outside doorways onto a balcony that `p` (feet) stands on: a building's own outdoor surface no stair from the
+ * landscape reaches (its doorway not grounded, and `p` on the surfaces outside it, standsOutside). Such a spot is
+ * outdoors by cell (the server names the landcell under it) but its only way is through the building. Empty: `p` is
+ * on the landscape (or a porch that meets it), as any outdoor point was taken to be.
+ */
+function perchExits(g: CellGraph, p: Vec3, closed: Vec3[] | undefined): CellDoor[] {
+  const out: CellDoor[] = [];
+  for (const list of g.doors.values()) for (const d of list) {
+    if (d.b === 0xFFFF && d.grounded === false && !shutIn(d, closed) && standsOutside(g, d, p)) out.push(d);
+  }
+  return out.sort((a, b) => dist(a.at, p) - dist(b.at, p));
+}
+
+/**
+ * How many of a balcony's doorways a route tries, the nearest to the spot on it first: each is a whole route through the
+ * landblock's doorways (a ring balcony in 0x9EE5 has four, ~150 ms a route from the landscape).
+ */
+export const PERCH_EXITS_MAX = 2;
+
 function routeViaOutside(g: CellGraph, fromCell: number, from: Vec3, toCell: number, to: Vec3, opts: RouteOptions): RoutePoint[] | null {
   const fromIn = isInterior(fromCell), toIn = isInterior(toCell);
-  if (!fromIn && !toIn) return [to];
+  // An outdoor end on a balcony (a building's upper outdoor surface, reached only through its upper doorways): the
+  // Master Scrivener of War Magic stands on the 0x49B6 scriveners' balcony at z 243, outdoor cell 0x49B60006 (ACE
+  // places a cell-0 landblock_instance on the landcell, Position.SetPosition), 3 m over the room 0x49B60130 under it.
+  // As "outdoors" the route left by the ground door 0x0133 and the walk searched under the balcony for 5 minutes
+  // (Arcanist, 2026-10-16 18:32Z); the way is up the stair (0x013E) and out by 0x0135 or 0x013F onto it.
+  const toPerch = toIn ? [] : perchExits(g, to, opts.closed);
+  const fromPerch = fromIn ? [] : perchExits(g, from, opts.closed);
+  // On the same balcony (or both on the landscape): a straight line.
+  if (!fromIn && !toIn && (toPerch.some((d) => fromPerch.includes(d)) || (!toPerch.length && !fromPerch.length))) return [to];
+  if (toPerch.length || fromPerch.length) {
+    let best: RoutePoint[] | null = null, bestLen = Infinity;
+    const length = (pts: RoutePoint[]): number => pts.reduce((t, p, i) => t + dist(i ? pts[i - 1] : from, p), 0);
+    const consider = (r: RoutePoint[] | null): void => { if (r && length(r) < bestLen) { bestLen = length(r); best = r; } };
+    if (toPerch.length) {
+      // To a doorway onto the goal's balcony (from the landscape, a room of any building, or another balcony), and out.
+      for (const b of toPerch.slice(0, PERCH_EXITS_MAX)) {
+        const into = routeViaOutside(g, fromCell, from, b.a, withFeet(b, b.at), opts);
+        if (into) consider([...into, doorstep(g, b), to]);
+      }
+    } else {
+      // Off a balcony: to its doorway's step, in, then on as from that room.
+      for (const b of fromPerch.slice(0, PERCH_EXITS_MAX)) {
+        const out = routeViaOutside(g, b.a, b.at, toCell, to, opts);
+        if (out) consider([doorstep(g, b), withFeet(b, b.at), ...out]);
+      }
+    }
+    // None through them (a door shut on the way): on as before, the walk's searches and jumps may still find one.
+    if (best) return best;
+    if (!fromIn && !toIn) return [to];
+  }
   if (fromIn && toIn) {
     const inside = findRoute(g, fromCell, from, toCell, to, [], opts);
     if (inside) return inside;

@@ -4,9 +4,9 @@
  * the stream is ending). Information a player has, never play decisions (Jake: no hardcoded behaviour).
  */
 import type { AgentItem } from '../../packages/renderer/src/agent/types.ts';
-import { emptySlotsText, gearView, hasGearData } from '../../packages/renderer/src/agent/gear.ts';
+import { casterGap, emptySlotsText, gearView, hasGearData } from '../../packages/renderer/src/agent/gear.ts';
 import type { CharacterConfig } from './config.ts';
-import { type KnownSpell, type TableSpell, spellGaps } from './spellGaps.ts';
+import { type KnownSpell, type TableSpell, magicSchools, spellGaps } from './spellGaps.ts';
 
 /** Tools a player has no use for (the supervisor starts and stops sessions) or that aren't for one character. */
 const NOT_FOR_PLAYERS = new Set(['start', 'stop', 'sessions', 'enter_world', 'status', 'click', 'trace', 'keys']);
@@ -120,8 +120,12 @@ export function readinessBrief(r: {
   /** The known spells (the agent API's `spells` read) and the era's DAT spell table, for the spells line (spellGaps.ts). */
   spells?: readonly KnownSpell[] | null;
   table?: readonly TableSpell[] | null;
+  /** The era's client needs a wielded caster for magic mode (EraClientRules.combatModeCheck 'eor'; not 1999). Default true. */
+  needsCaster?: boolean;
 }): string | null {
   const out = gearGaps(r.items);
+  const caster = casterGap(r.items, magicSchools(r.sheet).length > 0, r.needsCaster ?? true);
+  if (caster) out.push(`- gear: ${caster}`);
   const u = unspent(r.sheet);
   if (u) {
     out.push(`- unspent: ${u.xp.toLocaleString('en-US')} XP`);

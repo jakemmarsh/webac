@@ -51,8 +51,23 @@ export class DungeonHost extends FakeHost {
    * `creatures`: creature fixtures collide too (by their Setup's shapes), as the live client's body meets an NPC
    * standing in the way; the probe the walk plans with still leaves them out (main.ts navProbe). Default off.
    */
-  constructor(private readonly nav: DungeonNav, dats: { portal: DatDatabase; cell: DatDatabase }, landblock: number, opts: { fixtures?: Ac1999Fixture[]; rooms?: boolean; creatures?: boolean } = {}) {
+  /**
+   * `serverMoveTo`: a door's Use works as ACE's does (Player.HandleActionUseItem → CreateMoveToChain): it waits until the
+   * body is within the door's UseRadius (2 m, weenie 412) on its storey, and only then does Door.ActOnUse toggle it. A
+   * movement key while it waits cancels it (UseDone, the door untouched), as does ACE's 15 s MoveTo timeout. Without it a
+   * Use toggles the door at once from anywhere.
+   */
+  private readonly serverMoveTo: boolean;
+  private pendingUse: { guid: number; at: number } | null = null;
+  /** Every door Use the server carried out (toggled the door), in order: `guid open|shut`. */
+  readonly doorToggles: string[] = [];
+  /** Uses ACE cancelled before they reached the door (moved away, timed out, another Use). */
+  readonly usesCancelled: number[] = [];
+
+  constructor(private readonly nav: DungeonNav, dats: { portal: DatDatabase; cell: DatDatabase }, landblock: number, opts: { fixtures?: Ac1999Fixture[]; rooms?: boolean; creatures?: boolean; serverMoveTo?: boolean } = {}) {
     super();
+    this.serverMoveTo = !!opts.serverMoveTo;
+    this.busy = () => this.pendingUse !== null;
     this.bx = ((landblock >>> 24) & 0xff) * 192;
     this.by = ((landblock >>> 16) & 0xff) * 192;
     this.graph = loadCellGraph(dats.cell, dats.portal, landblock);
@@ -90,12 +105,43 @@ export class DungeonHost extends FakeHost {
 
   /**
    * Using a shut door opens it (it turns Ethereal and stops colliding) unless it is locked; using an open one swings it
-   * shut again (ACE Door.ActOnUse: IsOpen ? Close : Open), from any floor (the server measures no storey).
+   * shut again (ACE Door.ActOnUse: IsOpen ? Close : Open), from any floor (the server measures no storey), unless
+   * `serverMoveTo` makes it wait for the body to come within reach first.
    */
   override use = (g: number): boolean => {
     this.sent.push(`use ${g.toString(16)}`);
     const o = this.objs.get(g);
+    if (this.serverMoveTo && o && (o.objectDescFlags & 0x1000)) {
+      if (this.pendingUse) this.usesCancelled.push(this.pendingUse.guid);
+      this.pendingUse = { guid: g, at: this.t };
+      this.serverUseStep();
+      return true;
+    }
+    this.actOnUse(g);
+    return true;
+  };
+
+  /** ACE's MoveTo for a pending door Use: arrived (within UseRadius, on the door's storey) → ActOnUse; moved → cancelled. */
+  private serverUseStep(): void {
+    const p = this.pendingUse;
+    if (!p) return;
+    const o = this.objs.get(p.guid);
+    if (!o) { this.pendingUse = null; return; }
+    if (this.t - p.at > 15_000) {
+      this.usesCancelled.push(p.guid);
+      this.pendingUse = null;
+      return;
+    }
+    const reach = Math.hypot(o.x - this.me.x, o.y - this.me.y) - 0.48 <= 2 && this.me.z > o.z - 1.8 && this.me.z < o.z + 2;
+    if (!reach) return;
+    this.pendingUse = null;
+    this.actOnUse(p.guid);
+  }
+
+  private actOnUse(g: number): void {
+    const o = this.objs.get(g);
     if (o && (o.objectDescFlags & 0x1000)) {
+      if (!this.locked.has(g)) this.doorToggles.push(`${g.toString(16)} ${(o.physicsState ?? 0) & 0x4 ? 'shut' : 'open'}`);
       if (this.locked.has(g)) this.api?.pushChat('The door is locked!');
       else if ((o.physicsState ?? 0) & 0x4) {
         o.physicsState = ((o.physicsState ?? 0) & ~0x4) >>> 0;
@@ -107,8 +153,7 @@ export class DungeonHost extends FakeHost {
         o.physicsState = ((o.physicsState ?? 0) | 0x4) >>> 0;
       }
     }
-    return true;
-  };
+  }
 
   /** A key from the pack used on a locked door unlocks it (ACE Key.UseWithTarget; the tutorial's LockCode fits). */
   override useWithTarget = (src: number, target: number): boolean => {
@@ -133,6 +178,11 @@ export class DungeonHost extends FakeHost {
 
   /** Space: the charge runs while it is held; its release flies a standing long jump with the keys held then. */
   override key = (code: string, down: boolean): void => {
+    // A movement key pressed while ACE walks you to a door's Use: the client's own motion cancels the server's MoveTo.
+    if (down && !this.keys.has(code) && this.pendingUse && ['KeyW', 'KeyS', 'KeyZ', 'KeyC', 'Space'].includes(code)) {
+      this.usesCancelled.push(this.pendingUse.guid);
+      this.pendingUse = null;
+    }
     if (code === 'Space') {
       if (down && !this.keys.has('Space') && !this.flight) this.chargeT = this.t;
       if (!down && this.keys.has('Space') && this.chargeT !== null) {
@@ -155,6 +205,7 @@ export class DungeonHost extends FakeHost {
 
   /** W held: the body moves along its facing at run (walk with Shift) speed through the real collision. */
   override physics(dtMs: number): void {
+    this.serverUseStep();
     if (this.flight) {
       if (this.t >= this.flight.until) { Object.assign(this.me, this.flight.to); this.flight = null; this.updateCell(); }
       return;

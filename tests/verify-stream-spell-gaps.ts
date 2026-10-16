@@ -8,6 +8,7 @@ import { DatReader } from '../packages/dat-parser/src/DatReader.js';
 import { SpellTable } from '../packages/dat-parser/src/file-types/SpellTable.js';
 import { spellLevelFromPower } from '../packages/shared/src/magic/SpellFormula.ts';
 import { readinessBrief } from '../tools/stream/prompt.ts';
+import type { AgentItem } from '../packages/renderer/src/agent/types.ts';
 import { type KnownSpell, type TableSpell, STAPLES, SCHOOLS, learnableLevel, magicSchools, spellFamily, spellGaps } from '../tools/stream/spellGaps.ts';
 import { DAT_PATHS, openDat } from './_harness/dat.ts';
 
@@ -128,5 +129,25 @@ describe.skipIf(!existsSync(DAT_PATHS.portal))('stream readiness: the staples ar
     expect(lines.some((l) => l.includes('no War Magic spells known'))).toBe(false);
     expect(lines.some((l) => l.includes('no Item Enchantment spells known'))).toBe(false);
     expect(lines.find((l) => l.includes('Item Enchantment'))).toContain('1 Item Enchantment spell known');
+  });
+});
+
+// Claude Arcanist owned no caster (a Cup and a Flaming Tachi, 2026-10-16): end of retail's client won't enter magic
+// mode without one (CompatibleCombatMode @ 0056a580), so the opening says so before a fight; 1999's client doesn't need one.
+describe('the readiness block names a missing caster', () => {
+  const inv = (extra: AgentItem[] = []): AgentItem[] => [
+    { guid: 1, name: 'Cup', where: 'main pack', itemType: 0x800 },
+    { guid: 2, name: 'Flaming Tachi', where: 'main pack', itemType: 0x1 },
+    ...extra,
+  ];
+  const casterLine = (items: AgentItem[], needsCaster?: boolean): string | undefined =>
+    readinessBrief({ items, sheet: SHEET, session: null, ...(needsCaster !== undefined ? { needsCaster } : {}) })!.split('\n').find((l) => /wand, staff or orb/.test(l));
+  it('none owned: buy one; one in the pack: wield it; one wielded, a 1999 era or no magic school: nothing', () => {
+    expect(casterLine(inv())).toBe('- gear: no wand, staff or orb wielded: you can\'t enter magic mode or cast without one; you carry none: buy one (./world-query sells "Wand", or an Archmage or magic shop)');
+    expect(casterLine(inv([{ guid: 3, name: 'Orb', where: 'main pack', itemType: 0x8000 }])))
+      .toBe("- gear: no wand, staff or orb wielded: you can't enter magic mode or cast without one; Orb is in your pack: wield it (ac_equip Orb)");
+    expect(casterLine(inv([{ guid: 3, name: 'Orb', where: 'equipped', itemType: 0x8000, mask: 0x1000000 }]))).toBeUndefined();
+    expect(casterLine(inv(), false)).toBeUndefined();
+    expect(readinessBrief({ items: inv(), sheet: SHEET.replace(/Specialized skills:.*\n/, '').replace(/Trained skills:.*/, 'Trained skills: Arcane Lore 90'), session: null }) ?? '').not.toMatch(/wand, staff or orb/);
   });
 });

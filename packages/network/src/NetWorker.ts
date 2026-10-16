@@ -17,6 +17,7 @@ import type { BridgeHealth, ConnectionEvent, ConnectionListener } from './Client
 import { createConnection } from './createConnection.js';
 import type { GameMessageGroup } from './GameMessageGroup.js';
 import type { LoginProfile } from './LoginProfile.js';
+import type { NetDiagnostics } from './NetDiagnostics.js';
 
 /** What the page uses of a session connection (ClientConnection or NetWorkerClient). */
 export interface NetConnection {
@@ -37,6 +38,8 @@ export interface NetConnection {
   checkHealth(): Promise<BridgeHealth>;
   getLinkStatus(now?: number): { connected: boolean; secondsSinceLastPacket: number };
   getPacketLossPercentage(): number;
+  /** OBS.dm-stall-diagnostics — the connection's sequencing state now (NetDiagnostics.ts). */
+  getDiagnostics(now?: number): NetDiagnostics;
   on(listener: ConnectionListener): void;
   off(listener: ConnectionListener): void;
 }
@@ -48,6 +51,8 @@ export interface NetSnapshot {
   /** Date.now() when `link` was sampled. */
   at: number;
   loss: number;
+  /** OBS.dm-stall-diagnostics — the connection's diagnostics, sampled with `link`. */
+  diag?: NetDiagnostics;
 }
 
 export type NetCommand =
@@ -87,6 +92,7 @@ export function hostClientConnection(port: NetPort): () => void {
       link: conn ? conn.getLinkStatus(now) : { connected: false, secondsSinceLastPacket: 0 },
       at: now,
       loss: conn?.getPacketLossPercentage() ?? 0,
+      ...(conn ? { diag: conn.getDiagnostics(now) } : {}),
     };
   };
   port.addEventListener('message', (ev) => {

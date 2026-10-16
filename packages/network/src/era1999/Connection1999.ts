@@ -34,6 +34,7 @@ import {
 import { GameMessageOpcode } from '../GameMessageOpcode.js';
 import { ISAAC } from '../ISAAC.js';
 import type { NetConnection } from '../NetWorker.js';
+import { type NetDiagnostics, hex32, msAgo } from '../NetDiagnostics.js';
 import type { DisconnectCause } from '../ClientConnection.js';
 import { bridgeRefusalFromClose } from '../BridgeRefusal.js';
 import { Adapter1999, Group1999 } from './Adapter1999.js';
@@ -167,6 +168,15 @@ export class Connection1999 implements NetConnection {
   private dddIterations = { portal: 0, cell: 0 };
   private dddFinished = false;
 
+  // OBS.dm-stall-diagnostics — what getDiagnostics() reports (this session).
+  private diag = Connection1999.freshDiag();
+  private static freshDiag() {
+    return {
+      rxMsgAt: 0, rxSeqAt: 0, rxFlags: -1, rxOpcode: -1, nakAt: 0, naks: 0, srvAck: 0, srvNakAt: 0, srvNaks: 0,
+      resent: 0, unsatisfied: 0, txAt: 0, txSeqAt: 0, tickGapMax: 0, rxPkts: 0, txPkts: 0, rxBytes: 0,
+    };
+  }
+
   constructor(url: string, opts: { loginProfile?: LoginProfile } = {}) {
     this.url = url;
     this.loginProfile = opts.loginProfile ?? { ...EOR_LOGIN_PROFILE, clientVersion: VERSION_1999, protocol: 'ac1999' };
@@ -209,6 +219,7 @@ export class Connection1999 implements NetConnection {
     this.dddExpected = 0;
     this.dddIterations = { portal: 0, cell: 0 };
     this.dddFinished = false;
+    this.diag = Connection1999.freshDiag();
   }
 
   get bridgeUrl(): string { return this.url; }
@@ -222,6 +233,44 @@ export class Connection1999 implements NetConnection {
     return { connected: this.isConnected, secondsSinceLastPacket: this.lastPacketAt ? (now - this.lastPacketAt) / 1000 : 0 };
   }
   getPacketLossPercentage(): number { return this.received ? (100 * this.lost) / (this.received + this.lost) : 0; }
+
+  /** OBS.dm-stall-diagnostics — this session's sequencing state now (NetDiagnostics.ts). */
+  getDiagnostics(now = Date.now()): NetDiagnostics {
+    const d = this.diag;
+    let missing = 0;
+    for (let s = this.nextServerSeq; s < this.highestServerSeq && missing < 0x71; s++) if (!this.held.has(s)) missing++;
+    return {
+      rxAgoMs: msAgo(now, this.lastPacketAt),
+      rxMsgAgoMs: msAgo(now, d.rxMsgAt),
+      rxSeqAgoMs: msAgo(now, d.rxSeqAt),
+      rxFlags: hex32(d.rxFlags),
+      rxOpcode: hex32(d.rxOpcode),
+      rxEvent: null,
+      rxAck: Math.max(0, this.nextServerSeq - 1),
+      rxHigh: this.highestServerSeq,
+      rxHeld: this.held.size,
+      rxMissing: missing,
+      fragHeld: this.partial.size,
+      nakAgoMs: msAgo(now, d.nakAt),
+      naks: d.naks,
+      txSeq: this.sequence,
+      txUnacked: this.resendCache.size,
+      txAckedBySrv: d.srvAck,
+      srvNakAgoMs: msAgo(now, d.srvNakAt),
+      srvNaks: d.srvNaks,
+      resent: d.resent,
+      unsatisfied: d.unsatisfied,
+      srvRejects: 0,
+      txAgoMs: msAgo(now, d.txAt),
+      txSeqAgoMs: msAgo(now, d.txSeqAt),
+      wsBuffered: this.ws?.bufferedAmount ?? 0,
+      tickAgoMs: this.serviceTimer ? msAgo(now, this.lastServiceAt) : null,
+      tickGapMaxMs: Math.round(d.tickGapMax),
+      rxPkts: d.rxPkts,
+      txPkts: d.txPkts,
+      rxBytes: d.rxBytes,
+    };
+  }
   on(l: ConnectionListener): void { this.listeners.push(l); }
   off(l: ConnectionListener): void { this.listeners = this.listeners.filter((x) => x !== l); }
   private emit(e: ConnectionEvent | DatPatchEvent): void {
@@ -361,7 +410,10 @@ export class Connection1999 implements NetConnection {
   }
 
   private raw(packet: Uint8Array): void {
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(packet);
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.ws.send(packet);
+    this.diag.txAt = Date.now();
+    this.diag.txPkts++;
   }
 
   private sendLogin(): void {
@@ -386,6 +438,9 @@ export class Connection1999 implements NetConnection {
     const h = readHeader1999(b);
     this.lastPacketAt = Date.now();
     this.serverTime = h.time;
+    this.diag.rxFlags = h.flags;
+    this.diag.rxPkts++;
+    this.diag.rxBytes += b.length;
     if (h.flags & F1999.Checksum) {
       const xor = h.sequence >= 2 ? this.serverKeys.forSequence(h.sequence) : 0;
       if (checksum1999(b, xor) !== h.checksum) {
@@ -517,6 +572,7 @@ export class Connection1999 implements NetConnection {
 
   private applySequenced(b: Uint8Array): void {
     const h = readHeader1999(b);
+    this.diag.rxSeqAt = Date.now();
     const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
     // Option headers lead the body in a fixed order (Packet1999 optionBytes1999); fragments follow.
     let o = HEADER_SIZE_1999;
@@ -549,6 +605,8 @@ export class Connection1999 implements NetConnection {
 
   private onMessage1999(message: Uint8Array, group: number): void {
     const opcode = message.length >= 4 ? new DataView(message.buffer, message.byteOffset).getUint32(0, true) : 0;
+    this.diag.rxMsgAt = Date.now();
+    this.diag.rxOpcode = opcode;
     if (opcode === 0xf7b8) { this.onDddBegin(message); return; }
     if (opcode === 0xf7b7) { this.onDddFile(message); return; }
     for (const m of this.adapter?.inbound(message, group) ?? []) this.dispatchEoL(m);
@@ -654,21 +712,27 @@ export class Connection1999 implements NetConnection {
     });
     this.resendCache.set(seq, { packet, lastSent: Date.now() });
     this.raw(packet);
+    this.diag.txSeqAt = this.diag.txAt;
   }
 
   private onServerAck(seq: number): void {
+    if (seq > this.diag.srvAck) this.diag.srvAck = seq;
     for (const k of [...this.resendCache.keys()]) if (k <= seq) this.resendCache.delete(k);
   }
 
   /** See the file comment: everything below the named sequence is received; the named one may be a gap. */
   private onServerResendList(seqs: number[]): void {
     if (!seqs.length) return;
+    this.diag.srvNakAt = Date.now();
+    this.diag.srvNaks += seqs.length;
     const low = Math.min(...seqs);
     for (const k of [...this.resendCache.keys()]) if (k < low) this.resendCache.delete(k);
     const now = Date.now();
     for (const s of seqs) {
       const entry = this.resendCache.get(s);
-      if (!entry || now - entry.lastSent < OUR_RESEND_MIN_MS) continue;
+      if (!entry) { this.diag.unsatisfied++; continue; }
+      if (now - entry.lastSent < OUR_RESEND_MIN_MS) continue;
+      this.diag.resent++;
       entry.lastSent = now;
       const p = entry.packet.slice();
       const v = new DataView(p.buffer);
@@ -682,6 +746,7 @@ export class Connection1999 implements NetConnection {
 
   private service(now = Date.now()): void {
     const clockStalled = this.lastServiceAt !== 0 && now - this.lastServiceAt > SERVER_TIMEOUT_MS;
+    if (this.lastServiceAt !== 0 && now - this.lastServiceAt > this.diag.tickGapMax) this.diag.tickGapMax = now - this.lastServiceAt;
     this.lastServiceAt = now;
     if (!this.granted) return;
     if (!this.sessionAnswered) {
@@ -699,6 +764,8 @@ export class Connection1999 implements NetConnection {
       }
       if (missing.length) {
         this.lastNakAt = now;
+        this.diag.nakAt = now;
+        this.diag.naks++;
         this.lost += missing.length;
         this.sendControl(F1999.ResendList | F1999.Checksum, buildSeqList1999(missing));
       }

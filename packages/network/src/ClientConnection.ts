@@ -53,6 +53,7 @@ import { OrderedFragmentBuffer } from './OrderedFragmentBuffer.js';
 import { FragmentAssembler } from './FragmentAssembler.js';
 import { MAX_SERVER_PACKET_SIZE } from './PacketBuilder.js';
 import { LinkStatusAverages } from './LinkStatusAverages.js';
+import { type NetDiagnostics, hex32, msAgo } from './NetDiagnostics.js';
 import type { GameMessage, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData } from './MessageSerializer.js';
 
 /**
@@ -452,6 +453,11 @@ export class ClientConnection {
    * cleartext ACKs (sequence 0) never reset it.
    */
   static readonly FLOW_KEEPALIVE_INTERVAL_MS = 3000;
+  /** BUG.gdle-echo-reply-marks-lost-received — the flags a cleartext,
+   *  sequence-stamped server packet may carry and still be only an
+   *  announcement of the server's current sequence (see handlePacket). */
+  private static readonly CLEARTEXT_ANNOUNCE_FLAGS = PacketHeaderFlags.Retransmission | PacketHeaderFlags.AckSequence |
+    PacketHeaderFlags.TimeSync | PacketHeaderFlags.EchoRequest | PacketHeaderFlags.EchoResponse | PacketHeaderFlags.Flow;
   private lastFlowKeepaliveAt = 0;
   /** Origin of the EchoRequest client clock (seconds since the session's handshake). */
   private echoEpochMs = 0;
@@ -500,6 +506,28 @@ export class ClientConnection {
    *  it skips the check when its own clock stalled that long. */
   private static readonly SERVER_DEAD_MS = 140_000;
   private lastServiceAt: number = 0;
+
+  // ── OBS.dm-stall-diagnostics — what getDiagnostics() reports (this session) ──
+  private diagRxMsgAt = 0;
+  private diagRxSeqAt = 0;
+  private diagRxFlags = -1;
+  private diagRxOpcode = -1;
+  private diagRxEvent = -1;
+  private diagNakAt = 0;
+  private diagNaks = 0;
+  private diagSrvAck = 0;
+  private diagSrvNakAt = 0;
+  private diagSrvNaks = 0;
+  private diagResent = 0;
+  private diagUnsatisfied = 0;
+  private diagSrvRejects = 0;
+  private diagTxAt = 0;
+  private diagTxSeqAt = 0;
+  private diagTickGapMax = 0;
+  private diagRxPkts = 0;
+  private diagTxPkts = 0;
+  private diagRxBytes = 0;
+  private diagRxAt = 0;
   /** The socket whose end was already reported with 'disconnected' (so the
    *  later onclose of a socket we closed ourselves doesn't report it twice). */
   private sessionEndedFor: unknown = null;
@@ -606,6 +634,63 @@ export class ClientConnection {
    */
   getPacketLossPercentage(): number {
     return this.linkStatusAverages.getPacketLossPercentage();
+  }
+
+  /**
+   * OBS.dm-stall-diagnostics — this session's sequencing state now
+   * (NetDiagnostics.ts): which way traffic stopped, and whether a gap is
+   * holding delivery or a retransmit went unanswered.
+   */
+  getDiagnostics(now: number = Date.now()): NetDiagnostics {
+    const announcedTop = Math.max(this.orderedBuffer.highestBufferedSequence ?? 0, this.announcedServerSeq, this.orderedBuffer.lastSequence);
+    return {
+      rxAgoMs: msAgo(now, this.diagRxAt),
+      rxMsgAgoMs: msAgo(now, this.diagRxMsgAt),
+      rxSeqAgoMs: msAgo(now, this.diagRxSeqAt),
+      rxFlags: hex32(this.diagRxFlags),
+      rxOpcode: hex32(this.diagRxOpcode),
+      rxEvent: hex32(this.diagRxEvent),
+      rxAck: this.orderedBuffer.lastSequence,
+      rxHigh: announcedTop,
+      rxHeld: this.orderedBuffer.bufferedCount,
+      rxMissing: this.collectMissingServerSeqs().length,
+      fragHeld: this.orderedFragments.bufferedCount + this.fragmentAssembler.pendingCount,
+      nakAgoMs: msAgo(now, this.diagNakAt),
+      naks: this.diagNaks,
+      txSeq: this.packetSequence,
+      txUnacked: this.sentPacketCache.size,
+      txAckedBySrv: this.diagSrvAck,
+      srvNakAgoMs: msAgo(now, this.diagSrvNakAt),
+      srvNaks: this.diagSrvNaks,
+      resent: this.diagResent,
+      unsatisfied: this.diagUnsatisfied,
+      srvRejects: this.diagSrvRejects,
+      txAgoMs: msAgo(now, this.diagTxAt),
+      txSeqAgoMs: msAgo(now, this.diagTxSeqAt),
+      wsBuffered: this.ws?.bufferedAmount ?? 0,
+      tickAgoMs: this.keepaliveTimer ? msAgo(now, this.lastServiceAt) : null,
+      tickGapMaxMs: Math.round(this.diagTickGapMax),
+      rxPkts: this.diagRxPkts,
+      txPkts: this.diagTxPkts,
+      rxBytes: this.diagRxBytes,
+    };
+  }
+
+  private resetDiagnostics(): void {
+    this.diagRxAt = this.diagRxMsgAt = this.diagRxSeqAt = 0;
+    this.diagRxFlags = this.diagRxOpcode = this.diagRxEvent = -1;
+    this.diagNakAt = this.diagNaks = this.diagSrvAck = 0;
+    this.diagSrvNakAt = this.diagSrvNaks = this.diagResent = this.diagUnsatisfied = this.diagSrvRejects = 0;
+    this.diagTxAt = this.diagTxSeqAt = this.diagTickGapMax = 0;
+    this.diagRxPkts = this.diagTxPkts = this.diagRxBytes = 0;
+  }
+
+  /** A packet went out on the socket (`sequenced`: it carries a fresh client sequence). */
+  private noteSent(sequenced: boolean): void {
+    const now = Date.now();
+    this.diagTxAt = now;
+    if (sequenced) this.diagTxSeqAt = now;
+    this.diagTxPkts++;
   }
 
   /**
@@ -729,6 +814,7 @@ export class ClientConnection {
     this.stopLoginRetry();
     this.stopConnectResponseRetry();
     this.resetSequencingState();
+    this.resetDiagnostics();
     this.preHandshakeQueue = [];
     this.sessionPastLogin = false;
     this.awaitingServerConnect = false;
@@ -1057,6 +1143,8 @@ export class ClientConnection {
     PKT_DEBUG && console.log(`[AC:PKT] Requesting retransmit of server seqs: ${missingSeqs.join(', ')}`);
     this.sendPacket(PacketHeaderFlags.RequestRetransmit, payload);
     this.lastAckNakSentAt = now;
+    this.diagNakAt = now;
+    this.diagNaks++;
   }
 
   /**
@@ -1117,6 +1205,7 @@ export class ClientConnection {
    */
   private serviceReceiver(now: number = Date.now()): void {
     const clockStalled = now - this.lastServiceAt > ClientConnection.SERVER_DEAD_MS;
+    if (now - this.lastServiceAt > this.diagTickGapMax) this.diagTickGapMax = now - this.lastServiceAt;
     this.lastServiceAt = now;
 
     // cs_ConnectionRequestAcked: only the ConnectAck resend (its own timer)
@@ -1368,6 +1457,10 @@ export class ClientConnection {
     // one-shot 'serverTimeout' event when traffic resumes.
     this.lastPacketReceivedAt = Date.now();
     this.serverTimeoutEmitted = false;
+    this.diagRxAt = this.lastPacketReceivedAt;
+    this.diagRxFlags = header.flags;
+    this.diagRxPkts++;
+    this.diagRxBytes += data.length;
     // SharedNet::SplitPacketData: *PacketsReceivedCounter (3/4/5) per packet.
     this.linkStatusAverages.countReceived();
 
@@ -1432,6 +1525,25 @@ export class ClientConnection {
       return;
     }
 
+    // BUG.gdle-echo-reply-marks-lost-received — the same rule for any other
+    // cleartext packet stamped with a sequence: GDLE answers our keepalive's
+    // EchoRequest with a connectionless EchoResponse stamped m_out.sequence,
+    // its last real packet's sequence (Seedsow PacketController.cpp
+    // ProcessBlob BT_ECHORESPONSE → SendConnectlessBlob(..., m_out.sequence)).
+    // When that packet N was lost, the reply took its place in the reorder
+    // buffer as "N received": N was never NAKed and its messages were gone.
+    // Retail never counts a cleartext packet as received (ProcessNewestSeqNum
+    // NAKs through its seqID inclusive). Only the order-insensitive optional
+    // headers are read; a cleartext RejectRetransmit / Disconnect / fragment
+    // packet keeps its own handling below.
+    if (!hasFlag(header, PacketHeaderFlags.EncryptedChecksum) && header.sequence !== 0 &&
+        (header.flags & ~ClientConnection.CLEARTEXT_ANNOUNCE_FLAGS) === 0) {
+      this.noteServerAnnouncedSeq(header.sequence);
+      this.processOrderedPacket(header, data);
+      this.requestMissingServerSeqs();
+      return;
+    }
+
     // Standalone RejectRetransmit (ACE PacketRejectRetransmit.cs — flags are
     // exactly RejectRetransmit): pre-process order-insensitively. The reject
     // typically refers to the very gap that would block its own ordered
@@ -1477,6 +1589,7 @@ export class ClientConnection {
    */
   private handleServerAck(ackedSeq: number): void {
     PKT_DEBUG && console.log(`[AC:PKT] Server acked our seq ${ackedSeq}`);
+    if (ackedSeq > this.diagSrvAck) this.diagSrvAck = ackedSeq;
     for (const seq of this.sentPacketCache.keys()) {
       if (seq < ackedSeq) this.sentPacketCache.delete(seq);
     }
@@ -1503,6 +1616,10 @@ export class ClientConnection {
    */
   private handleRetransmitRequest(requestedSeqs: number[]): void {
     PKT_DEBUG && console.log(`[AC:PKT] Server requests retransmit of our seqs: ${requestedSeqs.join(', ')}`);
+    if (requestedSeqs.length > 0) {
+      this.diagSrvNakAt = Date.now();
+      this.diagSrvNaks += requestedSeqs.length;
+    }
 
     // Retransmit strategy: ALWAYS send exact cached bytes (no modification).
     // ACE processes packets in sequence order (buffering out-of-order packets),
@@ -1518,6 +1635,8 @@ export class ClientConnection {
 
       PKT_DEBUG && console.log(`[AC:PKT] Retransmitting seq=${seq} (${cached.length}B) [exact cached bytes]`);
       this.ws.send(cached);
+      this.noteSent(false);
+      this.diagResent++;
       // SharedNet::SendPacket counts (9, 1); FlowQueue::TransmitAcks counts
       // the resend as RetransmitsSentCounter (10).
       this.linkStatusAverages.countSent();
@@ -1541,6 +1660,7 @@ export class ClientConnection {
 
     if (uncached.length > 0) {
       console.warn(`[AC:PKT] Server NAKed uncached seqs ${uncached.join(', ')} — sending RejectRetransmit`);
+      this.diagUnsatisfied += uncached.length;
       const payload = new Uint8Array(4 + uncached.length * 4);
       const view = new DataView(payload.buffer);
       view.setUint32(0, uncached.length, true);
@@ -1564,6 +1684,8 @@ export class ClientConnection {
     if (lostSeqs.length === 0) return;
     PKT_DEBUG && console.log(`[AC:PKT] Accepting lost server seqs: ${lostSeqs.join(', ')}`);
     for (const seq of lostSeqs) {
+      // Counted once: the standalone pre-pass and the ordered walk may both see it.
+      if (seq > this.orderedBuffer.lastSequence && this.orderedBuffer.missingSequences(seq).includes(seq)) this.diagSrvRejects++;
       for (const pkt of this.orderedBuffer.markLost(seq)) {
         this.processOrderedPacket(pkt.header, pkt.data);
       }
@@ -1587,6 +1709,7 @@ export class ClientConnection {
    */
   private processOrderedPacket(header: PacketHeaderData, data: Uint8Array): void {
     let offset = PACKET_HEADER_SIZE;
+    if (header.sequence !== 0 && hasFlag(header, PacketHeaderFlags.EncryptedChecksum)) this.diagRxSeqAt = Date.now();
 
     // Handle AckSequence — server tells us which of our packets it has received
     if (hasFlag(header, PacketHeaderFlags.AckSequence)) {
@@ -1796,6 +1919,12 @@ export class ClientConnection {
   private processMessage(data: Uint8Array): void {
     PKT_DEBUG && console.log(`[AC:PKT:DBG] processMessage: ${data.length} bytes, hex=${Array.from(data.slice(0, Math.min(data.length, 24))).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
     const msg = deserializeMessage(data);
+    this.diagRxMsgAt = Date.now();
+    if (data.length >= 4) {
+      const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      this.diagRxOpcode = dv.getUint32(0, true);
+      this.diagRxEvent = this.diagRxOpcode === 0xF7B0 && data.length >= 16 ? dv.getUint32(12, true) : -1; // F7B0, guid, sequence, event type
+    }
     PKT_DEBUG && console.log(`[AC:PKT:DBG] deserialized: type=${msg.type} opcode=0x${(msg.opcode ?? 0).toString(16)}`);
 
     // Emit dedicated event for GameEvent messages so handlers can receive them
@@ -1993,6 +2122,7 @@ export class ClientConnection {
     // Don't cache control packets (they use seq=0, no retransmission needed)
 
     this.ws.send(buf.buffer);
+    this.noteSent(false);
     this.linkStatusAverages.countSent(); // SharedNet::SendPacket: PacketsSentCounter (9)
   }
 
@@ -2036,6 +2166,7 @@ export class ClientConnection {
       this.sentPacketCache.delete(oldest);
     }
     this.ws.send(buf.buffer);
+    this.noteSent(true);
     this.linkStatusAverages.countSent();
   }
 
@@ -2138,6 +2269,7 @@ export class ClientConnection {
     }
 
     this.ws.send(buf.buffer);
+    this.noteSent(true);
     this.linkStatusAverages.countSent(); // SharedNet::SendPacket: PacketsSentCounter (9)
   }
 }

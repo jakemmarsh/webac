@@ -261,3 +261,19 @@ export function formatGear(items: readonly AgentItem[], opts: { packList?: boole
   }
   return out.join('\n');
 }
+
+/**
+ * A mage with nothing to cast through: a trained or specialized magic school and no caster (ItemType 0x8000: a wand,
+ * staff or orb) wielded, where the era's client needs one for magic mode (end of retail's CompatibleCombatMode
+ * @ 0056a580; not 1999's). Says whether one is in the pack. Null when there is nothing to say, or the items carry no
+ * item types to tell. Arcanist owned none and learned it from a refused heal (2026-10-16).
+ */
+export function casterGap(items: readonly AgentItem[] | null, trainedMagic: boolean, needsCaster: boolean): string | null {
+  if (!items || !trainedMagic || !needsCaster || !items.some((i) => i.itemType !== undefined)) return null;
+  const isCaster = (i: AgentItem): boolean => ((i.itemType ?? 0) & 0x8000) !== 0;
+  if (items.some((i) => i.where === 'equipped' && isCaster(i))) return null;
+  const inPack = items.find((i) => i.where !== 'equipped' && isCaster(i));
+  return `no wand, staff or orb wielded: you can't enter magic mode or cast without one; ${inPack
+    ? `${inPack.name} is in your pack: wield it (ac_equip ${inPack.name})`
+    : 'you carry none: buy one (./world-query sells "Wand", or an Archmage or magic shop)'}`;
+}

@@ -183,6 +183,8 @@ export { BRIDGE_CLOSE_IP_CAP, BridgeRefusalError, bridgeRefusalFromClose, bridge
 export type { ConnectionEventType, ConnectionEvent, ConnectionListener, DisconnectCause, BridgeHealth, HealthSocketLike, RoutinesGrant, PairingReply, RelayLinkNotice, AgentCallFrame, ServerNetError } from './ClientConnection.js';
 export { hostClientConnection, NET_SNAPSHOT_INTERVAL_MS } from './NetWorker.js';
 export { createConnection } from './createConnection.js';
+export { hex32, msAgo, boundNetDiagnostics, NET_DIAG_END_CAUSES, NET_DIAG_MAX_MS, NET_DIAG_MAX_COUNT } from './NetDiagnostics.js';
+export type { NetDiagnostics } from './NetDiagnostics.js';
 export { Connection1999, VERSION_1999 } from './era1999/Connection1999.js';
 export { CREDENTIAL_BYTES_1999 } from './era1999/Login1999.js';
 export type { DatPatch1999, DatPatchEvent } from './era1999/Connection1999.js';

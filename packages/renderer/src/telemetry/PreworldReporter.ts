@@ -26,7 +26,7 @@
  * load and rides on the WebSocket URL, so the bridge's session_open /
  * session_close carry the same id.
  */
-import type { ConnectionEvent } from '@ac/network';
+import { boundNetDiagnostics, NET_DIAG_END_CAUSES, type ConnectionEvent } from '@ac/network';
 import { PASSWORD_MISMATCH_BOOT_REASON } from '../session/AccountBoot.js';
 import { CharacterError, CharacterGenerationVerificationResponse, characterCreateErrorToken } from '@ac/shared';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
@@ -207,6 +207,12 @@ export interface PreworldEvent {
   cache: BootCacheState | null;
   /** Capability problems the probe found (null when none). */
   caps: CapabilityIssue[] | null;
+  /**
+   * OBS.dm-stall-diagnostics — 'dropped' only, when the session went silent
+   * or its socket closed: the connection's NetDiagnostics, bounded
+   * (@ac/network boundNetDiagnostics). Absent otherwise.
+   */
+  net?: Record<string, number | string | null>;
 }
 
 export interface PreworldReporterOptions {
@@ -513,9 +519,14 @@ export class PreworldReporter {
     this.report('login_refused', { token: 'boot_banned', code: Number.isFinite(secondsUntilExpiry) ? secondsUntilExpiry >>> 0 : null });
   }
 
-  /** The server ended the session before the world (the Disconnected screen). */
-  dropped(code: number | null = null, token: string | null = null): void {
-    this.report('dropped', { code, token: safeToken(token) });
+  /**
+   * The server ended the session before the world (the Disconnected screen).
+   * `token` is the drop's endCause; `net` the connection's diagnostics, sent
+   * when the session went silent or its socket closed (OBS.dm-stall-diagnostics).
+   */
+  dropped(code: number | null = null, token: string | null = null, net?: unknown): void {
+    const diag = token !== null && NET_DIAG_END_CAUSES.includes(token) ? boundNetDiagnostics(net) : null;
+    this.report('dropped', { code, token: safeToken(token), ...(diag ? { net: diag } : {}) });
   }
 
   // ── Boot (RELEASE.preworld-boot-stage) ───────────────────────────────
@@ -670,7 +681,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs'>>): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net'>>): void {
     if (!this.opts.endpoint || this.sent >= MAX_PREWORLD_EVENTS) return;
     const { screen, step } = this.sample();
     const at = this.now();
@@ -696,6 +707,7 @@ export class PreworldReporter {
       sinceEnterMs: f.sinceEnterMs ?? null,
       ...(screen === 'boot' ? this.bootSnapshot()
         : { stage: null, progress: null, doneKB: null, totalKB: null, cache: null, caps: null }),
+      ...(f.net ? { net: f.net } : {}),
     };
     this.sent++;
     this.outbox.post(this.opts.endpoint, JSON.stringify(body));

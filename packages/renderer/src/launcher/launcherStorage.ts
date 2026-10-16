@@ -64,3 +64,36 @@ export function worldKeyOf(world: { id: string | null; kind: string; bridgeUrl?:
   if (world.kind === 'local' || !world.id) return 'local';
   return world.id;
 }
+
+/**
+ * Favourite worlds: the world keys (worldKeyOf) the player starred, oldest
+ * first. Kept apart from the remembered login so either record can be
+ * dropped without the other. A key whose world left the directory stays
+ * stored (it comes back when the world does).
+ */
+export const LAUNCHER_FAVORITES_KEY = 'acjs.launcher.favorites.v1';
+const MAX_FAVORITES = 64;
+
+export function loadFavoriteWorlds(storage: StorageLike | null = defaultStorage()): string[] {
+  if (!storage) return [];
+  try {
+    const raw = storage.getItem(LAUNCHER_FAVORITES_KEY);
+    if (!raw) return [];
+    const v = JSON.parse(raw) as unknown;
+    if (!Array.isArray(v)) return [];
+    const out: string[] = [];
+    for (const k of v) if (typeof k === 'string' && k && k.length <= 512 && !out.includes(k)) out.push(k);
+    return out.slice(0, MAX_FAVORITES);
+  } catch {
+    return [];
+  }
+}
+
+export function saveFavoriteWorlds(keys: readonly string[], storage: StorageLike | null = defaultStorage()): void {
+  if (!storage) return;
+  try {
+    storage.setItem(LAUNCHER_FAVORITES_KEY, JSON.stringify([...new Set(keys)].slice(0, MAX_FAVORITES)));
+  } catch {
+    /* storage full or blocked: favourites last for this visit only */
+  }
+}

@@ -695,6 +695,68 @@ describe('AgentApi', () => {
     expect(lines.filter((l) => /routing round it|once more before giving up/.test(l))).toEqual([]);
   });
 
+  // ACE's Use of a door (Player.HandleActionUseItem → CreateMoveToChain): the server walks you to it first and only then does
+  // Door.ActOnUse toggle it; until then the Use is in flight (busy, no UseDone). A movement key cancels it (UseDone, the door
+  // untouched). Here the server's walk doesn't move the body: the Use lands only once the body stands within reach (2.5 m).
+  const aceDoorUse = (door: AgentHostObject): { sentWhileInFlight: () => number; toggles: () => number; cancelled: () => number } => {
+    let pending = false, inFlightSends = 0, toggles = 0, cancelled = 0;
+    const use = host.use;
+    const land = () => {
+      if (pending && Math.hypot(host.me.x - door.x, host.me.y - door.y) <= 2.5) { pending = false; toggles++; door.physicsState = (door.physicsState ?? 0) ^ 0x4; }
+    };
+    host.use = (g: number) => {
+      if (g === door.guid) { if (pending) inFlightSends++; pending = true; land(); }
+      return use(g);
+    };
+    host.busy = () => { land(); return pending; };
+    const key = host.key;
+    host.key = (code: string, down: boolean) => {
+      if (down && pending && !host.keys.has(code) && ['KeyW', 'KeyS', 'KeyZ', 'KeyC'].includes(code)) { pending = false; cancelled++; }
+      key(code, down);
+    };
+    return { sentWhileInFlight: () => inFlightSends, toggles: () => toggles, cancelled: () => cancelled };
+  };
+
+  it('a door Use still in flight after 8 s (the server still walking you to it) is not judged or sent again: the walk goes to the door and Uses it there (Archmage Cindrue, 0xA9B4, 2026-10-16)', async () => {
+    const { door, isOpen } = academyBox();
+    host.me.x = 72.6; host.me.y = 40; // 3.2 m off: a Use from here doesn't reach the door until you walk closer
+    const ace = aceDoorUse(door);
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Society Greeter', { within: 1.5 });
+    // Held where it stands (the jamb), so the stall fallback Uses the door from 3.2 m; then free.
+    run(api, host, 12_000, { physics: false });
+    run(api, host, 60_000);
+    const r = await p;
+    log.mockRestore();
+    expect(r, lines.join('\n')).toMatchObject({ ok: true });
+    expect(isOpen()).toBe(true);
+    expect(ace.toggles()).toBe(1);
+    expect(ace.sentWhileInFlight()).toBe(0);
+    expect(lines.filter((l) => /did not open|routing round it/.test(l)), lines.join('\n')).toEqual([]);
+    expect(lines.some((l) => /hasn't reached it/.test(l)), lines.join('\n')).toBe(true);
+  });
+
+  it('a door a fellow opens while your own Use of it is still in flight is walked through: your Use never lands to swing it shut', async () => {
+    const { door, isOpen } = academyBox();
+    host.me.x = 72.6; host.me.y = 40;
+    const ace = aceDoorUse(door);
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Society Greeter', { within: 1.5 });
+    run(api, host, 12_000, { physics: false });
+    // Your Use is in flight; Bulwark, standing at the door, opens it.
+    expect(host.busy()).toBe(true);
+    door.physicsState = 0x4;
+    run(api, host, 60_000);
+    const r = await p;
+    log.mockRestore();
+    expect(r, lines.join('\n')).toMatchObject({ ok: true });
+    expect(isOpen()).toBe(true);
+    expect(ace.toggles()).toBe(0);
+    expect(ace.cancelled()).toBe(1);
+  });
+
   it('a stuck walk tries the shut door beside it once more before giving up, unless it said it is locked', async () => {
     const { door } = academyBox();
     host.me.x = 74; host.me.y = 40;
@@ -846,6 +908,30 @@ describe('AgentApi', () => {
     // Once on the stall, and once more before giving up (it never said it was locked).
     expect(host.sent.filter((x) => x === 'use 80000040')).toHaveLength(2);
     expect([...host.keys]).toEqual([]);
+  });
+
+  it('with no way found, the walk doesn\'t hold W into the wall in front for each stall (Arcanist at the 0x49B6 scriveners\' east wall, 2026-10-16 18:34Z)', async () => {
+    // A sealed box round the goal: no doorway, no door. Every search finds no way; the walk ends stuck. Pressing into the
+    // wall is W held while the body doesn't move.
+    const inBand = (v: number, c: number, half: number) => Math.abs(v - c) < half;
+    host.wall = (x, y) => (inBand(x, 76.5, 0.4) || inBand(x, 83.5, 0.4)) && y > 36.1 && y < 43.9 || (inBand(y, 36.5, 0.4) || inBand(y, 43.5, 0.4)) && x > 76.1 && x < 83.9;
+    host.me.x = 75.5; host.me.y = 40;
+    host.add({ guid: 0x8000c430, name: 'Walled Thing', x: 80, y: 40 });
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((m: unknown) => { lines.push(String(m)); });
+    const p = api.walkTo('Walled Thing', { within: 1.5 });
+    let pressedMs = 0;
+    for (let i = 0; i < 1200; i++) {
+      const was = { x: host.me.x, y: host.me.y };
+      run(api, host, 100);
+      if (host.keys.has('KeyW') && Math.hypot(host.me.x - was.x, host.me.y - was.y) < 0.01) pressedMs += 100;
+    }
+    const r = await p;
+    log.mockRestore();
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/^stuck /);
+    // Before: 3 s of it per stall, 18.2 s in all.
+    expect(pressedMs, lines.join('\n')).toBeLessThan(3000);
   });
 
   it('a stuck walk never Uses a door that already stands open (Using it would close it on you); observe marks it open', async () => {

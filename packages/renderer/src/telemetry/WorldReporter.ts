@@ -28,6 +28,7 @@
  * and never leaves the page; no key identity, typed text, name or chat is
  * ever an input to this module.
  */
+import { boundNetDiagnostics, NET_DIAG_END_CAUSES } from '@ac/network';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
 /** How the player left (closed set; `still_in` = in the world at 60 s). */
@@ -59,7 +60,16 @@ export type WorldEndCause = typeof WORLD_END_CAUSES[number];
 export interface WorldDropDetail {
   endCause?: string | null;
   closeCode?: number | null;
+  /**
+   * OBS.dm-stall-diagnostics — the connection's NetDiagnostics at the end
+   * (@ac/network NetDiagnostics.ts). Sent only for a session that went silent
+   * or lost its socket (NET_DIAG_END_CAUSES), bounded field by field.
+   */
+  net?: unknown;
 }
+
+/** The bounded connection diagnostics an event carries (boundNetDiagnostics). */
+export type WorldNetDiagnostics = Record<string, number | string | null>;
 
 /** The first-minute window. */
 export const FIRST_MINUTE_MS = 60_000;
@@ -116,6 +126,8 @@ export interface FirstMinuteEvent {
   /** Exit 'disconnected': what ended the session, and the socket's close code (1006 = dropped with no close frame). */
   endCause?: WorldEndCause | null;
   closeCode?: number | null;
+  /** OBS.dm-stall-diagnostics — the connection's state when a silent / closed session ended. */
+  net?: WorldNetDiagnostics;
 }
 
 export interface WorldLeftEvent {
@@ -136,6 +148,8 @@ export interface WorldLeftEvent {
   /** Page-lifecycle freezes (document 'freeze') during the session, and their total length so far. */
   freezes?: number;
   frozenMs?: number;
+  /** OBS.dm-stall-diagnostics — the connection's state when a silent / closed session ended. */
+  net?: WorldNetDiagnostics;
 }
 
 export type WorldEvent = FirstMinuteEvent | WorldLeftEvent;
@@ -220,12 +234,15 @@ function scalePct(v: number): number {
 export const MAX_DRAW_DISTANCE_STEPS = 5;
 
 /** A drop's endCause (closed set) and close code (a WebSocket code, 1000–4999). */
-function dropFields(drop: WorldDropDetail | undefined): { endCause: WorldEndCause | null; closeCode: number | null } {
+function dropFields(drop: WorldDropDetail | undefined): { endCause: WorldEndCause | null; closeCode: number | null; net?: WorldNetDiagnostics } {
   const cause = drop?.endCause;
   const code = drop?.closeCode;
+  const endCause = (WORLD_END_CAUSES as readonly string[]).includes(cause ?? '') ? cause as WorldEndCause : null;
+  const net = endCause !== null && NET_DIAG_END_CAUSES.includes(endCause) ? boundNetDiagnostics(drop?.net) : null;
   return {
-    endCause: (WORLD_END_CAUSES as readonly string[]).includes(cause ?? '') ? cause as WorldEndCause : null,
+    endCause,
     closeCode: typeof code === 'number' && Number.isInteger(code) && code >= 1000 && code <= 4999 ? code : null,
+    ...(net ? { net } : {}),
   };
 }
 
@@ -457,7 +474,7 @@ export class WorldReporter {
     return { era: safe(this.opts.era, 'unknown'), server: safe(this.opts.server, null), trace: this.opts.trace, build: this.opts.build };
   }
 
-  private sendFirstMinute(exit: WorldExit, at: number, detail: Pick<FirstMinuteEvent, 'endCause' | 'closeCode'> = {}): void {
+  private sendFirstMinute(exit: WorldExit, at: number, detail: Pick<FirstMinuteEvent, 'endCause' | 'closeCode' | 'net'> = {}): void {
     const enterAt = this.enterAt!;
     this.minuteSent = true;
     this.pollModal(at);

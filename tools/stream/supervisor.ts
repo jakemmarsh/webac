@@ -31,6 +31,8 @@ import { type ChatParseState, FeedWriter, FileTail, type SegmentUsage, addUsage,
 import { type SegmentRecord, QUIET_TOOLS, afterTurn, dayUsage, endReason, localDay, nextSegment, quietNudge } from './policy.ts';
 import { preparePlayerDir } from './player.ts';
 import { type TableSpell, loadSpellTableRows } from './spellGaps.ts';
+import { eraClientRules } from '../../packages/renderer/src/era/EraFeatures.ts';
+import { eraProfile } from '../../packages/renderer/src/era/EraProfiles.ts';
 import { StuckWatch, classifyResult, isBusyChatLine } from './stuck.ts';
 import { TOOLS } from '../ac-agent/tools.ts';
 import { type SessionTally, clipReport, nudgeMessage, quietMessage, readinessBrief, sessionSoFar, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
@@ -388,6 +390,7 @@ export class StreamSupervisor {
       sheet: await deps.characterSheet(c.profile).catch(() => null),
       spells: await deps.spells?.(c.profile).catch(() => null) ?? null,
       table: await deps.spellTable?.().catch(() => null) ?? null,
+      needsCaster: eraClientRules(eraProfile(c.era)).combatModeCheck === 'eor',
       session: sessionSoFar(cfg.characters.map((o) => ({ character: o.character, tally: this.tally.get(o.profile) }))),
     });
     const startMs = deps.now();

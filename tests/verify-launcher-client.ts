@@ -13,6 +13,7 @@ import {
 } from '../packages/renderer/src/launcher/worldDirectory';
 import {
   loadRememberedLogin, saveRememberedLogin, worldKeyOf, LAUNCHER_STORAGE_KEY,
+  loadFavoriteWorlds, saveFavoriteWorlds, LAUNCHER_FAVORITES_KEY,
 } from '../packages/renderer/src/launcher/launcherStorage';
 import { resolveUrlLogin } from '../packages/renderer/src/launcher/urlLogin';
 import {
@@ -187,6 +188,33 @@ describe('remember last world + account (never the password)', () => {
     const throwing = { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); } };
     expect(loadRememberedLogin(throwing)).toEqual({ worldKey: null, account: null, era: null });
     expect(() => saveRememberedLogin({ worldKey: 'x', account: 'y' }, throwing)).not.toThrow();
+  });
+
+  it('favourite worlds round-trip on their own key, deduped, with malformed entries dropped', () => {
+    const s = new MemStorage();
+    expect(loadFavoriteWorlds(s)).toEqual([]);
+    saveFavoriteWorlds(['ac1999', 'reef', 'ac1999'], s);
+    expect(loadFavoriteWorlds(s)).toEqual(['ac1999', 'reef']);
+    // Separate from the remembered login: saving one never touches the other.
+    saveRememberedLogin({ worldKey: 'c0ldeve', account: 'a' }, s);
+    expect(loadFavoriteWorlds(s)).toEqual(['ac1999', 'reef']);
+    expect(loadRememberedLogin(s).worldKey).toBe('c0ldeve');
+    s.setItem(LAUNCHER_FAVORITES_KEY, JSON.stringify(['ok', 7, '', null, 'x'.repeat(600), 'ok', 'custom:wss://a.example/b']));
+    expect(loadFavoriteWorlds(s)).toEqual(['ok', 'custom:wss://a.example/b']);
+    saveFavoriteWorlds(Array.from({ length: 80 }, (_, i) => `w${i}`), s);
+    expect(loadFavoriteWorlds(s)).toHaveLength(64);
+  });
+
+  it('favourites survive missing, corrupt and throwing storage', () => {
+    expect(loadFavoriteWorlds(null)).toEqual([]);
+    const corrupt = new MemStorage();
+    corrupt.setItem(LAUNCHER_FAVORITES_KEY, '{nope');
+    expect(loadFavoriteWorlds(corrupt)).toEqual([]);
+    corrupt.setItem(LAUNCHER_FAVORITES_KEY, '{"a":1}');
+    expect(loadFavoriteWorlds(corrupt)).toEqual([]);
+    const throwing = { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); } };
+    expect(loadFavoriteWorlds(throwing)).toEqual([]);
+    expect(() => saveFavoriteWorlds(['x'], throwing)).not.toThrow();
   });
 
   it('world keys: id / local / custom:<url>', () => {
@@ -399,6 +427,129 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(s.screen.selectedWorld.name).toBe('Conquest');
   });
 
+  it('favourites: a heart click stars a world without selecting it, the list sorts favourites first, and it persists', async () => {
+    const storage = new MemStorage();
+    const s = await open(storage);
+    expect(s.rows().map(r => r.dataset.world)).toEqual(['c0ldeve', 'conq', 'funky']);
+    expect(s.rows().every(r => r.dataset.favorite === undefined)).toBe(true);
+    const heart = s.row('Funky').querySelector('.launcher-fav') as HTMLElement;
+    expect(heart.getAttribute('aria-pressed')).toBe('false');
+    expect(heart.getAttribute('aria-label')).toBe('Add Funky to favorites');
+    // The heart sits at the row's left edge (the overlay scrollbar covers the right).
+    expect(s.row('Funky').firstElementChild).toBe(heart);
+    heart.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    expect(s.rows().map(r => r.dataset.world)).toEqual(['funky', 'c0ldeve', 'conq']);
+    expect(s.row('Funky').dataset.favorite).toBe('true');
+    expect(s.row('Funky').querySelector('.launcher-fav')?.getAttribute('aria-pressed')).toBe('true');
+    expect(s.screen.selectedWorld.name).toBe('Coldeve'); // starring never selects
+    expect(loadFavoriteWorlds(storage)).toEqual(['funky']);
+    // A double-click on the heart neither enters nor selects the world.
+    s.account.value = 'me';
+    s.password.value = 'pw';
+    let entered = false;
+    void s.done.then(() => { entered = true; });
+    s.dbl(s.row('Funky').querySelector('.launcher-fav') as HTMLElement);
+    await Promise.resolve();
+    expect(entered).toBe(false);
+    expect(s.screen.selectedWorld.name).toBe('Coldeve');
+    // Favourites keep the directory's order among themselves.
+    (s.row('Coldeve').querySelector('.launcher-fav') as HTMLElement).dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    expect(s.rows().map(r => r.dataset.world)).toEqual(['c0ldeve', 'funky', 'conq']);
+
+    // A new visit reads them back and opens on the first enterable favourite
+    // (Funky is offline, so Coldeve).
+    const again = await open(storage);
+    expect(again.rows().map(r => r.dataset.world)).toEqual(['c0ldeve', 'funky', 'conq']);
+    expect(again.screen.selectedWorld.name).toBe('Coldeve');
+    // Unstarring drops it back to its directory place.
+    (again.row('Coldeve').querySelector('.launcher-fav') as HTMLElement).dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    expect(again.rows().map(r => r.dataset.world)).toEqual(['funky', 'c0ldeve', 'conq']);
+    expect(loadFavoriteWorlds(storage)).toEqual(['funky']);
+  });
+
+  it('favourites: with no remembered world the first enterable favourite opens selected; a remembered world still wins', async () => {
+    const storage = new MemStorage();
+    saveFavoriteWorlds(['conq', 'funky'], storage);
+    // Conquest is blocked and Funky offline: both are favourites, neither enterable.
+    let s = await open(storage);
+    expect(s.rows().map(r => r.dataset.world)).toEqual(['conq', 'funky', 'c0ldeve']);
+    expect(s.screen.selectedWorld.name).toBe('Coldeve');
+    saveFavoriteWorlds(['c0ldeve'], storage);
+    saveRememberedLogin({ worldKey: 'funky', account: 'a' }, storage);
+    s = await open(storage);
+    expect(s.rows()[0].dataset.world).toBe('c0ldeve');
+    expect(s.screen.selectedWorld.name).toBe('Funky');
+  });
+
+  it('favourites: the details panel toggles the selected world, and F in the list does too (Ctrl/Cmd+F does not)', async () => {
+    const storage = new MemStorage();
+    const s = await open(storage);
+    const link = () => s.mount.querySelector('.launcher-fav-link') as HTMLElement;
+    expect(link().textContent).toBe('Favorite');
+    link().dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(loadFavoriteWorlds(storage)).toEqual(['c0ldeve']);
+    expect(link().textContent).toBe('Unfavorite');
+    // Shown for a world with no website or Discord links too.
+    s.row('Funky').dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true }));
+    expect(link().textContent).toBe('Favorite');
+    const list = s.mount.querySelector('.launcher-world-list') as HTMLElement;
+    s.row('Funky').focus();
+    const press = (init: KeyboardEventInit) => {
+      const ev = new domWindow.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+      (domWindow.document.activeElement as HTMLElement ?? list).dispatchEvent(ev);
+      return ev.defaultPrevented as boolean;
+    };
+    expect(press({ key: 'f', metaKey: true })).toBe(false);
+    expect(press({ key: 'f', ctrlKey: true })).toBe(false);
+    expect(loadFavoriteWorlds(storage)).toEqual(['c0ldeve']);
+    expect(press({ key: 'f' })).toBe(true);
+    expect(loadFavoriteWorlds(storage)).toEqual(['c0ldeve', 'funky']);
+    expect(s.rows().map(r => r.dataset.world)).toEqual(['c0ldeve', 'funky', 'conq']);
+    expect(s.screen.selectedWorld.name).toBe('Funky');
+    // F typed into the account field is just a letter.
+    s.account.focus();
+    const ev = new domWindow.KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true });
+    s.account.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
+    expect(loadFavoriteWorlds(storage)).toEqual(['c0ldeve', 'funky']);
+  });
+
+  it('favourites: the heart is the DAT health-ornament pair, bright when starred and depleted on hover', async () => {
+    const k = makeKit();
+    const kit = { ...k.kit, texUrl: (id: number) => `tex:${id.toString(16)}` };
+    const storage = new MemStorage();
+    saveFavoriteWorlds(['funky'], storage);
+    const screen = new mod.LauncherScreen(kit, { bridgeUrl: BRIDGE, storage, loadDirectory: async () => ({ mode: 'multi', worlds: worlds() }) });
+    void screen.run();
+    await screen.loaded;
+    const heartOf = (id: string) => k.mount.querySelector(`.launcher-world-row[data-world="${id}"] .launcher-fav`) as HTMLElement;
+    expect(heartOf('funky').style.backgroundImage).toContain('tex:6007491');
+    expect(heartOf('c0ldeve').style.backgroundImage).toBe('none');
+    const row = k.mount.querySelector('.launcher-world-row[data-world="c0ldeve"]') as HTMLElement;
+    row.dispatchEvent(new domWindow.MouseEvent('mouseenter'));
+    expect(heartOf('c0ldeve').style.backgroundImage).toContain('tex:6007490');
+    row.dispatchEvent(new domWindow.MouseEvent('mouseleave'));
+    expect(heartOf('c0ldeve').style.backgroundImage).toBe('none');
+  });
+
+  it('favourites: favourite custom bridges come back as rows (with their era probed) beside the remembered one', async () => {
+    const k = makeKit();
+    const storage = new MemStorage();
+    saveFavoriteWorlds(['custom:wss://one.example/bridge', 'funky', 'custom:wss://two.example/bridge'], storage);
+    saveRememberedLogin({ worldKey: 'custom:wss://two.example/bridge', account: 'a' }, storage);
+    const probed: string[] = [];
+    const screen = new mod.LauncherScreen(k.kit, {
+      bridgeUrl: BRIDGE, storage, loadDirectory: async () => ({ mode: 'multi', worlds: worlds() }),
+      probeEra: async (u: string) => { probed.push(u); return null; },
+    });
+    void screen.run();
+    await screen.loaded;
+    const ids = [...k.mount.querySelectorAll('.launcher-world-row')].map(r => (r as HTMLElement).dataset.world);
+    expect(ids).toEqual(['custom:wss://two.example/bridge', 'custom:wss://one.example/bridge', 'funky', 'c0ldeve', 'conq']);
+    expect(probed.sort()).toEqual(['wss://one.example/bridge', 'wss://two.example/bridge']);
+    expect(screen.selectedWorld.bridgeUrl).toBe('wss://two.example/bridge');
+  });
+
   it('AGPL §13: the launcher shows a Source code link only when sourceUrl is configured', async () => {
     const k = makeKit();
     const screen = new mod.LauncherScreen(k.kit, {
@@ -510,6 +661,8 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(links.map((a) => [a.textContent, a.getAttribute('href'), a.target, a.rel])).toEqual([
       ['Register', 'http://reefcull.gdleac.com/', '_blank', 'noopener noreferrer'],
       ['Discord', 'https://discord.gg/3ngsm6e', '_blank', 'noopener noreferrer'],
+      // The favourite toggle closes the links row; it opens nothing.
+      ['Favorite', '#', '', ''],
     ]);
     // The first-login line does not show for it; a world without registration keeps it.
     expect(k.mount.querySelector('.launcher-details-body')?.textContent).not.toMatch(/Most worlds create your account/);

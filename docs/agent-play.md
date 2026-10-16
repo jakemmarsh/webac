@@ -704,6 +704,21 @@ here, not having to hardcode behavior").
   Bulwark's attacks on Mu-miyahs 6–12 m up or down pulled him off Arcanist's floor three times in Mountain Keep
   (0x01D2, 2026-10-16 15:12–15:20Z), and the reply named the floor change only once he was on his way. Shared by all
   three eras (floors and doorways from each era's cell DAT).
+- **Mountain Keep, second segment (2026-10-16 16:08–17:08Z).** A swing line ("Dread Mu-miyah grazes your foot") is
+  credited to the nearest creature of that name by the straight line, floors and all, and never to one a storey up or
+  down (ACE melee range is CylinderDistance, heights included, 0.75 m): mummies overhead read "ATTACKING YOU" with the
+  one beside you doing the hitting. A door that answered "The door is locked!" / "The key doesn't fit this lock." is
+  remembered for the session (by guid, until seen open): routes go round it, walks don't use it or try the key again,
+  and a walk whose only doorway route is through it ends at once naming it; observe's other-floor line and the
+  other-floor attack refusal say "no walk reaches it from here but through Door #…". The agent keeps each fellow's last
+  place while in sight, so a follow / walk_to after the client destroyed their object (ObjectMaint, 25 s out of view)
+  still goes to where they were. A melee `ac_attack` at a target more than 12 m off is refused when a fellow within
+  15 m of you would be more than 15 m from you there (`far=true` goes anyway; a target on the fellow is no run-away).
+  `ac_stop_moving` is retail's Stop Moving: it takes control back from the server, so the server's approach to a
+  melee target stops where you are and the attack is cancelled. A walk that ran more than 3 m past its goal between two
+  looks turns back for it (twice at most) instead of "arrived (9 m away, run past it a little)". "…, but it is surpassed
+  by X" says X is the target's own enchantment (ACE EnchantmentManager.Add on the target) and that the cast is kept under
+  it and takes over when it wears off.
 - **A caster's attack casts (2026-10-13).** `ac_attack`, and a routine's `pull` and `attack-nearest` (all `AgentApi.attack`),
   with a wand, staff or orb wielded (or already in magic mode) fight with spells: magic mode, then the attack spell the
   VirindiTank macro would pick for its `<DEFAULT>` row (`combatPlan.casterAttackSpell` → `planCombat`: Auto element from

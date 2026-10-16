@@ -19,6 +19,9 @@
  */
 import { CombatMode } from '@ac/shared';
 
+/** Which era's CompatibleCombatMode applies (era/EraFeatures.ts EraClientRules.combatModeCheck). */
+export type CombatModeCheck = 'eor' | 'ac1999';
+
 /** MotionCommand.Ready, the forward_command PlayerInReadyPosition wants in missile mode. */
 export const READY_FORWARD_COMMAND = 0x41000003;
 
@@ -120,8 +123,12 @@ export function getAttackTarget(selected: number, l: AttackTargetLookup): number
  * while something in 0x3500000 (a missile weapon or a caster) is. Peace and
  * every other mode are always compatible.
  */
-export function compatibleCombatMode(mode: CombatMode, inventoryMask: number): boolean {
+export function compatibleCombatMode(mode: CombatMode, inventoryMask: number, check: CombatModeCheck = 'eor'): boolean {
   const m = inventoryMask >>> 0;
+  // 1999 UI::SetCombatMode @ 0x4d04c0 (CompatibleCombatMode inlined): only
+  // melee / missile are refused, and only while a Held item (0x1000000) is
+  // wielded; magic needs no caster.
+  if (check === 'ac1999') return !((mode === CombatMode.Melee || mode === CombatMode.Missile) && (m & 0x1000000) !== 0);
   if (mode === CombatMode.Missile) return (m & 0x400000) !== 0;
   if (mode === CombatMode.Magic) return (m & 0x1000000) !== 0;
   if (mode === CombatMode.Melee) return (m & 0x100000) !== 0 || (m & 0x2000000) !== 0 || (m & 0x3500000) === 0;
@@ -146,10 +153,31 @@ export function combatModeName(mode: CombatMode): string {
  * with none the refusal is silent. Null when the mode is compatible.
  */
 export function incompatibleCombatModeRefusal(
-  mode: CombatMode, inventoryMask: number, readyWeaponName: string | null,
+  mode: CombatMode, inventoryMask: number, readyWeaponName: string | null, check: CombatModeCheck = 'eor',
 ): { text: string | null } | null {
-  if (compatibleCombatMode(mode, inventoryMask)) return null;
-  return { text: readyWeaponName === null ? null : `You can't enter ${combatModeName(mode)} mode while wielding the ${readyWeaponName}` };
+  if (compatibleCombatMode(mode, inventoryMask, check)) return null;
+  if (readyWeaponName === null) return { text: null };
+  // The 1999 line names no mode: "You can't enter combat mode while wielding the <item>".
+  return { text: `You can't enter ${check === 'ac1999' ? 'combat' : combatModeName(mode)} mode while wielding the ${readyWeaponName}` };
+}
+
+/**
+ * Why a requested combat-mode change would be refused, in words for the
+ * automation (the client itself is silent when no weapon is ready). Null when
+ * CompatibleCombatMode lets it in. End of retail: magic needs a wand, staff or
+ * orb in the Held slot; a player who asks without one gets nothing from the
+ * client, and ACE (Player_Combat.cs HandleActionChangeCombatMode_Inner,
+ * caster == null) answers a forced request with NonCombat.
+ */
+export function combatModeRefusalReason(
+  mode: CombatMode, inventoryMask: number, readyWeaponName: string | null, check: CombatModeCheck = 'eor',
+): string | null {
+  const r = incompatibleCombatModeRefusal(mode, inventoryMask, readyWeaponName, check);
+  if (!r) return null;
+  if (r.text) return r.text;
+  if (mode === CombatMode.Magic) return "magic mode needs a wielded wand, staff or orb, and none is wielded (the client won't enter spellcasting mode without one): wield one first";
+  if (mode === CombatMode.Missile) return 'missile mode needs a wielded bow, crossbow, atlatl or thrown weapon, and none is wielded';
+  return `you can't enter ${combatModeName(mode)} mode with what you wield`;
 }
 
 /** The worn slots whose object is the ready weapon: TwoHanded, MeleeWeapon, MissileWeapon, Held. */

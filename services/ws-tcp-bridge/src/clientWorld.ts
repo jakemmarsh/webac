@@ -15,6 +15,7 @@
  */
 import { TRACE_PATTERN, lateField } from './clientPreworld.js';
 import { eidField } from './eventIds.js';
+import { netDiagField, type NetDiag } from './netDiag.js';
 
 export const WORLD_OUTCOMES = ['first_minute', 'world_left'] as const;
 export type WorldOutcome = typeof WORLD_OUTCOMES[number];
@@ -56,6 +57,8 @@ export interface ClientWorldLeftEvent extends WorldIds {
   hiddenMs?: number | null;
   freezes?: number | null;
   frozenMs?: number | null;
+  /** OBS.dm-stall-diagnostics — the connection's state when a silent / closed session ended (netDiag.ts). */
+  net?: NetDiag;
 }
 
 /** The first minute after enter_ok (renderer WorldReporter FirstMinuteEvent). */
@@ -92,6 +95,8 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   errors: number | null;
   endCause?: typeof WORLD_END_CAUSES[number] | null;
   closeCode?: number | null;
+  /** OBS.dm-stall-diagnostics — the connection's state when a silent / closed session ended (netDiag.ts). */
+  net?: NetDiag;
 }
 
 export type ClientWorldEvent = ClientFirstMinuteEvent | ClientWorldLeftEvent;
@@ -129,10 +134,11 @@ function closeCode(v: unknown): number | null {
   return n !== null && n >= 1000 ? n : null;
 }
 /** The drop fields, present only when the page sent them (older pages do not). */
-function dropFields(b: Record<string, unknown>): { endCause?: typeof WORLD_END_CAUSES[number] | null; closeCode?: number | null } {
+function dropFields(b: Record<string, unknown>): { endCause?: typeof WORLD_END_CAUSES[number] | null; closeCode?: number | null; net?: NetDiag } {
   return {
     ...('endCause' in b ? { endCause: pick(b.endCause, WORLD_END_CAUSES) } : {}),
     ...('closeCode' in b ? { closeCode: closeCode(b.closeCode) } : {}),
+    ...netDiagField(b.net),
   };
 }
 

@@ -17,6 +17,7 @@
  */
 
 import { eidField } from './eventIds.js';
+import { netDiagField, type NetDiag } from './netDiag.js';
 
 export const PREWORLD_OUTCOMES = [
   'login_refused', 'connect_failed', 'char_list', 'char_error', 'chargen_ok', 'chargen_refused',
@@ -72,6 +73,8 @@ export interface ClientPreworldEvent {
   lateMs?: number;
   /** The page's id for this event, the same on every resend (eventIds.ts): the bridge logs each once. */
   eid?: string;
+  /** OBS.dm-stall-diagnostics — 'dropped' only: the connection's state when a silent / closed session ended (netDiag.ts). */
+  net?: NetDiag;
 }
 
 export const CLIENT_PREWORLD_MAX_BODY = 2 * 1024;
@@ -143,5 +146,6 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     caps: pickList(b.caps, CAPABILITY_ISSUES),
     ...lateField(b.lateMs, MAX_MS),
     ...eidField(b.eid),
+    ...(outcome === 'dropped' ? netDiagField(b.net) : {}),
   };
 }

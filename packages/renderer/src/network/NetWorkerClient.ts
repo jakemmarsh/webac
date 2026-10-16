@@ -8,7 +8,7 @@
 import {
   probeBridgeHealth, EOR_LOGIN_PROFILE,
   type BridgeHealth, type ConnectionEvent, type ConnectionListener, type GameMessageGroup, type LoginProfile,
-  type NetCommand, type NetConnection, type NetReply, type NetSnapshot,
+  type NetCommand, type NetConnection, type NetDiagnostics, type NetReply, type NetSnapshot,
 } from '@ac/network';
 
 /** The page's end of the worker (a Worker, or a MessagePort in tests). */
@@ -24,6 +24,14 @@ export interface NetWorkerEndpoint {
  * not that the server went quiet.
  */
 export const SNAPSHOT_EXTRAPOLATION_MAX_MS = 2000;
+
+/** Before the worker's first snapshot. */
+const EMPTY_DIAG: NetDiagnostics = {
+  rxAgoMs: null, rxMsgAgoMs: null, rxSeqAgoMs: null, rxFlags: null, rxOpcode: null, rxEvent: null,
+  rxAck: 0, rxHigh: 0, rxHeld: 0, rxMissing: 0, fragHeld: 0, nakAgoMs: null, naks: 0,
+  txSeq: 0, txUnacked: 0, txAckedBySrv: 0, srvNakAgoMs: null, srvNaks: 0, resent: 0, unsatisfied: 0, srvRejects: 0,
+  txAgoMs: null, txSeqAgoMs: null, wsBuffered: 0, tickAgoMs: null, tickGapMaxMs: 0, rxPkts: 0, txPkts: 0, rxBytes: 0,
+};
 
 export class NetWorkerClient implements NetConnection {
   private listeners: ConnectionListener[] = [];
@@ -116,6 +124,17 @@ export class NetWorkerClient implements NetConnection {
   }
 
   getPacketLossPercentage(): number { return this.snap.loss; }
+
+  /**
+   * OBS.dm-stall-diagnostics — the worker's diagnostics as last sampled, with
+   * how old that sample is by the page's clock (snapAgeMs): a large age means
+   * the worker's snapshots stopped reaching the page (a stalled worker or
+   * page), not that the values went stale on their own.
+   */
+  getDiagnostics(now: number = Date.now()): NetDiagnostics {
+    const d = this.snap.diag ?? EMPTY_DIAG;
+    return { ...d, snapAgeMs: this.snap.at > 0 ? Math.max(0, Math.round(now - this.snap.at)) : null };
+  }
 
   on(listener: ConnectionListener): void { this.listeners.push(listener); }
   off(listener: ConnectionListener): void { this.listeners = this.listeners.filter(l => l !== listener); }

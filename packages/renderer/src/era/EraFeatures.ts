@@ -138,10 +138,20 @@ export interface EraClientRules {
    * nothing under server control.
    */
   attackStopsAlways: boolean;
+  /**
+   * Which CompatibleCombatMode the client applies to a requested combat-mode
+   * change (controllers/CombatModeChange.ts compatibleCombatMode). End of
+   * retail's ClientCombatSystem::CompatibleCombatMode @ 0056a580 lets magic
+   * mode in only with a caster in the Held slot (0x1000000), so a bare-handed
+   * player can't enter it; the 1999 client.exe's UI::SetCombatMode @ 0x4d04c0
+   * (inlined check) refuses only melee / missile while a Held item is wielded,
+   * so a 1999 mage enters magic mode bare-handed.
+   */
+  combatModeCheck: 'eor' | 'ac1999';
 }
 
-const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false });
-const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true });
+const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const });
+const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const });
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {

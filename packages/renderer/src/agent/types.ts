@@ -73,7 +73,7 @@ export interface AgentObject {
    * With otherFloor: whether a walk gets there by the doorways as walk_to plans it (AgentApi.floorRoute): the route's
    * length and the drops / leaps it takes, or 'none' (no doorway route from your floor). Absent: not known.
    */
-  otherFloorWay?: { len: number; drops: number; leaps: number } | 'none';
+  otherFloorWay?: { len: number; drops: number; leaps: number } | 'none' | { locked: string };
 }
 
 export interface AgentVital { cur: number; max: number }
@@ -250,6 +250,8 @@ export interface AgentObservation {
    * cover one. A player sees them at a glance; Arcanist played to level 19 with no gloves (2026-10-14).
    */
   gearEmpty?: { slots: string[]; packFits: string[] };
+  /** A mage with no caster wielded where the era needs one for magic mode (gear.ts casterGap). */
+  casterGap?: string;
   /**
    * Worn items whose spells the server turned off when their mana ran out ("Your X is out of Mana."), not wielded again
    * since, with their mana when an appraisal showed it. A refill alone doesn't turn them back on (ACE: only a wield does).

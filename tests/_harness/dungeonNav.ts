@@ -39,6 +39,11 @@ export interface DungeonNavOptions {
    * the cells' statics (furniture, fences, columns) and the building shells too, not the cells alone.
    */
   statics?: boolean;
+  /**
+   * A flat landscape at this height wherever no cell or static floor is (no terrain otherwise): a town building's
+   * doorstep and the street outside it, for walks that leave by a door. Not the landblock's real terrain.
+   */
+  ground?: number;
 }
 
 /** The AC1999 world portal + cell (dat-sets/ac1999-retail), each through its 1999 overlay; null when absent. */
@@ -93,12 +98,13 @@ export async function dungeonNav(landblock: number, opts: DungeonNavOptions = {}
       col.addCell(id, cd.cellStruct, cd.position);
     }
   }
+  const groundAt = (fromY: number): number | null => (opts.ground !== undefined && fromY >= opts.ground - 0.05 ? opts.ground : null);
   const services = (): MovementServices => ({
     dungeonCollision: col, outdoorCollision: col,
     terrain: { getHeightAt: () => null, getTriangleNormalAt: () => null, isWalkable: () => true },
     water: { blockWaterTypeAt: () => null }, creatureObstacles: null, defaultPlayerRadius: col.playerRadius,
     edgeSlide: true, stepDownHeight: stepDown, slide: { slidingNormal: null },
-    dungeonGroundAt: (x, z, fromY) => col.getFloorHeight(x, z, fromY, Infinity),
+    dungeonGroundAt: (x, z, fromY) => col.getFloorHeight(x, z, fromY, Infinity) ?? groundAt(fromY),
   } as MovementServices);
   // main.ts navProbe, verbatim in behaviour.
   const probe: NavProbe = (from, to) => {
@@ -118,7 +124,7 @@ export async function dungeonNav(landblock: number, opts: DungeonNavOptions = {}
   };
   const skill = opts.jumpSkill ?? 100, runRate = opts.runRate ?? 2;
   const kit: JumpKit = {
-    floor: (x, y, fromZ) => col.getFloorHeight(x, y, fromZ + 0.05, Infinity),
+    floor: (x, y, fromZ) => col.getFloorHeight(x, y, fromZ + 0.05, Infinity) ?? groundAt(fromZ + 0.05),
     airStep: (from: NavPoint, dx, dy) => {
       const r = stepPlayerMovement({ x: from.x, z: from.y, floorY: from.z, inDungeon: true, airborne: true, jumpVelocityX: dx, jumpVelocityZ: dy, slideVelocity: null }, 0, 0, 1, services());
       return { x: r.x, y: r.z };

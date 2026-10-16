@@ -147,7 +147,11 @@ async function main(): Promise<void> {
         while (Date.now() < end2 && !consoleLines.some((l) => /we are in the world|creation failed|connection failure/.test(l))) await page.waitForTimeout(1000);
         if (consoleLines.some((l) => l.includes('we are in the world'))) {
           r.outcome = 'in-world';
-          await page.waitForTimeout(25_000); // MOTD, welcome lines and any VPN / IP check
+          // MOTD, welcome lines and any VPN / IP check. PROBE_HOLD_MS holds longer (an in-world soak:
+          // 2026-10-16 Dark Majesty sessions went silent minutes in; the bridge's world_left endCause tells why).
+          await page.waitForTimeout(Math.max(25_000, Number(process.env.PROBE_HOLD_MS) || 0));
+          const lost = consoleLines.find((l) => /ServerDied|connection to the server has been lost|stands down|link dead/i.test(l));
+          if (lost) r.failure = `after entering: ${lost}`;
         } else {
           r.outcome = 'create-failed';
           r.failure = consoleLines.find((l) => /creation failed|connection failure/.test(l)) ?? 'no world entry within 90 s';
