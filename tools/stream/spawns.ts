@@ -16,7 +16,7 @@
  *
  * The SQL runs in world-query.ts (read-only); everything here is pure.
  */
-import { formatPlace, nearestTownOf, placeMapCoords, type ShopDatInfo, type ShopPlace } from './shops.ts';
+import { aceCellOf, formatPlace, nearestTownOf, placeMapCoords, type ShopDatInfo, type ShopPlace } from './shops.ts';
 import type { MapCoords } from '../../packages/renderer/src/ui/MapMarkers.ts';
 import type { LorePick } from './lore.ts';
 
@@ -78,13 +78,16 @@ export function parseGenProfiles(tsv: string): GenProfile[] {
     if (!Number.isFinite(gen) || !Number.isFinite(wcid)) continue;
     const prof: GenProfile = { gen, id: Number(id), wcid, probability: Number(p), maxCreate: num(max) ?? 1 };
     const c = num(cell);
-    if (c) { prof.cell = c >>> 0; prof.x = num(x) ?? 0; prof.y = num(y) ?? 0; }
+    if (c) { prof.x = num(x) ?? 0; prof.y = num(y) ?? 0; prof.cell = aceCellOf(c, prof.x, prof.y); }
     out.push(prof);
   }
   return out;
 }
 
-/** Rows of spawnPlaceSql → placements, encounter spots and names. An encounter's spot is ACE's: (cell_X × 24, cell_Y × 24). */
+/**
+ * Rows of spawnPlaceSql → placements, encounter spots and names. An encounter's spot is ACE's: (cell_X × 24, cell_Y × 24).
+ * A cell the DB stores as its landblock alone (XXYY0000) is the outdoor cell ACE puts it in (aceCellOf).
+ */
 export function parseSpawnPlaces(tsv: string): SpawnPlaces {
   const out: SpawnPlaces = { placed: new Map(), encounters: new Map(), names: new Map() };
   const add = (m: Map<number, ShopPlace[]>, w: number, p: ShopPlace) => {
@@ -98,10 +101,12 @@ export function parseSpawnPlaces(tsv: string): SpawnPlaces {
     const wcid = Number(w);
     if (!Number.isFinite(wcid)) continue;
     if (tag === 'n') out.names.set(wcid, a.trim());
-    else if (tag === 'p') add(out.placed, wcid, { cell: Number(a) >>> 0, x: Number(b), y: Number(c), viaGenerator: false });
+    else if (tag === 'p') add(out.placed, wcid, { cell: aceCellOf(Number(a), Number(b), Number(c)), x: Number(b), y: Number(c), viaGenerator: false });
     else if (tag === 'e') {
+      // Landblock.SpawnEncounters: cell XXYY0001 at the clamped spot, then adjust_to_outside() takes the cell under it.
       const clamp = (v: number) => Math.min(191.5, Math.max(0.5, v * 24));
-      add(out.encounters, wcid, { cell: ((Number(a) << 16) | 1) >>> 0, x: clamp(Number(b)), y: clamp(Number(c)), viaGenerator: true });
+      const x = clamp(Number(b)), y = clamp(Number(c));
+      add(out.encounters, wcid, { cell: aceCellOf((Number(a) << 16) >>> 0, x, y), x, y, viaGenerator: true });
     }
   }
   return out;

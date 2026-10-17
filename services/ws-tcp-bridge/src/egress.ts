@@ -741,6 +741,21 @@ export interface EgressManagerOptions {
  */
 export const NO_REPLY_MOVE_MS = 5_000;
 
+/**
+ * An egress session with no server byte yet resends its last upstream
+ * datagram this long after its first (server.ts): the path to the server can
+ * open up to ~0.3 s after the readiness check passes, and the browser's own
+ * login resend comes only every 6 s (as the 1999 client's did). A repeated
+ * login from the same endpoint is ignored by the servers.
+ */
+export const EARLY_RESEND_MS: readonly number[] = [1_000, 3_000];
+
+/** moveForNoReply moved the session. */
+export interface NoReplyMoved { from: string; to: string; publicIp: string | null }
+/** moveForNoReply left the session where it was: why, and a fresh address it attached on the way (or null). */
+export interface NoReplyStay { stay: string; attached: string | null }
+export type NoReplyMove = NoReplyMoved | NoReplyStay;
+
 /** shutdown waits this long for stop() at most (AWS calls are bounded too, but a release per slot adds up). */
 export const STOP_DEADLINE_MS = 20_000;
 
@@ -955,13 +970,17 @@ export class EgressManager {
    * marker, while the old address's marker stays (the server may have made
    * the account and lost only its replies). `stillSilent` is asked once the
    * new address is ready: a reply meanwhile (AC1999 answers only the address
-   * that logged in) undoes the move. Returns the move, or null when the
-   * session stays where it is. Never throws.
+   * that logged in) undoes the move, and is checked under the plan lock too,
+   * so no AWS call starts once a reply is in. Returns the move, or why the
+   * session stays where it is (`answered`, `no_slot`, `aws:<code>`, …;
+   * `attached`: a fresh address made for an abandoned move, left to its
+   * normal idle grace). The caller logs either. Never throws.
    */
-  async moveForNoReply(lease: EgressLease, stillSilent: () => boolean): Promise<{ from: string; to: string; publicIp: string | null } | null> {
+  async moveForNoReply(lease: EgressLease, stillSilent: () => boolean): Promise<NoReplyMove> {
     const state = this.leases.get(lease.sessionId);
     const world = this.worlds.get(lease.world);
-    if (!state || !world || state.released || this.stopped || this.failed) return null;
+    const stay = (reason: string, attached: string | null = null): NoReplyStay => ({ stay: reason, attached });
+    if (!state || !world || state.released || this.stopped || this.failed) return stay('released');
     const from = state.record.slot;
     const fromIp = state.publicIp;
     const pending = [...state.loginAddr.keys()];
@@ -969,8 +988,9 @@ export class EgressManager {
     const isStatic = this.opts.provider.name === 'static';
     const back = () => this.withLock('alloc.lock', ALLOC_LOCK, async () => { if (!state.released) this.moveSession(state, from, fromIp); }).catch(() => {});
     try {
-      const plan = await this.withLock('alloc.lock', ALLOC_LOCK, async (): Promise<EgressSlot | { allocate: EgressSlot } | null> => {
-        if (state.released) return null;
+      const plan = await this.withLock('alloc.lock', ALLOC_LOCK, async (): Promise<EgressSlot | { allocate: EgressSlot } | 'released' | 'answered' | null> => {
+        if (state.released) return 'released';
+        if (!stillSilent()) return 'answered';
         const onWorld = this.liveSessions().filter((s) => s.world === world.key && s.sessionId !== state.record.sessionId);
         const held = this.slots
           .filter((sl) => sl.address !== from)
@@ -990,19 +1010,21 @@ export class EgressManager {
         this.moveSession(state, free.address, null);
         return { allocate: free };
       });
-      if (!plan) return null;
+      if (!plan) return stay('no_slot');
+      if (typeof plan === 'string') return stay(plan);
+      let attached: string | null = null;
       if ('allocate' in plan) {
         try {
           const h = await this.track(this.ensureAddress(plan.allocate, room));
           state.publicIp = h?.publicIp ?? null;
+          attached = state.publicIp;
         } catch (err) {
-          this.log('warn', 'egress_no_reply_stay', { egressSession: state.record.sessionId, slot: from, reason: `aws:${awsErrorCode(err)}` });
           await back();
-          return null;
+          return stay(`aws:${awsErrorCode(err)}`);
         }
       }
-      if (state.released) return null;
-      if (!stillSilent()) { await back(); return null; }
+      if (state.released) return stay('released', attached);
+      if (!stillSilent()) { await back(); return stay('answered', attached); }
       const to = state.record.slot;
       await this.withLock('alloc.lock', ALLOC_LOCK, async () => {
         if (world.accountsPerAddress === null) return;
@@ -1016,8 +1038,7 @@ export class EgressManager {
       if (!isStatic && !this.liveSessions().some((s) => s.slot === from)) void this.releaseIfIdle(from, 0, 'no_reply');
       return { from, to, publicIp: state.publicIp };
     } catch (err) {
-      this.log('warn', 'egress_no_reply_stay', { egressSession: state.record.sessionId, slot: from, reason: (err as Error).message });
-      return null;
+      return stay((err as Error).message);
     }
   }
 

@@ -37,7 +37,7 @@
         "What you want out of the game: every school of magic eventually, and somewhere in Dereth nobody would think to look. You lead and propose the first plan."
       ],
       "startNotes": "You lead the first plan: open with a /tell (or /f) to Claude Bulwark, re-form the fellowship if it's gone, buff, and pitch two or three ideas for where to go.",
-      "goal": "Item Enchantment is your priority. Training it costs 8 skill credits; you have 6, and the next credits come at levels 23 and 26 (your readiness lines show the live count). So: efficient XP to level 26, and train Item Enchantment (`train_skill`) the moment the credits arrive. No Temple of Forgetfulness.",
+      "goal": "Keep Impenetrability and the Banes up on your armor and Bulwark's (Item Enchantment, trained). Your readiness lines say which staple spells each school lacks and which you know only below the level you can learn; higher scrolls come from the Scriveners of Item Magic (Holtburg has two), not healers or Archmages. No Temple of Forgetfulness.",
       "attach": null,
       "era": null,
       "headless": false,
@@ -53,7 +53,7 @@
         "What you want out of the game: a really good shield and a reputation. Arcanist leads the first plan; you happily argue about it."
       ],
       "startNotes": "Accept fellowship requests first (`fellowship action=requests name=accept`), then find Claude Arcanist.",
-      "goal": "Help Claude Arcanist level efficiently: he needs level 26 for the skill credits to train Item Enchantment (8 credits).",
+      "goal": "Help Claude Arcanist level efficiently. He buffs your armor with Impenetrability and the Banes (Item Enchantment): ask for them before a hard fight.",
       "attach": null,
       "era": null,
       "headless": false,

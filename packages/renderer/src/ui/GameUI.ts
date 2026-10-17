@@ -1986,7 +1986,8 @@ export class GameUI {
      * UIElement_ItemList::AcceptDragObject @ 004e4250 → AttemptMerge /
      * AttemptToPlaceInContainer.
      */
-    onItemListDrop?: (source: WorldDropSource, target: ItemListDropTarget) => void;
+    /** False when nothing was sent (refused at the client); true or nothing when it went out. */
+    onItemListDrop?: (source: WorldDropSource, target: ItemListDropTarget) => void | boolean;
     /**
      * GAP.world-drag-drop — a drag released over the 3D view (sr_Drop →
      * ItemHolder::AttemptPlaceIn3D(dragged, found under the point, 1)): an
@@ -13542,8 +13543,7 @@ export class GameUI {
   /** AGENT.vtank-window — an agent's move or merge, as a drag released on the inventory (the UI's own path). */
   agentItemListDrop(source: WorldDropSource, target: ItemListDropTarget): boolean {
     if (!this.dragCallbacks.onItemListDrop) return false;
-    this.dragCallbacks.onItemListDrop(source, target);
-    return true;
+    return this.dragCallbacks.onItemListDrop(source, target) !== false;
   }
 
   setDragCallbacks(callbacks: typeof GameUI.prototype.dragCallbacks): void {

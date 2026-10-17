@@ -527,6 +527,11 @@ export interface RouteOptions {
    * 42 m shaft; the far half's ramps are the way down to its lower floors (2026-10-16). Unset: no leaps.
    */
   jumpAcross?: number;
+  /**
+   * Filled (when given) with every cell a body gets to from the start by the route's own rules when no route reaches the
+   * goal: the part of the dungeon you can walk (routeCutOff). Air cells are left out.
+   */
+  reached?: Set<number>;
 }
 
 /** A leap's two doorways may differ this much in sill height (m): across, not up onto a ledge. */
@@ -633,7 +638,13 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
       }
     }
   }
-  if (!best.has(GOAL)) return null;
+  if (!best.has(GOAL)) {
+    if (opts.reached) {
+      opts.reached.add(fromCell);
+      for (const k of best.keys()) for (const c of cellsOf.get(k) ?? []) if (!g.airCells?.has(c)) opts.reached.add(c);
+    }
+    return null;
+  }
   const nodes: string[] = [];
   for (let n = GOAL; n !== START; n = prev.get(n)!) nodes.unshift(n);
   // A wall doorway into a floorless cell, with the route's next step a fall through that cell's floor
@@ -794,6 +805,64 @@ export function routeBarrier(g: CellGraph, fromCell: number, toCell: number, opt
   if (!out.length) return null;
   const rank = (q: RouteGap): number => (q.acrossToGoal || q.downToGoal ? 0 : 1);
   return out.sort((p, q) => rank(p) - rank(q) || (p.width ?? Infinity) - (q.width ?? Infinity));
+}
+
+/**
+ * Why no doorway route joins two rooms of one landblock when no floorless gap beside you leads there either
+ * (routeBarrier): the part of the dungeon you can walk is joined to the goal's only by openings overhead (a pit you are
+ * at the bottom of, a walkway over you), or not at all. Mountain Keep (landblock 0x01D2): the −6 halls under the 0 m
+ * walkways (0x01D201D3 / 01D4 under 0x01D201D0, 0x01C0, 0x0192 …) are reached from the Holtburg portal's side only by a
+ * 7.1 m leap and a 6 m drop off the walkway, and from the way in (0x01D202F7) by drops; nothing climbs back, so every
+ * walk from there to the Holtburg portal, 0x01F6, 0x010C or the Surface portal by the way in ended "walls all round"
+ * after minutes of searching (Claude Arcanist, 2026-10-17 04:24–04:45Z). Their way out is up: the doorways climb to
+ * z 36 (0x01D203A5, where the world's other Surface portal stands).
+ * Null when a route exists, the graph is incomplete, or either end isn't one of the graph's rooms.
+ */
+export interface RouteCutOff {
+  /** From the goal's side a walk does get here: how (its falls through floor openings, its leaps). Null: no way either way. */
+  back: { drops: Array<{ depth: number; at: Vec3 }>; leaps: number[] } | null;
+  /**
+   * The lowest opening overhead that leads on out of the rooms you can walk (into a cell you can't reach, not a dead-end
+   * shaft): how far above the floor under it (m). Null: none.
+   */
+  climb: { cell: number; above: number; height: number; at: Vec3 } | null;
+  /** The highest floor among the rooms you can walk to from here, and its cell. */
+  top: { cell: number; z: number };
+  /** The rooms you can walk to from here (air cells left out). */
+  reach: Set<number>;
+}
+
+export function routeCutOff(g: CellGraph, fromCell: number, from: Vec3, toCell: number, to: Vec3, opts: { maxDrop?: number; jumpAcross?: number } = {}): RouteCutOff | null {
+  fromCell >>>= 0; toCell >>>= 0;
+  if (g.complete === false || fromCell === toCell || !g.doors.has(fromCell) || !g.doors.has(toCell)) return null;
+  const maxDrop = opts.maxDrop ?? 12;
+  const reach = new Set<number>();
+  const ro: RouteOptions = { maxDrop, bodyOnly: true, ...(opts.jumpAcross ? { jumpAcross: opts.jumpAcross } : {}), reached: reach };
+  if (findRoute(g, fromCell, from, toCell, to, [], ro)) return null;
+  if (reach.has(toCell)) return null;
+  let climb: RouteCutOff['climb'] = null;
+  let top = { cell: fromCell, z: from.z };
+  for (const c of reach) {
+    const fl = g.floors?.get(c) ?? [];
+    for (const f of fl) for (const q of f.pts) if (q.z > top.z) top = { cell: c, z: q.z };
+    for (const d of g.doors.get(c) ?? []) {
+      // Up through an opening no stair climbs to, into a cell you can't walk to.
+      if (d.b === 0xFFFF || d.below !== c || d.climb || reach.has(d.b >>> 0)) continue;
+      const above = d.b >>> 0;
+      // A dead end overhead (a shaft whose only opening is this one) leads nowhere.
+      if (g.airCells?.has(above) && (g.doors.get(above) ?? []).filter((e) => e.b !== 0xFFFF && (e.b >>> 0) !== c && !reach.has(e.b >>> 0)).length === 0) continue;
+      const under = floorUnder(fl, d.at.x, d.at.y, d.at.z);
+      const floorZ = under ?? fl.reduce((t, f) => Math.max(t, ...f.pts.map((q) => q.z)), -Infinity);
+      if (!Number.isFinite(floorZ)) continue;
+      const height = d.at.z - floorZ;
+      if (!climb || height < climb.height) climb = { cell: c, above, height, at: d.at };
+    }
+  }
+  const back = findRouteViaOutside(g, toCell, to, fromCell, from, { maxDrop: Infinity, ...(opts.jumpAcross ? { jumpAcross: opts.jumpAcross } : {}) });
+  return {
+    back: back ? { drops: back.filter((p) => p.drop !== undefined).map((p) => ({ depth: p.drop!, at: { x: p.x, y: p.y, z: p.z } })), leaps: back.filter((p) => p.leap !== undefined).map((p) => p.leap!) } : null,
+    climb, top, reach,
+  };
 }
 
 const isInterior = (cell: number): boolean => ((cell >>> 0) & 0xffff) >= 0x100;

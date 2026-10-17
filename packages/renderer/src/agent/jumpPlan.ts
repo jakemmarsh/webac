@@ -229,7 +229,8 @@ const POWER_SLOP = 0.05;
  * running ones, each from the gentlest charge up. Kept only when the landing deals at most
  * `maxDamage` and a slightly shorter or longer charge lands on the same floor. At most `max`.
  */
-export function jumpOptions(kit: JumpKit, from: NavPoint, dir: { x: number; y: number }, opts: { maxDamage: number; max?: number; minDistance?: number }): JumpSpec[] {
+/** `accept`: a landing the caller may take (navPlanner: none in a portal's disk); a refused one is no option, and the search goes on. */
+export function jumpOptions(kit: JumpKit, from: NavPoint, dir: { x: number; y: number }, opts: { maxDamage: number; max?: number; minDistance?: number; accept?: (to: NavPoint) => boolean }): JumpSpec[] {
   const out: JumpSpec[] = [];
   const max = opts.max ?? 3;
   const minDistance = opts.minDistance ?? 0.6;
@@ -243,6 +244,7 @@ export function jumpOptions(kit: JumpKit, from: NavPoint, dir: { x: number; y: n
     for (const power of POWERS) {
       const to = fly(power, walk);
       if (!to || Math.hypot(to.x - from.x, to.y - from.y) < minDistance) continue;
+      if (opts.accept && !opts.accept(to)) continue;
       const damage = expectedFallDamage(to.vz, kit.fall);
       if (damage > opts.maxDamage) continue;
       if (!stableLanding(kit, to)) continue;

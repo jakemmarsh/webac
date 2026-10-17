@@ -157,10 +157,10 @@ describe('3. pack slots in observe and inventory, and a loot that runs out of th
     host.packs = () => [{ slot: 0, guid: host.me.guid, capacity: 102, count: 102 }, { slot: 1, guid: 0x8000338e, capacity: 24, count: 20 }];
     const slots = api.packSlots()!;
     expect(slots).toEqual({ packs: [{ name: 'main pack', used: 102, capacity: 102, main: true }, { name: 'Sack', used: 20, capacity: 24, main: false }], free: 4 });
-    expect(packSlotsText(slots)).toBe('pack slots: main pack 102/102 FULL, Sack 20/24 (4 free)  LOW: an item with no slot left is refused ("… is completely full!") whatever your burden; drop or sell some first (ac_inventory filter=junk lists what no vendor buys, filter=sell what they do)');
+    expect(packSlotsText(slots)).toBe('pack slots: main pack 102/102 FULL, Sack 20/24 (4 free)  main pack FULL: ac_move_item moves items into your Sack (filter=junk, filter=salvage or item=…)  LOW: an item with no slot left is refused ("… is completely full!") whatever your burden; drop or sell some first (ac_inventory filter=junk lists what no vendor buys, filter=sell what they do)');
     expect(packSlotsText({ packs: [{ name: 'main pack', used: 80, capacity: 102, main: true }], free: 22 })).toBe('pack slots: main pack 80/102 (22 free)');
     run(api, host, 200, { physics: false });
-    expect(formatObservation(api.snapshot())).toContain('\npack slots: main pack 102/102 FULL, Sack 20/24 (4 free)  LOW');
+    expect(formatObservation(api.snapshot())).toContain('\npack slots: main pack 102/102 FULL, Sack 20/24 (4 free)  main pack FULL: ac_move_item');
   });
 
   it('a host without side-pack counts still says the main pack\'s free slots', () => {

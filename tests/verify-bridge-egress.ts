@@ -26,7 +26,8 @@ import {
 import {
   EgressManager, StaticEgressProvider, AwsEgressProvider, discoverImdsSlots, imdsClient, startEgress, sdkEc2Api,
   readLoginAccount, readLoginAccount1999, readLoginAccountEor, readLoginRefusal, SESSION_STALE_MS, EGRESS_TAG,
-  realIpKey, ALLOC_LOCK, RECONCILE_LOCK, PENDING_MARKER_TTL_MS, ATTACH_TRIES, READY_DEADLINE_MS, READY_POLL_MS, type Ec2Api, type TaggedAddress, type EgressLease, type EgressProvider,
+  realIpKey, ALLOC_LOCK, RECONCILE_LOCK, PENDING_MARKER_TTL_MS, ATTACH_TRIES, READY_DEADLINE_MS, READY_POLL_MS, EARLY_RESEND_MS, type Ec2Api, type TaggedAddress, type EgressLease, type EgressProvider,
+  type NoReplyMove,
 } from '../services/ws-tcp-bridge/src/egress';
 import {
   createBridgeServer, CLOSE_IP_CAP, CLOSE_WORLD_FULL, CLOSE_NEW_ACCOUNT_CAP, CLOSE_NEW_ACCOUNT_UNAVAILABLE, type BridgeServer,
@@ -761,13 +762,21 @@ describe('directory rows of an egress world', () => {
 
 // ─── The real bridge, end to end ──────────────────────
 
-interface FakeServer { port: number; sock: dgram.Socket; msgs: { msg: Buffer; rinfo: dgram.RemoteInfo }[]; close(): void }
+/** `at` is the Date.now() a datagram arrived. */
+interface FakeServer { port: number; sock: dgram.Socket; msgs: { msg: Buffer; rinfo: dgram.RemoteInfo; at: number }[]; close(): void }
+
+/**
+ * Node fires a setTimeout up to 1 ms early by Date.now(): libuv's loop clock is whole milliseconds of
+ * a monotonic clock whose phase differs from the wall clock's. A bridge timer of N ms can log N - 1
+ * (2026-10-17: "expected 149 to be greater than or equal to 150"), so lower bounds allow that 1 ms.
+ */
+const TIMER_SLOP_MS = 1;
 
 async function fakeServer(): Promise<FakeServer> {
   const sock = dgram.createSocket('udp4');
   await new Promise<void>((r) => sock.bind(0, '127.0.0.1', () => r()));
   const f: FakeServer = { port: sock.address().port, sock, msgs: [], close: () => { try { sock.close(); } catch { /* */ } } };
-  sock.on('message', (msg, rinfo) => f.msgs.push({ msg, rinfo }));
+  sock.on('message', (msg, rinfo) => f.msgs.push({ msg, rinfo, at: Date.now() }));
   return f;
 }
 
@@ -1969,7 +1978,9 @@ describe('a session the server never answers moves once to another address (move
   it('a reply while the new address was being made undoes the move', async () => {
     const { m, addresses } = await probedManager(tempDir(), 'ac1999:2', 0, ['10.0.1.11', '10.0.1.12']);
     const a = await lease(m, 'ac1999', '198.51.100.1');
-    expect(await m.moveForNoReply(a, () => false)).toBeNull();
+    let asked = 0;
+    // Silent when the plan is made, answered once the new address is ready.
+    expect(await m.moveForNoReply(a, () => asked++ === 0)).toEqual({ stay: 'answered', attached: '54.0.0.2' });
     expect(a.localAddress).toBe('10.0.1.11');
     expect(a.publicIp).toBe('54.0.0.1');
     expect(m.liveSessions().map((s) => s.slot)).toEqual(['10.0.1.11']);
@@ -1977,16 +1988,27 @@ describe('a session the server never answers moves once to another address (move
     await m.stop();
   });
 
+  it('a reply before the plan is made: no slot is chosen and no AWS call starts', async () => {
+    const { m, addresses, probes } = await probedManager(tempDir(), 'ac1999:2', 0, ['10.0.1.11', '10.0.1.12']);
+    const a = await lease(m, 'ac1999', '198.51.100.1');
+    const before = probes.length;
+    expect(await m.moveForNoReply(a, () => false)).toEqual({ stay: 'answered', attached: null });
+    expect(a.localAddress).toBe('10.0.1.11');
+    expect(addresses.size).toBe(1); // nothing allocated for 10.0.1.12
+    expect(probes.length).toBe(before);
+    await m.stop();
+  });
+
   it('stays when no other address can take it: a failed allocation, or every slot full on the world', async () => {
     const { m, fail, addresses } = await probedManager(tempDir(), 'ac1999:1', 0, ['10.0.1.11', '10.0.1.12']);
     const a = await lease(m, 'ac1999', '198.51.100.1');
     fail.allocate = Object.assign(new Error('quota'), { name: 'AddressLimitExceeded' });
-    expect(await m.moveForNoReply(a, () => true)).toBeNull();
+    expect(await m.moveForNoReply(a, () => true)).toEqual({ stay: 'aws:AddressLimitExceeded', attached: null });
     expect(a.localAddress).toBe('10.0.1.11');
     expect(a.publicIp).toBe('54.0.0.1');
     delete fail.allocate;
     await lease(m, 'ac1999', '198.51.100.2'); // takes 10.0.1.12: the world's 1 per address
-    expect(await m.moveForNoReply(a, () => true)).toBeNull();
+    expect(await m.moveForNoReply(a, () => true)).toEqual({ stay: 'no_slot', attached: null });
     expect(a.localAddress).toBe('10.0.1.11');
     expect(addresses.size).toBe(2);
     await m.stop();
@@ -2004,7 +2026,7 @@ describe('a session the server never answers moves once to another address (move
     spend(dir, 'w', '10.9.0.4', 1); // free, but no creation room
     expect(b.localAddress).toBe('10.9.0.2');
     expect(c.localAddress).toBe('10.9.0.3');
-    expect(await m.moveForNoReply(a, () => true)).toBeNull();
+    expect(await m.moveForNoReply(a, () => true)).toEqual({ stay: 'no_slot', attached: null });
     expect(a.localAddress).toBe('10.9.0.1');
     c.release();
     expect(await m.moveForNoReply(a, () => true)).toMatchObject({ from: '10.9.0.1', to: '10.9.0.3' });
@@ -2020,10 +2042,12 @@ describe('a session the server never answers moves once to another address (move
 });
 
 describe('bridge: the no-reply move (one slot on 127.0.0.1; the move itself stubbed)', () => {
-  async function start(manager: EgressManager, cap = capture()) {
+  // The tests that answer before the window use a longer one, so a slow event loop can't let the
+  // window pass before the reply lands.
+  async function start(manager: EgressManager, cap = capture(), noReplyMs = 150) {
     const server = await fakeServer();
     const config = bridgeConfig({}, server.port);
-    const bridge = createBridgeServer(config, { log: cap.log, egress: manager, egressNoReplyMs: 150 });
+    const bridge = createBridgeServer(config, { log: cap.log, egress: manager, egressNoReplyMs: noReplyMs });
     return { server, bridge, url: `ws://127.0.0.1:${await bridge.listen()}/` };
   }
   const managerOn = async () => {
@@ -2036,24 +2060,41 @@ describe('bridge: the no-reply move (one slot on 127.0.0.1; the move itself stub
 
   it('silence after the first datagram: the socket is rebound at the new address and the last datagram resent; one move only', async () => {
     const m = await managerOn();
-    const move = vi.spyOn(m, 'moveForNoReply').mockResolvedValue({ from: '127.0.0.1', to: '127.0.0.1', publicIp: null });
+    // The move finishes only once both datagrams have reached the server, so a slow loop can't put
+    // datagram 2 behind it (the resend would then be datagram 1).
+    let finish!: () => void;
+    const finished = new Promise<void>((r) => { finish = r; });
+    const move = vi.spyOn(m, 'moveForNoReply').mockImplementation(async () => {
+      await finished;
+      return { from: '127.0.0.1', to: '127.0.0.1', publicIp: null };
+    });
     const cap = capture();
     const { server, bridge, url } = await start(m, cap);
     try {
       const a = await openAs(url, '203.0.113.1');
       a.ws.send(packet(1));
       a.ws.send(packet(2));
+      await until(() => server.msgs.length === 2 && move.mock.calls.length === 1);
+      const oldPort = server.msgs[0].rinfo.port;
+      expect(server.msgs.map((x) => x.rinfo.port)).toEqual([oldPort, oldPort]);
+      finish();
       await until(() => server.msgs.length === 3); // 1, 2, then 2 again from the new socket
-      expect(server.msgs[2].msg.equals(packet(2))).toBe(true);
-      expect(server.msgs[2].rinfo.port).not.toBe(server.msgs[0].rinfo.port);
+      const resent = server.msgs[2];
+      expect(resent.msg.equals(packet(2))).toBe(true);
+      expect(resent.rinfo.port).not.toBe(oldPort);
       const logged = cap.lines.find((x) => x.event === 'egress_no_reply_move')!;
       expect(logged.fields).toMatchObject({ from: '127.0.0.1', to: '127.0.0.1' });
-      expect(logged.fields.ms as number).toBeGreaterThanOrEqual(150);
-      // Still silent, and later datagrams go out the new way: never a second move.
+      expect(logged.fields.ms as number).toBeGreaterThanOrEqual(150 - TIMER_SLOP_MS);
+      expect(cap.lines.some((x) => x.event === 'egress_no_reply_stay')).toBe(false);
+      // Still silent, and later datagrams go out the new way: never a second move, and no early
+      // resend (the shipped 1 s / 3 s ones stop at the move).
       a.ws.send(packet(3));
+      await until(() => server.msgs.length === 4);
+      expect(server.msgs[3].msg.equals(packet(3))).toBe(true);
+      expect(server.msgs[3].rinfo.port).toBe(resent.rinfo.port);
       await new Promise((r) => setTimeout(r, 400));
       expect(move).toHaveBeenCalledTimes(1);
-      expect(server.msgs[3].rinfo.port).toBe(server.msgs[2].rinfo.port);
+      expect(server.msgs).toHaveLength(4);
       a.ws.close();
     } finally {
       await bridge.shutdown();
@@ -2064,14 +2105,14 @@ describe('bridge: the no-reply move (one slot on 127.0.0.1; the move itself stub
   it('never once the server has sent a byte', async () => {
     const m = await managerOn();
     const move = vi.spyOn(m, 'moveForNoReply');
-    const { server, bridge, url } = await start(m);
+    const { server, bridge, url } = await start(m, capture(), 600);
     try {
       const a = await openAs(url, '203.0.113.1');
       a.ws.send(packet(1));
       await until(() => server.msgs.length === 1);
       server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
       await new Promise((res) => a.ws.once('message', res));
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 700)); // past the 600 ms window
       expect(move).not.toHaveBeenCalled();
       a.ws.close();
     } finally {
@@ -2083,7 +2124,7 @@ describe('bridge: the no-reply move (one slot on 127.0.0.1; the move itself stub
   it('a reply that arrives during the move keeps the session where it is', async () => {
     const m = await managerOn();
     let silent: (() => boolean) | null = null;
-    let answer!: (v: null) => void;
+    let answer!: (v: NoReplyMove) => void;
     vi.spyOn(m, 'moveForNoReply').mockImplementation((_l, s) => { silent = s; return new Promise((r) => { answer = r; }); });
     const { server, bridge, url } = await start(m);
     try {
@@ -2094,7 +2135,7 @@ describe('bridge: the no-reply move (one slot on 127.0.0.1; the move itself stub
       server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
       await new Promise((res) => a.ws.once('message', res));
       expect(silent!()).toBe(false); // the manager undoes the move on this
-      answer(null);
+      answer({ stay: 'answered', attached: null });
       a.ws.send(packet(2));
       await until(() => server.msgs.length === 2);
       expect(server.msgs[1].rinfo.port).toBe(server.msgs[0].rinfo.port);
@@ -2102,6 +2143,225 @@ describe('bridge: the no-reply move (one slot on 127.0.0.1; the move itself stub
     } finally {
       await bridge.shutdown();
       server.close();
+    }
+  });
+});
+
+/**
+ * An AWS-provider manager (fake EC2 + checkip) whose first slot is 127.0.0.1, so the bridge can bind
+ * it; the second slot (10.0.1.12) is only ever attached, never bound. `gate.associate` holds the next
+ * AssociateAddress until released.
+ */
+async function gatedAwsManager(servers = 'pinned:2') {
+  const clock = fakeClock();
+  const ec2 = fakeEc2();
+  const cap = capture();
+  const fp = fakeProbe(ec2.addresses, clock, 0);
+  const gate: { associate: Promise<void> | null } = { associate: null };
+  const associate = ec2.api.associateAddress.bind(ec2.api);
+  ec2.api.associateAddress = async (args) => { if (gate.associate) await gate.associate; return associate(args); };
+  const base = fakeImds();
+  const imds = async (p: string) => (p === 'network/interfaces/macs/0a:00:00:00:00:01/local-ipv4s' ? '10.0.1.10\n127.0.0.1\n10.0.1.12' : base(p));
+  const slots = ['127.0.0.1', '10.0.1.12'];
+  const config: EgressConfig = { worlds: parseEgressServers(servers), provider: 'aws', dir: tempDir(), slots, graceMs: 120_000 };
+  const provider = new AwsEgressProvider({ ec2: ec2.api, slots, imds, probe: fp.probe, now: clock.now, sleep: async (ms) => { clock.advance(ms); } });
+  const m = new EgressManager({ config, provider, now: clock.now, timers: false, log: cap.log });
+  await m.start();
+  return { m, gate, ...ec2 };
+}
+
+describe('bridge: early resends while a fresh address has had no reply (EARLY_RESEND_MS)', () => {
+  const packet = (seq: number) => { const b = Buffer.alloc(24); b.writeUInt32LE(seq, 0); b.writeUInt32LE(0x4, 4); return b; };
+  // Scaled down tenfold from the shipped 1 s / 3 s; the no-reply move is kept out of the way.
+  // The tests that must act before an offset (a reply, a close) get wider gaps, so a slow event
+  // loop can't let the offset pass first.
+  const resendMs = [100, 300];
+  async function start(egress: EgressManager | null, cap = capture(), offsets: readonly number[] = resendMs) {
+    const server = await fakeServer();
+    const bridge = createBridgeServer(bridgeConfig({}, server.port), { log: cap.log, egress, egressNoReplyMs: 10_000, egressEarlyResendMs: offsets });
+    return { server, bridge, cap, url: `ws://127.0.0.1:${await bridge.listen()}/` };
+  }
+  const managerOn = async () => {
+    const m = new EgressManager({ config: egressConfig(tempDir(), 'pinned:2', ['127.0.0.1']), provider: new StaticEgressProvider(['127.0.0.1']), timers: false });
+    await m.start();
+    return m;
+  };
+
+  it('ships at 1 s and 3 s after the first datagram', () => {
+    expect([...EARLY_RESEND_MS]).toEqual([1_000, 3_000]);
+  });
+
+  it('with no reply, the last datagram goes again at each offset from the same socket, counted as upstream packets', async () => {
+    const { server, bridge, cap, url } = await start(await managerOn());
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      // The bridge's first-datagram time is no earlier than this, so each resend arrives at least
+      // its offset after it, however slow the loop (polling for arrivals would add its own lag).
+      const t0 = Date.now();
+      a.ws.send(packet(1));
+      a.ws.send(packet(2));
+      await until(() => server.msgs.length === 4);
+      expect(server.msgs.map((x) => x.msg.readUInt32LE(0))).toEqual([1, 2, 2, 2]);
+      expect(server.msgs.every((x) => x.rinfo.port === server.msgs[0].rinfo.port)).toBe(true);
+      expect(server.msgs[2].at - t0).toBeGreaterThanOrEqual(100 - TIMER_SLOP_MS);
+      expect(server.msgs[3].at - t0).toBeGreaterThanOrEqual(300 - TIMER_SLOP_MS);
+      expect(cap.lines.filter((x) => x.event === 'egress_early_resend').map((x) => [x.level, x.fields.n])).toEqual([['debug', 1], ['debug', 2]]);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(server.msgs).toHaveLength(4); // two only
+      a.ws.close();
+      await until(() => cap.lines.some((x) => x.event === 'session_close'));
+      expect(cap.lines.find((x) => x.event === 'session_close')!.fields.packetsUp).toBe(4);
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  });
+
+  it('stop at the first reply (between the two): no second resend; egress_first_reply names the ms and how many went', async () => {
+    const { server, bridge, cap, url } = await start(await managerOn(), capture(), [100, 900]);
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      a.ws.send(packet(1));
+      await until(() => server.msgs.length === 2); // the original and the 100 ms resend
+      await new Promise((r) => setTimeout(r, 50));
+      server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      await new Promise((res) => a.ws.once('message', res));
+      // A second server byte logs nothing more.
+      server.sock.send(packet(10), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      await new Promise((res) => a.ws.once('message', res));
+      await until(() => server.msgs[0].at + 1_000 < Date.now()); // past the 900 ms offset
+      expect(server.msgs).toHaveLength(2);
+      const first = cap.lines.filter((x) => x.event === 'egress_first_reply');
+      expect(first).toHaveLength(1);
+      expect(first[0].level).toBe('info');
+      expect(first[0].fields).toMatchObject({ earlyResends: 1, egressSlot: '127.0.0.1' });
+      expect(first[0].fields.ms as number).toBeGreaterThanOrEqual(100 - TIMER_SLOP_MS);
+      expect(first[0].fields.ms as number).toBeLessThan(900);
+      a.ws.close();
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  });
+
+  it('a reply before the first offset: none go, and egress_first_reply says 0', async () => {
+    const { server, bridge, cap, url } = await start(await managerOn(), capture(), [500, 700]);
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      a.ws.send(packet(1));
+      await until(() => server.msgs.length === 1);
+      server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      await new Promise((res) => a.ws.once('message', res));
+      await until(() => server.msgs[0].at + 800 < Date.now()); // past both offsets
+      expect(server.msgs).toHaveLength(1);
+      expect(cap.lines.find((x) => x.event === 'egress_first_reply')!.fields.earlyResends).toBe(0);
+      a.ws.close();
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  });
+
+  it('a session without an egress address never resends early (nor logs egress_first_reply)', async () => {
+    const { server, bridge, cap, url } = await start(null);
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      a.ws.send(packet(1));
+      await until(() => server.msgs.length === 1);
+      await new Promise((r) => setTimeout(r, 450));
+      expect(server.msgs).toHaveLength(1);
+      server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      await new Promise((res) => a.ws.once('message', res));
+      expect(cap.lines.some((x) => x.event === 'egress_early_resend' || x.event === 'egress_first_reply')).toBe(false);
+      a.ws.close();
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  });
+
+  it('stop when the session closes', async () => {
+    const { server, bridge, cap, url } = await start(await managerOn(), capture(), [500, 700]);
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      a.ws.send(packet(1));
+      await until(() => server.msgs.length === 1);
+      a.ws.close();
+      await until(() => cap.lines.some((x) => x.event === 'session_close'));
+      await until(() => server.msgs[0].at + 800 < Date.now()); // past both offsets
+      expect(server.msgs).toHaveLength(1);
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  });
+});
+
+describe('bridge: the no-reply move against a real manager (fake EC2: a fresh address for the second slot)', () => {
+  const packet = (seq: number) => { const b = Buffer.alloc(24); b.writeUInt32LE(seq, 0); b.writeUInt32LE(0x4, 4); return b; };
+
+  it('a reply while the new address is being attached: egress_no_reply_stay reason answered (naming it), no move, the original slot kept', async () => {
+    const { m, gate, addresses } = await gatedAwsManager();
+    let open!: () => void;
+    const server = await fakeServer();
+    const cap = capture();
+    const bridge = createBridgeServer(bridgeConfig({}, server.port), { log: cap.log, egress: m, egressNoReplyMs: 150, egressEarlyResendMs: [] });
+    const url = `ws://127.0.0.1:${await bridge.listen()}/`;
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      expect(m.liveSessions().map((s) => s.slot)).toEqual(['127.0.0.1']);
+      gate.associate = new Promise<void>((r) => { open = r; }); // the next AssociateAddress (the move's) waits
+      const allocating = vi.spyOn(m, 'moveForNoReply');
+      a.ws.send(packet(1));
+      await until(() => allocating.mock.calls.length === 1);
+      await until(() => m.liveSessions()[0]?.slot === '10.0.1.12'); // the plan is made, the attach is under way
+      server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      await new Promise((res) => a.ws.once('message', res));
+      open();
+      await until(() => cap.lines.some((x) => x.event === 'egress_no_reply_stay'));
+      const stay = cap.lines.find((x) => x.event === 'egress_no_reply_stay')!;
+      expect(stay.level).toBe('info');
+      expect(stay.fields).toMatchObject({ reason: 'answered', from: '127.0.0.1', attached: '54.0.0.2' });
+      expect(cap.lines.some((x) => x.event === 'egress_no_reply_move')).toBe(false);
+      expect(m.liveSessions().map((s) => s.slot)).toEqual(['127.0.0.1']);
+      expect([...addresses.values()].map((x) => x.publicIp).sort()).toEqual(['54.0.0.1', '54.0.0.2']); // the new one keeps its grace
+      // Later datagrams go from the same socket.
+      a.ws.send(packet(2));
+      await until(() => server.msgs.length === 2);
+      expect(server.msgs[1].rinfo.port).toBe(server.msgs[0].rinfo.port);
+      a.ws.close();
+    } finally {
+      open?.();
+      await bridge.shutdown();
+      server.close();
+      await m.stop();
+    }
+  });
+
+  it('a reply before the timer: no move attempt, nothing allocated', async () => {
+    const { m, calls } = await gatedAwsManager();
+    const server = await fakeServer();
+    const cap = capture();
+    // A window long enough that a slow event loop can't let it pass before the reply lands.
+    const bridge = createBridgeServer(bridgeConfig({}, server.port), { log: cap.log, egress: m, egressNoReplyMs: 600, egressEarlyResendMs: [] });
+    const url = `ws://127.0.0.1:${await bridge.listen()}/`;
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      const allocations = calls.filter((c) => c[0] === 'allocate').length;
+      const move = vi.spyOn(m, 'moveForNoReply');
+      a.ws.send(packet(1));
+      await until(() => server.msgs.length === 1);
+      server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      await new Promise((res) => a.ws.once('message', res));
+      await new Promise((r) => setTimeout(r, 700)); // past the 600 ms window
+      expect(move).not.toHaveBeenCalled();
+      expect(calls.filter((c) => c[0] === 'allocate').length).toBe(allocations);
+      expect(cap.lines.some((x) => x.event === 'egress_no_reply_move' || x.event === 'egress_no_reply_stay')).toBe(false);
+      a.ws.close();
+    } finally {
+      await bridge.shutdown();
+      server.close();
+      await m.stop();
     }
   });
 });

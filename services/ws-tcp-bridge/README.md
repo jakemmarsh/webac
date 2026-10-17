@@ -314,9 +314,25 @@ only the address that logged in; a reply during the move undoes it), never
 twice per session. The per-real-IP caps are unchanged (same session); an
 unresolved new-account login needs creation room at the new address and
 gets a pending marker there, and the old address's marker stays (the
-server may have made the account and lost only its replies). Logged as
-`egress_no_reply_move` (from, fromIp, to, toIp, ms; `to: null` when no
-address could take it).
+server may have made the account and lost only its replies). A real move
+is logged as `egress_no_reply_move` (from, fromIp, to, toIp, ms). A move
+that doesn't happen is `egress_no_reply_stay` (from, fromIp, ms, reason,
+attached): reason `answered` (info) when the server replied meanwhile,
+checked before a slot is chosen and again once a new address is ready, so
+no AWS call starts once a reply is in; else `no_slot`, `aws:<code>`, …
+(warn). `attached` names a fresh address made for an abandoned move; it
+keeps its normal idle grace and can serve the next session.
+
+The path to the server can open up to ~0.3 s after checkip answers, and the
+browser resends its login only every 6 s (as the 1999 client did). So an
+egress session with no server byte yet resends its last upstream datagram
+1 s and 3 s after its first (`EARLY_RESEND_MS`; `egress_early_resend`,
+debug, session and n), counted as normal upstream packets. They stop at the
+first server byte, a close, or a move. The servers ignore a repeated login
+from the same endpoint (AC1999 `AcceptClientLogin`). The first server byte
+of an egress session logs `egress_first_reply` (info: ms since the first
+datagram, earlyResends), which shows whether the resends are what got
+answered.
 
 If egress can't start (no IMDS, no secondary IPs, a `BRIDGE_EGRESS_SLOTS`
 address that isn't one), the bridge logs `egress_start_failed` at error
@@ -327,7 +343,7 @@ other world works, and it retries after 30 s, 2 min, then every 10 min
 Logs: `egress_start` (or `egress_start_failed`), `egress_acquire` /
 `egress_associate` (slot, public IP, timings), `egress_ready` /
 `egress_not_ready` (the readiness check), `egress_session_end`,
-`egress_no_reply_move` / `egress_no_reply_stay`,
+`egress_early_resend` / `egress_first_reply`, `egress_no_reply_move` / `egress_no_reply_stay`,
 `egress_release` (`why`: idle, shutdown, orphan, unfinished, failed_attach, not_ready, no_reply),
 `egress_fallback`, `egress_moved` (a new-account login left a spent address), `egress_stop_deadline`, `egress_refused`
 (reason, e.g. `aws:AddressLimitExceeded`), `egress_reconcile`,

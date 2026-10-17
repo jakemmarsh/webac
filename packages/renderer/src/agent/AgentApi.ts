@@ -19,12 +19,12 @@
  */
 import { avoidDisks, portalGuard, type AvoidDisk } from './portalAvoid.js';
 import { PathSearch, floorPlan, straightWalk, type JumpSearch, type NavPoint, type NavProbe, type NavStep } from './navPlanner.js';
-import { compassPoint, isJunk, isSellable, PACK_SLOTS_LOW } from './format.ts';
+import { compassPoint, filterInventory, isJunk, isSellable, PACK_SLOTS_LOW } from './format.ts';
 import { casterGap, gearEmptyFacts, shieldRefusal } from './gear.ts';
 import { lossText, parseDeathBroadcast, parseDeathLoss, parseFellowDied, parseVictimDeathLine, type DeathLoss } from './deathLines.ts';
 import { APPRAISAL_SKILL_NAMES, ATTRIBUTE_NAMES, VITAL_NAMES } from '../ui/examine/appraisalFormat.js';
 import { dropDamage, fallBudget, fallModelFor, GRAVITY, isDrop, reaimJump, safeDropHeight, type JumpKit, type JumpSpec } from './jumpPlan.js';
-import type { RouteGap } from './cellPath.js';
+import type { RouteCutOff, RouteGap } from './cellPath.js';
 import { CELL_LENGTH, mapCoordinateText, mapCoordsOfCell } from '../ui/MapMarkers.js';
 import { USEABLE_NO } from '../input/UseObject.js';
 import type { PlanSpell, RoutineProfile } from '@ac/shared';
@@ -164,6 +164,8 @@ export interface AgentHost {
    * which a bolt's line to `guid` is open; null when there is none or it isn't known.
    */
   lineOfFireOpenSpot?(guid: number): { dx: number; dy: number; dist: number } | null;
+  /** {@link lineOfFire} as it would be from where `fromGuid` (a fellow) stands; null when it isn't known. */
+  lineOfFireFrom?(guid: number, fromGuid: number): { dist: number; blockedAt: number | null; blocker?: string } | null;
   /**
    * The path an arrow, bolt or thrown weapon flies to `guid` (the server's ballistic arc from its spawn point in front of
    * you, at `speed` m/s, aimed at `aim` height): `blockedAt` is the ground distance (m) to the first wall, ground or solid
@@ -386,6 +388,12 @@ export interface AgentHost {
    */
   routeBarrier?(fromCell: number, toCell: number, opts?: { maxDrop?: number }): RouteGap[] | null;
   /**
+   * When no doorway route joins two interior cells of one landblock and no floorless gap explains it: the rooms you can
+   * walk, the lowest opening overhead out of them, the highest floor among them, and how a walk from the goal's side gets
+   * here (one way) (cellPath.ts routeCutOff). Landblock-local. Null: a route exists, or the host can't say.
+   */
+  routeCutOff?(fromCell: number, from: { x: number; y: number; z: number }, toCell: number, to: { x: number; y: number; z: number }, opts?: { maxDrop?: number; jumpAcross?: number }): RouteCutOff | null;
+  /**
    * The interior cells of `landblock` (0xXXYY0000) with a walkable floor under landblock-local (x, y), one entry per
    * cell and floor height (cellPath.ts floorsAt over the cell DAT's EnvCells): where a map coordinate in a dungeon or
    * a building is. Empty: no cell there (the landscape). Absent / null: unknown.
@@ -458,6 +466,15 @@ export interface WalkOptions {
    */
   stayWith?: string;
   stayWithin?: number;
+  /**
+   * A one-way drop (off a ledge, down a floor opening) is taken with a fellow on your floor: with stayWith, once they
+   * are at the edge with you (both go down); for a melee run-up (dropLeavesFellows), at all. Without it such a walk stops
+   * at the edge and says so: a drop taken with the fellow still up there split Bulwark and Arcanist onto different floors
+   * of Mountain Keep again and again (0x01D2, 2026-10-17 06:03Z, 06:13Z), the stop_moving coming after the drop.
+   */
+  drop?: boolean;
+  /** A melee run-up: a drop that would leave a fellow in view on your floor stops at the edge unless `drop`. */
+  dropLeavesFellows?: boolean;
   /**
    * Follow the target (a player): walk to within `within` of them, stand while they are that near, and set off
    * again whenever they move off, until `durationMs` has passed. VirindiTank's Follow nav / UtilityBelt's
@@ -1212,8 +1229,14 @@ export class AgentApi {
   private dyingSeen = new Set<number>();
   /** Objects that left the client's world lately, by guid: their name, when, and whether they were seen to die. */
   private gone = new Map<number, { name: string; at: number; died: boolean }>();
+  /** Every creature the client showed starting to die (its Dead motion), with its name and when (killedRecently's guid). */
+  private sawDying = new Map<number, { name: string; at: number }>();
   /** Watched targets that vanished without a seen death: guid → name and when (resolved within 3 s). */
-  private pendingLoss = new Map<number, { name: string; at: number }>();
+  private pendingLoss = new Map<number, { name: string; at: number; lost?: string; prefix?: string }>();
+  /** When each corpse came into view (corpseAtLastSpot: a corpse that was lying there before is no new death). */
+  private corpseSeenAt = new Map<number, number>();
+  /** A corpse this near where a monster was last seen (m, across; on its floor) is its own. */
+  static readonly CORPSE_AT_SPOT_M = 3;
   /** Places (NPCs, vendors, portals, lifestones) by guid with their last-known landblock-local position. */
   private places = new Map<number, PlaceRecord>();
   /**
@@ -1333,9 +1356,12 @@ export class AgentApi {
       // A fellow well away on the landscape gets their map coordinates too: "401 m SW, down 76 m" four minutes after
       // "2 m S" read as a glitch to Arcanist, who asked where he was; it was right (Bulwark had run 400 m down the SW road
       // in 56 s, 2026-10-16 11:09Z), and his coordinates would have said so.
+      // A town building's rooms are in the landscape's frame (only a dungeon's are not), so a fellow inside one gets
+      // them too: "251 m S, up 51 m" with none read to Arcanist as a stale place while Bulwark was at the Holtburg
+      // scrivener's, 41.6N 34.0E, as said (his follow arrived beside him there; stream 2026-10-17 ~04:50Z).
       const at = this.host.object(f.guid);
-      const coords = o && o.dist >= AgentApi.FELLOW_COORDS_M && at?.cell && (at.cell & 0xffff) < 0x100
-        ? (() => { const g = toGlobal(at.cell, at.x, at.y); return mapCoordinateText(mapCoordsOfCell(Math.floor(g.x / CELL_LENGTH), Math.floor(g.y / CELL_LENGTH))); })() : undefined;
+      const coords = o && o.dist >= AgentApi.FELLOW_COORDS_M && at?.cell && ((at.cell & 0xffff) < 0x100 || this.host.cellSealed?.(at.cell) === false)
+        ? (() => { const g = toGlobal(at.cell, at.x, at.y); return `${mapCoordinateText(mapCoordsOfCell(Math.floor(g.x / CELL_LENGTH), Math.floor(g.y / CELL_LENGTH)))}${(at.cell & 0xffff) >= 0x100 ? ' inside a building' : ''}`; })() : undefined;
       if (o) return { name: f.name, healthPct, dist: o.dist, bearing: o.bearing, ...(Math.abs(o.dz) >= 2 ? { dz: o.dz } : {}), ...(coords ? { coords } : {}), ...(threats ? { threats } : {}) };
       const last = this.fellowLastSeen(f.guid);
       return { name: f.name, healthPct, ...(last ? { lastSeen: this.lastSeenText(last) } : {}) };
@@ -1422,7 +1448,32 @@ export class AgentApi {
     if (this.host.isDying(g) || this.dyingSeen.has(g) || this.gone.get(g)?.died) return true;
     if (g === this.host.targetGuid() && this.host.targetHealth() === 0) return true;
     const dead = this.deadAtSeq.get(g);
-    return dead !== undefined && e.seq <= dead;
+    if (dead !== undefined && e.seq <= dead) return true;
+    return this.threatMovedOff(e, o);
+  }
+
+  /** An aggro / fellow-aggro this much (m) past its range from you / the fellow by the time a wait returns it is history. */
+  static readonly THREAT_GONE_MARGIN_M = 15;
+  /**
+   * An aggro / fellow-aggro read FELLOW_EVENT_STALE_MS or more after it came, about a monster now well past the range
+   * it was raised in (AGGRO_RANGE_M of you, FELLOW_THREAT_M of the fellow, plus THREAT_GONE_MARGIN_M): it went home or
+   * chased someone else. A wait handed Bulwark five "coming at your fellow Claude Arcanist, 8–17 m from them" 23–30 s
+   * after they came, and his attack on one 3 s later said it was 131 m S (Mudlurk Mosswart #80002c6e, stream 2026-10-17
+   * 05:02Z). One still near, or out of sight (its place unknown), is delivered.
+   */
+  private threatMovedOff(e: AgentEvent, o: AgentHostObject): boolean {
+    if ((e.type !== 'aggro' && e.type !== 'fellow-aggro') || this.host.now() - e.t < AgentApi.FELLOW_EVENT_STALE_MS) return false;
+    if (!o.cell || this.released(o)) return false;
+    let at: { x: number; y: number } | null = null;
+    if (e.type === 'aggro') at = this.me()?.g ?? null;
+    else if (e.fellow !== undefined) {
+      const w = this.host.object(e.fellow);
+      at = w?.cell && !this.released(w) ? toGlobal(w.cell, w.x, w.y) : null;
+    }
+    if (!at) return false;
+    const g = toGlobal(o.cell, o.x, o.y);
+    const range = (e.type === 'aggro' ? AgentApi.AGGRO_RANGE_M : AgentApi.FELLOW_THREAT_M) + AgentApi.THREAT_GONE_MARGIN_M;
+    return Math.hypot(g.x - at.x, g.y - at.y) > range;
   }
 
   /**
@@ -1466,31 +1517,85 @@ export class AgentApi {
 
   /** Events as a wait hands them back: threat events about creatures dead or gone by now, and vital alarms healed past, left out. */
   private deliverable(evs: AgentEvent[]): AgentEvent[] {
-    return evs.filter((e) => !this.stale(e) && !this.answeredTaskDone(e)).map((e) => this.fellowWhereNow(this.attackedSince(e)));
+    return evs.filter((e) => !this.stale(e) && !this.answeredTaskDone(e)).map((e) => this.fellowWhereNow(this.onYouNow(this.attackedSince(e))));
   }
 
   /** A fellow-aggro read this long after it came (ms) says where the fellow was then, and where they are now. */
   static readonly FELLOW_EVENT_STALE_MS = 3000;
 
   /**
-   * A fellow-aggro event's "; Claude Arcanist is 15 m SE of you" was where they were when it came: read seconds later,
-   * after a walk to them that arrived, it read as the walk's "arrived (0.1 m away)" being wrong (Bulwark, Mountain Keep
-   * 14:30Z, 2026-10-16: the event came mid-walk, the wait handed it over after the arrival). Delivered as "was … N s ago;
-   * now …" once it is FELLOW_EVENT_STALE_MS old.
+   * An aggro / fellow-aggro / fellow-low read FELLOW_EVENT_STALE_MS or more after it came, as of the read: its places
+   * were where things stood when it came. A fellow-aggro's "; Claude Arcanist is 15 m SE of you", read after a walk to
+   * them that arrived, read as the walk's "arrived (0.1 m away)" being wrong (Bulwark, Mountain Keep 14:30Z,
+   * 2026-10-16); and "Claude Bulwark was 5 m NE of you 5 s ago (25 m N of you now)" beside the monster's "25 m from
+   * them" read as one Dread in two places (Arcanist, 08:01:42Z, 2026-10-17: Bulwark had run 20 m N to intercept). So each
+   * place says whose it is and when: the event's time ("N s ago"), the fellow then and now, and the monster (by guid)
+   * now, from them and from you, or out of sight.
    */
   private fellowWhereNow(e: AgentEvent): AgentEvent {
-    if (e.type !== 'fellow-aggro' || e.fellow === undefined) return e;
+    if (e.type !== 'fellow-aggro' && e.type !== 'aggro' && e.type !== 'fellow-low' && e.type !== 'attackers-up' && e.type !== 'cast-at-you') return e;
     const age = this.host.now() - e.t;
     const me = this.me();
-    const f = (this.host.fellows?.() ?? []).find((x) => x.guid >>> 0 === e.fellow! >>> 0);
-    if (age < AgentApi.FELLOW_EVENT_STALE_MS || !me || !f) return e;
+    if (age < AgentApi.FELLOW_EVENT_STALE_MS || !me) return e;
+    const ago = `${Math.round(age / 1000)} s ago`;
+    if (e.type === 'attackers-up') {
+      // "attacking you now" was when it came: who is on you as of the read (the last 10 s of attack lines).
+      if (!e.text.includes(' attacking you now ')) return e;
+      const on = [...this.attackersOfMe().keys()];
+      const names = on.slice(0, 4).map((g) => `${this.nameOf(g)} #${(g >>> 0).toString(16)}`).join(', ') + (on.length > 4 ? `, +${on.length - 4} more` : '');
+      return { ...e, text: `${e.text.replace(' attacking you now ', ` attacking you ${ago} `)} [now ${on.length ? `${on.length} attacking you: ${names}` : 'none attacking you'}]` };
+    }
+    if (e.type === 'cast-at-you') {
+      // A caster's place ("12 m NE is casting") was where it stood when it spoke.
+      if (e.guid === undefined || !/ \d+ m [NSEW]{1,2} is casting /.test(e.text)) return e;
+      return { ...e, text: `${e.text} [${ago}; now ${this.monsterWhereNow(e.guid, me)}]` };
+    }
+    if (e.type === 'aggro') {
+      if (e.guid === undefined) return e;
+      const now = this.monsterWhereNow(e.guid, me);
+      return { ...e, text: `${e.text} [${ago}; now ${now}]` };
+    }
+    const fg = e.type === 'fellow-low' ? e.guid : e.fellow;
+    if (fg === undefined) return e;
+    const f = (this.host.fellows?.() ?? []).find((x) => x.guid >>> 0 === fg >>> 0);
+    if (!f) return e;
+    if (e.type === 'fellow-low') {
+      const i = e.text.lastIndexOf('; they are ');
+      if (i < 0) return e;
+      return { ...e, text: `${e.text.slice(0, i)} (${ago}); they were ${e.text.slice(i + '; they are '.length)} then, ${this.fellowWhere(f.guid, me)} now` };
+    }
     const head = `; ${f.name} is `;
     const i = e.text.lastIndexOf(head);
     if (i < 0) return e;
     const tail = e.text.slice(i + head.length);
     const j = tail.lastIndexOf(', ');
     const where = j < 0 ? tail : tail.slice(0, j), rest = j < 0 ? '' : tail.slice(j);
-    return { ...e, text: `${e.text.slice(0, i)}; ${f.name} was ${where} ${Math.round(age / 1000)} s ago (${this.fellowWhere(f.guid, me)} now)${rest}` };
+    const pre = e.text.slice(0, i).replace(/ is (on|coming at) your fellow /, ' was $1 your fellow ');
+    let mon = '';
+    if (e.guid !== undefined) {
+      const o = this.host.object(e.guid);
+      const w = this.host.object(f.guid);
+      const name = `${this.nameOf(e.guid)} #${(e.guid >>> 0).toString(16)}`;
+      if (!o || !o.cell || this.released(o)) mon = `; ${name} is out of your sight now`;
+      else {
+        const g = toGlobal(o.cell, o.x, o.y);
+        let fromThem = '';
+        if (w && w.cell && !this.released(w)) {
+          const a = toGlobal(w.cell, w.x, w.y);
+          fromThem = `${Math.hypot(g.x - a.x, g.y - a.y, o.z - w.z).toFixed(0)} m from ${f.name} and `;
+        }
+        mon = `; ${name} is ${fromThem}${this.monsterWhereNow(e.guid, me)} now`;
+      }
+    }
+    return { ...e, text: `${pre}, ${ago}; ${f.name} was ${where} then and is ${this.fellowWhere(f.guid, me)} now${rest}${mon}` };
+  }
+
+  /** "12 m NE of you", or "out of your sight" (released, gone, or not placed): where a monster is as of now. */
+  private monsterWhereNow(guid: number, me: NonNullable<ReturnType<AgentApi['me']>>): string {
+    const o = this.host.object(guid);
+    if (!o || !o.cell || this.released(o)) return 'out of your sight';
+    const g = toGlobal(o.cell, o.x, o.y);
+    return `${Math.hypot(g.x - me.g.x, g.y - me.g.y).toFixed(0)} m ${compassPoint(bearing(me.g, g))} of you`;
   }
 
   /** Your attack orders by target: guid → the newest event seq when ac_attack (or a chained attack) went at it. */
@@ -1503,6 +1608,23 @@ export class AgentApi {
    * after it handed him the kill's event, "you are not attacking it", and he reported the switch as lost (Sclavus camp,
    * 2026-10-16 12:41Z). Delivered as it is now: "you have attacked it since".
    */
+  /**
+   * A target-died event's "; X #id is on you (16× in 10 s), but you are not attacking it" read FELLOW_EVENT_STALE_MS or
+   * more after the kill: that was who was on you then. Delivered as "was on you N s ago, when it died", and who is on
+   * you now (nextAttackerNote now), or that nothing is: an old note read late as "now" sent a tank after a monster
+   * already dead or gone (the fix8 sweep of the same shape as aggro read late, 2026-10-17).
+   */
+  private onYouNow(e: AgentEvent): AgentEvent {
+    if (e.type !== 'target-died' || e.guid === undefined) return e;
+    const age = this.host.now() - e.t;
+    if (age < AgentApi.FELLOW_EVENT_STALE_MS) return e;
+    const m = /; (.+?) #([0-9a-f]+) is on you \((\d+)× in 10 s\)(?: with \d+ more)?(?: and is your selection now \(Auto Target picked it\))?, but you are not attacking it: ac_attack target=#[0-9a-f]+ to fight it$/.exec(e.text);
+    if (!m) return e;
+    const now = this.nextAttackerNote(e.guid);
+    const nowText = now ? `; now${now.replace(/^;/, '')}` : '; nothing is on you now';
+    return { ...e, text: `${e.text.slice(0, m.index)}; ${m[1]} #${m[2]} was on you ${Math.round(age / 1000)} s ago, when it died (${m[3]}× in 10 s then)${nowText}` };
+  }
+
   private attackedSince(e: AgentEvent): AgentEvent {
     if (e.type !== 'target-died') return e;
     const m = /, but you are not attacking it: ac_attack target=#([0-9a-f]+) to fight it$/.exec(e.text);
@@ -1517,10 +1639,13 @@ export class AgentApi {
    * A task-done whose task answered its own call, once a newer task has started: the player had that answer and moved
    * on. Bulwark's follow ended at 4 s "stopped 8.7 m short: Pumpkin Buffer … coming at you" (its answer); he followed
    * again with stop_on_aggro=false, and his next ac_wait types=task-done handed him the first one's event, which read
-   * as the second follow stopping for aggro it was told to ignore (2026-10-16 07:12).
+   * as the second follow stopping for aggro it was told to ignore (2026-10-16 07:12). Also any task-done that came
+   * before a newer task started (taskDoneBefore): a new order given after an end makes that end history.
    */
   private answeredTaskDone(e: AgentEvent): boolean {
     if (e.type !== 'task-done') return false;
+    const before = this.taskDoneBefore.get(e.seq);
+    if (before !== undefined && before < this.tasksStarted) return true;
     const n = this.quickTaskDone.get(e.seq);
     if (n === undefined) return false;
     return n < this.tasksStarted;
@@ -1964,6 +2089,8 @@ export class AgentApi {
   static readonly USE_VITAL_MIN_CHANGE = 5;
   /** A use watches the doors this near for one swinging open or shut (a lever's door 8 m off, ACE landblock 0x0145). */
   static readonly USE_DOOR_WATCH_M = 40;
+  /** A use-report line's tail for another door that swung while a door was used (not that use's doing). */
+  static readonly OTHER_DOOR_NOTE = ' meanwhile (not by this use: a Use swings only the door used; a creature walking into a shut door opens it)';
   /** A use-report line that only says a vital changed. */
   static readonly VITAL_LINE = /^(health|stamina|mana) \d+ → \d+$/;
 
@@ -2001,11 +2128,15 @@ export class AgentApi {
     for (const l of chat) { const why = this.scrollShortfall(l); if (why) out.push(why); }
     const after = this.useMark(mark.target);
     if (mark.open !== undefined && after.open !== undefined && after.open !== mark.open) out.push(`${this.nameOf(mark.target!)} is now ${after.open ? 'open' : 'closed'}`);
+    // A door's Use swings only that door (ACE Door.ActOnUse); another door swinging meanwhile is someone else's doing: a
+    // creature walking into a shut door opens it (Door.OnCollideObject, AiOptions 1), or a fellow. Arcanist's use of Door
+    // #701d2020 answered "Door #701d201c 15 m NW swung open", read as the wrong door opening (Mountain Keep, 2026-10-17).
+    const plainDoor = mark.open !== undefined;
     for (const [g, was] of mark.doors) {
       const now = after.doors.get(g);
       if (now === undefined || now === was) continue;
       const o = this.nearby(AgentApi.USE_DOOR_WATCH_M).find((x) => x.guid === g);
-      out.push(`${this.nameOf(g)} #${g.toString(16)}${o ? ` ${o.dist.toFixed(0)} m ${compassPoint(o.bearing)}` : ''} ${now ? 'swung open' : 'swung shut'}${o?.notByHand ? ' (the door this opens: it won\'t open by hand)' : ''}`);
+      out.push(`${this.nameOf(g)} #${g.toString(16)}${o ? ` ${o.dist.toFixed(0)} m ${compassPoint(o.bearing)}` : ''} ${now ? 'swung open' : 'swung shut'}${plainDoor ? AgentApi.OTHER_DOOR_NOTE : o?.notByHand ? ' (the door this opens: it won\'t open by hand)' : ''}`);
     }
     for (const k of Object.keys(mark.vit)) {
       const a = mark.vit[k], b = after.vit[k];
@@ -2078,6 +2209,22 @@ export class AgentApi {
     const [g, n] = on.find(([x]) => x === sel) ?? on.sort((a, b) => b[1] - a[1])[0];
     const others = on.length - 1;
     return `; ${this.nameOf(g)} #${g.toString(16)} is on you (${n}× in 10 s)${others ? ` with ${others} more` : ''}${g === sel ? ' and is your selection now (Auto Target picked it)' : ''}, but you are not attacking it: ac_attack target=#${g.toString(16)} to fight it`;
+  }
+
+  /**
+   * An order at a target that is already dead: who is fighting you instead, so the next order goes at them. The monster on
+   * you (nextAttackerNote), else the nearest one on your floor coming at you; '' when none. Bulwark's attack at #8000561c
+   * answered only "Dread Mu-miyah is dead (loot its corpse, or pick another target)", and his wait slept 60 s with nothing
+   * said while it could have named the next (Mountain Keep, 2026-10-17 08:07:38Z; again at 08:02:30Z).
+   */
+  deadTargetNote(dead: number): string {
+    const on = this.nextAttackerNote(dead);
+    if (on) return on;
+    const me = this.host.self();
+    if (!me) return '';
+    const c = this.comingAt(me.guid).find((x) => x.guid >>> 0 !== dead >>> 0 && !this.host.isDying(x.guid) && !this.sawDying.has(x.guid >>> 0) && this.host.isAttackable(x.guid)
+      && Math.abs((this.host.object(x.guid)?.z ?? me.z) - me.z) < AgentApi.FLOOR_APART_M);
+    return c ? `; ${c.name} #${c.guid.toString(16)} is coming at you (${c.how}, ${c.dist.toFixed(0)} m ${compassPoint(c.bearing)}): ac_attack target=#${c.guid.toString(16)} to fight it` : '';
   }
 
   /**
@@ -2218,12 +2365,12 @@ export class AgentApi {
       if (hitting.has(c.guid)) this.aggroStall.delete(`${c.guid}:me`);
       const v = this.aggroVerdict(`${c.guid}:me`, c, me.g, hitting.has(c.guid), now);
       if (v === 'raise') {
-        this.push('aggro', `${this.threatText(c)} is coming at you, ${c.dist.toFixed(0)} m ${compassPoint(c.bearing)} (${c.how})`, c.guid);
+        this.push('aggro', `${this.threatText(c)} is coming at you, ${c.dist.toFixed(0)} m ${compassPoint(c.bearing)} (${c.how})${this.floorNote(c)}`, c.guid);
         this.lookAtLevels(this.nearby(AgentApi.AGGRO_RANGE_M).filter((o) => o.guid === c.guid));
       } else if (typeof v === 'number') {
         const lof = this.host.lineOfFire?.(c.guid);
         const wall = lof && lof.blockedAt !== null ? ` (no line of fire: ${lof.blocker ?? 'a wall'} in the way)` : '';
-        this.push('aggro', `${this.threatText(c)} keeps facing you, ${c.dist.toFixed(0)} m ${compassPoint(c.bearing)} (${c.how}), but it hasn't come closer in ${Math.round(v / 1000)} s${wall}: stuck, or it can't path round to you. No more aggro for it until it closes in or attacks.`, c.guid);
+        this.push('aggro', `${this.threatText(c)} keeps facing you, ${c.dist.toFixed(0)} m ${compassPoint(c.bearing)} (${c.how})${this.floorNote(c)}, but it hasn't come closer in ${Math.round(v / 1000)} s${wall}: stuck, or it can't path round to you. No more aggro for it until it closes in or attacks.`, c.guid);
       }
     }
     // fellow-aggro and fellow-low.
@@ -2232,8 +2379,12 @@ export class AgentApi {
       const fat = fo && fo.cell && !this.released(fo) ? toGlobal(fo.cell, fo.x, fo.y) : null;
       for (const c of fat ? this.comingAt(f.guid) : []) {
         const v = this.aggroVerdict(`${c.guid}:${f.guid}`, c, fat!, false, now);
-        if (v === 'raise') this.push('fellow-aggro', `${this.threatText(c)} is ${c.on ? 'on' : 'coming at'} your fellow ${f.name}${c.on ? '' : `, ${c.toWho.toFixed(0)} m from them`} (${c.how.replace(/\byou\b/g, 'them')}); ${f.name} is ${this.fellowWhere(f.guid, me)}, ${f.health.max > 0 ? Math.round((100 * f.health.cur) / f.health.max) : '?'}% health`, c.guid, undefined, f.guid);
-        else if (typeof v === 'number') this.push('fellow-aggro', `${this.threatText(c)} keeps facing your fellow ${f.name}, ${c.toWho.toFixed(0)} m from them (${c.how.replace(/\byou\b/g, 'them')}), but it hasn't come closer to them in ${Math.round(v / 1000)} s: stuck, or it can't path round to them. No more fellow-aggro for it until it closes in on them.`, c.guid);
+        // Whose distance each is, said every time: the monster's from them and from you, then theirs from you. "25 m from
+        // them (running at them); Claude Bulwark was 5 m NE of you 5 s ago (25 m N of you now)" read as one Dread being
+        // 5 m NE and 25 m N at once (Arcanist, Mountain Keep 08:01:42Z, 2026-10-17: #8000475f; Bulwark had run 20 m N).
+        const mine = `${c.dist.toFixed(0)} m ${compassPoint(c.bearing)} of you`;
+        if (v === 'raise') this.push('fellow-aggro', `${this.threatText(c)} is ${c.on ? 'on' : 'coming at'} your fellow ${f.name}${c.on ? '' : `, ${c.toWho.toFixed(0)} m from them and ${mine}`} (${c.how.replace(/\byou\b/g, 'them')}); ${f.name} is ${this.fellowWhere(f.guid, me)}, ${f.health.max > 0 ? Math.round((100 * f.health.cur) / f.health.max) : '?'}% health`, c.guid, undefined, f.guid);
+        else if (typeof v === 'number') this.push('fellow-aggro', `${this.threatText(c)} keeps facing your fellow ${f.name}, ${c.toWho.toFixed(0)} m from them and ${mine} (${c.how.replace(/\byou\b/g, 'them')}), but it hasn't come closer to them in ${Math.round(v / 1000)} s: stuck, or it can't path round to them. No more fellow-aggro for it until it closes in on them.`, c.guid);
       }
       if (f.health.max <= 0) continue;
       const frac = f.health.cur / f.health.max;
@@ -2287,10 +2438,46 @@ export class AgentApi {
     return 'raise';
   }
 
-  /** How long a monster coming at you has been held for getting no closer (ms), or null (not held). */
+  /**
+   * How long a monster coming at you has come no closer (ms), once that is AGGRO_STALL_MS or more (or it is held), else
+   * null. Not only once held: held is set when a new aggro would be raised, and a monster whose server MoveTo stays on
+   * you all along never gets there. Dread #80003fdc, 6 m up on a ledge and behind a wall, read "COMING AT YOU (running
+   * at you)" in Arcanist's observes for 33 s (07:20:27–07:21:00Z, 2026-10-17) while the aggro event's own rule would
+   * have called it stuck: the server's MoveToObject was real, it just got nowhere.
+   */
   private aggroHeldFor(guid: number, who: number | 'me'): number | null {
     const st = this.aggroStall.get(`${guid}:${who}`);
-    return st?.held ? this.host.now() - st.at : null;
+    if (!st) return null;
+    const since = this.host.now() - st.at;
+    return st.held || since >= AgentApi.AGGRO_STALL_MS ? since : null;
+  }
+
+  /**
+   * observe's word on a monster whose server movement is aimed at you (the server's MoveTo / TurnTo target: its truth
+   * about who it is after) but which isn't hitting you (attackers: ATTACKING YOU): how, and whether it can get to you.
+   * Stuck: a chase (running at / closing on you) that has come no closer for AGGRO_STALL_MS (the aggro event's rule), or
+   * that stands a storey up or down indoors; then the bolt's line too (lineOfFire: a wall, the floor), as the aggro
+   * event's "keeps facing you" says.
+   */
+  private comingAtYouText(c: { guid: number; how: string; on: boolean; dz: number; otherFloor: boolean }): { text: string; stuck: boolean } {
+    const bits = [c.how];
+    const held = c.on ? null : this.aggroHeldFor(c.guid, 'me');
+    if (held !== null) bits.push(`no closer in ${Math.round(held / 1000)} s`);
+    if (c.otherFloor) bits.push(`${Math.abs(c.dz).toFixed(0)} m ${c.dz > 0 ? 'up' : 'down'}: another floor, no melee from there`);
+    // A chase that gets nowhere. One turned to face you is a shooter or caster standing to shoot (Monster_Navigation:
+    // a ranged monster TurnTo's its target and stands): no nearer is how it fights, and a floor doesn't stop a spell.
+    const chasing = c.how === 'running at you' || c.how.startsWith('closing');
+    const stuck = chasing && (held !== null || c.otherFloor);
+    if (stuck) {
+      const lof = this.host.lineOfFire?.(c.guid);
+      if (lof && lof.blockedAt !== null) bits.push(`no line of fire: ${lof.blocker ?? 'a wall'} in the way`);
+    }
+    return { text: bits.join(', '), stuck };
+  }
+
+  /** ", 6 m up: another floor" for a monster a storey above or below you indoors, else "". */
+  private floorNote(c: { dz: number; otherFloor: boolean }): string {
+    return c.otherFloor ? `, ${Math.abs(c.dz).toFixed(0)} m ${c.dz > 0 ? 'up' : 'down'}: another floor` : '';
   }
 
   /** "Shadow #8000b6e1 (level 26)", or "(level not known yet)". */
@@ -2313,7 +2500,7 @@ export class AgentApi {
    * AGGRO_WINDOW_MS (a server that moves it by position updates only). A monster walking home (MoveToPosition) or aimed
    * at someone else is not coming at them. `dist`/`bearing` are from you; `toWho` from them; `on`: within reach of them.
    */
-  comingAt(who: number): Array<{ guid: number; name: string; level?: number; dist: number; bearing: number; toWho: number; how: string; on: boolean }> {
+  comingAt(who: number): Array<{ guid: number; name: string; level?: number; dist: number; bearing: number; toWho: number; how: string; on: boolean; dz: number; otherFloor: boolean }> {
     const me = this.me();
     if (!me) return [];
     const self = who === me.s.guid;
@@ -2346,9 +2533,13 @@ export class AgentApi {
       }
       const aim = tr.aim && now - tr.aim.at < AgentApi.AIM_MEMORY_MS ? tr.aim : null;
       const live = o.seeks && o.seeks.kind !== 'position' ? o.seeks : null;
+      // Whether it is at them is by the straight line, heights and all (a fellow's toWho already is): a Dread 2 m
+      // across and 12 m up, "running at" Arcanist from the floor above, read as on him and so never as stuck
+      // (Mountain Keep, 2026-10-17 08:01:49Z, #80001a58).
+      const reach = self ? Math.hypot(toWho, o.z - atZ) : toWho;
       let how: string | null = null;
       if (live && live.guid >>> 0 === who) how = live.kind === 'turn' ? 'turned to face you' : live.kind === 'stick' ? 'on you' : 'running at you';
-      else if (!live && aim && aim.guid === who && toWho <= AgentApi.AIM_ON_M) how = 'on you';
+      else if (!live && aim && aim.guid === who && reach <= AgentApi.AIM_ON_M) how = 'on you';
       else if (!live && !(aim && aim.guid !== who) && o.seeks?.kind !== 'position') {
         const old = tr.pts.find((p) => now - p.t <= AgentApi.AGGRO_WINDOW_MS);
         if (old && now - old.t >= AgentApi.AGGRO_WINDOW_MS / 2) {
@@ -2361,7 +2552,10 @@ export class AgentApi {
       out.push({
         guid, name: o.name, ...(o.level ? { level: o.level } : {}),
         dist: Math.round(Math.hypot(g.x - me.g.x, g.y - me.g.y) * 10) / 10, bearing: Math.round(bearing(me.g, g)),
-        toWho: Math.round(toWho * 10) / 10, how, on: how === 'on you' || toWho <= 3,
+        toWho: Math.round(toWho * 10) / 10, how, on: how === 'on you' || reach <= 3,
+        // Height from you (not from `who`), and whether that is a storey up or down indoors (observe's OTHER_FLOOR_M).
+        dz: Math.round((o.z - me.s.z) * 10) / 10,
+        otherFloor: this.floorsApply(me.s.cell, o.cell) && Math.abs(o.z - me.s.z) >= AgentApi.OTHER_FLOOR_M,
       });
     }
     return out.sort((a, b) => a.toWho - b.toWho);
@@ -2371,7 +2565,8 @@ export class AgentApi {
   private fellowThreats(guid: number): string | undefined {
     const cs = this.comingAt(guid);
     if (!cs.length) return undefined;
-    return cs.slice(0, 4).map((c) => `${c.name}${c.level ? ` L${c.level}` : ''} ${c.on ? 'on them' : `${c.how.replace(/\byou\b/g, 'them')} ${c.toWho.toFixed(0)} m off`}`).join(', ') + (cs.length > 4 ? `, +${cs.length - 4} more` : '');
+    // "13 m from them": "13 m off" was read as from you, beside your own distances on the line.
+    return cs.slice(0, 4).map((c) => `${c.name}${c.level ? ` L${c.level}` : ''} #${(c.guid >>> 0).toString(16)} ${c.on ? 'on them' : `${c.how.replace(/\byou\b/g, 'them')}, ${c.toWho.toFixed(0)} m from them`}`).join(', ') + (cs.length > 4 ? `, +${cs.length - 4} more` : '');
   }
 
   private objectAdded(o: AgentHostObject): void {
@@ -2387,7 +2582,7 @@ export class AgentApi {
    */
   private objectRemoved(guid: number, name: string): void {
     if (guid !== this.attackTarget && guid !== this.watchedTarget) return;
-    if (this.dyingSeen.has(guid) || this.killedRecently(name)) this.push('target-died', `${name} #${guid.toString(16)} died${guid === this.attackTarget ? this.afterKill(guid) : ''}`, guid);
+    if (this.dyingSeen.has(guid) || this.sawDying.has(guid >>> 0) || this.killedRecently(name, this.attackOrders.get(guid) ?? 0, guid)) this.push('target-died', `${name} #${guid.toString(16)} died${guid === this.attackTarget ? this.afterKill(guid) : ''}`, guid);
     else if (this.host.screen() === 'world') {
       // Not every server shows the death start (1999's adapter deletes the object outright):
       // a "Corpse of <name>" appearing in the next 3 s settles it as a kill (tick).
@@ -2398,10 +2593,19 @@ export class AgentApi {
     this.dyingSeen.delete(guid);
   }
 
-  /** A kill line naming `name` in the last 5 s ("You slay…", "Your killing blow…", "… died!"). */
-  private killedRecently(name: string, afterSeq = 0): boolean {
+  /**
+   * A kill line naming `name` in the last 5 s ("You slay…", "Your killing blow…", "… died!"). Kill lines name no id: with
+   * `guid`, a line is not its death while another creature of that name was seen starting to die in that time (sawDying):
+   * the line was that one's. Two Dread Mu-miyahs: "Dread Mu-miyah died!" for #8000fef1 at 08:10:13Z read as #80005cdb's
+   * end while #5cdb kept hitting Bulwark (Mountain Keep, 2026-10-17).
+   */
+  private killedRecently(name: string, afterSeq = 0, guid?: number): boolean {
     const since = this.host.now() - 5000;
     const n = name.toLowerCase();
+    if (guid !== undefined) {
+      const g = guid >>> 0;
+      for (const [k, d] of this.sawDying) if (k !== g && d.at >= since - 1000 && d.name.toLowerCase() === n) return false;
+    }
     // Only the game's own kill lines: someone's speech ("Bulwark says, \"the Skulker is dead\"") or the agent's own notes
     // ("[Agent] …") naming the target alongside "dead" said nothing about it (2026-10-12).
     return this.events.some((e) => e.t >= since && e.seq > afterSeq && e.type === 'chat' && e.text.toLowerCase().includes(n)
@@ -2512,7 +2716,7 @@ export class AgentApi {
     // A creature whose death has begun (it lingers a few seconds before the corpse): not a target any more.
     // Any creature, not only an attackable one: a dying monster stops being attackable, and the target line read
     // "hp 32%" for a Spikey Armoredillo already dead (2026-10-12). Your attack target named in a kill line is dead too.
-    if ((o.itemType & IT.Creature) && (this.host.isDying(o.guid) || this.dyingSeen.has(o.guid >>> 0) || (o.guid === this.attackTarget && this.killedRecently(o.name)))) obj.dying = true;
+    if ((o.itemType & IT.Creature) && (this.host.isDying(o.guid) || this.dyingSeen.has(o.guid >>> 0) || (o.guid === this.attackTarget && this.killedRecently(o.name, this.attackOrders.get(o.guid) ?? 0, o.guid)))) obj.dying = true;
     if (obj.kind === 'monster') { const seen = this.seenText(o.name); if (seen) obj.seen = seen; }
     if (o.guid === this.host.targetGuid() && !obj.dying) {
       const h = this.host.targetHealth();
@@ -2724,6 +2928,20 @@ export class AgentApi {
     if (this.fellowPlaces.size > fs.length + 8) for (const g of [...this.fellowPlaces.keys()]) if (!fs.some((f) => f.guid >>> 0 === g)) this.fellowPlaces.delete(g);
   }
 
+  /**
+   * A player the client last placed outside the dungeon you are in (on the landscape, or in another dungeon): they went
+   * through a portal or recalled. (From the landscape, a cell in another landblock may be a building next door: no say.) "went through a portal or recalled: the client
+   * now places them outside this dungeon (at 45.1N, 32.3E)". Null when they are in your space.
+   */
+  private elsewhereText(myCell: number, o: { cell?: number | null; x: number; y: number }): string | null {
+    if (!o.cell || ((myCell ^ o.cell) & 0xffff0000) === 0 || !this.inDungeon(myCell)) return null;
+    // Indoors elsewhere, and not known as a building on the landscape: a dungeon (the client may not have that cell's data).
+    const dungeon = (o.cell & 0xffff) >= 0x100 && this.host.cellSealed?.(o.cell) !== false;
+    const g = toGlobal(o.cell, o.x, o.y);
+    const at = !dungeon ? ` (at ${mapCoordinateText(mapCoordsOfCell(Math.floor(g.x / CELL_LENGTH), Math.floor(g.y / CELL_LENGTH)))})` : '';
+    return `went through a portal or recalled: the client now places them ${dungeon ? 'in another dungeon' : 'outside this dungeon'}${at}`;
+  }
+
   /** A fellow's last-seen spot older than this (ms) is no lead: they could be anywhere in the dungeon by now. */
   static readonly FELLOW_LAST_SEEN_MAX_MS = 300_000;
 
@@ -2818,6 +3036,29 @@ export class AgentApi {
     return { guid: g, name: m.name, cell: m.cell, x: m.x, y: m.y, z: m.z, agoS: Math.max(0, Math.round((now - m.at) / 1000)) };
   }
 
+  /**
+   * A corpse of the monster `g` (its name) lying where it was last seen (CORPSE_AT_SPOT_M, its floor), come into view since
+   * shortly before then: its death, which the client never showed (a monster the client let go dies out of its sight;
+   * the server's Dead motion goes only to those who see it). Bulwark's attack on a Dread at 5% 1 m away answered "out of
+   * your client's sight (it let it go)", then target-lost "not in sight at the spot"; Arcanist's bolt had killed it, and
+   * its corpse lay 1.1 m off (Mountain Keep, 2026-10-17 08:14:41Z). Null when none.
+   */
+  private corpseAtLastSpot(g: number): { guid: number; dist: number; bearing: number } | null {
+    const m = this.monsterSeen.get(g >>> 0);
+    const me = this.me();
+    if (!m || !me) return null;
+    const at = toGlobal(m.cell, m.x, m.y);
+    for (const o of this.host.objects()) {
+      if (!o.cell || o.wielderId || o.containerId || o.name !== `Corpse of ${m.name}`) continue;
+      const seenAt = this.corpseSeenAt.get(o.guid >>> 0);
+      if (seenAt === undefined || seenAt < m.at - 2000) continue;
+      const c = toGlobal(o.cell, o.x, o.y);
+      if (Math.hypot(c.x - at.x, c.y - at.y) > AgentApi.CORPSE_AT_SPOT_M || Math.abs(o.z - m.z) >= AgentApi.FLOOR_APART_M) continue;
+      return { guid: o.guid >>> 0, dist: Math.hypot(c.x - me.g.x, c.y - me.g.y), bearing: bearing(me.g, c) };
+    }
+    return null;
+  }
+
   /** walk_to a monster out of your sight: to where it was last seen, saying so, and whether it is in sight from there. */
   private async walkToMonsterLastSeen(seen: NonNullable<ReturnType<AgentApi['monsterLastSeen']>>, opts: WalkOptions): Promise<AgentResult> {
     const id = `${seen.name} #${seen.guid.toString(16)}`;
@@ -2825,8 +3066,10 @@ export class AgentApi {
     const r = await this.walkTo(seen.name, { ...opts, lastSeenAt: { cell: seen.cell, x: seen.x, y: seen.y, z: seen.z, name: seen.name } });
     const o = this.host.object(seen.guid);
     const there = o && !this.released(o) ? this.nearby(600).find((x) => x.guid >>> 0 === seen.guid) : undefined;
+    const corpse = there ? null : this.corpseAtLastSpot(seen.guid);
     const now = there ? `${id} is in sight now: ${there.dist.toFixed(0)} m ${compassPoint(there.bearing)}${Math.abs(there.dz) >= 2 ? `, ${Math.abs(there.dz).toFixed(0)} m ${there.dz > 0 ? 'up' : 'down'}` : ''}`
-      : `${id} isn't in sight from here: it moved on (or died)`;
+      : corpse ? `${id} died: its corpse #${corpse.guid.toString(16)} lies where it was last seen, ${corpse.dist.toFixed(0)} m ${compassPoint(corpse.bearing)}`
+        : `${id} isn't in sight from here: it moved on (or died)`;
     return { ...r, message: `${head}\n${r.message}${r.ok || there ? `; ${now}` : ''}` };
   }
 
@@ -2927,7 +3170,9 @@ export class AgentApi {
    */
   private packSlotsAdvice(atStart: AgentPackSlots | null, full: boolean): string {
     const now = this.packSlots();
-    const items = this.host.inventory();
+    // With the appraisals' marks (inventory()): the host's bare list has no attuned or unsellable flags, so an attuned
+    // item would be offered as junk to drop and a known-unsellable one as cheap to sell.
+    const items = this.inventory();
     const junk = items.filter(isJunk);
     const cheap = items.filter(isSellable).sort((a, b) => (a.value ?? 0) - (b.value ?? 0)).slice(0, 4);
     const name = (it: AgentItem): string => `${it.name} #${it.guid.toString(16)}`;
@@ -3020,11 +3265,15 @@ export class AgentApi {
       if (way) target.otherFloorWay = way;
     }
     const attackers = this.attackersOfMe();
-    const coming = me ? new Map(this.comingAt(me.s.guid).map((c) => { const h = this.aggroHeldFor(c.guid, 'me'); return [c.guid, h === null ? c.how : `${c.how}, no closer in ${Math.round(h / 1000)} s`]; })) : new Map<number, string>();
+    const coming = me ? new Map(this.comingAt(me.s.guid).map((c) => [c.guid, this.comingAtYouText(c)] as const)) : new Map<number, { text: string; stuck: boolean }>();
     for (const o of target ? [target, ...all] : all) {
       const n = attackers.get(o.guid);
       if (n) o.attackingYou = n;
-      else if (coming.has(o.guid) && !o.dying) o.comingAtYou = coming.get(o.guid)!;
+      else if (coming.has(o.guid) && !o.dying) {
+        const c = coming.get(o.guid)!;
+        o.comingAtYou = c.text;
+        if (c.stuck) o.comingAtYouStuck = true;
+      }
     }
     if (opts.levels) this.lookAtLevels(target ? [target, ...all] : all);
     if (target && target.kind === 'monster' && !target.dying) {
@@ -3092,6 +3341,22 @@ export class AgentApi {
       return { ...it, appraised: true, ...(al !== undefined ? { armorLevel: al } : {}), ...(reqs.length ? { wieldReqs: reqs } : {}), ...mana, ...marks };
     });
   }
+  /**
+   * The inventory for a junk list: each junk candidate not yet appraised gets a quiet appraisal first, so an attuned
+   * one (Attuned 114 travels only in the appraisal: AssessmentProperty, never in the object's public description) is
+   * known and left out. ac_inventory filter=junk listed three attuned Small Mnemosynes, and the drop of the first
+   * was refused "can't be dropped" (Bulwark, stream 2026-10-17 04:30Z). Waits up to JUNK_APPRAISE_MS for the answers.
+   */
+  async junkChecked(): Promise<AgentItem[]> {
+    if (!this.host.appraisalData) return this.inventory();
+    const unknown = this.inventory().filter((it) => isJunk(it) && !this.host.appraisalData!(it.guid)).slice(0, AgentApi.JUNK_APPRAISE_MAX);
+    for (const it of unknown) this.host.appraise(it.guid, true);
+    for (let w = 0; w < AgentApi.JUNK_APPRAISE_MS / 200 && unknown.some((it) => !this.host.appraisalData!(it.guid)); w++) await sleep(200);
+    return this.inventory();
+  }
+  /** A junk list appraises at most this many unknown items, and waits this long (ms) for the answers. */
+  static readonly JUNK_APPRAISE_MAX = 30;
+  static readonly JUNK_APPRAISE_MS = 3000;
   /** Items a vendor answered "The X is unsellable." for (ACE: !IsSellable or Retained, whichever vendor it is). */
   private unsellableSeen = new Set<number>();
 
@@ -3505,11 +3770,18 @@ export class AgentApi {
     const lines = (): string[] => this.useOutcome(mark, since);
     // A vital ticking up (regeneration, while the server walks you there) is no answer: the Town Network portal
     // 81 m off was reported "didn't arrive" on a stamina tick, and the portal fired a moment later (2026-10-11).
-    const answered = (): boolean => lines().some((l) => !AgentApi.VITAL_LINE.test(l)) || !!reacted() || this.host.book?.()?.guid === g;
+    const answered = (): boolean => lines().some((l) => !AgentApi.VITAL_LINE.test(l) && !l.endsWith(AgentApi.OTHER_DOOR_NOTE)) || !!reacted() || this.host.book?.()?.guid === g;
     await this.settle(answered);
     // The server walks you to a distant object (its MoveTo) and acts only on arrival: a portal 20 m off answered
     // after the 10 s wait ("no reply", then portal space). While you are still closing in, keep waiting.
     if (!answered()) await this.whileApproaching(g, answered, AgentApi.USE_SERVER_WALK_MS);
+    // A lifestone attunes only after the Sanctuary gesture (ACE Lifestone.ActOnUse: the sound, the motion, then its
+    // UseMessage "You have attuned your spirit to this Lifestone…" as Magic chat, ~6 s after the Use), so the first
+    // line in, often someone else's (a Pumpkin Buffer's buff), ended the wait with no word of the bind (Arcanist, the
+    // Holtburg Life Stone, 2026-10-17 05:12:13Z; the attune line came at 05:12:19).
+    const lifestone = !!target0 && classify(target0, false) === 'lifestone';
+    const bindSaid = (): boolean => lines().some((l) => AgentApi.LIFESTONE_BOUND.test(l) || AgentApi.LIFESTONE_TOO_FAR.test(l)) || this.eventsSince(since).some((e) => e.type === 'use-failed');
+    if (lifestone) for (let i = 0; i < AgentApi.LIFESTONE_BIND_MS / 200 && !bindSaid(); i++) await sleep(200);
     // A portal the server's walk never took you to: walk into it, as a player does. The server's MoveTo for a portal
     // Use answered UseDone at once and never moved the body from 7 m (Dungeon Fern's portal, 2026-10-12); walk_to then
     // use worked.
@@ -3524,6 +3796,9 @@ export class AgentApi {
       return { ok: false, message: `couldn't reach ${name}: ${w.message}${this.dialogNote()}` };
     }
     const out = lines();
+    // A door that didn't swing while the replies came (another door did, or a refusal): said, so it isn't taken for opened.
+    const tNow = this.host.object(g);
+    if (mark.open !== undefined && out.length && tNow?.physicsState !== undefined && ((tNow.physicsState & PHYSICS_ETHEREAL) !== 0) === mark.open) out.push(`${name} itself did not swing: it is still ${mark.open ? 'open' : 'closed'}`);
     // The client's refusal of a door only its lever opens: remembered, and what may open it named.
     if (out.some((l) => AgentApi.DOOR_NOT_BY_HAND.test(l)) && target0 && classify(target0, false) === 'door') {
       this.doorsRefusedByHand.add(g >>> 0);
@@ -3531,6 +3806,10 @@ export class AgentApi {
     }
     const quest = portalQuestNote(out);
     if (quest) out.push(quest);
+    if (lifestone) {
+      if (out.some((l) => AgentApi.LIFESTONE_BOUND.test(l))) out.push(`linked to ${name}: you will resurrect here when you die, and Lifestone Recall (or /lifestone) brings you here`);
+      else if (!out.some((l) => AgentApi.LIFESTONE_TOO_FAR.test(l))) out.push(`no word of a bind within ${AgentApi.LIFESTONE_BIND_MS / 1000} s ("You have attuned your spirit to this Lifestone"): it may not have taken. The server binds you only if you are still within its reach when the gesture ends: stand still beside it and use it again`);
+    }
     const extra = reacted();
     const read = this.host.book?.()?.guid === g ? await this.readBook() : [];
     // Where you ended up: a use that never got there must not read as done (Aun Taguauri "used" from 25 m away).
@@ -3548,6 +3827,12 @@ export class AgentApi {
     if (classify(this.host.object(g) ?? { itemType: 0, objectDescFlags: 0, guid: g }, false) === 'vendor' && !extra) out.push(`no shop window opened for ${name}`);
     return { ok: !out.some((l) => l.startsWith('the server refused it')) && !short, message: [`used ${name}:`, ...out.map((l) => `  ${l}`), ...(extra ? [`  ${extra}`] : []), ...read, ...(short ? [`  ${short}`] : [])].join('\n') };
   }
+
+  /** A lifestone's bind line (its UseMessage), and ACE's YouHaveMovedTooFar when you stepped off during the gesture. */
+  static readonly LIFESTONE_BOUND = /\battuned your spirit\b/i;
+  static readonly LIFESTONE_TOO_FAR = /\bmoved too far\b/i;
+  /** How long a lifestone use waits for its bind line after the first reply (ms): the Sanctuary gesture takes ~6 s. */
+  static readonly LIFESTONE_BIND_MS = 10_000;
 
   /** A portal used this soon after you came through one, now in another space than you, is the one that took you (ms). */
   static readonly JUST_PORTED_MS = 60_000;
@@ -4313,7 +4598,7 @@ export class AgentApi {
     const sel = o0 && this.leftBehind(o0) ? null : sel0;
     const o = sel ? o0 : null;
     const kind = o ? classify(o, this.host.isAttackable(sel!)) : null;
-    if (sel && o && kind === 'monster' && this.host.isDying(sel)) return { ok: false, targetGone: true, message: `${s.name} not cast: your target ${o.name} is dead (pick another target)` };
+    if (sel && o && kind === 'monster' && this.host.isDying(sel)) return { ok: false, targetGone: true, message: `${s.name} not cast: your target ${o.name} is dead (pick another target)${this.deadTargetNote(sel)}` };
     if (sel && o && this.released(o)) return { ok: false, message: `${s.name} not cast: your target ${o.name} is out of sight (your client let it go: it is only where it was last seen)` };
     if (sel && (kind === 'monster' || kind === 'npc' || kind === 'player')) return sel;
     return { ok: false, message: `${s.name} needs a target: pass target= (a creature or player), or "self"` };
@@ -4335,8 +4620,8 @@ export class AgentApi {
       // A fellow out of the client's world is far more often through a portal or a recall than dead.
       const fellow = o ? undefined : (this.host.fellows?.() ?? []).find((f) => f.guid >>> 0 === g >>> 0);
       if (fellow) return `${s.name} not cast: your fellow ${fellow.name} is out of your view (in portal space after a portal or recall, or out of sight): ask in /f where they are`;
-      if (!o) return `${s.name} not cast: target gone (${this.nameOf(g)} is dead or out of view)`;
-      if (classify(o, this.host.isAttackable(g)) === 'monster' && this.host.isDying(g)) return `${s.name} not cast: target gone (${o.name} is dead)`;
+      if (!o) return `${s.name} not cast: target gone (${this.nameOf(g)} is dead or out of view)${this.deadTargetNote(g)}`;
+      if (classify(o, this.host.isAttackable(g)) === 'monster' && this.host.isDying(g)) return `${s.name} not cast: target gone (${o.name} is dead)${this.deadTargetNote(g)}`;
       return null;
     };
     if (tg) { const why = gone(tg); if (why) return { ok: false, targetGone: true, message: why }; }
@@ -4368,7 +4653,10 @@ export class AgentApi {
           : `${what} ${lof.blockedAt.toFixed(1)} m along the line would take the bolt`;
         const since = this.lineHintSince(tg);
         const spot = this.host.lineOfFireOpenSpot?.(tg);
-        const go = spot ? ` The line is open from ${this.lineHintSpot(tg, spot)} of you (walk_to "${spot.dist}m ${compassWord(spot.dx, spot.dy)}"), if it stays put.` : ' No spot within 3 m of you has an open line: go round the corner, into its room, or let it come to you.';
+        const beside = spot ? null : this.openLineBesideFellow(tg);
+        const go = spot ? ` The line is open from ${this.lineHintSpot(tg, spot)} of you (walk_to "${spot.dist}m ${compassWord(spot.dx, spot.dy)}"), if it stays put.`
+          : beside ? ` No spot within 3 m of you has an open line, but where ${beside.name} stands (${beside.where}) has: walk_to target="${beside.name}" within=2, if it stays put.`
+          : ' No spot within 3 m of you has an open line: go round the corner, into its room, or let it come to you.';
         return { ok: false, message: `${s.name} not cast: no line of fire to ${this.nameOf(tg)} (${lof.dist.toFixed(1)} m away): ${where}.${since}${go} Then cast.` };
       }
     }
@@ -4695,6 +4983,13 @@ export class AgentApi {
     const tg = t;
     const name = this.nameOf(tg);
     const untilHealth = Math.min(Math.max(opts.untilHealth ?? AgentApi.CAST_REPEAT_HEALTH, 0), 1);
+    // Already under its health limit: not a cast made. "Flame Bolt V … 0 times (repeat); stopped: your health is 28/162
+    // (17%), below the 50% you set" read as a failed cast (Arcanist, Mountain Keep, 2026-10-17 04:1xZ).
+    const v0 = this.host.self();
+    if (v0 && v0.health.max && untilHealth > 0 && v0.health.current / v0.health.max < untilHealth) {
+      const p = (f: number): string => `${Math.round(f * 100)}%`;
+      return Promise.resolve({ ok: false, message: `${s.name} not cast: your health (${v0.health.current}/${v0.health.max}, ${p(v0.health.current / v0.health.max)}) is already under until_health (${p(untilHealth)}${opts.untilHealth === undefined ? ', the default' : ''}), where a repeat stops: heal first, or pass a lower until_health (until_health=0.1) to cast at this health` });
+    }
     const maxCasts = Math.min(Math.max(Math.floor(opts.maxCasts ?? AgentApi.CAST_REPEAT_MAX_CASTS), 1), 100);
     const maxMs = Math.min(Math.max(opts.maxMs ?? AgentApi.CAST_REPEAT_MAX_MS, 1000), 600_000);
     const baseMana = this.host.spellTableData?.()?.spells.get(s.id)?.baseMana;
@@ -4710,6 +5005,10 @@ export class AgentApi {
     const pct = (f: number): string => `${Math.round(f * 100)}%`;
     // The target died or went before any cast: an expected end (a fellow's kill landed first), not a failure.
     let goneFirst = false;
+    // A follow running when it starts: a repeat is a task of its own (one task at a time), and a caster stands to cast
+    // (retail has no follow to keep), so the follow ends. Said in the answer: "Cast replaces a follow" read as a fault
+    // with nothing saying the follow had stopped (Arcanist, 2026-10-17 05:26Z report).
+    const followed = this.task && this.task.label.startsWith('following ') ? this.task.label.slice('following '.length) : null;
     const summary = (why: string): AgentResult => {
       const v = this.host.self();
       const vit = v ? `you: health ${v.health.current}/${v.health.max}, stamina ${v.stamina.current}/${v.stamina.max}, mana ${v.mana.current}/${v.mana.max}` : '';
@@ -4724,6 +5023,7 @@ export class AgentApi {
           ...(joined.size ? [`  joined in meanwhile: ${[...joined].map(([g, j]) => `${j.name} #${g.toString(16)} (${this.attackerSeenText(j.name)})`).join(', ')}`] : []),
           `  limits: health below ${pct(untilHealth)} (until_health), ${maxCasts} casts, ${Math.round(maxMs / 1000)} s; a new attacker stops it only when it casts, hits for ${pct(AgentApi.CAST_REPEAT_ATTACKER_HIT_FRAC)}+ of your health, or is above your level`,
           ...(vit ? [`  ${vit}`] : []),
+          ...(followed ? [`  your follow of ${followed} stopped when this began (one task at a time, and you stand still to cast): ac_follow target="${followed}" to follow on`] : []),
         ].join('\n'),
       };
     };
@@ -4734,7 +5034,7 @@ export class AgentApi {
     const finish = (r: AgentResult): void => { if (this.task === task) { this.task = null; task.resolve(r); } };
     const targetGone = (): string | null => {
       const o = this.host.object(tg);
-      if (this.host.isDying(tg) || this.killedRecently(name, startSeq) || (!o && (this.dyingSeen.has(tg) || this.gone.get(tg)?.died))) { this.noteDead(tg); return `${name} died`; }
+      if (this.host.isDying(tg) || this.killedRecently(name, startSeq, tg) || (!o && (this.dyingSeen.has(tg) || this.gone.get(tg)?.died))) { this.noteDead(tg); return `${name} died`; }
       if (!o) return `${name} is gone from view (it died out of sight, fled, or you moved away)`;
       if (this.released(o)) return `${name} is out of sight (your client let it go)`;
       return null;
@@ -5310,6 +5610,98 @@ export class AgentApi {
       () => this.host.inventory().find((i) => i.guid === g)?.where !== 'equipped', 4000, { item: name });
   }
 
+  /**
+   * The pack a move names: a side pack by its own name first; "main" / "main pack" / "pack" / 0 the main pack; "side" / "side pack" the side pack with the most
+   * free slots; a number its pack slot (1 = the first side pack); else a side pack by name or #id. A string when none.
+   */
+  packFor(to: string | number | null | undefined): { slot: number; guid: number; name: string; capacity: number; count: number } | string {
+    const ps = this.host.packs?.() ?? [];
+    if (!ps.length) return 'moving items between packs is not available in this client';
+    const named = ps.map((p) => ({ ...p, name: p.slot === 0 ? 'main pack' : (this.host.inventory().find((i) => i.guid === p.guid)?.name ?? `side pack ${p.slot}`) }));
+    const side = named.filter((p) => p.slot > 0);
+    const list = (): string => named.map((p) => `${p.name}${p.slot ? ` #${p.guid.toString(16)}` : ''} (${p.count}/${p.capacity})`).join(', ');
+    const s = to === null || to === undefined ? 'side' : String(to).trim().toLowerCase();
+    // A side pack's own name first: Bulwark's side pack is called "Pack" (stream, 2026-10-17).
+    const exact = side.filter((p) => p.name.toLowerCase() === s);
+    if (exact.length) return [...exact].sort((a, b) => (b.capacity - b.count) - (a.capacity - a.count))[0];
+    if (/^(0|main|main ?pack|pack|backpack|inventory)$/.test(s)) return named.find((p) => p.slot === 0) ?? 'no main pack';
+    if (/^(side|side ?packs?|sidepack)$/.test(s)) {
+      if (!side.length) return 'you carry no side pack (a Sack, Pack or Pouch in your pack slots)';
+      return [...side].sort((a, b) => (b.capacity - b.count) - (a.capacity - a.count) || a.slot - b.slot)[0];
+    }
+    if (/^\d+$/.test(s)) return named.find((p) => p.slot === Number(s)) ?? `no pack in slot ${s}; your packs: ${list()}`;
+    const id = /^#?(?:0x)?([0-9a-f]{6,8})$/.exec(s);
+    if (id) { const g = parseInt(id[1], 16) >>> 0; const hit = side.find((p) => p.guid >>> 0 === g); if (hit) return hit; }
+    const loose = side.filter((p) => p.name.toLowerCase().includes(s));
+    if (!loose.length) return `no side pack named "${to}"; your packs: ${list()}`;
+    return [...loose].sort((a, b) => (b.capacity - b.count) - (a.capacity - a.count))[0];
+  }
+
+  /**
+   * Move an item from one of your packs into another: a side pack or back to the main pack, as dragging it onto the
+   * pack's icon in the inventory does (UIElement_ItemList::AcceptDragObject → PutItemInContainer, or a merge onto a
+   * stack of the same thing there). Done once the server has moved it (its container in the client's inventory changes
+   * only on the server's InventoryPutObjInContainer). Bulwark's main pack sat full at 109/102 while his Pack sat 0/24
+   * with no way to fill it (stream, 2026-10-17 06:14Z report).
+   */
+  async moveItem(t: TargetArg, to?: string | number | null): Promise<AgentResult> {
+    const g = this.need(t, 'inventory', 'item');
+    if (typeof g !== 'number') return g;
+    const pack = this.packFor(to);
+    if (typeof pack === 'string') return { ok: false, message: pack };
+    return this.moveItemTo(g, pack);
+  }
+
+  private async moveItemTo(g: number, pack: { slot: number; guid: number; name: string; capacity: number; count: number }): Promise<AgentResult> {
+    const name = this.nameOf(g);
+    const it = this.inventory().find((i) => i.guid === g);
+    if (!it) return { ok: false, message: `${name} is not in your packs` };
+    if (it.where === 'equipped') return { ok: false, message: `${name} is worn: ac_unequip it first (it goes to your main pack)` };
+    const slotRow = this.host.itemSlots?.().find((i) => i.guid === g);
+    if (slotRow?.isPack || it.where === 'pack slots') return { ok: false, message: `${name} is a pack (or another item that takes a pack slot): it can't go inside another pack` };
+    if (g >>> 0 === pack.guid >>> 0) return { ok: false, message: `${name} can't go inside itself` };
+    const inMain = (i: AgentItem | undefined): boolean => !!i && i.where !== 'equipped' && i.inside === undefined;
+    const isThere = (i: AgentItem | undefined): boolean => (pack.slot === 0 ? inMain(i) : i?.inside === pack.guid >>> 0);
+    if (isThere(it)) return { ok: true, message: `${name} is already in your ${pack.name}` };
+    const stackable = (slotRow?.maxStack ?? 1) > 1;
+    const now = this.host.packs?.().find((p) => p.slot === pack.slot) ?? pack;
+    if (now.count >= now.capacity && !stackable) return { ok: false, message: `not moved: ${name}: your ${pack.name} is full (${now.count}/${now.capacity})` };
+    if (!this.host.placeItem) return { ok: false, message: 'moving items is not available in this client' };
+    const from = it.where;
+    return this.inventoryRequest(`moved ${name} from your ${from} into your ${pack.name}`, `not moved: ${name}`, () => this.host.placeItem!(g, { packSlot: pack.slot }),
+      () => { const i = this.host.inventory().find((x) => x.guid === g); return !i || isThere(i); }, 4000, { item: name });
+  }
+
+  /**
+   * Move every carried item an ac_inventory filter= picks (junk, salvage, a name …) into one pack, one request at a
+   * time, until that pack is full; each move is reported with the server's answer.
+   */
+  async moveItems(filter: string, to?: string | number | null, max = 50): Promise<AgentResult> {
+    const pack = this.packFor(to);
+    if (typeof pack === 'string') return { ok: false, message: pack };
+    const kind = filterInventory([], filter).kind;
+    const all = kind === 'junk' ? await this.junkChecked() : this.inventory();
+    const inMain = (i: AgentItem): boolean => i.inside === undefined;
+    const packIds = new Set((this.host.itemSlots?.() ?? []).filter((i) => i.isPack).map((i) => i.guid >>> 0));
+    const picked = filterInventory(all, filter).items.filter((i) => i.where !== 'equipped' && i.where !== 'pack slots' && !packIds.has(i.guid >>> 0)
+      && !(pack.slot === 0 ? inMain(i) : i.inside === pack.guid >>> 0));
+    if (!picked.length) return { ok: true, message: `nothing to move: no ${kind ?? `"${filter}"`} items outside your ${pack.name}` };
+    const out: string[] = [];
+    let moved = 0, failed = 0;
+    for (const it of picked.slice(0, Math.max(1, max))) {
+      const room = this.host.packs?.().find((p) => p.slot === pack.slot);
+      if (room && room.count >= room.capacity) { out.push(`your ${pack.name} is full (${room.count}/${room.capacity}): stopped`); break; }
+      const r = await this.moveItemTo(it.guid, pack);
+      if (r.ok) moved++; else failed++;
+      out.push(`${it.name} #${it.guid.toString(16)}: ${r.message.replace(/\n/g, '\n    ')}`);
+      if (!r.ok && failed >= 3 && moved === 0) { out.push('three refusals in a row: stopped'); break; }
+    }
+    const left = picked.length - moved - failed;
+    const room = this.host.packs?.().find((p) => p.slot === pack.slot);
+    const head = `moved ${moved} of ${picked.length} into your ${pack.name}${room ? ` (now ${room.count}/${room.capacity})` : ''}${left > 0 ? `; ${left} not tried` : ''}`;
+    return { ok: moved > 0 || picked.length === 0, message: [head, ...out.map((l) => `  ${l}`)].join('\n') };
+  }
+
   async appraise(t: TargetArg, opts: { quiet?: boolean } = {}): Promise<AgentResult> {
     const g = this.need(t, 'any', 'object');
     if (typeof g !== 'number') return g;
@@ -5327,6 +5719,12 @@ export class AgentApi {
   static readonly PORTAL_CLEARANCE_M = 0.8;
   /** Holds at a portal's disk in a row (portalGuard) before the walk ends saying the only way on passes the portal. */
   static readonly PORTAL_HOLDS_MAX = 6;
+  /**
+   * A goal this near a portal's disk (m past its edge, on top of the walk's arrival reach) is moved out to it: arriving
+   * "within 2 m" of a point 3.2 m from the Mountain Keep portal's centre (its disk 2.7 m) took Arcanist into it and split
+   * the fellowship (walk_to "54.7N, 32.9E", 2026-10-17 05:07:38Z, WeenieError ITeleported).
+   */
+  static readonly PORTAL_GOAL_MARGIN_M = 1;
   /** walk_to line=true: each close-in for an open line of fire takes this much off the distance (m). */
   static readonly LINE_STEP_M = 1.5;
   /** …down to the target's reach plus this (beside it). */
@@ -5400,7 +5798,9 @@ export class AgentApi {
       costs.push(Number(r.cost ?? 0));
       done++;
     }
-    if (!first || !last) return { ok: false, message: stop };
+    // Not one raise: times= raises as many as the XP covers, and the first alone costs more. "times=10 checked the
+    // cost of all 10" read Bulwark, refused at 154,670 XP for one Melee Defense raise with 32,891 (2026-10-17 05:00Z).
+    if (!first || !last) return { ok: false, message: times > 1 && /\bcosts\b/.test(stop) ? `${stop} (not even one of the ${Math.min(times, 50)} raises asked: times= raises as many as your XP covers, and the next raise alone costs more)` : stop };
     const head = first.from !== undefined && last.to !== undefined ? `${String(first.name)} ${String(first.from)} → ${String(last.to)}` : `${String(first.name)} raised`;
     // Each raise's price when there are a few: a first raise that only finished a rank the skill had part-filled by
     // use (21 XP) beside the full steps after it read as "about 800 a raise, not the 21 listed" (2026-10-13).
@@ -5669,7 +6069,9 @@ export class AgentApi {
   }
 
   private startTask(label: string, step: Task['step'], cancel: () => void, extra: Pick<Task, 'interrupted' | 'kind' | 'quiet'> = {}): Promise<AgentResult> {
-    this.cancelTask(`replaced by ${label}`);
+    // The task this start replaces answers "interrupted (replaced by …)" as part of this start: not superseded by it.
+    this.taskStarting = true;
+    try { this.cancelTask(`replaced by ${label}`); } finally { this.taskStarting = false; }
     const n = ++this.tasksStarted;
     const began = this.host.now();
     return new Promise((resolve) => {
@@ -5683,6 +6085,9 @@ export class AgentApi {
           // with "stopped … short" while the walk went on.
           if (extra.quiet || r.lostFellow || r.rejoinFellow) return;
           this.push('task-done', r.message.startsWith(`${label}: `) ? r.message : `${label}: ${r.message}`);
+          // The first task that starts after this end supersedes it (one started by the very call that replaced it doesn't).
+          this.taskDoneBefore.set(this.seqN, this.tasksStarted + (this.taskStarting ? 1 : 0));
+          if (this.taskDoneBefore.size > 200) for (const k of [...this.taskDoneBefore.keys()].slice(0, 100)) this.taskDoneBefore.delete(k);
           if (this.host.now() - began < AgentApi.TASK_ANSWERED_MS) {
             this.quickTaskDone.set(this.seqN, n);
             if (this.quickTaskDone.size > 200) for (const k of [...this.quickTaskDone.keys()].slice(0, 100)) this.quickTaskDone.delete(k);
@@ -5700,6 +6105,17 @@ export class AgentApi {
    */
   private quickTaskDone = new Map<number, number>();
   static readonly TASK_ANSWERED_MS = 15_000;
+  /**
+   * Every task-done event → the number of the last task started when it came (the one replaced by a start counts as that
+   * start's). A task that has started since was a new order given after this end, so the end is history: Bulwark's
+   * `ac_attack #80005cdb` went out 3 s after his attack on #8000fef1 (another Dread Mu-miyah) ended on its kill, and the
+   * wait after it handed him that attack's task-done, "attacking Dread Mu-miyah: Dread Mu-miyah is dead", while #5cdb
+   * kept hitting him (Mountain Keep, 2026-10-17 08:10:13–17Z; the 15 s quickTaskDone rule let it through, the fight
+   * having run 15.5 s).
+   */
+  private taskDoneBefore = new Map<number, number>();
+  /** True while startTask cancels the task it replaces (that task's "interrupted" belongs to this start). */
+  private taskStarting = false;
 
   /**
    * Walk/run to an object, a map coordinate or a global point, steering each
@@ -5802,7 +6218,7 @@ export class AgentApi {
    * 0x01D20127 (floor −12), and Bulwark's walk_to her routed down through the pit to −12 and stood "stuck 0.5 m short"
    * under her (2026-10-16 15:13Z). A host that can't say keeps `cell`.
    */
-  private feetCell(cell: number, at: { x: number; y: number; z: number }): number {
+  private feetCell(cell: number, at: { x: number; y: number; z: number }, walkerZ?: number): number {
     if ((cell & 0xffff) < 0x100 || !this.host.floorsAt) return cell;
     const lb = (cell & 0xffff0000) >>> 0;
     const under = (x: number, y: number): Array<{ cell: number; z: number }> => (this.host.floorsAt!(lb, x, y) ?? []).filter((f) => (f.cell & 0xffff) >= 0x100 && Math.abs(f.z - at.z) <= AgentApi.FEET_FLOOR_M);
@@ -5814,6 +6230,17 @@ export class AgentApi {
           const f = under(at.x + r * Math.sin((i * Math.PI) / 4), at.y + r * Math.cos((i * Math.PI) / 4)).sort((a, b) => Math.abs(a.z - at.z) - Math.abs(b.z - at.z))[0];
           if (f) return f.cell >>> 0;
         }
+      }
+      // A goal a storey over or under the walker (`walkerZ`) with no floor near its height (a creature mid-step or mid-fall
+      // at a ledge): the server's cell, named by its sphere's centre, can be the walker's own hall, and the walk then aims
+      // straight at it overhead. The run-up from 0x01D20128 to a Dread on the −6 ledge 0x01D201FD planned the climb, then
+      // after a door re-planned to 0x01D20128 itself, Bulwark's own hall, and stalled "stuck 4.4 m short … walls all
+      // round" under it (Mountain Keep, 2026-10-17 07:54:12–07:55:05Z). The floor under it nearest its height, off the
+      // walker's storey, is its room.
+      if (walkerZ !== undefined && Math.abs(at.z - walkerZ) >= AgentApi.FLOOR_APART_M) {
+        const off = (this.host.floorsAt(lb, at.x, at.y) ?? []).filter((f) => (f.cell & 0xffff) >= 0x100 && Math.abs(f.z - walkerZ) >= AgentApi.FLOOR_APART_M)
+          .sort((a, b) => Math.abs(a.z - at.z) - Math.abs(b.z - at.z))[0];
+        if (off) return off.cell >>> 0;
       }
       return cell;
     }
@@ -5975,6 +6402,8 @@ export class AgentApi {
   static readonly APPROACH_WALK_M = 3;
   /** A player goal that has moved under 0.3 m this long is standing (the walk's last metres are walked), ms. */
   static readonly GOAL_STILL_MS = 600;
+  /** A moving player target counts as reached once within reach on your floor this long (ms). */
+  static readonly PLAYER_ARRIVE_CONFIRM_MS = 700;
   /** A walk to map coordinates ending this far off says how far that is on the map (240 m to the unit). */
   static readonly COORDS_SCALE_NOTE_M = 100;
   /** A walk to a cell of a landblock not loaded at the start gives up this near the landblock's middle if it still isn't. */
@@ -6153,10 +6582,61 @@ export class AgentApi {
       if (t?.sea && cellWait) return Promise.resolve({ ok: false, message: `${label}: the client hasn't loaded that cell, and its landblock is open sea: most likely a dungeon's cell (dungeons sit in landblocks of their own). No walk gets into one: go in by its portal${((v) => (v ? ` (${v})` : ''))(this.portalToNote(cellTarget ?? 0))}.` });
       if (t?.sea) return Promise.resolve({ ok: false, message: `${label}: that spot is out in open sea (a landblock of deep water: no one can wade it, and AC has no swimming). Pick a point on land.` });
     }
+    // A goal at a portal that isn't the walk's destination (a map point on it, someone standing in it): the goal moves out
+    // to the portal's edge, so the arrival never comes within its reach, and the answer says so. Only use (or enterPortal)
+    // goes through a portal.
+    let portalGoal: { label: string; guid: number; dist: number } | null = null;
+    {
+      const tg = targetGuid ? this.host.object(targetGuid) : null;
+      if (!opts.enterPortal && !(tg && classify(tg, false) === 'portal')) {
+        const raw = goal;
+        let cache: { at: number; disks: Array<{ x: number; y: number; z: number; r: number; guid: number; label: string }> } | null = null;
+        const disks = (): Array<{ x: number; y: number; z: number; r: number; guid: number; label: string }> => {
+          const now = this.host.now();
+          if (cache && now - cache.at < 1000) return cache.disks;
+          const out: Array<{ x: number; y: number; z: number; r: number; guid: number; label: string }> = [];
+          for (const o of this.host.objects()) {
+            if (!o.cell || o.wielderId || o.containerId || o.guid === targetGuid || classify(o, false) !== 'portal') continue;
+            const g = toGlobal(o.cell, o.x, o.y);
+            out.push({ x: g.x, y: g.y, z: o.z, r: (this.host.objectReach?.(o.guid) || 1) + AgentApi.PORTAL_CLEARANCE_M, guid: o.guid >>> 0, label: o.name });
+          }
+          cache = { at: now, disks: out };
+          return out;
+        };
+        goal = () => {
+          const p = raw();
+          if (!p) return p;
+          portalGoal = null;
+          for (const dk of disks()) {
+            if (p.z !== undefined && Math.abs(p.z - dk.z) > 3) continue;
+            const dc = Math.hypot(p.x - dk.x, p.y - dk.y);
+            const keep = dk.r + within + AgentApi.PORTAL_GOAL_MARGIN_M;
+            if (dc >= keep) continue;
+            // Out along the line from the portal to the goal; a goal on its centre, out toward you.
+            let ux = p.x - dk.x, uy = p.y - dk.y, l = Math.hypot(ux, uy);
+            if (l < 0.5) { const me = this.me(); if (me) { ux = me.g.x - dk.x; uy = me.g.y - dk.y; l = Math.hypot(ux, uy); } }
+            if (l < 1e-6) { ux = 0; uy = -1; l = 1; }
+            portalGoal = { label: dk.label, guid: dk.guid, dist: dc };
+            return { ...p, x: dk.x + (ux / l) * keep, y: dk.y + (uy / l) * keep };
+          }
+          return p;
+        };
+      }
+    }
+    const portalGoalText = (): string => {
+      if (!portalGoal) return '';
+      const o = this.host.object(portalGoal.guid), me = this.me();
+      const now = o && o.cell && me ? Math.hypot(toGlobal(o.cell, o.x, o.y).x - me.g.x, toGlobal(o.cell, o.x, o.y).y - me.g.y) : null;
+      return `; that point is ${portalGoal.dist.toFixed(1)} m from ${portalGoal.label} #${portalGoal.guid.toString(16)}, a portal, so the walk stopped outside its edge${now !== null ? ` (${now.toFixed(1)} m from it)` : ''}: stepping into a portal takes you through it. ac_use it to go through`;
+    };
     // A player (a fellow) moves: the walk takes its last metres at a walk so it stops on them (APPROACH_WALK_M).
     const goalIsPlayer = ((o) => !!o && classify(o, false) === 'player')(targetGuid ? this.host.object(targetGuid) : null);
+    // The walk's target is itself a portal (walk_to "Mountain Keep"): its name, for an answer after going through it.
+    const targetPortalName = ((o) => (o && classify(o, false) === 'portal' ? o.name : null))(targetGuid ? this.host.object(targetGuid) : null);
     // Where that player was last seen moving to, and since when they have stood there.
     let goalStill: { x: number; y: number; at: number } | null = null;
+    // A moving player target first within reach and on your floor (ms), for the arrival's confirmation.
+    let playerNearSince = 0;
     const start = this.host.now();
     // No time limit given: long enough for the distance (a 1.4 km walk took 90 s for 300 m in a headless
     // window, with its searches, and "timed out" read as a failure, 2026-10-11).
@@ -6184,6 +6664,16 @@ export class AgentApi {
     let edgeFellow: { x: number; y: number; at: number } | null = null;
     // A leap the doorway route took whose take-off no jump search found (its width, and where it lands, global).
     let leapFailed: { width: number; x: number; y: number } | null = null;
+    // A leap of the doorway route that was jumped and came down off the plan (short of the far side): its width, and
+    // where the body came down (global). Bulwark's 7.1 m leap over Mountain Keep's pit 0x01D202A7 landed 2.4 m short on
+    // the far lip, slid in and fell, and the walk then searched until it "went round in circles" (2026-10-17 04:22–04:23Z).
+    let leapMissed: { width: number; x: number; y: number; z: number } | null = null;
+    const leapMissedText = (): string => {
+      if (!leapMissed) return '';
+      const me = this.me();
+      const off = me ? Math.hypot(leapMissed.x - me.g.x, leapMissed.y - me.g.y) : 0;
+      return `the only doorway route there leaps a ${leapMissed.width.toFixed(1)} m gap over open air, and your jump across it came down short (${me && off >= 1 ? `${off.toFixed(0)} m ${compassPoint(bearing(me.g, leapMissed))} of you, ` : 'here, '}z ${leapMissed.z.toFixed(1)}), so the leap the planner counted on doesn't carry for you here`;
+    };
     // Following: where the leader stood (global, feet height) and the room their feet were in (feetCell) when the way to
     // them was last planned, and when (FOLLOW_REPLAN_M).
     let leaderPlanned: { x: number; y: number; z: number; cell: number } | null = null;
@@ -6362,8 +6852,14 @@ export class AgentApi {
     let directWide = false;
     // The doors found locked that the doorway route's only way goes through (planRoute's lastLockedOnly): the walk ends.
     let lockedOnly: number[] | null = null;
+    // No doorway route, no gap a jump or drop crosses, and the openings overhead out of the rooms you can walk are past
+    // your jump (cutOffNote): the walk ends at once saying so and which way the parts are joined, instead of searching
+    // for minutes to "walls all round" (Arcanist, Mountain Keep's −6 halls, 2026-10-17 04:24–04:45Z).
+    let cutOff: string | null = null;
     // Arrivals refused for having run well past the goal (OVERSHOOT_M): the walk turned back that many times.
     let overshoots = 0;
+    // The give-up's one last plan to a goal on another floor (its own floor's doorway way) has run.
+    let storeyReplanned = false;
     // Legs (by their aim, to the half metre) whose whole ladder of searches found no way, and how often.
     const legsExhausted = new Map<string, number>();
     const aimKey = (a: { x: number; y: number; drop?: number }): string => `${Math.round(a.x * 2)},${Math.round(a.y * 2)}${a.drop !== undefined ? 'd' : ''}`;
@@ -6391,6 +6887,8 @@ export class AgentApi {
     // Holds in a row at a portal's disk (portalGuard), and the portal last come near (named if the walk went through one).
     let portalHolds = 0;
     let portalBy: { label: string; guid: number; dist: number; at: number } | null = null;
+    // When the walk last jumped or dropped (a flight can't be steered: named if it carried the body into a portal).
+    let lastLeapAt = 0;
     // What the walk did on the way, for its result.
     const feats: { drops: number[]; jumps: number; falls: number[] } = { drops: [], jumps: 0, falls: [] };
     // An unplanned fall under way: where it began (feet height), for feats.falls.
@@ -6410,6 +6908,8 @@ export class AgentApi {
     /** The walk's "stuck" answer: what the searches found, the doors tried, the drops and leaps that didn't work. */
     const stuckResult = (d: number): AgentResult => {
       const me = this.me(), gl = goal();
+      // A goal a storey over or under you: walls round you on your floor are not what keeps you from it.
+      const storey = me && gl && gl.z !== undefined && Math.abs(gl.z - me.s.z) >= AgentApi.FLOOR_APART_M ? gl.z - me.s.z : null;
       // Only doors that stayed shut are named as not letting you through: one that opened did its part (a "stuck"
       // blaming a door a plain use opened at once sent Arcanist round the Holtburg tower, 2026-10-11).
       const opened = (g: number): boolean => { const o = this.host.object(g); return doorsOpened.has(g) || (!!o && o.physicsState !== undefined && (o.physicsState & PHYSICS_ETHEREAL) !== 0); };
@@ -6417,10 +6917,12 @@ export class AgentApi {
       const shutNames = [...doorsTried].filter((g) => !opened(g) && !leverDoorsMet.has(g)).map((g) => this.nameOf(g));
       const openNames = [...doorsTried].filter(opened).map((g) => this.nameOf(g));
       const why = [
-        noWay ? `no walkable way from here: the game's collision finds walls all round between you and it${jumpSearch() ? ', and no jump or drop your health can take gets past them' : ''}` : 'blocked',
+        storey !== null ? `it is ${Math.abs(storey).toFixed(0)} m ${storey > 0 ? 'above' : 'below'} you, on another floor, and no way ${storey > 0 ? 'up' : 'down'} to that floor was found from here${noWay && jumpSearch() ? ' (no jump or drop your health can take reaches it)' : ''}`
+          : noWay ? `no walkable way from here: the game's collision finds walls all round between you and it${jumpSearch() ? ', and no jump or drop your health can take gets past them' : ''}` : 'blocked',
         // The doorway route's only way there was a leap no take-off was found for (Mountain Keep 0x01D202A7: from the
         // fountain wing to 0x01D202B3 / 0x0340 the cell graph's only way is a 7.1 m jump corner to corner over a pit,
         // 2026-10-16): say that, so "walled off" isn't read as a planner fault and a partner's walk the same way isn't tried.
+        leapMissedText(),
         leapFailed ? `the only doorway route there leaps a ${leapFailed.width.toFixed(1)} m gap over open air (landing ${me ? `${Math.hypot(leapFailed.x - me.g.x, leapFailed.y - me.g.y).toFixed(0)} m ${compassPoint(bearing(me.g, leapFailed))} of you` : 'across it'}), and no take-off your jump lands it from was found; every other way from this part of the dungeon is cut off from there` : '',
         shutNames.length ? `tried the door${shutNames.length > 1 ? 's' : ''} ${shutNames.join(', ')}, which stayed shut: locked, or it needs a key` : '',
         openNames.length ? `opened ${openNames.join(', ')}, but the way on is still blocked` : '',
@@ -6536,7 +7038,8 @@ export class AgentApi {
       if (fresh.length) this.trace(`walk: keeping clear of ${fresh.map((m) => `${m.label} (${m.r} m)`).join(', ')} on the way`);
       return true;
     };
-    const jumpSearch = (): JumpSearch | null => this.jumpSearch();
+    // Never a jump or drop into (or over) a portal's disk the walk wasn't sent into: a flight can't be steered out of one.
+    const jumpSearch = (): JumpSearch | null => { const js = this.jumpSearch(); return js ? { ...js, avoid: portals } : null; };
     const wideOpts = { spacing: 1, margin: 35, maxNodes: 6000 };
     // The far search (outdoors, once per leg): a coarse grid over a much bigger area, for a wall whose way through lies
     // outside the wide box. Its own wall clock: it is the one search that may stand longer.
@@ -6684,6 +7187,9 @@ export class AgentApi {
       search = new PathSearch(probe!, from, mid, { within: 4, spacing: 1, margin: 20, maxNodes: 6000 });
       stretchSearch = search;
     };
+    // The first doorway route's climb above both ends (plan), for the answer.
+    let routeClimb: { up: number; drops: number } | null = null;
+    const me0z = this.host.self()?.z ?? null;
     const plan = (): void => {
       const gl = goal();
       route = gl && !directWide ? this.planRoute(gl, goalLocal(), shutNow(), dropsFailed) : [];
@@ -6692,7 +7198,19 @@ export class AgentApi {
         leaderPlanned = gl && lo?.cell ? { x: gl.x, y: gl.y, z: gl.z ?? lo.z, cell: this.feetCell(lo.cell, lo) >>> 0 } : null;
         leaderPlannedAt = this.host.now();
       }
+      // The doorway way there climbing well above both ends (Mountain Keep's east halls at −12 reach 0x01D20101, also at −12,
+      // only up the stairs to +2, along the top and down a 6 m drop and the ramps: no way on that floor joins them). Said in
+      // the answer, so a walk "upstairs, away from the lower rooms" isn't read as a wrong turn (Bulwark, 2026-10-17 05:35Z).
+      if (!routeClimb && route.length && gl && me0z !== null && !follow) {
+        const ends = Math.max(me0z, gl.z ?? me0z);
+        const top = Math.max(...route.map((q) => q.z ?? ends));
+        if (top - ends >= AgentApi.ROUTE_CLIMB_NOTE_M) {
+          routeClimb = { up: top - ends, drops: route.filter((q) => q.drop !== undefined).length };
+          this.trace(`walk route: climbs ${routeClimb.up.toFixed(0)} m above both ends (no way on the floor between)`);
+        }
+      }
       lockedOnly = route.length || !gl || directWide ? null : this.lastLockedOnly;
+      cutOff = route.length || !gl || directWide || follow || lockedOnly || this.barrierNote(goalLocal()?.cell ?? undefined) ? null : this.cutOffNote();
       // A doorway route far longer than the straight distance (round by a rift and down the ramps of the doll dungeon,
       // ~300 m for a goal 40 m off): time for it, unless a time was given. Following, the duration is the limit.
       const me = this.me();
@@ -6729,6 +7247,7 @@ export class AgentApi {
     // The keys of a standing long jump: the charge starts with nothing held (CMotionInterp standing_longjump),
     // the forward key (and Shift for a walking jump) goes down during it, and the release launches.
     const leap = (j: JumpSpec): void => {
+      lastLeapAt = this.host.now();
       const hold = Math.max(120, j.holdMs);
       this.host.key('Space', true);
       setTimeout(() => { if (j.walk) this.host.key('ShiftLeft', true); this.host.key('KeyW', true); }, 60);
@@ -6747,6 +7266,7 @@ export class AgentApi {
           : `hit on the way (${underAttack}), and you did NOT get away: you moved ${fledM.toFixed(1)} m after the first hit`);
       }
       if (waited > 1000) notes.push(`waited ${Math.round(waited / 1000)} s for ${opts.stayWith}`);
+      if (routeClimb) notes.push(`the only doorway way there climbs about ${routeClimb.up.toFixed(0)} m above both ends and comes back down${routeClimb.drops ? ` (${routeClimb.drops === 1 ? 'a drop' : `${routeClimb.drops} drops`} on the way down)` : ''}: no doorway, stair or ramp on your floor joins your room to it, so a walk there goes up first`);
       // A map coordinate's scale with the distance left: 240 m to the unit. "stopped 741 m short" for "0.7N, 51.4E" read
       // as impossible to a player who had it "just N" of 2.3S, 50.6E (Arcanist, 2026-10-16); it was right: 3.0 units
       // north and 0.8 east, 745 m. And "1489 m short" of Daiklos from Holtburg's lifestone (8.4 S, 4.4 W: 2.3 km).
@@ -6764,7 +7284,7 @@ export class AgentApi {
         // A creature standing over open air (no floor under its feet): that first, the reason no way reaches it.
         const tg = targetGuid ? this.host.object(targetGuid) : null;
         const air = tg && (tg.itemType & IT.Creature) ? this.noFloorUnder(tg) : null;
-        const note = air ?? this.barrierNote(goalLocal()?.cell ?? undefined);
+        const note = air ?? this.barrierNote(goalLocal()?.cell ?? undefined) ?? this.cutOffNote(true);
         if (note) notes.push(note);
       }
       // Doors on the way only a lever or switch opens: which, and what may open them (the walk never uses one by hand).
@@ -6780,7 +7300,10 @@ export class AgentApi {
         if (f.dist === undefined) {
           const fg = (this.host.fellows?.() ?? []).find((x) => x.name === f.name)?.guid;
           const lo = fg !== undefined ? this.host.object(fg) : null, meL = this.me();
-          const last = lo && lo.cell && meL ? ((g) => `; last seen ${Math.hypot(g.x - meL.g.x, g.y - meL.g.y).toFixed(0)} m ${compassPoint(bearing(meL.g, g))} of you`)(toGlobal(lo.cell, lo.x, lo.y)) : '';
+          // Placed last in another space (through a portal, a recall): that, not "last seen 32352 m E of you" (Arcanist, after
+          // Bulwark took the Mountain Keep Surface portal, 2026-10-17 05:49Z).
+          const away = lo && lo.cell && meL ? this.elsewhereText(meL.s.cell, lo) : null;
+          const last = away ? `; ${away}` : lo && lo.cell && meL ? ((g) => `; last seen ${Math.hypot(g.x - meL.g.x, g.y - meL.g.y).toFixed(0)} m ${compassPoint(bearing(meL.g, g))} of you`)(toGlobal(lo.cell, lo.x, lo.y)) : '';
           notes.push(`${f.name} is out of sight now (${was.toFixed(0)} m away when this walk set off${last})${was <= AgentApi.FELLOW_BEHIND_M ? '' : ': they fell behind'}`);
         }
         else if (f.dist > AgentApi.FELLOW_BEHIND_M && f.dist > was + 15) notes.push(`${f.name} is ${f.dist.toFixed(0)} m away now (was ${was.toFixed(0)} m): they fell behind (stay_with=${f.name} waits for them)`);
@@ -6821,6 +7344,13 @@ export class AgentApi {
         const keyNear = !this.host.inventory().some((i) => /\bkey\b/i.test(i.name)) ? this.nearby(40).find((o) => /\bkey\b/i.test(o.name) && (o.kind === 'item' || o.kind === 'other')) : undefined;
         return { ok: false, message: `stopped ${d0.toFixed(1)} m short: the only doorway route there goes through ${this.lockedDoorsText(lockedOnly)}, found locked this session, and no other way leads there from here. ${keyNear ? `A ${keyNear.name} lies ${keyNear.dist.toFixed(0)} m away: pick it up (ac_pick_up) and use it on the door (ac_use_on). ` : ''}Pick another goal (or meet on this side), have someone open it from the other side (it counts as a way again once it is seen open), or use the right key on it (ac_use_on)${featText()}` };
       }
+      if (cutOff && !route.length) {
+        release();
+        const gl0 = goal(), me0 = this.me();
+        const d0 = gl0 && me0 ? Math.hypot(gl0.x - me0.g.x, gl0.y - me0.g.y) : 0;
+        this.trace(`walk: no way on foot to the goal from this part of the dungeon (routeCutOff); ending at once`);
+        return { ok: false, message: `stopped ${d0.toFixed(1)} m short: ${cutOff}${featText()}` };
+      }
       const me = this.me();
       if (follow && me) {
         if (now - start >= follow.durationMs) {
@@ -6848,6 +7378,14 @@ export class AgentApi {
           // follow on from there (the follow's own start does so), not stand here waiting.
           const lost = (!lo || this.released(lo)) ? this.lostFellowSpot(targetGuid, lo?.cell ? { cell: lo.cell >>> 0, x: lo.x, y: lo.y, z: lo.z, heardAt: lo.heardAt } : targetPlace) : null;
           if (lost) return { ok: false, message: `${lost.name} went out of sight`, lostFellow: lost };
+          // Placed in another space now (the server moved them there: a portal, a recall): said at once, where they went.
+          const away0 = lo?.cell ? this.elsewhereText(me.s.cell, lo) : null;
+          if (away0) {
+            const p0 = leaderSeen ? this.portalBeside(leaderSeen, AgentApi.FOLLOW_PORTAL_BESIDE_M) : null;
+            const name0 = this.nameOf(targetGuid);
+            if (p0) return { ok: false, message: `stopped following: ${name0} went out of sight beside ${p0.name} #${p0.guid.toString(16)} (${Math.hypot(p0.g.x - me.g.x, p0.g.y - me.g.y).toFixed(0)} m ${compassPoint(bearing(me.g, p0.g))} of you): they most likely went through it (${away0.replace(/^went through a portal or recalled: /, '')}). ac_use it to follow, or ask them where they are${featText()}` };
+            return { ok: false, message: `stopped following: ${name0} ${away0}; ask them where they are${featText()}` };
+          }
           leaderLostAt ||= now;
           if (now - leaderLostAt > AgentApi.FOLLOW_LOST_MS) {
             const last = leaderSeen;
@@ -6896,6 +7434,7 @@ export class AgentApi {
       // Where the body was at the last tick: at a slow frame rate a run covers metres between ticks, so "there" is
       // judged along the stretch run since (onTheWay), not at the point it landed on.
       const tickFrom = lastAt && moved <= PORTAL_JUMP_M ? lastAt : me.g;
+      const prevAt = lastAt;
       lastAt = me.g;
       /** How near the stretch run since the last tick came to `p` (horizontal metres). */
       const onTheWay = (p: { x: number; y: number }): number => Math.min(Math.hypot(p.x - me.g.x, p.y - me.g.y), segmentDistance(p, tickFrom, me.g));
@@ -6903,6 +7442,18 @@ export class AgentApi {
       if (underAttackFrom && moved <= PORTAL_JUMP_M) fledM = Math.max(fledM, Math.hypot(me.g.x - underAttackFrom.x, me.g.y - underAttackFrom.y));
       if (moved > PORTAL_JUMP_M && d > 50) {
         release();
+        const where = `you're now in ${(me.s.cell & 0xffff) >= 0x100 ? 'an interior' : 'the open'} (cell 0x${(me.s.cell >>> 0).toString(16)})`;
+        // The portal this walk was sent to (walk_to "Mountain Keep"): through it is where the walk was going, not a fault.
+        // Said as that, with how it came within its reach (the walk stops at its edge). Bulwark's walk_to the Mountain Keep
+        // portal jumped onto its platform and landed in it, and the answer called it a portal "this walk was not sent to"
+        // (A8C3, 2026-10-17 05:28:40Z).
+        const own = targetGuid && portalBy && (portalBy.guid >>> 0) === (targetGuid >>> 0) && now - portalBy.at < 5000;
+        const tp = targetPlace ? toGlobal(targetPlace.cell, targetPlace.x, targetPlace.y) : null;
+        const wasNear = !!tp && !!prevAt && Math.hypot(tp.x - prevAt.x, tp.y - prevAt.y) < (this.host.objectReach?.(targetGuid) || 1) + AgentApi.PORTAL_CLEARANCE_M + 3;
+        if (targetGuid && targetPortalName && (own || wasNear)) {
+          const how = lastLeapAt && now - lastLeapAt < 8000 ? 'a jump onto it landed within its reach' : 'the walk came within its reach';
+          return { ok: true, message: `went through ${targetPortalName} #${targetGuid.toString(16)}, the portal this walk went to (a walk stops at a portal's edge; ${how}): ${where}${featText()}` };
+        }
         // Name the portal it came near last, and say it wasn't the walk's own (portalGuard holds back from them; this is a miss).
         const by = portalBy && now - portalBy.at < 5000 ? ` (${portalBy.label} #${portalBy.guid.toString(16)}, which this walk was not sent to: it keeps out of portals, so this is a fault to report)` : '';
         return { ok: true, message: `went through a portal on the way${by}: you're now in ${(me.s.cell & 0xffff) >= 0x100 ? 'an interior' : 'the open'} (cell 0x${(me.s.cell >>> 0).toString(16)}); the target is left behind${featText()}` };
@@ -7100,7 +7651,7 @@ export class AgentApi {
             // Down a storey the plan didn't take: the legs ahead are on the floor above. Plan again from here, now, rather
             // than push on at legs overhead (Mountain Keep's 6 m floors, 2026-10-16). With no way from this floor on to
             // the goal (a one-way fall: the dungeon's floors join only downward here), say so at once.
-            if (!jumping && !search) {
+            if (!jumping && (!search || leapMissed)) {
               // Whether the doorway route reached the goal from up there (the walk's last plan), before planning from here.
               const routedBefore = this.lastNoRoute === null;
               legs = []; prev = null; doorDetour = null; partial = null;
@@ -7108,9 +7659,9 @@ export class AgentApi {
               best = Infinity; bestAt = now;
               const nr = this.lastNoRoute;
               const gc = goalLocal()?.cell ?? 0;
-              if (routedBefore && !route.length && nr && (gc >>> 0) === (nr.toCell >>> 0) && !follow) {
+              if ((routedBefore || leapMissed) && !route.length && nr && (gc >>> 0) === (nr.toCell >>> 0) && !follow) {
                 release();
-                const note = this.barrierNote(gc);
+                const note = leapMissed ? leapMissedText() : this.barrierNote(gc) ?? this.cutOffNote(true);
                 feats.falls.pop(); // said in the answer's own words
                 return { ok: false, message: `stopped ${d.toFixed(1)} m short: slid off an edge and fell ${fell.toFixed(1)} m to the floor below (cell 0x${(me.s.cell >>> 0).toString(16).toUpperCase().padStart(8, '0')}), and no way from this floor leads back to there (no doorway route: the fall was one way)${note ? `; ${note}` : ''}${featText()}. ac_map shows this floor's ways; walk to a fellow or the way out from here.` };
               }
@@ -7186,7 +7737,10 @@ export class AgentApi {
       // from it, because the 12 m between the floors kept it from counting as arrived (Bulwark, Hollow Lair 0x039C0109,
       // 2026-10-16). Judged along the stretch run since the last tick: a run of 8 m a tick hopped either side of a goal
       // 4 m off for 30 s and gave up "in circles" ("20m east", 0x039C019C, the same evening).
-      let arrivedNow = rangedWithin ? Math.hypot(near, dz) <= within : near <= within && Math.abs(dz) < AgentApi.FLOOR_APART_M;
+      // A player (a fellow) is reached on their floor whatever the range: "within=8" of Bulwark 6 m down through a floor
+      // opening is not beside him, and "arrived" read as being with him while still on the floor above (Arcanist's
+      // report, Mountain Keep, 2026-10-17 08:15Z).
+      let arrivedNow = rangedWithin && !goalIsPlayer ? Math.hypot(near, dz) <= within : near <= within && Math.abs(dz) < AgentApi.FLOOR_APART_M;
       // Gone well past it between two looks (a slow frame at a run, or it walking toward you): turn back for it, not
       // "arrived (9.1 m away, run past it a little)" with the fellow 12 m off on the next observe (Arcanist to Bulwark,
       // Mountain Keep, 2026-10-16 16:44:22Z and 16:46:29Z). OVERSHOOT_TURNS times, then the pass counts, as before.
@@ -7196,6 +7750,17 @@ export class AgentApi {
         prev = null;
         this.trace(`walk: ran ${d.toFixed(1)} m past the goal between two looks; turning back for it`);
       }
+      // A player on the move who is within reach for one look (running past you, or across the floor over or under yours on
+      // a ramp) is not reached: "arrived (1.9 m away)" at Arcanist while she ran on down a spiral ramp, 19 m off on the next
+      // observe (Bulwark, Mountain Keep 0x01D20196, 2026-10-17 06:03:36Z). Arrived once they stand still, or have stayed
+      // within reach and on your floor for PLAYER_ARRIVE_CONFIRM_MS.
+      if (arrivedNow && goalIsPlayer && !follow && !jumping) {
+        const standingThere = !!goalStill && Math.hypot(gl.x - goalStill.x, gl.y - goalStill.y) <= 0.3 && now - goalStill.at >= AgentApi.GOAL_STILL_MS;
+        if (!standingThere) {
+          playerNearSince ||= now;
+          if (now - playerNearSince < AgentApi.PLAYER_ARRIVE_CONFIRM_MS) arrivedNow = false;
+        }
+      } else if (!arrivedNow) playerNearSince = 0;
       // line=true: within reach of it is not enough while a wall stands between: close in, round the wall, until it opens.
       if (!follow && !jumping && arrivedNow && opts.line && targetGuid) {
         const lof = this.host.lineOfFire?.(targetGuid);
@@ -7233,7 +7798,7 @@ export class AgentApi {
         const lineNote = lineCheck ? this.rangedArrivalNote(targetGuid) : '';
         const lineText = opts.line && targetGuid && this.host.lineOfFire ? (lineNote ? `${lineNote}${lineCloser ? ` (closed in ${lineCloser} time${lineCloser === 1 ? '' : 's'} looking for an open line; beside it now)` : ''}` : `; the line of fire to it is open${lineCloser ? ` (closed in ${lineCloser} time${lineCloser === 1 ? '' : 's'} round the wall for it)` : ''}`)
           : lineNote ? `${lineNote}${!opts.line && !rangedWithin ? ' (walk_to … line=true keeps going until the line is open)' : ''}` : '';
-        return { ok: true, message: `arrived (${shown.toFixed(1)} m away${floor}${past})${lineText}${featText()}` };
+        return { ok: true, message: `arrived (${shown.toFixed(1)} m away${floor}${past})${lineText}${portalGoalText()}${featText()}` };
       }
       if (settleAt && fallFrom === null && me.s.z < settleAt.z - 1) settleAt = null; // slid off: on with the walk (the fall is in featText)
       const frameMs = now - lastTick;
@@ -7251,7 +7816,8 @@ export class AgentApi {
             release();
             this.trace(`walk: back at (${me.g.x.toFixed(1)}, ${me.g.y.toFixed(1)}) where it was ${Math.round((now - was.t) / 1000)} s ago, no nearer; giving up`);
             const blocker = this.wayBlocker(me.g, gl);
-            return { ok: false, message: `stuck ${d.toFixed(1)} m short: the walk went round in circles (back where it was ${Math.round((now - was.t) / 1000)} s ago, no nearer), so no walkable way was found${blocker ? `; in the way: ${blocker}` : ''}${featText()}. ac_map shows what's round you; try another route or target.` };
+            const missed = leapMissedText();
+            return { ok: false, message: `stuck ${d.toFixed(1)} m short: the walk went round in circles (back where it was ${Math.round((now - was.t) / 1000)} s ago, no nearer), so no walkable way was found${missed ? `; ${missed}` : ''}${blocker ? `; in the way: ${blocker}` : ''}${featText()}. ac_map shows what's round you; try another route or target.` };
           }
         }
       }
@@ -7273,8 +7839,25 @@ export class AgentApi {
           // A drop is one way: with stay_with, not down off the floor your fellow is on while they are not with you. Wait
           // at the edge until they come up (then you go down together), as a player waits at the top of a pit. A drop
           // taken alone split Arcanist and Bulwark onto different floors of Mountain Keep (0x01D2, 2026-10-16).
+          // A melee run-up (dropLeavesFellows): not down at all while a fellow in view stands on this floor, unless drop=true.
+          if (opts.dropLeavesFellows && !opts.drop && isDrop(spec) && here.z - spec.to.z >= AgentApi.FLOOR_APART_M && !underAttack) {
+            const left = this.fellowsAt().filter((x) => x.dist !== undefined && x.dist <= AgentApi.FLOOR_FELLOW_NEAR_M && Math.abs(x.dz ?? 0) < AgentApi.FLOOR_APART_M);
+            if (left.length) {
+              release(); jumping = null;
+              return { ok: false, dropHeld: true, message: `stopped ${d.toFixed(1)} m short at the edge of a ${(here.z - spec.to.z).toFixed(0)} m drop: the way on drops to the floor below (one way), leaving ${left.map((x) => `${x.name} (${x.dist!.toFixed(0)} m from you)`).join(', ')} on this floor${featText()}` };
+            }
+          }
           if (opts.stayWith && isDrop(spec) && here.z - spec.to.z >= AgentApi.FLOOR_APART_M && !underAttack) {
             const f = this.fellowsAt().find((x) => x.name.toLowerCase() === opts.stayWith!.toLowerCase());
+            // Never a one-way drop the fellow isn't taking: with them on this floor (not already down there), stop at the edge
+            // unless drop=true said you go down together. Taken at once, beside them, it left Arcanist a floor up while
+            // Bulwark landed among ten Dreads (Mountain Keep, 2026-10-17 06:02:37Z; again at 06:13Z).
+            const upHere = f?.dist !== undefined && Math.abs(f.dz ?? 0) < AgentApi.FLOOR_APART_M;
+            if (upHere && !opts.drop) {
+              release(); jumping = null;
+              const drop = (here.z - spec.to.z).toFixed(0);
+              return { ok: false, dropHeld: true, message: `stopped ${d.toFixed(1)} m short at the edge of a ${drop} m drop: the way on drops to the floor below (one way: the way back up may be long, or none), and ${f!.name} is on this floor (${f!.dist!.toFixed(0)} m ${compassPoint(f!.bearing!)} of you), so stay_with doesn't go down without them. Tell them (ac_say text="/f dropping ${drop} m here, come down after me"), then ${label.replace(/^walking /, 'walk ')} again with drop=true (it waits at the edge for them, then goes down), or let them go first${featText()}` };
+            }
             const apart = f?.dist !== undefined && f.dist > AgentApi.STAY_WITH_DROP_TOGETHER_M && Math.abs(f.dz ?? 0) < AgentApi.FLOOR_APART_M;
             if (apart) {
               if (!edgeWaitSince) { edgeWaitSince = now; this.trace(`walk: waiting at the edge of a ${(here.z - spec.to.z).toFixed(1)} m drop for ${f!.name} (${f!.dist!.toFixed(0)} m ${compassPoint(f!.bearing!)}) to come up`); }
@@ -7317,9 +7900,20 @@ export class AgentApi {
           if (!legs.length) { while (route.length && passedRoute(route[0], here)) route.shift(); planLegs(); }
           return null;
         }
-        if (here.z < j.spec.from.z - 1) feats.drops.push(j.spec.from.z - here.z);
         const from = j.spec.from;
         const kind = isDrop(j.spec) ? 'drop' : 'jump';
+        // The route's leap, jumped and missed: remembered for the answer; down in the gap already, the walk ends now (from the
+        // floor under a pit the leap's far side is reached by no doorway; the leap was the only way, see leapFailed).
+        const lp = route[0]?.leap !== undefined && Math.hypot(route[0].x - to.x, route[0].y - to.y) < 4 ? route[0] : null;
+        if (here.z < j.spec.from.z - 1 && !lp) feats.drops.push(j.spec.from.z - here.z);
+        if (lp) {
+          leapMissed = { width: lp.leap!, x: here.x, y: here.y, z: here.z };
+          if (here.z < from.z - AgentApi.FLOOR_APART_M) {
+            release();
+            this.trace(`walk: the route's ${lp.leap!.toFixed(1)} m leap came down in the gap (z ${here.z.toFixed(1)}); ending`);
+            return { ok: false, message: `stopped ${d.toFixed(1)} m short: ${leapMissedText()}: you are ${(from.z - here.z).toFixed(0)} m below the take-off, in the gap (cell 0x${(me.s.cell >>> 0).toString(16).toUpperCase().padStart(8, '0')}). Meet on this side, or go round by the way out${featText()}` };
+          }
+        }
         // Came down where it took off: the leap never carried (no stamina, or something at the edge stops the body).
         const stayed = Math.hypot(here.x - from.x, here.y - from.y) < 1 && Math.abs(here.z - from.z) < 0.5;
         const mk = `${Math.round(from.x * 2)},${Math.round(from.y * 2)}`;
@@ -7801,7 +8395,7 @@ export class AgentApi {
       }
       const toPlayer = !follow && aim === gl && goalIsPlayer && !!goalStill && now - goalStill.at >= AgentApi.GOAL_STILL_MS && da < within + AgentApi.APPROACH_WALK_M;
       // Turned back after running past it: the last metres at a walk, so the body stops by it this time.
-      const slow = pg?.kind === 'near' || (legs[1]?.jump && da < 3) || (takeoff && da < 3) || (preciseStep && aim === gl && da < 3) || toPlayer
+      const slow = pg?.kind === 'near' || (portalGoal !== null && aim === gl && da < within + AgentApi.APPROACH_WALK_M) || (legs[1]?.jump && da < 3) || (takeoff && da < 3) || (preciseStep && aim === gl && da < 3) || toPlayer
         || (overshoots > 0 && aim === gl && da < within + AgentApi.APPROACH_WALK_M + AgentApi.OVERSHOOT_M);
       this.host.key('ShiftLeft', !!slow);
       // A cast or an attack request stops the player (CommandInterpreter::MaybeStopCompletely clears the command lists:
@@ -7875,6 +8469,18 @@ export class AgentApi {
           dodgeUntil = now + 2500;
           return null;
         }
+        // The goal a storey over or under you and no doorway way being walked: plan the way to its own floor once more (a
+        // re-plan can have named your own hall as its room while it stood at a ledge) before calling it walled off.
+        if (!route.length && !storeyReplanned && gl.z !== undefined && Math.abs(me.s.z - gl.z) >= AgentApi.FLOOR_APART_M && !follow) {
+          storeyReplanned = true;
+          const again = this.planRoute(gl, goalLocal(), shutNow(), dropsFailed);
+          if (again.length) {
+            this.trace(`walk: the goal is ${Math.abs(me.s.z - gl.z).toFixed(0)} m ${gl.z > me.s.z ? 'up' : 'down'}, on another floor; taking the doorway way to its floor, ${again.length} doorway(s)`);
+            route = again; directWide = false; noWay = false; search = null; legs = []; prev = null;
+            stalls = 2; planLegs(); best = Infinity; bestAt = now;
+            return null;
+          }
+        }
         release();
         return stuckResult(d);
       }
@@ -7909,6 +8515,7 @@ export class AgentApi {
           if (!back.ok) {
             const res = after({ ...back, message: `${r.message}: ${head}. Going back to them first didn't get there: ${back.message}. ${this.stayWithHint(rejoin.name, label)}` });
             this.push('task-done', `${label}: ${res.message}`); // the chain's end (its legs were quiet)
+            this.taskDoneBefore.set(this.seqN, this.tasksStarted);
             return res;
           }
           const on = await this.walkTo(target, { ...opts, stayRejoins: n });
@@ -8095,6 +8702,33 @@ export class AgentApi {
     return `; no open line to it from here (${lof.blocker ?? 'a wall'} ${lof.blockedAt.toFixed(1)} m along the line would take a bolt or arrow)${since ? ` (${since.trim().replace(/\.$/, '')})` : ''}${go}`;
   }
 
+  /** Fellows farther than this from you are no "go and stand by them" advice for a line of fire. */
+  static readonly LINE_FELLOW_MAX_M = 40;
+
+  /**
+   * The nearest fellow in view (within LINE_FELLOW_MAX_M of you, on your floor or not) from whose place a bolt reaches
+   * `guid` (host.lineOfFireFrom), for a refusal with no open spot within 3 m: what Arcanist did by hand after 6 of his 40
+   * refusals in Mountain Keep (walk_to Bulwark, then the bolt landed; 2026-10-17 07:18–08:01Z). null when none has.
+   */
+  private openLineBesideFellow(guid: number): { name: string; where: string } | null {
+    const me = this.me();
+    if (!me || !this.host.lineOfFireFrom) return null;
+    const near = (this.host.fellows?.() ?? []).map((f) => {
+      const o = this.host.object(f.guid);
+      if (!o || !o.cell || this.released(o)) return null;
+      const g = toGlobal(o.cell, o.x, o.y);
+      return { f, d: Math.hypot(g.x - me.g.x, g.y - me.g.y), g, dz: o.z - me.s.z };
+    }).filter((x): x is NonNullable<typeof x> => x !== null && x.d <= AgentApi.LINE_FELLOW_MAX_M).sort((a, b) => a.d - b.d);
+    for (const n of near) {
+      const lof = this.host.lineOfFireFrom(guid, n.f.guid);
+      if (lof && lof.blockedAt === null) {
+        const up = Math.abs(n.dz) >= AgentApi.FLOOR_APART_M ? `, ${Math.abs(n.dz).toFixed(0)} m ${n.dz > 0 ? 'up' : 'down'}` : '';
+        return { name: n.f.name, where: `${n.d.toFixed(0)} m ${compassPoint(bearing(me.g, n.g))} of you${up}` };
+      }
+    }
+    return null;
+  }
+
   /** The last line-of-fire hint given: at whom, where they stood then and the spot it named (global metres), and when. */
   private lineHint: { guid: number; at: { x: number; y: number }; spot: { x: number; y: number }; t: number } | null = null;
   /** A hint older than this is not tied to the next refusal. */
@@ -8249,7 +8883,7 @@ export class AgentApi {
  toCell = (lb | 0x0001) >>> 0; to = { x: gl.x - origin.x, y: gl.y - origin.y, z: s.z }; }
     // Each end in the room whose floor its feet stand on (feetCell), not the one the server names for it.
     const fromCell = this.feetCell(s.cell, s);
-    toCell = this.feetCell(toCell, to);
+    toCell = this.feetCell(toCell, to, s.z);
     // Landscape to landscape is a straight line, unless an end in this landblock stands on a building's balcony (an
     // outdoor surface reached only through the building: cellPath perchExits). The Master Scrivener of War Magic on
     // the 0x49B6 scriveners' balcony (z 243, outdoor cell 0x49B60006) was walked to as a point on the street, and the
@@ -8282,7 +8916,8 @@ export class AgentApi {
     if (!pts && !quiet && !outdoorPair) this.trace(`walk route: no doorway route from cell 0x${(fromCell >>> 0).toString(16)} to cell 0x${(toCell >>> 0).toString(16)}${shut.length ? ` (${shut.length} door(s) that would not open left out)` : ''}`);
     // Both ends in this landblock's rooms with no route between: what stands between them (a rift, a shaft), for the
     // walk's answer (barrierNote).
-    this.lastNoRoute = !pts && interior(fromCell) && interior(toCell) && ((fromCell ^ toCell) & 0xffff0000) === 0 ? { fromCell, toCell, maxDrop } : null;
+    this.lastNoRoute = !pts && interior(fromCell) && interior(toCell) && ((fromCell ^ toCell) & 0xffff0000) === 0
+      ? { fromCell, toCell, maxDrop, from: { x: s.x, y: s.y, z: s.z }, to, ...(jumpAcross > 0 ? { jumpAcross } : {}) } : null;
     // A doorway is reached at its floor (feet height), not at its centroid halfway up the opening.
     // The last point is the goal itself, unless the goal is across a counter: then it is where to stand (cellPath.counterSpot).
     return pts ? (pts[pts.length - 1]?.across ? pts : pts.slice(0, -1)).map((p) => ({
@@ -8299,7 +8934,7 @@ export class AgentApi {
    * the host can't say (no cell graph, another landblock, the landscape). observe's "ON ANOTHER FLOOR" read "no walk
    * reaches it" from the height alone, while walk_to reached Bulwark 6 m down (Mountain Keep, 2026-10-16).
    */
-  floorRoute(o: AgentHostObject): { len: number; drops: number; leaps: number } | 'none' | { locked: string } | null {
+  floorRoute(o: AgentHostObject): { len: number; drops: number; dropM: number; leaps: number } | 'none' | { locked: string } | null {
     const s = this.host.self();
     if (!s?.cell || !o.cell || ((s.cell ^ o.cell) & 0xffff0000) !== 0 || (o.cell & 0xffff) < 0x100 || (s.cell & 0xffff) < 0x100) return null;
     const saved = this.lastNoRoute;
@@ -8312,14 +8947,14 @@ export class AgentApi {
       if (!r.length) return this.lastNoRoute ? 'none' : null;
       let len = 0, p0 = toGlobal(s.cell, s.x, s.y);
       for (const q of [...r, g]) { len += Math.hypot(q.x - p0.x, q.y - p0.y); p0 = q; }
-      return { len, drops: r.filter((q) => q.drop !== undefined).length, leaps: r.filter((q) => q.leap !== undefined).length };
+      return { len, drops: r.filter((q) => q.drop !== undefined).length, dropM: Math.max(0, ...r.map((q) => q.drop ?? 0)), leaps: r.filter((q) => q.leap !== undefined).length };
     } finally {
       this.lastNoRoute = saved;
     }
   }
 
   /** The last doorway route asked for that had none between two rooms of one landblock (planRoute), else null. */
-  private lastNoRoute: { fromCell: number; toCell: number; maxDrop: number } | null = null;
+  private lastNoRoute: { fromCell: number; toCell: number; maxDrop: number; from?: { x: number; y: number; z: number }; to?: { x: number; y: number; z: number }; jumpAcross?: number } | null = null;
 
   /** A follow that moved less than this in all (m) and ends away from the leader got nowhere. */
   static readonly FOLLOW_STILL_M = 3;
@@ -8342,7 +8977,7 @@ export class AgentApi {
   private followStuckWhy(toCell: number | undefined, noWay: boolean, searching: boolean, travelled: number, ms: number, leader?: number): string {
     const air = leader !== undefined ? this.noFloorUnder(this.host.object(leader)) : null;
     if (air) return air;
-    const note = this.barrierNote(toCell);
+    const note = this.barrierNote(toCell) ?? this.cutOffNote(true);
     const still = travelled < AgentApi.FOLLOW_STILL_M ? `you moved ${travelled.toFixed(0)} m in ${Math.round(ms / 1000)} s` : '';
     const why = note ?? (noWay
       ? 'no way to them was found from here: the game\'s collision finds walls all round between you, and no jump or drop your health can take gets past them'
@@ -8357,6 +8992,55 @@ export class AgentApi {
   }
   /** How much farther than a gap a jump must carry for the route to leap it (m): the body's radius past the lip, and slack. */
   static readonly LEAP_MARGIN_M = 1;
+
+  /** How high a standing jump at full charge lifts the feet (m): the launch's upward speed against gravity. */
+  static jumpRise(kit: Pick<JumpKit, 'launch'>): number {
+    const l = kit.launch(1, false);
+    return (l.up * l.up) / (2 * GRAVITY);
+  }
+  /** An opening overhead counts as out of a jump's reach once it is this much higher than the jump lifts the feet (m). */
+  static readonly CLIMB_MARGIN_M = 0.3;
+
+  /**
+   * The walk's answer when the rooms you can walk are cut off from the goal with no gap between to cross (cellPath
+   * routeCutOff): how high the openings overhead are against your jump, which way the two parts ARE joined (from the
+   * goal's side, by drops and leaps: one way), the portals you know that stand on your side, and how high your side
+   * climbs. Null when the host can't say, a route exists, or the lowest opening overhead is one your jump may reach (the
+   * walk's own searches find those). `force`: say it even then (an answer after the searches failed).
+   */
+  private cutOffNote(force = false): string | null {
+    const nr = this.lastNoRoute;
+    const s = this.host.self();
+    if (!nr || !s || !nr.from || !nr.to || !this.host.routeCutOff) return null;
+    const cut = this.host.routeCutOff(nr.fromCell, nr.from, nr.toCell, nr.to, { maxDrop: nr.maxDrop, ...(nr.jumpAcross ? { jumpAcross: nr.jumpAcross } : {}) });
+    if (!cut) return null;
+    const kit = this.jumpKit();
+    const rise = kit ? AgentApi.jumpRise(kit) : null;
+    if (!force && cut.climb && (rise === null || cut.climb.height <= rise + AgentApi.CLIMB_MARGIN_M)) return null;
+    const hex = (c: number): string => `0x${(c >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
+    const parts: string[] = [];
+    parts.push(`no way on foot from this part of the dungeon to there: no doorway, stair or ramp joins them, and ${cut.climb
+      ? `the openings overhead out of it are ${cut.climb.height.toFixed(0)} m or more above the floor (the lowest in cell ${hex(cut.climb.cell)})${rise !== null ? `, past your jump (it lifts you about ${rise.toFixed(1)} m)` : ''}`
+      : 'no opening overhead leads on out of it'}`);
+    if (cut.back) {
+      const how: string[] = [];
+      if (cut.back.leaps.length) how.push(cut.back.leaps.length === 1 ? `a ${cut.back.leaps[0].toFixed(1)} m leap across open air` : `${cut.back.leaps.length} leaps (${cut.back.leaps.map((w) => `${w.toFixed(1)} m`).join(', ')})`);
+      if (cut.back.drops.length) how.push(`${cut.back.drops.length === 1 ? 'a drop' : `${cut.back.drops.length} drops`} through floor openings (${cut.back.drops.map((q) => `${q.depth.toFixed(0)} m`).join(', ')})`);
+      parts.push(`the two parts are joined one way only: from there a walk gets here${how.length ? ` by ${how.join(' and ')}` : ''}, and nothing climbs back`);
+    } else parts.push('no walk joins them the other way either');
+    // The portals you know in this landblock, and which stand on your side (a way out you can walk to).
+    const lb = (nr.fromCell & 0xffff0000) >>> 0;
+    const known = new Map<number, { name: string; cell: number }>();
+    for (const o of this.host.objects()) if (o.cell && ((o.cell & 0xffff0000) >>> 0) === lb && classify(o, false) === 'portal') known.set(o.guid >>> 0, { name: o.name, cell: o.cell >>> 0 });
+    for (const [g, p] of this.places) if (p.kind === 'portal' && ((p.cell & 0xffff0000) >>> 0) === lb && !known.has(g >>> 0)) known.set(g >>> 0, { name: p.name, cell: p.cell >>> 0 });
+    const mine = [...known].filter(([, p]) => cut.reach.has(p.cell));
+    const theirs = [...known].filter(([, p]) => !cut.reach.has(p.cell));
+    if (mine.length) parts.push(`on your side: ${mine.map(([g, p]) => `${p.name} #${g.toString(16)} (cell ${hex(p.cell)}; walk_to or ac_use it)`).join(', ')}`);
+    else if (theirs.length) parts.push(`none of the portals you know here is on your side (${theirs.slice(0, 3).map(([g, p]) => `${p.name} #${g.toString(16)}`).join(', ')} ${theirs.length === 1 ? 'is' : 'are'} on the other)`);
+    const up = cut.top.z - s.z;
+    if (!mine.length && up >= AgentApi.FLOOR_APART_M) parts.push(`the doorways from here climb about ${up.toFixed(0)} m higher (as far as cell ${hex(cut.top.cell)}): a way out of this part may be up there`);
+    return `${parts.join('; ')}. Otherwise recall out (a lifestone or portal recall spell, /lifestone), or meet on this side`;
+  }
 
   /**
    * What stands between you and a goal no doorway route reaches (the rift you'd have to jump, the shaft you'd have
@@ -8532,7 +9216,7 @@ export class AgentApi {
     const startSeq = this.seqN;
     const live = (): boolean => this.attackTarget === guid;
     const lost = (why: string): void => { if (live()) { this.attackTarget = 0; this.push('target-lost', `${name} #${guid.toString(16)}: ${why}`, guid); } };
-    const dead = (): boolean => this.host.isDying(guid) || this.killedRecently(name, startSeq) || this.dyingSeen.has(guid) || !!this.gone.get(guid)?.died;
+    const dead = (): boolean => this.host.isDying(guid) || this.killedRecently(name, startSeq, guid) || this.dyingSeen.has(guid) || !!this.gone.get(guid)?.died;
     const blockedWhy = (): string | null => {
       const o = this.host.object(guid), me = this.me();
       if (!o || !o.cell || !me) return null;
@@ -8667,6 +9351,10 @@ export class AgentApi {
    */
   /** Fellows this near you (m) on your floor are the ones a melee run-up to another floor would leave behind. */
   static readonly FLOOR_FELLOW_NEAR_M = 30;
+  /** A target 2.5–4 m up or down is on another storey when the doorway way there is this much longer than the straight line (m). */
+  static readonly STOREY_WAY_EXTRA_M = 10;
+  /** A walk's doorway route climbing this far (m) above both its ends is said in its answer. */
+  static readonly ROUTE_CLIMB_NOTE_M = 5;
 
   /**
    * Why a melee attack on `guid` would leave your fellows behind on another floor (it is a storey up or down, indoors,
@@ -8677,13 +9365,17 @@ export class AgentApi {
     const o = this.host.object(guid), me = this.me();
     if (!o?.cell || !me || !this.floorsApply(me.s.cell, o.cell)) return null;
     const dz = o.z - me.s.z;
-    // A storey (observe's OTHER_FLOOR_M), not a few steps up a stair in the same room.
-    if (Math.abs(dz) < AgentApi.OTHER_FLOOR_M) return null;
+    // A storey (observe's OTHER_FLOOR_M), not a few steps up a stair in the same room. Between FLOOR_APART_M and that, a
+    // storey too when the doorway way there is one (a drop, or a long way round by other rooms): the attack's own answer
+    // called a Dread 3 m below "another floor: the way there goes down" and ran Bulwark down off Arcanist's floor anyway
+    // (Mountain Keep, 2026-10-17 06:12:57Z).
+    if (Math.abs(dz) < AgentApi.FLOOR_APART_M) return null;
     const left = this.fellowsAt().filter((f) => f.dist !== undefined && f.dist <= AgentApi.FLOOR_FELLOW_NEAR_M && Math.abs(f.dz ?? 0) < AgentApi.FLOOR_APART_M);
     if (!left.length) return null;
     const t = toGlobal(o.cell, o.x, o.y);
     const d = Math.hypot(t.x - me.g.x, t.y - me.g.y);
     const way = this.floorRoute(o);
+    if (Math.abs(dz) < AgentApi.OTHER_FLOOR_M && !(way && way !== 'none' && !('locked' in way) && (way.drops > 0 || way.len >= Math.max(2 * d, d + AgentApi.STOREY_WAY_EXTRA_M)))) return null;
     const wayText = way === 'none' ? ', and no walk reaches it from here anyway (no doorway route from your floor)'
       : way && 'locked' in way ? `, and no walk reaches it from here anyway but through ${way.locked}`
       : way ? ` (the way there is about ${Math.round(way.len)} m by the doorways${way.drops ? `, down ${way.drops === 1 ? 'a drop' : `${way.drops} drops`}` : ''}${way.leaps ? ', with a jump across a gap' : ''})` : '';
@@ -8715,6 +9407,49 @@ export class AgentApi {
     const alt = this.nearby(AgentApi.ATTACK_RUN_UP_M).find((x) => x.kind === 'monster' && x.guid !== guid && !this.host.isDying(x.guid) && Math.abs(x.dz) < AgentApi.FLOOR_APART_M);
     return `${this.nameOf(guid)} #${guid.toString(16)} is ${d.toFixed(0)} m ${compassPoint(bearing(me.g, t))}${coming ? ' (coming at you)' : ''}: running up to it leaves ${left.join(', ')}, so no attack was started. `
       + `${coming ? 'Let it come to you' : 'Pull it to you (a caster\'s bolt, or show yourself and step back), or wait for it'}${alt ? `, fight ${alt.name} #${alt.guid.toString(16)} nearer (${alt.dist.toFixed(0)} m ${compassPoint(alt.bearing)})` : ''}, go together (ask in /f), or ac_attack target=#${guid.toString(16)} far=true to go anyway`;
+  }
+
+  /**
+   * A portal whose disk (its reach + PORTAL_CLEARANCE_M) the straight line from you to `guid` crosses on your floor or the
+   * target's: the server's walk to a melee target (ACE MoveToObject) runs that line, and stepping into a portal takes you
+   * through it. Bulwark's attack on a Dread 3 m off ran him through the Mountain Keep Surface portal (0x01D2, 2026-10-17
+   * 05:49:14Z, WeenieError ITeleported). Null when no portal stands on the line (or the target is a portal).
+   */
+  private portalAcross(guid: number): { guid: number; name: string; dist: number; bearing: number } | null {
+    const o = this.host.object(guid), me = this.me();
+    if (!o?.cell || !me) return null;
+    const t = toGlobal(o.cell, o.x, o.y);
+    let best: { guid: number; name: string; dist: number; bearing: number } | null = null;
+    for (const p of this.host.objects()) {
+      if (p.guid === guid || !p.cell || p.wielderId || p.containerId || classify(p, false) !== 'portal') continue;
+      if (Math.abs(p.z - me.s.z) > 3 && Math.abs(p.z - o.z) > 3) continue;
+      const g = toGlobal(p.cell, p.x, p.y);
+      const r = (this.host.objectReach?.(p.guid) || 1) + AgentApi.PORTAL_CLEARANCE_M;
+      if (segmentDistance(g, me.g, t) >= r) continue;
+      const dist = Math.hypot(g.x - me.g.x, g.y - me.g.y);
+      if (!best || dist < best.dist) best = { guid: p.guid >>> 0, name: p.name, dist, bearing: bearing(me.g, g) };
+    }
+    return best;
+  }
+
+  /** Why a melee attack on `guid` isn't sent with portal `pa` on the line to it. */
+  private portalAcrossText(guid: number, pa: { guid: number; name: string; dist: number; bearing: number }): string {
+    return `not attacking ${this.nameOf(guid)} #${guid.toString(16)} from here: ${pa.name} #${pa.guid.toString(16)} (${pa.dist.toFixed(0)} m ${compassPoint(pa.bearing)}) is on the straight line to it, and the server's walk to a melee target runs that line, through the portal (stepping into one takes you through it). Go round it first (ac_walk_to a spot on its far side), or let the monster come to you`;
+  }
+
+  /**
+   * A melee run-up's one-way drop (the doorway route down a floor opening or a ledge): the deepest one, and the fellows in
+   * view on your floor within FLOOR_FELLOW_NEAR_M it would leave there. Null when the way has no drop, or no fellow is
+   * left. Bulwark's run-ups to Dreads below dropped him a floor under Arcanist (Mountain Keep, 2026-10-17 06:03Z, 06:13Z).
+   */
+  private runUpDropNote(guid: number): string | null {
+    const o = this.host.object(guid), me = this.me();
+    if (!o?.cell || !me) return null;
+    const way = this.floorRoute(o);
+    if (!way || way === 'none' || 'locked' in way || !way.drops) return null;
+    const left = this.fellowsAt().filter((f) => f.dist !== undefined && f.dist <= AgentApi.FLOOR_FELLOW_NEAR_M && Math.abs(f.dz ?? 0) < AgentApi.FLOOR_APART_M);
+    if (!left.length) return null;
+    return `the run-up to ${this.nameOf(guid)} #${guid.toString(16)} drops ${way.dropM.toFixed(0)} m${way.drops > 1 ? ` (${way.drops} drops)` : ''} to the floor below (one way), leaving ${left.map((f) => `${f.name} (${f.dist!.toFixed(0)} m from you)`).join(', ')} on this floor, so no attack was started. Let it come to you, tell them you're dropping and go together, or ac_attack target=#${guid.toString(16)} far=true drop=true to go anyway`;
   }
 
   private targetWhere(guid: number): string {
@@ -8756,13 +9491,13 @@ export class AgentApi {
    * `power`: the power / accuracy bar for the swings (0..1), or 'bar' for the
    * combat bar's own setting (VirindiTank with AutoAttackPower off). Default 0.6.
    */
-  attack(target: TargetArg, opts: { height?: AttackHeightName; power?: number | 'bar'; next?: boolean; far?: boolean } = {}): AgentResult {
+  attack(target: TargetArg, opts: { height?: AttackHeightName; power?: number | 'bar'; next?: boolean; far?: boolean; drop?: boolean } = {}): AgentResult {
     const r = this.attackNow(target, opts);
     if (!r.ok && opts.next) this.chain = null;
     return r.ok && opts.next ? { ...r, message: `${r.message}\n  next=true: when it dies, the next monster on you (or on a fellow within ${AgentApi.CHAIN_FELLOW_M} m) is attacked, and the target-died event says which` } : r;
   }
 
-  private attackNow(target: TargetArg, opts: { height?: AttackHeightName; power?: number | 'bar'; next?: boolean; far?: boolean }): AgentResult {
+  private attackNow(target: TargetArg, opts: { height?: AttackHeightName; power?: number | 'bar'; next?: boolean; far?: boolean; drop?: boolean }): AgentResult {
     let g: number | null;
     if (target === null || target === undefined) {
       const tg = this.host.targetGuid();
@@ -8779,20 +9514,30 @@ export class AgentApi {
       if (typeof r !== 'number') return r;
       g = r;
     }
-    if (this.host.isDying(g)) return { ok: false, targetGone: true, message: `${this.nameOf(g)} is dead (loot its corpse, or pick another target)` };
+    if (this.host.isDying(g)) return { ok: false, targetGone: true, message: `${this.nameOf(g)} is dead (loot its corpse, or pick another target)${this.deadTargetNote(g)}` };
     // A foe of a moment ago (it attacked you or a fellow) that the client let go or destroyed, not dead: go to where it was
     // last placed (walk_to's monsterLastSeen), then attack it once it is in sight there. The fight goes on.
     const foeAgo = this.recentFoe(g);
     const held = this.host.object(g);
+    // Let go of, or destroyed, and its corpse lies where it was last seen: it died out of the client's sight.
+    // (Destroyed: the gone-from-view answer below says the same.)
+    if (held && this.released(held) && !this.dyingSeen.has(g)) {
+      const corpse = this.corpseAtLastSpot(g);
+      if (corpse) return { ok: false, targetGone: true, message: `${held.name} #${g.toString(16)} died out of your client's sight: its corpse is #${corpse.guid.toString(16)}, ${corpse.dist.toFixed(0)} m ${compassPoint(corpse.bearing)}, where it was last seen (loot it, or pick another target)${this.deadTargetNote(g)}` };
+    }
     const lastSpot = foeAgo !== null && (!held || this.released(held)) && !this.dyingSeen.has(g) ? this.monsterLastSeen(g) : null;
     if (lastSpot && !this.gone.get(g)?.died) {
       if (!opts.far && !this.casterStance() && !this.missileStance() && held) {
         const why = this.leavesFellowsNote(g) ?? this.leashNote(g);
         if (why) return { ok: false, message: why };
       }
+      if (!opts.drop && !this.casterStance() && !this.missileStance() && held) {
+        const why = this.runUpDropNote(g);
+        if (why) return { ok: false, message: why };
+      }
       const guid = g;
       this.attackTarget = guid;
-      void this.walkTo(guid, { within: 2.5, timeoutMs: 90_000 }).then((r) => {
+      void this.walkTo(guid, { within: 2.5, timeoutMs: 90_000, dropLeavesFellows: true, ...(opts.drop ? { drop: true } : {}) }).then((r) => {
         if (this.attackTarget !== guid) return; // another order came meanwhile
         const o = this.host.object(guid);
         if ((r.ok || r.attacked) && o && !this.released(o) && !this.host.isDying(guid)) {
@@ -8801,7 +9546,11 @@ export class AgentApi {
           return;
         }
         this.attackTarget = 0;
-        this.push('target-lost', `${lastSpot.name} #${guid.toString(16)}: no attack: ${o && !this.released(o) ? r.message.replace(/^walking to [^:]*: /, '') : 'it is not in sight at the spot where it was last seen (it moved on, or died out of sight)'}`, guid);
+        const why = o && !this.released(o) ? r.message.replace(/^walking to [^:]*: /, '') : null;
+        const lost = `${lastSpot.name} #${guid.toString(16)}: no attack: ${why ?? 'it is not in sight at the spot where it was last seen (it moved on, or died out of sight)'}`;
+        // Not there: a corpse of it there (now, or within the next 3 s as the server makes it) is its death, said as one.
+        if (!why && !this.host.isDying(guid)) { this.pendingLoss.set(guid, { name: lastSpot.name, at: this.host.now(), lost }); return; }
+        this.push('target-lost', lost, guid);
       });
       return { ok: true, message: `${lastSpot.name} #${guid.toString(16)} is out of your client's sight (it let it go), but it attacked ${foeAgo === 0 ? 'just now' : `${foeAgo} s ago`}: going to where it was last seen (${this.lastSeenText(lastSpot)}), then attacking it once it is in sight; ac_wait types=target-died,target-lost,vitals-low,death` };
     }
@@ -8809,9 +9558,12 @@ export class AgentApi {
       // Gone from the client's world since you saw it: most often it just died (observe listed #800021c0 "ATTACKING
       // YOU", and the attack a moment later said it "isn't attackable", 2026-10-12).
       const was = this.gone.get(g);
-      const corpse = was ? this.nearby(60).find((o) => o.kind === 'corpse' && o.name === `Corpse of ${was.name}`) : undefined;
-      if (was && (was.died || corpse || this.killedRecently(was.name))) return { ok: false, targetGone: true, message: `${was.name} #${g.toString(16)} died${corpse ? `: its corpse is #${corpse.guid.toString(16)}, ${corpse.dist.toFixed(0)} m ${compassPoint(corpse.bearing)}` : ''} (loot it, or pick another target)` };
-      return { ok: false, targetGone: true, message: `${was?.name ?? `#${g.toString(16)}`} is gone from view (it died, fled out of range, or you moved away): pick another target` };
+      // Its own corpse (where it was last seen); any of its name nearby only when where it was isn't known.
+      const own = this.corpseAtLastSpot(g);
+      const corpse = own ? { guid: own.guid, dist: own.dist, bearing: own.bearing }
+        : was && !this.monsterSeen.has(g) ? this.nearby(60).find((o) => o.kind === 'corpse' && o.name === `Corpse of ${was.name}`) : undefined;
+      if (was && (was.died || corpse || this.killedRecently(was.name, this.attackOrders.get(g) ?? 0, g))) return { ok: false, targetGone: true, message: `${was.name} #${g.toString(16)} died${corpse ? `: its corpse is #${corpse.guid.toString(16)}, ${corpse.dist.toFixed(0)} m ${compassPoint(corpse.bearing)}` : ''} (loot it, or pick another target)${this.deadTargetNote(g)}` };
+      return { ok: false, targetGone: true, message: `${was?.name ?? `#${g.toString(16)}`} is gone from view (it died, fled out of range, or you moved away): pick another target${this.deadTargetNote(g)}` };
     }
     if (!this.host.isAttackable(g)) return { ok: false, message: `${this.nameOf(g)} isn't attackable` };
     // A melee attack runs up to its target: on another floor that is a climb or a drop, off the floor your fellow is on.
@@ -8819,6 +9571,11 @@ export class AgentApi {
     // Arcanist's floor three times in Mountain Keep, each said only once he was on his way (0x01D2, 2026-10-16).
     if (!opts.far && !this.casterStance() && !this.missileStance()) {
       const why = this.leavesFellowsNote(g) ?? this.leashNote(g);
+      if (why) return { ok: false, message: why };
+    }
+    // A run-up down a one-way drop off your fellow's floor: only with drop=true (far=true alone doesn't say it).
+    if (!opts.drop && !this.casterStance() && !this.missileStance()) {
+      const why = this.runUpDropNote(g);
       if (why) return { ok: false, message: why };
     }
     const guid = g;
@@ -8891,21 +9648,21 @@ export class AgentApi {
           noteReach();
           const next = this.afterKill(guid);
           if (this.attackTarget === guid) { this.attackTarget = 0; this.dyingSeen.delete(guid); this.push('target-died', `${name} #${guid.toString(16)} died${next}`, guid); }
-          return { ok: true, message: `${name} is dead${next}` };
+          return { ok: true, message: `${name} #${guid.toString(16)} is dead${next}` };
         }
         if (!this.host.object(guid)) {
           noteReach();
           // objectRemoved (tick) decides died vs lost: the death start, a kill line or the corpse.
-          return this.killedRecently(name) ? { ok: true, message: `${name} is dead` } : { ok: false, message: `${name} is gone (dead or out of view: see the target-died / target-lost event)` };
+          return this.killedRecently(name, startSeq, guid) || this.gone.get(guid)?.died ? { ok: true, message: `${name} #${guid.toString(16)} is dead` } : { ok: false, message: `${name} #${guid.toString(16)} is gone (dead or out of view: see the target-died / target-lost event)` };
         }
         if (this.host.self()?.dead) return { ok: false, message: 'you died' };
         // A kill line naming it is its death, even while the client still shows it (its death start missed).
-        if (this.killedRecently(name, startSeq)) {
+        if (this.killedRecently(name, startSeq, guid)) {
           noteReach();
           this.host.cancelAttack();
           const next = this.afterKill(guid);
           if (this.attackTarget === guid) { this.attackTarget = 0; this.push('target-died', `${name} #${guid.toString(16)} died${next}`, guid); }
-          return { ok: true, message: `${name} is dead${next}` };
+          return { ok: true, message: `${name} #${guid.toString(16)} is dead${next}` };
         }
         // A missile the server wouldn't launch (ACE TargetInRange, or no ballistic arc reaches): close in, twice at most.
         if (ranged && this.events.some((e) => e.seq > startSeq && e.type === 'chat' && /^\(\w+\) Out of Range!/.test(e.text))) {
@@ -9038,6 +9795,16 @@ export class AgentApi {
           lost(`no swings either way for 20 s (${blocked ?? 'blocked, unreachable, fleeing, or not there on the server\'s side'})`);
           return { ok: false, message: `no swings at ${name} for 20 s (${blocked ?? 'blocked, unreachable or fleeing: walk_to it, or pick another target'})` };
         }
+        // A portal on the straight line to it: the server's walk to it (MoveToObject) would carry you through. Not sent.
+        if (!ranged && !this.withinMeleeReach(guid)) {
+          const pa = this.portalAcross(guid);
+          if (pa) {
+            this.host.cancelAttack();
+            const why = this.portalAcrossText(guid, pa);
+            lost(why);
+            return { ok: false, message: why };
+          }
+        }
         if (this.host.attackPending()) { idleSince = null; return null; }
         idleSince ??= now;
         if (!sent || now - idleSince >= 1500) { sent = true; idleSince = null; this.host.attack(guid, power, height); this.motionStopAt = this.host.now(); }
@@ -9113,10 +9880,17 @@ export class AgentApi {
     const o = this.host.object(guid);
     const me = this.me();
     const far = !!(o && o.cell && me && Math.hypot(toGlobal(o.cell, o.x, o.y).x - me.g.x, toGlobal(o.cell, o.x, o.y).y - me.g.y) > AgentApi.ATTACK_RUN_UP_M);
-    if (o && o.cell && (far || this.planRoute(toGlobal(o.cell, o.x, o.y), o).length || this.straightStopsShort(o, 2.5))) {
+    // A portal on the straight line the server's approach runs: the run-up goes round it (the walk keeps out of portals).
+    const portalInWay = this.portalAcross(guid);
+    if (o && o.cell && (far || portalInWay || this.planRoute(toGlobal(o.cell, o.x, o.y), o).length || this.straightStopsShort(o, 2.5))) {
       // Attacked on the way: stop walking and fight (the server's own approach closes the rest).
-      void this.walkTo(guid, { within: 2.5, timeoutMs: 90_000 }).then((r) => {
+      void this.walkTo(guid, { within: 2.5, timeoutMs: 90_000, dropLeavesFellows: true, ...(opts.drop ? { drop: true } : {}) }).then((r) => {
         if (r.ok || r.attacked) { fight(); return; }
+        if (r.dropHeld && this.attackTarget === guid) {
+          this.attackTarget = 0;
+          this.push('target-lost', `${name} #${guid.toString(16)}: no attack: ${r.message.replace(/^walking to [^:]*: /, '')}. Let it come to you, tell them you're dropping and go together, or ac_attack target=#${guid.toString(16)} far=true drop=true to go anyway`, guid);
+          return;
+        }
         // The run-up found no way (across water, up a cliff) or gave out: say so as the attack's own end, so a wait on
         // target-lost hears it. "running up to Young Banderling" was followed by 40 s of nothing (2026-10-12).
         if (!/interrupted/.test(r.message) && this.attackTarget === guid) {
@@ -9124,7 +9898,7 @@ export class AgentApi {
           this.push('target-lost', `${name} #${guid.toString(16)}: no attack, you couldn't get to it (${r.message.replace(/^walking to [^:]*: /, '')})`, guid);
         }
       });
-      return { ok: true, message: `running up to ${name} (#${guid.toString(16)})${this.targetWhere(guid)}, then attacking; ac_wait types=target-died,target-lost,vitals-low,death,task-done${this.otherAttackersNote(guid)}` };
+      return { ok: true, message: `running up to ${name} (#${guid.toString(16)})${this.targetWhere(guid)}${portalInWay ? `, round ${portalInWay.name} #${portalInWay.guid.toString(16)} (${portalInWay.dist.toFixed(0)} m ${compassPoint(portalInWay.bearing)}: a portal on the straight line, which the server's own approach would run you through)` : ''}, then attacking; ac_wait types=target-died,target-lost,vitals-low,death,task-done${this.otherAttackersNote(guid)}` };
     }
     fight();
     return { ok: true, message: `attacking ${name} (#${guid.toString(16)})${this.targetWhere(guid)}; ac_wait types=target-died,target-lost,vitals-low,death${this.otherAttackersNote(guid)}` };
@@ -9483,6 +10257,10 @@ export class AgentApi {
     for (const o of this.host.objects()) {
       seen.set(o.guid, o.name);
       if (this.known && !this.known.has(o.guid)) fresh.push(o);
+      if ((o.itemType & IT.Creature) && !this.sawDying.has(o.guid >>> 0) && this.host.isDying(o.guid)) {
+        this.sawDying.set(o.guid >>> 0, { name: o.name, at: now });
+        if (this.sawDying.size > 200) this.sawDying.delete(this.sawDying.keys().next().value!);
+      }
       if (s && o.cell && !o.wielderId && !o.containerId) {
         const kind = classify(o, this.host.isAttackable(o.guid));
         if (PLACE_KINDS.has(kind)) {
@@ -9503,6 +10281,11 @@ export class AgentApi {
     if (this.known) {
       const carried = fresh.length ? this.host.carriedGuids() : new Set<number>();
       for (const o of fresh) if (!carried.has(o.guid)) this.objectAdded(o);
+      for (const o of fresh) {
+        if (!o.cell || !o.name.startsWith('Corpse of ')) continue;
+        this.corpseSeenAt.set(o.guid >>> 0, now);
+        if (this.corpseSeenAt.size > 200) this.corpseSeenAt.delete(this.corpseSeenAt.keys().next().value!);
+      }
       for (const [g, name] of this.known) {
         if (seen.has(g)) continue;
         // A place going out of view: its last-seen time is saved now, so a reload tells its age right.
@@ -9511,7 +10294,7 @@ export class AgentApi {
           // Gone while held in view (not released out of range, not mid-portal or logging out): the server removed it.
           if (placesWere.get(g) === false && this.lastScreen === 'world' && this.host.screen() === 'world') this.places.delete(g);
         }
-        const died = this.dyingSeen.has(g) || this.killedRecently(name);
+        const died = this.dyingSeen.has(g) || this.sawDying.has(g >>> 0) || this.killedRecently(name, 0, g);
         this.objectRemoved(g, name);
         this.gone.set(g, { name, at: now, died });
         if (this.gone.size > 200) this.gone.delete(this.gone.keys().next().value!);
@@ -9520,9 +10303,12 @@ export class AgentApi {
     if (placesChanged.n) this.savePlaces(s);
     this.known = seen;
     for (const [g, p] of this.pendingLoss) {
-      const corpse = fresh.some((o) => o.name === `Corpse of ${p.name}`) || [...this.host.objects()].some((o) => o.name === `Corpse of ${p.name}` && this.isNearbyNew(o));
-      if (corpse || this.killedRecently(p.name)) { this.pendingLoss.delete(g); this.push('target-died', `${p.name} #${g.toString(16)} died`, g); }
-      else if (now - p.at > 3000) { this.pendingLoss.delete(g); this.push('target-lost', `${p.name} #${g.toString(16)} went out of view (fled, or you moved away)`, g); }
+      const atSpot = this.corpseAtLastSpot(g);
+      const corpse = !!atSpot || (!this.monsterSeen.has(g) && (fresh.some((o) => o.name === `Corpse of ${p.name}`) || [...this.host.objects()].some((o) => o.name === `Corpse of ${p.name}` && this.isNearbyNew(o))));
+      if (corpse || this.killedRecently(p.name, 0, g)) {
+        this.pendingLoss.delete(g);
+        this.push('target-died', `${p.prefix ?? ''}${p.name} #${g.toString(16)} died${atSpot ? `: its corpse #${atSpot.guid.toString(16)} lies where it was last seen, ${atSpot.dist.toFixed(0)} m ${compassPoint(atSpot.bearing)}` : ''}`, g);
+      } else if (now - p.at > 3000) { this.pendingLoss.delete(g); this.push('target-lost', p.lost ?? `${p.name} #${g.toString(16)} went out of view (fled, or you moved away)`, g); }
     }
     const dialogs = this.host.dialogs();
     for (const d of dialogs.slice(this.lastDialogCount)) this.push('dialog', `[${d.buttons.join('/')}] ${d.text}`);
@@ -9589,14 +10375,16 @@ export class AgentApi {
       useOn: (i: TargetArg, t: TargetArg) => this.useOnReported(i, t),
       // ac_walk_to / ac_follow: a monster starting to come at you answers the walk (stop_on_aggro=false walks on), and a
       // walk keeps clear of monsters near the way (avoid_monsters=false walks straight).
-      walkTo: (t: number | string, o?: { within?: number; timeoutMs?: number; flee?: boolean; stayWith?: string; stayWithin?: number; stopOnAggro?: boolean | null; avoidMonsters?: boolean | null; line?: boolean }) => this.walkTo(t, { ...(o ? { within: o.within, timeoutMs: o.timeoutMs, flee: o.flee, stayWith: o.stayWith, stayWithin: o.stayWithin, ...(o.line ? { line: true } : {}) } : {}), onAwayKeepGoing: true, stopOnAggro: o?.stopOnAggro !== false, avoidMonsters: o?.avoidMonsters !== false }),
+      // drop=true reaches the walk: the surface's own option list left it out, so `walk_to … stay_with=… drop=true` stopped
+      // at the edge with the same "stay_with doesn't go down without them" (Bulwark, Mountain Keep, 2026-10-17 07:50:34Z).
+      walkTo: (t: number | string, o?: { within?: number; timeoutMs?: number; flee?: boolean; stayWith?: string; stayWithin?: number; stopOnAggro?: boolean | null; avoidMonsters?: boolean | null; line?: boolean; drop?: boolean }) => this.walkTo(t, { ...(o ? { within: o.within, timeoutMs: o.timeoutMs, flee: o.flee, stayWith: o.stayWith, stayWithin: o.stayWithin, ...(o.line ? { line: true } : {}), ...(o.drop ? { drop: true } : {}) } : {}), onAwayKeepGoing: true, stopOnAggro: o?.stopOnAggro !== false, avoidMonsters: o?.avoidMonsters !== false }),
       follow: (t: TargetArg, o?: { within?: number | null; durationMs?: number | null; flee?: boolean | null; stopOnAggro?: boolean | null }) => this.follow(t, { ...(o?.within != null ? { within: o.within } : {}), ...(o?.durationMs != null ? { durationMs: o.durationMs } : {}), ...(o?.flee ? { flee: true } : {}), stopOnAggro: o?.stopOnAggro !== false }),
       turn: (t: number | string) => this.turn(t),
       move: (d: string, s?: number) => this.move(d, s),
       jump: (o?: { holdMs?: number; forward?: boolean; walk?: boolean }) => this.jump(o ?? {}),
       stopMoving: () => this.stopMoving(),
       combatMode: (m: string) => this.combatMode(m),
-      attack: (t: TargetArg, o?: { height?: AttackHeightName; power?: number | 'bar'; next?: boolean; far?: boolean }) => this.attack(t, o),
+      attack: (t: TargetArg, o?: { height?: AttackHeightName; power?: number | 'bar'; next?: boolean; far?: boolean; drop?: boolean }) => this.attack(t, o),
       cast: (s: number | string, t: TargetArg, o?: CastRepeatOptions | null) => this.cast(s, t, o ?? undefined),
       pickUp: (t: TargetArg) => this.pickUp(t),
       loot: (c: TargetArg, m: string | null) => this.loot(c, m),
@@ -9604,6 +10392,8 @@ export class AgentApi {
       give: (i: TargetArg, t: TargetArg, n: number | null) => this.give(i, t, n),
       equip: (t: TargetArg, slot?: string | null) => this.equip(t, slot ?? null),
       unequip: (t: TargetArg) => this.unequip(t),
+      moveItem: (t: TargetArg, to?: string | number | null) => this.moveItem(t, to ?? null),
+      moveItems: (f: string, to?: string | number | null, max?: number) => this.moveItems(f, to ?? null, max ?? 50),
       appraise: (t: TargetArg) => this.appraise(t),
       raise: (s: string, n?: number) => this.raise(s, n),
       trainSkill: (s: string) => this.trainSkill(s),

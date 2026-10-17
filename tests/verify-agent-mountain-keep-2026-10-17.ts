@@ -150,7 +150,10 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2): walks through the re
           expect(r.message).toMatch(/^followed Claude Bulwark for \d+ s, until they stopped/);
           expect(host.me.z).toBeLessThan(-4);
           expect(Math.hypot(host.me.x - b.x, host.me.y - b.y)).toBeLessThan(5);
-          expect(host.traces.some((l) => /follow: Claude Bulwark moved \d+ m during the searches; planning the way to them again/.test(l))).toBe(true);
+          // Planned to his floor again once he landed, or (since 2026-10-17 08:15Z: a goal in mid-air off your storey is in
+          // the room whose floor is under it, feetCell) to the floor under him from the start.
+          const firstLeg = host.traces.find((l) => /^\[AC:Agent\] walk leg /.test(l) || /^walk leg /.test(l)) ?? '';
+          expect(host.traces.some((l) => /follow: Claude Bulwark moved \d+ m during the searches; planning the way to them again/.test(l)) || (/\d+ doorway\(s\) ahead/.test(firstLeg) && !/ 0 doorway/.test(firstLeg)), host.traces.slice(0, 8).join('\n')).toBe(true);
           expect(host.traces.some((l) => /walk leg .*\d+ doorway\(s\) ahead/.test(l) && !/ 0 doorway/.test(l))).toBe(true);
         } finally { host.dispose(); }
       } finally { vi.useRealTimers(); vi.restoreAllMocks(); }
@@ -224,7 +227,9 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2): walks through the re
       vi.useFakeTimers();
       vi.spyOn(console, 'log').mockImplementation(() => {});
       try {
-        const { r, host, api } = await go({});
+        // drop=true: she comes along behind him, down the drops too (without it the walk stops at the first edge while she
+        // is on his floor: verify-agent-stream-movement-2026-10-17-0614z).
+        const { r, host, api } = await go({ drop: true });
         expect(r.ok, `${r.message}\n${host.traces.join('\n')}`).toBe(true);
         expect(r.message).toMatch(/^Claude Arcanist was \d+ m [NSEW]+ of you, on another floor \(\d+ m down\), not on your way, and hadn't moved for 1\d s: went back to them first \(arrived [^)]*\)[^:]*, then on together: arrived/);
         expect(host.me.cell).toBe(C(0x14a));

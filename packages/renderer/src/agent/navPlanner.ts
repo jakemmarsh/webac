@@ -35,6 +35,25 @@ export interface JumpSearch {
   penalty?: number;
   /** Most flights simulated before jumps stop being tried (default 1500). */
   maxFlights?: number;
+  /**
+   * Floor circles no jump or drop may land in or fly across (a portal's disk: portalAvoid.AvoidDisk, `span` the height
+   * it counts over, default 3 m). The probe stops a walk at a portal's rim, but a flight was never probed: a jump onto
+   * the Mountain Keep portal's platform landed 1.2 m from its centre, inside its reach, and took Bulwark through it on a
+   * walk_to the portal itself (A8C3, 2026-10-17 05:28:40Z, WeenieError ITeleported).
+   */
+  avoid?: () => ReadonlyArray<{ x: number; y: number; z: number; r: number; span?: number }>;
+}
+
+/** Whether a flight from `a` to `b` lands in, or passes over, one of `disks` (horizontal, within each one's height span). */
+export function flightCrossesDisk(a: NavPoint, b: NavPoint, disks: ReadonlyArray<{ x: number; y: number; z: number; r: number; span?: number }>): boolean {
+  const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy;
+  for (const d of disks) {
+    const span = d.span ?? 3;
+    if (Math.abs(a.z - d.z) > span && Math.abs(b.z - d.z) > span) continue;
+    const t = len2 > 1e-9 ? Math.max(0, Math.min(1, ((d.x - a.x) * dx + (d.y - a.y) * dy) / len2)) : 0;
+    if (Math.hypot(a.x + dx * t - d.x, a.y + dy * t - d.y) < d.r) return true;
+  }
+  return false;
 }
 
 export interface PlanOptions {
@@ -243,7 +262,8 @@ export class PathSearch {
       if (!open) continue;
       let flights = 0;
       const kit: typeof js.kit = { ...js.kit, launch: (power, walk) => { flights++; return js.kit.launch(power, walk); } };
-      const options = jumpOptions(kit, p, u, { maxDamage: js.maxDamage, max: 2 });
+      const avoid = js.avoid?.() ?? [];
+      const options = jumpOptions(kit, p, u, { maxDamage: js.maxDamage, max: 2, ...(avoid.length ? { accept: (to: NavPoint) => !flightCrossesDisk(p, to, avoid) } : {}) });
       this.flights += flights;
       for (const o of options) {
         const ni = Math.round((o.to.x - this.start.x) / this.spacing), nj = Math.round((o.to.y - this.start.y) / this.spacing);

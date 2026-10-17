@@ -62,7 +62,7 @@ export function formatObject(o: AgentObject): string {
     bits.push(`ON ANOTHER FLOOR, ${Math.abs(o.otherFloor)} m ${o.otherFloor > 0 ? 'up' : 'down'}: no melee from here; ${way}; a bolt or arrow only through an opening`);
   }
   if (o.attackingYou) bits.push(`ATTACKING YOU (${o.attackingYou}× in 10 s)`);
-  else if (o.comingAtYou) bits.push(`COMING AT YOU (${o.comingAtYou})`);
+  else if (o.comingAtYou) bits.push(o.comingAtYouStuck ? `AIMED AT YOU BUT NOT REACHING YOU (${o.comingAtYou})` : `COMING AT YOU (${o.comingAtYou})`);
   if (o.seen) bits.push(`seen: ${o.seen}`);
   if (o.lineOfFireBlockedAt !== undefined) bits.push(`no line of fire: blocked ${o.lineOfFireBlockedAt.toFixed(1)} m along it${o.lineOfFireBlocker ? ` by ${o.lineOfFireBlocker}` : ''} (${o.lineOfFireArc ? 'your arrow\'s arc would hit that' : 'a bolt or arrow would hit that'})`);
   if (o.seenAgo !== undefined) bits.push(`last seen ${seenAgoText(o.seenAgo)} ago`);
@@ -225,7 +225,14 @@ export const PACK_SLOTS_LOW = 5;
  */
 export function packSlotsText(p: AgentPackSlots): string {
   const each = p.packs.map((x) => `${x.name} ${x.used}/${x.capacity}${x.used >= x.capacity ? ' FULL' : ''}`).join(', ');
-  const head = `pack slots: ${each ? `${each} (${p.free} free)` : `${p.free} free in the main pack`}`;
+  const main = p.packs.find((x) => x.main);
+  const roomy = p.packs.filter((x) => !x.main && x.used < x.capacity);
+  // A full main pack beside an empty side pack: Bulwark's main pack sat at 109/102 the whole segment with his Pack
+  // at 0/24 and no tool to move anything into it (stream, 2026-10-17 06:14Z report).
+  const move = main && main.used >= main.capacity && roomy.length
+    ? `  main pack FULL: ac_move_item moves items into your ${roomy.map((x) => x.name).join(' / ')} (filter=junk, filter=salvage or item=…)`
+    : '';
+  const head = `pack slots: ${each ? `${each} (${p.free} free)` : `${p.free} free in the main pack`}${move}`;
   if (p.free > PACK_SLOTS_LOW) return head;
   return `${head}  LOW: an item with no slot left is refused ("… is completely full!") whatever your burden; drop or sell some first (ac_inventory filter=junk lists what no vendor buys, filter=sell what they do)`;
 }

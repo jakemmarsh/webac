@@ -5,7 +5,7 @@
  * front ends get it.
  */
 import {
-  formatEvents, formatInventory, formatInventoryFiltered, formatObservation, formatSpells, formatTrace, packSlotsText,
+  filterInventory, formatEvents, formatInventory, formatInventoryFiltered, formatObservation, formatSpells, formatTrace, packSlotsText,
 } from '../../packages/renderer/src/agent/format.ts';
 import type { AgentEvent, AgentItem, AgentPackSlots, AgentObservation, AgentResult, AgentSpell, AgentStatus, AgentTracePoint } from '../../packages/renderer/src/agent/types.ts';
 import { formatGear } from '../../packages/renderer/src/agent/gear.ts';
@@ -614,7 +614,10 @@ export const TOOLS: AgentTool[] = [
     props: { ...PROFILE_PROP, filter: { type: 'string', description: 'Only some items, each with where it is: a kind (weapon, armor, clothing, jewelry, scroll, book, kit, potion, food, salvage, gem, key, component, pack, manastone, money, worn; junk = carried items no vendor buys (value 0) that aren\'t money, keys, gems, writables, packs, components, mana stones or salvage; sell = what a vendor pays for, most valuable first) or text in the name ("Healing"). Default: everything, gear first. The first line counts your pack slots (main pack and each side pack): a loot finding none free is refused per item ("… is completely full!") whatever your burden.' } },
     async run(a) {
       const c = callerFor(a.profile);
-      const items = await c.call<AgentItem[]>('inventory');
+      // A junk list appraises the unknown candidates first, so attuned ones (known only from an appraisal) are left
+      // out; a page from before junkChecked answers with the plain list.
+      const junk = a.filter !== undefined && filterInventory([], String(a.filter)).kind === 'junk';
+      const items = junk ? await c.call<AgentItem[]>('junkChecked', [], 10_000).catch(() => c.call<AgentItem[]>('inventory')) : await c.call<AgentItem[]>('inventory');
       // Pages from before packSlots (an older playwebac.com build) answer without the line.
       const slots = await c.call<AgentPackSlots | null>('packSlots').catch(() => null);
       const body = a.filter === undefined || String(a.filter).trim() === '' ? formatInventory(items) : formatInventoryFiltered(items, String(a.filter));
@@ -729,10 +732,11 @@ export const TOOLS: AgentTool[] = [
     flee: { type: 'boolean', description: 'Keep going while monsters hit you (running away). Default: stop when hit, unless the way on leads away from every attacker. Any walk (flee too) stops at critical health (under 40%, or one hit taking 20% that leaves you under 60%) and says "Heal or keep running?": heal standing, or ask the walk again, which then runs on until health falls another 10% of your max.' },
     stay_with: { type: 'string', description: 'A fellow\'s name: stay together. You run as always (never a walk to let them catch up); when they are more than stay_within metres behind you stop once and wait until they are within 4 m (or have stopped near you), then run on together. While they are casting or fighting you wait on quietly. Indoors, one standing still off your way (on another floor, or round a wall in another branch) is gone back to once first, then you go on together (it says so). Ends early, saying so, if they stand still doing nothing, head elsewhere or go on past you another way.' },
     stay_within: { type: 'number', description: 'With stay_with: how far behind they may fall, metres (default 15).' },
+    drop: { type: 'boolean', description: 'With stay_with: the way may drop off a ledge or down a floor opening (one way) with them: it waits at the edge until they are with you, then goes down (tell them first, so they follow). Default off: at such an edge, with them on your floor, the walk stops and says so.' },
     stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you (default true; one already coming when you set off doesn\'t stop it). false walks on until hit. flee=true never stops for it.' },
     avoid_monsters: { type: 'boolean', description: 'Outdoors, route round monsters near the way, 10 m clear (15 m of one well above your level), as a player goes round a camp. Indoors, stop before coming within their wake range (18 m on ACE, 40 m on GDLE servers) of 2 or more monsters not yet awake, naming them. Default true; off with flee. false walks the straight way, and on into them.' },
     line: { type: 'boolean', description: 'For a caster or archer walking up to a target: arrive only with an open line of fire to it as well as within `within`. Walled off, it closes in 1.5 m at a time (round the wall) until the line opens, and at worst stops beside it saying the line is still shut. Without it, an arrival by a monster still says when the line is shut.' },
-  }, ['target'], (a) => [/[NS]\s*,?\s*[\d.]+\s*[EW]/i.test(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, ...(a.line === true || a.line === 'true' ? { line: true } : {}), ...(a.timeout_s !== undefined ? { timeoutMs: Number(a.timeout_s) * 1000 } : {}), ...(a.flee ? { flee: true } : {}), ...(a.stay_with ? { stayWith: String(a.stay_with) } : {}), ...(a.stay_within !== undefined ? { stayWithin: Number(a.stay_within) } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}), ...(a.avoid_monsters === false || a.avoid_monsters === 'false' ? { avoidMonsters: false } : {}) }], 320_000),
+  }, ['target'], (a) => [/[NS]\s*,?\s*[\d.]+\s*[EW]/i.test(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, ...(a.line === true || a.line === 'true' ? { line: true } : {}), ...(a.timeout_s !== undefined ? { timeoutMs: Number(a.timeout_s) * 1000 } : {}), ...(a.flee ? { flee: true } : {}), ...(a.stay_with ? { stayWith: String(a.stay_with) } : {}), ...(a.stay_within !== undefined ? { stayWithin: Number(a.stay_within) } : {}), ...(a.drop === true || a.drop === 'true' ? { drop: true } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}), ...(a.avoid_monsters === false || a.avoid_monsters === 'false' ? { avoidMonsters: false } : {}) }], 320_000),
   act('ac_follow', 'Follow a player (your fellow): run to within `within` metres of them, stand while they stay near, and run again once they are 3 m past that (never a walk), re-aiming as they go, until they stop (they stand beside you 30 s: they arrived, or are busy there; at most 10 minutes, then it says "still following" and you follow again) or duration_s ends when you give one, you are hit (unless flee=true, or they have monsters on them: then the follow goes on through the hits to them), a monster starts coming at you (unless stop_on_aggro=false), they go out of sight, or you start something else (any action, or ac_stop_moving). One already out of your sight when asked (a dungeon shows you only the rooms in sight of yours) is first walked to where they were last seen, then followed if they are in sight from there. Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
     target: { type: 'string', description: 'The player to follow: name or id.' },
     within: { type: 'number', description: 'How close to keep, metres (default 4).' },
@@ -827,7 +831,8 @@ export const TOOLS: AgentTool[] = [
     power: { type: 'number', description: 'Power/accuracy 0..1 (default 0.6).' },
     next: { type: 'boolean', description: 'Opt-in chaining: when this target dies, attack the next monster on you (or on a fellow within 30 m) at once, and so on while next=true holds; the target-died event names each next one (never one on another floor from a fellow beside you). Default off: the client\'s Auto Target only selects the next attacker, it never swings at it.' },
     far: { type: 'boolean', description: 'Melee only: go for a target on another floor (a storey up or down indoors), or one more than 12 m off, even though the run there leaves a fellow standing on your floor (or at your side) behind. Default off: such an attack is refused with where it is, the way there, and what to do instead.' },
-  }, [], (a) => [a.target === undefined ? null : guidOrName(a.target), { height: a.height, power: a.power, ...(a.next === true || a.next === 'true' ? { next: true } : {}), ...(a.far === true || a.far === 'true' ? { far: true } : {}) }]),
+    drop: { type: 'boolean', description: 'Melee only: the run-up may drop off a ledge or down a floor opening (one way) while a fellow stands on your floor. Default off: such a run-up is refused (or stops at the edge) saying how far it drops and who stays up; far=true alone does not allow it.' },
+  }, [], (a) => [a.target === undefined ? null : guidOrName(a.target), { height: a.height, power: a.power, ...(a.next === true || a.next === 'true' ? { next: true } : {}), ...(a.far === true || a.far === 'true' ? { far: true } : {}), ...(a.drop === true || a.drop === 'true' ? { drop: true } : {}) }]),
   act('ac_cast', 'Cast a spell by name or id at a target (or yourself). Switches to magic stance first. One cast per call, unless repeat=true: then it keeps casting the same spell at the same target, each as soon as the client lets you (as a player pressing the bolt key again does), and answers one summary (each cast\'s result, damage dealt, your vitals, why it stopped). It stops when the target dies or goes, your mana won\'t pay for another, the server refuses a cast (no line of fire, out of range, too busy twice), your health falls below until_health (default 60%: heal before the next bolt, a fragile caster earlier still), a monster other than the target that is real danger starts attacking you (it casts spells, one of its hits took 10% or more of your health, or it is above your level; a milder one is cast on through and named under "joined in meanwhile"), or after max_casts / max_s; any other action or ac_stop_moving stops it too. A long repeat answers "still in progress": ac_wait types=task-done,target-died hears the summary.', {
     spell: { type: 'string', description: 'Spell name (e.g. "Flame Bolt I") or id. A name without a level ("Heal Self") casts the highest level of it you know that you can land (75%+ past the fizzle roll, else the likeliest), and the reply says which.' },
     target: { type: 'string', description: 'Target id/name, or "self" (default: current target for hostile spells, else self).' },
@@ -853,6 +858,37 @@ export const TOOLS: AgentTool[] = [
     slot: { type: 'string', description: 'Paperdoll slot: left wrist, right wrist, left ring, right ring, neck, weapon, shield, missile, ammo, held, two-handed, trinket, cloak (or an EquipMask name, e.g. WristWearLeft). Armor and clothing go where they fit whatever you name.' },
   }, ['item'], (a) => [guidOrName(a.item), a.slot ?? null]),
   act('ac_unequip', 'Take off a worn or wielded item into your main pack (the drag off the paperdoll). ac_inventory shows what is worn where.', { item: { type: 'string', description: 'Item id or name.' } }, ['item'], (a) => [guidOrName(a.item)]),
+  {
+    name: 'ac_move_item',
+    description: 'Move items between your packs: into a side pack (a Sack, Pack or Pouch you carry) or back to the main pack, as dragging one onto the pack\'s icon in the inventory does. item= moves one, items= several, filter= every carried item of a kind (junk, salvage, potion … as ac_inventory filter=) or name, until the pack is full. to= names the pack: "side" (the side pack with the most room, the default), "main", its name ("Sack") or #id, or its pack slot (1 = the first side pack). Each move is reported once the server has moved it, or with its refusal. ac_inventory\'s first line counts each pack\'s slots. Worn items: ac_unequip first.',
+    props: {
+      ...PROFILE_PROP,
+      item: { type: 'string', description: 'Inventory item name or id.' },
+      items: { type: 'string', description: 'Several items: names or ids separated by commas, or a JSON list.' },
+      filter: { type: 'string', description: 'Every carried item of this kind or name (as ac_inventory filter=), e.g. junk, salvage, "Mu-miyah".' },
+      to: { type: 'string', description: 'side (default) | main | a side pack\'s name or #id | its pack slot number.' },
+      max: { type: 'number', description: 'filter=: at most this many (default 50).' },
+    },
+    aliases: { target: 'item', pack: 'to' },
+    required: [],
+    async run(a) {
+      const to = a.to === undefined || a.to === null || String(a.to).trim() === '' ? null : String(a.to);
+      const filter = a.filter !== undefined && a.filter !== null && String(a.filter).trim() !== '' ? String(a.filter) : null;
+      const list = [...(a.item !== undefined && a.item !== null && a.item !== '' ? [String(a.item)] : []), ...sellList(a.items)];
+      if (!filter && !list.length) return { text: 'ac_move_item: name the item (item=…), items (items="A, B") or a kind (filter=junk)', isError: true };
+      const c = callerFor(a.profile);
+      if (filter) return withNotice(c, result(await c.call<AgentResult>('moveItems', [filter, to, Number(a.max ?? 50) || 50], 240_000)));
+      if (list.length === 1) return withNotice(c, result(await c.call<AgentResult>('moveItem', [guidOrName(list[0]), to])));
+      const out: string[] = [];
+      let failed = 0;
+      for (const it of list) {
+        const r = await c.call<AgentResult>('moveItem', [guidOrName(it), to]);
+        if (!r.ok) failed++;
+        out.push(`${it}: ${r.message.replace(/\n/g, '\n    ')}`);
+      }
+      return withNotice(c, { text: [`moved ${list.length - failed} of ${list.length}:`, ...out.map((l) => `  ${l}`)].join('\n'), ...(failed === list.length ? { isError: true } : {}) });
+    },
+  },
   act('ac_appraise', 'Examine (ID) an object: full properties once the server answers.', { target: { type: 'string', description: 'Object id or name.' } }, ['target'], (a) => [guidOrName(a.target)], 20_000),
   {
     name: 'ac_keys',
@@ -1006,8 +1042,8 @@ export const TOOLS: AgentTool[] = [
   },
   act('ac_raise', 'Spend unassigned XP to raise an attribute, vital or skill by one step (or several with times). stat= names it; skill= works the same.', {
     stat: { type: 'string', description: 'Attribute (Strength…), vital (Health/Stamina/Mana) or skill name (e.g. "War Magic"); skill= is the same argument.' },
-    times: { type: 'number', description: 'How many raises (default 1).' },
-  }, ['stat'], (a) => [String(a.stat), Number(a.times ?? 1)]),
+    times: { type: 'number', description: 'Raises at most this many (default 1): as many as your unassigned XP covers, stopping at the first it can\'t pay for (times=50 spends all it can). amount= is the same argument.' },
+  }, ['stat'], (a) => [String(a.stat), Number(a.times ?? 1) || 1]),
   act('ac_train_skill', 'Spend skill credits to train an untrained skill (e.g. "Life Magic", "Creature Enchantment", "Healing"). ac_character lists each untrained skill\'s cost in credits and your credits. A trained magic school lets you learn its spells from scrolls (ac_use the scroll).', {
     skill: { type: 'string', description: 'Skill name.' },
   }, ['skill'], (a) => [String(a.skill)]),
@@ -1056,7 +1092,8 @@ export function sellList(v: unknown): string[] {
 
 // skill= is stat= for raise: "raise skill=Healing" was refused with "takes stat=" a dozen times in a segment (Bulwark,
 // Arcanist, 2026-10-16), and a skill is half of what raise raises.
-for (const t of TOOLS) if (t.name === 'ac_raise') t.aliases = { skill: 'stat' };
+// amount= is times= ("raise amount=max" was refused as an unknown argument, Bulwark 2026-10-17 05:00Z).
+for (const t of TOOLS) if (t.name === 'ac_raise') t.aliases = { skill: 'stat', amount: 'times' };
 
 // distance= is within= for the walks: "follow distance=" was refused as an unknown argument (Arcanist, 2026-10-16).
 for (const t of TOOLS) if (t.name === 'ac_walk_to' || t.name === 'ac_follow') t.aliases = { distance: 'within' };

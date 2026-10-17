@@ -903,11 +903,13 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
     expect(nextCreditLevels(null)).toEqual([]);
   });
 
-  it('a character\'s goal is in every segment\'s opening (start notes only the first); the cast plans Item Enchantment at 26, no Temple', () => {
+  it('a character\'s goal is in every segment\'s opening (start notes only the first); the cast goal is the plan, not what it knows, no Temple', () => {
     const cfg = parseStreamConfig(CAST);
     const [arc, bul] = cfg.characters;
-    expect(arc.goal).toMatch(/Item Enchantment is your priority\. Training it costs 8 skill credits; you have 6, and the next credits come at levels 23 and 26/);
-    expect(arc.goal).toMatch(/efficient XP to level 26, and train Item Enchantment \(`train_skill`\) the moment the credits arrive\. No Temple of Forgetfulness\./);
+    // The goal states the plan, never what the character knows (that is the readiness line's, live).
+    expect(arc.goal).toMatch(/Keep Impenetrability and the Banes up/);
+    expect(arc.goal).toMatch(/No Temple of Forgetfulness\./);
+    expect(arc.goal).not.toMatch(/you know almost no|you have \d/);
     expect(bul.goal).toMatch(/Help Claude Arcanist level efficiently/);
     for (const segment of [1, 3]) {
       const o = segmentOpening({ c: arc, partner: 'Claude Bulwark', segment, nowMs: 0, playMinutes: 75, journal: '', lastReport: null, readiness: 'Your readiness right now:\n- skill credits: 6 now; next at level 23 (+1) and 26 (+1)' });

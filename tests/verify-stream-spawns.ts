@@ -56,12 +56,13 @@ describe('spawns: the SQL', () => {
 });
 
 describe('spawns: rows → sources', () => {
-  it('turns an encounter into ACE\'s spot (cell_X × 24, clamped to 0.5 … 191.5) in its landblock, once per spot', () => {
+  it('turns an encounter into ACE\'s spot (cell_X × 24, clamped to 0.5 … 191.5) and the outdoor cell under it, once per spot', () => {
     const p = parseSpawnPlaces(PLACES);
+    // SpawnEncounters' adjust_to_outside: cellX × 8 + cellY + 1 (2026-10-17: was XXYY0001 for every spot).
     expect(p.encounters.get(23174)).toEqual([
-      { cell: 0xa3ad0001, x: 0.5, y: 168, viaGenerator: true },
-      { cell: 0xa3ad0001, x: 24, y: 72, viaGenerator: true },
-      { cell: 0xa4ad0001, x: 191.5, y: 191.5, viaGenerator: true },
+      { cell: 0xa3ad0008, x: 0.5, y: 168, viaGenerator: true },
+      { cell: 0xa3ad000c, x: 24, y: 72, viaGenerator: true },
+      { cell: 0xa4ad0040, x: 191.5, y: 191.5, viaGenerator: true },
     ]);
     expect(p.placed.get(9000)).toEqual([{ cell: 0x01a40105, x: 50, y: 60, viaGenerator: false }]);
     expect(p.names.get(4346)).toBe('Mite Scion Camp Generator');

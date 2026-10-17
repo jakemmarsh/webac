@@ -116,7 +116,7 @@ export function parseShopVendors(tsv: string): Map<number, ShopVendor> {
       if (rate !== undefined) v.sellRate = rate;
       if (c && c !== 'NULL') v.currency = c.trim();
     } else if (tag === 'p' || tag === 'g') {
-      const cell = Number(a) >>> 0;
+      const cell = aceCellOf(Number(a), Number(b), Number(c));
       if (!v.places.some((p) => p.cell === cell && p.x === Number(b) && p.y === Number(c))) v.places.push({ cell, x: Number(b), y: Number(c), viaGenerator: tag === 'g' });
     }
   }
@@ -127,6 +127,22 @@ export function parseShopVendors(tsv: string): Map<number, ShopVendor> {
 export function shopPrice(value: number | undefined, sellRate: number | undefined, itemType?: number): number {
   const rate = itemType !== undefined && (itemType & PROMISSORY_NOTE) !== 0 ? 1.15 : (sellRate ?? 1);
   return Math.max(1, Math.ceil(Math.fround(rate) * (value ?? 0) - 0.1));
+}
+
+/**
+ * The cell ACE puts an object in when the DB gives only its landblock: an outdoor `obj_Cell_Id` of XXYY0000 (40,069 of
+ * the end-of-retail world's 365,184 landblock_instance rows, among them the Mountain Keep portal, wcid 1364, at
+ * 0xA8C30000 105.357 154.166). ACE's Position(blockCellID, x, y, z, …) calls SetPosition when `blockCellID & 0xFFFF` is
+ * 0, and SetLandCell takes the outdoor cell under the origin: cellX × 8 + cellY + 1, cellX / cellY = origin / 24
+ * (ACE.Entity/Position.cs). So 0xA8C30000 at (105.4, 154.2) is 0xA8C30027. Any other id (an outdoor or interior cell,
+ * or 0: no place) is returned as it is.
+ */
+export function aceCellOf(cell: number, x: number, y: number): number {
+  const c = cell >>> 0;
+  if ((c & 0xffff) !== 0 || c < 0x10000 || !Number.isFinite(x) || !Number.isFinite(y)) return c;
+  const cx = Math.min(7, Math.max(0, Math.floor(x / CELL_LENGTH)));
+  const cy = Math.min(7, Math.max(0, Math.floor(y / CELL_LENGTH)));
+  return ((c & 0xffff0000) | (cx * 8 + cy + 1)) >>> 0;
 }
 
 /** A placement → the retail map readout's coordinates (the agent's own "42.1N, 33.6E"), from its landblock + origin. */

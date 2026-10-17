@@ -154,10 +154,13 @@ export class FakeHost implements AgentHost {
   /** The straight line of fire (a bolt) and an arrow's arc to a target; unset = the host can't say. */
   lineOfFire: AgentHost['lineOfFire'] = undefined;
   lineOfFireOpenSpot: AgentHost['lineOfFireOpenSpot'] = undefined;
+  lineOfFireFrom: AgentHost['lineOfFireFrom'] = undefined;
   missileLineOfFire: AgentHost['missileLineOfFire'] = undefined;
   routeTo: Array<{ x: number; y: number; z: number }> | null = null;
   /** The floorless cells between two rooms no route joins (cellPath routeBarrier); unset = the host can't say. */
   routeBarrier: AgentHost['routeBarrier'] = undefined;
+  /** The rooms you can walk cut off from the goal (cellPath routeCutOff); unset = the host can't say. */
+  routeCutOff: AgentHost['routeCutOff'] = undefined;
   route = (_fc: number, _f: unknown, _tc: number, to: { x: number; y: number; z: number }) => (this.routeTo ? [...this.routeTo, to] : null);
   logout = () => {};
 

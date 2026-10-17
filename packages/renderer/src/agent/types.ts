@@ -48,6 +48,8 @@ export interface AgentObject {
    * TurnToObject at you, before a charge or a spell), or "closing, 6 m nearer in 3 s" (its own movement toward you).
    */
   comingAtYou?: string;
+  /** comingAtYou, but it gets no nearer (no closer in AGGRO_STALL_MS) or is on another floor: aimed at you, not reaching you. */
+  comingAtYouStuck?: boolean;
   /**
    * Monsters only: what this kind of creature (by name) was seen doing to you this session, from the server's own
    * lines: "casts Frost Bolt II (40), Drain Health Other II; hits up to 6". Nothing hidden: only what a player saw.

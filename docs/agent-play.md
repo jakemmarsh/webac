@@ -159,6 +159,13 @@ A material name finds an item too ("Bronze Bracelet" is your "Bracelet" of bronz
 pack first. Without `slot=` it is the double-click (the client picks, and with both wrists or both rings taken it
 replaces the right one); the reply names the slot it went to and what it took off. `ac_unequip item=…` is the drag
 off the paperdoll into the main pack (2026-10-16: there was no way to take the dead bracelet off but dropping it).
+`ac_move_item item=… to=side` moves an item between your packs, as the drag onto a pack's icon does
+(PutItemInContainer, or a merge onto a stack there): `to=` is `side` (the side pack with the most room, the default),
+`main`, a side pack's name or #id (its own name wins: Bulwark's side pack is called "Pack") or its pack slot. `items=`
+takes several, `filter=junk` / `filter=salvage` / any `ac_inventory` filter every match, one request at a time until
+the pack is full. Each move is reported once the server has moved it (the client changes the item's container only on
+InventoryPutObjInContainer), or with its refusal; observe's pack-slots line points at it when the main pack is full
+beside a side pack with room (2026-10-17: Bulwark's main pack sat at 109/102 for a segment beside an empty Pack).
 `ac_give` walks up beside the recipient first, so ACE's own walk (15 s, then "can't be given - action cancelled") has
 nothing to do, waits up to 17 s for the server's answer and ignores other chat; an id that isn't in your inventory is
 refused before it is sent (the server's "Item not found!" names an object the client can't resolve, which left its
@@ -685,6 +692,13 @@ here, not having to hardcode behavior").
   open line (`ServerObjectManager.openLineSpot`: the 8 compass points every 0.5 m, a 5 cm margin; ACE hit from all 436
   spots it named). A/B any such check with `ALL=1 STEP=… run.sh grid <lb> <setup> <scale> x0 x1 y0 y1 r` (every shot,
   with ACE's placed positions) and `run.sh pairs <lb> <setup> <scale> /work/pairs.txt`.
+  Mountain Keep, 2026-10-17 07:14–08:16Z: 40 of Arcanist's 83 Flame Bolt calls were refused (28 a wall, 6 at the spawn
+  point, 4 the floor, 2 the ceiling), mostly Dreads a storey up or down or stuck behind walls; every bolt that went out
+  landed or was resisted (none died on a wall), and the path's numbers are ACE's (Flame Bolt's projectile, wcid 1499,
+  Setup 0x0200050D: one sphere of 0.1 m, height 0.2; spawn 2 × (0.48 + 0.1) ahead). So the check stands. The 3 m spot
+  search found a spot once; what worked by hand, six times, was walking to Bulwark. With no spot, the refusal now asks
+  `lineOfFireFrom(target, fellow)` (the same path with your body where a fellow in view stands) and says
+  `… but where Claude Bulwark stands (10 m NE of you) has: walk_to target="Claude Bulwark" within=2`.
 - **Stream reports, 2026-10-15 (Arcanist / Bulwark).** Four fixes, each with its sweep
   (tests/verify-agent-stream-reports-2026-10-15.ts):
   - *Waits never hand back threats from the dead.* Events queue between looks, so `ac_wait types=aggro` after a fight
@@ -744,6 +758,21 @@ here, not having to hardcode behavior").
   Bulwark's attacks on Mu-miyahs 6–12 m up or down pulled him off Arcanist's floor three times in Mountain Keep
   (0x01D2, 2026-10-16 15:12–15:20Z), and the reply named the floor change only once he was on his way. Shared by all
   three eras (floors and doorways from each era's cell DAT).
+- **Portals, drops and pass-bys on the way (2026-10-17 06:14Z reports).** No jump or drop the planner takes lands in
+  (or flies over) a portal's disk it wasn't sent into (`JumpSearch.avoid`, `jumpOptions` `accept`): a jump onto the
+  Mountain Keep portal's platform had landed in its reach. A walk that does go through the portal it was sent to says so
+  as the walk's end, not "a fault to report". A melee `ac_attack` with a portal's disk across the straight line to the
+  target runs up round it (the server's MoveToObject is that straight line) and stops, naming it, if the line crosses
+  one mid-fight. A one-way drop off the floor a fellow stands on now needs `drop=true`: a melee run-up is refused (or
+  stops at the edge) with the drop's height and who stays up (`far=true` alone doesn't allow it), and a `stay_with` walk
+  stops at the edge while they are on your floor (with `drop=true` it waits for them there, then goes down). A target
+  2.5–4 m up or down counts as another floor when its doorway way drops or runs the long way round. A walk to a moving
+  player arrives only once they stand or have stayed within reach on your floor for 0.7 s (no "arrived" as they run
+  past). A walk whose doorway way climbs 5 m or more above both ends says so (0x01D20101 from the east halls: up to
+  +2 and back down; correct, but read as a wrong turn). A fellow the client now places in another space reads "went
+  through a portal or recalled … outside this dungeon (at …)", never "last seen 32352 m E", and a follow says it at
+  once. A repeat cast that ends a running follow says so in its summary (one task at a time; a caster stands to cast;
+  no auto-resume). Shared code: all three eras.
 - **Mountain Keep, second segment (2026-10-16 16:08–17:08Z).** A swing line ("Dread Mu-miyah grazes your foot") is
   credited to the nearest creature of that name by the straight line, floors and all, and never to one a storey up or
   down (ACE melee range is CylinderDistance, heights included, 0.75 m): mummies overhead read "ATTACKING YOU" with the
@@ -815,7 +844,18 @@ here, not having to hardcode behavior").
   MoveTo on the client), or its own place closing on them by 4 m within 3 s inside 40 m (sampled every 250 ms); a monster
   walking home (MoveToPosition) or aimed at someone else is not. Information and capability, not decisions:
   - observe: `COMING AT YOU (running at you)` on a monster not yet hitting you; a fellow's line adds
-    `MONSTERS AT THEM: Mud Golem L8 on them, Shadow L26 running at them 20 m off`.
+    `MONSTERS AT THEM: Mud Golem L8 #8000b17c on them, Shadow L26 #8000b6e1 running at them, 20 m from them` (by guid,
+    and "from them": "20 m off" read as from you, 2026-10-17). A chase that gets nowhere reads
+    `AIMED AT YOU BUT NOT REACHING YOU (running at you, no closer in 33 s, 6 m up: another floor, no melee from there,
+    no line of fire: a wall in the way)`: the server's MoveTo at you is real, but it has come no 3 m nearer for 20 s,
+    or it stands a storey up or down indoors (a monster turned to face you, a shooter or caster, is never marked so).
+    Whether a monster is on you is by the straight line, heights and all: a Dread 2 m across and 12 m up is not.
+  - Events read late say so (`fellowWhereNow`, 3 s or more after they came): a fellow-aggro gives the monster's distance
+    from them and from you, then "N s ago; Claude Bulwark was 5 m NE of you then and is 25 m N of you now, …; Dread
+    Mu-miyah #8000475f is 12 m from Claude Bulwark and 30 m N of you now" (Arcanist read "was 5 m NE … (25 m N now)"
+    as one Dread in two places; it was Bulwark, who had run 20 m to intercept). aggro and a caster's cast-at-you get
+    `[N s ago; now 2 m N of you]`, attackers-up "attacking you N s ago … [now 1 attacking you: …]", fellow-low "they were
+    … then, … now". An aggro on another floor says `, 6 m up: another floor`.
   - `ac_wait` types `aggro` (a monster started coming at you, with its level, distance and how; its level is looked up
     quietly when unknown), `fellow-aggro` (one started coming at or fighting a fellow) and `fellow-low` (a fellow's
     health below 60%, `fellow_below=` per wait, or a quarter of it in one drop; the fellowship panel's vitals).
@@ -827,8 +867,8 @@ here, not having to hardcode behavior").
     next re-raise is one line instead: `Shore Armoredillo #8000dd45 (level 30) keeps facing you, 12 m N (running at you),
     but it hasn't come closer in 24 s (no line of fire: a wall in the way): stuck, or it can't path round to you. No
     more aggro for it until it closes in or attacks.` It is then quiet until it comes 3 m nearer (an aggro at once, no
-    forget window), is on them or attacks; you walking toward it doesn't count. observe still marks it `COMING AT YOU
-    (running at you, no closer in 40 s)`, and a held monster doesn't stop an `ac_walk_to` / `ac_follow`. A real chase
+    forget window), is on them or attacks; you walking toward it doesn't count. observe marks it `AIMED AT YOU BUT NOT
+    REACHING YOU (running at you, no closer in 40 s)` (from 20 s without coming nearer, held or not), and a held monster doesn't stop an `ac_walk_to` / `ac_follow`. A real chase
     closes metres a second, so it never holds. fellow-aggro is held the same way.
   - `ac_walk_to` and `ac_follow` answer when a monster starts coming at you: `stopped 31.0 m short: Shadow #8000b6e1
     (level 26) is coming at you, 24 m E (running at you). Fight it …, get away from it …, or walk on anyway
@@ -1519,3 +1559,4 @@ identify themselves.
 
 - Headed Chromium launched by Playwright on macOS gets the real GPU (`ANGLE Metal Renderer: Apple M3 Max`),
   so a watchable window is free; game-session.ts's "headed hangs" note is about its own harness.
+- **2026-10-17, Mountain Keep (0x01D2):** some parts of a dungeon are joined to the rest one way only (drops in, nothing climbs back). A walk with no way there now ends at once saying so, which way the parts ARE joined, the portals you know on your side, and how high your side climbs (the −6 halls under the 0 m walkways lead only up to 0x01D203A5, where a second Surface portal stands). A walk to a point at a portal stops outside its edge and says so; only `use` goes through a portal. A door use's reply waits for that door: another door swinging meanwhile (a monster walking into it opens it) is marked "not by this use".

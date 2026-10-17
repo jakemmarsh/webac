@@ -22,7 +22,8 @@ import { FileDatBytes } from '../../packages/dat-parser/src/node/FileDatBytes.js
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
 import { SpellTable } from '../../packages/dat-parser/src/file-types/SpellTable.js';
 import { formatLore, loreDetailSql, loreNameSql, parseLoreRows, pickLoreNames } from './lore.ts';
-import { formatShops, parseShopOffers, parseShopVendors, shopOfferSql, shopVendorSql, type ShopDatInfo } from './shops.ts';
+import { aceCellOf, formatShops, parseShopOffers, parseShopVendors, placeMapCoords, shopOfferSql, shopVendorSql, type ShopDatInfo } from './shops.ts';
+import { mapCoordinateText } from '../../packages/renderer/src/ui/MapMarkers.ts';
 import { SPAWN_MAX_DEPTH, SPAWNS_MAX_NAMES, formatSpawns, parseSpawnsQuery, parseGenProfiles, parseSpawnPlaces, spawnParentSql, spawnPlaceSql, spawnSources, type GenProfile } from './spawns.ts';
 
 export const WORLD_QUERY_MAX_CHARS = 8000;
@@ -35,6 +36,7 @@ export const WORLD_QUERY_USAGE = [
   '(landblock, cell_X, cell_Y → a generator wcid), not landblock_instance. `spawns "<monster>"` follows all three.',
   'SQL is MySQL 8: CONCAT(), HEX(), LPAD(), LOWER(), CAST(x AS UNSIGNED); there is no printf() (that is SQLite).',
   'A cell id XXYYcccc is a decimal number in the DB: landblock = obj_Cell_Id >> 16 (HEX() to read it); encounter.landblock is XXYY.',
+  'XXYY0000 is an outdoor spot stored with its landblock only: ACE puts it in cell XXYY00cc, cc = floor(origin_X/24)×8 + floor(origin_Y/24) + 1 (select origin_X, origin_Y and it is shown so).',
 ].join('\n');
 
 /** Why `sql` may not run, or null: a single SELECT / SHOW / DESCRIBE / EXPLAIN / WITH statement that writes nothing. */
@@ -63,29 +65,71 @@ export function clipOutput(out: string, max = WORLD_QUERY_MAX_CHARS): string {
  * keeps a cell id as a decimal number, and Bulwark turned 25493832 (0x01850148, a Horrible Mu-miyah's room in Daiklos)
  * into "0x01850248" by hand, a cell Daiklos hasn't, so the bottom floor read as unreachable (2026-10-16). A footnote
  * says walk_to takes such an id. Other columns, and a table with no cell column, are as mysql printed them.
+ *
+ * An outdoor object the DB keeps with its landblock alone (XXYY0000: the Mountain Keep portal 1364 is 0xA8C30000 at
+ * origin 105.357, 154.166) is in the cell ACE puts it in (aceCellOf: 0xA8C30027) when the row has origin_X / origin_Y
+ * columns; without them it stays XXYY0000 and a footnote says what that means. Arcanist read 0xA8C30000 as "a nonsense
+ * cell" (stream, 2026-10-17 07:38Z). The walk_to footnote names an indoor cell (a room) only; an outdoor one gets its
+ * map coordinates, which walk_to takes.
+ *
+ * A column the query already turned to hex (HEX(obj_Cell_Id) AS cell, as Arcanist's query did) is read as hex: a value
+ * of digits only ("1850148" for 0x01850148) was taken for a decimal and turned into another cell. Such a column is one
+ * named HEX(…), an alias `sql` gives HEX(…), or one with a hex letter in any row.
  */
-export function hexCellColumns(table: string): string {
+export function hexCellColumns(table: string, sql = ''): string {
   const lines = table.replace(/\n+$/, '').split('\n');
   const rows = lines.map((l) => (/^\|.*\|$/.test(l) ? l.slice(1, -1).split('|').map((c) => c.trim()) : null));
   const header = rows.find((r) => r !== null);
   if (!header) return table;
   const cols = header.map((h, i) => (/cell/i.test(h) ? i : -1)).filter((i) => i >= 0);
   if (!cols.length) return table;
-  let first: string | null = null;
-  const cellHex = (v: string): string => {
-    if (!/^\d+$/.test(v)) return v;
-    const n = Number(v);
+  const hexAliases = new Set([...sql.matchAll(/\bhex\s*\([^()]*\)\s+(?:as\s+)?[`"']?(\w+)/gi)].map((m) => m[1].toLowerCase()));
+  const hexCols = new Set(cols.filter((i) => /^hex\s*\(/i.test(header[i]) || hexAliases.has(header[i].toLowerCase())
+    || rows.some((r) => r && r !== header && /^[0-9A-F]*[A-F][0-9A-F]*$/i.test(r[i] ?? '') && (r[i] ?? '').length <= 8)));
+  // The row's own origin, when the query selected it (origin_X, li.origin_X shows as origin_X; "x" / "y" aliases too).
+  const xCol = header.findIndex((h) => /^(origin_?x|x)$/i.test(h));
+  const yCol = header.findIndex((h) => /^(origin_?y|y)$/i.test(h));
+  const hex = (n: number): string => `0x${n.toString(16).toUpperCase().padStart(8, '0')}`;
+  let room: string | null = null;
+  let outdoor: { cell: number; x: number; y: number } | null = null;
+  let fixed: { from: number; to: number } | null = null;
+  let bare: number | null = null;
+  const cellHex = (v: string, row: string[], col: number): string => {
+    const asHex = hexCols.has(col);
+    if (asHex ? !/^[0-9A-F]{1,8}$/i.test(v) : !/^\d+$/.test(v)) return v;
+    const n = asHex ? parseInt(v, 16) : Number(v);
     if (n < 0x10000 || n > 0xffffffff) return v;
-    const h = `0x${n.toString(16).toUpperCase().padStart(8, '0')}`;
-    first ??= h;
-    return h;
+    let cell = n >>> 0;
+    if ((cell & 0xffff) === 0) {
+      const x = xCol >= 0 ? Number(row[xCol]) : NaN, y = yCol >= 0 ? Number(row[yCol]) : NaN;
+      if (Number.isFinite(x) && Number.isFinite(y) && xCol >= 0 && yCol >= 0 && row[xCol] !== '' && row[yCol] !== '') {
+        cell = aceCellOf(cell, x, y);
+        fixed ??= { from: n >>> 0, to: cell };
+      } else bare ??= cell;
+    }
+    if ((cell & 0xffff) >= 0x100) room ??= hex(cell);
+    else if ((cell & 0xffff) !== 0 && xCol >= 0 && yCol >= 0 && !outdoor) {
+      const x = Number(row[xCol]), y = Number(row[yCol]);
+      if (Number.isFinite(x) && Number.isFinite(y)) outdoor = { cell, x, y };
+    }
+    return hex(cell);
   };
-  const out = rows.map((r) => (r && r !== header ? r.map((c, i) => (cols.includes(i) ? cellHex(c) : c)) : r));
-  if (first === null) return table;
+  let any = false;
+  const out = rows.map((r) => (r && r !== header ? r.map((c, i) => { if (!cols.includes(i)) return c; const h = cellHex(c, r, i); if (h !== c) any = true; return h; }) : r));
+  if (!any) return table;
   const widths = header.map((_, i) => Math.max(...out.filter((r): r is string[] => r !== null).map((r) => (r[i] ?? '').length)));
   const rule = `+${widths.map((w) => '-'.repeat(w + 2)).join('+')}+`;
   const text = out.map((r) => (r ? `| ${r.map((c, i) => c.padEnd(widths[i])).join(' | ')} |` : rule)).join('\n');
-  return `${text}\n(cell ids in hex: \`walk_to target=${first}\` walks to that room when you're in that dungeon or building, landblock 0x${(first as string).slice(2, 6)})`;
+  const notes: string[] = [];
+  const r = room as string | null;
+  if (r) notes.push(`\`walk_to target=${r}\` walks to that room when you're in that dungeon or building, landblock 0x${r.slice(2, 6)}`);
+  const o = outdoor as { cell: number; x: number; y: number } | null;
+  if (o) notes.push(`${hex(o.cell)} is outdoors at ${mapCoordinateText(placeMapCoords(o.cell, o.x, o.y))}: walk_to takes those coordinates`);
+  const f = fixed as { from: number; to: number } | null;
+  if (f) notes.push(`a cell ending 0000 in the DB (${hex(f.from)}) is outdoors, stored with its landblock only; shown as the cell ACE puts it in, under its origin_X / origin_Y (${hex(f.to)})`);
+  const b = bare as number | null;
+  if (b !== null) notes.push(`a cell ending 0000 (${hex(b)}) is an outdoor spot stored with its landblock only: the real cell is landblock + (floor(origin_X / 24) × 8 + floor(origin_Y / 24) + 1); select origin_X, origin_Y too and it is shown`);
+  return `${text}\n(cell ids in hex${notes.length ? `: ${notes.join('; ')}` : ''})`;
 }
 
 /** Run `stmts` inside one READ ONLY transaction; `table` = mysql's boxed output, else tab-separated rows, no header. */
@@ -204,7 +248,7 @@ function main(): void {
   const why = worldQueryRefusal(sql);
   if (why) { console.error(`refused: ${why}`); process.exit(2); }
   const out = runReadOnly([sql.trim().replace(/;\s*$/, '')], true);
-  console.log(clipOutput(out ? hexCellColumns(out) : '(no rows)'));
+  console.log(clipOutput(out ? hexCellColumns(out, sql) : '(no rows)'));
 }
 
 if (process.argv[1] && /world-query\.ts$/.test(process.argv[1])) main();

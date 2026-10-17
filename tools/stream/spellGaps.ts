@@ -118,26 +118,38 @@ export function spellGaps(sheet: string | null, known: readonly KnownSpell[] | n
     const missing = staples.filter((f) => !best.has(f));
     const low = staples.filter((f) => best.has(f) && best.get(f)! < cap);
     if (!missing.length && !low.length) continue;
-    // Whole groups missing read as the group ("the Banes"), the rest by name.
-    const groupOf = new Map<string, { label: string; first: string }>();
-    for (const g of GROUPS) {
-      const inSchool = g.members.filter((f) => staples.includes(f));
-      if (inSchool.length > 1 && inSchool.every((f) => missing.includes(f))) for (const f of inSchool) groupOf.set(f, { label: g.label, first: inSchool[0] });
-    }
-    const ordered = missing.flatMap((f) => {
-      const g = groupOf.get(f);
-      return !g ? [display(f)] : g.first === f ? [g.label] : [];
-    });
+    // Whole groups missing read as the group ("the Banes"), the rest by name; likewise a whole group known only at
+    // one lower level ("the Banes (V)").
+    const grouped = (fams: string[], same: (f: string) => string | number): string[] => {
+      const groupOf = new Map<string, { label: string; first: string }>();
+      for (const g of GROUPS) {
+        const inSchool = g.members.filter((f) => staples.includes(f));
+        if (inSchool.length > 1 && inSchool.every((f) => fams.includes(f) && same(f) === same(inSchool[0]))) for (const f of inSchool) groupOf.set(f, { label: g.label, first: inSchool[0] });
+      }
+      return fams.flatMap((f) => {
+        const g = groupOf.get(f);
+        return !g ? [f] : g.first === f ? [`@${g.label}@${f}`] : [];
+      });
+    };
+    const label = (x: string): string => (x.startsWith('@') ? x.split('@')[1] : display(x));
+    const famOf = (x: string): string => (x.startsWith('@') ? x.split('@')[2] : x);
+    const ordered = grouped(missing, () => 0).map(label);
     const head = `spells: ${school} ${status} (${skill})`;
     const where = `you can learn up to level ${ROMAN[cap]}`;
     if (!mine.length) {
       out.push(`- ${head} but no ${school} spells known: buy and read scrolls at a mage shop (${joinList(ordered)}; ${where})`);
       continue;
     }
-    const parts = [`${mine.length} ${school} spell${mine.length === 1 ? '' : 's'} known`];
-    if (ordered.length) parts.push(`none of ${joinList(ordered)}`);
-    if (low.length) parts.push(`below your level: ${joinList(low.map((f) => `${display(f)} (${ROMAN[best.get(f)!] || best.get(f)})`))}`);
-    out.push(`- ${head}: ${parts.join('; ')}; ${where} from scrolls at a mage shop`);
+    // What is missing and what is known only at a lower level are said apart: Arcanist read "below your level:
+    // Impenetrability (V), Blade Bane (V)…" beside a stale goal line as "you lack Item spells" while he knew every
+    // Bane and Impenetrability at V (stream, 2026-10-17 06:14Z report).
+    const parts = [`${mine.length} ${school} spell${mine.length === 1 ? '' : 's'} known${ordered.length ? '' : ', every staple family among them'}`];
+    if (ordered.length) parts.push(`not known at all: ${joinList(ordered)}`);
+    if (low.length) {
+      const lvl = (f: string): string => ROMAN[best.get(f)!] || String(best.get(f));
+      parts.push(`known, but below the level ${ROMAN[cap]} you can learn: ${joinList(grouped(low, lvl).map((x) => `${label(x)} (${lvl(famOf(x))})`), 5)}`);
+    }
+    out.push(`- ${head}: ${parts.join('; ')}; ${low.length && !ordered.length ? `level ${ROMAN[cap]} scrolls are sold at mage shops` : `${where} from scrolls at a mage shop`}`);
   }
   return out;
 }

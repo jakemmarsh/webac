@@ -126,7 +126,7 @@ describe('fake host', () => {
   });
 
   describe('3. a fellow-aggro read after a walk to them: where they were then, and now', () => {
-    it('"was 15 m SE of you 5 s ago (1 m N of you now)" (Bulwark, 14:30Z: read as the walk\'s arrival being wrong)', async () => {
+    it('"was 15 m SE of you then and is 10 m E of you now" (Bulwark, 14:30Z: read as the walk\'s arrival being wrong)', async () => {
       fellowship(host);
       host.add({ guid: ARC, name: 'Claude Arcanist', itemType: 0x10, objectDescFlags: 0x8, cell: UPPER, x: 90, y: 9, z: 0 });
       host.add({ guid: 0x80007a87, name: 'Dread Mu-miyah', itemType: 0x10, objectDescFlags: 0x10, cell: UPPER, x: 95, y: 0, z: 0 });
@@ -139,7 +139,8 @@ describe('fake host', () => {
       const p = api.waitFor({ types: ['fellow-aggro'], sinceSeq: 0 }, 10);
       vi.advanceTimersByTime(20);
       const later = await p;
-      expect(later[0].text).toMatch(/; Claude Arcanist was 15 m SE of you 5 s ago \(10 m E of you now\), 100% health$/);
+      // Whose place each is and when (2026-10-17: "was 5 m NE of you 5 s ago (25 m N of you now)" read as the Dread's).
+      expect(later[0].text).toBe('Dread Mu-miyah #80007a87 (level 60) was coming at your fellow Claude Arcanist, 18 m from them (running at them), 5 s ago; Claude Arcanist was 15 m SE of you then and is 10 m E of you now, 100% health; Dread Mu-miyah #80007a87 is 22 m from Claude Arcanist and 25 m SE of you now');
     });
   });
 
@@ -256,7 +257,8 @@ describe('fake host', () => {
       // 3 m behind you, inside the leash: she stays where she is (casting, say) while you walk on to the edge.
       host.add({ guid: ARC, name: 'Claude Arcanist', itemType: 0x10, objectDescFlags: 0x8, cell: UPPER, x: 67, y: 20, z: 100 });
       host.add({ guid: 0x7f000003, name: 'Fountain', cell: UPPER, x: 92, y: 20, z: 94 });
-      const p = api.walkTo(0x7f000003, { within: 2, stayWith: 'Claude Arcanist' });
+      // drop=true: going down together was said (2026-10-17: without it the walk stops at the edge, verify-agent-stream-movement-2026-10-17-0614z).
+      const p = api.walkTo(0x7f000003, { within: 2, stayWith: 'Claude Arcanist', drop: true });
       let edgeAt = 0, waited = false;
       const r = await settle(api, host, p, 60_000, () => {
         // At the edge she is 12 m back: the walk holds there (no launch) until she comes within 6 m.
@@ -276,11 +278,11 @@ describe('fake host', () => {
       expect(traces.some((l) => /waiting at the edge of a 6\.0 m drop for Claude Arcanist \(1[0-3] m W\) to come up/.test(l))).toBe(true);
     });
 
-    it('a fellow beside you: down at once', async () => {
+    it('a fellow beside you, drop=true: down at once', async () => {
       fellowship(host);
       host.add({ guid: ARC, name: 'Claude Arcanist', itemType: 0x10, objectDescFlags: 0x8, cell: UPPER, x: 70, y: 21, z: 100 });
       host.add({ guid: 0x7f000003, name: 'Fountain', cell: UPPER, x: 92, y: 20, z: 94 });
-      const r = await settle(api, host, api.walkTo(0x7f000003, { within: 2, stayWith: 'Claude Arcanist' }), 40_000, () => {
+      const r = await settle(api, host, api.walkTo(0x7f000003, { within: 2, stayWith: 'Claude Arcanist', drop: true }), 40_000, () => {
         const a = host.objs.get(ARC)!; a.x = host.me.x; a.y = host.me.y + 1; a.z = host.me.z;
       });
       expect(r?.ok, r?.message).toBe(true);
@@ -349,7 +351,8 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2)', () => {
         try {
           const r = await host.walkTarget(C(0x2a2), { x: 86, y: -46.1, z: 0 }, '0x01D202B3', { maxMs: 120_000 });
           expect(r.ok).toBe(false);
-          expect(r.message).toMatch(/^stuck [\d.]+ m short \(no walkable way from here.*; the only doorway route there leaps a 7\.1 m gap over open air \(landing \d+ m [NSEW]+ of you\), and no take-off your jump lands it from was found/);
+          // The goal room is 6 m up: said as another floor (2026-10-17 0815Z), not "walls all round".
+          expect(r.message).toMatch(/^stuck [\d.]+ m short \(it is 6 m above you, on another floor, and no way up to that floor was found from here.*; the only doorway route there leaps a 7\.1 m gap over open air \(landing \d+ m [NSEW]+ of you\), and no take-off your jump lands it from was found/);
           expect(host.traces.some((l) => /walk stall/.test(l))).toBe(false);
           expect(host.t).toBeLessThan(15_000);
         } finally { host.dispose(); }

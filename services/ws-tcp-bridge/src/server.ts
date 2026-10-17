@@ -70,7 +70,7 @@ import { RoutineStore } from './routineStore.js';
 import {
   type SessionProtocol, sessionProtocol, readGrant1999Ids, readTime1999, buildDisconnectPacket1999,
 } from './protocol.js';
-import { type EgressLease, type EgressManager, NO_REPLY_MOVE_MS, readLoginAccount, readLoginRefusal } from './egress.js';
+import { EARLY_RESEND_MS, type EgressLease, type EgressManager, NO_REPLY_MOVE_MS, readLoginAccount, readLoginRefusal } from './egress.js';
 
 /** Where a session's datagrams go. */
 interface Target {
@@ -132,6 +132,8 @@ export interface BridgeDeps {
   egress?: EgressManager | null;
   /** An egress session the server never answers moves after this long (default NO_REPLY_MOVE_MS; tests shorten it). */
   egressNoReplyMs?: number;
+  /** An egress session with no server byte resends its last datagram at these offsets from its first (default EARLY_RESEND_MS). */
+  egressEarlyResendMs?: readonly number[];
 }
 
 export interface BridgeServer {
@@ -609,6 +611,10 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         if (lease?.accountRule && session.account === null && readLoginRefusal(msg, protocol)) {
           try { egress!.loginRefused(lease); } catch (err) { egressFailure('login_refused', err); }
         }
+        if (lease && session.packetsDown === 0 && firstUpAt) {
+          clearEarlyResends();
+          log('info', 'egress_first_reply', { session: id, ms: now() - firstUpAt, earlyResends, ...egressFields() });
+        }
         session.bytesFromServer += msg.length;
         session.packetsDown++;
         metrics.addBytes('udp_in', msg.length);
@@ -827,16 +833,46 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       // A login check (it may be moving the session itself) finishes first.
       if (loginCheck) { noReplyTimer = setTimeout(noReplyCheck, 1000); noReplyTimer.unref?.(); return; }
       noReplyMoved = true;
+      clearEarlyResends();
       const from = { slot: lease.localAddress, publicIp: lease.publicIp };
-      egress!.moveForNoReply(lease, () => !session.closed && session.bytesFromServer === 0).then((moved) => {
+      egress!.moveForNoReply(lease, () => !session.closed && session.bytesFromServer === 0).then((r) => {
         if (session.closed) return;
-        log('info', 'egress_no_reply_move', {
-          session: id, ip, from: from.slot, fromIp: from.publicIp, to: moved?.to ?? null, toIp: moved?.publicIp ?? null, ms: now() - firstUpAt,
-        });
-        if (!moved) return;
+        const fields = { session: id, ip, from: from.slot, fromIp: from.publicIp, ms: now() - firstUpAt };
+        if ('stay' in r) {
+          // A reply came in meanwhile ('answered'), or no address could take it (no_slot, aws:…).
+          log(r.stay === 'answered' ? 'info' : 'warn', 'egress_no_reply_stay', { ...fields, reason: r.stay, attached: r.attached });
+          return;
+        }
+        log('info', 'egress_no_reply_move', { ...fields, to: r.to, toIp: r.publicIp });
         dropUdp();
         if (lastUp) forwardGame(lastUp);
       });
+    }
+
+    // Early resends (EARLY_RESEND_MS): an egress session with no server byte yet sends its last
+    // datagram again 1 s and 3 s after its first, so a login lost while the new address's path to
+    // the server was still opening doesn't wait for the browser's 6 s resend. Counted as normal
+    // upstream packets; the servers ignore a repeated login from the same endpoint. They stop at the
+    // first server byte, a close, or a move.
+    const earlyResendTimers: ReturnType<typeof setTimeout>[] = [];
+    let earlyResends = 0;
+    function clearEarlyResends(): void {
+      for (const t of earlyResendTimers.splice(0)) clearTimeout(t);
+    }
+    function scheduleEarlyResends(): void {
+      const slot = lease!.localAddress;
+      for (const ms of deps.egressEarlyResendMs ?? EARLY_RESEND_MS) {
+        const t = setTimeout(() => {
+          if (session.closed || !lease || noReplyMoved || session.bytesFromServer > 0 || lease.localAddress !== slot) { clearEarlyResends(); return; }
+          // A login check holds the session's datagrams (and may move it): skip this one.
+          if (loginCheck || !lastUp) return;
+          earlyResends++;
+          log('debug', 'egress_early_resend', { session: id, n: earlyResends });
+          forwardGame(lastUp);
+        }, ms);
+        t.unref?.();
+        earlyResendTimers.push(t);
+      }
     }
 
     function forwardGame(buf: Buffer): void {
@@ -848,6 +884,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
           firstUpAt = now();
           noReplyTimer = setTimeout(noReplyCheck, deps.egressNoReplyMs ?? NO_REPLY_MOVE_MS);
           noReplyTimer.unref?.();
+          scheduleEarlyResends();
         }
       }
       const flags = readPacketFlags(buf);
@@ -881,6 +918,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       session.closed = true;
       sessions.delete(session);
       if (noReplyTimer) { clearTimeout(noReplyTimer); noReplyTimer = null; }
+      clearEarlyResends();
       routineTokens.sessionEnded(id);
       release();
       clearInterval(pingInterval);

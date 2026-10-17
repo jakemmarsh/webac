@@ -69,7 +69,7 @@ describe('stream readiness: spells you could have', () => {
     ];
     const sheet = SHEET.replace('Life Magic 140', 'Life Magic 160');
     expect(spellGaps(sheet, known, null).filter((l) => l.includes('Life Magic'))).toEqual([
-      `- spells: Life Magic trained (160): ${known.filter((s) => s.school === 'Life').length} Life Magic spells known; none of Armor; below your level: Heal (II), Revitalize (IV), Stamina to Mana (IV), Blade Protection (IV)…; you can learn up to level V from scrolls at a mage shop`,
+      `- spells: Life Magic trained (160): ${known.filter((s) => s.school === 'Life').length} Life Magic spells known; not known at all: Armor; known, but below the level V you can learn: Heal (II), Revitalize (IV), Stamina to Mana (IV), the Protections (IV); you can learn up to level V from scrolls at a mage shop`,
     ]);
   });
 
@@ -129,6 +129,43 @@ describe.skipIf(!existsSync(DAT_PATHS.portal))('stream readiness: the staples ar
     expect(lines.some((l) => l.includes('no War Magic spells known'))).toBe(false);
     expect(lines.some((l) => l.includes('no Item Enchantment spells known'))).toBe(false);
     expect(lines.find((l) => l.includes('Item Enchantment'))).toContain('1 Item Enchantment spell known');
+  });
+});
+
+/**
+ * Claude Arcanist's Item Enchantment spells as `./ac spells filter=Item max=60` listed them (stream, 2026-10-17
+ * 05:39:27Z; his sheet: Item Enchantment 237, base 210). His report (06:14Z): "this segment's opening said I lacked
+ * Item Enchantment spells, but I know all the Banes V and Impen V". The words came from the stream config's stale
+ * goal ("you know almost no Item spells (no Impenetrability, no Banes)"); the readiness line said "below your
+ * level: Impenetrability (V), Blade Bane (V)…", which read as the same. It now says every staple is known and that
+ * they are only below the level VI he can learn.
+ */
+const ARCANIST_ITEM_2026_10_17: Array<[string, number]> = [
+  ['Lightning Bane III', 3], ['Lightning Bane IV', 4], ['Lightning Bane V', 5], ['Aura of Spirit Drinker Other VI', 6], ['Aura of Hermetic Link Self IV', 4], ['Aura of Hermetic Link Self V', 5],
+  ['Aura of Swift Killer Other III', 3], ['Impenetrability III', 3], ['Aura of Swift Killer Other IV', 4], ['Impenetrability IV', 4], ['Aura of Swift Killer Other V', 5], ['Impenetrability V', 5],
+  ['Flame Bane III', 3], ['Flame Bane IV', 4], ['Flame Bane V', 5], ['Blood Loather II', 2], ['Acid Bane III', 3], ['Blade Bane III', 3], ['Acid Bane IV', 4], ['Blade Bane IV', 4], ['Acid Bane V', 5],
+  ['Blade Bane V', 5], ['Aura of Hermetic Link Other I', 1], ['Piercing Bane II', 2], ['Piercing Bane III', 3], ['Piercing Bane IV', 4], ['Piercing Bane V', 5], ['Strengthen Lock II', 2],
+  ['Aura of Blood Drinker Other III', 3], ['Bludgeon Bane III', 3], ['Aura of Blood Drinker Other IV', 4], ['Bludgeon Bane IV', 4], ['Aura of Blood Drinker Other V', 5], ['Bludgeon Bane V', 5],
+  ['Aura of Defender Other III', 3], ['Aura of Defender Other IV', 4], ['Aura of Defender Other V', 5], ['Frost Bane III', 3], ['Frost Bane IV', 4], ['Frost Bane V', 5],
+  ['Aura of Spirit Drinker Self III', 3], ['Aura of Spirit Drinker Self IV', 4], ['Aura of Spirit Drinker Self V', 5], ['Aura of Heart Seeker Other IV', 4], ['Aura of Heart Seeker Other V', 5],
+  ['Aura of Defender Self I', 1], ['Lifestone Recall', 3], ['Portal Recall', 3],
+];
+
+describe('Arcanist\'s real Item spells (stream 2026-10-17): nothing missing, only below the learnable level', () => {
+  const known = ARCANIST_ITEM_2026_10_17.map(([name, level]) => ({ name, school: 'Item', level }));
+  const sheet = 'Specialized skills: War Magic 290 (base 255)\nTrained skills: Creature Enchantment 233 (base 206), Item Enchantment 237 (base 210)';
+  it('says every staple is known and names the families known only at V (Spirit Drinker, known at VI, is not)', () => {
+    const line = spellGaps(sheet, known, null).find((l) => l.includes('Item Enchantment'))!;
+    expect(line).toBe('- spells: Item Enchantment trained (237): 48 Item Enchantment spells known, every staple family among them; known, but below the level VI you can learn: Impenetrability (V), the Banes (V), Blood Drinker (V), Swift Killer (V), Heart Seeker (V)…; level VI scrolls are sold at mage shops');
+    expect(line).not.toMatch(/not known|no Item|none of|Spirit Drinker/);
+  });
+  it('a school missing a family still names it apart from the low ones', () => {
+    const line = spellGaps(sheet, known.filter((s) => !/Heart Seeker/.test(s.name)), null).find((l) => l.includes('Item Enchantment'))!;
+    expect(line).toMatch(/; not known at all: Heart Seeker; known, but below the level VI you can learn: Impenetrability \(V\), the Banes \(V\)/);
+  });
+  it('one Bane at a lower level breaks the group into names', () => {
+    const line = spellGaps(sheet, known.filter((s) => s.name !== 'Acid Bane V'), null).find((l) => l.includes('Item Enchantment'))!;
+    expect(line).toContain('below the level VI you can learn: Impenetrability (V), Blade Bane (V), Piercing Bane (V), Bludgeon Bane (V), Flame Bane (V)…');
   });
 });
 

@@ -139,7 +139,7 @@ let agentUseDoneTap: ((code: number) => void) | null = null;
 let agentAttackDoneTap: ((code: number) => void) | null = null;
 let agentMeleeSentTap: ((height: string) => void) | null = null;
 import { examineText } from './agent/examineText.js';
-import { cellIdRange, cellStandPoint, floorsAt, findRouteViaOutside, loadCellGraph, routeBarrier, type CellGraph } from './agent/cellPath.js';
+import { cellIdRange, cellStandPoint, floorsAt, findRouteViaOutside, loadCellGraph, routeBarrier, routeCutOff, type CellGraph } from './agent/cellPath.js';
 import { RoutineSync } from './agent/RoutineSync.js';
 import { isAutomationCommand } from './ui/automation/AutomationPanel.js';
 import { bridgeConnectApi } from './launcher/ConnectScreen.js';
@@ -6480,19 +6480,19 @@ async function main() {
     // a use: retail's only UseWithTarget senders are ItemHolder::
     // TargetAcquired, UseObject on a selection and the targeted-usage
     // confirmation (use-with is select → use → pick the target).
-    onItemListDrop: (source: WorldDropSource, target: ItemListDropTarget) => {
-      if (!sendGameAction || !aceCharGuid) return;
+    onItemListDrop: (source: WorldDropSource, target: ItemListDropTarget): boolean => {
+      if (!sendGameAction || !aceCharGuid) return false;
       const itemId = source.kind === 'world' ? source.guid
         : source.kind === 'inventory' ? playerState.inventory.getAll()[source.itemIndex]?.id ?? 0
           : playerState.equipment.getSlot(source.slot)?.id ?? 0;
-      if (!itemId) return;
+      if (!itemId) return false;
       const w = placementWorld();
       const packOf = (slot: number): number => (slot > 0 ? sidePackGuids[slot] ?? 0 : aceCharGuid ?? 0);
       let drop;
       let itemListEntryCount = 0;
       if (target.list === 'items') {
         const listContainerId = packOf(target.packSlot);
-        if (!listContainerId) return;
+        if (!listContainerId) return false;
         const isPack = (it: { itemType?: number; itemsCapacity?: number; objectDescFlags?: number }): boolean => heldIsContainer(it);
         const entries = (listContainerId === aceCharGuid
           ? playerState.inventory.getAll().filter((i) => i.containerId === aceCharGuid || i.containerId === 0)
@@ -6504,12 +6504,12 @@ async function main() {
         };
       } else {
         const cellItemId = packOf(target.packSlot);
-        if (!cellItemId) return;
+        if (!cellItemId) return false;
         drop = { itemId, cellItemId, listContainerId: aceCharGuid, containerList: true, cellPlacement: Math.max(0, target.packSlot - 1) };
       }
       // A drop back onto its own cell changes nothing.
-      if (drop.cellItemId === itemId) return;
-      if (!placementReady()) return;
+      if (drop.cellItemId === itemId) return false;
+      if (!placementReady()) return false;
       const placement = acceptItemListDrop(drop, w);
       // RECON.inventory-grid-dat-cells.b.a — AcceptDragObject's m_pendingItem at the drop cell.
       const pendingAt = target.list === 'items' && target.packSlot === gameUI.getSelectedPackSlot()
@@ -6518,6 +6518,7 @@ async function main() {
       if (pendingAt !== null) showPendingInPack(itemId, pendingAt);
       const sent = runPlacement(itemId, placement, `item list drop (${target.list})`);
       if (!sent && pendingAt !== null) gameUI.endPendingInPack(itemId);
+      return sent;
     },
     // GAP.world-drag-drop — a drag released over the 3D view is sr_Drop:
     // ItemHolder::AttemptPlaceIn3D(dragged, the object found under the
@@ -16287,6 +16288,7 @@ async function main() {
         object: (guid) => { const o = serverObjectManager?.getObject(guid); return o ? hostObject(o) : null; },
         lineOfFire: (guid) => serverObjectManager?.lineOfFire(guid) ?? null,
         lineOfFireOpenSpot: (guid) => serverObjectManager?.openLineSpot(guid) ?? null,
+        lineOfFireFrom: (guid, from) => serverObjectManager?.lineOfFireFrom(guid, from) ?? null,
         // An arrow's or bolt's real path: the server's ballistic arc from its spawn point (ServerObjectManager.missileArcOfFire).
         missileLineOfFire: (guid, shot) => serverObjectManager?.missileArcOfFire(guid, shot) ?? null,
         // Room for a summoned pet to appear (the automation's Summon Pets; VirindiTank's 3 m check).
@@ -16574,6 +16576,9 @@ async function main() {
         route: (fromCell, from, toCell, to, opts) => findRouteViaOutside(agentCellGraph(fromCell), fromCell, from, toCell, to, opts),
         // What floorless cell (a rift, a shaft) stands between two rooms no doorway route joins: the walk's answer names it.
         routeBarrier: (fromCell, toCell, opts) => routeBarrier(agentCellGraph(fromCell), fromCell, toCell, opts),
+        // No doorway route and no gap between: the rooms you can walk, the openings overhead out of them, and the way in
+        // from the goal's side (one way). The walk ends at once with it rather than searching for minutes (Mountain Keep).
+        routeCutOff: (fromCell, from, toCell, to, opts) => routeCutOff(agentCellGraph(fromCell), fromCell, from, toCell, to, opts),
         // Which room a map coordinate is in (a dungeon's nav point, a spot inside a building): the cells' floors under it.
         floorsAt: (lb, x, y) => floorsAt(agentCellGraph(lb), x, y),
         // Where to stand in a cell named by its id (walk_to target="0x039C0104"): its floor under its middle.

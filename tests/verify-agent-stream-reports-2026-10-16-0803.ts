@@ -243,7 +243,7 @@ describe('4. after an attack target dies, who is on you and that you aren\'t att
     const evs = api.eventsSince(since);
     const died = evs.find((e) => e.type === 'target-died');
     expect(died?.text).toBe('Drudge Lurker #800011e2 died; Lich #8000be07 is on you (2× in 10 s) and is your selection now (Auto Target picked it), but you are not attacking it: ac_attack target=#8000be07 to fight it');
-    expect(evs.find((e) => e.type === 'task-done')?.text).toMatch(/Drudge Lurker is dead; Lich #8000be07 is on you/);
+    expect(evs.find((e) => e.type === 'task-done')?.text).toMatch(/Drudge Lurker #800011e2 is dead; Lich #8000be07 is on you/);
     expect(host.sent.filter((x) => x.startsWith(`attack ${B.toString(16)}`))).toEqual([]);
   });
 

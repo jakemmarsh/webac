@@ -3551,6 +3551,19 @@ export class ServerObjectManager {
   }
 
   /**
+   * {@link lineOfFire} as it would be with your body standing where `fromGuid` stands (a fellow): Arcanist got an open
+   * line by walking to Bulwark after six of his 40 "no line of fire" refusals in Mountain Keep (2026-10-17 07:14–08:16Z),
+   * while the 3 m open-spot search found a spot only once. null when either object or our body isn't known.
+   */
+  lineOfFireFrom(guid: number, fromGuid: number, radius = DEFAULT_PROJECTILE_RADIUS): { dist: number; blockedAt: number | null; blocker?: string } | null {
+    const o = this.objects.get(guid);
+    const at = this.objects.get(fromGuid);
+    const me = this.missileLocalPlayer?.();
+    if (!o || !at || !me || !this.missileEnvironmentSweep) return null;
+    return this.boltPathFrom({ ...me, x: at.worldX, y: at.worldZ, z: at.worldY }, o, radius);
+  }
+
+  /**
    * {@link lineOfFire} from a caster body at `me` (feet, AC global metres). `beforeSpawn`: the blocker stands between
    * you and the spawn point (`spawnAhead` m out, ground distance): the bolt starts past it and can't see back to you
    * (ACE IsProjectileVisible), so stepping off the wall, not nearer the target, opens the line.

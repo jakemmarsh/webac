@@ -13,7 +13,7 @@
 import { vi } from 'vitest';
 import { AgentApi, compassToYaw, type AgentHost } from '../../packages/renderer/src/agent/AgentApi.ts';
 import type { AgentResult } from '../../packages/renderer/src/agent/types.ts';
-import { cellIdRange, cellStandPoint, findRouteViaOutside, floorsAt, loadCellGraph } from '../../packages/renderer/src/agent/cellPath.ts';
+import { cellIdRange, cellStandPoint, findRouteViaOutside, floorsAt, loadCellGraph, routeBarrier, routeCutOff } from '../../packages/renderer/src/agent/cellPath.ts';
 import { simulateFlight } from '../../packages/renderer/src/agent/jumpPlan.ts';
 import type { DatDatabase } from '../../packages/dat-parser/src/DatDatabase.js';
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
@@ -77,6 +77,9 @@ export class DungeonHost extends FakeHost {
       this.floorsAt = (_lb, x, y) => floorsAt(this.graph, x, y);
       this.cellPoint = (c) => cellStandPoint(this.graph, c);
       this.cellRange = () => cellIdRange(this.graph);
+      // main.ts's answers when no doorway route joins two rooms: the gaps between, and the part of the dungeon you can walk.
+      this.routeBarrier = (fc, tc, o) => routeBarrier(this.graph, fc, tc, o);
+      this.routeCutOff = (fc, f, tc, t, o) => routeCutOff(this.graph, fc, f, tc, t, o);
     }
     const sources = {
       loadSetupModel: (id: number) => { const d = dats.portal.getFileData(id); return d ? new SetupModel(new DatReader(d)) : null; },

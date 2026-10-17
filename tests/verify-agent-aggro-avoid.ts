@@ -112,7 +112,7 @@ describe('monsters coming at you, and at your fellows', () => {
       run(api, host, 300, { physics: false });
       const evs = await w;
       expect(evs[0].text).toBe('Mud Golem #8000b17c (level 8) is on your fellow Claude Arcanist (on them); Claude Arcanist is 20 m N of you, 71% health');
-      expect(formatObservation(api.observe())).toMatch(/fellows: Claude Arcanist 71% HP, 20 m N, MONSTERS AT THEM: Mud Golem L8 on them/);
+      expect(formatObservation(api.observe())).toMatch(/fellows: Claude Arcanist 71% HP, 20 m N, MONSTERS AT THEM: Mud Golem L8 #8000b17c on them/);
     });
 
     it("a fellow's threats are on their storey and near them: not a monster a floor over them, nor one far off (Mountain Keep, 2026-10-16)", async () => {
@@ -129,12 +129,12 @@ describe('monsters coming at you, and at your fellows', () => {
       const evs = await w;
       expect(evs.map((e) => e.text).join('\n')).not.toMatch(/Dread/);
       const line = formatObservation(api.observe()).split('\n').find((l) => l.startsWith('fellows:'))!;
-      expect(line).toMatch(/MONSTERS AT THEM: Mud Golem L8 on them$/);
+      expect(line).toMatch(/MONSTERS AT THEM: Mud Golem L8 #8000b17c on them$/);
       // On her floor and near, the Dread counts.
       const dread = host.object(SHADOW)!;
       dread.z = 94; dread.x = 80; dread.y = 50;
       run(api, host, 300, { physics: false });
-      expect(formatObservation(api.observe())).toMatch(/MONSTERS AT THEM: Mud Golem L8 on them, Dread Mu-miyah L60 running at them 10 m off/);
+      expect(formatObservation(api.observe())).toMatch(/MONSTERS AT THEM: Mud Golem L8 #8000b17c on them, Dread Mu-miyah L60 #8000b6e1 running at them, 10 m from them/);
     });
 
     it('fellow-low wakes at 60% by default, at a fellow_below mark per wait, and on a single big drop', async () => {
@@ -200,10 +200,10 @@ describe('monsters coming at you, and at your fellows', () => {
         "Shore Armoredillo #8000dd45 (level 30) keeps facing you, 12 m N (running at you), but it hasn't come closer in 24 s (no line of fire: a wall in the way): stuck, or it can't path round to you. No more aggro for it until it closes in or attacks.",
       ]);
       expect(said).toHaveLength(3);
-      // observe still marks it, and says how long it has come no nearer.
+      // observe still marks it as aimed at you, and says it gets no nearer and why a bolt wouldn't land (2026-10-17).
       d.seeks = { guid: host.me.guid, kind: 'move' };
       run(api, host, 300, { physics: false });
-      expect(formatObservation(api.observe())).toMatch(/Shore Armoredillo .*COMING AT YOU \(running at you, no closer in \d+ s\)/);
+      expect(formatObservation(api.observe())).toMatch(/Shore Armoredillo .*AIMED AT YOU BUT NOT REACHING YOU \(running at you, no closer in \d+ s, no line of fire: a wall in the way\)/);
     });
 
     it('you walking up to it is not it closing in; it coming 3 m nearer raises aggro at once', () => {
@@ -246,7 +246,7 @@ describe('monsters coming at you, and at your fellows', () => {
       }
       const said = api.eventsSince().filter((e) => e.type === 'fellow-aggro').map((e) => e.text);
       expect(said).toHaveLength(3);
-      expect(said[2]).toBe("Shore Armoredillo #8000dd45 (level 30) keeps facing your fellow Claude Arcanist, 12 m from them (running at them), but it hasn't come closer to them in 24 s: stuck, or it can't path round to them. No more fellow-aggro for it until it closes in on them.");
+      expect(said[2]).toBe("Shore Armoredillo #8000dd45 (level 30) keeps facing your fellow Claude Arcanist, 12 m from them and 32 m N of you (running at them), but it hasn't come closer to them in 24 s: stuck, or it can't path round to them. No more fellow-aggro for it until it closes in on them.");
     });
   });
 
@@ -403,7 +403,8 @@ describe('monsters coming at you, and at your fellows', () => {
       monster(SHADOW, 'Drudge Skulker', 80, 30, { level: 5 });
       host.me.health = { current: 29, max: 50 }; // 58%
       const out = await settle(api, host, api.cast('Flame Bolt I', 'Drudge Skulker', { repeat: true }), 10_000);
-      expect(out!.message).toMatch(/stopped: your health is 29\/50 \(58%\), below the 60% you set \(until_health\)/);
+      // Already under it at the start: refused plainly, before any cast (stream reports 2026-10-17 05:12Z, item 6).
+      expect(out!.message).toMatch(/Flame Bolt I not cast: your health \(29\/50, 58%\) is already under until_health \(60%, the default\)/);
     });
 
     it('the tools say so: ac_wait vitals_below default 0.6 and fellow_below; ac_cast until_health default 0.6', () => {
