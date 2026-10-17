@@ -165,7 +165,8 @@ export function formatObservation(obs: AgentObservation): string {
 
 export function formatEvents(events: AgentEvent[]): string {
   if (!events.length) return '(no events)';
-  return events.map((e) => `  [${e.seq}] ${e.type}: ${e.text}`).join('\n');
+  // A wait's "now" head is the state as of the read, not an event: no seq of its own.
+  return events.map((e) => (e.type === 'now' ? `  NOW: ${e.text}` : `  [${e.seq}] ${e.type}: ${e.text}`)).join('\n');
 }
 
 /**

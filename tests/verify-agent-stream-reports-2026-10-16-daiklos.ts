@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentApi } from '../packages/renderer/src/agent/AgentApi.ts';
 import { filterInventory, formatInventoryFiltered, formatObservation, isJunk, isSellable, packSlotsText } from '../packages/renderer/src/agent/format.ts';
 import type { AgentEvent, AgentItem } from '../packages/renderer/src/agent/types.ts';
-import { TOOL_BY_NAME, closestArg, unknownArgMessage, unknownArgs } from '../tools/ac-agent/tools.ts';
+import { TOOL_BY_NAME, closestArg, unknownArgMessage, unknownArgs, withArgAliases } from '../tools/ac-agent/tools.ts';
 import { parseCliArgs } from '../tools/ac-agent/cli.ts';
 import { handle } from '../tools/ac-agent/mcp-server.ts';
 import { FakeHost, run } from './_harness/agentFake.ts';
@@ -207,12 +207,15 @@ describe('3. pack slots in observe and inventory, and a loot that runs out of th
 });
 
 describe('4. an argument a tool doesn\'t take names the one it meant', () => {
-  it('raise target= → stat= on the CLI (06:28:58, 07:17:03) and over MCP', async () => {
+  it('raise target= is stat= on the CLI and over MCP (it was refused, 78 times across 2026-10-16/17; raise has one name argument)', async () => {
     const raise = TOOL_BY_NAME.get('ac_raise')!;
-    expect(() => parseCliArgs(raise, ['target=Magic Defense'])).toThrow('ac_raise: unknown argument "target": raise takes stat=, not target= (usage: raise stat=… [times=…])');
+    for (const k of ['target', 'name', 'attribute', 'vital', 'what']) {
+      expect(withArgAliases(raise, { [k]: 'Magic Defense' }), k).toEqual({ stat: 'Magic Defense' });
+      expect(unknownArgs(raise, { [k]: 'Magic Defense' }), k).toBeNull();
+    }
+    expect(withArgAliases(raise, { stat: 'Strength', target: 'Healing' })).toEqual({ stat: 'Strength' });
     const r = await handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'ac_raise', arguments: { target: 'mana' } } }) as { result: { isError?: boolean; content: Array<{ text: string }> } };
-    expect(r.result.isError).toBe(true);
-    expect(r.result.content[0].text).toBe('ac_raise: unknown argument "target": raise takes stat=, not target= (usage: raise stat=… [times=…])');
+    expect(r.result.content[0].text).not.toMatch(/unknown argument/);
   });
 
   it('generic over every tool: misspellings, synonyms, and nothing invented when nothing fits', () => {

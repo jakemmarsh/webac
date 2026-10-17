@@ -224,19 +224,19 @@ describe('3. a target on a 1.7 m step-down beside you', () => {
     expect(api.attack(C260).message).toMatch(/^attacking Tusker Liberator \(#8000c260\)/);
   });
 
-  it('out of reach down there: refused, with the drop as measured (1.7 m, not "2 m")', () => {
+  it('out of reach down there: refused, with the drop as measured (1.7 m, not "2 m") and each height from you', () => {
     host.add(LIB(C260, { cell: LOWER, x: 76, y: 26, z: 98.3 }));
     run(api, host, 200, { physics: false });
     const r = api.attack(C260);
     expect(r.ok).toBe(false);
-    expect(r.message).toBe('the run-up to Tusker Liberator #8000c260 drops 1.7 m to the floor below (one way), leaving Claude Arcanist (2 m from you) on this floor, so no attack was started. Let it come to you, tell them you\'re dropping and go together, or ac_attack target=#8000c260 far=true drop=true to go anyway');
+    expect(r.message).toBe('the run-up to Tusker Liberator #8000c260 (2 m down from you) has a one-way 1.7 m drop on the way, landing 2 m down from your floor, leaving Claude Arcanist (2 m from you) on this floor, so no attack was started. Let it come to you, tell them you\'re dropping and go together, or ac_attack target=#8000c260 far=true drop=true to go anyway');
   });
 
   it('within 4 m but a wall between and not hitting you: the drop note still holds', () => {
     host.add(LIB(C260, { cell: LOWER, x: 72.5, y: 22, z: 98.3 }));
     host.lineOfFire = () => ({ dist: 3.2, blockedAt: 1.1, blocker: 'a wall' });
     run(api, host, 200, { physics: false });
-    expect(api.attack(C260).message).toMatch(/^the run-up to Tusker Liberator #8000c260 drops 1\.7 m to the floor below/);
+    expect(api.attack(C260).message).toMatch(/^the run-up to Tusker Liberator #8000c260 \(2 m down from you\) has a one-way 1\.7 m drop on the way/);
   });
 });
 

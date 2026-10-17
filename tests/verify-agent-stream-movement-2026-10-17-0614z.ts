@@ -188,7 +188,7 @@ describe('3. one-way drops off the floor a fellow stands on', () => {
     host.routeTo = [{ x: 80.5, y: 20, z: 100, drop: 6, landing: 94 } as { x: number; y: number; z: number }];
     const r = api.attack(MU, { far: true });
     expect(r.ok).toBe(false);
-    expect(r.message).toBe('the run-up to Dread Mu-miyah #80003d7d drops 6.0 m to the floor below (one way), leaving Claude Arcanist (1 m from you) on this floor, so no attack was started. Let it come to you, tell them you\'re dropping and go together, or ac_attack target=#80003d7d far=true drop=true to go anyway');
+    expect(r.message).toBe('the run-up to Dread Mu-miyah #80003d7d (6 m down from you) has a one-way 6.0 m drop on the way, landing 6 m down from your floor, leaving Claude Arcanist (1 m from you) on this floor, so no attack was started. Let it come to you, tell them you\'re dropping and go together, or ac_attack target=#80003d7d far=true drop=true to go anyway');
     expect(host.sent.filter((x) => x.startsWith('attack'))).toEqual([]);
     expect(api.attack(MU, { far: true, drop: true }).ok).toBe(true);
   });

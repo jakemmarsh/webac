@@ -14,7 +14,7 @@ import { authoredMaterialCopy, morphTranslucencyToOriginal, drawAllParts } from 
 // scrollbar's active width); ATTRIBUTE_MAX is no longer read here.
 import { fellowshipUpdateLine, fellowAddedLine, fellowQuitLine, fellowDismissedLine, fellowshipDisbandedLine } from './fellowshipChatLines.js';
 import { defaultChargenSkillClasses, chargenTotalNumSkills } from './chargenSkillDefaults.js';
-import { Heritage, Gender, SkillAdvancementClass, EquipMask, DEFAULT_ATTRIBUTE_CREDITS, Sound, CombatMode, ItemType, COINSTACK_WCID, playerKillerStatusLabel, skillIdLabel, skillAdvancementClassLabel, characterOptionIsSet, CHARACTER_OPTION_BIT_MAP, chatColorFor, shopSellPrice, shopBuyPrice } from '@ac/shared';
+import { computeSkillFormula, Heritage, Gender, SkillAdvancementClass, EquipMask, DEFAULT_ATTRIBUTE_CREDITS, Sound, CombatMode, ItemType, COINSTACK_WCID, playerKillerStatusLabel, skillIdLabel, skillAdvancementClassLabel, characterOptionIsSet, CHARACTER_OPTION_BIT_MAP, chatColorFor, shopSellPrice, shopBuyPrice } from '@ac/shared';
 import type { InventoryItem, EquippedItem, SpellDefinition, NameFilterRules, TabooPredicate, MtChatLine, MtChatSpeech } from '@ac/shared';
 import { SPELLBOOK_FILTERS_DEFAULT, isSpellbookFilteredOut, spellbookLevelBit, spellbookOrder, spellbookSchoolBit, toggleSpellbookFilter, spellbookDeleteConfirmText } from './spellbookFilter.js';
 import { MagicSchool, magicSchoolColor, magicSchoolColorRGBA, LUMINANCE_MIN_LEVEL, getAppropriateName, StartingTown, SPELL_COMPONENT_DID_MAPPER_ID } from '@ac/shared';
@@ -19957,7 +19957,7 @@ export class GameUI {
    * cost tables and raise callbacks the character panel's Raise button uses
    * (statFooterModel), so the server sees exactly that button's request.
    */
-  agentRaise(stat: string, upTo?: number): { ok: boolean; message: string; name?: string; from?: number; to?: number; cost?: number; reached?: boolean } {
+  agentRaise(stat: string, upTo?: number): { ok: boolean; message: string; name?: string; from?: number; to?: number; cost?: number; reached?: boolean; shifts?: Array<{ name: string; from: number; to: number }> } {
     const reached = (label: string, at: number) => (upTo !== undefined && at >= upTo ? { ok: false, message: `${label} is already ${at}`, reached: true } : null);
     const want = stat.trim().toLowerCase();
     const avail = this.charInfo.unassignedXp;
@@ -19982,8 +19982,10 @@ export class GameUI {
       if (no) return no;
       this.raiseCallbacks.onRaiseAttribute?.(GameUI.ATTR_WIRE_IDS[attr], cost1);
       const from = data?.base ?? 0;
+      const shifts = GameUI.attributeRaiseSkillShifts(GameUI.ATTR_WIRE_IDS[attr], this.charInfo.attributes, this.charInfo.skills, this.skillTable?.skills);
       if (data) { data.raises++; data.base++; data.buffed++; }
-      return raised(label, from, cost1);
+      const r = raised(label, from, cost1);
+      return shifts.length ? { ...r, shifts } : r;
     }
     const vital = Object.keys(GameUI.VITAL_WIRE_IDS).find((k) => k === want || `max ${k}` === want || `maximum ${k}` === want);
     if (vital) {
@@ -20021,6 +20023,32 @@ export class GameUI {
     const r = partFilled ? { ...r0, message: `${r0.message}, the rest of a rank using it had part-filled` } : r0;
     const nextCost = GameUI.skillRaiseCosts(table, skill.raises, skill.pp).cost1;
     return nextCost > 0 ? { ...r, message: `${r.message}; the next +1 costs ${nextCost.toLocaleString()} XP` } : r;
+  }
+
+  /**
+   * AGENT — the trained and specialized skills whose base moves when attribute `wire` (1 Strength … 6 Self) goes up one:
+   * each skill's SkillTable formula over the base attributes (ACE CreatureSkill.Base: AttributeFormula.GetFormula with
+   * current=false, rounded), before and after. Run is Quickness / 1, so Quickness 112 → 113 moved Run 203 → 204.
+   */
+  static attributeRaiseSkillShifts(
+    wire: number,
+    attrs: Record<string, { base: number }>,
+    skills: ReadonlyArray<{ id: number; name: string; status: string; base: number }>,
+    table: ReadonlyMap<number, SkillBase> | undefined,
+  ): Array<{ name: string; from: number; to: number }> {
+    if (!table) return [];
+    const key = (id: number): string | undefined => Object.keys(GameUI.ATTR_WIRE_IDS).find((k) => GameUI.ATTR_WIRE_IDS[k] === id);
+    const out: Array<{ name: string; from: number; to: number }> = [];
+    for (const sk of skills) {
+      if (sk.status !== 'Trained' && sk.status !== 'Specialized') continue;
+      const f = table.get(sk.id)?.formula;
+      // ACE AttributeFormula.GetFormula: X == 0 is no attribute part at all.
+      if (!f || f.x === 0 || f.z === 0 || (f.attr1 !== wire && f.attr2 !== wire)) continue;
+      const at = (bump: number) => (id: number): number => (attrs[key(id) ?? '']?.base ?? 0) + (id === wire ? bump : 0);
+      const d = computeSkillFormula(f, at(1)) - computeSkillFormula(f, at(0));
+      if (d) out.push({ name: sk.name, from: sk.base, to: sk.base + d });
+    }
+    return out;
   }
 
   /**

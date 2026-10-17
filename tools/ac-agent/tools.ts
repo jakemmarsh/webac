@@ -385,7 +385,7 @@ const ARG_SYNONYMS: readonly (readonly string[])[] = [
   ['text', 'message', 'msg', 'say', 'line', 'words'],
   ['times', 'count', 'n', 'repeat_count', 'raises'],
   ['amount', 'quantity', 'qty', 'number', 'stack'],
-  ['timeout_s', 'timeout', 'seconds', 'secs', 'wait', 'time'],
+  ['timeout_s', 'timeout', 'seconds', 'secs', 'wait', 'time', 'duration_s', 'duration', 'max_s'],
   ['filter', 'kind', 'type', 'search', 'query', 'match'],
   ['radius', 'range', 'distance', 'within'],
   ['action', 'do', 'command', 'cmd', 'op'],
@@ -1090,13 +1090,31 @@ export function sellList(v: unknown): string[] {
   return s.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
 }
 
+/** Each tool with one time argument: the others' names for it (alias → its own). */
+export const TIME_ARG_ALIASES: Readonly<Record<string, Record<string, string>>> = {
+  ac_wait: { duration_s: 'timeout_s', seconds: 'timeout_s' },
+  ac_walk_to: { duration_s: 'timeout_s', seconds: 'timeout_s' },
+  ac_follow: { timeout_s: 'duration_s', seconds: 'duration_s' },
+  ac_move: { duration_s: 'seconds', timeout_s: 'seconds' },
+  ac_cast: { timeout_s: 'max_s', duration_s: 'max_s' },
+};
+
 // skill= is stat= for raise: "raise skill=Healing" was refused with "takes stat=" a dozen times in a segment (Bulwark,
 // Arcanist, 2026-10-16), and a skill is half of what raise raises.
 // amount= is times= ("raise amount=max" was refused as an unknown argument, Bulwark 2026-10-17 05:00Z).
-for (const t of TOOLS) if (t.name === 'ac_raise') t.aliases = { skill: 'stat', amount: 'times' };
+// raise has one name argument, so every word players reach for names it: across the 2026-10-16/17 stream
+// transcripts ~200 raises were refused for target= (78), name= (56), skill= (50, aliased since), attribute= (12) …
+for (const t of TOOLS) if (t.name === 'ac_raise') t.aliases = { skill: 'stat', target: 'stat', name: 'stat', attribute: 'stat', vital: 'stat', what: 'stat', amount: 'times' };
 
 // distance= is within= for the walks: "follow distance=" was refused as an unknown argument (Arcanist, 2026-10-16).
-for (const t of TOOLS) if (t.name === 'ac_walk_to' || t.name === 'ac_follow') t.aliases = { distance: 'within' };
+// The time argument by the other tools' names, where the tool has only the one: "follow … timeout_s=40" was refused
+// (ac_wait's and walk_to's name; follow's is duration_s), and Arcanist sent it again as duration_s=40 (2026-10-17
+// 17:52:51Z). ac_trace's seconds= (how far back, not how long) and ac_jump's hold_ms= keep their own names only.
+for (const t of TOOLS) {
+  const time = TIME_ARG_ALIASES[t.name];
+  if (t.name === 'ac_walk_to' || t.name === 'ac_follow') t.aliases = { distance: 'within', ...time };
+  else if (time) t.aliases = { ...t.aliases, ...time };
+}
 
 // Each one-object tool lists its alias (so the CLI and an MCP schema with additionalProperties: false take it) and
 // reads its arguments through withArgAliases. An alias has its argument's type (distance= is a number, as within=).

@@ -138,7 +138,10 @@ let agentUseDoneTap: ((code: number) => void) | null = null;
 /** The agent's tap on every AttackDone (its WeenieError code), set when the agent API is on. */
 let agentAttackDoneTap: ((code: number) => void) | null = null;
 let agentMeleeSentTap: ((height: string) => void) | null = null;
+/** The agent's tap on every WeenieError the server sends (after the client has shown its text), set when the agent API is on. */
+let agentWeenieErrorTap: ((code: number) => void) | null = null;
 import { examineText } from './agent/examineText.js';
+import { EMOTE_INPUT_ACTION_MOTIONS, resolvePress } from './input/KeybindActionLookup.js';
 import { cellIdRange, cellStandPoint, floorsAt, findRouteViaOutside, loadCellGraph, routeBarrier, routeCutOff, type CellGraph } from './agent/cellPath.js';
 import { RoutineSync } from './agent/RoutineSync.js';
 import { isAutomationCommand } from './ui/automation/AutomationPanel.js';
@@ -370,6 +373,7 @@ import { ItemShortcutRestorer, isShortcutEligible, quickslotCommand, CREATE_SHOR
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
 import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from './session/SessionLifecycle.js';
+import { ProvenLoginRetry, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { handleUnexpectedDrop } from './session/UnexpectedDrop.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel } from './session/AccountTabGuard.js';
 import { SquelchState } from './session/SquelchState.js';
@@ -7650,6 +7654,19 @@ async function main() {
   // session/SessionLifecycle.ts for the ACE Session.cs anchoring.
   const sessionLifecycle = new SessionLifecycle();
   resumingAfterDrop = () => sessionLifecycle.resumingAfterDrop;
+  // BUG.gdle-transient-login-failed — GDLE / the AC1999 server answer a correct login with
+  // "Client logon failed" now and then (their account query failed, e.g. busy saving the
+  // logout a moment before). A login this page already got in with retries on its own at
+  // 3 s and 6 s behind the connecting screen; a first-time login (a typo) is refused at
+  // once, as in retail. Credentials are kept only as an in-memory salted digest. A named
+  // browser-UX exception (CLAUDE.md), like the automatic reconnect.
+  const provenLoginRetry = new ProvenLoginRetry();
+  let provenLoginRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The connect cycle ended some other way: drop a pending automatic login retry. */
+  const cancelProvenLoginRetry = (): void => {
+    if (provenLoginRetryTimer !== null) { clearTimeout(provenLoginRetryTimer); provenLoginRetryTimer = null; }
+    provenLoginRetry.cancel();
+  };
 
   // ── CORE.17.k.b — retail connection-loss reporting ─────────────────────
   // gmUIFlow::RecvNotice_ServerDied @ 0047a9a0 queues the Disconnected UI
@@ -7669,6 +7686,7 @@ async function main() {
    */
   const relaunchConnectCycle = (): void => {
     if (!urlLogin.autoLogin && reloadIfUpdatePending()) return;
+    cancelProvenLoginRetry();
     serverDiedShown = false;
     sessionLifecycle.noteDisconnected();
     if (gameStarted || gameplayUi.isShown) teardownWorldState();
@@ -7715,6 +7733,7 @@ async function main() {
    */
   /** A refused launcher login: say why, then let the player fix it in the launcher. */
   const returnToLauncher = (text: string): void => {
+    cancelProvenLoginRetry();
     accountTabGuard.release();
     sessionLifecycle.noteDisconnected();
     aceConnection.autoReconnect = false;
@@ -7735,6 +7754,7 @@ async function main() {
     // BUG.resume-silent-launcher — every return to the server select says why (a resume
     // that ended there at 2026-10-17 02:34Z left no trace of how).
     preworldReporter?.leftForLauncher(why);
+    cancelProvenLoginRetry();
     exitToLauncherAfterLogOff = false;
     accountTabGuard.release();
     sessionLifecycle.noteLoggedOut();
@@ -7764,6 +7784,7 @@ async function main() {
   const raiseServerDied = (text: string = connectionLostText(), endCause?: WorldEndCause, net?: NetDiagnostics): void => {
     if (serverDiedShown || gameUI.disconnectedScreenShown) return;
     serverDiedShown = true;
+    cancelProvenLoginRetry();
     worldResumePending = false;
     worldReporter?.left('disconnected', endCause ? { endCause, net } : undefined);
     sessionLifecycle.noteDisconnected();
@@ -7788,6 +7809,7 @@ async function main() {
    * screen that already says the session is over.
    */
   const standDownForOtherTab = (): void => {
+    cancelProvenLoginRetry();
     worldResumePending = false;
     sessionLifecycle.endResume();
     if (launcherActive || gameUI.disconnectedScreenShown) return;
@@ -12305,6 +12327,8 @@ async function main() {
         // the ACE <summary> says). Pre-fix every code went to chat in the
         // Help colour. Map: @ac/shared WeenieErrorSink.ts (generated).
         deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType));
+        // The agent's melee attack reads an approach the server gave up on ("Unable to move to object!") from it.
+        agentWeenieErrorTap?.(data.errorType);
         // BUG.ac1999-magic-mode-refused — GDLE and the AC1999 server refuse a
         // combat mode with only this ActionCancelled (Player.cpp
         // CPlayerWeenie::ChangeCombatMode): no stance, no CombatMode int. The
@@ -16551,12 +16575,10 @@ async function main() {
         // aborts an automatic attack and stops a server MoveTo where the body is): the agent's stop_moving.
         stopMovingAction: () => cameraController.stopMoving(),
         press: (input) => {
-          // An action name resolves to its first bound key; a code is pressed as given.
-          const action = keybinds.actions().find((a) => a.name.toLowerCase() === input.trim().toLowerCase())
-            ?? keybinds.actions().find((a) => a.name.toLowerCase().includes(input.trim().toLowerCase()));
-          const code = /^((Ctrl|Alt|Shift)\+)*(Key[A-Z]|Digit\d|F\d{1,2}|Numpad\w+|Arrow\w+|Space|Enter|Escape|Tab|Backspace|Home|End|PageUp|PageDown|Insert|Delete|Minus|Equal|Bracket\w+|Semicolon|Quote|Comma|Period|Slash|Backslash|Backquote)$/.test(input.trim())
-            ? input.trim() : action ? keybinds.getMappings(action.id).find((m): m is string => !!m) : undefined;
-          if (!code) return { ok: false, message: action ? `"${action.name}" has no key bound` : `no key or keymap action "${input}" (ac_keys lists them)` };
+          // A key code is pressed as given; an action name (any of the forms findKeybindAction takes) as its first bound key.
+          const r = resolvePress(keybinds.actions(), (id) => keybinds.getMappings(id), input);
+          if (!r.ok) return r;
+          const { code, action } = r;
           const parts = code.split('+');
           const init = { code: parts[parts.length - 1], ctrlKey: parts.includes('Ctrl'), altKey: parts.includes('Alt'), shiftKey: parts.includes('Shift'), bubbles: true, cancelable: true };
           document.dispatchEvent(new KeyboardEvent('keydown', init));
@@ -16964,6 +16986,7 @@ async function main() {
       };
       agentAttackDoneTap = (code) => agentApi.pushAttackDone(code);
       agentMeleeSentTap = (h) => agentApi.noteMeleeSent(h);
+      agentWeenieErrorTap = (code) => agentApi.pushWeenieError(code);
       agentUseDoneTap = (code) => agentApi.pushUseDone(code, Object.entries(WeenieError).find(([, v]) => v === code)?.[0] ?? `0x${code.toString(16)}`, weenieErrorText(code));
       // The agent's steering tick rides the frame step (the rAF frame, or the background beat when the
       // browser stops frames), not a page timer that a covered window throttles to once a second.
@@ -17133,6 +17156,8 @@ async function main() {
           aceCharList = parseCharacterList(event.data as Uint8Array);
           aceServerAccount = aceCharList.accountName || null;
           preworldReporter?.characterList(aceCharList.characters.length);
+          // BUG.gdle-transient-login-failed — this world + account + password got in: proven for this page.
+          void provenLoginRetry.noteAccepted({ world: connectUrl, account: aceAccount, password: acePassword });
           console.log(`[AC] ACE: Got character list — ${aceCharList.characters.length} characters on account "${aceCharList.accountName}" (${aceCharList.slotCount} slots)`);
           // CPlayerSystem::m_accountHasThroneofDestiny — the chargen Random
           // rolls (heritage / town) read it (CORE.17.k.b.b.a.f.d).
@@ -17761,6 +17786,31 @@ async function main() {
             // with a NetError (ClientNet::EndState @ 00543380), e.g. GDLE's
             // STR_LOGIN_FAILED = "Client logon failed".
             const netNotice = connectionFailureNotice(event)!;
+            // BUG.gdle-transient-login-failed — a proven login's "Client logon failed" (GDLE /
+            // AC1999; ACE never sends it) retries on its own behind the connecting screen; the
+            // last refusal, and any other, is shown as before (ProvenLoginRetry decides).
+            if (!gameStarted && event.serverNetError) {
+              const creds: LoginCredentials = { world: connectUrl, account: aceAccount, password: acePassword };
+              void provenLoginRetry.onRefused(creds, netNotice.token).then((verdict) => {
+                if (gameStarted) return;
+                if (verdict.retry) {
+                  preworldReporter?.loginRetry(event, netNotice.token || null, verdict.attempt);
+                  console.log(`[AC] ACE: "${netNotice.text}" for a login this page already got in with — retrying in ${verdict.delayMs} ms (attempt ${verdict.attempt})`);
+                  if (provenLoginRetryTimer !== null) clearTimeout(provenLoginRetryTimer);
+                  provenLoginRetryTimer = setTimeout(() => {
+                    provenLoginRetryTimer = null;
+                    // Gone to the launcher, another tab, or new credentials meanwhile: nothing to retry.
+                    if (launcherActive || gameStarted || aceAccount !== creds.account || acePassword !== creds.password) return;
+                    aceConnection.autoReconnect = false;
+                    aceConnection.connect(creds.account, creds.password);
+                  }, verdict.delayMs);
+                  return;
+                }
+                preworldReporter?.connectionError(event, netNotice.token || null);
+                raiseNetError(netNotice);
+              });
+              break;
+            }
             if (!gameStarted) preworldReporter?.connectionError(event, netNotice.token || null);
             raiseNetError(netNotice);
             break;
@@ -18049,7 +18099,7 @@ async function main() {
       case ACT.Ready: animController?.setHeldSubstate(MotionCommand.Ready); return true;
       // CMotionInterp::DoMotion refuses the three postures outside the NonCombat style (combatMotionRefusal).
       case ACT.Crouch: case ACT.Sitting: case ACT.Sleeping: {
-        const posture = id === ACT.Crouch ? MotionCommand.Crouch : id === ACT.Sitting ? MotionCommand.Sitting : MotionCommand.Sleeping;
+        const posture = EMOTE_INPUT_ACTION_MOTIONS.get(id)!;
         const refused = combatMotionRefusal(posture, !combatController.isInCombat);
         if (refused) raiseClientNotice(gameUI, refused);
         else animController?.setHeldSubstate(posture);

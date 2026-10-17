@@ -23,7 +23,7 @@ export const PREWORLD_OUTCOMES = [
   'login_refused', 'connect_failed', 'char_list', 'char_error', 'chargen_ok', 'chargen_refused',
   'chargen_sent', 'chargen_blocked',
   'enter_refused', 'enter_ok', 'dropped', 'page_hidden', 'page_left', 'page_reload', 'boot_slow', 'boot_failed',
-  'enter_retry', 'left_for_launcher', 'resume_ended',
+  'enter_retry', 'left_for_launcher', 'resume_ended', 'login_retry',
 ] as const;
 export type PreworldOutcome = typeof PREWORLD_OUTCOMES[number];
 

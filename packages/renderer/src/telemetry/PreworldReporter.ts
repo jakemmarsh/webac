@@ -35,7 +35,7 @@ export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
   | 'chargen_sent' | 'chargen_blocked'
   | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed'
-  | 'enter_retry' | 'left_for_launcher' | 'resume_ended';
+  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry';
 
 /**
  * BUG.resume-silent-launcher — why the page went back to the launcher
@@ -483,6 +483,27 @@ export class PreworldReporter {
       code: code >>> 0,
       token: resume ? 'resume' : 'enter',
       sinceEnterMs: this.enterAt !== null ? Math.round(this.now() - this.enterAt) : null,
+    });
+  }
+
+  /**
+   * BUG.gdle-transient-login-failed — a login refusal the page retries on its
+   * own (a proven login's "Client logon failed", session/ProvenLoginRetry.ts):
+   * login_retry with the refusal's code / table / token and the retry's
+   * attempt number (count). The last refusal still ends in login_refused; a
+   * retry that gets in shows up as the usual char_list.
+   */
+  loginRetry(event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId'>, token: string | null, attempt: number): void {
+    const count = Math.max(0, Math.min(1000, Math.trunc(attempt)));
+    if (event.serverNetError) {
+      this.report('login_retry', {
+        code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token), count,
+      });
+      return;
+    }
+    this.report('login_retry', {
+      code: event.characterError !== undefined ? event.characterError >>> 0 : undefined,
+      token: safeToken(token) ?? safeToken(event.netErrorId), count,
     });
   }
 

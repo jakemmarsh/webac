@@ -30,7 +30,7 @@ import { IN_TOWN_UNITS, nearestTownOf, townInName } from './towns.js';
 import { USEABLE_NO, isUseable, isUseableTargeted } from '../input/UseObject.js';
 import { SELF_TARGETABLE_TYPE_MASK } from '../ui/SpellShortcutBar.js';
 import type { PlanSpell, RoutineProfile } from '@ac/shared';
-import { missileShot, getProjectileSpeed, DEFAULT_MAX_VELOCITY, MATERIAL_NAMES, EquipMask, type MissileShot } from '@ac/shared';
+import { missileShot, getProjectileSpeed, DEFAULT_MAX_VELOCITY, MATERIAL_NAMES, EquipMask, WeenieError, weenieErrorText, type MissileShot } from '@ac/shared';
 import { RoutineEngine, type ItemPalette } from './RoutineEngine.ts';
 import type { RoutineSyncResult } from './RoutineSync.ts';
 import { vtankExprHost, vtankExpressions } from './VtankExprHost.ts';
@@ -432,7 +432,11 @@ export interface AgentHost {
   tradeAction(action: 'add' | 'accept' | 'decline' | 'reset' | 'close', guid?: number): boolean;
   /** Spend XP on one raise of a named attribute / vital / skill; returns a message. */
   /** One raise of an attribute, vital or skill; refused (reached) when it is already at `upTo`. */
-  raise(stat: string, upTo?: number): AgentResult & { name?: string; from?: number; to?: number; cost?: number; reached?: boolean };
+  /**
+   * `shifts`: an attribute raise's knock-on, the trained skills whose base moves with it (their formula reads the
+   * attribute: Run is Quickness), each from → to.
+   */
+  raise(stat: string, upTo?: number): AgentResult & { name?: string; from?: number; to?: number; cost?: number; reached?: boolean; shifts?: Array<{ name: string; from: number; to: number }> };
   /** Train an untrained skill with skill credits (the skills panel's train button). */
   trainSkill(skill: string): AgentResult & { name?: string; cost?: number };
   logout(): void;
@@ -1457,9 +1461,13 @@ export class AgentApi {
     if (this.stale(e)) return;
     for (const w of [...this.waiters]) {
       if (e.seq > w.since && this.matches(e, w.filter)) {
+        // Only with something to hand back: a wait woken by an event deliverable leaves out (a task-done its call had
+        // already answered) sleeps on, rather than answering "(nothing within …)" at once.
+        const out = this.deliverable(this.events.filter((x) => x.seq > w.since && this.matches(x, w.filter)));
+        if (!out.length) continue;
         clearTimeout(w.timer);
         this.waiters.splice(this.waiters.indexOf(w), 1);
-        w.resolve(this.deliverable(this.events.filter((x) => x.seq > w.since && this.matches(x, w.filter))));
+        w.resolve(out);
       }
     }
   }
@@ -1574,7 +1582,33 @@ export class AgentApi {
 
   /** Events as a wait hands them back: threat events about creatures dead or gone by now, and vital alarms healed past, left out. */
   private deliverable(evs: AgentEvent[]): AgentEvent[] {
-    return evs.filter((e) => !this.stale(e) && !this.answeredTaskDone(e)).map((e) => this.fellowWhereNow(this.onYouNow(this.attackedSince(e))));
+    return evs.filter((e) => !this.stale(e) && !this.answeredTaskDone(e)).map((e) => this.killWhen(this.fellowWhereNow(this.onYouNow(this.attackedSince(e)))));
+  }
+
+  /**
+   * Kills one of your calls' replies reported (a cast's "X died", a repeat cast's "stopped: X died"): guid → when (host
+   * time) and by which call. The target-died event of such a kill, read in a later wait, says it is old news.
+   */
+  private killsTold = new Map<number, { at: number; by: string }>();
+  private noteKillTold(guid: number, by: string): void {
+    this.killsTold.set(guid >>> 0, { at: this.host.now(), by });
+    if (this.killsTold.size > 300) this.killsTold.delete(this.killsTold.keys().next().value!);
+  }
+
+  /**
+   * A target-died read FELLOW_EVENT_STALE_MS or more after it came: when it died ("[37 s ago]"), and when a call's own
+   * reply already said so ("your cast's reply said so"), so an old kill never reads as news. Arcanist's wait at
+   * 16:56:07Z handed him "target-died: Tusker Liberator #8000cb3c died" and "#8000cf8e died", killed by his own bolts at
+   * 16:55:36 and 16:55:46Z and reported by those casts, as if they had just died (stream 2026-10-17).
+   */
+  private killWhen(e: AgentEvent): AgentEvent {
+    // A target-lost read late is the same shape: when it went, not news.
+    if (e.type !== 'target-died' && e.type !== 'target-lost') return e;
+    const age = this.host.now() - e.t;
+    // onYouNow already said when ("was on you 12 s ago, when it died").
+    if (age < AgentApi.FELLOW_EVENT_STALE_MS || / s ago, when it died /.test(e.text)) return e;
+    const told = e.type === 'target-died' && e.guid !== undefined ? this.killsTold.get(e.guid >>> 0) : undefined;
+    return { ...e, text: `${e.text} [${Math.round(age / 1000)} s ago${told ? `; your ${told.by}'s reply said so` : ''}]` };
   }
 
   /** A fellow-aggro read this long after it came (ms) says where the fellow was then, and where they are now. */
@@ -1703,9 +1737,12 @@ export class AgentApi {
     if (e.type !== 'task-done') return false;
     const before = this.taskDoneBefore.get(e.seq);
     if (before !== undefined && before < this.tasksStarted) return true;
-    const n = this.quickTaskDone.get(e.seq);
-    if (n === undefined) return false;
-    return n < this.tasksStarted;
+    // A task that ended within TASK_ANSWERED_MS answered its own call, newer task or not: Arcanist's repeat casts that
+    // ended at once "not needed: #8000cf3f died before your first cast" (0.3 s) came back in his next wait as a
+    // task-done 23 s later, among the casts' own kills, after a say, a raise and three buff casts that start no task
+    // (stream 2026-10-17 16:55:50 → 16:56:13Z). Its quickTaskDone entry is made after the push, so a wait already
+    // running when it ended (one asked beside the call) still hears it.
+    return this.quickTaskDone.has(e.seq);
   }
 
   // ── deaths this session ──
@@ -2258,6 +2295,58 @@ export class AgentApi {
   pushAttackDone(code?: number): void {
     this.attackDones.push({ at: this.host.now(), seq: this.seqN, ord: ++this.meleeOrd, swung: code === AgentApi.ATTACK_DONE_SWUNG, cancel: code !== undefined && code !== AgentApi.ATTACK_DONE_SWUNG });
     if (this.attackDones.length > 20) this.attackDones.shift();
+  }
+  /**
+   * A WeenieError the server sent (GameEventWeenieError; main.ts taps it after the client has shown its text). Kept for
+   * the melee attack: ACE answers a melee approach that gave up with one (Player_Move.OnMoveComplete →
+   * SendWeenieError(status) + HandleActionCancelAttack, on the UseChargeAttack path every character has by default:
+   * CharacterOptions1.Default). Its text is "Unable to move to object!" for ObjectGone / NoObject (MoveToManager
+   * HandleUpdateTarget: the target left the server's tracking, most often because it died) and "You charged too far!"
+   * for YouChargedTooFar (15 m charged, MoveToParameters.FailDistance). A WeenieError carries no object id: one that
+   * comes after your last melee target died is that death's, and is said so ({@link meleeTargets}).
+   */
+  pushWeenieError(code: number): void {
+    const now = this.host.now();
+    let about: number | null = null;
+    if (AgentApi.APPROACH_FAILED.has(code)) {
+      // The newest melee target of the last minute that is dead now (and isn't the one being fought): its approach ended.
+      const dead = [...this.meleeTargets].reverse().find((m) => now - m.at <= 60_000 && m.guid !== this.attackTarget
+        && (this.host.isDying(m.guid) || this.dyingSeen.has(m.guid) || this.sawDying.has(m.guid) || !!this.gone.get(m.guid)?.died));
+      if (dead && code !== WeenieError.YouChargedTooFar) {
+        about = dead.guid;
+        this.push('chat', `(system) [Agent] "${weenieErrorText(code) ?? 'Unable to move to object!'}" is the server's approach to ${dead.name} #${dead.guid.toString(16)} ending because it died (WeenieError ${AgentApi.weenieErrorName(code)}: the target left the server's tracking): nothing went wrong, and it says nothing about where you stand`);
+      }
+    }
+    this.weenieErrors.push({ at: now, seq: this.seqN, code, about });
+    if (this.weenieErrors.length > 20) this.weenieErrors.shift();
+  }
+  private weenieErrors: Array<{ at: number; seq: number; code: number; about: number | null }> = [];
+  /** The melee targets fought lately, newest last (a WeenieError after one's death is attributed to it). */
+  private meleeTargets: Array<{ guid: number; name: string; at: number }> = [];
+  /**
+   * The WeenieErrors that end a server's melee approach without a swing: the four "Unable to move to object!" codes
+   * (MotionFailure 0x23, ObjectGone 0x37, NoObject 0x38, CantGetThere 0x39: WeenieErrorText) and YouChargedTooFar 0x3D.
+   * ACE sends ObjectGone, NoObject and YouChargedTooFar (MoveToManager); GDLE and the AC1999 server use the same codes.
+   */
+  static readonly APPROACH_FAILED: ReadonlySet<number> = new Set([WeenieError.MotionFailure, WeenieError.ObjectGone, WeenieError.NoObject, WeenieError.CantGetThere, WeenieError.YouChargedTooFar]);
+  /**
+   * A melee request the server has neither swung on nor ended (no AttackDone) this long, with you no nearer to the
+   * target: its approach is stuck. ACE's charge MoveTo for a player has no progress give-up (MoveToManager counts
+   * FailProgressCount only for monsters, Monster_Navigation) and stops only at FailDistance 15 m or a lost target, so a
+   * straight line it can't walk (down a ramp's edge, off a ledge) waits silently until cancelled: Bulwark's attack on
+   * #8000032f 2–3 m off and 2–3 m below on Tusker Habitat's ramps went 20 s with no swing and no answer
+   * (soldier.log 17:49:06.886–17:49:26Z, 2026-10-17).
+   */
+  static readonly APPROACH_STALL_MS = 8000;
+  /** Closer than this (m, straight line) since the request is progress: the approach is under way. */
+  static readonly APPROACH_PROGRESS_M = 0.5;
+  /** A target this far up or down (m) is off your level: the server's straight approach may not get there. */
+  static readonly APPROACH_OFF_LEVEL_M = 1;
+  /** A retry's run-up ends this near the target (m), on its floor with an open line. */
+  static readonly APPROACH_RETRY_WITHIN_M = 1.5;
+  /** WeenieError's name for a code ("ObjectGone"), else its hex. */
+  static weenieErrorName(code: number): string {
+    return Object.entries(WeenieError).find(([, v]) => v === code)?.[0] ?? `0x${code.toString(16)}`;
   }
   /** A TargetedMeleeAttack went out at this height (main.ts's send): ends before it say nothing about that height. */
   noteMeleeSent(height: string): void { this.meleeSends.push({ height, seq: this.seqN, ord: ++this.meleeOrd }); if (this.meleeSends.length > 20) this.meleeSends.shift(); }
@@ -2957,7 +3046,62 @@ export class AgentApi {
     }
     this.lookSeq = Math.max(this.lookSeq, ...evs.map((e) => e.seq));
     for (const e of evs) if (e.type === 'chat' && e.seq > this.chatCursor) this.chatByWait.add(e.seq);
-    return evs;
+    const head = this.pileUpHead(evs, since);
+    return head ? [head, ...evs] : evs;
+  }
+
+  /** A wait whose oldest event is this old (ms) when it is read starts with how things stand now (pileUpHead). */
+  static readonly PILED_UP_MS = 10_000;
+
+  /**
+   * The head of a wait whose events piled up while the player wasn't waiting: how things stand as of the read, first.
+   * Arcanist's waits came back at once (0.2–0.5 s) with 10–25 events queued over 20–42 s of his own calls (casts,
+   * buffs, says, raises: 17 of his 95 waits in the 16:08–17:10Z segment, 2026-10-17), oldest first, so the newest
+   * state was at the bottom and he picked targets from the top: "aggro … 40 s ago" for monsters other blows had killed
+   * since, and "target-died" lines his own casts had already reported, read as new ("late wakes"). None of it was
+   * delivery delay: every wait that slept woke within 3 s of its event. Null when the events are fresh.
+   */
+  private pileUpHead(evs: AgentEvent[], since: number): AgentEvent | null {
+    if (!evs.length) return null;
+    const now = this.host.now();
+    const oldest = Math.min(...evs.map((e) => e.t));
+    const me = this.me();
+    if (now - oldest < AgentApi.PILED_UP_MS || !me) return null;
+    const hex = (g: number): string => `#${(g >>> 0).toString(16)}`;
+    const pc = (v: { current: number; max: number }): string => `${v.current}/${v.max} (${v.max > 0 ? Math.round((100 * v.current) / v.max) : 0}%)`;
+    const parts: string[] = [];
+    const on = [...this.attackersOfMe().entries()];
+    parts.push(on.length
+      ? `${on.length} attacking you: ${on.slice(0, 4).map(([g, n]) => `${this.nameOf(g)} ${hex(g)} (${n}× in 10 s)`).join(', ')}${on.length > 4 ? `, +${on.length - 4} more` : ''}`
+      : 'nothing attacking you');
+    const onSet = new Set(on.map(([g]) => g));
+    const coming = this.comingAt(me.s.guid).filter((c) => !onSet.has(c.guid) && !this.comingAtYouText(c).stuck);
+    if (coming.length) parts.push(`coming at you: ${coming.slice(0, 3).map((c) => `${c.name} ${hex(c.guid)} ${c.dist.toFixed(0)} m ${compassPoint(c.bearing)}`).join(', ')}${coming.length > 3 ? `, +${coming.length - 3} more` : ''}`);
+    // Dead since your last look: kills reported (target-died, your casts) and the creatures these events were about
+    // that are dead or dying now (their threat events were left out).
+    const dead = new Set<number>();
+    for (const [g, at] of this.deadAtSeq) if (at > since) dead.add(g);
+    for (const e of this.events) {
+      if (e.seq <= since || e.guid === undefined || !AgentApi.THREAT_EVENTS.has(e.type)) continue;
+      const g = e.guid >>> 0;
+      if (this.host.isDying(g) || this.dyingSeen.has(g) || this.gone.get(g)?.died) dead.add(g);
+    }
+    const deadName = (g: number): string => `${this.host.object(g)?.name ?? this.gone.get(g)?.name ?? 'creature'} ${hex(g)}`;
+    if (dead.size) parts.push(`dead since your last look: ${[...dead].slice(0, 6).map(deadName).join(', ')}${dead.size > 6 ? `, +${dead.size - 6} more` : ''}`);
+    const tg = this.host.targetGuid();
+    if (tg && tg !== me.s.guid) {
+      const o = this.host.object(tg);
+      const isDead = dead.has(tg >>> 0) || this.host.isDying(tg) || this.host.targetHealth() === 0;
+      parts.push(isDead ? `your selection ${deadName(tg)} is dead` : o ? `your selection ${o.name} ${hex(tg)}${this.host.targetHealth() !== undefined ? ` at ${Math.round(this.host.targetHealth()! * 100)}%` : ''}` : `your selection ${hex(tg)} is out of sight`);
+    }
+    parts.push(`you: health ${pc(me.s.health)}, mana ${pc(me.s.mana)}`);
+    const fs = (this.host.fellows?.() ?? []).filter((f) => f.health.max > 0);
+    if (fs.length) parts.push(`fellows: ${fs.map((f) => `${f.name} ${Math.round((100 * f.health.cur) / f.health.max)}%`).join(', ')}`);
+    const n = evs.length;
+    return {
+      seq: Math.max(...evs.map((e) => e.seq)), t: now, type: 'now',
+      text: `${n} event${n === 1 ? '' : 's'} came over the last ${Math.round((now - oldest) / 1000)} s, while you weren't waiting (your other calls ran meanwhile); they follow oldest first. As of now: ${parts.join('; ')}`,
+    };
   }
 
   /** Resolve with the matching events as soon as one arrives (or [] after timeoutMs). */
@@ -5269,7 +5413,7 @@ export class AgentApi {
     // meanwhile are not the cast's outcome.
     const key = lines.filter((l) => outcome.test(l) && !/^you say\b/i.test(l) && !incomingCombat(l));
     let verdict = '';
-    if (!key.length && died()) { verdict = `${tname} died`; this.noteDead(tg!); }
+    if (!key.length && died()) { verdict = `${tname} died`; this.noteDead(tg!); this.noteKillTold(tg!, 'cast'); }
     if (!key.length && !verdict && s.projectile && tg && tg !== me) {
       // A bolt that went out ("Casting …") with no damage line, no resist and no kill: nothing the server told you of
       // landed. Seven point-blank Flame Bolts at a Spikey Armoredillo read as casts while it killed the mage (2026-10-12).
@@ -5597,7 +5741,7 @@ export class AgentApi {
     const finish = (r: AgentResult): void => { if (this.task === task) { this.task = null; task.resolve(r); } };
     const targetGone = (): string | null => {
       const o = this.host.object(tg);
-      if ((o && this.diedShown(tg)) || (!o && (this.dyingSeen.has(tg) || this.gone.get(tg)?.died))) { this.noteDead(tg); return `${name} died`; }
+      if ((o && this.diedShown(tg)) || (!o && (this.dyingSeen.has(tg) || this.gone.get(tg)?.died))) { this.noteDead(tg); this.noteKillTold(tg, 'cast'); return `${name} died`; }
       if (!o) return `${name} is gone from view (it died out of sight, fled, or you moved away)`;
       if (this.released(o)) return `${name} is out of sight (${this.releasedWhy(o, true)})`;
       return null;
@@ -6386,9 +6530,11 @@ export class AgentApi {
     let done = 0;
     let stop = '';
     const costs: number[] = [];
+    const results: Array<ReturnType<AgentHost['raise']>> = [];
     for (let i = 0; i < Math.max(1, Math.min(times, 50)); i++) {
       const r = this.host.raise(stat);
       if (!r.ok) { stop = r.message; break; }
+      results.push(r);
       first ??= r;
       last = r;
       spent += Number(r.cost ?? 0);
@@ -6402,7 +6548,17 @@ export class AgentApi {
     // Each raise's price when there are a few: a first raise that only finished a rank the skill had part-filled by
     // use (21 XP) beside the full steps after it read as "about 800 a raise, not the 21 listed" (2026-10-13).
     const each = done > 1 && done <= 5 ? `: ${costs.map((c) => c.toLocaleString()).join(' + ')} =` : ',';
-    const summary = `${head} (${done} raise${done > 1 ? 's' : ''}${each} ${spent.toLocaleString()} XP)`;
+    // An attribute's raises move the base of the skills drawn from it: say which, so the next skill raise's "from" isn't
+    // a surprise. Arcanist raised Quickness 112 → 113 at 16:56:00Z, then Run "204 → 205" at 17:01:25Z when he expected
+    // 203 → 204: Run's base had gone 203 → 204 with the Quickness (Run is Quickness / 1, SkillTable), and the server's
+    // "Your base Run skill is now 205!" agreed (stream 2026-10-17).
+    const moved = new Map<string, { from: number; to: number }>();
+    for (const r of results) for (const sh of r.shifts ?? []) {
+      const was = moved.get(sh.name);
+      moved.set(sh.name, { from: was?.from ?? sh.from, to: sh.to });
+    }
+    const knock = moved.size ? `; with it the base of ${[...moved].map(([n, m]) => `${n} ${m.from} → ${m.to}`).join(', ')}` : '';
+    const summary = `${head} (${done} raise${done > 1 ? 's' : ''}${each} ${spent.toLocaleString()} XP)${knock}`;
     return { ok: true, message: stop ? `${summary}; stopped: ${stop}` : summary };
   }
 
@@ -8160,6 +8316,12 @@ export class AgentApi {
         const fresh = this.comingAt(me.s.guid).filter((c) => !aggroAtStart.has(c.guid) && c.guid !== targetGuid && this.aggroHeldFor(c.guid, 'me') === null)
           .filter((c) => {
             if (hitting.has(c.guid)) return true;
+            // A chaser a storey up or down isn't on its way to you yet: observe already calls it AIMED AT YOU BUT NOT
+            // REACHING YOU (comingAtYouText), and it stops the walk once it comes onto your floor. Bulwark's walks in the
+            // Tusker Habitat stopped for Liberators 9 m above (#8000cac9, 16:34:53Z, it never got down) and 7 m below
+            // (#80000f68, 16:24:57Z) (stream 2026-10-17). One turned to face you (a caster) still stops it: a floor
+            // doesn't stop a spell.
+            if (c.otherFloor && (c.how === 'running at you' || c.how.startsWith('closing'))) return false;
             if (this.trivialFoe(c)) return false;
             if (this.levelOf(c) !== undefined) return true;
             let asked = levelWait.get(c.guid);
@@ -9685,7 +9847,7 @@ export class AgentApi {
    * the host can't say (no cell graph, another landblock, the landscape). observe's "ON ANOTHER FLOOR" read "no walk
    * reaches it" from the height alone, while walk_to reached Bulwark 6 m down (Mountain Keep, 2026-10-16).
    */
-  floorRoute(o: AgentHostObject): { len: number; drops: number; dropM: number; leaps: number } | 'none' | { locked: string } | null {
+  floorRoute(o: AgentHostObject): { len: number; drops: number; dropM: number; dropLandZ?: number; leaps: number } | 'none' | { locked: string } | null {
     const s = this.host.self();
     if (!s?.cell || !o.cell || ((s.cell ^ o.cell) & 0xffff0000) !== 0 || (o.cell & 0xffff) < 0x100 || (s.cell & 0xffff) < 0x100) return null;
     const saved = this.lastNoRoute;
@@ -9698,7 +9860,9 @@ export class AgentApi {
       if (!r.length) return this.lastNoRoute ? 'none' : null;
       let len = 0, p0 = toGlobal(s.cell, s.x, s.y);
       for (const q of [...r, g]) { len += Math.hypot(q.x - p0.x, q.y - p0.y); p0 = q; }
-      return { len, drops: r.filter((q) => q.drop !== undefined).length, dropM: Math.max(0, ...r.map((q) => q.drop ?? 0)), leaps: r.filter((q) => q.leap !== undefined).length };
+      // The deepest drop's landing (its floor's height, as your z): a drop on the way can land above where you stand.
+      const deepest = r.reduce<(typeof r)[number] | null>((b, q) => (q.drop !== undefined && (!b || q.drop > (b.drop ?? 0)) ? q : b), null);
+      return { len, drops: r.filter((q) => q.drop !== undefined).length, dropM: Math.max(0, ...r.map((q) => q.drop ?? 0)), ...(deepest?.landing !== undefined ? { dropLandZ: deepest.landing } : {}), leaps: r.filter((q) => q.leap !== undefined).length };
     } finally {
       this.lastNoRoute = saved;
     }
@@ -10249,7 +10413,20 @@ export class AgentApi {
     if (!way || way === 'none' || 'locked' in way || !way.drops) return null;
     const left = this.fellowsAt().filter((f) => f.dist !== undefined && f.dist <= AgentApi.FLOOR_FELLOW_NEAR_M && Math.abs(f.dz ?? 0) < AgentApi.FLOOR_APART_M);
     if (!left.length) return null;
-    return `the run-up to ${this.nameOf(guid)} #${guid.toString(16)} drops ${dropText(way.dropM)}${way.drops > 1 ? ` (${way.drops} drops)` : ''} to the floor below (one way), leaving ${left.map((f) => `${f.name} (${f.dist!.toFixed(0)} m from you)`).join(', ')} on this floor, so no attack was started. Let it come to you, tell them you're dropping and go together, or ac_attack target=#${guid.toString(16)} far=true drop=true to go anyway`;
+    return `the run-up to ${this.nameOf(guid)} #${guid.toString(16)} (${AgentApi.heightFromYou(o.z - me.s.z)}) has a one-way ${dropText(way.dropM)} drop on the way${way.drops > 1 ? ` (${way.drops} drops)` : ''}${way.dropLandZ !== undefined ? `, landing ${AgentApi.heightFromYou(way.dropLandZ - me.s.z, 'your floor')}` : ''}, leaving ${left.map((f) => `${f.name} (${f.dist!.toFixed(0)} m from you)`).join(', ')} on this floor, so no attack was started. Let it come to you, tell them you're dropping and go together, or ac_attack target=#${guid.toString(16)} far=true drop=true to go anyway`;
+  }
+
+  /**
+   * "2 m up from you", "3 m down from you", "at your height": a height difference (feet to feet, metres, + up) as the
+   * observe's "up 2m" reads it. Bulwark's observe said a Liberator was "up 2m" while the attack refused its run-up as one
+   * that "drops 2 m to the floor below": the route reached the ledge it stood on from a floor above it, by a 2 m drop
+   * that landed 2 m over his own feet, and "the floor below" was below the drop, not below him (Tusker Habitat, stream
+   * 2026-10-17 16:33:46Z). Each height now says what it is measured from.
+   */
+  static heightFromYou(dz: number, from = 'you'): string {
+    const m = Math.abs(dz);
+    if (m < 1) return from === 'you' ? 'at your height' : `at ${from}'s height`;
+    return `${m.toFixed(0)} m ${dz > 0 ? 'up' : 'down'} from ${from}`;
   }
 
   private targetWhere(guid: number): string {
@@ -10408,11 +10585,40 @@ export class AgentApi {
     const badSpots: Array<{ x: number; y: number }> = [];
     let relocations = 0;
     let closeIn: (why: string, relocate?: boolean) => void = () => {};
+    // Melee approaches the server gave up on (or left stuck) that were run up to with the walk planner instead: one.
+    let approachRetries = 0;
+    let retryApproach: (why: string) => void = () => {};
     const fight = (): void => {
       const start = this.host.now();
       const startSeq = this.seqN;
       let idleSince: number | null = null;
       let sent = false;
+      // The first request's time and the straight distance to it then (the stuck-approach test).
+      let sentAt: number | null = null;
+      let sentDist: number | null = null;
+      if (!ranged) {
+        this.meleeTargets = this.meleeTargets.filter((m) => m.guid !== guid);
+        this.meleeTargets.push({ guid, name, at: start });
+        if (this.meleeTargets.length > 10) this.meleeTargets.shift();
+      }
+      // Whether a stuck approach is one the walk planner can do better at: the target off your level (a ramp, a ledge, a
+      // step-down: 1 m or more up or down) or beyond the server's sticky reach (4 m), with no wall or door seen between
+      // (those keep their own ends, which name the door). Beside you on your floor with nothing between, the planner
+      // can't stand anywhere better: the silence is the server's (a ghost), and the 20 s rule below says so.
+      const walkHelps = (): boolean => {
+        const o = this.host.object(guid);
+        const me = this.me();
+        if (!o || !o.cell || !me || this.meleeBlockerText(guid)) return false;
+        const t = toGlobal(o.cell, o.x, o.y);
+        return Math.abs(o.z - me.s.z) >= AgentApi.APPROACH_OFF_LEVEL_M || Math.hypot(t.x - me.g.x, t.y - me.g.y) > 4;
+      };
+      const dist3 = (): number | null => {
+        const o = this.host.object(guid);
+        const me = this.me();
+        if (!o || !o.cell || !me) return null;
+        const t = toGlobal(o.cell, o.x, o.y);
+        return Math.hypot(t.x - me.g.x, t.y - me.g.y, o.z - me.s.z);
+      };
       let lastCombatSeq = this.seqN;
       let lastActivity = start;
       // Swings at this height that report nothing about the target (no hit, no evade): in AC1999 a swing
@@ -10507,6 +10713,41 @@ export class AgentApi {
             return { ok: false, message: `${what}. Moved ${relocations} time${relocations === 1 ? '' : 's'} and the arrows still hit it: no clear shot from anywhere tried. Shoot from level with it or above it with nothing between (step up to the edge, or go down to its floor), or pick another target.` };
           }
         }
+        // Every end of the attack is an event the attack's suggested wait hears (target-died / target-lost): an attack
+        // that gave up quietly left \`ac_wait types=target-died,target-lost,…\` asleep for 45 s with no hits (a "phantom"
+        // Spikey Armoredillo #80004cf6 in Holtburg Dungeon, 2026-10-12).
+        const lost = (why: string): void => { if (this.attackTarget === guid) { this.attackTarget = 0; this.push('target-lost', `${name} #${guid.toString(16)}: ${why}`, guid); } };
+        // The server's melee approach gave up ("Unable to move to object!", "You charged too far!") or is stuck (no swing,
+        // no AttackDone, no nearer): its MoveTo is a straight line, which a ramp's edge, a ledge or a step-down can stop
+        // where the walk planner finds a way (down the ramp, off the edge). Run up with the planner and attack once more.
+        if (!ranged && this.host.self()?.combatMode === 'melee') {
+          const failed = this.weenieErrors.find((w) => w.at >= start && w.about === null && AgentApi.APPROACH_FAILED.has(w.code));
+          const stuck = !failed && sentAt !== null && now - sentAt >= AgentApi.APPROACH_STALL_MS
+            && !this.attackDones.some((d) => d.at >= start)
+            && !this.events.some((e) => e.seq > startSeq && e.type === 'chat' && e.text.startsWith('(combat)') && swingReached(e.text, name))
+            && (() => { const d = dist3(); return d !== null && sentDist !== null && d > sentDist - AgentApi.APPROACH_PROGRESS_M; })()
+            && walkHelps();
+          if (failed || stuck) {
+            const o = this.host.object(guid);
+            const me = this.me();
+            const dz = o && me ? o.z - me.s.z : 0;
+            const where = Math.abs(dz) >= 1 ? `, ${Math.abs(dz).toFixed(1)} m ${dz < 0 ? 'below' : 'above'} you` : '';
+            const d = dist3();
+            const at = d !== null ? ` (${d.toFixed(1)} m off${where})` : '';
+            const why = failed
+              ? `the server answered "${weenieErrorText(failed.code) ?? 'Unable to move to object!'}" (WeenieError ${AgentApi.weenieErrorName(failed.code)}): its walk to ${name}${at} gave up`
+              : `the server's walk to ${name}${at} got you no nearer in ${Math.round((now - sentAt!) / 1000)} s, with no swing and no answer (its MoveTo goes in a straight line, and that line doesn't get there)`;
+            this.host.cancelAttack();
+            if (approachRetries < 1 && o && !this.released(o)) {
+              approachRetries++;
+              void Promise.resolve().then(() => { if (!this.task && this.host.object(guid) && !this.host.isDying(guid)) { this.attackTarget = guid; retryApproach(why); } });
+              return { ok: false, message: `${why}; running up to it with the walk planner (the way round, down or up that it finds), then attacking it once more (an "Action cancelled!" now is the server answering the stop of its walk)` };
+            }
+            const again = `${why}, again after the walk planner's run-up: the server can't bring you to it from where the planner reaches. Let it come to you, fight one on your floor, or ac_walk_to somewhere level with it first`;
+            lost(again);
+            return { ok: false, message: again };
+          }
+        }
         // The server ending attack after attack with no swing between: it isn't attacking this target at all.
         // Only a combat line naming THIS target is a swing: another creature hitting you meanwhile ("Banderling
         // Scout nicks your foot", "You evaded Banderling Scout!") said nothing about it, and counting those kept
@@ -10566,10 +10807,6 @@ export class AgentApi {
           if (this.attackTarget === guid) { this.attackTarget = 0; this.push('target-lost', `${name} #${guid.toString(16)}: the server won't attack it${everyHeight ? ' at any height' : ''}`, guid); }
           return { ok: false, message: `the server ended ${n} attacks on ${name}${everyHeight ? ' at all three heights' : ''} at once, with no swing: it is probably dead or gone on the server's side (the client still shows it), or out of reach. Pick another target, or walk_to it if it should be there.` };
         }
-        // Every end of the attack is an event the attack's suggested wait hears (target-died / target-lost): an attack
-        // that gave up quietly left \`ac_wait types=target-died,target-lost,…\` asleep for 45 s with no hits (a "phantom"
-        // Spikey Armoredillo #80004cf6 in Holtburg Dungeon, 2026-10-12).
-        const lost = (why: string): void => { if (this.attackTarget === guid) { this.attackTarget = 0; this.push('target-lost', `${name} #${guid.toString(16)}: ${why}`, guid); } };
         if (now - start > 120_000) { this.host.cancelAttack(); lost('still alive after 120 s of attacking'); return { ok: false, message: `${name} still alive after 120 s` }; }
         // Any swing either way since the last tick counts as progress.
         const fresh = this.events.filter((e) => e.seq > lastCombatSeq && e.type === 'chat' && e.text.startsWith('(combat)'));
@@ -10617,11 +10854,31 @@ export class AgentApi {
         }
         if (this.host.attackPending()) { idleSince = null; return null; }
         idleSince ??= now;
-        if (!sent || now - idleSince >= 1500) { sent = true; idleSince = null; this.host.attack(guid, power, height); this.motionStopAt = this.host.now(); }
+        if (!sent || now - idleSince >= 1500) {
+          sent = true; idleSince = null;
+          if (sentAt === null) { sentAt = now; sentDist = dist3(); }
+          this.host.attack(guid, power, height); this.motionStopAt = this.host.now();
+        }
         return null;
       // Interrupted by another task: stop watching. A vanished target stays watched for objectRemoved
       // to settle (died vs lost) on the same tick's object diff.
       }, () => { if (this.attackTarget === guid && this.host.object(guid)) this.attackTarget = 0; });
+    };
+    // The server's approach failed or stuck (see the fight's check): the walk planner's run-up to it, on its floor with an
+    // open line, then the attack again. Its own end is the attack's: a target-lost naming what the walk found otherwise.
+    retryApproach = (why: string): void => {
+      void this.runUpTo(guid, { within: AgentApi.APPROACH_RETRY_WITHIN_M, line: true, timeoutMs: 60_000, dropLeavesFellows: true, ...(opts.drop ? { drop: true } : {}) }).then((r) => {
+        if (this.attackTarget !== guid) return; // another order came meanwhile
+        if (r.ok || r.attacked) {
+          this.push('chat', `(system) [Agent] ${name} #${guid.toString(16)}: ${r.ok ? `ran up to it with the walk planner (${r.message.replace(/^walking to [^:]*: /, '')})` : 'hit on the way'}; attacking it again`);
+          fight();
+          return;
+        }
+        if (/interrupted/.test(r.message)) return;
+        this.attackTarget = 0;
+        const drop = r.dropHeld ? `. Let it come to you, tell them you're dropping and go together, or ac_attack target=#${guid.toString(16)} far=true drop=true to go anyway` : '';
+        this.push('target-lost', `${name} #${guid.toString(16)}: ${why}, and the walk planner's run-up didn't get there either (${r.message.replace(/^walking to [^:]*: /, '')})${drop}`, guid);
+      });
     };
     if (ranged) {
       // Close in only until the target is in reach with a clear line, then shoot (never to arm's length on purpose:

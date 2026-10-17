@@ -179,7 +179,12 @@ export interface AgentEvent {
     /** A fellow's health fell below the mark (60% by default, fellow_below per wait), or a single drop took a quarter of it. */
     | 'fellow-low'
     /** One of your enchantments ended ("<Spell> has expired."), or an item spell on your gear did (ACE's "The spell … on … has expired."). */
-    | 'buff-expired';
+    | 'buff-expired'
+    /**
+     * Not an event: the head of a wait whose events piled up while the player wasn't waiting (AgentApi.PILED_UP_MS):
+     * how things stand as of the read (who is on you, who died since, your target and vitals), before the events.
+     */
+    | 'now';
   text: string;
   guid?: number;
   /** Chat lines: the ChatMessageType the line came in as (Chat Message Capture's colour filter). */
