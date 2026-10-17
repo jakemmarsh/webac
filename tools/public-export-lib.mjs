@@ -41,9 +41,8 @@ export const EXCLUDED = [
   // Tools that drive or host the private retail client, or build the decomp.
   'tools/launch-retail-client-mac.sh', 'tools/retail-client-udp-relay.mjs', 'tools/capture-retail-',
   'tools/annotate-decomp-globals.ts', 'tools/extract-pdb-globals.ts',
-  // Our own hosting and harness: the Railway deploy script names the
-  // project, and tools/hooks/ are Claude-harness hooks (.claude/ stays private).
-  'tools/deploy-railway.sh', 'tools/hooks/',
+  // Our own harness: tools/hooks/ are Claude-harness hooks (.claude/ stays private).
+  'tools/hooks/',
 ];
 
 /**

@@ -284,12 +284,17 @@ export class VitalSystem {
     return this.vitals.get(id)?.current ?? 0;
   }
 
-  /** Set the current value (clamped to [0, max]). */
-  setCurrent(id: VitalId, value: number, attributes: AttributeSystem): void {
+  /**
+   * Set the current value (clamped to [0, max], as retail's CACQualities::SetAttribute2nd @ 00592530 clamps a current
+   * vital to InqAttribute2nd of its max). Returns how far the server's value was above the max worked out here (0 when
+   * it wasn't): a gap there means the bar reads full while the server's current is higher, and is worth a log line.
+   */
+  setCurrent(id: VitalId, value: number, attributes: AttributeSystem): number {
     const vital = this.vitals.get(id);
-    if (!vital) return;
+    if (!vital) return 0;
     const max = this.getMax(id, attributes);
     vital.current = Math.max(0, Math.min(value, max));
+    return value > max ? value - max : 0;
   }
 
   /** Initialize vitals to max (called after character creation). */

@@ -231,13 +231,13 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2): walks through the re
         // is on his floor: verify-agent-stream-movement-2026-10-17-0614z).
         const { r, host, api } = await go({ drop: true });
         expect(r.ok, `${r.message}\n${host.traces.join('\n')}`).toBe(true);
-        expect(r.message).toMatch(/^Claude Arcanist was \d+ m [NSEW]+ of you, on another floor \(\d+ m down\), not on your way, and hadn't moved for 1\d s: went back to them first \(arrived [^)]*\)[^:]*, then on together: arrived/);
+        expect(r.message).toMatch(/^Claude Arcanist, \d+ m [NSEW]+ of you, hadn't moved for 1\d s and wasn't on your way \(on another floor \(\d+ m down\)\): went back to them first \(arrived [^)]*\)[^:]*, then on together: arrived/);
         expect(host.me.cell).toBe(C(0x14a));
         // One answer for the whole chain: the legs' own ends woke no ac_wait types=task-done.
         const done = api!.eventsSince(0).filter((e) => e.type === 'task-done');
         expect(done.map((e) => e.text)).toHaveLength(1);
         expect(done[0].text).toMatch(/^walking to cell 0x01D2014A: arrived/);
-        expect(api!.eventsSince(0).some((e) => e.type === 'chat' && /\[Agent\] walk: Claude Arcanist is on another floor \(\d+ m down\), not on your way and hasn't moved for 1\d s; going back to them first, then on/.test(e.text))).toBe(true);
+        expect(api!.eventsSince(0).some((e) => e.type === 'chat' && /\[Agent\] walk: Claude Arcanist, \d+ m [NSEW]+ of you, hasn't moved for 1\d s, and isn't on your way \(on another floor \(\d+ m down\)\); going back to them first, then on/.test(e.text))).toBe(true);
       } finally { vi.useRealTimers(); vi.restoreAllMocks(); }
     }, 400_000);
 

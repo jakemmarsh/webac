@@ -349,7 +349,7 @@ import { RestartableTimer } from './utils/RestartableTimer.js';
 import { MovementSync, contactPlaneFromNormal } from './network/MovementSync.js';
 import { resolveFirstSpawnPosition } from './network/spawnPosition.js';
 import { portalStormPresentation } from './network/portalStormEvents.js';
-import { CLIENT_NOTICES as CN, raiseClientNotice, jumpRefusalNotice, combatModeChangeRefusal } from './ui/ClientNotices.js';
+import { CLIENT_NOTICES as CN, raiseClientNotice, jumpRefusalNotice, combatModeChangeRefusal, combatMotionRefusal } from './ui/ClientNotices.js';
 import { LoginCompleteNotifier } from './network/LoginCompleteNotifier.js';
 import {
   addTextToScroll, attackerHitLine, defenderHitLine, evasionAttackerLine, evasionDefenderLine,
@@ -407,6 +407,20 @@ import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateN
 
 /** How long a LoginComplete may wait on contained objects before the safety valve sends it. */
 const LOGIN_COMPLETE_GRACE_MS = 15_000;
+/** The last time each vital's "server current above our max" line was logged (performance.now ms). */
+const vitalAboveMaxLoggedAt = new Map<number, number>();
+/**
+ * A server current the bar clamped to the max worked out here (VitalSystem.setCurrent's gap): logged at most every 30 s
+ * per vital, so a bar that reads full while the server's value is higher shows in the page log. Arcanist's mana read
+ * full through runs of Flame Bolts while stamina kept moving (2026-10-17), and nothing in the log could say why.
+ */
+function logVitalAboveMax(id: number, value: number, gap: number): void {
+  if (gap <= 0) return;
+  const now = performance.now();
+  if (now - (vitalAboveMaxLoggedAt.get(id) ?? -Infinity) < 30_000) return;
+  vitalAboveMaxLoggedAt.set(id, now);
+  console.log(`[Vital] server current ${value} for vital ${id} is ${gap} above the max this client works out; the bar shows the max`);
+}
 /** AGENT.vtank-engine-support — each appraisal's properties and spell names, for loot rules on item properties. */
 /**
  * Appraisals the automation asked for (VirindiTank's background IDs): their replies update the item
@@ -10552,7 +10566,7 @@ async function main() {
         const curVitalId = curVitalMap[data.key];
         if (curVitalId !== undefined) {
           // Current value update
-          playerState.vitals.setCurrent(curVitalId, data.value, playerState.attributes);
+          logVitalAboveMax(curVitalId, data.value, playerState.vitals.setCurrent(curVitalId, data.value, playerState.attributes));
           // BUG.char-panel-vitals-stale-on-tick — see comment above.
           gameUI.hudState.updateVitals(playerState);
           gameUI.refreshVitalsPanel(playerState, xpTable?.characterLevelXpList);
@@ -10567,7 +10581,7 @@ async function main() {
         };
         const vitalId = vitalMap[data.key];
         if (vitalId !== undefined) {
-          playerState.vitals.setCurrent(vitalId, data.value, playerState.attributes);
+          logVitalAboveMax(vitalId, data.value, playerState.vitals.setCurrent(vitalId, data.value, playerState.attributes));
           // BUG.char-panel-vitals-stale-on-tick — damage/heal/regen ticks
           // reach here (not onPrivateUpdateVital); without this the panel's
           // Health/Stamina/Mana rows go stale on every combat/regen tick.
@@ -16498,6 +16512,9 @@ async function main() {
           return true;
         },
         chat: (text) => gameUI.callbacks.onChatSend?.(text),
+        // The agent's "/sit" note (AgentApi.poseNotCommand): this era's ChatPoseTable and the client's own command table.
+        chatPose: (word) => chatPoseTable?.stateFor(word.toLowerCase()) ?? null,
+        clientCommand: (word) => !!retailCommands.lookup(word),
         key: (code, down) => { if (down) cameraController.simulateKeyDown(code); else cameraController.simulateKeyUp(code); },
         setYaw: (yaw) => { cameraController.playerYaw = yaw; cameraController.cameraYawOffset = 0; },
         pickUp: (guid) => { agentPrimeMoveState(); return placeInBackpack(guid); },
@@ -16938,7 +16955,8 @@ async function main() {
       // Lines raised before the chat window exists are queued and re-sent through addSystemMessage: count them once, on replay.
       gameUI.addSystemMessage = (text, color, type, targetWindowId, speech, preset) => {
         if (gameUI['chatMessages']) {
-          agentApi.pushChat(text, type);
+          // A plugin's print (its VCS preset: Mag-Tools' item info) is tagged, so no action's reply reads it.
+          agentApi.pushChat(text, type, preset?.plugin);
           // The agent daemon keeps every line in <profile>.chat.log (tools/ac-agent/daemon.ts): what was said and shown.
           console.log(`[AC:Chat] ${text.replace(/\s+$/, '')}`);
         }
@@ -17890,6 +17908,9 @@ async function main() {
   // Play an emote locally + broadcast it via MoveToState so nearby players see
   // the animation (same path as the chat `*emote*` trigger, FAITHFUL.391).
   const triggerEmoteMotion = (motion: number): void => {
+    // CMotionInterp::DoMotion: a chat emote outside the NonCombat style is refused ("You can't use chat emotes in combat mode").
+    const refused = combatMotionRefusal(motion, !combatController.isInCombat);
+    if (refused) { raiseClientNotice(gameUI, refused); return; }
     // SWEEP1006 state emotes — ACCmdInterp::OnAction → SetMotion(cmd, true):
     // a SubState-class emote (0x43xxxxxx — the "… State" keys) is the held
     // forward command, sent with the movement state like Crouch / Sit;
@@ -18026,9 +18047,14 @@ async function main() {
       // SetMotion(command, true); Crouch / Sit / Lay Down hold their substate
       // (sent as the MoveToState forward command) until a move overwrites it.
       case ACT.Ready: animController?.setHeldSubstate(MotionCommand.Ready); return true;
-      case ACT.Crouch: animController?.setHeldSubstate(MotionCommand.Crouch); return true;
-      case ACT.Sitting: animController?.setHeldSubstate(MotionCommand.Sitting); return true;
-      case ACT.Sleeping: animController?.setHeldSubstate(MotionCommand.Sleeping); return true;
+      // CMotionInterp::DoMotion refuses the three postures outside the NonCombat style (combatMotionRefusal).
+      case ACT.Crouch: case ACT.Sitting: case ACT.Sleeping: {
+        const posture = id === ACT.Crouch ? MotionCommand.Crouch : id === ACT.Sitting ? MotionCommand.Sitting : MotionCommand.Sleeping;
+        const refused = combatMotionRefusal(posture, !combatController.isInCombat);
+        if (refused) raiseClientNotice(gameUI, refused);
+        else animController?.setHeldSubstate(posture);
+        return true;
+      }
       case ACT.ShowHideLinkStatusPanel: gameUI.toggleLinkStatusPanel(); return true;
       case ACT.ShowHideKeyboardConfig: gameUI.toggleKeyboardConfigPanel(); return true;
       // Targeting / selection

@@ -121,7 +121,7 @@ export function metricsJson(m: BridgeMetrics, s: BridgeSnapshot): Record<string,
 
 /**
  * The HTTP handler for non-upgrade requests: /healthz (always public — the
- * Railway health check; the launcher reads its `mode`), /servers (the
+ * deploy agent's health check; the launcher reads its `mode`), /servers (the
  * launcher's world list: ServerDirectory's body in multi mode, an empty
  * pinned list otherwise), /metrics (Prometheus text; `?format=json` for JSON;
  * guarded by `Authorization: Bearer <metricsToken>` when one is configured).

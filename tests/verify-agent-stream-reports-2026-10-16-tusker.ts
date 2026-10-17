@@ -222,7 +222,7 @@ describe('4. a use during a swing breaks the attack off first (the client\'s Can
     expect(r?.message).toBe([
       'used Adept Healing Kit on Claude Arcanist:',
       '  You heal Claude Arcanist for 40 Health points. Your Adept Healing Kit has 23 uses left.',
-      '  (broke off your attack first: the client takes no use or item move while you swing; ac_attack to go back to it)',
+      '  (broke off your attack first: the client takes no use or item move while a swing is in progress, as retail\'s ("You cannot move or use an item while attacking"); ac_attack to go back to it)',
     ].join('\n'));
   });
 
@@ -244,7 +244,7 @@ describe('4. a use during a swing breaks the attack off first (the client\'s Can
     host.drop = (g) => { host.sent.push(`drop ${g.toString(16)}`); host.inv = []; return true; };
     const d = await settle(api, host, api.drop('Adept Healing Kit'), 10_000);
     expect(d?.ok).toBe(true);
-    expect(d?.message).toBe('dropped Adept Healing Kit\n  (broke off your attack first: the client takes no use or item move while you swing; ac_attack to go back to it)');
+    expect(d?.message).toBe('dropped Adept Healing Kit\n  (broke off your attack first: the client takes no use or item move while a swing is in progress, as retail\'s ("You cannot move or use an item while attacking"); ac_attack to go back to it)');
     expect(host.sent).toEqual(['cancel', `drop ${KIT.toString(16)}`]);
     host.inv = [{ guid: KIT, name: 'Adept Healing Kit', where: 'main pack', stack: 1 }];
     host.sent = [];

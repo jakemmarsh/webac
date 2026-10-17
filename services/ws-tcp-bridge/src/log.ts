@@ -1,7 +1,7 @@
 /**
  * Structured one-line JSON logs (RELEASE: public hosting). Every line is a
  * single JSON object — `{"t":"<iso>","level":"info","event":"session_close",...}`
- * — so Railway's log search and any log shipper can filter on fields.
+ * — so CloudWatch (tools/aws-logs.sh) and any log shipper can filter on fields.
  */
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';

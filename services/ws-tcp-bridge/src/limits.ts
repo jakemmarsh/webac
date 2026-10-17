@@ -109,7 +109,7 @@ export function clientIp(
   headers: Record<string, string | string[] | undefined>,
   trustProxyHops: number,
   /** BRIDGE_CLIENT_IP_HEADER: a single-value header the edge proxy overwrites
-   *  with the connecting client (Railway: x-real-ip). Wins when present. */
+   *  with the connecting client (the AWS host's nginx: x-real-ip). Wins when present. */
   clientIpHeader?: string,
 ): string {
   const peer = normalizeAddress(remoteAddress ?? 'unknown');

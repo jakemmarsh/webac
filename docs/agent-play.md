@@ -376,6 +376,9 @@ The brief therefore asks for one CLI call per Bash command: no `cd`, pipes or ot
 **Files** (all under `$TMPDIR/acjs-agent/stream/`; `ACJS_AGENT_STATE_DIR` moves `$TMPDIR/acjs-agent`):
 - `feed.jsonl` (or `$ACJS_STREAM_FEED`): the overlay's event feed, one JSON object per line, `v: 1`, `t` epoch ms,
   `type`, `char` = profile. The shapes are in `tools/stream/feed-types.ts` (owned by the overlay, `tools/stream/overlay-server.ts`):
+  **Deaths are only here** (`"type":"death"`, with `text` and `killer`): the page logs `<profile>.log` never carry the
+  death line, so a watcher grepping them for "You have died" sees nothing (2026-10-17: six deaths in one segment went
+  unseen that way). Watch the feed.
   - `chat`: every line of `<profile>.chat.log`, with a channel (say / tell-in / tell-out / fellowship / general …;
     combat / magic / system by wording, since the log keeps no chat type). A line between cast members is written
     once, from the speaker's log. A character's own spell words ("You say, "Zojak Quaguz"", which retail prints as
@@ -850,6 +853,11 @@ here, not having to hardcode behavior").
     no line of fire: a wall in the way)`: the server's MoveTo at you is real, but it has come no 3 m nearer for 20 s,
     or it stands a storey up or down indoors (a monster turned to face you, a shooter or caster, is never marked so).
     Whether a monster is on you is by the straight line, heights and all: a Dread 2 m across and 12 m up is not.
+    A fellow's line uses the same rule for their chasers: one no nearer to them for 20 s goes under
+    `AIMED AT THEM BUT NOT REACHING THEM: Dread Mu-miyah L60 #80003576 (running at them, no closer to them in 39 s, 18 m
+    from them, 6 m up from you)`, not MONSTERS AT THEM; a fellow's threats are on their storey only, each says its
+    height from you when that's a storey off yours, and a fellow-aggro read late about a monster gone a floor off them
+    since is history (2026-10-17 10:12Z reports: Dreads stuck behind walls read as on Arcanist).
   - Events read late say so (`fellowWhereNow`, 3 s or more after they came): a fellow-aggro gives the monster's distance
     from them and from you, then "N s ago; Claude Bulwark was 5 m NE of you then and is 25 m N of you now, …; Dread
     Mu-miyah #8000475f is 12 m from Claude Bulwark and 30 m N of you now" (Arcanist read "was 5 m NE … (25 m N now)"
@@ -970,7 +978,10 @@ here, not having to hardcode behavior").
 - **Waits, places, walks.** `types=chat,tell` wakes on every chat line (tell only narrows a wait without chat);
   observe's radius and filter apply to remembered places, and without a radius only this region's (1 km) are
   listed; `ac_walk_to "10m north"` / `"5m ahead"` walks an offset; `ac_use` gives up its walk after 45 s (inside the
-  tool's time), stops it, and names an open dialog; a walk judges a door only after the server answered the Use,
+  tool's time), stops it, and names an open dialog; stopped within 6 m of the object on its floor, it uses it from
+  there (the server walks the last metres), and a use that ran past 18 s ends with its own `task-done` (`use: …`), its
+  walk's end staying quiet (Bulwark's portal use, 2026-10-17 10:13Z: the only word was "interrupted (ac_use stopped
+  waiting for it)"); a walk judges a door only after the server answered the Use,
   gives a door that ignored its Use (ACE ignores a Use while the door swings) a second try, and never blames a door
   that opened.
 - **Doors a lever opens (2026-10-14).** A door whose ItemUseable is No (ACE `doordungeonactivated`, Usable 1; the server
@@ -1209,7 +1220,13 @@ here, not having to hardcode behavior").
   to the target end it naming that: Silver Rats behind Arwic Mines doors, 2026-10-15) (each change had reset the 20 s give-up), and every attack end now raises an event its suggested
   wait hears. `/tell Name text` without a comma is retail's "Use comma after the name for targeted chat." (DoTell
   @ 00577e40); `ac_say` now says how to write it. `*blush*` is not in the end-of-retail ChatPoseTable (0x0E000007), so it
-  prints as typed: retail. A `use_on` cut short by your death says so. Checked: 2–3 fizzles of 5 Level III buffs at skill
+  prints as typed: retail. `/sit` (or `/wave`, any pose typed as a command) is no retail command: the client sends it
+  on and ACE answers "Unknown command: sit"; `ac_say` doesn't send it and says to type `*sit*` (the pose), and for
+  resting the Sit key (`ac_press key="Sit"`, G): ACE's Creature_Vitals.GetStanceMod gives health and stamina 2.5×
+  sitting (Crouch 2×, Sleeping 3×) and half rate in a combat stance or running (the pose's SitState gets nothing).
+  Crouch / Sit / Lay Down and chat emotes in a combat stance are refused with retail's "You can't sit down while in
+  combat mode" etc. (CMotionInterp::DoMotion; the 1999 client.exe has the same lines). AC1999's ChatPoseTable strings
+  carry a NUL (AcStrings): the 1999 overlay translates it now, and before that no pose matched there. A `use_on` cut short by your death says so. Checked: 2–3 fizzles of 5 Level III buffs at skill
   110–120 is ACE's (and retail's) sigmoid, SkillCheck.GetMagicSkillChance (factor 0.07, difficulty = Power 100):
   67–80% success before Vitae, about 48% with 10% Vitae on the skill. All three eras share this code (the walk, names,
   casts and attack messages); nothing era-specific.
@@ -1556,7 +1573,28 @@ identify themselves.
   A creature that attacked you or stood on a fellow in the last 30 s (`RECENT_FOE_MS`) stays one `ac_attack` goes
   after once the client lets it go: to its last placement (`monsterLastSeen`), then the attack once it is in sight
   there (a `target-lost` event if not); observe's target line says "it attacked N s ago".
+- **Walks and uses from the 12:07Z stream reports (2026-10-17).** Each with its evidence in
+  tests/verify-stream-reports-2026-10-17-1207-walk.ts:
+  - A monster in a combat stance is awake (ACE `Monster.Sleep` sets NonCombat): the pack stop ("monsters not awake
+    yet") skips it, and one in a combat stance within 4 m of a fellow you walk to counts as on them (`fightingBeside`),
+    since a swing in place leaves no MoveTo once the aim memory runs out. A kind below your level seen only nicking you
+    (at most 5% of your health a blow, no spell that hurt: `nickOnlyKind`) is no pack either.
+  - A leap that comes down on its own take-off is tried again from another spot along the edge (`JumpSearch.skipFrom`,
+    0.3 m apart), up to three, and not at all with no stamina. `drop=true` matters only with `stay_with` or a melee
+    run-up; a plain walk_to plans drops itself.
+  - `ac_use` refuses at once what the server marks unusable (ItemUseable No; the Pumpkin Buffer, wcid 32205): retail's
+    client sends no Use for it. A use's reply never includes another player's words (channels, a fellow's say or tell).
+  - Names: "lifestone" matches "Life Stone" (two words run together), and a town in the name narrows the match to that
+    town's places, in view or remembered ("Holtburg lifestone"; the town notes are `agent/towns.ts`).
+  - A walk to a portal remembered out of view that goes through it is its own portal (the name comes from the object
+    once seen, or the remembered place), not "a fault to report".
+  - A far walk whose stretch leads into a building's rooms plans the doorways out; a stuck answer names only doors
+    found locked in this landblock.
+  - A stall where the probe walks on and no creature is beside sidesteps off the wall first (to the side with more
+    room): a body a few cm closer to a wall than its 0.48 m radius has its 0.05–0.13 m frame steps refused where the
+    probe's 0.15 m steps pass (Monty's Den 0xA9B20113, on the cell DAT). Not at a door being opened or beside a shut one.
 
 - Headed Chromium launched by Playwright on macOS gets the real GPU (`ANGLE Metal Renderer: Apple M3 Max`),
   so a watchable window is free; game-session.ts's "headed hangs" note is about its own harness.
 - **2026-10-17, Mountain Keep (0x01D2):** some parts of a dungeon are joined to the rest one way only (drops in, nothing climbs back). A walk with no way there now ends at once saying so, which way the parts ARE joined, the portals you know on your side, and how high your side climbs (the −6 halls under the 0 m walkways lead only up to 0x01D203A5, where a second Surface portal stands). A walk to a point at a portal stops outside its edge and says so; only `use` goes through a portal. A door use's reply waits for that door: another door swinging meanwhile (a monster walking into it opens it) is marked "not by this use".
+- **2026-10-17, Shreth camp (0x5779) and Holtburg:** a plugin's chat prints (Mag-Tools' item info) are tagged `plugin` on the event and no action's reply reads them (`AgentApi.replyLines`): every sale to a vendor whose shop re-selects its first item (ACE re-sends the shop after each sale) printed the girth sold earlier. An Other spell whose target type leaves you out (creature-only: Heal Other, Magic Resistance Other) is never offered or sent at you (`spellCastsOnYou`, the client's 0x8107 rule). A use of a carried item that broke off a swing sends a fresh attack once the drink is done, as a player presses Attack again. The quiet-swing height cycling waits for a finished swing (AttackDone 0); before that the server is still running you up to it.

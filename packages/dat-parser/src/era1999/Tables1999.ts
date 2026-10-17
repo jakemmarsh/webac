@@ -620,6 +620,26 @@ export function transcodeSpellComponentTable1999(raw: ArrayBuffer): ArrayBuffer 
   return c.finish();
 }
 
+// ─── ChatPoseTable (0x0E000007) ───────────────────────────────────────────────
+
+/**
+ * ChatPoseTable 0x0E000007: the EoL layout (id; u16 count, u16 buckets, then pose word → motion state; the same again
+ * for state → { myEmote, otherEmote }) with AcStrings, each NUL dropped. Read as is, every key kept its NUL ("wave\0"),
+ * so no *pose* and no ChatPoseTable lookup matched in AC1999 (found 2026-10-17 checking "sit" in every era's table).
+ */
+export function transcodeChatPoseTable1999(raw: ArrayBuffer): ArrayBuffer {
+  const c = new Copier(raw, 'ChatPoseTable1999');
+  const { r, w } = c;
+  c.u32(); // id
+  const poses = r.readUInt16();
+  w.writeUInt16(poses).writeUInt16(r.readUInt16()); // count, buckets
+  for (let i = 0; i < poses; i++) { c.str(); c.str(); } // pose word, motion state
+  const emotes = r.readUInt16();
+  w.writeUInt16(emotes).writeUInt16(r.readUInt16());
+  for (let i = 0; i < emotes; i++) { c.str(); c.str(); c.str(); } // state, myEmote, otherEmote
+  return c.finish();
+}
+
 // ─── Spell-component DualDidMapper (synthetic 0x27000002) ─────────────────────
 
 /** The DualDidMapper end of retail keeps the spell-component id → WCID map in (ACE Spell.SpellComponentDIDs). */

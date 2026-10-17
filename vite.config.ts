@@ -5,8 +5,8 @@ import { headFromStatPlugin } from './tools/lib/vite-head-from-stat';
 
 /**
  * The build id the update notifier compares against /version.json
- * (packages/renderer/src/update/UpdateWatcher.ts). ACJS_BUILD_ID or a BUILD_ID
- * file (tools/deploy-railway.sh writes the git sha) wins; a local production
+ * (packages/renderer/src/update/UpdateWatcher.ts). ACJS_BUILD_ID (the AWS
+ * deploy agent passes the commit) or a BUILD_ID file wins; a local production
  * build gets a timestamp; the dev server is 'dev' (never polls).
  */
 function resolveBuildId(command: 'build' | 'serve'): string {

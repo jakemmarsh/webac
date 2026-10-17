@@ -36,23 +36,26 @@ export class ChatPoseTable {
 
   static read(reader: DatReader): ChatPoseTable {
     const t = new ChatPoseTable();
+    // A 1999 table not run through the 1999 overlay (a streamed 1999 world set published before the overlay translated
+    // 0x0E000007) carries each string's NUL terminator inside its length: drop it, so "wave\0" is "wave".
+    const nul = (v: string): string => (v.endsWith('\0') ? v.slice(0, -1) : v);
     t.id = reader.readUInt32();
 
     // ACE PackableHashTable layout: totalObjects (uint16) + bucketSize (uint16, ignored)
     const totalPose = reader.readUInt16();
     reader.readUInt16(); // bucket size — unused for in-order iteration
     for (let i = 0; i < totalPose; i++) {
-      const key = reader.readPString(); reader.align(4);
-      const value = reader.readPString(); reader.align(4);
+      const key = nul(reader.readPString()); reader.align(4);
+      const value = nul(reader.readPString()); reader.align(4);
       t.commandToState.set(key.toLowerCase(), value);
     }
 
     const totalEmote = reader.readUInt16();
     reader.readUInt16(); // bucket size — unused
     for (let i = 0; i < totalEmote; i++) {
-      const key = reader.readPString(); reader.align(4);
-      const myEmote = reader.readPString(); reader.align(4);
-      const otherEmote = reader.readPString(); reader.align(4);
+      const key = nul(reader.readPString()); reader.align(4);
+      const myEmote = nul(reader.readPString()); reader.align(4);
+      const otherEmote = nul(reader.readPString()); reader.align(4);
       t.stateToEmote.set(key, { myEmote, otherEmote });
     }
 

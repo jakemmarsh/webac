@@ -34,7 +34,7 @@ describe('isPublicPath', () => {
     for (const p of ['verification/sidebyside/inv.png', 'verification/perf/run.json', SHOT,
       'docs/remote-agent-ops.md', 'docs/progress-archive/2026-09.md', 'docs/retail-client-symbols.md', 'docs/release-plan.md',
       'CLAUDE.md', 'GOAL.md', 'progress.md', 'tasks.json', '.claude/settings.json',
-      'tools/capture-' + 'retail-ab.ts', 'tools/launch-' + 'retail-client-mac.sh', 'tools/deploy-' + 'railway.sh', HOOK,
+      'tools/capture-' + 'retail-ab.ts', 'tools/launch-' + 'retail-client-mac.sh', HOOK,
       'reference/client-' + 'eol/acclient.exe', 'dat/client_portal.dat']) {
       expect(isPublicPath(p), p).toBe(false);
     }

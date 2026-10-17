@@ -264,10 +264,22 @@ describe('agent play reports 2026-10-13', () => {
       host.add({ guid: 0x80004cf6, name: 'Spikey Armoredillo', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 21.5 });
       api.attack('Spikey Armoredillo');
       const w = api.wait({ types: ['target-died', 'target-lost'] }, 45_000);
+      // Swings that finish (AttackDone 0) and name it in no line, at every height.
+      const evs = await settle(api, host, w, 45_000, () => { host.pending = false; if (host.t % 1500 === 0) api.pushAttackDone(0); });
+      expect(evs?.map((e) => e.type)).toEqual(['target-lost']);
+      expect(evs?.[0].text).toMatch(/swings at all three heights reported nothing|the server won't attack it at any height/);
+      expect(host.sent.filter((s) => s.startsWith('height'))).toEqual(['height low', 'height high']);
+    });
+
+    it('a ghost the server never swings at (no swing ends at all) is given up at 20 s, its heights left alone (2026-10-17)', async () => {
+      host.me.combatMode = 'melee';
+      host.add({ guid: 0x80004cf6, name: 'Spikey Armoredillo', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 21.5 });
+      api.attack('Spikey Armoredillo');
+      const w = api.wait({ types: ['target-died', 'target-lost'] }, 45_000);
       const evs = await settle(api, host, w, 45_000, () => { host.pending = false; });
       expect(evs?.map((e) => e.type)).toEqual(['target-lost']);
-      expect(evs?.[0].text).toMatch(/swings at all three heights reported nothing/);
-      expect(host.sent.filter((s) => s.startsWith('height'))).toEqual(['height low', 'height high']);
+      expect(evs?.[0].text).toMatch(/no swings either way for 20 s/);
+      expect(host.sent.filter((s) => s.startsWith('height'))).toEqual([]);
     });
   });
 });

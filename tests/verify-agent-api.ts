@@ -1010,8 +1010,9 @@ describe('AgentApi', () => {
     api.attack('Black Rabbit');
     run(api, host, 100);
     expect(host.sent).toContain('attack 60000075 0.6 medium'); // the combat bar's height
-    // It bites us: that's not one of our swings reaching it.
-    for (let t = 0; t < AgentApi.QUIET_SWING_MS + 500; t += 500) { run(api, host, 500); if (t === 1000) api.pushChat('Black Rabbit bites you for 2 points of piercing damage!', 0x15); }
+    // It bites us: that's not one of our swings reaching it. Each swing that passes over it still ends (AttackDone 0, both
+    // servers send one between repeat swings); only finished swings make a quiet stretch the height's fault.
+    for (let t = 0; t < AgentApi.QUIET_SWING_MS + 500; t += 500) { if (t % 1500 === 0) api.pushAttackDone(0); run(api, host, 500); if (t === 1000) api.pushChat('Black Rabbit bites you for 2 points of piercing damage!', 0x15); }
     expect(host.sent).toContain('cancel');
     expect(host.sent).toContain('height low'); // set on the combat bar, as its Low button does
     host.pending = false;
@@ -1567,7 +1568,7 @@ describe('walk_to drops and jumps (AGENT.walk-drops-jumps)', () => {
     host.key = (code: string, down: boolean) => { if (code === 'KeyW' && down && host.keys.has('Space')) return; key(code, down); };
   };
 
-  it('a drop that comes down on its own take-off twice ends the walk, saying the drop didn\'t happen', async () => {
+  it('a drop that comes down on its own take-off from three spots along the edge ends the walk, saying the drop didn\'t happen', async () => {
     host.floors = (x, y) => (inX(x) && y > 0 && y < 60 ? (y < 30 ? [94, 88] : [88]) : []);
     host.add({ guid: 0x80000065, name: 'Straw Drudge', x: 80, y: 45, z: 88 });
     noCarry();
@@ -1578,10 +1579,12 @@ describe('walk_to drops and jumps (AGENT.walk-drops-jumps)', () => {
     const r = await p;
     log.mockRestore();
     expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/the drop didn't happen: 2 times from \([0-9.]+, [0-9.]+\) the body went up and came down where it took off, not 6\.0 m down/);
-    expect(host.launches).toHaveLength(2);
+    expect(r.message).toMatch(/the drop didn't happen: 3 times, from 3 spots along the edge \(the last \([0-9.]+, [0-9.]+\)\), the body went up and came down where it took off, not 6\.0 m down/);
+    // Each try from another take-off (JumpSearch.skipFrom): none within 0.3 m of an earlier one.
+    expect(host.launches).toHaveLength(3);
     expect(host.launches.every((l) => l.forward === 0)).toBe(true);
-    expect(lines.filter((l) => /landed off the plan/.test(l))).toHaveLength(2);
+    expect(lines.filter((l) => /landed off the plan/.test(l))).toHaveLength(3);
+    for (let i = 1; i < host.launches.length; i++) for (let j = 0; j < i; j++) expect(Math.hypot(host.launches[i].x - host.launches[j].x, host.launches[i].y - host.launches[j].y)).toBeGreaterThanOrEqual(0.3);
     expect(host.me.z).toBe(94);
   });
 
@@ -1595,7 +1598,8 @@ describe('walk_to drops and jumps (AGENT.walk-drops-jumps)', () => {
     const r = await p;
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/couldn't drop: no stamina \(0\/50\).*drink a stamina potion/);
-    expect(host.launches).toHaveLength(2);
+    // With none at all no other take-off helps: it ends at the first leap that came down on itself.
+    expect(host.launches).toHaveLength(1);
   });
 
   it('jumps that keep landing off the plan somewhere else end the walk after a few, not every 4 s for minutes', async () => {

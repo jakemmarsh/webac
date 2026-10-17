@@ -258,7 +258,8 @@ describe('6. a cast or attack at a target that died first is not an error', () =
   it('cast repeat at a guid gone from view: targetGone, and the tool answers no error (CLI exit 0)', async () => {
     const r = await api.cast('Whirling Blade IV', GONE, { repeat: true });
     expect(r).toMatchObject({ ok: false, targetGone: true });
-    expect(r.message).toMatch(/0 times \(repeat\); stopped: #80005e81 is gone from view/);
+    // Said as what happened, not a "0 times" tally (stream reports 2026-10-17 10:12Z).
+    expect(r.message).toMatch(/^Whirling Blade IV not cast: #80005e81 is gone from view \(it died out of sight, fled, or you moved away\), before your first cast at it \(no cast made; pick the next target\)/);
     expect(result(r).isError).toBe(false);
   });
 

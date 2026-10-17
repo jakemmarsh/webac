@@ -25,7 +25,8 @@ export const WS_BACKPRESSURE_LIMIT = 1024 * 1024; // 1 MB
 export const DEFAULT_WS_MAX_PAYLOAD = 64 * 1024;
 /** Concurrent WebSocket clients (each owns a UDP socket + a game session).
  *  RELEASE Phase 2 raised it from 32 for public hosting: one session is one
- *  file descriptor + a few KB, and Railway allows 10k WebSockets. */
+ *  file descriptor + a few KB, and the AWS host's nginx allows 4096
+ *  connections per worker. */
 export const DEFAULT_MAX_CONNECTIONS = 500;
 
 /** RELEASE Phase 2 abuse-limit defaults — generous for real play. A real
@@ -102,10 +103,10 @@ export interface BridgeConfig {
    *  target: the client picks an allowlisted server with ?server=<id>. */
   mode: 'pinned' | 'multi';
   /** BRIDGE_TRUST_PROXY: number of trusted proxy hops in front of the bridge
-   *  (1/true = one, e.g. Railway's edge). 0 = ignore X-Forwarded-For. */
+   *  (1/true = one, e.g. the AWS host's nginx). 0 = ignore X-Forwarded-For. */
   trustProxyHops: number;
   /** BRIDGE_CLIENT_IP_HEADER: trusted single-value client-IP header set by the
-   *  edge (Railway: x-real-ip); only consulted when trustProxyHops > 0. */
+   *  edge (the AWS host's nginx: x-real-ip); only consulted when trustProxyHops > 0. */
   clientIpHeader?: string;
   /**
    * Simple Proxy Protocol (spp.ts): servers that trust this bridge and read

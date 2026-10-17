@@ -16,8 +16,7 @@
  * Map coordinates: the retail map readout (renderer ui/MapMarkers.ts, the same text the agent's observe prints);
  * building interiors and dungeons are framed in their landblock like the outdoors, so the formula is the same.
  */
-import { CELL_LENGTH, MAP_MARKER_AREA, PLACE_MARKER_BIAS, PLACE_MARKER_FLIP, PLACE_MARKER_SCALE, PLACE_MARKER_STEP, mapCoordinateText, mapCoordsOfCell, type MapCoords } from '../../packages/renderer/src/ui/MapMarkers.ts';
-import { MAP_NOTE_LOCATIONS } from '../../packages/renderer/src/ui/HudTooltips.ts';
+import { CELL_LENGTH, mapCoordinateText, mapCoordsOfCell, type MapCoords } from '../../packages/renderer/src/ui/MapMarkers.ts';
 import { escapeSqlLike } from './lore.ts';
 
 export const SHOP_DESTINATION = 4;
@@ -152,28 +151,8 @@ export function placeMapCoords(cell: number, x: number, y: number): MapCoords {
   return mapCoordsOfCell(Math.floor(gx / CELL_LENGTH), Math.floor(gy / CELL_LENGTH));
 }
 
-/** The retail map's town notes (gmMapUI s_rgLocations), each rect's centre turned back into map coordinates (placeMarkerOnMap inverted). */
-export const MAP_TOWNS: readonly { name: string; coords: MapCoords }[] = MAP_NOTE_LOCATIONS.map((l) => {
-  const a = MAP_MARKER_AREA;
-  const px = l.x + l.width / 2, py = l.y + l.height / 2;
-  const ew = ((px - a.x0) / ((a.x1 - a.x0 + 1) * -PLACE_MARKER_STEP) - PLACE_MARKER_BIAS) / PLACE_MARKER_SCALE;
-  const ns = (PLACE_MARKER_FLIP - (py - a.y0) / ((a.y1 - a.y0 + 1) * -PLACE_MARKER_STEP) - PLACE_MARKER_BIAS) / PLACE_MARKER_SCALE;
-  return { name: l.name, coords: { ew, ns } };
-});
-
-/** The nearest town on the map within 15 map units: its name, the distance, and the text ("Holtburg" within 3, else "5 SW of Holtburg"). */
-export function nearestTownOf(c: MapCoords): { name: string; distance: number; text: string } | undefined {
-  let best: { name: string; d: number; dn: number; de: number } | undefined;
-  for (const t of MAP_TOWNS) {
-    const dn = c.ns - t.coords.ns, de = c.ew - t.coords.ew;
-    const d = Math.hypot(dn, de);
-    if (!best || d < best.d) best = { name: t.name, d, dn, de };
-  }
-  if (!best || best.d > 15) return undefined;
-  if (best.d <= 3) return { name: best.name, distance: best.d, text: best.name };
-  const dir = `${Math.abs(best.dn) > best.d * 0.38 ? (best.dn > 0 ? 'N' : 'S') : ''}${Math.abs(best.de) > best.d * 0.38 ? (best.de > 0 ? 'E' : 'W') : ''}`;
-  return { name: best.name, distance: best.d, text: `${Math.round(best.d)} ${dir} of ${best.name}` };
-}
+export { MAP_TOWNS, nearestTownOf } from '../../packages/renderer/src/agent/towns.ts';
+import { nearestTownOf } from '../../packages/renderer/src/agent/towns.ts';
 
 export function nearestTown(c: MapCoords): string | undefined {
   return nearestTownOf(c)?.text;

@@ -107,7 +107,7 @@ async function main(): Promise<void> {
   // BRIDGE_DRAIN_SECONDS (default 0 = shut down at once, as before): on
   // SIGTERM (a deploy), refuse new connections and let open sessions play on
   // until they end or this long passes; the platform's own grace period
-  // (Railway RAILWAY_DEPLOYMENT_DRAINING_SECONDS) must be at least as long.
+  // (on the AWS host, nginx's worker_shutdown_timeout) must be at least as long.
   // SIGINT, or a second SIGTERM during the drain, shuts down at once.
   const drainMs = Math.max(0, Number(process.env.BRIDGE_DRAIN_SECONDS ?? 0) || 0) * 1000;
   let stopping = false;

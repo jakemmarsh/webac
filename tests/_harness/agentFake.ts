@@ -155,6 +155,9 @@ export class FakeHost implements AgentHost {
   lineOfFire: AgentHost['lineOfFire'] = undefined;
   lineOfFireOpenSpot: AgentHost['lineOfFireOpenSpot'] = undefined;
   lineOfFireFrom: AgentHost['lineOfFireFrom'] = undefined;
+  /** The ChatPoseTable's state for a pose word, and whether the client handles "/word"; unset = the host can't say. */
+  chatPose: AgentHost['chatPose'] = undefined;
+  clientCommand: AgentHost['clientCommand'] = undefined;
   missileLineOfFire: AgentHost['missileLineOfFire'] = undefined;
   routeTo: Array<{ x: number; y: number; z: number }> | null = null;
   /** The floorless cells between two rooms no route joins (cellPath routeBarrier); unset = the host can't say. */

@@ -201,7 +201,7 @@ OPFS-cached path.
 - `Atomics.wait` is forbidden on the main thread, and the DAT consumers (renderer, UI, physics) run there. The main thread could only spin-wait (burning a core, freezing the tab until bytes arrive) or get the bytes asynchronously anyway.
 - Making it truly synchronous means moving the entire renderer and game into a worker with OffscreenCanvas. That is a multi-week rewrite, and the DOM UI (LayoutRenderer, GameUI) cannot move.
 - It would also need cross-origin isolation:
-  - `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp` (or `credentialless`) on the game's HTML, set by whatever serves it on Railway;
+  - `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp` (or `credentialless`) on the game's HTML, set by whatever serves it (the web container's Caddy);
   - every cross-origin subresource (the R2 DAT domain, any CDN/font) served with CORS or `Cross-Origin-Resource-Policy: cross-origin`. For R2 that means a Transform Rule adding CORP, or CORS fetches.
   - COOP also breaks popup-based flows (OAuth windows).
 - And it still doesn't remove the need to know *what* to fetch before a frame needs it.

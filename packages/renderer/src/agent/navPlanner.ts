@@ -42,7 +42,17 @@ export interface JumpSearch {
    * walk_to the portal itself (A8C3, 2026-10-17 05:28:40Z, WeenieError ITeleported).
    */
   avoid?: () => ReadonlyArray<{ x: number; y: number; z: number; r: number; span?: number }>;
+  /**
+   * Take-offs a jump or drop already came down on itself from (the body went up and landed where it left, live): no
+   * jump is tried from within SKIP_TAKEOFF_M of one, so the search takes off from another spot along the edge. Two drops
+   * from Arcanist's spot on the Shreth camp ledge's lip landed back on it and the walk gave up; the next walk's drop from
+   * 0.3 m further along went down (0x5779, 2026-10-17 11:28:41–11:29:30Z).
+   */
+  skipFrom?: () => ReadonlyArray<NavPoint>;
 }
+
+/** A take-off this near (m, horizontal; within half a metre of height) one in JumpSearch.skipFrom is not jumped from. */
+export const SKIP_TAKEOFF_M = 0.3;
 
 /** Whether a flight from `a` to `b` lands in, or passes over, one of `disks` (horizontal, within each one's height span). */
 export function flightCrossesDisk(a: NavPoint, b: NavPoint, disks: ReadonlyArray<{ x: number; y: number; z: number; r: number; span?: number }>): boolean {
@@ -250,6 +260,7 @@ export class PathSearch {
   private tryJumps(k: number, p: NavPoint, stuck: Array<[number, number]>): void {
     const js = this.jumps!;
     const max = js.maxFlights ?? 1500;
+    if (js.skipFrom?.().some((q) => Math.hypot(q.x - p.x, q.y - p.y) < SKIP_TAKEOFF_M && Math.abs(q.z - p.z) < 0.5)) return;
     for (const [di, dj] of stuck) {
       if (this.flights >= max) return;
       const n = Math.hypot(di, dj);

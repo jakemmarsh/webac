@@ -141,6 +141,12 @@ export const CLIENT_NOTICES = Object.freeze({
   combatModeIncompatible: ui('combatModeIncompatible', 'spew', "You can't enter %hs mode while wielding the %s", 'ClientCombatSystem::SetCombatMode @ 0056be30 (:354322-354340, CompatibleCombatMode @ 0056a580), AddTextToScroll(…, 0x1a)'),
   combatModeInPortalSpace: ui('combatModeInPortalSpace', 'spew', "You can't enter combat mode while in portal space", 'ClientCombatSystem::SetCombatMode @ 0056be30 (:354346, teleportInProgress), AddTextToScroll(…, 0x1a)'),
   cantJumpLoad: ui('cantJumpLoad', 'spew', "You're too loaded down to jump", 'cant_jump_load ($E145 @ 007090c0), 0x1a'),
+  // ── posture / emote refusals in a combat stance (CMotionInterp::DoMotion @ 00528d20 → CommandInterpreter::MovePlayer
+  // @ 006b3f40's switch, SendNotice_DisplayStringInfo(0x1a)); the AC1999 client.exe carries the same four strings ──
+  cantCrouchCombat: ui('cantCrouchCombat', 'spew', "You can't crouch while in combat mode", 'cant_crouch_combat (DoMotion → 0x3f), MovePlayer @ 006b3f40, 0x1a'),
+  cantSitCombat: ui('cantSitCombat', 'spew', "You can't sit down while in combat mode", 'cant_sit_combat (DoMotion → 0x40), MovePlayer @ 006b3f40, 0x1a'),
+  cantLieDownCombat: ui('cantLieDownCombat', 'spew', "You can't lie down while in combat mode", 'cant_lie_down_combat (DoMotion → 0x41), MovePlayer @ 006b3f40, 0x1a'),
+  cantEmoteCombat: ui('cantEmoteCombat', 'spew', "You can't use chat emotes in combat mode", 'cant_emote_combat (DoMotion → 0x42), MovePlayer @ 006b3f40, 0x1a'),
 
   // ── portal storm (ClientUISystem::Handle_Misc__PortalStorm*) ──
   portalStormBrewing: ui('portalStormBrewing', 'spew', 'This area is getting too crowded - a Portal Storm is brewing.', '@ 347620, SendNotice_DisplayStringInfo(0x1a)'),
@@ -240,3 +246,18 @@ export function allClientNotices(): ClientNotice[] {
   return Object.values(CLIENT_NOTICES);
 }
 
+/**
+ * CMotionInterp::DoMotion @ 00528d20: outside the NonCombat style (0x8000003d) the player's own Crouch (0x41000012),
+ * Sitting (0x41000013) and Sleeping (0x41000014), and any chat emote (the 0x02000000 class bit: the Emote keys and the
+ * *pose* chat motions), are refused before they reach the motion table (0x3f / 0x40 / 0x41 / 0x42), and MovePlayer
+ * raises the line. Null: allowed. Retail Bulwark could not sit in a melee stance, and ours sent Sitting anyway.
+ */
+export function combatMotionRefusal(motion: number, nonCombatStyle: boolean): ClientNotice | null {
+  if (nonCombatStyle) return null;
+  const m = motion >>> 0;
+  if (m === 0x41000012) return CLIENT_NOTICES.cantCrouchCombat;
+  if (m === 0x41000013) return CLIENT_NOTICES.cantSitCombat;
+  if (m === 0x41000014) return CLIENT_NOTICES.cantLieDownCombat;
+  if (m & 0x02000000) return CLIENT_NOTICES.cantEmoteCombat;
+  return null;
+}

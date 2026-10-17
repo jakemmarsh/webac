@@ -184,6 +184,11 @@ export interface AgentEvent {
   chatType?: number;
   /** fellow-aggro: the fellow it is about (where they are is said again as of the read, when it is old by then). */
   fellow?: number;
+  /**
+   * Chat lines a plugin printed (Mag-Tools' item info on an identify, its command output): the plugin's name. Not the
+   * server's or the client's answer to anything, so no action's reply reads them.
+   */
+  plugin?: string;
 }
 
 export type AgentScreen = 'world' | 'portal-space' | 'character-select' | 'character-create' | 'loading' | 'unknown';
@@ -236,6 +241,11 @@ export interface AgentObservation {
     coords?: string;
     /** Monsters on them or coming at them, as the client sees it: "Rust Gromnie L8 on them, Shadow L26 running at them 20 m off". */
     threats?: string;
+    /**
+     * Monsters whose server movement is aimed at them but which get no nearer to them (a chase that has come no closer
+     * for AGGRO_STALL_MS: behind a wall, or no way round): "AIMED AT THEM BUT NOT REACHING THEM", apart from threats.
+     */
+    stuckThreats?: string;
     /** Out of sight but last placed in the space you're in: "43 m SE of you, 6 m down, 4 s ago" (walk_to / follow go there). */
     lastSeen?: string;
   }>;

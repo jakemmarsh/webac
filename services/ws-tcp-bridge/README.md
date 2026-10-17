@@ -73,13 +73,13 @@ bridge's own ping timeout, which logs `session_ping_timeout` first).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT` / `BRIDGE_PORT` | 9090 | Listen port (first positional arg wins, then `BRIDGE_PORT`, then `PORT`, which Railway sets) |
+| `PORT` / `BRIDGE_PORT` | 9090 | Listen port (first positional arg wins, then `BRIDGE_PORT`, then `PORT`, which many hosting platforms set) |
 | `BRIDGE_HOST` | 127.0.0.1 | Listen address (`0.0.0.0` in the Docker image) |
 | `BRIDGE_MODE` | pinned | `multi` enables `?server=<id>` (ignored when a target is pinned) |
 | `BRIDGE_TARGET` | — | Pinned target `host:port` (world port = port+1); same as the positional args |
 | `BRIDGE_ALLOWED_ORIGINS` | — | Extra browser Origins allowed (comma list, or `*`). Loopback origins and clients without an Origin always pass. **Set this to the client's origin in production** |
-| `BRIDGE_TRUST_PROXY` | off | Trusted proxy hops in front of the bridge (`1`/`true` = one). Only then is `X-Forwarded-For` used for the client IP (the Nth entry from the right). Set to `1` on Railway |
-| `BRIDGE_CLIENT_IP_HEADER` | unset | With `BRIDGE_TRUST_PROXY`, a single-value header the edge overwrites with the client address, preferred over `X-Forwarded-For`. Railway: `x-real-ip` (its `X-Forwarded-For` ends with Railway's own edge, so hop counting picks the edge) |
+| `BRIDGE_TRUST_PROXY` | off | Trusted proxy hops in front of the bridge (`1`/`true` = one). Only then is `X-Forwarded-For` used for the client IP (the Nth entry from the right). Set to `1` behind one proxy (playwebac.com: nginx) |
+| `BRIDGE_CLIENT_IP_HEADER` | unset | With `BRIDGE_TRUST_PROXY`, a single-value header the edge overwrites with the client address, preferred over `X-Forwarded-For`. playwebac.com: `x-real-ip`, which its nginx overwrites with the TCP peer (deploy/aws/host/nginx-webac.conf). Prefer such a header wherever the edge appends itself to `X-Forwarded-For`, as Railway's did, since hop counting would then pick the edge |
 | `BRIDGE_MAX_CONNECTIONS` | 500 | Global concurrent sessions |
 | `BRIDGE_MAX_SESSIONS_PER_IP` | 8 | Concurrent sessions per client IP |
 | `BRIDGE_CONNECT_RATE_PER_IP` / `BRIDGE_CONNECT_RATE_WINDOW_MS` | 20 / 60000 | New connections per IP per window |
@@ -96,7 +96,7 @@ bridge's own ping timeout, which logs `session_ping_timeout` first).
 | `BRIDGE_AC1999_LOCAL` | — | Multi mode: `<host>:<port>` of a local AC1999 (Nov 1999) server to list as "AC1999 (local)" (`tools/ac1999/start-ac1999.sh` is `127.0.0.1:9310`; needs `BRIDGE_ALLOW_PRIVATE_TARGETS=1`). The public `ac1999.cobradragon.com:9110` row is always listed (deny id `ac1999` to hide it). AC1999 rows are never era-probed |
 | `BRIDGE_STATUS_URL` / `BRIDGE_COUNTS_URL` | TreeStats | Live-status / player-count feeds for `GET /servers` (`none` = off) |
 | `BRIDGE_ERA_PROBE` | on | Multi mode: detect each ACE server's era from the login version it accepts (`eraDetect.ts`; one empty-password LoginRequest per literal, no account created). `off` = no probe logins |
-| `BRIDGE_DRAIN_SECONDS` | 0 | On SIGTERM (a deploy), refuse new connections and keep open sessions playing until they end or this many seconds pass, then shut down. 0 = shut down at once. Railway's `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` must be at least this; SIGINT or a second SIGTERM skips the drain |
+| `BRIDGE_DRAIN_SECONDS` | 0 | On SIGTERM (a deploy), refuse new connections and keep open sessions playing until they end or this many seconds pass, then shut down. 0 = shut down at once. Whatever runs the old container must let it live at least this long (playwebac.com: 21600, with nginx's `worker_shutdown_timeout` 6h10m keeping the old WebSockets open); SIGINT or a second SIGTERM skips the drain |
 | `BRIDGE_ALLOW_PRIVATE_TARGETS` | off | **Dev only**: allow servers that resolve to private or loopback addresses |
 | `BRIDGE_METRICS_TOKEN` | — | Bearer token for `/metrics` |
 | `BRIDGE_ROUTINES_DIR` | dev: `~/.acjs-agent/routines`; production: off | Where `/routines` keeps each account's automation routines (`<server>/<account>.json`). A session gets a token for them with the text message `routines` once its server's CharacterList has named the account (`src/routines.ts`). Production keeps none unless this names a volume; `none` turns it off |
@@ -141,23 +141,22 @@ before exiting.
 ## Deploying
 
 playwebac.com runs the bridge on AWS (docs/aws-hosting.md: one EC2 host, nginx in
-front, blue/green deploys that drain the old container). The Railway recipe below
-still works for a self-hosted bridge.
+front, blue/green deploys that drain the old container; it moved there from Railway on
+2026-10-16). To host one yourself, the same shape works anywhere that runs a
+container:
 
-### On Railway
-
-1. Create a service from this repo. Leave the root directory at the repo
-   root. `services/ws-tcp-bridge/railway.json` sets the Dockerfile path and
-   the `/healthz` health check (point the service's config-file setting at
-   it).
-2. Variables: `BRIDGE_MODE=multi`, `BRIDGE_TRUST_PROXY=1`, `BRIDGE_CLIENT_IP_HEADER=x-real-ip`,
-   `BRIDGE_ALLOWED_ORIGINS=https://<client domain>`, and optionally
-   `BRIDGE_METRICS_TOKEN`. Railway sets `PORT`.
-3. Generate a public domain. Railway terminates TLS, so clients connect with
-   `wss://<bridge domain>/connect?server=<id>`. WebSockets are exempt from
-   Railway's request timeouts. Outbound UDP works; no inbound UDP is needed.
-4. Optional: attach a volume and set `BRIDGE_SERVERS_CACHE=/data/servers.xml`
-   so the last good list survives redeploys.
+1. Build and run the image (Docker, below) from the repo root. Health check:
+   `GET /healthz`.
+2. Variables: `BRIDGE_MODE=multi`, `BRIDGE_ALLOWED_ORIGINS=https://<client domain>`,
+   and optionally `BRIDGE_METRICS_TOKEN`. Behind a proxy, also
+   `BRIDGE_TRUST_PROXY=1` and `BRIDGE_CLIENT_IP_HEADER=x-real-ip` with the proxy
+   overwriting `X-Real-IP` with the client address.
+3. Terminate TLS in front of it (playwebac.com: nginx with WebSocket upgrade and
+   a long `proxy_read_timeout`, deploy/aws/host/nginx-webac.conf), so clients
+   connect with `wss://<bridge domain>/connect?server=<id>`. Outbound UDP must
+   work; no inbound UDP is needed.
+4. Optional: keep `BRIDGE_SERVERS_CACHE` on persistent storage so the last good
+   list survives redeploys.
 
 Every player behind a shared bridge appears to the game server as the
 bridge's egress IP. On servers that limit sessions per IP, ask the operator
