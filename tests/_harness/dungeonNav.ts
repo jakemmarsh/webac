@@ -129,6 +129,8 @@ export async function dungeonNav(landblock: number, opts: DungeonNavOptions = {}
       const r = stepPlayerMovement({ x: from.x, z: from.y, floorY: from.z, inDungeon: true, airborne: true, jumpVelocityX: dx, jumpVelocityZ: dy, slideVelocity: null }, 0, 0, 1, services());
       return { x: r.x, y: r.z };
     },
+    // main.ts navCeiling: the rise stops under a ceiling (DungeonCollision.riseLimit).
+    ceiling: (x, y, fromZ, toZ) => col.riseLimit(x, y, fromZ, toZ),
     launch: (power, walk) => ({ forward: walk ? 3.12 : 4 * runRate, up: getJumpVelocity(0, skill, power) }),
     chargeSeconds: 1,
   };

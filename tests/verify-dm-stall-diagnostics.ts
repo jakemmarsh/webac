@@ -26,6 +26,7 @@ import {
   ClientConnection, hostClientConnection, PacketHeaderFlags, type PacketHeaderData, PACKET_HEADER_SIZE,
   writePacketHeader, readPacketHeader, fragmentMessage, writeFragment, FRAGMENT_HEADER_SIZE,
   GameMessageGroup, boundNetDiagnostics, type ConnectionEvent, type NetCommand, type NetReply, type NetDiagnostics,
+  NET_DIAG_TX_RING, TxRing, messageLabel, joinLabels,
 } from '@ac/network';
 import { Connection1999 } from '../packages/network/src/era1999/Connection1999.js';
 import { NetWorkerClient, type NetWorkerEndpoint } from '../packages/renderer/src/network/NetWorkerClient.js';
@@ -330,6 +331,15 @@ describe('OBS.dm-stall-diagnostics — Connection1999.getDiagnostics', () => {
     expect(d.txPkts).toBe(sock.sent.length);
     expect(d.rxAgoMs).toBe(0);
     expect(d.rxMsgAgoMs).toBe(0);
+    // OBS.dm-stall-tx-ring — our sequenced data packets ring with what they carried.
+    const before = d.txSeq;
+    conn.sendMessage(new Uint8Array([0xC8, 0xF7, 0, 0, 1, 0, 0, 0x50]));
+    const after = conn.getDiagnostics();
+    expect(after.txSeq).toBeGreaterThan(before);
+    const last = after.txRecent![after.txRecent!.length - 1];
+    expect(last).toMatchObject({ seq: after.txSeq, agoMs: 0 });
+    expect(last.what).toMatch(/^[0-9a-f]{4,8}$/);
+    expect(last.flags).toMatch(/^0x[0-9a-f]{8}$/);
     conn.disconnect();
   });
 });
@@ -467,3 +477,108 @@ describe('OBS.dm-stall-diagnostics — the bridge validates net field by field',
     expect(suspended).toMatchObject({ token: 'client_suspended', net: { rxAck: 5 } });
   });
 });
+
+// ── OBS.dm-stall-tx-ring ──
+
+/** A GameAction (0xF7B1, sequence, action type) with `extra` bytes of body. */
+function gameAction(action: number, extra = 0): Uint8Array {
+  const m = new Uint8Array(12 + extra);
+  const v = new DataView(m.buffer);
+  v.setUint32(0, 0xF7B1, true); v.setUint32(4, 1, true); v.setUint32(8, action, true);
+  return m;
+}
+
+describe('OBS.dm-stall-tx-ring — which of our packets the server stopped acknowledging', () => {
+  it('labels: a GameAction names its action type, other messages their opcode, joined and bounded', () => {
+    expect(messageLabel(gameAction(0x00a1))).toBe('f7b1:00a1');
+    expect(messageLabel(new Uint8Array([0xC8, 0xF7, 0, 0]))).toBe('f7c8');
+    expect(messageLabel(new Uint8Array([1]))).toBe('short');
+    expect(joinLabels(['f7b1:0008', 'cont'])).toBe('f7b1:0008+cont');
+    expect(joinLabels(Array(10).fill('f7b1:0008')).length).toBeLessThanOrEqual(48);
+  });
+
+  it('ClientConnection: every sequenced packet joins the ring (fragments by opcode, continuations, the ~3 s keepalive), capped at 8', () => {
+    const s = session();
+    s.ws.receive(serverMessage(2, 1));
+    s.conn.sendMessage(gameAction(0x0008));         // seq 2
+    s.conn.sendMessage(gameAction(0x00a1, 600));    // seq 3 + 4: a message split over two packets
+    vi.advanceTimersByTime(3_100);                  // the flow keepalive: seq 5
+    let d = s.conn.getDiagnostics();
+    expect(d.txRecent!.map(r => [r.seq, r.what])).toEqual([[2, 'f7b1:0008'], [3, 'f7b1:00a1'], [4, 'cont'], [5, 'ts+echo']]);
+    expect(d.txRecent![0]).toMatchObject({ flags: '0x00000006', agoMs: 3_100 });
+    expect(d.txRecent![3]).toMatchObject({ flags: hexFlags(PacketHeaderFlags.TimeSync | PacketHeaderFlags.EchoRequest | PacketHeaderFlags.EncryptedChecksum) });
+    expect(d.txRecent![3].agoMs).toBeLessThan(200); // the 100 ms service tick that sent it
+    expect(d.srvAckAgoMs).toBeNull();
+    for (let i = 0; i < 10; i++) s.conn.sendMessage(gameAction(0x0008));
+    d = s.conn.getDiagnostics();
+    expect(d.txRecent).toHaveLength(NET_DIAG_TX_RING);
+    expect(d.txRecent![NET_DIAG_TX_RING - 1].seq).toBe(d.txSeq);
+  });
+
+  it('the server ACKing an old value is told apart from a server that stopped (srvAckAgoMs vs srvAckAdvAgoMs)', () => {
+    const s = session();
+    s.ws.receive(serverMessage(2, 1));
+    s.conn.sendMessage(gameAction(0x0008)); // our 2
+    s.ws.receive(packet(2, PacketHeaderFlags.AckSequence, u32List([2]).subarray(4)));
+    vi.advanceTimersByTime(9_000);
+    // GDLE keeps acking activesequence 2 every 3 s (FlushPeerCache) while it takes none of ours.
+    s.ws.receive(packet(2, PacketHeaderFlags.AckSequence, u32List([2]).subarray(4)));
+    let d = s.conn.getDiagnostics();
+    expect(d).toMatchObject({ txAckedBySrv: 2, srvAckAgoMs: 0, srvAckAdvAgoMs: 9_000 });
+    // A sequenced, piggybacked ack (ClassicDereth UpdatePeerTime: ACK | TIMEUPDATE | CRC) that moves forward.
+    const body = new Uint8Array(12);
+    new DataView(body.buffer).setUint32(0, 5, true);
+    s.ws.receive(packet(3, PacketHeaderFlags.AckSequence | PacketHeaderFlags.TimeSync | PacketHeaderFlags.EncryptedChecksum, body));
+    d = s.conn.getDiagnostics();
+    expect(d).toMatchObject({ txAckedBySrv: 5, srvAckAgoMs: 0, srvAckAdvAgoMs: 0 });
+  });
+
+  it('a fresh connect() starts the ring over', () => {
+    const s = session();
+    s.ws.receive(serverMessage(2, 1));
+    s.conn.sendMessage(gameAction(0x0008));
+    s.conn.disconnect();
+    s.conn.connect('acct', 'pw');
+    expect(s.conn.getDiagnostics()).toMatchObject({ txRecent: [], srvAckAgoMs: null, srvAckAdvAgoMs: null });
+  });
+
+  it('page and bridge keep the ring bounded: at most 8 records, each field checked, junk records dropped', () => {
+    const ring = new TxRing();
+    for (let i = 1; i <= 12; i++) ring.sent(i, 6, 'f7b1:0008', 1000 + i);
+    ring.serverAck(4, 1005);
+    const snap = ring.snapshot(2000);
+    expect(snap.txRecent).toHaveLength(8);
+    const net = { ...fullDiag(), ...snap };
+    const recs = [...snap.txRecent!, { seq: 1, flags: '0x6', what: '<script>', agoMs: 1 }, { seq: -1, flags: '0x6', what: 'ok', agoMs: 1 }, 'x'];
+    const page = boundNetDiagnostics({ ...net, txRecent: recs });
+    expect(page!.txRecent).toEqual(snap.txRecent!.slice(-5)); // only the last 8 inputs are read: 5 good, 3 junk dropped
+    expect(page).toMatchObject({ srvAckAgoMs: 995, srvAckAdvAgoMs: 995 });
+    const bridge = sanitizeNetDiag({ ...net, txRecent: recs });
+    expect(bridge!.txRecent).toEqual(page!.txRecent);
+    expect(sanitizeNetDiag({ txRecent: 'no' })).toBeNull();
+  });
+
+  it('a worst-case world_left with a full ring fits the bridge route\'s body limit', () => {
+    const w = worldRig();
+    w.r.enteredWorld();
+    w.clock.t += 59_999;
+    const big = fullDiag({
+      rxAgoMs: 604_800_000, rxMsgAgoMs: 604_800_000, rxSeqAgoMs: 604_800_000, nakAgoMs: 604_800_000, srvNakAgoMs: 604_800_000,
+      txAgoMs: 604_800_000, txSeqAgoMs: 604_800_000, tickAgoMs: 604_800_000, snapAgeMs: 604_800_000,
+      srvAckAgoMs: 604_800_000, srvAckAdvAgoMs: 604_800_000,
+      rxFlags: '0xffffffff', rxOpcode: '0xffffffff', rxEvent: '0xffffffff',
+      rxAck: 0xffffffff, rxHigh: 0xffffffff, rxHeld: 0xffffffff, rxMissing: 0xffffffff, fragHeld: 0xffffffff, naks: 0xffffffff,
+      txSeq: 0xffffffff, txUnacked: 0xffffffff, txAckedBySrv: 0xffffffff, srvNaks: 0xffffffff, resent: 0xffffffff,
+      unsatisfied: 0xffffffff, srvRejects: 0xffffffff, wsBuffered: 0xffffffff, tickGapMaxMs: 0xffffffff,
+      rxPkts: 0xffffffff, txPkts: 0xffffffff, rxBytes: 0xffffffff,
+      txRecent: Array.from({ length: NET_DIAG_TX_RING }, () => ({ seq: 0xffffffff, flags: '0xffffffff', what: 'f'.repeat(48), agoMs: 604_800_000 })),
+    });
+    w.r.left('disconnected', { endCause: 'socket_closed', closeCode: 1006, net: big });
+    const body = w.raw[w.raw.length - 1];
+    expect(body.length + 80).toBeLessThanOrEqual(CLIENT_PREWORLD_MAX_BODY);
+    const ev = sanitizeClientWorld(JSON.parse(body));
+    expect(ev && ev.outcome === 'first_minute' && ev.net).toEqual(boundNetDiagnostics(big));
+  });
+});
+
+function hexFlags(f: number): string { return `0x${(f >>> 0).toString(16).padStart(8, '0')}`; }

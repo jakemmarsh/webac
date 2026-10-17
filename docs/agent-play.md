@@ -1503,6 +1503,19 @@ identify themselves.
   (`AgentApi.CORPSE_SIGHT_M` / `CORPSE_ABSENT_GRACE_MS`), so `my-corpse-within` stops sending you back to nothing.
   The same shape for remembered places: one the server deletes while it is in view (a summoned Gateway rotting)
   is forgotten; one released out of range, or dropped by a teleport, is kept.
+- **Follow and walk_to plan alike; a stay_with partner off your way is gone back to; a foe of a moment ago stays a
+  target (Mountain Keep, 2026-10-17).** A follow plans the way to the leader with walk_to's own planner (planRoute's
+  doorway route, bridges, drops and leaps, then the legs), and plans again when the leader goes into another room or
+  is `FOLLOW_REPLAN_M` (4 m) on from where they stood at the last plan while the walk is still searching; its
+  "no way to them" waits until the leader has stood still through the searches (a follow had aimed every search at
+  where Bulwark was in mid-jump). A leader (or a walk_to's creature target) standing where the collision has no
+  floor under them says so ("stands where the game's collision has no floor under them (open air, 6 m over the
+  floor below)"). Indoors, a `stay_with` fellow who stands still for 12 s off your way (another floor, or no
+  straight walk between you) is gone back to once (`STAY_WITH_REJOINS`), then the walk goes on from beside them;
+  the same at a drop's edge with them still on the floor above; the chain's legs push no task-done of their own.
+  A creature that attacked you or stood on a fellow in the last 30 s (`RECENT_FOE_MS`) stays one `ac_attack` goes
+  after once the client lets it go: to its last placement (`monsterLastSeen`), then the attack once it is in sight
+  there (a `target-lost` event if not); observe's target line says "it attacked N s ago".
 
 - Headed Chromium launched by Playwright on macOS gets the real GPU (`ANGLE Metal Renderer: Apple M3 Max`),
   so a watchable window is free; game-session.ts's "headed hangs" note is about its own harness.

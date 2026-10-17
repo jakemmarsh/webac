@@ -545,3 +545,157 @@ describe('a sealed viewer keeps its own cell and that cell\'s visible cells (Arw
     expect(som.getObject(o.guid)).toBeUndefined();
   });
 });
+
+/**
+ * Mountain Keep (0x01D2), stream players 2026-10-17 00:36–00:45Z: Claude Arcanist's client did not show Claude Bulwark
+ * for ~8 minutes while they fought side by side in 0x01D20107 / 0x01D2010C. Our ObjectMaint deleted him (out of her
+ * cell's stab list 25 s, then a cell change of hers) while ACE still counted him as known: ACE forgets only from the
+ * player's own server-side cell change, on a clock his cell changes reset (Physics/Common/ObjectMaint.cs
+ * DestroyObjects / PhysicsObj.handle_visible_obj), so it never re-sent his CreateObject (prevKnown) and every later
+ * position and movement of his named a guid we no longer held. The client now keeps a deleted object's last record
+ * and re-makes it on the first message the server sends about it; one the server never speaks of again (a monster
+ * that died out of sight, Arwic Mines 2026-10-15) stays gone.
+ */
+describe('a released object the server speaks of again is re-made (Mountain Keep, 2026-10-17)', () => {
+  const KEEP = 0x01D20000;
+  const c = (i: number) => (KEEP | i) >>> 0;
+  // The real stab lists' relevant halves: 0x010C sees 0x0107 / 0x0117 / 0x011F; 0x012E (the ledge above) sees
+  // neither 0x010C nor 0x011F; 0x01A7 sees none of them.
+  const stabs: Record<number, number[]> = {
+    [c(0x010C)]: [0x0107, 0x0117, 0x011F],
+    [c(0x0107)]: [0x010C, 0x0117, 0x011F],
+    [c(0x012E)]: [0x0137],
+    [c(0x01A7)]: [0x01A8],
+  };
+  const sealedAt = (cell: number) => viewer({ viewerCellId: cell, sealed: true, visibleCells: (id) => stabs[id] ?? null });
+  const pos = (guid: number, cell: number, x: number, seq: number) =>
+    ({ guid, flags: 0x4, landblock: cell, x, y: 20, z: -12, rw: 1, rx: 0, ry: 0, rz: 0, positionSequence: seq, teleportSequence: 0 }) as never;
+  const BULWARK = 0x50000c3a;
+
+  function releasedFellow() {
+    const r = rig();
+    let v = sealedAt(c(0x010C));
+    const loaded = (id: number) => isCellLoaded(id, v);
+    const fellow = r.som.createObject(createData(BULWARK, c(0x010C), {
+      name: 'Claude Bulwark', timestamps: [1, 0, 0, 0, 0, 0, 0, 0, 1],
+    }) as never)!;
+    r.som.updateObjectMaint(loaded, 0, c(0x010C));
+    expect(fellow.lostCell).toBeFalsy();
+    // He is placed in 0x011F; she climbs to the ledge (0x012E) that sees neither room.
+    r.som.updatePosition(pos(BULWARK, c(0x011F), 30, 2));
+    v = sealedAt(c(0x012E));
+    r.som.updateObjectMaint(loaded, 1, c(0x012E));
+    expect(fellow.lostCell).toBe(true);
+    // 25 s on she walks on into 0x01A7: our side deletes him; ACE (whose clock his own moves reset) still knows him.
+    v = sealedAt(c(0x01A7));
+    r.som.updateObjectMaint(loaded, 40, c(0x01A7));
+    expect(r.som.getObject(BULWARK)).toBeUndefined();
+    expect(r.som.releasedRecordCount).toBe(1);
+    return { ...r, setViewer: (cell: number) => { v = sealedAt(cell); }, loaded };
+  }
+
+  it('without the record an update for him lands nowhere: the 8 minutes he stayed invisible', () => {
+    const { som } = releasedFellow();
+    som.updatePosition(pos(BULWARK, c(0x010C), 12, 3));
+    expect(som.getObject(BULWARK)).toBeUndefined();
+  });
+
+  it('his next position re-makes him where the server says, and he shows once her cell sees his', () => {
+    const { som, setViewer, loaded } = releasedFellow();
+    const made: number[] = [];
+    // main.ts: reviveReleased(guid) before the UpdatePosition applies, through the CreateObject path.
+    expect(som.reviveReleased(BULWARK, (rec) => { made.push(rec.guid); som.createObject(rec); })).toBe(true);
+    som.updatePosition(pos(BULWARK, c(0x0107), 12, 3));
+    const back = som.getObject(BULWARK)!;
+    expect(made).toEqual([BULWARK]);
+    expect(back.name).toBe('Claude Bulwark');
+    expect(back.objCellId).toBe(c(0x0107));
+    expect(back.serverPlace!.worldX).toBeCloseTo(0x01 * 192 + 12, 3);
+    // She is back in 0x010C beside him: in sight, drawn.
+    setViewer(c(0x010C));
+    som.updateObjectMaint(loaded, 50, c(0x010C));
+    expect(back.lostCell).toBeFalsy();
+    expect(back.mesh!.visible).toBe(true);
+    // Taken once.
+    expect(som.releasedRecordCount).toBe(0);
+    expect(som.reviveReleased(BULWARK, () => { throw new Error('made twice'); })).toBe(false);
+  });
+
+  it('the record is his latest: the last server position (and its stamp) and his state, not the create', () => {
+    const r = rig();
+    let v = sealedAt(c(0x010C));
+    const loaded = (id: number) => isCellLoaded(id, v);
+    r.som.createObject(createData(BULWARK, c(0x010C), { name: 'Claude Bulwark', timestamps: [1, 0, 0, 0, 0, 0, 0, 0, 1] }) as never);
+    r.som.updateObjectMaint(loaded, 0, c(0x010C));
+    r.som.updatePosition(pos(BULWARK, c(0x011F), 33, 7));
+    r.som.setPhysicsState(BULWARK, PhysicsState.LightingOn | PhysicsState.ReportCollisions, 4);
+    v = sealedAt(c(0x012E));
+    r.som.updateObjectMaint(loaded, 1, c(0x012E));
+    v = sealedAt(c(0x01A7));
+    r.som.updateObjectMaint(loaded, 40, c(0x01A7));
+    let rec: { position: { landblock: number; x: number } | null; physicsState: number; timestamps?: number[]; initialMotion?: unknown } | null = null;
+    r.som.reviveReleased(BULWARK, (d) => { rec = d as never; });
+    expect(rec).not.toBeNull();
+    expect(rec!.position!.landblock).toBe(c(0x011F));
+    expect(rec!.position!.x).toBe(33);
+    expect(rec!.timestamps![0]).toBe(7);
+    expect(rec!.timestamps![2]).toBe(4);
+    expect(rec!.physicsState).toBe(PhysicsState.LightingOn | PhysicsState.ReportCollisions);
+    expect(rec!.initialMotion).toBeUndefined();
+  });
+
+  it('a monster that died out of sight is never spoken of again: it stays gone, even back in its room', () => {
+    const { som, setViewer, loaded } = releasedFellow();
+    // Nothing more arrives about him; she walks back into the room he was last placed in.
+    setViewer(c(0x0107));
+    som.updateObjectMaint(loaded, 60, c(0x0107));
+    expect(som.getObject(BULWARK)).toBeUndefined();
+  });
+
+  it('a server DeleteObject (or a fresh CreateObject) for it drops the record', () => {
+    const a = releasedFellow();
+    a.som.deleteObject(BULWARK);
+    expect(a.som.reviveReleased(BULWARK, () => { throw new Error('re-made after a delete'); })).toBe(false);
+    const b = releasedFellow();
+    b.som.createObject(createData(BULWARK, c(0x010C), { name: 'Claude Bulwark' }) as never);
+    expect(b.som.releasedRecordCount).toBe(0);
+    const d = releasedFellow();
+    d.som.clear();
+    expect(d.som.releasedRecordCount).toBe(0);
+  });
+
+  it('the items he held come back with him', () => {
+    const r = rig();
+    let v = sealedAt(c(0x010C));
+    const loaded = (id: number) => isCellLoaded(id, v);
+    r.som.createObject(createData(BULWARK, c(0x010C), { name: 'Claude Bulwark' }) as never);
+    const SWORD = 0x80001234;
+    r.som.createObject(createData(SWORD, c(0x010C), { name: 'Sword', itemType: 1, wielderId: BULWARK, physicsParentId: BULWARK, parentLocation: 1, position: null }) as never);
+    r.som.updateObjectMaint(loaded, 0, c(0x010C));
+    v = sealedAt(c(0x01A7));
+    r.som.updateObjectMaint(loaded, 1, c(0x01A7));
+    v = sealedAt(c(0x012E));
+    r.som.updateObjectMaint(loaded, 40, c(0x012E));
+    expect(r.som.getObject(BULWARK)).toBeUndefined();
+    expect(r.som.getObject(SWORD)).toBeUndefined();
+    const made: number[] = [];
+    r.som.reviveReleased(BULWARK, (d) => { made.push(d.guid >>> 0); r.som.createObject(d); });
+    expect(made).toEqual([BULWARK, SWORD]);
+    expect(r.som.getObject(SWORD)?.wielderId).toBe(BULWARK);
+  });
+
+  it('outdoors too (retail\'s 25 s clock, unchanged): a creature the server moves again is re-made', () => {
+    const { som } = rig();
+    let v = viewer();
+    const loaded = (id: number) => isCellLoaded(id, v);
+    const o = som.createObject(createData(0x80005555, 0xA9B40021, { name: 'Drudge Skulker' }) as never)!;
+    som.updateObjectMaint(loaded, 0);
+    v = viewer({ viewerCellId: 0xACB4FFFF });
+    som.updateObjectMaint(loaded, 1);
+    expect(o.lostCell).toBe(true);
+    som.updateObjectMaint(loaded, 1 + NONVISIBLE_OBJECT_DESTRUCTION_TIME);
+    expect(som.getObject(0x80005555)).toBeUndefined();
+    expect(som.reviveReleased(0x80005555, (d) => { som.createObject(d); })).toBe(true);
+    expect(som.getObject(0x80005555)?.name).toBe('Drudge Skulker');
+  });
+});

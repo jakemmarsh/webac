@@ -304,6 +304,8 @@ export class FakeHost implements AgentHost {
     if (!this.floors) return undefined;
     return (from, dx, dy) => { const m = this.airMove(from.x - this.ox, from.y - this.oy, from.z, dx, dy); return { x: m.x + this.ox, y: m.y + this.oy }; };
   }
+  /** No ceilings in the fake's floor plans (DungeonHost has the real ones). */
+  get navCeiling(): AgentHost['navCeiling'] { return undefined; }
   get jumpLaunch(): AgentHost['jumpLaunch'] {
     if (!this.floors) return undefined;
     return (power, walk) => this.launchOf(power, walk);

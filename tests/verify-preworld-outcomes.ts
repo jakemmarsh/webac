@@ -424,7 +424,7 @@ describe('AC1999 — Connection1999', () => {
     FakeSocket.sockets = [];
     const h2 = harness();
     start1999(h2);
-    vi.advanceTimersByTime(60_000);
+    vi.advanceTimersByTime(151_000); // the 1999 client's 25 sends 6 s apart (Connection1999 LOGIN_*)
     expect(h2.sent.map(s => [s.body.outcome, s.body.token])).toEqual([['connect_failed', 'ID_ConnectionError_ClientTimedOutServer']]);
     expectClean(h); expectClean(h2);
   });

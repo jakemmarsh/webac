@@ -173,7 +173,7 @@ describe('ClientConnection: a NetError during logon ends the login at once (Clie
     // The close is ours and ends nothing in the world: no ServerDied 'disconnected'.
     expect(events.some((e) => e.type === 'disconnected')).toBe(false);
 
-    // Pre-fix: four more LoginRequests, then 'Login timed out' at 25 s.
+    // Pre-fix: more LoginRequests, then 'Login timed out' (at 40 s now: ClientNet::LogonUseTime).
     vi.advanceTimersByTime(60_000);
     expect(events.filter((e) => e.type === 'error')).toHaveLength(1);
     expect(events.some((e) => e.netErrorId === 'ID_ConnectionError_ClientTimedOutServer')).toBe(false);
@@ -204,7 +204,7 @@ describe('ClientConnection: a NetError during logon ends the login at once (Clie
     sock.deliver(gdleLoginFailure(0, 0));
     expect(events.some((e) => e.type === 'error')).toBe(false);
     expect(sock.closed).toBe(false);
-    vi.advanceTimersByTime(5000);
+    vi.advanceTimersByTime(ClientConnection.LOGIN_RETRY_INTERVAL);
     expect(sock.sent.length).toBe(2); // the LoginRequest resend still runs
     conn.disconnect();
   });

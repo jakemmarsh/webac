@@ -267,13 +267,98 @@ describe('a refusal on a world whose per-IP caps every webAC player shares', () 
   });
 });
 
-describe('Connection1999: the other login outcomes', () => {
-  it('a server that never answers: six LoginRequests, then ClientTimedOutServer (it used to sit silent)', () => {
+/**
+ * The 1999 client's own connect retry (client.exe "4.35752"): Net_Connect @
+ * 0x004187c0 resends the login every pass; Net_ConnectAwaitResponse @
+ * 0x00418050 waits until time(NULL) + 6 for a reply (0x004180d6) and returns 2
+ * on silence; 24 such timeouts (`[ebp-8] = 0x18` at 0x004188a7) and it gives
+ * up ("Failed to establish connection to the server."). Live 2026-10-16: our
+ * old 6 sends 2 s apart gave up at 12.0 s on a login the AC1999 server
+ * answered ~0.4 s later.
+ */
+const isLogin = (p: Uint8Array): boolean => readHeader1999(p).sequence === 1;
+describe("Connection1999: the 1999 client's login retry timing", () => {
+  it('resends every 6 s, not every 2 s', () => {
+    vi.useFakeTimers();
+    const { sock } = start();
+    expect(sock.sent.filter(isLogin)).toHaveLength(1);
+    vi.advanceTimersByTime(5_999);
+    expect(sock.sent.filter(isLogin)).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(sock.sent.filter(isLogin)).toHaveLength(2);
+    vi.advanceTimersByTime(6_000);
+    expect(sock.sent.filter(isLogin)).toHaveLength(3);
+  });
+
+  it('is still waiting at 12 s and beyond, until the 25th send has had its 6 s', () => {
     vi.useFakeTimers();
     const { events, sock } = start();
+    vi.advanceTimersByTime(13_000);
+    expect(errors(events)).toHaveLength(0);
+    expect(sock.closed).toBe(false);
+    vi.advanceTimersByTime(144_000 - 13_000);
+    expect(sock.sent.filter(isLogin)).toHaveLength(25); // t = 144 s: the last send
+    vi.advanceTimersByTime(5_999);
+    expect(errors(events)).toHaveLength(0);
+    vi.advanceTimersByTime(1);
+    const errs = errors(events);
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatchObject({ error: 'Login timed out', netErrorId: 'ID_ConnectionError_ClientTimedOutServer' });
+    expect(sock.closed).toBe(true);
+    expect(sock.sent.filter(isLogin)).toHaveLength(25);
     vi.advanceTimersByTime(60_000);
+    expect(errors(events)).toHaveLength(1);
+  });
+
+  it('a grant answering a late resend (the live case: after 12 s) completes the login', () => {
+    vi.useFakeTimers();
+    const { events, sock } = start();
+    vi.advanceTimersByTime(12_500);
+    expect(sock.sent.filter(isLogin)).toHaveLength(3); // 0, 6, 12 s
+    sock.deliver(grant1999(VERSION_1999));
+    sock.deliver(serverSwitch1999());
+    expect(events.some((e) => e.type === 'handshakeComplete')).toBe(true);
+    vi.advanceTimersByTime(30_000); // inside the 60 s server timeout (this fake server goes quiet)
+    expect(sock.sent.filter(isLogin)).toHaveLength(3);
+    expect(errors(events)).toHaveLength(0);
+    expect(sock.closed).toBe(false);
+  });
+
+  it('a refusal after some resends ends the login at once: no more resends, no timeout on top', () => {
+    vi.useFakeTimers();
+    const { events, sock } = start();
+    vi.advanceTimersByTime(12_000);
+    sock.deliver(refusal1999(STR_LOGIN_SERVER_FULL));
+    const sent = sock.sent.filter(isLogin).length;
+    vi.advanceTimersByTime(200_000);
+    expect(sock.sent.filter(isLogin)).toHaveLength(sent);
+    const errs = errors(events);
+    expect(errs).toHaveLength(1);
+    expect(errs[0].serverNetError).toEqual({ stringId: STR_LOGIN_SERVER_FULL, tableId: ST_SERVER_ERRORS });
+    expect(errs[0].netErrorId).toBeUndefined();
+    expect(FakeSocket.sockets).toHaveLength(1); // nothing reconnects
+  });
+
+  it('a deliberate cancel during the wait stops the resends and raises nothing', () => {
+    vi.useFakeTimers();
+    const { conn, events, sock } = start();
+    vi.advanceTimersByTime(7_000);
+    conn.disconnect();
+    const sent = sock.sent.filter(isLogin).length;
+    vi.advanceTimersByTime(200_000);
+    expect(sock.sent.filter(isLogin)).toHaveLength(sent);
+    expect(errors(events)).toHaveLength(0);
+    expect(FakeSocket.sockets).toHaveLength(1);
+  });
+});
+
+describe('Connection1999: the other login outcomes', () => {
+  it('a server that never answers: 25 LoginRequests 6 s apart, then ClientTimedOutServer at 150 s (it used to sit silent)', () => {
+    vi.useFakeTimers();
+    const { events, sock } = start();
+    vi.advanceTimersByTime(160_000);
     const logins = sock.sent.filter((p) => readHeader1999(p).sequence === 1);
-    expect(logins).toHaveLength(6);
+    expect(logins).toHaveLength(25);
     const errs = errors(events);
     expect(errs).toHaveLength(1);
     expect(errs[0].netErrorId).toBe('ID_ConnectionError_ClientTimedOutServer');

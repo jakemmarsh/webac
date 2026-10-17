@@ -34,7 +34,7 @@ import {
 import { GameMessageOpcode } from '../GameMessageOpcode.js';
 import { ISAAC } from '../ISAAC.js';
 import type { NetConnection } from '../NetWorker.js';
-import { type NetDiagnostics, hex32, msAgo } from '../NetDiagnostics.js';
+import { type NetDiagnostics, TxRing, hex32, messageLabel, msAgo } from '../NetDiagnostics.js';
 import type { DisconnectCause } from '../ClientConnection.js';
 import { bridgeRefusalFromClose } from '../BridgeRefusal.js';
 import { Adapter1999, Group1999 } from './Adapter1999.js';
@@ -60,8 +60,24 @@ export interface DatPatch1999 { dat: 'portal' | 'cell'; fileId: number; compress
 /** What Connection1999 adds to the ConnectionEvent stream (the page ignores types it doesn't know). */
 export interface DatPatchEvent { type: 'datPatch1999'; patches: DatPatch1999[]; portalIteration: number; cellIteration: number }
 
-const LOGIN_RESEND_MS = 2000;
-const LOGIN_MAX_SENDS = 6;
+/**
+ * The 1999 client's connect-request retry, from its own client.exe
+ * (dat-sets/ac1999-retail/client.exe, md5 aef6b20d, the release "4.35752"
+ * build). Net_Connect @ 0x004187c0 loops: send the login (Net_SendPacket @
+ * 0x00417ca0, called every pass at 0x004188f9), then Net_ConnectAwaitResponse
+ * @ 0x00418050, which polls select() until `time(NULL) + 6` (0x004180d0-
+ * 0x004180df) and returns 2 when nothing came (0x0041824a). Case 2 spends a
+ * budget of 0x18 = 24 retries (`[ebp-8]` at 0x004188a7, decremented at
+ * 0x00418980); once spent it returns -12 (0x00418988), which
+ * Client_ConnectToServer @ 0x004030d0 shows as "Failed to establish connection
+ * to the server.\nPlease try again in a few minutes." (0x005f4bd0). So 25
+ * sends, 6 s apart, and the give-up 6 s after the last: 150 s. (time() has
+ * whole-second ticks, so each real wait was 5-6 s; 6 s is the bound.)
+ * This lane used to give up after 6 sends 2 s apart (12 s), which cut off a
+ * live login the server answered 0.4 s later (2026-10-16).
+ */
+const LOGIN_RESEND_MS = 6000;
+const LOGIN_MAX_SENDS = 25;
 const NAK_MIN_MS = 250;
 const OUR_RESEND_MIN_MS = 1000;
 const SERVICE_MS = 100;
@@ -177,6 +193,8 @@ export class Connection1999 implements NetConnection {
 
   // OBS.dm-stall-diagnostics — what getDiagnostics() reports (this session).
   private diag = Connection1999.freshDiag();
+  /** OBS.dm-stall-tx-ring — our last sequenced packets and the server's ACKs of them. */
+  private readonly diagTx = new TxRing();
   private static freshDiag() {
     return {
       rxMsgAt: 0, rxSeqAt: 0, rxFlags: -1, rxOpcode: -1, nakAt: 0, naks: 0, srvAck: 0, srvNakAt: 0, srvNaks: 0,
@@ -228,6 +246,7 @@ export class Connection1999 implements NetConnection {
     this.dddIterations = { portal: 0, cell: 0 };
     this.dddFinished = false;
     this.diag = Connection1999.freshDiag();
+    this.diagTx.reset();
   }
 
   get bridgeUrl(): string { return this.url; }
@@ -281,6 +300,7 @@ export class Connection1999 implements NetConnection {
       rxPkts: d.rxPkts,
       txPkts: d.txPkts,
       rxBytes: d.rxBytes,
+      ...this.diagTx.snapshot(now),
     };
   }
   on(l: ConnectionListener): void { this.listeners.push(l); }
@@ -558,10 +578,10 @@ export class Connection1999 implements NetConnection {
 
   /**
    * Every LoginRequest went unanswered (LOGIN_MAX_SENDS, LOGIN_RESEND_MS
-   * apart): the end-of-retail lane's ClientTimedOutServer. The 1999 client
-   * gave up too ("Server has not responded. Please try again later.", its
-   * client.exe strings); this lane used to stop resending and leave the
-   * connecting screen up with nothing said.
+   * apart, see the constants): the end-of-retail lane's ClientTimedOutServer.
+   * The 1999 client gave up there too, with "Failed to establish connection to
+   * the server." (Net_Connect's -12); this lane used to stop resending and
+   * leave the connecting screen up with nothing said.
    */
   private loginTimedOut(): void {
     this.stopLoginTimer();
@@ -708,14 +728,15 @@ export class Connection1999 implements NetConnection {
     for (const { message, group } of out) {
       const frags = fragmentMessage1999(message, this.fragmentSequence++, group);
       // One fragment per packet keeps every packet under the 484-byte datagram.
-      for (const f of frags) {
+      const label = messageLabel(message);
+      frags.forEach((f, i) => {
         if (f.length > MAX_DATA_BODY) throw new Error('1999 fragment over the datagram limit');
-        this.sendData(f);
-      }
+        this.sendData(f, i === 0 ? label : 'cont');
+      });
     }
   }
 
-  private sendData(fragment: Uint8Array): void {
+  private sendData(fragment: Uint8Array, what = 'data'): void {
     const seq = ++this.sequence;
     this.flowBytes += fragment.length;
     const packet = buildPacket1999({
@@ -725,10 +746,12 @@ export class Connection1999 implements NetConnection {
     this.resendCache.set(seq, { packet, lastSent: Date.now() });
     this.raw(packet);
     this.diag.txSeqAt = this.diag.txAt;
+    this.diagTx.sent(seq, F1999.Referral | F1999.Checksum, what, Date.now());
   }
 
   private onServerAck(seq: number): void {
     if (seq > this.diag.srvAck) this.diag.srvAck = seq;
+    this.diagTx.serverAck(seq, Date.now());
     for (const k of [...this.resendCache.keys()]) if (k <= seq) this.resendCache.delete(k);
   }
 

@@ -6574,6 +6574,27 @@ export class GameUI {
     return null;
   }
 
+  /**
+   * BUG.resume-silent-launcher — the page's own enter (the auto-resume after
+   * an in-world drop, a URL login's auto-enter, a meta's next login) goes the
+   * way EnterGame @ 004ed440 does: the character's row selected and the
+   * Entering World wait dialog up, then LogOnCharacter. It used to call
+   * onEnterWorld alone, so a resume that GDLE answered with "character still
+   * in the world" sat on a live character select with nothing saying it was
+   * still entering: the player left through the World box 13 s in
+   * (playwebac.com, 2026-10-17). The dialog stays until the world replaces
+   * the screen or a refusal re-renders it (showCharacterErrorDialog).
+   */
+  autoEnterCharacter(slot: CharacterSlot): void {
+    const i = this.selectScreen.slots.findIndex((c) => c.id === slot.id);
+    if (i >= 0 && this.selectScreen.selectedIndex !== i) {
+      this.selectScreen.selectCharacter(i);
+      this.renderCharacterSelect();
+    }
+    this.showEnteringWorldDialog();
+    this.callbacks.onEnterWorld?.(slot);
+  }
+
   showEnteringWorldDialog(): void {
     if (this.screenContainer.querySelector('#charsel-enteringworld')) return;
     const dlg = this.buildWaitDialog('charsel-enteringworld', getString(50695556) ?? 'Entering World');

@@ -149,3 +149,70 @@ export function headroomClamp(feetY: number, velocityY: number, floorAtHead: num
   if (velocityY <= 0 || floorAtHead === null || floorAtHead <= feetY + 1) return { feetY, velocityY, hit: false };
   return { feetY: Math.min(feetY, floorAtHead - height), velocityY: 0, hit: true };
 }
+
+/** What the airborne frame needs from the collision world around the body (each optional: none = open air). */
+export interface AirborneSurroundings {
+  /**
+   * BUG.jump-through-ceiling — the highest feet height the body rising at its position from `fromY` toward `toY`
+   * reaches before its spheres meet a face over it (DungeonCollision.riseLimit), null when nothing stops it.
+   */
+  riseLimit?: ((fromY: number, toY: number) => number | null) | null;
+  /** The walkable found searching down from the head (feet + `height`): a storey's floor over the body (headroomClamp). */
+  floorAtHead?: ((headY: number) => number | null) | null;
+  /** The body's height (the collision's playerHeight). */
+  height: number;
+}
+
+/** One frame of an airborne body's vertical motion: advanceAirborne, then the rise stopped by what is over it. */
+export interface AirborneFrame extends AirborneAdvance {
+  /** TRUE when a ceiling (riseLimit) or the floor of a storey above (headroomClamp) stopped the rise this frame. */
+  ceilingHit: boolean;
+}
+
+/**
+ * The main.ts frame loop's airborne vertical step: the arc stepped per physics chunk (advanceAirborne), then the
+ * head meeting a ceiling (riseLimit; BUG.jump-through-ceiling) or the floor of the storey above (headroomClamp)
+ * stops the rise: the feet stay under it and the vertical velocity is 0, so the body falls from there. A frame
+ * whose arc already came back down under the ceiling keeps its fall.
+ */
+export function advanceAirborneFrame(
+  airborneBaseY: number,
+  offsetY: number,
+  velocityY: number,
+  steps: readonly number[],
+  groundY: number,
+  gravity: number,
+  around: AirborneSurroundings,
+): AirborneFrame {
+  const air = advanceAirborne(airborneBaseY, offsetY, velocityY, steps, groundY, gravity);
+  const out: AirborneFrame = { ...air, ceilingHit: false };
+  if (air.landed) return out;
+  const top = ceilingStop(airborneBaseY + offsetY, airborneBaseY + air.peakY, around.riseLimit);
+  if (top !== null && airborneBaseY + out.offsetY > top) {
+    out.offsetY = top - airborneBaseY;
+    out.velocityY = 0;
+    out.ceilingHit = true;
+  }
+  if (out.velocityY > 0 && around.floorAtHead) {
+    const feet = airborneBaseY + out.offsetY;
+    const c = headroomClamp(feet, out.velocityY, around.floorAtHead(feet + around.height), around.height);
+    if (c.hit) { out.offsetY = c.feetY - airborneBaseY; out.velocityY = c.velocityY; out.ceilingHit = true; }
+  }
+  return out;
+}
+
+/**
+ * BUG.jump-through-ceiling — where a rising body's feet stop under the ceiling: the airborne arc went up from
+ * `startFeetY` to `peakFeetY` this frame (or flight step), and `riseLimit` (DungeonCollision.riseLimit at the
+ * body's position) says how high the body's spheres get before one meets a face over it. Returns that feet
+ * height (the caller stops the rise there: vertical velocity 0), or null when the body did not rise or nothing
+ * is over it. headroomClamp still catches the floor of a storey above, seen from below.
+ */
+export function ceilingStop(
+  startFeetY: number,
+  peakFeetY: number,
+  riseLimit: ((fromY: number, toY: number) => number | null) | null | undefined,
+): number | null {
+  if (!riseLimit || !(peakFeetY > startFeetY)) return null;
+  return riseLimit(startFeetY, peakFeetY);
+}

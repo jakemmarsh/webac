@@ -199,6 +199,8 @@ export interface AgentHost {
   navFloor?(x: number, y: number, fromZ: number): number | null;
   /** One airborne transition of the player's body (feet at from.z) moved (dx, dy) through the collision world; where it ends. Never moves the player. */
   navAirStep?(from: { x: number; y: number; z: number }, dx: number, dy: number): { x: number; y: number };
+  /** The highest feet height the player's body rising at a global (x, y) from `fromZ` toward `toZ` reaches under a ceiling; null = nothing stops it. */
+  navCeiling?(x: number, y: number, fromZ: number, toZ: number): number | null;
   /**
    * The landscape at a global (x, y), for telling a player what is in the way: `sea` when its landblock is all deep
    * water (CObjCell::get_block_water_type ENTIRELY_WATER: no one wades it), `steep` when the terrain there is too
@@ -507,6 +509,13 @@ export interface WalkOptions {
    * target only; without the host's line check it is the plain walk.
    */
   line?: boolean;
+  /**
+   * stay_with: the times this walk already went back for the fellow (STAY_WITH_REJOINS): a fellow not on your way who
+   * stood still is gone back to once, then the walk goes on from beside them.
+   */
+  stayRejoins?: number;
+  /** One leg of a chain of walks: its end pushes no task-done (the chain's last walk does). */
+  quietDone?: boolean;
 }
 
 /**
@@ -785,6 +794,8 @@ interface Task {
   interrupted?(why: string): AgentResult;
   /** A cast repeat (a single cast replaces it); a walk or follow (a turn or jump by hand replaces it). */
   kind?: 'cast-repeat' | 'walk';
+  /** One leg of a chain of walks (a stay_with walk's way back for its fellow): its end is no task-done of its own. */
+  quiet?: boolean;
 }
 
 /** What one cast of a repeat did: whether it went out, the chat lines after it, the server's refusals. */
@@ -1696,6 +1707,7 @@ export class AgentApi {
       const who = this.attackerOf(clean);
       this.push('attacked', clean, who.guid ?? undefined);
       this.attackLines.push({ at: this.host.now(), text: clean.toLowerCase(), guid: who.guid, name: who.name });
+      if (who.guid !== null) this.noteFoe(who.guid);
       if (this.attackLines.length > 60) this.attackLines.splice(0, this.attackLines.length - 60);
       if (who.guid !== null && !before.has(who.guid)) {
         const now = [...this.attackersOfMe().keys()];
@@ -2196,6 +2208,8 @@ export class AgentApi {
       if (o.seeks && o.seeks.kind !== 'position') tr.aim = { guid: o.seeks.guid >>> 0, kind: o.seeks.kind, at: now };
       else if (o.seeks?.kind === 'position') tr.aim = null;
     }
+    // Monsters on a fellow in view (within reach of them, aimed at them): foes of the fellowship (recentFoe).
+    for (const f of this.host.fellows?.() ?? []) for (const c of this.comingAt(f.guid)) if (c.on) this.noteFoe(c.guid);
     for (const g of [...this.creatureTrail.keys()]) if (!seen.has(g)) this.creatureTrail.delete(g);
     if (this.monsterSeen.size > AgentApi.MONSTER_SEEN_KEEP) for (const [g, m] of [...this.monsterSeen]) if (now - m.at > AgentApi.MONSTER_LAST_SEEN_MAX_MS) this.monsterSeen.delete(g);
     // aggro: a monster newly coming at you (not one already hitting you: attackers-up says that).
@@ -2743,6 +2757,28 @@ export class AgentApi {
     return { ...r, message: `${head}\n${r.message}${r.ok || there ? `; ${now}` : ''}` };
   }
 
+  /**
+   * When each creature last attacked you (a CombatEnemy line credited to it) or stood on a fellow in view (comingAt's
+   * `on`), on the host's clock. A foe that recent stays a target once the client lets it go (recentFoe): Bulwark's
+   * ac_attack at #80010988 two seconds after "attackers-up: +Dread Mu-miyah #80010988" was refused "out of sight: your
+   * client let it go … Go back there and look again" (Mountain Keep, 2026-10-17 02:34:30Z).
+   */
+  private foeAt = new Map<number, number>();
+  /** A creature that attacked you or a fellow this recently stays one ac_attack goes after, out of sight or not (ms). */
+  static readonly RECENT_FOE_MS = 30_000;
+  private noteFoe(g: number): void {
+    this.foeAt.delete(g >>> 0);
+    this.foeAt.set(g >>> 0, this.host.now());
+    if (this.foeAt.size > 100) this.foeAt.delete(this.foeAt.keys().next().value!);
+  }
+  /** Seconds since `g` last attacked you or a fellow, while that is within RECENT_FOE_MS; null otherwise. */
+  private recentFoe(g: number): number | null {
+    const at = this.foeAt.get(g >>> 0);
+    if (at === undefined) return null;
+    const ms = this.host.now() - at;
+    return ms <= AgentApi.RECENT_FOE_MS ? Math.max(0, Math.round(ms / 1000)) : null;
+  }
+
   /** Each monster's last place while in your sight (sampleCreatures), and when: walk_to one the client has let go. */
   private monsterSeen = new Map<number, { name: string; cell: number; x: number; y: number; z: number; at: number }>();
   /** A monster seen this recently is walked to at its last spot once the client lets it go (ms). */
@@ -2971,7 +3007,11 @@ export class AgentApi {
     });
     const behind = tobj && me && this.leftBehind(tobj) ? tobj : null;
     const target = tobj && me && !behind ? this.describe(tobj, me) : null;
-    if (target && this.released(tobj)) target.outOfSight = true;
+    if (target && this.released(tobj)) {
+      target.outOfSight = true;
+      const ago = this.recentFoe(tobj!.guid);
+      if (ago !== null) target.foeAgoS = ago;
+    }
     // On another floor of a building or dungeon: in reach of the eye, maybe, but not of a step or a bolt through the
     // floor (Bulwark's Battered Doll 20 m down, "no line of fire" through the floor, 2026-10-16).
     if (target && me && tobj?.cell && this.floorsApply(me.s.cell, tobj.cell) && Math.abs(target.dz) >= AgentApi.OTHER_FLOOR_M) {
@@ -3190,7 +3230,7 @@ export class AgentApi {
     return ` (${others.length + 1} in view are named like "${q}"; also ${shown.join(', ')}${others.length > 3 ? ', …' : ''}: name one or its #id for another)`;
   }
 
-  private need(t: TargetArg, where: 'world' | 'inventory' | 'any', what: string): number | AgentResult {
+  private need(t: TargetArg, where: 'world' | 'inventory' | 'any', what: string, foeOk = false): number | AgentResult {
     const g = this.resolve(t, where, { corpse: /corpse/i.test(what) });
     // Only a corpse matched a name asked for without "corpse": the one named is not in view.
     const gc = g === null ? null : this.host.object(g);
@@ -3220,7 +3260,9 @@ export class AgentApi {
     }
     // A released object (BUG.ghost-objects) is only where it was last seen; a remembered place is walked to by its spot.
     const o = this.host.object(g);
-    if (o && this.released(o) && !this.places.has(g)) return { ok: false, message: `${o.name} #${g.toString(16)} is out of sight: your client let it go (too far from you for the server to keep you updated), so it is only where it was last seen. Go back there and look again.` };
+    // A creature that attacked you or a fellow a moment ago is still the fight (recentFoe): the attack goes after it by its
+    // last placement (attackNow), not "go back there and look again".
+    if (o && this.released(o) && !this.places.has(g) && !(foeOk && this.recentFoe(g) !== null)) return { ok: false, message: `${o.name} #${g.toString(16)} is out of sight: your client let it go (too far from you for the server to keep you updated), so it is only where it was last seen. Go back there and look again.` };
     return g;
   }
 
@@ -3558,6 +3600,33 @@ export class AgentApi {
   static readonly FELLOW_CAST_BUSY_MS = 30_000;
   /** stay_with: the longest wait for a fellow who is busy casting or fighting (ms). */
   static readonly STAY_WITH_BUSY_WAIT_MS = 120_000;
+  /** stay_with, indoors: how many times one walk goes back for a fellow standing still off its way, then walks on. */
+  static readonly STAY_WITH_REJOINS = 1;
+
+  /** The stay_with fellow's object by name (global place, feet height), or where they were last placed; null: neither. */
+  private stayWithObject(name: string): { x: number; y: number; z: number } | null {
+    const g = (this.host.fellows?.() ?? []).find((f) => f.name.toLowerCase() === name.toLowerCase())?.guid;
+    const o = g !== undefined ? this.host.object(g) : null;
+    if (o?.cell) return { ...toGlobal(o.cell, o.x, o.y), z: o.z };
+    const ls = this.fellowLastSeen(name);
+    return ls ? { ...toGlobal(ls.cell, ls.x, ls.y), z: ls.z } : null;
+  }
+
+  /**
+   * stay_with, indoors: why a fellow you are waiting for isn't on your way: on another floor, or round a wall (no straight
+   * walk between you: another branch of the rooms, the other side of a pit). Null outdoors, or when they are in plain
+   * reach on your floor (only slow, or busy).
+   */
+  private stayWithSplit(name: string, here: { x: number; y: number; z: number }, probe: NavProbe | undefined): string | null {
+    const s = this.host.self();
+    if (!s?.cell || (s.cell & 0xffff) < 0x100) return null;
+    const at = this.stayWithObject(name);
+    if (!at) return null;
+    const dz = at.z - here.z;
+    if (Math.abs(dz) >= AgentApi.FLOOR_APART_M) return `on another floor (${Math.abs(dz).toFixed(0)} m ${dz > 0 ? 'up' : 'down'}), not on your way`;
+    if (probe && !straightWalk(probe, here, at)) return 'round a wall or through other doorways (another branch of the rooms), not on your way';
+    return null;
+  }
 
   /**
    * A stay_with walk that stopped for its fellow: what to do. stay_with tells them nothing (the wait is only yours), so
@@ -3645,6 +3714,15 @@ export class AgentApi {
   static readonly FOLLOW_ARRIVED_MOVE_M = 2;
   /** A portal this close to where a followed leader was last seen is taken as the one they went through. */
   static readonly FOLLOW_PORTAL_BESIDE_M = 6;
+  /**
+   * follow, indoors: a leader this far (m, floors and all) from where they stood when the way to them was planned, or in
+   * another room, is planned to again (planRoute, as walk_to plans), and a follow whose searches found no way plans again
+   * rather than ending while the leader has moved on since. Arcanist's follow searched for Bulwark's spot in mid-jump and
+   * said "no way to them" where he had landed 9 m on (Mountain Keep 0x01D202A2, 2026-10-17 02:35Z).
+   */
+  static readonly FOLLOW_REPLAN_M = 4;
+  /** …at most this often (ms). */
+  static readonly FOLLOW_REPLAN_MS = 2000;
   /**
    * A walk going round in circles: back within LOOP_RADIUS_M of where it stood at least LOOP_BACK_MS before, having
    * been LOOP_AWAY_M or more from there since, and no LOOP_GAIN_M nearer the goal. A goal across water paced Bulwark
@@ -3893,7 +3971,8 @@ export class AgentApi {
     const full = launch(1, false);
     // GDLE's ratio divides by the player's own full-power jump (InqJumpVelocity(1.0)): its Jump skill and load now.
     const fall = fallModelFor(h.fallServer?.() ?? 'ace', full.up);
-    return { floor, airStep, launch: (p, w) => launch(p, w), chargeSeconds: full.chargeSeconds, fall };
+    const ceiling = h.navCeiling?.bind(h);
+    return { floor, airStep, ...(ceiling ? { ceiling } : {}), launch: (p, w) => launch(p, w), chargeSeconds: full.chargeSeconds, fall };
   }
 
   /** Jumps and drops the planner may take, with the fall damage your health allows now. */
@@ -5589,7 +5668,7 @@ export class AgentApi {
     t.resolve(t.interrupted?.(why) ?? { ok: false, message: `${t.label}: interrupted (${why})` });
   }
 
-  private startTask(label: string, step: Task['step'], cancel: () => void, extra: Pick<Task, 'interrupted' | 'kind'> = {}): Promise<AgentResult> {
+  private startTask(label: string, step: Task['step'], cancel: () => void, extra: Pick<Task, 'interrupted' | 'kind' | 'quiet'> = {}): Promise<AgentResult> {
     this.cancelTask(`replaced by ${label}`);
     const n = ++this.tasksStarted;
     const began = this.host.now();
@@ -5599,6 +5678,10 @@ export class AgentApi {
         // An interrupted task's answer already starts with its label (cancelTask): name it once.
         resolve: (r) => {
           resolve(r);
+          // A walk that hands on to the next of a chain (on to a fellow's last place, back for a stay_with fellow) or one
+          // leg of such a chain: the chain's last walk answers. Each leg's own task-done woke an ac_wait types=task-done
+          // with "stopped … short" while the walk went on.
+          if (extra.quiet || r.lostFellow || r.rejoinFellow) return;
           this.push('task-done', r.message.startsWith(`${label}: `) ? r.message : `${label}: ${r.message}`);
           if (this.host.now() - began < AgentApi.TASK_ANSWERED_MS) {
             this.quickTaskDone.set(this.seqN, n);
@@ -6095,10 +6178,16 @@ export class AgentApi {
     let leaderSeen: { x: number; y: number } | null = null;
     // The target object's last placement (landblock-local), kept each tick: a fellow the client drops is walked on to it.
     let targetPlace: { cell: number; x: number; y: number; z: number; heardAt?: number } | null = null;
-    // stay_with: since when the walk has stood at a drop's edge waiting for the fellow to come up (0: not waiting).
+    // stay_with: since when the walk has stood at a drop's edge waiting for the fellow to come up (0: not waiting), and
+    // where they stood (global) since when while it waits.
     let edgeWaitSince = 0;
+    let edgeFellow: { x: number; y: number; at: number } | null = null;
     // A leap the doorway route took whose take-off no jump search found (its width, and where it lands, global).
     let leapFailed: { width: number; x: number; y: number } | null = null;
+    // Following: where the leader stood (global, feet height) and the room their feet were in (feetCell) when the way to
+    // them was last planned, and when (FOLLOW_REPLAN_M).
+    let leaderPlanned: { x: number; y: number; z: number; cell: number } | null = null;
+    let leaderPlannedAt = -Infinity;
     // Following a leader a storey up or down: which way it was said (-1 they're above, 1 below, 0 not), and since when.
     let floorApartSaid = 0;
     let floorApartAt = 0;
@@ -6598,6 +6687,11 @@ export class AgentApi {
     const plan = (): void => {
       const gl = goal();
       route = gl && !directWide ? this.planRoute(gl, goalLocal(), shutNow(), dropsFailed) : [];
+      if (follow) {
+        const lo = goalLocal();
+        leaderPlanned = gl && lo?.cell ? { x: gl.x, y: gl.y, z: gl.z ?? lo.z, cell: this.feetCell(lo.cell, lo) >>> 0 } : null;
+        leaderPlannedAt = this.host.now();
+      }
       lockedOnly = route.length || !gl || directWide ? null : this.lastLockedOnly;
       // A doorway route far longer than the straight distance (round by a rift and down the ramps of the doll dungeon,
       // ~300 m for a goal 40 m off): time for it, unless a time was given. Following, the duration is the limit.
@@ -6608,6 +6702,28 @@ export class AgentApi {
         timeoutMs = Math.min(Math.max(timeoutMs, (this.host.now() - start - credit) + (len / AgentApi.WALK_BUDGET_MPS + 30) * 1000), AgentApi.WALK_MAX_MS);
       }
       planLegs();
+    };
+    // Following, indoors: how far the leader is (m, floors and all) from where they stood when the way to them was last
+    // planned, and whether their feet are in another room now. Null when there's nothing to compare (not following, no
+    // plan yet, both ends on the landscape: a stretch there is planned 35 m at a time anyway).
+    const leaderShift = (): { moved: number; room: boolean } | null => {
+      if (!follow || !leaderPlanned) return null;
+      const gl = goal(), lo = goalLocal(), s = this.host.self();
+      if (!gl || !lo?.cell || !s?.cell) return null;
+      if ((s.cell & 0xffff) < 0x100 && (lo.cell & 0xffff) < 0x100) return null;
+      const moved = Math.hypot(gl.x - leaderPlanned.x, gl.y - leaderPlanned.y, (gl.z ?? lo.z) - leaderPlanned.z);
+      return { moved, room: (lo.cell & 0xffff) >= 0x100 && (this.feetCell(lo.cell, lo) >>> 0) !== leaderPlanned.cell };
+    };
+    // The way to the leader planned again from scratch (walk_to's own plan: the doorway route, then the legs), the
+    // searches aimed at where they were dropped.
+    const followReplan = (why: string): void => {
+      this.trace(`follow: ${why}; planning the way to them again`);
+      directWide = false; doorDetour = null; leapFailed = null; noWay = false; search = null; legs = [];
+      stretch = null; stretchSearch = null; farSearch = null; farRoute = [];
+      legsExhausted.clear();
+      prev = null;
+      plan();
+      best = Infinity; bestAt = this.host.now();
     };
     const legText = (p: NavStep): string => `${p.jump ? (isDrop(p.jump) ? `drop ${(p.jump.from.z - p.z).toFixed(1)} m to ` : 'jump to ') : ''}(${p.x.toFixed(1)}, ${p.y.toFixed(1)}${p.jump ? `, z ${p.z.toFixed(1)}` : ''})`;
     // The keys of a standing long jump: the charge starts with nothing held (CMotionInterp standing_longjump),
@@ -6645,7 +6761,10 @@ export class AgentApi {
       // No doorway route to it, and a floorless cell (a rift, a shaft) between: name it, its width against your jump and
       // its depth against your health, not just "walls all round" (the doll dungeon's rift, 2026-10-16).
       if (!r.ok && /^stuck /.test(r.message)) {
-        const note = this.barrierNote(goalLocal()?.cell ?? undefined);
+        // A creature standing over open air (no floor under its feet): that first, the reason no way reaches it.
+        const tg = targetGuid ? this.host.object(targetGuid) : null;
+        const air = tg && (tg.itemType & IT.Creature) ? this.noFloorUnder(tg) : null;
+        const note = air ?? this.barrierNote(goalLocal()?.cell ?? undefined);
         if (note) notes.push(note);
       }
       // Doors on the way only a lever or switch opens: which, and what may open them (the walk never uses one by hand).
@@ -6714,7 +6833,7 @@ export class AgentApi {
           const glEnd = goal();
           const dEnd = glEnd ? Math.hypot(glEnd.x - me.g.x, glEnd.y - me.g.y) : 0;
           if (o && !standing && dEnd > within + AgentApi.FOLLOW_SLACK_M && (noWay || search || travelled < AgentApi.FOLLOW_STILL_M)) {
-            return { ok: false, message: `couldn't follow ${this.nameOf(targetGuid)}: ${this.followStuckWhy(goalLocal()?.cell ?? undefined, noWay, !!search, travelled, now - start)}; ${where}${featText()}` };
+            return { ok: false, message: `couldn't follow ${this.nameOf(targetGuid)}: ${this.followStuckWhy(goalLocal()?.cell ?? undefined, noWay, !!search, travelled, now - start, targetGuid)}; ${where}${featText()}` };
           }
           // The longest one follow runs, reached with no duration asked for: say it is still a follow, to be asked again.
           if (follow.untilStopped) return { ok: true, message: `still following ${this.nameOf(targetGuid)} after ${Math.round((now - start) / 1000)} s, the longest one follow runs (they kept moving); ${where}: ac_follow again to keep going${featText()}` };
@@ -6947,7 +7066,17 @@ export class AgentApi {
               return { ok: false, message: `stopped ${d.toFixed(1)} m short to wait for ${f.name}, but they went on past you on another way: now ${where}, ${(-behind).toFixed(0)} m nearer where you're going than you. Walk to them (ac_walk_to ${f.name}) or tell them (/f) where to meet${featText()}` };
             }
             if (now - wf.movedAt > AgentApi.STAY_WITH_STILL_MS) {
-              return { ok: false, message: `stopped ${d.toFixed(1)} m short: ${f.name} is ${where} and hasn't moved for ${Math.round((now - wf.movedAt) / 1000)} s (fighting, busy, stuck or waiting for you?). ${this.stayWithHint(f.name, label)}${featText()}` };
+              const stood = Math.round((now - wf.movedAt) / 1000);
+              // Indoors, not on your way (another floor, or round a wall: another branch of the rooms) and not coming: go back
+              // to them first, then on (the walk's .then), as a player goes back for a friend who took the other stairs.
+              // Bulwark's stay_with walks to 0x01D2014A stopped "57.6 m short: Arcanist is 15 m NE and hasn't moved" twice,
+              // his way down a drop she wasn't on (Mountain Keep, 2026-10-17 02:35–02:39Z).
+              const split = (opts.stayRejoins ?? 0) < AgentApi.STAY_WITH_REJOINS ? this.stayWithSplit(f.name, { x: me.g.x, y: me.g.y, z: me.s.z }, probe) : null;
+              if (split) {
+                release();
+                return { ok: false, message: `stopped ${d.toFixed(1)} m short: ${f.name} is ${where} and hasn't moved for ${stood} s`, rejoinFellow: { name: f.name, why: split, where, stood } };
+              }
+              return { ok: false, message: `stopped ${d.toFixed(1)} m short: ${f.name} is ${where} and hasn't moved for ${stood} s (fighting, busy, stuck or waiting for you?)${(opts.stayRejoins ?? 0) ? `; you went back for them once already on this walk, and the way you take is one they don't come by: lead another way, or follow them` : ''}. ${this.stayWithHint(f.name, label)}${featText()}` };
             }
             const waitCap = wf.busy ? AgentApi.STAY_WITH_BUSY_WAIT_MS : AgentApi.STAY_WITH_WAIT_MS;
             if (now - waitingSince > waitCap) return { ok: false, message: `stopped ${d.toFixed(1)} m short: waited ${Math.round(waitCap / 1000)} s for ${f.name}, still ${where}${wf.busy ? ` (${busy ?? wf.busy})` : ''}. ${this.stayWithHint(f.name, label)}${featText()}` };
@@ -7002,9 +7131,12 @@ export class AgentApi {
         if (apart && d <= within + AgentApi.FOLLOW_SLACK_M && floorApartSaid !== Math.sign(dz)) {
           floorApartSaid = Math.sign(dz);
           const what = `${this.nameOf(targetGuid)} is ${Math.abs(dz).toFixed(0)} m ${dz < 0 ? 'above' : 'below'} you (${dz < 0 ? 'a ledge or upper floor' : 'a lower floor'}), not beside you`;
-          this.trace(`follow: ${what}; routing to their floor`);
           this.push('chat', `(system) [Agent] following: ${what}; taking the way ${dz < 0 ? 'up' : 'down'} to them`);
           floorApartAt = now;
+          // The way to their floor is walk_to's: the doorway route to the room their feet are in, not a search for the
+          // spot overhead (a follow aimed its searches at where Bulwark was in mid-jump, Mountain Keep 2026-10-17 02:35Z).
+          if (!doorDetour) { followReplan(`${what}, routing to their floor`); if (search) return null; }
+          else this.trace(`follow: ${what}; routing to their floor`);
         }
         if (!apart) floorApartSaid = 0;
         if (!apart && (near <= within || (standing && d <= within + AgentApi.FOLLOW_SLACK_M))) {
@@ -7026,6 +7158,13 @@ export class AgentApi {
         }
         if (standing) { standing = false; prev = null; plan(); best = Infinity; bestAt = now; }
         besideSince = 0;
+        // Indoors, a leader gone into another room, or on from where they stood when the way was planned while the walk is
+        // still searching (or found none): plan the way to where they are now, as walk_to would from here.
+        const sh = !doorDetour && now - leaderPlannedAt >= AgentApi.FOLLOW_REPLAN_MS ? leaderShift() : null;
+        if (sh && ((sh.room && sh.moved >= 2) || (sh.moved >= AgentApi.FOLLOW_REPLAN_M && (search || noWay || directWide || !legs.length)))) {
+          followReplan(sh.room ? `${this.nameOf(targetGuid)} went into another room` : `${this.nameOf(targetGuid)} moved ${sh.moved.toFixed(0)} m since the way to them was planned`);
+          if (search) return null;
+        }
       }
       if (opts.until && !follow && !jumping) {
         const why = opts.until();
@@ -7140,6 +7279,16 @@ export class AgentApi {
             if (apart) {
               if (!edgeWaitSince) { edgeWaitSince = now; this.trace(`walk: waiting at the edge of a ${(here.z - spec.to.z).toFixed(1)} m drop for ${f!.name} (${f!.dist!.toFixed(0)} m ${compassPoint(f!.bearing!)}) to come up`); }
               const busy = this.fellowBusy(f!.name, now, AgentApi.FELLOW_CAST_BUSY_MS);
+              // Standing still there all the while (not busy), they aren't coming up: go back to them first, then on together.
+              if (!busy) {
+                const fo = this.stayWithObject(f!.name);
+                if (fo && (!edgeFellow || Math.hypot(fo.x - edgeFellow.x, fo.y - edgeFellow.y) > 2)) edgeFellow = { x: fo.x, y: fo.y, at: now };
+              } else edgeFellow = null;
+              if (edgeFellow && now - edgeFellow.at > AgentApi.STAY_WITH_STILL_MS && (opts.stayRejoins ?? 0) < AgentApi.STAY_WITH_REJOINS) {
+                release(); jumping = null;
+                const where = `${f!.dist!.toFixed(0)} m ${compassPoint(f!.bearing!)} of you, on this floor`;
+                return { ok: false, message: `stopped ${d.toFixed(1)} m short at the edge of a ${(here.z - spec.to.z).toFixed(0)} m drop: ${f!.name} is ${where} and hasn't moved for ${Math.round((now - edgeFellow.at) / 1000)} s`, rejoinFellow: { name: f!.name, why: `the way on is a ${(here.z - spec.to.z).toFixed(0)} m drop (one way), and they stay on the floor above it`, where, stood: Math.round((now - edgeFellow.at) / 1000) } };
+              }
               if (now - edgeWaitSince > (busy ? AgentApi.STAY_WITH_BUSY_WAIT_MS : AgentApi.STAY_WITH_WAIT_MS)) {
                 release(); jumping = null;
                 return { ok: false, message: `stopped ${d.toFixed(1)} m short at the edge of a ${(here.z - spec.to.z).toFixed(0)} m drop: waited ${Math.round((now - edgeWaitSince) / 1000)} s for ${f!.name} (${f!.dist!.toFixed(0)} m ${compassPoint(f!.bearing!)} of you, on this floor) to come up before going down. A drop is one way (the way back up may be long, or none), so stay_with doesn't leave them on this floor. ${this.stayWithHint(f!.name, label)}${featText()}` };
@@ -7147,7 +7296,7 @@ export class AgentApi {
               j.until = now + 250;
               return null;
             }
-            if (edgeWaitSince) { this.trace(`walk: ${f?.name ?? opts.stayWith} is here; down`); edgeWaitSince = 0; }
+            if (edgeWaitSince) { this.trace(`walk: ${f?.name ?? opts.stayWith} is here; down`); edgeWaitSince = 0; edgeFellow = null; }
           }
           this.host.setYaw(compassToYaw(bearing(me.g, { x: me.g.x + spec.dir.x, y: me.g.y + spec.dir.y })));
           leap(spec);
@@ -7327,6 +7476,9 @@ export class AgentApi {
         // say so now. The follow stood the rest of its time searching wider, then said "followed for 25 s" (2026-10-16).
         if (follow && targetGuid && r.status === 'none' && sr.hasJumps && !doorDetour) {
           const why = this.barrierNote(goalLocal()?.cell ?? undefined);
+          // Not while the leader has moved on since the way was planned: plan again to where they are now.
+          const sh = why ? leaderShift() : null;
+          if (sh && sh.moved >= AgentApi.FOLLOW_REPLAN_M) { followReplan(`${this.nameOf(targetGuid)} moved ${sh.moved.toFixed(0)} m during the search`); return null; }
           if (why) {
             release();
             const o = this.nearby(600).find((x) => x.guid === targetGuid);
@@ -7515,9 +7667,13 @@ export class AgentApi {
           }
           // Following, and the last search found no way either: say so now, not after standing out the duration.
           if (follow && targetGuid && (sr.hasJumps || !jumpSearch())) {
+            // The leader moved on while the searches ran (they were aimed at where the leader was): plan again to where
+            // they are now, as a walk_to set off from here would, rather than "no way to them".
+            const sh = leaderShift();
+            if (sh && sh.moved >= AgentApi.FOLLOW_REPLAN_M) { followReplan(`${this.nameOf(targetGuid)} moved ${sh.moved.toFixed(0)} m during the searches`); return null; }
             release();
             const o = this.nearby(600).find((x) => x.guid === targetGuid);
-            return { ok: false, message: `couldn't follow ${this.nameOf(targetGuid)}: ${this.followStuckWhy(goalLocal()?.cell ?? undefined, true, false, travelled, now - start)}${o ? `; they are ${o.dist.toFixed(0)} m ${compassPoint(o.bearing)} of you` : ''}${featText()}` };
+            return { ok: false, message: `couldn't follow ${this.nameOf(targetGuid)}: ${this.followStuckWhy(goalLocal()?.cell ?? undefined, true, false, travelled, now - start, targetGuid)}${o ? `; they are ${o.dist.toFixed(0)} m ${compassPoint(o.bearing)} of you` : ''}${featText()}` };
           }
           // The doorway route's only way was a leap no take-off was found for, and the wide search that may jump found
           // none either: say so now. The six stalls after it only pushed at the fountain room's wall for ~40 s
@@ -7739,7 +7895,26 @@ export class AgentApi {
       dodgeUntil = now + (stalls >= 3 ? 1600 : 900);
       best = Infinity;
       return null;
-    }, release, { kind: 'walk' }).then((r) => {
+    }, release, { kind: 'walk', ...(opts.quietDone ? { quiet: true } : {}) }).then((r) => {
+      // stay_with: the fellow stood still off your way (another floor, another branch): back to them first, then on to the
+      // goal from beside them (the walk planned again from there), and the answer says so.
+      const rejoin = r.rejoinFellow as { name: string; why: string; where: string; stood: number } | undefined;
+      if (rejoin) {
+        return (async () => {
+          const n = (opts.stayRejoins ?? 0) + 1;
+          this.trace(`walk: ${rejoin.name} is ${rejoin.where}, ${rejoin.why}, and hasn't moved for ${rejoin.stood} s; going back to them first`);
+          this.push('chat', `(system) [Agent] walk: ${rejoin.name} is ${rejoin.why} and hasn't moved for ${rejoin.stood} s; going back to them first, then on`);
+          const head = `${rejoin.name} was ${rejoin.where}, ${rejoin.why}, and hadn't moved for ${rejoin.stood} s`;
+          const back = await this.walkTo(rejoin.name, { within: AgentApi.STAY_WITH_TOGETHER_M - 1, onAwayKeepGoing: true, quietDone: true, ...(opts.flee ? { flee: true } : {}), ...(opts.stopOnAggro ? { stopOnAggro: true } : {}), ...(opts.avoidMonsters ? { avoidMonsters: true } : {}) });
+          if (!back.ok) {
+            const res = after({ ...back, message: `${r.message}: ${head}. Going back to them first didn't get there: ${back.message}. ${this.stayWithHint(rejoin.name, label)}` });
+            this.push('task-done', `${label}: ${res.message}`); // the chain's end (its legs were quiet)
+            return res;
+          }
+          const on = await this.walkTo(target, { ...opts, stayRejoins: n });
+          return { ...on, message: `${head}: went back to them first (${back.message}), then on together: ${on.message}` };
+        })();
+      }
       const lost = r.lostFellow as ReturnType<AgentApi['fellowLastSeen']> | undefined;
       if (!lost) return after(r);
       // On to where the fellow was last placed; a follow follows on from there once they are in sight again.
@@ -8149,8 +8324,24 @@ export class AgentApi {
   /** A follow that moved less than this in all (m) and ends away from the leader got nowhere. */
   static readonly FOLLOW_STILL_M = 3;
 
+  /**
+   * Indoors, a creature (a fellow) whose feet stand where the game's collision has no floor under them: over open air (a
+   * pit, a shaft). Bulwark stood at the fountain room's height over the pit 0x01D201F7 after drops that never fell, his own
+   * walk probe unable to take a step (Mountain Keep, 2026-10-17 02:35–02:37Z), and Arcanist's follow said only "walls all
+   * round". No walk or jump lands beside them there. Null when a floor is under them, or the host can't say.
+   */
+  private noFloorUnder(o: AgentHostObject | null | undefined): string | null {
+    if (!o?.cell || (o.cell & 0xffff) < 0x100 || !this.host.navFloor) return null;
+    const g = toGlobal(o.cell, o.x, o.y);
+    const f = this.host.navFloor(g.x, g.y, o.z + 0.3);
+    if (f !== null && o.z - f < AgentApi.FLOOR_APART_M) return null;
+    return `${o.name} stands where the game's collision has no floor under them (open air${f !== null ? `, ${(o.z - f).toFixed(0)} m over the floor below` : ''}): no walk or jump lands beside them there. Ask them to step back onto a floor or to come to you`;
+  }
+
   /** Why a follow got nowhere: what stands between (barrierNote), else what the searches found. */
-  private followStuckWhy(toCell: number | undefined, noWay: boolean, searching: boolean, travelled: number, ms: number): string {
+  private followStuckWhy(toCell: number | undefined, noWay: boolean, searching: boolean, travelled: number, ms: number, leader?: number): string {
+    const air = leader !== undefined ? this.noFloorUnder(this.host.object(leader)) : null;
+    if (air) return air;
     const note = this.barrierNote(toCell);
     const still = travelled < AgentApi.FOLLOW_STILL_M ? `you moved ${travelled.toFixed(0)} m in ${Math.round(ms / 1000)} s` : '';
     const why = note ?? (noWay
@@ -8584,11 +8775,36 @@ export class AgentApi {
         : (live.find((o) => Math.abs(o.dz) < AgentApi.FLOOR_APART_M && !(melee && this.leashNote(o.guid))) ?? live.find((o) => Math.abs(o.dz) < AgentApi.FLOOR_APART_M) ?? live[0])?.guid ?? null;
       if (!g) return { ok: false, message: 'no target selected and no monster nearby' };
     } else {
-      const r = this.need(target, 'world', 'creature');
+      const r = this.need(target, 'world', 'creature', true);
       if (typeof r !== 'number') return r;
       g = r;
     }
     if (this.host.isDying(g)) return { ok: false, targetGone: true, message: `${this.nameOf(g)} is dead (loot its corpse, or pick another target)` };
+    // A foe of a moment ago (it attacked you or a fellow) that the client let go or destroyed, not dead: go to where it was
+    // last placed (walk_to's monsterLastSeen), then attack it once it is in sight there. The fight goes on.
+    const foeAgo = this.recentFoe(g);
+    const held = this.host.object(g);
+    const lastSpot = foeAgo !== null && (!held || this.released(held)) && !this.dyingSeen.has(g) ? this.monsterLastSeen(g) : null;
+    if (lastSpot && !this.gone.get(g)?.died) {
+      if (!opts.far && !this.casterStance() && !this.missileStance() && held) {
+        const why = this.leavesFellowsNote(g) ?? this.leashNote(g);
+        if (why) return { ok: false, message: why };
+      }
+      const guid = g;
+      this.attackTarget = guid;
+      void this.walkTo(guid, { within: 2.5, timeoutMs: 90_000 }).then((r) => {
+        if (this.attackTarget !== guid) return; // another order came meanwhile
+        const o = this.host.object(guid);
+        if ((r.ok || r.attacked) && o && !this.released(o) && !this.host.isDying(guid)) {
+          const a = this.attackNow(guid, opts);
+          this.push('chat', `(system) [Agent] at ${lastSpot.name} #${guid.toString(16)}'s last place: ${a.message}`);
+          return;
+        }
+        this.attackTarget = 0;
+        this.push('target-lost', `${lastSpot.name} #${guid.toString(16)}: no attack: ${o && !this.released(o) ? r.message.replace(/^walking to [^:]*: /, '') : 'it is not in sight at the spot where it was last seen (it moved on, or died out of sight)'}`, guid);
+      });
+      return { ok: true, message: `${lastSpot.name} #${guid.toString(16)} is out of your client's sight (it let it go), but it attacked ${foeAgo === 0 ? 'just now' : `${foeAgo} s ago`}: going to where it was last seen (${this.lastSeenText(lastSpot)}), then attacking it once it is in sight; ac_wait types=target-died,target-lost,vitals-low,death` };
+    }
     if (!this.host.object(g)) {
       // Gone from the client's world since you saw it: most often it just died (observe listed #800021c0 "ATTACKING
       // YOU", and the attack a moment later said it "isn't attackable", 2026-10-12).

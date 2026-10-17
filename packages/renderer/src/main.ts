@@ -198,7 +198,7 @@ import { LandblockObjectStreamer } from './world/LandblockObjectStreamer.js';
 import { StaticScriptDriver } from './world/StaticScriptDriver.js';
 import { StaticAnimationDriver } from './world/StaticAnimationDriver.js';
 import { createLandblockSceneryBuilder } from './world/LandblockScenery.js';
-import { losesContact, advanceAirborne, airborneReferenceY, headroomClamp, PLAYER_STEP_DOWN_HEIGHT, resolvePlayerStepDownHeight } from './world/fallPhysics.js';
+import { losesContact, advanceAirborneFrame, airborneReferenceY, PLAYER_STEP_DOWN_HEIGHT, resolvePlayerStepDownHeight } from './world/fallPhysics.js';
 import { ClothingRenderer } from './models/ClothingRenderer.js';
 import { AppearanceManager } from './models/AppearanceManager.js';
 import { CharacterModelBuilder } from './models/CharacterModelBuilder.js';
@@ -400,7 +400,7 @@ import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLo
 import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
-import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type PreworldScreen } from './telemetry/PreworldReporter.js';
+import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
 import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
@@ -7706,7 +7706,7 @@ async function main() {
     aceConnection.disconnect();
     sessionStorage.setItem('aceDisconnectTime', Date.now().toString());
     acePassword = '';
-    gameUI.showMessageDialog(text, () => gameUI.callbacks.onWorldBoxClick?.());
+    gameUI.showMessageDialog(text, () => { if (!gameStarted) leaveForLauncher('refused'); });
   };
   /** Set by Options → Exit Game in the world: the CharacterLogOff ack goes to the launcher. */
   let exitToLauncherAfterLogOff = false;
@@ -7715,8 +7715,11 @@ async function main() {
    * World box, the char-select EXIT epilogue and Options → Exit Game (after
    * its logoff has played out) all land here.
    */
-  const leaveForLauncher = (why: string): void => {
+  const leaveForLauncher = (why: LauncherLeaveReason): void => {
     console.log(`[AC] ACE: ${why} — leaving this world for the launcher`);
+    // BUG.resume-silent-launcher — every return to the server select says why (a resume
+    // that ended there at 2026-10-17 02:34Z left no trace of how).
+    preworldReporter?.leftForLauncher(why);
     exitToLauncherAfterLogOff = false;
     accountTabGuard.release();
     sessionLifecycle.noteLoggedOut();
@@ -7736,7 +7739,7 @@ async function main() {
   };
   gameUI.callbacks.onWorldBoxClick = () => {
     if (gameStarted) return;
-    leaveForLauncher('World box');
+    leaveForLauncher('world_box');
   };
   /**
    * ECM_Login::SendNotice_ServerDied (or a Disconnected-screen CharacterError):
@@ -8556,6 +8559,21 @@ async function main() {
       // SmartBox::ProcessObjectNetBlobs @ 00454b20 — the queued messages now.
       pendingPlayScripts.replayFor(data.guid, performance.now());
     };
+    /**
+     * An object ObjectMaint let go (25 s out of sight) that the server speaks
+     * of again: re-made from its last record before the message applies. ACE
+     * still counts it as known (it forgets only on its own schedule) and
+     * sends no new CreateObject, so without this a fellow or monster moving
+     * beside us stayed invisible until ACE forgot it (Claude Bulwark, 8 min
+     * in Mountain Keep 0x01D2010C, 2026-10-17; ServerObjectManager.takeReleasedRecord).
+     */
+    const reviveReleased = (guid: number): void => {
+      if (guid === aceCharGuid) return;
+      serverObjectManager?.reviveReleased(guid, (rec) => {
+        console.log(`[AC] 0x${(rec.guid >>> 0).toString(16)} "${rec.name}" heard from again after the client let it go: re-made (the server still counts it as known)`);
+        handleObjectCreateOrUpdate(rec, false);
+      });
+    };
     const handleObjectCreateOrUpdateInner = (data: CreateObjectData, isUpdate: boolean): void => {
         // ServerSaysContainID @ 0058be40 already listed it in one of our packs (GDLE's spawn order).
         data = pendingContainIds.resolve(data);
@@ -9037,6 +9055,7 @@ async function main() {
           }
           return; // don't move our mesh — camera follows playerWorldX/Z
         }
+        reviveReleased(data.guid);
         serverObjectManager!.updatePosition(data);
       },
       onPlayerTeleport: () => {
@@ -9076,6 +9095,7 @@ async function main() {
         // (GameUI onTeleportAnimationFinished → loginCompleteNotifier).
       },
       onMovementEvent: (data) => {
+        reviveReleased(data.guid);
         serverObjectManager!.handleMovementEvent(data);
       },
       onSetState: (data) => {
@@ -9083,6 +9103,7 @@ async function main() {
           applyPlayerPhysicsState(data.physicsState);
           return;
         }
+        reviveReleased(data.guid);
         serverObjectManager!.setPhysicsState(data.guid, data.physicsState, data.stateSequence);
         refreshHeldCopy(data.guid);
       },
@@ -9097,6 +9118,7 @@ async function main() {
           streamedPlayerBuild(() => applyPlayerAppearance(data));
           return;
         }
+        reviveReleased(data.guid);
         const sd = worldStreamingDats;
         const target = sd ? serverObjectManager!.getObject(data.guid) : undefined;
         if (sd && target?.setupId) {
@@ -11542,6 +11564,7 @@ async function main() {
         // never changed: retail drops our own, as here.
         // ACE GameMessageVectorUpdate.cs.
         if (data.guid !== aceCharGuid) {
+          reviveReleased(data.guid);
           serverObjectManager?.applyVectorUpdate(
             data.guid, data.velocity.x, data.velocity.y, data.velocity.z,
             data.omega.x, data.omega.y, data.omega.z, data.vectorSequence,
@@ -11749,7 +11772,7 @@ async function main() {
         // @ 0055d780 resets the player state and drops the world connection;
         // it posts nothing. The old 'You have been logged off.' was invented.
         if (exitToLauncherAfterLogOff) {
-          leaveForLauncher('Exit Game logoff complete');
+          leaveForLauncher('exit_logoff');
           return;
         }
         console.log('[AC] ACE: CharacterLogOff — back to character select');
@@ -13315,7 +13338,7 @@ async function main() {
         logOffCharacter(gameUI, aceConnection); // SaveToServer, then the logoff
         return;
       }
-      leaveForLauncher('Exit Game');
+      leaveForLauncher('exit_game');
     };
     gameUI.callbacks.onDeleteCharacter = (slot: CharacterSlot) => sendCharacterDelete(parseInt(slot.id, 10));
     gameUI.callbacks.onRestoreCharacter = (slot: CharacterSlot) => sendCharacterRestore(parseInt(slot.id, 10));
@@ -16603,6 +16626,12 @@ async function main() {
           if (height === null) return null;
           return { sea: waterMap.blockWaterTypeAt(x, y) === LandWaterType.EntirelyWater, steep: !terrainCollision.isWalkable(x, y), wade: waterMap.waterDepthAt(x, y), height };
         },
+        // BUG.jump-through-ceiling — the rise the live frame stops under a ceiling (advanceAirborneFrame).
+        navCeiling: (x, y, fromZ, toZ) => {
+          const { inDungeon, toWorld } = agentNav();
+          const w = toWorld(x, y);
+          return (inDungeon ? dungeonCollision : outdoorCollision)?.riseLimit(w.x, w.z, fromZ, toZ) ?? null;
+        },
         navAirStep: (from, dx, dy) => {
           const { inDungeon, toWorld, toGlobal, services } = agentNav();
           const a = toWorld(from.x, from.y);
@@ -17117,7 +17146,10 @@ async function main() {
           const autoEnter = urlLogin.autoLogin !== null && urlParams.get('autoenter') !== 'false';
           const autoSlot = sessionLifecycle.pickAutoEnterSlot(characterSlots, autoEnter);
           // A resume whose character is gone (deleted meanwhile) ends at character select.
-          if (!autoSlot && sessionLifecycle.resumingAfterDrop) sessionLifecycle.endResume();
+          if (!autoSlot && sessionLifecycle.resumingAfterDrop) {
+            sessionLifecycle.endResume();
+            preworldReporter?.resumeEnded('character_gone');
+          }
           // The same tooling convenience for an empty account (not retail):
           // a URL-login session goes on to chargen as if CREATE were pressed,
           // so the probes / captures that create their character still can.
@@ -17128,7 +17160,7 @@ async function main() {
           if (nextLoginSlot) {
             console.log(`[AC] ACE: next login (setnextlogin): ${nextLoginSlot.name}`);
             autoEnterTimer.schedule(() => {
-              if (isAutoEnterTargetStillValid(aceCharList?.characters ?? [], parseInt(nextLoginSlot.id, 10))) gameUI.callbacks.onEnterWorld?.(nextLoginSlot);
+              if (isAutoEnterTargetStillValid(aceCharList?.characters ?? [], parseInt(nextLoginSlot.id, 10))) gameUI.autoEnterCharacter(nextLoginSlot);
             }, 500);
           }
           if (autoSlot) {
@@ -17143,7 +17175,7 @@ async function main() {
                 console.log(`[AC] ACE: Auto-enter skipped — character ${autoSlot.name} no longer valid in the latest character list`);
                 return;
               }
-              gameUI.callbacks.onEnterWorld?.(autoSlot);
+              gameUI.autoEnterCharacter(autoSlot);
             }, 500);
           }
           break;
@@ -17551,7 +17583,8 @@ async function main() {
           // of leaving a stale world behind character select. Not a
           // deliberate logout: keep the last-entered character so
           // /reconnect resumes it.
-          const droppedInWorld = sessionLifecycle.inWorld || sessionLifecycle.resumingAfterDrop;
+          const wasInWorld = sessionLifecycle.inWorld;
+          const droppedInWorld = wasInWorld || sessionLifecycle.resumingAfterDrop;
           // RELEASE.first-minute — the world session ended under the player (a no-op after a tab close).
           // BUG.hidden-tab-session-drop — with what ended it (a network close vs the client's own verdict).
           // OBS.dm-stall-diagnostics — with the connection's state at the drop (the worker's
@@ -17575,9 +17608,10 @@ async function main() {
           // old "Disconnected from ACE server. Type /reconnect to retry."
           // chat line was a client diagnostic retail never printed.
           if (event.everOpened && !event.deliberate) {
+            // Before the world (a resume attempt's session counts: its world_left already went out).
+            if (!wasInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
             // In the world (or mid-resume): reconnect and re-enter on our own first.
             if (droppedInWorld && scheduleResume()) { worldResumePending = true; break; }
-            if (!droppedInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
             raiseServerDied();
           }
           break;
@@ -17631,6 +17665,8 @@ async function main() {
               break;
             }
             if (inWorldVerdict === 'retry') {
+              // BUG.resume-silent-launcher — the first retry of each enter is visible (a resume's says so).
+              preworldReporter?.enterRetry(code, sessionLifecycle.resumingAfterDrop);
               const retryDelay = sessionLifecycle.inWorldRetryDelay();
               console.log(`[AC] ACE: Character still in world, retrying enter world in ${retryDelay}ms...`);
               setTimeout(() => {
@@ -17689,6 +17725,9 @@ async function main() {
             // A resume attempt that couldn't connect: the next one, or the
             // Disconnected screen once the budget is spent.
             if (sessionLifecycle.resumingAfterDrop) {
+              // BUG.resume-silent-launcher — say why this attempt failed (a GDLE STR_LOGIN_FAILED
+              // can be the server's own database hiccup: the next attempt may pass).
+              preworldReporter?.connectionError(event, connectionFailureNotice(event)?.token || null);
               if (!scheduleResume()) raiseServerDied();
               break;
             }
@@ -18834,17 +18873,19 @@ async function main() {
         // current position, so a jump off a cliff keeps falling until the
         // feet reach the lower terrain (reported to ACE as not-in-contact,
         // arming HandleFallingDamage server-side).
-        const air = advanceAirborne(airborneBaseY, playerWorldY, jumpVelocityY, physSteps, groundY, GRAVITY);
+        // BUG.jump-through-ceiling — the rise collides too (advanceAirborneFrame): the head meets the
+        // room's ceiling (or the floor of the storey above) and the jump stops rising there, instead of
+        // carrying the body up through it, over the walls and out of every cell.
+        const riseCollision = playerInDungeon ? dungeonCollision : outdoorCollision;
+        const air = advanceAirborneFrame(airborneBaseY, playerWorldY, jumpVelocityY, physSteps, groundY, GRAVITY, {
+          riseLimit: riseCollision ? (from, to) => riseCollision.riseLimit(playerWorldX, playerWorldZ, from, to) : null,
+          floorAtHead: (headY) => (playerInDungeon
+            ? movementServices.dungeonGroundAt?.(playerWorldX, playerWorldZ, headY)
+            : movementServices.groundAt?.(playerWorldX, playerWorldZ, headY)) ?? null,
+          height: riseCollision?.playerHeight ?? DungeonCollision.PLAYER_HEIGHT,
+        });
         playerWorldY = air.offsetY;
         jumpVelocityY = air.velocityY;
-        if (!air.landed && jumpVelocityY > 0) {
-          // The head meets the floor above: stop rising (headroomClamp).
-          const h = (playerInDungeon ? dungeonCollision : outdoorCollision)?.playerHeight ?? DungeonCollision.PLAYER_HEIGHT;
-          const feet = airborneBaseY + playerWorldY;
-          const over = playerInDungeon ? movementServices.dungeonGroundAt?.(playerWorldX, playerWorldZ, feet + h) : movementServices.groundAt?.(playerWorldX, playerWorldZ, feet + h);
-          const c = headroomClamp(feet, jumpVelocityY, over ?? null, h);
-          if (c.hit) { playerWorldY = c.feetY - airborneBaseY; jumpVelocityY = c.velocityY; }
-        }
         // FAITHFUL.596 verification telemetry — peak height + airtime of the
         // current jump for acDebug.jumpStats() (peak must equal the launch
         // formula's h).

@@ -260,8 +260,15 @@ export const ACCOUNT_NAME_TAKEN_HINT =
   "If you're new to this world, that account name may already belong to someone else: try a different account name. "
   + '(Your browser may also have filled in a password saved for another world.)';
 
-/** The same hint after a refusal whose own text does not say "password" (GDLE / AC1999 "Client logon failed"). */
-export const LOGON_FAILED_HINT = `That usually means a wrong password for this account name. ${ACCOUNT_NAME_TAKEN_HINT}`;
+/**
+ * The same hint after a refusal whose own text does not say "password" (GDLE / AC1999 "Client logon failed").
+ * GDLE sends that one refusal (STR_LOGIN_FAILED) for a wrong password AND for its own account query
+ * failing (Network.cpp AuthenticateUserQuery::PerformQuery → CDatabaseIO::VerifyAccount
+ * VERIFYACCOUNT_ERROR_QUERY_FAILED), which passes again minutes later: Snowreap refused a returning
+ * player twice and a brand-new account once, each accepted soon after (2026-10-17).
+ */
+export const LOGON_FAILED_HINT = `That usually means a wrong password for this account name. ${ACCOUNT_NAME_TAKEN_HINT} `
+  + 'If this name and password worked before, the server may be having trouble: wait a minute and try again.';
 
 const COUNT_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
 const countWord = (n: number): string => COUNT_WORDS[n] ?? String(n);

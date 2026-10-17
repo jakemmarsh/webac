@@ -34,7 +34,18 @@ import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './Tel
 export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
   | 'chargen_sent' | 'chargen_blocked'
-  | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed';
+  | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed'
+  | 'enter_retry' | 'left_for_launcher' | 'resume_ended';
+
+/**
+ * BUG.resume-silent-launcher — why the page went back to the launcher
+ * (left_for_launcher's token): the char-select World box, Exit Game (char
+ * select's EXIT epilogue or Options → Exit Game before the world), Exit Game's
+ * logoff from the world completing, or OK on a refused login / failed
+ * connection's dialog. Every return to the server select now says which.
+ */
+export const LAUNCHER_LEAVE_REASONS = ['world_box', 'exit_game', 'exit_logoff', 'refused'] as const;
+export type LauncherLeaveReason = typeof LAUNCHER_LEAVE_REASONS[number];
 
 /**
  * Why FINISH sent no CharacterCreate (chargen_blocked's token): the no-name /
@@ -212,7 +223,7 @@ export interface PreworldEvent {
    * or its socket closed: the connection's NetDiagnostics, bounded
    * (@ac/network boundNetDiagnostics). Absent otherwise.
    */
-  net?: Record<string, number | string | null>;
+  net?: NonNullable<ReturnType<typeof boundNetDiagnostics>>;
 }
 
 export interface PreworldReporterOptions {
@@ -342,6 +353,8 @@ export class PreworldReporter {
   private loginAt: number | null = null;
   private enterAt: number | null = null;
   private charListSeen = false;
+  /** enter_retry went out for the current enter request. */
+  private enterRetrySent = false;
   /** The chargen_blocked reasons already reported this page. */
   private readonly chargenBlockSeen = new Set<string>();
   private screenKey = '';
@@ -453,6 +466,39 @@ export class PreworldReporter {
   /** CharacterEnterWorldRequest went out (character select, or straight after creation). */
   enterRequested(): void {
     this.enterAt = this.now();
+    this.enterRetrySent = false;
+  }
+
+  /**
+   * BUG.resume-silent-launcher — the server refused the enter with a code
+   * the page retries on its own ("character still in the world", 0x0D):
+   * enter_retry, once per enter request (the first retry; the last one ends
+   * in enter_refused). `resume`: the enter is the automatic resume after an
+   * in-world drop (token 'resume'), else 'enter'.
+   */
+  enterRetry(code: number, resume: boolean): void {
+    if (this.enterRetrySent) return;
+    this.enterRetrySent = true;
+    this.report('enter_retry', {
+      code: code >>> 0,
+      token: resume ? 'resume' : 'enter',
+      sinceEnterMs: this.enterAt !== null ? Math.round(this.now() - this.enterAt) : null,
+    });
+  }
+
+  /** BUG.resume-silent-launcher — the page is going back to the launcher (server select), and why. */
+  leftForLauncher(reason: LauncherLeaveReason): void {
+    if (!(LAUNCHER_LEAVE_REASONS as readonly string[]).includes(reason)) return;
+    this.report('left_for_launcher', { token: reason });
+  }
+
+  /**
+   * BUG.resume-silent-launcher — the automatic resume after an in-world drop
+   * stopped without the world: 'character_gone' (the character list no
+   * longer has the character; the page stays at char select).
+   */
+  resumeEnded(reason: 'character_gone'): void {
+    this.report('resume_ended', { token: reason });
   }
 
   /** The world is up (gameStarted). */

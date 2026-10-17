@@ -211,12 +211,26 @@ const F_EPSILON = 0.0002;
  * away from it, and the next one hits it again and slides from where the
  * body is: retail loses ground going round a sphere that a fresh per-step
  * tangent slide does not.
+ *
+ * BUG.airborne-head-on-slide-sticks — an airborne body's offset is 3-D in
+ * retail: adjust_offset (no contact plane) removes only its part into the
+ * sliding normal, so a step pushing straight into it keeps its vertical part
+ * and is still inserted, with SlidingNormalValid cleared first (ACE
+ * Transition.cs FindTransitionalPosition), and a step that hits nothing
+ * leaves no sliding normal. Here the vertical part is the frame's arc
+ * (advanceAirborneFrame), so an `airborne` step whose sideways part
+ * projects to nothing is that vertical-only step: it hits nothing sideways
+ * and clears the sliding normal, and the next step tries the full offset
+ * again. Without that, a jump straight at a fence (the AC1999 balcony,
+ * 2026-10-16) kept the fence's normal from its first contact for the whole
+ * flight and never went over it. A grounded step still ends there.
  */
 function sweepTransition(
   collider: MovementCollider,
   x: number, z: number, dx: number, dz: number,
   adjust: (x: number, z: number, dx: number, dz: number) => [number, number],
   slide?: SlideState,
+  airborne = false,
 ): [number, number] {
   const n = transitionNumSteps(dx, dz, collider.transitionSphereRadius ?? collider.playerRadius);
   if (n === 0) return [0, 0];
@@ -241,7 +255,11 @@ function sweepTransition(
         oz = along * tz;
       }
     }
-    if (ox * ox + oz * oz < F_EPSILON * F_EPSILON) break;
+    if (ox * ox + oz * oz < F_EPSILON * F_EPSILON) {
+      if (!airborne) break;
+      sliding = null;
+      continue;
+    }
     const [ax, az] = adjust(x + totX, z + totZ, ox, oz);
     maxStepUp = Math.max(maxStepUp, collider.lastStepUp ?? 0);
     sliding = collider.collisionNormal ?? null;
@@ -265,7 +283,7 @@ function outdoorAdjusted(
   return withCreatures(services, services.outdoorCollision, state, () =>
     sweepTransition(services.outdoorCollision, state.x, state.z, dx, dz,
       (x, z, sx, sz) => outdoorAdjustedStep(x === state.x && z === state.z ? state : { ...state, x, z },
-        sx, sz, services, slopeGate), services.slide));
+        sx, sz, services, slopeGate), services.slide, state.airborne));
 }
 
 /**
@@ -476,7 +494,7 @@ function dungeonAdjusted(
   collider: MovementCollider, state: MovementStepState, dx: number, dz: number, services: MovementServices,
 ): [number, number] {
   return withCreatures(services, collider, state, () => sweepTransition(collider, state.x, state.z, dx, dz,
-    (x, z, sx, sz) => dungeonAdjustedStep(collider, x, z, state.floorY, sx, sz, services, !state.airborne), services.slide));
+    (x, z, sx, sz) => dungeonAdjustedStep(collider, x, z, state.floorY, sx, sz, services, !state.airborne), services.slide, state.airborne));
 }
 
 /** One dungeon transition step: the wall slide, then (grounded) the precipice rule. */

@@ -379,12 +379,16 @@ export function sphereIntersectsPoly(
  * player-movement walkable-surface skip: ACE Polygon.pos_hits_sphere itself
  * (Physics/Polygon.cs) tests every polygon the sphere moves into, floors and
  * roofs included. A missile is stopped by a floor or ramp exactly like by a
- * wall.
+ * wall. `approachEps` (default 0, pos_hits_sphere's own test) skips faces
+ * the movement only grazes: movement · N must be below −approachEps
+ * (DungeonCollision.riseLimit: a straight rise is no hit on a wall whose
+ * cell frame rounds its normal a hair downward).
  */
 export function sphereIntersectsAnyPoly(
   node: CollisionBSPNode | undefined,
   sphere: CollisionSphere,
   movement: Vec3,
+  approachEps = 0,
 ): CollisionHit | null {
   if (!node) return null;
   if (node.boundingSphere) {
@@ -395,7 +399,7 @@ export function sphereIntersectsAnyPoly(
   if (node.type === 'LEAF') {
     if (!node.polygons) return null;
     for (const poly of node.polygons) {
-      if (dot(movement, poly.plane.normal) >= 0) continue;
+      if (dot(movement, poly.plane.normal) >= -approachEps) continue;
       const { hit, contactPoint } = polygonHitsSpherePrecise(poly, sphere);
       if (hit) return { polygon: poly, contactPoint };
     }
@@ -404,10 +408,10 @@ export function sphereIntersectsAnyPoly(
   if (!node.splittingPlane) return null;
   const dist = dot(node.splittingPlane.normal, sphere.center) + node.splittingPlane.distance;
   const reach = sphere.radius - EPSILON;
-  if (dist >= reach) return sphereIntersectsAnyPoly(node.posNode, sphere, movement);
-  if (dist <= -reach) return sphereIntersectsAnyPoly(node.negNode, sphere, movement);
-  return sphereIntersectsAnyPoly(node.posNode, sphere, movement)
-    ?? sphereIntersectsAnyPoly(node.negNode, sphere, movement);
+  if (dist >= reach) return sphereIntersectsAnyPoly(node.posNode, sphere, movement, approachEps);
+  if (dist <= -reach) return sphereIntersectsAnyPoly(node.negNode, sphere, movement, approachEps);
+  return sphereIntersectsAnyPoly(node.posNode, sphere, movement, approachEps)
+    ?? sphereIntersectsAnyPoly(node.negNode, sphere, movement, approachEps);
 }
 
 // ── BSP traversal: find_walkable (the step-down / step-up lift) ──

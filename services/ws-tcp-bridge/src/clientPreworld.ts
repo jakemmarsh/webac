@@ -23,6 +23,7 @@ export const PREWORLD_OUTCOMES = [
   'login_refused', 'connect_failed', 'char_list', 'char_error', 'chargen_ok', 'chargen_refused',
   'chargen_sent', 'chargen_blocked',
   'enter_refused', 'enter_ok', 'dropped', 'page_hidden', 'page_left', 'page_reload', 'boot_slow', 'boot_failed',
+  'enter_retry', 'left_for_launcher', 'resume_ended',
 ] as const;
 export type PreworldOutcome = typeof PREWORLD_OUTCOMES[number];
 
@@ -77,7 +78,11 @@ export interface ClientPreworldEvent {
   net?: NetDiag;
 }
 
-export const CLIENT_PREWORLD_MAX_BODY = 2 * 1024;
+/**
+ * The route's body limit (client_preworld and client_world share it). 4 KiB since
+ * OBS.dm-stall-tx-ring: a worst-case first_minute with a full txRecent ring is ~2.4 KiB.
+ */
+export const CLIENT_PREWORLD_MAX_BODY = 4 * 1024;
 
 /** A random page id: what the client puts on its WebSocket URL and on each event. */
 export const TRACE_PATTERN = /^[a-z0-9]{8,32}$/;

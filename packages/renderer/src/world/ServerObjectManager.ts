@@ -336,6 +336,14 @@ export interface ServerObject {
   serverPlace?: { cell: number; worldX: number; worldY: number; worldZ: number };
   /** AGENT — performance.now() ms when the server last set serverPlace (the agent's "still being placed" test). */
   serverPlaceAt?: number;
+  /**
+   * The CreateObject this record was made from, and the last position the
+   * server sent for it (wire frame + stamps): what {@link ServerObjectManager.takeReleasedRecord}
+   * re-makes an object from when the server speaks of it again after
+   * ObjectMaint let it go.
+   */
+  createData?: CreateObjectData;
+  lastServerPosition?: { position: ACPosition; positionTs?: number; teleportTs?: number };
   /** AGENT — performance.now() ms when the physics body last moved worldX/Y/Z (syncBodyToMesh). */
   bodySyncedAt?: number;
   /**
@@ -1278,7 +1286,9 @@ export class ServerObjectManager {
       // wielder's feet as well as in hand, and stayed when they portaled).
       // A parentless object with no position (cell 0) enters no cell either.
       outOfWorld: !!data.physicsParentId || !data.position || data.position.landblock === 0,
+      createData: data,
     };
+    this.maintReleased.delete(data.guid >>> 0);
 
     // Check if this is a missile/projectile
     const isMissile = !!(data.physicsState & PhysicsState.Missile);
@@ -1495,6 +1505,7 @@ export class ServerObjectManager {
    */
   private updateInPlace(obj: ServerObject, data: CreateObjectData): void {
     const ts = data.timestamps ?? [];
+    obj.createData = data;
     this.updateAppearance({
       guid: obj.guid,
       basePalette: data.basePalette, subPalettes: data.subPalettes,
@@ -1637,6 +1648,8 @@ export class ServerObjectManager {
 
   /** Delete a server object and remove from scene. `reason` names the caller for the removal journal. */
   deleteObject(guid: number, reason: ObjectRemovalReason = 'server'): void {
+    // The server deleted it: a copy ObjectMaint let go is not to come back.
+    if (reason === 'server') this.maintReleased.delete(guid >>> 0);
     const obj = this.objects.get(guid);
     if (!obj) return;
 
@@ -1795,6 +1808,11 @@ export class ServerObjectManager {
     // Where the server says it is, for the agent's observations (an airborne one the body ignores included).
     obj.serverPlace = { cell: cell >>> 0, worldX: newX, worldY: newY, worldZ: newZ };
     obj.serverPlaceAt = performance.now();
+    obj.lastServerPosition = {
+      position: { landblock: cell >>> 0, x, y, z, rw, rx, ry, rz },
+      positionTs: stamps.positionTs ?? obj.lastServerPosition?.positionTs,
+      teleportTs: stamps.teleportTs ?? obj.lastServerPosition?.teleportTs,
+    };
     if (r === 'ignored') return;
     // SmartBox::HandleReceivedPosition @ 00453fd0: an object without
     // animations takes the position's placement (SetPlacementFrame; 0 when
@@ -2363,12 +2381,118 @@ export class ServerObjectManager {
       if (nowSec < at) continue;
       if (this.maintViewer && this.maintViewer.changedAt < at) continue;
       this.destructionQueue.delete(guid);
-      if (this.objects.get(guid)?.lostCell) { this.forceDelete(guid, 'maint'); destroyed.push(guid); }
+      const gone = this.objects.get(guid);
+      if (gone?.lostCell) {
+        this.keepReleasedRecord(gone);
+        this.forceDelete(guid, 'maint');
+        destroyed.push(guid);
+      }
     }
     if ((left.length > 0 || destroyed.length > 0) && this.onObjectMaintReport) {
       try { this.onObjectMaintReport({ left, destroyed }); } catch { /* diagnostics never block the upkeep */ }
     }
     this.flushRemovalJournal();
+  }
+
+  /**
+   * Objects ObjectMaint deleted (out of sight 25 s), each kept as the
+   * CreateObject that re-makes it as last known (its latest position,
+   * appearance and state). ACE forgets an object on its own schedule
+   * (Physics/Common/ObjectMaint.cs DestroyObjects, run only from the
+   * player's server-side cell change, with a clock the object's own cell
+   * changes reset) and until then counts it as known: it never re-sends the
+   * CreateObject (PhysicsObj.handle_visible_obj: prevKnown) and keeps
+   * sending the object's movement, positions and states to every player in
+   * its KnownPlayers. Whenever our release ran ahead of ACE's, every later
+   * message for it named a guid we no longer held (retail queues such a blob
+   * for a create that never comes, SmartBox::HandleVectorUpdate @ 00453480 →
+   * CObjectMaint::QueueBlobForObject), so the object stayed invisible while
+   * it moved beside us: Claude Bulwark for 8 minutes in Mountain Keep
+   * 0x01D2010C (2026-10-17). The owner re-makes it from here on the first
+   * such message ({@link takeReleasedRecord}); one the server never speaks
+   * of again (a monster that died out of sight) stays gone.
+   */
+  private maintReleased = new Map<number, CreateObjectData>();
+  /** Most released records kept (oldest dropped first). */
+  static readonly MAINT_RELEASED_MAX = 1024;
+
+  private keepReleasedRecord(obj: ServerObject): void {
+    const d = obj.createData;
+    if (!d || obj.guid === this.playerGuid || obj.guid === this.localPlayerGuid || this.projectiles.has(obj.guid)) return;
+    const ts = [...(d.timestamps ?? [])];
+    const last = obj.lastServerPosition;
+    if (last?.positionTs !== undefined) ts[PhysicsTimestamp.Position] = last.positionTs;
+    if (last?.teleportTs !== undefined) ts[PhysicsTimestamp.Teleport] = last.teleportTs;
+    if (obj.lastStateSequence >= 0) ts[PhysicsTimestamp.State] = obj.lastStateSequence;
+    if (obj.lastVisualDescSeq >= 0) ts[PhysicsTimestamp.ObjDesc] = obj.lastVisualDescSeq;
+    const rec: CreateObjectData = {
+      ...d,
+      name: obj.name,
+      position: last?.position ?? obj.position ?? d.position,
+      physicsState: obj.physicsState,
+      basePalette: obj.basePalette, subPalettes: obj.subPalettes,
+      textureChanges: obj.textureChanges, animPartChanges: obj.animPartChanges,
+      placement: obj.placement,
+      // Its motion and velocity at create time are long over: the message that
+      // brings it back (or the next) carries the current ones.
+      initialMotion: undefined,
+      velocityX: 0, velocityY: 0, velocityZ: 0,
+      timestamps: ts,
+    };
+    const g = obj.guid >>> 0;
+    this.maintReleased.delete(g);
+    this.maintReleased.set(g, rec);
+    while (this.maintReleased.size > ServerObjectManager.MAINT_RELEASED_MAX) {
+      const oldest = this.maintReleased.keys().next().value;
+      if (oldest === undefined) break;
+      this.maintReleased.delete(oldest);
+    }
+  }
+
+  /**
+   * The record of an object ObjectMaint let go, to re-make it now that the
+   * server speaks of it again (UpdatePosition, a movement, a vector, a state,
+   * an ObjDesc): the server still counts it as known and sends no new
+   * CreateObject. Taken once; null when the guid was never let go (or the
+   * server deleted it since, or it is held again).
+   */
+  takeReleasedRecord(guid: number): CreateObjectData | null {
+    const g = guid >>> 0;
+    const rec = this.maintReleased.get(g);
+    if (!rec) return null;
+    this.maintReleased.delete(g);
+    return this.objects.has(guid) ? null : rec;
+  }
+
+  /** The released records of the items `holderGuid` held (they went with it): re-made with it. */
+  takeReleasedHeldBy(holderGuid: number): CreateObjectData[] {
+    const out: CreateObjectData[] = [];
+    for (const [g, rec] of this.maintReleased) {
+      if (((rec.physicsParentId || rec.wielderId || 0) >>> 0) !== (holderGuid >>> 0)) continue;
+      this.maintReleased.delete(g);
+      if (!this.objects.has(g)) out.push(rec);
+    }
+    return out;
+  }
+
+  /**
+   * The server spoke of `guid` (a position, movement, vector, state or
+   * ObjDesc): if ObjectMaint had let it go, re-make it, and the items it
+   * held, through `make` (the owner's CreateObject path) before the message
+   * applies. True when it was re-made.
+   */
+  reviveReleased(guid: number, make: (rec: CreateObjectData) => void): boolean {
+    if (guid === this.playerGuid || guid === this.localPlayerGuid || this.objects.has(guid)) return false;
+    const rec = this.takeReleasedRecord(guid);
+    if (!rec) return false;
+    make(rec);
+    for (const held of this.takeReleasedHeldBy(guid)) make(held);
+    return true;
+  }
+
+  /** How many released records are kept (probes / tests). */
+  get releasedRecordCount(): number {
+    return this.maintReleased.size;
   }
 
   /**
@@ -2886,6 +3010,7 @@ export class ServerObjectManager {
 
   /** Remove all objects. */
   clear(): void {
+    this.maintReleased.clear();
     this.dyingObjects.clear();
     this.projectiles.clear();
     this.destructionQueue.clear();

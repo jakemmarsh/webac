@@ -197,6 +197,10 @@ const STEP_DOWN_RAISE_EPS = 0.01;
 /** AC +Z: the up axis step_sphere_down moves the feet sphere along. */
 const AC_UP = { x: 0, y: 0, z: 1 };
 const scratchLanding = new THREE.Vector3();
+/** riseLimit's sweep step (m): a few cm of headroom lost at most. */
+const RISE_STEP_M = 0.05;
+/** riseLimit: a face stops the rise when its normal points down by more than this (cos): ceilings, not walls. */
+const RISE_GRAZE = 0.1;
 
 /** The terrain under (x, z) (three.js world): height, Y-up plane normal, wade depth. */
 export type TerrainLandingSource = (x: number, z: number) => {
@@ -1302,6 +1306,47 @@ export class DungeonCollision {
   /** The (resolved) body spheres: their radius and their centres' heights above the feet. */
   get bodySphereLayout(): { radius: number; heights: readonly number[] } {
     return { radius: this.bodySphereRadius, heights: this.bodySphereHeights };
+  }
+
+  /**
+   * BUG.jump-through-ceiling — a body rising at (worldX, worldZ) from feet
+   * height `fromY` toward `toY` meets the ceiling: the highest feet height
+   * (≤ toY) its spheres reach before one moves into a polygon over it, or
+   * null when nothing stops it. Retail's airborne transition sweeps every
+   * body sphere along the whole offset, the vertical part included
+   * (CPhysicsObj::UpdateObjectInternal @ 005156b0 → CTransition::
+   * find_valid_position; ACE Transition.FindTransitionalPosition), so the
+   * head sphere hits a room's ceiling and the jump stops rising there
+   * (handle_all_collisions takes the velocity into the face away). Our
+   * airborne step moved the spheres only sideways at the feet height, so a
+   * high jump (Jump 400+: 4.9 m) in Mountain Keep's 3 m corridor 0x01D202A2
+   * rose through the ceiling, over the wall and out of every cell, where
+   * the floor search finds nothing and the body hung at its take-off height
+   * (2026-10-17). Only faces the rise moves into count (movement · N < 0,
+   * pos_hits_sphere): a floor seen from below or a wall beside the body
+   * never stops it. Swept in RISE_STEP_M steps.
+   */
+  riseLimit(worldX: number, worldZ: number, fromY: number, toY: number): number | null {
+    if (this.cells.size === 0 || !(toY > fromY)) return null;
+    const n = Math.max(1, Math.ceil((toY - fromY) / RISE_STEP_M));
+    const dy = (toY - fromY) / n;
+    const cells = [...this.cellsNear(worldX, worldZ, this.bodySphereRadius)];
+    let prev = fromY;
+    for (let i = 1; i <= n; i++) {
+      const y = fromY + dy * i;
+      for (const cell of cells) {
+        const inv = 1 / cell.scale;
+        const move = scaleVec(quatRotate(quatConjugate(cell.quat), { x: 0, y: 0, z: dy }), inv);
+        for (const h of this.bodySphereHeights) {
+          const center = scaleVec(globalToLocal(cell.origin, cell.quat,
+            { x: worldX - cell.blockOffsetX, y: worldZ - cell.blockOffsetY, z: y + h }), inv);
+          // A face counts only when the rise goes into it, not along it (a wall: N·up ≈ 0).
+          if (sphereIntersectsAnyPoly(cell.bsp, { center, radius: this.bodySphereRadius * inv }, move, RISE_GRAZE * dy * inv)) return prev;
+        }
+      }
+      prev = y;
+    }
+    return null;
   }
 
   /**

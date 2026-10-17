@@ -49,7 +49,9 @@ export function formatObject(o: AgentObject): string {
   else if (o.open === false) bits.push('closed');
   if (o.notByHand) bits.push('opened by a lever or switch, not by hand');
   if (o.dying) bits.push('DYING (dead: not a target)');
-  if (o.outOfSight) bits.push('OUT OF SIGHT: only where it was last seen (it may have moved, died or gone)');
+  if (o.outOfSight) bits.push(o.foeAgoS !== undefined
+    ? `OUT OF SIGHT: only where it was last seen, but it attacked ${o.foeAgoS ? `${o.foeAgoS} s ago` : 'just now'} (ac_attack goes to where it was last seen and fights it there)`
+    : 'OUT OF SIGHT: only where it was last seen (it may have moved, died or gone)');
   if (o.otherFloor !== undefined) {
     // Whether a walk gets there is the walk planner's answer (the doorway route walk_to takes), not the height's.
     const w = o.otherFloorWay;

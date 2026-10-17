@@ -67,6 +67,8 @@ export interface AgentObject {
    * on: CPhysicsObj::leave_visibility): not drawn, frozen where it was last seen, deleted 25 s later. Not there to act on.
    */
   outOfSight?: boolean;
+  /** Out of sight but a foe of a moment ago: seconds since it attacked you or a fellow (ac_attack still goes after it). */
+  foeAgoS?: number;
   /** Indoors, on a floor this many metres above (+) or below (−) yours: in view maybe, but no step reaches it. */
   otherFloor?: number;
   /**

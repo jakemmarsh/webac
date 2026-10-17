@@ -53,7 +53,7 @@ import { OrderedFragmentBuffer } from './OrderedFragmentBuffer.js';
 import { FragmentAssembler } from './FragmentAssembler.js';
 import { MAX_SERVER_PACKET_SIZE } from './PacketBuilder.js';
 import { LinkStatusAverages } from './LinkStatusAverages.js';
-import { type NetDiagnostics, hex32, msAgo } from './NetDiagnostics.js';
+import { type NetDiagnostics, TxRing, hex32, joinLabels, messageLabel, msAgo } from './NetDiagnostics.js';
 import { ThreadStallClock, silenceIsOwnStall, type LinkSample } from './ThreadStall.js';
 import type { GameMessage, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData } from './MessageSerializer.js';
 
@@ -553,6 +553,8 @@ export class ClientConnection {
   private diagTxPkts = 0;
   private diagRxBytes = 0;
   private diagRxAt = 0;
+  /** OBS.dm-stall-tx-ring — our last sequenced packets and the server's ACKs of them. */
+  private readonly diagTx = new TxRing();
   /** The socket whose end was already reported with 'disconnected' (so the
    *  later onclose of a socket we closed ourselves doesn't report it twice). */
   private sessionEndedFor: unknown = null;
@@ -584,8 +586,14 @@ export class ClientConnection {
   // retry until the old session times out or gets booted.
   private loginRetryTimer: ReturnType<typeof setInterval> | null = null;
   private loginRetryCount: number = 0;
-  private static readonly LOGIN_RETRY_INTERVAL = 5000; // 5 seconds
-  private static readonly LOGIN_MAX_RETRIES = 4;
+  // Retail ClientNet::LogonUseTime @ 00544a10 (end-of-retail client, which
+  // Dark Majesty servers run too): a LoginRequest whenever
+  // HANDSHAKE_WAIT_FOR_HANDSHAKE_RESPONSE_TIMEOUT (2 s) has passed since the
+  // last, and ID_ConnectionError_ClientTimedOutServer once nRequestsSent is
+  // past 0x13: 20 sends 2 s apart, the give-up at 40 s. Ours used to send 5,
+  // 5 s apart, and give up at 25 s.
+  static readonly LOGIN_RETRY_INTERVAL = 2000;
+  static readonly LOGIN_MAX_RETRIES = 19;
 
 
   /** DAT iteration counts for DDD_InterrogationResponse (must match server's DATs). */
@@ -699,10 +707,12 @@ export class ClientConnection {
       rxPkts: this.diagRxPkts,
       txPkts: this.diagTxPkts,
       rxBytes: this.diagRxBytes,
+      ...this.diagTx.snapshot(now),
     };
   }
 
   private resetDiagnostics(): void {
+    this.diagTx.reset();
     this.diagRxAt = this.diagRxMsgAt = this.diagRxSeqAt = 0;
     this.diagRxFlags = this.diagRxOpcode = this.diagRxEvent = -1;
     this.diagNakAt = this.diagNaks = this.diagSrvAck = 0;
@@ -1632,6 +1642,7 @@ export class ClientConnection {
   private handleServerAck(ackedSeq: number): void {
     PKT_DEBUG && console.log(`[AC:PKT] Server acked our seq ${ackedSeq}`);
     if (ackedSeq > this.diagSrvAck) this.diagSrvAck = ackedSeq;
+    this.diagTx.serverAck(ackedSeq, Date.now());
     for (const seq of this.sentPacketCache.keys()) {
       if (seq < ackedSeq) this.sentPacketCache.delete(seq);
     }
@@ -2215,6 +2226,7 @@ export class ClientConnection {
     }
     this.ws.send(buf.buffer);
     this.noteSent(true);
+    this.diagTx.sent(header.sequence, header.flags, 'ts+echo', Date.now());
     this.linkStatusAverages.countSent();
   }
 
@@ -2318,6 +2330,8 @@ export class ClientConnection {
 
     this.ws.send(buf.buffer);
     this.noteSent(true);
+    this.diagTx.sent(header.sequence, header.flags,
+      joinLabels(fragments.map(f => (f.header.index === 0 ? messageLabel(f.data) : 'cont'))), Date.now());
     this.linkStatusAverages.countSent(); // SharedNet::SendPacket: PacketsSentCounter (9)
   }
 }

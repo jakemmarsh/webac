@@ -49,6 +49,28 @@ describe('RECON.charselect-dat-controls — char-select EXIT / ENTER', () => {
   const click = (el: Element): void => { el.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true })); };
   const dialogButtons = (): HTMLElement[] => [...domWindow.document.querySelectorAll('.ac-dialog-button')] as HTMLElement[];
 
+  it('BUG.resume-silent-launcher — the page\'s own enter (auto-resume, URL auto-enter) goes through EnterGame: row selected, Entering World up', async () => {
+    const { ui, container } = await freshSelect();
+    const onEnterWorld = vi.fn();
+    ui.callbacks.onEnterWorld = onEnterWorld;
+    const beta = { id: '1342177282', name: 'Beta' };
+    ui.autoEnterCharacter(beta);
+    expect(onEnterWorld).toHaveBeenCalledWith(beta);
+    expect(ui.selectScreen.selectedCharacter.name).toBe('Beta');
+    // The wait dialog's full-screen blocker covers the World box / EXIT while the enter is under way
+    // (GDLE's "still in the world" retries run behind it).
+    const wait = container.querySelector('#charsel-enteringworld') as HTMLElement;
+    expect(wait).toBeTruthy();
+    expect(wait.style.pointerEvents).toBe('auto');
+    // The agent tools' enter is refused while it is up, as a second ENTER would be.
+    expect(ui.enterCharacterNamed('Alpha')).toBe('already entering the world');
+    // A refusal that gives up (retail's char-select OK dialog) re-renders the screen without it.
+    ui.showCharacterErrorDialog('refused', [
+      { id: '1342177281', name: 'Alpha' }, beta,
+    ] as unknown as Parameters<typeof ui.showCharacterSelect>[0]);
+    expect(container.querySelector('#charsel-enteringworld')).toBeNull();
+  });
+
   it('EXIT asks ID_CharacterManagement_ConfirmExit and No keeps the char-select screen', async () => {
     const { ui, container } = await freshSelect();
     const onExitGame = vi.fn();

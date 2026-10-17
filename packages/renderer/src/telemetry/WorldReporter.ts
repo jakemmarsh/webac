@@ -69,7 +69,7 @@ export interface WorldDropDetail {
 }
 
 /** The bounded connection diagnostics an event carries (boundNetDiagnostics). */
-export type WorldNetDiagnostics = Record<string, number | string | null>;
+export type WorldNetDiagnostics = NonNullable<ReturnType<typeof boundNetDiagnostics>>;
 
 /** The first-minute window. */
 export const FIRST_MINUTE_MS = 60_000;

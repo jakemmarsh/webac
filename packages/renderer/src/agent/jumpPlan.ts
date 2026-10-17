@@ -63,6 +63,11 @@ export interface JumpKit {
   launch(power: number, walk: boolean): { forward: number; up: number };
   /** Seconds of holding the jump key to charge it fully (ATTACK_POWERUP_TIME; 0.8 s in dual wield). */
   chargeSeconds: number;
+  /**
+   * BUG.jump-through-ceiling — the highest feet height a body rising at (x, y) from `fromZ` toward `toZ` reaches
+   * before its head meets a ceiling (DungeonCollision.riseLimit), or null when nothing stops it. Absent: no ceilings.
+   */
+  ceiling?(x: number, y: number, fromZ: number, toZ: number): number | null;
   /** The body's height (Setup 0x02000001: 1.835 m), for the floor above its head (fallPhysics.headroomClamp). */
   bodyHeight?: number;
   /** The server's fall-damage formula (ACE's when absent). */
@@ -168,7 +173,7 @@ const FLIGHT_DT = 1 / 30;
  * (where its feet reach a walkable, with the vertical speed then) or null when it never lands within
  * `maxSeconds` or falls more than `maxFall` metres.
  */
-export function simulateFlight(kit: Pick<JumpKit, 'floor' | 'airStep' | 'bodyHeight'>, from: NavPoint, vx: number, vy: number, vz: number, opts: { maxSeconds?: number; maxFall?: number } = {}): Landing | null {
+export function simulateFlight(kit: Pick<JumpKit, 'floor' | 'airStep' | 'bodyHeight' | 'ceiling'>, from: NavPoint, vx: number, vy: number, vz: number, opts: { maxSeconds?: number; maxFall?: number } = {}): Landing | null {
   const maxT = opts.maxSeconds ?? 4;
   const maxFall = opts.maxFall ?? 60;
   const height = kit.bodyHeight ?? BODY_HEIGHT;
@@ -176,6 +181,11 @@ export function simulateFlight(kit: Pick<JumpKit, 'floor' | 'airStep' | 'bodyHei
   while (t < maxT) {
     let nz = z + v * FLIGHT_DT - 0.5 * GRAVITY * FLIGHT_DT * FLIGHT_DT;
     let nv = v - GRAVITY * FLIGHT_DT;
+    // The head meets the ceiling: the rise stops there (as the live frame's ceilingStop does).
+    if (nz > z && kit.ceiling) {
+      const top = kit.ceiling(x, y, z, nz);
+      if (top !== null) { nz = top; nv = 0; }
+    }
     if (nv > 0) ({ feetY: nz, velocityY: nv } = headroomClamp(nz, nv, kit.floor(x, y, nz + height), height));
     const moved = vx || vy ? kit.airStep({ x, y, z }, vx * FLIGHT_DT, vy * FLIGHT_DT) : { x, y };
     t += FLIGHT_DT;

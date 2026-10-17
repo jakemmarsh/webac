@@ -172,6 +172,7 @@ export class DungeonHost extends FakeHost {
   override get navProbe(): AgentHost['navProbe'] { return this.nav.probe; }
   override get navFloor(): AgentHost['navFloor'] { return (x, y, z) => this.nav.kit.floor(x, y, z); }
   override get navAirStep(): AgentHost['navAirStep'] { return (f, dx, dy) => this.nav.kit.airStep(f, dx, dy); }
+  override get navCeiling(): AgentHost['navCeiling'] { return (x, y, a, b) => this.nav.kit.ceiling?.(x, y, a, b) ?? null; }
   override get jumpLaunch(): AgentHost['jumpLaunch'] { return (p, w) => ({ ...this.nav.kit.launch(p, w), chargeSeconds: this.nav.kit.chargeSeconds }); }
   override route = (fc: number, f: unknown, tc: number, t: { x: number; y: number; z: number }, o?: Parameters<AgentHost['route']>[4]): ReturnType<AgentHost['route']> =>
     findRouteViaOutside(this.graph, fc, f as { x: number; y: number; z: number }, tc, t, o);
@@ -259,6 +260,36 @@ export class DungeonHost extends FakeHost {
         await Promise.resolve();
       }
       return r ?? { ok: false, message: 'the walk had not ended' };
+    } finally {
+      console.log = log;
+    }
+  }
+
+  /**
+   * Stand at (cell, x, y, z) and run whatever `start` sets going on the agent (a follow, a stay_with walk), the page ticking
+   * every 100 ms and `each` called before every tick (to move a fellow, say), until it ends. Other objects (a fellow) are
+   * added to the host before this.
+   */
+  async run(cell: number, at: { x: number; y: number; z: number }, start: (api: AgentApi) => Promise<AgentResult>, opts: { maxMs?: number; each?: (api: AgentApi) => void } = {}): Promise<AgentResult> {
+    this.me = { ...this.me, cell: cell >>> 0, ...at, yaw: compassToYaw(0) };
+    const api = new AgentApi(this);
+    this.api = api;
+    const log = console.log;
+    console.log = (...a: unknown[]) => { this.traces.push(a.join(' ')); };
+    try {
+      let r: AgentResult | null = null;
+      void start(api).then((x) => { r = x; });
+      const maxMs = opts.maxMs ?? 300_000;
+      for (let t = 0; t < maxMs && !r; t += 100) {
+        opts.each?.(api);
+        this.t += 100;
+        vi.advanceTimersByTime(100);
+        this.physics(100);
+        api.tick();
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+      return r ?? { ok: false, message: 'it had not ended' };
     } finally {
       console.log = log;
     }

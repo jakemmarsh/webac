@@ -70,16 +70,22 @@ async function main(): Promise<void> {
       relay = spawn(process.execPath, ['-e', RELAY_JS], { stdio: 'ignore' });
       const end = Date.now() + 90_000;
       let wasOut = false;
+      // The resume's auto-enter shows retail's Entering World plate over character select (BUG.resume-silent-launcher).
+      let plateSeen = false;
       while (Date.now() < end) {
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(500);
+        if (!plateSeen && (await page.evaluate("(() => { const e = document.getElementById('charsel-enteringworld'); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()").catch(() => false))) {
+          plateSeen = true;
+          console.log('Entering World plate shown during the resume');
+        }
         const inw = await inWorld(page).catch(() => false);
         if (!inw) wasOut = true;
         if (wasOut && inw) break;
         if (lines.some((l) => /Disconnected screen/.test(l))) break;
       }
       const back = !lines.some((l) => /Disconnected screen/.test(l)) && (await inWorld(page).catch(() => false));
-      console.log(`RESULT netdrop back_in_world=${back}`);
-      process.exitCode = back ? 0 : 1;
+      console.log(`RESULT netdrop back_in_world=${back} entering_world_plate=${plateSeen}`);
+      process.exitCode = back && plateSeen ? 0 : 1;
       return;
     }
     const pids = descendants(process.pid).filter((p) => {

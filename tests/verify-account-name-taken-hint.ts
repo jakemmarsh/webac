@@ -140,7 +140,13 @@ describe('the hint text', () => {
     expect(ACCOUNT_NAME_TAKEN_HINT).toMatch(/different account name/);
     expect(ACCOUNT_NAME_TAKEN_HINT).toMatch(/browser .*password saved for another world/);
     expect(LOGON_FAILED_HINT.startsWith('That usually means a wrong password for this account name. ')).toBe(true);
-    expect(LOGON_FAILED_HINT.endsWith(ACCOUNT_NAME_TAKEN_HINT)).toBe(true);
+    expect(LOGON_FAILED_HINT).toContain(ACCOUNT_NAME_TAKEN_HINT);
+  });
+
+  it('GDLE sends the same refusal when its own account query fails: a returning player is told to wait and retry', () => {
+    // STR_LOGIN_FAILED also comes from CDatabaseIO::VerifyAccount's QUERY_FAILED (Snowreap 2026-10-17:
+    // a returning player refused twice, a brand-new account once, each accepted minutes later).
+    expect(LOGON_FAILED_HINT.endsWith('If this name and password worked before, the server may be having trouble: wait a minute and try again.')).toBe(true);
   });
 });
 
