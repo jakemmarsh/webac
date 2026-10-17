@@ -178,7 +178,7 @@ describe('3. equip onto a chosen slot, and unequip', () => {
   it('without slot= the reply names where it went and what it replaced (the double-click took the wrong wrist)', async () => {
     host.wield = (g: number) => { setWorn(DEAD.guid, null); setWorn(g, 0x20000); return true; };
     const r = await settle(api, host, api.equip(NEW.guid), 20_000);
-    expect(r).toEqual({ ok: true, message: 'equipped Bracelet (right wrist), taking off Heavy Bracelet #8000e111 into your pack' });
+    expect(r).toEqual({ ok: true, message: 'equipped Bracelet (right wrist), taking off Heavy Bracelet #8000e111 into your pack\n  (both wrists were taken, so it went on the right wrist as a double-click does; to replace Heavy Bracelet #8000e760 on the left wrist instead, equip with slot="left wrist")' });
   });
 
   it('a swing or a fellow\'s spell words during the wait are not the answer; the item\'s own spell is', async () => {
@@ -189,7 +189,7 @@ describe('3. equip onto a chosen slot, and unequip', () => {
       return true;
     };
     const r = await settle(api, host, api.equip(NEW.guid), 20_000);
-    expect(r).toEqual({ ok: true, message: 'equipped Bracelet (right wrist), taking off Heavy Bracelet #8000e111 into your pack\n  Bracelet cast Strength Self IV on you' });
+    expect(r).toEqual({ ok: true, message: 'equipped Bracelet (right wrist), taking off Heavy Bracelet #8000e111 into your pack\n  Bracelet cast Strength Self IV on you\n  (both wrists were taken, so it went on the right wrist as a double-click does; to replace Heavy Bracelet #8000e760 on the left wrist instead, equip with slot="left wrist")' });
   });
 
   it('unequip is the drag off the paperdoll into the pack', async () => {

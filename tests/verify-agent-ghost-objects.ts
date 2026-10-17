@@ -83,7 +83,7 @@ describe('released objects are not presented as there', () => {
     host.target = SENTRY;
     const r = await api.cast('Flame Bolt I', null);
     expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/Flame Bolt I not cast: your target Mite Sentry is out of sight/);
+    expect(r.message).toMatch(/Flame Bolt I not cast: your target Mite Sentry #[0-9a-f]+ is out of sight: your client let it go/);
     expect(host.sent.some((s) => s.startsWith('cast'))).toBe(false);
   });
 });

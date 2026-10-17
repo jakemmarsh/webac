@@ -20,8 +20,12 @@
  * AssociateAddress returns (1.7-3.2 s, measured seven times on the production
  * host), and every datagram sent meanwhile is lost. So an attach is
  * done only when a request from the slot comes back from checkip naming the
- * new address (the provider's awaitReady); an address that never does is
- * given back and one fresh address tried in its place.
+ * new address, and then, for a world with a path probe (pathProbeFor: the
+ * AC1999 server-tracker login), once the world's own server answers a
+ * datagram from the slot or PATH_PROBE_MAX_MS passes (best-effort; the
+ * provider's awaitReady). Checkip is inside AWS and can pass about 1 s before
+ * the path to outside hosts opens. An address checkip never confirms is given
+ * back and one fresh address tried in its place.
  *
  * Coordination is cross-process through files in BRIDGE_EGRESS_DIR, because
  * two bridges share the slots during a deploy (the old one drains for hours
@@ -52,6 +56,7 @@
  * the manager compares is one it wrote itself (mtimes are set from its
  * clock), so tests drive staleness and grace with a fake clock.
  */
+import * as dgram from 'dgram';
 import * as fs from 'fs';
 import * as https from 'https';
 import * as net from 'net';
@@ -61,6 +66,8 @@ import type { EgressConfig, EgressWorld } from './bridgeUtil.js';
 import type { Logger } from './log.js';
 import { sppAddressBytes } from './spp.js';
 import { readSingleFragmentMessages } from './routines.js';
+import { buildLoginBody1999 } from '../../../packages/network/src/era1999/Login1999.js';
+import { buildPacket1999, F1999 } from '../../../packages/network/src/era1999/Packet1999.js';
 
 /** An unresolved new-account marker (a login whose character list never came) stops counting after 30 days. */
 export const PENDING_MARKER_TTL_MS = 30 * 24 * 3600_000;
@@ -149,9 +156,10 @@ export interface EgressProvider {
   detach(h: HeldAddress): Promise<void>;
   /**
    * After a fresh attach: wait until `held` passes traffic from `slot` both
-   * ways. null: this provider doesn't check (static, or no probe configured).
+   * ways (checkip, then `path` when given: the world's own server answering).
+   * null: this provider doesn't check (static, or no probe configured).
    */
-  awaitReady?(slot: EgressSlot, held: HeldAddress): Promise<ReadyResult | null>;
+  awaitReady?(slot: EgressSlot, held: HeldAddress, path?: PathProbe | null): Promise<ReadyResult | null>;
   /** This instance's tagged addresses ([] for static). */
   listTagged(): Promise<TaggedAddress[]>;
 }
@@ -166,8 +174,18 @@ export class StaticEgressProvider implements EgressProvider {
   async listTagged(): Promise<TaggedAddress[]> { return []; }
 }
 
-/** awaitReady's answer: `last` is what the final probe saw (an address, or the error), for the log. */
-export interface ReadyResult { ready: boolean; ms: number; attempts: number; last: string }
+/**
+ * awaitReady's answer: `last` is what the final probe saw (an address, or the
+ * error), for the log. `probe` names the probe that decided it ('checkip', or
+ * a path probe's name); `attempts` are that probe's. With a path probe,
+ * `checkipMs` / `checkipAttempts` are checkip's part (`ms` is the total).
+ */
+export interface ReadyResult {
+  ready: boolean; ms: number; attempts: number; last: string; probe: string;
+  checkipMs?: number; checkipAttempts?: number;
+  /** A path probe that got no reply within PATH_PROBE_MAX_MS: the address is ready anyway (checkip proved it ours). */
+  pathUnconfirmed?: PathProbeResult;
+}
 
 /** One readiness probe: the public address a request bound to `localAddress` arrives from (rejects on failure). */
 export type EgressProbe = (localAddress: string, timeoutMs: number) => Promise<string>;
@@ -194,6 +212,123 @@ export function checkIpProbe(url = CHECKIP_URL): EgressProbe {
     req.on('error', reject);
     req.end();
   });
+}
+
+// ─── Path probes (the world's own server answers from the new address) ───
+
+/**
+ * Checkip proves the address works inside AWS only: it can pass about 1 s
+ * before a new Elastic IP's path to outside hosts opens in both directions
+ * (2026-10-17: a host capture showed logins leave with no reply; server logs
+ * showed some reached the AC1999 server, were granted, and the grant was lost
+ * on the way back). A path probe sends a datagram the world's server answers
+ * without keeping any state, from the slot to the session's real target, and
+ * passes on the first reply from that host:port.
+ */
+export interface PathTarget {
+  host: string;
+  port: number;
+  /** The server trusts the bridge and expects an SPP header on every datagram (spp.ts). */
+  spp?: boolean;
+}
+
+export interface PathProbeResult { ok: boolean; ms: number; attempts: number; last: string }
+
+export interface PathProbe {
+  /** For the log (egress_ready probe). */
+  readonly name: string;
+  readonly target: PathTarget;
+  /** Probe from `localAddress` until a reply, or `deadlineMs` passes. Never rejects. */
+  run(localAddress: string, deadlineMs: number): Promise<PathProbeResult>;
+}
+
+/** A path probe sends every 250 ms for its first 2 s (PATH_PROBE_FAST_MS), then every 1 s, until its first reply. */
+export const PATH_PROBE_POLL_MS = 250;
+export const PATH_PROBE_FAST_MS = 2_000;
+export const PATH_PROBE_SLOW_POLL_MS = 1_000;
+/**
+ * The gap after a send `elapsedMs` into a probe. Backs off after 2 s: each
+ * tracker login is a query on the AC1999 server's single DB thread, and once
+ * (live, 2026-10-17) a stalled thread got 24 of them in 6 s; this sends 12.
+ */
+export function pathProbePollMs(elapsedMs: number): number {
+  return elapsedMs < PATH_PROBE_FAST_MS ? PATH_PROBE_POLL_MS : PATH_PROBE_SLOW_POLL_MS;
+}
+/**
+ * A path probe runs this long at most after checkip passes (or what is left of
+ * READY_DEADLINE_MS, if less). It is best-effort: with no reply the address is
+ * used anyway (egress_path_unconfirmed), since the session's port rotation
+ * and the no-reply move cover a path still opening, and a world that is down
+ * then fails in the game as before rather than as a false world_full.
+ */
+export const PATH_PROBE_MAX_MS = 6_000;
+
+/**
+ * The AC1999 server-tracker login: a full datagram (sequence 1, flags 0x2,
+ * recipient 0) for account "acservertracker", password "x", version
+ * 4.35752, DAT iterations 0/0 (byte-identical to the packet used live on
+ * 2026-10-17). The server's AuthenticateUserQuery::PerformQuery
+ * (reference/ac1999 Network.cpp) checks this account before anything else
+ * and answers STR_LOGIN_FAILED, keeping no state and creating no client, so a
+ * probe can never leave a Connecting client that would make the server ignore
+ * the session's real login from the same endpoint.
+ */
+export const AC1999_TRACKER_LOGIN: Buffer = Buffer.from(buildPacket1999({
+  sequence: 1, flags: F1999.Checksum, recipient: 0, time: 0,
+  body: buildLoginBody1999({ version: '4.35752', account: 'acservertracker', password: 'x', portalIteration: 0, cellIteration: 0 }),
+}));
+
+/**
+ * A probe that sends `packet` to `target` from one socket bound to the slot,
+ * paced by `pollMs` (a fixed gap, or the gap after a send at `elapsedMs`), and
+ * passes on the first reply from target's host:port.
+ */
+export function udpReplyProbe(name: string, packet: Buffer, target: PathTarget, pollMs: number | ((elapsedMs: number) => number) = pathProbePollMs): PathProbe {
+  const gap = typeof pollMs === 'number' ? () => pollMs : pollMs;
+  return {
+    name,
+    target,
+    run: (localAddress, deadlineMs) => new Promise<PathProbeResult>((resolve) => {
+      const started = Date.now();
+      const sock = dgram.createSocket('udp4');
+      let attempts = 0;
+      let last = `no reply from ${target.host}:${target.port}`;
+      let done = false;
+      let poll: ReturnType<typeof setTimeout> | undefined;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(poll);
+        clearTimeout(deadline);
+        try { sock.close(); } catch { /* closed */ }
+        resolve({ ok, ms: Date.now() - started, attempts, last: ok ? `reply from ${target.host}:${target.port}` : last });
+      };
+      const deadline = setTimeout(() => finish(false), Math.max(0, deadlineMs));
+      sock.on('error', (err) => { last = awsErrorCode(err); finish(false); });
+      sock.on('message', (_msg, rinfo) => {
+        if (rinfo.address === target.host && rinfo.port === target.port) finish(true);
+        else last = `foreign reply from ${rinfo.address}:${rinfo.port}`;
+      });
+      const send = () => {
+        if (done) return;
+        attempts++;
+        sock.send(packet, target.port, target.host, (err) => { if (err) last = awsErrorCode(err); });
+        poll = setTimeout(send, gap(Date.now() - started));
+      };
+      sock.bind({ address: localAddress, port: 0 }, send);
+    }),
+  };
+}
+
+/**
+ * The path probe for a session's world, by wire protocol (null: checkip
+ * only). Add a server family by returning a probe whose datagram that server
+ * answers statelessly. Not for an SPP server (the probe carries no header).
+ */
+export function pathProbeFor(protocol: 'eor' | 'ac1999', target: PathTarget): PathProbe | null {
+  if (target.spp) return null;
+  if (protocol === 'ac1999') return udpReplyProbe('ac1999-tracker', AC1999_TRACKER_LOGIN, target);
+  return null;
 }
 
 /** Allocations tried for an address the world will still let create accounts. */
@@ -426,13 +561,14 @@ export class AwsEgressProvider implements EgressProvider {
    * Probe from the slot until the answer names the held address, or
    * READY_DEADLINE_MS passes (a failed or slow probe counts as not yet).
    */
-  async awaitReady(slot: EgressSlot, held: HeldAddress): Promise<ReadyResult | null> {
+  async awaitReady(slot: EgressSlot, held: HeldAddress, path: PathProbe | null = null): Promise<ReadyResult | null> {
     const probe = this.opts.probe;
-    if (!probe) return null;
+    if (!probe && !path) return null;
     const now = this.opts.now ?? Date.now;
     const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     const started = now();
-    for (let attempts = 1; ; attempts++) {
+    let checkip: ReadyResult | null = null;
+    for (let attempts = 1; probe; attempts++) {
       let last: string;
       try {
         last = (await withTimeout(probe(slot.address, READY_PROBE_TIMEOUT_MS), READY_PROBE_TIMEOUT_MS + 250, 'checkip')).trim();
@@ -440,10 +576,21 @@ export class AwsEgressProvider implements EgressProvider {
         last = awsErrorCode(err);
       }
       const ms = now() - started;
-      if (last === held.publicIp) return { ready: true, ms, attempts, last };
-      if (ms + READY_POLL_MS >= READY_DEADLINE_MS) return { ready: false, ms, attempts, last };
+      if (last === held.publicIp) { checkip = { ready: true, ms, attempts, last, probe: 'checkip' }; break; }
+      if (ms + READY_POLL_MS >= READY_DEADLINE_MS) return { ready: false, ms, attempts, last, probe: 'checkip' };
       await sleep(READY_POLL_MS);
     }
+    if (!path) return checkip;
+    // Checkip passed (inside AWS): give the world's own server a chance to answer too. Best-effort:
+    // no reply leaves the address ready on checkip's word (pathUnconfirmed), never not-ready.
+    const before = checkip?.ms ?? 0;
+    const r = await path.run(slot.address, Math.min(PATH_PROBE_MAX_MS, READY_DEADLINE_MS - before));
+    const ip = checkip ? { checkipMs: checkip.ms, checkipAttempts: checkip.attempts } : {};
+    if (r.ok) return { ready: true, ms: before + r.ms, attempts: r.attempts, last: r.last, probe: path.name, ...ip };
+    return {
+      ready: true, ms: before + r.ms, attempts: checkip?.attempts ?? 0, last: checkip?.last ?? r.last, probe: checkip ? 'checkip' : 'none',
+      ...ip, pathUnconfirmed: r,
+    };
   }
 
   /**
@@ -718,6 +865,8 @@ interface LeaseState {
   lastNewLogin: string | null;
   /** Account hashes this session's logins were let through for. */
   allowed: Set<string>;
+  /** The session's world's path probe (pathProbeFor), run on every fresh address it gets; null: checkip only. */
+  pathProbe: PathProbe | null;
 }
 
 export interface EgressManagerOptions {
@@ -731,24 +880,38 @@ export interface EgressManagerOptions {
   startReconcileMs?: number;
   /** Retry delays after a failed start (startWithRetry), the last repeating. Default 30 s, 2 min, 10 min. */
   startRetryMs?: number[];
+  /** The path probe for a session's target (default pathProbeFor). */
+  pathProbeFor?: (protocol: 'eor' | 'ac1999', target: PathTarget) => PathProbe | null;
 }
+
+/** Where a session's datagrams go, for its world's path probe (acquire). */
+export interface SessionPath extends PathTarget { protocol: 'eor' | 'ac1999' }
 
 /**
  * An egress session whose server has sent nothing this long after its first
- * upstream datagram is moved once to another address (moveForNoReply): one
- * fresh address got no reply for 12 s across six login resends, well after
- * the dead window the readiness check covers, cause unknown.
+ * upstream datagram is moved once to another address (moveForNoReply), on a
+ * new socket. One fresh address got no reply for 12 s across six login
+ * resends from one port: most likely a lost first grant, after which the
+ * AC1999 server ignores that endpoint's logins (EARLY_RESEND_MS). The early
+ * resends rotate the port first; this is the last resort.
  */
 export const NO_REPLY_MOVE_MS = 5_000;
 
 /**
  * An egress session with no server byte yet resends its last upstream
- * datagram this long after its first (server.ts): the path to the server can
- * open up to ~0.3 s after the readiness check passes, and the browser's own
- * login resend comes only every 6 s (as the 1999 client's did). A repeated
- * login from the same endpoint is ignored by the servers.
+ * datagram at these offsets from its first (server.ts), each from a NEW UDP
+ * socket on the same slot (a new source port). The AC1999 server's
+ * AcceptClientLogin ignores a login from the same source endpoint while that
+ * account's client is Connecting, so a session whose first grant was lost on
+ * the way back (a new Elastic IP's outside path still opening, 2026-10-17) is
+ * stuck on that port: the same login resent from it gets nothing, while from
+ * a new port the server drops the stale session and answers in ms (local
+ * repro, server log "Re-connect for account ... dropping stale session"). A
+ * login that never arrived is answered on the new port just the same. Every
+ * offset is below NO_REPLY_MOVE_MS, which moves the session to another
+ * address. The browser's own resend comes only every 6 s.
  */
-export const EARLY_RESEND_MS: readonly number[] = [1_000, 3_000];
+export const EARLY_RESEND_MS: readonly number[] = [1_000, 2_000, 3_000, 4_000];
 
 /** moveForNoReply moved the session. */
 export interface NoReplyMoved { from: string; to: string; publicIp: string | null }
@@ -896,7 +1059,7 @@ export class EgressManager {
    * world's per-address session limit, 'full' when every slot does (or AWS
    * could not give one an address, or egress failed to start). Never throws.
    */
-  async acquire(worldKey: string, realIp: string): Promise<AcquireResult> {
+  async acquire(worldKey: string, realIp: string, target: SessionPath | null = null): Promise<AcquireResult> {
     const world = this.worlds.get(worldKey.toLowerCase());
     if (!world) return { ok: false, refusal: 'full', detail: 'not an egress world' };
     const realIpHash = this.hash('ip', realIpKey(realIp));
@@ -911,6 +1074,8 @@ export class EgressManager {
     if ('refusal' in picked) return this.refuse(world.key, realIpHash, picked.refusal, picked.detail);
     let { slot } = picked;
     const { state } = picked;
+    // A fresh address must answer from the session's own world server too (pathProbeFor), on every attach this session makes.
+    state.pathProbe = target ? (this.opts.pathProbeFor ?? pathProbeFor)(target.protocol, target) : null;
     this.leases.set(state.record.sessionId, state);
     const started = this.now();
     let held: HeldAddress | null = null;
@@ -923,7 +1088,7 @@ export class EgressManager {
       }
       tried.add(slot.address);
       try {
-        held = await this.track(this.ensureAddress(slot));
+        held = await this.track(this.ensureAddress(slot, undefined, state.pathProbe));
         break;
       } catch (err) {
         const failedSlot = slot.address;
@@ -1015,7 +1180,7 @@ export class EgressManager {
       let attached: string | null = null;
       if ('allocate' in plan) {
         try {
-          const h = await this.track(this.ensureAddress(plan.allocate, room));
+          const h = await this.track(this.ensureAddress(plan.allocate, room, state.pathProbe));
           state.publicIp = h?.publicIp ?? null;
           attached = state.publicIp;
         } catch (err) {
@@ -1095,7 +1260,7 @@ export class EgressManager {
     writeAtomic(file, JSON.stringify(record), at);
     this.touchActive(slot.address);
     this.cancelReleaseTimer(slot.address);
-    return { slot, state: { record, file, released: false, allowed: new Set(), publicIp: null, loginAddr: new Map(), lastNewLogin: null } };
+    return { slot, state: { record, file, released: false, allowed: new Set(), publicIp: null, loginAddr: new Map(), lastNewLogin: null, pathProbe: null } };
   }
 
   private release(state: LeaseState): void {
@@ -1179,12 +1344,13 @@ export class EgressManager {
   }
 
   /**
-   * The slot's public address: the one already held (by either process),
-   * else a new one, used only once it passes traffic (awaitReady). A new
+   * The slot's public address: the one already held (by either process: it
+   * has carried traffic, so no probe), else a new one, used only once it
+   * passes traffic (awaitReady: checkip, then `path` when given, best-effort). A new
    * address that never does is given back and one more tried; when that one
    * fails too, this throws 'NotReady' as a failed attach does.
    */
-  private async ensureAddress(slot: EgressSlot, accept?: (publicIp: string) => boolean): Promise<HeldAddress | null> {
+  private async ensureAddress(slot: EgressSlot, accept?: (publicIp: string) => boolean, path: PathProbe | null = null): Promise<HeldAddress | null> {
     if (this.opts.provider.name === 'static') return null;
     return this.withLock(this.slotLockName(slot.address), SLOT_LOCK, async () => {
       const have = this.readAddr(slot.address);
@@ -1201,13 +1367,22 @@ export class EgressManager {
         // AWS hands a just-released address back first: never the dead one again.
         const held = await this.attachFresh(slot, (ip) => !dead.includes(ip) && (accept?.(ip) ?? true));
         if (!held) return null;
-        const ready = await this.opts.provider.awaitReady?.(slot, held);
+        const ready = await this.opts.provider.awaitReady?.(slot, held, path);
         if (!ready) return held;
+        const fields = {
+          probe: ready.probe, ms: ready.ms, attempts: ready.attempts,
+          ...(path ? { target: `${path.target.host}:${path.target.port}` } : {}),
+          ...(ready.checkipMs !== undefined ? { checkipMs: ready.checkipMs, checkipAttempts: ready.checkipAttempts } : {}),
+        };
         if (ready.ready) {
-          this.log('info', 'egress_ready', { slot: slot.address, publicIp: held.publicIp, ms: ready.ms, attempts: ready.attempts });
+          if (ready.pathUnconfirmed && path) {
+            const u = ready.pathUnconfirmed;
+            this.log('warn', 'egress_path_unconfirmed', { slot: slot.address, publicIp: held.publicIp, target: `${path.target.host}:${path.target.port}`, probe: path.name, ms: u.ms, attempts: u.attempts, last: u.last });
+          }
+          this.log('info', 'egress_ready', { slot: slot.address, publicIp: held.publicIp, ...fields });
           return held;
         }
-        this.log('warn', 'egress_not_ready', { slot: slot.address, publicIp: held.publicIp, allocationId: held.allocationId, ms: ready.ms, attempts: ready.attempts, last: ready.last, attempt });
+        this.log('warn', 'egress_not_ready', { slot: slot.address, publicIp: held.publicIp, allocationId: held.allocationId, ...fields, last: ready.last, attempt });
         dead.push(held.publicIp);
         await this.detachHeld(slot.address, held, 'not_ready', null);
         if (attempt >= 2) throw Object.assign(new Error(`${slot.address}: no new address passed traffic`), { name: 'NotReady' });
@@ -1394,7 +1569,7 @@ export class EgressManager {
     let verdict: LoginVerdict;
     if (typeof plan === 'object') {
       try {
-        const held = await this.track(this.ensureAddress(plan.allocate, (ip) => this.addrCount(world, ip) < world.accountsPerAddress!));
+        const held = await this.track(this.ensureAddress(plan.allocate, (ip) => this.addrCount(world, ip) < world.accountsPerAddress!, state.pathProbe));
         if (state.released) return 'new_account_cap';
         state.publicIp = held?.publicIp ?? null;
         await this.withLock('alloc.lock', ALLOC_LOCK, async () => { this.addLoginAddr(state, world, ah); state.lastNewLogin = ah; });

@@ -24,9 +24,10 @@ import {
   type BridgeConfig, type EgressConfig,
 } from '../services/ws-tcp-bridge/src/bridgeUtil';
 import {
-  EgressManager, StaticEgressProvider, AwsEgressProvider, discoverImdsSlots, imdsClient, startEgress, sdkEc2Api,
+  EgressManager, type EgressManagerOptions, StaticEgressProvider, AwsEgressProvider, discoverImdsSlots, imdsClient, startEgress, sdkEc2Api,
   readLoginAccount, readLoginAccount1999, readLoginAccountEor, readLoginRefusal, SESSION_STALE_MS, EGRESS_TAG,
-  realIpKey, ALLOC_LOCK, RECONCILE_LOCK, PENDING_MARKER_TTL_MS, ATTACH_TRIES, READY_DEADLINE_MS, READY_POLL_MS, EARLY_RESEND_MS, type Ec2Api, type TaggedAddress, type EgressLease, type EgressProvider,
+  realIpKey, ALLOC_LOCK, RECONCILE_LOCK, PENDING_MARKER_TTL_MS, ATTACH_TRIES, READY_DEADLINE_MS, READY_POLL_MS, EARLY_RESEND_MS, NO_REPLY_MOVE_MS,
+  AC1999_TRACKER_LOGIN, PATH_PROBE_POLL_MS, PATH_PROBE_MAX_MS, pathProbePollMs, pathProbeFor, udpReplyProbe, type Ec2Api, type TaggedAddress, type EgressLease, type EgressProvider,
   type NoReplyMove,
 } from '../services/ws-tcp-bridge/src/egress';
 import {
@@ -1491,7 +1492,7 @@ describe('a fresh address is used only once it passes traffic (readiness check)'
     const l = await lease(m, 'ac1999', '198.51.100.1');
     expect(probes).toHaveLength(1);
     expect(probes[0].local).toBe('10.0.1.11'); // bound to the slot's private IP
-    expect(cap.lines.find((x) => x.event === 'egress_ready')?.fields).toEqual({ slot: '10.0.1.11', publicIp: l.publicIp, ms: 100, attempts: 1 });
+    expect(cap.lines.find((x) => x.event === 'egress_ready')?.fields).toEqual({ slot: '10.0.1.11', publicIp: l.publicIp, probe: 'checkip', ms: 100, attempts: 1 });
     await m.stop();
   });
 
@@ -1504,7 +1505,7 @@ describe('a fresh address is used only once it passes traffic (readiness check)'
     expect(probes.length).toBe(8);
     expect(probes[1].at - probes[0].at).toBe(100 + READY_POLL_MS);
     const ready = cap.lines.find((x) => x.event === 'egress_ready')!;
-    expect(ready.fields).toMatchObject({ slot: '10.0.1.11', publicIp: l.publicIp, attempts: 8 });
+    expect(ready.fields).toMatchObject({ slot: '10.0.1.11', publicIp: l.publicIp, probe: 'checkip', attempts: 8 });
     expect(ready.fields.ms as number).toBeGreaterThanOrEqual(2_500);
     // Logged after the association, before the acquire.
     const order = cap.lines.map((x) => x.event).filter((e) => ['egress_associate', 'egress_ready', 'egress_acquire'].includes(e));
@@ -1522,7 +1523,7 @@ describe('a fresh address is used only once it passes traffic (readiness check)'
     expect(l.localAddress).toBe('10.0.1.11');
     const notReady = cap.lines.find((x) => x.event === 'egress_not_ready')!;
     expect(notReady.level).toBe('warn');
-    expect(notReady.fields).toMatchObject({ slot: '10.0.1.11', publicIp: '54.0.0.1', last: 'Timeout' });
+    expect(notReady.fields).toMatchObject({ slot: '10.0.1.11', publicIp: '54.0.0.1', probe: 'checkip', last: 'Timeout' });
     expect(notReady.fields.ms as number).toBeGreaterThanOrEqual(READY_DEADLINE_MS - READY_POLL_MS);
     expect(notReady.fields.ms as number).toBeLessThanOrEqual(READY_DEADLINE_MS);
     expect(cap.lines.find((x) => x.event === 'egress_release')?.fields).toMatchObject({ publicIp: '54.0.0.1', why: 'not_ready', ok: true });
@@ -1588,6 +1589,240 @@ describe('a fresh address is used only once it passes traffic (readiness check)'
   it('the static provider never probes', async () => {
     const p: EgressProvider = new StaticEgressProvider(['127.0.0.1']);
     expect(p.awaitReady).toBeUndefined();
+  });
+});
+
+/** A fake world server on 127.0.0.1 that drops every datagram until `opensAt` (Date.now()), then answers each one. */
+async function pathServer(opensAt = 0): Promise<FakeServer & { answered: () => number }> {
+  const f = await fakeServer();
+  let answered = 0;
+  f.sock.on('message', (_msg, rinfo) => {
+    if (Date.now() < opensAt) return; // the new address's outside path isn't open yet
+    answered++;
+    f.sock.send(Buffer.from('04df9c54', 'hex'), rinfo.port, rinfo.address); // STR_LOGIN_FAILED-ish: any datagram passes
+  });
+  return { ...f, answered: () => answered };
+}
+
+/** An AWS manager whose one slot is 127.0.0.1 (so path probes really leave from it), checkip faked on `clock`. */
+async function loopbackAwsManager(checkipExtraMs = 0, pathProbeForOpt?: EgressManagerOptions['pathProbeFor']) {
+  const clock = fakeClock();
+  const ec2 = fakeEc2();
+  const cap = capture();
+  const fp = fakeProbe(ec2.addresses, clock, 0);
+  const base = fakeImds();
+  const imds = async (p: string) => (p === 'network/interfaces/macs/0a:00:00:00:00:01/local-ipv4s' ? '10.0.1.10\n127.0.0.1' : base(p));
+  const slots = ['127.0.0.1'];
+  const config: EgressConfig = { worlds: parseEgressServers('ac1999:2'), provider: 'aws', dir: tempDir(), slots, graceMs: 120_000 };
+  const probe = async (local: string) => { const r = await fp.probe(local); clock.advance(checkipExtraMs); return r; };
+  const provider = new AwsEgressProvider({ ec2: ec2.api, slots, imds, probe, now: clock.now, sleep: async (ms) => { clock.advance(ms); } });
+  const m = new EgressManager({ config, provider, now: clock.now, timers: false, log: cap.log, ...(pathProbeForOpt ? { pathProbeFor: pathProbeForOpt } : {}) });
+  await m.start();
+  return { m, cap, clock, ...ec2, ...fp };
+}
+
+describe('readiness proves the round trip to the world server (path probe: the AC1999 server-tracker login)', () => {
+  const held = { allocationId: 'eipalloc-1', associationId: 'eipassoc-1', publicIp: '54.0.0.1', at: 0 };
+  const slot = { address: '127.0.0.1', eni: 'eni-primary' };
+
+  it('the tracker login is the datagram used live, built by the 1999 client code, and names account acservertracker', () => {
+    expect(AC1999_TRACKER_LOGIN.toString('hex')).toBe('010000000200000000000000624c90616000000015cd5b070800342e3335373532000000efbeefbe6163736572766572747261636b65723a7800000000000000efbeefbe0000000000000000000000000000000000000000000000000100000000000000000000000000000000000000ffffffff');
+    expect(readLoginAccount1999(AC1999_TRACKER_LOGIN)).toEqual({ login: true, account: 'acservertracker' });
+  });
+
+  it('pathProbeFor: AC1999 gets the tracker probe; end of retail and an SPP server get none (checkip only)', () => {
+    const t = { host: '192.0.2.5', port: 9000 };
+    expect(pathProbeFor('ac1999', t)).toMatchObject({ name: 'ac1999-tracker', target: t });
+    expect(pathProbeFor('eor', t)).toBeNull();
+    expect(pathProbeFor('ac1999', { ...t, spp: true })).toBeNull();
+  });
+
+  it('a server that drops everything until T: ready within one 250 ms poll of T, every probe the tracker login from the slot', async () => {
+    const opensAt = Date.now() + 600;
+    const server = await pathServer(opensAt);
+    try {
+      const provider = new AwsEgressProvider({ ec2: fakeEc2().api, slots: ['10.0.1.11'], imds: fakeImds(), probe: async () => held.publicIp });
+      const r = (await provider.awaitReady(slot, held, pathProbeFor('ac1999', { host: '127.0.0.1', port: server.port })))!;
+      const readyAt = Date.now();
+      expect(r).toMatchObject({ ready: true, probe: 'ac1999-tracker', checkipAttempts: 1 });
+      expect(readyAt - opensAt).toBeLessThanOrEqual(PATH_PROBE_POLL_MS + 100);
+      expect(r.ms).toBeGreaterThanOrEqual(600 - 50);
+      expect(r.attempts).toBe(server.msgs.length);
+      expect(r.attempts).toBeGreaterThanOrEqual(3); // 0, 250, 500 ms dropped
+      expect(server.msgs.every((x) => x.msg.equals(AC1999_TRACKER_LOGIN))).toBe(true);
+      expect(server.msgs.every((x) => x.rinfo.address === '127.0.0.1' && x.rinfo.port === server.msgs[0].rinfo.port)).toBe(true);
+      // Sends at the poll interval.
+      expect(server.msgs[1].at - server.msgs[0].at).toBeGreaterThanOrEqual(PATH_PROBE_POLL_MS - 20);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('never answered: still ready on checkip\'s word once the path\'s time is up (what checkip left of READY_DEADLINE_MS), and it stops sending', async () => {
+    const server = await pathServer(Infinity);
+    const clock = fakeClock();
+    try {
+      // Checkip passes 9.6 s in (fake clock), leaving the path probe 400 ms of real time.
+      const provider = new AwsEgressProvider({
+        ec2: fakeEc2().api, slots: ['10.0.1.11'], imds: fakeImds(), now: clock.now,
+        sleep: async (ms) => { clock.advance(ms); }, probe: async () => { clock.advance(9_600); return held.publicIp; },
+      });
+      const started = Date.now();
+      const r = (await provider.awaitReady(slot, held, pathProbeFor('ac1999', { host: '127.0.0.1', port: server.port })))!;
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(r).toMatchObject({ ready: true, probe: 'checkip', checkipMs: 9_600, checkipAttempts: 1, attempts: 1, last: held.publicIp });
+      expect(r.pathUnconfirmed).toMatchObject({ ok: false });
+      expect(r.pathUnconfirmed!.last).toMatch(/no reply from 127\.0\.0\.1:/);
+      expect(r.ms).toBeGreaterThanOrEqual(READY_DEADLINE_MS - 50);
+      expect(r.ms).toBeLessThanOrEqual(READY_DEADLINE_MS + 100);
+      const sent = server.msgs.length;
+      expect(sent).toBe(r.pathUnconfirmed!.attempts);
+      await new Promise((res) => setTimeout(res, 2 * PATH_PROBE_POLL_MS));
+      expect(server.msgs).toHaveLength(sent);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('the path probe runs up to PATH_PROBE_MAX_MS (6 s): a reply 3 s in is still ready via the tracker probe', async () => {
+    expect(PATH_PROBE_MAX_MS).toBe(6_000);
+    const opensAt = Date.now() + 3_000;
+    const server = await pathServer(opensAt);
+    try {
+      const provider = new AwsEgressProvider({ ec2: fakeEc2().api, slots: ['10.0.1.11'], imds: fakeImds(), probe: async () => held.publicIp });
+      const r = (await provider.awaitReady(slot, held, pathProbeFor('ac1999', { host: '127.0.0.1', port: server.port })))!;
+      expect(r).toMatchObject({ ready: true, probe: 'ac1999-tracker' });
+      expect(r.pathUnconfirmed).toBeUndefined();
+      expect(Date.now() - opensAt).toBeLessThanOrEqual(PATH_PROBE_POLL_MS + 100);
+      expect(r.attempts).toBeGreaterThanOrEqual(9); // 0-2 s every 250 ms, then 3 s
+    } finally {
+      server.close();
+    }
+  }, 10_000);
+
+  it('paces itself: every 250 ms for 2 s, then every 1 s, so a 6 s run with no reply sends 12, not 24', async () => {
+    expect([0, 1_750, 1_999, 2_000, 5_000].map(pathProbePollMs)).toEqual([250, 250, 250, 1_000, 1_000]);
+    const server = await pathServer(Infinity);
+    try {
+      const r = await pathProbeFor('ac1999', { host: '127.0.0.1', port: server.port })!.run('127.0.0.1', PATH_PROBE_MAX_MS);
+      expect(r.ok).toBe(false);
+      // Sends at 0, 0.25 … 1.75, 2, 3, 4, 5 s.
+      expect(r.attempts).toBe(12);
+      expect(server.msgs).toHaveLength(12);
+      const t0 = server.msgs[0].at;
+      const offsets = server.msgs.map((x) => x.at - t0);
+      expect(offsets[7]).toBeLessThan(2_000);
+      for (let i = 9; i < 12; i++) expect(offsets[i] - offsets[i - 1]).toBeGreaterThanOrEqual(1_000 - 20);
+    } finally {
+      server.close();
+    }
+  }, 10_000);
+
+  it('checkip comes first: while it fails the world server gets nothing', async () => {
+    const server = await pathServer();
+    const clock = fakeClock();
+    try {
+      const provider = new AwsEgressProvider({
+        ec2: fakeEc2().api, slots: ['10.0.1.11'], imds: fakeImds(), now: clock.now,
+        sleep: async (ms) => { clock.advance(ms); }, probe: async () => { clock.advance(100); throw Object.assign(new Error('t'), { name: 'Timeout' }); },
+      });
+      const r = (await provider.awaitReady(slot, held, pathProbeFor('ac1999', { host: '127.0.0.1', port: server.port })))!;
+      expect(r).toMatchObject({ ready: false, probe: 'checkip', last: 'Timeout' });
+      await new Promise((res) => setTimeout(res, 50));
+      expect(server.msgs).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a udpReplyProbe ignores a reply from another port, and a world without one stays on checkip alone', async () => {
+    const server = await pathServer(Infinity);
+    const other = await fakeServer();
+    try {
+      // The server answers from a different port than the probe went to: not the world server's reply.
+      server.sock.on('message', (_m, rinfo) => other.sock.send(Buffer.from('x'), rinfo.port, rinfo.address));
+      const probe = udpReplyProbe('test', Buffer.from('ping'), { host: '127.0.0.1', port: server.port }, 50);
+      const r = await probe.run('127.0.0.1', 300);
+      expect(r.ok).toBe(false);
+      expect(r.last).toMatch(/foreign reply/);
+      const provider = new AwsEgressProvider({ ec2: fakeEc2().api, slots: ['10.0.1.11'], imds: fakeImds(), probe: async () => held.publicIp });
+      expect(await provider.awaitReady(slot, held, null)).toMatchObject({ ready: true, probe: 'checkip' });
+      expect(await new AwsEgressProvider({ ec2: fakeEc2().api, slots: null, imds: fakeImds() }).awaitReady(slot, held, null)).toBeNull();
+    } finally {
+      server.close();
+      other.close();
+    }
+  });
+
+  it('acquire with the session target: a fresh address is probed against that server and logged; a held one is reused without a probe', async () => {
+    const server = await pathServer();
+    try {
+      const { m, cap } = await loopbackAwsManager();
+      const target = { protocol: 'ac1999' as const, host: '127.0.0.1', port: server.port };
+      const a = await m.acquire('ac1999', '198.51.100.1', target);
+      expect(a.ok).toBe(true);
+      const ready = cap.lines.find((x) => x.event === 'egress_ready')!;
+      expect(ready.fields).toMatchObject({ slot: '127.0.0.1', probe: 'ac1999-tracker', target: `127.0.0.1:${server.port}`, attempts: 1, checkipAttempts: 1, checkipMs: 100 });
+      expect(server.msgs).toHaveLength(1);
+      expect(server.msgs[0].msg.equals(AC1999_TRACKER_LOGIN)).toBe(true);
+      // The order: associated, proven, acquired.
+      expect(cap.lines.map((x) => x.event).filter((e) => ['egress_associate', 'egress_ready', 'egress_acquire'].includes(e))).toEqual(['egress_associate', 'egress_ready', 'egress_acquire']);
+      // A second session on the same (held, proven) address: no probe at all.
+      const b = await m.acquire('ac1999', '198.51.100.2', target);
+      expect(b.ok && a.ok && b.lease.publicIp === a.lease.publicIp).toBe(true);
+      expect(server.msgs).toHaveLength(1);
+      expect(cap.lines.filter((x) => x.event === 'egress_ready')).toHaveLength(1);
+      await m.stop();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('the world server never answers a fresh address: the session is admitted on checkip\'s word, with egress_path_unconfirmed, and no release or retry', async () => {
+    const server = await pathServer(Infinity);
+    try {
+      // Checkip passes 9.7 s in (fake clock): the path probe gets the 300 ms left of the deadline.
+      const { m, cap, addresses, calls } = await loopbackAwsManager(9_600);
+      const r = await m.acquire('ac1999', '198.51.100.1', { protocol: 'ac1999', host: '127.0.0.1', port: server.port });
+      expect(r.ok).toBe(true);
+      const unconfirmed = cap.lines.filter((x) => x.event === 'egress_path_unconfirmed');
+      expect(unconfirmed).toHaveLength(1);
+      expect(unconfirmed[0].level).toBe('warn');
+      expect(unconfirmed[0].fields).toMatchObject({ slot: '127.0.0.1', publicIp: r.ok ? r.lease.publicIp : null, target: `127.0.0.1:${server.port}` });
+      expect(unconfirmed[0].fields.attempts as number).toBeGreaterThan(0);
+      expect(unconfirmed[0].fields.ms as number).toBeGreaterThanOrEqual(250);
+      expect(cap.lines.find((x) => x.event === 'egress_ready')!.fields).toMatchObject({ probe: 'checkip', checkipAttempts: 1 });
+      expect(cap.lines.some((x) => x.event === 'egress_not_ready' || x.event === 'egress_release')).toBe(false);
+      expect(calls.map((c) => c[0])).toEqual(['describe', 'allocate', 'associate']); // one address, kept
+      expect(addresses.size).toBe(1);
+      expect(server.msgs.length).toBeGreaterThan(0);
+      await m.stop();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('the bridge hands acquire the session\'s real destination and protocol', async () => {
+    const server = await fakeServer();
+    const seen: unknown[] = [];
+    const m = new EgressManager({
+      config: egressConfig(tempDir(), 'pinned:2', ['127.0.0.1']), provider: new StaticEgressProvider(['127.0.0.1']), timers: false,
+      pathProbeFor: (protocol, target) => { seen.push({ protocol, target }); return null; },
+    });
+    await m.start();
+    const bridge = createBridgeServer(bridgeConfig({}, server.port), { egress: m, egressEarlyResendMs: [] });
+    try {
+      const url = `ws://127.0.0.1:${await bridge.listen()}/`;
+      (await openAs(`${url}?proto=ac1999`, '203.0.113.1')).ws.close();
+      (await openAs(url, '203.0.113.2')).ws.close();
+      expect(seen).toEqual([
+        { protocol: 'ac1999', target: { protocol: 'ac1999', host: '127.0.0.1', port: server.port, spp: false } },
+        { protocol: 'eor', target: { protocol: 'eor', host: '127.0.0.1', port: server.port, spp: false } },
+      ]);
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
   });
 });
 
@@ -2172,7 +2407,7 @@ async function gatedAwsManager(servers = 'pinned:2') {
 
 describe('bridge: early resends while a fresh address has had no reply (EARLY_RESEND_MS)', () => {
   const packet = (seq: number) => { const b = Buffer.alloc(24); b.writeUInt32LE(seq, 0); b.writeUInt32LE(0x4, 4); return b; };
-  // Scaled down tenfold from the shipped 1 s / 3 s; the no-reply move is kept out of the way.
+  // Short offsets (the shipped schedule is every 500 ms to 4.5 s); the no-reply move is kept out of the way.
   // The tests that must act before an offset (a reply, a close) get wider gaps, so a slow event
   // loop can't let the offset pass first.
   const resendMs = [100, 300];
@@ -2187,11 +2422,62 @@ describe('bridge: early resends while a fresh address has had no reply (EARLY_RE
     return m;
   };
 
-  it('ships at 1 s and 3 s after the first datagram', () => {
-    expect([...EARLY_RESEND_MS]).toEqual([1_000, 3_000]);
+  it('ships at 1, 2, 3 and 4 s after the first datagram, every offset before the no-reply move', () => {
+    expect([...EARLY_RESEND_MS]).toEqual([1_000, 2_000, 3_000, 4_000]);
+    expect(NO_REPLY_MOVE_MS).toBe(5_000);
+    for (const ms of EARLY_RESEND_MS) expect(ms).toBeLessThan(NO_REPLY_MOVE_MS);
   });
 
-  it('with no reply, the last datagram goes again at each offset from the same socket, counted as upstream packets', async () => {
+  it('shipped schedule: a server that ignores the first source port (a lost grant) answers the 1 s resend from a new port, and the session stays on it', async () => {
+    // The AC1999 server ignores a login from the same endpoint while that account's client is
+    // Connecting, so once its first grant is lost that port gets nothing; a new port is answered at once.
+    const server = await fakeServer();
+    const cap = capture();
+    const bridge = createBridgeServer(bridgeConfig({}, server.port), { log: cap.log, egress: await managerOn(), egressNoReplyMs: 10_000 });
+    try {
+      const a = await openAs(`ws://127.0.0.1:${await bridge.listen()}/`, '203.0.113.1');
+      let firstPort = 0;
+      server.sock.on('message', (_msg, rinfo) => {
+        if (!firstPort) firstPort = rinfo.port;
+        if (rinfo.port === firstPort) return; // its grant was "lost": ignored from here on
+        server.sock.send(packet(100 + server.msgs.length), rinfo.port, rinfo.address);
+      });
+      const fromBrowser: Buffer[] = [];
+      a.ws.on('message', (d: Buffer) => fromBrowser.push(Buffer.from(d)));
+      const t0 = Date.now();
+      a.ws.send(packet(1));
+      await until(() => fromBrowser.length === 1, 3_000);
+      const first = cap.lines.find((x) => x.event === 'egress_first_reply')!;
+      expect(first.fields.earlyResends).toBe(1);
+      expect(first.fields.ms as number).toBeGreaterThanOrEqual(1_000 - TIMER_SLOP_MS);
+      expect(first.fields.ms as number).toBeLessThan(1_900);
+      expect(Date.now() - t0).toBeLessThan(2_000);
+      expect(server.msgs).toHaveLength(2);
+      const newPort = server.msgs[1].rinfo.port;
+      expect(newPort).not.toBe(firstPort);
+      expect(server.msgs[1].msg.readUInt32LE(0)).toBe(1); // the same datagram again
+      const resend = cap.lines.find((x) => x.event === 'egress_early_resend')!;
+      expect(resend.fields).toMatchObject({ n: 1, port: newPort });
+      // Later datagrams flow both ways on the new port; the 2 s offset sends nothing (the server spoke).
+      a.ws.send(packet(2));
+      await until(() => fromBrowser.length === 2);
+      expect(server.msgs.slice(2).map((x) => [x.msg.readUInt32LE(0), x.rinfo.port])).toEqual([[2, newPort]]);
+      await until(() => Date.now() - t0 > 2_200);
+      expect(server.msgs).toHaveLength(3);
+      // A late datagram to the old port reaches nobody (that socket is closed).
+      server.sock.send(packet(99), firstPort, '127.0.0.1');
+      await new Promise((r) => setTimeout(r, 100));
+      expect(fromBrowser.map((b) => b.readUInt32LE(0))).not.toContain(99);
+      a.ws.close();
+      await until(() => cap.lines.some((x) => x.event === 'session_close'));
+      expect(cap.lines.find((x) => x.event === 'session_close')!.fields).toMatchObject({ packetsUp: 3, packetsDown: 2 });
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  }, 10_000);
+
+  it('with no reply, the last datagram goes again at each offset, each from a new source port, counted as upstream packets', async () => {
     const { server, bridge, cap, url } = await start(await managerOn());
     try {
       const a = await openAs(url, '203.0.113.1');
@@ -2202,10 +2488,13 @@ describe('bridge: early resends while a fresh address has had no reply (EARLY_RE
       a.ws.send(packet(2));
       await until(() => server.msgs.length === 4);
       expect(server.msgs.map((x) => x.msg.readUInt32LE(0))).toEqual([1, 2, 2, 2]);
-      expect(server.msgs.every((x) => x.rinfo.port === server.msgs[0].rinfo.port)).toBe(true);
+      const ports = server.msgs.map((x) => x.rinfo.port);
+      expect(ports[1]).toBe(ports[0]); // the browser's own two from the first socket
+      expect(new Set(ports.slice(1)).size).toBe(3); // each resend from a port of its own
+      expect(server.msgs.every((x) => x.rinfo.address === '127.0.0.1')).toBe(true); // the same slot
       expect(server.msgs[2].at - t0).toBeGreaterThanOrEqual(100 - TIMER_SLOP_MS);
       expect(server.msgs[3].at - t0).toBeGreaterThanOrEqual(300 - TIMER_SLOP_MS);
-      expect(cap.lines.filter((x) => x.event === 'egress_early_resend').map((x) => [x.level, x.fields.n])).toEqual([['debug', 1], ['debug', 2]]);
+      expect(cap.lines.filter((x) => x.event === 'egress_early_resend').map((x) => [x.level, x.fields.n, x.fields.port])).toEqual([['debug', 1, ports[2]], ['debug', 2, ports[3]]]);
       await new Promise((r) => setTimeout(r, 200));
       expect(server.msgs).toHaveLength(4); // two only
       a.ws.close();
@@ -2224,10 +2513,13 @@ describe('bridge: early resends while a fresh address has had no reply (EARLY_RE
       a.ws.send(packet(1));
       await until(() => server.msgs.length === 2); // the original and the 100 ms resend
       await new Promise((r) => setTimeout(r, 50));
-      server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      // The resend left from a new socket (the first one is closed): the server answers that one.
+      const current = server.msgs[1].rinfo;
+      expect(current.port).not.toBe(server.msgs[0].rinfo.port);
+      server.sock.send(packet(9), current.port, current.address);
       await new Promise((res) => a.ws.once('message', res));
       // A second server byte logs nothing more.
-      server.sock.send(packet(10), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      server.sock.send(packet(10), current.port, current.address);
       await new Promise((res) => a.ws.once('message', res));
       await until(() => server.msgs[0].at + 1_000 < Date.now()); // past the 900 ms offset
       expect(server.msgs).toHaveLength(2);

@@ -4,8 +4,9 @@
 #   docker build -f services/ws-tcp-bridge/Dockerfile -t acjs-bridge .
 #
 # The bridge imports no workspace package, only dependency-free files
-# (packages/network/src/era1999/Packet1999.ts, the 1999 Disconnect, and the
-# Hash32.ts it imports; packages/shared/src/routines, the routine document
+# (packages/network/src/era1999/Packet1999.ts, the 1999 Disconnect;
+# Login1999.ts, the readiness probe's tracker login; and the
+# Hash32.ts Packet1999 imports; packages/shared/src/routines, the routine document
 # /routines validates and exports, with the Windows-1252 encoder the export
 # writes files in), so the
 # build stage bundles src/bridge.ts + that file + ws (+ @aws-sdk/client-ec2) into one CommonJS file and
@@ -22,6 +23,7 @@ RUN npm install --no-save --no-audit --no-fund esbuild@0.28.2 ws@8.22.0 @aws-sdk
 # Repo-relative layout, so src/protocol.ts's ../../../packages import resolves.
 COPY services/ws-tcp-bridge/src ./services/ws-tcp-bridge/src
 COPY packages/network/src/era1999/Packet1999.ts ./packages/network/src/era1999/Packet1999.ts
+COPY packages/network/src/era1999/Login1999.ts ./packages/network/src/era1999/Login1999.ts
 COPY packages/network/src/Hash32.ts ./packages/network/src/Hash32.ts
 # The whole routines folder: a new file there is copied without editing this list.
 COPY packages/shared/src/routines ./packages/shared/src/routines

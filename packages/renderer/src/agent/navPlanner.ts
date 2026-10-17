@@ -66,6 +66,27 @@ export function flightCrossesDisk(a: NavPoint, b: NavPoint, disks: ReadonlyArray
   return false;
 }
 
+/**
+ * A goal point, with its floor height `z` (feet) when known. `zTop`: the top of a doorway's opening whose floor is `z`
+ * (cellPath RoutePoint.top): a body is in that doorway with its feet anywhere from its floor up to a body's height under
+ * its top. The Facility Hub's doorway 0x8A0201C9 → 0x8A0201C8 at (60, −75) is 6 m tall (floor 0) with the ramp down
+ * from the arrival crossing it at z 3: the probe reached it there and every leg and search toward it called it "blocked"
+ * by the 3 m (Bulwark and Arcanist, 2026-10-17 15:18:28–15:19:10Z), and the use timed out 30 m short.
+ */
+export type NavGoal = { x: number; y: number; z?: number; zTop?: number };
+
+/** Feet this far above or below a goal's floor are on it (m): a step or a sloped floor, never a storey. */
+export const GOAL_LEVEL_M = 1.5;
+/** A standing body's height, for the feet that fit under a doorway's top (m; the human Setup is 1.8 tall). */
+export const BODY_HEIGHT_M = 1.8;
+
+/** Feet at height `z` are on the goal's level: within GOAL_LEVEL_M of its floor, or anywhere up its doorway's opening. */
+export function onGoalLevel(goal: NavGoal, z: number): boolean {
+  if (goal.z === undefined) return true;
+  const hi = goal.zTop !== undefined ? Math.max(goal.z + GOAL_LEVEL_M, goal.zTop - BODY_HEIGHT_M) : goal.z + GOAL_LEVEL_M;
+  return z >= goal.z - GOAL_LEVEL_M && z <= hi;
+}
+
 export interface PlanOptions {
   /** Grid spacing in metres (default 0.6: under the body's diameter, so door gaps aren't skipped). */
   spacing?: number;
@@ -162,7 +183,7 @@ export class PathSearch {
    * hall only down its stairs, so nodes are kept apart by floor (2 m bands of height) as well as by
    * position, and the goal counts as reached on its own floor only.
    */
-  constructor(private readonly probe: NavProbe, private readonly start: NavPoint, private readonly goal: { x: number; y: number; z?: number }, opts: PlanOptions = {}) {
+  constructor(private readonly probe: NavProbe, private readonly start: NavPoint, private readonly goal: NavGoal, opts: PlanOptions = {}) {
     this.spacing = opts.spacing ?? 0.6;
     this.within = opts.within ?? this.spacing;
     this.maxNodes = opts.maxNodes ?? 6000;
@@ -192,7 +213,7 @@ export class PathSearch {
     return Math.hypot(this.goal.x - p.x, this.goal.y - p.y) + (this.goal.z !== undefined && p.z !== undefined ? Math.abs(this.goal.z - p.z) : 0);
   }
   private reached(p: NavPoint): boolean {
-    return Math.hypot(this.goal.x - p.x, this.goal.y - p.y) <= this.within && (this.goal.z === undefined || Math.abs(this.goal.z - p.z) <= 1.5);
+    return Math.hypot(this.goal.x - p.x, this.goal.y - p.y) <= this.within && onGoalLevel(this.goal, p.z);
   }
 
   /** Whether this search may take jumps and drops. */
@@ -326,7 +347,7 @@ export class PathSearch {
  * A straight walk from a to b arrives (the probe, in legs of `spacing`), and on b's floor when b
  * has a height: overhead on a walkway is not at a point in the hall below.
  */
-export function straightWalk(probe: NavProbe, a: NavPoint, b: { x: number; y: number; z?: number }, spacing = 0.6, tolerance = 0.15): boolean {
+export function straightWalk(probe: NavProbe, a: NavPoint, b: NavGoal, spacing = 0.6, tolerance = 0.15): boolean {
   const d = Math.hypot(b.x - a.x, b.y - a.y);
   const n = Math.max(1, Math.ceil(d / spacing));
   let p = a;
@@ -336,11 +357,11 @@ export function straightWalk(probe: NavProbe, a: NavPoint, b: { x: number; y: nu
     if (!got || Math.hypot(got.x - t.x, got.y - t.y) > tolerance) return false;
     p = got;
   }
-  return b.z === undefined || Math.abs(p.z - b.z) <= 1.5;
+  return onGoalLevel(b, p.z);
 }
 
 /** Run a search to the end (tests, small plans). */
-export function planPath(probe: NavProbe, start: NavPoint, goal: { x: number; y: number; z?: number }, opts: PlanOptions = {}): PlanResult {
+export function planPath(probe: NavProbe, start: NavPoint, goal: NavGoal, opts: PlanOptions = {}): PlanResult {
   const s = new PathSearch(probe, start, goal, opts);
   for (;;) { const r = s.step(Infinity); if (r) return r; }
 }

@@ -290,9 +290,29 @@ host), and every datagram sent in that window is silently
 lost: an AC1999 client that logs in at 0 s and 2 s got nothing back and gave
 up. So after a fresh association the bridge polls
 `https://checkip.amazonaws.com/` bound to the slot's private IP (every
-250 ms, 1 s per request, 10 s in all) and uses the address only once the
-answer names it, which proves the NAT mapping works both ways
-(`egress_ready`: ms, attempts). An address that never answers is logged
+250 ms, 1 s per request, 10 s in all) until the answer names it. Checkip
+is inside AWS, so that proves only the address's path inside AWS: it can
+pass about 1 s before the path to outside hosts opens in both directions.
+So a world with a path probe (`pathProbeFor(protocol, target)`, egress.ts)
+then waits, best-effort, for an answer from the session's own world server:
+for the AC1999 protocol, the server-tracker login (account
+`acservertracker`, `AC1999_TRACKER_LOGIN`) sent from a socket bound to the
+slot's private IP to the session's target host:port every 250 ms for its first 2 s, then every 1 s (`pathProbePollMs`: each is a query on the AC1999 server's single DB thread, and a stalled one once got 24 in 6 s; now 12), ready on
+the first reply from that host:port, for at most `PATH_PROBE_MAX_MS` (6 s,
+or what is left of the 10 s). With no reply the address is used anyway on
+checkip's word (`egress_path_unconfirmed`, warn: slot, publicIp, target,
+ms, attempts): it is never released, retried or refused for that, since the
+port rotation and the 5 s move below cover a path still opening, and a
+world that is down fails in the game as before instead of as a false
+`world_full`. `egress_not_ready` and `aws:NotReady` are checkip's only. The AC1999 server special-cases that
+account before any other check and answers STR_LOGIN_FAILED, keeping no
+state and creating no client, so the probe can't leave a Connecting client
+behind. The bridge passes acquire the session's target (its resolved
+`sendHost`, `authPort`, protocol). Worlds with no path probe (end of retail,
+an SPP server, whose datagrams would need the header) stay on checkip alone.
+`egress_ready` names the probe that decided it (`probe: 'checkip'` or
+`'ac1999-tracker'`, ms in all, attempts of that probe, `target`, and
+`checkipMs` / `checkipAttempts` with a path probe). An address checkip never confirms is logged
 (`egress_not_ready`, warn), released, and one fresh address tried in its
 place; if that one fails too, the acquire fails as a failed attach does
 (`aws:NotReady`: a fallback slot, else `world_full`). Reusing an address a
@@ -301,7 +321,9 @@ address goes through the same path. The host needs outbound HTTPS from its
 secondary IPs (the default security group allows it).
 
 One session on a fresh address once got no server byte for 12 s across six
-login resends, well after the dead window, cause unknown. So an egress
+login resends from one source port, well after the dead window: most
+likely a lost first grant, after which the AC1999 server ignores that
+endpoint (below). As a last resort an egress
 session whose server has sent nothing 5 s after its first upstream datagram
 (`NO_REPLY_MOVE_MS`) is moved once (`moveForNoReply`): to another slot
 holding a working address with room on the world, else a free slot with a
@@ -322,16 +344,30 @@ no AWS call starts once a reply is in; else `no_slot`, `aws:<code>`, …
 (warn). `attached` names a fresh address made for an abandoned move; it
 keeps its normal idle grace and can serve the next session.
 
-The path to the server can open up to ~0.3 s after checkip answers, and the
-browser resends its login only every 6 s (as the 1999 client did). So an
-egress session with no server byte yet resends its last upstream datagram
-1 s and 3 s after its first (`EARLY_RESEND_MS`; `egress_early_resend`,
-debug, session and n), counted as normal upstream packets. They stop at the
-first server byte, a close, or a move. The servers ignore a repeated login
-from the same endpoint (AC1999 `AcceptClientLogin`). The first server byte
-of an egress session logs `egress_first_reply` (info: ms since the first
-datagram, earlyResends), which shows whether the resends are what got
-answered.
+Early resends rotate the source port. A login can reach the AC1999 server,
+be granted, and have the grant lost on the way back (server-side slot-id
+gaps on 2026-10-17 showed this happening on fresh addresses). The server's
+`AcceptClientLogin` then ignores every further login from the same source
+endpoint while that account's client is Connecting (reference/ac1999
+Network.cpp), so the same login resent from the same port gets nothing.
+Reproduced against the local server: a login whose grant went unread,
+resent twice from the same port, got no reply; the same login from a new
+port was answered in 5 ms ("Re-connect for account … dropping stale
+session"). So an egress session with no server byte yet resends its last
+upstream datagram 1, 2, 3 and 4 s after its first (`EARLY_RESEND_MS`, all
+before the 5 s no-reply move), each from a new UDP socket bound to the same
+slot (same lease, same address): the old socket is closed (its late
+datagrams are never read) and the new one becomes the session's socket for
+replies, grant parsing, counters and the disconnect at cleanup.
+`egress_early_resend` (debug: session, n, port, the new local port). They
+are counted as normal upstream packets, stop at the first server byte, a
+close, a move or a slot change, and skip a beat while a login check holds
+the session. The browser resends its login only every 6 s (as the 1999
+client did). The first server byte of an egress session logs
+`egress_first_reply` (info: ms since the first datagram, earlyResends),
+which shows whether a rotation is what got answered. (A 500 ms same-port
+schedule, tried 2026-10-17, made it worse: 9 of 16 sessions slow, against
+3 of 18 before, since only a port change rescues a lost grant.)
 
 If egress can't start (no IMDS, no secondary IPs, a `BRIDGE_EGRESS_SLOTS`
 address that isn't one), the bridge logs `egress_start_failed` at error
@@ -341,7 +377,7 @@ other world works, and it retries after 30 s, 2 min, then every 10 min
 
 Logs: `egress_start` (or `egress_start_failed`), `egress_acquire` /
 `egress_associate` (slot, public IP, timings), `egress_ready` /
-`egress_not_ready` (the readiness check), `egress_session_end`,
+`egress_not_ready` (the readiness check), `egress_path_unconfirmed`, `egress_session_end`,
 `egress_early_resend` / `egress_first_reply`, `egress_no_reply_move` / `egress_no_reply_stay`,
 `egress_release` (`why`: idle, shutdown, orphan, unfinished, failed_attach, not_ready, no_reply),
 `egress_fallback`, `egress_moved` (a new-account login left a spent address), `egress_stop_deadline`, `egress_refused`

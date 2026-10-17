@@ -424,11 +424,13 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     // An egress world: a slot of its own address, attached before the upgrade completes, so the
     // session's first datagram already leaves from it. The world's per-address rules apply per real IP.
     let lease: EgressLease | null = null;
+    const protocol = sessionProtocol(era, req.url);
     if (egress && target && egress.isEgressWorld(target.key)) {
       perIp.inc(ip);
       if (serverKey) perServer.inc(serverKey);
       pending++;
-      const got = await egress.acquire(target.key, ip);
+      // The session's real destination: a fresh address must get an answer from it (egress.ts pathProbeFor).
+      const got = await egress.acquire(target.key, ip, { protocol, host: target.sendHost, port: target.authPort, spp: target.spp });
       pending--;
       perIp.dec(ip);
       if (serverKey) perServer.dec(serverKey);
@@ -450,7 +452,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     return {
       ok: true,
       target,
-      protocol: sessionProtocol(era, req.url),
+      protocol,
       egress: lease,
       release: () => {
         if (released) return;
@@ -567,12 +569,13 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
 
     const sendUdp = (buf: Buffer, port: number) => {
       const t = session.target!;
-      const udp = session.udp!;
       upLink.send(() => {
-        if (session.closed) return;
+        // The session's socket when it goes (an early resend or a move may have replaced it meanwhile).
+        const udp = session.udp;
+        if (session.closed || !udp) return;
         session.bytesToServer += buf.length;
         metrics.addBytes('udp_out', buf.length);
-        udp.send(withSpp(buf), port, t.sendHost);
+        try { udp.send(withSpp(buf), port, t.sendHost); } catch { /* closed under a delayed send */ }
       });
     };
 
@@ -850,10 +853,13 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     }
 
     // Early resends (EARLY_RESEND_MS): an egress session with no server byte yet sends its last
-    // datagram again 1 s and 3 s after its first, so a login lost while the new address's path to
-    // the server was still opening doesn't wait for the browser's 6 s resend. Counted as normal
-    // upstream packets; the servers ignore a repeated login from the same endpoint. They stop at the
-    // first server byte, a close, or a move.
+    // datagram again 1, 2, 3 and 4 s after its first (before the 5 s no-reply move), each from a NEW
+    // socket on the same slot and lease. A login whose grant was lost on the way back is ignored from
+    // the same port (AC1999 AcceptClientLogin: same endpoint while Connecting); from a new port the
+    // server drops the stale session and answers. The old socket is closed (its late datagrams are
+    // never read); the new one is the session's from then on (replies, grant parsing, counters, the
+    // disconnect at cleanup). Counted as normal upstream packets. They stop at the first server byte,
+    // a close, a move or a slot change, and skip a beat while a login check holds the session.
     const earlyResendTimers: ReturnType<typeof setTimeout>[] = [];
     let earlyResends = 0;
     function clearEarlyResends(): void {
@@ -867,7 +873,10 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
           // A login check holds the session's datagrams (and may move it): skip this one.
           if (loginCheck || !lastUp) return;
           earlyResends++;
-          log('debug', 'egress_early_resend', { session: id, n: earlyResends });
+          const n = earlyResends;
+          dropUdp();
+          const udp = ensureUdp();
+          udp.once('listening', () => log('debug', 'egress_early_resend', { session: id, n, port: udp.address().port }));
           forwardGame(lastUp);
         }, ms);
         t.unref?.();

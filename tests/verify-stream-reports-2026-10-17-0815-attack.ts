@@ -90,10 +90,14 @@ describe('1. no death reported before it happens', () => {
     run(api, host, 1000, { physics: false });
     expect(texts(api, since).filter((t) => /target-died|task-done/.test(t))).toEqual([]);
     expect(api.hasTask).toBe(true);
-    // With no other of its name dying, the line is its own (the client missed its death start).
+    // A kill line alone is never a shown creature's death (it names no id: ACE sends a namesake's before its Dead motion,
+    // 2026-10-17 15:56:39Z); its own death start is, and its leaving the world right after the line (stream 16:07 test).
     api.pushChat('You killed Dread Mu-miyah!', 0);
     host.dying.delete(A);
     (api as unknown as { sawDying: Map<number, unknown> }).sawDying.clear();
+    run(api, host, 200, { physics: false });
+    expect(texts(api, since).filter((t) => /target-died/.test(t))).toEqual([]);
+    host.dying.add(B);
     run(api, host, 200, { physics: false });
     expect(texts(api, since)).toContain('target-died: Dread Mu-miyah #80005cdb died');
   });

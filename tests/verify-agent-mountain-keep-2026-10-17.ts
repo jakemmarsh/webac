@@ -88,11 +88,11 @@ describe('3. a monster that just attacked you stays the fight once the client le
 
   it('one that never attacked you or a fellow, or did so over 30 s ago, is refused as before', () => {
     ambush({ hit: false });
-    expect(api.attack(MU).message).toMatch(/is out of sight: your client let it go .*Go back there and look again/);
+    expect(api.attack(MU).message).toMatch(/is out of sight: your client let it go: .*(?:Go back there and look again|walk_to #80010988 goes to where it was)/);
     host.objs.delete(MU);
     ambush();
     run(api, host, AgentApi.RECENT_FOE_MS + 1000);
-    expect(api.attack(MU).message).toMatch(/is out of sight: your client let it go .*Go back there and look again/);
+    expect(api.attack(MU).message).toMatch(/is out of sight: your client let it go: .*(?:Go back there and look again|walk_to #80010988 goes to where it was)/);
   });
 
   it('one standing on a fellow counts too', () => {

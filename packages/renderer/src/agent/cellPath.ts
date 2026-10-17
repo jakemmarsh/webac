@@ -474,6 +474,8 @@ const dist = (p: Vec3, q: Vec3): number => Math.hypot(p.x - q.x, p.y - q.y, p.z 
  * 1.25–1.55 m above that in a 2.5–3.1 m door: the Holtburg tavern, 2026-10-09.
  */
 export type RoutePoint = Vec3 & { floor?: boolean; feet?: number; drop?: number; landing?: number;
+  /** A wall doorway's opening top (its floor `feet` plus its height): a ramp may cross it well above its floor. */
+  top?: number;
   /** The route's end: where a body stands to deal with a goal across a counter or window (counterSpot), not the goal itself. */
   across?: boolean;
   /**
@@ -481,7 +483,7 @@ export type RoutePoint = Vec3 & { floor?: boolean; feet?: number; drop?: number;
    * at the near lip is left out of the route: the walk's jump search finds the edge and the leap (navPlanner).
    */
   leap?: number };
-const withFeet = (d: CellDoor, p: Vec3): RoutePoint => (d.bottom === undefined ? p : { ...p, feet: d.bottom });
+const withFeet = (d: CellDoor, p: Vec3): RoutePoint => (d.bottom === undefined ? p : { ...p, feet: d.bottom, ...(d.height !== undefined && d.height > 0 ? { top: d.bottom + d.height } : {}) });
 
 /** Two points within 1 cm: the same doorway (each side's copy of a door shares its centroid). */
 export const samePoint = (p: Vec3, q: Vec3): boolean => Math.hypot(p.x - q.x, p.y - q.y, p.z - q.z) < 0.01;

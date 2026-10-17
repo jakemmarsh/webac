@@ -393,6 +393,7 @@ describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('H
 });
 
 describe('findRouteViaOutside: doorways the landscape walks up to, and doors that would not open', () => {
+  // Each route point at a wall doorway carries its opening's top (feet + height): a ramp may cross it well above its floor.
   // A hall 0x0100 with a door on a 5 m porch (east, x 10, feet 99) and one at the ground up a ramp (south, y -10, feet 96).
   const LB = 0xE63D0000;
   const hall = (LB | 0x0100) >>> 0;
@@ -402,14 +403,14 @@ describe('findRouteViaOutside: doorways the landscape walks up to, and doors tha
   const g: CellGraph = { landblock: LB, doors: new Map([[hall, [high, low]]]), exitFloors: new Map([[high, [porch]], [low, []]]) };
   const outside = (LB | 0x002D) >>> 0;
   it('from the ground, in by the door the ground reaches, though the porch door is nearer', () => {
-    expect(findRouteViaOutside(g, outside, v(11, -4, 94), hall, v(5, 0, 96))).toEqual([{ ...v(0, -10, 97.25), feet: 96 }, v(5, 0, 96)]);
+    expect(findRouteViaOutside(g, outside, v(11, -4, 94), hall, v(5, 0, 96))).toEqual([{ ...v(0, -10, 97.25), feet: 96, top: 96 + 2.5 }, v(5, 0, 96)]);
   });
   it('from up on the porch, in by the porch door', () => {
-    expect(findRouteViaOutside(g, outside, v(11.5, 0, 99), hall, v(5, 0, 96))).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+    expect(findRouteViaOutside(g, outside, v(11.5, 0, 99), hall, v(5, 0, 96))).toEqual([{ ...v(10, 0, 100.25), feet: 99, top: 99 + 2.5 }, v(5, 0, 96)]);
   });
   it('with no grounded door at all, any door (the walk may still jump or find a way)', () => {
     const g2: CellGraph = { landblock: LB, doors: new Map([[hall, [high]]]) };
-    expect(findRouteViaOutside(g2, outside, v(11, -4, 94), hall, v(5, 0, 96))).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+    expect(findRouteViaOutside(g2, outside, v(11, -4, 94), hall, v(5, 0, 96))).toEqual([{ ...v(10, 0, 100.25), feet: 99, top: 99 + 2.5 }, v(5, 0, 96)]);
   });
   it('a slightly low opening on the ground before a door no walk reaches; a window never (the drudge statue\'s tunnel, 2026-10-14)', () => {
     // The statue: 0x178's tall opening sits over the town (grounded false); 0x177's is 1.79 m tall with its sill on the ground.
@@ -419,15 +420,15 @@ describe('findRouteViaOutside: doorways the landscape walks up to, and doors tha
     expect(lowDoorway(duck)).toBe(true);
     expect(lowDoorway(window)).toBe(false);
     expect(walkableExit(duck)).toBe(false);
-    expect(route([high, duck])).toEqual([{ ...v(0, -10, 96.9), feet: 96 }, v(5, 0, 96)]);
+    expect(route([high, duck])).toEqual([{ ...v(0, -10, 96.9), feet: 96, top: 96 + 1.79 }, v(5, 0, 96)]);
     // A 1.68 m window on the ground is not a way in while any door exists.
-    expect(route([high, window])).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+    expect(route([high, window])).toEqual([{ ...v(10, 0, 100.25), feet: 99, top: 99 + 2.5 }, v(5, 0, 96)]);
     // A door the ground reaches still comes first, and a low opening off the ground is no better than the porch door.
-    expect(route([high, low, duck])).toEqual([{ ...v(0, -10, 97.25), feet: 96 }, v(5, 0, 96)]);
-    expect(route([high, { ...duck, grounded: false }])).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+    expect(route([high, low, duck])).toEqual([{ ...v(0, -10, 97.25), feet: 96, top: 96 + 2.5 }, v(5, 0, 96)]);
+    expect(route([high, { ...duck, grounded: false }])).toEqual([{ ...v(10, 0, 100.25), feet: 99, top: 99 + 2.5 }, v(5, 0, 96)]);
   });
   it('leaves out a doorway by a door that would not open, and has no route when it was the only one', () => {
-    expect(findRouteViaOutside(g, outside, v(1, -14, 94), hall, v(5, 0, 96), { closed: [v(0.2, -10.7, 96)] })).toEqual([{ ...v(10, 0, 100.25), feet: 99 }, v(5, 0, 96)]);
+    expect(findRouteViaOutside(g, outside, v(1, -14, 94), hall, v(5, 0, 96), { closed: [v(0.2, -10.7, 96)] })).toEqual([{ ...v(10, 0, 100.25), feet: 99, top: 99 + 2.5 }, v(5, 0, 96)]);
     expect(findRouteViaOutside(g, outside, v(1, -14, 94), hall, v(5, 0, 96), { closed: [v(0.2, -10.7, 96), v(10.7, 0, 99)] })).toBeNull();
     // Indoors as well: a shut door between two rooms.
     const A = (LB | 0x0101) >>> 0, B = (LB | 0x0102) >>> 0;

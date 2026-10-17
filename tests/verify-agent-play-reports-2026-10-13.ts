@@ -242,9 +242,10 @@ describe('agent play reports 2026-10-13', () => {
   describe('11. the smaller reports', () => {
     it('/tell without a comma says how to write it (retail DoTell takes the name up to a comma)', () => {
       host.fellows = () => [fellow(ARCANIST, 'Claude Arcanist')];
+      // Starting with the one player you know: the agent tool puts the comma in and says so (2026-10-17 14:11Z reports).
       const r = api.say('/tell Claude Arcanist meet me at the portal');
-      expect(r.ok).toBe(false);
-      expect(r.message).toContain('/tell Claude Arcanist, meet me at the portal');
+      expect(r.ok).toBe(true);
+      expect(r.message).toMatch(/^sent: \/tell Claude Arcanist, meet me at the portal\n  \(a comma went in after Claude Arcanist: /);
       expect(api.say('/tell Somebody Else hi').message).toContain('/tell Their Name, your message');
       expect(api.say('/tell Claude Arcanist, meet me at the portal')).toEqual({ ok: true, message: 'sent: /tell Claude Arcanist, meet me at the portal' });
     });

@@ -48,13 +48,18 @@ describe('attacking a target the server has finished with', () => {
     expect(api.eventsSince(since).some((e) => e.type === 'target-lost')).toBe(false);
   });
 
-  it('a kill line naming it ends the attack as a kill, though the client still shows it', () => {
+  it('a kill line naming it is no kill while the client still shows it alive (it names no id); its Dead motion is', () => {
+    // A namesake's line came first and "killed" #8000c3b3 at 80% (stream 2026-10-17 15:56:39Z): only the guid's own
+    // evidence counts. A target the server already removed ends on the empty-ends rule (the tests above).
     host.attack = (g: number) => { host.sent.push(`attack ${g.toString(16)}`); };
     const since = api.observe().seq;
     api.attack('Drudge Skulker');
     run(api, host, 500, { physics: false });
     api.pushChat('You killed the Drudge Skulker!', 0x16);
     run(api, host, 500, { physics: false });
+    expect(api.eventsSince(since).filter((e) => e.type === 'target-died')).toEqual([]);
+    host.dying.add(0x8000c72a);
+    run(api, host, 200, { physics: false });
     expect(api.eventsSince(since).filter((e) => e.type === 'target-died').map((e) => e.text)).toEqual(['Drudge Skulker #8000c72a died']);
   });
 

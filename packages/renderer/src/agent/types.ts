@@ -177,7 +177,9 @@ export interface AgentEvent {
     /** A monster started coming at (or fighting) one of your fellows. */
     | 'fellow-aggro'
     /** A fellow's health fell below the mark (60% by default, fellow_below per wait), or a single drop took a quarter of it. */
-    | 'fellow-low';
+    | 'fellow-low'
+    /** One of your enchantments ended ("<Spell> has expired."), or an item spell on your gear did (ACE's "The spell … on … has expired."). */
+    | 'buff-expired';
   text: string;
   guid?: number;
   /** Chat lines: the ChatMessageType the line came in as (Chat Message Capture's colour filter). */
@@ -231,6 +233,8 @@ export interface AgentObservation {
   buffs?: Array<{ name: string; remaining: number; beneficial?: boolean }>;
   /** Buffs you know that aren't up on you (self-only ones first), to cast with ac_cast. */
   buffsMissing?: string[];
+  /** Spells you cast on the items you wear (no timer reaches the client for them): when, on how many, about how long is left. */
+  gearSpells?: Array<{ spell: string; items: number; castAgoS: number; leftS?: number }>;
   /**
    * Your fellows (not you): health %, and distance and compass direction when in view, else out of sight.
    * Without it a player stood waiting for a partner 490 m away to buff him (Bulwark, 2026-10-10).

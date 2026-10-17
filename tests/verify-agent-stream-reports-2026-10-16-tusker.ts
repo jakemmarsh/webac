@@ -317,14 +317,16 @@ describe('6. a portal that took you during the walk to it is a use that worked',
 
   it('used again after the walk up to it already went in: "it already took you" (was "outside this dungeon … No walk gets there")', async () => {
     host.cellSealed = (c) => (c & 0xffff) >= 0x100;
-    // The walk_to before stepped into it: portal space, then the Town Network.
+    // The walk_to before stepped into it (the body beside it as the screen went to portal space), then the Town Network.
+    host.me.x = 80; host.me.y = 28.5;
+    run(api, host, 200);
     host.screenName = 'portal-space';
     run(api, host, 500);
     host.me.cell = 0x00070143; host.me.x = 60; host.me.y = 60;
     host.screenName = 'world';
     run(api, host, 2500);
     const r = await settle(api, host, api.use('Portal to Town Network'), 10_000);
-    expect(r).toEqual({ ok: true, message: 'used Portal to Town Network: it already took you through 2 s ago (on the way to it): you are now indoors (cell 0x00070143), and Portal to Town Network is back where you were' });
+    expect(r).toEqual({ ok: true, message: 'used Portal to Town Network: it already took you through 3 s ago (on the way to it): you are now indoors (cell 0x00070143), and Portal to Town Network is back where you were' });
     expect(host.sent.filter((x) => x.startsWith('use'))).toEqual([]);
   });
 

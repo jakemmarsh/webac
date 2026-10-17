@@ -86,10 +86,18 @@ export function formatChat(lines: AgentChatLine[]): string {
   return out.join('\n');
 }
 
+/** A buff with this little left (s) is running low: said apart on the observe, and in a buff-expired event. */
+export const BUFF_LOW_S = 120;
+
+/** "1m10s", "45s", "permanent" (negative). */
+export function buffTimeText(s: number): string {
+  return s < 0 ? 'permanent' : s >= 60 ? `${Math.floor(s / 60)}m${Math.floor(s % 60) ? `${Math.floor(s % 60)}s` : ''}` : `${Math.max(0, Math.floor(s))}s`;
+}
+
 /** "buffs (3): Strength Other II 2m10s, …" soonest to expire first, or "buffs: none (ac_spells / ac_cast to buff yourself or others)". */
 export function formatBuffs(buffs: ReadonlyArray<{ name: string; remaining: number }>): string {
   if (!buffs.length) return 'buffs: none (ac_spells finds buffs you know; ac_cast casts them on yourself or another player)';
-  const left = (s: number): string => (s < 0 ? 'permanent' : s >= 60 ? `${Math.floor(s / 60)}m${Math.floor(s % 60) ? `${Math.floor(s % 60)}s` : ''}` : `${Math.max(0, Math.floor(s))}s`);
+  const left = buffTimeText;
   const sorted = [...buffs].sort((a, b) => (a.remaining < 0 ? Infinity : a.remaining) - (b.remaining < 0 ? Infinity : b.remaining));
   const shown = sorted.slice(0, 16).map((b) => `${b.name} ${left(b.remaining)}`);
   return `buffs (${buffs.length}): ${shown.join(', ')}${buffs.length > shown.length ? `, +${buffs.length - shown.length} more` : ''}`;
@@ -117,6 +125,12 @@ export function formatObservation(obs: AgentObservation): string {
   out.push(formatBuffs((obs.buffs ?? []).filter((b) => b.beneficial !== false)));
   const bad = (obs.buffs ?? []).filter((b) => b.beneficial === false);
   if (bad.length) out.push(formatBuffs(bad).replace(/^buffs/, 'debuffs'));
+  const low = (obs.buffs ?? []).filter((b) => b.beneficial !== false && b.remaining >= 0 && b.remaining <= BUFF_LOW_S).sort((a, b) => a.remaining - b.remaining);
+  if (low.length) out.push(`  BUFFS RUNNING LOW (${BUFF_LOW_S / 60} min or less left): ${low.map((b) => `${b.name} ${buffTimeText(b.remaining)}`).join(', ')}: recast before they end (ac_wait types=buff-expired wakes when one does)`);
+  if (obs.gearSpells?.length) {
+    const g = obs.gearSpells.map((x) => `${x.spell} on ${x.items} item${x.items === 1 ? '' : 's'}, cast ${buffTimeText(x.castAgoS)} ago${x.leftS !== undefined ? ` (${x.leftS <= BUFF_LOW_S ? 'RUNNING LOW: ' : ''}about ${buffTimeText(x.leftS)} left by its duration)` : ''}`);
+    out.push(`  spells on your gear (no timer for them reaches you: reckoned from your casts): ${g.join(', ')}`);
+  }
   if (obs.buffsMissing?.length) out.push(`  buffs you know that aren't up: ${obs.buffsMissing.slice(0, 10).join(', ')}${obs.buffsMissing.length > 10 ? ` +${obs.buffsMissing.length - 10} more` : ''} (ac_cast; "… Other" ones go on a fellow with target=)`);
   if (obs.deaths) out.push(obs.deaths);
   if (obs.fellowshipAlone) out.push('fellowship: only you are in it, so /f reaches no one (a fellow who logs out leaves it): recruit your partner (in sight), or quit it (ac_fellowship action=quit) if they lead one');

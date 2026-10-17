@@ -108,32 +108,33 @@ describe('2. /tell with a multi-word name and no comma after it', () => {
     api = new AgentApi(host);
   });
 
-  it('a comma later in the message: sent as typed (retail), with the hint every time, when the player is in view', () => {
+  // Since 2026-10-17 14:11Z the agent tool puts the comma in after a known player's name (Bulwark's "/t Claude Arcanist
+  // Here, …" went to a "Claude Arcanist Here"); the player's own chat box still sends what is typed, as retail's does.
+  it('a comma later in the message: the comma goes in after the player in view, every time', () => {
     host.add({ guid: BULWARK, name: 'Claude Bulwark', itemType: 0x10, objectDescFlags: 0x8, x: 90, y: 20 });
     for (let i = 0; i < 3; i++) {
       const r = api.say('/tell Claude Bulwark hi, ready to go?');
-      expect(r.ok).toBe(false);
-      expect(r.message).toContain('the name is everything before the first comma ("Claude Bulwark hi")');
-      expect(r.message).toContain('/tell Claude Bulwark, hi, ready to go?');
+      expect(r.ok).toBe(true);
+      expect(r.message).toContain('would have gone to "Claude Bulwark hi"');
+      expect(r.message).toMatch(/^sent: \/tell Claude Bulwark, hi, ready to go\?\n/);
     }
-    expect(host.chats).toEqual(Array(3).fill('/tell Claude Bulwark hi, ready to go?'));
+    expect(host.chats).toEqual(Array(3).fill('/tell Claude Bulwark, hi, ready to go?'));
   });
 
   it('knows the name from a fellowship and from tells exchanged, out of view', () => {
     host.fellows = () => [{ guid: BULWARK, name: 'Claude Bulwark', health: { cur: 50, max: 50 }, stamina: { cur: 1, max: 1 }, mana: { cur: 1, max: 1 } }];
-    expect(api.say('/t Claude Bulwark come here, please').message).toContain('/tell Claude Bulwark, come here, please');
+    expect(api.say('/t Claude Bulwark come here, please').message).toMatch(/^sent: \/t Claude Bulwark, come here, please\n/);
     host.fellows = undefined;
     api.pushChat('Claude Arcanist tells you, "where are you?"', 0x3);
     const r = api.say('@tell Claude Arcanist by the portal, come');
-    expect(r.ok).toBe(false);
-    expect(r.message).toContain('/tell Claude Arcanist, by the portal, come');
-    expect(host.chats).toContain('@tell Claude Arcanist by the portal, come');
+    expect(r.ok).toBe(true);
+    expect(host.chats).toContain('@tell Claude Arcanist, by the portal, come');
   });
 
-  it('no comma at all: the client sends nothing, and the hint names the comma\'s place', () => {
+  it('no comma at all: the comma goes in after a known name; an unknown one still says where the comma goes', () => {
     host.add({ guid: BULWARK, name: 'Claude Bulwark', itemType: 0x10, objectDescFlags: 0x8, x: 90, y: 20 });
-    const r = api.say('/whisper Claude Bulwark hi');
-    expect(r).toEqual({ ok: false, message: "sent: /whisper Claude Bulwark hi\n  not delivered: a tell needs a comma after the name (names with spaces too), as retail's /tell does: /tell Claude Bulwark, hi" });
+    expect(api.say('/whisper Claude Bulwark hi').message).toMatch(/^sent: \/whisper Claude Bulwark, hi\n  \(a comma went in after Claude Bulwark: .*, or with no comma at all nowhere\. Write \/tell Name, message\)$/);
+    expect(api.say('/whisper Somebody hi')).toEqual({ ok: false, message: "sent: /whisper Somebody hi\n  not delivered: a tell needs a comma after the name (names with spaces too), as retail's /tell does (\"Use comma after the name for targeted chat.\"): /tell Their Name, your message" });
   });
 
   it('a right tell, an unknown name with a comma, and other "@" commands are as before', () => {
