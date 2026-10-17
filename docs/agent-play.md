@@ -205,7 +205,13 @@ things to sell. `ac_inventory filter=junk` is what no vendor buys (Value 0: ACE 
 undead arms, legs and thighbones a Lich drops) that isn't money, a key, gem, writable, pack, component, mana stone or
 salvage (it can still be a quest or crafting piece); `filter=sell` is what a vendor pays for (not an item an appraisal or a vendor showed unsellable: ACE IsSellable false or Retained, marked "unsellable" in the listing), most valuable first,
 with the total. An argument a tool doesn't take is refused on the CLI and over MCP naming the one it most likely
-meant ("ac_raise: unknown argument "target": raise takes stat=, not target="). A give refused because one of you was
+meant ("ac_raise: unknown argument "target": raise takes stat=, not target="); some take a second name for the
+same argument (raise skill= is stat=, walk_to distance= is within=, the one-object tools item= / target=). `ac_sell
+items="A, B"` sells several one after another, and `ac_vendor filter=` narrows a vendor's list as inventory's does (text
+in the name, or service / scroll / potion / kit / note). A name that finds nothing out on the landscape says why it
+often does: an NPC inside a building is sent only once you are at it; a role word that fits several in view ("walk_to
+Healer") takes the nearest and names the others. A cast the server answers TargetNotAcquired says when that is your
+own portal space (or a teleport a moment ago) or a fellow's, not "dead or gone". A give refused because one of you was
 busy ("too busy to accept gifts" while reading a scroll, "one item at a time") is tried once more after 3 s, and the
 reply says so.
 

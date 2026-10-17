@@ -70,7 +70,7 @@ import { RoutineStore } from './routineStore.js';
 import {
   type SessionProtocol, sessionProtocol, readGrant1999Ids, readTime1999, buildDisconnectPacket1999,
 } from './protocol.js';
-import { type EgressLease, type EgressManager, readLoginAccount, readLoginRefusal } from './egress.js';
+import { type EgressLease, type EgressManager, NO_REPLY_MOVE_MS, readLoginAccount, readLoginRefusal } from './egress.js';
 
 /** Where a session's datagrams go. */
 interface Target {
@@ -130,6 +130,8 @@ export interface BridgeDeps {
   now?: () => number;
   /** Per-session egress addresses for BRIDGE_EGRESS_SERVERS worlds (egress.ts startEgress), already started. */
   egress?: EgressManager | null;
+  /** An egress session the server never answers moves after this long (default NO_REPLY_MOVE_MS; tests shorten it). */
+  egressNoReplyMs?: number;
 }
 
 export interface BridgeServer {
@@ -789,9 +791,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
               // The session's address had made the world's account creations: it is on another slot
               // now. Nothing of this login has left yet, so a socket bound to the old address is
               // replaced (ensureUdp binds the new one).
-              const old = session.udp;
-              session.udp = null;
-              if (old) { old.removeAllListeners('error'); old.on('error', () => {}); try { old.close(); } catch { /* closed */ } }
+              dropUdp();
               log('info', 'session_egress_moved', { session: id, ip, ...egressFields() });
             }
             forwardGame(buf);
@@ -806,9 +806,50 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       forwardGame(buf);
     }
 
+    /** Close the session's socket; the next forwarded datagram binds a new one at the lease's (current) address. */
+    function dropUdp(): void {
+      const old = session.udp;
+      session.udp = null;
+      if (old) { old.removeAllListeners('error'); old.on('error', () => {}); try { old.close(); } catch { /* closed */ } }
+    }
+
+    // An egress session the server never answers (no byte NO_REPLY_MOVE_MS after its first datagram)
+    // moves once to another address (egress.ts moveForNoReply); the browser keeps resending its login,
+    // and the last datagram goes again at once. Never after a reply: AC1999 answers only the address
+    // that logged in.
+    let noReplyTimer: ReturnType<typeof setTimeout> | null = null;
+    let firstUpAt = 0;
+    let noReplyMoved = false;
+    let lastUp: Buffer | null = null;
+    function noReplyCheck(): void {
+      noReplyTimer = null;
+      if (session.closed || !lease || noReplyMoved || session.bytesFromServer > 0) return;
+      // A login check (it may be moving the session itself) finishes first.
+      if (loginCheck) { noReplyTimer = setTimeout(noReplyCheck, 1000); noReplyTimer.unref?.(); return; }
+      noReplyMoved = true;
+      const from = { slot: lease.localAddress, publicIp: lease.publicIp };
+      egress!.moveForNoReply(lease, () => !session.closed && session.bytesFromServer === 0).then((moved) => {
+        if (session.closed) return;
+        log('info', 'egress_no_reply_move', {
+          session: id, ip, from: from.slot, fromIp: from.publicIp, to: moved?.to ?? null, toIp: moved?.publicIp ?? null, ms: now() - firstUpAt,
+        });
+        if (!moved) return;
+        dropUdp();
+        if (lastUp) forwardGame(lastUp);
+      });
+    }
+
     function forwardGame(buf: Buffer): void {
       if (session.closed || !session.target) return;
       ensureUdp();
+      if (lease) {
+        lastUp = buf;
+        if (!firstUpAt) {
+          firstUpAt = now();
+          noReplyTimer = setTimeout(noReplyCheck, deps.egressNoReplyMs ?? NO_REPLY_MOVE_MS);
+          noReplyTimer.unref?.();
+        }
+      }
       const flags = readPacketFlags(buf);
       session.packetsUp++;
       if (config.debug) log('debug', 'ws_in', { session: id, seq: buf.readUInt32LE(0), flags, len: buf.length });
@@ -839,6 +880,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       if (session.closed) return Promise.resolve();
       session.closed = true;
       sessions.delete(session);
+      if (noReplyTimer) { clearTimeout(noReplyTimer); noReplyTimer = null; }
       routineTokens.sessionEnded(id);
       release();
       clearInterval(pingInterval);

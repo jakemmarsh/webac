@@ -26,7 +26,7 @@ import {
 import {
   EgressManager, StaticEgressProvider, AwsEgressProvider, discoverImdsSlots, imdsClient, startEgress, sdkEc2Api,
   readLoginAccount, readLoginAccount1999, readLoginAccountEor, readLoginRefusal, SESSION_STALE_MS, EGRESS_TAG,
-  realIpKey, ALLOC_LOCK, RECONCILE_LOCK, PENDING_MARKER_TTL_MS, ATTACH_TRIES, type Ec2Api, type TaggedAddress, type EgressLease, type EgressProvider,
+  realIpKey, ALLOC_LOCK, RECONCILE_LOCK, PENDING_MARKER_TTL_MS, ATTACH_TRIES, READY_DEADLINE_MS, READY_POLL_MS, type Ec2Api, type TaggedAddress, type EgressLease, type EgressProvider,
 } from '../services/ws-tcp-bridge/src/egress';
 import {
   createBridgeServer, CLOSE_IP_CAP, CLOSE_WORLD_FULL, CLOSE_NEW_ACCOUNT_CAP, CLOSE_NEW_ACCOUNT_UNAVAILABLE, type BridgeServer,
@@ -1440,6 +1440,148 @@ describe('failed attaches and fallbacks', () => {
   });
 });
 
+// ─── Readiness: a fresh Elastic IP passes no traffic for a few seconds ───
+
+/**
+ * A fake checkip probe over the fake EC2: it answers with the address
+ * associated with the probing private IP once that association has been up
+ * for `deadMs` (per allocation, overridable; Infinity: never), else fails as
+ * a lost request does. Each probe costs 100 ms of the shared clock.
+ */
+function fakeProbe(addresses: ReturnType<typeof fakeEc2>['addresses'], clock: { now: () => number; advance(ms: number): void }, deadMs: number) {
+  const probes: Array<{ local: string; at: number }> = [];
+  const associatedAt = new Map<string, number>();
+  const deadFor = new Map<string, number>();
+  const probe = async (local: string) => {
+    probes.push({ local, at: clock.now() });
+    clock.advance(100);
+    const a = [...addresses.values()].find((x) => x.privateIp === local && x.associationId);
+    if (!a) throw Object.assign(new Error('timed out'), { name: 'Timeout' });
+    if (!associatedAt.has(a.allocationId)) associatedAt.set(a.allocationId, clock.now() - 100);
+    if (clock.now() - associatedAt.get(a.allocationId)! < (deadFor.get(a.publicIp) ?? deadMs)) throw Object.assign(new Error('timed out'), { name: 'Timeout' });
+    return `${a.publicIp}\n`;
+  };
+  return { probe, probes, deadFor };
+}
+
+async function probedManager(dir: string, servers: string, deadMs: number, slots: string[] | null = ['10.0.1.11']) {
+  const clock = fakeClock();
+  const ec2 = fakeEc2();
+  const cap = capture();
+  const fp = fakeProbe(ec2.addresses, clock, deadMs);
+  const config: EgressConfig = { worlds: parseEgressServers(servers), provider: 'aws', dir, slots, graceMs: 120_000 };
+  const provider = new AwsEgressProvider({ ec2: ec2.api, slots, imds: fakeImds(), probe: fp.probe, now: clock.now, sleep: async (ms) => { clock.advance(ms); } });
+  const m = new EgressManager({ config, provider, now: clock.now, timers: false, log: cap.log });
+  await m.start();
+  return { m, clock, cap, ...ec2, ...fp };
+}
+
+describe('a fresh address is used only once it passes traffic (readiness check)', () => {
+  it('ready on the first probe: acquire returns at once, logging egress_ready', async () => {
+    const { m, cap, probes } = await probedManager(tempDir(), 'ac1999:2', 0);
+    const l = await lease(m, 'ac1999', '198.51.100.1');
+    expect(probes).toHaveLength(1);
+    expect(probes[0].local).toBe('10.0.1.11'); // bound to the slot's private IP
+    expect(cap.lines.find((x) => x.event === 'egress_ready')?.fields).toEqual({ slot: '10.0.1.11', publicIp: l.publicIp, ms: 100, attempts: 1 });
+    await m.stop();
+  });
+
+  it('dead for the first 2.5 s (as measured on AWS): acquire waits, polling every 250 ms, until the address answers', async () => {
+    const { m, cap, probes, clock } = await probedManager(tempDir(), 'ac1999:2', 2_500);
+    const before = clock.now();
+    const l = await lease(m, 'ac1999', '198.51.100.1');
+    // Not returned before the address passes traffic; one probe per 350 ms (100 probe + 250 wait).
+    expect(clock.now() - before).toBeGreaterThanOrEqual(2_500);
+    expect(probes.length).toBe(8);
+    expect(probes[1].at - probes[0].at).toBe(100 + READY_POLL_MS);
+    const ready = cap.lines.find((x) => x.event === 'egress_ready')!;
+    expect(ready.fields).toMatchObject({ slot: '10.0.1.11', publicIp: l.publicIp, attempts: 8 });
+    expect(ready.fields.ms as number).toBeGreaterThanOrEqual(2_500);
+    // Logged after the association, before the acquire.
+    const order = cap.lines.map((x) => x.event).filter((e) => ['egress_associate', 'egress_ready', 'egress_acquire'].includes(e));
+    expect(order).toEqual(['egress_associate', 'egress_ready', 'egress_acquire']);
+    expect(cap.lines.some((x) => x.event === 'egress_not_ready')).toBe(false);
+    await m.stop();
+  });
+
+  it('never ready: that address is released and a second fresh one attached, checked and used', async () => {
+    const { m, cap, calls, addresses, deadFor } = await probedManager(tempDir(), 'ac1999:2', 0);
+    deadFor.set('54.0.0.1', Infinity);
+    const l = await lease(m, 'ac1999', '198.51.100.1');
+    // 54.0.0.2 is the dead 54.0.0.1 handed back (refused), so the replacement is the next new one.
+    expect(l.publicIp).toBe('54.0.0.3');
+    expect(l.localAddress).toBe('10.0.1.11');
+    const notReady = cap.lines.find((x) => x.event === 'egress_not_ready')!;
+    expect(notReady.level).toBe('warn');
+    expect(notReady.fields).toMatchObject({ slot: '10.0.1.11', publicIp: '54.0.0.1', last: 'Timeout' });
+    expect(notReady.fields.ms as number).toBeGreaterThanOrEqual(READY_DEADLINE_MS - READY_POLL_MS);
+    expect(notReady.fields.ms as number).toBeLessThanOrEqual(READY_DEADLINE_MS);
+    expect(cap.lines.find((x) => x.event === 'egress_release')?.fields).toMatchObject({ publicIp: '54.0.0.1', why: 'not_ready', ok: true });
+    // The dead one is gone at AWS; AWS hands it straight back, and it is refused for the replacement.
+    expect(calls.map((c) => c[0])).toEqual(['describe', 'allocate', 'associate', 'disassociate', 'release', 'allocate', 'allocate', 'release', 'associate']);
+    expect([...addresses.values()].map((a) => a.publicIp)).toEqual(['54.0.0.3']);
+    expect(cap.lines.find((x) => x.event === 'egress_ready')?.fields).toMatchObject({ publicIp: '54.0.0.3', attempts: 1 });
+    expect(m.liveSessions()).toHaveLength(1);
+    await m.stop();
+  });
+
+  it('both never ready: acquire is refused as full, as a failed attach is, and no address or session is left', async () => {
+    const dir = tempDir();
+    const { m, cap, addresses } = await probedManager(dir, 'ac1999:2', Infinity);
+    expect(await m.acquire('ac1999', '198.51.100.1')).toEqual({ ok: false, refusal: 'full', detail: 'aws:NotReady' });
+    expect(cap.lines.filter((x) => x.event === 'egress_not_ready')).toHaveLength(2);
+    expect(cap.lines.filter((x) => x.event === 'egress_release' && x.fields.why === 'not_ready')).toHaveLength(2);
+    expect(addresses.size).toBe(0);
+    expect(fs.readdirSync(path.join(dir, 'slots')).filter((f) => f.endsWith('.addr.json'))).toHaveLength(0);
+    expect(fs.readdirSync(path.join(dir, 'sessions'))).toHaveLength(0);
+    expect(await m.reconcile()).toMatchObject({ released: 0, errors: 0 });
+    await m.stop();
+  });
+
+  it('both never ready on one slot: the player falls back to a slot already holding a working address', async () => {
+    const { m, deadFor, cap } = await probedManager(tempDir(), 'ac1999:2', 0, ['10.0.1.11', '10.0.1.12']);
+    const first = await lease(m, 'ac1999', '198.51.100.1'); // 10.0.1.11 = 54.0.0.1, ready
+    for (let i = 2; i < 10; i++) deadFor.set(`54.0.0.${i}`, Infinity); // every later allocation is dead
+    const second = await lease(m, 'ac1999', '198.51.100.2');
+    expect(second.localAddress).toBe(first.localAddress);
+    expect(cap.lines.find((x) => x.event === 'egress_fallback')?.fields).toMatchObject({ from: '10.0.1.12', reason: 'aws:NotReady' });
+    await m.stop();
+  });
+
+  it('an address already held (it has carried traffic) is reused without a probe', async () => {
+    const { m, probes, calls, cap } = await probedManager(tempDir(), 'ac1999:2', 2_500);
+    const a = await lease(m, 'ac1999', '198.51.100.1');
+    const probed = probes.length;
+    calls.length = 0;
+    cap.lines.length = 0;
+    const b = await lease(m, 'ac1999', '198.51.100.2'); // same slot, same address
+    expect(b.publicIp).toBe(a.publicIp);
+    expect(probes.length).toBe(probed);
+    expect(calls).toEqual([]);
+    expect(cap.lines.find((x) => x.event === 'egress_acquire')?.fields.ms).toBe(0);
+    await m.stop();
+  });
+
+  it('a new-account login moved to a newly allocated address waits for it too', async () => {
+    const dir = tempDir();
+    const { m, probes, cap } = await probedManager(dir, 'ac1999:2:5:2', 2_500, ['10.0.1.11', '10.0.1.12']);
+    const a = await lease(m, 'ac1999', '203.0.113.1');
+    spend(dir, 'ac1999', a.publicIp!, 2);
+    // 10.0.1.12 is taken by nobody but has no address: the move allocates there.
+    const before = probes.length;
+    expect(await m.checkLogin(a, 'brandnew')).toBe('moved');
+    expect(a.localAddress).toBe('10.0.1.12');
+    expect(probes.slice(before).every((p) => p.local === '10.0.1.12')).toBe(true);
+    expect(cap.lines.filter((x) => x.event === 'egress_ready').at(-1)?.fields).toMatchObject({ slot: '10.0.1.12', publicIp: a.publicIp });
+    await m.stop();
+  });
+
+  it('the static provider never probes', async () => {
+    const p: EgressProvider = new StaticEgressProvider(['127.0.0.1']);
+    expect(p.awaitReady).toBeUndefined();
+  });
+});
+
 describe('a failed start retries', () => {
   it('egress worlds come back once a retry succeeds', async () => {
     let calls = 0;
@@ -1793,4 +1935,200 @@ describe('bridge end to end: an explicit refusal gives the allowance back', () =
       expect(await c.closed).toBe(CLOSE_NEW_ACCOUNT_CAP);
     });
   }
+});
+
+// ─── No reply from the server: move once to another address ───
+
+describe('a session the server never answers moves once to another address (moveForNoReply)', () => {
+  it('to another slot holding a working address with room; the old address is retired, not kept for its grace', async () => {
+    const { m, addresses, cap } = await probedManager(tempDir(), 'ac1999:2', 0, ['10.0.1.11', '10.0.1.12']);
+    const a = await lease(m, 'ac1999', '198.51.100.1'); // 10.0.1.11 = 54.0.0.1
+    const b = await lease(m, 'ac1999', '198.51.100.2'); // 10.0.1.12 = 54.0.0.2
+    expect(await m.moveForNoReply(a, () => true)).toEqual({ from: '10.0.1.11', to: '10.0.1.12', publicIp: '54.0.0.2' });
+    expect(a.localAddress).toBe('10.0.1.12');
+    expect(a.publicIp).toBe(b.publicIp);
+    expect(await m.releaseIfIdle('10.0.1.11', 0)).toBe('none'); // the retire already ran
+    expect([...addresses.values()].map((x) => x.publicIp)).toEqual(['54.0.0.2']);
+    expect(cap.lines.find((x) => x.event === 'egress_release')?.fields).toMatchObject({ slot: '10.0.1.11', publicIp: '54.0.0.1', why: 'no_reply' });
+    await m.stop();
+  });
+
+  it('else to a free slot with a new address, which passes the readiness check first', async () => {
+    const { m, addresses, probes } = await probedManager(tempDir(), 'ac1999:2', 1_000, ['10.0.1.11', '10.0.1.12']);
+    const a = await lease(m, 'ac1999', '198.51.100.1');
+    const before = probes.length;
+    const moved = await m.moveForNoReply(a, () => true);
+    expect(moved).toEqual({ from: '10.0.1.11', to: '10.0.1.12', publicIp: '54.0.0.2' });
+    expect(probes.slice(before).length).toBeGreaterThan(1); // waited out the dead window
+    expect(probes.slice(before).every((p) => p.local === '10.0.1.12')).toBe(true);
+    await m.releaseIfIdle('10.0.1.11', 0);
+    expect([...addresses.values()].map((x) => x.publicIp)).toEqual(['54.0.0.2']);
+    await m.stop();
+  });
+
+  it('a reply while the new address was being made undoes the move', async () => {
+    const { m, addresses } = await probedManager(tempDir(), 'ac1999:2', 0, ['10.0.1.11', '10.0.1.12']);
+    const a = await lease(m, 'ac1999', '198.51.100.1');
+    expect(await m.moveForNoReply(a, () => false)).toBeNull();
+    expect(a.localAddress).toBe('10.0.1.11');
+    expect(a.publicIp).toBe('54.0.0.1');
+    expect(m.liveSessions().map((s) => s.slot)).toEqual(['10.0.1.11']);
+    expect(addresses.size).toBe(2); // the new one keeps its normal grace; the old one carries the session
+    await m.stop();
+  });
+
+  it('stays when no other address can take it: a failed allocation, or every slot full on the world', async () => {
+    const { m, fail, addresses } = await probedManager(tempDir(), 'ac1999:1', 0, ['10.0.1.11', '10.0.1.12']);
+    const a = await lease(m, 'ac1999', '198.51.100.1');
+    fail.allocate = Object.assign(new Error('quota'), { name: 'AddressLimitExceeded' });
+    expect(await m.moveForNoReply(a, () => true)).toBeNull();
+    expect(a.localAddress).toBe('10.0.1.11');
+    expect(a.publicIp).toBe('54.0.0.1');
+    delete fail.allocate;
+    await lease(m, 'ac1999', '198.51.100.2'); // takes 10.0.1.12: the world's 1 per address
+    expect(await m.moveForNoReply(a, () => true)).toBeNull();
+    expect(a.localAddress).toBe('10.0.1.11');
+    expect(addresses.size).toBe(2);
+    await m.stop();
+  });
+
+  it('the caps hold: the new address needs creation room for an unresolved new account and gets its own marker; the old marker stays', async () => {
+    const dir = tempDir();
+    const m = await staticManager(dir, 'w:1:5:1', ['10.9.0.1', '10.9.0.2', '10.9.0.3', '10.9.0.4']);
+    const world = m.worlds.get('w')!;
+    const a = await lease(m, 'w', '203.0.113.1'); // 10.9.0.1
+    expect(await m.checkLogin(a, 'brandnew')).toBe('ok');
+    expect(m.addrCount(world, '10.9.0.1')).toBe(1);
+    const b = await lease(m, 'w', '203.0.113.2'); // 10.9.0.2: full (1 session per address)
+    const c = await lease(m, 'w', '203.0.113.3'); // the clean 10.9.0.3, taken
+    spend(dir, 'w', '10.9.0.4', 1); // free, but no creation room
+    expect(b.localAddress).toBe('10.9.0.2');
+    expect(c.localAddress).toBe('10.9.0.3');
+    expect(await m.moveForNoReply(a, () => true)).toBeNull();
+    expect(a.localAddress).toBe('10.9.0.1');
+    c.release();
+    expect(await m.moveForNoReply(a, () => true)).toMatchObject({ from: '10.9.0.1', to: '10.9.0.3' });
+    expect(m.addrCount(world, '10.9.0.3')).toBe(1); // the resent login may create it here
+    expect(m.addrCount(world, '10.9.0.1')).toBe(1); // and may already have, there
+    // The real IP's allowance is unchanged: the same login, counted once.
+    expect(fs.readdirSync(path.join(dir, 'accounts', 'w', 'by-ip', m.hash('ip', '203.0.113.1')))).toHaveLength(1);
+    // The character list resolves the new address's marker.
+    m.accountConfirmed(a, 'brandnew', 0);
+    expect(m.addrCount(world, '10.9.0.3')).toBe(1);
+    await m.stop();
+  });
+});
+
+describe('bridge: the no-reply move (one slot on 127.0.0.1; the move itself stubbed)', () => {
+  async function start(manager: EgressManager, cap = capture()) {
+    const server = await fakeServer();
+    const config = bridgeConfig({}, server.port);
+    const bridge = createBridgeServer(config, { log: cap.log, egress: manager, egressNoReplyMs: 150 });
+    return { server, bridge, url: `ws://127.0.0.1:${await bridge.listen()}/` };
+  }
+  const managerOn = async () => {
+    const config = egressConfig(tempDir(), 'pinned:2', ['127.0.0.1']);
+    const m = new EgressManager({ config, provider: new StaticEgressProvider(['127.0.0.1']), timers: false });
+    await m.start();
+    return m;
+  };
+  const packet = (seq: number) => { const b = Buffer.alloc(24); b.writeUInt32LE(seq, 0); b.writeUInt32LE(0x4, 4); return b; };
+
+  it('silence after the first datagram: the socket is rebound at the new address and the last datagram resent; one move only', async () => {
+    const m = await managerOn();
+    const move = vi.spyOn(m, 'moveForNoReply').mockResolvedValue({ from: '127.0.0.1', to: '127.0.0.1', publicIp: null });
+    const cap = capture();
+    const { server, bridge, url } = await start(m, cap);
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      a.ws.send(packet(1));
+      a.ws.send(packet(2));
+      await until(() => server.msgs.length === 3); // 1, 2, then 2 again from the new socket
+      expect(server.msgs[2].msg.equals(packet(2))).toBe(true);
+      expect(server.msgs[2].rinfo.port).not.toBe(server.msgs[0].rinfo.port);
+      const logged = cap.lines.find((x) => x.event === 'egress_no_reply_move')!;
+      expect(logged.fields).toMatchObject({ from: '127.0.0.1', to: '127.0.0.1' });
+      expect(logged.fields.ms as number).toBeGreaterThanOrEqual(150);
+      // Still silent, and later datagrams go out the new way: never a second move.
+      a.ws.send(packet(3));
+      await new Promise((r) => setTimeout(r, 400));
+      expect(move).toHaveBeenCalledTimes(1);
+      expect(server.msgs[3].rinfo.port).toBe(server.msgs[2].rinfo.port);
+      a.ws.close();
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  });
+
+  it('never once the server has sent a byte', async () => {
+    const m = await managerOn();
+    const move = vi.spyOn(m, 'moveForNoReply');
+    const { server, bridge, url } = await start(m);
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      a.ws.send(packet(1));
+      await until(() => server.msgs.length === 1);
+      server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      await new Promise((res) => a.ws.once('message', res));
+      await new Promise((r) => setTimeout(r, 400));
+      expect(move).not.toHaveBeenCalled();
+      a.ws.close();
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  });
+
+  it('a reply that arrives during the move keeps the session where it is', async () => {
+    const m = await managerOn();
+    let silent: (() => boolean) | null = null;
+    let answer!: (v: null) => void;
+    vi.spyOn(m, 'moveForNoReply').mockImplementation((_l, s) => { silent = s; return new Promise((r) => { answer = r; }); });
+    const { server, bridge, url } = await start(m);
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      a.ws.send(packet(1));
+      await until(() => silent !== null);
+      expect(silent!()).toBe(true);
+      server.sock.send(packet(9), server.msgs[0].rinfo.port, server.msgs[0].rinfo.address);
+      await new Promise((res) => a.ws.once('message', res));
+      expect(silent!()).toBe(false); // the manager undoes the move on this
+      answer(null);
+      a.ws.send(packet(2));
+      await until(() => server.msgs.length === 2);
+      expect(server.msgs[1].rinfo.port).toBe(server.msgs[0].rinfo.port);
+      a.ws.close();
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  });
+});
+
+describe.skipIf(!aliasesBindable)('bridge end to end: the no-reply move (127.0.0.2 / 127.0.0.3)', () => {
+  it('a silent session\'s login goes again from the other slot\'s address', async () => {
+    const server = await fakeServer();
+    const config = bridgeConfig({
+      BRIDGE_EGRESS_SERVERS: 'pinned:2:5:2', BRIDGE_EGRESS_PROVIDER: 'static', BRIDGE_EGRESS_SLOTS: '127.0.0.2,127.0.0.3', BRIDGE_EGRESS_DIR: tempDir(),
+    }, server.port);
+    const manager = (await startEgress(config.egress, () => {}))!;
+    const bridge = createBridgeServer(config, { log: () => {}, egress: manager, egressNoReplyMs: 150 });
+    const url = `ws://127.0.0.1:${await bridge.listen()}/`;
+    try {
+      const a = await openAs(url, '203.0.113.1');
+      a.ws.send(clientLogin('eor', 'quiet', 'pw'));
+      await until(() => server.msgs.length === 2);
+      expect(server.msgs.map((x) => x.rinfo.address)).toEqual(['127.0.0.2', '127.0.0.3']);
+      expect(readLoginAccountEor(server.msgs[1].msg).account).toBe('quiet');
+      expect(manager.liveSessions().map((s) => s.slot)).toEqual(['127.0.0.3']);
+      const world = manager.worlds.get('pinned')!;
+      expect(manager.addrCount(world, '127.0.0.2')).toBe(1);
+      expect(manager.addrCount(world, '127.0.0.3')).toBe(1);
+      a.ws.close();
+    } finally {
+      await bridge.shutdown();
+      server.close();
+    }
+  });
 });

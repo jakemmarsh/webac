@@ -707,6 +707,28 @@ export function nameMatchScore(query: string, name: string): number {
   return 0;
 }
 
+/** ac_vendor filter= kinds: each tells a vendor's row by its name or its service flag. */
+export const VENDOR_KINDS: Readonly<Record<string, (i: { name: string; service?: boolean }) => boolean>> = {
+  service: (i) => !!i.service,
+  scroll: (i) => !i.service && /\bscroll\b/i.test(i.name),
+  potion: (i) => /\b(potion|draught|elixir|tincture|tonic)s?\b/i.test(i.name),
+  kit: (i) => /\bkits?\b/i.test(i.name),
+  note: (i) => /\btrade note\b/i.test(i.name),
+};
+const VENDOR_KIND_ALIASES: Readonly<Record<string, string>> = {
+  services: 'service', buff: 'service', buffs: 'service', spells: 'service', scrolls: 'scroll', potions: 'potion',
+  elixirs: 'potion', elixir: 'potion', kits: 'kit', 'healing kit': 'kit', notes: 'note', 'trade notes': 'note', 'trade note': 'note',
+};
+
+/** Whether a vendor's row fits an ac_vendor filter=: a kind (VENDOR_KINDS), else the text (or every word of it) in its name. */
+export function vendorItemMatches(i: { name: string; service?: boolean }, filter: string): boolean {
+  const f = filter.trim().toLowerCase();
+  if (!f) return true;
+  const kind = VENDOR_KINDS[f] ? f : VENDOR_KIND_ALIASES[f];
+  if (kind) return VENDOR_KINDS[kind](i);
+  return i.name.toLowerCase().includes(f) || nameMatchScore(f, i.name) > 0;
+}
+
 /** The query has a word the name lacks ("Holtburg Dungeon Directions" for "Holtburg Dungeon"). */
 export function extraWords(query: string, name: string): boolean {
   const nt = nameTokens(name);
@@ -1357,6 +1379,8 @@ export class AgentApi {
   static readonly THREAT_EVENTS: ReadonlySet<AgentEvent['type']> = new Set(['aggro', 'attackers-up', 'cast-at-you', 'fellow-aggro']);
   /** The newest event seq at your last teleport (portal space, or a jump of PORTAL_JUMP_M in a tick): threat events up to it are stale. */
   private teleportSeq = 0;
+  /** When (host time) you were last seen teleporting (as teleportSeq): a cast a moment after arrival can still miss its target. */
+  private teleportAt = -Infinity;
   /** Where you stood at the last tick, to tell a teleport from a walk. */
   private lastTickAt: { x: number; y: number } | null = null;
   /** Creatures known dead (a target-died, a cast or attack that saw the kill): guid → the newest event seq then. */
@@ -3133,6 +3157,39 @@ export class AgentApi {
     return score;
   }
 
+  /**
+   * Why a name may find nothing out on the landscape: the server sends a building's insides (its shopkeepers, healers,
+   * trainers) only once you are at it, in sight of the rooms they stand in (ACE sends an EnvCell's objects to players
+   * who can see that cell). "walk_to Healer" and "walk_to Thelnoth Cort the Healer" answered "no object matching" from
+   * the Holtburg lifestone, ~290 m from the Healer's shop at 42.4N 32.2E (Arcanist, Bulwark, 2026-10-16 07:05, 23:18Z).
+   */
+  private notInViewHint(): string {
+    const s = this.host.self();
+    if (!s?.cell || (s.cell & 0xffff) >= 0x100) return '';
+    return ' (from out here a shopkeeper or other NPC inside a building is not in view: the server sends a building\'s insides only once you are at its door or in sight of its rooms. Walk to the building by its map coordinates ("42.4N, 32.2E"), then name it)';
+  }
+
+  /**
+   * Others in view that a typed name fits as well as the one a walk or use chose (another name, the same kind),
+   * nearest first: "Healer" in a town fits each "… the Healer". Empty when the name was the object's own or none other fits.
+   */
+  namesakesNote(query: TargetArg, chosen: number): string {
+    if (typeof query !== 'string') return '';
+    const q = query.trim();
+    const o = this.nearby(600).find((x) => x.guid === chosen);
+    if (!o || o.name.toLowerCase() === q.toLowerCase()) return '';
+    const top = nameMatchScore(q, o.name);
+    const seen = new Set([o.name.toLowerCase()]);
+    const others = this.nearby(600).filter((x) => {
+      if (x.guid === chosen || x.kind !== o.kind || seen.has(x.name.toLowerCase()) || nameMatchScore(q, x.name) !== top) return false;
+      seen.add(x.name.toLowerCase());
+      return true;
+    });
+    if (!others.length) return '';
+    const shown = others.slice(0, 3).map((x) => `${x.name} #${x.guid.toString(16)} ${x.dist.toFixed(0)} m ${compassPoint(x.bearing)}`);
+    return ` (${others.length + 1} in view are named like "${q}"; also ${shown.join(', ')}${others.length > 3 ? ', …' : ''}: name one or its #id for another)`;
+  }
+
   private need(t: TargetArg, where: 'world' | 'inventory' | 'any', what: string): number | AgentResult {
     const g = this.resolve(t, where, { corpse: /corpse/i.test(what) });
     // Only a corpse matched a name asked for without "corpse": the one named is not in view.
@@ -3147,7 +3204,7 @@ export class AgentApi {
     if (fellow) return { ok: false, message: `${fellow.name} is in your fellowship but not in view (in a dungeon you only see the rooms in sight of yours): ask in /f where they are, or go back to where you last saw them` };
     if (g === null) {
       const like = where === 'world' || typeof t !== 'string' ? [] : this.itemsSharingWords(t);
-      return { ok: false, message: `no ${what} matching "${t}"${where === 'world' ? ' nearby' : where === 'inventory' ? ' in your inventory' : ' nearby or in your inventory'}${like.length ? `; you carry ${like.join(', ')}: name one (or its #id)` : ''}` };
+      return { ok: false, message: `no ${what} matching "${t}"${where === 'world' ? ' nearby' : where === 'inventory' ? ' in your inventory' : ' nearby or in your inventory'}${like.length ? `; you carry ${like.join(', ')}: name one (or its #id)` : ''}${where === 'world' && !like.length ? this.notInViewHint() : ''}` };
     }
     // Matched only loosely (synonyms, NAME_SYNONYMS) by items of different names: which one is not yours to guess.
     if (typeof t === 'string' && where !== 'world') {
@@ -4196,6 +4253,9 @@ export class AgentApi {
     const gone = (g: number): string | null => {
       if (g === me) return null;
       const o = this.host.object(g);
+      // A fellow out of the client's world is far more often through a portal or a recall than dead.
+      const fellow = o ? undefined : (this.host.fellows?.() ?? []).find((f) => f.guid >>> 0 === g >>> 0);
+      if (fellow) return `${s.name} not cast: your fellow ${fellow.name} is out of your view (in portal space after a portal or recall, or out of sight): ask in /f where they are`;
       if (!o) return `${s.name} not cast: target gone (${this.nameOf(g)} is dead or out of view)`;
       if (classify(o, this.host.isAttackable(g)) === 'monster' && this.host.isDying(g)) return `${s.name} not cast: target gone (${o.name} is dead)`;
       return null;
@@ -4248,6 +4308,7 @@ export class AgentApi {
     // A repeat stopped (replaced, stopped, you died) while this cast waited: nothing more goes out.
     if (info?.abort()) return { ok: false, message: `${s.name} not cast: stopped` };
     const since = this.seqN;
+    const sentInPortal = this.host.screen() === 'portal-space';
     if (!this.host.cast(s.id, tg)) return { ok: false, message: `cast of ${s.name} refused (not castable now)` };
     this.motionStopAt = this.host.now();
     if (info) info.sent = true;
@@ -4281,7 +4342,7 @@ export class AgentApi {
       const lines = said().filter((l) => !refused.some((r) => r.startsWith(l)));
       const why = refused.map((r) => `  the server refused it: ${r}`);
       if (tg && tg !== me && refused.some((r) => /TargetNotAcquired/.test(r))) {
-        why.push(`  (the server has no ${this.nameOf(tg)} where you are: it is dead, gone or moved on its side though your client may still show it. Pick another target.)`);
+        why.push(`  (${this.targetNotAcquiredWhy(tg, sentInPortal)})`);
       }
       // "Out of Range! (MissileOutOfRange)": how far the spell reaches for you and how far to close.
       if (tg && tg !== me && s.range && refused.some((r) => /out of range/i.test(r))) {
@@ -4392,6 +4453,26 @@ export class AgentApi {
 
   /** A cast that names no level takes the highest level you know with at least this chance past the skill roll. */
   static readonly SPELL_PICK_MIN_CHANCE = 0.75;
+  /** A cast this soon (ms) after your own teleport that the server can't place its target on blames the teleport. */
+  static readonly JUST_TELEPORTED_MS = 5000;
+
+  /**
+   * Why the server answered TargetNotAcquired (ACE Player_Magic: no such target where you are). You in portal space, or
+   * just out of it: Arcanist cast Bludgeoning Protection Other at Bulwark 2 s into her own portal into Mountain Keep and
+   * read "dead, gone or moved" about a fellow who was fine (2026-10-16 23:25:39Z). A fellow in portal space: ACE
+   * Player.Teleport sets them Hidden (PhysicsState 0x4000, DoTeleportPhysicsStateChanges) until they materialize.
+   */
+  private targetNotAcquiredWhy(tg: number, sentInPortal: boolean): string {
+    const name = this.nameOf(tg);
+    if (sentInPortal || this.host.screen() === 'portal-space') return `you are in portal space: until you arrive the server finds no one around you. ac_wait types=portal for the arrival, then cast again`;
+    if (this.host.now() - this.teleportAt < AgentApi.JUST_TELEPORTED_MS) return `you just teleported: the server had not yet placed ${name} beside you where you arrived. Cast again in a moment`;
+    const fellow = (this.host.fellows?.() ?? []).some((f) => f.guid >>> 0 === tg >>> 0);
+    const o = this.host.object(tg);
+    if (fellow && o && ((o.physicsState ?? 0) & 0x4000)) return `${name} is in portal space (just teleported): cast again once they arrive and show again`;
+    if (fellow) return `the server has no ${name} where you are: your fellow may be in portal space (just teleported) or moved on, though your client may still show them. Ask in /f where they are`;
+    return `the server has no ${name} where you are: it is dead, gone or moved on its side though your client may still show it. Pick another target.`;
+  }
+
   /** Why findSpell chose the level it did for a name without one, by spell id, for the cast's reply (castOnce). */
   private spellPickNote = new Map<number, string>();
 
@@ -5275,28 +5356,36 @@ export class AgentApi {
    * (walk there, use, the server's ApproachVendor). "vendor target=#7a9b301a" was refused as an unknown argument with
    * no hint, eleven times in a segment (Arcanist / Bulwark, 2026-10-16 07:06–10:55 UTC); each then took an ac_use.
    */
-  async vendorAt(t?: TargetArg | null): Promise<AgentResult> {
-    if (t === undefined || t === null || t === '') return this.vendorView();
+  async vendorAt(t?: TargetArg | null, filter?: string | null): Promise<AgentResult> {
+    if (t === undefined || t === null || t === '') return this.vendorView(filter);
     const g = this.need(t, 'world', 'vendor');
     if (typeof g !== 'number') return g;
-    if (this.host.vendor()?.guid === g) return this.vendorView();
+    if (this.host.vendor()?.guid === g) return this.vendorView(filter);
     const used = await this.use(g);
     if (this.host.vendor()?.guid !== g) {
       return { ok: false, message: `${this.nameOf(g)}'s vendor window did not open (ac_use ${this.nameOf(g)} answered):\n${used.message}` };
     }
-    const view = this.vendorView();
+    const view = this.vendorView(filter);
     return { ok: view.ok, message: `(used ${this.nameOf(g)} to open its window)\n${view.message}` };
   }
 
-  vendorView(): AgentResult {
-    const v = this.host.vendor();
-    if (!v) return { ok: false, message: 'no vendor window is open (ac_use the vendor first)' };
+  /**
+   * The open vendor's list, or (filter=) only some of it: text in the name ("stamina"), or a kind: service (a spell
+   * the vendor casts on you), scroll, potion (draughts, elixirs, tinctures), kit, note (trade notes). "vendor
+   * filter=stamina" was refused as an unknown argument (Arcanist, 2026-10-16 23:18Z), as inventory takes filter=.
+   */
+  vendorView(filter?: string | null): AgentResult {
+    const v0 = this.host.vendor();
+    if (!v0) return { ok: false, message: 'no vendor window is open (ac_use the vendor first)' };
+    const f = (filter ?? '').trim();
+    const v = f ? { ...v0, items: v0.items.filter((i) => vendorItemMatches(i, f)) } : v0;
+    for (const i of v0.items) this.vendorSeen.set(i.guid >>> 0, i.name);
+    if (f && !v.items.length) return { ok: true, message: `${v0.name} sells nothing matching "${f}" (${v0.items.length} item${v0.items.length === 1 ? '' : 's'} in all: ac_vendor with no filter lists them; kinds: ${Object.keys(VENDOR_KINDS).join(', ')})` };
     // A service (ItemType TYPE_SERVICE) is a spell the vendor casts on you as you pay (ACE Vendor.ApplyService), not a
     // scroll: Arcanist and Bulwark both took the Healer's "Coordination Other IV" for scrolls (2026-10-12).
     const services = v.items.some((i) => i.service);
-    for (const i of v.items) this.vendorSeen.set(i.guid >>> 0, i.name);
     const purse = this.host.self()?.pyreals;
-    return { ok: true, message: [`${v.name} sells (${v.currency}${purse !== undefined && (!v.currency || /^pyreals?$/i.test(v.currency)) ? `; you have ${purse.toLocaleString('en-US')}, and only coins pay: trade notes don't` : ''}):`, ...v.items.map((i) => `  #${i.guid.toString(16)} ${i.name}  ${i.price}${i.stack && i.stack > 1 ? `  (stack ${i.stack})` : ''}${i.service ? `  (service: ${v.name} casts it on you when you buy it; not a scroll)` : ''}`),
+    return { ok: true, message: [`${v.name} sells${f ? ` (only those matching "${f}": ${v.items.length} of ${v0.items.length})` : ''} (${v.currency}${purse !== undefined && (!v.currency || /^pyreals?$/i.test(v.currency)) ? `; you have ${purse.toLocaleString('en-US')}, and only coins pay: trade notes don't` : ''}):`, ...v.items.map((i) => `  #${i.guid.toString(16)} ${i.name}  ${i.price}${i.stack && i.stack > 1 ? `  (stack ${i.stack})` : ''}${i.service ? `  (service: ${v.name} casts it on you when you buy it; not a scroll)` : ''}`),
       ...(services ? ['  (a service lands on whoever buys it; buy one at a time, the vendor casts each before the next)'] : [])].join('\n') };
   }
 
@@ -5955,7 +6044,8 @@ export class AgentApi {
       goalLocal = () => this.host.object(g) ?? this.remembered(g);
       // With its floor height: a target in the hall under a walkway is not reached from overhead.
       goal = () => { const o = goalLocal(); return o && o.cell ? { ...toGlobal(o.cell, o.x, o.y), z: o.z } : null; };
-      label = opts.follow ? `following ${name}` : `walking to ${name}`;
+      // A role word ("Healer") that fits several in view: the one taken, and the others to name instead.
+      label = opts.follow ? `following ${name}` : `walking to ${name}${this.namesakesNote(target, g)}`;
     }
     {
       // A dungeon is its own space: its cells sit at made-up landblock coordinates, so a goal in another landblock (the
@@ -9224,7 +9314,7 @@ export class AgentApi {
     const screen = this.host.screen();
     // A teleport: in portal space, or moved farther in a tick than any run (a recall, a server teleport).
     const here = this.me()?.g ?? null;
-    if (screen === 'portal-space' || (here && this.lastTickAt && Math.hypot(here.x - this.lastTickAt.x, here.y - this.lastTickAt.y) > PORTAL_JUMP_M)) this.teleportSeq = this.seqN;
+    if (screen === 'portal-space' || (here && this.lastTickAt && Math.hypot(here.x - this.lastTickAt.x, here.y - this.lastTickAt.y) > PORTAL_JUMP_M)) { this.teleportSeq = this.seqN; this.teleportAt = this.host.now(); }
     this.lastTickAt = here ? { x: here.x, y: here.y } : this.lastTickAt;
     if (screen !== this.lastScreen) {
       if (screen === 'portal-space') {
@@ -9304,8 +9394,8 @@ export class AgentApi {
       dialog: (b: string, i?: number | null) => this.dialog(b, i),
       press: (k: string) => this.press(k),
       keys: (f?: string) => this.keys(f ?? ''),
-      vendor: () => this.vendorView(),
-      vendorAt: (t: TargetArg) => this.vendorAt(t),
+      vendor: (f?: string | null) => this.vendorView(f ?? null),
+      vendorAt: (t: TargetArg, f?: string | null) => this.vendorAt(t, f ?? null),
       buy: (i: TargetArg, n?: number | null) => this.buyReported(i, n ?? 1),
       sell: (i: TargetArg, n?: number | null) => this.sell(i, n ?? null),
       trade: (a?: string | null, i?: TargetArg) => this.trade(a ?? 'view', i ?? null),

@@ -763,21 +763,53 @@ export const TOOLS: AgentTool[] = [
     // and uses the vendor as ac_use does, so it takes its turn with the other acting calls and the player's control).
     name: 'ac_vendor',
     description: 'List what a vendor sells, with prices: the open vendor window, or target=<the vendor> (opened first with the same use ac_use makes, walking there, when it isn\'t the one open).',
-    props: { ...PROFILE_PROP, target: { type: 'string', description: 'The vendor: name or id. Default: the vendor window already open.' } },
+    props: {
+      ...PROFILE_PROP,
+      target: { type: 'string', description: 'The vendor: name or id. Default: the vendor window already open.' },
+      filter: { type: 'string', description: 'Only some of the list, as ac_inventory filter= does: text in the name ("stamina", "Heal Other") or a kind (service: a spell the vendor casts on you, scroll, potion, kit, note). Default: everything.' },
+    },
     async run(a) {
       const c = callerFor(a.profile);
       const has = a.target !== undefined && a.target !== null && a.target !== '';
-      return withNotice(c, result(await c.call<AgentResult>(has ? 'vendorAt' : 'vendor', has ? [guidOrName(a.target)] : [], 120_000)));
+      const f = a.filter === undefined || a.filter === null || String(a.filter).trim() === '' ? null : String(a.filter);
+      // The filter goes last, and only when given, so a page from before it (it takes no filter) still answers.
+      const tail = f === null ? [] : [f];
+      return withNotice(c, result(await c.call<AgentResult>(has ? 'vendorAt' : 'vendor', has ? [guidOrName(a.target), ...tail] : tail, 120_000)));
     },
   },
   act('ac_buy', 'Buy from the open vendor.', {
     item: { type: 'string', description: 'Merchandise name or id (from ac_vendor).' },
     amount: { type: 'number', description: 'How many (default 1).' },
   }, ['item'], (a) => [guidOrName(a.item), a.amount ?? null]),
-  act('ac_sell', 'Sell an item from your inventory to the open vendor.', {
-    item: { type: 'string', description: 'Inventory item name or id.' },
-    amount: { type: 'number', description: 'For stacks (default: whole stack).' },
-  }, ['item'], (a) => [guidOrName(a.item), a.amount ?? null]),
+  {
+    name: 'ac_sell',
+    description: 'Sell an item from your inventory to the open vendor; items= sells several, one after another, each answered on its own line.',
+    props: {
+      ...PROFILE_PROP,
+      item: { type: 'string', description: 'Inventory item name or id.' },
+      items: { type: 'string', description: 'Several items to sell: names or ids separated by commas ("Studded Leather Basinet, #8000c1d2"), or a JSON list. Each is sold whole (amount= is for item= alone).' },
+      amount: { type: 'number', description: 'For stacks (default: whole stack).' },
+    },
+    // item= or items=: neither alone is required (missingRequired would refuse items= by itself).
+    required: [],
+    async run(a) {
+      const c = callerFor(a.profile);
+      const list = sellList(a.items);
+      if (!list.length) {
+        if (a.item === undefined || a.item === null || a.item === '') return { text: 'ac_sell: name the item (item=…) or items (items="A, B")', isError: true };
+        return withNotice(c, result(await c.call<AgentResult>('sell', [guidOrName(a.item), a.amount ?? null])));
+      }
+      const all = a.item !== undefined && a.item !== null && a.item !== '' ? [String(a.item), ...list] : list;
+      const out: string[] = [];
+      let failed = 0;
+      for (const it of all) {
+        const r = await c.call<AgentResult>('sell', [guidOrName(it), null]);
+        if (!r.ok) failed++;
+        out.push(`${it}: ${r.message.replace(/\n/g, '\n    ')}`);
+      }
+      return withNotice(c, { text: [`sold ${all.length - failed} of ${all.length}:`, ...out.map((l) => `  ${l}`)].join('\n'), ...(failed === all.length ? { isError: true } : {}) });
+    },
+  },
   act('ac_trade', 'Secure trade with another player (open it with ac_use on them): view, add an item, accept, decline, reset or close.', {
     action: { type: 'string', description: 'view | add | accept | decline | reset | close', enum: ['view', 'add', 'accept', 'decline', 'reset', 'close'] },
     item: { type: 'string', description: 'For add: inventory item name or id.' },
@@ -972,8 +1004,8 @@ export const TOOLS: AgentTool[] = [
       return { text: `unknown action "${action}" (${ROUTINE_ACTIONS.join(', ')})`, isError: true };
     },
   },
-  act('ac_raise', 'Spend unassigned XP to raise an attribute, vital or skill by one step (or several with times).', {
-    stat: { type: 'string', description: 'Attribute (Strength…), vital (Health/Stamina/Mana) or skill name (e.g. "War Magic").' },
+  act('ac_raise', 'Spend unassigned XP to raise an attribute, vital or skill by one step (or several with times). stat= names it; skill= works the same.', {
+    stat: { type: 'string', description: 'Attribute (Strength…), vital (Health/Stamina/Mana) or skill name (e.g. "War Magic"); skill= is the same argument.' },
     times: { type: 'number', description: 'How many raises (default 1).' },
   }, ['stat'], (a) => [String(a.stat), Number(a.times ?? 1)]),
   act('ac_train_skill', 'Spend skill credits to train an untrained skill (e.g. "Life Magic", "Creature Enchantment", "Healing"). ac_character lists each untrained skill\'s cost in credits and your credits. A trained magic school lets you learn its spells from scrolls (ac_use the scroll).', {
@@ -1009,6 +1041,22 @@ export function withArgAliases(t: Pick<AgentTool, 'name' | 'props' | 'aliases'>,
   }
   return out;
 }
+
+/**
+ * sell items=: a list as a comma (or semicolon / newline) separated string or a JSON array. "sell items=…" was refused
+ * as an unknown argument (Arcanist, 2026-10-16 23:17Z): a player hands a vendor several things at once.
+ */
+export function sellList(v: unknown): string[] {
+  if (v === undefined || v === null || v === '') return [];
+  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  const s = String(v).trim();
+  if (s.startsWith('[')) { try { const j = JSON.parse(s); if (Array.isArray(j)) return sellList(j); } catch { /* not JSON: a plain list */ } }
+  return s.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
+}
+
+// skill= is stat= for raise: "raise skill=Healing" was refused with "takes stat=" a dozen times in a segment (Bulwark,
+// Arcanist, 2026-10-16), and a skill is half of what raise raises.
+for (const t of TOOLS) if (t.name === 'ac_raise') t.aliases = { skill: 'stat' };
 
 // distance= is within= for the walks: "follow distance=" was refused as an unknown argument (Arcanist, 2026-10-16).
 for (const t of TOOLS) if (t.name === 'ac_walk_to' || t.name === 'ac_follow') t.aliases = { distance: 'within' };

@@ -16,6 +16,13 @@
  * `newAccountsPerRealIp` accounts each real IP creates on the world through
  * this bridge.
  *
+ * A freshly associated Elastic IP passes no traffic for a few seconds after
+ * AssociateAddress returns (1.7-3.2 s, measured seven times on the production
+ * host), and every datagram sent meanwhile is lost. So an attach is
+ * done only when a request from the slot comes back from checkip naming the
+ * new address (the provider's awaitReady); an address that never does is
+ * given back and one fresh address tried in its place.
+ *
  * Coordination is cross-process through files in BRIDGE_EGRESS_DIR, because
  * two bridges share the slots during a deploy (the old one drains for hours
  * while the new one serves):
@@ -46,6 +53,7 @@
  * clock), so tests drive staleness and grace with a fake clock.
  */
 import * as fs from 'fs';
+import * as https from 'https';
 import * as net from 'net';
 import * as path from 'path';
 import { createHash, randomBytes } from 'crypto';
@@ -72,7 +80,8 @@ interface LockTiming { staleMs: number; keepaliveMs: number; waitMs: number }
 /** alloc.lock is held for milliseconds: a crashed holder's is taken over after a few seconds. */
 export const ALLOC_LOCK: LockTiming = { staleMs: 5_000, keepaliveMs: 1_000, waitMs: 10_000 };
 /** A slot's lock spans AWS calls (seconds). */
-export const SLOT_LOCK: LockTiming = { staleMs: 60_000, keepaliveMs: 10_000, waitMs: 30_000 };
+// waitMs covers the worst attach: two fresh addresses that never pass traffic (2 x 10 s readiness, plus the AWS calls).
+export const SLOT_LOCK: LockTiming = { staleMs: 60_000, keepaliveMs: 10_000, waitMs: 45_000 };
 /** The reconciler's lock (never waited for: another process reconciling is enough). */
 export const RECONCILE_LOCK: LockTiming = { staleMs: 60_000, keepaliveMs: 10_000, waitMs: 0 };
 
@@ -138,6 +147,11 @@ export interface EgressProvider {
   attach(slot: EgressSlot, persist: (h: HeldAddress) => void, accept?: (publicIp: string) => boolean): Promise<HeldAddress | null>;
   /** Undo attach: disassociate (when `associationId` is set) and release. */
   detach(h: HeldAddress): Promise<void>;
+  /**
+   * After a fresh attach: wait until `held` passes traffic from `slot` both
+   * ways. null: this provider doesn't check (static, or no probe configured).
+   */
+  awaitReady?(slot: EgressSlot, held: HeldAddress): Promise<ReadyResult | null>;
   /** This instance's tagged addresses ([] for static). */
   listTagged(): Promise<TaggedAddress[]>;
 }
@@ -150,6 +164,36 @@ export class StaticEgressProvider implements EgressProvider {
   async attach(): Promise<HeldAddress | null> { return null; }
   async detach(): Promise<void> { /* nothing held */ }
   async listTagged(): Promise<TaggedAddress[]> { return []; }
+}
+
+/** awaitReady's answer: `last` is what the final probe saw (an address, or the error), for the log. */
+export interface ReadyResult { ready: boolean; ms: number; attempts: number; last: string }
+
+/** One readiness probe: the public address a request bound to `localAddress` arrives from (rejects on failure). */
+export type EgressProbe = (localAddress: string, timeoutMs: number) => Promise<string>;
+
+/** Echoes the source address it sees, so an answer naming the new address proves the NAT mapping works both ways. */
+export const CHECKIP_URL = 'https://checkip.amazonaws.com/';
+/** Readiness: a probe every 250 ms, each given 1 s, for 10 s in all (the dead window measured 1.7-3.2 s). */
+export const READY_POLL_MS = 250;
+export const READY_PROBE_TIMEOUT_MS = 1_000;
+export const READY_DEADLINE_MS = 10_000;
+
+/** The real probe: an HTTPS GET to `url` from `localAddress`, its trimmed body. */
+export function checkIpProbe(url = CHECKIP_URL): EgressProbe {
+  return (localAddress, timeoutMs) => new Promise<string>((resolve, reject) => {
+    const req = https.request(url, { method: 'GET', localAddress, family: 4, agent: false, timeout: timeoutMs }, (res) => {
+      if (res.statusCode !== 200) { res.resume(); reject(new Error(`checkip: HTTP ${res.statusCode}`)); return; }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c: string) => { body += c; if (body.length > 256) req.destroy(new Error('checkip: body too long')); });
+      res.on('end', () => resolve(body.trim()));
+      res.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(Object.assign(new Error(`checkip timed out after ${timeoutMs} ms`), { name: 'Timeout' })));
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 /** Allocations tried for an address the world will still let create accounts. */
@@ -298,6 +342,10 @@ export class AwsEgressProvider implements EgressProvider {
     sleep?: (ms: number) => Promise<void>;
     /** Each EC2 call's deadline (default AWS_CALL_TIMEOUT_MS), on top of the SDK's own abort signal. */
     callTimeoutMs?: number;
+    /** awaitReady's probe (makeEgressProvider: checkIpProbe); without one a fresh address is used at once. */
+    probe?: EgressProbe;
+    /** awaitReady's clock (tests pair it with `sleep`). */
+    now?: () => number;
   }) {
     const ms = opts.callTimeoutMs ?? AWS_CALL_TIMEOUT_MS;
     const e = opts.ec2;
@@ -375,6 +423,30 @@ export class AwsEgressProvider implements EgressProvider {
   }
 
   /**
+   * Probe from the slot until the answer names the held address, or
+   * READY_DEADLINE_MS passes (a failed or slow probe counts as not yet).
+   */
+  async awaitReady(slot: EgressSlot, held: HeldAddress): Promise<ReadyResult | null> {
+    const probe = this.opts.probe;
+    if (!probe) return null;
+    const now = this.opts.now ?? Date.now;
+    const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const started = now();
+    for (let attempts = 1; ; attempts++) {
+      let last: string;
+      try {
+        last = (await withTimeout(probe(slot.address, READY_PROBE_TIMEOUT_MS), READY_PROBE_TIMEOUT_MS + 250, 'checkip')).trim();
+      } catch (err) {
+        last = awsErrorCode(err);
+      }
+      const ms = now() - started;
+      if (last === held.publicIp) return { ready: true, ms, attempts, last };
+      if (ms + READY_POLL_MS >= READY_DEADLINE_MS) return { ready: false, ms, attempts, last };
+      await sleep(READY_POLL_MS);
+    }
+  }
+
+  /**
    * This instance's tagged addresses only (two bridge hosts in one account
    * must never release each other's): associated with one of this
    * instance's ENIs, or unassociated and tagged with this instance's id.
@@ -391,7 +463,7 @@ export function makeEgressProvider(config: EgressConfig): EgressProvider {
   if (config.provider === 'static') return new StaticEgressProvider(config.slots ?? []);
   const imds = imdsClient();
   const region = async () => process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || imds('placement/region');
-  return new AwsEgressProvider({ ec2: sdkEc2Api(region), slots: config.slots, imds });
+  return new AwsEgressProvider({ ec2: sdkEc2Api(region), slots: config.slots, imds, probe: checkIpProbe() });
 }
 
 // ─── Login requests (the account a login names) ────────
@@ -661,6 +733,14 @@ export interface EgressManagerOptions {
   startRetryMs?: number[];
 }
 
+/**
+ * An egress session whose server has sent nothing this long after its first
+ * upstream datagram is moved once to another address (moveForNoReply): one
+ * fresh address got no reply for 12 s across six login resends, well after
+ * the dead window the readiness check covers, cause unknown.
+ */
+export const NO_REPLY_MOVE_MS = 5_000;
+
 /** shutdown waits this long for stop() at most (AWS calls are bounded too, but a release per slot adds up). */
 export const STOP_DEADLINE_MS = 20_000;
 
@@ -863,6 +943,84 @@ export class EgressManager {
     return { ok: true, lease };
   }
 
+  /**
+   * The server has sent this session nothing since its first datagram
+   * (NO_REPLY_MOVE_MS): move it to another address, once (the caller's
+   * rule), and retire the old one, which may be bad. Another slot holding a
+   * working address with room on the world comes first, else a free slot
+   * gets a new address (with the readiness check). The per-real-IP caps are
+   * untouched (the same session, the same allowances); an unresolved
+   * new-account login the session let through will be resent from the new
+   * address, so that address needs creation room and gets its own pending
+   * marker, while the old address's marker stays (the server may have made
+   * the account and lost only its replies). `stillSilent` is asked once the
+   * new address is ready: a reply meanwhile (AC1999 answers only the address
+   * that logged in) undoes the move. Returns the move, or null when the
+   * session stays where it is. Never throws.
+   */
+  async moveForNoReply(lease: EgressLease, stillSilent: () => boolean): Promise<{ from: string; to: string; publicIp: string | null } | null> {
+    const state = this.leases.get(lease.sessionId);
+    const world = this.worlds.get(lease.world);
+    if (!state || !world || state.released || this.stopped || this.failed) return null;
+    const from = state.record.slot;
+    const fromIp = state.publicIp;
+    const pending = [...state.loginAddr.keys()];
+    const room = (addr: string) => world.accountsPerAddress === null || this.addrCount(world, addr) + pending.length <= world.accountsPerAddress;
+    const isStatic = this.opts.provider.name === 'static';
+    const back = () => this.withLock('alloc.lock', ALLOC_LOCK, async () => { if (!state.released) this.moveSession(state, from, fromIp); }).catch(() => {});
+    try {
+      const plan = await this.withLock('alloc.lock', ALLOC_LOCK, async (): Promise<EgressSlot | { allocate: EgressSlot } | null> => {
+        if (state.released) return null;
+        const onWorld = this.liveSessions().filter((s) => s.world === world.key && s.sessionId !== state.record.sessionId);
+        const held = this.slots
+          .filter((sl) => sl.address !== from)
+          .map((sl) => {
+            const h = this.readAddr(sl.address);
+            const addr = h ? (h.associationId && !h.releasing ? h.publicIp : null) : (isStatic ? sl.address : null);
+            return { sl, addr, count: onWorld.filter((s) => s.slot === sl.address).length };
+          })
+          .filter((c) => c.addr !== null && c.count < world.sessionsPerAddress && room(c.addr))
+          .sort((a, b) => a.count - b.count)[0];
+        if (held) {
+          this.moveSession(state, held.sl.address, isStatic ? null : held.addr);
+          return held.sl;
+        }
+        const free = isStatic ? null : this.freeSlot(state);
+        if (!free) return null;
+        this.moveSession(state, free.address, null);
+        return { allocate: free };
+      });
+      if (!plan) return null;
+      if ('allocate' in plan) {
+        try {
+          const h = await this.track(this.ensureAddress(plan.allocate, room));
+          state.publicIp = h?.publicIp ?? null;
+        } catch (err) {
+          this.log('warn', 'egress_no_reply_stay', { egressSession: state.record.sessionId, slot: from, reason: `aws:${awsErrorCode(err)}` });
+          await back();
+          return null;
+        }
+      }
+      if (state.released) return null;
+      if (!stillSilent()) { await back(); return null; }
+      const to = state.record.slot;
+      await this.withLock('alloc.lock', ALLOC_LOCK, async () => {
+        if (world.accountsPerAddress === null) return;
+        const addr = this.addrKey(state);
+        for (const ah of pending) {
+          this.writeMarker(path.join(this.addrDir(world.key, addr), ah));
+          state.loginAddr.set(ah, addr);
+        }
+      });
+      // Retired, not kept for its grace: it may be what lost the replies (a session still on it keeps it).
+      if (!isStatic && !this.liveSessions().some((s) => s.slot === from)) void this.releaseIfIdle(from, 0, 'no_reply');
+      return { from, to, publicIp: state.publicIp };
+    } catch (err) {
+      this.log('warn', 'egress_no_reply_stay', { egressSession: state.record.sessionId, slot: from, reason: (err as Error).message });
+      return null;
+    }
+  }
+
   private refuse(world: string, realIpHash: string, refusal: EgressRefusal, detail: string): AcquireResult {
     this.log('info', 'egress_refused', { world, realIpHash, refusal, reason: detail });
     return { ok: false, refusal, detail };
@@ -956,7 +1114,7 @@ export class EgressManager {
    * it never races an attach (in this or the other process), and re-checked
    * there: a session that arrived meanwhile keeps it. Never throws.
    */
-  releaseIfIdle(slot: string, graceMs = this.graceMs): Promise<'released' | 'busy' | 'none' | 'error'> {
+  releaseIfIdle(slot: string, graceMs = this.graceMs, why?: string): Promise<'released' | 'busy' | 'none' | 'error'> {
     return this.track((async () => {
       try {
         return await this.withLock(this.slotLockName(slot), SLOT_LOCK, async () => {
@@ -965,7 +1123,7 @@ export class EgressManager {
           if (idle < graceMs) { this.scheduleRelease(slot, graceMs - idle); return 'busy' as const; }
           const held = this.readAddr(slot);
           if (!held) return 'none' as const;
-          await this.detachHeld(slot, held, graceMs === 0 ? 'shutdown' : 'idle', null);
+          await this.detachHeld(slot, held, why ?? (graceMs === 0 ? 'shutdown' : 'idle'), null);
           return 'released' as const;
         });
       } catch (err) {
@@ -999,11 +1157,17 @@ export class EgressManager {
     this.log('info', 'egress_release', { slot, publicIp: t.publicIp, allocationId: t.allocationId, why, ok: true, ms: this.now() - started });
   }
 
-  /** The slot's public address: the one already held (by either process), else a new one. */
+  /**
+   * The slot's public address: the one already held (by either process),
+   * else a new one, used only once it passes traffic (awaitReady). A new
+   * address that never does is given back and one more tried; when that one
+   * fails too, this throws 'NotReady' as a failed attach does.
+   */
   private async ensureAddress(slot: EgressSlot, accept?: (publicIp: string) => boolean): Promise<HeldAddress | null> {
     if (this.opts.provider.name === 'static') return null;
     return this.withLock(this.slotLockName(slot.address), SLOT_LOCK, async () => {
       const have = this.readAddr(slot.address);
+      // Held and carrying traffic already: no wait.
       if (have?.associationId && !have.releasing) return have;
       if (have) {
         // An exit mid-attach or mid-release left this one: give it back, by its listed association.
@@ -1011,30 +1175,50 @@ export class EgressManager {
         if (listed) await this.detachHeld(slot.address, have, 'unfinished', listed);
         else unlinkQuiet(this.addrFile(slot.address));
       }
-      const started = this.now();
-      let held: HeldAddress | null;
-      try {
-        held = await this.opts.provider.attach(slot, (h) => this.writeAddr(slot.address, h), accept);
-      } catch (err) {
-        // Nothing half-made stays recorded (the provider already gave back what it allocated).
-        unlinkQuiet(this.addrFile(slot.address));
-        // A call that failed on our side may have succeeded at AWS (an associate whose answer
-        // timed out): with AllowReassociation false that address would wedge the slot. Give back,
-        // under the slot lock we hold, every address tagged for this slot that no record names.
-        try {
-          for (const t of (await this.opts.provider.listTagged()).filter((x) => x.slot === slot.address)) {
-            await this.detachListed(slot.address, t, 'failed_attach');
-          }
-        } catch (cleanupErr) {
-          this.log('warn', 'egress_release', { slot: slot.address, ok: false, why: 'failed_attach', reason: `aws:${awsErrorCode(cleanupErr)}` });
+      const dead: string[] = [];
+      for (let attempt = 1; ; attempt++) {
+        // AWS hands a just-released address back first: never the dead one again.
+        const held = await this.attachFresh(slot, (ip) => !dead.includes(ip) && (accept?.(ip) ?? true));
+        if (!held) return null;
+        const ready = await this.opts.provider.awaitReady?.(slot, held);
+        if (!ready) return held;
+        if (ready.ready) {
+          this.log('info', 'egress_ready', { slot: slot.address, publicIp: held.publicIp, ms: ready.ms, attempts: ready.attempts });
+          return held;
         }
-        throw err;
+        this.log('warn', 'egress_not_ready', { slot: slot.address, publicIp: held.publicIp, allocationId: held.allocationId, ms: ready.ms, attempts: ready.attempts, last: ready.last, attempt });
+        dead.push(held.publicIp);
+        await this.detachHeld(slot.address, held, 'not_ready', null);
+        if (attempt >= 2) throw Object.assign(new Error(`${slot.address}: no new address passed traffic`), { name: 'NotReady' });
       }
-      if (!held) return null;
-      this.writeAddr(slot.address, held);
-      this.log('info', 'egress_associate', { slot: slot.address, eni: slot.eni, publicIp: held.publicIp, allocationId: held.allocationId, ms: this.now() - started });
-      return held;
     });
+  }
+
+  /** Under the slot's lock: allocate and associate a new address, and record it (a failure leaves nothing recorded). */
+  private async attachFresh(slot: EgressSlot, accept: (publicIp: string) => boolean): Promise<HeldAddress | null> {
+    const started = this.now();
+    let held: HeldAddress | null;
+    try {
+      held = await this.opts.provider.attach(slot, (h) => this.writeAddr(slot.address, h), accept);
+    } catch (err) {
+      // Nothing half-made stays recorded (the provider already gave back what it allocated).
+      unlinkQuiet(this.addrFile(slot.address));
+      // A call that failed on our side may have succeeded at AWS (an associate whose answer
+      // timed out): with AllowReassociation false that address would wedge the slot. Give back,
+      // under the slot lock we hold, every address tagged for this slot that no record names.
+      try {
+        for (const t of (await this.opts.provider.listTagged()).filter((x) => x.slot === slot.address)) {
+          await this.detachListed(slot.address, t, 'failed_attach');
+        }
+      } catch (cleanupErr) {
+        this.log('warn', 'egress_release', { slot: slot.address, ok: false, why: 'failed_attach', reason: `aws:${awsErrorCode(cleanupErr)}` });
+      }
+      throw err;
+    }
+    if (!held) return null;
+    this.writeAddr(slot.address, held);
+    this.log('info', 'egress_associate', { slot: slot.address, eni: slot.eni, publicIp: held.publicIp, allocationId: held.allocationId, ms: this.now() - started });
+    return held;
   }
 
   // ── Reconcile ──

@@ -285,6 +285,39 @@ effect at AWS (an associate whose answer timed out), the bridge gives back
 every address tagged for that slot that no record names, under the slot's
 lock, and the reconciler releases such an orphan at once.
 
+A freshly associated Elastic IP passes no traffic for a few seconds after
+`AssociateAddress` returns (1.7–3.2 s, measured seven times on the production
+host), and every datagram sent in that window is silently
+lost: an AC1999 client that logs in at 0 s and 2 s got nothing back and gave
+up. So after a fresh association the bridge polls
+`https://checkip.amazonaws.com/` bound to the slot's private IP (every
+250 ms, 1 s per request, 10 s in all) and uses the address only once the
+answer names it, which proves the NAT mapping works both ways
+(`egress_ready`: ms, attempts). An address that never answers is logged
+(`egress_not_ready`, warn), released, and one fresh address tried in its
+place; if that one fails too, the acquire fails as a failed attach does
+(`aws:NotReady`: a fallback slot, else `world_full`). Reusing an address a
+slot already holds never waits. The new-account move to a newly allocated
+address goes through the same path. The host needs outbound HTTPS from its
+secondary IPs (the default security group allows it).
+
+One session on a fresh address once got no server byte for 12 s across six
+login resends, well after the dead window, cause unknown. So an egress
+session whose server has sent nothing 5 s after its first upstream datagram
+(`NO_REPLY_MOVE_MS`) is moved once (`moveForNoReply`): to another slot
+holding a working address with room on the world, else a free slot with a
+new address (readiness-checked). Its socket is closed and rebound there, the
+last datagram is resent at once, and the browser's own login resends follow.
+The old address is retired at once (`egress_release` why `no_reply`) unless
+another session still uses it. Never after any server byte (AC1999 answers
+only the address that logged in; a reply during the move undoes it), never
+twice per session. The per-real-IP caps are unchanged (same session); an
+unresolved new-account login needs creation room at the new address and
+gets a pending marker there, and the old address's marker stays (the
+server may have made the account and lost only its replies). Logged as
+`egress_no_reply_move` (from, fromIp, to, toIp, ms; `to: null` when no
+address could take it).
+
 If egress can't start (no IMDS, no secondary IPs, a `BRIDGE_EGRESS_SLOTS`
 address that isn't one), the bridge logs `egress_start_failed` at error
 level and keeps running: its egress worlds are refused as `world_full`, every
@@ -292,8 +325,10 @@ other world works, and it retries after 30 s, 2 min, then every 10 min
 (`egress_start_recovered` when one works).
 
 Logs: `egress_start` (or `egress_start_failed`), `egress_acquire` /
-`egress_associate` (slot, public IP, timings), `egress_session_end`,
-`egress_release` (`why`: idle, shutdown, orphan, unfinished, failed_attach),
+`egress_associate` (slot, public IP, timings), `egress_ready` /
+`egress_not_ready` (the readiness check), `egress_session_end`,
+`egress_no_reply_move` / `egress_no_reply_stay`,
+`egress_release` (`why`: idle, shutdown, orphan, unfinished, failed_attach, not_ready, no_reply),
 `egress_fallback`, `egress_moved` (a new-account login left a spent address), `egress_stop_deadline`, `egress_refused`
 (reason, e.g. `aws:AddressLimitExceeded`), `egress_reconcile`,
 `egress_account_known` (`created` true when it counted), `egress_session_error`
