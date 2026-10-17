@@ -3,6 +3,7 @@
  *
  *   npx tsx tools/stream/supervisor.ts [run] [--config tools/stream/cast.json]
  *   npx tsx tools/stream/supervisor.ts stop        (or touch $TMPDIR/acjs-agent/stream/STOP, or Ctrl-C the supervisor)
+ *   npx tsx tools/stream/supervisor.ts stop --at-segment-end   (each character finishes its segment first: restarts)
  *   npx tsx tools/stream/supervisor.ts status
  *
  * For each character in the cast it starts the ac-agent daemon if none is running (or, for a public server, attaches
@@ -11,7 +12,8 @@
  * opening message. A segment ends at its time (the player is told to wrap up), on a crash, or when the player stops
  * early and won't continue; the next one starts with the journal so the story goes on. Stopping tells each player to
  * say goodbye, ends the sessions and logs every character out (Jake: "you should always log out if you stop
- * controlling them").
+ * controlling them"). A stop at the segment end (the STOP file's `segment-end` mode) instead lets each running
+ * segment reach its own wrap-up and report, then logs that character out instead of starting the next segment.
  *
  * It writes the stream's event feed (feed-events.ts) to $TMPDIR/acjs-agent/stream/feed.jsonl, each segment's usage
  * to segments.jsonl, each player's final report to reports/, its raw stream-json to sessions/, and its own log to
@@ -38,6 +40,71 @@ import { type SessionTally, clipReport, nudgeMessage, quietMessage, readinessBri
 
 export const STREAM_DIR = join(STATE_DIR, 'stream');
 export const STOP_FILE = join(STREAM_DIR, 'STOP');
+/** The running supervisor's lock: its pid and start, and (since the boundary stop) its live state (LiveState). */
+export const LOCK_FILE = join(STREAM_DIR, 'supervisor.json');
+
+/**
+ * How a stop was asked for. `now`: each player is told the stream is ending and says goodbye at once. `segment-end`:
+ * each character's running segment runs to its normal end (wrap-up, report), then the character is logged out instead
+ * of starting the next one; a character between segments stops at once.
+ */
+export type StopMode = 'now' | 'segment-end';
+
+/**
+ * The STOP file's contents. A plain stop writes a timestamp (or the file is merely touched): `now`. A boundary stop
+ * writes `segment-end <iso>` on its first line.
+ */
+export function parseStopFile(text: string): StopMode {
+  return /^\s*segment-end\b/.test(text) ? 'segment-end' : 'now';
+}
+
+export function stopFileText(mode: StopMode, nowMs: number): string {
+  const at = new Date(nowMs).toISOString();
+  return mode === 'segment-end' ? `segment-end ${at}\n` : `${at}\n`;
+}
+
+/** A running segment's clock, as the supervisor publishes it in its lock file. */
+export interface LiveSegment { segment: number; startedAt: string; wrapUpAt: string; endsBy: string }
+
+/** The supervisor's live state (written into LOCK_FILE): each character's running segment, or why it halted. */
+export interface LiveState {
+  stopMode: StopMode | null;
+  characters: Array<{ profile: string; character: string; segment: LiveSegment | null; halted: string | null }>;
+}
+
+const hhmm = (iso: string): string => `${iso.slice(11, 16)}Z`;
+
+/** When each character will stop under a boundary stop, one line each. */
+export function boundaryPlanLines(state: LiveState): string[] {
+  return state.characters.map((c) => {
+    if (c.halted) return `${c.character}: already done for now (${c.halted})`;
+    if (!c.segment) return `${c.character}: between segments: stops at once`;
+    const s = c.segment;
+    return `${c.character}: segment ${s.segment} (started ${hhmm(s.startedAt)}) gets its wrap-up at ${hhmm(s.wrapUpAt)} and ends by ${hhmm(s.endsBy)} at the latest`;
+  });
+}
+
+/** What `supervisor.ts stop [--at-segment-end]` does: what to write to the STOP file (null: nothing), and what to say. */
+export function stopCommand(o: { atSegmentEnd: boolean; alive: { pid: number; live?: LiveState } | null; current: StopMode | null; nowMs: number }): { write: string | null; lines: string[] } {
+  if (!o.atSegmentEnd) {
+    return {
+      write: stopFileText('now', o.nowMs),
+      lines: [o.alive ? `asked the supervisor (pid ${o.alive.pid}) to stop; it logs everyone out within a few minutes` : `no supervisor running; left ${STOP_FILE} (removed at the next start)`],
+    };
+  }
+  if (!o.alive) return { write: null, lines: ['no supervisor running; nothing to stop'] };
+  // A supervisor from before this mode reads any STOP file as "stop now": the very mid-fight wrap-up this avoids.
+  if (!o.alive.live) return { write: null, lines: [`the running supervisor (pid ${o.alive.pid}) predates --at-segment-end and would stop at once; nothing written. Use a plain \`stop\` when a mid-segment stop is acceptable.`] };
+  if (o.current === 'now') return { write: null, lines: [`an immediate stop is already pending (pid ${o.alive.pid}); left as it is`] };
+  return {
+    write: stopFileText('segment-end', o.nowMs),
+    lines: [
+      `asked the supervisor (pid ${o.alive.pid}) to stop at each character's segment end; it logs each one out then, and exits after the last`,
+      ...boundaryPlanLines(o.alive.live).map((l) => `  ${l}`),
+      'a plain `stop` still ends everything now',
+    ],
+  };
+}
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /** A running player session: its stdout lines, its stdin, and how it ended. */
@@ -86,7 +153,10 @@ export interface SupervisorDeps {
   brief(): string;
   /** New lines of the profile's chat log since the last call. */
   chatLines(profile: string): string[];
-  stopRequested(): boolean;
+  /** Whether a stop was asked for and how (the STOP file): true or 'now' stops at once, 'segment-end' at each segment's end. */
+  stopRequested(): boolean | StopMode | null;
+  /** Publish the live state (each character's running segment) for `status` and `stop --at-segment-end`. */
+  liveState?(state: LiveState): void;
   feed: FeedWriter;
   segments: { read(): SegmentRecord[]; append(r: SegmentRecord): void };
   /** Keep the player's final report; returns where. */
@@ -163,6 +233,10 @@ interface Active { proc: PlayerProcess; c: CharacterConfig }
 
 export class StreamSupervisor {
   stopping = false;
+  /** A boundary stop is pending: no new segment starts; running ones end on their own clock. */
+  stopAtBoundary = false;
+  /** Each character's running segment (its number and start), for the live state. */
+  private live = new Map<string, { segment: number; startMs: number }>();
   private stopWaiters: Array<() => void> = [];
   private active = new Map<string, Active>();
   private restarting = new Set<string>();
@@ -196,11 +270,54 @@ export class StreamSupervisor {
     this.stopping = true;
     this.deps.log(`stopping: ${why}`);
     for (const w of this.stopWaiters.splice(0)) w();
+    this.publishLive();
   }
 
-  /** Sleep that a stop cuts short. */
-  private async pause(ms: number): Promise<void> {
-    if (this.stopping || ms <= 0) return;
+  /**
+   * Stop at the segment boundary: no character starts another segment; each running one runs to its own wrap-up and
+   * report, then that character is logged out. A character between segments stops at once (its pause is cut short).
+   * A later plain stop (requestStop) still ends everything at once.
+   */
+  requestBoundaryStop(why: string): void {
+    if (this.stopping || this.stopAtBoundary) return;
+    this.stopAtBoundary = true;
+    this.deps.log(`stopping at each segment's end: ${why}`);
+    for (const l of boundaryPlanLines(this.liveState())) this.deps.log(`  ${l}`);
+    for (const w of this.stopWaiters.splice(0)) w();
+    this.publishLive();
+  }
+
+  /** No new segment may start (either stop). */
+  private get halting(): boolean { return this.stopping || this.stopAtBoundary; }
+
+  liveState(): LiveState {
+    const { cfg } = this;
+    return {
+      stopMode: this.stopping ? 'now' : this.stopAtBoundary ? 'segment-end' : null,
+      characters: cfg.characters.map((c) => {
+        const l = this.live.get(c.profile);
+        const deadline = l ? l.startMs + cfg.segment.minutes * 60_000 : 0;
+        return {
+          profile: c.profile, character: c.character, halted: this.halted.get(c.profile) ?? null,
+          segment: l ? {
+            segment: l.segment,
+            startedAt: new Date(l.startMs).toISOString(),
+            wrapUpAt: new Date(deadline).toISOString(),
+            // runSegment's hard deadline: the wrap-up time and a minute after the segment's time.
+            endsBy: new Date(deadline + cfg.segment.wrapUpMinutes * 60_000 + 60_000).toISOString(),
+          } : null,
+        };
+      }),
+    };
+  }
+
+  private publishLive(): void {
+    try { this.deps.liveState?.(this.liveState()); } catch (e) { this.deps.log(`live state: ${(e as Error).message}`); }
+  }
+
+  /** Sleep that a stop cuts short (with `betweenSegments`, a boundary stop too). */
+  private async pause(ms: number, betweenSegments = false): Promise<void> {
+    if (this.stopping || (betweenSegments && this.stopAtBoundary) || ms <= 0) return;
     await Promise.race([this.deps.sleep(ms), new Promise<void>((r) => this.stopWaiters.push(r))]);
   }
 
@@ -208,11 +325,14 @@ export class StreamSupervisor {
   async run(): Promise<void> {
     const { deps } = this;
     deps.feed.write({ type: 'session-start', title: this.cfg.characters.map((c) => c.character).join(' & ') });
+    this.publishLive();
     let playing = true;
     const watcher = (async () => {
       let lastStatus = 0;
       while (playing) {
-        if (deps.stopRequested()) this.requestStop('stop requested');
+        const asked = deps.stopRequested();
+        if (asked === true || asked === 'now') this.requestStop('stop requested');
+        else if (asked === 'segment-end') this.requestBoundaryStop('stop at segment end requested');
         this.pumpChat();
         if (deps.now() - lastStatus >= this.cfg.statusEverySeconds * 1000) {
           lastStatus = deps.now();
@@ -227,7 +347,10 @@ export class StreamSupervisor {
     this.pumpChat();
     playing = false;
     await watcher;
-    deps.feed.write({ type: 'segment-end', title: 'Stream over', detail: this.stopping ? 'stopped; everyone logged out' : `every character halted (${[...this.halted.values()].join('; ')})` });
+    const detail = this.stopping ? 'stopped; everyone logged out'
+      : this.stopAtBoundary ? 'stopped at the segment ends; everyone logged out'
+        : `every character halted (${[...this.halted.values()].join('; ')})`;
+    deps.feed.write({ type: 'segment-end', title: 'Stream over', detail });
   }
 
   /** Feed the new chat lines of every character. */
@@ -327,10 +450,13 @@ export class StreamSupervisor {
     return r.code === 0;
   }
 
-  /** Until the character is in the world (attached: until the human has logged it in). */
-  private async waitReady(c: CharacterConfig): Promise<boolean> {
+  /**
+   * Until the character is in the world (attached: until the human has logged it in). `betweenSegments`: before a
+   * segment, where a boundary stop ends the wait too (a mid-segment relog keeps waiting through one).
+   */
+  private async waitReady(c: CharacterConfig, betweenSegments = false): Promise<boolean> {
     let said = -Infinity;
-    while (!this.stopping) {
+    while (!this.stopping && !(betweenSegments && this.stopAtBoundary)) {
       const st = await this.deps.daemonStatus(c.profile).catch(() => null);
       if (!st) return false;
       if (st.ready) return true;
@@ -339,7 +465,7 @@ export class StreamSupervisor {
         const why = c.attach ? `waiting for ${c.character} to be logged in (attach ${c.attach.endpoint})` : 'waiting for the world';
         this.deps.log(`${c.character}: ${why}`);
       }
-      await this.pause(5000);
+      await this.pause(5000, betweenSegments);
     }
     return false;
   }
@@ -351,24 +477,27 @@ export class StreamSupervisor {
     let lastReport: string | null = null;
     for (;;) {
       const today = dayUsage(this.deps.segments.read(), c.profile, localDay(new Date(this.deps.now())));
-      const step = nextSegment({ cfg: this.cfg, stopping: this.stopping, segmentsThisRun: segment, quickExits, last, today });
+      const step = nextSegment({ cfg: this.cfg, stopping: this.halting, segmentsThisRun: segment, quickExits, last, today });
       if (step.action === 'halt') {
-        if (!this.stopping) {
+        if (this.stopAtBoundary && !this.stopping) await this.stopAtSegmentEnd(c);
+        else if (!this.stopping) {
           this.halted.set(c.profile, step.why);
           this.deps.log(`${c.character}: halted: ${step.why}`);
           this.deps.feed.write({ type: 'segment-end', char: c.profile, title: `${c.character} is done for now`, detail: step.why });
+          this.publishLive();
           await this.logOut(c);
         }
         return;
       }
-      await this.pause(step.delayMs);
-      if (this.stopping) return;
-      if (!(await this.ensureDaemon(c)) || !(await this.waitReady(c))) {
-        if (this.stopping) return;
+      await this.pause(step.delayMs, true);
+      if (this.halting) { await this.stopAtSegmentEnd(c); return; }
+      if (!(await this.ensureDaemon(c)) || !(await this.waitReady(c, true))) {
+        if (this.halting) { await this.stopAtSegmentEnd(c); return; }
         quickExits++;
         last = 'crashed';
         continue;
       }
+      if (this.halting) { await this.stopAtSegmentEnd(c); return; }
       segment++;
       const rec = await this.runSegment(c, segment, lastReport);
       this.deps.segments.append(rec);
@@ -380,6 +509,17 @@ export class StreamSupervisor {
       last = rec.reason;
       quickExits = rec.reason !== 'stopping' && rec.minutes < this.cfg.segment.quickExitMinutes ? quickExits + 1 : 0;
     }
+  }
+
+  /**
+   * A boundary stop reached this character between segments: log it out now rather than leave it standing in the
+   * world until the others' segments end (a plain stop logs everyone out at the end of run()).
+   */
+  private async stopAtSegmentEnd(c: CharacterConfig): Promise<void> {
+    if (this.stopping || !this.stopAtBoundary) return;
+    this.deps.log(`${c.character}: stopped at the segment boundary; logging out`);
+    this.deps.feed.write({ type: 'segment-end', char: c.profile, title: `${c.character} is done for now`, detail: 'the stream is stopping at the segment end' });
+    await this.logOut(c);
   }
 
   /** One headless Claude Code session playing `c`, from its opening message until it ends. */
@@ -404,6 +544,8 @@ export class StreamSupervisor {
     const name = `stream: ${c.character} #${segment}`;
     const proc = deps.spawnPlayer(claudeArgs(cfg, c, systemPrompt(deps.brief(), c, partner), name), playerEnv(cfg, c), name);
     this.active.set(c.profile, { proc, c });
+    this.live.set(c.profile, { segment, startMs });
+    this.publishLive();
     deps.log(`${c.character}: segment ${segment} started (${c.model}, ${cfg.segment.minutes} min)`);
     deps.feed.write({ type: 'segment-start', char: c.profile, title: `${c.character}: segment ${segment}`, detail: `${c.model}, ${cfg.segment.minutes} min` });
     proc.send(userLine(segmentOpening({ c, partner, segment, nowMs: startMs, playMinutes: cfg.segment.minutes, journal: deps.journal(c.profile), lastReport, readiness, ownTime })));
@@ -501,6 +643,8 @@ export class StreamSupervisor {
     }
     const exitCode = await proc.exit;
     this.active.delete(c.profile);
+    this.live.delete(c.profile);
+    this.publishLive();
     const endMs = deps.now();
     const reason = endReason({ stopping: this.stopping, wrapUpSent, killed, sawResult, exitCode, resultSubtype });
     const minutes = (endMs - startMs) / 60_000;
@@ -606,7 +750,14 @@ export function realDeps(cfg: StreamConfig): SupervisorDeps {
       if (!t) { t = new FileTail(logFile(p).replace(/\.log$/, '.chat.log')); tails.set(p, t); }
       return t.read();
     },
-    stopRequested: () => existsSync(STOP_FILE),
+    stopRequested: () => {
+      if (!existsSync(STOP_FILE)) return null;
+      try { return parseStopFile(readFileSync(STOP_FILE, 'utf8')); } catch { return 'now'; }
+    },
+    liveState: (state) => {
+      const lock = existsSync(LOCK_FILE) ? (JSON.parse(readFileSync(LOCK_FILE, 'utf8')) as Record<string, unknown>) : { pid: process.pid, startedAt: new Date().toISOString() };
+      writeFileSync(LOCK_FILE, JSON.stringify({ ...lock, live: state }) + '\n');
+    },
     feed: new FeedWriter(feedPath()),
     segments: {
       read: () => (existsSync(segFile) ? readFileSync(segFile, 'utf8').split('\n').filter(Boolean).flatMap((l) => { try { return [JSON.parse(l) as SegmentRecord]; } catch { return []; } }) : []),
@@ -631,17 +782,28 @@ async function main(): Promise<void> {
   const cmd = argv[0] && !argv[0].startsWith('--') ? argv[0] : 'run';
   const ci = argv.indexOf('--config');
   const cfgPath = ci > -1 ? argv[ci + 1] : 'tools/stream/cast.json';
-  const lock = join(STREAM_DIR, 'supervisor.json');
+  const lock = LOCK_FILE;
   mkdirSync(STREAM_DIR, { recursive: true });
-  const running = existsSync(lock) ? (JSON.parse(readFileSync(lock, 'utf8')) as { pid: number; startedAt: string }) : null;
+  const running = existsSync(lock) ? (JSON.parse(readFileSync(lock, 'utf8')) as { pid: number; startedAt: string; live?: LiveState }) : null;
   const alive = running && pidAlive(running.pid) ? running : null;
+  const pendingStop = (): StopMode | null => (existsSync(STOP_FILE) ? parseStopFile(readFileSync(STOP_FILE, 'utf8')) : null);
   if (cmd === 'stop') {
-    writeFileSync(STOP_FILE, new Date().toISOString() + '\n');
-    console.log(alive ? `asked the supervisor (pid ${alive.pid}) to stop; it logs everyone out within a few minutes` : `no supervisor running; left ${STOP_FILE} (removed at the next start)`);
+    const atSegmentEnd = argv.includes('--at-segment-end');
+    const unknown = argv.slice(1).filter((a, i, all) => a.startsWith('--') && a !== '--at-segment-end' && a !== '--config' && all[i - 1] !== '--config');
+    if (unknown.length) throw new Error(`unknown stop option ${unknown.join(' ')} (stop [--at-segment-end])`);
+    const r = stopCommand({ atSegmentEnd, alive, current: pendingStop(), nowMs: Date.now() });
+    if (r.write !== null) writeFileSync(STOP_FILE, r.write);
+    for (const l of r.lines) console.log(l);
     return;
   }
   if (cmd === 'status') {
     console.log(alive ? `supervisor pid ${alive.pid}, since ${alive.startedAt}` : 'no supervisor running');
+    const pending = alive ? pendingStop() : null;
+    if (pending === 'now') console.log('stop pending: everyone is wrapping up now');
+    if (pending === 'segment-end') {
+      console.log(`stop at segment end pending (asked ${readFileSync(STOP_FILE, 'utf8').trim().split(/\s+/)[1] ?? '?'}): no new segments start`);
+      if (alive?.live) for (const l of boundaryPlanLines(alive.live)) console.log(`  ${l}`);
+    }
     const segFile = join(STREAM_DIR, 'segments.jsonl');
     const recs = existsSync(segFile) ? readFileSync(segFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as SegmentRecord) : [];
     const cfg = readConfig(cfgPath);

@@ -27,6 +27,7 @@ import { isCorpseDenial } from './macro/corpseBook.ts';
 import { LootExtras } from './macro/lootExtras.ts';
 import { propertyDumpLines, testItemLine } from './macro/lootTest.ts';
 import type { AgentObject, AgentObservation, AgentResult } from './types.ts';
+import type { RoutineDriver, RoutineErrorPlace, RoutineLifecycleEvent, RoutineStopReason } from '../telemetry/AutomationReporter.ts';
 
 /** Live facts the conditions read that the observation doesn't carry. */
 export interface RoutineFacts {
@@ -397,12 +398,32 @@ export class RoutineEngine {
    * Errors, Warnings); otherwise main.ts files it under CommandLine.
    */
   onReport: ((text: string, category?: VtVcsCategory) => void) | null = null;
+  /**
+   * OBS.automation-usage — a run started, stopped (a closed reason) or had an action fail (a closed place);
+   * main.ts hands these to telemetry/AutomationReporter.ts. Never throws into the run.
+   */
+  onLifecycle: ((e: RoutineLifecycleEvent) => void) | null = null;
+
+  private lifecycle(e: RoutineLifecycleEvent): void {
+    try { this.onLifecycle?.(e); } catch { /* telemetry never stops the routine */ }
+  }
+
+  /** An action sequence threw: the run's log, and the lifecycle's error. */
+  private failed(where: RoutineErrorPlace, e: unknown, label = 'error'): void {
+    this.note(`${label}: ${String((e as Error)?.message ?? e)}`);
+    this.lifecycle({ type: 'error', where });
+  }
 
   constructor(private readonly api: AgentApi, private readonly facts: RoutineFacts, private readonly now: () => number) {
     this.loot = new LootExtras(api, now, (t) => this.report(t));
   }
 
-  start(profile: RoutineProfile): AgentResult {
+  /**
+   * Run `profile`. `driver`: who asked, for the usage report — the agent API by default; the player's
+   * own windows and /vt commands say 'player' (main.ts). A run already going ends as 'replaced'.
+   */
+  start(profile: RoutineProfile, driver: RoutineDriver = 'agent'): AgentResult {
+    if (this.profile) this.lifecycle({ type: 'stop', reason: 'replaced' });
     // A copy: the panel's module switches change this run, not the stored document.
     this.profile = { ...profile, modules: { ...profile.modules } };
     this.state = profile.initialState;
@@ -435,11 +456,14 @@ export class RoutineEngine {
     this.activeLootSet = null;
     if (profile.lootSet && profile.lootSets?.[profile.lootSet]) { this.profile.loot = profile.lootSets[profile.lootSet]; this.activeLootSet = profile.lootSet; }
     this.note(`started "${profile.name}" in "${this.state}"`);
+    this.lifecycle({ type: 'start', profile, driver });
     return { ok: true, message: `running "${profile.name}" (starts in "${this.state}")` };
   }
 
-  stop(why = 'stopped'): AgentResult {
+  /** End the run. `reason`: why, for the usage report (the agent API by default; main.ts's player surfaces say 'player'). */
+  stop(why = 'stopped', reason: RoutineStopReason = 'agent'): AgentResult {
     if (!this.profile) return { ok: false, message: 'no routine is running' };
+    this.lifecycle({ type: 'stop', reason });
     this.clockState();
     this.note(`${why}`);
     this.paused = false;
@@ -965,7 +989,7 @@ export class RoutineEngine {
       this.busy = true;
       void this.lootOne({ guid, dist: at?.dist ?? 0 }, undefined, p)
         .then((r) => this.report(`Loot this Container: ${r.message}`))
-        .catch((e) => this.note(`error: ${String((e as Error)?.message ?? e)}`))
+        .catch((e) => this.failed('loot', e))
         .finally(() => { this.busy = false; });
       return;
     }
@@ -981,7 +1005,7 @@ export class RoutineEngine {
         if (!this.deadSeen) { this.deadSeen = true; this.stats.deaths++; }
         if (truthySetting(this.settings.StopMacroOnDeath)) {
           this.report(`You died: stopped "${p.name}"`, 'Errors');
-          this.stop('stopped: you died');
+          this.stop('stopped: you died', 'died');
         }
         return;
       }
@@ -1016,7 +1040,7 @@ export class RoutineEngine {
     this.busy = true;
     this.chatSeq = this.api.currentSeq();
     this.eventMark = this.api.currentSeq();
-    void this.run(rule.do, p, key).catch((e) => this.note(`error: ${String((e as Error)?.message ?? e)}`)).finally(() => { this.busy = false; this.acting = null; });
+    void this.run(rule.do, p, key).catch((e) => this.failed('rule', e)).finally(() => { this.busy = false; this.acting = null; });
   }
 
   /**
@@ -1062,7 +1086,7 @@ export class RoutineEngine {
         if (step) {
           this.acting = step.label;
           this.busy = true;
-          void step.run().then((r) => this.note(`${step.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.note(`${step.label}: ${String((e as Error)?.message ?? e)}`)).finally(() => { this.busy = false; this.acting = null; });
+          void step.run().then((r) => this.note(`${step.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.failed('macro', e, step.label)).finally(() => { this.busy = false; this.acting = null; });
           return;
         }
       }
@@ -1089,7 +1113,7 @@ export class RoutineEngine {
         if (last) {
           this.acting = last.label;
           this.busy = true;
-          void last.run().then((r) => this.note(`${last.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.note(`${last.label}: ${String((e as Error)?.message ?? e)}`)).finally(() => { this.busy = false; this.acting = null; });
+          void last.run().then((r) => this.note(`${last.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.failed('macro', e, last.label)).finally(() => { this.busy = false; this.acting = null; });
         }
         return;
       }
@@ -1155,7 +1179,7 @@ export class RoutineEngine {
       if (step) {
         this.busy = true;
         this.acting = step.label;
-        void step.run().then((r) => this.note(`${step.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.note(`${step.label}: ${String((e as Error)?.message ?? e)}`)).finally(() => { this.busy = false; this.acting = null; });
+        void step.run().then((r) => this.note(`${step.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.failed('macro', e, step.label)).finally(() => { this.busy = false; this.acting = null; });
         return true;
       }
     }
@@ -1648,7 +1672,7 @@ export class RoutineEngine {
       case 'set-state':
         this.enterState(a.state, this.acting);
         return { ok: true, message: `→ "${a.state}"` };
-      case 'stop': this.stop('stopped by its own rule'); return null;
+      case 'stop': this.stop('stopped by its own rule', 'rule'); return null;
       // A spell by name, or by id (imported VTank recall steps carry the id).
       case 'cast': return this.api.cast(/^\d+$/.test(a.spell.trim()) ? Number(a.spell) : a.spell, a.target === 'target' ? null : 'self');
       case 'cast-buffs': {

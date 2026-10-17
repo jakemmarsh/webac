@@ -266,7 +266,7 @@ requests. Both confirm with `show` before leaving town. Then the brief sets the 
   should still help fight, heal, etc"): the caster still fights the called target and heals;
 - the tank calls each target in `/f`, the caster attacks only that target and heals the tank below 50%;
 - "/f RUN" when either is below 35% or more than two monsters are on them;
-- after a death, regroup at the lifestone;
+- after a death, regroup at the lifestone and fetch the corpse together, buffed (2026-10-17, below);
 - monster levels within about ±3, checked in the world DB.
 Without the retreat and level rules the 2026-10-09 pair both died to a four-drudge pull in the Drudge Hideout.
 Don't `observe` a running agent's profile from outside: it consumes that agent's "chat since last look".
@@ -298,7 +298,8 @@ stream with no human or lead session launching each run (Jake, 2026-10-13).
 ```bash
 npx tsx tools/stream/supervisor.ts                 # run (tools/stream/cast.json; --config <file> for another)
 npx tsx tools/stream/supervisor.ts stop            # or touch $TMPDIR/acjs-agent/stream/STOP, or Ctrl-C it
-npx tsx tools/stream/supervisor.ts status          # today's segments, minutes and cost per character
+npx tsx tools/stream/supervisor.ts stop --at-segment-end   # let each segment finish first: use this to restart
+npx tsx tools/stream/supervisor.ts status          # today's segments, minutes and cost per character; a pending stop
 ```
 
 **What it does.** For each character in the cast it starts the play daemon if none is running (`cli.ts start
@@ -363,6 +364,22 @@ profile=… character=…`), then plays it as a headless Claude Code session in 
   `stopGraceSeconds` to say goodbye and write a report. Then the session ends and every character is logged out:
   `cli.ts stop profile=…` for each. Jake: "you should always log out if you stop controlling them". A character
   halted by a cap is logged out the same way.
+- **Stopping at the segment end** (`stop --at-segment-end`, 2026-10-17) writes `segment-end <iso>` into the same STOP
+  file (a plain stop writes a timestamp; a touched empty file is a plain stop too). No character starts another
+  segment; each running one keeps its own clock: its normal "Wrap up now" at `segment.minutes`, its report, then that
+  character is logged out (`cli.ts stop`) at once, and the supervisor exits after the last. A character already
+  between segments (its pause, or waiting for its daemon) stops at once. The command prints when each character will
+  stop (its wrap-up time and the hard end, wrap-up time + 1 min after it) from the live state the supervisor keeps in
+  `stream/supervisor.json` (`live`: each character's running segment and start); `status` shows the pending stop and
+  the same lines. A plain `stop` afterwards still ends everything at once. A supervisor started before this build has
+  no `live` state and would read any STOP file as "stop now", so the command refuses to write one for it. Why: at
+  18:47Z on 2026-10-17 a plain stop to load a new build sent the goodbye mid-fight with four or five monsters, and
+  Claude Arcanist died in it.
+- **Restarting the stream for a new build:** `stop --at-segment-end`, wait for the supervisor to exit (`status`: no
+  supervisor running), then `run` again from the checkout at the new commit. Then confirm each daemon serves it:
+  `$TMPDIR/acjs-agent/<profile>.json`'s `.snapshot` must be `…/tree-<new sha>` (e.g. `jq -r .snapshot
+  $TMPDIR/acjs-agent/mage.json`). A daemon left running from before keeps its old snapshot; the stop logs each
+  character out with `cli.ts stop`, so the new `run` starts fresh ones.
 
 **Limits** (cast.json): `maxSegments` per run per character; `daily.maxSegments` / `maxMinutes` / `maxUsd` per local
 day per character. These are counted from the segment log, so they survive a supervisor restart. `segment.budgetUsd`
@@ -394,6 +411,9 @@ The brief therefore asks for one CLI call per Bash command: no `cd`, pipes or ot
   **Deaths are only here** (`"type":"death"`, with `text` and `killer`): the page logs `<profile>.log` never carry the
   death line, so a watcher grepping them for "You have died" sees nothing (2026-10-17: six deaths in one segment went
   unseen that way). Watch the feed.
+  `node tools/stream/death-watch.mjs [run.out]` does that as a Monitor command: it first replays every death since the
+  last one it reported (a stamp file beside the feed), so a death in the gap between one 30-minute watch expiring and
+  the next being armed still shows up (two were missed that way on 2026-10-17).
   - `chat`: every line of `<profile>.chat.log`, with a channel (say / tell-in / tell-out / fellowship / general …;
     combat / magic / system by wording, since the log keeps no chat type). A line between cast members is written
     once, from the speaker's log. A character's own spell words ("You say, "Zojak Quaguz"", which retail prints as
@@ -537,6 +557,7 @@ What changed:
   Your readiness right now (`./ac gear`, `./ac character`, `./ac inventory` for the whole picture):
   - gear: nothing worn: no helm or hat (head), no gloves (hands)
   - gear: clothing only, no armor over it: upper legs, lower legs
+  - gear: no jewelry on: neck, wrists
   - gear: in your pack, would fill an empty slot: Pathwarden Helm #80002002 (head); Chevron Cloak #80002001 (cloak)
   - gear: 4 worn pieces with unknown armor level (Studded Leather Coat, Shirt, Pants, Leather Boots): appraise to compare
   - unspent: 612,345 XP
@@ -558,6 +579,51 @@ What changed:
   only when a real player would. `cast.json` personalities are temperaments now (Arcanist the curious one, a bit
   cocky about damage; Bulwark dry, deadpan, protective, with a grudge list), not characters to perform.
 - The readiness rule is mirrored in `.claude/skills/play/SKILL.md` and `tools/ac-agent/hostedGuide.ts`.
+
+### Corpse first, never a gear gap (2026-10-17)
+
+Jake: "they also should be prioritizing getting their corpses and never going without gear, even if they have to
+replace it". Claude Arcanist died at 18:48:02Z in the Tusker Liberator dungeon (0x5B47, cell 0x5B470172) and lost
+"1,780 Pyreals, your Studded Leather Greaves, and your Gloves"; the next segment started at 18:49Z, he said "Skip my
+corpse, I've got replacements" and the pair went to L60 Viamontian Footmen and L80 Mercenaries at levels 48 and 46;
+he died at 19:18:37Z and Bulwark at 19:19:13Z. What the evidence showed (sessions/{mage,soldier}-2026-10-17-seg1.jsonl,
+feed.jsonl, reports/mage-2026-10-17T18-48-28-713Z-seg1.md):
+- **The gear rule held; the facts misled him.** The lost greaves and gloves were spares in his pack (his 17:09Z plan
+  listed both as junk to sell); his 18:49Z `gear` showed Platemail Leggings and Leather Gauntlets worn and every body
+  part armored (the Baggy Shirt is under a Platemail Breastplate). His own report still said they "need replacing":
+  the "You've lost …" line doesn't say which lost items were worn. And every worn piece was "AL ?" (never appraised),
+  with Leather Bracers, Gauntlets and Boots at level 48: low-level gear nobody measured.
+- **The death and its corpse were missing from the opening.** The supervisor restarted at 18:48:45Z (a new session),
+  so the session tally was empty, and the page's own death log starts empty on every reload. Nothing said where the
+  corpse was or when it would rot.
+- **No prompt pushed him past preparation.** The brief and supervisor messages were checked for "keep moving" or
+  dead-air pressure: none left (the 2026-10-14 pass removed it). Rule 4's "if buffing stalls … pull anyway with kits
+  and potions" is the 2026-10-14 fix for a tank stuck 4 minutes waiting on buffs and was kept. The deaths came from
+  monsters 12 to 32 levels above them, against rule 5's ±3.
+
+What changed:
+- **Brief** (Readiness): "After a death, your corpse comes first: go back for it together, buffed, before anything
+  else … If it can't be reached safely or has rotted, replace what you wore before you hunt again: never hunt with a
+  gear gap"; rule 5's "after a death" line points there. The play skill and the hosted guide say the same.
+- **Opening** (`tools/stream/corpses.ts`, carried by the supervisor's `ownTime` read, `own-time.ts loadOwnTime`, so
+  supervisor.ts is unchanged): one line per corpse from the feed (which outlives restarts): the death's time and
+  killer, where (outdoors the server's "Your corpse is located at" spot; inside the landblock and cell, a walk_to
+  target), what's on it (the loss line's items; the pyreals are destroyed, not on it), and "rots at about HH:MM, N
+  from now" or "ROTTED at … what was on it is gone, so replace any of it you wore". A corpse you opened is said for
+  10 min, then counted as fetched; a coins-only death leaves none. Readiness adds "- gear: armor on every body part"
+  when no part is bare or clothing-only, and "- gear: no jewelry on: neck, wrists".
+- **Observe and `gear`** (AgentApi `corpsesLine`, also the page's `corpses` read): `your corpses: from your death 1
+  min ago (Tusker Liberator) inside landblock 0x5B47, cell 0x5B470172: Studded Leather Greaves, Gloves (all from your
+  pack, none worn); rots in about 4 h`, with "(in view now)", "GONE … (left your view: looted empty, or rotted)" or
+  "ROTTED … ago". Which lost items were worn comes from the inventory at the death state (ACE Player_Death.Die sends
+  Health 0 at once and makes the corpse after the death animation). Kept in browser storage per character
+  (`acAgent.corpses.<name>`), so a reload keeps it. `gear` starts with a `gaps:` line naming each gap and ends with the
+  corpses line.
+- **Decay source:** ACE `Corpse.RecalculateDecayTime` (reference/ACE/Source/ACE.Server/WorldObjects/Corpse.cs:103-110):
+  max(3600 s, level × 300 s) with items, `EmptyDecayTime` 15 s without. `corpse_destroy_pyreals` (PropertyManager.cs:547,
+  default true) is 1 on our local server's `ace_shard.config_properties_boolean` (checked 2026-10-17), so dropped coins
+  are destroyed (Player_Death.cs:569). AC1999: `CORPSE_PLAYER_SECONDS_PER_LEVEL` 300 × level (reference/ac1999
+  Server/Source/Player.cpp:40, 1392), with no one-hour floor: the same from level 12 up.
 - **Skill credits ahead and a standing goal** (Jake, 2026-10-14: "lets just get the credits ASAP no temple"). The
   readiness block's credit line names the next two levels that grant credits. They come from the era's own XpTable
   `characterLevelSkillCreditList` (portal 0x0E000018; ACE `Player_Xp` adds `list[newLevel]` on each level-up). The
@@ -1428,8 +1494,20 @@ uses the client's own movement collision:
 
 The trace (browser console, `[AC:Agent] walk …`) logs each leg, search, jump (`walk drop 6.0 m from … facing
 0°, walking, jump key held 150 ms (power 0.15); landing … in 1.4 s`) and landing. The result says what the
-walk did: `arrived (1.2 m away); on the way you dropped off a ledge (6.0 m) and jumped once (a gap or a
-platform)`.
+walk did: `arrived (1.2 m from Dread Mu-miyah); on the way you dropped off a ledge (6.0 m) and jumped once (a gap or a
+platform)`. An arrival names what its distance is from: the object (centre to centre), `the spot` for "5m north", the
+coordinate, `the middle of cell 0x…`, or `where X was last seen` when the walk went to a last-seen spot (2026-10-17:
+"arrived (0.1 m away)" at a Dread's last-seen spot read as being on it, with it 5 m W).
+
+A last leg to an object with a reach (a portal, a lifestone, a statue) is straight when the line reaches its reach: its
+middle is inside the disk the walk keeps from portals, or inside its own collision, so the probe to the middle always
+stopped short and every such leg searched (the Al-Jalima flee walk to the Town Network portal stood searching while it
+was killed, 2026-10-17 19:53Z).
+
+**Line of fire is to where the server has the target.** The client plays a monster's MoveTo out on its own, and a Dread
+the server held a storey up can run down to you in your view. When the copy here and the server's last position split
+by a storey (2.5 m) or 6 m across, `lineOfFire` checks the server's spot too (walk_to `line=true`, the cast refusal and
+the arrival note all read it) and says "where the server has it: 12.9 m off, 6 m up" (Mountain Keep, 2026-10-17).
 
 `ac_map` draws the floor you can reach from where you stand, and with the jump physics also:
 `v` a ledge you can drop off (the fall is one your health takes), `!` a drop that would hurt too much, and
@@ -1588,6 +1666,19 @@ identify themselves.
   A creature that attacked you or stood on a fellow in the last 30 s (`RECENT_FOE_MS`) stays one `ac_attack` goes
   after once the client lets it go: to its last placement (`monsterLastSeen`), then the attack once it is in sight
   there (a `target-lost` event if not); observe's target line says "it attacked N s ago".
+  A leader the client has let go but the server placed in the last 5 s (`released()` false: in a dungeon the client
+  keeps only the rooms in sight of yours) is followed on as in sight; only one not placed since stands the follow
+  (then on to their last placement for a fellow, or "went out of sight" after `FOLLOW_LOST_MS`). The "is N m below
+  you; no way down to them was found" lead is only for a follow that searched and found none, never over an
+  out-of-sight stop (Mountain Keep 20:29Z, 2026-10-17: tests/verify-stream-split-2026-10-17-2029.ts).
+- **A leap your jump failed is left out of your routes for 30 min (2026-10-17).** A leap of the doorway route whose
+  take-off no jump search found, or whose jump came down in the gap, is remembered per character and landblock
+  (`AgentApi.leapsFailed`, `LEAP_FAILED_MS`) and passed to the planner as `cellPath` RouteOptions.noLeapTo (that
+  direction only: by its landing doorway). A later walk that needs it ends at once with the cut-off answer, which
+  names it ("the doorway route there needs a 7.1 m leap over open air, and your jump didn't make it N min ago …").
+  Mountain Keep's 0x01D20340 from the halls under the walkways is reachable only across the 7.1 m corner leap over
+  the pit 0x01D202A7 from the 0x02A6 side (~400 m, 100 doorways): a buffed Arcanist makes it, Bulwark finds no
+  take-off there; the locked door #701d2021 (0x01D201A6) is on no route.
 - **Walks and uses from the 12:07Z stream reports (2026-10-17).** Each with its evidence in
   tests/verify-stream-reports-2026-10-17-1207-walk.ts:
   - A monster in a combat stance is awake (ACE `Monster.Sleep` sets NonCombat): the pack stop ("monsters not awake
@@ -1615,3 +1706,5 @@ identify themselves.
 - **2026-10-17, Shreth camp (0x5779) and Holtburg:** a plugin's chat prints (Mag-Tools' item info) are tagged `plugin` on the event and no action's reply reads them (`AgentApi.replyLines`): every sale to a vendor whose shop re-selects its first item (ACE re-sends the shop after each sale) printed the girth sold earlier. An Other spell whose target type leaves you out (creature-only: Heal Other, Magic Resistance Other) is never offered or sent at you (`spellCastsOnYou`, the client's 0x8107 rule). A use of a carried item that broke off a swing sends a fresh attack once the drink is done, as a player presses Attack again. The quiet-swing height cycling waits for a finished swing (AttackDone 0); before that the server is still running you up to it.
 - **2026-10-17 14:11Z, Mountain Keep (0x01D2):** a monster the client "let go" in a dungeon is out of your cell's stab list (ObjectMaint, retail `CEnvCell::grab_visible_cells`, ACE `EnvCell.IsVisibleIndoors` read the same VisibleCells), not out of the server's update range: the refusal now says that, where it was last seen, and that it died when its corpse lies there. `buff-expired` wakes a wait when one of your enchantments ends (the client's "<Spell> has expired.") or an item spell on your gear does (ACE's "The spell … on … has expired.", one event per spell); observe has `BUFFS RUNNING LOW` (2 min or less, from the server's enchantment data) and `spells on your gear` (no timer for an item's spells reaches the client, so it is reckoned from your casts and the spell's Duration, as a player would). Aggro holds a chase that gets no nearer at 20 s whether or not its MoveTo lets up, and one a storey off at 8 s; its walks about the other floor don't count as closing in. stay_with doesn't go back for a fellow standing on the way you came (they can come; they aren't following), and a going-back that ends away from them says so. `/tell Name msg` with no comma after a known player's name gets the comma put in (retail DoTell takes the name up to the first comma; the player's own chat box is unchanged).
 - **2026-10-17 17:54Z, Tusker Habitat (0x5B47):** a melee approach the server gives up on or leaves stuck (8 s, no answer, no nearer, the target 1 m+ off your level or past 4 m, no wall or door seen between) is run up to with the walk planner and attacked once more (`AgentApi` fight: `APPROACH_FAILED`, `APPROACH_STALL_MS`). ACE's melee charge (UseChargeAttack, on by default) is a straight MoveTo with no progress give-up for players: on a ramp or a step-down it waits silently (20 s with no swing and no answer, #8000032f 2–3 m below Bulwark), and ends only on a lost target ("Unable to move to object!", WeenieError ObjectGone / NoObject) or 15 m charged ("You charged too far!"). The fight's reply says which, then "running up to it with the walk planner … then attacking it once more"; a second failure ends it with target-lost. An "Unable to move to object!" that comes after your last melee target died is that death's (ObjectGone: the server's approach ending because the target left its tracking), and a `[Agent]` line says so: both of Bulwark's were. ACE's use, pick-up, give and loot walks (`CreateMoveToChain`) never send that text: their failed approach answers UseDone / InventoryServerSaveFailed(ActionCancelled) after 15 s. `ac_press` takes an action by its other names (`input/KeybindActionLookup.ts`): the posture motion an emote input action holds (`key=Sitting` is Sit, `Sleeping` is Lay Down: ACCmdInterp::InitializeEmoteInputActionHash), the name squashed (`ShowHideInventoryPanel`, `lay_down`) or inflected (`Jumping`), and a refusal lists the closest names. Each tool with one time argument takes the others' names for it (`TIME_ARG_ALIASES`): `follow timeout_s=` is `duration_s=`, `wait`/`walk_to` take `duration_s=`, `move` takes `duration_s=` / `timeout_s=` for `seconds=`, `cast` takes them for `max_s=`; `trace`'s `seconds=` (how far back) keeps its name.
+- **2026-10-17 18:48Z / 19:18Z, Tusker Habitat (0x5B47) and Viamontian Lab (0x0068):** a follow beside its leader stops at the first hit, flee or not (getting there is done; a leader with monsters on them no longer keeps you standing in the pile), and a walk to a mobbed fellow stops once the hits take you under half. A walk being hit never stands still for a `stay_with` fellow. `stop_on_aggro=false` (walk_to, follow) walks on through hits too, as flee does; the critical stop still applies. A repeat cast already under its `until_health` makes one cast and ends there, saying so (never a refusal for a threshold you set). `use` with a loose restorative name ("Health Potion") while that vital is under 60% (or something is on you) uses the strongest you carry (BoostValue from an appraisal, else price per unit) and says which; otherwise it asks, strongest first. Stamina 0 is ACE's IsExhausted: no defense (every attack lands) and a crawl for a run, and each attack at you in a combat stance costs a point; an "EXHAUSTED" vitals-low wakes any wait while something is on you, and observe's header marks it. A walk's own notes (hit on the way, waited for a fellow) are in its task-done too. Dungeon statics that are only a CylSphere (the Tusker Habitat pole 0x020009A3) collide for movement and line of fire, as ACE's projectile physics has them (tools/ace-physics-harness pairs: 236/237 agree). A way round a doorway no search gets into that is 3× and 10+ doorways longer waits for one wide search for the goal first.
+- **2026-10-17 19:50–20:53Z, Al-Jalima and Mountain Keep (0x01D2):** an ACE buy makes a new stack (it never tops up one you carry; retail's pack shows two icons), so `buy` now says where the goods went and what you carry of them in all ("in your main pack: #8000e175 x12 (a new stack); you carry 15 Stamina Elixir in all, in 2 stacks"), and a use's stack line names the other stacks ("gone from your pack: Stamina Elixir (and 12 more in another stack: #8000e175 x12)"). Bulwark's 12 elixirs sat unused all hour behind the old 3-stack's "gone from your pack". A vendor's shop opens after it turns to you (ACE Vendor.ActOnUse: ApproachVendor after Rotate's time), and your own status lines ("You're no longer protected by the Lifestone's magic!", "… has expired.") are no use's answer (`SELF_STATUS_LINE`): a use waits for the vendor's window. Aggro "closing" counts on your floor only. `raise` with `attribute=` / `vital=` / `skill=` naming the other kind raises it and says which it raised and the other by name, from the DAT's SecondaryAttributeTable ("raised Maximum Stamina: a vital, not an attribute; the attribute that feeds it is Endurance").

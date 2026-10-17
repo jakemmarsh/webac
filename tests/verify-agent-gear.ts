@@ -50,7 +50,8 @@ describe('the gear view: the paperdoll as text', () => {
   it('lists every slot, worn or EMPTY, with armor levels from appraisals and what a multi-part item covers', () => {
     const { api } = arcanist();
     const text = formatInventory(api.inventory());
-    expect(text).toMatch(/^gear \(the paperdoll/);
+    // The gaps by name come first (2026-10-17: keep gear gaps loud), then the paperdoll.
+    expect(text).toMatch(/^gaps: nothing worn: no helm or hat \(head\), no gloves \(hands\); no jewelry on: neck, wrists, rings\ngear \(the paperdoll/);
     expect(text).toContain('  head:       EMPTY\n');
     expect(text).toContain('  chest:      Robe #80001001 (AL 20; covers chest, abdomen, upper arms, lower arms, upper legs, lower legs)');
     expect(text).toContain('  abdomen:    Robe (above)');
@@ -143,7 +144,9 @@ describe('the gear view: the paperdoll as text', () => {
       call: async <T>(m: string, args: unknown[] = []) => { calls.push(m); return (await surface[m](...args)) as T; },
     };
     const out = await TOOL_CALLER.run(c, () => TOOLS.find((t) => t.name === 'ac_gear')!.run({}));
-    expect(calls).toEqual(['inventory']);
+    // The page's corpses read follows (null: no corpse of yours), and the reply carries no corpse line then.
+    expect(calls).toEqual(['inventory', 'corpses']);
+    expect(out.text).not.toContain('your corpses');
     expect(out.text).toContain('  hands:      EMPTY  (in your pack: Leather Gauntlets #80002001)');
     expect(out.text).toContain('wearable in your pack:\n  #80002001 Leather Gauntlets: covers hands; fills your EMPTY hands');
     expect(out.text).not.toContain('Pyreal');

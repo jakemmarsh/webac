@@ -32,6 +32,8 @@ const pasted: string[] = [];
 /** The file the next File → Open / Import Ranges picks (the fake file picker). */
 let nextFile: { name: string; text: string } | null = null;
 const opened: string[] = [];
+/** OBS.automation-usage — what the editor told the kit about each import (kit.imported). */
+const imports: Array<[string, string[]]> = [];
 function fakeKit(paste = true): VTankKit {
   const div = (data: Record<string, string>, onClick?: () => void) => { const d = document.createElement('div'); Object.assign(d.dataset, data); if (onClick) d.addEventListener('click', (e) => { e.stopPropagation(); onClick(); }); return d; };
   return {
@@ -59,6 +61,7 @@ function fakeKit(paste = true): VTankKit {
     download: (name, text) => { downloads.push({ name, text }); },
     ...(paste ? { pasteChat: (text: string) => { pasted.push(text); } } : {}),
     openFile: (accept, onFile) => { opened.push(accept); if (nextFile) onFile(nextFile); },
+    imported: (outcome, names) => { imports.push([outcome, names]); },
   };
 }
 function pick(field: Element | null, label: string): void {
@@ -379,6 +382,7 @@ describe('the loot editor in the VirindiTank window (Profiles → Looting)', () 
   it('File → Open loads a .utl from disk as the loot profile of its name, with its salvage bands; Combine → Export / Import Ranges', async () => {
     downloads.length = 0;
     opened.length = 0;
+    imports.length = 0;
     const t = await open(docWith(base()));
     click(t.body.querySelector('[data-vtank="loot-show-editor"] [data-check]'));
     const src = exportUtl('Trade', [{ label: 'Pyreals', action: 'keep', match: { name: '^Pyreal' } }, { label: 'Buffed', action: 'keep', match: { unsupported: 'x' }, vtc: { reqs: [{ type: 2000, lines: ['40'] }] } }],
@@ -391,6 +395,10 @@ describe('the loot editor in the VirindiTank window (Profiles → Looting)', () 
     expect(t.rowTexts('rules')).toEqual(['Pyreals', 'Buffed']);
     expect((t.q('[data-vtank="loot-message"]') as HTMLElement).textContent).toBe("Loaded Trade.utl: 2 rules; 1 with requirements this client can't test yet (kept).");
     expect(t.win.profile()!.salvageCombineSets?.Trade).toEqual({ default: '1-5, 6-10', materials: { 60: '1-10' } });
+    // OBS.automation-usage: a requirement kept but untestable makes the import partial; a file that isn't a .utl, failed.
+    expect(imports).toEqual([['partial', ['C:\\VirindiTank\\Trade.utl']]]);
+    t.win.loot.openUtl('junk.utl', 'not a utl');
+    expect(imports.at(-1)).toEqual(['failed', ['junk.utl']]);
     pick(t.q('[data-vtank-loot-menu="combine"]'), 'Export Ranges');
     expect(downloads.at(-1)).toEqual({ name: 'Trade.ucr', text: '1\r\n1-5, 6-10\r\n1\r\n60\r\n1-10\r\n' });
     nextFile = { name: 'wide.ucr', text: '1\n1-10\n0\n' };

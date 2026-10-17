@@ -88,12 +88,15 @@ describe('ListenToGlobalMessage — the Quickslot commands', () => {
 });
 
 describe('IsShortcutEligible', () => {
-  it('refuses unowned stuck objects, unowned creatures and vendor stock only', () => {
-    expect(isShortcutEligible({ owned: false, stuck: true, itemType: 0x1 })).toBe(false);
-    expect(isShortcutEligible({ owned: false, stuck: false, itemType: 0x10 })).toBe(false);
-    expect(isShortcutEligible({ owned: true, stuck: false, itemType: 0x1, vendorItem: true })).toBe(false);
-    expect(isShortcutEligible({ owned: false, stuck: false, itemType: 0x80 })).toBe(true);
-    expect(isShortcutEligible({ owned: true, stuck: true, itemType: 0x10 })).toBe(true);
+  it('refuses stuck objects and creatures unless they are players (vtable +0x10 = IsPlayer), and vendor stock', () => {
+    expect(isShortcutEligible({ isPlayer: false, stuck: true, itemType: 0x1 })).toBe(false);
+    expect(isShortcutEligible({ isPlayer: false, stuck: false, itemType: 0x10 })).toBe(false);
+    expect(isShortcutEligible({ isPlayer: false, stuck: false, itemType: 0x1, vendorItem: true })).toBe(false);
+    expect(isShortcutEligible({ isPlayer: false, stuck: false, itemType: 0x80 })).toBe(true);
+    // A player — the main pack is the player — passes both gates.
+    expect(isShortcutEligible({ isPlayer: true, stuck: true, itemType: 0x10 })).toBe(true);
+    expect(isShortcutEligible({ isPlayer: true, stuck: false, itemType: 0x10 })).toBe(true);
+    expect(isShortcutEligible({ isPlayer: true, stuck: false, itemType: 0x10, vendorItem: true })).toBe(false);
   });
 });
 

@@ -91,7 +91,7 @@ describe('agent play reports 2026-10-12 (night)', () => {
       host.me.dead = true;
       const r = (await settle(api, host, p, 2000))!;
       expect(r.message).toMatch(/you died/);
-      expect(r.message).toMatch(/and you did NOT get away: you moved 0\.0 m after the first hit/);
+      expect(r.message).toMatch(/and you did NOT get away: you moved 0\.0 m in the [\d.]+ s after the first hit/);
       expect(r.message).not.toMatch(/you kept going/);
     });
 

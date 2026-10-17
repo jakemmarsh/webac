@@ -19,6 +19,7 @@ import type { MapCoords } from '../../packages/renderer/src/ui/MapMarkers.ts';
 import { type SessionTimeline, parseSession } from './dead-air.ts';
 import { cliCalls } from './feed.ts';
 import type { FeedChat, FeedStatus } from './feed-types.ts';
+import { loadCorpses } from './corpses.ts';
 import { localDay } from './policy.ts';
 import { nearestTownOf, placeMapCoords } from './shops.ts';
 
@@ -494,10 +495,21 @@ export function feedFor(feedFile: string, profile: string, from: number, to: num
 }
 
 /**
+ * What the opening says right under the readiness block (the supervisor's `ownTime` read): the character's corpses
+ * from the feed (corpses.ts loadCorpses: where, what is on each, when it rots; they outlive a restart, which empties
+ * the page's own death log), then where its last segment's time went ({@link loadOwnTimeBlock}). Null with neither.
+ */
+export function loadOwnTime(o: { streamDir: string; feedFile: string; profile: string; character?: string; cast: readonly string[]; nowMs: number; maxAgeMs?: number }): string | null {
+  const corpses = o.character ? loadCorpses({ feedFile: o.feedFile, profile: o.profile, character: o.character, nowMs: o.nowMs }) : null;
+  const own = loadOwnTimeBlock(o);
+  return [own, corpses].filter(Boolean).join('\n') || null;
+}
+
+/**
  * The line for `profile`'s next opening, from its latest segment in `streamDir` (segments.jsonl + sessions/) and the
  * feed: null when it has none, or when that segment ended more than `maxAgeMs` ago (a new day's stream).
  */
-export function loadOwnTime(o: { streamDir: string; feedFile: string; profile: string; character?: string; cast: readonly string[]; nowMs: number; maxAgeMs?: number }): string | null {
+export function loadOwnTimeBlock(o: { streamDir: string; feedFile: string; profile: string; character?: string; cast: readonly string[]; nowMs: number; maxAgeMs?: number }): string | null {
   const segFile = join(o.streamDir, 'segments.jsonl');
   if (!existsSync(segFile)) return null;
   const rows: SegmentRow[] = readFileSync(segFile, 'utf8').split('\n').filter(Boolean)

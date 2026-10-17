@@ -3543,12 +3543,34 @@ export class ServerObjectManager {
    * mage through a timed door took its bolts in silence (2026-10-14). `blockedAt` is the ground distance (m) from you to where the bolt dies, null when it reaches the
    * target. null when the target or our body isn't known.
    */
-  lineOfFire(guid: number, radius = DEFAULT_PROJECTILE_RADIUS): { dist: number; blockedAt: number | null; blocker?: string; beforeSpawn?: boolean; spawnAhead?: number } | null {
+  lineOfFire(guid: number, radius = DEFAULT_PROJECTILE_RADIUS): { dist: number; blockedAt: number | null; blocker?: string; beforeSpawn?: boolean; spawnAhead?: number; serverSpot?: { dist: number; dz: number } } | null {
     const o = this.objects.get(guid);
     const me = this.missileLocalPlayer?.();
     if (!o || !me || !this.missileEnvironmentSweep) return null;
-    return this.boltPathFrom(me, o, radius);
+    const shown = this.boltPathFrom(me, o, radius);
+    if (shown.blockedAt !== null) return shown;
+    // The server flies the bolt at the target where the SERVER has it. A creature whose MoveTo the client plays out on its
+    // own can run far from the server's body: a Dread the server held on the floor 6 m over Arcanist ran down to her in
+    // our view, so walk_to line=true "arrived (1.7 m away); the line of fire to it is open", the bolt that followed hit
+    // nothing, and the next cast found it 12.9 m off and 6 m up (Mountain Keep 0x01D20200, 2026-10-17 20:32:06–17Z).
+    // Split that far (a storey, or SERVER_SPLIT_M across), the line must be open to the server's spot as well.
+    const sp = o.serverPlace;
+    if (!sp || !Number.isFinite(sp.worldX) || !Number.isFinite(sp.worldZ)) return shown;
+    const dz = sp.worldY - o.worldY;
+    const across = Math.hypot(sp.worldX - o.worldX, sp.worldZ - o.worldZ);
+    if (Math.abs(dz) < ServerObjectManager.SERVER_SPLIT_DZ_M && across < ServerObjectManager.SERVER_SPLIT_M) return shown;
+    const there = this.boltPathFrom(me, { ...o, worldX: sp.worldX, worldY: sp.worldY, worldZ: sp.worldZ }, radius);
+    if (there.blockedAt === null) return shown;
+    return { ...there, serverSpot: { dist: Math.round(there.dist * 10) / 10, dz: Math.round((sp.worldY - me.z) * 10) / 10 } };
   }
+
+  /**
+   * How far the client's copy of a creature may stray from where the server last placed it before a line of fire is
+   * checked to the server's spot too (m across; m up or down): a run between two of the server's position updates
+   * stays inside these.
+   */
+  static readonly SERVER_SPLIT_M = 6;
+  static readonly SERVER_SPLIT_DZ_M = 2.5;
 
   /**
    * {@link lineOfFire} as it would be with your body standing where `fromGuid` stands (a fellow): Arcanist got an open

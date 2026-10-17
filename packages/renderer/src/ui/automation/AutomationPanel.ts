@@ -28,7 +28,7 @@
  * (no dead-end UI). Everything acts through AutomationSource.
  */
 import {
-  ALL_MODULES_OFF, PropertyDataId, PropertyFloat, PropertyInt, PropertyString, ROUTINE_SCHEMA_VERSION, SkillId, emptyRoutineDoc, explainProfile, importVTankFiles, validateRoutineDoc, type VtNames,
+  ALL_MODULES_OFF, PropertyDataId, PropertyFloat, PropertyInt, PropertyString, ROUTINE_SCHEMA_VERSION, SkillId, emptyRoutineDoc, explainProfile, importVTankFiles, validateRoutineDoc, vtankFileKind, type VtNames,
   type BuffSet, type LootAction, type LootMatch, type LootRule, type Route, type RoutineAction, type RoutineCondition,
   type RoutineDoc, type RoutineProfile, type RoutineRule, type RoutineState,
 } from '@ac/shared';
@@ -38,6 +38,11 @@ export interface MenuItem { label: string; value: string; hint?: string; group?:
 
 /** Retail parts the panel is drawn from (GameUI implements it; tests fake it). */
 export interface AutomationKit {
+  /**
+   * OBS.automation-usage — a VirindiTank import finished: everything carried over ('ok'), some of it
+   * switched off ('partial'), or nothing read ('failed'). File names go no further than their extension.
+   */
+  imported?(outcome: 'ok' | 'partial' | 'failed', fileNames: string[]): void;
   text(text: string, opts?: { color?: string; maxWidth?: number }): HTMLElement;
   /** The EoL blue 3-slice button (0x21000040:0x10000618), or the maroon one (0x100002cd) for 'red'. In flow, 32 px tall. */
   button(label: string, onClick: () => void, opts?: { variant?: 'blue' | 'red'; width?: number }): HTMLElement;
@@ -550,17 +555,28 @@ export class RoutineEditor {
    * VirindiTank files (.met / .nav / .utl / .usd, and metaf's .af) into the current profile (or a new
    * one). `names` names a .usd's object and spell ids from the client (vtankUsd.ts).
    */
-  importFiles(files: Array<{ name: string; text: string }>, redraw: () => void, names: VtNames = {}): void {
+  importFiles(files: Array<{ name: string; text: string }>, redraw: () => void, names: VtNames = {}): 'ok' | 'partial' | 'failed' {
     const base = this.profile();
     const name = base?.name ?? files.find((f) => /\.(met|af|usd)$/i.test(f.name))?.name.replace(/\.(met|af|usd)$/i, '') ?? 'Imported';
-    const r = importVTankFiles(files, base, name, names);
+    const fileNames = files.map((f) => f.name);
+    let r: ReturnType<typeof importVTankFiles>;
+    try { r = importVTankFiles(files, base, name, names); } catch (e) {
+      this.note = `Couldn't import ${fileNames.join(', ')}: ${(e as Error).message}`;
+      this.kit.imported?.('failed', fileNames);
+      redraw();
+      return 'failed';
+    }
     this.doc.profiles = [...this.doc.profiles.filter((p) => p !== base), r.value];
     this.profileName = r.value.name;
     this.stateName = null;
     this.dirty = true;
     this.issues = r.problems.map((p) => ({ path: 'import', message: p }));
     this.note = `Imported ${files.map((f) => f.name).join(', ')}: ${r.problems.length ? `${r.problems.length} things couldn't be carried over exactly (switched off)` : 'everything carried over'}. Save to keep it.`;
+    // No file VirindiTank's (every one refused) is a failed import; anything not carried over exactly, a partial one.
+    const outcome = files.every((f) => vtankFileKind(f.name, f.text) === null) ? 'failed' : r.problems.length ? 'partial' : 'ok';
+    this.kit.imported?.(outcome, fileNames);
     redraw();
+    return outcome;
   }
 
   render(body: HTMLElement, w: number, h: number, redraw: () => void, close: () => void, pickFiles?: () => void, exportDoc?: () => void): void {

@@ -245,20 +245,44 @@ export function emptySlotsText(slots: readonly string[]): string {
   return slots.map((s) => { const p = BODY_PARTS.find((b) => b.name === s); return p ? `no ${p.thing} (${s})` : `nothing on ${s}`; }).join(', ');
 }
 
-/** The equipment view: the paperdoll's slots, then each wearable pack item's note. */
-export function formatGear(items: readonly AgentItem[], opts: { packList?: boolean } = {}): string {
+/** Jewelry slots (neck, wrists, rings): an empty one is a gap too, though no body part goes bare for it. */
+const JEWELRY = new Set(['neck', 'wrists', 'rings']);
+
+/**
+ * The gaps by name, one fact each: bare body parts, clothing-only parts, empty jewelry slots. The same words in the
+ * gear view's `gaps:` line and the stream opening's readiness block, so a gap reads the same wherever it is seen.
+ */
+export function gearGapTexts(v: GearView): string[] {
+  const out: string[] = [];
+  if (v.emptyParts.length) out.push(`nothing worn: ${emptySlotsText(v.emptyParts)}`);
+  if (v.clothingOnly.length) out.push(`clothing only, no armor over it: ${v.clothingOnly.join(', ')}`);
+  const jewelry = v.emptyOther.filter((s) => JEWELRY.has(s));
+  if (jewelry.length) out.push(`no jewelry on: ${jewelry.join(', ')}`);
+  return out;
+}
+
+/**
+ * The equipment view: the gaps by name, the paperdoll's slots, each wearable pack item's note, then your corpses
+ * (`corpses`: AgentApi.corpsesLine, what the last deaths took and where it lies).
+ */
+export function formatGear(items: readonly AgentItem[], opts: { packList?: boolean; corpses?: string | null } = {}): string {
   if (!hasGearData(items)) {
     return items.some((i) => i.where === 'equipped')
       ? '(this game tab is an older version and does not say which slots items are in: reload it to see the gear slots)'
       : '(nothing worn, and no item says where it can be worn)';
   }
   const v = gearView(items);
-  const out = ['gear (the paperdoll; armor levels from your appraisals; a body part\'s armor is the AL of everything covering it, added up):', ...v.lines];
+  const gaps = gearGapTexts(v);
+  const out = [
+    ...(gaps.length ? [`gaps: ${gaps.join('; ')}`] : []),
+    'gear (the paperdoll; armor levels from your appraisals; a body part\'s armor is the AL of everything covering it, added up):', ...v.lines,
+  ];
   const wearable = items.filter((i) => i.where !== 'equipped' && i.validLocations);
   if (wearable.length && opts.packList !== false) {
     out.push('wearable in your pack:');
     for (const it of wearable) out.push(`  #${it.guid.toString(16)} ${it.name}: ${gearNote(it, items)}`);
   }
+  if (opts.corpses) out.push(opts.corpses);
   return out.join('\n');
 }
 

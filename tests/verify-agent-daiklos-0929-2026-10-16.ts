@@ -78,7 +78,7 @@ describe('Daiklos 09:29Z reports (fake host)', () => {
       const r = await settle(api, host, api.walkTo('Claude Arcanist'), 60_000);
       expect(r, traces.join('\n')).toMatchObject({ ok: true });
       expect(r!.message).toMatch(/^Claude Arcanist is out of your sight \(in a dungeon you see only the rooms in sight of yours\); going to where they were last seen: 25 m N of you, 12 s ago\n/);
-      expect(r!.message).toMatch(/arrived \(\d\.\d m away\)/);
+      expect(r!.message).toMatch(/arrived \(\d\.\d m from [^)]+\)/);
       expect(r!.message).toMatch(/Claude Arcanist isn't in sight from here: they moved on\. Ask in \/f where they are$/);
       expect(Math.hypot(host.me.x - 40, host.me.y - -75)).toBeLessThan(2.5);
     });

@@ -43,6 +43,12 @@ export interface ShortcutItemInfo {
   uiEffects?: number;
   iconOverlayDid?: number;
   iconUnderlayDid?: number;
+  /**
+   * The shortcut's object is the player (the main pack): RenderIcons'
+   * ACCWeenieObject::IsThePlayer branch draws the UIASSET PlayerIcon on the
+   * Container backdrop instead of an iconDid.
+   */
+  isThePlayer?: boolean;
 }
 
 /** Retail slot count: UpdateFromPlayerDesc iterates 0x12 slots (two rows
@@ -84,13 +90,19 @@ export function quickslotCommand(actionId: number): { slot: number; use: boolean
 }
 
 /**
- * gmToolbarUI::IsShortcutEligible @ 004bd1d0: an unowned stuck object
- * (pwd bitfield 0x4, BF_STUCK), an unowned creature (ITEM_TYPE 0x10) and a
- * vendor's stock (container == ClientUISystem::vendorID) cannot be shortcut.
+ * gmToolbarUI::IsShortcutEligible @ 004bd1d0: a stuck object (pwd bitfield
+ * 0x4, BF_STUCK) and a creature (InqType & 0x10) are refused unless the
+ * ACCWeenieObject vtable +0x10 says yes, and a vendor's stock (container ==
+ * ClientUISystem::vendorID) is always refused. That virtual is
+ * ACCWeenieObject::IsPlayer @ 0058c890 (`pwd._bitfield >> 3 & 1`, BF_PLAYER;
+ * the primary vtable @ 0x7e3ea0 read from acclient.exe: +0x10 = 0058c890,
+ * +0x18 = InqType 0058c8d0), so a player, the main pack included, is
+ * eligible. CreateShortcutToItem then asks IsOwnedByPlayer, which is true
+ * for the player itself (IsOwnedByObject @ 0058ceb0: id == player_id).
  */
-export function isShortcutEligible(o: { owned: boolean; stuck: boolean; itemType: number; vendorItem?: boolean }): boolean {
-  if (o.stuck && !o.owned) return false;
-  if ((o.itemType & 0x10) !== 0 && !o.owned) return false;
+export function isShortcutEligible(o: { isPlayer: boolean; stuck: boolean; itemType: number; vendorItem?: boolean }): boolean {
+  if (o.stuck && !o.isPlayer) return false;
+  if ((o.itemType & 0x10) !== 0 && !o.isPlayer) return false;
   return !o.vendorItem;
 }
 
@@ -304,6 +316,27 @@ export class ItemShortcutRestorer {
   }
 
   /**
+   * gmToolbarUI::RecvNotice_ServerSaysMoveItem @ 004bf2b0 — the server moved
+   * (or, through ACCWeenieObject::Remove @ 0058dd20 → ServerSaysMoveItem(this,
+   * 0), deleted) `objectId`: when a slot holds it and the weenie is gone or
+   * no longer IsOwnedByPlayer (sold, given, dropped, stored in a chest, used
+   * up), RemoveShortcutInSlotNum(slot, true) clears the slot and tells the
+   * server (Event_RemoveShortCut). A move between the player's own packs
+   * keeps it. Retail raises the notice only for an object the client knows
+   * (ServerSaysMoveItem is an ACCWeenieObject method), so a slot still
+   * waiting on its weenie (SetDelayedShortcutNum — a GDLE ContainID ahead of
+   * the item's CreateObject at login) is not a removal. Returns the cleared
+   * slot, or -1.
+   */
+  serverSaysMoveItem(objectId: number, ownedByPlayer: boolean): number {
+    if (!objectId || ownedByPlayer) return -1;
+    const slot = this.slotOf(objectId);
+    if (slot === -1 || this.pending.get(objectId) === slot) return -1;
+    this.removeShortcutInSlot(slot, true);
+    return slot;
+  }
+
+  /**
    * PlayerDescription arrived. Mirrors UpdateFromPlayerDesc: flush every
    * slot first (a re-sent description replaces the whole bar — also clears
    * the previous character's icons after a switch), then bind each record,
@@ -364,4 +397,17 @@ export class ItemShortcutRestorer {
   get pendingCount(): number {
     return this.pending.size;
   }
+}
+
+/**
+ * The toolbar's half of every server move / delete handler (main.ts
+ * `toolbarObjectMoved`): gmToolbarUI::RecvNotice_ServerSaysMoveItem @ 004bf2b0
+ * with ownership read AFTER the move was applied — `held` is whether the
+ * client still holds the object then (a drag-drop's optimistic DropItem has
+ * already taken it out of the pack by the time 0x19A arrives). The player's
+ * own id (the main pack) never moves. Returns the cleared slot, or -1.
+ */
+export function toolbarObjectMoved(bar: ItemShortcutRestorer, objectId: number, o: { isThePlayer: boolean; held: boolean }): number {
+  if (o.isThePlayer) return -1;
+  return bar.serverSaysMoveItem(objectId, o.held);
 }

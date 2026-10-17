@@ -627,9 +627,13 @@ export const TOOLS: AgentTool[] = [
   },
   {
     name: 'ac_gear',
-    description: 'Just the gear slots (the paperdoll): every body part and the neck, wrists, rings, shield, weapon and ammo slots with what you wear there and its armor level, or EMPTY, then each pack item you could wear: the slots it fills, what it replaces, its armor level against yours, its wield requirements (ac_appraise an item to learn them).',
+    description: 'Just the gear slots (the paperdoll): the gaps by name first, then every body part and the neck, wrists, rings, shield, weapon and ammo slots with what you wear there and its armor level, or EMPTY, then each pack item you could wear: the slots it fills, what it replaces, its armor level against yours, its wield requirements (ac_appraise an item to learn them); last, your corpses (where, what is on them, time left before they rot).',
     props: { ...PROFILE_PROP },
-    async run(a) { return { text: formatGear(await callerFor(a.profile).call<AgentItem[]>('inventory')) }; },
+    async run(a) {
+      const c = callerFor(a.profile);
+      // A page from before the corpses read answers without the line.
+      return { text: formatGear(await c.call<AgentItem[]>('inventory'), { corpses: await c.call<string | null>('corpses').catch(() => null) }) };
+    },
   },
   {
     name: 'ac_spells',
@@ -733,16 +737,16 @@ export const TOOLS: AgentTool[] = [
     stay_with: { type: 'string', description: 'A fellow\'s name: stay together. You run as always (never a walk to let them catch up); when they are more than stay_within metres behind you stop once and wait until they are within 4 m (or have stopped near you), then run on together. While they are casting or fighting you wait on quietly. Indoors, one standing still off your way (on another floor, or round a wall in another branch) is gone back to once first, then you go on together (it says so). Ends early, saying so, if they stand still doing nothing, head elsewhere or go on past you another way.' },
     stay_within: { type: 'number', description: 'With stay_with: how far behind they may fall, metres (default 15).' },
     drop: { type: 'boolean', description: 'With stay_with: the way may drop off a ledge or down a floor opening (one way) with them: it waits at the edge until they are with you, then goes down (tell them first, so they follow). Default off: at such an edge, with them on your floor, the walk stops and says so.' },
-    stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you (default true; one already coming when you set off doesn\'t stop it). false walks on until hit. flee=true never stops for it.' },
+    stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you (default true; one already coming when you set off doesn\'t stop it). false walks on, through hits too, as flee does (it still stops at critical health, 40%). flee=true never stops for it.' },
     avoid_monsters: { type: 'boolean', description: 'Outdoors, route round monsters near the way, 10 m clear (15 m of one well above your level), as a player goes round a camp. Indoors, stop before coming within their wake range (18 m on ACE, 40 m on GDLE servers) of 2 or more monsters not yet awake, naming them. Default true; off with flee. false walks the straight way, and on into them.' },
     line: { type: 'boolean', description: 'For a caster or archer walking up to a target: arrive only with an open line of fire to it as well as within `within`. Walled off, it closes in 1.5 m at a time (round the wall) until the line opens, and at worst stops beside it saying the line is still shut. Without it, an arrival by a monster still says when the line is shut.' },
   }, ['target'], (a) => [/[NS]\s*,?\s*[\d.]+\s*[EW]/i.test(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, ...(a.line === true || a.line === 'true' ? { line: true } : {}), ...(a.timeout_s !== undefined ? { timeoutMs: Number(a.timeout_s) * 1000 } : {}), ...(a.flee ? { flee: true } : {}), ...(a.stay_with ? { stayWith: String(a.stay_with) } : {}), ...(a.stay_within !== undefined ? { stayWithin: Number(a.stay_within) } : {}), ...(a.drop === true || a.drop === 'true' ? { drop: true } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}), ...(a.avoid_monsters === false || a.avoid_monsters === 'false' ? { avoidMonsters: false } : {}) }], 320_000),
-  act('ac_follow', 'Follow a player (your fellow): run to within `within` metres of them, stand while they stay near, and run again once they are 3 m past that (never a walk), re-aiming as they go, until they stop (they stand beside you 30 s: they arrived, or are busy there; at most 10 minutes, then it says "still following" and you follow again) or duration_s ends when you give one, you are hit (unless flee=true, or they have monsters on them: then the follow goes on through the hits to them), a monster starts coming at you (unless stop_on_aggro=false), they go out of sight, or you start something else (any action, or ac_stop_moving). One already out of your sight when asked (a dungeon shows you only the rooms in sight of yours) is first walked to where they were last seen, then followed if they are in sight from there. Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
+  act('ac_follow', 'Follow a player (your fellow): run to within `within` metres of them, stand while they stay near, and run again once they are 3 m past that (never a walk), re-aiming as they go, until they stop (they stand beside you 30 s: they arrived, or are busy there; at most 10 minutes, then it says "still following" and you follow again) or duration_s ends when you give one, you are hit (unless flee=true, or they have monsters on them: then the follow goes on through the hits to them; once you are beside them a hit ends it, flee or not), a monster starts coming at you (unless stop_on_aggro=false), they go out of sight, or you start something else (any action, or ac_stop_moving). One already out of your sight when asked (a dungeon shows you only the rooms in sight of yours) is first walked to where they were last seen, then followed if they are in sight from there. Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
     target: { type: 'string', description: 'The player to follow: name or id.' },
     within: { type: 'number', description: 'How close to keep, metres (default 4).' },
     duration_s: { type: 'number', description: 'Follow this long, seconds (at most 600), whether they stop or not. Default: until they stop beside you (30 s standing), at most 600.' },
     flee: { type: 'boolean', description: 'Keep following while you are hit (e.g. running to your tank with monsters on you), as walk_to flee=true does. Default: being hit stops it.' },
-    stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you, and indoors before following them within wake range (18 m on ACE) of 2 or more monsters not yet awake (default true). false follows on until hit.' },
+    stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you, and indoors before following them within wake range (18 m on ACE) of 2 or more monsters not yet awake (default true). false follows on through hits too, until you are beside them.' },
   }, ['target'], (a) => [guidOrName(a.target), { within: a.within ?? null, durationMs: a.duration_s !== undefined ? Math.min(Number(a.duration_s), 600) * 1000 : null, ...(a.flee === true || a.flee === 'true' ? { flee: true } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}) }], 640_000),
   act('ac_turn', 'Turn to face a compass bearing (0 = north, 90 = east), a compass point (N, NNW, west-southwest: all 16), your left / right / back, or an object.', { toward: { type: 'string', description: 'Bearing in degrees ("330" or "330°"), a compass point, left / right / back, or an object id / name.' } }, ['toward'], (a) => [/^-?\d+(\.\d+)?$/.test(String(a.toward)) && String(a.toward).length < 6 ? Number(a.toward) : guidOrName(a.toward)]),
   act('ac_move', 'Hold a movement key for a while (fine control, e.g. backing off or strafing around an obstacle).', {
@@ -1043,7 +1047,7 @@ export const TOOLS: AgentTool[] = [
   act('ac_raise', 'Spend unassigned XP to raise an attribute, vital or skill by one step (or several with times). stat= names it; skill= works the same.', {
     stat: { type: 'string', description: 'Attribute (Strength…), vital (Health/Stamina/Mana) or skill name (e.g. "War Magic"); skill= is the same argument.' },
     times: { type: 'number', description: 'Raises at most this many (default 1): as many as your unassigned XP covers, stopping at the first it can\'t pay for (times=50 spends all it can). amount= is the same argument.' },
-  }, ['stat'], (a) => [String(a.stat), Number(a.times ?? 1) || 1]),
+  }, ['stat'], (a) => [String(a.stat), Number(a.times ?? 1) || 1, ...(a[RAISE_WORD] ? [a[RAISE_WORD]] : [])]),
   act('ac_train_skill', 'Spend skill credits to train an untrained skill (e.g. "Life Magic", "Creature Enchantment", "Healing"). ac_character lists each untrained skill\'s cost in credits and your credits. A trained magic school lets you learn its spells from scrolls (ac_use the scroll).', {
     skill: { type: 'string', description: 'Skill name.' },
   }, ['skill'], (a) => [String(a.skill)]),
@@ -1106,6 +1110,19 @@ export const TIME_ARG_ALIASES: Readonly<Record<string, Record<string, string>>> 
 // transcripts ~200 raises were refused for target= (78), name= (56), skill= (50, aliased since), attribute= (12) …
 for (const t of TOOLS) if (t.name === 'ac_raise') t.aliases = { skill: 'stat', target: 'stat', name: 'stat', attribute: 'stat', vital: 'stat', what: 'stat', amount: 'times' };
 
+/**
+ * Which kind a raise was asked for by its word (attribute=, vital=, skill=), kept past the aliasing so the page can say
+ * when the name is the other kind: `raise attribute="Stamina"` raised the Maximum Stamina vital with no word that
+ * Stamina isn't an attribute (Endurance feeds it; Arcanist, 2026-10-17 20:23:25Z).
+ */
+export const RAISE_WORD = '__raiseWord';
+export function raiseWord(a: Record<string, unknown>): 'attribute' | 'vital' | 'skill' | null {
+  const given = (k: string): boolean => a[k] !== undefined && a[k] !== null && a[k] !== '';
+  if (given('stat')) return null;
+  for (const k of ['attribute', 'vital', 'skill'] as const) if (given(k)) return k;
+  return null;
+}
+
 // distance= is within= for the walks: "follow distance=" was refused as an unknown argument (Arcanist, 2026-10-16).
 // The time argument by the other tools' names, where the tool has only the one: "follow … timeout_s=40" was refused
 // (ac_wait's and walk_to's name; follow's is duration_s), and Arcanist sent it again as duration_s=40 (2026-10-17
@@ -1124,7 +1141,9 @@ for (const t of TOOLS) {
   t.aliases = al;
   for (const [alias, real] of Object.entries(al)) t.props = { ...t.props, [alias]: { type: t.props[real]?.type ?? 'string', description: `Same as ${real} (either name works).` } };
   const run = t.run.bind(t);
-  t.run = (a) => run(withArgAliases(t, a));
+  t.run = t.name === 'ac_raise'
+    ? (a) => { const w = raiseWord(a); return run({ ...withArgAliases(t, a), ...(w ? { [RAISE_WORD]: w } : {}) }); }
+    : (a) => run(withArgAliases(t, a));
 }
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));

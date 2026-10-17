@@ -154,7 +154,7 @@ describe('agent play reports 2026-10-12', () => {
       api.stopMoving();
       expect((await q).message).toMatch(/following Claude Bulwark: interrupted \(stopped\)/);
     });
-    it('follow: being hit ends it (a fresh decision while the tank walks on); flee=true keeps following through the hits (Arcanist, 2026-10-12)', async () => {
+    it('follow: being hit ends it (a fresh decision while the tank walks on); flee=true keeps following through the hits until beside the leader (Arcanist, 2026-10-12; 2026-10-17)', async () => {
       const SERVANT = 0x80003c31;
       const run = async (flee: boolean) => {
         host.me.x = 80; host.me.y = 0;
@@ -172,8 +172,11 @@ describe('agent play reports 2026-10-12', () => {
       const stopped = await run(false);
       expect(stopped.r.message).toMatch(/under attack/);
       expect(stopped.took).toBeLessThan(15_000);
+      // flee=true runs on through the hits all the way to the leader, then (beside them: getting there is done) the next
+      // hit ends it for a fresh decision (stream 2026-10-17 18:03:58Z / 18:42:21Z: follows beside a mobbed leader).
       const kept = await run(true);
-      expect(kept.r.message).toMatch(/^followed Claude Bulwark for (29|30) s/);
+      expect(kept.r.message).toMatch(/^stopped following Claude Bulwark: you're beside them/);
+      expect(kept.r.message).toMatch(/hit on the way \(The Drudge Servant hits your leg/);
       expect(Math.hypot(host.me.x - 80, host.me.y - 40)).toBeLessThan(4 + 3.5);
     });
     it('follow: a leader walking away as fast as you never reads as a stall (live: "stuck 85.6 m short" after covering 90 m)', async () => {

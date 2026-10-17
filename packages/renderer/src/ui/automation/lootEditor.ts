@@ -261,8 +261,14 @@ export class VtLootEditor {
     if (!p) return;
     const name = fileName.replace(/^.*[\\/]/, '').replace(/\.utl$/i, '');
     let file: ReturnType<typeof parseUtlFile>;
-    try { file = parseUtlFile(text); } catch (e) { this.message = `${fileName}: not a VTClassic .utl (${(e as Error).message})`; this.host.redraw(); return; }
+    try { file = parseUtlFile(text); } catch (e) {
+      this.message = `${fileName}: not a VTClassic .utl (${(e as Error).message})`;
+      this.host.kit.imported?.('failed', [fileName]);
+      this.host.redraw();
+      return;
+    }
     const { value: rules, problems } = utlToLoot(file.rules);
+    this.host.kit.imported?.(problems.length ? 'partial' : 'ok', [fileName]);
     const had = !!p.lootSets?.[name];
     p.lootSets = { ...(p.lootSets ?? {}), [name]: rules };
     if (file.salvageCombine) p.salvageCombineSets = { ...(p.salvageCombineSets ?? {}), [name]: file.salvageCombine };

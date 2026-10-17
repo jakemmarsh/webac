@@ -39,7 +39,8 @@ describe('1. raise skill= is stat=', () => {
     expect(withArgAliases(t, { skill: 'Healing' })).toEqual({ stat: 'Healing' });
     const c = caller(() => ({ ok: true, message: 'Healing 155 → 156 (1 raise, 44,841 XP)' }));
     const out = await TOOL_CALLER.run(c, () => t.run({ skill: 'Healing' }));
-    expect(c.calls[0]).toEqual({ method: 'raise', args: ['Healing', 1] });
+    // The word used rides along, so the page can say when Healing isn't a skill (it is: no note).
+    expect(c.calls[0]).toEqual({ method: 'raise', args: ['Healing', 1, 'skill'] });
     expect(out.text).toBe('Healing 155 → 156 (1 raise, 44,841 XP)');
     expect(t.description).toMatch(/skill= works the same/);
   });

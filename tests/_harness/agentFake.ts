@@ -153,6 +153,8 @@ export class FakeHost implements AgentHost {
   tradeAction = (a: string, g?: number) => { this.sent.push(`trade ${a}${g ? ` ${g.toString(16)}` : ''}`); return true; };
   /** The straight line of fire (a bolt) and an arrow's arc to a target; unset = the host can't say. */
   lineOfFire: AgentHost['lineOfFire'] = undefined;
+  /** The attributes each vital is drawn from (the DAT's SecondaryAttributeTable); unset = the host can't say. */
+  vitalAttributes: AgentHost['vitalAttributes'] = undefined;
   lineOfFireOpenSpot: AgentHost['lineOfFireOpenSpot'] = undefined;
   lineOfFireFrom: AgentHost['lineOfFireFrom'] = undefined;
   /** The ChatPoseTable's state for a pose word, and whether the client handles "/word"; unset = the host can't say. */

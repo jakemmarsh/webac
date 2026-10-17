@@ -25,7 +25,7 @@ export interface DungeonCollisionSources {
   findInteriorCells(landblockId: number): number[];
   getCellCollisionData(cellId: number): { cellStruct: CellStruct; position: Frame } | null;
   loadEnvCell(cellId: number): Pick<EnvCell, 'staticObjects'> | null;
-  loadSetupModel(setupId: number): Pick<SetupModel, 'parts' | 'placementFrames'> | null;
+  loadSetupModel(setupId: number): (Pick<SetupModel, 'parts' | 'placementFrames'> & Partial<Pick<SetupModel, 'cylSpheres' | 'spheres'>>) | null;
   loadGfxObj(gfxObjId: number): GfxObj | null;
   loadLandblockInfo(landblockId: number): Pick<LandblockInfo, 'buildings'> | null;
 }
@@ -39,12 +39,37 @@ export function populateDungeonCollision(collision: DungeonCollision, geoLb: num
   const offY = landblockY(geoLb) * 192;
 
   /** One model (a Setup's parts at its default placement, or a lone GfxObj) at a frame. */
-  const addModel = (modelId: number, origin: Vec3, quat: Quat, key: (part: number) => ReturnType<typeof collisionKey.cellStatic>, building = false): void => {
+  const addModel = (modelId: number, origin: Vec3, quat: Quat, key: (part: number, kind?: 'p' | 'c' | 's') => ReturnType<typeof collisionKey.cellStatic>, building = false): void => {
     const hb = (modelId >> 24) & 0xff;
     if (hb === PortalFileType.Setup) {
       const setup = src.loadSetupModel(modelId);
       if (!setup) return;
       const placement = placementFrameOf(setup);
+      // FindObjCollisions (ObjectCollision.addObjectCollision): an object whose parts have no physics BSP collides by its
+      // Setup's CylSpheres, else its Spheres. Those were left out here, so a dungeon static that is only a CylSphere (the
+      // Tusker Habitat's pole 0x020009A3 in cell 0x5B47011A: one 0.13 m × 2.19 m CylSphere, a GfxObj with no physics
+      // polygons) blocked nothing on this client while ACE's projectile hit it: two Flame Bolts 1.7 m off did no damage,
+      // and our line of fire said the way was open (Arcanist, 2026-10-17 18:14:17Z; tools/ace-physics-harness pairs).
+      // Judged only once every part is resident: a part not loaded yet (a streamed miss) may be the BSP, and the retry
+      // run fills it in (verify-stream-dungeon-retries).
+      const gfxs = setup.parts.map((p) => { try { return src.loadGfxObj(p); } catch { return null; } });
+      const anyBsp = gfxs.some((g) => !!g?.physicsBSP && g.physicsPolygons.size > 0);
+      if (!anyBsp && gfxs.every((g) => !!g)) {
+        const toWorld = (o: Vec3): Vec3 => DungeonCollision.composeFrames(origin, quat, o, { w: 1, x: 0, y: 0, z: 0 }).origin;
+        if (setup.cylSpheres?.length) {
+          setup.cylSpheres.forEach((cs, i) => {
+            const low = toWorld(cs.origin);
+            collision.addCylinderObstacle(key(i, 'c'), offX + low.x, offY + low.y, cs.radius, low.z, low.z + cs.height);
+          });
+        } else if (setup.spheres?.length) {
+          setup.spheres.forEach((sp, i) => {
+            const c = toWorld(sp.origin);
+            // AC (x, y, z-up) → world (x, height, z).
+            collision.addSphereObstacle(key(i, 's'), offX + c.x, c.z, offY + c.y, sp.radius);
+          });
+        }
+        return;
+      }
       for (let gi = 0; gi < setup.parts.length; gi++) {
         try {
           const gfx = src.loadGfxObj(setup.parts[gi]);
@@ -81,7 +106,7 @@ export function populateDungeonCollision(collision: DungeonCollision, geoLb: num
       if (!envCell) continue;
       for (let si = 0; si < envCell.staticObjects.length; si++) {
         const stab = envCell.staticObjects[si];
-        addModel(stab.id, stab.frame.origin, stab.frame.orientation, (part) => collisionKey.cellStatic(cid, si, 'p', part));
+        addModel(stab.id, stab.frame.origin, stab.frame.orientation, (part, kind = 'p') => collisionKey.cellStatic(cid, si, kind, part));
       }
     } catch { /* skip */ }
   }
@@ -93,7 +118,7 @@ export function populateDungeonCollision(collision: DungeonCollision, geoLb: num
     for (let bi = 0; bi < info.buildings.length; bi++) {
       const building = info.buildings[bi];
       if (!building.modelId) continue;
-      addModel(building.modelId, building.frame.origin, building.frame.orientation, (part) => collisionKey.building(-1, bi, 'p', part), true);
+      addModel(building.modelId, building.frame.origin, building.frame.orientation, (part, kind = 'p') => collisionKey.building(-1, bi, kind, part), true);
     }
   } catch { /* skip LandblockInfo parse errors */ }
 }

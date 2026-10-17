@@ -399,12 +399,12 @@ describe('monsters coming at you, and at your fellows', () => {
   });
 
   describe('healing marks: 60% defaults (Arcanist has ~85 HP: two or three hits from dead at half)', () => {
-    it('cast repeat stops below 60% by default', async () => {
+    it('cast repeat stops below 60% by default (one cast when already under it)', async () => {
       monster(SHADOW, 'Drudge Skulker', 80, 30, { level: 5 });
       host.me.health = { current: 29, max: 50 }; // 58%
       const out = await settle(api, host, api.cast('Flame Bolt I', 'Drudge Skulker', { repeat: true }), 10_000);
-      // Already under it at the start: refused plainly, before any cast (stream reports 2026-10-17 05:12Z, item 6).
-      expect(out!.message).toMatch(/Flame Bolt I not cast: your health \(29\/50, 58%\) is already under until_health \(60%, the default\)/);
+      // Already under it at the start: one cast, then it ends on that limit, said so (2026-10-17 19:18Z; was a refusal).
+      expect(out!.message).toMatch(/stopped: your own until_health: your health was already under the 60% default when this began \(29\/50\), so one cast was made/);
     });
 
     it('the tools say so: ac_wait vitals_below default 0.6 and fellow_below; ac_cast until_health default 0.6', () => {

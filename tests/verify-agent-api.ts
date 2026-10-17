@@ -1552,7 +1552,7 @@ describe('walk_to drops and jumps (AGENT.walk-drops-jumps)', () => {
     run(api, host, 40_000);
     const r = await p;
     expect(r).toMatchObject({ ok: true });
-    expect(r.message).toMatch(/^arrived \([0-9.]+ m away\); on the way you dropped off a ledge \(6\.0 m\)/);
+    expect(r.message).toMatch(/^arrived \([0-9.]+ m from [^)]+\); on the way you dropped off a ledge \(6\.0 m\)/);
     expect(host.launches).toHaveLength(1);
     // A standing long jump: the forward key went down during the charge, never before it.
     expect(host.launches[0].forward).toBeGreaterThan(0);

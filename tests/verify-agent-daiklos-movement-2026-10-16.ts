@@ -89,7 +89,7 @@ describe('Daiklos walk reports (2026-10-16 07:29Z)', () => {
       const r = await settle(api, host, api.walkTo('1m north'), 10_000);
       expect(r, traces.join('\n')).toMatchObject({ ok: true });
       expect(host.me.y - y0).toBeGreaterThan(0.7);
-      expect(Number(/arrived \((\d+\.\d) m away/.exec(r!.message)![1])).toBeLessThanOrEqual(0.4);
+      expect(Number(/arrived \((\d+\.\d) m from /.exec(r!.message)![1])).toBeLessThanOrEqual(0.4);
     });
 
     it('"0.5m east" steps too; a within= given still counts', async () => {

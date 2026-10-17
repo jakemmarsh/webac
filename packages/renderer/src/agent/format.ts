@@ -113,7 +113,9 @@ export function formatObservation(obs: AgentObservation): string {
     if (!me) return out.join('\n');
   }
   const v = (x: { cur: number; max: number }): string => `${x.cur}/${x.max}`;
-  out.push(`${me.name} (L${me.level})${me.dead ? '  ** DEAD **' : ''}  HP ${v(me.health)}  ST ${v(me.stamina)}  MA ${v(me.mana)}  mode ${me.combatMode}`);
+  // Stamina 0 is ACE's IsExhausted: no defense (every attack at you lands) and a crawl for a run (AgentApi's exhausted alarm).
+  const exhausted = !me.dead && me.stamina.max > 0 && me.stamina.cur === 0 ? ' (EXHAUSTED: no defense, every attack lands; a crawl for a run)' : '';
+  out.push(`${me.name} (L${me.level})${me.dead ? '  ** DEAD **' : ''}  HP ${v(me.health)}  ST ${v(me.stamina)}${exhausted}  MA ${v(me.mana)}  mode ${me.combatMode}`);
   out.push(`at ${me.coords ?? 'indoors'}  cell ${me.cell}  facing ${Math.round(me.heading)}° (${compassPoint(me.heading)})${me.task ? `  task: ${me.task}` : ''}`);
   // ACE Player_Death.GetNumCoinsDropped: above level 5 a death takes half your coins (onto the corpse, or destroyed
   // outright where the server sets corpse_destroy_pyreals, ACE's default); trade notes are not coins.
@@ -133,6 +135,7 @@ export function formatObservation(obs: AgentObservation): string {
   }
   if (obs.buffsMissing?.length) out.push(`  buffs you know that aren't up: ${obs.buffsMissing.slice(0, 10).join(', ')}${obs.buffsMissing.length > 10 ? ` +${obs.buffsMissing.length - 10} more` : ''} (ac_cast; "… Other" ones go on a fellow with target=)`);
   if (obs.deaths) out.push(obs.deaths);
+  if (obs.corpses) out.push(obs.corpses);
   if (obs.fellowshipAlone) out.push('fellowship: only you are in it, so /f reaches no one (a fellow who logs out leaves it): recruit your partner (in sight), or quit it (ac_fellowship action=quit) if they lead one');
   if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.coords ? `, at ${f.coords}` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}${f.stuckThreats ? `, AIMED AT THEM BUT NOT REACHING THEM: ${f.stuckThreats}` : ''}` : f.lastSeen ? `out of sight, last seen ${f.lastSeen} (walk_to ${f.name} goes there; they may have moved on)` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
   if (obs.gearManaOut?.length) {

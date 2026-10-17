@@ -73,7 +73,7 @@ describe('1. a melee approach the server gives up on, or leaves stuck', () => {
     for (let t = 0; t < 10_000 && attacks(host, C32F) < 2; t += 100) { run(api, host, 100); await vi.advanceTimersByTimeAsync(0); }
     expect(attacks(host, C32F)).toBe(2);
     expect(Math.hypot(host.me.x - 80, host.me.y - 22.3)).toBeLessThanOrEqual(1.6);
-    expect(texts(api, since).some((t) => /^chat: \(system\) \[Agent\] Tusker Liberator #8000032f: ran up to it with the walk planner \(arrived \(1\.\d m away\)\); attacking it again$/.test(t))).toBe(true);
+    expect(texts(api, since).some((t) => /^chat: \(system\) \[Agent\] Tusker Liberator #8000032f: ran up to it with the walk planner \(arrived \(1\.\d m from [^)]+\)\); attacking it again$/.test(t))).toBe(true);
     // Swinging now: no second stall while the server swings.
     host.pending = false;
     for (let i = 0; i < 12; i++) {

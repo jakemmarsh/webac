@@ -84,7 +84,7 @@ describe('stream reports 2026-10-16 21:53Z', () => {
       dread(); wallUntil(3);
       const r = await settle(api, host, api.walkTo(DREAD, { within: 4, line: true, stopOnAggro: false, avoidMonsters: false }), 20_000);
       expect(r?.ok).toBe(true);
-      expect(r?.message).toMatch(/^arrived \(\d\.\d m away\); the line of fire to it is open \(closed in 1 time round the wall for it\)/);
+      expect(r?.message).toMatch(/^arrived \(\d\.\d m from [^)]+\); the line of fire to it is open \(closed in 1 time round the wall for it\)/);
       expect(Math.hypot(host.me.x - 80, host.me.y - 40)).toBeLessThanOrEqual(3);
     });
 
@@ -98,7 +98,7 @@ describe('stream reports 2026-10-16 21:53Z', () => {
     it('without line=true: the arrival by a monster says the line is shut, and how to ask for one (the 21:53Z case)', async () => {
       dread(); wallUntil(3);
       const r = await settle(api, host, api.walkTo(DREAD, { within: 4, stopOnAggro: false, avoidMonsters: false }), 20_000);
-      expect(r?.message).toMatch(/^arrived \(4\.\d m away\); no open line to it from here .*\(walk_to … line=true keeps going until the line is open\)/);
+      expect(r?.message).toMatch(/^arrived \(4\.\d m from [^)]+\); no open line to it from here .*\(walk_to … line=true keeps going until the line is open\)/);
     });
 
     it('the tool takes line=true through to the walk', async () => {

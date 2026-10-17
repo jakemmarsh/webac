@@ -107,6 +107,9 @@ export function isComponentPack(wcid: number, packWcids: ReadonlySet<number>): b
 export interface OwnedUseItem {
   name: string;
   containerId?: number;
+  /** pwd._itemsCapacity / _containersCapacity (a side pack's; ACCWeenieObject::IsContainer reads them). */
+  itemsCapacity?: number;
+  containersCapacity?: number;
   itemType?: number;
   combatUse?: number;
   validLocations?: number;
@@ -131,7 +134,8 @@ export function ownedUseSubject(guid: number, item: OwnedUseItem, playerGuid = 0
   return {
     guid, name: item.name, containerId: worn ? 0 : item.containerId ?? 0, wielderId: worn ? playerGuid : 0,
     bitfield: item.objectDescFlags ?? 0,
-    itemsCapacity: 0, containersCapacity: 0, itemType: item.itemType ?? 0, combatUse: item.combatUse ?? 0,
+    itemsCapacity: item.itemsCapacity ?? 0, containersCapacity: item.containersCapacity ?? 0,
+    itemType: item.itemType ?? 0, combatUse: item.combatUse ?? 0,
     validLocations: item.validLocations ?? 0, location: item.slot ?? 0,
     useability: item.usable ?? 0, ownedByPlayer: true, isPlayer: false,
   };
@@ -248,6 +252,60 @@ export function decideUseObject(o: UseSubject, ctx: UseObjectContext): UseDecisi
   if ((o.bitfield & BF_VOLATILE_RARE) !== 0 && ctx.confirmVolatileRare) return { kind: 'confirm', which: 'volatileRare' };
   const creature = ((o.itemType >>> 0) & TYPE_CREATURE) !== 0;
   return { kind: 'use', text: creature ? `Approaching ${o.name}` : `Using the ${o.name}` };
+}
+
+/** ACCWeenieObject::IsContainer @ 004a4530: RequiresPackSlot, or any item / container capacity. */
+export function isContainerSubject(o: Pick<UseSubject, 'bitfield' | 'itemsCapacity' | 'containersCapacity'>): boolean {
+  return (o.bitfield & BF_REQUIRES_PACK_SLOT) !== 0 || o.itemsCapacity !== 0 || o.containersCapacity !== 0;
+}
+
+/**
+ * Whether ItemHolder::UseObject @ 00588a80 reaches CPlayerSystem::UsingItem
+ * @ 00562f70 on this path (decideUseObject's branches, in the same order):
+ * a DetermineUseResult case 2–7 (UsingItem(…, 1, param_3)); a targeted item
+ * used on a compatible selection (Event_UseWithTargetEvent, then
+ * LAB_00588c92); a non-useable object (UsingItem(…, 0, param_3) before the
+ * self / door / attackable / "cannot be used" tail); and a plain Use
+ * (Event_UseEvent, then UsingItem). The trading / wield refusals, the
+ * target-mode arm, the select-a-target line and the altar / volatile-rare
+ * confirmations return before it.
+ */
+export function useObjectRunsUsingItem(o: UseSubject, ctx: UseObjectContext): boolean {
+  if (!ctx.skipDetermine) {
+    const r = determineUseResult(o, ctx);
+    if (r > 1 && r < 8) return true;
+  }
+  if (o.beingTraded) return false;
+  if (o.location === 0 && (leastLimitedSourceUse(o.useability) & USEABLE_WIELDED) !== 0) return false;
+  if (isUseableTargeted(o.useability)) return ctx.allowSelection && ctx.selectedGuid !== 0 && ctx.selectionCompatible;
+  if (!isUseable(o.useability)) return true;
+  if ((o.bitfield & (BF_PK_SWITCH | BF_NPK_SWITCH)) !== 0) return false;
+  if ((o.bitfield & BF_VOLATILE_RARE) !== 0 && ctx.confirmVolatileRare) return false;
+  return true;
+}
+
+/** What CPlayerSystem::UsingItem @ 00562f70 does on the client beyond its DetermineUseResult case. */
+export interface UsingItemEffects {
+  /**
+   * param_3 == 0 re-runs DetermineUseResult; case 8 (a WieldLeft item, which
+   * UseObject's own `1 < r < 8` gate lets through to its ItemUses checks)
+   * is AutoWield(SLOT_SIDE_LEFT).
+   */
+  autoWieldLeft: boolean;
+  /**
+   * IsOwnedByPlayer && IsContainer → CM_UI::SendNotice_OpenContainedContainer:
+   * the inventory shows that pack (a side pack's shortcut, the main pack's).
+   */
+  openContainer: boolean;
+}
+
+/** UsingItem's client-side effects on UseObject's path, or null when UseObject never calls it. */
+export function usingItemEffects(o: UseSubject, ctx: UseObjectContext): UsingItemEffects | null {
+  if (!useObjectRunsUsingItem(o, ctx)) return null;
+  return {
+    autoWieldLeft: !ctx.skipDetermine && determineUseResult(o, ctx) === 8,
+    openContainer: o.ownedByPlayer && isContainerSubject(o),
+  };
 }
 
 /** ClientUISystem::UsageConfirmation_* @ 00566420 / 00566610 / 00566800 — the dialog text (wide literals in the binary). */

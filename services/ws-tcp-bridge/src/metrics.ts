@@ -37,6 +37,9 @@ export class BridgeMetrics {
   /** RELEASE.preworld-outcomes — accepted pre-world outcome events by outcome. */
   readonly clientPreworld = new Map<string, number>();
   clientPreworldEvent(outcome: string): void { this.clientPreworld.set(outcome, (this.clientPreworld.get(outcome) ?? 0) + 1); }
+  /** OBS.automation-usage — accepted automation usage events (clientAutomation.ts) by outcome. */
+  readonly clientAutomation = new Map<string, number>();
+  clientAutomationEvent(outcome: string): void { this.clientAutomation.set(outcome, (this.clientAutomation.get(outcome) ?? 0) + 1); }
 }
 
 export interface ServerSessionCount { id: string; name: string; sessions: number }
@@ -88,6 +91,8 @@ export function renderPrometheus(m: BridgeMetrics, s: BridgeSnapshot): string {
     [...m.clientErrors].map(([kind, n]) => [{ kind }, n]));
   metric('acbridge_client_preworld_total', 'counter', 'Pre-world outcome and in-world (first_minute, world_left) events accepted from web clients, by outcome.',
     [...m.clientPreworld].map(([outcome, n]) => [{ outcome }, n]));
+  metric('acbridge_client_automation_total', 'counter', 'Automation usage events (plugin bar, routines, imports) accepted from web clients, by outcome.',
+    [...m.clientAutomation].map(([outcome, n]) => [{ outcome }, n]));
   metric('acbridge_sessions_closed_total', 'counter', 'Closed sessions by reason.',
     [...m.closes.entries()].map(([r, v]) => [{ reason: r }, v]));
   metric('acbridge_rejects_total', 'counter', 'Rejected connection attempts by reason.',
@@ -116,6 +121,7 @@ export function metricsJson(m: BridgeMetrics, s: BridgeSnapshot): Record<string,
     drops: { ...m.drops },
     clientErrors: Object.fromEntries(m.clientErrors),
     clientPreworld: Object.fromEntries(m.clientPreworld),
+    clientAutomation: Object.fromEntries(m.clientAutomation),
   };
 }
 

@@ -245,9 +245,10 @@ export class DungeonHost extends FakeHost {
    * Stand at (cell, x, y, z) and walk_to `target` as given (an offset "20m east", a cell id, map coordinates), the page
    * ticking every `tickMs` (a slow frame rate moves the body metres between ticks), until the walk ends.
    */
-  async walkTarget(cell: number, at: { x: number; y: number; z: number }, target: number | string, opts: { within?: number; maxMs?: number; timeoutMs?: number; tickMs?: number } = {}): Promise<AgentResult> {
+  async walkTarget(cell: number, at: { x: number; y: number; z: number }, target: number | string, opts: { within?: number; maxMs?: number; timeoutMs?: number; tickMs?: number; sameApi?: boolean } = {}): Promise<AgentResult> {
     this.me = { ...this.me, cell: cell >>> 0, ...at, yaw: compassToYaw(0) };
-    const api = new AgentApi(this);
+    // `sameApi`: the page's agent from the last walk or run (what it learned this session kept), else a fresh one.
+    const api = opts.sameApi && this.api ? this.api : new AgentApi(this);
     this.api = api;
     const log = console.log;
     console.log = (...a: unknown[]) => { this.traces.push(a.join(' ')); };
@@ -273,9 +274,9 @@ export class DungeonHost extends FakeHost {
    * every 100 ms and `each` called before every tick (to move a fellow, say), until it ends. Other objects (a fellow) are
    * added to the host before this.
    */
-  async run(cell: number, at: { x: number; y: number; z: number }, start: (api: AgentApi) => Promise<AgentResult>, opts: { maxMs?: number; each?: (api: AgentApi) => void } = {}): Promise<AgentResult> {
+  async run(cell: number, at: { x: number; y: number; z: number }, start: (api: AgentApi) => Promise<AgentResult>, opts: { maxMs?: number; each?: (api: AgentApi) => void; sameApi?: boolean } = {}): Promise<AgentResult> {
     this.me = { ...this.me, cell: cell >>> 0, ...at, yaw: compassToYaw(0) };
-    const api = new AgentApi(this);
+    const api = opts.sameApi && this.api ? this.api : new AgentApi(this);
     this.api = api;
     const log = console.log;
     console.log = (...a: unknown[]) => { this.traces.push(a.join(' ')); };

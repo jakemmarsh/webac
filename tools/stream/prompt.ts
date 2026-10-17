@@ -4,7 +4,7 @@
  * the stream is ending). Information a player has, never play decisions (Jake: no hardcoded behaviour).
  */
 import type { AgentItem } from '../../packages/renderer/src/agent/types.ts';
-import { casterGap, emptySlotsText, gearView, hasGearData } from '../../packages/renderer/src/agent/gear.ts';
+import { casterGap, gearGapTexts, gearView, hasGearData } from '../../packages/renderer/src/agent/gear.ts';
 import type { CharacterConfig } from './config.ts';
 import { type KnownSpell, type TableSpell, magicSchools, spellGaps } from './spellGaps.ts';
 
@@ -62,15 +62,16 @@ export function segmentOpening(s: {
 
 /**
  * The gaps in what the character wears, from its inventory (agent/gear.ts): bare body parts, parts with clothing and no
- * armor, pack items that would fill an empty slot, and worn pieces never appraised. Empty when there is nothing to say
- * (gear complete, or a tab too old to say where items go). Facts only: what to do about them is the player's call.
+ * armor, empty jewelry slots, pack items that would fill an empty slot, and worn pieces never appraised; with no bare or
+ * clothing-only part, a line that says so (Arcanist's report after his 18:48Z death said his lost greaves and gloves
+ * "need replacing": they were spares from his pack, and every part had armor on it, 2026-10-17). Empty when the tab
+ * is too old to say where items go. Facts only: what to do about them is the player's call.
  */
 export function gearGaps(items: readonly AgentItem[] | null): string[] {
   if (!items || !hasGearData(items)) return [];
   const v = gearView(items);
-  const out: string[] = [];
-  if (v.emptyParts.length) out.push(`- gear: nothing worn: ${emptySlotsText(v.emptyParts)}`);
-  if (v.clothingOnly.length) out.push(`- gear: clothing only, no armor over it: ${v.clothingOnly.join(', ')}`);
+  const out: string[] = gearGapTexts(v).map((t) => `- gear: ${t}`);
+  if (!v.emptyParts.length && !v.clothingOnly.length) out.unshift('- gear: armor on every body part');
   if (v.packFills.length) out.push(`- gear: in your pack, would fill an empty slot: ${v.packFills.map((f) => `${f.items.join(' or ')} (${f.slot})`).join('; ')}`);
   if (v.unknownArmor.length) {
     const n = v.unknownArmor.length;

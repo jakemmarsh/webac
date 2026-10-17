@@ -1684,9 +1684,13 @@ export class GameUI {
     onDropShortcut?: (slot: number) => void;
     /** A real item (pack, paperdoll or 3D) was dropped on `slot`. */
     onDropItem?: (slot: number, source: WorldDropSource) => void;
+    /** The main pack (the player, `guid`) was dropped on `slot`. */
+    onDropPlayer?: (slot: number, guid: number) => void;
   } = {};
   /** The slot the shortcut drag in flight left (-1 = none). */
   private shortcutDragFrom = -1;
+  /** The main pack (the player's id) being dragged off the pack column (0 = none); only the toolbar takes it. */
+  private playerPackDragGuid = 0;
   /** gmToolbarUI::m_shortcutSlots — the object in shortcut slot `index` (0 = empty); main's restorer. */
   itemShortcutObjectAt: ((index: number) => number) | null = null;
   /**
@@ -1703,7 +1707,7 @@ export class GameUI {
   private componentSelSyncedGuid = 0;
   /** The global selection the shortcut slots last drew their selected overlay for. */
   private shortcutAntsGuid = 0;
-  private itemShortcutData: Array<{ iconDid?: number; title: string; look?: { itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number } } | null> = new Array(18).fill(null);
+  private itemShortcutData: Array<{ iconDid?: number; title: string; look?: { itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; isThePlayer?: boolean } } | null> = new Array(18).fill(null);
 
   // DOM element references
   private screenContainer: HTMLDivElement;
@@ -3199,6 +3203,17 @@ export class GameUI {
     };
     window.addEventListener('pointerdown', trackButtons, true);
     window.addEventListener('pointerup', trackButtons, true);
+    // UIElementManager::StartDragandDrop replaces m_dragElement: every drag
+    // starts with no source. Captured, so it runs before the source's own
+    // dragstart sets its kind; a drag whose source cell was re-rendered away
+    // (a sell-list entry, a staged house payment, a spell shortcut) never gets
+    // its dragend, and its kind must not carry over to the next drag.
+    const resetDragSource = (): void => {
+      const ui = self.deref();
+      if (!ui) { window.removeEventListener('dragstart', resetDragSource, true); return; }
+      ui.resetDragSourceState();
+    };
+    window.addEventListener('dragstart', resetDragSource, true);
     this.hud = new HUD();
     this.wizard = new CharacterCreateWizard();
     this.selectScreen = new CharacterSelectScreen();
@@ -14989,7 +15004,7 @@ export class GameUI {
     // a UIElement_ItemList too (gmExternalContainerUI m_itemList).
     const container = this.containerPanel;
     if (container && container.isConnected) {
-      for (const cell of container.querySelectorAll<HTMLElement>(`[data-ac-container-guid="${guid}"]`)) {
+      for (const cell of container.querySelectorAll<HTMLElement>(`[data-ac-container-guid="${guid}"], [data-ac-container-pack-guid="${guid}"]`)) {
         this.applyItemWaitingGhost(cell, guid);
       }
     }
@@ -15073,6 +15088,9 @@ export class GameUI {
    * with it.
    */
   settleItemDragWaiting(): void {
+    // A main-pack drag ends here too, wherever it was released (a re-render
+    // mid-drag can take the source cell, and its dragend, with it).
+    this.playerPackDragGuid = 0;
     for (const guid of [...this.itemWaitingGuids]) {
       if (!this.itemRequestPendingFor?.(guid)) this.setItemWaiting(guid, false);
     }
@@ -15082,7 +15100,7 @@ export class GameUI {
   private refreshInventoryShortcutTags(): void {
     const panel = this.inventoryPanel;
     if (!panel || !panel.isConnected) return;
-    for (const cell of panel.querySelectorAll<HTMLElement>('[data-inv-slot], [data-equip-slot]')) {
+    for (const cell of panel.querySelectorAll<HTMLElement>('[data-inv-slot], [data-equip-slot], [data-pack-shortcut-cell]')) {
       this.applyItemShortcutTag(cell, Number(cell.dataset.acSelGuid ?? 0));
     }
   }
@@ -15672,6 +15690,16 @@ export class GameUI {
         if (packSelGuid !== 0) {
           inset.dataset.acSelGuid = `${packSelGuid}`;
           if (packSelGuid === this.containerSelectedGuid()) this.styleSlotTile(inset, 'selected', 0x06000f6e, true);
+          // The pack cells are UIItems too: UIItem_Update shows the object's
+          // shortcutNum tag (SetShortcutNum @ 004e1590) — the main pack's is
+          // the player's own (a toolbar shortcut to the main pack).
+          inset.dataset.packShortcutCell = '1';
+          this.applyItemShortcutTag(inset, packSelGuid);
+        }
+        if (packIdx === 0 && packSelGuid !== 0) {
+          // ItemList_BeginDrag's SetWaitingState(1) ghosts the main pack's cell while it is dragged.
+          inset.dataset.packWaitCell = '1';
+          this.applyItemWaitingGhost(inset, packSelGuid);
         }
         if (packItem) {
           inset.dataset.packWaitCell = '1';
@@ -15708,7 +15736,35 @@ export class GameUI {
             else this.onSelectObject?.(packSelGuid);
             this.onExamineObject?.(packSelGuid);
           });
-          // A side pack drags like any pack item (the player's own cell does not).
+          // The main pack cell drags too: m_topContainer (0x100001c9) is an
+          // ItemList inheriting base 0x10000339 @ 0x2100003d's 0x10000016 =
+          // true (drag enabled), and gmInventoryUI::RecvNotice_SetDisplay-
+          // Inventory @ 004a6750 ItemList_AddItem's the player's id into it,
+          // so ItemList_BeginDrag @ 004e32d0 picks up the player. Only the
+          // toolbar takes it (gmToolbarUI::HandleDropRelease @ 004be7c0 →
+          // CreateShortcutToItem: IsShortcutEligible passes a player, and the
+          // player owns itself) — a shortcut to the main pack.
+          if (packIdx === 0 && packSelGuid !== 0) {
+            slot.draggable = true;
+            slot.addEventListener('dragstart', (e) => {
+              this.dragItemIndex = -1;
+              this.dragSourceSlot = null;
+              this.worldDragGuid = 0;
+              this.playerPackDragGuid = packSelGuid;
+              if (e.dataTransfer) {
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', `player:${packSelGuid}`);
+                this.setItemDragImage(e.dataTransfer, { iconDid: 0, isThePlayer: true });
+              }
+              // ItemList_BeginDrag: SetSelectedObject(item) unless it is selected already.
+              if (packSelGuid !== this.containerSelectedGuid()) this.onSelectObject?.(packSelGuid);
+              this.beginItemListDragWaiting(packSelGuid);
+            });
+            slot.addEventListener('dragend', () => {
+              this.playerPackDragGuid = 0;
+            });
+          }
+          // A side pack drags like any pack item.
           if (packItem) {
             const packInvIdx = this.inventoryItems.indexOf(packItem);
             slot.draggable = true;
@@ -16158,6 +16214,16 @@ export class GameUI {
   }
   private lastSellStateKey = '';
 
+  /** A new drag began: no source kind yet (the source's own dragstart sets one). */
+  private resetDragSourceState(): void {
+    this.worldDragGuid = 0;
+    this.dragSourceSlot = null;
+    this.dragItemIndex = -1;
+    this.dragIsContainer = false;
+    this.playerPackDragGuid = 0;
+    this.shortcutDragFrom = -1;
+  }
+
   /** GAP.world-drag-drop — the drag in flight as a 3D-drop source (null when none). */
   worldDropSource(): WorldDropSource | null {
     if (this.worldDragGuid !== 0) return { kind: 'world', guid: this.worldDragGuid };
@@ -16192,6 +16258,26 @@ export class GameUI {
   /** GAP.world-drag-drop — the 3D drag ended (StopDragandDrop / ClearDragandDrop). */
   endWorldDrag(): void {
     this.worldDragGuid = 0;
+  }
+
+  /**
+   * gmInventoryUI::RecvNotice_OpenContainedContainer @ 004a6a80 (raised by
+   * CPlayerSystem::UsingItem @ 00562f70 for an owned container): the
+   * inventory shows (its SetVisible(1)) and opens `guid` — the player's id
+   * re-opens the main pack (m_topContainer), a side pack opens in the pack
+   * column. Anything not in the pack column does nothing. True when opened.
+   */
+  openContainedContainer(guid: number): boolean {
+    const packIdx = guid ? this.sidePackGuids.indexOf(guid) : -1;
+    if (packIdx < 0) return false;
+    this.setPanelsWindowPanel(INVENTORY_PANEL, true);
+    if (this.selectedPackSlot !== packIdx) {
+      this.selectedPackSlot = packIdx;
+      // ItemList_OpenContainer re-parents the grid (ItemList_Flush drops m_pendingItem).
+      this.pendingPackItem = null;
+    }
+    if (this.inventoryVisible) this.renderInventoryPanel();
+    return true;
   }
 
   /** GAP.world-drag-drop — the pack the inventory shows (0 = main pack, 1-7 = side packs): CPlayerSystem::mOpenContainerID for PlaceInBackpack. */
@@ -16495,6 +16581,11 @@ export class GameUI {
     // from a world selection shows them on the ground container's cell.
     if (packGuid !== 0) inset.dataset.acSelGuid = `${packGuid}`;
     if (packGuid !== 0 && packGuid === this.containerSelectedGuid()) this.styleSlotTile(inset, 'selected', 0x06000f6e, true);
+    // The drag's SetWaitingState(1) ghost (setItemWaiting finds the inset by this key).
+    if (packGuid !== 0) {
+      inset.dataset.acContainerPackGuid = `${packGuid}`;
+      this.applyItemWaitingGhost(inset, packGuid);
+    }
     // RECON.inventory-grid-dat-cells.a — a container UIItem's fullness meter
     // (UpdateCapacityDisplay @ 004e16e0) over the objects known inside it
     // (`_itemsList`: nested containers excluded; an unviewed pack counts 0
@@ -16529,6 +16620,23 @@ export class GameUI {
       this.containerItemScrollX = 0;
       this.renderContainerPanel();
     });
+    // ItemList_BeginDrag @ 004e32d0 on the strip's upper lists: m_topContainer
+    // (0x10000064) and m_containerList (0x10000067) inherit base 0x10000339
+    // @ 0x2100003d's 0x10000016 = true (drag enabled) like the item row, so
+    // the ground container itself and each nested pack ride the drag as a
+    // ground object to every drop target (a nested pack into your pack, a
+    // pack onto the toolbar; the chest itself is refused at the target:
+    // IsShortcutEligible / _IsItemLegal).
+    if (packGuid !== 0) {
+      cell.draggable = true;
+      cell.addEventListener('dragstart', (e) => {
+        if (packGuid !== this.containerSelectedGuid()) this.selectContainerObject(packGuid, { name: name ?? '', iconDid });
+        this.beginWorldDrag(packGuid, iconDid ?? 0, e.dataTransfer,
+          { overlayDid: look?.iconOverlayDid, itemType: look?.itemType, effects: look?.uiEffects });
+        this.beginItemListDragWaiting(packGuid);
+      });
+      cell.addEventListener('dragend', () => { this.endWorldDrag(); });
+    }
     return cell;
   }
 
@@ -17260,7 +17368,7 @@ export class GameUI {
    */
   setItemShortcutIcon(
     index: number, iconDid: number | undefined, title: string,
-    look?: { itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number },
+    look?: { itemType?: number; uiEffects?: number; iconOverlayDid?: number; iconUnderlayDid?: number; isThePlayer?: boolean },
   ): void {
     if (index < 0 || index > 17) return;
     this.itemShortcutData[index] = look ? { iconDid, title, look } : { iconDid, title };
@@ -17313,7 +17421,7 @@ export class GameUI {
       this.itemShortcutCallbacks.onEndDrag?.();
     });
     slot.addEventListener('dragover', (e) => {
-      if (this.shortcutDragFrom !== -1 || this.worldDropSource()) e.preventDefault();
+      if (this.shortcutDragFrom !== -1 || this.playerPackDragGuid !== 0 || this.worldDropSource()) e.preventDefault();
     });
     slot.addEventListener('drop', (e) => {
       e.preventDefault();
@@ -17326,6 +17434,12 @@ export class GameUI {
         return;
       }
       this.shortcutDragFrom = -1;
+      if (this.playerPackDragGuid !== 0) {
+        const guid = this.playerPackDragGuid;
+        this.playerPackDragGuid = 0;
+        this.itemShortcutCallbacks.onDropPlayer?.(index, guid);
+        return;
+      }
       const source = this.worldDropSource();
       this.dragItemIndex = -1;
       this.dragSourceSlot = null;
@@ -17358,10 +17472,15 @@ export class GameUI {
     const data = this.itemShortcutData[index];
     slot.replaceChildren();
     // CORE.18.c.a — the shortcut is a UIItem (UIItem_SetIcon → GetIcon).
-    const iconEl = data?.iconDid
-      ? this.buildItemIconElement(data.iconDid, 32, data.look?.iconOverlayDid, data.look?.iconUnderlayDid,
-        { itemType: data.look?.itemType, effects: data.look?.uiEffects })
-      : null;
+    // A shortcut to the main pack holds the player, whose UIItem draws
+    // RenderIcons' IsThePlayer composite (PlayerIcon on the Container
+    // backdrop), as the pack column's main-pack cell does.
+    const iconEl = data?.look?.isThePlayer
+      ? this.buildItemIconElement(undefined, 32, undefined, undefined, { isThePlayer: true })
+      : data?.iconDid
+        ? this.buildItemIconElement(data.iconDid, 32, data.look?.iconOverlayDid, data.look?.iconUnderlayDid,
+          { itemType: data.look?.itemType, effects: data.look?.uiEffects })
+        : null;
     const emptyTileTex = index < 9 ? 0x060010fa + index : 0x060074cf;
     const bgTex = iconEl ? 0x06001a97 : emptyTileTex;
     Object.assign(slot.style, this.texBgStyle(bgTex, 'rgba(8,12,34,0.85)'), {
@@ -17757,8 +17876,16 @@ export class GameUI {
    */
   assignSpellToBar(spellIndex: number, slotIdx: number): void {
     if (spellIndex < 0 || spellIndex >= this.knownSpells.length) return;
-    const spell = this.knownSpells[spellIndex];
-    const bar = this.activeSpellBarTab;
+    this.addSpellFavoriteToTab(this.activeSpellBarTab, this.knownSpells[spellIndex], slotIdx);
+  }
+
+  /**
+   * SpellCastSubMenu::AddFavorite(tab, spell, index, send = true) — the drop
+   * half of gmSpellcastingUI::HandleDropRelease @ 004c7930 for any tab: the
+   * open tab's list (at the cell under the mouse), the bar background
+   * (append) or another tab's label (append to that tab, which stays shut).
+   */
+  private addSpellFavoriteToTab(bar: number, spell: SpellDefinition, slotIdx: number): void {
     const m = this.spellBarSubMenu(bar);
     const events = m.addFavorite(spell.id, slotIdx);
     this.commitSpellBarSubMenu(bar, m, spell);
@@ -17769,6 +17896,39 @@ export class GameUI {
     this.updateEndowmentIcon();
     this.updateCastButtonTooltip();
     this.refreshSpellBarPanel();
+  }
+
+  /** The spell a spell drag carries: a spellbook row (`text/spell-index`) or a bar shortcut (`text/spell-id`). */
+  private spellOfDrag(dt: DataTransfer | null): SpellDefinition | null {
+    if (!dt) return null;
+    const idx = parseInt(dt.getData('text/spell-index') || '-1', 10);
+    if (idx >= 0 && idx < this.knownSpells.length) return this.knownSpells[idx];
+    const id = parseInt(dt.getData('text/spell-id') || '0', 10);
+    if (!id) return null;
+    return this.knownSpells.find((s) => s.id === id)
+      ?? this.spellBarSlots.flat().find((s): s is SpellDefinition => !!s && s.id === id)
+      ?? null;
+  }
+
+  /**
+   * gmSpellcastingUI::RecvNotice_ItemListBeginDrag @ 004c7360: picking a
+   * shortcut up off the open tab's list (0x100000b6 inherits 0x10000016 =
+   * true from 0x2100003d:0x10000339) takes it off the tab at once —
+   * SpellCastSubMenu::RemoveSpellFromMenu (Event_RemoveSpellFavorite) — and
+   * it comes back only where it is dropped (HandleDropRelease); released
+   * anywhere else it stays off: how a spell leaves the bar.
+   */
+  beginSpellShortcutDrag(tab: number, slotIdx: number): number {
+    if (tab !== this.activeSpellBarTab) return 0;
+    const sp = this.spellBarSlots[tab]?.[slotIdx];
+    if (!sp) return 0;
+    this.removeSpellFromBar(sp.id);
+    return sp.id;
+  }
+
+  /** HandleDropRelease's drop of a dragged spell onto the open tab's cell `slotIdx` (−1 = the bar background: append). */
+  dropSpellOnBar(spell: SpellDefinition, slotIdx: number, tab = this.activeSpellBarTab): void {
+    this.addSpellFavoriteToTab(tab, spell, slotIdx);
   }
 
   /** SpellCastSubMenu::RemoveSpellFromMenu @ 004c68f0 on the open tab: Event_RemoveSpellFavorite, the selection cleared when it was this spell. */
@@ -18097,6 +18257,16 @@ export class GameUI {
       const label = getString(SPELL_BAR_TAB_STRING_IDS[t]) ?? SPELL_BAR_TAB_FALLBACK[t];
       handle.setText(tabIds[t], label);
 
+      // HandleDropRelease @ 004c7930: a spell dropped on a tab's label is
+      // SpellCastSubMenu::AddFavorite(that tab, spell, -1) — appended there,
+      // the open tab unchanged.
+      tabEl.addEventListener('dragover', (e) => { e.preventDefault(); });
+      tabEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const spell = this.spellOfDrag(e.dataTransfer);
+        if (spell) this.dropSpellOnBar(spell, -1, t);
+      });
       tabEl.addEventListener('click', () => {
         // FAITHFUL.452 — persist the active tab so the player returns
         // to the same spell-bar page next session (sibling of
@@ -18289,14 +18459,32 @@ export class GameUI {
       this.castSelectedSpell();
     });
 
-    // Drop target for drag-and-drop from spellbook
+    // A filled shortcut is a drag source (gmSpellcastingUI::
+    // RecvNotice_ItemListBeginDrag @ 004c7360 takes it off the tab).
+    slot.draggable = true;
+    slot.addEventListener('dragstart', (e) => {
+      const sp = this.spellBarSlots[tabIdx]?.[slotIdx];
+      if (!sp || tabIdx !== this.activeSpellBarTab) { e.preventDefault(); return; }
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/spell-id', `${sp.id}`);
+        const icon = slot.firstElementChild;
+        if (icon instanceof HTMLElement) e.dataTransfer.setDragImage(icon, 16, 16);
+      }
+      // After the browser has taken the drag image from the cell.
+      setTimeout(() => this.beginSpellShortcutDrag(tabIdx, slotIdx), 0);
+    });
+
+    // Drop target: a spellbook row or a bar shortcut, inserted at this cell
+    // (HandleDropRelease → AddSpellShortcut(spell, WhatNum(cell))).
     slot.addEventListener('dragover', (e) => { e.preventDefault(); slot.style.opacity = '0.7'; });
     slot.addEventListener('dragleave', () => { slot.style.opacity = ''; });
     slot.addEventListener('drop', (e) => {
       e.preventDefault();
+      e.stopPropagation();
       slot.style.opacity = '';
-      const spellIdx = parseInt(e.dataTransfer?.getData('text/spell-index') ?? '-1');
-      if (spellIdx >= 0) this.assignSpellToBar(spellIdx, slotIdx);
+      const spell = this.spellOfDrag(e.dataTransfer);
+      if (spell) this.dropSpellOnBar(spell, slotIdx);
     });
   }
 
@@ -22223,6 +22411,7 @@ export class GameUI {
   private setAutomationPanelShown(show: boolean): void {
     this.automationPanelVisible = show;
     if (show) {
+      this.pluginUsage?.windowOpened('vtank-panel');
       this.renderAutomationPanel();
       void this.automationModel?.load(() => this.renderAutomationBody());
     } else {
@@ -22274,6 +22463,7 @@ export class GameUI {
     this.vtankWindows.set(key, { el: win, redraw });
     redraw();
     this.vvsWindowShown();
+    this.pluginUsage?.windowOpened(key);
   }
 
   private closeVTankAux(key: string): void {
@@ -22356,6 +22546,7 @@ export class GameUI {
     const on = !this.vvsBarShown();
     try { globalThis.localStorage?.setItem(GameUI.VVS_BAR_KEY, on ? 'on' : 'off'); } catch { /* storage blocked */ }
     this.vvsBarChoice = on;
+    this.pluginUsage?.barToggled();
     this.refreshVvsBar();
     return on ? 'Virindi Views bar shown' : 'Virindi Views bar hidden (/automation bar shows it)';
   }
@@ -22629,8 +22820,18 @@ export class GameUI {
     }
     // Splitpea: set only in AC1999 (createSplitpea); our own stand-in icon (virindiIcons.ts).
     if (this.splitpea) out.push({ id: 'splitpea', plugin: 'Splitpea', title: 'Splitpea', icon: { url: SPLITPEA_ICON_PNG }, open: this.vtankWindows.has('splitpea'), toggle: () => this.toggleSplitpeaWindow() });
-    return out;
+    // OBS.automation-usage: a click on the bar is counted (and the window it opened) before it acts.
+    return out.map((e) => ({ ...e, toggle: () => { this.pluginUsage?.barClicked(e.id, !e.open); e.toggle(); } }));
   }
+
+  /**
+   * OBS.automation-usage — where the plugin bar's and windows' use is counted (telemetry/AutomationReporter.ts;
+   * main.ts sets it). Window keys and bar ids only; the reporter maps them onto its closed list.
+   */
+  pluginUsage: {
+    barOnScreen(): void; barToggled(): void; barClicked(id: string, opening: boolean): void; windowOpened(id: string): void;
+    imported(outcome: 'ok' | 'partial' | 'failed', fileNames: readonly string[]): void;
+  } | null = null;
 
   /**
    * Preview UI (2026-10-12, Jake: gate the bar to him until it's trusted): on for the accounts the bridge
@@ -22652,6 +22853,7 @@ export class GameUI {
   refreshVvsBar(): void {
     const show = this.previewFeatures && this.automationAvailable && this.vvsBarShown();
     if (!show) { this.vvsBarEl?.remove(); this.vvsBarEl = null; return; }
+    this.pluginUsage?.barOnScreen();
     let bar = this.vvsBarEl;
     if (!bar) {
       bar = document.createElement('div');
@@ -22780,6 +22982,7 @@ export class GameUI {
    */
   private openAutomationEditor(editor: RoutineEditor): void {
     this.closeAutomationEditor();
+    this.pluginUsage?.windowOpened('vtank-editor');
     // The mock's editor is a large window over the world (1160x690 at 1600x900); fit it to the HUD.
     const W = Math.max(720, Math.min(1080, this.hudLogicalWidth() - 40));
     const H = Math.max(480, Math.min(640, this.hudLogicalHeight() - 140));
@@ -22917,6 +23120,7 @@ export class GameUI {
       scroll: (host) => this.addPanelScrollbar(host),
       plate: (w, h) => this.buildDialogPlate(w, h),
       colors: { text: AC_COLORS.white, dim: AC_COLORS.textMed, gold: AC_COLORS.goldLight, good: AC_COLORS.onlineGreen, warn: AC_COLORS.squelchTypeCharacter, bad: AC_COLORS.squelchTypeAccount },
+      imported: (outcome, fileNames) => this.pluginUsage?.imported(outcome, fileNames),
     };
   }
 
@@ -23333,6 +23537,7 @@ export class GameUI {
     // Loaded once per character; reopened, it re-checks the stored document (changed in another tab, or by Claude).
     void model.opened(redraw);
     this.vvsWindowShown();
+    this.pluginUsage?.windowOpened('vtank');
   }
 
   private closeVTankWindow(): void {
@@ -29921,6 +30126,37 @@ export class GameUI {
 
   /* ── Selling page (the drag-in sell list) ──────────────────────── */
 
+  /**
+   * gmVendorUI::RecvNotice_ItemListBeginDrag @ 004c4380: the sell list
+   * 0x100000ce keeps base 0x2100003d:0x10000339's 0x10000016 = true (the
+   * shop and buy lists set it false), so an entry picks up. It leaves the
+   * list at once (SetSellState(0), RemoveProfileFromList, VendorSellUI::
+   * Update — no "Removing" line, that is HandleMousePresses') and the drag
+   * carries the player's own item on to wherever it is released: a pack, the
+   * toolbar, the 3D view. A lowered split size is refused first ("You cannot
+   * split items from this panel") and reset to the whole stack.
+   */
+  beginSellListDrag(guid: number): void {
+    const d = this.vendorData;
+    const at = d.sellList.findIndex((e) => e.guid === guid);
+    if (at === -1) return;
+    const invIdx = this.inventoryItems.findIndex((i) => i.id === guid);
+    this.worldDragGuid = 0;
+    this.dragSourceSlot = null;
+    this.dragItemIndex = invIdx;
+    if (this.toolbarSplitSize < this.toolbarMaxSplitSize) {
+      this.displayErrorText('You cannot split items from this panel');
+      this.setToolbarSplitSize(this.toolbarMaxSplitSize);
+    }
+    // After the browser has taken the drag image from the cell (a re-render now would cancel the drag).
+    setTimeout(() => {
+      const i = d.sellList.findIndex((e) => e.guid === guid);
+      if (i === -1) return;
+      d.sellList.splice(i, 1);
+      if (this.vendorVisible) this.renderVendorPanel();
+    }, 0);
+  }
+
   private populateVendorSellingPage(handle: LayoutHandle): void {
     const E = GameUI.VENDOR_EL;
     const d = this.vendorData;
@@ -29961,6 +30197,10 @@ export class GameUI {
           this.displayErrorText(vendorRemovingFromListText(getAppropriateName(it.name, it.pluralName, x.entry.qty)));
           d.sellList.splice(d.sellList.indexOf(x.entry), 1);
           this.renderVendorPanel();
+        },
+        onDragStart: (it, idx) => {
+          const x = entries[idx];
+          if (x) this.beginSellListDrag(x.entry.guid);
         },
       });
 

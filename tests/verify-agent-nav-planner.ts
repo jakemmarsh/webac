@@ -344,7 +344,7 @@ describe.skipIf(!existsSync(DAT_PATHS.cell) || !existsSync(DAT_PATHS.portal))('B
       expect(cell >>> 0).toBe((LB | 0x121) >>> 0);
       const r = await host.walk(cell, start, { cell: LB | 0x105, x: 10, y: -20, z: 0, name: 'Hall Chest' });
       expect(r, host.traces.join('\n')).toMatchObject({ ok: true });
-      expect(r.message).toMatch(/^arrived \([0-9.]+ m away\)$/);
+      expect(r.message).toMatch(/^arrived \([0-9.]+ m from [^)]+\)$/);
       expect(host.launches).toHaveLength(0);
       expect(host.me.z).toBeCloseTo(0, 1);
     } finally { vi.useRealTimers(); }

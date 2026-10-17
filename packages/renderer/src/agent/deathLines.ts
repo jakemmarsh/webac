@@ -139,3 +139,10 @@ export function lossText(l: DeathLoss | null | undefined): string {
   if (!parts.length) return 'nothing dropped';
   return parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
 }
+
+/** "Heavy Bracelet ×3, Steel Toed Boots": repeated names counted, first-seen order. */
+export function itemsText(items: readonly string[]): string {
+  const n = new Map<string, number>();
+  for (const i of items) n.set(i, (n.get(i) ?? 0) + 1);
+  return [...n].map(([name, k]) => (k > 1 ? `${name} ×${k}` : name)).join(', ');
+}

@@ -530,12 +530,23 @@ export interface RouteOptions {
    */
   jumpAcross?: number;
   /**
+   * Leaps not to take, by where they land (a route point's leap point, LEAP_LAND_M past the far lip): a leap whose landing
+   * doorway is within NO_LEAP_NEAR_M of one is left out, in that direction only. The agent fills it with the leaps its
+   * own jump failed this session (no take-off found, or came down short). Mountain Keep's 7.1 m corner leap over the pit
+   * 0x01D202A7 from 0x02A6 to 0x029D was planned into every walk to 0x01D20340 from the east, 20+ times on 2026-10-17,
+   * though no take-off search found it from that side (soldier.log 20:27:33Z: 1566 points) and the one jump came down
+   * short (04:22Z); the other way (0x029D → 0x02A6) carries.
+   */
+  noLeapTo?: Vec3[];
+  /**
    * Filled (when given) with every cell a body gets to from the start by the route's own rules when no route reaches the
    * goal: the part of the dungeon you can walk (routeCutOff). Air cells are left out.
    */
   reached?: Set<number>;
 }
 
+/** A leap left out (RouteOptions.noLeapTo) lands this near (m, seen from above; within 2 m of height) its landing doorway. */
+export const NO_LEAP_NEAR_M = 2.5;
 /** A leap's two doorways may differ this much in sill height (m): across, not up onto a ledge. */
 export const LEAP_RISE_M = 1;
 /** A leap across a gap costs this much extra route length: a walk round up to this much longer is taken instead. */
@@ -602,6 +613,7 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
     if (!dn || !dm || Math.abs(dn.normal.z) > 0.7 || Math.abs(dm.normal.z) > 0.7) return undefined;
     if (Math.abs((dn.bottom ?? dn.at.z) - (dm.bottom ?? dm.at.z)) > LEAP_RISE_M) return undefined;
     const w = Math.hypot(dn.at.x - dm.at.x, dn.at.y - dm.at.y);
+    if (opts.noLeapTo?.some((p) => Math.hypot(p.x - dm.at.x, p.y - dm.at.y) <= NO_LEAP_NEAR_M && Math.abs(p.z - (dm.bottom ?? dm.at.z)) < 2)) return undefined;
     // Floor on both sides: a leap from a ledge to a ledge, never on into more air.
     return w <= reach && floorSide(n, c) && floorSide(m, c) ? w : undefined;
   };
@@ -834,12 +846,12 @@ export interface RouteCutOff {
   reach: Set<number>;
 }
 
-export function routeCutOff(g: CellGraph, fromCell: number, from: Vec3, toCell: number, to: Vec3, opts: { maxDrop?: number; jumpAcross?: number } = {}): RouteCutOff | null {
+export function routeCutOff(g: CellGraph, fromCell: number, from: Vec3, toCell: number, to: Vec3, opts: { maxDrop?: number; jumpAcross?: number; noLeapTo?: Vec3[] } = {}): RouteCutOff | null {
   fromCell >>>= 0; toCell >>>= 0;
   if (g.complete === false || fromCell === toCell || !g.doors.has(fromCell) || !g.doors.has(toCell)) return null;
   const maxDrop = opts.maxDrop ?? 12;
   const reach = new Set<number>();
-  const ro: RouteOptions = { maxDrop, bodyOnly: true, ...(opts.jumpAcross ? { jumpAcross: opts.jumpAcross } : {}), reached: reach };
+  const ro: RouteOptions = { maxDrop, bodyOnly: true, ...(opts.jumpAcross ? { jumpAcross: opts.jumpAcross } : {}), ...(opts.noLeapTo?.length ? { noLeapTo: opts.noLeapTo } : {}), reached: reach };
   if (findRoute(g, fromCell, from, toCell, to, [], ro)) return null;
   if (reach.has(toCell)) return null;
   let climb: RouteCutOff['climb'] = null;

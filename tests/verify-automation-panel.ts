@@ -357,6 +357,22 @@ describe('the routine editor (mock board 2)', () => {
     expect(t.ed.doc.profiles[0].routes.find((r) => r.name === 'loop')?.stops).toEqual([{ at: 1, do: [{ kind: 'cast', spell: 'Lifestone Recall', target: 'self' }] }]);
     expect(t.ed.dirty).toBe(true);
   });
+
+  it('OBS.automation-usage: each import tells the kit how it went (ok / partial / failed), with the file names', async () => {
+    const doc = docWith(structuredClone(EXAMPLE_HUNT_PROFILE));
+    const seen: Array<[string, string[]]> = [];
+    const ed = new M.RoutineEditor({ ...fakeKit(), imported: (o, names) => { seen.push([o, names]); } }, fakeSource(doc).source, structuredClone(doc), doc.profiles[0].name, () => {});
+    const body = document.createElement('div');
+    const redraw = () => ed.render(body, 960, 560, redraw, () => {}, () => {}, () => {});
+    redraw();
+    const nav = ['uTank2 NAV 1.2', '1', '2', '0', '33.6', '42.1', '0.39', '0', '2', '33.7', '42.0', '0.39', '0', '1635', ''].join('\r\n');
+    expect(ed.importFiles([{ name: 'loop.nav', text: nav }], redraw)).toBe('ok');
+    // A VirindiTank file beside one that isn't: what was read comes in, the rest is said (partial).
+    expect(ed.importFiles([{ name: 'loop2.nav', text: nav }, { name: 'notes.txt', text: 'hello' }], redraw)).toBe('partial');
+    // Nothing VirindiTank's at all: failed.
+    expect(ed.importFiles([{ name: 'notes.txt', text: 'hello' }], redraw)).toBe('failed');
+    expect(seen).toEqual([['ok', ['loop.nav']], ['partial', ['loop2.nav', 'notes.txt']], ['failed', ['notes.txt']]]);
+  });
 });
 
 describe('panel helpers', () => {

@@ -57,6 +57,7 @@ import type { ServerDirectory } from './serverDirectory.js';
 import { sanitizeClientError } from './clientErrors.js';
 import { sanitizeClientPreworld, traceFromUrl } from './clientPreworld.js';
 import { isWorldOutcome, sanitizeClientWorld } from './clientWorld.js';
+import { isAutomationOutcome, sanitizeClientAutomation } from './clientAutomation.js';
 import { RecentEventIds } from './eventIds.js';
 import { type LookupFn, resolveTarget } from './targets.js';
 import { encodeSppHeader, stripSppHeader } from './spp.js';
@@ -228,10 +229,13 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
   // RELEASE.preworld-outcomes — a pre-world visit sends a few events (list, create, enter, leave);
   // retried logins send more. 60 per 10 minutes per address.
   const clientPreworldRate = new SlidingWindowCounter(60, 10 * 60_000, now);
+  // OBS.automation-usage — a page sends at most 30 automation events (AutomationReporter); its own budget, so a
+  // busy automation session never spends the pre-world events' one. 40 per 10 minutes per address.
+  const clientAutomationRate = new SlidingWindowCounter(40, 10 * 60_000, now);
   // BUG.telemetry-duplicate-resend — a page resends an event whose send failed after delivery
   // (TelemetryOutbox); each event id is logged once.
   const recentEventIds = new RecentEventIds(now);
-  const sweepTimer = setInterval(() => { connectRate.sweep(); clientErrorRate.sweep(); clientPreworldRate.sweep(); }, limits.connectRateWindowMs);
+  const sweepTimer = setInterval(() => { connectRate.sweep(); clientErrorRate.sweep(); clientPreworldRate.sweep(); clientAutomationRate.sweep(); }, limits.connectRateWindowMs);
   sweepTimer.unref?.();
   const sessions = new Set<Session>();
   /** Admitted-but-not-yet-open upgrades count against the global cap too. */
@@ -312,6 +316,16 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     },
     clientPreworld: (body, req) => {
       const ip = clientIp(req.socket.remoteAddress, req.headers, config.trustProxyHops, config.clientIpHeader);
+      // OBS.automation-usage — the page's automation usage events share the route (clientAutomation.ts): one client_automation line.
+      if (body && typeof body === 'object' && isAutomationOutcome((body as { outcome?: unknown }).outcome)) {
+        if (!clientAutomationRate.hit(ip)) return 429;
+        const aev = sanitizeClientAutomation(body);
+        if (!aev) return 400;
+        if (recentEventIds.repeat(aev.eid)) return 204;
+        metrics.clientAutomationEvent(aev.outcome);
+        log('info', 'client_automation', { ip, ...Object.fromEntries(Object.entries(aev).filter(([, v]) => v !== null)) });
+        return 204;
+      }
       if (!clientPreworldRate.hit(ip)) return 429;
       // RELEASE.first-minute — the page's in-world events share the route (clientWorld.ts): one client_world line.
       if (body && typeof body === 'object' && isWorldOutcome((body as { outcome?: unknown }).outcome)) {

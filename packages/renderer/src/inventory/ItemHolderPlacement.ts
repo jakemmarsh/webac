@@ -47,10 +47,8 @@
  *   @ 004cbb60 (:197399) — a hook only takes items while its house is owned
  *   and the item's hook type / ITEM_TYPE match the hook's.
  *
- * Not ported (ACE enforces the same refusals server-side; it needs the
- * stuck bit, ownership and location): the head gate
- * AttemptToPlaceInContainer_IsItemLegal @ 005870c0. Nor
- * IsDragIntoContainerAttemptLegal @ 00587e90 (:376924), which only decides
+ * AttemptToPlaceInContainer_IsItemLegal @ 005870c0 is isItemLegalHead.
+ * Not ported: IsDragIntoContainerAttemptLegal @ 00587e90 (:376924), which only decides
  * AcceptDragObject's pending placeholder cell.
  */
 
@@ -83,6 +81,14 @@ export interface PlacementObject {
   houseOwnerId?: number;
   /** ITEM_TYPE (vtable +0x18, pwd._type). */
   itemType?: number;
+  /** pwd._bitfield & 4 (BF_STUCK). Absent = not stuck. */
+  stuck?: boolean;
+  /** pwd._containerID != 0 || pwd._wielderID != 0 (in a container or wielded). Absent = neither. */
+  contained?: boolean;
+  /** ACCWeenieObject::IsOwnedByPlayer @ 0058d160. Absent = not owned. */
+  ownedByPlayer?: boolean;
+  /** pwd._location (the wielded slot mask; 0 = not wielded). Absent = 0. */
+  wieldedLocation?: number;
 }
 
 export interface PlacementWorld {
@@ -267,14 +273,50 @@ export function placementFullNotice(holder: PlacementObject, itemIsContainer: bo
   return fmt.replace('%s', holder.name);
 }
 
+/** acclient.exe literals AttemptToPlaceInContainer_IsItemLegal @ 005870c0 raises (SendNotice_DisplayStringInfo 0x1a). */
+export const ITEM_LEGAL_STRINGS = {
+  self: 'You cannot place yourself within a container!',
+  creature: 'You cannot pick up creatures!',
+  /** Stuck and in no container, wielded by nobody (push 0x7e227c @ 00587264). */
+  stuck: 'The %s cannot be picked up!',
+  /** Not owned by the player and wielded (pwd._location != 0; push 0x7e2228 @ 005872db). */
+  wieldedElsewhere: 'The %s is being wielded by someone else!',
+  /** A container that holds containers (IsContainer && _containersCapacity != 0; push 0x7e21f0 @ 00587353). */
+  holdsContainers: "The %s can't be picked up!",
+} as const;
+
+/**
+ * ItemHolder::AttemptToPlaceInContainer_IsItemLegal(item, quiet = 0)
+ * @ 005870c0: the player itself (id == player_id); a creature (InqType ==
+ * 0x10 exactly — so another player too); a stuck object in no container and
+ * wielded by nobody; an object the player does not own that something
+ * wields; and a container that holds containers (a chest, a corpse) — each
+ * refused with its 0x1a line (the object's name formatted in). The literal
+ * each branch pushes was read from the acclient.exe disassembly. An unknown
+ * object ("That item is not valid!") is the caller's own refusal. Null =
+ * legal.
+ */
+export function isItemLegalHead(itemId: number, w: PlacementWorld): string | null {
+  if (itemId === w.playerId) return ITEM_LEGAL_STRINGS.self;
+  const item = w.object(itemId);
+  if (!item) return null;
+  if ((item.itemType ?? 0) === 0x10) return ITEM_LEGAL_STRINGS.creature;
+  if (item.stuck && !item.contained) return ITEM_LEGAL_STRINGS.stuck.replace('%s', item.name);
+  if (!item.ownedByPlayer && (item.wieldedLocation ?? 0) !== 0) return ITEM_LEGAL_STRINGS.wieldedElsewhere.replace('%s', item.name);
+  if (item.isContainer && item.containersCapacity !== 0) return ITEM_LEGAL_STRINGS.holdsContainers.replace('%s', item.name);
+  return null;
+}
+
 /**
  * ItemHolder::AttemptToPlaceInContainer(item, holder, requested, autoMerge,
- * placement) @ 00588140 — after the readiness gate, which the caller runs
- * (and _IsItemLegal, not ported), then _IsContainerLegal(item, holder).
+ * placement) @ 00588140 — after the readiness gate, which the caller runs,
+ * then _IsItemLegal (its head: isItemLegalHead), then _IsContainerLegal(item, holder).
  */
 export function attemptToPlaceInContainer(
   itemId: number, holderId: number, requestedId: number, autoMerge: boolean, placement: number, w: PlacementWorld,
 ): PlacementResult {
+  const illegal = isItemLegalHead(itemId, w);
+  if (illegal) return { kind: 'refused', notice: illegal };
   const legal = isContainerLegal(itemId, holderId, false, w);
   if (!legal.ok) return { kind: 'refused', notice: legal.notice };
   const requested = w.object(requestedId);

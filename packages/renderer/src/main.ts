@@ -345,7 +345,7 @@ import { PendingCombatMode, playerInReadyPosition, getAttackTarget, incompatible
 import { tracksCombatTarget, isObjectAttackable } from './input/InteractionSystem.js';
 import { selectionQueryFor } from './ui/ToolbarSelection.js';
 import { PHYSICS_STATE_KEY } from './models/ObjectTranslucency.js';
-import { decideUseObject, USAGE_CONFIRMATION_TEXT, type UseSubject, COMPONENT_PACKS_DID_MAPPER_ID, isComponentPack, containedUseSubject, ownedUseSubject, type OwnedUseItem } from './input/UseObject.js';
+import { decideUseObject, usingItemEffects, USAGE_CONFIRMATION_TEXT, type UseSubject, COMPONENT_PACKS_DID_MAPPER_ID, isComponentPack, containedUseSubject, ownedUseSubject, type OwnedUseItem } from './input/UseObject.js';
 import { WorldRightClick } from './ui/WorldRightClick.js';
 import { formatAcTime } from './utils/formatAcTime.js';
 import { RestartableTimer } from './utils/RestartableTimer.js';
@@ -369,7 +369,7 @@ import { parsePlayerDescription } from './network/PlayerDescriptionParser.js';
 import { buildContractRows, applyContractTracker, applyContractTrackerTable, type TimedContractEntry } from './network/contractRows.js';
 import { harDumpText } from './chat/HouseAccessText.js';
 import { routeObjectSubject, buildInventoryEntry, WorldObjectRecords, PendingContainIds } from './network/objectSubjectRouting.js';
-import { ItemShortcutRestorer, isShortcutEligible, quickslotCommand, CREATE_SHORTCUT_ACTION, type ShortcutTarget } from './network/itemShortcutRestore.js';
+import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, quickslotCommand, CREATE_SHORTCUT_ACTION, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
 import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from './session/SessionLifecycle.js';
@@ -404,6 +404,7 @@ import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLo
 import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
+import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
@@ -808,6 +809,8 @@ let preworldServer: () => string | null = () => null;
 let preworldChargenStep: () => ChargenStepName | null = () => null;
 /** RELEASE.first-minute — the first minute in the world, and the session's end (telemetry/WorldReporter.ts); set at boot. */
 let worldReporter: WorldReporter | null = null;
+/** OBS.automation-usage — whether players use the plugin bar and routines (telemetry/AutomationReporter.ts); set at boot. */
+let automationReporter: AutomationReporter | null = null;
 
 // ─── Era (docs/dark-majesty-support.md, era/EraBoot.ts) ──────────────
 // One era's DATs per page load. main() resolves the boot era before any DAT
@@ -1243,6 +1246,16 @@ async function main() {
     hidden: () => document.visibilityState === 'hidden',
   });
   worldReporter.install(window, document, canvas);
+  automationReporter = new AutomationReporter({
+    endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
+    build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
+    trace: preworldReporter.trace,
+    era: () => activeEra.id,
+    server: () => preworldServer(),
+  });
+  automationReporter.install(window, document);
+  // Its world sessions are the world reporter's (every exit, the drop's and the closed tab's included).
+  { const ar = automationReporter; worldReporter.onSessionStart(() => ar.enteredWorld()); worldReporter.onSessionEnd((exit) => ar.worldLeft(exit)); }
 
   // RELEASE.capability-check — before the patch screen downloads anything.
   // RELEASE.preworld-boot-stage — each await below names its boot stage on the reporter.
@@ -4532,16 +4545,29 @@ async function main() {
       objectDescFlags: held.objectDescFlags, petOwner: 0, name: held.name,
     };
   }
+  /** The player's own id (the main pack): the guid the pack column's top cell holds. */
+  const isPlayerSelf = (id: number): boolean => id !== 0 && (id === aceCharGuid || id === myPlayerGuid);
+  /**
+   * The player as a shortcut's object (a shortcut to the main pack): the
+   * UIItem draws RenderIcons' IsThePlayer composite and its tooltip is the
+   * player's name (UIElement_UIItem::UpdateTooltip → GetObjectName).
+   */
+  const playerShortcutItem = (): ShortcutItemInfo => ({ name: playerState.name || '', itemType: ItemType.Creature, isThePlayer: true });
   /** ClientObjMaintSystem::GetWeenieObject as CreateShortcutToItem sees it (null = unknown). */
   function shortcutTargetOf(id: number): ShortcutTarget | null {
+    // The player itself: IsShortcutEligible passes it (IsPlayer) and
+    // IsOwnedByPlayer is true (IsOwnedByObject: id == player_id).
+    if (isPlayerSelf(id)) return { owned: true, eligible: true, item: playerShortcutItem(), name: playerState.name || '' };
     const held = heldItemById(id);
     if (held) return { owned: true, item: held, name: held.name };
     const obj = serverObjectManager?.getObject(id);
     if (!obj) return null;
-    const stuck = ((obj.objectDescFlags >>> 0) & ObjectDescriptionFlag.Stuck) !== 0;
+    const flags = obj.objectDescFlags >>> 0;
+    const stuck = (flags & ObjectDescriptionFlag.Stuck) !== 0;
+    const isPlayer = (flags & ObjectDescriptionFlag.Player) !== 0;
     return {
       owned: false, name: obj.name,
-      eligible: isShortcutEligible({ owned: false, stuck, itemType: obj.itemType }),
+      eligible: isShortcutEligible({ isPlayer, stuck, itemType: obj.itemType }),
       item: { iconDid: obj.iconId, name: obj.name, itemType: obj.itemType },
     };
   }
@@ -4581,6 +4607,8 @@ async function main() {
           inTrade: tradeGuids.has(id), isPlayer: false,
           // ItemHolder::CheckHookStatus reads the item's _hook_type and type.
           hookType: held.hookType ?? 0, itemType: held.itemType ?? 0,
+          // _IsItemLegal: carried or worn, so contained and owned.
+          contained: true, ownedByPlayer: heldItemById(id) !== null,
         };
       }
       const o = serverObjectManager?.getObject(id);
@@ -4598,6 +4626,11 @@ async function main() {
         // A housing hook's _hook_type / _hook_item_types / _house_owner_iid.
         hookType: o?.hookType ?? src?.hookType ?? 0, hookItemTypes: o?.hookItemTypes ?? 0,
         houseOwnerId: o?.houseOwnerId ?? 0, itemType: o?.itemType ?? src?.itemType ?? 0,
+        // _IsItemLegal's inputs: BF_STUCK, in a container (the open ground
+        // container's contents) or wielded, and the wielded slot.
+        stuck: (flags & ObjectDescriptionFlag.Stuck) !== 0,
+        contained: (o?.wielderId ?? 0) !== 0 || openContainer.has(id),
+        wieldedLocation: o?.wieldedLocation ?? 0,
       };
     };
     const inside = (holderId: number) => holderId === playerId
@@ -4707,6 +4740,7 @@ async function main() {
   };
   /** ACCWeenieObject::SetSelectedObject for a shortcut's object. */
   function selectShortcutObject(id: number): void {
+    if (isPlayerSelf(id)) { selectGuid(id); return; }
     const held = heldItemById(id);
     if (held) { gameUI.selectInventoryItem(held); return; }
     const obj = serverObjectManager?.getObject(id);
@@ -4728,6 +4762,8 @@ async function main() {
       return true;
     }
     if (pendingUseWithTargetGuid) {
+      // A shortcut to the main pack targets the player (a kit on yourself), as the self-click path does.
+      if (isPlayerSelf(id)) { consumePendingUseWithTarget(id, playerState.name || '', ItemType.Creature); return true; }
       const held = heldItemById(id);
       const obj = held ? null : serverObjectManager?.getObject(id);
       consumePendingUseWithTarget(id, held?.name ?? obj?.name ?? '', held?.itemType ?? obj?.itemType ?? 0);
@@ -4741,6 +4777,11 @@ async function main() {
     if (!id) return;
     if (shortcutTargetModeUse(id)) return;
     if (!use) { selectShortcutObject(id); return; }
+    // ItemHolder::UseObject @ 00588a80 on the player (not useable) runs only
+    // CPlayerSystem::UsingItem @ 00562f70: the player owns itself and is a
+    // container, so SendNotice_OpenContainedContainer shows the inventory on
+    // the main pack, and UseObject returns (param_1 == player) — no request.
+    if (isPlayerSelf(id)) { gameUI.openContainedContainer(id); return; }
     if (!gameUI.useHeldItem(id) && sendUseAction) sendUseAction(id);
   }
   // ── Container / Loot system ──────────────────────────────────────
@@ -6237,10 +6278,14 @@ async function main() {
         payload.writeUInt32(id);
         if (!sendGameAction(GameActionType.DropItem, payload.toBuffer())) return;
         console.log(`[AC] Sent DropItem: item=0x${id.toString(16)} "${dragged.item.name}"`);
-        if (dragged.source.kind === 'inventory') {
-          inventoryController.dropItem(id);
-          inventoryDirty = true;
-        }
+        // ACCWeenieObject::UIAttemptPutIn3D only records the request: the item
+        // stays in the pack, ghosted (ItemList_BeginDrag's SetWaitingState),
+        // until the server answers. A drop that lands is 0x019A in every era
+        // (ACE GameEventItemServerSaysMoveItem, GDLE / AC1999 ObjectMsgs.cpp
+        // InventoryDrop), whose onInventoryPutIn3D takes it out of the pack;
+        // a refusal (0x00A0, e.g. 426 "That item can't be dropped") is
+        // ServerSaysAttemptFailed @ 0058eae0, which only clears the ghost.
+        // The old optimistic removal here was never undone by a refusal.
         return;
       }
     }
@@ -7422,6 +7467,7 @@ async function main() {
     resuming: resumingAfterDrop(),
   });
   gameUI.onRelaunch = () => preworldReporter?.leavingForReload('epilogue');
+  gameUI.pluginUsage = automationReporter;
   worldReporter?.setSources({
     screen: () => {
       if (gameUI.disconnectedScreenShown) return 'disconnected';
@@ -8495,6 +8541,11 @@ async function main() {
         const notice = itemShortcutRestorer.dropItemOnSlot(id, slot, shortcutTargetOf(id), () => placeInBackpack(id));
         if (notice) gameUI.displayErrorText(notice);
       },
+      // The main pack dragged off the pack column: the same HandleDropRelease → CreateShortcutToItem.
+      onDropPlayer: (slot, guid) => {
+        const notice = itemShortcutRestorer.dropItemOnSlot(guid, slot, shortcutTargetOf(guid), () => placeInBackpack(guid));
+        if (notice) gameUI.displayErrorText(notice);
+      },
     };
 
     // Per-session contract tracker state (FAITHFUL.202). Keyed by contractId;
@@ -8811,6 +8862,23 @@ async function main() {
       if (released.length > 0) inventoryDirty = true;
       return released.length;
     };
+    /**
+     * gmToolbarUI::RecvNotice_ServerSaysMoveItem @ 004bf2b0, run by every
+     * handler where the server moves or deletes an object (contain-in,
+     * put-in-3D, inventory remove, delete — the same messages in all three
+     * eras; Inventory1999 maps 0x22 / 0x19A / 0x24 onto them): a shortcut to
+     * an object the player no longer owns leaves the bar and the server is
+     * told (Event_RemoveShortCut) — a sold, given, dropped, stored or used-up
+     * item. Ownership is read after the move is applied (a drag-drop's
+     * optimistic DropItem has already taken it out of the pack). A shortcut
+     * still waiting on its weenie (SetDelayedShortcutNum) is no removal:
+     * retail's ServerSaysMoveItem needs the ACCWeenieObject. The main pack
+     * (the player) never moves.
+     */
+    const toolbarObjectMoved = (guid: number): void => {
+      const slot = toolbarObjectMovedOnBar(itemShortcutRestorer, guid, { isThePlayer: isPlayerSelf(guid), held: heldItemById(guid) !== null });
+      if (slot !== -1) console.log(`[AC] Shortcut ${slot + 1} removed: 0x${guid.toString(16)} left the player`);
+    };
 
     // ── Inventory item moved to container (confirmation from server) ──
     // A named function: GDLE's container-id property update reuses it (onPublicUpdatePropertyInstanceID).
@@ -8972,6 +9040,7 @@ async function main() {
       } else {
         pendingContainIds.forget(data.itemGuid);
       }
+      toolbarObjectMoved(data.itemGuid);
     };
 
     // Wire up all server message handlers
@@ -9003,6 +9072,8 @@ async function main() {
         // InventoryRemoveObject (Player_Inventory.cs:414-420).
         gameUI.itemRequestAnswered(data.guid);
         if (releaseFromPlayer(data.guid) > 0) inventoryRequests.respond(data.guid);
+        // ACCWeenieObject::Remove @ 0058dd20 → ServerSaysMoveItem(this, 0) → the toolbar's shortcut goes.
+        toolbarObjectMoved(data.guid);
         // CORE.17.k.b.b.c.c.a.a.b — gmSlumlordUI::RecvNotice_BeingDeleted @
         // 004c85a0 (the 0x186af notice AddItem subscribed): a staged payment
         // item destroyed server-side leaves the list.
@@ -10040,9 +10111,11 @@ async function main() {
         // all 18 slots (gmToolbarUI::UpdateFromPlayerDesc → FlushShortcuts,
         // then walks all 0x12 slots) and binds each entry now or when its
         // item's CreateObject lands (handleObjectCreateOrUpdate).
+        // A shortcut to the main pack holds the player's own id, which is no
+        // inventory item: it binds at once (its icon is the DAT's PlayerIcon).
         const { restored, deferred } = itemShortcutRestorer.restoreFromDescription(
           desc.shortcuts,
-          (objectId) => playerState.inventory.getItem(objectId) ?? undefined,
+          (objectId) => (isPlayerSelf(objectId) ? playerShortcutItem() : playerState.inventory.getItem(objectId) ?? undefined),
         );
         if (restored > 0 || deferred > 0) {
           console.log(`[PlayerDesc] Item-shortcut bar: ${restored} restored now, ${deferred} deferred to inventory arrival (${desc.shortcuts.length} entr${desc.shortcuts.length === 1 ? 'y' : 'ies'})`);
@@ -12266,6 +12339,7 @@ async function main() {
         // contents go with it.
         removeItemLeavingPlayer(playerState, data.itemGuid);
         inventoryDirty = true;
+        toolbarObjectMoved(data.itemGuid);
         // CORE.17.k.b.b.c.c.a.a.b — the dropped item is no longer
         // IsOwnedByPlayer (RecvNotice_ServerSaysMoveItem → RemoveItem).
         gameUI.onInventoryItemLeftPlayer(data.itemGuid);
@@ -12299,6 +12373,8 @@ async function main() {
         releaseFromPlayer(data.itemGuid);
         deselectIfSelected(data.itemGuid);
         gameUI.onInventoryItemLeftPlayer(data.itemGuid);
+        // ServerSaysRemove @ 0058e4c0 = ServerSaysMoveItem(this, 0, …): a consumed / given / spent item's shortcut goes.
+        toolbarObjectMoved(data.itemGuid);
       },
 
       // ── PlayScriptId (0xF754): a PhysicsScript DID played directly on the
@@ -12789,7 +12865,7 @@ async function main() {
       const subject = useSubjectFor(guid);
       if (!subject) { sendUseEvent(guid); return; }
       const useTarget = serverObjectManager?.getObject(guid);
-      const decision = decideUseObject(subject, {
+      const useCtx = {
         playerGuid: aceCharGuid ?? 0,
         groundObject: openContainerGuid ?? 0,
         allowSelection: false,
@@ -12799,8 +12875,20 @@ async function main() {
         peaceMode: !combatController.isInCombat,
         confirmVolatileRare: characterOptionIsSet(0x2d /* ConfirmVolatileRareUse */, currentCharacterOptions1 ?? 0, currentCharacterOptions2 ?? 0),
         selectionCompatible: false,
-      });
+      };
+      const decision = decideUseObject(subject, useCtx);
       console.log(`[AC] UseObject 0x${guid.toString(16)} "${subject.name}": ${JSON.stringify(decision)}`);
+      // CPlayerSystem::UsingItem @ 00562f70's client-side tail on every path
+      // UseObject reaches it: an owned container (a side pack's shortcut)
+      // opens in the inventory (SendNotice_OpenContainedContainer) — the Use
+      // still goes out, as retail's Event_UseEvent does — and a WieldLeft
+      // item's DetermineUseResult case 8 is AutoWield(SLOT_SIDE_LEFT).
+      const usingItem = usingItemEffects(subject, useCtx);
+      if (usingItem?.openContainer) gameUI.openContainedContainer(guid);
+      if (usingItem?.autoWieldLeft) {
+        const item = playerState.inventory.getItem(guid);
+        if (item) attemptAutoWield(item, UISlotSide.Left);
+      }
       switch (decision.kind) {
         case 'usingItem':
           switch (decision.result) {
@@ -16151,9 +16239,9 @@ async function main() {
       if (e.type === 'agentPairing') { onPairingReply(e.data as PairingReply); return; }
       if (e.type === 'relayLink') { relayLink.onNotice(e.data as RelayLinkNotice); return; }
       if (e.type === 'routinesGrant') routineSync.onGrant(e.data as RoutinesGrant | null, e.error);
-      else if (e.type === 'automationAccess') { if (e.data === true) { startAgent(false); showAutomationUi(); } }
-      // Preview UI for the accounts the bridge names (the Virindi Views bar).
-      else if (e.type === 'previewAccess') gameUI.setPreviewFeatures(e.data === true || automationUiEnabled(urlOverridesEnabled()));
+      else if (e.type === 'automationAccess') { automationReporter?.automationAccess(e.data === true); if (e.data === true) { startAgent(false); showAutomationUi(); } }
+      // Preview UI for the accounts the bridge names (the Virindi Views bar). Follows automationAccess: the answer is whole.
+      else if (e.type === 'previewAccess') { automationReporter?.previewAccess(e.data === true); gameUI.setPreviewFeatures(e.data === true || automationUiEnabled(urlOverridesEnabled())); }
       else if (e.type === 'characterList') {
         routineSync.reset();
         worldCharacterName = null;
@@ -16324,6 +16412,14 @@ async function main() {
         // What creatures hold (out of the world, so not in objects()): a monster's bow or javelins says it shoots.
         wielded: function* () { for (const o of serverObjectManager?.getAllObjects().values() ?? []) if (o.wielderId) yield hostObject(o); },
         object: (guid) => { const o = serverObjectManager?.getObject(guid); return o ? hostObject(o) : null; },
+        // The attributes each vital's maximum draws from (the era DAT's SecondaryAttributeTable formulas), for a raise
+        // that named a vital as an attribute or the other way round.
+        vitalAttributes: () => {
+          const t = vitalFormulaTable;
+          if (!t) return null;
+          const ids = (f: { attr1: number; attr2: number }): number[] => [f.attr1, f.attr2].filter((a) => a > 0);
+          return { health: ids(t.maxHealth), stamina: ids(t.maxStamina), mana: ids(t.maxMana) };
+        },
         lineOfFire: (guid) => serverObjectManager?.lineOfFire(guid) ?? null,
         lineOfFireOpenSpot: (guid) => serverObjectManager?.openLineSpot(guid) ?? null,
         lineOfFireFrom: (guid, from) => serverObjectManager?.lineOfFireFrom(guid, from) ?? null,
@@ -16718,6 +16814,8 @@ async function main() {
         },
       };
       const agentApi = new AgentApi(agentHost);
+      // OBS.automation-usage — runs started / stopped / failing, whoever drove them (telemetry/AutomationReporter.ts).
+      agentApi.routine.onLifecycle = (e) => automationReporter?.routine(e);
       // VirindiTank / UtilityBelt meta expressions over the client's own state (docs/vtank-parity-gaps.md §5).
       const metaObject = (id: number): MetaGameObject | null => {
         const worn = playerState.equipment.getAll().find((e) => e.id >>> 0 === id);
@@ -17015,10 +17113,11 @@ async function main() {
           status: () => agentApi.routine.status(),
           stats: () => agentApi.routine.statsNow(),
           current: () => agentApi.routine.current(),
-          run: (p) => agentApi.routine.start(p),
+          // The player's windows and /vt commands (OBS.automation-usage: driver 'player'; the agent API's are 'agent').
+          run: (p) => agentApi.routine.start(p, 'player'),
           pause: () => agentApi.routine.pause(),
           resume: () => agentApi.routine.resume(),
-          stop: () => agentApi.routine.stop(),
+          stop: () => agentApi.routine.stop('stopped', 'player'),
           setModule: (m, on) => agentApi.routine.setModule(m, on),
           setting: (name) => agentApi.routine.setting(name),
           setSetting: (name, value) => agentApi.routine.setSetting(name, value),
@@ -17378,6 +17477,8 @@ async function main() {
             // CORE.17.m — heritage picks the retail paperdoll camera
             // (gmPaperDollUI::UpdateForRace); PlayerDescription seeded it.
             gameUI.setInventoryOwner(obj.name, obj.iconId, playerState.heritage);
+            // A shortcut to the main pack still waiting on the player's weenie binds now (SetDelayedShortcutNum).
+            itemShortcutRestorer.onItemKnown(obj.guid, { ...playerShortcutItem(), name: obj.name || playerState.name || '' });
             // GDLE: our position packs must carry the instance/teleport/
             // force-position stamps from this PhysicsDesc, or GDLE drops them.
             movementSync?.adoptPhysicsTimestamps(obj.timestamps);

@@ -305,6 +305,12 @@ export class WorldReporter {
 
   get inWorld(): boolean { return this.enterAt !== null; }
 
+  /** OBS.automation-usage — told when a world session starts and ends (every exit), as AutomationReporter is. */
+  private readonly starts: Array<() => void> = [];
+  private readonly ends: Array<(exit: 'closed_tab' | 'logout' | 'disconnected') => void> = [];
+  onSessionStart(f: () => void): void { this.starts.push(f); }
+  onSessionEnd(f: (exit: 'closed_tab' | 'logout' | 'disconnected') => void): void { this.ends.push(f); }
+
   /** The world is up (gameStarted, beside PreworldReporter.enteredWorld). `resumed`: the auto-resume after a drop. */
   enteredWorld(resumed = false): void {
     if (this.enterAt !== null) this.left('disconnected');
@@ -331,6 +337,7 @@ export class WorldReporter {
     this.modal = null;
     this.modalSince = at;
     this.pollModal(at);
+    for (const f of this.starts) { try { f(); } catch { /* a listener never breaks the report */ } }
   }
 
   /**
@@ -435,6 +442,7 @@ export class WorldReporter {
       });
     }
     this.enterAt = null;
+    for (const f of this.ends) { try { f(exit); } catch { /* a listener never breaks the report */ } }
   }
 
   /** pagehide / visibilitychange (hidden) / the 1 s tick / the canvas's webglcontextlost. */

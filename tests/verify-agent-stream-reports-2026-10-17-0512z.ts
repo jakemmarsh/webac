@@ -259,19 +259,25 @@ describe('6. a repeat cast already under its until_health', () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it('17% under 60%: refused plainly, nothing cast', async () => {
+  // Since 2026-10-17 19:18Z (Viamontian Lab, a refusal at 38% among three Footmen, death 15 s later): a call never comes
+  // back empty for a threshold the caller set. One cast is made, then the repeat ends on until_health, saying so.
+  it('17% under 60%: one cast, then the repeat ends on your own until_health, said so', async () => {
     host.me.health = { current: 28, max: 162 };
-    const r: AgentResult = await api.castRepeat('Flame Bolt I', DREAD, { untilHealth: 0.6 });
-    expect(r.ok).toBe(false);
-    expect(r.message).toBe('Flame Bolt I not cast: your health (28/162, 17%) is already under until_health (60%), where a repeat stops: heal first, or pass a lower until_health (until_health=0.1) to cast at this health');
-    expect(host.sent.some((s) => s.startsWith('cast'))).toBe(false);
+    let r: AgentResult | undefined;
+    void api.castRepeat('Flame Bolt I', DREAD, { untilHealth: 0.6 }).then((x) => { r = x; });
+    for (let t = 0; t < 20_000 && !r; t += 200) await vi.advanceTimersByTimeAsync(200);
+    expect(host.sent.filter((s) => s.startsWith('cast 27'))).toHaveLength(1);
+    expect(r!.message).toMatch(/^cast Flame Bolt I at Dread Mu-miyah 1 time \(repeat\); stopped: your own until_health: your health was already under the 60% you set when this began \(28\/162\), so one cast was made and the repeat ended there/);
     expect(api.observe().me?.task).toBeNull();
   });
 
   it('the default limit is named as the default; until_health=0 casts at any health', async () => {
     host.me.health = { current: 5, max: 50 };
-    const r = await api.castRepeat('Flame Bolt I', DREAD, {});
-    expect(r.message).toMatch(/is already under until_health \(\d+%, the default\)/);
+    let r: AgentResult | undefined;
+    void api.castRepeat('Flame Bolt I', DREAD, {}).then((x) => { r = x; });
+    for (let t = 0; t < 20_000 && !r; t += 200) await vi.advanceTimersByTimeAsync(200);
+    expect(r!.message).toMatch(/your health was already under the 60% default when this began/);
+    host.sent = [];
     void api.castRepeat('Flame Bolt I', DREAD, { untilHealth: 0 });
     await vi.advanceTimersByTimeAsync(300);
     expect(host.sent.some((s) => s.startsWith('cast 27'))).toBe(true);

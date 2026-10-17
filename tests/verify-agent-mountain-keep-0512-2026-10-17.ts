@@ -78,7 +78,7 @@ describe('2. walk_to a point at a portal stops outside its edge and says so (nev
     const p = api.walkTo('42.1N, 33.6E');
     const closest = drive(30_000, px, py);
     const r = await p;
-    expect(r.message).toMatch(/^arrived \([\d.]+ m away\); that point is 3\.2 m from Mountain Keep #7a8c3000, a portal, so the walk stopped outside its edge \([\d.]+ m from it\): stepping into a portal takes you through it\. ac_use it to go through/);
+    expect(r.message).toMatch(/^arrived \([\d.]+ m from [^)]+\); that point is 3\.2 m from Mountain Keep #7a8c3000, a portal, so the walk stopped outside its edge \([\d.]+ m from it\): stepping into a portal takes you through it\. ac_use it to go through/);
     expect(closest).toBeGreaterThan(DISK_M);
     expect(closest).toBeGreaterThan(TOUCH_M);
   });
@@ -101,7 +101,7 @@ describe('2. walk_to a point at a portal stops outside its edge and says so (nev
     const p = api.walkTo('42.1N, 33.6E');
     drive(20_000, goal.x - 12, goal.y);
     const r = await p;
-    expect(r.message).toMatch(/^arrived \([\d.]+ m away\)$/);
+    expect(r.message).toMatch(/^arrived \([\d.]+ m from [^)]+\)$/);
     expect(Math.hypot(host.me.x - goal.x, host.me.y - goal.y)).toBeLessThan(2.5);
   });
 

@@ -6,7 +6,7 @@ import { parseStreamConfig, DEFAULT_ALLOWED_TOOLS, DEFAULT_AUTO_COMPACT_TOKENS, 
 import { FeedWriter, FileTail, cliCalls, feedPath, isIncantation, parseChatLine, parseStreamJsonLine, shellWords, statusDraft, summarizeCliCall, type ChatParseState } from '../tools/stream/feed.ts';
 import type { FeedEvent } from '../tools/stream/feed-types.ts';
 import { QUIET_TOOLS, afterTurn, dayUsage, endReason, nextSegment, quietNudge, type SegmentRecord } from '../tools/stream/policy.ts';
-import { StreamSupervisor, claudeArgs, segmentDetail, playerEnv, startArgs, type PlayerProcess, type SupervisorDeps, type DaemonState } from '../tools/stream/supervisor.ts';
+import { StreamSupervisor, claudeArgs, segmentDetail, playerEnv, startArgs, boundaryPlanLines, parseStopFile, stopCommand, stopFileText, type LiveState, type PlayerProcess, type SupervisorDeps, type DaemonState } from '../tools/stream/supervisor.ts';
 import { creditsLine, nextCreditLevels, readinessBrief, recoveryCounts, unspent, playerToolNames, segmentOpening, sessionSoFar, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from '../tools/stream/prompt.ts';
 import { playerScripts, preparePlayerDir } from '../tools/stream/player.ts';
 import { TOOLS, TOOL_BY_NAME } from '../tools/ac-agent/tools.ts';
@@ -550,6 +550,130 @@ describe('stream supervisor (fake players, daemons and clock)', () => {
   });
 });
 
+describe('stop at the segment boundary (supervisor.ts stop --at-segment-end)', () => {
+  // 2026-10-17 18:47Z: a plain stop to load a new build sent the wrap-up mid-fight and Claude Arcanist died in it.
+  it('the STOP file carries the mode: a timestamp or an empty touch is an immediate stop, `segment-end …` a boundary stop', () => {
+    const t = Date.UTC(2026, 9, 17, 18, 47);
+    expect(parseStopFile(stopFileText('now', t))).toBe('now');
+    expect(parseStopFile('')).toBe('now');
+    expect(stopFileText('segment-end', t)).toBe('segment-end 2026-10-17T18:47:00.000Z\n');
+    expect(parseStopFile(stopFileText('segment-end', t))).toBe('segment-end');
+  });
+
+  const live: LiveState = {
+    stopMode: null,
+    characters: [
+      { profile: 'mage', character: 'Claude Arcanist', halted: null, segment: { segment: 3, startedAt: '2026-10-17T18:00:00.000Z', wrapUpAt: '2026-10-17T19:00:00.000Z', endsBy: '2026-10-17T19:06:00.000Z' } },
+      { profile: 'soldier', character: 'Claude Bulwark', halted: null, segment: null },
+    ],
+  };
+
+  it('the stop command writes the boundary mode and prints when each character will stop', () => {
+    const r = stopCommand({ atSegmentEnd: true, alive: { pid: 42, live }, current: null, nowMs: Date.UTC(2026, 9, 17, 18, 47) });
+    expect(r.write).toBe('segment-end 2026-10-17T18:47:00.000Z\n');
+    expect(r.lines.join('\n')).toContain('Claude Arcanist: segment 3 (started 18:00Z) gets its wrap-up at 19:00Z and ends by 19:06Z at the latest');
+    expect(r.lines.join('\n')).toContain('Claude Bulwark: between segments: stops at once');
+    // A plain stop still writes an immediate stop, also over a pending boundary stop (an escalation).
+    expect(parseStopFile(stopCommand({ atSegmentEnd: false, alive: { pid: 42, live }, current: 'segment-end', nowMs: 0 }).write!)).toBe('now');
+  });
+
+  it('refuses where a boundary stop would not be one: no supervisor, one too old to know the mode, or an immediate stop already pending', () => {
+    expect(stopCommand({ atSegmentEnd: true, alive: null, current: null, nowMs: 0 }).write).toBeNull();
+    const old = stopCommand({ atSegmentEnd: true, alive: { pid: 7 }, current: null, nowMs: 0 });
+    expect(old.write).toBeNull();
+    expect(old.lines[0]).toMatch(/predates --at-segment-end and would stop at once/);
+    expect(stopCommand({ atSegmentEnd: true, alive: { pid: 7, live }, current: 'now', nowMs: 0 }).write).toBeNull();
+  });
+
+  it('a running segment plays to its own wrap-up and report, then the character is logged out and no next segment starts', async () => {
+    const h = harness({ maxSegments: 5, characters: [CAST.characters[0]], segment: { ...CAST.segment, minutes: 2, wrapUpMinutes: 5, restartPauseSeconds: 0 } }, (_p, text, p) => {
+      if (/Wrap up now/.test(text)) p.emit(result('report 1'));
+    });
+    const states: LiveState[] = [];
+    h.deps.liveState = (s) => states.push(structuredClone(s));
+    let asked = false;
+    h.deps.stopRequested = () => (asked ? 'segment-end' : null);
+    const startedAt = h.deps.now();
+    const sleep = h.deps.sleep;
+    h.deps.sleep = async (ms) => { await sleep(ms); if (h.procs.length && h.deps.now() - startedAt >= 30_000) asked = true; };
+    try {
+      const sup = new StreamSupervisor(h.cfg, h.deps);
+      await sup.run();
+      expect(sup.stopping).toBe(false);
+      expect(sup.stopAtBoundary).toBe(true);
+      expect(h.procs).toHaveLength(1); // no segment 2
+      const sent = h.procs[0].p.sent;
+      expect(sent.some((t) => /stream is ending/.test(t))).toBe(false); // no mid-segment goodbye
+      expect(sent.some((t) => /Wrap up now/.test(t))).toBe(true);
+      expect(h.segs.map((s) => [s.reason, s.finalText, s.minutes >= 2])).toEqual([['done', 'report 1', true]]);
+      expect(h.cli.filter((a) => a[0] === 'stop')).toEqual([['stop', 'profile=mage']]);
+      expect(h.feed().at(-1)).toMatchObject({ type: 'segment-end', title: 'Stream over', detail: 'stopped at the segment ends; everyone logged out' });
+      // The live state the stop command and `status` read: the running segment's clock, then the pending mode.
+      const running = states.find((s) => s.characters[0].segment)!.characters[0].segment!;
+      const segStart = Date.parse(running.startedAt);
+      expect(Date.parse(h.segs[0].start)).toBe(segStart);
+      expect(running).toEqual({
+        segment: 1, startedAt: new Date(segStart).toISOString(), wrapUpAt: new Date(segStart + 120_000).toISOString(),
+        endsBy: new Date(segStart + 120_000 + 5 * 60_000 + 60_000).toISOString(),
+      });
+      const pending = states.find((s) => s.stopMode === 'segment-end')!;
+      expect(boundaryPlanLines(pending)[0]).toMatch(/^Claude Arcanist: segment 1 \(started 20:00Z\) gets its wrap-up at 20:02Z and ends by 20:08Z at the latest$/);
+      expect(states.at(-1)!.characters[0].segment).toBeNull();
+    } finally { h.cleanup(); }
+  });
+
+  it('a character between segments stops at once (logged out then), while its partner plays its segment out', async () => {
+    const h = harness({ maxSegments: 5, segment: { ...CAST.segment, minutes: 10, maxNudges: 0, restartPauseSeconds: 60 } }, (profile, text, p) => {
+      if (profile === 'mage' && /Segment 1/.test(text)) p.emit(result('mage quits early'));
+      if (/Wrap up now/.test(text)) p.emit(result(`${profile} report`));
+    });
+    const stopAt: Record<string, number> = {};
+    const runCli = h.deps.runCli;
+    h.deps.runCli = async (args) => { if (args[0] === 'stop') stopAt[args[1]] = h.deps.now(); return runCli(args); };
+    // Asked once Arcanist's segment has ended and it is waiting out the pause before its next.
+    h.deps.stopRequested = () => (h.segs.some((s) => s.profile === 'mage') ? 'segment-end' : null);
+    try {
+      const sup = new StreamSupervisor(h.cfg, h.deps);
+      await sup.run();
+      expect(h.procs.map((x) => x.profile).sort()).toEqual(['mage', 'soldier']); // nobody started a second segment
+      const mageEnd = Date.parse(h.segs.find((s) => s.profile === 'mage')!.end);
+      const soldier = h.segs.find((s) => s.profile === 'soldier')!;
+      expect(soldier.reason).toBe('done'); // its own wrap-up and report
+      // Logged out from its pause before the next segment (the fake clock runs a pause out at once), not left in the
+      // world until Bulwark's segment ends.
+      expect(stopAt['profile=mage']).toBeGreaterThanOrEqual(mageEnd);
+      expect(stopAt['profile=mage']).toBeLessThan(Date.parse(soldier.end));
+      expect(stopAt['profile=soldier']).toBeGreaterThanOrEqual(Date.parse(soldier.end));
+      expect(h.procs.find((x) => x.profile === 'soldier')!.p.sent.some((t) => /stream is ending/.test(t))).toBe(false);
+      expect(h.feed().some((e) => e.type === 'segment-end' && 'char' in e && e.char === 'mage' && e.detail === 'the stream is stopping at the segment end')).toBe(true);
+    } finally { h.cleanup(); }
+  });
+
+  it('a plain stop after a boundary stop still ends everything at once', async () => {
+    const h = harness({ maxSegments: 5, characters: [CAST.characters[0]], segment: { ...CAST.segment, minutes: 30 } }, (_p, text, p) => {
+      if (/stream is ending/.test(text)) p.emit(result('bye'));
+    });
+    let mode: 'segment-end' | 'now' | null = null;
+    h.deps.stopRequested = () => mode;
+    const t0 = h.deps.now();
+    const sleep = h.deps.sleep;
+    h.deps.sleep = async (ms) => {
+      await sleep(ms);
+      if (!h.procs.length) return;
+      if (h.deps.now() - t0 >= 60_000) mode = 'segment-end';
+      if (h.deps.now() - t0 >= 120_000) mode = 'now';
+    };
+    try {
+      const sup = new StreamSupervisor(h.cfg, h.deps);
+      await sup.run();
+      expect(sup.stopping).toBe(true);
+      expect(h.segs.map((s) => s.reason)).toEqual(['stopping']);
+      expect(h.segs[0].minutes).toBeLessThan(5);
+      expect(h.cli.filter((a) => a[0] === 'stop')).toEqual([['stop', 'profile=mage']]);
+    } finally { h.cleanup(); }
+  });
+});
+
 describe('attach: two tabs in one Chrome, one per character', () => {
   const tab = (url: string) => ({ url: () => url });
   it('picks the tab in the world as the named character, and none until that character has entered', () => {
@@ -868,6 +992,7 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
       'Your readiness right now (`./ac gear`, `./ac character`, `./ac inventory` for the whole picture):',
       '- gear: nothing worn: no helm or hat (head), no gloves (hands)',
       '- gear: clothing only, no armor over it: upper legs, lower legs',
+      '- gear: no jewelry on: neck, wrists, rings',
       '- gear: in your pack, would fill an empty slot: Pathwarden Helm #80002002 (head); Chevron Cloak #80002001 (cloak)',
       '- gear: 4 worn pieces with unknown armor level (Studded Leather Coat, Shirt, Pants, Leather Boots): appraise to compare',
       '- unspent: 612,345 XP',
@@ -876,9 +1001,11 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
     ]);
   });
 
-  it('no gear lines when the gear is complete (or the tab can\'t say where items go); kits and potions counted by stack', () => {
+  it('armor on every body part says so, empty jewelry slots are named (no gear lines when the tab can\'t say where items go); kits and potions counted by stack', () => {
     expect(recoveryCounts(completeInv())).toEqual({ kits: 3, health: 4, mana: 1 });
     expect(readinessBrief({ items: completeInv(), sheet: sheet('0', 0), session: null })!.split('\n').slice(1)).toEqual([
+      '- gear: armor on every body part',
+      '- gear: no jewelry on: neck, wrists, rings',
       '- unspent: 0 XP',
       '- skill credits: 0 now; next at level 20 (+1) and 23 (+1)',
       '- in your pack: 3 healing kits, 4 health potions, 1 mana potion',
@@ -953,7 +1080,7 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
       const [mage1, mage2] = openings('mage');
       const [soldier1] = openings('soldier');
       for (const o of [mage1, soldier1]) expect(o).toContain('\n- deaths and levels this session: Claude Arcanist: 3 deaths (Banderling Striker, Mud Golem, unknown); Claude Bulwark: 0 deaths, level 20 → 21');
-      expect(mage1).toMatch(/Your readiness right now[^\n]*\n- gear: nothing worn: no helm or hat \(head\), no gloves \(hands\)\n- gear: clothing only, no armor over it: upper legs, lower legs\n- gear: in your pack, would fill an empty slot: Pathwarden Helm #80002002 \(head\); Chevron Cloak #80002001 \(cloak\)/);
+      expect(mage1).toMatch(/Your readiness right now[^\n]*\n- gear: nothing worn: no helm or hat \(head\), no gloves \(hands\)\n- gear: clothing only, no armor over it: upper legs, lower legs\n- gear: no jewelry on: neck, wrists, rings\n- gear: in your pack, would fill an empty slot: Pathwarden Helm #80002002 \(head\); Chevron Cloak #80002001 \(cloak\)/);
       expect(mage1).toContain('\n- unspent: 612,345 XP\n- skill credits: 2 now; next at level 20 (+1) and 23 (+1)\n- spells: Item Enchantment trained (166) but no Item Enchantment spells known: buy and read scrolls at a mage shop (Impenetrability, Blade Bane; you can learn up to level V)\n- in your pack: 0 healing kits, 0 health potions, 2 mana potions\n');
       expect(mage1.indexOf('Your readiness right now')).toBeLessThan(mage1.indexOf('Your journal:'));
       // The spells line above: the known spells (a read) against the sheet's schools and the era's table (War has no
@@ -961,7 +1088,8 @@ describe('segment opening: readiness (gear gaps, unspent XP, kits and potions, t
       expect(mage1).not.toContain('- spells: War Magic');
       expect(mage2).toContain('Your readiness right now');
       expect(soldier1).toContain('- in your pack: 3 healing kits, 4 health potions, 1 mana potion');
-      expect(soldier1).not.toContain('- gear:');
+      expect(soldier1).toContain('\n- gear: armor on every body part\n- gear: no jewelry on: neck, wrists, rings\n');
+      expect(soldier1).not.toMatch(/- gear: (?:nothing worn|clothing only)/);
       expect(soldier1).not.toContain('- unspent:'); // no sheet read for it here
       // The feed got the same deaths the opening counted.
       expect(h.feed().filter((e) => e.type === 'death').map((e) => (e as { killer?: string }).killer ?? null)).toEqual(['Banderling Striker', 'Mud Golem', null]);

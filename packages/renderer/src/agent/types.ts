@@ -269,6 +269,11 @@ export interface AgentObservation {
    */
   deaths?: string;
   /**
+   * Your corpses from the last hours (AgentApi.corpsesLine): where each lies, what is on it and which of that you wore,
+   * and how long until it rots, or that it rotted or went. Kept across page reloads; absent when there is none.
+   */
+  corpses?: string;
+  /**
    * Body slots nothing you wear covers (the paperdoll's bare spots: head, hands, feet …), and the pack items that would
    * cover one. A player sees them at a glance; Arcanist played to level 19 with no gloves (2026-10-14).
    */

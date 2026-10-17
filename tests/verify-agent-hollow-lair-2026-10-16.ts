@@ -73,7 +73,7 @@ describe('Hollow Lair movement reports (fake host)', () => {
       const t = monster(0x8000fa14, 'Goldenback Tusker', 80, 60, 94 - 12);
       const r = await settle(api, host, api.walkTo(t.guid, { within: 25 }), 30_000);
       expect(r, traces.join('\n')).toMatchObject({ ok: true });
-      expect(r!.message).toMatch(/^arrived \(2[45]\.\d m away, 12 m above it\)/);
+      expect(r!.message).toMatch(/^arrived \(2[45]\.\d m from [^,)]+, 12 m above it\)/);
       const flat = 60 - host.me.y;
       // sqrt(25² − 12²) = 21.9 m across: stopped there (a tick's 0.4 m), not walked on to its floor.
       expect(flat).toBeGreaterThan(21.4);
@@ -100,7 +100,7 @@ describe('Hollow Lair movement reports (fake host)', () => {
     it('"20m east" with 8 m between ticks: arrives as it runs past (was a 30 s hop either side of it, then "in circles")', async () => {
       const r = await settle(api, host, api.walkTo('20m east'), 120_000, { tick: 2000 });
       expect(r, traces.join('\n')).toMatchObject({ ok: true });
-      expect(r!.message).toMatch(/^arrived \(4\.0 m away, run past it a little/);
+      expect(r!.message).toMatch(/^arrived \(4\.0 m from [^,)]+, run past it a little/);
       expect(traces.some((l) => /stall/.test(l))).toBe(false);
       expect(host.keys.has('KeyW')).toBe(false);
     });
@@ -118,7 +118,7 @@ describe('Hollow Lair movement reports (fake host)', () => {
 
     it('the same at 10 ticks a second: arrives within 2 m as before', async () => {
       const r = await settle(api, host, api.walkTo('20m east'), 30_000);
-      expect(r!.message).toMatch(/^arrived \(\d\.\d m away\)$/);
+      expect(r!.message).toMatch(/^arrived \(\d\.\d m from [^)]+\)$/);
     });
 
     it('an offset just off a corridor floor\'s edge is that floor\'s room, not the cell you started in', async () => {

@@ -65,7 +65,8 @@ describe('agent play reports 2026-10-11 (evening)', () => {
     const q = api.use('Journeyman Scrivener of War Magic');
     await vi.advanceTimersByTimeAsync(300);
     api.pushChat('Journeyman Scrivener of War Magic tells you, "Isn\'t it wonderful what Asheron and the Arcanum were able to accomplish for us?"', 0x03);
-    await vi.advanceTimersByTimeAsync(3000);
+    // A greeting is not the shop: the use waits a little longer for the window (it comes after the vendor turns to you).
+    await vi.advanceTimersByTimeAsync(3000 + AgentApi.VENDOR_WINDOW_MS);
     expect((await q).message).toMatch(/no shop window opened for Journeyman Scrivener of War Magic/);
   });
 
