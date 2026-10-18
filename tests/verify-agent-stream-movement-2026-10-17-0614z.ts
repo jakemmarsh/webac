@@ -250,14 +250,14 @@ describe('4. arriving at a fellow: not while they run past you', () => {
 });
 
 describe('5. a doorway way that climbs above both ends is said in the answer', () => {
-  it('walk_to a room on your floor whose only way goes up and back down: "climbs about 14 m above both ends"', async () => {
+  it('walk_to a room on your floor whose only way goes up and back down: "climbs about 14 m, then goes down about 14 m"', async () => {
     host.wall = () => false;
     host.me.cell = UPPER; host.me.x = 80; host.me.y = 20; host.me.z = -12;
     host.routeTo = [{ x: 85, y: 20, z: 2 }, { x: 90, y: 20, z: 2 }, { x: 95, y: 20, z: -12 }];
     // A goal with no floor plan: the walk ends short (the fake can't climb), and the answer says why the way goes up.
     host.add({ guid: 0x80000077, name: 'Chest', itemType: 0x200, cell: LOWER, x: 100, y: 20, z: -12 });
     const r = await settle(api, host, api.walkTo(0x80000077, { timeoutMs: 10_000 }), 120_000);
-    expect(r?.message).toMatch(/the only doorway way there climbs about 14 m above both ends and comes back down: no doorway, stair or ramp on your floor joins your room to it, so a walk there goes up first/);
+    expect(r?.message).toMatch(/the only doorway way there climbs about 14 m, then goes down about 14 m: no doorway, stair or ramp on your floor joins your room to it, so a walk there goes up first/);
   });
 
   it('a level doorway way: no such note', async () => {

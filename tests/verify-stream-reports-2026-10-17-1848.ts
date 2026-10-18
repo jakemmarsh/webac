@@ -160,7 +160,7 @@ describe('walks, follows and waits under attack (items 1 and 3)', () => {
     const w = api.wait({ types: ['tell'] as never }, 20_000);
     const evs = (await settle(api, host, w, 5000, (t) => { if (t === 300) { host.me.stamina = { current: 0, max: 221 }; api.pushChat("You're Exhausted!"); } }))!;
     expect(evs.map((e) => e.type)).toEqual(['vitals-low']);
-    expect(evs[0].text).toMatch(/^stamina 0\/221: EXHAUSTED\. The server gives you no defense now \(every attack at you lands\) and runs you at a crawl; .*\(1 on you\)\. A stamina potion or elixir, or a Revitalize, brings it back/);
+    expect(evs[0].text).toMatch(/^stamina 0\/221: EXHAUSTED\. The server gives you no defense now \(every attack at you lands\) and runs you at a crawl; .*\(1 on you\)\. Bring it back: you carry nothing to restore stamina with and know no spell for it; out of a combat stance/);
     // The observe header says so too.
     expect(formatObservation(api.observe())).toMatch(/ST 0\/221 \(EXHAUSTED: no defense, every attack lands; a crawl for a run\)/);
     // Back above 0: no longer EXHAUSTED.

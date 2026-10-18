@@ -32,7 +32,7 @@ import type { PendingTieBind } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
 import { closeCurrentContainer, releaseGroundObject as releaseGroundObjectState } from './world/CloseCurrentContainer.js';
-import { createLoadingOverlay, revealLoadingPlaceholder } from './ui/LoadingOverlay.js';
+import { createLoadingOverlay, revealLoadingPlaceholder, fadeOutLoadingOverlay } from './ui/LoadingOverlay.js';
 import { testResearchFormula } from './ui/SpellResearch1999.js';
 import { attachPreworldScale } from './ui/PreworldScale.js';
 import { buildVendorSellRows } from './ui/VendorSellDrag.js';
@@ -5051,9 +5051,7 @@ async function main() {
 
   // Remove loading overlay and stop meter animation
   stopMeterAnimation();
-  loadingOverlay.style.transition = 'opacity 0.5s';
-  loadingOverlay.style.opacity = '0';
-  setTimeout(() => { loadingOverlay.remove(); splashScaleCleanup?.(); splashScaleCleanup = null; }, 500);
+  fadeOutLoadingOverlay(loadingOverlay, 500, () => { splashScaleCleanup?.(); splashScaleCleanup = null; });
 
   let gameStarted = false;
   /** RELEASE.first-minute — the next world entry is the automatic resume after an in-world drop. */
@@ -14058,6 +14056,7 @@ async function main() {
       showLoadingScreen: (connectLevel = 1, patchLevel = 0.38, expectedBytes = 926941184) => {
         if (!document.body.contains(loadingOverlay)) document.body.appendChild(loadingOverlay);
         loadingOverlay.style.opacity = '1';
+        loadingOverlay.style.pointerEvents = 'auto';
         loadingOverlay.style.display = 'flex';
         initDatSplash(uiTextureManager, uiPortalDb);
         // The retail strings for the sample levels (CORE.17.k.b.b.a.a.a).
@@ -14066,7 +14065,7 @@ async function main() {
         meterRightPct = Math.round(Math.min(Math.max(patchLevel, 0), 1) * 100);
         renderSplashLabel('load-text-right', patchProgressText(patchLevel, expectedBytes));
       },
-      hideLoadingScreen: () => { stopMeterAnimation(); loadingOverlay.style.opacity = '0'; setTimeout(() => { loadingOverlay.remove(); splashScaleCleanup?.(); splashScaleCleanup = null; }, 300); },
+      hideLoadingScreen: () => { stopMeterAnimation(); fadeOutLoadingOverlay(loadingOverlay, 300, () => { splashScaleCleanup?.(); splashScaleCleanup = null; }); },
       /** Cancel the current attack swing — sends GameActionType.CancelAttack (no payload). */
       cancelAttack: () => {
         if (!sendGameAction) return;
@@ -16552,7 +16551,7 @@ async function main() {
         },
         // The effects windows' list (fed by the server's Magic update events). PlayerState's
         // EnchantmentManager.getAll() is never filled (the registry is), so reading it showed no buffs ever.
-        activeSpells: () => gameUI.agentActiveEnchantments().map((e) => ({ spellId: e.spellId, name: e.name, remaining: e.remaining, beneficial: e.beneficial })),
+        activeSpells: () => gameUI.agentActiveEnchantments().map((e) => ({ spellId: e.spellId, name: e.name, remaining: e.remaining, beneficial: e.beneficial, ...(e.statModType !== undefined ? { statModType: e.statModType, statModKey: e.statModKey, statModValue: e.statModValue } : {}) })),
         // VTank's buff items wait out their shared cooldown (the item's SharedCooldown → cooldown enchantment 0x8000 + id).
         cooldownRemaining: (id) => gameUI.agentCooldownRemaining(id),
         // Side packs and foci sit in the container slots, not item slots (ACE Container.CountPackItems: !UseBackpackSlot).

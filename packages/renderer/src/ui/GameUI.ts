@@ -21957,11 +21957,12 @@ export class GameUI {
    * (EffectsPanelModel: startTime + duration − time since applied); −1 for
    * a permanent one. Cooldowns aren't effects and are left out.
    */
-  agentActiveEnchantments(nowSec = Date.now() / 1000): Array<{ spellId: number; name: string; remaining: number; beneficial: boolean }> {
-    const out: Array<{ spellId: number; name: string; remaining: number; beneficial: boolean }> = [];
+  agentActiveEnchantments(nowSec = Date.now() / 1000): Array<{ spellId: number; name: string; remaining: number; beneficial: boolean; statModType?: number; statModKey?: number; statModValue?: number }> {
+    const out: Array<{ spellId: number; name: string; remaining: number; beneficial: boolean; statModType?: number; statModKey?: number; statModValue?: number }> = [];
     for (const e of this.activeEnchantments.values()) {
       if (e.isCooldown) continue;
-      out.push({ spellId: e.spellId, name: e.name, beneficial: e.isBeneficial, remaining: e.duration < 0 ? -1 : Math.max(0, e.startTime + e.duration - (nowSec - e.appliedAt)) });
+      // With its stat mod (what it changes and by how much): the agent's protections line reads the resistances from it.
+      out.push({ spellId: e.spellId, name: e.name, beneficial: e.isBeneficial, remaining: e.duration < 0 ? -1 : Math.max(0, e.startTime + e.duration - (nowSec - e.appliedAt)), ...(e.statModType !== undefined ? { statModType: e.statModType, statModKey: e.statModKey, statModValue: e.statModValue } : {}) });
     }
     return out;
   }

@@ -288,7 +288,7 @@ describe('stream reports 2026-10-17 12:07 (combat, cast, sell, vitals)', () => {
       const began = host.now();
       const r = await settle(api.cast('Heal Other V', 'Claude Bulwark'));
       expect(host.now() - began).toBeLessThan(4000);
-      expect(r.message).toContain('Claude Bulwark was already at full health: nothing to restore, and the cast still cost its mana (the server spends it before Heal Other V lands)');
+      expect(r.message).toContain('Claude Bulwark was already at full health when it landed: nothing to restore, and the cast still cost its mana (the server spends it before Heal Other V lands)');
     });
   });
 });

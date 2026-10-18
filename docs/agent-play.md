@@ -208,7 +208,8 @@ from higher still.
 **Critical health (2026-10-16, Arcanist at 19:58Z, end of retail).** Below the critical line (`AgentApi.CRITICAL_HEALTH`
 40% of max, or one hit of `CRITICAL_HIT_FRAC` 20% that leaves you under 60%) three things happen. (1) Any walk stops,
 flee=true included: "stopped … m short: health 26/146 (18%), below the critical 40% … Heal or keep running?". Heal there
-(a cast needs you standing), or ask the walk again: one asked already under the line runs on until health falls another
+with what the stop names (Heal Self only if you know it and have the mana, else your best kit or potion and how many;
+a cast needs you standing), or ask the walk again: one asked already under the line runs on until health falls another
 `CRITICAL_RUN_ON_FRAC` (10%) of max. A run into a portal (`use` on a portal) and a routine's own walks don't stop for it.
 (2) Under 40%, every `ac_wait` wakes, whatever its types (as it does on your death): a `vitals-low` saying CRITICAL, again at each further
 10% fall. A wait with no types already woke on everything. A fellow's health still needs `fellow-low`. (3) `ac_cast
@@ -967,6 +968,28 @@ heal and hand control back on danger. The brief only listed a routine beside tho
     after). A small Heal Self right after the routine's own heal is the routine's heal landing first.
   - Not the Follow: the final split (15:26:37Z) was Arcanist's own `walk_to 0x029E0122 flee=true`, which ran on through
     the dolls' hits 115 m ahead of Bulwark while her routine was held for it.
+
+- **Live 2026-10-18 16:27–17:04Z (Aerbax Laboratory, then the Qalaba'r portal ring), fixed 2026-10-18**
+  (`tests/verify-stream-live-2026-10-18-1700.ts`):
+  - *walk_to a portal that was out of view at the start.* Bulwark's `walk_to "Qalabar Oasis Settlement"` set off 429 m
+    away (the portal a remembered place) and stood 3+ minutes 34 m short in the ring: the walk's arrival reach was fixed
+    at the start (the default 2 m, no reach, no portal stand-off), while the planner's disk round the goal portal itself,
+    once in view, was its 1.92 m reach + 0.8 = 2.72 m, so no point within 2 m of its middle was outside it and every
+    search failed. The probe trace showed it: the straight line stopped 2.75 m from the middle (the disk's rim) and went
+    through "without the portal / NPC disks". Now the target's reach (and a portal's stand-off) is taken in on every
+    look, as soon as the client knows it (in view, its Setup loaded). `use` was unaffected: its walk-in is exempt from
+    its own portal's disk. Also: in a ring round the walk's own goal portal (GOAL_PORTAL_RING_M) the other portals are
+    kept out of at their touch (the sentinel's disk) rather than the wider clearance; and a straight probe that stops
+    within the goal's reach (a disk's rim, a statue's own collision) goes straight there instead of searching for the
+    middle. The portal-safety guarantees are unchanged (no walk into a portal it wasn't sent into; the sentinel still
+    guards every movement, and a walk sent into a portal is let in).
+  - *Heal hints name what you have* (`AgentApi.restoreOptions`). The critical-health stop ("Heal or keep running?"), the
+    CRITICAL vitals-low and the EXHAUSTED lines offer Heal Self / Revitalize only when you know it and have the mana for
+    a cast; otherwise the best kit and the best potion you carry, each with its count; otherwise that you carry nothing
+    for it. Bulwark (no magic) was told to cast Heal Self at 27% with 18 kits and 19 potions in his pack.
+  - *Route text says what the way does.* "climbs about 6 m above both ends and comes back down" was said of a way from
+    z −6 up to 0 and down to −12; it now reads "climbs about 6 m, then goes down about 12 m (one way: a 6 m drop, and
+    6 m by stairs or ramps)" (`AgentApi.routeClimbText`).
 
 ### Dead air (measured 2026-10-14)
 

@@ -21,6 +21,7 @@ import { DatDatabase } from '../../packages/dat-parser/src/DatDatabase.js';
 import { FileDatBytes } from '../../packages/dat-parser/src/node/FileDatBytes.js';
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
 import { SpellTable } from '../../packages/dat-parser/src/file-types/SpellTable.js';
+import { type AreaCreature, areaCreatureSql, parseAreaCreatures } from './corpses.ts';
 import { formatLore, loreDetailSql, loreNameSql, parseLoreRows, pickLoreNames } from './lore.ts';
 import { aceCellOf, formatShops, parseShopOffers, parseShopVendors, placeMapCoords, shopOfferSql, shopScrollOfferSql, shopVendorSql, type ShopDatInfo, type ShopOffer, type ShopVendor } from './shops.ts';
 import { mapCoordinateText } from '../../packages/renderer/src/ui/MapMarkers.ts';
@@ -165,6 +166,15 @@ export function scrollShops(spellIds: readonly number[]): { offers: ShopOffer[];
   if (!offers.length) return { offers, vendors: new Map() };
   const v = queryReadOnly(shopVendorSql(offers.map((x) => x.vendor)), false);
   return v.ok ? { offers, vendors: parseShopVendors(v.out) } : null;
+}
+
+/**
+ * The monsters the world DB places in landblock `lb` (corpses.ts areaCreatureSql), for the opening's corpse lines; null
+ * when the DB can't be read (the line then says nothing of them).
+ */
+export function areaCreatures(lb: number): AreaCreature[] | null {
+  const r = queryReadOnly([areaCreatureSql(lb)], false);
+  return r.ok ? parseAreaCreatures(r.out) : null;
 }
 
 /** `lore "<name>"`: the monster lookup. Two reads: the names containing it, then the chosen versions' details. */

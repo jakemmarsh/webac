@@ -113,33 +113,107 @@ export function buffTimeText(s: number): string {
 
 /** A buff that landed on you (new, or refreshed) this recently (s) is listed first, newest first, said "just landed". */
 export const BUFF_NEW_S = 120;
-/** The buffs listed with their time left; the rest are named after "+N more" while the names fit in this many characters. */
-const BUFFS_SHOWN = 16;
-const BUFF_MORE_NAMES_CHARS = 400;
+
+/** "77m" from half an hour up (a long buff's seconds are noise in a list read every look), else buffTimeText's "11m41s". */
+function buffListTime(s: number): string {
+  return s >= 1800 ? `${Math.floor(s / 60)}m` : buffTimeText(s);
+}
 
 /**
- * "buffs (3): Strength Other II 2m10s, …": any that landed in the last BUFF_NEW_S first (newest first), then the rest
- * soonest to expire first; past BUFFS_SHOWN the others by name ("+6 more: Armor Other V, …"). Or "buffs: none (…)".
+ * A buff name's family wording and the part that differs: "Incantation of Fire Protection Other" → ["Incantation of …
+ * Other", "Fire Protection"], "Fire Protection Other V" → ["… Other V", "Fire Protection"]; null for a name of no such
+ * shape (Heritage Bonus).
+ */
+function buffFamily(name: string): [string, string] | null {
+  const inc = /^(Incantation of|Aura of) (.+) (Self|Other)$/.exec(name);
+  if (inc) return [`${inc[1]} … ${inc[3]}`, inc[2]];
+  const lv = /^(.+) (Self|Other) ([IVX]+)$/.exec(name);
+  if (lv) return [`… ${lv[2]} ${lv[3]}`, lv[1]];
+  return null;
+}
+
+/**
+ * Buffs as a compact list: one entry per name (two casters' layers of one spell are one buff, ACE
+ * EnchantmentManager.Add keeps a layer per caster), soonest to end first, and the names of one wording written once:
+ * "Incantation of … Other: Armor 77m, Fire Protection 77m". Every buff is named: none folds into a count.
+ */
+function compactBuffs(rows: ReadonlyArray<{ name: string; remaining: number; until?: string }>, keepOrder = false): string {
+  const order = (r: { remaining: number }): number => (r.remaining < 0 ? Infinity : r.remaining);
+  const sorted = keepOrder ? [...rows] : [...rows].sort((a, b) => order(a) - order(b));
+  const groups = new Map<string, string[]>();
+  const out: Array<{ key: string | null; text: string }> = [];
+  for (const r of sorted) {
+    const t = r.until ?? buffListTime(r.remaining);
+    const fam = r.until ? null : buffFamily(r.name);
+    if (!fam) { out.push({ key: null, text: `${r.name} ${t}` }); continue; }
+    const g = groups.get(fam[0]);
+    if (g) { g.push(`${fam[1]} ${t}`); continue; }
+    groups.set(fam[0], [`${fam[1]} ${t}`]);
+    out.push({ key: fam[0], text: r.name + ' ' + t });
+  }
+  return out.map((o) => {
+    const g = o.key !== null ? groups.get(o.key)! : null;
+    return g && g.length > 1 ? `${o.key}: ${g.join(', ')};` : o.text + ',';
+  }).join(' ').replace(/[;,]$/, '');
+}
+
+/**
+ * "buffs (3): Strength Other II 2m10s, …": any that landed in the last BUFF_NEW_S first ("just landed 8s ago: …"),
+ * then the rest soonest to expire first, each name written once and every one named (compactBuffs). Or "buffs: none (…)".
  * Lightning Protection Other III, cast on Bulwark at 07:4xZ, was 15 minutes from its end and so folded into "+6 more"
- * (a count alone), and he couldn't tell it had landed (Aerbax Haven, 2026-10-18).
+ * (a count alone), and he couldn't tell it had landed (Aerbax Haven, 2026-10-18). Later the cut hid that Arcanist's 51
+ * Incantations had no Fire Protection among them, and he died to fire golems (Crystal Core, 2026-10-18 17:46Z): the
+ * list names all of them now, compactly, and the observe's protections line says which are not up.
  */
 export function formatBuffs(buffs: ReadonlyArray<{ name: string; remaining: number; until?: string; landedAgoS?: number }>): string {
   if (!buffs.length) return 'buffs: none (ac_spells finds buffs you know; ac_cast casts them on yourself or another player)';
-  const left = buffTimeText;
-  const isNew = (b: { landedAgoS?: number }): boolean => b.landedAgoS !== undefined && b.landedAgoS <= BUFF_NEW_S;
-  const fresh = buffs.filter(isNew).sort((a, b) => a.landedAgoS! - b.landedAgoS!);
-  const rest = buffs.filter((b) => !isNew(b)).sort((a, b) => (a.remaining < 0 ? Infinity : a.remaining) - (b.remaining < 0 ? Infinity : b.remaining));
-  const sorted = [...fresh, ...rest];
-  const shown = sorted.slice(0, Math.max(BUFFS_SHOWN, fresh.length)).map((b) => `${b.name} ${b.until ?? left(b.remaining)}${isNew(b) ? ` (just landed, ${left(b.landedAgoS!)} ago)` : ''}`);
-  const hidden = sorted.slice(shown.length).map((b) => b.name);
-  let more = '';
-  if (hidden.length) {
-    const names: string[] = [];
-    let len = 0;
-    for (const n of hidden) { if (len + n.length + 2 > BUFF_MORE_NAMES_CHARS) break; names.push(n); len += n.length + 2; }
-    more = `, +${hidden.length} more${names.length ? `: ${names.join(', ')}${names.length < hidden.length ? ` and ${hidden.length - names.length} others` : ''}` : ''}`;
+  // One row per name: the longest time left, the latest landing.
+  const byName = new Map<string, { name: string; remaining: number; until?: string; landedAgoS?: number }>();
+  for (const b of buffs) {
+    const was = byName.get(b.name);
+    if (!was) { byName.set(b.name, { ...b }); continue; }
+    if (b.remaining < 0 || (was.remaining >= 0 && b.remaining > was.remaining)) was.remaining = b.remaining;
+    if (b.landedAgoS !== undefined && (was.landedAgoS === undefined || b.landedAgoS < was.landedAgoS)) was.landedAgoS = b.landedAgoS;
   }
-  return `buffs (${buffs.length}): ${shown.join(', ')}${more}`;
+  const rows = [...byName.values()];
+  const isNew = (b: { landedAgoS?: number }): boolean => b.landedAgoS !== undefined && b.landedAgoS <= BUFF_NEW_S;
+  const fresh = rows.filter(isNew).sort((a, b) => a.landedAgoS! - b.landedAgoS!);
+  const rest = rows.filter((b) => !isNew(b));
+  const parts: string[] = [];
+  if (fresh.length) {
+    const lo = fresh[0].landedAgoS!, hi = fresh[fresh.length - 1].landedAgoS!;
+    parts.push(`just landed ${lo === hi ? `${buffTimeText(lo)} ago` : `${buffTimeText(lo)}–${buffTimeText(hi)} ago`}${fresh.length > 1 ? ' (newest first)' : ''}: ${compactBuffs(fresh, true)}`);
+  }
+  if (rest.length) parts.push(compactBuffs(rest));
+  return `buffs (${rows.length}): ${parts.join('; ')}`;
+}
+
+/**
+ * The seven damage types a protection spell covers (its enchantment's StatModKey: ACE PropertyFloat ResistSlash 64 …
+ * ResistElectric 70, an EnchantmentTypeFlags.Float multiplier under 1), in the names the spells use.
+ */
+export const PROTECTION_KEYS: ReadonlyArray<[number, string]> = [[64, 'Blade'], [65, 'Piercing'], [66, 'Bludgeoning'], [67, 'Fire'], [68, 'Cold'], [69, 'Acid'], [70, 'Lightning']];
+
+/**
+ * "protections on you (damage taken ×): Blade ×0.32, …; NOT on you: Fire" from your enchantments' stat mods. A
+ * multiplier over 1 on a key is a vulnerability (a debuff) and is said so. Null when no enchantment carries stat mods
+ * (an older host): no claim is made.
+ */
+export function protectionsLine(enchantments: ReadonlyArray<{ statModType?: number; statModKey?: number; statModValue?: number }>): string | null {
+  if (!enchantments.some((e) => e.statModType !== undefined)) return null;
+  const best = new Map<number, number>();
+  const worst = new Map<number, number>();
+  for (const e of enchantments) {
+    if (!((e.statModType ?? 0) & 0x8) || e.statModKey === undefined || e.statModValue === undefined) continue;
+    if (!PROTECTION_KEYS.some(([k]) => k === e.statModKey)) continue;
+    if (e.statModValue < 1) best.set(e.statModKey, Math.min(best.get(e.statModKey) ?? 1, e.statModValue));
+    else if (e.statModValue > 1) worst.set(e.statModKey, Math.max(worst.get(e.statModKey) ?? 1, e.statModValue));
+  }
+  const fmt = (v: number): string => `×${Math.round(v * 100) / 100}`;
+  const on = PROTECTION_KEYS.filter(([k]) => best.has(k)).map(([k, n]) => `${n} ${fmt(best.get(k)!)}`);
+  const off = PROTECTION_KEYS.filter(([k]) => !best.has(k)).map(([, n]) => n);
+  const vuln = PROTECTION_KEYS.filter(([k]) => worst.has(k)).map(([k, n]) => `${n} ${fmt(worst.get(k)!)}`);
+  return `protections on you (damage of that kind taken ×): ${on.length ? on.join(', ') : 'none'}${off.length ? `; NOT on you: ${off.join(', ')}` : '; all seven up'}${vuln.length ? `; vulnerabilities on you: ${vuln.join(', ')}` : ''} (banes on your armour count apart)`;
 }
 
 export function formatObservation(obs: AgentObservation): string {
@@ -163,6 +237,8 @@ export function formatObservation(obs: AgentObservation): string {
   for (const [i, d] of obs.dialogs.entries()) out.push(`DIALOG ${i} [${d.buttons.join(' / ')}]: ${d.text.replace(/\s+/g, ' ')}`);
   if (obs.dialogs.length) out.push('  (answer or dismiss each with ac_dialog, e.g. button=OK; a dialog stays up until you do)');
   out.push(formatBuffs((obs.buffs ?? []).filter((b) => b.beneficial !== false)));
+  const prot = protectionsLine(obs.buffs ?? []);
+  if (prot) out.push(`  ${prot}`);
   const bad = (obs.buffs ?? []).filter((b) => b.beneficial === false);
   if (bad.length) out.push(formatBuffs(bad).replace(/^buffs/, 'debuffs'));
   if (obs.vitalsLowered) out.push(`  ${obs.vitalsLowered}`);

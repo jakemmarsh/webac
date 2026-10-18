@@ -156,11 +156,11 @@ describe('AgentApi', () => {
   it('observations show your active buffs, soonest to expire first, and say how to buff when there are none', () => {
     expect(formatObservation(api.observe())).toContain('buffs: none (ac_spells finds buffs you know; ac_cast casts them');
     host.buffs = [{ name: 'Strength Self I', remaining: 1810 }, { name: 'Heritage Bonus', remaining: -1 }, { name: 'Blood Drinker I', remaining: 42 }];
-    expect(formatObservation(api.observe())).toContain('buffs (3): Blood Drinker I 42s, Strength Self I 30m10s, Heritage Bonus permanent');
+    expect(formatObservation(api.observe())).toContain('buffs (3): Blood Drinker I 42s, Strength Self I 30m, Heritage Bonus permanent');
     // Vitae and other harmful enchantments are debuffs, on their own line.
     host.buffs = [{ name: 'Vitae', remaining: -1, beneficial: false }, { name: 'Armor Self I', remaining: 600, beneficial: true }];
     const text = formatObservation(api.observe());
-    expect(text).toContain('buffs (1): Armor Self I 10m');
+    expect(text).toContain('buffs (1): just landed 0s ago: Armor Self I 10m');
     // Not "permanent": XP works it off (verify-stream-vitae-2026-10-17.ts has the VITAE line a host with the enchantment gives).
     expect(text).toContain('debuffs (1): Vitae until XP works it off');
   });

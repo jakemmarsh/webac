@@ -20,7 +20,7 @@ import type { MapCoords } from '../../packages/renderer/src/ui/MapMarkers.ts';
 import { type SessionTimeline, parseSession } from './dead-air.ts';
 import { cliCalls } from './feed.ts';
 import type { FeedChat, FeedStatus } from './feed-types.ts';
-import { loadCorpses } from './corpses.ts';
+import { type AreaCreature, loadCorpses } from './corpses.ts';
 import { localDay } from './policy.ts';
 import { nearestTownOf, placeMapCoords } from './shops.ts';
 
@@ -498,8 +498,8 @@ export function feedFor(feedFile: string, profile: string, from: number, to: num
  * from the feed (corpses.ts loadCorpses: where, what is on each, when it rots; they outlive a restart, which empties
  * the page's own death log), then where its last segment's time went ({@link loadOwnTimeBlock}). Null with neither.
  */
-export function loadOwnTime(o: { streamDir: string; feedFile: string; profile: string; character?: string; cast: readonly string[]; nowMs: number; maxAgeMs?: number }): string | null {
-  const corpses = o.character ? loadCorpses({ feedFile: o.feedFile, profile: o.profile, character: o.character, nowMs: o.nowMs }) : null;
+export function loadOwnTime(o: { streamDir: string; feedFile: string; profile: string; character?: string; cast: readonly string[]; nowMs: number; maxAgeMs?: number; areaCreatures?: (landblock: number) => AreaCreature[] | null }): string | null {
+  const corpses = o.character ? loadCorpses({ feedFile: o.feedFile, profile: o.profile, character: o.character, nowMs: o.nowMs, areaCreatures: o.areaCreatures }) : null;
   const own = loadOwnTimeBlock(o);
   return [own, corpses].filter(Boolean).join('\n') || null;
 }

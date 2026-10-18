@@ -11,6 +11,7 @@
 import { classifyGpu } from '../telemetry/WorldReporter.js';
 import { probeWebGl2, detectHelpPlatform, webgl2HelpText, type WebGlFailure, type HelpPlatform } from './WebGlDiagnosis.js';
 import { renderAdaptConfigFor, type RenderAdaptConfig } from '../scene/RenderScale.js';
+import { ZLayer, zLayer } from '../ui/ZIndexRegistry.js';
 
 export interface CapabilityProblem {
   id: 'webgl2' | 'websocket' | 'memory' | 'pointer';
@@ -100,7 +101,9 @@ export function probeCapabilities(win: Window & typeof globalThis): CapabilityEn
 }
 
 /**
- * Show the problems over the page. Resolves when the player chooses to
+ * Show the problems over the page, above the boot loading overlay (ZLayer.BOOT_NOTICE
+ * over #loading-overlay's DEBUG_OVERLAY), which stays up underneath and is what the
+ * page shows again after a soft prompt's Continue. Resolves when the player chooses to
  * continue (soft problems only); never resolves when a problem is hard.
  */
 export function showCapabilityScreen(doc: Document, problems: CapabilityProblem[]): Promise<void> {
@@ -108,7 +111,7 @@ export function showCapabilityScreen(doc: Document, problems: CapabilityProblem[
   const root = doc.createElement('div');
   root.id = 'capability-screen';
   Object.assign(root.style, {
-    position: 'fixed', inset: '0', zIndex: '1000', background: 'black', color: 'wheat',
+    position: 'fixed', inset: '0', zIndex: zLayer(ZLayer.BOOT_NOTICE), background: 'black', color: 'wheat',
     display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px',
     font: '16px/1.5 Georgia, "Times New Roman", serif',
   });

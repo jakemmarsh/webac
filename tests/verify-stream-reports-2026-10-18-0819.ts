@@ -370,15 +370,17 @@ describe('3. a chaser stuck behind a wall stays held while it gets no closer, as
   });
 });
 
-describe('4. observe\'s buffs: the one just cast on you first, and "+N more" by name', () => {
+describe('4. observe\'s buffs: the one just cast on you first, and every other one named', () => {
   // Bulwark's 22 buffs at 08:17:22Z, Lightning Protection Other III among them.
   const names = ['Armor Other V', 'Invulnerability Other V', 'Strength Other IV', 'Endurance Other III', 'Quickness Other V', 'Blade Protection Other V', 'Bludgeoning Protection Other V', 'Piercing Protection Other V', 'Heavy Weapon Mastery Other V', 'Regeneration Other V', 'Fire Protection Other V', 'Shield Mastery Other IV', 'Aura of Blood Drinker Other V', 'Aura of Swift Killer Other V', 'Aura of Defender Other V', 'Acid Protection Other III', 'Cold Protection Other III', 'Rejuvenation Other V', 'Healing Mastery Other V', 'Coordination Other IV', 'Focus Other IV'];
 
   it('formatBuffs: one landed 8 s ago with 15 min left is listed first and said so; the folded ones are named', () => {
     const buffs = [...names.map((name, i) => ({ name, remaining: 300 + i * 20 })), { name: 'Lightning Protection Other III', remaining: 900, landedAgoS: 8 }];
     const line = formatBuffs(buffs);
-    expect(line).toMatch(/^buffs \(22\): Lightning Protection Other III 15m \(just landed, 8s ago\), Armor Other V 5m, /);
-    expect(line).toMatch(/, \+6 more: Acid Protection Other III, Cold Protection Other III, Rejuvenation Other V, Healing Mastery Other V, Coordination Other IV, Focus Other IV$/);
+    expect(line).toMatch(/^buffs \(22\): just landed 8s ago: Lightning Protection Other III 15m; … Other V: Armor 5m, /);
+    // None folds into a count: each one's distinct words are there (the 2026-10-18 17:46Z cut hid a missing Fire Protection).
+    expect(line).not.toMatch(/more/);
+    for (const n of names) expect(line).toContain(n.replace(/ Other [IVX]+$/, ''));
     // One that landed long ago sorts by its time left again.
     expect(formatBuffs([{ name: 'A', remaining: 900, landedAgoS: 600 }, { name: 'B', remaining: 100 }])).toBe('buffs (2): B 1m40s, A 15m');
   });
@@ -394,12 +396,11 @@ describe('4. observe\'s buffs: the one just cast on you first, and "+N more" by 
     host.buffs.push({ name: 'Lightning Protection Other III', remaining: 900, beneficial: true });
     run(api, host, 3000, { physics: false });
     const text = formatObservation(api.observe());
-    expect(text).toMatch(/^buffs \(22\): Lightning Protection Other III 1[45]m\d*s? \(just landed, 3s ago\), /m);
-    expect(text).toMatch(/\+6 more: /);
+    expect(text).toMatch(/^buffs \(22\): just landed 3s ago: Lightning Protection Other III 1[45]m\d*s?; /m);
     // Armor Other V recast (its time left back up): just landed too, newest first.
     host.buffs[0] = { name: 'Armor Other V', remaining: 1800, beneficial: true };
     run(api, host, 1000, { physics: false });
-    expect(formatObservation(api.observe())).toMatch(/^buffs \(22\): Armor Other V (29m\d*s?|30m) \(just landed, \d+s ago\), Lightning Protection Other III /m);
+    expect(formatObservation(api.observe())).toMatch(/^buffs \(22\): just landed \d+s–\d+s ago \(newest first\): Armor Other V (29m|30m), Lightning Protection Other III 1[45]m; /m);
     vi.useRealTimers();
     vi.restoreAllMocks();
   });

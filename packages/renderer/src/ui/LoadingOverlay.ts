@@ -60,3 +60,15 @@ export function revealLoadingPlaceholder(loadingOverlay: HTMLElement): void {
     if (el.style.visibility === 'hidden') el.style.visibility = 'visible';
   }
 }
+
+/**
+ * Fade the overlay out and remove it. It stops taking the pointer at once: an
+ * opaque-then-fading frame at DEBUG_OVERLAY still sat over the character screen
+ * for the fade and swallowed the first clicks. `onRemoved` runs after removal.
+ */
+export function fadeOutLoadingOverlay(loadingOverlay: HTMLElement, ms: number, onRemoved?: () => void): void {
+  loadingOverlay.style.pointerEvents = 'none';
+  loadingOverlay.style.transition = `opacity ${ms / 1000}s`;
+  loadingOverlay.style.opacity = '0';
+  setTimeout(() => { loadingOverlay.remove(); onRemoved?.(); }, ms);
+}

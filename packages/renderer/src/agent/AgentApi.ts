@@ -22,7 +22,7 @@ import { BODY_RADIUS_M, PORTAL_REPORT_NEAR_M, STEP_CLEAR_M, avoidDisks, chordNee
 import { PathSearch, SKIP_TAKEOFF_M, floorPlan, onGoalLevel, straightWalk, type JumpSearch, type NavPoint, type NavProbe, type NavStep } from './navPlanner.js';
 import { BUFF_LOW_S, buffTimeText, compassPoint, filterInventory, isJunk, isSellable, MANA_STONE_CHARGING, PACK_SLOTS_LOW, unplacedText } from './format.ts';
 import { BODY_BITS, casterGap, equipSwapText, gearEmptyFacts, shieldRefusal } from './gear.ts';
-import { routineSuppliesMissing } from './macro/routineSupplies.ts';
+import { routineSuppliesMissing, supplyOf } from './macro/routineSupplies.ts';
 import { itemsText, lossText, parseDeathBroadcast, parseDeathLoss, parseFellowDied, parseVictimDeathLine, type DeathLoss } from './deathLines.ts';
 import { APPRAISAL_SKILL_NAMES, ATTRIBUTE_NAMES, VITAL_NAMES } from '../ui/examine/appraisalFormat.js';
 import { dropDamage, fallBudget, fallModelFor, GRAVITY, isDrop, reaimJump, safeDropHeight, type JumpKit, type JumpSpec } from './jumpPlan.js';
@@ -315,7 +315,7 @@ export interface AgentHost {
   /** Ask for one page of the open book, as turning to it does (BookGetPageData); false when it is not open or already here. */
   bookPage?(index: number): boolean;
   /** Active enchantments by spell name with seconds left (what the effects UI shows). */
-  activeSpells(): Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean }>;
+  activeSpells(): Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean; /** Its stat mod as the server sent it (EnchantmentTypeFlags; the attribute / skill / property id; the value). */ statModType?: number; statModKey?: number; statModValue?: number }>;
   /**
    * The Vitae enchantment (spell 666) as the server sent it: its StatModValue (ACE Player.Vitae), PropertyInt
    * VitaeCpPool (129) and DeathLevel (139), and your max vitals without it. Null / absent: no vitae.
@@ -2180,7 +2180,7 @@ export class AgentApi {
    * up). Those on you at the first look have no landing time (they were there when the page loaded). For observe's buffs
    * line, which lists what just landed first (formatBuffs).
    */
-  private buffLanded = new Map<string, { at: number; rem: number }>();
+  private buffLanded = new Map<string, { at: number; rem: number; n: number }>();
   private buffLandedSeen = false;
   private noteBuffLanded(active: ReadonlyArray<{ name: string; remaining: number }>, now: number): void {
     // The first look with any enchantments is the baseline: they arrive with the login's PlayerDescription, after the
@@ -2188,15 +2188,25 @@ export class AgentApi {
     if (!active.length && !this.buffLandedSeen) return;
     const first = !this.buffLandedSeen;
     this.buffLandedSeen = true;
-    const names = new Set<string>();
+    // One spell can be on you more than once: ACE keeps a layer per caster (EnchantmentManager.Add refreshes only the
+    // caster's own), so two players' Incantations are two entries of each name. Compared one by one against a single
+    // remembered time, the longer layer read as "refreshed" against the shorter every look, and all 51 of Bulwark's
+    // said "just landed, 0s ago" for an hour (Crystal Core, 2026-10-18). Per name: the longest time left, and how many.
+    const now_ = new Map<string, { rem: number; n: number }>();
     for (const b of active) {
-      names.add(b.name);
-      const was = this.buffLanded.get(b.name);
-      // A permanent one (remaining < 0) never counts down; refreshed is a time left well up on the last look's.
-      const landed = !was ? !first : b.remaining >= 0 && was.rem >= 0 && b.remaining > was.rem + 2;
-      this.buffLanded.set(b.name, { at: landed ? now : was?.at ?? -Infinity, rem: b.remaining });
+      const r = now_.get(b.name);
+      const rem = b.remaining < 0 ? -1 : b.remaining;
+      if (!r) now_.set(b.name, { rem, n: 1 });
+      else { r.n++; if (rem < 0 || (r.rem >= 0 && rem > r.rem)) r.rem = rem; }
     }
-    for (const k of [...this.buffLanded.keys()]) if (!names.has(k)) this.buffLanded.delete(k);
+    for (const [name, b] of now_) {
+      const was = this.buffLanded.get(name);
+      // A permanent one (remaining < 0) never counts down; refreshed is a time left well up on the last look's, or
+      // another caster's layer of it added.
+      const landed = !was ? !first : (b.rem >= 0 && was.rem >= 0 && b.rem > was.rem + 2) || b.n > was.n;
+      this.buffLanded.set(name, { at: landed ? now : was?.at ?? -Infinity, rem: b.rem, n: b.n });
+    }
+    for (const k of [...this.buffLanded.keys()]) if (!now_.has(k)) this.buffLanded.delete(k);
   }
   /**
    * The spells you cast on items you wear, by spell name: when (`at` host time on this page, null for one read back from
@@ -2399,6 +2409,21 @@ export class AgentApi {
     return e.type === 'chat' && /^\((say|tell|emote|channel)\) /.test(e.text);
   }
 
+  /** Your last heal (or stamina / mana boost) that restored something, by target ("" for you) and vital: when, how much, which spell. */
+  private lastBoosts = new Map<string, { at: number; n: number; spell: string }>();
+  /** A boost of yours that restored N > 0 (ACE WorldObject_Magic HandleCastSpell_Boost's caster lines): noted for a 0 that follows. */
+  private noteBoostLine(line: string): void {
+    const other = /^With (.+?) you restore (\d+) points of (health|stamina|mana) to (.+?)\.?$/i.exec(line.trim());
+    const self = other ? null : /^You cast (.+?) and restore (\d+) points of your (health|stamina|mana)\.?$/i.exec(line.trim());
+    const m = other ?? self;
+    if (!m || Number(m[2]) <= 0) return;
+    const who = other ? other[4].toLowerCase() : '';
+    this.lastBoosts.set(`${who}|${m[3].toLowerCase()}`, { at: this.host.now(), n: Number(m[2]), spell: m[1] });
+    if (this.lastBoosts.size > 40) this.lastBoosts.delete(this.lastBoosts.keys().next().value!);
+  }
+  /** A boost before a 0 within this long (ms) is said with it: the earlier one is what filled the target. */
+  static readonly BOOST_BEFORE_ZERO_MS = 15_000;
+
   /**
    * A chat/system line the client displayed. main.ts taps gameUI.addSystemMessage into this; `plugin` names the plugin
    * that printed it (the line's VCS preset: Mag-Tools' item info), which keeps it out of every action's reply.
@@ -2416,6 +2441,7 @@ export class AgentApi {
     // Someone's words: nothing to read from them (corpse, death, attack, spell, what a creature does).
     if (AgentApi.spokenLine(clean, type)) return;
     this.noteBuffLine(clean, type);
+    this.noteBoostLine(clean);
     this.noteCorpseLine(clean);
     this.noteDeathLine(clean);
     this.noteLockedDoorLine(clean);
@@ -2820,7 +2846,8 @@ export class AgentApi {
       vit, doors,
       inv: this.packMark(),
       spells: new Set(this.host.spells().map((s) => s.id)),
-      buffs: new Map(this.host.activeSpells().map((b) => [b.name, b.remaining])),
+      // Per name the longest time left: two casters' layers of one spell are two entries (ACE keeps a layer per caster).
+      buffs: this.host.activeSpells().reduce((m, b) => { const w = m.get(b.name); if (w === undefined || b.remaining < 0 || (w >= 0 && b.remaining > w)) m.set(b.name, b.remaining); return m; }, new Map<string, number>()),
       ...(open !== undefined ? { target, open } : {}),
     };
   }
@@ -4820,8 +4847,10 @@ export class AgentApi {
       if (loose.length > 1 && loose.some((i) => i.guid === g)) {
         // Restoratives of one vital: the strongest first, with what it restores when known.
         const vit = this.looseVital(t, loose);
-        const shown = vit ? [...loose].sort((a, b) => this.restoreStrength(b, vit).score - this.restoreStrength(a, vit).score) : loose;
-        return { ok: false, message: `"${t.trim()}" could be ${shown.map((i) => `${i.name} #${i.guid.toString(16)}${vit && this.restoreStrength(i, vit).why ? ` (${this.restoreStrength(i, vit).why})` : ''}`).join(', ')}: name one (or its #id)` };
+        // Unappraised ones are appraised now (quietly), so the next ask ranks them by what they restore.
+        if (vit) this.appraiseRestoratives(loose, vit);
+        const shown = vit ? this.rankRestoratives(loose, vit) : loose.map((item) => ({ item, why: '' }));
+        return { ok: false, message: `"${t.trim()}" could be ${shown.map(({ item: i, why }) => `${i.name} #${i.guid.toString(16)}${why ? ` (${why})` : ''}`).join(', ')}: name one (or its #id)` };
       }
     }
     // An id the client doesn't hold is not an inventory request a player can make (retail's give / drop / wield all
@@ -4872,19 +4901,63 @@ export class AgentApi {
   }
 
   /**
-   * How much a restorative of `vital` restores, as far as the client knows: its BoostValue (PropertyInt 90, ACE Food /
-   * Healer: the points it restores) from an appraisal of it, with BoostEnum (89) the vital's; else its value per unit,
-   * the only thing the public description carries (end-of-retail world DB: Health Draught 85 py and 10 points, Potion of
-   * Healing 170 and 25, Health Elixir 1000 and 65; Mana Draught 85 and 10).
+   * What a restorative of `vital` restores, when an appraisal says: its BoostValue (PropertyInt 90, ACE Food / Healer:
+   * the points it restores) with BoostEnum (89) the vital's, from an appraisal of it or of another of its weenie you carry
+   * (two stacks of one weenie restore the same). Null when nothing appraised says.
    */
-  private restoreStrength(i: AgentItem, vital: 'health' | 'stamina' | 'mana'): { score: number; why: string } {
-    const a = this.host.appraisalData?.(i.guid);
+  private restoreBoost(i: AgentItem, vital: 'health' | 'stamina' | 'mana'): number | null {
     const boostEnum = { health: 2, stamina: 4, mana: 6 }[vital];
-    const boost = a?.int[90];
-    if (boost !== undefined && boost > 0 && (a?.int[89] === undefined || a.int[89] === boostEnum)) return { score: 1e6 + boost, why: `restores ${boost} ${vital}` };
-    const per = i.value !== undefined ? Math.round(i.value / Math.max(1, i.stack ?? 1)) : 0;
-    return { score: per, why: per ? `${per} pyreals each, unappraised` : '' };
+    const read = (g: number): number | null => {
+      const a = this.host.appraisalData?.(g);
+      const boost = a?.int[90];
+      return boost !== undefined && boost > 0 && (a?.int[89] === undefined || a.int[89] === boostEnum) ? boost : null;
+    };
+    const own = read(i.guid);
+    if (own !== null || i.wcid === undefined) return own;
+    for (const o of this.host.inventory()) {
+      if (o.guid !== i.guid && o.wcid === i.wcid) { const b = read(o.guid); if (b !== null) return b; }
+    }
+    return null;
   }
+
+  /**
+   * Restoratives of one vital, strongest first, each with what says so. By what they restore when every one's is known
+   * (appraised); else all by value per unit, the only thing every public description carries. Never one basis for some
+   * and another for the rest: an appraised Health Draught's "restores 10" outranked an unappraised Potion of Healing
+   * (25 points) on a score that put any appraisal above any price, and Arcanist drank the 10 (Crystal Core, 2026-10-18
+   * 17:45Z). Price is only a guess (end-of-retail world DB: Health Draught 85 py and 10 points, Potion of Healing 170
+   * and 25, Health Elixir 1000 and 65, but a Trade Health Elixir 10 py and 70), so the line says which it went by.
+   */
+  private rankRestoratives(items: AgentItem[], vital: 'health' | 'stamina' | 'mana'): { item: AgentItem; why: string }[] {
+    const rows = items.map((item) => {
+      const boost = this.restoreBoost(item, vital);
+      const per = item.value !== undefined ? Math.round(item.value / Math.max(1, item.stack ?? 1)) : 0;
+      return { item, boost, per };
+    });
+    const byBoost = rows.every((r) => r.boost !== null);
+    const sorted = [...rows].sort((a, b) => (byBoost ? b.boost! - a.boost! : b.per - a.per));
+    return sorted.map((r) => ({
+      item: r.item,
+      why: byBoost ? `restores ${r.boost} ${vital}`
+        : [r.boost !== null ? `restores ${r.boost} ${vital}` : '', r.per ? `${r.per} pyreals each` : '', r.boost === null && r.per ? 'unappraised' : ''].filter(Boolean).join(', '),
+    }));
+  }
+
+  /** Every one of these items has an appraisal saying what it restores (rankRestoratives can rank by it). */
+  private restorativesKnown(items: AgentItem[], vital: 'health' | 'stamina' | 'mana'): boolean {
+    return items.every((i) => this.restoreBoost(i, vital) !== null);
+  }
+
+  /** Ask the server (quietly) what each unknown one restores, so the next ranking goes by it. */
+  private appraiseRestoratives(items: AgentItem[], vital: 'health' | 'stamina' | 'mana'): AgentItem[] {
+    if (!this.host.appraisalData) return [];
+    const unknown = items.filter((i) => this.restoreBoost(i, vital) === null);
+    for (const i of unknown) this.host.appraise(i.guid, true);
+    return unknown;
+  }
+
+  /** How long a low-vital use waits for the appraisals of its candidates (one round trip each, sent together). */
+  static RESTORATIVE_APPRAISE_MS = 1_000;
 
   /**
    * `use` with a loose name every match of which restores the vital it names ("Health Potion": a Health Draught and a
@@ -4892,7 +4965,7 @@ export class AgentApi {
    * question. Asking cost Arcanist 7 s at 38% among three Viamontian Footmen; he died a second after the potion he named
    * next (2026-10-17 19:18:29–37Z). Null otherwise (the refusal names them, strongest first).
    */
-  private urgentRestorative(name: string): { pick: AgentItem; others: AgentItem[]; vital: 'health' | 'stamina' | 'mana'; why: string; frac: number } | null {
+  private urgentRestorative(name: string): { pick: AgentItem; others: AgentItem[]; vital: 'health' | 'stamina' | 'mana'; why: string; frac: number; loose: AgentItem[] } | null {
     const loose = this.looseItemMatches(name);
     if (loose.length < 2) return null;
     const vital = this.looseVital(name, loose);
@@ -4900,8 +4973,66 @@ export class AgentApi {
     if (!vital || !me || !me[vital].max) return null;
     const frac = me[vital].current / me[vital].max;
     if (!(frac < AgentApi.VITALS_LOW_DEFAULT || (vital === 'health' && this.attackersOfMe().size > 0))) return null;
-    const ranked = [...loose].sort((a, b) => this.restoreStrength(b, vital).score - this.restoreStrength(a, vital).score);
-    return { pick: ranked[0], others: ranked.slice(1), vital, why: this.restoreStrength(ranked[0], vital).why, frac };
+    const ranked = this.rankRestoratives(loose, vital);
+    return { pick: ranked[0].item, others: ranked.slice(1).map((r) => r.item), vital, why: ranked[0].why, frac, loose };
+  }
+
+  /** A self spell that restores each vital (its family name, as ac_cast takes it: the highest level you can land is cast). */
+  static readonly RESTORE_SPELLS: Readonly<Record<'health' | 'stamina' | 'mana', ReadonlyArray<{ family: string; re: RegExp }>>> = {
+    health: [{ family: 'Heal Self', re: /\bHeal Self\b/i }],
+    stamina: [{ family: 'Revitalize Self', re: /\bRevitalize Self\b/i }],
+    mana: [{ family: 'Mana Boost Self', re: /\bMana Boost Self\b/i }, { family: 'Stamina to Mana Self', re: /\bStamina to Mana Self\b/i }],
+  };
+
+  /**
+   * What you can do now to bring a vital back, as you are: a self spell of yours that restores it (only one you know, with
+   * the mana for a cast), else the best healing kit and the best potion you carry (each named, with how many), else that
+   * you carry nothing for it. Every hint that offers a heal goes through here: Bulwark, who has no magic school, was told
+   * at 27% health to "Heal now (ac_cast spell="Heal Self" …)" with 18 healing kits and 19 health potions in his pack, used
+   * a kit a moment later than he could have, and died before it took (2026-10-18 16:58:09Z).
+   */
+  restoreOptions(vital: 'health' | 'stamina' | 'mana'): { text: string; spell: string | null; kit: string | null; drink: string | null } {
+    const me = this.host.self();
+    let spell: string | null = null;
+    let spellShort = '';
+    for (const f of AgentApi.RESTORE_SPELLS[vital]) {
+      const known = this.host.spells().filter((s) => f.re.test(s.name));
+      if (!known.length) continue;
+      // The level ac_cast takes for the family: the highest you land often enough, else the likeliest.
+      const ranked = [...known].sort((a, b) => (b.level ?? 0) - (a.level ?? 0));
+      const pick = ranked.find((s) => { const c = this.castChanceOf(s)?.chance; return c === undefined || c >= AgentApi.BUFF_MIN_CHANCE; }) ?? ranked[0];
+      const cost = this.host.spellTableData?.()?.spells.get(pick.id)?.baseMana;
+      // Mana for it: Stamina to Mana takes no mana to restore it, so only its cost is checked against what you have.
+      if (me && cost !== undefined && me.mana.current < cost) { spellShort = `you know ${pick.name} but have ${me.mana.current} mana, and it costs up to ${cost}`; continue; }
+      spell = `ac_cast spell="${f.family}" target=self (${pick.name}; you're standing, as a cast needs)`;
+      break;
+    }
+    // Kits heal health only; drinks by the vital their name says (routineSupplies.supplyOf), strongest first.
+    const items = this.host.inventory().filter((i) => i.where !== 'equipped');
+    const best = (kind: 'kits' | 'drinks'): string | null => {
+      const byName = new Map<string, { item: AgentItem; n: number }>();
+      for (const i of items) {
+        const s = supplyOf(i.name);
+        if (!s || s.vital !== vital || s.kind !== kind) continue;
+        const k = i.name.toLowerCase(), had = byName.get(k);
+        byName.set(k, { item: had?.item ?? i, n: (had?.n ?? 0) + Math.max(1, i.stack ?? 1) });
+      }
+      // One basis for all of them (rankRestoratives): what each restores when every one is appraised, else price.
+      const order = this.rankRestoratives([...byName.values()].map((r) => r.item), vital).map((r) => r.item);
+      const ranked = [...byName.values()].sort((a, b) => order.indexOf(a.item) - order.indexOf(b.item));
+      const top = ranked[0];
+      return top ? `ac_use item="${top.item.name}" (you carry ${top.n}${ranked.length > 1 ? `; also ${ranked.slice(1, 3).map((r) => `${r.item.name} ×${r.n}`).join(', ')}` : ''})` : null;
+    };
+    const kit = vital === 'health' ? best('kits') : null;
+    const drink = best('drinks');
+    const carried = [kit && `a kit: ${kit}`, drink && `a potion: ${drink}`].filter(Boolean).join(', or ');
+    const what = vital === 'health' ? 'heal with' : `restore ${vital} with`;
+    const text = spell
+      ? `${spell}${carried ? `; or ${carried}` : ''}`
+      : carried
+        ? `${carried}${spellShort ? ` (${spellShort})` : ''}`
+        : `you carry nothing to ${what}${spellShort ? ` and ${spellShort}` : ' and know no spell for it'}`;
+    return { text, spell, kit, drink };
   }
 
   /** "Potion of Healing #80001e78"…: up to 6 items you carry sharing a word (synonyms read as one) with a name that matched nothing. */
@@ -5136,7 +5267,14 @@ export class AgentApi {
   static USE_LATE_MS = 18_000;
 
   private async useBody(t: TargetArg, opts: { flee?: boolean } = {}): Promise<AgentResult> {
-    const urgent = typeof t === 'string' ? this.urgentRestorative(t) : null;
+    let urgent = typeof t === 'string' ? this.urgentRestorative(t) : null;
+    // Not every candidate's appraisal is in: ask for them and wait one round trip, so the pick goes by what each
+    // restores rather than by price (a Trade Health Elixir is 10 py and restores 70).
+    if (urgent && typeof t === 'string' && !this.restorativesKnown(urgent.loose, urgent.vital) && this.appraiseRestoratives(urgent.loose, urgent.vital).length) {
+      const end = this.host.now() + AgentApi.RESTORATIVE_APPRAISE_MS;
+      while (this.host.now() < end && !this.restorativesKnown(urgent.loose, urgent.vital)) await sleep(100);
+      urgent = this.urgentRestorative(t) ?? urgent;
+    }
     if (urgent) {
       const r = await this.useBody(urgent.pick.guid, opts);
       return { ...r, message: `${r.message}\n  ("${String(t).trim()}" could be ${[urgent.pick, ...urgent.others].map((i) => `${i.name} #${i.guid.toString(16)}`).join(', ')}: used ${urgent.pick.name}, ${urgent.why ? `the strongest you carry (${urgent.why})` : 'the first you carry (nothing says which restores more: appraise them)'}, with your ${urgent.vital} at ${Math.round(urgent.frac * 100)}%${urgent.vital === 'health' && this.attackersOfMe().size ? ' and something on you' : ''}; name one to choose)` };
@@ -5674,6 +5812,12 @@ export class AgentApi {
   static readonly FLOOR_APART_M = 2.5;
   /** A doorway left out as blocked is back in the route once the body stands this near it (m, on its storey). */
   static readonly BLOCKED_DOORWAY_REACHED_M = 1.5;
+  /**
+   * A stall this near (m) the route's next doorway with a creature that is no monster standing in it is that creature's
+   * doing (walkTo doorwayStander). The Crystal Core walk stalled 4 m from the Wall of Ice's doorway: the body slid along
+   * the room's north wall from corner to corner past it (0x5861015C, 2026-10-18).
+   */
+  static readonly STANDER_STALL_NEAR_M = 6;
   /**
    * A walk's `within` this far or more is a range to stand at (a bolt's or an arrow's, a pull's): arrival is the straight
    * distance, whatever floor the target is on, and the result says whether the line to it is open. Below it, arrival
@@ -6636,7 +6780,13 @@ export class AgentApi {
     // mana. "Heal Other V restores 0" read as a fault (Bulwark's report, Arcanist's heals, 2026-10-17 11:37:52Z).
     const none = lines.map(fullBoostLine).find((m) => !!m);
     if (none) {
-      const why = `${none.who ? `${none.who} was` : 'you were'} already at full ${none.vital}: nothing to restore, and the cast still cost its mana (the server spends it before ${none.spell} lands)`;
+      // Two heals queued on one target: the first fills them and the second restores 0. Arcanist's routine healed
+      // Bulwark for 80 and her own Heal Other V landed a moment later for 0; Bulwark read it as a fault while hurt
+      // (Crystal Core, 2026-10-18 17:3xZ). The earlier one is said when it was this recent.
+      const prev = this.lastBoosts.get(`${(none.who ?? '').toLowerCase()}|${none.vital}`);
+      const ago = prev ? this.host.now() - prev.at : Infinity;
+      const before = ago <= AgentApi.BOOST_BEFORE_ZERO_MS ? ` (your ${prev!.spell} restored ${prev!.n} ${none.vital} to ${none.who ? 'them' : 'you'} ${Math.max(0, Math.round(ago / 1000))}s before)` : '';
+      const why = `${none.who ? `${none.who} was` : 'you were'} already at full ${none.vital} when it landed${before}: nothing to restore, and the cast still cost its mana (the server spends it before ${none.spell} lands)`;
       verdict = verdict ? `${verdict}; ${why}` : why;
     }
     const rest = lines.filter((l) => !key.includes(l));
@@ -7058,7 +7208,7 @@ export class AgentApi {
       const v = this.host.self();
       const manaNote = v && manaAtStart !== undefined && casts.length ? ` (${manaAtStart} when this began${v.mana.current >= manaAtStart ? ': no net drop on the bar' : `: ${manaAtStart - v.mana.current} down, net of regeneration`})` : '';
       const exhausted = v && v.stamina.max > 0 && v.stamina.current === 0
-        ? ' (EXHAUSTED: at 0 stamina the server gives you no defense, so every attack at you lands, and runs you at a crawl; a stamina potion or a Revitalize first)'
+        ? ` (EXHAUSTED: at 0 stamina the server gives you no defense, so every attack at you lands, and runs you at a crawl; stamina first: ${this.restoreOptions('stamina').text})`
         : exhaustedSeen ? ' ("You\'re Exhausted!" came during the casts: your stamina hit 0, and while it is 0 every attack at you lands)' : '';
       const vit = v ? `you: health ${v.health.current}/${v.health.max}, stamina ${v.stamina.current}/${v.stamina.max}, mana ${v.mana.current}/${v.mana.max}${manaNote}${exhausted}` : '';
       const tally = [hits ? `${damage} damage in ${hits} hit${hits === 1 ? '' : 's'}` : '', resisted ? `${resisted} resisted` : '', fizzled ? `${fizzled} fizzled` : ''].filter(Boolean).join(', ');
@@ -7877,6 +8027,20 @@ export class AgentApi {
   }
 
   /** Raise a stat `times` times; reports "Name from → to, N XP" (and why it stopped early). */
+  /**
+   * What a doorway way that climbs above its ends does, in order: up from where you stand, then down to the goal's floor,
+   * with the part of the way down that is a one-way drop (no climbing back that way): "climbs about 6 m, then goes down
+   * about 12 m (one way: a 6 m drop, and 6 m by stairs or ramps)".
+   */
+  static routeClimbText(c: { up: number; down: number; drops: number; dropM: number }): string {
+    const m = (n: number): string => `${Math.max(0, Math.round(n))} m`;
+    const rest = c.down - c.dropM;
+    const how = c.drops
+      ? ` (one way: ${c.drops === 1 ? `a ${m(c.dropM)} drop` : `${c.drops} drops, ${m(c.dropM)} in all`}${rest >= 1 ? `, and ${m(rest)} by stairs or ramps` : ''})`
+      : '';
+    return `climbs about ${m(c.up)}, then goes down about ${m(c.down)}${how}`;
+  }
+
   /** Kept between a walking body and a portal's reach: the body's radius (0.48 m) and a margin. */
   static readonly PORTAL_CLEARANCE_M = 0.8;
   /** How far ahead of the body (m, at least) the walk looks for the server's next straight line crossing a portal's disk. */
@@ -7889,6 +8053,8 @@ export class AgentApi {
    * the fellowship (walk_to "54.7N, 32.9E", 2026-10-17 05:07:38Z, WeenieError ITeleported).
    */
   static readonly PORTAL_GOAL_MARGIN_M = 1;
+  /** Portals this near (m, middle to middle) the walk's own goal portal are its ring: walked by at their touch. */
+  static readonly GOAL_PORTAL_RING_M = 10;
   /** walk_to line=true: each close-in for an open line of fire takes this much off the distance (m). */
   static readonly LINE_STEP_M = 1.5;
   /** …down to the target's reach plus this (beside it). */
@@ -8833,6 +8999,8 @@ export class AgentApi {
       if (ms) return this.walkToMonsterLastSeen(ms, opts);
     }
     let within = Math.max(opts.within ?? 2, 0.5);
+    /** An object target's reach and portal stand-off taken into `within` as the client comes to know them (each look). */
+    let refreshTargetReach = (): void => {};
     // A range asked for (stand this far off it): the straight distance counts, whatever floor it is on.
     const rangedWithin = within >= AgentApi.RANGED_WITHIN_M && !opts.follow;
     let timeoutMs = opts.timeoutMs ?? 60_000;
@@ -8970,10 +9138,26 @@ export class AgentApi {
       const name = this.nameOf(g);
       // Measured from its edge, as ACE measures a Use: the middle of a lifestone or a statue is inside its
       // own collision, so no walk reaches it (a 6000-point search, then doors tried all round, 2026-10-09).
-      within += this.host.objectReach?.(g) ?? 0;
       // A portal walked to, not through: stop outside the clearance the walk keeps from portals.
-      const tobj = this.host.object(g);
-      if (tobj && classify(tobj, false) === 'portal' && !opts.enterPortal) within = Math.max(within, (this.host.objectReach?.(g) || 1) + AgentApi.PORTAL_CLEARANCE_M + 0.7);
+      // Both as the client knows the target NOW, and again on every look (refreshTargetReach): a target out of view when
+      // the walk sets off (a remembered place) has no reach yet, nor a portal whose Setup isn't loaded. Bulwark's walk_to
+      // the Qalabar Oasis Settlement Portal #79521003 set off 429 m away and kept "within 2 m" of its middle while the
+      // planner's disk round the portal itself (its 1.92 m reach + 0.8, measured once in view) covered 2.72 m: no way in
+      // was ever found, for 3+ minutes of searches, 34 m short (Qalaba'r portal ring 0x9521, 2026-10-18 17:01:23Z).
+      const baseWithin = within;
+      let reachKnown = -1, portalKnown = false;
+      refreshTargetReach = () => {
+        const o = this.host.object(g);
+        const r = this.host.objectReach?.(g) ?? 0;
+        const isPortal = (o ? classify(o, false) : this.places.get(g)?.kind) === 'portal';
+        if (r <= reachKnown + 0.01 && (!isPortal || portalKnown)) return;
+        const w = isPortal && !opts.enterPortal ? Math.max(baseWithin + r, (r || 1) + AgentApi.PORTAL_CLEARANCE_M + 0.7) : baseWithin + r;
+        if (reachKnown >= 0 && w > within + 0.01) this.trace(`walk: ${this.nameOf(g)}'s reach is known now (${r.toFixed(2)} m${isPortal ? ', a portal' : ''}): arriving within ${w.toFixed(1)} m of its middle, not ${within.toFixed(1)}`);
+        reachKnown = Math.max(reachKnown, r);
+        portalKnown ||= isPortal;
+        within = Math.max(within, w);
+      };
+      refreshTargetReach();
       // Out of view, a remembered place is walked to at its last-known position.
       // A monster the client dropped on the way (out of your cells' sight 25 s): on to its last-seen place.
       // That chase is bounded as a walk to a lost monster's last spot is (lostChaseGiveUp), from when it was dropped, and
@@ -9020,9 +9204,15 @@ export class AgentApi {
     // to the portal's edge, so the arrival never comes within its reach, and the answer says so. Only use (or enterPortal)
     // goes through a portal.
     let portalGoal: { label: string; guid: number; dist: number } | null = null;
+    // The walk's own target is a portal (in view, or a remembered place of that kind): its neighbours in a portal ring are
+    // walked by at their touch, and the goal is not moved out of them (portalGoal is for a point that only sits by one).
+    const targetIsPortal = (): boolean => {
+      if (!targetGuid) return false;
+      const o = this.host.object(targetGuid);
+      return (o ? classify(o, false) : this.places.get(targetGuid)?.kind) === 'portal';
+    };
     {
-      const tg = targetGuid ? this.host.object(targetGuid) : null;
-      if (!opts.enterPortal && !(tg && classify(tg, false) === 'portal')) {
+      if (!opts.enterPortal && !targetIsPortal()) {
         const raw = goal;
         let cache: { at: number; disks: Array<{ x: number; y: number; z: number; r: number; guid: number; label: string }> } | null = null;
         const disks = (): Array<{ x: number; y: number; z: number; r: number; guid: number; label: string }> => {
@@ -9453,6 +9643,13 @@ export class AgentApi {
         openNames.length ? `opened ${openNames.join(', ')}, but the way on is still blocked` : '',
         dropsFailed.length ? `the way down through the floor opening${dropsFailed.length > 1 ? 's' : ''} is past a rail higher than your jump clears` : '',
         (() => { const b = me && gl ? this.wayBlocker(me.g, gl) : null; return b ? `in the way: ${b}` : ''; })(),
+        // A creature that is no monster standing in the only doorway route's doorway (doorwayStander).
+        (() => {
+          const st = standerMet ? doorwayStander(standerMet.at) : null;
+          if (!st || !me || !st.cell) return '';
+          const sg = toGlobal(st.cell, st.x, st.y);
+          return `${st.name} #${(st.guid >>> 0).toString(16)} stands in the doorway of the only doorway route there, ${Math.hypot(sg.x - me.g.x, sg.y - me.g.y).toFixed(0)} m ${compassPoint(bearing(me.g, sg))} of you (cell 0x${(st.cell >>> 0).toString(16).toUpperCase().padStart(8, '0')}), and its body blocks the opening`;
+        })(),
         // A portal the walk kept out of, by you or across the way on: the only way may be through it, which a walk never
         // takes unasked (stepping in teleports you).
         (() => {
@@ -9483,6 +9680,10 @@ export class AgentApi {
       if (portalCache && now - portalCache.at < 1000) return portalCache.disks;
       const me = this.me();
       const disks: PortalDisk[] = [];
+      // In a ring of portals round the walk's own goal portal, the others are kept out of at their touch (where the body's
+      // sphere meets the portal's widest part, and STEP_CLEAR_M past: the sentinel's own disk), not the wider clearance:
+      // the way in to one portal of a tight ring passes its neighbours closer than the clearance a walk past them keeps.
+      const ringAt = targetIsPortal() ? goal() : null;
       if (me) {
         for (const o of this.host.objects()) {
           if (!o.cell || o.wielderId || o.containerId) continue;
@@ -9494,7 +9695,9 @@ export class AgentApi {
           if (opts.enterPortal && targetGuid && this.samePortal(o.guid, targetGuid)) continue;
           const g = toGlobal(o.cell, o.x, o.y);
           if (Math.hypot(g.x - me.g.x, g.y - me.g.y) > 80) continue;
-          disks.push({ x: g.x, y: g.y, z: o.z, r: (this.host.objectReach?.(o.guid) || 1) + AgentApi.PORTAL_CLEARANCE_M, guid: o.guid >>> 0, label: o.name });
+          const reach = this.host.objectReach?.(o.guid) || 1;
+          const inRing = !!ringAt && !this.samePortal(o.guid, targetGuid) && Math.hypot(g.x - ringAt.x, g.y - ringAt.y) <= AgentApi.GOAL_PORTAL_RING_M;
+          disks.push({ x: g.x, y: g.y, z: o.z, r: reach + (inRing ? BODY_RADIUS_M + STEP_CLEAR_M : AgentApi.PORTAL_CLEARANCE_M), guid: o.guid >>> 0, label: o.name });
         }
       }
       portalCache = { at: now, disks };
@@ -9571,6 +9774,35 @@ export class AgentApi {
       return disks;
     };
     const fixedDisks = (): AvoidDisk[] => { const n = npcDisks(); return n.length ? [...portals(), ...n] : portals(); };
+    // A creature that is no monster standing in a doorway of the route (its body's disk over the doorway's point, on its
+    // storey): an NPC, or a fixture the server made a creature. The Crystal Core's Wall of Ice (weenie 48724, a creature,
+    // not attackable, its Setup 0x0200195E a 3.3 m wide physics box) fills the north doorway of 0x5861015C; the walk to
+    // the Surface portal searched round its 0.35 m spheres' disk, stalled six times against the box and ended "stuck
+    // 97.2 m short … (blocked)" naming nothing, with no other doorway route there (Bulwark, 2026-10-18 16:57:41Z).
+    const doorwayStander = (r0: { x: number; y: number; z?: number }): AgentHostObject | null => {
+      const me = this.me();
+      if (!me) return null;
+      const z = r0.z ?? me.s.z;
+      for (const o of this.host.objects()) {
+        if (!(o.itemType & IT.Creature) || !o.cell || o.lost || o.wielderId || o.containerId || o.guid === targetGuid || o.guid === me.s.guid) continue;
+        const k = classify(o, this.host.isAttackable(o.guid));
+        if (k !== 'npc' && k !== 'vendor') continue;
+        if (Math.abs(o.z - z) >= AgentApi.DOOR_STOREY_M) continue;
+        const g = toGlobal(o.cell, o.x, o.y);
+        const r = (this.host.objectReach?.(o.guid) || AgentApi.NPC_BODY_M) + AgentApi.NPC_CLEAR_M;
+        if (Math.hypot(g.x - r0.x, g.y - r0.y) < r) return o;
+      }
+      return null;
+    };
+    // The doorway of the only doorway route that such a creature was found standing in (the searches found no way into it).
+    let standerMet: { o: AgentHostObject; at: { x: number; y: number; z?: number } } | null = null;
+    // The walk's end when the only doorway route there is through a doorway such a creature stands in.
+    const standerResult = (d: number, o: AgentHostObject): AgentResult => {
+      const me = this.me();
+      const g = toGlobal(o.cell!, o.x, o.y);
+      const at = me ? ` ${Math.hypot(g.x - me.g.x, g.y - me.g.y).toFixed(0)} m ${compassPoint(bearing(me.g, g))} of you` : '';
+      return { ok: false, message: `stuck ${d.toFixed(1)} m short (${o.name} #${(o.guid >>> 0).toString(16)} stands in the doorway${at} (cell 0x${(o.cell! >>> 0).toString(16).toUpperCase().padStart(8, '0')}), and its body blocks the opening: the doorway route there goes only through that doorway, no other doorway leads there, and it is not a door a walk opens)${featText()}. ac_appraise or ac_look at it and at what else is in the room, or ac_map for the room and its exits; or try another target.` };
+    };
     const plainProbe = rawProbe ? avoidDisks(rawProbe, fixedDisks) : undefined;
     const probe = rawProbe ? avoidDisks(rawProbe, () => { const m = monsterDisks(); return m.length ? [...fixedDisks(), ...m] : fixedDisks(); }) : undefined;
     // Monsters the way went round (avoid_monsters), and those it had to pass because no way kept clear of them.
@@ -9641,6 +9873,7 @@ export class AgentApi {
       return true;
     };
     const planLegs = (): void => {
+      refreshTargetReach();
       legs = [];
       search = null;
       tier = 0;
@@ -9675,6 +9908,13 @@ export class AgentApi {
         const k = (far - (within - AgentApi.GOAL_REACH_SLACK_M)) / far;
         const edge = { ...aim, x: from.x + (aim.x - from.x) * k, y: from.y + (aim.y - from.y) * k };
         if (straightWalk(probe, from, edge)) { this.trace(`walk leg straight ${far.toFixed(1)} m to (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)}) (to its reach, ${within.toFixed(1)} m from its middle), ${route.length} doorway(s) ahead`); return; }
+        // Where the straight probe stops (a disk's rim, the goal's own collision) already within its reach and on its floor
+        // (not under a leader on a ledge): that is arriving, so straight on to it, not a search for a way to a middle no search can reach.
+        const stop = probe(from, aim);
+        if (stop && Math.hypot(stop.x - aim.x, stop.y - aim.y) <= within - 0.05 && (aim.z === undefined || Math.abs(stop.z - aim.z) < AgentApi.FLOOR_APART_M) && straightWalk(probe, from, stop)) {
+          this.trace(`walk leg straight ${far.toFixed(1)} m to (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)}): the straight way stops ${Math.hypot(stop.x - aim.x, stop.y - aim.y).toFixed(1)} m from its middle, within its reach (${within.toFixed(1)} m)`);
+          return;
+        }
       }
       // The goal's reach straight ahead while the next doorway is not: the doorway's point lies inside the goal's own body
       // or behind its counter. The Tufa Archmage stands 1 m past the doorway into his cell (0x7C73011B), so every search
@@ -9785,7 +10025,7 @@ export class AgentApi {
       stretchSearch = search;
     };
     // The first doorway route's climb above both ends (plan), for the answer.
-    let routeClimb: { up: number; drops: number } | null = null;
+    let routeClimb: { up: number; down: number; drops: number; dropM: number } | null = null;
     const me0z = this.host.self()?.z ?? null;
     const plan = (): void => {
       const gl = goal();
@@ -9799,11 +10039,16 @@ export class AgentApi {
       // only up the stairs to +2, along the top and down a 6 m drop and the ramps: no way on that floor joins them). Said in
       // the answer, so a walk "upstairs, away from the lower rooms" isn't read as a wrong turn (Bulwark, 2026-10-17 05:35Z).
       if (!routeClimb && route.length && gl && me0z !== null && !follow) {
-        const ends = Math.max(me0z, gl.z ?? me0z);
+        // From where you stand up to the top, and from the top down to the goal's floor, each said for itself: "6 m above
+        // both ends" was said of a way from 0x029E01A3 (z −6) up to 0 and down a 6 m drop and the ramps to 0x029E0143
+        // (z −12), 12 m below its top (Bulwark, 2026-10-18 16:27:53Z).
+        const goalZ = gl.z ?? me0z;
+        const ends = Math.max(me0z, goalZ);
         const top = Math.max(...route.map((q) => q.z ?? ends));
         if (top - ends >= AgentApi.ROUTE_CLIMB_NOTE_M) {
-          routeClimb = { up: top - ends, drops: route.filter((q) => q.drop !== undefined).length };
-          this.trace(`walk route: climbs ${routeClimb.up.toFixed(0)} m above both ends (no way on the floor between)`);
+          const drops = route.filter((q) => q.drop !== undefined);
+          routeClimb = { up: top - me0z, down: top - goalZ, drops: drops.length, dropM: drops.reduce((n, q) => n + (q.drop ?? 0), 0) };
+          this.trace(`walk route: ${AgentApi.routeClimbText(routeClimb)} (no way on the floor between)`);
         }
       }
       lockedOnly = route.length || !gl || directWide ? null : this.lastLockedOnly;
@@ -9912,7 +10157,7 @@ export class AgentApi {
           : `didn't stop to wait for ${stayWithSkipped}: you were being hit, and a walk under attack never stands still for a fellow (stay_with waits again once nothing is on you)`);
       }
       if (stayMildHits.size && opts.stayWith) notes.push(`waited for ${opts.stayWith} through mild hits your routine takes once the walk is done (${[...stayMildHits.values()].slice(0, 4).join(', ')}: no pack, no hurting spells, no heavy hits, health not under ${Math.round(AgentApi.VITALS_LOW_DEFAULT * 100)}%)`);
-      if (routeClimb) notes.push(`the only doorway way there climbs about ${routeClimb.up.toFixed(0)} m above both ends and comes back down${routeClimb.drops ? ` (${routeClimb.drops === 1 ? 'a drop' : `${routeClimb.drops} drops`} on the way down)` : ''}: no doorway, stair or ramp on your floor joins your room to it, so a walk there goes up first`);
+      if (routeClimb) notes.push(`the only doorway way there ${AgentApi.routeClimbText(routeClimb)}: no doorway, stair or ramp on your floor joins your room to it, so a walk there goes up first`);
       // A map coordinate's scale with the distance left: 240 m to the unit. "stopped 741 m short" for "0.7N, 51.4E" read
       // as impossible to a player who had it "just N" of 2.3S, 50.6E (Arcanist, 2026-10-16); it was right: 3.0 units
       // north and 0.8 east, 745 m. And "1489 m short" of Daiklos from Holtburg's lifestone (8.4 S, 4.4 W: 2.3 km).
@@ -9988,6 +10233,7 @@ export class AgentApi {
       return Math.hypot(g.x - m.g.x, g.y - m.g.y) <= within && (g.z === undefined || Math.abs(m.s.z - g.z) < AgentApi.FLOOR_APART_M);
     };
     const walkStep = (now: number): AgentResult | null => {
+      refreshTargetReach();
       // The doorway route's only way there is through a door found locked this session: say so, and don't walk to it to
       // be told again (Door #701d2021 in Mountain Keep, tried by six walks and attacks, 2026-10-16).
       // Only doors known locked when this walk set off: one found locked on the way ends as before (stuckResult, which
@@ -10188,7 +10434,7 @@ export class AgentApi {
           this.trace(`walk: stopped at critical health ${hp.current}/${hp.max}`);
           return {
             ok: false, attacked: true, critical: true,
-            message: `stopped ${d.toFixed(1)} m short: health ${hp.current}/${hp.max} (${pc(hp.current)}), ${why}${who}${featText()}. Heal or keep running? Heal now (ac_cast spell="Heal Self" target=self: you're standing, as a cast needs), or run on (the same ac_walk_to${opts.flee ? ' flee=true' : ''} again keeps going until health falls another ${Math.round(AgentApi.CRITICAL_RUN_ON_FRAC * 100)}% of your max).`,
+            message: `stopped ${d.toFixed(1)} m short: health ${hp.current}/${hp.max} (${pc(hp.current)}), ${why}${who}${featText()}. Heal or keep running? Heal now (${this.restoreOptions('health').text}), or run on (the same ac_walk_to${opts.flee ? ' flee=true' : ''} again keeps going until health falls another ${Math.round(AgentApi.CRITICAL_RUN_ON_FRAC * 100)}% of your max).`,
           };
         }
       }
@@ -11126,6 +11372,14 @@ export class AgentApi {
             this.trace(`walk: no way into the doorway at (${r0.x.toFixed(1)}, ${r0.y.toFixed(1)}) (something stands in it); ${again.length ? `routing round it, ${again.length} doorway(s)` : 'no other doorway route'}`);
             if (again.length) { route = again; prev = null; noWay = false; planLegs(); best = Infinity; bestAt = now; return null; }
             doorsShut.pop();
+            // What stands in it is a creature's body (an NPC, a barrier the server made a creature): the wider searches and
+            // jumps after this may still find a way past it in a wide doorway, but in a narrow one they only lead through
+            // it (the probe leaves creatures out but for a disk round the middle). Remembered: a stall by it ends the walk.
+            const stander = r0.leap === undefined ? doorwayStander(r0) : null;
+            if (stander) {
+              standerMet = { o: stander, at: { x: r0.x, y: r0.y, ...(r0.z !== undefined ? { z: r0.z } : {}) } };
+              this.trace(`walk: ${stander.name} #${(stander.guid >>> 0).toString(16)} stands in the doorway at (${r0.x.toFixed(1)}, ${r0.y.toFixed(1)}), the only doorway route; a stall by it ends the walk`);
+            }
             // Remembered as a leap your jump can't make only when the search for its take-off ran its course: one cut short
             // after 1.5 s because you were being hit found nothing for want of time, and would have kept the leap out of
             // every route for 30 min.
@@ -11399,6 +11653,35 @@ export class AgentApi {
       if (now - bestAt < (underAttack ? AgentApi.FLEE_STALL_MS : pressing ? AgentApi.PRESSING_STALL_MS : 3000)) return null;
       // Stalled.
       stalls++;
+      // Stalled again by the route's next doorway with a creature that is no monster standing in it (doorwayStander): its
+      // body blocks yours there, though the searches (which leave creatures out but for a disk round the middle) find
+      // ways past it. Leave that doorway out and route round it by the others; with no other way, say what stands there.
+      const r0s = route[0];
+      if (stalls >= 2 && r0s && r0s.drop === undefined && r0s.leap === undefined && !doorDetour && Math.hypot(r0s.x - me.g.x, r0s.y - me.g.y) < AgentApi.STANDER_STALL_NEAR_M) {
+        const stander = doorwayStander(r0s);
+        if (stander) {
+          doorsShut.push({ x: r0s.x, y: r0s.y, z: r0s.z ?? me.s.z });
+          const again = this.planRoute(gl, goalLocal(), shutNow(), dropsFailed);
+          this.trace(`walk: ${stander.name} #${(stander.guid >>> 0).toString(16)} stands in the doorway at (${r0s.x.toFixed(1)}, ${r0s.y.toFixed(1)}) and the body stalls there; ${again.length ? `routing round it, ${again.length} doorway(s)` : 'no other doorway route; ending'}`);
+          if (again.length) {
+            route = again; prev = null; noWay = false; search = null; legs = []; directWide = false;
+            planLegs(); best = Infinity; bestAt = now;
+            return null;
+          }
+          doorsShut.pop();
+          release();
+          return standerResult(d, stander);
+        }
+      }
+      // Stalled by a doorway the walk already found a creature standing in, with no other doorway route (standerMet).
+      if (standerMet && !doorDetour && Math.hypot(standerMet.at.x - me.g.x, standerMet.at.y - me.g.y) < AgentApi.STANDER_STALL_NEAR_M) {
+        const still = doorwayStander(standerMet.at);
+        if (still) {
+          this.trace(`walk: stalled by the doorway ${still.name} #${(still.guid >>> 0).toString(16)} stands in; ending`);
+          release();
+          return standerResult(d, still);
+        }
+      }
       {
         const p = probe?.({ x: me.g.x, y: me.g.y, z: me.s.z }, aim);
         const close = this.nearby(2.5).filter((o) => o.kind === 'monster' || o.kind === 'npc' || o.kind === 'player' || o.kind === 'vendor').map((o) => `${o.name} ${o.dist.toFixed(1)} m ${compassPoint(o.bearing)}`);
@@ -13883,7 +14166,7 @@ export class AgentApi {
       }
       const pct = Math.round(frac * 100);
       if (critical) {
-        this.pushVital('vitals-low', `health ${s.health.current}/${s.health.max} (${pct}%): CRITICAL, below ${Math.round(AgentApi.CRITICAL_HEALTH * 100)}%${bigHit ? ` (it ${hitText})` : ''}. Heal now (standing still: a running walk stops for it) or get away; this wakes every wait`, { k: 'health', mark: AgentApi.CRITICAL_HEALTH, critical: true });
+        this.pushVital('vitals-low', `health ${s.health.current}/${s.health.max} (${pct}%): CRITICAL, below ${Math.round(AgentApi.CRITICAL_HEALTH * 100)}%${bigHit ? ` (it ${hitText})` : ''}. Heal now (standing still: a running walk stops for it; ${this.restoreOptions('health').text}) or get away; this wakes every wait`, { k: 'health', mark: AgentApi.CRITICAL_HEALTH, critical: true });
       } else if (bigHit) {
         // Stale once you are back where the hit found you (healed past it).
         this.pushVital('vitals-low', `health ${hitText}${crossed ? `: ${s.health.current}/${s.health.max} (${pct}%), below ${Math.round(AgentApi.VITALS_LOW_DEFAULT * 100)}%` : ''}`, { k: 'health', mark: Math.min(1, lastHp! / s.health.max), hit: true, ...(crossed ? { crossed: true } : {}) });
@@ -13898,7 +14181,7 @@ export class AgentApi {
       // Wakes every wait while something is on you.
       if (s.stamina.max > 0 && !s.dead && s.stamina.current === 0 && this.lastStamina !== null && this.lastStamina > 0) {
         const on = this.attackersOfMe().size;
-        this.pushVital('vitals-low', `stamina 0/${s.stamina.max}: EXHAUSTED. The server gives you no defense now (every attack at you lands) and runs you at a crawl; in a combat stance each attack thrown at you costs 1 stamina, so it stays at 0 while they swing${on ? ` (${on} on you)` : ''}. A stamina potion or elixir, or a Revitalize, brings it back; out of a combat stance (peace mode) attacks at you cost none and it regenerates`, { k: 'stamina', mark: 1e-6, critical: on > 0 });
+        this.pushVital('vitals-low', `stamina 0/${s.stamina.max}: EXHAUSTED. The server gives you no defense now (every attack at you lands) and runs you at a crawl; in a combat stance each attack thrown at you costs 1 stamina, so it stays at 0 while they swing${on ? ` (${on} on you)` : ''}. Bring it back: ${this.restoreOptions('stamina').text}; out of a combat stance (peace mode) attacks at you cost none and it regenerates`, { k: 'stamina', mark: 1e-6, critical: on > 0 });
       }
       this.lastStamina = s.stamina.current;
       this.checkVitalWaits(s);

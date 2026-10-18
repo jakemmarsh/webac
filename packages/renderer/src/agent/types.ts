@@ -243,7 +243,7 @@ export interface AgentObservation {
   /** Open windows (Inventory, Social (fellowship), Container …); close with ac_close. */
   windows?: string[];
   /** Your active enchantments (the effects UI), seconds left; -1 = permanent. Other players' are not visible to a client. */
-  buffs?: Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean; /** Said in place of the time left (Vitae: "until XP works it off"). */ until?: string; /** Seconds since it landed on you (new, or refreshed) as this page saw it; absent: on you when the page loaded. */ landedAgoS?: number }>;
+  buffs?: Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean; /** The enchantment's stat mod (EnchantmentTypeFlags, the property it changes, by how much): protections read from it. */ statModType?: number; statModKey?: number; statModValue?: number; /** Said in place of the time left (Vitae: "until XP works it off"). */ until?: string; /** Seconds since it landed on you (new, or refreshed) as this page saw it; absent: on you when the page loaded. */ landedAgoS?: number }>;
   /** The VITAE line (vitaeFacts.ts vitaeHeadline): what the death penalty costs now and the XP that works it off; absent with none. */
   vitae?: string;
   /** Buffs you know that aren't up on you (self-only ones first), to cast with ac_cast. */

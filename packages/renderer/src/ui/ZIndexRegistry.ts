@@ -151,8 +151,17 @@ export const ZLayer = {
   /** Modal dialog content */
   MODAL_CONTENT: 8500,
 
-  /** Debug/dev overlays */
+  /** Debug/dev overlays; also the boot loading overlay (#loading-overlay, ui/LoadingOverlay.ts) */
   DEBUG_OVERLAY: 9999,
+
+  /**
+   * Boot notices that must show while #loading-overlay (DEBUG_OVERLAY, an
+   * opaque black full-window frame) is still up: the browser capability
+   * screen (boot/Capability.ts), hard and soft. At z 1000 it drew under the
+   * overlay, so players saw a black page and could not reach its Continue
+   * button (live 2026-10-18).
+   */
+  BOOT_NOTICE: 10000,
 
   /** Dragged item ghost */
   DRAG_GHOST: 100000,

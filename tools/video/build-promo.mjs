@@ -18,7 +18,17 @@
  *   fit       'cover' (fill, crop the overflow; default) or 'box' (whole frame on a blurred fill)
  *   caption   { text, sub?, at?: 'top'|'middle'|'bottom', style?: 'hook'|'plain'|'card' }
  *   card      true: a full-frame title card over the clip (caption.style = 'card')
+ *   vo        a narration line's name (<audio>/vo/<name>.wav, from tools/video/tts.mjs); voAt = seconds
+ *             into the clip it starts (default 0.15). A line may run on over the next clips, but never
+ *             into the next line: the build stops and says how much room is missing.
  * The total length is the sum of (to - from) / speed. Prints chapter marks for clips with `chapter`.
+ *
+ * Sound (--audio <dir>, which holds sfx/ from extract-sfx.ts, vo/ and the music files):
+ *   music     { file, from?: seconds into the track, gain?: dB, fadeOut?: s } — ducked under narration
+ *   events    { '<take>': [[sfx, takeSeconds, gainDb?], …] } — the game's own sounds at the moments
+ *             they happen in a take (a portal swirl, a spell going off); every clip that shows that
+ *             moment plays it, retimed by the clip's speed. Find the moments with tools/video/luma.mjs.
+ * --no-vo builds the same cut without narration. The mix is normalised to -14 LUFS (YouTube's level).
  */
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -31,6 +41,8 @@ const opt = (n, d) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i
 const edlPath = resolve(opt('edl'));
 const footage = resolve(opt('footage', '.'));
 const out = resolve(opt('out', 'promo.mp4'));
+const audioDir = opt('audio') ? resolve(opt('audio')) : null;
+const withVo = !args.includes('--no-vo');
 const work = join(dirname(out), `.${out.split('/').pop()}-work`);
 mkdirSync(work, { recursive: true });
 
@@ -38,6 +50,13 @@ const edl = (await import(pathToFileURL(edlPath).href)).default;
 const { width: W, height: H, clips } = edl;
 const here = dirname(fileURLToPath(import.meta.url));
 const fontDir = resolve(here, '../site/fonts');
+
+// Clip start times, and the narration's room, before anything slow runs.
+// Every clip is a whole number of frames, so the sound laid against these times stays on its frames.
+const FPS = 30;
+const frames = (c) => Math.round(((c.to - c.from) / (c.speed ?? 1)) * FPS);
+{ let at = 0; for (const c of clips) { c.start = at; c.dur = frames(c) / FPS; at += c.dur; } edl.total = at; }
+const voCues = audioDir && withVo ? narration() : [];
 
 // ── Captions: HTML → transparent PNG ────────────────────────────────────────
 // Fonts as data URIs: a setContent page can't load file:// fonts.
@@ -93,7 +112,7 @@ for (const [i, c] of clips.entries()) {
   const src = join(footage, c.take);
   if (!existsSync(src)) throw new Error(`missing take ${src}`);
   const speed = c.speed ?? 1;
-  const dur = (c.to - c.from) / speed;
+  const dur = c.dur;
   if (c.caption) {
     const words = [c.caption.kicker, c.caption.text, c.caption.sub].filter(Boolean).join(' — ').replace(/\*/g, '').replace(/\n/g, ' ');
     srt.push(`${srt.length + 1}\n${ts(t)} --> ${ts(t + dur)}\n${words}\n`);
@@ -117,17 +136,115 @@ for (const [i, c] of clips.entries()) {
     // Captions pop in over the first 0.15 s, as Shorts captions do.
     graph += `;[1:v]format=rgba,fade=t=in:st=0:d=0.15:alpha=1[cap];[v0][cap]overlay=0:0:shortest=1[v1]`;
   } else graph += ';[v0]null[v1]';
-  graph += `;[v1]fps=30,format=yuv420p,setsar=1[v]`;
-  const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', ...inputs, '-filter_complex', graph, '-map', '[v]', '-t', dur.toFixed(3),
-    '-c:v', 'libx264', '-preset', 'slow', '-crf', '17', '-r', '30', seg], { stdio: 'inherit' });
+  // tpad holds the last frame so a clip whose source ends a hair early still fills its frame count.
+  graph += `;[v1]fps=${FPS},tpad=stop_mode=clone:stop=3,format=yuv420p,setsar=1[v]`;
+  const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', ...inputs, '-filter_complex', graph, '-map', '[v]', '-frames:v', String(frames(c)),
+    '-c:v', 'libx264', '-preset', 'slow', '-crf', '17', '-r', String(FPS), seg], { stdio: 'inherit' });
   if (r.status !== 0) throw new Error(`segment ${i} failed`);
+  const got = Number(spawnSync('ffprobe', ['-v', 'error', '-count_packets', '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0', seg]).stdout.toString());
+  if (got !== frames(c)) throw new Error(`segment ${i} has ${got} frames, wanted ${frames(c)}`);
   segs.push(seg);
 }
 const list = join(work, 'segs.txt');
 writeFileSync(list, segs.map((s) => `file '${s}'`).join('\n'));
-const audio = edl.music ? ['-i', resolve(edl.music), '-map', '0:v', '-map', '1:a', '-shortest', '-c:a', 'aac', '-b:a', '192k'] : [];
-const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, ...audio, '-c:v', 'copy', '-movflags', '+faststart', out], { stdio: 'inherit' });
+const video = join(work, 'video.mp4');
+let r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c:v', 'copy', video], { stdio: 'inherit' });
 if (r.status !== 0) throw new Error('concat failed');
-writeFileSync(out.replace(/\.mp4$/, '.srt'), srt.join('\n'));
-console.log(`${out} — ${t.toFixed(1)} s, ${W}x${H} (+ .srt)`);
+const mix = audioDir ? buildMix(t) : null;
+r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', video, ...(mix ? ['-i', mix, '-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '192k'] : []),
+  '-c:v', 'copy', '-movflags', '+faststart', out], { stdio: 'inherit' });
+if (r.status !== 0) throw new Error('mux failed');
+writeFileSync(out.replace(/\.mp4$/, '.srt'), (voCues.length ? narrationSrt() : srt).join('\n'));
+console.log(`${out} — ${t.toFixed(1)} s, ${W}x${H}${mix ? `, sound${withVo ? ' + narration' : ''}` : ''} (+ .srt)`);
 if (chapters.length) console.log(`chapters:\n${chapters.join('\n')}`);
+
+// ── Sound: music bed (ducked under the voice) + the game's sound effects + narration ─────────
+function durOf(f) {
+  return Number(spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', f]).stdout.toString());
+}
+// With narration, the captions file is what's said (YouTube reads it as the transcript), one cue per
+// sentence, timed by its share of the line's characters. Spoken numbers go back to digits.
+function narrationSrt() {
+  const text = JSON.parse(readFileSync(join(here, 'narration.json'), 'utf8'));
+  const written = (x) => x.replace(/play web AC dot com/g, 'playwebac.com').replace(/twenty seventeen/g, '2017')
+    .replace(/nineteen ninety-nine/g, '1999').replace(/thirteen/g, '13');
+  const cues = [];
+  for (const v of voCues) {
+    const sentences = written(text[v.name]).split(/(?<=[.!?])\s+/); // not at the dot in playwebac.com
+    const chars = sentences.reduce((n, x) => n + x.length, 0);
+    let at = v.at;
+    for (const x of sentences) {
+      const d = v.len * (x.length / chars);
+      cues.push(`${cues.length + 1}\n${ts(at)} --> ${ts(at + d)}\n${x.trim()}\n`);
+      at += d;
+    }
+  }
+  return cues;
+}
+
+// Narration lines, each checked for room before the next one (or the end).
+function narration() {
+  const vo = clips.filter((c) => c.vo).map((c) => {
+    const file = join(audioDir, 'vo', `${c.vo}.wav`);
+    if (!existsSync(file)) throw new Error(`missing narration ${file} (run tools/video/tts.mjs)`);
+    return { file, at: c.start + (c.voAt ?? 0.15), len: durOf(file), name: c.vo, gain: edl.voGain ?? 4, kind: 'vo' };
+  });
+  const short = vo.map((v, i) => [v, (i + 1 < vo.length ? vo[i + 1].at - 0.2 : edl.total - 0.3) - (v.at + v.len)]).filter(([, room]) => room < 0);
+  if (short.length) throw new Error(short.map(([v, room]) => `narration ${v.name} needs ${(-room).toFixed(2)} s more room`).join('\n'));
+  return vo;
+}
+function buildMix(total) {
+  const inputs = [], cues = []; // cues: { file, at, gain, kind }
+  cues.push(...voCues);
+  // Game sounds at the moments their takes show them.
+  for (const c of clips) {
+    for (const [name, at, gain = edl.sfxGain ?? -3] of edl.events?.[c.take] ?? []) {
+      if (at < c.from || at >= c.to) continue;
+      const file = ['wav', 'mp3'].map((x) => join(audioDir, 'sfx', `${name}.${x}`)).find(existsSync);
+      if (!file) throw new Error(`missing sound ${name} in ${join(audioDir, 'sfx')}`);
+      cues.push({ file, at: c.start + (at - c.from) / (c.speed ?? 1), gain, kind: 'sfx' });
+    }
+  }
+  const graph = [];
+  let n = 0;
+  const add = (file, pre = []) => { inputs.push(...pre, '-i', file); return n++; };
+  const labels = { vo: [], sfx: [] };
+  for (const [i, q] of cues.entries()) {
+    const k = add(q.file);
+    graph.push(`[${k}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${q.gain}dB,adelay=${Math.round(q.at * 1000)}:all=1[${q.kind}${i}]`);
+    labels[q.kind].push(`[${q.kind}${i}]`);
+  }
+  const bus = (kind) => {
+    const l = labels[kind];
+    if (!l.length) { graph.push(`anullsrc=r=48000:cl=stereo,atrim=0:${total}[${kind}]`); return; }
+    graph.push(`${l.join('')}amix=inputs=${l.length}:normalize=0:duration=longest,apad,atrim=0:${total}[${kind}]`);
+  };
+  bus('vo'); bus('sfx');
+  if (edl.music) {
+    const m = edl.music;
+    const k = add(join(audioDir, m.file), ['-ss', String(m.from ?? 0)]);
+    const fade = m.fadeOut ?? 2;
+    graph.push(`[${k}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:${total},afade=t=in:d=0.3,afade=t=out:st=${(total - fade).toFixed(2)}:d=${fade},volume=${m.gain ?? -4}dB[mraw]`);
+    // Duck the music ~10 dB under the voice, as narrated YouTube videos do.
+    graph.push('[vo]asplit[vo1][key]', '[mraw][key]sidechaincompress=threshold=0.03:ratio=4:attack=25:release=500:makeup=1[music]');
+  } else graph.push('anullsrc=r=48000:cl=stereo,atrim=0:' + total + '[music]', '[vo]anull[vo1]');
+  // --stems also writes each bus (pre-normalisation) next to the mix, to check the balance by numbers.
+  const stems = args.includes('--stems');
+  if (stems) graph.push('[vo1]asplit[vo2][svo]', '[sfx]asplit[sfx2][ssfx]', '[music]asplit[music2][smusic]');
+  graph.push(`${stems ? '[vo2][sfx2][music2]' : '[vo1][sfx][music]'}amix=inputs=3:normalize=0:duration=first[pre]`);
+  graph.push(`[pre]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]`);
+  const file = join(work, 'mix.wav');
+  const maps = ['-map', '[a]', '-t', total.toFixed(3), file];
+  if (stems) for (const k of ['vo', 'sfx', 'music']) maps.push('-map', `[s${k}]`, '-t', total.toFixed(3), join(work, `stem-${k}.wav`));
+  const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', ...inputs, '-filter_complex', graph.join(';'), ...maps], { stdio: 'inherit' });
+  if (r.status !== 0) throw new Error('mix failed');
+  // loudnorm's one-pass mode lands short mixes a dB or two low: measure, then trim the gain to -14
+  // with a limiter holding the peaks.
+  const meas = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-af', 'ebur128', '-f', 'null', '-'], { encoding: 'utf8' }).stderr;
+  const I = Number(/I:\s+(-?[\d.]+) LUFS\s+Threshold/.exec(meas.slice(meas.lastIndexOf('Summary')))?.[1]);
+  if (!Number.isFinite(I)) throw new Error('loudness measure failed');
+  const final = join(work, 'mix-14.wav');
+  const r2 = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', file, '-af', `volume=${(-14 - I).toFixed(2)}dB,alimiter=limit=0.84:level=false`, final], { stdio: 'inherit' });
+  if (r2.status !== 0) throw new Error('gain trim failed');
+  return final;
+}

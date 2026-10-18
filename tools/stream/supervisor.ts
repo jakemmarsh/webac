@@ -36,7 +36,7 @@ import { loadOwnTime } from './own-time.ts';
 import { preparePlayerDir } from './player.ts';
 import { type TableSpell, loadSpellTableRows } from './spellGaps.ts';
 import type { ShopOffer, ShopVendor } from './shops.ts';
-import { scrollShops } from './world-query.ts';
+import { areaCreatures, scrollShops } from './world-query.ts';
 import { isMapCoordsText, parseMapCoordsText } from '../../packages/shared/src/mapCoordsText.ts';
 import { StuckWatch, classifyResult, isBusyChatLine } from './stuck.ts';
 import { TOOLS, routineFromFile } from '../ac-agent/tools.ts';
@@ -767,7 +767,7 @@ export function realDeps(cfg: StreamConfig): SupervisorDeps {
       const r = routineFromFile(f);
       return 'profile' in r ? r.profile : null;
     },
-    ownTime: (p, character, cast) => loadOwnTime({ streamDir: STREAM_DIR, feedFile: feedPath(), profile: p, character, cast, nowMs: Date.now() }),
+    ownTime: (p, character, cast) => loadOwnTime({ streamDir: STREAM_DIR, feedFile: feedPath(), profile: p, character, cast, nowMs: Date.now(), areaCreatures }),
     callAgent: async (p, m, a = []) => { const c = client(p); if (!c) throw new Error(`no daemon for ${p}`); return c.call(m, a, 15_000); },
     journal: (p) => {
       const i = readInfo(p);
