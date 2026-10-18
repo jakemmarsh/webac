@@ -109,6 +109,8 @@ export interface ClientPreworldEvent {
   eid?: string;
   /** OBS.dm-stall-diagnostics — 'dropped' only: the connection's state when a silent / closed session ended (netDiag.ts). */
   net?: NetDiag;
+  /** chargen_ok / chargen_refused only: the requested HeritageGroup, 1–13 (an Olthoi refused by olthoi_play_disabled is code 2 + 12/13). */
+  heritage?: number;
   /** 'handover' only: from the handover's start (or the hard cut) to back in the world, in ms; why and how (HANDOVER_REASONS / _PATHS). */
   handoverMs?: number;
   reason?: typeof HANDOVER_REASONS[number];
@@ -191,7 +193,17 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...eidField(b.eid),
     ...(outcome === 'dropped' ? netDiagField(b.net) : {}),
     ...(outcome === 'handover' ? handoverFields(b) : {}),
+    ...(outcome === 'chargen_ok' || outcome === 'chargen_refused' ? heritageField(b.heritage) : {}),
   };
+}
+
+/** HeritageGroup's range (ACE HeritageGroup.cs: Aluvian 1 … OlthoiAcid 13). */
+const MAX_HERITAGE = 13;
+
+/** `{ heritage }` when it is a known HeritageGroup (1–13), else nothing. */
+export function heritageField(v: unknown): { heritage?: number } {
+  const n = uint(v, MAX_HERITAGE);
+  return n !== null && n >= 1 ? { heritage: n } : {};
 }
 
 /**

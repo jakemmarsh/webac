@@ -210,6 +210,7 @@ import { ClothingRenderer } from './models/ClothingRenderer.js';
 import { AppearanceManager } from './models/AppearanceManager.js';
 import { CharacterModelBuilder } from './models/CharacterModelBuilder.js';
 import { GameUI } from './ui/GameUI.js';
+import { chargenRefusalText, chargenWorldKey, isOlthoiRefusal, olthoiRefusedOnWorld, rememberOlthoiRefused } from './ui/ChargenRefusal.js';
 import { dispatchBarberApply } from './ui/BarberModel.js';
 import { LayoutRenderer } from './ui/LayoutRenderer.js';
 import { UITextureLoader } from './ui/UITextureLoader.js';
@@ -16646,7 +16647,8 @@ async function main() {
           // A missile spell (bolts, streaks, arcs, life and enchantment projectiles): walls stop it.
           ...(isProjectileSpellType(spellTable?.spells.get(s.id)?.metaSpellType ?? 0) ? { projectile: true } : {}),
           // How far it reaches for you: the spell examine's Range line (DetermineSpellRange), the server's check too.
-          ...((): { range?: number } => { const b = spellTable?.spells.get(s.id); const r = b ? spellRangeMeters(b, (id) => inqSkillLevel(playerState.skills, id)) : 0; return r > 0 ? { range: Math.round(r * 10) / 10 } : {}; })(),
+          // A reach no rank lengthens: no per-skill part (BaseRangeMod 0: every Aura Other, 25 m) or already at the 75 m cap.
+          ...((): { range?: number; rangeFixed?: boolean } => { const b = spellTable?.spells.get(s.id); const r = b ? spellRangeMeters(b, (id) => inqSkillLevel(playerState.skills, id)) : 0; return r > 0 ? { range: Math.round(r * 10) / 10, ...(b!.baseRangeMod <= 0 || r >= 75 ? { rangeFixed: true } : {}) } : {}; })(),
         })),
         characterSheet: () => gameUI.agentCharacterSheet(),
         allegiance: () => gameUI.agentAllegiance(),
@@ -17442,6 +17444,9 @@ async function main() {
           gameUI.accountHasThroneOfDestiny = aceCharList.hasThroneOfDestiny;
           // The era's playable heritages: a Dark Majesty-era server allows three.
           gameUI.eraHeritages = activeEra.heritages ? new Set(activeEra.heritages) : null;
+          // BUG.chargen-olthoi-pending — a world that refused an Olthoi in the
+          // last 30 days no longer offers them (ChargenRefusal.ts).
+          gameUI.chargenOlthoiDisallowed = olthoiRefusedOnWorld(chargenWorldKey(connectUrl));
 
           // FAITHFUL.598 — carry deleteTime through (parsed since forever,
           // dropped here): non-zero = the character is queued for deletion
@@ -17512,7 +17517,7 @@ async function main() {
           // Handle_CharGenVerificationResponse @ 0055e8b0: every reply puts
           // the verification state back to UNDEF (FINISH may send again).
           gameUI.noteCharGenVerificationResponse();
-          preworldReporter?.chargenResult(response.responseCode);
+          preworldReporter?.chargenResult(response.responseCode, aceCharHeritage);
           if (response.responseCode === CharacterGenerationVerificationResponse.Ok) {
             // Success!
             console.log(`[AC] ACE: Character created! GUID=0x${response.characterGuid?.toString(16)} (${response.characterGuid}) name="${response.characterName}"`);
@@ -17547,7 +17552,16 @@ async function main() {
             // string-table 0x23000002 text for the code; the creation screen
             // stays up so the player can pick another name.
             const token = characterCreateErrorToken(response.responseCode) ?? 'ID_Character_Err_NameDBDown';
-            const errorMsg = getStringFromTable(0x23000002, acStringHash(token)) ?? token;
+            const retailMsg = getStringFromTable(0x23000002, acStringHash(token)) ?? token;
+            // BUG.chargen-olthoi-pending — Pending (2) for an Olthoi is ACE's
+            // olthoi_play_disabled: retail's "try again later" plus a line that
+            // says to pick another heritage, and this world stops offering
+            // Olthoi (remembered 30 days). Any other refusal keeps retail's text.
+            const errorMsg = chargenRefusalText(retailMsg, response.responseCode, aceCharHeritage);
+            if (isOlthoiRefusal(response.responseCode, aceCharHeritage)) {
+              rememberOlthoiRefused(chargenWorldKey(connectUrl));
+              gameUI.noteOlthoiDisallowed();
+            }
             console.error(`[AC] ACE: Character creation failed (code ${response.responseCode}): ${errorMsg}`);
             // Corrupt (5) from a server whose data differs from the set we loaded
             // (Snowreap: Classic Dereth 1.0 vs our 1.1) looks like any other failure:

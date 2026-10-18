@@ -272,6 +272,13 @@ export interface AgentObservation {
      * said he couldn't see Arcanist 2 s before Arcanist arrived beside him, Aerbax Laboratory, 2026-10-18 13:12:46Z).
      */
     arriving?: string;
+    /**
+     * The client last placed them in another space than yours (another dungeon, or the landscape seen from one, where
+     * nothing of theirs reaches you any more: ACE gives a dungeon landblock no adjacent ones): "in another dungeon
+     * (landblock 0x029E)". A distance across it is none: Arcanist read "Claude Bulwark 213 m S" from Aerbax Haven while
+     * Bulwark stood in the Laboratory, landblock 0x029E, next on the grid (2026-10-18 18:56Z).
+     */
+    elsewhere?: string;
   }>;
   /**
    * In a fellowship with nobody else in it: a fellow logged out (the server takes them out, as retail did) and /f
@@ -311,6 +318,21 @@ export interface AgentObservation {
    * from 60 m): out of sight, or a missile from afar. Named, never pinned on a far one of that name.
    */
   attackersUnplaced?: Array<{ name: string; count: number; /** Where the server last placed one of the name, in a room out of your sight. */ unseen?: { dist: number; bearing: number; dz: number } }>;
+  /**
+   * Worn items whose spells are on and whose mana runs out soon (an appraisal's ItemCurMana 107 at the item's ManaRate,
+   * PropertyFloat 5, reckoned on from when it was read), or that the server said is "low on Mana." (ACE Player_Tick
+   * CheckLowMana: two minutes before it is empty). Arcanist's Pathwarden Helm ran out three times in a day with only that
+   * two-minute line as warning (2026-10-18). `refill`: the mana stones and charges you carry, and where they are sold.
+   */
+  gearManaLow?: { items: Array<{ guid: number; name: string; leftS?: number; mana?: { cur: number; max: number }; serverSaidLow?: boolean }>; refill: string };
+  /**
+   * Sections of this observe printed short because the player's own look printed them in full a moment ago and they
+   * are the same now (AgentApi.playerObserve): 'buffs', 'buffsMissing', 'gearSpells', 'corpses', 'money', 'vitae',
+   * 'routineSupplies'. ac_observe full=true prints every one in full. Absent: all in full.
+   */
+  brief?: string[];
+  /** Buffs on you at your last look that are gone now (expired, dispelled): named, never only counted. */
+  buffsGone?: string[];
   /** Chat / system lines since the previous observe (or the last N on the first call). */
   chat: AgentChatLine[];
   /** Highest event seq seen; pass it to waitFor/events to get only newer ones. */
@@ -441,6 +463,11 @@ export interface AgentSpell {
   projectile?: boolean;
   /** How far it reaches for you, metres (the spell examine's Range: its range grows with your ranks in the school's skill). */
   range?: number;
+  /**
+   * Its reach is the same whatever your ranks: no per-skill part in the spell table (BaseRangeMod 0, as every Aura Other
+   * at 25 m) or already at the 75 m most any spell reaches (DetermineSpellRange @ 004ad450; ACE VerifySpellRange).
+   */
+  rangeFixed?: boolean;
   /**
    * The chance a cast gets past the skill roll now (0..1): the school's buffed skill against the spell's power by the
    * fizzle formula (magicSkillChance). Unset when the host can't say the skill.

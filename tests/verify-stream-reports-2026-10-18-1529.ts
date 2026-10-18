@@ -397,7 +397,7 @@ describe('3. cast repeat=true: casters on you from the start whose spells took n
     reply = (n) => { base(n); api.pushChat('Innocent Doll scratches your upper arm for 1 point of slashing damage!', 0x15); api.pushChat('Marionette grazes your chest for 1 point of bludgeoning damage!', 0x15); };
     const r = await settle(api.cast('Flame Bolt V', TARGET, { repeat: true }));
     expect(castsSent, r.message).toBe(1);
-    expect(r.message.split('\n')[0]).toMatch(/stopped: Innocent Doll #8000b0ff \(\d× in 10 s; its kind's Flame Bolt III took 56 of your 1\d\d health\), on you from the start and not your target, is real danger now$/);
+    expect(r.message.split('\n')[0]).toMatch(/stopped: Innocent Doll #8000b0ff \(\d× in 10 s; its kind's Flame Bolt III took 56 of the 1\d\d health you have \(of 1\d\d\)\), on you from the start and not your target, is real danger now$/);
     expect(r.message.split('\n')[0]).not.toMatch(/Marionette/);
   });
 

@@ -130,6 +130,7 @@ import { fillComponentList, desiredCompIterationOrder, determineComponentCategor
 import type { TextureManager } from '../models/TextureManager.js';
 import { getString, getStringParts, getStringFromTable, acStringHash } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { heritageListed, visibleHeritageRows } from './HeritageRows.js';
+import { isOlthoiHeritage, OLTHOI_UNAVAILABLE_NOTE } from './ChargenRefusal.js';
 import { loadChargen1999, startAreasFor1999, type Chargen1999 } from './Chargen1999.js';
 import { buildEpilogueFrame } from './PatchScreen.js';
 import { fellowshipString } from './FellowshipStrings.js';
@@ -1432,7 +1433,15 @@ export class GameUI {
    * neither, every heritage counts (end of retail unchanged).
    */
   readonly chargenHeritageDefined = (h: number): boolean =>
-    (!this.charGen || this.charGen.heritageGroups.has(h)) && (!this.eraHeritages || this.eraHeritages.has(h));
+    (!this.charGen || this.charGen.heritageGroups.has(h)) && (!this.eraHeritages || this.eraHeritages.has(h))
+    && !(this.chargenOlthoiDisallowed && isOlthoiHeritage(h));
+  /**
+   * BUG.chargen-olthoi-pending — this world refused an Olthoi creation
+   * (ACE olthoi_play_disabled, remembered per world for 30 days:
+   * ChargenRefusal.ts): the heritage page drops the two Olthoi rows and says
+   * why where they were. Retail always offered them (no server signal).
+   */
+  chargenOlthoiDisallowed = false;
 
   /** What SetHeritageGroup and the Random rolls read from ACCharGenData (CharGenState's charGenData). */
   private chargenRollDeps(): ChargenRollDeps {
@@ -7537,6 +7546,18 @@ export class GameUI {
         </div>`;
     }).join('');
 
+    // BUG.chargen-olthoi-pending — where the hidden Olthoi rows would be:
+    // a short note saying the world doesn't allow them, in the lore panel's
+    // body font, aligned with the row labels and wrapped clear of the
+    // portrait (0x100003be at x=258).
+    const noteRowStyle = this.datTextStyleFor(descRef(0x21000046, 0x100005c7));
+    const noteLeft = 21 + (noteRowStyle?.marginLeft ?? 64);
+    const noteWidth = 258 - 8 - noteLeft;
+    const olthoiNote = this.chargenOlthoiDisallowed && !this.chargen1999 ? `
+        <div class="chargen-olthoi-note" style="position:absolute;left:${noteLeft}px;top:${15 + datRows.length * 35 + 8}px;width:${noteWidth}px;">
+          <span data-ac-text="${OLTHOI_UNAVAILABLE_NOTE.replace(/"/g, '&quot;')}" ${GameUI.datTextAttrs(descRef(0x21000046, 0x100003c4))} data-ac-maxwidth="${noteWidth}"></span>
+        </div>` : '';
+
     // Portrait — 0x100003be (258,15) 265x450; gold frame is baked in
     const selectedRow = datRows.find(h => h.key === this.wizard.heritage) ?? datRows[0];
     const portraitUrl = this.getTexURL(selectedRow.portrait);
@@ -7570,6 +7591,7 @@ export class GameUI {
       <div style="position:relative;width:800px;height:485px;">
         <!-- 13 heritage radio rows — 0x21000046, x=21, 35px pitch -->
         ${heritageRadios}
+        ${olthoiNote}
 
         <!-- Portrait — 0x100003be (258,15) 265x450, frame baked into the art -->
         <div style="position:absolute;left:258px;top:15px;width:265px;height:450px;">
@@ -34720,6 +34742,21 @@ export class GameUI {
   noteCharGenVerificationResponse(): void {
     this.chargenVerificationPending = false;
     this.clearChargenReplyTimer();
+  }
+
+  /**
+   * BUG.chargen-olthoi-pending — the server refused an Olthoi (or the world
+   * is remembered as refusing them): stop offering the Olthoi heritages. A
+   * wizard still on an Olthoi moves to the first heritage the page lists,
+   * through SetHeritageGroup as a row click would, and the page redraws.
+   */
+  noteOlthoiDisallowed(): void {
+    this.chargenOlthoiDisallowed = true;
+    if (!this.wizard.isOlthoi) return;
+    const first = visibleHeritageRows(getString, this.chargenHeritageDefined)[0];
+    if (!first) return;
+    this.wizard.setHeritageGroup(first.key, this.chargenRollDeps(), this.chargenRandomSource);
+    if (this.uiManager.currentScreen === 'character-create') this.renderCharacterCreate();
   }
 
   /** A CharacterCreate is in flight (CG_VERIFICATION_RESPONSE_PENDING; tests / probes). */

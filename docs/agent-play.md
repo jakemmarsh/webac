@@ -17,6 +17,13 @@ Say "go play" (or `/play`). The skill (`.claude/skills/play/SKILL.md`) does this
    Holtburg start, via the probe chargen seed).
 2. The session loops: `ac_observe` → decide → act (`ac_walk_to`, `ac_use`, `ac_attack`, `ac_cast`,
    `ac_loot`, `ac_say`, …) → `ac_wait` (sleep until an event, instead of polling).
+   An observe prints its long lists in full once (every buff, the spells on your gear, the buffs you know that aren't
+   up, what is on your corpses, the money and vitae notes), then short while they say the same, for 15 minutes:
+   the buff count, the 4 soonest to end, when the rest end, every one that just landed and every one GONE since the
+   last look; protections, debuffs, what lowers a maximum vital, RUNNING LOW buffs and gear running out of mana are
+   always said in full. `ac_observe full=true` prints everything (2026-10-18: the 40-buff list and two corpses'
+   contents on every look made quick checks slow to read). The short record is the page's
+   (`AgentApi.playerObserve`); routines read `snapshot()`, which leaves it alone.
 3. `ac_stop` logs out and closes the window.
 
 The MCP server is registered in `.mcp.json` as `ac`. A session that started before that file existed (or
@@ -826,6 +833,12 @@ heal and hand control back on danger. The brief only listed a routine beside tho
     your buffed school skill against its power) gives way to the next level down, as the cast tool's pick does. VTank's
     SpellDiffExcessThreshold-Buff 5 alone let Invulnerability Self VI and Impenetrability VI through at 255 against 250
     (59%). The log names the level passed over, its chance and the bar.
+  - *Fight before rebuffing* (beyond VTank, `FightBeforeBuffs`, default 60 s; 0 is VTank's order, 2026-10-18 19:28Z
+    reports): VTank casts a due buff above Attack, so "Arcanist fights" cast Invulnerability Self VI and four banes at
+    the Aerbax Laboratory portal while two dolls hit him. Now, with a monster you can fight in range on you or coming at
+    you (not one stuck behind a wall), a rebuff waits for the fight, up to 60 s of it, and the log says once what waits
+    ("buff: waiting for the fight"). A Force Buff round is never held. Every macro step that ran 0.5 s or more says how
+    long it took ("took 1.6 s"): the 2 s cut-off left most self-buff casts (under 2 s each, all landed) without one.
   - *"You're too busy!" after a kit.* The kit landed; the attack task re-sent its attack during the bandaging and ACE
     refused that (Player_Melee: IsBusy). The attack task now sends no request while the client is busy with a use (its
     busy count, released by the server's UseDone). A `use` of a healing kit with no target goes on you (use-with-target

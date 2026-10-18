@@ -82,7 +82,7 @@ export function dispelOptionsAvailable(table: { spells: Map<number, { desc: stri
 }
 
 /** One thing to do, and doing it. */
-export interface VtStep { label: string; run: () => Promise<AgentResult> }
+export interface VtStep { label: string; run: () => Promise<AgentResult>; /** A buff step's spell, for the log when it waits (fightHold). */ spell?: string }
 
 const num = (v: unknown, d: number): number => { const n = Number(v); return Number.isFinite(n) ? n : d; };
 /** A VTank option's value from the profile's settings (any case), else VTank's default. */
@@ -1008,7 +1008,9 @@ export class VtMacro {
 
     // 4. Buffs whose time left is below RebuffTimeRemainingSeconds (a Force Buff round first), a monster
     // in range or not: VTank's BuffSelfNormal sits above Attack. Then SpellCompMin-Normal pea splitting.
-    const buff = this.buffStep(p, settings, ctx, fam, spells, skills, me.level, stance, false);
+    // Beyond VTank (FightBeforeBuffs): with a monster in range on you or coming at you, the rebuff waits for the fight,
+    // up to that many seconds of it (fightHold).
+    const buff = this.fightHold(this.buffStep(p, settings, ctx, fam, spells, skills, me.level, stance, false), settings, ctx.combat, seen.filter((o) => monsters.some((m) => m.guid === o.guid)));
     if (buff) return buff;
     const normalSplit = this.splitStep(p, settings, 'normal');
     if (normalSplit) return normalSplit;
@@ -1162,6 +1164,34 @@ export class VtMacro {
     return this.splitStep(p, settings, 'idle') ?? this.refillStep(p, settings, stance, 'PetRefillCount-Idle') ?? this.buffStep(p, settings, ctx, fam, spells, skills, me.level, stance, true);
   }
 
+  /** When the fight began holding the rebuff (FightBeforeBuffs), and whether the routine's log was told; null: no hold. */
+  private buffHold: { since: number; said: boolean } | null = null;
+
+  /**
+   * Beyond VTank (FightBeforeBuffs, beyondVtank.ts): BuffSelfNormal's step, unless a monster you can fight in range is
+   * hitting you or coming at you (not one stuck behind a wall). Then a rebuff (a cast, the switch to magic mode for one,
+   * a buff item) waits while the fight lasts, up to FightBeforeBuffs seconds of it, after which buffs go in again
+   * (VTank's order) so a long fight never runs them out. A Force Buff round and the buff notes (no self version, an
+   * untrained skill) are never held. VTank casts a due buff above Attack: "Arcanist fights" came out of the Aerbax
+   * Laboratory portal into two Innocuous Dolls and cast Invulnerability Self VI and four banes (one new breastplate
+   * lacked them) while they hit him, until he bolted them by hand (2026-10-18 18:40:05–18:40:17Z).
+   */
+  private fightHold(step: VtStep | null, settings: Record<string, string | number | boolean>, combat: boolean, inRange: ReadonlyArray<{ name: string; attackingYou?: number; comingAtYou?: string; comingAtYouStuck?: boolean }>): VtStep | null {
+    const limit = Math.max(0, Number(beyondSetting(settings, 'FightBeforeBuffs')) || 0) * 1000;
+    const threat = combat && limit > 0 ? inRange.filter((o) => !!o.attackingYou || (!!o.comingAtYou && !o.comingAtYouStuck)) : [];
+    if (!threat.length) { this.buffHold = null; return step; }
+    const now = this.now();
+    this.buffHold ??= { since: now, said: false };
+    if (!step || !/^(?:buff: |buff item: )/.test(step.label) || /^buff: (?:no self version known|not kept up)/.test(step.label)) return step;
+    if (now - this.buffHold.since >= limit) return step;
+    if (this.buffHold.said) return null;
+    this.buffHold.said = true;
+    const who = threat.slice(0, 3).map((o) => `${o.name} ${o.attackingYou ? 'on you' : 'coming at you'}`).join(', ');
+    const what = step.spell ? `${step.spell} (${step.label.replace(/^buff(?: item)?: /, '').replace(/: switching to magic mode to cast$/, '')})` : step.label.replace(/^buff(?: item)?: /, '');
+    const message = `the fight first (FightBeforeBuffs): ${who}; ${what} waits until it is over, or ${Math.round(limit / 1000)} s of it`;
+    return { label: 'buff: waiting for the fight', run: async () => ({ ok: true, message }) };
+  }
+
   /**
    * VirindiTank's buffing, in its two places in the rule list: `idleSlot` false is BuffSelfNormal (a buff
    * below RebuffTimeRemainingSeconds, and a Force Buff round), above Attack; true is BuffSelfIdle (the
@@ -1257,10 +1287,10 @@ export class VtMacro {
     // No spell due: a buff gem, food or potion (VTank tries its consumables after its spells).
     if (!next) return ctx.buffing ? this.buffItemStep(p, settings, idleSlot && ctx.idle, skills, level) : null;
     const mode = toMagicFirst(`buff: ${next.why}${this.levelNote(next)}${this.leftNote(next)}`);
-    if (mode) return mode;
+    if (mode) return { ...mode, spell: next.spell.name };
     const target = next.target === 'weapon' && weapon && !next.spell.self ? weapon.guid : 'self';
     const item = onItem(next);
-    return { label: `buff: ${next.why}${this.levelNote(next)}${this.leftNote(next)}`, run: async () => {
+    return { label: `buff: ${next.why}${this.levelNote(next)}${this.leftNote(next)}`, spell: next.spell.name, run: async () => {
       this.castSpent(settings);
       const res = await this.castBuff(next.spell, target, settings);
       const ok = item ? this.noteItemBuff(res, next.spell, item, weaponRef) : castConfirmed(res, next.spell.name);

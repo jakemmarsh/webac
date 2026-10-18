@@ -463,6 +463,7 @@ export class RoutineEngine {
     this.handNoted = false;
     this.handPick = null;
     this.settings = { ...MACRO_DEFAULTS };
+    this.coverSaid.clear();
     for (const [k, v] of Object.entries(profile.settings ?? {})) this.settings[vtCanonicalName(k)] = v;
     // VirindiTank's Auto-Navigation and Looting profiles: the route and loot set it starts with.
     const navRoute = profile.navRoute ? profile.routes.find((r) => r.name === profile.navRoute) : undefined;
@@ -499,6 +500,32 @@ export class RoutineEngine {
       ...(this.follow && this.nav?.route.mode === 'follow' ? { follow: { target: this.follow.who, inSight: this.follow.inSight, trail: this.follow.trail.length } } : {}),
     };
   }
+
+  /**
+   * What the running macro does on its own that a hand cast just did, for that cast's answer (said once per kind each
+   * run): its Helper's level for a fellow's vital (DoHelp + Recharge-Helper-HitP / -Stam / -Mana: VTank restores a
+   * fellow's vital below it, and the -Stam and -Mana defaults of 1 % keep it from ever doing so), and its own-buff
+   * upkeep (EnableBuffing, RebuffTimeRemainingSeconds). Arcanist cast Revitalize Other on Bulwark by hand 23 times
+   * a segment with "Arcanist fights" running at Recharge-Helper-Stam 1 (2026-10-18 19:26–20:30Z). Null: nothing to say.
+   */
+  coverFor(kind: 'health' | 'stamina' | 'mana' | 'self-buff'): { profile: string; setting: string; value: number; on: boolean } | null {
+    // on: the Helper may act (DoHelp), or own-buff upkeep is on.
+    const p = this.profile;
+    if (!p || this.paused || !p.macro || !p.vtank || this.coverSaid.has(kind)) return null;
+    let out: { profile: string; setting: string; value: number; on: boolean } | null = null;
+    if (kind === 'self-buff') {
+      if (!p.modules.buffs || !truthySetting(this.settings.EnableBuffing)) return null;
+      out = { profile: p.name, setting: 'RebuffTimeRemainingSeconds', value: Number(this.settings.RebuffTimeRemainingSeconds) || 0, on: true };
+    } else {
+      const setting = `Recharge-Helper-${({ health: 'HitP', stamina: 'Stam', mana: 'Mana' } as const)[kind]}`;
+      const value = Number(this.settings[setting]) || 0;
+      out = { profile: p.name, setting, value, on: truthySetting(this.settings.DoHelp) };
+    }
+    this.coverSaid.add(kind);
+    return out;
+  }
+  /** The kinds coverFor said this run. */
+  private coverSaid = new Set<string>();
 
   /**
    * The running macro profile's name when it fights for you (running, not paused, the macro with EnableCombat and the
@@ -833,17 +860,25 @@ export class RoutineEngine {
   }
 
   /**
-   * A macro step's log line, stamped when the step began, with "(took N s)" when it ran 2 s or more. Stamped at its
-   * end, a bolt's line came 4–9 s after the "turning to face" before it (the cast's whole wind-up, flight and the server's
-   * UseDone), and read as a 5–9 s wait before each bolt (Arcanist, Aerbax Haven, 2026-10-18 06:21–07:14Z).
+   * A macro step's log line, stamped when the step began, with "(took N s)" when it ran MACRO_STEP_TOOK_MS or more.
+   * Stamped at its end, a bolt's line came 4–9 s after the "turning to face" before it (the cast's whole wind-up, flight
+   * and the server's UseDone), and read as a 5–9 s wait before each bolt (Arcanist, Aerbax Haven, 2026-10-18 06:21–07:14Z).
    */
   private runMacroStep(step: { label: string; run: () => Promise<AgentResult> }): Promise<void> {
     const at = this.now(), wall = Date.now();
     return step.run().then((r) => {
       const took = this.now() - at;
-      this.note(`${step.label}: ${r.message.split('\n')[0]}${RoutineEngine.missedCastNote(r)}${took >= 2000 ? ` (took ${(took / 1000).toFixed(1)} s)` : ''}`, wall);
+      this.note(`${step.label}: ${r.message.split('\n')[0]}${RoutineEngine.missedCastNote(r)}${took >= RoutineEngine.MACRO_STEP_TOOK_MS ? ` (took ${(took / 1000).toFixed(1)} s)` : ''}`, wall);
     }).catch((e) => this.failed('macro', e, step.label));
   }
+
+  /**
+   * A step that ran this long (ms) or more says how long. Before 2026-10-18 only 2 s or more did, and a rebuff round of
+   * eleven self buffs read as cut short: nine said no time, each a level I–III self buff of under 2 s (they went out 1.5 s apart) that landed (they
+   * showed 23m+ left six minutes on), and only the two Aura V casts, 3.4 s, passed the bar (Arcanist, Aerbax Haven,
+   * 19:21:09–28Z). Every cast takes longer than this; an instant step (a log note) says nothing.
+   */
+  static readonly MACRO_STEP_TOOK_MS = 500;
 
   /**
    * A cast step whose spell went out but did not take (a fizzle, a resist, an immune target), said on its log line: only
@@ -1511,6 +1546,22 @@ export class RoutineEngine {
     return { advance: true, ok, message: last };
   }
 
+  /** What the Follow did on its own lately (a drop taken, a portal gone through after the leader), with when (engine ms). */
+  private followMoves: Array<{ at: number; text: string }> = [];
+  private followMoved(text: string): void {
+    this.followMoves.push({ at: this.now(), text });
+    if (this.followMoves.length > 8) this.followMoves.shift();
+  }
+  /**
+   * The Follow's own moves after its leader since `t` (engine ms), oldest first: a wait that answers "nothing" says them
+   * (AgentApi.wait). Arcanist walked to Bulwark by hand 14 times after his "dropping 6 m, hop after me", each after a
+   * 10–15 s wait that said nothing, while her routine had already dropped after him (the hand walks took no drop:
+   * 2026-10-18 19:43–20:27Z, e.g. the Follow's drop at 19:54:37, her walk_to at 19:54:46).
+   */
+  followMovesSince(t: number): string[] {
+    return this.followMoves.filter((m) => m.at >= t).map((m) => m.text);
+  }
+
   /**
    * A Follow route's leader, every FOLLOW_SAMPLE_MS while navigation runs:
    * record where they are (the corners of their path, for
@@ -1541,6 +1592,10 @@ export class RoutineEngine {
     const portal = this.followPortalFor(f.who, !!lead, !!obs.me);
     if (portal) {
       if (!f.portal || f.portal.guid !== portal.guid) this.note(`Follow: ${f.who} went through ${portal.name} #${portal.guid.toString(16)} (${portal.why}); following through it`);
+      // A walk at them under way ends now (the next step takes the portal): it was aimed at where the server now places
+      // them, in another space. Arcanist's ran 14 s at Bulwark's landing spot 27 km off after he took the Surface portal,
+      // and she followed him through by hand (Aerbax Laboratory, 2026-10-18 19:59:14–28Z).
+      if (f.walking && f.walking !== 'portal') { f.walking = null; this.api.stopMoving(); }
       f.portal = portal;
       f.lastSeen = null;
       f.inSight = true;
@@ -1570,6 +1625,14 @@ export class RoutineEngine {
     addTrailPoint(f.trail, leaderAt(obs.me.pos, lead), obs.me.pos);
     // Running straight at them and they turned a corner: end that leg, so the next one runs their path.
     if (f.walking === 'lead' && f.trail.length > 1 && truthySetting(this.settings.FollowAroundCorners) && !obs.me.indoors) { f.walking = null; this.api.stopMoving(); }
+  }
+
+  /** A Follow walk's answer that took a drop ("on the way you dropped off a ledge (6.0 m)"): noted in the log and for waits. */
+  private noteFollowDrop(message: string, who: string): void {
+    const m = /dropped (off (?:a ledge|\d+ ledges) \([^)]+\))/.exec(message);
+    if (!m) return;
+    this.note(`Follow: dropped ${m[1]} after ${who}`);
+    this.followMoved(`dropped ${m[1]} after ${who}`);
   }
 
   /** The portal a Follow takes after its leader (AgentApi.fellowPortal), with FollowThroughPortals on; none while they are in sight or one tried lately failed. */
@@ -1639,6 +1702,7 @@ export class RoutineEngine {
           const pg = f.portal;
           const r = await this.api.use(pg.guid);
           this.note(`Follow: through ${pg.name} #${pg.guid.toString(16)} after ${f.who}: ${r.message.split('\n')[0]}`);
+          if (r.ok) this.followMoved(`went through ${pg.name} after ${f.who}`);
           if (!r.ok) { this.followPortalFailed.set(pg.guid, this.now()); this.report(`Follow: couldn't follow ${f.who} through ${pg.name}: ${r.message.split('\n')[0]}`, 'Warnings'); }
           f.portal = null;
           return;
@@ -1650,6 +1714,7 @@ export class RoutineEngine {
           if (f.noWayUntil && this.now() < f.noWayUntil) { await sleep(1000); return; }
           f.walking = 'last-seen';
           const r = await this.api.walkTo(f.who, { within: 2, timeoutMs: 15_000 });
+          this.noteFollowDrop(r.message, f.who);
           if (!r.ok && /no way on foot|no doorway route|routeCutOff/i.test(r.message)) {
             f.noWayUntil = this.now() + FOLLOW_NO_WAY_MS;
             this.report(`Follow: no way on foot to where ${f.who} was last placed: ${r.message.split('\n')[0].replace(/^[^:]*: /, '')}; standing still (ask them where they are)`, 'Warnings');
@@ -1687,6 +1752,7 @@ export class RoutineEngine {
           // reaches is not walked at every cycle.
           if (f.noWayUntil && this.now() < f.noWayUntil) { await sleep(1000); return; }
           const r = await this.api.walkTo(lead.guid, { within: otherStorey ? Math.min(within, STOREY_FOLLOW_M) : within, timeoutMs: 15_000 });
+          this.noteFollowDrop(r.message, f.who);
           if (!r.ok && /no way on foot/i.test(r.message)) {
             f.noWayUntil = this.now() + FOLLOW_NO_WAY_MS;
             this.report(`Follow: no way on foot to ${f.who}: ${r.message.split('\n')[0].replace(/^[^:]*: /, '')}; standing still (ask them to come to you)`, 'Warnings');

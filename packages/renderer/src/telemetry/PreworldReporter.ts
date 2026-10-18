@@ -252,6 +252,9 @@ export const BOOT_SLOW_MS = 20_000;
 export type BootPatchEvent = { kind: 'begin'; expected: number } | { kind: 'downloaded'; bytes: number } | { kind: 'end' } | { kind: string };
 
 /** Exactly what goes on the wire: no other field exists. */
+/** HeritageGroup's highest value (OlthoiAcid = 13; ACE HeritageGroup.cs): the bound on a reported heritage. */
+export const MAX_HERITAGE = 13;
+
 export interface PreworldEvent {
   outcome: PreworldOutcome;
   era: string;
@@ -301,6 +304,13 @@ export interface PreworldEvent {
    * Absent otherwise.
    */
   stream?: BootStreamReport[];
+  /**
+   * BUG.chargen-olthoi-pending — chargen_ok / chargen_refused only: the
+   * heritage the CharacterCreate asked for (HeritageGroup 1–13), so an
+   * Olthoi refused by olthoi_play_disabled (code 2) shows as such. Absent
+   * otherwise, or when not a known heritage.
+   */
+  heritage?: number;
   /** 'handover' only: from the handover's start (or the drop) to back in the world, why and how. */
   handoverMs?: number;
   reason?: HandoverReason;
@@ -526,9 +536,10 @@ export class PreworldReporter {
   }
 
   /** A CharacterGenerationVerificationResponse: Ok, or the refusal code with its string-table token (ID_Character_Err_*). */
-  chargenResult(responseCode: number): void {
-    if (responseCode === CharacterGenerationVerificationResponse.Ok) this.report('chargen_ok', { code: responseCode });
-    else this.report('chargen_refused', { code: responseCode >>> 0, token: safeToken(characterCreateErrorToken(responseCode)) });
+  chargenResult(responseCode: number, heritage?: number | null): void {
+    const h = typeof heritage === 'number' && Number.isInteger(heritage) && heritage >= 1 && heritage <= MAX_HERITAGE ? { heritage } : {};
+    if (responseCode === CharacterGenerationVerificationResponse.Ok) this.report('chargen_ok', { code: responseCode, ...h });
+    else this.report('chargen_refused', { code: responseCode >>> 0, token: safeToken(characterCreateErrorToken(responseCode)), ...h });
   }
 
   /** BUG.chargen-finish-silent — FINISH sent a CharacterCreate (the reply comes as chargen_ok / chargen_refused). */
@@ -867,7 +878,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'handoverMs' | 'reason' | 'path'>>, withStream = false): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path'>>, withStream = false): void {
     if (!this.opts.endpoint) return;
     if (outcome === 'handover' ? this.handoversSent >= MAX_HANDOVER_EVENTS : this.sent >= MAX_PREWORLD_EVENTS) return;
     const { screen, step } = this.sample();
@@ -896,6 +907,7 @@ export class PreworldReporter {
         : { stage: null, progress: null, doneKB: null, totalKB: null, cache: null, caps: null }),
       ...((withStream || screen === 'boot') && this.streams.size > 0 ? { stream: [...this.streams.values()].map((r) => ({ ...r })) } : {}),
       ...(f.net ? { net: f.net } : {}),
+      ...(f.heritage !== undefined ? { heritage: f.heritage } : {}),
       ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path } : {}),
     };
     if (outcome === 'handover') this.handoversSent++;

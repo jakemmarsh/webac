@@ -1124,6 +1124,8 @@ export interface ObserveOptions {
   radius?: number; max?: number; filter?: string;
   /** Examine the nearest monsters with no known level (the player's ac_observe / ac_look; routines don't). */
   levels?: boolean;
+  /** The player's look (playerObserve): every list in full, none short for having been printed a moment ago. */
+  full?: boolean;
 }
 
 type TargetArg = number | string | null | undefined;
@@ -1421,7 +1423,7 @@ export class AgentApi {
    * Observe's `corpses:` line: each corpse of yours from the last hours, newest first, with where it lies, what is on
    * it (which of it you wore), and how long it has left, or that it rotted or went; null when there is none.
    */
-  corpsesLine(): string | null {
+  corpsesLine(brief = false): string | null {
     this.loadMyCorpses();
     this.settleMyCorpses();
     if (!this.myCorpses.length) return null;
@@ -1435,9 +1437,11 @@ export class AgentApi {
       const state = c.gone ? `GONE ${AgentApi.spanText(now - c.gone)} ago (left your view: looted empty, or rotted)`
         : left <= 0 ? `ROTTED ${AgentApi.spanText(-left)} ago: what was on it is gone for good`
           : `rots in about ${AgentApi.spanText(left)}${c.guid !== undefined && !c.seenLost ? ' (in view now)' : ''}`;
+      // Short (playerObserve: the same corpses, said in full a moment ago): where and its state, not what is on it.
+      if (brief) return `from your death ${AgentApi.spanText(now - c.wall)} ago in ${inside ? `cell 0x${(c.cell >>> 0).toString(16).toUpperCase().padStart(8, '0')}` : c.coords ? `${c.coords}` : c.place} (${c.items.length} item${c.items.length === 1 ? '' : 's'}): ${state}`;
       return `from your death ${AgentApi.spanText(now - c.wall)} ago${c.killer ? ` (${c.killer})` : ''} ${where}: ${what}; ${state}`;
     });
-    return `your corpses: ${parts.join('; ')}`;
+    return `your corpses: ${parts.join('; ')}${brief ? ' (what is on each: ac_observe full=true)' : ''}`;
   }
 
   /** Ties the remembered corpse to the object in view, and forgets it once it rotted or left the client while in view. */
@@ -1648,7 +1652,11 @@ export class AgentApi {
       if (o) return { name: f.name, healthPct, dist: o.dist, bearing: o.bearing, ...(Math.abs(o.dz) >= 2 ? { dz: o.dz } : {}), ...(coords ? { coords } : {}), ...(threats ? { threats } : {}), ...(stuckThreats ? { stuckThreats } : {}) };
       const last = this.fellowLastSeen(f.guid);
       const arriving = last ? null : this.fellowArrivingText();
-      return { name: f.name, healthPct, ...(last ? { lastSeen: this.lastSeenText(last) } : {}), ...(arriving ? { arriving } : {}) };
+      // Last placed in another space (sealedApart): where, not a distance across it.
+      const me = this.host.self();
+      const elsewhere = !last && at?.cell && me?.cell && this.sealedApart(me.cell, at.cell)
+        ? `the client last placed them in ${this.dungeonish(at.cell) ? `another dungeon (landblock 0x${(at.cell >>> 16).toString(16).toUpperCase().padStart(4, '0')})` : 'the landscape, outside this dungeon'}, where nothing of theirs reaches you; they may be on their way (ask in /f)` : null;
+      return { name: f.name, healthPct, ...(last ? { lastSeen: this.lastSeenText(last) } : {}), ...(elsewhere ? { elsewhere } : arriving ? { arriving } : {}) };
     });
   }
 
@@ -1824,7 +1832,47 @@ export class AgentApi {
 
   /** Events as a wait hands them back: threat events about creatures dead or gone by now, and vital alarms healed past, left out. */
   private deliverable(evs: AgentEvent[]): AgentEvent[] {
-    return evs.filter((e) => !this.stale(e) && !this.answeredTaskDone(e)).map((e) => this.killWhen(this.fellowWhereNow(this.onYouNow(this.attackedSince(e)))));
+    const live = evs.filter((e) => !this.stale(e) && !this.answeredTaskDone(e) && !this.aimedElsewhereNow(e));
+    return AgentApi.newestThreatPerCreature(live).map((e) => this.killWhen(this.fellowWhereNow(this.onYouNow(this.attackedSince(e)))));
+  }
+
+  /**
+   * Of the aggro / fellow-aggro events about one creature (and one fellow) in a batch, only the newest: what it does now.
+   * A walk's 27 s handed Bulwark one Marionette (#8000ca48) three times over, coming at him, then at Arcanist twice, then
+   * "keeps facing your fellow … stuck", beside two more stuck Marionettes' alerts, all at once when the walk ended
+   * (Aerbax Haven, 2026-10-18 19:18:48Z). The newest says the latest of it, the stuck note included.
+   */
+  static newestThreatPerCreature(evs: AgentEvent[]): AgentEvent[] {
+    const key = (e: AgentEvent): string | null => ((e.type === 'aggro' || e.type === 'fellow-aggro') && e.guid !== undefined ? `${e.type}:${e.guid >>> 0}:${e.fellow ?? ''}` : null);
+    const last = new Map<string, number>();
+    for (const e of evs) { const k = key(e); if (k) last.set(k, e.seq); }
+    return evs.filter((e) => { const k = key(e); return !k || last.get(k) === e.seq; });
+  }
+
+  /**
+   * An aggro / fellow-aggro read FELLOW_EVENT_STALE_MS or more after it came, about a creature in view that is no longer
+   * coming at that one (you, or the fellow, in view) and not hitting you: it went for someone else, home, or gave up.
+   * Its alert no longer holds, so it isn't handed over as news. One whose place or whose fellow is out of sight is kept
+   * (unknown), as is one not watched (no trail); one stuck facing them still aims at them (comingAt), and its stuck note
+   * says so.
+   */
+  private aimedElsewhereNow(e: AgentEvent): boolean {
+    if ((e.type !== 'aggro' && e.type !== 'fellow-aggro') || e.guid === undefined) return false;
+    if (this.host.now() - e.t < AgentApi.FELLOW_EVENT_STALE_MS) return false;
+    const me = this.me();
+    if (!me) return false;
+    const g = e.guid >>> 0;
+    const o = this.host.object(g);
+    // Not watched (no trail sampled: too far from you to follow), so where it aims is unknown: kept.
+    if (!o || !o.cell || this.released(o) || !this.creatureTrail.has(g)) return false;
+    const who = e.type === 'aggro' ? me.s.guid : e.fellow;
+    if (who === undefined) return false;
+    if (e.type === 'aggro' && this.attackersOfMe().has(g)) return false;
+    if (e.type === 'fellow-aggro') {
+      const w = this.host.object(who);
+      if (!w || !w.cell || this.released(w)) return false;
+    }
+    return !this.comingAt(who).some((c) => c.guid >>> 0 === g);
   }
 
   /**
@@ -2521,7 +2569,7 @@ export class AgentApi {
   private noteSeen(line: string, type?: number): void {
     this.loadSeenKinds();
     const t = line.replace(/^Critical hit!\s*/i, '').trim();
-    const note = (name: string | null | undefined, spell: string | null, dmg: number): void => {
+    const note = (name: string | null | undefined, spell: string | null, dmg: number, notHealth = false): void => {
       const n = name?.replace(/^the /i, '').trim();
       if (!n || /^you$/i.test(n)) return;
       // Monsters only: a player or NPC named in a line (a fellow's buff on you) is no danger to note.
@@ -2532,7 +2580,8 @@ export class AgentApi {
       if (!e) { e = { spells: new Map(), maxHit: 0, words: false }; this.seenKinds.set(k, e); }
       const before = JSON.stringify([e.words, e.maxHit, e.spells.get(spell ?? '')]);
       if (spell === '') e.words = true;
-      else if (spell) e.spells.set(spell, Math.max(e.spells.get(spell) ?? 0, dmg));
+      // A line naming another vital proves the spell takes no health: a number stored for it before (read as health) goes.
+      else if (spell) e.spells.set(spell, notHealth ? 0 : Math.max(e.spells.get(spell) ?? 0, dmg));
       else e.maxHit = Math.max(e.maxHit, dmg);
       if (JSON.stringify([e.words, e.maxHit, e.spells.get(spell ?? '')]) !== before) this.saveSeenKinds();
     };
@@ -2541,8 +2590,19 @@ export class AgentApi {
     if (type === 0x15 && (m = /^(.+?) for (\d+) points?\b.*\bwith (.+?)[.!]?$/i.exec(t))) { note(this.attackerOf(t).name, m[3], Number(m[2])); return; }
     // "Lich scratches your upper leg for 6 points of slashing damage!" (a blow)
     if (type === 0x15 && (m = /\b(?:you|your\b.*?) for (\d+) points?\b/i.exec(t)) && !/^you\b/i.test(t)) { note(this.attackerOf(t).name, null, Number(m[1])); return; }
-    // "You lose 12 points of health due to Lich casting Drain Health Other II on you"
-    if ((m = /^You lose (\d+) points? of \w+ due to (.+?) casting (.+?) on you\.?$/i.exec(t))) { note(m[2], m[3], Number(m[1])); return; }
+    // "You lose 12 points of health due to Lich casting Drain Health Other II on you". Only health is harm here: ACE
+    // WorldObject_Magic names the vital ("You lose 22 points of mana due to Innocent Doll casting Drain Mana Other III on
+    // you"), and before 2026-10-18 a mana or stamina drain was kept as that much health taken, so an Aerbax Haven doll's
+    // Drain Mana Other III "took 22 of your 205 health" and stopped Bulwark's walks a dozen times in an hour, and
+    // Arcanist's repeat Flame Bolt (2026-10-18 18:40:23Z, 19:00–19:26Z).
+    if ((m = /^You lose (\d+) points? of (\w+) due to (.+?) casting (.+?) on you\.?$/i.exec(t))) {
+      const health = m[2].toLowerCase() === 'health';
+      // The AC1999 server fills the two names the other way round ("due to %s casting %s on you" given the spell, then
+      // the caster: SpellcastingManager.cpp SendTransferVitalPercentText); the spell table tells which is the spell.
+      const swap = this.isSpellName(m[3]) && !this.isSpellName(m[4]);
+      note(swap ? m[4] : m[3], swap ? m[3] : m[4], health ? Number(m[1]) : 0, !health);
+      return;
+    }
     // "Lich cast Bafflement Other II on you", "Lich casts Drain Health Other II and drains …", "Lich fails to affect you with …".
     // A buff (or debuff) that stacked with one you had carries a suffix, and one on your armor or weapon names it (ACE
     // WorldObject_Magic: "{caster} cast {spell} on you{suffix}", suffix ", refreshing X" / ", surpassing X" / ", but it is
@@ -2585,7 +2645,8 @@ export class AgentApi {
     this.loadSeenKinds();
     const e = this.seenKinds.get(name.toLowerCase());
     if (!e) return null;
-    const spells = [...e.spells].sort((a, b) => b[1] - a[1]);
+    // A mana or stamina drain's number (stored as health by older sessions) is no health taken: shown bare.
+    const spells = [...e.spells].map(([s, d]): [string, number] => [s, d > 0 && this.spellTakesNoHealth(s) ? 0 : d]).sort((a, b) => b[1] - a[1]);
     const parts: string[] = [];
     if (spells.length) parts.push(`casts ${spells.slice(0, 4).map(([s, d]) => (d > 0 ? `${s} (${d})` : s)).join(', ')}${spells.length > 4 ? ` +${spells.length - 4} more` : ''}`);
     else if (e.words) parts.push('casts spells (heard its spell words)');
@@ -2860,9 +2921,9 @@ export class AgentApi {
     const out: string[] = [];
     const chat = this.eventsSince(since)
       .filter((e) => (e.type === 'chat' && !e.plugin && !/^\(\w+\) (Approaching|Using the) /.test(e.text) && !this.otherPlayersWords(e.text)) || e.type === 'dialog' || e.type === 'portal')
-      .map((e) => (e.type === 'chat' ? e.text.replace(/^\(\w+\) /, '') : `${e.type}: ${e.text}`));
+      .map((e) => (e.type === 'chat' ? this.portalCooldownText(e.text.replace(/^\(\w+\) /, ''), null) : `${e.type}: ${e.text}`));
     out.push(...chat);
-    for (const e of this.eventsSince(since)) if (e.type === 'use-failed' && !chat.some((l) => e.text.startsWith(l))) out.push(`the server refused it: ${e.text}`);
+    for (const e of this.eventsSince(since)) if (e.type === 'use-failed' && !chat.some((l) => e.text.startsWith(l.split(' (the server refusing ')[0]))) out.push(`the server refused it: ${e.text}`);
     for (const l of chat) { const why = this.scrollShortfall(l); if (why) out.push(why); }
     const after = this.useMark(mark.target);
     if (mark.open !== undefined && after.open !== undefined && after.open !== mark.open) out.push(`${this.nameOf(mark.target!)} is now ${after.open ? 'open' : 'closed'}`);
@@ -3197,7 +3258,7 @@ export class AgentApi {
         // 5 m NE and 25 m N at once (Arcanist, Mountain Keep 08:01:42Z, 2026-10-17: #8000475f; Bulwark had run 20 m N).
         const mine = `${c.dist.toFixed(0)} m ${compassPoint(c.bearing)} of you`;
         if (v === 'raise') this.push('fellow-aggro', `${this.threatText(c)} is ${c.on ? 'on' : 'coming at'} your fellow ${f.name}${c.on ? '' : `, ${c.toWho.toFixed(0)} m from them and ${mine}`} (${c.how.replace(/\byou\b/g, 'them')}); ${f.name} is ${this.fellowWhere(f.guid, me)}, ${f.health.max > 0 ? Math.round((100 * f.health.cur) / f.health.max) : '?'}% health`, c.guid, undefined, f.guid);
-        else if (typeof v === 'number') this.push('fellow-aggro', `${this.threatText(c)} keeps facing your fellow ${f.name}, ${c.toWho.toFixed(0)} m from them and ${mine} (${c.how.replace(/\byou\b/g, 'them')}), but it hasn't come closer to them in ${Math.round(v / 1000)} s: stuck, or it can't path round to them. No more fellow-aggro for it until it closes in on them.`, c.guid);
+        else if (typeof v === 'number') this.push('fellow-aggro', `${this.threatText(c)} keeps facing your fellow ${f.name}, ${c.toWho.toFixed(0)} m from them and ${mine} (${c.how.replace(/\byou\b/g, 'them')}), but it hasn't come closer to them in ${Math.round(v / 1000)} s: stuck, or it can't path round to them. No more fellow-aggro for it until it closes in on them.`, c.guid, undefined, f.guid);
       }
       if (f.health.max <= 0) continue;
       const frac = f.health.cur / f.health.max;
@@ -3581,7 +3642,7 @@ export class AgentApi {
    * Holtburg, 2026-10-17 11:59:49Z).
    */
   replyLines(sinceSeq: number): string[] {
-    return this.eventsSince(sinceSeq).filter((e) => e.type === 'chat' && !e.plugin).map((e) => e.text.replace(/^\(\w+\) /, ''));
+    return this.eventsSince(sinceSeq).filter((e) => e.type === 'chat' && !e.plugin).map((e) => this.portalCooldownText(e.text.replace(/^\(\w+\) /, ''), 'this action'));
   }
 
   /**
@@ -3614,8 +3675,29 @@ export class AgentApi {
     }
     this.lookSeq = Math.max(this.lookSeq, ...evs.map((e) => e.seq));
     for (const e of evs) if (e.type === 'chat' && e.seq > this.chatCursor) this.chatByWait.add(e.seq);
+    if (!evs.length) { const quiet = this.routineMovedText(start); return quiet ? [{ seq: since, t: Math.round(this.host.now()), type: 'now', text: quiet }] : evs; }
     const head = this.pileUpHead(evs, since);
     return head ? [head, ...evs] : evs;
+  }
+
+  /**
+   * For a wait that found nothing it asked for: what your routine's Follow did on its own meanwhile (a drop or a portal
+   * taken after its leader: RoutineEngine.followMovesSince), and where the leader is now; null when it did nothing.
+   * Arcanist's waits after Bulwark's "dropping 6 m, hop after me" answered "(nothing within 10 s)" while her routine had
+   * already dropped after him, and she walked to him by hand each time (2026-10-18 19:43–20:27Z).
+   */
+  private routineMovedText(since: number): string | null {
+    const moves = this.routine.followMovesSince(since);
+    if (!moves.length) return null;
+    const r = this.routine.status();
+    const who = r.follow?.target;
+    const lead = who ? this.nearby(250).find((o) => o.name.toLowerCase() === who.toLowerCase()) : undefined;
+    const where = lead ? `; ${lead.name} is ${lead.dist.toFixed(1)} m ${compassPoint(lead.bearing)} of you now` : '';
+    const secs = Math.max(0, Math.round((this.host.now() - since) / 1000));
+    // The same move again and again (a drop each leg down a stair of ledges): once, with how many times.
+    const runs: Array<{ text: string; n: number }> = [];
+    for (const m of moves) { const last = runs[runs.length - 1]; if (last && last.text === m) last.n++; else runs.push({ text: m, n: 1 }); }
+    return `nothing you waited for came within ${secs} s; meanwhile your routine${r.profile ? ` "${r.profile}"` : ''} ${runs.map((x) => (x.n > 1 ? `${x.text} (${x.n} times)` : x.text)).join(', then ')} on its own${where}`;
   }
 
   /** A wait whose oldest event is this old (ms) when it is read starts with how things stand now (pileUpHead). */
@@ -3662,7 +3744,10 @@ export class AgentApi {
       const isDead = dead.has(tg >>> 0) || this.host.isDying(tg) || this.host.targetHealth() === 0;
       parts.push(isDead ? `your selection ${deadName(tg)} is dead` : o ? `your selection ${o.name} ${hex(tg)}${this.host.targetHealth() !== undefined ? ` at ${Math.round(this.host.targetHealth()! * 100)}%` : ''}` : `your selection ${hex(tg)} is out of sight`);
     }
-    parts.push(`you: health ${pc(me.s.health)}, mana ${pc(me.s.mana)}`);
+    // A maximum lowered by a debuff, said with it: "health 198/198 (100%)" during a Marionette's Frailty Other II (−15
+    // Endurance) read to Bulwark as his max health dropping from 205 with no debuff shown (Aerbax Haven, 2026-10-18 19:22:40Z).
+    const lowered = this.vitalsLoweredText();
+    parts.push(`you: health ${pc(me.s.health)}, mana ${pc(me.s.mana)}${lowered ? ` (${lowered})` : ''}`);
     const fs = (this.host.fellows?.() ?? []).filter((f) => f.health.max > 0);
     if (fs.length) parts.push(`fellows: ${fs.map((f) => `${f.name} ${Math.round((100 * f.health.cur) / f.health.max)}%`).join(', ')}`);
     const n = evs.length;
@@ -4084,6 +4169,17 @@ export class AgentApi {
     return ((a ^ b) & 0xffff0000) !== 0 && (this.dungeonish(a) || this.dungeonish(b));
   }
 
+  /**
+   * Two cells in different landblocks, one of them a known dungeon cell (cellSealed true: no SeenOutside), so nothing in
+   * one reaches the other (ACE: a dungeon landblock has no adjacents, a sealed cell sees only its VisibleCells). Narrower
+   * than apartSpaces: a building's cell whose data hasn't loaded (cellSealed null) is not taken for a dungeon.
+   */
+  private sealedApart(a: number, b: number): boolean {
+    if (((a ^ b) & 0xffff0000) === 0) return false;
+    const sealed = (c: number): boolean => (c & 0xffff) >= 0x100 && this.host.cellSealed?.(c) === true;
+    return sealed(a) || sealed(b);
+  }
+
   /** A fellow's last-seen spot older than this (ms) is no lead: they could be anywhere in the dungeon by now. */
   static readonly FELLOW_LAST_SEEN_MAX_MS = 300_000;
 
@@ -4288,6 +4384,11 @@ export class AgentApi {
       // A creature or player outside the server's update range is only its last-known position: the client keeps it,
       // but nothing moves it any more (a fellow 430 m off read 212 m, 2026-10-10).
       if ((o.itemType & IT.Creature) && o.cell && !inUpdateRange(me.s.cell, o.cell)) continue;
+      // Or in another landblock with a dungeon cell on either side: ACE gives a dungeon landblock no adjacent ones
+      // (LandblockManager.GetAdjacentIDs) and a sealed cell sees only its own landblock's (VisibleCells), so nothing
+      // moves it any more. Arcanist, just through the Aerbax Haven portal (0x029F), read "Claude Bulwark 213 m S" for
+      // Bulwark's last spot in the Laboratory, 0x029E, the next landblock on the grid (2026-10-18 18:56Z).
+      if ((o.itemType & IT.Creature) && o.cell && this.sealedApart(me.s.cell, o.cell)) continue;
       // Likewise a creature in a dungeon cell out of sight of yours that the server has stopped placing: its place is
       // stale. One the server placed a moment ago is where it is: a fellow walking beside Bulwark in Holtburg Dungeon read
       // "out of sight (was 0 m away)" crossing 0x01F60269, whose VisibleCells lack the cell he stood in (2026-10-12).
@@ -4406,6 +4507,58 @@ export class AgentApi {
     return { profile: rs.profile, paused: rs.paused, ...(rs.heldFor ? { held: rs.heldFor } : {}), actedAgoMs: acted === -Infinity ? null : Math.max(0, this.host.now() - acted) };
   }
 
+  /**
+   * Each long observe section as the player's own last full print of it held it (a key of what it says, not its
+   * timers), and when (host ms): playerObserve prints it short while it is the same and that print is under
+   * OBSERVE_REFULL_MS old.
+   */
+  private shownFull = new Map<string, { key: string; at: number }>();
+  /** The beneficial buffs on you at the player's last look (their drops are named in the next). */
+  private buffsAtLastLook: Set<string> | null = null;
+  /** A long section printed in full is printed short at the player's looks for this long (ms) while it stays the same. */
+  static readonly OBSERVE_REFULL_MS = 15 * 60_000;
+
+  /**
+   * The player's own look (ac_observe, ac_look, the hosted observe): observe(), with the long sections that their last
+   * look printed in full and that say the same now marked short (`brief`), and the buffs gone since that look named.
+   * The 40-buff list, two corpses' contents and the money and vitae notes on every observe made a quick check slow to
+   * read (Bulwark and Arcanist, Aerbax Haven, 2026-10-18 19:28Z). `full`: everything in full. Routines read
+   * snapshot(), which leaves this record alone.
+   */
+  playerObserve(o: ObserveOptions = {}): AgentObservation {
+    const obs = this.observe({ ...o, levels: true });
+    if (obs.screen !== 'world' || !obs.me) return obs;
+    const now = this.host.now();
+    const brief: string[] = [];
+    // A key without the numbers in it (timers, counts): "rots in about 1 h 4 min" and "… 58 min" are one state.
+    const digitless = (t: string): string => t.replace(/\d+ h( \d+ min)?|\d+ min|[\d,.]+/g, '#');
+    const section = (name: string, key: string | null | undefined): void => {
+      if (key === null || key === undefined) { this.shownFull.delete(name); return; }
+      const was = this.shownFull.get(name);
+      if (!o.full && was && was.key === key && now - was.at < AgentApi.OBSERVE_REFULL_MS) { brief.push(name); return; }
+      this.shownFull.set(name, { key, at: now });
+    };
+    const good = (obs.buffs ?? []).filter((b) => b.beneficial !== false);
+    const names = new Set(good.map((b) => b.name));
+    // The buff list: what is new and what dropped are said in the short form too, so its key is only that one exists.
+    section('buffs', good.length ? 'on' : null);
+    section('buffsMissing', obs.buffsMissing?.length ? [...obs.buffsMissing].sort().join('|') : null);
+    section('gearSpells', obs.gearSpells?.length ? obs.gearSpells.map((g) => `${g.spell}×${g.items}`).sort().join('|') : null);
+    // Corpses and the vitae line: the same corpses in the same state (their timers aside), the same vitae percentage.
+    section('corpses', obs.corpses ? digitless(obs.corpses) : null);
+    section('vitae', obs.vitae ? (/^VITAE −(\d+)%/.exec(obs.vitae)?.[1] ?? obs.vitae) : null);
+    section('money', obs.me.pyreals !== undefined || obs.me.tradeNotes ? 'facts' : null);
+    if (brief.includes('corpses')) { const c = this.corpsesLine(true); if (c) obs.corpses = c; }
+    if (brief.includes('vitae')) { const v = this.vitaeLine(true); if (v) obs.vitae = v; }
+    if (this.buffsAtLastLook) {
+      const gone = [...this.buffsAtLastLook].filter((n) => !names.has(n));
+      if (gone.length) obs.buffsGone = gone;
+    }
+    this.buffsAtLastLook = names;
+    if (brief.length) obs.brief = brief;
+    return obs;
+  }
+
   /** An observation that leaves the unread chat for the player's own next observe (routines read it this way). */
   snapshot(opts: ObserveOptions = {}): AgentObservation {
     const cursor = this.chatCursor, look = this.lookSeq, byWait = new Set(this.chatByWait);
@@ -4515,6 +4668,7 @@ export class AgentApi {
         const g = casterGap(this.host.inventory(), trained, this.host.magicNeedsCaster?.() ?? false);
         return g ? { casterGap: g } : {};
       })(),
+      ...(() => { const g = this.gearManaLow(); return g ? { gearManaLow: g } : {}; })(),
       ...(() => { const m = this.gearManaOut(); const st = m.length ? this.manaStonesText() : null; return m.length ? { gearManaOut: m, ...(st ? { manaStones: st } : {}) } : {}; })(),
       ...(() => { const p = this.routine.loadedProfile; const m = p ? routineSuppliesMissing(p, this.host.inventory()) : null; return m ? { routineSupplies: m } : {}; })(),
       ...(() => { const u = this.attackersUnplaced(); return u.length ? { attackersUnplaced: u } : {}; })(),
@@ -4676,10 +4830,12 @@ export class AgentApi {
     return v ? v.multiplier : null;
   }
 
-  private vitaeLine(): string | null {
+  private vitaeLine(brief = false): string | null {
     const v = this.host.vitae?.() ?? null;
     if (!v) return null;
     const s = this.host.self();
+    // Short (playerObserve: the same percentage, said in full a moment ago): what it costs and the XP that clears it.
+    if (brief) return vitaeHeadline(v, { health: s?.health.max ?? 0, stamina: s?.stamina.max ?? 0, mana: s?.mana.max ?? 0 }, null, true);
     const dist = new Map((this.host.fellows?.() ?? []).length ? this.fellowsAt().filter((f) => f.dist !== undefined).map((f) => [f.name, f.dist!] as [string, number]) : []);
     const fellow = fellowVitaeText(this.host.fellowshipXp?.() ?? null, dist);
     return vitaeHeadline(v, { health: s?.health.max ?? 0, stamina: s?.stamina.max ?? 0, mana: s?.mana.max ?? 0 }, fellow);
@@ -5430,6 +5586,20 @@ export class AgentApi {
     WeenieError.PKLiteMayNotUsePortal, WeenieError.YouMustBeAnAdvocateToUsePortal, WeenieError.MustPurchaseThroneOfDestinyToUsePortal,
     WeenieError.OnlyOlthoiMayUsePortal, WeenieError.OlthoiMayNotUsePortal, WeenieError.YouMayNotUsePortalWithVitae, WeenieError.YouMustBeTwoWeeksOldToUsePortal,
   ]);
+  /**
+   * "You have been teleported too recently!" said with what it answers: a portal your body touched (or used) within
+   * 3.5 s of your last arrival, which ACE refuses (Portal.CheckUseRequirements, minTimeSinceLastPortal), never the cast
+   * or other action whose reply it fell into. Arcanist arrived from Surface on Bulwark's spot beside the Aerbax
+   * Laboratory portal, touched it 0.7 s later (0x4A7), and her Strength Other IV, sent then, answered with the line as if
+   * the cast had drawn it (2026-10-18 19:59:42.5–43.2Z). `what`: the action ("this cast"); null for a portal's own use.
+   */
+  portalCooldownText(line: string, what: string | null): string {
+    if (!/^You have been teleported too recently!?$/i.test(line.trim())) return line;
+    const me = this.me();
+    const p = me ? this.portalBeside(me.g, AgentApi.FOLLOW_PORTAL_BESIDE_M) : null;
+    const which = p ? `${p.name} #${(p.guid >>> 0).toString(16)}, ${Math.hypot(p.g.x - me!.g.x, p.g.y - me!.g.y).toFixed(1)} m from you` : 'a portal';
+    return `${line.trim()} (${what ? `not ${what}: ` : ''}the server refusing ${which}${what ? ', which your body touched' : ''}: no portal takes you within ${AgentApi.PORTAL_COOLDOWN_MS / 1000} s of your last arrival, and this one didn't)`;
+  }
   /** When you last arrived from portal space (host ms), or null. */
   private lastArrivalAt(): number | null {
     for (let i = this.events.length - 1; i >= 0; i--) { const e = this.events[i]; if (e.type === 'portal' && e.text === 'arrived') return e.t; }
@@ -6608,8 +6778,16 @@ export class AgentApi {
     return ` (waited ${(ms / 1000).toFixed(1)} s for the cast or use already under way${whose} to finish: sent sooner, the server answers "You're too busy!")`;
   }
 
+  /** Casts asked for and not yet answered (yours sent together): each waits for the one before (waitNotBusy). */
+  private castCallsOpen = 0;
   /** One cast; `info` (the repeat's) learns whether it went out and what came back, and can stop it before it goes. */
   private async castOnce(spell: number | string, target: TargetArg, info?: CastInfo): Promise<AgentResult> {
+    this.castCallsOpen++;
+    try { return await this.castOnceInner(spell, target, info); } finally { this.castCallsOpen--; }
+  }
+  private async castOnceInner(spell: number | string, target: TargetArg, info?: CastInfo): Promise<AgentResult> {
+    // Asked by the player (the surface's hand command, which this runs inside of before its first await), not the routine.
+    const byHand = this.handCalls > 0;
     const s = this.findSpell(spell, target);
     if ('ok' in s) return s;
     const t = this.castTarget(s, target);
@@ -6679,10 +6857,24 @@ export class AgentApi {
     const busyWaited = this.host.busy() ? await this.waitNotBusy() : 0;
     // It may have died while we waited.
     if (tg) { const why = gone(tg); if (why) return { ok: false, targetGone: true, message: why }; }
+    // Or moved out of reach while we waited (the range was checked before the wait): said here, not sent for the bare
+    // "Out of Range!".
+    if (busyWaited > 0 && tg && tg !== me && s.range) {
+      const d = this.spellDistanceTo(tg);
+      if (d !== null && d > s.range + AgentApi.CAST_RANGE_SLACK_M) return { ok: false, message: `${s.name} not cast${this.busyWaitText(busyWaited)}: out of range by the time it could go out: ${this.reachNote(s, tg, d)}` };
+    }
+    // The bolt's line of fire likewise (checked before the wait): a target that stepped behind a wall meanwhile.
+    if (busyWaited > 0 && tg && tg !== me && s.projectile) {
+      const lof = this.host.lineOfFire?.(tg);
+      if (lof && lof.blockedAt !== null) return { ok: false, message: `${s.name} not cast${this.busyWaitText(busyWaited)}: no line of fire to ${this.nameOf(tg)} by the time it could go out (${lof.dist.toFixed(1)} m away): ${lof.blocker ?? 'a wall, the ground or an object'} ${lof.blockedAt.toFixed(1)} m along the line would take the bolt. Cast again for where to stand` };
+    }
     // A repeat stopped (replaced, stopped, you died) while this cast waited: nothing more goes out.
     if (info?.abort()) return { ok: false, message: `${s.name} not cast: stopped` };
     const since = this.seqN;
     const sentInPortal = this.host.screen() === 'portal-space';
+    // How far the target was as the cast went out: the server checks the range again when the windup ends (ACE
+    // VerifySpellRange, "called both before and after windup"), so a target that runs off meanwhile is "Out of Range!".
+    const sentDist = tg && tg !== me && s.range ? this.spellDistanceTo(tg) : null;
     if (!this.host.cast(s.id, tg)) return { ok: false, message: `cast of ${s.name} refused (not castable now)` };
     this.lastCombatActAt = this.host.now();
     this.motionStopAt = this.host.now();
@@ -6690,7 +6882,7 @@ export class AgentApi {
     // Wait for the outcome (cast, fizzle, a refusal) and for the client to be free again, so the next
     // call can cast straight away; the words alone ("You say, …") are not the end of it. Others' words (a fellow's /f
     // "I can't see it") are neither the cast's outcome nor its reply.
-    const said = (): string[] => this.eventsSince(since).filter((e) => e.type === 'chat' && !e.plugin && (!AgentApi.spokenEvent(e) || /^\(\w+\) You say, /.test(e.text))).map((e) => e.text.replace(/^\(\w+\) /, ''));
+    const said = (): string[] => this.eventsSince(since).filter((e) => e.type === 'chat' && !e.plugin && (!AgentApi.spokenEvent(e) || /^\(\w+\) You say, /.test(e.text))).map((e) => this.portalCooldownText(e.text.replace(/^\(\w+\) /, ''), 'this cast'));
     // A war bolt's outcome is its damage line ("You scorch Drudge Skulker for 40 points with Flame Bolt I.": ACE
     // SpellProjectile; no "You cast" for a projectile) or the wall it hit; before 2026-10-11 a bolt that landed was
     // waited on for the full 8 s.
@@ -6731,21 +6923,21 @@ export class AgentApi {
     if (info) { info.lines = said(); info.refused = refused; }
     if (refused.length) {
       // The refusal's own text (when the client showed one) is already in the chat lines: say it once, as the refusal.
-      const lines = said().filter((l) => !refused.some((r) => r.startsWith(l)));
+      const lines = said().filter((l) => !refused.some((r) => r.startsWith(l.split(' (not this cast: ')[0])));
       const why = refused.map((r) => `  the server refused it: ${r}`);
       if (tg && tg !== me && refused.some((r) => /TargetNotAcquired/.test(r))) {
         why.push(`  (${this.targetNotAcquiredWhy(tg, sentInPortal)})`);
       }
       // "Out of Range! (MissileOutOfRange)": how far the spell reaches for you and how far to close.
       if (tg && tg !== me && s.range && refused.some((r) => /out of range/i.test(r))) {
-        why.push(`  (${this.reachNote(s, tg, this.spellDistanceTo(tg))})`);
+        why.push(`  (${this.reachNote(s, tg, this.spellDistanceTo(tg))}${this.movedOffNote(s, sentDist, this.spellDistanceTo(tg))})`);
       }
       return { ok: false, message: [`${s.name} not cast${tg ? ` at ${this.nameOf(tg)}` : ''}${this.busyWaitText(busyWaited)}`, ...why, ...lines.map((l) => `  ${l}`)].join('\n') };
     }
     const lines = said();
     // "Out of Range!" (ACE Player_Magic: farther than the spell's range for you): say how far it reaches, as its
     // examine's Range line does, and how far the target is (Arcanist at 11 m with Creature buffs, 2026-10-11).
-    if (tg && tg !== me && s.range && lines.some((l) => /out of range/i.test(l))) lines.push(`(${this.reachNote(s, tg, this.spellDistanceTo(tg))})`);
+    if (tg && tg !== me && s.range && lines.some((l) => /out of range/i.test(l))) lines.push(`(${this.reachNote(s, tg, this.spellDistanceTo(tg))}${this.movedOffNote(s, sentDist, this.spellDistanceTo(tg))})`);
     if (!lines.length) return { ok: true, message: `${head} (no reply yet: a wand/orb wielded and magic mode are needed; ac_wait for the result)` };
     // The outcome first (a fizzle, a resist, the damage, the kill), then the rest: a fizzle printed last after the
     // incantation was cut off by \`| head\` and read as a landed buff (Arcanist, 2026-10-12). Lines about what hit YOU
@@ -6768,7 +6960,15 @@ export class AgentApi {
     }
     // A fizzle: how near the skill is to the spell ("Swift Killer V fizzling twice and no clear feedback about how close
     // I am to landing it", Arcanist 2026-10-16).
-    if (lines.some((l) => /\bfizzle/i.test(l))) { const why = this.fizzleNote(s); if (why) verdict = verdict ? `${verdict}; ${why}` : why; }
+    if (lines.some((l) => /\bfizzle/i.test(l))) {
+      const why = this.fizzleNote(s);
+      if (why) verdict = verdict ? `${verdict}; ${why}` : why;
+      // Sent with others (queued behind one, or others queued behind it): they went out one at a time, so none cut this
+      // one short. "Two casts sent close together fizzle" (Arcanist, 2026-10-18): each later one waited for the last's
+      // end (19:29:23 Swift Killer fizzled, Heart Seeker went out only at 19:29:26.98), and ACE rolls the fizzle as the
+      // cast starts (GetCastingPreCheckStatus), from the skill and the spell's power alone.
+      if (busyWaited > 0 || this.castCallsOpen > 1) verdict += `${verdict ? '; ' : ''}the casts you sent together went out one at a time here, each once the last had ended, so none cut this one short: a fizzle is the server's skill roll for that one cast, made as it starts`;
+    }
     // "…, but it is surpassed by X": X is on the TARGET (ACE WorldObject_Magic → target.EnchantmentManager.Add compares
     // the target's own enchantments of the spell's category), never yours. Arcanist read her own Incantations as the
     // block and waited them out while Bulwark's, from the Pumpkin Buffer, still had seconds left (2026-10-16 17:00–17:02Z).
@@ -6789,10 +6989,34 @@ export class AgentApi {
       const why = `${none.who ? `${none.who} was` : 'you were'} already at full ${none.vital} when it landed${before}: nothing to restore, and the cast still cost its mana (the server spends it before ${none.spell} lands)`;
       verdict = verdict ? `${verdict}; ${why}` : why;
     }
+    const cover = byHand ? this.routineCoverNote(s, !!tg && tg !== me, lines) : null;
+    if (cover) verdict = verdict ? `${verdict}; ${cover}` : cover;
     const rest = lines.filter((l) => !key.includes(l));
     // A resist ("X resists your spell": ACE TryResistSpell, the same words on GDLE / 1999) or an immune target
     // didn't take, and ACE's "You don't have all the components" is a refusal: none of them is a landed cast.
     return { ok: !lines.some((l) => CAST_NOT_LANDED.test(l)), message: [head, ...key, ...(verdict ? [verdict] : []), ...rest].map((l, i) => (i ? `  ${l}` : l)).join('\n') };
+  }
+
+  /**
+   * What your running routine does by itself that this hand cast just did (said once per kind each run,
+   * RoutineEngine.coverFor): restoring a fellow's health / stamina / mana (VTank's Helper: DoHelp and its
+   * Recharge-Helper level), or keeping your own buffs up. Null when it has nothing to say.
+   */
+  private routineCoverNote(s: AgentSpell, onOther: boolean, lines: string[]): string | null {
+    if (onOther) {
+      const m = lines.map((l) => /^With .+? you restore [\d,]+ points? of (health|stamina|mana) to (.+?)\.?$/i.exec(l)).find((x) => !!x);
+      if (!m || !(this.host.fellows?.() ?? []).some((f) => f.name.toLowerCase() === m[2].toLowerCase())) return null;
+      const vital = m[1].toLowerCase() as 'health' | 'stamina' | 'mana';
+      const c = this.routine.coverFor(vital);
+      if (!c) return null;
+      if (c.on && c.value > 1) return `your routine "${c.profile}" also restores a fellow's ${vital} itself, below ${c.value}% (DoHelp, ${c.setting})`;
+      return `your routine "${c.profile}" restores a fellow's ${vital} itself only ${c.on ? `below ${c.setting} ${c.value}%${c.value <= 1 ? " (VTank's default: in effect never)" : ''}` : 'with DoHelp on (it is off)'}; a run with set="${c.on ? '' : 'DoHelp=true,'}${c.setting}=<percent>" has it cast ${s.name.replace(/ [IVX]+$/, '')} on a fellow below that`;
+    }
+    if (s.self && s.buff) {
+      const c = this.routine.coverFor('self-buff');
+      if (c) return `your routine "${c.profile}" keeps your own buffs up itself (EnableBuffing: every trained skill's, the protections and banes, and its Extra Buff Spells), recasting each under ${c.value} s left`;
+    }
+    return null;
   }
 
   /**
@@ -6818,10 +7042,23 @@ export class AgentApi {
     return Math.hypot(t.x - m.g.x, t.y - m.g.y);
   }
 
+  /**
+   * "; when it went out they were 22.0 m away, within reach: …" for a target within the spell's reach at the send and
+   * refused "Out of Range!" after: ACE checks the range again as the windup ends (VerifySpellRange). Bulwark ran from
+   * within Aura of Swift Killer Other V's 25 m to 50 m during the cast (Aerbax Laboratory, 2026-10-18 20:20:42Z).
+   */
+  private movedOffNote(s: AgentSpell, sentDist: number | null, nowDist: number | null): string {
+    // Only for one that really moved off: within reach (at most the slack over) then, farther than that now.
+    if (sentDist === null || nowDist === null || !s.range || sentDist > s.range + AgentApi.CAST_RANGE_SLACK_M || nowDist <= s.range + AgentApi.CAST_RANGE_SLACK_M || nowDist - sentDist < 1) return '';
+    return `; when it went out they were ${sentDist.toFixed(1)} m away, within reach: they moved off during the windup, and the server checks the range again as the spell goes off`;
+  }
+
   /** "Aura of Defender Other V reaches 25 m for you; Claude Bulwark is 58.7 m away: walk 34 m closer (…)". */
   private reachNote(s: AgentSpell, tg: number, d: number | null): string {
     const who = this.nameOf(tg);
-    const reach = `${s.name} reaches ${s.range} m for you (longer as your ${s.school} ranks grow)`;
+    // An aura's 25 m (BaseRangeMod 0) and a spell at the 75 m cap are the same at any rank: "longer as your Item ranks
+    // grow" was said of Aura of Swift Killer Other V's fixed 25 m (Arcanist, Aerbax Laboratory, 2026-10-18 20:20:42Z).
+    const reach = `${s.name} reaches ${s.range} m for you (${s.rangeFixed ? (s.range! >= 75 ? 'the most any spell reaches' : 'a fixed reach: no rank lengthens it') : `longer as your ${s.school} ranks grow`})`;
     if (d === null) return reach;
     if (d <= s.range!) return `${reach}; ${who} is ${d.toFixed(1)} m away`;
     const closer = Math.ceil(d - s.range! + 1);
@@ -7020,7 +7257,7 @@ export class AgentApi {
     // A spell of its kind's that hurt is named first: "it casts Lightning Vulnerability Other III, Slowness Other III"
     // was the stop's reason for an Innocent Doll whose kind's bolts had taken 54 and 56 a moment before (Arcanist,
     // Aerbax Laboratory, 2026-10-18 15:27:41Z).
-    const hurt = this.spellHurt(seen, base);
+    const hurt = this.spellHurt(seen, base, h?.max);
     if (hurt) return hurt;
     if (seen && (seen.spells.size || seen.words)) return seen.spells.size ? `it casts ${[...seen.spells.keys()].slice(0, 2).join(', ')}` : 'it casts spells';
     if (seen && base > 0 && seen.maxHit >= base * AgentApi.CAST_REPEAT_ATTACKER_HIT_FRAC) return `one hit of its took ${seen.maxHit}, ${Math.round((100 * seen.maxHit) / base)}% of the ${base} health you have${h && base < h.max ? ` (of ${h.max})` : ''}`;
@@ -7069,11 +7306,44 @@ export class AgentApi {
     return why && !why.startsWith('it casts') ? why : null;
   }
 
-  /** "its kind's Flame Bolt III took 56 of your 162 health" when a spell of the kind took CAST_REPEAT_ATTACKER_HIT_FRAC of `base` or more; else null. */
-  private spellHurt(seen: { spells: Map<string, number> } | undefined, base: number): string | null {
+  /**
+   * "its kind's Flame Bolt III took 56 of your 162 health" when a spell of the kind took CAST_REPEAT_ATTACKER_HIT_FRAC of
+   * `base` (the health you have) or more; else null. Under your most it says both: "22 of the 196 health you have (of
+   * 205)". "took 22 of your 196 health" with 196 of 205 read to Bulwark as his max health lowered with no debuff shown
+   * (Aerbax Haven, 2026-10-18 19:25Z).
+   */
+  private spellHurt(seen: { spells: Map<string, number> } | undefined, base: number, max?: number): string | null {
     if (!seen || base <= 0) return null;
-    const hurt = [...seen.spells].filter(([, n]) => n >= base * AgentApi.CAST_REPEAT_ATTACKER_HIT_FRAC).sort((a, b) => b[1] - a[1])[0];
-    return hurt ? `its kind's ${hurt[0]} took ${hurt[1]} of your ${base} health` : null;
+    const hurt = [...seen.spells].filter(([s, n]) => n >= base * AgentApi.CAST_REPEAT_ATTACKER_HIT_FRAC && !this.spellTakesNoHealth(s)).sort((a, b) => b[1] - a[1])[0];
+    if (!hurt) return null;
+    return max !== undefined && max > base ? `its kind's ${hurt[0]} took ${hurt[1]} of the ${base} health you have (of ${max})` : `its kind's ${hurt[0]} took ${hurt[1]} of your ${base} health`;
+  }
+
+  /**
+   * Whether the era's spell table says a spell drains only the target's mana or stamina ("Drains 20% of the target's
+   * Mana and gives it to the caster.", "Drains 16-31 points of the target's Stamina."): what such a spell took is no
+   * health, whatever an older session stored for it (noteSeen kept a mana drain as health before 2026-10-18). Unknown
+   * spell or no table: false.
+   */
+  private spellTakesNoHealth(spell: string): boolean {
+    const table = this.host.spellTableData?.();
+    if (!table) return false;
+    if (!this.drainOnlyByName || this.drainOnlyByName.table !== table.spells) {
+      const by = new Map<string, boolean>();
+      for (const sp of table.spells.values()) {
+        const d = sp.desc ?? '';
+        by.set(sp.name.toLowerCase(), /\btarget's (?:mana|stamina)\b/i.test(d) && !/\bhealth\b/i.test(d));
+      }
+      this.drainOnlyByName = { table: table.spells, by };
+    }
+    return this.drainOnlyByName.by.get(spell.toLowerCase()) ?? false;
+  }
+  private drainOnlyByName: { table: Map<number, unknown>; by: Map<string, boolean> } | null = null;
+
+  /** Whether a name is a spell of the era's table (no table: false). */
+  private isSpellName(name: string): boolean {
+    this.spellTakesNoHealth(name);
+    return this.drainOnlyByName?.by.has(name.trim().toLowerCase()) ?? false;
   }
 
   /**
@@ -7793,10 +8063,93 @@ export class AgentApi {
   static readonly MANA_OUT_LINE = /^Your (.+) is out of Mana\.?$/i;
 
   private noteManaOut(line: string): void {
+    const low = AgentApi.MANA_LOW_LINE.exec(line.trim());
+    if (low) {
+      const name = low[1].toLowerCase();
+      for (const it of this.host.inventory()) if (it.where === 'equipped' && it.name.toLowerCase() === name) this.manaLowSaid.set(it.guid >>> 0, this.host.now());
+      return;
+    }
     const m = AgentApi.MANA_OUT_LINE.exec(line.trim());
     if (!m) return;
     const name = m[1].toLowerCase();
     for (const it of this.host.inventory()) if (it.where === 'equipped' && it.name.toLowerCase() === name) this.manaOut.set(it.guid >>> 0, it.name);
+  }
+
+  static readonly MANA_LOW_LINE = /^Your (.+) is low on Mana\.?$/i;
+  /** Worn items the server said are "low on Mana." (ACE CheckLowMana: under 120 s left), guid → when (host ms). */
+  private manaLowSaid = new Map<number, number>();
+  /** The server's low-mana line stands this long (ms): two minutes from it the item is empty, and the out line follows. */
+  static readonly MANA_LOW_SAID_MS = 150_000;
+  /**
+   * Each worn item's mana as an appraisal last gave it: ItemCurMana 107, ItemMaxMana 108, the burn per second
+   * (−ManaRate, PropertyFloat 5: ACE Player_Tick.ManaConsumersTick burns it from every item whose spells are on), when it
+   * was read (host ms; −Infinity for an appraisal already there when this page first looked, of unknown age), and the
+   * appraisal object read (a new one is a new read).
+   */
+  private gearManaRead = new Map<number, { cur: number; max: number; burn: number; at: number; ref: object }>();
+  /** When a quiet appraisal of a worn item was last asked for its mana (guid → host ms). */
+  private gearManaAsked = new Map<number, number>();
+  /** A worn item's mana is read again (a quiet appraisal, as VirindiTank's background IDs) once its last read is this old (ms). */
+  static readonly GEAR_MANA_REREAD_MS = 5 * 60_000;
+  /** …and not more often than this (ms), answered or not. */
+  static readonly GEAR_MANA_ASK_MS = 30_000;
+  /** A worn item with this little mana left (s, at its burn rate) is said on the observe. */
+  static readonly GEAR_MANA_LOW_S = 15 * 60;
+
+  /**
+   * Worn items whose mana runs out within GEAR_MANA_LOW_S, or that the server said are low: reckoned from their last
+   * appraisal (the examine window's "Mana: 212 / 1500" and "Mana Cost: 1 point per 25 seconds", read as a player
+   * reads it), each worn item with mana read again every GEAR_MANA_REREAD_MS by a quiet appraisal. ACE's own warning
+   * comes two minutes before the end, and Arcanist's Pathwarden Helm ran out of mana three times in a day on it alone
+   * (2026-10-18 07:47Z, 14:00Z, 19:16Z). Null when none is low.
+   */
+  private gearManaLow(): AgentObservation['gearManaLow'] | null {
+    const now = this.host.now();
+    const worn = this.host.inventory().filter((i) => i.where === 'equipped');
+    const wornIds = new Set(worn.map((i) => i.guid >>> 0));
+    for (const m of [this.gearManaRead, this.gearManaAsked, this.manaLowSaid] as Map<number, unknown>[]) for (const g of [...m.keys()]) if (!wornIds.has(g)) m.delete(g);
+    const items: NonNullable<AgentObservation['gearManaLow']>['items'] = [];
+    for (const it of worn) {
+      const g = it.guid >>> 0;
+      if (this.manaOut.has(g)) continue; // out already: the gear-out-of-mana line says it
+      const d = this.host.appraisalData?.(g) ?? null;
+      let r = this.gearManaRead.get(g);
+      if (d && r?.ref !== d) {
+        // A read since this page first looked (a change of the appraisal, or the answer to an ask) is dated now.
+        const fresh = r !== undefined || this.gearManaAsked.has(g);
+        r = { cur: d.int[107] ?? 0, max: d.int[108] ?? 0, burn: -(d.float?.[5] ?? 0), at: fresh ? now : -Infinity, ref: d };
+        this.gearManaRead.set(g, r);
+      }
+      const asked = this.gearManaAsked.get(g) ?? -Infinity;
+      if (this.host.appraisalData && (!r || (r.max > 0 && now - r.at > AgentApi.GEAR_MANA_REREAD_MS)) && now - asked > AgentApi.GEAR_MANA_ASK_MS) {
+        this.gearManaAsked.set(g, now);
+        this.host.appraise(g, true);
+      }
+      const said = this.manaLowSaid.get(g);
+      const serverSaidLow = said !== undefined && now - said < AgentApi.MANA_LOW_SAID_MS;
+      let leftS: number | undefined;
+      if (r && r.max > 0 && r.burn > 0 && Number.isFinite(r.at)) leftS = Math.max(0, (r.cur - (r.burn * (now - r.at)) / 1000) / r.burn);
+      if (!serverSaidLow && (leftS === undefined || leftS > AgentApi.GEAR_MANA_LOW_S)) continue;
+      if (serverSaidLow && leftS !== undefined && leftS > 120) leftS = undefined; // the server knows better: under 2 min
+      const mana = r && r.max > 0 ? { mana: { cur: Math.round(r.cur), max: r.max } } : {};
+      items.push({ guid: g, name: it.name, ...(leftS !== undefined ? { leftS: Math.round(leftS) } : {}), ...mana, ...(serverSaidLow ? { serverSaidLow } : {}) });
+    }
+    if (!items.length) return null;
+    items.sort((a, b) => (a.leftS ?? 0) - (b.leftS ?? 0));
+    return { items, refill: this.manaRefillText() };
+  }
+
+  /**
+   * What refills a worn item's mana: the charged stones and Mana Charges you carry (ac_use_on one with target= the item,
+   * or target=self for every worn piece), else where they are sold. In the end-of-retail world nearly every Archmage
+   * and Magus shop sells Mana Charges (charged: Tiny 100 mana up to Great 1,000) and empty mana stones (charged by
+   * draining an item you don't need), by the world DB's shop lists.
+   */
+  private manaRefillText(): string {
+    const stones = this.inventory().filter((i) => i.manaStone);
+    const charged = stones.filter((i) => i.manaStone!.charged);
+    if (charged.length) return `refill: ac_use_on a charged stone on it (target= the item; target=self fills every worn piece): ${charged.map((i) => `${i.name} #${i.guid.toString(16)}${i.manaStone!.mana !== undefined ? ` (${i.manaStone!.mana.toLocaleString('en-US')} mana)` : ''}`).join(', ')}`;
+    return `you carry no charged mana stone or Mana Charge${stones.length ? ` (${stones.length} empty: ${MANA_STONE_CHARGING})` : ''}; a mage's shop (an Archmage's or Magus's) is where mana stones and Mana Charges are sold, and a Mana Charge comes charged (ac_vendor shows what that shop has)`;
   }
 
   /** Wielded items whose spells are off for want of mana: still worn, and not wielded again since. */
@@ -9366,6 +9719,8 @@ export class AgentApi {
     let stayArrivalWait = 0;
     // Where your fellows were when the walk began: one left far behind is named in the result.
     const fellowsAtStart = new Map(this.fellowsAt().filter((f) => f.dist !== undefined).map((f) => [f.name, f.dist!]));
+    // The cell the walk set off from: a walk that ends in another space went through a portal (a use's walk into one).
+    const startCell = this.host.self()?.cell ?? 0;
     // Where the body was last tick: a portal (or any teleport) moves it tens of metres or more at once;
     // walking over a landblock's edge outdoors, or out through a building's doorway, never does.
     let lastAt = this.me()?.g ?? null;
@@ -10188,14 +10543,25 @@ export class AgentApi {
         if (was === undefined) continue;
         // "was N m" is when this walk set off, and where the client last saw them: "out of sight (was 19 m away)" read as
         // a wrong distance for a fellow "1 m from me just before", who had walked 18 m off while she cast (Arcanist, 2026-10-16).
+        // You went through a portal on the way (a use of one walks into it): they are where you left, not behind you.
+        // "Claude Bulwark is 213 m away now (was 5 m): they fell behind" after Arcanist took the Aerbax Haven portal
+        // first; Bulwark stood where she had left him, and came through 10 s later (2026-10-18 18:56:20Z).
+        const nowCell = this.host.self()?.cell ?? 0;
+        if (f.dist === undefined && startCell && nowCell && this.apartSpaces(startCell, nowCell)) {
+          notes.push(`${f.name} is still in the place you left (${was.toFixed(0)} m from you when this walk set off; you went through a portal and they haven't come through yet): wait for them at the arrival, or tell them in /f`);
+          continue;
+        }
         if (f.dist === undefined) {
           const fg = (this.host.fellows?.() ?? []).find((x) => x.name === f.name)?.guid;
           const lo = fg !== undefined ? this.host.object(fg) : null, meL = this.me();
           // Placed last in another space (through a portal, a recall): that, not "last seen 32352 m E of you" (Arcanist, after
           // Bulwark took the Mountain Keep Surface portal, 2026-10-17 05:49Z).
           const away = lo && lo.cell && meL ? this.elsewhereText(meL.s.cell, lo) : null;
+          // The walk's own target gone through a portal: its answer already says so (the stop at the server's move).
+          if (away && fg !== undefined && (fg >>> 0) === (targetGuid >>> 0) && /^stopped: .* went through a portal/.test(r.message)) continue;
           const last = away ? `; ${away}` : lo && lo.cell && meL ? ((g) => `; last seen ${Math.hypot(g.x - meL.g.x, g.y - meL.g.y).toFixed(0)} m ${compassPoint(bearing(meL.g, g))} of you`)(toGlobal(lo.cell, lo.x, lo.y)) : '';
-          notes.push(`${f.name} is out of sight now (${was.toFixed(0)} m away when this walk set off${last})${was <= AgentApi.FELLOW_BEHIND_M ? '' : ': they fell behind'}`);
+          // Placed in another space: they went through a portal or recalled, which is no falling behind.
+          notes.push(`${f.name} is out of sight now (${was.toFixed(0)} m away when this walk set off${last})${was <= AgentApi.FELLOW_BEHIND_M || away ? '' : ': they fell behind'}`);
         }
         else if (f.dist > AgentApi.FELLOW_BEHIND_M && f.dist > was + 15) notes.push(`${f.name} is ${f.dist.toFixed(0)} m away now (was ${was.toFixed(0)} m): they fell behind (stay_with=${f.name} waits for them)`);
       }
@@ -10312,8 +10678,22 @@ export class AgentApi {
       // Where the target object was last placed (for a fellow who drops out of the client's world on the way).
       if (targetGuid) {
         const o = this.host.object(targetGuid);
+        const was = targetPlace;
         if (o?.cell) targetPlace = { cell: o.cell >>> 0, x: o.x, y: o.y, z: o.z, heardAt: o.heardAt };
         if (o) targetPortalName();
+        // A creature walked to that the server now places in another space (a portal, a recall), placed in yours a moment
+        // ago: ended here, with where they went, never walked on at their new place. Arcanist's routine Follow, walking at
+        // Bulwark as he took the Surface portal, ran on for 14 s at his landing spot 27 km off ("walk stretch blocked …
+        // toward a goal 27080 m away"), "no doorway route" each try, until she walked to him by hand and found him gone
+        // (Aerbax Laboratory, 2026-10-18 19:59:14–28Z).
+        if (!follow && me && o?.cell && was && (o.itemType & IT.Creature) && !this.apartSpaces(me.s.cell, was.cell) && this.apartSpaces(me.s.cell, o.cell >>> 0)) {
+          release();
+          const away = this.elsewhereText(me.s.cell, o) ?? 'went through a portal or recalled';
+          const p = this.portalBeside(toGlobal(was.cell, was.x, was.y), AgentApi.FOLLOW_PORTAL_BESIDE_M);
+          const name = this.nameOf(targetGuid);
+          const by = p ? `, from beside ${p.name} #${(p.guid >>> 0).toString(16)} (${Math.hypot(p.g.x - me.g.x, p.g.y - me.g.y).toFixed(0)} m ${compassPoint(bearing(me.g, p.g))} of you): ac_use it to follow` : ': ask them where they are';
+          return { ok: false, message: `stopped: ${name} ${away}${by}${featText()}` };
+        }
       }
       const gl = goal();
       if (!me || !gl) {
@@ -12048,7 +12428,7 @@ export class AgentApi {
     this.loadSeenKinds();
     const e = this.seenKinds.get(c.name.toLowerCase());
     if (!e || e.maxHit <= 0 || e.maxHit > mine.health.max * AgentApi.NICK_KIND_FRAC) return false;
-    for (const dmg of e.spells.values()) if (dmg > 0) return false;
+    for (const [spell, dmg] of e.spells) if (dmg > 0 && !this.spellTakesNoHealth(spell)) return false;
     return true;
   }
   /** A blow under this share of your health is a nick (nickOnlyKind). */
@@ -13889,7 +14269,7 @@ export class AgentApi {
 
   /** "; the server said: …" for the chat lines since `sinceT` (page ms), or ''. */
   private saidNote(sinceT: number): string {
-    const lines = [...new Set(this.events.filter((e) => e.type === 'chat' && !e.plugin && e.t >= sinceT).map((e) => e.text.replace(/^\(\w+\) /, '')).filter((l) => !/^(Approaching|Using the) /.test(l)))];
+    const lines = [...new Set(this.events.filter((e) => e.type === 'chat' && !e.plugin && e.t >= sinceT).map((e) => this.portalCooldownText(e.text.replace(/^\(\w+\) /, ''), null)).filter((l) => !/^(Approaching|Using the) /.test(l)))];
     return lines.length ? `; the server said: ${lines.slice(-3).join(' / ')}` : '';
   }
 
@@ -14303,7 +14683,7 @@ export class AgentApi {
   surface(): Record<string, unknown> {
     const s: Record<string, unknown> = {
       version: this.version,
-      observe: (o?: ObserveOptions) => this.observe({ ...(o ?? {}), levels: true }),
+      observe: (o?: ObserveOptions) => this.playerObserve(o ?? {}),
       // Who and where you are without reading the chat (observe consumes it): a daemon attached to a player's own tab waits on this.
       self: () => this.self(),
       // A stream overlay's status line (tools/stream/): reads only, like self, so polling it never eats the agent's chat.

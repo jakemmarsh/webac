@@ -167,8 +167,18 @@ function compactBuffs(rows: ReadonlyArray<{ name: string; remaining: number; unt
  */
 export function formatBuffs(buffs: ReadonlyArray<{ name: string; remaining: number; until?: string; landedAgoS?: number }>): string {
   if (!buffs.length) return 'buffs: none (ac_spells finds buffs you know; ac_cast casts them on yourself or another player)';
-  // One row per name: the longest time left, the latest landing.
-  const byName = new Map<string, { name: string; remaining: number; until?: string; landedAgoS?: number }>();
+  const { rows, fresh, rest } = buffRows(buffs);
+  const parts: string[] = [];
+  if (fresh.length) parts.push(justLandedText(fresh));
+  if (rest.length) parts.push(compactBuffs(rest));
+  return `buffs (${rows.length}): ${parts.join('; ')}`;
+}
+
+type BuffRow = { name: string; remaining: number; until?: string; landedAgoS?: number };
+
+/** One row per name (the longest time left, the latest landing), split into those just landed (newest first) and the rest. */
+function buffRows(buffs: ReadonlyArray<BuffRow>): { rows: BuffRow[]; fresh: BuffRow[]; rest: BuffRow[] } {
+  const byName = new Map<string, BuffRow>();
   for (const b of buffs) {
     const was = byName.get(b.name);
     if (!was) { byName.set(b.name, { ...b }); continue; }
@@ -176,16 +186,42 @@ export function formatBuffs(buffs: ReadonlyArray<{ name: string; remaining: numb
     if (b.landedAgoS !== undefined && (was.landedAgoS === undefined || b.landedAgoS < was.landedAgoS)) was.landedAgoS = b.landedAgoS;
   }
   const rows = [...byName.values()];
-  const isNew = (b: { landedAgoS?: number }): boolean => b.landedAgoS !== undefined && b.landedAgoS <= BUFF_NEW_S;
-  const fresh = rows.filter(isNew).sort((a, b) => a.landedAgoS! - b.landedAgoS!);
-  const rest = rows.filter((b) => !isNew(b));
+  const isNew = (b: BuffRow): boolean => b.landedAgoS !== undefined && b.landedAgoS <= BUFF_NEW_S;
+  return { rows, fresh: rows.filter(isNew).sort((a, b) => a.landedAgoS! - b.landedAgoS!), rest: rows.filter((b) => !isNew(b)) };
+}
+
+function justLandedText(fresh: BuffRow[]): string {
+  const lo = fresh[0].landedAgoS!, hi = fresh[fresh.length - 1].landedAgoS!;
+  return `just landed ${lo === hi ? `${buffTimeText(lo)} ago` : `${buffTimeText(lo)}–${buffTimeText(hi)} ago`}${fresh.length > 1 ? ' (newest first)' : ''}: ${compactBuffs(fresh, true)}`;
+}
+
+/** The short buff line names this many of the soonest to end (every one under BUFF_LOW_S is named on the RUNNING LOW line too). */
+export const BUFF_BRIEF_SOONEST = 4;
+
+/**
+ * The buff list short, for a look soon after one that listed them all (AgentObservation.brief): how many, the
+ * BUFF_BRIEF_SOONEST soonest to end by name, when the rest end, every one that just landed, and every one gone since
+ * your last look. A 40-buff list on every look made a quick check slow to read (Bulwark, Aerbax Haven, 2026-10-18
+ * 19:28Z report); what matters is still said: a missing protection (the protections line), what ends soon (RUNNING
+ * LOW), what landed and what dropped. `ac_observe full=true` lists them all.
+ */
+export function formatBuffsBrief(buffs: ReadonlyArray<BuffRow>, gone?: readonly string[]): string {
+  const goneText = gone?.length ? `; GONE since your last look: ${gone.join(', ')}` : '';
+  if (!buffs.length) return `buffs: none${goneText}`;
+  const { rows, fresh, rest } = buffRows(buffs);
+  const timed = rest.filter((b) => b.remaining >= 0 && !b.until).sort((a, b) => a.remaining - b.remaining);
+  const lasting = rest.filter((b) => b.remaining < 0 || b.until);
   const parts: string[] = [];
-  if (fresh.length) {
-    const lo = fresh[0].landedAgoS!, hi = fresh[fresh.length - 1].landedAgoS!;
-    parts.push(`just landed ${lo === hi ? `${buffTimeText(lo)} ago` : `${buffTimeText(lo)}–${buffTimeText(hi)} ago`}${fresh.length > 1 ? ' (newest first)' : ''}: ${compactBuffs(fresh, true)}`);
+  if (fresh.length) parts.push(justLandedText(fresh));
+  const soon = timed.slice(0, BUFF_BRIEF_SOONEST);
+  if (soon.length) parts.push(`soonest to end: ${compactBuffs(soon, true)}`);
+  const later = timed.slice(BUFF_BRIEF_SOONEST);
+  if (later.length) {
+    const lo = buffListTime(later[0].remaining), hi = buffListTime(later[later.length - 1].remaining);
+    parts.push(`the other ${later.length} end in ${lo === hi ? lo : `${lo} to ${hi}`}`);
   }
-  if (rest.length) parts.push(compactBuffs(rest));
-  return `buffs (${rows.length}): ${parts.join('; ')}`;
+  if (lasting.length) parts.push(`${lasting.length} with no end time (${lasting.map((b) => b.name).join(', ')})`);
+  return `buffs (${rows.length}; every one: ac_observe full=true): ${parts.join('; ')}${goneText}`;
 }
 
 /**
@@ -210,10 +246,13 @@ export function protectionsLine(enchantments: ReadonlyArray<{ statModType?: numb
     else if (e.statModValue > 1) worst.set(e.statModKey, Math.max(worst.get(e.statModKey) ?? 1, e.statModValue));
   }
   const fmt = (v: number): string => `×${Math.round(v * 100) / 100}`;
+  const vals = new Set([...best.values()].map(fmt));
   const on = PROTECTION_KEYS.filter(([k]) => best.has(k)).map(([k, n]) => `${n} ${fmt(best.get(k)!)}`);
   const off = PROTECTION_KEYS.filter(([k]) => !best.has(k)).map(([, n]) => n);
   const vuln = PROTECTION_KEYS.filter(([k]) => worst.has(k)).map(([k, n]) => `${n} ${fmt(worst.get(k)!)}`);
-  return `protections on you (damage of that kind taken ×): ${on.length ? on.join(', ') : 'none'}${off.length ? `; NOT on you: ${off.join(', ')}` : '; all seven up'}${vuln.length ? `; vulnerabilities on you: ${vuln.join(', ')}` : ''} (banes on your armour count apart)`;
+  // All seven at one multiplier (a full set of one level): said once, not seven times.
+  const head = !off.length && vals.size === 1 ? `all seven up, ${[...vals][0]} each` : `${on.length ? on.join(', ') : 'none'}${off.length ? `; NOT on you: ${off.join(', ')}` : '; all seven up'}`;
+  return `protections on you (damage of that kind taken ×): ${head}${vuln.length ? `; vulnerabilities on you: ${vuln.join(', ')}` : ''} (banes on your armour count apart)`;
 }
 
 export function formatObservation(obs: AgentObservation): string {
@@ -226,17 +265,20 @@ export function formatObservation(obs: AgentObservation): string {
     if (!me) return out.join('\n');
   }
   const v = (x: { cur: number; max: number }): string => `${x.cur}/${x.max}`;
+  // Sections the player's last look printed in full and that are the same now (AgentApi.playerObserve): short here.
+  const brief = new Set(obs.brief ?? []);
   // Stamina 0 is ACE's IsExhausted: no defense (every attack at you lands) and a crawl for a run (AgentApi's exhausted alarm).
   const exhausted = !me.dead && me.stamina.max > 0 && me.stamina.cur === 0 ? ' (EXHAUSTED: no defense, every attack lands; a crawl for a run)' : '';
   out.push(`${me.name} (L${me.level})${me.dead ? '  ** DEAD **' : ''}  HP ${v(me.health)}  ST ${v(me.stamina)}${exhausted}  MA ${v(me.mana)}  mode ${me.combatMode}`);
   out.push(`at ${me.coords ?? 'indoors'}  cell ${me.cell}  facing ${Math.round(me.heading)}° (${compassPoint(me.heading)})${me.task ? `  task: ${me.task}` : ''}`);
   if (obs.vitae) out.push(obs.vitae);
   // Coins and trade notes together (moneyLine: what a death takes, what a vendor takes as payment).
-  if (me.pyreals !== undefined || me.tradeNotes || me.burden || me.xp) out.push(`${moneyLine(me.pyreals, me.tradeNotes, me.level)}${me.burden ? `  burden ${me.burden}` : ''}${me.xp ? `  unassigned xp ${me.xp.unassigned.toLocaleString('en-US')}${me.xp.unassigned >= 1000 ? ' (spend it: ac_raise)' : ''}` : ''}`);
+  if (me.pyreals !== undefined || me.tradeNotes || me.burden || me.xp) out.push(`${moneyLine(me.pyreals, me.tradeNotes, me.level, brief.has('money'))}${me.burden ? `  burden ${me.burden}` : ''}${me.xp ? `  unassigned xp ${me.xp.unassigned.toLocaleString('en-US')}${me.xp.unassigned >= 1000 ? ' (spend it: ac_raise)' : ''}` : ''}`);
   if (me.packSlots) out.push(packSlotsText(me.packSlots));
   for (const [i, d] of obs.dialogs.entries()) out.push(`DIALOG ${i} [${d.buttons.join(' / ')}]: ${d.text.replace(/\s+/g, ' ')}`);
   if (obs.dialogs.length) out.push('  (answer or dismiss each with ac_dialog, e.g. button=OK; a dialog stays up until you do)');
-  out.push(formatBuffs((obs.buffs ?? []).filter((b) => b.beneficial !== false)));
+  const good = (obs.buffs ?? []).filter((b) => b.beneficial !== false);
+  out.push(brief.has('buffs') ? formatBuffsBrief(good, obs.buffsGone) : `${formatBuffs(good)}${obs.buffsGone?.length ? `; GONE since your last look: ${obs.buffsGone.join(', ')}` : ''}`);
   const prot = protectionsLine(obs.buffs ?? []);
   if (prot) out.push(`  ${prot}`);
   const bad = (obs.buffs ?? []).filter((b) => b.beneficial === false);
@@ -245,16 +287,29 @@ export function formatObservation(obs: AgentObservation): string {
   const low = (obs.buffs ?? []).filter((b) => b.beneficial !== false && b.remaining >= 0 && b.remaining <= BUFF_LOW_S).sort((a, b) => a.remaining - b.remaining);
   if (low.length) out.push(`  BUFFS RUNNING LOW (${BUFF_LOW_S / 60} min or less left): ${low.map((b) => `${b.name} ${buffTimeText(b.remaining)}`).join(', ')}: recast before they end (ac_wait types=buff-expired wakes when one does)`);
   if (obs.gearSpells?.length) {
-    const g = obs.gearSpells.map((x) => `${x.spell} on ${x.items} item${x.items === 1 ? '' : 's'}, cast ${buffTimeText(x.castAgoS)} ago${x.leftS !== undefined ? ` (${x.leftS <= BUFF_LOW_S ? 'RUNNING LOW: ' : ''}about ${buffTimeText(x.leftS)} left by its duration)` : ''}`);
-    out.push(`  spells on your gear (no timer for them reaches you: reckoned from your casts): ${g.join(', ')}`);
+    const one = (x: NonNullable<AgentObservation['gearSpells']>[number]): string => `${x.spell} on ${x.items} item${x.items === 1 ? '' : 's'}, cast ${buffTimeText(x.castAgoS)} ago${x.leftS !== undefined ? ` (${x.leftS <= BUFF_LOW_S ? 'RUNNING LOW: ' : ''}about ${buffTimeText(x.leftS)} left by its duration)` : ''}`;
+    if (brief.has('gearSpells')) {
+      // Short: how many, the soonest to end, and every one running low by name.
+      const byLeft = [...obs.gearSpells].sort((a, b) => (a.leftS ?? Infinity) - (b.leftS ?? Infinity));
+      const named = byLeft.filter((x, i) => i === 0 || (x.leftS !== undefined && x.leftS <= BUFF_LOW_S));
+      out.push(`  spells on your gear: ${obs.gearSpells.length}, as at your last look${named.length ? `; ${named.map(one).join(', ')}` : ''} (every one: ac_observe full=true)`);
+    } else out.push(`  spells on your gear (no timer for them reaches you: reckoned from your casts): ${obs.gearSpells.map(one).join(', ')}`);
   }
-  if (obs.buffsMissing?.length) out.push(`  buffs you know that aren't up: ${obs.buffsMissing.slice(0, 10).join(', ')}${obs.buffsMissing.length > 10 ? ` +${obs.buffsMissing.length - 10} more` : ''} (ac_cast; "… Other" ones go on a fellow with target=)`);
+  if (obs.buffsMissing?.length) {
+    out.push(brief.has('buffsMissing')
+      ? `  buffs you know that aren't up: the same ${obs.buffsMissing.length} as at your last look (every one: ac_observe full=true)`
+      : `  buffs you know that aren't up: ${obs.buffsMissing.slice(0, 10).join(', ')}${obs.buffsMissing.length > 10 ? ` +${obs.buffsMissing.length - 10} more` : ''} (ac_cast; "… Other" ones go on a fellow with target=)`);
+  }
   if (obs.deaths) out.push(obs.deaths);
   if (obs.corpses) out.push(obs.corpses);
   if (obs.fellowshipAlone) out.push('fellowship: only you are in it, so /f reaches no one (a fellow who logs out leaves it): recruit your partner (in sight), or quit it (ac_fellowship action=quit) if they lead one');
-  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.coords ? `, at ${f.coords}` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}${f.stuckThreats ? `, AIMED AT THEM BUT NOT REACHING THEM: ${f.stuckThreats}` : ''}` : f.lastSeen ? `out of sight, last seen ${f.lastSeen} (walk_to ${f.name} goes there; they may have moved on)` : f.arriving ? `not placed here yet (${f.arriving})` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
+  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.coords ? `, at ${f.coords}` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}${f.stuckThreats ? `, AIMED AT THEM BUT NOT REACHING THEM: ${f.stuckThreats}` : ''}` : f.lastSeen ? `out of sight, last seen ${f.lastSeen} (walk_to ${f.name} goes there; they may have moved on)` : f.elsewhere ? `not here: ${f.elsewhere}` : f.arriving ? `not placed here yet (${f.arriving})` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
   if (obs.gearManaOut?.length) {
     out.push(`gear out of mana (its spells are off): ${obs.gearManaOut.map((m) => `${m.name} #${m.guid.toString(16)}${m.mana ? ` (mana ${m.mana.cur}/${m.mana.max})` : ''}`).join(', ')}: ac_use_on a charged mana stone on an empty one, then ac_unequip and ac_equip it (the server turns its spells back on only on a wield with mana in it)${obs.manaStones ? `; ${obs.manaStones}` : ''}`);
+  }
+  if (obs.gearManaLow?.items.length) {
+    const it = obs.gearManaLow.items.map((m) => `${m.name} #${m.guid.toString(16)} (${m.leftS !== undefined ? `about ${buffTimeText(m.leftS)} of mana left` : 'the server says it is low on mana: under 2 min left'}${m.mana ? `, ${m.mana.cur}/${m.mana.max} when last read` : ''})`);
+    out.push(`gear running out of mana (its spells go off when it does): ${it.join(', ')}; ${obs.gearManaLow.refill}`);
   }
   if (obs.routineSupplies) out.push(`routine supplies: ${obs.routineSupplies}`);
   if (obs.gearEmpty?.slots.length) out.push(`gear: ${emptySlotsText(obs.gearEmpty.slots)}${obs.gearEmpty.packFits.length ? `; in your pack that would cover one: ${obs.gearEmpty.packFits.slice(0, 4).join(', ')}` : ''} (ac_inventory / ac_gear show every gear slot)`);
@@ -551,16 +606,17 @@ export function coinsOf(items: readonly AgentItem[]): number | null {
  *   (GetSellCost);
  * - above level 5 a death drops half your coins (Player_Death.GetNumCoinsDropped), but every Trade Note weenie is
  *   Bonded (PropertyInt 33 = 1), and CalculateDeathItems leaves bonded items out: notes stay with you.
- * `level` gates the death fact (level 5 and under drops no coins).
+ * `level` gates the death fact (level 5 and under drops no coins). `brief`: the sums alone (the facts were said at a
+ * look a moment ago).
  */
-export function moneyLine(coins: number | null | undefined, notes: TradeNotes | null | undefined, level?: number): string {
+export function moneyLine(coins: number | null | undefined, notes: TradeNotes | null | undefined, level?: number, brief = false): string {
   const fmt = (x: number): string => x.toLocaleString('en-US');
   const c = coins ?? null;
   const n = notes && notes.count ? notes : null;
   const coinText = c === null ? '? in coins' : `${fmt(c)} in coins`;
   const deathRisk = c !== null && c >= 1000 && (level === undefined || level > 5);
   if (!n) {
-    return `money: ${coinText}, no trade notes${deathRisk ? ' (half your coins are lost if you die; trade notes, bought from most vendors, are kept on death)' : ''}`;
+    return `money: ${coinText}, no trade notes${deathRisk && !brief ? ' (half your coins are lost if you die; trade notes, bought from most vendors, are kept on death)' : ''}`;
   }
   const unpriced = n.unpriced ? `, ${n.unpriced} of unknown value` : '';
   const total = c !== null ? ` = ${fmt(c + n.value)}${n.unpriced ? '+' : ''}` : '';
@@ -568,5 +624,6 @@ export function moneyLine(coins: number | null | undefined, notes: TradeNotes | 
     ...(deathRisk ? ['half your coins are lost if you die, notes are kept'] : ['notes are kept on death']),
     'vendors take only coins as payment: sell a note to a vendor (most buy them) for its face value in coins',
   ];
-  return `money: ${coinText} + ${fmt(n.value)} in trade notes (${n.count} note${n.count === 1 ? '' : 's'}${unpriced})${total} (${facts.join('; ')})`;
+  // `brief`: the facts were said at a look a moment ago (AgentObservation.brief), the sums only now.
+  return `money: ${coinText} + ${fmt(n.value)} in trade notes (${n.count} note${n.count === 1 ? '' : 's'}${unpriced})${total}${brief ? '' : ` (${facts.join('; ')})`}`;
 }

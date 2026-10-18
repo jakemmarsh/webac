@@ -277,7 +277,8 @@ export function waitFilter(a: Record<string, any>): { types?: string[]; chatMatc
 }
 
 async function observeText(c: ToolCaller, a: Record<string, any>): Promise<string> {
-  const obs = await c.call<AgentObservation>('observe', [{ radius: a.radius, max: a.max, filter: a.filter }]);
+  const full = a.full === true || a.full === 'true';
+  const obs = await c.call<AgentObservation>('observe', [{ radius: a.radius, max: a.max, filter: a.filter, ...(full ? { full: true } : {}) }]);
   return formatObservation(obs);
 }
 
@@ -543,6 +544,7 @@ export const TOOLS: AgentTool[] = [
       radius: { type: 'number', description: 'Metres (default 60).' },
       max: { type: 'number', description: 'Max objects listed (default 25).' },
       filter: { type: 'string', description: 'Only objects whose name or kind contains this text (e.g. "monster", "Drudge", "corpse").' },
+      full: { type: 'boolean', description: 'Every list in full: each buff by name, the spells on your gear, the buffs you know that are not up, what is on your corpses, the money and vitae notes. Without it, a list printed in full at a look in the last 15 min and the same now is printed short (a count, what ends soonest, what landed or dropped, every protection missing).' },
     },
     async run(a) { const c = callerFor(a.profile); return withNotice(c, { text: await observeText(c, a) }); },
   },

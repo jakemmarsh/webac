@@ -110,7 +110,7 @@ export function fellowVitaeText(f: FellowshipXpState | null, fellowDist?: Readon
  * Observe's header line: "VITAE −18%: max health, stamina and mana and every skill 18% lower (max health 158, not
  * 193); 4,512 more XP regains 1%, about 470,331 XP clears it; fellowship kills count too: …". Null without vitae.
  */
-export function vitaeHeadline(v: VitaeState | null, me: { health: number; stamina: number; mana: number }, fellow: string | null): string | null {
+export function vitaeHeadline(v: VitaeState | null, me: { health: number; stamina: number; mana: number }, fellow: string | null, brief = false): string | null {
   if (!v) return null;
   const pct = vitaePercent(v.multiplier);
   if (pct <= 0) return null;
@@ -121,6 +121,8 @@ export function vitaeHeadline(v: VitaeState | null, me: { health: number; stamin
     `${n(vitaeXpToNext(v))} more XP regains 1%, about ${n(vitaeXpToClear(v))} XP clears it all (kill, quest and fellowship XP all count; set at your level at death, ${v.deathLevel})`,
     `each death adds 5% more (up to ${vitaeCapPercent(v.deathLevel)}% at your level)`,
   ];
+  // `brief`: what it costs and what clears it; the rules were said at a look a moment ago.
+  if (brief) return `${parts[0]}; ${parts[1]} (the rest: ac_observe full=true)`;
   if (fellow) parts.push(fellow);
   return parts.join('; ');
 }

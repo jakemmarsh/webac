@@ -93,8 +93,14 @@ export function awayWord(from: ReadonlyArray<{ bearing: number }>): string | nul
  *     in another space is followed by the portal near you that took you to their landblock before (AgentApi.fellowPortal).
  *     VTank's Follow stands still once the leader is out of sight: Arcanist's stood when Bulwark took Aerbax Laboratory's
  *     Surface portal 2 m from her and came back in at the entrance, 622 m off by no foot route (2026-10-18 14:51:58Z).
+ *   FightBeforeBuffs (60; 2026-10-18): with a monster you can fight in range hitting you or coming at you (not one stuck
+ *     behind a wall), a due rebuff (VTank's BuffSelfNormal: a buff under RebuffTimeRemainingSeconds, or a bane missing on
+ *     a piece) waits for the fight, up to this many seconds of it; then buffs go in again as VTank orders them (above
+ *     Attack), so a long fight doesn't run them out. A Force Buff round is never held. VTank casts the rebuff first:
+ *     "Arcanist fights" cast Invulnerability Self VI and four banes while two Innocuous Dolls hit him at the Aerbax
+ *     Laboratory portal, until he bolted them by hand (2026-10-18 18:40:05–17Z). 0 is VTank's order.
  */
-export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true, BuffMinLandChance: 75, FollowLeash: 0, FollowThroughPortals: true } as const;
+export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true, BuffMinLandChance: 75, FollowLeash: 0, FollowThroughPortals: true, FightBeforeBuffs: 60 } as const;
 
 /** A beyond-VTank macro setting from a profile's settings (any case), else its default. */
 export function beyondSetting<K extends keyof typeof BEYOND_MACRO_DEFAULTS>(settings: Record<string, string | number | boolean>, name: K): (typeof BEYOND_MACRO_DEFAULTS)[K] {
