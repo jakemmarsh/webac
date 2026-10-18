@@ -5,7 +5,7 @@
  * Built for playing a deployed page (https://playwebac.com), where URL login
  * and ?agent are off: you log in through the launcher with clicks and keys.
  *
- *   npx tsx tools/live-drive.ts serve [--url https://playwebac.com/] [--gpu] [--out dir] [--port 9477] [--throttle kbit/s] [--profile dir]
+ *   npx tsx tools/live-drive.ts serve [--url https://playwebac.com/] [--gpu] [--out dir] [--port 9477] [--throttle kbit/s] [--profile dir] [--viewport WxH] [--cursor]
  *   npx tsx tools/live-drive.ts shot [name]            → prints the PNG path
  *   npx tsx tools/live-drive.ts click <x> <y> [right|double]
  *   npx tsx tools/live-drive.ts drag <x0> <y0> <x1> <y1>
@@ -17,7 +17,14 @@
  *   npx tsx tools/live-drive.ts goto <url>
  *   npx tsx tools/live-drive.ts resize <w> <h>          (the viewport, as a window resize)
  *   npx tsx tools/live-drive.ts log [pattern] [n]      (last n console lines, regex-filtered)
+ *   npx tsx tools/live-drive.ts move <x> <y> [ms]      (glide the mouse there over ms, default 400, as a hand would)
+ *   npx tsx tools/live-drive.ts record start|stop [name] (a CDP screencast → <out>/<name>.mp4, 30 fps; see below)
  *   npx tsx tools/live-drive.ts stop
+ *
+ * Recording (for videos): serve with `--viewport 1920x1080 --cursor` so the capture is full HD and
+ * shows a drawn mouse pointer with a ring on each click (headless Chrome paints no cursor). `record
+ * start` streams screencast frames (JPEG q92) with their timestamps; `record stop` encodes them with
+ * ffmpeg at their real timing to a constant 30 fps H.264 file and prints its path.
  *
  * window.__ldLongTasks lists main-thread long tasks (≥ 50 ms) since the page started.
  *
@@ -33,7 +40,8 @@
  * `--profile <dir>`: that directory is reused and never deleted (pick one
  * fixed path and remove it when done, not a new one per run).
  */
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,6 +59,8 @@ async function serve(): Promise<void> {
   mkdirSync(out, { recursive: true });
   const LOG = join(out, 'console.log');
   const gpu = args.includes('--gpu');
+  const vp = opt('viewport', '');
+  const viewport = /^\d+x\d+$/.test(vp) ? { width: Number(vp.split('x')[0]), height: Number(vp.split('x')[1]) } : { ...DEFAULT_VIEWPORT };
   const persist = opt('profile', '');
   if (persist) mkdirSync(persist, { recursive: true });
   const profile = createRunProfile('live-drive-profile-', { persistDir: persist || undefined, tool: 'live-drive' });
@@ -58,7 +68,7 @@ async function serve(): Promise<void> {
     headless: true,
     // The cloud container's preinstalled Chromium (the game-session recipe); Playwright's own may be absent.
     ...(gpu ? { channel: 'chromium', args: GPU_ARGS } : { args: SWIFTSHADER_ARGS, ...(existsSync(REMOTE_CHROMIUM) ? { executablePath: REMOTE_CHROMIUM } : {}) }),
-    viewport: { ...DEFAULT_VIEWPORT },
+    viewport,
   });
   profile.setCloser(() => ctx.close());
   // The browser going away (crash, killed, closed) ends the server and takes the temp profile with it.
@@ -80,6 +90,29 @@ async function serve(): Promise<void> {
         .observe({ type: 'longtask', buffered: true });
     } catch { /* no longtask support */ }
   });
+  // --cursor: draw the pointer (headless Chrome paints none), with a ring on each press, for recordings.
+  if (args.includes('--cursor')) {
+    await ctx.addInitScript(() => {
+      const add = (): void => {
+        const c = document.createElement('div');
+        c.id = '__ldCursor';
+        c.style.cssText = 'position:fixed;left:0;top:0;width:22px;height:22px;z-index:2147483647;pointer-events:none;transform:translate(-100px,-100px)';
+        c.innerHTML = '<svg width="22" height="22" viewBox="0 0 22 22"><path d="M2 1 L2 17 L6.5 13 L9.5 20 L12.5 18.7 L9.6 12 L15.5 12 Z" fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+        document.documentElement.appendChild(c);
+        type At = { clientX: number; clientY: number };
+        addEventListener('mousemove', (ev) => { const e = ev as unknown as At; c.style.transform = `translate(${e.clientX - 2}px,${e.clientY - 1}px)`; }, true);
+        addEventListener('mousedown', (ev) => {
+          const e = ev as unknown as At;
+          const r = document.createElement('div');
+          r.style.cssText = `position:fixed;left:${e.clientX - 18}px;top:${e.clientY - 18}px;width:36px;height:36px;border-radius:50%;border:3px solid #ffd76a;z-index:2147483646;pointer-events:none;transition:transform .35s ease-out,opacity .35s ease-out;transform:scale(.4);opacity:1`;
+          document.documentElement.appendChild(r);
+          requestAnimationFrame(() => { r.style.transform = 'scale(1.3)'; r.style.opacity = '0'; });
+          setTimeout(() => r.remove(), 450);
+        }, true);
+      };
+      if (document.documentElement) add(); else addEventListener('DOMContentLoaded', add);
+    });
+  }
   const page: Page = ctx.pages()[0] ?? await ctx.newPage();
   page.setDefaultTimeout(60_000);
   // --throttle <kbit/s>: Chrome's network emulation (both directions, 40 ms latency), e.g. to reproduce
@@ -96,6 +129,8 @@ async function serve(): Promise<void> {
   page.on('pageerror', (e) => appendFileSync(LOG, `[${new Date().toISOString().slice(11, 23)}] PAGEERROR ${e.message}\n`));
   await page.goto(url, { waitUntil: 'commit', timeout: 120_000 });
   let shots = 0;
+  let mouse = { x: 0, y: 0 };
+  let rec: { name: string; dir: string; frames: Array<{ f: string; t: number }>; cdp: import('playwright').CDPSession; size: { width: number; height: number } } | null = null;
 
   const run = async (op: string, a: string[]): Promise<string> => {
     switch (op) {
@@ -104,8 +139,61 @@ async function serve(): Promise<void> {
         await page.screenshot({ path: f, timeout: 60_000 });
         return f;
       }
+      case 'move': {
+        const [x, y, ms] = [Number(a[0]), Number(a[1]), Number(a[2] ?? 400)];
+        const steps = Math.max(1, Math.round(ms / 16));
+        const from = { ...mouse };
+        for (let i = 1; i <= steps; i++) {
+          const k = i / steps, e = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+          await page.mouse.move(from.x + (x - from.x) * e, from.y + (y - from.y) * e);
+          await page.waitForTimeout(16);
+        }
+        mouse = { x, y };
+        return 'ok';
+      }
+      case 'record': {
+        if (a[0] === 'start') {
+          if (rec) throw new Error(`already recording ${rec.name}`);
+          const name = a[1] ?? `rec-${Date.now()}`;
+          const dir = join(out, `${name}-frames`);
+          mkdirSync(dir, { recursive: true });
+          const cdp = await ctx.newCDPSession(page);
+          // The size now, not at launch: `resize` (e.g. 1080x1920 for a vertical take) changes it.
+          const size = page.viewportSize() ?? viewport;
+          const r = { name, dir, frames: [] as Array<{ f: string; t: number }>, cdp, size };
+          cdp.on('Page.screencastFrame', (fr: { data: string; sessionId: number; metadata: { timestamp?: number } }) => {
+            const f = join(dir, `${String(r.frames.length).padStart(6, '0')}.jpg`);
+            writeFileSync(f, Buffer.from(fr.data, 'base64'));
+            r.frames.push({ f, t: fr.metadata.timestamp ?? Date.now() / 1000 });
+            void cdp.send('Page.screencastFrameAck', { sessionId: fr.sessionId }).catch(() => {});
+          });
+          await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 92, maxWidth: size.width, maxHeight: size.height, everyNthFrame: 1 });
+          rec = r;
+          return `recording ${name}`;
+        }
+        if (!rec) throw new Error('not recording');
+        const r = rec;
+        rec = null;
+        await r.cdp.send('Page.stopScreencast');
+        await r.cdp.detach();
+        if (r.frames.length === 0) throw new Error('no frames captured');
+        // The concat demuxer with each frame's real on-screen duration; the screencast only sends a
+        // frame when the page repaints, so a still screen is one long frame, not a gap.
+        const list = r.frames.map((fr, i) => {
+          const next = r.frames[i + 1]?.t ?? fr.t + 1 / 30;
+          return `file '${fr.f}'\nduration ${Math.max(0.001, next - fr.t).toFixed(4)}`;
+        }).join('\n') + `\nfile '${r.frames[r.frames.length - 1].f}'\n`;
+        const listFile = join(r.dir, 'frames.txt');
+        writeFileSync(listFile, list);
+        const mp4 = join(out, `${r.name}.mp4`);
+        const ff = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile,
+          '-vf', `fps=30,scale=${r.size.width}:${r.size.height}:flags=lanczos,format=yuv420p`, '-c:v', 'libx264', '-preset', 'slow', '-crf', '16', mp4]);
+        if (ff.status !== 0) throw new Error(`ffmpeg failed: ${ff.stderr}`);
+        return `${mp4} (${r.frames.length} frames, ${(r.frames[r.frames.length - 1].t - r.frames[0].t).toFixed(1)} s)`;
+      }
       case 'click': {
         const [x, y] = [Number(a[0]), Number(a[1])];
+        mouse = { x, y };
         if (a[2] === 'double') await page.mouse.dblclick(x, y);
         else await page.mouse.click(x, y, { button: a[2] === 'right' ? 'right' : 'left' });
         return 'ok';

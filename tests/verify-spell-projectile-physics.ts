@@ -248,6 +248,20 @@ describe('MissilePhysics — sweeps', () => {
     expect(sweepHeightfield(v(0, 0, 1), v(0, 20, 1), 0.25, () => null, n)).toBeNull(); // unloaded ground
   });
 
+  it('sweepHeightfield: under the terrain inside an interior cell (a cellar, a statue ramp) the land overhead is no contact', () => {
+    // Terrain at z 66 over the Holtburg drudge statue's ramp; a level bolt flown 4 m under it.
+    const h = () => 66;
+    const n = () => v(0, 0, 1);
+    const inRamp = (_x: number, y: number) => y >= 0 && y <= 10;
+    expect(sweepHeightfield(v(0, 0, 62), v(0, 10, 62), 0.25, h, n, inRamp)).toBeNull();
+    // Without the cell (open ground, or the pre-fix sweep) the first step is under the surface.
+    expect(sweepHeightfield(v(0, 0, 62), v(0, 10, 62), 0.25, h, n)!.t).toBe(0);
+    // A bolt leaving the cell hits the land where it does.
+    const c = sweepHeightfield(v(0, 0, 62), v(0, 20, 62), 0.25, h, n, inRamp)!;
+    expect(c.t * 20).toBeGreaterThan(9.5);
+    expect(c.t * 20).toBeLessThan(10.5);
+  });
+
   it('nearestContact keeps the earlier contact', () => {
     expect(nearestContact({ t: 0.6, normal: null }, { t: 0.2, normal: null, objectGuid: 3 })!.objectGuid).toBe(3);
     expect(nearestContact(null, null)).toBeNull();

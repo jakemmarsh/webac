@@ -59,10 +59,18 @@ describe('outdoorGroundY — an interior cell\'s floor under the terrain is the 
     expect(outdoorGroundY(src(null, 0xa9b40177), 0, 0, 66)).toBe(66);
   });
 
-  it('the cell is asked for the body standing on the candidate floor', () => {
+  it('the cell is asked for the body standing on the candidate floor, then where it stands now', () => {
     const asked: number[] = [];
     outdoorGroundY({ terrainHeight: () => 66, floorHeight: () => 62.5, cellAt: (_x, _z, f) => { asked.push(f); return 1; } }, 0, 0, 66);
-    expect(asked).toEqual([62.5]);
+    expect(asked).toEqual([62.5, 66]);
+  });
+
+  it('BUG.building-floor-sink-a1a4 — a body on the landscape (no cell where it stands) keeps the terrain over a cell floor under it', () => {
+    // The floor's height lies in a cell (a cellar running out under the grass), the body's own does not.
+    const cellar = (_x: number, _z: number, f: number): number => (f < 64 ? 0xa1a40120 : 0);
+    expect(outdoorGroundY({ terrainHeight: () => 66, floorHeight: () => 62.5, cellAt: cellar }, 0, 0, 66)).toBe(66);
+    // Already in the cell (walking its floor), the floor stands.
+    expect(outdoorGroundY({ terrainHeight: () => 66, floorHeight: () => 62.5, cellAt: cellar }, 0, 0, 62.5)).toBe(62.5);
   });
 });
 
@@ -131,8 +139,8 @@ describe.skipIf(!haveDat)('the Holtburg drudge statue\'s tunnel (A9B4 0x177 ramp
     };
   }
 
-  /** `n` keyed 1/30 s substeps east (0.1 m each) from local (x0, y0) with the floor at f0, followed as main.ts follows it. */
-  function walkEast(x0: number, y0: number, f0: number, n: number, terrainRuleOnly = false) {
+  /** `n` keyed 1/30 s substeps east (0.1 m each; `dx` −0.1 walks west) from local (x0, y0) with the floor at f0, followed as main.ts follows it. */
+  function walkEast(x0: number, y0: number, f0: number, n: number, terrainRuleOnly = false, dx = 0.1) {
     let x = OX + x0;
     let z = OY + y0;
     let floorY = f0;
@@ -141,7 +149,7 @@ describe.skipIf(!haveDat)('the Holtburg drudge statue\'s tunnel (A9B4 0x177 ramp
     const src = sources(terrainRuleOnly, true);
     const svc = terrainRuleOnly ? { ...services, groundAt: (a: number, b: number, y: number) => outdoorGroundY(sources(true), a, b, y) } : services;
     for (let i = 0; i < n; i++) {
-      const r = stepPlayerMovement({ x, z, floorY, inDungeon: false, airborne: false, jumpVelocityX: 0, jumpVelocityZ: 0 }, 0.1, 0, 1 / 30, svc);
+      const r = stepPlayerMovement({ x, z, floorY, inDungeon: false, airborne: false, jumpVelocityX: 0, jumpVelocityZ: 0 }, dx, 0, 1 / 30, svc);
       const g = traceGroundAlongPath((a, b, y) => outdoorGroundY(src, a, b, y), x, z, r.x, r.z,
         floorSearchFromY(null, floorY, dc.lastStepUp), dc.transitionSphereRadius);
       x = r.x;
@@ -184,5 +192,15 @@ describe.skipIf(!haveDat)('the Holtburg drudge statue\'s tunnel (A9B4 0x177 ramp
     const s = walkEast(66.8, 156.7, 66, 130);
     expect(s.cell).toBe(PORTAL_ROOM);
     expect(s.x).toBeGreaterThan(79);
+  });
+
+  // BUG.bunker-sealed-at-ground (2026-10-18 report: "once you go down into a bunker, you can't get back out, it
+  // seals you in at ground level"). The pedestal's shell (GfxObj 0x01002A1B) caps its whole footprint with a plate
+  // at z 66; the ramp runs under it. Retail tests a building's shell only from its land cell, which a body in the
+  // ramp's env cell reaches only within a sphere radius of the cell's outside portal plane (the doorway at x 62.3).
+  it('walking west back up from the portal room climbs the ramp to the doorway at ground level', () => {
+    const s = walkEast(78, 156.7, 60.8, 190, false, -0.1);
+    expect(s.x).toBeLessThan(63);
+    expect(s.floorY).toBeGreaterThan(65.9);
   });
 });

@@ -53,7 +53,7 @@ import { smartBoxPhysicsSteps, inventoryRequestRefusalText } from '@ac/shared';
 import { WaterMap, LandWaterType, canAttackTarget, canUseTarget, canAddToTrade, canOpenTrade, getPlayerFormula, spellComponentsSatisfied, appropriateSpellFormula, SPELL_COMPONENT_DID_MAPPER_ID, resolveAllegiancePatron, DEFAULT_WEAPON_SPEED, resolveCombatManeuverTableDid } from '@ac/shared';
 import { SceneManager } from './scene/SceneManager.js';
 import { CameraController } from './scene/CameraController.js';
-import { CAMERA_DEFAULT_PIVOT_Z, CAMERA_IN_HEAD_Y, TRACK_TARGET_OFFSET_Z, blipResetsViewer, cameraPlayerTranslucency } from './scene/RetailCamera.js';
+import { CAMERA_DEFAULT_PIVOT_Z, CAMERA_IN_HEAD_Y, TRACK_TARGET_OFFSET_Z, blipResetsViewer, cameraPlayerTranslucency, viewerClipsOnTerrain } from './scene/RetailCamera.js';
 import { RetailCameraRig } from './scene/RetailCameraRig.js';
 import { RendererWarmup } from './scene/RendererWarmup.js';
 import { applyViewerFade } from './scene/ViewerFade.js';
@@ -1271,7 +1271,10 @@ async function main() {
   if (capabilityIssues.length > 0) {
     console.warn(`[AC] browser capability: ${capabilityIssues.map(p => `${p.id}${p.hard ? ' (blocking)' : ''}`).join(', ')}`);
     if (capabilityIssues.some(p => p.hard)) {
-      errorReporter.report('boot', `unsupported browser: ${capabilityIssues.filter(p => p.hard).map(p => p.id).join(', ')}`);
+      // BOOT.webgl2-diagnosis: the boot report says why WebGL 2 failed (cause + the browser's own reason).
+      const wf = capabilityEnv.webgl2Failure;
+      errorReporter.report('boot', `unsupported browser: ${capabilityIssues.filter(p => p.hard).map(p => p.id).join(', ')}${wf ? ` (${wf.cause})` : ''}`,
+        { webglCause: wf?.cause ?? null, webglStatus: wf?.status ?? null });
     }
     preworldReporter.bootStage('capability_prompt');
     await showCapabilityScreen(document, capabilityIssues);
@@ -8308,7 +8311,8 @@ async function main() {
       if (inside) return objects;
       const ground = sweepHeightfield(from, to, radius,
         (x, y) => terrainCollision.getHeightAt(x, y),
-        (x, y) => { const n = terrainCollision.getNormalAt(x, y); return n ? { x: n.x, y: n.z, z: n.y } : null; });
+        (x, y) => { const n = terrainCollision.getNormalAt(x, y); return n ? { x: n.x, y: n.z, z: n.y } : null; },
+        (x, y, z) => outdoorCollision.findCellContaining(x, y, z) !== 0);
       return nearestContact(objects, ground);
     };
     // VERIFY.spell-projectile-arc-ring-dungeon — a non-creature server
@@ -19438,12 +19442,18 @@ async function main() {
       let cameraScale = 1;
       if (followDist > 0.01 && soughtDist > 0.01) {
         const pPos = collisionProbePos.set(playerDrawX, pivotY, playerDrawZ);
+        // BUG.bunker-camera-in-head — from a walked-in env cell under the
+        // landscape (a bunker) the terrain overhead never clips the boom.
+        const terrainClips = viewerClipsOnTerrain((currentSurfaceCellId & 0xffff) >= 0x100,
+          pivotY, terrainCollision.getHeightAt(playerDrawX, playerDrawZ));
         const cameraDist = (playerInDungeon && dungeonCollision)
           ? dungeonCollision.getCameraDistance(pPos, behindX, behindZ, soughtDist, soughtUp)
           : Math.min(
               outdoorCollision.getCameraDistance(pPos, behindX, behindZ, soughtDist, soughtUp),
-              terrainCollision.getCameraDistance(
-                playerDrawX, pivotY, playerDrawZ, behindX, behindZ, soughtDist, soughtUp),
+              terrainClips
+                ? terrainCollision.getCameraDistance(
+                  playerDrawX, pivotY, playerDrawZ, behindX, behindZ, soughtDist, soughtUp)
+                : soughtDist,
             );
         cameraScale = cameraDist / soughtDist;
         camPos.x = playerDrawX + behindX * cameraScale;

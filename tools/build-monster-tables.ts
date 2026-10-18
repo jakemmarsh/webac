@@ -14,7 +14,7 @@
  *
  * Kept: weenies whose ItemType has Creature (0x10) and that are not
  * Attackable = False (NPCs, vendors). Each row is [name, weak, maxHealth,
- * species, immune]:
+ * species, immune, multipliers]:
  *   weak       the seven elements VTank's damage list names, most damaging
  *              first by the creature's Resist* multipliers (PropertyFloat
  *              64 Slash, 65 Pierce, 66 Bludgeon, 67 Fire, 68 Cold, 69 Acid,
@@ -29,6 +29,8 @@
  *              current_Level, else init_Level + Endurance / 2.
  *   species    CreatureType (PropertyInt 2; 0 when unset): what a slayer weapon
  *              (SlayerCreatureType, PropertyInt 166) names (VTank SpeciesMembers).
+ *   multipliers the Resist* multipliers of `weak`'s letters, in its order, comma-separated (2026-10-18:
+ *              VTank takes the first element it can deal; the macro also weighs each by the bolt you can cast).
  *   immune     VTank's MonsterImmunities, from the creature's own properties:
  *              'm' NonProjectileMagicImmune (PropertyBool 103: ACE answers
  *              "You fail to affect X with Y" to every spell that isn't a
@@ -59,8 +61,11 @@ export interface CreatureFacts {
   drainImmune: boolean;
 }
 
-/** One table row: [name, weak letters, max health, species (CreatureType), immunity letters ('m' magic, 'd' drain)]. */
-export type MonsterRow = [string, string, number, number, string];
+/**
+ * One table row: [name, weak letters, max health, species (CreatureType), immunity letters ('m' magic, 'd' drain), the
+ * Resist* multipliers of the weak letters in their order (comma-separated; '' when the weak list is)].
+ */
+export type MonsterRow = [string, string, number, number, string, string];
 
 /** VTank's element order for monsters its database doesn't list (MOSS VtankDamageDatabase.UnlistedElementOrder), as letters. */
 export const ELEMENT_ORDER = ['p', 'b', 's', 'a', 'l', 'c', 'f'] as const;
@@ -126,6 +131,15 @@ export function weakOrder(resist: number[]): string {
   return ELEMENT_ORDER.map((el, i) => ({ el, v: resist[i], i })).sort((a, b) => b.v - a.v || a.i - b.i).map((x) => x.el).join('');
 }
 
+/**
+ * The multipliers of a weak-letter string, in its order ('' for ''): how much each element does against the creature,
+ * so the macro can weigh a strong bolt of a slightly less damaging element against a weak bolt of the most damaging
+ * one (a Dread Mu-miyah takes fire and acid alike, ×1, and "Arcanist fights" cast Acid Stream I over Flame Bolt V).
+ */
+export function weakMultipliers(weak: string, resist: number[]): string {
+  return [...weak].map((l) => String(Math.round(resist[ELEMENT_ORDER.indexOf(l as (typeof ELEMENT_ORDER)[number])] * 1000) / 1000)).join(',');
+}
+
 const median = (xs: number[]): number => { const s = [...xs].sort((a, b) => a - b); const n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; };
 
 /** The most common value (the first seen of a tie). */
@@ -140,7 +154,8 @@ export function buildMonsterRows(all: CreatureFacts[]): MonsterRow[] {
     const resist = ELEMENT_ORDER.map((_, i) => median(cs.map((c) => c.resist[i])));
     const most = (f: (c: CreatureFacts) => boolean): boolean => cs.filter(f).length * 2 > cs.length;
     const immune = `${most((c) => c.magicImmune) ? 'm' : ''}${most((c) => c.drainImmune) ? 'd' : ''}`;
-    rows.push([name, weakOrder(resist), Math.round(median(cs.map((c) => c.maxHealth))), mode(cs.map((c) => c.species)), immune]);
+    const weak = weakOrder(resist);
+    rows.push([name, weak, Math.round(median(cs.map((c) => c.maxHealth))), mode(cs.map((c) => c.species)), immune, weakMultipliers(weak, resist)]);
   }
   return rows.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }

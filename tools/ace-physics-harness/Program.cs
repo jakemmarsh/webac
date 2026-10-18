@@ -219,6 +219,35 @@ class Program {
       }
       return;
     }
+    if (mode == "walk") {
+      // args: lb x0 y0 x1 y1 [step]: a human (Setup 0x02000001) placed on the ground at landblock-local (x0, y0) with
+      // enter_world, then walked toward (x1, y1) by `step` m transitions (PhysicsObj.transition + SetPositionInternal,
+      // the path a grounded mover's every frame takes). Prints the cell, origin and contact after each step: where
+      // ACE's physics keeps a body walking over an EnvCell that lies under the landscape (BUG.building-floor-sink-a1a4).
+      var lb = Convert.ToUInt32(args[1], 16);
+      float x0 = float.Parse(args[2]), y0 = float.Parse(args[3]), x1 = float.Parse(args[4]), y1 = float.Parse(args[5]);
+      var st = args.Length > 6 ? float.Parse(args[6]) : 0.25f;
+      var landCell = (lb << 16) | (uint)((int)(x0 / 24) * 8 + (int)(y0 / 24) + 1);
+      var ground = new ACE.Entity.Position(landCell, x0, y0, 200f, 0, 0, 0, 1).GetTerrainZ();
+      var wo = Uninit<Player>();
+      var body = Creature(0x02000001, 1.0f, wo, PhysicsState.ReportCollisions | PhysicsState.Gravity | PhysicsState.EdgeSlide);
+      body.Position.ObjCellID = landCell;
+      var ok = body.enter_world(new PPos(landCell, new AFrame(new Vector3(x0, y0, ground), Quaternion.Identity)));
+      body.TransientState |= TransientStateFlags.Contact | TransientStateFlags.OnWalkable;
+      Console.WriteLine($"enter {ok} cell {body.CurCell?.ID:X8} at {body.Position.Frame.Origin} terrain {ground:0.00} state {body.TransientState}");
+      var dir = Vector3.Normalize(new Vector3(x1 - x0, y1 - y0, 0));
+      var n = (int)MathF.Ceiling(Vector2.Distance(new Vector2(x0, y0), new Vector2(x1, y1)) / st);
+      for (var i = 0; i < n; i++) {
+        var from = new PPos(body.Position);
+        var to = new PPos(body.Position); to.Frame.Origin += dir * st;
+        var tr = body.transition(from, to, false);
+        if (tr == null) { Console.WriteLine($"step {i}: no valid position (blocked)"); continue; }
+        body.SetPositionInternal(tr);
+        var o = body.Position.Frame.Origin;
+        Console.WriteLine($"step {i}: cell {body.CurCell?.ID:X8} ({o.X:0.00}, {o.Y:0.00}, {o.Z:0.00}) contact={body.TransientState.HasFlag(TransientStateFlags.Contact)} walkable={body.TransientState.HasFlag(TransientStateFlags.OnWalkable)}");
+      }
+      return;
+    }
     if (mode == "hmap") {
       var lb = Convert.ToUInt32(args[1], 16);
       float x0 = float.Parse(args[2]), x1 = float.Parse(args[3]), y0 = float.Parse(args[4]), y1 = float.Parse(args[5]), st = float.Parse(args[6]);

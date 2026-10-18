@@ -155,12 +155,14 @@ export class EnvCellRenderer {
    * Get collision data for a cell: CellStruct (with physicsBSP) + position Frame.
    * Used by DungeonCollision to build sphere-BSP collision trees.
    */
-  getCellCollisionData(cellId: number): { cellStruct: CellStruct; position: Frame } | null {
+  getCellCollisionData(cellId: number): { cellStruct: CellStruct; position: Frame; outsidePortalPolygonIds: number[] } | null {
     const envCell = this.loadEnvCell(cellId);
     if (!envCell) return null;
     const cellStruct = this.getCellStruct(envCell);
     if (!cellStruct) return null;
-    return { cellStruct, position: envCell.position };
+    // BUG.bunker-sealed-at-ground — the portals out to the landscape (OtherCellId 0xFFFF).
+    const outsidePortalPolygonIds = envCell.cellPortals.filter((p) => p.otherCellId === 0xFFFF).map((p) => p.polygonId);
+    return { cellStruct, position: envCell.position, outsidePortalPolygonIds };
   }
 
   /**

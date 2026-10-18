@@ -246,9 +246,26 @@ export interface BuffPlanInput {
    * BuffCastRecastReset_Seconds (the caller keeps that clock); 0 or absent otherwise.
    */
   recastExtra?: number;
+  /**
+   * Whether a spell can go on you (or your own gear): the agent's spellCastsOnYou, the client's
+   * ObjectCompatibleWithSpellTargetType @ 00567230 (its target type shares a bit with 0x8107). A
+   * creature-only Other spell (Shield Mastery Other IV, target type Creature 0x10) fails it: the client
+   * answers "You cannot cast this spell upon yourself". Absent: every spell is let through.
+   */
+  castsOnYou?: (s: PlanSpell) => boolean;
 }
 
-export interface PlannedBuff { spell: PlanSpell; target: 'self' | 'weapon' | 'shield' | 'armor'; why: string; remaining: number | null }
+export interface PlannedBuff {
+  spell: PlanSpell; target: 'self' | 'weapon' | 'shield' | 'armor'; why: string; remaining: number | null;
+  /**
+   * A stronger spell of the family you know but can't reliably land: your buffed skill in its school is under its power +
+   * SpellDiffExcessThreshold-Buff (VTank's rule), so `spell` is the best castable level. Said in the routine's log.
+   */
+  stronger?: { spell: PlanSpell; skill: number; need: number };
+}
+
+/** A family you want up whose only spells you know go on someone else (Other spells): never cast as a self buff. */
+export interface NoSelfBuff { category: number; why: string; /** The best Other spell of it you know. */ other: PlanSpell }
 
 /** Weapon auras by wielded kind (INF): melee and missile weapons take damage, speed, attack and defense; casters mana conversion, elemental damage and defense. */
 const AURAS: Record<'melee' | 'missile' | 'caster', WeaponAura[]> = {
@@ -294,7 +311,7 @@ const trained = (s: PlanSkill | undefined): boolean => !!s && (s.training === 't
  * The buffs you want up (`wanted`, one per family you can cast) and those to
  * cast now (`due`), in plan order. With Enable Buffing off nothing is due.
  */
-export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: PlannedBuff[] } {
+export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: PlannedBuff[]; noSelf: NoSelfBuff[] } {
   const { families, settings } = input;
   const threshold = num(setting(settings, 'SpellDiffExcessThreshold-Buff'), 5);
   // BuffCastRecast raises both thresholds for a while after a buff; VTank never goes below 10 s.
@@ -360,19 +377,35 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
   }
 
   const wanted: Array<PlannedBuff & { order: number }> = [];
+  const noSelf: NoSelfBuff[] = [];
+  const onYou = input.castsOnYou ?? (() => true);
   for (const [category, known] of byCategory) {
     const f = families.byCategory.get(category);
     if (!f) continue;
     const why = wantFamily(f);
     if (!why) continue;
+    // VTank buffs only itself (its BuffSelfNormal / BuffSelfIdle rules): a Self and an Other spell share a family
+    // (the category), but the Other one can't target you. Knowing only Shield Mastery Other IV, the macro picked it
+    // for trained Shield and the client refused it every buff cycle (Claude Arcanist, 2026-10-17 00:02:32Z).
+    const mine = known.filter((s) => !f.exclude.has(s.id));
+    const selfable = mine.filter(onYou);
+    if (mine.length && !selfable.length) {
+      noSelf.push({ category, why, other: mine.reduce((a, b) => (b.power > a.power ? b : a)) });
+      continue;
+    }
     let best: PlanSpell | undefined;
-    for (const s of known) {
-      if (f.exclude.has(s.id)) continue;
+    let over: { spell: PlanSpell; skill: number; need: number } | undefined;
+    for (const s of selfable) {
       const skill = schoolSkill(s.school);
-      if (skill === null || s.power + threshold > skill) continue;
+      if (skill !== null && s.power + threshold > skill) {
+        if (!over || s.power > over.spell.power) over = { spell: s, skill, need: s.power + threshold };
+        continue;
+      }
+      if (skill === null) continue;
       if (!best || s.power > best.power || (s.power === best.power && s.self && !best.self)) best = s;
     }
     if (!best) continue;
+    const stronger = over && over.spell.power > best.power ? over : undefined;
     const t = f.target.kind;
     const target: PlannedBuff['target'] = t === 'bane' || t === 'armorValue' ? 'armor' : t === 'weapon' ? 'weapon' : 'self';
     let remaining = remainingFor(input.active, category, input.spells, best);
@@ -380,14 +413,15 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
       const onItem = input.itemRemaining(target, best);
       if (onItem !== null && (remaining === null || onItem > remaining)) remaining = onItem;
     }
-    wanted.push({ spell: best, target, why, remaining, order: KIND_ORDER.indexOf(t) });
+    wanted.push({ spell: best, target, why, remaining, order: KIND_ORDER.indexOf(t), ...(stronger ? { stronger } : {}) });
   }
   wanted.sort((a, b) => a.order - b.order || a.spell.category - b.spell.category);
   const out: PlannedBuff[] = wanted.map(({ order: _o, ...b }) => b);
 
-  if (!bool(setting(settings, 'EnableBuffing'))) return { wanted: out, due: [] };
+  noSelf.sort((a, b) => a.category - b.category);
+  if (!bool(setting(settings, 'EnableBuffing'))) return { wanted: out, due: [], noSelf };
   const due = out.filter((b) => b.remaining === null || b.remaining < rebuffAt || (topoff && b.remaining < topoffAt));
-  return { wanted: out, due };
+  return { wanted: out, due, noSelf };
 }
 
 /**

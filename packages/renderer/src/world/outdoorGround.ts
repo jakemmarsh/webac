@@ -39,12 +39,25 @@ export interface OutdoorGroundSources {
  * drudge statue's tunnel ramp (cell 0xA9B40177) runs down to 5.2 m under
  * the town's terrain: on the terrain rule the body walked level on the
  * terrain over the ramp until the sloped ceiling stopped it at x 66.8.
+ *
+ * BUG.building-floor-sink-a1a4 — only for a body that is in an interior
+ * cell already, at the height it stands at (`fromY`). A body on the
+ * landscape reaches an EnvCell only through a building's portals
+ * (CSortCell::find_transit_cells @ 00534080 → CBuildingObj::
+ * find_building_transit_cells @ 006b52a0 → CEnvCell::check_building_transit),
+ * so an EnvCell that merely lies under the terrain (a cellar running out
+ * past its house's walls) is never its ground: the terrain is. The Glenden
+ * Wood shop's cellar strip 0xA1A40120 (floor z 46.04) reaches 2 m out under
+ * the open ground SW of the house (terrain z 50.0); a body walking there
+ * dropped through the grass into it and on under the house (Claude Bulwark,
+ * 2026-10-18 03:48Z), where ACE's own physics walks it on the terrain.
  */
 export function outdoorGroundY(src: OutdoorGroundSources, worldX: number, worldZ: number, fromY: number): number | null {
   const terrainY = src.terrainHeight(worldX, worldZ);
   if (src.floorHeight) {
     const bspFloor = src.floorHeight(worldX, worldZ, fromY);
-    if (bspFloor !== null && terrainY !== null && bspFloor < terrainY && src.cellAt?.(worldX, worldZ, bspFloor)) return bspFloor;
+    if (bspFloor !== null && terrainY !== null && bspFloor < terrainY && src.cellAt?.(worldX, worldZ, bspFloor)
+      && src.cellAt(worldX, worldZ, fromY)) return bspFloor;
     if (bspFloor !== null && bspFloor >= (terrainY ?? 0) - 0.5) return Math.max(bspFloor, terrainY ?? 0);
   }
   return terrainY;

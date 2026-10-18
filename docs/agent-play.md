@@ -691,6 +691,39 @@ heal and hand control back on danger. The brief only listed a routine beside tho
   buffs only you; Arcanist casts Bulwark's by hand), loot (looting is off in both profiles), or reach what has no way to
   it. The brief says so, and the players use `attack` / `cast repeat=true` by hand only for a one-off target or one of
   those, saying which. Tests: `tests/verify-stream-routines-default-2026-10-17.ts`.
+- **First live hour (2026-10-17 23:33Z–00:34Z, Mountain Keep, Dread Mu-miyahs), fixed 2026-10-18**
+  (`tests/verify-routine-live-2026-10-18.ts`):
+  - *Weak bolt.* VTank's Auto takes the first element of the monster's damage list it can bolt at all; a Dread takes acid
+    and fire alike (×1, acid first), so with War Magic ~216 (vitae; Flame Bolt V needs 200 + SpellDiffExcessThreshold-Hunt
+    25) the macro cast Acid Stream I (16-31), her only acid bolt, over Flame Bolt IV (52-105). Now (beyond VTank,
+    `WeighBoltsByDamage`, on) a caster takes the element whose best castable bolt does the most: the bolt's damage from
+    the era's own spell-table description times the monster's Resist* multiplier, which the monster tables now carry
+    (`tools/build-monster-tables.ts`, a 6th field). Flame Bolt V once War Magic reaches 225.
+  - *"Buffs not recast", "0 rebuffs".* The Pumpkin Buffer's 90-minute Incantations of Acid / Bludgeoning / Piercing
+    Protection Other were on her: same spell-table category, stronger, so the buff plan rightly cast nothing when her
+    Self III ones ran out. But observe's "buffs you know that aren't up" went by name and listed them, and the run's
+    rebuff count counted only a rules profile's buff sets. Both fixed (category check; the macro's landed buffs count).
+  - *Follow dropped on floor changes.* The routine's Follow had no raw `lost` read; it stood still because `nearby`
+    leaves out a fellow in a dungeon room yours can't see that the server hasn't placed for 5 s, and it never asked
+    `fellowLastSeen`. It now walks to where they were last placed by the doorway route, as plain follow and walk_to do.
+  - *Bulwark's elixir never landed.* The recharge used the elixir "with" himself mid-swing: the client refuses any use
+    during a swing ("You cannot move or use an item while attacking") and ACE refuses a use-with-target of an item with
+    no TargetType ("Cannot use the Stamina Elixir with the Claude Bulwark"). `AgentApi.useCarried` breaks the swing off,
+    waits it out, uses a potion / elixir / food plainly (a kit on you), waits out the drink, and the macro attacks
+    afresh. The macro's mana stones and dispel items and a rule's `use-item` go through it too.
+  - *stay_with left her a floor below.* Its leash measured straight distance (~6 m across, 12 m down). A fellow left below
+    on the floor a climbing walk set off from now counts by the doorways (`floorRoute`), and is behind wherever they
+    stand; a fellow above after a drop is left to the drop's edge wait. A route with no way for them at all still waits
+    (past the leash) and the walk's answer names their floor, rather than walking on.
+
+- **Second live hour (2026-10-18 01:35–02:41Z), fixed 2026-10-18** (`tests/verify-stream-reports-2026-10-18-0238.ts`):
+  - *Buff levels.* The macro casts the best level whose power + SpellDiffExcessThreshold-Buff is within your buffed skill;
+    under vitae that can be below a level you cast by hand, and the log now says so (`levelNote`). Item buffs you cast by
+    hand count as up for it (`AgentApi.gearSpellLeftOn`): it had cast Impenetrability V over a hand-cast VI.
+  - *No stamina top-off.* Both profiles have Recharge-NoTarg-Stam 1: no elixir is spent above the Restam mark (20% /
+    25%); stamina regenerates between fights. The same drink is not sent again within 5 s if the last one raised nothing.
+  - *Lost targets.* A walk after a monster out of sight gives up after 15 s, or 25 m from a fellow (`lostChaseGiveUp`);
+    a walk_to hint is given only when the doorway route gets there (`noWalkTo`: a locked door is named).
 
 ### Dead air (measured 2026-10-14)
 

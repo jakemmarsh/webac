@@ -75,11 +75,18 @@ export async function buildA9b4World(options: { interiors?: boolean; blockers?: 
  * Any landblock's collision world, built as buildA9b4World builds Holtburg's: its terrain (with the block's real
  * WaterMap), every LandblockInfo building and static, its procedural scenery, with `interiors` its walkable
  * interior cells and their statics, and `blockers` (server objects: doors, NPCs) as main.ts registers them.
+ * `dats` opens another era's portal / cell DATs (dat-sets/…) instead of the end-of-retail ones; `ac1999` serves
+ * them through the 1999 overlays (Ac1999Overlay.ts) as the AC1999 lane does.
  */
-export async function buildLandblockWorld(BX: number, BY: number, options: { interiors?: boolean; blockers?: A9b4Blocker[] } = {}): Promise<(slide?: SlideState, stateOf?: (guid: number) => number | undefined) => MovementServices> {
+export async function buildLandblockWorld(BX: number, BY: number, options: { interiors?: boolean; blockers?: A9b4Blocker[]; dats?: { portal: string; cell: string; ac1999?: boolean } } = {}): Promise<(slide?: SlideState, stateOf?: (guid: number) => number | undefined) => MovementServices> {
   const OX = BX * 192, OY = BY * 192;
-  const portalDb = openDat(DAT_PATHS.portal);
-  const cellDb = openDat(DAT_PATHS.cell);
+  const portalDb = openDat(options.dats?.portal ?? DAT_PATHS.portal);
+  const cellDb = openDat(options.dats?.cell ?? DAT_PATHS.cell);
+  if (options.dats?.ac1999) {
+    const { ac1999PortalOverlay, ac1999CellOverlay } = await import('../../packages/dat-parser/src/era1999/Ac1999Overlay.js');
+    if (!portalDb.overlayKind) portalDb.setOverlay(ac1999PortalOverlay());
+    if (!cellDb.overlayKind) cellDb.setOverlay(ac1999CellOverlay());
+  }
   const { DatReader } = await import('../../packages/dat-parser/src/DatReader.js');
   const { RegionDesc, CellLandblock, LandblockInfo } = await import('@ac/dat-parser');
   const { TextureManager } = await import('../../packages/renderer/src/models/TextureManager.js');
@@ -128,7 +135,7 @@ export async function buildLandblockWorld(BX: number, BY: number, options: { int
     for (const idx of [...walkable].sort((a, b) => a - b)) {
       const cellId = (prefix | idx) >>> 0;
       const cd = env.getCellCollisionData(cellId);
-      if (cd) collider.addCell(cellId, cd.cellStruct, cd.position);
+      if (cd) collider.addCell(cellId, cd.cellStruct, cd.position, cd.outsidePortalPolygonIds);
       const envCell = env.loadEnvCell(cellId);
       envCell?.staticObjects.forEach((s, si) => {
         const model = resolveObjectPhysics(s.id, src);

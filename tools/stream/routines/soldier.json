@@ -1,6 +1,6 @@
 {
   "name": "Bulwark fights",
-  "description": "Claude Bulwark's starting fight routine (tools/stream/routines/soldier.json): swings at what is on you or Arcanist, or what you pulled by hand, Arcanist's attackers first; a healing kit (or a health potion) at 55% health; a stamina elixir or potion at 20% stamina. It starts no fights of its own and never walks off on a route. Change any setting for a run with set=.",
+  "description": "Claude Bulwark's starting fight routine (tools/stream/routines/soldier.json): swings at what is on you or Arcanist, or what you pulled by hand, Arcanist's attackers first; a healing kit (or a health potion) at 55% health; a stamina elixir or potion at 20% stamina (no top-off above that: stamina comes back by itself between fights, faster sitting, so no elixir is spent on it). It starts no fights of its own and never walks off on a route. Change any setting for a run with set=.",
   "modules": { "buffs": false, "vitals": true, "combat": true, "looting": false, "navigation": false, "inventory": false, "service": false },
   "initialState": "Default",
   "states": [{ "name": "Default", "rules": [] }],
@@ -24,7 +24,7 @@
     "Recharge-Norm-HitP": 55,
     "Recharge-NoTarg-HitP": 85,
     "Recharge-Norm-Stam": 20,
-    "Recharge-NoTarg-Stam": 50,
+    "Recharge-NoTarg-Stam": 1,
     "Recharge-Norm-Mana": 1,
     "Recharge-NoTarg-Mana": 1,
     "DoHelp": false,

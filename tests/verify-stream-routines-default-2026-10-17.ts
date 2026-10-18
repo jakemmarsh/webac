@@ -100,7 +100,7 @@ describe('each player has a ready profile, and the brief makes it the way fights
   });
 
   it('the beyond-VTank defaults leave an imported VTank profile as it was, but for the melee walk-in to the unreachable', () => {
-    expect(BEYOND_MACRO_DEFAULTS).toEqual({ SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false });
+    expect(BEYOND_MACRO_DEFAULTS).toEqual({ SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true });
     expect(beyondSetting({ protectfellows: 'on' }, 'ProtectFellows')).toBe(true);
     expect(beyondSetting({ ProtectFellowsDistance: '40' }, 'ProtectFellowsDistance')).toBe(40);
   });
@@ -201,21 +201,23 @@ describe.skipIf(!existsSync(PORTAL))('the ready profiles fight on the real spell
     host.appraisalDatas.set(ELIXIR, { int: { 89: 4, 90: 100, 16: 8 }, float: {}, string: {}, bool: {}, did: {}, spells: [] });
     host.appraised.push(ELIXIR);
     const hit = liberatorOnYou(3);
-    // The elixir's 100 stamina, as the server gives it.
-    const useWith = host.useWithTarget;
-    host.useWithTarget = (i, t) => { if (i === ELIXIR) host.me.stamina.current = Math.min(host.me.stamina.max, host.me.stamina.current + 100); return useWith(i, t); };
+    // The elixir's 100 stamina, as the server gives it for a plain Use (ACE refuses a use-with-target of an elixir:
+    // "Cannot use the Stamina Elixir with the Claude Bulwark", 2026-10-18).
+    const use = host.use;
+    host.use = (i) => { if (i === ELIXIR) host.me.stamina.current = Math.min(host.me.stamina.max, host.me.stamina.current + 100); return use(i); };
     api.routine.start(ready('soldier'));
     await step(api, host, 3000, hit);
     expect(host.sent.some((s) => s.startsWith(`attack ${MU.toString(16)}`)), host.sent.join('\n')).toBe(true);
-    expect(host.sent.some((s) => s.startsWith(`usewith ${ELIXIR.toString(16)}`))).toBe(false);
+    expect(host.sent.some((s) => s.startsWith(`use ${ELIXIR.toString(16)}`))).toBe(false);
     // Exhausted mid-swing: the swing's wait gives way within a slice and the elixir goes down.
     host.me.stamina.current = 0;
     const at = host.sent.length;
     await step(api, host, 2000, hit);
     const after = host.sent.slice(at);
-    expect(after, after.join('\n')).toContain(`usewith ${ELIXIR.toString(16)} ${host.me.guid.toString(16)}`);
+    expect(after, after.join('\n')).toContain(`use ${ELIXIR.toString(16)}`);
+    expect(after.some((s) => s.startsWith(`usewith ${ELIXIR.toString(16)}`))).toBe(false);
     // One elixir (it brought him back over the mark), and the fight goes on.
-    expect(after.filter((s) => s.startsWith(`usewith ${ELIXIR.toString(16)}`))).toHaveLength(1);
+    expect(after.filter((s) => s === `use ${ELIXIR.toString(16)}`)).toHaveLength(1);
     expect(api.routine.status().acting).toMatch(/^combat/);
     expect(api.routine.history().join('\n')).toMatch(/recharge: stamina 0% < 20% \(Recharge-Norm-Stam\): Recharge With Food \(Stamina Elixir\)/);
   });

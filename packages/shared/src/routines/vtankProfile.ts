@@ -149,6 +149,8 @@ export interface PlanSpell {
   components?: string[];
   /** How far it reaches for you, metres (the spell examine's Range), when known. */
   range?: number;
+  /** What it may be cast on (the spell table's NonComponentTargetType, ACE ItemType bits), when known: a creature-only Other spell (0x10) can't go on you. */
+  targetType?: number;
 }
 
 /** A skill of yours (AC skill id), with its training and buffed value. */

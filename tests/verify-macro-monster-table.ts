@@ -66,9 +66,17 @@ describe('Auto damage: the monster\'s weak element (bug #1)', () => {
   });
 
   it('an unlisted monster (or no table) keeps the old fallback: the first castable bolt in VTank\'s unlisted order (acid before fire)', () => {
-    expect(planCombat(input({ monsters: [mon('Banderling Scout')] }))).toMatchObject({ spell: { id: 58 } });
-    expect(planCombat(input({ monsterFacts: undefined }))).toMatchObject({ spell: { id: 58 } });
-    expect(planCombat(input({ monsters: [mon('Wisp')] }))).toMatchObject({ spell: { id: 58 } }); // listed, nothing to prefer
+    // VTank's rule exactly (WeighBoltsByDamage off).
+    const vt = { settings: { AttackDistance: 30, WeighBoltsByDamage: false } };
+    expect(planCombat(input({ ...vt, monsters: [mon('Banderling Scout')] }))).toMatchObject({ spell: { id: 58 } });
+    expect(planCombat(input({ ...vt, monsterFacts: undefined }))).toMatchObject({ spell: { id: 58 } });
+    expect(planCombat(input({ ...vt, monsters: [mon('Wisp')] }))).toMatchObject({ spell: { id: 58 } }); // listed, nothing to prefer
+    // Beyond VTank (on by default, 2026-10-18): nothing to prefer between elements, so the strongest bolt you can cast
+    // (Flame Bolt VI over Acid Stream I); a level tie still goes to the unlisted order.
+    expect(planCombat(input({ monsters: [mon('Banderling Scout')] }))).toMatchObject({ spell: { id: 85 } });
+    expect(planCombat(input({ monsterFacts: undefined }))).toMatchObject({ spell: { id: 85 } });
+    expect(planCombat(input({ monsters: [mon('Wisp')] }))).toMatchObject({ spell: { id: 85 } });
+    expect(planCombat(input({ monsters: [mon('Wisp')], spells: [spell(27), spell(58)] }))).toMatchObject({ spell: { id: 58 } });
   });
 
   it('the V column vulns the same element Auto attacks with; Prismatic means Auto', () => {
@@ -165,9 +173,9 @@ describe('the monster tables (tools/build-monster-tables.ts)', () => {
     expect(weakOrder([0.75, 0.66, 0.86, 0.75, 1.42, 1.42, 1.42])).toBe('lcfspab');
     expect(weakOrder([1, 1, 1, 1, 1, 1, 1])).toBe('');
     const c = (resist: number[], maxHealth: number, extra: Partial<CreatureFacts> = {}): CreatureFacts => ({ name: 'Rat', resist, maxHealth, species: 9, magicImmune: false, drainImmune: false, ...extra });
-    expect(buildMonsterRows([c([1, 1, 1, 1, 1, 1, 2], 10), c([1, 1, 1, 1, 1, 1, 2], 30), c([3, 1, 1, 1, 1, 1, 1], 500)])).toEqual([['Rat', 'fpbsalc', 30, 9, '']]);
+    expect(buildMonsterRows([c([1, 1, 1, 1, 1, 1, 2], 10), c([1, 1, 1, 1, 1, 1, 2], 30), c([3, 1, 1, 1, 1, 1, 1], 500)])).toEqual([['Rat', 'fpbsalc', 30, 9, '', '2,1,1,1,1,1,1']]);
     // The most common species; an immunity only when most of the same-named weenies have it.
-    expect(buildMonsterRows([c([1, 1, 1, 1, 1, 1, 1], 10, { species: 4, drainImmune: true }), c([1, 1, 1, 1, 1, 1, 1], 10, { magicImmune: true, drainImmune: true }), c([1, 1, 1, 1, 1, 1, 1], 10)])[0].slice(3)).toEqual([9, 'd']);
+    expect(buildMonsterRows([c([1, 1, 1, 1, 1, 1, 1], 10, { species: 4, drainImmune: true }), c([1, 1, 1, 1, 1, 1, 1], 10, { magicImmune: true, drainImmune: true }), c([1, 1, 1, 1, 1, 1, 1], 10)])[0].slice(3)).toEqual([9, 'd', '']);
   });
 
   it('the shipped tables: a Drudge Skulker is weakest to lightning, cold and fire in every era', () => {

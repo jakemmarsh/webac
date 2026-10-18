@@ -151,6 +151,32 @@ interface CellCollision extends GridEntry {
    * @ 0053a440: clearCell = !hits_interior_cell).
    */
   building: boolean;
+  /**
+   * BUG.bunker-sealed-at-ground — an env cell's outside portals (EnvCell
+   * portals whose OtherCellId is 0xFFFF) as cell-local planes, n·p + d = 0.
+   * Undefined for a source that is no env cell, or one registered without
+   * its portals (then every building shell counts, as before).
+   */
+  outsidePlanes?: readonly OutsidePortalPlane[];
+}
+
+/** A cell-local plane through an outside portal polygon (unit normal n, n·p + d = 0). */
+interface OutsidePortalPlane { nx: number; ny: number; nz: number; d: number }
+
+/** The plane through a portal polygon's first three vertices, or null for a degenerate one. */
+function portalPlane(cellStruct: CellStruct, polygonId: number): OutsidePortalPlane | null {
+  const poly = cellStruct.polygons.get(polygonId);
+  if (!poly || poly.vertexIndices.length < 3) return null;
+  const v = poly.vertexIndices.slice(0, 3).map((i) => cellStruct.vertexArray.vertices.get(i)?.origin);
+  if (v.some((o) => !o)) return null;
+  const [a, b, c] = v as { x: number; y: number; z: number }[];
+  const ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+  const wx = c.x - a.x, wy = c.y - a.y, wz = c.z - a.z;
+  let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+  const len = Math.hypot(nx, ny, nz);
+  if (len < 1e-9) return null;
+  nx /= len; ny /= len; nz /= len;
+  return { nx, ny, nz, d: -(nx * a.x + ny * a.y + nz * a.z) };
 }
 
 /** Extra facts about a GfxObj collision source (addGfxObjCollision). */
@@ -444,7 +470,19 @@ export class DungeonCollision {
   }
 
   /** COLLISIONINFO::set_collision_normal for a horizontal (x, z) normal. */
-  private setCollisionNormal(x: number, z: number): void {
+  /**
+   * `up`: the face normal's vertical (AC z) part. BUG.ramp-sliding-normal-stuck —
+   * a walkable face is never carried as the sliding normal. Retail keeps the
+   * 3-D normal and runs the next step's offset along the contact plane
+   * (CTransition::adjust_offset @ 0050a370; ACE Transition.AdjustOffset), so a
+   * step up a ramp whose step-up failed once does not push into the ramp's own
+   * normal and clears it. Flattened to its horizontal part, the ramp's normal
+   * (0.59 across, 0.81 up under the drudge statues) became a wall straight
+   * ahead of every uphill step, which projected to nothing and stopped the
+   * player on the ramp for good (2026-10-18, Yaraq's statue ramp 0x7D640151).
+   */
+  private setCollisionNormal(x: number, z: number, up = 0): void {
+    if (up >= FLOOR_WALKABLE_Z) return;
     const len = Math.hypot(x, z);
     if (len > 1e-6) this.collisionNormal = { x: x / len, z: z / len };
   }
@@ -492,7 +530,11 @@ export class DungeonCollision {
 
   // ── BSP cell management ───────────────────────────────────
 
-  addCell(cellId: number, cellStruct: CellStruct, position: Frame): void {
+  /**
+   * `outsidePortalPolygonIds`: the cell's portal polygons that lead outside
+   * (EnvCell cellPortals with OtherCellId 0xFFFF); see shellsReachable.
+   */
+  addCell(cellId: number, cellStruct: CellStruct, position: Frame, outsidePortalPolygonIds?: readonly number[]): void {
     const bsp = buildCollisionBSP(
       cellStruct.physicsBSP.rootNode,
       cellStruct.physicsPolygons,
@@ -510,8 +552,54 @@ export class DungeonCollision {
       blockOffsetY: landblockY(cellId) * 192,
       scale: 1,
       building: false,
+      outsidePlanes: outsidePortalPolygonIds?.map((id) => portalPlane(cellStruct, id))
+        .filter((pl): pl is OutsidePortalPlane => pl !== null),
     });
   }
+
+  /**
+   * BUG.bunker-sealed-at-ground — whether the building shells take part in a
+   * test of the body stacked on `baseY` at AC landblock-global (gx, gy).
+   * Retail tests a building's shell from its landcell only
+   * (SortCell::find_collisions → BuildingObj::find_building_collisions; ACE
+   * SortCell.cs / BuildingObj.cs). A body in an env cell reaches the
+   * landcells only when one of its spheres lies within its radius of the
+   * plane of one of that cell's outside portals (EnvCell::find_transit_cells
+   * → LandCell::add_all_outside_cells; ACE EnvCell.cs:311-371). Away from
+   * those, nothing outside the cell is tested: the lid the Holtburg drudge
+   * statue's pedestal puts over its ramp (GfxObj 0x01002A1B, a solid plate
+   * at ground level) stopped the head of a player walking back up from the
+   * Mannikin Foundry room under it (2026-10-18 report: "it seals you in at
+   * ground level"). Outdoors, or in a cell registered without its portals,
+   * the shells always count.
+   */
+  private shellsReachable(gx: number, gy: number, baseY: number): boolean {
+    return this.shellsReachableFor(this.bodySphereHeights.map((h) => ({ x: gx, y: gy, z: baseY + h })), this.bodySphereRadius);
+  }
+
+  /** shellsReachable for any spheres of radius `radius` (AC landblock-global centres): a missile's too. */
+  private shellsReachableFor(centres: readonly { x: number; y: number; z: number }[], radius: number): boolean {
+    const r = radius + PHYSICS_EPSILON;
+    let inCell = false;
+    for (const c of centres) {
+      const id = this.findCellContaining(c.x, c.y, c.z, this.lastShellCell);
+      if (id === 0) continue;
+      inCell = true;
+      this.lastShellCell = id;
+      const cell = this.envCells.get(id)!;
+      if (!cell.outsidePlanes) return true;
+      for (const cc of centres) {
+        const p = globalToLocal(cell.origin, cell.quat, { x: cc.x - cell.blockOffsetX, y: cc.y - cell.blockOffsetY, z: cc.z });
+        for (const pl of cell.outsidePlanes) {
+          const dist = pl.nx * p.x + pl.ny * p.y + pl.nz * p.z + pl.d;
+          if (dist > -r && dist < r) return true;
+        }
+      }
+    }
+    return !inCell;
+  }
+  /** shellsReachable's preferred cell: the last one it found the body in. */
+  private lastShellCell = 0;
 
   /** Map.set semantics (a re-registered key keeps its original scan position) + the spatial grid. */
   private registerCell(key: CollisionKey, data: Omit<CellCollision, 'seq' | 'gridCells'>): void {
@@ -969,7 +1057,7 @@ export class DungeonCollision {
     // Project movement onto wall tangent: slide = move - dot(move, N)*N
     const dotMN = acMovement.x * acNormal.x + acMovement.y * acNormal.y;
     if (dotMN >= 0) return [deltaX, deltaZ]; // moving away
-    this.setCollisionNormal(acNormal.x, acNormal.y);
+    this.setCollisionNormal(acNormal.x, acNormal.y, acNormal.z);
 
     const slideX = acMovement.x - dotMN * acNormal.x;
     const slideY = acMovement.y - dotMN * acNormal.y;
@@ -992,7 +1080,7 @@ export class DungeonCollision {
       const n2 = localToGlobalVec(slideHit.cell.quat, slideHit.hit.polygon.plane.normal);
       const dot2 = slideX * n2.x + slideY * n2.y;
       if (dot2 < 0) {
-        this.setCollisionNormal(n2.x, n2.y);
+        this.setCollisionNormal(n2.x, n2.y, n2.z);
         const sx2 = slideX - dot2 * n2.x;
         const sy2 = slideY - dot2 * n2.y;
         if (Math.abs(sx2) > 0.001 || Math.abs(sy2) > 0.001) {
@@ -1037,7 +1125,10 @@ export class DungeonCollision {
   private sphereContactAt(
     x: number, y: number, z: number, radius: number, acStep: { x: number; y: number; z: number },
   ): { x: number; y: number; z: number } | null {
+    let shells: boolean | undefined;
     for (const cell of this.cellsNear(x, z, radius)) {
+      // BUG.bunker-sealed-at-ground — a missile in an env cell meets the shells only near its outside portals.
+      if (cell.building && !(shells ??= this.shellsReachableFor([{ x, y: z, z: y }], radius))) continue;
       const inv = 1 / cell.scale;
       const local = scaleVec(globalToLocal(cell.origin, cell.quat,
         { x: x - cell.blockOffsetX, y: z - cell.blockOffsetY, z: y }), inv);
@@ -1114,9 +1205,11 @@ export class DungeonCollision {
     let gz = footY;
     let landed = false;
     // CTransition::transitional_insert(5): insert until nothing adjusts.
+    const shells = this.shellsReachable(destX, destZ, pos.y);
     for (let attempt = 0; attempt < 5; attempt++) {
       let changed = false;
       for (const cell of this.cellsNear(destX, destZ, this.bodySphereRadius)) {
+        if (cell.building && !shells) continue;
         const inv = 1 / cell.scale;
         const localUp = quatRotate(quatConjugate(cell.quat), AC_UP);
         const movement = scaleVec(localUp, -(this.stepUpHeight * path.walkInterp) * inv);
@@ -1252,7 +1345,9 @@ export class DungeonCollision {
    */
   private bodyFitsAt(gx: number, gy: number, baseY: number): boolean {
     let hitsInteriorCell: boolean | undefined;
+    let shells: boolean | undefined;
     for (const cell of this.cellsNear(gx, gy, this.bodySphereRadius)) {
+      if (cell.building && !(shells ??= this.shellsReachable(gx, gy, baseY))) continue;
       const inv = 1 / cell.scale;
       let checkSolid = true;
       if (cell.building) {
@@ -1330,7 +1425,8 @@ export class DungeonCollision {
     if (this.cells.size === 0 || !(toY > fromY)) return null;
     const n = Math.max(1, Math.ceil((toY - fromY) / RISE_STEP_M));
     const dy = (toY - fromY) / n;
-    const cells = [...this.cellsNear(worldX, worldZ, this.bodySphereRadius)];
+    const shells = this.shellsReachable(worldX, worldZ, fromY);
+    const cells = [...this.cellsNear(worldX, worldZ, this.bodySphereRadius)].filter((c) => !c.building || shells);
     let prev = fromY;
     for (let i = 1; i <= n; i++) {
       const y = fromY + dy * i;
@@ -1365,7 +1461,9 @@ export class DungeonCollision {
     const destX = worldPos.x + dxWorld;
     const destZ = worldPos.z + dzWorld;
 
+    let shells: boolean | undefined;
     for (const cell of this.cellsNear(destX, destZ, this.bodySphereRadius)) {
+      if (cell.building && !(shells ??= this.shellsReachable(destX, destZ, worldPos.y))) continue;
       // Transform movement to cell-local (rotation only) — same for both spheres
       const inv = 1 / cell.scale;
       const cellMovement = scaleVec(quatRotate(quatConjugate(cell.quat), acMovement), inv);

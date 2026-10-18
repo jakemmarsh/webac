@@ -13,6 +13,7 @@ import * as THREE from 'three';
 import { CameraController } from '../packages/renderer/src/scene/CameraController.js';
 import {
   CAMERA_IN_HEAD_Y, CAMERA_MIN_CHAR_DIST2, CAMERA_MIN_CHAR_TRANS_DIST, cameraPlayerTranslucency,
+  viewerClipsOnTerrain,
 } from '../packages/renderer/src/scene/RetailCamera.js';
 import { applyViewerFade, viewerFadeLevel, withoutViewerFade } from '../packages/renderer/src/scene/ViewerFade.js';
 import { ACT } from '../packages/renderer/src/input/KeybindDefaults.js';
@@ -122,5 +123,22 @@ describe('CORE.18.b.a applyViewerFade', () => {
     shared.opacity = 0.8;
     applyViewerFade(root, 0.5);
     expect((mesh.material as THREE.Material).opacity).toBeCloseTo(0.4, 6);
+  });
+});
+
+describe('BUG.bunker-camera-in-head — the terrain clips the boom only for a viewer it can reach', () => {
+  // The Mannikin Foundry ramp under Holtburg's drudge statue: terrain z 66, the
+  // pivot 1.5 m over feet 3 m down the ramp. The terrain sweep's first step was
+  // already "under" the ground, so the camera sat in the player's head.
+  it('in an env cell with the pivot under the terrain: no terrain clip', () => {
+    expect(viewerClipsOnTerrain(true, 64.5, 66)).toBe(false);
+  });
+  it('in an env cell at or over the terrain (a house floor): the terrain clips as before', () => {
+    expect(viewerClipsOnTerrain(true, 67.5, 66)).toBe(true);
+    expect(viewerClipsOnTerrain(true, 66, 66)).toBe(true);
+  });
+  it('outdoors, or over an unloaded block: the terrain clips as before', () => {
+    expect(viewerClipsOnTerrain(false, 64.5, 66)).toBe(true);
+    expect(viewerClipsOnTerrain(true, 64.5, null)).toBe(true);
   });
 });

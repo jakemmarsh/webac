@@ -118,7 +118,7 @@ export interface LandblockObjectStreamerDeps {
   buildingsPool: BlockInstancePool;
   envCells: {
     createCellMesh(cellId: number): THREE.Object3D | null;
-    getCellCollisionData(cellId: number): { cellStruct: CellStruct; position: Frame } | null;
+    getCellCollisionData(cellId: number): { cellStruct: CellStruct; position: Frame; outsidePortalPolygonIds?: readonly number[] } | null;
     loadEnvCell(cellId: number): Pick<EnvCell, 'staticObjects' | 'cellPortals'> | null;
   };
   setupModels: {
@@ -925,7 +925,7 @@ export class LandblockObjectStreamer {
           // Register cell BSP with outdoor collision for floor detection (stairs in surface buildings)
           const collData = d.envCells.getCellCollisionData(cellId);
           if (collData) {
-            d.collision.addCell(cellId, collData.cellStruct, collData.position);
+            d.collision.addCell(cellId, collData.cellStruct, collData.position, collData.outsidePortalPolygonIds);
             bspKeys.push(cellId);
           }
           // Also register interior cell static objects (furniture, columns, etc.)

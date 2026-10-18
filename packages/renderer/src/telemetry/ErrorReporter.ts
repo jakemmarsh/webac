@@ -25,6 +25,10 @@ export interface ErrorReport {
   screen: string;
   userAgent: string;
   count: number;
+  /** BOOT.webgl2-diagnosis — on the boot report of a browser without WebGL 2: why (WebGlDiagnosis.ts). */
+  webglCause?: string;
+  /** The browser's creation-error statusMessage, clipped to plain characters. */
+  webglStatus?: string;
 }
 
 export interface ErrorReporterOptions {
@@ -74,7 +78,10 @@ export class ErrorReporter {
    */
   get reportCount(): number { return this.reports; }
 
-  report(kind: ErrorKind, message: string, detail: { stack?: string | null; source?: string | null; line?: number | null; column?: number | null } = {}): void {
+  report(kind: ErrorKind, message: string, detail: {
+    stack?: string | null; source?: string | null; line?: number | null; column?: number | null;
+    webglCause?: string | null; webglStatus?: string | null;
+  } = {}): void {
     this.reports++;
     if (!this.opts.endpoint) return;
     const msg = stripUrlQueries(String(message || 'Unknown error')).slice(0, 500);
@@ -96,6 +103,8 @@ export class ErrorReporter {
       screen: this.safeScreen(),
       userAgent: (this.opts.userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent : '')).slice(0, 300),
       count: 1,
+      ...(detail.webglCause ? { webglCause: detail.webglCause.slice(0, 32) } : {}),
+      ...(detail.webglStatus ? { webglStatus: stripUrlQueries(detail.webglStatus).slice(0, 120) } : {}),
     };
     this.outbox.retry();
     this.outbox.post(this.opts.endpoint, JSON.stringify(body));

@@ -58,6 +58,8 @@ export interface CombatMonster {
  */
 export interface MonsterFacts {
   weak: CombatElement[]; maxHealth: number;
+  /** What each element of `weak` does against it (its Resist* multiplier: 1 full damage, 0.5 half); absent: not known. */
+  resist?: Partial<Record<CombatElement, number>>;
   /** CreatureType (what a slayer names); undefined when the table doesn't say. */
   species?: number;
   /** NonProjectileMagicImmune: debuffs, drains and Harm never land. */
@@ -143,6 +145,12 @@ export interface CombatFamily {
   dot: boolean;
   /** Spell ids in the family (other-targeted, not beneficial, not fellowship; arcs apart from bolts). */
   ids: Set<number>;
+  /**
+   * Each member's mean damage, from its own description in this era's spell table ("The bolt does 68-136 points of fire
+   * damage to the first thing it hits": 102), where it says. The macro weighs a weak bolt of the most damaging element
+   * against a strong bolt of another by it (pickElement).
+   */
+  damage?: Map<number, number>;
 }
 
 export interface CombatFamilies {
@@ -215,6 +223,15 @@ const HARM_ANCHOR = 7; // HarmOther1
 const DRAIN_ANCHOR = 1237; // DrainHealth1 ("Drain Health Other I")
 const FISTS_ANCHOR = 2934; // TuskerFists
 
+/**
+ * A war spell's mean damage from its description: "does 16-31 points of acid damage" → 23.5 (end of retail; Dark
+ * Majesty's Acid Stream I says 10-20). Null when the text names no damage range.
+ */
+export function spellDamage(desc: string | undefined): number | null {
+  const m = desc ? /\bdoes (\d+)\s*-\s*(\d+) points\b/i.exec(desc) : null;
+  return m ? (Number(m[1]) + Number(m[2])) / 2 : null;
+}
+
 export interface CombatSpellTableEntry { name: string; category: number; school: number; bitfield: number; power: number; duration?: number; desc?: string }
 
 export function buildCombatFamilies(spellTable: { spells: Map<number, CombatSpellTableEntry> }): CombatFamilies {
@@ -229,6 +246,7 @@ export function buildCombatFamilies(spellTable: { spells: Map<number, CombatSpel
     if (!a) return undefined; // this era lacks the family
     const arc = (a.bitfield & SF_NON_TRACKING_PROJECTILE) !== 0;
     const ids = new Set<number>();
+    const damage = new Map<number, number>();
     const members: Array<[number, CombatSpellTableEntry]> = opts.only ? [[anchor, a]] : byCategory.get(a.category) ?? [];
     for (const [id, s] of members) {
       if (s.school !== a.school) continue;
@@ -236,8 +254,10 @@ export function buildCombatFamilies(spellTable: { spells: Map<number, CombatSpel
       if (s.bitfield & (SF_SELF_TARGETED | SF_BENEFICIAL | SF_FELLOWSHIP)) continue;
       if (((s.bitfield & SF_NON_TRACKING_PROJECTILE) !== 0) !== arc) continue;
       ids.add(id);
+      const dmg = spellDamage(s.desc);
+      if (dmg !== null) damage.set(id, dmg);
     }
-    return { anchor, category: a.category, school: a.school, dot: (a.bitfield & SF_DAMAGE_OVER_TIME) !== 0, ids };
+    return { anchor, category: a.category, school: a.school, dot: (a.bitfield & SF_DAMAGE_OVER_TIME) !== 0, ids, ...(damage.size ? { damage } : {}) };
   };
   const out: CombatFamilies = { debuff: {}, vuln: {}, attack: {} };
   for (const [col, id] of Object.entries(DEBUFF_ANCHORS) as Array<[DebuffColumn, number]>) { const f = family(id); if (f) out.debuff[col] = f; }
@@ -650,15 +670,22 @@ const randomPick = new WeakMap<CombatInput, CombatElement | null>();
 const UNLISTED_ORDER: CombatElement[] = ['pierce', 'bludgeon', 'slash', 'acid', 'lightning', 'cold', 'fire'];
 const TABLE_LETTER: Record<string, CombatElement> = { p: 'pierce', b: 'bludgeon', s: 'slash', a: 'acid', l: 'lightning', c: 'cold', f: 'fire' };
 
-/** One monster table row: [name, weak letters, max health, species (CreatureType), immunity letters] (tools/build-monster-tables.ts). */
-export type MonsterTableRow = [string, string, number, number?, string?];
+/**
+ * One monster table row: [name, weak letters, max health, species (CreatureType), immunity letters, the weak letters'
+ * Resist* multipliers comma-separated] (tools/build-monster-tables.ts).
+ */
+export type MonsterTableRow = [string, string, number, number?, string?, string?];
 
 /** The era's monster table rows as a by-name lookup. */
 export function indexMonsterTable(rows: MonsterTableRow[]): (name: string) => MonsterFacts | undefined {
   const map = new Map<string, MonsterFacts>();
-  for (const [name, weak, maxHealth, species, immune] of rows) {
+  for (const [name, weak, maxHealth, species, immune, mults] of rows) {
+    const els = [...weak].flatMap((c) => (TABLE_LETTER[c] ? [TABLE_LETTER[c]] : []));
+    const ms = mults ? mults.split(',').map(Number) : [];
+    const resist: Partial<Record<CombatElement, number>> = {};
+    if (ms.length === els.length) els.forEach((el, i) => { if (Number.isFinite(ms[i])) resist[el] = ms[i]; });
     map.set(name.trim().toLowerCase(), {
-      weak: [...weak].flatMap((c) => (TABLE_LETTER[c] ? [TABLE_LETTER[c]] : [])), maxHealth,
+      weak: els, maxHealth, ...(Object.keys(resist).length ? { resist } : {}),
       ...(species ? { species } : {}), ...(immune?.includes('m') ? { magicImmune: true } : {}), ...(immune?.includes('d') ? { drainImmune: true } : {}),
     });
   }
@@ -711,10 +738,53 @@ function resolveElement(input: CombatInput, damage: number, weapon: PlanItem | u
   if (own) return own;
   const trained = (school: string) => { const s = schoolSkill(input, school); return !!s && s.training !== 'untrained'; };
   if (trained('Void Magic') && !trained('War Magic') && bestSpell(input, input.families.attack.nether?.bolt)) return 'nether';
-  const weak = m ? input.monsterFacts?.(m.name)?.weak ?? [] : [];
+  const facts = m ? input.monsterFacts?.(m.name) : undefined;
+  const weak = facts?.weak ?? [];
+  // Beyond VTank (WeighBoltsByDamage, on by default): a caster weighs each element by the bolt it can cast of it.
+  if ((weaponKind(weapon) === 'caster' || !weapon) && weighBolts(input.settings)) {
+    const best = strongestBolt(input, facts);
+    if (best) return best;
+  }
   for (const el of weak) if (canDeliver(input, el, weapon)) return el;
   for (const el of UNLISTED_ORDER) if (bestSpell(input, input.families.attack[el]?.bolt)) return el;
   return null;
+}
+
+/**
+ * Beyond VTank (2026-10-18), the macro's WeighBoltsByDamage setting (on unless a profile sets it false): VTank's Auto
+ * takes the first element of the monster's damage list a caster can bolt, whatever level that bolt is. A Dread Mu-miyah
+ * takes fire and acid alike (×1; acid first in the unlisted order), so "Arcanist fights" cast Acid Stream I (16-31) at
+ * them while she knew Flame Bolt V (68-136): about a quarter of the damage per cast, for an hour (Mountain Keep,
+ * 2026-10-17 23:40Z–00:34Z). With it on, a caster takes the element whose best castable bolt does the most against
+ * this monster: the bolt's mean damage (its description in this era's spell table) times the monster's multiplier for
+ * the element (its Resist*: the era's monster table, 1 for an element it doesn't resist or a monster the table doesn't
+ * list); ties go to the damage list's order (then VTank's unlisted order). When a bolt's damage isn't known (a table
+ * without the descriptions), by the multiplier and then the bolt's level.
+ */
+function weighBolts(settings: CombatInput['settings']): boolean {
+  for (const [k, v] of Object.entries(settings)) if (k.toLowerCase() === 'weighboltsbydamage') return !(v === false || v === 0 || (typeof v === 'string' && /^(false|0|no|off)$/i.test(v)));
+  return true;
+}
+
+function strongestBolt(input: CombatInput, facts: MonsterFacts | undefined): CombatElement | null {
+  // A damage list without its multipliers (an older table) can't be weighed: VTank's order decides.
+  if (facts?.weak.length && !facts.resist) return null;
+  const order = [...(facts?.weak ?? []), ...UNLISTED_ORDER.filter((el) => !facts?.weak.includes(el))];
+  // A monster listed with nothing to prefer (weak '') or not listed takes every element alike.
+  const mult = (el: CombatElement): number => facts?.resist?.[el] ?? 1;
+  const options = order.flatMap((el) => {
+    const fam = input.families.attack[el]?.bolt;
+    const s = bestSpell(input, fam);
+    return s ? [{ el, s, mult: mult(el), dmg: fam?.damage?.get(s.id) }] : [];
+  });
+  if (!options.length) return null;
+  const known = options.every((o) => o.dmg !== undefined);
+  let best = options[0];
+  for (const o of options.slice(1)) {
+    const better = known ? o.mult * o.dmg! > best.mult * best.dmg! : o.mult > best.mult || (o.mult === best.mult && o.s.power > best.s.power);
+    if (better) best = o;
+  }
+  return best.el;
 }
 
 // ─── Ammunition ─────────────────────────────────────────────────────────────

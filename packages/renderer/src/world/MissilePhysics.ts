@@ -413,12 +413,14 @@ export function sweepSpheres(
  * Sweep a sphere over the landscape heightfield: `heightAt(x, y)` is the
  * terrain Z under AC (x, y) (null = not loaded → no contact). Stepped by the
  * sphere radius like CTransition; the contact is the first step whose sphere
- * dips below the surface, reported at the last free step.
+ * dips below the surface, reported at the last free step. `inCell(x, y, z)`
+ * says a sample stands in an interior cell, where the terrain is not tested.
  */
 export function sweepHeightfield(
   from: V3, to: V3, radius: number,
   heightAt: (x: number, y: number) => number | null,
   normalAt: (x: number, y: number) => V3 | null,
+  inCell?: (x: number, y: number, z: number) => boolean,
 ): MissileContact | null {
   const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
   const len = Math.hypot(dx, dy, dz);
@@ -428,6 +430,10 @@ export function sweepHeightfield(
     const x = from.x + dx * (i / n), y = from.y + dy * (i / n), z = from.z + dz * (i / n);
     const h = heightAt(x, y);
     if (h === null || z - radius >= h) continue;
+    // A sample inside an interior cell (a cellar, the drudge statues' ramps
+    // under the town's ground) tests the cell, not the land overhead
+    // (BUG.bunker-sealed-at-ground; the outdoorGroundY cell rule).
+    if (inCell?.(x, y, z)) continue;
     return { t: (i - 1) / n, normal: normalAt(x, y) ?? { x: 0, y: 0, z: 1 } };
   }
   return null;

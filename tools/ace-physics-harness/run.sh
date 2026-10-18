@@ -8,6 +8,7 @@
 #   tools/ace-physics-harness/run.sh scan 0145 02000059 1.0        # every EnvCell of a dungeon: near shots vs far shots
 #   tools/ace-physics-harness/run.sh hmap 0145 96 104 -42 -30 1    # floor heights (EnvCell point_in_cell)
 #   tools/ace-physics-harness/run.sh door 0145 100 -36 100 -34.4 [nodoor]   # through Door #70145010 (closed)
+#   tools/ace-physics-harness/run.sh walk A1A4 119 128 125.3 135.6 0.25  # a human walked on the ground: cell, z, contact per step
 #   TV=4,0,0 tools/ace-physics-harness/run.sh sweep out            # with a (stale) target CachedVelocity, caster frame
 #   tools/ace-physics-harness/run.sh pairs 0286 02000004 0.8 /work/pairs.txt   # "cx cy cz tx ty tz" per line (file in $ACE_HARNESS_DIR)
 #   ALL=1 STEP=1 tools/ace-physics-harness/run.sh grid 0286 02000004 0.8 72 80 -95 -87 8   # every shot, HIT and MISS (A/B input)

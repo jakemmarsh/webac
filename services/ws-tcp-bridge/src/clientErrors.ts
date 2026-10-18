@@ -29,8 +29,27 @@ export interface ClientErrorReport {
   userAgent: string | null;
   /** Times this error repeated on the page before this report (client-side dedupe). */
   count: number;
+  /** BOOT.webgl2-diagnosis — why WebGL 2 failed (a known cause; anything else is dropped). */
+  webglCause?: WebGlFailureCause;
+  /** The browser's creation-error statusMessage: plain characters only, at most WEBGL_STATUS_MAX. */
+  webglStatus?: string;
   /** The page's id for this report, the same on every resend (eventIds.ts): the bridge logs each once. */
   eid?: string;
+}
+
+/** The renderer's WEBGL_FAILURE_CAUSES (boot/WebGlDiagnosis.ts); the bridge doesn't import page code. */
+export const WEBGL_FAILURE_CAUSES = [
+  'blocklisted', 'acceleration_disabled', 'gpu_process_unavailable', 'context_lost_after_crash',
+  'webgl1_only', 'no_webgl', 'unknown', 'disabled_by_policy',
+] as const;
+export type WebGlFailureCause = typeof WEBGL_FAILURE_CAUSES[number];
+export const WEBGL_STATUS_MAX = 120;
+
+/** Re-validate the page's statusMessage: the same character set and length the page keeps, else dropped. */
+function webglStatus(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const s = v.replace(/[^A-Za-z0-9\s.,:;()/_-]/g, '').replace(/\s+/g, ' ').trim().slice(0, WEBGL_STATUS_MAX).trim();
+  return s.length > 0 ? scrubText(s) : null;
 }
 
 export const CLIENT_ERROR_MAX_BODY = 16 * 1024;
@@ -72,6 +91,11 @@ export function sanitizeClientError(body: unknown): ClientErrorReport | null {
     screen: text(b.screen, 32),
     userAgent: text(b.userAgent, 300),
     count: Math.max(1, Math.min(int(b.count) ?? 1, 1e6)),
+    ...(() => {
+      const cause = WEBGL_FAILURE_CAUSES.find(c => c === b.webglCause);
+      const status = cause ? webglStatus(b.webglStatus) : null;
+      return { ...(cause ? { webglCause: cause } : {}), ...(status ? { webglStatus: status } : {}) };
+    })(),
     ...eidField(b.eid),
   };
 }

@@ -118,6 +118,24 @@ export function cameraPlayerTranslucency(inHead: boolean, viewerToPivot: number)
   return Math.max(0, Math.min(1, t));
 }
 
+/**
+ * BUG.bunker-camera-in-head — whether the camera boom is clipped against the
+ * landscape's terrain surface. SmartBox::update_viewer @ 00453ce0 starts the
+ * viewer sphere's transition in the player's cell: an outdoor one, or for an
+ * env cell the cell AdjustPosition places the pivot in. From an env cell the
+ * landscape is reached only out through the cell's outside portals. With the
+ * pivot under the terrain (a bunker or cellar entered on foot: the Mannikin
+ * Foundry room under each town's drudge statue) no path out of the cell meets
+ * the surface overhead before the cell's own walls, so the terrain never clips
+ * the boom there. Clipping it anyway put the camera in the player's head the
+ * moment they went down the ramp (the first sweep step is already "under" the
+ * ground). `terrainZ` is the surface height under the pivot, null when unloaded.
+ */
+export function viewerClipsOnTerrain(inEnvCell: boolean, pivotZ: number, terrainZ: number | null): boolean {
+  if (!inEnvCell || terrainZ === null) return true;
+  return pivotZ >= terrainZ;
+}
+
 // ── CORE.18.b.a.a — stiffness lag, the zoom step, slope alignment ─────────
 
 /** acclient.exe .rdata 0x007c84ec F_EPSILON = 0.0002f. */

@@ -8,7 +8,8 @@
  * not a retail screen (CLAUDE.md, browser-UX exception), and it draws before
  * any DAT is loaded, so it uses plain CSS named colours.
  */
-import { classifyGpu, unmaskedRenderer } from '../telemetry/WorldReporter.js';
+import { classifyGpu } from '../telemetry/WorldReporter.js';
+import { probeWebGl2, detectHelpPlatform, webgl2HelpText, type WebGlFailure, type HelpPlatform } from './WebGlDiagnosis.js';
 import { renderAdaptConfigFor, type RenderAdaptConfig } from '../scene/RenderScale.js';
 
 export interface CapabilityProblem {
@@ -36,6 +37,10 @@ export interface CapabilityEnv {
   webdriver?: boolean;
   /** `?renderAdapt=` from the page URL, or null. */
   renderAdapt?: string | null;
+  /** BOOT.webgl2-diagnosis — why WebGL 2 failed (null / absent when it worked or wasn't probed). */
+  webgl2Failure?: WebGlFailure | null;
+  /** OS + browser family, for the fix the message gives. Absent = unknown. */
+  platform?: HelpPlatform;
 }
 
 /** The render adaptation this browser gets (scene/RenderScale.ts). */
@@ -49,17 +54,10 @@ export const MIN_DEVICE_MEMORY_GB = 4;
 export function capabilityProblems(env: CapabilityEnv): CapabilityProblem[] {
   const out: CapabilityProblem[] = [];
   if (!env.webgl2) {
-    out.push({
-      id: 'webgl2', hard: true,
-      text: 'This browser could not start WebGL 2, which the game needs to draw the world. '
-        + 'Use a current Chrome, Edge, Firefox or Safari on a desktop or laptop, and make sure hardware acceleration '
-        + '(graphics acceleration) is turned on in the browser settings. '
-        // A browser that ran the game before turns WebGL off for the site after a graphics crash (Chrome:
-        // chrome://gpu shows it), until it restarts (live 2026-10-13: Chrome 155 on Windows, minutes after playing).
-        + 'If the game worked before in this browser, quit the browser completely and start it again: after a '
-        + 'graphics crash the browser turns graphics off for the site until it restarts (in Chrome, chrome://gpu shows it). '
-        + 'If it keeps happening, update your graphics driver.',
-    });
+    // BOOT.webgl2-diagnosis: the text names the fix for the cause the probe found, on this OS and browser
+    // (boot/WebGlDiagnosis.ts). Unknown cause: the general advice, including the restart after a graphics
+    // crash (live 2026-10-13: Chrome 155 on Windows, minutes after playing).
+    out.push({ id: 'webgl2', hard: true, text: webgl2HelpText(env.webgl2Failure ?? null, env.platform ?? { os: 'other', browser: 'other' }) });
   }
   if (!env.websocket) {
     out.push({ id: 'websocket', hard: true, text: 'This browser cannot open the connection the game uses (WebSocket). Use a current desktop browser.' });
@@ -81,14 +79,9 @@ export function capabilityProblems(env: CapabilityEnv): CapabilityProblem[] {
 
 /** Probe the real browser. */
 export function probeCapabilities(win: Window & typeof globalThis): CapabilityEnv {
-  let webgl2 = false;
-  let rendererString: string | null = null;
-  try {
-    const gl = win.document.createElement('canvas').getContext('webgl2');
-    webgl2 = !!gl;
-    rendererString = unmaskedRenderer(gl);
-    gl?.getExtension('WEBGL_lose_context')?.loseContext();
-  } catch { webgl2 = false; }
+  const probe = probeWebGl2(() => win.document.createElement('canvas'));
+  const webgl2 = probe.webgl2;
+  const rendererString = probe.renderer;
   let renderAdapt: string | null = null;
   try { renderAdapt = new URLSearchParams(win.location?.search ?? '').get('renderAdapt'); } catch { renderAdapt = null; }
   const mem = (win.navigator as Navigator & { deviceMemory?: number }).deviceMemory;
@@ -101,6 +94,8 @@ export function probeCapabilities(win: Window & typeof globalThis): CapabilityEn
     softwareGpu: webgl2 && classifyGpu(rendererString) === 'software',
     webdriver: win.navigator.webdriver === true,
     renderAdapt,
+    webgl2Failure: probe.failure,
+    platform: detectHelpPlatform(win.navigator as Navigator & { userAgentData?: { platform?: string; brands?: Array<{ brand: string }> } }),
   };
 }
 

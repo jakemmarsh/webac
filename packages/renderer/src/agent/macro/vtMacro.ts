@@ -28,8 +28,8 @@
  * through the UI's own paths. Spell families are built once per spell table,
  * so each era's own table decides what exists.
  */
-import { resolveVtankIds, vtItemIs, vtOption, vtStoredValue, type PlanItem, type PlanSkill, type PlanSpell, type RoutineProfile, type Stance, type VtankProfileData } from '@ac/shared';
-import { AgentApi } from '../AgentApi.ts';
+import { resolveVtankIds, SPELL_FLAG_SELF_TARGETED, vtItemIs, vtOption, vtStoredValue, type PlanItem, type PlanSkill, type PlanSpell, type RoutineProfile, type Stance, type VtankProfileData } from '@ac/shared';
+import { AgentApi, spellCastsOnYou } from '../AgentApi.ts';
 import { beyondSetting } from '../beyondVtank.ts';
 import type { AgentResult } from '../types.ts';
 import { buildBuffFamilies, planBuffs, type BuffFamilies } from './buffPlan.ts';
@@ -364,6 +364,8 @@ export class VtMacro {
   private lastWasAttack = false;
   /** Blacklist and ghost notices, said as the next step. */
   private notices: string[] = [];
+  /** Buff families already said to have no self version you know (planBuffs' noSelf): said once each. */
+  private noSelfNoted = new Set<number>();
   /** [0, 1) random numbers (RandomHelperBuffs' picks). */
   random: () => number = Math.random;
   /** When RandomHelperBuffs may cast again. */
@@ -404,10 +406,30 @@ export class VtMacro {
     if (!res.ok && NOT_ENOUGH_MANA.test(res.message)) this.manaShort = { mana: this.api.snapshot({ max: 0 }).me?.mana.cur ?? 0, at: this.now() };
     return res;
   }
+  /** The last potion, elixir or food the recharge used: which, its vital then, when (and whether its hold was said). */
+  private lastDrink: { guid: number; cur: number; at: number; said: boolean } | null = null;
+  /** How long a drink whose vital didn't rise is held before the same one is tried again (ms). */
+  static readonly RECHARGE_REUSE_MS = 5000;
   /** When UseBreakableTurnTo last turned to each monster (one turn per monster every 3 s). */
   private turnedAt = new Map<number, number>();
   /** The mana a cast was refused at for lack of it ("You don't have enough Mana"), and when. */
   private manaShort: { mana: number; at: number } | null = null;
+
+  /**
+   * Why a buff goes on at a lower level than one you know (planBuffs' `stronger`), for the routine's log: VTank casts the
+   * best level whose power + SpellDiffExcessThreshold-Buff is within your buffed skill, so under vitae (or without a
+   * mastery buff up) a stronger spell you cast by hand is passed over. "It cast Acid Protection Self III after my VI
+   * expired" read as a mis-pick (Arcanist, Mountain Keep, 2026-10-18 02:27Z): her Life Magic was under VI's 300 + 5.
+   */
+  private levelNote(b: { spell: PlanSpell; remaining: number | null; stronger?: { spell: PlanSpell; skill: number; need: number } }): string {
+    const st = b.stronger;
+    if (!st) return '';
+    const v = this.api.vitaeMultiplier();
+    const vit = v !== null && v < 1 ? `, with vitae (−${Math.round((1 - v) * 100)}%) on you` : '';
+    // What is on you of the family now runs out soon (that is why it is due): this one is surpassed until then, then takes over.
+    const on = b.remaining !== null && b.remaining > 0 ? `; what you have on of it now ends in ${Math.round(b.remaining)} s, and this one takes over then` : '';
+    return ` (${b.spell.name}: the best you land reliably; ${st.spell.name} needs ${st.spell.school} ${st.need} (its ${st.spell.power} + SpellDiffExcessThreshold-Buff ${st.need - st.spell.power}) and yours is ${st.skill}${vit}${on})`;
+  }
 
   /** Worn armor and clothing an armor buff cast on yourself goes on (ACE: ItemType Vestements, Armor | Clothing). */
   private wornVestments(): ItemRef[] {
@@ -452,7 +474,7 @@ export class VtMacro {
     const pay = this.componentsRequired ? componentPurse(this.api.inventory()) : null;
     return this.api.spells('', 1000).flatMap((s) => (s.category === undefined || s.power === undefined || (no.size && this.api.spellComponents(s.id).some((c) => no.has(c.toLowerCase()))) || (pay && !pay(this.api.spellComponents(s.id))) ? [] : [{
       id: s.id, name: s.name, school: fullSchoolName(s.school), category: s.category, power: s.power, self: !!s.self, buff: !!s.buff, duration: s.duration ?? 0,
-      ...(s.range !== undefined ? { range: s.range } : {}),
+      ...(s.range !== undefined ? { range: s.range } : {}), ...(s.targetType !== undefined ? { targetType: s.targetType } : {}),
     }]));
   }
 
@@ -570,7 +592,7 @@ export class VtMacro {
       this.manaUsedAt = this.now();
       this.manaLookAt = this.manaUsedAt - 88_000;
       this.usedStones.set(stone.guid, { at: this.now(), data: this.api.itemData(stone.guid), asked: false });
-      return this.api.useOn(stone.guid, 'self');
+      return this.api.useCarried(stone.guid, 'self');
     } };
   }
   /** When a stone or charge was last used (the worn items' mana is looked at again before the next). */
@@ -689,7 +711,7 @@ export class VtMacro {
         const d = this.api.itemData(i.guid);
         if (!d) { if (/gem|food|potion|misc/i.test(i.type ?? '') && !this.asked.has(i.guid)) { this.asked.add(i.guid); void this.api.appraise(i.guid, { quiet: true }); } continue; }
         const sid = d.did?.[28];
-        if (sid && isDispel(t.spells.get(sid)?.desc ?? '')) return { label: `dispel: ${bad.name} on you, using ${i.name}`, run: async () => this.api.useOn(i.guid, 'self') };
+        if (sid && isDispel(t.spells.get(sid)?.desc ?? '')) return { label: `dispel: ${bad.name} on you, using ${i.name}`, run: async () => this.api.useCarried(i.guid, 'self') };
       }
     }
     return null;
@@ -697,6 +719,12 @@ export class VtMacro {
 
   /** The routine's "the player took over" (RoutineEngine.handOver): a long wait inside a step ends when it holds. */
   held?: () => boolean;
+  /**
+   * Told of each of your own buffs the macro landed (a confirmed cast, or an item buff the server named), for the
+   * routine's "rebuffs" count: before 2026-10-18 only a rules profile's buff sets counted, so "Arcanist fights" said
+   * "0 rebuffs" for an hour of the macro's own rebuffing.
+   */
+  rebuffed?: () => void;
 
   /** Fighting hand to hand: not in magic or missile mode, and no caster or launcher in hand (SkipUnreachableMonsters). */
   private fightsMelee(stance: Stance): boolean {
@@ -803,13 +831,27 @@ export class VtMacro {
     if (critical) return critical;
 
     // 2. Recharge.
-    const r = planRecharge({
+    let r = planRecharge({
       vitals: { health: { cur: me.health.cur, max: me.health.max }, stamina: { cur: me.stamina.cur, max: me.stamina.max }, mana: { cur: me.mana.cur, max: me.mana.max } },
       stance, hasTarget, settings, spells, skills, consumables: this.items(p.vtank.consumables), rechargeFamilies: fam.recharge,
       fellows: this.withNetFellows(this.api.fellowsNear(), snap.nearby, me.guid, net), boost: this.boostPoints(settings, stance),
       // Items-tab casters whose own spell recharges (wands, Healer's Heart): rechargePlan's caster items.
       casterItems: this.items(p.vtank.items.map((x) => x.name)).filter((i) => ((i.itemType ?? 0) & 0x8000) !== 0), level: me.level,
     });
+    // The same potion, elixir or food again within RECHARGE_REUSE_MS and its vital no higher than before the last one: that
+    // use didn't land (a refusal, a busy client), so it is held for that long rather than sent twice a second. "Bulwark
+    // fights" logged "stamina 27% < 50% … using Stamina Elixir on yourself" twice a second for 5 s, every one refused
+    // (Mountain Keep, 2026-10-18 01:45:15–01:45:20Z). A kit is retried as VTank does (a failed bandaging is a roll).
+    const reuse = r?.kind === 'use' && !r.onYou ? this.lastDrink : null;
+    const vitalOf = (why: string): 'health' | 'stamina' | 'mana' | null => (/^(health|stamina|mana)\b/.exec(why)?.[1] as 'health' | 'stamina' | 'mana' | undefined) ?? null;
+    if (reuse && r?.kind === 'use' && reuse.guid === r.item.guid && this.now() - reuse.at < VtMacro.RECHARGE_REUSE_MS) {
+      const v = vitalOf(r.why);
+      if (v && me[v].cur <= reuse.cur) {
+        const held = r;
+        if (!reuse.said) { reuse.said = true; return { label: `recharge: ${held.why}`, run: async () => ({ ok: false, message: `${held.item.name} again so soon: the last one didn't raise your ${v} (${reuse.cur} then, ${me[v].cur} now), so it waits ${Math.round(VtMacro.RECHARGE_REUSE_MS / 1000)} s rather than being sent again` }) }; }
+        r = null;
+      }
+    }
     if (r) {
       // A kit, a potion or a spell between swings: the attack order is sent afresh after it, not waited on as if still going.
       this.lastAttack = null;
@@ -817,7 +859,16 @@ export class VtMacro {
         ? { label: `recharge: ${r.why}: wielding ${r.item.name}`, run: async () => this.api.equip(r.item.guid) }
         : { label: `recharge: ${r.why}`, run: async () => this.useCaster(r.item.guid, r.target ?? 'self', settings) };
       if (r.kind === 'cast') return { label: `recharge: ${r.why}`, run: () => { this.castSpent(settings); return this.cast(r.spell.id, r.target ?? 'self'); } };
-      if (r.kind === 'use') return { label: `recharge: ${r.why}`, run: async () => this.api.useOn(r.item.guid, 'self') };
+      // A kit on you, food or a potion by a plain use; a swing under way is broken off first and the drink waited out
+      // (AgentApi.useCarried: the client takes no use while a swing is in progress), and the attack is sent afresh next.
+      if (r.kind === 'use') {
+        const use = r;
+        const v = vitalOf(use.why);
+        return { label: `recharge: ${use.why}`, run: async () => {
+          if (!use.onYou && v) this.lastDrink = { guid: use.item.guid, cur: me[v].cur, at: this.now(), said: false };
+          return this.api.useCarried(use.item.guid, use.onYou ? 'self' : undefined);
+        } };
+      }
       // Switching to magic mode to recharge starts the recharge boost.
       if (r.to === 'magic') return this.toMagic(p, `recharge: ${r.why}`, () => { this.boostUntil = this.now() + Math.max(0, Number(opt(settings, 'RechargeBoostTimeSeconds')) || 0) * 1000; });
       return { label: `recharge: ${r.why}`, run: () => this.switchMode(p, r.to) };
@@ -987,10 +1038,24 @@ export class VtMacro {
       spells, skills, settings, idle: idleSlot && ctx.idle, families: fam.buff, level, wielded,
       active: this.api.activeSpellsNow(), extraBuffs: p.vtank.extraBuffs, blacklistedBuffs: p.vtank.blacklistedBuffs,
       recastExtra: this.now() < this.recastUntil ? Math.max(0, Number(opt(settings, 'BuffCastRecast_Seconds')) || 0) : 0,
-      itemRemaining: (target, spell) => (target === 'weapon'
-        ? (weaponRef ? this.itemTimers.remainingOn(weaponRef, spell.category, spell.power) : null)
-        : this.itemTimers.remainingOnAll(this.wornVestments(), spell.category, spell.power)),
+      // The macro's own timers, or a cast you saw land on them (by hand too: AgentApi.gearSpellLeftOn), whichever is longer.
+      itemRemaining: (target, spell) => {
+        const on = target === 'weapon' ? (weaponRef ? [weaponRef] : []) : this.wornVestments();
+        const own = target === 'weapon'
+          ? (weaponRef ? this.itemTimers.remainingOn(weaponRef, spell.category, spell.power) : null)
+          : this.itemTimers.remainingOnAll(on, spell.category, spell.power);
+        const seen = on.length ? this.api.gearSpellLeftOn(on.map((i) => i.name), spell.category, spell.power) : null;
+        return own === null ? seen : seen === null ? own : Math.max(own, seen);
+      },
+      castsOnYou: spellCastsOnYou,
     });
+    // A family you know only Other spells of: said once (not every buff cycle), never cast on you.
+    const unsaid = b.noSelf.filter((x) => !this.noSelfNoted.has(x.category));
+    if (unsaid.length) {
+      for (const x of unsaid) this.noSelfNoted.add(x.category);
+      const message = unsaid.map((x) => `buff: ${x.why}: no self version known: ${this.selfVersionName(x.other)} (${x.other.name} goes on someone else only)`).join('; ');
+      return { label: 'buff: no self version known', run: async () => ({ ok: true, message }) };
+    }
     // Add (no buffs) on the Items tab: that weapon gets no auras (a Force Buff round included).
     // By the entry's object id when it has one: of two same-named weapons only the listed one goes without.
     if (weapon && p.vtank.items.some((x) => x.noBuffs && vtItemIs(x, weapon))) { b.due = b.due.filter((x) => x.target !== 'weapon'); b.wanted = b.wanted.filter((x) => x.target !== 'weapon'); }
@@ -1004,19 +1069,19 @@ export class VtMacro {
       const nx = b.wanted.find((w) => !f.done.has(w.spell.category));
       if (!nx) this.forced = null;
       else {
-        const mode = toMagicFirst(`force buff: ${nx.why}`);
+        const mode = toMagicFirst(`force buff: ${nx.why}${this.levelNote(nx)}`);
         if (mode) return mode;
         const category = nx.spell.category;
         const target = nx.target === 'weapon' && weapon && !nx.spell.self ? weapon.guid : 'self';
         const item = onItem(nx);
-        return { label: `force buff: ${nx.why}`, run: async () => {
+        return { label: `force buff: ${nx.why}${this.levelNote(nx)}`, run: async () => {
           const sentAt = this.now();
           this.castSpent(settings);
           const res = await this.castBuff(nx.spell, target, settings);
           if (this.forced !== f) return res; // cancelled (or restarted) meanwhile
           // A buff on an item is done on the server's success line naming it (and goes in the item timers).
           if (item) {
-            if (this.noteItemBuff(res, nx.spell, item, weaponRef)) { f.done.add(category); return res; }
+            if (this.noteItemBuff(res, nx.spell, item, weaponRef)) { f.done.add(category); this.rebuffed?.(); return res; }
           } else {
             // Done only once the enchantment is on: refreshed past what was left before the cast.
             // What was left then has run down since; a recast puts the clock back up past that.
@@ -1025,7 +1090,7 @@ export class VtMacro {
             for (let w = 0; w < 10 && res.ok && !landed(left(), after); w++) { await new Promise((ok) => setTimeout(ok, 200)); after = this.familyRemaining(category, nx.spell.power); }
             const unseen = nx.remaining === null && after === null && castConfirmed(res, nx.spell.name);
             const permanent = res.ok && nx.remaining === Infinity && after === Infinity;
-            if (landed(left(), after) || unseen || permanent) { f.done.add(category); return res; }
+            if (landed(left(), after) || unseen || permanent) { f.done.add(category); this.rebuffed?.(); return res; }
           }
           const tries = (f.tries.get(category) ?? 0) + 1;
           f.tries.set(category, tries);
@@ -1040,16 +1105,16 @@ export class VtMacro {
     const next = ctx.buffing ? b.due.find((x) => !((this.buffMisses.get(x.spell.category)?.until ?? 0) > t)) : undefined;
     // No spell due: a buff gem, food or potion (VTank tries its consumables after its spells).
     if (!next) return ctx.buffing ? this.buffItemStep(p, settings, idleSlot && ctx.idle, skills, level) : null;
-    const mode = toMagicFirst(`buff: ${next.why}`);
+    const mode = toMagicFirst(`buff: ${next.why}${this.levelNote(next)}`);
     if (mode) return mode;
     const target = next.target === 'weapon' && weapon && !next.spell.self ? weapon.guid : 'self';
     const item = onItem(next);
-    return { label: `buff: ${next.why}`, run: async () => {
+    return { label: `buff: ${next.why}${this.levelNote(next)}`, run: async () => {
       this.castSpent(settings);
       const res = await this.castBuff(next.spell, target, settings);
       const ok = item ? this.noteItemBuff(res, next.spell, item, weaponRef) : castConfirmed(res, next.spell.name);
       const cat = next.spell.category;
-      if (ok) this.buffMisses.delete(cat);
+      if (ok) { this.buffMisses.delete(cat); this.rebuffed?.(); }
       else if (!res.message.startsWith(MANA_WAIT)) {
         const m = this.buffMisses.get(cat) ?? { n: 0, until: 0 };
         m.n++;
@@ -1178,6 +1243,14 @@ export class VtMacro {
    * Every buff cast: arms BuffCastRecast, and with FastCastBuffs walks backwards while a quick buff is
    * cast (VTank 1.0: "Moves you backwards during casting").
    */
+  /** The family's Self spell name without its level ("Shield Mastery Self"), from the spell table; else the Other name with Self for Other. */
+  private selfVersionName(other: PlanSpell): string {
+    const t = this.api.spellTableData();
+    const self = t ? [...t.spells.values()].filter((r) => r.category === other.category && (r.bitfield & SPELL_FLAG_SELF_TARGETED) !== 0).sort((a, b) => a.power - b.power)[0] : undefined;
+    const name = self?.name ?? other.name.replace(/\bOther\b/, 'Self');
+    return name.replace(/\s+(?:[IVX]+|[1-8])$/, '');
+  }
+
   private async castBuff(spell: PlanSpell, target: number | 'self', settings: Record<string, string | number | boolean>): Promise<AgentResult> {
     this.recastUntil = this.now() + Math.max(0, Number(opt(settings, 'BuffCastRecastReset_Seconds')) || 0) * 1000;
     const row = this.api.spellTableData()?.spells.get(spell.id);

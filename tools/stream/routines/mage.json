@@ -1,6 +1,6 @@
 {
   "name": "Arcanist fights",
-  "description": "Claude Arcanist's starting fight routine (tools/stream/routines/mage.json): bolts what is on you or Bulwark, or what you pulled by hand; heals yourself at 70% and Bulwark at 60%; Stamina to Mana at 40% mana; keeps your own buffs up; follows Bulwark when nothing is to fight. It starts no fights of its own. Change any setting for a run with set=.",
+  "description": "Claude Arcanist's starting fight routine (tools/stream/routines/mage.json): bolts what is on you or Bulwark, or what you pulled by hand; heals yourself at 70% and Bulwark at 60%; Stamina to Mana at 40% mana; stamina only below 25% (Revitalize first, an elixir only with no mana for it; no top-off above that, as stamina comes back by itself); keeps your own buffs up; follows Bulwark when nothing is to fight. It starts no fights of its own. Change any setting for a run with set=.",
   "modules": { "buffs": true, "vitals": true, "combat": true, "looting": false, "navigation": true, "inventory": false, "service": false },
   "initialState": "Default",
   "states": [{ "name": "Default", "rules": [] }],
@@ -26,7 +26,7 @@
     "Recharge-Norm-HitP": 70,
     "Recharge-NoTarg-HitP": 90,
     "Recharge-Norm-Stam": 25,
-    "Recharge-NoTarg-Stam": 50,
+    "Recharge-NoTarg-Stam": 1,
     "Recharge-Norm-Mana": 40,
     "Recharge-NoTarg-Mana": 80,
     "DoHelp": true,

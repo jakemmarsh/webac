@@ -118,7 +118,11 @@ export interface RechargeInput {
 
 export type RechargeAction =
   | { kind: 'cast'; spell: PlanSpell; why: string; target?: number }
-  | { kind: 'use'; item: PlanItem; why: string }
+  /**
+   * A carried item used from the pack. `onYou`: a healing kit, used with you as its target; otherwise (food, a potion, an
+   * elixir) a plain use, which is what the item takes (ACE refuses a use-with-target of an item with no TargetType).
+   */
+  | { kind: 'use'; item: PlanItem; why: string; onYou?: boolean }
   /** A caster item's own spell, used on you (no target) or a fellow, in magic mode; `wield`: it must be wielded first. */
   | { kind: 'item'; item: PlanItem; spellName: string; wield: boolean; why: string; target?: number }
   | { kind: 'stance'; to: Stance; why: string };
@@ -415,7 +419,7 @@ function tryRow(ctx: Ctx, r: RechargeRow, why: string): RechargeAction | null {
       if (!kit) return null;
       const what = `${kit.item.name} ${Math.floor(kit.chance * 100)}% success`;
       if (toPeace) return { kind: 'stance', to: 'peace', why: `${why}: ${r.handler} (${what}) in peace mode (GoToPeaceModeToUseKits)` };
-      return { kind: 'use', item: kit.item, why: `${why}: ${r.handler} (${what})` };
+      return { kind: 'use', item: kit.item, why: `${why}: ${r.handler} (${what})`, onYou: true };
     }
     case 'Recharge With Food': {
       const food = bestFood(ctx, r.vital);

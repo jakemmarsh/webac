@@ -293,7 +293,7 @@ describe('4. cast repeat stops for a dangerous new attacker, not for every one',
     expect(castsSent).toBe(4);
     expect(r.message.split('\n')[0]).toBe('cast Flame Bolt I at Drudge Skulker 4 times (repeat); stopped: Drudge Skulker died');
     expect(r.message).toMatch(/joined in meanwhile: Lurker #8000020\d \(hits up to 1\)/);
-    expect(r.message).toContain('a new attacker (or one on you from the start, after the first cast) stops it only when it casts, hits for 10%+ of the health you have, or is above your level');
+    expect(r.message).toContain("a new attacker (or one on you from the start, after the first cast) stops it only when it casts, hits for 10%+ of the health you have, or is above your level and hasn't hit you yet (or 15+ above)");
   });
 
   it('a new attacker whose hit takes a tenth of your health stops it, saying so', async () => {
@@ -307,7 +307,7 @@ describe('4. cast repeat stops for a dangerous new attacker, not for every one',
     expect(r.message.split('\n')[0]).toBe("cast Flame Bolt I at Drudge Skulker 2 times (repeat); stopped: Mosswart #80000082 (1× in 10 s; one hit of its took 6, 12% of the 50 health you have) started attacking you, and isn't your target");
   });
 
-  it('a new attacker seen casting, or one above your level, stops it however light its blows', async () => {
+  it('a new attacker seen casting, or one above your level not yet seen hitting, stops it', async () => {
     creature(host, 0x80000083, 'Shadow', 83, 20);
     api.pushChat('Shadow casts Drain Health Other I and drains 2 points of your health.', 0x07); // seen before the repeat (Magic)
     reply = (n) => {
@@ -322,9 +322,10 @@ describe('4. cast repeat stops for a dangerous new attacker, not for every one',
     vi.advanceTimersByTime(11_000); // the Shadow's lines age out
     reply = (n) => {
       api.pushChat('You scorch Drudge Skulker for 12 points with Flame Bolt I.', 0x16);
-      if (n === 1) api.pushChat('The Mosswart Elder hits your hand for 1 point of bludgeoning damage!', 0x15);
+      // Only a miss: its danger is unknown (a higher-level one that has hit lightly is cast on through: 2026-10-18 tests).
+      if (n === 1) api.pushChat('The Mosswart Elder misses you!', 0x15);
     };
     r = await settle(api.cast('Flame Bolt I', 'Drudge Skulker', { repeat: true }));
-    expect(r.message.split('\n')[0]).toMatch(/stopped: Mosswart Elder #80000084 \(1× in 10 s; level 12, above your 5\) started attacking you/);
+    expect(r.message.split('\n')[0]).toMatch(/stopped: Mosswart Elder #80000084 \(1× in 10 s; level 12, above your 5, and it hasn't hit you yet\) started attacking you/);
   });
 });

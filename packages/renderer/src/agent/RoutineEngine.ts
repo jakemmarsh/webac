@@ -335,7 +335,11 @@ export class RoutineEngine {
    * corners of their path still ahead of us: FollowAroundCorners), whether
    * they are in sight, and whether a leg toward them is under way.
    */
-  private follow: { who: string; trail: Array<{ x: number; y: number }>; inSight: boolean; sampledAt: number; walking: 'lead' | 'corner' | null } | null = null;
+  /**
+   * `lastSeen`: the leader is out of the client's sight in the dungeon you're in (a room yours can't see) and was placed
+   * there a moment ago (AgentApi.fellowLastSeen): walked to by the doorway route, as plain follow does, not stood for.
+   */
+  private follow: { who: string; trail: Array<{ x: number; y: number }>; inSight: boolean; sampledAt: number; walking: 'lead' | 'corner' | 'last-seen' | null; lastSeen?: { agoS: number | null } | null } | null = null;
   /** ruleFiring 'once': rules (state#index) that fired and wait for their conditions to turn false. */
   private spent = new Set<string>();
   /** Loot Only Rare Corpses: a rare of yours was announced and not looted yet. */
@@ -1129,6 +1133,7 @@ export class RoutineEngine {
       this.vt ??= new VtMacro(this.api, this.now);
       this.vt.allowTarget = (o) => this.holdOk(o);
       this.vt.held = () => this.isHeld();
+      this.vt.rebuffed = () => { this.stats.rebuffs++; };
       this.vt.picked = () => this.handPick;
       for (const name of this.vt.kills()) { this.kills.push({ name, at: this.now() }); this.kills = this.kills.slice(-KILLS_KEPT); this.stats.kills++; }
       // A corpse of ours waiting and nothing in range: only recharging comes before the loot (buffs wait for idle);
@@ -1456,6 +1461,20 @@ export class RoutineEngine {
     f.sampledAt = t;
     const obs = this.api.snapshot({ radius: FOLLOW_SIGHT_M, max: 100 });
     const lead = findLeader(obs.nearby, f.who);
+    // Out of the client's sight in this dungeon but placed there a moment ago: in a dungeon the client keeps only the rooms
+    // in sight of yours, so a leader a floor down or round a corner drops out of `nearby` while the server still places
+    // him. Walked to by the doorway route (walkNav, as plain follow and walk_to do: fellowLastSeen), not stood for.
+    // Arcanist's "With Bulwark" logged "out of sight; standing still" every time he changed floors and she followed by
+    // hand all segment (Mountain Keep, 2026-10-17 23:40Z–00:34Z); 7e06f9c4 had fixed the same drop in plain follow.
+    const seen = !lead && obs.me ? this.api.fellowLastSeen(f.who) : null;
+    if (seen) {
+      if (!f.lastSeen) this.note(`Follow: ${f.who} is out of sight in another room; going to where they were last placed${seen.agoS !== null ? ` (${seen.agoS} s ago)` : ''}`);
+      f.lastSeen = { agoS: seen.agoS };
+      f.inSight = true;
+      f.trail = [];
+      return;
+    }
+    if (f.lastSeen) f.lastSeen = null;
     if (!lead || !obs.me) {
       if (f.inSight) {
         f.inSight = false;
@@ -1486,6 +1505,13 @@ export class RoutineEngine {
         const f = this.follow;
         const obs = this.api.snapshot({ radius: FOLLOW_SIGHT_M, max: 100 });
         const lead = f?.inSight ? findLeader(obs.nearby, f.who) : undefined;
+        // Out of sight in another room of this dungeon, placed a moment ago: to where they were last placed, by the doorway
+        // route (walkTo of an unseen fellow goes there: AgentApi.walkToLastSeen); they are followed on once in sight.
+        if (f && !lead && obs.me && f.lastSeen) {
+          f.walking = 'last-seen';
+          await this.api.walkTo(f.who, { within: 2, timeoutMs: 15_000 });
+          return;
+        }
         // Out of sight: stand still (watchLeader stopped us and said so) until they come back.
         if (!f || !lead || !obs.me) { await sleep(1000); return; }
         const me = obs.me.pos;
@@ -1761,7 +1787,14 @@ export class RoutineEngine {
         if (cast) { this.stats.rebuffs++; this.report(`Rebuffed ${cast} of ${due.length} spells (set: ${set.name})`); }
         return { ok: true, message: due.length ? `cast ${due.map((d) => d.spell).join(', ')}` : 'buffs all up', ...(due.length ? {} : { idle: true }) };
       }
-      case 'use-item': return this.api.useOn(a.item, a.to ?? (a.on === 'target' ? this.api.targetName() : 'self'));
+      // A swing under way is broken off first, and a potion or food on you is a plain use (AgentApi.useCarried): a rule's
+      // "use Stamina Elixir on self" mid-fight got "You cannot move or use an item while attacking" and "Cannot use the
+      // Stamina Elixir with the Claude Bulwark" (2026-10-18).
+      case 'use-item': {
+        const to = a.to ?? (a.on === 'target' ? this.api.targetName() : 'self');
+        if (to === null || to === undefined || to === '') return { ok: false, message: `no target to use ${a.item} on` };
+        return this.api.useCarried(a.item, to);
+      }
       case 'attack-nearest': {
         const obs = this.api.snapshot({ radius: a.meters ?? 60, max: 30 });
         // A VirindiTank Monsters row with priority -1 means leave that one alone, whoever asks.

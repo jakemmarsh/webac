@@ -74,8 +74,12 @@ export function awayWord(from: ReadonlyArray<{ bearing: number }>): string | nul
  *   OnlyEngaged (off): the macro starts no fights of its own. It fights only what is attacking you, coming at you, on or
  *     coming at a fellow in view, or the monster you last attacked or cast at by hand (RoutineEngine.pickedTarget): the
  *     player picks the pulls, the macro fights them out (heals, restams and peels between swings).
+ *   WeighBoltsByDamage (on; 2026-10-18): a caster's Auto element is the one whose best castable bolt does the most against
+ *     the monster (the bolt's damage from the era's spell table times the monster's Resist* multiplier for it), not the
+ *     first of its damage list it can bolt at all (combatPlan.strongestBolt): Acid Stream I over Flame Bolt V at a Dread
+ *     Mu-miyah, which takes both alike.
  */
-export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false } as const;
+export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true } as const;
 
 /** A beyond-VTank macro setting from a profile's settings (any case), else its default. */
 export function beyondSetting<K extends keyof typeof BEYOND_MACRO_DEFAULTS>(settings: Record<string, string | number | boolean>, name: K): (typeof BEYOND_MACRO_DEFAULTS)[K] {
