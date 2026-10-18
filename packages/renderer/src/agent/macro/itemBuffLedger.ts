@@ -65,10 +65,13 @@ export class ItemBuffLedger {
     this.save();
   }
 
-  /** A confirmed cast of `spell` on `items` (VTank: only a success is recorded; a longer record is kept). */
-  note(items: ItemRef[], spell: { id: number; category: number; power: number; duration: number }): void {
+  /**
+   * A confirmed cast of `spell` on `items` (VTank: only a success is recorded; a longer record is kept), `agoMs` ago
+   * (a server line read a moment after it came).
+   */
+  note(items: ItemRef[], spell: { id: number; category: number; power: number; duration: number }, agoMs = 0): void {
     if (!(spell.duration > 0) || !Number.isFinite(spell.duration)) return;
-    const now = this.observe();
+    const now = this.observe() - Math.max(0, agoMs);
     const until = now + spell.duration * 1000;
     let changed = false;
     for (const it of items) {
@@ -105,6 +108,17 @@ export class ItemBuffLedger {
       worst = Math.min(worst, left);
     }
     return worst;
+  }
+
+  /**
+   * The server's "The spell X on Y has expired.": X's record on the worn item named Y goes (one under it, surpassed when
+   * cast, now takes over and keeps its own). Matched by the item's name, as the line names it.
+   */
+  dropSpell(itemName: string, spellId: number): void {
+    const n = itemName.trim().toLowerCase();
+    let changed = false;
+    for (const [k, r] of this.rows) if (r.spellId === spellId && r.name.toLowerCase() === n) { this.rows.delete(k); changed = true; }
+    if (changed) this.save();
   }
 
   /** Drop expired records. */

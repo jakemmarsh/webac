@@ -196,8 +196,16 @@ export class DungeonHost extends FakeHost {
         const l = this.nav.kit.launch(power, walk);
         const forward = this.keys.has('KeyW') ? l.forward : 0;
         this.launches.push({ power, forward, walk, x: this.me.x, y: this.me.y, z: this.me.z });
-        const land = simulateFlight(this.nav.kit, { x: this.bx + this.me.x, y: this.by + this.me.y, z: this.me.z },
-          -Math.sin(this.me.yaw) * forward, -Math.cos(this.me.yaw) * forward, l.up);
+        // The NPCs' bodies stop a jump as they stop a step (the live body's flight meets them as walls): a hop planned
+        // through the Holtburg scriveners' Apprentice of Creature Magic landed back on its take-off (2026-10-18 10:05Z).
+        const bodies = this.creatureShapes.flatMap((sh) => sh());
+        let land: ReturnType<typeof simulateFlight>;
+        try {
+          land = simulateFlight(this.nav.kit, { x: this.bx + this.me.x, y: this.by + this.me.y, z: this.me.z },
+            -Math.sin(this.me.yaw) * forward, -Math.cos(this.me.yaw) * forward, l.up);
+        } finally {
+          for (const k of bodies) this.nav.col.removeKey(k);
+        }
         if (land) {
           this.flight = { until: this.t + land.t * 1000, to: { x: land.x - this.bx, y: land.y - this.by, z: land.z } };
           this.landings.push({ ...this.flight.to, vz: land.vz });

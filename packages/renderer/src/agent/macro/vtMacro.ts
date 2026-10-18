@@ -139,6 +139,10 @@ export class VtMacro {
   /** The last blow you landed on each monster you fought (combat text), by guid, and how far the chat has been read. */
   private blows = new Map<number, number>();
   private blowMark = 0;
+  /** How far the chat has been read for spells landing on (or wearing off) your gear (noteGearLines). */
+  private gearMark = 0;
+  /** The spell table's spells by lower-case name, for the gear lines (built once per table). */
+  private spellsByName: { table: unknown; byName: Map<string, { id: number; category: number; power: number; duration: number }> } | null = null;
   /** The era's drains and martyrs (Drain Auto's plan; tools/build-drain-tables.ts), once loaded. */
   private drainRows: DrainRow[] | null = null;
   /** Monsters the server answered "You fail to affect …" for: immune to spells that aren't projectiles (no more debuffs). */
@@ -486,6 +490,53 @@ export class VtMacro {
     return true;
   }
 
+  /**
+   * The server's lines about spells on the gear you wear, whoever cast them, into the item timers:
+   * - "You cast S on <worn item>[, refreshing …]": S is on it from then (a hand cast as much as the macro's own);
+   * - "…, but it is surpassed by X": X is on it NOW (the server compared the item's own enchantments: ACE
+   *   EnchantmentManager.Add), and S is kept under it; X's cast time is unknown, so it is timed from this line as at most
+   *   its full duration, and its expiry line ends it;
+   * - "The spell X on <item> has expired.": X's record on it goes, and what was kept under it takes over.
+   * "Arcanist fights" kept casting Impenetrability V on armor under her hand-cast VI ("but it is surpassed by
+   * Impenetrability VI" at 08:04, 08:22 and 08:49Z): the VI was known only from a cast seen landing on this page (the 08:20
+   * reload emptied it), never from the server's own word that it was there (Aerbax Haven, 2026-10-18).
+   */
+  private noteGearLines(): void {
+    const table = this.api.spellTableData();
+    if (!table) return;
+    if (this.spellsByName?.table !== table) {
+      const byName = new Map<string, { id: number; category: number; power: number; duration: number }>();
+      for (const [id, sp] of table.spells) if (sp.duration && sp.duration > 0 && !byName.has(sp.name.toLowerCase())) byName.set(sp.name.toLowerCase(), { id, category: sp.category, power: sp.power, duration: sp.duration });
+      this.spellsByName = { table, byName };
+    }
+    const byName = this.spellsByName.byName;
+    const now = this.now();
+    let worn: ItemRef[] | null = null;
+    const wornNamed = (n: string): ItemRef[] => {
+      worn ??= this.api.inventory().filter((i) => i.where === 'equipped').map((i) => ({ guid: i.guid, name: i.name }));
+      return worn.filter((w) => w.name.toLowerCase() === n.toLowerCase());
+    };
+    for (const e of this.api.eventsSince(this.gearMark)) {
+      this.gearMark = Math.max(this.gearMark, e.seq);
+      if (e.type !== 'chat') continue;
+      const line = e.text.replace(/^\([a-z]+\) /i, '').trim();
+      const ago = Math.max(0, now - e.t);
+      const gone = /^The spell (.+?) on (.+?) has expired\.?$/i.exec(line);
+      if (gone) { const sp = byName.get(gone[1].toLowerCase()); if (sp) this.itemTimers.dropSpell(gone[2], sp.id); continue; }
+      const cast = /^You (?:quick)?cast (?:(?:delayed|extended|enchained|maximized|empowered) )*(.+?) on (.+?)(?:, (refreshing|surpassing|but it is surpassed by) (.+?))?\.?$/i.exec(line);
+      if (!cast || /^yourself$/i.test(cast[2])) continue;
+      const on = wornNamed(cast[2]);
+      if (!on.length) continue;
+      const sp = byName.get(cast[1].toLowerCase());
+      if (sp) this.itemTimers.note(on, sp, ago);
+      if (cast[3]?.toLowerCase() === 'but it is surpassed by') {
+        const over = byName.get(cast[4].toLowerCase());
+        // Only where nothing times it already: a cast of it seen landing is exact, and this is only an upper bound.
+        if (over) this.itemTimers.note(on.filter((w) => this.itemTimers.remainingOn(w, over.category, over.power) === null), over, ago);
+      }
+    }
+  }
+
   private families(): typeof this.fam {
     const t = this.api.spellTableData();
     if (!t) return null;
@@ -801,6 +852,26 @@ export class VtMacro {
   /** The routine's hold-position (beyond VTank, Jake 2026-10-12): a monster this refuses is no target. */
   allowTarget?: (o: { dist: number; bearing: number }) => boolean;
 
+  /**
+   * BuffSelfNormal alone: a buff under RebuffTimeRemainingSeconds (or a Force Buff round), and nothing else of the rule
+   * list: no fight, no recharge, no crafting, no idle top-off. For while your own walk or follow holds the routine
+   * (RoutineEngine.buffWhileYouWalk).
+   */
+  buffDueStep(p: RoutineProfile & { vtank: VtankProfileData }, settings: Record<string, string | number | boolean>): VtStep | null {
+    p = this.resolved(p);
+    const fam = this.families();
+    if (!fam) return null;
+    const me = this.api.snapshot({ max: 0 }).me;
+    if (!me || me.dead) return null;
+    this.lastSettings = settings;
+    this.itemTimers.bind({ guid: me.guid, name: me.name });
+    this.itemTimers.expire();
+    this.noteGearLines();
+    const stance: Stance = me.combatMode === 'unknown' ? 'peace' : me.combatMode;
+    const spells = this.now() < this.noMagicUntil ? [] : this.spells(p.vtank.excludedScarabs);
+    return this.buffStep(p, settings, { buffing: true, idle: false }, fam, spells, this.skills(), me.level, stance, false);
+  }
+
   decide(p: RoutineProfile & { vtank: VtankProfileData }, settings: Record<string, string | number | boolean>, ctx: { combat: boolean; buffing: boolean; idle: boolean }): VtStep | null {
     p = this.resolved(p);
     const fam = this.families();
@@ -814,6 +885,7 @@ export class VtMacro {
     this.lastSettings = settings;
     this.itemTimers.bind({ guid: me.guid, name: me.name });
     this.itemTimers.expire();
+    this.noteGearLines();
     // Auto Fellow Mgmt needs no spell data: before the spell table is loaded it is all there is to do.
     if (!fam) return this.fellowStep(settings);
     // UtilityBelt cast sharing: debuffs your other clients landed count as cast here (ubNet.ts).

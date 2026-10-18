@@ -86,7 +86,7 @@ describe('1. a bought stack beside one you carry (Bulwark, 12 Stamina Elixirs at
       return true;
     };
     const r = (await settle(api, host, api.use(OLD), 8000))!;
-    expect(r.message).toContain('gone from your pack: Stamina Elixir (and 12 more in another stack: #8000e175 x12)');
+    expect(r.message).toContain('gone from your pack: Stamina Elixir #8000cd92 (and 12 more in another stack: #8000e175 x12)');
   });
 
   it('one stack alone reads as before: no other-stacks note', async () => {

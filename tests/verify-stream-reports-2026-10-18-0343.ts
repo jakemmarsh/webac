@@ -189,9 +189,10 @@ describe('6, 7. buy and sell: items=, count=, and the vendor\'s window opened fo
     const t = tool('ac_buy');
     expect(unknownArgs(t, { items: 'Bracelet, High Mana Charge' })).toBeNull();
     expect(unknownArgs(t, { item: '#80004fb9', count: 10 })).toBeNull();
-    const c = caller((_m, a) => ({ ok: true, message: `bought ${String(a[1] ?? 1)} ${String(a[0])}` }));
+    const c = caller((m, a) => (m === 'vendorReady' ? { ok: true, message: '' } : { ok: true, message: `bought ${String(a[1] ?? 1)} ${String(a[0])}` }));
     const out = await TOOL_CALLER.run(c, () => t.run({ items: 'Bracelet, High Mana Charge, High Mana Charge' }));
-    expect(c.calls).toEqual([{ method: 'buy', args: ['Bracelet', 1] }, { method: 'buy', args: ['High Mana Charge', 2] }]);
+    // The window opened once first (2026-10-18 12:24Z), then a buy per name.
+    expect(c.calls).toEqual([{ method: 'vendorReady', args: [null] }, { method: 'buy', args: ['Bracelet', 1] }, { method: 'buy', args: ['High Mana Charge', 2] }]);
     expect(out.text).toBe('bought 2 of 2:\n  Bracelet: bought 1 Bracelet\n  High Mana Charge x2: bought 2 High Mana Charge');
     // Bulwark's `buy item=#80004fb9 count=10` (03:27:37Z): count= is amount=.
     const c2 = caller(() => ({ ok: true, message: 'ok' }));
@@ -205,7 +206,8 @@ describe('6, 7. buy and sell: items=, count=, and the vendor\'s window opened fo
     expect(vendorAndItem({ vendor: 'Peddler', target: 'Cap' })).toEqual({ vendor: 'Peddler', item: 'Cap' });
     const c = caller(() => ({ ok: true, message: 'sold' }));
     await TOOL_CALLER.run(c, () => tool('ac_sell').run({ target: '#7a7b4003', items: '#8000412e, #80004242' }));
-    expect(c.calls).toEqual([{ method: 'sell', args: [0x8000412e, null, PEDDLER] }, { method: 'sell', args: [0x80004242, null, PEDDLER] }]);
+    // A list is one page call now, the vendor with it (2026-10-18 12:24Z).
+    expect(c.calls).toEqual([{ method: 'sellList', args: [[0x8000412e, 0x80004242], null, PEDDLER] }]);
     // With no vendor named, the page gets the old two arguments (a page from before this still answers).
     const c2 = caller(() => ({ ok: true, message: 'sold' }));
     await TOOL_CALLER.run(c2, () => tool('ac_sell').run({ item: 'Cap', amount: 2 }));

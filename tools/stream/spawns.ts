@@ -16,6 +16,7 @@
  *
  * The SQL runs in world-query.ts (read-only); everything here is pure.
  */
+import { isMapCoordsText, parseMapCoordsText } from '../../packages/shared/src/mapCoordsText.ts';
 import { aceCellOf, formatPlace, nearestTownOf, placeMapCoords, type ShopDatInfo, type ShopPlace } from './shops.ts';
 import type { MapCoords } from '../../packages/renderer/src/ui/MapMarkers.ts';
 import type { LorePick } from './lore.ts';
@@ -200,9 +201,11 @@ export function spawnSources(creatures: number[], profiles: GenProfile[], places
 
 /** `spawns "<name>" near 36.7N 29.1E` → the name and the coordinates (map units; S and W negative). */
 export function parseSpawnsQuery(arg: string): { name: string; near?: MapCoords } {
-  const m = /^(.*?)\s+near\s+(\d+(?:\.\d+)?)\s*([NS])[\s,]+(\d+(?:\.\d+)?)\s*([EW])\s*$/i.exec(arg.trim());
-  if (!m) return { name: arg.trim() };
-  return { name: m[1].trim().replace(/^"(.*)"$/, '$1'), near: { ns: Number(m[2]) * (/s/i.test(m[3]) ? -1 : 1), ew: Number(m[4]) * (/w/i.test(m[5]) ? -1 : 1) } };
+  const m = /^(.*?)\s+near\s+(.+?)\s*$/i.exec(arg.trim());
+  // The coordinates as walk_to reads them (mapCoordsText: comma or not, any spacing).
+  const near = m && isMapCoordsText(m[2]) ? parseMapCoordsText(m[2]) : null;
+  if (!m || !near) return { name: arg.trim() };
+  return { name: m[1].trim().replace(/^"(.*)"$/, '$1'), near };
 }
 
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];

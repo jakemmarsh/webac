@@ -61,7 +61,11 @@ export function flightCrossesDisk(a: NavPoint, b: NavPoint, disks: ReadonlyArray
     const span = d.span ?? 3;
     if (Math.abs(a.z - d.z) > span && Math.abs(b.z - d.z) > span) continue;
     const t = len2 > 1e-9 ? Math.max(0, Math.min(1, ((d.x - a.x) * dx + (d.y - a.y) * dy) / len2)) : 0;
-    if (Math.hypot(a.x + dx * t - d.x, a.y + dy * t - d.y) < d.r) return true;
+    const near = Math.hypot(a.x + dx * t - d.x, a.y + dy * t - d.y);
+    // Taking off inside one already (pressed against an NPC's body): only a flight that goes no deeper in, as avoidDisks
+    // lets a step from inside head away only.
+    const from = Math.hypot(a.x - d.x, a.y - d.y);
+    if (from < d.r ? near < from - 0.05 : near < d.r) return true;
   }
   return false;
 }

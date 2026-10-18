@@ -32,7 +32,7 @@ import { IN_TOWN_UNITS, nearestTownOf, townInName } from './towns.js';
 import { USEABLE_NO, isUseable, isUseableTargeted } from '../input/UseObject.js';
 import { SELF_TARGETABLE_TYPE_MASK } from '../ui/SpellShortcutBar.js';
 import type { PlanSpell, RoutineProfile } from '@ac/shared';
-import { missileShot, getProjectileSpeed, DEFAULT_MAX_VELOCITY, MATERIAL_NAMES, EquipMask, WeenieError, weenieErrorText, type MissileShot } from '@ac/shared';
+import { parseMapCoordsText, isPartialMapCoordsText, missileShot, getProjectileSpeed, DEFAULT_MAX_VELOCITY, MATERIAL_NAMES, EquipMask, WeenieError, weenieErrorText, type MissileShot } from '@ac/shared';
 import { RoutineEngine, type ItemPalette } from './RoutineEngine.ts';
 import type { RoutineSyncResult } from './RoutineSync.ts';
 import { vtankExprHost, vtankExpressions } from './VtankExprHost.ts';
@@ -457,6 +457,11 @@ export interface AgentHost {
   /** The vendor window's Buy / Sell (one item, `amount` units). */
   vendorBuy(guid: number, amount: number): boolean;
   vendorSell(guid: number, amount: number): boolean;
+  /**
+   * Several whole stacks onto the sell list, then one Sell for them all (the bar's Sell sends the list in one GameAction
+   * Sell, which ACE's HandleActionSellItem pays in one payout). Returns the ids that went out; absent on older hosts.
+   */
+  vendorSellMany?(guids: number[]): number[];
   /** The open secure-trade window, or null. */
   trade(): AgentTrade | null;
   tradeAction(action: 'add' | 'accept' | 'decline' | 'reset' | 'close', guid?: number): boolean;
@@ -634,11 +639,9 @@ export const compassToYaw = (deg: number): number => (normDeg(deg) - 180) / DEG;
  */
 export const MAP_COORD_ORIGIN = 101.95;
 export function parseMapCoords(text: string): { x: number; y: number } | null {
-  const m = /(\d+(?:\.\d+)?)\s*([NS])\s*[, ]\s*(\d+(?:\.\d+)?)\s*([EW])/i.exec(text);
-  if (!m) return null;
-  const ns = Number(m[1]) * (/s/i.test(m[2]) ? -1 : 1);
-  const ew = Number(m[3]) * (/w/i.test(m[4]) ? -1 : 1);
-  return { x: (ew + MAP_COORD_ORIGIN) * 240, y: (ns + MAP_COORD_ORIGIN) * 240 };
+  // The shared reader (@ac/shared mapCoordsText): with or without a comma, any spacing ("42.6N33.6E", "42.6N; 33.6E").
+  const c = parseMapCoordsText(text);
+  return c ? { x: (c.ew + MAP_COORD_ORIGIN) * 240, y: (c.ns + MAP_COORD_ORIGIN) * 240 } : null;
 }
 
 /** The compass point word ("northeast") for an offset `dx` east, `dy` north: one parseOffset reads back. */
@@ -860,6 +863,9 @@ const PLACE_KINDS = new Set<AgentObjectKind>(['npc', 'vendor', 'portal', 'lifest
  */
 interface PlaceRecord { name: string; kind: AgentObjectKind; cell: number; x: number; y: number; z: number; t?: number; at?: number }
 
+/** A carried item as a use's before / after reads it (AgentApi.packMark). */
+interface PackMark { name: string; stack: number; worn: boolean; stackable?: boolean }
+
 interface Task {
   label: string;
   /** Returns a result when done, null while running. */
@@ -872,6 +878,12 @@ interface Task {
   kind?: 'cast-repeat' | 'walk';
   /** One leg of a chain of walks (a stay_with walk's way back for its fellow): its end is no task-done of its own. */
   quiet?: boolean;
+  /**
+   * Where it stands now, for the observation's task line ("420 m N to go"): a walk out of a building by its doorways
+   * heads away from the goal for a while, and without the distance Bulwark took his walk north for "42.6N 33.6E",
+   * leaving the pawn shop through the gaming hall next door, for a wrong turn and stopped it (2026-10-18 10:05:50Z).
+   */
+  progress?(): string | null;
 }
 
 /** What one cast of a repeat did: whether it went out, the chat lines after it, the server's refusals. */
@@ -2767,8 +2779,17 @@ export class AgentApi {
   /** A vendor's use waits this much longer for its window once something else answered (its turn to face you), ms. */
   static VENDOR_WINDOW_MS = 4000;
 
+  /** Each carried item for a use's before / after: its name, stack, whether it is worn, and whether it stacks (known). */
+  private packMark(): Map<number, PackMark> {
+    const slots = new Map((this.host.itemSlots?.() ?? []).map((r) => [r.guid >>> 0, r]));
+    return new Map(this.host.inventory().map((i) => {
+      const row = slots.get(i.guid >>> 0);
+      return [i.guid, { name: i.name, stack: i.stack ?? 1, worn: i.where === 'equipped', ...(row ? { stackable: row.maxStack > 1 } : {}) }];
+    }));
+  }
+
   /** What a use can change, read before it: vitals, carried items, known spells, the enchantments on you. */
-  private useMark(target?: number): { vit: Record<string, number>; inv: Map<number, { name: string; stack: number }>; spells: Set<number>; buffs: Map<string, number>; target?: number; open?: boolean; doors: Map<number, boolean> } {
+  private useMark(target?: number): { vit: Record<string, number>; inv: Map<number, PackMark>; spells: Set<number>; buffs: Map<string, number>; target?: number; open?: boolean; doors: Map<number, boolean> } {
     const me = this.host.self();
     const t = target !== undefined ? this.host.object(target) : null;
     // A door's open state (PhysicsState Ethereal): a player sees it slide open or shut.
@@ -2780,7 +2801,7 @@ export class AgentApi {
     for (const o of this.nearby(AgentApi.USE_DOOR_WATCH_M)) if (o.kind === 'door' && o.guid !== target && o.open !== undefined) doors.set(o.guid, o.open);
     return {
       vit, doors,
-      inv: new Map(this.host.inventory().map((i) => [i.guid, { name: i.name, stack: i.stack ?? 1 }])),
+      inv: this.packMark(),
       spells: new Set(this.host.spells().map((s) => s.id)),
       buffs: new Map(this.host.activeSpells().map((b) => [b.name, b.remaining])),
       ...(open !== undefined ? { target, open } : {}),
@@ -2818,8 +2839,10 @@ export class AgentApi {
     }
     for (const [g, i] of mark.inv) {
       const now = after.inv.get(g);
-      if (!now) out.push(`gone from your pack: ${i.name}${i.stack > 1 ? ` x${i.stack}` : ''}${this.otherStacksNote(after.inv, g, i.name)}`);
-      else if (now.stack !== i.stack) out.push(`${i.name}: ${i.stack} → ${now.stack}${this.otherStacksNote(after.inv, g, i.name)}`);
+      // The server's own word for it ("The Ring is destroyed.": ACE ManaStone draining an item, a stone used up).
+      const destroyed = !now && chat.some((l) => l.includes(`The ${i.name} is destroyed`)) ? ' (destroyed)' : '';
+      if (!now) out.push(`gone from your ${i.worn ? 'gear (it was worn)' : 'pack'}: ${i.name}${i.stack > 1 ? ` x${i.stack}` : ''} #${g.toString(16)}${destroyed}${this.otherStacksNote(after.inv, g, i)}`);
+      else if (now.stack !== i.stack) out.push(`${i.name}: ${i.stack} → ${now.stack}${this.otherStacksNote(after.inv, g, i)}`);
     }
     for (const [g, i] of after.inv) if (!mark.inv.has(g)) out.push(`new in your pack: ${i.name}${i.stack > 1 ? ` x${i.stack}` : ''} #${g.toString(16)}`);
     const learned = this.host.spells().filter((s) => !mark.spells.has(s.id));
@@ -2838,8 +2861,13 @@ export class AgentApi {
    * sat unused in the main pack (ACE's buy makes a new stack, it never tops up one you have: Player.
    * TryCreateInInventoryWithNetworking; Bulwark, 2026-10-17 19:59:33–20:45:55Z, #8000e175 x12 still in ace_shard).
    */
-  private otherStacksNote(inv: Map<number, { name: string; stack: number }>, g: number, name: string): string {
-    const others = [...inv].filter(([o, i]) => o !== g && i.name === name);
+  private otherStacksNote(inv: Map<number, PackMark>, g: number, it: PackMark): string {
+    // Stacks only: two rings of one name aren't "other stacks" of a ring drained into a mana stone, and worn ones aren't
+    // in the pack at all. Bulwark's drain answered "gone from your pack: Ring (and 2 more in 2 other stacks: #8000ee4d x1,
+    // #800105be x1)", his two worn rings, and he read them as gone (stream 2026-10-18 ~09:59Z).
+    if (it.stackable === false || (it.stackable === undefined && it.stack <= 1 && ![...inv.values()].some((i) => i.name === it.name && i.stack > 1))) return '';
+    const name = it.name;
+    const others = [...inv].filter(([o, i]) => o !== g && i.name === name && !i.worn);
     if (!others.length) return '';
     const n = others.reduce((s, [, i]) => s + i.stack, 0);
     return ` (and ${n} more in ${others.length === 1 ? 'another stack' : `${others.length} other stacks`}: ${others.slice(0, 4).map(([o, i]) => `#${o.toString(16)} x${i.stack}`).join(', ')})`;
@@ -4165,7 +4193,7 @@ export class AgentApi {
       pos: { x: Math.round(me.g.x * 10) / 10, y: Math.round(me.g.y * 10) / 10, z: Math.round(s.z * 10) / 10 },
       heading: Math.round(me.heading),
       combatMode: s.combatMode,
-      task: this.task?.label ?? null,
+      task: this.taskLine(),
       dead: s.dead,
     };
     if (s.serverMode) out.serverMode = s.serverMode;
@@ -4587,7 +4615,24 @@ export class AgentApi {
       }
     }
     if (inv && inv.score >= (world?.score ?? 0)) return inv.item.guid;
-    return world?.guid ?? null;
+    if (world) return world.guid;
+    return where === 'world' ? null : this.qualifiedItem(name);
+  }
+
+  /**
+   * An item of yours named with a word saying which (what nothing matched in full): "Worn Goggles" / "my wielded Wand"
+   * are among what you wear, "spare Boots" / "pack Ring" among what you carry unworn, "my Goggles" among either.
+   * Arcanist's `use_on item=<stone> target="Worn Goggles"` found nothing, her goggles being "Goggles" (Aerbax Haven,
+   * 2026-10-18 08:33:35Z). Null when the name has no such word or the rest matches nothing of yours.
+   */
+  private qualifiedItem(name: string): number | null {
+    const m = /^(?:(?:my|your|the)\s+)?(worn|wielded|equipped|spare|pack|carried|my|your)\s+(.+)$/i.exec(name.trim());
+    if (!m) return null;
+    const how = m[1].toLowerCase(), rest = m[2].trim();
+    const items = this.host.inventory();
+    const pool = /^(worn|wielded|equipped)$/.test(how) ? items.filter((i) => i.where === 'equipped')
+      : /^(spare|pack|carried)$/.test(how) ? items.filter((i) => i.where !== 'equipped') : items;
+    return bestNameMatch(rest, pool, (i) => i.name)?.item.guid ?? null;
   }
 
   /**
@@ -4978,6 +5023,10 @@ export class AgentApi {
     }
     const g0 = this.need(t, 'any', 'object');
     if (typeof g0 !== 'number') return g0;
+    // Yourself (your name, or self): nothing to double-click. An item on you is use_on with target=self. A use of
+    // "Claude Bulwark" answered "can't use #500000a4 (not known to the client)" (Aerbax Haven, 2026-10-18 08:52:26Z).
+    const meGuid = this.host.self()?.guid;
+    if (meGuid !== undefined && g0 >>> 0 === meGuid >>> 0) return { ok: false, message: `${this.host.self()?.name ?? 'that'} is you: there is nothing to use. To use an item on yourself (a healing kit, a mana stone), ac_use_on item=<the item> target=self; a kit used plainly (ac_use target=<the kit>) also goes on you` };
     // Of several of that name (a dungeon's Exits), the one a walk reaches.
     const g = this.reachableNamesake(g0, t);
     const name = this.nameOf(g);
@@ -5565,6 +5614,8 @@ export class AgentApi {
 
   /** A far walk's stretch that finds no way to its end still goes to the farthest point reached when that gains this much (m). */
   static readonly STRETCH_MIN_GAIN_M = 8;
+  /** A goal this near (m) whose reach a straight line gets to is walked to straight, past a doorway on the route no walk gets into. */
+  static readonly GOAL_PAST_DOORWAY_M = 12;
 
   /** How long a use waits on the server's own walk to its object once it is still closing in. */
   static readonly USE_SERVER_WALK_MS = 30_000;
@@ -5677,9 +5728,18 @@ export class AgentApi {
    * walking with nobody waiting for it (Arcanist at a Holtburg tower scrivener, 2026-10-11).
    */
   static USE_APPROACH_MS = 45_000;
+  /** A use's walk stopped short says where it set off from when it got this much nearer meanwhile (m). */
+  static readonly USE_PROGRESS_NOTE_M = 10;
 
   /** {@link approach}, given up after `limitMs`: the walk is stopped (not left running) and the reply says how far it got. */
   private async approachWithin(guid: number, within: number, limitMs: number, flee = false): Promise<AgentResult | null> {
+    const distTo = (): { d: number; dz: number } | null => {
+      const o = this.host.object(guid), me = this.me();
+      if (!o || !o.cell || !me) return null;
+      const g = toGlobal(o.cell, o.x, o.y);
+      return { d: Math.hypot(g.x - me.g.x, g.y - me.g.y), dz: o.z - me.s.z };
+    };
+    const at0 = distTo();
     const walk = this.approach(guid, within, flee);
     if (!walk) return null;
     let result: AgentResult | null | undefined;
@@ -5691,14 +5751,20 @@ export class AgentApi {
     this.cancelTask('ac_use stopped waiting for it');
     const o = this.host.object(guid);
     const me = this.me();
-    const d = o && o.cell && me ? Math.hypot(toGlobal(o.cell, o.x, o.y).x - me.g.x, toGlobal(o.cell, o.x, o.y).y - me.g.y) : null;
+    const now = distTo();
+    const d = now ? now.d : null;
     // Within a use's reach on its floor when time ran out: use it from there, as a player clicks it once close (the
     // server's MoveTo takes the last metres). Bulwark's walk to the Mountain Keep exit portal stood its last 18 s
     // searching and was stopped 2.8 m from it; the use he typed next went in at once (2026-10-17 10:13:52–59Z).
     if (o && me && d !== null && d <= AgentApi.USE_REACHED_M && Math.abs(o.z - me.s.z) < AgentApi.FLOOR_APART_M) {
       return { ok: true, usedFromHere: true, message: `${task} took longer than ${Math.round(limitMs / 1000)} s and stopped ${d.toFixed(1)} m away, within reach, so the use went from there` };
     }
-    return { ok: false, message: `${task} took longer than ${Math.round(limitMs / 1000)} s${d !== null ? ` and stopped ${d.toFixed(1)} m away` : ''}; ac_walk_to it first (it can take longer), then use it` };
+    // The distance is the straight one to the object (not along the route). Said with where the walk set off from and its
+    // floor: Arcanist's buy from the pawn shop gave up "116.1 m away" 45 s into a 300 m walk, and he read it as wrong
+    // (the vendor was a floor up, 7 m off, when he next looked, after the walk_to he typed got him there; 2026-10-18 10:05:15Z).
+    const set = at0 && d !== null && at0.d - d >= AgentApi.USE_PROGRESS_NOTE_M ? ` (straight-line; it was ${at0.d.toFixed(0)} m off when the walk set off)` : '';
+    const floor = now && Math.abs(now.dz) >= AgentApi.FLOOR_APART_M ? `, ${Math.abs(now.dz).toFixed(0)} m ${now.dz > 0 ? 'above' : 'below'} you` : '';
+    return { ok: false, message: `${task} took longer than ${Math.round(limitMs / 1000)} s${d !== null ? ` and stopped ${d.toFixed(1)} m away${floor}` : ''}; ac_walk_to it first (it can take longer), then use it${set}` };
   }
 
   /** "; a dialog is open: …" naming the open popups (they wait for an answer; ac_dialog gives it), or ''. */
@@ -7843,6 +7909,92 @@ export class AgentApi {
     return this.atVendor(vendor, () => this.sell(item, amount));
   }
 
+  /** A list sold or bought one by one longer than this ends with a task-done event (a stream player's call answers at 30 s). */
+  static VENDOR_LIST_LATE_MS = 18_000;
+
+  /**
+   * ac_sell items=: the vendor's window opened once (vendorReady), then every whole stack in ONE sale, as a player drags
+   * them all onto the sell list and presses Sell once (ACE HandleActionSellItem takes the list, drops what it won't buy and
+   * pays once). Part of a stack (amount=) is sold on its own. With no window open, 14 items each walked to the Tufa
+   * Archmage again: every walk replaced the one before ("interrupted (replaced by walking to Archmage)"), the call went to
+   * the background past 30 s and kept cutting off the player's own walks for minutes, "sold 8 of 14" (Arcanist, stream
+   * 2026-10-18 12:09:22–12:14:31Z); and each one-item sale paid its own new coin stack, 24 of them for Bulwark's 24 stones.
+   */
+  async sellListAt(items: TargetArg[], amount: number | null, vendor?: TargetArg | null): Promise<AgentResult> {
+    const began = this.host.now();
+    const r = await this.sellListBody(items, amount, vendor);
+    if (this.host.now() - began > AgentApi.VENDOR_LIST_LATE_MS) this.push('task-done', `sell: ${r.message}`);
+    return r;
+  }
+
+  private async sellListBody(items: TargetArg[], amount: number | null, vendor?: TargetArg | null): Promise<AgentResult> {
+    // As the call named it: an id as #hex (the tool hands ids over as numbers).
+    const label = (t: TargetArg): string => (typeof t === 'number' ? `#${(t >>> 0).toString(16)}` : String(t));
+    const ready = await this.vendorReady(vendor);
+    if (ready && 'ok' in ready) return { ok: false, message: `sold 0 of ${items.length}: ${ready.message}` };
+    const head = ready ? `${ready.opened}\n` : '';
+    const lines = new Map<number, string>();
+    const resolved: Array<{ index: number; guid: number }> = [];
+    items.forEach((t, index) => {
+      const g = this.need(t, 'inventory', 'item');
+      if (typeof g !== 'number') { lines.set(index, `${label(t)}: ${g.message.replace(/\n/g, '\n    ')}`); return; }
+      // A name given twice is two of that name (as one sale after another took the next one of it); an id twice is one.
+      if (resolved.some((x) => x.guid === g)) {
+        const name = this.nameOf(g);
+        const next = typeof t === 'string' && !/^#?(0x)?[0-9a-f]{8}$/i.test(t.trim()) ? this.host.inventory().find((i) => i.name === name && i.where !== 'equipped' && !resolved.some((x) => x.guid === i.guid)) : undefined;
+        if (!next) { lines.set(index, `${label(t)}: listed twice (sold once)`); return; }
+        resolved.push({ index, guid: next.guid });
+        return;
+      }
+      resolved.push({ index, guid: g });
+    });
+    const stackOf = (g: number): number => this.host.inventory().find((i) => i.guid === g)?.stack ?? 1;
+    // Whole stacks go in one sale; part of a stack is split first, so it is sold by itself (sell).
+    const whole = resolved.filter((x) => amount === null || amount >= stackOf(x.guid));
+    const part = resolved.filter((x) => !whole.includes(x));
+    let sold = 0;
+    if (whole.length > 1 && this.host.vendorSellMany && this.host.vendor()) {
+      for (let w = 0; w < 30 && this.host.busy(); w++) await sleep(200);
+      const since = this.seqN;
+      const purse = this.host.self()?.pyreals ?? 0;
+      const names = new Map(whole.map((x) => [x.guid, this.nameOf(x.guid)]));
+      const sent = new Set(this.host.vendorSellMany(whole.map((x) => x.guid)));
+      const gone = (g: number): boolean => !this.host.inventory().some((i) => i.guid === g);
+      const refusal = (): boolean => this.eventsSince(since).some((e) => e.type === 'use-failed'
+        || (e.type === 'chat' && /^\((system|other)\) /.test(e.text) && AgentApi.SELL_REFUSAL.test(e.text.replace(/^\(\w+\) /, ''))));
+      // ACE drops the ones it won't take and sells the rest: wait for every one sent to leave, or a word from the server.
+      for (let w = 0; w < 40 && [...sent].some((g) => !gone(g)) && !refusal(); w++) await sleep(200);
+      await sleep(400);
+      const said = this.replyLines(since);
+      const gained = (this.host.self()?.pyreals ?? 0) - purse;
+      for (const x of whole) {
+        const name = names.get(x.guid) ?? `#${x.guid.toString(16)}`;
+        if (!sent.has(x.guid)) { lines.set(x.index, `${label(items[x.index])}: the vendor won't take ${name}`); continue; }
+        if (gone(x.guid)) { sold++; lines.set(x.index, `${label(items[x.index])}: sold ${name}`); continue; }
+        if (said.some((l) => /\bis unsellable\b/i.test(l) && l.includes(name))) this.unsellableSeen.add(x.guid >>> 0);
+        lines.set(x.index, `${label(items[x.index])}: ${name} was not sold`);
+      }
+      const batch = sold;
+      const rest: string[] = [];
+      for (const x of part) {
+        const r = await this.sell(x.guid, amount);
+        if (r.ok) sold++;
+        rest.push(`${label(items[x.index])}: ${r.message.replace(/\n/g, '\n    ')}`);
+      }
+      const how = batch ? ` (${batch} in one sale${gained > 0 ? ` for ${gained} pyreals` : ''}${part.length ? `, then ${part.length} part of a stack on ${part.length === 1 ? 'its' : 'their'} own` : ''})` : '';
+      const body = [...[...lines.entries()].sort((a, b) => a[0] - b[0]).map(([, l]) => l), ...rest, ...said];
+      return { ok: sold > 0, message: [`${head}sold ${sold} of ${items.length}${how}:`, ...body.map((l) => `  ${l}`)].join('\n') };
+    }
+    // One at a time (one stack, a host without the list sale): the window is open now, so no walk between them.
+    for (const x of resolved) {
+      const r = await this.sell(x.guid, amount);
+      if (r.ok) sold++;
+      lines.set(x.index, `${label(items[x.index])}: ${r.message.replace(/\n/g, '\n    ')}`);
+    }
+    const body = [...lines.entries()].sort((a, b) => a[0] - b[0]).map(([, l]) => `  ${l}`);
+    return { ok: sold > 0, message: [`${head}sold ${sold} of ${items.length}:`, ...body].join('\n') };
+  }
+
   /**
    * The open vendor's list, or (filter=) only some of it: text in the name ("stamina"), or a kind: service (a spell
    * the vendor casts on you), scroll, potion (draughts, elixirs, tinctures), kit, note (trade notes). "vendor
@@ -8078,6 +8230,15 @@ export class AgentApi {
 
   // ── motor tasks (one at a time) ──
 
+  /** The running task as the observation names it: its label, and where it stands when it says (Task.progress). */
+  private taskLine(): string | null {
+    const t = this.task;
+    if (!t) return null;
+    let p: string | null = null;
+    try { p = t.progress?.() ?? null; } catch { p = null; }
+    return p ? `${t.label} (${p})` : t.label;
+  }
+
   private cancelTask(why: string): void {
     const t = this.task;
     if (!t) return;
@@ -8086,7 +8247,7 @@ export class AgentApi {
     t.resolve(t.interrupted?.(why) ?? { ok: false, message: `${t.label}: interrupted (${why})` });
   }
 
-  private startTask(label: string, step: Task['step'], cancel: () => void, extra: Pick<Task, 'interrupted' | 'kind' | 'quiet'> = {}): Promise<AgentResult> {
+  private startTask(label: string, step: Task['step'], cancel: () => void, extra: Pick<Task, 'interrupted' | 'kind' | 'quiet' | 'progress'> = {}): Promise<AgentResult> {
     // The task this start replaces answers "interrupted (replaced by …)" as part of this start: not superseded by it.
     this.taskStarting = true;
     try { this.cancelTask(`replaced by ${label}`); } finally { this.taskStarting = false; }
@@ -8454,6 +8615,11 @@ export class AgentApi {
     // A cell target whose landblock wasn't loaded at the start: checked each tick (cell resolved, or its landblock reached).
     let cellWait: ((me: NonNullable<ReturnType<AgentApi['me']>>, d: number) => AgentResult | null) | null = null;
     const coords = typeof target === 'string' ? parseMapCoords(target) : null;
+    // Half a coordinate pair ("42.6N", "42.6N 33.6") is no name and no place: refused, never searched for as a name or
+    // guessed at (mapCoordsText isPartialMapCoordsText).
+    if (!coords && typeof target === 'string' && isPartialMapCoordsText(target)) {
+      return Promise.resolve({ ok: false, message: `"${target}" is not whole map coordinates: give both halves, north/south then east/west ("42.6N, 33.6E", or "42.6N 33.6E")` });
+    }
     if (coords && (coords.x < 0 || coords.y < 0 || coords.x >= 256 * LANDBLOCK_SIZE || coords.y >= 256 * LANDBLOCK_SIZE)) {
       // Arcanist set off for "197.4S, 59.9E", 2026-10-10.
       return Promise.resolve({ ok: false, message: `${target} is off the map: Dereth runs from about 101.9S to 102.9N and 101.9W to 102.9E` });
@@ -8739,7 +8905,7 @@ export class AgentApi {
     // no nearer, is going round in circles.
     const trail: TrailPoint[] = [];
     // The fellow waited for (stay_with): where they were when the wait began and when they last moved.
-    let waitFellow: { x: number; y: number; toGoal: number; movedAt: number; lastX: number; lastY: number; busy?: string } | null = null;
+    let waitFellow: { x: number; y: number; toGoal: number; lag: number; movedAt: number; lastX: number; lastY: number; busy?: string } | null = null;
     // Hit on the way and kept going (fleeing, or the way on led away from them), for the result.
     let underAttack: string | null = null;
     // Where the body stood when that first hit came, and the farthest it got from there: a result never says "you kept
@@ -9010,12 +9176,16 @@ export class AgentApi {
     let settleAt: { until: number; z: number } | null = null;
     // Mild chasers walked on past because your routine runs and takes them (routineCoversWalk), by guid: named in the answer.
     const mildWalkedOn = new Map<number, string>();
+    // Monsters not awake yet the walk went on past (sleepersWalkOn), by guid, and why: named in the answer.
+    const sleepersWalkedOn = new Map<number, string>();
+    let sleepersWhy = '';
     const featText = (): string => {
       const parts: string[] = [];
       if (feats.drops.length) parts.push(`dropped ${feats.drops.length === 1 ? 'off a ledge' : `off ${feats.drops.length} ledges`} (${feats.drops.map((h) => `${h.toFixed(1)} m`).join(', ')})`);
       if (feats.falls.length) parts.push(`fell ${feats.falls.map((h) => `${h.toFixed(1)} m`).join(', ')} where no drop was planned (slid off an edge)`);
       if (feats.jumps) parts.push(`jumped ${feats.jumps === 1 ? 'once' : `${feats.jumps} times`} (a gap or a platform)`);
       if (shrugged.n) parts.push(`walked on through ${shrugged.n === 1 ? 'a hit' : `${shrugged.n} hits`} for ${shrugged.damage} damage in all (${[...shrugged.from].join(', ')}: no harm, or a nick)`);
+      if (sleepersWalkedOn.size) parts.push(`walked on past ${sleepersWalkedOn.size === 1 ? 'a monster' : `${sleepersWalkedOn.size} monsters`} not awake yet (${[...sleepersWalkedOn.values()].slice(0, 4).join(', ')}${sleepersWalkedOn.size > 4 ? ', …' : ''}: ${sleepersWhy})`);
       if (mildWalkedOn.size) parts.push(`walked on past ${mildWalkedOn.size === 1 ? 'a mild chaser' : `${mildWalkedOn.size} mild chasers`} your routine takes (${[...mildWalkedOn.values()].slice(0, 4).join(', ')}${mildWalkedOn.size > 4 ? ', …' : ''}: no pack, no hurting spells, no heavy hits)`);
       return parts.length ? `; on the way you ${parts.join(' and ')}` : '';
     };
@@ -9177,7 +9347,16 @@ export class AgentApi {
     // Never a jump or drop into (or over) a portal's disk the walk wasn't sent into: a flight can't be steered out of one.
     // Take-offs a leap came down on itself from in this walk: the searches take off from another spot (JumpSearch.skipFrom).
     const stayedFrom: NavPoint[] = [];
-    const jumpSearch = (): JumpSearch | null => { const js = this.jumpSearch(); return js ? { ...js, avoid: portals, skipFrom: () => stayedFrom } : null; };
+    // The fine re-search of a tight nook (FINE_SEARCH_*), and the spots it was laid from (once each).
+    let fineSearch: PathSearch | null = null;
+    const fineFrom = new Set<string>();
+    // Nor through an NPC's body: a flight meets it as a wall. The Holtburg scriveners' upstairs walk planned a 0.6 m hop
+    // through the Apprentice Scrivener of Creature Magic from the nook beside him, landed back on its take-off, and went
+    // round that loop until it gave up, three walks running (Arcanist, 2026-10-18 10:05:40–10:07:25Z). The bodies' own
+    // contact (theirs and yours), not the walk's wider berth: a hop only has to clear them.
+    const npcBodies = (): AvoidDisk[] => npcDisks().map((d) => ({ ...d, r: Math.max(0.1, d.r - AgentApi.NPC_CLEAR_M + AgentApi.NPC_BODY_M) }));
+    const jumpAvoid = (): ReadonlyArray<AvoidDisk> => { const n = npcBodies(); return n.length ? [...portals(), ...n] : portals(); };
+    const jumpSearch = (): JumpSearch | null => { const js = this.jumpSearch(); return js ? { ...js, avoid: jumpAvoid, skipFrom: () => stayedFrom } : null; };
     const wideOpts = { spacing: 1, margin: 35, maxNodes: 6000 };
     // The far search (outdoors, once per leg): a coarse grid over a much bigger area, for a wall whose way through lies
     // outside the wide box. Its own wall clock: it is the one search that may stand longer.
@@ -9255,6 +9434,24 @@ export class AgentApi {
         const k = (far - (within - AgentApi.GOAL_REACH_SLACK_M)) / far;
         const edge = { ...aim, x: from.x + (aim.x - from.x) * k, y: from.y + (aim.y - from.y) * k };
         if (straightWalk(probe, from, edge)) { this.trace(`walk leg straight ${far.toFixed(1)} m to (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)}) (to its reach, ${within.toFixed(1)} m from its middle), ${route.length} doorway(s) ahead`); return; }
+      }
+      // The goal's reach straight ahead while the next doorway is not: the doorway's point lies inside the goal's own body
+      // or behind its counter. The Tufa Archmage stands 1 m past the doorway into his cell (0x7C73011B), so every search
+      // for that doorway found none ("something stands in it") and a use stood 45 s at 6.7 m and gave up, then a walk_to
+      // took 2 min, while the straight line stops 1.6 m from him, inside his UseRadius (Bulwark, 2026-10-18 12:08:35Z).
+      // Straight to the goal's reach, the route dropped.
+      if (aim === route[0] && aim.drop === undefined && !doorDetour && within > 1) {
+        const gl = goal();
+        const fg = gl ? Math.hypot(gl.x - from.x, gl.y - from.y) : Infinity;
+        if (gl && fg > within && fg <= AgentApi.GOAL_PAST_DOORWAY_M && !(gl.z !== undefined && Math.abs(gl.z - from.z) >= AgentApi.FLOOR_APART_M)) {
+          const k = (fg - (within - AgentApi.GOAL_REACH_SLACK_M)) / fg;
+          const edge = { x: from.x + (gl.x - from.x) * k, y: from.y + (gl.y - from.y) * k };
+          if (straightWalk(probe, from, edge)) {
+            this.trace(`walk leg straight ${fg.toFixed(1)} m to the goal's reach (${within.toFixed(1)} m from its middle), leaving out the ${route.length} doorway(s) the route went by`);
+            route = [];
+            return;
+          }
+        }
       }
       // Back at a leg whose every search already found no way (after a door detour or a replan): not again.
       if (!doorDetour && exhausted(aim) && goWide(from, `every search toward (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)}) already found no way`)) return;
@@ -9793,7 +9990,12 @@ export class AgentApi {
       if (packOn && !underAttack && !jumping && (me.s.cell & 0xffff) >= 0x100 && now - packCheckAt >= AgentApi.PACK_CHECK_MS && !rescue()) {
         packCheckAt = now;
         const pack = packAt({ x: me.g.x, y: me.g.y, z: me.s.z });
-        if (pack.length) {
+        const onPast = pack.length ? this.sleepersWalkOn(pack) : null;
+        if (pack.length && onPast) {
+          const fresh = pack.filter(({ o }) => !sleepersWalkedOn.has(o.guid));
+          for (const { o } of fresh) sleepersWalkedOn.set(o.guid, `${o.name}${o.level ? ` L${o.level}` : ''}`);
+          if (fresh.length) { sleepersWhy = onPast; this.trace(`walk: walking on past monsters not awake yet (${onPast}): ${this.packText(fresh)}`); }
+        } else if (pack.length) {
           release();
           this.trace(`walk: stopping short of a pack not awake yet: ${this.packText(pack)}`);
           return packStop(pack, d, 'going on brings you');
@@ -9881,7 +10083,7 @@ export class AgentApi {
             lastTick = now;
             if (!waitingSince) {
               waitingSince = now;
-              waitFellow = { x: at.x, y: at.y, toGoal: theirs, movedAt: now, lastX: at.x, lastY: at.y };
+              waitFellow = { x: at.x, y: at.y, toGoal: theirs, lag, movedAt: now, lastX: at.x, lastY: at.y };
               this.trace(`walk: waiting for ${f.name}, ${lag.toFixed(0)} m behind`);
             }
             const wf = waitFellow!;
@@ -9895,7 +10097,11 @@ export class AgentApi {
               wf.busy = busy; wf.movedAt = now;
             }
             // What a player would see while waiting: they aren't coming (standing still), or they're off somewhere else.
-            if (theirs - wf.toGoal > AgentApi.STAY_WITH_AWAY_M) {
+            // Only one getting farther from YOU too: a fellow coming to you (following you) takes whatever way leads to you,
+            // and indoors that can run away from your goal in a straight line. Arcanist, following Bulwark with her routine's
+            // Follow, came from 16 m to 7 m behind him by the doorways and his walk stopped "they are going elsewhere: now 7 m
+            // NW of you, 10 m farther from where you're going" (Aerbax Haven, 2026-10-18 09:16:13Z).
+            if (theirs - wf.toGoal > AgentApi.STAY_WITH_AWAY_M && lag > wf.lag) {
               return { ok: false, message: `stopped ${d.toFixed(1)} m short to wait for ${f.name}, but they are going elsewhere: now ${where}, ${(theirs - wf.toGoal).toFixed(0)} m farther from where you're going than when you stopped. Tell them (/f), or go with them${featText()}` };
             }
             // On past you toward where you're going, by a leash. On YOUR way (within a leash of your line to the goal) they
@@ -10432,6 +10638,20 @@ export class AgentApi {
             return null;
           }
         }
+        // A search that died within a few points of where you stand: a nook its grid (0.6–1 m points, each reached within
+        // 0.15 m) can't thread though the body slides through it, as out of the Holtburg scriveners' back corner past the
+        // Scrivener of War Magic (west along the wall behind him, up the 0.8 m step: a 0.5 m flood of the body's own moves
+        // gets out). Laid again once from here, finer, before the wider searches, doors and jumps.
+        if (r.status === 'none' && r.expanded <= AgentApi.FINE_SEARCH_MAX_EXPANDED && probe && sr !== fineSearch) {
+          const fk = `${here.x.toFixed(1)},${here.y.toFixed(1)},${here.z.toFixed(0)}`;
+          if (!fineFrom.has(fk)) {
+            fineFrom.add(fk);
+            const aimNow = legAim() ?? gl;
+            this.trace(`walk: the search found no way within ${r.expanded} point(s) of here; laying it again finer (${AgentApi.FINE_SEARCH_SPACING_M} m)`);
+            fineSearch = search = new PathSearch(probe, here, aimNow, { within: legWithin(aimNow as { drop?: number }), spacing: AgentApi.FINE_SEARCH_SPACING_M, tolerance: 0.1, margin: 8, maxNodes: 6000 });
+            return null;
+          }
+        }
         // Following, no doorway route to the leader and a rift between that the search that may jump found no way over:
         // say so now. The follow stood the rest of its time searching wider, then said "followed for 25 s" (2026-10-16).
         if (follow && targetGuid && r.status === 'none' && sr.hasJumps && !doorDetour) {
@@ -10942,7 +11162,16 @@ export class AgentApi {
     return this.startTask(label, (now) => {
       const r = walkStep(now);
       return r && !r.lostFellow && !r.rejoinFellow ? { ...after(r), afterApplied: true } : r;
-    }, release, { kind: 'walk', ...(opts.quietDone ? { quiet: true } : {}) }).then((r0) => {
+    }, release, {
+      kind: 'walk', ...(opts.quietDone ? { quiet: true } : {}),
+      // The straight distance and direction left to the goal (not along the route): what a player reads off the map.
+      progress: () => {
+        const me = this.me(), g = goal();
+        if (!me || !g) return null;
+        const d = Math.hypot(g.x - me.g.x, g.y - me.g.y);
+        return d < 1 ? null : `${d.toFixed(0)} m ${compassPoint(bearing(me.g, g))} to go`;
+      },
+    }).then((r0) => {
       const { afterApplied, ...r } = r0 as AgentResult & { afterApplied?: boolean };
       // stay_with: the fellow stood still off your way (another floor, another branch): back to them first, then on to the
       // goal from beside them (the walk planned again from there), and the answer says so.
@@ -11032,6 +11261,9 @@ export class AgentApi {
   static readonly NPC_BODY_M = 0.48;
   /** Added to an NPC's body radius for yours (a human body's 0.48 m spheres, less a little for the slide along it). */
   static readonly NPC_CLEAR_M = 0.45;
+  /** A search that ends "none" within this many points is laid again from the same spot at FINE_SEARCH_SPACING_M. */
+  static readonly FINE_SEARCH_MAX_EXPANDED = 12;
+  static readonly FINE_SEARCH_SPACING_M = 0.3;
   /**
    * The GDLE family's (the AC1999 server, GDL-Classic, GDLE end-of-retail worlds): MonsterAI.cpp DEFAULT_AWARENESS_RANGE
    * 40 m, indoors too (GetVisualRange clamps only a larger one to DEFAULT_INDOOR_AWARENESS_RANGE 25).
@@ -11185,6 +11417,21 @@ export class AgentApi {
   }
   /** A blow under this share of your health is a nick (nickOnlyKind). */
   static readonly NICK_KIND_FRAC = 0.05;
+
+  /**
+   * Why a walk goes on past monsters not awake yet that it would otherwise stop short of, or null to stop. Your routine
+   * running and holding for the walk (routineCoversWalk) fights what wakes, so only a crowd (ROUTINE_WALK_CROWD+ not well
+   * below you) stops it; with no routine, sleepers all well below your level (wellBelowYou) don't, and any at or near your
+   * level (or of unknown level) still do. Bulwark's (L48) short room-to-room walks with "Bulwark fights" running stopped
+   * 33 times in an hour for two or three Innocent / Pristine Dolls asleep 15–22 m off, each walk taking two or three calls
+   * (Aerbax Haven, 2026-10-18 08:20–09:21Z).
+   */
+  private sleepersWalkOn(pack: Array<{ o: AgentObject; d: number }>): string | null {
+    const weighty = pack.filter(({ o }) => !this.wellBelowYou(o));
+    const covered = this.routineCoversWalk();
+    if (covered) return weighty.length >= AgentApi.ROUTINE_WALK_CROWD ? null : `your routine "${covered}" takes them as they wake; ${AgentApi.ROUTINE_WALK_CROWD}+ would stop it`;
+    return weighty.length ? null : `all ${AgentApi.ROUTINE_PACK_BELOW_LEVELS}+ levels under yours`;
+  }
 
   /** The pack a walk stopped short of, as the answer names it. */
   private packText(pack: Array<{ o: AgentObject; d: number }>): string {
@@ -13289,6 +13536,9 @@ export class AgentApi {
       // A vendor named (or the one beside you, with no window open): its window first (vendorReady).
       buy: (i: TargetArg, n?: number | null, v?: TargetArg | null) => this.buyAt(i, n ?? null, v ?? null),
       sell: (i: TargetArg, n?: number | null, v?: TargetArg | null) => this.sellAt(i, n ?? null, v ?? null),
+      // ac_sell items= / ac_buy items=: the window opened once, then the whole list (sellListAt: one sale for the whole stacks).
+      sellList: (items: TargetArg[], n?: number | null, v?: TargetArg | null) => this.sellListAt(items, n ?? null, v ?? null),
+      vendorReady: async (v?: TargetArg | null) => { const r = await this.vendorReady(v ?? null); return r === null ? { ok: true, message: '' } : 'ok' in r ? r : { ok: true, message: r.opened }; },
       trade: (a?: string | null, i?: TargetArg) => this.trade(a ?? 'view', i ?? null),
       trace: (s?: number | null) => this.traceView(s ?? 30),
       routineStart: (p: RoutineProfile) => this.routine.start(p),
@@ -13327,7 +13577,7 @@ export class AgentApi {
 }
 
 /** The agent surface's commands that move, fight, use or trade: a running routine holds while one runs (handOver). */
-const HAND_COMMANDS = ['use', 'useOn', 'walkTo', 'follow', 'turn', 'move', 'jump', 'stopMoving', 'combatMode', 'attack', 'cast', 'pickUp', 'loot', 'drop', 'give', 'equip', 'unequip', 'vendorAt', 'buy', 'sell', 'trade'] as const;
+const HAND_COMMANDS = ['use', 'useOn', 'walkTo', 'follow', 'turn', 'move', 'jump', 'stopMoving', 'combatMode', 'attack', 'cast', 'pickUp', 'loot', 'drop', 'give', 'equip', 'unequip', 'vendorAt', 'vendorReady', 'buy', 'sell', 'sellList', 'trade'] as const;
 
 /**
  * `?agent` turns the agent API on, on every build including playwebac.com

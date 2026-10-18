@@ -80,7 +80,7 @@ describe('2. walk_to by a name not in view, or a role word that fits several', (
     host.add({ guid: 0x7a9b4002, name: 'Fertroth the Healer', itemType: 0x10, objectDescFlags: 0x200, x: 80, y: 60 });
     const p = api.walkTo('Healer');
     run(api, host, 400);
-    expect(api.observe().me?.task).toBe('walking to Thelnoth Cort the Healer (2 in view are named like "Healer"; also Fertroth the Healer #7a9b4002 40 m N: name one or its #id for another)');
+    expect(api.observe().me?.task).toBe('walking to Thelnoth Cort the Healer (2 in view are named like "Healer"; also Fertroth the Healer #7a9b4002 40 m N: name one or its #id for another) (9 m N to go)');
     run(api, host, 8000);
     const r = await p;
     expect(r.message).toMatch(/arrived/);
@@ -169,9 +169,14 @@ describe('4. sell items= and vendor filter=', () => {
     const t = tool('ac_sell');
     expect(unknownArgs(t, { target: 'Shopkeeper Renald the Elder', items: 'Studded Leather Basinet' })).toBeNull();
     expect(missingRequired(t, { items: 'A, B' })).toBeNull();
-    const c = caller((_m, args) => (args[0] === 'Cap' ? { ok: false, message: 'Cap was not sold\nThe Cap cannot be sold here.' } : { ok: true, message: `sold ${String(args[0])} for 5368 pyreals` }));
+    // A page from before sellList (2026-10-18 12:24Z: a list is one page call now): the window once, then sell by sell.
+    const c = caller((m, args) => {
+      if (m === 'sellList') throw new Error('unknown agent method: sellList');
+      if (m === 'vendorReady') return { ok: true, message: '' };
+      return args[0] === 'Cap' ? { ok: false, message: 'Cap was not sold\nThe Cap cannot be sold here.' } : { ok: true, message: `sold ${String(args[0])} for 5368 pyreals` };
+    });
     const out = await TOOL_CALLER.run(c, () => t.run({ items: 'Studded Leather Basinet, Cap' }));
-    expect(c.calls).toEqual([{ method: 'sell', args: ['Studded Leather Basinet', null] }, { method: 'sell', args: ['Cap', null] }]);
+    expect(c.calls).toEqual([{ method: 'sellList', args: [['Studded Leather Basinet', 'Cap'], null, null] }, { method: 'vendorReady', args: [null] }, { method: 'sell', args: ['Studded Leather Basinet', null] }, { method: 'sell', args: ['Cap', null] }]);
     expect(out.text).toBe('sold 1 of 2:\n  Studded Leather Basinet: sold Studded Leather Basinet for 5368 pyreals\n  Cap: Cap was not sold\n    The Cap cannot be sold here.');
     expect(out.isError).toBeFalsy();
   });

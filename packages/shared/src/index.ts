@@ -233,6 +233,7 @@ export {
 export { SELF_EMOTE_SPEAKER, substituteEmotePronoun, composeHeardEmoteLine, composeSelfEmoteLine, isOwnSoulEmoteEcho } from './emote-lines.js';
 export * from './routines/index.js';
 export * from './goarrow/index.js';
+export * from './mapCoordsText.js';
 export * from './magtools/index.js';
 export * from './splitpea/index.js';
 export * from './vcs5/vcs5.js';

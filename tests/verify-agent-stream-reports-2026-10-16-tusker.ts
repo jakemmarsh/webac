@@ -370,7 +370,8 @@ describe('7. item= and target= alike for the one-object tools', () => {
   });
 
   it('give and use_on name two things (item= what, target= whom): no aliases there', () => {
-    expect(argAliases(TOOL_BY_NAME.get('ac_give')!)).toEqual({});
+    // give's only aliases are amount='s words (count=, quantity=, as buy and sell take), never item= / target= (2026-10-18).
+    expect(argAliases(TOOL_BY_NAME.get('ac_give')!)).toEqual({ count: 'amount', quantity: 'amount' });
     expect(argAliases(TOOL_BY_NAME.get('ac_use_on')!)).toEqual({});
     expect(missingRequired(TOOL_BY_NAME.get('ac_give')!, { target: 'Claude Arcanist' })).toBe('ac_give: missing item (usage: give item=… target=… [amount=…])');
   });

@@ -373,6 +373,7 @@ import { parsePlayerDescription } from './network/PlayerDescriptionParser.js';
 import { buildContractRows, applyContractTracker, applyContractTrackerTable, type TimedContractEntry } from './network/contractRows.js';
 import { harDumpText } from './chat/HouseAccessText.js';
 import { routeObjectSubject, buildInventoryEntry, WorldObjectRecords, PendingContainIds } from './network/objectSubjectRouting.js';
+import { packSlotCounts } from './agent/packCounts.js';
 import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, quickslotCommand, CREATE_SHORTCUT_ACTION, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
@@ -4648,6 +4649,12 @@ async function main() {
   /** ACCWeenieObject::IsContainer @ 004a4530 for a held item. */
   const heldIsContainer = (it: { itemType?: number; itemsCapacity?: number; objectDescFlags?: number }): boolean =>
     ((it.objectDescFlags ?? 0) & 0x800000) !== 0 || (it.itemsCapacity ?? 0) !== 0 || ((it.itemType ?? 0) & ItemType.Container) !== 0;
+  /**
+   * The main pack's own items: the player's container (0 or the player id), worn and wielded items left out. They stay in
+   * the inventory list beside the pack items and are in no pack (ACE EquippedObjects; agent/packCounts.ts).
+   */
+  const inMainPack = (i: { id: number; containerId: number }): boolean =>
+    (i.containerId === aceCharGuid || i.containerId === 0) && !playerState.equipment.getAll().some((e) => e.id >>> 0 === i.id >>> 0);
   /** The client's view of every object the placement may touch. */
   function placementWorld(): PlacementWorld {
     const playerId = aceCharGuid ?? 0;
@@ -6627,7 +6634,7 @@ async function main() {
         if (!listContainerId) return false;
         const isPack = (it: { itemType?: number; itemsCapacity?: number; objectDescFlags?: number }): boolean => heldIsContainer(it);
         const entries = (listContainerId === aceCharGuid
-          ? playerState.inventory.getAll().filter((i) => i.containerId === aceCharGuid || i.containerId === 0)
+          ? playerState.inventory.getAll().filter(inMainPack)
           : playerState.inventory.getByContainer(listContainerId)).map((it) => ({ id: it.id, isPack: isPack(it) }));
         itemListEntryCount = entries.filter((e) => !e.isPack).length;
         drop = {
@@ -16659,13 +16666,11 @@ async function main() {
           };
         },
         // AGENT.vtank-window — Autostack / Autocram: packs, items by pack slot, and moves through the drop path.
-        packs: () => sidePackGuids.flatMap((g, slot) => {
-          const guid = slot === 0 ? (aceCharGuid ?? 0) : g;
-          if (!guid) return [];
-          const isPack = (i: { itemType?: number; itemsCapacity?: number; objectDescFlags?: number }) => heldIsContainer(i);
-          const inIt = slot === 0 ? playerState.inventory.getAll().filter((i) => (i.containerId === aceCharGuid || i.containerId === 0) && !isPack(i)) : playerState.inventory.getByContainer(guid);
-          const capacity = slot === 0 ? playerState.itemsCapacity : (serverObjectManager?.getObject(guid)?.itemsCapacity ?? 24);
-          return [{ slot, guid, capacity, count: inIt.length }];
+        // Worn items are in no pack (packSlotCounts): they stay in the inventory list beside the pack items.
+        packs: () => packSlotCounts(playerState.inventory.getAll(), {
+          playerGuid: aceCharGuid ?? 0, sidePackGuids, worn: new Set(playerState.equipment.getAll().map((e) => e.id >>> 0)),
+          isPack: (i) => heldIsContainer(i),
+          capacityOf: (slot, guid) => (slot === 0 ? playerState.itemsCapacity : (serverObjectManager?.getObject(guid)?.itemsCapacity ?? 24)),
         }),
         itemSlots: () => {
           const worn = new Set(playerState.equipment.getAll().map((e) => e.id >>> 0));
@@ -16680,7 +16685,7 @@ async function main() {
           const it = playerState.inventory.getItem(guid);
           if (!it || !aceCharGuid || !placementReady()) return false;
           const asMove = (i: { id: number; weenieClassId: number; stackSize: number; maxStackSize: number }) => ({ id: i.id >>> 0, wcid: i.weenieClassId, stack: i.stackSize || 1, maxStack: i.maxStackSize || 1 });
-          const inside = playerState.inventory.getAll().filter((i) => i.containerId === 0 || i.containerId === aceCharGuid);
+          const inside = playerState.inventory.getAll().filter(inMainPack);
           return runPlacement(guid, metaMovePlan(asMove(it), aceCharGuid, 0, amount, false, inside.map(asMove)), 'split');
         },
         placeItem: (guid, to) => {
@@ -16869,6 +16874,7 @@ async function main() {
         // The vendor bar's Buy / Sell buttons send their whole list in one message (onBuyList / onSellList).
         vendorBuy: (guid, amount) => { if (!gameUI.isVendorVisible) return false; gameUI['vendorCallbacks'].onBuyList?.([{ guid, amount }]); return true; },
         vendorSell: (guid, amount) => { const it = playerState.inventory.getItem(guid); return !!it && gameUI.agentVendorSell(it, amount); },
+        vendorSellMany: (guids) => gameUI.agentVendorSellMany(guids.flatMap((g) => { const it = playerState.inventory.getItem(g); return it ? [it] : []; })),
         trade: () => {
           const t = gameUI.getTradeData();
           if (!t.partnerGuid) return null;
@@ -17029,7 +17035,7 @@ async function main() {
           const it = playerState.inventory.getItem(id) ?? playerState.equipment.getAll().find((e) => e.id >>> 0 === id);
           if (!it || !placementReady()) return false;
           const asMove = (i: { id: number; weenieClassId: number; stackSize: number; maxStackSize: number }) => ({ id: i.id >>> 0, wcid: i.weenieClassId, stack: i.stackSize || 1, maxStack: i.maxStackSize || 1 });
-          const inside = containerId === aceCharGuid ? playerState.inventory.getAll().filter((i) => i.containerId === 0 || i.containerId === aceCharGuid) : playerState.inventory.getByContainer(containerId);
+          const inside = containerId === aceCharGuid ? playerState.inventory.getAll().filter(inMainPack) : playerState.inventory.getByContainer(containerId);
           return runPlacement(id, metaMovePlan(asMove(it), containerId, slot, amount, join, inside.map(asMove)), 'meta move');
         },
         cooldownRemaining: (cid) => gameUI.agentCooldownRemaining(cid),
@@ -17118,7 +17124,7 @@ async function main() {
         vars: (scope) => metaHost.listVars?.(scope) ?? [],
         setVar: (name, value) => metaHost.setVar('var', name, value),
         freeSlots: () => {
-          const inMain = playerState.inventory.getAll().filter((i) => (i.containerId === 0 || i.containerId === aceCharGuid) && !heldIsContainer(i)).length;
+          const inMain = playerState.inventory.getAll().filter((i) => inMainPack(i) && !heldIsContainer(i)).length;
           return Math.max(0, playerState.itemsCapacity - inMain);
         },
         lootSets: () => pluginLootSets(agentApi.routine.loadedProfile, () => gameUI.automationStandbyProfile()),

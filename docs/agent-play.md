@@ -229,7 +229,8 @@ salvage (it can still be a quest or crafting piece); `filter=sell` is what a ven
 with the total. An argument a tool doesn't take is refused on the CLI and over MCP naming the one it most likely
 meant ("ac_raise: unknown argument "target": raise takes stat=, not target="); some take a second name for the
 same argument (raise skill= is stat=, walk_to distance= is within=, the one-object tools item= / target=). `ac_sell
-items="A, B"` sells several one after another, and `ac_vendor filter=` narrows a vendor's list as inventory's does (text
+items="A, B"` opens the vendor's window once (one walk) and sells every whole stack in one sale (one payout:
+`sellListAt`, GameUI `agentVendorSellMany`; `buy items=` opens it once too, then buys one by one), and `ac_vendor filter=` narrows a vendor's list as inventory's does (text
 in the name, or service / scroll / potion / kit / note). A name that finds nothing out on the landscape says why it
 often does: an NPC inside a building is sent only once you are at it; a role word that fits several in view ("walk_to
 Healer") takes the nearest and names the others. A cast the server answers TargetNotAcquired says when that is your
@@ -747,6 +748,25 @@ heal and hand control back on danger. The brief only listed a routine beside tho
     (the use walks there), and with no window open the one vendor within 12 m opens by itself (`vendorReady`); `buy`
     takes items= (a name listed n times is n of it) and count=. A walk's doorway left out as "something stands in it"
     comes back into the route once the body stands at it (the Pawn Shopkeep walk had stalled 0.9 m from one).
+    A goal within 12 m whose reach the straight line gets to is walked to straight, the doorway route dropped, when the
+    next doorway is one no walk gets into (`GOAL_PAST_DOORWAY_M`): the Tufa Archmage stands 1 m past the doorway into
+    his cell (0x7C73011B), and a use stood 45 s at 6.7 m searching for it (2026-10-18).
+    Observe's pack slots count what is in each pack: worn items are in none (`agent/packCounts.ts`; "main pack 108/102
+    FULL" was 89 pack items and 19 worn). A routine held by your own walk_to or follow still recasts a buff under
+    RebuffTimeRemainingSeconds between your steps (`RoutineEngine.buffWhileYouWalk`); an attack, cast or use of yours
+    still holds it outright.
+    items= splits between names only, never inside parentheses or quotes nor at a thousands comma
+    (`items="Trade Note (1,000), Mana Stone"`: `tools.ts splitNameList`), and amount= (count=, quantity=) beside
+    items= counts its one name (`buy items="Stamina Elixir" amount=6` is six); with several names it is refused.
+    give takes count= / quantity= for amount= too (2026-10-18).
+  - *2026-10-18 10:21Z segment.* A walk's task line in observe ends "(420 m N to go)", the straight distance and way
+    to the goal, so a doorway route out through the next room (the pawn shop leaves by the gaming hall) isn't read
+    as a wrong turn. A walk's jump search keeps clear of NPC bodies (their 0.48 m spheres and yours), as it did of
+    portals: a hop planned through the Holtburg scriveners' Apprentice of Creature Magic landed back on its take-off
+    until the walk "went round in circles". A use's walk that runs out of time says where it set off from and the
+    floor ("stopped 116.1 m away; … (straight-line; it was 300 m off when the walk set off)"). The daemon restores the
+    agent memory (seen kinds such as the Pumpkin Buffer, places) into its own game origin whatever port Vite took, and
+    a save merges with the file rather than replacing it (`pageStorage.ts`).
   - *Multi-slot armor.* `equip` of a piece worn over two or more others takes each off first, one at a time (the
     double-click frees only one, ACE then refuses); a refusal names what came off on the way. The paperdoll was right.
   - *Retail, said:* a mana stone on one item gives it only what it lacks and the rest goes with the stone (ACE
@@ -820,6 +840,30 @@ heal and hand control back on danger. The brief only listed a routine beside tho
   - *Stuck chasers as a pack:* the hold rule above (it stays held as you walk).
   - *Buffs line.* A buff that landed on you (new, or refreshed) in the last 2 min is listed first, newest first, "just
     landed"; past 16 the rest are named after "+N more" (`formatBuffs`).
+- **Sixth live hour (2026-10-18 08:20–09:21Z, Aerbax Haven), fixed 2026-10-18**
+  (`tests/verify-stream-reports-2026-10-18-0920.ts`):
+  - *`use item=… target=…`.* ac_use's item= is an alias of target=, and with both the alias rule kept target= and dropped
+    the item: Bulwark's `use item="Excellent Healing Kit" target="Claude Bulwark"` double-clicked himself ("can't use
+    #500000a4 (not known to the client)"). Not a2366cf6's kit rule; that path was never reached. ac_use with item= and
+    target= naming different things is now ac_use_on (`useArgsAsUseOn`), and a use of yourself says it is you and how
+    to use an item on you.
+  - *Item buffs under a stronger one.* The macro reads the server's lines about your gear itself (`VtMacro.noteGearLines`):
+    "You cast S on <worn item>" (a hand cast too) times S there; "…, but it is surpassed by X" times X there from that
+    line, as at most its full duration (its real cast time is unknown), unless a cast of it seen landing times it
+    already; "The spell X on <item> has expired." ends X's record (`ItemBuffLedger.dropSpell`), and what was kept under it
+    goes on with its own. Impenetrability V was cast over her hand-cast VI at 08:04, 08:22 and 08:49Z.
+  - *"Flame Bane V twice."* The first fizzled (09:17:55Z, WeenieError 0x402); a macro step's log line now says when its
+    cast did not take (`RoutineEngine.missedCastNote`: "…: did not take (Your spell fizzled)").
+  - *stay_with "going elsewhere".* A fellow waited for counts as going elsewhere only when they are both farther from
+    your goal by 10 m AND farther from you than when the wait began: one following you comes by whatever way leads to
+    you (Arcanist, 16 m → 7 m behind Bulwark round by the doorways, read "going elsewhere").
+  - *Sleepers by the way* (`sleepersWalkOn`). Indoors, a walk your routine covers (running and held for it) goes on past
+    monsters asleep and names them, unless 6+ not well below you would wake at once; with no routine, sleepers all 10+
+    levels under you are walked past, any at or near your level (or of unknown level) still stop it. A jump's or drop's
+    landing among sleepers still stops it (one way).
+  - *"Worn Goggles".* A name with a word saying which of your items (worn / wielded / equipped, spare / pack / carried,
+    my / your) that matched nothing in full finds it among those (`qualifiedItem`), for use, use_on, give and the rest.
+  - The kill note's hand-attack invitation while a routine fights for you was reworded in 161577067.
 
 ### Dead air (measured 2026-10-14)
 
@@ -1566,7 +1610,9 @@ provide.**
 
 ## Walking: `ac_walk_to` and `ac_map`
 
-Targets: an object, a remembered place, map coordinates, an offset ("10m NNW"), or a room by its cell id
+Targets: an object, a remembered place, map coordinates (with or without the comma, any spacing: "42.6N, 33.6E",
+"42.6N 33.6E", "42.6N33.6E"; one reader for walk_to, the routine documents and the stream tools, `@ac/shared
+mapCoordsText`; half a pair such as "42.6N" is refused, never searched as a name), an offset ("10m NNW"), or a room by its cell id
 (`target=0x01850148`: the floor under the cell's middle; an id the landblock hasn't says which ids it has). From
 the landscape, a building's room or an outdoor cell (0xXXYY0001–0040) of any landblock is a target too: the walk crosses
 the landscape and takes the building's doorways once in its landblock; a cell of a landblock not loaded yet is walked

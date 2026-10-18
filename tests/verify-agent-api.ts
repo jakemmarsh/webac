@@ -234,7 +234,7 @@ describe('AgentApi', () => {
   it('walkTo steers toward the goal and arrives', async () => {
     host.add({ guid: 0x80000030, name: 'Life Stone', objectDescFlags: 0x4000, x: 110, y: 50 });
     const p = api.walkTo('Life Stone', { within: 2 });
-    expect(api.observe().me?.task).toBe('walking to Life Stone');
+    expect(api.observe().me?.task).toBe('walking to Life Stone (42 m NE to go)');
     run(api, host, 20_000);
     const r = await p;
     expect(r.ok).toBe(true);

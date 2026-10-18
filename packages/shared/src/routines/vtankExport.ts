@@ -23,6 +23,7 @@ import {
 } from './vtank.js';
 import { vtToVTank } from './vtankOptions.js';
 import { encodeWindows1252 } from '../encoding/Windows1252.js';
+import { parseMapCoordsText } from '../mapCoordsText.js';
 
 /** One exported file: its name as VirindiTank names them (<name>.met / .nav / .utl), its text, and what it couldn't hold. */
 export interface VTankExport { fileName: string; text: string; problems: string[] }
@@ -83,9 +84,7 @@ const RECALL_IDS: Record<string, number> = Object.fromEntries(Object.entries(REC
 
 /** Our "42.100N, 33.600E" as VTank's map units (east / north positive). */
 export function navUnits(coords: string): { ew: number; ns: number } | null {
-  const m = /(\d+(?:\.\d+)?)\s*([NS])\s*[, ]\s*(\d+(?:\.\d+)?)\s*([EW])/i.exec(coords);
-  if (!m) return null;
-  return { ns: Number(m[1]) * (/s/i.test(m[2]) ? -1 : 1), ew: Number(m[3]) * (/w/i.test(m[4]) ? -1 : 1) };
+  return parseMapCoordsText(coords);
 }
 
 /** A route step as the chat line a VirindiTank Chat point or meta Chat Command sends, or null when none says it. */

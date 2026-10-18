@@ -15,6 +15,7 @@ import { AGENT_ERAS, ERA_IDS } from './eras.ts';
 import { NOTE_KINDS, type Journal, type NoteKind, addNote, formatJournal, loadJournal, saveJournal } from './journal.ts';
 import { RoutineStore } from './routineStore.ts';
 import { encodeWindows1252 } from '../../packages/shared/src/encoding/Windows1252.ts';
+import { isMapCoordsText, isPartialMapCoordsText } from '../../packages/shared/src/mapCoordsText.ts';
 import { EXAMPLE_HUNT_PROFILE, ROUTINE_SCHEMA_VERSION, explainProfile, exportVTankFile, importVTankFiles, validateRoutineDoc, type RoutineDoc, type RoutineProfile } from '../../packages/shared/src/routines/index.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -752,7 +753,7 @@ export const TOOLS: AgentTool[] = [
   },
   act('ac_say', 'Type a line into chat exactly as a player would: plain text is said aloud; "/tell Name, msg", "/f msg", emotes like "*wave*" and the retail "/" commands work. A tell\'s name is everything before the first comma (retail): the answer says when the name part isn\'t the player it starts with ("/tell Claude Bulwark hi, there" goes to "Claude Bulwark hi"). "@" server commands are refused (agents play as players); @tell / @t work as /tell.', { text: { type: 'string', description: 'The chat line.' } }, ['text'], (a) => [String(a.text)]),
   act('ac_select', 'Select an object (it becomes your target).', { target: { type: 'string', description: 'Object id (#…) or a name to find nearby.' } }, ['target'], (a) => [guidOrName(a.target)]),
-  act('ac_use', 'Use an object the way double-clicking does: talk to an NPC, open a door/chest/corpse, enter a portal, use a lifestone, eat/drink an item. You walk to it automatically. A portal is walked to through any hits (asking for it is asking to get there); flee=true does the same for anything else (a door, a lifestone). A door marked "opened by a lever or switch, not by hand" can\'t be used: the answer names the levers, switches and plates in view by it; using one of those reports any door near you that swung open or shut. Using an open door shuts it.', {
+  act('ac_use', 'Use an object the way double-clicking does: talk to an NPC, open a door/chest/corpse, enter a portal, use a lifestone, eat/drink an item. item= with target= uses that item on the target (as ac_use_on). You walk to it automatically. A portal is walked to through any hits (asking for it is asking to get there); flee=true does the same for anything else (a door, a lifestone). A door marked "opened by a lever or switch, not by hand" can\'t be used: the answer names the levers, switches and plates in view by it; using one of those reports any door near you that swung open or shut. Using an open door shuts it.', {
     target: { type: 'string', description: 'Object id (#…) or a name to find nearby.' },
     flee: { type: 'boolean', description: 'Keep walking to it while monsters hit you, as walk_to flee=true does (always so for a portal). Default: being hit stops the walk.' },
   }, ['target'], (a) => [guidOrName(a.target), ...(a.flee === true || a.flee === 'true' ? [{ flee: true }] : [])], 120_000),
@@ -760,7 +761,7 @@ export const TOOLS: AgentTool[] = [
     item: { type: 'string', description: 'Item id or name in your inventory.' },
     target: { type: 'string', description: 'Target id or name ("self" for yourself).' },
   }, ['item', 'target'], (a) => [guidOrName(a.item), String(a.target) === 'self' ? 'self' : guidOrName(a.target)]),
-  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), a distance and direction from where you stand ("10m north", "25 m NE", "10m NNW", "10m 330°", "5m ahead", "3 m left"; map coordinates: 0.1 = 24 m), or a room of the dungeon or building you are in by its cell id (target=0x01850148: a room of your dungeon, or a room or outdoor cell of any landblock on the landscape, through its building\'s door; world-query and lore print cell ids in hex). A fellow out of your sight in a dungeon is walked to where they were last seen (it says so, and whether they are there now). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after. Being hit stops it unless the way on leads away from everything hitting you, you are going to a fellow with monsters on them, or flee=true (running away). A monster starting to come at you (running at you, turning to face you, closing in) stops it too, while it is still metres off, naming it, its level and distance (stop_on_aggro=false walks on); with your routine running, only a pack (3+ at once), a caster whose spells hurt you or a heavy hitter stops it, and it names the mild ones it walked past for the routine to take. Outdoors it keeps 10 m clear of monsters near the way (15 m of one well above your level) and says which it went round; when no way keeps clear it walks past them and says so (avoid_monsters=false walks straight). It names a fellow left far behind; stay_with=<fellow> keeps you together: you run as always, and stop to wait whenever they fall stay_within behind, until they are beside you (and it says when they stopped or went elsewhere). To keep up with someone, use ac_follow.', {
+  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), a distance and direction from where you stand ("10m north", "25 m NE", "10m NNW", "10m 330°", "5m ahead", "3 m left"; map coordinates: 0.1 = 24 m), or a room of the dungeon or building you are in by its cell id (target=0x01850148: a room of your dungeon, or a room or outdoor cell of any landblock on the landscape, through its building\'s door; world-query and lore print cell ids in hex). A fellow out of your sight in a dungeon is walked to where they were last seen (it says so, and whether they are there now). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after. Being hit stops it unless the way on leads away from everything hitting you, you are going to a fellow with monsters on them, or flee=true (running away). A monster starting to come at you (running at you, turning to face you, closing in) stops it too, while it is still metres off, naming it, its level and distance (stop_on_aggro=false walks on); with your routine running, only a pack (3+ at once), a caster whose spells hurt you or a heavy hitter stops it, and it names the mild ones it walked past for the routine to take. Indoors it stops short of 2+ monsters asleep that it would come near (they wake together), unless all are 10+ levels under you or your routine is running (then only 6+ asleep at once stop it); it names those it walked past. Outdoors it keeps 10 m clear of monsters near the way (15 m of one well above your level) and says which it went round; when no way keeps clear it walks past them and says so (avoid_monsters=false walks straight). It names a fellow left far behind; stay_with=<fellow> keeps you together: you run as always, and stop to wait whenever they fall stay_within behind, until they are beside you (and it says when they stopped or went elsewhere). To keep up with someone, use ac_follow.', {
     target: { type: 'string', description: 'Object id (#…), nearby object name (of several with that name, the one a walk reaches), map coordinates like "42.1N, 33.6E", an offset like "10m north" / "5m ahead" (compass N…NW, or ahead / back / left / right of your facing), or a cell id (0x039C0104: that room; a building\'s room or an outdoor cell of any landblock on the landscape too).' },
     within: { type: 'number', description: 'Stop this close, metres (default 2: beside it, on its floor). 5 or more is a range to stand at (a bolt\'s, a pull\'s): the straight distance, whatever floor it is on, and the answer says when the line to it is blocked.' },
     timeout_s: { type: 'number', description: 'Give up after this long (default: by distance, about 3 m/s + 30 s, 60 s to 10 min).' },
@@ -771,7 +772,7 @@ export const TOOLS: AgentTool[] = [
     stop_on_aggro: { type: 'boolean', description: 'Stop when a monster starts coming at you (default true; one already coming when you set off doesn\'t stop it). false walks on, through hits too, as flee does (it still stops at critical health, 40%). flee=true never stops for it.' },
     avoid_monsters: { type: 'boolean', description: 'Outdoors, route round monsters near the way, 10 m clear (15 m of one well above your level), as a player goes round a camp. Indoors, stop before coming within their wake range (18 m on ACE, 40 m on GDLE servers) of 2 or more monsters not yet awake, naming them. Default true; off with flee. false walks the straight way, and on into them.' },
     line: { type: 'boolean', description: 'For a caster or archer walking up to a target: arrive only with an open line of fire to it as well as within `within`. Walled off, it closes in 1.5 m at a time (round the wall) until the line opens, and at worst stops beside it saying the line is still shut. Without it, an arrival by a monster still says when the line is shut.' },
-  }, ['target'], (a) => [/[NS]\s*,?\s*[\d.]+\s*[EW]/i.test(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, ...(a.line === true || a.line === 'true' ? { line: true } : {}), ...(a.timeout_s !== undefined ? { timeoutMs: Number(a.timeout_s) * 1000 } : {}), ...(a.flee ? { flee: true } : {}), ...(a.stay_with ? { stayWith: String(a.stay_with) } : {}), ...(a.stay_within !== undefined ? { stayWithin: Number(a.stay_within) } : {}), ...(a.drop === true || a.drop === 'true' ? { drop: true } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}), ...(a.avoid_monsters === false || a.avoid_monsters === 'false' ? { avoidMonsters: false } : {}) }], 320_000),
+  }, ['target'], (a) => [isMapCoordsText(String(a.target)) || isPartialMapCoordsText(String(a.target)) ? String(a.target) : guidOrName(a.target), { within: a.within, ...(a.line === true || a.line === 'true' ? { line: true } : {}), ...(a.timeout_s !== undefined ? { timeoutMs: Number(a.timeout_s) * 1000 } : {}), ...(a.flee ? { flee: true } : {}), ...(a.stay_with ? { stayWith: String(a.stay_with) } : {}), ...(a.stay_within !== undefined ? { stayWithin: Number(a.stay_within) } : {}), ...(a.drop === true || a.drop === 'true' ? { drop: true } : {}), ...(a.stop_on_aggro === false || a.stop_on_aggro === 'false' ? { stopOnAggro: false } : {}), ...(a.avoid_monsters === false || a.avoid_monsters === 'false' ? { avoidMonsters: false } : {}) }], 320_000),
   act('ac_follow', 'Follow a player (your fellow): run to within `within` metres of them, stand while they stay near, and run again once they are 3 m past that (never a walk), re-aiming as they go, until they stop (they stand beside you 30 s: they arrived, or are busy there; at most 10 minutes, then it says "still following" and you follow again) or duration_s ends when you give one, you are hit (unless flee=true, or they have monsters on them: then the follow goes on through the hits to them; once you are beside them a hit ends it, flee or not), a monster starts coming at you (unless stop_on_aggro=false), they go out of sight, or you start something else (any action, or ac_stop_moving). One already out of your sight when asked (a dungeon shows you only the rooms in sight of yours) is first walked to where they were last seen, then followed if they are in sight from there. Like VirindiTank\'s Follow (retail had no follow command). Long follows answer "still in progress"; ac_wait types=task-done hears the end.', {
     target: { type: 'string', description: 'The player to follow: name or id.' },
     within: { type: 'number', description: 'How close to keep, metres (default 4).' },
@@ -818,12 +819,12 @@ export const TOOLS: AgentTool[] = [
   },
   {
     name: 'ac_buy',
-    description: 'Buy from a vendor: the open window, or vendor=<the vendor> (its window is opened first, walking there, as ac_vendor target= does; with no window open the one vendor within 12 m opens by itself). items= buys several, one after another, each answered on its own line ("Bracelet, High Mana Charge, High Mana Charge": a name listed twice is bought twice).',
+    description: 'Buy from a vendor: the open window, or vendor=<the vendor> (its window is opened first, walking there, as ac_vendor target= does; with no window open the one vendor within 12 m opens by itself). items= buys several: the window opened once (one walk), then one after another, each answered on its own line ("Bracelet, High Mana Charge, High Mana Charge": a name listed twice is bought twice).',
     props: {
       ...PROFILE_PROP,
       item: { type: 'string', description: 'Merchandise name or id (from ac_vendor).' },
-      items: { type: 'string', description: 'Several to buy: names or ids separated by commas, or a JSON list; each listed once is one (amount= is for item= alone), a name listed n times is n.' },
-      amount: { type: 'number', description: 'How many of item= (default 1).' },
+      items: { type: 'string', description: 'Several to buy: names or ids separated by commas (a comma inside a name\'s parentheses or quotes is part of it: "Trade Note (1,000), Mana Stone"), or a JSON list; each listed once is one, a name listed n times is n. With one name, amount= says how many.' },
+      amount: { type: 'number', description: 'How many of item= (default 1), or of the one name items= gives (items="Stamina Elixir" amount=6 is six). count= and quantity= are the same.' },
       vendor: { type: 'string', description: 'The vendor to buy from: name or id. Default: the window open, else the one vendor beside you.' },
       target: { type: 'string', description: 'The vendor (as vendor=) when item= or items= names the goods, else the item.' },
     },
@@ -842,28 +843,36 @@ export const TOOLS: AgentTool[] = [
       // A name listed n times is n of it, bought in one go (a vendor sells a stack at once).
       const counts = new Map<string, number>();
       for (const it of item === null ? list : [item, ...list]) counts.set(it, (counts.get(it) ?? 0) + 1);
-      const out: string[] = [];
+      const amount = listAmount('ac_buy', a.amount, counts);
+      if (typeof amount === 'string') return { text: amount, isError: true };
+      if (amount !== null) counts.set([...counts.keys()][0], amount);
+      // Several: the window opened once first (one walk there), then each from it. Each buy with no window open walked to
+      // the vendor again, as the sells did (Arcanist at the Tufa Archmage, stream 2026-10-18 12:09Z).
+      const opened = counts.size > 1 ? await openVendorOnce(c, vendor) : null;
+      if (opened && !opened.ok) return withNotice(c, { text: `bought 0 of ${counts.size}: ${opened.message}`, isError: true });
+      const out: string[] = opened?.message ? [opened.message] : [];
       let failed = 0;
       for (const [it, n] of counts) {
         const r = await c.call<AgentResult>('buy', [guidOrName(it), n, ...tail]);
         if (!r.ok) failed++;
         out.push(`${n > 1 ? `${it} x${n}` : it}: ${r.message.replace(/\n/g, '\n    ')}`);
       }
-      return withNotice(c, { text: [`bought ${counts.size - failed} of ${counts.size}:`, ...out.map((l) => `  ${l}`)].join('\n'), ...(failed === counts.size ? { isError: true } : {}) });
+      const head = opened?.message ? [out.shift()!] : [];
+      return withNotice(c, { text: [...head, `bought ${counts.size - failed} of ${counts.size}:`, ...out.map((l) => `  ${l}`)].join('\n'), ...(failed === counts.size ? { isError: true } : {}) });
     },
   },
   {
     name: 'ac_sell',
-    description: 'Sell an item from your inventory to a vendor: the open window, or vendor=<the vendor> (its window is opened first, walking there, as ac_vendor target= does; with no window open the one vendor within 12 m opens by itself). items= sells several, one after another, each answered on its own line.',
+    description: 'Sell an item from your inventory to a vendor: the open window, or vendor=<the vendor> (its window is opened first, walking there, as ac_vendor target= does; with no window open the one vendor within 12 m opens by itself). items= sells several: the window is opened once (one walk), then every whole stack goes in ONE sale (one payout, as dragging them all onto the sell list and pressing Sell), each answered on its own line.',
     props: {
       ...PROFILE_PROP,
       item: { type: 'string', description: 'Inventory item name or id.' },
-      items: { type: 'string', description: 'Several items to sell: names or ids separated by commas ("Studded Leather Basinet, #8000c1d2"), or a JSON list. Each is sold whole (amount= is for item= alone).' },
-      amount: { type: 'number', description: 'For stacks (default: whole stack).' },
+      items: { type: 'string', description: 'Several items to sell: names or ids separated by commas ("Studded Leather Basinet, #8000c1d2"; a comma inside parentheses or quotes is part of the name), or a JSON list. Each is sold whole; with one name, amount= says how many of its stack.' },
+      amount: { type: 'number', description: 'For stacks (default: whole stack): of item=, or of the one name items= gives. count= and quantity= are the same.' },
       vendor: { type: 'string', description: 'The vendor to sell to: name or id. Default: the window open, else the one vendor beside you.' },
       target: { type: 'string', description: 'The vendor (as vendor=) when item= or items= names what to sell, else the item.' },
     },
-    aliases: { count: 'amount' },
+    aliases: { count: 'amount', quantity: 'amount' },
     // item= or items=: neither alone is required (missingRequired would refuse items= by itself).
     required: [],
     async run(a) {
@@ -877,14 +886,29 @@ export const TOOLS: AgentTool[] = [
         return withNotice(c, result(await c.call<AgentResult>('sell', [guidOrName(item), a.amount ?? null, ...tail])));
       }
       const all = item !== null ? [item, ...list] : list;
+      const sellCounts = new Map<string, number>();
+      for (const it of all) sellCounts.set(it, (sellCounts.get(it) ?? 0) + 1);
+      const amount = listAmount('ac_sell', a.amount, sellCounts);
+      if (typeof amount === 'string') return { text: amount, isError: true };
+      // Several: the page opens the window once and sells the whole stacks in one sale (sellList). With no window open each
+      // item's sell walked to the vendor again, every walk replacing the last, and the call went to the background
+      // (Arcanist, the Tufa Archmage, stream 2026-10-18 12:09:22Z: "sold 8 of 14" minutes later).
+      if (all.length > 1) {
+        const r = await c.call<AgentResult>('sellList', [all.map(guidOrName), amount, vendor === null ? null : guidOrName(vendor)])
+          .catch((e: Error) => { if (/unknown (?:agent )?method:? sellList\b/.test(String(e?.message ?? e))) return null; throw e; });
+        if (r) return withNotice(c, { text: r.message, ...(r.ok ? {} : { isError: true }) });
+      }
+      // A page from before sellList: one by one, the window opened once first.
+      const opened = all.length > 1 ? await openVendorOnce(c, vendor) : null;
+      if (opened && !opened.ok) return withNotice(c, { text: `sold 0 of ${all.length}: ${opened.message}`, isError: true });
       const out: string[] = [];
       let failed = 0;
       for (const it of all) {
-        const r = await c.call<AgentResult>('sell', [guidOrName(it), null, ...tail]);
+        const r = await c.call<AgentResult>('sell', [guidOrName(it), amount, ...tail]);
         if (!r.ok) failed++;
         out.push(`${it}: ${r.message.replace(/\n/g, '\n    ')}`);
       }
-      return withNotice(c, { text: [`sold ${all.length - failed} of ${all.length}:`, ...out.map((l) => `  ${l}`)].join('\n'), ...(failed === all.length ? { isError: true } : {}) });
+      return withNotice(c, { text: [...(opened?.message ? [opened.message] : []), `sold ${all.length - failed} of ${all.length}:`, ...out.map((l) => `  ${l}`)].join('\n'), ...(failed === all.length ? { isError: true } : {}) });
     },
   },
   act('ac_trade', 'Secure trade with another player (open it with ac_use on them): view, add an item, accept, decline, reset or close.', {
@@ -1156,6 +1180,19 @@ export function argAliases(t: Pick<AgentTool, 'name' | 'props' | 'aliases'>): Re
   return {};
 }
 
+/**
+ * ac_use given both item= and target= naming different things: the item to use and what to use it on, which is
+ * ac_use_on. The alias rule below kept target= and dropped item=, so Bulwark's `use item="Excellent Healing Kit"
+ * target="Claude Bulwark"` used HIMSELF and answered "can't use #500000a4 (not known to the client)" (Aerbax Haven,
+ * 2026-10-18 08:52:26Z). Null when it is a plain use (one of them, or both naming the same thing).
+ */
+export function useArgsAsUseOn(a: Record<string, unknown>): { item: string; target: string } | null {
+  const has = (v: unknown): boolean => v !== undefined && v !== null && String(v).trim() !== '';
+  if (!has(a.item) || !has(a.target)) return null;
+  const item = String(a.item).trim(), target = String(a.target).trim();
+  return item.toLowerCase() === target.toLowerCase() ? null : { item, target };
+}
+
 /** A call's arguments with an alias moved onto the argument it means (the canonical one wins when both are given). */
 export function withArgAliases(t: Pick<AgentTool, 'name' | 'props' | 'aliases'>, a: Record<string, any>): Record<string, any> {
   const al = argAliases(t);
@@ -1170,6 +1207,16 @@ export function withArgAliases(t: Pick<AgentTool, 'name' | 'props' | 'aliases'>,
 }
 
 /**
+ * A list's vendor window, opened once before its items (the page's vendorReady: it walks there and uses the vendor, as
+ * ac_vendor target= does): null when the page has no vendorReady (an older build), else its answer, the opening said in
+ * its message ('' when the right window was open already).
+ */
+export async function openVendorOnce(c: ToolCaller, vendor: string | null): Promise<AgentResult | null> {
+  return c.call<AgentResult>('vendorReady', [vendor === null ? null : guidOrName(vendor)])
+    .catch((e: Error) => { if (/unknown (?:agent )?method:? vendorReady\b/.test(String(e?.message ?? e))) return null; throw e; });
+}
+
+/**
  * sell items=: a list as a comma (or semicolon / newline) separated string or a JSON array. "sell items=…" was refused
  * as an unknown argument (Arcanist, 2026-10-16 23:17Z): a player hands a vendor several things at once. buy items= reads
  * the same ("buy items=…" was refused too, 2026-10-18 03:29Z).
@@ -1179,7 +1226,44 @@ export function sellList(v: unknown): string[] {
   if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
   const s = String(v).trim();
   if (s.startsWith('[')) { try { const j = JSON.parse(s); if (Array.isArray(j)) return sellList(j); } catch { /* not JSON: a plain list */ } }
-  return s.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
+  return splitNameList(s);
+}
+
+/**
+ * A comma (or semicolon / newline) list of item names, split only between names: never inside parentheses, brackets or
+ * quotes, nor at a thousands comma between digits. `buy items="Trade Note (1,000), …"` split as "Trade Note (1" and
+ * "000)" and bought nothing (Bulwark, stream 2026-10-18 10:05:00Z). Quotes round a name are taken off.
+ */
+export function splitNameList(s: string): string[] {
+  const out: string[] = [];
+  let cur = '', depth = 0, quote: string | null = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quote) { if (c === quote) quote = null; cur += c; continue; }
+    if (c === '"' || c === '\u201c' || c === '\u201d' || (c === "'" && !/\w/.test(s[i - 1] ?? ''))) { quote = c === '\u201c' ? '\u201d' : c; cur += c; continue; }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if ((c === ')' || c === ']' || c === '}') && depth > 0) depth--;
+    const sep = c === ',' || c === ';' || c === '\n';
+    // "1,000" (a thousands comma: a digit on each side and three after) is part of a name.
+    const thousands = c === ',' && /\d$/.test(cur) && /^\d{3}(?!\d)/.test(s.slice(i + 1));
+    if (sep && depth === 0 && !thousands) { out.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  out.push(cur);
+  return out.map((x) => x.trim().replace(/^(["'\u201c])(.*)(["'\u201d])$/s, '$2').trim()).filter(Boolean);
+}
+
+/**
+ * amount= beside items=: how many of the one name listed (each once), null when not given, or the refusal when the list
+ * names several things (which of them would it count?). `buy items="Stamina Elixir" amount=6` bought one: amount= was
+ * read only beside item= (Arcanist, stream 2026-10-18 10:00:02Z).
+ */
+export function listAmount(tool: string, amount: unknown, counts: Map<string, number>): number | null | string {
+  if (amount === undefined || amount === null || amount === '') return null;
+  const n = Number(amount);
+  if (!Number.isInteger(n) || n < 1) return `${tool}: amount= must be a whole number, 1 or more (got ${String(amount)})`;
+  if (counts.size === 1 && [...counts.values()][0] === 1) return n;
+  return `${tool}: amount= counts one item, and items= names ${counts.size > 1 ? `${counts.size} (${[...counts.keys()].join(', ')})` : `one ${[...counts.values()][0]} times`}: list a name as many times as you want of it, or call ${tool.replace(/^ac_/, '')} once per item with item= and amount=`;
 }
 
 /**
@@ -1209,6 +1293,8 @@ export const TIME_ARG_ALIASES: Readonly<Record<string, Record<string, string>>> 
 // amount= is times= ("raise amount=max" was refused as an unknown argument, Bulwark 2026-10-17 05:00Z).
 // raise has one name argument, so every word players reach for names it: across the 2026-10-16/17 stream
 // transcripts ~200 raises were refused for target= (78), name= (56), skill= (50, aliased since), attribute= (12) …
+// count= and quantity= are amount= for give, as for buy and sell (a give of part of a stack).
+for (const t of TOOLS) if (t.name === 'ac_give') t.aliases = { count: 'amount', quantity: 'amount' };
 for (const t of TOOLS) if (t.name === 'ac_raise') t.aliases = { skill: 'stat', target: 'stat', name: 'stat', attribute: 'stat', vital: 'stat', what: 'stat', amount: 'times' };
 
 /**
@@ -1244,7 +1330,14 @@ for (const t of TOOLS) {
   const run = t.run.bind(t);
   t.run = t.name === 'ac_raise'
     ? (a) => { const w = raiseWord(a); return run({ ...withArgAliases(t, a), ...(w ? { [RAISE_WORD]: w } : {}) }); }
-    : (a) => run(withArgAliases(t, a));
+    : t.name === 'ac_use'
+      ? async (a) => {
+        const both = useArgsAsUseOn(a);
+        if (!both) return run(withArgAliases(t, a));
+        const out = await TOOL_BY_NAME.get('ac_use_on')!.run({ ...(a.profile !== undefined ? { profile: a.profile } : {}), item: both.item, target: both.target });
+        return { ...out, text: `${out.text}\n  (use with item= and target= is use_on: used ${both.item} on ${both.target})` };
+      }
+      : (a) => run(withArgAliases(t, a));
 }
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));

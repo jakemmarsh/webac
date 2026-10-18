@@ -27,7 +27,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, s
 import { basename, dirname, join } from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
 import { AT_CHAR_SELECT_JS, HOST_RESOLVER_ARGS, REMOTE_CHROMIUM, REPO, createCharacterIfNeeded, waitForWorld } from '../lib/game-session.ts';
-import { READ_PAGE_STORAGE_JS, pageStorageFile, pickAgentStorage, readPageStorage, restorePageStorageScript, writePageStorage, type SavedPageStorage } from './pageStorage.ts';
+import { READ_PAGE_STORAGE_JS, gameOriginOf, mergePageStorage, pageStorageFile, readPageStorage, restorePageStorageScript, writePageStorage, type SavedPageStorage } from './pageStorage.ts';
 import { STATE_DIR, accountForProfile, clearInfo, listInfos, logFile, pickStaleSnapshots, readInfo, writeInfo } from './state.ts';
 import { type AgentEra, agentEra, eraAccount } from './eras.ts';
 import { CALLS_SETTLE_MS, SHUTDOWN_DEADLINE_MS, createShutdown, killTree, waitForCalls } from './shutdown.ts';
@@ -422,7 +422,9 @@ async function main(): Promise<void> {
     // The agent API's memory (creatures seen only buffing you, remembered places) from the last launch: this
     // context's localStorage starts empty (pageStorage.ts).
     const saved = readPageStorage(storageFile);
-    if (saved) { await page.addInitScript({ content: restorePageStorageScript(saved) }); say(`restoring ${saved.items.length} agent memory entr${saved.items.length === 1 ? 'y' : 'ies'} for ${saved.origin}`); }
+    // For this launch's game origin too: Vite's port moves from launch to launch (pageStorage.ts).
+    const gameOrigin = gameOriginOf(url);
+    if (saved) { await page.addInitScript({ content: restorePageStorageScript(saved, gameOrigin) }); say(`restoring ${saved.items.length} agent memory entr${saved.items.length === 1 ? 'y' : 'ies'} saved on ${saved.origin}${gameOrigin && gameOrigin !== saved.origin ? ` into ${gameOrigin}` : ''}`); }
   }
   page.setDefaultTimeout(120_000);
   page.on('crash', () => say('PAGE CRASHED'));
@@ -539,7 +541,7 @@ async function main(): Promise<void> {
   const saveStorage = async (): Promise<void> => {
     if (args.attach) return;
     const got = await withTimeout(page.evaluate(READ_PAGE_STORAGE_JS) as Promise<SavedPageStorage | null>, 3000).catch(() => null);
-    if (got && /^https?:/.test(got.origin)) { try { writePageStorage(storageFile, { origin: got.origin, items: pickAgentStorage(got.items) }); } catch { /* state dir unwritable */ } }
+    if (got && /^https?:/.test(got.origin)) { try { writePageStorage(storageFile, mergePageStorage(readPageStorage(storageFile), { origin: got.origin, items: got.items })); } catch { /* state dir unwritable */ } }
   };
   const storageTimer = setInterval(() => void saveStorage(), 60_000);
   // tools/ac-agent/shutdown.ts: a deadline, a second signal ends it at once, children killed as process groups.

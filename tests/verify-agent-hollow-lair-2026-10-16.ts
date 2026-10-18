@@ -180,11 +180,17 @@ describe('Hollow Lair movement reports (fake host)', () => {
       const r = await settle(api, host, api.walkTo('45m north', { avoidMonsters: true, stopOnAggro: true }), 30_000);
       expect(r!.message).not.toMatch(/not awake/);
     });
-    it('at level 70 the L30 Tusker no longer counts but the two L40 Lurkers still make a pack', async () => {
+    it('at level 70 the L30 Tusker no longer counts and the two L40 Lurkers, 30 under, are walked on past and named (2026-10-18 0920)', async () => {
       host.me.level = 70;
       const r = await settle(api, host, api.walkTo('45m north', { avoidMonsters: true, stopOnAggro: true }), 30_000);
-      expect(r!.message).toMatch(/within 18 m of 2 monsters not awake yet: Drudge Lurker L40/);
+      expect(r!.message).not.toMatch(/stopped/);
+      expect(r!.message).toMatch(/walked on past 2 monsters not awake yet \(Drudge Lurker L40, Drudge Lurker L40: all 10\+ levels under yours\)/);
       expect(r!.message).not.toMatch(/Tusker/);
+    });
+    it('at level 45 the two L40 Lurkers (5 under, not well below) still make a pack', async () => {
+      host.me.level = 45;
+      const r = await settle(api, host, api.walkTo('45m north', { avoidMonsters: true, stopOnAggro: true }), 30_000);
+      expect(r!.message).toMatch(/within 18 m of \d monsters not awake yet: .*Drudge Lurker L40/);
     });
     it('on a GDLE-family server (monsters notice you from 40 m: MonsterAI DEFAULT_AWARENESS_RANGE) it stops ~44 m off', async () => {
       host.fallFamily = 'gdle';

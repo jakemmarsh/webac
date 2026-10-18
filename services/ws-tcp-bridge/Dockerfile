@@ -30,6 +30,8 @@ COPY packages/network/src/Hash32.ts ./packages/network/src/Hash32.ts
 # The whole routines folder: a new file there is copied without editing this list.
 COPY packages/shared/src/routines ./packages/shared/src/routines
 COPY packages/shared/src/encoding/Windows1252.ts ./packages/shared/src/encoding/Windows1252.ts
+# mapCoordsText.ts: the shared map-coordinate reader validateRoutine and vtankExport import.
+COPY packages/shared/src/mapCoordsText.ts ./packages/shared/src/mapCoordsText.ts
 # The hosted connector's /mcp serves the ac-agent tool table (tools/ac-agent; no Playwright in it).
 COPY packages/renderer/src/agent/format.ts ./packages/renderer/src/agent/format.ts
 COPY packages/renderer/src/agent/gear.ts ./packages/renderer/src/agent/gear.ts

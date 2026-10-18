@@ -262,6 +262,8 @@ function standbySettings(p: RoutineProfile): Record<string, string | number | bo
 const truthySetting = (v: string | number | boolean | undefined): boolean => v === true || v === 1 || (typeof v === 'string' && /^(true|1|yes|on)$/i.test(v));
 /** After the player's own command answers, the routine holds this long before its next step (handOver). */
 export const HAND_GRACE_MS = 3_000;
+/** The hand commands that only move you (walk_to, follow): the routine's buffing goes on between your steps (buffWhileYouWalk). */
+const HAND_WALKS: ReadonlySet<string> = new Set(['walk_to', 'follow']);
 /** A rule whose every action found nothing to do rests this long, so the rules below it get their turn. */
 export const IDLE_REST_MS = 30_000;
 /** NPC Talk (VirindiTank): how long each use of the NPC waits for its tell, and when the step gives up. */
@@ -585,6 +587,30 @@ export class RoutineEngine {
     return false;
   }
 
+  /**
+   * While your own walk or follow holds the routine (handOver), its buffing still runs between your steps: a buff under
+   * RebuffTimeRemainingSeconds is recast as you go (VTank's BuffSelfNormal alone: no fight, no loot, no route of its own).
+   * A hand `follow` holds the routine until the follow ends (up to 10 minutes), and Arcanist's self buffs ran down to 15 s
+   * and her banes out while she followed Bulwark from Tufa with "Arcanist fights" running (stream 2026-10-18
+   * 12:19:21–12:22:34Z); the casts she then made by hand went out mid-follow without stopping it.
+   */
+  private buffWhileYouWalk(p: RoutineProfile): void {
+    const h = this.hand;
+    if (!h || !HAND_WALKS.has(h.what) || !p.vtank || !p.macro || this.busy) return;
+    const st = this.settings;
+    if (!truthySetting(st.EnableBuffing) || !p.modules.buffs) return;
+    const t = this.now();
+    if (t - this.lastStep < STEP_MS) return;
+    this.lastStep = t;
+    this.vt ??= new VtMacro(this.api, this.now);
+    this.vt.rebuffed = () => { this.stats.rebuffs++; };
+    const step = this.vt.buffDueStep(p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> }, st);
+    if (!step) return;
+    this.acting = `${step.label} (while you ${h.what === 'follow' ? 'follow' : 'walk'})`;
+    this.busy = true;
+    void this.runMacroStep({ label: this.acting, run: step.run }).finally(() => { this.busy = false; this.acting = null; });
+  }
+
   /** The monster the player last attacked or cast at by hand while this routine ran (handOver), or null. */
   pickedTarget(): number | null { return this.handPick; }
   private hand: { what: string; until: number; pending: number } | null = null;
@@ -813,8 +839,19 @@ export class RoutineEngine {
     const at = this.now(), wall = Date.now();
     return step.run().then((r) => {
       const took = this.now() - at;
-      this.note(`${step.label}: ${r.message.split('\n')[0]}${took >= 2000 ? ` (took ${(took / 1000).toFixed(1)} s)` : ''}`, wall);
+      this.note(`${step.label}: ${r.message.split('\n')[0]}${RoutineEngine.missedCastNote(r)}${took >= 2000 ? ` (took ${(took / 1000).toFixed(1)} s)` : ''}`, wall);
     }).catch((e) => this.failed('macro', e, step.label));
+  }
+
+  /**
+   * A cast step whose spell went out but did not take (a fizzle, a resist, an immune target), said on its log line: only
+   * the reply's head ("casting Flame Bane V on yourself") was logged, so a fizzled bane and its recast read as the same
+   * spell cast twice for nothing ("Arcanist fights", 09:17:52 and 09:17:56, the first "Your spell fizzled.", Aerbax Haven,
+   * 2026-10-18). Empty when it took or the step was no cast.
+   */
+  static missedCastNote(r: AgentResult): string {
+    const line = r.message.split('\n').slice(1).map((l) => l.trim()).find((l) => /\byour spell fizzled\b|\bresists your spell\b|^you fail to affect\b/i.test(l));
+    return line ? `: did not take (${line.replace(/\.$/, '')})` : '';
   }
 
   // ── conditions ──
@@ -1073,7 +1110,7 @@ export class RoutineEngine {
       return;
     }
     if (this.paused) { this.offUpkeep(p, this.settings); return; }
-    if (this.isHeld()) return;
+    if (this.isHeld()) { this.buffWhileYouWalk(p); return; }
     const t = this.now();
     if (t - this.lastStep < STEP_MS) return;
     this.lastStep = t;

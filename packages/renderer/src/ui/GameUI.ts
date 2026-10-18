@@ -29800,6 +29800,31 @@ export class GameUI {
    * refusal text, a pack's contents, a split), then send what that added,
    * as the bar's Sell does. False when the vendor refused it.
    */
+  /**
+   * AGENT — several whole stacks sold at once, as a player drags each onto the sell list and presses Sell once: every drop
+   * goes through acceptVendorSellDrag (the vendor's refusals, a pack's contents), then ONE onSellList for all they added
+   * (populateVendorSellingPage's sellAll: one GameAction Sell carrying the list, one ACE payout). Returns the ids sent.
+   * One sale per item paid a new coin stack each, 24 for Bulwark's 24 stones (Tufa Archmage, stream 2026-10-18 12:11Z).
+   */
+  agentVendorSellMany(items: InventoryItem[]): number[] {
+    if (!this.vendorVisible || !items.length) return [];
+    const before = new Set(this.vendorData.sellList.map((e) => e.guid));
+    const dropped = new Set<number>();
+    for (const item of items) {
+      this.selectInventoryItem(item);
+      const stack = Math.max(1, Math.floor(item.stackSize ?? 1));
+      this.toolbarMaxSplitSize = stack;
+      this.setToolbarSplitSize(stack);
+      if (this.acceptVendorSellDrag(this.vendorDragItemOf(item))) dropped.add(item.id);
+    }
+    const added = this.vendorData.sellList.filter((e) => !before.has(e.guid) || dropped.has(e.guid));
+    if (!added.length) return [];
+    this.vendorData.sellList = this.vendorData.sellList.filter((e) => !added.includes(e));
+    this.vendorCallbacks.onSellList?.(added.map((e) => ({ guid: e.guid, amount: e.qty })));
+    if (this.vendorVisible) this.renderVendorPanel();
+    return added.map((e) => e.guid);
+  }
+
   agentVendorSell(item: InventoryItem, amount: number | null = null): boolean {
     if (!this.vendorVisible) return false;
     // A drag starts with a mouse-down on the item, which selects it, so the

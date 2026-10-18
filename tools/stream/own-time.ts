@@ -15,6 +15,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isMapCoordsText, parseMapCoordsText } from '../../packages/shared/src/mapCoordsText.ts';
 import type { MapCoords } from '../../packages/renderer/src/ui/MapMarkers.ts';
 import { type SessionTimeline, parseSession } from './dead-air.ts';
 import { cliCalls } from './feed.ts';
@@ -74,7 +75,6 @@ const VENDOR_NAME = /\b(?:Shopkeeper|Blacksmith|Armorer|Weaponsmith|Grocer|Bowye
 const PORTAL_RESULT = /portal space|entered portal/i;
 /** Walk targets that say nothing about where the character went. */
 const RELATIVE = /^\s*[\d.]+\s*m\b|^(?:#|0x)?[0-9a-f]{8}$|^#[0-9a-f]+$/i;
-const COORDS = /^\s*(\d+(?:\.\d+)?)\s*([NS])[,\s]+(\d+(?:\.\d+)?)\s*([EW])\s*$/i;
 
 interface Span { k: TimeKind; start: number; end: number }
 interface Leg { start: number; end: number; target: string | null; portal: boolean }
@@ -96,9 +96,8 @@ export function castIsBuff(command: string, result: string, cast: readonly strin
 
 /** "42.1N, 33.6E" → map coordinates. */
 export function parseCoords(text: string): MapCoords | null {
-  const m = COORDS.exec(text.replace(/,/g, ' '));
-  if (!m) return null;
-  return { ns: Number(m[1]) * (m[2].toUpperCase() === 'S' ? -1 : 1), ew: Number(m[3]) * (m[4].toUpperCase() === 'W' ? -1 : 1) };
+  // The walk's own reader (mapCoordsText), whole text only: what walk_to took as coordinates, this reads as them.
+  return isMapCoordsText(text) ? parseMapCoordsText(text) : null;
 }
 
 const coordsText = (c: MapCoords): string => `${Math.abs(c.ns).toFixed(1)}${c.ns < 0 ? 'S' : 'N'} ${Math.abs(c.ew).toFixed(1)}${c.ew < 0 ? 'W' : 'E'}`;

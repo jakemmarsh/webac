@@ -5,6 +5,7 @@
  * can fix it before the engine ever sees it.
  */
 import { VT_MONSTER_COLUMNS } from './vtankProfile.js';
+import { isMapCoordsText } from '../mapCoordsText.js';
 import {
   ROUTINE_SCHEMA_VERSION, type RoutineAction, type RoutineCondition, type RoutineDoc, type RoutineProfile,
 } from './RoutineDoc.js';
@@ -15,7 +16,8 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 const isStr = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
 const isNum = (v: unknown, min = -Infinity, max = Infinity): v is number => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 
-const COORDS = /^\s*\d+(\.\d+)?\s*[NS]\s*[, ]\s*\d+(\.\d+)?\s*[EW]\s*$/i;
+/** Whole-text map coordinates, read as the agent's walk_to reads them (mapCoordsText: comma or not, any spacing). */
+const COORDS = { test: (s: string): boolean => isMapCoordsText(s) };
 const VITALS = ['health', 'stamina', 'mana'];
 const LOOT_ACTIONS = ['keep', 'keep-up-to', 'salvage', 'sell', 'read', 'ignore'];
 const MODULES = ['buffs', 'vitals', 'combat', 'looting', 'navigation', 'inventory', 'service'];

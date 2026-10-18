@@ -7,6 +7,7 @@
 !packages/network/src/Hash32.ts
 !packages/shared/src/routines/**
 !packages/shared/src/encoding/Windows1252.ts
+!packages/shared/src/mapCoordsText.ts
 !packages/renderer/src/agent/format.ts
 !packages/renderer/src/agent/gear.ts
 !tools/ac-agent/client.ts
