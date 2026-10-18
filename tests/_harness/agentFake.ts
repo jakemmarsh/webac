@@ -68,6 +68,10 @@ export class FakeHost implements AgentHost {
   cameraBoom = () => ({ min: 2.5, max: 2.75 });
   buffs: Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean }> = [];
   activeSpells = () => this.buffs;
+  /** The Vitae enchantment (AgentHost.vitae); unset = no vitae. */
+  vitae: AgentHost['vitae'] = undefined;
+  /** The fellowship's XP split (AgentHost.fellowshipXp); unset = the host can't say. */
+  fellowshipXp: AgentHost['fellowshipXp'] = undefined;
   freeSlots = 50;
   freePackSlots = () => this.freeSlots;
   /** The main pack and side packs with their item slots (AgentHost.packs); unset = the host can't say. */

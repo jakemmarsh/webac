@@ -15,7 +15,7 @@ import {
   itemTypeLabel, parseMetaView, SALVAGE_COMBINE_DEFAULTS, VT_DAMAGE, vtCanonicalName, vtDefaults, type MetaView, type MetaViewButton, type SalvageCombine,
   type LootRule, type PropTest, type Route, type RoutineAction, type RoutineCondition, type RoutineProfile, type RoutineRule, type VtVcsCategory,
 } from '@ac/shared';
-import { MAP_COORD_ORIGIN, parseMapCoords, type AgentApi, type LootDecision } from './AgentApi.ts';
+import { AgentApi, MAP_COORD_ORIGIN, parseMapCoords, type LootDecision } from './AgentApi.ts';
 import { VtMacro, vtAttackHeight } from './macro/vtMacro.ts';
 import { matchMonsterRow } from './macro/combatPlan.ts';
 import { autoAttackPower, powerItemsToExamine, swingElement, wieldedPair, type PowerItem } from './macro/attackPower.ts';
@@ -197,6 +197,8 @@ export interface RoutineStatus {
   running: boolean;
   /** Running but holding still until resumed (the panel's Pause). */
   paused: boolean;
+  /** Holding while the player's own command runs (handOver): which one. It carries on by itself. */
+  heldFor?: string;
   profile: string | null;
   state: string | null;
   /** The rule now acting (its label, or its index). */
@@ -258,6 +260,8 @@ function standbySettings(p: RoutineProfile): Record<string, string | number | bo
 }
 
 const truthySetting = (v: string | number | boolean | undefined): boolean => v === true || v === 1 || (typeof v === 'string' && /^(true|1|yes|on)$/i.test(v));
+/** After the player's own command answers, the routine holds this long before its next step (handOver). */
+export const HAND_GRACE_MS = 3_000;
 /** A rule whose every action found nothing to do rests this long, so the rules below it get their turn. */
 export const IDLE_REST_MS = 30_000;
 /** NPC Talk (VirindiTank): how long each use of the NPC waits for its tell, and when the step gives up. */
@@ -447,6 +451,9 @@ export class RoutineEngine {
     this.rareMark = this.api.currentSeq();
     this.watchdog = null;
     this.hold = null;
+    this.hand = null;
+    this.handNoted = false;
+    this.handPick = null;
     this.settings = { ...MACRO_DEFAULTS };
     for (const [k, v] of Object.entries(profile.settings ?? {})) this.settings[vtCanonicalName(k)] = v;
     // VirindiTank's Auto-Navigation and Looting profiles: the route and loot set it starts with.
@@ -478,7 +485,7 @@ export class RoutineEngine {
 
   status(): RoutineStatus {
     return {
-      running: !!this.profile, paused: !!this.profile && this.paused, profile: this.profile?.name ?? null, state: this.profile ? this.state : null,
+      running: !!this.profile, paused: !!this.profile && this.paused, ...(this.profile && this.hand ? { heldFor: this.hand.what } : {}), profile: this.profile?.name ?? null, state: this.profile ? this.state : null,
       acting: this.acting, last: this.log.slice(-12), stateSince: this.stateSince, lastChange: this.lastChange, spent: [...this.spent], forcingBuffs: !!this.vt?.forcing,
       ...(this.nav ? { nav: { route: this.nav.route.name, point: this.nav.i, done: this.nav.done } } : {}),
       ...(this.follow && this.nav?.route.mode === 'follow' ? { follow: { target: this.follow.who, inSight: this.follow.inSight, trail: this.follow.trail.length } } : {}),
@@ -524,6 +531,48 @@ export class RoutineEngine {
     this.note('resumed');
     return { ok: true, message: `resumed "${this.profile.name}" in "${this.state}"` };
   }
+
+  /**
+   * The player's own action while a routine runs (beyond VTank, STREAM.routines-default 2026-10-17): the agent surface
+   * calls this for every command that moves, fights, uses or trades (AgentApi.surface), so Claude stepping in to loot a
+   * corpse, walk somewhere, cast a buff on a fellow or pull a monster isn't fought over by the routine's next step. The
+   * routine holds (nothing new starts, a long wait inside a step ends) while that command runs and for HAND_GRACE_MS
+   * after it answers, then carries on by itself. A hand `attack` or `cast` also makes its target the player's pick
+   * (pickedTarget): the macro's OnlyEngaged fights it, and TargetLock puts it first. Paused or stopped routines are not
+   * touched. `done`: the command's answer, when it is a promise.
+   */
+  handOver(what: string, done?: PromiseLike<unknown> | null): void {
+    if (!this.profile || this.paused) return;
+    const t = this.now();
+    const h = (this.hand ??= { what, until: t, pending: 0 });
+    if (!this.handNoted) { this.note(`holding: you took over (${what})`); this.handNoted = true; }
+    h.what = what;
+    h.until = Math.max(h.until, t + HAND_GRACE_MS);
+    if (what === 'attack' || what === 'cast') this.handPick = this.api.selectedGuid();
+    // The step under way ends at its next action; the macro's own swing wait checks isHeld().
+    this.gen++;
+    if (done && typeof done.then === 'function') {
+      h.pending++;
+      const settle = (): void => { if (this.hand === h) { h.pending = Math.max(0, h.pending - 1); h.until = Math.max(h.until, this.now() + HAND_GRACE_MS); } };
+      done.then(settle, settle);
+    }
+  }
+
+  /** Whether the player's own action holds the routine now (handOver). */
+  isHeld(): boolean {
+    const h = this.hand;
+    if (!h) return false;
+    if (h.pending > 0 || this.now() < h.until) return true;
+    this.hand = null;
+    if (this.handNoted) { this.note(`carrying on after your ${h.what}`); this.handNoted = false; }
+    return false;
+  }
+
+  /** The monster the player last attacked or cast at by hand while this routine ran (handOver), or null. */
+  pickedTarget(): number | null { return this.handPick; }
+  private hand: { what: string; until: number; pending: number } | null = null;
+  private handNoted = false;
+  private handPick: number | null = null;
 
   /** Go to a state now (an expression's setmetastate / VTank's /vt setmetastate). */
   goTo(state: string): void {
@@ -994,6 +1043,7 @@ export class RoutineEngine {
       return;
     }
     if (this.paused) { this.offUpkeep(p, this.settings); return; }
+    if (this.isHeld()) return;
     const t = this.now();
     if (t - this.lastStep < STEP_MS) return;
     this.lastStep = t;
@@ -1078,6 +1128,8 @@ export class RoutineEngine {
     if (p.vtank) {
       this.vt ??= new VtMacro(this.api, this.now);
       this.vt.allowTarget = (o) => this.holdOk(o);
+      this.vt.held = () => this.isHeld();
+      this.vt.picked = () => this.handPick;
       for (const name of this.vt.kills()) { this.kills.push({ name, at: this.now() }); this.kills = this.kills.slice(-KILLS_KEPT); this.stats.kills++; }
       // A corpse of ours waiting and nothing in range: only recharging comes before the loot (buffs wait for idle);
       // with Boost Loot Priority it comes first outright.
@@ -1416,7 +1468,7 @@ export class RoutineEngine {
     if (!f.inSight) { f.inSight = true; this.note(`Follow: ${f.who} is in sight again`); }
     addTrailPoint(f.trail, leaderAt(obs.me.pos, lead), obs.me.pos);
     // Running straight at them and they turned a corner: end that leg, so the next one runs their path.
-    if (f.walking === 'lead' && f.trail.length > 1 && truthySetting(this.settings.FollowAroundCorners)) { f.walking = null; this.api.stopMoving(); }
+    if (f.walking === 'lead' && f.trail.length > 1 && truthySetting(this.settings.FollowAroundCorners) && !obs.me.indoors) { f.walking = null; this.api.stopMoving(); }
   }
 
   /** One point of the loaded route; circular loops, linear turns back, once ends (route-done). */
@@ -1437,14 +1489,20 @@ export class RoutineEngine {
         // Out of sight: stand still (watchLeader stopped us and said so) until they come back.
         if (!f || !lead || !obs.me) { await sleep(1000); return; }
         const me = obs.me.pos;
-        if (lead.dist <= within) { f.trail = [leaderAt(me, lead)]; await sleep(500); return; }
+        // Within reach on your storey: a leader a storey down (Bulwark on Mountain Keep's −6 deck, 5 m across and 6 m
+        // under her) is not reached by standing over them.
+        const otherStorey = obs.me.indoors && Math.abs(lead.dz) >= AgentApi.OTHER_FLOOR_M;
+        if (lead.dist <= within && !otherStorey) { f.trail = [leaderAt(me, lead)]; await sleep(500); return; }
         // NavFarStopRange: a leader this far off isn't followed (VTank holds until they are nearer).
         const far = Number(this.settings.NavFarStopRange);
         if (Number.isFinite(far) && far > 0 && lead.dist > far) { await sleep(1000); return; }
         // A corner reached, or just passed (a few metres off and nearer the next corner than it is): on to the next one.
         const d = (u: { x: number; y: number }, v: { x: number; y: number }): number => Math.hypot(u.x - v.x, u.y - v.y);
         while (f.trail.length > 1 && (d(f.trail[0], me) <= FOLLOW_CORNER_M || (d(f.trail[0], me) <= 3 && d(me, f.trail[1]) < d(f.trail[0], f.trail[1])))) f.trail.shift();
-        if (truthySetting(this.settings.FollowAroundCorners) && f.trail.length > 1) {
+        // Indoors the leader is walked to by the doorway route (walkTo plans rooms, storeys, drops and ramps); the trail's
+        // corners are flat points with no storey, so in Mountain Keep a corner past the leader's drop was "walked" on the
+        // floor above (STREAM.routines-default, 2026-10-17).
+        if (truthySetting(this.settings.FollowAroundCorners) && f.trail.length > 1 && !obs.me.indoors) {
           f.walking = 'corner';
           const corner = f.trail[0];
           await this.api.walkTo(mapCoordsText(corner), { within: FOLLOW_CORNER_M, timeoutMs: 15_000 });
@@ -1454,7 +1512,8 @@ export class RoutineEngine {
           f.walking = 'lead';
           // At a run, always: no walking pace near them (Shift-walking had the pair walking most of the time on stream,
           // 2026-10-14); within Follow/Nav Min of them it stands until they move off.
-          await this.api.walkTo(lead.guid, { within, timeoutMs: 15_000 });
+          // A storey away, near them (walkTo's `within` is the straight line, so 8 m was "arrived" 6 m above them).
+          await this.api.walkTo(lead.guid, { within: otherStorey ? Math.min(within, STOREY_FOLLOW_M) : within, timeoutMs: 15_000 });
         }
       } finally { if (this.follow) this.follow.walking = null; this.busy = false; this.acting = null; }
       return;
@@ -1476,8 +1535,21 @@ export class RoutineEngine {
     }
   }
 
+  /** The rule (state#index) whose actions run now: attack-nearest's wait gives way to a rule above it. */
+  private runningKey: string | null = null;
+
+  /** A rule above `key` (state#index) in the current state that would fire now, by label; null if none (or the state moved on). */
+  private ruleAbove(key: string): string | null {
+    const [state, idx] = [key.slice(0, key.lastIndexOf('#')), Number(key.slice(key.lastIndexOf('#') + 1))];
+    if (state !== this.state || !Number.isFinite(idx)) return null;
+    const v = this.dryRun();
+    const at = v.findIndex((x) => x.fires);
+    return at >= 0 && at < idx ? v[at].rule : null;
+  }
+
   private async run(actions: RoutineAction[], p: RoutineProfile, key?: string): Promise<void> {
     const gen = this.gen;
+    this.runningKey = key ?? null;
     let idle = true;
     for (const a of actions) {
       if (this.stopRequested || this.profile !== p || this.gen !== gen) return;
@@ -1489,10 +1561,6 @@ export class RoutineEngine {
     // Every action found nothing to do (a met training plan, no corpse of ours, buffs all up):
     // firing it again at once would starve the rules below it.
     if (idle && key) { this.resting.set(key, this.now() + IDLE_REST_MS); this.note(`resting "${this.acting ?? key}" ${IDLE_REST_MS / 1000} s (nothing to do)`); }
-  }
-
-  private async waitDone(types: string[], ms: number): Promise<void> {
-    await this.api.waitFor({ types: types as never }, ms);
   }
 
   /**
@@ -1705,8 +1773,23 @@ export class RoutineEngine {
         const since = this.api.currentSeq();
         const r = this.api.attack(m.guid, p.macro ? { height: vtAttackHeight(this.settings), power: this.macroAttackPower(p, m), far: true } : { far: true });
         if (!r.ok) return r;
-        if (!this.hold) await this.waitDone(['target-died', 'target-lost', 'death'], 120_000);
-        else {
+        if (!this.hold) {
+          // Watched in half-second slices: a rule above this one that fires now (a "Low health" heal, a "Pack full"),
+          // or the player taking over, ends the wait and the next step runs it; the server keeps swinging meanwhile.
+          // Before 2026-10-17 the whole fight (up to 2 minutes) went by with no rule checked, so a heal rule above the
+          // fight rule fired only between kills.
+          const t0 = this.now();
+          const mine = this.runningKey;
+          // The end is read off the events since the order (a slice's wait may start after it came).
+          const over = (): boolean => this.api.eventsSince(since).some((e) => e.type === 'death' || ((e.type === 'target-died' || e.type === 'target-lost') && e.guid === m.guid));
+          while (this.now() - t0 < 120_000 && !over()) {
+            await this.api.waitFor({ types: ['target-died', 'target-lost', 'death'] as never }, 500);
+            if (over() || this.stopRequested) break;
+            if (this.isHeld()) { this.gen++; return { ok: true, message: `left ${m.name} to you (you took over)` }; }
+            const above = mine ? this.ruleAbove(mine) : null;
+            if (above) { this.gen++; return { ok: true, message: `broke off ${m.name} for "${above}"` }; }
+          }
+        } else {
           // Holding position: the fight is watched, and broken off once the target goes past the anchor's range (no chase down a ledge).
           const t0 = this.now();
           while (this.now() - t0 < 120_000) {
@@ -1911,6 +1994,8 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /** Follow routes: how often the leader's position is taken, how far they can be seen, and how near a corner of their path counts as reached. */
 export const FOLLOW_SAMPLE_MS = 250;
+/** A Follow leg to a leader a storey up or down walks to within this of them (on their storey), whatever Follow/Nav Min says. */
+export const STOREY_FOLLOW_M = 3;
 const FOLLOW_SIGHT_M = 250;
 const FOLLOW_CORNER_M = 1;
 

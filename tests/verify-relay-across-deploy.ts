@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import * as dgram from 'dgram';
 import { WebSocket } from 'ws';
 import { resolveBridgeConfig, type BridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil';
-import { createBridgeServer, DRAINING_FRAME, type BridgeServer } from '../services/ws-tcp-bridge/src/server';
+import { createBridgeServer, DRAINING_FRAME, DRAINING_HANDOVER_FRAME, type BridgeServer } from '../services/ws-tcp-bridge/src/server';
 import { AgentRelay, accountKey } from '../services/ws-tcp-bridge/src/relay';
 import { OAuthServer, RELAY_TICKET_MS } from '../services/ws-tcp-bridge/src/oauth';
 import { parseRelayLinkNotice } from '../packages/network/src/ClientConnection';
@@ -124,7 +124,7 @@ describe('the connector follows the tab across a bridge deploy', () => {
     // The deploy: B is up, A drains. Claude's calls now reach B, which has never seen the tab: the bug.
     expect((await observe(env.portB)).content[0].text).toMatch(/your game is not open/);
     const drained = env.a.drain(60_000);
-    await until(() => t.gameText.includes(DRAINING_FRAME));
+    await until(() => t.gameText.includes(DRAINING_HANDOVER_FRAME)); // the shared secret also lets the bridges hand sessions over
     await until(() => t.link.linked);
     await new Promise((r) => setTimeout(r, 50));
 
@@ -193,8 +193,10 @@ describe('the connector follows the tab across a bridge deploy', () => {
     game.send(pkt);
     await until(() => env.got.length > 0);
     void env.a.drain(60_000);
+    // Every game session hears the drain at once (its tab hands it over); the login repeats it for the relay.
+    await until(() => texts.filter((x) => x === DRAINING_HANDOVER_FRAME).length === 1);
     env.udp.send(characterListPacket('AgentClaude', ['Claude']), env.got[0].port, env.got[0].address);
-    await until(() => texts.includes(DRAINING_FRAME));
+    await until(() => texts.filter((x) => x === DRAINING_HANDOVER_FRAME).length === 2);
   });
 });
 
@@ -232,6 +234,7 @@ describe('the pieces', () => {
 
   it('notices parse; the link URL drops the server and marks the relay', () => {
     expect(parseRelayLinkNotice(DRAINING_FRAME)).toEqual({ kind: 'draining' });
+    expect(parseRelayLinkNotice(DRAINING_HANDOVER_FRAME)).toEqual({ kind: 'draining', handover: true });
     expect(parseRelayLinkNotice('{"relayTicket":{"ticket":"l1.a.b","draining":true}}')).toEqual({ kind: 'ticket', ticket: 'l1.a.b', draining: true });
     expect(parseRelayLinkNotice('{"relayTicket":{"ticket":null,"draining":false}}')).toEqual({ kind: 'ticket', ticket: null, draining: false });
     expect(parseRelayLinkNotice('{"paired":{"ok":true}}')).toBeNull();

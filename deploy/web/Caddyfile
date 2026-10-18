@@ -7,7 +7,9 @@
 	encode zstd gzip
 	# Hashed bundle names: cache forever. index.html / config.json: always revalidate.
 	header /assets/* Cache-Control "public, max-age=31536000, immutable"
-	@html path / /index.html /about/ /about/index.html
+	# The static pages' assets carry a content hash in their names too (tools/site/build-site.mjs).
+	header /s/* Cache-Control "public, max-age=31536000, immutable"
+	@html path / /index.html /about/ /about/index.html /how-to-play-asherons-call/ /how-to-play-asherons-call/index.html /servers/ /servers/index.html /mac-linux/ /mac-linux/index.html /eras/ /eras/index.html
 	header @html Cache-Control "no-cache"
 	header /config.json Cache-Control "no-store"
 	header /version.json Cache-Control "no-store"

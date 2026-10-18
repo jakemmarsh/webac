@@ -183,6 +183,8 @@ export { ClientConnection, parseAgentCall, parsePairingReply, parseRelayLinkNoti
 export { BRIDGE_CLOSE_IP_CAP, BRIDGE_CLOSE_WORLD_FULL, BRIDGE_CLOSE_NEW_ACCOUNT_CAP, BRIDGE_CLOSE_NEW_ACCOUNT_UNAVAILABLE, BridgeRefusalError, bridgeRefusalFromClose, bridgeRefusalOf, type BridgeRefusal } from './BridgeRefusal.js';
 export type { ConnectionEventType, ConnectionEvent, ConnectionListener, DisconnectCause, BridgeHealth, HealthSocketLike, RoutinesGrant, PairingReply, RelayLinkNotice, AgentCallFrame, ServerNetError } from './ClientConnection.js';
 export { hostClientConnection, NET_SNAPSHOT_INTERVAL_MS } from './NetWorker.js';
+export { SocketHandover, handoverUrl, HANDOVER_TICKET_REQUEST, HANDOVER_RELEASE, HANDOVER_TICKET_TIMEOUT_MS, HANDOVER_ADOPT_TIMEOUT_MS, HANDOVER_BIND_TIMEOUT_MS } from './SocketHandover.js';
+export type { HandoverResult, HandoverSocket, HandoverStage, SocketHandoverOptions } from './SocketHandover.js';
 export { createConnection } from './createConnection.js';
 export { hex32, msAgo, boundNetDiagnostics, NET_DIAG_END_CAUSES, NET_DIAG_MAX_MS, NET_DIAG_MAX_COUNT, NET_DIAG_TX_RING, NET_DIAG_WHAT_RE, TxRing, messageLabel, joinLabels } from './NetDiagnostics.js';
 export type { NetDiagnostics, NetTxRecord, BoundTxRecord } from './NetDiagnostics.js';

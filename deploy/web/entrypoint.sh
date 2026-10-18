@@ -48,7 +48,9 @@ else
   [ -n "$ERA_DAT_SETS" ] && echo "ACJS_ERA_DAT_SETS ignored: expected {\"era-id\":\"https://…/v1/sets/<set>.json\"}" >&2
   ERA_DAT_SETS_JSON="{}"
 fi
-printf '{"assetBase":"%s","bridgeUrl":"%s","datSet":%s,"sourceUrl":%s,"eraAssetBases":%s,"eraDatSets":%s}\n' \
+# siteLinks: this image serves deploy/web/site (/about/, /servers/, …) beside
+# the client, so the launcher links to those pages.
+printf '{"assetBase":"%s","bridgeUrl":"%s","datSet":%s,"sourceUrl":%s,"siteLinks":true,"eraAssetBases":%s,"eraDatSets":%s}\n' \
   "$(json_escape "$ASSET_BASE")" "$(json_escape "$BRIDGE_URL")" "$DAT_SET_JSON" "$SOURCE_JSON" "$ERA_ASSET_BASES_JSON" "$ERA_DAT_SETS_JSON" > /srv/config.json
 
 # Update notifier: the build this image carries, plus an optional urgent flag

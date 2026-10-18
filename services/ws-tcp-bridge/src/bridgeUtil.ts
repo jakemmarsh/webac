@@ -175,6 +175,12 @@ export interface BridgeConfig {
   mcpPublicUrl: string;
   mcpAccounts: string[];
   mcpSecret: string | null;
+  /**
+   * The secret two deployments share to vouch for a session's planned handover (handover.ts):
+   * BRIDGE_HANDOVER_SECRET, else BRIDGE_MCP_SECRET (≥ 32 characters). Null: a draining bridge
+   * can't hand its sessions over, and they stay until they end or the drain's hard cut.
+   */
+  handoverSecret: string | null;
   /** BRIDGE_CONNECT_PAGE: the game's connect screen (e.g. https://playwebac.com/); authorize redirects there. Unset: the bridge's plain page. */
   mcpConnectPage: string | null;
   /**
@@ -434,6 +440,7 @@ export function resolveBridgeConfig(
     mcpAccounts: (env.BRIDGE_MCP_ACCOUNTS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
     previewAccounts: (env.BRIDGE_PREVIEW_ACCOUNTS ?? env.BRIDGE_MCP_ACCOUNTS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
     mcpSecret: env.BRIDGE_MCP_SECRET || null,
+    handoverSecret: [env.BRIDGE_HANDOVER_SECRET, env.BRIDGE_MCP_SECRET].find((s) => !!s && s.length >= 32) ?? null,
     mcpConnectPage: /^https?:\/\//.test(env.BRIDGE_CONNECT_PAGE ?? '') ? env.BRIDGE_CONNECT_PAGE! : null,
     egress: resolveEgressConfig(env),
   };

@@ -301,3 +301,47 @@ export function casterGap(items: readonly AgentItem[] | null, trainedMagic: bool
     ? `${inPack.name} is in your pack: wield it (ac_equip ${inPack.name})`
     : 'you carry none: buy one (./world-query sells "Wand", or an Archmage or magic shop)'}`;
 }
+
+/**
+ * After an equip: what the swap did to your armor, before you have to find out from the paperdoll. Each piece it took
+ * off against the new one (armor levels when appraised, the parts each covers), and every body part it left with
+ * nothing on, or with clothing only where armor was. Arcanist's corpse greaves (lower legs only) took off his Platemail
+ * Leggings (upper and lower legs) and left his upper legs in Trousers alone, and his corpse Gloves (AL 218) took off
+ * Leather Gauntlets (AL 280); he found out by ac_gear and two appraisals, swapped back in peace mode beside Tusker
+ * Liberators and died mid-swap (Tusker Habitat 0x5B47, 2026-10-17 22:18:55–22:19:08Z). '' when nothing came off and
+ * nothing went bare.
+ */
+export function equipSwapText(guid: number, before: readonly AgentItem[], after: readonly AgentItem[]): string {
+  const onBefore = worn(before);
+  const onAfter = worn(after);
+  const put = onAfter.find((i) => i.guid === guid) ?? after.find((i) => i.guid === guid);
+  const off = onBefore.filter((b) => b.guid !== guid && !onAfter.some((a) => a.guid === b.guid));
+  const lines: string[] = [];
+  const body = (it: AgentItem): boolean => ((it.mask ?? 0) & BODY_BITS) !== 0 || ((it.validLocations ?? 0) & BODY_BITS) !== 0;
+  const parts = (it: AgentItem): string[] => partsOf(it, it.mask ?? it.validLocations ?? 0).map((p) => p.name);
+  const al = (it: AgentItem): string => (it.armorLevel !== undefined ? `AL ${it.armorLevel}` : it.appraised ? 'no armor level' : 'AL ? (not appraised)');
+  const desc = (it: AgentItem): string => { const ps = parts(it); return `${tag(it)} (${al(it)}${ps.length ? `, covers ${ps.join(' + ')}` : ''})`; };
+  const armorOff = off.filter(body);
+  if (put && body(put) && armorOff.length) {
+    lines.push(`taking off ${armorOff.map(desc).join(' and ')} for ${desc(put)}`);
+    const known = armorOff.filter((o) => o.armorLevel !== undefined);
+    if (put.armorLevel !== undefined && known.length === armorOff.length) {
+      const was = known.reduce((t, o) => t + o.armorLevel!, 0);
+      const diff = put.armorLevel - was;
+      if (diff !== 0) lines.push(`armor level ${was} → ${put.armorLevel} where they overlap: ${Math.abs(diff)} ${diff < 0 ? 'LESS' : 'more'}`);
+    } else lines.push(`appraise ${[put, ...armorOff].filter((i) => i.armorLevel === undefined && !i.appraised).map(tag).join(' and ')} to compare armor levels (ac_appraise)`);
+  }
+  // Parts covered before and bare now; parts that had armor before and only clothing now.
+  const covers = (on: AgentItem[], p: BodyPart): AgentItem[] => on.filter((w) => partsOf(w, w.mask ?? 0).includes(p));
+  const armored = (w: AgentItem, p: BodyPart): boolean => p.armor === 0 || ((w.mask ?? 0) & p.armor) !== 0 || ((w.coverage ?? 0) & p.cov & ~0xff) !== 0;
+  const bare: string[] = [];
+  const clothOnly: string[] = [];
+  for (const p of BODY_PARTS) {
+    const was = covers(onBefore, p), now = covers(onAfter, p);
+    if (was.length && !now.length) bare.push(p.name);
+    else if (p.armor !== 0 && was.some((w) => armored(w, p)) && now.length && !now.some((w) => armored(w, p))) clothOnly.push(`${p.name} (only ${[...new Set(now.map((w) => w.name))].join(', ')})`);
+  }
+  if (bare.length) lines.push(`leaves your ${bare.join(', ')} with nothing on`);
+  if (clothOnly.length) lines.push(`leaves your ${clothOnly.join(', ')} with no armor`);
+  return lines.join('\n  ');
+}

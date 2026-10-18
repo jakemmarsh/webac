@@ -173,6 +173,18 @@ describe('RELEASE.gdle-30s-idle-drop — NetWorkerClient ↔ hostClientConnectio
     expect(FakeWebSocket.last!.url).toBe('ws://other');
   });
 
+  it('a planned bridge handover runs in the worker and its answer comes back as a handover event', () => {
+    const s = session();
+    const before = FakeWebSocket.last;
+    s.client.handover();
+    // The draining bridge has no shared secret: no ticket, nothing moves.
+    (s.ws.onmessage as unknown as (ev: { data: string }) => void)({ data: JSON.stringify({ handoverTicket: { ticket: null, reason: 'no_secret' } }) });
+    const h = s.events.filter((e) => e.type === 'handover');
+    expect(h.map((e) => e.data)).toEqual([expect.objectContaining({ ok: false, stage: 'ticket', reason: 'no_secret', released: false })]);
+    expect(FakeWebSocket.last).toBe(before);
+    expect(s.client.isConnected).toBe(true);
+  });
+
   it('createNetConnection keeps the connection on the page with ?networker=0 or without Worker', () => {
     const inThread = vi.fn(() => ({}) as never);
     expect(createNetConnection('ws://x', { search: '?networker=0', inThread }).inWorker).toBe(false);

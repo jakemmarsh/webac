@@ -43,6 +43,11 @@ export interface CombatMonster {
   blocked?: boolean;
   /** The server has answered "You fail to affect …" to a debuff at it: it is immune to spells that aren't projectiles. */
   magicImmune?: boolean;
+  /**
+   * Beyond VTank (ProtectFellows, beyondVtank.ts): it is on a fellow. Fought before the others of its priority (after a
+   * TargetLock pick), and a candidate out past Monster Range (the macro bounds it by ProtectFellowsDistance).
+   */
+  onFellow?: boolean;
 }
 
 /**
@@ -446,7 +451,7 @@ function candidates(input: CombatInput, maxRange?: number): Candidate[] {
   const ctx: MatchContext = { settings: input.settings };
   const list: Candidate[] = [];
   for (const m of input.monsters) {
-    if (m.dist > max || m.dist < min) continue;
+    if ((m.dist > max && !m.onFellow) || m.dist < min) continue;
     const row = matchMonsterRow(input.rows, m, ctx);
     if (row.priority < 0) continue;
     const weapon = rowWeapon(input, row, m);
@@ -466,6 +471,7 @@ function candidates(input: CombatInput, maxRange?: number): Candidate[] {
     if ((each === 2 || each === 3) && a.needsDebuff !== b.needsDebuff) return first(a.needsDebuff, b.needsDebuff);
     if (a.urgency !== b.urgency) return b.urgency - a.urgency;
     if (a.locked !== b.locked) return first(a.locked, b.locked);
+    if (!!a.m.onFellow !== !!b.m.onFellow) return first(!!a.m.onFellow, !!b.m.onFellow);
     if (a.m.dist < angleRange && b.m.dist < angleRange && a.swaps !== b.swaps) return a.swaps - b.swaps;
     if (a.last !== b.last) return first(a.last, b.last);
     if (method === 1) return a.m.dist - b.m.dist || turn(a) - turn(b);

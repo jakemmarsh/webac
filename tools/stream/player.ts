@@ -72,5 +72,16 @@ export function preparePlayerDir(root: string, repo: string, profile: string): P
     if (!existsSync(f) || readFileSync(f, 'utf8') !== text) writeFileSync(f, text);
     chmodSync(f, 0o755);
   }
+  // The character's ready fight routine (tools/stream/routines/<profile>.json), as ./routine.json: the brief's
+  // `./ac routine action=run file=routine.json` starts it in one call (STREAM.routines-default, 2026-10-17).
+  const ready = join(repo, 'tools', 'stream', 'routines', `${profile}.json`);
+  if (existsSync(ready)) {
+    const text = readFileSync(ready, 'utf8');
+    const f = join(dir, PLAYER_ROUTINE_FILE);
+    if (!existsSync(f) || readFileSync(f, 'utf8') !== text) writeFileSync(f, text);
+  }
   return { dir, ac: './ac', worldQuery: './world-query' };
 }
+
+/** The ready routine's name in a player's directory (preparePlayerDir copies it there). */
+export const PLAYER_ROUTINE_FILE = 'routine.json';

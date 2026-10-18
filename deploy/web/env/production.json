@@ -1,0 +1,19 @@
+{
+  "bridgeUrl": "wss://bridge.playwebac.com",
+  "assetBase": "https://dats.playwebac.com/v1/raw/eol-p2072-c982-h497-l994",
+  "datSetUrl": "https://dats.playwebac.com/v1/sets/eol-p2072-c982-h497-l994.json",
+  "sourceUrl": "https://github.com/jakemmarsh/webac",
+  "eraAssetBases": {
+    "classicace-infiltration": "https://dats.playwebac.com/v1/raw/classicace-infiltration-1.9",
+    "classicace-customdm": "https://dats.playwebac.com/v1/raw/classicace-customdm-1.60",
+    "classic-dereth": "https://dats.playwebac.com/v1/raw/classic-dereth-1.1",
+    "ac1999-retail": "https://dats.playwebac.com/v1/raw/ac1999-retail-p102-c67"
+  },
+  "eraDatSets": {
+    "classicace-infiltration": "https://dats.playwebac.com/v1/sets/classicace-infiltration-1.9.json",
+    "classicace-customdm": "https://dats.playwebac.com/v1/sets/classicace-customdm-1.60.json",
+    "classic-dereth": "https://dats.playwebac.com/v1/sets/classic-dereth-1.1.json",
+    "ac1999-retail": "https://dats.playwebac.com/v1/sets/ac1999-retail-world-p102-c67.json"
+  },
+  "updateUrgent": false
+}

@@ -12,6 +12,7 @@
 import { CLIENT_ERROR_MAX_BODY } from './clientErrors.js';
 import { CLIENT_PREWORLD_MAX_BODY } from './clientPreworld.js';
 import type { IncomingMessage, ServerResponse } from 'http';
+import { gzipSync } from 'zlib';
 
 export type ByteDirection = 'ws_in' | 'udp_out' | 'udp_in' | 'ws_out';
 export type DropReason = 'rate_limited' | 'backpressure' | 'foreign_udp' | 'spp_missing';
@@ -186,8 +187,14 @@ export function makeHttpHandler(
       return send(200, 'application/json', JSON.stringify(healthzBody(snapshot())), cors);
     }
     if (url.pathname === '/servers') {
-      const body = opts.servers ? opts.servers() : { mode: snapshot().mode, updatedAt: null, servers: [] };
-      return send(200, 'application/json', JSON.stringify(body), cors);
+      const body = JSON.stringify(opts.servers ? opts.servers() : { mode: snapshot().mode, updatedAt: null, servers: [] });
+      // Every launcher load fetches this list (~18 KB of JSON, ~4 KB gzipped), so it goes compressed.
+      if (/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) {
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'content-encoding': 'gzip', vary: 'accept-encoding', ...cors });
+        res.end(req.method === 'HEAD' ? undefined : gzipSync(body));
+        return;
+      }
+      return send(200, 'application/json', body, { vary: 'accept-encoding', ...cors });
     }
     if (url.pathname === '/metrics') {
       if (opts.metricsToken && req.headers.authorization !== `Bearer ${opts.metricsToken}`) {

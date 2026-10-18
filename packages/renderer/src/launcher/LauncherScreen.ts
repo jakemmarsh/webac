@@ -32,6 +32,7 @@ import { descRef } from '../ui/DatTextStyle.js';
 import {
   type World, type WorldDirectory, connectUrlFor, parseCustomBridge, probeCustomBridge, worldEnterBlock, worldRegistrationText,
 } from './worldDirectory.js';
+import { matchUrlWorld } from './urlLogin.js';
 import { loadFavoriteWorlds, loadRememberedLogin, saveFavoriteWorlds, saveRememberedLogin, worldKeyOf, type RememberedLogin } from './launcherStorage.js';
 
 export const CHARSEL_LAYOUT = 0x21000004;
@@ -54,6 +55,24 @@ const EL_EXIT = 0x100003a4;
 const BUTTON_IDS = [EL_RESTORE, EL_DELETE, EL_CREATE, EL_ENTER, EL_CREDITS, EL_EXIT];
 /** UIElement disabled state. */
 const UI_STATE_DISABLED = 0xd;
+
+/**
+ * The site's own pages (deploy/web/site), linked from the launcher so a
+ * rendered page has crawlable links to them. Same tab: they are our own site.
+ * Two rows: all five don't fit one line in the 259 px gap between the
+ * CUSTOM… and CREDITS plates in font 0x40000000.
+ */
+export const LAUNCHER_SITE_LINKS: readonly (readonly { label: string; href: string }[])[] = [
+  [
+    { label: 'How to play', href: '/how-to-play-asherons-call/' },
+    { label: 'Servers', href: '/servers/' },
+    { label: 'Mac & Linux', href: '/mac-linux/' },
+  ],
+  [
+    { label: 'Eras', href: '/eras/' },
+    { label: 'About', href: '/about/' },
+  ],
+];
 
 /** Text styles (DAT text elements) the launcher draws with. */
 export const LAUNCHER_TEXT = {
@@ -148,6 +167,18 @@ export interface LauncherOptions {
    * players of the hosted client are offered its source; null hides the link.
    */
   sourceUrl?: string | null;
+  /**
+   * Show the links to the site's own pages (LAUNCHER_SITE_LINKS, config.json
+   * `siteLinks`): true where the web image serves deploy/web/site beside the
+   * client, false (local dev) where those pages don't exist.
+   */
+  siteLinks?: boolean;
+  /**
+   * `?world=<id or name>` (urlLogin.resolveUrlWorld): once the list loads,
+   * that directory world is selected as a click on its row would select it.
+   * Unknown or incompatible: the usual default selection.
+   */
+  linkedWorld?: string | null;
   /**
    * A custom bridge's era from its /healthz (worldDirectory.probeCustomBridge;
    * tests pass a fake). Rejects when the bridge answered neither probe: the
@@ -254,6 +285,8 @@ export class LauncherScreen {
   private pendingEnter = false;
   private account = '';
   private remembered: RememberedLogin;
+  /** The `?world=` link, until the first directory load consumes it. */
+  private linkedWorld: string | null;
   private resolve: ((c: LauncherChoice) => void) | null = null;
   private handle: { destroy(): void } | null = null;
   private listEl: HTMLElement | null = null;
@@ -270,6 +303,7 @@ export class LauncherScreen {
   private unsubscribeArrivals: (() => void) | null = null;
 
   constructor(private readonly kit: LauncherKit, private readonly opts: LauncherOptions) {
+    this.linkedWorld = opts.linkedWorld ?? null;
     this.remembered = loadRememberedLogin(opts.storage === undefined ? undefined : opts.storage);
     this.account = opts.prefillAccount ?? this.remembered.account ?? '';
     this.favorites = loadFavoriteWorlds(opts.storage === undefined ? undefined : opts.storage);
@@ -323,9 +357,12 @@ export class LauncherScreen {
   private load(): Promise<void> {
     this.loadingWorlds = true;
     this.loaded = (async () => {
+      let linked: World | null = null;
       try {
         const dir = await this.opts.loadDirectory();
         this.mode = dir.mode;
+        linked = matchUrlWorld(dir.worlds, this.linkedWorld);
+        this.linkedWorld = null;
         const custom = this.worlds.filter((w) => w.kind === 'custom');
         this.worlds = [...custom, ...dir.worlds];
         const key = this.remembered.worldKey;
@@ -353,6 +390,7 @@ export class LauncherScreen {
       this.loadingWorlds = false;
       if (!this.done) {
         this.refresh();
+        if (linked) this.select(linked);
         this.revealSelected();
         if (this.pendingEnter) {
           this.pendingEnter = false;
@@ -412,6 +450,28 @@ export class LauncherScreen {
       });
       src.appendChild(this.kit.text('Source code (AGPL-3.0)', LAUNCHER_TEXT.body, { color: this.dim }));
       inner.appendChild(src);
+    }
+
+    // The site's own pages, two rows above the source link (ENTER's circle
+    // ends at y 500), centred in the same 230 px box.
+    if (this.opts.siteLinks) {
+      LAUNCHER_SITE_LINKS.forEach((row, i) => {
+        const rowEl = document.createElement('div');
+        rowEl.className = 'launcher-site-links';
+        Object.assign(rowEl.style, {
+          position: 'absolute', left: '236px', top: `${534 + i * 16}px`, width: '230px',
+          display: 'flex', justifyContent: 'center', columnGap: '12px', zIndex: '2',
+        });
+        for (const link of row) {
+          const a = document.createElement('a');
+          a.className = 'launcher-site-link';
+          a.href = link.href;
+          a.style.textDecoration = 'none';
+          a.appendChild(this.kit.text(link.label, LAUNCHER_TEXT.body, { color: this.dim }));
+          rowEl.appendChild(a);
+        }
+        inner.appendChild(rowEl);
+      });
     }
 
     const listHost = lh?.elements.get(EL_LIST) ?? (() => {

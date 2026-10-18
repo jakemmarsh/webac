@@ -1,8 +1,8 @@
 /**
- * The AWS host's deploy agent (deploy/aws/host/deploy-agent.sh, changed_for)
- * rebuilds a service only when a changed file matches its railway.json
- * watchPatterns, the rule Railway applied before it was deleted (2026-10-17;
- * the files keep their names). Every file its Dockerfile copies must match
+ * tools/build-push-images.sh builds a new image for a service only when a
+ * changed file matches its railway.json watchPatterns (tools/image-source.sh;
+ * otherwise the commit gets the previous image's tag), the rule Railway
+ * applied before it was deleted (2026-10-17; the files keep their names). Every file its Dockerfile copies must match
  * one, or a change to it never deploys: the bridge copied tools/ac-agent/*
  * (the hosted connector's tool table and guide) and the agent's format.ts
  * without watching them, so their changes sat undeployed (2026-10-11).
@@ -17,7 +17,7 @@ const SERVICES = [
   { config: 'deploy/web/railway.json' },
 ];
 
-/** A watch glob (Railway's syntax, as deploy-agent.sh reads it) as a matcher: `**` any depth, `*` within one path segment. */
+/** A watch glob (Railway's syntax, as tools/image-source.sh reads it) as a matcher: `**` any depth, `*` within one path segment. */
 export function globMatcher(patterns: string[]): (path: string) => boolean {
   const res = patterns.map((p) => new RegExp(`^${p.split('**').map((part) => part.split('*').map((t) => t.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*')}$`));
   return (path) => res.some((r) => r.test(path));

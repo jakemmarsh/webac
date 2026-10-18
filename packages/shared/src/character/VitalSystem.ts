@@ -238,8 +238,9 @@ export class VitalSystem {
    *            total < 5) — "a creature cannot fall below 5 MaxVital".
    * The formula reads BUFFED attributes when enchanted (Endurance buffs raise
    * max health). Vitae applies even to the unenchanted value, as in ACE.
+   * `withVitae` false gives the max as it would be without the vitae penalty (the agent's vitae facts).
    */
-  getMaxValue(id: VitalId, attributes: AttributeSystem, enchanted = true): number {
+  getMaxValue(id: VitalId, attributes: AttributeSystem, enchanted = true, withVitae = true): number {
     const vital = this.vitals.get(id);
     if (!vital) return 0;
     const ctx = this.statContext?.() ?? null;
@@ -254,7 +255,7 @@ export class VitalSystem {
     const key = VITAL_MAX_KEY[id];
     const multiplier = enchanted && ench ? ench.getVitalModMultiplier(key) : 1.0;
     let fTotal = Math.fround(total * multiplier);
-    if (mods && ench) {
+    if (mods && ench && withVitae) {
       const vitae = ench.getVitae();
       if (vitae !== 1.0) fTotal = Math.fround(fTotal * vitae);
     }

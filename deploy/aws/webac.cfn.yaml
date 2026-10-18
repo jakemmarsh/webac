@@ -32,6 +32,19 @@ Parameters:
   BudgetUsd:
     Type: Number
     Default: 30
+  GitHubOidcProviderArn:
+    Type: String
+    Default: ''
+    Description: >-
+      An existing IAM OIDC provider for token.actions.githubusercontent.com in this
+      account (only one may exist per URL). Empty = the stack creates it.
+  GitHubRepo:
+    Type: String
+    Default: jakemmarsh/acjs
+    Description: The repository whose main-branch CI may push images (owner/name).
+
+Conditions:
+  CreateGitHubOidcProvider: !Equals [!Ref GitHubOidcProviderArn, '']
 
 Resources:
   Vpc:
@@ -121,6 +134,13 @@ Resources:
               - Effect: Allow
                 Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
                 Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/webac/*
+              # Pull the images CI or tools/build-push-images.sh pushed (deploy-agent.sh).
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability, ecr:DescribeImages]
+                Resource: [!GetAtt WebRepository.Arn, !GetAtt BridgeRepository.Arn]
               # Per-session egress addresses (services/ws-tcp-bridge/src/egress.ts).
               - Effect: Allow
                 Action: [ec2:DescribeAddresses, ec2:DescribeNetworkInterfaces]
@@ -152,6 +172,78 @@ Resources:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles: [!Ref Role]
+
+  # Images (docs/aws-hosting.md, "Images"): built off the host by tools/build-push-images.sh,
+  # tagged with their source commit's full sha. Tags are immutable, so a tag always names
+  # the bytes that were deployed under it; the newest 30 of each stay for rollbacks.
+  WebRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: webac-web
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules":[{"rulePriority":1,"description":"keep the newest 30 images",
+          "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":30},
+          "action":{"type":"expire"}}]}
+  BridgeRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: webac-bridge
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules":[{"rulePriority":1,"description":"keep the newest 30 images",
+          "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":30},
+          "action":{"type":"expire"}}]}
+
+  # GitHub Actions (.github/workflows/ci.yml) pushes images through this role, assumed with
+  # the workflow's OIDC token: only main-branch runs of GitHubRepo. Its ARN goes in the repo
+  # variable AWS_DEPLOY_ROLE_ARN.
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateGitHubOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1, 1c58a3a8518e8759bf075b76b750d4f2df264fcd]
+  GitHubImageRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: webac CI pushes images to ECR (GitHub Actions OIDC, main only)
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateGitHubOidcProvider, !Ref GitHubOidcProvider, !Ref GitHubOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+                'token.actions.githubusercontent.com:sub': !Sub repo:${GitHubRepo}:ref:refs/heads/main
+      Policies:
+        - PolicyName: webac-image-push
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ecr:GetAuthorizationToken, sts:GetCallerIdentity]
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: [!GetAtt WebRepository.Arn, !GetAtt BridgeRepository.Arn]
 
   BridgeLogs:
     Type: AWS::Logs::LogGroup
@@ -235,3 +327,13 @@ Outputs:
     Value: !Ref PublicAddress
   InstanceId:
     Value: !Ref Instance
+  ImageRegistry:
+    Description: ECR registry host; images are <registry>/webac-web and <registry>/webac-bridge.
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+  WebRepositoryUri:
+    Value: !GetAtt WebRepository.RepositoryUri
+  BridgeRepositoryUri:
+    Value: !GetAtt BridgeRepository.RepositoryUri
+  GitHubImageRoleArn:
+    Description: Set as the GitHub repo variable AWS_DEPLOY_ROLE_ARN.
+    Value: !GetAtt GitHubImageRole.Arn

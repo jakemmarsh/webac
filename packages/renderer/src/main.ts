@@ -172,7 +172,7 @@ import { gatherLoadout } from './agent/macro/defaultLoadout.js';
 import { NavLinesOverlay, routeNavPoints } from './scene/NavLines.js';
 import { NametagAssessQueue, NametagOverlay, chooseNametags, nametagAllegiance, nametagAppraisal, nametagBaseType, nametagNeedsAssess, nametagObjectHeight, nametagTextCanvas, nametagTextureFromCanvas, readNametagSettings, type NametagSource } from './scene/Nametags.js';
 import { exposeDebugGlobal, readDebugGlobal, debugBag, debugGlobalsEnabled } from './utils/debugGlobals.js';
-import { resolveUrlLogin } from './launcher/urlLogin.js';
+import { resolveUrlLogin, resolveUrlWorld, withoutUrlWorld } from './launcher/urlLogin.js';
 import { urlOverridesEnabled } from './config/urlOverrides.js';
 import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, type World } from './launcher/worldDirectory.js';
 import { eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
@@ -318,7 +318,7 @@ import {
   buildChangeStoragePermissionPayload,
   buildAddFriendPayload,
   buildRemoveFriendPayload} from '@ac/network';
-import type { NetDiagnostics, ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant, PairingReply, RelayLinkNotice } from '@ac/network';
+import type { NetDiagnostics, ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant, PairingReply, RelayLinkNotice, HandoverResult } from '@ac/network';
 import { ServerMessageHandler } from './network/ServerMessageHandler.js';
 import { applySetStackSize } from './network/applySetStackSize.js';
 import { getObjectSplitSize } from './inventory/dragSplit.js';
@@ -375,6 +375,7 @@ import { decidePositionCorrection, blendStep } from './world/PositionCorrection.
 import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from './session/SessionLifecycle.js';
 import { ProvenLoginRetry, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { handleUnexpectedDrop } from './session/UnexpectedDrop.js';
+import { DrainHandover } from './session/DrainHandover.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel } from './session/AccountTabGuard.js';
 import { SquelchState } from './session/SquelchState.js';
 import { LastOutsideDeathState } from './session/LastOutsideDeathState.js';
@@ -5270,6 +5271,7 @@ async function main() {
     gameLoop.start();
     gameStarted = true;
     preworldReporter?.enteredWorld();
+    drainHandover.onEnteredWorld();
     worldReporter?.enteredWorld(worldResumePending);
     worldResumePending = false;
     // CORE.17.k — retail gmUIElement_LinkStatusIndicator::UseTime: feed the
@@ -5308,7 +5310,7 @@ async function main() {
           scheduleResume,
           raiseServerDied: () => raiseServerDied(undefined, cause, net),
         });
-        if (verdict === 'resuming') worldResumePending = true;
+        if (verdict === 'resuming') { worldResumePending = true; drainHandover.onSessionDropped(); }
       }
     }, LINK_STATUS_TICK_MS);
     // Reveal the WebGL canvas — kept hidden during pre-play to avoid sky bleed-through
@@ -7421,6 +7423,14 @@ async function main() {
   // credentials; only dev builds may log in from the URL (the probe
   // tooling's ?account=&password=), see launcher/urlLogin.ts.
   const urlLogin = resolveUrlLogin(window.location.search, urlOverridesEnabled());
+  // ?world=<id or name>: preselects a launcher world, credential-free, so it
+  // works on deployed builds. Consumed once (stripped from the URL): a later
+  // launcher or an era reload keeps the player's own choice.
+  let linkedWorld = resolveUrlWorld(window.location.search);
+  if (linkedWorld) {
+    const stripped = withoutUrlWorld(window.location.href);
+    if (stripped !== window.location.href) window.history.replaceState(window.history.state, '', stripped);
+  }
   let aceAccount = urlLogin.autoLogin?.account ?? '';
   let acePassword = urlLogin.autoLogin?.password ?? '';
   /** The account name as ACE stores it (from the CharacterList); see session/ServerAccountName.ts. */
@@ -7566,7 +7576,10 @@ async function main() {
         prefillAccount: aceAccount || urlLogin.prefillAccount,
         loadDirectory: () => loadWorldDirectory(bridgeUrl),
         sourceUrl: runtimeConfig.sourceUrl,
+        siteLinks: runtimeConfig.siteLinks,
+        linkedWorld,
       });
+      linkedWorld = null;
       launcherActive = false;
       const target = launcherEraTarget(choice.world, activeEra);
       if (target.id !== activeEra.id) {
@@ -7773,6 +7786,56 @@ async function main() {
     return true;
   };
   /**
+   * A bridge deploy (docs/bridge-handover.md): the draining bridge says so on
+   * every session, and at a safe moment the session moves to the new
+   * deployment without leaving the world (NetConnection.handover; the server
+   * never sees a change). Never in danger: a session that finds no safe
+   * moment stays until the drain's hard cut, and the resume above brings it
+   * back. Not retail (it had no bridge): part of the named reconnect
+   * exception in CLAUDE.md.
+   */
+  let lastCombatAt: number | null = null;
+  const drainHandover = new DrainHandover({
+    now: () => Date.now(),
+    safety: () => {
+      const som = serverObjectManager;
+      const me = aceCharGuid !== null ? aceCharGuid >>> 0 : 0;
+      let hostilesSeeking = 0;
+      if (me && som) {
+        for (const o of som.getAllObjects().values()) {
+          if ((o.guid >>> 0) === me || !isObjectAttackable(o, som.playerDescFlags) || som.isDying(o.guid)) continue;
+          const mt = o.moveTo;
+          // Chasing it or turning to face it (ACE Monster_Navigation's MoveTo / TurnTo on its AttackTarget), or stuck to it.
+          if ((mt?.isMovingTo() && (mt.topLevelObjectId >>> 0) === me) || ((o.physics?.stickyObjectId() ?? 0) >>> 0) === me) hostilesSeeking++;
+        }
+      }
+      return {
+        // The server has the character in the world (PlayerCreate), whether or not the page has drawn it yet.
+        inWorld: sessionLifecycle.inWorld,
+        entering: sessionLifecycle.enterWorldPending || sessionLifecycle.resumingAfterDrop,
+        combatStance: combatController.mode !== CombatMode.NonCombat,
+        dead: playerDead || playerState.isDead,
+        portalSpace: gameUI.portalSpaceCovering || pendingTeleport,
+        trade: gameUI.isTradeVisible,
+        vendor: gameUI.isVendorVisible,
+        dialog: gameUI.openBlockingWindow(),
+        lastCombatAt,
+        hostilesSeeking,
+      };
+    },
+    handover: () => aceConnection.handover(),
+    report: (r) => preworldReporter?.handover(r),
+    log: (text) => console.log(`[AC:handover] ${text}`),
+  });
+  aceConnection.on((e) => {
+    if (e.type === 'relayLink') {
+      const n = e.data as RelayLinkNotice;
+      if (n.kind === 'draining') drainHandover.onDraining(n.handover === true);
+    } else if (e.type === 'handover') {
+      drainHandover.onResult(e.data as HandoverResult);
+    }
+  });
+  /**
    * RELEASE.launcher-screen — the char-select World box: log off this world
    * cleanly (the bridge sends the server its Disconnect), show the launcher,
    * then connect to the world chosen there (same grace period as above).
@@ -7800,6 +7863,7 @@ async function main() {
     // BUG.resume-silent-launcher — every return to the server select says why (a resume
     // that ended there at 2026-10-17 02:34Z left no trace of how).
     preworldReporter?.leftForLauncher(why);
+    drainHandover.reset();
     cancelProvenLoginRetry();
     exitToLauncherAfterLogOff = false;
     accountTabGuard.release();
@@ -7832,6 +7896,7 @@ async function main() {
     serverDiedShown = true;
     cancelProvenLoginRetry();
     worldResumePending = false;
+    drainHandover.reset();
     worldReporter?.left('disconnected', endCause ? { endCause, net } : undefined);
     sessionLifecycle.noteDisconnected();
     sessionLifecycle.endResume();
@@ -10676,6 +10741,8 @@ async function main() {
         };
         const vitalId = vitalMap[data.key];
         if (vitalId !== undefined) {
+          // Health lost to anything (a spell, a fall, a trap): a planned bridge handover waits (session/DrainHandover.ts).
+          if (vitalId === VitalId.Health && data.value < playerState.vitals.getCurrent(VitalId.Health)) lastCombatAt = Date.now();
           logVitalAboveMax(vitalId, data.value, playerState.vitals.setCurrent(vitalId, data.value, playerState.attributes));
           // BUG.char-panel-vitals-stale-on-tick — damage/heal/regen ticks
           // reach here (not onPrivateUpdateVital); without this the panel's
@@ -10756,6 +10823,7 @@ async function main() {
 
       // ── Combat ──
       onAttackerNotification: (data: CombatNotificationData) => {
+        lastCombatAt = Date.now(); // a planned bridge handover waits for the fight to end (session/DrainHandover.ts)
         // DECOMP.hit-chat-lines — HandleAttackerNotificationEvent @ 0056b420:
         // ONE CombatSelf (0x16) line per event, the crit / Sneak Attack /
         // Recklessness prefixes and the target's Critical Protection suffix
@@ -10783,6 +10851,7 @@ async function main() {
         // BUG.combat-attack-charge-build.c — HandleDefenderNotificationEvent
         // @ 0056c920 stamps lastAttackedTime (AutoTarget's 15 s window).
         attackRequest?.noteAttacked();
+        lastCombatAt = Date.now();
         console.log(formatDefenderNotificationLog(data.attackerName, data.damageType, data.damage, data.critical));
         // DECOMP.hit-chat-lines — HandleDefenderNotificationEvent @ 0056c920:
         // ONE CombatEnemy (0x15) line per event (the body part, severity
@@ -10796,6 +10865,7 @@ async function main() {
 
       },
       onEvasionAttacker: (data) => {
+        lastCombatAt = Date.now();
         // DECOMP.evasion-chat-lines — HandleEvasionAttackerNotificationEvent @ 0056c7a0.
         addTextToScroll(gameUI, evasionAttackerLine(data.targetName));
         // Swoosh sounds come from server via GameMessageSound (onSound handler)
@@ -10803,6 +10873,7 @@ async function main() {
       },
       onEvasionDefender: (data) => {
         attackRequest?.noteAttacked(); // HandleEvasionDefenderNotificationEvent @ 0056c620
+        lastCombatAt = Date.now();
         // DECOMP.evasion-chat-lines — "You evaded X!" as CombatEnemy (0x15).
         addTextToScroll(gameUI, evasionDefenderLine(data.attackerName));
         // Evasion sounds come from server via GameMessageSound (onSound handler).
@@ -16238,6 +16309,8 @@ async function main() {
       if (e.type === 'agentCall') { runRelayCall(e.data as RelayCall); return; }
       if (e.type === 'agentPairing') { onPairingReply(e.data as PairingReply); return; }
       if (e.type === 'relayLink') { relayLink.onNotice(e.data as RelayLinkNotice); return; }
+      // The session moved to the new deployment (session/DrainHandover.ts): the game socket carries the relay there again.
+      if (e.type === 'handover') { if ((e.data as HandoverResult).ok) relayLink.reset(); return; }
       if (e.type === 'routinesGrant') routineSync.onGrant(e.data as RoutinesGrant | null, e.error);
       else if (e.type === 'automationAccess') { automationReporter?.automationAccess(e.data === true); if (e.data === true) { startAgent(false); showAutomationUi(); } }
       // Preview UI for the accounts the bridge names (the Virindi Views bar). Follows automationAccess: the answer is whole.
@@ -16494,6 +16567,18 @@ async function main() {
         fellowship: () => gameUI.agentFellowship(),
         fellows: () => gameUI.agentFellows(),
         fellowshipInfo: () => gameUI.agentFellowshipInfo(),
+        fellowshipXp: () => gameUI.agentFellowshipXp(),
+        // The Vitae enchantment's StatModValue from the registry the server keeps in step (ACE Player.Vitae), with the
+        // VitaeCpPool / DeathLevel ints the Vitae panel reads and your max vitals without it (vitaeFacts.ts).
+        vitae: () => {
+          const m = playerState.enchantments.getVitae();
+          if (!(m < 1)) return null;
+          const without = (id: VitalId) => playerState.vitals.getMaxValue(id, playerState.attributes, true, false);
+          return {
+            multiplier: m, cpPool: playerState.vitaeCpPool, deathLevel: playerState.deathLevel > 0 ? playerState.deathLevel : playerState.level,
+            maxWithout: { health: without(VitalId.Health), stamina: without(VitalId.Stamina), mana: without(VitalId.Mana) },
+          };
+        },
         // AGENT.vtank-window — Autostack / Autocram: packs, items by pack slot, and moves through the drop path.
         packs: () => sidePackGuids.flatMap((g, slot) => {
           const guid = slot === 0 ? (aceCharGuid ?? 0) : g;
@@ -17760,7 +17845,7 @@ async function main() {
             // Before the world (a resume attempt's session counts: its world_left already went out).
             if (!wasInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
             // In the world (or mid-resume): reconnect and re-enter on our own first.
-            if (droppedInWorld && scheduleResume()) { worldResumePending = true; break; }
+            if (droppedInWorld && scheduleResume()) { worldResumePending = true; drainHandover.onSessionDropped(); break; }
             raiseServerDied();
           }
           break;

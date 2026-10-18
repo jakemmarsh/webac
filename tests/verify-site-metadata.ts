@@ -89,7 +89,23 @@ describe('search and answer-engine basics', () => {
     expect(doc.body.firstElementChild?.id).toBe('game-canvas');
   });
 
-  it('robots.txt allows crawling and names the sitemap, which lists the home and about pages', () => {
+  it('the <noscript> text links the site\'s pages (root-relative, trailing slash), and og:image:alt states no world count', () => {
+    const holder = doc.createElement('div');
+    holder.innerHTML = doc.querySelector('body > noscript')!.innerHTML;
+    const links = [...holder.querySelectorAll('nav a')].map(a => [a.textContent, a.getAttribute('href')]);
+    expect(links).toEqual([
+      ["How to play Asheron's Call", '/how-to-play-asherons-call/'],
+      ["Asheron's Call servers", '/servers/'],
+      ['Mac & Linux', '/mac-linux/'],
+      ['Classic and 1999 eras', '/eras/'],
+      ['About & FAQ', '/about/'],
+    ]);
+    const alt = doc.querySelector('meta[property="og:image:alt"]')?.getAttribute('content') ?? '';
+    expect(alt).toContain('the list of public worlds');
+    expect(alt).not.toMatch(/\d/);
+  });
+
+  it('robots.txt allows crawling and names the sitemap, which lists the home page and every static page', () => {
     const robots = site('robots.txt');
     expect(robots).toMatch(/^User-agent: \*$/m);
     expect(robots).toMatch(/^Allow: \/$/m);
@@ -98,9 +114,10 @@ describe('search and answer-engine basics', () => {
     expect(sitemapUrl).toBe('https://playwebac.com/sitemap.xml');
     const sitemap = new DOMParser().parseFromString(site('sitemap.xml'), 'application/xml');
     const locs = [...sitemap.getElementsByTagName('loc')].map((l) => l.textContent);
+    const pages = ['how-to-play-asherons-call', 'servers', 'mac-linux', 'eras', 'about'];
     expect(locs).toEqual([
       doc.querySelector('link[rel="canonical"]')?.getAttribute('href'),
-      about.querySelector('link[rel="canonical"]')?.getAttribute('href'),
+      ...pages.map((p) => new DOMParser().parseFromString(site(`${p}/index.html`), 'text/html').querySelector('link[rel="canonical"]')?.getAttribute('href')),
     ]);
   });
 
@@ -130,9 +147,10 @@ describe('search and answer-engine basics', () => {
 
   it('the about page FAQ JSON-LD matches its visible questions', () => {
     const ld = JSON.parse(about.querySelector('script[type="application/ld+json"]')?.textContent ?? '');
-    expect(ld['@type']).toBe('FAQPage');
+    const faq = ld['@graph'].find((n: { '@type': string }) => n['@type'] === 'FAQPage');
     const visible = [...about.querySelectorAll('h3')].map((h) => h.textContent);
-    for (const q of ld.mainEntity) {
+    expect(faq.mainEntity.length).toBeGreaterThan(5);
+    for (const q of faq.mainEntity) {
       expect(q.acceptedAnswer.text.length).toBeGreaterThan(40);
       expect(visible).toContain(q.name);
     }
@@ -142,7 +160,8 @@ describe('search and answer-engine basics', () => {
     for (const img of about.querySelectorAll('img')) {
       const src = img.getAttribute('src') ?? '';
       expect(src.startsWith('/')).toBe(true);
-      expect(statSync(resolve(ROOT, 'deploy/web/site', src.slice(1))).size).toBeGreaterThan(10_000);
+      // The favicon is a 32x32 game icon; the screenshots are real captures.
+      expect(statSync(resolve(ROOT, 'deploy/web/site', src.slice(1))).size).toBeGreaterThan(src.includes('favicon') ? 500 : 10_000);
     }
   });
 

@@ -1263,6 +1263,58 @@ export class EgressManager {
     return { slot, state: { record, file, released: false, allowed: new Set(), publicIp: null, loginAddr: new Map(), lastNewLogin: null, pathProbe: null } };
   }
 
+  /**
+   * A planned handover (handover.ts): this process lets go of the lease
+   * without freeing its slot. The session record stays where it is (another
+   * bridge process takes it over with adopt()); a record nobody adopts goes
+   * stale after SESSION_STALE_MS like a dead process's.
+   */
+  handOff(lease: EgressLease): void {
+    const state = this.leases.get(lease.sessionId);
+    if (!state || state.released) return;
+    state.released = true;
+    this.leases.delete(state.record.sessionId);
+    setMtime(state.file, this.now());
+    this.log('info', 'egress_session_handoff', { egressSession: state.record.sessionId, world: state.record.world, slot: state.record.slot });
+  }
+
+  /**
+   * Take over the session record another bridge process handed off (its
+   * planned handover): this process keeps it fresh and frees it at the end.
+   * Null when there is no such live record, it is for another world, or this
+   * process already holds it.
+   */
+  adopt(sessionId: string, worldKey: string): EgressLease | null {
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(sessionId) || this.leases.has(sessionId)) return null;
+    const world = this.worlds.get(worldKey.toLowerCase());
+    if (!world) return null;
+    const file = path.join(this.dir, 'sessions', `${sessionId}.json`);
+    let record: SessionRecord;
+    try { record = JSON.parse(fs.readFileSync(file, 'utf8')) as SessionRecord; } catch { return null; }
+    if (record.sessionId !== sessionId || record.world !== world.key) return null;
+    const m = mtimeOf(file);
+    if (m === null || this.now() - m > SESSION_STALE_MS) return null;
+    record.pid = process.pid;
+    writeAtomic(file, JSON.stringify(record), this.now());
+    const held = this.readAddr(record.slot);
+    const state: LeaseState = {
+      record, file, released: false, allowed: new Set(), publicIp: held?.publicIp ?? null,
+      loginAddr: new Map(), lastNewLogin: null, pathProbe: null,
+    };
+    this.leases.set(sessionId, state);
+    this.touchActive(record.slot);
+    this.cancelReleaseTimer(record.slot);
+    this.log('info', 'egress_session_adopt', { egressSession: sessionId, world: world.key, slot: record.slot, publicIp: state.publicIp });
+    return {
+      sessionId,
+      world: world.key,
+      get localAddress() { return state.record.slot; },
+      get publicIp() { return state.publicIp; },
+      accountRule: world.newAccountsPerRealIp !== null || world.accountsPerAddress !== null,
+      release: () => this.release(state),
+    };
+  }
+
   private release(state: LeaseState): void {
     if (state.released) return;
     this.dropLease(state);

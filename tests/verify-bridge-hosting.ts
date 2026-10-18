@@ -744,6 +744,10 @@ describe('ERA.dm-support: the web entrypoint passes ACJS_ERA_ASSET_BASES through
     expect(r.csp).toMatch(/connect-src [^;]*https:\/\/cd\.example\.org/);
   });
 
+  it('config.json turns the launcher\'s site links on (the image serves deploy/web/site)', () => {
+    expect(run(undefined).config.siteLinks).toBe(true);
+  });
+
   it('unset or malformed values become {} and config.json stays valid JSON', () => {
     expect(run(undefined).config.eraAssetBases).toEqual({});
     expect(run('{"x":"https://a.org/\\"}evil"}').config.eraAssetBases).toEqual({});

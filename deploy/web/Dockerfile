@@ -6,7 +6,9 @@
 #   PORT             listen port (default 8080; the AWS deploy agent sets 8080)
 # The official images through AWS's public mirror: Docker Hub's anonymous pull limit (429)
 # failed Railway builds twice on 2026-10-09, leaving playwebac.com on the old build.
-FROM public.ecr.aws/docker/library/node:20-slim AS build
+# The build stage runs on the builder's own platform (its output is platform-free JS and
+# static files), so CI's x86 runner builds the arm64 image without emulating the build.
+FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/node:20-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json tsconfig*.json vite.config.ts ./
 COPY packages ./packages
@@ -19,8 +21,8 @@ RUN npm ci --ignore-scripts --no-audit --no-fund
 # The vite build peaks near 2.7 GB. On a 2 GB host (with swap) Node's default heap
 # limit, sized from physical memory, aborts it (exit 134); give it room explicitly.
 ENV NODE_OPTIONS=--max-old-space-size=3584
-# Update notifier build id: the AWS deploy agent (deploy/aws/host/deploy-agent.sh)
-# passes the commit's first 12 characters as ACJS_BUILD_ID, for automatic and
+# Update notifier build id: tools/build-push-images.sh
+# passes the first 12 characters of the image's source commit as ACJS_BUILD_ID, for CI and
 # tools/deploy-aws.sh deploys alike. Unset → a timestamped local build id.
 ARG ACJS_BUILD_ID
 RUN ACJS_BUILD_ID="$ACJS_BUILD_ID" npx vite build

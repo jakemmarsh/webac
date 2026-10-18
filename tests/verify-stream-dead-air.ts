@@ -202,7 +202,8 @@ describe('follow: a leader who vanished beside a portal (rehearsal 2026-10-13: "
     b.cell = 0x545a013c; b.x = 10; b.y = -20;
     const r = await settle(p, 20_000);
     expect(r!.ok).toBe(false);
-    expect(r!.message).toMatch(/^stopped following: Claude Bulwark went out of sight beside Mannikin Foundry Portal #7a9b404a \(\d+ m N of you\): they most likely went through it\. ac_use it to follow/);
+    // From the landscape into a dungeon (2026-10-17 21:55Z reports): the portal, and where the client now places them.
+    expect(r!.message).toMatch(/^stopped following: Claude Bulwark went out of sight beside Mannikin Foundry Portal #7a9b404a \(\d+ m N of you\): they most likely went through it \(the client now places them inside a dungeon\)\. ac_use it to follow/);
   });
   it('with no portal there: where they were last seen in sight, not their new cell\'s far-off coordinates', async () => {
     const p = api.follow('Claude Bulwark', { durationMs: 120_000 });
@@ -210,9 +211,9 @@ describe('follow: a leader who vanished beside a portal (rehearsal 2026-10-13: "
     const b = host.objs.get(BUL)!;
     b.cell = 0x545a013c; b.x = 10; b.y = -20;
     const r = await settle(p, 20_000);
-    const m = /last seen (\d+) m N of you/.exec(r!.message);
-    expect(m).not.toBeNull();
-    expect(Number(m![1])).toBeLessThan(40);
+    // Their new cell is a dungeon's: that, never its far-off distance (2026-10-17 21:55Z reports, "32233 m W").
+    expect(r!.message).toMatch(/went through a portal or recalled: the client now places them inside a dungeon/);
+    expect(r!.message).not.toMatch(/\d{3,} m/);
     expect(r!.message).not.toMatch(/beside/);
   });
 });

@@ -99,6 +99,8 @@ export class NetWorkerClient implements NetConnection {
 
   sendBridgeText(text: string): void { this.post({ t: 'text', text }); }
 
+  handover(): void { this.post({ t: 'handover' }); }
+
   /** The bridge's text health probe needs no session: it runs on the page. */
   checkHealth(): Promise<BridgeHealth> { return probeBridgeHealth(this.url); }
 

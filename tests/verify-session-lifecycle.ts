@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { SessionLifecycle, RESUME_DELAYS_MS, characterSlotIndex, isAutoEnterTargetStillValid } from '@ac/renderer/session/SessionLifecycle.js';
+import { SessionLifecycle, RESUME_DELAYS_MS, RESUME_IN_WORLD_RETRY_DELAYS_MS, IN_WORLD_RETRY_DELAY_MS, characterSlotIndex, isAutoEnterTargetStillValid } from '@ac/renderer/session/SessionLifecycle.js';
 
 const slots = [
   { id: '1342177280', name: 'First' },                    // 0x50000000
@@ -173,6 +173,27 @@ describe('resume after an unexpected drop in the world (bridge restart, network 
     expect(s.resumingAfterDrop).toBe(true);
     expect(s.nextResumeDelay()).toBeNull();
     expect(s.resumingAfterDrop).toBe(false);
+  });
+
+  it('a resume asks again every second while the old character logs out, then at the usual cadence; a normal enter keeps 3 s', () => {
+    const s = inWorldAs(0x50000002);
+    s.noteDisconnected();
+    s.nextResumeDelay();
+    s.noteEnterWorldRequested(0x50000002);
+    const waits: number[] = [];
+    for (let i = 0; i < RESUME_IN_WORLD_RETRY_DELAYS_MS.length + 2; i++) {
+      expect(s.characterInWorldRefusal()).toBe('retry');
+      waits.push(s.inWorldRetryDelay());
+    }
+    expect(waits.slice(0, RESUME_IN_WORLD_RETRY_DELAYS_MS.length)).toEqual([...RESUME_IN_WORLD_RETRY_DELAYS_MS]);
+    expect(waits.slice(-2)).toEqual([IN_WORLD_RETRY_DELAY_MS, IN_WORLD_RETRY_DELAY_MS]);
+    // ACE frees the character 2 s + 5.67 s after the Disconnect: the 1 s retries reach past it.
+    expect(RESUME_DELAYS_MS[0] + RESUME_IN_WORLD_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0)).toBeGreaterThan(2000 + 5667);
+
+    const fresh = new SessionLifecycle();
+    fresh.noteEnterWorldRequested(0x50000001);
+    expect(fresh.characterInWorldRefusal()).toBe('retry');
+    expect(fresh.inWorldRetryDelay()).toBe(IN_WORLD_RETRY_DELAY_MS);
   });
 
   it('re-enters only the character that was in the world, even after a launcher login (auto-enter off)', () => {

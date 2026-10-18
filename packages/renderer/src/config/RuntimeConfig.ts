@@ -35,6 +35,12 @@ export interface RuntimeConfig {
    */
   sourceUrl: string | null;
   /**
+   * The site's own pages (deploy/web/site: /about/, /servers/, …) are served
+   * beside the client, so the launcher links to them. The web image always
+   * writes true; false (local dev, where those pages don't exist) = no links.
+   */
+  siteLinks: boolean;
+  /**
    * Where a classic era's own DATs are hosted, by era id (era/EraBoot.ts,
    * docs/dark-majesty-support.md), e.g. { "classic-dereth":
    * "https://dats.example.org/sets/classic-dereth" }. Empty: the client looks
@@ -58,6 +64,7 @@ export const DEV_RUNTIME_CONFIG: Readonly<RuntimeConfig> = Object.freeze({
   bridgeUrl: 'ws://localhost:9090',
   datSet: null,
   sourceUrl: null,
+  siteLinks: false,
   eraAssetBases: Object.freeze({}) as Record<string, string>,
   eraDatSets: Object.freeze({}) as Record<string, string>,
 });
@@ -119,6 +126,7 @@ export function resolveRuntimeConfig(file: unknown, search: string, allowOverrid
     if (typeof src === 'string' && /^https:\/\//.test(src)) {
       try { cfg.sourceUrl = new URL(src).toString(); } catch { /* invalid: no link */ }
     }
+    if ((file as Record<string, unknown>).siteLinks === true) cfg.siteLinks = true;
   }
   if (file && typeof file === 'object') {
     const bases = (file as Record<string, unknown>).eraAssetBases;

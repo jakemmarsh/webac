@@ -22,7 +22,7 @@ describe('RuntimeConfig (release Phase 1)', () => {
       { assetBase: 'https://dats.example.org/eol/', bridgeUrl: 'wss://bridge.example.org/connect' },
       '',
     );
-    expect(cfg).toEqual({ assetBase: 'https://dats.example.org/eol', bridgeUrl: 'wss://bridge.example.org/connect', datSet: null, sourceUrl: null, eraAssetBases: {}, eraDatSets: {} });
+    expect(cfg).toEqual({ assetBase: 'https://dats.example.org/eol', bridgeUrl: 'wss://bridge.example.org/connect', datSet: null, sourceUrl: null, siteLinks: false, eraAssetBases: {}, eraDatSets: {} });
     expect(assetUrl(cfg, '/client_portal.dat')).toBe('https://dats.example.org/eol/client_portal.dat');
     expect(assetUrl(cfg, 'weenie-setups.json')).toBe('https://dats.example.org/eol/weenie-setups.json');
   });
@@ -61,6 +61,12 @@ describe('RuntimeConfig (release Phase 1)', () => {
 
     const offline = await loadRuntimeConfig(async () => { throw new TypeError('network'); }, '?bridge=wss://x.example');
     expect(offline).toEqual({ ...DEV_RUNTIME_CONFIG, bridgeUrl: 'wss://x.example' });
+  });
+
+  it('siteLinks: only a literal true turns the launcher\'s site links on; dev has none', () => {
+    expect(DEV_RUNTIME_CONFIG.siteLinks).toBe(false);
+    expect(resolveRuntimeConfig({ siteLinks: true }, '').siteLinks).toBe(true);
+    for (const bad of ['true', 1, null, false, {}]) expect(resolveRuntimeConfig({ siteLinks: bad }, '').siteLinks).toBe(false);
   });
 
   it('AGPL §13: sourceUrl takes an https URL; anything else means no source link', () => {

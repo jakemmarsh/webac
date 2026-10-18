@@ -653,6 +653,45 @@ What changed:
   - spells: Item Enchantment trained (166) but no Item Enchantment spells known: buy and read scrolls at a mage shop (Impenetrability, the Banes, Aura of Blood Drinker, Aura of Swift Killer…; you can learn up to level V)
   ```
 
+### Fights run under a routine (2026-10-17)
+
+Jake, agreeing the design of "Cut dead air: routines fight, Claude decides and talks": routines do the moment-to-moment
+fighting. On 2026-10-17 the pair made no routine call in ~21,500 tool calls and died 16 times; in the last two deaths
+each model decision took 4–7 s while three monsters did ~10 health a second, and `attack` / `cast repeat=true` never
+heal and hand control back on danger. The brief only listed a routine beside those two. Now:
+- **Each player has a ready profile**, `tools/stream/routines/<profile>.json` (`mage.json` "Arcanist fights",
+  `soldier.json` "Bulwark fights"), which `preparePlayerDir` copies into the player's directory as `routine.json`.
+  `./ac routine action=run file=routine.json` starts it in one call (nothing stored; `ac_routine file=` validates it as
+  a stored profile would be), `set="Recharge-Norm-HitP=75,AttackDistance=20"` changes settings for that run, and
+  `Read routine.json` shows them. Both are the VirindiTank-style macro (`macro: true`, a `<DEFAULT>` Monsters row on
+  Attack, no rules): the macro's recharge (`rechargePlan.ts`: Heal at / Restam at / Get Mana at, Heal others at), buffs
+  (Arcanist only, recast under 120 s left) and combat (best war bolt for the monster's weakness; the wielded weapon).
+  Arcanist: Monster Range 25 m, heal 70% (top-off 90%), Heal Other on a fellow at 60%, Stamina to Mana at 40%, a
+  Follow route on Bulwark (8 m) when idle. Bulwark: Monster Range 12 m, a kit at 55% (MinimumHealKitSuccessChance 60),
+  a stamina elixir or potion at 20%, no buffing, no route.
+- **Beyond VTank, for this pair** (`beyondVtank.ts` `BEYOND_MACRO_DEFAULTS`; settings beside VTank's, any case):
+  `OnlyEngaged` (off by default, on in both profiles: no fights of its own; what is on or coming at you or a fellow in
+  view, plus the monster you last attacked or cast at by hand), `ProtectFellows` (off; on in both: what is on a fellow
+  is fought first after a TargetLock pick, out to `ProtectFellowsDistance` 30 m past Monster Range, and a swing at
+  another breaks off when one gets on a fellow) and `SkipUnreachableMonsters` (on by default: hand to hand, a monster
+  AIMED AT YOU BUT NOT REACHING YOU or a storey up or down indoors is no target; a bolt still goes where its line is
+  open, which UseProjectileAwareness and the cast's own refusal decide).
+- **Hand-over** (`RoutineEngine.handOver`): every surface command that moves, fights, uses or trades (`HAND_COMMANDS` in
+  `AgentApi.surface`) holds a running routine while it runs and `HAND_GRACE_MS` (3 s) after, then it carries on by
+  itself; `routine` status says "holding: you took over (…)". So the player pulls with `attack`, loots, rebuffs the
+  partner or walks without pausing it; `routine action=stop` before running away, resting or travelling.
+- **Engine fixes found checking this pair's case:** the macro's swing wait (10 s) now ends in half-second slices when
+  health or stamina is under its Recharge-Norm mark (the vitals-low event wakes only at 60%, so a 70% heal mark waited
+  out the swing), when a monster gets on a fellow, or on a hand-over; a recharge between swings sends the attack order
+  afresh. A rules profile's `attack-nearest` no longer holds the whole fight (up to 2 minutes) with no rule checked: a
+  rule above it that fires (the example's "Low health") breaks it off. A Follow route indoors walks to the leader by the
+  doorway route rather than along flat trail corners (a corner past the leader's drop in Mountain Keep was walked on the
+  floor above).
+- **What a routine still can't do here:** choose pulls or targets by plan, decide to leave, buff the partner (VTank
+  buffs only you; Arcanist casts Bulwark's by hand), loot (looting is off in both profiles), or reach what has no way to
+  it. The brief says so, and the players use `attack` / `cast repeat=true` by hand only for a one-off target or one of
+  those, saying which. Tests: `tests/verify-stream-routines-default-2026-10-17.ts`.
+
 ### Dead air (measured 2026-10-14)
 
 Dead air is time a viewer watches a character doing nothing visible. Measure every rehearsal the same way:
@@ -783,6 +822,11 @@ here, not having to hardcode behavior").
   search found a spot once; what worked by hand, six times, was walking to Bulwark. With no spot, the refusal now asks
   `lineOfFireFrom(target, fellow)` (the same path with your body where a fellow in view stands) and says
   `… but where Claude Bulwark stands (10 m NE of you) has: walk_to target="Claude Bulwark" within=2`.
+  Mountain Keep again, 2026-10-17 20:53–21:55Z, after 8725a9c9 registered CylSphere/Sphere-only statics: 46 of 117
+  calls refused (39%, against 46% and 36% in the two segments without them), 14 at the spawn point, most in the walled
+  pocket 0x01D201EA/0x01AD where no such static stands. On 102,619 harness shots there ours and ACE agree on 99.1% with
+  or without the statics; every spawn-side refusal is an ACE miss. Upper storeys: `ZMIN=17 ZMAX=19 … run.sh grid …`
+  (grid searches floors below 4 m unless told). Monster melee reaching you while every bolt is refused is ACE too.
 - **Stream reports, 2026-10-15 (Arcanist / Bulwark).** Four fixes, each with its sweep
   (tests/verify-agent-stream-reports-2026-10-15.ts):
   - *Waits never hand back threats from the dead.* Events queue between looks, so `ac_wait types=aggro` after a fight
@@ -1010,6 +1054,12 @@ here, not having to hardcode behavior").
   - **The overlay missed all three** (the feed keyed on the corpse line, which a dungeon death never gets).
   Tests: tests/verify-agent-death-tally.ts, tests/verify-stream-supervisor.ts (the real lines),
   tests/verify-allegiance-pane-native.ts (the vitals request).
+  - **Vitae read as a buff, "Vitae permanent"** (Arcanist, three deaths in 25 min, 2026-10-17). Observe now has a
+    `VITAE −18%: …` line under the header (agent/vitaeFacts.ts, from the Vitae enchantment's StatModValue): max vitals
+    and every skill N% lower (with the max health without it), the XP that regains the next 1% (retail's Vitae panel)
+    and that clears it (ACE UpdateXpVitae run to the end), the cap at your level, and whether a fellow's kill XP counts
+    (ACE Fellowship.SplitXp: the share for your levels, 600 m). `character` ends with the same line and the stream
+    opening's readiness leads with it. Facts only. Tests: tests/verify-stream-vitae-2026-10-17.ts.
 - **Follow through the hits (2026-10-12).** `ac_follow flee=true` keeps following while you're hit, as `ac_walk_to
   flee=true` does; without it the first hit ends the follow (as before). Arcanist died four times in an hour in Holtburg
   Dungeon: separated from Bulwark, drudge spawners refilled next to the 67-HP mage, its follow ended at the first hit,

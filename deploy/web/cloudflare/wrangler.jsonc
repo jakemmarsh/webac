@@ -1,0 +1,34 @@
+// playwebac.com's static web (the game client + site pages) as Cloudflare Workers Static Assets:
+// an assets-only Worker, so every request is a free, unlimited asset request (a Worker script
+// would count against the Free plan's 100,000 requests a day and fail past it).
+// tools/deploy-web-cf.sh assembles the release and deploys it; docs/web-hosting-cloudflare-plan.md.
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "webac-web",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    // Overridden by deploy-web-cf.sh's --assets; kept so `wrangler` commands resolve the config.
+    "directory": "./empty",
+    // _redirects serves "/" and "/<page>/" from their index.html; nothing is redirected implicitly,
+    // so /index.html and /about/index.html stay 200 as on Caddy.
+    "html_handling": "none",
+    // An unknown path is a plain 404, as on Caddy (no SPA fallback).
+    "not_found_handling": "none"
+  },
+  "routes": [
+    // Staging: the same release on its own name, to diff and play before playwebac.com moves.
+    { "pattern": "next.playwebac.com", "custom_domain": true }
+  ],
+  "env": {
+    "production": {
+      "name": "webac-web",
+      "routes": [
+        { "pattern": "next.playwebac.com", "custom_domain": true },
+        // Inert while the playwebac.com A record is DNS-only; it takes over when that record is proxied.
+        { "pattern": "playwebac.com/*", "zone_name": "playwebac.com" }
+      ]
+    }
+  }
+}

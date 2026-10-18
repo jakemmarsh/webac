@@ -35,3 +35,44 @@ export function resolveUrlLogin(search: string, overridesEnabled: boolean): UrlL
   }
   return { autoLogin: null, prefillAccount: account, server: null };
 }
+
+/**
+ * `?world=<id or name>`: a shareable link that preselects a world in the
+ * launcher's list (playwebac.com/?world=Coldeve), as a click on its row
+ * would. A browser-UX addition (docs/release-plan.md, "Login form"). Unlike
+ * the login parameters above it is honoured on deployed builds, because it
+ * carries no credential: it never logs in, never fills the Account or
+ * Password field, and an unknown or incompatible world changes nothing.
+ */
+export function resolveUrlWorld(search: string): string | null {
+  return new URLSearchParams(search).get('world')?.trim() || null;
+}
+
+/**
+ * The directory world `query` names: an exact Servers.xml id first, then a
+ * case-insensitive name. null when none matches or the match is
+ * `incompatible` (nobody can play there from webAC).
+ */
+export function matchUrlWorld<W extends { id: string | null; name: string; compat: string }>(worlds: readonly W[], query: string | null): W | null {
+  const q = query?.trim();
+  if (!q) return null;
+  const lower = q.toLowerCase();
+  const w = worlds.find((x) => x.id !== null && x.id === q) ?? worlds.find((x) => x.name.trim().toLowerCase() === lower) ?? null;
+  return w && w.compat !== 'incompatible' ? w : null;
+}
+
+/**
+ * `href` without its `world` parameter. The link is consumed once: a later
+ * launcher (after a logout, or the era reload an ENTER can trigger) keeps the
+ * player's own choice instead of jumping back to the linked world.
+ */
+export function withoutUrlWorld(href: string): string {
+  try {
+    const u = new URL(href);
+    if (!u.searchParams.has('world')) return href;
+    u.searchParams.delete('world');
+    return u.toString();
+  } catch {
+    return href;
+  }
+}

@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as http from 'http';
 import type { AddressInfo } from 'net';
+import { gunzipSync } from 'zlib';
 import { parseServersXml, normalizeLinkUrl, type ServerEntry } from '../services/ws-tcp-bridge/src/serverList';
 import {
   parseTreeStatsStatus, parsePlayerCounts, buildDirectory, compareEntries, ServerDirectory, withDetection,
@@ -288,5 +289,26 @@ describe('GET /servers and /healthz (HTTP handler)', () => {
     const h = await fetch(`${base}/healthz`);
     expect(h.headers.get('access-control-allow-origin')).toBe('*');
     expect((await h.json() as { mode: string }).mode).toBe('pinned');
+  });
+
+  it('/servers goes gzipped to a client that accepts it and plain to one that does not, the same JSON either way', async () => {
+    const list = { mode: 'multi', updatedAt: '2026-10-17T00:00:00Z', servers: [{ name: 'Coldeve' }] };
+    const base = await serve('multi', () => list);
+    const raw = (encoding: string | null) => new Promise<{ headers: http.IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
+      http.get(`${base}/servers`, { headers: encoding ? { 'accept-encoding': encoding } : {} }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => resolve({ headers: res.headers, body: Buffer.concat(chunks) }));
+      }).on('error', reject);
+    });
+    const zipped = await raw('gzip, deflate, br');
+    expect(zipped.headers['content-encoding']).toBe('gzip');
+    expect(zipped.headers['vary']).toBe('accept-encoding');
+    expect(zipped.headers['access-control-allow-origin']).toBe('*');
+    expect(JSON.parse(gunzipSync(zipped.body).toString('utf8'))).toEqual(list);
+    const plain = await raw(null);
+    expect(plain.headers['content-encoding']).toBeUndefined();
+    expect(plain.headers['vary']).toBe('accept-encoding');
+    expect(JSON.parse(plain.body.toString('utf8'))).toEqual(list);
   });
 });

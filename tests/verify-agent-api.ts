@@ -161,7 +161,8 @@ describe('AgentApi', () => {
     host.buffs = [{ name: 'Vitae', remaining: -1, beneficial: false }, { name: 'Armor Self I', remaining: 600, beneficial: true }];
     const text = formatObservation(api.observe());
     expect(text).toContain('buffs (1): Armor Self I 10m');
-    expect(text).toContain('debuffs (1): Vitae permanent');
+    // Not "permanent": XP works it off (verify-stream-vitae-2026-10-17.ts has the VITAE line a host with the enchantment gives).
+    expect(text).toContain('debuffs (1): Vitae until XP works it off');
   });
 
   it('fellowship: creates by name, recruits a nearby player by selecting them (back within 5 s for their dialog)', async () => {

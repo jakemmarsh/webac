@@ -6,5 +6,5 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/bin/bash /opt/webac/repo/deploy/aws/host/deploy-agent.sh
-# A web build can take a few minutes on a small instance.
+# Pulls and health checks; images are built elsewhere (tools/build-push-images.sh).
 TimeoutStartSec=30min

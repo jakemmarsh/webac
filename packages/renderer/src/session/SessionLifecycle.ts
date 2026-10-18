@@ -24,7 +24,20 @@
  *     blips not to strand players — a named exception (CLAUDE.md).
  */
 
-/** Delays before each automatic resume attempt; after the last, the Disconnected screen. */
+/**
+ * Delays before each automatic resume attempt; after the last, the Disconnected screen.
+ *
+ * The first stays 2 s for every kind of drop. When the socket closes (or the
+ * page closes a silent one), the bridge sends the server its Disconnect, and
+ * ACE keeps the session 2 s after it (Session.Terminate:
+ * SessionTerminationDetails.TerminationEndTicks). A login inside that window
+ * is refused with CharacterError.Logon and re-arms the window (the refusal
+ * terminates the old session again: AuthenticationHandler.cs), so an earlier
+ * attempt makes an ACE resume slower, not faster. GDLE and the AC1999 server
+ * free the account at the Disconnect, but the character stays in their world
+ * 5 s (CPlayerWeenie::BeginLogout, Player.cpp), which the 0x0D retries below
+ * cover either way. docs/bridge-handover.md has the timings.
+ */
 export const RESUME_DELAYS_MS: readonly number[] = Object.freeze([2000, 5000, 10000]);
 
 /** Wait before re-asking to enter after a "character still in the world" refusal (CharacterError 0x0D). */
@@ -57,6 +70,18 @@ export const IN_WORLD_RETRY_BUDGET = 25;
  * than the 3 s stale-session wait; after these, the usual cadence and budget.
  */
 export const JUST_CREATED_RETRY_DELAYS_MS: readonly number[] = Object.freeze([500, 1000, 2000, 2000]);
+/**
+ * Waits before the first "still in the world" retries of an automatic resume.
+ * The previous session's character is logging out on a known clock: ACE
+ * removes it 2 s + its 5.67 s LogOut motion after the Disconnect
+ * (Player.LogOut_Final; the human motion table's NonCombat LogOut link, 170
+ * frames at 30 fps), GDLE and the AC1999 server 5 s after it
+ * (BeginLogout). A 3 s cadence entered up to 3 s after the character was
+ * free (prod 2026-10-17: 11 s and 15 s from drop to world on Coldeve); a
+ * refusal costs the server one message, so a resume asks every second
+ * through that window, then at the usual cadence.
+ */
+export const RESUME_IN_WORLD_RETRY_DELAYS_MS: readonly number[] = Object.freeze(Array(10).fill(1000) as number[]);
 /** A refusal counts as the new-character save race only this soon after the create reply. */
 export const JUST_CREATED_WINDOW_MS = 10_000;
 
@@ -139,10 +164,12 @@ export class SessionLifecycle {
 
   /**
    * The wait before the retry that characterInWorldRefusal() just granted:
-   * short for the character created moments ago, else IN_WORLD_RETRY_DELAY_MS.
+   * short during an automatic resume (RESUME_IN_WORLD_RETRY_DELAYS_MS) and for
+   * the character created moments ago, else IN_WORLD_RETRY_DELAY_MS.
    */
   inWorldRetryDelay(now: number = Date.now()): number {
     const n = this.inWorldRetries - 1;
+    if (this.resuming && n >= 0 && n < RESUME_IN_WORLD_RETRY_DELAYS_MS.length) return RESUME_IN_WORLD_RETRY_DELAYS_MS[n];
     if (this.createdGuid !== null && this.createdGuid === this.lastEnteredGuid
       && now - this.createdAt <= JUST_CREATED_WINDOW_MS && n >= 0 && n < JUST_CREATED_RETRY_DELAYS_MS.length) {
       return JUST_CREATED_RETRY_DELAYS_MS[n];

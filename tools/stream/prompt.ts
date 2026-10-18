@@ -118,8 +118,17 @@ export function creditsLine(credits: number, next: ReadonlyArray<{ level: number
 }
 
 /**
+ * The sheet's "Vitae: −18%: …" line (AgentApi.characterSheet adds it from the Vitae enchantment: what the penalty
+ * costs and the XP that works it off, vitaeFacts.ts), or null with no vitae.
+ */
+export function vitaeFromSheet(sheet: string | null): string | null {
+  return (sheet ? /^Vitae: (.+)$/m.exec(sheet)?.[1] : null) ?? null;
+}
+
+/**
  * The opening message's readiness block: gear gaps, unspent XP, skill credits and the levels that grant the next ones, the
- * spells each trained magic school lacks (spellGaps.ts), the healing kits and potions in the pack, and the session's deaths. Facts, a few lines; null when none of it could be read.
+ * spells each trained magic school lacks (spellGaps.ts), the healing kits and potions in the pack, the session's deaths, and
+ * the vitae you carry (first: what it costs and the XP that works it off). Facts, a few lines; null when none of it could be read.
  */
 export function readinessBrief(r: {
   items: readonly AgentItem[] | null;
@@ -132,6 +141,8 @@ export function readinessBrief(r: {
   needsCaster?: boolean;
 }): string | null {
   const out = gearGaps(r.items);
+  const vitae = vitaeFromSheet(r.sheet);
+  if (vitae) out.unshift(`- vitae ${vitae}`);
   const caster = casterGap(r.items, magicSchools(r.sheet).length > 0, r.needsCaster ?? true);
   if (caster) out.push(`- gear: ${caster}`);
   const u = unspent(r.sheet);

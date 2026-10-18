@@ -5,6 +5,11 @@
 #
 #   bash tools/aws-cutover.sh status
 #   bash tools/aws-cutover.sh aws        # A records → the stack's Elastic IP
+#   bash tools/aws-cutover.sh web-cf     # playwebac.com proxied: the Cloudflare Worker route serves the web
+#   bash tools/aws-cutover.sh web-aws    # playwebac.com back to DNS-only: the AWS web container (rollback)
+#
+# web-cf / web-aws touch only the playwebac.com record; bridge.playwebac.com stays DNS-only on AWS
+# (docs/web-hosting-cloudflare-plan.md). The A record's IP stays the AWS host's either way.
 #
 # The Cloudflare token (DNS edit, playwebac.com only) is read from SSM /webac/cloudflare-token.
 set -euo pipefail
@@ -28,5 +33,12 @@ case "${1:-status}" in
         --data "$(jq -cn --arg n "$n" --arg ip "$ip" '{type:"A",name:$n,content:$ip,ttl:60,proxied:false}')" >/dev/null
     done
     show ;;
-  *) echo "usage: aws-cutover.sh status|aws" >&2; exit 2 ;;
+  web-cf|web-aws)
+    proxied=false; [ "$1" = web-cf ] && proxied=true
+    id="$(record_id playwebac.com)"
+    cur="$(cf "$API/zones/$ZONE/dns_records/$id" | jq -c '.result | {type,name,content,ttl}')"
+    cf -X PATCH "$API/zones/$ZONE/dns_records/$id" --data "$(jq -cn --argjson p "$proxied" 'if $p then {proxied:true} else {proxied:false,ttl:60} end')" >/dev/null
+    echo "playwebac.com was $cur; now proxied=$proxied"
+    show ;;
+  *) echo "usage: aws-cutover.sh status|aws|web-cf|web-aws" >&2; exit 2 ;;
 esac

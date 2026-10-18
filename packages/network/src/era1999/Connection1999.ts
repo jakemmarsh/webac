@@ -37,6 +37,7 @@ import type { NetConnection } from '../NetWorker.js';
 import { type NetDiagnostics, TxRing, hex32, messageLabel, msAgo } from '../NetDiagnostics.js';
 import type { DisconnectCause } from '../ClientConnection.js';
 import { bridgeRefusalFromClose } from '../BridgeRefusal.js';
+import { SocketHandover, type HandoverResult, type HandoverSocket } from '../SocketHandover.js';
 import { Adapter1999, Group1999 } from './Adapter1999.js';
 import { codecs1999 } from './codecs/index.js';
 import { buildLoginBody1999, readGrant1999 } from './Login1999.js';
@@ -312,6 +313,7 @@ export class Connection1999 implements NetConnection {
   }
 
   connect(account: string, password: string): void {
+    this.cancelHandover();
     if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null; }
     this.stopLoginTimer();
     if (this.serviceTimer) clearInterval(this.serviceTimer);
@@ -343,13 +345,22 @@ export class Connection1999 implements NetConnection {
       }, LOGIN_RESEND_MS);
       this.serviceTimer = setInterval(() => this.service(), SERVICE_MS);
     };
-    let serverReached = false;
+    this.attach(ws, false);
+  }
+
+  /**
+   * A session socket's frame, close and error handlers: the one connect()
+   * opened, or the one a planned handover moved the session to
+   * (`serverReached`: the server already answered this session).
+   */
+  private attach(ws: WebSocket, serverReached: boolean): void {
     ws.onmessage = (ev) => {
       // A closed session's socket can still deliver queued frames; only the current one counts.
       if (ws !== this.ws) return;
       // BUG.multi-tab-login-pingpong — as ClientConnection: the page's tab guard claims the account here.
       if (typeof ev.data !== 'string' && !serverReached) { serverReached = true; this.emit({ type: 'serverReached' }); }
       if (typeof ev.data === 'string') {
+        if (this.handoverRun?.onOldText(ev.data)) return;
         // Bridge text: the routines grant (AGENT.routine-store-auth); health answers are ignored.
         const grant = parseRoutinesGrant(ev.data);
         if (grant) {
@@ -390,12 +401,56 @@ export class Connection1999 implements NetConnection {
     };
   }
 
+  /** A planned handover under way (SocketHandover.ts). */
+  private handoverRun: SocketHandover | null = null;
+
+  /** As ClientConnection.handover: move this live session to the bridge's new deployment. */
+  handover(): void {
+    if (this.handoverRun?.active) return;
+    const old = this.ws;
+    if (!old || old.readyState !== WebSocket.OPEN) {
+      this.emit({ type: 'handover', data: { ok: false, stage: 'ticket', reason: 'not_connected', released: false, ms: 0 } satisfies HandoverResult });
+      return;
+    }
+    const run = new SocketHandover({
+      old: old as unknown as HandoverSocket,
+      // The 1999 marker rides along, as on the session's own socket (the new bridge picks the protocol from it).
+      url: withProto1999(this.url),
+      open: (url) => new WebSocket(url) as unknown as HandoverSocket,
+      switchTo: (ws, early) => {
+        const socket = ws as unknown as WebSocket;
+        this.ws = socket;
+        this.attach(socket, true);
+        for (const frame of early) this.handleDatagram(new Uint8Array(frame as ArrayBuffer));
+      },
+      done: (r) => {
+        if (this.handoverRun === run) this.handoverRun = null;
+        this.emit({ type: 'handover', data: r });
+        // The old bridge let go of the session's socket and the new one never took it: the session is gone.
+        if (!r.ok && r.released && this.ws === old) {
+          this.endCause ??= 'socket_closed';
+          try { old.close(); } catch { /* closing */ }
+          this.ended();
+        }
+      },
+    });
+    this.handoverRun = run;
+    run.start();
+  }
+
+  private cancelHandover(): void {
+    const run = this.handoverRun;
+    this.handoverRun = null;
+    run?.cancel();
+  }
+
   private stopLoginTimer(): void {
     if (this.loginTimer) clearInterval(this.loginTimer);
     this.loginTimer = null;
   }
 
   private ended(closeCode?: number): void {
+    this.cancelHandover();
     this.stopLoginTimer();
     if (this.serviceTimer) clearInterval(this.serviceTimer);
     this.serviceTimer = null;
@@ -420,6 +475,7 @@ export class Connection1999 implements NetConnection {
   }
 
   disconnect(): void {
+    this.cancelHandover();
     this.deliberate = true;
     if (this.granted) this.sendControl(F1999.Disconnect | F1999.Checksum);
     this.ws?.close();

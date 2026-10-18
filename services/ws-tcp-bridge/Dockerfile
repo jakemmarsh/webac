@@ -13,7 +13,9 @@
 # the runtime image is just node + that file (no node_modules). Env vars:
 # services/ws-tcp-bridge/README.md.
 
-FROM public.ecr.aws/docker/library/node:20-slim AS build
+# The build stage runs on the builder's own platform (its output is platform-free JS and
+# static files), so CI's x86 runner builds the arm64 image without emulating the build.
+FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/node:20-slim AS build
 WORKDIR /build
 # Versions pinned to the repo's package-lock.json (every dependency in
 # services/ws-tcp-bridge/package.json, bundled: the runtime image has no node_modules).

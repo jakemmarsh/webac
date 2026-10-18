@@ -67,10 +67,13 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # contents: write only for the ci-green push at the end (the AWS host's deploy signal).
+    # 20 for the tests, plus the image builds on main pushes.
+    timeout-minutes: 40
+    # contents: write only for the ci-green push at the end (the AWS host's deploy signal);
+    # id-token: write for the AWS OIDC role that pushes the images.
     permissions:
       contents: write
+      id-token: write
     steps:
       # The tracked tree is ~2.7 GB, ~2.6 GB of it verification evidence
       # (png/jpg/side-by-side html) that no test reads (the paths filter
@@ -82,6 +85,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           filter: blob:none
+          # Full commit history (no blobs): tools/image-source.sh walks back to the commit
+          # that last changed each image's inputs.
+          fetch-depth: 0
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /*
@@ -127,6 +133,30 @@ jobs:
         run: |
           set -o pipefail
           npm test 2>&1 | tee vitest-output.log
+
+      # Images for the AWS host (docs/aws-hosting.md, "Images"): built here, never on the
+      # host. The host pulls <registry>/webac-<svc>:<this sha> once ci-green names it, so the
+      # images go up first. Needs the repo variable AWS_DEPLOY_ROLE_ARN (the stack output
+      # GitHubImageRoleArn); without it the step is skipped and the host waits for an image
+      # pushed by tools/deploy-aws.sh. The build stages run natively on this x86 runner
+      # (FROM --platform=$BUILDPLATFORM); QEMU covers the arm64 final stages' few steps.
+      - name: Image push skipped (no AWS_DEPLOY_ROLE_ARN)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN == ''
+        run: echo "::warning::AWS_DEPLOY_ROLE_ARN is not set; no images pushed for ${GITHUB_SHA}. Deploy with tools/deploy-aws.sh."
+      - uses: docker/setup-qemu-action@v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Build and push images
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+        run: bash tools/build-push-images.sh "$GITHUB_SHA"
 
       # The AWS host deploys the commit this branch names (deploy/aws/host/deploy-agent.sh,
       # docs/aws-hosting.md): each main commit that passed moves it forward. A plain push

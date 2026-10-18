@@ -53,6 +53,7 @@ import { OrderedFragmentBuffer } from './OrderedFragmentBuffer.js';
 import { FragmentAssembler } from './FragmentAssembler.js';
 import { MAX_SERVER_PACKET_SIZE } from './PacketBuilder.js';
 import { LinkStatusAverages } from './LinkStatusAverages.js';
+import { SocketHandover, type HandoverResult, type HandoverSocket } from './SocketHandover.js';
 import { type NetDiagnostics, TxRing, hex32, joinLabels, messageLabel, msAgo } from './NetDiagnostics.js';
 import { ThreadStallClock, silenceIsOwnStall, type LinkSample } from './ThreadStall.js';
 import type { GameMessage, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData } from './MessageSerializer.js';
@@ -93,12 +94,13 @@ export function parsePairingReply(text: string): PairingReply | null {
  * The relay link (docs/hosted-agent-connector.md §4.5): the bridge says it is draining (a deploy; /mcp now
  * reaches the new deployment), or answers the tab's 'relayTicket' request with a ticket for its account.
  */
-export type RelayLinkNotice = { kind: 'draining' } | { kind: 'ticket'; ticket: string | null; draining: boolean };
+export type RelayLinkNotice = { kind: 'draining'; handover?: boolean } | { kind: 'ticket'; ticket: string | null; draining: boolean };
 export function parseRelayLinkNotice(text: string): RelayLinkNotice | null {
   if (!text.startsWith('{"bridgeDraining"') && !text.startsWith('{"relayTicket"')) return null;
   try {
-    const j = JSON.parse(text) as { bridgeDraining?: unknown; relayTicket?: { ticket?: unknown; draining?: unknown } };
-    if (j.bridgeDraining === true) return { kind: 'draining' };
+    const j = JSON.parse(text) as { bridgeDraining?: unknown; handover?: unknown; relayTicket?: { ticket?: unknown; draining?: unknown } };
+    // handover: the draining bridge can hand this session over to the new deployment (SocketHandover.ts).
+    if (j.bridgeDraining === true) return j.handover === true ? { kind: 'draining', handover: true } : { kind: 'draining' };
     const t = j.relayTicket;
     if (!t || typeof t !== 'object') return null;
     return { kind: 'ticket', ticket: typeof t.ticket === 'string' && t.ticket ? t.ticket : null, draining: t.draining === true };
@@ -180,6 +182,8 @@ export type ConnectionEventType =
   | 'agentPairing'
   // The bridge is draining, or its relay-link ticket (data = RelayLinkNotice; docs/hosted-agent-connector.md §4.5).
   | 'relayLink'
+  // A planned handover to the new bridge deployment finished (data = HandoverResult; SocketHandover.ts).
+  | 'handover'
   // BUG.multi-tab-login-pingpong — the first game frame from the server on
   // this socket (whatever it says: a ConnectRequest, a CharacterError). The
   // page's tab guard claims the account then: a login the bridge refused
@@ -745,6 +749,7 @@ export class ClientConnection {
 
   /** Bridge text frames (not game packets): the routines grant, relay calls. */
   private handleBridgeText(text: string): void {
+    if (this.handoverRun?.onOldText(text)) return;
     const grant = parseRoutinesGrant(text);
     if (grant) {
       this.emit({ type: 'routinesGrant', data: grant.grant, error: grant.reason ?? undefined });
@@ -785,8 +790,21 @@ export class ClientConnection {
     this.doConnect(account, password);
   }
 
-  /** Max timed login retries after a "two accounts" rejection (~2 min). */
-  private static readonly MAX_LOGIN_REJECT_RETRIES = 12;
+  /**
+   * The wait before a fresh login after a "two accounts" rejection
+   * (CharacterError.Logon). ACE refuses a login while NetworkManager.Find
+   * still holds a session for the account, and the refusal itself boots that
+   * session (AuthenticationHandler.cs, account_login_boots_in_use, on by
+   * default): Session.Terminate, whose SessionTerminationDetails end 2 s
+   * later, when DropSession removes it (NetworkManager.RemoveSession). So the
+   * account is free about 2 s after the refusal, not after the character's
+   * logoff (that comes after, and is CharacterError 0x0D's retry). 3 s lands
+   * after the drop with a tick to spare; the old 10 s wait added 7 s to every
+   * resume that met it.
+   */
+  static readonly LOGIN_REJECT_RETRY_MS = 3000;
+  /** Max timed login retries after a "two accounts" rejection (40 × 3 s ≈ 2 min, the old budget). */
+  static readonly MAX_LOGIN_REJECT_RETRIES = 40;
   private loginRejectRetryAttempts = 0;
   /**
    * This socket's login succeeded (a CharacterList arrived). A Logon error
@@ -798,9 +816,10 @@ export class ClientConnection {
   private loginRejectRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * ASSESS: after CharacterError.Logon, ACE frees the account once the
-   * abandoned session's player logoff finishes — retry a full fresh login
-   * every 10s until it succeeds or the budget runs out.
+   * ASSESS: after CharacterError.Logon, ACE frees the account once it has
+   * dropped the abandoned session (2 s after the refusal booted it) — retry
+   * a full fresh login every LOGIN_REJECT_RETRY_MS until it succeeds or the
+   * budget runs out.
    */
   private scheduleLoginRetryAfterReject(): boolean {
     // NB: deliberately NOT gated on autoReconnect — the app disables
@@ -824,16 +843,17 @@ export class ClientConnection {
       type: 'loginRetry',
       reconnectAttempt: this.loginRejectRetryAttempts,
       reconnectMax: ClientConnection.MAX_LOGIN_REJECT_RETRIES,
-      reconnectDelaySec: 10,
+      reconnectDelaySec: ClientConnection.LOGIN_REJECT_RETRY_MS / 1000,
     });
     this.loginRejectRetryTimer = setTimeout(() => {
       this.loginRejectRetryTimer = null;
       this.doConnect(this.lastAccount, this.lastPassword);
-    }, 10_000);
+    }, ClientConnection.LOGIN_REJECT_RETRY_MS);
     return true;
   }
 
   private doConnect(account: string, password: string): void {
+    this.cancelHandover();
     // ASSESS: never leak a previous socket — orphaned sockets kept logging
     // in concurrently (the "two accounts" wedge) and double-processed packets.
     if (this.ws) {
@@ -872,27 +892,28 @@ export class ClientConnection {
       this.sendLoginRequest(account, password);
       this.startLoginRetry(account, password);
     };
+    this.attachSocket(this.ws, false);
+  }
 
-    let serverReached = false;
-    this.ws.onmessage = (event: MessageEvent) => {
+  /**
+   * A session socket's frame, close and error handlers: the one connect()
+   * opened, or the one a planned handover moved the session to
+   * (`serverReached`: the server already answered this session).
+   */
+  private attachSocket(socket: WebSocket, serverReached: boolean): void {
+    socket.onmessage = (event: MessageEvent) => {
       if (typeof event.data === 'string') { this.handleBridgeText(event.data); return; }
       if (!serverReached) { serverReached = true; this.emit({ type: 'serverReached' }); }
-      const data = new Uint8Array(event.data as ArrayBuffer);
-      try {
-        this.handlePacket(data);
-      } catch (err) {
-        console.error('[AC:PKT] EXCEPTION in handlePacket:', err, 'packet len=', data.length, 'hex=', Array.from(data.slice(0, 40)).map(b => b.toString(16).padStart(2, '0')).join(' '));
-      }
+      this.receiveFrame(event.data);
     };
 
-    const socket = this.ws;
-    this.ws.onclose = (ev: CloseEvent) => {
+    socket.onclose = (ev: CloseEvent) => {
       const refusal = bridgeRefusalFromClose(ev?.code);
       if (refusal && this.ws === socket) { this.handleBridgeRefusal(socket, refusal); return; }
       this.handleSocketEnded(socket, 'socket_closed', ev?.code);
     };
 
-    this.ws.onerror = () => {
+    socket.onerror = () => {
       if (!this.wsEverOpened) {
         console.warn(`[AC:NET] Bridge not reachable at ${this.url} — start: npx tsx services/ws-tcp-bridge/src/bridge.ts`);
         // CORE.17.k.b — the browser client's local socket layer could not be
@@ -902,6 +923,65 @@ export class ClientConnection {
       }
       this.emit({ type: 'error', error: 'WebSocket error' });
     };
+  }
+
+  /** One game datagram from the bridge. */
+  private receiveFrame(raw: unknown): void {
+    const data = new Uint8Array(raw as ArrayBuffer);
+    try {
+      this.handlePacket(data);
+    } catch (err) {
+      console.error('[AC:PKT] EXCEPTION in handlePacket:', err, 'packet len=', data.length, 'hex=', Array.from(data.slice(0, 40)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+    }
+  }
+
+  /** A planned handover under way (SocketHandover.ts). */
+  private handoverRun: SocketHandover | null = null;
+
+  /**
+   * Move this live session to the bridge's new deployment (its draining
+   * notice said it can: SocketHandover.ts). Answered by a 'handover' event
+   * (data = HandoverResult). On success nothing else changes: same session,
+   * same sequences, same character in the world. A failure before the old
+   * bridge let go leaves the session as it was; after it, the session ends
+   * ('disconnected', socket_closed) and the page resumes it.
+   */
+  handover(): void {
+    if (this.handoverRun?.active) return;
+    const old = this.ws;
+    if (!old || old.readyState !== WebSocket.OPEN) {
+      this.emit({ type: 'handover', data: { ok: false, stage: 'ticket', reason: 'not_connected', released: false, ms: 0 } satisfies HandoverResult });
+      return;
+    }
+    const run = new SocketHandover({
+      old: old as unknown as HandoverSocket,
+      url: this.url,
+      open: (url) => new WebSocket(url) as unknown as HandoverSocket,
+      switchTo: (ws, early) => {
+        const socket = ws as unknown as WebSocket;
+        this.ws = socket;
+        this.attachSocket(socket, true);
+        for (const frame of early) this.receiveFrame(frame);
+      },
+      done: (r) => {
+        if (this.handoverRun === run) this.handoverRun = null;
+        this.emit({ type: 'handover', data: r });
+        // The old bridge let go of the session's socket and the new one never took it: the session is gone.
+        if (!r.ok && r.released && this.ws === old) {
+          this.handleSocketEnded(old, 'socket_closed');
+          try { old.close(); } catch { /* closing */ }
+        }
+      },
+    });
+    this.handoverRun = run;
+    run.start();
+  }
+
+  /** Stop a handover that hasn't moved the session (the session is ending some other way). */
+  private cancelHandover(): void {
+    const run = this.handoverRun;
+    this.handoverRun = null;
+    run?.cancel();
   }
 
   /** Reset every send/receive sequence counter and buffer (new session). */
@@ -935,6 +1015,7 @@ export class ClientConnection {
     // (2026-10-12, Coldeve: bridge sessions 12 → 13 two seconds apart).
     if (this.ws !== null && this.ws !== socket) return;
     this.sessionEndedFor = socket;
+    this.cancelHandover();
     if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
     this.stopConnectResponseRetry();
     this.stopLoginRetry();
@@ -1123,6 +1204,7 @@ export class ClientConnection {
   }
 
   disconnect(): void {
+    this.cancelHandover();
     this.autoReconnect = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -2077,12 +2159,12 @@ export class ClientConnection {
           console.error(`[AC] CharacterError context: aceCharGuid was sent, raw payload hex: ${msg.payload ? Array.from(msg.payload).map(b => b.toString(16).padStart(2, '0')).join(' ') : 'none'}`);
           // ASSESS: CharacterError.Logon (0x1, "Cannot have two accounts
           // logged on at the same time") happens whenever a page is closed
-          // mid-world: ACE only frees the account after the abandoned
-          // player's logoff completes (Session.Terminate → player LogOut,
-          // reference/ACE/Source/ACE.Server/Network/Managers/NetworkManager.cs
-          // duplicate-account check). Pre-fix the client gave up into a dead
-          // empty char-select and the user had to reload. Retry the login on
-          // a 10s timer until ACE lets us in (budget ~2 min).
+          // mid-world: ACE frees the account once it drops the abandoned
+          // session, 2 s after this refusal booted it (Session.Terminate →
+          // SessionTerminationDetails → DropSession → NetworkManager.RemoveSession).
+          // Pre-fix the client gave up into a dead empty char-select and the
+          // user had to reload. Retry the login every LOGIN_REJECT_RETRY_MS
+          // until ACE lets us in (budget ~2 min).
           // CORE.17.k.b — the event carries the code and whether a retry is
           // pending, so the renderer can pick the retail surface (Disconnected
           // screen / char-select dialog) when it is not.

@@ -15,7 +15,7 @@ import { AGENT_ERAS, ERA_IDS } from './eras.ts';
 import { NOTE_KINDS, type Journal, type NoteKind, addNote, formatJournal, loadJournal, saveJournal } from './journal.ts';
 import { RoutineStore } from './routineStore.ts';
 import { encodeWindows1252 } from '../../packages/shared/src/encoding/Windows1252.ts';
-import { EXAMPLE_HUNT_PROFILE, explainProfile, exportVTankFile, importVTankFiles, validateRoutineDoc, type RoutineDoc } from '../../packages/shared/src/routines/index.ts';
+import { EXAMPLE_HUNT_PROFILE, ROUTINE_SCHEMA_VERSION, explainProfile, exportVTankFile, importVTankFiles, validateRoutineDoc, type RoutineDoc, type RoutineProfile } from '../../packages/shared/src/routines/index.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { findDaemon } from './client.ts';
@@ -348,6 +348,37 @@ async function hostedRoutinesTool(c: ToolCaller, a: Record<string, any>): Promis
     return { text: [`imported into "${r.value.name}" in ${store.label}`, ...(r.problems.length ? ['', `not carried over exactly (${r.problems.length}):`, ...r.problems.slice(0, 40).map((x) => `  ${x}`)] : []), '', explainProfile(r.value)].join('\n') };
   }
   return { text: `unknown action "${action}" (${ROUTINES_ACTIONS.join(', ')})`, isError: true };
+}
+
+/**
+ * ac_routine file=: one profile from a JSON file (a profile, or a routine document with `name` picking one of its
+ * profiles), checked as a stored one would be (validateRoutineDoc). The stream players' ready profiles
+ * (tools/stream/routines/) start this way in one call, nothing stored.
+ */
+export function routineFromFile(path: string, name?: string): { profile: RoutineProfile } | { text: string; isError: true } {
+  let body: unknown;
+  try { body = JSON.parse(readFileSync(path, 'utf8')); } catch (e) { return { text: `can't read ${path}: ${(e as Error).message}`, isError: true }; }
+  const isDoc = !!body && typeof body === 'object' && Array.isArray((body as { profiles?: unknown }).profiles);
+  const doc = isDoc ? body : { schemaVersion: ROUTINE_SCHEMA_VERSION, account: 'file', server: 'file', updatedAt: new Date(0).toISOString(), profiles: [body] };
+  const issues = validateRoutineDoc(doc);
+  if (issues.length) return { text: `${path}: not a routine profile:\n${issues.map((i) => `${i.path || '(document)'}: ${i.message}`).join('\n')}`, isError: true };
+  const ps = (doc as RoutineDoc).profiles;
+  const p = name ? ps.find((x) => x.name.toLowerCase() === name.toLowerCase()) : ps.length === 1 ? ps[0] : undefined;
+  if (!p) return { text: `${path}: ${name ? `no profile "${name}"` : 'pass name='} (have: ${ps.map((x) => x.name).join(', ')})`, isError: true };
+  return { profile: p };
+}
+
+/** ac_routine set=: "Name=value, Name=value" as settings (numbers and true/false typed). */
+export function routineSettings(raw: unknown): { settings: Record<string, string | number | boolean> } | { text: string; isError: true } {
+  const out: Record<string, string | number | boolean> = {};
+  if (raw === undefined || raw === null || String(raw).trim() === '') return { settings: out };
+  for (const part of String(raw).split(',').map((x) => x.trim()).filter(Boolean)) {
+    const at = part.indexOf('=');
+    if (at <= 0) return { text: `set: "${part}" is not Name=value (e.g. set="Recharge-Norm-HitP=70,AttackDistance=20")`, isError: true };
+    const k = part.slice(0, at).trim(), v = part.slice(at + 1).trim();
+    out[k] = /^(true|false)$/i.test(v) ? /^true$/i.test(v) : v !== '' && Number.isFinite(Number(v)) ? Number(v) : v;
+  }
+  return { settings: out };
 }
 
 /** ac_routines' actions; list is what a bare `routines` does (both stream players typed `./ac routines`, 2026-10-16). */
@@ -1001,10 +1032,26 @@ export const TOOLS: AgentTool[] = [
       action: { type: 'string', description: 'run | pause | resume | stop | status (the default) | dryrun', enum: [...ROUTINE_ACTIONS] },
       name: { type: 'string', description: 'For run/dryrun: the profile name (default: the one assigned to this character, else the only one).' },
       server: { type: 'string', description: 'Server id the routines are stored under (default local-<era>).' },
+      file: { type: 'string', description: 'For run/dryrun, local only: run a profile from this JSON file (one profile, or a whole routine document with name= picking one) instead of the stored ones; nothing is stored.' },
+      set: { type: 'string', description: 'For run/dryrun: settings to change for this run, "Name=value" separated by commas (e.g. "Recharge-Norm-HitP=70,AttackDistance=20"); the profile itself is not changed.' },
     },
     async run(a) {
       const c = callerFor(a.profile);
       const action = routinesAction(a.action, 'status');
+      if ((action === 'run' || action === 'dryrun') && a.file && !isHosted()) {
+        const f = routineFromFile(String(a.file), a.name === undefined ? undefined : String(a.name));
+        if ('text' in f) return f;
+        const set = routineSettings(a.set);
+        if ('text' in set) return set;
+        const prof = { ...f.profile, settings: { ...(f.profile.settings ?? {}), ...set.settings } };
+        if (action === 'run') {
+          const r = await c.call<AgentResult>('routineStart', [prof]);
+          return result({ ...r, message: `${r.message} (from ${a.file}${Object.keys(set.settings).length ? `; ${Object.entries(set.settings).map(([k, v]) => `${k}=${v}`).join(', ')}` : ''})` });
+        }
+        const v = await c.call<Array<{ rule: string; fires: boolean; enabled: boolean; off?: boolean; why: string[] }>>('routineDryRun', [prof]);
+        const first = v.findIndex((x) => x.fires);
+        return { text: [`"${prof.name}" from ${a.file}, state "${prof.initialState}":`, ...v.map((x, i) => `  ${i === first ? '▶' : ' '} ${x.rule}${x.off ? ' [off]' : x.enabled ? '' : ' [module off]'}: ${x.why.join(', ')}`), first < 0 ? (prof.macro ? '  (no rule would fire now: the macro fights, heals and buffs from its settings)' : '  (no rule would fire now)') : ''].join('\n') };
+      }
       if (action === 'stop') return result(await c.call<AgentResult>('routineStop'));
       if (action === 'pause') return result(await c.call<AgentResult>('routinePause'));
       if (action === 'resume') return result(await c.call<AgentResult>('routineResume'));
@@ -1031,7 +1078,9 @@ export const TOOLS: AgentTool[] = [
       const prof = doc.profiles.find((p) => p.name.toLowerCase() === String(wanted ?? '').toLowerCase());
       if (!prof) return { text: `no routine ${wanted ? `"${wanted}" ` : ''}for ${who.account} in ${source} (have: ${doc.profiles.map((p) => p.name).join(', ') || 'none — configure one with ac_routines'})`, isError: true };
       if (action === 'run') {
-        const r = await c.call<AgentResult>('routineStart', [prof]);
+        const set = routineSettings(a.set);
+        if ('text' in set) return set;
+        const r = await c.call<AgentResult>('routineStart', [Object.keys(set.settings).length ? { ...prof, settings: { ...(prof.settings ?? {}), ...set.settings } } : prof]);
         return result({ ...r, message: `${r.message} (from ${source})` });
       }
       if (action === 'dryrun') {

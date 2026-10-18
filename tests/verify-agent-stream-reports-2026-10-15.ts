@@ -293,7 +293,7 @@ describe('4. cast repeat stops for a dangerous new attacker, not for every one',
     expect(castsSent).toBe(4);
     expect(r.message.split('\n')[0]).toBe('cast Flame Bolt I at Drudge Skulker 4 times (repeat); stopped: Drudge Skulker died');
     expect(r.message).toMatch(/joined in meanwhile: Lurker #8000020\d \(hits up to 1\)/);
-    expect(r.message).toContain('a new attacker stops it only when it casts, hits for 10%+ of your health, or is above your level');
+    expect(r.message).toContain('a new attacker (or one on you from the start, after the first cast) stops it only when it casts, hits for 10%+ of the health you have, or is above your level');
   });
 
   it('a new attacker whose hit takes a tenth of your health stops it, saying so', async () => {
@@ -304,7 +304,7 @@ describe('4. cast repeat stops for a dangerous new attacker, not for every one',
     };
     const r = await settle(api.cast('Flame Bolt I', 'Drudge Skulker', { repeat: true }));
     expect(castsSent).toBe(2);
-    expect(r.message.split('\n')[0]).toBe("cast Flame Bolt I at Drudge Skulker 2 times (repeat); stopped: Mosswart #80000082 (1× in 10 s; one hit of its took 6 of your 50 health (12%)) started attacking you, and isn't your target");
+    expect(r.message.split('\n')[0]).toBe("cast Flame Bolt I at Drudge Skulker 2 times (repeat); stopped: Mosswart #80000082 (1× in 10 s; one hit of its took 6, 12% of the 50 health you have) started attacking you, and isn't your target");
   });
 
   it('a new attacker seen casting, or one above your level, stops it however light its blows', async () => {

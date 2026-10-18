@@ -92,7 +92,7 @@ function makeConn(): { conn: ClientConnection; events: ConnectionEvent[] } {
 }
 
 describe('ClientConnection — stale-session login retry', () => {
-  it('CharacterError.Logon schedules a loginRetry and opens a fresh socket after 10s', () => {
+  it('CharacterError.Logon schedules a loginRetry and opens a fresh socket after 3 s (ACE drops the booted session 2 s after the refusal)', () => {
     vi.useFakeTimers();
     const { conn, events } = makeConn();
     (conn as unknown as { handlePacket(p: Uint8Array): void }).handlePacket(
@@ -102,10 +102,13 @@ describe('ClientConnection — stale-session login retry', () => {
     const retry = events.find(e => e.type === 'loginRetry');
     expect(retry).toBeTruthy();
     expect(retry!.reconnectAttempt).toBe(1);
-    expect(retry!.reconnectDelaySec).toBe(10);
+    expect(retry!.reconnectDelaySec).toBe(3);
 
     expect(RecordingWebSocket.instances.length).toBe(0);
-    vi.advanceTimersByTime(10_000);
+    // Not before ACE's 2 s termination window has passed (a login inside it is refused again and re-arms it).
+    vi.advanceTimersByTime(2_500);
+    expect(RecordingWebSocket.instances.length).toBe(0);
+    vi.advanceTimersByTime(500);
     // doConnect ran — a fresh socket to the bridge was opened.
     expect(RecordingWebSocket.instances.length).toBe(1);
     expect(RecordingWebSocket.instances[0].url).toBe('ws://test-not-connected');
@@ -191,13 +194,15 @@ describe('ClientConnection — stale-session login retry', () => {
     try {
       // Each rejection schedules one retry; sequence numbers must advance
       // past the dedup gate, so reset the connection state between feeds.
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < 44; i++) {
         anyConn.handlePacket(buildOpcodePacket(i + 2, CHARACTER_ERROR, i, ERR_LOGON));
-        vi.advanceTimersByTime(10_000);
+        vi.advanceTimersByTime(ClientConnection.LOGIN_REJECT_RETRY_MS);
       }
-      expect(anyConn.loginRejectRetryAttempts).toBeLessThanOrEqual(12);
+      expect(anyConn.loginRejectRetryAttempts).toBeLessThanOrEqual(ClientConnection.MAX_LOGIN_REJECT_RETRIES);
       const retries = events.filter(e => e.type === 'loginRetry');
-      expect(retries.length).toBeLessThanOrEqual(12);
+      expect(retries.length).toBeLessThanOrEqual(ClientConnection.MAX_LOGIN_REJECT_RETRIES);
+      // The budget is still about two minutes of retries.
+      expect(ClientConnection.MAX_LOGIN_REJECT_RETRIES * ClientConnection.LOGIN_REJECT_RETRY_MS).toBeGreaterThanOrEqual(115_000);
     } finally {
       warn.mockRestore();
     }

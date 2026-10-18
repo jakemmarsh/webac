@@ -167,7 +167,7 @@ describe('ac_cast repeat', () => {
     };
     const r = await settle(api.cast('Flame Bolt I', 'Drudge Skulker', { repeat: true }));
     expect(castsSent).toBe(2);
-    expect(r.message).toMatch(/2 times \(repeat\); stopped: Mosswart #80000082 \(1× in 10 s; one hit of its took 8 of your 50 health \(16%\)\) started attacking you, and isn't your target/);
+    expect(r.message).toMatch(/2 times \(repeat\); stopped: Mosswart #80000082 \(1× in 10 s; one hit of its took 8, 16% of the 50 health you have\) started attacking you, and isn't your target/);
   });
 
   it('a monster already attacking you when it started, or the target itself hitting you, does not stop it', async () => {

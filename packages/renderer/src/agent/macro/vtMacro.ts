@@ -29,7 +29,8 @@
  * so each era's own table decides what exists.
  */
 import { resolveVtankIds, vtItemIs, vtOption, vtStoredValue, type PlanItem, type PlanSkill, type PlanSpell, type RoutineProfile, type Stance, type VtankProfileData } from '@ac/shared';
-import type { AgentApi } from '../AgentApi.ts';
+import { AgentApi } from '../AgentApi.ts';
+import { beyondSetting } from '../beyondVtank.ts';
 import type { AgentResult } from '../types.ts';
 import { buildBuffFamilies, planBuffs, type BuffFamilies } from './buffPlan.ts';
 import { blowPoints, buildCombatFamilies, indexMonsterTable, planCombat, planPet, type CombatFamilies, type CombatInput, type CombatMonster, type MonsterFacts } from './combatPlan.ts';
@@ -694,6 +695,46 @@ export class VtMacro {
     return null;
   }
 
+  /** The routine's "the player took over" (RoutineEngine.handOver): a long wait inside a step ends when it holds. */
+  held?: () => boolean;
+
+  /** Fighting hand to hand: not in magic or missile mode, and no caster or launcher in hand (SkipUnreachableMonsters). */
+  private fightsMelee(stance: Stance): boolean {
+    if (stance === 'magic' || stance === 'missile') return false;
+    const w = this.api.inventory().find((i) => i.where === 'equipped' && /weapon|wand|staff|orb|caster|missile|bow/i.test(`${i.type ?? ''} ${i.slot ?? ''}`));
+    return !w || !/wand|staff|orb|caster|missile|bow/i.test(`${w.type ?? ''} ${w.slot ?? ''}`);
+  }
+
+  /** The routine's pick by hand (RoutineEngine.pickedTarget): the monster the player last attacked or cast at. */
+  picked?: () => number | null;
+
+  /** OnlyEngaged: monsters coming at or on a fellow in view, and the player's pick (yours are read off the observation). */
+  private engaged(): Set<number> {
+    const out = new Set<number>();
+    for (const f of this.api.fellowsNear()) for (const c of this.api.comingAt(f.guid)) out.add(c.guid);
+    const pick = this.picked?.();
+    if (pick !== null && pick !== undefined) out.add(pick);
+    return out;
+  }
+
+  /** Monsters on a fellow in view: within reach of them by the fellows line's rule (AgentApi.comingAt), ProtectFellows. */
+  private monstersOnFellows(): Set<number> {
+    const out = new Set<number>();
+    for (const f of this.api.fellowsNear()) for (const c of this.api.comingAt(f.guid)) if (c.on) out.add(c.guid);
+    return out;
+  }
+
+  /** Health or stamina under its Recharge-Norm mark (Heal at / Restam at), or null: what a swing's wait gives way to. */
+  private belowMark(settings: Record<string, string | number | boolean>): string | null {
+    const me = this.api.snapshot({ max: 0 }).me;
+    if (!me) return null;
+    for (const [v, k] of [['health', 'HitP'], ['stamina', 'Stam']] as const) {
+      const x = me[v];
+      if (x.max > 0 && (x.cur / x.max) * 100 < Number(opt(settings, `Recharge-Norm-${k}`))) return `${v} under Recharge-Norm-${k}`;
+    }
+    return null;
+  }
+
   /** What the macro should do now, or null. `range`: Monster Range (metres). */
   /** The routine's hold-position (beyond VTank, Jake 2026-10-12): a monster this refuses is no target. */
   allowTarget?: (o: { dist: number; bearing: number }) => boolean;
@@ -736,15 +777,24 @@ export class VtMacro {
     // UseProjectileAwareness: each monster within Monster Range gets the client's line-of-fire test (a bolt or an
     // arrow at it would hit a wall, the ground or an object first); the planner then fights another (combatPlan).
     const aware = opt(settings, 'UseProjectileAwareness') === true;
-    const near: CombatMonster[] = seen.filter((o) => !this.blocked.has(o.guid) && !this.targets.excluded(o.guid) && (this.allowTarget?.(o) ?? true)).map((o) => {
+    // Beyond VTank (beyondVtank.ts): a melee fighter leaves alone what it can't walk to, and ProtectFellows fights what is on a fellow first.
+    const skipUnreachable = beyondSetting(settings, 'SkipUnreachableMonsters') && this.fightsMelee(stance);
+    const onFellow = beyondSetting(settings, 'ProtectFellows') ? this.monstersOnFellows() : new Set<number>();
+    const guardRange = Math.max(range, beyondSetting(settings, 'ProtectFellowsDistance'));
+    const unreachable = (o: (typeof seen)[number]): boolean => skipUnreachable && (!!o.comingAtYouStuck || (me.indoors && Math.abs(o.dz) >= AgentApi.OTHER_FLOOR_M));
+    // OnlyEngaged: the pulls are the player's; the macro fights what is on you or a fellow, coming at either, or picked by hand.
+    const engaged = beyondSetting(settings, 'OnlyEngaged') ? this.engaged() : null;
+    const near: CombatMonster[] = seen.filter((o) => !this.blocked.has(o.guid) && !this.targets.excluded(o.guid) && (this.allowTarget?.(o) ?? true) && !unreachable(o)
+      && (!engaged || engaged.has(o.guid) || !!o.attackingYou || !!o.comingAtYou)).map((o) => {
       const blow = this.blows.get(o.guid);
-      const lof = aware && o.dist <= range ? this.lineOfFire(o.guid) : null;
+      const lof = aware && (o.dist <= range || onFellow.has(o.guid)) ? this.lineOfFire(o.guid) : null;
       return {
         guid: o.guid, name: o.name, dist: o.dist, relBearing: o.relBearing, ...(o.health !== undefined ? { health: o.health } : {}), ...(blow !== undefined ? { lastDamage: blow } : {}),
         ...(lof ? { blocked: true } : {}), ...(this.magicImmune.has(o.guid) ? { magicImmune: true } : {}),
+        ...(onFellow.has(o.guid) && o.dist <= guardRange ? { onFellow: true } : {}),
       };
     });
-    const monsters = near.filter((m) => m.dist <= range);
+    const monsters = near.filter((m) => m.dist <= range || m.onFellow);
     const petMonsters = near.filter((m) => m.dist <= petRange);
     const hasTarget = ctx.combat && monsters.length > 0;
 
@@ -761,6 +811,8 @@ export class VtMacro {
       casterItems: this.items(p.vtank.items.map((x) => x.name)).filter((i) => ((i.itemType ?? 0) & 0x8000) !== 0), level: me.level,
     });
     if (r) {
+      // A kit, a potion or a spell between swings: the attack order is sent afresh after it, not waited on as if still going.
+      this.lastAttack = null;
       if (r.kind === 'item') return r.wield
         ? { label: `recharge: ${r.why}: wielding ${r.item.name}`, run: async () => this.api.equip(r.item.guid) }
         : { label: `recharge: ${r.why}`, run: async () => this.useCaster(r.item.guid, r.target ?? 'self', settings) };
@@ -880,8 +932,24 @@ export class VtMacro {
           const res = same ? { ok: true, message: `still fighting #${c.target.toString(16)}` } : this.api.attack(c.target, { height: vtAttackHeight(settings), power, far: true });
           if (!same && res.ok) this.lastAttack = { guid: c.target, at: this.now() };
           if (!res.ok) return res;
-          const ev = await this.api.waitFor({ types: ['target-died', 'target-lost', 'death', 'vitals-low'] }, 10_000);
-          const end = ev.find((e) => e.seq > since && (e.guid === c.target || e.type === 'death' || e.type === 'vitals-low'));
+          // Watched in half-second slices: a vital under its own mark (Recharge-Norm-*: the vitals-low event wakes only at
+          // 60%, so a 70% heal mark waited out the swing's 10 s), a monster newly on a fellow (ProtectFellows) or the
+          // player taking over ends the wait, and the next decision heals, restams or peels. Before 2026-10-17 a tank at
+          // 65% swung on for 10 s under three Tusker Liberators.
+          const onFellowBefore = beyondSetting(settings, 'ProtectFellows') ? this.monstersOnFellows() : null;
+          let end: { type: string } | undefined;
+          // The end is read off the events since the order (a slice's wait may start after it came).
+          // Any of these ends the wait (as the single 10 s wait did); `end` is the one about this fight.
+          const evs = () => this.api.eventsSince(since).filter((e) => e.type === 'target-died' || e.type === 'target-lost' || e.type === 'death' || e.type === 'vitals-low');
+          const about = () => evs().find((e) => e.guid === c.target || e.type === 'death' || e.type === 'vitals-low');
+          // Twenty slices: the wait's own clock, as the single 10 s wait had (not the host's, which a test may run apart).
+          for (let i = 0; i < 20 && !evs().length; i++) {
+            const ev = await this.api.waitFor({ types: ['target-died', 'target-lost', 'death', 'vitals-low'] }, 500);
+            if (ev.length || evs().length || this.held?.()) break;
+            if (this.belowMark(settings)) { end = { type: 'vitals-low' }; break; }
+            if (onFellowBefore && [...this.monstersOnFellows()].some((g) => g !== c.target && !onFellowBefore.has(g))) break;
+          }
+          end ??= about();
           if (end && end.type !== 'vitals-low') this.lastAttack = null;
           return res;
         } };

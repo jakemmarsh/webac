@@ -58,3 +58,34 @@ export function awayWord(from: ReadonlyArray<{ bearing: number }>): string | nul
   const away = (toward + 180 + 360) % 360;
   return COMPASS[Math.round(away / 45) % 8];
 }
+
+/**
+ * Macro settings beyond VTank (STREAM.routines-default, 2026-10-17): the stream pair's Mountain Keep (0x01D2) and Tusker
+ * Habitat (0x5B47) hunts, where a melee macro ran at Dreads a floor up or behind a wall, and a tank's targeting never
+ * looked at what was on its caster. They sit beside VTank's options in a profile's settings (any case) and an export
+ * leaves them out (VTank ignores names it doesn't know).
+ *   SkipUnreachableMonsters (on): with melee (no caster or bow in hand, not in magic or missile mode), a monster that
+ *     is aimed at you but not reaching you (observe's AIMED AT YOU BUT NOT REACHING YOU: a chase no nearer in
+ *     AgentApi.AGGRO_STALL_MS) or that stands a storey up or down indoors is no target: the server's straight-line
+ *     walk-in can't reach it. A bolt still can when its line is open (UseProjectileAwareness decides that).
+ *   ProtectFellows (off): a monster on a fellow (by the fellows line's rule: AgentApi.comingAt(fellow), within reach of
+ *     them) is fought before the others of its priority, out to ProtectFellowsDistance metres from you even past
+ *     Monster Range, and a swing at another breaks off when one gets on a fellow (peeling for the caster).
+ *   OnlyEngaged (off): the macro starts no fights of its own. It fights only what is attacking you, coming at you, on or
+ *     coming at a fellow in view, or the monster you last attacked or cast at by hand (RoutineEngine.pickedTarget): the
+ *     player picks the pulls, the macro fights them out (heals, restams and peels between swings).
+ */
+export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false } as const;
+
+/** A beyond-VTank macro setting from a profile's settings (any case), else its default. */
+export function beyondSetting<K extends keyof typeof BEYOND_MACRO_DEFAULTS>(settings: Record<string, string | number | boolean>, name: K): (typeof BEYOND_MACRO_DEFAULTS)[K] {
+  const want = name.toLowerCase();
+  const d = BEYOND_MACRO_DEFAULTS[name];
+  for (const [k, v] of Object.entries(settings)) {
+    if (k.toLowerCase() !== want) continue;
+    if (typeof d === 'boolean') return (v === true || v === 1 || (typeof v === 'string' && /^(true|1|yes|on)$/i.test(v))) as (typeof BEYOND_MACRO_DEFAULTS)[K];
+    const n = Number(v);
+    return (Number.isFinite(n) ? n : d) as (typeof BEYOND_MACRO_DEFAULTS)[K];
+  }
+  return d;
+}

@@ -8,10 +8,11 @@
  * entry points (the real module resolution, not a regex over the source).
  * 2026-10-10: the hand deploy then (Railway's, since deleted) uploaded a `git
  * archive` of named paths, which left out tools/ac-agent, so that build FAILED
- * too. The AWS host's deploy agent (deploy/aws/host/deploy-agent.sh,
- * deploy_svc) builds from the same kind of `git archive` of named paths, so
- * the last test reads that command.
+ * too. The images are built by tools/build-push-images.sh from the same kind
+ * of `git archive` of named paths, so the last test asks that script for its
+ * list (--print-context-paths).
  */
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { build } from 'esbuild';
@@ -37,11 +38,9 @@ describe('bridge Docker build inputs', () => {
   let inputs: string[] = [];
   let archived: string[] = [];
   beforeAll(async () => {
-    // The deploy agent's build context: `git -C "$REPO" archive "$TARGET" <paths…> | tar -x`,
-    // continued over lines with a trailing backslash.
-    const agent = readFileSync(join(REPO, 'deploy/aws/host/deploy-agent.sh'), 'utf8').replace(/\\\n/g, ' ');
-    const line = agent.split('\n').find((l) => l.trim().startsWith('git -C "$REPO" archive "$TARGET"'))!;
-    archived = line.split('|')[0].trim().split(/\s+/).slice(5);
+    // The image build's context: the paths tools/build-push-images.sh `git archive`s.
+    archived = execFileSync('bash', [join(REPO, 'tools/build-push-images.sh'), '--print-context-paths'], { encoding: 'utf8' })
+      .split('\n').filter(Boolean);
     ignore = readFileSync(join(BRIDGE_DIR, 'Dockerfile.dockerignore'), 'utf8');
     dockerfile = readFileSync(join(BRIDGE_DIR, 'Dockerfile'), 'utf8');
     inputs = await externalInputs();
@@ -76,9 +75,9 @@ describe('bridge Docker build inputs', () => {
     }
   });
 
-  it('the AWS deploy agent ships every one of them and the Dockerfile in its build context', () => {
+  it('the image build ships every one of them and the Dockerfile in its build context', () => {
     expect(archived).toContain('services');
     const shipped = (f: string) => archived.some((p) => f === p || f.startsWith(`${p}/`));
-    for (const f of inputs) expect(shipped(f), `deploy-agent.sh's git archive must include ${f}`).toBe(true);
+    for (const f of inputs) expect(shipped(f), `build-push-images.sh's git archive must include ${f}`).toBe(true);
   });
 });

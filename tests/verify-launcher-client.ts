@@ -15,11 +15,11 @@ import {
   loadRememberedLogin, saveRememberedLogin, worldKeyOf, LAUNCHER_STORAGE_KEY,
   loadFavoriteWorlds, saveFavoriteWorlds, LAUNCHER_FAVORITES_KEY,
 } from '../packages/renderer/src/launcher/launcherStorage';
-import { resolveUrlLogin } from '../packages/renderer/src/launcher/urlLogin';
+import { resolveUrlLogin, resolveUrlWorld, matchUrlWorld, withoutUrlWorld } from '../packages/renderer/src/launcher/urlLogin';
 import {
   exposeDebugGlobal, readDebugGlobal, debugBag, setDebugGlobalsEnabledForTest,
 } from '../packages/renderer/src/utils/debugGlobals';
-import { wrapLines, LAUNCHER_GEOMETRY } from '../packages/renderer/src/launcher/LauncherScreen';
+import { wrapLines, LAUNCHER_GEOMETRY, LAUNCHER_SITE_LINKS } from '../packages/renderer/src/launcher/LauncherScreen';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
 import { ERA_PROFILES } from '../packages/renderer/src/era/EraProfiles';
 
@@ -243,6 +243,48 @@ describe('URL credential gating', () => {
   it('production with ?debug still ignores ?password= (any link can carry ?debug)', () => {
     expect(resolveUrlLogin(`${Q}&debug`, false)).toEqual({ autoLogin: null, prefillAccount: 'probe1', server: null });
     expect(resolveUrlLogin('?debug&account=probe1', false).autoLogin).toBeNull();
+  });
+});
+
+describe('?world= deep link (urlLogin.resolveUrlWorld / matchUrlWorld)', () => {
+  const dir = [
+    listed(),
+    listed({ id: 'conq', name: 'Conquest', compat: 'incompatible' }),
+    listed({ id: 'funky', name: 'Funky Town' }),
+    listed({ id: 'Funky Town', name: 'Elsewhere' }),
+  ];
+
+  it('reads ?world= whether or not URL overrides are on, and carries no credential', () => {
+    expect(resolveUrlWorld('?world=Coldeve')).toBe('Coldeve');
+    expect(resolveUrlWorld('?world=Funky+Town&account=a&password=p')).toBe('Funky Town');
+    expect(resolveUrlWorld('?world=%20%20')).toBeNull();
+    expect(resolveUrlWorld('?ace')).toBeNull();
+    // The credential path is untouched by it.
+    expect(resolveUrlLogin('?world=Coldeve', false)).toEqual({ autoLogin: null, prefillAccount: null, server: null });
+  });
+
+  it('matches an exact id first, then a case-insensitive name', () => {
+    expect(matchUrlWorld(dir, 'c0ldeve')?.name).toBe('Coldeve');
+    expect(matchUrlWorld(dir, 'coldeve')?.id).toBe('c0ldeve');
+    expect(matchUrlWorld(dir, 'COLDEVE')?.id).toBe('c0ldeve');
+    expect(matchUrlWorld(dir, ' funky town ')?.id).toBe('funky');
+    // An id that is also another world's name: the id wins.
+    expect(matchUrlWorld(dir, 'Funky Town')?.name).toBe('Elsewhere');
+    // Ids are exact: a case-folded id only matches as a name.
+    expect(matchUrlWorld(dir, 'C0LDEVE')).toBeNull();
+  });
+
+  it('an unknown or incompatible world matches nothing', () => {
+    expect(matchUrlWorld(dir, 'Nowhere')).toBeNull();
+    expect(matchUrlWorld(dir, 'conq')).toBeNull();
+    expect(matchUrlWorld(dir, 'Conquest')).toBeNull();
+    expect(matchUrlWorld(dir, null)).toBeNull();
+  });
+
+  it('withoutUrlWorld strips only the world parameter', () => {
+    expect(withoutUrlWorld('https://playwebac.com/?world=Coldeve&era=x')).toBe('https://playwebac.com/?era=x');
+    expect(withoutUrlWorld('https://playwebac.com/?world=Coldeve')).toBe('https://playwebac.com/');
+    expect(withoutUrlWorld('https://playwebac.com/?era=x')).toBe('https://playwebac.com/?era=x');
   });
 });
 
@@ -574,6 +616,63 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(a.rel).toContain('noopener');
     const none = await open();
     expect(none.mount.querySelector('a.launcher-source')).toBeNull();
+  });
+
+  it('siteLinks: the launcher links the site\'s own pages, same tab; none without siteLinks', async () => {
+    const k = makeKit();
+    const screen = new mod.LauncherScreen(k.kit, {
+      bridgeUrl: BRIDGE, storage: new MemStorage(), siteLinks: true,
+      loadDirectory: async () => ({ mode: 'multi', worlds: worlds() }),
+    });
+    void screen.run();
+    const links = [...k.mount.querySelectorAll('a.launcher-site-link')] as HTMLAnchorElement[];
+    expect(links.map(a => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['How to play', '/how-to-play-asherons-call/'],
+      ['Servers', '/servers/'],
+      ['Mac & Linux', '/mac-linux/'],
+      ['Eras', '/eras/'],
+      ['About', '/about/'],
+    ]);
+    expect(LAUNCHER_SITE_LINKS.flat().length).toBe(5);
+    for (const a of links) expect(a.target).toBe('');
+    // Two rows, above the source link's line (y 566).
+    const rows = [...k.mount.querySelectorAll('.launcher-site-links')] as HTMLElement[];
+    expect(rows.map(r => r.style.top)).toEqual(['534px', '550px']);
+    const none = await open();
+    expect(none.mount.querySelector('a.launcher-site-link')).toBeNull();
+  });
+
+  it('?world=: the linked world is selected and shown as a click would; credentials stay empty', async () => {
+    const k = makeKit();
+    const storage = new MemStorage();
+    const screen = new mod.LauncherScreen(k.kit, {
+      bridgeUrl: BRIDGE, storage, linkedWorld: 'funky',
+      loadDirectory: async () => ({ mode: 'multi', worlds: worlds() }),
+    });
+    void screen.run();
+    await screen.loaded;
+    expect(screen.selectedWorld.id).toBe('funky');
+    const row = [...k.mount.querySelectorAll('.launcher-world-row')].find(r => (r as HTMLElement).dataset.world === 'funky')!;
+    expect(row.getAttribute('aria-selected')).toBe('true');
+    expect(k.mount.querySelector('.launcher-world-name')?.textContent).toBe('Funky');
+    expect((k.mount.querySelector('.launcher-account') as HTMLInputElement).value).toBe('');
+    expect((k.mount.querySelector('.launcher-password') as HTMLInputElement).value).toBe('');
+    expect(k.messages).toEqual([]);
+  });
+
+  it('?world=: an unknown or incompatible world leaves the usual selection (the remembered world)', async () => {
+    for (const linkedWorld of ['Nowhere', 'Conquest', 'conq']) {
+      const k = makeKit();
+      const storage = new MemStorage();
+      storage.setItem(LAUNCHER_STORAGE_KEY, JSON.stringify({ account: null, worldKey: 'funky' }));
+      const screen = new mod.LauncherScreen(k.kit, {
+        bridgeUrl: BRIDGE, storage, linkedWorld,
+        loadDirectory: async () => ({ mode: 'multi', worlds: worlds() }),
+      });
+      void screen.run();
+      await screen.loaded;
+      expect(screen.selectedWorld.id).toBe('funky');
+    }
   });
 
   it('first visit (streamed DATs): the online bullets paint once their texture streams in', async () => {

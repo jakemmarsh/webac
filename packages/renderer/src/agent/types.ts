@@ -235,7 +235,9 @@ export interface AgentObservation {
   /** Open windows (Inventory, Social (fellowship), Container …); close with ac_close. */
   windows?: string[];
   /** Your active enchantments (the effects UI), seconds left; -1 = permanent. Other players' are not visible to a client. */
-  buffs?: Array<{ name: string; remaining: number; beneficial?: boolean }>;
+  buffs?: Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean; /** Said in place of the time left (Vitae: "until XP works it off"). */ until?: string }>;
+  /** The VITAE line (vitaeFacts.ts vitaeHeadline): what the death penalty costs now and the XP that works it off; absent with none. */
+  vitae?: string;
   /** Buffs you know that aren't up on you (self-only ones first), to cast with ac_cast. */
   buffsMissing?: string[];
   /** Spells you cast on the items you wear (no timer reaches the client for them): when, on how many, about how long is left. */

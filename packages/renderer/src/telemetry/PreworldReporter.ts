@@ -35,7 +35,16 @@ export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
   | 'chargen_sent' | 'chargen_blocked'
   | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed'
-  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry';
+  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover';
+
+/**
+ * A draining bridge's session moving to the new deployment (session/DrainHandover.ts): why
+ * ('safe': the page found a safe moment; 'hard_cut': the drain's cap closed the session first)
+ * and how ('adopt': the new bridge took the session's socket over; 'relogin': the resume logged
+ * back in). The bridge accepts exactly these (clientPreworld.ts HANDOVER_REASONS / _PATHS).
+ */
+export type HandoverReason = 'safe' | 'hard_cut';
+export type HandoverPath = 'adopt' | 'relogin';
 
 /**
  * BUG.resume-silent-launcher — why the page went back to the launcher
@@ -224,6 +233,10 @@ export interface PreworldEvent {
    * (@ac/network boundNetDiagnostics). Absent otherwise.
    */
   net?: NonNullable<ReturnType<typeof boundNetDiagnostics>>;
+  /** 'handover' only: from the handover's start (or the drop) to back in the world, why and how. */
+  handoverMs?: number;
+  reason?: HandoverReason;
+  path?: HandoverPath;
 }
 
 export interface PreworldReporterOptions {
@@ -250,6 +263,8 @@ export interface PreworldReporterOptions {
 
 /** A page sends at most this many events (the bridge also caps each address). */
 export const MAX_PREWORLD_EVENTS = 40;
+/** Handovers have their own budget: a tab left open for days meets a deploy every hour or two. */
+export const MAX_HANDOVER_EVENTS = 60;
 
 /**
  * Tell `onAttempt` whenever `conn.connect` starts a connect attempt, so every
@@ -375,6 +390,7 @@ export class PreworldReporter {
   private cache: BootCacheState | null = null;
   private caps: CapabilityIssue[] = [];
   private bootSlowSent = false;
+  private handoversSent = 0;
 
   constructor(private readonly opts: PreworldReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -520,6 +536,16 @@ export class PreworldReporter {
    */
   resumeEnded(reason: 'character_gone'): void {
     this.report('resume_ended', { token: reason });
+  }
+
+  /**
+   * A planned handover finished (session/DrainHandover.ts): 'handover' with its time, why and
+   * how; `token` names a failed attempt's step and reason (absent when it worked).
+   */
+  handover(f: { reason: HandoverReason; path: HandoverPath; ms: number; token?: string | null }): void {
+    this.report('handover', {
+      handoverMs: Math.max(0, Math.round(f.ms)), reason: f.reason, path: f.path, token: safeToken(f.token ?? null),
+    });
   }
 
   /** The world is up (gameStarted). */
@@ -748,8 +774,9 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net'>>): void {
-    if (!this.opts.endpoint || this.sent >= MAX_PREWORLD_EVENTS) return;
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'handoverMs' | 'reason' | 'path'>>): void {
+    if (!this.opts.endpoint) return;
+    if (outcome === 'handover' ? this.handoversSent >= MAX_HANDOVER_EVENTS : this.sent >= MAX_PREWORLD_EVENTS) return;
     const { screen, step } = this.sample();
     const at = this.now();
     let era = 'unknown';
@@ -775,8 +802,10 @@ export class PreworldReporter {
       ...(screen === 'boot' ? this.bootSnapshot()
         : { stage: null, progress: null, doneKB: null, totalKB: null, cache: null, caps: null }),
       ...(f.net ? { net: f.net } : {}),
+      ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path } : {}),
     };
-    this.sent++;
+    if (outcome === 'handover') this.handoversSent++;
+    else this.sent++;
     this.outbox.post(this.opts.endpoint, JSON.stringify(body));
   }
 }

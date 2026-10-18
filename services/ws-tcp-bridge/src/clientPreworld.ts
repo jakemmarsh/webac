@@ -23,7 +23,7 @@ export const PREWORLD_OUTCOMES = [
   'login_refused', 'connect_failed', 'char_list', 'char_error', 'chargen_ok', 'chargen_refused',
   'chargen_sent', 'chargen_blocked',
   'enter_refused', 'enter_ok', 'dropped', 'page_hidden', 'page_left', 'page_reload', 'boot_slow', 'boot_failed',
-  'enter_retry', 'left_for_launcher', 'resume_ended', 'login_retry',
+  'enter_retry', 'left_for_launcher', 'resume_ended', 'login_retry', 'handover',
 ] as const;
 export type PreworldOutcome = typeof PREWORLD_OUTCOMES[number];
 
@@ -31,6 +31,15 @@ export const PREWORLD_SCREENS = [
   'boot', 'server-select', 'connecting', 'resuming', 'char-select', 'chargen', 'portal-space', 'disconnected', 'world',
 ] as const;
 export type PreworldScreen = typeof PREWORLD_SCREENS[number];
+
+/**
+ * A draining bridge's session moving to the new deployment (outcome 'handover'): why it moved —
+ * 'safe' (the page found a safe moment and handed it over) or 'hard_cut' (the drain's cap closed it,
+ * and the page's resume brought it back) — and how: 'adopt' (the new bridge took the session's
+ * socket over; the server never saw a change) or 'relogin' (a fresh login and enter).
+ */
+export const HANDOVER_REASONS = ['safe', 'hard_cut'] as const;
+export const HANDOVER_PATHS = ['adopt', 'relogin'] as const;
 
 export const CHARGEN_STEPS = ['heritage', 'profession', 'skills', 'appearance', 'town', 'summary'] as const;
 
@@ -76,6 +85,10 @@ export interface ClientPreworldEvent {
   eid?: string;
   /** OBS.dm-stall-diagnostics — 'dropped' only: the connection's state when a silent / closed session ended (netDiag.ts). */
   net?: NetDiag;
+  /** 'handover' only: from the handover's start (or the hard cut) to back in the world, in ms; why and how (HANDOVER_REASONS / _PATHS). */
+  handoverMs?: number;
+  reason?: typeof HANDOVER_REASONS[number];
+  path?: typeof HANDOVER_PATHS[number];
 }
 
 /**
@@ -152,5 +165,14 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...lateField(b.lateMs, MAX_MS),
     ...eidField(b.eid),
     ...(outcome === 'dropped' ? netDiagField(b.net) : {}),
+    ...(outcome === 'handover' ? handoverFields(b) : {}),
   };
+}
+
+/** The 'handover' outcome's own fields, each only when valid. */
+function handoverFields(b: Record<string, unknown>): Pick<ClientPreworldEvent, 'handoverMs' | 'reason' | 'path'> {
+  const ms = uint(b.handoverMs, 24 * 3600_000);
+  const reason = pick(b.reason, HANDOVER_REASONS);
+  const path = pick(b.path, HANDOVER_PATHS);
+  return { ...(ms !== null ? { handoverMs: ms } : {}), ...(reason ? { reason } : {}), ...(path ? { path } : {}) };
 }

@@ -2,17 +2,37 @@
 # webac deploy agent (docs/aws-hosting.md). Runs every minute from webac-deploy.timer:
 #
 #   1. restarts the live containers if they aren't running (after a reboot);
-#   2. picks the target commit: --ref <sha>, else /var/lib/webac/state/pin, else
+#   2. picks the target commit: --ref <sha|branch>, else /var/lib/webac/state/pin, else
 #      origin/ci-green (CI moves that branch to each main commit it passed);
 #   3. updates this host's own config (bootstrap.sh) when deploy/aws/host changed;
-#   4. for web and bridge, when a file the service is built from changed (its
-#      railway.json watchPatterns, the same rule Railway applied), builds the image,
-#      starts it beside the live one, health-checks it, switches nginx to it, then
-#      retires the old one: the web container stops, the bridge gets SIGTERM and
-#      drains its sessions for up to BRIDGE_DRAIN_SECONDS before exiting.
+#   4. for web and bridge, looks up the commit's image (<registry>/webac-<svc>:<sha>) in
+#      ECR. When its digest differs from the live one, pulls it, starts it beside the
+#      live one, health-checks it, switches nginx to it, then retires the old one: the
+#      web container stops, the bridge gets SIGTERM and drains its sessions for up to
+#      BRIDGE_DRAIN_SECONDS before exiting. Then it deletes this service's older images,
+#      keeping the live one and the previous one (rollback).
 #
-#   deploy-agent.sh [--ref <commit>] [--only web|bridge] [--force]
-#     --force   rebuild and switch even when nothing changed (also re-reads SSM config)
+# This host never builds an image and needs no repo history: tools/build-push-images.sh
+# (CI, or tools/deploy-aws.sh on the laptop) builds each image once and tags it with every
+# commit it serves, so "did this service change" is "is the tag's digest the live one".
+# Building here pushed the 2 GB instance into swap for minutes and stalled the live bridge
+# (2026-10-17). A commit whose image isn't in the registry yet is logged once and retried
+# every run; the live container stays. The repo checkout is shallow and sparse
+# (deploy/aws/host only; bootstrap.sh converts an old full clone).
+#
+# Draining cap: a bridge deploy waits while MAX_DRAINING (2) or more retired bridges are
+# still draining sessions (running webac-bridge-* containers other than the live one); it
+# logs how many and their session counts, and --urgent overrides. Web deploys never wait.
+#
+# WEB_SERVICE=off in /webac/host/env (SSM; tools/aws-env.sh set host WEB_SERVICE=off) skips
+# the web service: no pull, no switch, its container left running as a standby (the static
+# web is moving to Cloudflare). Read from SSM on each deploy run, so it applies at once.
+#
+#   deploy-agent.sh [--ref <sha|branch|live>] [--only web|bridge] [--force] [--urgent]
+#     --ref live   each service's live commit again: with --force, a restart that picks up
+#                  changed SSM config (tools/aws-env.sh) without deploying anything new
+#     --force   pull (if needed) and switch even when the image is the live one; re-runs
+#               bootstrap.sh (re-reads SSM config)
 set -euo pipefail
 
 exec 9>/run/webac-deploy.lock
@@ -26,17 +46,20 @@ export GIT_SSH_COMMAND="ssh -i /root/.ssh/webac_deploy -o StrictHostKeyChecking=
 IMDS_TOKEN="$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')"
 REGION="$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)"
 export AWS_DEFAULT_REGION="$REGION"
+ACCOUNT="$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .accountId)"
+REGISTRY="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
 
-REF="" ONLY="" FORCE=0 FAILED=0
+REF="" ONLY="" FORCE=0 URGENT=0 FAILED=0 PENDING=0
+MAX_DRAINING=2
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref) REF="$2"; shift 2 ;;
     --only) ONLY="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
+    --urgent) URGENT=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-ARGS=("$@")
 
 # One line to the journal, and to CloudWatch (/webac/host, stream "deploy") so
 # tools/aws-logs.sh shows deploys next to the bridge's own lines.
@@ -49,7 +72,6 @@ log() {
 }
 
 ports_for() { case "$1" in web) echo "8081 8082 8083 8084" ;; bridge) echo "9091 9092 9093 9094 9095 9096 9097 9098" ;; esac; }
-watch_file() { case "$1" in web) echo deploy/web/railway.json ;; bridge) echo services/ws-tcp-bridge/railway.json ;; esac; }
 
 # ── 1. keep the live containers up ─────────────────────
 for svc in web bridge; do
@@ -61,59 +83,49 @@ for svc in web bridge; do
 done
 
 # ── 2. target commit ───────────────────────────────────
-git -C "$REPO" fetch -q origin '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || { log "git fetch failed"; exit 1; }
-git -C "$REPO" fetch -q origin '+refs/heads/ci-green:refs/remotes/origin/ci-green' 2>/dev/null || true
-if [ -n "$REF" ]; then
-  # A commit only on another branch (a hotfix branch while CI is down) needs every head fetched.
-  git -C "$REPO" cat-file -e "$REF^{commit}" 2>/dev/null \
-    || git -C "$REPO" fetch -q origin '+refs/heads/*:refs/remotes/origin/*' 2>/dev/null || true
-  TARGET="$(git -C "$REPO" rev-parse --verify "$REF^{commit}")"
+remote_sha() { git -C "$REPO" ls-remote origin "$1" | awk 'NR == 1 { print $1 }'; }
+LIVE=0
+if [ "$REF" = live ]; then
+  LIVE=1 TARGET="live"
+elif [ -n "$REF" ]; then
+  if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then TARGET="$REF"
+  else TARGET="$(remote_sha "refs/heads/$REF")" || { log "git ls-remote failed"; exit 1; }; fi
+  [ -n "$TARGET" ] || { log "--ref $REF: give a full commit sha or a branch name"; exit 2; }
 elif [ -s "$STATE/pin" ]; then
-  TARGET="$(git -C "$REPO" rev-parse --verify "$(cat "$STATE/pin")^{commit}")"
-elif git -C "$REPO" rev-parse -q --verify refs/remotes/origin/ci-green >/dev/null; then
-  TARGET="$(git -C "$REPO" rev-parse refs/remotes/origin/ci-green)"
+  TARGET="$(cat "$STATE/pin")"
+else
+  TARGET="$(remote_sha refs/heads/ci-green)" || { log "git ls-remote failed"; exit 1; }
+  [ -n "$TARGET" ] || exit 0
   # Act only when ci-green moves, as Railway did: a manual --ref deploy (a hotfix
   # while CI is down) stays live until CI passes a newer main commit.
   if [ "$FORCE" = 0 ] && [ "$(cat "$STATE/green.seen" 2>/dev/null || true)" = "$TARGET" ]; then exit 0; fi
   GREEN="$TARGET"
-else
-  exit 0
 fi
 SHORT="${TARGET:0:12}"
 
 # ── 3. this host's config ──────────────────────────────
-HOST_SHA="$(cat "$STATE/host.sha" 2>/dev/null || true)"
-if [ "$FORCE" = 1 ] || [ -z "$HOST_SHA" ] || ! git -C "$REPO" diff --quiet "$HOST_SHA" "$TARGET" -- deploy/aws/host; then
-  if [ "$HOST_SHA" != "$TARGET" ] || [ "$FORCE" = 1 ]; then
-    log "host config → $SHORT"
-    git -C "$REPO" checkout -q -f "$TARGET"
-    bash "$HOST_DIR/bootstrap.sh"
-    echo "$TARGET" > "$STATE/host.sha"
-    # Run the (possibly new) agent; fd 9 keeps the lock.
-    exec /bin/bash "$HOST_DIR/deploy-agent.sh" ${REF:+--ref "$REF"} ${ONLY:+--only "$ONLY"} ${ARGS[@]+"${ARGS[@]}"}
-  fi
+if [ "$LIVE" = 1 ]; then
+  # Same code, fresh config: re-run bootstrap from the current checkout (re-reads SSM).
+  [ "$FORCE" = 1 ] && bash "$HOST_DIR/bootstrap.sh"
+else
+# One commit, no blobs but deploy/aws/host's (the sparse checkout).
+git -C "$REPO" cat-file -e "$TARGET^{commit}" 2>/dev/null \
+  || git -C "$REPO" fetch -q --depth 1 --filter=blob:none origin "$TARGET" 2>/dev/null \
+  || { log "git fetch of $SHORT failed"; exit 1; }
+HOST_TREE="$(git -C "$REPO" rev-parse "$TARGET:deploy/aws/host")"
+if [ -z "${WEBAC_AGENT_REEXEC:-}" ] && { [ "$FORCE" = 1 ] || [ "$(cat "$STATE/host.tree" 2>/dev/null || true)" != "$HOST_TREE" ]; }; then
+  log "host config → $SHORT"
+  git -C "$REPO" checkout -q -f --detach "$TARGET"
+  bash "$HOST_DIR/bootstrap.sh"
+  echo "$HOST_TREE" > "$STATE/host.tree"
+  # Run the (possibly new) agent for the same target; fd 9 keeps the lock.
+  again=(); [ -n "$REF" ] && again+=(--ref "$TARGET"); [ -n "$ONLY" ] && again+=(--only "$ONLY")
+  [ "$FORCE" = 1 ] && again+=(--force); [ "$URGENT" = 1 ] && again+=(--urgent)
+  WEBAC_AGENT_REEXEC=1 exec /bin/bash "$HOST_DIR/deploy-agent.sh" ${again[@]+"${again[@]}"}
+fi
 fi
 
 # ── 4. services ────────────────────────────────────────
-# Did any file the service is built from change between two commits? Patterns are
-# Railway's watchPatterns (** spans directories, * stays inside one).
-changed_for() { # svc from to
-  local patterns
-  patterns="$(git -C "$REPO" show "$3:$(watch_file "$1")" | jq -r '.build.watchPatterns[]')"
-  git -C "$REPO" diff --name-only "$2" "$3" | PATTERNS="$patterns" python3 -c '
-import os, re, sys
-pats = [p for p in os.environ["PATTERNS"].splitlines() if p]
-def rx(p):
-    out, i = "", 0
-    while i < len(p):
-        if p.startswith("**", i): out += ".*"; i += 2
-        elif p[i] == "*": out += "[^/]*"; i += 1
-        else: out += re.escape(p[i]); i += 1
-    return re.compile(out + r"\Z")
-rs = [rx(p) for p in pats]
-sys.exit(0 if any(r.match(f.strip()) for f in sys.stdin for r in rs) else 1)'
-}
-
 free_port() { # svc
   local p
   for p in $(ports_for "$1"); do
@@ -123,8 +135,7 @@ free_port() { # svc
 }
 
 health() { # port path
-  local i
-  for i in $(seq 1 90); do
+  for _ in $(seq 1 90); do
     curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$1$2" && return 0
     sleep 1
   done
@@ -140,21 +151,73 @@ switch_upstream() { # svc port
   return 1
 }
 
-deploy_svc() { # svc
-  local svc="$1" ctx port name old image
-  ctx="$(mktemp -d /var/tmp/webac-build.XXXXXX)"
-  trap 'rm -rf "$ctx"' RETURN
-  git -C "$REPO" archive "$TARGET" package.json package-lock.json tsconfig.json vite.config.ts \
-    tools/lib/vite-head-from-stat.ts packages services deploy tools/ac-agent .dockerignore | tar -x -C "$ctx"
-  image="webac-$svc:$SHORT"
-  log "$svc: building $image"
-  # deploy_svc runs under `||`, where bash ignores set -e: every step checks its own status.
-  local built=0
-  case "$svc" in
-    bridge) docker build -q -f "$ctx/services/ws-tcp-bridge/Dockerfile" -t "$image" "$ctx" >/dev/null && built=1 ;;
-    web) docker build -q --build-arg "ACJS_BUILD_ID=$SHORT" -f "$ctx/deploy/web/Dockerfile" -t "$image" "$ctx" >/dev/null && built=1 ;;
+LOGGED_IN=0
+ecr_login() {
+  [ "$LOGGED_IN" = 1 ] && return 0
+  aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null 2>&1 || return 1
+  LOGGED_IN=1
+}
+
+# The digest of webac-<svc>:$TARGET in the registry (stdout; its log lines go to stderr). Returns 1 when the tag isn't there
+# (logged once per commit), 2 when the lookup failed.
+registry_digest() { # svc
+  local svc="$1" out
+  if out="$(aws ecr describe-images --repository-name "webac-$svc" --image-ids "imageTag=$TARGET" \
+      --query 'imageDetails[0].imageDigest' --output text 2>&1)"; then
+    echo "$out"; return 0
+  fi
+  case "$out" in
+    *ImageNotFoundException*)
+      if [ "$(cat "$STATE/$svc.missing" 2>/dev/null || true)" != "$TARGET" ]; then
+        log "$svc: image for $SHORT not in the registry yet; skipping" >&2
+        echo "$TARGET" > "$STATE/$svc.missing"
+      fi
+      return 1 ;;
   esac
-  [ "$built" = 1 ] || { log "$svc: build of $image failed"; return 1; }
+  log "$svc: registry lookup failed: $(echo "$out" | tail -1)" >&2
+  return 2
+}
+
+# Delete this service's local images except the live one and the previous one (rollback).
+# An image a container still uses (a draining bridge) fails to delete and goes next time.
+prune_images() { # svc
+  local svc="$1" keep ref id
+  keep="$(docker image inspect -f '{{.Id}}' "$(cat "$STATE/$svc.image" 2>/dev/null || echo none)" \
+    "$(cat "$STATE/$svc.image.prev" 2>/dev/null || echo none)" 2>/dev/null || true)"
+  docker images --no-trunc --format '{{.Repository}}:{{.Tag}} {{.ID}}' | while read -r ref id; do
+    case "$ref" in "$REGISTRY/webac-$svc:"*|"webac-$svc:"*) ;; *) continue ;; esac
+    printf '%s\n' "$keep" | grep -qxF "$id" && continue
+    docker rmi "$ref" >/dev/null 2>&1 || true
+  done
+}
+
+# Retired bridges still draining: "<container> <sessions>" per line (the live one excluded).
+draining_bridges() {
+  local live c port n
+  live="$(cat "$STATE/bridge.container" 2>/dev/null || true)"
+  docker ps --filter status=running --format '{{.Names}}' | { grep '^webac-bridge-' || true; } | while read -r c; do
+    [ "$c" = "$live" ] && continue
+    port="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" 2>/dev/null | sed -n 's/^PORT=//p' | head -1)"
+    n="$(curl -fsS --max-time 3 "http://127.0.0.1:${port:-0}/healthz" 2>/dev/null | jq -r '.sessions // "?"' 2>/dev/null || true)"
+    echo "$c ${n:-?}"
+  done
+}
+
+# WEB_SERVICE from /webac/host/env (SSM), else the copy bootstrap wrote.
+host_setting() { # key
+  { aws ssm get-parameter --name /webac/host/env --with-decryption --query Parameter.Value --output text 2>/dev/null \
+      || cat /etc/webac/host.env 2>/dev/null || true; } | sed -n "s/^$1=//p" | tail -1 | tr -d "\"'"
+}
+
+deploy_svc() { # svc digest
+  local svc="$1" digest="$2" port name old image
+  image="$REGISTRY/webac-$svc:$TARGET"
+  # deploy_svc runs under `||`, where bash ignores set -e: every step checks its own status.
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    ecr_login || { log "$svc: registry login failed"; return 2; }
+    log "$svc: pulling $image"
+    docker pull -q "$image" >/dev/null || { log "$svc: pull of $image failed"; return 2; }
+  fi
   port="$(free_port "$svc")" || { log "$svc: no free port"; return 1; }
   name="webac-$svc-$SHORT-$(date +%s)"
   local logopts=(--log-driver awslogs --log-opt "awslogs-region=$REGION" --log-opt "awslogs-group=/webac/$svc"
@@ -183,6 +246,9 @@ deploy_svc() { # svc
   echo "$name" > "$STATE/$svc.container"
   echo "$port" > "$STATE/$svc.port"
   echo "$TARGET" > "$STATE/$svc.sha"
+  echo "$digest" > "$STATE/$svc.digest"
+  [ -s "$STATE/$svc.image" ] && mv "$STATE/$svc.image" "$STATE/$svc.image.prev"
+  echo "$image" > "$STATE/$svc.image"
   rm -f "$STATE/$svc.failed"
   if [ -n "$old" ] && docker inspect "$old" >/dev/null 2>&1; then
     docker update --restart=no "$old" >/dev/null 2>&1 || true
@@ -193,26 +259,71 @@ deploy_svc() { # svc
     esac
   fi
   log "$svc: live on $name (port $port)${old:+, retired $old}"
+  prune_images "$svc"
 }
 
+WEB_SERVICE="$(host_setting WEB_SERVICE)"
 for svc in web bridge; do
   [ -n "$ONLY" ] && [ "$ONLY" != "$svc" ] && continue
-  deployed="$(cat "$STATE/$svc.sha" 2>/dev/null || true)"
-  [ "$FORCE" = 0 ] && [ "$deployed" = "$TARGET" ] && continue
-  [ "$FORCE" = 0 ] && [ "$(cat "$STATE/$svc.failed" 2>/dev/null || true)" = "$TARGET" ] && continue
-  if [ "$FORCE" = 0 ] && [ -n "$deployed" ] && [ -z "$REF" ] && ! changed_for "$svc" "$deployed" "$TARGET"; then
-    echo "$TARGET" > "$STATE/$svc.sha"   # nothing it's built from changed
+  if [ "$svc" = web ] && [ "$WEB_SERVICE" = off ]; then
+    if [ ! -e "$STATE/web.off" ]; then
+      log "web: WEB_SERVICE=off; not deploying it (the live container stays up as a standby)"
+      touch "$STATE/web.off"
+    fi
     continue
   fi
-  deploy_svc "$svc" || { echo "$TARGET" > "$STATE/$svc.failed"; FAILED=1; }
+  [ "$svc" = web ] && rm -f "$STATE/web.off"
+  if [ "$LIVE" = 1 ]; then
+    TARGET="$(cat "$STATE/$svc.sha" 2>/dev/null || true)"
+    [ -n "$TARGET" ] || { log "$svc: no live commit recorded"; FAILED=1; continue; }
+    SHORT="${TARGET:0:12}"
+  fi
+  [ "$FORCE" = 0 ] && [ "$(cat "$STATE/$svc.sha" 2>/dev/null || true)" = "$TARGET" ] && continue
+  [ "$FORCE" = 0 ] && [ "$(cat "$STATE/$svc.failed" 2>/dev/null || true)" = "$TARGET" ] && continue
+  rc=0; digest="$(registry_digest "$svc")" || rc=$?
+  [ "$rc" = 0 ] || { PENDING=1; continue; }   # no image yet: try again next run
+  rm -f "$STATE/$svc.missing"
+  if [ "$FORCE" = 0 ] && [ "$(cat "$STATE/$svc.digest" 2>/dev/null || true)" = "$digest" ]; then
+    echo "$TARGET" > "$STATE/$svc.sha"   # the live image already: nothing it's built from changed
+    continue
+  fi
+  if [ "$svc" = bridge ] && [ "$URGENT" = 0 ]; then
+    draining="$(draining_bridges)"
+    count="$(printf '%s' "$draining" | grep -c . || true)"
+    if [ "$count" -ge "$MAX_DRAINING" ]; then
+      detail="$(printf '%s\n' "$draining" | awk '{ printf "%s%s: %s sessions", (NR > 1 ? ", " : ""), $1, $2 }')"
+      msg="bridge: $count old bridges still draining ($detail); not deploying $SHORT until fewer than $MAX_DRAINING remain (tools/deploy-aws.sh --urgent overrides)"
+      if [ -n "$REF" ] || [ "$FORCE" = 1 ]; then log "$msg"
+      elif [ "$(cat "$STATE/bridge.drainwait" 2>/dev/null || true)" != "$TARGET" ]; then log "$msg"; echo "$TARGET" > "$STATE/bridge.drainwait"; fi
+      PENDING=1
+      continue
+    fi
+  fi
+  rc=0; deploy_svc "$svc" "$digest" || rc=$?
+  case "$rc" in
+    0) ;;
+    2) PENDING=1 ;;   # pull failed: try again next run
+    *) echo "$TARGET" > "$STATE/$svc.failed"; FAILED=1 ;;
+  esac
 done
-# A failed build is retried only by --force or a newer commit, so ci-green counts as handled.
-[ -n "${GREEN:-}" ] && echo "$GREEN" > "$STATE/green.seen"
+# A failed deploy is retried only by --force or a newer commit, so ci-green counts as
+# handled; a missing image keeps it unhandled so the next run looks again.
+[ -n "${GREEN:-}" ] && [ "$PENDING" = 0 ] && echo "$GREEN" > "$STATE/green.seen"
 
 # ── housekeeping ───────────────────────────────────────
-# Exited webac containers (retired webs, bridges that finished draining), then
-# images no container uses, and build cache beyond 3 GB.
+# Exited webac containers (retired webs, bridges that finished draining), each service's
+# images but the live and previous ones, dangling layers, any build cache left from when
+# this host built images, and (daily) git objects of commits no longer checked out.
 docker ps -a --filter status=exited --format '{{.Names}}' | grep '^webac-' | xargs -r docker rm >/dev/null 2>&1 || true
-docker image prune -af --filter "until=24h" >/dev/null 2>&1 || true
-docker builder prune -f --keep-storage 3gb >/dev/null 2>&1 || true
+prune_images web; prune_images bridge
+docker image prune -f >/dev/null 2>&1 || true
+docker builder prune -af >/dev/null 2>&1 || true
+if [ -z "$(find "$STATE/git-gc.stamp" -mtime -1 2>/dev/null)" ]; then
+  git -C "$REPO" reflog expire --expire=now --all >/dev/null 2>&1 || true
+  git -C "$REPO" gc -q --prune=now >/dev/null 2>&1 || true
+  touch "$STATE/git-gc.stamp"
+fi
 [ "${FAILED:-0}" = 0 ] || exit 1
+# A manual run (--ref / --force) that found no image reports it to tools/deploy-aws.sh.
+{ [ -n "$REF" ] || [ "$FORCE" = 1 ]; } && [ "$PENDING" = 1 ] && exit 1
+exit 0

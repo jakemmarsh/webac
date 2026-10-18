@@ -176,14 +176,17 @@ class Program {
       float cx0 = float.Parse(args[4]), cx1 = float.Parse(args[5]), cy0 = float.Parse(args[6]), cy1 = float.Parse(args[7]);
       float rmax = float.Parse(args[8]); float st = float.TryParse(Environment.GetEnvironmentVariable("STEP"), out var stv) ? stv : 0.5f;
       var all = Environment.GetEnvironmentVariable("ALL") == "1";
+      // Floors searched: ZMIN <= floor < ZMAX (default below 4 m; a dungeon's upper storeys need ZMIN=17 ZMAX=19 etc.).
+      float zmin = float.TryParse(Environment.GetEnvironmentVariable("ZMIN"), out var zmn) ? zmn : float.NegativeInfinity;
+      float zmax = float.TryParse(Environment.GetEnvironmentVariable("ZMAX"), out var zmx) ? zmx : 4f;
       int hits = 0, misses = 0;
       var missByD = new SortedDictionary<int, (int h, int m)>();
       for (var cx = cx0; cx <= cx1 + 1e-3; cx += st) for (var cy = cy0; cy <= cy1 + 1e-3; cy += st)
-      foreach (var cl in Column(lb, cx, cy).Where(c => c.lo < 4)) {
+      foreach (var cl in Column(lb, cx, cy).Where(c => c.lo < zmax && c.lo >= zmin)) {
         for (var tx = cx - rmax; tx <= cx + rmax + 1e-3; tx += st) for (var ty = cy - rmax; ty <= cy + rmax + 1e-3; ty += st) {
           var dd = MathF.Sqrt((tx - cx) * (tx - cx) + (ty - cy) * (ty - cy));
           if (dd < 1.0f || dd > rmax) continue;
-          foreach (var tl in Column(lb, tx, ty).Where(c => c.lo < 4 && MathF.Abs(c.lo - cl.lo) < 3.0f)) {
+          foreach (var tl in Column(lb, tx, ty).Where(c => c.lo < zmax + 3f && MathF.Abs(c.lo - cl.lo) < 3.0f)) {
             TargetOverride = (tl.cell, new Vector3(tx, ty, tl.lo));
             siteCache["X"] = new Vector3(cx, cy, cl.lo); siteCell = cl.cell;
             var r = Shot(setupS, scaleS, dd, 0, "X");

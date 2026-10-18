@@ -26017,6 +26017,14 @@ export class GameUI {
    * AGENT.vtank-window — your fellowship's shape for Auto Fellow Mgmt: are you its leader, is it open,
    * how many are in it and who, and whether this era's client has the Leader hand-off (its startvote).
    */
+  /** AGENT — the fellowship's XP split for the vitae facts: ShareXP / EvenShare from the server, each fellow's level, the XP table. */
+  agentFellowshipXp(): { shareXP: boolean; evenShare: boolean; members: Array<{ name: string; level: number; self: boolean }>; levelXpTable: bigint[] | null } | null {
+    const f = this.fellowshipData;
+    if (!f) return null;
+    const self = f.selfGuid ?? this.playerGuid;
+    return { shareXP: f.shareXP, evenShare: f.evenShare, members: f.fellows.map((m) => ({ name: m.name, level: m.level, self: m.guid === self })), levelXpTable: this.levelXpTable };
+  }
+
   agentFellowshipInfo(): { leader: boolean; open: boolean; count: number; members: string[]; handOff: boolean; sharing: string[] } | null {
     const f = this.fellowshipData;
     if (!f) return null;
@@ -29414,6 +29422,8 @@ export class GameUI {
   /** FAITHFUL.470 — accessor for the vendor-visible flag so main.ts
    *  can re-compute the sell tab whenever inventory changes. */
   get isVendorVisible(): boolean { return this.vendorVisible; }
+  /** The trade window is open (a planned bridge handover waits for it to close: session/DrainHandover.ts). */
+  get isTradeVisible(): boolean { return this.tradeVisible; }
   /** The open vendor's merchandise row for `guid` (what an examine of a shop item resolves to); undefined when not on sale here. */
   vendorStockItem(guid: number): (typeof this.vendorData.buyItems)[number] | undefined {
     return this.vendorVisible && guid ? this.vendorData.buyItems.find((i) => i.guid === guid) : undefined;

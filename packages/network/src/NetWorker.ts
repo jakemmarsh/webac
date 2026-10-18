@@ -36,6 +36,11 @@ export interface NetConnection {
   requestRoutinesGrant(): void;
   /** A text frame to the bridge (the hosted connector's relay answers and state). */
   sendBridgeText(text: string): void;
+  /**
+   * Move the live session to the bridge's new deployment (its draining notice said it can;
+   * SocketHandover.ts): answered by a 'handover' event (data = HandoverResult).
+   */
+  handover(): void;
   checkHealth(): Promise<BridgeHealth>;
   getLinkStatus(now?: number): LinkSample;
   getPacketLossPercentage(): number;
@@ -65,7 +70,8 @@ export type NetCommand =
   | { t: 'send'; bytes: Uint8Array; queue?: GameMessageGroup }
   | { t: 'logOff' }
   | { t: 'routines' }
-  | { t: 'text'; text: string };
+  | { t: 'text'; text: string }
+  | { t: 'handover' };
 
 export type NetReply =
   | { t: 'event'; event: ConnectionEvent; snap: NetSnapshot }
@@ -117,6 +123,7 @@ export function hostClientConnection(port: NetPort): () => void {
       case 'logOff': conn.sendCharacterLogOff(); break;
       case 'routines': conn.requestRoutinesGrant(); break;
       case 'text': conn.sendBridgeText(cmd.text); break;
+      case 'handover': conn.handover(); break;
     }
     port.postMessage({ t: 'snap', snap: snapshot() });
   });

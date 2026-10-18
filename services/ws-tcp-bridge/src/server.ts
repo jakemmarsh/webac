@@ -72,6 +72,7 @@ import {
   type SessionProtocol, sessionProtocol, readGrant1999Ids, readTime1999, buildDisconnectPacket1999,
 } from './protocol.js';
 import { EARLY_RESEND_MS, type EgressLease, type EgressManager, NO_REPLY_MOVE_MS, readLoginAccount, readLoginRefusal } from './egress.js';
+import { HANDOVER_RELEASE, HANDOVER_TICKET_REQUEST, HandoverTickets, bindWhenFree, type HandoverTicket } from './handover.js';
 
 /** Where a session's datagrams go. */
 interface Target {
@@ -109,7 +110,10 @@ interface Session {
    * (oauth.ts relayTicket). The tab opens one when its game session's bridge drains (docs/hosted-agent-connector.md §4.5).
    */
   relayLinkKey: string | null;
-  /** The bridge started draining: tell this session's tab, so it links its relay to the new deployment. */
+  /**
+   * The bridge started draining: tell this session's tab, so it hands the session over to the new
+   * deployment at a safe moment (handover.ts) and links its relay there.
+   */
   notifyDraining(): void;
   packetsUp: number;
   packetsDown: number;
@@ -156,6 +160,8 @@ export interface BridgeServer {
 
 /** Bridge → tab when it starts draining (docs/hosted-agent-connector.md §4.5). */
 export const DRAINING_FRAME = JSON.stringify({ bridgeDraining: true });
+/** The same, from a bridge that can hand its sessions over (a handover secret is set; handover.ts). */
+export const DRAINING_HANDOVER_FRAME = JSON.stringify({ bridgeDraining: true, handover: true });
 
 /**
  * BUG.multi-tab-login-pingpong — the WebSocket close code (and reason) for a
@@ -207,7 +213,7 @@ const READABLE_REFUSALS: Readonly<Record<string, readonly [number, string]>> = {
 };
 
 type Admission =
-  | { ok: true; target: Target | null; protocol: SessionProtocol; egress: EgressLease | null; release: () => void }
+  | { ok: true; target: Target | null; protocol: SessionProtocol; egress: EgressLease | null; handover: boolean; release: () => void }
   | { ok: false; status: number; reason: string; message: string };
 
 export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}): BridgeServer {
@@ -244,6 +250,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
   const lastServerResponse = new Map<string, number>();
   let shuttingDown = false;
   let draining = false;
+  // Planned handovers between deployments (handover.ts): needs the secret both share.
+  const handoverTickets = config.handoverSecret ? new HandoverTickets(config.handoverSecret, now) : null;
 
   // ─── Capture (packet-replay corpus; never in production) ───
   let capture: fs.WriteStream | null = null;
@@ -439,7 +447,10 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     // session's first datagram already leaves from it. The world's per-address rules apply per real IP.
     let lease: EgressLease | null = null;
     const protocol = sessionProtocol(era, req.url);
-    if (egress && target && egress.isEgressWorld(target.key)) {
+    // A planned handover's socket (handover.ts): it carries nothing until a ticket hands it a session,
+    // whose egress lease comes with it, so it takes no slot of its own.
+    const handover = !!target && new URL(req.url ?? '/', 'http://bridge.local').searchParams.get('handover') === '1';
+    if (egress && target && egress.isEgressWorld(target.key) && !handover) {
       perIp.inc(ip);
       if (serverKey) perServer.inc(serverKey);
       pending++;
@@ -468,6 +479,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       target,
       protocol,
       egress: lease,
+      handover,
       release: () => {
         if (released) return;
         released = true;
@@ -510,7 +522,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       socket.once('close', a.release);
       const proxy = { address: req.socket.localAddress ?? '', port: req.socket.localPort ?? 0 };
       const trace = traceFromUrl(req.url);
-      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, proxy, a.target, a.protocol, a.release, trace, a.egress));
+      wss.handleUpgrade(req, socket, head, (ws) => openSession(ws, ip, proxy, a.target, a.protocol, a.release, trace, a.egress, a.handover));
     }, (err) => {
       metrics.reject('internal');
       log('error', 'admit_failed', { ip, error: err as Error });
@@ -522,7 +534,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
 
   function openSession(
     ws: WebSocket, ip: string, proxy: { address: string; port: number }, target: Target | null, protocol: SessionProtocol, release: () => void,
-    trace: string | null = null, lease: EgressLease | null = null,
+    trace: string | null = null, lease: EgressLease | null = null, handoverOnly = false,
   ): void {
     const id = ++sessionCounter;
     const upLink = makeImpairedLink(config.impairment);
@@ -540,7 +552,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       id, ip, ws, target, udp: null, closed: false, openedAt: now(), aceSessionId: null, protocol, time1999: 0, account: null, relayLinkKey: null,
       packetsUp: 0, packetsDown: 0, bytesFromBrowser: 0, bytesToServer: 0, bytesFromServer: 0, bytesToBrowser: 0, dropped: 0,
       close: (reason, code) => cleanup(reason, code),
-      notifyDraining: () => { if (relayOn && relayKeyOf() && ws.readyState === WebSocket.OPEN) ws.send(DRAINING_FRAME); },
+      // Every game session hears it (its tab hands the session over at a safe moment); a probe has nothing to hand over.
+      notifyDraining: () => { if (session.target && !isProbe && ws.readyState === WebSocket.OPEN) ws.send(handoverTickets ? DRAINING_HANDOVER_FRAME : DRAINING_FRAME); },
     };
     // The relay's handle on this session's tab (text frames on the game WebSocket).
     const relayPeer: RelayPeer = { send: (t) => { if (ws.readyState === WebSocket.OPEN) ws.send(t); } };
@@ -595,15 +608,20 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
 
     const ensureUdp = (): dgram.Socket => {
       if (session.udp) return session.udp;
-      const t = session.target!;
-      // A 1999 server speaks from its one port only.
-      const sourcePorts = is1999 ? [t.authPort] : [t.authPort, t.worldPort];
       const udp = dgram.createSocket('udp4');
       session.udp = udp;
       // An egress session leaves from its slot's address (sends queue until the bind completes).
       const bound = () => log('debug', 'udp_bound', { session: id, address: udp.address().address, port: udp.address().port });
       if (lease) udp.bind({ port: 0, address: lease.localAddress }, bound);
       else udp.bind(0, bound);
+      return wireUdp(udp);
+    };
+
+    /** The session's socket: what the server sends goes to the tab. */
+    function wireUdp(udp: dgram.Socket): dgram.Socket {
+      const t = session.target!;
+      // A 1999 server speaks from its one port only.
+      const sourcePorts = is1999 ? [t.authPort] : [t.authPort, t.worldPort];
       udp.on('error', (err) => {
         log('error', 'udp_error', { session: id, error: err });
         void cleanup('udp_error');
@@ -680,7 +698,104 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         });
       });
       return udp;
-    };
+    }
+
+    // ── Planned handover (handover.ts) ──
+    /** This (draining) bridge gave the tab a ticket for the session. */
+    let ticketIssued = false;
+    /** The tab moved the session to the new deployment: the socket closes without the server's Disconnect. */
+    let handedOver = false;
+    /** A handover socket: the ticket it presented is being taken over, or was. */
+    let adopting = false;
+    let adopted = false;
+
+    /** Old bridge: a ticket that lets the new deployment take this session's UDP socket over. */
+    function handoverTicket(): void {
+      const reply = (ticket: string | null, reason?: string) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ handoverTicket: { ticket, ...(reason ? { reason } : {}) } }));
+      };
+      if (!handoverTickets) { reply(null, 'no_secret'); return; }
+      if (!draining) { reply(null, 'not_draining'); return; }
+      const udp = session.udp;
+      if (!udp || !session.target || session.closed) { reply(null, 'no_session'); return; }
+      // A login check may still move an egress session to another address: hand it over once settled.
+      if (loginCheck) { reply(null, 'busy'); return; }
+      let addr: { address: string; port: number };
+      try { addr = udp.address(); } catch { reply(null, 'no_session'); return; }
+      ticketIssued = true;
+      log('info', 'handover_ticket', { session: id, port: addr.port, ...egressFields(), ...(trace ? { trace } : {}) });
+      reply(handoverTickets.issue({
+        target: session.target.key, protocol, address: addr.address, port: addr.port,
+        aceSessionId: session.aceSessionId, time1999: session.time1999, account: session.account,
+        egress: lease?.sessionId ?? null, trace,
+      }));
+    }
+
+    /** Old bridge: the new deployment holds the ticket; let go of the socket (no Disconnect: the session lives on). */
+    function handoverRelease(): void {
+      if (!ticketIssued || session.closed || handedOver) return;
+      handedOver = true;
+      if (lease && egress) egress.handOff(lease);
+      void cleanup('handover');
+    }
+
+    /** New bridge: take over the session a ticket names, binding its socket's address and port once the old bridge lets go. */
+    async function adoptSession(text: string): Promise<void> {
+      const refuse = (reason: string) => {
+        log('warn', 'handover_refused', { session: id, reason, ...(trace ? { trace } : {}) });
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ adopt: { ok: false, reason } }));
+      };
+      if (!handoverOnly || adopting || adopted || session.closed || !session.target) { refuse('not_a_handover_socket'); return; }
+      if (!handoverTickets) { refuse('no_secret'); return; }
+      let tok = '';
+      try { tok = String((JSON.parse(text) as { adopt?: unknown }).adopt ?? ''); } catch { /* not JSON */ }
+      const opened = handoverTickets.open(tok);
+      if (!opened.ok) { refuse(opened.reason); return; }
+      const t: HandoverTicket = opened.ticket;
+      if (t.target !== session.target.key) { refuse('other_server'); return; }
+      if (t.protocol !== protocol) { refuse('other_protocol'); return; }
+      let taken: EgressLease | null = null;
+      if (t.egress) {
+        taken = egress ? egress.adopt(t.egress, session.target.key) : null;
+        if (!taken) { refuse('egress_lease'); return; }
+        if (taken.localAddress !== t.address) { taken.release(); refuse('egress_slot'); return; }
+      } else if (egress?.isEgressWorld(session.target.key)) {
+        refuse('egress_lease');
+        return;
+      }
+      adopting = true;
+      const started = now();
+      ws.send(JSON.stringify({ adopt: { ok: true } }));
+      const udp = await bindWhenFree(t.address, t.port);
+      if (session.closed) {
+        try { udp?.close(); } catch { /* closed */ }
+        taken?.release();
+        return;
+      }
+      if (!udp) {
+        taken?.release();
+        log('warn', 'handover_bind_failed', { session: id, port: t.port, ms: now() - started, ...(trace ? { trace } : {}) });
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ adopted: { ok: false, reason: 'port_busy' } }));
+        void cleanup('handover_failed');
+        return;
+      }
+      lease = taken;
+      session.aceSessionId = t.aceSessionId;
+      session.time1999 = t.time1999;
+      // The session is answered already: no early resends, no no-reply move (those are for a new login).
+      firstUpAt = now();
+      noReplyMoved = true;
+      if (t.account) {
+        session.account = t.account;
+        if (relayOn) relay.register(relayPeer, accountKey(routinesServer(session.target), t.account));
+      }
+      adopted = true;
+      const ms = now() - started;
+      log('info', 'handover_adopted', { session: id, port: t.port, ms, ...egressFields(), ...(t.trace ? { fromTrace: t.trace } : {}), ...(trace ? { trace } : {}) });
+      ws.send(JSON.stringify({ adopted: { ok: true, ms } }));
+      session.udp = udp;
+      wireUdp(udp);
+    }
 
     ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
       if (session.closed) return;
@@ -702,6 +817,11 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
 
       // Text "health" → JSON status, then close (probeBridgeHealth / check-stack).
       if (!isBinary) {
+        const head = buf.length <= 32 ? buf.toString('utf8') : '';
+        // Planned handover (handover.ts): the old bridge's ticket and release, the new bridge's adopt.
+        if (head === HANDOVER_TICKET_REQUEST) { handoverTicket(); return; }
+        if (head === HANDOVER_RELEASE) { handoverRelease(); return; }
+        if (buf.subarray(0, 9).toString('utf8') === '{"adopt":') { void adoptSession(buf.toString('utf8')); return; }
         // The relay's frames from the tab (agentResult / agentState).
         if (relayOn && relay.onText(relayPeer, buf.toString('utf8'), relayKeyOf())) return;
         const pairText = buf.toString('utf8');
@@ -770,6 +890,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       }
 
       if (isProbe || !session.target) return; // probe-only session: forward nothing
+      if (handoverOnly && !adopted) return; // a handover socket carries nothing of its own
       if (buf.length < 20) return;
       handleGame(buf);
     });
@@ -944,6 +1065,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       clearEarlyResends();
       routineTokens.sessionEnded(id);
       release();
+      // A lease this session adopted in a handover (release() frees only admission's; handed over: a no-op).
+      lease?.release();
       clearInterval(pingInterval);
       upLink.close();
       downLink.close();
@@ -967,8 +1090,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       return new Promise<void>((resolve) => {
         const done = () => { try { udp.close(); } catch { /* ignore */ } resolve(); };
         // Tell the server to free the session now instead of after its 60 s
-        // timeout. Needs the right session id + a valid checksum.
-        if (session.aceSessionId !== null && session.target) {
+        // timeout. Needs the right session id + a valid checksum. Not after a
+        // handover: the session lives on through the new deployment's socket.
+        if (session.aceSessionId !== null && session.target && !handedOver) {
           const pkt = is1999
             ? buildDisconnectPacket1999(session.aceSessionId, session.time1999)
             : buildDisconnectPacket(session.aceSessionId);

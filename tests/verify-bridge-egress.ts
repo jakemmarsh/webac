@@ -248,6 +248,52 @@ describe('cross-process coordination (two bridges on one state dir)', () => {
     await oldBridge.stop(); await newBridge.stop();
   });
 
+  it('a planned handover moves a session\'s lease to the new process: same slot, never counted twice, freed by its new owner', async () => {
+    const dir = tempDir();
+    const clock = fakeClock();
+    const oldBridge = await staticManager(dir, 'w:1', ['10.0.0.1', '10.0.0.2'], clock);
+    const newBridge = await staticManager(dir, 'w:1', ['10.0.0.1', '10.0.0.2'], clock);
+    const a = await lease(oldBridge, 'w', '198.51.100.1');
+    oldBridge.handOff(a);
+    // Between the old process letting go and the new one taking it, the session still holds its slot and its real IP's place.
+    expect(oldBridge.liveSessions()).toHaveLength(1);
+    expect(await newBridge.acquire('w', '198.51.100.1')).toMatchObject({ ok: false, refusal: 'ip_cap' });
+    // Only the world it belongs to, only once, only a live record.
+    expect(newBridge.adopt(a.sessionId, 'other')).toBeNull();
+    expect(newBridge.adopt('no-such-session', 'w')).toBeNull();
+    const b = newBridge.adopt(a.sessionId, 'w')!;
+    expect(b).not.toBeNull();
+    expect(newBridge.adopt(a.sessionId, 'w')).toBeNull();
+    expect(b.localAddress).toBe(a.localAddress);
+    expect(newBridge.liveSessions()).toHaveLength(1);
+    // The old process's release (its session closing after the handover) frees nothing.
+    a.release();
+    expect(newBridge.liveSessions()).toHaveLength(1);
+    // The new owner keeps it fresh past the stale time; its release frees the slot.
+    clock.advance(SESSION_STALE_MS - 1000);
+    newBridge.refresh();
+    clock.advance(SESSION_STALE_MS - 1000);
+    expect(newBridge.liveSessions()).toHaveLength(1);
+    b.release();
+    expect(newBridge.liveSessions()).toHaveLength(0);
+    expect((await newBridge.acquire('w', '198.51.100.1')).ok).toBe(true);
+    await oldBridge.stop(); await newBridge.stop();
+  });
+
+  it('a handed-off lease nobody adopts goes stale like a dead process\'s', async () => {
+    const dir = tempDir();
+    const clock = fakeClock();
+    const oldBridge = await staticManager(dir, 'w:1', ['10.0.0.1'], clock);
+    const newBridge = await staticManager(dir, 'w:1', ['10.0.0.1'], clock);
+    const a = await lease(oldBridge, 'w', '198.51.100.1');
+    oldBridge.handOff(a);
+    oldBridge.refresh(); // the old process no longer refreshes it
+    clock.advance(SESSION_STALE_MS + 1);
+    expect(newBridge.adopt(a.sessionId, 'w')).toBeNull();
+    expect(newBridge.liveSessions()).toHaveLength(0);
+    await oldBridge.stop(); await newBridge.stop();
+  });
+
   it('a dead process\'s session lock goes stale after 120 s and is taken over; a refreshed one stays', async () => {
     const dir = tempDir();
     const clock = fakeClock();

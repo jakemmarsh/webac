@@ -95,11 +95,11 @@ export function buffTimeText(s: number): string {
 }
 
 /** "buffs (3): Strength Other II 2m10s, …" soonest to expire first, or "buffs: none (ac_spells / ac_cast to buff yourself or others)". */
-export function formatBuffs(buffs: ReadonlyArray<{ name: string; remaining: number }>): string {
+export function formatBuffs(buffs: ReadonlyArray<{ name: string; remaining: number; until?: string }>): string {
   if (!buffs.length) return 'buffs: none (ac_spells finds buffs you know; ac_cast casts them on yourself or another player)';
   const left = buffTimeText;
   const sorted = [...buffs].sort((a, b) => (a.remaining < 0 ? Infinity : a.remaining) - (b.remaining < 0 ? Infinity : b.remaining));
-  const shown = sorted.slice(0, 16).map((b) => `${b.name} ${left(b.remaining)}`);
+  const shown = sorted.slice(0, 16).map((b) => `${b.name} ${b.until ?? left(b.remaining)}`);
   return `buffs (${buffs.length}): ${shown.join(', ')}${buffs.length > shown.length ? `, +${buffs.length - shown.length} more` : ''}`;
 }
 
@@ -120,6 +120,7 @@ export function formatObservation(obs: AgentObservation): string {
   // ACE Player_Death.GetNumCoinsDropped: above level 5 a death takes half your coins (onto the corpse, or destroyed
   // outright where the server sets corpse_destroy_pyreals, ACE's default); trade notes are not coins.
   const coinRisk = me.pyreals !== undefined && me.pyreals >= 1000 && me.level > 5 ? ' (half are lost if you die; trade notes, bought from most vendors, aren\'t coins)' : '';
+  if (obs.vitae) out.push(obs.vitae);
   if (me.pyreals !== undefined || me.burden || me.xp) out.push(`pyreals ${me.pyreals ?? '?'}${coinRisk}${me.burden ? `  burden ${me.burden}` : ''}${me.xp ? `  unassigned xp ${me.xp.unassigned.toLocaleString('en-US')}${me.xp.unassigned >= 1000 ? ' (spend it: ac_raise)' : ''}` : ''}`);
   if (me.packSlots) out.push(packSlotsText(me.packSlots));
   for (const [i, d] of obs.dialogs.entries()) out.push(`DIALOG ${i} [${d.buttons.join(' / ')}]: ${d.text.replace(/\s+/g, ' ')}`);

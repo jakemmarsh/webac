@@ -6,6 +6,7 @@
 #   bash tools/aws-env.sh show bridge            # secrets masked
 #   bash tools/aws-env.sh set bridge KEY=value [KEY2=value2 …]
 #   bash tools/aws-env.sh unset bridge KEY [KEY2 …]
+#   bash tools/aws-env.sh set host WEB_SERVICE=off   # /webac/host/env: host settings (deploy-agent.sh)
 #
 # The host reads it on a forced deploy: bash tools/deploy-aws.sh --force --only bridge
 set -euo pipefail
@@ -43,4 +44,8 @@ print("\n".join(k + "=" + env[k] for k in sorted(env)))
 ' "$@" <<<"$current")"
 
 aws ssm put-parameter --name "$name" --type SecureString --overwrite --value "$next" >/dev/null
-echo "updated $name ($(printf '%s\n' "$next" | grep -c .) keys); apply: bash tools/deploy-aws.sh --force --only $svc"
+if [ "$svc" = host ]; then
+  echo "updated $name ($(printf '%s\n' "$next" | grep -c .) keys); the deploy agent reads WEB_SERVICE from it on its next deploy run"
+else
+  echo "updated $name ($(printf '%s\n' "$next" | grep -c .) keys); apply: bash tools/deploy-aws.sh --force --only $svc"
+fi

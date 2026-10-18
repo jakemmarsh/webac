@@ -28,6 +28,8 @@
 #        bash tools/ci-local.sh --ci-shape # step 3 only (after your own suite)
 #
 # Step 3 tests HEAD, so commit first. Exit status is non-zero on any failure.
+# A pass stamps HEAD's sha (tools/lib/deploy-gate.sh): tools/deploy-aws.sh and
+# tools/build-push-images.sh refuse a commit without one.
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
@@ -87,4 +89,13 @@ if [[ -d "$ROOT/reference/ACE" ]]; then
   [[ "$PIN" == "$HAVE" ]] || echo "[ci-local] note: reference/ACE is $HAVE, CI pins $PIN"
 fi
 (cd "$WT" && npm run build >/dev/null && npm test)
-echo "[ci-local] PASS — type check, full suite, CI-shaped suite"
+# The pass stamp tools/deploy-aws.sh and tools/build-push-images.sh require (tools/lib/deploy-gate.sh).
+# shellcheck source=tools/lib/deploy-gate.sh
+. "$ROOT/tools/lib/deploy-gate.sh"
+GATED="$(git -C "$WT" rev-parse HEAD)"
+gate_stamp "$ROOT" "$GATED" "$([[ $ONLY_SHAPE -eq 1 ]] && echo ci-shape || echo full)"
+if [[ $ONLY_SHAPE -eq 1 ]]; then
+  echo "[ci-local] PASS — CI-shaped suite of ${GATED:0:12} (stamped: it may be built and deployed)"
+else
+  echo "[ci-local] PASS — type check, full suite, CI-shaped suite of ${GATED:0:12} (stamped: it may be built and deployed)"
+fi

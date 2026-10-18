@@ -1,0 +1,162 @@
+/* playwebac.com static pages. Layout: a sticky dark header, a hero on the end-of-retail
+   character-select backdrop, then DAT dialog panels with blue header bars on the backdrop's
+   stone blue; one column under 760px. Every image is a DAT texture (tools/site/export-site-art.ts),
+   drawn at native size and tiled, never stretched. @@name@@ is replaced with the hashed asset URL. */
+@font-face { font-family: "Uncial Antiqua"; src: url(@@uncial-antiqua-400.woff2@@) format("woff2"); font-display: swap; }
+@font-face { font-family: "Alegreya Sans"; src: url(@@alegreya-sans-400.woff2@@) format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Alegreya Sans"; src: url(@@alegreya-sans-400-italic.woff2@@) format("woff2"); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: "Alegreya Sans"; src: url(@@alegreya-sans-700.woff2@@) format("woff2"); font-weight: 700; font-display: swap; }
+/* Fallbacks sized to each face's metrics (measured from the source TTFs) so the swap doesn't move text. */
+@font-face { font-family: "Uncial fallback"; src: local("Georgia"); size-adjust: 126.7%; ascent-override: 77.8%; descent-override: 26%; line-gap-override: 0%; }
+@font-face { font-family: "Alegreya Sans fallback"; src: local("Arial"); size-adjust: 84.3%; ascent-override: 106.8%; descent-override: 35.6%; line-gap-override: 0%; }
+
+:root {
+  color-scheme: dark;
+  /* Stone/navy: the DAT backdrop 0x06007576 and dialog plate 0x06005ddb. Golds and cream: the
+     layout text colours (#ffb219 titles, #d8af5b labels, #fff2cc body). Bar blue: ac.turbine.com. */
+  --stone: #172741;
+  --stone-deep: #0d1628;
+  --navy: #080e19;
+  --bar-top: #0a0c3a;
+  --bar-mid: #2e2a9a;
+  --gold-title: #ffb219;
+  --gold-label: #d8af5b;
+  --gold-line: #b8964f;
+  --cream: #fff2cc;
+  --text: #ebe6d8;
+  --muted: #bdb5a0;
+  --ink: #241806;
+  --green: #9ed36a;
+  --amber: #f2c45c;
+  --red: #ef8f74;
+  --display: "Uncial Antiqua", "Uncial fallback", Georgia, serif;
+  --body: "Alegreya Sans", "Alegreya Sans fallback", system-ui, sans-serif;
+  --script: var(--body);
+}
+* { box-sizing: border-box; }
+html { background: var(--stone-deep); -webkit-text-size-adjust: 100%; }
+body { margin: 0; color: var(--text); font: 17px/1.6 var(--body); background: var(--stone-deep) url(@@stone.webp@@) repeat; background-blend-mode: multiply; }
+a { color: var(--gold-title); text-underline-offset: 3px; }
+a:hover { color: #ffd24c; }
+a:focus-visible, .cta:focus-visible { outline: 2px solid var(--cream); outline-offset: 3px; }
+/* Anchor targets land below the sticky header. */
+[id] { scroll-margin-top: 84px; }
+.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.wrap { max-width: 1040px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.skip { position: absolute; left: 8px; top: -60px; z-index: 20; background: var(--navy); color: var(--cream); padding: 8px 12px; border: 1px solid var(--gold-line); }
+.skip:focus { top: 8px; }
+
+/* Header */
+.top { position: sticky; top: 0; z-index: 10; background: rgba(5, 9, 18, 0.94); border-bottom: 1px solid var(--gold-line); box-shadow: 0 1px 0 #000, 0 6px 18px rgba(0, 0, 0, 0.5); }
+.top .wrap { display: flex; align-items: center; gap: 18px; min-height: 64px; }
+.brand { display: flex; align-items: center; gap: 9px; text-decoration: none; flex: none; color: var(--cream); }
+.brand img { width: 28px; height: 28px; display: block; image-rendering: pixelated; }
+.brand span { font: 1.35rem var(--display); letter-spacing: 0.02em; }
+.sitenav { display: flex; gap: 2px 18px; flex-wrap: wrap; flex: 1; justify-content: flex-end; font-weight: 400; }
+.sitenav a { color: var(--text); text-decoration: none; padding: 9px 0 7px; border-bottom: 2px solid transparent; }
+.sitenav a:hover { color: var(--gold-title); }
+.sitenav a[aria-current] { color: var(--gold-title); border-bottom-color: var(--gold-title); }
+
+/* The pre-world plate button (0x06004ca3/a4/a5, one sprite): a 200x59 plate inside each 254x113 frame. */
+.cta { position: relative; isolation: isolate; display: inline-grid; place-items: center; width: 200px; height: 59px; flex: none;
+       font: 1.15rem var(--display); color: var(--gold-title); text-decoration: none; letter-spacing: 0.03em;
+       text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 2px 4px #000; }
+.cta::before { content: ""; position: absolute; z-index: -1; inset: -26px -27px -28px -27px; background: url(@@plate-button.webp@@) 0 0 / 254px 339px no-repeat; }
+.cta:hover { color: #ffd24c; } .cta:hover::before { background-position: 0 -113px; }
+.cta:active { color: #fff27f; } .cta:active::before { background-position: 0 -226px; }
+/* The header copy at 72%: a 144x42 plate. */
+.cta.small { width: 144px; height: 42px; font-size: 0.95rem; }
+.cta.small::before { inset: -19px -19px -20px -20px; background-size: 183px 244px; }
+.cta.small:hover::before { background-position: 0 -81px; } .cta.small:active::before { background-position: 0 -163px; }
+
+/* Hero */
+.hero { position: relative; overflow: hidden; border-bottom: 1px solid var(--gold-line); background: linear-gradient(90deg, var(--stone) 0%, var(--stone) 45%, #1c2f50 100%); }
+.hero picture { position: absolute; top: 0; right: max(0px, calc((100% - 1040px) / 2 - 20px)); height: 100%; }
+.hero picture img { height: 100%; width: auto; display: block;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28%, #000 82%, transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 28%, #000 82%, transparent 100%); }
+.hero .wrap { position: relative; padding-block: 52px 60px; }
+.hero .copy { max-width: 34rem; display: grid; gap: 16px; justify-items: start; }
+.eyebrow { font: 700 0.8rem var(--body); letter-spacing: 0.14em; text-transform: uppercase; color: var(--gold-label); margin: 0; }
+h1, h2 { font-family: var(--display); font-weight: 400; text-wrap: balance; }
+h1 { margin: 0; font-size: clamp(2.1rem, 5.2vw, 3.2rem); line-height: 1.1; color: var(--gold-title); text-shadow: 0 2px 0 #000, 0 0 22px rgba(0, 0, 0, 0.6); }
+.lede { margin: 0; font-size: 1.15rem; color: var(--cream); text-shadow: 0 1px 2px #000; }
+.fan { margin: -4px 0 0; font-size: 0.92rem; color: var(--muted); text-shadow: 0 1px 2px #000; }
+.actions { display: flex; align-items: center; gap: 20px 28px; flex-wrap: wrap; margin-top: 6px; }
+.actions a.more { font-weight: 700; padding: 8px 0; }
+.facts { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 2px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 0.95rem; }
+.facts li::before { content: "\25C6"; color: var(--gold-label); font-size: 0.6rem; margin-right: 8px; vertical-align: 2px; }
+
+/* Panels: the DAT dialog plate, fill tiled, 13px gold 9-slice repeated (never stretched). */
+main { display: grid; gap: 28px; }
+main > .wrap { display: grid; gap: 28px; padding-block: 36px 48px; width: 100%; }
+.panel { background: var(--navy) url(@@dialog-fill.webp@@) repeat; border: 13px solid transparent; border-image: url(@@dialog-frame.webp@@) 13 round; padding: 6px 14px 14px; min-width: 0; }
+.panel > h2 { margin: -6px -14px 16px; padding: 9px 16px 8px; font-size: 1.3rem; color: var(--cream); text-align: center;
+  background: linear-gradient(180deg, var(--bar-top) 0%, var(--bar-mid) 55%, var(--bar-top) 100%);
+  border-bottom: 1px solid var(--gold-line); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18); text-shadow: 0 1px 0 #000; }
+.panel h3 { margin: 22px 0 4px; font: 700 1.08rem var(--body); color: var(--gold-title); padding-bottom: 4px; border-bottom: 1px solid rgba(216, 175, 91, 0.35); }
+.panel p, .panel ul, .panel ol { margin: 0 0 12px; max-width: 72ch; }
+.panel li { margin: 4px 0; }
+.panel ul li::marker { color: var(--gold-label); }
+.updated { color: var(--muted); font-size: 0.88rem; margin: 0 0 10px; }
+
+/* The short answer, on the book page parchment (0x0600126f), with the old site's drop cap. */
+.answer { background: #ac8b52 url(@@parchment.webp@@) repeat; color: var(--ink); padding: 16px 22px; margin: 0 0 16px !important; max-width: none !important;
+  font: italic 1.12rem/1.55 var(--script); border: 1px solid #5d4520; box-shadow: inset 0 0 8px rgba(60, 35, 5, 0.35); }
+.answer strong { font-style: normal; font-family: var(--body); font-weight: 700; }
+.answer::first-letter { font: normal 2.9rem/0.8 var(--display); float: left; margin: 6px 8px 0 0; color: #4a2205; }
+
+/* Ornate-cornered screenshots (0x06004cc3-c6). */
+figure { margin: 0; }
+.shot { border: 8px solid transparent; border-image: url(@@ornate-frame.webp@@) 34 / 34px round; background: #000; }
+.shot img { display: block; width: 100%; height: auto; }
+figcaption { color: var(--muted); font-size: 0.92rem; text-align: center; margin-top: 10px; }
+.shots { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+
+.tablewrap { overflow-x: auto; margin: 0 0 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 0.96rem; font-variant-numeric: tabular-nums; }
+caption { text-align: left; color: var(--muted); font-size: 0.9rem; padding: 0 0 8px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(184, 150, 79, 0.28); vertical-align: top; }
+thead th { color: var(--gold-title); font-weight: 700; white-space: nowrap; border-bottom: 1px solid var(--gold-line); }
+tbody th { color: var(--gold-label); font-weight: 400; }
+td.num { text-align: right; white-space: nowrap; }
+.yes { color: var(--green); } .warn { color: var(--amber); } .no { color: var(--red); }
+.chip { display: inline-block; font-size: 0.82rem; padding: 0 8px; border: 1px solid var(--gold-line); border-radius: 3px; color: var(--cream); background: rgba(0, 0, 0, 0.35); white-space: nowrap; }
+.works { white-space: nowrap; font-weight: 700; }
+.play { white-space: nowrap; font-weight: 700; }
+.note { color: var(--muted); font-size: 0.95rem; }
+ol.steps { padding-left: 1.5em; } ol.steps li { padding-left: 4px; margin: 8px 0; }
+ol.steps li::marker { font-family: var(--display); color: var(--gold-title); }
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 0 0 12px; }
+.cards > div { border: 1px solid rgba(184, 150, 79, 0.4); background: rgba(0, 0, 0, 0.3); padding: 12px 14px; min-width: 0; }
+.cards h3 { margin-top: 0; }
+
+footer { border-top: 1px solid var(--gold-line); background: rgba(5, 9, 18, 0.9); color: var(--muted); font-size: 0.92rem; }
+footer .wrap { padding-block: 22px 28px; display: grid; gap: 8px; }
+footer nav { display: flex; flex-wrap: wrap; gap: 4px 18px; }
+footer nav a { padding: 6px 0; }
+footer p { margin: 0; }
+
+@media (max-width: 760px) {
+  body { font-size: 16px; }
+  .top .wrap { flex-wrap: wrap; gap: 0 14px; padding-block: 8px 0; }
+  .brand { flex: 1; }
+  .sitenav { order: 3; flex-basis: 100%; justify-content: flex-start; flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; gap: 0 18px; margin-inline: -4px; padding-inline: 4px; }
+  .hero picture { position: relative; right: auto; display: block; height: auto; }
+  .hero picture img { width: 100%; height: auto; max-height: 280px; object-fit: cover; object-position: 50% 0;
+    -webkit-mask-image: linear-gradient(180deg, #000 55%, transparent 100%); mask-image: linear-gradient(180deg, #000 55%, transparent 100%); }
+  .hero .wrap { padding-block: 0 36px; margin-top: -70px; }
+  .shots, .cards { grid-template-columns: 1fr; }
+  .panel { padding: 4px 6px 10px; }
+  .panel > h2 { margin: -4px -6px 14px; }
+  /* The servers table as cards; ARIA roles keep it a table for screen readers (display:block drops them). */
+  table.servers thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  table.servers, table.servers tbody, table.servers tr { display: block; }
+  table.servers tr { padding: 10px 2px; border-bottom: 1px solid rgba(184, 150, 79, 0.28); }
+  table.servers td { display: inline-block; border: 0; padding: 0 10px 2px 0; }
+  table.servers td.name { display: block; font-size: 1.05rem; }
+  table.servers td.about { display: block; color: var(--muted); padding-top: 4px; }
+  table.servers td.num.none { display: none; }
+  table.servers td.num::after { content: " on"; color: var(--muted); }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
