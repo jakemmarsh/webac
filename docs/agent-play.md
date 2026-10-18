@@ -656,6 +656,35 @@ What changed:
   ```
   - spells: Item Enchantment trained (166) but no Item Enchantment spells known: buy and read scrolls at a mage shop (Impenetrability, the Banes, Aura of Blood Drinker, Aura of Swift Killer…; you can learn up to level V)
   ```
+- **Your own buffs: Self, not Other** (Jake 2026-10-18: "why is arcanist using level 1 spells"). His routine cast
+  Strength, Quickness and Coordination Self I, Aura of Defender Self I and Impregnability Self I, the highest Self he
+  knew, while he knew their Other versions at III–V for Bulwark; the spells line above counts a family by its best
+  level of either, so it said nothing. `selfBuffGaps` / `selfBuffLine` (`spellGaps.ts`) compare each known Self buff
+  with the highest Self level the school's skill can read (each level's power from the era's SpellTable, the same
+  CanReadScroll rule), and say the Other levels apart. The scrolls come from this era's world DB by spell id
+  (a scroll's PropertyDataId 28: `shopScrollOfferSql`, `world-query.ts scrollShops`; the names vary: "Scroll of Self
+  Strength V" beside "Scroll of Quickness Self V"), the highest level sold and the next one below, each from the
+  seller nearest the character's map coordinates (the daemon's vitals; in a dungeon, the vendor with the most
+  places and its towns). A character with no magic school is told it casts none. Example (EoL world DB, 2026-10-18):
+  ```
+  - your own buffs: Aura of Defender is at Self I, though you can learn up to Self VI (your Item Enchantment 256); Coordination, Impregnability, Quickness and Strength are at Self I, though you can learn up to Self VI (your Creature Enchantment 256); you know Other V of Aura of Defender, Quickness and Strength, Other IV of Coordination and Other III of Impregnability, which go on someone else (Claude Bulwark), not on you
+  - Self VI scrolls: Aura of Defender Self VI, 50,000 pyreals, from Grand Master Scrivener of Item Magic at 68.7N, 21.5W indoors (Stonehold), the nearest, 61.3 NW of you; Scroll of Coordination Self VI, …, 50,000 pyreals each, from Grand Master Scrivener of Creature Magic at 68.7N, 21.5W indoors (Stonehold), …
+  - Self V scrolls: Aura of Defender Self V, 10,000 pyreals, from Master Scrivener of Item Magic at 8.0S, 73.1E indoors (Dryreach), the nearest, 63.6 SE of you; …
+  ```
+- **Money: coins and trade notes** (Jake 2026-10-18: "do they not have trade notes? why are they so broke"). Bulwark
+  carried ~405,000 in notes and Arcanist a 10,000 note while observe showed coins alone. Observe's header, the
+  `character` sheet's `Money:` line and the opening's `money:` line now add the notes (`format.ts tradeNotesOf`: rows
+  of ItemType PromissoryNote 0x40000 in every pack, by Value, never by name; a stack's Value is units × face value),
+  and the opening adds `fellowship money: you N, <partner> M` from the partner's own inventory read (left out when
+  unreadable). What ACE does, said in the line: a vendor takes only coins as payment (Vendor.BuyItems_ValidateTransaction
+  checks CoinValue, the Coin stacks, or the vendor's AlternateCurrency), buys a note at its face value (GetBuyCost rate
+  1.0; 1,107 of the EoL world's 1,179 vendors buy PromissoryNote) and sells one at 115%; every Trade Note weenie is
+  Bonded (33 = 1), which CalculateDeathItems leaves out, so notes are kept on death while half the coins drop above
+  level 5. So a vendor does not give change for a note: sell the note first.
+  ```
+  - money: 2,350 in coins + 405,000 in trade notes (112 notes) = 407,350 (half your coins are lost if you die, notes are kept; vendors take only coins as payment: sell a note to a vendor (most buy them) for its face value in coins)
+  - fellowship money: you 407,350 (2,350 in coins + 405,000 in notes), Claude Arcanist 11,150 (1,150 in coins + 10,000 in notes)
+  ```
 
 ### Fights run under a routine (2026-10-17)
 
@@ -864,6 +893,80 @@ heal and hand control back on danger. The brief only listed a routine beside tho
   - *"Worn Goggles".* A name with a word saying which of your items (worn / wielded / equipped, spare / pack / carried,
     my / your) that matched nothing in full finds it among those (`qualifiedItem`), for use, use_on, give and the rest.
   - The kill note's hand-attack invitation while a routine fights for you was reworded in 161577067.
+
+- **Live hour 2026-10-18 12:24–13:25Z (Aerbax Laboratory 0x029E), fixed 2026-10-18**
+  (`tests/verify-stream-reports-2026-10-18-1325.ts`):
+  - *The portal sentinel (`AgentApi.enforcePortalSentinel`, `portalAvoid.portalStepThreat`).* The fourth time a walk went
+    through a portal (dfa53b46, 914c301d, 2994488e before): Arcanist's follow ran a leg ending 4.9 m short of Aerbax
+    Haven #7029e002 and, between two looks of the walk, ran on past it into the portal (the body itself 1.4 m from its
+    middle). Every movement the agent makes now passes one guard, whatever pressed the keys (walk, follow, a routine's
+    Follow / nav, flee, stay_with, a stall's sidestep, `move`, `jump`, a held motion): each look, and each movement key
+    the agent presses, the stride the body could run before the next look (the pace times the longest of the last ten
+    gaps between looks, with slack for a run) is checked against every portal near it that the task isn't sent into; one
+    it would come into turns the run into a walk, or, if a walk's stride reaches it too, lets go of the agent's movement
+    keys so the body stands (the walk then plans round, or says the way on passes the portal). Each look it also reports
+    the body's place when the server's straight line from the last report would cut a portal's disk. Only keys the agent
+    itself holds are touched: a player's own movement never is. Its trace line: `portal sentinel: …; let go of KeyW`.
+  - *stay_with after a portal.* A fellow not placed yet within 30 s of your own arrival is waited for up to 20 s ("isn't
+    placed here yet … waiting"), not "out of sight" at once; the fellows line says "not placed here yet (you came
+    through a portal N s ago; …)". Bulwark's walk set off while Arcanist was still in portal space.
+  - *Fizzles at 98%.* Checked, no fault: ACE rolls `GetMagicSkillChance(Current, Power)`, the same curve as
+    `magicSkillChance`; 256 against 200 is 98.05%, and 2 fizzles in the segment's 32 Item Enchantment casts happen ~13%
+    of the time.
+  - *Leash refusal at a wall-stuck monster.* The attack's leash refusal says when the monster is aimed at you or a fellow
+    but stuck (no nearer in AGGRO_STALL_MS), so it won't come to you, and whether a walk (so a far=true run-up) gets to it.
+
+- **Live hour 2026-10-18 13:25–14:27Z (Aerbax Laboratory / Haven), fixed 2026-10-18**
+  (`tests/verify-stream-reports-2026-10-18-1426.ts`):
+  - *Follow leash* (beyond VTank, `FollowLeash`, 0 by default, 7 in mage.json). VTank fights before it follows, so
+    Arcanist's routine bolted a mild chaser on Bulwark from where it stood while Bulwark walked on, and ended 16–28 m
+    back. It was not "chasing a bolt line": the macro never walks for a line. A Follow leader farther than Follow
+    distance + FollowLeash (15 m), or out of sight in another room, is now followed before buffs and fights. Recharge
+    still comes first, and something hitting you is still fought. A caster's close-in for range or a line
+    (`castAttack`: `ac_attack`, a rules routine's attack) keeps to the melee fellow leash unless far=true, and never
+    goes past a routine's Follow leash.
+  - *stay_with and mild hits.* With your routine covering the walk, a stay_with wait goes on through a mild chaser's nicks.
+    Only real danger walks on without the fellow: a pack, a caster whose spells hurt, a heavy hitter, or health under
+    60% (`stayWithDanger`). With no routine, or flee=true, any hit still does.
+  - *Busy.* A cast or use (by hand, or the routine's kit or drink) waits up to 10 s for the one already under way, until
+    the server's UseDone (`BUSY_WAIT_MS`), and says so. A hand Heal Other had gone out at the old 4 s cap, 0.4 s before
+    the routine's own Heal Other ended ("You're too busy!").
+  - *Namesakes out of view.* `walk_to` / `use` by a name that several remembered places in this dungeon share take the
+    one a walk reaches, nearest by the doorway route, and the walk's answer says which it took. Before, "Surface" took the
+    484 m one across a one-way drop.
+  - *Corpses out of sight.* `walk_to` and `loot` by a corpse's id go to where it lies. A corpse doesn't move. Loot opens
+    it once it is in view again.
+
+- **Live hour 2026-10-18 14:27–15:30Z (Aerbax Laboratory's doll loop), fixed 2026-10-18**
+  (`tests/verify-stream-reports-2026-10-18-1529.ts`):
+  - *Follow through portals* (beyond VTank, `FollowThroughPortals`, on by default). The routine's Follow "gave up" when
+    Bulwark took the Surface portal 2 m from Arcanist: her client placed him outside the dungeon, so there was no spot to
+    walk to ("out of sight; standing still"). When he came back in at the entrance, 622 m off, it walked at that spot 36
+    times in 20 s, each "no way on foot" (the pocket half reaches the entrance only by that portal). Now the Follow goes
+    through the portal its leader stood beside when the server moved them (placed far off, faster than any run, or in
+    another space, or gone from your client), or, with them in another space, through the portal near you that took you
+    to their landblock before (`fellowPortal`). A walk to their last placement that finds no way on foot is said once and
+    tried again only after 15 s. The drops were never the problem: the Follow takes them.
+  - *stay_with holds under real danger.* With the fellow already past the leash behind (or waited for), real danger on
+    you (a pack, a caster whose spells hurt, a heavy hitter, health under 60%, or any hit with no routine covering the
+    walk) ends the walk there, "stopped … short to hold with X", to fight where they catch up, never on without them.
+    flee=true still runs on, naming them.
+  - *stay_with waits at the bottom of a drop.* Down a one-way drop, the walk stands at the bottom until the fellow is down
+    on that floor too (`STAY_WITH_WAIT_MS`), then walks on. Live, Bulwark landed in the Pristine pocket and walked on
+    85 m while Arcanist was still up on the ledge.
+  - *No message suggests leaving a fellow.* The stay_with hint says to wait on for them (not "walk on without waiting
+    (no stay_with)"); a melee run-up's drop refusal says to go down together with drop=true once they're beside you.
+  - *Repeat casts and casters already on you.* From the second cast, one on you from the start stops `cast repeat=true`
+    only as real danger: a spell of its kind's that took a tenth of your health, a heavy hit, or far above you. A
+    debuffer is named ("cast on through, on you from the start") and cast on through. A new caster still stops it. The
+    stop names the spell that hurt.
+  - *"stopped N m short"* is the straight line to the goal (it was right: 0x029E0197's floor point is 85 m south of the
+    drop's edge). Where the doorway route left is much longer, the answer gives both: "stopped 51.0 m short in a straight
+    line (94 m left by the doorway route)".
+  - Checked, retail (ACE): Heal Other on a full-health target spends its mana (spent at the cast, the boost clamped
+    after). A small Heal Self right after the routine's own heal is the routine's heal landing first.
+  - Not the Follow: the final split (15:26:37Z) was Arcanist's own `walk_to 0x029E0122 flee=true`, which ran on through
+    the dolls' hits 115 m ahead of Bulwark while her routine was held for it.
 
 ### Dead air (measured 2026-10-14)
 

@@ -162,7 +162,7 @@ interface CellCollision extends GridEntry {
    * The source stands in the landscape's land cells: a building's shell
    * (`building`), a landblock static (LandblockInfo.objects) or a scenery
    * placement. A body in an env cell meets these only near one of that
-   * cell's outside portals (shellsReachable): CEnvCell::find_transit_cells
+   * cell's outside portals (bodyScope): CEnvCell::find_transit_cells
    * @ 0052c820 adds the land cells to its cell array only there, and
    * CObjCell::find_obj_collisions tests each cell's own objects.
    */
@@ -174,10 +174,79 @@ interface CellCollision extends GridEntry {
    * its portals (then every building shell counts, as before).
    */
   outsidePlanes?: readonly OutsidePortalPlane[];
+  /** An env cell's portal neighbours (full cell ids), or undefined when registered without them (componentOf). */
+  neighbors?: readonly number[];
+  /**
+   * An env cell's vertex bounds, AC landblock-global (x, y, z up): no point
+   * outside them is in the cell (its CELL BSP is closed by its polygons; 0 of
+   * 57 M points sampled just outside every 10th cell of the end-of-retail and
+   * Classic Dereth cell.dats were), so findCellContaining tests a point
+   * against the cell's BSP only inside them.
+   */
+  cellBox?: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number };
+  /** The env cell this source is (an EnvCell) or stands in (one of its statics, collisionKey.cellStatic); 0 for any other. */
+  envCellId: number;
+}
+
+/** An env cell's entry in DungeonCollision's envCellGrid. */
+interface EnvCellSlot extends GridEntry {
+  cellId: number;
+}
+
+/** Which cell a source stands in, for a body's scope (DungeonCollision.inScope). */
+interface ScopedSource {
+  /** It stands in the land cells (a building shell, a landblock static, scenery). */
+  landCell: boolean;
+  /** The env cell it is or stands in; 0 for none. */
+  envCellId: number;
+}
+
+/**
+ * What a test of a body meets: the land cells (`land`: it is in no env
+ * cell, or near one of its cell's outside portals) and which group of
+ * portal-joined env cells it stands in (`home`, -1 = none or unknown).
+ */
+interface BodyScope {
+  land: boolean;
+  home: number;
+}
+
+/** A body that meets every source (outdoors, or in a cell registered without its portals). */
+const EVERYTHING: BodyScope = { land: true, home: -1 };
+
+/** Whether the source belongs to a cell (land or env) a body's scope decides on. */
+function scoped(src: ScopedSource): boolean {
+  return src.landCell || src.envCellId !== 0;
+}
+
+/** The env cell a source under `key` is or stands in (an EnvCell's numeric key, or a cellStatic key's cell); 0 otherwise. */
+function envCellOfKey(key: CollisionKey): number {
+  if (typeof key === 'number') return key >>> 0;
+  return key.startsWith('cs:') ? parseInt(key.slice(3), 10) >>> 0 : 0;
+}
+
+/** Whether a source under `key` stands in the land cells by its key (a landblock static or scenery placement). */
+function landKey(key: CollisionKey): boolean {
+  return typeof key === 'string' && (key.startsWith('st:') || key.startsWith('sc:'));
 }
 
 /** A cell-local plane through an outside portal polygon (unit normal n, n·p + d = 0). */
 interface OutsidePortalPlane { nx: number; ny: number; nz: number; d: number }
+
+/** CellCollision.cellBox: the cell's vertices carried out of its frame, padded by a centimetre; undefined with none. */
+function cellBoxOf(cellStruct: CellStruct, position: Frame, offX: number, offY: number): CellCollision['cellBox'] {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const v of cellStruct.vertexArray.vertices.values()) {
+    const g = quatRotate(position.orientation, v.origin);
+    const x = g.x + position.origin.x + offX, y = g.y + position.origin.y + offY, z = g.z + position.origin.z;
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  if (!(minX <= maxX)) return undefined;
+  const pad = 0.01;
+  return { minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad, minZ: minZ - pad, maxZ: maxZ + pad };
+}
 
 /** The plane through a portal polygon's first three vertices, or null for a degenerate one. */
 function portalPlane(cellStruct: CellStruct, polygonId: number): OutsidePortalPlane | null {
@@ -224,6 +293,10 @@ interface CylinderObstacle extends GridEntry {
    * near an outside portal (getCameraDistance's `landFrom`).
    */
   inCell: boolean;
+  /** ScopedSource: a landblock static's or scenery placement's (bodyScope's land cells). */
+  landCell: boolean;
+  /** ScopedSource: the env cell whose static it is, 0 for none. */
+  envCellId: number;
 }
 
 /** A Setup `Sphere` obstacle (ACE Sphere.IntersectsSphere), world THREE space. */
@@ -232,6 +305,9 @@ interface SphereObstacle extends GridEntry {
   y: number;
   z: number;
   radius: number;
+  /** ScopedSource, as CylinderObstacle's. */
+  landCell: boolean;
+  envCellId: number;
 }
 
 /** ACE PhysicsGlobals.EPSILON (Physics/PhysicsGlobals.cs:9) — the radsum slack in CylSphere/Sphere tests. */
@@ -384,6 +460,9 @@ export class DungeonCollision {
    */
   private readonly spatialIndex: boolean;
   private cellGrid = new CollisionGrid<CellCollision>();
+  /** The env cells by their vertex bounds (cellBox), for findCellContaining's search past the preferred cell's portals. */
+  private envCellGrid = new CollisionGrid<EnvCellSlot>();
+  private envCellSlots = new Map<number, EnvCellSlot>();
   private cylinderGrid = new CollisionGrid<CylinderObstacle>();
   private sphereGrid = new CollisionGrid<SphereObstacle>();
   private nextSeq = 0;
@@ -544,6 +623,7 @@ export class DungeonCollision {
     } | null | undefined,
     scaleZ: number,
   ): void {
+    this.scopeEpoch++; // bodyScope's spheres
     if (!setup) {
       this.playerRadius = DungeonCollision.PLAYER_RADIUS;
       this.playerHeight = DungeonCollision.PLAYER_HEIGHT;
@@ -565,9 +645,12 @@ export class DungeonCollision {
 
   /**
    * `outsidePortalPolygonIds`: the cell's portal polygons that lead outside
-   * (EnvCell cellPortals with OtherCellId 0xFFFF); see shellsReachable.
+   * (EnvCell cellPortals with OtherCellId 0xFFFF); see bodyScope.
+   * `neighborCellIds`: the cells its other portals lead to (full ids); see componentOf.
    */
-  addCell(cellId: number, cellStruct: CellStruct, position: Frame, outsidePortalPolygonIds?: readonly number[]): void {
+  addCell(
+    cellId: number, cellStruct: CellStruct, position: Frame, outsidePortalPolygonIds?: readonly number[], neighborCellIds?: readonly number[],
+  ): void {
     const bsp = buildCollisionBSP(
       cellStruct.physicsBSP.rootNode,
       cellStruct.physicsPolygons,
@@ -587,13 +670,15 @@ export class DungeonCollision {
       building: false,
       outsidePlanes: outsidePortalPolygonIds?.map((id) => portalPlane(cellStruct, id))
         .filter((pl): pl is OutsidePortalPlane => pl !== null),
+      neighbors: neighborCellIds?.map((id) => id >>> 0),
+      cellBox: cellBoxOf(cellStruct, position, landblockX(cellId) * 192, landblockY(cellId) * 192),
     });
   }
 
   /**
-   * BUG.bunker-sealed-at-ground — whether the building shells take part in a
-   * test of the body stacked on `baseY` at AC landblock-global (gx, gy).
-   * Retail tests a building's shell from its landcell only
+   * BUG.bunker-sealed-at-ground — what a test of the body stacked on `baseY`
+   * at AC landblock-global (gx, gy) meets (scopeFor with the player's body
+   * spheres). Retail tests a building's shell from its landcell only
    * (SortCell::find_collisions → BuildingObj::find_building_collisions; ACE
    * SortCell.cs / BuildingObj.cs). A body in an env cell reaches the
    * landcells only when one of its spheres lies within its radius of the
@@ -606,45 +691,128 @@ export class DungeonCollision {
    * ground level"). Outdoors, or in a cell registered without its portals,
    * the shells always count.
    */
-  private shellsReachable(gx: number, gy: number, baseY: number): boolean {
-    return this.shellsReachableFor(this.bodySphereHeights.map((h) => ({ x: gx, y: gy, z: baseY + h })), this.bodySphereRadius);
+  private bodyScope(gx: number, gy: number, baseY: number): BodyScope {
+    // One step asks it several times at one spot (the move, its step up, the placement, the floor).
+    const m = this.lastBodyScope;
+    if (m && m.gx === gx && m.gy === gy && m.baseY === baseY && m.epoch === this.scopeEpoch) return m.scope;
+    const scope = this.scopeFor(this.bodySphereHeights.map((h) => ({ x: gx, y: gy, z: baseY + h })), this.bodySphereRadius);
+    this.lastBodyScope = { gx, gy, baseY, epoch: this.scopeEpoch, scope };
+    return scope;
   }
+  private lastBodyScope: { gx: number; gy: number; baseY: number; epoch: number; scope: BodyScope } | null = null;
+  /** Bumped whenever what bodyScope reads changes (a source, the body cell, the body's spheres). */
+  private scopeEpoch = 0;
 
   /**
    * Whether a body whose feet are at `feetY` at (gx, gy) (AC landblock-global,
    * the player's body spheres) has the landscape's land cells in its cell
    * array: it stands in no registered env cell, or in one with a sphere
-   * within its radius of an outside portal's plane (shellsReachable). Only
+   * within its radius of an outside portal's plane (bodyScope). Only
    * then do the terrain's rules (height, slope, water:
    * CLandCell::find_env_collisions @ 00532f20) apply to it.
    */
   reachesLandCells(gx: number, gy: number, feetY: number): boolean {
-    return this.shellsReachable(gx, gy, feetY);
+    return this.bodyScope(gx, gy, feetY).land;
   }
 
-  /** shellsReachable for any spheres of radius `radius` (AC landblock-global centres): a missile's too. */
-  private shellsReachableFor(centres: readonly { x: number; y: number; z: number }[], radius: number): boolean {
+  /**
+   * bodyScope for any spheres of radius `radius` (AC landblock-global
+   * centres): a missile's too. `home` is the portal-connected group of the
+   * env cell the first centre in one stands in (componentOf), found from the
+   * body's cell (setBodyCell) through its portals.
+   */
+  private scopeFor(centres: readonly { x: number; y: number; z: number }[], radius: number): BodyScope {
     const r = radius + PHYSICS_EPSILON;
+    let home = -1;
     let inCell = false;
     for (const c of centres) {
-      const id = this.findCellContaining(c.x, c.y, c.z, this.lastShellCell);
+      const id = this.findCellContaining(c.x, c.y, c.z, this.bodyCell || this.lastShellCell);
       if (id === 0) continue;
+      if (!inCell) home = this.componentOf(id);
       inCell = true;
       this.lastShellCell = id;
       const cell = this.envCells.get(id)!;
-      if (!cell.outsidePlanes) return true;
+      if (!cell.outsidePlanes) return EVERYTHING;
       for (const cc of centres) {
         const p = globalToLocal(cell.origin, cell.quat, { x: cc.x - cell.blockOffsetX, y: cc.y - cell.blockOffsetY, z: cc.z });
         for (const pl of cell.outsidePlanes) {
           const dist = pl.nx * p.x + pl.ny * p.y + pl.nz * p.z + pl.d;
-          if (dist > -r && dist < r) return true;
+          if (dist > -r && dist < r) return EVERYTHING;
         }
       }
     }
-    return !inCell;
+    return inCell ? { land: false, home } : EVERYTHING;
   }
-  /** shellsReachable's preferred cell: the last one it found the body in. */
+  /** scopeFor's preferred cell when no body cell is set: the last one it found a body in. */
   private lastShellCell = 0;
+
+  /**
+   * The cell the player's body is in (0 = outdoors / unknown): where
+   * findCellContaining starts for every test of a body (scopeFor), so a
+   * point where two unconnected cells overlap is placed in the player's
+   * own group of cells (CTransition::find_cell_list starts at the object's
+   * cell; CEnvCell::find_transit_cells walks only its portals).
+   */
+  setBodyCell(cellId: number): void {
+    if (this.bodyCell !== cellId >>> 0) this.scopeEpoch++;
+    this.bodyCell = cellId >>> 0;
+  }
+  private bodyCell = 0;
+
+  /**
+   * Whether source `src` takes part in a test of a body with `scope`.
+   * A land-cell source only when the body reaches the land cells. An env
+   * cell (or one of its statics) of a group of cells no portal joins to the
+   * body's own (componentOf) only then too: retail's cell array holds the
+   * body's cell, the cells its portals lead to, and the land cells near an
+   * outside portal (CEnvCell::find_transit_cells @ 0052c820), never a cell
+   * that merely overlaps it. Before this, the rooms of Eastham's two portal
+   * bunkers under the town (0xCE94 0x0102 / 0x0107, Env 0x0D0003F4, both
+   * eras) and the basements of the olthoi mounds (building 0x01004031) at
+   * 0xC4B5 and 0xE6D3 stood in each other's space: one's walls blocked a
+   * player walking in the other, and its floors held them up.
+   */
+  private inScope(src: ScopedSource, scope: BodyScope): boolean {
+    if (src.landCell) return scope.land;
+    if (scope.land || scope.home < 0) return true;
+    const c = this.componentOf(src.envCellId);
+    return c < 0 || c === scope.home;
+  }
+
+  /**
+   * The group of registered env cells joined to `cellId` by portals that
+   * lead both ways (EnvCell cellPortals), as a number; -1 when the cell was
+   * registered without its portals (then nothing is set apart from it). A
+   * cell only one of whose portals names another (a dangling cell such as
+   * 0xD2D403B4, whose one portal leads to 0x03B3 but not back) is a group
+   * of its own: a body in the other never reaches it.
+   */
+  private componentOf(cellId: number): number {
+    if (!this.components) {
+      const comp = new Map<number, number>();
+      let next = 0;
+      for (const [id, cell] of this.envCells) {
+        if (!cell.neighbors || comp.has(id)) continue;
+        const group = next++;
+        comp.set(id, group);
+        const queue = [id];
+        while (queue.length > 0) {
+          const at = queue.pop()!;
+          for (const n of this.envCells.get(at)!.neighbors!) {
+            if (comp.has(n)) continue;
+            const other = this.envCells.get(n);
+            if (!other?.neighbors?.includes(at)) continue;
+            comp.set(n, group);
+            queue.push(n);
+          }
+        }
+      }
+      this.components = comp;
+    }
+    return this.components.get(cellId >>> 0) ?? -1;
+  }
+  /** componentOf's groups; null = rebuild (an env cell was added or removed). */
+  private components: Map<number, number> | null = null;
 
   /**
    * BUG.bunker-camera-in-head — whether the camera's viewer sphere at AC
@@ -652,21 +820,35 @@ export class DungeonCollision {
    * shells, land objects): in no env cell, in a cell registered without its
    * portals, or within `radius` of one of its cell's outside portal planes
    * (CEnvCell::find_transit_cells @ 0052c820 → CLandCell::add_all_outside_cells;
-   * ACE EnvCell.cs:311-371). The probe viewerLandFrom steps along the boom.
+   * ACE EnvCell.cs:311-371). The probe viewerLandFrom steps along the boom;
+   * a missile's terrain sweep (main.ts missileEnvironmentSweep) asks it of
+   * the missile's sphere.
    */
   viewerReachesLand(x: number, y: number, z: number, radius: number): boolean {
-    return this.shellsReachableFor([{ x, y, z }], radius);
+    return this.scopeFor([{ x, y, z }], radius).land;
   }
 
   /** Map.set semantics (a re-registered key keeps its original scan position) + the spatial grid. */
-  private registerCell(key: CollisionKey, data: Omit<CellCollision, 'seq' | 'gridCells' | 'landCell'>): void {
+  private registerCell(key: CollisionKey, data: Omit<CellCollision, 'seq' | 'gridCells' | 'landCell' | 'envCellId'>): void {
     const prev = this.cells.get(key);
-    const landCell = data.building || (typeof key === 'string' && (key.startsWith('st:') || key.startsWith('sc:')));
-    const entry: CellCollision = { ...data, landCell, seq: prev ? prev.seq : this.nextSeq++, gridCells: [] };
+    const landCell = data.building || landKey(key);
+    const entry: CellCollision = { ...data, landCell, envCellId: landCell ? 0 : envCellOfKey(key), seq: prev ? prev.seq : this.nextSeq++, gridCells: [] };
     if (prev) this.cellGrid.remove(prev);
     this.cells.set(key, entry);
-    if (typeof key === 'number' && entry.cellBspRoot) this.envCells.set(key, entry);
-    else if (typeof key === 'number') this.envCells.delete(key);
+    this.scopeEpoch++;
+    if (typeof key === 'number') {
+      this.components = null;
+      if (entry.cellBspRoot) {
+        this.envCells.set(key, entry);
+        let slot = this.envCellSlots.get(key);
+        if (!slot) { slot = { cellId: key, seq: entry.seq, gridCells: [] }; this.envCellSlots.set(key, slot); }
+        const b = entry.cellBox;
+        if (b) this.envCellGrid.insert(slot, (b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, Math.hypot(b.maxX - b.minX, b.maxY - b.minY) / 2);
+        else this.envCellGrid.insert(slot, NaN, NaN, NaN);
+      } else {
+        this.dropEnvCell(key);
+      }
+    }
     // World XZ footprint: the physics BSP root's bounding sphere, scaled and
     // carried out of the source's frame. No sphere → always scanned.
     const bs = data.bsp.boundingSphere;
@@ -681,12 +863,19 @@ export class DungeonCollision {
       bs.radius * data.scale);
   }
 
+  private dropEnvCell(cellId: number): void {
+    this.envCells.delete(cellId);
+    const slot = this.envCellSlots.get(cellId);
+    if (slot) { this.envCellGrid.remove(slot); this.envCellSlots.delete(cellId); }
+  }
+
   removeCell(key: CollisionKey): void {
     const prev = this.cells.get(key);
     if (!prev) return;
     this.cellGrid.remove(prev);
     this.cells.delete(key);
-    if (typeof key === 'number') this.envCells.delete(key);
+    this.scopeEpoch++;
+    if (typeof key === 'number') { this.dropEnvCell(key); this.components = null; }
   }
 
   /** Remove whatever source (BSP cell, cylinder or sphere obstacle) is registered under `key`. */
@@ -712,11 +901,21 @@ export class DungeonCollision {
    * player's current cell — the overwhelmingly common answer), then scan
    * the rest. Returns 0 when no registered cell contains the point (e.g.
    * mid-portal, or outside the dungeon).
+   *
+   * After the preferred cell come the cells its portals lead to, outward
+   * through theirs (CTransition::find_cell_list → CEnvCell::find_transit_cells
+   * @ 0052c820 walks the current cell's portals), and only then the rest.
+   * Where two unconnected cells overlap (Eastham's two bunker rooms, 0xC4B5's
+   * olthoi mound basements; a dangling cell like 0xD2D403B4 over a house's stairs)
+   * a body stepping on from its cell stays in its own group of cells: by id
+   * order the scan put it in the other one, and the cell tracking followed.
    */
   findCellContaining(acX: number, acY: number, acZ: number, preferredCellId = 0): number {
     const test = (cellId: number): boolean => {
       const cell = this.envCells.get(cellId);
       if (!cell || !cell.cellBspRoot) return false;
+      const b = cell.cellBox;
+      if (b && (acX < b.minX || acX > b.maxX || acY < b.minY || acY > b.maxY || acZ < b.minZ || acZ > b.maxZ)) return false;
       return pointInCell(
         cell.cellBspRoot,
         cell.origin,
@@ -724,9 +923,31 @@ export class DungeonCollision {
         { x: acX - cell.blockOffsetX, y: acY - cell.blockOffsetY, z: acZ },
       );
     };
-    if (preferredCellId && test(preferredCellId)) return preferredCellId;
+    const start = preferredCellId ? this.envCells.get(preferredCellId >>> 0) : undefined;
+    if (start && test(preferredCellId)) return preferredCellId;
+    let tried: Set<number> | null = null;
+    if (start?.neighbors) {
+      tried = new Set([preferredCellId >>> 0]);
+      const queue = [...start.neighbors];
+      for (let i = 0; i < queue.length; i++) {
+        const id = queue[i];
+        if (tried.has(id)) continue;
+        tried.add(id);
+        const cell = this.envCells.get(id);
+        if (!cell) continue;
+        if (test(id)) return id;
+        if (cell.neighbors) for (const n of cell.neighbors) if (!tried.has(n)) queue.push(n);
+      }
+    }
+    if (this.spatialIndex) {
+      // The cells whose bounds reach the point, in registration order (as the scan below visits them).
+      for (const slot of this.envCellGrid.queryDisc(acX, acY, 0)) {
+        if (slot.cellId !== preferredCellId && !tried?.has(slot.cellId) && test(slot.cellId)) return slot.cellId;
+      }
+      return 0;
+    }
     for (const cellId of this.envCells.keys()) {
-      if (cellId !== preferredCellId && test(cellId)) return cellId;
+      if (cellId !== preferredCellId && !tried?.has(cellId) && test(cellId)) return cellId;
     }
     return 0;
   }
@@ -753,6 +974,7 @@ export class DungeonCollision {
     const entry: CylinderObstacle = {
       x: worldX, z: worldZ, radius, bottomY, topY,
       inCell: typeof key === 'string' && key.startsWith('cs:'),
+      landCell: landKey(key), envCellId: envCellOfKey(key),
       seq: prev ? prev.seq : this.nextSeq++, gridCells: [],
     };
     this.cylinders.set(key, entry);
@@ -783,6 +1005,7 @@ export class DungeonCollision {
     if (prev) this.sphereGrid.remove(prev);
     const entry: SphereObstacle = {
       x: worldX, y: worldY, z: worldZ, radius,
+      landCell: landKey(key), envCellId: envCellOfKey(key),
       seq: prev ? prev.seq : this.nextSeq++, gridCells: [],
     };
     this.spheres.set(key, entry);
@@ -889,8 +1112,13 @@ export class DungeonCollision {
   setDungeonGroup(group: THREE.Group): void {
     this.renderMeshes = [];
     this.landCellMeshes.clear();
+    this.meshCells.clear();
     group.traverse(child => {
-      if (child instanceof THREE.Mesh && child.userData.cellGeometry) this.renderMeshes.push(child);
+      if (!(child instanceof THREE.Mesh && child.userData.cellGeometry)) return;
+      this.renderMeshes.push(child);
+      for (let o: THREE.Object3D | null = child; o; o = o.parent) {
+        if (o.userData.envCellId !== undefined) { this.meshCells.set(child, o.userData.envCellId >>> 0); break; }
+      }
     });
   }
 
@@ -902,6 +1130,7 @@ export class DungeonCollision {
   setMeshes(objects: THREE.Object3D[]): void {
     this.renderMeshes = [];
     this.landCellMeshes.clear();
+    this.meshCells.clear();
     for (const obj of objects) {
       obj.updateMatrixWorld(true);
       const land = obj.userData.envCellId === undefined;
@@ -909,12 +1138,15 @@ export class DungeonCollision {
         if (!(child instanceof THREE.Mesh)) return;
         this.renderMeshes.push(child);
         if (land) this.landCellMeshes.add(child);
+        else this.meshCells.set(child, obj.userData.envCellId >>> 0);
       });
     }
   }
 
   /** BUG.bunker-camera-in-head — the render meshes of land-cell objects (building shells), not of any env cell. */
   private readonly landCellMeshes = new Set<THREE.Object3D>();
+  /** The env cell each interior render mesh (a cell's geometry or one of its statics) belongs to (inScope for the camera). */
+  private readonly meshCells = new Map<THREE.Object3D, number>();
 
   /**
    * The camera / wall rays hit both faces of every collision mesh. Building
@@ -1015,11 +1247,14 @@ export class DungeonCollision {
       return d > 0.001 ? { nx: dx / d, nz: dz / d } : { nx: 1, nz: 0 };
     };
 
+    // A tree or a landblock static is in the land cells, another cell's static in that cell (inScope).
+    let scope: BodyScope | undefined;
     if (this.cylinders.size > 0) {
       const cyls = this.spatialIndex
         ? this.cylinderGrid.queryDisc(destX, destZ, r + this.maxObstacleRadius)
         : this.cylinders.values();
       for (const cyl of cyls) {
+        if (scoped(cyl) && !this.inScope(cyl, scope ??= this.bodyScope(destX, destZ, pos.y))) continue;
         const radsum = cyl.radius - PHYSICS_EPSILON + r;
         for (let si = 0; si < this.bodySphereHeights.length; si++) {
           const cy = pos.y + this.bodySphereHeights[si];
@@ -1041,6 +1276,7 @@ export class DungeonCollision {
     if (this.spheres.size > 0) {
       const sphs = this.spatialIndex ? this.sphereGrid.queryDisc(destX, destZ, pad) : this.spheres.values();
       for (const sph of sphs) {
+        if (scoped(sph) && !this.inScope(sph, scope ??= this.bodyScope(destX, destZ, pos.y))) continue;
         const radsum = sph.radius + r - PHYSICS_EPSILON;
         for (let si = 0; si < this.bodySphereHeights.length; si++) {
           const dy = pos.y + this.bodySphereHeights[si] - sph.y;
@@ -1197,10 +1433,10 @@ export class DungeonCollision {
   private sphereContactAt(
     x: number, y: number, z: number, radius: number, acStep: { x: number; y: number; z: number },
   ): { x: number; y: number; z: number } | null {
-    let shells: boolean | undefined;
+    let scope: BodyScope | undefined;
     for (const cell of this.cellsNear(x, z, radius)) {
       // BUG.bunker-sealed-at-ground — a missile in an env cell meets the shells only near its outside portals.
-      if (cell.landCell && !(shells ??= this.shellsReachableFor([{ x, y: z, z: y }], radius))) continue;
+      if (scoped(cell) && !this.inScope(cell, scope ??= this.scopeFor([{ x, y: z, z: y }], radius))) continue;
       const inv = 1 / cell.scale;
       const local = scaleVec(globalToLocal(cell.origin, cell.quat,
         { x: x - cell.blockOffsetX, y: z - cell.blockOffsetY, z: y }), inv);
@@ -1215,6 +1451,7 @@ export class DungeonCollision {
       ? this.cylinderGrid.queryDisc(x, z, radius + this.maxObstacleRadius)
       : this.cylinders.values();
     for (const c of cyls) {
+      if (scoped(c) && !this.inScope(c, scope ??= this.scopeFor([{ x, y: z, z: y }], radius))) continue;
       if (y < c.bottomY - radius || y > c.topY + radius) continue;
       const ox = x - c.x, oz = z - c.z;
       const r = c.radius + radius - PHYSICS_EPSILON;
@@ -1227,6 +1464,7 @@ export class DungeonCollision {
       ? this.sphereGrid.queryDisc(x, z, radius + this.maxObstacleRadius)
       : this.spheres.values();
     for (const s of sphs) {
+      if (scoped(s) && !this.inScope(s, scope ??= this.scopeFor([{ x, y: z, z: y }], radius))) continue;
       const ox = x - s.x, oy = y - s.y, oz = z - s.z;
       const r = s.radius + radius - PHYSICS_EPSILON;
       const d2 = ox * ox + oy * oy + oz * oz;
@@ -1277,11 +1515,11 @@ export class DungeonCollision {
     let gz = footY;
     let landed = false;
     // CTransition::transitional_insert(5): insert until nothing adjusts.
-    const shells = this.shellsReachable(destX, destZ, pos.y);
+    const scope = this.bodyScope(destX, destZ, pos.y);
     for (let attempt = 0; attempt < 5; attempt++) {
       let changed = false;
       for (const cell of this.cellsNear(destX, destZ, this.bodySphereRadius)) {
-        if (cell.landCell && !shells) continue;
+        if (scoped(cell) && !this.inScope(cell, scope)) continue;
         const inv = 1 / cell.scale;
         const localUp = quatRotate(quatConjugate(cell.quat), AC_UP);
         const movement = scaleVec(localUp, -(this.stepUpHeight * path.walkInterp) * inv);
@@ -1362,10 +1600,13 @@ export class DungeonCollision {
     const r = this.bodySphereRadius;
     const headZ = gz - this.bodySphereHeights[0] + this.bodySphereHeights[1];
     const stepScale = this.stepUpHeight * path.walkInterp;
+    let scope: BodyScope | undefined;
+    const scopeHere = (): BodyScope => this.bodyScope(gx, gy, gz - this.bodySphereHeights[0]);
     const cyls = this.spatialIndex
       ? this.cylinderGrid.queryDisc(gx, gy, r + this.maxObstacleRadius)
       : this.cylinders.values();
     for (const cyl of cyls) {
+      if (scoped(cyl) && !this.inScope(cyl, scope ??= scopeHere())) continue;
       const radsum = cyl.radius - PHYSICS_EPSILON + r;
       const dx = gx - cyl.x;
       const dy = gy - cyl.z;
@@ -1386,6 +1627,7 @@ export class DungeonCollision {
       ? this.sphereGrid.queryDisc(gx, gy, r + this.maxObstacleRadius)
       : this.spheres.values();
     for (const sph of sphs) {
+      if (scoped(sph) && !this.inScope(sph, scope ??= scopeHere())) continue;
       const radsum = sph.radius + r - PHYSICS_EPSILON;
       const dx = gx - sph.x;
       const dy = gy - sph.z;
@@ -1417,9 +1659,9 @@ export class DungeonCollision {
    */
   private bodyFitsAt(gx: number, gy: number, baseY: number): boolean {
     let hitsInteriorCell: boolean | undefined;
-    let shells: boolean | undefined;
+    let scope: BodyScope | undefined;
     for (const cell of this.cellsNear(gx, gy, this.bodySphereRadius)) {
-      if (cell.landCell && !(shells ??= this.shellsReachable(gx, gy, baseY))) continue;
+      if (scoped(cell) && !this.inScope(cell, scope ??= this.bodyScope(gx, gy, baseY))) continue;
       const inv = 1 / cell.scale;
       let checkSolid = true;
       if (cell.building) {
@@ -1447,11 +1689,11 @@ export class DungeonCollision {
    * object around one that is turning solid.
    */
   spheresOverlap(spheres: readonly { x: number; y: number; z: number; radius: number }[]): boolean {
-    let shells: boolean | undefined;
+    let scope: BodyScope | undefined;
     for (const s of spheres) {
       for (const cell of this.cellsNear(s.x, s.y, s.radius)) {
         // A body in an env cell meets land-cell sources only near its outside portals.
-        if (cell.landCell && !(shells ??= this.shellsReachableFor(spheres, maxRadius(spheres)))) continue;
+        if (scoped(cell) && !this.inScope(cell, scope ??= this.scopeFor(spheres, maxRadius(spheres)))) continue;
         const inv = 1 / cell.scale;
         const center = scaleVec(globalToLocal(cell.origin, cell.quat,
           { x: s.x - cell.blockOffsetX, y: s.y - cell.blockOffsetY, z: s.z }), inv);
@@ -1459,12 +1701,14 @@ export class DungeonCollision {
       }
       const cyls = this.spatialIndex ? this.cylinderGrid.queryDisc(s.x, s.y, s.radius + this.maxObstacleRadius) : this.cylinders.values();
       for (const c of cyls) {
+        if (scoped(c) && !this.inScope(c, scope ??= this.scopeFor(spheres, maxRadius(spheres)))) continue;
         const reach = s.radius + c.radius;
         const dx = s.x - c.x, dz = s.y - c.z;
         if (dx * dx + dz * dz < reach * reach && s.z + s.radius > c.bottomY && s.z - s.radius < c.topY) return true;
       }
       const sphs = this.spatialIndex ? this.sphereGrid.queryDisc(s.x, s.y, s.radius + this.maxObstacleRadius) : this.spheres.values();
       for (const o of sphs) {
+        if (scoped(o) && !this.inScope(o, scope ??= this.scopeFor(spheres, maxRadius(spheres)))) continue;
         const reach = s.radius + o.radius;
         const dx = s.x - o.x, dy = s.z - o.y, dz = s.y - o.z;
         if (dx * dx + dy * dy + dz * dz < reach * reach) return true;
@@ -1500,8 +1744,8 @@ export class DungeonCollision {
     if (this.cells.size === 0 || !(toY > fromY)) return null;
     const n = Math.max(1, Math.ceil((toY - fromY) / RISE_STEP_M));
     const dy = (toY - fromY) / n;
-    const shells = this.shellsReachable(worldX, worldZ, fromY);
-    const cells = [...this.cellsNear(worldX, worldZ, this.bodySphereRadius)].filter((c) => !c.landCell || shells);
+    const scope = this.bodyScope(worldX, worldZ, fromY);
+    const cells = [...this.cellsNear(worldX, worldZ, this.bodySphereRadius)].filter((c) => !scoped(c) || this.inScope(c, scope));
     let prev = fromY;
     for (let i = 1; i <= n; i++) {
       const y = fromY + dy * i;
@@ -1536,9 +1780,9 @@ export class DungeonCollision {
     const destX = worldPos.x + dxWorld;
     const destZ = worldPos.z + dzWorld;
 
-    let shells: boolean | undefined;
+    let scope: BodyScope | undefined;
     for (const cell of this.cellsNear(destX, destZ, this.bodySphereRadius)) {
-      if (cell.landCell && !(shells ??= this.shellsReachable(destX, destZ, worldPos.y))) continue;
+      if (scoped(cell) && !this.inScope(cell, scope ??= this.bodyScope(destX, destZ, worldPos.y))) continue;
       // Transform movement to cell-local (rotation only) — same for both spheres
       const inv = 1 / cell.scale;
       const cellMovement = scaleVec(quatRotate(quatConjugate(cell.quat), acMovement), inv);
@@ -1602,7 +1846,7 @@ export class DungeonCollision {
    * under (worldX, worldZ), or null when none lies there (or in raycast
    * mode). What a falling object's transition lands on. With the object's
    * `spheres` (AC global centres where it stands), a land-cell source's
-   * floor counts only when they reach the land cells (shellsReachableFor).
+   * floor counts only when they reach the land cells (scopeFor).
    */
   floorBelow(
     worldX: number, worldZ: number, fromY: number,
@@ -1611,7 +1855,7 @@ export class DungeonCollision {
     if (this.cells.size === 0) return null;
     let best: number | null = null;
     // The falling object's own spheres decide whether it reaches the land cells' floors.
-    const landCells = () => (spheres && spheres.length > 0 ? this.shellsReachableFor(spheres, maxRadius(spheres)) : true);
+    const landCells = (): BodyScope => (spheres && spheres.length > 0 ? this.scopeFor(spheres, maxRadius(spheres)) : EVERYTHING);
     for (const y of this.floorCandidates(worldX, worldZ, fromY, fromY, -Infinity, landCells)) {
       if (best === null || y > best) best = y;
     }
@@ -1637,7 +1881,7 @@ export class DungeonCollision {
     // Only CylSphere / Sphere obstacles registered: their tops are the contact.
     if (this.cells.size === 0) return contact?.y ?? this.getFloorHeight(worldX, worldZ, fromY, maxDrop);
     const candidates = this.floorCandidates(worldX, worldZ, fromY, fromY + 2.0, fromY - maxDrop,
-      () => this.shellsReachable(worldX, worldZ, bodyFeetY));
+      () => this.bodyScope(worldX, worldZ, bodyFeetY));
     // A floor under the centre counts above the search height only while
     // the feet sphere's centre is still above it (a tread the body's centre
     // has crossed onto); one higher than that is the underside of something
@@ -1692,10 +1936,10 @@ export class DungeonCollision {
     const r = this.bodySphereRadius;
     const startZ = fromY + lowH - stepDownHeight;
     const landings: { y: number; placeY: number; normal: { x: number; y: number; z: number } }[] = [];
-    let shells: boolean | undefined;
+    let scope: BodyScope | undefined;
     for (const cell of this.cellsNear(worldX, worldZ, lowH)) {
       // A body in an env cell steps down onto no land-cell source away from its outside portals.
-      if (cell.landCell && !(shells ??= this.shellsReachable(worldX, worldZ, fromY))) continue;
+      if (scoped(cell) && !this.inScope(cell, scope ??= this.bodyScope(worldX, worldZ, fromY))) continue;
       const s = cell.scale;
       const inv = 1 / s;
       const upL = quatRotate(quatConjugate(cell.quat), AC_UP);
@@ -1761,10 +2005,12 @@ export class DungeonCollision {
       if (y > fromY + STEP_SEARCH_SLACK) return; // the step up, not the step down, lifts the body
       out.push({ y, placeY: y, normal });
     };
+    let scope: BodyScope | undefined;
     const cyls = this.spatialIndex
       ? this.cylinderGrid.queryDisc(worldX, worldZ, r + this.maxObstacleRadius)
       : this.cylinders.values();
     for (const cyl of cyls) {
+      if (scoped(cyl) && !this.inScope(cyl, scope ??= this.bodyScope(worldX, worldZ, fromY))) continue;
       const radsum = cyl.radius - PHYSICS_EPSILON + r;
       const dx = worldX - cyl.x;
       const dy = worldZ - cyl.z;
@@ -1781,6 +2027,7 @@ export class DungeonCollision {
       ? this.sphereGrid.queryDisc(worldX, worldZ, r + this.maxObstacleRadius)
       : this.spheres.values();
     for (const sph of sphs) {
+      if (scoped(sph) && !this.inScope(sph, scope ??= this.bodyScope(worldX, worldZ, fromY))) continue;
       const reach = sph.radius + r;
       const dx = worldX - sph.x;
       const dy = worldZ - sph.z;
@@ -1824,7 +2071,7 @@ export class DungeonCollision {
     // which loses stair treads when a foundation slab shares the XY footprint.
     // For correct stair climbing we need ALL candidates.
     const candidates = this.floorCandidates(worldX, worldZ, fromY, fromY + 2.0, fromY - maxDrop,
-      () => this.shellsReachable(worldX, worldZ, bodyFeetY));
+      () => this.bodyScope(worldX, worldZ, bodyFeetY));
     if (candidates.length === 0) return null;
 
     // Stair/step preference: when multiple floors overlap the same XZ (e.g.
@@ -1859,17 +2106,17 @@ export class DungeonCollision {
 
   /**
    * Every walkable floor height (THREE world y) under (worldX, worldZ) within
-   * [minY, maxY]; `fromY` is the query height. `landCells` = the asking body
-   * reaches the land cells (shellsReachable, asked only when a land-cell
-   * source lies near); false skips those sources.
+   * [minY, maxY]; `fromY` is the query height. `landCells` = what the
+   * asking body meets (bodyScope, asked only when a land-cell or env-cell
+   * source lies near).
    */
   private floorCandidates(
-    worldX: number, worldZ: number, fromY: number, maxY: number, minY: number, landCells: () => boolean,
+    worldX: number, worldZ: number, fromY: number, maxY: number, minY: number, landCells: () => BodyScope,
   ): number[] {
     const candidates: number[] = [];
-    let shells: boolean | undefined;
+    let scope: BodyScope | undefined;
     for (const cell of this.cellsNear(worldX, worldZ, FLOOR_QUERY_PAD)) {
-      if (cell.landCell && !(shells ??= landCells())) continue;
+      if (scoped(cell) && !this.inScope(cell, scope ??= landCells())) continue;
       if (!floorProbeMayHit(cell, worldX - cell.blockOffsetX, worldZ - cell.blockOffsetY)) continue;
       const acLocal = {
         x: worldX - cell.blockOffsetX,
@@ -1919,9 +2166,9 @@ export class DungeonCollision {
   getFloorNormal(worldX: number, worldZ: number, floorY: number): { x: number; y: number; z: number } | null {
     let best: { x: number; y: number; z: number } | null = null;
     let bestDist = 0.05;
-    let shells: boolean | undefined;
+    let scope: BodyScope | undefined;
     for (const cell of this.cellsNear(worldX, worldZ, FLOOR_QUERY_PAD)) {
-      if (cell.landCell && !(shells ??= this.shellsReachable(worldX, worldZ, floorY))) continue;
+      if (scoped(cell) && !this.inScope(cell, scope ??= this.bodyScope(worldX, worldZ, floorY))) continue;
       // REND.per-frame-allocations — the slope-aligned camera asks every
       // frame; skip cells whose polygons can't lie under this XY.
       if (!floorProbeMayHit(cell, worldX - cell.blockOffsetX, worldZ - cell.blockOffsetY)) continue;
@@ -1983,9 +2230,9 @@ export class DungeonCollision {
   ): { edge: { x: number; y: number; z: number } | null; floorNormal: { x: number; y: number; z: number } } | null {
     let best: { cell: CellCollision; poly: PhysicsPolygon; normal: { x: number; y: number; z: number } } | null = null;
     let bestDist = 0.05;
-    let shells: boolean | undefined;
+    let scope: BodyScope | undefined;
     for (const cell of this.cellsNear(worldX, worldZ, FLOOR_QUERY_PAD)) {
-      if (cell.landCell && !(shells ??= this.shellsReachable(worldX, worldZ, floorY))) continue;
+      if (scoped(cell) && !this.inScope(cell, scope ??= this.bodyScope(worldX, worldZ, floorY))) continue;
       if (!floorProbeMayHit(cell, worldX - cell.blockOffsetX, worldZ - cell.blockOffsetY)) continue;
       const cellLocal = globalToLocal(cell.origin, cell.quat, {
         x: worldX - cell.blockOffsetX,
@@ -2051,6 +2298,11 @@ export class DungeonCollision {
     if (len < 0.001) return maxDist;
     const reach = maxDist + DungeonCollision.VIEWER_SPHERE_RADIUS;
     let bestDist = reach;
+    // An env cell no portal joins to the pivot's is met like the land cells (inScope): past landFrom, or not at all
+    // from a cell with no way out (a dungeon).
+    let scope: BodyScope | undefined;
+    const apart = (envCellId: number): boolean =>
+      !this.inScope({ landCell: false, envCellId }, scope ??= this.scopeFor([{ x: playerPos.x, y: playerPos.z, z: playerPos.y }], DungeonCollision.VIEWER_SPHERE_RADIUS));
 
     // Mesh raycaster (BSP cells + buildings + indoor geometry).
     if (this.renderMeshes.length > 0) {
@@ -2062,6 +2314,8 @@ export class DungeonCollision {
         if (hit.distance >= bestDist) break;
         if (landFrom > 0 && this.landCellMeshes.has(hit.object)
           && !landContactCounts(hit.distance, landFrom)) continue;
+        const cellId = this.meshCells.get(hit.object);
+        if (cellId !== undefined && apart(cellId) && (landFrom === 0 || !landContactCounts(hit.distance, landFrom))) continue;
         bestDist = hit.distance;
         break;
       }
@@ -2114,6 +2368,7 @@ export class DungeonCollision {
         // We want the smallest positive s (entry point into the cylinder).
         const t1 = s1 * toBoom;
         if (landFrom > 0 && !cyl.inCell && !landContactCounts(t1, landFrom)) continue;
+        if (cyl.envCellId !== 0 && apart(cyl.envCellId) && (landFrom === 0 || !landContactCounts(t1, landFrom))) continue;
         if (s1 > 0 && t1 < bestDist) bestDist = t1;
       }
     }

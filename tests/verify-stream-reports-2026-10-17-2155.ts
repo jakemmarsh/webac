@@ -274,7 +274,7 @@ describe('9. a repeat cast with a second attacker on you from the start (Olthoi,
     reply = (n) => { api.pushChat('You impale Olthoi Worker for 53 points with Force Bolt III.', 0x16); if (n === 1) { hit(7, 'upper leg'); hit(8); } };
     const r = await settleR(api.cast('Force Bolt III', TARGET, { repeat: true, untilHealth: 0.55 }));
     expect(castsSent).toBe(1);
-    expect(r.message.split('\n')[0]).toMatch(/^cast Force Bolt III at Olthoi Worker 1 time \(repeat\); stopped: Olthoi Worker #80001d4a \(\d+× in 10 s; one hit of its took 17, 1[45]% of the 1[12]\d health you have \(of 175\)\) started attacking you, and isn't your target/);
+    expect(r.message.split('\n')[0]).toMatch(/^cast Force Bolt III at Olthoi Worker 1 time \(repeat\); stopped: Olthoi Worker #80001d4a \(\d+× in 10 s; one hit of its took 17, 1[45]% of the 1[12]\d health you have \(of 175\)\), on you from the start and not your target, is real danger now/);
     expect(r.message).toMatch(/\n {2}hits on you meanwhile: 2 for 15 \(Olthoi Worker 2 for 15\)/);
   });
 

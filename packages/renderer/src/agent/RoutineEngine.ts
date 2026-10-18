@@ -341,7 +341,9 @@ export class RoutineEngine {
    * `lastSeen`: the leader is out of the client's sight in the dungeon you're in (a room yours can't see) and was placed
    * there a moment ago (AgentApi.fellowLastSeen): walked to by the doorway route, as plain follow does, not stood for.
    */
-  private follow: { who: string; trail: Array<{ x: number; y: number }>; inSight: boolean; sampledAt: number; walking: 'lead' | 'corner' | 'last-seen' | null; lastSeen?: { agoS: number | null } | null } | null = null;
+  private follow: { who: string; trail: Array<{ x: number; y: number }>; inSight: boolean; sampledAt: number; walking: 'lead' | 'corner' | 'last-seen' | 'portal' | null; lastSeen?: { agoS: number | null } | null; portal?: { guid: number; name: string; why: string } | null; noWayUntil?: number } | null = null;
+  /** Portals the Follow tried to take after its leader and couldn't (guid → when): not tried again for FOLLOW_PORTAL_RETRY_MS. */
+  private followPortalFailed = new Map<number, number>();
   /** ruleFiring 'once': rules (state#index) that fired and wait for their conditions to turn false. */
   private spent = new Set<string>();
   /** Loot Only Rare Corpses: a rare of yours was announced and not looted yet. */
@@ -1198,6 +1200,7 @@ export class RoutineEngine {
       this.vt.held = () => this.isHeld();
       this.vt.rebuffed = () => { this.stats.rebuffs++; };
       this.vt.picked = () => this.handPick;
+      this.vt.followLeash = () => this.followLeashNow();
       for (const name of this.vt.kills()) { this.kills.push({ name, at: this.now() }); this.kills = this.kills.slice(-KILLS_KEPT); this.stats.kills++; }
       // A corpse of ours waiting and nothing in range: only recharging comes before the loot (buffs wait for idle);
       // with Boost Loot Priority it comes first outright.
@@ -1523,12 +1526,28 @@ export class RoutineEngine {
     if (!now && t - f.sampledAt < FOLLOW_SAMPLE_MS) return;
     f.sampledAt = t;
     const obs = this.api.snapshot({ radius: FOLLOW_SIGHT_M, max: 100 });
+    // In portal space (the Follow's own trip after them, or anyone's): nothing to see or say until you arrive.
+    if (obs.screen === 'portal-space') return;
     const lead = findLeader(obs.nearby, f.who);
     // Out of the client's sight in this dungeon but placed there a moment ago: in a dungeon the client keeps only the rooms
     // in sight of yours, so a leader a floor down or round a corner drops out of `nearby` while the server still places
     // him. Walked to by the doorway route (walkNav, as plain follow and walk_to do: fellowLastSeen), not stood for.
     // Arcanist's "With Bulwark" logged "out of sight; standing still" every time he changed floors and she followed by
     // hand all segment (Mountain Keep, 2026-10-17 23:40Z–00:34Z); 7e06f9c4 had fixed the same drop in plain follow.
+    // Through a portal (beyond VTank, FollowThroughPortals): the one they stood beside when the server moved them, or the
+    // one near you that took you to the landblock they are in now (AgentApi.fellowPortal); walkNav takes it. Before the
+    // last placement: Bulwark's re-entry spot 622 m off had no foot route from the pocket half of Aerbax Laboratory, and
+    // the Follow walked at it 36 times in 20 s, each "no way on foot" (2026-10-18 14:52:14–34Z).
+    const portal = this.followPortalFor(f.who, !!lead, !!obs.me);
+    if (portal) {
+      if (!f.portal || f.portal.guid !== portal.guid) this.note(`Follow: ${f.who} went through ${portal.name} #${portal.guid.toString(16)} (${portal.why}); following through it`);
+      f.portal = portal;
+      f.lastSeen = null;
+      f.inSight = true;
+      f.trail = [];
+      return;
+    }
+    if (f.portal) f.portal = null;
     const seen = !lead && obs.me ? this.api.fellowLastSeen(f.who) : null;
     if (seen) {
       if (!f.lastSeen) this.note(`Follow: ${f.who} is out of sight in another room; going to where they were last placed${seen.agoS !== null ? ` (${seen.agoS} s ago)` : ''}`);
@@ -1553,6 +1572,49 @@ export class RoutineEngine {
     if (f.walking === 'lead' && f.trail.length > 1 && truthySetting(this.settings.FollowAroundCorners) && !obs.me.indoors) { f.walking = null; this.api.stopMoving(); }
   }
 
+  /** The portal a Follow takes after its leader (AgentApi.fellowPortal), with FollowThroughPortals on; none while they are in sight or one tried lately failed. */
+  private followPortalFor(who: string, inView: boolean, placed: boolean): { guid: number; name: string; why: string } | null {
+    if (inView || !placed || !beyondSetting(this.settings, 'FollowThroughPortals')) return null;
+    const p = this.api.fellowPortal(who);
+    if (!p) return null;
+    const failed = this.followPortalFailed.get(p.guid);
+    if (failed !== undefined && this.now() - failed < FOLLOW_PORTAL_RETRY_MS) return null;
+    return { guid: p.guid, name: p.name, why: p.why };
+  }
+
+  /** A caster's close-in never takes you past a Follow route's leash (FollowLeash): `stayNear` for api.attack, or nothing. */
+  private leashStayNear(): { stayNear?: { name: string; within: number } } {
+    const n = this.nav, slack = beyondSetting(this.settings, 'FollowLeash');
+    if (!n || n.done || n.route.mode !== 'follow' || !n.route.follow || !(slack > 0) || !truthySetting(this.settings.EnableNav)) return {};
+    return { stayNear: { name: n.route.follow, within: Math.max(0.5, Number(this.settings.NavCloseStopRange) || 2) + slack } };
+  }
+  /** Whether the FollowLeash note was said for the leader's current time past the leash (said once each time). */
+  private leashSaid = false;
+  /**
+   * Beyond VTank (FollowLeash, beyondVtank.ts): a Follow route's leader farther than the Follow distance
+   * (NavCloseStopRange) + FollowLeash metres, in sight, or out of sight in another room of this dungeon with a last
+   * placement (AgentApi.fellowLastSeen). Null when within it, or with no Follow route running (the setting at 0, navigation
+   * off or held). The macro then leaves buffs and fights to the Follow (VtMacro.followLeash).
+   */
+  followLeashNow(): { who: string; dist: number | null; limit: number } | null {
+    const n = this.nav, p = this.profile;
+    const slack = beyondSetting(this.settings, 'FollowLeash');
+    const off = !n || n.done || n.route.mode !== 'follow' || !n.route.follow || !p?.modules.navigation || !truthySetting(this.settings.EnableNav) || this.now() < this.navHeldUntil || !(slack > 0);
+    const out = ((): { who: string; dist: number | null; limit: number } | null => {
+      if (off) return null;
+      const limit = Math.max(0.5, Number(this.settings.NavCloseStopRange) || 2) + slack;
+      const obs = this.api.snapshot({ radius: FOLLOW_SIGHT_M, max: 100 });
+      const lead = findLeader(obs.nearby, n!.route.follow!);
+      if (lead) return lead.dist > limit ? { who: lead.name, dist: lead.dist, limit } : null;
+      return this.api.fellowLastSeen(n!.route.follow!) || this.followPortalFor(n!.route.follow!, false, !!obs.me) ? { who: n!.route.follow!, dist: null, limit } : null;
+    })();
+    if (out && !this.leashSaid) {
+      this.leashSaid = true;
+      this.note(`Follow: ${out.who} is ${out.dist !== null ? `${out.dist.toFixed(0)} m off` : 'out of sight in another room'}, past the ${out.limit.toFixed(0)} m leash (Follow distance ${(out.limit - slack).toFixed(0)} m + FollowLeash ${slack} m): following before buffing or fighting (unless something is hitting you)`);
+    } else if (!out) this.leashSaid = false;
+    return out;
+  }
+
   /** One point of the loaded route; circular loops, linear turns back, once ends (route-done). */
   private async walkNav(): Promise<void> {
     const n = this.nav!;
@@ -1570,9 +1632,28 @@ export class RoutineEngine {
         const lead = f?.inSight ? findLeader(obs.nearby, f.who) : undefined;
         // Out of sight in another room of this dungeon, placed a moment ago: to where they were last placed, by the doorway
         // route (walkTo of an unseen fellow goes there: AgentApi.walkToLastSeen); they are followed on once in sight.
+        // Through the portal they took (watchLeader found it): the use walks there and steps in; on the far side they are
+        // followed on as ever (in sight, or by their last placement there).
+        if (f && !lead && obs.me && f.portal) {
+          f.walking = 'portal';
+          const pg = f.portal;
+          const r = await this.api.use(pg.guid);
+          this.note(`Follow: through ${pg.name} #${pg.guid.toString(16)} after ${f.who}: ${r.message.split('\n')[0]}`);
+          if (!r.ok) { this.followPortalFailed.set(pg.guid, this.now()); this.report(`Follow: couldn't follow ${f.who} through ${pg.name}: ${r.message.split('\n')[0]}`, 'Warnings'); }
+          f.portal = null;
+          return;
+        }
         if (f && !lead && obs.me && f.lastSeen) {
+          // No way on foot to where they were placed (another part of the dungeon, joined only by a portal or a one-way
+          // drop the other way): said once, and not walked at again for FOLLOW_NO_WAY_MS. Arcanist's Follow walked at
+          // Bulwark's re-entry spot 36 times in 20 s, each ending at once "no way on foot" (2026-10-18 14:52:14–34Z).
+          if (f.noWayUntil && this.now() < f.noWayUntil) { await sleep(1000); return; }
           f.walking = 'last-seen';
-          await this.api.walkTo(f.who, { within: 2, timeoutMs: 15_000 });
+          const r = await this.api.walkTo(f.who, { within: 2, timeoutMs: 15_000 });
+          if (!r.ok && /no way on foot|no doorway route|routeCutOff/i.test(r.message)) {
+            f.noWayUntil = this.now() + FOLLOW_NO_WAY_MS;
+            this.report(`Follow: no way on foot to where ${f.who} was last placed: ${r.message.split('\n')[0].replace(/^[^:]*: /, '')}; standing still (ask them where they are)`, 'Warnings');
+          } else f.noWayUntil = 0;
           return;
         }
         // Out of sight: stand still (watchLeader stopped us and said so) until they come back.
@@ -1602,7 +1683,14 @@ export class RoutineEngine {
           // At a run, always: no walking pace near them (Shift-walking had the pair walking most of the time on stream,
           // 2026-10-14); within Follow/Nav Min of them it stands until they move off.
           // A storey away, near them (walkTo's `within` is the straight line, so 8 m was "arrived" 6 m above them).
-          await this.api.walkTo(lead.guid, { within: otherStorey ? Math.min(within, STOREY_FOLLOW_M) : within, timeoutMs: 15_000 });
+          // The same no-way-on-foot backoff as the last-placement walk: a leader in sight on a part of the dungeon no walk
+          // reaches is not walked at every cycle.
+          if (f.noWayUntil && this.now() < f.noWayUntil) { await sleep(1000); return; }
+          const r = await this.api.walkTo(lead.guid, { within: otherStorey ? Math.min(within, STOREY_FOLLOW_M) : within, timeoutMs: 15_000 });
+          if (!r.ok && /no way on foot/i.test(r.message)) {
+            f.noWayUntil = this.now() + FOLLOW_NO_WAY_MS;
+            this.report(`Follow: no way on foot to ${f.who}: ${r.message.split('\n')[0].replace(/^[^:]*: /, '')}; standing still (ask them to come to you)`, 'Warnings');
+          } else f.noWayUntil = 0;
         }
       } finally { if (this.follow) this.follow.walking = null; this.busy = false; this.acting = null; }
       return;
@@ -1769,7 +1857,7 @@ export class RoutineEngine {
     const m = this.api.snapshot({ radius: a.meters ?? 60, max: 60 }).nearby.find((o) => o.kind === 'monster' && !o.dying && re.test(o.name));
     if (!m) return { ok: false, message: `nothing matching /${a.pattern}/ within ${a.meters ?? 60} m`, idle: true };
     const since = this.api.currentSeq();
-    const r = this.api.attack(m.guid, { far: true }); // a routine's targets are its rules' (no floor refusal)
+    const r = this.api.attack(m.guid, { far: true, ...this.leashStayNear() }); // a routine's targets are its rules' (no floor refusal)
     if (!r.ok) return r;
     const t0 = this.now();
     let landed: string | null = null;
@@ -1870,7 +1958,7 @@ export class RoutineEngine {
         // (2026-10-13: a monster-within rule saw a creature the held position put out of reach, and fired twice a second).
         if (!m) return { ok: false, message: this.hold ? `no monster in reach within ${this.hold.meters} m of the held position` : 'no monster in reach', idle: true };
         const since = this.api.currentSeq();
-        const r = this.api.attack(m.guid, p.macro ? { height: vtAttackHeight(this.settings), power: this.macroAttackPower(p, m), far: true } : { far: true });
+        const r = this.api.attack(m.guid, p.macro ? { height: vtAttackHeight(this.settings), power: this.macroAttackPower(p, m), far: true, ...this.leashStayNear() } : { far: true, ...this.leashStayNear() });
         if (!r.ok) return r;
         if (!this.hold) {
           // Watched in half-second slices: a rule above this one that fires now (a "Low health" heal, a "Pack full"),
@@ -2097,6 +2185,10 @@ export const FOLLOW_SAMPLE_MS = 250;
 export const STOREY_FOLLOW_M = 3;
 const FOLLOW_SIGHT_M = 250;
 const FOLLOW_CORNER_M = 1;
+/** A portal the Follow couldn't take after its leader (refused, or the walk there failed) isn't tried again for this long (ms). */
+const FOLLOW_PORTAL_RETRY_MS = 60_000;
+/** A Follow whose walk to the leader's last placement found no way on foot stands this long (ms) before trying again. */
+const FOLLOW_NO_WAY_MS = 15_000;
 
 /** The Follow route's leader among what you see: the player of that name first, else a creature (VirindiTank follows the selection). */
 export function findLeader<T extends { name: string; kind: string; dying?: boolean }>(nearby: T[], who: string): T | undefined {

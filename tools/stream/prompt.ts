@@ -8,7 +8,10 @@ import { casterGap, gearGapTexts, gearView, hasGearData } from '../../packages/r
 import { routineSuppliesLine } from '../../packages/renderer/src/agent/macro/routineSupplies.ts';
 import type { RoutineProfile } from '../../packages/shared/src/routines/index.ts';
 import type { CharacterConfig } from './config.ts';
-import { type KnownSpell, type TableSpell, magicSchools, spellGaps } from './spellGaps.ts';
+import { type KnownSpell, type TableSpell, magicSchools, selfBuffGaps, selfBuffLine, spellGaps } from './spellGaps.ts';
+import { coinsOf, moneyLine, tradeNotesOf } from '../../packages/renderer/src/agent/format.ts';
+import { scrollSellerLines, type ShopOffer, type ShopVendor } from './shops.ts';
+import type { MapCoords } from '../../packages/renderer/src/ui/MapMarkers.ts';
 
 /** Tools a player has no use for (the supervisor starts and stops sessions) or that aren't for one character. */
 const NOT_FOR_PLAYERS = new Set(['start', 'stop', 'sessions', 'enter_world', 'status', 'click', 'trace', 'keys']);
@@ -144,6 +147,11 @@ export function readinessBrief(r: {
   needsCaster?: boolean;
   /** The character's ready fight routine (tools/stream/routines/<profile>.json, the player's routine.json), for its supplies line. */
   routine?: RoutineProfile | null;
+  /** The partner's name and inventory (the supervisor reads both players), for the fellowship money line; left out when unreadable. */
+  partner?: { name: string; items: readonly AgentItem[] | null } | null;
+  /** The shops selling the Self scrolls selfBuffGaps names (world-query.ts scrollShops), and where the character is, for the scroll line. */
+  shops?: { offers: ShopOffer[]; vendors: Map<number, ShopVendor> } | null;
+  near?: MapCoords | null;
 }): string | null {
   const out = gearGaps(r.items);
   const vitae = vitaeFromSheet(r.sheet);
@@ -156,6 +164,7 @@ export function readinessBrief(r: {
     out.push(`- ${creditsLine(u.credits, nextCreditLevels(r.sheet))}`);
   }
   out.push(...spellGaps(r.sheet, r.spells ?? null, r.table ?? null));
+  out.push(...selfBuffLines(r));
   if (r.items) {
     const c = recoveryCounts(r.items);
     const pl = (k: number, one: string, many: string): string => `${k} ${k === 1 ? one : many}`;
@@ -164,8 +173,57 @@ export function readinessBrief(r: {
     const supplies = r.routine ? routineSuppliesLine(r.routine, r.items, { spellsFirst: magicSchools(r.sheet).some((m) => m.school === 'Life Magic') }) : null;
     if (supplies) out.push(`- ${supplies}`);
   }
+  out.push(...moneyLines(r.items, r.sheet, r.partner ?? null));
   if (r.session) out.push(`- ${r.session}`);
   return out.length ? ['Your readiness right now (`./ac gear`, `./ac character`, `./ac inventory` for the whole picture):', ...out].join('\n') : null;
+}
+
+/**
+ * The Self-buff lines (spellGaps.ts selfBuffGaps / selfBuffLine): each buff cast on yourself below the Self level your
+ * skill can learn, the Other levels you know of them, and where the scrolls are sold (shops.ts scrollSellerLines),
+ * nearest first. Nothing without the spell list; a character with no magic school is told it casts none.
+ */
+export function selfBuffLines(r: { sheet: string | null; spells?: readonly KnownSpell[] | null; table?: readonly TableSpell[] | null; partner?: { name: string } | null; shops?: { offers: ShopOffer[]; vendors: Map<number, ShopVendor> } | null; near?: MapCoords | null }): string[] {
+  if (!r.spells || !r.sheet) return [];
+  const gaps = selfBuffGaps(r.sheet, r.spells, r.table ?? null);
+  const line = selfBuffLine(gaps, { magic: magicSchools(r.sheet).length > 0, partner: r.partner?.name });
+  if (!line) return [];
+  const sellers = r.shops && gaps.some((g) => g.upgrades.some((u) => u.ids.length)) ? scrollSellerLines(gaps, r.shops.offers, r.shops.vendors, r.near ?? null) : [];
+  return [line, ...sellers];
+}
+
+/** The spell ids of the Self scrolls the readiness block would name (for the supervisor's shop read). */
+export function selfScrollIds(sheet: string | null, spells: readonly KnownSpell[] | null, table: readonly TableSpell[] | null): number[] {
+  return [...new Set(selfBuffGaps(sheet, spells, table).flatMap((g) => g.upgrades.flatMap((u) => u.ids)))];
+}
+
+/** "Claude Arcanist  level 26 …" → 26 (the sheet's first line), or undefined. */
+function sheetLevel(sheet: string | null): number | undefined {
+  const m = sheet ? /\blevel (\d+)\b/.exec(sheet.split('\n')[0]) : null;
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * The money lines: your coins and trade notes (format.ts moneyLine: notes counted by Value in every pack), and with
+ * the partner's inventory read, both purses side by side, so one can see the other could fund a purchase. Claude
+ * Bulwark carried ~405,000 in notes and Arcanist one 10,000 note, and both acted broke on their coins alone (Jake,
+ * 2026-10-18: "do they not have trade notes? why are they so broke").
+ */
+export function moneyLines(items: readonly AgentItem[] | null, sheet: string | null, partner: { name: string; items: readonly AgentItem[] | null } | null): string[] {
+  if (!items) return [];
+  const coins = coinsOf(items);
+  const notes = tradeNotesOf(items);
+  if (coins === null && !notes.count) return [];
+  const out = [`- ${moneyLine(coins, notes, sheetLevel(sheet))}`];
+  if (partner?.items) {
+    const pc = coinsOf(partner.items);
+    const pn = tradeNotesOf(partner.items);
+    if (pc !== null || pn.count) {
+      const purse = (c: number | null, n: { value: number }): string => `${((c ?? 0) + n.value).toLocaleString('en-US')} (${(c ?? 0).toLocaleString('en-US')} in coins + ${n.value.toLocaleString('en-US')} in notes)`;
+      out.push(`- fellowship money: you ${purse(coins, notes)}, ${partner.name} ${purse(pc, pn)}`);
+    }
+  }
+  return out;
 }
 
 /** Deaths (killer names, when the chat said) and levels gained by one character since the stream session began. */

@@ -293,7 +293,7 @@ describe('4. cast repeat stops for a dangerous new attacker, not for every one',
     expect(castsSent).toBe(4);
     expect(r.message.split('\n')[0]).toBe('cast Flame Bolt I at Drudge Skulker 4 times (repeat); stopped: Drudge Skulker died');
     expect(r.message).toMatch(/joined in meanwhile: Lurker #8000020\d \(hits up to 1\)/);
-    expect(r.message).toContain("a new attacker (or one on you from the start, after the first cast) stops it only when it casts, hits for 10%+ of the health you have, or is above your level and hasn't hit you yet (or 15+ above)");
+    expect(r.message).toContain("a new attacker stops it only when it casts, hits for 10%+ of the health you have, or is above your level and hasn't hit you yet (or 15+ above); one on you from the start, after the first cast, only when its kind's spells or hits took 10%+ of your health (or it is 15+ above you)");
   });
 
   it('a new attacker whose hit takes a tenth of your health stops it, saying so', async () => {

@@ -820,6 +820,12 @@ export class VtMacro {
 
   /** The routine's pick by hand (RoutineEngine.pickedTarget): the monster the player last attacked or cast at. */
   picked?: () => number | null;
+  /**
+   * Beyond VTank (FollowLeash, beyondVtank.ts): the Follow route's leader when they are past the leash (Follow distance +
+   * FollowLeash metres), else null (RoutineEngine.followLeashNow). Past it, buffs and fights wait for the Follow to bring
+   * you back unless something is hitting you; recharging still comes first.
+   */
+  followLeash?: () => { who: string; dist: number | null; limit: number } | null;
 
   /** OnlyEngaged: monsters coming at or on a fellow in view, and the player's pick (yours are read off the observation). */
   private engaged(): Set<number> {
@@ -993,6 +999,12 @@ export class VtMacro {
     // 3. Worn items' mana.
     const mana = this.manaStep(p, settings);
     if (mana) return mana;
+
+    // 3b. Beyond VTank (FollowLeash): the Follow route's leader past the leash goes first (the engine's Follow walks you
+    // back, as no step is due), unless a monster is hitting you. Arcanist's routine bolted a mild Dark Marionette chasing
+    // Bulwark from where it stood while Bulwark walked on, 16–17 m then 28 m ahead ("Where you off to?", Aerbax
+    // Laboratory, 2026-10-18 14:17:27–37Z); it followed only between bolts.
+    if (!near.some((m) => m.hittingYou) && this.followLeash?.()) return null;
 
     // 4. Buffs whose time left is below RebuffTimeRemainingSeconds (a Force Buff round first), a monster
     // in range or not: VTank's BuffSelfNormal sits above Attack. Then SpellCompMin-Normal pea splitting.

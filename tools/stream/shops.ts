@@ -291,3 +291,89 @@ export function formatShops(query: string, offers: ShopOffer[], vendors: Map<num
   if (hidden) lines.push(`… ${hidden} more shop${hidden === 1 ? '' : 's'} not shown; give more of the name (e.g. "${itemNames[itemNames.length - 1]}").`);
   return lines.join('\n');
 }
+
+// ── the scrolls that teach given spells, for the readiness block ──
+
+/** Every shop offer whose item teaches one of `spellIds` (a scroll's spell, PropertyDataId 28); the columns of shopOfferSql. */
+export function shopScrollOfferSql(spellIds: readonly number[]): string {
+  const ids = [...new Set(spellIds.map((n) => Math.trunc(n)).filter((n) => Number.isFinite(n) && n > 0))].join(',') || '0';
+  const intProp = (t: number) => `(SELECT value FROM weenie_properties_int x WHERE x.object_Id = c.weenie_Class_Id AND x.type = ${t} LIMIT 1)`;
+  return `SELECT DISTINCT c.object_Id, c.weenie_Class_Id, s.value, ${intProp(19)}, ${intProp(1)}, d.value `
+    + `FROM weenie_properties_create_list c JOIN weenie_properties_d_i_d d ON d.object_Id = c.weenie_Class_Id AND d.type = 28 `
+    + `JOIN weenie_properties_string s ON s.object_Id = c.weenie_Class_Id AND s.type = 1 `
+    + `WHERE c.destination_Type = ${SHOP_DESTINATION} AND d.value IN (${ids}) LIMIT 5000`;
+}
+
+/** A spell family's Self levels to buy, highest first (spellGaps.ts SelfBuffGap.upgrades), with the family's name. */
+export interface ScrollWant { display: string; upgrades: ReadonlyArray<{ level: number; name: string; ids: readonly number[] }> }
+
+/** How many Self levels per family the scroll line names: the highest sold and the next one sold below it. */
+export const SCROLL_LEVELS_SHOWN = 2;
+const ROMAN_OF = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
+const COMPASS_8 = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+
+/**
+ * "- Self V scrolls: Scroll of Self Strength V and Scroll of Quickness Self V, 10,000 pyreals each, from Master Scrivener
+ * of Creature Magic at 8.0S, 73.1E (Dryreach), the nearest, 12.3 SE of you": for each family the highest level it
+ * wants that a placed vendor sells and the next one sold below it, each from the seller nearest `near` (map coordinates; without them the vendor with the
+ * most places and three of its towns). The scrolls and prices are the world DB's (Vendor.GetSellCost); a family no
+ * shop sells at any of its levels is said so.
+ */
+export function scrollSellerLines(wants: readonly ScrollWant[], offers: readonly ShopOffer[], vendors: Map<number, ShopVendor>, near?: MapCoords | null, dat: ShopDatInfo = {}): string[] {
+  const dist = (a: MapCoords, b: MapCoords) => Math.hypot(a.ns - b.ns, a.ew - b.ew);
+  type Pick = { level: number; scroll: string; price: number; vendor: string; currency?: string; where: string; key: string; from?: string };
+  const pickOf = (u: ScrollWant['upgrades'][number]): Pick | null => {
+    const os = offers.filter((o) => o.spell !== undefined && u.ids.includes(o.spell) && vendors.get(o.vendor)?.places.length);
+    if (!os.length) return null;
+    if (near) {
+      let best: { o: ShopOffer; p: ShopPlace; d: number } | null = null;
+      for (const o of os) for (const p of vendors.get(o.vendor)!.places) {
+        const d = dist(near, placeMapCoords(p.cell, p.x, p.y));
+        if (!best || d < best.d) best = { o, p, d };
+      }
+      const { o, p, d } = best!;
+      const v = vendors.get(o.vendor)!;
+      const at = placeMapCoords(p.cell, p.x, p.y);
+      const from = d < 0.05 ? 'here' : `${d.toFixed(1)} ${COMPASS_8[Math.round(((Math.atan2(at.ew - near.ew, at.ns - near.ns) * 180) / Math.PI + 360) / 45) % 8]} of you`;
+      const where = formatPlace({ ...p, viaGenerator: false }, dat);
+      return { level: u.level, scroll: o.name, price: shopPrice(o.value, v.sellRate, o.itemType), vendor: v.name, currency: v.currency, where, key: `${v.name}|${where}`, from };
+    }
+    const o = [...os].sort((a, b) => vendors.get(b.vendor)!.places.length - vendors.get(a.vendor)!.places.length)[0];
+    const v = vendors.get(o.vendor)!;
+    const towns = [...new Set(v.places.map((p) => nearestTown(placeMapCoords(p.cell, p.x, p.y))).filter((t): t is string => !!t))].sort();
+    const where = towns.length ? `${towns.slice(0, 3).join(', ')}${towns.length > 3 ? ` and ${towns.length - 3} more towns` : ''}` : formatPlace({ ...v.places[0], viaGenerator: false }, dat);
+    return { level: u.level, scroll: o.name, price: shopPrice(o.value, v.sellRate, o.itemType), vendor: v.name, currency: v.currency, where, key: `${v.name}|${where}` };
+  };
+  // Each family's highest level a shop sells and the next one sold below it (a cheaper step, often nearer).
+  const picks: Array<{ want: ScrollWant; picks: Pick[] }> = wants.map((w) => {
+    const got: Pick[] = [];
+    for (const u of w.upgrades) {
+      const p = pickOf(u);
+      if (p) got.push(p);
+      if (got.length === SCROLL_LEVELS_SHOWN) break;
+    }
+    return { want: w, picks: got };
+  });
+  const lines: string[] = [];
+  const byLevel = new Map<number, Map<string, Pick[]>>();
+  for (const pick of picks.flatMap((x) => x.picks)) {
+    const m = byLevel.get(pick.level) ?? new Map<string, Pick[]>();
+    m.set(pick.key, [...(m.get(pick.key) ?? []), pick]);
+    byLevel.set(pick.level, m);
+  }
+  for (const [level, groups] of [...byLevel].sort((a, b) => b[0] - a[0])) {
+    const parts = [...groups.values()].map((ps) => {
+      const p = ps[0];
+      const cur = p.currency ?? 'pyreals';
+      const same = ps.every((x) => x.price === p.price);
+      const names = ps.map((x) => x.scroll);
+      const list = names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+      const price = same ? `${p.price.toLocaleString('en-US')} ${cur}${ps.length > 1 ? ' each' : ''}` : ps.map((x) => `${x.scroll} ${x.price.toLocaleString('en-US')}`).join(', ') + ` ${cur}`;
+      return `${list}, ${price}, from ${p.vendor} at ${p.where}${p.from ? `, the nearest, ${p.from}` : ''}`;
+    });
+    lines.push(`- Self ${ROMAN_OF[level]} scrolls: ${parts.join('; ')}`);
+  }
+  const unsold = picks.filter((x) => !x.picks.length).map((x) => x.want.display);
+  if (unsold.length) lines.push(`- no shop in this world sells a higher Self scroll of ${unsold.length <= 1 ? unsold.join('') : `${unsold.slice(0, -1).join(', ')} or ${unsold[unsold.length - 1]}`}`);
+  return lines;
+}

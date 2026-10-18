@@ -133,6 +133,8 @@ describe('2. stay_with drop=true goes down with the fellow beside you, reading w
       // She stands 16 m off for 4 s, then walks up beside him.
       if (host.t > 4000) { const dx = host.me.x - 1 - a.x, dy = host.me.y - a.y, l = Math.hypot(dx, dy); if (l > 3) { a.x += (dx / l) * 0.4; a.y += (dy / l) * 0.4; } }
       if (droppedWithHerAt === null && host.launches.length) droppedWithHerAt = Math.hypot(a.x - host.me.x, a.y - host.me.y);
+      // She comes down after him (2026-10-18 15:29Z: the walk waits at the bottom of the drop until she is down too).
+      if (host.me.z < 95 && a.z > 95) Object.assign(a, { x: host.me.x - 1, z: 94 });
     });
     expect(r?.ok, r?.message).toBe(true);
     expect(host.me.z).toBeCloseTo(94, 1);

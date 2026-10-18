@@ -353,7 +353,7 @@ describe('4. stay_with: a fellow who logged out is named as gone, not "out of si
     api.pushChat('Claude Bulwark has left your Fellowship.', 0x1a);
     const r = await settle(api, host, api.walkTo('Chest', { stayWith: 'Claude Bulwark' }), 20_000);
     expect(r?.ok).toBe(false);
-    expect(r?.message).toMatch(/^stopped [\d.]+ m short: Claude Bulwark left your fellowship \d+ s ago \(logged out, or quit it\), so there is no one to stay with: walk on without stay_with/);
+    expect(r?.message).toMatch(/^stopped [\d.]+ m short: Claude Bulwark left your fellowship \d+ s ago \(logged out, or quit it\), so there is no one to stay with here: wait for them to come back, or ask in \/f where to meet them/);
   });
 
   it('a stay_with name that never was a fellow keeps the old answer', async () => {

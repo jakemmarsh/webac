@@ -106,6 +106,8 @@ export interface AgentSelf {
   dead: boolean;
   burden?: string;
   pyreals?: number;
+  /** Trade notes carried (format.ts tradeNotesOf: by each row's Value), when any. */
+  tradeNotes?: { value: number; count: number; unpriced: number };
   xp?: { total: number; unassigned: number };
   /** Item slots: the main pack's and each side pack's (AgentPackSlots); unset when the host can't say. */
   packSlots?: AgentPackSlots;
@@ -265,6 +267,11 @@ export interface AgentObservation {
     stuckThreats?: string;
     /** Out of sight but last placed in the space you're in: "43 m SE of you, 6 m down, 4 s ago" (walk_to / follow go there). */
     lastSeen?: string;
+    /**
+     * Not placed here yet, seconds after you came through a portal: they may still be in portal space behind you (Bulwark
+     * said he couldn't see Arcanist 2 s before Arcanist arrived beside him, Aerbax Laboratory, 2026-10-18 13:12:46Z).
+     */
+    arriving?: string;
   }>;
   /**
    * In a fellowship with nobody else in it: a fellow logged out (the server takes them out, as retail did) and /f

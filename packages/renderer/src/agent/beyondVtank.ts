@@ -83,8 +83,18 @@ export function awayWord(from: ReadonlyArray<{ bearing: number }>): string | nul
  *     level pick does (AgentApi.SPELL_PICK_MIN_CHANCE). VTank's SpellDiffExcessThreshold-Buff (5) alone let Impenetrability
  *     VI and Invulnerability Self VI through at Item / Creature Enchantment 255 against 250: 59%, two casts in five
  *     fizzled (Arcanist, Aerbax Haven, 2026-10-18 06:18:57–06:19:03Z). 0 is VTank's rule only.
+ *   FollowLeash (0, off; 2026-10-18): with a Follow route running, a leader farther than Follow/Nav Min
+ *     (NavCloseStopRange) + this many metres, or out of sight in another room, is followed before the macro buffs or
+ *     fights (recharging still first, and a monster hitting you is still fought). VTank fights first wherever the leader
+ *     went: Arcanist's routine bolted a mild chaser from where it stood while Bulwark walked on, 16–28 m ahead (Aerbax
+ *     Laboratory, 2026-10-18 14:17Z). A caster's close-in for range or a line (AgentApi.castAttack) never takes you past it.
+ *   FollowThroughPortals (on; 2026-10-18): a Follow route's leader who goes through a portal (they stood beside it, then the
+ *     server placed them far off or in another space, or they went from your client) is followed through it, and one placed
+ *     in another space is followed by the portal near you that took you to their landblock before (AgentApi.fellowPortal).
+ *     VTank's Follow stands still once the leader is out of sight: Arcanist's stood when Bulwark took Aerbax Laboratory's
+ *     Surface portal 2 m from her and came back in at the entrance, 622 m off by no foot route (2026-10-18 14:51:58Z).
  */
-export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true, BuffMinLandChance: 75 } as const;
+export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true, BuffMinLandChance: 75, FollowLeash: 0, FollowThroughPortals: true } as const;
 
 /** A beyond-VTank macro setting from a profile's settings (any case), else its default. */
 export function beyondSetting<K extends keyof typeof BEYOND_MACRO_DEFAULTS>(settings: Record<string, string | number | boolean>, name: K): (typeof BEYOND_MACRO_DEFAULTS)[K] {

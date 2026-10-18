@@ -229,7 +229,7 @@ describe('3. a target on a 1.7 m step-down beside you', () => {
     run(api, host, 200, { physics: false });
     const r = api.attack(C260);
     expect(r.ok).toBe(false);
-    expect(r.message).toBe('the run-up to Tusker Liberator #8000c260 (2 m down from you) has a one-way 1.7 m drop on the way, landing 2 m down from your floor, leaving Claude Arcanist (2 m from you) on this floor, so no attack was started. Let it come to you, tell them you\'re dropping and go together, or ac_attack target=#8000c260 far=true drop=true to go anyway');
+    expect(r.message).toBe('the run-up to Tusker Liberator #8000c260 (2 m down from you) has a one-way 1.7 m drop on the way, landing 2 m down from your floor, leaving Claude Arcanist (2 m from you) on this floor, so no attack was started. Let it come to you, or go down together: tell them you\'re dropping (ac_say text="/f dropping here, come down after me"), and with them beside you at the edge, ac_attack target=#8000c260 far=true drop=true (they come down after you)');
   });
 
   it('within 4 m but a wall between and not hitting you: the drop note still holds', () => {

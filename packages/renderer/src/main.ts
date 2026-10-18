@@ -8390,7 +8390,8 @@ async function main() {
       const ground = sweepHeightfield(from, to, radius,
         (x, y) => terrainCollision.getHeightAt(x, y),
         (x, y) => { const n = terrainCollision.getNormalAt(x, y); return n ? { x: n.x, y: n.z, z: n.y } : null; },
-        (x, y, z) => outdoorCollision.findCellContaining(x, y, z) !== 0);
+        // A missile sphere in an env cell meets the terrain only near one of its outside portals (the cell rule).
+        (x, y, z) => !outdoorCollision.viewerReachesLand(x, y, z, radius));
       return nearestContact(objects, ground);
     };
     // VERIFY.spell-projectile-arc-ring-dungeon — a non-creature server
@@ -19749,6 +19750,10 @@ async function main() {
         // walk-in complex, the current cell + its VisibleCells PVS join.
         updateSurfaceCellVisibility(playerWorldX, playerWorldZ, playerFeetY);
       }
+      // The player's cell starts every body test's cell search, so a spot two unconnected cells share is placed in
+      // the player's own (DungeonCollision.setBodyCell).
+      outdoorCollision.setBodyCell(playerInDungeon ? 0 : currentSurfaceCellId);
+      dungeonCollision?.setBodyCell(playerInDungeon ? dungeonLandblockId : 0);
       // DECOMP.interior-objects-culled — an env-cell object draws with its
       // cell (PView::DrawCells), so it follows the cell passes just run.
       if (serverObjectManager) {

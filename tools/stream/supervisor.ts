@@ -35,9 +35,12 @@ import { type SegmentRecord, QUIET_TOOLS, afterTurn, dayUsage, endReason, localD
 import { loadOwnTime } from './own-time.ts';
 import { preparePlayerDir } from './player.ts';
 import { type TableSpell, loadSpellTableRows } from './spellGaps.ts';
+import type { ShopOffer, ShopVendor } from './shops.ts';
+import { scrollShops } from './world-query.ts';
+import { isMapCoordsText, parseMapCoordsText } from '../../packages/shared/src/mapCoordsText.ts';
 import { StuckWatch, classifyResult, isBusyChatLine } from './stuck.ts';
 import { TOOLS, routineFromFile } from '../ac-agent/tools.ts';
-import { type SessionTally, clipReport, nudgeMessage, quietMessage, readinessBrief, sessionSoFar, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
+import { type SessionTally, clipReport, nudgeMessage, quietMessage, readinessBrief, selfScrollIds, sessionSoFar, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
 
 export const STREAM_DIR = join(STATE_DIR, 'stream');
 export const STOP_FILE = join(STREAM_DIR, 'STOP');
@@ -143,6 +146,8 @@ export interface SupervisorDeps {
   spells?(profile: string): Promise<AgentSpell[] | null>;
   /** The era's DAT spell table (name, school, power), for the spells line's family names; null when the DAT isn't there. */
   spellTable?(): Promise<TableSpell[] | null>;
+  /** The shops selling scrolls of these spells and their places (world-query.ts scrollShops: this era's world DB), for the Self-scroll line; null when unreadable. */
+  scrollShops?(spellIds: number[]): Promise<{ offers: ShopOffer[]; vendors: Map<number, ShopVendor> } | null>;
   /** The character's ready fight routine (tools/stream/routines/<profile>.json), for the readiness supplies line; null when none. */
   routine?(profile: string): RoutineProfile | null;
   /**
@@ -532,11 +537,24 @@ export class StreamSupervisor {
     // What the opening says beside the journal: this character's readiness (gear gaps, unspent XP, kits and potions)
     // and the session's deaths and levels.
     this.pumpChat(); // the latest deaths and level-ups into the tally
+    const sheet = await deps.characterSheet(c.profile).catch(() => null);
+    const spells = await deps.spells?.(c.profile).catch(() => null) ?? null;
+    const table = await deps.spellTable?.().catch(() => null) ?? null;
+    // The fellow's purse beside yours (one partner: the supervisor reads both players' packs), and the shops selling
+    // the Self scrolls you could read, nearest to where you stand.
+    const others = cfg.characters.filter((o) => o !== c);
+    const partnerItems = others.length === 1 ? await deps.inventory(others[0].profile).catch(() => null) : null;
+    const scrollIds = selfScrollIds(sheet, spells, table);
+    const shops = scrollIds.length ? await deps.scrollShops?.(scrollIds).catch(() => null) ?? null : null;
+    const coords = shops ? (await deps.vitals(c.profile).catch(() => null))?.coords ?? null : null;
     const readiness = readinessBrief({
       items: await deps.inventory(c.profile).catch(() => null),
-      sheet: await deps.characterSheet(c.profile).catch(() => null),
-      spells: await deps.spells?.(c.profile).catch(() => null) ?? null,
-      table: await deps.spellTable?.().catch(() => null) ?? null,
+      sheet,
+      spells,
+      table,
+      partner: partnerItems ? { name: others[0].character, items: partnerItems } : null,
+      shops,
+      near: coords && isMapCoordsText(coords) ? parseMapCoordsText(coords) : null,
       routine: (() => { try { return deps.routine?.(c.profile) ?? null; } catch { return null; } })(),
       session: sessionSoFar(cfg.characters.map((o) => ({ character: o.character, tally: this.tally.get(o.profile) }))),
     });
@@ -742,6 +760,7 @@ export function realDeps(cfg: StreamConfig): SupervisorDeps {
     characterSheet: async (p) => { const c = client(p); return c ? c.call<string>('characterSheet', [], 15_000).catch(() => null) : null; },
     spells: async (p) => { const c = client(p); return c ? c.call<AgentSpell[]>('spells', ['', 1000], 15_000).catch(() => null) : null; },
     spellTable: () => (spellRows ??= loadSpellTableRows()),
+    scrollShops: async (ids) => scrollShops(ids),
     routine: (p) => {
       const f = join(REPO, 'tools', 'stream', 'routines', `${p}.json`);
       if (!existsSync(f)) return null;

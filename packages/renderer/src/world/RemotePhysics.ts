@@ -813,29 +813,35 @@ export class RemotePhysicsObject implements PositionHost {
     }
     let outdoor = isOutdoorCell(this.cell);
     if (this.contact) {
+      // The transition finds the body's cell from where it moved to
+      // (CTransition::check_other_cells / find_cell_list): a creature
+      // walking on its own MoveTo into the ramp under a statue is in the
+      // ramp's env cell, where the land cell's terrain is not tested
+      // (CEnvCell::find_transit_cells @ 0052c820; CLandCell::
+      // find_env_collisions @ 00532f20), and follows the cell's floor.
+      // Only a land cell or one of the landscape's own env cells is
+      // re-found; a dungeon's cells keep the server's cell. An interpolated
+      // step moves through the cells too (InterpolationManager's offset goes
+      // through the same transition): the cell is where the body has got to,
+      // not the newest position's, which MoveOrTeleport set when it came. A
+      // player walking down into a classic town bunker was drawn inside (or
+      // outside) the hut before reaching its doorway.
+      const refind = !stuck && !!env.surfaceCellAt && (outdoor || !!env.holdsSurfaceCell?.(this.cell));
+      if (refind) {
+        const inCell = env.surfaceCellAt!(frame.origin.x, frame.origin.y, frame.origin.z, this.cell);
+        if (inCell !== 0) {
+          this.cell = inCell >>> 0;
+        } else if (!outdoor) {
+          this.cell = landCellAt(frame.origin.x, frame.origin.y);
+        }
+        outdoor = isOutdoorCell(this.cell);
+      }
       // Ground contact: follow the ground under a self-moved object (a
       // server target is already at the height the server gave).
       if (!interpolated && !stuck) {
-        // The transition finds the body's cell from where it moved to
-        // (CTransition::check_other_cells / find_cell_list): a creature
-        // walking on its own MoveTo into the ramp under a statue is in the
-        // ramp's env cell, where the land cell's terrain is not tested
-        // (CEnvCell::find_transit_cells @ 0052c820; CLandCell::
-        // find_env_collisions @ 00532f20), and follows the cell's floor.
-        // Only a land cell or one of the landscape's own env cells is
-        // re-found; a dungeon's cells keep the server's cell.
-        if (env.surfaceCellAt && (outdoor || env.holdsSurfaceCell?.(this.cell))) {
-          const inCell = env.surfaceCellAt(frame.origin.x, frame.origin.y, frame.origin.z, this.cell);
-          if (inCell !== 0) {
-            this.cell = inCell >>> 0;
-          } else if (!outdoor) {
-            this.cell = landCellAt(frame.origin.x, frame.origin.y);
-          }
-          outdoor = isOutdoorCell(this.cell);
-          if (!outdoor) {
-            const f = env.surfaceFloorZ?.(frame.origin.x, frame.origin.y, frame.origin.z) ?? null;
-            if (f !== null) frame.origin.z = f;
-          }
+        if (refind && !outdoor) {
+          const f = env.surfaceFloorZ?.(frame.origin.x, frame.origin.y, frame.origin.z) ?? null;
+          if (f !== null) frame.origin.z = f;
         }
         if (outdoor) {
           const h0 = env.terrainHeight(oldX, oldY);

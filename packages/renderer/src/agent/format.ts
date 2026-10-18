@@ -156,11 +156,9 @@ export function formatObservation(obs: AgentObservation): string {
   const exhausted = !me.dead && me.stamina.max > 0 && me.stamina.cur === 0 ? ' (EXHAUSTED: no defense, every attack lands; a crawl for a run)' : '';
   out.push(`${me.name} (L${me.level})${me.dead ? '  ** DEAD **' : ''}  HP ${v(me.health)}  ST ${v(me.stamina)}${exhausted}  MA ${v(me.mana)}  mode ${me.combatMode}`);
   out.push(`at ${me.coords ?? 'indoors'}  cell ${me.cell}  facing ${Math.round(me.heading)}° (${compassPoint(me.heading)})${me.task ? `  task: ${me.task}` : ''}`);
-  // ACE Player_Death.GetNumCoinsDropped: above level 5 a death takes half your coins (onto the corpse, or destroyed
-  // outright where the server sets corpse_destroy_pyreals, ACE's default); trade notes are not coins.
-  const coinRisk = me.pyreals !== undefined && me.pyreals >= 1000 && me.level > 5 ? ' (half are lost if you die; trade notes, bought from most vendors, aren\'t coins)' : '';
   if (obs.vitae) out.push(obs.vitae);
-  if (me.pyreals !== undefined || me.burden || me.xp) out.push(`pyreals ${me.pyreals ?? '?'}${coinRisk}${me.burden ? `  burden ${me.burden}` : ''}${me.xp ? `  unassigned xp ${me.xp.unassigned.toLocaleString('en-US')}${me.xp.unassigned >= 1000 ? ' (spend it: ac_raise)' : ''}` : ''}`);
+  // Coins and trade notes together (moneyLine: what a death takes, what a vendor takes as payment).
+  if (me.pyreals !== undefined || me.tradeNotes || me.burden || me.xp) out.push(`${moneyLine(me.pyreals, me.tradeNotes, me.level)}${me.burden ? `  burden ${me.burden}` : ''}${me.xp ? `  unassigned xp ${me.xp.unassigned.toLocaleString('en-US')}${me.xp.unassigned >= 1000 ? ' (spend it: ac_raise)' : ''}` : ''}`);
   if (me.packSlots) out.push(packSlotsText(me.packSlots));
   for (const [i, d] of obs.dialogs.entries()) out.push(`DIALOG ${i} [${d.buttons.join(' / ')}]: ${d.text.replace(/\s+/g, ' ')}`);
   if (obs.dialogs.length) out.push('  (answer or dismiss each with ac_dialog, e.g. button=OK; a dialog stays up until you do)');
@@ -178,7 +176,7 @@ export function formatObservation(obs: AgentObservation): string {
   if (obs.deaths) out.push(obs.deaths);
   if (obs.corpses) out.push(obs.corpses);
   if (obs.fellowshipAlone) out.push('fellowship: only you are in it, so /f reaches no one (a fellow who logs out leaves it): recruit your partner (in sight), or quit it (ac_fellowship action=quit) if they lead one');
-  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.coords ? `, at ${f.coords}` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}${f.stuckThreats ? `, AIMED AT THEM BUT NOT REACHING THEM: ${f.stuckThreats}` : ''}` : f.lastSeen ? `out of sight, last seen ${f.lastSeen} (walk_to ${f.name} goes there; they may have moved on)` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
+  if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.coords ? `, at ${f.coords}` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}${f.stuckThreats ? `, AIMED AT THEM BUT NOT REACHING THEM: ${f.stuckThreats}` : ''}` : f.lastSeen ? `out of sight, last seen ${f.lastSeen} (walk_to ${f.name} goes there; they may have moved on)` : f.arriving ? `not placed here yet (${f.arriving})` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
   if (obs.gearManaOut?.length) {
     out.push(`gear out of mana (its spells are off): ${obs.gearManaOut.map((m) => `${m.name} #${m.guid.toString(16)}${m.mana ? ` (mana ${m.mana.cur}/${m.mana.max})` : ''}`).join(', ')}: ac_use_on a charged mana stone on an empty one, then ac_unequip and ac_equip it (the server turns its spells back on only on a wield with mana in it)${obs.manaStones ? `; ${obs.manaStones}` : ''}`);
   }
@@ -433,4 +431,66 @@ export function formatSpells(spells: AgentSpell[], max = Infinity): string {
     ? `  ${s.castChance < 0.01 ? 'under 1%' : `${Math.round(s.castChance * 100)}%`} to cast (your skill ${s.schoolSkill ?? '?'} vs difficulty ${s.power ?? '?'})` : '');
   return shown.map((s) => `  ${s.id}  ${s.name}  [${s.school}${s.level ? ` L${s.level}` : ''}]${s.range ? `  range ${s.range} m` : ''}${odds(s)}`).join('\n')
     + (more > 0 ? `\n  … ${more} more match (${spells.length} in all): narrow the filter or pass max=${spells.length}` : '');
+}
+
+// ── money: coins and trade notes ──
+
+/** ACE ItemType Money (0x40: coin stacks, WeenieType Coin) and PromissoryNote (0x40000: trade notes). */
+const ITEM_MONEY = 0x40;
+const ITEM_PROMISSORY_NOTE = 0x40000;
+
+/** Trade notes carried: their worth in all (each row's Value: a stack's is its units × face value), how many, and rows with no Value known. */
+export interface TradeNotes { value: number; count: number; unpriced: number }
+
+/**
+ * The trade notes in every pack and side pack (an inventory row's ItemType PromissoryNote 0x40000), counted by each
+ * row's Value (PropertyInt 19), never by name. ACE keeps a stack's Value at its units × the note's face value
+ * (SetStackSize; GameMessageSetStackSize carries it), so a stack of 70 Trade Note (500) is worth 35,000. Claude Bulwark
+ * carried about 405,000 in notes while observe showed only his 1,781 coins, and acted broke (Jake, 2026-10-18: "do
+ * they not have trade notes? why are they so broke").
+ */
+export function tradeNotesOf(items: readonly AgentItem[]): TradeNotes {
+  const n: TradeNotes = { value: 0, count: 0, unpriced: 0 };
+  for (const it of items) {
+    if (((it.itemType ?? 0) & ITEM_PROMISSORY_NOTE) === 0) continue;
+    n.count += it.stack ?? 1;
+    if (it.value !== undefined && it.value > 0) n.value += it.value; else n.unpriced += it.stack ?? 1;
+  }
+  return n;
+}
+
+/** The coins in the packs (ItemType Money 0x40 rows' Value: a coin stack's Value is its count, ACE UpdateCoinValue), or null when the rows carry no type bits. */
+export function coinsOf(items: readonly AgentItem[]): number | null {
+  if (!items.some((it) => it.itemType !== undefined)) return null;
+  return items.reduce((t, it) => t + ((((it.itemType ?? 0) & ITEM_MONEY) !== 0 && ((it.itemType ?? 0) & ITEM_PROMISSORY_NOTE) === 0) ? (it.value ?? 0) : 0), 0);
+}
+
+/**
+ * "money: 1,781 in coins + 405,500 in trade notes (124 notes) = 407,281 (…)": coins and notes, and the facts that
+ * matter about each, from ACE:
+ * - a vendor takes only coins (Vendor.BuyItems_ValidateTransaction checks CoinValue, the sum of the Coin stacks, or
+ *   the vendor's AlternateCurrency; Player.FinalizeBuyTransaction spends coin stacks), so a note pays for nothing;
+ * - a vendor buys a note at its face value (Vendor.GetBuyCost: buy rate 1.0 for a PromissoryNote; 1,107 of the
+ *   end-of-retail world's 1,179 vendors list PromissoryNote among the kinds they buy) and sells one at 115%
+ *   (GetSellCost);
+ * - above level 5 a death drops half your coins (Player_Death.GetNumCoinsDropped), but every Trade Note weenie is
+ *   Bonded (PropertyInt 33 = 1), and CalculateDeathItems leaves bonded items out: notes stay with you.
+ * `level` gates the death fact (level 5 and under drops no coins).
+ */
+export function moneyLine(coins: number | null | undefined, notes: TradeNotes | null | undefined, level?: number): string {
+  const fmt = (x: number): string => x.toLocaleString('en-US');
+  const c = coins ?? null;
+  const n = notes && notes.count ? notes : null;
+  const coinText = c === null ? '? in coins' : `${fmt(c)} in coins`;
+  const deathRisk = c !== null && c >= 1000 && (level === undefined || level > 5);
+  if (!n) {
+    return `money: ${coinText}, no trade notes${deathRisk ? ' (half your coins are lost if you die; trade notes, bought from most vendors, are kept on death)' : ''}`;
+  }
+  const unpriced = n.unpriced ? `, ${n.unpriced} of unknown value` : '';
+  const total = c !== null ? ` = ${fmt(c + n.value)}${n.unpriced ? '+' : ''}` : '';
+  const facts = [
+    ...(deathRisk ? ['half your coins are lost if you die, notes are kept'] : ['notes are kept on death']),
+    'vendors take only coins as payment: sell a note to a vendor (most buy them) for its face value in coins',
+  ];
+  return `money: ${coinText} + ${fmt(n.value)} in trade notes (${n.count} note${n.count === 1 ? '' : 's'}${unpriced})${total} (${facts.join('; ')})`;
 }

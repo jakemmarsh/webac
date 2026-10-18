@@ -272,7 +272,7 @@ describe('Daiklos 09:29Z reports (fake host)', () => {
       const r = await settle(api, host, api.walkTo('300m north', { within: 2, stayWith: 'Claude Bulwark', timeoutMs: 600_000 }), 120_000,
         () => { host.objs.get(ARCANIST)!.heardAt = host.t; });
       expect(r!.ok).toBe(false);
-      expect(r!.message).toMatch(/hasn't moved for \d+ s \(fighting, busy, stuck or waiting for you\?\)\. stay_with doesn't tell them you set off: say where you're going \(ac_say text="\/f heading 300 m N, come with me"\), follow them \(ac_follow target="Claude Bulwark"\), or walk on without waiting \(no stay_with\)/);
+      expect(r!.message).toMatch(/hasn't moved for \d+ s \(fighting, busy, stuck or waiting for you\?\)\. stay_with doesn't tell them you set off: say where you're going \(ac_say text="\/f heading 300 m N, come with me"\), follow them \(ac_follow target="Claude Bulwark"\), or wait on for them here \(a walk without stay_with leaves them behind\)/);
     });
   });
 });

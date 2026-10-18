@@ -22,7 +22,7 @@ import { FileDatBytes } from '../../packages/dat-parser/src/node/FileDatBytes.js
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
 import { SpellTable } from '../../packages/dat-parser/src/file-types/SpellTable.js';
 import { formatLore, loreDetailSql, loreNameSql, parseLoreRows, pickLoreNames } from './lore.ts';
-import { aceCellOf, formatShops, parseShopOffers, parseShopVendors, placeMapCoords, shopOfferSql, shopVendorSql, type ShopDatInfo } from './shops.ts';
+import { aceCellOf, formatShops, parseShopOffers, parseShopVendors, placeMapCoords, shopOfferSql, shopScrollOfferSql, shopVendorSql, type ShopDatInfo, type ShopOffer, type ShopVendor } from './shops.ts';
 import { mapCoordinateText } from '../../packages/renderer/src/ui/MapMarkers.ts';
 import { SPAWN_MAX_DEPTH, SPAWNS_MAX_NAMES, formatSpawns, parseSpawnsQuery, parseGenProfiles, parseSpawnPlaces, spawnParentSql, spawnPlaceSql, spawnSources, type GenProfile } from './spawns.ts';
 
@@ -134,6 +134,13 @@ export function hexCellColumns(table: string, sql = ''): string {
 
 /** Run `stmts` inside one READ ONLY transaction; `table` = mysql's boxed output, else tab-separated rows, no header. */
 function runReadOnly(stmts: string[], table: boolean): string {
+  const r = queryReadOnly(stmts, table);
+  if (!r.ok) { console.error(`${r.err}\n\n${WORLD_QUERY_USAGE}`); process.exit(1); }
+  return r.out;
+}
+
+/** runReadOnly that reports a failure instead of exiting (the supervisor's reads: a missing DB must not end the stream). */
+function queryReadOnly(stmts: string[], table: boolean): { ok: boolean; out: string; err: string } {
   const container = process.env.ACJS_WORLD_DB_CONTAINER ?? 'ace-db';
   const db = process.env.ACJS_WORLD_DB ?? 'ace_world';
   const pw = process.env.ACJS_WORLD_DB_PASSWORD ?? '1999asheron2017';
@@ -141,8 +148,23 @@ function runReadOnly(stmts: string[], table: boolean): string {
   const sql = `START TRANSACTION READ ONLY; ${stmts.map((s) => `${s};`).join(' ')} ROLLBACK;`;
   const r = spawnSync('docker', ['exec', container, 'mysql', '-uroot', `-p${pw}`, ...format, db, '-e', sql], { encoding: 'utf8', maxBuffer: 32 << 20 });
   const err = (r.stderr ?? '').split('\n').filter((l) => l && !/Using a password on the command line/.test(l)).join('\n');
-  if (r.status !== 0) { console.error(`${err || `mysql exited ${r.status}`}\n\n${WORLD_QUERY_USAGE}`); process.exit(1); }
-  return r.stdout ?? '';
+  if (r.status !== 0) return { ok: false, out: '', err: err || `mysql exited ${r.status}` };
+  return { ok: true, out: r.stdout ?? '', err };
+}
+
+/**
+ * The shops that sell a scroll of any of `spellIds` and those vendors' places (shops.ts shopScrollOfferSql /
+ * shopVendorSql), for the readiness block's Self-scroll line (shops.ts scrollSellerLines). Null when the world DB
+ * can't be read. The DB is this era's (ACJS_WORLD_DB_*), so the scroll names and prices are too.
+ */
+export function scrollShops(spellIds: readonly number[]): { offers: ShopOffer[]; vendors: Map<number, ShopVendor> } | null {
+  if (!spellIds.length) return { offers: [], vendors: new Map() };
+  const o = queryReadOnly([shopScrollOfferSql(spellIds)], false);
+  if (!o.ok) return null;
+  const offers = parseShopOffers(o.out);
+  if (!offers.length) return { offers, vendors: new Map() };
+  const v = queryReadOnly(shopVendorSql(offers.map((x) => x.vendor)), false);
+  return v.ok ? { offers, vendors: parseShopVendors(v.out) } : null;
 }
 
 /** `lore "<name>"`: the monster lookup. Two reads: the names containing it, then the chosen versions' details. */

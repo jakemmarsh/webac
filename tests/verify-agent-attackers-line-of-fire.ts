@@ -240,7 +240,7 @@ describe('inventory and purse facts', () => {
     const host = new FakeHost();
     const api = new AgentApi(host);
     host.me.level = 12; host.me.pyreals = 4_500;
-    expect(formatObservation(api.observe())).toMatch(/pyreals 4500 \(half are lost if you die; trade notes, bought from most vendors, aren't coins\)/);
+    expect(formatObservation(api.observe())).toMatch(/money: 4,500 in coins, no trade notes \(half your coins are lost if you die; trade notes, bought from most vendors, are kept on death\)/);
     host.me.pyreals = 400;
     expect(formatObservation(api.observe())).not.toContain('half drop');
     host.me.level = 5; host.me.pyreals = 4_500;

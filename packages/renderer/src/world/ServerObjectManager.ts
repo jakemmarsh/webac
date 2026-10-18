@@ -2538,10 +2538,12 @@ export class ServerObjectManager {
   updateInteriorVisibility(cellDrawn: (objCellId: number) => boolean | undefined): void {
     for (const obj of this.objects.values()) {
       if (!obj.mesh) continue;
-      const objCellId = obj.objCellId ?? 0;
+      // The object's own cell (CPhysicsObj::cell): its physics follows it between the server's positions
+      // (RemotePhysicsObject.update re-finds it as the body moves), else the server's newest position's.
+      const objCellId = (obj.physics?.inCell ? obj.physics.cell : obj.objCellId) ?? 0;
       // BUG.bunker-terrain-over-stairs — the cell the indoor view's passes sort this object by (scene/IndoorView.ts).
       obj.mesh.userData.objCellId = objCellId;
-      obj._culledByCell = isInteriorCellIndex(obj.cellId) && objCellId !== 0
+      obj._culledByCell = isInteriorCellIndex(objCellId & 0xffff) && objCellId !== 0
         && cellDrawn(objCellId) === false;
       // Combine with the physicsState hide bits (Hidden | NoDraw).
       this.applyVisibility(obj);

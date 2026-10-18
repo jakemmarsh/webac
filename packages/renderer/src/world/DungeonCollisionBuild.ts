@@ -23,7 +23,7 @@ import { landblockX, landblockY } from '@ac/shared';
 
 export interface DungeonCollisionSources {
   findInteriorCells(landblockId: number): number[];
-  getCellCollisionData(cellId: number): { cellStruct: CellStruct; position: Frame; outsidePortalPolygonIds?: readonly number[] } | null;
+  getCellCollisionData(cellId: number): { cellStruct: CellStruct; position: Frame; outsidePortalPolygonIds?: readonly number[]; neighborCellIds?: readonly number[] } | null;
   loadEnvCell(cellId: number): Pick<EnvCell, 'staticObjects'> | null;
   loadSetupModel(setupId: number): (Pick<SetupModel, 'parts' | 'placementFrames'> & Partial<Pick<SetupModel, 'cylSpheres' | 'spheres'>>) | null;
   loadGfxObj(gfxObjId: number): GfxObj | null;
@@ -101,7 +101,7 @@ export function populateDungeonCollision(collision: DungeonCollision, geoLb: num
     try {
       const collData = src.getCellCollisionData(cid);
       if (!collData) continue;
-      collision.addCell(cid, collData.cellStruct, collData.position, collData.outsidePortalPolygonIds);
+      collision.addCell(cid, collData.cellStruct, collData.position, collData.outsidePortalPolygonIds, collData.neighborCellIds);
       const envCell = src.loadEnvCell(cid);
       if (!envCell) continue;
       for (let si = 0; si < envCell.staticObjects.length; si++) {

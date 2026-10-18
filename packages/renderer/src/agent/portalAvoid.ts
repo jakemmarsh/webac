@@ -116,3 +116,34 @@ function segDist(p: { x: number; y: number }, a: { x: number; y: number }, b: { 
   const t = l2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
   return Math.hypot(a.x + dx * t - p.x, a.y + dy * t - p.y);
 }
+
+/** The player's own sphere (ACE: 0.48 m): a portal teleports whoever's sphere touches its own (Portal.OnCollideObject). */
+export const BODY_RADIUS_M = 0.48;
+/** How far past that touch the agent's body is kept from a portal it wasn't sent into (portalStepThreat). */
+export const STEP_CLEAR_M = 0.15;
+
+/**
+ * The one guard every agent movement goes through (AgentApi.enforcePortalSentinel), whatever moves the body: a walk, a
+ * follow, a routine's Follow or nav point, a flee, a stay_with, a stall's sidestep, a hand `move` / `jump`, a held motion.
+ * The walk steers only at its ticks, and between two of them the body runs on along its heading: a follow's leg ending
+ * 4.9 m north of Aerbax Haven #7029e002, run at ~11 m/s, carried the body past its end and into the portal before the next
+ * look (Arcanist, 0x029E0119, 2026-10-18 13:11:11Z, 1.4 m from its middle; reproduced on the cell DAT with any look
+ * ≥ 0.3 s apart). So the next stride (`stride` m along `dir` from `me`: the pace times the longest recent gap between two
+ * looks, with slack) is checked against each disk (`r`: where the body's sphere would touch the portal's, plus
+ * STEP_CLEAR_M): the first disk it would come into, nearer than the body stands now, is returned. Moving out of or along
+ * a disk the body already stands in is no threat (an arrival beside the exit portal can always leave it).
+ */
+export function portalStepThreat<D extends AvoidDisk>(me: NavPoint, dir: { x: number; y: number }, stride: number, disks: readonly D[]): { disk: D; dist: number; closest: number } | null {
+  const len = Math.hypot(dir.x, dir.y);
+  if (len < 1e-6 || stride <= 0) return null;
+  const end = { x: me.x + (dir.x / len) * stride, y: me.y + (dir.y / len) * stride };
+  let best: { disk: D; dist: number; closest: number } | null = null;
+  for (const d of disks) {
+    if (Math.abs(me.z - d.z) > (d.span ?? FLOOR_SPAN_M)) continue;
+    const dist = Math.hypot(d.x - me.x, d.y - me.y);
+    const closest = segDist(d, me, end);
+    if (closest >= d.r || closest >= dist - 0.05) continue;
+    if (!best || closest - d.r < best.closest - best.disk.r) best = { disk: d, dist, closest };
+  }
+  return best;
+}

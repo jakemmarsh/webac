@@ -72,7 +72,7 @@ describe('fake host', () => {
       expect(r.message).toMatch(/^Dread Mu-miyah #80007179 is on a floor above \(12 m up, 12 m NE\)/);
       expect(r.message).toMatch(/running up to it leaves Claude Arcanist \(1 m from you\) behind on this floor, so no attack was started/);
       expect(r.message).toMatch(/fight Dread Mu-miyah #80008449 on your floor \(8 m N\)/);
-      expect(r.message).toMatch(/ac_attack target=#80007179 far=true to go anyway/);
+      expect(r.message).toMatch(/or go together: tell them \(\/f\), and with them coming, ac_attack target=#80007179 far=true$/);
       expect(host.sent.filter((x) => x.startsWith('attack'))).toEqual([]);
       expect(host.target).toBeNull();
     });
@@ -259,7 +259,7 @@ describe('fake host', () => {
       host.add({ guid: 0x7f000003, name: 'Fountain', cell: UPPER, x: 92, y: 20, z: 94 });
       // drop=true: going down together was said (2026-10-17: without it the walk stops at the edge, verify-agent-stream-movement-2026-10-17-0614z).
       const p = api.walkTo(0x7f000003, { within: 2, stayWith: 'Claude Arcanist', drop: true });
-      let edgeAt = 0, waited = false;
+      let edgeAt = 0, waited = false, downAt = 0;
       const r = await settle(api, host, p, 60_000, () => {
         // At the edge she is 12 m back: the walk holds there (no launch) until she comes within 6 m.
         if (!edgeAt && host.me.x > 78) edgeAt = host.t;
@@ -269,6 +269,9 @@ describe('fake host', () => {
           expect(host.me.z).toBeCloseTo(100, 1);
           Object.assign(host.objs.get(ARC)!, { x: host.me.x - 2 });
         }
+        // She comes down after him 3 s later (2026-10-18 15:29Z: the walk now waits at the bottom until she is down too).
+        if (host.me.z < 95 && !downAt) downAt = host.t;
+        if (downAt && host.t > downAt + 3000 && host.objs.get(ARC)!.z > 95) Object.assign(host.objs.get(ARC)!, { x: host.me.x - 1, z: 94, cell: LOWER });
       });
       expect(waited, `${r?.message} at ${host.me.x.toFixed(1)},${host.me.z} t ${host.t}\n${(console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => c.join(' ')).join('\n')}`).toBe(true);
       expect(r?.ok, r?.message).toBe(true);

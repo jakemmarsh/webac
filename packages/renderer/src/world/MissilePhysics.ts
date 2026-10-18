@@ -414,7 +414,9 @@ export function sweepSpheres(
  * terrain Z under AC (x, y) (null = not loaded → no contact). Stepped by the
  * sphere radius like CTransition; the contact is the first step whose sphere
  * dips below the surface, reported at the last free step. `inCell(x, y, z)`
- * says a sample stands in an interior cell, where the terrain is not tested.
+ * says a sample's sphere is in an interior cell away from its outside
+ * portals, where the terrain is not tested (CEnvCell::find_transit_cells
+ * adds the land cells only within the sphere's radius of one).
  */
 export function sweepHeightfield(
   from: V3, to: V3, radius: number,
@@ -431,8 +433,9 @@ export function sweepHeightfield(
     const h = heightAt(x, y);
     if (h === null || z - radius >= h) continue;
     // A sample inside an interior cell (a cellar, the drudge statues' ramps
-    // under the town's ground) tests the cell, not the land overhead
-    // (BUG.bunker-sealed-at-ground; the outdoorGroundY cell rule).
+    // under the town's ground) tests the cell, not the land overhead, unless
+    // it is near the cell's way out (BUG.bunker-sealed-at-ground; the
+    // outdoorGroundY cell rule).
     if (inCell?.(x, y, z)) continue;
     return { t: (i - 1) / n, normal: normalAt(x, y) ?? { x: 0, y: 0, z: 1 } };
   }

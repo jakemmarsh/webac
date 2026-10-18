@@ -211,7 +211,7 @@ describe('4. the run-up note says each height from you', () => {
     run(api, host, 200, { physics: false });
     const r = api.attack(D7C1);
     expect(r.ok).toBe(false);
-    expect(r.message).toBe('the run-up to Tusker Liberator #8000d7c1 (2 m up from you) has a one-way 2.0 m drop on the way, landing 2 m up from your floor, leaving Claude Arcanist (1 m from you) on this floor, so no attack was started. Let it come to you, tell them you\'re dropping and go together, or ac_attack target=#8000d7c1 far=true drop=true to go anyway');
+    expect(r.message).toBe('the run-up to Tusker Liberator #8000d7c1 (2 m up from you) has a one-way 2.0 m drop on the way, landing 2 m up from your floor, leaving Claude Arcanist (1 m from you) on this floor, so no attack was started. Let it come to you, or go down together: tell them you\'re dropping (ac_say text="/f dropping here, come down after me"), and with them beside you at the edge, ac_attack target=#8000d7c1 far=true drop=true (they come down after you)');
   });
 
   it('heightFromYou: "at your height" under a metre', () => {

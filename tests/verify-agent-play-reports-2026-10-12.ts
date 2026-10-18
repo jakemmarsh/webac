@@ -338,7 +338,7 @@ describe('agent play reports 2026-10-12', () => {
 
   it('the purse note is true on every server: half are lost (ACE destroys them by default), notes aren\'t coins', () => {
     host.me.pyreals = 4500; host.me.level = 13;
-    expect(formatObservation(api.observe())).toMatch(/pyreals 4500 \(half are lost if you die; trade notes, bought from most vendors, aren't coins\)/);
+    expect(formatObservation(api.observe())).toMatch(/money: 4,500 in coins, no trade notes \(half your coins are lost if you die; trade notes, bought from most vendors, are kept on death\)/);
   });
 });
 

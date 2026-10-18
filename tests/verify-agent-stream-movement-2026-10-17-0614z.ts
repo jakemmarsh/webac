@@ -188,7 +188,7 @@ describe('3. one-way drops off the floor a fellow stands on', () => {
     host.routeTo = [{ x: 80.5, y: 20, z: 100, drop: 6, landing: 94 } as { x: number; y: number; z: number }];
     const r = api.attack(MU, { far: true });
     expect(r.ok).toBe(false);
-    expect(r.message).toBe('the run-up to Dread Mu-miyah #80003d7d (6 m down from you) has a one-way 6.0 m drop on the way, landing 6 m down from your floor, leaving Claude Arcanist (1 m from you) on this floor, so no attack was started. Let it come to you, tell them you\'re dropping and go together, or ac_attack target=#80003d7d far=true drop=true to go anyway');
+    expect(r.message).toBe('the run-up to Dread Mu-miyah #80003d7d (6 m down from you) has a one-way 6.0 m drop on the way, landing 6 m down from your floor, leaving Claude Arcanist (1 m from you) on this floor, so no attack was started. Let it come to you, or go down together: tell them you\'re dropping (ac_say text="/f dropping here, come down after me"), and with them beside you at the edge, ac_attack target=#80003d7d far=true drop=true (they come down after you)');
     expect(host.sent.filter((x) => x.startsWith('attack'))).toEqual([]);
     expect(api.attack(MU, { far: true, drop: true }).ok).toBe(true);
   });
@@ -200,7 +200,7 @@ describe('3. one-way drops off the floor a fellow stands on', () => {
     for (let t = 0; t < 30_000 && !events(api).some((e) => e.startsWith('target-lost')); t += 100) { run(api, host, 100); await Promise.resolve(); }
     expect(host.launches).toHaveLength(0);
     expect(host.me.z).toBeCloseTo(100, 1);
-    expect(events(api).find((e) => e.startsWith('target-lost'))).toMatch(/^target-lost: Dread Mu-miyah #80003d7d: no attack: stopped [\d.]+ m short at the edge of a 6\.0 m drop: the way on drops to the floor below \(one way\), leaving Claude Arcanist \(\d+ m from you\) on this floor\. Let it come to you, tell them you're dropping and go together, or ac_attack target=#80003d7d far=true drop=true to go anyway$/);
+    expect(events(api).find((e) => e.startsWith('target-lost'))).toMatch(/^target-lost: Dread Mu-miyah #80003d7d: no attack: stopped [\d.]+ m short at the edge of a 6\.0 m drop: the way on drops to the floor below \(one way\), leaving Claude Arcanist \(\d+ m from you\) on this floor\. Let it come to you, or go down together: tell them you're dropping \(ac_say text="\/f dropping here, come down after me"\), and with them beside you at the edge, ac_attack target=#80003d7d far=true drop=true \(they come down after you\)$/);
   });
 
   it('a target 3 m below whose doorway way drops: refused without far=true (was: "another floor" in the answer, and the run-up went)', () => {

@@ -136,7 +136,7 @@ export async function buildLandblockWorld(BX: number, BY: number, options: { int
     for (const idx of [...walkable].sort((a, b) => a - b)) {
       const cellId = (prefix | idx) >>> 0;
       const cd = env.getCellCollisionData(cellId);
-      if (cd) collider.addCell(cellId, cd.cellStruct, cd.position, cd.outsidePortalPolygonIds);
+      if (cd) collider.addCell(cellId, cd.cellStruct, cd.position, cd.outsidePortalPolygonIds, cd.neighborCellIds);
       const envCell = env.loadEnvCell(cellId);
       envCell?.staticObjects.forEach((s, si) => {
         const model = resolveObjectPhysics(s.id, src);
