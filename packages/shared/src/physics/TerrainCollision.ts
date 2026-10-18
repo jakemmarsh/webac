@@ -23,6 +23,27 @@ export interface LandblockHeightMap {
   data: TerrainHeightData;
 }
 
+/** acclient.exe .rdata F_EPSILON (0x007c84ec) = 0.0002f. */
+const F_EPSILON = 0.0002;
+
+/**
+ * BUG.bunker-camera-in-head — OBJECTINFO::validate_walkable @ 0050d010, the
+ * IsViewer branch (ACE ObjectInfo.ValidateWalkable): whether one step of the
+ * camera's viewer sphere collides with a terrain plane. `dist` / `prevDist`
+ * are n·c + d − radius at the step's end / start. The sphere must dip into
+ * the plane (dist <= −F_EPSILON). A viewer whose path began outdoors then
+ * collides; one that began in an env cell (begin_pos cell & 0xffff >= 0x100)
+ * collides only when the step crossed the plane, i.e. the crossing fraction
+ * dist / (offset·N) lies in (0, 1]. A sphere already under the ground (a
+ * bunker, the drudge statues' ramps) passes on.
+ */
+export function viewerTerrainStepCollides(dist: number, prevDist: number, beganIndoors: boolean): boolean {
+  if (!(dist <= -F_EPSILON)) return false;
+  if (!beganIndoors) return true;
+  const angle = dist / (dist - prevDist);
+  return angle > 0 && angle <= 1;
+}
+
 export class TerrainCollision {
   private heightMaps = new Map<number, TerrainHeightData>();
 
@@ -283,6 +304,14 @@ export class TerrainCollision {
    *
    * Unloaded landblocks (null height) never clip — matching current behavior
    * where unloaded terrain has no geometry to clip against.
+   *
+   * BUG.bunker-camera-in-head — `viewer` carries the cell rule for a viewer
+   * whose path began in an env cell (SmartBox::update_viewer @ 00453ce0 starts
+   * it in the player's cell): the terrain is a land cell's, reached only from
+   * `landFrom` along the boom (where the sphere first comes within its radius
+   * of an outside portal plane, viewerLandFrom), and with `beganIndoors` a
+   * step meets the terrain only when it crosses the terrain plane
+   * (viewerTerrainStepCollides). Omitted: the outdoor viewer, as before.
    */
   getCameraDistance(
     startX: number,
@@ -292,11 +321,14 @@ export class TerrainCollision {
     behindZ: number,
     maxDist: number,
     behindY = 0,
+    viewer?: { landFrom: number; beganIndoors: boolean },
   ): number {
     const r = TerrainCollision.VIEWER_SPHERE_RADIUS;
     // CORE.18.b — the boom may rise (behindY); distances run along the 3D boom.
     const len = Math.sqrt(behindX * behindX + behindY * behindY + behindZ * behindZ);
     if (len < 0.001 || maxDist <= 0) return maxDist;
+    const landFrom = viewer?.landFrom ?? 0;
+    if (!(landFrom <= maxDist)) return maxDist;
     const dirX = behindX / len;
     const dirY = behindY / len;
     const dirZ = behindZ / len;
@@ -305,12 +337,25 @@ export class TerrainCollision {
       const h = this.getHeightAt(startX + dirX * t, startZ + dirZ * t);
       return h !== null && startY + dirY * t - h < r;
     };
+    // The step from boom distance `t0` to `t` meets the terrain (the plane of
+    // the triangle under the step's end, as LandCell.FindEnvCollisions tests it).
+    const stepContact = (t0: number, t: number): boolean => {
+      if (t < landFrom) return false;
+      if (!viewer?.beganIndoors) return penetrates(t);
+      const x = startX + dirX * t, z = startZ + dirZ * t;
+      const h = this.getHeightAt(x, z);
+      const n = h === null ? null : this.getTriangleNormalAt(x, z);
+      if (h === null || !n) return false;
+      const planeDist = (s: number) =>
+        n.x * (dirX * s + startX - x) + n.y * (dirY * s + startY - h) + n.z * (dirZ * s + startZ - z) - r;
+      return viewerTerrainStepCollides(planeDist(t), planeDist(t0), true);
+    };
 
     // Walk outward in sphere-radius steps; on first penetrating step, bisect
     // between the last clear distance and the contact step for the boundary.
     let lastClear = 0;
     for (let t = Math.min(r, maxDist); ; t = Math.min(t + r, maxDist)) {
-      if (penetrates(t)) {
+      if (stepContact(lastClear, t)) {
         let lo = lastClear;
         let hi = t;
         for (let i = 0; i < 12; i++) {

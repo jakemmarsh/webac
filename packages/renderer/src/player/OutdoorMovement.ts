@@ -123,6 +123,15 @@ export interface MovementServices {
    */
   groundAt?: (worldX: number, worldZ: number, fromY: number) => number | null;
   /**
+   * Whether a body whose feet are at `feetY` at (x, z) has the land cells in
+   * its cell array (DungeonCollision.reachesLandCells): it stands in no
+   * registered env cell, or in one within reach of an outside portal
+   * (CEnvCell::find_transit_cells @ 0052c820). The terrain's slope and water
+   * rules (CLandCell::find_env_collisions @ 00532f20) apply only then.
+   * Absent = always.
+   */
+  landReachable?: (worldX: number, worldZ: number, feetY: number) => boolean;
+  /**
    * The nearest walkable below fromY inside a dungeon (DungeonCollision
    * getFloorHeight with no drop limit); null/absent = none known. The
    * dungeon step's precipice rule measures the drop with it.
@@ -325,6 +334,8 @@ function walkableTerrainContact(
 ): { n: Normal; h: number } | null {
   const h = services.terrain.getHeightAt(x, z);
   if (h === null) return null;
+  // In an env cell away from its outside portals the terrain is not there (landReachable).
+  if (!reachesLand(services, x, z, fromY)) return null;
   const ground = services.groundAt?.(x, z, fromY) ?? null;
   // A BSP floor is the contact: one over the terrain, or an interior cell's under it.
   if (ground !== null && Math.abs(ground - h) > 0.01) return null;
@@ -371,14 +382,35 @@ function cliffSlide(
   };
 }
 
+/** services.landReachable, true when absent. */
+function reachesLand(services: MovementServices, x: number, z: number, feetY: number): boolean {
+  return services.landReachable ? services.landReachable(x, z, feetY) : true;
+}
+
+/**
+ * The terrain under (x, z) is the contact plane of a body whose last ground
+ * was `fromY`: the body reaches the land cells there and no BSP floor stands
+ * over (or, in an interior cell, under) the terrain.
+ */
+function terrainIsContact(services: MovementServices, x: number, z: number, fromY: number): boolean {
+  if (!reachesLand(services, x, z, fromY)) return false;
+  const h = services.terrain.getHeightAt(x, z);
+  if (h === null) return false;
+  const ground = services.groundAt?.(x, z, fromY) ?? null;
+  return ground === null || Math.abs(ground - h) <= 0.01;
+}
+
 /**
  * BUG.holtburg-statue-tunnel-wall — the body at (x, z) stands on an interior
  * cell's floor under the terrain (outdoorGroundY's cell rule: the only
  * ground below it). Retail's cell array then holds no land cell
  * (CEnvCell::find_transit_cells @ 0052c820), so the terrain's slope and water
  * rules (CLandCell::find_env_collisions @ 00532f20) do not apply there.
+ * Also true for any body in an env cell away from its outside portals,
+ * whatever its floor's height against the terrain (landReachable).
  */
 function onCellFloorUnderTerrain(services: MovementServices, x: number, z: number, fromY: number): boolean {
+  if (!reachesLand(services, x, z, fromY)) return true;
   const h = services.terrain.getHeightAt(x, z);
   if (h === null || fromY >= h + 0.5) return false;
   const ground = services.groundAt?.(x, z, fromY) ?? null;
@@ -413,8 +445,10 @@ function outdoorAdjustedStep(
     if (slopeGate && !services.terrain.isWalkable(destX, destZ)) {
       const destH = services.terrain.getHeightAt(destX, destZ);
       const curH = services.terrain.getHeightAt(state.x, state.z);
+      // Only where that terrain face is the contact plane: a body on a BSP
+      // floor (a ground-floor room on the slope, a bridge) never touches it.
       if (destH !== null && curH !== null && destH > curH + 0.001
-        && !onCellFloorUnderTerrain(services, destX, destZ, state.floorY)) return [0, 0];
+        && terrainIsContact(services, destX, destZ, state.floorY)) return [0, 0];
     }
     // GAP.6 — open sea is impassable: CLandCell::find_env_collisions
     // @ 00532f20 (ACE LandCell.cs:54-58) returns Collided for any
@@ -422,6 +456,7 @@ function outdoorAdjustedStep(
     // is EntirelyWater (get_block_water_type). AC1 has no swimming;
     // a fully flooded cell inside a block with any dry land (a river,
     // a lake) is waded, 0.9 m deep (get_water_depth).
+    // The land cell is tested only when it is in the cell array (onCellFloorUnderTerrain's landReachable).
     if (services.water.blockWaterTypeAt(destX, destZ) === LandWaterType.EntirelyWater
       && !onCellFloorUnderTerrain(services, destX, destZ, state.floorY)) return [0, 0];
     if (slopeGate && stepDownRefused(services.outdoorCollision, state.x, state.z, destX, destZ, state.floorY, services)) return [0, 0];
@@ -436,6 +471,7 @@ function outdoorAdjustedStep(
     // BSP search.
     const destTerrain = services.terrain.getHeightAt(destX, destZ);
     if (destTerrain !== null && (state.floorY - destTerrain > services.stepDownHeight
+      || !reachesLand(services, state.x, state.z, state.floorY)
       || (state.floorY < destTerrain - 0.01 && onCellFloorUnderTerrain(services, state.x, state.z, state.floorY)))) {
       const precipice = precipiceStep(services.outdoorCollision, state.x, state.z, state.floorY, adjX, adjZ,
         services.stepDownHeight, services.groundAt);

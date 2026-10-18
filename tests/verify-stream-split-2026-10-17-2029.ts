@@ -12,10 +12,11 @@
  *      as drop=true says. The split was item 1.
  *   3. 0x01D20340 from Arcanist's landing (0x01D20137) or 0x01D20200 is reachable on the cell DAT, but only by one route
  *      (~400 m, 100 doorways) across the 7.1 m corner leap over the pit 0x01D202A7 from the 0x02A6 side; the locked door
- *      #701d2021 (0x01D201A6) is on no route. Arcanist's buffed jump makes that leap; Bulwark's finds no take-off from the
+ *      #701d2021 (0x01D201A6) is on no route. Arcanist's buffed jump makes that leap; Bulwark's found no take-off from the
  *      0x02A6 lip (soldier.log 20:27:33Z, 1566 points; the jump came down short at 04:22Z), yet every walk of his planned
  *      it again, 20+ times that day. A leap your own jump failed is now left out of your routes for a while, so the walk
- *      ends at once saying so.
+ *      ends at once saying so. (2026-10-18: the no-take-off was the search's grid, laid from where he stood; laid again a
+ *      step aside, his jump makes it, as it did live at 03:20:59Z: verify-stream-reports-2026-10-18-0343.ts.)
  */
 import { existsSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -256,7 +257,10 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2): the split of 20:29Z'
       } finally { host.dispose(); }
     }, 300_000);
 
-    it('3. Bulwark\'s doesn\'t: the first walk finds no take-off and says so; the next ends at once, the leap named (was: planned again every walk)', async () => {
+    it('3. Bulwark\'s makes it too once its take-off search is laid again a step aside (2026-10-18 03:20:59Z, live, power 0.30); a leap that came down short is left out, and the next walk ends at once naming it', async () => {
+      // Before 2026-10-18 his walks found no take-off from the 0x02A6 lip (1566 points): the tier-2 search lays a 1 m grid
+      // from where you stand and tries jumps only from its points, and from there none of its points was a take-off. It is
+      // laid again from a step aside now (AgentApi.LEAP_REGRID; verify-stream-reports-2026-10-18-0343.ts).
       vi.useFakeTimers();
       vi.spyOn(console, 'log').mockImplementation(() => {});
       const { DungeonHost } = await import('./_harness/dungeonWalk.js');
@@ -264,18 +268,22 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2): the split of 20:29Z'
       host.me.health = { current: 196, max: 196 };
       const at = cellStandPoint(g, C(0x2a6))!;
       try {
-        const r1 = await host.walkTarget(C(0x2a6), at, '0x01D20340', { maxMs: 120_000 });
-        expect(r1.ok).toBe(false);
-        expect(r1.message).toMatch(/the only doorway route there leaps a 7\.1 m gap over open air \(landing \d+ m [NSEW]+ of you\), and no take-off your jump lands it from was found/);
-        expect(host.traces.some((l) => /remembering the 7\.1 m leap to \(275\.9, 40248\.9\) as one your jump doesn't make \(no take-off found\)/.test(l))).toBe(true);
+        const r1 = await host.walkTarget(C(0x2a6), at, '0x01D20340', { maxMs: 300_000 });
+        expect(r1.ok, `${r1.message}\n${host.traces.slice(-20).join('\n')}`).toBe(true);
+        expect(host.traces.some((l) => /walk leg jumps a 7\.1 m gap/.test(l))).toBe(true);
+        expect(host.traces.some((l) => /remembering the 7\.1 m leap/.test(l))).toBe(false);
+        // A leap whose jump came down in the gap (his 04:22Z on 2026-10-17): left out of the next walk, which ends at once.
+        const api = (host as unknown as { api: AgentApi }).api;
+        Object.assign(host.me, { cell: C(0x2a6), ...at });
+        (api as unknown as { noteLeapFailed: (p: { x: number; y: number; z: number; leap: number }, how: string) => void }).noteLeapFailed({ x: 192 + LEAP_WEST.x, y: 40320 + LEAP_WEST.y, z: LEAP_WEST.z, leap: 7.1 }, 'short');
         host.traces.length = 0;
         const t0 = host.t;
         const r2 = await host.walkTarget(C(0x2a6), at, '0x01D20340', { maxMs: 120_000, sameApi: true });
         expect(r2.ok).toBe(false);
-        expect(r2.message).toMatch(/^stopped [\d.]+ m short: no way on foot from this part of the dungeon to there: .*the doorway route there needs a 7\.1 m leap over open air, and your jump didn't make it \d+ min ago \(no take-off for it was found from this side\), so it is left out for now/);
+        expect(r2.message).toMatch(/^stopped [\d.]+ m short: no way on foot from this part of the dungeon to there: .*the doorway route there needs a 7\.1 m leap over open air, and your jump didn't make it \d+ min ago \(it came down short, in the gap\), so it is left out for now/);
         expect(host.t - t0).toBeLessThan(2000);
         expect(host.traces.some((l) => /walk leg jumps|walk search/.test(l))).toBe(false);
       } finally { host.dispose(); }
-    }, 300_000);
+    }, 400_000);
   });
 });

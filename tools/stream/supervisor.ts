@@ -25,17 +25,18 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import type { AgentItem, AgentSpell, AgentVitals } from '../../packages/renderer/src/agent/types.ts';
+import type { RoutineProfile } from '../../packages/shared/src/routines/index.ts';
 import { AgentClient } from '../ac-agent/client.ts';
 import { formatJournal, loadJournal } from '../ac-agent/journal.ts';
 import { STATE_DIR, logFile, pidAlive, readInfo } from '../ac-agent/state.ts';
 import { type CharacterConfig, type StreamConfig, parseStreamConfig } from './config.ts';
 import { type ChatParseState, FeedWriter, FileTail, type SegmentUsage, addUsage, feedPath, parseChatLine, parseStreamJsonLine, statusDraft } from './feed.ts';
-import { type SegmentRecord, QUIET_TOOLS, afterTurn, dayUsage, endReason, localDay, nextSegment, quietNudge } from './policy.ts';
+import { type SegmentRecord, QUIET_TOOLS, afterTurn, dayUsage, endReason, localDay, nextSegment, quietNudge, runningTask } from './policy.ts';
 import { loadOwnTime } from './own-time.ts';
 import { preparePlayerDir } from './player.ts';
 import { type TableSpell, loadSpellTableRows } from './spellGaps.ts';
 import { StuckWatch, classifyResult, isBusyChatLine } from './stuck.ts';
-import { TOOLS } from '../ac-agent/tools.ts';
+import { TOOLS, routineFromFile } from '../ac-agent/tools.ts';
 import { type SessionTally, clipReport, nudgeMessage, quietMessage, readinessBrief, sessionSoFar, playerToolNames, segmentOpening, streamEndingMessage, systemPrompt, userLine, wrapUpMessage } from './prompt.ts';
 
 export const STREAM_DIR = join(STATE_DIR, 'stream');
@@ -142,6 +143,8 @@ export interface SupervisorDeps {
   spells?(profile: string): Promise<AgentSpell[] | null>;
   /** The era's DAT spell table (name, school, power), for the spells line's family names; null when the DAT isn't there. */
   spellTable?(): Promise<TableSpell[] | null>;
+  /** The character's ready fight routine (tools/stream/routines/<profile>.json), for the readiness supplies line; null when none. */
+  routine?(profile: string): RoutineProfile | null;
   /**
    * Where the character's time went in its previous segment (own-time.ts loadOwnTime: travel, fights, buffs, trips, XP per
    * hour by spot, waiting, refused casts, time apart), for the opening; null when there is no previous segment.
@@ -384,7 +387,7 @@ export class StreamSupervisor {
         continue;
       }
       const vit = await this.deps.vitals(c.profile).catch(() => null);
-      if (vit) this.tasks.set(c.profile, { task: vit.task ?? null, at: this.deps.now() });
+      if (vit) this.tasks.set(c.profile, { task: runningTask(vit), at: this.deps.now() });
       else this.tasks.delete(c.profile);
       const v = statusDraft(c.profile, vit);
       if (v) this.deps.feed.write(v);
@@ -534,6 +537,7 @@ export class StreamSupervisor {
       sheet: await deps.characterSheet(c.profile).catch(() => null),
       spells: await deps.spells?.(c.profile).catch(() => null) ?? null,
       table: await deps.spellTable?.().catch(() => null) ?? null,
+      routine: (() => { try { return deps.routine?.(c.profile) ?? null; } catch { return null; } })(),
       session: sessionSoFar(cfg.characters.map((o) => ({ character: o.character, tally: this.tally.get(o.profile) }))),
     });
     let ownTime: string | null = null;
@@ -738,6 +742,12 @@ export function realDeps(cfg: StreamConfig): SupervisorDeps {
     characterSheet: async (p) => { const c = client(p); return c ? c.call<string>('characterSheet', [], 15_000).catch(() => null) : null; },
     spells: async (p) => { const c = client(p); return c ? c.call<AgentSpell[]>('spells', ['', 1000], 15_000).catch(() => null) : null; },
     spellTable: () => (spellRows ??= loadSpellTableRows()),
+    routine: (p) => {
+      const f = join(REPO, 'tools', 'stream', 'routines', `${p}.json`);
+      if (!existsSync(f)) return null;
+      const r = routineFromFile(f);
+      return 'profile' in r ? r.profile : null;
+    },
     ownTime: (p, character, cast) => loadOwnTime({ streamDir: STREAM_DIR, feedFile: feedPath(), profile: p, character, cast, nowMs: Date.now() }),
     callAgent: async (p, m, a = []) => { const c = client(p); if (!c) throw new Error(`no daemon for ${p}`); return c.call(m, a, 15_000); },
     journal: (p) => {

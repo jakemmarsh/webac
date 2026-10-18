@@ -17,13 +17,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   PreworldReporter, BOOT_STAGES, BOOT_CACHE_STATES, CAPABILITY_ISSUES, BOOT_SLOW_MS, bootCacheVerdict,
+  streamedBootStage, BOOT_STREAM_SCOPES, BOOT_STREAM_MAX_BYTES,
   type PreworldEvent, type PreworldScreen,
 } from '../packages/renderer/src/telemetry/PreworldReporter.js';
 import { PatchStatus, type PatchEvent } from '../packages/renderer/src/ui/PatchScreen.js';
 import { capabilityProblems } from '../packages/renderer/src/boot/Capability.js';
 import {
   sanitizeClientPreworld, BOOT_STAGES as BRIDGE_BOOT_STAGES, BOOT_CACHE_STATES as BRIDGE_CACHE_STATES,
-  CAPABILITY_ISSUES as BRIDGE_CAPS, PREWORLD_OUTCOMES,
+  CAPABILITY_ISSUES as BRIDGE_CAPS, PREWORLD_OUTCOMES, BOOT_STREAM_SCOPES as BRIDGE_STREAM_SCOPES,
 } from '../services/ws-tcp-bridge/src/clientPreworld.js';
 import { resolveBridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil.js';
 import { createBridgeServer } from '../services/ws-tcp-bridge/src/server.js';
@@ -198,6 +199,138 @@ describe('bridge: the boot fields', () => {
       const line = lines.find(l => l[1] === 'client_preworld')!;
       expect(line[2]).toMatchObject({ outcome: 'boot_slow', screen: 'boot', stage: 'patch_download', progress: 10, doneKB: 3072, totalKB: 30720, cache: 'cold' });
       expect(line[2]).not.toHaveProperty('caps'); // nulls are left out of the line
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+});
+
+/**
+ * Production (2026-10-18): a returning player on a slow laptop sat 20 s+ on
+ * the patch screen at 100% twice; boot_slow said stage=patch_download
+ * progress=100 cache=warm. That was StreamingDats.open() loading a warm
+ * profile's world + terrain packs and UI art from the object cache. It now
+ * has its own stage (world_cache), and each set's bootReport rides along.
+ */
+describe('world_cache: the warm-cache world load', () => {
+  const warmAll = { netBytes: 0, netObjects: 0, cacheBytes: 98_765_432, cacheObjects: 4321, preWorldArtFiles: 77, ms: 23_456.4, worldCached: true, worldCacheMs: 21_000.2 };
+
+  it('comes straight after patch_download, in both lists', () => {
+    expect(BOOT_STAGES.indexOf('world_cache')).toBe(BOOT_STAGES.indexOf('patch_download') + 1);
+    expect([...BRIDGE_BOOT_STAGES]).toEqual([...BOOT_STAGES]);
+    expect([...BRIDGE_STREAM_SCOPES]).toEqual([...BOOT_STREAM_SCOPES]);
+    expect(PREWORLD_OUTCOMES).toContain('boot_done');
+  });
+
+  it('streamedBootStage: download wins, then any set loading its world from the cache, then back to patch_download', () => {
+    expect(streamedBootStage([])).toBe('patch_download');
+    expect(streamedBootStage(['download'])).toBe('patch_download');
+    expect(streamedBootStage(['world_cache'])).toBe('world_cache');
+    // AC1999: the world set reached its cache wait while the interface set still downloads.
+    expect(streamedBootStage(['download', 'world_cache'])).toBe('patch_download');
+    expect(streamedBootStage(['world_cache', 'done'])).toBe('world_cache');
+    expect(streamedBootStage(['done', 'done'])).toBe('patch_download');
+  });
+
+  it('boot_slow in the cache wait says world_cache at 100%, and the boot_done that follows carries the set report', () => {
+    const h = harness();
+    h.r.bootStage('patch_download');
+    h.r.bootPatchEvent({ kind: 'begin', expected: 512 * 1024 });
+    h.r.bootPatchEvent({ kind: 'downloaded', bytes: 512 * 1024 });
+    h.r.bootCache('warm');
+    h.r.bootStage(streamedBootStage(['world_cache']));
+    h.advance(BOOT_SLOW_MS);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]).toMatchObject({ outcome: 'boot_slow', screen: 'boot', stage: 'world_cache', progress: 100, cache: 'warm' });
+    expect(h.sent[0]).not.toHaveProperty('stream'); // open() has not resolved yet
+
+    h.advance(3000);
+    h.r.bootStream('all', warmAll);
+    h.r.bootStage('side_tables');
+    h.advance(2000);
+    h.state.screen = 'server-select';
+    h.advance(1000);
+    expect(h.sent.map((e) => e.outcome)).toEqual(['boot_slow', 'boot_done']);
+    expect(h.sent[1]).toMatchObject({
+      outcome: 'boot_done', screen: 'server-select', stage: null, pageMs: BOOT_SLOW_MS + 6000,
+      stream: [{ scope: 'all', ms: 23_456, worldCacheMs: 21_000, worldCached: true, netBytes: 0, cacheBytes: 98_765_432, cacheObjects: 4321 }],
+    });
+    expect(Object.keys(h.sent[1].stream![0]).sort()).toEqual(['cacheBytes', 'cacheObjects', 'ms', 'netBytes', 'scope', 'worldCacheMs', 'worldCached']);
+    h.advance(60_000);
+    expect(h.sent).toHaveLength(2); // once
+  });
+
+  it('a fast boot sends no boot_done; its first char_list carries the reports, later ones do not', () => {
+    const h = harness();
+    h.r.bootStream('interface', { ...warmAll, worldCached: false, worldCacheMs: 0, netBytes: 5_000_000 });
+    h.r.bootStream('world', warmAll);
+    h.advance(4000);
+    h.state.screen = 'server-select';
+    h.advance(5000);
+    expect(h.sent).toHaveLength(0);
+    h.state.screen = 'char-select';
+    h.r.characterList(3);
+    h.r.characterList(3);
+    expect(h.sent[0].stream!.map((r) => [r.scope, r.worldCached, r.netBytes])).toEqual([['interface', false, 5_000_000], ['world', true, 0]]);
+    expect(h.sent[1]).not.toHaveProperty('stream');
+  });
+
+  it('a boot-screen event carries the reports known so far; out-of-range values are clamped, an unknown scope dropped', () => {
+    const h = harness();
+    h.r.bootStream('everything', warmAll);
+    h.r.bootStream('all', { ms: -5, worldCacheMs: Number.NaN, worldCached: 'yes', netBytes: 1e15, cacheBytes: Infinity, cacheObjects: 1e12 });
+    h.winL.get('pagehide')!();
+    expect(h.sent[0]).toMatchObject({ outcome: 'page_left', screen: 'boot' });
+    expect(h.sent[0].stream).toEqual([{ scope: 'all', ms: 0, worldCacheMs: 0, worldCached: false, netBytes: BOOT_STREAM_MAX_BYTES, cacheBytes: 0, cacheObjects: 10_000_000 }]);
+  });
+
+  it('bridge: keeps a real report whole, drops a bad entry whole, dedups scopes and caps the list', () => {
+    const h = harness();
+    h.r.bootStage('world_cache');
+    h.r.bootStream('all', warmAll);
+    h.advance(BOOT_SLOW_MS);
+    const real = h.sent[0];
+    expect(real).toMatchObject({ outcome: 'boot_slow', stage: 'world_cache' });
+    expect(sanitizeClientPreworld(real)).toEqual(real);
+
+    const good = real.stream![0];
+    const ev = sanitizeClientPreworld({
+      ...real,
+      stream: [
+        { ...good, scope: 'secret' },
+        { ...good, ms: 1.5 },
+        { ...good, netBytes: BOOT_STREAM_MAX_BYTES + 1 },
+        { ...good, worldCached: 1 },
+        'junk', null, [good],
+        good, { ...good, ms: 7 }, // a second 'all' is dropped
+        { ...good, scope: 'world', name: 'secretacct77' },
+        { ...good, scope: 'interface' }, // past MAX_BOOT_STREAMS
+      ],
+    })!;
+    expect(ev.stream).toEqual([good, { ...good, scope: 'world' }]);
+    expect(sanitizeClientPreworld({ outcome: 'boot_done', stream: 'all' })).not.toHaveProperty('stream');
+    expect(sanitizeClientPreworld({ outcome: 'boot_done', stream: [{ scope: 'all' }] })).not.toHaveProperty('stream');
+    expect(sanitizeClientPreworld({ outcome: 'boot_slow', stage: 'world_cache' })!.stage).toBe('world_cache');
+  });
+
+  it('POST /client-preworld logs boot_done with its stream reports', async () => {
+    const c = resolveBridgeConfig([], { BRIDGE_SERVERS_URL: 'none', BRIDGE_SERVERS_CACHE: 'none' });
+    c.wsPort = 0;
+    const lines: Array<[string, string, Record<string, unknown>]> = [];
+    const bridge = createBridgeServer(c, { log: (level, event, fields) => { lines.push([level, event, fields ?? {}]); } });
+    const port = await bridge.listen();
+    try {
+      const h = harness();
+      h.r.bootStage('world_cache');
+      h.advance(BOOT_SLOW_MS);
+      h.r.bootStream('all', warmAll);
+      h.state.screen = 'server-select';
+      h.advance(1000);
+      const done = h.sent.find((e) => e.outcome === 'boot_done')!;
+      const res = await fetch(`http://127.0.0.1:${port}/client-preworld`, { method: 'POST', body: JSON.stringify(done), headers: { 'content-type': 'text/plain' } });
+      expect(res.status).toBe(204);
+      const line = lines.find((l) => l[1] === 'client_preworld')!;
+      expect(line[2]).toMatchObject({ outcome: 'boot_done', stream: [{ scope: 'all', ms: 23_456, worldCacheMs: 21_000, worldCached: true, cacheObjects: 4321 }] });
     } finally {
       await bridge.shutdown();
     }

@@ -12,9 +12,17 @@
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ITEM_TIMERS_KEY_PREFIX } from '../../packages/renderer/src/agent/macro/itemBuffLedger.ts';
 
-/** The localStorage keys the agent API owns (AgentApi seenKinds / places). */
+/** The localStorage keys the agent API owns (AgentApi seenKinds / places / corpses / gearCasts). */
 export const AGENT_STORAGE_PREFIX = 'acAgent.';
+/**
+ * Every prefix carried across launches: the agent API's, and the routine macro's item-buff timers (VTank BuffedItems,
+ * itemBuffLedger.ts). Those were left behind until 2026-10-18, so after each segment's relaunch "Arcanist fights" judged
+ * all seven Banes V missing and recast them on ten pieces 5 and 6 minutes after the last round (07:19, 08:21Z).
+ */
+export const AGENT_STORAGE_PREFIXES: readonly string[] = [AGENT_STORAGE_PREFIX, ITEM_TIMERS_KEY_PREFIX];
+const carried = (k: string): boolean => AGENT_STORAGE_PREFIXES.some((p) => k.startsWith(p));
 
 export interface SavedPageStorage { origin: string; items: Array<[string, string]> }
 
@@ -25,7 +33,7 @@ export function pageStorageFile(stateDir: string, profile: string): string {
 
 /** The agent's own entries of a page's localStorage (other keys, the game's settings and caches, are not ours to carry). */
 export function pickAgentStorage(entries: Iterable<[string, string]>): Array<[string, string]> {
-  return [...entries].filter(([k, v]) => k.startsWith(AGENT_STORAGE_PREFIX) && typeof v === 'string');
+  return [...entries].filter(([k, v]) => carried(k) && typeof v === 'string');
 }
 
 export function readPageStorage(file: string): SavedPageStorage | null {
@@ -55,4 +63,4 @@ export function restorePageStorageScript(saved: SavedPageStorage): string {
 }
 
 /** The page side of a save: the origin and its agent entries (a string for page.evaluate, as above). */
-export const READ_PAGE_STORAGE_JS = `(() => { try { const items = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith(${JSON.stringify(AGENT_STORAGE_PREFIX)})) items.push([k, localStorage.getItem(k)]); } return { origin: location.origin, items }; } catch (e) { return null; } })()`;
+export const READ_PAGE_STORAGE_JS = `(() => { try { const items = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && ${JSON.stringify(AGENT_STORAGE_PREFIXES)}.some((p) => k.startsWith(p))) items.push([k, localStorage.getItem(k)]); } return { origin: location.origin, items }; } catch (e) { return null; } })()`;

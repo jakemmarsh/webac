@@ -200,10 +200,11 @@ describe('stream reports 2026-10-17 14:11Z', () => {
       // It walks off and back about the room below: no new alert (it was 55 s of them).
       for (const [x, y, z] of [[86, 14, -6], [90, 20, -6], [80, 26, -6], [84, 22, -6]]) { Object.assign(d, { x, y, z }); run(api, host, 3000); }
       expect(aggros()).toEqual([]);
-      // Up on your floor and coming: said again at once.
+      // Up on your floor and coming: said again at once, the moment it is on your floor (since 2026-10-18; it was said
+      // only once it had come 3 m nearer there).
       Object.assign(d, { x: 80, y: 32, z: 0 }); run(api, host, 1000);
       for (let i = 0; i < 4; i++) { d.y -= 1; run(api, host, 300); }
-      expect(aggros()).toEqual(['Dread Mu-miyah #800090d1 (level 60) is coming at you, 9 m N (running at you)']);
+      expect(aggros()).toEqual(['Dread Mu-miyah #800090d1 (level 60) is coming at you, 12 m N (running at you)']);
     });
   });
 

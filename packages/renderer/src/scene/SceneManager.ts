@@ -5,6 +5,7 @@ import { fovForViewDistanceRatio } from '../effects/PortalSpaceModel.js';
 import { ProgramRetention, type RetainableProgram } from './ProgramRetention.js';
 import { renderPixelRatio, renderAdaptConfig, contextAntialias, MIN_RENDER_PIXEL_RATIO } from './RenderScale.js';
 import { DynamicResolution } from './DynamicResolution.js';
+import { renderIndoorView, type IndoorViewContext } from './IndoorView.js';
 
 /** Retail `Render::znear` (globals.tsv: 0.1; SetFOVRad resets it to 0.1). */
 export const RETAIL_ZNEAR = 0.1;
@@ -308,12 +309,21 @@ export class SceneManager {
     for (const w of waiting) w(jpeg);
   }
 
+  /**
+   * BUG.bunker-terrain-over-stairs — set each frame while the camera is in a
+   * surface building cell that sees outside: render() then draws the
+   * landscape backdrop, clears depth and draws the viewer's cells over it
+   * (PView::DrawCells; scene/IndoorView.ts). Null: one ordinary pass.
+   */
+  indoorView: IndoorViewContext | null = null;
+
   render(): void {
     if (this.renderer?.domElement?.style?.visibility === 'hidden') {
       this.skipDraw();
       return;
     }
-    this.renderer?.render(this.scene, this.camera);
+    if (this.indoorView && this.renderer) renderIndoorView(this.renderer, this.scene, this.camera, this.indoorView);
+    else this.renderer?.render(this.scene, this.camera);
     if (this.pendingCaptures.length) this.flushCaptures();
     // PERF.gpu-soak-frame-hitches-28a525da — no program is ever relinked.
     this.programRetention.retainNew();

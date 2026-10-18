@@ -23,7 +23,7 @@ export const PREWORLD_OUTCOMES = [
   'login_refused', 'connect_failed', 'char_list', 'char_error', 'chargen_ok', 'chargen_refused',
   'chargen_sent', 'chargen_blocked',
   'enter_refused', 'enter_ok', 'dropped', 'page_hidden', 'page_left', 'page_reload', 'boot_slow', 'boot_failed',
-  'enter_retry', 'left_for_launcher', 'resume_ended', 'login_retry', 'handover',
+  'enter_retry', 'left_for_launcher', 'resume_ended', 'login_retry', 'handover', 'boot_done',
 ] as const;
 export type PreworldOutcome = typeof PREWORLD_OUTCOMES[number];
 
@@ -45,9 +45,27 @@ export const CHARGEN_STEPS = ['heritage', 'profession', 'skills', 'appearance', 
 
 /** RELEASE.preworld-boot-stage — main()'s boot steps before the launcher (PreworldReporter BOOT_STAGES). */
 export const BOOT_STAGES = [
-  'capability', 'capability_prompt', 'era', 'patch_check', 'patch_download', 'side_tables', 'dat_parse',
+  'capability', 'capability_prompt', 'era', 'patch_check', 'patch_download', 'world_cache', 'side_tables', 'dat_parse',
   'renderer_init', 'world_init', 'bridge_probe', 'ui_init',
 ] as const;
+/** A streamed DAT set's scope (renderer StreamingDats StreamScope; PreworldReporter BOOT_STREAM_SCOPES). */
+export const BOOT_STREAM_SCOPES = ['all', 'interface', 'world'] as const;
+/** At most this many streamed sets boot per page (an era's interface set and its world set). */
+export const MAX_BOOT_STREAMS = 2;
+const MAX_STREAM_BYTES = 16 * 1024 * 1024 * 1024;
+const MAX_STREAM_OBJECTS = 10_000_000;
+const MAX_STREAM_MS = 24 * 3600_000;
+
+/** One streamed set's open (PreworldReporter BootStreamReport). */
+export interface BootStream {
+  scope: typeof BOOT_STREAM_SCOPES[number];
+  ms: number;
+  worldCacheMs: number;
+  worldCached: boolean;
+  netBytes: number;
+  cacheBytes: number;
+  cacheObjects: number;
+}
 export const BOOT_CACHE_STATES = ['cold', 'warm', 'partial', 'off'] as const;
 export const CAPABILITY_ISSUES = ['webgl2', 'websocket', 'memory', 'pointer', 'software_gpu'] as const;
 /** The largest download a boot announces, in KiB (16 GiB: every whole DAT is ~1.4 GB). */
@@ -75,6 +93,12 @@ export interface ClientPreworldEvent {
   totalKB: number | null;
   cache: typeof BOOT_CACHE_STATES[number] | null;
   caps: Array<typeof CAPABILITY_ISSUES[number]> | null;
+  /**
+   * Each streamed set's open (how long, how much of it the warm-cache world
+   * wait took, cache vs network): boot-screen events, boot_done and the
+   * page's first char_list. Absent otherwise or when nothing valid came.
+   */
+  stream?: BootStream[];
   /**
    * The event went out late: the network refused its first send (renderer
    * telemetry/TelemetryOutbox.ts) and this is how long it waited. Absent on
@@ -162,11 +186,37 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     totalKB: uint(b.totalKB, MAX_KB),
     cache: pick(b.cache, BOOT_CACHE_STATES),
     caps: pickList(b.caps, CAPABILITY_ISSUES),
+    ...streamField(b.stream),
     ...lateField(b.lateMs, MAX_MS),
     ...eidField(b.eid),
     ...(outcome === 'dropped' ? netDiagField(b.net) : {}),
     ...(outcome === 'handover' ? handoverFields(b) : {}),
   };
+}
+
+/**
+ * `{ stream }` when the body carries valid streamed-set reports: each entry
+ * needs a known scope and every number in bounds (an entry with any field
+ * out of bounds is dropped whole), one per scope, at most MAX_BOOT_STREAMS.
+ */
+export function streamField(v: unknown): { stream?: BootStream[] } {
+  if (!Array.isArray(v)) return {};
+  const out: BootStream[] = [];
+  for (const e of v.slice(0, 16)) { // the 4 KiB body holds few more
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    const r = e as Record<string, unknown>;
+    const scope = pick(r.scope, BOOT_STREAM_SCOPES);
+    const ms = uint(r.ms, MAX_STREAM_MS);
+    const worldCacheMs = uint(r.worldCacheMs, MAX_STREAM_MS);
+    const netBytes = uint(r.netBytes, MAX_STREAM_BYTES);
+    const cacheBytes = uint(r.cacheBytes, MAX_STREAM_BYTES);
+    const cacheObjects = uint(r.cacheObjects, MAX_STREAM_OBJECTS);
+    if (!scope || ms === null || worldCacheMs === null || netBytes === null || cacheBytes === null || cacheObjects === null
+      || typeof r.worldCached !== 'boolean' || out.some((o) => o.scope === scope)) continue;
+    out.push({ scope, ms, worldCacheMs, worldCached: r.worldCached, netBytes, cacheBytes, cacheObjects });
+    if (out.length >= MAX_BOOT_STREAMS) break;
+  }
+  return out.length ? { stream: out } : {};
 }
 
 /** The 'handover' outcome's own fields, each only when valid. */

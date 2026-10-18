@@ -346,7 +346,10 @@ profile=… character=…`), then plays it as a headless Claude Code session in 
   player who has written no line and made no acting call (anything but wait / observe / look / status / trace / map)
   for that long, while the daemon's `/vitals` shows no `task` of theirs running (walk, follow, fight, repeat cast), is
   sent "[supervisor] Nothing has been said or done …: say in a few words what you're doing". A running task counts as
-  activity, so a long walk never sets it off. The player session runs with `CLAUDE_CODE_SILENT_TURN_REMINDER=0`:
+  activity, so a long walk never sets it off. So does a routine that is running, not paused, and acting: `/vitals`
+  carries `routine: { profile, paused, held, actedAgoMs }` (its last cast, attack request or counted kill), and
+  `policy.ts runningTask` counts one that acted within `ROUTINE_ACTING_MS` (60 s) as running (Arcanist's routine bolted
+  all segment while the nudge said "nothing of yours is running" four times, 2026-10-18). The player session runs with `CLAUDE_CODE_SILENT_TURN_REMINDER=0`:
   Claude Code's own "The user hasn't heard from you in a while" reminder came every few silent turns, long walks
   included, and Arcanist called it dead air he could do nothing about (2026-10-16 11:01 UTC report).
 - The next segment starts after `restartPauseSeconds`. A segment shorter than `quickExitMinutes` (a crash) backs off
@@ -725,6 +728,99 @@ heal and hand control back on danger. The brief only listed a routine beside tho
   - *Lost targets.* A walk after a monster out of sight gives up after 15 s, or 25 m from a fellow (`lostChaseGiveUp`);
     a walk_to hint is given only when the doorway route gets there (`noWalkTo`: a locked door is named).
 
+- **Third live hour (2026-10-18 02:41–03:43Z), fixed 2026-10-18** (`tests/verify-stream-reports-2026-10-18-0343.ts`):
+  - *Routine supplies.* The segment opening's readiness block has a `- routine supplies (routine.json): …` line: each
+    vital the profile's recharge restores from its Consumables list, with what you carry of those exact names (the
+    macro matches them by name: a "Potion of Healing" is no listed "Health Potion"), an empty one first ("Stamina
+    Elixir, Stamina Potion or Stamina Tincture: NONE carried (your routine drinks one at 20% stamina)"). Observe says
+    the missing ones while a routine runs (`macro/routineSupplies.ts`). Bulwark ran out mid-hunt unwarned.
+  - *stay_with over a gap.* A stay_with walk waits at the take-off of a route leap while the fellow is more than 6 m
+    behind on that floor, then jumps once they are beside it (a leap can be one way, and they jump it after you); a
+    later wait for them names the gap. A take-off search that finds none for a leap your own jump made this session no
+    longer leaves it out of your routes for 30 min (`leapsMade`), and a route leap's take-off search that finds none is
+    laid again from a step aside first (`LEAP_REGRID`: its grid is laid from where you stand).
+  - *Melee chases.* SkipUnreachableMonsters (melee, indoors) also leaves alone a monster the doorway route reaches only
+    the long way round (more than twice the straight distance and 10 m over it), by no route, a storey off, or by a
+    run-up leaving a fellow over 15 m behind (`AgentApi.meleeChaseBar`), said in the routine log; a run-up stops when
+    its target goes so, and that monster is no target for 15 s unless it hits you. The one you picked is yours.
+  - *Vendors.* `buy` and `sell` take `vendor=` (target= with item=/items= is the vendor): its window is opened first
+    (the use walks there), and with no window open the one vendor within 12 m opens by itself (`vendorReady`); `buy`
+    takes items= (a name listed n times is n of it) and count=. A walk's doorway left out as "something stands in it"
+    comes back into the route once the body stands at it (the Pawn Shopkeep walk had stalled 0.9 m from one).
+  - *Multi-slot armor.* `equip` of a piece worn over two or more others takes each off first, one at a time (the
+    double-click frees only one, ACE then refuses); a refusal names what came off on the way. The paperdoll was right.
+  - *Retail, said:* a mana stone on one item gives it only what it lacks and the rest goes with the stone (ACE
+    ManaStone.HandleActionUseOnTarget); used on yourself it is shared among every worn item needing mana, and `use_on`
+    says so when another worn piece is still out. The Holtburg Healer buys only Misc and trade notes
+    (MerchandiseItemTypes 262272); the "Peddler refused" sales went to the Healer's window still open.
+  - *Wielded caster (2026-10-18 06:15Z).* The macro reads the weapon in your hand by its numbers (`macro/wieldedWeapon.ts`:
+    EquipMask Held / MeleeWeapon / MissileWeapon / TwoHanded, ItemType Caster / MissileWeapon / MeleeWeapon). The
+    page's worn rows had `slot: 'Held'` and no `type` label (main.ts now adds it), and the old text test found no weapon
+    in a mage's hand, so "Arcanist fights" never wanted Aura of Hermetic Link / Spirit Drinker Self and let them expire.
+    Fakes for worn gear should copy the page's row shape (slot names, mask, itemType), not invent a `type`.
+  - *Portal cooldown.* A use of a portal within 3.5 s of arriving from one waits that out first (ACE Portal
+    minTimeSinceLastPortal, counted from OnTeleportComplete), and a portal's WeenieError refusal since the use began (the
+    walk-in's touch included) is the use's answer, with how long until it takes you; a spell or swing at you meanwhile
+    is no answer. A run-up that goes through a portal ends there ("the run-up went through a portal …"), never with an
+    attack answer measured from the far side.
+  - *Level picks.* A cast with no level names the higher level it passed over and why ("Invulnerability Self VI is
+    higher but 59% to land (your Creature Enchantment 255 against its 250)"), vitae included, as the routine log does.
+
+- **Fourth live hour (2026-10-18 06:16–07:18Z, Aerbax Haven), fixed 2026-10-18**
+  (`tests/verify-stream-reports-2026-10-18-0717.ts`):
+  - *Untrained skills' buffs.* VTank keeps up only trained skills' buffs, and Arcanist's Melee Defense is untrained (101),
+    so the macro never wanted Invulnerability Self; he recast it by hand twice. `mage.json` lists Invulnerability Self IV
+    under Extra Buff Spells, and the macro says once in its log which self buffs it won't keep for an untrained skill
+    (`planBuffs` `untrained`). An Extra Buff Spells name with no level ("Invulnerability Self") finds its family too.
+  - *Buff landing bar* (beyond VTank, `BuffMinLandChance`, default 75): a buff level under 75% to land (the fizzle curve:
+    your buffed school skill against its power) gives way to the next level down, as the cast tool's pick does. VTank's
+    SpellDiffExcessThreshold-Buff 5 alone let Invulnerability Self VI and Impenetrability VI through at 255 against 250
+    (59%). The log names the level passed over, its chance and the bar.
+  - *"You're too busy!" after a kit.* The kit landed; the attack task re-sent its attack during the bandaging and ACE
+    refused that (Player_Melee: IsBusy). The attack task now sends no request while the client is busy with a use (its
+    busy count, released by the server's UseDone). A `use` of a healing kit with no target goes on you (use-with-target
+    on yourself): the plain use armed target mode and the routine's next selection took it ("You can't heal that!"). A
+    plain `use` of any other carried item that is used ON something (a mana stone, a key, a tool) is refused with the
+    use_on to make.
+  - *Bolt cadence.* The routine log stamped each step when it ended, so a bolt's line (its whole ~3.5 s cast, to the
+    server's UseDone) came 4–9 s after "turning to face" and read as a wait. Steps are now stamped when they begin, with
+    how long they ran when that was 2 s or more. A bolt with no damage line was waited on the full 8 s; once the client
+    is free again after the words, 1.5 s more is waited (`BOLT_FLIGHT_WAIT_MS`).
+  - *stay_with "out of sight".* Bulwark had logged out 0.1 s before; the stop now says "X left your fellowship N s ago
+    (logged out, or quit it)" when the server's line came.
+  - *Packs.* With your routine covering the walk, a pack counts only monsters not 10+ levels under you (or whose spells
+    or hits hurt); 6+ coming at once still stop it. Marionettes L26–35 no longer stop a L48's walks.
+  - *Mana stones.* Inventory says each stone's charge (its appraisal's ItemCurMana, else its glow: UiEffects Magical),
+    and an empty one how it is charged (ACE ManaStone: used on an item with mana it drains Efficiency × that mana and
+    destroys the item). The gear-out-of-mana line names your stones, and an empty stone's "That item doesn't have enough
+    Mana." is explained.
+  - *Lowered maximum vitals.* Observe names the debuff behind each (Feeblemind: Self → Maximum Mana; Frailty: Endurance →
+    Maximum Health and Stamina; "Decreases maximum health by N"), from the spell table and the DAT's vital formulas.
+  - *The fellow leash.* attack's refusal past 12 m says the rule: a melee run-up past 12 m goes only when every fellow
+    beside you stays within 15 m of you there; far=true lifts it.
+
+- **Fifth live hour (2026-10-18 07:18–08:20Z, Aerbax Haven), fixed 2026-10-18**
+  (`tests/verify-stream-reports-2026-10-18-0819.ts`):
+  - *Banes recast 5 minutes in.* Each segment reloads the page, and the gear-cast reckoning (`AgentApi.gearCasts`) and
+    the macro's item timers lived in it only, so the first buff look after the 07:18 and 08:20 reloads judged all seven
+    Banes missing and recast them on ten pieces ("refreshing" every line). The macro's ledger is in localStorage, but the
+    daemon's fresh browser context each launch carried only `acAgent.*` keys (`pageStorage.ts`); it now carries the
+    ledger's `acjs.vtank.itemTimers.*` too (`AGENT_STORAGE_PREFIXES`). The agent's reckoning is kept in storage as well
+    (`acAgent.gearCasts.<name>`, wall-clock), its expiry lines included, and each buff step's log line says
+    what it judged was left (`[judged: 1m29s left on your armor, reckoned from the casts seen]`, or `not on …`). The
+    in-page rounds were right (2 min before the 30 min end); observe no longer lists a gear spell that is up as a buff
+    "not up".
+  - *The next target after a kill.* The target-died note was written at the kill, before the routine's pick a moment
+    later, and said "but you are not attacking it: ac_attack …": Bulwark took over by hand 20 times. With a macro routine
+    fighting for you it now says the routine picks the next target itself, and read after the pick, which it went for.
+    The pick itself (`combatPlan` candidates, beyond VTank): after a kill, one on a fellow (ProtectFellows) first, then
+    one hitting you (`hittingYou`), then the client's Auto Target selection; the player's own hand pick first of all.
+    Mid-fight the order is unchanged. Where it took another in the logs: a Dark Marionette on Arcanist (ProtectFellows,
+    by design), or the same-named twin of the Marionette the note named.
+  - *Stuck chasers as a pack:* the hold rule above (it stays held as you walk).
+  - *Buffs line.* A buff that landed on you (new, or refreshed) in the last 2 min is listed first, newest first, "just
+    landed"; past 16 the rest are named after "+N more" (`formatBuffs`).
+
 ### Dead air (measured 2026-10-14)
 
 Dead air is time a viewer watches a character doing nothing visible. Measure every rehearsal the same way:
@@ -1033,13 +1129,21 @@ here, not having to hardcode behavior").
     next re-raise is one line instead: `Shore Armoredillo #8000dd45 (level 30) keeps facing you, 12 m N (running at you),
     but it hasn't come closer in 24 s (no line of fire: a wall in the way): stuck, or it can't path round to you. No
     more aggro for it until it closes in or attacks.` It is then quiet until it comes 3 m nearer (an aggro at once, no
-    forget window), is on them or attacks; you walking toward it doesn't count. observe marks it `AIMED AT YOU BUT NOT
+    forget window), is on them or attacks; you walking toward it doesn't count. Held, it stays held while it gets no
+    closer, wherever you (or the fellow) walk: it is let go when it comes 3 m nearer by its own movement and is 3 m nearer
+    you than when it was held, and indoors the doorway route to it is no longer the long way round (`wayRound`); a chaser
+    held a storey off raises aggro the moment it is on your floor. (914c301d dropped the hold once you moved 4 m; a
+    fight's footwork then never let its 20 s add up, and three Marionettes behind the west wall of 0x029F0144 stopped
+    Bulwark's walks as a pack for 15 minutes, 2026-10-18 08:06–08:20Z.) observe marks it `AIMED AT YOU BUT NOT
     REACHING YOU (running at you, no closer in 40 s)` (from 20 s without coming nearer, held or not), and a held monster doesn't stop an `ac_walk_to` / `ac_follow`. A real chase
     closes metres a second, so it never holds. fellow-aggro is held the same way.
   - `ac_walk_to` and `ac_follow` answer when a monster starts coming at you: `stopped 31.0 m short: Shadow #8000b6e1
     (level 26) is coming at you, 24 m E (running at you). Fight it …, get away from it …, or walk on anyway
     (stop_on_aggro=false)`. One already coming when you set off doesn't stop it; flee never does. Routines' own walks
-    (api.walkTo without the tool) are unchanged. A monster under half your level (`trivialFoe`: its examined level, else
+    (api.walkTo without the tool) are unchanged. With your routine running (held for your walk, `routineCoversWalk`) a
+    walk stops only for a pack (`ROUTINE_WALK_PACK`, 3+ coming at once), a caster whose spells took a tenth of your
+    health, or a heavy hitter (`walkDanger`: the repeat cast's rule; a debuff-only caster is mild); the answer says the
+    rule, and names the mild chasers it walked on past (the routine takes them once the walk is done). A monster under half your level (`trivialFoe`: its examined level, else
     the level one of its name showed) neither stops a walk / follow nor is kept clear of (the pack stop's rule); one of
     unknown level is examined quietly and gets `AGGRO_LEVEL_WAIT_MS` (1.5 s) for the answer before it stops the walk; one
     that hits you stops it as any hit does (Bulwark L33's follows stopped for L8 trash, 2026-10-16).
@@ -1294,9 +1398,9 @@ here, not having to hardcode behavior").
   goal. The point is never placed by dividing by 192: dungeon frames run outside 0–192 (the Training Academy 0x7202
   spans local y −255..5; a hive route's point at 0x039D is local (51, −56), room 0x039D0156 at z −30, VTank Z −0.125).
   In a building the same lookup puts a coordinate inside it in its room (within 3 m of your storey). Attack lines are placed when they come, on the nearest of that name within reach (a swing
-  8 m, a spell 60 m, a shot 78 m from a monster wielding a bow, crossbow, atlatl or thrown weapon (read from the host's `wielded()`: held items are out of the world, so `objects()` never lists them) or turned to face you: ACE's ranged monsters TurnTo and stand, and a Sata Sclavus's arrows from 22 m read as melee lines, 2026-10-16), never moved onto another of the name later; none in reach is `hit by, but not placed` (in a dungeon ACE shows you no monster in a cell yours can't see, yet its melee checks distance only, so it can hit you through a wall or shut door). ac_wait:
+  8 m, a spell 60 m, a shot 78 m from a monster wielding a bow, crossbow, atlatl or thrown weapon (read from the host's `wielded()`: held items are out of the world, so `objects()` never lists them) or turned to face you: ACE's ranged monsters TurnTo and stand, and a Sata Sclavus's arrows from 22 m read as melee lines, 2026-10-16), never moved onto another of the name later; none in reach is `hit by a <name> you can't see` (observe, and one `attackers-up` per name), with where the server last placed one of the name in a room out of your sight when the client knows it (in a dungeon ACE shows you no monster in a cell yours can't see, yet its melee checks distance only, so it can hit you through a wall or shut door; its bolts need a clear line from it when it picks the spell, Monster_Combat.GetMaxRange → IsDirectVisible, and walls stop them, so a bolt that reached you came through an opening). A name counts only where the line names its attacker (its start, after "You evaded" or "cast by"): "Dark Marionette grazes …" is never the Marionette in sight (2026-10-18). ac_wait:
   vitals-low at half health by default (`vitals_below=`, `mana_below=`, `stamina_below=` per wait; it was 35%, and woke
-  an archer at 14%), any single hit over a quarter of max health, `attackers-up` and `cast-at-you` (a spell landing on,
+  an archer at 14%), any single hit over a quarter of max health (one event per fall: a hit that also crosses 60% or the critical line says both, and a wait's own mark adds none beside it), `attackers-up` and `cast-at-you` (a spell landing on,
   failing on or resisted by you, or a creature within 40 m speaking spell words: ACE Monster_Magic broadcasts them).
   `ac_pick_up` waits for the item in the pack or the server's refusal (a walk_to straight after cancelled ACE's walk to
   the note: "can't be picked up - action cancelled"); a note or book on the ground is read from the pack (ACE's torn
@@ -1760,8 +1864,10 @@ identify themselves.
   direction only: by its landing doorway). A later walk that needs it ends at once with the cut-off answer, which
   names it ("the doorway route there needs a 7.1 m leap over open air, and your jump didn't make it N min ago …").
   Mountain Keep's 0x01D20340 from the halls under the walkways is reachable only across the 7.1 m corner leap over
-  the pit 0x01D202A7 from the 0x02A6 side (~400 m, 100 doorways): a buffed Arcanist makes it, Bulwark finds no
-  take-off there; the locked door #701d2021 (0x01D201A6) is on no route.
+  the pit 0x01D202A7 from the 0x02A6 side (~400 m, 100 doorways); the locked door #701d2021 (0x01D201A6) is on no
+  route. (2026-10-18: "Bulwark finds no take-off there" was the take-off search's grid, laid from where he stood; it is
+  laid again from a step aside now (`LEAP_REGRID`) and his jump makes the leap, as it did live at 03:20:59Z. A take-off
+  search that finds none for a leap you made this session no longer leaves it out.)
 - **Walks and uses from the 12:07Z stream reports (2026-10-17).** Each with its evidence in
   tests/verify-stream-reports-2026-10-17-1207-walk.ts:
   - A monster in a combat stance is awake (ACE `Monster.Sleep` sets NonCombat): the pack stop ("monsters not awake
@@ -1791,3 +1897,4 @@ identify themselves.
 - **2026-10-17 17:54Z, Tusker Habitat (0x5B47):** a melee approach the server gives up on or leaves stuck (8 s, no answer, no nearer, the target 1 m+ off your level or past 4 m, no wall or door seen between) is run up to with the walk planner and attacked once more (`AgentApi` fight: `APPROACH_FAILED`, `APPROACH_STALL_MS`). ACE's melee charge (UseChargeAttack, on by default) is a straight MoveTo with no progress give-up for players: on a ramp or a step-down it waits silently (20 s with no swing and no answer, #8000032f 2–3 m below Bulwark), and ends only on a lost target ("Unable to move to object!", WeenieError ObjectGone / NoObject) or 15 m charged ("You charged too far!"). The fight's reply says which, then "running up to it with the walk planner … then attacking it once more"; a second failure ends it with target-lost. An "Unable to move to object!" that comes after your last melee target died is that death's (ObjectGone: the server's approach ending because the target left its tracking), and a `[Agent]` line says so: both of Bulwark's were. ACE's use, pick-up, give and loot walks (`CreateMoveToChain`) never send that text: their failed approach answers UseDone / InventoryServerSaveFailed(ActionCancelled) after 15 s. `ac_press` takes an action by its other names (`input/KeybindActionLookup.ts`): the posture motion an emote input action holds (`key=Sitting` is Sit, `Sleeping` is Lay Down: ACCmdInterp::InitializeEmoteInputActionHash), the name squashed (`ShowHideInventoryPanel`, `lay_down`) or inflected (`Jumping`), and a refusal lists the closest names. Each tool with one time argument takes the others' names for it (`TIME_ARG_ALIASES`): `follow timeout_s=` is `duration_s=`, `wait`/`walk_to` take `duration_s=`, `move` takes `duration_s=` / `timeout_s=` for `seconds=`, `cast` takes them for `max_s=`; `trace`'s `seconds=` (how far back) keeps its name.
 - **2026-10-17 18:48Z / 19:18Z, Tusker Habitat (0x5B47) and Viamontian Lab (0x0068):** a follow beside its leader stops at the first hit, flee or not (getting there is done; a leader with monsters on them no longer keeps you standing in the pile), and a walk to a mobbed fellow stops once the hits take you under half. A walk being hit never stands still for a `stay_with` fellow. `stop_on_aggro=false` (walk_to, follow) walks on through hits too, as flee does; the critical stop still applies. A repeat cast already under its `until_health` makes one cast and ends there, saying so (never a refusal for a threshold you set). `use` with a loose restorative name ("Health Potion") while that vital is under 60% (or something is on you) uses the strongest you carry (BoostValue from an appraisal, else price per unit) and says which; otherwise it asks, strongest first. Stamina 0 is ACE's IsExhausted: no defense (every attack lands) and a crawl for a run, and each attack at you in a combat stance costs a point; an "EXHAUSTED" vitals-low wakes any wait while something is on you, and observe's header marks it. A walk's own notes (hit on the way, waited for a fellow) are in its task-done too. Dungeon statics that are only a CylSphere (the Tusker Habitat pole 0x020009A3) collide for movement and line of fire, as ACE's projectile physics has them (tools/ace-physics-harness pairs: 236/237 agree). A way round a doorway no search gets into that is 3× and 10+ doorways longer waits for one wide search for the goal first.
 - **2026-10-17 19:50–20:53Z, Al-Jalima and Mountain Keep (0x01D2):** an ACE buy makes a new stack (it never tops up one you carry; retail's pack shows two icons), so `buy` now says where the goods went and what you carry of them in all ("in your main pack: #8000e175 x12 (a new stack); you carry 15 Stamina Elixir in all, in 2 stacks"), and a use's stack line names the other stacks ("gone from your pack: Stamina Elixir (and 12 more in another stack: #8000e175 x12)"). Bulwark's 12 elixirs sat unused all hour behind the old 3-stack's "gone from your pack". A vendor's shop opens after it turns to you (ACE Vendor.ActOnUse: ApproachVendor after Rotate's time), and your own status lines ("You're no longer protected by the Lifestone's magic!", "… has expired.") are no use's answer (`SELF_STATUS_LINE`): a use waits for the vendor's window. Aggro "closing" counts on your floor only. `raise` with `attribute=` / `vital=` / `skill=` naming the other kind raises it and says which it raised and the other by name, from the DAT's SecondaryAttributeTable ("raised Maximum Stamina: a vital, not an attribute; the attribute that feeds it is Endurance").
+- **2026-10-18 04:11–05:13Z, doll dungeon 0x029E and Aerbax Haven 0x029F:** the server moves you along the straight line between two AutonomousPositions (ACE `UpdatePlayerPosition` → `update_object_server`), at most a second apart, so a walk round a portal's disk in a corridor never entered the disk while the server's chord ran 0.5 m from the portal (Bulwark through Aerbax Haven #7029e002; reproduced on the cell DAT). Near a portal that isn't the goal the walk now reports the body's place at each bend (`AgentHost.reportPosition`, `portalAvoid.chordNeedsReport`), jumps' take-offs included. A slow frame's run (the page looked every ~0.5 s) is walked for the last metres when one stride would carry it past the reach (`strideSlow`), and a walk to a point turns back once it is 1 m past (`OVERSHOOT_PAST_M`): no more "run past it a little" at cell middles. An offset into rock keeps the farthest open point as its goal through stalls (it went back to the point in the rock: "stuck … walls all round"). A follow doesn't stop for sleepers its leader stands about as near to. A spell named by its skill points to retail's line ("Melee Defense spells are called Invulnerability: Invulnerability Other V", `spellFamilies.ts` from the spell table's descriptions). A second attack order on the same target (the routine resuming after your hand-over) no longer loses its target-died, and no attack request goes at a target that is no longer attackable (the client's "You must select a valid combat target").

@@ -5,7 +5,7 @@
  * Loads DAT files, presents character creation / selection,
  * then runs the game with HUD, terrain, models, and game logic.
  */
-import { outdoorGroundY, floorSearchFromY, traceGroundAlongPath, interiorGroundY, objectLandingZ, type OutdoorGroundSources, type ObjectSurfaceSources } from './world/outdoorGround.js';
+import { outdoorGroundY, floorSearchFromY, traceGroundAlongPath, interiorGroundY, objectLandingZ, unwalkableTerrainNormal, standsOnTerrain, type OutdoorGroundSources, type ObjectSurfaceSources } from './world/outdoorGround.js';
 import * as THREE from 'three';
 import { installCpuBacked2dCanvases } from './ui/CanvasBacking.js';
 import { installContextHealth } from './ui/ContextHealth.js';
@@ -53,7 +53,8 @@ import { smartBoxPhysicsSteps, inventoryRequestRefusalText } from '@ac/shared';
 import { WaterMap, LandWaterType, canAttackTarget, canUseTarget, canAddToTrade, canOpenTrade, getPlayerFormula, spellComponentsSatisfied, appropriateSpellFormula, SPELL_COMPONENT_DID_MAPPER_ID, resolveAllegiancePatron, DEFAULT_WEAPON_SPEED, resolveCombatManeuverTableDid } from '@ac/shared';
 import { SceneManager } from './scene/SceneManager.js';
 import { CameraController } from './scene/CameraController.js';
-import { CAMERA_DEFAULT_PIVOT_Z, CAMERA_IN_HEAD_Y, TRACK_TARGET_OFFSET_Z, blipResetsViewer, cameraPlayerTranslucency, viewerClipsOnTerrain } from './scene/RetailCamera.js';
+import { CAMERA_DEFAULT_PIVOT_Z, CAMERA_IN_HEAD_Y, TRACK_TARGET_OFFSET_Z, blipResetsViewer, cameraPlayerTranslucency } from './scene/RetailCamera.js';
+import { surfaceViewerCell, surfaceViewerDistance, type SurfaceViewerWorld } from './scene/ViewerBoom.js';
 import { RetailCameraRig } from './scene/RetailCameraRig.js';
 import { RendererWarmup } from './scene/RendererWarmup.js';
 import { applyViewerFade } from './scene/ViewerFade.js';
@@ -129,12 +130,15 @@ import { GameActions } from './network/GameActions.js';
 import { pageDebugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
 import { AgentApi, agentApiEnabled, automationUiEnabled, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, yawToCompass, type AgentHost, type AgentHostObject } from './agent/AgentApi.js';
 import { createHostAttack } from './agent/hostAttack.js';
+import { skillKey, skillSpellLines, spellSkillMod } from './agent/spellFamilies.js';
 import { pluginLootSets } from './agent/pluginLootSets.js';
 import { modeOfStance } from './agent/macro/modeGate.js';
 import type { AgentScreen, AgentSelf } from './agent/types.js';
 
 /** The agent's tap on every UseDone (its WeenieError code; 0 = done), set when the agent API is on. */
 let agentUseDoneTap: ((code: number) => void) | null = null;
+/** Each skill's spell line named otherwise (spellFamilies.skillSpellLines), built from the spell table on first ask. */
+let agentSkillLines: Map<string, { skill: string; line: string }> | null = null;
 /** The agent's tap on every AttackDone (its WeenieError code), set when the agent API is on. */
 let agentAttackDoneTap: ((code: number) => void) | null = null;
 let agentMeleeSentTap: ((height: string) => void) | null = null;
@@ -406,7 +410,7 @@ import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
-import { PreworldReporter, bootCacheVerdict, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
+import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
 import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
@@ -1127,9 +1131,20 @@ function noteSetCache(scope: string, stats: { netBytes: number; cacheBytes: numb
   noteBootCache();
 }
 
+/**
+ * Each streamed set's boot phase (an era's world set boots beside its
+ * interface set): the boot telemetry's patch_download / world_cache stage.
+ */
+const streamBootPhases = new Map<StreamScope, StreamBootPhase>();
+function setStreamBootPhase(scope: StreamScope, phase: StreamBootPhase): void {
+  streamBootPhases.set(scope, phase);
+  preworldReporter?.bootStage(streamedBootStage(streamBootPhases.values()));
+}
+
 async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope; wholeBytes?: number } = {}): Promise<StreamingDats> {
   const t0 = performance.now();
   const scope = opts.scope ?? 'all';
+  setStreamBootPhase(scope, 'download');
   // Whole DATs this boot downloads besides the set (an AC1999 world), and a
   // second set (the world's, booting concurrently): one meter over all of it.
   // Each boot ADDS its bytes to the announced total when it learns them (so
@@ -1148,6 +1163,8 @@ async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope;
     bypassCache: datCacheBypass,
     scope,
     onProgress: (done, total) => feed.onProgress(done, total),
+    // A warm profile's world + terrain packs and UI art load from the object cache before open() resolves.
+    onWorldCache: () => setStreamBootPhase(scope, 'world_cache'),
     onBootPacks: (store) => {
       noteSetCache(scope, store.stats);
       console.log(`[AC:DatStream] boot packs resident in ${Math.round(performance.now() - t0)} ms (net ${store.stats.netBytes} B / ${store.stats.netObjects} objects, cache ${store.stats.cacheBytes} B)`);
@@ -1162,9 +1179,11 @@ async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope;
   });
   if (patchCancelled) throw patchAbortError();
   feed.finish();
+  setStreamBootPhase(scope, 'done');
+  preworldReporter?.bootStream(scope, s.bootReport);
   const st = s.store.stats;
   noteSetCache(scope, st);
-  console.log(`[AC:DatStream] set ${s.store.pointer.set}${opts.scope && opts.scope !== 'all' ? ` (${opts.scope})` : ''}: char-select set resident in ${Math.round(performance.now() - t0)} ms (net ${st.netBytes} B / ${st.netObjects} objects, cache ${st.cacheBytes} B / ${st.cacheObjects} objects, ${s.bootReport.preWorldArtFiles} pre-world art files); ${s.bootReport.worldCached ? 'world + terrain packs loaded from the object cache too (warm profile)' : 'world + terrain packs continue in the background'}`);
+  console.log(`[AC:DatStream] set ${s.store.pointer.set}${opts.scope && opts.scope !== 'all' ? ` (${opts.scope})` : ''}: char-select set resident in ${Math.round(performance.now() - t0)} ms (net ${st.netBytes} B / ${st.netObjects} objects, cache ${st.cacheBytes} B / ${st.cacheObjects} objects, ${s.bootReport.preWorldArtFiles} pre-world art files); ${s.bootReport.worldCached ? `world + terrain packs loaded from the object cache too in ${s.bootReport.worldCacheMs} ms (warm profile)` : 'world + terrain packs continue in the background'}`);
   return s;
 }
 
@@ -2228,6 +2247,10 @@ async function main() {
   // with the dungeon state) because the landblock object streamer below
   // registers into it.
   const outdoorCollision = new DungeonCollision(); // reuse for outdoor building meshes
+  /** The surface camera sweep's world (scene/ViewerBoom.ts); isCellSeenOutside is hoisted. */
+  const surfaceViewerWorld: SurfaceViewerWorld = {
+    collision: outdoorCollision, terrain: terrainCollision, seenOutside: (id) => isCellSeenOutside(id),
+  };
   // RECON.transition-stepup-stepdown-port.c.a — a step up outside every
   // EnvCell lands on the land cell's terrain polygon (CLandCell::
   // find_env_collisions), wading depth included.
@@ -2579,6 +2602,40 @@ async function main() {
     applySurfaceCellVisibility(surfaceCellRegistry, playerBlockKey, surfacePvs,
       surfacePortalGatingEnabled ? surfaceView : undefined);
   }
+  // BUG.bunker-terrain-over-stairs — retail keys its indoor draw on the
+  // VIEWER's cell (SmartBox::RenderNormalMode @ 00453aa0): with the camera in
+  // a surface cell that sees outside, the frame draws the landscape as a
+  // backdrop, clears depth and draws that cell's PVS over it
+  // (scene/IndoorView.ts). The camera reaches a cell only through the
+  // player's, so the scan runs only while the player is in one.
+  let indoorViewCellId = 0;
+  let indoorViewPvs = new Set<number>();
+  function updateIndoorView(): void {
+    let camCell = 0;
+    if (!playerInDungeon && currentSurfaceCellId !== 0 && landblockObjects.landscapeVisible) {
+      const cam = sceneManager.camera;
+      cam.updateMatrixWorld();
+      cam.getWorldPosition(surfaceCamPos);
+      camCell = surfaceViewerCell(surfaceViewerWorld, currentSurfaceCellId, surfaceCamPos);
+      if ((camCell & 0xffff) < 0x100) camCell = 0;
+    }
+    if (camCell !== indoorViewCellId) {
+      indoorViewCellId = camCell;
+      indoorViewPvs = new Set<number>();
+      const env = camCell !== 0 ? envCellRenderer.loadEnvCell(camCell) : null;
+      // A cell that never sees outside draws no landscape at all (the sealed-interior toggle owns that case).
+      if (env && (env.flags & EnvCellFlags.SeenOutside) !== 0) {
+        indoorViewPvs.add(camCell & 0xffff);
+        for (const v of env.visibleCells) indoorViewPvs.add(v);
+      }
+    }
+    sceneManager.indoorView = indoorViewPvs.size > 0 ? {
+      blockKey: indoorViewCellId >>> 16,
+      cells: indoorViewPvs,
+      playerCellId: currentSurfaceCellId,
+      cellAt: (x, y, z) => outdoorCollision.findCellContaining(x, y, z, indoorViewCellId),
+    } : null;
+  }
   /** Building + cell meshes per block (streamer-owned; the camera/collision raycast rebuild reads them). */
   const loadedBuildingMeshes = landblockObjects.loadedBuildingMeshes;
 
@@ -2589,13 +2646,18 @@ async function main() {
    */
   const surfaceCellAt = (x: number, z: number, footY: number): number =>
     outdoorCollision.findCellContaining(x, z, footY + outdoorCollision.lowerSphereHeight, currentSurfaceCellId);
+  /** The body with feet at footY has the land cells in its cell array (DungeonCollision.reachesLandCells). */
+  const surfaceLandReachable = (x: number, z: number, footY: number): boolean => outdoorCollision.reachesLandCells(x, z, footY);
   /** Terrain + outdoor collision-world floors (world/outdoorGround.ts). */
   const outdoorGroundSources: OutdoorGroundSources = {
     terrainHeight: (x, z) => terrainCollision.getHeightAt(x, z),
     get floorHeight() {
-      return outdoorCollision.hasCells ? (x: number, z: number, fromY: number) => outdoorCollision.getFloorHeight(x, z, fromY) : null;
+      return outdoorCollision.hasCells
+        ? (x: number, z: number, fromY: number, maxDrop?: number, bodyFeetY?: number) => outdoorCollision.getFloorHeight(x, z, fromY, maxDrop, bodyFeetY)
+        : null;
     },
     cellAt: surfaceCellAt,
+    landReachable: surfaceLandReachable,
   };
   /**
    * The same, for the player's own floor follow: a BSP floor is the contact
@@ -2607,10 +2669,12 @@ async function main() {
     terrainHeight: (x, z) => terrainCollision.getHeightAt(x, z),
     get floorHeight() {
       return outdoorCollision.hasCells
-        ? (x: number, z: number, fromY: number) => outdoorCollision.getBodyFloorHeight(x, z, fromY, playerStepDownHeight)
+        ? (x: number, z: number, fromY: number, maxDrop?: number, bodyFeetY?: number) =>
+          outdoorCollision.getBodyFloorHeight(x, z, fromY, playerStepDownHeight, maxDrop, bodyFeetY)
         : null;
     },
     cellAt: surfaceCellAt,
+    landReachable: surfaceLandReachable,
   };
 
   function feedTerrainCollision(worldX: number, worldZ: number) {
@@ -3296,6 +3360,7 @@ async function main() {
     get edgeSlide() { return (playerPhysicsState & AcePhysicsState.EdgeSlide) !== 0; },
     get stepDownHeight() { return playerStepDownHeight; },
     groundAt: (x, z, fromY) => outdoorGroundY(outdoorGroundSources, x, z, fromY),
+    landReachable: surfaceLandReachable,
     // RECON.transition-stepup-stepdown-port.b — the walkable below a dungeon step's destination.
     dungeonGroundAt: (x, z, fromY) => dungeonCollision?.getFloorHeight(x, z, fromY, Infinity) ?? null,
     // MOVE.slide-speed-around-sphere — CPhysicsObj::sliding_normal, carried between transitions.
@@ -3445,14 +3510,13 @@ async function main() {
   let slopeContact = initialSlopeContact();
   /** The terrain face under (x, z) is the contact plane and fails FloorZ; its normal, else null. */
   function unwalkableTerrainContact(x: number, z: number, groundY: number): SlideVec3 | null {
-    const terrainY = terrainCollision.getHeightAt(x, z);
-    // A BSP floor (bridge, building, stairs) over the terrain is the contact there,
-    // and so is an interior cell's floor under it (a tunnel or cellar;
-    // BUG.holtburg-statue-tunnel-wall). A wade on the terrain is in no cell.
-    if (terrainY === null || groundY > terrainY + 0.01) return null;
-    if (groundY < terrainY - 0.01 && surfaceCellAt(x, z, groundY) !== 0) return null;
-    const n = terrainCollision.getTriangleNormalAt(x, z);
-    return n && n.y < TerrainCollision.ACE_FLOOR_Z ? n : null;
+    // outdoorGround.ts: never the terrain for a body in an env cell away from its outside portals.
+    return unwalkableTerrainNormal({
+      terrainHeight: (tx, tz) => terrainCollision.getHeightAt(tx, tz),
+      terrainNormal: (tx, tz) => terrainCollision.getTriangleNormalAt(tx, tz),
+      cellAt: surfaceCellAt,
+      landReachable: surfaceLandReachable,
+    }, x, z, groundY, TerrainCollision.ACE_FLOOR_Z);
   }
   // FAITHFUL.596 — ACE PhysicsGlobals.cs:13: Gravity = -9.8f, integrated as-is
   // (PhysicsObj.cs:2080 Acceleration=(0,0,Gravity); :1858 Velocity += Accel*q).
@@ -8072,6 +8136,13 @@ async function main() {
       terrainHeight: (x, y) => terrainCollision.getHeightAt(x, y),
     };
     serverObjectManager.setObjectLandingQuery((cell, x, y, z, spheres) => objectLandingZ(objectSurfaceSources, cell, x, y, z, spheres));
+    // A creature walking on its own motion into a building's room or a ramp under the ground is in that cell
+    // (RemotePhysics.update): the landscape's collision world finds it and its floor.
+    serverObjectManager.setSurfaceCells({
+      surfaceCellAt: (x, y, z, preferred) => outdoorCollision.findCellContaining(x, y, z + outdoorCollision.lowerSphereHeight, preferred),
+      holdsSurfaceCell: (cell) => outdoorCollision.hasCell(cell),
+      surfaceFloorZ: (x, y, z) => (outdoorCollision.hasCells ? outdoorCollision.getFloorHeight(x, y, z) : null),
+    });
     // PhysicsScript playback for ambient/default visual effects (FAITHFUL.177).
     // Each ServerObject with a non-zero SetupModel.defaultScript fires the
     // script's AnimationHook sequence (Sound + CreateParticle) at the object's
@@ -16414,6 +16485,7 @@ async function main() {
         requestPending: () => !!attackRequest && (attackRequest.attackServerResponsePending || attackRequest.attackInProgress || attackRequest.repeatAttackInProgress()),
         now: () => performance.now(),
         schedule: (fn, ms) => { setTimeout(fn, ms); },
+        canSwing: (guid) => { const o = serverObjectManager?.getObject(guid); return !!o && !serverObjectManager!.isDying(guid) && isObjectAttackable(o, serverObjectManager?.playerDescFlags ?? 0); },
       });
       // The frame the agent's movement probes work in, and the collision services they step through:
       // agent global metres in and out (outdoors the render world is global; a dungeon's is its
@@ -16533,7 +16605,8 @@ async function main() {
           // The paperdoll's numbers for the gear view (agent/gear.ts): the EquipMask slots each item is worn in
           // (CurrentWieldedLocation) or could be (ValidLocations), and the body it covers (ClothingPriority).
           const gearNums = (i: { validLocations?: number; clothingPriority?: number }) => ({ ...(i.validLocations ? { validLocations: i.validLocations >>> 0 } : {}), ...(i.clothingPriority ? { coverage: i.clothingPriority >>> 0 } : {}) });
-          const worn = playerState.equipment.getAll().map((e) => ({ guid: e.id >>> 0, name: e.name, where: 'equipped', slot: slotNames(e.slot) || String(e.slot), mask: Number(e.slot) >>> 0, ...gearNums(e), ...(e.stackSize > 1 ? { stack: e.stackSize } : {}), ...(typeBits(e.id >>> 0) ? { itemType: typeBits(e.id >>> 0) } : {}), ...(ammoOf(e.id >>> 0) ? { ammoType: ammoOf(e.id >>> 0) } : {}), ...(playerState.inventory.getItem(e.id)?.materialType ? { materialType: playerState.inventory.getItem(e.id)!.materialType } : {}) }));
+          // Worn rows carry the same type label as pack rows (a worn wand had only slot "Held", and the macro's text test missed it).
+          const worn = playerState.equipment.getAll().map((e) => ({ guid: e.id >>> 0, name: e.name, where: 'equipped', slot: slotNames(e.slot) || String(e.slot), mask: Number(e.slot) >>> 0, ...gearNums(e), ...(e.stackSize > 1 ? { stack: e.stackSize } : {}), ...(typeBits(e.id >>> 0) ? { type: itemTypeLabel(typeBits(e.id >>> 0)!), itemType: typeBits(e.id >>> 0) } : {}), ...(ammoOf(e.id >>> 0) ? { ammoType: ammoOf(e.id >>> 0) } : {}), ...(playerState.inventory.getItem(e.id)?.materialType ? { materialType: playerState.inventory.getItem(e.id)!.materialType } : {}) }));
           const wornIds = new Set(worn.map((w) => w.guid));
           const held = playerState.inventory.getAll().filter((i) => !wornIds.has(i.id >>> 0)).map((i) => ({
             // A container or a RequiresPackSlot item (a pack, a focus) at the top level sits in the side pack slots, not the main pack.
@@ -16561,6 +16634,8 @@ async function main() {
           // SpellFlags.Beneficial (0x4) with a duration: an enchantment that helps (ACE SpellFlags.cs).
           ...(((spellTable?.spells.get(s.id)?.bitfield ?? 0) & 0x4) && (spellTable?.spells.get(s.id)?.duration ?? 0) !== 0 ? { buff: true } : {}),
           ...(spellTable?.spells.get(s.id) ? { category: spellTable.spells.get(s.id)!.category, power: spellTable.spells.get(s.id)!.power, duration: spellTable.spells.get(s.id)!.duration ?? 0, targetType: spellTable.spells.get(s.id)!.nonComponentTargetType >>> 0 } : {}),
+          // The skill it raises or lowers, from its description ("Increases the target's Melee Defense skill …").
+          ...((): { skill?: { name: string; raises: boolean } } => { const m = spellSkillMod(spellTable?.spells.get(s.id)?.desc ?? ''); return m ? { skill: { name: m.skill, raises: m.raises } } : {}; })(),
           // A missile spell (bolts, streaks, arcs, life and enchantment projectiles): walls stop it.
           ...(isProjectileSpellType(spellTable?.spells.get(s.id)?.metaSpellType ?? 0) ? { projectile: true } : {}),
           // How far it reaches for you: the spell examine's Range line (DetermineSpellRange), the server's check too.
@@ -16726,6 +16801,15 @@ async function main() {
         clientCommand: (word) => !!retailCommands.lookup(word),
         key: (code, down) => { if (down) cameraController.simulateKeyDown(code); else cameraController.simulateKeyUp(code); },
         setYaw: (yaw) => { cameraController.playerYaw = yaw; cameraController.cameraYawOffset = 0; },
+        // The server moves you along the straight line between two AutonomousPositions: the walk reports each bend near a
+        // portal (portalAvoid.chordNeedsReport), the same message the client's own position event sends.
+        reportPosition: () => { if (gameStarted) movementSync?.sendAutonomousPositionNow(syncPositionNow()); },
+        // A skill's spell line when retail names it otherwise ("Melee Defense" → Invulnerability), from the whole spell table.
+        skillSpellLine: (skill) => {
+          if (!spellTable) return null;
+          agentSkillLines ??= skillSpellLines(spellTable.spells.values());
+          return agentSkillLines.get(skillKey(skill)) ?? null;
+        },
         pickUp: (guid) => { agentPrimeMoveState(); return placeInBackpack(guid); },
         drop: (guid) => {
           if (!sendGameAction || !playerState.inventory.getItem(guid)) return false;
@@ -18917,7 +19001,8 @@ async function main() {
         // interior cells (stairs, elevated floors in surface buildings).
         const terrainY = terrainCollision.getHeightAt(playerWorldX, playerWorldZ);
         playerGroundY = traceGroundAlongPath(
-          (x, z, fromY) => outdoorGroundY(playerGroundSources, x, z, fromY),
+          // In a surface env cell with no walkable under it at all, the floor it stood on (as interiorGroundY).
+          (x, z, fromY) => outdoorGroundY(playerGroundSources, x, z, fromY, { fallbackY: lastFloorAwareGroundY }),
           prePhysicsPlayerX, prePhysicsPlayerZ, playerWorldX, playerWorldZ,
           floorFromY, outdoorCollision.transitionSphereRadius,
         );
@@ -18927,7 +19012,7 @@ async function main() {
         // ObjCell.get_water_depth: 0.45 nearest-vertex-water / 0.1 dry
         // vertex of a partially-flooded cell). Only when standing on the
         // terrain itself — building floors (bridges, docks) stay dry.
-        if (playerGroundY !== null && terrainY !== null && playerGroundY === terrainY) {
+        if (playerGroundY !== null && terrainY !== null && standsOnTerrain(outdoorGroundSources, playerWorldX, playerWorldZ, playerGroundY)) {
           const wadeDepth = waterMap.waterDepthAt(playerWorldX, playerWorldZ);
           if (wadeDepth > 0) playerGroundY = terrainY - wadeDepth;
         }
@@ -19148,12 +19233,16 @@ async function main() {
         // room's ceiling (or the floor of the storey above) and the jump stops rising there, instead of
         // carrying the body up through it, over the walls and out of every cell.
         const riseCollision = playerInDungeon ? dungeonCollision : outdoorCollision;
+        const bodyHeight = riseCollision?.playerHeight ?? DungeonCollision.PLAYER_HEIGHT;
         const air = advanceAirborneFrame(airborneBaseY, playerWorldY, jumpVelocityY, physSteps, groundY, GRAVITY, {
           riseLimit: riseCollision ? (from, to) => riseCollision.riseLimit(playerWorldX, playerWorldZ, from, to) : null,
+          // The storey over the head, as the body's own cell sees it: from a
+          // room under the ground no land-cell floor (the statue pedestal's
+          // lid) or terrain is over it (outdoorGroundY's bodyFeetY).
           floorAtHead: (headY) => (playerInDungeon
             ? movementServices.dungeonGroundAt?.(playerWorldX, playerWorldZ, headY)
-            : movementServices.groundAt?.(playerWorldX, playerWorldZ, headY)) ?? null,
-          height: riseCollision?.playerHeight ?? DungeonCollision.PLAYER_HEIGHT,
+            : outdoorGroundY(outdoorGroundSources, playerWorldX, playerWorldZ, headY, { bodyFeetY: headY - bodyHeight })) ?? null,
+          height: bodyHeight,
         });
         playerWorldY = air.offsetY;
         jumpVelocityY = air.velocityY;
@@ -19336,7 +19425,7 @@ async function main() {
           contactPlane: () => (playerGroundY === null ? null : contactPlaneFromNormal(
             playerInDungeon
               ? dungeonCollision?.getFloorNormal(playerWorldX, playerWorldZ, playerGroundY) ?? LEVEL_CONTACT_NORMAL
-              : (playerGroundY !== terrainCollision.getHeightAt(playerWorldX, playerWorldZ)
+              : (!standsOnTerrain(outdoorGroundSources, playerWorldX, playerWorldZ, playerGroundY)
                 && outdoorCollision.getFloorNormal(playerWorldX, playerWorldZ, playerGroundY))
                 // The exact triangle's plane (CLandCell::find_terrain_poly), not
                 // getNormalAt's 0.5 m finite difference: that one blends two
@@ -19367,7 +19456,7 @@ async function main() {
       const pivotY = drawFeetY + CAMERA_DEFAULT_PIVOT_Z;
       const rigDt = Math.max(dt, 1e-6);
       const onBuildingFloor = !playerInDungeon && playerGroundY !== null
-        && playerGroundY !== terrainCollision.getHeightAt(playerWorldX, playerWorldZ);
+        && !standsOnTerrain(outdoorGroundSources, playerWorldX, playerWorldZ, playerGroundY);
       // CORE.18.b.a.a.a — the offset frame is the PLAYER's heading; mouse-look
       // orbits viewer_offset inside it (CameraSet::Rotate), and the rig picks
       // SetTargetForOffset's flags (align / look-at-pivot) from the orbited
@@ -19442,19 +19531,12 @@ async function main() {
       let cameraScale = 1;
       if (followDist > 0.01 && soughtDist > 0.01) {
         const pPos = collisionProbePos.set(playerDrawX, pivotY, playerDrawZ);
-        // BUG.bunker-camera-in-head — from a walked-in env cell under the
-        // landscape (a bunker) the terrain overhead never clips the boom.
-        const terrainClips = viewerClipsOnTerrain((currentSurfaceCellId & 0xffff) >= 0x100,
-          pivotY, terrainCollision.getHeightAt(playerDrawX, playerDrawZ));
+        // BUG.bunker-camera-in-head — from a surface env cell the land cells
+        // (terrain, shells, scenery) clip the boom only out through the
+        // cell's outside portals (scene/ViewerBoom.ts).
         const cameraDist = (playerInDungeon && dungeonCollision)
           ? dungeonCollision.getCameraDistance(pPos, behindX, behindZ, soughtDist, soughtUp)
-          : Math.min(
-              outdoorCollision.getCameraDistance(pPos, behindX, behindZ, soughtDist, soughtUp),
-              terrainClips
-                ? terrainCollision.getCameraDistance(
-                  playerDrawX, pivotY, playerDrawZ, behindX, behindZ, soughtDist, soughtUp)
-                : soughtDist,
-            );
+          : surfaceViewerDistance(surfaceViewerWorld, currentSurfaceCellId, pPos, behindX, soughtUp, behindZ, soughtDist);
         cameraScale = cameraDist / soughtDist;
         camPos.x = playerDrawX + behindX * cameraScale;
         camPos.z = playerDrawZ + behindZ * cameraScale;
@@ -19511,8 +19593,11 @@ async function main() {
       // viewer draws under Render::useSunlightSet(1) with the sun as the
       // only hardware light (SmartBox::RenderNormalMode @ 00453aa0), so no
       // pool light — the player light included — reaches outdoor draws.
-      // The player's cell stands in for retail's viewer (camera) cell.
-      viewerLight.visible = viewerLightOverride ?? (playerInDungeon || viewerLightActive(currentSurfaceCellId));
+      // BUG.bunker-camera-in-head — it is the VIEWER's (camera's) cell that
+      // RenderNormalMode reads: a camera out through the doorway of the
+      // player's cell draws outdoors (scene/ViewerBoom.ts surfaceViewerCell).
+      viewerLight.visible = viewerLightOverride ?? (playerInDungeon
+        || viewerLightActive(surfaceViewerCell(surfaceViewerWorld, currentSurfaceCellId, camPos)));
       // CORE.17.q.b — the player's parts draw in the pass its cell decides:
       // PView::DrawCells' useSunlightSet(0) span inside any env cell (no
       // sun, the pool lights), the sun-only landscape pass outdoors.
@@ -19807,7 +19892,7 @@ async function main() {
     // only competed with the portal-space gate's prefetch (the full sky's
     // layers held the warm login gate ~1.5 s on SwiftShader, 2026-10-05).
     if ((!draw && !sceneManager.capturePending) || gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
-    else sceneManager.render();
+    else { updateIndoorView(); sceneManager.render(); }
     // RELEASE.first-minute — counters only (WorldReporter.frame); the world counts as drawn once no portal space covers it.
     if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering);
     // PERF.render-adapt — dynamic resolution measures only frames that drew the world in a visible tab.

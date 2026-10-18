@@ -78,8 +78,13 @@ export function awayWord(from: ReadonlyArray<{ bearing: number }>): string | nul
  *     the monster (the bolt's damage from the era's spell table times the monster's Resist* multiplier for it), not the
  *     first of its damage list it can bolt at all (combatPlan.strongestBolt): Acid Stream I over Flame Bolt V at a Dread
  *     Mu-miyah, which takes both alike.
+ *   BuffMinLandChance (75; 2026-10-18): a buff level whose cast chance (ACE SkillCheck.GetMagicSkillChance: your buffed
+ *     school skill against its power) is under this percent is passed over for the next level down, as the cast tool's
+ *     level pick does (AgentApi.SPELL_PICK_MIN_CHANCE). VTank's SpellDiffExcessThreshold-Buff (5) alone let Impenetrability
+ *     VI and Invulnerability Self VI through at Item / Creature Enchantment 255 against 250: 59%, two casts in five
+ *     fizzled (Arcanist, Aerbax Haven, 2026-10-18 06:18:57–06:19:03Z). 0 is VTank's rule only.
  */
-export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true } as const;
+export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true, BuffMinLandChance: 75 } as const;
 
 /** A beyond-VTank macro setting from a profile's settings (any case), else its default. */
 export function beyondSetting<K extends keyof typeof BEYOND_MACRO_DEFAULTS>(settings: Record<string, string | number | boolean>, name: K): (typeof BEYOND_MACRO_DEFAULTS)[K] {

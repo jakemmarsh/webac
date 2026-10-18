@@ -150,7 +150,7 @@ describe('"hit by, but not placed" says what the server is doing', () => {
     host.me.cell = 0x01e3024b;
     api.pushChat('Drudge Slave nicks your chest for 1 point of piercing damage!', 0x15);
     const text = formatObservation(api.observe());
-    expect(text).toMatch(/hit by, but not placed: Drudge Slave \(1× in 10 s\) \(none of that name in sight within reach: a monster in a cell yours can't see is not shown to you, yet its melee reaches through a wall or shut door \(the server checks distance only\)/);
+    expect(text).toMatch(/hit by a Drudge Slave you can't see \(1× in 10 s\): none of that name is in sight within reach of you, and your client knows of none in the rooms out of your sight\. Its melee reaches through a wall or shut door \(the server checks distance only\)/);
     vi.useRealTimers();
   });
 });

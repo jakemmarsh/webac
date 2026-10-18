@@ -404,6 +404,8 @@ export class EnvCellRenderer {
 
     const group = this.buildCellGeometry(cellStruct, envCell.surfaces);
     group.name = `envcell_${cellId.toString(16).padStart(8, '0')}`;
+    // BUG.bunker-camera-in-head — interior geometry for the camera sweep (DungeonCollision.setMeshes).
+    group.userData.envCellId = cellId >>> 0;
 
     // Position cell using its Frame + landblock world offset
     const worldOffsetX = landblockX(cellId) * 192;

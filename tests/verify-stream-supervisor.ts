@@ -523,6 +523,27 @@ describe('stream supervisor (fake players, daemons and clock)', () => {
     } finally { idle.cleanup(); walking.cleanup(); }
   });
 
+  it('a routine running and acting counts as running: Arcanist\'s routine bolting through the segment was never "nothing of yours" (2026-10-18)', async () => {
+    const seg = { ...CAST.segment, minutes: 8, restartPauseSeconds: 0 };
+    const play = (_p: string, text: string, p: FakeProc) => {
+      if (/Segment 1/.test(text)) p.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: './ac wait types=fellow-low timeout_s=90' } }] } });
+      if (/Wrap up now/.test(text)) p.emit(result('report'));
+    };
+    const vit = (routine: { profile: string; paused: boolean; actedAgoMs: number | null }) => () => ({ name: 'X', level: 5, health: { cur: 1, max: 1 }, stamina: { cur: 1, max: 1 }, mana: { cur: 1, max: 1 }, xp: null, coords: null, cell: '0x029F01B1', indoors: true, dead: false, combatMode: 'magic' as const, task: null, goal: null, routine });
+    const bolting = harness({ maxSegments: 1, characters: [CAST.characters[0]], segment: seg }, play, { vitals: vit({ profile: 'mage-hunt', paused: false, actedAgoMs: 3000 }) });
+    const idleRoutine = harness({ maxSegments: 1, characters: [CAST.characters[0]], segment: seg }, play, { vitals: vit({ profile: 'mage-hunt', paused: false, actedAgoMs: 400_000 }) });
+    const paused = harness({ maxSegments: 1, characters: [CAST.characters[0]], segment: seg }, play, { vitals: vit({ profile: 'mage-hunt', paused: true, actedAgoMs: 3000 }) });
+    try {
+      await new StreamSupervisor(bolting.cfg, bolting.deps).run();
+      expect(bolting.procs[0].p.sent.some((t) => /Nothing has been said or done/.test(t))).toBe(false);
+      // A routine loaded but standing idle for minutes, or paused, is not running anything.
+      await new StreamSupervisor(idleRoutine.cfg, idleRoutine.deps).run();
+      expect(idleRoutine.procs[0].p.sent.some((t) => /Nothing has been said or done/.test(t))).toBe(true);
+      await new StreamSupervisor(paused.cfg, paused.deps).run();
+      expect(paused.procs[0].p.sent.some((t) => /Nothing has been said or done/.test(t))).toBe(true);
+    } finally { bolting.cleanup(); idleRoutine.cleanup(); paused.cleanup(); }
+  });
+
   it('narration and acting calls count as activity: a player who talks every minute is never asked', async () => {
     const seg = { ...CAST.segment, minutes: 8, restartPauseSeconds: 0 };
     const h = harness({ maxSegments: 1, characters: [CAST.characters[0]], segment: seg }, (_p, text, p) => {

@@ -341,7 +341,9 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2)', () => {
     }, 120_000);
     const dats = (): { portal: ReturnType<typeof openDat>; cell: ReturnType<typeof openDat> } => ({ portal: openDat(DAT_PATHS.portal), cell: openDat(DAT_PATHS.cell) });
 
-    it('walk_to 0x01D202B3 from the fountain: ends at once naming the leap (was 70 s of searches and six stalls, "walls all round")', async () => {
+    it('walk_to 0x01D202B3 from the fountain: across the 7.1 m leap (was 70 s of searches and six stalls, "walls all round"; then "no take-off", the take-off search\'s grid: 2026-10-18)', async () => {
+      // His unbuffed jump makes the leap once the take-off search is laid again from a step aside (AgentApi.LEAP_REGRID),
+      // as his walks to 0x01D202B3 jumped it live on 2026-10-18 03:20:59Z (verify-stream-reports-2026-10-18-0343.ts).
       vi.useFakeTimers();
       vi.spyOn(console, 'log').mockImplementation(() => {});
       try {
@@ -350,11 +352,10 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2)', () => {
         host.me.health = { current: 175, max: 175 };
         try {
           const r = await host.walkTarget(C(0x2a2), { x: 86, y: -46.1, z: 0 }, '0x01D202B3', { maxMs: 120_000 });
-          expect(r.ok).toBe(false);
-          // The goal room is 6 m up: said as another floor (2026-10-17 0815Z), not "walls all round".
-          expect(r.message).toMatch(/^stuck [\d.]+ m short \(it is 6 m above you, on another floor, and no way up to that floor was found from here.*; the only doorway route there leaps a 7\.1 m gap over open air \(landing \d+ m [NSEW]+ of you\), and no take-off your jump lands it from was found/);
-          expect(host.traces.some((l) => /walk stall/.test(l))).toBe(false);
-          expect(host.t).toBeLessThan(15_000);
+          expect(r.ok, `${r.message}\n${host.traces.slice(-20).join('\n')}`).toBe(true);
+          expect(host.me.cell).toBe(C(0x2b3));
+          expect(host.traces.some((l) => /walk leg jumps a 7\.1 m gap/.test(l))).toBe(true);
+          expect(host.traces.some((l) => /walls all round|remembering the 7\.1 m leap/.test(l))).toBe(false);
         } finally { host.dispose(); }
       } finally { vi.useRealTimers(); vi.restoreAllMocks(); }
     }, 240_000);

@@ -35,7 +35,7 @@ export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
   | 'chargen_sent' | 'chargen_blocked'
   | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed'
-  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover';
+  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover' | 'boot_done';
 
 /**
  * A draining bridge's session moving to the new deployment (session/DrainHandover.ts): why
@@ -145,6 +145,9 @@ export type ChargenStepName = typeof CHARGEN_STEP_NAMES[number];
  *  - patch_check: the cache interrogation (HEAD requests; the ranged splash wait).
  *  - patch_download: the streamed set's boot (pointer, boot/local/skeleton packs, pre-world art)
  *    and every whole-DAT load (portal, world portal, cell, language, highres).
+ *  - world_cache: a warm profile's streamed set loading its world + terrain packs and the UI
+ *    art from the object cache before open() resolves (StreamingDats onWorldCache), once no
+ *    set is still downloading (streamedBootStage). The patch meter already reads 100 here.
  *  - side_tables: the weenie side-table JSON fetches.
  *  - dat_parse: the DAT tables (MasterProperty, StringTables, SpellTable, …).
  *  - renderer_init: the scene, WebGL renderer and keymaps.
@@ -153,10 +156,69 @@ export type ChargenStepName = typeof CHARGEN_STEP_NAMES[number];
  *  - ui_init: building the game UI, up to the launcher.
  */
 export const BOOT_STAGES = [
-  'capability', 'capability_prompt', 'era', 'patch_check', 'patch_download', 'side_tables', 'dat_parse',
+  'capability', 'capability_prompt', 'era', 'patch_check', 'patch_download', 'world_cache', 'side_tables', 'dat_parse',
   'renderer_init', 'world_init', 'bridge_probe', 'ui_init',
 ] as const;
 export type BootStage = typeof BOOT_STAGES[number];
+
+/** Where one streamed set's boot (main.ts bootStreamedDats) is. */
+export type StreamBootPhase = 'download' | 'world_cache' | 'done';
+
+/**
+ * The boot stage while streamed sets boot (an era's world set boots beside
+ * its interface set): patch_download while any set still downloads, then
+ * world_cache while any set loads its world from the object cache, and
+ * patch_download again once every set is in (whole DATs may still follow).
+ */
+export function streamedBootStage(phases: Iterable<StreamBootPhase>): 'patch_download' | 'world_cache' {
+  let cacheWait = false;
+  for (const p of phases) {
+    if (p === 'download') return 'patch_download';
+    if (p === 'world_cache') cacheWait = true;
+  }
+  return cacheWait ? 'world_cache' : 'patch_download';
+}
+
+/** The streamed set scopes (StreamingDats StreamScope). */
+export const BOOT_STREAM_SCOPES = ['all', 'interface', 'world'] as const;
+/** Bounds on a set's boot report: 16 GiB, 10 M objects, one day. */
+export const BOOT_STREAM_MAX_BYTES = 16 * 1024 * 1024 * 1024;
+export const BOOT_STREAM_MAX_OBJECTS = 10_000_000;
+export const BOOT_STREAM_MAX_MS = 24 * 3600_000;
+
+/**
+ * One streamed set's open (StreamingDats.bootReport): how long open() took
+ * (ms), how much of it was the warm-cache world wait (worldCacheMs, 0 when
+ * the world was not cached), and what came from the object cache vs the network.
+ */
+export interface BootStreamReport {
+  scope: typeof BOOT_STREAM_SCOPES[number];
+  ms: number;
+  worldCacheMs: number;
+  worldCached: boolean;
+  netBytes: number;
+  cacheBytes: number;
+  cacheObjects: number;
+}
+
+function boundInt(v: unknown, max: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(max, Math.round(v))) : 0;
+}
+
+/** A set's bootReport as the wire's BootStreamReport (null for an unknown scope). */
+export function boundBootStreamReport(scope: string, r: { ms?: unknown; worldCacheMs?: unknown; worldCached?: unknown; netBytes?: unknown; cacheBytes?: unknown; cacheObjects?: unknown }): BootStreamReport | null {
+  const sc = BOOT_STREAM_SCOPES.find((s) => s === scope);
+  if (!sc) return null;
+  return {
+    scope: sc,
+    ms: boundInt(r.ms, BOOT_STREAM_MAX_MS),
+    worldCacheMs: boundInt(r.worldCacheMs, BOOT_STREAM_MAX_MS),
+    worldCached: r.worldCached === true,
+    netBytes: boundInt(r.netBytes, BOOT_STREAM_MAX_BYTES),
+    cacheBytes: boundInt(r.cacheBytes, BOOT_STREAM_MAX_BYTES),
+    cacheObjects: boundInt(r.cacheObjects, BOOT_STREAM_MAX_OBJECTS),
+  };
+}
 
 /**
  * The browser DAT cache's verdict for this boot: warm (nothing came over the
@@ -233,6 +295,12 @@ export interface PreworldEvent {
    * (@ac/network boundNetDiagnostics). Absent otherwise.
    */
   net?: NonNullable<ReturnType<typeof boundNetDiagnostics>>;
+  /**
+   * Each streamed set's open (BootStreamReport), once it resolved: on events
+   * sent from the boot screen, on boot_done and on the page's first char_list.
+   * Absent otherwise.
+   */
+  stream?: BootStreamReport[];
   /** 'handover' only: from the handover's start (or the drop) to back in the world, why and how. */
   handoverMs?: number;
   reason?: HandoverReason;
@@ -390,6 +458,9 @@ export class PreworldReporter {
   private cache: BootCacheState | null = null;
   private caps: CapabilityIssue[] = [];
   private bootSlowSent = false;
+  private bootDoneSent = false;
+  private streamReportedOnCharList = false;
+  private readonly streams = new Map<string, BootStreamReport>();
   private handoversSent = 0;
 
   constructor(private readonly opts: PreworldReporterOptions) {
@@ -449,7 +520,9 @@ export class PreworldReporter {
   /** The server's character list arrived: the login is accepted. */
   characterList(count: number): void {
     this.charListSeen = true;
-    this.report('char_list', { count: Math.max(0, Math.min(1000, Math.trunc(count))) });
+    const withStream = !this.streamReportedOnCharList && this.streams.size > 0;
+    if (withStream) this.streamReportedOnCharList = true;
+    this.report('char_list', { count: Math.max(0, Math.min(1000, Math.trunc(count))) }, withStream);
   }
 
   /** A CharacterGenerationVerificationResponse: Ok, or the refusal code with its string-table token (ID_Character_Err_*). */
@@ -629,6 +702,16 @@ export class PreworldReporter {
     if ((BOOT_STAGES as readonly string[]).includes(stage)) this.stage = stage;
   }
 
+  /**
+   * A streamed set's open() resolved: its bootReport (bounded; a later report
+   * for the same scope replaces the earlier). Rides on boot-screen events,
+   * boot_done and the page's first char_list.
+   */
+  bootStream(scope: string, report: Parameters<typeof boundBootStreamReport>[1]): void {
+    const r = boundBootStreamReport(scope, report);
+    if (r) this.streams.set(r.scope, r);
+  }
+
   /** The capability probe's problem ids (closed list; anything else is dropped). */
   capabilityIssues(ids: readonly string[]): void {
     this.caps = CAPABILITY_ISSUES.filter((id) => ids.includes(id));
@@ -682,11 +765,21 @@ export class PreworldReporter {
   /**
    * The 1 s tick: re-sample the screen, and once the page has sat on 'boot'
    * BOOT_SLOW_MS send one boot_slow (so a visitor who waits it out is heard too).
+   * A boot that was slow sends one boot_done when it leaves 'boot' (its pageMs
+   * is the whole boot, with each streamed set's report).
    */
   tick(): void {
     this.outbox.retry();
     const { screen } = this.sample();
-    if (this.bootSlowSent || this.left || screen !== 'boot') return;
+    if (this.left) return;
+    if (screen !== 'boot') {
+      if (this.bootSlowSent && !this.bootDoneSent) {
+        this.bootDoneSent = true;
+        this.report('boot_done', {}, true);
+      }
+      return;
+    }
+    if (this.bootSlowSent) return;
     if (this.now() - this.startedAt < BOOT_SLOW_MS) return;
     this.bootSlowSent = true;
     this.report('boot_slow', {});
@@ -774,7 +867,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'handoverMs' | 'reason' | 'path'>>): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'handoverMs' | 'reason' | 'path'>>, withStream = false): void {
     if (!this.opts.endpoint) return;
     if (outcome === 'handover' ? this.handoversSent >= MAX_HANDOVER_EVENTS : this.sent >= MAX_PREWORLD_EVENTS) return;
     const { screen, step } = this.sample();
@@ -801,6 +894,7 @@ export class PreworldReporter {
       sinceEnterMs: f.sinceEnterMs ?? null,
       ...(screen === 'boot' ? this.bootSnapshot()
         : { stage: null, progress: null, doneKB: null, totalKB: null, cache: null, caps: null }),
+      ...((withStream || screen === 'boot') && this.streams.size > 0 ? { stream: [...this.streams.values()].map((r) => ({ ...r })) } : {}),
       ...(f.net ? { net: f.net } : {}),
       ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path } : {}),
     };

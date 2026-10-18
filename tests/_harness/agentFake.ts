@@ -100,6 +100,8 @@ export class FakeHost implements AgentHost {
   cast = (id: number, t: number | null) => { this.sent.push(`cast ${id} ${t === null ? 'self' : t.toString(16)}`); return true; };
   chat = (text: string) => { this.chats.push(text); };
   setYaw = (y: number) => { this.me.yaw = y; };
+  /** The agent's own position report to the server (AgentHost.reportPosition); unset = the host can't. */
+  reportPosition: AgentHost['reportPosition'] = undefined;
   pickUp = (g: number) => { this.sent.push(`pickup ${g.toString(16)}`); return true; };
   drop = (_g: number) => true;
   /** Wall-clock ms for remembered places; unset = Date.now(). */

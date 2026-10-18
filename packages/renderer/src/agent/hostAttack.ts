@@ -28,6 +28,12 @@ export interface HostAttackDeps {
   requestPending(): boolean;
   now(): number;
   schedule(fn: () => void, ms: number): void;
+  /**
+   * Whether `guid` can still be swung at (there, not dying, attackable): the stance switch's delayed swing checks it, for
+   * a target that died meanwhile drew the client's "You must select a valid combat target before attacking" (Bulwark,
+   * 2026-10-18 04:26Z). Unset: always.
+   */
+  canSwing?(guid: number): boolean;
 }
 
 export function createHostAttack(d: HostAttackDeps): {
@@ -42,7 +48,7 @@ export function createHostAttack(d: HostAttackDeps): {
       if (!plan.sendAttack) return;
       d.changeCombatMode(plan.mode);
       enteringUntil = d.now() + AUTO_ENTER_DELAY_MS + AUTO_ENTER_GRACE_MS;
-      d.schedule(() => d.swing(guid, power, height), AUTO_ENTER_DELAY_MS);
+      d.schedule(() => { if (!d.canSwing || d.canSwing(guid)) d.swing(guid, power, height); else enteringUntil = 0; }, AUTO_ENTER_DELAY_MS);
     },
     pending: () => d.now() < enteringUntil || d.requestPending(),
   };

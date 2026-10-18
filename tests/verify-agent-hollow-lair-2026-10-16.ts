@@ -97,10 +97,13 @@ describe('Hollow Lair movement reports (fake host)', () => {
   });
 
   describe('3. arrival along the stretch run since the last tick', () => {
-    it('"20m east" with 8 m between ticks: arrives as it runs past (was a 30 s hop either side of it, then "in circles")', async () => {
+    it('"20m east" with 8 m between ticks: arrives (was a 30 s hop either side of it, then "in circles")', async () => {
       const r = await settle(api, host, api.walkTo('20m east'), 120_000, { tick: 2000 });
       expect(r, traces.join('\n')).toMatchObject({ ok: true });
-      expect(r!.message).toMatch(/^arrived \(4\.0 m from [^,)]+, run past it a little/);
+      // Since 2026-10-18 the last metres go at a walk when a run's stride would overshoot (strideSlow), so it stops
+      // within reach instead of "arrived (4.0 m …, run past it a little)".
+      expect(r!.message).toMatch(/^arrived \([0-2]\.\d m from /);
+      expect(r!.message).not.toMatch(/run past it/);
       expect(traces.some((l) => /stall/.test(l))).toBe(false);
       expect(host.keys.has('KeyW')).toBe(false);
     });

@@ -123,7 +123,10 @@ describe.skipIf(!haveDat)('the Holtburg drudge statue\'s tunnel (A9B4 0x177 ramp
     const base = (await buildA9b4World({ interiors: true }))({ slidingNormal: null });
     dc = base.outdoorCollision as DungeonCollision;
     // main.ts's services.groundAt (outdoorGroundSources, with the cell rule).
-    services = { ...base, groundAt: (x, z, fromY) => outdoorGroundY(sources(false), x, z, fromY) };
+    services = {
+      ...base, groundAt: (x, z, fromY) => outdoorGroundY(sources(false), x, z, fromY),
+      landReachable: (x, z, feet) => dc.reachesLandCells(x, z, feet),
+    };
     const cellDb = openDat(DAT_PATHS.cell);
     seenOutside = (id) => (new EnvCell(new DatReader(cellDb.getFileData(id)!)).flags & 1) !== 0;
   }, 120_000);
@@ -133,9 +136,12 @@ describe.skipIf(!haveDat)('the Holtburg drudge statue\'s tunnel (A9B4 0x177 ramp
     return {
       terrainHeight: (a, b) => services.terrain.getHeightAt(a, b),
       floorHeight: body
-        ? (a, b, y) => dc.getBodyFloorHeight(a, b, y, services.stepDownHeight)
-        : (a, b, y) => dc.getFloorHeight(a, b, y),
-      ...(terrainRuleOnly ? {} : { cellAt: (a: number, b: number, f: number) => dc.findCellContaining(a, b, f + dc.lowerSphereHeight) }),
+        ? (a, b, y, drop, feet) => dc.getBodyFloorHeight(a, b, y, services.stepDownHeight, drop, feet)
+        : (a, b, y, drop, feet) => dc.getFloorHeight(a, b, y, drop, feet),
+      ...(terrainRuleOnly ? {} : {
+        cellAt: (a: number, b: number, f: number) => dc.findCellContaining(a, b, f + dc.lowerSphereHeight),
+        landReachable: (a: number, b: number, f: number) => dc.reachesLandCells(a, b, f),
+      }),
     };
   }
 
@@ -147,7 +153,9 @@ describe.skipIf(!haveDat)('the Holtburg drudge statue\'s tunnel (A9B4 0x177 ramp
     let minFloor = f0;
     services.slide!.slidingNormal = null;
     const src = sources(terrainRuleOnly, true);
-    const svc = terrainRuleOnly ? { ...services, groundAt: (a: number, b: number, y: number) => outdoorGroundY(sources(true), a, b, y) } : services;
+    const svc = terrainRuleOnly
+      ? { ...services, groundAt: (a: number, b: number, y: number) => outdoorGroundY(sources(true), a, b, y), landReachable: undefined }
+      : services;
     for (let i = 0; i < n; i++) {
       const r = stepPlayerMovement({ x, z, floorY, inDungeon: false, airborne: false, jumpVelocityX: 0, jumpVelocityZ: 0 }, dx, 0, 1 / 30, svc);
       const g = traceGroundAlongPath((a, b, y) => outdoorGroundY(src, a, b, y), x, z, r.x, r.z,

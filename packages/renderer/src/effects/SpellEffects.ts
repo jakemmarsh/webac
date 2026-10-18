@@ -77,6 +77,8 @@ export class SpellEffects {
       // World-frame emitters (ParticleEmitter::SetParenting) simulate their
       // particles in world coordinates against the live parent frame; the
       // system's node itself stays at the scene origin.
+      // BUG.bunker-terrain-over-stairs — the indoor view sorts it by its parent's position.
+      obj.userData.indoorAnchor = (out: THREE.Vector3) => system.anchorWorldPosition(out);
       this.scene.add(obj);
     } else {
       obj.position.set(position.x, position.y, position.z);

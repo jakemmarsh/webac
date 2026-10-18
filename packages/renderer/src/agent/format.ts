@@ -14,6 +14,23 @@ export function compassPoint(bearing: number): string {
   return COMPASS[Math.round(b / 45) % 8];
 }
 
+/**
+ * An attacker your client hasn't placed where it could reach you, said plainly (observe and the attackers-up event).
+ * ACE: a monster's melee lands on distance alone (Monster_Navigation.IsMeleeInRange: CylinderDistance <= MaxMeleeRange
+ * 0.75 m, no line-of-sight test), so it swings through a wall or shut door; its war bolts need a clear line from it to
+ * you when it picks the spell (Monster_Combat.GetMaxRange → IsDirectVisible, else it rerolls or falls back to melee),
+ * and fly as objects that walls stop (SpellProjectile.OnCollideEnvironment). Your client shows only creatures in the
+ * cells yours can see (the cell's VisibleCells), so a bolt that reaches you came through an opening into a room your
+ * client doesn't show, or from the creature at your body.
+ */
+export function unplacedText(u: { name: string; count: number; unseen?: { dist: number; bearing: number; dz: number } }): string {
+  const art = /^the /i.test(u.name) ? '' : /^[aeiou]/i.test(u.name) ? 'an ' : 'a ';
+  const where = u.unseen
+    ? `it's in a room out of your sight, ${u.unseen.dist.toFixed(0)} m ${compassPoint(u.unseen.bearing)}${Math.abs(u.unseen.dz) >= 2 ? `, ${Math.abs(u.unseen.dz).toFixed(0)} m ${u.unseen.dz > 0 ? 'up' : 'down'}` : ''} by the server's last placement`
+    : `none of that name is in sight within reach of you, and your client knows of none in the rooms out of your sight`;
+  return `${art}${u.name} you can't see (${u.count}× in 10 s): ${where}. Its melee reaches through a wall or shut door (the server checks distance only); its bolts need a clear line from it, so they come through an opening into its room. Step away from the wall, or go into its room to fight it`;
+}
+
 /** Relative bearing → "ahead" / "ahead-left" / "left" / "behind-right" / … */
 export function relativeDirection(rel: number): string {
   const a = Math.abs(rel);
@@ -94,13 +111,35 @@ export function buffTimeText(s: number): string {
   return s < 0 ? 'permanent' : s >= 60 ? `${Math.floor(s / 60)}m${Math.floor(s % 60) ? `${Math.floor(s % 60)}s` : ''}` : `${Math.max(0, Math.floor(s))}s`;
 }
 
-/** "buffs (3): Strength Other II 2m10s, …" soonest to expire first, or "buffs: none (ac_spells / ac_cast to buff yourself or others)". */
-export function formatBuffs(buffs: ReadonlyArray<{ name: string; remaining: number; until?: string }>): string {
+/** A buff that landed on you (new, or refreshed) this recently (s) is listed first, newest first, said "just landed". */
+export const BUFF_NEW_S = 120;
+/** The buffs listed with their time left; the rest are named after "+N more" while the names fit in this many characters. */
+const BUFFS_SHOWN = 16;
+const BUFF_MORE_NAMES_CHARS = 400;
+
+/**
+ * "buffs (3): Strength Other II 2m10s, …": any that landed in the last BUFF_NEW_S first (newest first), then the rest
+ * soonest to expire first; past BUFFS_SHOWN the others by name ("+6 more: Armor Other V, …"). Or "buffs: none (…)".
+ * Lightning Protection Other III, cast on Bulwark at 07:4xZ, was 15 minutes from its end and so folded into "+6 more"
+ * (a count alone), and he couldn't tell it had landed (Aerbax Haven, 2026-10-18).
+ */
+export function formatBuffs(buffs: ReadonlyArray<{ name: string; remaining: number; until?: string; landedAgoS?: number }>): string {
   if (!buffs.length) return 'buffs: none (ac_spells finds buffs you know; ac_cast casts them on yourself or another player)';
   const left = buffTimeText;
-  const sorted = [...buffs].sort((a, b) => (a.remaining < 0 ? Infinity : a.remaining) - (b.remaining < 0 ? Infinity : b.remaining));
-  const shown = sorted.slice(0, 16).map((b) => `${b.name} ${b.until ?? left(b.remaining)}`);
-  return `buffs (${buffs.length}): ${shown.join(', ')}${buffs.length > shown.length ? `, +${buffs.length - shown.length} more` : ''}`;
+  const isNew = (b: { landedAgoS?: number }): boolean => b.landedAgoS !== undefined && b.landedAgoS <= BUFF_NEW_S;
+  const fresh = buffs.filter(isNew).sort((a, b) => a.landedAgoS! - b.landedAgoS!);
+  const rest = buffs.filter((b) => !isNew(b)).sort((a, b) => (a.remaining < 0 ? Infinity : a.remaining) - (b.remaining < 0 ? Infinity : b.remaining));
+  const sorted = [...fresh, ...rest];
+  const shown = sorted.slice(0, Math.max(BUFFS_SHOWN, fresh.length)).map((b) => `${b.name} ${b.until ?? left(b.remaining)}${isNew(b) ? ` (just landed, ${left(b.landedAgoS!)} ago)` : ''}`);
+  const hidden = sorted.slice(shown.length).map((b) => b.name);
+  let more = '';
+  if (hidden.length) {
+    const names: string[] = [];
+    let len = 0;
+    for (const n of hidden) { if (len + n.length + 2 > BUFF_MORE_NAMES_CHARS) break; names.push(n); len += n.length + 2; }
+    more = `, +${hidden.length} more${names.length ? `: ${names.join(', ')}${names.length < hidden.length ? ` and ${hidden.length - names.length} others` : ''}` : ''}`;
+  }
+  return `buffs (${buffs.length}): ${shown.join(', ')}${more}`;
 }
 
 export function formatObservation(obs: AgentObservation): string {
@@ -128,6 +167,7 @@ export function formatObservation(obs: AgentObservation): string {
   out.push(formatBuffs((obs.buffs ?? []).filter((b) => b.beneficial !== false)));
   const bad = (obs.buffs ?? []).filter((b) => b.beneficial === false);
   if (bad.length) out.push(formatBuffs(bad).replace(/^buffs/, 'debuffs'));
+  if (obs.vitalsLowered) out.push(`  ${obs.vitalsLowered}`);
   const low = (obs.buffs ?? []).filter((b) => b.beneficial !== false && b.remaining >= 0 && b.remaining <= BUFF_LOW_S).sort((a, b) => a.remaining - b.remaining);
   if (low.length) out.push(`  BUFFS RUNNING LOW (${BUFF_LOW_S / 60} min or less left): ${low.map((b) => `${b.name} ${buffTimeText(b.remaining)}`).join(', ')}: recast before they end (ac_wait types=buff-expired wakes when one does)`);
   if (obs.gearSpells?.length) {
@@ -140,15 +180,18 @@ export function formatObservation(obs: AgentObservation): string {
   if (obs.fellowshipAlone) out.push('fellowship: only you are in it, so /f reaches no one (a fellow who logs out leaves it): recruit your partner (in sight), or quit it (ac_fellowship action=quit) if they lead one');
   if (obs.fellows?.length) out.push(`fellows: ${obs.fellows.map((f) => `${f.name} ${f.healthPct}% HP, ${f.dist !== undefined && f.bearing !== undefined ? `${Math.round(f.dist)} m ${compassPoint(f.bearing)}${f.dz !== undefined ? `, ${f.dz > 0 ? 'up' : 'down'} ${Math.abs(f.dz).toFixed(0)} m` : ''}${f.coords ? `, at ${f.coords}` : ''}${f.threats ? `, MONSTERS AT THEM: ${f.threats}` : ''}${f.stuckThreats ? `, AIMED AT THEM BUT NOT REACHING THEM: ${f.stuckThreats}` : ''}` : f.lastSeen ? `out of sight, last seen ${f.lastSeen} (walk_to ${f.name} goes there; they may have moved on)` : 'out of sight (far away: go to them, or ask where they are)'}`).join('; ')}`);
   if (obs.gearManaOut?.length) {
-    out.push(`gear out of mana (its spells are off): ${obs.gearManaOut.map((m) => `${m.name} #${m.guid.toString(16)}${m.mana ? ` (mana ${m.mana.cur}/${m.mana.max})` : ''}`).join(', ')}: ac_use_on a charged mana stone on an empty one, then ac_unequip and ac_equip it (the server turns its spells back on only on a wield with mana in it)`);
+    out.push(`gear out of mana (its spells are off): ${obs.gearManaOut.map((m) => `${m.name} #${m.guid.toString(16)}${m.mana ? ` (mana ${m.mana.cur}/${m.mana.max})` : ''}`).join(', ')}: ac_use_on a charged mana stone on an empty one, then ac_unequip and ac_equip it (the server turns its spells back on only on a wield with mana in it)${obs.manaStones ? `; ${obs.manaStones}` : ''}`);
   }
+  if (obs.routineSupplies) out.push(`routine supplies: ${obs.routineSupplies}`);
   if (obs.gearEmpty?.slots.length) out.push(`gear: ${emptySlotsText(obs.gearEmpty.slots)}${obs.gearEmpty.packFits.length ? `; in your pack that would cover one: ${obs.gearEmpty.packFits.slice(0, 4).join(', ')}` : ''} (ac_inventory / ac_gear show every gear slot)`);
   if (obs.casterGap) out.push(`gear: ${obs.casterGap}`);
   if (obs.windows?.length) out.push(`windows open: ${obs.windows.join(', ')}  (ac_close name=… or all, when done with them)`);
   out.push(`target: ${obs.target ? formatObject(obs.target) : obs.targetLeftBehind ? `none (your last target, ${obs.targetLeftBehind}, was left behind in another place: you went through a portal or far away since; pick a new one)` : 'none'}`);
   const attackers = obs.nearby.filter((o) => o.attackingYou && o.guid !== obs.target?.guid);
   if (attackers.length) out.push(`under attack by: ${attackers.map((o) => `${o.name} #${o.guid.toString(16)} ${o.dist.toFixed(1)}m (${o.attackingYou}× in 10 s)`).join(', ')}${obs.target ? ' (not your target)' : ''}`);
-  if (obs.attackersUnplaced?.length) out.push(`hit by, but not placed: ${obs.attackersUnplaced.map((u) => `${u.name} (${u.count}× in 10 s)`).join(', ')} (none of that name in sight within reach: a monster in a cell yours can't see is not shown to you, yet its melee reaches through a wall or shut door (the server checks distance only); step away from the wall, or into its room)`);
+  // Said plainly, with where the server last placed it (unplacedText): "hit by, but not placed: Dark Marionette"
+  // left Arcanist guessing what hit him through the walls of 0x029E0112 (2026-10-18 06:14Z).
+  for (const u of obs.attackersUnplaced ?? []) out.push(`hit by ${unplacedText(u)}`);
   out.push(`nearby (${obs.nearby.length}${obs.nearbyTotal > obs.nearby.length ? ` of ${obs.nearbyTotal}` : ''}, nearest first):`);
   for (const o of obs.nearby) out.push(`  ${formatObject(o)}`);
   if (obs.unseen?.length) {
@@ -231,8 +274,22 @@ export function itemMarks(it: AgentItem): string {
   return [
     it.attuned ? "attuned: can't be dropped, given or traded" : '',
     it.bonded ? 'bonded: kept when you die' : '',
-    it.mana ? `mana ${it.mana.cur.toLocaleString('en-US')}/${it.mana.max.toLocaleString('en-US')}${it.mana.cur <= 0 && it.where === 'equipped' ? ' OUT: its spells are off' : ''}` : '',
+    it.manaStone ? manaStoneText(it.manaStone) : it.mana ? `mana ${it.mana.cur.toLocaleString('en-US')}/${it.mana.max.toLocaleString('en-US')}${it.mana.cur <= 0 && it.where === 'equipped' ? ' OUT: its spells are off' : ''}` : '',
   ].filter(Boolean).join(', ');
+}
+
+/** How a stone charges: ACE ManaStone.HandleActionUseOnTarget, an empty stone used on an item. */
+export const MANA_STONE_CHARGING = 'charge it by using it on an item you don\'t need that holds mana (ac_use_on the stone with target= that item): it drains the item and the item is DESTROYED; a retained item refuses';
+
+/**
+ * A mana stone's charge as the inventory and gear show it: "charged: 4,496 mana (ac_use_on it with target=self fills
+ * your worn items)", or "EMPTY: …" with how to charge one (ACE ManaStone: an empty stone used on an item with mana
+ * drains Efficiency × that mana into itself and destroys the item; used on an empty item it answers "That item doesn't
+ * have enough Mana").
+ */
+export function manaStoneText(st: NonNullable<AgentItem['manaStone']>): string {
+  if (!st.charged) return `EMPTY mana stone: holds no mana, so it fills nothing; ${MANA_STONE_CHARGING}${st.efficiency !== undefined ? ` (it keeps ${Math.round(st.efficiency * 100)}% of the item's mana)` : ''}`;
+  return `charged: ${st.mana !== undefined ? `${st.mana.toLocaleString('en-US')} mana` : 'holds mana (appraise it for how much)'}; ac_use_on it with target=self shares it among your worn items that need mana, or target= one item`;
 }
 
 /** Free item slots at or under which the packs read LOW (a loot warns first: AgentApi.PACK_SLOTS_LOW). */

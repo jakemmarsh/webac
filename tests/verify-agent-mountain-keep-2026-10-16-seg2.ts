@@ -196,7 +196,7 @@ describe('fake host', () => {
       mummy(host, 0x92bb, 80, 4, 0);
       const r = api.attack(MU(0x92bb));
       expect(r.ok).toBe(false);
-      expect(r.message).toMatch(/^Dread Mu-miyah #800092bb is 16 m S: running up to it leaves Claude Arcanist \(1 m from you now\) 16 m behind, so no attack was started\./);
+      expect(r.message).toMatch(/^Dread Mu-miyah #800092bb is 16 m S: running up to it leaves Claude Arcanist \(1 m from you now\) 16 m behind, so no attack was started \(the fellow leash: past 12 m a melee attack runs up only when every fellow beside you stays within 15 m of you there; far=true lifts it\)\./);
       expect(r.message).toMatch(/ac_attack target=#800092bb far=true to go anyway$/);
       expect(host.sent.filter((s) => s.startsWith('attack'))).toEqual([]);
     });

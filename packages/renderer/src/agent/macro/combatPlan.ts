@@ -48,6 +48,12 @@ export interface CombatMonster {
    * TargetLock pick), and a candidate out past Monster Range (the macro bounds it by ProtectFellowsDistance).
    */
   onFellow?: boolean;
+  /**
+   * Beyond VTank: its blows (hits, misses, evades) at you came in the last 10 s of combat lines (AgentApi.attackersOfMe).
+   * When the last target is gone, one hitting you is the next target after what is on a fellow (ProtectFellows) and
+   * before the selection the client's Auto Target made (TargetLock) or a nearer monster that isn't (candidates).
+   */
+  hittingYou?: boolean;
 }
 
 /**
@@ -94,6 +100,8 @@ export interface CombatInput {
   monsterFacts?: (name: string) => MonsterFacts | undefined;
   /** The monster the macro's last combat action went to (VTank's sticky last target). */
   lastTarget?: number | null;
+  /** The monster the player last attacked or cast at by hand (RoutineEngine.pickedTarget): with TargetLock, theirs first. */
+  pickedByHand?: number | null;
   /**
    * The Items tab's Hands column for a carried item: 2 two-handed (no offhand is wielded with it), 1 one-handed,
    * undefined Auto (the item's own slots say: a TwoHanded slot is two-handed).
@@ -441,6 +449,8 @@ interface Candidate {
   locked: boolean;
   /** The macro's last combat action went to it. */
   last: boolean;
+  /** TargetLock is on and it is selected because the player picked it by hand (not the client's Auto Target). */
+  handLocked: boolean;
   /** The weapon and offhand swaps fighting it needs (its row's weapon / offhand not in hand). */
   swaps: number;
 }
@@ -453,7 +463,9 @@ interface Candidate {
  * 3. With DebuffEachFirst Priority or All, one that needs a debuff.
  * 4. Higher urgency (already vulned to the attack element +1; already Imperiled, or Yielded when
  *    fighting with magic, +2): finish what's been started.
- * 5. With TargetLock, the selected monster.
+ * 5. With TargetLock, the selected monster the player picked by hand. Then, beyond VTank, when the last target is
+ *    gone (the next pick after a kill): one on a fellow (ProtectFellows), then one hitting you (hittingYou), before any
+ *    other selection (the client's Auto Target makes one after a kill). Mid-fight: the selection, then one on a fellow.
  * 6. With TargetSelectMethod Both and both within TargetSelectAngleRange: fewer weapon swaps.
  * 7. The monster the last combat action went to (sticky).
  * 8. TargetSelectMethod: 1 By Range (nearer, then smaller turn); 2 By Angle (smaller turn, then
@@ -475,7 +487,8 @@ function candidates(input: CombatInput, maxRange?: number): Candidate[] {
     const row = matchMonsterRow(input.rows, m, ctx);
     if (row.priority < 0) continue;
     const weapon = rowWeapon(input, row, m);
-    const c: Candidate = { m, row, needsDebuff: false, urgency: 0, locked: lock && m.guid === input.selectedGuid, last: input.lastTarget === m.guid, swaps: 0 };
+    const locked = lock && m.guid === input.selectedGuid;
+    const c: Candidate = { m, row, needsDebuff: false, urgency: 0, locked, handLocked: locked && input.pickedByHand === m.guid, last: input.lastTarget === m.guid, swaps: 0 };
     c.needsDebuff = nextDebuff(input, c, weapon) !== null;
     c.urgency = urgency(input, c, weapon);
     if (weapon && !isWielded(input, weapon, 'weapon')) c.swaps++;
@@ -485,11 +498,20 @@ function candidates(input: CombatInput, maxRange?: number): Candidate[] {
   }
   const turn = (c: Candidate) => Math.abs(c.m.relBearing);
   const first = (a: boolean, b: boolean): number => (a === b ? 0 : a ? -1 : 1);
+  // The last target gone (killed, or out of reach): what is hitting you is the next one (beyond VTank, hittingYou).
+  const nextPick = input.lastTarget == null || !input.monsters.some((m) => m.guid === input.lastTarget);
   list.sort((a, b) => {
     if (each === 3 && a.needsDebuff !== b.needsDebuff) return first(a.needsDebuff, b.needsDebuff);
     if (a.row.priority !== b.row.priority) return b.row.priority - a.row.priority;
     if ((each === 2 || each === 3) && a.needsDebuff !== b.needsDebuff) return first(a.needsDebuff, b.needsDebuff);
     if (a.urgency !== b.urgency) return b.urgency - a.urgency;
+    if (a.handLocked !== b.handLocked) return first(a.handLocked, b.handLocked);
+    if (nextPick) {
+      // The next target after a kill: a fellow's attacker (ProtectFellows), then one hitting you, then the selection
+      // the client's Auto Target made (it is no pick of the player's).
+      if (!!a.m.onFellow !== !!b.m.onFellow) return first(!!a.m.onFellow, !!b.m.onFellow);
+      if (!!a.m.hittingYou !== !!b.m.hittingYou) return first(!!a.m.hittingYou, !!b.m.hittingYou);
+    }
     if (a.locked !== b.locked) return first(a.locked, b.locked);
     if (!!a.m.onFellow !== !!b.m.onFellow) return first(!!a.m.onFellow, !!b.m.onFellow);
     if (a.m.dist < angleRange && b.m.dist < angleRange && a.swaps !== b.swaps) return a.swaps - b.swaps;

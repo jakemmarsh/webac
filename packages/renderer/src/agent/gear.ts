@@ -39,7 +39,7 @@ export const BODY_PARTS: readonly BodyPart[] = [
 ];
 
 /** Every EquipMask bit that dresses the body (HeadWear 0x1 … LowerLegArmor 0x4000). */
-const BODY_BITS = 0x7fff;
+export const BODY_BITS = 0x7fff;
 
 interface OtherSlot {
   name: string;

@@ -419,6 +419,26 @@ export interface RemotePhysicsEnv {
    * resident yet (outdoorGround.objectLandingZ).
    */
   landingZ?(cell: number, x: number, y: number, z: number, spheres: readonly { x: number; y: number; z: number; radius: number }[]): number | null;
+  /**
+   * The landscape's registered env cell (a building's room, the ramp under
+   * a statue) holding a body whose feet are at (x, y, z), 0 for none (it is
+   * on a land cell). Absent = no cells known: the cell changes only with
+   * the server's positions.
+   */
+  surfaceCellAt?(x: number, y: number, z: number, preferredCell: number): number;
+  /** Whether the landscape's collision holds env cell `cell` (surfaceCellAt can answer for a body in it). */
+  holdsSurfaceCell?(cell: number): boolean;
+  /** The walkable of the landscape's collision under (x, y) nearest feet height z, or null. */
+  surfaceFloorZ?(x: number, y: number, z: number): number | null;
+}
+
+/** The land cell (0xXXYY00NN, NN = 1 + 8·column + row) holding AC global (x, y). */
+export function landCellAt(x: number, y: number): number {
+  const bx = Math.min(0xff, Math.max(0, Math.floor(x / 192)));
+  const by = Math.min(0xff, Math.max(0, Math.floor(y / 192)));
+  const cx = Math.min(7, Math.max(0, Math.floor((x - bx * 192) / 24)));
+  const cy = Math.min(7, Math.max(0, Math.floor((y - by * 192) / 24)));
+  return ((bx << 24) | (by << 16) | (cx * 8 + cy + 1)) >>> 0;
 }
 
 /** One of the object's physics spheres (Setup `Spheres`, object-local, unscaled). */
@@ -791,14 +811,37 @@ export class RemotePhysicsObject implements PositionHost {
         quantumMoved.yaw = wrapAngle(yawOf(frame.orientation) - byaw);
       }
     }
-    const outdoor = isOutdoorCell(this.cell);
+    let outdoor = isOutdoorCell(this.cell);
     if (this.contact) {
-      // Ground contact: follow the terrain under a self-moved object (a
+      // Ground contact: follow the ground under a self-moved object (a
       // server target is already at the height the server gave).
-      if (!interpolated && !stuck && outdoor) {
-        const h0 = env.terrainHeight(oldX, oldY);
-        const h1 = env.terrainHeight(frame.origin.x, frame.origin.y);
-        if (h0 !== null && h1 !== null) frame.origin.z += h1 - h0;
+      if (!interpolated && !stuck) {
+        // The transition finds the body's cell from where it moved to
+        // (CTransition::check_other_cells / find_cell_list): a creature
+        // walking on its own MoveTo into the ramp under a statue is in the
+        // ramp's env cell, where the land cell's terrain is not tested
+        // (CEnvCell::find_transit_cells @ 0052c820; CLandCell::
+        // find_env_collisions @ 00532f20), and follows the cell's floor.
+        // Only a land cell or one of the landscape's own env cells is
+        // re-found; a dungeon's cells keep the server's cell.
+        if (env.surfaceCellAt && (outdoor || env.holdsSurfaceCell?.(this.cell))) {
+          const inCell = env.surfaceCellAt(frame.origin.x, frame.origin.y, frame.origin.z, this.cell);
+          if (inCell !== 0) {
+            this.cell = inCell >>> 0;
+          } else if (!outdoor) {
+            this.cell = landCellAt(frame.origin.x, frame.origin.y);
+          }
+          outdoor = isOutdoorCell(this.cell);
+          if (!outdoor) {
+            const f = env.surfaceFloorZ?.(frame.origin.x, frame.origin.y, frame.origin.z) ?? null;
+            if (f !== null) frame.origin.z = f;
+          }
+        }
+        if (outdoor) {
+          const h0 = env.terrainHeight(oldX, oldY);
+          const h1 = env.terrainHeight(frame.origin.x, frame.origin.y);
+          if (h0 !== null && h1 !== null) frame.origin.z += h1 - h0;
+        }
       }
       if (this.velocity.z > SMALL_VELOCITY) {
         // Moving up off the ground (set_on_walkable(false) → MovementManager::

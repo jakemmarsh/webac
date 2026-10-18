@@ -15,14 +15,37 @@ import { transitionNumSteps } from '../player/OutdoorMovement.js';
 export interface OutdoorGroundSources {
   /** Terrain heightmap height (renderer Y) at renderer (x, z), or null before the block loads. */
   terrainHeight(worldX: number, worldZ: number): number | null;
-  /** Walkable BSP floor nearest `fromY` (DungeonCollision.getFloorHeight); null = no collision world. */
-  floorHeight: ((worldX: number, worldZ: number, fromY: number) => number | null) | null;
+  /**
+   * Walkable BSP floor nearest `fromY` (DungeonCollision.getFloorHeight),
+   * searching at most `maxDrop` below (default: the search window) for a
+   * body whose feet are at `bodyFeetY` (default `fromY`; it decides whether
+   * land-cell floors count); null = no collision world.
+   */
+  floorHeight: ((worldX: number, worldZ: number, fromY: number, maxDrop?: number, bodyFeetY?: number) => number | null) | null;
   /**
    * The registered interior cell holding a body whose feet are at `footY`
    * (DungeonCollision.findCellContaining at the feet sphere's centre), 0 for
    * none. Absent = no cells known (the terrain rule alone).
    */
   cellAt?: (worldX: number, worldZ: number, footY: number) => number;
+  /**
+   * Whether a body whose feet are at `footY` has the land cells in its cell
+   * array (DungeonCollision.reachesLandCells): it is in no registered env
+   * cell, or in one within reach of an outside portal. Absent = always.
+   */
+  landReachable?: (worldX: number, worldZ: number, footY: number) => boolean;
+}
+
+/** outdoorGroundY's options. */
+export interface OutdoorGroundOptions {
+  /** Where the asking body's feet are, when the search does not start at them (a search from the head). */
+  bodyFeetY?: number;
+  /**
+   * The ground when the body is in an env cell away from its outside portals
+   * and no walkable lies anywhere under it there (the floor it stood on,
+   * as interiorGroundY keeps); default null.
+   */
+  fallbackY?: number | null;
 }
 
 /**
@@ -51,11 +74,27 @@ export interface OutdoorGroundSources {
  * the open ground SW of the house (terrain z 50.0); a body walking there
  * dropped through the grass into it and on under the house (Claude Bulwark,
  * 2026-10-18 03:48Z), where ACE's own physics walks it on the terrain.
+ *
+ * Decided by the cell (landReachable), never by the heights: a room whose
+ * floor is at or above the terrain is no nearer the land cells for it.
  */
-export function outdoorGroundY(src: OutdoorGroundSources, worldX: number, worldZ: number, fromY: number): number | null {
+export function outdoorGroundY(
+  src: OutdoorGroundSources, worldX: number, worldZ: number, fromY: number, opts: OutdoorGroundOptions = {},
+): number | null {
   const terrainY = src.terrainHeight(worldX, worldZ);
   if (src.floorHeight) {
-    const bspFloor = src.floorHeight(worldX, worldZ, fromY);
+    const bspFloor = src.floorHeight(worldX, worldZ, fromY, undefined, opts.bodyFeetY);
+    // In an env cell away from its outside portals the body reaches no land
+    // cell: its ground is a walkable of the cells, above or below the
+    // terrain, and with none in reach the walkable below it (it falls). It
+    // never lands on the terrain (a floor-search miss in a cellar used to
+    // snap the feet up through its ceiling onto the grass).
+    // The body's own height, never the floor found below it (a yard over a cellar is not in the cellar).
+    const feet = opts.bodyFeetY ?? fromY;
+    if (src.landReachable && !src.landReachable(worldX, worldZ, feet)) {
+      if (bspFloor !== null) return bspFloor;
+      return src.floorHeight(worldX, worldZ, fromY, Infinity, feet) ?? opts.fallbackY ?? null;
+    }
     if (bspFloor !== null && terrainY !== null && bspFloor < terrainY && src.cellAt?.(worldX, worldZ, bspFloor)
       && src.cellAt(worldX, worldZ, fromY)) return bspFloor;
     if (bspFloor !== null && bspFloor >= (terrainY ?? 0) - 0.5) return Math.max(bspFloor, terrainY ?? 0);
@@ -165,9 +204,16 @@ export interface SurfaceCollision {
   hasCell(cellId: number): boolean;
   /** Whether any source is registered. */
   readonly hasCells: boolean;
-  /** The highest walkable surface at or below `fromY` (DungeonCollision.floorBelow). */
-  floorBelow(worldX: number, worldZ: number, fromY: number): number | null;
-  /** Does any of these spheres (AC landblock-global centres) overlap a registered source as it stands? */
+  /**
+   * The highest walkable surface at or below `fromY` (DungeonCollision.floorBelow);
+   * `spheres` = the object's spheres where it stands (land-cell floors count only when they reach the land cells).
+   */
+  floorBelow(worldX: number, worldZ: number, fromY: number, spheres?: readonly { x: number; y: number; z: number; radius: number }[]): number | null;
+  /**
+   * Does any of these spheres (AC landblock-global centres) overlap a
+   * registered source as it stands? Land-cell sources count only when the
+   * spheres reach the land cells (DungeonCollision.spheresOverlap).
+   */
   spheresOverlap(spheres: readonly { x: number; y: number; z: number; radius: number }[]): boolean;
   /** The registered interior cell holding the point, 0 for none. */
   findCellContaining(acX: number, acY: number, acZ: number, preferredCellId?: number): number;
@@ -230,7 +276,7 @@ export function objectLandingZ(
   for (const s of spheres) { bottom = Math.min(bottom, s.z - s.radius); top = Math.max(top, s.z); }
   const at = (oz: number) => spheres.map((s) => ({ x: x + s.x, y: y + s.y, z: oz + s.z, radius: s.radius }));
   if (world?.spheresOverlap(at(z))) return z;
-  let surface = world ? world.floorBelow(x, y, z + top) : null;
+  let surface = world ? world.floorBelow(x, y, z + top, at(z)) : null;
   if (!interior) {
     const terrain = src.terrainHeight(x, y);
     if (terrain === null && surface === null) return null;
@@ -250,3 +296,52 @@ export function objectLandingZ(
   return rest;
 }
 
+
+/** What unwalkableTerrainNormal reads (renderer axes: y up). */
+export interface TerrainContactSources {
+  /** Terrain heightmap height at (x, z), or null before the block loads. */
+  terrainHeight(worldX: number, worldZ: number): number | null;
+  /** The terrain triangle's normal at (x, z) (y up), or null. */
+  terrainNormal(worldX: number, worldZ: number): { x: number; y: number; z: number } | null;
+  /** OutdoorGroundSources.cellAt. */
+  cellAt?: (worldX: number, worldZ: number, footY: number) => number;
+  /** OutdoorGroundSources.landReachable. */
+  landReachable?: (worldX: number, worldZ: number, footY: number) => boolean;
+}
+
+/**
+ * RECON.transition-stepup-stepdown-port.a — the terrain face under (x, z)
+ * when it is the contact plane of a body standing at `groundY` and fails
+ * `floorZ` (its normal), else null: the steep-slope slide starts only there.
+ * A BSP floor over the terrain (a bridge, stairs) is the contact instead,
+ * and so is an interior cell's floor under it (BUG.holtburg-statue-tunnel-wall).
+ * A body in an env cell away from its outside portals has no land cell in
+ * its cell array (CEnvCell::find_transit_cells @ 0052c820), so the terrain
+ * is never its contact there, even where the room's floor is level with the
+ * grass. A wade on the terrain is in no cell.
+ */
+export function unwalkableTerrainNormal(
+  src: TerrainContactSources, x: number, z: number, groundY: number, floorZ: number,
+): { x: number; y: number; z: number } | null {
+  const terrainY = src.terrainHeight(x, z);
+  if (terrainY === null || groundY > terrainY + 0.01) return null;
+  if (src.landReachable && !src.landReachable(x, z, groundY)) return null;
+  if (groundY < terrainY - 0.01 && (src.cellAt?.(x, z, groundY) ?? 0) !== 0) return null;
+  const n = src.terrainNormal(x, z);
+  return n && n.y < floorZ ? n : null;
+}
+
+/**
+ * Whether a body standing at `groundY` stands on the terrain itself (its
+ * ground is the terrain's height there and the land cell is in its cell
+ * array), not on a BSP floor: the wade (ObjCell.get_water_depth), the
+ * terrain triangle as the contact plane, the camera's terrain alignment. A
+ * room floor that happens to lie level with the grass is the room's floor
+ * (BUG.env-cell-land-reach).
+ */
+export function standsOnTerrain(
+  src: Pick<OutdoorGroundSources, 'terrainHeight' | 'landReachable'>, x: number, z: number, groundY: number,
+): boolean {
+  if (groundY !== src.terrainHeight(x, z)) return false;
+  return src.landReachable ? src.landReachable(x, z, groundY) : true;
+}

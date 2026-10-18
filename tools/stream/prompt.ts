@@ -5,6 +5,8 @@
  */
 import type { AgentItem } from '../../packages/renderer/src/agent/types.ts';
 import { casterGap, gearGapTexts, gearView, hasGearData } from '../../packages/renderer/src/agent/gear.ts';
+import { routineSuppliesLine } from '../../packages/renderer/src/agent/macro/routineSupplies.ts';
+import type { RoutineProfile } from '../../packages/shared/src/routines/index.ts';
 import type { CharacterConfig } from './config.ts';
 import { type KnownSpell, type TableSpell, magicSchools, spellGaps } from './spellGaps.ts';
 
@@ -127,7 +129,8 @@ export function vitaeFromSheet(sheet: string | null): string | null {
 
 /**
  * The opening message's readiness block: gear gaps, unspent XP, skill credits and the levels that grant the next ones, the
- * spells each trained magic school lacks (spellGaps.ts), the healing kits and potions in the pack, the session's deaths, and
+ * spells each trained magic school lacks (spellGaps.ts), the healing kits and potions in the pack, what the ready routine's
+ * recharge uses against what you carry of it (routineSupplies.ts), the session's deaths, and
  * the vitae you carry (first: what it costs and the XP that works it off). Facts, a few lines; null when none of it could be read.
  */
 export function readinessBrief(r: {
@@ -139,6 +142,8 @@ export function readinessBrief(r: {
   table?: readonly TableSpell[] | null;
   /** The client needs a wielded caster for magic mode: every era's does (1999's toggle asks for magic only with a caster held). Default true. */
   needsCaster?: boolean;
+  /** The character's ready fight routine (tools/stream/routines/<profile>.json, the player's routine.json), for its supplies line. */
+  routine?: RoutineProfile | null;
 }): string | null {
   const out = gearGaps(r.items);
   const vitae = vitaeFromSheet(r.sheet);
@@ -155,6 +160,9 @@ export function readinessBrief(r: {
     const c = recoveryCounts(r.items);
     const pl = (k: number, one: string, many: string): string => `${k} ${k === 1 ? one : many}`;
     out.push(`- in your pack: ${pl(c.kits, 'healing kit', 'healing kits')}, ${pl(c.health, 'health potion', 'health potions')}, ${pl(c.mana, 'mana potion', 'mana potions')}`);
+    // What the ready routine drinks or bandages with, by its own Consumables names (an empty one first).
+    const supplies = r.routine ? routineSuppliesLine(r.routine, r.items, { spellsFirst: magicSchools(r.sheet).some((m) => m.school === 'Life Magic') }) : null;
+    if (supplies) out.push(`- ${supplies}`);
   }
   if (r.session) out.push(`- ${r.session}`);
   return out.length ? ['Your readiness right now (`./ac gear`, `./ac character`, `./ac inventory` for the whole picture):', ...out].join('\n') : null;

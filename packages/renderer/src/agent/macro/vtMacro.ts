@@ -32,6 +32,7 @@ import { resolveVtankIds, SPELL_FLAG_SELF_TARGETED, vtItemIs, vtOption, vtStored
 import { AgentApi, spellCastsOnYou } from '../AgentApi.ts';
 import { beyondSetting } from '../beyondVtank.ts';
 import type { AgentResult } from '../types.ts';
+import { buffTimeText } from '../format.ts';
 import { buildBuffFamilies, planBuffs, type BuffFamilies } from './buffPlan.ts';
 import { blowPoints, buildCombatFamilies, indexMonsterTable, planCombat, planPet, type CombatFamilies, type CombatInput, type CombatMonster, type MonsterFacts } from './combatPlan.ts';
 import { FellowManager } from './fellowManager.ts';
@@ -55,6 +56,7 @@ import { isQuickBuff, itemCooldown, planBuffItem, rebuffThreshold, VT_GEM_FOOD_I
 import type { DrainRow } from './drainPlan.ts';
 import { itemCastLine } from './itemDebuffs.ts';
 import { planPetRefill } from './petRefill.ts';
+import { wieldedWeapon, wornShield } from './wieldedWeapon.ts';
 
 /** A spell that dispels negative Life Magic (by its description in the era's own SpellTable). */
 export const isLifeDispel = (desc: string): boolean => /dispels?\b[^.]*\bnegative\b[^.]*\blife magic\b/i.test(desc);
@@ -364,6 +366,21 @@ export class VtMacro {
   private lastWasAttack = false;
   /** Blacklist and ghost notices, said as the next step. */
   private notices: string[] = [];
+  /** Monsters a melee routine left alone as out of its walking reach (meleeChaseBar), and when it last said so. */
+  private chaseSaid = new Map<number, number>();
+  /** Monsters whose run-up was stopped as no melee chase: until when they are no target (unless one hits you meanwhile). */
+  private chaseBlocked = new Map<number, number>();
+  /** A melee chase bar is said again for one monster after this long (ms). */
+  static readonly CHASE_SAY_MS = 60_000;
+  /** A monster whose chase was stopped is no target for this long (ms), unless it comes back on you. */
+  static readonly CHASE_BLOCK_MS = 15_000;
+  /** SkipUnreachableMonsters' log line for a monster left alone because the way to it is no melee chase. */
+  private noteChaseBar(guid: number, name: string, why: string, stopped: boolean): void {
+    const at = this.chaseSaid.get(guid);
+    if (at !== undefined && this.now() - at < VtMacro.CHASE_SAY_MS) return;
+    this.chaseSaid.set(guid, this.now());
+    this.notices.push(`${stopped ? 'stopped running after' : 'not running after'} ${name} #${guid.toString(16)}: ${why} (SkipUnreachableMonsters: a melee routine fights what it can walk to beside you and your fellow; it fights it when it comes back)`);
+  }
   /** Buff families already said to have no self version you know (planBuffs' noSelf): said once each. */
   private noSelfNoted = new Set<number>();
   /** [0, 1) random numbers (RandomHelperBuffs' picks). */
@@ -421,14 +438,31 @@ export class VtMacro {
    * mastery buff up) a stronger spell you cast by hand is passed over. "It cast Acid Protection Self III after my VI
    * expired" read as a mis-pick (Arcanist, Mountain Keep, 2026-10-18 02:27Z): her Life Magic was under VI's 300 + 5.
    */
-  private levelNote(b: { spell: PlanSpell; remaining: number | null; stronger?: { spell: PlanSpell; skill: number; need: number } }): string {
+  private levelNote(b: { spell: PlanSpell; remaining: number | null; stronger?: { spell: PlanSpell; skill: number; need: number; chance?: number; bar?: number } }): string {
     const st = b.stronger;
     if (!st) return '';
     const v = this.api.vitaeMultiplier();
     const vit = v !== null && v < 1 ? `, with vitae (−${Math.round((1 - v) * 100)}%) on you` : '';
     // What is on you of the family now runs out soon (that is why it is due): this one is surpassed until then, then takes over.
     const on = b.remaining !== null && b.remaining > 0 ? `; what you have on of it now ends in ${Math.round(b.remaining)} s, and this one takes over then` : '';
+    // Passed over for its landing chance (BuffMinLandChance), not VTank's threshold: the chance and the bar, as the cast tool says them.
+    if (st.chance !== undefined && st.bar !== undefined) {
+      return ` (${b.spell.name}: the best you land reliably; ${st.spell.name} is ${Math.round(st.chance * 100)}% to land (your ${st.spell.school} ${st.skill} against its ${st.spell.power}${vit}), under the ${Math.round(st.bar * 100)}% BuffMinLandChance${on})`;
+    }
     return ` (${b.spell.name}: the best you land reliably; ${st.spell.name} needs ${st.spell.school} ${st.need} (its ${st.spell.power} + SpellDiffExcessThreshold-Buff ${st.need - st.spell.power}) and yours is ${st.skill}${vit}${on})`;
+  }
+
+  /**
+   * How much time the buff plan judged was left on what it is about to cast, for the routine's log: on you, or on your
+   * gear as reckoned from the casts seen landing (no timer for an item's spells reaches you). "Arcanist fights" recast
+   * all seven Banes V 5 minutes after the last round (07:19Z, 2026-10-18), and nothing in its log said it had judged them
+   * missing: the page reload had emptied both reckonings.
+   */
+  private leftNote(b: { spell: PlanSpell; target: string; remaining: number | null }): string {
+    const item = b.target === 'armor' ? 'your armor' : b.target === 'weapon' && !b.spell.self ? 'your weapon' : null;
+    if (b.remaining === null) return item ? ` [judged: not on ${item}; no cast of it there seen landing]` : ' [judged: not on you]';
+    if (b.remaining === Infinity || b.remaining < 0) return '';
+    return ` [judged: ${buffTimeText(b.remaining)} left${item ? ` on ${item}, reckoned from the casts seen` : ''}]`;
   }
 
   /** Worn armor and clothing an armor buff cast on yourself goes on (ACE: ItemType Vestements, Armor | Clothing). */
@@ -729,8 +763,8 @@ export class VtMacro {
   /** Fighting hand to hand: not in magic or missile mode, and no caster or launcher in hand (SkipUnreachableMonsters). */
   private fightsMelee(stance: Stance): boolean {
     if (stance === 'magic' || stance === 'missile') return false;
-    const w = this.api.inventory().find((i) => i.where === 'equipped' && /weapon|wand|staff|orb|caster|missile|bow/i.test(`${i.type ?? ''} ${i.slot ?? ''}`));
-    return !w || !/wand|staff|orb|caster|missile|bow/i.test(`${w.type ?? ''} ${w.slot ?? ''}`);
+    const w = wieldedWeapon(this.api.inventory());
+    return !w || w.kind === 'melee';
   }
 
   /** The routine's pick by hand (RoutineEngine.pickedTarget): the monster the player last attacked or cast at. */
@@ -810,16 +844,26 @@ export class VtMacro {
     const onFellow = beyondSetting(settings, 'ProtectFellows') ? this.monstersOnFellows() : new Set<number>();
     const guardRange = Math.max(range, beyondSetting(settings, 'ProtectFellowsDistance'));
     const unreachable = (o: (typeof seen)[number]): boolean => skipUnreachable && (!!o.comingAtYouStuck || (me.indoors && Math.abs(o.dz) >= AgentApi.OTHER_FLOOR_M));
+    // Indoors, a monster a melee routine would chase the long way round, a storey off by the way there, or away from its
+    // fellow (AgentApi.meleeChaseBar) is no target either; the one you picked by hand is yours to go after.
+    const picked = this.picked?.() ?? null;
+    const chaseBarred = (o: (typeof seen)[number]): boolean => {
+      if (!skipUnreachable || !me.indoors || o.guid === picked || o.dist > Math.max(range, guardRange)) return false;
+      const why = this.api.meleeChaseBar(o.guid);
+      if (why) this.noteChaseBar(o.guid, o.name, why, false);
+      return !!why;
+    };
     // OnlyEngaged: the pulls are the player's; the macro fights what is on you or a fellow, coming at either, or picked by hand.
     const engaged = beyondSetting(settings, 'OnlyEngaged') ? this.engaged() : null;
     const near: CombatMonster[] = seen.filter((o) => !this.blocked.has(o.guid) && !this.targets.excluded(o.guid) && (this.allowTarget?.(o) ?? true) && !unreachable(o)
-      && (!engaged || engaged.has(o.guid) || !!o.attackingYou || !!o.comingAtYou)).map((o) => {
+      && (!engaged || engaged.has(o.guid) || !!o.attackingYou || !!o.comingAtYou) && !((this.chaseBlocked.get(o.guid) ?? 0) > this.now() && !o.attackingYou) && !chaseBarred(o)).map((o) => {
       const blow = this.blows.get(o.guid);
       const lof = aware && (o.dist <= range || onFellow.has(o.guid)) ? this.lineOfFire(o.guid) : null;
       return {
         guid: o.guid, name: o.name, dist: o.dist, relBearing: o.relBearing, ...(o.health !== undefined ? { health: o.health } : {}), ...(blow !== undefined ? { lastDamage: blow } : {}),
         ...(lof ? { blocked: true } : {}), ...(this.magicImmune.has(o.guid) ? { magicImmune: true } : {}),
         ...(onFellow.has(o.guid) && o.dist <= guardRange ? { onFellow: true } : {}),
+        ...(o.attackingYou ? { hittingYou: true } : {}),
       };
     });
     const monsters = near.filter((m) => m.dist <= range || m.onFellow);
@@ -904,11 +948,12 @@ export class VtMacro {
       const table = this.api.spellTableData();
       return {
         rows: p.vtank.monsters, spells, skills, items: this.items(undefined, [...itemNames, ...p.vtank.consumables]), itemNames,
-        wielded: { weapon: wieldedItems.find((i) => /weapon|wand|staff|orb|caster/i.test(`${i.type ?? ''} ${i.slot ?? ''}`))?.name, offhand: wieldedItems.find((i) => /shield/i.test(`${i.type ?? ''} ${i.slot ?? ''}`))?.name },
+        wielded: { weapon: wieldedWeapon(wieldedItems)?.item.name, offhand: wornShield(wieldedItems)?.name },
         stance, settings, castLog: this.castLog, now: this.now(), selectedGuid: this.api.selectedGuid(), families: fam.combat,
         ...(this.monsterFacts ? { monsterFacts: this.monsterFacts } : {}),
         ...(this.specialAmmo?.size ? { specialAmmo: (n: string) => this.specialAmmo?.get(n.toLowerCase()) ?? 0 } : {}),
         lastTarget: this.lastTarget,
+        pickedByHand: this.picked?.() ?? null,
         // The Items tab's Hands column (an entry's by its object id when it has one, else by name).
         hands: (item) => p.vtank.items.find((e) => e.hands !== undefined && vtItemIs(e, item))?.hands,
         // Item debuffs (casters, cast-on-strike weapons, grenades) read their spells from the era's table; Drain Auto plans with your health.
@@ -998,6 +1043,17 @@ export class VtMacro {
             const ev = await this.api.waitFor({ types: ['target-died', 'target-lost', 'death', 'vitals-low'] }, 500);
             if (ev.length || evs().length || this.held?.()) break;
             if (this.belowMark(settings)) { end = { type: 'vitals-low' }; break; }
+            // The monster turned back up a storey or went the long way round while the run-up chased it: let it go, said.
+            if (skipUnreachable && me.indoors && c.target !== picked) {
+              const why = this.api.meleeChaseBar(c.target);
+              if (why) {
+                this.api.stopMoving();
+                this.chaseBlocked.set(c.target, this.now() + VtMacro.CHASE_BLOCK_MS);
+                this.lastAttack = null;
+                this.noteChaseBar(c.target, name ?? `#${c.target.toString(16)}`, why, true);
+                return { ok: false, message: `stopped running after ${name ?? `#${c.target.toString(16)}`}: ${why}` };
+              }
+            }
             if (onFellowBefore && [...this.monstersOnFellows()].some((g) => g !== c.target && !onFellowBefore.has(g))) break;
           }
           end ??= about();
@@ -1031,8 +1087,10 @@ export class VtMacro {
    */
   private buffStep(p: RoutineProfile & { vtank: VtankProfileData }, settings: Record<string, string | number | boolean>, ctx: { buffing: boolean; idle: boolean }, fam: NonNullable<typeof this.fam>, spells: PlanSpell[], skills: PlanSkill[], level: number, stance: Stance, idleSlot: boolean): VtStep | null {
     if (!ctx.buffing && !(this.forced && !idleSlot)) return null;
-    const weapon = this.api.inventory().find((i) => i.where === 'equipped' && /weapon|wand|staff|orb|caster/i.test(`${i.type ?? ''} ${i.slot ?? ''}`));
-    const wielded = !weapon ? null : /missile|bow/i.test(`${weapon.type ?? ''} ${weapon.slot ?? ''}`) ? 'missile' : /wand|staff|orb|caster/i.test(`${weapon.type ?? ''} ${weapon.slot ?? ''}`) ? 'caster' : 'melee';
+    // The wielded weapon by its EquipMask / ItemType numbers (wieldedWeapon.ts): a worn wand is "Held" with no type label.
+    const inHand = wieldedWeapon(this.api.inventory());
+    const weapon = inHand?.item;
+    const wielded = inHand?.kind ?? null;
     const weaponRef: ItemRef | null = weapon ? { guid: weapon.guid, name: weapon.name } : null;
     const b = planBuffs({
       spells, skills, settings, idle: idleSlot && ctx.idle, families: fam.buff, level, wielded,
@@ -1048,13 +1106,22 @@ export class VtMacro {
         return own === null ? seen : seen === null ? own : Math.max(own, seen);
       },
       castsOnYou: spellCastsOnYou,
+      minChance: Math.max(0, Number(beyondSetting(settings, 'BuffMinLandChance')) || 0) / 100,
     });
     // A family you know only Other spells of: said once (not every buff cycle), never cast on you.
     const unsaid = b.noSelf.filter((x) => !this.noSelfNoted.has(x.category));
     if (unsaid.length) {
       for (const x of unsaid) this.noSelfNoted.add(x.category);
-      const message = unsaid.map((x) => `buff: ${x.why}: no self version known: ${this.selfVersionName(x.other)} (${x.other.name} goes on someone else only)`).join('; ');
+      const message = unsaid.map((x) => `${x.why}: no self version known: ${this.selfVersionName(x.other)} (${x.other.name} goes on someone else only)`).join('; ');
       return { label: 'buff: no self version known', run: async () => ({ ok: true, message }) };
+    }
+    // A self buff of an untrained skill (Invulnerability Self with Melee Defense untrained): VTank keeps only trained skills
+    // up, so it is never recast. Said once, with how to have it kept, so a hand recast isn't read as the routine forgetting.
+    const untrainedUnsaid = b.untrained.filter((x) => !this.noSelfNoted.has(x.category));
+    if (untrainedUnsaid.length) {
+      for (const x of untrainedUnsaid) this.noSelfNoted.add(x.category);
+      const message = untrainedUnsaid.map((x) => `${this.selfVersionName(x.spell)} (${x.skill} untrained)`).join(', ');
+      return { label: 'buff: not kept up, the skill untrained (VTank buffs trained skills only; Extra Buff Spells adds one)', run: async () => ({ ok: true, message }) };
     }
     // Add (no buffs) on the Items tab: that weapon gets no auras (a Force Buff round included).
     // By the entry's object id when it has one: of two same-named weapons only the listed one goes without.
@@ -1069,12 +1136,12 @@ export class VtMacro {
       const nx = b.wanted.find((w) => !f.done.has(w.spell.category));
       if (!nx) this.forced = null;
       else {
-        const mode = toMagicFirst(`force buff: ${nx.why}${this.levelNote(nx)}`);
+        const mode = toMagicFirst(`force buff: ${nx.why}${this.levelNote(nx)}${this.leftNote(nx)}`);
         if (mode) return mode;
         const category = nx.spell.category;
         const target = nx.target === 'weapon' && weapon && !nx.spell.self ? weapon.guid : 'self';
         const item = onItem(nx);
-        return { label: `force buff: ${nx.why}${this.levelNote(nx)}`, run: async () => {
+        return { label: `force buff: ${nx.why}${this.levelNote(nx)}${this.leftNote(nx)}`, run: async () => {
           const sentAt = this.now();
           this.castSpent(settings);
           const res = await this.castBuff(nx.spell, target, settings);
@@ -1105,11 +1172,11 @@ export class VtMacro {
     const next = ctx.buffing ? b.due.find((x) => !((this.buffMisses.get(x.spell.category)?.until ?? 0) > t)) : undefined;
     // No spell due: a buff gem, food or potion (VTank tries its consumables after its spells).
     if (!next) return ctx.buffing ? this.buffItemStep(p, settings, idleSlot && ctx.idle, skills, level) : null;
-    const mode = toMagicFirst(`buff: ${next.why}${this.levelNote(next)}`);
+    const mode = toMagicFirst(`buff: ${next.why}${this.levelNote(next)}${this.leftNote(next)}`);
     if (mode) return mode;
     const target = next.target === 'weapon' && weapon && !next.spell.self ? weapon.guid : 'self';
     const item = onItem(next);
-    return { label: `buff: ${next.why}${this.levelNote(next)}`, run: async () => {
+    return { label: `buff: ${next.why}${this.levelNote(next)}${this.leftNote(next)}`, run: async () => {
       this.castSpent(settings);
       const res = await this.castBuff(next.spell, target, settings);
       const ok = item ? this.noteItemBuff(res, next.spell, item, weaponRef) : castConfirmed(res, next.spell.name);

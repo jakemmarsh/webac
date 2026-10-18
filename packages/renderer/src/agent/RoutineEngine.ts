@@ -22,7 +22,7 @@ import { autoAttackPower, powerItemsToExamine, swingElement, wieldedPair, type P
 import { InventoryTidy } from './macro/inventoryPlan.ts';
 import { findUst, planSalvageCombine, salvageRefusal } from './macro/salvagePlan.ts';
 import { isRecall, nearestStart, objectAt, openDoorOnTheWay, runCheckpoint, runRecall, runUseStep, stopsAt, walksTo, type NodeCtx } from './routeNodes.ts';
-import { BEING_CAST_AT_S, PULL_LAND_MS, RECALL_MOVE_M, RECALL_WAIT_MS, awayWord, holdAllows, pullLanded } from './beyondVtank.ts';
+import { BEING_CAST_AT_S, PULL_LAND_MS, RECALL_MOVE_M, RECALL_WAIT_MS, awayWord, beyondSetting, holdAllows, pullLanded } from './beyondVtank.ts';
 import { isCorpseDenial } from './macro/corpseBook.ts';
 import { LootExtras } from './macro/lootExtras.ts';
 import { propertyDumpLines, testItemLine } from './macro/lootTest.ts';
@@ -496,6 +496,19 @@ export class RoutineEngine {
     };
   }
 
+  /**
+   * The running macro profile's name when it fights for you (running, not paused, the macro with EnableCombat and the
+   * combat module on), else null: a kill's target-died note says the routine takes the next target itself.
+   */
+  fightsForYou(): string | null {
+    const p = this.profile;
+    if (!p || this.paused || !p.macro || !p.modules.combat || !truthySetting(this.settings.EnableCombat)) return null;
+    return p.name;
+  }
+
+  /** When this routine last counted a kill (the engine's clock), or null: the supervisor's quiet check reads it (AgentApi.vitals). */
+  lastKillAt(): number | null { return this.kills.length ? this.kills[this.kills.length - 1].at : null; }
+
   /** The running profile (UtilityBelt's AutoVendor / equip / ig read its loot sets), or null. */
   get loadedProfile(): RoutineProfile | null { return this.profile; }
 
@@ -786,9 +799,22 @@ export class RoutineEngine {
     try { this.onReport?.(text, category); } catch { /* a report never stops the routine */ }
   }
 
-  private note(s: string): void {
-    this.log.push(`${new Date().toISOString().slice(11, 19)} ${s}`);
+  private note(s: string, wallMs = Date.now()): void {
+    this.log.push(`${new Date(wallMs).toISOString().slice(11, 19)} ${s}`);
     if (this.log.length > 60) this.log.shift();
+  }
+
+  /**
+   * A macro step's log line, stamped when the step began, with "(took N s)" when it ran 2 s or more. Stamped at its
+   * end, a bolt's line came 4–9 s after the "turning to face" before it (the cast's whole wind-up, flight and the server's
+   * UseDone), and read as a 5–9 s wait before each bolt (Arcanist, Aerbax Haven, 2026-10-18 06:21–07:14Z).
+   */
+  private runMacroStep(step: { label: string; run: () => Promise<AgentResult> }): Promise<void> {
+    const at = this.now(), wall = Date.now();
+    return step.run().then((r) => {
+      const took = this.now() - at;
+      this.note(`${step.label}: ${r.message.split('\n')[0]}${took >= 2000 ? ` (took ${(took / 1000).toFixed(1)} s)` : ''}`, wall);
+    }).catch((e) => this.failed('macro', e, step.label));
   }
 
   // ── conditions ──
@@ -1143,7 +1169,7 @@ export class RoutineEngine {
         if (step) {
           this.acting = step.label;
           this.busy = true;
-          void step.run().then((r) => this.note(`${step.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.failed('macro', e, step.label)).finally(() => { this.busy = false; this.acting = null; });
+          void this.runMacroStep(step).finally(() => { this.busy = false; this.acting = null; });
           return;
         }
       }
@@ -1170,7 +1196,7 @@ export class RoutineEngine {
         if (last) {
           this.acting = last.label;
           this.busy = true;
-          void last.run().then((r) => this.note(`${last.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.failed('macro', e, last.label)).finally(() => { this.busy = false; this.acting = null; });
+          void this.runMacroStep(last).finally(() => { this.busy = false; this.acting = null; });
         }
         return;
       }
@@ -1236,7 +1262,7 @@ export class RoutineEngine {
       if (step) {
         this.busy = true;
         this.acting = step.label;
-        void step.run().then((r) => this.note(`${step.label}: ${r.message.split('\n')[0]}`)).catch((e) => this.failed('macro', e, step.label)).finally(() => { this.busy = false; this.acting = null; });
+        void this.runMacroStep(step).finally(() => { this.busy = false; this.acting = null; });
         return true;
       }
     }
@@ -1799,7 +1825,10 @@ export class RoutineEngine {
         const obs = this.api.snapshot({ radius: a.meters ?? 60, max: 30 });
         // A VirindiTank Monsters row with priority -1 means leave that one alone, whoever asks.
         const ignored = (o: { guid: number; name: string; dist: number; relBearing: number }) => !!p.vtank && matchMonsterRow(p.vtank.monsters, o, { settings: this.settings }).priority < 0;
-        const m = obs.nearby.find((o) => o.kind === 'monster' && !o.dying && !ignored(o) && this.holdOk(o) && (!a.names?.length || a.names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))));
+        // SkipUnreachableMonsters, as the macro: hand to hand, not one only the long way round, a storey off or away from your
+        // fellow reaches (AgentApi.meleeChaseBar; the stream's 2026-10-18 03:16Z chases up Mountain Keep's floors).
+        const skipFar = beyondSetting(this.settings, 'SkipUnreachableMonsters');
+        const m = obs.nearby.find((o) => o.kind === 'monster' && !o.dying && !ignored(o) && this.holdOk(o) && (!a.names?.length || a.names.some((n) => o.name.toLowerCase().includes(n.toLowerCase()))) && !(skipFar && this.api.meleeChaseBar(o.guid)));
         // Nothing to fight is nothing to do: the rule rests, so the rules below it (a "clear" / move-on rule) get their turn
         // (2026-10-13: a monster-within rule saw a creature the held position put out of reach, and fired twice a second).
         if (!m) return { ok: false, message: this.hold ? `no monster in reach within ${this.hold.meters} m of the held position` : 'no monster in reach', idle: true };

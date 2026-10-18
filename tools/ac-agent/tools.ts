@@ -760,7 +760,7 @@ export const TOOLS: AgentTool[] = [
     item: { type: 'string', description: 'Item id or name in your inventory.' },
     target: { type: 'string', description: 'Target id or name ("self" for yourself).' },
   }, ['item', 'target'], (a) => [guidOrName(a.item), String(a.target) === 'self' ? 'self' : guidOrName(a.target)]),
-  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), a distance and direction from where you stand ("10m north", "25 m NE", "10m NNW", "10m 330°", "5m ahead", "3 m left"; map coordinates: 0.1 = 24 m), or a room of the dungeon or building you are in by its cell id (target=0x01850148: a room of your dungeon, or a room or outdoor cell of any landblock on the landscape, through its building\'s door; world-query and lore print cell ids in hex). A fellow out of your sight in a dungeon is walked to where they were last seen (it says so, and whether they are there now). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after. Being hit stops it unless the way on leads away from everything hitting you, you are going to a fellow with monsters on them, or flee=true (running away). A monster starting to come at you (running at you, turning to face you, closing in) stops it too, while it is still metres off, naming it, its level and distance (stop_on_aggro=false walks on). Outdoors it keeps 10 m clear of monsters near the way (15 m of one well above your level) and says which it went round; when no way keeps clear it walks past them and says so (avoid_monsters=false walks straight). It names a fellow left far behind; stay_with=<fellow> keeps you together: you run as always, and stop to wait whenever they fall stay_within behind, until they are beside you (and it says when they stopped or went elsewhere). To keep up with someone, use ac_follow.', {
+  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), a distance and direction from where you stand ("10m north", "25 m NE", "10m NNW", "10m 330°", "5m ahead", "3 m left"; map coordinates: 0.1 = 24 m), or a room of the dungeon or building you are in by its cell id (target=0x01850148: a room of your dungeon, or a room or outdoor cell of any landblock on the landscape, through its building\'s door; world-query and lore print cell ids in hex). A fellow out of your sight in a dungeon is walked to where they were last seen (it says so, and whether they are there now). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after. Being hit stops it unless the way on leads away from everything hitting you, you are going to a fellow with monsters on them, or flee=true (running away). A monster starting to come at you (running at you, turning to face you, closing in) stops it too, while it is still metres off, naming it, its level and distance (stop_on_aggro=false walks on); with your routine running, only a pack (3+ at once), a caster whose spells hurt you or a heavy hitter stops it, and it names the mild ones it walked past for the routine to take. Outdoors it keeps 10 m clear of monsters near the way (15 m of one well above your level) and says which it went round; when no way keeps clear it walks past them and says so (avoid_monsters=false walks straight). It names a fellow left far behind; stay_with=<fellow> keeps you together: you run as always, and stop to wait whenever they fall stay_within behind, until they are beside you (and it says when they stopped or went elsewhere). To keep up with someone, use ac_follow.', {
     target: { type: 'string', description: 'Object id (#…), nearby object name (of several with that name, the one a walk reaches), map coordinates like "42.1N, 33.6E", an offset like "10m north" / "5m ahead" (compass N…NW, or ahead / back / left / right of your facing), or a cell id (0x039C0104: that room; a building\'s room or an outdoor cell of any landblock on the landscape too).' },
     within: { type: 'number', description: 'Stop this close, metres (default 2: beside it, on its floor). 5 or more is a range to stand at (a bolt\'s, a pull\'s): the straight distance, whatever floor it is on, and the answer says when the line to it is blocked.' },
     timeout_s: { type: 'number', description: 'Give up after this long (default: by distance, about 3 m/s + 30 s, 60 s to 10 min).' },
@@ -816,33 +816,71 @@ export const TOOLS: AgentTool[] = [
       return withNotice(c, result(await c.call<AgentResult>(has ? 'vendorAt' : 'vendor', has ? [guidOrName(a.target), ...tail] : tail, 120_000)));
     },
   },
-  act('ac_buy', 'Buy from the open vendor.', {
-    item: { type: 'string', description: 'Merchandise name or id (from ac_vendor).' },
-    amount: { type: 'number', description: 'How many (default 1).' },
-  }, ['item'], (a) => [guidOrName(a.item), a.amount ?? null]),
+  {
+    name: 'ac_buy',
+    description: 'Buy from a vendor: the open window, or vendor=<the vendor> (its window is opened first, walking there, as ac_vendor target= does; with no window open the one vendor within 12 m opens by itself). items= buys several, one after another, each answered on its own line ("Bracelet, High Mana Charge, High Mana Charge": a name listed twice is bought twice).',
+    props: {
+      ...PROFILE_PROP,
+      item: { type: 'string', description: 'Merchandise name or id (from ac_vendor).' },
+      items: { type: 'string', description: 'Several to buy: names or ids separated by commas, or a JSON list; each listed once is one (amount= is for item= alone), a name listed n times is n.' },
+      amount: { type: 'number', description: 'How many of item= (default 1).' },
+      vendor: { type: 'string', description: 'The vendor to buy from: name or id. Default: the window open, else the one vendor beside you.' },
+      target: { type: 'string', description: 'The vendor (as vendor=) when item= or items= names the goods, else the item.' },
+    },
+    aliases: { count: 'amount', quantity: 'amount' },
+    // item= or items=: neither alone is required.
+    required: [],
+    async run(a) {
+      const c = callerFor(a.profile);
+      const { vendor, item } = vendorAndItem(a);
+      const tail = vendor === null ? [] : [guidOrName(vendor)];
+      const list = sellList(a.items);
+      if (!list.length) {
+        if (item === null) return { text: 'ac_buy: name the item (item=…) or items (items="A, B")', isError: true };
+        return withNotice(c, result(await c.call<AgentResult>('buy', [guidOrName(item), a.amount ?? null, ...tail])));
+      }
+      // A name listed n times is n of it, bought in one go (a vendor sells a stack at once).
+      const counts = new Map<string, number>();
+      for (const it of item === null ? list : [item, ...list]) counts.set(it, (counts.get(it) ?? 0) + 1);
+      const out: string[] = [];
+      let failed = 0;
+      for (const [it, n] of counts) {
+        const r = await c.call<AgentResult>('buy', [guidOrName(it), n, ...tail]);
+        if (!r.ok) failed++;
+        out.push(`${n > 1 ? `${it} x${n}` : it}: ${r.message.replace(/\n/g, '\n    ')}`);
+      }
+      return withNotice(c, { text: [`bought ${counts.size - failed} of ${counts.size}:`, ...out.map((l) => `  ${l}`)].join('\n'), ...(failed === counts.size ? { isError: true } : {}) });
+    },
+  },
   {
     name: 'ac_sell',
-    description: 'Sell an item from your inventory to the open vendor; items= sells several, one after another, each answered on its own line.',
+    description: 'Sell an item from your inventory to a vendor: the open window, or vendor=<the vendor> (its window is opened first, walking there, as ac_vendor target= does; with no window open the one vendor within 12 m opens by itself). items= sells several, one after another, each answered on its own line.',
     props: {
       ...PROFILE_PROP,
       item: { type: 'string', description: 'Inventory item name or id.' },
       items: { type: 'string', description: 'Several items to sell: names or ids separated by commas ("Studded Leather Basinet, #8000c1d2"), or a JSON list. Each is sold whole (amount= is for item= alone).' },
       amount: { type: 'number', description: 'For stacks (default: whole stack).' },
+      vendor: { type: 'string', description: 'The vendor to sell to: name or id. Default: the window open, else the one vendor beside you.' },
+      target: { type: 'string', description: 'The vendor (as vendor=) when item= or items= names what to sell, else the item.' },
     },
+    aliases: { count: 'amount' },
     // item= or items=: neither alone is required (missingRequired would refuse items= by itself).
     required: [],
     async run(a) {
       const c = callerFor(a.profile);
+      const { vendor, item } = vendorAndItem(a);
+      // The vendor goes last, and only when given, so a page from before it (it takes none) still answers.
+      const tail = vendor === null ? [] : [guidOrName(vendor)];
       const list = sellList(a.items);
       if (!list.length) {
-        if (a.item === undefined || a.item === null || a.item === '') return { text: 'ac_sell: name the item (item=…) or items (items="A, B")', isError: true };
-        return withNotice(c, result(await c.call<AgentResult>('sell', [guidOrName(a.item), a.amount ?? null])));
+        if (item === null) return { text: 'ac_sell: name the item (item=…) or items (items="A, B")', isError: true };
+        return withNotice(c, result(await c.call<AgentResult>('sell', [guidOrName(item), a.amount ?? null, ...tail])));
       }
-      const all = a.item !== undefined && a.item !== null && a.item !== '' ? [String(a.item), ...list] : list;
+      const all = item !== null ? [item, ...list] : list;
       const out: string[] = [];
       let failed = 0;
       for (const it of all) {
-        const r = await c.call<AgentResult>('sell', [guidOrName(it), null]);
+        const r = await c.call<AgentResult>('sell', [guidOrName(it), null, ...tail]);
         if (!r.ok) failed++;
         out.push(`${it}: ${r.message.replace(/\n/g, '\n    ')}`);
       }
@@ -1133,7 +1171,8 @@ export function withArgAliases(t: Pick<AgentTool, 'name' | 'props' | 'aliases'>,
 
 /**
  * sell items=: a list as a comma (or semicolon / newline) separated string or a JSON array. "sell items=…" was refused
- * as an unknown argument (Arcanist, 2026-10-16 23:17Z): a player hands a vendor several things at once.
+ * as an unknown argument (Arcanist, 2026-10-16 23:17Z): a player hands a vendor several things at once. buy items= reads
+ * the same ("buy items=…" was refused too, 2026-10-18 03:29Z).
  */
 export function sellList(v: unknown): string[] {
   if (v === undefined || v === null || v === '') return [];
@@ -1141,6 +1180,19 @@ export function sellList(v: unknown): string[] {
   const s = String(v).trim();
   if (s.startsWith('[')) { try { const j = JSON.parse(s); if (Array.isArray(j)) return sellList(j); } catch { /* not JSON: a plain list */ } }
   return s.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
+}
+
+/**
+ * ac_buy / ac_sell: which argument names the vendor and which the goods. vendor= is the vendor; target= is the vendor
+ * when item= or items= names the goods (Bulwark's `sell target=#7a7b4003 items=…`, the Peddler, sold "#7a7b4003" as an
+ * item to the Healer's window still open, stream 2026-10-18 03:28Z), else the item, as it always was.
+ */
+export function vendorAndItem(a: Record<string, unknown>): { vendor: string | null; item: string | null } {
+  const has = (v: unknown): boolean => v !== undefined && v !== null && v !== '';
+  const goods = has(a.item) || has(a.items);
+  const vendor = has(a.vendor) ? String(a.vendor) : goods && has(a.target) ? String(a.target) : null;
+  const item = has(a.item) ? String(a.item) : !goods && has(a.target) ? String(a.target) : null;
+  return { vendor, item };
 }
 
 /** Each tool with one time argument: the others' names for it (alias → its own). */

@@ -30,7 +30,9 @@ interface Row { item: number; name: string; category: number; spellId: number; p
 export interface LedgerStore { getItem(key: string): string | null; setItem(key: string, value: string): void; removeItem?(key: string): void }
 
 const VERSION = 1;
-const key = (char: { guid: number; name: string }): string => `acjs.vtank.itemTimers.v${VERSION}.${char.name.trim().toLowerCase()}.${(char.guid >>> 0).toString(16)}`;
+/** Every character's records are under this localStorage prefix (the agent daemon carries it across launches: pageStorage.ts). */
+export const ITEM_TIMERS_KEY_PREFIX = 'acjs.vtank.itemTimers.';
+const key = (char: { guid: number; name: string }): string => `${ITEM_TIMERS_KEY_PREFIX}v${VERSION}.${char.name.trim().toLowerCase()}.${(char.guid >>> 0).toString(16)}`;
 const defaultStore = (): LedgerStore | null => { try { return globalThis.localStorage ?? null; } catch { return null; } };
 
 export class ItemBuffLedger {

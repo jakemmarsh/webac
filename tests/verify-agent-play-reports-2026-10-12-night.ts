@@ -209,7 +209,7 @@ describe('agent play reports 2026-10-12 (night)', () => {
       hit();
       const obs = api.observe();
       expect(obs.nearby.find((o) => o.guid === DRUDGE)?.attackingYou).toBeUndefined();
-      expect(formatObservation(obs)).toMatch(/hit by, but not placed: Drudge Servant \(1× in 10 s\) \(none of that name in sight within reach/);
+      expect(formatObservation(obs)).toMatch(/hit by a Drudge Servant you can't see \(1× in 10 s\): none of that name is in sight within reach of you/);
     });
     it('the one that hit you died: its lines are not moved onto another of its name standing off', () => {
       drudge(80, 21.5);
@@ -255,7 +255,8 @@ describe('agent play reports 2026-10-12 (night)', () => {
       host.me.health = { current: 105, max: 180 };
       run(api, host, 100, { physics: false });
       const evs = await w;
-      expect(evs.some((e) => /health 105\/180 \(58%\): below 60%/.test(e.text))).toBe(true);
+      // 180 → 105 is also a hit of over a quarter: one event says both (2026-10-18).
+      expect(evs.some((e) => /105\/180 \(58%\)(?::|,) below 60%/.test(e.text))).toBe(true);
     });
     it('a health still above 60% does not wake it', async () => {
       host.me.health = { current: 180, max: 180 };

@@ -736,6 +736,8 @@ export class ServerObjectManager {
    * collision world wired (objects stay at the server's frame).
    */
   private objectLandingQuery: NonNullable<RemotePhysicsEnv['landingZ']> | null = null;
+  /** The landscape's env cells as remote physics reads them (setSurfaceCells); null = not wired. */
+  private surfaceCells: Required<Pick<RemotePhysicsEnv, 'surfaceCellAt' | 'holdsSurfaceCell' | 'surfaceFloorZ'>> | null = null;
   /** AnimatedEntity instances for objects with motion tables (idle animations). */
   private animatedObjects = new Map<number, AnimatedEntity>();
   /** CMotionInterp::server_action_stamp per object (0 on a new object — the ctor's). */
@@ -1013,6 +1015,11 @@ export class ServerObjectManager {
   /** Wire the landing query (AC landblock-global x / y / z) a placed Gravity object falls by. */
   setObjectLandingQuery(q: NonNullable<RemotePhysicsEnv['landingZ']> | null): void {
     this.objectLandingQuery = q;
+  }
+
+  /** Wire the landscape's env cells (AC landblock-global): a self-moved creature re-finds its cell by them (RemotePhysics.update). */
+  setSurfaceCells(q: Required<Pick<RemotePhysicsEnv, 'surfaceCellAt' | 'holdsSurfaceCell' | 'surfaceFloorZ'>> | null): void {
+    this.surfaceCells = q;
   }
 
   setPlayerGuid(guid: number): void {
@@ -2532,6 +2539,8 @@ export class ServerObjectManager {
     for (const obj of this.objects.values()) {
       if (!obj.mesh) continue;
       const objCellId = obj.objCellId ?? 0;
+      // BUG.bunker-terrain-over-stairs — the cell the indoor view's passes sort this object by (scene/IndoorView.ts).
+      obj.mesh.userData.objCellId = objCellId;
       obj._culledByCell = isInteriorCellIndex(obj.cellId) && objCellId !== 0
         && cellDrawn(objCellId) === false;
       // Combine with the physicsState hide bits (Hidden | NoDraw).
@@ -3117,6 +3126,9 @@ export class ServerObjectManager {
   private readonly physicsEnv: RemotePhysicsEnv = {
     terrainHeight: (x, y) => this.terrainCollision?.getHeightAt(x, y) ?? null,
     landingZ: (cell, x, y, z, spheres) => this.objectLandingQuery?.(cell, x, y, z, spheres) ?? null,
+    surfaceCellAt: (x, y, z, preferred) => this.surfaceCells?.surfaceCellAt(x, y, z, preferred) ?? 0,
+    holdsSurfaceCell: (cell) => this.surfaceCells?.holdsSurfaceCell(cell) ?? false,
+    surfaceFloorZ: (x, y, z) => this.surfaceCells?.surfaceFloorZ(x, y, z) ?? null,
   };
 
   /** Whether this client knows object `id` (CObjectMaint::GetObjectA) — us included. */

@@ -146,6 +146,12 @@ export interface AgentVitals {
   combatMode: AgentSelf['combatMode'];
   /** The agent's own motor task ("walking to …"), if any. */
   task: string | null;
+  /**
+   * The character's routine when one is loaded: its profile, paused (the panel's Pause), held for the player's own command,
+   * and how long ago it (or the player) last acted in a fight: a cast or attack sent, or a kill it counted (ms; null:
+   * never). The supervisor's quiet check counts a routine acting lately as running (tools/stream/policy.ts runningTask).
+   */
+  routine?: { profile: string; paused: boolean; held?: string; actedAgoMs: number | null } | null;
   /** Claude's goal line (ac_goal), if set. */
   goal: string | null;
 }
@@ -235,7 +241,7 @@ export interface AgentObservation {
   /** Open windows (Inventory, Social (fellowship), Container …); close with ac_close. */
   windows?: string[];
   /** Your active enchantments (the effects UI), seconds left; -1 = permanent. Other players' are not visible to a client. */
-  buffs?: Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean; /** Said in place of the time left (Vitae: "until XP works it off"). */ until?: string }>;
+  buffs?: Array<{ spellId?: number; name: string; remaining: number; beneficial?: boolean; /** Said in place of the time left (Vitae: "until XP works it off"). */ until?: string; /** Seconds since it landed on you (new, or refreshed) as this page saw it; absent: on you when the page loaded. */ landedAgoS?: number }>;
   /** The VITAE line (vitaeFacts.ts vitaeHeadline): what the death penalty costs now and the XP that works it off; absent with none. */
   vitae?: string;
   /** Buffs you know that aren't up on you (self-only ones first), to cast with ac_cast. */
@@ -287,11 +293,17 @@ export interface AgentObservation {
    * since, with their mana when an appraisal showed it. A refill alone doesn't turn them back on (ACE: only a wield does).
    */
   gearManaOut?: Array<{ guid: number; name: string; mana?: { cur: number; max: number } }>;
+  /** Debuffs on you that lower a maximum vital, and by what (AgentApi.vitalsLoweredText). */
+  vitalsLowered?: string;
+  /** With gear out of mana: the mana stones you carry and their charge ("your mana stones: Mana Stone ×2 EMPTY …"). */
+  manaStones?: string;
+  /** While a routine runs: the recharge supplies its profile uses that you carry none of (macro/routineSupplies.ts). */
+  routineSupplies?: string;
   /**
    * Attack lines of the last 10 s naming a creature none of whose name stands within reach (a swing from 8 m, a spell
    * from 60 m): out of sight, or a missile from afar. Named, never pinned on a far one of that name.
    */
-  attackersUnplaced?: Array<{ name: string; count: number }>;
+  attackersUnplaced?: Array<{ name: string; count: number; /** Where the server last placed one of the name, in a room out of your sight. */ unseen?: { dist: number; bearing: number; dz: number } }>;
   /** Chat / system lines since the previous observe (or the last N on the first call). */
   chat: AgentChatLine[];
   /** Highest event seq seen; pass it to waitFor/events to get only newer ones. */
@@ -390,6 +402,11 @@ export interface AgentItem {
    * 0 the server turns them off ("Your X is out of Mana."); refilled, they come back only when it is wielded again.
    */
   mana?: { cur: number; max: number };
+  /**
+   * A mana stone's charge (AgentApi.withStoneCharge): `charged` with the `mana` it holds when an appraisal said (else from
+   * its glow), and its ItemEfficiency (PropertyFloat 87: the share of an item's mana it takes when it drains one).
+   */
+  manaStone?: { charged: boolean; mana?: number; efficiency?: number };
   /** ArmorLevel (PropertyInt 28) from its appraisal: what the examine window shows, enchantments included. */
   armorLevel?: number;
   /** Its wield requirements from its appraisal, in the examine window's words; `met` when your character sheet says. */
@@ -411,6 +428,8 @@ export interface AgentSpell {
   duration?: number;
   /** What it is cast on (the spell table's NonComponentTargetType, ACE ItemType bits: Creature 0x10, Armor | Clothing 0x6 …). */
   targetType?: number;
+  /** The skill it raises or lowers, from its description in the spell table ("Increases the target's Melee Defense skill …"). */
+  skill?: { name: string; raises: boolean };
   /** It flies to its target as a missile (the spell table's MetaSpellType Projectile / LifeProjectile / EnchantmentProjectile): walls stop it. */
   projectile?: boolean;
   /** How far it reaches for you, metres (the spell examine's Range: its range grows with your ranks in the school's skill). */

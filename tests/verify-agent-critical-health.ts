@@ -191,7 +191,7 @@ describe('cast "Heal Self" with no level', () => {
   it('casts the highest level you can land (V at 220 vs 200; VI at 250 is too far), naming why', async () => {
     const r = await castNow('Heal Self');
     expect(host.sent).toContain('cast 1162 self');
-    expect(r.message).toMatch(/^casting Heal Self V on yourself \(no level named: the highest of yours you can land, \d+% to land\)/);
+    expect(r.message).toMatch(/^casting Heal Self V on yourself \(no level named: the highest of yours you can land, \d+% to land; Heal Self VI is higher but \d+% to land \(your Life Magic 220 against its 250\): name it to try it\)/);
   });
 
   it('a named level is cast as named, with no note', async () => {

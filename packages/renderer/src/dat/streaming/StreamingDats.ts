@@ -77,8 +77,9 @@ export interface StreamingDats {
    * the world + terrain packs were already in the object cache (a warm
    * profile), so open() also awaited them and the UI art — no download to hide
    * behind char select, and main() builds the world up front as with whole DATs.
+   * `worldCacheMs`: how much of `ms` that warm-cache wait took (0 when not worldCached).
    */
-  readonly bootReport: { netBytes: number; netObjects: number; cacheBytes: number; cacheObjects: number; preWorldArtFiles: number; ms: number; worldCached: boolean };
+  readonly bootReport: StreamingBootReport;
 }
 
 /**
@@ -90,6 +91,18 @@ export interface StreamingDats {
  * draws from the boot pack.
  */
 export const PREWORLD_LAYOUTS: readonly number[] = [0x21000004, 0x21000042, 0x2100003c];
+
+/** What openStreamingDats awaited before resolving (StreamingDats.bootReport). */
+export interface StreamingBootReport {
+  netBytes: number;
+  netObjects: number;
+  cacheBytes: number;
+  cacheObjects: number;
+  preWorldArtFiles: number;
+  ms: number;
+  worldCached: boolean;
+  worldCacheMs: number;
+}
 
 export interface OpenStreamingOptions {
   pointerUrl: string;
@@ -108,6 +121,12 @@ export interface OpenStreamingOptions {
    * Which side of the game this set serves (StreamScope). Default 'all'.
    */
   scope?: StreamScope;
+  /**
+   * Called once, before open() starts awaiting the world + terrain packs and
+   * the UI art from the object cache (a warm profile: bootReport.worldCached).
+   * Never called on a cold profile. The boot telemetry's 'world_cache' stage.
+   */
+  onWorldCache?: () => void;
 }
 
 /**
@@ -218,14 +237,18 @@ export async function openStreamingDats(opts: OpenStreamingOptions): Promise<Str
   const worldRefs = WORLD.map((role) => store.manifest.packs.get(role) ?? store.pointer.packs[role]).filter((r): r is NonNullable<typeof r> => !!r);
   const worldCached = worldRefs.length > 0 && cache.has !== undefined
     && (await Promise.all(worldRefs.map((r) => cache.has!(r.hash).catch(() => false)))).every(Boolean);
+  let worldCacheMs = 0;
   if (worldCached) {
+    const tw = performance.now();
+    try { opts.onWorldCache?.(); } catch { /* a reporting hook never blocks boot */ }
     try {
       await worldPacks;
       await uiArtReady;
     } catch { /* a corrupt cache entry refetches; main() awaits worldPacks again */ }
+    worldCacheMs = Math.round(performance.now() - tw);
   }
   const st = store.stats;
-  const bootReport = { netBytes: st.netBytes, netObjects: st.netObjects, cacheBytes: st.cacheBytes, cacheObjects: st.cacheObjects, preWorldArtFiles: preWorld.length, ms: Math.round(performance.now() - t0), worldCached };
+  const bootReport: StreamingBootReport = { netBytes: st.netBytes, netObjects: st.netObjects, cacheBytes: st.cacheBytes, cacheObjects: st.cacheObjects, preWorldArtFiles: preWorld.length, ms: Math.round(performance.now() - t0), worldCached, worldCacheMs };
   return {
     uiArtReady,
     worldPacks,

@@ -119,21 +119,38 @@ export function cameraPlayerTranslucency(inHead: boolean, viewerToPivot: number)
 }
 
 /**
- * BUG.bunker-camera-in-head — whether the camera boom is clipped against the
- * landscape's terrain surface. SmartBox::update_viewer @ 00453ce0 starts the
- * viewer sphere's transition in the player's cell: an outdoor one, or for an
- * env cell the cell AdjustPosition places the pivot in. From an env cell the
- * landscape is reached only out through the cell's outside portals. With the
- * pivot under the terrain (a bunker or cellar entered on foot: the Mannikin
- * Foundry room under each town's drudge statue) no path out of the cell meets
- * the surface overhead before the cell's own walls, so the terrain never clips
- * the boom there. Clipping it anyway put the camera in the player's head the
- * moment they went down the ramp (the first sweep step is already "under" the
- * ground). `terrainZ` is the surface height under the pivot, null when unloaded.
+ * BUG.bunker-camera-in-head — whether the viewer's path begins in an env cell.
+ * SmartBox::update_viewer @ 00453ce0 starts the viewer sphere in the player's
+ * cell: an outdoor cell as is; from an env cell, CPhysicsObj::AdjustPosition
+ * places the pivot in the cell (or one it sees) containing it, and failing
+ * that, for a SeenOutside cell, outside (ACE PhysicsObj.AdjustPosition,
+ * PhysicsObj.cs:232-262; a sealed cell keeps the player's). `pivotCellId` is
+ * the env cell containing the pivot, 0 for none.
  */
-export function viewerClipsOnTerrain(inEnvCell: boolean, pivotZ: number, terrainZ: number | null): boolean {
-  if (!inEnvCell || terrainZ === null) return true;
-  return pivotZ >= terrainZ;
+export function viewerBeginsIndoors(playerCellId: number, pivotCellId: number, playerCellSeenOutside: boolean): boolean {
+  if ((playerCellId & 0xffff) < 0x100) return false;
+  return pivotCellId !== 0 || !playerCellSeenOutside;
+}
+
+/**
+ * BUG.bunker-camera-in-head — the boom distance at which a viewer that began
+ * in an env cell first reaches the land cells (the terrain, building shells,
+ * scenery and land objects), or Infinity when it never does within `maxDist`.
+ * CTransition steps the viewer sphere along the boom in steps of its radius
+ * (calc_num_steps; the IsViewer last step takes the remainder), and at each
+ * step CEnvCell::find_transit_cells @ 0052c820 adds the land cells
+ * (CLandCell::add_all_outside_cells) only when the sphere lies within its
+ * radius of an outside portal's plane (ACE EnvCell.cs:311-371).
+ * `reachesLand(t)` answers that for the sphere centred `t` along the boom
+ * (DungeonCollision.viewerReachesLand). About maxDist / radius probes a frame,
+ * and only while the player is in an env cell.
+ */
+export function viewerLandFrom(maxDist: number, radius: number, reachesLand: (t: number) => boolean): number {
+  if (!(maxDist >= 0) || !(radius > 0)) return Infinity;
+  for (let t = 0; ; t = Math.min(t + radius, maxDist)) {
+    if (reachesLand(t)) return t;
+    if (t >= maxDist) return Infinity;
+  }
 }
 
 // ── CORE.18.b.a.a — stiffness lag, the zoom step, slope alignment ─────────

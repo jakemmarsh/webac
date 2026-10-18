@@ -4,7 +4,7 @@ export * from './weenie-types.js';
 export * from './game-types.js';
 export * from './item-types.js';
 export * from './ace-enums.js';
-export { TerrainCollision } from './physics/TerrainCollision.js';
+export { TerrainCollision, viewerTerrainStepCollides } from './physics/TerrainCollision.js';
 export { WaterMap, LandWaterType, isWaterTerrainType, WATER_DEPTH_ENTIRELY, WATER_DEPTH_PARTIAL_WATER_VERTEX, WATER_DEPTH_PARTIAL_DRY_VERTEX } from './physics/WaterMap.js';
 export { computeCellSplitDir } from './physics/CellSplitDir.js';
 export {

@@ -478,6 +478,45 @@ describe('openStreamingDats — a warm profile loads the world before char selec
     expect(dec(warm.portal.getFileData(0x06000200))).toBe('world-texture');
     expect(dec(warm.cell.getFileData(0xA9B4FFFF))).toBe('land-a9b4');
   });
+
+  it('onWorldCache fires once, before open() resolves, only on a warm profile; bootReport times the wait (boot stage world_cache, 2026-10-18)', async () => {
+    const { openStreamingDats } = await import('../packages/renderer/src/dat/streaming/StreamingDats.js');
+    const set = makeSet();
+    const cache = new MemoryObjectCache();
+    const order: string[] = [];
+    const open = (fetchObject: (url: string) => Promise<Uint8Array>) => openStreamingDats({
+      pointerUrl: `${BASE}/v1/sets/test-set.json`,
+      fetchPointer: async () => JSON.parse(JSON.stringify(set.pointer)),
+      fetchObject,
+      cache,
+      onWorldCache: () => order.push('world_cache'),
+    }).then((sd) => { order.push('resolved'); return sd; });
+
+    const cold = await open((url) => set.bucket.fetch(url));
+    expect(order).toEqual(['resolved']);
+    expect(cold.bootReport).toMatchObject({ worldCached: false, worldCacheMs: 0 });
+    await cold.worldPacks;
+    await new Promise((r) => setTimeout(r, 0)); // cache writes are fire-and-forget
+
+    // Warm: the world packs are held in the cache read, so the hook must fire while open() still waits.
+    order.length = 0;
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const worldHashes = new Set([set.packs.world.hash, set.packs.terrain.hash]);
+    const get = cache.get.bind(cache);
+    cache.get = async (hash: string) => { if (worldHashes.has(hash)) await held; return get(hash); };
+    const opening = open(async () => { throw new Error('network used on a warm profile'); });
+    for (let i = 0; i < 50 && !order.includes('world_cache'); i++) await new Promise((r) => setTimeout(r, 0));
+    expect(order).toEqual(['world_cache']);
+    release();
+    const warm = await opening;
+    expect(order).toEqual(['world_cache', 'resolved']);
+    expect(warm.bootReport.worldCached).toBe(true);
+    expect(warm.bootReport.worldCacheMs).toBeGreaterThanOrEqual(0);
+    expect(warm.bootReport.worldCacheMs).toBeLessThanOrEqual(warm.bootReport.ms);
+    expect(warm.bootReport.cacheObjects).toBeGreaterThan(0);
+    expect(warm.bootReport.netBytes).toBe(0);
+  });
 });
 
 describe('openStreamingDats — an interface-only set (AC1999 under the streamed end-of-retail interface, 2026-10-06)', () => {

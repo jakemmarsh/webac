@@ -31,6 +31,7 @@
  */
 import { vtOption } from '@ac/shared';
 import type { PlanEnchantment, PlanSkill, PlanSpell } from '@ac/shared';
+import { magicSkillChance } from '../magicChance.ts';
 
 // ── what a family buffs ──
 
@@ -253,6 +254,14 @@ export interface BuffPlanInput {
    * answers "You cannot cast this spell upon yourself". Absent: every spell is let through.
    */
   castsOnYou?: (s: PlanSpell) => boolean;
+  /**
+   * Beyond VTank (BuffMinLandChance, beyondVtank.ts): a level whose cast chance (the fizzle curve, ACE
+   * SkillCheck.GetMagicSkillChance, your buffed school skill against its power) is under this share (0..1) is passed
+   * over for the next level down, as the cast tool's level pick does. VTank's own bar is SpellDiffExcessThreshold-Buff
+   * alone: 5 over the power lets a 59% level through (Invulnerability Self VI at Creature Enchantment 255 against its
+   * 250), which fizzles two casts in five. Absent or 0: VTank's rule only.
+   */
+  minChance?: number;
 }
 
 export interface PlannedBuff {
@@ -261,8 +270,16 @@ export interface PlannedBuff {
    * A stronger spell of the family you know but can't reliably land: your buffed skill in its school is under its power +
    * SpellDiffExcessThreshold-Buff (VTank's rule), so `spell` is the best castable level. Said in the routine's log.
    */
-  stronger?: { spell: PlanSpell; skill: number; need: number };
+  stronger?: { spell: PlanSpell; skill: number; need: number; chance?: number; bar?: number };
 }
+
+/**
+ * A skill family you know a self spell of whose skill is not trained: VTank buffs only trained skills (wiki, Standard
+ * Options), so it is never kept up unless Extra Buff Spells names it. Said once in the routine's log, so a buff the
+ * player keeps by hand isn't read as a missed recast: Arcanist's Invulnerability Self IV ran out twice mid-fight in
+ * Aerbax Haven, his Melee Defense untrained (101), and he recast it by hand (2026-10-18 06:28 and 06:59Z).
+ */
+export interface UntrainedBuff { category: number; skill: string; spell: PlanSpell }
 
 /** A family you want up whose only spells you know go on someone else (Other spells): never cast as a self buff. */
 export interface NoSelfBuff { category: number; why: string; /** The best Other spell of it you know. */ other: PlanSpell }
@@ -311,7 +328,7 @@ const trained = (s: PlanSkill | undefined): boolean => !!s && (s.training === 't
  * The buffs you want up (`wanted`, one per family you can cast) and those to
  * cast now (`due`), in plan order. With Enable Buffing off nothing is due.
  */
-export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: PlannedBuff[]; noSelf: NoSelfBuff[] } {
+export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: PlannedBuff[]; noSelf: NoSelfBuff[]; untrained: UntrainedBuff[] } {
   const { families, settings } = input;
   const threshold = num(setting(settings, 'SpellDiffExcessThreshold-Buff'), 5);
   // BuffCastRecast raises both thresholds for a while after a buff; VTank never goes below 10 s.
@@ -332,9 +349,14 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
   const skillFor = (t: { skill: string; skillId?: number }): PlanSkill | undefined =>
     (t.skillId !== undefined ? skillById.get(t.skillId) : undefined) ?? skillByName.get(normSkill(t.skill));
 
+  // A name with no level ("Invulnerability Self") is its family too: the first spell of the table's that is that name and a level.
+  const bare = (n: string): string => n.replace(/\s+(?:[ivx]+|[1-8])$/, '');
   const familyOfName = (name: string): number | undefined => {
-    const n = name.trim().toLowerCase();
-    return families.byName.get(n) ?? input.spells.find((s) => s.name.trim().toLowerCase() === n)?.category;
+    const n = name.trim().toLowerCase().replace(/\s+/g, ' ');
+    const exact = families.byName.get(n) ?? input.spells.find((s) => s.name.trim().toLowerCase() === n)?.category;
+    if (exact !== undefined || bare(n) !== n) return exact;
+    for (const [k, c] of families.byName) if (bare(k) === n) return c;
+    return input.spells.find((s) => bare(s.name.trim().toLowerCase()) === n)?.category;
   };
   const blacklisted = new Set(input.blacklistedBuffs.map(familyOfName).filter((c): c is number => c !== undefined));
   const extra = new Set(input.extraBuffs.map(familyOfName).filter((c): c is number => c !== undefined));
@@ -378,12 +400,22 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
 
   const wanted: Array<PlannedBuff & { order: number }> = [];
   const noSelf: NoSelfBuff[] = [];
+  const untrained: UntrainedBuff[] = [];
   const onYou = input.castsOnYou ?? (() => true);
+  const minChance = Math.max(0, Math.min(1, input.minChance ?? 0));
   for (const [category, known] of byCategory) {
     const f = families.byCategory.get(category);
     if (!f) continue;
     const why = wantFamily(f);
-    if (!why) continue;
+    if (!why) {
+      // An untrained skill's family you could cast on yourself: not VTank's to keep up (said once by the macro).
+      if (f.target.kind === 'skill' && !blacklisted.has(f.category)) {
+        const sk = skillFor(f.target);
+        const self = known.filter((s) => !f.exclude.has(s.id) && onYou(s));
+        if (self.length && sk && !trained(sk)) untrained.push({ category, skill: sk.name, spell: self.reduce((a, b) => (b.power > a.power ? b : a)) });
+      }
+      continue;
+    }
     // VTank buffs only itself (its BuffSelfNormal / BuffSelfIdle rules): a Self and an Other spell share a family
     // (the category), but the Other one can't target you. Knowing only Shield Mastery Other IV, the macro picked it
     // for trained Shield and the client refused it every buff cycle (Claude Arcanist, 2026-10-17 00:02:32Z).
@@ -394,11 +426,12 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
       continue;
     }
     let best: PlanSpell | undefined;
-    let over: { spell: PlanSpell; skill: number; need: number } | undefined;
+    let over: { spell: PlanSpell; skill: number; need: number; chance?: number; bar?: number } | undefined;
     for (const s of selfable) {
       const skill = schoolSkill(s.school);
-      if (skill !== null && s.power + threshold > skill) {
-        if (!over || s.power > over.spell.power) over = { spell: s, skill, need: s.power + threshold };
+      const chance = skill !== null && minChance > 0 ? magicSkillChance(skill, s.power) : null;
+      if (skill !== null && (s.power + threshold > skill || (chance !== null && chance < minChance))) {
+        if (!over || s.power > over.spell.power) over = { spell: s, skill, need: s.power + threshold, ...(chance !== null && chance < minChance && s.power + threshold <= skill ? { chance, bar: minChance } : {}) };
         continue;
       }
       if (skill === null) continue;
@@ -419,9 +452,10 @@ export function planBuffs(input: BuffPlanInput): { wanted: PlannedBuff[]; due: P
   const out: PlannedBuff[] = wanted.map(({ order: _o, ...b }) => b);
 
   noSelf.sort((a, b) => a.category - b.category);
-  if (!bool(setting(settings, 'EnableBuffing'))) return { wanted: out, due: [], noSelf };
+  untrained.sort((a, b) => a.category - b.category);
+  if (!bool(setting(settings, 'EnableBuffing'))) return { wanted: out, due: [], noSelf, untrained };
   const due = out.filter((b) => b.remaining === null || b.remaining < rebuffAt || (topoff && b.remaining < topoffAt));
-  return { wanted: out, due, noSelf };
+  return { wanted: out, due, noSelf, untrained };
 }
 
 /**

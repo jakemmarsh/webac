@@ -597,6 +597,17 @@ export class ParticleSystem {
     this.writeInstances();
   }
 
+  /**
+   * BUG.bunker-terrain-over-stairs — a world-space system's parent frame origin in world
+   * coordinates (three.js axes), or null before its first frame: the node itself stays at the
+   * scene origin, so the indoor view sorts the system by where its parent is (scene/IndoorView.ts).
+   */
+  anchorWorldPosition(out: THREE.Vector3): THREE.Vector3 | null {
+    if (!this.frameSource || !this.frameValid) return null;
+    const x = this.frameOrigin.x + this.frameCell.x, y = this.frameOrigin.y + this.frameCell.y, z = this.frameOrigin.z + this.frameCell.z;
+    return out.set(x, z, y); // AC (z-up) → three (y-up)
+  }
+
   /** Emitter origin (AC axes) = parent frame ∘ hook offset, in the parent's current cell. */
   private emitterOrigin(out: THREE.Vector3): THREE.Vector3 {
     const off = this.frameSource!.offset;

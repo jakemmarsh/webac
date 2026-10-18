@@ -54,7 +54,8 @@ describe('1. a vitals-low queued while low is not handed back after a heal', () 
     run(api, host, 300, { physics: false });
     host.me.health.current = 80;
     run(api, host, 300, { physics: false });
-    expect((await waitFor(api, ['vitals-low'])).map((e) => e.text)).toEqual(['health 80/156 (51%): below 60%', 'health fell 120 → 80 of 156 at once (−26% of your health in one hit)']);
+    // One fall, one event (2026-10-18 stream: one Frost Bolt crit raised "below 60%" and "fell … at once" as two).
+    expect((await waitFor(api, ['vitals-low'])).map((e) => e.text)).toEqual(['health fell 120 → 80 of 156 at once (−26% of your health in one hit): 80/156 (51%), below 60%']);
   });
 
   it('a big single hit stays news until you are back where it found you', async () => {

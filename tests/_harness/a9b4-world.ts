@@ -115,14 +115,15 @@ export async function buildLandblockWorld(BX: number, BY: number, options: { int
   }
   const collider = new DungeonCollision();
   const info = new LandblockInfo(new DatReader(cellDb.getFileData(((lbId & 0xffff0000) | 0xfffe) >>> 0)!));
-  let n = 0;
+  const { collisionKey: keyOf } = await import('../../packages/renderer/src/world/DungeonCollision.js');
+  const blockKey = (BX << 8) | BY;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (const o of [...((info as any).buildings ?? []).map((b: any) => ({ id: b.modelId, frame: b.frame, building: true })), ...((info as any).objects ?? []).map((s: any) => ({ id: s.id, frame: s.frame, building: false }))]) {
+  for (const o of [...((info as any).buildings ?? []).map((b: any, i: number) => ({ id: b.modelId, frame: b.frame, building: true, i })), ...((info as any).objects ?? []).map((s: any, i: number) => ({ id: s.id, frame: s.frame, building: false, i }))]) {
     const phys = resolveObjectPhysics(o.id, src);
     if (!phys) continue;
-    const k = n++;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    addObjectCollision(collider, (a, j) => `s${k}:${a}${j}` as any, phys, o.frame.origin, o.frame.orientation, 1, OX, OY, { building: o.building });
+    // The streamer's keys (LandblockObjectStreamer): a land-cell source is known by them (DungeonCollision landCell).
+    addObjectCollision(collider, (a, j) => (o.building ? keyOf.building(blockKey, o.i, a, j) : keyOf.landblockStatic(blockKey, o.i, a, j)),
+      phys, o.frame.origin, o.frame.orientation, 1, OX, OY, { building: o.building });
   }
   if (options.interiors) {
     const { EnvCellRenderer } = await import('../../packages/renderer/src/world/EnvCellRenderer.js');

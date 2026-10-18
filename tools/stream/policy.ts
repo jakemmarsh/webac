@@ -47,6 +47,22 @@ export function quietNudge(s: { nowMs: number; quietMs: number | null; inTurn: b
   return s.nowMs - s.lastActiveMs >= s.quietMs && s.nowMs - s.lastNudgeMs >= s.quietMs;
 }
 
+/** A routine that cast, attacked or killed within this long (ms) is running for the quiet check (runningTask). */
+export const ROUTINE_ACTING_MS = 60_000;
+
+/**
+ * What of the player's is running in the game, for quietNudge's `task`: the agent's own motor task (a walk, follow,
+ * fight or repeat cast), else a routine that is running, not paused, and acting (a cast, attack or kill in the last
+ * ROUTINE_ACTING_MS), as `routine action=status` reads it; null when nothing is. Arcanist's routine bolted through the
+ * segment while the nudge said "nothing of yours is running" four times (2026-10-18 04:21–05:08Z).
+ */
+export function runningTask(v: { task: string | null; routine?: { profile: string; paused: boolean; held?: string; actedAgoMs: number | null } | null }): string | null {
+  if (v.task) return v.task;
+  const r = v.routine;
+  if (!r || r.paused || r.actedAgoMs === null || r.actedAgoMs > ROUTINE_ACTING_MS) return null;
+  return `routine "${r.profile}" acting (${Math.round(r.actedAgoMs / 1000)} s ago)`;
+}
+
 /** Agent CLI tools that only look or wait: a player making only these calls is quiet (quietNudge). */
 export const QUIET_TOOLS: ReadonlySet<string> = new Set(['wait', 'observe', 'look', 'status', 'trace', 'map', 'vitals', 'sessions', 'help']);
 

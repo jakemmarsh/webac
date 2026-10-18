@@ -147,7 +147,7 @@ describe('BUG.physicsstate-nodraw-ignored — updateInteriorVisibility', () => {
     obj.cellId = 0xFFFF;
     obj.physicsState = PhysicsState.Static | PhysicsState.Gravity;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    obj.mesh = { visible: false } as any;
+    obj.mesh = { visible: false, userData: {} } as any;
     som.getAllObjects().set(obj.guid, obj);
 
     som.updateInteriorVisibility(() => undefined);

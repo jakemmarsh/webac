@@ -87,3 +87,32 @@ export function portalGuard<D extends AvoidDisk>(me: NavPoint, aim: { x: number;
   }
   return near ? { kind: 'near', disk: near } : null;
 }
+
+/** Beyond this far past a portal's disk (m), no straight line the server sweeps between two reports can reach it. */
+export const PORTAL_REPORT_NEAR_M = 6;
+
+/**
+ * The server moves the player only from the positions the client reports: ACE Player.UpdatePlayerPosition →
+ * PhysicsObj.update_object_server sweeps ONE straight transition from the last reported spot to the new one, and a portal
+ * teleports whoever that line touches (Portal.OnCollideObject). The client reports when its cell changes and otherwise at
+ * most once a second (CommandInterpreter's time_between_position_events, MovementSync.shouldSendPositionEvent), so at a
+ * run (~11 m/s) the server's line is a chord across metres of the body's real path. A walk that went round a portal's disk
+ * in a corridor never entered the disk itself, and the server's chord from before the detour to after it ran 0.5 m from
+ * the portal's middle: Bulwark's walk to 0x029E0122 went round Aerbax Haven #7029e002 in 0x029E0119 and through it
+ * (2026-10-18 04:36:02Z, WeenieError ITeleported; reproduced on the cell DAT). So near a portal the walk reports the
+ * body's place itself, at each bend: whenever the straight line from the last spot it reported to where the body is about
+ * to run (`ahead`) would cross a disk. Returns whether to report now. `reported` null: nothing reported near these disks
+ * yet (report on coming near, so the line starts outside them).
+ */
+export function chordNeedsReport(reported: { x: number; y: number } | null, me: NavPoint, ahead: { x: number; y: number }, disks: readonly AvoidDisk[], margin = 0.3): boolean {
+  const near = disks.filter((d) => Math.abs(me.z - d.z) <= (d.span ?? FLOOR_SPAN_M) && Math.hypot(d.x - me.x, d.y - me.y) < d.r + PORTAL_REPORT_NEAR_M);
+  if (!near.length) return false;
+  if (!reported) return true;
+  return near.some((d) => segDist(d, reported, ahead) < d.r + margin || segDist(d, reported, me) < d.r + margin);
+}
+
+function segDist(p: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }): number {
+  const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+  const t = l2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+  return Math.hypot(a.x + dx * t - p.x, a.y + dy * t - p.y);
+}
