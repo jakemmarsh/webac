@@ -17575,8 +17575,10 @@ async function main() {
         case 'characterCreateResponse': {
           const response = event.data as CharacterCreateResponseData;
           // Handle_CharGenVerificationResponse @ 0055e8b0: every reply puts
-          // the verification state back to UNDEF (FINISH may send again).
-          gameUI.noteCharGenVerificationResponse();
+          // the verification state back to UNDEF (FINISH may send again after
+          // a refusal). An OK starts the new character's login: the chargen
+          // screen goes inert under Entering World (BUG.chargen-double-create).
+          gameUI.noteCharGenVerificationResponse(response.responseCode === CharacterGenerationVerificationResponse.Ok && response.characterGuid != null);
           preworldReporter?.chargenResult(response.responseCode, aceCharHeritage);
           if (response.responseCode === CharacterGenerationVerificationResponse.Ok) {
             // Success!

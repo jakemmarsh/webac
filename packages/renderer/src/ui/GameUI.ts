@@ -1493,6 +1493,13 @@ export class GameUI {
   /** CharGenState verification state: true = CG_VERIFICATION_RESPONSE_PENDING
    *  (a CharacterCreate is in flight; DoFinish sends no second one). */
   private chargenVerificationPending = false;
+  /** gmCharGenMainUI::m_bAwaitingCharSetForLogin (the ctor @ 004e7eb0 clears
+   *  it): an OK reply arrived and the new character's login is under way.
+   *  Retail's Update @ 004e8460 logged the character on as soon as the
+   *  CharacterSet came, and BeginEnterWorld replaced the chargen UI, so FINISH
+   *  was never reachable again; ours keeps the screen up until the world (or
+   *  its tunnel) arrives, 1-11 s later, so FINISH and EXIT do nothing. */
+  private chargenAwaitingLogin = false;
   /** True between server-connect start and character-list arrival (VISUAL.78). */
   private connectingMode = false;
   /** The connecting screen's status line under Please Wait (setConnectingStatus). */
@@ -3195,6 +3202,13 @@ export class GameUI {
     // label draws with its own font instead of the 0x40000000 UI font.
     this.layoutRenderer?.setFontResolver?.((did) => this.loadFontRenderer(did));
     this.uiManager = new UIManager();
+    // BUG.chargen-double-create — gmCharGenMainUI's state goes with the UI:
+    // leaving the character-create screen any way at all (world entry,
+    // character select, a disconnect) ends its pending CharacterCreate, its
+    // reply timer and its wait for the login, so none can act on another screen.
+    this.uiManager.on('screen-change', (screen: string | undefined) => {
+      if (screen !== 'character-create') this.endChargenSession();
+    });
     // RELEASE.streaming-regression-gate — repaint icons / art that drew while a streamed file was missing.
     // (A WeakRef: the module-level listener never keeps a discarded GameUI alive.)
     // Deferred to a microtask: every other arrival listener of the batch runs
@@ -5501,7 +5515,11 @@ export class GameUI {
         const open = () => {
           this.chargenAwaitingWorldArt = false;
           document.getElementById(CHARGEN_WORLD_ART_WAIT_ID)?.remove();
-          this.showCharacterCreate();
+          // BUG.chargen-double-create sweep — the wait belongs to character
+          // select: a world entry, a disconnect or a new connect cycle in the
+          // meantime must not be replaced by chargen when the art lands.
+          const screen = this.uiManager.currentScreen;
+          if (screen !== 'game' && screen !== 'disconnected' && !this.connectingMode) this.showCharacterCreate();
         };
         this.worldArtPending.then(open, open);
       }
@@ -5510,8 +5528,7 @@ export class GameUI {
     this.closePopupStringDialogs();
     this.uiManager.setScreen('character-create');
     // A new gmCharGenMainUI / CharGenState: no CharacterCreate in flight.
-    this.chargenVerificationPending = false;
-    this.clearChargenReplyTimer();
+    this.endChargenSession();
     // Use CharGen data for credits if available
     if (this.charGen) {
       const firstHeritage = this.charGen.heritageGroups.get(Heritage.Aluvian);
@@ -7159,6 +7176,11 @@ export class GameUI {
       this.callbacks.onChargenFinish?.('blocked', reason);
       return false;
     };
+    // BUG.chargen-double-create — the character was created and is entering
+    // the world: retail's chargen UI was already gone (chargenAwaitingLogin).
+    // A second CharacterCreate went out here, and its reply timer later fired
+    // in the world as a phantom refusal (playwebac.com, 2026-10-19).
+    if (this.chargenAwaitingLogin) return blocked('entering_world');
     const name = trimFinishName(this.wizard.name);
     this.wizard.setName(name);
     if (!this.chargenNameEntered || name.length === 0) {
@@ -7220,9 +7242,12 @@ export class GameUI {
       this.chargenReplyTimer = null;
       if (!this.chargenVerificationPending) return;
       this.chargenVerificationPending = false;
+      // Leaving the screen clears this timer (endChargenSession); never report
+      // or show a refusal anywhere but the chargen screen.
+      if (this.uiManager.currentScreen !== 'character-create') return;
       console.warn(`[GameUI] no CharGenVerificationResponse in ${CHARGEN_REPLY_TIMEOUT_MS / 1000} s; FINISH is usable again`);
       this.callbacks.onChargenFinish?.('no_reply');
-      if (this.uiManager.currentScreen === 'character-create') this.showChargenFailureDialog();
+      this.showChargenFailureDialog();
     }, CHARGEN_REPLY_TIMEOUT_MS);
     return true;
   }
@@ -7231,6 +7256,16 @@ export class GameUI {
 
   private clearChargenReplyTimer(): void {
     if (this.chargenReplyTimer !== null) { clearTimeout(this.chargenReplyTimer); this.chargenReplyTimer = null; }
+  }
+
+  /** gmCharGenMainUI's per-UI state ends (a new one, or the screen left): no
+   *  CharacterCreate pending, no reply timer, no login awaited. */
+  private endChargenSession(): void {
+    this.chargenVerificationPending = false;
+    this.chargenAwaitingLogin = false;
+    this.clearChargenReplyTimer();
+    // The hover tooltip's check timer goes with the page too.
+    this.resetChargenTooltip();
   }
 
   /**
@@ -7402,6 +7437,9 @@ export class GameUI {
    */
   doChargenExit(): boolean {
     if (this.chargenExitContext && this.confirmationDialog) return false;
+    // BUG.chargen-double-create — the new character is entering the world
+    // (retail had left this UI by now): no way back to character select.
+    if (this.chargenAwaitingLogin) return false;
     this.showConfirmationDialog(getString(EXIT_WARNING_STRING_ID) ?? EXIT_WARNING_FALLBACK, (accepted) => {
       // RecvNotice_CloseDialog @ 004e9780: the context is cleared on either
       // answer; Yes (property 0x92) → QueueUIMode(0x1000000a).
@@ -34795,12 +34833,31 @@ export class GameUI {
   /**
    * CPlayerSystem::Handle_CharGenVerificationResponse @ 0055e8b0: every reply
    * (OK or any error) sets CharGenState's verification state back to
-   * UNDEF_CG_VERIFICATION_RESPONSE, so FINISH may send again.
+   * UNDEF_CG_VERIFICATION_RESPONSE, so FINISH may send again after a refusal.
+   *
+   * BUG.chargen-double-create — `ok`: gmCharGenMainUI::RecvNotice_CharGen
+   * VerificationResponse @ 004e9030's OK case closes its dialog and sets
+   * m_bAwaitingCharSetForLogin; Update @ 004e8460 then logs the new character
+   * on (CPlayerSystem::LogOnCharacter → BeginEnterWorld → QueueUIMode
+   * (0x10000008)), so retail's chargen UI was gone at once. Ours waits on the
+   * server for the world: the chargen screen stays inert (chargenAwaitingLogin)
+   * under the Entering World wait dialog, the one character select's
+   * EnterGame @ 004ed440 raises for the same wait (MakeEnteringWorldDialog
+   * @ 004ed090); the world (showGame) or a refusal (a fresh character select)
+   * takes it down.
    */
-  noteCharGenVerificationResponse(): void {
+  noteCharGenVerificationResponse(ok = false): void {
     this.chargenVerificationPending = false;
     this.clearChargenReplyTimer();
+    if (!ok || this.uiManager.currentScreen !== 'character-create') return;
+    this.chargenAwaitingLogin = true;
+    this.hideConfirmationDialog();
+    this.hideMessageDialog();
+    this.showEnteringWorldDialog();
   }
+
+  /** gmCharGenMainUI::m_bAwaitingCharSetForLogin — the created character is entering the world (tests / probes). */
+  get charGenAwaitingLogin(): boolean { return this.chargenAwaitingLogin; }
 
   /**
    * BUG.chargen-olthoi-pending — the server refused an Olthoi (or the world

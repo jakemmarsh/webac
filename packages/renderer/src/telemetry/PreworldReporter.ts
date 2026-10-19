@@ -59,9 +59,10 @@ export type LauncherLeaveReason = typeof LAUNCHER_LEAVE_REASONS[number];
 /**
  * Why FINISH sent no CharacterCreate (chargen_blocked's token): the no-name /
  * banned-name / unspent-credit dialogs, a request still pending, the host
- * having nothing to send on, or an exception building it.
+ * having nothing to send on, an exception building it, or the character
+ * already created and entering the world (BUG.chargen-double-create).
  */
-export const CHARGEN_BLOCK_REASONS = ['no_name', 'name_banned', 'credit_warning', 'pending', 'not_sent', 'exception'] as const;
+export const CHARGEN_BLOCK_REASONS = ['no_name', 'name_banned', 'credit_warning', 'pending', 'not_sent', 'exception', 'entering_world'] as const;
 export type ChargenBlockReason = typeof CHARGEN_BLOCK_REASONS[number];
 
 export type PreworldScreen =

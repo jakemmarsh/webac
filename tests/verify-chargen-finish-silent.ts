@@ -427,6 +427,152 @@ describe('FINISH sends or says why (no DATs)', () => {
   });
 });
 
+/**
+ * BUG.chargen-double-create (playwebac.com, build 672ef4b6, 2026-10-19):
+ * chargen_sent → chargen_ok → chargen_sent AGAIN 3 s later (still on the
+ * chargen screen) → enter_ok → chargen_refused "timeout" in the world. After
+ * an OK, gmCharGenMainUI::RecvNotice_CharGenVerificationResponse @ 004e9030
+ * set m_bAwaitingCharSetForLogin and Update @ 004e8460 logged the character
+ * on, so retail's chargen UI was gone; ours stays up until the world, so it
+ * goes inert under Entering World, and every chargen timer ends with the screen.
+ */
+describe('after an OK reply, and leaving the chargen screen (no DATs)', () => {
+  let fx: GameUIFixture;
+  beforeAll(async () => { fx = await mountGameUI(); });
+  afterAll(() => fx?.teardown());
+  afterEach(() => { vi.useRealTimers(); });
+
+  function ready(): { ui: any; sent: () => number; events: string[] } {
+    const { ui } = fx;
+    ui.hideMessageDialog();
+    ui.hideConfirmationDialog();
+    let sent = 0;
+    const events: string[] = [];
+    ui.callbacks.onCharacterCreated = () => { sent++; return true; };
+    ui.callbacks.onChargenFinish = (o: string, reason?: string) => { events.push(reason ? `${o}:${reason}` : o); };
+    ui.callbacks.onCancelCreate = undefined;
+    openChargen(ui);
+    ui.wizard.currentStep = CreateStep.Summary;
+    ui.renderCharacterCreate();
+    const input = fx.container.querySelector('#char-name-input') as HTMLInputElement;
+    input.value = 'Brenna Qaeol';
+    input.dispatchEvent(new fx.win.Event('input', { bubbles: true }));
+    ui.wizard.attributes.strength += ui.wizard.attributesRemaining;
+    return { ui, sent: () => sent, events };
+  }
+  const press = (id = '#btn-confirm'): void => {
+    fx.container.querySelector(id)!.dispatchEvent(new fx.win.MouseEvent('click', { bubbles: true }));
+  };
+  const enteringWorld = (): boolean => !!fx.container.querySelector('#charsel-enteringworld');
+  const messageText = (): string | null => fx.win.document.getElementById('ac-message-dialog')?.textContent ?? null;
+
+  it('the production repro: FINISH → OK → FINISH again sends no second CharacterCreate, and nothing fires in the world', () => {
+    vi.useFakeTimers();
+    const { ui, sent, events } = ready();
+    press();
+    expect(sent()).toBe(1);
+    ui.noteCharGenVerificationResponse(true);
+    expect(ui.charGenVerificationPending).toBe(false);
+    expect(ui.charGenAwaitingLogin).toBe(true);
+    // Retail's wait text for an enter under way, with its input blocker.
+    expect(enteringWorld()).toBe(true);
+    press(); // a click that reaches FINISH anyway (an agent's dispatched click)
+    press();
+    expect(sent()).toBe(1);
+    expect(events).toEqual(['sent', 'blocked:entering_world', 'blocked:entering_world']);
+    // EXIT (DoExit) does nothing either: no way back to character select mid-login.
+    expect(ui.doChargenExit()).toBe(false);
+    expect(ui.isChargenExitDialogOpen).toBe(false);
+    // The world arrives: the wait dialog goes, and no timer ever reports a refusal.
+    ui.showGame();
+    expect(enteringWorld()).toBe(false);
+    expect(ui.charGenAwaitingLogin).toBe(false);
+    vi.advanceTimersByTime(fx.mod.CHARGEN_REPLY_TIMEOUT_MS * 3);
+    expect(events).toEqual(['sent', 'blocked:entering_world', 'blocked:entering_world']);
+    expect(messageText()).toBeNull();
+  });
+
+  it('a refusal reply leaves FINISH live (RecvNotice\'s error cases), as before', () => {
+    const { ui, sent, events } = ready();
+    press();
+    ui.noteCharGenVerificationResponse(false);
+    expect(ui.charGenAwaitingLogin).toBe(false);
+    expect(enteringWorld()).toBe(false);
+    press();
+    expect(sent()).toBe(2);
+    expect(events).toEqual(['sent', 'sent']);
+  });
+
+  it('an OK that arrives after the screen was left changes nothing there', () => {
+    const { ui } = ready();
+    press();
+    ui.showCharacterSelect([]);
+    ui.noteCharGenVerificationResponse(true);
+    expect(ui.charGenAwaitingLogin).toBe(false);
+    expect(enteringWorld()).toBe(false);
+  });
+
+  for (const [how, leave] of [
+    ['world entry', (ui: any) => ui.showGame()],
+    ['character select', (ui: any) => ui.showCharacterSelect([])],
+    ['a disconnect', (ui: any) => ui.showDisconnectedScreen('The connection to the server has been lost!', () => {})],
+  ] as const) {
+    it(`leaving by ${how} with a CharacterCreate unanswered: the reply timer is cleared, no no_reply, no dialog`, () => {
+      vi.useFakeTimers();
+      const { ui, events } = ready();
+      press();
+      expect(ui.charGenVerificationPending).toBe(true);
+      leave(ui);
+      expect(ui.charGenVerificationPending).toBe(false);
+      vi.advanceTimersByTime(fx.mod.CHARGEN_REPLY_TIMEOUT_MS * 2);
+      expect(events).toEqual(['sent']);
+      expect(messageText() ?? '').not.toContain('cannot create your new character');
+    });
+  }
+
+  it('re-entering chargen after a created character\'s session starts fresh: FINISH sends again', () => {
+    const { ui } = ready();
+    press();
+    ui.noteCharGenVerificationResponse(true);
+    ui.showCharacterSelect([]);
+    const again = ready();
+    expect(again.ui.charGenAwaitingLogin).toBe(false);
+    press();
+    expect(again.sent()).toBe(1);
+    expect(again.events).toEqual(['sent']);
+  });
+
+  it('CREATE waiting on the world art opens chargen only if character select is still up when it lands', async () => {
+    const { ui } = fx;
+    /** The world art pending, cleared on arrival as the constructor's worldArtReady hook does. */
+    const pendingArt = (): { done: Promise<void>; land: () => void } => {
+      let land!: () => void;
+      const done = new Promise<void>((r) => { land = r; });
+      done.then(() => { if (ui.worldArtPending === done) ui.worldArtPending = null; });
+      ui.worldArtPending = done;
+      return { done, land };
+    };
+    ui.showCharacterSelect([]);
+    let art = pendingArt();
+    ui.showCharacterCreate();
+    expect(ui.uiManager.currentScreen).toBe('character-select');
+    ui.showDisconnectedScreen('The connection to the server has been lost!', () => {});
+    art.land();
+    await art.done;
+    await Promise.resolve();
+    expect(ui.uiManager.currentScreen).toBe('disconnected');
+    // Still on character select when the art lands: chargen opens, as before.
+    ui.showCharacterSelect([]);
+    art = pendingArt();
+    ui.showCharacterCreate();
+    expect(ui.uiManager.currentScreen).toBe('character-select');
+    art.land();
+    await art.done;
+    await Promise.resolve();
+    expect(ui.uiManager.currentScreen).toBe('character-create');
+  });
+});
+
 describe('FINISH telemetry (PreworldReporter → the bridge allowlist)', () => {
   function reporter(): { r: PreworldReporter; bodies: PreworldEvent[] } {
     const bodies: PreworldEvent[] = [];
@@ -443,9 +589,10 @@ describe('FINISH telemetry (PreworldReporter → the bridge allowlist)', () => {
     r.chargenBlocked('pending');
     r.chargenBlocked('pending');
     r.chargenBlocked('name_banned');
+    r.chargenBlocked('entering_world');
     r.chargenNoReply();
     expect(bodies.map((b) => `${b.outcome}:${b.token}`)).toEqual([
-      'chargen_sent:null', 'chargen_blocked:pending', 'chargen_blocked:name_banned', 'chargen_refused:timeout',
+      'chargen_sent:null', 'chargen_blocked:pending', 'chargen_blocked:name_banned', 'chargen_blocked:entering_world', 'chargen_refused:timeout',
     ]);
     for (const b of bodies) expect(sanitizeClientPreworld(b)).toEqual(b);
   });
