@@ -19,6 +19,9 @@ export interface SegmentRecord {
   usage: SegmentUsage | null;
   /** The last thing the player wrote (its report, when it got to write one), clipped. */
   finalText: string;
+  /** Total XP from the character sheet read at the segment's start and after it ended (own-time.ts xpRateLine); absent when unread. */
+  xpStart?: number;
+  xpEnd?: number;
 }
 
 export type SegmentEndReason = 'done' | 'quit-early' | 'crashed' | 'timed-out' | 'stopping' | 'budget';

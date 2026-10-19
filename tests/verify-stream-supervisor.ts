@@ -1140,6 +1140,25 @@ describe('segment opening: where the last segment\'s time went (own-time.ts, Jak
     } finally { h.cleanup(); }
   });
 
+  it('records the sheet\'s total XP at each segment\'s start and end, and hands the opening\'s sheet to the XP line', async () => {
+    const sheets: Record<string, string> = { mage: 'Claude Arcanist  level 53  x\nXP 1,900,000 total, 5 unassigned, 1 to next level; 3 skill credits' };
+    const h = harness({ maxSegments: 1, segment: { ...CAST.segment, minutes: 1, restartPauseSeconds: 0 } }, (_p, text, p) => {
+      if (/Wrap up now/.test(text)) { sheets.mage = sheets.mage.replace('1,900,000', '2,350,000'); p.emit(result('report')); }
+    }, { sheets });
+    const given: Array<[string, string | null | undefined]> = [];
+    h.deps.ownTime = (profile, _c, _cast, sheet) => { given.push([profile, sheet]); return null; };
+    try {
+      await new StreamSupervisor(h.cfg, h.deps).run();
+      const mage = h.segs.find((s) => s.profile === 'mage')!;
+      expect([mage.xpStart, mage.xpEnd]).toEqual([1_900_000, 2_350_000]);
+      // No sheet read: nothing recorded (never a 0 that would read as a real total).
+      const soldier = h.segs.find((s) => s.profile === 'soldier')!;
+      expect('xpStart' in soldier || 'xpEnd' in soldier).toBe(false);
+      expect(given.find(([p]) => p === 'mage')![1]).toContain('XP 1,900,000 total');
+      expect(given.find(([p]) => p === 'soldier')![1]).toBeNull();
+    } finally { h.cleanup(); }
+  });
+
   it('a block that fails to read is logged and left out; the segment still starts', async () => {
     const h = harness({ maxSegments: 1, segment: { ...CAST.segment, minutes: 1, restartPauseSeconds: 0 } }, (_p, text, p) => {
       if (/Wrap up now/.test(text)) p.emit(result('report'));

@@ -32,7 +32,7 @@ import { STATE_DIR, logFile, pidAlive, readInfo } from '../ac-agent/state.ts';
 import { type CharacterConfig, type StreamConfig, parseStreamConfig } from './config.ts';
 import { type ChatParseState, FeedWriter, FileTail, type SegmentUsage, addUsage, feedPath, parseChatLine, parseStreamJsonLine, statusDraft } from './feed.ts';
 import { type SegmentRecord, QUIET_TOOLS, afterTurn, dayUsage, endReason, localDay, nextSegment, quietNudge, runningTask } from './policy.ts';
-import { loadOwnTime } from './own-time.ts';
+import { loadOwnTime, sheetXp } from './own-time.ts';
 import { preparePlayerDir } from './player.ts';
 import { type TableSpell, loadSpellTableRows } from './spellGaps.ts';
 import type { ShopOffer, ShopVendor } from './shops.ts';
@@ -151,10 +151,11 @@ export interface SupervisorDeps {
   /** The character's ready fight routine (tools/stream/routines/<profile>.json), for the readiness supplies line; null when none. */
   routine?(profile: string): RoutineProfile | null;
   /**
-   * Where the character's time went in its previous segment (own-time.ts loadOwnTime: travel, fights, buffs, trips, XP per
+   * Where the character's time went in its previous segment (own-time.ts loadOwnTime: travel, fights, buffs, trips, the
+   * segment's and the day's XP against the next level (from `sheet`, the opening's sheet read), XP per
    * hour by spot, waiting, refused casts, time apart), for the opening; null when there is no previous segment.
    */
-  ownTime?(profile: string, character: string, cast: readonly string[]): string | null;
+  ownTime?(profile: string, character: string, cast: readonly string[], sheet?: string | null): string | null;
   /** One agent-API call through the daemon (the stop flow's logout of an attached tab). */
   callAgent(profile: string, method: string, args?: unknown[]): Promise<unknown>;
   journal(profile: string): string;
@@ -559,7 +560,7 @@ export class StreamSupervisor {
       session: sessionSoFar(cfg.characters.map((o) => ({ character: o.character, tally: this.tally.get(o.profile) }))),
     });
     let ownTime: string | null = null;
-    try { ownTime = deps.ownTime?.(c.profile, c.character, cfg.characters.map((o) => o.character)) ?? null; } catch (e) { deps.log(`${c.character}: own time: ${(e as Error).message}`); }
+    try { ownTime = deps.ownTime?.(c.profile, c.character, cfg.characters.map((o) => o.character), sheet) ?? null; } catch (e) { deps.log(`${c.character}: own time: ${(e as Error).message}`); }
     const startMs = deps.now();
     const deadline = startMs + cfg.segment.minutes * 60_000;
     const hardDeadline = deadline + cfg.segment.wrapUpMinutes * 60_000 + 60_000;
@@ -670,11 +671,15 @@ export class StreamSupervisor {
     const endMs = deps.now();
     const reason = endReason({ stopping: this.stopping, wrapUpSent, killed, sawResult, exitCode, resultSubtype });
     const minutes = (endMs - startMs) / 60_000;
+    // Total XP at both ends, from the same sheet read the readiness block uses, for the next opening's XP line.
+    const xpStart = sheetXp(sheet)?.total;
+    const xpEnd = sheetXp(await deps.characterSheet(c.profile).catch(() => null))?.total;
     deps.feed.write({ type: 'segment-end', char: c.profile, title: `${c.character}: segment ${segment}`, detail: segmentDetail(reason, minutes, usage) });
     deps.log(`${c.character}: segment ${segment} ended: ${reason} after ${minutes.toFixed(1)} min${usage?.costUsd != null ? `, $${usage.costUsd.toFixed(2)} API-equivalent` : ''}${exitCode ? ` (exit ${exitCode})` : ''}`);
     return {
       profile: c.profile, character: c.character, segment, start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString(),
       minutes, reason, model, sessionId, usage, finalText: clipReport(finalText, 20_000),
+      ...(xpStart !== undefined ? { xpStart } : {}), ...(xpEnd !== undefined ? { xpEnd } : {}),
     };
   }
 
@@ -767,7 +772,7 @@ export function realDeps(cfg: StreamConfig): SupervisorDeps {
       const r = routineFromFile(f);
       return 'profile' in r ? r.profile : null;
     },
-    ownTime: (p, character, cast) => loadOwnTime({ streamDir: STREAM_DIR, feedFile: feedPath(), profile: p, character, cast, nowMs: Date.now(), areaCreatures }),
+    ownTime: (p, character, cast, sheet) => loadOwnTime({ streamDir: STREAM_DIR, feedFile: feedPath(), profile: p, character, cast, nowMs: Date.now(), sheet, areaCreatures }),
     callAgent: async (p, m, a = []) => { const c = client(p); if (!c) throw new Error(`no daemon for ${p}`); return c.call(m, a, 15_000); },
     journal: (p) => {
       const i = readInfo(p);

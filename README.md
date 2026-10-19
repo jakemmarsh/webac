@@ -12,6 +12,11 @@ name and password, and press ENTER. On most ACE worlds your account is created
 the first time you log in. Some worlds ask you to register on their website
 first; the launcher says which.
 
+**Guides:** [How to play Asheron's Call in 2026](https://playwebac.com/how-to-play-asherons-call/) ·
+[Live servers](https://playwebac.com/servers/) ·
+[Asheron's Call on Mac, Linux and Chromebook](https://playwebac.com/mac-linux/) ·
+[Which era: end of retail, Dark Majesty or AC1999](https://playwebac.com/eras/)
+
 > webAC is a fan project. It is not affiliated with, endorsed by or sponsored
 > by Warner Bros. Games, Turbine or Daybreak. "Asheron's Call" is a trademark
 > of its owner and is used here only to say what the client is compatible

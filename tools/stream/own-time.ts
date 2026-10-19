@@ -32,6 +32,9 @@ export const TIME_KINDS: readonly TimeKind[] = ['fighting', 'travelling', 'buffi
 export interface OwnTimeSegment {
   start: number;
   end: number;
+  /** Total XP from the character sheet at the segment's start / end (segments.jsonl xpStart / xpEnd), when recorded. */
+  xpStart?: number | null;
+  xpEnd?: number | null;
   session: SessionTimeline;
   feed: ReadonlyArray<FeedStatus | FeedChat>;
 }
@@ -345,6 +348,64 @@ export function xpLine(prevStatus: readonly FeedStatus[], todayStatus: readonly 
   return `- XP per hour: ${parts.join(', ')}`;
 }
 
+// ── XP over the last segment and the day ──
+
+/** The sheet's "<name>  level N" and "XP 1,234 total, … unassigned, 5,678 to next level" lines (GameUI.agentCharacterSheet), or null. */
+export function sheetXp(sheet: string | null | undefined): { total: number; toNext: number; level: number | null } | null {
+  const m = sheet ? /\bXP ([\d,]+) total, [\d,]+ unassigned, ([\d,]+) to next level\b/.exec(sheet) : null;
+  if (!m) return null;
+  const lv = /^.+?\s{2}level (\d+)\b/m.exec(sheet!);
+  return { total: Number(m[1].replace(/,/g, '')), toNext: Number(m[2].replace(/,/g, '')), level: lv ? Number(lv[1]) : null };
+}
+
+/** A feed status sample this close to a segment's edge stands for its start / end XP when segments.jsonl has none. */
+const XP_EDGE_MS = 3 * 60_000;
+
+/**
+ * Total XP at a segment's start and end: the sheet reads segments.jsonl recorded (xpStart / xpEnd), else the feed's
+ * status samples nearest each edge (within 3 min). Null when either is missing or the total went down (not one character).
+ */
+export function segmentXp(seg: OwnTimeSegment): { start: number; end: number } | null {
+  const s = seg.feed.filter((e): e is FeedStatus => e.type === 'status' && (e.xp?.total ?? 0) > 0).sort((a, b) => a.t - b.t);
+  const first = s.find((e) => e.t <= seg.start + XP_EDGE_MS);
+  const last = [...s].reverse().find((e) => e.t >= seg.end - XP_EDGE_MS);
+  const start = seg.xpStart ?? first?.xp.total ?? null;
+  const end = seg.xpEnd ?? last?.xp.total ?? null;
+  return start === null || end === null || end < start ? null : { start, end };
+}
+
+/** "1.02M", "640k", "12". */
+const xpAmount = (n: number): string => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(Math.round(n)));
+const duration = (h: number): string => (h < 1 ? `${Math.max(1, Math.round(h * 60))} min` : `${h.toFixed(1)} h`);
+
+/**
+ * "- XP: last segment 1.02M in 61 min (1.0M/h); level 54 is 3.13M away: about 3.1 h at that rate; today 6.20M over 7
+ * segments in 6.9 h (0.9M/h)". The level part is from the sheet read for this opening; the day's part needs two segments
+ * with XP. XP that works off vitae still counts in full (ACE Player_Xp.UpdateXpAndLevel adds the whole grant to
+ * TotalExperience, then feeds the same amount to the vitae pool), said only when the sheet shows vitae. Facts only;
+ * null when the last segment's start or end XP is unknown.
+ */
+export function xpRateLine(prev: OwnTimeSegment, earlier: readonly OwnTimeSegment[], sheet?: string | null): string | null {
+  const p = segmentXp(prev);
+  const ms = prev.end - prev.start;
+  if (!p || ms < 60_000) return null;
+  const gained = p.end - p.start;
+  const rate = gained / (ms / 3600_000);
+  let line = `- XP: last segment ${xpAmount(gained)} in ${Math.round(ms / 60_000)} min (${xpText(rate)}/h)`;
+  const now = sheetXp(sheet);
+  if (now && now.toNext > 0) {
+    line += `; ${now.level !== null ? `level ${now.level + 1}` : 'the next level'} is ${xpAmount(now.toNext)} away`;
+    if (rate > 0) line += `: about ${duration(now.toNext / rate)} at that rate`;
+  }
+  const day = [...earlier, prev].flatMap((s) => { const x = segmentXp(s); return x && s.end > s.start ? [{ xp: x.end - x.start, ms: s.end - s.start }] : []; });
+  if (day.length >= 2) {
+    const xp = day.reduce((a, d) => a + d.xp, 0), dms = day.reduce((a, d) => a + d.ms, 0);
+    line += `; today ${xpAmount(xp)} over ${day.length} segments in ${hours(dms)} (${xpText(xp / (dms / 3600_000))}/h)`;
+  }
+  if (sheet && /^Vitae: /m.test(sheet) && gained > 0) line += ' (XP earned under vitae counts in full toward your level and also works the vitae off)';
+  return line;
+}
+
 // ── waiting: no monster in sight, resting ──
 
 /** Monsters (not dying) in an observe result's nearby list, or null when the result has no list. */
@@ -456,10 +517,11 @@ export function apartLine(seg: OwnTimeSegment, partners: readonly string[]): str
 }
 
 /**
- * The opening's block (right after readiness): the time line, then XP per hour by spot, waiting, offensive casts refused
+ * The opening's block (right after readiness): the time line, then the segment's and the day's XP with the next level's
+ * distance (from `sheet`), XP per hour by spot, waiting, offensive casts refused
  * and time apart, each only when its data is there. Null when there is no previous segment.
  */
-export function ownTimeBlock(prev: OwnTimeSegment, earlier: readonly OwnTimeSegment[], cast: readonly string[], me?: string): string | null {
+export function ownTimeBlock(prev: OwnTimeSegment, earlier: readonly OwnTimeSegment[], cast: readonly string[], me?: string, sheet?: string | null): string | null {
   const names = portalNames([...earlier, prev]);
   const t = segmentTime(prev, cast, names);
   const first = ownTimeLine(prev, earlier, cast, names, t);
@@ -467,6 +529,7 @@ export function ownTimeBlock(prev: OwnTimeSegment, earlier: readonly OwnTimeSegm
   const statusOf = (s: OwnTimeSegment) => s.feed.filter((e): e is FeedStatus => e.type === 'status');
   const lines = [
     first,
+    xpRateLine(prev, earlier, sheet),
     xpLine(statusOf(prev), [...earlier, prev].flatMap(statusOf), names),
     waitingLine(prev, t),
     castRefusalLine(prev, cast, names),
@@ -477,7 +540,7 @@ export function ownTimeBlock(prev: OwnTimeSegment, earlier: readonly OwnTimeSegm
 
 // ── reading a run's files ──
 
-interface SegmentRow { profile: string; character?: string; segment: number; start: string; end: string; sessionId?: string | null }
+interface SegmentRow { profile: string; character?: string; segment: number; start: string; end: string; sessionId?: string | null; xpStart?: number | null; xpEnd?: number | null }
 
 /** The character's status and chat events from the feed, in [from, to]. */
 export function feedFor(feedFile: string, profile: string, from: number, to: number): Array<FeedStatus | FeedChat> {
@@ -498,7 +561,7 @@ export function feedFor(feedFile: string, profile: string, from: number, to: num
  * from the feed (corpses.ts loadCorpses: where, what is on each, when it rots; they outlive a restart, which empties
  * the page's own death log), then where its last segment's time went ({@link loadOwnTimeBlock}). Null with neither.
  */
-export function loadOwnTime(o: { streamDir: string; feedFile: string; profile: string; character?: string; cast: readonly string[]; nowMs: number; maxAgeMs?: number; areaCreatures?: (landblock: number) => AreaCreature[] | null }): string | null {
+export function loadOwnTime(o: { streamDir: string; feedFile: string; profile: string; character?: string; cast: readonly string[]; nowMs: number; maxAgeMs?: number; sheet?: string | null; areaCreatures?: (landblock: number) => AreaCreature[] | null }): string | null {
   const corpses = o.character ? loadCorpses({ feedFile: o.feedFile, profile: o.profile, character: o.character, nowMs: o.nowMs, areaCreatures: o.areaCreatures }) : null;
   const own = loadOwnTimeBlock(o);
   return [own, corpses].filter(Boolean).join('\n') || null;
@@ -508,7 +571,7 @@ export function loadOwnTime(o: { streamDir: string; feedFile: string; profile: s
  * The line for `profile`'s next opening, from its latest segment in `streamDir` (segments.jsonl + sessions/) and the
  * feed: null when it has none, or when that segment ended more than `maxAgeMs` ago (a new day's stream).
  */
-export function loadOwnTimeBlock(o: { streamDir: string; feedFile: string; profile: string; character?: string; cast: readonly string[]; nowMs: number; maxAgeMs?: number }): string | null {
+export function loadOwnTimeBlock(o: { streamDir: string; feedFile: string; profile: string; character?: string; cast: readonly string[]; nowMs: number; maxAgeMs?: number; sheet?: string | null }): string | null {
   const segFile = join(o.streamDir, 'segments.jsonl');
   if (!existsSync(segFile)) return null;
   const rows: SegmentRow[] = readFileSync(segFile, 'utf8').split('\n').filter(Boolean)
@@ -530,7 +593,7 @@ export function loadOwnTimeBlock(o: { streamDir: string; feedFile: string; profi
     const files = [...new Set([localDay(r.start), localDay(r.end)])].map((d) => join(o.streamDir, 'sessions', `${r.profile}-${d}-seg${r.segment}.jsonl`));
     const session = parseSession(files.flatMap(lines), r.sessionId ?? undefined);
     session.calls = session.calls.filter((c) => c.end >= start && c.start <= end);
-    return { start, end, session, feed: feed.filter((e) => e.t >= start && e.t <= end) };
+    return { start, end, session, feed: feed.filter((e) => e.t >= start && e.t <= end), xpStart: r.xpStart ?? null, xpEnd: r.xpEnd ?? null };
   };
-  return ownTimeBlock(segOf(prev), today.slice(0, -1).map(segOf), o.cast, o.character ?? prev.character);
+  return ownTimeBlock(segOf(prev), today.slice(0, -1).map(segOf), o.cast, o.character ?? prev.character, o.sheet);
 }

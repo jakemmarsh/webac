@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { parseSession } from '../tools/stream/dead-air.ts';
 import type { FeedChat, FeedStatus } from '../tools/stream/feed-types.ts';
 import {
-  apartLine, castIsBuff, castRefusalLine, fellowSample, loadOwnTime, monstersInObserve, ownTimeBlock, ownTimeLine, placeText, segmentTime, spotOf, waitingLine, xpLine,
+  apartLine, castIsBuff, castRefusalLine, fellowSample, loadOwnTime, monstersInObserve, ownTimeBlock, ownTimeLine, placeText, segmentTime, segmentXp, sheetXp, spotOf, waitingLine, xpLine, xpRateLine,
   type OwnTimeSegment,
 } from '../tools/stream/own-time.ts';
 import { segmentOpening } from '../tools/stream/prompt.ts';
@@ -179,12 +179,59 @@ describe('own time: one hour of a mage', () => {
     const block = ownTimeBlock(seg, [earlier], CAST, 'Claude Arcanist')!;
     expect(block.split('\n')).toEqual([
       '- last hour: travelling 8 min (1 portal trip), fighting 13 min, buffing 2 min, waiting/idle 37 min; longest trip Holtburg → Mountain Keep (54.7N 32.9E), 8 min, 2nd time today',
+      '- XP: last segment 600k in 60 min (600k/h); today 1.20M over 2 segments in 2.0 h (600k/h)',
       '- XP per hour: Mountain Keep 747k/h over 48 min (today 747k/h over 1.6 h), Holtburg 0/h over 5 min (today 0/h over 11 min)',
       '- waiting: 6 min with no monster in sight, 5 min resting (mana)',
       '- offensive casts refused for no line of fire or out of range: Mountain Keep 20% (10/50)',
       '- apart from Claude Bulwark (over 30 m, another floor or out of sight): 7 min (different floors 2)',
     ]);
     expect(block).not.toMatch(ADVICE);
+  });
+});
+
+// Jake 2026-10-19 ("add the XP rate"): the segment's and the day's XP against the next level, from the sheet the
+// opening reads and the totals segments.jsonl records at each segment's ends (the feed's status samples for older rows).
+describe('own time: the XP line (last segment, the next level, the day)', () => {
+  const { seg } = hour(T0, 'sess-2');
+  const earlier = hour(T0 - 2 * 3600_000, 'sess-1').seg;
+  // GameUI.agentCharacterSheet's first two lines; the Vitae line as AgentApi.characterSheet adds it.
+  const SHEET = 'Claude Arcanist  level 53  Aluvian Male  NPK\nXP 77,056,170 total, 1,204 unassigned, 3,130,000 to next level; 2 skill credits';
+  const VITAE = `${SHEET}\nVitae: -5%: costs 5% of every attribute and skill; 120,000 more XP works it off`;
+
+  it('reads the sheet\'s level, total XP and XP to the next level', () => {
+    expect(sheetXp(SHEET)).toEqual({ total: 77_056_170, toNext: 3_130_000, level: 53 });
+    expect(sheetXp('XP 5 total, 0 unassigned, 0 to next level; 0 skill credits')).toEqual({ total: 5, toNext: 0, level: null });
+    expect(sheetXp(null)).toBeNull();
+    expect(sheetXp('no xp here')).toBeNull();
+  });
+
+  it('a segment\'s ends: the recorded sheet totals first, else the feed\'s samples nearest each edge', () => {
+    expect(segmentXp(seg)).toEqual({ start: 10_000_000, end: 10_600_000 });
+    expect(segmentXp({ ...seg, xpStart: 9_000_000, xpEnd: 11_000_000 })).toEqual({ start: 9_000_000, end: 11_000_000 });
+    // No sample within 3 min of the start (the feed was off): unknown, not the first sample an hour in.
+    expect(segmentXp({ ...seg, feed: seg.feed.filter((e) => e.t > T0 + 30 * 60_000) })).toBeNull();
+    expect(segmentXp({ ...seg, feed: [] })).toBeNull();
+    // A total that went down is not one character's: no number.
+    expect(segmentXp({ ...seg, xpStart: 20_000_000 })).toBeNull();
+  });
+
+  it('the line: the segment, the next level\'s distance at that rate, and the day', () => {
+    expect(xpRateLine(seg, [earlier], SHEET)).toBe('- XP: last segment 600k in 60 min (600k/h); level 54 is 3.13M away: about 5.2 h at that rate; today 1.20M over 2 segments in 2.0 h (600k/h)');
+    // One segment today: no day part; no sheet: no level part.
+    expect(xpRateLine(seg, [])).toBe('- XP: last segment 600k in 60 min (600k/h)');
+    // Under an hour away; the max level (0 to go) says nothing of a next level.
+    expect(xpRateLine({ ...seg, xpStart: 8_000_000, xpEnd: 10_020_000 }, [], SHEET.replace('3,130,000', '1,010,000'))).toBe('- XP: last segment 2.02M in 60 min (2.0M/h); level 54 is 1.01M away: about 30 min at that rate');
+    expect(xpRateLine(seg, [], SHEET.replace('3,130,000 to next', '0 to next'))).toBe('- XP: last segment 600k in 60 min (600k/h)');
+    // No XP at all: the distance without a time.
+    expect(xpRateLine({ ...seg, xpStart: 5, xpEnd: 5 }, [], SHEET)).toBe('- XP: last segment 0 in 60 min (0/h); level 54 is 3.13M away');
+    // A day segment without numbers is left out of the day's sum rather than guessed.
+    expect(xpRateLine(seg, [{ ...earlier, feed: [] }, earlier], SHEET)).toMatch(/; today 1\.20M over 2 segments in 2\.0 h \(600k\/h\)$/);
+    expect(xpRateLine({ ...seg, feed: [] }, [earlier], SHEET)).toBeNull();
+    expect(xpRateLine(seg, [earlier], SHEET)).not.toMatch(ADVICE);
+  });
+
+  it('under vitae: says the XP still counts in full (ACE adds the whole grant to TotalExperience, then the same to the vitae pool)', () => {
+    expect(xpRateLine(seg, [], VITAE)).toBe('- XP: last segment 600k in 60 min (600k/h); level 54 is 3.13M away: about 5.2 h at that rate (XP earned under vitae counts in full toward your level and also works the vitae off)');
   });
 });
 
@@ -209,6 +256,15 @@ describe('own time: read from a run directory (segments.jsonl, sessions/, the fe
     const got = loadOwnTime({ streamDir: dir, feedFile: join(dir, 'feed.jsonl'), profile: 'mage', cast: CAST, nowMs: T0 + 3600_000 + 30_000 });
     expect(got).toBe(ownTimeBlock(hour(T0, 'sess-2').seg, [hour(T0 - 2 * 3600_000, 'sess-1').seg], CAST, 'Claude Arcanist'));
     expect(got).toMatch(/2nd time today/);
+  });
+
+  it('the XP line takes segments.jsonl\'s recorded totals and the opening\'s sheet', () => {
+    setup();
+    const rows = [1, 2].map((n) => ({ profile: 'mage', character: 'Claude Arcanist', segment: n, start: new Date(T0 - (2 - n) * 2 * 3600_000).toISOString(), end: new Date(T0 - (2 - n) * 2 * 3600_000 + 3600_000).toISOString(), minutes: 60, reason: 'done', model: 'm', sessionId: `sess-${n}`, usage: null, finalText: '', xpStart: n * 1_000_000, xpEnd: n * 1_000_000 + 900_000 }));
+    writeFileSync(join(dir, 'segments.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const sheet = 'Claude Arcanist  level 53  x\nXP 2,900,000 total, 0 unassigned, 1,800,000 to next level; 0 skill credits';
+    const got = loadOwnTime({ streamDir: dir, feedFile: join(dir, 'feed.jsonl'), profile: 'mage', cast: CAST, nowMs: T0 + 3600_000 + 30_000, sheet })!;
+    expect(got.split('\n')).toContain('- XP: last segment 900k in 60 min (900k/h); level 54 is 1.80M away: about 2.0 h at that rate; today 1.80M over 2 segments in 2.0 h (900k/h)');
   });
 
   it('nothing when there is no previous segment, or it ended hours ago', () => {
