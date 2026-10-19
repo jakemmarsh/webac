@@ -160,6 +160,21 @@ export class VtMacro {
     return blocked;
   }
 
+  /**
+   * Why the macro's attacks may not have touched monster `guid` (the HP tracker's "health hasn't changed"), when the
+   * client can tell: the last cast at it refused for a wall (blocked), no line of fire now (UseProjectileAwareness's
+   * test), a storey up or down indoors, or past Monster Range. Null when nothing says (then it may be a ghost).
+   */
+  private unhitWhy(guid: number, seen: ReadonlyArray<{ guid: number; dist: number; dz: number }>, indoors: boolean, range: number): string | null {
+    const o = seen.find((x) => x.guid === guid);
+    if (this.blocked.has(guid)) return 'your casts at it were refused for no line of fire (a wall or the floor between you)';
+    if (!o) return null;
+    if (this.lineOfFire(guid) === true) return 'there is no line of fire to it from where you stand (a wall or the floor between you)';
+    if (indoors && Math.abs(o.dz) >= AgentApi.OTHER_FLOOR_M) return `it is ${Math.abs(o.dz).toFixed(0)} m ${o.dz > 0 ? 'up' : 'down'}, on another floor`;
+    if (o.dist > range) return `it is out of reach: ${o.dist.toFixed(0)} m off, past Monster Range (${range} m)`;
+    return null;
+  }
+
   /** The monster of that name the macro fought most recently. */
   private foughtNamed(name: string): number | null {
     let best: { guid: number; at: number } | null = null;
@@ -275,6 +290,60 @@ export class VtMacro {
   }
   /** Monsters a spell couldn't reach ("no line of fire"), set aside until then (VTank moves on to another target). */
   private blocked = new Map<number, number>();
+  /** SeekLineOfFire's last move or note by monster: when, and how many moves since a line last opened to it. */
+  private lineSeek = new Map<number, { at: number; moves: number; said: number }>();
+  /** SeekLineOfFire moves at one monster at most this often (ms), and this many times before it only waits (and says so). */
+  static readonly LINE_SEEK_EVERY_MS = 3000;
+  static readonly LINE_SEEK_MOVES = 2;
+  /** SeekLineOfFire's "no line, waiting" note for one monster comes again after this long (ms). */
+  static readonly LINE_SEEK_SAY_MS = 30_000;
+
+  /**
+   * Beyond VTank (SeekLineOfFire, beyondVtank.ts): the step for a caster (magic mode, or a caster wielded; not melee or a
+   * bow) whose bolts reach none of the monsters fighting it: one hitting you, running at you or on a fellow within
+   * Monster Range, whose line of fire is blocked (UseProjectileAwareness's test, or a cast refused for it). It walks to
+   * the nearest spot within 3 m with an open line, else beside the fellow whose place has one (AgentApi.lineOfFireMove);
+   * with neither, or after LINE_SEEK_MOVES moves that opened none, the routine's log says so and it waits. "Arcanist
+   * fights" stood silent 50 s with a Dread Mu-miyah 4 m off running at him behind a wall, its every pass planning nothing,
+   * until Bulwark fetched it through a door; Arcanist's hand bolt was refused with no spot within 3 m (Mountain Keep,
+   * 2026-10-19 15:33:04–15:34:10Z). Null when there is nothing so placed, or a line is open to it.
+   */
+  private seekLineStep(settings: Record<string, string | number | boolean>, stance: Stance, seen: ReadonlyArray<{ guid: number; name: string; dist: number; bearing: number; attackingYou?: number; comingAtYou?: string }>, range: number, aware: boolean): VtStep | null {
+    if (!beyondSetting(settings, 'SeekLineOfFire') || this.fightsMelee(stance)) return null;
+    const onFellow = this.monstersOnFellows();
+    const now = this.now();
+    const fighting = seen.filter((o) => o.dist <= range && (!!o.attackingYou || !!o.comingAtYou || onFellow.has(o.guid)) && !this.targets.excluded(o.guid) && (this.allowTarget?.(o) ?? true));
+    // One with an open line is the planner's to fight: nothing to seek.
+    const blockedNow = (g: number): boolean => this.blocked.has(g) || (aware && this.lineOfFire(g) === true);
+    for (const o of fighting) if (!blockedNow(o.guid)) { this.lineSeek.delete(o.guid); }
+    const want = fighting.filter((o) => blockedNow(o.guid)).sort((a, b) => (b.attackingYou ? 1 : 0) - (a.attackingYou ? 1 : 0) || a.dist - b.dist)[0];
+    if (!want) return null;
+    const rec = this.lineSeek.get(want.guid) ?? { at: -Infinity, moves: 0, said: -Infinity };
+    if (now - rec.at < VtMacro.LINE_SEEK_EVERY_MS) return null;
+    const how = want.attackingYou ? 'hitting you' : onFellow.has(want.guid) ? 'on a fellow' : 'running at you';
+    const label = `combat: no line of fire to ${want.name} #${want.guid.toString(16)} (${want.dist.toFixed(0)} m, ${how})`;
+    // A bow's arrow flies an arc (lineOfFireBlocked's missile test), not the bolt's straight line the spot search tests: a
+    // missile routine only says it.
+    const move = stance !== 'missile' && rec.moves < VtMacro.LINE_SEEK_MOVES ? this.api.lineOfFireMove(want.guid) : null;
+    if (move) {
+      this.lineSeek.set(want.guid, { ...rec, at: now, moves: rec.moves + 1 });
+      // A fresh look at the line once there: the refusal's set-aside (blocked) was for where you stood.
+      return { label: `${label}: stepping ${move.where} for one (SeekLineOfFire)`, run: async () => {
+        // Through the hits (flee): the step is what a monster on you calls for, not a walk to stop for it.
+        const r = await this.api.walkTo(move.walk, { ...(move.within !== undefined ? { within: move.within } : {}), timeoutMs: 8000, flee: true });
+        this.blocked.delete(want.guid);
+        this.lofSeen.delete(want.guid);
+        return r;
+      } };
+    }
+    this.lineSeek.set(want.guid, { ...rec, at: now });
+    if (now - rec.said < VtMacro.LINE_SEEK_SAY_MS) return null;
+    this.lineSeek.set(want.guid, { ...rec, at: now, said: now });
+    const why = stance === 'missile' ? 'a wall, the ground or an object stands in your arrows\' way'
+      : rec.moves >= VtMacro.LINE_SEEK_MOVES ? `${rec.moves} steps for a line opened none`
+      : 'a wall or object stands between, and no spot within 3 m of you, nor beside a fellow in view, has an open line';
+    return { label, run: async () => ({ ok: true, message: `${why}: waiting for it to come round the wall (or for a fellow to bring it); your bolts go at it once a line opens (SeekLineOfFire)` }) };
+  }
   private noMagicUntil = 0;
 
   /**
@@ -907,7 +976,7 @@ export class VtMacro {
     const ts = trackerSettings(settings);
     const seen = snap.nearby.filter((o) => o.kind === 'monster' && !o.dying);
     this.targets.observe(seen, ts);
-    const ghost = this.targets.checkHp((name) => (this.monsterFacts?.(name)?.maxHealth ?? 0) > 0, ts);
+    const ghost = this.targets.checkHp((name) => (this.monsterFacts?.(name)?.maxHealth ?? 0) > 0, ts, (g) => this.unhitWhy(g, seen, me.indoors, range));
     if (ghost) this.notices.push(ghost);
     if (this.notices.length) {
       const said = this.notices.splice(0);
@@ -921,7 +990,12 @@ export class VtMacro {
     const skipUnreachable = beyondSetting(settings, 'SkipUnreachableMonsters') && this.fightsMelee(stance);
     const onFellow = beyondSetting(settings, 'ProtectFellows') ? this.monstersOnFellows() : new Set<number>();
     const guardRange = Math.max(range, beyondSetting(settings, 'ProtectFellowsDistance'));
-    const unreachable = (o: (typeof seen)[number]): boolean => skipUnreachable && (!!o.comingAtYouStuck || (me.indoors && Math.abs(o.dz) >= AgentApi.OTHER_FLOOR_M));
+    // A stuck chaser indoors that the doorway route reaches (AgentApi.walkReaches) is the walk's to judge (chaseBarred
+    // below: the long way round, another storey, a fellow left behind): one a walk reaches is one your sword reaches, as
+    // the routine's own far attack walks there (AgentApi.attack's run-up, as ac_attack far=true does by hand). "Bulwark
+    // fights" left every mummy stuck behind a wall alone, and Bulwark fetched each by hand with far=true (Sand Shallow,
+    // 2026-10-19). With no route, or none known (one room; out on the landscape), a stuck chase is still skipped.
+    const unreachable = (o: (typeof seen)[number]): boolean => skipUnreachable && ((!!o.comingAtYouStuck && !(me.indoors && this.api.walkReaches(o.guid) === true)) || (me.indoors && Math.abs(o.dz) >= AgentApi.OTHER_FLOOR_M));
     // Indoors, a monster a melee routine would chase the long way round, a storey off by the way there, or away from its
     // fellow (AgentApi.meleeChaseBar) is no target either; the one you picked by hand is yours to go after.
     const picked = this.picked?.() ?? null;
@@ -1152,6 +1226,13 @@ export class VtMacro {
         if (c.to === 'magic') return this.toMagic(p, `combat: ${c.why}`);
         return { label: `combat: ${c.why}`, run: () => { this.lastAttack = null; return this.switchMode(p, c.to); } };
       }
+    }
+
+    // 7b. Beyond VTank (SeekLineOfFire): a caster with no line of fire to a monster on you, coming at you or on a fellow
+    // steps to where it has one, or says why it can't. VTank leaves a blocked monster for the pass and stands.
+    if (ctx.combat) {
+      const seek = this.seekLineStep(settings, stance, seen, range, aware);
+      if (seek) return seek;
     }
 
     // 8. Nothing to fight: crafting (AutoCraftItems, in peace mode), SpellCompMin-Idle pea splitting and

@@ -263,9 +263,10 @@ describe('2. the use\'s give-up distance is the straight one to the object, said
     // In the hall (an interior cell): the use walks the doorway route there first (approach), as in Holtburg.
     host.add({ guid: V, name: 'Scrivener of Life Magic', itemType: 0x10, cell: ((HOLTBURG & 0xffff0000) | 0x0107) >>> 0, x: 80, y: 140, z: 97 });
     host.routeTo = [{ x: 80, y: 130, z: 94 }];
-    const r = (await settle(api, host, api.use(V), 20_000))!;
+    // A 120 m way: walk_to's time for it (120 ÷ 3 + 30 = 70 s), not the use's own 5 s (2026-10-19 15:49Z reports, 3).
+    const r = (await settle(api, host, api.use(V), 120_000))!;
     expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/^couldn't reach Scrivener of Life Magic: walking to Scrivener of Life Magic took longer than 5 s and stopped (\d+\.\d) m away, 3 m above you; ac_walk_to it first \(it can take longer\), then use it \(straight-line; it was 120 m off when the walk set off\)/);
+    expect(r.message).toMatch(/^couldn't reach Scrivener of Life Magic: walking to Scrivener of Life Magic took longer than (?:6\d|7\d) s and stopped (\d+\.\d) m away, 3 m above you; ac_walk_to it first \(it can take longer\), then use it \(straight-line; it was 120 m off when the walk set off\)/);
     const d = Number(/stopped (\d+\.\d) m away/.exec(r.message)![1]);
     expect(d).toBeCloseTo(Math.hypot(host.me.x - 80, host.me.y - 140), 0);
   });

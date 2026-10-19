@@ -542,7 +542,7 @@ describe('7b. attack past the fellow leash says the rule and its numbers', () =>
     run(api, host, 200, { physics: false });
     const r = api.attack(DOLL);
     expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/^Pristine Doll #80007b75 is 54 m S: running up to it leaves Claude Arcanist \(2 m from you now\) \d+ m behind, so no attack was started \(the fellow leash: past 12 m a melee attack runs up only when every fellow beside you stays within 15 m of you there; far=true lifts it\)\. /);
+    expect(r.message).toMatch(/^Pristine Doll #80007b75 is 54 m S: running up to it leaves Claude Arcanist \(2 m from you now\) \d+ m behind, so no attack was started \(the fellow leash: past 12 m a melee attack runs up only when every fellow beside you stays within 15 m of you there, a fellow who has kept up with you as you moved lately counting as coming along; far=true lifts it\)\. /);
     expect(r.message).toMatch(/ac_attack target=#80007b75 far=true to go anyway$/);
     vi.useRealTimers();
     vi.restoreAllMocks();

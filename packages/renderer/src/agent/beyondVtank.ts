@@ -65,9 +65,13 @@ export function awayWord(from: ReadonlyArray<{ bearing: number }>): string | nul
  * looked at what was on its caster. They sit beside VTank's options in a profile's settings (any case) and an export
  * leaves them out (VTank ignores names it doesn't know).
  *   SkipUnreachableMonsters (on): with melee (no caster or bow in hand, not in magic or missile mode), a monster that
- *     is aimed at you but not reaching you (observe's AIMED AT YOU BUT NOT REACHING YOU: a chase no nearer in
- *     AgentApi.AGGRO_STALL_MS) or that stands a storey up or down indoors is no target: the server's straight-line
- *     walk-in can't reach it. A bolt still can when its line is open (UseProjectileAwareness decides that).
+ *     stands a storey up or down indoors, or that is aimed at you but not reaching you (observe's AIMED AT YOU BUT NOT
+ *     REACHING YOU: a chase no nearer in AgentApi.AGGRO_STALL_MS), is no target, unless indoors the doorway route reaches
+ *     it (AgentApi.walkReaches): then the walk to it judges (AgentApi.meleeChaseBar: the long way round, another storey,
+ *     a fellow left behind), and one a walk reaches is fought, as the routine's far attack walks there (2026-10-19: "Bulwark
+ *     fights" left every Sand Shallow mummy stuck behind a wall alone, and Bulwark fetched each by hand with far=true).
+ *     A bolt still reaches what its line is open to (UseProjectileAwareness decides that), and observe says, of a stuck
+ *     one, which fellow in view has a line of fire to it.
  *   ProtectFellows (off): a monster on a fellow (by the fellows line's rule: AgentApi.comingAt(fellow), within reach of
  *     them) is fought before the others of its priority, out to ProtectFellowsDistance metres from you even past
  *     Monster Range, and a swing at another breaks off when one gets on a fellow (peeling for the caster).
@@ -99,8 +103,14 @@ export function awayWord(from: ReadonlyArray<{ bearing: number }>): string | nul
  *     Attack), so a long fight doesn't run them out. A Force Buff round is never held. VTank casts the rebuff first:
  *     "Arcanist fights" cast Invulnerability Self VI and four banes while two Innocuous Dolls hit him at the Aerbax
  *     Laboratory portal, until he bolted them by hand (2026-10-18 18:40:05–17Z). 0 is VTank's order.
+ *   SeekLineOfFire (on; 2026-10-19): a caster (not melee; a bow only says it) whose bolt line to a monster hitting you, running at
+ *     you or on a fellow (within Monster Range) is blocked steps to the nearest spot within 3 m with an open line, else
+ *     beside the fellow whose place has one (AgentApi.lineOfFireMove); two steps that open none, or no such spot, and the
+ *     routine's log says so and it waits for the monster to come round. VTank leaves a blocked monster for the pass and
+ *     stands: "Arcanist fights" stood 50 s, silent, with a Dread Mu-miyah 4 m off running at him behind a wall (Mountain
+ *     Keep, 2026-10-19 15:33Z). Off is VTank's way.
  */
-export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true, BuffMinLandChance: 75, FollowLeash: 0, FollowThroughPortals: true, FightBeforeBuffs: 60 } as const;
+export const BEYOND_MACRO_DEFAULTS = { SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true, BuffMinLandChance: 75, FollowLeash: 0, FollowThroughPortals: true, FightBeforeBuffs: 60, SeekLineOfFire: true } as const;
 
 /** A beyond-VTank macro setting from a profile's settings (any case), else its default. */
 export function beyondSetting<K extends keyof typeof BEYOND_MACRO_DEFAULTS>(settings: Record<string, string | number | boolean>, name: K): (typeof BEYOND_MACRO_DEFAULTS)[K] {

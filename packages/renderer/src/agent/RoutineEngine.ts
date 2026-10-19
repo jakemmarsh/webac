@@ -1700,7 +1700,7 @@ export class RoutineEngine {
         if (f && !lead && obs.me && f.portal) {
           f.walking = 'portal';
           const pg = f.portal;
-          const r = await this.api.use(pg.guid);
+          const r = await this.api.use(pg.guid, { why: `following ${f.who} (your routine's Follow)` });
           this.note(`Follow: through ${pg.name} #${pg.guid.toString(16)} after ${f.who}: ${r.message.split('\n')[0]}`);
           if (r.ok) this.followMoved(`went through ${pg.name} after ${f.who}`);
           if (!r.ok) { this.followPortalFailed.set(pg.guid, this.now()); this.report(`Follow: couldn't follow ${f.who} through ${pg.name}: ${r.message.split('\n')[0]}`, 'Warnings'); }
@@ -1751,7 +1751,9 @@ export class RoutineEngine {
           // The same no-way-on-foot backoff as the last-placement walk: a leader in sight on a part of the dungeon no walk
           // reaches is not walked at every cycle.
           if (f.noWayUntil && this.now() < f.noWayUntil) { await sleep(1000); return; }
-          const r = await this.api.walkTo(lead.guid, { within: otherStorey ? Math.min(within, STOREY_FOLLOW_M) : within, timeoutMs: 15_000 });
+          // Tracked: indoors the way is planned again as they go on into other rooms (WalkOptions.track), not run straight
+          // at where they are now from the plan made at the start (Sand Shallow, 2026-10-19: a floor up, 20–30 m behind).
+          const r = await this.api.walkTo(lead.guid, { within: otherStorey ? Math.min(within, STOREY_FOLLOW_M) : within, timeoutMs: 15_000, track: true });
           this.noteFollowDrop(r.message, f.who);
           if (!r.ok && /no way on foot/i.test(r.message)) {
             f.noWayUntil = this.now() + FOLLOW_NO_WAY_MS;

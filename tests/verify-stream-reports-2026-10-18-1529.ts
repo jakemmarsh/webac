@@ -131,8 +131,9 @@ describe.skipIf(!haveDat)('1. the routine\'s Follow takes the portal its leader 
     const why = `${r.hist}\n${r.traces.slice(-3000)}`;
     expect(r.sent, why).not.toContain(`use ${SURFACE.toString(16)}`);
     expect(r.hist, why).toMatch(/Follow: Claude Bulwark is out of sight; standing still/);
-    // The live failure, reproduced: the pocket half has no doorway route to the entrance (0x029E0269).
-    expect(r.traces, why).toMatch(/no doorway route from cell 0x29e01(17|19|22) to cell 0x29e0269/);
+    // The live failure, reproduced: the pocket half has no doorway route to the entrance (0x029E0269). (Her Follow's walk,
+    // planned again as he went on toward the portal (WalkOptions.track, 2026-10-19), has her nearer it, in 0x011B.)
+    expect(r.traces, why).toMatch(/no doorway route from cell 0x29e01(17|19|1b|22) to cell 0x29e0269/);
     expect(r.hist, why).toMatch(/Follow: no way on foot to where Claude Bulwark was last placed: .*standing still \(ask them where they are\)/);
     // In the 49 s after his re-entry: one try each FOLLOW_NO_WAY_MS (15 s), not one every 0.6 s.
     expect((r.traces.match(/routeCutOff\); ending at once/g) ?? []).length, why).toBeLessThanOrEqual(5);

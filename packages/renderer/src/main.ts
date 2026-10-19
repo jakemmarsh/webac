@@ -412,6 +412,7 @@ import { logOffCharacter, installUnloadSessionClose } from './session/PlayerModu
 import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLogOff, type RequestLogOffDeps } from './session/LogoutFlow.js';
 import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
+import { launcherConnectFailedReport, reportFromPage, worldListFailedReport } from './telemetry/WebReport.js';
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
@@ -7524,6 +7525,11 @@ async function main() {
   let launcherWorldName: string | null = null;
   /** The launcher world (null: URL login or an era reload): its registration note explains a login timeout. */
   let launcherWorld: World | null = null;
+  /**
+   * When the launcher (or its era reload) handed over the current login; null
+   * once its connection failure was reported (BUG.world-list-unreachable).
+   */
+  let launcherLoginAt: number | null = null;
 
   // ── Update notifier (update/UpdateWatcher.ts) ──
   // A new deploy reloads at a natural break: on the launcher before a
@@ -7645,6 +7651,7 @@ async function main() {
     connectUrl = login.connectUrl;
     launcherWorldName = login.worldName;
     launcherWorld = login.world;
+    launcherLoginAt = Date.now();
     // An end-of-retail world on GDL / GDLE reads strings as Windows-1252, not ACE's UTF-8.
     setString16Wire(login.wire);
     if (login.world) console.log(`[AC] ${login.world.name}: ${login.world.emu ?? 'unknown'} server, strings as ${login.wire === 'ace' ? 'UTF-8' : 'Windows-1252'}`);
@@ -7657,6 +7664,10 @@ async function main() {
         bridgeUrl,
         prefillAccount: aceAccount || urlLogin.prefillAccount,
         loadDirectory: () => loadWorldDirectory(bridgeUrl),
+        // BUG.world-list-unreachable — the bridge never saw these requests, so report through the web origin.
+        onWorldListFailed: (f) => {
+          reportFromPage(worldListFailedReport(f, bridgeUrl, (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID));
+        },
         sourceUrl: runtimeConfig.sourceUrl,
         siteLinks: runtimeConfig.siteLinks,
         linkedWorld,
@@ -18175,6 +18186,15 @@ async function main() {
               break;
             }
             if (!gameStarted) preworldReporter?.connectionError(event, netNotice.token || null);
+            // BUG.world-list-unreachable — a launcher login whose socket to our bridge never opened:
+            // the bridge has no trace of it, so report it through the web origin (once per login).
+            if (!gameStarted && launcherLoginAt !== null) {
+              const report = launcherConnectFailedReport({
+                netErrorId: event.netErrorId ?? null, connectUrl, bridgeUrl, sinceLoginMs: Date.now() - launcherLoginAt,
+                build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
+              });
+              if (report) { launcherLoginAt = null; reportFromPage(report); }
+            }
             raiseNetError(netNotice);
             break;
           }

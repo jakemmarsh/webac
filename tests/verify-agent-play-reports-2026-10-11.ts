@@ -6,7 +6,7 @@
  * take; ac_use's walk ran on past the tool's timeout with a fellowship invite open. (Loot and the door timing are
  * in verify-agent-api.ts.)
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { AgentApi, compassToYaw, parseOffset } from '../packages/renderer/src/agent/AgentApi.ts';
 import { INCOMING_TELL, TOOLS, waitFilter } from '../tools/ac-agent/tools.ts';
 import { FakeHost, HOLTBURG, run } from './_harness/agentFake.ts';
@@ -94,9 +94,13 @@ describe('agent play reports 2026-10-11', () => {
     expect(formatSpells(host.spells())).toBe('  1427  Focus Other I  [Creature Enchantment L1]  range 6 m');
   });
 
-  it('ac_use gives up walking to its object inside the tool\'s time, stops the walk, and names an open dialog', async () => {
-    // The scrivener is in a building (an interior cell), 250 m off across the landblock: a 60 s run.
-    host.me.x = 5; host.me.y = 5;
+  it('ac_use gives up walking to its object when its time runs out, stops the walk, and names an open dialog', async () => {
+    // The scrivener is in a building (an interior cell), 40 m off: a way of 45 m or less has the use's own time
+    // (USE_APPROACH_MS, cut to 5 s here), a longer one walk_to's (verify-stream-reports-2026-10-19-1549.ts, 3).
+    const saved = AgentApi.USE_APPROACH_MS;
+    AgentApi.USE_APPROACH_MS = 5000;
+    onTestFinished(() => { AgentApi.USE_APPROACH_MS = saved; });
+    host.me.x = 145; host.me.y = 180;
     host.add({ guid: 0x80000b10, name: 'Journeyman Scrivener of Creature Magic', itemType: 0x10, cell: (HOLTBURG & 0xffff0000) | 0x0105, x: 185, y: 185 });
     host.routeTo = [{ x: 180, y: 180, z: 94 }];
     host.dialogList = [{ text: 'Claude Bulwark has invited you to join a fellowship. Do you accept?', buttons: ['Yes', 'No'] }];
@@ -112,7 +116,7 @@ describe('agent play reports 2026-10-11', () => {
     expect(r).toBeDefined();
     expect(host.t).toBeLessThan(AgentApi.USE_APPROACH_MS + 2000);
     expect(r!.ok).toBe(false);
-    expect(r!.message).toMatch(/^couldn't reach Journeyman Scrivener of Creature Magic: walking to Journeyman Scrivener of Creature Magic took longer than 45 s and stopped [\d.]+ m away; ac_walk_to it first/);
+    expect(r!.message).toMatch(/^couldn't reach Journeyman Scrivener of Creature Magic: walking to Journeyman Scrivener of Creature Magic took longer than 5 s and stopped [\d.]+ m away; ac_walk_to it first/);
     expect(r!.message).toMatch(/a dialog is open: "Claude Bulwark has invited you to join a fellowship\. Do you accept\?" \[Yes \/ No\] \(ac_dialog answers it\)/);
     // The walk stopped with the call: no task left running, no key held.
     expect(api.observe().me!.task).toBeNull();

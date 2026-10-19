@@ -1,22 +1,32 @@
-// playwebac.com's static web (the game client + site pages) as Cloudflare Workers Static Assets:
-// an assets-only Worker, so every request is a free, unlimited asset request (a Worker script
-// would count against the Free plan's 100,000 requests a day and fail past it).
+// playwebac.com's static web (the game client + site pages) as Cloudflare Workers Static Assets.
+// Every request is a free, unlimited asset request EXCEPT /__webac/* (assets.run_worker_first),
+// which runs report-worker.mjs: a Worker script request counts against the Free plan's 100,000
+// requests a day, so the script is kept to that one path (failure reports the bridge can't see,
+// BUG.world-list-unreachable). `main`, `assets` and `observability` are inherited by env.production.
 // tools/deploy-web-cf.sh assembles the release and deploys it; docs/web-hosting-cloudflare-plan.md.
 {
   "$schema": "../../../node_modules/wrangler/config-schema.json",
   "name": "webac-web",
+  "main": "./report-worker.mjs",
   "compatibility_date": "2026-10-01",
   "workers_dev": false,
   "preview_urls": false,
   "assets": {
-    // Overridden by deploy-web-cf.sh's --assets; kept so `wrangler` commands resolve the config.
+    // Overridden by deploy-web-cf.sh's --assets (which replaces only the directory); kept so
+    // `wrangler` commands resolve the config.
     "directory": "./empty",
+    // report-worker.mjs falls through to env.ASSETS.fetch for anything that isn't a report.
+    "binding": "ASSETS",
+    // Only these paths reach the Worker script; everything else is served from assets first.
+    "run_worker_first": ["/__webac/*"],
     // _redirects serves "/" and "/<page>/" from their index.html; nothing is redirected implicitly,
     // so /index.html and /about/index.html stay 200 as on Caddy.
     "html_handling": "none",
     // An unknown path is a plain 404, as on Caddy (no SPA fallback).
     "not_found_handling": "none"
   },
+  // Workers Logs keep report-worker.mjs's `web_report` lines (dashboard → Workers Logs, or wrangler tail).
+  "observability": { "enabled": true },
   "routes": [
     // Staging: the same release on its own name, to diff and play before playwebac.com moves.
     { "pattern": "next.playwebac.com", "custom_domain": true }

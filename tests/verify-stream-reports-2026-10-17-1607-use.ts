@@ -125,7 +125,7 @@ describe('stream reports 2026-10-17 16:07Z: use, equip, gear spells, map coordin
       expect(r.message).toMatch(/^couldn't reach Portal to Town Network: .*that is outside this dungeon.*No walk gets there/);
       // The one stepped into is the one that took you.
       const r2 = await settle(api, host, api.use(OTHER), 120_000);
-      expect(r2.message).toMatch(/^used Portal to Cragstone: it already took you through \d+ s ago/);
+      expect(r2.message).toMatch(/^used Portal to Cragstone: you came through Portal to Cragstone \d+ s ago; you're inside now/);
     });
   });
 

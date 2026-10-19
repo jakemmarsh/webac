@@ -40,6 +40,7 @@ import {
   type Stance,
 } from '@ac/shared';
 import { itemSpellId, mustWield, outOfMana, useRequirementProblem } from './itemUse.ts';
+import { pctBelowText } from '../format.ts';
 
 export type Vital = 'health' | 'stamina' | 'mana';
 export const VITALS: readonly Vital[] = ['health', 'stamina', 'mana'];
@@ -443,7 +444,7 @@ function helperAction(ctx: Ctx): RechargeAction | null {
       if (v === 'health' && bool(settings, 'UseHealersHeart')) {
         const heart = bestItem(ctx, 'heal', false, 'health');
         if (heart) {
-          const why = `${f.name} health ${fmt(pct(f.health))} < ${at}% (Recharge-Helper-HitP): ${heart.item.name} (UseHealersHeart)`;
+          const why = `${f.name} health ${pctBelowText(pct(f.health), at)} < ${at}% (Recharge-Helper-HitP): ${heart.item.name} (UseHealersHeart)`;
           if (mustWield(heart.item) && !heart.item.equipped) return itemAction(heart.item, heart.fam, why, f.guid);
           if (stance !== 'magic') return { kind: 'stance', to: 'magic', why: `${why} needs magic stance` };
           return itemAction(heart.item, heart.fam, why, f.guid);
@@ -451,7 +452,7 @@ function helperAction(ctx: Ctx): RechargeAction | null {
       }
       const pick = bestSpell(ctx, BOOST_KIND[v], false) ?? bestSpell(ctx, 'infuse', false, v);
       if (!pick) continue;
-      const why = `${f.name} ${v} ${fmt(pct(f[v]))} < ${at}% (Recharge-Helper-${VITAL_SUFFIX[v]})`;
+      const why = `${f.name} ${v} ${pctBelowText(pct(f[v]), at)} < ${at}% (Recharge-Helper-${VITAL_SUFFIX[v]})`;
       if (stance !== 'magic') return { kind: 'stance', to: 'magic', why: `${why}: ${pick.spell.name} needs magic stance` };
       return { kind: 'cast', spell: pick.spell, target: f.guid, why: `${why}: ${pick.spell.name}` };
     }
@@ -479,7 +480,7 @@ export function planRecharge(input: RechargeInput): RechargeAction | null {
     if (p >= level && !boosted) continue;
     const why = boosted
       ? `${v} ${fmt(p)}, within ${boost} points of ${level}% (${name}; recharge boost, RechargeBoostAmount)`
-      : `${v} ${fmt(p)} < ${level}% (${name})`;
+      : `${v} ${pctBelowText(p, level)} < ${level}% (${name})`;
     for (const r of RECHARGE_HANDLER_SET) {
       if (r.vital !== v || r.magic !== magic || p < r.minPct || p > r.maxPct) continue;
       const a = tryRow(ctx, r, why);

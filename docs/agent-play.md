@@ -715,8 +715,10 @@ heal and hand control back on danger. The brief only listed a routine beside tho
   view, plus the monster you last attacked or cast at by hand), `ProtectFellows` (off; on in both: what is on a fellow
   is fought first after a TargetLock pick, out to `ProtectFellowsDistance` 30 m past Monster Range, and a swing at
   another breaks off when one gets on a fellow) and `SkipUnreachableMonsters` (on by default: hand to hand, a monster
-  AIMED AT YOU BUT NOT REACHING YOU or a storey up or down indoors is no target; a bolt still goes where its line is
-  open, which UseProjectileAwareness and the cast's own refusal decide).
+  a storey up or down indoors, or AIMED AT YOU BUT NOT REACHING YOU with no doorway route known to it, is no target; a
+  stuck chaser indoors that the doorway route reaches is fought unless the melee chase bar below refuses the walk there,
+  2026-10-19; a bolt still goes where its line is open, which UseProjectileAwareness and the cast's own refusal decide,
+  and observe says of a stuck chaser which fellow in view has a line of fire to it).
 - **Hand-over** (`RoutineEngine.handOver`): every surface command that moves, fights, uses or trades (`HAND_COMMANDS` in
   `AgentApi.surface`) holds a running routine while it runs and `HAND_GRACE_MS` (3 s) after, then it carries on by
   itself; `routine` status says "holding: you took over (…)". So the player pulls with `attack`, loots, rebuffs the
@@ -839,6 +841,12 @@ heal and hand control back on danger. The brief only listed a routine beside tho
     you (not one stuck behind a wall), a rebuff waits for the fight, up to 60 s of it, and the log says once what waits
     ("buff: waiting for the fight"). A Force Buff round is never held. Every macro step that ran 0.5 s or more says how
     long it took ("took 1.6 s"): the 2 s cut-off left most self-buff casts (under 2 s each, all landed) without one.
+  - *Seek a line of fire* (beyond VTank, `SeekLineOfFire`, on; 2026-10-19 15:49Z reports): VTank leaves a monster whose
+    bolt line is blocked for the pass and stands, so "Arcanist fights" stood 50 s, saying nothing, with a Dread 4 m off
+    running at him behind a wall. Now a caster whose line is blocked to a monster hitting it, running at it or on a
+    fellow steps to the nearest spot within 3 m with an open line, else beside the fellow whose place has one
+    ("combat: no line of fire to …: stepping 2 m NE of you for one"). With no such spot, or after two steps that opened
+    none, the log says so once every 30 s and it waits for the monster to come round.
   - *"You're too busy!" after a kit.* The kit landed; the attack task re-sent its attack during the bandaging and ACE
     refused that (Player_Melee: IsBusy). The attack task now sends no request while the client is busy with a use (its
     busy count, released by the server's UseDone). A `use` of a healing kit with no target goes on you (use-with-target
@@ -860,7 +868,10 @@ heal and hand control back on danger. The brief only listed a routine beside tho
   - *Lowered maximum vitals.* Observe names the debuff behind each (Feeblemind: Self → Maximum Mana; Frailty: Endurance →
     Maximum Health and Stamina; "Decreases maximum health by N"), from the spell table and the DAT's vital formulas.
   - *The fellow leash.* attack's refusal past 12 m says the rule: a melee run-up past 12 m goes only when every fellow
-    beside you stays within 15 m of you there; far=true lifts it.
+    beside you stays within 15 m of you there; far=true lifts it. Since 2026-10-19 a fellow who has kept up with you
+    as you moved lately (every 10 m you move: within 12 m of you on your floor, having moved half as far;
+    `AgentApi.noteFollowers`, `followsYou`) counts as coming along, by hand and in the routine's chase bar: Arcanist's
+    routine Follow keeps her within 8 m, and the leash refused Bulwark's 13–20 m pulls with her at his side.
 
 - **Fifth live hour (2026-10-18 07:18–08:20Z, Aerbax Haven), fixed 2026-10-18**
   (`tests/verify-stream-reports-2026-10-18-0819.ts`):
@@ -984,6 +995,27 @@ heal and hand control back on danger. The brief only listed a routine beside tho
   - Not the Follow: the final split (15:26:37Z) was Arcanist's own `walk_to 0x029E0122 flee=true`, which ran on through
     the dolls' hits 115 m ahead of Bulwark while her routine was held for it.
 
+- **Live hour 2026-10-19 13:46–14:47Z (Sand Shallow 0x02A0's four-room loop), fixed 2026-10-19**
+  (`tests/verify-stream-reports-2026-10-19-1447.ts`):
+  - *Slanted splits are walked through* (`cellPath` `CellDoor.slanted`). 4115 portal pairs in 3409 landblocks lean past
+    the horizontal test (|normal.z| > 0.7; nearly all the stock corridor piece: n.z −0.86, 3 m tall, its low edge on the
+    floor), and were read as ceiling holes: a room beyond one led nowhere. Sand Shallow's doorway south of 0x0140 then
+    had only 0x013F's 0.75 m sliver of it (z −15) as a route, and every walk there stood ~60 s searching for a point no
+    body stands on ("no way into the doorway … (something stands in it)") before a wide search walked straight through,
+    ten times in the hour for both players. A tall split whose low edge is on the lower cell's floor is passable both
+    ways now, and its centroid is no route point.
+  - *A routine Follow's walk tracks its leader* (`WalkOptions.track`, RoutineEngine's Follow). Indoors the way is planned
+    again when the leader goes into another room (or moves 4 m with no leg that gets there), as `follow`'s is; before, the
+    walk ran the plan made when it set off, straight at him after he had gone down the ramp, stalled at the wall (or up
+    into the alcove 0x0135 at z −15) and fell 20–30 m behind. Replayed on the cell DAT: 26 m behind before, under 15 m now.
+  - *The routine's own task, cut off by your command, answers only the routine* (`AgentApi.cancelTask`, `Task.byHand`).
+    "walking to Claude Bulwark: interrupted (replaced by walking to Claude Bulwark)" was her routine's Follow walk,
+    replaced by her own walk_to (which arrived); the hold had applied.
+  - *Stuck chasers by what each can hit.* "Bulwark fights" goes after a stuck chaser indoors that the doorway route
+    reaches (`AgentApi.walkReaches`, then the chase bar); observe says of a stuck chaser which fellow in view has a line of
+    fire to it (`fellowBoltText`), on yours and on the fellows line. The fellow leash counts a fellow who keeps up with you
+    as coming along (above). An HP-tracker set-aside names the likely reason (no line of fire, another floor, out of
+    range, bolts into the wall) instead of "ghost monster" when one is known (`TargetTracker.checkHp`, `VtMacro.unhitWhy`).
 - **Live 2026-10-18 16:27–17:04Z (Aerbax Laboratory, then the Qalaba'r portal ring), fixed 2026-10-18**
   (`tests/verify-stream-live-2026-10-18-1700.ts`):
   - *walk_to a portal that was out of view at the start.* Bulwark's `walk_to "Qalabar Oasis Settlement"` set off 429 m

@@ -150,15 +150,22 @@ export class TargetTracker {
    * hasn't changed in that time is a ghost. Only one with a known maximum health (`listed`): for any
    * other, an unchanging health says nothing. The notice when it was set aside.
    */
-  checkHp(listed: (name: string) => boolean, s: TrackerSettings): string | null {
+  checkHp(listed: (name: string) => boolean, s: TrackerSettings, why?: (guid: number) => string | null): string | null {
     const h = this.hp;
     if (!h || !s.DeleteGhostMonstersByHPTracker || !listed(h.name)) return null;
     const t = this.now();
     const stale = Math.max(0, s.GhostDeleteHPTrackerSeconds) * 1000;
     if (t - h.since < stale || (h.changedAt !== null && t - h.changedAt < stale)) return null;
-    this.get(h.guid, h.name).ghost = { health: h.health };
+    const e = this.get(h.guid, h.name);
+    e.ghost = { health: h.health };
     this.hp = null;
-    return `ghost monster ${h.name} set aside: its health hasn't changed in ${Math.round(s.GhostDeleteHPTrackerSeconds)} s of fighting it`;
+    const secs = Math.round(s.GhostDeleteHPTrackerSeconds);
+    // The likely reason when one is known (no line of fire, another floor, out of range, bolts into the wall): a monster
+    // the routine couldn't hit is no ghost. "ghost monster Ancient Mu-miyah set aside" was a mummy behind a wall from
+    // Arcanist, its one bolt blocked (Sand Shallow, 2026-10-19 14:19:20Z).
+    const reason = why?.(h.guid) ?? (e.misses > 0 ? `${e.misses === 1 ? 'an attack' : `${e.misses} attacks`} at it hit the environment (a wall or the floor in the way)` : null);
+    if (reason) return `${h.name} set aside: its health hasn't changed in ${secs} s of fighting it, most likely because ${reason}; it is a target again once its health changes or it leaves view`;
+    return `ghost monster ${h.name} set aside: its health hasn't changed in ${secs} s of fighting it`;
   }
 
   /** Death or a fresh start: nothing is held against anyone. */

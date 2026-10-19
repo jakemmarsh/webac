@@ -47,7 +47,17 @@ export interface Vec3 { x: number; y: number; z: number }
  * `landingCell`: the cell whose floor the fall lands on. Under a shaft (the cell below has no floor under the opening:
  * an air cell, or a storey with a hole of its own) it is farther down than `below` (cellPath shaftLanding).
  */
-export interface CellDoor { a: number; b: number; at: Vec3; normal: Vec3; height?: number; bottom?: number; below?: number; climb?: boolean; landing?: number | null; landingCell?: number; grounded?: boolean }
+/**
+ * `slanted`: a steep split between two cells of one room rather than a hole in a floor or ceiling: a portal leaning past
+ * the horizontal test (|normal.z| > 0.7) that is a body's height tall (OPENING_MIN_HEIGHT_M) with its low edge on the
+ * lower cell's floor. A body walks through it at that edge, so it is passable both ways (climb) and routed to at its
+ * feet. Sand Shallow's corridor south of 0x02A00140 is two cells split by such a plane (0x013E under, 0x013F over, the
+ * plane from the doorway's top at z -15 down to the floor at -18 5 m on): read as a ceiling hole, 0x013E led nowhere,
+ * the only route was 0x013F's 0.75 m sliver of the doorway at z -15, every walk through there stood ~60 s searching for
+ * a point no body stands on ("no way into the doorway at (424.0, 30655.0) (something stands in it)") before a wide
+ * search walked straight through (both stream players, ten times in an hour, 2026-10-19 13:46–14:47Z).
+ */
+export interface CellDoor { a: number; b: number; at: Vec3; normal: Vec3; height?: number; bottom?: number; below?: number; climb?: boolean; slanted?: boolean; landing?: number | null; landingCell?: number; grounded?: boolean }
 
 /** PhysicsGlobals.FloorZ: the least normal.z a walkable polygon has (ACE ObjectInfo.GetWalkableZ). */
 const FLOOR_Z = 0.66417414618662751;
@@ -59,6 +69,10 @@ const FLOOR_Z = 0.66417414618662751;
  * ceiling portals, so the way up is the corner ramps, never straight up through the hole (2026-10-10).
  */
 export const CLIMB_REACH_M = 1.5;
+/** A slanted split's low edge within this of the lower cell's floor top is on that floor (m): a body steps through it. */
+export const STEP_ONTO_M = 0.5;
+/** A slanted split's point stays in a route when the line between the doorways either side passes farther than this from it (m, in plan). */
+export const SLANT_OFF_LINE_M = 0.75;
 
 /** A walkable polygon of a cell in the landblock frame: its points and plane (n · p = d). */
 export interface FloorPoly { pts: Vec3[]; n: Vec3; d: number }
@@ -288,6 +302,11 @@ export function loadCellGraph(cellDat: DatDatabase, portalDat: DatDatabase, land
     const top = fl.reduce((t, f) => Math.max(t, ...f.pts.map((q) => q.z)), -Infinity);
     d.below = below;
     d.climb = top >= d.at.z - CLIMB_REACH_M;
+    // A tall slanted split whose low edge is on the lower cell's floor: walked through at that edge (CellDoor.slanted).
+    if (d.height !== undefined && d.height >= OPENING_MIN_HEIGHT_M && d.bottom !== undefined && top >= d.bottom - STEP_ONTO_M && top <= d.bottom + STEP_ONTO_M) {
+      d.slanted = true;
+      d.climb = true;
+    }
     d.landing = floorUnder(fl, d.at.x, d.at.y, d.at.z);
     if (d.landing !== null) d.landingCell = below;
   }
@@ -554,8 +573,26 @@ export const LEAP_PENALTY_M = 20;
 
 /** How near a doorway a door that would not open stands (seen from above; within 3 m of height). */
 export const CLOSED_DOOR_M = 2.5;
-const shutIn = (d: CellDoor, closed: Vec3[] | undefined): boolean =>
-  !!closed?.some((c) => Math.hypot(c.x - d.at.x, c.y - d.at.y) <= CLOSED_DOOR_M && Math.abs(c.z - (d.bottom ?? d.at.z)) <= 3);
+const shutIn = (d: CellDoor, closed: Vec3[] | undefined): boolean => {
+  const at = d.slanted ? slantFoot(d) : d.at;
+  return !!closed?.some((c) => Math.hypot(c.x - at.x, c.y - at.y) <= CLOSED_DOOR_M && Math.abs(c.z - (d.bottom ?? d.at.z)) <= 3);
+};
+
+/**
+ * Where a slanted split (CellDoor.slanted) meets the lower cell's floor, under its centroid's line of steepest descent:
+ * the point a body walks through it at (the plane's low edge, at its bottom). Its centroid is the plane's middle, over
+ * the lower floor but up on the upper side's slope: Tusker Habitat's 0x0107 / 0x0108 split centroid (12.8, −60, −10.3)
+ * has its low edge at (10, −60, −12), where the sunken strip 0x0108 meets the room's flat floor.
+ */
+export function slantFoot(d: CellDoor): Vec3 {
+  const nz = d.normal.z;
+  if (d.bottom === undefined || Math.abs(nz) < 1e-6) return d.at;
+  // The plane's height gradient (dz/dx, dz/dy); down it from the centroid to the bottom.
+  const gx = -d.normal.x / nz, gy = -d.normal.y / nz, g2 = gx * gx + gy * gy;
+  if (g2 < 1e-6) return d.at;
+  const k = (d.at.z - d.bottom) / g2;
+  return { x: d.at.x - gx * k, y: d.at.y - gy * k, z: d.bottom };
+}
 
 /**
  * A fall through an opening costs this much extra route length: a walk round by stairs or a ramp up
@@ -589,7 +626,7 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
     if (!door.has(k)) door.set(k, d);
     if (!pos.has(k)) {
       const fall = d.below !== undefined && !d.climb && d.landing !== null && d.landing !== undefined;
-      pos.set(k, Math.abs(d.normal.z) > 0.7 ? { ...d.at, floor: true, ...(fall ? { drop: d.at.z - d.landing!, landing: d.landing! } : {}) } : withFeet(d, d.at));
+      pos.set(k, Math.abs(d.normal.z) > 0.7 && !d.slanted ? { ...d.at, floor: true, ...(fall ? { drop: d.at.z - d.landing!, landing: d.landing! } : {}) } : withFeet(d, d.slanted ? slantFoot(d) : d.at));
     }
     const cs = cellsOf.get(k) ?? [];
     cs.push(cell);
@@ -681,7 +718,19 @@ function searchRoute(g: CellGraph, fromCell: number, from: Vec3, toCell: number,
     const dx = far.x - lip.x, dy = far.y - lip.y, l = Math.hypot(dx, dy) || 1;
     return { ...far, x: far.x + (dx / l) * LEAP_LAND_M, y: far.y + (dy / l) * LEAP_LAND_M, leap: leapTo.get(n)! };
   };
-  return nodes.map((n, i) => (leapTo.has(n) ? leapPoint(n, i) : posOf(n))).filter((_, i) => !intoAir(nodes[i], nodes[i + 1]) && !leapTo.has(nodes[i + 1]));
+  // A slanted split inside one room (CellDoor.slanted) is no doorway to aim at when the way from the doorway before to the
+  // one after runs through it anyway (a corridor split along its length: its centroid hangs over the floor, mid-room).
+  // One off that line is kept: Tusker Habitat's rooms (0x5B47) are a ring of corner ramps (0x0107) round a sunken strip
+  // (0x0108) split from them by such a plane, and the straight line from the doorway 0x0109 → 0x0107 (10, −65) to the
+  // strip's far doorway (15, −60) cut over the ramp's corner, 1.6 m off the split, where the body climbed it and stuck
+  // above the strip (both stream players' walks there, 2026-10-17; replayed on the cell DAT, 2026-10-19).
+  const offLine = (i: number): boolean => {
+    const p = posOf(nodes[i - 1] ?? START), q = posOf(nodes[i + 1]), m = posOf(nodes[i]);
+    const dx = q.x - p.x, dy = q.y - p.y, l2 = dx * dx + dy * dy;
+    const t = l2 > 0 ? Math.max(0, Math.min(1, ((m.x - p.x) * dx + (m.y - p.y) * dy) / l2)) : 0;
+    return Math.hypot(p.x + t * dx - m.x, p.y + t * dy - m.y) > SLANT_OFF_LINE_M;
+  };
+  return nodes.map((n, i) => (leapTo.has(n) ? leapPoint(n, i) : posOf(n))).filter((_, i) => !intoAir(nodes[i], nodes[i + 1]) && !leapTo.has(nodes[i + 1]) && !(nodes[i + 1] !== undefined && door.get(nodes[i])?.slanted && !offLine(i)));
 }
 
 /** A doorway's feet within this height of a bridge's deck stands on it (m). */

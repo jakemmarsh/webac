@@ -71,8 +71,8 @@ login() {
   LOGGED_IN=1
 }
 
-CTX=""
-cleanup() { [ -z "$CTX" ] || rm -rf "$CTX"; }
+CTX="" META=""
+cleanup() { [ -z "$CTX" ] || rm -rf "$CTX"; [ -z "$META" ] || rm -f "$META"; }
 trap cleanup EXIT
 
 # Add tag <new> to the image tagged <have> (immutable tags: a new tag on the same manifest).
@@ -100,6 +100,14 @@ for svc in web bridge; do
     rc=0; in_registry "$repo" "$src" || rc=$?
     [ "$rc" -le 1 ] || { echo "[images] $svc: could not query the registry" >&2; exit 1; }
     if [ "$rc" = 0 ]; then
+      # Cross-check the history walk before reusing an image: no file the service is
+      # built from may differ between the two commits (a straight diff, renames as
+      # delete + add). A mismatch means image-source.sh picked wrong; never retag then.
+      if ! diff_out="$(bash "$REPO/tools/image-source.sh" --same-inputs "$REPO" "$svc" "$src" "$SHA")"; then
+        echo "[images] $svc: refusing to tag $repo:${src:0:12} as ${SHA:0:12}: these inputs differ between them:" >&2
+        printf '         %s\n' $diff_out >&2
+        exit 1
+      fi
       retag "$repo" "$src" "$SHA" || { echo "[images] $svc: could not tag $repo:${src:0:12} as ${SHA:0:12}" >&2; exit 1; }
       echo "[images] $svc: $image = $repo:${src:0:12} (nothing it is built from changed)"
       continue
@@ -112,7 +120,9 @@ for svc in web bridge; do
   fi
   login
   # Tagged with the commit and, when they differ, the source commit later commits retag from.
-  build=(docker buildx build --platform linux/arm64 --provenance=false --sbom=false --push -t "$image")
+  [ -n "$META" ] || META="$(mktemp "${TMPDIR:-/tmp}/webac-build-meta.XXXXXX")"
+  : >"$META"
+  build=(docker buildx build --platform linux/arm64 --provenance=false --sbom=false --push --metadata-file "$META" -t "$image")
   [ "$src" = "$SHA" ] || build+=(-t "$REGISTRY/$repo:$src")
   case "$svc" in
     web) build+=(--build-arg "ACJS_BUILD_ID=${src:0:12}" -f "$CTX/deploy/web/Dockerfile") ;;
@@ -126,4 +136,18 @@ for svc in web bridge; do
     exit 1
   fi
   echo "[images] $svc: pushed $image"
+  # A rebuild whose output is byte-identical (e.g. an esbuild bundle a new unused export
+  # left unchanged) pushes the same digest, so the commit's tag joins an existing image.
+  # Say so: it is a real build, not a retag (2026-10-19, ffbc7308 on e9135e09's image).
+  digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("containerimage.digest",""))' "$META" 2>/dev/null || true)"
+  if [ -n "$digest" ]; then
+    tags="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageDigest=$digest" \
+      --query 'imageDetails[0].imageTags' --output text 2>/dev/null || true)"
+    others="$(printf '%s\n' $tags | grep -v -x -e "$SHA" -e "$src" -e None | cut -c1-12 | tr '\n' ' ' || true)"
+    if [ -n "${others// /}" ]; then
+      echo "[images] $svc: $digest (built output identical to the image already tagged ${others% })"
+    else
+      echo "[images] $svc: $digest"
+    fi
+  fi
 done

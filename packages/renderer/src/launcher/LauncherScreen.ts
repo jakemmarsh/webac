@@ -37,6 +37,43 @@ import { loadFavoriteWorlds, loadRememberedLogin, saveFavoriteWorlds, saveRememb
 
 export const CHARSEL_LAYOUT = 0x21000004;
 
+/**
+ * BUG.world-list-unreachable — a world list that fails to load is tried again
+ * quietly after these delays (three attempts in all) while the details box
+ * keeps its "Loading worlds…" state; only the last failure shows the error.
+ * Production 2026-10-19: a player saw "(Failed to fetch)" from a request that
+ * never reached the bridge. A browser-UX exception (CLAUDE.md).
+ */
+export const WORLD_LIST_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000];
+/** While the error shows, the list is tried again in the background this often; a success brings it back. */
+export const WORLD_LIST_BACKGROUND_RETRY_MS = 30_000;
+
+/** The bridge's host name for the error text (from the configured bridge URL, never a literal). */
+function bridgeHostName(bridgeUrl: string): string | null {
+  try { return new URL(bridgeUrl).hostname || null; } catch { return null; }
+}
+
+/**
+ * The details box's text when the world list can't be loaded: what happened
+ * and one next step, no raw error string (the refusal-consistency shape).
+ */
+export function worldListUnavailableText(bridgeUrl: string): string {
+  const host = bridgeHostName(bridgeUrl);
+  const blocking = host ? `may be blocking ${host}` : 'may be blocking it';
+  return `Can't reach the webAC server right now. Check your connection; if it keeps happening, a browser extension, VPN or network filter ${blocking}.`;
+}
+
+/** The CUSTOM pointer under the world-list error. */
+export const WORLD_LIST_CUSTOM_HINT = "Or use CUSTOM to enter a server's own bridge.";
+
+/** A world-list load that failed every quiet attempt (LauncherOptions.onWorldListFailed). */
+export interface WorldListFailure {
+  attempts: number;
+  elapsedMs: number;
+  /** The last attempt's error (a worldDirectory.WorldDirectoryError from loadWorldDirectory). */
+  error: unknown;
+}
+
 /** The launcher's custom-bridge era probe: the era, or a rejection when the bridge did not answer. */
 async function defaultProbeEra(bridgeUrl: string): Promise<string | null> {
   const r = await probeCustomBridge(bridgeUrl);
@@ -185,6 +222,16 @@ export interface LauncherOptions {
    * world is then World.eraUnknown.
    */
   probeEra?: (bridgeUrl: string) => Promise<string | null>;
+  /** Quiet retry delays after a failed world-list load (default WORLD_LIST_RETRY_DELAYS_MS). */
+  retryDelaysMs?: readonly number[];
+  /** Background retry period while the error shows (default WORLD_LIST_BACKGROUND_RETRY_MS). */
+  backgroundRetryMs?: number;
+  /**
+   * Every quiet attempt failed and the error is now shown (once per load:
+   * the first, and each Retry; not the background retries). main.ts sends
+   * the web-origin report (telemetry/WebReport.ts).
+   */
+  onWorldListFailed?: (f: WorldListFailure) => void;
 }
 
 /**
@@ -354,51 +401,114 @@ export class LauncherScreen {
   /** Resolves once the first directory load has finished (tests). */
   loaded: Promise<void> = Promise.resolve();
 
+  /** Bumped by each load and by leaving: a stale attempt or timer does nothing. */
+  private loadGen = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+  }
+
+  /** Load the world list again now (the error's Retry link), with the quiet retries. */
+  retryWorldList(): Promise<void> {
+    if (this.done || (this.loadingWorlds && this.loadError === null)) return this.loaded;
+    return this.load();
+  }
+
   private load(): Promise<void> {
+    const gen = ++this.loadGen;
+    this.clearRetryTimer();
     this.loadingWorlds = true;
+    const wasShowingError = this.loadError !== null;
+    this.loadError = null;
+    if (wasShowingError) this.refresh();
     this.loaded = (async () => {
-      let linked: World | null = null;
-      try {
-        const dir = await this.opts.loadDirectory();
-        this.mode = dir.mode;
-        linked = matchUrlWorld(dir.worlds, this.linkedWorld);
-        this.linkedWorld = null;
-        const custom = this.worlds.filter((w) => w.kind === 'custom');
-        this.worlds = [...custom, ...dir.worlds];
-        const key = this.remembered.worldKey;
-        // The remembered custom bridge, then any favourite ones: a custom
-        // world is not in the directory, so it is rebuilt from its key.
-        if (!custom.length) {
-          const keys = [...(key?.startsWith('custom:') ? [key] : []), ...this.favorites.filter((k) => k.startsWith('custom:') && k !== key)];
-          for (const k of keys.reverse()) {
-            const r = parseCustomBridge(k.slice('custom:'.length));
-            if ('world' in r) {
-              this.worlds.unshift(r.world);
-              this.probeCustomEra(r.world);
-            }
-          }
+      const started = Date.now();
+      const delays = this.opts.retryDelaysMs ?? WORLD_LIST_RETRY_DELAYS_MS;
+      let lastErr: unknown = null;
+      let attempts = 0;
+      for (;;) {
+        attempts++;
+        try {
+          const dir = await this.opts.loadDirectory();
+          if (gen !== this.loadGen || this.done) return;
+          this.finishLoad(this.applyDirectory(dir));
+          return;
+        } catch (err) {
+          lastErr = err;
         }
-        if (!this.selected) {
-          this.selected = this.worlds.find((w) => key !== null && worldKeyOf(w) === key)
-            ?? this.orderedWorlds.find((w) => worldEnterBlock(w) === null)
-            ?? this.orderedWorlds[0] ?? null;
-        }
-        this.loadError = null;
-      } catch (err) {
-        this.loadError = `The world list is unavailable (${(err as Error).message || 'network error'}). Try again later, or use CUSTOM.`;
+        if (gen !== this.loadGen || this.done) return;
+        if (attempts > delays.length) break;
+        await new Promise<void>((resolve) => { this.retryTimer = setTimeout(resolve, delays[attempts - 1]); });
+        this.retryTimer = null;
+        if (gen !== this.loadGen || this.done) return;
       }
-      this.loadingWorlds = false;
-      if (!this.done) {
-        this.refresh();
-        if (linked) this.select(linked);
-        this.revealSelected();
-        if (this.pendingEnter) {
-          this.pendingEnter = false;
-          this.attemptEnter();
-        }
-      }
+      this.loadError = worldListUnavailableText(this.opts.bridgeUrl);
+      this.finishLoad(null);
+      try { this.opts.onWorldListFailed?.({ attempts, elapsedMs: Date.now() - started, error: lastErr }); } catch { /* reporting never breaks the launcher */ }
+      this.scheduleBackgroundRetry(gen);
     })();
     return this.loaded;
+  }
+
+  /** While the error shows: try again every backgroundRetryMs, silently; a success replaces the error with the list. */
+  private scheduleBackgroundRetry(gen: number): void {
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (gen !== this.loadGen || this.done) return;
+      this.loaded = this.opts.loadDirectory().then(
+        (dir) => {
+          if (gen !== this.loadGen || this.done) return;
+          this.finishLoad(this.applyDirectory(dir));
+        },
+        () => {
+          if (gen !== this.loadGen || this.done) return;
+          this.scheduleBackgroundRetry(gen);
+        },
+      );
+    }, this.opts.backgroundRetryMs ?? WORLD_LIST_BACKGROUND_RETRY_MS);
+  }
+
+  /** Take a loaded directory in; returns the `?world=` link's world to select, if any. */
+  private applyDirectory(dir: WorldDirectory): World | null {
+    this.mode = dir.mode;
+    const linked = matchUrlWorld(dir.worlds, this.linkedWorld);
+    this.linkedWorld = null;
+    const custom = this.worlds.filter((w) => w.kind === 'custom');
+    this.worlds = [...custom, ...dir.worlds];
+    const key = this.remembered.worldKey;
+    // The remembered custom bridge, then any favourite ones: a custom
+    // world is not in the directory, so it is rebuilt from its key.
+    if (!custom.length) {
+      const keys = [...(key?.startsWith('custom:') ? [key] : []), ...this.favorites.filter((k) => k.startsWith('custom:') && k !== key)];
+      for (const k of keys.reverse()) {
+        const r = parseCustomBridge(k.slice('custom:'.length));
+        if ('world' in r) {
+          this.worlds.unshift(r.world);
+          this.probeCustomEra(r.world);
+        }
+      }
+    }
+    if (!this.selected) {
+      this.selected = this.worlds.find((w) => key !== null && worldKeyOf(w) === key)
+        ?? this.orderedWorlds.find((w) => worldEnterBlock(w) === null)
+        ?? this.orderedWorlds[0] ?? null;
+    }
+    this.loadError = null;
+    return linked;
+  }
+
+  private finishLoad(linked: World | null): void {
+    this.loadingWorlds = false;
+    if (this.done) return;
+    this.refresh();
+    if (linked) this.select(linked);
+    this.revealSelected();
+    if (this.pendingEnter) {
+      this.pendingEnter = false;
+      this.attemptEnter();
+    }
   }
 
   // ─── Building ─────────────────────────────────────────
@@ -822,7 +932,22 @@ export class LauncherScreen {
     const w = this.selected;
     if (!w) {
       const waiting = this.pendingEnter ? 'Loading worlds… You will enter as soon as the list arrives.' : 'Loading worlds…';
-      body.appendChild(para(this.loadError ?? waiting, 5, this.loadError ? this.warn : this.dim, 'launcher-desc'));
+      body.appendChild(para(this.loadError ?? waiting, 6, this.loadError ? this.warn : this.dim, 'launcher-desc'));
+      if (this.loadError) {
+        // Retry, drawn like the details box's Website / Discord / Favorite links.
+        const row = document.createElement('div');
+        row.className = 'launcher-links';
+        Object.assign(row.style, { display: 'flex', flexShrink: '0', gap: '12px' });
+        const retry = document.createElement('a');
+        retry.className = 'launcher-retry-link';
+        retry.href = '#';
+        retry.style.textDecoration = 'none';
+        retry.addEventListener('click', (e) => { e.preventDefault(); void this.retryWorldList(); });
+        retry.appendChild(this.kit.text('Retry', LAUNCHER_TEXT.body, { color: this.kit.textColor(LAUNCHER_TEXT.label) ?? undefined }));
+        row.appendChild(retry);
+        body.appendChild(row);
+        body.appendChild(para(WORLD_LIST_CUSTOM_HINT, 2, this.dim, 'launcher-hint'));
+      }
       d.appendChild(body);
       return;
     }
@@ -950,6 +1075,8 @@ export class LauncherScreen {
       return;
     }
     this.done = true;
+    this.loadGen++;
+    this.clearRetryTimer();
     const finish = (): void => {
       saveRememberedLogin({ worldKey: worldKeyOf(w), account, era: w.era }, this.opts.storage === undefined ? undefined : this.opts.storage);
       this.handle?.destroy();

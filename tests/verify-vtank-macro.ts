@@ -742,6 +742,21 @@ describe.skipIf(!existsSync(PORTAL))('VirindiTank\'s macro over the real spell t
       await step(6500);
       expect(at(0x80005002)).toBe(0);
     });
+
+    it('the HP tracker names the likely reason when it knows one: a monster walled off from you is no "ghost" (Sand Shallow, 2026-10-19)', async () => {
+      two();
+      (host as unknown as { monsterTable: () => Promise<Array<[string, string, number]>> }).monsterTable = async () => [['Gate Guard', 'f', 500], ['Drudge Skulker', 'f', 40]];
+      serverAnswers();
+      api.routine.start(vt({ settings: { EnableBuffing: false, AttackDistance: 30, GhostDeleteHPTrackerSeconds: 3 } }));
+      await step(2500);
+      expect(at(0x80005001)).toBeGreaterThan(0);
+      // Both go behind a wall: the lines of fire shut, and the macro has nothing it can bolt (the tracker stays on the Guard).
+      host.lineOfFire = () => ({ dist: 10, blockedAt: 4, blocker: 'a wall' });
+      await step(4000);
+      const h = api.routine.history().join('\n');
+      expect(h).toMatch(/Gate Guard set aside: its health hasn't changed in 3 s of fighting it, most likely because (there is no line of fire to it|your casts at it were refused for no line of fire)/);
+      expect(h).not.toMatch(/ghost monster Gate Guard/);
+    });
   });
 
   describe('the combat-mode gate (VTank CombatModeGate)', () => {

@@ -100,7 +100,7 @@ describe('each player has a ready profile, and the brief makes it the way fights
   });
 
   it('the beyond-VTank defaults leave an imported VTank profile as it was, but for the melee walk-in to the unreachable', () => {
-    expect(BEYOND_MACRO_DEFAULTS).toEqual({ SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true, BuffMinLandChance: 75, FollowLeash: 0, FollowThroughPortals: true, FightBeforeBuffs: 60 });
+    expect(BEYOND_MACRO_DEFAULTS).toEqual({ SkipUnreachableMonsters: true, ProtectFellows: false, ProtectFellowsDistance: 25, OnlyEngaged: false, WeighBoltsByDamage: true, BuffMinLandChance: 75, FollowLeash: 0, FollowThroughPortals: true, FightBeforeBuffs: 60, SeekLineOfFire: true });
     expect(beyondSetting({ protectfellows: 'on' }, 'ProtectFellows')).toBe(true);
     expect(beyondSetting({ ProtectFellowsDistance: '40' }, 'ProtectFellowsDistance')).toBe(40);
   });

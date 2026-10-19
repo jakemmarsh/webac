@@ -326,7 +326,8 @@ describe('6. a portal that took you during the walk to it is a use that worked',
     host.screenName = 'world';
     run(api, host, 2500);
     const r = await settle(api, host, api.use('Portal to Town Network'), 10_000);
-    expect(r).toEqual({ ok: true, message: 'used Portal to Town Network: it already took you through 3 s ago (on the way to it): you are now indoors (cell 0x00070143), and Portal to Town Network is back where you were' });
+    // The trip by this portal, said as such (2026-10-19 15:49Z reports, 1: the routine's Follow's trips too).
+    expect(r).toEqual({ ok: true, message: "used Portal to Town Network: you came through Portal to Town Network 3 s ago; you're inside now (cell 0x00070143), and Portal to Town Network is back where you were. Nothing to walk to: you are through" });
     expect(host.sent.filter((x) => x.startsWith('use'))).toEqual([]);
   });
 

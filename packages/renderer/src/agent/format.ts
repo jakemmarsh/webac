@@ -6,6 +6,15 @@
 import { emptySlotsText, formatGear, gearNote, hasGearData } from './gear.ts';
 import type { AgentChatLine, AgentEvent, AgentItem, AgentObject, AgentObservation, AgentPackSlots, AgentSpell, AgentTracePoint } from './types.ts';
 
+/**
+ * A percentage (0–100) said as under `level` (0–100): whole when its rounding stays under it, else to the tenth below, so a
+ * line never reads "60% < 60%" (Arcanist's routine, Bulwark's stamina at 59.6%: "Claude Bulwark stamina 60% < 60%
+ * (Recharge-Helper-Stam)", 2026-10-19 15:42:34Z).
+ */
+export function pctBelowText(n: number, level: number): string {
+  return Math.round(n) < level ? `${Math.round(n)}%` : `${(Math.floor(n * 10) / 10).toFixed(1)}%`;
+}
+
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 
 /** 0..360 compass bearing → "N" / "NE" / … */

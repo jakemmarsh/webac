@@ -165,20 +165,45 @@ export function worldFromEntry(raw: unknown): World | null {
   };
 }
 
+/** Which request of a world-list load failed: the /healthz probe, the /servers list, or reading either answer. */
+export type WorldListStep = 'healthz' | 'servers' | 'json';
+
+/**
+ * A world-list load that failed, with the step it failed at and the
+ * underlying error (a fetch TypeError "Failed to fetch" when the request
+ * never reached the bridge). The launcher shows its own wording, never this
+ * message; the step and cause go into the web-origin report
+ * (telemetry/WebReport.ts).
+ */
+export class WorldDirectoryError extends Error {
+  constructor(readonly step: WorldListStep, readonly cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'WorldDirectoryError';
+  }
+}
+
+async function step<T>(name: WorldListStep, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    throw err instanceof WorldDirectoryError ? err : new WorldDirectoryError(name, err);
+  }
+}
+
 /**
  * Ask the bridge what it is and list its worlds. Pinned (or a bridge too old
- * to answer /healthz with a mode) → the single local world. Throws when the
- * bridge cannot be reached at all.
+ * to answer /healthz with a mode) → the single local world. Throws a
+ * WorldDirectoryError when the bridge cannot be reached at all.
  */
 export async function loadWorldDirectory(bridgeUrl: string, fetchFn: typeof fetch = fetch): Promise<WorldDirectory> {
   const origin = bridgeHttpOrigin(bridgeUrl);
   if (!origin) throw new Error(`not a bridge URL: ${bridgeUrl}`);
-  const health = await fetchFn(`${origin}/healthz`, { cache: 'no-store' });
-  const hz = health.ok ? ((await health.json()) as { mode?: unknown; era?: unknown }) : {};
+  const health = await step('healthz', () => fetchFn(`${origin}/healthz`, { cache: 'no-store' }));
+  const hz: { mode?: unknown; era?: unknown } = health.ok ? await step('json', () => health.json() as Promise<{ mode?: unknown; era?: unknown }>) : {};
   if (hz.mode !== 'multi') return { mode: 'pinned', worlds: [localWorld(eraIdFrom(hz.era))] };
-  const resp = await fetchFn(`${origin}/servers`, { cache: 'no-store' });
-  if (!resp.ok) throw new Error(`GET /servers: HTTP ${resp.status}`);
-  const body = (await resp.json()) as { servers?: unknown };
+  const resp = await step('servers', () => fetchFn(`${origin}/servers`, { cache: 'no-store' }));
+  if (!resp.ok) throw new WorldDirectoryError('servers', new Error(`GET /servers: HTTP ${resp.status}`));
+  const body = await step('json', () => resp.json() as Promise<{ servers?: unknown }>);
   const worlds = Array.isArray(body.servers) ? body.servers.map(worldFromEntry).filter((w): w is World => w !== null) : [];
   return { mode: 'multi', worlds };
 }

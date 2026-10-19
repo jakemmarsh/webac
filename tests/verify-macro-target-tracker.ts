@@ -110,6 +110,24 @@ describe('ghosts (DeleteGhostMonsters, DeleteGhostMonstersByHPTracker)', () => {
     expect(tr.excluded(6)).toBe(false);
   });
 
+  it('HP tracker: the likely reason, when the caller knows one or its attacks hit the environment, replaces "ghost" (Sand Shallow, 2026-10-19)', () => {
+    const { tr, add } = tracker();
+    const listed = () => true;
+    tr.engage(8, 'Ancient Mu-miyah', 1);
+    add(30_000);
+    expect(tr.checkHp(listed, SETTINGS, () => 'there is no line of fire to it from where you stand')).toBe('Ancient Mu-miyah set aside: its health hasn\'t changed in 30 s of fighting it, most likely because there is no line of fire to it from where you stand; it is a target again once its health changes or it leaves view');
+    expect(tr.excluded(8)).toBe(true);
+    // No reason from the caller, but a bolt at it hit the environment.
+    tr.engage(9, 'Dread Mu-miyah', 1);
+    tr.miss(9, 'Dread Mu-miyah', SETTINGS);
+    add(30_000);
+    expect(tr.checkHp(listed, SETTINGS, () => null)).toMatch(/^Dread Mu-miyah set aside: .*most likely because an attack at it hit the environment \(a wall or the floor in the way\)/);
+    // Nothing known: still VTank's ghost.
+    tr.engage(10, 'Wisp', 1);
+    add(30_000);
+    expect(tr.checkHp(listed, SETTINGS, () => null)).toMatch(/^ghost monster Wisp set aside/);
+  });
+
   it('HP tracker: a monster with no known max health, the option off, or re-engaging the same monster', () => {
     const { tr, add } = tracker();
     tr.engage(7, 'Unknown Thing', 1);

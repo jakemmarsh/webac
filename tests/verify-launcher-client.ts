@@ -5,9 +5,9 @@
  * password), URL-credential gating, the debug-globals gate, and the
  * LauncherScreen itself driven in happy-dom through a fake LauncherKit.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import {
-  bridgeHttpOrigin, loadWorldDirectory, connectUrlFor, worldEnterBlock, parseCustomBridge, worldFromEntry,
+  bridgeHttpOrigin, loadWorldDirectory, WorldDirectoryError, connectUrlFor, worldEnterBlock, parseCustomBridge, worldFromEntry,
   localWorld, bridgeUrlWithServer, worldBoxName, LOCAL_WORLD_NAME, type World,
   eraIdFrom, probeBridgeEra, loginTimeoutText, worldRegistrationText,
 } from '../packages/renderer/src/launcher/worldDirectory';
@@ -125,6 +125,24 @@ describe('world directory', () => {
   it('an unreachable bridge throws (the launcher shows the error)', async () => {
     await expect(loadWorldDirectory(BRIDGE, fakeFetch({ 'https://bridge.example.org/healthz': new Error('offline') }))).rejects.toThrow();
     await expect(loadWorldDirectory('nonsense', fakeFetch({}))).rejects.toThrow(/not a bridge URL/);
+  });
+
+  it('BUG.world-list-unreachable: a failed load says which step failed and keeps the underlying error', async () => {
+    const stepOf = async (f: typeof fetch) => {
+      const err = await loadWorldDirectory(BRIDGE, f).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(WorldDirectoryError);
+      const e = err as WorldDirectoryError;
+      return [e.step, (e.cause as Error).name, (e.cause as Error).message];
+    };
+    // The browser's own failure for a request that never got anywhere.
+    const blocked = new TypeError('Failed to fetch');
+    expect(await stepOf(fakeFetch({ 'https://bridge.example.org/healthz': blocked }))).toEqual(['healthz', 'TypeError', 'Failed to fetch']);
+    expect(await stepOf(fakeFetch({ 'https://bridge.example.org/healthz': { mode: 'multi' }, 'https://bridge.example.org/servers': blocked })))
+      .toEqual(['servers', 'TypeError', 'Failed to fetch']);
+    expect(await stepOf(fakeFetch({ 'https://bridge.example.org/healthz': { mode: 'multi' }, 'https://bridge.example.org/servers': 502 })))
+      .toEqual(['servers', 'Error', 'GET /servers: HTTP 502']);
+    const notJson = (async (input: RequestInfo | URL) => new Response(String(input).endsWith('/healthz') ? '{"mode":"multi"}' : '<html>', { status: 200 })) as typeof fetch;
+    expect((await stepOf(notJson))[0]).toBe('json');
   });
 
   it('connect URLs: listed → ?server=<id>; local → the bridge as is; custom → its own bridge', () => {
@@ -970,20 +988,132 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     await expect(s.done).resolves.toMatchObject({ connectUrl: 'wss://play.example.net/bridge' });
   });
 
-  it('a failed directory load shows the error and leaves Custom… usable', async () => {
+  it('a failed directory load shows plain wording (no raw error), Retry, and leaves Custom… usable', async () => {
     const k = makeKit();
     const screen = new mod.LauncherScreen(k.kit, {
-      bridgeUrl: BRIDGE, storage: new MemStorage(), loadDirectory: async () => { throw new Error('HTTP 502'); },
+      bridgeUrl: BRIDGE, storage: new MemStorage(), retryDelaysMs: [], backgroundRetryMs: 3_600_000,
+      loadDirectory: async () => { throw new Error('HTTP 502'); },
     });
     void screen.run();
     await screen.loaded;
-    expect(k.mount.querySelector('.launcher-details-body')?.textContent).toMatch(/world list is unavailable \(HTTP 502\).*use CUSTOM\.$/);
+    // Each wrapped line is its own span: join them with spaces to read the sentence.
+    const text = [...k.mount.querySelectorAll('.launcher-details-body span')].map((e: Element) => e.textContent).join(' ');
+    expect(text).toContain(mod.worldListUnavailableText(BRIDGE));
+    expect(text).not.toContain('HTTP 502');
+    expect(text).toContain('Retry');
+    expect(text).toMatch(/use CUSTOM/);
     expect(k.mount.querySelector('.launcher-custom')).toBeTruthy();
+    screen.attemptEnter(); // leaving clears the background retry
+  });
+
+  describe('BUG.world-list-unreachable: quiet retries (fake timers)', () => {
+    afterEach(() => { vi.useRealTimers(); });
+    const blocked = () => new TypeError('Failed to fetch');
+    const details = (k: { mount: HTMLElement }) => [...k.mount.querySelectorAll('.launcher-details-body span')].map((e: Element) => e.textContent).join(' ');
+
+    function start(results: Array<'fail' | 'ok'>) {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      vi.setSystemTime(1_000_000);
+      const k = makeKit();
+      let calls = 0;
+      const failures: Array<{ attempts: number; elapsedMs: number; error: unknown }> = [];
+      const screen = new mod.LauncherScreen(k.kit, {
+        bridgeUrl: 'wss://bridge.playwebac.com/', storage: new MemStorage(),
+        loadDirectory: async () => {
+          const r = results[Math.min(calls++, results.length - 1)];
+          if (r === 'fail') throw blocked();
+          return { mode: 'multi', worlds: worlds() };
+        },
+        onWorldListFailed: (f: { attempts: number; elapsedMs: number; error: unknown }) => { failures.push(f); },
+      });
+      void screen.run();
+      return { k, screen, failures, calls: () => calls };
+    }
+
+    it('the defaults: 2 s and 5 s quiet retries, 30 s in the background', () => {
+      expect(mod.WORLD_LIST_RETRY_DELAYS_MS).toEqual([2_000, 5_000]);
+      expect(mod.WORLD_LIST_BACKGROUND_RETRY_MS).toBe(30_000);
+    });
+
+    it('fails twice then loads: the box stays "Loading worlds…" throughout and no error or report ever shows', async () => {
+      const t = start(['fail', 'fail', 'ok']);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.calls()).toBe(1);
+      expect(details(t.k)).toBe('Loading worlds…');
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(t.calls()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(t.calls()).toBe(2);
+      expect(details(t.k)).toBe('Loading worlds…');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(t.calls()).toBe(3);
+      expect(t.k.mount.querySelectorAll('.launcher-world-row').length).toBe(3);
+      expect(t.screen.selectedWorld?.name).toBe('Coldeve');
+      expect(t.failures).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('every attempt fails: the error after the third, reported once; background retries every 30 s bring the list back', async () => {
+      const t = start(['fail', 'fail', 'fail', 'fail', 'ok']);
+      await vi.advanceTimersByTimeAsync(7_000);
+      expect(t.calls()).toBe(3);
+      const text = details(t.k);
+      expect(text).toContain("Can't reach the webAC server right now. Check your connection; if it keeps happening, a browser extension, VPN or network filter may be blocking bridge.playwebac.com.");
+      expect(text).not.toMatch(/Failed to fetch|unavailable \(/);
+      expect(t.k.mount.querySelector('.launcher-retry-link')?.textContent).toBe('Retry');
+      expect(text).toContain(mod.WORLD_LIST_CUSTOM_HINT);
+      expect(t.failures.length).toBe(1);
+      expect(t.failures[0].attempts).toBe(3);
+      expect(t.failures[0].elapsedMs).toBe(7_000);
+      expect((t.failures[0].error as Error).message).toBe('Failed to fetch');
+      // Background attempt 4 fails silently: the error stays, nothing is reported again.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(t.calls()).toBe(4);
+      expect(details(t.k)).toContain("Can't reach the webAC server");
+      expect(t.failures.length).toBe(1);
+      // Attempt 5 succeeds: the list replaces the error, and no timer is left.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(t.calls()).toBe(5);
+      expect(details(t.k)).not.toContain("Can't reach");
+      expect(t.k.mount.querySelectorAll('.launcher-world-row').length).toBe(3);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('Retry reloads at once with the loading state, and runs the quiet retries again', async () => {
+      const t = start(['fail', 'fail', 'fail', 'fail', 'ok']);
+      await vi.advanceTimersByTimeAsync(7_000);
+      expect(t.calls()).toBe(3);
+      (t.k.mount.querySelector('.launcher-retry-link') as HTMLElement).click();
+      expect(details(t.k)).toBe('Loading worlds…');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.calls()).toBe(4);
+      expect(details(t.k)).toBe('Loading worlds…');
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(t.calls()).toBe(5);
+      expect(t.k.mount.querySelectorAll('.launcher-world-row').length).toBe(3);
+      expect(t.failures.length).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('ENTER pressed while the quiet retries run waits for the list and enters when it arrives', async () => {
+      const t = start(['fail', 'ok']);
+      const acct = t.k.mount.querySelector('.launcher-account') as HTMLInputElement;
+      const pw = t.k.mount.querySelector('.launcher-password') as HTMLInputElement;
+      acct.value = 'me';
+      pw.value = 'pw';
+      await vi.advanceTimersByTimeAsync(0);
+      t.screen.attemptEnter();
+      expect(t.k.messages).toEqual([]);
+      expect(details(t.k)).toMatch(/You will enter as soon as the list arrives/);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(t.screen.selectedWorld?.name).toBe('Coldeve');
+      expect(t.k.messages).toEqual([]);
+    });
   });
 
   it('the Custom… plate is upper-cased like the DAT\'s DELETE / CREDITS / EXIT labels', async () => {
     const k = makeKit();
-    const screen = new mod.LauncherScreen(k.kit, { bridgeUrl: BRIDGE, storage: new MemStorage(), loadDirectory: async () => [] });
+    const screen = new mod.LauncherScreen(k.kit, { bridgeUrl: BRIDGE, storage: new MemStorage(), loadDirectory: async () => ({ mode: 'multi', worlds: [] }) });
     void screen.run();
     await screen.loaded;
     expect(k.mount.querySelector('.launcher-custom')?.textContent).toBe('CUSTOM…');
