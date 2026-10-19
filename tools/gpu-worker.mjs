@@ -181,7 +181,8 @@ async function stackUp(needVite) {
     await sleep(4000);
   }
   if (needVite) {
-    children.push(spawn('npx', ['vite', '--port', String(VITE_PORT), '--strictPort'], { cwd: JOB_WT, detached: true, stdio: 'ignore' }));
+    // No HMR socket: its close (a lid closing mid-job) would reload the job's page (tools/lib/vite-no-reload.ts).
+    children.push(spawn('npx', ['vite', '--port', String(VITE_PORT), '--strictPort'], { cwd: JOB_WT, detached: true, stdio: 'ignore', env: { ...process.env, ACJS_VITE_NO_RELOAD: '1' } }));
     for (let i = 0; i < 60; i++) { try { sh('curl', ['-sf', '-o', '/dev/null', `http://localhost:${VITE_PORT}/`]); break; } catch { await sleep(2000); } }
   }
 }

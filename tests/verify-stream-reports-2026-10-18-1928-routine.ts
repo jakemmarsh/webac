@@ -214,7 +214,7 @@ describe('3. a mana or stamina drain is no health taken: a doll that drains mana
     const p = walkTo();
     const r = await settle(api, host, p, 15_000, doll());
     expect(r?.message).toMatch(/^stopped [\d.]+ m short: Innocent Doll #8000dd24 \(level 50\) is coming at you/);
-    expect(r?.message).toMatch(/this one: its kind's Drain Health Other III took 22 of your 205 health\./);
+    expect(r?.message).toMatch(/\(its kind's Drain Health Other III took 22 of your 205 health; your routine "[^"]+" takes mild ones\)\./);
   });
 
   it('a mana drain stored as health by an older session (the stream pages keep seen kinds per character) is read by the spell table', async () => {

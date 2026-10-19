@@ -225,7 +225,7 @@ describe('4. an argument a tool doesn\'t take names the one it meant', () => {
     expect(closestArg(TOOL_BY_NAME.get('ac_say')!, 'message')).toBe('text');
     expect(closestArg(TOOL_BY_NAME.get('ac_wait')!, 'timeout')).toBe('timeout_s');
     expect(closestArg(TOOL_BY_NAME.get('ac_give')!, 'recipient', { item: 'Necklace' })).toBe('target');
-    expect(unknownArgMessage(TOOL_BY_NAME.get('ac_raise')!, 'zebra')).toBe('ac_raise: unknown argument "zebra" (usage: raise stat=… [times=…])');
+    expect(unknownArgMessage(TOOL_BY_NAME.get('ac_raise')!, 'zebra')).toBe('ac_raise: unknown argument "zebra" (usage: raise [stat=…] [times=…])');
     // Every tool's own arguments (and aliases, and the hosted account) pass.
     for (const t of TOOL_BY_NAME.values()) expect(unknownArgs(t, Object.fromEntries(Object.keys(t.props).map((k) => [k, 'x'])), ['account'])).toBeNull();
     expect(unknownArgs(cast, { spell: 'Flame Bolt IV', account: 'a' }, ['account'])).toBeNull();

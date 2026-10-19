@@ -74,6 +74,14 @@ export function reloadAtBreak(pending: ServedVersion | null): boolean {
   return pending !== null;
 }
 
+/**
+ * Whether the notice is also the OK dialog: an urgent one always; any one at
+ * character select, which has no chat window for the line to land in.
+ */
+export function updateNoticeAsDialog(urgent: boolean, screen: Screen): boolean {
+  return urgent || screen === 'char-select';
+}
+
 /** Player-facing notice text (browser-UX, no retail string exists). */
 export function updateNoticeText(urgent: boolean): string {
   return urgent

@@ -235,18 +235,20 @@ describe('a refusal on a world whose per-IP caps every webAC player shares', () 
     expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), fromRow(AC1999_LOCAL_ID), false)).toBe(`Client logon failed\n\n${LOGON_FAILED_HINT}`);
   });
 
-  it('ServerFull: two webAC players are already on; the local server keeps the bare "Server Full"', () => {
+  it('ServerFull: two webAC players are already on; the local server says retail\'s "Server Full" and what to do', () => {
     expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), fromRow('ac1999'), false)).toBe(`Server Full\n\n${FULL_TEXT}`);
-    expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), fromRow(AC1999_LOCAL_ID), false)).toBe('Server Full');
+    expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), fromRow(AC1999_LOCAL_ID), false))
+      .toBe('Server Full\n\nWait a few minutes and try again, or pick another world.');
   });
 
-  it('the other refusals, and anything once in the world, are unchanged there', () => {
+  it('the other refusals, and anything once in the world, get only their plain next step there', () => {
     const pub = fromRow('ac1999');
-    expect(loginFailureText(refusedWith(STR_LOGIN_ACCOUNT_ONLINE), pub, false)).toBe('Player already logged on');
-    expect(loginFailureText(refusedWith(STR_LOGIN_INVALID_AUTH), pub, false)).toBe('Invalid or corrupted authentication');
+    expect(loginFailureText(refusedWith(STR_LOGIN_ACCOUNT_ONLINE), pub, false)).toBe('Player already logged on\n\nClose any other window logged in to this account, or wait a minute and try again.');
+    expect(loginFailureText(refusedWith(STR_LOGIN_INVALID_AUTH), pub, false)).toBe('Invalid or corrupted authentication\n\nReload the page and try again.');
     expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), pub, true)).toBe('Client logon failed');
-    expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), pub, true)).toBe('Server Full');
-    expect(loginFailureText(netErrorNotice('ID_ConnectionError_ClientTimedOutServer'), pub, false)).toBe('Client timed out the connection');
+    expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), pub, true)).toBe('Server Full\n\nWait a few minutes and try again, or pick another world.');
+    expect(loginFailureText(netErrorNotice('ID_ConnectionError_ClientTimedOutServer'), pub, false))
+      .toBe('Client timed out the connection\n\nTry again in a minute, or pick another world.');
   });
 
   it('the caps drive the wording (another server adopting the rule is flagged in the bridge only); a 0 cap is unlimited', () => {

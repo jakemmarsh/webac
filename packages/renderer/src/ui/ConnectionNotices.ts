@@ -82,7 +82,7 @@
  */
 
 import { acStringHash, getString, getStringFromTable } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { CharacterError, characterErrorMessage } from '@ac/shared';
+import { CharacterError, characterErrorMessage, playerText, withNextStep } from '@ac/shared';
 import { silenceIsOwnStall, type BridgeRefusal, type LinkSample } from '@ac/network';
 
 /** CPlayerSystem::UseTime — seconds since the last packet before ServerDied (0x7cc5c8). */
@@ -101,6 +101,25 @@ export const DISCONNECTED_ROOT_ELEMENT = 0x10000416;
 export const DISCONNECTED_PLATE_ELEMENT = 0x10000333;
 export const DISCONNECTED_TEXT_ELEMENT = 0x10000417;
 export const DISCONNECTED_BUTTON_ELEMENT = 0x10000418;
+/** 0x10000417's DAT size: retail's fixed text box on the Disconnected plate. */
+export const DISCONNECTED_TEXT_WIDTH = 260;
+export const DISCONNECTED_TEXT_HEIGHT = 126;
+
+/**
+ * Whether the Disconnected text needs its scrollbar. 0x10000417 is a
+ * UIElement_Text, which is a UIElement_Scrollable (its vftable 'for
+ * UIElement_Scrollable'; InqScrollDelta, ScrollToPosition, ScrollPage): text
+ * taller than the box scrolls inside it, and the visible bar is a linked
+ * UIElement_Scrollbar (p0x72, UIElement_Scrollable::OnSetAttribute @
+ * 00474630) whose p121 hides it while the text fits (the chargen framed
+ * texts' 0x100002e7). The DAT gives 0x10000417 no bar because every retail
+ * text fit in 260x126; a server's own boot or ban reason (plus our next-step
+ * line) does not, and the box clipped it mid-sentence. Text that fits keeps
+ * retail's exact cell; taller text gets the HUD scrollbar at the box's right.
+ */
+export function disconnectedTextScrolls(contentHeight: number): boolean {
+  return contentHeight > DISCONNECTED_TEXT_HEIGHT;
+}
 /** The backdrop 0x10000416 carries (800x600 JPEG). */
 export const DISCONNECTED_BACKDROP_TEXTURE = 0x06005d3f;
 /** Button label string of 0x10000418 (p23). */
@@ -203,6 +222,38 @@ const NET_ERROR_FALLBACK: Readonly<Record<string, string>> = Object.freeze({
 /** Every ClientNet NetError token (table 0x23000010), for audits and tests. */
 export const NET_ERROR_TOKENS: readonly string[] = Object.freeze(Object.keys(NET_ERROR_FALLBACK));
 
+/** Pick another world, or wait: the next step after a failure the world itself caused. */
+export const RETRY_OR_OTHER_WORLD_HINT = 'Try again in a minute, or pick another world.';
+/** webAC players can't install a client: a version refusal is fixed by reloading the page. */
+export const RELOAD_FOR_LATEST_HINT = 'Reload the page to get the latest webAC.';
+/** An account already in use elsewhere. */
+export const ACCOUNT_IN_USE_HINT = 'Close any other window logged in to this account, or wait a minute and try again.';
+
+/**
+ * The plain next-step sentence each NetError gets under its retail text
+ * (launcher/worldDirectory.ts loginFailureText adds it: retail text, one
+ * blank line, the hint). Retail's own texts were written for a client a
+ * player installed and restarted ("You do not have the current version of
+ * the client installed.", "Server Full") and stop there. Tokens whose retail
+ * text already says what to do (CantSocket, CantBind, LogonServerMigrated)
+ * and ClientLogOnFailed (its hints depend on the world: loginFailureText)
+ * are absent.
+ */
+export const NET_ERROR_NEXT_STEP: Readonly<Record<string, string>> = Object.freeze({
+  ID_ConnectionError_Generic: RETRY_OR_OTHER_WORLD_HINT,
+  ID_ConnectionError_ServerFull: 'Wait a few minutes and try again, or pick another world.',
+  ID_ConnectionError_SecondLogon: ACCOUNT_IN_USE_HINT,
+  ID_ConnectionError_BadCryptoKey: 'Reload the page and try again.',
+  ID_ConnectionError_NoLogonServer: RETRY_OR_OTHER_WORLD_HINT,
+  ID_ConnectionError_NetVersionMismatch: RELOAD_FOR_LATEST_HINT,
+  ID_ConnectionError_ServerTimedOutClient: RETRY_OR_OTHER_WORLD_HINT,
+  ID_ConnectionError_ClientTimedOutServer: RETRY_OR_OTHER_WORLD_HINT,
+  ID_ConnectionError_PlayerAlreadyLoggedOn: ACCOUNT_IN_USE_HINT,
+  ID_ConnectionError_ServerClosedConnection: RETRY_OR_OTHER_WORLD_HINT,
+  ID_ConnectionError_InsufficientPriveledge: "This account can't log in here; ask this server's operators.",
+  ID_ConnectionError_AccountAuthenticationFailed: 'Check the account name and password, then try again.',
+});
+
 /**
  * The NetError our own connection layer raises for each failure it can
  * detect. The WebSocket to the bridge is the browser client's local socket
@@ -227,8 +278,8 @@ export function connectionLostText(): string {
 /** The ID_ConnectionError_* / ID_NetError_* text for a token (DAT first, documented fallback second). */
 export function netErrorNotice(token: string): ConnectionNotice {
   const stringId = acStringHash(token);
-  const text = getStringFromTable(NET_ERROR_STRING_TABLE, stringId) ?? getString(stringId)
-    ?? NET_ERROR_FALLBACK[token] ?? NET_ERROR_FALLBACK.ID_ConnectionError_Generic;
+  const text = playerText(getStringFromTable(NET_ERROR_STRING_TABLE, stringId) ?? getString(stringId),
+    NET_ERROR_FALLBACK[token] ?? NET_ERROR_FALLBACK.ID_ConnectionError_Generic);
   // Retail: PopupError → MessageBoxW, then Client::Run returns. Ours renders
   // it as the DialogFactory OK message dialog over the connecting screen.
   return Object.freeze({ surface: 'dialog', token, stringId, text });
@@ -316,10 +367,8 @@ const NET_ERROR_TOKEN_BY_ID: ReadonlyMap<number, string> = new Map(
 export function serverNetErrorNotice(stringId: number, tableEnum: number): ConnectionNotice {
   const table = NET_ERROR_TABLE_ENUMS.get(tableEnum);
   const token = NET_ERROR_TOKEN_BY_ID.get(stringId) ?? '';
-  const text = (table !== undefined ? getStringFromTable(table, stringId) : null)
-    ?? getString(stringId)
-    ?? (token ? NET_ERROR_FALLBACK[token] : undefined)
-    ?? NET_ERROR_FALLBACK.ID_ConnectionError_Generic;
+  const text = playerText((table !== undefined ? getStringFromTable(table, stringId) : null) ?? getString(stringId),
+    (token ? NET_ERROR_FALLBACK[token] : undefined) ?? NET_ERROR_FALLBACK.ID_ConnectionError_Generic);
   return Object.freeze({ surface: 'dialog', token, stringId, text });
 }
 
@@ -335,24 +384,27 @@ export const LOGIN_REFUSED_TOKENS: ReadonlySet<string> = new Set([
   'ID_ConnectionError_ClientLogOnFailed',
 ]);
 
-interface CharErrorRow { readonly token: string; readonly surface: ErrorSurface }
+interface CharErrorRow { readonly token: string; readonly surface: ErrorSurface; readonly nextStep?: string }
+
+/** Pick another character: the next step for a char-select refusal about the chosen one. */
+export const PICK_ANOTHER_CHARACTER_HINT = 'Pick another character.';
 
 /** gmUIFlow::RecvNotice_CharacterError @ 0047a7c0 — the switch, case by case. */
 const CHAR_ERROR_ROWS: ReadonlyMap<number, CharErrorRow> = new Map<number, CharErrorRow>([
-  [CharacterError.Logon, { token: 'ID_CHAR_ERROR_LOGON', surface: 'disconnected' }],
+  [CharacterError.Logon, { token: 'ID_CHAR_ERROR_LOGON', surface: 'disconnected', nextStep: ACCOUNT_IN_USE_HINT }],
   [CharacterError.AccountLogin, { token: 'ID_CHAR_ERROR_ACCOUNT_LOGON', surface: 'disconnected' }],
   [CharacterError.ServerCrash1, { token: 'ID_CHAR_ERROR_SERVER_CRASH', surface: 'disconnected' }],
-  [CharacterError.Logoff, { token: 'ID_CHAR_ERROR_LOGOFF', surface: 'dialog' }],
-  [CharacterError.Delete, { token: 'ID_CHAR_ERROR_DELETE', surface: 'dialog' }],
+  [CharacterError.Logoff, { token: 'ID_CHAR_ERROR_LOGOFF', surface: 'dialog', nextStep: 'Try again in a minute.' }],
+  [CharacterError.Delete, { token: 'ID_CHAR_ERROR_DELETE', surface: 'dialog', nextStep: 'Try again in a minute.' }],
   // CHAR_ERROR_ACCOUNT_IN_USE (0x8) shares the SERVER_CRASH case.
   [CharacterError.ServerCrash2, { token: 'ID_CHAR_ERROR_SERVER_CRASH', surface: 'disconnected' }],
-  [CharacterError.AccountInvalid, { token: 'ID_CHAR_ERROR_ACCOUNT_INVALID', surface: 'disconnected' }],
-  [CharacterError.AccountDoesntExist, { token: 'ID_CHAR_ERROR_ACCOUNT_DOESNT_EXIST', surface: 'disconnected' }],
-  [CharacterError.EnterGameGeneric, { token: 'ID_CHAR_ERROR_ENTER_GAME_GENERIC', surface: 'dialog' }],
+  [CharacterError.AccountInvalid, { token: 'ID_CHAR_ERROR_ACCOUNT_INVALID', surface: 'disconnected', nextStep: 'Check the account name and password, then try again.' }],
+  [CharacterError.AccountDoesntExist, { token: 'ID_CHAR_ERROR_ACCOUNT_DOESNT_EXIST', surface: 'disconnected', nextStep: "Check the account name. If this server needs an account registered first, register on its website." }],
+  [CharacterError.EnterGameGeneric, { token: 'ID_CHAR_ERROR_ENTER_GAME_GENERIC', surface: 'dialog', nextStep: PICK_ANOTHER_CHARACTER_HINT }],
   [CharacterError.EnterGameStressAccount, { token: 'ID_CHAR_ERROR_ENTER_GAME_STRESS_ACCOUNT', surface: 'dialog' }],
   [CharacterError.EnterGameCharacterInWorld, { token: 'ID_CHAR_ERROR_ENTER_GAME_CHARACTER_IN_WORLD', surface: 'dialog' }],
   [CharacterError.EnterGamePlayerAccountMissing, { token: 'ID_CHAR_ERROR_ENTER_GAME_PLAYER_ACCOUNT_MISSING', surface: 'disconnected' }],
-  [CharacterError.EnterGameCharacterNotOwned, { token: 'ID_CHAR_ERROR_ENTER_GAME_CHARACTER_NOT_OWNED', surface: 'dialog' }],
+  [CharacterError.EnterGameCharacterNotOwned, { token: 'ID_CHAR_ERROR_ENTER_GAME_CHARACTER_NOT_OWNED', surface: 'dialog', nextStep: PICK_ANOTHER_CHARACTER_HINT }],
   [CharacterError.EnterGameCharacterInWorldServer, { token: 'ID_CHAR_ERROR_ENTER_GAME_CHARACTER_IN_WORLD_SERVER', surface: 'dialog' }],
   [CharacterError.EnterGameOldCharacter, { token: 'ID_CHAR_ERROR_ENTER_GAME_OLD_CHARACTER', surface: 'dialog' }],
   [CharacterError.EnterGameCorruptCharacter, { token: 'ID_CHAR_ERROR_ENTER_GAME_CORRUPT_CHARACTER', surface: 'dialog' }],
@@ -366,11 +418,13 @@ const CHAR_ERROR_ROWS: ReadonlyMap<number, CharErrorRow> = new Map<number, CharE
 /**
  * Where a CharacterError code lands and what it says. Codes outside the
  * retail switch (its `default:` label) show nothing, like retail. The DAT
- * text is used verbatim — including the EoL quirk that
- * ID_CHAR_ERROR_ENTER_GAME_GENERIC's entry reads
- * "ID_CHAR_ERROR_ENTER_GAME_OLD_CHARACTER" and the OLD_CHARACTER token has
- * no entry at all; when the string tables are not loaded the ACE wording
- * (`characterErrorMessage`, the same retail resource text) stands in.
+ * text comes first; when the string tables are not loaded, or the entry is
+ * only a resource token (the EoL and Dark Majesty DATs store
+ * ID_CHAR_ERROR_ENTER_GAME_GENERIC's entry as the literal
+ * "ID_CHAR_ERROR_ENTER_GAME_OLD_CHARACTER", which retail drew as is), the
+ * ACE wording (`characterErrorMessage`) stands in (playerText). A refusal
+ * whose retail text stops short of saying what to do carries one plain
+ * next-step line after a blank line (`nextStep`).
  */
 export function characterErrorNotice(code: number): ConnectionNotice {
   const row = CHAR_ERROR_ROWS.get(code);
@@ -378,7 +432,7 @@ export function characterErrorNotice(code: number): ConnectionNotice {
     return Object.freeze({ surface: 'none', token: '', stringId: 0, text: characterErrorMessage(code) });
   }
   const stringId = acStringHash(row.token);
-  const text = getString(stringId) ?? characterErrorMessage(code);
+  const text = withNextStep(playerText(getString(stringId), characterErrorMessage(code)), row.nextStep);
   return Object.freeze({ surface: row.surface, token: row.token, stringId, text });
 }
 

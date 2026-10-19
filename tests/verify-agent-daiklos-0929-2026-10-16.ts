@@ -226,7 +226,7 @@ describe('Daiklos 09:29Z reports (fake host)', () => {
       expect(out).toContain('0x0185014E');
       expect(out).toContain('0x01850114');
       expect(out).not.toContain('25493832');
-      expect(out.split('\n').at(-1)).toBe('(cell ids in hex: `walk_to target=0x01850148` walks to that room when you\'re in that dungeon or building, landblock 0x0185)');
+      expect(out.split('\n').at(-1)).toBe('(cell ids in hex: `walk_to target=0x01850148` walks to that room: a building\'s from outside too (from up to about 1.5 km), a dungeon\'s once you are in it (landblock 0x0185))');
       // Every row is as wide as its rule.
       const lines = out.split('\n').slice(0, -1);
       expect(new Set(lines.map((l) => l.length)).size).toBe(1);

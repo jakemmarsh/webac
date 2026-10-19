@@ -125,6 +125,6 @@ describe('Custom…: a bridge that never answers is named, not the player\'s net
   it('only CantSocket is reworded for a custom world (a refused login keeps its own text)', () => {
     const custom = (parseCustomBridge('wss://ac.example.net/') as { world: World }).world;
     const timeout = netErrorNotice('ID_ConnectionError_ClientTimedOutServer');
-    expect(loginFailureText(timeout, custom, false)).toBe(timeout.text);
+    expect(loginFailureText(timeout, custom, false)).toBe(`${timeout.text}\n\nTry again in a minute, or pick another world.`);
   });
 });

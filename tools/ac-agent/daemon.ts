@@ -33,6 +33,7 @@ import { type AgentEra, agentEra, eraAccount } from './eras.ts';
 import { CALLS_SETTLE_MS, SHUTDOWN_DEADLINE_MS, createShutdown, killTree, waitForCalls } from './shutdown.ts';
 import { replyDeadlineMs, withCallDeadline } from './callDeadline.ts';
 import { withStateLock } from './stateLock.ts';
+import { AGENT_VITE_CONFIG_SOURCE, NO_RELOAD_ENV } from '../lib/vite-no-reload.ts';
 
 /** `p`, or a rejection after `ms`. */
 const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> => Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timed out after ${ms} ms`)), ms))]);
@@ -353,11 +354,14 @@ async function main(): Promise<void> {
       const dir = ensureSnapshot(say);
       snapshot = dir;
       const port = await freePort(3127);
-      // HMR off: a page whose Vite went away (its daemon stopped) would otherwise poll and reload into
-      // whatever Vite comes back on that port, dropping the player mid-session (acjs-ea, 1999 run).
+      // HMR and Vite's WebSocket off: a page whose Vite socket closed (its daemon stopped, or the Mac's lid
+      // closed and Chrome dropped every socket) would otherwise poll and reload itself, dropping the player
+      // mid-session (acjs-ea, 1999 run; both stream players four times on 2026-10-18). tools/lib/vite-no-reload.ts.
       const cfg = join(dir, 'vite.agent.config.mjs');
-      writeFileSync(cfg, "import base from './vite.config.ts';\nexport default async (env) => { const c = typeof base === 'function' ? await base(env) : base; return { ...c, server: { ...(c.server ?? {}), hmr: false } }; };\n");
-      viteChild = spawn('npx', ['vite', '--config', cfg, '--port', String(port), '--strictPort'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      writeFileSync(cfg, AGENT_VITE_CONFIG_SOURCE);
+      viteChild = spawn('npx', ['vite', '--config', cfg, '--port', String(port), '--strictPort'], {
+        cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, [NO_RELOAD_ENV]: '1' },
+      });
       viteChild.stdout?.on('data', (d) => appendFileSync(log, `[vite] ${d}`));
       viteChild.stderr?.on('data', (d) => appendFileSync(log, `[vite] ${d}`));
       base = `http://localhost:${port}/`;
@@ -518,12 +522,12 @@ async function main(): Promise<void> {
     entering = enter().finally(() => { entering = null; });
     await entering;
   }
-  // A dev-server reload (another session saved a file) re-runs the login on its own; wait it out.
+  // A page that reloaded anyway (an attached tab's own site, a navigation) re-runs the login on its own; wait it out.
   let notice: string | null = null;
   page.on('load', () => {
     if (entering) return;
     say('page reloaded — waiting for re-entry');
-    notice = 'The game page reloaded (a file changed under its dev server, or the connection dropped). You have re-entered the world: any running walk/attack/loot was cancelled and event numbers restarted. Observe before acting.';
+    notice = 'The game page reloaded. You have re-entered the world: any running walk/attack/loot was cancelled and event numbers restarted. Observe before acting.';
     entering = enter().catch((e) => say(`re-entry failed: ${e}`)).finally(() => { entering = null; });
   });
 

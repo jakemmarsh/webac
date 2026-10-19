@@ -60,7 +60,9 @@ describe('1. routines with no action, and tools missing a required argument', ()
 
   it('a required argument left out answers with the usage line, on the CLI and over MCP, before anything is sent', async () => {
     const raise = TOOL_BY_NAME.get('ac_raise')!;
-    expect(missingRequired(raise, parseCliArgs(raise, []))).toBe('ac_raise: missing stat (usage: raise stat=… [times=…])');
+    // A bare raise is no longer refused: the page lists what can be raised and the costs (2026-10-18, fix7 test file).
+    expect(missingRequired(raise, parseCliArgs(raise, []))).toBeNull();
+    expect(missingRequired(TOOL_BY_NAME.get('ac_use')!, {})).toBe('ac_use: missing target (usage: use target=… [flee=…])');
     expect(missingRequired(raise, { stat: 'Quickness' })).toBeNull();
     const r = await handle({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'ac_give', arguments: { item: 'Necklace' } } }) as { result: { isError?: boolean; content: Array<{ text: string }> } };
     expect(r.result.isError).toBe(true);

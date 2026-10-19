@@ -27,7 +27,7 @@ import { SkillTable } from '@ac/dat-parser/file-types/SkillTable.js';
 import { SecondaryAttributeTable } from '@ac/dat-parser/file-types/SecondaryAttributeTable.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken,  PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
+import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
@@ -42,7 +42,7 @@ import {
   PATCH_CANCEL_FONT, PATCH_CANCEL_PRESS_SOUND, PATCH_COPYRIGHT, PATCH_CONNECT_TEXT, PATCH_TITLE_IMAGE,
   PATCH_METER_BG_FRAMES, PATCH_METER_OV_FRAMES, loadPatchSplashFiles,
   PatchStatus, PatchEventGate, StreamedPatchFeed, connectTextForLevel, patchProgressText, type PatchEvent,
-  PatchStatusLatch, patchFailureText, patchBootPlan, QuietPatchProgress, QUIET_PATCH_REVEAL_MS, type PatchBootPlan } from './ui/PatchScreen.js';
+  PatchStatusLatch, patchFailureText, showPatchFailureNotice, patchBootPlan, QuietPatchProgress, QUIET_PATCH_REVEAL_MS, type PatchBootPlan } from './ui/PatchScreen.js';
 import { loadDatWithCache, interrogateDat, fetchHeadMeta, OpfsDatBlobStore } from './dat/DatCache.js';
 import { PhysicsState as AcePhysicsState, EnvironChangeType, ENVIRON_FOG, ENVIRON_SOUND, isEnvironFog, isEnvironSound, OptimisticEquipmentTracker, CHARACTER_OPTION_BIT_MAP, resolveAutoWield, autoWieldRetryDue, UISlotSide } from '@ac/shared';
 import type { InventoryItem, MtChatSpeech } from '@ac/shared';
@@ -364,7 +364,9 @@ import {
   victimOrKillerLine, playerKilledLine, transientStringLine, channelIndexLines, channelListLines,
   tradeClosedLine, allegianceLoginLine, confirmationRequestText} from './ui/ServerMessageText.js';
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED } from './ui/WeenieErrorNotices.js';
-import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkDeadCause, linkSampleIsDead, NET_ERROR_STRING_TABLE, type ConnectionNotice } from './ui/ConnectionNotices.js';
+import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkDeadCause, linkSampleIsDead, NET_ERROR_STRING_TABLE, REQUEST_TIMEOUT_S, type ConnectionNotice } from './ui/ConnectionNotices.js';
+import { accountRefusalRoute, characterErrorRoute, staleSessionWaitText } from './session/RefusalRoute.js';
+import { characterRestoreRefusalText } from './session/CharacterRestore.js';
 import { CharacterError, runExpr } from '@ac/shared';
 import { DatLightBudget, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
 import { createViewerLight, updateViewerLight, viewerLightActive } from './effects/ViewerLight.js';
@@ -403,7 +405,7 @@ import { string2command } from './chat/commands/RetailCommandStrings.js';
 import { RETAIL_VERBOSE_VERSION } from './chat/commands/EmoteStatusCommands.js';
 import { type RuntimeConfig, assetUrl, loadRuntimeConfig, resolveRuntimeConfig } from './config/RuntimeConfig.js';
 import { startWeenieSideTables, skippedWeenieSideTables, wieldLocationFromMask as wieldLocationFor } from './boot/WeenieSideTables.js';
-import { accountBannedText, accountBootSurface, connectionFailureRecovery } from './session/AccountBoot.js';
+import { accountBannedText, connectionFailureRecovery } from './session/AccountBoot.js';
 import { characterMessageAccount } from './session/ServerAccountName.js';
 import { createSplitpea } from './ui/splitpea/SplitpeaPlugin.js';
 import { logOffCharacter, installUnloadSessionClose } from './session/PlayerModuleSave.js';
@@ -415,7 +417,7 @@ import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
-import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
+import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeAsDialog, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
 
 /** How long a LoginComplete may wait on contained objects before the safety valve sends it. */
 const LOGIN_COMPLETE_GRACE_MS = 15_000;
@@ -1002,13 +1004,18 @@ function applyPatchEvents(events: PatchEvent[]): void {
   }
 }
 
-/** A fatal launch error: its text in the connect label (retail's PopupError box is CORE.17.k.b's). */
+/**
+ * A fatal launch error: the boot notice plate (the retail OK dialog's look,
+ * boot/BootNotice.ts) over the splash, with a Reload button. The latch keeps
+ * later status writes (a late "Connected!") off the splash labels, which are
+ * cleared so the plate is the one place the error reads.
+ */
 function showPatchError(text: string): void {
   if (patchCancelled) return;
-  renderSplashLabel('load-text-left', patchStatusLatch.fail(text), true);
+  patchStatusLatch.fail(text);
+  renderSplashLabel('load-text-left', '', true);
   renderSplashLabel('load-text-right', '', true);
-  // The quiet (era-switch) boot has no splash: the placeholder line carries the error.
-  if (!datSplashBuilt) revealLoadingPlaceholder(loadingOverlay);
+  showPatchFailureNotice(document, text);
 }
 
 // OPFS-backed DAT cache (ASSESS: avoid re-downloading ~1.28GB every load).
@@ -7580,7 +7587,9 @@ async function main() {
       updateNotified = true;
       const text = updateNoticeText(action.urgent);
       gameUI.addSystemMessage(text, chatColorFor(ChatMessageType.System));
-      if (action.urgent) gameUI.showMessageDialog(text);
+      // Character select has no chat window: the notice is the OK dialog there
+      // (it never replaces one already up, e.g. a refusal).
+      if (updateNoticeAsDialog(action.urgent, updateScreen())) gameUI.showMessageDialog(text);
     }
   };
   const updateWatcher = new UpdateWatcher({
@@ -7786,6 +7795,21 @@ async function main() {
   // session/SessionLifecycle.ts for the ACE Session.cs anchoring.
   const sessionLifecycle = new SessionLifecycle();
   resumingAfterDrop = () => sessionLifecycle.resumingAfterDrop;
+  // CPlayerSystem::UseTime @ 00563110 — an enter-world request unanswered for
+  // REQUEST_TIMEOUT (110 s) raises ServerDied, the connection-lost path. Each
+  // request (and each "still in the world" retry) re-arms it, as
+  // LogOnCharacter re-stamps logOnRequestTime; PlayerCreate or a refusal stops it.
+  const enterRequestTimer = new RestartableTimer();
+  /** An enter-world request (0xF7C8) went out: send it and start retail's 110 s budget. */
+  const sendEnterWorldRequest = (): void => {
+    sessionLifecycle.noteEnterRequestSent();
+    aceConnection.sendMessage(buildCharacterEnterWorldRequest(), GameMessageGroup.UIQueue);
+    enterRequestTimer.schedule(() => {
+      if (!sessionLifecycle.enterRequestTimedOut(REQUEST_TIMEOUT_S * 1000)) return;
+      console.warn(`[AC] ACE: no answer to the enter-world request in ${REQUEST_TIMEOUT_S} s — ServerDied`);
+      raiseServerDied();
+    }, REQUEST_TIMEOUT_S * 1000);
+  };
   // BUG.gdle-transient-login-failed — GDLE / the AC1999 server answer a correct login with
   // "Client logon failed" now and then (their account query failed, e.g. busy saving the
   // logout a moment before). A login this page already got in with retries on its own at
@@ -7913,16 +7937,46 @@ async function main() {
    * cleanly (the bridge sends the server its Disconnect), show the launcher,
    * then connect to the world chosen there (same grace period as above).
    */
-  /** A refused launcher login: say why, then let the player fix it in the launcher. */
-  const returnToLauncher = (text: string): void => {
+  /** A refused login before the world: close what is left of the session (its later close is ours, so no ServerDied). */
+  const endRefusedSession = (): void => {
     cancelProvenLoginRetry();
     accountTabGuard.release();
     sessionLifecycle.noteDisconnected();
+    enterRequestTimer.cancel();
     aceConnection.autoReconnect = false;
     aceConnection.disconnect();
     sessionStorage.setItem('aceDisconnectTime', Date.now().toString());
+  };
+  /**
+   * A refused launcher login: back to the launcher, with the refusal's OK
+   * dialog over it, so the player fixes what was refused where they typed
+   * it. (The dialog used to sit over the connecting screen, an empty
+   * character select, until OK.)
+   */
+  const returnToLauncher = (text: string): void => {
+    endRefusedSession();
     acePassword = '';
-    gameUI.showMessageDialog(text, () => { if (!gameStarted) leaveForLauncher('refused'); });
+    leaveForLauncher('refused', text);
+  };
+  /**
+   * An account-level refusal (AccountBoot / AccountBanned, a Disconnected-
+   * screen CharacterError, another tab taking the account): retail's
+   * Disconnected screen from the world (or a resume of a drop from it);
+   * before the world the OK dialog, over the launcher for a launcher login,
+   * and with OK relaunching the connect cycle for a URL login, as the
+   * Disconnected screen's button did (session/RefusalRoute.ts).
+   */
+  const raiseAccountRefusal = (text: string, endCause?: WorldEndCause): void => {
+    const route = accountRefusalRoute({
+      inWorld: gameStarted || sessionLifecycle.inWorld,
+      resuming: sessionLifecycle.resumingAfterDrop,
+      launcherLogin: !urlLogin.autoLogin,
+    });
+    if (route === 'disconnected') { raiseServerDied(text, endCause); return; }
+    if (route === 'launcher') { returnToLauncher(text); return; }
+    endRefusedSession();
+    console.log(`[AC] ACE: refused before the world — OK relaunches: "${text}"`);
+    gameUI.showRefusalDialog(text, relaunchConnectCycle);
   };
   /** Set by Options → Exit Game in the world: the CharacterLogOff ack goes to the launcher. */
   let exitToLauncherAfterLogOff = false;
@@ -7931,7 +7985,7 @@ async function main() {
    * World box, the char-select EXIT epilogue and Options → Exit Game (after
    * its logoff has played out) all land here.
    */
-  const leaveForLauncher = (why: LauncherLeaveReason): void => {
+  const leaveForLauncher = (why: LauncherLeaveReason, refusal?: string): void => {
     console.log(`[AC] ACE: ${why} — leaving this world for the launcher`);
     // BUG.resume-silent-launcher — every return to the server select says why (a resume
     // that ended there at 2026-10-17 02:34Z left no trace of how).
@@ -7941,8 +7995,14 @@ async function main() {
     exitToLauncherAfterLogOff = false;
     accountTabGuard.release();
     sessionLifecycle.noteLoggedOut();
+    enterRequestTimer.cancel();
     aceConnection.disconnect();
     sessionStorage.setItem('aceDisconnectTime', Date.now().toString());
+    // A refusal on the way to a new build's reload: say why first, reload on OK.
+    if (refusal !== undefined && reloadAtBreak(updateWatcher.pendingVersion)) {
+      gameUI.showRefusalDialog(refusal, () => { reloadIfUpdatePending(); });
+      return;
+    }
     if (reloadIfUpdatePending()) return;
     void runLauncher().then(() => {
       aceConnection.setUrl(preworldReporter?.tagUrl(connectUrl) ?? connectUrl);
@@ -7954,6 +8014,9 @@ async function main() {
         aceConnection.connect(aceAccount, acePassword);
       }, 750);
     });
+    // runLauncher drew the launcher synchronously (LauncherScreen.build → prepareScreen,
+    // which closes every dialog): the refusal goes on top of it.
+    if (refusal !== undefined) gameUI.showRefusalDialog(refusal);
   };
   gameUI.callbacks.onWorldBoxClick = () => {
     if (gameStarted) return;
@@ -7997,7 +8060,8 @@ async function main() {
     worldResumePending = false;
     sessionLifecycle.endResume();
     if (launcherActive || gameUI.disconnectedScreenShown) return;
-    raiseServerDied(characterErrorNotice(CharacterError.Logon).text);
+    // From the world: the Disconnected screen; before it, the OK dialog over the launcher.
+    raiseAccountRefusal(characterErrorNotice(CharacterError.Logon).text);
   };
   /**
    * A client-side connection failure (ID_ConnectionError_* / ID_NetError_*):
@@ -8017,7 +8081,8 @@ async function main() {
       returnToLauncher(text);
       return;
     }
-    gameUI.showMessageDialog(text, relaunchConnectCycle);
+    // Replaces any dialog already up: refused, the OK (and its relaunch) never came.
+    gameUI.showRefusalDialog(text, relaunchConnectCycle);
   };
   // BUG.auto-enter-timer-stale-character-race — a CharacterDelete on the
   // auto-entered slot makes ACE send a second, later CharacterList
@@ -11985,11 +12050,9 @@ async function main() {
         console.warn(`[AC] AccountBoot: ${text}`);
         // RELEASE.preworld-outcomes — a closed code for the reason, never its text.
         if (!gameStarted) preworldReporter?.accountBoot(data.reason);
-        if (accountBootSurface({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
-          returnToLauncher(text);
-        } else {
-          raiseServerDied(text, 'server_boot');
-        }
+        // From the world: the Disconnected screen; before it, the OK dialog
+        // (over the launcher for a launcher login) — session/RefusalRoute.ts.
+        raiseAccountRefusal(text, 'server_boot');
       },
       onAccountBanned: (data) => {
         // CPlayerSystem::Handle_AccountBanned @ 00562bd0: retail's own ban
@@ -11999,11 +12062,7 @@ async function main() {
         const text = accountBannedText(data.secondsUntilExpiry, data.reason, Date.now());
         console.warn(`[AC] AccountBanned: ${text}`);
         if (!gameStarted) preworldReporter?.accountBanned(data.secondsUntilExpiry);
-        if (accountBootSurface({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
-          returnToLauncher(text);
-        } else {
-          raiseServerDied(text, 'server_boot');
-        }
+        raiseAccountRefusal(text, 'server_boot');
       },
       onCharacterDelete: () => {
         // ASSESS — 0xF655 S2C is ACE's delete ACK (CharacterHandler.cs:312):
@@ -13566,8 +13625,7 @@ async function main() {
       console.log(`[AC] ACE: Entering world with character ${slot.name} (GUID: 0x${aceCharGuid.toString(16)})...`);
 
       // Step 1: Send CharacterEnterWorldRequest
-      const requestMsg = buildCharacterEnterWorldRequest();
-      aceConnection.sendMessage(requestMsg, GameMessageGroup.UIQueue);
+      sendEnterWorldRequest();
     };
 
     // ── Character delete / restore — real ACE wire flow (ASSESS) ──
@@ -16494,6 +16552,8 @@ async function main() {
         now: () => performance.now(),
         schedule: (fn, ms) => { setTimeout(fn, ms); },
         canSwing: (guid) => { const o = serverObjectManager?.getObject(guid); return !!o && !serverObjectManager!.isDying(guid) && isObjectAttackable(o, serverObjectManager?.playerDescFlags ?? 0); },
+        // The agent host's own busy rule (agentHost.busy below), so the stance switch's delayed swing waits as the loop does.
+        busy: () => busyCount.busy || inventoryRequests.pending !== null || teleportBusy.value,
       });
       // The frame the agent's movement probes work in, and the collision services they step through:
       // agent global metres in and out (outdoors the render world is global; a dungeon's is its
@@ -17543,8 +17603,7 @@ async function main() {
               sessionLifecycle.noteCharacterCreated(aceCharGuid);
               gameUI.noteWorldSessionStart();
               preworldReporter?.enterRequested();
-              const requestMsg = buildCharacterEnterWorldRequest();
-              aceConnection.sendMessage(requestMsg, GameMessageGroup.UIQueue);
+              sendEnterWorldRequest();
             }
           } else {
             // SWEEP1006 chargen failure — RecvNotice_CharGenVerificationResponse
@@ -17552,7 +17611,7 @@ async function main() {
             // string-table 0x23000002 text for the code; the creation screen
             // stays up so the player can pick another name.
             const token = characterCreateErrorToken(response.responseCode) ?? 'ID_Character_Err_NameDBDown';
-            const retailMsg = getStringFromTable(0x23000002, acStringHash(token)) ?? token;
+            const retailMsg = playerText(getStringFromTable(0x23000002, acStringHash(token)), characterCreateErrorFallbackText(token));
             // BUG.chargen-olthoi-pending — Pending (2) for an Olthoi is ACE's
             // olthoi_play_disabled: retail's "try again later" plus a line that
             // says to pick another heritage, and this world stops offering
@@ -17579,23 +17638,24 @@ async function main() {
           // opcode as CharacterCreateResponse, so ClientConnection only
           // emits this event when no CharacterCreate request was
           // outstanding (see ClientConnection.ts's CharacterCreateResponse
-          // case). Surface the confirmation as a chat line (during play)
-          // and refresh the character-select screen if we're there.
+          // case). CPlayerSystem::Handle_CharGenVerificationResponse @ 0055e8b0:
+          // OK updates the character set (the list redraws; retail prints
+          // nothing); a refusal is gmCharacterManagementUI::
+          // RecvNotice_CharGenVerificationResponse @ 004ebf60's OK dialog over
+          // character select (session/CharacterRestore.ts). It used to be a
+          // chat line, which character select has nowhere to show.
           const data = event.data as CharacterRestoreResponseData;
           const cooldownNote = data.secondsDisabled > 0
             ? ` (login cooldown: ${data.secondsDisabled}s)`
             : '';
-          const verb = data.verificationOk ? 'restored' : 'rejected';
+          const verb = data.verificationOk ? 'restored' : `refused (code ${data.responseCode})`;
           console.log(
             `[AC] CharacterRestoreResponse: ${verb} "${data.name}" `
             + `guid=0x${data.objectGuid.toString(16)}${cooldownNote}`,
           );
-          gameUI.addSystemMessage(
-            data.verificationOk
-              ? `Character "${data.name}" has been restored.${cooldownNote}`
-              : `Character restore for "${data.name}" was rejected.`,
-            chatColorFor(ChatMessageType.System),
-          );
+          const restoreRefusal = characterRestoreRefusalText(data.responseCode);
+          // gmCharacterManagementUI only exists at character select: in the world retail shows nothing.
+          if (restoreRefusal !== null && !gameStarted && !sessionLifecycle.inWorld) gameUI.showRefusalDialog(restoreRefusal);
           // ASSESS — unlike delete, ACE does NOT re-send the CharacterList
           // after a restore (CharacterHandler.cs:379 sends only
           // GameMessageCharacterRestore) — clear the cached deleteTime and
@@ -17633,6 +17693,7 @@ async function main() {
         case 'playerCreate': {
           console.log(`[AC] ACE: PlayerCreate received — we are in the world! aceCharGuid=0x${(aceCharGuid ?? 0).toString(16)}`);
           sessionLifecycle.noteWorldEntered();
+          enterRequestTimer.cancel();
 
           // Initialize side pack tracking: index 0 = main pack (player GUID)
           sidePackGuids.length = 0;
@@ -17973,13 +18034,15 @@ async function main() {
         case 'loginRetry': {
           // ASSESS: stale-session recovery — ACE rejected the login because
           // the previous (abandoned) session hasn't finished logging off yet.
-          // ClientConnection retries on a 10s timer. CORE.17.k.b: the wait
-          // is carried by the connecting screen's Please Wait dialog, as in
-          // retail; the progress line goes to the console, not to chat.
+          // ClientConnection retries every LOGIN_REJECT_RETRY_MS (up to
+          // MAX_LOGIN_REJECT_RETRIES). CORE.17.k.b: the wait is carried by the
+          // connecting screen's Please Wait dialog, never chat; a wait that can
+          // run minutes says what it is waiting for under Please Wait.
           const a = event.reconnectAttempt ?? 0;
           const m = event.reconnectMax ?? 0;
           const s = event.reconnectDelaySec ?? 0;
           raiseClientNotice(gameUI, CN.loginRetryWaiting, { text: `Account still logged on server-side — retrying login in ${s}s (attempt ${a}/${m})…` });
+          gameUI.setConnectingStatus(staleSessionWaitText(a, m));
           break;
         }
 
@@ -18014,8 +18077,7 @@ async function main() {
               setTimeout(() => {
                 if (aceCharGuid !== null && sessionLifecycle.mayRetryEnterWorld()) {
                   console.log('[AC] ACE: Retrying CharacterEnterWorldRequest...');
-                  const requestMsg = buildCharacterEnterWorldRequest();
-                  aceConnection.sendMessage(requestMsg, GameMessageGroup.UIQueue);
+                  sendEnterWorldRequest();
                 }
               }, retryDelay);
               break;
@@ -18030,18 +18092,23 @@ async function main() {
             // CORE.17.k.b — gmUIFlow::RecvNotice_CharacterError @ 0047a7c0:
             // the Disconnected screen for the account-level codes, the
             // char-select OK dialog for the rest, nothing for the codes the
-            // switch does not list.
+            // switch does not list. Before the world the account-level codes
+            // are the OK dialog over the launcher, and an unlisted code ends
+            // the Entering World wait with the generic dialog instead of
+            // leaving it up forever (session/RefusalRoute.ts).
             // The enter is over (a refusal the player can answer by trying again).
-            if (!sessionLifecycle.inWorld) sessionLifecycle.noteEnterRefused();
-            const notice = characterErrorNotice(code);
+            if (!sessionLifecycle.inWorld) { sessionLifecycle.noteEnterRefused(); enterRequestTimer.cancel(); }
+            const inWorldNow = gameStarted || sessionLifecycle.inWorld;
+            const charError = characterErrorRoute(code, { inWorld: inWorldNow, connecting: gameUI.connectingScreenShown });
+            const notice = charError.notice;
             if (!gameStarted) preworldReporter?.connectionError(event, notice.token || null);
-            if (notice.surface === 'disconnected') {
-              raiseServerDied(notice.text);
-            } else if (notice.surface === 'dialog') {
-              console.warn(`[AC] ACE: CharacterError ${notice.token} → char-select dialog: "${notice.text}"`);
+            if (charError.route === 'account') {
+              raiseAccountRefusal(charError.text);
+            } else if (charError.route === 'charselect') {
+              console.warn(`[AC] ACE: CharacterError ${notice.token || `0x${code.toString(16)} (not in retail's switch)`} → char-select dialog: "${charError.text}"`);
               // QueueUIModeWithError(0x1000000a): a fresh character select
               // (the wait dialogs go with the old one), then the OK dialog.
-              gameUI.showCharacterErrorDialog(notice.text, aceCharList?.characters.map(c => ({
+              gameUI.showCharacterErrorDialog(charError.text, aceCharList?.characters.map(c => ({
                 id: c.id.toString(),
                 name: c.name,
                 deleteTime: c.deleteTime,

@@ -147,7 +147,7 @@ describe('2. stay_with drop=true goes down with the fellow beside you, reading w
     const r = await settle(api, host, api.walkTo(0x7f000003, { within: 2, stayWith: 'Claude Arcanist' }), 40_000, () => {
       const a = host.objs.get(ARC)!; a.x = host.me.x; a.y = host.me.y + 1; a.heardAt = host.t;
     });
-    expect(r?.message).toMatch(/so stay_with doesn't go down without them/);
+    expect(r?.message).toMatch(/and stay_with doesn't go down without them/);
     expect(host.launches).toHaveLength(0);
   });
 });
@@ -282,7 +282,7 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2): the split of 20:29Z'
         const t0 = host.t;
         const r2 = await host.walkTarget(C(0x2a6), at, '0x01D20340', { maxMs: 120_000, sameApi: true });
         expect(r2.ok).toBe(false);
-        expect(r2.message).toMatch(/^stopped [\d.]+ m short: no way on foot from this part of the dungeon to there: .*the doorway route there needs a 7\.1 m leap over open air, and your jump didn't make it \d+ min ago \(it came down short, in the gap\), so it is left out for now/);
+        expect(r2.message).toMatch(/^stopped [\d.]+ m short: no way on foot to there: .*the doorway route there needs a 7\.1 m leap over open air, and your jump didn't make it \d+ min ago \(it came down short, in the gap\), so it is left out for now/);
         expect(host.t - t0).toBeLessThan(2000);
         expect(host.traces.some((l) => /walk leg jumps|walk search/.test(l))).toBe(false);
       } finally { host.dispose(); }

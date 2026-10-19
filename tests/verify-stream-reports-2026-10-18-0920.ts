@@ -223,21 +223,35 @@ describe('5. sleepers by your way: your routine covering the walk, or all well b
     api.routine.start(fightProfile());
     const r = await settle(api, host, walk(), 40_000);
     expect(r!.message).toMatch(/^arrived/);
-    expect(r!.message).toMatch(/walked on past 3 monsters not awake yet \(Innocent Doll L50, Innocent Doll L50, Innocent Doll: your routine "Bulwark fights" takes them as they wake; 6\+ would stop it\)/);
+    expect(r!.message).toMatch(/passed 3 asleep \(Innocent Doll ×3: your routine takes them as they wake\)/);
   });
 
-  it('no routine: the same Dolls (at or above your level) still stop it', async () => {
+  // 2026-10-18 21:32Z segment: two near your level asleep are no pack (they aren't coming at you, and the walk keeps
+  // clear of them); three are, and one far above you (15+) stops it alone.
+  it('no routine: two Dolls at your level asleep are walked on past; three stop it, as do two with one 15+ above you', async () => {
     sleepers([['Innocent Doll', 50], ['Innocent Doll', 50]]);
     const r = await settle(api, host, walk(), 40_000);
+    expect(r!.message).toMatch(/^arrived/);
+    expect(r!.message).toMatch(/passed 2 asleep \(Innocent Doll ×2: no pack \(under 3 near your level\)\)/);
+  });
+  it('no routine: three Dolls at your level asleep still stop it', async () => {
+    sleepers([['Innocent Doll', 50], ['Innocent Doll', 50], ['Innocent Doll', 50]]);
+    const r = await settle(api, host, walk(), 40_000);
     expect(r!.ok).toBe(false);
-    expect(r!.message).toMatch(/going on brings you within 18 m of 2 monsters not awake yet: Innocent Doll L50/);
+    expect(r!.message).toMatch(/going on brings you within 18 m of 3 monsters not awake yet: Innocent Doll L50/);
+  });
+  it('no routine: two asleep, one of them 15+ levels above you, still stop it', async () => {
+    sleepers([['Pristine Doll', 63], ['Innocent Doll', 50]]);
+    const r = await settle(api, host, walk(), 40_000);
+    expect(r!.ok).toBe(false);
+    expect(r!.message).toMatch(/going on brings you within 18 m of 2 monsters not awake yet: Pristine Doll L63/);
   });
 
   it('no routine: Marionettes L26 asleep (22 under a L48) are walked on past and named', async () => {
     sleepers([['Marionette', 26], ['Marionette', 26]]);
     const r = await settle(api, host, walk(), 40_000);
     expect(r!.message).toMatch(/^arrived/);
-    expect(r!.message).toMatch(/walked on past 2 monsters not awake yet \(Marionette L26, Marionette L26: all 10\+ levels under yours\)/);
+    expect(r!.message).toMatch(/passed 2 asleep \(Marionette ×2: all 10\+ levels under yours\)/);
   });
 
   it('with your routine, six Pristine Dolls L60 asleep (a crowd) still stop it', async () => {

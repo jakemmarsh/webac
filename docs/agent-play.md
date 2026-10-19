@@ -32,7 +32,7 @@ in the cloud) uses the CLI; it is the same tool table (`tools/ac-agent/tools.ts`
 Prereqs: ACE + its DB in Docker (`npm run check-stack`). The daemon starts its own bridge (9127+) and, unless
 you pass `base=`, its own Vite on a **snapshot of the committed HEAD** (a sparse worktree under
 `$TMPDIR/acjs-agent/tree-<sha>`, Vite on 3127+), so other sessions saving files can't reload the game under
-the player. A new daemon prunes old snapshots: it keeps the 3 newest plus any a live daemon serves (before 2026-10-12 none were ever removed: 57 trees, 2.9 GB). The snapshot links `node_modules` and `dat/` from the checkout you start from, or from the main checkout when that is a fresh `git worktree` without them (before 2026-10-11 such a snapshot had no `node_modules` and Vite failed with "Cannot find package 'vite'"; the daemon now repairs those trees). To verify *uncommitted* work, pass `base=http://localhost:<your vite>/`. Logs:
+the player. That Vite runs with HMR **and its WebSocket** off (`vite.agent.config.mjs`, `tools/lib/vite-no-reload.ts`): `hmr: false` alone left /@vite/client's socket, which reloads the page whenever it closes, and closing the Mac's lid (DarkWake, Chrome closes every socket) reloaded both stream players four times on 2026-10-18. The lid still drops the game socket (the client resumes, but ACE's logout quits the fellowship): keep the lid open while a stream or a party runs. A new daemon prunes old snapshots: it keeps the 3 newest plus any a live daemon serves (before 2026-10-12 none were ever removed: 57 trees, 2.9 GB). The snapshot links `node_modules` and `dat/` from the checkout you start from, or from the main checkout when that is a fresh `git worktree` without them (before 2026-10-11 such a snapshot had no `node_modules` and Vite failed with "Cannot find package 'vite'"; the daemon now repairs those trees). To verify *uncommitted* work, pass `base=http://localhost:<your vite>/`. Logs:
 `$TMPDIR/acjs-agent/<profile>.log` (daemon, bridge, Vite, and the client's `[AC] Sent …` / server refusal
 lines, the first place to look when an action "did nothing").
 
@@ -901,9 +901,11 @@ heal and hand control back on danger. The brief only listed a routine beside tho
     your goal by 10 m AND farther from you than when the wait began: one following you comes by whatever way leads to
     you (Arcanist, 16 m → 7 m behind Bulwark round by the doorways, read "going elsewhere").
   - *Sleepers by the way* (`sleepersWalkOn`). Indoors, a walk your routine covers (running and held for it) goes on past
-    monsters asleep and names them, unless 6+ not well below you would wake at once; with no routine, sleepers all 10+
-    levels under you are walked past, any at or near your level (or of unknown level) still stop it. A jump's or drop's
-    landing among sleepers still stops it (one way).
+    monsters asleep and names them, unless 6+ not well below you would wake at once; with no routine (since 2026-10-18
+    21:32Z), only 3+ near your level, or 2+ with one 15+ above you, stop it: a monster asleep isn't coming at you, and
+    the walk keeps clear of it. A jump's or drop's landing among sleepers still stops it (one way). A chaser 10+ under
+    you whose kind did nothing that hurt is walked past with or without a routine; `ac_cast spells="A, B, C"` casts a
+    list on one target (Stamina to Mana Self between when mana is short).
   - *"Worn Goggles".* A name with a word saying which of your items (worn / wielded / equipped, spare / pack / carried,
     my / your) that matched nothing in full finds it among those (`qualifiedItem`), for use, use_on, give and the rest.
   - The kill note's hand-attack invitation while a routine fights for you was reworded in 161577067.

@@ -27,8 +27,9 @@ describe('patch failure latch (playwebac.com stuck on "Patching data...", 2026-1
     expect(patchFailureText(new TypeError('Failed to fetch'))).toBe('Could not reach the game data server. Check your connection and reload.');
   });
 
-  it('anything else keeps its message', () => {
-    expect(patchFailureText(new Error('WebGL2 unavailable'))).toBe('Error: WebGL2 unavailable');
-    expect(patchFailureText('weird')).toBe('Error: weird');
+  it('anything else reads as the generic game-data text, never the raw message (BOOT.notice-plate)', () => {
+    const generic = 'The game data couldn\'t be loaded. Check your connection and reload.';
+    expect(patchFailureText(new Error('WebGL2 unavailable'))).toBe(generic);
+    expect(patchFailureText('weird')).toBe(generic);
   });
 });

@@ -265,7 +265,8 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2): the −6 halls under
         try {
           const r = await host.walkTarget(C(f), cellStandPoint(g, C(f))!, hex(C(t)), { maxMs: 120_000 });
           expect(r.ok).toBe(false);
-          expect(r.message).toMatch(/^stopped [\d.]+ m short: no way on foot from this part of the dungeon to there: no doorway, stair or ramp joins them, and the openings overhead out of it are 6 m or more above the floor \(the lowest in cell 0x01D201[0-9A-F]{2}\), past your jump \(it lifts you about [\d.]+ m\); the two parts are joined one way only: from there a walk gets here by .*drops? through floor openings \([\d m,]+\), and nothing climbs back; the doorways from here climb about 4\d m higher \(as far as cell 0x01D203A5\): a way out of this part may be up there\. Otherwise recall out/);
+          // Said short since 2026-10-18 (Bulwark: "long explanations" at Aerbax Laboratory's one-way drops).
+          expect(r.message).toMatch(/^stopped [\d.]+ m short: no way on foot to there: this part is joined to it one way only \(from there .*drops? \([\d m,]+\) leads here, and nothing climbs back: the openings overhead are 6\+ m up, past your [\d.]+ m jump\); the doorways from here climb about 4\d m higher \(as far as cell 0x01D203A5\): a way out of this part may be up there\. Else recall/);
           expect(host.traces.some((l) => /walk stall|walk search/.test(l))).toBe(false);
           expect(host.t).toBeLessThan(2000);
         } finally { host.dispose(); }
@@ -284,7 +285,7 @@ describe.skipIf(!haveDat)('the real Mountain Keep (0x01D2): the −6 halls under
         expect(r.message).toMatch(/none of the portals you know here is on your side \(Holtburg #701d2027 is on the other\)/);
         host.add({ guid: 0x701d2099, name: 'Surface', itemType: 0x10000, objectDescFlags: 0x40000, cell: C(0x3a5), x: 62.3608, y: -11.6727, z: 36 });
         r = await host.walkTarget(C(0x192), cellStandPoint(g, C(0x192))!, 0x701d2027, { maxMs: 60_000 });
-        expect(r.message).toMatch(/on your side: Surface #701d2099 \(cell 0x01D203A5; walk_to or ac_use it\)/);
+        expect(r.message).toMatch(/portals on your side: Surface #701d2099 \(0x01D203A5\)/);
         expect(r.message).not.toMatch(/climb about/);
       } finally { host.dispose(); }
     }, 120_000);

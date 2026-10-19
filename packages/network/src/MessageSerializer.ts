@@ -3110,19 +3110,33 @@ export function parseCharacterCreateResponse(payload: Uint8Array): CharacterCrea
  * outstanding) since the opcode alone can't tell the two shapes apart.
  */
 export interface CharacterRestoreResponseData {
+  /** The u32 CG_VERIFICATION_RESPONSE: 1 = OK; ACE refuses with 3 (NameInUse) or 5 (Corrupt). */
+  responseCode: number;
+  /** responseCode === 1 (retail Handle_CharGenVerificationResponse @ 0055e8b0's `case 1`). */
   verificationOk: boolean;
+  /** 0 on a refusal (the refusal is the code alone). */
   objectGuid: number;
   name: string;
   secondsDisabled: number;
 }
 
+/**
+ * A refusal is the code alone (ACE SendCharacterCreateResponse(NameInUse /
+ * Corrupt), CharacterHandler.cs CharacterRestore), so the identity is read
+ * only after an OK: reading it unconditionally threw on the 4-byte payload
+ * and the refusal never reached the screen.
+ */
 export function parseCharacterRestoreResponse(payload: Uint8Array): CharacterRestoreResponseData {
   const reader = new BinaryReader(payload);
-  const verificationOk = reader.readUInt32() !== 0;
+  const responseCode = reader.readUInt32();
+  const verificationOk = responseCode === 1;
+  if (!verificationOk || reader.remaining < 4) {
+    return { responseCode, verificationOk, objectGuid: 0, name: '', secondsDisabled: 0 };
+  }
   const objectGuid = reader.readUInt32();
-  const name = reader.readString16();
+  const name = reader.remaining >= 2 ? reader.readString16() : '';
   const secondsDisabled = reader.remaining >= 4 ? reader.readUInt32() : 0;
-  return { verificationOk, objectGuid, name, secondsDisabled };
+  return { responseCode, verificationOk, objectGuid, name, secondsDisabled };
 }
 
 /** ServerName (0xF7E1) payload — the world/realm identity shown on the

@@ -441,7 +441,7 @@ describe.skipIf(!haveDat)('4. "stopped N m short" is the straight line; a much l
       expect(m, r.message).not.toBeNull();
       expect(Math.abs(Number(m![1]) - Math.hypot(pt.x - host.me.x, pt.y - host.me.y)), r.message).toBeLessThan(0.2);
       expect(Number(m![1])).toBeGreaterThan(80);
-      expect(r.message).toMatch(/at the edge of a 6\.0 m drop/);
+      expect(r.message).toMatch(/at a 6\.0 m drop \(one way down\)/);
     } finally { host.dispose(); }
   }, 300_000);
 

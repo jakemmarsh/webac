@@ -169,7 +169,7 @@ describe('3. one-way drops off the floor a fellow stands on', () => {
       const a = host.objs.get(ARC)!; a.x = host.me.x; a.y = host.me.y + 1; a.z = host.me.z;
     });
     expect(r?.ok).toBe(false);
-    expect(r?.message).toMatch(/^stopped [\d.]+ m short at the edge of a 6\.0 m drop: the way on drops to the floor below \(one way: the way back up may be long, or none\), and Claude Arcanist is on this floor \(1 m [NSEW]+ of you\), so stay_with doesn't go down without them\. Tell them \(ac_say text="\/f dropping 6\.0 m here, come down after me"\), then walk to Fountain again with drop=true/);
+    expect(r?.message).toMatch(/^stopped [\d.]+ m short at a 6\.0 m drop \(one way down\): Claude Arcanist is still up here \(1 m [NSEW]+\), and stay_with doesn't go down without them\. Tell them \(\/f\), then walk to Fountain again with drop=true/);
     expect(host.launches).toHaveLength(0);
     expect(host.me.z).toBeCloseTo(100, 1);
   });

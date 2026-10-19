@@ -258,7 +258,7 @@ describe('monsters coming at you, and at your fellows', () => {
       const shadow = monster(SHADOW, 'Shadow', 110, 60, { level: 26 });
       const r = await settle(api, host, p, 20_000, () => { if (++n === 10) shadow.seeks = { guid: host.me.guid, kind: 'move' }; });
       expect(r).toMatchObject({ ok: false, aggro: true });
-      expect(r!.message).toMatch(/^stopped [0-9.]+ m short: Shadow #8000b6e1 \(level 26\) is coming at you, \d+ m (E|NE|SE) \(running at you\)\. Fight it \(ac_attack \/ ac_cast\), get away from it .*stop_on_aggro=false\)\.$/);
+      expect(r!.message).toMatch(/^stopped [0-9.]+ m short: Shadow #8000b6e1 \(level 26\) is coming at you, \d+ m (E|NE|SE) \(running at you\)\. Fight it, get away .*stop_on_aggro=false\)\.$/);
       expect([...host.keys]).toEqual([]);
     });
 

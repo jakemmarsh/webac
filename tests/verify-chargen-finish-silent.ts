@@ -355,8 +355,10 @@ describe('FINISH sends or says why (no DATs)', () => {
     vi.advanceTimersByTime(fx.mod.CHARGEN_REPLY_TIMEOUT_MS);
     expect(ui.charGenVerificationPending).toBe(false);
     expect(events.at(-1)).toBe('no_reply');
-    // ID_Character_Err_NameDBDown: its table-0x23000002 text, or the token when the table is not loaded.
-    expect(messageText()).toMatch(/ID_Character_Err_NameDBDown|cannot create/);
+    // ID_Character_Err_NameDBDown: its table-0x23000002 text, or the same words when the table is
+    // not loaded (characterCreateErrorFallbackText), never the token itself.
+    expect(messageText()).toContain('The server cannot create your new character at this time. Please try again later.');
+    expect(messageText()).not.toMatch(/ID_[A-Za-z_]+/);
     ui.hideMessageDialog();
     press();
     expect(sent()).toBe(2);

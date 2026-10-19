@@ -108,7 +108,7 @@ describe('2. hits that do no harm don\'t stop a walk; real damage does', () => {
   it('"Critical hit! Essa Sclavus nicks your head for 0 points" mid-walk: walks on and says so (was "stopped 167.9 m short")', async () => {
     const r = await settle(api, host, api.walkTo('30m north', { stopOnAggro: false }), 30_000, hitAt(1000, 'Critical hit! Essa Sclavus nicks your head for 0 points of piercing damage!'));
     expect(r).toMatchObject({ ok: true });
-    expect(r!.message).toMatch(/walked on through a hit for 0 damage in all \(Essa Sclavus: no harm, or a nick\)/);
+    expect(r!.message).toMatch(/walked through a hit for 0 damage \(Essa Sclavus\)/);
   });
 
   it('an evade ("You evaded Mite Scamp!") walks on, whatever stop_on_aggro', async () => {

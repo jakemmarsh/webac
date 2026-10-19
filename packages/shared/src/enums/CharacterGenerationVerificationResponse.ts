@@ -55,3 +55,21 @@ export function characterCreateErrorToken(code: number): string | null {
     default:                                                           return 'ID_Character_Err_NameDBDown';
   }
 }
+
+/**
+ * The words of each chargen refusal token as the EoL DAT has them (table
+ * 0x23000002), for when the string table is not loaded: the token itself
+ * must never reach the player (it used to be the fallback). An unknown token
+ * reads as the catch-all ID_Character_Err_NameDBDown.
+ */
+const CHARGEN_REFUSAL_FALLBACK: Readonly<Record<string, string>> = Object.freeze({
+  ID_Character_Err_NameReserved: 'The name you have selected is already in use.',
+  ID_Character_Err_NameBanned: 'Sorry, but that name is not permitted. Please choose another.',
+  ID_Character_Err_NameAdminDenied: 'Sorry, but you do not have the privileges to make an administrator character.',
+  ID_Character_Err_NameDBDown: 'The server cannot create your new character at this time. Please try again later.',
+});
+
+/** Plain-English text for a chargen refusal token (characterCreateErrorToken), never the token. */
+export function characterCreateErrorFallbackText(token: string | null | undefined): string {
+  return (token ? CHARGEN_REFUSAL_FALLBACK[token] : undefined) ?? CHARGEN_REFUSAL_FALLBACK.ID_Character_Err_NameDBDown;
+}

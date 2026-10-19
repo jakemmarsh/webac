@@ -179,7 +179,7 @@ describe('GDLE (Dark Majesty): the STR_LOGIN_FAILED NetError bytes through Clien
     expect(shownFor(gdleLogin(STR_LOGIN_FAILED), REEF)).toBe(`Client logon failed${REEF_HINT}`);
   });
   it('another refusal (account already online) gets neither', () => {
-    expect(shownFor(gdleLogin(STR_LOGIN_ACCOUNT_ONLINE), COLDEVE)).toBe('Player already logged on');
+    expect(shownFor(gdleLogin(STR_LOGIN_ACCOUNT_ONLINE), COLDEVE)).toBe('Player already logged on\n\nClose any other window logged in to this account, or wait a minute and try again.');
   });
 });
 
@@ -188,10 +188,10 @@ describe('AC1999: the STR_LOGIN_FAILED NetError bytes through Connection1999 to 
   it('auto_create_accounts=1: the taken-name hint', () => {
     expect(shownFor(ac1999Login(STR_LOGIN_FAILED), AC1999)).toBe(`Client logon failed\n\n${LOGON_FAILED_HINT}`);
   });
-  it('a register-first world: its registration line; another refusal: the text alone', () => {
+  it('a register-first world: its registration line; another refusal: its own plain next step', () => {
     FakeSocket.sockets = [];
     expect(shownFor(ac1999Login(STR_LOGIN_FAILED), REEF)).toBe(`Client logon failed${REEF_HINT}`);
     FakeSocket.sockets = [];
-    expect(shownFor(ac1999Login(STR_LOGIN_ACCOUNT_ONLINE), AC1999)).toBe('Player already logged on');
+    expect(shownFor(ac1999Login(STR_LOGIN_ACCOUNT_ONLINE), AC1999)).toBe('Player already logged on\n\nClose any other window logged in to this account, or wait a minute and try again.');
   });
 });

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  DEV_BUILD_ID, UpdateWatcher, VERSION_PATH, decideUpdateAction, reloadAtBreak, isUpdateAvailable, parseServedVersion, updateNoticeText,
+  DEV_BUILD_ID, UpdateWatcher, VERSION_PATH, decideUpdateAction, reloadAtBreak, isUpdateAvailable, parseServedVersion, updateNoticeText, updateNoticeAsDialog,
 } from '../packages/renderer/src/update/UpdateWatcher.js';
 
 const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status });
@@ -38,6 +38,13 @@ describe('update notifier', () => {
   it('notice text', () => {
     expect(updateNoticeText(false)).toMatch(/next time you return to the world list/);
     expect(updateNoticeText(true)).toMatch(/log out/);
+  });
+
+  it('the notice is the OK dialog when urgent, and at character select (no chat window there)', () => {
+    expect(updateNoticeAsDialog(true, 'world')).toBe(true);
+    expect(updateNoticeAsDialog(false, 'world')).toBe(false);
+    expect(updateNoticeAsDialog(false, 'char-select')).toBe(true);
+    expect(updateNoticeAsDialog(true, 'char-select')).toBe(true);
   });
 
   it('UpdateWatcher fetches /version.json uncached, reports a new build once, and an urgent upgrade again', async () => {

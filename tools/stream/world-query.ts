@@ -21,6 +21,7 @@ import { DatDatabase } from '../../packages/dat-parser/src/DatDatabase.js';
 import { FileDatBytes } from '../../packages/dat-parser/src/node/FileDatBytes.js';
 import { DatReader } from '../../packages/dat-parser/src/DatReader.js';
 import { SpellTable } from '../../packages/dat-parser/src/file-types/SpellTable.js';
+import { EnvCell } from '../../packages/dat-parser/src/file-types/EnvCell.js';
 import { type AreaCreature, areaCreatureSql, parseAreaCreatures } from './corpses.ts';
 import { formatLore, loreDetailSql, loreNameSql, parseLoreRows, pickLoreNames } from './lore.ts';
 import { aceCellOf, formatShops, parseShopOffers, parseShopVendors, placeMapCoords, shopOfferSql, shopScrollOfferSql, shopVendorSql, type ShopDatInfo, type ShopOffer, type ShopVendor } from './shops.ts';
@@ -77,7 +78,10 @@ export function clipOutput(out: string, max = WORLD_QUERY_MAX_CHARS): string {
  * of digits only ("1850148" for 0x01850148) was taken for a decimal and turned into another cell. Such a column is one
  * named HEX(…), an alias `sql` gives HEX(…), or one with a hex letter in any row.
  */
-export function hexCellColumns(table: string, sql = ''): string {
+/** What the cell DAT says of a room: a building's (EnvCell SeenOutside) and where it stands in its landblock. */
+export type RoomInfo = { building: boolean; x: number; y: number };
+
+export function hexCellColumns(table: string, sql = '', roomOf?: (cell: number) => RoomInfo | null): string {
   const lines = table.replace(/\n+$/, '').split('\n');
   const rows = lines.map((l) => (/^\|.*\|$/.test(l) ? l.slice(1, -1).split('|').map((c) => c.trim()) : null));
   const header = rows.find((r) => r !== null);
@@ -123,7 +127,16 @@ export function hexCellColumns(table: string, sql = ''): string {
   const text = out.map((r) => (r ? `| ${r.map((c, i) => c.padEnd(widths[i])).join(' | ')} |` : rule)).join('\n');
   const notes: string[] = [];
   const r = room as string | null;
-  if (r) notes.push(`\`walk_to target=${r}\` walks to that room when you're in that dungeon or building, landblock 0x${r.slice(2, 6)}`);
+  // A building's room is walked to from outside too (the landscape, then its doorways), from up to 8 landblocks away
+  // (AgentApi.CELL_TARGET_NEAR_LB). The note said "when you're in that dungeon or building", so Arcanist walked at the
+  // Archmage by name from 1.4 km (refused: not in view), then by coordinates, never by 0x866C0106 (2026-10-18 21:06Z).
+  if (r) {
+    const info = roomOf?.(parseInt(r.slice(2), 16)) ?? null;
+    const lb = `landblock 0x${r.slice(2, 6)}`;
+    if (info?.building) notes.push(`${r} is a room in a building at about ${mapCoordinateText(placeMapCoords(parseInt(r.slice(2), 16), info.x, info.y))}: \`walk_to target=${r}\` walks there from outside too (the landscape, then the doorways) from up to about 1.5 km; farther, walk to those coordinates first`);
+    else if (info) notes.push(`${r} is a dungeon room (${lb}): \`walk_to target=${r}\` walks to it once you are in that dungeon (go in by its portal)`);
+    else notes.push(`\`walk_to target=${r}\` walks to that room: a building's from outside too (from up to about 1.5 km), a dungeon's once you are in it (${lb})`);
+  }
   const o = outdoor as { cell: number; x: number; y: number } | null;
   if (o) notes.push(`${hex(o.cell)} is outdoors at ${mapCoordinateText(placeMapCoords(o.cell, o.x, o.y))}: walk_to takes those coordinates`);
   const f = fixed as { from: number; to: number } | null;
@@ -262,6 +275,20 @@ function spellTable(): Map<number, { bitfield: number; power: number; school: nu
   }
 }
 
+/** A room's EnvCell from the cell DAT (ACJS_CELL_DAT picks another era's): SeenOutside (0x1) = a building's room. */
+let cellDat: DatDatabase | null | undefined;
+export function roomInfo(cell: number): RoomInfo | null {
+  try {
+    if (cellDat === undefined) cellDat = datAt(process.env.ACJS_CELL_DAT, '../../dat/client_cell_1.dat');
+    const data = cellDat?.getFileData(cell >>> 0);
+    if (!data) return null;
+    const c = new EnvCell(new DatReader(data));
+    return { building: (c.flags & 0x1) !== 0, x: c.position.origin.x, y: c.position.origin.y };
+  } catch {
+    return null;
+  }
+}
+
 function main(): void {
   if (process.argv[2] === 'lore') {
     console.log(clipOutput(lore(process.argv.slice(3).join(' '))));
@@ -280,7 +307,7 @@ function main(): void {
   const why = worldQueryRefusal(sql);
   if (why) { console.error(`refused: ${why}`); process.exit(2); }
   const out = runReadOnly([sql.trim().replace(/;\s*$/, '')], true);
-  console.log(clipOutput(out ? hexCellColumns(out, sql) : '(no rows)'));
+  console.log(clipOutput(out ? hexCellColumns(out, sql, roomInfo) : '(no rows)'));
 }
 
 if (process.argv[1] && /world-query\.ts$/.test(process.argv[1])) main();

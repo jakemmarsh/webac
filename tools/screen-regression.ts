@@ -112,7 +112,8 @@ async function waitHttp(url: string, ms = 120_000): Promise<void> {
 }
 
 function startVite(cwd: string, port: number): ChildProcess {
-  const p = spawn('npx', ['vite', '--port', String(port), '--strictPort'], { cwd, stdio: 'ignore', detached: true });
+  // No HMR socket: its close (a lid closing mid-run) would reload a page mid-capture (tools/lib/vite-no-reload.ts).
+  const p = spawn('npx', ['vite', '--port', String(port), '--strictPort'], { cwd, stdio: 'ignore', detached: true, env: { ...process.env, ACJS_VITE_NO_RELOAD: '1' } });
   return p;
 }
 

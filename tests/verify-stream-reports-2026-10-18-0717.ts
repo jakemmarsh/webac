@@ -394,7 +394,7 @@ describe('5. a walk your routine covers: a pack of mild monsters well below you 
     const gs = chasers([['Marionette', 26], ['Marionette', 26], ['Dark Marionette', 35]]);
     const r = await settle(api, host, p, 40_000, chase(gs));
     expect(r?.message).toMatch(/^arrived/);
-    expect(r?.message).toMatch(/walked on past 3 mild chasers your routine takes/);
+    expect(r?.message).toMatch(/passed 3 mild chasers \(Marionette ×2, Dark Marionette: well below you, nothing that hurt; your routine takes them\)/);
   });
 
   it('two Innocuous Dolls L46 and a Marionette: two weigh, no pack: walked on', async () => {
@@ -411,7 +411,7 @@ describe('5. a walk your routine covers: a pack of mild monsters well below you 
     const gs = chasers([['Pristine Doll', 60], ['Pristine Doll', 60], ['Pristine Doll', 60]]);
     const r = await settle(api, host, p, 15_000, chase(gs));
     expect(r?.message).toMatch(/^stopped [\d.]+ m short: Pristine Doll #80007a0\d \(level 60\) is coming at you/);
-    expect(r?.message).toMatch(/so a walk stops only for a pack \(3\+ coming at once, not counting mild ones 10\+ levels under you; 6\+ whatever their levels\), a caster whose spells hurt, or a heavy hitter; this one: 3 coming at once \(a pack\)\./);
+    expect(r?.message).toMatch(/\(a pack: 3 near your level; your routine "[^"]+" takes mild ones\)\./);
   });
 
   it('a Dark Marionette whose kind\'s Lightning Bolt took 110 of 192 stops it, low level or not', async () => {
@@ -421,7 +421,7 @@ describe('5. a walk your routine covers: a pack of mild monsters well below you 
     const gs = chasers([['Dark Marionette', 35]]);
     const r = await settle(api, host, p, 15_000, chase(gs));
     expect(r?.message).toMatch(/^stopped [\d.]+ m short: Dark Marionette #80007a00 \(level 35\) is coming at you/);
-    expect(r?.message).toMatch(/this one: its kind's Lightning Bolt III took 110 of your 192 health\./);
+    expect(r?.message).toMatch(/\(its kind's Lightning Bolt III took 110 of your 192 health; your routine "[^"]+" takes mild ones\)\./);
   });
 
   it('six coming at once stop it whatever their levels (a crowd)', async () => {
@@ -429,7 +429,7 @@ describe('5. a walk your routine covers: a pack of mild monsters well below you 
     const p = walkTo();
     const gs = chasers(Array.from({ length: 6 }, (): [string, number] => ['Marionette', 26]));
     const r = await settle(api, host, p, 15_000, chase(gs));
-    expect(r?.message).toMatch(/this one: 6 coming at once \(a crowd, if each is well below you\)\./);
+    expect(r?.message).toMatch(/\(a crowd of 6; your routine "[^"]+" takes mild ones\)\./);
   });
 });
 

@@ -14,7 +14,8 @@
 
 import { probeBridgeHealth } from '@ac/network';
 import { eraProfile } from '../era/EraProfiles.js';
-import { LOGIN_REFUSED_TOKENS } from '../ui/ConnectionNotices.js';
+import { LOGIN_REFUSED_TOKENS, NET_ERROR_NEXT_STEP } from '../ui/ConnectionNotices.js';
+import { withNextStep } from '@ac/shared';
 import { accountBootedText, PASSWORD_MISMATCH_BOOT_REASON } from '../session/AccountBoot.js';
 
 export type WorldCompat = 'ok' | 'beta' | 'incompatible';
@@ -310,7 +311,9 @@ export function perIpServerFullText(limits: PerIpLimits): string {
  * account (AuthenticateUserQuery::PerformQuery auto-creates unknown names),
  * so it carries LOGON_FAILED_HINT. A Custom… world whose bridge never
  * answered (CantSocket) gets customBridgeUnansweredText. Anything else, or
- * anything once in the world, is the notice text alone.
+ * anything once in the world, is the notice text with its plain next step
+ * (NET_ERROR_NEXT_STEP: "Server Full" → wait or pick another world, the
+ * version mismatch → reload the page) after one blank line.
  */
 export function loginFailureText(
   notice: { readonly token: string; readonly text: string },
@@ -328,9 +331,9 @@ export function loginFailureText(
     if (notice.token === 'ID_ConnectionError_ClientLogOnFailed' && limits.accounts > 0) return `${notice.text}\n\n${perIpLogonFailedText(limits)}`;
     if (notice.token === 'ID_ConnectionError_ServerFull' && limits.sessions > 0) return `${notice.text}\n\n${perIpServerFullText(limits)}`;
   }
-  if (inWorld || !LOGIN_REFUSED_TOKENS.has(notice.token)) return notice.text;
+  if (inWorld || !LOGIN_REFUSED_TOKENS.has(notice.token)) return withNextStep(notice.text, NET_ERROR_NEXT_STEP[notice.token]);
   if (world && worldRegistrationText(world)) return loginTimeoutText(notice.text, world);
-  return notice.token === 'ID_ConnectionError_ClientLogOnFailed' ? `${notice.text}\n\n${LOGON_FAILED_HINT}` : notice.text;
+  return notice.token === 'ID_ConnectionError_ClientLogOnFailed' ? `${notice.text}\n\n${LOGON_FAILED_HINT}` : withNextStep(notice.text, NET_ERROR_NEXT_STEP[notice.token]);
 }
 
 /**

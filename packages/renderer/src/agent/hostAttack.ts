@@ -34,6 +34,13 @@ export interface HostAttackDeps {
    * 2026-10-18 04:26Z). Unset: always.
    */
   canSwing?(guid: number): boolean;
+  /**
+   * A use or cast of yours still in progress (the agent host's busy rule: the client's busy count, a pending inventory
+   * request, a teleport): the delayed swing doesn't go out then, as AgentApi.attack's loop sends none while busy, and
+   * the loop sends it afresh once free. ACE answers a request sent meanwhile "You're too busy!" (Player_Melee
+   * HandleActionTargetedMeleeAttack: IsBusy). Unset: never busy.
+   */
+  busy?(): boolean;
 }
 
 export function createHostAttack(d: HostAttackDeps): {
@@ -48,7 +55,7 @@ export function createHostAttack(d: HostAttackDeps): {
       if (!plan.sendAttack) return;
       d.changeCombatMode(plan.mode);
       enteringUntil = d.now() + AUTO_ENTER_DELAY_MS + AUTO_ENTER_GRACE_MS;
-      d.schedule(() => { if (!d.canSwing || d.canSwing(guid)) d.swing(guid, power, height); else enteringUntil = 0; }, AUTO_ENTER_DELAY_MS);
+      d.schedule(() => { if ((!d.canSwing || d.canSwing(guid)) && !d.busy?.()) d.swing(guid, power, height); else enteringUntil = 0; }, AUTO_ENTER_DELAY_MS);
     },
     pending: () => d.now() < enteringUntil || d.requestPending(),
   };

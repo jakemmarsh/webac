@@ -48,6 +48,8 @@ export interface AgentObject {
    * TurnToObject at you, before a charge or a spell), or "closing, 6 m nearer in 3 s" (its own movement toward you).
    */
   comingAtYou?: string;
+  /** Monsters only, when not ATTACKING YOU: its last spell at you within the last minute ("Feeblemind Other II 26 s ago"). */
+  castingAtYou?: string;
   /** comingAtYou, but it gets no nearer (no closer in AGGRO_STALL_MS) or is on another floor: aimed at you, not reaching you. */
   comingAtYouStuck?: boolean;
   /**

@@ -79,7 +79,10 @@ export function formatObject(o: AgentObject): string {
     bits.push(`ON ANOTHER FLOOR, ${Math.abs(o.otherFloor)} m ${o.otherFloor > 0 ? 'up' : 'down'}: no melee from here; ${way}; a bolt or arrow only through an opening`);
   }
   if (o.attackingYou) bits.push(`ATTACKING YOU (${o.attackingYou}× in 10 s)`);
-  else if (o.comingAtYou) bits.push(o.comingAtYouStuck ? `AIMED AT YOU BUT NOT REACHING YOU (${o.comingAtYou})` : `COMING AT YOU (${o.comingAtYou})`);
+  else {
+    if (o.castingAtYou) bits.push(`CASTING AT YOU from ${o.dist.toFixed(1)} m (${o.castingAtYou})`);
+    if (o.comingAtYou) bits.push(o.comingAtYouStuck ? `AIMED AT YOU BUT NOT REACHING YOU (${o.comingAtYou})` : `COMING AT YOU (${o.comingAtYou})`);
+  }
   if (o.seen) bits.push(`seen: ${o.seen}`);
   if (o.lineOfFireBlockedAt !== undefined) bits.push(`no line of fire: blocked ${o.lineOfFireBlockedAt.toFixed(1)} m along it${o.lineOfFireBlocker ? ` by ${o.lineOfFireBlocker}` : ''} (${o.lineOfFireArc ? 'your arrow\'s arc would hit that' : 'a bolt or arrow would hit that'})`);
   if (o.seenAgo !== undefined) bits.push(`last seen ${seenAgoText(o.seenAgo)} ago`);

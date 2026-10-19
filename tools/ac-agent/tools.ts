@@ -202,6 +202,12 @@ function act(name: string, description: string, props: Props, required: string[]
   };
 }
 
+/** ac_cast's spells= as a list: a comma-separated string (ids as numbers), or an array as an MCP client may send it. */
+export function castListArg(v: unknown): Array<number | string> {
+  const parts = Array.isArray(v) ? v.map(String) : String(v).split(/\s*[,;]\s*/);
+  return parts.map((x) => x.trim()).filter(Boolean).map((x) => (/^\d+$/.test(x) ? Number(x) : x));
+}
+
 /** ac_cast's repeat arguments as the page's CastRepeatOptions (null: a single cast). */
 export function castRepeatArgs(a: Record<string, any>): { repeat: true; untilHealth?: number; maxCasts?: number; maxMs?: number } | null {
   if (!(a.repeat === true || a.repeat === 'true')) return null;
@@ -763,7 +769,7 @@ export const TOOLS: AgentTool[] = [
     item: { type: 'string', description: 'Item id or name in your inventory.' },
     target: { type: 'string', description: 'Target id or name ("self" for yourself).' },
   }, ['item', 'target'], (a) => [guidOrName(a.item), String(a.target) === 'self' ? 'self' : guidOrName(a.target)]),
-  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), a distance and direction from where you stand ("10m north", "25 m NE", "10m NNW", "10m 330°", "5m ahead", "3 m left"; map coordinates: 0.1 = 24 m), or a room of the dungeon or building you are in by its cell id (target=0x01850148: a room of your dungeon, or a room or outdoor cell of any landblock on the landscape, through its building\'s door; world-query and lore print cell ids in hex). A fellow out of your sight in a dungeon is walked to where they were last seen (it says so, and whether they are there now). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after. Being hit stops it unless the way on leads away from everything hitting you, you are going to a fellow with monsters on them, or flee=true (running away). A monster starting to come at you (running at you, turning to face you, closing in) stops it too, while it is still metres off, naming it, its level and distance (stop_on_aggro=false walks on); with your routine running, only a pack (3+ at once), a caster whose spells hurt you or a heavy hitter stops it, and it names the mild ones it walked past for the routine to take. Indoors it stops short of 2+ monsters asleep that it would come near (they wake together), unless all are 10+ levels under you or your routine is running (then only 6+ asleep at once stop it); it names those it walked past. Outdoors it keeps 10 m clear of monsters near the way (15 m of one well above your level) and says which it went round; when no way keeps clear it walks past them and says so (avoid_monsters=false walks straight). It names a fellow left far behind; stay_with=<fellow> keeps you together: you run as always, and stop to wait whenever they fall stay_within behind, until they are beside you (and it says when they stopped or went elsewhere). To keep up with someone, use ac_follow.', {
+  act('ac_walk_to', 'Walk/run to an object, map coordinates ("42.1N, 33.6E"), a distance and direction from where you stand ("10m north", "25 m NE", "10m NNW", "10m 330°", "5m ahead", "3 m left"; map coordinates: 0.1 = 24 m), or a room of the dungeon or building you are in by its cell id (target=0x01850148: a room of your dungeon, or a room or outdoor cell of any landblock on the landscape, through its building\'s door; world-query and lore print cell ids in hex). A fellow out of your sight in a dungeon is walked to where they were last seen (it says so, and whether they are there now). Paths round walls and through doorways, and jumps or drops off ledges, across gaps and onto platforms where no walk leads (never a fall your health can\'t take); the result says when it jumped or dropped. Returns when you arrive, get stuck, or after timeout; check ac_observe after. Being hit stops it unless the way on leads away from everything hitting you, you are going to a fellow with monsters on them, or flee=true (running away). A monster starting to come at you (running at you, turning to face you, closing in) stops it too, while it is still metres off, naming it, its level and distance (stop_on_aggro=false walks on); one 10+ levels under you whose kind has done nothing that hurt is walked past and named; with your routine running, only a pack (3+ at once near your level), a caster whose spells hurt you or a heavy hitter stops it. Indoors it stops short of monsters asleep that it would come near (they wake together) only when 3+ are near your level, or one is 15+ above you (your routine running: 6+); it names those it walked past. Outdoors it keeps 10 m clear of monsters near the way (15 m of one well above your level) and says which it went round; when no way keeps clear it walks past them and says so (avoid_monsters=false walks straight). It names a fellow left far behind; stay_with=<fellow> keeps you together: you run as always, and stop to wait whenever they fall stay_within behind, until they are beside you (and it says when they stopped or went elsewhere). To keep up with someone, use ac_follow.', {
     target: { type: 'string', description: 'Object id (#…), nearby object name (of several with that name, the one a walk reaches), map coordinates like "42.1N, 33.6E", an offset like "10m north" / "5m ahead" (compass N…NW, or ahead / back / left / right of your facing), or a cell id (0x039C0104: that room; a building\'s room or an outdoor cell of any landblock on the landscape too).' },
     within: { type: 'number', description: 'Stop this close, metres (default 2: beside it, on its floor). 5 or more is a range to stand at (a bolt\'s, a pull\'s): the straight distance, whatever floor it is on, and the answer says when the line to it is blocked.' },
     timeout_s: { type: 'number', description: 'Give up after this long (default: by distance, about 3 m/s + 30 s, 60 s to 10 min).' },
@@ -939,7 +945,10 @@ export const TOOLS: AgentTool[] = [
     until_health: { type: 'number', description: 'With repeat: stop when your health is below this, a fraction (0.7) or percent (70) (default 0.6; 0 never stops for health). A caster with under 100 HP is two or three hits from dead: 0.7 leaves time to heal.' },
     max_casts: { type: 'number', description: 'With repeat: stop after this many casts (default 20, at most 100).' },
     max_s: { type: 'number', description: 'With repeat: stop after this many seconds (default 120, at most 600).' },
-  }, ['spell'], (a) => [/^\d+$/.test(String(a.spell)) ? Number(a.spell) : String(a.spell), a.target === undefined ? null : (String(a.target) === 'self' ? 'self' : guidOrName(a.target)), castRepeatArgs(a)], 640_000),
+    spells: { type: 'string', description: 'Instead of spell=: a comma-separated list cast one after another on the one target, in your order (e.g. a fellow\'s buffs: "Armor Other, Blade Protection Other, Strength Other"). A spell your mana won\'t pay for gets Stamina to Mana Self first (as a routine restores mana); it stops when something starts attacking you or your health falls under 60%, and answers what landed and what didn\'t. A long list answers "still in progress": ac_wait types=task-done hears the summary.' },
+  }, [], (a) => (a.spells !== undefined && a.spells !== null && a.spells !== ''
+    ? [castListArg(a.spells), a.target === undefined ? null : (String(a.target) === 'self' ? 'self' : guidOrName(a.target)), null]
+    : [a.spell === undefined || a.spell === null ? '' : /^\d+$/.test(String(a.spell)) ? Number(a.spell) : String(a.spell), a.target === undefined ? null : (String(a.target) === 'self' ? 'self' : guidOrName(a.target)), castRepeatArgs(a)]), 640_000),
   act('ac_pick_up', 'Pick up an item from the ground or from an open container/corpse into your pack.', { item: { type: 'string', description: 'Item id or name.' } }, ['item'], (a) => [guidOrName(a.item)]),
   act('ac_loot', 'Open a corpse/chest and take everything (or only items whose name matches).', {
     target: { type: 'string', description: 'Corpse/chest id or name (default: nearest corpse).' },
@@ -1157,13 +1166,14 @@ export const TOOLS: AgentTool[] = [
       return { text: `unknown action "${action}" (${ROUTINE_ACTIONS.join(', ')})`, isError: true };
     },
   },
-  act('ac_raise', 'Spend unassigned XP to raise an attribute, vital or skill by one step (or several with times). stat= names it; skill= works the same.', {
+  act('ac_raise', 'Spend unassigned XP to raise an attribute, vital or skill by one step (or several with times). stat= names it; skill= works the same. With no stat it lists what can be raised and what one raise of each costs.', {
     stat: { type: 'string', description: 'Attribute (Strength…), vital (Health/Stamina/Mana) or skill name (e.g. "War Magic"); skill= is the same argument.' },
     times: { type: 'number', description: 'Raises at most this many (default 1): as many as your unassigned XP covers, stopping at the first it can\'t pay for (times=50 spends all it can). amount= is the same argument.' },
-  }, ['stat'], (a) => [String(a.stat), Number(a.times ?? 1) || 1, ...(a[RAISE_WORD] ? [a[RAISE_WORD]] : [])]),
-  act('ac_train_skill', 'Spend skill credits to train an untrained skill (e.g. "Life Magic", "Creature Enchantment", "Healing"). ac_character lists each untrained skill\'s cost in credits and your credits. A trained magic school lets you learn its spells from scrolls (ac_use the scroll).', {
+  // No stat: the page answers with what can be raised and each raise's cost (Arcanist's bare `./ac raise`, 2026-10-18).
+  }, [], (a) => [a.stat == null ? '' : String(a.stat), Number(a.times ?? 1) || 1, ...(a[RAISE_WORD] ? [a[RAISE_WORD]] : [])]),
+  act('ac_train_skill', 'Spend skill credits to train an untrained skill (e.g. "Life Magic", "Creature Enchantment", "Healing"). ac_character lists each untrained skill\'s cost in credits and your credits. A trained magic school lets you learn its spells from scrolls (ac_use the scroll). With no skill it lists the untrained skills and their costs.', {
     skill: { type: 'string', description: 'Skill name.' },
-  }, ['skill'], (a) => [String(a.skill)]),
+  }, [], (a) => [a.skill == null ? '' : String(a.skill)]),
 ];
 
 /**

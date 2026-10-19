@@ -119,7 +119,7 @@ describe('stream movement reports, 2026-10-16 11:01Z (fake host)', () => {
       host.add({ guid, name, itemType: 0x10, objectDescFlags: 0x10, x, y, ...extra });
     beforeEach(() => { host.me.level = 33; });
 
-    it('an L8 Banderling Scout coming at an L33 walks on; an L20 stops it', async () => {
+    it('an L8 Banderling Scout coming at an L33 walks on; an L25 (near his level) stops it (an L20, 13 under, walks on since 2026-10-18 21:32Z)', async () => {
       host.add({ guid: 0x80000070, name: 'Far Post', x: 80, y: 120 });
       const scout = monster(0x8000400a, 'Banderling Scout', 110, 60, { level: 8 });
       let n = 0;
@@ -127,11 +127,11 @@ describe('stream movement reports, 2026-10-16 11:01Z (fake host)', () => {
       expect(r, traces.join('\n')).toMatchObject({ ok: true });
 
       host.me.x = 80; host.me.y = 20;
-      const captain = monster(0x80002d80, 'Skeleton Captain', 110, 60, { level: 20 });
+      const captain = monster(0x80002d80, 'Skeleton Captain', 110, 60, { level: 25 });
       n = 0;
       const r2 = await settle(api, host, api.walkTo('Far Post', { stopOnAggro: true }), 60_000, () => { if (++n === 10) captain.seeks = { guid: host.me.guid, kind: 'move' }; });
       expect(r2).toMatchObject({ ok: false, aggro: true });
-      expect(r2!.message).toMatch(/Skeleton Captain #80002d80 \(level 20\) is coming at you/);
+      expect(r2!.message).toMatch(/Skeleton Captain #80002d80 \(level 25\) is coming at you/);
     });
 
     it('a newcomer of unknown level is examined first: its level (L8) answers, and the follow goes on', async () => {

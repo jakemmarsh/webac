@@ -48,6 +48,7 @@ import type { ACFontRenderer } from './ACFontRenderer.js';
 import { OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { attachPreworldScale, PREWORLD_WIDTH, PREWORLD_HEIGHT } from './PreworldScale.js';
 import { descRef } from './DatTextStyle.js';
+import { showBootNotice, type BootNoticeHandle } from '../boot/BootNotice.js';
 
 export const PATCH_LAYOUT_ID = 0x21000000;
 export const PATCH_ROOT_ELEMENT_ID = 0x1000041a;
@@ -630,7 +631,10 @@ export class PatchStatusLatch {
   allows(): boolean { return this.failedText === null; }
 }
 
-/** Player-facing text for a fatal boot error. */
+/** What a fatal boot error says when nothing more specific is known (the detail goes to the console and telemetry). */
+export const PATCH_FAILURE_GENERIC_TEXT = 'The game data couldn\'t be loaded. Check your connection and reload.';
+
+/** Player-facing text for a fatal boot error. Never the raw error message: that is for the console and telemetry. */
 export function patchFailureText(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   const status = /:\s*(\d{3})\b/.exec(msg)?.[1];
@@ -643,7 +647,23 @@ export function patchFailureText(err: unknown): string {
   if (err instanceof TypeError && /fetch|network/i.test(msg)) {
     return 'Could not reach the game data server. Check your connection and reload.';
   }
-  return `Error: ${msg}`;
+  return PATCH_FAILURE_GENERIC_TEXT;
+}
+
+/**
+ * BOOT.notice-plate — the failure on the boot notice plate (boot/BootNotice.ts),
+ * over the splash (left visible behind it) or the quiet boot's black frame,
+ * with a Reload button that has the keyboard focus. Retail reported a failed
+ * patch through its NetError dialog; this is that dialog's look with the
+ * browser's way out (a reload re-runs the cache-first download).
+ */
+export function showPatchFailureNotice(doc: Document, text: string, reload: () => void = () => doc.defaultView?.location.reload()): BootNoticeHandle {
+  doc.getElementById('patch-failure')?.remove();
+  return showBootNotice(doc, {
+    id: 'patch-failure', backdrop: 'clear',
+    paragraphs: [{ text, className: 'patch-failure-text' }],
+    buttons: [{ label: 'Reload', className: 'patch-failure-reload', onClick: reload }],
+  });
 }
 
 // ── ERA.switch-no-splash — an era-switch reload is not a new launch ──────

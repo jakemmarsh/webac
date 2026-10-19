@@ -21,7 +21,7 @@ import { MagicSchool, magicSchoolColor, magicSchoolColorRGBA, LUMINANCE_MIN_LEVE
 import { contractProgressText, contractTimedText, contractRepeatLeft, type ContractTiming } from '@ac/shared';
 import { TeleportAnimation, TeleportAnimState, PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
 import { PortalSpaceRenderer, portalSpaceHookSound } from '../effects/PortalSpaceRenderer.js';
-import { getAllegianceRankTitle, getDefaultCombatMode, encodeWindows1252, characterCreateErrorToken, CharacterGenerationVerificationResponse } from '@ac/shared';
+import { getAllegianceRankTitle, getDefaultCombatMode, encodeWindows1252, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, CharacterGenerationVerificationResponse } from '@ac/shared';
 import type { ChargenBlockReason } from '../telemetry/PreworldReporter.js';
 import { SHIPPED_DEFAULT_LANDSCAPE_DRAW_DISTANCE } from '../world/LandscapeDrawDistance.js';
 import { RETAIL_DEGRADE_PREFS } from '../models/DegradeLod.js';
@@ -366,7 +366,7 @@ import {
   attachDatEditField, attachDatTextArea, pinCaretBlink,
   type DatEditFieldHandle, type DatEditFieldOptions, type DatTextAreaHandle,
 } from './DatEditField.js';
-import { DIALOG_TEXT_BASE_TEMPLATE, DIALOG_TEXT_TEMPLATE, DISCONNECTED_TEXT_TEMPLATE, type TextTemplate } from './ConnectionNotices.js';
+import { DIALOG_TEXT_BASE_TEMPLATE, DIALOG_TEXT_TEMPLATE, DISCONNECTED_TEXT_TEMPLATE, DISCONNECTED_TEXT_WIDTH, DISCONNECTED_TEXT_HEIGHT, disconnectedTextScrolls, type TextTemplate } from './ConnectionNotices.js';
 
 /**
  * CORE.17.k.b.b.a.g.f.a — the MapInstructions dialog's text 0x3e (DialogFactory
@@ -1495,6 +1495,8 @@ export class GameUI {
   private chargenVerificationPending = false;
   /** True between server-connect start and character-list arrival (VISUAL.78). */
   private connectingMode = false;
+  /** The connecting screen's status line under Please Wait (setConnectingStatus). */
+  private connectingStatus: string | null = null;
   /** World/realm name from the ServerName (0xF7E1) message — shown on the
    *  char-select world plate. Null until ServerName arrives (VISUAL.79/.149). */
   private worldName: string | null = null;
@@ -5330,7 +5332,13 @@ export class GameUI {
       : this.uiManager.currentScreen === 'character-select'
         ? this.selectScreen.selectedCharacter?.id
         : this.selectedAvatarId;
+    // UIFlow::UseNewMode: entering character select from another screen (the
+    // world, chargen, the Disconnected screen) destroys the old UI's dialogs.
+    // A CharacterList that only redraws character select (or ends the
+    // connecting wait) leaves an open OK dialog alone.
+    if (this.uiManager.currentScreen !== 'character-select') this.hideMessageDialog();
     this.connectingMode = false;
+    this.connectingStatus = null;
     // CORE.17.k.b.b.a.e.a — gmCharGenMainUI and its gmCG3DView objects go
     // with the chargen screen: the view machine, the animator and its tick.
     this.resetChargenAppearanceView();
@@ -5377,6 +5385,11 @@ export class GameUI {
   }
 
   showConnectingScreen(): void {
+    // A new connect cycle: the last one's dialogs (a refusal answered on the
+    // launcher, a dialog left over a dropped world) and its status line go.
+    this.hideConfirmationDialog();
+    this.hideMessageDialog();
+    this.connectingStatus = null;
     this.connectingMode = true;
     this.selectedAvatarId = undefined;
     this.uiManager.setScreen('character-select');
@@ -6045,7 +6058,10 @@ export class GameUI {
       this.disconnectedHandle.destroy();
       this.disconnectedHandle = null;
     }
-    this.hideMessageDialog();
+    // An open OK dialog outlives a redraw of the same screen (a row click, a
+    // ServerName, a re-sent CharacterList): retail's modal dialog stays until
+    // its OK. Redrawing it away dropped a refusal and its onOk. A new mode
+    // (showConnectingScreen, showCharacterSelect from another screen) closes it.
     this.screenContainer.innerHTML = '';
     // gmCharacterManagementUI::SelectCharacter @ 004ec160 writes every
     // selection to UIPersistantData::m_iidSelectedAvatar; an empty list
@@ -6516,7 +6532,7 @@ export class GameUI {
     // showCharacterSelect() re-render replaces screenContainer's children,
     // which removes the blocker the same way.
     if (this.connectingMode) {
-      this.screenContainer.appendChild(this.buildWaitDialog('charsel-pleasewait', getString(7426468) ?? 'Please Wait'));
+      this.screenContainer.appendChild(this.buildWaitDialog('charsel-pleasewait', this.connectingWaitText()));
     }
 
     this.replaceACTextElements(this.screenContainer);
@@ -7235,7 +7251,7 @@ export class GameUI {
   /** RecvNotice_CharGenVerificationResponse's default case: ID_Character_Err_NameDBDown (table 0x23000002). */
   private showChargenFailureDialog(): void {
     const token = characterCreateErrorToken(CharacterGenerationVerificationResponse.Corrupt) ?? 'ID_Character_Err_NameDBDown';
-    this.showChargenFinishDialog(getStringFromTable(0x23000002, acStringHash(token)) ?? token);
+    this.showChargenFinishDialog(playerText(getStringFromTable(0x23000002, acStringHash(token)), characterCreateErrorFallbackText(token)));
   }
 
   /* ── CORE.17.k.b.b.a.d — chargen hover tooltips (layout 0x21000041) ── */
@@ -34731,7 +34747,49 @@ export class GameUI {
       if (characters) this.showCharacterSelect(characters, slotCount);
       else this.showCharacterSelect(this.lastCharacterSlots, this.lastSlotCount);
     }
-    this.showMessageDialog(text);
+    // A refusal is never swallowed by a dialog already up (showRefusalDialog).
+    this.showRefusalDialog(text);
+  }
+
+  /**
+   * A refusal's OK dialog: whatever message or confirmation dialog is open
+   * goes first, as UIFlow::UseNewMode destroys the old UI's dialogs before
+   * SetErrorMsg raises the new one. showMessageDialog alone refuses while
+   * one is open (MakeErrorMessageDialog), which swallowed a refusal and its
+   * onOk (the way back to the launcher) when another dialog was up.
+   */
+  showRefusalDialog(text: string, onOk?: () => void): void {
+    this.hideConfirmationDialog();
+    this.hideMessageDialog();
+    this.showMessageDialog(text, onOk);
+  }
+
+  /**
+   * A line under the connecting screen's Please Wait (MakePleaseWaitDialog's
+   * plate, string 7426468) while the connect cycle waits on something the
+   * player should know about, e.g. the server still releasing the account's
+   * last session. Null clears it. Retail had no such line (its waits were
+   * seconds); ours can wait minutes (ClientConnection.MAX_LOGIN_REJECT_RETRIES).
+   */
+  setConnectingStatus(text: string | null): void {
+    if (this.connectingStatus === text) return;
+    this.connectingStatus = text;
+    if (!this.connectingMode || this.uiManager.currentScreen !== 'character-select') return;
+    const old = this.screenContainer.querySelector('#charsel-pleasewait');
+    if (!old) return;
+    const next = this.buildWaitDialog('charsel-pleasewait', this.connectingWaitText());
+    old.replaceWith(next);
+    this.replaceACTextElements(next);
+  }
+
+  /** The connecting screen's wait text now showing (tests / probes). */
+  get connectingStatusText(): string | null {
+    return this.connectingMode ? this.connectingStatus : null;
+  }
+
+  private connectingWaitText(): string {
+    const pleaseWait = getString(7426468) ?? 'Please Wait';
+    return this.connectingStatus ? `${pleaseWait}\n${this.connectingStatus}` : pleaseWait;
   }
 
   /**
@@ -34996,13 +35054,15 @@ export class GameUI {
       }
       // UIElement_Text::SetStringInfo on 0x10000417 — the text wraps inside
       // its 260x126 cell and is centred both ways (base 0x10000377 p20/p21
-      // = 1), font 0x40000001, its own p27 colour 0xFFFFF7CC.
+      // = 1), font 0x40000001, its own p27 colour 0xFFFFF7CC. Taller text
+      // scrolls in the box (buildDisconnectedText).
       const textEl = handle.elements.get(0x10000417);
       if (textEl) {
         textEl.id = 'disconnected-text';
-        const cell = this.buildTemplateTextCell(text, 260, 126, DISCONNECTED_TEXT_TEMPLATE);
-        Object.assign(cell.style, { left: '0', top: '0' });
-        textEl.appendChild(cell);
+        const built = this.buildDisconnectedText(text);
+        Object.assign(built.el.style, { left: '0', top: '0' });
+        textEl.appendChild(built.el);
+        built.bind?.();
       }
       const btnEl = handle.elements.get(0x10000418);
       if (btnEl) btnEl.id = 'disconnected-quit';
@@ -35017,7 +35077,8 @@ export class GameUI {
         position: 'absolute', left: '430px', top: '115px', width: '290px', height: '205px',
         background: 'rgba(0,0,0,0.41)',
       });
-      const textEl = this.buildTemplateTextCell(text, 260, 126, DISCONNECTED_TEXT_TEMPLATE);
+      const built = this.buildDisconnectedText(text);
+      const textEl = built.el;
       textEl.id = 'disconnected-text';
       Object.assign(textEl.style, { left: '15px', top: '15px' });
       plate.appendChild(textEl);
@@ -35026,8 +35087,55 @@ export class GameUI {
       Object.assign(btn.style, { left: '95px', top: '158px', width: '100px' });
       plate.appendChild(btn);
       inner.appendChild(plate);
+      built.bind?.();
     }
     this.replaceACTextElements(this.screenContainer);
+  }
+
+  /**
+   * The Disconnected screen's text 0x10000417. Text that fits is retail's
+   * exact 260x126 UIElement_Text cell. Taller text (a server's own boot or
+   * ban reason, a refusal with its next-step line) used to be clipped
+   * mid-sentence; UIElement_Text is a UIElement_Scrollable, and retail shows
+   * long text in a fixed box by linking a scrollbar to it (the chargen
+   * framed texts' 0x100002e7, hidden while the text fits: p121), so it
+   * wraps 16 px narrower and scrolls under the HUD base scrollbar
+   * 0x2100003e:0x10000367 at the box's right edge — wheel, arrows (one
+   * glyph line, UIElement_Text::InqScrollDelta) and the thumb. `bind` wires
+   * the bar once the box is in the document.
+   */
+  private buildDisconnectedText(text: string): { el: HTMLDivElement; bind: (() => void) | null } {
+    const W = DISCONNECTED_TEXT_WIDTH, H = DISCONNECTED_TEXT_HEIGHT;
+    const cell = this.buildTemplateTextCell(text, W, H, DISCONNECTED_TEXT_TEMPLATE);
+    const contentH = Number(cell.dataset.acContentHeight);
+    if (!Number.isFinite(contentH) || !disconnectedTextScrolls(contentH)) return { el: cell, bind: null };
+    const barW = HUD_SCROLLBAR_SKIN.width;
+    const wrapped = this.buildTemplateTextCell(text, W - barW, H, DISCONNECTED_TEXT_TEMPLATE);
+    Object.assign(wrapped.style, { position: 'relative', left: '0', top: '0' });
+    const box = document.createElement('div');
+    box.dataset.scrolls = '1';
+    // The template's record (data-ac-font / -color / -outline) on the box too.
+    for (const k of ['acFont', 'acColor', 'acOutline', 'acLines', 'acContentHeight'] as const) {
+      const v = wrapped.dataset[k];
+      if (v !== undefined) box.dataset[k] = v;
+    }
+    Object.assign(box.style, { position: 'absolute', width: `${W}px`, height: `${H}px`, overflow: 'hidden' });
+    const viewport = document.createElement('div');
+    viewport.className = 'disconnected-text-viewport';
+    Object.assign(viewport.style, {
+      position: 'absolute', left: '0', top: '0', width: `${W - barW}px`, height: `${H}px`,
+      overflowX: 'hidden', overflowY: 'auto', pointerEvents: 'auto',
+    });
+    viewport.appendChild(wrapped);
+    const bar = document.createElement('div');
+    bar.className = 'disconnected-text-scrollbar';
+    Object.assign(bar.style, { position: 'absolute', left: `${W - barW}px`, top: '0', width: `${barW}px`, height: `${H}px` });
+    box.append(viewport, bar);
+    const lineH = this.loadFontRenderer(DISCONNECTED_TEXT_TEMPLATE.font)?.lineHeight ?? 0;
+    return {
+      el: box,
+      bind: () => this.bindDatScrollbarWidget(bar, viewport, () => textScrollDelta(lineH, H), true),
+    };
   }
 
   /** Leave the Disconnected screen (the caller shows the next screen). */

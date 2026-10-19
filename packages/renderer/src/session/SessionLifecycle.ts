@@ -105,6 +105,8 @@ export class SessionLifecycle {
   private enterInFlight = false;
   private createdGuid: number | null = null;
   private createdAt = 0;
+  /** CPlayerSystem::logOnRequestTime: when the last enter-world request went out (ms), null when none is waiting. */
+  private enterRequestAt: number | null = null;
 
   /** An automatic resume after an unexpected drop is under way (not yet back in the world). */
   get resumingAfterDrop(): boolean {
@@ -194,18 +196,55 @@ export class SessionLifecycle {
     return !this.inWorldFlag && !this.enterInFlight;
   }
 
+  /**
+   * An enter-world request (0xF7C8) just went out: the first, or a retry
+   * after a "still in the world" refusal. CPlayerSystem::LogOnCharacter
+   * @ 0055f890 stamps logOnRequestTime with Timer::cur_time on every call.
+   */
+  noteEnterRequestSent(now: number = Date.now()): void {
+    this.enterRequestAt = now;
+  }
+
+  /** When the enter-world request now waiting went out, or null (tests / probes). */
+  get enterRequestSentAt(): number | null {
+    return this.enterRequestAt;
+  }
+
+  /**
+   * CPlayerSystem::UseTime @ 00563110: `logOnRequestTime != 0 &&
+   * REQUEST_TIMEOUT (110 s) <= now - logOnRequestTime` clears the stamp and
+   * raises ServerDied. True once when that budget is spent with the enter
+   * still unanswered (no PlayerCreate, no refusal): the caller raises the
+   * connection-lost path. InitializePlayer @ 00563570 clears the stamp when
+   * the player arrives (noteWorldEntered here).
+   *
+   * Retail never cleared it on a CharacterError, so a refused enter would
+   * end the session 110 s later at character select; ours stops the clock
+   * at a refusal (noteEnterRefused), the session going on as the refusal's
+   * dialog says.
+   */
+  enterRequestTimedOut(timeoutMs: number, now: number = Date.now()): boolean {
+    if (this.enterRequestAt === null || !this.enterInFlight || this.inWorldFlag) return false;
+    if (now - this.enterRequestAt < timeoutMs) return false;
+    this.enterRequestAt = null;
+    this.enterInFlight = false;
+    return true;
+  }
+
   /** PlayerCreate arrived — we are in the world. */
   noteWorldEntered(): void {
     this.createdGuid = null;
     this.inWorldFlag = true;
     this.inWorldRetries = 0;
     this.enterInFlight = false;
+    this.enterRequestAt = null;
     this.endResume();
   }
 
   /** The server refused the enter for good (its dialog is shown): the player may try again. */
   noteEnterRefused(): void {
     this.enterInFlight = false;
+    this.enterRequestAt = null;
   }
 
   /**
@@ -232,6 +271,7 @@ export class SessionLifecycle {
     if (this.inWorldRetries >= IN_WORLD_RETRY_BUDGET) {
       this.inWorldRetries = 0;
       this.enterInFlight = false;
+      this.enterRequestAt = null;
       return 'dialog';
     }
     this.inWorldRetries++;
@@ -248,6 +288,7 @@ export class SessionLifecycle {
   noteLoggedOut(): void {
     this.inWorldFlag = false;
     this.enterInFlight = false;
+    this.enterRequestAt = null;
     this.manualLogout = true;
     this.endResume();
   }
@@ -257,6 +298,7 @@ export class SessionLifecycle {
   noteDisconnected(): void {
     this.inWorldFlag = false;
     this.enterInFlight = false;
+    this.enterRequestAt = null;
   }
 
   /**

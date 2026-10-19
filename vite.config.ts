@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { headFromStatPlugin } from './tools/lib/vite-head-from-stat';
+import { noReloadServerOptions } from './tools/lib/vite-no-reload';
 
 /**
  * The build id the update notifier compares against /version.json
@@ -45,6 +46,9 @@ export default defineConfig(({ command }) => {
   publicDir: command === 'serve' ? resolve(__dirname, 'dat') : false,
   server: {
     port: 3000,
+    // ACJS_VITE_NO_RELOAD=1 (agent daemon, GPU worker, screen regression): no HMR and no Vite WebSocket,
+    // whose close (e.g. the Mac's lid closing) would reload the page (tools/lib/vite-no-reload.ts).
+    ...noReloadServerOptions(),
   },
   build: {
     outDir: resolve(__dirname, 'dist/web'),

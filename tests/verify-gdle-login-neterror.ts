@@ -266,14 +266,14 @@ describe('the registration hint on register-first worlds', () => {
   it('on an auto-create world the login-failed NetError is a taken name / wrong password and says so', () => {
     expect(loginFailureText(serverNetErrorNotice(STR_LOGIN_FAILED, 8), plain, false)).toBe(`Client logon failed\n\n${LOGON_FAILED_HINT}`);
     expect(loginFailureText(serverNetErrorNotice(STR_LOGIN_FAILED, 8), null, false)).toBe(`Client logon failed\n\n${LOGON_FAILED_HINT}`);
-    expect(loginFailureText(netErrorNotice('ID_ConnectionError_ClientTimedOutServer'), plain, false)).toBe('Client timed out the connection');
+    expect(loginFailureText(netErrorNotice('ID_ConnectionError_ClientTimedOutServer'), plain, false)).toBe('Client timed out the connection\n\nTry again in a minute, or pick another world.');
   });
 
-  it('other errors and in-world failures keep the plain text', () => {
-    expect(loginFailureText(serverNetErrorNotice(STR_LOGIN_SERVER_FULL, 8), reef, false)).toBe('Server Full');
-    expect(loginFailureText(serverNetErrorNotice(STR_LOGIN_SERVER_FULL, 8), plain, false)).toBe('Server Full');
+  it('other errors and in-world failures keep retail\'s text, with only its plain next step', () => {
+    expect(loginFailureText(serverNetErrorNotice(STR_LOGIN_SERVER_FULL, 8), reef, false)).toBe('Server Full\n\nWait a few minutes and try again, or pick another world.');
+    expect(loginFailureText(serverNetErrorNotice(STR_LOGIN_SERVER_FULL, 8), plain, false)).toBe('Server Full\n\nWait a few minutes and try again, or pick another world.');
     expect(loginFailureText(serverNetErrorNotice(STR_LOGIN_FAILED, 8), plain, true)).toBe('Client logon failed');
-    expect(loginFailureText(netErrorNotice('ID_ConnectionError_ClientTimedOutServer'), reef, true)).toBe('Client timed out the connection');
+    expect(loginFailureText(netErrorNotice('ID_ConnectionError_ClientTimedOutServer'), reef, true)).toBe('Client timed out the connection\n\nTry again in a minute, or pick another world.');
     expect(loginFailureText(netErrorNotice('ID_NetError_CantSocket'), reef, false)).toBe(netErrorNotice('ID_NetError_CantSocket').text);
   });
 });

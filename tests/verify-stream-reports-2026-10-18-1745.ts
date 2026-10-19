@@ -64,7 +64,7 @@ describe('1. the strongest restorative: one basis for every candidate', () => {
     host.appraised.push(DRAUGHT, POTION);
     host.appraisalDatas.set(DRAUGHT, data(10));
     host.appraisalDatas.set(POTION, data(25));
-    expect(api.restoreOptions('health').drink).toBe('ac_use item="Potion of Healing" (you carry 1; also Health Draught ×2)');
+    expect(api.restoreOptions('health').drink).toBe('ac_use item="Potion of Healing" (restores up to 25; you carry 1; also Health Draught ×2)');
   });
 
   it('no appraisal answers: all by price per unit, said so (the Draught\'s known 10 does not outrank an unknown)', async () => {

@@ -216,7 +216,7 @@ describe('2. stay_with with your routine covering the walk waits through a mild 
     expect(trace, trace).toMatch(/walk: waiting for Claude Arcanist, \d+ m behind/);
     expect(trace).not.toMatch(/under attack while waiting for Claude Arcanist/);
     expect(r.message, r.message).not.toMatch(/didn't stop to wait/);
-    expect(r.message).toMatch(/waited for Claude Arcanist through mild hits your routine takes once the walk is done \(Marionette L26: no pack, no hurting spells, no heavy hits, health not under 60%\)/);
+    expect(r.message).toMatch(/waited for Claude Arcanist through mild hits \(Marionette L26; your routine takes them\)/);
   });
 
   // 2026-10-18 15:29Z reports (verify-stream-reports-2026-10-18-1529.ts): under danger with the fellow past the leash the

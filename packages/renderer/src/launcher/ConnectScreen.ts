@@ -76,10 +76,36 @@ export function isClaudeCallback(url: string): boolean {
   } catch { return false; }
 }
 
+/**
+ * The bridge answered, but not with a pairing status: an HTTP error (a bridge
+ * with the connector off has no /oauth routes and answers 404) or a body that
+ * is not a status. Unlike a network failure, retrying will not change it.
+ */
+export class ConnectAnswerError extends Error {
+  constructor(readonly httpStatus: number | null) {
+    super(httpStatus === null ? 'the pairing status was not readable' : `the pairing status call answered HTTP ${httpStatus}`);
+    this.name = 'ConnectAnswerError';
+  }
+}
+
+/** A status body as the bridge sends it (oauth.ts OAuthServer.status), or ConnectAnswerError. */
+export function parseConnectStatus(body: unknown): ConnectStatus {
+  const state = (body as { state?: unknown } | null)?.state;
+  if (state !== 'waiting' && state !== 'paired' && state !== 'expired') throw new ConnectAnswerError(null);
+  return body as ConnectStatus;
+}
+
 /** The bridge's pairing calls (oauthHttp.ts) from this page. */
 export function bridgeConnectApi(origin: string, fetchImpl: typeof fetch = fetch.bind(globalThis), navigate: (url: string) => void = (u) => { window.location.href = u; }): ConnectApi {
   return {
-    status: async (req) => (await fetchImpl(`${origin}/oauth/authorize/status?req=${encodeURIComponent(req)}`)).json() as Promise<ConnectStatus>,
+    status: async (req) => {
+      // A network failure (TypeError) propagates: poll() retries it.
+      const resp = await fetchImpl(`${origin}/oauth/authorize/status?req=${encodeURIComponent(req)}`);
+      if (!resp.ok) throw new ConnectAnswerError(resp.status);
+      let body: unknown;
+      try { body = await resp.json(); } catch { throw new ConnectAnswerError(null); }
+      return parseConnectStatus(body);
+    },
     decide: async (req, approve, only) => (await fetchImpl(`${origin}/oauth/authorize/decision`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ req, approve, only }),
     })).json() as Promise<{ redirect?: string; error?: string }>,
@@ -90,6 +116,14 @@ export function bridgeConnectApi(origin: string, fetchImpl: typeof fetch = fetch
 }
 
 export type ConnectOutcome = 'allowed' | 'denied' | 'expired' | 'error';
+
+/** Unreachable status calls in a row before the page stops retrying (~CONNECT_RETRY_MS apart). */
+export const CONNECT_STATUS_MAX_FAILURES = 5;
+export const CONNECT_RETRY_MS = 3000;
+/** The bridge answered, but has no pairing for this page (connector off, or not a status). */
+export const CONNECT_NO_SERVICE_TEXT = 'This game server doesn\'t recognise this connect link. It may be from an older attempt, or the server may not take Claude connections.';
+/** Status calls kept failing. */
+export const CONNECT_UNREACHABLE_TEXT = 'The game\'s server didn\'t answer, so this connect link can\'t be checked. It may have expired, or the server may be down.';
 
 export class ConnectScreen {
   private status: ConnectStatus = { state: 'waiting' };
@@ -121,9 +155,25 @@ export class ConnectScreen {
   private get client(): string { return this.status.client || 'Claude'; }
 
   private async poll(): Promise<void> {
+    let failures = 0;
     for (;;) {
       let s: ConnectStatus;
-      try { s = await this.api.status(this.req); } catch { this.note = 'Can\'t reach the game\'s server; retrying…'; this.render(); await this.api.sleep(3000); continue; }
+      try {
+        s = await this.api.status(this.req);
+      } catch (e) {
+        // The bridge answered without a status (no pairing service there): say so, don't retry forever.
+        if (e instanceof ConnectAnswerError) { this.fail(CONNECT_NO_SERVICE_TEXT); return; }
+        // Unreachable: retry a while (a bridge restart takes seconds), then stop. A browser can't tell an
+        // unreachable bridge from one that refuses the call cross-origin (a bridge without the connector
+        // answers its 404 with no CORS header), so the last word covers an unknown link too.
+        failures++;
+        if (failures >= CONNECT_STATUS_MAX_FAILURES) { this.fail(CONNECT_UNREACHABLE_TEXT); return; }
+        this.note = 'Can\'t reach the game\'s server; retrying…';
+        this.render();
+        await this.api.sleep(CONNECT_RETRY_MS);
+        continue;
+      }
+      failures = 0;
       this.status = { ...this.status, ...s };
       this.note = null;
       if (s.state === 'expired') { this.phase = 'expired'; this.render(); this.finish?.('expired'); return; }
@@ -133,6 +183,14 @@ export class ConnectScreen {
       this.render();
       await this.api.sleep(1500);
     }
+  }
+
+  /** End on the error plate with `note` (no retry: start again from Claude). */
+  private fail(note: string): void {
+    this.phase = 'error';
+    this.note = note;
+    this.render();
+    this.finish?.('error');
   }
 
   private async decide(approve: boolean): Promise<void> {
@@ -260,8 +318,10 @@ export class ConnectScreen {
         break;
       }
       case 'expired':
+        // The bridge answers 'expired' for an id it never issued too (a mistyped or old link, or one from
+        // before a bridge restart): pending pairings live in its memory.
         para('This pairing has expired', LAUNCHER_TEXT.title);
-        para('Codes last 10 minutes. Start again from Claude\'s connect button.', body, undefined, 8);
+        para('Codes last 10 minutes, and a link from an earlier attempt no longer works. Start again from Claude\'s connect button.', body, undefined, 8);
         break;
       case 'error':
         para('Couldn\'t connect Claude', LAUNCHER_TEXT.title);

@@ -5,13 +5,14 @@
  * boot, before the patch screen starts downloading. A hard problem (no WebGL
  * 2, no WebSocket) stops with an explanation; a soft one (little memory, no
  * mouse) explains and lets the player continue. This screen is browser UX,
- * not a retail screen (CLAUDE.md, browser-UX exception), and it draws before
- * any DAT is loaded, so it uses plain CSS named colours.
+ * not a retail screen (CLAUDE.md, browser-UX exception). It draws before any
+ * DAT is loaded, on the boot notice plate (boot/BootNotice.ts): the retail OK
+ * dialog's look reproduced in CSS from its DAT values.
  */
 import { classifyGpu } from '../telemetry/WorldReporter.js';
 import { probeWebGl2, detectHelpPlatform, webgl2HelpText, type WebGlFailure, type HelpPlatform } from './WebGlDiagnosis.js';
 import { renderAdaptConfigFor, type RenderAdaptConfig } from '../scene/RenderScale.js';
-import { ZLayer, zLayer } from '../ui/ZIndexRegistry.js';
+import { showBootNotice } from './BootNotice.js';
 
 export interface CapabilityProblem {
   id: 'webgl2' | 'websocket' | 'memory' | 'pointer';
@@ -101,42 +102,30 @@ export function probeCapabilities(win: Window & typeof globalThis): CapabilityEn
 }
 
 /**
- * Show the problems over the page, above the boot loading overlay (ZLayer.BOOT_NOTICE
- * over #loading-overlay's DEBUG_OVERLAY), which stays up underneath and is what the
- * page shows again after a soft prompt's Continue. Resolves when the player chooses to
- * continue (soft problems only); never resolves when a problem is hard.
+ * Show the problems over the page on the boot notice plate (boot/BootNotice.ts,
+ * the retail OK dialog's look in CSS), above the boot loading overlay
+ * (ZLayer.BOOT_NOTICE over #loading-overlay's DEBUG_OVERLAY), which stays up
+ * underneath and is what the page shows again after a soft prompt's Continue.
+ * Resolves when the player chooses to continue (soft problems only); never
+ * resolves when a problem is hard — that plate's only button reloads the page,
+ * for after the player has fixed the cause (hardware acceleration, a newer
+ * browser) the text names.
  */
-export function showCapabilityScreen(doc: Document, problems: CapabilityProblem[]): Promise<void> {
+export function showCapabilityScreen(doc: Document, problems: CapabilityProblem[], reload: () => void = () => doc.defaultView?.location.reload()): Promise<void> {
   const hard = problems.some(p => p.hard);
-  const root = doc.createElement('div');
-  root.id = 'capability-screen';
-  Object.assign(root.style, {
-    position: 'fixed', inset: '0', zIndex: zLayer(ZLayer.BOOT_NOTICE), background: 'black', color: 'wheat',
-    display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px',
-    font: '16px/1.5 Georgia, "Times New Roman", serif',
-  });
-  const box = doc.createElement('div');
-  Object.assign(box.style, { maxWidth: '560px', border: '1px solid darkgoldenrod', padding: '24px 28px' });
-  const title = doc.createElement('h1');
-  title.textContent = hard ? 'This browser can\'t run the game' : 'Before you continue';
-  Object.assign(title.style, { font: 'bold 22px Georgia, serif', color: 'goldenrod', margin: '0 0 12px' });
-  box.appendChild(title);
-  for (const p of problems) {
-    const para = doc.createElement('p');
-    para.className = `capability-problem capability-${p.id}`;
-    para.textContent = p.text;
-    para.style.margin = '0 0 10px';
-    box.appendChild(para);
+  const paragraphs = problems.map(p => ({ text: p.text, className: `capability-problem capability-${p.id}` }));
+  const title = hard ? 'This browser can\'t run the game' : 'Before you continue';
+  if (hard) {
+    showBootNotice(doc, {
+      id: 'capability-screen', title, paragraphs,
+      buttons: [{ label: 'Reload', className: 'capability-reload', onClick: reload }],
+    });
+    return new Promise(() => {});
   }
-  root.appendChild(box);
-  doc.body.appendChild(root);
-  if (hard) return new Promise(() => {});
   return new Promise((resolve) => {
-    const btn = doc.createElement('button');
-    btn.className = 'capability-continue';
-    btn.textContent = 'Continue anyway';
-    Object.assign(btn.style, { marginTop: '8px', font: '16px Georgia, serif', padding: '6px 16px', cursor: 'pointer' });
-    btn.addEventListener('click', () => { root.remove(); resolve(); });
-    box.appendChild(btn);
+    const notice = showBootNotice(doc, {
+      id: 'capability-screen', title, paragraphs,
+      buttons: [{ label: 'Continue anyway', className: 'capability-continue', onClick: () => { notice.close(); resolve(); } }],
+    });
   });
 }

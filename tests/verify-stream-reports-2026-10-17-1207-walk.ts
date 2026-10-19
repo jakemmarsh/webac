@@ -93,9 +93,11 @@ describe('the 12:07Z stream reports: walks and uses', () => {
       bulwarkAt();
       monster(0x80007662, 'Tumerok Commander', 79, 61.5, 94, 50);
       monster(0x80007206, 'Tumerok Major', 81.5, 62, 94, 50);
+      // A third: with no routine, sleepers near your level stop a walk only as a pack of 3+ (2026-10-18 21:32Z segment).
+      monster(0x80007207, 'Tumerok Major', 80.5, 63, 94, 50);
       const r = await settle(api, host, api.walkTo('Claude Bulwark', { within: 3, avoidMonsters: true, stopOnAggro: false }), 40_000);
       expect(r).toMatchObject({ ok: false });
-      expect(r!.message).toMatch(/going on brings you within 18 m of 2 monsters not awake yet: Tumerok Commander L50/);
+      expect(r!.message).toMatch(/going on brings you within 18 m of 3 monsters not awake yet: Tumerok Commander L50/);
     });
 
     it('Standard Bearers (L30) seen hitting for 2 at most are no pack for a level 43; a kind that hit for 40 is', async () => {

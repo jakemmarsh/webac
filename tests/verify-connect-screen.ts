@@ -167,3 +167,118 @@ describe('ConnectScreen (behavioral, fake kit and bridge)', () => {
     expect(s.btn('connect-copy').style.display).toBe('none');
   });
 });
+
+
+/**
+ * BOOT.notice-plate — a connect link the bridge doesn't know. The hosted bridge
+ * answers an unknown request id with 200 {state:'expired'} (OAuthServer.status:
+ * pending pairings live in its memory); a bridge with the connector off has no
+ * /oauth routes and answers 404 text/plain with no CORS header, which a browser
+ * sees as a failed fetch. The page used to say "Can't reach the game's server;
+ * retrying…" forever in that case. Drives the real bridgeConnectApi (fake fetch)
+ * through the real ConnectScreen, and the real bridge OAuthServer for the
+ * unknown-id contract.
+ */
+describe('ConnectScreen — an unknown or expired connect link says so', () => {
+  const saved: Record<string, unknown> = {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mod: any;
+  beforeAll(async () => {
+    installDomGlobals(domWindow, DOM_GLOBALS, saved);
+    mod = await import('../packages/renderer/src/launcher/ConnectScreen');
+  });
+  afterAll(() => restoreDomGlobals(DOM_GLOBALS, saved));
+
+  type Answer = { ok: boolean; status: number; json: () => Promise<unknown> } | 'network';
+  function setup(answers: Answer[]) {
+    const mount = domWindow.document.createElement('div');
+    domWindow.document.body.replaceChildren(mount);
+    const kit = {
+      prepareScreen: () => { mount.replaceChildren(); return mount; },
+      renderLayout: () => null, desc: () => null, texUrl: () => null,
+      text: (text: string) => { const sp = domWindow.document.createElement('span'); sp.textContent = text; return sp; },
+      measure: (_r: string, t: string) => t.length * 5, textColor: () => null, lineHeight: () => 12, bindEditField: () => null,
+      onlineColor: 'green', attachScale: () => {}, plate: () => domWindow.document.createElement('div'),
+      message: () => {}, textEntry: () => {}, confirmExit: () => {}, openCredits: () => {}, justifyLabel: () => {}, tagElement: () => {},
+    };
+    const urls: string[] = [];
+    let i = 0;
+    const fetchImpl = (async (url: string) => {
+      urls.push(url);
+      const a = answers[Math.min(i++, answers.length - 1)];
+      if (a === 'network') throw new TypeError('Failed to fetch');
+      return a;
+    }) as unknown as typeof fetch;
+    const api = mod.bridgeConnectApi('https://bridge.example', fetchImpl, () => {});
+    let sleeps = 0;
+    let wake: (() => void) | null = null;
+    api.sleep = () => { sleeps++; return new Promise<void>((r) => { wake = r; }); };
+    const screen = new mod.ConnectScreen(kit, api, '00000000000000000000000000000000');
+    let outcome: string | null = null;
+    const done = screen.run().then((o: string) => { outcome = o; return o; });
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+    const step = async () => { await flush(); const w = wake; wake = null; w?.(); await flush(); };
+    const text = () => [...mount.querySelectorAll('.connect-line')].map((n: Element) => n.textContent).join(' ');
+    return { done, step, flush, text, urls, outcome: () => outcome, sleeps: () => sleeps };
+  }
+  const json = (body: unknown, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+  const notJson = (status: number) => ({ ok: status >= 200 && status < 300, status, json: async () => { throw new SyntaxError('Unexpected token'); } });
+
+  it('the hosted bridge\'s answer for an id it never issued is "expired", and the page says the link is spent', async () => {
+    const { OAuthServer } = await import('../services/ws-tcp-bridge/src/oauth.js');
+    const bridge = new OAuthServer({ issuer: 'https://bridge.example', allow: [] });
+    const answer = bridge.status('00000000000000000000000000000000');
+    expect(answer).toEqual({ state: 'expired' });
+    const s = setup([json(answer)]);
+    expect(await s.done).toBe('expired');
+    expect(s.urls[0]).toBe('https://bridge.example/oauth/authorize/status?req=00000000000000000000000000000000');
+    expect(s.text()).toContain('This pairing has expired');
+    expect(s.text()).toContain('a link from an earlier attempt no longer works');
+    expect(s.text()).not.toContain('retrying');
+  });
+
+  it('a bridge that answers 404 (no pairing service) ends at once on "Couldn\'t connect Claude", without retrying', async () => {
+    const s = setup([notJson(404)]);
+    expect(await s.done).toBe('error');
+    expect(s.sleeps()).toBe(0);
+    expect(s.text()).toContain('Couldn\'t connect Claude');
+    expect(s.text()).toContain('doesn\'t recognise this connect link');
+    expect(s.text()).not.toContain('retrying');
+  });
+
+  it('a 200 that is not a pairing status is the same dead end, not a page stuck on "waiting"', async () => {
+    const s = setup([json({ hello: 'world' })]);
+    expect(await s.done).toBe('error');
+    expect(s.text()).toContain('doesn\'t recognise this connect link');
+    expect(mod.parseConnectStatus({ state: 'waiting', code: 'ABC123' })).toEqual({ state: 'waiting', code: 'ABC123' });
+    expect(() => mod.parseConnectStatus(null)).toThrow(mod.ConnectAnswerError);
+  });
+
+  it('an unreachable bridge retries a while, then says the link can\'t be checked instead of retrying forever', async () => {
+    const s = setup(['network']);
+    await s.flush();
+    expect(s.text()).toContain('Can\'t reach the game\'s server; retrying…');
+    for (let k = 1; k < mod.CONNECT_STATUS_MAX_FAILURES; k++) {
+      expect(s.outcome()).toBeNull();
+      await s.step();
+    }
+    expect(await s.done).toBe('error');
+    expect(s.urls.length).toBe(mod.CONNECT_STATUS_MAX_FAILURES);
+    expect(s.text()).toContain('Couldn\'t connect Claude');
+    expect(s.text()).toContain('didn\'t answer, so this connect link can\'t be checked');
+    expect(s.text()).not.toContain('retrying');
+  });
+
+  it('a blip shorter than the limit recovers: the failures count resets on an answer', async () => {
+    const answers: Answer[] = [];
+    for (let k = 0; k < mod.CONNECT_STATUS_MAX_FAILURES - 1; k++) answers.push('network');
+    answers.push(json({ state: 'waiting', client: 'Claude', code: 'HRCBN3' }));
+    for (let k = 0; k < mod.CONNECT_STATUS_MAX_FAILURES - 1; k++) answers.push('network');
+    answers.push(json({ state: 'waiting', client: 'Claude', code: 'HRCBN3' }));
+    const s = setup(answers);
+    for (let k = 0; k < 2 * mod.CONNECT_STATUS_MAX_FAILURES; k++) await s.step();
+    expect(s.outcome()).toBeNull();
+    expect(s.text()).toContain('/automation pair HRC-BN3');
+    expect(s.text()).not.toContain('retrying');
+  });
+});

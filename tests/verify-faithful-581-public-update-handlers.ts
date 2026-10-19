@@ -302,7 +302,7 @@ describe('FAITHFUL.581 / BUG.character-restore-response-shadowed-dead-code — C
     expect(createEvents.length).toBe(0);
     expect(restoreEvents.length).toBe(1);
     expect(restoreEvents[0].data).toEqual({
-      verificationOk: true, objectGuid: 0x50012345, name: 'Restored Toon', secondsDisabled: 45,
+      responseCode: 1, verificationOk: true, objectGuid: 0x50012345, name: 'Restored Toon', secondsDisabled: 45,
     });
 
     h.conn.disconnect();
@@ -337,10 +337,29 @@ describe('FAITHFUL.581 / BUG.character-restore-response-shadowed-dead-code — C
   });
 
   it('parseCharacterRestoreResponse round-trips the ACE-documented wire shape directly', () => {
-    const payload = buildRestorePayload(false, 0x50000042, 'Rejected', 0).slice(4); // strip opcode prefix
+    const payload = buildRestorePayload(true, 0x50000042, 'Restored', 7).slice(4); // strip opcode prefix
     expect(parseCharacterRestoreResponse(payload)).toEqual({
-      verificationOk: false, objectGuid: 0x50000042, name: 'Rejected', secondsDisabled: 0,
+      responseCode: 1, verificationOk: true, objectGuid: 0x50000042, name: 'Restored', secondsDisabled: 7,
     });
+  });
+
+  it('a refused restore is the code alone (ACE NameInUse / Corrupt): parsed, never thrown, and not OK', () => {
+    // CharacterHandler.cs CharacterRestore → SendCharacterCreateResponse(NameInUse = 3 / Corrupt = 5).
+    expect(parseCharacterRestoreResponse(u32(3))).toEqual({
+      responseCode: 3, verificationOk: false, objectGuid: 0, name: '', secondsDisabled: 0,
+    });
+    expect(parseCharacterRestoreResponse(u32(5)).verificationOk).toBe(false);
+    // Any non-1 code is a refusal (the old `!== 0` read 3 as OK).
+    expect(parseCharacterRestoreResponse(u32(3)).verificationOk).toBe(false);
+
+    // Through the connection: an unsolicited 4-byte 0xF643 reaches the page as a refusal.
+    const h = makeHarness();
+    handshake(h);
+    feed(h, buildMessagePacket(2, concatBytes([u32(GameMessageOpcode.CharacterCreateResponse), u32(3)])));
+    const restoreEvents = h.events.filter(e => e.type === 'characterRestoreResponse');
+    expect(restoreEvents.length).toBe(1);
+    expect(restoreEvents[0].data).toMatchObject({ responseCode: 3, verificationOk: false });
+    h.conn.disconnect();
   });
 
   it('parseCharacterCreateResponse still parses the failure shape (no guid/name)', () => {

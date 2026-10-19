@@ -168,7 +168,7 @@ describe('3. walk_to drop=true reaches the walk (the surface\'s option list)', (
 
   it('without drop=true: stops at the edge as before', async () => {
     const r = await settle(api, host, surface().walkTo(0x7f000003, { within: 2, stayWith: 'Claude Arcanist' }), 40_000, beside);
-    expect(r?.message).toMatch(/so stay_with doesn't go down without them/);
+    expect(r?.message).toMatch(/and stay_with doesn't go down without them/);
     expect(host.me.z).toBeCloseTo(100, 1);
   });
 });

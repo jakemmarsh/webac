@@ -285,9 +285,10 @@ describe('3. a follow beside its leader doesn\'t stop for sleepers the leader is
 
   it('a pack by your way that the leader, 30 m on, is far from still stops it short', async () => {
     host.add({ guid: BUL, name: 'Claude Bulwark', itemType: 0x10, objectDescFlags: 0x8, cell: host.me.cell, x: 80, y: 50, z: 94 });
-    doll(0x80007629, 97, 34); doll(0x8000762c, 98, 35);
+    // Three: with no routine, sleepers near your level are a pack only at 3+ (2026-10-18 21:32Z segment).
+    doll(0x80007629, 97, 34); doll(0x8000762c, 98, 35); doll(0x8000762d, 97, 35);
     const r = await settle(api, host, (api.surface() as { follow: (t: string, o?: object) => Promise<AgentResult> }).follow('Claude Bulwark', { durationMs: 20_000 }), 30_000);
-    expect(r?.message).toMatch(/^stopped following Claude Bulwark, [\d.]+ m from them: going on brings you within 18 m of 2 monsters not awake yet/);
+    expect(r?.message).toMatch(/^stopped following Claude Bulwark, [\d.]+ m from them: going on brings you within 18 m of 3 monsters not awake yet/);
   });
 });
 
@@ -319,12 +320,21 @@ describe('5. a walk of yours with your routine running stops only for a pack, a 
 
   const walkTo = (): Promise<AgentResult> => (api.surface() as { walkTo: (t: string, o?: object) => Promise<AgentResult> }).walkTo('Chest', {}) as Promise<AgentResult>;
 
-  it('no routine: a single Marionette L26 coming at you stops the walk, as before', async () => {
+  // 2026-10-18 21:32Z segment: with no routine too, a chaser well below you that has done nothing that hurt walks on
+  // (Arcanist, L53, stopped twice in a minute by Dark Marionettes L35); one near your level still stops the walk.
+  it('no routine: a single mild Marionette L26 is walked on past', async () => {
     goWest();
     const gs = chasers(1);
-    const r = await settle(api, host, walkTo(), 15_000, chase(gs));
-    expect(r?.message).toMatch(/^stopped [\d.]+ m short: Marionette #80006a00 \(level 26\) is coming at you/);
-    expect(r?.message).not.toMatch(/Your routine/);
+    const r = await settle(api, host, walkTo(), 40_000, chase(gs));
+    expect(r?.message).toMatch(/^arrived/);
+    expect(r?.message).toMatch(/passed a mild chaser \(Marionette: well below you, nothing that hurt\)/);
+  });
+  it('no routine: one near your level (Innocuous Doll L46, him L48) stops the walk, as before', async () => {
+    goWest();
+    const gs2 = chasers(1, 'Innocuous Doll', 46);
+    const r2 = await settle(api, host, walkTo(), 15_000, chase(gs2));
+    expect(r2?.message).toMatch(/^stopped [\d.]+ m short: Innocuous Doll #80006a00 \(level 46\) is coming at you/);
+    expect(r2?.message).not.toMatch(/routine/);
   });
 
   it('your fight routine running: a single mild Marionette is walked on past, and the answer says so', async () => {
@@ -334,7 +344,7 @@ describe('5. a walk of yours with your routine running stops only for a pack, a 
     const gs = chasers(1);
     const r = await settle(api, host, p, 40_000, chase(gs));
     expect(r?.message).toMatch(/^arrived/);
-    expect(r?.message).toMatch(/walked on past a mild chaser your routine takes \(Marionette L26: no pack, no hurting spells, no heavy hits\)/);
+    expect(r?.message).toMatch(/passed a mild chaser \(Marionette: well below you, nothing that hurt; your routine takes them\)/);
   });
 
   // Three near his level (Marionettes L26 against his 48 no longer count: verify-stream-reports-2026-10-18-0717.ts, 5).
@@ -345,7 +355,7 @@ describe('5. a walk of yours with your routine running stops only for a pack, a 
     const gs = chasers(3, 'Innocuous Doll', 46);
     const r = await settle(api, host, p, 15_000, chase(gs));
     expect(r?.message).toMatch(/^stopped [\d.]+ m short: Innocuous Doll #80006a0\d \(level 46\) is coming at you/);
-    expect(r?.message).toMatch(/Your routine "hunt" is running, so a walk stops only for a pack \(3\+ coming at once, not counting mild ones 10\+ levels under you; 6\+ whatever their levels\), a caster whose spells hurt, or a heavy hitter; this one: 3 coming at once \(a pack\)\./);
+    expect(r?.message).toMatch(/\(a pack: 3 near your level; your routine "hunt" takes mild ones\)\./);
   });
 
   it('…one whose kind\'s spell took a tenth of your health stops it (a debuff-only caster doesn\'t)', async () => {
@@ -361,7 +371,7 @@ describe('5. a walk of yours with your routine running stops only for a pack, a 
     const gs = chasers(1, 'Pristine Doll', 47);
     const r = await settle(api, host, p, 15_000, chase(gs));
     expect(r?.message).toMatch(/^stopped [\d.]+ m short: Pristine Doll #80006a00 \(level 47\) is coming at you/);
-    expect(r?.message).toMatch(/this one: its kind's Harm Other III took 22 of your 187 health\./);
+    expect(r?.message).toMatch(/\(its kind's Harm Other III took 22 of your 187 health; your routine "hunt" takes mild ones\)\./);
   });
 
   it('stop_on_aggro=false and flee walk on as before, routine or not', async () => {

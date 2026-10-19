@@ -184,13 +184,21 @@ describe('Hollow Lair movement reports (fake host)', () => {
       host.me.level = 70;
       const r = await settle(api, host, api.walkTo('45m north', { avoidMonsters: true, stopOnAggro: true }), 30_000);
       expect(r!.message).not.toMatch(/stopped/);
-      expect(r!.message).toMatch(/walked on past 2 monsters not awake yet \(Drudge Lurker L40, Drudge Lurker L40: all 10\+ levels under yours\)/);
+      expect(r!.message).toMatch(/passed 2 asleep \(Drudge Lurker ×2: all 10\+ levels under yours\)/);
       expect(r!.message).not.toMatch(/Tusker/);
     });
-    it('at level 45 the two L40 Lurkers (5 under, not well below) still make a pack', async () => {
+    // 2026-10-18 21:32Z segment: with no routine, sleepers near your level stop a walk only as a pack (3+); two Innocent
+    // Dolls asleep 22 m off had stopped Arcanist's walk out of Aerbax Haven.
+    it('at level 45 the two L40 Lurkers (5 under) are no pack: walked on past; a third makes one', async () => {
       host.me.level = 45;
+      const start = { x: host.me.x, y: host.me.y, z: host.me.z };
       const r = await settle(api, host, api.walkTo('45m north', { avoidMonsters: true, stopOnAggro: true }), 30_000);
-      expect(r!.message).toMatch(/within 18 m of \d monsters not awake yet: .*Drudge Lurker L40/);
+      expect(r!.message).toMatch(/^arrived/);
+      expect(r!.message).toMatch(/passed 3 asleep \(Goldenback Tusker, Drudge Lurker ×2: no pack \(under 3 near your level\)\)/);
+      Object.assign(host.me, start);
+      monster(0x8000ffdc, 'Drudge Lurker', 79, 63, 82, 40);
+      const r2 = await settle(api, host, api.walkTo('45m north', { avoidMonsters: true, stopOnAggro: true }), 30_000);
+      expect(r2!.message).toMatch(/within 18 m of \d monsters not awake yet: .*Drudge Lurker L40/);
     });
     it('on a GDLE-family server (monsters notice you from 40 m: MonsterAI DEFAULT_AWARENESS_RANGE) it stops ~44 m off', async () => {
       host.fallFamily = 'gdle';

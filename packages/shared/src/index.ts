@@ -201,6 +201,7 @@ export { CharacterOptionDataFlag } from './enums/CharacterOptionDataFlag.js';
 export {
   CharacterGenerationVerificationResponse,
   characterCreateErrorToken,
+  characterCreateErrorFallbackText,
 } from './enums/CharacterGenerationVerificationResponse.js';
 export {
   CharacterError,
@@ -230,6 +231,7 @@ export {
   roundHalfAwayFromZero,
   roundHalfToEven,
 } from './util/round.js';
+export { playerText, isStringToken, withNextStep } from './util/playerText.js';
 export { SELF_EMOTE_SPEAKER, substituteEmotePronoun, composeHeardEmoteLine, composeSelfEmoteLine, isOwnSoulEmoteEcho } from './emote-lines.js';
 export * from './routines/index.js';
 export * from './goarrow/index.js';

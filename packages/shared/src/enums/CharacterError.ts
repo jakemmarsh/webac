@@ -65,9 +65,9 @@ export enum CharacterError {
  *
  * Returns a generic fallback for unmapped codes so the player always sees
  * SOMETHING — the original retail client did the same. EnterGameOldCharacter
- * (0x11) and EnterGameGeneric (0x0B) are explicitly fall-through because the
- * retail behavior is a generic OK popup with no detailed message; we
- * approximate with a short generic.
+ * (0x11) has no retail text (its DAT entry is missing), so a short generic
+ * stands in. EnterGameGeneric (0x0B) says what ACE means by it (the chosen
+ * character no longer exists); its DAT entry is only a resource token.
  */
 export function characterErrorMessage(code: number): string {
   switch (code) {
@@ -109,6 +109,10 @@ export function characterErrorMessage(code: number): string {
     case CharacterError.SubscriptionExpired:
       return 'Your subscription to this game has expired.';
     case CharacterError.EnterGameGeneric:
+      // ACE sends it when the chosen character no longer exists
+      // (CharacterHandler.cs CharacterEnterWorldRequest: GetOfflinePlayer == null).
+      // The EoL DAT entry is the bare token "ID_CHAR_ERROR_ENTER_GAME_OLD_CHARACTER".
+      return 'That character could not be found.';
     case CharacterError.EnterGameOldCharacter:
       return 'Could not enter the game. Please try again.';
     default:

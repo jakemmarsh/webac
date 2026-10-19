@@ -2469,6 +2469,47 @@ export class AgentApi {
     this.lastBoosts.set(`${who}|${m[3].toLowerCase()}`, { at: this.host.now(), n: Number(m[2]), spell: m[1] });
     if (this.lastBoosts.size > 40) this.lastBoosts.delete(this.lastBoosts.keys().next().value!);
   }
+  /**
+   * A restoration that came to you, said with what it means: a heal of 0 ("Claude Arcanist casts Heal Other V and
+   * restores 0 points of your health": ACE's boost is UpdateVitalDelta's real change, 0 at full) says you were full and
+   * what filled you just before; a potion's or food's that restored less than it can (ACE Food: "The Potion of Healing
+   * restores 15 points of your Health", the change clamped at your max) says its full amount. Bulwark read a Heal Other V
+   * of 0 as a fault "at 45%" and a Potion of Healing (wcid 377, BoostValue 25) restoring 15 as a weak potion: his kit and
+   * Arcanist's heal had filled him a moment before, from a look taken before they landed (2026-10-18 21:31:24–29Z).
+   * '' for any other line. Restorations of yours are kept for the next 0's note.
+   */
+  private receivedBoostNote(line: string): string {
+    const t = line.trim();
+    // "You're too busy!" just after an attack request: it was the attack that was refused (Player_Melee: IsBusy while a
+    // kit, potion or cast of yours runs), not the use, which goes on.
+    if (/^You're too busy!?$/i.test(t) && this.host.now() - this.lastAttackSentAt <= AgentApi.BUSY_REFUSAL_MS) return ' (an attack request, refused while a use or cast of yours ran: that use goes on)';
+    let m = /^(.+?) casts (.+?) and restores (\d+) points of your (health|stamina|mana)\.?$/i.exec(t);
+    let got: { what: string; n: number; vital: string } | null = m ? { what: `${m[1]}'s ${m[2]}`, n: Number(m[3]), vital: m[4].toLowerCase() } : null;
+    let item: string | null = null;
+    if (!got && (m = /^The (.+?) restores (\d+) points of your (health|stamina|mana)\.?$/i.exec(t))) { item = m[1]; got = { what: `the ${m[1]}`, n: Number(m[2]), vital: m[3].toLowerCase() }; }
+    if (!got && (m = /^You heal yourself for (\d+) Health points\b/i.exec(t))) got = { what: 'your kit', n: Number(m[1]), vital: 'health' };
+    if (!got) return '';
+    const key = `@me|${got.vital}`;
+    const now = this.host.now();
+    if (got.n <= 0) {
+      const prev = this.lastBoosts.get(key);
+      const ago = prev ? now - prev.at : Infinity;
+      const before = ago <= AgentApi.BOOST_BEFORE_ZERO_MS ? `; ${prev!.spell} restored ${prev!.n} ${Math.max(0, Math.round(ago / 1000))} s before` : '';
+      return ` (0: your ${got.vital} was already full when it landed${before})`;
+    }
+    this.lastBoosts.set(key, { at: now, n: got.n, spell: got.what });
+    if (this.lastBoosts.size > 40) this.lastBoosts.delete(this.lastBoosts.keys().next().value!);
+    if (!item) return '';
+    const v = got.vital as 'health' | 'stamina' | 'mana';
+    const carried = this.host.inventory().find((i) => i.name.toLowerCase() === item!.toLowerCase());
+    const boost = carried ? this.restoreBoost(carried, v) : null;
+    if (boost === null || got.n >= boost) return '';
+    const me = this.host.self();
+    const full = !!me && me[v].max > 0 && me[v].current >= me[v].max;
+    return ` (it restores up to ${boost}${full ? `: you were only ${got.n} short of full` : ''})`;
+  }
+  /** A "You're too busy!" this soon (ms) after an attack request answers that request. */
+  static readonly BUSY_REFUSAL_MS = 500;
   /** A boost before a 0 within this long (ms) is said with it: the earlier one is what filled the target. */
   static readonly BOOST_BEFORE_ZERO_MS = 15_000;
 
@@ -2479,7 +2520,8 @@ export class AgentApi {
   pushChat(text: string, type?: number, plugin?: string): void {
     const clean = text.replace(/\s+$/, '');
     if (!clean) return;
-    this.push('chat', `(${chatKindOf(type, clean)}) ${clean}`, undefined, type);
+    const boostNote = plugin || AgentApi.spokenLine(clean, type) ? '' : this.receivedBoostNote(clean);
+    this.push('chat', `(${chatKindOf(type, clean)}) ${clean}${boostNote}`, undefined, type);
     if (plugin) {
       const e = this.events[this.events.length - 1];
       if (e && e.seq === this.seqN) e.plugin = plugin;
@@ -2520,7 +2562,21 @@ export class AgentApi {
       // A spell that came at you: credited to the nearest creature of the caster's name (a dying one too), so a wait
       // after it died leaves the line out (staleThreat).
       const caster = cast.words ? null : this.nearby(80).find((o) => o.kind === 'monster' && o.name.toLowerCase() === cast.caster.replace(/^the /i, '').toLowerCase());
-      if (!cast.words) this.push('cast-at-you', clean, caster?.guid);
+      // An enchantment that landed: a monster's harmful one only (a fellow's buff, or a Pumpkin Buffer's, is no attack).
+      // A heal or buff on you ("Claude Arcanist casts Heal Other V and restores 51 points of your health") is no attack.
+      const beneficial = (!!cast.spell && this.spellBeneficial(cast.spell)) || /\band restores \d+ points of your\b/i.test(clean);
+      const harmful = !beneficial && (!cast.landed || !!caster);
+      if (caster && harmful && !cast.words) {
+        this.castOnMe.set(caster.guid >>> 0, { at: this.host.now(), spell: cast.spell ?? null });
+        if (this.castOnMe.size > 60) this.castOnMe.delete(this.castOnMe.keys().next().value!);
+      }
+      // Spell words heard from a creature (whom they're at the words don't say): kept for the fellows line, where one
+      // turned to face a fellow while speaking them is casting at that fellow (fellowThreats).
+      if (cast.words && who) {
+        this.wordsBy.set(who.guid >>> 0, this.host.now());
+        if (this.wordsBy.size > 60) this.wordsBy.delete(this.wordsBy.keys().next().value!);
+      }
+      if (!cast.words) { if (harmful) this.push('cast-at-you', clean, caster?.guid); }
       else if (who) this.push('cast-at-you', `${who.name} #${who.guid.toString(16)} ${who.dist.toFixed(0)} m ${compassPoint(who.bearing)} is casting ("${cast.words}"; at whom the words don't say)`, who.guid);
     }
   }
@@ -2620,6 +2676,39 @@ export class AgentApi {
    * only; ACE-World-16PY patches) stopped Bulwark's walks and follows three times in two minutes while it buffed him
    * (2026-10-16 07:10–07:12). From what you were shown only: one blow or harmful spell and it is a threat again.
    */
+  /**
+   * The monsters that cast a harmful spell at you (a debuff that landed, a resist, a drain, a bolt), by guid: when and
+   * which spell (null: the line didn't name it). observe's CASTING AT YOU mark reads it.
+   */
+  private castOnMe = new Map<number, { at: number; spell: string | null }>();
+  /** When each creature was last heard speaking spell words (guid → ms). */
+  private wordsBy = new Map<number, number>();
+  /** Spell words this recent (ms), from one turned to face a fellow, mark it CASTING AT THEM on the fellows line. */
+  static readonly FELLOW_CAST_WORDS_MS = 10_000;
+  /** A spell cast at you this recently (ms) marks its caster CASTING AT YOU on observe. */
+  static readonly CAST_MARK_MS = 60_000;
+
+  /** Whether the spell table calls a spell beneficial (SpellFlags.Beneficial); unknown: false. */
+  private spellBeneficial(name: string): boolean {
+    const table = this.host.spellTableData?.();
+    if (!table) return false;
+    if (!this.spellFlagsByName || this.spellFlagsByName.table !== table.spells) {
+      const by = new Map<string, number>();
+      for (const sp of table.spells.values()) by.set(sp.name.toLowerCase(), sp.bitfield);
+      this.spellFlagsByName = { table: table.spells, by };
+    }
+    return ((this.spellFlagsByName.by.get(name.toLowerCase()) ?? 0) & AgentApi.SPELL_BENEFICIAL) !== 0;
+  }
+
+  /** "Feeblemind Other II 26 s ago" for a monster that cast at you within CAST_MARK_MS, else null. */
+  castAtYouMark(guid: number): string | null {
+    const c = this.castOnMe.get(guid >>> 0);
+    if (!c) return null;
+    const ago = this.host.now() - c.at;
+    if (ago > AgentApi.CAST_MARK_MS) return null;
+    return `${c.spell ? `${c.spell} ` : 'a spell '}${Math.max(0, Math.round(ago / 1000))} s ago`;
+  }
+
   harmlessKind(name: string): boolean {
     this.loadSeenKinds();
     const e = this.seenKinds.get(name.toLowerCase());
@@ -2661,13 +2750,19 @@ export class AgentApi {
    * your …", "X fails to affect you with S", a war bolt's damage line ("X frosts you for 25 points with Frost Bolt
    * I"); or a creature's spell words (Monster_Magic: HearSpeech of the words, ChatMessageType.Spellcasting 0x11).
    */
-  static castAtYou(line: string, type?: number): { caster: string; words?: string } | null {
+  static castAtYou(line: string, type?: number): { caster: string; words?: string; spell?: string; landed?: boolean } | null {
     let m = /^You resist the spell cast by (.+?)\.?$/i.exec(line);
     if (m) return { caster: m[1] };
-    m = /^(.+?) (?:casts .+? (?:and|on you)|fails to affect you with) /i.exec(line);
-    if (m) return { caster: m[1] };
+    // An enchantment that landed on you (ACE WorldObject_Magic: "{caster} cast {spell} on you{suffix}", the suffix
+    // ", refreshing X" / ", surpassing X" / ", but it is surpassed by X"). A debuff or a buff alike: who cast it says which.
+    m = /^(.+?) cast (.+?) on you(?:, (?:refreshing|surpassing|but it is surpassed by) .+?)?\.?$/i.exec(line);
+    if (m && !/^you$/i.test(m[1])) return { caster: m[1], spell: m[2], landed: true };
+    m = /^(.+?) casts (.+?) (?:and|on you)\b/i.exec(line);
+    if (m) return { caster: m[1], spell: m[2] };
+    m = /^(.+?) fails to affect you with (.+?)[.!]?$/i.exec(line);
+    if (m) return { caster: m[1], spell: m[2] };
     m = /^(?:Critical hit! )?(.+?) \w+ you for \d+ points? .*\bwith (.+?)[.!]?$/i.exec(line);
-    if (m && type === 0x15) return { caster: m[1] };
+    if (m && type === 0x15) return { caster: m[1], spell: m[2] };
     if (type === 0x11) { m = /^(.+?) says?, "(.+)"$/.exec(line); if (m && m[1] !== 'You') return { caster: m[1], words: m[2] }; }
     return null;
   }
@@ -2937,10 +3032,23 @@ export class AgentApi {
       const o = this.nearby(AgentApi.USE_DOOR_WATCH_M).find((x) => x.guid === g);
       out.push(`${this.nameOf(g)} #${g.toString(16)}${o ? ` ${o.dist.toFixed(0)} m ${compassPoint(o.bearing)}` : ''} ${now ? 'swung open' : 'swung shut'}${plainDoor ? AgentApi.OTHER_DOOR_NOTE : o?.notByHand ? ' (the door this opens: it won\'t open by hand)' : ''}`);
     }
+    const vitalSaid = new Set<string>();
     for (const k of Object.keys(mark.vit)) {
       const a = mark.vit[k], b = after.vit[k];
       // A point or two is the vital regenerating while the use ran, not its result ("mana 53 → 54" opening a corpse).
-      if (b !== undefined && Math.abs(b - a) >= AgentApi.USE_VITAL_MIN_CHANGE) out.push(`${k} ${a} → ${b}`);
+      if (b !== undefined && Math.abs(b - a) >= AgentApi.USE_VITAL_MIN_CHANGE) { out.push(`${k} ${a} → ${b}`); vitalSaid.add(k); }
+    }
+    // A potion, food or kit used up one: where its vital stands now, said even when a hit in the same moment ate the
+    // change. Bulwark's Potion of Healing answered only its "restores 15" and the stack count, as he stood full at 184/184
+    // (a hit for 15 the same second), and he went on as if at 45% (2026-10-18 21:31:28Z).
+    const meNow = this.host.self();
+    for (const [g, i] of mark.inv) {
+      const now = after.inv.get(g);
+      if (now && now.stack === i.stack) continue;
+      const sup = supplyOf(i.name);
+      if (!sup || !meNow || vitalSaid.has(sup.vital)) continue;
+      const v = meNow[sup.vital];
+      if (v.max > 0) { out.push(`${sup.vital} now ${v.current}/${v.max}${v.current >= v.max ? ' (full)' : ''}`); vitalSaid.add(sup.vital); }
     }
     for (const [g, i] of mark.inv) {
       const now = after.inv.get(g);
@@ -3516,7 +3624,14 @@ export class AgentApi {
       const held = c.on ? null : this.aggroHeldFor(c.guid, guid);
       const chasing = c.how === 'running at you' || c.how.startsWith('closing');
       // "13 m from them": "13 m off" was read as from you, beside your own distances on the line.
-      if (chasing && held !== null) stuck.push(`${id} (${how}, no closer to them in ${Math.round(held / 1000)} s, ${c.toWho.toFixed(0)} m from them${up(c)})`);
+      // Casting at them: what you can see of a spell at a fellow is the caster's server TurnTo aimed at them (ACE
+      // Monster_Navigation: a caster turns to its target and stands) and its spell words in your chat (Monster_Magic:
+      // HearSpeech of the words); the landing line goes to the fellow alone. Both within FELLOW_CAST_WORDS_MS: casting
+      // at them. Marionettes casting at Bulwark from 14.6 m had no mark at all (2026-10-18 21:29Z).
+      const heard = this.wordsBy.get(c.guid >>> 0);
+      const casting = c.how === 'turned to face you' && heard !== undefined && this.host.now() - heard <= AgentApi.FELLOW_CAST_WORDS_MS;
+      if (casting) at.push(`${id} CASTING AT THEM (turned to face them, spell words ${Math.max(0, Math.round((this.host.now() - heard!) / 1000))} s ago), ${c.toWho.toFixed(0)} m from them${up(c)}`);
+      else if (chasing && held !== null) stuck.push(`${id} (${how}, no closer to them in ${Math.round(held / 1000)} s, ${c.toWho.toFixed(0)} m from them${up(c)})`);
       else at.push(`${id} ${c.on ? 'on them' : `${how}, ${c.toWho.toFixed(0)} m from them`}${up(c)}`);
     }
     const list = (xs: string[]): string | undefined => (xs.length ? xs.slice(0, 4).join(', ') + (xs.length > 4 ? `, +${xs.length - 4} more` : '') : undefined);
@@ -4493,6 +4608,8 @@ export class AgentApi {
 
   /** When a cast or attack request last went out (this API's own clock): a routine's bolts and swings come through here. */
   private lastCombatActAt = -Infinity;
+  /** When the last attack request went out (receivedBoostNote's "You're too busy!" note). */
+  private lastAttackSentAt = -Infinity;
 
   /**
    * The routine as vitals() reports it (AgentVitals.routine): what `routine action=status` shows (running, paused, held),
@@ -4626,6 +4743,11 @@ export class AgentApi {
     const coming = me ? new Map(this.comingAt(me.s.guid).map((c) => [c.guid, this.comingAtYouText(c)] as const)) : new Map<number, { text: string; stuck: boolean }>();
     for (const o of target ? [target, ...all] : all) {
       const n = attackers.get(o.guid);
+      // A caster at range: its spells at you are no CombatEnemy swing, so they don't count in ATTACKING YOU, and one
+      // standing to cast has no MoveTo at you either. Marionettes casting Feeblemind at Bulwark from 14.6 m had no mark at
+      // all (Aerbax Haven, 2026-10-18 21:29:30Z).
+      const cast = !n && !o.dying ? this.castAtYouMark(o.guid) : null;
+      if (cast) o.castingAtYou = cast;
       if (n) o.attackingYou = n;
       else if (coming.has(o.guid) && !o.dying) {
         const c = coming.get(o.guid)!;
@@ -4957,7 +5079,7 @@ export class AgentApi {
   private notInViewHint(): string {
     const s = this.host.self();
     if (!s?.cell || (s.cell & 0xffff) >= 0x100) return '';
-    return ' (from out here a shopkeeper or other NPC inside a building is not in view: the server sends a building\'s insides only once you are at its door or in sight of its rooms. Walk to the building by its map coordinates ("42.4N, 32.2E"), then name it)';
+    return ' (from out here a shopkeeper or other NPC inside a building is not in view: the server sends a building\'s insides only once you are at its door or in sight of its rooms. Walk to the building by its map coordinates ("42.4N, 32.2E"), or to the cell id of the room it stands in (walk_to target=0xXXYYCCCC: a world-DB obj_Cell_Id), then name it)';
   }
 
   /**
@@ -5177,7 +5299,9 @@ export class AgentApi {
       const order = this.rankRestoratives([...byName.values()].map((r) => r.item), vital).map((r) => r.item);
       const ranked = [...byName.values()].sort((a, b) => order.indexOf(a.item) - order.indexOf(b.item));
       const top = ranked[0];
-      return top ? `ac_use item="${top.item.name}" (you carry ${top.n}${ranked.length > 1 ? `; also ${ranked.slice(1, 3).map((r) => `${r.item.name} ×${r.n}`).join(', ')}` : ''})` : null;
+      // What it restores when an appraisal says, up front: "a Potion of Healing restored only 15" was its 25 clamped at full.
+      const amt = top ? this.restoreBoost(top.item, vital) : null;
+      return top ? `ac_use item="${top.item.name}" (${amt !== null ? `restores up to ${amt}; ` : ''}you carry ${top.n}${ranked.length > 1 ? `; also ${ranked.slice(1, 3).map((r) => `${r.item.name} ×${r.n}`).join(', ')}` : ''})` : null;
     };
     const kit = vital === 'health' ? best('kits') : null;
     const drink = best('drinks');
@@ -6501,7 +6625,7 @@ export class AgentApi {
     await sleep(0);
     while (this.host.busy() && this.host.now() < end) await sleep(200);
     const on = broke?.guid !== undefined ? this.nameOf(broke.guid) : null;
-    return { ok: true, message: `using ${what}${broke ? ` (broke off your attack${on ? ` on ${on}` : ''} first: the client takes no use while a swing is in progress)` : ''}` };
+    return { ok: true, message: `using ${what}${broke ? ` ${broke.note.startsWith('(stopped') ? broke.note.replace(/; ac_attack to go back to it\)$/, ')') : `(broke off your attack${on ? ` on ${on}` : ''} first: the client takes no use while a swing is in progress)`}` : ''}` };
   }
 
   combatMode(mode: string): AgentResult {
@@ -6599,7 +6723,19 @@ export class AgentApi {
    * on; a note to add to the reply; or a refusal when the swing never ended.
    */
   private async breakOffAttack(what: string): Promise<{ note: string; guid?: number } | AgentResult | null> {
-    if (!this.host.attacking?.()) return null;
+    if (!this.host.attacking?.()) {
+      // No swing under way, but your attack order still on: its loop sends a fresh request once idle, and one sent while
+      // the use runs draws the server's "You're too busy!" (Player_Melee: IsBusy through a kit's bandaging), which read as
+      // the kit failing. Bulwark's routine kit healed 51 at 21:31:24.8 while a re-sent attack at 23.3 drew the refusal
+      // (Aerbax Haven, 2026-10-18; again at 21:41:43.9). The order ends here and starts again after the use.
+      if (this.attackTarget && this.task?.label.startsWith('attacking ')) {
+        const guid = this.attackTarget;
+        const on = this.nameOf(guid);
+        this.stopAttacking();
+        return { note: `(stopped your attack on ${on} for it, so no attack request goes out while the use runs: the server would refuse it "You're too busy!"; ac_attack to go back to it)`, guid };
+      }
+      return null;
+    }
     const guid = this.attackTarget || undefined;
     const on = guid ? this.nameOf(guid) : null;
     this.stopAttacking();
@@ -6685,6 +6821,91 @@ export class AgentApi {
     if (opts?.repeat) return this.castRepeat(spell, target, opts);
     if (this.task?.kind === 'cast-repeat') this.cancelTask('replaced by a single cast');
     return this.castOnce(spell, target);
+  }
+
+  /** A list cast stops when your health falls under this share of your max. */
+  static readonly CAST_LIST_MIN_HEALTH = 0.6;
+  /** Stamina to Mana casts at most this many times for one spell of a list that your mana won't pay for. */
+  static readonly CAST_LIST_MANA_TRIES = 3;
+
+  /**
+   * ac_cast spells="A, B, C": the spells you named, cast one after another on one target, in your order, through the same
+   * single cast as ac_cast (each its highest level you land when no level is named). A spell your mana won't pay for
+   * is preceded by Stamina to Mana Self, as the routine restores mana (rechargePlan: Mana Boost Self costs more mana than it
+   * gives), up to CAST_LIST_MANA_TRIES times. It stops when something starts attacking you, your health falls under
+   * CAST_LIST_MIN_HEALTH, mana can't be had, or another order replaces it; the answer says what landed, what didn't and
+   * why. Which spells is the player's choice: this only saves the twenty calls. Arcanist buffed Bulwark with about 20
+   * separate casts and Stamina to Mana Self between them every outing ("I'd like a buff batch", 2026-10-18 21:32Z).
+   */
+  castList(spells: Array<number | string>, target: TargetArg): Promise<AgentResult> {
+    const list = spells.map((x) => (typeof x === 'string' ? x.trim() : x)).filter((x) => x !== '');
+    if (!list.length) return Promise.resolve({ ok: false, message: 'spells= names no spell (a comma-separated list: spells="Armor Other, Blade Protection Other")' });
+    const onAtStart = new Set(this.attackersOfMe().keys());
+    const tname = target === null || target === undefined || target === '' || this.namesYou(target) ? 'yourself' : typeof target === 'number' ? this.nameOf(target) : String(target);
+    const landed: string[] = [], failed: string[] = [], restores: string[] = [];
+    let cancelled = false;
+    let stop = '';
+    const summary = (why: string): AgentResult => {
+      const v = this.host.self();
+      const left = list.length - landed.length - failed.length;
+      return {
+        ok: landed.length > 0,
+        message: [
+          `cast ${landed.length + failed.length} of ${list.length} on ${tname}: ${landed.length} landed${failed.length ? `, ${failed.length} didn't` : ''}${why ? `; stopped: ${why}${left ? ` (${left} not cast: ${list.slice(list.length - left).join(', ')})` : ''}` : ''}`,
+          ...(landed.length ? [`  landed: ${landed.join(', ')}`] : []),
+          ...(failed.length ? [`  didn't: ${failed.join('; ')}`] : []),
+          ...(restores.length ? [`  mana: ${restores.join(', ')}`] : []),
+          ...(v ? [`  you: health ${v.health.current}/${v.health.max}, stamina ${v.stamina.current}/${v.stamina.max}, mana ${v.mana.current}/${v.mana.max}`] : []),
+        ].join('\n'),
+      };
+    };
+    const done = this.startTask(`casting ${list.length} spells on ${tname}`, () => null, () => { cancelled = true; }, {
+      kind: 'cast-repeat', interrupted: (why) => summary(`interrupted (${why})`),
+      progress: () => `${landed.length + failed.length} of ${list.length} cast`,
+    });
+    const task = this.task!;
+    const finish = (r: AgentResult): void => { if (this.task === task) { this.task = null; task.resolve(r); } };
+    const danger = (): string | null => {
+      const me = this.host.self();
+      if (!me || me.dead) return 'you died';
+      if (me.health.max > 0 && me.health.current < me.health.max * AgentApi.CAST_LIST_MIN_HEALTH) return `your health is ${me.health.current}/${me.health.max}, under ${Math.round(AgentApi.CAST_LIST_MIN_HEALTH * 100)}%`;
+      const fresh = [...this.attackersOfMe().keys()].filter((g) => !onAtStart.has(g));
+      if (fresh.length) return `${fresh.map((g) => `${this.nameOf(g)} #${g.toString(16)}`).join(', ')} started attacking you`;
+      return null;
+    };
+    const costOf = (sp: number | string): { cost: number; name: string } | null => {
+      const f = this.findSpell(sp, target);
+      if ('ok' in f) return null;
+      const cost = this.host.spellTableData?.()?.spells.get(f.id)?.baseMana;
+      return cost === undefined ? null : { cost, name: f.name };
+    };
+    void (async () => {
+      for (const sp of list) {
+        if (cancelled) return;
+        stop = danger() ?? '';
+        if (stop) break;
+        const need = costOf(sp);
+        // Mana first, the routine's way: Stamina to Mana Self (it costs no mana to cast for its gain).
+        for (let i = 0; need && i < AgentApi.CAST_LIST_MANA_TRIES && (this.host.self()?.mana.current ?? 0) < need.cost; i++) {
+          const before = this.host.self()?.mana.current ?? 0;
+          const r = await this.castOnce('Stamina to Mana Self', 'self');
+          if (cancelled) return;
+          const after = this.host.self()?.mana.current ?? 0;
+          restores.push(r.ok ? `Stamina to Mana Self ${after - before >= 0 ? `+${after - before}` : 'cast'}` : `Stamina to Mana Self failed (${r.message.split('\n')[0].slice(0, 80)})`);
+          if (!r.ok && /don't know|no spell matching/i.test(r.message)) break;
+        }
+        if (need && (this.host.self()?.mana.current ?? 0) < need.cost) { stop = `mana ${this.host.self()?.mana.current ?? 0} won't pay for ${need.name} (up to ${need.cost}), and Stamina to Mana didn't make it up`; break; }
+        stop = danger() ?? '';
+        if (stop) break;
+        const r = await this.castOnce(sp, target);
+        if (cancelled) return;
+        const name = /^casting (.+?) (?:at|on) /.exec(r.message)?.[1] ?? String(sp);
+        if (r.ok) landed.push(/, refreshing |surpassing/.test(r.message) ? `${name} (refreshed)` : name);
+        else failed.push(`${name}: ${r.message.split('\n').map((l) => l.trim()).filter((l) => l && !/^casting /.test(l))[0]?.slice(0, 100) ?? r.message.slice(0, 100)}`);
+      }
+      if (!cancelled) finish(summary(stop));
+    })();
+    return done;
   }
 
   /** A known spell by id, else by name ({@link matchSpell}: Self / Other by whom `target` names); or why not. */
@@ -8469,7 +8690,45 @@ export class AgentApi {
     return { ok: true, name: String(r.name ?? stat), from: Number(r.from ?? 0), to: Number(r.to ?? 0), cost: Number(r.cost ?? 0) };
   }
 
+  /**
+   * A raise or train asked with no name: what can be raised and what one raise of each costs (the sheet's [+1: N xp]),
+   * cheapest first and split by what your unassigned XP covers, or the untrained skills with their credit costs.
+   * `./ac raise` alone was refused with only "missing stat" (Arcanist, 2026-10-18 20:59:16Z), and he read the
+   * character sheet next for the costs.
+   */
+  static raiseMenu(sheet: string): string {
+    const xp = /([\d,]+) unassigned/.exec(sheet);
+    const have = xp ? Number(xp[1].replace(/,/g, '')) : NaN;
+    const costs: Array<{ name: string; cost: number }> = [];
+    for (const line of sheet.split('\n')) {
+      if (!/^(Attributes|Vitals|Specialized skills|Trained skills): /.test(line)) continue;
+      for (const m of line.matchAll(/([A-Za-z][A-Za-z ]*?) \d+(?:\/\d+)?(?: \(base [^)]*\))? \[\+1: ([\d,]+) xp/g)) {
+        const n = m[1].trim();
+        costs.push({ name: /^(health|stamina|mana)$/.test(n) ? n[0].toUpperCase() + n.slice(1) : n, cost: Number(m[2].replace(/,/g, '')) });
+      }
+    }
+    const usage = 'raise takes stat= (an attribute, vital or skill; times= for several)';
+    if (!costs.length) return `${usage}; ac_character lists what one raise of each costs ([+1: N xp]).`;
+    costs.sort((a, b) => a.cost - b.cost);
+    const fmt = (l: typeof costs) => l.map((c) => `${c.name} ${c.cost.toLocaleString('en-US')}`).join(', ');
+    if (!Number.isFinite(have)) return `${usage}. One raise costs (XP): ${fmt(costs)}`;
+    const can = costs.filter((c) => c.cost <= have), cannot = costs.filter((c) => c.cost > have);
+    return [`${usage}. ${have.toLocaleString('en-US')} XP unassigned; one raise costs:`,
+      `  you can pay: ${can.length ? fmt(can) : 'none yet'}`,
+      ...(cannot.length ? [`  more than you have: ${fmt(cannot)}`] : [])].join('\n');
+  }
+
+  /** The untrained skills and their credit costs (the sheet's line) for a train asked with no skill. */
+  static trainMenu(sheet: string): string {
+    const credits = /; (\d+) skill credits/.exec(sheet)?.[1];
+    const line = sheet.split('\n').find((l) => l.startsWith('Untrained skills (credits to train): '));
+    const usage = 'train_skill takes skill= (an untrained skill)';
+    if (!line) return `${usage}; ac_character lists the untrained skills and their credit costs.`;
+    return `${usage}.${credits !== undefined ? ` You have ${credits} skill credits.` : ''} ${line.replace(/^Untrained skills \(credits to train\)/, 'Untrained (credits to train)')}`;
+  }
+
   raise(stat: string, times = 1, asked?: 'attribute' | 'vital' | 'skill' | null): AgentResult {
+    if (!stat?.trim() || stat === 'undefined') return { ok: true, message: AgentApi.raiseMenu(this.host.characterSheet()) };
     let first: AgentResult | null = null;
     let last: AgentResult | null = null;
     let spent = 0;
@@ -8546,6 +8805,7 @@ export class AgentApi {
 
   /** Train an untrained skill (Creature Enchantment, Life Magic, …) with skill credits. */
   trainSkill(skill: string): AgentResult {
+    if (!skill?.trim() || skill === 'undefined') return { ok: true, message: AgentApi.trainMenu(this.host.characterSheet()) };
     const r = this.host.trainSkill(skill);
     return { ok: r.ok, message: r.message };
   }
@@ -9970,10 +10230,17 @@ export class AgentApi {
       if (feats.drops.length) parts.push(`dropped ${feats.drops.length === 1 ? 'off a ledge' : `off ${feats.drops.length} ledges`} (${feats.drops.map((h) => `${h.toFixed(1)} m`).join(', ')})`);
       if (feats.falls.length) parts.push(`fell ${feats.falls.map((h) => `${h.toFixed(1)} m`).join(', ')} where no drop was planned (slid off an edge)`);
       if (feats.jumps) parts.push(`jumped ${feats.jumps === 1 ? 'once' : `${feats.jumps} times`} (a gap or a platform)`);
-      if (shrugged.n) parts.push(`walked on through ${shrugged.n === 1 ? 'a hit' : `${shrugged.n} hits`} for ${shrugged.damage} damage in all (${[...shrugged.from].join(', ')}: no harm, or a nick)`);
-      if (sleepersWalkedOn.size) parts.push(`walked on past ${sleepersWalkedOn.size === 1 ? 'a monster' : `${sleepersWalkedOn.size} monsters`} not awake yet (${[...sleepersWalkedOn.values()].slice(0, 4).join(', ')}${sleepersWalkedOn.size > 4 ? ', …' : ''}: ${sleepersWhy})`);
-      if (mildWalkedOn.size) parts.push(`walked on past ${mildWalkedOn.size === 1 ? 'a mild chaser' : `${mildWalkedOn.size} mild chasers`} your routine takes (${[...mildWalkedOn.values()].slice(0, 4).join(', ')}${mildWalkedOn.size > 4 ? ', …' : ''}: no pack, no hurting spells, no heavy hits)`);
-      return parts.length ? `; on the way you ${parts.join(' and ')}` : '';
+      // Names by kind, counted ("Pristine Doll ×4, Marionette"): the answer's tail, not its point.
+      const kinds = (names: Iterable<string>): string => {
+        const n = new Map<string, number>();
+        for (const x of names) { const k = x.replace(/ L\d+$/, ''); n.set(k, (n.get(k) ?? 0) + 1); }
+        const l = [...n].map(([k, c]) => (c > 1 ? `${k} ×${c}` : k));
+        return l.slice(0, 3).join(', ') + (l.length > 3 ? ', …' : '');
+      };
+      if (shrugged.n) parts.push(`walked through ${shrugged.n === 1 ? 'a hit' : `${shrugged.n} hits`} for ${shrugged.damage} damage (${kinds(shrugged.from)})`);
+      if (sleepersWalkedOn.size) parts.push(`passed ${sleepersWalkedOn.size} asleep (${kinds(sleepersWalkedOn.values())}: ${sleepersWhy})`);
+      if (mildWalkedOn.size) parts.push(`passed ${mildWalkedOn.size === 1 ? 'a mild chaser' : `${mildWalkedOn.size} mild chasers`} (${kinds(mildWalkedOn.values())}: well below you, nothing that hurt${this.routineCoversWalk() ? '; your routine takes them' : ''})`);
+      return parts.length ? `; on the way you ${parts.join(', ')}` : '';
     };
     /** The walk's "stuck" answer: what the searches found, the doors tried, the drops and leaps that didn't work. */
     const stuckResult = (d: number): AgentResult => {
@@ -10511,7 +10778,7 @@ export class AgentApi {
           ? `didn't stop to wait for ${stayWithSkipped}: you were being hit, and with real danger on you (${stayWithDangerWhy}) a walk never stands still for a fellow (stay_with waits again once that is off you; a mild chaser's nicks don't count while your routine covers the walk)`
           : `didn't stop to wait for ${stayWithSkipped}: you were being hit, and a walk under attack never stands still for a fellow (stay_with waits again once nothing is on you)`);
       }
-      if (stayMildHits.size && opts.stayWith) notes.push(`waited for ${opts.stayWith} through mild hits your routine takes once the walk is done (${[...stayMildHits.values()].slice(0, 4).join(', ')}: no pack, no hurting spells, no heavy hits, health not under ${Math.round(AgentApi.VITALS_LOW_DEFAULT * 100)}%)`);
+      if (stayMildHits.size && opts.stayWith) notes.push(`waited for ${opts.stayWith} through mild hits (${[...stayMildHits.values()].slice(0, 4).join(', ')}; your routine takes them)`);
       if (routeClimb) notes.push(`the only doorway way there ${AgentApi.routeClimbText(routeClimb)}: no doorway, stair or ramp on your floor joins your room to it, so a walk there goes up first`);
       // A map coordinate's scale with the distance left: 240 m to the unit. "stopped 741 m short" for "0.7N, 51.4E" read
       // as impossible to a player who had it "just N" of 2.3S, 50.6E (Arcanist, 2026-10-16); it was right: 3.0 units
@@ -10765,7 +11032,9 @@ export class AgentApi {
         return { ok: true, message: `went through a portal on the way${by}: you're now in ${(me.s.cell & 0xffff) >= 0x100 ? 'an interior' : 'the open'} (cell 0x${(me.s.cell >>> 0).toString(16)}); the target is left behind${featText()}` };
       }
       if (opts.stopWhenAttacked !== false) {
-        const hit = this.walkStoppingHit(sinceSeq, !!opts.stopOnAggro, shrugged);
+        // A nick walks on with your routine running too (it takes the attacker once the walk is done): an Innocent Doll's
+        // 1-point scratch stopped Bulwark's walk 2.5 m short, "Bulwark fights" running (Aerbax Haven, 2026-10-18 20:4xZ).
+        const hit = this.walkStoppingHit(sinceSeq, !!opts.stopOnAggro && !this.routineCoversWalk(), shrugged);
         const hp = me.s.health;
         const hurt = hp.max > 0 && hp.current < hp.max * 0.5 && hp.current < startHealth - hp.max * 0.1;
         if (hit || hurt) {
@@ -10850,19 +11119,24 @@ export class AgentApi {
         const covered = fresh.length && !rescue() ? this.routineCoversWalk() : null;
         let stopFor = fresh;
         let coverWhy = '';
-        if (covered && fresh.length) {
+        if (fresh.length && !rescue()) {
           const danger = fresh.map((c) => ({ c, why: this.walkDanger(c.guid) })).filter((x) => x.why);
           // A pack counts what weighs: one well below your level (ROUTINE_PACK_BELOW_LEVELS or more, its kind's level when
           // this one's isn't known) whose hits and spells have been mild (walkDanger) is the routine's to take, however many.
           // Bulwark (L48) stopped walk after walk for three Marionettes / Dark Marionettes (L26–35) his routine killed at
           // once (Aerbax Haven, 2026-10-18 06:16–07:18Z). A big crowd (ROUTINE_WALK_CROWD) still stops it.
           const weighty = fresh.filter((c) => !this.wellBelowYou(c) || danger.some((x) => x.c === c));
-          if (weighty.length >= AgentApi.ROUTINE_WALK_PACK || fresh.length >= AgentApi.ROUTINE_WALK_CROWD) {
-            coverWhy = weighty.length >= AgentApi.ROUTINE_WALK_PACK ? `${fresh.length} coming at once (a pack)` : `${fresh.length} coming at once (a crowd, if each is well below you)`;
-          }
-          else if (danger.length) { stopFor = [danger[0].c, ...fresh.filter((c) => c !== danger[0].c)]; coverWhy = danger[0].why!; }
+          // With no routine the mild ones (well below you, nothing of theirs that hurt) walk on too; one near your level
+          // still stops it. A Dark Marionette (L35) 3 m off and another 25 m off stopped Arcanist's (L53) walks to the
+          // Surface portal twice in a minute, his routine stopped for the walk (Aerbax Haven, 2026-10-18 21:05:01, 21:05:48Z).
+          const pack = covered ? weighty.length >= AgentApi.ROUTINE_WALK_PACK : weighty.length > 0;
+          if (pack || fresh.length >= AgentApi.ROUTINE_WALK_CROWD) {
+            stopFor = [...weighty, ...fresh.filter((c) => !weighty.includes(c))];
+            coverWhy = weighty.length >= AgentApi.ROUTINE_WALK_PACK ? `a pack: ${weighty.length} near your level` : fresh.length >= AgentApi.ROUTINE_WALK_CROWD ? `a crowd of ${fresh.length}` : danger.length ? danger[0].why! : '';
+            if (danger.length) stopFor = [danger[0].c, ...stopFor.filter((c) => c !== danger[0].c)];
+          } else if (danger.length) { stopFor = [danger[0].c, ...fresh.filter((c) => c !== danger[0].c)]; coverWhy = danger[0].why!; }
           else {
-            for (const c of fresh) if (!mildWalkedOn.has(c.guid)) { mildWalkedOn.set(c.guid, `${c.name}${c.level ? ` L${c.level}` : ''}`); this.trace(`walk: ${c.name} #${c.guid.toString(16)} coming at you, mild; walking on (your routine "${covered}" takes it)`); }
+            for (const c of fresh) if (!mildWalkedOn.has(c.guid)) { mildWalkedOn.set(c.guid, `${c.name}${c.level ? ` L${c.level}` : ''}`); this.trace(`walk: ${c.name} #${c.guid.toString(16)} coming at you, mild; walking on${covered ? ` (your routine "${covered}" takes it)` : ''}`); }
             stopFor = [];
           }
         }
@@ -10870,8 +11144,10 @@ export class AgentApi {
           release();
           const c = stopFor[0];
           const more = stopFor.slice(1, 4).map((x) => `${x.name}${x.level ? ` L${x.level}` : ''} ${x.dist.toFixed(0)} m ${compassPoint(x.bearing)}`);
-          const cover = covered ? ` Your routine "${covered}" is running, so a walk stops only for a pack (${AgentApi.ROUTINE_WALK_PACK}+ coming at once, not counting mild ones ${AgentApi.ROUTINE_PACK_BELOW_LEVELS}+ levels under you; ${AgentApi.ROUTINE_WALK_CROWD}+ whatever their levels), a caster whose spells hurt, or a heavy hitter; this one: ${coverWhy}.` : '';
-          return { ok: false, aggro: true, message: `stopped ${d.toFixed(1)} m short: ${this.threatText(c)} is coming at you, ${c.dist.toFixed(0)} m ${compassPoint(c.bearing)} (${c.how})${more.length ? `; also coming: ${more.join(', ')}` : ''}${featText()}.${cover} Fight it (ac_attack / ac_cast), get away from it (ac_walk_to keeps clear of monsters; flee=true runs on through hits), or walk on anyway (stop_on_aggro=false).` };
+          // Why, when the level alone doesn't say it: with your routine running (it takes mild ones), or one well below you
+          // that stops the walk for what its kind did (or a crowd).
+          const why = coverWhy && (covered || this.wellBelowYou(c)) ? ` (${coverWhy}${covered ? `; your routine "${covered}" takes mild ones` : ''})` : '';
+          return { ok: false, aggro: true, message: `stopped ${d.toFixed(1)} m short: ${this.threatText(c)} is coming at you, ${c.dist.toFixed(0)} m ${compassPoint(c.bearing)} (${c.how})${more.length ? `; also ${more.join(', ')}` : ''}${why}${featText()}. Fight it, get away (walk_to keeps clear; flee=true runs on through hits), or walk on (stop_on_aggro=false).` };
         }
       }
       if (packOn && !underAttack && !jumping && (me.s.cell & 0xffff) >= 0x100 && now - packCheckAt >= AgentApi.PACK_CHECK_MS && !rescue()) {
@@ -11351,7 +11627,7 @@ export class AgentApi {
             if (upHere && !opts.drop) {
               release(); jumping = null;
               const drop = dropText(here.z - spec.to.z);
-              return { ok: false, dropHeld: true, message: `stopped ${d.toFixed(1)} m short at the edge of a ${drop} drop: the way on drops to the floor below (one way: the way back up may be long, or none), and ${f!.name} is on this floor (${f!.dist!.toFixed(0)} m ${compassPoint(f!.bearing!)} of you), so stay_with doesn't go down without them. Tell them (ac_say text="/f dropping ${drop} here, come down after me"), then ${label.replace(/^walking /, 'walk ')} again with drop=true (it waits at the edge for them, then goes down), or let them go first${featText()}` };
+              return { ok: false, dropHeld: true, message: `stopped ${d.toFixed(1)} m short at a ${drop} drop (one way down): ${f!.name} is still up here (${f!.dist!.toFixed(0)} m ${compassPoint(f!.bearing!)}), and stay_with doesn't go down without them. Tell them (/f), then ${label.replace(/^walking /, 'walk ')} again with drop=true (it waits at the edge for them, then goes down)${featText()}` };
             }
             const apart = f?.dist !== undefined && f.dist > AgentApi.STAY_WITH_DROP_TOGETHER_M && Math.abs(f.dz ?? 0) < AgentApi.FLOOR_APART_M;
             if (apart) {
@@ -12445,8 +12721,14 @@ export class AgentApi {
   private sleepersWalkOn(pack: Array<{ o: AgentObject; d: number }>): string | null {
     const weighty = pack.filter(({ o }) => !this.wellBelowYou(o));
     const covered = this.routineCoversWalk();
-    if (covered) return weighty.length >= AgentApi.ROUTINE_WALK_CROWD ? null : `your routine "${covered}" takes them as they wake; ${AgentApi.ROUTINE_WALK_CROWD}+ would stop it`;
-    return weighty.length ? null : `all ${AgentApi.ROUTINE_PACK_BELOW_LEVELS}+ levels under yours`;
+    if (covered) return weighty.length >= AgentApi.ROUTINE_WALK_CROWD ? null : `your routine takes them as they wake`;
+    // No routine: a monster asleep isn't coming at you, and the walk keeps clear of it (avoid_monsters), so only a pack
+    // (ROUTINE_WALK_PACK+ not well below you) or one far above your level stops the walk. Two Innocent Dolls asleep 22 m
+    // off stopped Arcanist's (L53) walk out of Aerbax Haven, and he walked on with avoid_monsters=false (2026-10-18 21:03:45Z).
+    const mine = this.self()?.level ?? this.host.self()?.level ?? 0;
+    const farAbove = pack.some(({ o }) => { const lv = this.levelOf(o); return lv !== undefined && mine > 0 && lv >= mine + AgentApi.CAST_REPEAT_FAR_ABOVE_LEVELS; });
+    if (farAbove || weighty.length >= AgentApi.ROUTINE_WALK_PACK) return null;
+    return weighty.length ? `no pack (under ${AgentApi.ROUTINE_WALK_PACK} near your level)` : `all ${AgentApi.ROUTINE_PACK_BELOW_LEVELS}+ levels under yours`;
   }
 
   /** The pack a walk stopped short of, as the answer names it. */
@@ -12863,15 +13145,15 @@ export class AgentApi {
     if (!force && cut.climb && (rise === null || cut.climb.height <= rise + AgentApi.CLIMB_MARGIN_M)) return null;
     const hex = (c: number): string => `0x${(c >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
     const parts: string[] = [];
-    parts.push(`no way on foot from this part of the dungeon to there: no doorway, stair or ramp joins them, and ${cut.climb
-      ? `the openings overhead out of it are ${cut.climb.height.toFixed(0)} m or more above the floor (the lowest in cell ${hex(cut.climb.cell)})${rise !== null ? `, past your jump (it lifts you about ${rise.toFixed(1)} m)` : ''}`
-      : 'no opening overhead leads on out of it'}`);
+    // Said short: the walk stopping is the news, the why in one clause (Bulwark: "walk_to kept stopping me short with long
+    // explanations" around Aerbax Laboratory's one-way drops, 2026-10-18 21:1xZ).
+    const over = cut.climb ? `the openings overhead are ${cut.climb.height.toFixed(0)}+ m up${rise !== null ? `, past your ${rise.toFixed(1)} m jump` : ''}` : 'no opening overhead leads out';
     if (cut.back) {
       const how: string[] = [];
-      if (cut.back.leaps.length) how.push(cut.back.leaps.length === 1 ? `a ${cut.back.leaps[0].toFixed(1)} m leap across open air` : `${cut.back.leaps.length} leaps (${cut.back.leaps.map((w) => `${w.toFixed(1)} m`).join(', ')})`);
-      if (cut.back.drops.length) how.push(`${cut.back.drops.length === 1 ? 'a drop' : `${cut.back.drops.length} drops`} through floor openings (${cut.back.drops.map((q) => `${q.depth.toFixed(0)} m`).join(', ')})`);
-      parts.push(`the two parts are joined one way only: from there a walk gets here${how.length ? ` by ${how.join(' and ')}` : ''}, and nothing climbs back`);
-    } else parts.push('no walk joins them the other way either');
+      if (cut.back.leaps.length) how.push(cut.back.leaps.length === 1 ? `a ${cut.back.leaps[0].toFixed(1)} m leap` : `${cut.back.leaps.length} leaps (${cut.back.leaps.map((w) => `${w.toFixed(1)} m`).join(', ')})`);
+      if (cut.back.drops.length) how.push(`${cut.back.drops.length === 1 ? 'a drop' : `${cut.back.drops.length} drops`} (${cut.back.drops.map((q) => `${q.depth.toFixed(0)} m`).join(', ')})`);
+      parts.push(`no way on foot to there: this part is joined to it one way only (from there ${how.length ? how.join(' and ') : 'a walk'} leads here, and nothing climbs back: ${over})`);
+    } else parts.push(`no way on foot to there: no doorway, stair or ramp joins the two parts either way (${over})`);
     if (leftOut.length) {
       const l = leftOut[leftOut.length - 1];
       const ago = Math.max(1, Math.round((this.host.now() - l.at) / 60_000));
@@ -12891,7 +13173,7 @@ export class AgentApi {
     // (Mountain Keep, 2026-10-18 02:19Z).
     const pocket = cut.back ? null : this.droppedInFrom(theirs.map(([g, p]) => ({ guid: g, ...p })), nr);
     if (pocket) parts.unshift(`this part of the dungeon is reached one way only: from ${pocket.from} a walk gets here by ${pocket.how}, and no doorway, stair or ramp climbs back out`);
-    if (mine.length) parts.push(`on your side: ${mine.map(([g, p]) => `${p.name} #${g.toString(16)} (cell ${hex(p.cell)}; walk_to or ac_use it)`).join(', ')}`);
+    if (mine.length) parts.push(`portals on your side: ${mine.map(([g, p]) => `${p.name} #${g.toString(16)} (${hex(p.cell)})`).join(', ')}`);
     else if (theirs.length) parts.push(`none of the portals you know here is on your side (${theirs.slice(0, 3).map(([g, p]) => `${p.name} #${g.toString(16)}`).join(', ')} ${theirs.length === 1 ? 'is' : 'are'} on the other)`);
     const up = cut.top.z - s.z;
     const topHint = !mine.length && up >= AgentApi.FLOOR_APART_M;
@@ -12900,7 +13182,7 @@ export class AgentApi {
       const out = mine.length ? `take a portal on your side (above)` : topHint ? `walk_to ${hex(cut.top.cell)}, the highest room on your side (about ${up.toFixed(0)} m up), and look there for a portal out (a dungeon's far end often has one)` : 'look round this part for a portal out';
       return `${parts.join('; ')}. To get out: ${out}, or recall (a lifestone or portal recall spell, /lifestone); then come back in by the entrance`;
     }
-    return `${parts.join('; ')}. Otherwise recall out (a lifestone or portal recall spell, /lifestone), or meet on this side`;
+    return `${parts.join('; ')}. Else recall (/lifestone or a recall spell), or meet on this side`;
   }
 
   /**
@@ -13931,7 +14213,7 @@ export class AgentApi {
         if (!sent || now - idleSince >= 1500) {
           sent = true; idleSince = null;
           if (sentAt === null) { sentAt = now; sentDist = dist3(); }
-          this.host.attack(guid, power, height); this.motionStopAt = this.host.now(); this.lastCombatActAt = this.host.now();
+          this.host.attack(guid, power, height); this.motionStopAt = this.host.now(); this.lastCombatActAt = this.host.now(); this.lastAttackSentAt = this.host.now();
         }
         return null;
       // Interrupted by another task: stop watching. A vanished target stays watched for objectRemoved
@@ -14722,7 +15004,10 @@ export class AgentApi {
       stopMoving: () => this.stopMoving(),
       combatMode: (m: string) => this.combatMode(m),
       attack: (t: TargetArg, o?: { height?: AttackHeightName; power?: number | 'bar'; next?: boolean; far?: boolean; drop?: boolean }) => this.attack(t, o),
-      cast: (s: number | string, t: TargetArg, o?: CastRepeatOptions | null) => this.cast(s, t, o ?? undefined),
+      // spells= (a list): castList, one after another on one target (ac_cast spells="A, B, C").
+      cast: (s: number | string | Array<number | string>, t: TargetArg, o?: CastRepeatOptions | null) => (Array.isArray(s) ? this.castList(s, t)
+        : s === '' || s === undefined || s === null ? Promise.resolve({ ok: false, message: 'cast takes spell= (one spell) or spells= (a comma-separated list, cast in order on one target)' })
+        : this.cast(s, t, o ?? undefined)),
       pickUp: (t: TargetArg) => this.pickUp(t),
       loot: (c: TargetArg, m: string | null) => this.loot(c, m),
       drop: (t: TargetArg) => this.drop(t),
@@ -14732,7 +15017,8 @@ export class AgentApi {
       moveItem: (t: TargetArg, to?: string | number | null) => this.moveItem(t, to ?? null),
       moveItems: (f: string, to?: string | number | null, max?: number) => this.moveItems(f, to ?? null, max ?? 50),
       appraise: (t: TargetArg) => this.appraise(t),
-      raise: (s: string, n?: number) => this.raise(s, n),
+      // The kind word (attribute= / vital= / skill=) reaches the raise: the surface dropped it, so raiseKindNote never ran.
+      raise: (s: string, n?: number, w?: 'attribute' | 'vital' | 'skill' | null) => this.raise(s, n, w),
       trainSkill: (s: string) => this.trainSkill(s),
       dialog: (b: string, i?: number | null) => this.dialog(b, i),
       press: (k: string) => this.press(k),
