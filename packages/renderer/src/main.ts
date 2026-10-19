@@ -128,7 +128,7 @@ import { rangedSpeechInRange } from './chat/RangedSpeechGate.js';
 import { PingLatencyTracker } from './network/PingLatencyTracker.js';
 import { GameActions } from './network/GameActions.js';
 import { pageDebugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
-import { AgentApi, agentApiEnabled, automationUiEnabled, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, yawToCompass, type AgentHost, type AgentHostObject } from './agent/AgentApi.js';
+import { AgentApi, agentApiEnabled, automationUiEnabled, doorFacing, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, yawToCompass, type AgentHost, type AgentHostObject } from './agent/AgentApi.js';
 import { createHostAttack } from './agent/hostAttack.js';
 import { skillKey, skillSpellLines, spellSkillMod } from './agent/spellFamilies.js';
 import { pluginLootSets } from './agent/pluginLootSets.js';
@@ -16519,6 +16519,8 @@ async function main() {
         wielderId: o.wielderId || undefined, containerId: (o as { containerId?: number }).containerId || undefined,
         palettes: o.subPalettes?.map((p) => ({ id: p.paletteId >>> 0, offset: p.offset, length: p.length })),
         physicsState: o.physicsState,
+        // A door's heading (its frame's +Y, AFrame.get_vector_heading): ACE opens a locked door used from behind it.
+        ...((o.objectDescFlags ?? 0) & 0x1000 && o.position ? { facing: doorFacing(o.position) } : {}),
         ...(o.uiEffects ? { uiEffects: o.uiEffects } : {}),
         // ItemUseable: a door with the No bit opens only by its lever or switch (agent: notByHand).
         ...(o.usable ? { useability: o.usable >>> 0 } : {}),
@@ -16565,6 +16567,8 @@ async function main() {
         canSwing: (guid) => { const o = serverObjectManager?.getObject(guid); return !!o && !serverObjectManager!.isDying(guid) && isObjectAttackable(o, serverObjectManager?.playerDescFlags ?? 0); },
         // The agent host's own busy rule (agentHost.busy below), so the stance switch's delayed swing waits as the loop does.
         busy: () => busyCount.busy || inventoryRequests.pending !== null || teleportBusy.value,
+        // In the air (a jump, a walk's drop): ACE refuses the swing; the agent's loop sends it once landed.
+        inAir: () => isPlayerAirborne,
       });
       // The frame the agent's movement probes work in, and the collision services they step through:
       // agent global metres in and out (outdoors the render world is global; a dungeon's is its
@@ -16837,6 +16841,8 @@ async function main() {
         bookPage: (index) => gameUI.agentBookPage(index),
         answerDialog: (label, index) => gameUI.agentAnswerDialog(label, index),
         busy: () => busyCount.busy || inventoryRequests.pending !== null || teleportBusy.value,
+        // The body's own contact state (GAP.7 falling): ACE refuses a cast or a kit/food/gem use in the air.
+        bodyInAir: () => isPlayerAirborne,
         select: (guid) => { selectGuid(guid); return selectedObjectId() === guid; },
         use: (guid) => { if (!sendUseAction || (!serverObjectManager?.getObject(guid) && !inventoryItem(guid))) return false; agentPrimeMoveState(); sendUseAction(guid); return true; },
         // The send's own answer: the client's gate (a pending request, a swing under way) refuses it with its line.

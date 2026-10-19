@@ -265,7 +265,7 @@ describe('fake host', () => {
     it('says it is on Bulwark, that the caster\'s own plays no part, and that hers is kept under it (17:01:39Z)', async () => {
       host.buffs = [{ name: 'Incantation of Strength Other', remaining: 1, beneficial: true }];
       const r = await settle(api, host, api.cast('Strength Other IV', 'Claude Bulwark'), 10_000);
-      expect(r?.message).toMatch(/surpassed on Claude Bulwark: Claude Bulwark still has Incantation of Strength Other on them \(the server compares the target's own enchantments, not yours; yours, 1s left, plays no part\)\. Strength Other IV is kept under it on Claude Bulwark and takes over when theirs wears off/);
+      expect(r?.message).toMatch(/surpassed on Claude Bulwark: Claude Bulwark still has Incantation of Strength Other on them, the stronger, which stays in effect \(the server compares the target's own enchantments, not yours; yours, 1s left, plays no part\); the cast still cost its mana \(the server spends it as the spell goes off, before it finds the stronger one: as in retail\)\. Strength Other IV is kept under it on Claude Bulwark and takes over when theirs wears off/);
     });
   });
 });

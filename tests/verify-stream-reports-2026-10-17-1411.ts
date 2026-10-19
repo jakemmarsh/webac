@@ -81,7 +81,8 @@ describe('stream reports 2026-10-17 14:11Z', () => {
       expect(r.ok).toBe(false);
       expect(r.message).toMatch(/Dread Mu-miyah #80009ce8 is out of sight: your client let it go: in a dungeon you see only the rooms in sight of yours, and it is in one yours can't see; last seen 27 m N of you, \d s ago\. Go where it can be seen from \(walk_to #80009ce8 goes to where it was\), or let it come to you$/);
       expect(r.message).not.toMatch(/keep you updated/);
-      expect(api.attack(0x80009ce8).message).toMatch(/^Dread Mu-miyah #80009ce8 is out of sight: your client let it go: in a dungeon/);
+      // An attack goes there first (2026-10-19 18:20:35Z): the cast can't, a bolt needs it in sight.
+      expect(api.attack(0x80009ce8).message).toMatch(/^Dread Mu-miyah #80009ce8 is out of your client's sight \(it let it go\): going to where it was last seen \(27 m N of you/);
     });
 
     it('one that died out of sight: its corpse at its last spot says so', () => {
@@ -91,16 +92,17 @@ describe('stream reports 2026-10-17 14:11Z', () => {
       run(api, host, 1000);
       host.add({ guid: 0x8000a5b0, name: 'Corpse of Dread Mu-miyah', itemType: 0x200, cell: ROOM, x: 81, y: 34, z: 0 });
       run(api, host, 500);
-      expect(api.attack(0x80007acb).message).toMatch(/^Dread Mu-miyah #80007acb is out of sight: your client let it go: in a dungeon .*\. It died there: its corpse #8000a5b0 lies where it was last seen, 14 m N$/);
+      expect(api.attack(0x80007acb).message).toMatch(/^Dread Mu-miyah #80007acb died out of your client's sight: its corpse is #8000a5b0, 14 m N, where it was last seen/);
     });
 
-    it('on the landscape it is still the server\'s update range', () => {
+    it('on the landscape it is still the server\'s update range (an attack goes to its last spot)', () => {
       host.me.cell = 0xa9b40019; host.me.z = 94; host.cellSealed = undefined;
       const d = host.add({ guid: 0x80001234, name: 'Drudge Skulker', itemType: 0x10, objectDescFlags: 0x10, x: 80, y: 60, z: 94, level: 5 });
       run(api, host, 1000);
       d.lost = true; d.heardAt = host.t - 10_000;
       run(api, host, 500);
-      expect(api.attack(0x80001234).message).toMatch(/out of sight: your client let it go: too far from you for the server to keep you updated; last seen 40 m N/);
+      // An attack goes there first (2026-10-19).
+      expect(api.attack(0x80001234).message).toMatch(/out of your client's sight \(it let it go\): going to where it was last seen \(40 m N/);
     });
 
     describe.skipIf(!existsSync(DAT_PATHS.cell))('the Keep\'s stab lists (cell DAT)', () => {

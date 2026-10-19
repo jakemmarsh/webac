@@ -98,7 +98,8 @@ describe('stream reports 2026-10-16 21:53Z', () => {
     it('without line=true: the arrival by a monster says the line is shut, and how to ask for one (the 21:53Z case)', async () => {
       dread(); wallUntil(3);
       const r = await settle(api, host, api.walkTo(DREAD, { within: 4, stopOnAggro: false, avoidMonsters: false }), 20_000);
-      expect(r?.message).toMatch(/^arrived \(4\.\d m from [^)]+\); no open line to it from here .*\(walk_to … line=true keeps going until the line is open\)/);
+      // …and that a sword can't reach it from there either (2026-10-19 18:29Z: "arrived" 2 m from a walled-off Dread).
+      expect(r?.message).toMatch(/^arrived \(4\.\d m from [^)]+\), but it can't be hit from here; no open line to it from here .*; nor a sword from here .*\(walk_to … line=true keeps going until the line is open\)/);
     });
 
     it('the tool takes line=true through to the walk', async () => {

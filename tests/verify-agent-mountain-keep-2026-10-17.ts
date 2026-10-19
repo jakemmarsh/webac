@@ -86,13 +86,21 @@ describe('3. a monster that just attacked you stays the fight once the client le
     expect(formatObservation(api.observe())).toMatch(/OUT OF SIGHT: only where it was last seen, but it attacked (just now|\d+ s ago) \(ac_attack goes to where it was last seen and fights it there\)/);
   });
 
-  it('one that never attacked you or a fellow, or did so over 30 s ago, is refused as before', () => {
+  // Since 2026-10-19 (Bulwark's attack on a Dread seen 10 s before, refused "out of sight … Go where it can be seen
+  // from", 18:20:35Z): any monster seen within MONSTER_LAST_SEEN_MAX_MS is gone after to its last spot, foe or not.
+  it('one that never attacked you or a fellow, or did so over 30 s ago: to where it was last seen, not called a foe', () => {
     ambush({ hit: false });
-    expect(api.attack(MU).message).toMatch(/is out of sight: your client let it go: .*(?:Go back there and look again|walk_to #80010988 goes to where it was)/);
+    const r = api.attack(MU);
+    expect(r.ok, r.message).toBe(true);
+    expect(r.message).toMatch(/is out of your client's sight \(it let it go\): going to where it was last seen/);
+    expect(r.message).not.toMatch(/it attacked/);
     host.objs.delete(MU);
     ambush();
     run(api, host, AgentApi.RECENT_FOE_MS + 1000);
-    expect(api.attack(MU).message).toMatch(/is out of sight: your client let it go: .*(?:Go back there and look again|walk_to #80010988 goes to where it was)/);
+    expect(api.attack(MU).message).toMatch(/is out of your client's sight \(it let it go\): going to where it was last seen/);
+    // Seen over a minute ago: refused as before.
+    run(api, host, AgentApi.MONSTER_LAST_SEEN_MAX_MS);
+    expect(api.attack(MU).message).toMatch(/is out of sight: your client let it go/);
   });
 
   it('one standing on a fellow counts too', () => {

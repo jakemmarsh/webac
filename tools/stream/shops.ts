@@ -217,12 +217,23 @@ function learnText(rules: NonNullable<ReturnType<typeof learnRule>>[]): string[]
 
 const PLACES_PER_LINE = 3;
 
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+/** Distance between two map spots, in map units (0.1 = 24 m). */
+export const mapDist = (a: MapCoords, b: MapCoords): number => Math.hypot(a.ns - b.ns, a.ew - b.ew);
+/** "2.3 SW of you" in map units (0.1 = 24 m), from `from` to `to`; "here" under 0.05. */
+export function fromYouText(from: MapCoords, to: MapCoords): string {
+  const dn = to.ns - from.ns, de = to.ew - from.ew;
+  const d = Math.hypot(dn, de);
+  if (d < 0.05) return 'here';
+  return `${d.toFixed(1)} ${COMPASS[Math.round(((Math.atan2(de, dn) * 180) / Math.PI + 360) / 45) % 8]} of you`;
+}
+
 /**
  * The answer, grouped by vendor + place: each kind of shop (a vendor name with the same stock and prices) once, with
  * what it sells of the match and its price, then everywhere it stands (by nearest town). Ordered by the first item
  * it sells (spell tiers in order), so a family reads lowest tier first.
  */
-export function formatShops(query: string, offers: ShopOffer[], vendors: Map<number, ShopVendor>, dat: ShopDatInfo = {}, maxLines = SHOPS_MAX_LINES): string {
+export function formatShops(query: string, offers: ShopOffer[], vendors: Map<number, ShopVendor>, dat: ShopDatInfo = {}, maxLines = SHOPS_MAX_LINES, near?: MapCoords): string {
   const q = query.trim();
   if (!q) return 'give part of an item name: ./world-query sells "Scroll of Impenetrability"';
   // Only vendors that stand somewhere in the world.
@@ -244,19 +255,21 @@ export function formatShops(query: string, offers: ShopOffer[], vendors: Map<num
     const key = `${v.name}|${currency}|${items.map((i) => `${i.name}=${i.price}`).join(',')}`;
     const g = groups.get(key) ?? { vendor: `${v.name}${v.currency ? ` (prices in ${v.currency})` : ''}`, items, places: new Map() };
     for (const p of v.places) {
-      // Sort key: the town's name, then nearest first; places far from any town last.
-      const town = nearestTownOf(placeMapCoords(p.cell, p.x, p.y));
-      const text = formatPlace(p, dat);
-      g.places.set(text, `${town ? `${town.name}\t${town.distance.toFixed(1).padStart(5, '0')}` : '\uffff'}\t${text}`);
+      // Sort key: the town's name, then nearest first; places far from any town last. With `near`: nearest to it first,
+      // with how far (spawns' near). Arcanist's `sells "…" near 54.7N 32.9E` listed by town, the near ignored (2026-10-19).
+      const at = placeMapCoords(p.cell, p.x, p.y);
+      const town = nearestTownOf(at);
+      const text = `${formatPlace(p, dat)}${near ? `, ${fromYouText(near, at)}` : ''}`;
+      g.places.set(text, near ? `${mapDist(near, at).toFixed(2).padStart(8, '0')}\t${text}` : `${town ? `${town.name}\t${town.distance.toFixed(1).padStart(5, '0')}` : '\uffff'}\t${text}`);
     }
     groups.set(key, g);
   }
   const placeList = (g: { places: Map<string, string> }) => [...g.places.values()].sort((a, b) => a.localeCompare(b));
-  const sorted = [...groups.values()].sort((a, b) => compareItemNames(a.items[0].name, b.items[0].name) || a.items.length - b.items.length
+  const sorted = [...groups.values()].sort((a, b) => (near ? placeList(a)[0].localeCompare(placeList(b)[0]) : 0) || compareItemNames(a.items[0].name, b.items[0].name) || a.items.length - b.items.length
     || placeList(a)[0].localeCompare(placeList(b)[0]) || a.vendor.localeCompare(b.vendor));
   const itemNames = [...new Set(placed.map((o) => o.name))].sort(compareItemNames);
   const shopCount = sorted.reduce((n, g) => n + g.places.size, 0);
-  const lines = [`${shopCount} shop${shopCount === 1 ? '' : 's'} sell ${itemNames.length} item${itemNames.length === 1 ? '' : 's'} matching "${q}"; prices are what you pay${placed.some((o) => o.spell) ? '; use a scroll to learn its spell' : ''}.`];
+  const lines = [`${shopCount} shop${shopCount === 1 ? '' : 's'} sell ${itemNames.length} item${itemNames.length === 1 ? '' : 's'} matching "${q}"${near ? `, nearest to ${mapCoordinateText(near)} first` : ''}; prices are what you pay${placed.some((o) => o.spell) ? '; use a scroll to learn its spell' : ''}.`];
   // Who can learn each scroll, once.
   const rules = itemNames.map((n) => ({ n, r: learnRule(placed.find((o) => o.name === n)!, dat) })).filter((x): x is { n: string; r: NonNullable<typeof x.r> } => !!x.r);
   if (rules.length) {
@@ -288,7 +301,7 @@ export function formatShops(query: string, offers: ShopOffer[], vendors: Map<num
       lines[lines.length - 1] += ` (+${left} more)`;
     }
   }
-  if (hidden) lines.push(`… ${hidden} more shop${hidden === 1 ? '' : 's'} not shown; give more of the name (e.g. "${itemNames[itemNames.length - 1]}").`);
+  if (hidden) lines.push(`… ${hidden} more shop${hidden === 1 ? '' : 's'} not shown; give more of the name (e.g. "${itemNames[itemNames.length - 1]}")${near ? '' : ', or add "near <your coords>" for the nearest first'}.`);
   return lines.join('\n');
 }
 

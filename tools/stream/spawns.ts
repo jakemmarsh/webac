@@ -17,7 +17,7 @@
  * The SQL runs in world-query.ts (read-only); everything here is pure.
  */
 import { isMapCoordsText, parseMapCoordsText } from '../../packages/shared/src/mapCoordsText.ts';
-import { aceCellOf, formatPlace, nearestTownOf, placeMapCoords, type ShopDatInfo, type ShopPlace } from './shops.ts';
+import { aceCellOf, formatPlace, fromYouText, mapDist, nearestTownOf, placeMapCoords, type ShopDatInfo, type ShopPlace } from './shops.ts';
 import type { MapCoords } from '../../packages/renderer/src/ui/MapMarkers.ts';
 import type { LorePick } from './lore.ts';
 
@@ -208,16 +208,7 @@ export function parseSpawnsQuery(arg: string): { name: string; near?: MapCoords 
   return { name: m[1].trim().replace(/^"(.*)"$/, '$1'), near };
 }
 
-const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-/** "2.3 SW of you" in map units (0.1 = 24 m), from `from` to `to`. */
-function fromYou(from: MapCoords, to: MapCoords): string {
-  const dn = to.ns - from.ns, de = to.ew - from.ew;
-  const d = Math.hypot(dn, de);
-  if (d < 0.05) return 'here';
-  return `${d.toFixed(1)} ${COMPASS[Math.round(((Math.atan2(de, dn) * 180) / Math.PI + 360) / 45) % 8]} of you`;
-}
-
-const mapDist = (a: MapCoords, b: MapCoords) => Math.hypot(a.ns - b.ns, a.ew - b.ew);
+const fromYou = fromYouText;
 
 /**
  * Places as text, one per landblock: "37.6N, 29.0E (8 SW of Holtburg) ×4" at the landblock's first spot; a dungeon as

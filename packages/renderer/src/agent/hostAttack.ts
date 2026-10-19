@@ -41,6 +41,12 @@ export interface HostAttackDeps {
    * HandleActionTargetedMeleeAttack: IsBusy). Unset: never busy.
    */
   busy?(): boolean;
+  /**
+   * Your body is in the air (a jump, a drop): the delayed swing doesn't go out then either, for ACE refuses it
+   * (Player_Melee / Player_Missile: "You can't do that while in the air!"); AgentApi.attack's loop sends it once landed.
+   * Unset: never in the air.
+   */
+  inAir?(): boolean;
 }
 
 export function createHostAttack(d: HostAttackDeps): {
@@ -55,7 +61,7 @@ export function createHostAttack(d: HostAttackDeps): {
       if (!plan.sendAttack) return;
       d.changeCombatMode(plan.mode);
       enteringUntil = d.now() + AUTO_ENTER_DELAY_MS + AUTO_ENTER_GRACE_MS;
-      d.schedule(() => { if ((!d.canSwing || d.canSwing(guid)) && !d.busy?.()) d.swing(guid, power, height); else enteringUntil = 0; }, AUTO_ENTER_DELAY_MS);
+      d.schedule(() => { if ((!d.canSwing || d.canSwing(guid)) && !d.busy?.() && !d.inAir?.()) d.swing(guid, power, height); else enteringUntil = 0; }, AUTO_ENTER_DELAY_MS);
     },
     pending: () => d.now() < enteringUntil || d.requestPending(),
   };

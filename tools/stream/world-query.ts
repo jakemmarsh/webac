@@ -6,7 +6,8 @@
  *
  *   npx tsx tools/stream/world-query.ts "SELECT … FROM weenie_properties_string WHERE type = 1 AND value LIKE '%Drudge%' LIMIT 20"
  *   npx tsx tools/stream/world-query.ts lore "Olthoi Gardener"     a wiki-style monster lookup (tools/stream/lore.ts)
- *   npx tsx tools/stream/world-query.ts sells "Impenetrability"    which shops sell it, the price, and where (tools/stream/shops.ts)
+ *   npx tsx tools/stream/world-query.ts sells "Impenetrability"    which shops sell it, the price, and where (tools/stream/shops.ts);
+ *                                       add `near 42.1N 33.6E` for the nearest first
  *   npx tsx tools/stream/world-query.ts spawns "Grievver"          where a creature is placed or generated (tools/stream/spawns.ts);
  *                                       add `near 42.1N 33.6E` for the nearest first
  *
@@ -32,7 +33,7 @@ export const WORLD_QUERY_MAX_CHARS = 8000;
 
 /** Usage, how monsters spawn (ACE Landblock.CreateWorldObjects / SpawnEncounters, WorldObject_Generators) and the dialect. */
 export const WORLD_QUERY_USAGE = [
-  'usage: ./world-query "SELECT … LIMIT 20" | lore "<monster>" | sells "<item>" | spawns "<monster>" [near 42.1N 33.6E]',
+  'usage: ./world-query "SELECT … LIMIT 20" | lore "<monster>" | sells "<item>" [near 42.1N 33.6E] | spawns "<monster>" [near 42.1N 33.6E]',
   'How monsters spawn: a landblock_instance row places a creature or a generator; a generator\'s weenie_properties_generator',
   'profiles name what it makes, often another generator (chains); most outdoor monsters come from the encounter table',
   '(landblock, cell_X, cell_Y → a generator wcid), not landblock_instance. `spawns "<monster>"` follows all three.',
@@ -205,7 +206,9 @@ function lore(query: string): string {
 }
 
 /** `sells "<item>"`: two reads, the shop offers whose item name contains it, then those vendors and their placements. */
-function sells(query: string): string {
+function sells(arg: string): string {
+  // `sells "<item>" near 42.1N 33.6E`: nearest shops first (the same `near` as spawns).
+  const { name: query, near } = parseSpawnsQuery(arg);
   const offers = query.trim() ? parseShopOffers(runReadOnly([shopOfferSql(query)], false)) : [];
   const vendors = parseShopVendors(offers.length ? runReadOnly(shopVendorSql(offers.map((o) => o.vendor)), false) : '');
   const spells = offers.some((o) => o.spell) ? spellTable() : null;
@@ -217,7 +220,7 @@ function sells(query: string): string {
       return data && data.byteLength >= 8 ? new DataView(data).getUint32(4, true) : undefined;
     },
   };
-  return formatShops(query, offers, vendors, dat);
+  return formatShops(query, offers, vendors, dat, undefined, near);
 }
 
 /**

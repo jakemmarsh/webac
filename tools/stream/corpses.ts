@@ -160,9 +160,11 @@ export function corpseLine(c: CorpseFact, nowMs: number, creatures?: readonly Ar
   const left = c.rotsAt - nowMs;
   const state = left <= 0 ? `ROTTED at ${clock(c.rotsAt)}, ${span(-left)} ago: what was on it is gone, so replace any of it you wore`
     : `rots at about ${clock(c.rotsAt)}, ${span(left)} from now`;
-  const opened = c.openedAt ? `; you opened a corpse of yours there at ${clock(c.openedAt)} (\`./ac inventory\` shows what came back)` : '';
+  // Opened since: what came off it is in your pack, so the death's list is no longer what is on it (the feed sees the
+  // loot call, not what it took). Arcanist's corpse kept "listing its items" after he took all three (2026-10-19 17:48Z).
+  const opened = c.openedAt ? `; you opened a corpse of yours there at ${clock(c.openedAt)}, so what you took is off it (\`./ac inventory\` shows what came back; \`./ac observe\`'s corpses line says what is still on it)` : '';
   const area = cell !== null && creatures ? areaCreaturesText(cell >>> 16, creatures, c.level) : null;
-  return `- corpse from your death at ${clock(c.t)}${c.killer ? ` (${c.killer})` : ''}, ${where}: on it ${itemsText(c.items)}${coins}; ${state}${opened}${area ? `; ${area}` : ''}`;
+  return `- corpse from your death at ${clock(c.t)}${c.killer ? ` (${c.killer})` : ''}, ${where}: on it ${c.openedAt ? 'when you died ' : ''}${itemsText(c.items)}${coins}; ${state}${opened}${area ? `; ${area}` : ''}`;
 }
 
 /** An indoor corpse's landblock (XXYY), else null (outdoors: the landscape's monsters come from encounters, not placements). */

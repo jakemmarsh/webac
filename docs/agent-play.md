@@ -335,7 +335,7 @@ profile=… character=…`), then plays it as a headless Claude Code session in 
   Brief rule 5 tells a player to look a monster up before fighting a new kind (Jake 2026-10-14: Arcanist kept
   casting Flame Bolt at Olthoi, which take 75% fire and 100% pierce/bludgeon; a brief line naming the float types
   was ignored). The feed shows the call as "looks up <name>".
-- **Shop lookup:** `./world-query sells "<item>"` (`tools/stream/shops.ts`, read-only) answers "who sells X and
+- **Shop lookup:** `./world-query sells "<item>" [near 42.1N 33.6E]` (`tools/stream/shops.ts`, read-only; `near` lists the nearest shops first, with how far each is) answers "who sells X and
   where": every shop whose stock (create list, DestinationType.Shop 4) holds an item whose name contains the text,
   grouped by vendor kind, with the price you pay (ACE Vendor.GetSellCost: ceil(SellPrice float 38 × Value int 19 −
   0.1)) and every placement as the retail map readout the agent prints ("41.6N, 34.0E"; building interiors use their

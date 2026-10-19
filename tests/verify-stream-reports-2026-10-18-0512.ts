@@ -455,9 +455,11 @@ describe('8. a spell named by its skill points to the line retail calls it', () 
     host.spells = () => known;
     host.add({ guid: 0x500000a4, name: 'Claude Bulwark', itemType: 0x10, objectDescFlags: 0x8, x: 82, y: 20 });
     const api = new AgentApi(host);
+    // Since 2026-10-19 it is cast as that line (it was only pointed to, and "Melee Defense Other" in a list on Bulwark
+    // went uncast): the highest Invulnerability Other you land, the line's name said.
     const r = await api.cast('Melee Defense Other', 'Claude Bulwark');
-    expect(r).toMatchObject({ ok: false });
-    expect(r.message).toBe('you don\'t know a spell matching "Melee Defense Other": Melee Defense spells are called Invulnerability: Invulnerability Other V');
+    expect(host.sent).toContain('cast 243 500000a4');
+    expect(r.message.split('\n')[0]).toMatch(/^casting Invulnerability Other V at Claude Bulwark #500000a4 \("Melee Defense Other": Melee Defense spells are called Invulnerability; no level named: the highest of yours you can land\)/);
     expect(skillLineHint(known, 'Melee Defense Self', null)).toBe('Melee Defense spells are called Invulnerability: Invulnerability Self V');
     expect(skillLineHint(known, 'Melee Defence Other IV', 'other')).toBe('Melee Defense spells are called Invulnerability: Invulnerability Other IV');
     expect(skillLineHint(known, 'Melee Defense Other VII', 'other')).toBe('Melee Defense spells are called Invulnerability: Invulnerability Other V (the highest of yours; you know no level 7 of it)');

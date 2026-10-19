@@ -341,7 +341,11 @@ export class RoutineEngine {
    * `lastSeen`: the leader is out of the client's sight in the dungeon you're in (a room yours can't see) and was placed
    * there a moment ago (AgentApi.fellowLastSeen): walked to by the doorway route, as plain follow does, not stood for.
    */
-  private follow: { who: string; trail: Array<{ x: number; y: number }>; inSight: boolean; sampledAt: number; walking: 'lead' | 'corner' | 'last-seen' | 'portal' | null; lastSeen?: { agoS: number | null } | null; portal?: { guid: number; name: string; why: string } | null; noWayUntil?: number } | null = null;
+  private follow: { who: string; trail: Array<{ x: number; y: number }>; inSight: boolean; sampledAt: number; walking: 'lead' | 'corner' | 'last-seen' | 'portal' | null; lastSeen?: { agoS: number | null } | null; portal?: { guid: number; name: string; why: string } | null; noWayUntil?: number;
+    /** Where the leader was at the last sample that saw them (global metres), when, whether on the landscape, and a spot they ran from (their heading). */
+    lastPlace?: { x: number; y: number; at: number; outdoors: boolean; from?: { x: number; y: number } };
+    /** Out of the client's range on the landscape: the spots still to run to after them (their last place, then on the way they were going). */
+    landscape?: { goals: Array<{ x: number; y: number }>; at: number } | null } | null = null;
   /** Portals the Follow tried to take after its leader and couldn't (guid → when): not tried again for FOLLOW_PORTAL_RETRY_MS. */
   private followPortalFailed = new Map<number, number>();
   /** ruleFiring 'once': rules (state#index) that fired and wait for their conditions to turn false. */
@@ -868,7 +872,8 @@ export class RoutineEngine {
     const at = this.now(), wall = Date.now();
     return step.run().then((r) => {
       const took = this.now() - at;
-      this.note(`${step.label}: ${r.message.split('\n')[0]}${RoutineEngine.missedCastNote(r)}${took >= RoutineEngine.MACRO_STEP_TOOK_MS ? ` (took ${(took / 1000).toFixed(1)} s)` : ''}`, wall);
+      // A refusal's reason is on the lines under "X not cast" (the server's words): kept, as the list cast keeps it.
+      this.note(`${step.label}: ${RoutineEngine.resultLine(r)}${RoutineEngine.missedCastNote(r)}${took >= RoutineEngine.MACRO_STEP_TOOK_MS ? ` (took ${(took / 1000).toFixed(1)} s)` : ''}`, wall);
     }).catch((e) => this.failed('macro', e, step.label));
   }
 
@@ -886,6 +891,16 @@ export class RoutineEngine {
    * spell cast twice for nothing ("Arcanist fights", 09:17:52 and 09:17:56, the first "Your spell fizzled.", Aerbax Haven,
    * 2026-10-18). Empty when it took or the step was no cast.
    */
+  /**
+   * A step's answer for the log on one line: its first line, but a refusal's reason too ("X not cast" with the server's
+   * words on the lines under it, AgentApi.castFailReason). A cast that went out ("casting X …") keeps its first line;
+   * missedCastNote says a fizzle or resist.
+   */
+  static resultLine(r: AgentResult): string {
+    const first = r.message.split('\n')[0];
+    return r.ok || /^casting /.test(first) ? first : AgentApi.castFailReason(r.message);
+  }
+
   static missedCastNote(r: AgentResult): string {
     const line = r.message.split('\n').slice(1).map((l) => l.trim()).find((l) => /\byour spell fizzled\b|\bresists your spell\b|^you fail to affect\b/i.test(l));
     return line ? `: did not take (${line.replace(/\.$/, '')})` : '';
@@ -1120,7 +1135,7 @@ export class RoutineEngine {
     if (this.api.snapshot({ max: 0 }).me?.dead) return;
     this.vt ??= new VtMacro(this.api, this.now);
     const m = this.vt.manaStep(p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> }, settings);
-    if (m) { this.busy = true; void m.run().then((r) => this.note(`${m.label}: ${r.message.split('\n')[0]}`)).finally(() => { this.busy = false; }); }
+    if (m) { this.busy = true; void m.run().then((r) => this.note(`${m.label}: ${RoutineEngine.resultLine(r)}`)).finally(() => { this.busy = false; }); }
   }
 
   /** Called from the agent API's tick (~10 Hz); evaluates at most every half second. */
@@ -1612,6 +1627,29 @@ export class RoutineEngine {
       return;
     }
     if (f.lastSeen) f.lastSeen = null;
+    // Out of the client's range on the landscape (the server places a player for you only within about a landblock):
+    // after them to where they were last seen, then on the way they were heading, instead of standing still. Arcanist's
+    // "follow Bulwark" stood 74 s once Bulwark, 174 m ahead on the 1.7 km run to the Mountain Keep portal, left her
+    // client's range ("out of sight (far away …)"), and she stopped the routine to go after him (2026-10-19 18:02:56–18:04:22Z).
+    // A portal of theirs is followPortalFor's; a leader seen longer than FOLLOW_LANDSCAPE_LAST_MS ago (a recall, a logout)
+    // is no lead.
+    if (!lead && obs.me && !obs.me.indoors) {
+      const lp = f.lastPlace;
+      const elsewhere = !!obs.fellows?.find((x) => x.name.toLowerCase() === f.who.toLowerCase())?.elsewhere;
+      // Only a leader who was far enough off to leave the client's range (its 3×3 landblocks): one gone from beside you
+      // took a portal, recalled or logged out.
+      const farOff = !!lp && Math.hypot(lp.x - obs.me.pos.x, lp.y - obs.me.pos.y) >= FOLLOW_LANDSCAPE_FAR_M;
+      if (!f.landscape && lp?.outdoors && farOff && !elsewhere && t - lp.at <= FOLLOW_LANDSCAPE_LAST_MS) {
+        const goals = [{ x: lp.x, y: lp.y }];
+        const from = lp.from;
+        const run = from ? Math.hypot(lp.x - from.x, lp.y - from.y) : 0;
+        if (from && run >= 1) goals.push({ x: lp.x + ((lp.x - from.x) / run) * FOLLOW_LANDSCAPE_ON_M, y: lp.y + ((lp.y - from.y) / run) * FOLLOW_LANDSCAPE_ON_M });
+        f.landscape = { goals, at: t };
+        const dx = lp.x - obs.me.pos.x, dy = lp.y - obs.me.pos.y;
+        this.note(`Follow: ${f.who} went out of your client's range (on the landscape the server places a player for you only within about a landblock); going after them to where they were last seen, ${Math.hypot(dx, dy).toFixed(0)} m ${compassOf(dx, dy)} (${Math.round((t - lp.at) / 1000)} s ago)${goals.length > 1 ? `, then on ${FOLLOW_LANDSCAPE_ON_M} m the way they were heading` : ''}`);
+      }
+      if (f.landscape?.goals.length) { f.inSight = true; f.trail = []; return; }
+    }
     if (!lead || !obs.me) {
       if (f.inSight) {
         f.inSight = false;
@@ -1622,7 +1660,11 @@ export class RoutineEngine {
       return;
     }
     if (!f.inSight) { f.inSight = true; this.note(`Follow: ${f.who} is in sight again`); }
-    addTrailPoint(f.trail, leaderAt(obs.me.pos, lead), obs.me.pos);
+    if (f.landscape) { f.landscape = null; if (f.walking === 'last-seen') { f.walking = null; this.api.stopMoving(); } }
+    const at = leaderAt(obs.me.pos, lead);
+    const was = f.lastPlace;
+    f.lastPlace = { ...at, at: t, outdoors: !obs.me.indoors, ...(was && Math.hypot(at.x - was.x, at.y - was.y) >= FOLLOW_HEADING_M ? { from: { x: was.x, y: was.y } } : was?.from ? { from: was.from } : {}) };
+    addTrailPoint(f.trail, at, obs.me.pos);
     // Running straight at them and they turned a corner: end that leg, so the next one runs their path.
     if (f.walking === 'lead' && f.trail.length > 1 && truthySetting(this.settings.FollowAroundCorners) && !obs.me.indoors) { f.walking = null; this.api.stopMoving(); }
   }
@@ -1669,7 +1711,7 @@ export class RoutineEngine {
       const obs = this.api.snapshot({ radius: FOLLOW_SIGHT_M, max: 100 });
       const lead = findLeader(obs.nearby, n!.route.follow!);
       if (lead) return lead.dist > limit ? { who: lead.name, dist: lead.dist, limit } : null;
-      return this.api.fellowLastSeen(n!.route.follow!) || this.followPortalFor(n!.route.follow!, false, !!obs.me) ? { who: n!.route.follow!, dist: null, limit } : null;
+      return this.api.fellowLastSeen(n!.route.follow!) || this.followPortalFor(n!.route.follow!, false, !!obs.me) || (this.follow?.who === n!.route.follow && !!this.follow?.landscape?.goals.length) ? { who: n!.route.follow!, dist: null, limit } : null;
     })();
     if (out && !this.leashSaid) {
       this.leashSaid = true;
@@ -1719,6 +1761,18 @@ export class RoutineEngine {
             f.noWayUntil = this.now() + FOLLOW_NO_WAY_MS;
             this.report(`Follow: no way on foot to where ${f.who} was last placed: ${r.message.split('\n')[0].replace(/^[^:]*: /, '')}; standing still (ask them where they are)`, 'Warnings');
           } else f.noWayUntil = 0;
+          return;
+        }
+        // Out of the client's range on the landscape (watchLeader): to their last spot, then on the way they were going.
+        if (f && !lead && obs.me && f.landscape?.goals.length) {
+          f.walking = 'last-seen';
+          const goal = f.landscape.goals[0];
+          const r = await this.api.walkTo(mapCoordsText(goal), { within: 3, timeoutMs: 30_000 });
+          if (this.follow === f && f.landscape?.goals[0] === goal) {
+            if (r.ok || !/aggro|attack|hit/i.test(r.message)) f.landscape.goals.shift();
+            if (!f.landscape.goals.length) this.note(`Follow: at the spot ${f.who} was heading for, and they are still out of your client's range`);
+          }
+          if (f.walking === 'last-seen') f.walking = null;
           return;
         }
         // Out of sight: stand still (watchLeader stopped us and said so) until they come back.
@@ -2257,6 +2311,18 @@ const FOLLOW_CORNER_M = 1;
 const FOLLOW_PORTAL_RETRY_MS = 60_000;
 /** A Follow whose walk to the leader's last placement found no way on foot stands this long (ms) before trying again. */
 const FOLLOW_NO_WAY_MS = 15_000;
+/** A leader last seen on the landscape this recently (ms) is gone after to that spot once out of the client's range. */
+export const FOLLOW_LANDSCAPE_LAST_MS = 60_000;
+/** …when they were at least this far from you (m) at the loss: half a landblock, where the client's 3×3 range can end. */
+export const FOLLOW_LANDSCAPE_FAR_M = 96;
+/** …and then this far on (m) the way they were heading. */
+export const FOLLOW_LANDSCAPE_ON_M = 60;
+/** The leader's heading is taken from a spot at least this far back on their way (m). */
+const FOLLOW_HEADING_M = 3;
+/** "NE" for a step of (dx east, dy north). */
+function compassOf(dx: number, dy: number): string {
+  return ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((Math.atan2(dx, dy) * 180) / Math.PI + 360) / 45) % 8];
+}
 
 /** The Follow route's leader among what you see: the player of that name first, else a creature (VirindiTank follows the selection). */
 export function findLeader<T extends { name: string; kind: string; dying?: boolean }>(nearby: T[], who: string): T | undefined {

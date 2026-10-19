@@ -292,7 +292,8 @@ describe('fake host: walks, attacks and swings (no DAT needed)', () => {
       (host as unknown as { route: () => null }).route = () => null;
       expect((api.attack(DREAD, { far: true }) as { message: string }).message).toMatch(/No walk gets there from here \(no doorway, stair or ramp leads to that room from yours\)/);
       throughDoor();
-      expect((api.attack(DREAD, { far: true }) as { message: string }).message).toMatch(/walk_to #800042a2 goes to where it was/);
+      // With a way there, the attack goes to where it was last seen itself (2026-10-19 18:20:35Z).
+    expect((api.attack(DREAD, { far: true }) as { message: string }).message).toMatch(/going to where it was last seen/);
     });
 
     it('seen too long ago for walk_to #id: the room it was in, by cell, when a walk gets there', () => {

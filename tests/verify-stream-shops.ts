@@ -6,6 +6,7 @@ import {
 } from '../tools/stream/shops.ts';
 import { mapCoordinateText } from '../packages/renderer/src/ui/MapMarkers.ts';
 import { worldQueryRefusal } from '../tools/stream/world-query.ts';
+import { parseSpawnsQuery } from '../tools/stream/spawns.ts';
 import { join } from 'node:path';
 import { parseStreamConfig } from '../tools/stream/config.ts';
 import { playerToolNames, systemPrompt } from '../tools/stream/prompt.ts';
@@ -161,7 +162,21 @@ describe('sells: the answer', () => {
     const capped = formatShops('Healing Kit', offers, vendors, {}, 4).split('\n');
     expect(capped).toHaveLength(5);
     expect(capped[3]).toMatch(/\(\+4 more\)$/);
-    expect(capped[4]).toBe('… 4 more shops not shown; give more of the name (e.g. "Handy Healing Kit").');
+    expect(capped[4]).toBe('… 4 more shops not shown; give more of the name (e.g. "Handy Healing Kit"), or add "near <your coords>" for the nearest first.');
+  });
+
+  // Arcanist's `sells "<item>" near <coords>` listed by town, the near ignored (2026-10-19 18:47Z report); spawns took it.
+  it('near <coords>: the nearest shop first, each place with how far it is from there', () => {
+    const offers = parseShopOffers(tsv([[1, 11, 'Adept Healing Kit', 45, 0, 'NULL'], [2, 11, 'Adept Healing Kit', 45, 0, 'NULL']]));
+    const vendors = parseShopVendors(tsv([['v', 1, 'Peddler', 1.5, 'NULL'], ['v', 2, 'Ancient Trader', 2, 'NULL'], ['p', 1, 0xa9b3003c, 183.232, 76.6786], ['p', 2, 0x7d64000d, 100, 100]]));
+    const byTown = formatShops('Healing Kit', offers, vendors).split('\n');
+    expect(byTown[1]).toMatch(/^Peddler: .*\(Holtburg\)$/);
+    const nearYaraq = formatShops('Healing Kit', offers, vendors, {}, undefined, parseSpawnsQuery('x near 21.4S 1.4W').near).split('\n');
+    expect(nearYaraq[0]).toBe('2 shops sell 1 item matching "Healing Kit", nearest to 21.4S, 1.4W first; prices are what you pay.');
+    expect(nearYaraq[1]).toBe('Ancient Trader: Adept Healing Kit 90 pyreals, at 21.5S, 1.5W (Yaraq), 0.1 SW of you');
+    expect(nearYaraq[2]).toMatch(/^Peddler: Adept Healing Kit 68 pyreals, at 41\.6N, 34\.0E \(Holtburg\), \d+\.\d NE of you$/);
+    // The query's own "near": the item name without it, the coordinates as walk_to reads them.
+    expect(parseSpawnsQuery('"Adept Healing Kit" near 54.7N, 32.9E')).toEqual({ name: 'Adept Healing Kit', near: { ns: 54.7, ew: 32.9 } });
   });
 
   it('says so when nothing matches, when no matching vendor stands anywhere, and when the query is empty', () => {
@@ -176,11 +191,12 @@ describe('sells: what the player is told and what viewers see', () => {
   it('the brief names the command as a fact next to lore', () => {
     const cfg = parseStreamConfig(JSON.parse(readFileSync(join(__dirname, '..', 'tools', 'stream', 'cast.json'), 'utf8')));
     const sys = systemPrompt(readFileSync(join(__dirname, '..', 'tools', 'stream', 'brief.md'), 'utf8'), cfg.characters[0], 'Claude Bulwark', playerToolNames(TOOLS.map((t) => t.name)));
-    expect(sys).toContain('`./world-query sells "<item>"` finds which shop sells it, the price, and where.');
+    expect(sys).toContain('`./world-query sells "<item>"` (add `near <your coords>` for the nearest first) finds which shop sells it, the price, and where.');
   });
   it('the feed says "looks for a shop selling <item>"', () => {
     const call = (command: string) => parseStreamJsonLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] } }), 'mage').drafts[0];
     expect(call('./world-query sells "Scroll of Impenetrability"')).toMatchObject({ tool: 'bash', summary: 'looks for a shop selling Scroll of Impenetrability' });
+    expect(call('./world-query sells "Scroll of Impenetrability" near 54.7N 32.9E')).toMatchObject({ tool: 'bash', summary: 'looks for a shop selling Scroll of Impenetrability' });
     expect(call('./world-query lore "Drudge"')).toMatchObject({ summary: 'looks up Drudge' });
   });
 });

@@ -381,7 +381,7 @@ export function parseStreamJsonLine(line: string, char: string, names: Map<strin
           const words = /world-query/.test(cmd) ? shellWords(cmd) : [];
           const wq = words.findIndex((w) => /world-query(\.ts)?$/.test(w));
           const what = wq >= 0 && words[wq + 1] === 'lore' ? `looks up ${clip(words.slice(wq + 2).join(' '), 60)}`
-            : wq >= 0 && words[wq + 1] === 'sells' ? `looks for a shop selling ${clip(words.slice(wq + 2).join(' '), 60)}`
+            : wq >= 0 && words[wq + 1] === 'sells' ? `looks for a shop selling ${clip(words.slice(wq + 2).join(' ').replace(/\s+near\s+.*$/i, ''), 60)}`
             : wq >= 0 && words[wq + 1] === 'spawns' ? `looks up where ${clip(words.slice(wq + 2).join(' ').replace(/\s+near\s+.*$/i, ''), 60)} spawn`
             : /world-query|ace_world|sqlite3/.test(cmd) ? 'checks the world database' : `runs: ${clip(String(b.input?.description ?? cmd), 80)}`;
           out.drafts.push({ type: 'tool', char, tool: 'bash', summary: what });
