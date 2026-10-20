@@ -17,7 +17,7 @@ import {
   renderPixelRatio, renderAdaptConfigFor, setRenderAdaptConfig, renderAdaptConfig, contextAntialias,
   SOFTWARE_START_BUFFER_PIXELS, MIN_RENDER_PIXEL_RATIO,
 } from '../packages/renderer/src/scene/RenderScale.js';
-import { DynamicResolution, DOWN_MS, UP_MS, STALL_MS } from '../packages/renderer/src/scene/DynamicResolution.js';
+import { DynamicResolution, DOWN_MS, UP_MS, STALL_MS, LONG_FRAME_CAP_MS } from '../packages/renderer/src/scene/DynamicResolution.js';
 import { SceneManager } from '../packages/renderer/src/scene/SceneManager.js';
 import { adaptedDrawDistance, adaptiveDrawDistanceSteps } from '../packages/renderer/src/world/LandscapeDrawDistance.js';
 import { WorldReporter, type FirstMinuteEvent } from '../packages/renderer/src/telemetry/WorldReporter.js';
@@ -209,6 +209,80 @@ describe('PERF.render-adapt — DynamicResolution', () => {
     s.ctrl.setBounds(0.5, 2);
     expect(s.ctrl.ratio).toBe(2);
     expect(s.changes).toEqual([]);
+  });
+});
+
+// PERF.slow-first-minute-diagnostics (prod 2026-10-20, build 55c0255e): an Intel
+// UHD 630 Mac at dpr 2 (2600×1400 buffer) drew every frame in 250–330 ms for
+// its whole first minute and renderScalePct stayed 100: every interval was
+// over STALL_MS, dropped as a hitch, so the window never filled.
+describe('PERF.render-adapt — DynamicResolution on a machine whose every frame is slow', () => {
+  /** Deterministic 250–330 ms jitter around a frame cost. */
+  const jitter = (base: number) => { let i = 0; return () => base * (0.85 + 0.25 * (((i++ * 7919) % 101) / 100)); };
+
+  it('steady ~300 ms frames at dpr 2: the first step comes within a few seconds, and the floor is reached while frames stay slow', () => {
+    const s = sim({ max: 2, min: 0.5 });
+    const j = jitter(1);
+    // GPU-bound: 300 ms at full size, still ~160 ms at the floor (frames stay slow).
+    const cost = (r: number) => (150 + 150 * (r / 2) ** 2) * j();
+    expect(cost(2)).toBeGreaterThan(STALL_MS);
+    run(s, 6_000, cost);
+    expect(s.changes.length).toBeGreaterThan(0);
+    expect(s.changes[0][0]).toBeLessThan(4_000);
+    // The first step from a 300 ms median is a big one (half the ratio: a quarter of the pixels).
+    expect(s.changes[0][1]).toBeLessThanOrEqual(1);
+    run(s, 9_000, cost);
+    expect(s.ctrl.ratio).toBe(0.5);
+    expect(s.changes.at(-1)![0]).toBeLessThan(12_000);
+    // Each step went down; none was undone (each one helped).
+    for (let i = 1; i < s.changes.length; i++) expect(s.changes[i][1]).toBeLessThan(s.changes[i - 1][1]);
+    const n = s.changes.length;
+    run(s, 60_000, cost);
+    expect(s.changes.length).toBe(n);
+  });
+
+  it('a pixel-bound 300 ms machine settles where frames are under the threshold', () => {
+    const s = sim({ max: 2, min: 0.5 });
+    const cost = (r: number) => 4 + 296 * (r / 2) ** 2;
+    run(s, 30_000, cost);
+    expect(cost(s.ctrl.ratio)).toBeLessThanOrEqual(DOWN_MS);
+    expect(s.changes[0][0]).toBeLessThan(4_000);
+  });
+
+  it('steady slow frames that pixels do not cause: the step is undone (no gain), and draw distance is used instead', () => {
+    const s = sim({ max: 2, min: 0.5, distanceSteps: 2 });
+    run(s, 30_000, (_r, d) => 300 - d * 60);
+    expect(s.changes[0][1]).toBeLessThan(2); // the one tried step
+    expect(s.changes[1][1]).toBe(2); // undone
+    expect(s.ctrl.ratio).toBe(2);
+    expect(s.ctrl.distanceSteps).toBe(2);
+  });
+
+  it('isolated 400 ms hitches (and back-to-back pairs) among 16 ms frames never move it', () => {
+    const s = sim({ max: 2, min: 0.5 });
+    let n = 0;
+    run(s, 5 * 60_000, () => {
+      n++;
+      if (n % 180 === 0) return 400; // a lone hitch every ~3 s
+      if (n % 600 === 1 || n % 600 === 2) return 400; // two in a row every ~10 s
+      return 16.7;
+    });
+    expect(s.changes).toEqual([]);
+    expect(s.ctrl.ratio).toBe(2);
+  });
+
+  it('steady 16 ms frames stay at full resolution', () => {
+    const s = sim({ max: 2, min: 0.5 });
+    run(s, 5 * 60_000, () => 16.7);
+    expect(s.changes).toEqual([]);
+    expect(s.ctrl.scale).toBe(1);
+  });
+
+  it('a slow run counts its long frames clamped: multi-second frames still step down, not a stall forever', () => {
+    const s = sim({ max: 2, min: 0.5 });
+    run(s, 20_000, (r) => 300 + 2700 * (r / 2) ** 2); // 3 s frames at full size
+    expect(LONG_FRAME_CAP_MS).toBeLessThan(3000);
+    expect(s.ctrl.ratio).toBeLessThan(2);
   });
 });
 

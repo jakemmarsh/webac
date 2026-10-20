@@ -1,6 +1,6 @@
 /**
  * PERF.slow-first-minute-diagnostics (2026-10-20). About 10% of end-of-retail first minutes ran at 3-4 fps
- * (frameMedianMs / p95 pinned at the 250 ms histogram cap), discrete GPUs included, while the same build ran
+ * (frameMedianMs / p95 pinned at the then 250 ms histogram cap, now 2000 ms), discrete GPUs included, while the same build ran
  * 120 fps here at Holtburg on local and streamed DATs. The event had nothing to say why, so it now carries
  * the uncapped mean interval, our own per-frame JS time, long tasks, draw calls / triangles, the landblock,
  * the browser / OS family, the WebGL renderer string, cores and memory, and the bridge keeps them.
@@ -10,9 +10,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  WorldReporter, browserOf, gpuNameOf, type WorldEvent, type FirstMinuteEvent,
+  WorldReporter, browserOf, gpuNameOf, HIST_MAX_MS, type WorldEvent, type FirstMinuteEvent,
 } from '../packages/renderer/src/telemetry/WorldReporter';
-import { sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld';
+import { FRAME_HIST_MAX_MS, sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld';
 import { CLIENT_PREWORLD_MAX_BODY } from '../services/ws-tcp-bridge/src/clientPreworld';
 
 const CHROME_WIN = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
@@ -34,13 +34,14 @@ function rig(draw = { calls: 900, triangles: 250_000 }, landblock: number | null
 const first = (events: WorldEvent[]) => events.find((e) => e.outcome === 'first_minute') as FirstMinuteEvent;
 
 describe('PERF.slow-first-minute-diagnostics — the reporter', () => {
-  it('a 3 fps minute: mean interval uncapped beside the capped median, our JS time, draw stats, landblock, device', () => {
+  it('a 3 fps minute: the real median and p95 (no 250 ms cap), the mean, our JS time, draw stats, landblock, device', () => {
     const { r, events, clock } = rig();
     r.enteredWorld();
     for (let i = 0; i < 180; i++) { clock.t += 333; r.frame(clock.t, true, 40); if (i % 3 === 0) r.tick(); }
     clock.t += 1000; r.tick();
     const ev = first(events);
-    expect(ev.frameMedianMs).toBe(250);           // the histogram's cap
+    expect(ev.frameMedianMs).toBe(333);           // was 250, the old histogram cap, for every slow minute
+    expect(ev.frameP95Ms).toBe(333);
     expect(ev.frameMeanMs).toBe(333);             // the real interval
     expect(ev.workMedianMs).toBe(40);             // JS took 40 of 333 ms: the time is spent outside our frame code
     expect(ev.drawCalls).toBe(900);
@@ -102,12 +103,26 @@ describe('PERF.slow-first-minute-diagnostics — the bridge keeps the fields', (
     expect(JSON.stringify({ ...ev, gpuName: 'x'.repeat(96) }).length).toBeLessThan(CLIENT_PREWORLD_MAX_BODY);
   });
 
+  it('a 3 fps minute passes whole: medians and p95s over the old 250 ms cap are kept, up to FRAME_HIST_MAX_MS', () => {
+    const { r, events, clock } = rig();
+    r.enteredWorld();
+    for (let i = 0; i < 180; i++) { clock.t += 333; r.frame(clock.t, true, 300); if (i % 3 === 0) r.tick(); }
+    clock.t += 1000; r.tick();
+    const ev = first(events);
+    expect(ev.frameMedianMs).toBe(333);
+    expect(ev.workMedianMs).toBe(300);
+    expect(sanitizeClientWorld(ev)).toEqual(ev);
+    expect(sanitizeClientWorld({ ...ev, frameP95Ms: FRAME_HIST_MAX_MS })).toMatchObject({ frameP95Ms: FRAME_HIST_MAX_MS });
+    expect(sanitizeClientWorld({ ...ev, frameP95Ms: FRAME_HIST_MAX_MS + 1 })).toMatchObject({ frameP95Ms: null });
+    expect(FRAME_HIST_MAX_MS).toBe(HIST_MAX_MS);
+  });
+
   it('out-of-range or free-text values are nulled; an older page that sends none gets none added', () => {
     const { r, events, clock } = rig();
     r.enteredWorld();
     for (let i = 0; i < 70; i++) { clock.t += 1000; r.frame(clock.t, true, 7); r.tick(); }
     const ev = first(events) as unknown as Record<string, unknown>;
-    const bad = sanitizeClientWorld({ ...ev, landblock: 'zz', browser: 'netscape', gpuName: 'a\u0001b', memGb: 3, cores: 9999, workMedianMs: 400 })!;
+    const bad = sanitizeClientWorld({ ...ev, landblock: 'zz', browser: 'netscape', gpuName: 'a\u0001b', memGb: 3, cores: 9999, workMedianMs: 4000 })!;
     expect(bad).toMatchObject({ landblock: null, browser: null, gpuName: null, memGb: null, cores: null, workMedianMs: null });
     const older = { ...ev };
     for (const k of ['frameMeanMs', 'workMedianMs', 'workP95Ms', 'longTaskMs', 'drawCalls', 'triangles', 'landblock', 'browser', 'browserMajor', 'os', 'gpuName', 'cores', 'memGb']) delete older[k];

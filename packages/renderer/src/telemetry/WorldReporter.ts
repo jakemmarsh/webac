@@ -75,8 +75,13 @@ export type WorldNetDiagnostics = NonNullable<ReturnType<typeof boundNetDiagnost
 export const FIRST_MINUTE_MS = 60_000;
 /** A page sends at most this many world events (relogs, resumes). */
 export const MAX_WORLD_EVENTS = 20;
-/** The frame-time histogram: 1 ms bins 0..HIST_MAX_MS-1, the last bin holds everything longer. */
-export const HIST_MAX_MS = 250;
+/**
+ * The frame-time histogram: 1 ms bins 0..HIST_MAX_MS-1, the last bin holds everything longer.
+ * It reached only 250 ms, so the median and p95 of a 3-4 FPS minute (prod 2026-10-20: 294 ms
+ * frames) both read 250, the cap: blind exactly for the minutes they exist to describe.
+ * 2000 ms (0.5 FPS) holds every playable pace; the arrays are 8 KB each.
+ */
+export const HIST_MAX_MS = 2000;
 /** A gap this long between frames is a stall of the tab (hidden, minimised), not a frame: not counted. */
 const STALL_MS = 5_000;
 
@@ -126,7 +131,7 @@ export interface FirstMinuteEvent {
   /**
    * PERF.slow-first-minute-diagnostics (2026-10-20: ~10% of end-of-retail first minutes ran at 3-4 fps,
    * discrete GPUs included, with nothing to say why). The mean frame interval, uncapped (the median /
-   * p95 histogram stops at HIST_MAX_MS).
+   * p95 histogram stops at HIST_MAX_MS, 250 ms until 2026-10-20).
    */
   frameMeanMs?: number | null;
   /** Our own JS per frame (frameStep: update + render submit), 1 ms histogram capped at HIST_MAX_MS. */

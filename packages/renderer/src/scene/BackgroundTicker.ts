@@ -12,12 +12,27 @@
  *
  * A dedicated worker's beat (frameTicker.worker.ts, not throttled) runs the
  * frame step without drawing whenever rAF has been silent for STARVED_MS.
+ *
+ * "Silent" is measured against the page's own frame pace: a visible tab on a
+ * slow GPU draws every 250–330 ms (prod 2026-10-20, Intel UHD 630 at ~3 FPS),
+ * and a fixed 250 ms threshold ran an extra undrawn frame step between nearly
+ * every pair of real frames, adding main-thread work to a machine that was
+ * already too slow. The threshold is STARVED_FACTOR times the recent rAF
+ * interval (a smoothed average, each interval capped at STARVED_MAX_MS), never
+ * under STARVED_MS and never over STARVED_MAX_MS, so a hidden tab is still
+ * picked up within a second.
  */
 export const TICK_MS = 50;
 export const STARVED_MS = 250;
+export const STARVED_MAX_MS = 1000;
+export const STARVED_FACTOR = 3;
+/** Weight of the newest interval in the smoothed rAF interval. */
+const INTERVAL_EMA = 0.2;
 
 export class BackgroundTicker {
   private lastFrameAt: number;
+  /** Smoothed rAF interval, ms (starts at a 60 Hz frame). */
+  private intervalMs = 1000 / 60;
   private worker: { postMessage(ms: number): void; terminate(): void; onmessage: ((e: MessageEvent) => void) | null } | null = null;
 
   constructor(
@@ -31,10 +46,20 @@ export class BackgroundTicker {
   }
 
   /** The browser drew a frame (call from the rAF loop). */
-  frame(): void { this.lastFrameAt = this.now(); }
+  frame(): void {
+    const t = this.now();
+    const dt = t - this.lastFrameAt;
+    if (dt > 0) this.intervalMs += (Math.min(dt, STARVED_MAX_MS) - this.intervalMs) * INTERVAL_EMA;
+    this.lastFrameAt = t;
+  }
+
+  /** How long rAF must be silent before the beat steps: scaled to the page's own frame pace. */
+  get starvedAfterMs(): number {
+    return Math.min(STARVED_MAX_MS, Math.max(STARVED_MS, STARVED_FACTOR * this.intervalMs));
+  }
 
   /** rAF has been silent long enough that the simulation needs the worker's beat. */
-  get starved(): boolean { return this.now() - this.lastFrameAt > STARVED_MS; }
+  get starved(): boolean { return this.now() - this.lastFrameAt > this.starvedAfterMs; }
 
   start(): void {
     if (this.worker) return;

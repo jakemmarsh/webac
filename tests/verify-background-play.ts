@@ -9,7 +9,7 @@
  *    unthrottled clock (the agent's waits, the relay's deadlines).
  */
 import { describe, expect, it } from 'vitest';
-import { BackgroundTicker, STARVED_MS, TICK_MS } from '../packages/renderer/src/scene/BackgroundTicker';
+import { BackgroundTicker, STARVED_MAX_MS, STARVED_MS, TICK_MS } from '../packages/renderer/src/scene/BackgroundTicker';
 import { installWorkerTimers, type TimerHost } from '../packages/renderer/src/scene/workerTimers';
 
 function fakeWorker() {
@@ -37,6 +37,33 @@ describe('BackgroundTicker', () => {
     ticker.stop();
     expect(w.posted.at(-1)).toBe(0);
     expect(w.terminated).toBe(true);
+  });
+
+  it('a visible tab on a slow GPU (~300 ms frames) gets no extra undrawn steps between its frames; a hidden one is still picked up within a second', () => {
+    let t = 1000;
+    let steps = 0;
+    const w = fakeWorker();
+    const ticker = new BackgroundTicker(() => { steps++; }, () => t, () => w as never);
+    ticker.start();
+    // Prod 2026-10-20 (Intel UHD 630, ~3 FPS): rAF every 250-330 ms, the worker beating every TICK_MS in between.
+    let warmup = 0;
+    for (let f = 0; f < 60; f++) {
+      if (f === 3) warmup = steps; // the first slow frames still measure against a 60 Hz pace
+      const interval = f % 2 ? 330 : 290;
+      for (let b = TICK_MS; b < interval; b += TICK_MS) { t += TICK_MS; w.beat(); }
+      t += interval % TICK_MS || TICK_MS;
+      ticker.frame();
+    }
+    expect(warmup).toBeLessThanOrEqual(2);
+    expect(steps).toBe(warmup); // none at all once the pace is learned (before: one per frame)
+    expect(ticker.starvedAfterMs).toBeGreaterThan(330);
+    expect(ticker.starvedAfterMs).toBeLessThanOrEqual(STARVED_MAX_MS);
+    // The tab hides: rAF stops, the beat takes over within STARVED_MAX_MS.
+    for (let b = 0; b < STARVED_MAX_MS / TICK_MS + 1; b++) { t += TICK_MS; w.beat(); }
+    expect(steps).toBeGreaterThan(0);
+    // A fast page is back to the STARVED_MS threshold once its frames are quick again.
+    for (let f = 0; f < 60; f++) { t += 16; ticker.frame(); }
+    expect(ticker.starvedAfterMs).toBe(STARVED_MS);
   });
 
   it('without workers it does nothing (the page pauses when hidden, as before)', () => {

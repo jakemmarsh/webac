@@ -111,6 +111,44 @@ describe('LandblockLoadScheduler', () => {
     expect(new Set(b.log)).toEqual(new Set(a.log));
     expect(b.log.length).toBe(a.log.length);
   });
+
+  /** Pump once per frame of `frameMs` (the frame's other work is the rest of it); the ms of loading done per second. */
+  function loadingPerSecond(frameMs: number): { perSecond: number; maxPumpMs: number; budget: number } {
+    const w = world(1000, 1);
+    const s = new LandblockLoadScheduler(w.factory, { now: w.now, syncRadius: 0 });
+    for (let dx = -8; dx <= 8; dx++) s.request(100 + dx, 108, 0);
+    let work = 0, maxPumpMs = 0;
+    const frames = Math.round(10_000 / frameMs);
+    for (let f = 0; f < frames; f++) {
+      const t0 = w.now();
+      s.pump(100, 100);
+      const spent = w.now() - t0;
+      if (f >= 10) { work += spent; maxPumpMs = Math.max(maxPumpMs, spent); }
+      w.advance(Math.max(0, frameMs - spent));
+    }
+    return { perSecond: work / ((frames - 10) * frameMs / 1000), maxPumpMs, budget: s.frameBudgetMs };
+  }
+
+  it('PERF slow machine: at 3 FPS the budget follows the frame (not 6 ms a frame), capped; 60 FPS unchanged', () => {
+    // 60 FPS: the 6 ms budget, as before.
+    const fast = loadingPerSecond(1000 / 60);
+    expect(fast.budget).toBe(6);
+    expect(fast.maxPumpMs).toBeLessThanOrEqual(6 + 1);
+    // ~13 FPS: still the plain budget.
+    expect(loadingPerSecond(75).budget).toBe(6);
+    // 3.3 FPS (300 ms frames, the prod UHD 630 first minute): 6 ms a frame was ~20 ms of loading a second.
+    const slow = loadingPerSecond(300);
+    expect(slow.budget).toBeGreaterThanOrEqual(23);
+    expect(slow.budget).toBeLessThanOrEqual(24);
+    expect(slow.maxPumpMs).toBeLessThanOrEqual(24 + 1);
+    expect(slow.perSecond).toBeGreaterThan(70);
+    // A hidden tab's multi-second gap counts as at most 1 s: the cap still holds.
+    const w = world(1000, 1);
+    const s = new LandblockLoadScheduler(w.factory, { now: w.now, syncRadius: 0 });
+    s.request(50, 50, 2);
+    s.pump(0, 0); w.advance(60_000); s.pump(0, 0);
+    expect(s.frameBudgetMs).toBe(24);
+  });
 });
 
 describe('RateLimitedWarn', () => {

@@ -117,14 +117,20 @@ export interface ClientFirstMinuteEvent extends WorldIds {
 export const BROWSER_FAMILIES = ['chrome', 'edge', 'firefox', 'safari', 'opera', 'other'] as const;
 export const OS_FAMILIES = ['windows', 'mac', 'linux', 'chromeos', 'android', 'ios', 'other'] as const;
 const MEM_GB = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
+/**
+ * The renderer's frame / work histogram cap (WorldReporter HIST_MAX_MS): medians and p95s up to it.
+ * It was 250 ms, which read every 3-4 FPS minute as 250 (2026-10-20). Accepting up to 2000 here
+ * before the web build sends them keeps a newer page's slow minutes from reading as null.
+ */
+export const FRAME_HIST_MAX_MS = 2000;
 
 /** The slow-first-minute fields, each only when the client sent it (older builds send none). */
 function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent> {
   const out: Partial<ClientFirstMinuteEvent> = {};
   const set = <K extends keyof ClientFirstMinuteEvent>(k: K, v: ClientFirstMinuteEvent[K]): void => { if (k in b) out[k] = v; };
   set('frameMeanMs', uint(b.frameMeanMs, 5_000));
-  set('workMedianMs', uint(b.workMedianMs, 250));
-  set('workP95Ms', uint(b.workP95Ms, 250));
+  set('workMedianMs', uint(b.workMedianMs, FRAME_HIST_MAX_MS));
+  set('workP95Ms', uint(b.workP95Ms, FRAME_HIST_MAX_MS));
   set('longTaskMs', uint(b.longTaskMs, MINUTE_MS));
   set('drawCalls', uint(b.drawCalls, 1_000_000));
   set('triangles', uint(b.triangles, 100_000_000));
@@ -225,8 +231,8 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
     startedHidden: bool(b.startedHidden),
     frames: uint(b.frames, MAX_FRAMES),
     worldFrames: uint(b.worldFrames, MAX_FRAMES),
-    frameMedianMs: uint(b.frameMedianMs, 250),
-    frameP95Ms: uint(b.frameP95Ms, 250),
+    frameMedianMs: uint(b.frameMedianMs, FRAME_HIST_MAX_MS),
+    frameP95Ms: uint(b.frameP95Ms, FRAME_HIST_MAX_MS),
     frameMaxMs: uint(b.frameMaxMs, MINUTE_MS),
     contextLost: bool(b.contextLost),
     gpu: pick(b.gpu, GPU_CLASSES),

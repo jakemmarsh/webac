@@ -28,18 +28,36 @@
  * With whole-file DATs (local dev, no streaming store) every destination is
  * satisfied and events pass straight through: no behavior change.
  *
- * Safety valve: a gate that has not completed within `timeoutMs` (or whose
+ * Safety valve: a gate that has made no progress for `timeoutMs` (or whose
  * fetch failed after retries) releases the hold anyway and reports an error,
  * so a dead DAT host can never trap a player in portal space. Whatever is
  * still missing then streams in through the miss/rebuild path.
+ *
+ * Progress, not total time: a fixed 90 s from the start released a player on
+ * a slow link while the destination was still arriving (a cold Holtburg
+ * login gate is ~7 MB: 90 s is ~80 KB/s), into a half-built world with a
+ * "data failed" notice. Retail had no limit at all. The valve now fires after
+ * `timeoutMs` with nothing landing (a landblock finishing, or the `progress`
+ * counter moving: the stores' landed bytes), and at the latest `maxHoldMs`
+ * after the hold began: ACE logs off a player still teleporting 5 minutes
+ * after the teleport (or login) began (Player_Tick.cs MaximumTeleportTime),
+ * and the tunnel's own tail still runs after the release.
  */
 import type { DatClosure } from './DatClosure.js';
 import { type FileKey, FetchPriority } from './DatStore.js';
 
 /** Retail CheckPrefetchStatus re-poll interval: 5.0 s (___real_4014000000000000). */
 export const PREFETCH_STATUS_POLL_MS = 5000;
-/** How long a gate may hold portal space before releasing with an error. */
+/** How long a gate may hold portal space with no progress before releasing with an error. */
 export const DEFAULT_GATE_TIMEOUT_MS = 90_000;
+/**
+ * The longest a gate holds at all, from when the hold began: a minute under
+ * ACE's MaximumTeleportTime (5 min, Player_Tick.cs), which logs off a player
+ * whose teleport or login has not completed.
+ */
+export const DEFAULT_GATE_MAX_HOLD_MS = 240_000;
+/** How often a holding gate looks for progress. */
+export const GATE_PROGRESS_POLL_MS = 1000;
 
 export interface GateProgress {
   /** RuntimeDDDStatus(blocking, done, total). */
@@ -62,7 +80,16 @@ export interface CellGateOptions {
    * the cell's bundle is not resident (the ring is assumed until it is).
    */
   sealedInterior?: (cellId: number) => boolean | null;
+  /** No progress for this long releases the hold (DEFAULT_GATE_TIMEOUT_MS). */
   timeoutMs?: number;
+  /** The hold releases this long after it began, progress or not (DEFAULT_GATE_MAX_HOLD_MS). */
+  maxHoldMs?: number;
+  /**
+   * A counter that grows while the gate's downloads land (the stores' landed
+   * bytes). Any change counts as progress; without it only finished
+   * landblocks / root sets do.
+   */
+  progress?: () => number;
   now?: () => number;
   /**
    * The interface set's closure when it is not the world's (an era whose
@@ -122,7 +149,10 @@ export class CellGate {
    * objects already created there). Never rejects: a timeout or failed fetch
    * resolves { ok: false } so the caller releases the hold and reports it.
    */
-  async prefetch(cellId: number, extraRoots: readonly FileKey[] = [], interfaceRoots: readonly FileKey[] = []): Promise<GateOutcome> {
+  async prefetch(
+    cellId: number, extraRoots: readonly FileKey[] = [], interfaceRoots: readonly FileKey[] = [],
+    hold: { since?: number } = {},
+  ): Promise<GateOutcome> {
     const now = this.opts.now ?? (() => performance.now());
     const t0 = now();
     const c = this.closure;
@@ -147,8 +177,30 @@ export class CellGate {
     ]);
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeoutMs = this.opts.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
+    const maxHoldMs = this.opts.maxHoldMs ?? DEFAULT_GATE_MAX_HOLD_MS;
+    const holdStart = Math.min(hold.since ?? t0, t0);
+    const counter = this.opts.progress;
+    let seen = counter ? counter() : 0;
+    let seenDone = done;
+    let progressAt = t0;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`portal-space gate timed out after ${timeoutMs} ms (${done}/${total} done)`)), timeoutMs);
+      const check = () => {
+        timer = null;
+        const t = now();
+        const p = counter ? counter() : 0;
+        if (p !== seen || done !== seenDone) { seen = p; seenDone = done; progressAt = t; }
+        if (t - holdStart >= maxHoldMs) {
+          reject(new Error(`portal-space gate timed out: held ${Math.round(t - holdStart)} ms, the most it may (${done}/${total} done)`));
+          return;
+        }
+        if (t - progressAt >= timeoutMs) {
+          reject(new Error(`portal-space gate timed out after ${timeoutMs} ms without progress (${done}/${total} done)`));
+          return;
+        }
+        const next = Math.min(GATE_PROGRESS_POLL_MS, timeoutMs - (t - progressAt), maxHoldMs - (t - holdStart));
+        timer = setTimeout(check, Math.max(1, next));
+      };
+      timer = setTimeout(check, Math.max(1, Math.min(GATE_PROGRESS_POLL_MS, timeoutMs, maxHoldMs - (t0 - holdStart))));
     });
     try {
       await Promise.race([work, timeout]);

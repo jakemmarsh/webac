@@ -18247,6 +18247,10 @@ async function main() {
       // A separate world (AC1999): the HUD's layout art closes over the interface set.
       interfaceClosure: streamingDats?.closure ?? null,
       objectRadius: () => landblockObjects.objectRadius,
+      // Progress for the safety valve: bytes arriving in the stores as they stream (netReceivedBytes
+      // counts a download in progress; one object can take minutes at 25 KB/s) or from the OPFS cache.
+      // A slow link keeps holding while the destination arrives; a dead host still releases.
+      progress: () => gateStores().reduce((n, st) => n + st.stats.netReceivedBytes + st.stats.cacheBytes, 0),
       // EnvCell flags are the u32 after its id (EnvCell.ts): SeenOutside clear → a dungeon cell.
       sealedInterior: (cellId) => {
         if ((cellId & 0xffff) < 0x100) return false;
@@ -18303,10 +18307,12 @@ async function main() {
         dddStatus.begin();
         const sum = () => stores.reduce((a, st) => ({ netBytes: a.netBytes + st.stats.netBytes, netObjects: a.netObjects + st.stats.netObjects, cacheBytes: a.cacheBytes + st.stats.cacheBytes }), { netBytes: 0, netObjects: 0, cacheBytes: 0 });
         const before = sum();
+        // The hold begins now (the world packs may still be on their way): the gate's cap counts from here.
+        const heldSince = performance.now();
         console.log(`[AC:DatStream] portal-space gate: holding for cell 0x${dest.toString(16).padStart(8, '0')}`);
         // RELEASE.streaming-charselect-weight — the latest point the world packs are awaited.
         return (worldPending && streamedWorldReady ? streamedWorldReady : Promise.resolve()).then(() => {
-          const prefetch = cellGate.prefetch(dest, roots, hudArt);
+          const prefetch = cellGate.prefetch(dest, roots, hudArt, { since: heldSince });
           dddStatus.check(); // PreFetchCells counts what is missing as soon as it asks
           return prefetch;
         }).then((o) => {

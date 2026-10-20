@@ -7,7 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GameMessageOpcode } from '../packages/network/src/GameMessageOpcode.js';
-import { CellGate, GatedEventQueue, PREFETCH_STATUS_POLL_MS, PrefetchStatus, settleBurst, type GateProgress } from '../packages/renderer/src/dat/streaming/PortalSpaceGate.js';
+import { CellGate, DEFAULT_GATE_MAX_HOLD_MS, DEFAULT_GATE_TIMEOUT_MS, GatedEventQueue, PREFETCH_STATUS_POLL_MS, PrefetchStatus, settleBurst, type GateProgress } from '../packages/renderer/src/dat/streaming/PortalSpaceGate.js';
 import { DatClosure } from '../packages/renderer/src/dat/streaming/DatClosure.js';
 import { DatStore, fileKey } from '../packages/renderer/src/dat/streaming/DatStore.js';
 import { appearanceRoots, arrivalCellOf, queuedObjectRoots } from '../packages/renderer/src/dat/streaming/ArrivalEvents.js';
@@ -78,6 +78,95 @@ describe('CellGate', () => {
     const gate = new CellGate(closure, { objectRadius: () => 0 });
     const out = await gate.prefetch(0xA9B40100);
     expect(out.ok).toBe(false);
+  });
+});
+
+describe('CellGate — the safety valve on a slow link (progress, not total time)', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  /**
+   * A closure whose landblocks land one after another, `perBlockMs` apart, on a
+   * clock the test drives; `bytes` grows as each block's download trickles in.
+   */
+  function slowClosure(perBlockMs: number, opts: { stallAfter?: number } = {}) {
+    const ready = new Set<number>();
+    let bytes = 0;
+    let queue = Promise.resolve();
+    let landed = 0;
+    const closure = {
+      isLandblockReady: (lb: number) => ready.has(lb),
+      isClosed: () => false,
+      ensure: () => Promise.resolve({ files: 0, waves: 0, keys: new Set() }),
+      ensureLandblock(lb: number): Promise<void> {
+        if (ready.has(lb)) return Promise.resolve();
+        // One at a time over the link: each block takes perBlockMs, bytes landing every second of it.
+        queue = queue.then(() => new Promise<void>((resolve) => {
+          if (opts.stallAfter !== undefined && landed >= opts.stallAfter) return; // the host stops answering
+          let left = perBlockMs;
+          const tick = () => {
+            left -= 1000;
+            bytes += 10_000;
+            if (left > 0) { setTimeout(tick, 1000); return; }
+            landed++;
+            ready.add(lb);
+            resolve();
+          };
+          setTimeout(tick, 1000);
+        }));
+        return queue;
+      },
+    };
+    return { closure: closure as unknown as DatClosure, progress: () => bytes };
+  }
+
+  it('a destination still arriving after 90 s keeps holding (9 blocks × 15 s at ~10 KB/s) and completes', async () => {
+    vi.useFakeTimers();
+    const { closure, progress } = slowClosure(15_000);
+    const gate = new CellGate(closure, { objectRadius: () => 1, progress, now: () => Date.now() });
+    const p = gate.prefetch(0xA9B4001C);
+    await vi.advanceTimersByTimeAsync(140_000);
+    await expect(p).resolves.toMatchObject({ ok: true });
+  });
+
+  it('the same download without a byte counter still counts each finished landblock as progress', async () => {
+    vi.useFakeTimers();
+    const { closure } = slowClosure(15_000);
+    const gate = new CellGate(closure, { objectRadius: () => 1, now: () => Date.now() });
+    const p = gate.prefetch(0xA9B4001C);
+    await vi.advanceTimersByTimeAsync(140_000);
+    await expect(p).resolves.toMatchObject({ ok: true });
+  });
+
+  it('a host that stops answering still releases DEFAULT_GATE_TIMEOUT_MS after the last progress', async () => {
+    vi.useFakeTimers();
+    const { closure, progress } = slowClosure(5_000, { stallAfter: 2 });
+    const gate = new CellGate(closure, { objectRadius: () => 1, progress, now: () => Date.now() });
+    let out: Awaited<ReturnType<CellGate['prefetch']>> | null = null;
+    void gate.prefetch(0xA9B4001C).then((o) => { out = o; });
+    // Two blocks land by 10 s; nothing after.
+    await vi.advanceTimersByTimeAsync(10_000 + DEFAULT_GATE_TIMEOUT_MS - 2000);
+    expect(out).toBeNull();
+    await vi.advanceTimersByTimeAsync(3000);
+    const o = out as Awaited<ReturnType<CellGate['prefetch']>> | null;
+    expect(o).not.toBeNull();
+    expect(o?.ok).toBe(false);
+    if (o && !o.ok) expect(o.error.message).toMatch(/timed out after 90000 ms without progress \(2\/9 done\)/);
+  });
+
+  it('progress never holds past the cap (ACE logs off a player still teleporting at 5 min), counted from the hold', async () => {
+    vi.useFakeTimers();
+    const { closure, progress } = slowClosure(60_000); // 9 minutes of steady progress
+    const gate = new CellGate(closure, { objectRadius: () => 1, progress, now: () => Date.now() });
+    let out: Awaited<ReturnType<CellGate['prefetch']>> | null = null;
+    // The hold began 40 s before the prefetch (the world packs were still arriving).
+    void gate.prefetch(0xA9B4001C, [], [], { since: Date.now() - 40_000 }).then((o) => { out = o; });
+    await vi.advanceTimersByTimeAsync(DEFAULT_GATE_MAX_HOLD_MS - 40_000 - 1000);
+    expect(out).toBeNull();
+    await vi.advanceTimersByTimeAsync(2000);
+    const o = out as Awaited<ReturnType<CellGate['prefetch']>> | null;
+    expect(o?.ok).toBe(false);
+    if (o && !o.ok) expect(o.error.message).toMatch(/timed out: held 240\d{3} ms/);
+    expect(DEFAULT_GATE_MAX_HOLD_MS).toBeLessThan(5 * 60_000);
   });
 });
 

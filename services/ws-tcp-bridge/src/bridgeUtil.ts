@@ -597,3 +597,27 @@ export function buildDisconnectPacket(sessionId: number): Buffer {
   pkt.writeUInt32LE(headerHash, 8);
   return pkt;
 }
+
+/** How often the bridge pings each browser socket; a socket silent for a whole interval is ended. */
+export const WS_PING_INTERVAL_MS = 20_000;
+
+/**
+ * Whether a browser socket is still there, checked every WS_PING_INTERVAL_MS.
+ * A pong proves it, and so does ANY message from the browser (BUG.slow-link-
+ * session-drop, 2026-10-20, live at 25 KB/s): a download-saturated link queued
+ * the bridge's ping behind seconds of game data, the pong came late, and the
+ * bridge could cut a session whose browser was sending its 3 s keepalives the
+ * whole time. Only a socket that sent nothing for a whole interval and did not
+ * answer the ping is ended.
+ */
+export class WsLiveness {
+  private alive = true;
+  /** A pong or any message arrived from the browser. */
+  heard(): void { this.alive = true; }
+  /** The interval elapsed: 'dead' to end the socket, else 'ping' (send one and wait for the next tick). */
+  tick(): 'ping' | 'dead' {
+    if (!this.alive) return 'dead';
+    this.alive = false;
+    return 'ping';
+  }
+}

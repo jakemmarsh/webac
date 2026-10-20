@@ -48,6 +48,7 @@ import {
   initialAceAddresses,
   normalizeAddress,
   automationAllowed,
+  WsLiveness, WS_PING_INTERVAL_MS,
 } from './bridgeUtil.js';
 import { type Logger, makeLogger, rateLimitedLog } from './log.js';
 import { AbuseMeter, KeyedCounter, SlidingWindowCounter, TokenBucket, clientIp, isLoopbackAddress } from './limits.js';
@@ -546,7 +547,8 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     const warnRate = rateLimitedLog(log, 1000, now);
     const warnForeign = rateLimitedLog(log, 5000, now);
     let isProbe = false;
-    let isAlive = true;
+    // A pong or any browser message proves the socket (WsLiveness).
+    const liveness = new WsLiveness();
 
     const session: Session = {
       id, ip, ws, target, udp: null, closed: false, openedAt: now(), aceSessionId: null, protocol, time1999: 0, account: null, relayLinkKey: null,
@@ -583,16 +585,15 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     const sppHeader = target?.spp ? encodeSppHeader({ address: ip, port: 0 }, proxy) : null;
     const withSpp = (buf: Buffer): Buffer => (sppHeader ? Buffer.concat([sppHeader, buf]) : buf);
 
-    ws.on('pong', () => { isAlive = true; });
+    ws.on('pong', () => { liveness.heard(); });
     const pingInterval = setInterval(() => {
-      if (!isAlive) {
+      if (liveness.tick() === 'dead') {
         log('info', 'session_ping_timeout', { session: id });
         ws.terminate();
         return;
       }
-      isAlive = false;
       ws.ping();
-    }, 20_000);
+    }, WS_PING_INTERVAL_MS);
 
     const sendUdp = (buf: Buffer, port: number) => {
       const t = session.target!;
@@ -800,6 +801,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
       if (session.closed) return;
       const buf = data instanceof ArrayBuffer ? Buffer.from(data) : Array.isArray(data) ? Buffer.concat(data) : data;
+      liveness.heard();
       session.bytesFromBrowser += buf.length;
       metrics.addBytes('ws_in', buf.length);
 

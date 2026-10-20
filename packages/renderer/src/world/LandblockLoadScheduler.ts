@@ -11,9 +11,18 @@
  *     finished NOW, whatever the budget — the player's own block and its
  *     neighbours always have their collision before the player can reach it
  *     (a teleport into unloaded ground loads them synchronously).
- *  2. Then jobs advance nearest-first until `budgetMs` of this frame is
- *     spent. The job in progress is always resumed before a new one starts,
- *     so at most one block is ever partially built.
+ *  2. Then jobs advance nearest-first until this frame's budget is spent
+ *     (`budgetMs`, more on a slow machine: see frameBudgetMs). The job in
+ *     progress is always resumed before a new one starts, so at most one
+ *     block is ever partially built.
+ *
+ * The budget is per frame, so on a slow machine it was per much less time:
+ * at 3–4 FPS (prod 2026-10-20, Intel UHD 630 at ~300 ms frames) 6 ms a frame
+ * is ~20 ms of loading a second against ~360 ms at 60 FPS, and the streamed
+ * object ring fell minutes behind the player. A frame whose interval is long
+ * gets SLOW_FRAME_SHARE of it instead (never under `budgetMs`, never over
+ * MAX_SLOW_BUDGET_MS): unchanged up to ~75 ms frames (13 FPS), 24 ms at
+ * 300 ms frames (8% more frame time for 4× the loading).
  *
  * Nothing is dropped: the same steps run in the same order as a synchronous
  * load, only spread over frames — the end state is identical.
@@ -40,6 +49,14 @@ export interface PumpStats {
 
 /** Retail-default-agnostic budget: well under one 60 Hz frame (16.7 ms). */
 export const DEFAULT_LANDBLOCK_BUDGET_MS = 6;
+/** On long frames the budget is this share of the (smoothed) interval between pumps... */
+export const SLOW_FRAME_SHARE = 0.08;
+/** ...at most this many ms per frame. */
+export const MAX_SLOW_BUDGET_MS = 24;
+/** Each interval counts at most this long (a hidden tab's pause is not a frame). */
+const MAX_INTERVAL_MS = 1000;
+/** Weight of the newest interval in the smoothed one. */
+const INTERVAL_EMA = 0.3;
 
 function blockKey(bx: number, by: number): number {
   return ((bx & 0xff) << 8) | (by & 0xff);
@@ -53,6 +70,9 @@ export class LandblockLoadScheduler {
   private readonly budgetMs: number;
   private readonly syncRadius: number;
   private readonly now: () => number;
+  /** When the last pump started, and the smoothed interval between pumps (null until two pumps). */
+  private lastPumpAt: number | null = null;
+  private intervalMs: number | null = null;
 
   constructor(private readonly start: BlockJobFactory, options: LandblockLoadSchedulerOptions = {}) {
     this.budgetMs = options.budgetMs ?? DEFAULT_LANDBLOCK_BUDGET_MS;
@@ -105,9 +125,22 @@ export class LandblockLoadScheduler {
     }
   }
 
+  /** This frame's budget for non-mandatory work: `budgetMs`, or a share of a long frame. */
+  get frameBudgetMs(): number {
+    const iv = this.intervalMs;
+    if (iv === null) return this.budgetMs;
+    return Math.max(this.budgetMs, Math.min(MAX_SLOW_BUDGET_MS, iv * SLOW_FRAME_SHARE));
+  }
+
   /** One frame's worth of loading around the player's block (px, py). */
   pump(px: number, py: number): PumpStats {
     const t0 = this.now();
+    if (this.lastPumpAt !== null) {
+      const dt = Math.min(MAX_INTERVAL_MS, t0 - this.lastPumpAt);
+      if (dt > 0) this.intervalMs = this.intervalMs === null ? dt : this.intervalMs + (dt - this.intervalMs) * INTERVAL_EMA;
+    }
+    this.lastPumpAt = t0;
+    const budget = this.frameBudgetMs;
     let steps = 0;
     let completed = 0;
 
@@ -125,7 +158,7 @@ export class LandblockLoadScheduler {
     }
 
     // 2. Budgeted — nearest first, resuming the block in progress.
-    while (this.now() - t0 < this.budgetMs) {
+    while (this.now() - t0 < budget) {
       if (!this.current) {
         const key = this.nearest(px, py);
         if (key === null) break;

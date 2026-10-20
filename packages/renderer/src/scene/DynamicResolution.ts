@@ -4,14 +4,27 @@
  *
  * The controller sees one sample per drawn frame (main.ts, beside the
  * first-minute reporter) and only counts frames that drew the world in a
- * visible tab: portal space, loading screens and a hidden tab never move it,
- * and any interval over STALL_MS (a GC pause, a streamed-in landblock, a tab
- * switch) is dropped. Every EVAL_MS it takes the MEDIAN of the window, so a
- * few hitches cannot move it either:
+ * visible tab: portal space, loading screens and a hidden tab never move it.
+ * An interval over STALL_MS is dropped as a one-off hitch (a GC pause, a
+ * streamed-in landblock, a tab switch) only when the interval before it was
+ * not already slow (under DOWN_MS); after a slow interval it is a real frame
+ * of a slow machine and counts, clamped to LONG_FRAME_CAP_MS. Every EVAL_MS it
+ * takes the MEDIAN of the window, so a few hitches cannot move it either.
+ * A window needs MIN_SAMPLES frames, or, when frames are long, MIN_SLOW_SAMPLES
+ * whose summed length covers EVAL_MS (a 3 FPS machine draws ~6 frames in 2 s).
+ *
+ * BUG (prod 2026-10-20, Intel UHD 630 at dpr 2): every frame took 250–330 ms,
+ * the old rule dropped every one of them as a hitch, the window never filled,
+ * and the controller sat at full resolution at ~3 FPS for the whole first
+ * minute: blind exactly where it is needed.
+ *
  *
  *  - median > DOWN_MS (under ~26 FPS): step the pixel ratio down, by the
  *    square root of target / median (cost follows the pixel count), at most
  *    MAX_DOWN_FACTOR and at least MIN_DOWN_FACTOR per step, to the floor.
+ *    A median over FAR_DOWN_MS (far over budget) allows a step as large as
+ *    FAR_MIN_DOWN_FACTOR, so a 300 ms machine reaches the floor in two steps
+ *    (a few seconds) instead of four or five.
  *  - a step down that did not make frames faster means the frame is not
  *    bound by pixels: the ratio steps back up and stays put for NO_GAIN_MS.
  *  - at the floor (or pixels not being the cost) and still slow: one step
@@ -38,6 +51,13 @@ export const UP_PREDICT_MS = 30;
 export const STALL_MS = 250;
 export const EVAL_MS = 2000;
 export const MIN_SAMPLES = 15;
+/** A window of long frames evaluates with this many, once their summed length reaches EVAL_MS. */
+export const MIN_SLOW_SAMPLES = 5;
+/** A long interval that counts (part of a slow run) is clamped to this. */
+export const LONG_FRAME_CAP_MS = 1000;
+/** Medians over this are far over budget: the down step may be as large as FAR_MIN_DOWN_FACTOR. */
+export const FAR_DOWN_MS = 2 * DOWN_MS;
+export const FAR_MIN_DOWN_FACTOR = 0.5;
 export const SETTLE_MS = 1000;
 export const MIN_DOWN_FACTOR = 0.7;
 export const MAX_DOWN_FACTOR = 0.9;
@@ -78,6 +98,10 @@ export class DynamicResolution {
 
   private readonly samples = new Float32Array(MAX_SAMPLES);
   private count = 0;
+  /** Summed length of the window's samples, ms. */
+  private sum = 0;
+  /** The previous interval of the current eligible chain (null at a chain start). */
+  private prevDt: number | null = null;
   private windowStart: number | null = null;
   private lastFrameAt: number | null = null;
   private settleUntil = -Infinity;
@@ -126,12 +150,21 @@ export class DynamicResolution {
     // An ineligible frame breaks the chain: the next interval would span it.
     const last = this.lastFrameAt;
     this.lastFrameAt = eligible ? now : null;
-    if (!eligible || last === null || now < this.settleUntil) return;
+    if (!eligible || last === null) { this.prevDt = null; return; }
     const dt = now - last;
-    if (!(dt > 0) || dt > STALL_MS) return;
+    const prev = this.prevDt;
+    this.prevDt = dt;
+    if (now < this.settleUntil || !(dt > 0)) return;
+    let sample = dt;
+    if (dt > STALL_MS) {
+      // A hitch among normal frames is dropped; a long frame after a slow one is the machine's pace.
+      if (prev === null || !(prev > DOWN_MS)) return;
+      sample = Math.min(dt, LONG_FRAME_CAP_MS);
+    }
     if (this.windowStart === null) this.windowStart = last;
-    if (this.count < MAX_SAMPLES) this.samples[this.count++] = dt;
-    if (now - this.windowStart >= EVAL_MS && this.count >= MIN_SAMPLES) this.evaluate(now);
+    if (this.count < MAX_SAMPLES) { this.samples[this.count++] = sample; this.sum += sample; }
+    if (now - this.windowStart >= EVAL_MS
+      && (this.count >= MIN_SAMPLES || (this.count >= MIN_SLOW_SAMPLES && this.sum >= EVAL_MS))) this.evaluate(now);
   }
 
   private median(): number {
@@ -143,6 +176,7 @@ export class DynamicResolution {
   private evaluate(now: number): void {
     const med = this.median();
     this.count = 0;
+    this.sum = 0;
     this.windowStart = null;
 
     // Did the last step down help? If not, pixels are not the cost: undo it.
@@ -159,7 +193,8 @@ export class DynamicResolution {
     if (med > DOWN_MS) {
       const canRatio = this._ratio > this._min && now >= this.noGainUntil;
       if (canRatio) {
-        const f = Math.min(MAX_DOWN_FACTOR, Math.max(MIN_DOWN_FACTOR, Math.sqrt(TARGET_FRAME_MS / med)));
+        const minFactor = med > FAR_DOWN_MS ? FAR_MIN_DOWN_FACTOR : MIN_DOWN_FACTOR;
+        const f = Math.min(MAX_DOWN_FACTOR, Math.max(minFactor, Math.sqrt(TARGET_FRAME_MS / med)));
         let next = this.clamp(quantize(this._ratio * f));
         if (next >= this._ratio) next = this.clamp(this._ratio - RATIO_QUANTUM);
         if (next < this._ratio) {
@@ -213,8 +248,10 @@ export class DynamicResolution {
     this.changes++;
     this.settleUntil = now + SETTLE_MS;
     this.count = 0;
+    this.sum = 0;
     this.windowStart = null;
     this.lastFrameAt = null;
+    this.prevDt = null;
     try { this.onChange?.(r, distanceSteps); } catch { /* the host's apply must not stop the loop */ }
   }
 }

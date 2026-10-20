@@ -186,13 +186,13 @@ describe('WorldReporter — first_minute', () => {
     expect(g.events).toHaveLength(0);
     g.r.enteredWorld();
     let t = g.clock.t;
-    for (let i = 0; i < 10; i++) { t += 300; g.r.frame(t, true); }
+    for (let i = 0; i < 10; i++) { t += HIST_MAX_MS + 300; g.r.frame(t, true); }
     t += 9000; g.r.frame(t, true);
     g.clock.t = t;
     g.r.left('closed_tab');
     const ev = g.events[0] as FirstMinuteEvent;
     expect(ev.frameMedianMs).toBe(HIST_MAX_MS);
-    expect(ev.frameMaxMs).toBe(300);
+    expect(ev.frameMaxMs).toBe(HIST_MAX_MS + 300);
     expect(ev.frames).toBe(11);
     expect(ev.keys).toBe(0);
     expect(ev.firstClickMs).toBeNull();

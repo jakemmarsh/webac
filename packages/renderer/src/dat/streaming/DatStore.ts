@@ -90,17 +90,106 @@ export function splitFileKey(key: FileKey): { dat: DatName; id: number } {
   return { dat: DAT_OF_CODE[Math.floor(key / 0x100000000)], id: key % 0x100000000 };
 }
 
-/** Fetches one object's stored (gzip) bytes. */
-export type ObjectFetcher = (url: string, opts: { priority: FetchPriority; signal?: AbortSignal }) => Promise<Uint8Array>;
+/**
+ * Fetches one object's stored (gzip) bytes. `onBytes` hears each chunk of the
+ * body as it arrives (a fetcher that cannot report is topped up when it
+ * resolves), so a slow download shows progress before it lands.
+ */
+export type ObjectFetcher = (url: string, opts: { priority: FetchPriority; signal?: AbortSignal; onBytes?: (n: number) => void }) => Promise<Uint8Array>;
 
-/** The browser fetcher: no-store, priority hint, length-checked body. */
-export const browserObjectFetcher: ObjectFetcher = async (url, { priority, signal }) => {
+/** The browser fetcher: no-store, priority hint, length-checked body, bytes reported per chunk. */
+export const browserObjectFetcher: ObjectFetcher = async (url, { priority, signal, onBytes }) => {
   const init: RequestInit & { priority?: string } = { cache: 'no-store', ...(signal ? { signal } : {}) };
   init.priority = priority === FetchPriority.Critical ? 'high' : priority === FetchPriority.Background ? 'low' : 'auto';
   const resp = await fetch(url, init);
   if (!resp.ok) throw new Error(`GET ${url}: HTTP ${resp.status}`);
-  return new Uint8Array(await readResponseBytes(resp));
+  let seen = 0;
+  return new Uint8Array(await readResponseBytes(resp, onBytes ? (_pct, loaded) => { onBytes(loaded - seen); seen = loaded; } : undefined));
 };
+
+/**
+ * A link is slow when a saturated second (more bytes in flight than ~2 s of
+ * it) moved less than this: 2 Mbit/s. A healthy link (the 50 Mbit/s the
+ * streaming budget assumes) is ~25× this; a cold edge's latency-bound
+ * trickle of small objects is not saturated, so it never counts.
+ */
+export const SLOW_LINK_BYTES_PER_S = 256 * 1024;
+/**
+ * On a slow link a fetch starts only while the bytes in flight stay under
+ * about this many seconds of the measured rate (at least
+ * SLOW_LINK_MIN_INFLIGHT_BYTES, and one fetch always may run): big objects go
+ * one or two at a time, small ones still many, and nothing queues minutes of
+ * download in front of the game's own traffic.
+ */
+export const SLOW_LINK_INFLIGHT_SECONDS = 2;
+export const SLOW_LINK_MIN_INFLIGHT_BYTES = 32 * 1024;
+
+/**
+ * BUG.slow-link-fetch-flood (2026-10-20, live at 25 KB/s): 96 fetches in
+ * flight split a slow link 96 ways, so no object landed for minutes (the
+ * gate saw no progress) and the game's WebSocket got a sliver of the link
+ * (the session dropped and resumed twice). LinkMeter watches the bytes in
+ * flight and the rate they arrive at, one-second windows while anything is
+ * in flight: a saturated window under SLOW_LINK_BYTES_PER_S marks the link
+ * slow, any window at twice that marks it healthy again.
+ */
+export class LinkMeter {
+  private inflight = 0;
+  private winStart: number | null = null;
+  private winBytes = 0;
+  private _slow = false;
+  /** The last window's rate, bytes/s (null before one closed). */
+  rate: number | null = null;
+
+  constructor(private readonly now: () => number) {}
+
+  get slow(): boolean { this.roll(); return this._slow; }
+  get inflightBytes(): number { return this.inflight; }
+  /** While slow: the bytes that may be in flight. */
+  get slowBudgetBytes(): number {
+    return Math.max(SLOW_LINK_MIN_INFLIGHT_BYTES, SLOW_LINK_INFLIGHT_SECONDS * (this.rate ?? 0));
+  }
+  /** Whether a fetch of `bytes` may start with `running` running and `starting` bytes about to begin. */
+  room(running: number, starting: number, bytes: number): boolean {
+    if (!this.slow || running === 0) return true;
+    return this.inflight + starting + bytes <= this.slowBudgetBytes;
+  }
+
+  /** A network fetch of `bytes` (its expected size) started. */
+  begin(bytes: number): void {
+    this.roll();
+    if (this.inflight <= 0) { this.inflight = 0; this.winStart = this.now(); this.winBytes = 0; }
+    this.inflight += Math.max(0, bytes);
+  }
+
+  /** `n` body bytes arrived. */
+  received(n: number): void {
+    if (!(n > 0)) return;
+    this.winBytes += n;
+    this.inflight = Math.max(0, this.inflight - n);
+    this.roll();
+  }
+
+  /** A fetch ended (landed or failed) with `unreceived` of its expected bytes never arriving. */
+  end(unreceived: number): void {
+    this.inflight = Math.max(0, this.inflight - Math.max(0, unreceived));
+    this.roll();
+  }
+
+  private roll(): void {
+    if (this.winStart === null) return;
+    const t = this.now();
+    const ms = t - this.winStart;
+    if (ms < 1000) return;
+    const rate = this.winBytes / (ms / 1000);
+    this.rate = rate;
+    // Saturated: the bytes still in flight are more than ~2 s of this rate.
+    if (rate >= 2 * SLOW_LINK_BYTES_PER_S) this._slow = false;
+    else if (rate < SLOW_LINK_BYTES_PER_S && this.inflight > 2 * rate) this._slow = true;
+    this.winStart = this.inflight > 0 ? t : null;
+    this.winBytes = 0;
+  }
+}
 
 /** gunzip with the platform DecompressionStream (browsers, Node ≥ 18). */
 export async function gunzip(gz: Uint8Array): Promise<Uint8Array> {
@@ -120,6 +209,12 @@ export interface DatStoreStats {
   /** Objects / gzip bytes fetched over the network. */
   netObjects: number;
   netBytes: number;
+  /**
+   * Body bytes received from the network so far, counted as they arrive (a
+   * download in progress included; failed attempts too). The portal-space
+   * gate reads it as progress: one object may take minutes on a slow link.
+   */
+  netReceivedBytes: number;
   /** Objects / gzip bytes served from the ObjectCache (OPFS). */
   cacheObjects: number;
   cacheBytes: number;
@@ -197,6 +292,8 @@ const bundleUnitKey = (lb: number): number => lb & 0xffff;
 class Ticket {
   queuedIn: Limiter | null = null;
   wake: (() => void) | null = null;
+  /** The network download's expected size (gzip bytes), for the slow-link rule. */
+  bytes = 0;
   constructor(public priority: FetchPriority) {}
   promote(priority: FetchPriority): void {
     if (priority >= this.priority) return;
@@ -205,31 +302,80 @@ class Ticket {
   }
 }
 
-/** A tiny priority-ordered concurrency limiter. */
+/** How a limiter may start work beyond its fixed max (the network limiter's link rules). */
+interface LimiterPolicy {
+  /** Whether a ticket of `bytes` may start now: `running` running, `starting` bytes woken but not begun. */
+  room(running: number, starting: number, bytes: number): boolean;
+  /** Non-critical work waits while critical work is running or queued. */
+  holdNonCritical: boolean;
+}
+
+/**
+ * A tiny priority-ordered concurrency limiter. With a policy (the network
+ * limiter): prefetch and background work do not start while a critical load
+ * (a portal-space gate, a miss) runs or waits, so a gate gets the link to
+ * itself, and on a slow link a fetch starts only while the bytes in flight
+ * fit SLOW_LINK_INFLIGHT_SECONDS of it (LinkMeter.room).
+ * Work already running is never cut off.
+ */
 class Limiter {
-  private active = 0;
+  private readonly active = new Set<Ticket>();
+  /** Woken by pump but not yet running fn (their bytes are not in the link meter yet). */
+  private readonly waking = new Set<Ticket>();
   private readonly queues: Ticket[][] = [[], [], []];
-  constructor(private readonly max: number) {}
+  constructor(private readonly max: number, private readonly policy: LimiterPolicy | null = null) {}
+
+  private criticalWaiting(): boolean {
+    if (this.queues[0].length > 0) return true;
+    for (const t of this.active) if (t.priority === FetchPriority.Critical) return true;
+    return false;
+  }
+
+  private canStart(ticket: Ticket, priority: FetchPriority = ticket.priority): boolean {
+    if (this.active.size >= this.max) return false;
+    if (!this.policy) return true;
+    if (this.policy.holdNonCritical && priority !== FetchPriority.Critical && this.criticalWaiting()) return false;
+    let starting = 0;
+    for (const t of this.waking) starting += t.bytes;
+    return this.policy.room(this.active.size, starting, ticket.bytes);
+  }
+
   async run<T>(ticket: Ticket, fn: () => Promise<T>): Promise<T> {
-    if (this.active >= this.max) {
+    const ahead = this.queues.slice(0, ticket.priority + 1).some((q) => q.length > 0);
+    if (ahead || !this.canStart(ticket)) {
       await new Promise<void>((r) => { ticket.wake = r; ticket.queuedIn = this; this.queues[ticket.priority].push(ticket); });
-    } else {
-      this.active++;
     }
+    this.waking.delete(ticket);
+    this.active.add(ticket);
     try {
       return await fn();
     } finally {
-      const next = this.queues[0].shift() ?? this.queues[1].shift() ?? this.queues[2].shift();
-      if (next) {
-        const wake = next.wake!;
-        next.wake = null;
-        next.queuedIn = null;
-        wake();
-      } else {
-        this.active--;
-      }
+      this.active.delete(ticket);
+      this.pump();
     }
   }
+
+  /** Start every queued ticket the rules allow now (after a finish, or when the link's state changed). */
+  pump(): void {
+    for (;;) {
+      let next: Ticket | undefined;
+      for (let p = 0; p < this.queues.length && !next; p++) {
+        const q = this.queues[p];
+        if (q.length > 0 && this.canStart(q[0], p as FetchPriority)) next = q.shift();
+        // A queue that cannot start blocks the lower ones (priority order).
+        else if (q.length > 0) break;
+      }
+      if (!next) return;
+      const wake = next.wake!;
+      next.wake = null;
+      next.queuedIn = null;
+      // Counted at once (active, and its bytes as starting), so this loop's canStart sees it.
+      this.active.add(next);
+      this.waking.add(next);
+      wake();
+    }
+  }
+
   /** Move a queued ticket to a higher-priority queue. */
   requeue(ticket: Ticket, priority: FetchPriority): void {
     const q = this.queues[ticket.priority];
@@ -237,13 +383,15 @@ class Limiter {
     if (i >= 0) q.splice(i, 1);
     ticket.priority = priority;
     this.queues[priority].push(ticket);
+    this.pump();
   }
   get pending(): number { return this.queues[0].length + this.queues[1].length + this.queues[2].length; }
+  get running(): number { return this.active.size; }
 }
 
 export class DatStore {
   readonly stats: DatStoreStats = {
-    netObjects: 0, netBytes: 0, cacheObjects: 0, cacheBytes: 0, misses: 0, missesByType: {}, failures: 0, unresolvedMisses: 0,
+    netObjects: 0, netBytes: 0, netReceivedBytes: 0, cacheObjects: 0, cacheBytes: 0, misses: 0, missesByType: {}, failures: 0, unresolvedMisses: 0,
     residentBytes: 0, packBytes: 0, evictableBytes: 0, evictions: 0, evictedBytes: 0,
   };
   /** Resident file bytes per DAT (views into packs / bundles / leaf payloads). */
@@ -270,6 +418,8 @@ export class DatStore {
   private readonly dbs = new Map<DatName, DatDatabase>();
   private readonly limiter: Limiter;
   private readonly disk = new Limiter(32);
+  /** The network link's state (LinkMeter): a slow link starts fewer fetches. */
+  readonly link: LinkMeter;
   private readonly fetchObject: ObjectFetcher;
   private readonly cache: ObjectCache;
   private readonly verifyHash: boolean;
@@ -295,11 +445,16 @@ export class DatStore {
     this.cache = opts.cache ?? new NullObjectCache();
     this.verifyHash = opts.verifyHash ?? true;
     this.retries = opts.retries ?? 3;
-    this.limiter = new Limiter(opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
     this.onError = opts.onError ?? ((d, e) => console.warn(`[DatStore] ${d}`, e));
     this.residentCap = opts.residentCapBytes ?? DEFAULT_RESIDENT_CAP_BYTES;
     this.minResidentAge = opts.minResidentAgeMs ?? DEFAULT_MIN_RESIDENT_AGE_MS;
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
+    this.link = new LinkMeter(this.now);
+    const link = this.link;
+    this.limiter = new Limiter(opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT, {
+      room: (running, starting, bytes) => link.room(running, starting, bytes),
+      holdNonCritical: true,
+    });
   }
 
   /** The parsed binary manifest (leaf / pack / bundle tables). */
@@ -827,10 +982,27 @@ export class DatStore {
     }
     const url = `${this.baseUrl}/${objectKey(ref.hash)}`;
     let lastErr: unknown = null;
+    ticket.bytes = ref.gzSize;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, 250 * 2 ** (attempt - 1)));
       try {
-        const gz = await this.limiter.run(ticket, () => this.fetchObject(url, { priority: ticket.priority }));
+        const gz = await this.limiter.run(ticket, async () => {
+          let got = 0;
+          this.link.begin(ref.gzSize);
+          const onBytes = (n: number): void => {
+            if (!(n > 0)) return;
+            got += n;
+            this.stats.netReceivedBytes += n;
+            this.link.received(n);
+          };
+          try {
+            const bytes = await this.fetchObject(url, { priority: ticket.priority, onBytes });
+            if (bytes.byteLength > got) onBytes(bytes.byteLength - got); // a fetcher that reports nothing (or not all)
+            return bytes;
+          } finally {
+            this.link.end(ref.gzSize - got);
+          }
+        });
         if (gz.byteLength !== ref.gzSize) throw new Error(`${ref.hash}: got ${gz.byteLength} bytes, manifest says ${ref.gzSize}`);
         const payload = await this.inflateChecked(gz, ref);
         this.stats.netObjects++;
