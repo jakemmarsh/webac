@@ -28,6 +28,8 @@ const FIRST_MINUTE_KEYS = [
   'frameMedianMs', 'frameP95Ms', 'frameMaxMs', 'contextLost', 'gpu', 'dpr', 'canvasW', 'canvasH', 'renderScalePct', 'msaaOff', 'drawDistanceSteps', 'worldDrawnMs', 'screen',
   'unresolvedMisses', 'firstMoveMs', 'firstClickMs', 'keys', 'modal', 'modalMs', 'errors',
   'eid', // BUG.telemetry-duplicate-resend — the outbox's event id (verify-telemetry-duplicate-resend.ts)
+  // PERF.slow-first-minute-diagnostics (verify-slow-first-minute-diagnostics.ts); the device fields come only after setDevice.
+  'frameMeanMs', 'workMedianMs', 'workP95Ms', 'longTaskMs', 'drawCalls', 'triangles', 'landblock', 'gpuName',
 ].sort();
 const WORLD_LEFT_BASE_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
 // BUG.hidden-tab-session-drop: the page adds hiddenMs / freezes / frozenMs to every world_left (endCause / closeCode

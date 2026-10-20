@@ -97,6 +97,45 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   closeCode?: number | null;
   /** OBS.dm-stall-diagnostics — the connection's state when a silent / closed session ended (netDiag.ts). */
   net?: NetDiag;
+  /** PERF.slow-first-minute-diagnostics (renderer WorldReporter): why a first minute was slow. */
+  frameMeanMs?: number | null;
+  workMedianMs?: number | null;
+  workP95Ms?: number | null;
+  longTaskMs?: number | null;
+  drawCalls?: number | null;
+  triangles?: number | null;
+  landblock?: string | null;
+  browser?: typeof BROWSER_FAMILIES[number] | null;
+  browserMajor?: number | null;
+  os?: typeof OS_FAMILIES[number] | null;
+  gpuName?: string | null;
+  cores?: number | null;
+  memGb?: number | null;
+}
+
+/** Closed sets, as the renderer's WorldReporter BROWSER_FAMILIES / OS_FAMILIES. */
+export const BROWSER_FAMILIES = ['chrome', 'edge', 'firefox', 'safari', 'opera', 'other'] as const;
+export const OS_FAMILIES = ['windows', 'mac', 'linux', 'chromeos', 'android', 'ios', 'other'] as const;
+const MEM_GB = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
+
+/** The slow-first-minute fields, each only when the client sent it (older builds send none). */
+function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent> {
+  const out: Partial<ClientFirstMinuteEvent> = {};
+  const set = <K extends keyof ClientFirstMinuteEvent>(k: K, v: ClientFirstMinuteEvent[K]): void => { if (k in b) out[k] = v; };
+  set('frameMeanMs', uint(b.frameMeanMs, 5_000));
+  set('workMedianMs', uint(b.workMedianMs, 250));
+  set('workP95Ms', uint(b.workP95Ms, 250));
+  set('longTaskMs', uint(b.longTaskMs, MINUTE_MS));
+  set('drawCalls', uint(b.drawCalls, 1_000_000));
+  set('triangles', uint(b.triangles, 100_000_000));
+  set('landblock', match(b.landblock, /^[0-9a-f]{4}$/));
+  set('browser', pick(b.browser, BROWSER_FAMILIES));
+  set('browserMajor', uint(b.browserMajor, 999));
+  set('os', pick(b.os, OS_FAMILIES));
+  set('gpuName', match(b.gpuName, /^[\x20-\x7e]{1,96}$/));
+  set('cores', uint(b.cores, 256));
+  set('memGb', typeof b.memGb === 'number' && MEM_GB.includes(b.memGb) ? b.memGb : null);
+  return out;
 }
 
 export type ClientWorldEvent = ClientFirstMinuteEvent | ClientWorldLeftEvent;
@@ -207,5 +246,6 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
     modalMs: uint(b.modalMs, SESSION_MS),
     errors: uint(b.errors, 100_000),
     ...dropFields(b),
+    ...perfFields(b),
   };
 }

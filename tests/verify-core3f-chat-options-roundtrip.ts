@@ -73,7 +73,7 @@ describe('CORE.3.f — serializeGameplayOptions byte-golden vectors', () => {
     ]);
   });
 
-  it('opacities serialize as top-level f32 entries 0x10000080/81', () => {
+  it('opacities serialize as top-level f32 entries 0x10000080/81, in retail bucket order (0x81 bucket 0, 0x80 bucket 10)', () => {
     const blob = serializeGameplayOptions({
       defaultOpacity: 0.5,
       activeOpacity: 1.0,
@@ -81,10 +81,10 @@ describe('CORE.3.f — serializeGameplayOptions byte-golden vectors', () => {
     });
     expect(Array.from(blob)).toEqual([
       0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
-      0x80, 0x00, 0x00, 0x10, 0x80, 0x00, 0x00, 0x10,
-      0x00, 0x00, 0x00, 0x3F,       // 0.5f
       0x81, 0x00, 0x00, 0x10, 0x81, 0x00, 0x00, 0x10,
       0x00, 0x00, 0x80, 0x3F,       // 1.0f
+      0x80, 0x00, 0x00, 0x10, 0x80, 0x00, 0x00, 0x10,
+      0x00, 0x00, 0x00, 0x3F,       // 0.5f
     ]);
   });
 });

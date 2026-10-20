@@ -408,7 +408,7 @@ import { startWeenieSideTables, skippedWeenieSideTables, wieldLocationFromMask a
 import { accountBannedText, connectionFailureRecovery } from './session/AccountBoot.js';
 import { characterMessageAccount } from './session/ServerAccountName.js';
 import { createSplitpea } from './ui/splitpea/SplitpeaPlugin.js';
-import { logOffCharacter, installUnloadSessionClose } from './session/PlayerModuleSave.js';
+import { logOffCharacter, installUnloadSessionClose, ChatOptionsRepair } from './session/PlayerModuleSave.js';
 import { DeferredLogOff, endCharacterSessionConfirmed, isPlayerKiller, requestLogOff, type RequestLogOffDeps } from './session/LogoutFlow.js';
 import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
@@ -1933,13 +1933,22 @@ async function main() {
   }
 
   const cameraController = new CameraController(sceneManager.camera);
-  // RELEASE.first-minute — the GPU's class (integrated / discrete / software); the renderer string stays here.
-  worldReporter?.setGpu(classifyGpu(unmaskedRenderer(sceneManager.renderer?.getContext())));
+  // RELEASE.first-minute — the GPU's class (integrated / discrete / software). PERF.slow-first-minute-diagnostics
+  // (2026-10-20): the renderer string goes too (printable, 96 chars), to tell a slow first minute's hardware apart.
+  {
+    const rendererName = unmaskedRenderer(sceneManager.renderer?.getContext());
+    worldReporter?.setGpu(classifyGpu(rendererName), rendererName);
+    worldReporter?.setDevice(navigator as Navigator & { deviceMemory?: number });
+  }
   // PERF.render-adapt — what the buffer settled on (RenderScale.ts / DynamicResolution.ts).
   worldReporter?.setSources({
     renderScale: () => sceneManager.dynamicResolution?.scale ?? 1,
     msaaOff: () => !contextAntialias(),
     drawDistanceSteps: () => sceneManager.dynamicResolution?.distanceSteps ?? 0,
+    drawStats: () => {
+      const r = sceneManager.renderer?.info?.render;
+      return r ? { calls: r.calls, triangles: r.triangles } : null;
+    },
   });
 
   // ── Rebindable keyboard system (VISUAL.127) ────────────────────────────
@@ -7572,6 +7581,12 @@ async function main() {
     },
     modal: () => gameUI.openBlockingWindow(),
     moving: () => cameraController.isMoving,
+    landblock: () => {
+      if (!gameStarted) return null;
+      if (playerInDungeon) return dungeonLandblockId ? (dungeonLandblockId >>> 16) & 0xffff : null;
+      const { blockX, blockY } = TerrainManager.worldToBlock(playerWorldX, playerWorldZ);
+      return ((blockX & 0xff) << 8) | (blockY & 0xff);
+    },
     unresolvedMisses: () => {
       const stores = [...new Set([streamingDats, worldStreamingDats])].filter((x): x is StreamingDats => !!x);
       return stores.length ? stores.reduce((n, sd) => n + sd.store.stats.unresolvedMisses, 0) : null;
@@ -8119,11 +8134,22 @@ async function main() {
   // ACE keeps the player Hidden (and ignores actions) until then. Exposed via
   // acDebug.collisionState().loginComplete so captures/probes wait for it.
   let loginCompleteOutstanding = true;
+  // BUG.gameplay-options-entry-order — rewrite a stored chat-window module
+  // the retail client cannot load, once the server accepts the save.
+  const chatOptionsRepair = new ChatOptionsRepair({
+    resave: () => {
+      gameUI.markChatOptionsDirty();
+      gameUI.flushChatOptionsSave();
+      console.log('[AC] Re-saved the chat-window options in retail order (repairs retail-client login)');
+    },
+    schedule: (fn, ms) => { setTimeout(fn, ms); },
+  });
   const loginCompleteNotifier = new LoginCompleteNotifier({
     send: () => {
       loginCompleteOutstanding = false;
       aceConnection.sendMessage(buildLoginComplete(++aceActionSequence), GameMessageGroup.SecureWeenieQueue);
       console.log('[AC] Sent LoginComplete (teleport animation finished)');
+      chatOptionsRepair.loginCompleteSent();
       questTracker.loginComplete(String(aceCharGuid ?? worldCharacterName ?? ''));
       // Mag-Tools' On Login Complete commands and Open Main Pack On Login (once per login; preview UI).
       magTools?.loginComplete();
@@ -10160,6 +10186,7 @@ async function main() {
         // must not keep the previous character's (null = nothing stored).
         try {
           gameUI.setServerChatWindowOptions(desc.gameplayOptions ?? null);
+          chatOptionsRepair.noteLoginModule(desc.gameplayOptions);
         } catch (err) {
           // A stored layout the restore can't apply must not abort the rest
           // of login setup; windows fall back to their defaults.
@@ -18885,7 +18912,8 @@ async function main() {
 
   /** One frame of the game; `draw` false runs everything but the 3D draw (the background beat). */
   function frameStep(draw: boolean, frameTime?: number) {
-    const now = frameClock.next(frameTime, performance.now());
+    const workStart = performance.now();
+    const now = frameClock.next(frameTime, workStart);
     if (draw) { updateNavLines(now); updateNametags(now); goArrow?.frame(); }
     if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(); }
     const dt = Math.max(0, now - lastTime) / 1000;
@@ -20013,7 +20041,7 @@ async function main() {
     if ((!draw && !sceneManager.capturePending) || gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
     else { updateIndoorView(); sceneManager.render(); }
     // RELEASE.first-minute — counters only (WorldReporter.frame); the world counts as drawn once no portal space covers it.
-    if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering);
+    if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering, performance.now() - workStart);
     // PERF.render-adapt — dynamic resolution measures only frames that drew the world in a visible tab.
     if (draw) {
       sceneManager.dynamicResolution?.frame(now, gameStarted && !gameUI.portalSpaceCovering

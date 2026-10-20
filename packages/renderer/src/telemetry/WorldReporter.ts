@@ -123,6 +123,29 @@ export interface FirstMinuteEvent {
   modal: WorldModal | null;
   modalMs: number | null;
   errors: number;
+  /**
+   * PERF.slow-first-minute-diagnostics (2026-10-20: ~10% of end-of-retail first minutes ran at 3-4 fps,
+   * discrete GPUs included, with nothing to say why). The mean frame interval, uncapped (the median /
+   * p95 histogram stops at HIST_MAX_MS).
+   */
+  frameMeanMs?: number | null;
+  /** Our own JS per frame (frameStep: update + render submit), 1 ms histogram capped at HIST_MAX_MS. */
+  workMedianMs?: number | null;
+  workP95Ms?: number | null;
+  /** Main-thread long tasks (> 50 ms) in the minute, total ms; null where the browser has no longtask timing. */
+  longTaskMs?: number | null;
+  /** Per drawn world frame, means: renderer draw calls and triangles (three.js renderer.info: the whole frame outdoors, the last pass of an indoor view). */
+  drawCalls?: number | null;
+  triangles?: number | null;
+  /** The player's landblock at the event, 4 hex digits (XXYY), or null. */
+  landblock?: string | null;
+  /** The browser and OS family + major version (closed sets), the WebGL renderer string, and the device's cores / memory. */
+  browser?: BrowserFamily;
+  browserMajor?: number | null;
+  os?: OsFamily;
+  gpuName?: string | null;
+  cores?: number | null;
+  memGb?: number | null;
   /** Exit 'disconnected': what ended the session, and the socket's close code (1006 = dropped with no close frame). */
   endCause?: WorldEndCause | null;
   closeCode?: number | null;
@@ -172,7 +195,45 @@ export interface WorldReporterSources {
   msaaOff?: () => boolean;
   /** Adaptive draw-distance steps (DynamicResolution.distanceSteps). */
   drawDistanceSteps?: () => number;
+  /** The last rendered frame's draw calls and triangles (three.js renderer.info.render). */
+  drawStats?: () => { calls: number; triangles: number } | null;
+  /** The player's landblock, 0xXXYY, or null. */
+  landblock?: () => number | null;
 }
+
+export const BROWSER_FAMILIES = ['chrome', 'edge', 'firefox', 'safari', 'opera', 'other'] as const;
+export type BrowserFamily = typeof BROWSER_FAMILIES[number];
+export const OS_FAMILIES = ['windows', 'mac', 'linux', 'chromeos', 'android', 'ios', 'other'] as const;
+export type OsFamily = typeof OS_FAMILIES[number];
+
+/** Browser and OS family + major version from a user-agent string (closed sets; the string itself is never sent). */
+export function browserOf(ua: string | null | undefined): { browser: BrowserFamily; browserMajor: number | null; os: OsFamily } {
+  const u = ua ?? '';
+  const ver = (re: RegExp): number | null => { const m = re.exec(u); const n = m ? parseInt(m[1], 10) : NaN; return Number.isFinite(n) && n >= 0 && n < 1000 ? n : null; };
+  let browser: BrowserFamily = 'other';
+  let browserMajor: number | null = null;
+  if (/Edg\//.test(u)) { browser = 'edge'; browserMajor = ver(/Edg\/(\d+)/); }
+  else if (/OPR\//.test(u)) { browser = 'opera'; browserMajor = ver(/OPR\/(\d+)/); }
+  else if (/Firefox\//.test(u)) { browser = 'firefox'; browserMajor = ver(/Firefox\/(\d+)/); }
+  else if (/Chrome\/|CriOS\//.test(u)) { browser = 'chrome'; browserMajor = ver(/(?:Chrome|CriOS)\/(\d+)/); }
+  else if (/Safari\//.test(u)) { browser = 'safari'; browserMajor = ver(/Version\/(\d+)/); }
+  const os: OsFamily = /Windows/.test(u) ? 'windows'
+    : /iPhone|iPad|iPod/.test(u) ? 'ios'
+    : /Android/.test(u) ? 'android'
+    : /CrOS/.test(u) ? 'chromeos'
+    : /Mac OS X|Macintosh/.test(u) ? 'mac'
+    : /Linux/.test(u) ? 'linux' : 'other';
+  return { browser, browserMajor, os };
+}
+
+/** A WebGL renderer string as sent: printable ASCII, at most 96 characters (null when hidden or empty). */
+export function gpuNameOf(renderer: string | null | undefined): string | null {
+  const t = (renderer ?? '').replace(/[^\x20-\x7e]/g, '').trim().slice(0, 96);
+  return t || null;
+}
+
+/** navigator.deviceMemory's values (GiB); anything else reads as unknown. */
+const MEM_GB = [0.25, 0.5, 1, 2, 4, 8, 16, 32] as const;
 
 export interface WorldReporterOptions {
   endpoint: string | null;
@@ -230,6 +291,11 @@ function scalePct(v: number): number {
   return Number.isFinite(v) && v > 0 ? Math.min(100, Math.max(1, Math.round(v * 100))) : 100;
 }
 
+/** 0xXXYY as 4 hex digits; anything else null. */
+function landblockHex(v: number | null): string | null {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 0xffff ? v.toString(16).padStart(4, '0') : null;
+}
+
 /** The draw-distance ladder has six entries: at most five steps down. */
 export const MAX_DRAW_DISTANCE_STEPS = 5;
 
@@ -271,7 +337,18 @@ export class WorldReporter {
   private lastFrameAt: number | null = null;
   private readonly hist = new Uint32Array(HIST_MAX_MS + 1);
   private intervals = 0;
+  private intervalSum = 0;
   private maxFrame = 0;
+  private readonly workHist = new Uint32Array(HIST_MAX_MS + 1);
+  private works = 0;
+  private drawCallSum = 0;
+  private triangleSum = 0;
+  private drawSamples = 0;
+  /** Long-task ms in this session's first minute (null: no longtask timing in this browser). */
+  private longTaskMs: number | null = null;
+  private longTasksSupported = false;
+  private device: Pick<FirstMinuteEvent, 'browser' | 'browserMajor' | 'os' | 'cores' | 'memGb'> = {};
+  private gpuName: string | null = null;
   private worldDrawnAt: number | null = null;
   private firstMoveAt: number | null = null;
   private firstClickAt: number | null = null;
@@ -299,8 +376,26 @@ export class WorldReporter {
   }
 
   /** The renderer's GPU class (classifyGpu of the unmasked string, read once at renderer init). */
-  setGpu(gpu: GpuClass): void {
+  setGpu(gpu: GpuClass, rendererName?: string | null): void {
     this.gpu = (GPU_CLASSES as readonly string[]).includes(gpu) ? gpu : 'unknown';
+    if (rendererName !== undefined) this.gpuName = gpuNameOf(rendererName);
+  }
+
+  /** The device: navigator's user agent, cores and memory (read once at install). */
+  setDevice(nav: { userAgent?: string; hardwareConcurrency?: number; deviceMemory?: number } | null | undefined): void {
+    const cores = nav?.hardwareConcurrency;
+    const mem = nav?.deviceMemory;
+    this.device = {
+      ...browserOf(nav?.userAgent),
+      cores: typeof cores === 'number' && Number.isInteger(cores) && cores > 0 && cores <= 256 ? cores : null,
+      memGb: typeof mem === 'number' && (MEM_GB as readonly number[]).includes(mem) ? mem : null,
+    };
+  }
+
+  /** A main-thread long task finished (PerformanceObserver 'longtask'); counted inside the first minute only. */
+  longTask(durationMs: number): void {
+    if (this.enterAt === null || this.minuteSent || !(durationMs > 0)) return;
+    this.longTaskMs = (this.longTaskMs ?? 0) + durationMs;
   }
 
   get inWorld(): boolean { return this.enterAt !== null; }
@@ -329,7 +424,14 @@ export class WorldReporter {
     this.lastFrameAt = null;
     this.hist.fill(0);
     this.intervals = 0;
+    this.intervalSum = 0;
     this.maxFrame = 0;
+    this.workHist.fill(0);
+    this.works = 0;
+    this.drawCallSum = 0;
+    this.triangleSum = 0;
+    this.drawSamples = 0;
+    this.longTaskMs = this.longTasksSupported ? 0 : null;
     this.worldDrawnAt = null;
     this.firstMoveAt = null;
     this.firstClickAt = null;
@@ -344,14 +446,23 @@ export class WorldReporter {
    * One animation frame (main.ts frameStep with draw). `worldDrawn`: this frame
    * drew the 3D world with no portal space over it. Counters only.
    */
-  frame(now: number, worldDrawn: boolean): void {
+  frame(now: number, worldDrawn: boolean, workMs?: number): void {
     if (this.enterAt === null || this.minuteSent) return;
     this.frames++;
+    if (workMs !== undefined && workMs >= 0 && Number.isFinite(workMs)) {
+      this.workHist[workMs >= HIST_MAX_MS ? HIST_MAX_MS : Math.floor(workMs)]++;
+      this.works++;
+    }
+    if (worldDrawn) {
+      const d = safe(this.src.drawStats, null);
+      if (d && d.calls >= 0 && d.triangles >= 0) { this.drawCallSum += d.calls; this.triangleSum += d.triangles; this.drawSamples++; }
+    }
     if (this.lastFrameAt !== null) {
       const dt = now - this.lastFrameAt;
       if (dt >= 0 && dt < STALL_MS) {
         this.hist[dt >= HIST_MAX_MS ? HIST_MAX_MS : Math.floor(dt)]++;
         this.intervals++;
+        this.intervalSum += dt;
         if (dt > this.maxFrame) this.maxFrame = dt;
       }
     }
@@ -462,8 +573,20 @@ export class WorldReporter {
     doc.addEventListener('keydown', ((e: KeyboardEvent) => { if (!e.repeat) this.keyDown(); }) as EventListener, true);
     canvas?.addEventListener('pointerdown', () => this.worldClick());
     canvas?.addEventListener('webglcontextlost', () => this.contextLostNow());
+    this.installLongTasks();
     this.outbox.install(win);
     win.setInterval(() => this.tick(), 1000);
+  }
+
+  /** PerformanceObserver 'longtask' (Chromium); elsewhere longTaskMs stays null. */
+  private installLongTasks(): void {
+    try {
+      const PO = (globalThis as { PerformanceObserver?: typeof PerformanceObserver }).PerformanceObserver;
+      if (!PO || !(PO.supportedEntryTypes ?? []).includes('longtask')) return;
+      new PO((list) => { for (const e of list.getEntries()) this.longTask(e.duration); }).observe({ entryTypes: ['longtask'] });
+      this.longTasksSupported = true;
+      if (this.enterAt !== null && !this.minuteSent && this.longTaskMs === null) this.longTaskMs = 0;
+    } catch { /* no longtask timing */ }
   }
 
   // ── Building and sending ─────────────────────────────────────────
@@ -517,6 +640,15 @@ export class WorldReporter {
       modal: this.modal,
       modalMs: this.modal !== null ? Math.max(0, Math.round(at - this.modalSince)) : null,
       errors: this.errorsSince(),
+      frameMeanMs: this.intervals ? Math.round(this.intervalSum / this.intervals) : null,
+      workMedianMs: histQuantile(this.workHist, this.works, 0.5),
+      workP95Ms: histQuantile(this.workHist, this.works, 0.95),
+      longTaskMs: this.longTaskMs === null ? null : Math.round(this.longTaskMs),
+      drawCalls: this.drawSamples ? Math.round(this.drawCallSum / this.drawSamples) : null,
+      triangles: this.drawSamples ? Math.round(this.triangleSum / this.drawSamples) : null,
+      landblock: landblockHex(safe(this.src.landblock, null)),
+      ...this.device,
+      gpuName: this.gpuName,
       ...detail,
     });
   }

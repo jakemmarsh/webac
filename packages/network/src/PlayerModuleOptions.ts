@@ -82,10 +82,57 @@ export const CHAT_OPT_PLACEMENT_ARRAY = 0x1000008C;
 export const CHAT_OPT_TITLE = 0x1000008D;
 
 /**
+ * g_bucketSizeArray (.rdata 0x794670, read from acclient.exe) — a table
+ * serialized with bucket-size index i is unpacked into g_bucketSizes[i]
+ * buckets (nice_num_buckets @ 005978d0 maps each entry to itself).
+ */
+const BUCKET_SIZES: readonly number[] = [
+  11, 23, 47, 89, 191, 383, 761, 1531, 3067, 6143, 12281, 24571, 49139, 98299,
+  196597, 393209, 786431, 1572853, 3145721, 6291449, 12582893, 25165813, 50331599,
+];
+
+/**
  * g_numBucketSizes — the retail client rejects a serialized bucket-size
  * index ≥ 23 (SerializeIntrusiveHashTable RaiseError path), so we do too.
  */
-const NUM_BUCKET_SIZES = 23;
+const NUM_BUCKET_SIZES = BUCKET_SIZES.length;
+
+/**
+ * Bucket of `key` in a table serialized with bucket-size index `idx` —
+ * retail packs a table by walking its buckets in order, so its entries are
+ * always in ascending bucket order (order within a bucket is free).
+ *
+ * BUG.gameplay-options-entry-order (2026-10-20): the retail client can only
+ * load a table in that order. A struct written out of bucket order (our old
+ * fixed order put the text-type filter 0x7f, bucket 9, before x/y/w/h,
+ * buckets 5-8; and opacity 0x80, bucket 10, before 0x81/0x8c, bucket 0)
+ * hangs retail on entering the world: black screen, empty vitals. Verified
+ * with the real client against local ACE: the same entries re-ordered load.
+ */
+function bucketOf(key: number, idx: number): number {
+  return (key >>> 0) % BUCKET_SIZES[idx];
+}
+
+/** Retail's pack order: ascending bucket, stable within a bucket. */
+function inRetailOrder<T>(entries: Array<[number, T]>, idx: number): Array<[number, T]> {
+  return entries
+    .map((e, i) => ({ e, i, b: bucketOf(e[0], idx) }))
+    .sort((a, b) => a.b - b.b || a.i - b.i)
+    .map((x) => x.e);
+}
+
+/** Parse-side record of whether every table read was in retail's order. */
+interface ParseOrder { outOfOrder: boolean }
+
+/** Note one table's keys (in read order); flags a key whose bucket is lower than the one before it. */
+function checkOrder(keys: number[], idx: number, order: ParseOrder): void {
+  let last = -1;
+  for (const k of keys) {
+    const b = bucketOf(k, idx);
+    if (b < last) order.outOfOrder = true;
+    last = b;
+  }
+}
 
 // ─── Semantic model ─────────────────────────────────────────────────────
 
@@ -118,6 +165,13 @@ export interface GameplayOptionsData {
   activeOpacity?: number;
   /** windowId (1-based; floaties are 2-5, main chat is 8) → options. */
   chatWindows: Map<number, ChatWindowOptions>;
+  /**
+   * Parse only: some table in the stored blob was not in retail's bucket
+   * order, so the retail client hangs entering the world with it (an older
+   * webAC save; see bucketOf). The client re-saves the module in retail
+   * order as soon as the server accepts it, which repairs the character.
+   */
+  needsRepair?: boolean;
 }
 
 // ─── Packed u32 (SB_As32Bit_Compressed — the AC CompressedUInt32) ───────
@@ -202,15 +256,17 @@ function readTitleStringInfo(r: BinaryReader): string | undefined {
   return literal;
 }
 
-function readPlacementStruct(r: BinaryReader): ChatWindowOptions {
+function readPlacementStruct(r: BinaryReader, order: ParseOrder): ChatWindowOptions {
   const bucketIdx = u8(r);
   if (bucketIdx >= NUM_BUCKET_SIZES) throw new ParseAbort();
   const count = readPackedU32(r);
   const out: ChatWindowOptions = {};
+  const keys: number[] = [];
   for (let i = 0; i < count; i++) {
     const hashKey = r.readUInt32();
     const name = r.readUInt32();
     if (name !== hashKey) throw new ParseAbort();
+    keys.push(name);
     switch (name) {
       case CHAT_OPT_TEXT_TYPE:
         out.filter = BigInt.asUintN(64, r.readInt64());
@@ -230,6 +286,7 @@ function readPlacementStruct(r: BinaryReader): ChatWindowOptions {
         throw new ParseAbort();
     }
   }
+  checkOrder(keys, bucketIdx, order);
   return out;
 }
 
@@ -250,10 +307,13 @@ export function parseGameplayOptions(r: BinaryReader): GameplayOptionsData | nul
     if (bucketIdx >= NUM_BUCKET_SIZES) throw new ParseAbort();
     const count = readPackedU32(r);
     const out: GameplayOptionsData = { chatWindows: new Map() };
+    const order: ParseOrder = { outOfOrder: false };
+    const keys: number[] = [];
     for (let i = 0; i < count; i++) {
       const hashKey = r.readUInt32();
       const name = r.readUInt32();
       if (name !== hashKey) throw new ParseAbort();
+      keys.push(name);
       switch (name) {
         case CHAT_OPT_DEFAULT_OPACITY: out.defaultOpacity = r.readFloat32(); break;
         case CHAT_OPT_ACTIVE_OPACITY: out.activeOpacity = r.readFloat32(); break;
@@ -263,7 +323,7 @@ export function parseGameplayOptions(r: BinaryReader): GameplayOptionsData | nul
           for (let idx = 0; idx < num; idx++) {
             const elemName = r.readUInt32();
             if (elemName !== CHAT_OPT_PLACEMENT) throw new ParseAbort();
-            const winOpts = readPlacementStruct(r);
+            const winOpts = readPlacementStruct(r, order);
             if (Object.keys(winOpts).length > 0) out.chatWindows.set(idx + 1, winOpts);
           }
           break;
@@ -276,11 +336,13 @@ export function parseGameplayOptions(r: BinaryReader): GameplayOptionsData | nul
         case CHAT_OPT_WIDTH: case CHAT_OPT_HEIGHT: r.skip(4); break;
         case CHAT_OPT_VISIBILITY: u8(r); break;
         case CHAT_OPT_TITLE: readTitleStringInfo(r); break;
-        case CHAT_OPT_PLACEMENT: readPlacementStruct(r); break;
+        case CHAT_OPT_PLACEMENT: readPlacementStruct(r, order); break;
         default:
           throw new ParseAbort();
       }
     }
+    checkOrder(keys, bucketIdx, order);
+    if (order.outOfOrder) out.needsRepair = true;
     return out;
   } catch {
     return null;
@@ -322,9 +384,10 @@ function writePlacementStruct(w: BinaryWriter, opts: ChatWindowOptions): void {
     const t = opts.title;
     entries.push([CHAT_OPT_TITLE, () => writeTitleStringInfo(w, t)]);
   }
-  w.writeUInt8(bucketSizeIndexFor(entries.length));
+  const idx = bucketSizeIndexFor(entries.length);
+  w.writeUInt8(idx);
   writePackedU32(w, entries.length);
-  for (const [id, writeValue] of entries) {
+  for (const [id, writeValue] of inRetailOrder(entries, idx)) {
     w.writeUInt32(id); // hashtable key
     w.writeUInt32(id); // BaseProperty name
     writeValue();
@@ -361,9 +424,10 @@ export function serializeGameplayOptions(data: GameplayOptionsData): Uint8Array 
     }]);
   }
 
-  w.writeUInt8(bucketSizeIndexFor(top.length));
+  const idx = bucketSizeIndexFor(top.length);
+  w.writeUInt8(idx);
   writePackedU32(w, top.length);
-  for (const [id, writeValue] of top) {
+  for (const [id, writeValue] of inRetailOrder(top, idx)) {
     w.writeUInt32(id); // hashtable key
     w.writeUInt32(id); // BaseProperty name
     writeValue();

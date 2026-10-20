@@ -23,6 +23,42 @@ export interface PlayerModuleFlush {
   flushChatOptionsSave(): void;
 }
 
+/**
+ * BUG.gameplay-options-entry-order — self-repair of a stored module the
+ * retail client cannot load. Older webAC saves wrote the GameplayOptions
+ * tables out of retail's bucket order; the retail client then hangs entering
+ * the world with that character (black world, empty vitals) while every other
+ * character on the account works. Nothing on the retail side can overwrite
+ * it, so when a login's PlayerDescription carries such a blob (parse flag
+ * `needsRepair`), the module is re-saved, now in retail order, as soon as the
+ * server accepts SetCharacterOptions: ACE ignores it until LoginComplete
+ * (GameActionSetCharacterOptions.cs: FirstEnterWorldDone). The delay keeps
+ * the save well behind LoginComplete in ACE's action queue.
+ */
+export const CHAT_OPTIONS_REPAIR_DELAY_MS = 2000;
+
+export class ChatOptionsRepair {
+  private pending = false;
+
+  constructor(private readonly deps: {
+    /** Mark the module dirty and send it now (GameUI.markChatOptionsDirty + flushChatOptionsSave). */
+    resave(): void;
+    schedule(fn: () => void, ms: number): void;
+  }) {}
+
+  /** Each PlayerDescription: remember whether its stored module needs rewriting. */
+  noteLoginModule(stored: { needsRepair?: boolean } | null | undefined): void {
+    this.pending = stored?.needsRepair === true;
+  }
+
+  /** LoginComplete went out: the server will now accept the re-save. */
+  loginCompleteSent(): void {
+    if (!this.pending) return;
+    this.pending = false;
+    this.deps.schedule(() => this.deps.resave(), CHAT_OPTIONS_REPAIR_DELAY_MS);
+  }
+}
+
 /** CPlayerSystem::LogOffCharacter: SaveToServer(false), then the logoff request. */
 export function logOffCharacter(module: PlayerModuleFlush, connection: { sendCharacterLogOff(): void }): void {
   module.flushChatOptionsSave();
