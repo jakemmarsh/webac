@@ -8,6 +8,7 @@
  * nobody wants any more (`stillWanted` false) is dropped.
  */
 import { FetchPriority, type FileKey } from './DatStore.js';
+import { streamHandlerCost } from '../../telemetry/MainThreadCost.js';
 
 export interface RetryStore {
   scoped<T>(fn: () => T): { result: T; scope: { missed: boolean; keys: Iterable<FileKey> } };
@@ -28,7 +29,8 @@ export function runRetryingOnArrival(
     const { scope } = store.scoped(run);
     if (!scope.missed || n + 1 >= maxRuns) return;
     store.ensure(scope.keys, FetchPriority.Critical).then(
-      () => { if (stillWanted()) attempt(n + 1); },
+      // PERF.slow-first-minute-diagnostics — a re-run's main-thread cost (telemetry/MainThreadCost.ts).
+      () => { if (stillWanted()) streamHandlerCost.time('retry', () => attempt(n + 1)); },
       () => { /* failed fetch: keep what was built */ },
     );
   };

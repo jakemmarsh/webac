@@ -50,6 +50,7 @@ import {
 } from '@ac/dat-parser/streaming/DatSetFormat.js';
 import { readResponseBytes } from '../readResponseBytes.js';
 import { NullObjectCache, type ObjectCache } from './ObjectCache.js';
+import { streamHandlerCost } from '../../telemetry/MainThreadCost.js';
 
 const ITERATION_FILE_ID = 0xffff0001;
 
@@ -602,7 +603,8 @@ export class DatStore {
     let p = this.bundleLoads.get(lb);
     if (p) this.promote(ref.hash, priority);
     if (!p) {
-      p = this.loadObject(ref, priority).then((bytes) => {
+      // PERF.slow-first-minute-diagnostics — a landing's main-thread cost (telemetry/MainThreadCost.ts).
+      p = this.loadObject(ref, priority).then((bytes) => streamHandlerCost.time('bundle', () => {
         const pack = parsePack(bytes);
         const cell = this.resident.cell;
         for (const [id, view] of pack.files) cell.set(id >>> 0, view);
@@ -611,7 +613,7 @@ export class DatStore {
         this.addUnit(bundleUnitKey(lb), { bytes: bytes.byteLength, touched: this.now(), dat: 'cell', id: lb, bundle: true });
         for (const id of pack.ids) this.emitResident(fileKey('cell', id));
         this.evictIfOverCap();
-      }).finally(() => this.bundleLoads.delete(lb));
+      })).finally(() => this.bundleLoads.delete(lb));
       this.bundleLoads.set(lb, p);
     }
     return p;
@@ -785,6 +787,10 @@ export class DatStore {
    * frees it; the common pack's are views that stay for the session.
    */
   private addLeafPack(bytes: Uint8Array, evictable: boolean): void {
+    streamHandlerCost.time(evictable ? 'area' : 'common', () => this.addLeafPackNow(bytes, evictable));
+  }
+
+  private addLeafPackNow(bytes: Uint8Array, evictable: boolean): void {
     const map = this.resident.portal;
     const pack = parsePack(bytes);
     for (const [rawId, view] of pack.files) {
@@ -814,6 +820,10 @@ export class DatStore {
   }
 
   private addPack(role: PackRole, bytes: Uint8Array): void {
+    streamHandlerCost.time(`pack_${role}`, () => this.addPackNow(role, bytes));
+  }
+
+  private addPackNow(role: PackRole, bytes: Uint8Array): void {
     const dat = PACK_DAT[role];
     const pack = parsePack(bytes);
     const map = this.resident[dat];
@@ -916,12 +926,14 @@ export class DatStore {
         return false;
       }
       const payload = await this.loadObject(leaf, priority);
-      if (!this.resident[dat].has(id)) {
-        this.resident[dat].set(id, payload);
-        this.addUnit(fileKey(dat, id), { bytes: payload.byteLength, touched: this.now(), dat, id, bundle: false });
-      }
-      this.emitResident(fileKey(dat, id));
-      this.evictIfOverCap();
+      streamHandlerCost.time('leaf', () => {
+        if (!this.resident[dat].has(id)) {
+          this.resident[dat].set(id, payload);
+          this.addUnit(fileKey(dat, id), { bytes: payload.byteLength, touched: this.now(), dat, id, bundle: false });
+        }
+        this.emitResident(fileKey(dat, id));
+        this.evictIfOverCap();
+      });
       return true;
     }
     if (dat === 'cell') {

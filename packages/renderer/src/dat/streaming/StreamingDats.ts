@@ -24,6 +24,7 @@ import type { PackRole } from '@ac/dat-parser/streaming/DatSetFormat.js';
 import { DatClosure, layoutArtIds } from './DatClosure.js';
 import { DatStore, type DatStoreOptions, FetchPriority, type FileKey, type MissScope, fileKey, splitFileKey } from './DatStore.js';
 import { type ObjectCache, NullObjectCache, OpfsObjectCache } from './ObjectCache.js';
+import { streamHandlerCost } from '../../telemetry/MainThreadCost.js';
 
 export interface StreamingDats {
   store: DatStore;
@@ -298,7 +299,8 @@ export function rebuildOnArrival(
 ): Promise<void> {
   return Promise.all([store.ensure(scope.keys, FetchPriority.Critical), closure.ensure(roots, FetchPriority.Critical)])
     .then(() => {
-      const again = store.scoped(rebuild).scope;
+      // PERF.slow-first-minute-diagnostics — the rebuild's main-thread cost (telemetry/MainThreadCost.ts).
+      const again = streamHandlerCost.time('rebuild', () => store.scoped(rebuild).scope);
       if (again.missed && attempts > 1) return rebuildOnArrival(store, closure, again, rebuild, roots, attempts - 1);
       return undefined;
     }, () => { /* failed fetch: stays as built */ });

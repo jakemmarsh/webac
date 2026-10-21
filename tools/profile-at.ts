@@ -47,6 +47,8 @@ try {
   };
   const throttleAfterEntry = args.includes('--throttle-after-entry');
   if (netKbps > 0 && !throttleAfterEntry) await throttle();
+  // The page's own telemetry posts (client-world / client-preworld), printed when a first_minute goes out.
+  page.on('request', (r) => { const u = r.url(); if (/client-(pre)?world/.test(u)) { const b = r.postData() ?? ''; if (b.includes('first_minute')) console.log('[first_minute ' + stamp() + ']', b.slice(0, 3000)); } });
   await page.goto(url, { waitUntil: 'commit', timeout: 120_000 });
   await page.waitForFunction(() => (window as unknown as { __ac?: { gameUI?: { uiManager?: { currentScreen?: string } } } }).__ac?.gameUI?.uiManager?.currentScreen === 'game', null, { timeout: 900_000, polling: 1000 });
   console.log('in game at', stamp());
@@ -95,6 +97,10 @@ try {
   const frames = await page.evaluate('(() => { window.__pfOn = false; return window.__pf; })()') as number[];
 
   const rs = await page.evaluate('(() => { clearInterval(window.__rsT); return window.__rs; })()') as Array<[number, number]>;
+  const info = await page.evaluate(`(() => { const r = window.__ac?.sceneManager?.renderer; if (!r) return null;
+    const progs = r.info.programs || []; const keys = {}; for (const p of progs) { const k = (p.name || p.cacheKey || '?').slice(0, 40); keys[k] = (keys[k] || 0) + 1; }
+    return { programs: progs.length, geometries: r.info.memory.geometries, textures: r.info.memory.textures, calls: r.info.render.calls, top: Object.entries(keys).sort((a,b)=>b[1]-a[1]).slice(0,8) }; })()`);
+  console.log('renderer info:', JSON.stringify(info));
   console.log('pixel ratio over time (s:ratio):', rs.map(([t, r]) => `${t}:${r}`).join(' '));
   mkdirSync(out, { recursive: true });
   const shot = join(out, `profile-${Date.now()}.png`);

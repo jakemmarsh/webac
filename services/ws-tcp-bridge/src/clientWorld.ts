@@ -111,6 +111,43 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   gpuName?: string | null;
   cores?: number | null;
   memGb?: number | null;
+  /** PERF.slow-first-minute-diagnostics, second pass: which part of the page's code the minute went to. */
+  phaseMs?: Partial<Record<typeof FRAME_PHASES[number], number>> | null;
+  netHandlerMs?: number | null;
+  streamHandlerMs?: number | null;
+  longestHandlerMs?: number | null;
+  longestHandlerOp?: string | null;
+  longTaskMaxMs?: number | null;
+  programs?: number | null;
+  programsCreated?: number | null;
+  geometries?: number | null;
+  textures?: number | null;
+  sceneObjects?: number | null;
+  compileMs?: number | null;
+  serverObjects?: number | null;
+}
+
+/** frameStep's phases (renderer telemetry/MainThreadCost.ts FRAME_PHASES): phaseMs keeps only these keys. */
+export const FRAME_PHASES = ['tags', 'physics', 'sweep', 'anim', 'sync', 'camera', 'fx', 'stream', 'hud', 'lod', 'warmup', 'render'] as const;
+/** phaseMs holds at most this many phases (the renderer sends its ten largest). */
+export const MAX_PHASE_KEYS = 10;
+/** A per-frame phase mean, ms, at most this. */
+export const MAX_PHASE_MS = 5000;
+
+/** Mean ms per frame by phase: whitelisted keys, numbers 0..MAX_PHASE_MS at 0.1 ms; null when not an object. */
+function phaseMs(v: unknown): Partial<Record<typeof FRAME_PHASES[number], number>> | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const out: Partial<Record<typeof FRAME_PHASES[number], number>> = {};
+  let n = 0;
+  // The page's order (largest first) is kept; unknown keys are dropped.
+  for (const k of Object.keys(v)) {
+    if (!(FRAME_PHASES as readonly string[]).includes(k)) continue;
+    const x = (v as Record<string, unknown>)[k];
+    if (typeof x !== 'number' || !Number.isFinite(x) || x < 0 || x > MAX_PHASE_MS) continue;
+    if (n++ >= MAX_PHASE_KEYS) break;
+    out[k as typeof FRAME_PHASES[number]] = Math.round(x * 10) / 10;
+  }
+  return out;
 }
 
 /** Closed sets, as the renderer's WorldReporter BROWSER_FAMILIES / OS_FAMILIES. */
@@ -141,6 +178,19 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
   set('gpuName', match(b.gpuName, /^[\x20-\x7e]{1,96}$/));
   set('cores', uint(b.cores, 256));
   set('memGb', typeof b.memGb === 'number' && MEM_GB.includes(b.memGb) ? b.memGb : null);
+  set('phaseMs', phaseMs(b.phaseMs));
+  set('netHandlerMs', uint(b.netHandlerMs, MINUTE_MS));
+  set('streamHandlerMs', uint(b.streamHandlerMs, MINUTE_MS));
+  set('longestHandlerMs', uint(b.longestHandlerMs, MINUTE_MS));
+  set('longestHandlerOp', match(b.longestHandlerOp, /^[A-Za-z0-9:_]{1,24}$/));
+  set('longTaskMaxMs', uint(b.longTaskMaxMs, MINUTE_MS));
+  set('programs', uint(b.programs, 100_000));
+  set('programsCreated', uint(b.programsCreated, 1_000_000));
+  set('geometries', uint(b.geometries, 10_000_000));
+  set('textures', uint(b.textures, 10_000_000));
+  set('sceneObjects', uint(b.sceneObjects, 10_000_000));
+  set('compileMs', uint(b.compileMs, MINUTE_MS));
+  set('serverObjects', uint(b.serverObjects, 1_000_000));
   return out;
 }
 

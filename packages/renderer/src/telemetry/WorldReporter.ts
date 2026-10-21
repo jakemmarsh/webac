@@ -30,6 +30,7 @@
  */
 import { boundNetDiagnostics, NET_DIAG_END_CAUSES } from '@ac/network';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
+import { FRAME_PHASES, PHASE, opToken } from './MainThreadCost.js';
 
 /** How the player left (closed set; `still_in` = in the world at 60 s). */
 export const WORLD_EXITS = ['closed_tab', 'hidden', 'logout', 'disconnected', 'still_in'] as const;
@@ -151,6 +152,31 @@ export interface FirstMinuteEvent {
   gpuName?: string | null;
   cores?: number | null;
   memGb?: number | null;
+  /**
+   * PERF.slow-first-minute-diagnostics, second pass (2026-10-20: a 294 ms-a-frame minute on an RX 7900 XTX
+   * with frameStep at 117 ms and 34.6 s of long tasks, so ~22 s ran outside frameStep). frameStep's mean
+   * ms per measured frame by phase (MainThreadCost FRAME_PHASES), the ten largest, 0.1 ms; null when unmeasured.
+   */
+  phaseMs?: Partial<Record<typeof FRAME_PHASES[number], number>> | null;
+  /** Synchronous main-thread ms in the minute: server-message handling (onSessionEvent) and streamed-DAT landings / rebuilds. */
+  netHandlerMs?: number | null;
+  streamHandlerMs?: number | null;
+  /** The single longest of those handler calls and its op ("objectCreate", "m:f745", "ge:13", "s:bundle"). */
+  longestHandlerMs?: number | null;
+  longestHandlerOp?: string | null;
+  /** The longest single long task in the minute (null where the browser has no longtask timing). */
+  longTaskMaxMs?: number | null;
+  /** three.js at the event: live WebGL programs, geometries and textures (renderer.info). */
+  programs?: number | null;
+  geometries?: number | null;
+  textures?: number | null;
+  /** WebGL programs created in the minute (a program thrown away and rebuilt counts again). */
+  programsCreated?: number | null;
+  /** The render + warmup phase ms of the frames in which programs were created (their compile cost, roughly). */
+  compileMs?: number | null;
+  /** Object3Ds under the world scene, counted at the event; live server objects at the event. */
+  sceneObjects?: number | null;
+  serverObjects?: number | null;
   /** Exit 'disconnected': what ended the session, and the socket's close code (1006 = dropped with no close frame). */
   endCause?: WorldEndCause | null;
   closeCode?: number | null;
@@ -204,7 +230,28 @@ export interface WorldReporterSources {
   drawStats?: () => { calls: number; triangles: number } | null;
   /** The player's landblock, 0xXXYY, or null. */
   landblock?: () => number | null;
+  /** WebGL programs created so far, a running total (MainThreadCost ProgramCreationCounter); read per measured frame. */
+  programsCreated?: () => number | null;
+  /** renderer.info at the event: live programs, geometries, textures. */
+  rendererState?: () => { programs: number; geometries: number; textures: number } | null;
+  /** Object3Ds under the world scene (counted once, at the event). */
+  sceneObjects?: () => number | null;
+  /** Live server objects (ServerObjectManager), at the event. */
+  serverObjects?: () => number | null;
 }
+
+/** A HandlerMeter as the reporter reads it (MainThreadCost). */
+export interface HandlerCostMeter {
+  readonly totalMs: number;
+  readonly longestMs: number;
+  readonly longestOp: string | null;
+  reset(): void;
+}
+
+/** phaseMs keeps the largest this many phases. */
+export const MAX_PHASE_KEYS = 10;
+/** A per-frame phase mean above this is not a frame phase (the bridge's bound too). */
+export const MAX_PHASE_MS = 5000;
 
 export const BROWSER_FAMILIES = ['chrome', 'edge', 'firefox', 'safari', 'opera', 'other'] as const;
 export type BrowserFamily = typeof BROWSER_FAMILIES[number];
@@ -301,6 +348,9 @@ function landblockHex(v: number | null): string | null {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 0xffff ? v.toString(16).padStart(4, '0') : null;
 }
 
+/** A first-minute total in ms is at most this (the bridge's bound: 60 s with slack for a late tick). */
+const MINUTE_CAP_MS = 120_000;
+
 /** The draw-distance ladder has six entries: at most five steps down. */
 export const MAX_DRAW_DISTANCE_STEPS = 5;
 
@@ -315,6 +365,11 @@ function dropFields(drop: WorldDropDetail | undefined): { endCause: WorldEndCaus
     closeCode: typeof code === 'number' && Number.isInteger(code) && code >= 1000 && code <= 4999 ? code : null,
     ...(net ? { net } : {}),
   };
+}
+
+/** A count as sent: a whole number 0..max (clamped), else null. */
+function count(v: unknown, max: number): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(max, Math.round(v)) : null;
 }
 
 function safe<T>(f: (() => T) | undefined, fallback: T): T {
@@ -352,6 +407,15 @@ export class WorldReporter {
   /** Long-task ms in this session's first minute (null: no longtask timing in this browser). */
   private longTaskMs: number | null = null;
   private longTasksSupported = false;
+  private longTaskMax = 0;
+  /** Phase sums over the measured frames (FRAME_PHASES order). */
+  private readonly phaseSum = new Float64Array(FRAME_PHASES.length);
+  private phaseFrames = 0;
+  private compileSum = 0;
+  /** The program-creation total at the session's start and at the last measured frame (null: no source). */
+  private programsAtEnter: number | null = null;
+  private programsLast: number | null = null;
+  private meters: { net: HandlerCostMeter; stream: HandlerCostMeter } | null = null;
   private device: Pick<FirstMinuteEvent, 'browser' | 'browserMajor' | 'os' | 'cores' | 'memGb'> = {};
   private gpuName: string | null = null;
   private worldDrawnAt: number | null = null;
@@ -380,6 +444,11 @@ export class WorldReporter {
     this.src = { ...this.src, ...src };
   }
 
+  /** The server-message and streamed-DAT handler meters (MainThreadCost); reset at each world entry. */
+  setHandlerMeters(net: HandlerCostMeter, stream: HandlerCostMeter): void {
+    this.meters = { net, stream };
+  }
+
   /** The renderer's GPU class (classifyGpu of the unmasked string, read once at renderer init). */
   setGpu(gpu: GpuClass, rendererName?: string | null): void {
     this.gpu = (GPU_CLASSES as readonly string[]).includes(gpu) ? gpu : 'unknown';
@@ -401,6 +470,7 @@ export class WorldReporter {
   longTask(durationMs: number): void {
     if (this.enterAt === null || this.minuteSent || !(durationMs > 0)) return;
     this.longTaskMs = (this.longTaskMs ?? 0) + durationMs;
+    if (durationMs > this.longTaskMax) this.longTaskMax = durationMs;
   }
 
   get inWorld(): boolean { return this.enterAt !== null; }
@@ -437,6 +507,14 @@ export class WorldReporter {
     this.triangleSum = 0;
     this.drawSamples = 0;
     this.longTaskMs = this.longTasksSupported ? 0 : null;
+    this.longTaskMax = 0;
+    this.phaseSum.fill(0);
+    this.phaseFrames = 0;
+    this.compileSum = 0;
+    const programs = safe(this.src.programsCreated, null);
+    this.programsAtEnter = typeof programs === 'number' && Number.isFinite(programs) ? programs : null;
+    this.programsLast = this.programsAtEnter;
+    if (this.meters) { this.meters.net.reset(); this.meters.stream.reset(); }
     this.worldDrawnAt = null;
     this.firstMoveAt = null;
     this.firstClickAt = null;
@@ -449,11 +527,29 @@ export class WorldReporter {
 
   /**
    * One animation frame (main.ts frameStep with draw). `worldDrawn`: this frame
-   * drew the 3D world with no portal space over it. Counters only.
+   * drew the 3D world with no portal space over it. Counters only. `phases`:
+   * this frame's ms per FRAME_PHASES phase (MainThreadCost FramePhaseTimer.frameMs).
    */
-  frame(now: number, worldDrawn: boolean, workMs?: number): void {
+  frame(now: number, worldDrawn: boolean, workMs?: number, phases?: ArrayLike<number>): void {
     if (this.enterAt === null || this.minuteSent) return;
     this.frames++;
+    let created = false;
+    if (this.src.programsCreated) {
+      const total = safe(this.src.programsCreated, null);
+      if (typeof total === 'number' && Number.isFinite(total)) {
+        if (this.programsLast === null) { this.programsLast = total; this.programsAtEnter ??= total; }
+        created = total > this.programsLast;
+        this.programsLast = total;
+      }
+    }
+    if (phases && phases.length === FRAME_PHASES.length) {
+      for (let i = 0; i < FRAME_PHASES.length; i++) {
+        const v = phases[i];
+        if (v > 0 && Number.isFinite(v)) this.phaseSum[i] += v;
+      }
+      this.phaseFrames++;
+      if (created) this.compileSum += Math.max(0, phases[PHASE.render] || 0) + Math.max(0, phases[PHASE.warmup] || 0);
+    }
     if (workMs !== undefined && workMs >= 0 && Number.isFinite(workMs)) {
       this.workHist[workMs >= HIST_MAX_MS ? HIST_MAX_MS : Math.floor(workMs)]++;
       this.works++;
@@ -654,8 +750,43 @@ export class WorldReporter {
       landblock: landblockHex(safe(this.src.landblock, null)),
       ...this.device,
       gpuName: this.gpuName,
+      ...this.costFields(),
       ...detail,
     });
+  }
+
+  /** PERF.slow-first-minute-diagnostics, second pass: where the minute's main thread went. */
+  private costFields(): Pick<FirstMinuteEvent, 'phaseMs' | 'netHandlerMs' | 'streamHandlerMs' | 'longestHandlerMs' | 'longestHandlerOp'
+    | 'longTaskMaxMs' | 'programs' | 'geometries' | 'textures' | 'programsCreated' | 'compileMs' | 'sceneObjects' | 'serverObjects'> {
+    let phaseMs: FirstMinuteEvent['phaseMs'] = null;
+    if (this.phaseFrames > 0) {
+      const means = FRAME_PHASES.map((p, i) => [p, Math.min(MAX_PHASE_MS, Math.round(this.phaseSum[i] / this.phaseFrames * 10) / 10)] as const)
+        .filter(([, v]) => v > 0)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, MAX_PHASE_KEYS);
+      phaseMs = Object.fromEntries(means);
+    }
+    const m = this.meters;
+    const longest = m ? (m.net.longestMs >= m.stream.longestMs ? m.net : m.stream) : null;
+    const longestOp = longest && longest.longestOp !== null && longest.longestMs > 0
+      ? opToken(longest === m!.stream ? `s:${longest.longestOp}` : longest.longestOp) : null;
+    const rs = safe(this.src.rendererState, null);
+    const programsNow = safe(this.src.programsCreated, null);
+    return {
+      phaseMs,
+      netHandlerMs: m ? count(m.net.totalMs, MINUTE_CAP_MS) : null,
+      streamHandlerMs: m ? count(m.stream.totalMs, MINUTE_CAP_MS) : null,
+      longestHandlerMs: longestOp !== null ? count(longest!.longestMs, MINUTE_CAP_MS) : null,
+      longestHandlerOp: longestOp,
+      longTaskMaxMs: this.longTaskMs === null ? null : count(this.longTaskMax, MINUTE_CAP_MS),
+      programs: count(rs?.programs, 100_000),
+      geometries: count(rs?.geometries, 10_000_000),
+      textures: count(rs?.textures, 10_000_000),
+      programsCreated: this.programsAtEnter !== null && typeof programsNow === 'number' ? count(programsNow - this.programsAtEnter, 1_000_000) : null,
+      compileMs: this.phaseFrames > 0 && this.programsAtEnter !== null ? count(this.compileSum, MINUTE_CAP_MS) : null,
+      sceneObjects: count(safe(this.src.sceneObjects, null), 10_000_000),
+      serverObjects: count(safe(this.src.serverObjects, null), 1_000_000),
+    };
   }
 
   private post(ev: WorldEvent): void {

@@ -414,6 +414,7 @@ import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
 import { launcherConnectFailedReport, reportFromPage, worldListFailedReport } from './telemetry/WebReport.js';
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
+import { FramePhaseTimer, PHASE, ProgramCreationCounter, netHandlerCost, streamHandlerCost, connectionEventOp } from './telemetry/MainThreadCost.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
@@ -1275,6 +1276,8 @@ async function main() {
     canvas: () => ({ width: canvas.clientWidth, height: canvas.clientHeight }),
     hidden: () => document.visibilityState === 'hidden',
   });
+  // PERF.slow-first-minute-diagnostics — the main-thread work outside frameStep (telemetry/MainThreadCost.ts).
+  worldReporter.setHandlerMeters(netHandlerCost, streamHandlerCost);
   worldReporter.install(window, document, canvas);
   automationReporter = new AutomationReporter({
     endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
@@ -1933,6 +1936,8 @@ async function main() {
   }
 
   const cameraController = new CameraController(sceneManager.camera);
+  /** PERF.slow-first-minute-diagnostics — WebGL programs three.js created (telemetry/MainThreadCost.ts). */
+  const programCreations = new ProgramCreationCounter();
   // RELEASE.first-minute — the GPU's class (integrated / discrete / software). PERF.slow-first-minute-diagnostics
   // (2026-10-20): the renderer string goes too (printable, 96 chars), to tell a slow first minute's hardware apart.
   {
@@ -1949,7 +1954,20 @@ async function main() {
       const r = sceneManager.renderer?.info?.render;
       return r ? { calls: r.calls, triangles: r.triangles } : null;
     },
+    // PERF.slow-first-minute-diagnostics — programs created (hooked now, before the world's
+    // materials compile), the renderer's live resources and the scene's size at the event.
+    programsCreated: () => programCreations.sample(sceneManager.renderer?.info),
+    rendererState: () => {
+      const info = sceneManager.renderer?.info;
+      return info ? { programs: info.programs?.length ?? 0, geometries: info.memory.geometries, textures: info.memory.textures } : null;
+    },
+    sceneObjects: () => {
+      let n = 0;
+      sceneManager.scene.traverse(() => { n++; });
+      return n;
+    },
   });
+  programCreations.sample(sceneManager.renderer?.info);
 
   // ── Rebindable keyboard system (VISUAL.127) ────────────────────────────
   // One registry drives BOTH movement (via CameraController.keyTranslator) and
@@ -7591,6 +7609,7 @@ async function main() {
       const stores = [...new Set([streamingDats, worldStreamingDats])].filter((x): x is StreamingDats => !!x);
       return stores.length ? stores.reduce((n, sd) => n + sd.store.stats.unresolvedMisses, 0) : null;
     },
+    serverObjects: () => serverObjectManager?.getAllObjects().size ?? null,
   });
   preworldChargenStep = () => chargenStepName(gameUI.chargenStep);
   const applyUpdatePolicy = (): void => {
@@ -18277,7 +18296,8 @@ async function main() {
     const QUEUED_OBJECT_BURST_MAX_MS = 1500;
     const SESSION_LIFECYCLE = new Set(['connected', 'disconnected', 'error', 'reconnecting', 'serverTimeout', 'loginRetry']);
     const sessionEventGate: GatedEventQueue<ConnectionEvent> = new GatedEventQueue<ConnectionEvent>({
-      dispatch: onSessionEvent,
+      // PERF.slow-first-minute-diagnostics — every handled event's synchronous cost, by type / opcode.
+      dispatch: (e) => netHandlerCost.time(() => connectionEventOp(e), () => onSessionEvent(e)),
       passThrough: (e) => {
         if (e.type === 'disconnected') { sessionEventGate.clear(); dddStatus.end(); }
         return SESSION_LIFECYCLE.has(e.type);
@@ -18916,12 +18936,20 @@ async function main() {
     if (nametagsOn) nametags.follow(nametagPos);
   }
 
+  /**
+   * PERF.slow-first-minute-diagnostics — frameStep's time by phase (telemetry/MainThreadCost.ts
+   * FRAME_PHASES): one performance.now() at the end of each phase, read by WorldReporter.frame.
+   */
+  const framePhases = new FramePhaseTimer();
+
   /** One frame of the game; `draw` false runs everything but the 3D draw (the background beat). */
   function frameStep(draw: boolean, frameTime?: number) {
     const workStart = performance.now();
+    framePhases.begin(workStart);
     const now = frameClock.next(frameTime, workStart);
     if (draw) { updateNavLines(now); updateNametags(now); goArrow?.frame(); }
     if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(); }
+    framePhases.mark(PHASE.tags);
     const dt = Math.max(0, now - lastTime) / 1000;
     lastTime = now;
 
@@ -19481,6 +19509,7 @@ async function main() {
         // since it's registered in animatedObjects — don't update it twice.
       }
 
+      framePhases.mark(PHASE.physics);
       // ── NPC/creature idle animations ──
       if (serverObjectManager) {
         // BUG.teleport-leaves-stale-objects — CObjectMaint: objects whose
@@ -19516,12 +19545,14 @@ async function main() {
         // still uses (models/ResourceSweep.ts). At most every 10 s.
         // After unloads at most every 10 s, and every 60 s regardless (creatures
         // that die in place free their textures without any block unloading).
+        framePhases.mark(PHASE.anim);
         const sinceSweep = performance.now() - lastResourceSweep;
         if ((landblockObjects.unloadedBlockCount !== sweptUnloadCount && sinceSweep > 10_000) || sinceSweep > 60_000) {
           sweptUnloadCount = landblockObjects.unloadedBlockCount;
           lastResourceSweep = performance.now();
           sweepUnusedResources();
         }
+        framePhases.mark(PHASE.sweep);
         serverObjectManager.updateAnimations(dt);
       }
 
@@ -19529,6 +19560,7 @@ async function main() {
       // inside the building's bbox. Hides static interior geometry
       // (walls/furniture/floors) from the outdoor view.
       updateBuildingShells(playerWorldX, playerWorldZ);
+      framePhases.mark(PHASE.anim);
 
       // ── Movement sync to ACE server ──
       // Only once in the world: retail's CommandInterpreter has no player to
@@ -19588,6 +19620,7 @@ async function main() {
         movementSync.update(ms, pp, now);
       }
 
+      framePhases.mark(PHASE.sync);
       // Position camera behind character (third-person follow). CORE.18.b —
       // the retail rig (scene/RetailCamera.ts, CameraManager::UpdateCamera):
       // a boom from the pivot CAMERA_DEFAULT_PIVOT_Z above the feet, back
@@ -19719,6 +19752,7 @@ async function main() {
       // through physicsScriptPlayer in their DAT time windows, replacing
       // the old invented 10-30s random UI_Thunder timer.
 
+      framePhases.mark(PHASE.camera);
       // Update skybox and visual effects — center sky on camera.
       // CORE.17.q — the sky clock/light tick keeps running underground too
       // (retail LScape::UseTime); sealed-interior mode hides the dome/sun and
@@ -19828,6 +19862,7 @@ async function main() {
       // Death check — detect when health hits 0
       checkPlayerDeath();
 
+      framePhases.mark(PHASE.fx);
       // Terrain streaming (based on player position, not camera) — always stream terrain
       // even when in surface buildings so outdoor terrain is visible through doors/windows
       const tdx = playerWorldX - lastTerrainX;
@@ -19905,6 +19940,7 @@ async function main() {
           (cellId) => objectCellDrawn(cellId, dungeonDrawn, surfaceCellRegistry));
       }
 
+      framePhases.mark(PHASE.stream);
       // Update HUD state: level and XP only; the vitals repaint when a vital
       // changes (gmVitalsUI::OnQualityChanged), as below.
       gameUI.hudState.updateProgress(playerState);
@@ -20004,6 +20040,7 @@ async function main() {
 
       // Render HUD DOM updates
       gameUI.updateHUD();
+      framePhases.mark(PHASE.hud);
     }
 
     // CORE.17.h.g.c.c — degrade levels: Render::CalcDegLevel (auto bias)
@@ -20036,7 +20073,9 @@ async function main() {
     // PERF.4 — under the portal-space cover: texture uploads, compileAsync
     // and scissored warm passes; during play, newly streamed subtrees get an
     // async compile + a 1x1 geometry-upload draw.
+    framePhases.mark(PHASE.lod);
     rendererWarmup?.tick(now);
+    framePhases.mark(PHASE.warmup);
 
     // Render 3D scene — retail SmartBox::Draw @ 00455570 draws nothing while
     // the portal-space tunnel has the SmartBox hidden (gmSmartBoxUI::UseTime
@@ -20046,8 +20085,9 @@ async function main() {
     // layers held the warm login gate ~1.5 s on SwiftShader, 2026-10-05).
     if ((!draw && !sceneManager.capturePending) || gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
     else { updateIndoorView(); sceneManager.render(); }
+    framePhases.mark(PHASE.render);
     // RELEASE.first-minute — counters only (WorldReporter.frame); the world counts as drawn once no portal space covers it.
-    if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering, performance.now() - workStart);
+    if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering, performance.now() - workStart, framePhases.frameMs);
     // PERF.render-adapt — dynamic resolution measures only frames that drew the world in a visible tab.
     if (draw) {
       sceneManager.dynamicResolution?.frame(now, gameStarted && !gameUI.portalSpaceCovering
