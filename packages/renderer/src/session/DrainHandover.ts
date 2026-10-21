@@ -85,6 +85,8 @@ export interface DrainHandoverHost {
 export class DrainHandover {
   /** The session's bridge is draining (a deploy). */
   private draining = false;
+  /** When the drain notice arrived (host clock). */
+  private drainingAt = 0;
   /** It can hand sessions over (it said so). */
   private capable = false;
   private inFlight = false;
@@ -101,10 +103,19 @@ export class DrainHandover {
   /** A handover is under way. */
   get busy(): boolean { return this.inFlight; }
   get isDraining(): boolean { return this.draining; }
+  /**
+   * How long the bridge has been draining with the session still on it, or null when it isn't.
+   * Read by the world_left report (WorldReporter drainWaitMs), so a session that never found a safe
+   * moment and then closed or was cut still says how long it waited (TELEMETRY.freeze-ending-in-close).
+   */
+  drainingForMs(): number | null {
+    return this.draining ? Math.max(0, this.host.now() - this.drainingAt) : null;
+  }
 
   /** The session's bridge started draining (`handover`: it can hand the session over). */
   onDraining(handover: boolean): void {
     if (this.draining && this.capable === handover) return;
+    if (!this.draining) this.drainingAt = this.host.now();
     this.draining = true;
     this.capable = handover;
     this.safeSince = null;

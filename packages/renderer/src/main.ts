@@ -194,7 +194,8 @@ import { populateDungeonCollision, type DungeonCollisionSources } from './world/
 import { arrivalMode, confirmSurfaceArrival } from './world/arrivalMode.js';
 import { runRetryingOnArrival } from './dat/streaming/RetryOnArrival.js';
 import { resolveObjectPhysics, createServerObjectMissileSweep, type ObjectPhysicsModel } from './world/ObjectCollision.js';
-import { playCreationDefaultScript, physicsDescDefaultScriptId, playScriptTypeInOrder, playScriptDid, PendingPlayScripts, type PlayScriptSink } from './effects/PlayScriptResolve.js';
+import { physicsDescDefaultScriptId, playScriptTypeInOrder, playScriptDid, PendingPlayScripts, type PlayScriptSink } from './effects/PlayScriptResolve.js';
+import { LocalPlayerDefaults, initSetupDefaults, type SetupDefaultsDeps } from './world/LocalPlayerObject.js';
 import { examineHeldItem, resolveExamineHeader } from './ui/examineHeader.js';
 import { chooseExaminePage, examineTitle, examineInscription, type ExaminationView } from './ui/examine/ExaminationWindow.js';
 import { buildItemAppraisalText } from './ui/examine/ItemAppraisalText.js';
@@ -2899,6 +2900,12 @@ async function main() {
   /** Our own PublicWeenieDesc._bitfield (PK status for @pkarena / @pklarena / @pklite). */
   let playerObjectDescFlags: number | null = null;
   let playerPeTableId: number = 0; // GAP.13 — server-reported PhysicsScriptTable (0x34…) for own PScript resolution
+  /** Our PhysicsDesc DefaultScript + intensity (play_default_script's input; a ServerObject's defaultScriptOverride). */
+  let playerDefaultScript = { override: 0, intensity: 0 };
+  /** InitDefaults' DAT access (world/LocalPlayerObject); bound once the script player exists. */
+  let setupDefaultsDeps: SetupDefaultsDeps = { setupDefaultScript: () => undefined, loadScript: () => null, play: () => {} };
+  /** BUG.self-heritage-effects — our model's InitDefaults, played once the frame loop has placed it. */
+  const localPlayerDefaults = new LocalPlayerDefaults(() => setupDefaultsDeps);
   /**
    * Our own PhysicsState (the player is not a ServerObject): CreateObject's,
    * then every SetState on our guid — CPhysicsObj::set_state @ 00514dd0 runs
@@ -5848,6 +5855,7 @@ async function main() {
       physicsScriptPlayer.stopForAnchor(playerModel);
       sceneManager.scene.remove(playerModel);
       playerModel = null;
+      localPlayerDefaults.reset();
     }
     playerAnimated = null;
     animController = null;
@@ -6219,6 +6227,8 @@ async function main() {
   gameUI.setUnsupportedFeatures(eraUnsupported);
   // AC1999.spell-research-panel — the 1999 client.exe's "Create Spell" tab (eraClientRules).
   gameUI.setSpellResearch(eraRules.spellResearch);
+  // BUG.vendor-buy-quantity — the era's buy-one-at-a-time ware mask (HandleSelectionChanged / 1999 UpdateSplitUI).
+  gameUI.setVendorBuyOneMask(eraRules.vendorBuyOneMask);
 
   // FAITHFUL.270 — restore the persisted logging-on state's HUD indicator.
   // (gameUI exists now; setIndicatorActive is a no-op until indicators are
@@ -7969,6 +7979,8 @@ async function main() {
     report: (r) => preworldReporter?.handover(r),
     log: (text) => console.log(`[AC:handover] ${text}`),
   });
+  // TELEMETRY.freeze-ending-in-close — a session that ends while its bridge drains says how long it waited.
+  worldReporter?.setSources({ drainWaitMs: () => drainHandover.drainingForMs() });
   aceConnection.on((e) => {
     if (e.type === 'relayLink') {
       const n = e.data as RelayLinkNotice;
@@ -8347,6 +8359,12 @@ async function main() {
       // object's PhysicsDesc DefaultScript through its own PhysicsScriptTable
       // by its DefaultScriptIntensity (not the Setup's DefaultScript DID).
       resolveDefaultScript: (anchor) => {
+        // BUG.self-heritage-effects — our own character is no ServerObject:
+        // its PhysicsDesc DefaultScript / table come from its CreateObject.
+        if (anchor === playerModel && playerSetupId) {
+          return objectDefaultScript({ peTableId: playerPeTableId, setupId: playerSetupId,
+            defaultScriptOverride: playerDefaultScript.override, defaultScriptIntensity: playerDefaultScript.intensity });
+        }
         const obj = serverObjectManager?.objectForAnchor(anchor);
         return obj ? objectDefaultScript(obj) : null;
       },
@@ -8454,6 +8472,13 @@ async function main() {
     serverObjectManager.onLocalPlayerMovement = (type, move) => {
       performServerMovement(playerMoveToManager(), type, move, (id) => !!serverObjectManager?.targetInfo(id));
     };
+    // CPhysicsObj::InitDefaults @ 005139d0 — every object's Setup
+    // DefaultScript (server objects, held copies, our own character).
+    setupDefaultsDeps = {
+      setupDefaultScript: (setupId) => setupModelRenderer.loadSetupModel(setupId)?.defaultScript,
+      loadScript: loadPhysicsScript,
+      play: (script, anchor) => physicsScriptPlayer.play(script, anchor),
+    };
     serverObjectManager.onObjectCreated = (obj) => {
       // Mag-Tools' corpse and player trackers (preview UI).
       magTools?.objectSeen(obj.guid);
@@ -8461,9 +8486,6 @@ async function main() {
       // object's sound table (its waves follow, WavePrefetch).
       if (obj.soundTableId) soundPlayer.loadSoundTable(obj.soundTableId >>> 0);
       if (!obj.mesh || !obj.setupId) return;
-      // Tag the mesh with its setup ID so DefaultScript[Part] hooks can
-      // resolve the chained script via `anchor.userData.setupId`.
-      obj.mesh.userData.setupId = obj.setupId;
       // BUG.default-script-80-cap — every object plays its Setup's
       // DefaultScript (CPhysicsObj::InitDefaults @ 005139d0 →
       // play_script_internal, no limit). The old "> 80 active scripts → skip"
@@ -8479,8 +8501,10 @@ async function main() {
       // ACCWeenieObject::DoCollision (a ScriptedCollision missile's contact —
       // onMissileDefaultScript below). Playing it here fired every spell
       // projectile's ProjectileCollision burst at the caster on launch.
-      playCreationDefaultScript(obj.mesh, setupModelRenderer.loadSetupModel(obj.setupId)?.defaultScript,
-        loadPhysicsScript, (script, anchor) => physicsScriptPlayer.play(script, anchor));
+      // BUG.self-heritage-effects — the same InitDefaults our own character
+      // gets (LocalPlayerDefaults); the mesh is tagged with its Setup so
+      // DefaultScript[Part] hooks resolve via `anchor.userData.setupId`.
+      initSetupDefaults(obj.mesh, obj.setupId, setupDefaultsDeps);
       // BUG.held-item-own-state — an object created out of the world (a
       // held item: its copy in the hand plays the script) is in no cell:
       // its emitters are not drawn until a position puts it in the world.
@@ -8546,11 +8570,7 @@ async function main() {
       for (const held of heldCopiesUnder(obj.mesh)) physicsScriptPlayer.setAnchorSuspended(held, false);
     };
     heldCopyScripts = {
-      start: (mesh, setupId) => {
-        mesh.userData.setupId = setupId;
-        playCreationDefaultScript(mesh, setupModelRenderer.loadSetupModel(setupId)?.defaultScript,
-          loadPhysicsScript, (script, anchor) => physicsScriptPlayer.play(script, anchor));
-      },
+      start: (mesh, setupId) => { initSetupDefaults(mesh, setupId, setupDefaultsDeps); },
       stop: (mesh) => physicsScriptPlayer.stopForAnchor(mesh),
     };
     serverObjectManager.onObjectDeleted = (obj) => {
@@ -11455,6 +11475,10 @@ async function main() {
           pricing: 'vendorSells' as const,
           // gmVendorUI::InqListSlotCount inputs (the Buy pre-check).
           maxStackSize: item.maxStackSize,
+          // BUG.vendor-buy-quantity — with maxStackSize, the object stack
+          // VendorItemsUI::UpdateItemsList gives the row (the toolbar split
+          // slider's max): `stackSize` above is the ItemProfile amount.
+          descStackSize: item.descStackSize,
           objectDescFlags: item.objectDescFlags,
           itemsCapacity: item.itemsCapacity,
           containersCapacity: item.containersCapacity,
@@ -17867,6 +17891,7 @@ async function main() {
                 // streamed files rebuilds in place once they land.
                 playerAppearance = obj;
                 playerSetupId = obj.setupId;
+                const priorModel = playerModel;
                 playerModel = streamedPlayerBuild(() => setupModelRenderer.createSetupMeshWithOverrides(
                   obj.setupId,
                   0,  // default placement
@@ -17874,12 +17899,26 @@ async function main() {
                   ov.perPartTextureOverrides,
                   ov.paletteColors,
                 ));
+                // A re-sent own CreateObject replaces our object (HandleCreateObject
+                // destroys the old CPhysicsObj): its scripts, emitters and held
+                // copies go with it, and it leaves the scene (it used to stay,
+                // its DefaultScript emitters running, beside the new one).
+                if (priorModel && playerModel && priorModel !== playerModel) {
+                  physicsScriptPlayer.stopForAnchor(priorModel);
+                  for (const held of heldCopiesUnder(priorModel)) { releaseObjectLightsIn(held); physicsScriptPlayer.stopForAnchor(held); }
+                  priorModel.parent?.remove(priorModel);
+                }
 
                 if (playerModel) {
-                  playerModel.name = `player_${obj.name}`;
-                  // CORE.17.h.g.c.c — CPhysicsPart::UpdateViewerDistance never
-                  // degrades the player's own parts (physobj id == player_iid).
-                  playerModel.userData[DegradeLod.NO_DEGRADE_KEY] = true;
+                  // CORE.17.h.g.c.c / BUG.self-heritage-effects — our object is
+                  // made like every other (world/LocalPlayerObject): name,
+                  // never-degraded parts, wire sound table, ObjScale, Setup
+                  // tag; once the frame loop places it, InitDefaults @
+                  // 005139d0 plays the Setup's DefaultScript — the Undead
+                  // flaming skull, the Umbraen / Penumbraen smoke and crown,
+                  // the Empyrean glow.
+                  localPlayerDefaults.built(playerModel, obj);
+                  playerDefaultScript = { override: obj.defaultScript || 0, intensity: obj.defaultScriptIntensity ?? 0 };
                   playerSetupId = obj.setupId;
                   // BUG.own-objdescevent-dropped — fresh model, fresh
                   // ObjectVisualDesc sequence baseline (ACE re-registers
@@ -17892,10 +17931,8 @@ async function main() {
                   // plays its Hidden script — the pink bubbles UnHide stops.
                   playerPhysicsState = PHYSICS_STATE_CTOR_DEFAULT;
                   applyPlayerPhysicsState(obj.physicsState ?? 0);
-                  // BUG.remote-anim-sound-hooks — our own sound hooks play
-                  // from our wire sound table like every object's
-                  // (CPhysicsObj::set_description @ 00514f40).
-                  playerModel.userData[SOUND_TABLE_KEY] = obj.soundTableId || 0;
+                  // (BUG.remote-anim-sound-hooks — our wire sound table was
+                  // tagged by LocalPlayerDefaults.built, set_description @ 00514f40.)
                   sceneManager.add(playerModel);
                   console.log(`[AC] Player model created from server data: setup=0x${obj.setupId.toString(16)}, ` +
                     `${obj.animPartChanges.length} part changes, ${obj.textureChanges.length} tex changes, ` +
@@ -19501,6 +19538,8 @@ async function main() {
         // CORE.18.b.a — visibility is the camera's translucency, applied
         // below once the viewer position is known (applyViewerFade).
         playerModel.rotation.y = cameraController.playerYaw + Math.PI; // face player's direction, not camera
+        // BUG.self-heritage-effects — a freshly built model, now placed, plays its Setup DefaultScript.
+        localPlayerDefaults.placed(playerModel);
 
         // Drive animation state from input, then advance playback
         if (animController) {

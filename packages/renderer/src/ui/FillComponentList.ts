@@ -136,7 +136,7 @@ export function shopHasItem(shopItems: readonly FillShopItem[], wcid: number, wa
  * refusal notice and no change; a new guid is appended uncapped (even at 0).
  * Returns the notice line, or null.
  */
-function addToBuyList(list: FillBuyEntry[], guid: number, qty: number): FillComponentLine | null {
+export function addToBuyList(list: FillBuyEntry[], guid: number, qty: number): FillComponentLine | null {
   const existing = list.find((e) => e.guid === guid);
   if (existing) {
     const merged = qty + existing.qty;

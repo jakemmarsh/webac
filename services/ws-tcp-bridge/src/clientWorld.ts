@@ -57,6 +57,10 @@ export interface ClientWorldLeftEvent extends WorldIds {
   hiddenMs?: number | null;
   freezes?: number | null;
   frozenMs?: number | null;
+  /** How long before the report the page's 1 s tick last ran: a large gap = its JavaScript was not running (frozen / suspended). */
+  lastBeatAgoMs?: number | null;
+  /** How long the session's bridge had been draining without a handover when it ended; null = not draining. */
+  drainWaitMs?: number | null;
   /** OBS.dm-stall-diagnostics — the connection's state when a silent / closed session ended (netDiag.ts). */
   net?: NetDiag;
 }
@@ -271,6 +275,8 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
       ...('hiddenMs' in b ? { hiddenMs: uint(b.hiddenMs, SESSION_MS) } : {}),
       ...('freezes' in b ? { freezes: uint(b.freezes, 100_000) } : {}),
       ...('frozenMs' in b ? { frozenMs: uint(b.frozenMs, SESSION_MS) } : {}),
+      ...('lastBeatAgoMs' in b ? { lastBeatAgoMs: uint(b.lastBeatAgoMs, SESSION_MS) } : {}),
+      ...('drainWaitMs' in b ? { drainWaitMs: uint(b.drainWaitMs, SESSION_MS) } : {}),
     };
   }
   return {

@@ -165,7 +165,10 @@ describe('OAuth pieces', () => {
     const forged = new Sealer('forger-secret-'.padEnd(40, 'c')).seal('a1', { g: 'x', k: 'local-eor:jake', s: 'any', t: 0, e: Number.MAX_SAFE_INTEGER });
     expect(o.resolve(forged)).toBeNull();
     const [p, iv, body] = t.access_token.split('.');
-    const flipped = `${p}.${iv}.${body.slice(0, -2)}${body.slice(-2) === 'AA' ? 'AB' : 'AA'}`;
+    // Alter the body's FIRST character: every one of its 6 bits is significant. (Rewriting the last
+    // two flaked now and then (a full-suite gate, 2026-10-21): an unpadded base64url tail has unused low bits, so the "altered"
+    // text sometimes decoded to the very same bytes, and the unchanged token rightly resolved.)
+    const flipped = `${p}.${iv}.${body[0] === 'A' ? 'B' : 'A'}${body.slice(1)}`;
     expect(o.resolve(flipped)).toBeNull();
     expect(o.resolve(t.refresh_token)).toBeNull(); // a refresh token is not an access token
     advance(3_600_001);

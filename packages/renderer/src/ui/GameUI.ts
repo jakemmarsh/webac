@@ -126,7 +126,8 @@ import { SpellComponentTable } from '@ac/dat-parser/file-types/SpellComponentTab
 import { readDualDidMapper } from '@ac/dat-parser/file-types/DualDidMapper.js';
 import { buildComponentRows, desiredLevelFromText, compositeSpellComponentIcon } from './SpellComponentList.js';
 import { ResearchFormula, researchGridCells, researchComponentSignature, researchButtonLeft, ownedComponentCounts, RESEARCH_LAYOUT, RESEARCH_TAB_WIDTH, RESEARCH_TEXT } from './SpellResearch1999.js';
-import { fillComponentList, desiredCompIterationOrder, determineComponentCategory, componentNameFromWcid, getNumComponent } from './FillComponentList.js';
+import { fillComponentList, desiredCompIterationOrder, determineComponentCategory, componentNameFromWcid, getNumComponent, addToBuyList } from './FillComponentList.js';
+import { vendorShopStackSize } from './VendorShopStack.js';
 import type { TextureManager } from '../models/TextureManager.js';
 import { getString, getStringParts, getStringFromTable, acStringHash } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { heritageListed, visibleHeritageRows } from './HeritageRows.js';
@@ -12012,7 +12013,9 @@ export class GameUI {
       const entry = this.targetStackEntry;
       if (!entry) return;
       const parsed = parseInt(entry.value, 10);
+      const before = this.toolbarSplitSize;
       this.setToolbarSplitSize(Number.isFinite(parsed) ? parsed : 0);
+      this.toolbarSplitChangedByPlayer(before);
     };
     this.targetStackEntry.addEventListener('change', commitStackEntry);
     this.targetStackEntry.addEventListener('blur', commitStackEntry);
@@ -12061,7 +12064,9 @@ export class GameUI {
       const rect = this.targetStackSlider!.getBoundingClientRect();
       const travel = Math.max(1, rect.width - 16);
       const frac = Math.max(0, Math.min(1, (clientX - rect.left - 8) / travel));
+      const before = this.toolbarSplitSize;
       this.setToolbarSplitSize(Math.round(frac * this.toolbarMaxSplitSize));
+      this.toolbarSplitChangedByPlayer(before);
     };
     this.targetStackSlider.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -12584,20 +12589,7 @@ export class GameUI {
           if (this.targetGlowTimer) clearTimeout(this.targetGlowTimer);
           const glow = this.targetGlow;
           this.targetGlowTimer = setTimeout(() => { this.targetGlowTimer = null; glow.style.display = 'none'; }, GameUI.SELECTION_FLASH_MS);
-          if (isStack) {
-            this.toolbarMaxSplitSize = stackSize;
-            // CORE.10.f — HandleSelectionChanged vendor branch: a stack in
-            // the OPEN vendor's container with itemType & 0x0dc41cb0 seeds
-            // splitSize=1 (buy one at a time); everything else seeds full.
-            this.setToolbarSplitSize(this.vendorSeedsSplitOfOne(this.hud.target) ? 1 : stackSize);
-          } else {
-            // CORE.10.f — retail resets splitSize/maxSplitSize to 1/1 on
-            // EVERY selection change before the stack branch (@ 004bf6e8);
-            // without this a stale split amount from the previous stack
-            // selection leaks into GetObjectSplitSize consumers.
-            this.toolbarMaxSplitSize = 1;
-            this.setToolbarSplitSize(1);
-          }
+          this.seedToolbarSplit(this.hud.target, stackSize);
         }
         if (isStack && this.toolbarMaxSplitSize !== stackSize) {
           // Server changed the selected stack's size (SetStackSize) —
@@ -12698,6 +12690,37 @@ export class GameUI {
    * non-useable selection). Items and NPCs (talk/vendor via UseObject)
    * stay useable.
    */
+  /** gmToolbarUI::HandleSelectionChanged @ 004bf380's split seeding
+   *  (decomp 185708–185761) for the selection's stack size. */
+  private seedToolbarSplit(t: TargetInfo, stackSize: number): void {
+    if (stackSize >= 2) {
+      this.toolbarMaxSplitSize = stackSize;
+      // CORE.10.f — HandleSelectionChanged vendor branch: a stack in
+      // the OPEN vendor's container with itemType & the era's mask
+      // (0x0dc41cb0; 1999 0x14b0) seeds splitSize=1 (buy one at a time);
+      // everything else seeds full.
+      this.setToolbarSplitSize(this.vendorSeedsSplitOfOne(t) ? 1 : stackSize);
+    } else {
+      // CORE.10.f — retail resets splitSize/maxSplitSize to 1/1 on
+      // EVERY selection change before the stack branch (@ 004bf6e8);
+      // without this a stale split amount from the previous stack
+      // selection leaks into GetObjectSplitSize consumers.
+      this.toolbarMaxSplitSize = 1;
+      this.setToolbarSplitSize(1);
+    }
+  }
+
+  /** The player moved the toolbar split (slider message 10 / entry commit):
+   *  CM_UI::SendNotice_StackSliderChanged → gmVendorUI::
+   *  RecvNotice_StackSliderChanged @ 004c4500 redraws the Items tab's name /
+   *  cost line (UpdateItemsUI) when the selection is shop merchandise. */
+  private toolbarSplitChangedByPlayer(before: number): void {
+    if (this.toolbarSplitSize === before) return;
+    if (this.vendorVisible && this.vendorData.tab === 0 && this.vendorHasItem(this.containerSelectedGuid())) {
+      this.renderVendorPanel();
+    }
+  }
+
   /**
    * CORE.10.a — set the toolbar split size (GenItemHolder::splitSize),
    * clamped per gmToolbarUI::ListenToElementMessage @ 004bee90: 0 → 1,
@@ -12750,7 +12773,20 @@ export class GameUI {
   private vendorSeedsSplitOfOne(t: TargetInfo): boolean {
     return this.vendorVisible && this.vendorData.vendorGuid !== 0
       && t.containerId === this.vendorData.vendorGuid
-      && ((t.itemType ?? 0) & 0x0dc41cb0) !== 0;
+      && ((t.itemType ?? 0) & this.vendorBuyOneMask) !== 0;
+  }
+
+  /** The era's buy-one-at-a-time ware mask (EraClientRules.vendorBuyOneMask): end of retail 0x0dc41cb0, 1999 0x14b0. */
+  private vendorBuyOneMask = 0x0dc41cb0;
+  /** Set once per page load from the era profile, like setSpellResearch. */
+  setVendorBuyOneMask(mask: number): void {
+    this.vendorBuyOneMask = mask >>> 0;
+  }
+
+  /** The merchandise object's stack while the shop is open (VendorShopStack.ts), or null when a finite stock is all on the Buying list. */
+  private vendorShopStack(item: { guid?: number; stackSize?: number; maxStackSize?: number; descStackSize?: number }): number | null {
+    const queued = item.guid ? this.vendorData.buyList.reduce((n, e) => n + (e.guid === item.guid ? e.qty : 0), 0) : 0;
+    return vendorShopStackSize(item, queued);
   }
 
   /** CORE.10.f — ItemHolder::GetObjectSplitSize @ 00586f00: a transfer
@@ -12774,7 +12810,11 @@ export class GameUI {
     fromBuyTab: boolean,
   ): void {
     if (!item.guid) return;
-    const stackSize = Math.max(0, item.stackSize ?? 0);
+    // BUG.vendor-buy-quantity — a merchandise object's stack is the one
+    // VendorItemsUI::UpdateItemsList gave it (VendorShopStack.ts), never the
+    // ItemProfile amount (-1 = unlimited) nor a Buying-list row's queued qty.
+    const shopRow = fromBuyTab ? this.vendorData.buyItems.find((i) => i.guid === item.guid) : undefined;
+    const stackSize = shopRow ? (this.vendorShopStack(shopRow) ?? 0) : Math.max(0, item.stackSize ?? 0);
     this.hud.setTarget({
       id: item.guid, name: item.name, pluralName: item.pluralName,
       level: 0, healthFraction: 0, distance: 0, type: 'item',
@@ -29347,7 +29387,7 @@ export class GameUI {
      *  across refreshes, clamped — VendorItemsUI::OpenVendor tail). */
     typeFilterIdx: number;
     filterMenuOpen: boolean;
-    buyItems: Array<{ guid?: number; weenieClassId: number; name: string; pluralName?: string; price: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; usable?: number; combatUse?: number; maxStackSize?: number; objectDescFlags?: number; itemsCapacity?: number; containersCapacity?: number; burden: number; stackSize?: number; itemType?: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }>;
+    buyItems: Array<{ guid?: number; weenieClassId: number; name: string; pluralName?: string; price: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; usable?: number; combatUse?: number; maxStackSize?: number; descStackSize?: number; objectDescFlags?: number; itemsCapacity?: number; containersCapacity?: number; burden: number; stackSize?: number; itemType?: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }>;
     sellItems: Array<{ guid?: number; weenieClassId: number; name: string; pluralName?: string; price: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; burden: number; stackSize?: number; itemType?: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }>;
     /** Buying-tab list (retail m_buyShopList): merchandise guid + qty. */
     buyList: Array<{ guid: number; qty: number }>;
@@ -29539,7 +29579,7 @@ export class GameUI {
     const filters = this.vendorActiveFilters();
     const idx = Math.max(0, Math.min(d.typeFilterIdx, filters.length - 1));
     const mask = filters.length > 0 ? filters[idx][1] : ~0;
-    const first = d.buyItems.find(it => (((it.itemType ?? 0) & mask) !== 0 || filters.length === 0) && !!it.guid);
+    const first = d.buyItems.find(it => (((it.itemType ?? 0) & mask) !== 0 || filters.length === 0) && !!it.guid && this.vendorShopStack(it) !== null);
     if (first) this.seedVendorSelection(first, true);
   }
 
@@ -30010,7 +30050,9 @@ export class GameUI {
     // when no itemType matches any category (missing wire data), fall back
     // to the unfiltered list rather than an empty shop.
     const mask = filters.length > 0 ? filters[d.typeFilterIdx][1] : ~0;
-    const items = d.buyItems.filter(it => ((it.itemType ?? 0) & mask) !== 0 || filters.length === 0);
+    // VendorItemsUI::UpdateItemsList @ 004c1ea0 leaves out a finite stock
+    // that is all on the Buying list (BUG.vendor-buy-quantity).
+    const items = d.buyItems.filter(it => (((it.itemType ?? 0) & mask) !== 0 || filters.length === 0) && this.vendorShopStack(it) !== null);
 
     // Filter dropdown (117x18 at page (4,4) — VendorItemsUI m_itemTypeMenu).
     if (filters.length > 0) {
@@ -30095,8 +30137,11 @@ export class GameUI {
     // global selection, and go blank / disabled when it is not merchandise.
     const sel = this.containerSelectedGuid();
     const selected = sel !== 0 ? items.find(it => it.guid === sel) : undefined;
+    // GetObjectSplitSize reads the object's shop stack when it is not the
+    // selection (VendorItemsUI::UpdateItemsList's SetObjectStackSize).
+    const shopSplit = (it: { guid?: number; stackSize?: number; maxStackSize?: number; descStackSize?: number }) => this.getObjectSplitSize({ guid: it.guid, stackSize: this.vendorShopStack(it) ?? 1 });
     if (selected) {
-      const split = this.getObjectSplitSize(selected);
+      const split = shopSplit(selected);
       handle.setText(E.itemsName, split < 2
         ? selected.name
         : `${split} ${getAppropriateName(selected.name, selected.pluralName, split)}`);
@@ -30118,7 +30163,9 @@ export class GameUI {
         // gmVendorUI::HandleMousePresses @ 004c40d0: shop list → BuySingleItem.
         onDoubleClick: (it) => {
           if (!it.guid) return;
-          this.vendorCallbacks.onBuy?.(it.guid, this.getObjectSplitSize(it));
+          // BuySingleItem: an object stack < 2 buys 1, else GetObjectSplitSize.
+          const stack = this.vendorShopStack(it) ?? 0;
+          this.vendorCallbacks.onBuy?.(it.guid, stack < 2 ? 1 : shopSplit(it));
         },
       });
 
@@ -30127,8 +30174,9 @@ export class GameUI {
     // Buying-tab list with the current split amount.
     handle.setInteractive(E.itemsBuy, () => {
       if (!selected?.guid) return;
-      // gmVendorUI::BuySingleItem: the money + slot pre-checks first.
-      const qty = this.getObjectSplitSize(selected);
+      // gmVendorUI::BuySingleItem @ 004c2820: an object stack < 2 buys 1,
+      // else GetObjectSplitSize; the money + slot pre-checks first.
+      const qty = (this.vendorShopStack(selected) ?? 0) < 2 ? 1 : shopSplit(selected);
       const cost = this.vendorUnitCost(selected, qty);
       const refusal = this.vendorBuyRefusal([{ item: selected, qty }], cost);
       if (refusal) { this.displayErrorText(refusal); return; }
@@ -30137,8 +30185,7 @@ export class GameUI {
     });
     handle.setInteractive(E.itemsAdd, () => {
       if (!selected?.guid) return;
-      d.buyList.push({ guid: selected.guid, qty: this.getObjectSplitSize(selected) });
-      this.renderVendorPanel();
+      this.addSelectedToBuyList(selected);
     });
     // No selection → the action buttons show their disabled art (state
     // 0xd, texture 0x6004c4e — the layout authors it for exactly this).
@@ -30146,6 +30193,41 @@ export class GameUI {
       handle.setState(E.itemsBuy, 0xd);
       handle.setState(E.itemsAdd, 0xd);
     }
+  }
+
+  /**
+   * BUG.vendor-buy-quantity — Add to List (gmVendorUI::HandleButtonClicks
+   * case 0x100000c3 @ 004c50d0, decomp 190936–190947): an object stack > 1
+   * queues GetObjectSplitSize (the toolbar split for the selection), else 1,
+   * through VendorItemsUI::AddToBuyList @ 004c3dc0 — one entry per object,
+   * a merge capped below 0x1389 with "I can't possibly sell you that much!…"
+   * — then RemoveFromShop @ 004c3ce0: a finite stock re-sizes the object
+   * (the toolbar re-seeds through ItemAttributesChanged → HandleSelectionChanged)
+   * or, all queued, leaves the shop list and drops the selection.
+   */
+  private addSelectedToBuyList(item: (typeof this.vendorData.buyItems)[number]): void {
+    if (!item.guid) return;
+    const d = this.vendorData;
+    const stack = this.vendorShopStack(item) ?? 0;
+    const qty = stack > 1 ? this.getObjectSplitSize({ guid: item.guid, stackSize: stack }) : 1;
+    const notice = addToBuyList(d.buyList, item.guid, qty);
+    if (notice) {
+      this.displayErrorText(notice.text);
+    } else {
+      const left = this.vendorShopStack(item);
+      const t = this.hud.target;
+      if (t?.id === item.guid) {
+        if (left === null) {
+          this.clearGlobalSelection();
+        } else if (left !== (t.stackSize ?? 0)) {
+          const next = { ...t, stackSize: left };
+          this.hud.setTarget(next);
+          this.seedToolbarSplit(next, left);
+          this.updateHUD();
+        }
+      }
+    }
+    this.renderVendorPanel();
   }
 
   /* ── Buying page (the player's buy list) ───────────────────────── */

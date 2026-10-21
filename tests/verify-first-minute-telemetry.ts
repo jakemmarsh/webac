@@ -37,7 +37,8 @@ const FIRST_MINUTE_KEYS = [
 const WORLD_LEFT_BASE_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
 // BUG.hidden-tab-session-drop: the page adds hiddenMs / freezes / frozenMs to every world_left (endCause / closeCode
 // on a drop only); the bridge keeps them only when sent, so an older page's event keeps the base keys.
-const WORLD_LEFT_KEYS = [...WORLD_LEFT_BASE_KEYS, 'hiddenMs', 'freezes', 'frozenMs'].sort();
+// TELEMETRY.freeze-ending-in-close: lastBeatAgoMs and drainWaitMs (verify-freeze-ending-in-close.ts).
+const WORLD_LEFT_KEYS = [...WORLD_LEFT_BASE_KEYS, 'hiddenMs', 'freezes', 'frozenMs', 'lastBeatAgoMs', 'drainWaitMs'].sort();
 
 interface Rig {
   r: WorldReporter;

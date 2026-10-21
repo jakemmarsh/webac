@@ -140,7 +140,7 @@ export interface FirstMinuteEvent {
   workP95Ms?: number | null;
   /** Main-thread long tasks (> 50 ms) in the minute, total ms; null where the browser has no longtask timing. */
   longTaskMs?: number | null;
-  /** Per drawn world frame, means: renderer draw calls and triangles (three.js renderer.info: the whole frame outdoors, the last pass of an indoor view). */
+  /** Per drawn world frame, means: renderer draw calls and triangles (three.js renderer.info: the whole frame, both passes of an indoor view (IndoorView.renderIndoorView)). */
   drawCalls?: number | null;
   triangles?: number | null;
   /** The player's landblock at the event, 4 hex digits (XXYY), or null. */
@@ -199,9 +199,26 @@ export interface WorldLeftEvent {
   closeCode?: number | null;
   /** How long the page had been hidden when the session ended; null when it was visible. */
   hiddenMs?: number | null;
-  /** Page-lifecycle freezes (document 'freeze') during the session, and their total length so far. */
+  /**
+   * Page-lifecycle freezes (document 'freeze') during the session, and their total length so far.
+   * A freeze still open when the report is built (no 'resume' yet: the tab closed while frozen)
+   * counts, up to the report (TELEMETRY.freeze-ending-in-close).
+   */
   freezes?: number;
   frozenMs?: number;
+  /**
+   * How long before this report the page's 1 s telemetry tick last ran (since the enter when it
+   * never ran). Up to ~1 s on a running visible page and ~60 s on a hidden one (Chrome's intensive
+   * timer throttling); far more means the page's JavaScript was not running: a page-lifecycle
+   * freeze, an OS suspend, or a main thread stalled (TELEMETRY.freeze-ending-in-close).
+   */
+  lastBeatAgoMs?: number;
+  /**
+   * How long the session's bridge had been draining (a deploy) with the session not yet handed over,
+   * when the session ended; null when it was not draining (session/DrainHandover.ts). A session that
+   * never found a safe moment, then closed or was cut, reports its wait here.
+   */
+  drainWaitMs?: number | null;
   /** OBS.dm-stall-diagnostics — the connection's state when a silent / closed session ended. */
   net?: WorldNetDiagnostics;
 }
@@ -210,6 +227,8 @@ export type WorldEvent = FirstMinuteEvent | WorldLeftEvent;
 
 /** What main.ts supplies; each is read only when an event is built or once a second. */
 export interface WorldReporterSources {
+  /** How long the session's bridge has been draining without a handover, or null (DrainHandover.drainingForMs). */
+  drainWaitMs?: () => number | null;
   screen?: () => WorldScreen;
   modal?: () => WorldModal | null;
   unresolvedMisses?: () => number | null;
@@ -372,6 +391,9 @@ function count(v: unknown, max: number): number | null {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(max, Math.round(v)) : null;
 }
 
+/** A session-length field's cap (the bridge's SESSION_MS: 7 days). */
+const SESSION_CAP_MS = 7 * 24 * 3600_000;
+
 function safe<T>(f: (() => T) | undefined, fallback: T): T {
   if (!f) return fallback;
   try { return f(); } catch { return fallback; }
@@ -430,6 +452,8 @@ export class WorldReporter {
   private freezes = 0;
   private frozenMs = 0;
   private frozenAt: number | null = null;
+  /** The last 1 s tick this session (the enter until one runs): when the page's JavaScript last ran on its own. */
+  private lastBeatAt = 0;
 
   constructor(private readonly opts: WorldReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -491,6 +515,7 @@ export class WorldReporter {
     if (this.startedHidden && this.hiddenSince === null) this.hiddenSince = at;
     this.freezes = 0;
     this.frozenMs = 0;
+    this.lastBeatAt = at;
     this.minuteSent = false;
     this.errorsAtEnter = safe(this.src.errors, 0);
     this.contextLost = false;
@@ -599,6 +624,7 @@ export class WorldReporter {
     this.outbox.retry();
     if (this.enterAt === null) return;
     const at = this.now();
+    this.lastBeatAt = at;
     this.pollModal(at);
     if (!this.minuteSent && at - this.enterAt >= FIRST_MINUTE_MS) this.sendFirstMinute('still_in', at);
   }
@@ -625,9 +651,15 @@ export class WorldReporter {
     if (this.frozenAt === null) return;
     if (this.enterAt !== null) {
       this.freezes++;
-      this.frozenMs += Math.max(0, this.now() - Math.max(this.frozenAt, this.enterAt));
+      this.frozenMs += this.openFreezeMs(this.now());
     }
     this.frozenAt = null;
+  }
+
+  /** The open freeze's length inside this session up to `at` (0 when none is open). */
+  private openFreezeMs(at: number): number {
+    if (this.frozenAt === null || this.enterAt === null) return 0;
+    return Math.max(0, at - Math.max(this.frozenAt, this.enterAt));
   }
 
   /**
@@ -649,8 +681,12 @@ export class WorldReporter {
         errors: this.errorsSince(),
         ...detail,
         hiddenMs: this.hiddenSince === null ? null : Math.max(0, Math.round(at - Math.max(this.hiddenSince, this.enterAt))),
-        freezes: this.freezes,
-        frozenMs: Math.round(this.frozenMs),
+        // A freeze still open (the tab closed or the session dropped before 'resume') counts up to
+        // now. The session ends here, so a later 'resume' (enterAt null) adds nothing.
+        freezes: this.freezes + (this.frozenAt !== null ? 1 : 0),
+        frozenMs: Math.round(this.frozenMs + this.openFreezeMs(at)),
+        lastBeatAgoMs: count(Math.max(0, at - this.lastBeatAt), SESSION_CAP_MS) ?? 0,
+        drainWaitMs: count(safe(this.src.drainWaitMs, null), SESSION_CAP_MS),
       });
     }
     this.enterAt = null;

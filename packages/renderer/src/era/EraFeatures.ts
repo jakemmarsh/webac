@@ -164,10 +164,19 @@ export interface EraClientRules {
    * 1999 spell research system. Only the 1999 client researches spells (RandomizeVersion1 tapers).
    */
   splitpea: boolean;
+  /**
+   * The ITEM_TYPE mask of shop wares whose toolbar buy quantity seeds 1
+   * instead of the whole object stack (gmToolbarUI::HandleSelectionChanged
+   * @ 004bf380, decomp 185731–185737: `& 0xdc41cb0`). The 1999 client.exe's
+   * PanelUI::UpdateSplitUI @ 0x004fde40 tests 0x14B0 (Creature, Food, Misc,
+   * Useless, SpellComponents; reference/ac1999 kb vendor-buy-quantity-default):
+   * a 1999 gem, trade note or craft base defaults to the whole stack.
+   */
+  vendorBuyOneMask: number;
 }
 
-const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false });
-const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true });
+const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0 });
+const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0 });
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {

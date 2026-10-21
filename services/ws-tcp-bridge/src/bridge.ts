@@ -112,18 +112,22 @@ async function main(): Promise<void> {
   const drainMs = Math.max(0, Number(process.env.BRIDGE_DRAIN_SECONDS ?? 0) || 0) * 1000;
   let stopping = false;
   let draining = false;
+  /** When the drain began: both of its ends (drained / cut by a second SIGTERM) log how long it ran. */
+  let drainStartedAt = 0;
+  const drainFields = () => (draining ? { drainedMs: Date.now() - drainStartedAt } : {});
   const stop = (signal: string) => {
     if (stopping) return;
     if (signal === 'SIGTERM' && drainMs > 0 && !draining) {
       draining = true;
+      drainStartedAt = Date.now();
       void bridge.drain(drainMs).then((how) => {
-        log('info', 'bridge_drained', { how, sessions: bridge.snapshot().sessions });
+        log('info', 'bridge_drained', { how, sessions: bridge.snapshot().sessions, ...drainFields() });
         stop('drained');
       });
       return;
     }
     stopping = true;
-    log('info', 'bridge_shutdown', { signal, sessions: bridge.snapshot().sessions });
+    log('info', 'bridge_shutdown', { signal, sessions: bridge.snapshot().sessions, ...drainFields() });
     bridge.shutdown().then(() => process.exit(0), () => process.exit(1));
   };
   process.on('SIGTERM', () => stop(draining ? 'SIGTERM-again' : 'SIGTERM'));
