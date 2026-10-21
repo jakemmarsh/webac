@@ -449,7 +449,7 @@ export class RoutineEngine {
     this.stats = { ...emptyStats(), startedAt: this.now() };
     this.resting.clear();
     this.stateClock = this.now();
-    this.xpAtStart = this.api.snapshot({ max: 0 }).me?.xp?.total ?? 0;
+    this.xpAtStart = this.api.self()?.xp?.total ?? 0;
     this.chatSeq = this.api.currentSeq();
     this.eventMark = this.api.currentSeq();
     this.nav = null;
@@ -718,7 +718,7 @@ export class RoutineEngine {
   setNearestWaypoint(): AgentResult {
     if (!this.nav) return { ok: false, message: 'no route loaded' };
     if (this.nav.route.mode !== 'circular') return { ok: false, message: 'the current waypoint is set on circular routes only' };
-    const me = this.api.snapshot({ max: 0 }).me;
+    const me = this.api.self();
     if (!me) return { ok: false, message: 'your position is not known yet' };
     let best = -1;
     let bestD = Infinity;
@@ -811,7 +811,7 @@ export class RoutineEngine {
   /** What this run has done; xpGained and state times are as of now. */
   statsNow(): RoutineStats {
     this.clockState();
-    const xp = this.api.snapshot({ max: 0 }).me?.xp?.total;
+    const xp = this.api.self()?.xp?.total;
     return { ...this.stats, xpGained: this.stats.startedAt !== null && xp !== undefined ? Math.max(0, xp - this.xpAtStart) : this.stats.xpGained, stateTime: { ...this.stats.stateTime } };
   }
 
@@ -819,7 +819,7 @@ export class RoutineEngine {
   resetStats(): void {
     this.stats = { ...emptyStats(), startedAt: this.profile ? this.now() : null };
     this.stateClock = this.now();
-    this.xpAtStart = this.api.snapshot({ max: 0 }).me?.xp?.total ?? 0;
+    this.xpAtStart = this.api.self()?.xp?.total ?? 0;
   }
 
   private clockState(): void {
@@ -849,7 +849,7 @@ export class RoutineEngine {
   private lootCharacter(): LootCharacter {
     return {
       freeSlots: this.facts.freePackSlots(),
-      level: this.api.snapshot({ max: 0 }).me?.level ?? 0,
+      level: this.api.self()?.level ?? 0,
       skill: (id) => this.facts.skill?.(id) ?? null,
     };
   }
@@ -1096,7 +1096,7 @@ export class RoutineEngine {
   dryRun(other?: RoutineProfile): Array<{ rule: string; fires: boolean; enabled: boolean; off?: boolean; why: string[] }> {
     const p = other ?? this.profile;
     if (!p) return [];
-    const obs = this.api.snapshot({ max: 60, radius: RULE_SIGHT_M });
+    const obs = this.api.look({ max: 60, radius: RULE_SIGHT_M });
     const stateName = other && other !== this.profile ? other.initialState : this.state;
     const st = p.states.find((s) => s.name === stateName);
     const t = this.now();
@@ -1122,6 +1122,8 @@ export class RoutineEngine {
    * with it while Run Macro is off.
    */
   standby: (() => RoutineProfile | null) | null = null;
+  /** When the stand-by profile was last asked for (tick). */
+  private standbyAt = -Infinity;
 
   /**
    * What the macro does while switched off (paused, stopped, or never started):
@@ -1132,7 +1134,7 @@ export class RoutineEngine {
   private offUpkeep(p: RoutineProfile, settings: Record<string, string | number | boolean>): void {
     if (!p.vtank || !truthySetting(settings.ManaChargesWhenOff) || this.now() - this.lastStep < STEP_MS) return;
     this.lastStep = this.now();
-    if (this.api.snapshot({ max: 0 }).me?.dead) return;
+    if (this.api.self()?.dead) return;
     this.vt ??= new VtMacro(this.api, this.now);
     const m = this.vt.manaStep(p as RoutineProfile & { vtank: NonNullable<RoutineProfile['vtank']> }, settings);
     if (m) { this.busy = true; void m.run().then((r) => this.note(`${m.label}: ${RoutineEngine.resultLine(r)}`)).finally(() => { this.busy = false; }); }
@@ -1143,7 +1145,12 @@ export class RoutineEngine {
     const p = this.profile;
     if (!p) {
       if (this.busy) return;
-      // Run Macro never on, or stopped (StopMacroOnDeath): the stand-by profile's upkeep.
+      // Run Macro never on, or stopped (StopMacroOnDeath): the stand-by profile's upkeep. Its upkeep steps at most every
+      // STEP_MS, so the stand-by profile is asked for no more often: the window's answer read the character's name off a
+      // full observation, every frame, for every automation player not running a macro (PERF.agent-tick-cost, 2026-10-21).
+      const t = this.now();
+      if (t - this.standbyAt < STEP_MS) return;
+      this.standbyAt = t;
       const sb = this.standby?.() ?? null;
       if (sb) this.offUpkeep(sb, standbySettings(sb));
       return;
@@ -1153,7 +1160,7 @@ export class RoutineEngine {
     if (this.lootThisGuid !== null) {
       const guid = this.lootThisGuid;
       this.lootThisGuid = null;
-      const at = this.api.snapshot({ radius: 60, max: 60 }).nearby.find((o) => o.guid === guid);
+      const at = this.api.look({ radius: 60, max: 60 }).nearby.find((o) => o.guid === guid);
       this.busy = true;
       void this.lootOne({ guid, dist: at?.dist ?? 0 }, undefined, p)
         .then((r) => this.report(`Loot this Container: ${r.message}`))
@@ -1166,7 +1173,7 @@ export class RoutineEngine {
     const t = this.now();
     if (t - this.lastStep < STEP_MS) return;
     this.lastStep = t;
-    const me = this.api.snapshot({ max: 0 }).me;
+    const me = this.api.self();
     if (me?.dead) {
       // A routine with its own death rules (VTank's "Character death") handles it; otherwise stop.
       if (!usesCondition(p, 'died')) {
@@ -1224,7 +1231,7 @@ export class RoutineEngine {
     const range = Math.max(0, Number(st.AttackDistance) || 0);
     const approach = Math.max(0, Number(st.ApproachDistance) || 0);
     const reach = this.corpseReach();
-    const obs = this.api.snapshot({ radius: Math.max(range, approach, reach, 20), max: 30 });
+    const obs = this.api.look({ radius: Math.max(range, approach, reach, 20), max: 30 });
     const combat = truthySetting(st.EnableCombat) && p.modules.combat;
     const looting = truthySetting(st.EnableLooting) && p.modules.looting;
     const navOn = truthySetting(st.EnableNav) && p.modules.navigation && !!this.nav && !this.nav.done && this.now() >= this.navHeldUntil;
@@ -1336,7 +1343,7 @@ export class RoutineEngine {
   private othersDue(nearby: ReadonlyArray<{ guid: number; kind: string; dist: number }>, reach: number): boolean {
     const bs = this.loot.settings(this.settings);
     if (!bs.lootAll && !bs.lootFellow) return false;
-    const me = this.api.snapshot({ max: 0 }).me?.name ?? '';
+    const me = this.api.self()?.name ?? '';
     const ctx = { me, fellows: this.loot.fellows(), settings: bs, now: this.now() };
     return nearby.some((o) => o.kind === 'corpse' && o.dist <= reach && !this.loot.book.skipped(o.guid, ctx.now, bs)
       && (this.loot.book.needsDescription(o.guid) || this.loot.book.mayLoot(o.guid, ctx) === true));
@@ -1367,7 +1374,7 @@ export class RoutineEngine {
     const g = this.api.selectedGuid();
     if (g === null) return ['TestItem: select an item first.'];
     const carried = this.api.inventory().find((i) => i.guid === g);
-    const o = this.api.snapshot({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g);
+    const o = this.api.look({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g);
     const name = carried?.name ?? o?.name;
     if (!name) return ['TestItem: select an item first.'];
     const r = await this.api.appraise(g, { quiet: true });
@@ -1382,7 +1389,7 @@ export class RoutineEngine {
     const g = this.api.selectedGuid();
     if (g === null) return ['propertydump: select something first.'];
     const r = await this.api.appraise(g, { quiet: true });
-    const name = this.api.inventory().find((i) => i.guid === g)?.name ?? this.api.snapshot({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g)?.name ?? `#${g.toString(16)}`;
+    const name = this.api.inventory().find((i) => i.guid === g)?.name ?? this.api.look({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g)?.name ?? `#${g.toString(16)}`;
     if (!r.ok) return [`propertydump: ${r.message}`];
     return propertyDumpLines(name, (r.data ?? this.api.itemData(g)) as ItemProps | null);
   }
@@ -1479,7 +1486,7 @@ export class RoutineEngine {
    * routes start at the point nearest you that you could be at; a once route at its head.
    */
   private loadNav(route: Route): { route: Route; i: number; dir: 1 | -1; done: boolean } {
-    const me = this.api.snapshot({ max: 0 }).me;
+    const me = this.api.self();
     const i = me && route.points.length ? nearestStart(route, me.pos) : 0;
     if (i) this.note(`route "${route.name}" starts at point ${i + 1}, the nearest`);
     return { route, i, dir: 1, done: route.mode !== 'follow' && route.points.length === 0 };
@@ -1504,7 +1511,7 @@ export class RoutineEngine {
     const st = this.settings;
     if (walksTo(route, i)) {
       const g = parseMapCoords(pt);
-      const me = this.api.snapshot({ max: 0 }).me;
+      const me = this.api.self();
       if (g && me) {
         // NavFarStopRange: a point this far off is no leg to walk (VTank stops navigating until you're nearer).
         const far = Number(st.NavFarStopRange);
@@ -1591,7 +1598,7 @@ export class RoutineEngine {
     const t = this.now();
     if (!now && t - f.sampledAt < FOLLOW_SAMPLE_MS) return;
     f.sampledAt = t;
-    const obs = this.api.snapshot({ radius: FOLLOW_SIGHT_M, max: 100 });
+    const obs = this.api.look({ radius: FOLLOW_SIGHT_M, max: 100 });
     // In portal space (the Follow's own trip after them, or anyone's): nothing to see or say until you arrive.
     if (obs.screen === 'portal-space') return;
     const lead = findLeader(obs.nearby, f.who);
@@ -1708,7 +1715,7 @@ export class RoutineEngine {
     const out = ((): { who: string; dist: number | null; limit: number } | null => {
       if (off) return null;
       const limit = Math.max(0.5, Number(this.settings.NavCloseStopRange) || 2) + slack;
-      const obs = this.api.snapshot({ radius: FOLLOW_SIGHT_M, max: 100 });
+      const obs = this.api.look({ radius: FOLLOW_SIGHT_M, max: 100 });
       const lead = findLeader(obs.nearby, n!.route.follow!);
       if (lead) return lead.dist > limit ? { who: lead.name, dist: lead.dist, limit } : null;
       return this.api.fellowLastSeen(n!.route.follow!) || this.followPortalFor(n!.route.follow!, false, !!obs.me) || (this.follow?.who === n!.route.follow && !!this.follow?.landscape?.goals.length) ? { who: n!.route.follow!, dist: null, limit } : null;
@@ -1733,7 +1740,7 @@ export class RoutineEngine {
         const p = this.profile;
         if (p) this.watchLeader(p, true);
         const f = this.follow;
-        const obs = this.api.snapshot({ radius: FOLLOW_SIGHT_M, max: 100 });
+        const obs = this.api.look({ radius: FOLLOW_SIGHT_M, max: 100 });
         const lead = f?.inSight ? findLeader(obs.nearby, f.who) : undefined;
         // Out of sight in another room of this dungeon, placed a moment ago: to where they were last placed, by the doorway
         // route (walkTo of an unseen fellow goes there: AgentApi.walkToLastSeen); they are followed on once in sight.
@@ -1963,7 +1970,7 @@ export class RoutineEngine {
 
   /** Whether a monster stands within the held position's range (always, with none held). */
   private holdOk(o: { dist: number; bearing: number }): boolean {
-    const me = this.api.snapshot({ max: 0 }).me;
+    const me = this.api.self();
     return !this.hold || !me || holdAllows(this.hold, me.pos, o);
   }
 
@@ -1976,7 +1983,7 @@ export class RoutineEngine {
   private async pull(a: Extract<RoutineAction, { kind: 'pull' }>): Promise<AgentResult> {
     let re: RegExp;
     try { re = new RegExp(a.pattern, 'i'); } catch { return { ok: false, message: `bad pattern /${a.pattern}/` }; }
-    const m = this.api.snapshot({ radius: a.meters ?? 60, max: 60 }).nearby.find((o) => o.kind === 'monster' && !o.dying && re.test(o.name));
+    const m = this.api.look({ radius: a.meters ?? 60, max: 60 }).nearby.find((o) => o.kind === 'monster' && !o.dying && re.test(o.name));
     if (!m) return { ok: false, message: `nothing matching /${a.pattern}/ within ${a.meters ?? 60} m`, idle: true };
     const since = this.api.currentSeq();
     const r = this.api.attack(m.guid, { far: true, ...this.leashStayNear() }); // a routine's targets are its rules' (no floor refusal)
@@ -2022,7 +2029,7 @@ export class RoutineEngine {
       if (n >= limit) {
         // The client's own abort: a jump cuts the kneel; then far enough that the server cancels it too.
         this.api.jump();
-        const seen = this.api.snapshot({ radius: 80, max: 60 }).nearby;
+        const seen = this.api.look({ radius: 80, max: 60 }).nearby;
         const away = awayWord([...this.api.attackersOfMe().keys()].map((g) => seen.find((o) => o.guid === g)).filter((o): o is NonNullable<typeof o> => !!o));
         await sleep(400);
         const run = away ? await this.api.walkTo(`${RECALL_MOVE_M}m ${away}`, { within: 1, timeoutMs: 15_000, flee: true }) : null;
@@ -2069,7 +2076,7 @@ export class RoutineEngine {
         return this.api.useCarried(a.item, to);
       }
       case 'attack-nearest': {
-        const obs = this.api.snapshot({ radius: a.meters ?? 60, max: 30 });
+        const obs = this.api.look({ radius: a.meters ?? 60, max: 30 });
         // A VirindiTank Monsters row with priority -1 means leave that one alone, whoever asks.
         const ignored = (o: { guid: number; name: string; dist: number; relBearing: number }) => !!p.vtank && matchMonsterRow(p.vtank.monsters, o, { settings: this.settings }).priority < 0;
         // SkipUnreachableMonsters, as the macro: hand to hand, not one only the long way round, a storey off or away from your
@@ -2131,10 +2138,10 @@ export class RoutineEngine {
         const pending = this.killsToLoot();
         const others = (bs.lootAll || bs.lootFellow) && !truthySetting(st.LootOnlyRareCorpses);
         if (!pending.length && !others) return { ok: true, message: 'nothing of ours to loot', idle: true };
-        const meName = this.api.snapshot({ max: 0 }).me?.name ?? '';
+        const meName = this.api.self()?.name ?? '';
         const ctx = () => ({ me: meName, fellows: this.loot.fellows(), settings: bs, now: now() });
         const wanted = new Set(pending.map((k) => `Corpse of ${k.name}`));
-        const look = () => this.api.snapshot({ radius: a.meters ?? 20, max: 30 }).nearby
+        const look = () => this.api.look({ radius: a.meters ?? 20, max: 30 }).nearby
           .filter((o) => o.kind === 'corpse' && !book.skipped(o.guid, now(), bs) && (wanted.has(o.name) || others));
         let cands = look();
         for (let w = 0; pending.length && !cands.some((c) => wanted.has(c.name)) && w < 10; w++) { await sleep(500); cands = look(); }
@@ -2175,7 +2182,7 @@ export class RoutineEngine {
         return a.portal ? this.api.use(a.portal, { flee: true }) : { ok: false, message: 'flee-to needs coords or a portal' };
       }
       case 'hold-position': {
-        const me = this.api.snapshot({ max: 0 }).me;
+        const me = this.api.self();
         const at = a.coords ? parseMapCoords(a.coords) : me ? { x: me.pos.x, y: me.pos.y } : null;
         if (!at) return { ok: false, message: a.coords ? `can't read ${a.coords}` : 'your position is not known yet' };
         this.hold = { x: at.x, y: at.y, meters: a.meters };
@@ -2185,7 +2192,7 @@ export class RoutineEngine {
       case 'pull': return this.pull(a);
       case 'loot-corpse': {
         const want = a.name.trim().toLowerCase();
-        const c = this.api.snapshot({ radius: a.meters ?? 40, max: 60 }).nearby.filter((o) => o.kind === 'corpse' && o.name.toLowerCase() === want).sort((x, y) => x.dist - y.dist)[0];
+        const c = this.api.look({ radius: a.meters ?? 40, max: 60 }).nearby.filter((o) => o.kind === 'corpse' && o.name.toLowerCase() === want).sort((x, y) => x.dist - y.dist)[0];
         if (!c) return { ok: true, message: `no ${a.name} within ${a.meters ?? 40} m`, idle: true };
         return this.lootOne(c, undefined, p);
       }
@@ -2193,7 +2200,7 @@ export class RoutineEngine {
       case 'use-object': return this.api.use(a.name);
       // Route steps (a rule running one has no point): the portal by id or nearest you; a checkpoint where you stand.
       case 'use-portal': return runUseStep(this.nodeCtx(p), a, { point: null, usePortalDistance: Number(this.settings.UsePortalDistance) || 4 });
-      case 'checkpoint': { const me = this.api.snapshot({ max: 0 }).me; return me ? runCheckpoint(this.nodeCtx(p), mapCoordsText(me.pos), Math.max(0.5, Number(this.settings.NavCloseStopRange) || 2)) : { ok: false, message: 'your position is not known yet' }; }
+      case 'checkpoint': { const me = this.api.self(); return me ? runCheckpoint(this.nodeCtx(p), mapCoordsText(me.pos), Math.max(0.5, Number(this.settings.NavCloseStopRange) || 2)) : { ok: false, message: 'your position is not known yet' }; }
       case 'create-view': {
         const v = parseMetaView(a.xml);
         if (!v) return { ok: false, message: `view "${a.name}" has no <view>` };

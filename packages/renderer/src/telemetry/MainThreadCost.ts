@@ -20,7 +20,14 @@
 
 /** frameStep's phases, in the order they run (main.ts). A phase may be marked more than once a frame. */
 export const FRAME_PHASES = [
-  'tags',     // nav lines, nametags, the go-arrow, the agent tick
+  // The frame's top was one 'tags' phase until 2026-10-21 (PERF.agent-tick-cost: 56 and 86 ms of "tags" on two routine
+  // users' machines). Split so a report names the subsystem; the page sends only its ten largest phases.
+  'nav',      // the frame clock and VirindiTank's nav lines
+  'tags',     // UtilityBelt's nametags and the go-arrow
+  'agent',    // the agent API's tick (its task, watchers and object diff), less the routine
+  'routine',  // the routine engine's tick (VirindiTank's macro and meta) inside the agent tick
+  'ub',       // UtilityBelt's tick
+  'mag',      // Mag-Tools' tick
   'physics',  // building-collision refresh, input, movement, MoveTo, range checks, ground, jump / fall
   'sweep',    // ResourceSweep: unused pooled meshes / materials / textures released
   'anim',     // object maintenance, creature animation, building shells
@@ -54,6 +61,28 @@ export class FramePhaseTimer {
     this.frameMs[phase] += t - this.last;
     this.last = t;
   }
+}
+
+/**
+ * The frame's automation tick (main.ts agentFrameTick), each part marked into its own phase: the agent API's tick
+ * ('agent', with the routine engine's share inside it as 'routine'), UtilityBelt's ('ub', only where /ub runs) and
+ * Mag-Tools' ('mag'). Time before the call is marked by the caller.
+ */
+export function timedAgentTick(
+  parts: {
+    agent: { tick(marks?: { routineStart(): void; routineEnd(): void }): void };
+    ub?: { tick(): void } | null;
+    ubOn: boolean;
+    mag?: { tick(): void } | null;
+  },
+  mark: (phase: number) => void,
+): void {
+  parts.agent.tick({ routineStart: () => mark(PHASE.agent), routineEnd: () => mark(PHASE.routine) });
+  mark(PHASE.agent);
+  if (parts.ubOn) parts.ub?.tick();
+  mark(PHASE.ub);
+  parts.mag?.tick();
+  mark(PHASE.mag);
 }
 
 /** An op token as sent: letters, digits, ':' and '_', at most 24 characters. */

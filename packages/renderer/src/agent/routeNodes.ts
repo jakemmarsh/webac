@@ -110,7 +110,7 @@ export function objectAt(me: { x: number; y: number }, o: { dist: number; bearin
 
 const entered = (api: AgentApi, mark: number): boolean => api.status().screen === 'portal-space' || api.eventsSince(mark).some((e) => e.type === 'portal' && /entered/.test(e.text));
 const arrived = (api: AgentApi, mark: number): boolean => api.eventsSince(mark).some((e) => e.type === 'portal' && /arrived/.test(e.text));
-const myPos = (api: AgentApi): { x: number; y: number; z: number } | null => api.snapshot({ max: 0 }).me?.pos ?? null;
+const myPos = (api: AgentApi): { x: number; y: number; z: number } | null => api.self()?.pos ?? null;
 
 async function until(ctx: NodeCtx, done: () => boolean, ms: number, step = 250): Promise<boolean> {
   const end = ctx.now() + ms;
@@ -138,9 +138,9 @@ export async function runRecall(ctx: NodeCtx, spell: string): Promise<AgentResul
   const { api } = ctx;
   const arg = /^\d+$/.test(spell.trim()) ? Number(spell) : spell;
   api.stopMoving();
-  if (api.snapshot({ max: 0 }).me?.combatMode !== 'magic') {
+  if (api.self()?.combatMode !== 'magic') {
     api.combatMode('magic');
-    await until(ctx, () => api.snapshot({ max: 0 }).me?.combatMode === 'magic', 3000, 200);
+    await until(ctx, () => api.self()?.combatMode === 'magic', 3000, 200);
   }
   let casts = 0;
   const started = ctx.now();

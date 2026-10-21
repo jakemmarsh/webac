@@ -40,7 +40,7 @@ export class LootExtras {
   fellows(): Array<{ name: string; shareLoot: boolean }> {
     const f = this.api.fellowshipInfo();
     if (!f) return [];
-    const me = this.api.snapshot({ max: 0 }).me?.name ?? '';
+    const me = this.api.self()?.name ?? '';
     const sharing = new Set((f.sharing ?? []).map((n) => n.toLowerCase()));
     return (f.members ?? []).filter((n) => n !== me).map((n) => ({ name: n, shareLoot: sharing.has(n.toLowerCase()) }));
   }
@@ -172,7 +172,7 @@ export class LootExtras {
       if (!r.ok) { this.donors.delete(plan.donor.guid); return r; }
       // The client's own "destroy … and drain its mana into this stone?" is answered Yes, should it come up.
       for (let i = 0; i < 30; i++) {
-        const ask = this.api.snapshot({ max: 0 }).dialogs?.find((x) => DRAIN_CONFIRM.test(x.text));
+        const ask = this.api.openDialogs().find((x) => DRAIN_CONFIRM.test(x.text));
         if (ask) this.api.dialog('Yes');
         if (!this.api.inventory().some((x) => x.guid === plan.donor.guid)) break;
         await sleep(200);

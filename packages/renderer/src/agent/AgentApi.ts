@@ -1763,7 +1763,7 @@ export class AgentApi {
 
   /** Fellows in sight with their vitals and distance (the macro's Helper heals those within its range). */
   fellowsNear(radius = 100): Array<{ guid: number; name: string; distance: number; health: { cur: number; max: number }; stamina: { cur: number; max: number }; mana: { cur: number; max: number } }> {
-    const near = new Map(this.snapshot({ radius, max: 80 }).nearby.map((o) => [o.guid, o.dist]));
+    const near = new Map(this.look({ radius, max: 80 }).nearby.map((o) => [o.guid, o.dist]));
     return (this.host.fellows?.() ?? []).flatMap((f) => (near.has(f.guid) ? [{ ...f, distance: near.get(f.guid)! }] : []));
   }
   /** What an examination of a carried item told (null until it was examined). */
@@ -1771,6 +1771,10 @@ export class AgentApi {
 
   /** The newest event's seq (where "since now" starts). */
   currentSeq(): number { return this.seqN; }
+  /** The screen you are on (an observation's `screen`, without the rest of the look). */
+  currentScreen(): AgentScreen { return this.host.screen(); }
+  /** Your character's name (an observation's `me.name`, without the rest of the look); null outside the world. */
+  characterName(): string | null { return this.me()?.s.name ?? null; }
   /** Where the server last echoed you (global metres; z as the cell's), and when (now() ms); null when it hasn't (or the host can't say). */
   serverPosition(): { x: number; y: number; z: number; at: number } | null {
     const p = this.host.serverSelfPosition?.();
@@ -2449,8 +2453,7 @@ export class AgentApi {
     let best: number | null = null;
     for (const [k, g] of this.gearCasts) {
       if (!want.every((n) => g.items.has(n))) continue;
-      let sp: { category: number; power: number; duration?: number } | undefined;
-      for (const x of table.values()) if (x.name.toLowerCase() === k) { sp = x; break; }
+      const sp = this.spellNamed(k);
       if (!sp || sp.category !== category || sp.power < power || !(sp.duration && sp.duration > 0)) continue;
       const left = sp.duration - this.gearCastAgo(g);
       if (left > 0 && (best === null || left > best)) best = left;
@@ -2458,22 +2461,42 @@ export class AgentApi {
     return best;
   }
 
-  /** Whether a spell of `category` at `power` or stronger that you saw land on gear you still wear has time left. */
-  private gearCovers(category: number, power: number): boolean {
-    const table = this.host.spellTableData?.()?.spells;
-    if (!table) return false;
+  /**
+   * The spells you saw land on gear you still wear that have time left, by spell-table category and power: a spell of
+   * a category at a power or stronger among them covers that buff (missingBuffs). Read once per look: it was asked per
+   * buff family, each time reading the inventory and walking the whole spell table by name for every gear cast, and a
+   * routine user's dozen remembered banes made every look ~100 ms (PERF.agent-tick-cost, 2026-10-21).
+   */
+  private gearCoverage(): Array<{ category: number; power: number }> {
+    if (!this.host.spellTableData?.()?.spells) return [];
     this.loadGearCasts();
+    if (!this.gearCasts.size) return [];
     const worn = this.wornNames();
+    const out: Array<{ category: number; power: number }> = [];
     for (const [k, g] of this.gearCasts) {
       if (![...g.items].some((n) => worn.has(n))) continue;
+      const x = this.spellNamed(k);
+      if (x && x.duration && x.duration - this.gearCastAgo(g) > 0) out.push({ category: x.category, power: x.power });
+    }
+    return out;
+  }
+
+  /** The spell table's first spell (in table order) whose name is `lower` (lower case), through an index built once per table. */
+  private spellNamed(lower: string): { name: string; category: number; power: number; duration?: number } | undefined {
+    const table = this.host.spellTableData?.()?.spells;
+    if (!table) return undefined;
+    if (this.spellNameIndexFor !== table) {
+      this.spellNameIndexFor = table;
+      this.spellNameIndex = new Map();
       for (const x of table.values()) {
-        if (x.name.toLowerCase() !== k) continue;
-        if (x.category === category && x.power >= power && x.duration && x.duration - this.gearCastAgo(g) > 0) return true;
-        break;
+        const k = x.name.toLowerCase();
+        if (!this.spellNameIndex.has(k)) this.spellNameIndex.set(k, x);
       }
     }
-    return false;
+    return this.spellNameIndex.get(lower);
   }
+  private spellNameIndexFor: unknown = null;
+  private spellNameIndex = new Map<string, { name: string; category: number; power: number; duration?: number }>();
 
   /** The names (lower case) of the items you wear now. */
   private wornNames(): Set<string> {
@@ -2515,7 +2538,8 @@ export class AgentApi {
     let stale = false;
     for (const [k, g] of this.gearCasts) {
       let name = k, dur: number | undefined;
-      if (table) for (const sp of table.values()) if (sp.name.toLowerCase() === k) { name = sp.name; dur = sp.duration; break; }
+      const sp = table ? this.spellNamed(k) : undefined;
+      if (sp) { name = sp.name; dur = sp.duration; }
       const ago = Math.max(0, Math.round(this.gearCastAgo(g)));
       // Long past its duration and no expiry line seen (cast before this session's lines, or a line missed): no lead.
       if (dur !== undefined && dur > 0 && ago > dur + 600) { this.gearCasts.delete(k); stale = true; continue; }
@@ -3202,7 +3226,7 @@ export class AgentApi {
     if (!m || !this.lastScroll) return null;
     const table = this.host.spellTableData?.();
     const spellName = this.lastScroll.replace(/^Scroll of /i, '').toLowerCase();
-    const spell = table ? [...table.spells.values()].find((s) => s.name.toLowerCase() === spellName) : undefined;
+    const spell = table ? this.spellNamed(spellName) : undefined;
     const skill = this.host.skillList?.().find((s) => s.name.toLowerCase() === m[1].toLowerCase());
     if (!spell || !skill) return null;
     return `  (${this.lastScroll}: needs ${skill.name} ${spell.power - 50} or more to learn; yours is ${skill.buffed})`;
@@ -4979,6 +5003,38 @@ export class AgentApi {
   }
 
   /**
+   * A routine's look: {@link snapshot}'s screen, you, your target, what is near (with who is attacking or coming at you)
+   * and your fellows, without the player's sections (buffs and the buffs not up, gear spells and mana, corpses, deaths,
+   * vitae, supplies, remembered places: `remembered` is empty). A routine reads only the first part, several times a
+   * second; the rest cost it most of a millisecond each look on a big spellbook, and with a routine user's remembered
+   * gear casts ~100 ms (PERF.agent-tick-cost, 2026-10-21).
+   */
+  look(opts: ObserveOptions = {}): AgentObservation {
+    const cursor = this.chatCursor, look = this.lookSeq, byWait = new Set(this.chatByWait);
+    const obs = this.observe(opts, true);
+    this.chatCursor = cursor;
+    this.lookSeq = look;
+    this.chatByWait = byWait;
+    return obs;
+  }
+
+  /**
+   * What the player's sections did on the way while a routine looked (they ran on its every look): your corpses
+   * settled (one that left while in view), worn items' mana re-read by quiet appraisals. Kept at once a second when
+   * the looks are lean.
+   */
+  private leanUpkeepAt = -Infinity;
+  static readonly LEAN_UPKEEP_MS = 1000;
+  private leanUpkeep(): void {
+    const now = this.host.now();
+    if (now - this.leanUpkeepAt < AgentApi.LEAN_UPKEEP_MS) return;
+    this.leanUpkeepAt = now;
+    if (!this.me()) return;
+    this.settleMyCorpses();
+    this.gearManaLow();
+  }
+
+  /**
    * A monster's level: CreateObject carries none (ACE WorldObject_Networking) and the retail selection asks only
    * for its health (QueryHealth), so a player learns it by examining the creature: ACE's IdentifyObjectResponse
    * sends Level (PropertyInt 25) even when the Assess Creature roll fails (AppraiseInfo keeps PropertiesInt).
@@ -5000,7 +5056,8 @@ export class AgentApi {
     }
   }
 
-  observe(opts: ObserveOptions = {}): AgentObservation {
+  observe(opts: ObserveOptions = {}, lean = false): AgentObservation {
+    if (lean) this.leanUpkeep();
     this.host.wantFellowVitals?.();
     const radius = opts.radius ?? 60;
     const max = opts.max ?? 25;
@@ -5066,14 +5123,26 @@ export class AgentApi {
       nearby: all.slice(0, max),
       nearbyTotal: all.length,
       dialogs: this.host.dialogs(),
+      fellows: this.fellowsAt(),
+      fellowshipAlone: (this.host.fellowshipInfo?.()?.count ?? 0) === 1,
+      ...(hidden.length ? { unseen: hidden.slice(0, AgentApi.UNSEEN_MAX) } : {}),
+      chat,
+      seq: this.seqN,
+      remembered: lean ? [] : this.rememberedPlaces({ ...(opts.radius !== undefined ? { radius: opts.radius } : {}), ...(opts.filter ? { filter: opts.filter } : {}) }),
+      // A routine's look (look()) stops here: the sections below are the player's reading, and each costs.
+      ...(lean ? {} : this.playerSections()),
+    };
+  }
+
+  /** observe()'s sections for the player's reading (left out of a routine's look()). */
+  private playerSections(): Partial<AgentObservation> {
+    return {
       windows: this.host.openWindows?.() ?? [],
       buffs: this.buffsWithVitae(),
       ...(() => { const v = this.vitalsLoweredText(); return v ? { vitalsLowered: v } : {}; })(),
       ...(() => { const v = this.vitaeLine(); return v ? { vitae: v } : {}; })(),
       buffsMissing: this.missingBuffs(),
       ...(() => { const g = this.gearSpells(); return g.length ? { gearSpells: g } : {}; })(),
-      fellows: this.fellowsAt(),
-      fellowshipAlone: (this.host.fellowshipInfo?.()?.count ?? 0) === 1,
       ...(() => { const d = this.deathsLine(); return d ? { deaths: d } : {}; })(),
       ...(() => { const c = this.corpsesLine(); return c ? { corpses: c } : {}; })(),
       ...(() => { const g = gearEmptyFacts(this.host.inventory()); return g ? { gearEmpty: g } : {}; })(),
@@ -5086,10 +5155,6 @@ export class AgentApi {
       ...(() => { const m = this.gearManaOut(); const st = m.length ? this.manaStonesText() : null; return m.length ? { gearManaOut: m, ...(st ? { manaStones: st } : {}) } : {}; })(),
       ...(() => { const p = this.routine.loadedProfile; const m = p ? routineSuppliesMissing(p, this.host.inventory()) : null; return m ? { routineSupplies: m } : {}; })(),
       ...(() => { const u = this.attackersUnplaced(); return u.length ? { attackersUnplaced: u } : {}; })(),
-      remembered: this.rememberedPlaces({ ...(opts.radius !== undefined ? { radius: opts.radius } : {}), ...(opts.filter ? { filter: opts.filter } : {}) }),
-      ...(hidden.length ? { unseen: hidden.slice(0, AgentApi.UNSEEN_MAX) } : {}),
-      chat,
-      seq: this.seqN,
     };
   }
 
@@ -5199,8 +5264,9 @@ export class AgentApi {
     // Each with its cast chance now (the fizzle formula against the school's buffed skill), so a spell far above your
     // skill reads as such: Armor Self VI (power 250) listed for Arcanist's Life Magic ~217 fizzled nearly every time
     // (Sclavus camp, 2026-10-16 12:37).
+    const skills = new Map<number, { buffed: number } | null>();
     return this.host.spells().filter((s) => !f || s.name.toLowerCase().includes(f) || s.school.toLowerCase().includes(f)).slice(0, max).map((s) => {
-      const c = this.castChanceOf(s);
+      const c = this.castChanceOf(s, skills);
       return c ? { ...s, castChance: Math.round(c.chance * 1000) / 1000, schoolSkill: c.skill } : s;
     });
   }
@@ -6743,10 +6809,12 @@ export class AgentApi {
     // Arcanist (Life Magic ~217, ~9%) while her Armor Self III would land (Sclavus camp, 2026-10-16 12:37).
     const best = new Map<string, { s: AgentSpell; chance: number | null }>();
     const castable = (c: number | null): boolean => c === null || c >= AgentApi.BUFF_MIN_CHANCE;
+    // Each school's skill read once for the look, not once per spell (a high-level spellbook is ~1,500 spells).
+    const skills = new Map<number, { buffed: number } | null>();
     for (const s of this.host.spells()) {
       if (!s.buff) continue;
       const family = s.name.replace(/\s+[IVXL]+$/, '');
-      const chance = this.castChanceOf(s)?.chance ?? null;
+      const chance = this.castChanceOf(s, skills)?.chance ?? null;
       const had = best.get(family);
       const better = !had
         || (castable(chance) && !castable(had.chance))
@@ -6760,9 +6828,11 @@ export class AgentApi {
     const onYou = this.activeSpellsNow();
     // A spell on your gear (a bane, Impenetrability) is up when your casts of it on what you wear still have time left:
     // "Lightning Bane V" was listed as not up all hour while it was on all ten pieces (Arcanist, 2026-10-18 07:14–08:21Z).
+    const gear = this.gearCoverage();
     const covered = (s: AgentSpell): boolean => s.category !== undefined && (onYou.some((e) => e.category === s.category && e.remaining > 0 && (e.power === undefined || s.power === undefined || e.power >= s.power))
-      || this.gearCovers(s.category, s.power ?? 0));
-    const fams = [...best.entries()].filter(([family, { s }]) => ![...up].some((n) => n.replace(/\s+[IVXL]+$/, '') === family) && !covered(s));
+      || gear.some((g) => g.category === s.category && g.power >= (s.power ?? 0)));
+    const upFamilies = new Set([...up].map((n) => n.replace(/\s+[IVXL]+$/, '')));
+    const fams = [...best.entries()].filter(([family, { s }]) => !upFamilies.has(family) && !covered(s));
     return fams.sort((a, b) => Number(castable(b[1].chance)) - Number(castable(a[1].chance)) || Number(!!b[1].s.self) - Number(!!a[1].s.self))
       .map(([, { s, chance }]) => (castable(chance) ? s.name : `${s.name} (only ${Math.max(1, Math.round((chance ?? 0) * 100))}% to cast: your skill is too low)`));
   }
@@ -7746,10 +7816,15 @@ export class AgentApi {
    * The chance a cast of `s` gets past the skill roll now: the school's buffed skill against the spell's power
    * ({@link magicSkillChance}, the fizzle formula). Null when the host can't say the skill or the spell has no power.
    */
-  private castChanceOf(s: AgentSpell): { sk: { id: number; name: string }; skill: number; power: number; chance: number } | null {
+  private castChanceOf(s: AgentSpell, skills?: Map<number, { buffed: number } | null>): { sk: { id: number; name: string }; skill: number; power: number; chance: number } | null {
     const sk = schoolSkill(s.school);
     const power = s.power;
-    const have = sk ? this.host.skill?.(sk.id) ?? null : null;
+    let have: { buffed: number } | null = null;
+    if (sk) {
+      // `skills`: one look's reads, shared by its spells.
+      if (skills?.has(sk.id)) have = skills.get(sk.id)!;
+      else { have = this.host.skill?.(sk.id) ?? null; skills?.set(sk.id, have); }
+    }
     if (!sk || !have || power === undefined || power <= 0) return null;
     return { sk, skill: have.buffed, power, chance: magicSkillChance(have.buffed, power) };
   }
@@ -15357,10 +15432,15 @@ export class AgentApi {
     }
   }
 
-  /** Step the running task and the watchers. main.ts calls this ~10×/s. */
-  tick(): void {
+  /**
+   * Step the running task and the watchers. main.ts calls this ~10×/s. `marks`: told just before and after the routine's
+   * tick, so the frame's phase timing (telemetry/MainThreadCost.ts) can tell the routine's time from the rest.
+   */
+  tick(marks?: { routineStart(): void; routineEnd(): void }): void {
     this.settleCorpse();
+    marks?.routineStart();
     this.routine.tick();
+    marks?.routineEnd();
     const now = this.host.now();
     const t = this.task;
     // Death ends whatever you were doing: a walk or use must not carry on after the respawn.

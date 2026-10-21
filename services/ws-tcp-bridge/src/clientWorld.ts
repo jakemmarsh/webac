@@ -128,7 +128,7 @@ export interface ClientFirstMinuteEvent extends WorldIds {
 }
 
 /** frameStep's phases (renderer telemetry/MainThreadCost.ts FRAME_PHASES): phaseMs keeps only these keys. */
-export const FRAME_PHASES = ['tags', 'physics', 'sweep', 'anim', 'sync', 'camera', 'fx', 'stream', 'hud', 'lod', 'warmup', 'render'] as const;
+export const FRAME_PHASES = ['nav', 'tags', 'agent', 'routine', 'ub', 'mag', 'physics', 'sweep', 'anim', 'sync', 'camera', 'fx', 'stream', 'hud', 'lod', 'warmup', 'render'] as const;
 /** phaseMs holds at most this many phases (the renderer sends its ten largest). */
 export const MAX_PHASE_KEYS = 10;
 /** A per-frame phase mean, ms, at most this. */

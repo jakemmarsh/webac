@@ -96,13 +96,13 @@ function store(key: string): { get(): Record<string, ExprValue>; set(v: Record<s
 export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text: string) => void, game: MetaGame = {}): ExprHost {
   const runVars = new Map<string, ExprValue>();
   const gvars = store('acjs.vtank.gvar');
-  const pvarsFor = () => store(`acjs.vtank.pvar.${api.snapshot({ max: 0 }).me?.name ?? '?'}`);
+  const pvarsFor = () => store(`acjs.vtank.pvar.${api.self()?.name ?? '?'}`);
   const scopeGet = (scope: VarScope, name: string): ExprValue | undefined => {
     if (scope === 'var') return runVars.get(name);
     const s = scope === 'gvar' ? gvars.get() : pvarsFor().get();
     return name in s ? s[name] : undefined;
   };
-  const me = () => api.snapshot({ max: 0 }).me;
+  const me = () => api.self();
   const setting = (n: string) => engine.setting(n) ?? MACRO_DEFAULTS[n];
   /** A game object as the expressions see it (Decal's object class; ItemType; where it is worn). */
   const fromGame = (o: MetaGameObject, coords?: ExprCoords | null): HostObject => ({
@@ -113,7 +113,7 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
   const objects = (): HostObject[] => {
     const self = me();
     if (!self) return [];
-    return api.snapshot({ radius: 250, max: 200 }).nearby.map((o) => {
+    return api.look({ radius: 250, max: 200 }).nearby.map((o) => {
       const r = (o.bearing * Math.PI) / 180;
       const coords = coordsOf(self.pos.x + o.dist * Math.sin(r), self.pos.y + o.dist * Math.cos(r), self.pos.z + (o.dz ?? 0));
       const g = game.object?.(o.guid);
@@ -186,7 +186,7 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
     combatState: () => { const m = me()?.combatMode ?? 'peace'; return m === 'unknown' ? 'Peace' : m[0]!.toUpperCase() + m.slice(1); },
     setCombatState: (state) => api.combatMode(state.toLowerCase()).ok,
     // snapshot, not observe: observe hands the pending chat lines to its caller.
-    isPortaling: () => api.snapshot({ max: 0 }).screen === 'portal-space',
+    isPortaling: () => api.currentScreen() === 'portal-space',
     objects,
     inventory,
     objectById: (id) => {
@@ -222,7 +222,7 @@ export function vtankExprHost(api: AgentApi, engine: RoutineEngine, print: (text
     objectHealth: (id) => {
       const s = me();
       if (id === s?.guid) return s.health.max ? s.health.cur / s.health.max : 0;
-      return api.snapshot({ radius: 250, max: 200 }).nearby.find((o) => o.guid === id)?.health ?? 0;
+      return api.look({ radius: 250, max: 200 }).nearby.find((o) => o.guid === id)?.health ?? 0;
     },
     objectVital: (id, v) => {
       const s = me();

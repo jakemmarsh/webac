@@ -486,3 +486,62 @@ describe('the bridge logs the browser socket\'s close code', () => {
     }
   });
 });
+
+describe('session_close says how long the page and the server had been quiet', () => {
+  // 2026-10-21 17:29Z: a drain's hard cut closed a session whose page never came back. Protocol
+  // pongs come from the browser even while the page's JavaScript is frozen, so only the page's own
+  // messages (binary or text) and the server's datagrams tell a frozen tab from a live one.
+  it('browserQuietMs / serverQuietMs on a shutdown close; omitted when nothing was ever heard', async () => {
+    vi.useRealTimers();
+    const server = dgram.createSocket('udp4');
+    await new Promise<void>(r => server.bind(0, '127.0.0.1', () => r()));
+    const udpPort = (server.address() as { port: number }).port;
+    // A game server that answers every datagram with one of its own.
+    server.on('message', (_msg, rinfo) => { server.send(Buffer.alloc(24), rinfo.port, rinfo.address); });
+    const clock = { t: 1_000_000 };
+    const logs: Array<[string, Record<string, unknown>]> = [];
+    const config = resolveBridgeConfig(['0', '127.0.0.1', String(udpPort)], { BRIDGE_SERVERS_URL: 'none', BRIDGE_SERVERS_CACHE: 'none' });
+    config.wsPort = 0;
+    const bridge = createBridgeServer(config, { now: () => clock.t, log: (_level, event, fields) => { logs.push([event, fields ?? {}]); } });
+    const port = await bridge.listen();
+    const until = async (f: () => boolean) => {
+      const end = Date.now() + 3000;
+      while (!f()) { if (Date.now() > end) throw new Error('timeout'); await new Promise(r => setTimeout(r, 10)); }
+    };
+    const open = async () => {
+      const ws = new NodeWebSocket(`ws://127.0.0.1:${port}/`);
+      await new Promise<void>((res, rej) => { ws.once('open', () => res()); ws.once('error', rej); });
+      return ws;
+    };
+    const opened = () => logs.filter(l => l[0] === 'session_open').map(l => l[1].session as number);
+    try {
+      // A socket the page never wrote to.
+      const silent = await open();
+      await until(() => opened().length === 1);
+      // A page that played (a game datagram both ways), then sent a text control frame.
+      const played = await open();
+      await until(() => opened().length === 2);
+      const binaryIn: Buffer[] = [];
+      const textIn: string[] = [];
+      played.on('message', (d: Buffer, isBinary: boolean) => { if (isBinary) binaryIn.push(d); else textIn.push(d.toString('utf8')); });
+      played.send(Buffer.alloc(20));
+      await until(() => binaryIn.length === 1); // the server's answer came back at t0
+      clock.t += 4_000;
+      played.send('relayTicket'); // a text frame counts: the page's own code sent it
+      await until(() => textIn.length === 1);
+      clock.t += 60_000; // the page then went quiet (frozen), and so did the server
+      await bridge.shutdown();
+      const closes = logs.filter(l => l[0] === 'session_close').map(l => l[1]);
+      const silentClose = closes.find(c => c.session === opened()[0])!;
+      const playedClose = closes.find(c => c.session === opened()[1])!;
+      expect(silentClose).toMatchObject({ reason: 'shutdown' });
+      expect(silentClose).not.toHaveProperty('browserQuietMs');
+      expect(silentClose).not.toHaveProperty('serverQuietMs');
+      expect(playedClose).toMatchObject({ reason: 'shutdown', browserQuietMs: 60_000, serverQuietMs: 64_000, durationMs: 64_000 });
+      silent.terminate();
+      played.terminate();
+    } finally {
+      server.close();
+    }
+  });
+});

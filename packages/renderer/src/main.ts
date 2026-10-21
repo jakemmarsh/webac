@@ -414,7 +414,7 @@ import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
 import { launcherConnectFailedReport, reportFromPage, worldListFailedReport } from './telemetry/WebReport.js';
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
-import { FramePhaseTimer, PHASE, ProgramCreationCounter, netHandlerCost, streamHandlerCost, connectionEventOp } from './telemetry/MainThreadCost.js';
+import { FramePhaseTimer, PHASE, ProgramCreationCounter, netHandlerCost, streamHandlerCost, connectionEventOp, timedAgentTick } from './telemetry/MainThreadCost.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
@@ -7546,7 +7546,7 @@ async function main() {
   // AGENT.hosted-mcp-connector: the chat side of pairing Claude (set where the tab relay is built).
   let pairingChat: ((line: string) => boolean) | null = null;
   // The agent API's tick (every 100 ms), run from the frame step once the agent starts.
-  let agentFrameTick: (() => void) | null = null;
+  let agentFrameTick: ((mark: (phase: number) => void) => void) | null = null;
   let connectUrl = urlLogin.server ? bridgeUrlWithServer(bridgeUrl, urlLogin.server) : bridgeUrl;
   /** The launcher world's name for the World box (null: the server's own ServerName). */
   let launcherWorldName: string | null = null;
@@ -17393,7 +17393,7 @@ async function main() {
       // The agent's steering tick rides the frame step (the rAF frame, or the background beat when the
       // browser stops frames), not a page timer that a covered window throttles to once a second.
       // UtilityBelt's timers, AutoVendor-on-open, game events and login quest read run only where /ub does.
-      agentFrameTick = () => { agentApi.tick(); if (gameUI.automationAvailable) ubRuntime?.tick(); magTools?.tick(); };
+      agentFrameTick = (mark) => timedAgentTick({ agent: agentApi, ub: ubRuntime, ubOn: gameUI.automationAvailable, mag: magTools }, mark);
       // AGENT.automation-panel — the player's surface over the same engine: the Automation panel
       // (/automation, or the HUD strip while a routine runs). Reports print as System chat.
       // Dev / URL-override builds only (automationUiEnabled); the agent API itself runs everywhere.
@@ -17449,7 +17449,7 @@ async function main() {
             if (g === null) return null;
             const carried = agentApi.inventory().find((i) => i.guid === g);
             if (carried) return { name: carried.name, kind: 'item', guid: g };
-            const o = agentApi.snapshot({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g);
+            const o = agentApi.look({ max: 60, radius: 200 }).nearby.find((x) => x.guid === g);
             return o ? { name: o.name, kind: o.kind } : null;
           },
           resetStats: () => agentApi.routine.resetStats(),
@@ -17473,7 +17473,7 @@ async function main() {
             skillRows: () => agentApi.skillList().map((k) => ({ id: k.id, name: k.name, training: k.training, base: k.base, buffed: k.buffed })),
             stackCram: (mode) => metaTidyPass.start(mode),
             carried: () => agentApi.inventory().map((i) => ({ name: i.name, ...(i.stack !== undefined ? { stack: i.stack } : {}), ...(i.type ? { type: i.type } : {}), ...(i.value !== undefined ? { value: i.value } : {}), ...(i.burden !== undefined ? { burden: i.burden } : {}) })),
-            playersWithin: (r) => 1 + agentApi.snapshot({ radius: r, max: 1000 }).nearby.filter((o) => o.kind === 'player' && o.dist <= r).length,
+            playersWithin: (r) => 1 + agentApi.look({ radius: r, max: 1000 }).nearby.filter((o) => o.kind === 'player' && o.dist <= r).length,
             // UB's clearbugged also forgets the items stack/cram gave up on.
             // Every other /ub command (agent/ub/ubCommands.ts).
             ub: (line, lootRules) => ubRuntime ? ubRuntime.command(line, lootRules) : Promise.resolve(null),
@@ -17495,10 +17495,10 @@ async function main() {
         buffs: () => agentHost.activeSpells(),
           // The VirindiTank window's lines: /vt answers (CommandLine) and `/vt log` (Logging).
           report: (text) => gameUI.addSystemMessage(`[Automation] ${text}`, chatColorFor(ChatMessageType.System), ChatMessageType.System, 0, null, { plugin: 'VTank', category: vtVcsCategory(text) }),
-          character: () => agentApi.snapshot({ max: 0 }).me?.name ?? null,
+          character: () => agentApi.characterName(),
           // Precise to centimetres and indoors too (a dungeon's own frame), not the radar's 24 m cell (null indoors).
-          coords: () => { const me = agentApi.snapshot({ max: 0 }).me; return me ? mapCoordsText(me.pos) : null; },
-          height: () => agentApi.snapshot({ max: 0 }).me?.pos.z ?? null,
+          coords: () => { const me = agentApi.self(); return me ? mapCoordsText(me.pos) : null; },
+          height: () => agentApi.self()?.pos.z ?? null,
           now: () => performance.now(),
         });
       }
@@ -18941,15 +18941,19 @@ async function main() {
    * FRAME_PHASES): one performance.now() at the end of each phase, read by WorldReporter.frame.
    */
   const framePhases = new FramePhaseTimer();
+  const frameMark = (phase: number): void => framePhases.mark(phase);
 
   /** One frame of the game; `draw` false runs everything but the 3D draw (the background beat). */
   function frameStep(draw: boolean, frameTime?: number) {
     const workStart = performance.now();
     framePhases.begin(workStart);
     const now = frameClock.next(frameTime, workStart);
-    if (draw) { updateNavLines(now); updateNametags(now); goArrow?.frame(); }
-    if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(); }
+    if (draw) updateNavLines(now);
+    framePhases.mark(PHASE.nav);
+    if (draw) { updateNametags(now); goArrow?.frame(); }
     framePhases.mark(PHASE.tags);
+    // The automation tick marks its own phases (agent, routine, ub, mag).
+    if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(frameMark); }
     const dt = Math.max(0, now - lastTime) / 1000;
     lastTime = now;
 

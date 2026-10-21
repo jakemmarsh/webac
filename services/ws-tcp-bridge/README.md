@@ -68,6 +68,12 @@ page's own code closed it (ClientConnection ending a session it judged dead or
 the server ended), 1001 = the page went away (tab closed, reload), 1006 = the
 connection dropped with no close frame (an edge proxy, the network, or the
 bridge's own ping timeout, which logs `session_ping_timeout` first).
+Every `session_close` also carries `browserQuietMs` (how long since the page's
+own code last sent a WebSocket message, binary or text) and `serverQuietMs`
+(how long since the game server's last datagram); each is left out when nothing
+ever arrived that way. The ping check can't tell these apart: the browser
+answers protocol pings even while a hidden tab's JavaScript is frozen, so a
+frozen page shows as a large `browserQuietMs` on a socket that never timed out.
 
 ## Environment variables
 

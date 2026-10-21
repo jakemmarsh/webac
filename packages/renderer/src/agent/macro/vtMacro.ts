@@ -484,7 +484,7 @@ export class VtMacro {
     // (2026-10-11). It waits up to 3 s per call.
     const short = this.manaShort;
     if (short) {
-      const mana = () => this.api.snapshot({ max: 0 }).me?.mana.cur ?? 0;
+      const mana = () => this.api.self()?.mana.cur ?? 0;
       const need = this.api.spellTableData()?.spells.get(spellId)?.baseMana ?? short.mana + 1;
       const waiting = () => mana() < need && this.now() - short.at < 30_000;
       for (let w = 0; w < 15 && waiting(); w++) await new Promise((ok) => setTimeout(ok, 200));
@@ -493,7 +493,7 @@ export class VtMacro {
     }
     const res = await this.api.cast(spellId, target);
     if (!res.ok && COMPONENTS_MISSING.test(res.message)) this.componentsRequired = true;
-    if (!res.ok && NOT_ENOUGH_MANA.test(res.message)) this.manaShort = { mana: this.api.snapshot({ max: 0 }).me?.mana.cur ?? 0, at: this.now() };
+    if (!res.ok && NOT_ENOUGH_MANA.test(res.message)) this.manaShort = { mana: this.api.self()?.mana.cur ?? 0, at: this.now() };
     return res;
   }
   /** The last potion, elixir or food the recharge used: which, its vital then, when (and whether its hold was said). */
@@ -914,7 +914,7 @@ export class VtMacro {
 
   /** Health or stamina under its Recharge-Norm mark (Heal at / Restam at), or null: what a swing's wait gives way to. */
   private belowMark(settings: Record<string, string | number | boolean>): string | null {
-    const me = this.api.snapshot({ max: 0 }).me;
+    const me = this.api.self();
     if (!me) return null;
     for (const [v, k] of [['health', 'HitP'], ['stamina', 'Stam']] as const) {
       const x = me[v];
@@ -936,7 +936,7 @@ export class VtMacro {
     p = this.resolved(p);
     const fam = this.families();
     if (!fam) return null;
-    const me = this.api.snapshot({ max: 0 }).me;
+    const me = this.api.self();
     if (!me || me.dead) return null;
     this.lastSettings = settings;
     this.itemTimers.bind({ guid: me.guid, name: me.name });
@@ -952,7 +952,7 @@ export class VtMacro {
     const fam = this.families();
     const range = num(settings.AttackDistance, vtOption('AttackDistance')!.default as number);
     const petRange = VtMacro.petRange(settings);
-    const snap = this.api.snapshot({ radius: Math.max(range, petRange, 60), max: 40 });
+    const snap = this.api.look({ radius: Math.max(range, petRange, 60), max: 40 });
     const me = snap.me;
     if (!me) return null;
     // Death strips item enchantments (VTank's death handler clears its item timers too).
@@ -1421,7 +1421,7 @@ export class VtMacro {
     p = this.resolved(p);
     if (!opt(settings, 'RandomHelperBuffs') || this.now() < this.helperUntil || this.now() < this.noMagicUntil) return null;
     const table = this.api.spellTableData();
-    const snap = this.api.snapshot({ radius: HELPER_RANGE, max: 40 });
+    const snap = this.api.look({ radius: HELPER_RANGE, max: 40 });
     const me = snap.me;
     if (!table || !me) return null;
     const players = snap.nearby.filter((o) => o.kind === 'player' && o.guid !== me.guid && o.dist < HELPER_RANGE);

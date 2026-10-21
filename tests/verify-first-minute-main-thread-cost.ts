@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { WorldReporter, MAX_PHASE_KEYS, type WorldEvent, type FirstMinuteEvent } from '../packages/renderer/src/telemetry/WorldReporter';
 import {
-  FRAME_PHASES, PHASE, FramePhaseTimer, HandlerMeter, ProgramCreationCounter, connectionEventOp, opToken, streamHandlerCost,
+  FRAME_PHASES, PHASE, FramePhaseTimer, HandlerMeter, ProgramCreationCounter, connectionEventOp, opToken, streamHandlerCost, timedAgentTick,
 } from '../packages/renderer/src/telemetry/MainThreadCost';
 import { rebuildOnArrival } from '../packages/renderer/src/dat/streaming/StreamingDats';
 import { runRetryingOnArrival } from '../packages/renderer/src/dat/streaming/RetryOnArrival';
@@ -235,6 +235,52 @@ describe('MainThreadCost meters', () => {
     expect(streamHandlerCost.calls).toBe(2);         // the first run is the caller's; the retry is a landing
     expect(streamHandlerCost.longestOp).toBe('retry');
     streamHandlerCost.reset();
+  });
+});
+
+describe('PERF.agent-tick-cost — the frame top split so a report names the automation subsystem', () => {
+  // Two field reports (2026-10-21) said only "tags": 56 and 86 ms a frame, all of it the agent tick of routine users.
+  it('timedAgentTick marks the agent API, the routine inside it, UtilityBelt and Mag-Tools into their own phases', () => {
+    const clock = { t: 0 };
+    const ph = new FramePhaseTimer(() => clock.t);
+    ph.begin(0);
+    clock.t = 1; ph.mark(PHASE.nav);
+    clock.t = 3; ph.mark(PHASE.tags);
+    const agent = { tick(m?: { routineStart(): void; routineEnd(): void }) { clock.t += 2; m?.routineStart(); clock.t += 40; m?.routineEnd(); clock.t += 5; } };
+    const ub = { tick() { clock.t += 7; } };
+    const mag = { tick() { clock.t += 11; } };
+    timedAgentTick({ agent, ub, ubOn: true, mag }, (p) => ph.mark(p));
+    expect(ph.frameMs[PHASE.nav]).toBe(1);
+    expect(ph.frameMs[PHASE.tags]).toBe(2);
+    expect(ph.frameMs[PHASE.agent]).toBe(7);
+    expect(ph.frameMs[PHASE.routine]).toBe(40);
+    expect(ph.frameMs[PHASE.ub]).toBe(7);
+    expect(ph.frameMs[PHASE.mag]).toBe(11);
+    // UtilityBelt runs only where /ub does: none of its time, and Mag-Tools' still its own.
+    ph.begin(clock.t);
+    let ubRan = false;
+    timedAgentTick({ agent, ub: { tick() { ubRan = true; } }, ubOn: false, mag: null }, (p) => ph.mark(p));
+    expect(ubRan).toBe(false);
+    expect(ph.frameMs[PHASE.routine]).toBe(40);
+    expect(ph.frameMs[PHASE.ub]).toBe(0);
+    expect(ph.frameMs[PHASE.mag]).toBe(0);
+  });
+
+  it('the report sends the new keys among its ten largest, and the bridge keeps them (old keys still accepted)', () => {
+    const { r, events, clock } = rig();
+    r.enteredWorld();
+    for (let i = 0; i < 100; i++) {
+      clock.t += 145;
+      r.frame(clock.t, true, 60, phases({ nav: 0.2, tags: 0.3, agent: 3, routine: 52, ub: 0.4, mag: 0.6, render: 1.5, warmup: 0.8, physics: 0.1, anim: 0.2, hud: 0.25 }));
+      if (i % 3 === 0) r.tick();
+    }
+    clock.t += 50_000; r.tick();
+    const ev = first(events);
+    expect(Object.keys(ev.phaseMs!).slice(0, 3)).toEqual(['routine', 'agent', 'render']);
+    expect(Object.keys(ev.phaseMs!)).toHaveLength(MAX_PHASE_KEYS);
+    expect(sanitizeClientWorld(ev)).toEqual(ev);
+    // An older page's single "tags" key still passes.
+    expect((sanitizeClientWorld({ ...ev, phaseMs: { tags: 56.2, render: 1.5 } }) as FirstMinuteEvent).phaseMs).toEqual({ tags: 56.2, render: 1.5 });
   });
 });
 

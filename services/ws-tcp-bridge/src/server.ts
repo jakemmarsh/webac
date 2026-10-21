@@ -549,6 +549,11 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     let isProbe = false;
     // A pong or any browser message proves the socket (WsLiveness).
     const liveness = new WsLiveness();
+    // When the page's own code last sent a message, and the server its last datagram (null: never).
+    // A frozen tab still answers protocol pings (the browser does that, not the page), so only
+    // these tell a frozen page from a live one; session_close logs their ages (browserQuietMs / serverQuietMs).
+    let lastBrowserMessageAt: number | null = null;
+    let lastServerDatagramAt: number | null = null;
 
     const session: Session = {
       id, ip, ws, target, udp: null, closed: false, openedAt: now(), aceSessionId: null, protocol, time1999: 0, account: null, relayLinkKey: null,
@@ -651,6 +656,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
           clearEarlyResends();
           log('info', 'egress_first_reply', { session: id, ms: now() - firstUpAt, earlyResends, ...egressFields() });
         }
+        lastServerDatagramAt = now();
         session.bytesFromServer += msg.length;
         session.packetsDown++;
         metrics.addBytes('udp_in', msg.length);
@@ -802,6 +808,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       if (session.closed) return;
       const buf = data instanceof ArrayBuffer ? Buffer.from(data) : Array.isArray(data) ? Buffer.concat(data) : data;
       liveness.heard();
+      lastBrowserMessageAt = now();
       session.bytesFromBrowser += buf.length;
       metrics.addBytes('ws_in', buf.length);
 
@@ -1073,9 +1080,12 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
       upLink.close();
       downLink.close();
       metrics.close(reason);
+      const closedAt = now();
       log('info', 'session_close', {
         session: id, ip, server: session.target?.key ?? null, reason, ...egressFields(), ...(trace ? { trace } : {}),
-        durationMs: now() - session.openedAt,
+        durationMs: closedAt - session.openedAt,
+        ...(lastBrowserMessageAt !== null ? { browserQuietMs: closedAt - lastBrowserMessageAt } : {}),
+        ...(lastServerDatagramAt !== null ? { serverQuietMs: closedAt - lastServerDatagramAt } : {}),
         bytesFromBrowser: session.bytesFromBrowser, bytesToServer: session.bytesToServer,
         bytesFromServer: session.bytesFromServer, bytesToBrowser: session.bytesToBrowser,
         packetsUp: session.packetsUp, packetsDown: session.packetsDown, dropped: session.dropped,

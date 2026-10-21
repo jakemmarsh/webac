@@ -115,7 +115,7 @@ export class FellowManager {
     const info = this.api.fellowshipInfo();
     if (!on || !info?.leader) { this.reset(); return null; }
     const t = this.now();
-    const me = this.api.snapshot({ radius: 1, max: 1 }).me?.name ?? 'me';
+    const me = this.api.self()?.name ?? 'me';
     const members = info.members ?? [];
     const isMember = (n: string) => members.some((m) => lc(m) === lc(n));
     const handOff = info.handOff !== false;
@@ -143,7 +143,7 @@ export class FellowManager {
     for (const ask of [...this.asks]) {
       if (ask.tries === 1 && t - ask.at < RETRY_MS) continue;
       if (isMember(ask.name)) { this.asks.splice(this.asks.indexOf(ask), 1); continue; }
-      const near = this.api.snapshot({ radius: REACH, max: 80 }).nearby.find((o) => o.kind === 'player' && lc(o.name) === lc(ask.name));
+      const near = this.api.look({ radius: REACH, max: 80 }).nearby.find((o) => o.kind === 'player' && lc(o.name) === lc(ask.name));
       if (!near) {
         if (ask.tries === 0) { ask.tries = 1; ask.at = t; this.tell(ask.name, 'You are too far away. I will wait 20 seconds and give you one more chance.'); continue; }
         this.asks.splice(this.asks.indexOf(ask), 1);
@@ -212,7 +212,7 @@ export class FellowManager {
         return;
       case 'location': {
         if (!c.isMember(name)) { this.tell(name, 'I only tell fellows where I am.'); return; }
-        const me = this.api.snapshot({ radius: 1, max: 1 }).me;
+        const me = this.api.self();
         if (!me) return;
         this.tell(name, `I am in landcell ${me.cell}${me.coords ? ` (${me.coords})` : ''}.`);
         return;
