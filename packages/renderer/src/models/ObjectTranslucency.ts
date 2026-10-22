@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ownMeshMaterials } from './MaterialOwnership.js';
+import { ownMeshMaterials, ownedCopyOf } from './MaterialOwnership.js';
 import { inheritRetailLighting } from './RetailLighting.js';
 
 /**
@@ -188,6 +188,21 @@ function applyFadeToMeshes(meshes: THREE.Mesh[], t: number): void {
       m.alphaTest = 0;
     }
   }
+}
+
+/**
+ * PERF.firefox-cover-compile-stall — the material a part draws with while
+ * fading (CopyMaterial + SetTranslucencySimple, as applyFadeToMeshes writes
+ * it) for `material`, without touching any live mesh: a fresh copy, faded.
+ * three.js keys that state (transparent, no alpha test, normal blending) as
+ * its own program, so the warm compiles one per lit object surface under the
+ * portal-space cover instead of the first fade (a materialize, a death)
+ * linking them in a visible frame.
+ */
+export function fadedMaterialVariant(material: THREE.Material, geometry?: THREE.BufferGeometry): THREE.Material {
+  const copy = ownedCopyOf(material, geometry);
+  applyFadeToMeshes([new THREE.Mesh(geometry, copy)], 0.5);
+  return copy;
 }
 
 /**

@@ -548,6 +548,8 @@ export interface HealthSignals {
   crashed: boolean;
   webglLost: number;
   canvas2dLost: number;
+  /** Blank bitmap-font sheets caught and rebuilt (BUG.hud-text-blank-font-sheet); reported, not fatal: they heal. */
+  fontSheetBad: number;
   pageErrors: string[];
   events: Array<{ type: string; canvas: string }>;
 }
@@ -555,10 +557,10 @@ export interface HealthSignals {
 /** Everything the page and the browser have reported so far. */
 export async function healthSignals(page: Page): Promise<HealthSignals> {
   const a = ALARMS.get(page) ?? { crashed: false, pageErrors: [] };
-  if (a.crashed) return { crashed: true, webglLost: 0, canvas2dLost: 0, pageErrors: a.pageErrors, events: [] };
+  if (a.crashed) return { crashed: true, webglLost: 0, canvas2dLost: 0, fontSheetBad: 0, pageErrors: a.pageErrors, events: [] };
   const h = await page.evaluate('window.__acHealth || null').catch(() => null) as
-    { webglLost: number; canvas2dLost: number; events: Array<{ type: string; canvas: string }> } | null;
-  return { crashed: false, webglLost: h?.webglLost ?? 0, canvas2dLost: h?.canvas2dLost ?? 0, pageErrors: a.pageErrors, events: h?.events ?? [] };
+    { webglLost: number; canvas2dLost: number; fontSheetBad?: number; events: Array<{ type: string; canvas: string }> } | null;
+  return { crashed: false, webglLost: h?.webglLost ?? 0, canvas2dLost: h?.canvas2dLost ?? 0, fontSheetBad: h?.fontSheetBad ?? 0, pageErrors: a.pageErrors, events: h?.events ?? [] };
 }
 
 /** A fatal signal's one-line description, or null. Page errors are reported but not fatal on their own. */

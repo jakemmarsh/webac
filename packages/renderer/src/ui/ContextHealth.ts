@@ -20,11 +20,34 @@ export interface ContextHealth {
   webglRestored: number;
   canvas2dLost: number;
   canvas2dRestored: number;
+  /**
+   * BUG.hud-text-blank-font-sheet — bitmap-font glyph sheets (or tinted
+   * copies) that read back blank after they were built (ACFontRenderer's
+   * health check): the canvas got no backing, or lost it. Each is dropped
+   * and rebuilt; text draws with the fallback until it heals.
+   */
+  fontSheetBad: number;
   /** The most recent events, newest last (bounded). */
   events: Array<{ type: string; canvas: string; at: number }>;
 }
 
 const MAX_EVENTS = 50;
+
+/** Font sheets found blank since the page loaded (also on `__acHealth.fontSheetBad` once installed). */
+let fontSheetBadTotal = 0;
+
+/** Count one blank glyph sheet (ACFontRenderer's readback check). */
+export function noteFontSheetBad(): void {
+  fontSheetBadTotal++;
+  const h = (globalThis as { window?: { __acHealth?: ContextHealth } }).window?.__acHealth;
+  if (h) h.fontSheetBad = fontSheetBadTotal;
+}
+
+/** The page's font-sheet and 2D-canvas health, for telemetry (first_minute). */
+export function uiCanvasHealth(): { fontSheetBad: number; canvas2dLost: number } {
+  const h = (globalThis as { window?: { __acHealth?: ContextHealth } }).window?.__acHealth;
+  return { fontSheetBad: fontSheetBadTotal, canvas2dLost: h?.canvas2dLost ?? 0 };
+}
 
 /** A short description of a canvas for logs: id, classes, size. */
 export function describeCanvas(el: unknown): string {
@@ -54,7 +77,7 @@ export function installContextHealth(win: (Window & { __acHealth?: ContextHealth
   (globalThis as { window?: Window & { __acHealth?: ContextHealth } }).window): ContextHealth | null {
   if (!win) return null;
   if (win.__acHealth) return win.__acHealth;
-  const h: ContextHealth = { webglLost: 0, webglRestored: 0, canvas2dLost: 0, canvas2dRestored: 0, events: [] };
+  const h: ContextHealth = { webglLost: 0, webglRestored: 0, canvas2dLost: 0, canvas2dRestored: 0, fontSheetBad: fontSheetBadTotal, events: [] };
   win.__acHealth = h;
   for (const type of ['webglcontextlost', 'webglcontextrestored', 'contextlost', 'contextrestored']) {
     win.addEventListener(type, (e: Event) => {

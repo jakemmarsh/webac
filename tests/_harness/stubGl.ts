@@ -4,7 +4,11 @@
  * headless-gl). Every call is a no-op returning a plausible value; the
  * calls that matter for frame-structure tests are recorded:
  *   - clear(mask): each mask, so a test can see which buffers a frame wiped;
- *   - createProgram / useProgram: program creation and switches.
+ *   - createProgram / useProgram: program creation and switches;
+ *   - link waits: the first query of a linked program's results
+ *     (getProgramInfoLog / getProgramParameter / getActiveUniform / uniform or
+ *     attribute locations), where a real driver without
+ *     KHR_parallel_shader_compile makes the caller wait for the link.
  * three.js's own code decides when to clear, which program a material gets
  * and when lights force a program change, so a test of a render pass
  * structure (scene/IndoorView.ts) drives the shipped three.js paths.
@@ -24,6 +28,15 @@ export interface StubGlLog {
   programSwitches: number;
   /** drawElements / drawArrays calls. */
   draws: number;
+  /** Programs whose link result was first queried (each one a synchronous link wait on a real driver). */
+  linkWaits: number;
+}
+
+export interface StubGlOptions {
+  /** Extensions getExtension returns (default none: e.g. no KHR_parallel_shader_compile, as Firefox). */
+  extensions?: readonly string[];
+  /** Called at each link wait (a test advances its fake clock here to model the link's cost). */
+  onLinkWait?: () => void;
 }
 
 export interface StubGl {
@@ -41,8 +54,18 @@ const REAL_CONSTANTS: Record<string, number> = {
   NO_ERROR: 0,
 };
 
-export function createStubGl(width = 64, height = 64): StubGl {
-  const log: StubGlLog = { clears: [], programsCreated: 0, programSwitches: 0, draws: 0 };
+export function createStubGl(width = 64, height = 64, opts: StubGlOptions = {}): StubGl {
+  const log: StubGlLog = { clears: [], programsCreated: 0, programSwitches: 0, draws: 0, linkWaits: 0 };
+  const exts = new Set(opts.extensions ?? []);
+  /** Linked programs whose result nobody has asked for yet. */
+  const unwaited = new WeakSet<object>();
+  const waitFor = (program: unknown): void => {
+    if (program && typeof program === 'object' && unwaited.has(program)) {
+      unwaited.delete(program);
+      log.linkWaits++;
+      opts.onLinkWait?.();
+    }
+  };
   const constants = new Map<string, number>();
   let nextConstant = 0x10000;
   const constant = (name: string): number => {
@@ -66,8 +89,8 @@ export function createStubGl(width = 64, height = 64): StubGl {
     drawingBufferColorSpace: 'srgb',
     getContextAttributes: () => ({ alpha: false, antialias: false, depth: true, stencil: true, premultipliedAlpha: true, preserveDrawingBuffer: false, powerPreference: 'default', failIfMajorPerformanceCaveat: false }),
     isContextLost: () => false,
-    getExtension: () => null,
-    getSupportedExtensions: () => [],
+    getExtension: (name: string) => (exts.has(name) ? {} : null),
+    getSupportedExtensions: () => [...exts],
     getError: () => 0,
     getShaderPrecisionFormat: () => ({ precision: 23, rangeMin: 127, rangeMax: 127 }),
     getParameter: (p: number) => {
@@ -82,6 +105,7 @@ export function createStubGl(width = 64, height = 64): StubGl {
       return 16;
     },
     createProgram: () => { log.programsCreated++; return {}; },
+    linkProgram: (program: object) => { unwaited.add(program); },
     useProgram: () => { log.programSwitches++; },
     clear: (mask: number) => { log.clears.push(mask); },
     drawElements: () => { log.draws++; },
@@ -97,13 +121,16 @@ export function createStubGl(width = 64, height = 64): StubGl {
     getShaderParameter: () => true,
     getShaderInfoLog: () => '',
     getShaderSource: () => '',
-    getProgramInfoLog: () => '',
-    getProgramParameter: (_p: unknown, pname: number) => {
+    getProgramInfoLog: (program: unknown) => { waitFor(program); return ''; },
+    getProgramParameter: (program: unknown, pname: number) => {
+      // COMPLETION_STATUS_KHR (0x91B1) is the extension's non-blocking poll.
+      if (pname !== 0x91b1) waitFor(program);
       if (pname === C('ACTIVE_UNIFORMS') || pname === C('ACTIVE_ATTRIBUTES')) return 0;
       return true;
     },
-    getUniformLocation: () => null,
-    getAttribLocation: () => -1,
+    getActiveUniform: (program: unknown) => { waitFor(program); return null; },
+    getUniformLocation: (program: unknown) => { waitFor(program); return null; },
+    getAttribLocation: (program: unknown) => { waitFor(program); return -1; },
     checkFramebufferStatus: () => C('FRAMEBUFFER_COMPLETE'),
   };
   const proxy = new Proxy(impl, {
@@ -117,13 +144,13 @@ export function createStubGl(width = 64, height = 64): StubGl {
 
   return {
     gl: proxy, canvas, log,
-    reset() { log.clears.length = 0; log.programsCreated = 0; log.programSwitches = 0; log.draws = 0; },
+    reset() { log.clears.length = 0; log.programsCreated = 0; log.programSwitches = 0; log.draws = 0; log.linkWaits = 0; },
   };
 }
 
 /** A real three.js WebGLRenderer on a stub context (stencil on, as SceneManager.initRenderer makes it). */
-export function createStubRenderer(width = 64, height = 64): { renderer: THREE.WebGLRenderer; stub: StubGl } {
-  const stub = createStubGl(width, height);
+export function createStubRenderer(width = 64, height = 64, opts: StubGlOptions = {}): { renderer: THREE.WebGLRenderer; stub: StubGl } {
+  const stub = createStubGl(width, height, opts);
   const renderer = new THREE.WebGLRenderer({ canvas: stub.canvas, context: stub.gl, stencil: true });
   renderer.setSize(width, height, false);
   return { renderer, stub };

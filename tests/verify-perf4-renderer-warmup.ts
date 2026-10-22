@@ -37,12 +37,19 @@ class FakeRenderer implements WarmupRenderer {
   exts: Set<string>;
   pendingCompiles: Array<() => void> = [];
   readonly extensions = { has: (n: string) => this.exts.has(n) };
+  readonly info = { programs: [] as Array<{ getUniforms(): unknown }> };
   constructor(opts: { parallel?: boolean; target?: THREE.WebGLRenderTarget | null } = {}) {
     this.exts = new Set(opts.parallel ? [PARALLEL_COMPILE_EXT] : []);
     this.target = opts.target ?? null;
   }
   private rec(op: string, args: unknown[]): void {
     this.calls.push({ op, args, target: this.target, scissorTest: this.scissorTest, scissor: this.scissor.toArray() });
+  }
+  compile(scene: THREE.Object3D, camera: THREE.Camera, targetScene?: THREE.Scene | null): unknown {
+    const items: THREE.Object3D[] = [];
+    scene.traverse(o => { items.push(o); });
+    this.rec('compile', [scene, camera, targetScene, items]);
+    return new Set();
   }
   compileAsync(scene: THREE.Object3D, camera: THREE.Camera, targetScene?: THREE.Scene | null): Promise<unknown> {
     this.rec('compileAsync', [scene, camera, targetScene]);
@@ -139,7 +146,8 @@ describe('PERF.4 RendererWarmup — while the world is visible', () => {
     // lit program variant), a whole-ring camera, 1x1 scissor on the canvas.
     const up = h.r.calls[1];
     const [root, upCam] = up.args as [THREE.Scene, THREE.Camera];
-    expect(up.args[5]).toEqual([block]);
+    // The subtree's drawables, flattened (its lights are not gathered: PERF.firefox-cover-compile-stall).
+    expect(up.args[5]).toEqual([block.children[0]]);
     expect((up.args[6] as THREE.Material).type).toBe('MeshBasicMaterial');
     expect(root).not.toBe(h.scene);
     expect(root.matrixWorldAutoUpdate).toBe(false); // never recomputes the subtree's matrices
@@ -233,13 +241,18 @@ describe('RELEASE.streaming-charselect-weight RendererWarmup.precompile — sky 
     expect(sun.visible).toBe(true); // nothing visible changed
   });
 
-  it('runs without KHR_parallel_shader_compile too: a link at character select beats one inside the gate', () => {
+  it('runs without KHR_parallel_shader_compile too, sliced (PERF.firefox-cover-compile-stall): a link at character select beats one inside the gate', () => {
     const h = harness({ parallel: false });
     const s = sky();
     h.scene.add(s.group);
     h.warm.precompile(s.group);
-    h.warm.tick(0);
-    expect(h.r.ops('compileAsync').map(c => c.args[0])).toEqual([s.group]);
+    for (let t = 0; t < 10 * 16; t += 16) h.warm.tick(t);
+    expect(h.r.ops('compileAsync')).toEqual([]);
+    // Every mesh of the subtree compiled against the scene's lights, none of the scene's other objects.
+    const compiled = h.r.ops('compile').flatMap(c => c.args[3] as THREE.Object3D[]);
+    expect(new Set(compiled)).toEqual(new Set(s.group.children));
+    for (const c of h.r.ops('compile')) expect(c.args[2]).toBe(h.scene);
+    expect(h.warm.stats.precompiles).toBe(1);
   });
 
   it('under a cover the queue waits (the full warm compiles the scene), then drains on the first uncovered frame', () => {
@@ -267,9 +280,9 @@ describe('RELEASE.streaming-charselect-weight RendererWarmup.precompile — sky 
   });
 });
 
-describe('PERF.4 RendererWarmup — the cover-time warm', () => {
+describe('PERF.4 RendererWarmup — the cover-time warm (KHR_parallel_shader_compile: compileAsync)', () => {
   it('under the cover, once content is quiet: textures, then compileAsync(scene), then one scissored pass per frame', async () => {
-    const h = harness({ target: null });
+    const h = harness({ parallel: true, target: null });
     h.env.covered = true;
     h.warm.tick(0);
     expect(h.r.calls).toEqual([]); // content just seen; waiting for quiet
@@ -328,7 +341,7 @@ describe('PERF.4 RendererWarmup — the cover-time warm', () => {
 
   it('no visible state changes: camera, scene graph, materials, and the renderer\'s target/scissor are restored', async () => {
     const rt = new THREE.WebGLRenderTarget(4, 4);
-    const h = harness({ target: rt });
+    const h = harness({ parallel: true, target: rt });
     const camBefore = {
       pos: h.camera.position.clone(), quat: h.camera.quaternion.clone(),
       fov: h.camera.fov, aspect: h.camera.aspect, proj: h.camera.projectionMatrix.clone(),
@@ -359,7 +372,7 @@ describe('PERF.4 RendererWarmup — the cover-time warm', () => {
   });
 
   it('the cover dropping mid-compile cancels the sweep; dropping mid-sweep stops it at once', async () => {
-    const h = harness();
+    const h = harness({ parallel: true });
     h.env.covered = true;
     h.warm.tick(0);
     h.warm.tick(QUIET_MS);
@@ -385,7 +398,7 @@ describe('PERF.4 RendererWarmup — the cover-time warm', () => {
   });
 
   it('streaming that never goes quiet still warms after MAX_WAIT_MS of cover', () => {
-    const h = harness();
+    const h = harness({ parallel: true });
     h.env.covered = true;
     let t = 0;
     for (; t < MAX_WAIT_MS; t += 16) {
@@ -399,7 +412,7 @@ describe('PERF.4 RendererWarmup — the cover-time warm', () => {
   });
 
   it('re-warms when more content lands under the same cover, and on the next arrival (requestWarm)', async () => {
-    const h = harness();
+    const h = harness({ parallel: true });
     h.env.covered = true;
     h.warm.tick(0);
     h.warm.tick(QUIET_MS);

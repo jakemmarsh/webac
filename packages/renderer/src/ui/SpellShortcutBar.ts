@@ -52,7 +52,7 @@ export const SPELL_SHORTCUT_TEMPLATE = 0x10000341;
 /** The list's rect inside the tab page (p0x10000057 / p0x10000059 = the 32 px cell). */
 export const SPELL_SHORTCUT_LIST_RECT = { x: 23, y: 2, width: 639, height: 32 } as const;
 export const SPELL_SHORTCUT_CELL = 32;
-/** floor(639 / 32): the cells the list can show. */
+/** floor(639 / 32): the cells the authored 800-wide list can show at once (the list itself is unbounded and scrolls). */
 export const SPELL_SHORTCUT_VISIBLE = Math.floor(SPELL_SHORTCUT_LIST_RECT.width / SPELL_SHORTCUT_CELL);
 /** 0x10000341's root media + the icon 0x1000033b's EMPTY-state media: the dark leather recess. */
 export const SPELL_SHORTCUT_SLOT_MEDIA = 0x06001a97;
@@ -196,6 +196,65 @@ export const SPELL_BAR_CONTENT_IDS = [0x100000aa, 0x100000ab, 0x100000ac, 0x1000
  */
 export function spellListPaddedCells(listWidth: number, numberedCells = 1): number {
   return Math.max(numberedCells, Math.floor(listWidth / SPELL_SHORTCUT_CELL));
+}
+
+/* ── scrolling the list (BUG.ac1999-spellbar-arrows, webac#6) ─────── */
+
+/**
+ * The tab page's arrow pair: 0x21000010:0x100000b5, a UIElement_Scrollbar
+ * (type 11) inheriting 0x21000008:0x10000070. p119 (the increment button)
+ * is 0x10000072, the left arrow; p120 (the decrement button) is 0x10000071,
+ * the right one (UIElement_Scrollbar::OnSetAttribute @ 004714d0 cases
+ * 0x77 / 0x78). The list 0x100000b6 names the scroller in p113.
+ */
+export const SPELL_LIST_SCROLLER = 0x100000b5;
+export const SPELL_LIST_ARROW_LEFT = 0x10000072;
+export const SPELL_LIST_ARROW_RIGHT = 0x10000071;
+
+/** When the arrows show: end of retail's whole scroller, or the 1999 client's one arrow per end (eraClientRules().spellBarArrows). */
+export type SpellBarArrowRule = 'pair' | 'ends';
+
+export interface SpellListScroll {
+  /** The list's scroll offset in px (0 = the first cell at the left edge), clamped. */
+  scrollX: number;
+  /** The furthest it can scroll: the cells' width less the list's. */
+  maxScroll: number;
+  /** Whether the left / right arrow shows. */
+  left: boolean;
+  right: boolean;
+}
+
+/**
+ * The list's scroll state for `cellTotal` 32-px cells in a `listWidth` px
+ * list. Retail clamps the offset to [0, cells − width] (UIElement_
+ * Scrollable::SetScrollableXY @ 004740c0; the 1999 menu's 0x5d4860).
+ *  - 'pair' (end of retail): UIElement_Scrollable::UpdateScrollbarSize_ @
+ *    004741a0 disables the scroller when the cells fit, and with p121
+ *    (hide-disabled) UIElement_Scrollbar::UpdateLayout @ 004710d0 hides it
+ *    whole; otherwise both arrows show, at either end of the scroll.
+ *  - 'ends' (1999 client.exe): the menu's 0x5d3dc0 disables the left
+ *    button at offset 0 and the right one once offset + width reaches the
+ *    cells' width; each was made hide-while-disabled (0x4513d0(1) in the
+ *    SpellCastSubPanel ctor @ 0x512390; 0x4511d0 hides a disabled button).
+ */
+export function spellListScroll(scrollX: number, cellTotal: number, listWidth: number, rule: SpellBarArrowRule): SpellListScroll {
+  const content = Math.max(0, cellTotal) * SPELL_SHORTCUT_CELL;
+  const maxScroll = Math.max(0, content - Math.max(0, listWidth));
+  const x = Number.isFinite(scrollX) ? Math.max(0, Math.min(maxScroll, Math.round(scrollX))) : 0;
+  if (rule === 'ends') return { scrollX: x, maxScroll, left: x > 0, right: x < maxScroll };
+  return { scrollX: x, maxScroll, left: maxScroll > 0, right: maxScroll > 0 };
+}
+
+/**
+ * One arrow press: one cell. End of retail: UIElement_Scrollbar::
+ * HandleButtonClick @ 00470e90 → HandleMoveSteps(±1) → message 0xd / 0xe →
+ * UIElement_Scrollable::HandleScrollbarMessage_ @ 00474370 →
+ * UIElement_ListBox::InqScrollDelta @ 0046dc10 (the list's width over its
+ * columns: one 32-px cell). 1999: the menu's button handler 0x5d42a0
+ * scrolls by its item width (+0x124). `dir` −1 is the left arrow.
+ */
+export function stepSpellListScroll(scrollX: number, dir: -1 | 1, cellTotal: number, listWidth: number): number {
+  return spellListScroll(scrollX + dir * SPELL_SHORTCUT_CELL, cellTotal, listWidth, 'pair').scrollX;
 }
 
 /**
@@ -366,13 +425,15 @@ export class SpellCastSubMenu {
   }
 
   /**
-   * The cells the ItemList shows: the shortcuts, then ONE trailing EMPTY
-   * item (ItemList_AddSpellShortcut → UpdateEmptySlots with p0x10000017),
-   * clipped to the 19 the 639 px list fits.
+   * The cells the ItemList holds: the shortcuts, then ONE trailing EMPTY
+   * item (ItemList_AddSpellShortcut → UpdateEmptySlots with p0x10000017).
+   * Nothing is cut at the list's width: the list's capacity (0x10000015) is
+   * −1, so the cells past it are scrolled to with the arrows
+   * (BUG.ac1999-spellbar-arrows; spellListScroll).
    */
   cells(): Array<{ index: number; spellId: number; empty: boolean; selected: boolean; numeral: number | null }> {
     const out = [] as Array<{ index: number; spellId: number; empty: boolean; selected: boolean; numeral: number | null }>;
-    const n = Math.min(this.spells.length + 1, SPELL_SHORTCUT_VISIBLE);
+    const n = this.spells.length + 1;
     for (let i = 0; i < n; i++) {
       const spellId = this.spells[i] ?? 0;
       const empty = spellId === 0;

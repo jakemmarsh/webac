@@ -344,6 +344,30 @@ function load(s: CharacterInfoSource, out: string[]): void {
   }
 }
 
+/**
+ * BUG.ac1999-char-info-eor-rows (webac#8) — the 1999 client.exe's burden text
+ * (its "Burden" panel, title literal 0x611b2c, ctor @ 0x59a57c; text built
+ * @ 0x59a9e0). Its own literals, typo included, and its own sums:
+ *  - capacity = Strength x 150 (@ 0x5d5e20; no carrying augmentations in 1999);
+ *  - load ratio (@ 0x5d5e50, via 0x517c70): 3.0 with no capacity, 0 for a
+ *    negative burden, else burden / capacity as a float;
+ *  - under 1.0: "You are not overburdended at this time";
+ *  - else the excess in Burden Units, and the penalty
+ *    (10 - trunc(mod x 10)) x 10 % with mod = 1 / 2 - ratio / 0 (@ 0x5d5ea0,
+ *    _ftol @ 0x5ba450 chops), so it moves in steps of 10, then the advice line.
+ * Each literal opens with "\n\n" as the client wrote it.
+ */
+export function burdenText1999(encumbrance: number, strength: number): string {
+  const capacity = strength > 0 ? strength * 150 : 0;
+  const ratio = capacity <= 0 ? 3.0 : encumbrance < 0 ? 0 : Math.fround(encumbrance / capacity);
+  if (ratio < 1.0) return '\n\nYou are not overburdended at this time';
+  const mod = ratio < 1.0 ? 1.0 : ratio < 2.0 ? Math.fround(2.0 - ratio) : 0;
+  const penalty = (10 - Math.trunc(mod * 10)) * 10;
+  return `\n\nYou are currently overburdened by ${encumbrance - capacity} Burden Units.\n\n`
+    + `\n\nThis is reducing your Run, Jump, Melee Defense and Missile Defense skill levels by ${penalty}%.\n\n`
+    + '\n\nTo reduce this penalty, you must either drop some of your equipment or increase your Strength.';
+}
+
 function formatDuration(seconds: number): string {
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
@@ -365,9 +389,20 @@ function pushLine(out: string[], line: string | null): void {
  * matching the retail client (it only appends a StringInfo when the source
  * value is present and > threshold).
  */
-export function buildCharacterInfoReport(s: CharacterInfoSource): string[] {
+export function buildCharacterInfoReport(s: CharacterInfoSource, mode: 'eor' | 'ac1999' = 'eor'): string[] {
   const out: string[] = [];
   birthAgeDeaths(s, out);
+  if (mode === 'ac1999') {
+    // BUG.ac1999-char-info-eor-rows (webac#8; eraClientRules().characterInfoText).
+    // The 1999 client.exe has no gmCharacterInfoUI: none of its strings
+    // (resistance / regeneration tiers, innates, chess, fishing, masteries,
+    // luminance, augmentations) exist in it. Its character text is the
+    // Burden panel's (burdenText1999). Born / played / deaths stay: the 1999
+    // server sends their properties (and 1999 answered @age with "You have
+    // played for ...", 0x4cde50).
+    out.push(burdenText1999(s.prop(P.EncumbranceVal) ?? 0, s.strength).trimEnd());
+    return out;
+  }
   enduranceInfo(s, out);
   innates(s, out);
   fakeSkills(s, out);

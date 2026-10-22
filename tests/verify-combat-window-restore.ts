@@ -189,9 +189,14 @@ describe.skipIf(!hasDats)('the combat window restored from a veteran character (
     ui.setSpellData(spells, bars);
     ui.hudState.combatMode = CombatMode.Magic;
     expect(() => { ui.renderSpellBarPanel(); ui.updateSpellBarVisibility(); }).not.toThrow();
+    // BUG.ac1999-spellbar-arrows — every favourite gets a cell (30 + the trailing empty) in the
+    // strip the 439-px list clips; the arrow pair scrolls to the rest.
     const shown = [...ui.spellBarPanelEl.querySelectorAll(`[data-spell-slot^="${ui.activeSpellBarTab}-"]`)]
       .filter((c) => (c as HTMLElement).style.display !== 'none');
-    expect(shown.length).toBe(19);
+    expect(shown.length).toBe(31);
+    const strip = ui.spellBarPanelEl.querySelector(`[data-spell-strip="${ui.activeSpellBarTab}"]`) as HTMLElement;
+    expect(strip.parentElement!.dataset.elementId).toBe('0x100000b6');
+    expect(strip.parentElement!.style.overflow).toBe('hidden');
     expect(ui.spellBarPanelEl.style.display).toBe('block');
   });
 

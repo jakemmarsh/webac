@@ -155,6 +155,9 @@ export class ProgramCreationCounter {
   created = 0;
   private hooked: unknown[] | null = null;
 
+  /** `onCreate`: each new program (CompileTrace.noteProgram). */
+  constructor(private readonly onCreate?: (program: unknown, existing: readonly unknown[]) => void) {}
+
   sample(info: { programs?: unknown[] | null } | null | undefined): number {
     const list = info?.programs;
     if (Array.isArray(list) && list !== this.hooked) {
@@ -162,9 +165,181 @@ export class ProgramCreationCounter {
       const push = list.push;
       list.push = (...items: unknown[]): number => {
         this.created += items.length;
+        if (this.onCreate) for (const p of items) { try { this.onCreate(p, list); } catch { /* diagnostics never break a draw */ } }
         return push.apply(list, items);
       };
     }
     return this.created;
+  }
+}
+
+/** A frame CompileTrace kept: a long one, or one in which programs were created. */
+export interface CompileTraceFrame {
+  /** performance.now() at the frame's end. */
+  at: number;
+  workMs: number;
+  warmupMs: number;
+  renderMs: number;
+  /** "<shaderName>:<cacheKey hash>" per program created since the previous frame ended; "~" marks one created outside frameStep. */
+  programs: string[];
+  /**
+   * For each program created inside a draw (CompileTrace.wrapRenderer): what
+   * was being drawn, and how its key differs from the nearest live program of
+   * the same material class (comma-field index: that program's value → this one's).
+   */
+  details?: CompileTraceDetail[];
+  /** The portal-space cover was up / the world draw was skipped under it / the teleport animation state / the warm's phase. */
+  covered: boolean;
+  worldHidden: boolean;
+  tunnelState: number;
+  warm: string;
+}
+
+export interface CompileTraceDetail {
+  program: string;
+  /** The object drawn: name (or type), then its parents up to the scene, nearest first. */
+  object: string;
+  parents: string[];
+  objectFlags: string;
+  /** The material: class, name, and the inputs three.js keys programs on. */
+  material: string;
+  materialFlags: Record<string, unknown>;
+  /** Whether a RendererWarmup cover job compiled this material at some point (false: it arrived after, or never hung in the scene). */
+  warmed: boolean | null;
+  /** The key fields that differ from the nearest live program of the same class: [index, theirs, ours]. */
+  keyDiff: Array<[number, string, string]> | null;
+}
+
+/** FNV-1a of a string, 8 hex digits (a program's cache key, short). */
+function fnv1a(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * PERF.firefox-cover-compile-stall — which frame linked which programs. A
+ * driver without KHR_parallel_shader_compile links a program in the first
+ * draw that reads its uniforms, so a burst shows as a long frame here with
+ * the programs created in it, and with what covered the screen. Kept on the
+ * page (window.__ac.compileTrace) for live probes; nothing is sent.
+ */
+interface THREE_Like { name?: string; type?: string; parent?: THREE_Like | null }
+
+export class CompileTrace {
+  readonly frames: CompileTraceFrame[] = [];
+  private pending: string[] = [];
+  private pendingDetails: CompileTraceDetail[] = [];
+  private inFrame = false;
+  /** The draw three.js is in (wrapRenderer), so a program it creates names its object. */
+  private draw: { object: unknown; material: unknown } | null = null;
+  /** Answers CompileTraceDetail.warmed (RendererWarmup.compiledMaterial). */
+  warmedMaterial: ((m: unknown) => boolean) | null = null;
+
+  constructor(private readonly longFrameMs = 250, private readonly keep = 80) {}
+
+  /**
+   * Wrap the renderer's per-draw entry (WebGLRenderer.renderBufferDirect,
+   * which renderObject calls through `_this`, just before setProgram) so a
+   * program created by a draw is attributed to that object and material.
+   */
+  wrapRenderer(renderer: { renderBufferDirect: (...args: never[]) => unknown }): void {
+    const r = renderer as unknown as { renderBufferDirect: (...args: unknown[]) => unknown };
+    const inner = r.renderBufferDirect;
+    if ((inner as { compileTraced?: boolean }).compileTraced) return;
+    const wrapped = (...args: unknown[]): unknown => {
+      this.draw = { material: args[3], object: args[4] };
+      try { return inner.apply(renderer, args); } finally { this.draw = null; }
+    };
+    (wrapped as { compileTraced?: boolean }).compileTraced = true;
+    r.renderBufferDirect = wrapped;
+  }
+
+  noteProgram(program: unknown, existing: readonly unknown[] = []): void {
+    const p = program as { type?: unknown; name?: unknown; cacheKey?: unknown } | null;
+    // three.js's shaderType (the material class, e.g. MeshBasicMaterial), else its
+    // shaderName (the material's name, usually ''): 2026-10-22's "custom" programs were unnamed materials.
+    const name = typeof p?.type === 'string' && p.type ? p.type
+      : typeof p?.name === 'string' && p.name ? p.name : 'custom';
+    const key = typeof p?.cacheKey === 'string' ? fnv1a(p.cacheKey) : '?';
+    const label = `${this.inFrame ? '' : '~'}${name}:${key}`;
+    this.pending.push(label);
+    if (this.draw) this.pendingDetails.push(this.describe(label, p, existing));
+  }
+
+  private describe(label: string, p: { type?: unknown; cacheKey?: unknown } | null, existing: readonly unknown[]): CompileTraceDetail {
+    const o = this.draw!.object as THREE_Like | null;
+    const m = this.draw!.material as Record<string, unknown> | null;
+    const nm = (x: THREE_Like | null) => (x ? (x.name || x.type || '?') : '?');
+    const parents: string[] = [];
+    for (let q = o?.parent ?? null, i = 0; q && i < 8; q = q.parent ?? null, i++) parents.push(nm(q));
+    const geo = (o as { geometry?: { attributes?: Record<string, { itemSize?: number }>; morphAttributes?: Record<string, unknown> } } | null)?.geometry;
+    const objectFlags = [
+      o?.type ?? '?', (o as { isInstancedMesh?: boolean })?.isInstancedMesh ? 'instanced' : '',
+      (o as { isSkinnedMesh?: boolean })?.isSkinnedMesh ? 'skinned' : '',
+      geo?.morphAttributes && Object.keys(geo.morphAttributes).length ? 'morph' : '',
+      geo?.attributes?.color ? `color${geo.attributes.color.itemSize ?? ''}` : '',
+      geo?.attributes?.tangent ? 'tangent' : '',
+    ].filter(Boolean).join(',');
+    const materialFlags: Record<string, unknown> = {};
+    if (m) {
+      for (const k of ['side', 'transparent', 'opacity', 'alphaTest', 'vertexColors', 'fog', 'blending', 'depthWrite',
+        'premultipliedAlpha', 'flatShading', 'wireframe', 'alphaHash', 'alphaToCoverage', 'dithering', 'forceSinglePass']) {
+        if (k in m) materialFlags[k] = m[k];
+      }
+      for (const k of ['map', 'alphaMap', 'emissiveMap', 'lightMap', 'aoMap', 'specularMap', 'envMap', 'normalMap', 'bumpMap']) {
+        if (m[k]) materialFlags[k] = true;
+      }
+      if (m.defines) materialFlags.defines = m.defines;
+      try {
+        const ck = (m as { customProgramCacheKey?: () => string }).customProgramCacheKey?.();
+        if (ck) materialFlags.customKey = fnv1a(ck);
+      } catch { /* ignore */ }
+      const ud = m.userData as Record<string, unknown> | undefined;
+      if (ud && Object.keys(ud).length) materialFlags.userData = Object.keys(ud).join(',');
+    }
+    let keyDiff: Array<[number, string, string]> | null = null;
+    if (typeof p?.cacheKey === 'string') {
+      const ours = p.cacheKey.split(',');
+      let best: string[] | null = null;
+      let bestN = Infinity;
+      for (const e of existing) {
+        const q = e as { type?: unknown; cacheKey?: unknown };
+        if (q === p || q.type !== p.type || typeof q.cacheKey !== 'string') continue;
+        const theirs = q.cacheKey.split(',');
+        let n = Math.abs(theirs.length - ours.length);
+        for (let i = 0; i < Math.min(theirs.length, ours.length); i++) if (theirs[i] !== ours[i]) n++;
+        if (n < bestN) { bestN = n; best = theirs; }
+      }
+      if (best) {
+        keyDiff = [];
+        for (let i = 0; i < Math.max(best.length, ours.length) && keyDiff.length < 12; i++) {
+          if (best[i] !== ours[i]) keyDiff.push([i, (best[i] ?? '').slice(0, 40), (ours[i] ?? '').slice(0, 40)]);
+        }
+      }
+    }
+    let warmed: boolean | null = null;
+    try { warmed = this.warmedMaterial && m ? this.warmedMaterial(m) : null; } catch { /* ignore */ }
+    return {
+      program: label, object: nm(o), parents, objectFlags,
+      material: `${(m?.type as string) ?? '?'}${m?.name ? `/${m.name as string}` : ''}`,
+      materialFlags, warmed, keyDiff,
+    };
+  }
+
+  frameBegin(): void { this.inFrame = true; }
+
+  frameEnd(f: Omit<CompileTraceFrame, 'programs'>): void {
+    this.inFrame = false;
+    if (f.workMs < this.longFrameMs && this.pending.length === 0) return;
+    this.frames.push({ ...f, programs: this.pending, ...(this.pendingDetails.length ? { details: this.pendingDetails } : {}) });
+    this.pending = [];
+    this.pendingDetails = [];
+    if (this.frames.length > this.keep) this.frames.splice(0, this.frames.length - this.keep);
+  }
+
+  /** The longest kept frames first (for a probe's report). */
+  longest(n = 5): CompileTraceFrame[] {
+    return [...this.frames].sort((a, b) => b.workMs - a.workMs).slice(0, n);
   }
 }

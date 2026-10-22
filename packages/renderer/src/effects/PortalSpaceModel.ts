@@ -47,6 +47,12 @@ export const TELEPORT_ANIM_FADE_TIME = 1;
 export const TELEPORT_ANIM_MIN_CONTINUE_TIME = 2;
 /** TELEPORT_ANIM_MAX_CONTINUE_TIME (s). */
 export const TELEPORT_ANIM_MAX_CONTINUE_TIME = 5;
+/**
+ * Ours, not retail's (PERF.firefox-cover-compile-stall): the longest CONTINUE
+ * waits for a sliced GPU warm (s). A tenth of ACE's 5 min MaximumTeleportTime
+ * (Player_Tick.cs); at the ~160 ms a link seen in production it is ~180 programs.
+ */
+export const TELEPORT_ANIM_WARM_HOLD_MAX_TIME = 30;
 /** TRANSITION_VIEW_PLANE_DISTANCE — the fully zoomed-out view-plane distance. */
 export const TRANSITION_VIEW_PLANE_DISTANCE = 0.001;
 /** The CONTINUE release reads 0x78 − get_curr_frame_number (the animation's 120 frames). */
@@ -173,8 +179,18 @@ export class TeleportAnimation {
     this.curVDist = this.gameVDist; // SetOverrideFovDistance(false, 0)
   }
 
-  /** One gmSmartBoxUI::UseTime pass. */
-  update(now: number, animFrame: number): TeleportAnimFrame {
+  /**
+   * One gmSmartBoxUI::UseTime pass. `holdContinue`: the world's GPU warm is
+   * still linking programs a frame at a time (RendererWarmup.slicing, no
+   * KHR_parallel_shader_compile; PERF.firefox-cover-compile-stall), so
+   * CONTINUE stays, past retail's TELEPORT_ANIM_MAX_CONTINUE_TIME, until the
+   * hold drops (then it leaves at once, the 5 s having passed) or
+   * TELEPORT_ANIM_WARM_HOLD_MAX_TIME. A browser-UX exception to retail
+   * (to be named in CLAUDE.md's list): retail had no shader links to wait for, and without the
+   * hold the fade-out's first world draw linked every remaining program in
+   * one frame (3.3 s on the live Firefox A/B) with the tunnel frozen.
+   */
+  update(now: number, animFrame: number, holdContinue = false): TeleportAnimFrame {
     const out: TeleportAnimFrame = {
       state: this.state, tunnelVisible: this.tunnelShowing, viewDistanceRatio: null,
       rollDeg: this.rotCurAngle, postNotice: false, tunnelShown: false, tunnelHidden: false, finished: false,
@@ -213,8 +229,12 @@ export class TeleportAnimation {
     }
     if (this.state === S.TunnelContinue && now - this.transitionStart >= TELEPORT_ANIM_MIN_CONTINUE_TIME) {
       const remaining = (TELEPORT_ANIM_FRAMES - animFrame) / TELEPORT_ANIM_FPS;
-      if (now - this.transitionStart >= TELEPORT_ANIM_MAX_CONTINUE_TIME
-        || (TELEPORT_ANIM_FADE_TIME + 0.1 < remaining && remaining < TELEPORT_ANIM_FADE_TIME + 0.3)) {
+      const elapsed = now - this.transitionStart;
+      const release = holdContinue
+        ? elapsed >= TELEPORT_ANIM_WARM_HOLD_MAX_TIME
+        : elapsed >= TELEPORT_ANIM_MAX_CONTINUE_TIME
+          || (TELEPORT_ANIM_FADE_TIME + 0.1 < remaining && remaining < TELEPORT_ANIM_FADE_TIME + 0.3);
+      if (release) {
         this.state = S.TunnelFadeOut;
         this.transitionStart = now;
       }

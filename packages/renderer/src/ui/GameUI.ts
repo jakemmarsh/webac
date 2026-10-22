@@ -16,7 +16,7 @@ import { fellowshipUpdateLine, fellowAddedLine, fellowQuitLine, fellowDismissedL
 import { defaultChargenSkillClasses, chargenTotalNumSkills } from './chargenSkillDefaults.js';
 import { computeSkillFormula, Heritage, Gender, SkillAdvancementClass, EquipMask, DEFAULT_ATTRIBUTE_CREDITS, Sound, CombatMode, ItemType, COINSTACK_WCID, playerKillerStatusLabel, skillIdLabel, skillAdvancementClassLabel, characterOptionIsSet, CHARACTER_OPTION_BIT_MAP, chatColorFor, shopSellPrice, shopBuyPrice } from '@ac/shared';
 import type { InventoryItem, EquippedItem, SpellDefinition, NameFilterRules, TabooPredicate, MtChatLine, MtChatSpeech } from '@ac/shared';
-import { SPELLBOOK_FILTERS_DEFAULT, isSpellbookFilteredOut, spellbookLevelBit, spellbookOrder, spellbookSchoolBit, toggleSpellbookFilter, spellbookDeleteConfirmText } from './spellbookFilter.js';
+import { SPELLBOOK_FILTERS_DEFAULT, isSpellbookFilteredOut, spellbookLevelBit, spellbookOrder, spellbookSchoolBit, toggleSpellbookFilter, spellbookDeleteConfirmText, spellbookFilterOptions, type SpellbookFilterOptions } from './spellbookFilter.js';
 import { MagicSchool, magicSchoolColor, magicSchoolColorRGBA, LUMINANCE_MIN_LEVEL, getAppropriateName, StartingTown, SPELL_COMPONENT_DID_MAPPER_ID } from '@ac/shared';
 import { contractProgressText, contractTimedText, contractRepeatLeft, type ContractTiming } from '@ac/shared';
 import { TeleportAnimation, TeleportAnimState, PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
@@ -162,8 +162,9 @@ import {
 import {
   SpellCastSubMenu, shortcutNumMedia, shortcutNumForIndex, nextSpellBarTab, prevSpellBarTab, clampSpellBarTabCount,
   spellNeedsNoTarget, objectCompatibleWithSpellTargetType, type SpellTargetObject, pruneUnknownSpellFavorites,
-  SPELL_SHORTCUT_LIST_RECT, SPELL_SHORTCUT_CELL, SPELL_SHORTCUT_VISIBLE, SPELL_SHORTCUT_SLOT_MEDIA, SPELL_SHORTCUT_SELECTED_MEDIA, SPELL_SHORTCUT_TEMPLATE, SPELL_SHORTCUT_NUM_ELEMENT, SPELL_SHORTCUT_SELECTED_ELEMENT,
+  SPELL_SHORTCUT_LIST_RECT, SPELL_SHORTCUT_CELL, SPELL_SHORTCUT_SLOT_MEDIA, SPELL_SHORTCUT_SELECTED_MEDIA, SPELL_SHORTCUT_TEMPLATE, SPELL_SHORTCUT_NUM_ELEMENT, SPELL_SHORTCUT_SELECTED_ELEMENT,
   SPELL_BAR_TAB_IDS, SPELL_BAR_CONTENT_IDS, SPELL_SHORTCUT_LIST, spellListPaddedCells,
+  SPELL_LIST_SCROLLER, SPELL_LIST_ARROW_LEFT, SPELL_LIST_ARROW_RIGHT, spellListScroll, stepSpellListScroll, type SpellBarArrowRule,
   SPELLBAR_ENDOWMENT_UNDERLAY, SPELLBAR_ENDOWMENT_OVERLAY, SPELLBAR_ENDOWMENT_SELECTED, SPELLBAR_ENDOWMENT_SELECTED_MEDIA,
   findEndowment, endowmentIconTooltip, isUseableSelfTarget, itemOverlayShortcutNumMedia, ITEM_SHORTCUT_SLOTS,
   ITEM_WAITING_GHOST_MEDIA, ITEM_SELL_STATE_MEDIA,
@@ -233,9 +234,10 @@ export const VENDOR_LEAVE_CONFIRM_TEXT = 'You have not completed all transaction
 import { assignLeadership, quitFellowship, toggleOpenness, dismissFellow, disbandFellowship, type FellowshipStep } from './FellowshipPanelActions.js';
 import {
   hiddenBy, FEATURE_PANELS, FEATURE_TOOLBAR_BUTTONS, FEATURE_CHARACTER_OPTIONS, FEATURE_CHAT_FILTERS,
-  FEATURE_TALK_FOCUSES, FEATURE_KEYBIND_ACTIONS, FEATURE_SOCIAL_TABS, clientRuleHiddenActions, type EraFeature,
+  FEATURE_TALK_FOCUSES, FEATURE_KEYBIND_ACTIONS, FEATURE_SOCIAL_TABS, FEATURE_EQUIP_SLOTS, clientRuleHiddenActions, type EraFeature,
 } from '../era/EraFeatures.js';
 import { ACFontRenderer, OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
+import { placeScrollbarButtons, bindHotClick, hotClickTiming, buttonVisualState } from './ScrollbarButtons.js';
 import { outlineCssFromArgb, DEFAULT_TEXT_OUTLINE_ARGB } from './TextOutline.js';
 import { attachPreworldScale as attachPreworldScaleShared } from './PreworldScale.js';
 import { debugBag } from '../utils/debugGlobals.js';
@@ -2211,6 +2213,14 @@ export class GameUI {
    * (one row, the 1-9 tray) for 1999.
    */
   private itemShortcutSlotCount = 18;
+  /**
+   * BUG.ac1999-spellbar-arrows (webac#6) — each tab page's list scroll
+   * offset in px (its own UIElement_ItemList in retail), and when the
+   * page's arrows show (eraClientRules().spellBarArrows: end of retail's
+   * whole scroller, the 1999 client's one arrow per end).
+   */
+  private spellBarScrollX: number[] = new Array(8).fill(0);
+  private spellBarArrowRule: SpellBarArrowRule = 'pair';
   private magicPanelTab: 'spells' | 'components' | 'research' = 'spells'; // VISUAL.139 — 'foci' removed (foci retired from AC in 2010; not an EoL page)
   private spellComponents: Array<{ name: string; quantity: number; icon?: number }> = [];
   private spellCallbacks: {
@@ -2308,6 +2318,18 @@ export class GameUI {
   }
   /** How this world words the selected stat's line. */
   get statLineTextKind(): 'eor' | 'ac1999' { return this.statLineMode; }
+  /**
+   * BUG.ac1999-char-info-eor-rows (webac#8) — what the shared Character
+   * Information panel says (eraClientRules().characterInfoText): end of
+   * retail's gmCharacterInfoUI report, or the 1999 rows (born / played /
+   * deaths and the 1999 client's burden text). Set once per page load.
+   */
+  private characterInfoMode: 'eor' | 'ac1999' = 'eor';
+  setCharacterInfoText(mode: 'eor' | 'ac1999'): void {
+    if (mode === this.characterInfoMode) return;
+    this.characterInfoMode = mode;
+    if (this.charInfoTextPanelVisible) this.renderCharacterInfoTextPanel();
+  }
 
   /**
    * BUG.ac1999-spell-tabs (webac#5) — the era's spell-bar tab count, set
@@ -2356,6 +2378,16 @@ export class GameUI {
   }
   /** The toolbar's item-shortcut slots in this world. */
   get itemShortcutSlotTotal(): number { return this.itemShortcutSlotCount; }
+
+  /** BUG.ac1999-spellbar-arrows — when the spell bar's scroll arrows show, set once per page load from the era profile. */
+  setSpellBarArrowRule(rule: SpellBarArrowRule): void {
+    const next: SpellBarArrowRule = rule === 'ends' ? 'ends' : 'pair';
+    if (next === this.spellBarArrowRule) return;
+    this.spellBarArrowRule = next;
+    if (this.spellBarHandle) this.layoutSpellBarPage(this.activeSpellBarTab, false);
+  }
+  /** The open tab's list scroll offset (px). */
+  get spellBarScrollOffset(): number { return this.spellBarScrollX[this.activeSpellBarTab] ?? 0; }
   private statLineMode: 'eor' | 'ac1999' = 'eor';
   private charInfo: {
     name: string; level: number; heritage: string; gender: string; pkStatus: string;
@@ -3609,6 +3641,18 @@ export class GameUI {
     }
   }
 
+  /** BUG.ac1999-spell-filters — the filter buttons this era's SpellTable can match (spellbookFilterOptions). */
+  spellbookFilterOptions(): SpellbookFilterOptions {
+    if (!this.spellTable) return spellbookFilterOptions(null);
+    if (this.filterOptionsFor !== this.spellTable) {
+      this.filterOptionsFor = this.spellTable;
+      this.filterOptionsCache = spellbookFilterOptions(this.spellTable.spells.values());
+    }
+    return this.filterOptionsCache!;
+  }
+  private filterOptionsFor: SpellTable | null = null;
+  private filterOptionsCache: SpellbookFilterOptions | null = null;
+
   private loadSpellTableAsset(): void {
     if (!this.portalDb) return;
     // FAITHFUL.297 — Load SpellTable (0x0E00000E) for the appraisal panel's
@@ -3654,6 +3698,7 @@ export class GameUI {
       const fontData = this.uiPortalDb?.getFileData(0x40000000);
       if (fontData) {
         const font = ACFont.read(new DatReader(fontData));
+        const previous = this.fontRenderer;
         this.fontRenderer = new ACFontRenderer(font);
 
         // Load the font spritesheet texture
@@ -3669,10 +3714,38 @@ export class GameUI {
           if (rgba) this.fontRenderer.initBackgroundSpritesheet(rgba.width, rgba.height, rgba.data);
         }
         this.fontRendererCache.set(0x40000000, this.fontRenderer);
+        this.adoptUiFontRenderer(previous, this.fontRenderer);
       }
     } catch (e) {
       console.warn('[GameUI] Failed to parse AC Font:', e);
     }
+  }
+
+  /**
+   * BUG.hud-text-blank-font-sheet — the UI font (0x40000000) was (re)built:
+   * it is the one instance every UI text draws with. The LayoutRenderer
+   * takes it (repainting its labels), chat moves to it when it drew with the
+   * one it replaces (the retail default chat pair names 0x40000000), and its
+   * heal (a blank glyph sheet rebuilt) redraws the chat logs.
+   */
+  private adoptUiFontRenderer(previous: ACFontRenderer | null, renderer: ACFontRenderer): void {
+    (this.layoutRenderer as { setFontRenderer?: (r: ACFontRenderer | null) => void } | null)?.setFontRenderer?.(renderer);
+    if (previous && this.chatFontRenderer === previous) {
+      this.chatFontRenderer = renderer;
+      for (const log of this.chatLogElements()) this.refontChatLog(log);
+    }
+    this.watchChatFontHeal(renderer);
+  }
+
+  private chatHealWatched = new WeakSet<ACFontRenderer>();
+  /** When `renderer` heals while chat draws with it, redraw the chat logs (runs drawn meanwhile took the fallback). */
+  private watchChatFontHeal(renderer: ACFontRenderer): void {
+    if (this.chatHealWatched.has(renderer) || typeof renderer.onHeal !== 'function') return;
+    this.chatHealWatched.add(renderer);
+    renderer.onHeal(() => {
+      if (this.chatRenderer() !== renderer) return;
+      for (const log of this.chatLogElements()) this.refontChatLog(log);
+    });
   }
 
   private loadHeritageIconAssets(): void {
@@ -5352,6 +5425,7 @@ export class GameUI {
     if (this.chatFontPending || did === null || !renderer) return false;
     this.chatFontDid = did;
     this.chatFontRenderer = renderer;
+    this.watchChatFontHeal(renderer);
     for (const log of this.chatLogElements()) this.refontChatLog(log);
     return true;
   }
@@ -5903,7 +5977,9 @@ export class GameUI {
     if (this.logOffFadeRunning && this.teleportAnim.state === TeleportAnimState.Tunnel) {
       this.teleportAnim.end(now);
     }
-    const f = this.teleportAnim.update(now, this.portalSpaceRenderer?.animFrame ?? 0);
+    // PERF.firefox-cover-compile-stall — an arrival's tunnel waits (≤ retail's 5 s) for the world's sliced GPU warm; a logoff's never.
+    const holdForWarm = !this.logOffFadeRunning && (this.uiHost?.portalTunnelHold?.() ?? false);
+    const f = this.teleportAnim.update(now, this.portalSpaceRenderer?.animFrame ?? 0, holdForWarm);
     if (f.tunnelShown) this.mountPortalSpaceTunnel();
     if (f.postNotice) this.displayErrorText(PORTAL_SPACE_NOTICE);
     if (this.portalSpaceRenderer && f.tunnelVisible) {
@@ -5988,7 +6064,24 @@ export class GameUI {
    * PERF.4 — true while the portal-space tunnel hides the world canvas, the
    * window RendererWarmup does its GPU prewarm in.
    */
-  get portalSpaceCovering(): boolean { return this.portalSpaceOverlay !== null; }
+  get portalSpaceCovering(): boolean { return this.tunnelUp; }
+
+  /**
+   * The tunnel is up, or begun and about to mount. BeginTeleportAnimation
+   * (TAS_TUNNEL) @ 004d6300 hides the SmartBox at once, but ours mounts the
+   * overlay on the teleport loop's next pass, and the game loop's frame runs
+   * first in that browser frame. On an arrival whose tunnel startGame opens
+   * itself (no gate hold), showPortalSpace and endPortalSpace run back to back,
+   * so that frame saw TAS_TUNNEL_CONTINUE with no overlay, drew the whole
+   * world uncovered and linked its 17 programs in one 2.9 s frame (live
+   * Firefox A/B, 2026-10-22, PERF.firefox-cover-compile-stall); the warm,
+   * seeing no cover, had not started.
+   */
+  private get tunnelUp(): boolean {
+    if (this.portalSpaceOverlay !== null) return true;
+    const s = this.teleportAnim.state;
+    return s === TeleportAnimState.Tunnel || s === TeleportAnimState.TunnelContinue;
+  }
 
   /**
    * Retail SmartBox::hidden: the tunnel replaced the world view
@@ -6004,7 +6097,7 @@ export class GameUI {
   }
 
   get worldHiddenByPortalSpace(): boolean {
-    return this.portalSpaceOverlay !== null && this.teleportAnim.state !== TeleportAnimState.TunnelFadeOut;
+    return this.tunnelUp && this.teleportAnim.state !== TeleportAnimState.TunnelFadeOut;
   }
 
   /** Tear the teleport animation down at once (disconnect / logout / screen change). */
@@ -15689,7 +15782,10 @@ export class GameUI {
       }
       // CORE.18.e — the three aetheria sigil slots only once unlocked
       // (gmPaperDollUI::UpdateAetheria @ 004a3e50).
-      flankSlots.filter(sd => aetheriaSigilVisible(sd.mask, this.aetheriaBitfield)).forEach(makeEquipSlot);
+      // BUG.ac1999-char-info-eor-rows sweep — and no slot for an item kind the era lacks
+      // (1999: no cloaks, no trinkets; FEATURE_EQUIP_SLOTS).
+      const eraHiddenSlots = hiddenBy(FEATURE_EQUIP_SLOTS, this.eraUnsupported);
+      flankSlots.filter(sd => aetheriaSigilVisible(sd.mask, this.aetheriaBitfield) && !eraHiddenSlots.has(sd.mask)).forEach(makeEquipSlot);
 
       // CORE.1 — the burden readout no longer lives on the paperdoll: the
       // retail backpack strip (layout 0x21000022, gmBackpackUI) carries a
@@ -17332,17 +17428,23 @@ export class GameUI {
     handle.setVisible(E.containerScroller, packsOverflow);
     const scrollerEl = handle.elements.get(E.containerScroller);
     if (scrollerEl) scrollerEl.style.pointerEvents = 'none';
+    // BUG.ac1999-spellbar-arrows sweep — UIElement_Scrollbar::Global_Loop
+    // puts the increment (left) arrow at the scroller's left edge; the
+    // static reflow left it at 640 of 726 (440 of 526 in the dock), beside
+    // the right one. Each arrow steps on the press and repeats while held
+    // (UIElement_Button hot-click, the template's p15 / p16 / p17).
+    if (scrollerEl) placeScrollbarButtons(scrollerEl, handle.elements.get(E.arrowLeft) ?? null, handle.elements.get(E.arrowRight) ?? null);
     for (const [arrowId, dir] of [[E.arrowLeft, -1], [E.arrowRight, 1]] as const) {
       const arrow = handle.elements.get(arrowId);
       if (!arrow) continue;
       arrow.style.pointerEvents = 'auto';
       arrow.style.cursor = 'pointer';
-      arrow.addEventListener('click', () => {
+      bindHotClick(arrow, () => {
         const next = Math.max(0, Math.min(maxPackScroll, this.containerPackScroll + dir));
         if (next === this.containerPackScroll) return;
         this.containerPackScroll = next;
         this.renderContainerPanel();
-      });
+      }, hotClickTiming(handle.descs?.get(arrowId)?.properties));
     }
 
     // ── m_itemList: ONE row of 32-px UIItem cells ──
@@ -18157,14 +18259,15 @@ export class GameUI {
   }
 
   /**
-   * The cells a tab's ItemList shows: its shortcuts and ONE trailing EMPTY
+   * The cells a tab's ItemList holds: its shortcuts and ONE trailing EMPTY
    * item (ItemList_AddSpellShortcut @ 004e40a0 → UpdateEmptySlots @ 004e3700
-   * under p0x10000017), clipped to the 19 the 639 px list fits.
+   * under p0x10000017). Unbounded (capacity 0x10000015 = −1): the cells past
+   * the list's width are scrolled to with the arrows (BUG.ac1999-spellbar-arrows).
    */
   spellBarCellCount(tab: number): number {
     let last = -1;
     (this.spellBarSlots[tab] ?? []).forEach((s, i) => { if (s) last = i; });
-    return Math.max(1, Math.min(last + 2, SPELL_SHORTCUT_VISIBLE));
+    return Math.max(1, last + 2);
   }
 
   /**
@@ -18304,17 +18407,118 @@ export class GameUI {
     }
 
     // Update the active tab's cells: the shortcuts + the trailing empty item,
-    // then UpdateEmptySlots' padding across the list's (reflowed) width.
-    const count = this.spellBarCellCount(this.activeSpellBarTab);
-    const shown = Math.min(SPELL_SHORTCUT_VISIBLE, Math.max(count, this.spellBarVisibleCells()));
-    for (let i = 0; i < SPELL_SHORTCUT_VISIBLE; i++) {
-      const slot = this.spellBarPanelEl.querySelector(
-        `[data-spell-slot="${this.activeSpellBarTab}-${i}"]`,
-      ) as HTMLElement | null;
-      if (!slot) continue;
-      slot.style.display = i < shown ? '' : 'none';
-      if (i < shown) this.renderSpellBarSlot(slot, i, i >= count);
+    // then UpdateEmptySlots' padding across the list's (reflowed) width, and
+    // the list's scroll + arrows.
+    this.layoutSpellBarPage(this.activeSpellBarTab, true);
+  }
+
+  /** Element `id` inside tab page `t` (every page has its own list and arrow pair under the same ids). */
+  private spellBarPageEl(t: number, id: number): HTMLElement | null {
+    const page = this.spellBarHandle?.elements.get(SPELL_BAR_CONTENT_IDS[t]);
+    return (page?.querySelector?.(`[data-element-id="0x${id.toString(16)}"]`) as HTMLElement | null) ?? null;
+  }
+
+  /**
+   * BUG.ac1999-spellbar-arrows (webac#6) — lay tab `t`'s list out: one cell
+   * per shortcut + the trailing empty item + the width padding, in a strip
+   * the list 0x100000b6 clips and scrolls; then the arrow pair 0x100000b5
+   * per the era's rule. `render` redraws the cells (the open tab only, as
+   * before).
+   */
+  private layoutSpellBarPage(t: number, render: boolean): void {
+    if (!this.spellBarHandle || t < 0 || t >= this.spellBarTabCount) return;
+    const list = this.spellBarPageEl(t, SPELL_SHORTCUT_LIST);
+    if (!list) return;
+    let strip = list.querySelector<HTMLElement>('[data-spell-strip]');
+    if (!strip) {
+      strip = document.createElement('div');
+      strip.dataset.spellStrip = `${t}`;
+      Object.assign(strip.style, { position: 'absolute', left: '0px', top: '0px', height: `${SPELL_SHORTCUT_CELL}px`, pointerEvents: 'auto' });
+      list.appendChild(strip);
+      list.style.pointerEvents = 'auto';
+      list.style.overflow = 'hidden';
     }
+    const width = this.spellListWidth(list);
+    const count = this.spellBarCellCount(t);
+    const total = spellListPaddedCells(width, count);
+    const cells = [...strip.children] as HTMLElement[];
+    for (let i = cells.length; i < total; i++) {
+      const slot = document.createElement('div');
+      slot.dataset.spellSlot = `${t}-${i}`;
+      Object.assign(slot.style, {
+        position: 'absolute', left: `${i * SPELL_SHORTCUT_CELL}px`, top: '0px',
+        width: `${SPELL_SHORTCUT_CELL}px`, height: `${SPELL_SHORTCUT_CELL}px`,
+        cursor: 'pointer', pointerEvents: 'auto', boxSizing: 'border-box',
+      });
+      this.wireSpellBarSlotEvents(slot, i, t);
+      strip.appendChild(slot);
+      cells.push(slot);
+    }
+    for (let i = cells.length - 1; i >= total; i--) cells.pop()!.remove();
+    if (render) for (let i = 0; i < total; i++) this.renderSpellBarSlot(cells[i], i, i >= count);
+    strip.style.width = `${total * SPELL_SHORTCUT_CELL}px`;
+    const s = spellListScroll(this.spellBarScrollX[t] ?? 0, total, width, this.spellBarArrowRule);
+    this.spellBarScrollX[t] = s.scrollX;
+    strip.style.left = `${-s.scrollX}px`;
+    // The scroller is type 11 and renders hidden (LayoutRenderer's runtime-
+    // widget guard): it shows here per the era's rule.
+    const scroller = this.spellBarPageEl(t, SPELL_LIST_SCROLLER);
+    if (scroller) scroller.style.display = s.left || s.right ? '' : 'none';
+    const left = this.spellBarPageEl(t, SPELL_LIST_ARROW_LEFT);
+    const right = this.spellBarPageEl(t, SPELL_LIST_ARROW_RIGHT);
+    if (left) left.style.display = s.left ? '' : 'none';
+    if (right) right.style.display = s.right ? '' : 'none';
+  }
+
+  /** The list's reflowed width: UpdateEmptySlots @ 004e3700 pads it with width / 32 cells (439 in the combat window's 600 body when unknown). */
+  private spellListWidth(list: HTMLElement): number {
+    const w = parseInt(list.style.width, 10);
+    return Number.isFinite(w) ? w : SPELL_SHORTCUT_LIST_RECT.width - (800 - COMBAT_WINDOW.body.w);
+  }
+
+  /** An arrow press on tab `t`'s list: one cell left (−1) or right (+1). */
+  scrollSpellBarList(t: number, dir: -1 | 1): void {
+    const list = this.spellBarPageEl(t, SPELL_SHORTCUT_LIST);
+    if (!list) return;
+    const width = this.spellListWidth(list);
+    const total = spellListPaddedCells(width, this.spellBarCellCount(t));
+    const next = stepSpellListScroll(this.spellBarScrollX[t] ?? 0, dir, total, width);
+    if (next === this.spellBarScrollX[t]) return;
+    this.spellBarScrollX[t] = next;
+    this.layoutSpellBarPage(t, false);
+  }
+
+  /** Wire tab `t`'s arrow pair: retail's runtime placement, the pointer only on the arrows, hot-click stepping, the button states. */
+  private wireSpellBarArrows(t: number): void {
+    const handle = this.spellBarHandle;
+    const scroller = this.spellBarPageEl(t, SPELL_LIST_SCROLLER);
+    if (!handle || !scroller) return;
+    scroller.style.pointerEvents = 'none';
+    const left = this.spellBarPageEl(t, SPELL_LIST_ARROW_LEFT);
+    const right = this.spellBarPageEl(t, SPELL_LIST_ARROW_RIGHT);
+    placeScrollbarButtons(scroller, left, right);
+    for (const [el, id, dir] of [[left, SPELL_LIST_ARROW_LEFT, -1], [right, SPELL_LIST_ARROW_RIGHT, 1]] as const) {
+      if (!el) continue;
+      el.style.pointerEvents = 'auto';
+      el.style.cursor = 'pointer';
+      el.dataset.spellListArrow = dir < 0 ? 'left' : 'right';
+      const desc = handle.descs?.get(id);
+      // UIElement_Button::UpdateState_ @ 00471cf0 with the template's p19
+      // (rollover): 1 at rest, 2 hovered or held off the button, 3 held on it.
+      let over = false, held = false;
+      const paint = () => this.showArrowState(el, desc, buttonVisualState(held, over, desc?.properties?.get(19)?.valueBool === true));
+      el.addEventListener('mouseenter', () => { over = true; paint(); });
+      el.addEventListener('mouseleave', () => { over = false; paint(); });
+      bindHotClick(el, () => this.scrollSpellBarList(t, dir), hotClickTiming(desc?.properties), (down) => { held = down; if (down) over = true; paint(); });
+    }
+  }
+
+  /** Draw an arrow in DAT state `state` (its state desc's media; a state the desc lacks keeps the art). */
+  private showArrowState(el: HTMLElement, desc: ElementDesc | undefined, state: number): void {
+    const media = desc?.states?.get(state)?.media;
+    if (!this.layoutRenderer || !media?.length) return;
+    this.layoutRenderer.applyMediaToElement(el, media, 1);
+    el.dataset.buttonState = String(state);
   }
 
   /** Show/hide spell bar based on combat mode — only visible in Magic mode. */
@@ -18430,13 +18634,6 @@ export class GameUI {
     for (const inst of this.floatyChatInstances) place(inst.panelEl, inst.def.windowId);
   }
 
-  /** The shortcut cells the open tab's list shows: its reflowed width / 32 (UpdateEmptySlots @ 004e3700 pads the visible area). */
-  private spellBarVisibleCells(): number {
-    const page = this.spellBarHandle?.elements.get(SPELL_BAR_CONTENT_IDS[this.activeSpellBarTab]);
-    const list = page?.querySelector?.(`[data-element-id="0x${SPELL_SHORTCUT_LIST.toString(16)}"]`) as HTMLElement | null;
-    const w = list ? parseInt(list.style.width, 10) : NaN;
-    return spellListPaddedCells(Number.isFinite(w) ? w : SPELL_SHORTCUT_LIST_RECT.width - (800 - COMBAT_WINDOW.body.w));
-  }
 
   /** Render the floating spell bar panel using LayoutRenderer with LayoutDesc 0x21000010. */
   private renderSpellBarPanel(): void {
@@ -18520,6 +18717,12 @@ export class GameUI {
     // template 0x10000341): an ordered list of shortcuts plus one trailing
     // EMPTY item, 19 cells at most. The cells exist up front; refresh shows
     // the tab's count.
+    // BUG.ac1999-spellbar-arrows (webac#6) — the cells live in a strip the
+    // list clips and scrolls, as many as the tab holds (the list's capacity
+    // is −1), and the page's arrow pair 0x100000b5 scrolls it a cell per
+    // press. Before, at most 19 cells were drawn over the page and the
+    // arrows never showed, so a long list ran under the Cast button with no
+    // way to reach its end (1999's one bar holds every favourite).
     for (let t = 0; t < 8; t++) {
       const contentEl = handle.elements.get(contentIds[t]);
       if (!contentEl) continue;
@@ -18527,32 +18730,8 @@ export class GameUI {
       // BUG.ac1999-spell-tabs — a page this era lacks gets no cells.
       if (t >= this.spellBarTabCount) continue;
       contentEl.style.pointerEvents = 'auto';
-      const count = this.spellBarCellCount(t);
-      const shown = Math.min(SPELL_SHORTCUT_VISIBLE, Math.max(count, this.spellBarVisibleCells()));
-
-      for (let i = 0; i < SPELL_SHORTCUT_VISIBLE; i++) {
-        const slot = document.createElement('div');
-        slot.dataset.spellSlot = `${t}-${i}`;
-        Object.assign(slot.style, {
-          position: 'absolute',
-          left: `${SPELL_SHORTCUT_LIST_RECT.x + i * SPELL_SHORTCUT_CELL}px`,
-          top: `${SPELL_SHORTCUT_LIST_RECT.y}px`,
-          width: `${SPELL_SHORTCUT_CELL}px`, height: `${SPELL_SHORTCUT_CELL}px`,
-          cursor: 'pointer',
-          pointerEvents: 'auto',
-          boxSizing: 'border-box',
-          display: i < shown ? '' : 'none',
-        });
-
-        // Only populate active tab's slots initially
-        if (t === this.activeSpellBarTab && i < shown) {
-          this.renderSpellBarSlot(slot, i, i >= count);
-        }
-
-        // Wire up events for this slot
-        this.wireSpellBarSlotEvents(slot, i, t);
-        contentEl.appendChild(slot);
-      }
+      this.wireSpellBarArrows(t);
+      this.layoutSpellBarPage(t, t === this.activeSpellBarTab);
     }
 
     // CORE.17.k.b.b.a.g.a — gmSpellcastingUI::PostInit @ 004c5d00 binds the
@@ -19171,7 +19350,16 @@ export class GameUI {
       { id: 0x1000029b, school: MagicSchool.WarMagic,            str: 141746946, fallback: 'War', },
       { id: 0x100005c0, school: MagicSchool.VoidMagic,           str: 253794626, fallback: 'Void', },
     ];
+    // BUG.ac1999-spell-filters (webac#7) — only the schools and levels the
+    // era's own SpellTable has (1999: no Void, no VII / VIII); a button no
+    // spell can match is not shown.
+    const filterOptions = this.spellbookFilterOptions();
+    const hideRow = (id: number): void => {
+      const rowEl = handle.elements.get(id);
+      if (rowEl) rowEl.style.display = 'none';
+    };
     for (const sr of schoolRadios) {
+      if (!filterOptions.schools.has(sr.school)) { hideRow(sr.id); continue; }
       const bit = spellbookSchoolBit(sr.school);
       wireRadio(sr.id, getString(sr.str) ?? sr.fallback, (this.spellbookFilters & bit) !== 0,
         () => this.toggleSpellbookFilterBit(bit));
@@ -19192,6 +19380,7 @@ export class GameUI {
     for (let i = 0; i < levelRadios.length; i++) {
       const lr = levelRadios[i];
       const level = i + 1;
+      if (level > filterOptions.maxLevel) { hideRow(lr.id); continue; }
       const bit = spellbookLevelBit(level);
       wireRadio(lr.id, getString(lr.str) ?? lr.fallback, (this.spellbookFilters & bit) !== 0,
         () => this.toggleSpellbookFilterBit(bit));
@@ -22454,7 +22643,7 @@ export class GameUI {
 
   /** The Character Information report's lines as the panel renders them ([] without a source) — for live probes. */
   characterInfoReportLines(): string[] {
-    return this.characterInfoSource ? buildCharacterInfoReport(this.characterInfoSource()) : [];
+    return this.characterInfoSource ? buildCharacterInfoReport(this.characterInfoSource(), this.characterInfoMode) : [];
   }
 
   /** Show / hide the character-info panel in its panels-window slot (setPanelsWindowPanel drives it). */
@@ -22535,7 +22724,7 @@ export class GameUI {
     // Word-wrap to the text element's width (0x1000011d is 262 px wide) so
     // long sentences wrap inside it, as retail's multiline text element does.
     const WRAP_W = 262;
-    const lines = buildCharacterInfoReport(this.characterInfoSource());
+    const lines = buildCharacterInfoReport(this.characterInfoSource(), this.characterInfoMode);
     if (lines.length === 0) {
       content.appendChild(this.renderACText('No character information available.', AC_COLORS.textDim, 1, WRAP_W));
     } else {

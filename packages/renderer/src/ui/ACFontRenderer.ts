@@ -1,5 +1,6 @@
 import type { ACFont, FontCharDesc } from '@ac/dat-parser/file-types/ACFont.js';
 import { calcJustification } from './UIElementTextLayout.js';
+import { noteFontSheetBad } from './ContextHealth.js';
 
 export interface GlyphLayout {
   charDesc: FontCharDesc;
@@ -67,11 +68,67 @@ export function lineSourceSpans(text: string, lines: ReadonlyArray<string>): num
 /** Pre-tinted glyph sheets kept per renderer (UI text uses a few dozen colours). */
 const TINT_CACHE_MAX = 48;
 
+/** A glyph sheet's source pixels, kept so a sheet that comes back blank (or loses its backing) can be rebuilt. */
+interface SheetSource { width: number; height: number; data: Uint8Array; probe: number }
+
+/** The byte index of the first texel with alpha in `data` (RGBA), or -1 for an all-transparent sheet. */
+function firstInkedAlpha(data: Uint8Array): number {
+  for (let i = 3; i < data.length; i += 4) if (data[i] !== 0) return i;
+  return -1;
+}
+
+type Ctx2d = CanvasRenderingContext2D & { isContextLost?: () => boolean };
+
+/**
+ * BUG.hud-text-blank-font-sheet — whether `canvas` really holds ink at the
+ * source's first inked texel. A 2D canvas the browser could not back (memory
+ * pressure, IOSurface exhaustion) or whose context was lost draws nothing and
+ * reads back zeros, and a cached blank sheet blanked every later label until
+ * a reload (2026-10-22: every HUD label blank, no error). Where the context
+ * cannot read back (test stubs) the sheet is taken as drawn.
+ */
+function sheetHasInk(canvas: HTMLCanvasElement, probe: number): boolean {
+  const ctx = canvas.getContext('2d') as Ctx2d | null;
+  if (!ctx) return false;
+  if (typeof ctx.isContextLost === 'function' && ctx.isContextLost()) return false;
+  if (probe < 0 || typeof ctx.getImageData !== 'function') return true;
+  const texel = (probe - 3) / 4;
+  const x = texel % canvas.width;
+  const y = Math.floor(texel / canvas.width);
+  try {
+    const px = ctx.getImageData(x, y, 1, 1)?.data;
+    return px ? px[3] !== 0 : true;
+  } catch {
+    return false;
+  }
+}
+
+/** A colour that tints to nothing (zero alpha): its tinted sheet is blank by design, not broken. */
+function isTransparentColor(color: string): boolean {
+  const c = color.trim().toLowerCase();
+  return c === 'transparent' || /^rgba\(.*,\s*0*(\.0*)?\s*\)$/.test(c) || /^#[0-9a-f]{3}0$/.test(c) || /^#[0-9a-f]{6}00$/.test(c);
+}
+
 export class ACFontRenderer {
+  /**
+   * Least time between rebuilds of a sheet that came back blank: each try
+   * makes a new canvas, and under the memory pressure that blanked it a try
+   * per label paint would only make it worse.
+   */
+  static rebuildIntervalMs = 1000;
+
   private font: ACFont;
   private charMap: Map<number, FontCharDesc>;
   private spritesheetCanvas: HTMLCanvasElement | null = null;
   private backgroundCanvas: HTMLCanvasElement | null = null;
+  /** The sheets' source pixels (initSpritesheet / initBackgroundSpritesheet), for rebuilds. */
+  private foregroundSource: SheetSource | null = null;
+  private backgroundSource: SheetSource | null = null;
+  /** When the last rebuild of a missing sheet was tried (rebuildIntervalMs). */
+  private lastRebuildAt = -Infinity;
+  /** A sheet was found blank (or lost) since the sheets were last whole: the next whole build is a heal. */
+  private unhealthy = false;
+  private readonly healListeners = new Set<() => void>();
   /**
    * PERF.ui-text-canvas-churn — the glyph sheets pre-tinted per colour (an LRU
    * of TINT_CACHE_MAX). Tinted text used to draw its glyphs onto a fresh
@@ -104,38 +161,149 @@ export class ACFontRenderer {
 
   /**
    * Initialize the spritesheet canvas from RGBA pixel data.
-   * Must be called before renderToCanvas() can work.
+   * Must be called before renderToCanvas() can work. A sheet that reads back
+   * blank is not kept: isReady stays false (text takes the fallback) and the
+   * sheet is rebuilt from these pixels on a later use.
    */
   initSpritesheet(width: number, height: number, rgbaData: Uint8Array): void {
-    this.spritesheetCanvas = document.createElement('canvas');
-    this.spritesheetCanvas.width = width;
-    this.spritesheetCanvas.height = height;
-    const ctx = this.spritesheetCanvas.getContext('2d')!;
-    const imageData = ctx.createImageData(width, height);
-    imageData.data.set(rgbaData);
-    ctx.putImageData(imageData, 0, 0);
+    this.foregroundSource = { width, height, data: rgbaData, probe: firstInkedAlpha(rgbaData) };
     this.tintedSheets.clear();
+    this.spritesheetCanvas = this.buildSheet(this.foregroundSource);
+    this.settle();
   }
 
-  /** `sheet` with every texel's colour replaced by `color` and its alpha kept (the old per-label 'source-in' tint), cached. */
+  /**
+   * One glyph sheet canvas from `src`, or null (counted on __acHealth) when it
+   * reads back blank. A kept sheet drops itself, and every tint, if its 2D
+   * context is lost, so the next use rebuilds it.
+   */
+  private buildSheet(src: SheetSource): HTMLCanvasElement | null {
+    const canvas = document.createElement('canvas');
+    canvas.width = src.width;
+    canvas.height = src.height;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      const imageData = ctx.createImageData(src.width, src.height);
+      imageData.data.set(src.data);
+      ctx.putImageData(imageData, 0, 0);
+    }
+    if (!ctx || !sheetHasInk(canvas, src.probe)) {
+      noteFontSheetBad();
+      this.unhealthy = true;
+      return null;
+    }
+    this.watchContext(canvas);
+    return canvas;
+  }
+
+  /** A sheet or tint losing its 2D context drops every cached sheet; its restore rebuilds them at once. */
+  private watchContext(canvas: HTMLCanvasElement): void {
+    const target = canvas as unknown as { addEventListener?: (type: string, l: () => void) => void };
+    if (typeof target.addEventListener !== 'function') return;
+    target.addEventListener('contextlost', () => this.dropSheets());
+    target.addEventListener('contextrestored', () => {
+      this.dropSheets();
+      this.lastRebuildAt = -Infinity;
+      this.rebuildMissing();
+    });
+  }
+
+  /** Forget every built sheet (the sources stay): the next isReady rebuilds them. */
+  private dropSheets(): void {
+    this.unhealthy = true;
+    this.spritesheetCanvas = null;
+    this.backgroundCanvas = null;
+    this.tintedSheets.clear();
+    this.tintedBackgrounds.clear();
+  }
+
+  /** Every sheet with a source is built again after a failure: the renderer healed, so tell the listeners. */
+  private settle(): void {
+    const fgOk = !this.foregroundSource || this.spritesheetCanvas !== null;
+    const bgOk = !this.backgroundSource || this.backgroundCanvas !== null;
+    if (!fgOk || !bgOk || !this.unhealthy) return;
+    this.unhealthy = false;
+    for (const listener of [...this.healListeners]) {
+      try { listener(); } catch (e) { console.warn('[AC] font heal listener failed:', e); }
+    }
+  }
+
+  /**
+   * Run `listener` whenever this renderer heals (a blank or lost glyph sheet
+   * rebuilt good), so text drawn with the fallback meanwhile is drawn again
+   * (LayoutRenderer.repaintAllLabels, GameUI's chat logs). Returns the unsubscribe.
+   */
+  onHeal(listener: () => void): () => void {
+    this.healListeners.add(listener);
+    return () => { this.healListeners.delete(listener); };
+  }
+
+  /** Build the sheets that are missing, at most once per rebuildIntervalMs; true when the foreground sheet is built. */
+  private rebuildMissing(): boolean {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (now - this.lastRebuildAt < ACFontRenderer.rebuildIntervalMs) return this.spritesheetCanvas !== null;
+    this.lastRebuildAt = now;
+    if (!this.spritesheetCanvas && this.foregroundSource) {
+      this.tintedSheets.clear();
+      this.spritesheetCanvas = this.buildSheet(this.foregroundSource);
+    }
+    if (!this.backgroundCanvas && this.backgroundSource) {
+      this.tintedBackgrounds.clear();
+      this.backgroundCanvas = this.buildSheet(this.backgroundSource);
+    }
+    this.settle();
+    return this.spritesheetCanvas !== null;
+  }
+
+  /**
+   * `sheet` with every texel's colour replaced by `color` and its alpha kept
+   * (the old per-label 'source-in' tint), cached. A tint that reads back blank
+   * is used this once but not cached (counted); if the sheet it came from now
+   * reads blank too, that sheet is dropped and rebuilt on the next use.
+   */
   private tinted(cache: Map<string, HTMLCanvasElement>, sheet: HTMLCanvasElement, color: string): HTMLCanvasElement {
     let t = cache.get(color);
     if (t) { cache.delete(color); cache.set(color, t); return t; }   // LRU touch
     t = document.createElement('canvas');
     t.width = sheet.width;
     t.height = sheet.height;
-    const ctx = t.getContext('2d')!;
-    ctx.drawImage(sheet, 0, 0);
-    ctx.globalCompositeOperation = 'source-in';
-    ctx.fillStyle = color;
-    ctx.fillRect(0, 0, t.width, t.height);
+    const ctx = t.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(sheet, 0, 0);
+      ctx.globalCompositeOperation = 'source-in';
+      ctx.fillStyle = color;
+      ctx.fillRect(0, 0, t.width, t.height);
+    }
+    const isBackground = sheet === this.backgroundCanvas;
+    const src = isBackground ? this.backgroundSource : this.foregroundSource;
+    if (!ctx || (src && !isTransparentColor(color) && !sheetHasInk(t, src.probe))) {
+      noteFontSheetBad();
+      if (src && !sheetHasInk(sheet, src.probe)) {
+        this.unhealthy = true;
+        if (isBackground) { this.backgroundCanvas = null; this.tintedBackgrounds.clear(); }
+        else { this.spritesheetCanvas = null; this.tintedSheets.clear(); }
+      }
+      return t;
+    }
+    this.watchContext(t);
     cache.set(color, t);
     if (cache.size > TINT_CACHE_MAX) cache.delete(cache.keys().next().value as string);
     return t;
   }
 
-  /** Whether the spritesheet is loaded and rendering is possible. */
-  get isReady(): boolean { return this.spritesheetCanvas !== null; }
+  /**
+   * Whether the spritesheet is loaded and rendering is possible. A sheet that
+   * came back blank or lost its context is rebuilt here (rate-limited), so a
+   * label painted after the heal draws with the font again.
+   */
+  get isReady(): boolean {
+    if (this.spritesheetCanvas !== null && (this.backgroundCanvas !== null || !this.backgroundSource)) return true;
+    if (!this.foregroundSource) return this.spritesheetCanvas !== null;
+    return this.rebuildMissing();
+  }
+
+  /** Font sheets this renderer still has to rebuild (a blank or lost sheet): probes and tests. */
+  get needsRebuild(): boolean { return this.unhealthy; }
 
   /**
    * CORE.17.k.b.a — the font's BACKGROUND surface (`Font::GetSubObjects @
@@ -145,14 +313,10 @@ export class ACFontRenderer {
    * pass tints with the outline colour.
    */
   initBackgroundSpritesheet(width: number, height: number, rgbaData: Uint8Array): void {
-    this.backgroundCanvas = document.createElement('canvas');
-    this.backgroundCanvas.width = width;
-    this.backgroundCanvas.height = height;
-    const ctx = this.backgroundCanvas.getContext('2d')!;
-    const imageData = ctx.createImageData(width, height);
-    imageData.data.set(rgbaData);
-    ctx.putImageData(imageData, 0, 0);
+    this.backgroundSource = { width, height, data: rgbaData, probe: firstInkedAlpha(rgbaData) };
     this.tintedBackgrounds.clear();
+    this.backgroundCanvas = this.buildSheet(this.backgroundSource);
+    this.settle();
   }
 
   /** Whether the background (halo) sheet is loaded — the outline pass uses it when it is. */
@@ -246,9 +410,12 @@ export class ACFontRenderer {
     outlineColor?: string,
   ): TextLayout {
     const layout = this.layoutText(text);
-    if (!this.spritesheetCanvas || layout.glyphs.length === 0) return layout;
+    // isReady rebuilds a sheet that came back blank (rate-limited) before giving up.
+    if (layout.glyphs.length === 0 || !this.isReady || !this.spritesheetCanvas) return layout;
 
     if (outlineColor) this.renderOutlineToCanvas(ctx, layout, x, y, outlineColor);
+    // The outline's tint can find the sheet itself blank and drop it.
+    if (!this.spritesheetCanvas) return layout;
 
     // A tinted run draws from the colour's pre-tinted sheet; an untinted one from the sheet itself.
     const sheet = color ? this.tinted(this.tintedSheets, this.spritesheetCanvas, color) : this.spritesheetCanvas;
@@ -285,9 +452,7 @@ export class ACFontRenderer {
       ctx.scale(scale, scale);
     }
 
-    if (this.spritesheetCanvas && layout.glyphs.length > 0) {
-      this.renderToCanvas(ctx, text, pad.x, pad.y, color, outlineColor);
-    }
+    if (layout.glyphs.length > 0) this.renderToCanvas(ctx, text, pad.x, pad.y, color, outlineColor);
 
     return canvas;
   }
@@ -427,7 +592,7 @@ export class ACFontRenderer {
       ctx.scale(scale, scale);
     }
 
-    if (this.spritesheetCanvas) {
+    if (this.isReady) {
       const spans = lineSourceSpans(text, lines);
       // Run boundaries in the concatenated text: runs[k] covers [ends[k-1], ends[k]).
       const ends: number[] = [];

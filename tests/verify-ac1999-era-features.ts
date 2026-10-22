@@ -25,8 +25,9 @@ import { GameActionType } from '../packages/network/src/GameActionType.js';
 import { decodeCapture } from '../tools/ac1999/decode-capture.js';
 import { ERA_PROFILES, eraProfile } from '../packages/renderer/src/era/EraProfiles.js';
 import {
-  unsupportedFeatures, hiddenBy, FEATURE_KEYBIND_ACTIONS, FEATURE_CHARACTER_OPTIONS, FEATURE_TOOLBAR_BUTTONS, FEATURE_PANELS, type EraFeature,
+  unsupportedFeatures, hiddenBy, FEATURE_KEYBIND_ACTIONS, FEATURE_CHARACTER_OPTIONS, FEATURE_TOOLBAR_BUTTONS, FEATURE_PANELS, FEATURE_EQUIP_SLOTS, type EraFeature,
 } from '../packages/renderer/src/era/EraFeatures.js';
+import { EquipMask } from '../packages/shared/src/game-types.js';
 import { KeybindRegistry } from '../packages/renderer/src/input/KeybindRegistry.js';
 import { ActionClass } from '../packages/renderer/src/input/KeybindActionClass.js';
 import { DEFAULT_KEYBINDS } from '../packages/renderer/src/input/KeybindDefaults.js';
@@ -43,9 +44,12 @@ describe('era capability set', () => {
   it('a 1999 world lacks every absent feature plus the end-of-retail wcid tables, and nothing client-side', () => {
     for (const f of Object.keys(ABSENT_1999)) expect(ERA_1999.has(f as EraFeature), f).toBe(true);
     expect(ERA_1999.has('eolWcidTables')).toBe(true);
-    // Every entry is an absent feature or one of the three justified in EraFeatures.ts.
+    // Every entry is an absent feature or one of those justified in EraFeatures.ts.
     const extra = [...ERA_1999].filter((f) => !(f in ABSENT_1999)).sort();
-    expect(extra).toEqual(['eolWcidTables', 'friendsPanel', 'netherDamage']);
+    expect(extra).toEqual(['cloaks', 'eolWcidTables', 'fishing', 'friendsPanel', 'netherDamage', 'rareGems', 'trinkets']);
+    // BUG.ac1999-char-info-eor-rows sweep: no cloak or trinket slot on the 1999 paperdoll.
+    expect([...hiddenBy(FEATURE_EQUIP_SLOTS, ERA_1999)].sort()).toEqual([EquipMask.TrinketOne, EquipMask.Cloak].sort());
+    expect(hiddenBy(FEATURE_EQUIP_SLOTS, ERA_EOR).size).toBe(0);
     // The World panel is client-side: its button, panel and keys stay on 1999.
     expect(hiddenBy(FEATURE_TOOLBAR_BUTTONS, ERA_1999).has('tb-map')).toBe(false);
     expect(hiddenBy(FEATURE_PANELS, ERA_1999).has('map')).toBe(false);
@@ -253,7 +257,8 @@ for (const [era, features] of [['ac1999-retail', ERA_1999], ['eor', ERA_EOR]] as
       const keys = optionKeys('character');
       const gone = ['ignoreTradeRequests', 'dragItemToPlayerOpensTrade', 'disableHouseRestrictionEffects', 'acceptCorpseLooting',
         'allowSeeChessRank', 'allowSeeNumberOfTitles', 'salvageMultipleMaterialsAtOnce', 'useCraftingChanceOfSuccessDialog',
-        'listenAllegiance', 'listenGeneral', 'listenTrade', 'listenLFG', 'listenRoleplay', 'listenSociety'];
+        'listenAllegiance', 'listenGeneral', 'listenTrade', 'listenLFG', 'listenRoleplay', 'listenSociety',
+        'showCloak', 'confirmUseOfRareGems', 'allowSeeFishingSkill'];
       for (const k of gone) expect(keys.has(k), k).toBe(!is1999);
       for (const k of ['runAsDefault', 'allowGive', 'ignoreFellowshipRequests', 'displayTimestamps']) expect(keys.has(k), k).toBe(true);
     });

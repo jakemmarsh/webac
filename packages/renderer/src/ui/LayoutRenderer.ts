@@ -16,7 +16,7 @@ import type {
   LayoutDescData, ElementDesc, StateDesc, MediaDesc, BaseProperty,
 } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import type { UITextureLoader } from './UITextureLoader.js';
-import type { ACFontRenderer } from './ACFontRenderer.js';
+import { ACFontRenderer } from './ACFontRenderer.js';
 import { OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { outlineColorFromProps, type OutlineDescLike } from './TextOutline.js';
 import { textColorFromProps, textStyleFromDesc, cssFromArgb, DEFAULT_TEXT_FONT_DID } from './DatTextStyle.js';
@@ -57,6 +57,14 @@ export type LayoutClickHandler = (elementId: number, element: HTMLElement) => vo
  * then falls back to the UI font the renderer was built with.
  */
 export type FontResolver = (fontDid: number) => ACFontRenderer | null;
+
+/** A label as last painted: its text, the caller's colour, and the desc + state it drew in. */
+interface LabelPaint {
+  text: string;
+  color?: string;
+  desc?: OutlineDescLike | null;
+  stateId?: number;
+}
 
 /**
  * CORE.17.k.b.b.b — the state a freshly rendered element rests in: its
@@ -368,8 +376,20 @@ export class LayoutRenderer {
   private fontRenderer: ACFontRenderer | null;
   /** CORE.17.k.b.b.c — Font::Get for the descs' p26 fonts (null: every label draws with `fontRenderer`). */
   private fontResolver: FontResolver | null = null;
-  /** CORE.17.k.b.b.b — the text + caller colour last rendered into an element (restyleLabel redraws it per state). */
-  private labelTexts = new WeakMap<HTMLElement, { text: string; color?: string }>();
+  /**
+   * CORE.17.k.b.b.b — the text + caller colour last rendered into an element
+   * (restyleLabel redraws it per state), with the desc and state it drew in
+   * (repaintAllLabels redraws it as it was).
+   */
+  private labelTexts = new WeakMap<HTMLElement, LabelPaint>();
+  /** BUG.hud-text-blank-font-sheet — every element a label was painted into (weakly held), for repaintAllLabels. */
+  private labelElements = new Set<WeakRef<HTMLElement>>();
+  private labelElementsPruneAt = 256;
+  /** Font renderers whose heal (ACFontRenderer.onHeal) repaints this renderer's labels. */
+  private healWatched = new WeakSet<ACFontRenderer>();
+  /** A label fell back while its font was rebuilding: the timer that retries the rebuild. */
+  private healRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private healRetryDelayMs = 0;
   private layoutCache = new Map<number, LayoutDescData>();
   private resolvedLayoutCache = new Map<number, LayoutDescData>();
   /**
@@ -408,6 +428,7 @@ export class LayoutRenderer {
     this.languageDb = languageDb;
     this.uiTextureLoader = uiTextureLoader;
     this.fontRenderer = fontRenderer ?? null;
+    this.watchHeal(this.fontRenderer);
   }
 
   private loadedStringTables = new Set<number>();
@@ -427,9 +448,56 @@ export class LayoutRenderer {
     return true;
   }
 
-  /** Set or update the font renderer (e.g. after async font loading). */
-  setFontRenderer(fontRenderer: ACFontRenderer): void {
+  /**
+   * Set or replace the UI font (0x40000000) renderer. GameUI hands over its
+   * own (loadUiFontAsset), so the HUD and chat share one instance and its
+   * streamed-miss reload; labels already painted are redrawn with it.
+   */
+  setFontRenderer(fontRenderer: ACFontRenderer | null): void {
     this.fontRenderer = fontRenderer;
+    this.watchHeal(fontRenderer);
+    this.repaintAllLabels();
+  }
+
+  /** The UI font renderer labels draw with (null before GameUI hands it over). */
+  get uiFontRenderer(): ACFontRenderer | null { return this.fontRenderer; }
+
+  /** Repaint every label when `renderer` heals (a blank or lost glyph sheet rebuilt). Once per renderer. */
+  private watchHeal(renderer: ACFontRenderer | null): void {
+    if (!renderer || this.healWatched.has(renderer) || typeof renderer.onHeal !== 'function') return;
+    this.healWatched.add(renderer);
+    renderer.onHeal(() => this.repaintAllLabels());
+  }
+
+  /**
+   * BUG.hud-text-blank-font-sheet — redraw every connected label from its stored
+   * text, colour, desc and state. Labels are otherwise painted only when their
+   * text or state changes, so a label that took the fallback while the font
+   * was missing or rebuilding kept it for the session. Returns the count.
+   */
+  repaintAllLabels(): number {
+    let n = 0;
+    for (const ref of [...this.labelElements]) {
+      const el = ref.deref();
+      if (!el) { this.labelElements.delete(ref); continue; }
+      const label = this.labelTexts.get(el);
+      // Destroyed panels are skipped (as replayMissedMedia does).
+      if (!label || !el.isConnected) continue;
+      this.paintText(el, label.text, label.color, label.desc, label.stateId);
+      n++;
+    }
+    return n;
+  }
+
+  /** A label fell back while `renderer` rebuilds a blank sheet: try the rebuild again soon (its heal repaints). */
+  private scheduleHealRetry(renderer: ACFontRenderer): void {
+    if (this.healRetryTimer !== null || typeof setTimeout !== 'function') return;
+    this.healRetryDelayMs = Math.min(30_000, Math.max(ACFontRenderer.rebuildIntervalMs + 50, this.healRetryDelayMs * 2));
+    this.healRetryTimer = setTimeout(() => {
+      this.healRetryTimer = null;
+      if (renderer.isReady && !renderer.needsRebuild) { this.healRetryDelayMs = 0; return; }
+      if (renderer.needsRebuild) this.scheduleHealRetry(renderer);
+    }, this.healRetryDelayMs);
   }
 
   /**
@@ -445,13 +513,14 @@ export class LayoutRenderer {
 
   /**
    * The renderer a label draws with: the UI font renderer for 0x40000000 (the
-   * one main.ts built, background sheet included), else the resolved p26 font
+   * one GameUI built and handed over, background sheet included), else the resolved p26 font
    * — falling back to the UI font when the DID does not load or no resolver
    * is installed (retail's `SetFontDID` on a null font keeps the old one).
    */
   private rendererForFont(fontDid: number): ACFontRenderer | null {
     if (fontDid === DEFAULT_TEXT_FONT_DID || !this.fontResolver) return this.fontRenderer;
     const resolved = this.fontResolver(fontDid);
+    this.watchHeal(resolved);
     return resolved?.isReady ? resolved : this.fontRenderer;
   }
 
@@ -1644,8 +1713,18 @@ export class LayoutRenderer {
     desc?: OutlineDescLike | null,
     stateId?: number,
   ): void {
-    this.labelTexts.set(el, { text, color });
+    if (!this.labelTexts.has(el)) this.trackLabelElement(el);
+    this.labelTexts.set(el, { text, color, desc, stateId });
     this.paintText(el, text, color, desc, stateId);
+  }
+
+  /** Remember `el` for repaintAllLabels; collected elements are pruned as the set grows. */
+  private trackLabelElement(el: HTMLElement): void {
+    if (typeof WeakRef !== 'function') return;
+    this.labelElements.add(new WeakRef(el));
+    if (this.labelElements.size < this.labelElementsPruneAt) return;
+    for (const ref of [...this.labelElements]) if (!ref.deref()) this.labelElements.delete(ref);
+    this.labelElementsPruneAt = Math.max(256, this.labelElements.size * 2);
   }
 
   /**
@@ -1667,6 +1746,8 @@ export class LayoutRenderer {
   ): void {
     // A font that read across a streamed miss (a p26 font, its glyph sheets)
     // drew with a fallback: repaint the label — its latest text — on arrival.
+    const label = this.labelTexts.get(el);
+    if (label) { label.desc = desc; label.stateId = stateId; }
     const missEpoch = datMissEpoch();
     try {
       this.paintTextNow(el, text, callerColor, desc, stateId);
@@ -1754,6 +1835,9 @@ export class LayoutRenderer {
       this.placeByCalcJustification(el, wrapper, canvas, outlineColor ? fontRenderer.outlinePadding : { x: 0, y: 0 },
         textLayoutPropsOf(desc?.properties as Map<number, BaseProperty> | undefined, stateProps));
     } else {
+      // A font whose glyph sheet came back blank rebuilds on a later use; make
+      // sure one comes, so its heal repaints this label (BUG.hud-text-blank-font-sheet).
+      if (fontRenderer?.needsRebuild) this.scheduleHealRetry(fontRenderer);
       const span = document.createElement('span');
       Object.assign(span.style, {
         color: color ?? 'inherit',

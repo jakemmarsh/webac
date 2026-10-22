@@ -8,7 +8,7 @@
 import { outdoorGroundY, floorSearchFromY, traceGroundAlongPath, interiorGroundY, objectLandingZ, unwalkableTerrainNormal, standsOnTerrain, type OutdoorGroundSources, type ObjectSurfaceSources } from './world/outdoorGround.js';
 import * as THREE from 'three';
 import { installCpuBacked2dCanvases } from './ui/CanvasBacking.js';
-import { installContextHealth } from './ui/ContextHealth.js';
+import { installContextHealth, uiCanvasHealth } from './ui/ContextHealth.js';
 import { freezeStaticTransform } from './utils/freezeStatic.js';
 import { pageStorage } from './utils/pageStorage.js';
 import { readResponseBytes } from './dat/readResponseBytes.js';
@@ -355,7 +355,7 @@ import { WorldHoverFind } from './controllers/WorldHoverFind.js';
 import { PendingCombatMode, playerInReadyPosition, getAttackTarget, incompatibleCombatModeRefusal, combatModeRefusalReason, READY_WEAPON_SLOTS, UnconfirmedCombatMode, combatModeOfStance, followModeRefusal, castOnceMagicTaken } from './controllers/CombatModeChange.js';
 import { tracksCombatTarget, isObjectAttackable } from './input/InteractionSystem.js';
 import { selectionQueryFor } from './ui/ToolbarSelection.js';
-import { PHYSICS_STATE_KEY } from './models/ObjectTranslucency.js';
+import { PHYSICS_STATE_KEY, fadedMaterialVariant } from './models/ObjectTranslucency.js';
 import { decideUseObject, usingItemEffects, USAGE_CONFIRMATION_TEXT, type UseSubject, COMPONENT_PACKS_DID_MAPPER_ID, isComponentPack, containedUseSubject, ownedUseSubject, type OwnedUseItem } from './input/UseObject.js';
 import { WorldRightClick } from './ui/WorldRightClick.js';
 import { formatAcTime } from './utils/formatAcTime.js';
@@ -421,7 +421,7 @@ import { createNetConnection } from './network/NetWorkerClient.js';
 import { ErrorReporter } from './telemetry/ErrorReporter.js';
 import { launcherConnectFailedReport, reportFromPage, worldListFailedReport } from './telemetry/WebReport.js';
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
-import { FramePhaseTimer, PHASE, ProgramCreationCounter, netHandlerCost, streamHandlerCost, connectionEventOp, timedAgentTick } from './telemetry/MainThreadCost.js';
+import { FramePhaseTimer, PHASE, ProgramCreationCounter, CompileTrace, netHandlerCost, streamHandlerCost, connectionEventOp, timedAgentTick } from './telemetry/MainThreadCost.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { PortalUseReporter, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
@@ -673,7 +673,9 @@ function initDatSplash(texMgr: TextureManager, portalDb?: DatFileSource) {
             const rgba = texMgr.getIconRGBA(font.backgroundSurfaceDataId);
             if (rgba) renderer.initBackgroundSpritesheet(rgba.width, rgba.height, rgba.data);
           }
-          if (renderer.isReady) fr = renderer;
+          // A sheet that read back blank is kept too: it rebuilds on a later
+          // label (renderPatchLabel's isReady), which takes the fallback meanwhile.
+          if (renderer.isReady || renderer.needsRebuild) fr = renderer;
         }
       } catch (e) {
         console.warn(`[AC] Splash font 0x${did.toString(16)} load failed, using sans-serif fallback:`, e);
@@ -1958,7 +1960,10 @@ async function main() {
 
   const cameraController = new CameraController(sceneManager.camera);
   /** PERF.slow-first-minute-diagnostics — WebGL programs three.js created (telemetry/MainThreadCost.ts). */
-  const programCreations = new ProgramCreationCounter();
+  // PERF.firefox-cover-compile-stall — which frame created (and so linked) which programs (__ac.compileTrace).
+  const compileTrace = new CompileTrace();
+  const programCreations = new ProgramCreationCounter((p, existing) => compileTrace.noteProgram(p, existing));
+  if (sceneManager.renderer) compileTrace.wrapRenderer(sceneManager.renderer);
   // RELEASE.first-minute — the GPU's class (integrated / discrete / software). PERF.slow-first-minute-diagnostics
   // (2026-10-20): the renderer string goes too (printable, 96 chars), to tell a slow first minute's hardware apart.
   {
@@ -2097,38 +2102,15 @@ async function main() {
   }
   setupModelRenderer.setDegradeLod(degradeLod);
 
-  // AC bitmap font for UI text rendering
-  let acFontRenderer: ACFontRenderer | null = null;
-  try {
-    const fontData = uiPortalDb.getFileData(0x40000000);
-    if (fontData) {
-      const font = ACFont.read(new DatReader(fontData));
-      acFontRenderer = new ACFontRenderer(font);
-      if (font.foregroundSurfaceDataId) {
-        const rgba = uiTextureManager.getIconRGBA(font.foregroundSurfaceDataId);
-        if (rgba) {
-          acFontRenderer.initSpritesheet(rgba.width, rgba.height, rgba.data);
-        }
-      }
-      // CORE.17.k.b.b — Font::GetSubObjects @ 004435e0 loads the background
-      // (halo) sheet next to the foreground; LayoutRenderer's p33 outline
-      // pass draws from it (0x06005ee6 for the UI font 0x40000000).
-      if (font.backgroundSurfaceDataId) {
-        const rgba = uiTextureManager.getIconRGBA(font.backgroundSurfaceDataId);
-        if (rgba) {
-          acFontRenderer.initBackgroundSpritesheet(rgba.width, rgba.height, rgba.data);
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('[AC] Failed to load AC font for LayoutRenderer:', e);
-  }
-
-  // LayoutRenderer (DAT-driven UI system)
+  // LayoutRenderer (DAT-driven UI system). Its UI font (0x40000000, foreground
+  // + background sheets) is GameUI's own renderer, handed over when GameUI
+  // loads it (loadUiFontAsset → setFontRenderer): one instance for the HUD and
+  // chat, rebuilt by GameUI's streamed-miss reload (BUG.hud-text-blank-font-sheet:
+  // a second copy built here was never retried and drew every HUD label blank).
   const uiTextureLoader = new UITextureLoader(uiTextureManager);
-  const layoutRenderer = langDb ? new LayoutRenderer(langDb, uiTextureLoader, acFontRenderer) : null;
+  const layoutRenderer = langDb ? new LayoutRenderer(langDb, uiTextureLoader) : null;
   if (layoutRenderer) {
-    console.log(`[AC] LayoutRenderer initialized with language DAT${acFontRenderer?.isReady ? ' + AC font' : ''}`);
+    console.log('[AC] LayoutRenderer initialized with language DAT');
   }
 
   // Expose layoutRenderer for future use (will be wired to HUD in Step 7+)
@@ -2327,6 +2309,8 @@ async function main() {
   // PERF.4 — GPU prewarm under the portal-space cover (scene/RendererWarmup);
   // assigned just below, once the streamer it watches exists.
   let rendererWarmup: RendererWarmup | null = null;
+  /** The faded copy of each server-object surface the warm compiled (one per base material). */
+  const fadedVariants = new WeakMap<THREE.Material, THREE.Material>();
   // VISUAL.dat-static-default-scripts — DAT statics (landblock objects, cell
   // stabs) run their Setup DefaultScript like every CPhysicsObj
   // (CPhysicsObj::InitDefaults @ 005139d0): torch flames, braziers, lamp
@@ -2417,7 +2401,23 @@ async function main() {
     rendererWarmup = new RendererWarmup(sceneManager.renderer, sceneManager.scene, sceneManager.camera, {
       isCovered: () => gameUI.portalSpaceCovering,
       contentVersion: () => landblockObjects.totalModelsPlaced + sceneManager.scene.children.length,
+      // PERF.firefox-cover-compile-stall — a server object's parts draw a faded
+      // copy of their surfaces whenever it fades (materialize, death, cloak):
+      // compiled under the cover too, once per surface.
+      variantFor: (object, material) => {
+        if (!(material instanceof THREE.MeshLambertMaterial || material instanceof THREE.MeshBasicMaterial)) return null;
+        let server = false;
+        for (let o: THREE.Object3D | null = object; o; o = o.parent) {
+          if (o.userData[PHYSICS_STATE_KEY] !== undefined) { server = true; break; }
+        }
+        if (!server) return null;
+        let v = fadedVariants.get(material);
+        if (!v) { v = fadedMaterialVariant(material, (object as THREE.Mesh).geometry); fadedVariants.set(material, v); }
+        return v;
+      },
     });
+    const warm = rendererWarmup;
+    compileTrace.warmedMaterial = m => warm.compiledMaterial(m);
   }
 
   // Skybox
@@ -6308,10 +6308,14 @@ async function main() {
   gameUI.setSpellResearch(eraRules.spellResearch);
   // REVERT.ac1999-forked-panels — the shared character panel words the selected stat the era's way.
   gameUI.setStatLineText(eraRules.statLineText);
+  // BUG.ac1999-char-info-eor-rows — the shared Character Information panel says what the era's client did.
+  gameUI.setCharacterInfoText(eraRules.characterInfoText);
   // BUG.ac1999-spell-tabs — the shared spell bar's tab count and the toolbar's quick slots are the
   // era's (1999: one bar with no tab strip, the nine-slot 1-9 tray).
   gameUI.setSpellBarTabCount(eraRules.spellBarTabs);
   gameUI.setItemShortcutSlotCount(eraRules.shortcutSlots);
+  // BUG.ac1999-spellbar-arrows (webac#6) — when the spell list's scroll arrows show (1999: one per end).
+  gameUI.setSpellBarArrowRule(eraRules.spellBarArrows);
   // BUG.vendor-buy-quantity — the era's buy-one-at-a-time ware mask (HandleSelectionChanged / 1999 UpdateSplitUI).
   gameUI.setVendorBuyOneMask(eraRules.vendorBuyOneMask);
 
@@ -7705,6 +7709,7 @@ async function main() {
       return stores.length ? stores.reduce((n, sd) => n + sd.store.stats.unresolvedMisses, 0) : null;
     },
     serverObjects: () => serverObjectManager?.getAllObjects().size ?? null,
+    uiCanvasHealth,
   });
   preworldChargenStep = () => chargenStepName(gameUI.chargenStep);
   const applyUpdatePolicy = (): void => {
@@ -19108,6 +19113,7 @@ async function main() {
   function frameStep(draw: boolean, frameTime?: number) {
     const workStart = performance.now();
     framePhases.begin(workStart);
+    compileTrace.frameBegin();
     const now = frameClock.next(frameTime, workStart);
     if (draw) updateNavLines(now);
     framePhases.mark(PHASE.nav);
@@ -20254,6 +20260,12 @@ async function main() {
     if ((!draw && !sceneManager.capturePending) || gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
     else { updateIndoorView(); sceneManager.render(); }
     framePhases.mark(PHASE.render);
+    compileTrace.frameEnd({
+      at: performance.now(), workMs: performance.now() - workStart,
+      warmupMs: framePhases.frameMs[PHASE.warmup], renderMs: framePhases.frameMs[PHASE.render],
+      covered: gameUI.portalSpaceCovering, worldHidden: gameUI.worldHiddenByPortalSpace,
+      tunnelState: gameUI.portalSpaceState, warm: rendererWarmup?.phaseName ?? 'none',
+    });
     // RELEASE.first-minute — counters only (WorldReporter.frame); the world counts as drawn once no portal space covers it.
     if (draw) worldReporter?.frame(now, gameStarted && !gameUI.portalSpaceCovering, performance.now() - workStart, framePhases.frameMs);
     // PERF.render-adapt — dynamic resolution measures only frames that drew the world in a visible tab.
@@ -20283,6 +20295,8 @@ async function main() {
     setGameFov: (deg: number) => sceneManager.setGameFov(deg),
     get gameFov() { return sceneManager.gameFov; },
     setViewDistanceRatio: (ratio: number | null) => sceneManager.setViewDistanceRatio(ratio),
+    // PERF.firefox-cover-compile-stall — no KHR_parallel_shader_compile: the tunnel's CONTINUE waits (≤ 5 s) for the sliced warm.
+    portalTunnelHold: () => rendererWarmup?.slicing ?? false,
     setDegradePrefs,
     setDetailTexturing,
     setTexturePrefs,
@@ -20292,6 +20306,7 @@ async function main() {
   // Expose for debugging
   exposeDebugGlobal('__ac', {
     get rendererWarmup() { return rendererWarmup; },
+    compileTrace,
     sweepUnusedResources,
     sceneManager, cameraController, cameraRig, terrainRenderer, terrainManager,
     textureManager, uiTextureManager, materialFactory, modelRenderer, setupModelRenderer,

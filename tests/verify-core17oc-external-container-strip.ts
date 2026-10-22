@@ -201,6 +201,11 @@ describe('CORE.17.o.c — GameUI renders the container on the 0x21000008 strip (
     return { guid, name, iconDid: 0, stackSize: 1, containerId, isContainer: false, ...extra };
   }
   function click(target: HTMLElement): void { target.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true })); }
+  /** An arrow press: UIElement_Button hot-click steps on the press (MouseDown @ 00471ff0); the release stops the repeat. */
+  function press(target: HTMLElement): void {
+    target.dispatchEvent(new domWindow.MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    domWindow.document.dispatchEvent(new domWindow.MouseEvent('mouseup', { bubbles: true, button: 0 }));
+  }
   function dblclick(target: HTMLElement): void { target.dispatchEvent(new domWindow.MouseEvent('dblclick', { bubbles: true })); }
 
   it('CORE.17.k.b.b.c.c.a.a.c.a — renders the transaction dock 0x2100006d:0x100005fb with only its container slot 0x1000005d (based on 0x21000008:0x10000063) instantiated', () => {
@@ -271,10 +276,10 @@ describe('CORE.17.o.c — GameUI renders the container on the 0x21000008 strip (
     expect(visible.get(0x10000066)).toBe(true);
     const strip = el(0x10000067).querySelector('[data-ac-container-packs]') as HTMLElement;
     expect(strip.style.left).toBe('0px');
-    click(el(0x10000071));
+    press(el(0x10000071));
     const after = el(0x10000067).querySelector('[data-ac-container-packs]') as HTMLElement;
     expect(after.style.left).toBe('-36px');
-    click(el(0x10000072));
+    press(el(0x10000072));
     expect((el(0x10000067).querySelector('[data-ac-container-packs]') as HTMLElement).style.left).toBe('0px');
   });
 

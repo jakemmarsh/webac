@@ -21,7 +21,18 @@ export type EraFeature =
    */
   | 'friendsPanel'
   /** Nether damage: the 1999 armor profile has seven resistances, no nether (Inventory1999 appraisal). */
-  | 'netherDamage';
+  | 'netherDamage'
+  /**
+   * Later item kinds and pastimes the 1999 client.exe has no trace of (BUG.ac1999-char-info-eor-rows
+   * sweep): cloaks and trinkets (their paperdoll slots and the Show Your Cloak option), rare gems
+   * (Confirm Use of Rare Gems) and fishing (Allow Others to See Your Fishing Skill). Its options
+   * page lists thirteen character options, none of these (strings @ file 0x210a44-0x210ba8), and
+   * its strings name no cloak, trinket or fishing at all.
+   */
+  | 'cloaks'
+  | 'trinkets'
+  | 'rareGems'
+  | 'fishing';
 
 const NONE: ReadonlySet<EraFeature> = new Set();
 /**
@@ -51,6 +62,10 @@ const AC1999_UNSUPPORTED: ReadonlySet<EraFeature> = new Set<EraFeature>([
   'eolWcidTables',
   'friendsPanel',
   'netherDamage',
+  'cloaks',
+  'trinkets',
+  'rareGems',
+  'fishing',
 ]);
 
 /** The features era `p` lacks (empty for end of retail and the classic eras). */
@@ -83,6 +98,15 @@ export const FEATURE_CHARACTER_OPTIONS: Readonly<Partial<Record<EraFeature, read
   characterTitles: ['DisplayNumberCharacterTitles'],
   salvage: ['SalvageMultiple', 'UseCraftSuccessDialog'],
   turbineChat: ['HearAllegianceChat', 'HearGeneralChat', 'HearTradeChat', 'HearLFGChat', 'HearRoleplayChat', 'HearSocietyChat'],
+  cloaks: ['ShowCloak'],
+  rareGems: ['ConfirmVolatileRareUse'],
+  fishing: ['DisplayFishingSkill'],
+};
+
+/** The paperdoll equip slots (EquipMask bits) each feature owns. */
+export const FEATURE_EQUIP_SLOTS: Readonly<Partial<Record<EraFeature, readonly number[]>>> = {
+  cloaks: [0x08000000], // EquipMask.Cloak
+  trinkets: [0x04000000], // EquipMask.TrinketOne
 };
 
 /** The Chat options channel filters (CHAT_CHANNELS suffixes) each feature owns. */
@@ -211,10 +235,31 @@ export interface EraClientRules {
    * past 8; its key commands are UseShortcut 1-9). The 1999 toolbar shows one row.
    */
   shortcutSlots: number;
+  /**
+   * What the Character Information panel says (BUG.ac1999-char-info-eor-rows, webac#8). End of
+   * retail's gmCharacterInfoUI::Update @ 0x4ba790 (born / played / deaths, resistance and
+   * regeneration tiers, innate attributes, chess / fishing, masteries, luminance, augmentations,
+   * burden; the classic eras run that exe with the same strings in their local DATs). The 1999
+   * client.exe has none of those strings: its only character text is the Burden panel
+   * (@ 0x59a9e0), so a 1999 world shows born / played / deaths (the 1999 server sends them)
+   * and the 1999 burden text (ui/CharacterInfoReport.ts burdenText1999) in the shared panel.
+   */
+  characterInfoText: 'eor' | 'ac1999';
+  /**
+   * When the spell bar's two scroll arrows show (BUG.ac1999-spellbar-arrows, webac#6). End of
+   * retail ('pair'): the arrows are one UIElement_Scrollbar (0x21000010:0x100000b5, template
+   * 0x21000008:0x10000070, p121 hide-disabled), shown whole while the list overflows and hidden
+   * whole when it fits (UIElement_Scrollbar::UpdateLayout @ 004710d0). The 1999 client.exe
+   * ('ends'): two separate buttons the spell menu owns (SpellCastSubPanel ctor @ 0x512390, menu
+   * +0x110 / +0x114), each set to hide while disabled (0x4513d0(1)); the menu's 0x5d3dc0 disables
+   * the left one at scroll 0 and the right one once the last cell is in view, so each shows only
+   * while there is more to see on its side.
+   */
+  spellBarArrows: 'pair' | 'ends';
 }
 
-const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18 });
-const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9 });
+const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const });
+const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const });
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {

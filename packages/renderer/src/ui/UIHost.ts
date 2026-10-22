@@ -43,6 +43,8 @@ export interface UIHost {
   /** SmartBox::SetOverrideFovDistance as a ratio g / v (null = the game's own
    *  projection): the world zoom of the teleport fades (PortalSpaceModel.ts). */
   setViewDistanceRatio?(ratio: number | null): void;
+  /** The world's GPU warm is still slicing its compiles: the tunnel's CONTINUE holds, up to retail's 5 s (TeleportAnimation.update). */
+  portalTunnelHold?(): boolean;
   /** Render.DegradeDistance / AdaptiveDegrade / bias (CORE.17.h.g.c.c). */
   setDegradePrefs?(prefs: Record<string, unknown>): boolean;
   /** Render.BuildingDetailTextures (CORE.17.h.g.c.b). */

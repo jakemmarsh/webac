@@ -13,7 +13,7 @@
  *  - IsFilteredOut @ 0048aeb0 hides a spell whose school bit OR level bit is
  *    clear (an unknown school or a level outside 1..9 is hidden too).
  */
-import { MagicSchool } from '@ac/shared';
+import { MagicSchool, spellLevelFromPower, MAX_SPELL_LEVEL } from '@ac/shared';
 
 /** ACE's default Character.SpellbookFilters (ShardDbContext: 16383). */
 export const SPELLBOOK_FILTERS_DEFAULT = 0x3fff;
@@ -40,6 +40,35 @@ export function isSpellbookFilteredOut(school: number, level: number, filters: n
   const s = spellbookSchoolBit(school);
   const l = spellbookLevelBit(level);
   return s === 0 || l === 0 || (filters & s) === 0 || (filters & l) === 0;
+}
+
+/**
+ * BUG.ac1999-spell-filters (webac#7) — the school and level filter buttons
+ * the era's own SpellTable (0x0E00000E) can match: the schools its spells
+ * belong to and levels 1 up to its highest spell level (spellLevelFromPower,
+ * the level the spellbook files each spell under). The 1999 table (1635
+ * spells, served through the 1999 portal overlay) has Creature, Item, Life
+ * and War only, levels I-VI (Void magic and levels VII / VIII came later).
+ * End of retail and every classic set carry all five schools and
+ * levels I-VIII, so nothing changes there. A button no spell of the era can
+ * match is not shown (No Dead-End UI); the filter bits themselves are kept.
+ * Without a table (not loaded yet) every button shows.
+ */
+export interface SpellbookFilterOptions { schools: ReadonlySet<number>; maxLevel: number }
+const ALL_FILTER_OPTIONS: SpellbookFilterOptions = Object.freeze({
+  schools: new Set<number>([MagicSchool.CreatureEnchantment, MagicSchool.ItemEnchantment, MagicSchool.LifeMagic, MagicSchool.WarMagic, MagicSchool.VoidMagic]),
+  maxLevel: MAX_SPELL_LEVEL,
+});
+export function spellbookFilterOptions(spells: Iterable<{ school: number; power: number }> | null | undefined): SpellbookFilterOptions {
+  if (!spells) return ALL_FILTER_OPTIONS;
+  const schools = new Set<number>();
+  let maxLevel = 0;
+  for (const s of spells) {
+    if (spellbookSchoolBit(s.school) !== 0) schools.add(s.school);
+    const level = spellLevelFromPower(s.power);
+    if (level > maxLevel) maxLevel = level;
+  }
+  return schools.size === 0 || maxLevel === 0 ? ALL_FILTER_OPTIONS : { schools, maxLevel };
 }
 
 /** gmSpellbookUI::UpdateFilter: the clicked button flips its own bit. */

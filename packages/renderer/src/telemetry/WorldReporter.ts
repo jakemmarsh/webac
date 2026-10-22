@@ -182,6 +182,13 @@ export interface FirstMinuteEvent {
   closeCode?: number | null;
   /** OBS.dm-stall-diagnostics — the connection's state when a silent / closed session ended. */
   net?: WorldNetDiagnostics;
+  /**
+   * BUG.hud-text-blank-font-sheet — page totals at the event: bitmap-font glyph sheets that read back
+   * blank (rebuilt; text took the fallback meanwhile) and 2D canvases that lost their context
+   * (ContextHealth, `__acHealth`). Nonzero means the HUD text may have drawn blank or as fallback.
+   */
+  fontSheetBad?: number | null;
+  canvas2dLost?: number | null;
 }
 
 export interface WorldLeftEvent {
@@ -259,6 +266,8 @@ export interface WorldReporterSources {
   sceneObjects?: () => number | null;
   /** Live server objects (ServerObjectManager), at the event. */
   serverObjects?: () => number | null;
+  /** The page's blank font sheets and lost 2D contexts so far (ContextHealth.uiCanvasHealth), at the event. */
+  uiCanvasHealth?: () => { fontSheetBad: number; canvas2dLost: number } | null;
 }
 
 /** A HandlerMeter as the reporter reads it (MainThreadCost). */
@@ -808,8 +817,15 @@ export class WorldReporter {
       ...this.device,
       gpuName: this.gpuName,
       ...this.costFields(),
+      ...this.uiCanvasFields(),
       ...detail,
     });
+  }
+
+  /** BUG.hud-text-blank-font-sheet — blank font sheets and lost 2D contexts (page totals). */
+  private uiCanvasFields(): Pick<FirstMinuteEvent, 'fontSheetBad' | 'canvas2dLost'> {
+    const h = safe(this.src.uiCanvasHealth, null);
+    return { fontSheetBad: count(h?.fontSheetBad, 1_000_000), canvas2dLost: count(h?.canvas2dLost, 1_000_000) };
   }
 
   /** PERF.slow-first-minute-diagnostics, second pass: where the minute's main thread went. */

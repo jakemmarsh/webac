@@ -87,6 +87,11 @@ function copyForMutation(m: THREE.Material, geometry?: THREE.BufferGeometry): TH
   return applyRetailLighting(m.clone(), retailLightingKindOf(m) ?? 'object');
 }
 
+/** CopyMaterial's copy, for a caller that needs one without a mesh (RendererWarmup's faded variants). */
+export function ownedCopyOf(m: THREE.Material, geometry?: THREE.BufferGeometry): THREE.Material {
+  return copyForMutation(m, geometry);
+}
+
 /** Meshes whose shared materials were swapped for private copies: what they drew before, and the copies installed. */
 const ownedCopies = new WeakMap<THREE.Mesh, { originals: THREE.Material | THREE.Material[]; copies: THREE.Material | THREE.Material[] }>();
 

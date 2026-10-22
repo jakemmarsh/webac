@@ -339,7 +339,7 @@ describe('the bridge keeps the new fields, bounded', () => {
   it('an older page that sends none of them gets none added', () => {
     const ev = realEvent() as unknown as Record<string, unknown>;
     const keys = ['phaseMs', 'netHandlerMs', 'streamHandlerMs', 'longestHandlerMs', 'longestHandlerOp', 'longTaskMaxMs',
-      'programs', 'programsCreated', 'geometries', 'textures', 'sceneObjects', 'compileMs', 'serverObjects'];
+      'programs', 'programsCreated', 'geometries', 'textures', 'sceneObjects', 'compileMs', 'serverObjects', 'fontSheetBad', 'canvas2dLost'];
     const older = { ...ev };
     for (const k of keys) delete older[k];
     const out = Object.keys(sanitizeClientWorld(older)!);

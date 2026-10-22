@@ -129,6 +129,9 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   sceneObjects?: number | null;
   compileMs?: number | null;
   serverObjects?: number | null;
+  /** BUG.hud-text-blank-font-sheet — page totals: blank bitmap-font sheets (rebuilt) and lost 2D canvas contexts. */
+  fontSheetBad?: number | null;
+  canvas2dLost?: number | null;
 }
 
 /** frameStep's phases (renderer telemetry/MainThreadCost.ts FRAME_PHASES): phaseMs keeps only these keys. */
@@ -195,6 +198,8 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
   set('sceneObjects', uint(b.sceneObjects, 10_000_000));
   set('compileMs', uint(b.compileMs, MINUTE_MS));
   set('serverObjects', uint(b.serverObjects, 1_000_000));
+  set('fontSheetBad', uint(b.fontSheetBad, 1_000_000));
+  set('canvas2dLost', uint(b.canvas2dLost, 1_000_000));
   return out;
 }
 

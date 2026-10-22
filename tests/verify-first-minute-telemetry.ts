@@ -33,6 +33,8 @@ const FIRST_MINUTE_KEYS = [
   // Its second pass (verify-first-minute-main-thread-cost.ts): where the main thread went; null when unmeasured.
   'phaseMs', 'netHandlerMs', 'streamHandlerMs', 'longestHandlerMs', 'longestHandlerOp', 'longTaskMaxMs',
   'programs', 'geometries', 'textures', 'programsCreated', 'compileMs', 'sceneObjects', 'serverObjects',
+  // BUG.hud-text-blank-font-sheet (verify-acfont-sheet-health.ts): blank font sheets + lost 2D contexts, null without a source.
+  'fontSheetBad', 'canvas2dLost',
 ].sort();
 const WORLD_LEFT_BASE_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
 // BUG.hidden-tab-session-drop: the page adds hiddenMs / freezes / frozenMs to every world_left (endCause / closeCode

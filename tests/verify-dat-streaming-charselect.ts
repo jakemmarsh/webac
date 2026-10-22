@@ -98,7 +98,9 @@ describe.skipIf(!HAVE_DATS)('character select over the streamed char-select set 
     // happy-dom has no 2D canvas: a no-op context so the UI's canvas paths run.
     const ctx2d: unknown = new Proxy({}, {
       get: (_t, k) => {
-        if (k === 'createImageData' || k === 'getImageData') return (w: number, h: number) => ({ width: w || 1, height: h || 1, data: new Uint8ClampedArray(Math.max(1, (w || 1) * (h || 1) * 4)) });
+        if (k === 'createImageData') return (w: number, h: number) => ({ width: w || 1, height: h || 1, data: new Uint8ClampedArray(Math.max(1, (w || 1) * (h || 1) * 4)) });
+        // Reads back as drawn (opaque): ACFontRenderer's sheet check (BUG.hud-text-blank-font-sheet) keeps the glyph sheets.
+        if (k === 'getImageData') return (_x: number, _y: number, w: number, h: number) => ({ width: w || 1, height: h || 1, data: new Uint8ClampedArray(Math.max(1, (w || 1) * (h || 1) * 4)).fill(255) });
         if (k === 'measureText') return () => ({ width: 0 });
         if (k === 'canvas') return null;
         return () => {};
@@ -142,23 +144,16 @@ describe.skipIf(!HAVE_DATS)('character select over the streamed char-select set 
 
     const { TextureManager } = await import('../packages/renderer/src/models/TextureManager.js');
     const { CursorManager } = await import('../packages/renderer/src/ui/CursorManager.js');
-    const { ACFont } = await import('../packages/dat-parser/src/file-types/ACFont.js');
-    const { ACFontRenderer } = await import('../packages/renderer/src/ui/ACFontRenderer.js');
     const { UITextureLoader } = await import('../packages/renderer/src/ui/UITextureLoader.js');
     const { LayoutRenderer } = await import('../packages/renderer/src/ui/LayoutRenderer.js');
     const { GameUI } = await import('../packages/renderer/src/ui/GameUI.js');
     const textureManager = new TextureManager(portalDb, 2048, 4096, null);
-    let acFont: InstanceType<typeof ACFontRenderer> | null = null;
     expect(missesOf(() => {
       new CursorManager(portalDb, textureManager).getCursorCSS('Default');
-      const font = ACFont.read(new DatReader(portalDb.getFileData(0x40000000)!));
-      acFont = new ACFontRenderer(font);
-      const fg = textureManager.getIconRGBA(font.foregroundSurfaceDataId);
-      if (fg) acFont.initSpritesheet(fg.width, fg.height, fg.data);
-      const bg = textureManager.getIconRGBA(font.backgroundSurfaceDataId);
-      if (bg) acFont.initBackgroundSpritesheet(bg.width, bg.height, bg.data);
     })).toEqual([]);
-    const layoutRenderer = new LayoutRenderer(localDb, new UITextureLoader(textureManager), acFont);
+    // BUG.hud-text-blank-font-sheet — main() builds no UI font of its own: GameUI's
+    // 0x40000000 renderer (loaded in its constructor, below) is handed to the LayoutRenderer.
+    const layoutRenderer = new LayoutRenderer(localDb, new UITextureLoader(textureManager));
     const container = win.document.createElement('div');
     win.document.body.appendChild(container);
 
@@ -170,6 +165,10 @@ describe.skipIf(!HAVE_DATS)('character select over the streamed char-select set 
       ui = new GameUI(container, {}, portalDb, textureManager, undefined, undefined, localDb, layoutRenderer, { worldArtReady: worldReady });
     })).toEqual([]);
     expect(ui.characterGenerator).not.toBeNull(); // 0x0E000002 from the skeleton pack
+    // The UI font's foreground + background sheets were resident: one renderer, ready, shared.
+    expect(ui.acFont?.isReady).toBe(true);
+    expect(ui.acFont?.hasBackgroundSpritesheet).toBe(true);
+    expect(layoutRenderer.uiFontRenderer).toBe(ui.acFont);
     expect(missesOf(() => { void ui.showLauncher({ bridgeUrl: 'ws://x', loadDirectory: () => new Promise(() => {}) }); })).toEqual([]);
     expect(missesOf(() => ui.showConnectingScreen())).toEqual([]);
     expect(missesOf(() => ui.showCharacterSelect([{ id: '1', name: 'Sim Tester' }, { id: '2', name: 'Second' }], 11))).toEqual([]);

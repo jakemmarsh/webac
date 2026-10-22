@@ -42,7 +42,7 @@ describe('sessionBudgetBreaches', () => {
 });
 
 describe('ContextHealth', () => {
-  const fresh = (): ContextHealth => ({ webglLost: 0, webglRestored: 0, canvas2dLost: 0, canvas2dRestored: 0, events: [] });
+  const fresh = (): ContextHealth => ({ webglLost: 0, webglRestored: 0, canvas2dLost: 0, canvas2dRestored: 0, fontSheetBad: 0, events: [] });
   it('counts WebGL and 2D losses/restores and describes the canvas', () => {
     const h = fresh();
     const canvas = { id: 'game', className: 'world main', width: 1600, height: 900, dataset: {} };
@@ -70,11 +70,13 @@ describe('ContextHealth', () => {
 });
 
 describe('harness fatalReason', () => {
-  const base = { crashed: false, webglLost: 0, canvas2dLost: 0, pageErrors: [], events: [] as Array<{ type: string; canvas: string }> };
+  const base = { crashed: false, webglLost: 0, canvas2dLost: 0, fontSheetBad: 0, pageErrors: [], events: [] as Array<{ type: string; canvas: string }> };
   it('a crash or any context loss is fatal; page errors alone are not', () => {
     expect(fatalReason(base)).toBeNull();
     expect(fatalReason({ ...base, pageErrors: ['TypeError: x'] })).toBeNull();
     expect(fatalReason({ ...base, crashed: true })).toBe('the page crashed');
+    // A blank font sheet is caught and rebuilt (BUG.hud-text-blank-font-sheet): reported, not fatal.
+    expect(fatalReason({ ...base, fontSheetBad: 3 })).toBeNull();
     expect(fatalReason({ ...base, canvas2dLost: 2, events: [{ type: 'contextlost', canvas: 'canvas 18x16' }] }))
       .toBe('graphics context lost (0 WebGL, 2 2D; last on canvas 18x16)');
   });
