@@ -43,6 +43,12 @@ export interface ChatCommandContext extends CoreCommandContext {
    * which persists the options and re-enables the talk foci).
    */
   setHearChat(room: HearChatRoom, on: boolean): void;
+  /**
+   * The era's client keeps @chat on the client (eraClientRules().chatToggle 'local', the 1999
+   * client.exe): set its local-speech flag (chat/LocalChatGate.ts) and return the line to print.
+   * Absent (end of retail): @chat asks the server.
+   */
+  setLocalChatSquelched?(squelched: boolean): string;
 }
 
 type Run = CommandRun<ChatCommandContext>;
@@ -70,8 +76,16 @@ function doChatToggle(run: Run, argv: string[]): boolean {
     run.reply('Please specify if you want chat text on or off.');
     return true;
   }
-  if (sameWord(argv[0], 'on')) return modifyGlobalSquelch(run, 0, 2);
-  if (sameWord(argv[0], 'off')) return modifyGlobalSquelch(run, 1, 2);
+  const on = sameWord(argv[0], 'on');
+  if (on || sameWord(argv[0], 'off')) {
+    // The 1999 client.exe: UI_SetLocalChatSquelched @ 0x4d0470, client-only, prints its own line.
+    const local = run.ctx.setLocalChatSquelched?.(!on);
+    if (local !== undefined) {
+      run.reply(local, CHAT_TYPE_DEFAULT);
+      return true;
+    }
+    return modifyGlobalSquelch(run, on ? 0 : 1, 2);
+  }
   run.reply('Please specify on or off.');
   return true;
 }

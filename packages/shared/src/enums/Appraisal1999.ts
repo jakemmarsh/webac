@@ -5,7 +5,7 @@
  * retail's property tables; these fields ride in those tables under keys past
  * every STypes range, so no end-of-retail reader mistakes them for a real
  * property. Only the 1999 item page (renderer ui/examine/ItemAppraisalText1999.ts)
- * reads them.
+ * and the character page's 1999 lines (ui/examine/CreatureAppraisalText.ts) read them.
  *
  * Offsets are the 1999 client's AppraisalProfile (UnPack @ 0x005e0fa0 in the
  * 1999 client.exe; reference/ac1999 kb structures/AppraisalProfile).
@@ -17,6 +17,16 @@ export const APPRAISAL_1999_STRING = {
   spellDescriptions: 0x7f000002,
   /** +0xa4, block 0x2000000: the text after "Enchantments:\n" (gate 0x005df970). */
   enchantments: 0x7f000003,
+} as const;
+
+export const APPRAISAL_1999_INT = {
+  /**
+   * +0x40, character block 0x2: the character's Loyalty (accessor 0x00463eb0). The 1999
+   * CharExaminePanel::SetAppraiseInfo @ 0x0050f760 prints it under "No Allegiance" (0x604160).
+   */
+  loyalty: 0x7f000001,
+  /** +0x44, character block 0x2: the character's Leadership (accessor 0x005a2670; "  Leadership: " 0x604150). */
+  leadership: 0x7f000002,
 } as const;
 
 export const APPRAISAL_1999_FLOAT = {

@@ -184,7 +184,7 @@ import { urlOverridesEnabled } from './config/urlOverrides.js';
 import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, type World } from './launcher/worldDirectory.js';
 import { eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
 import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
-import { eraClientRules, unsupportedFeatures, type EraFeature } from './era/EraFeatures.js';
+import { eraClientRules, unsupportedFeatures, hiddenBy, FEATURE_COMMANDS, type EraFeature } from './era/EraFeatures.js';
 import { Ac1999World, ac1999ServerKey, type Ac1999PatchEvent } from './era/Ac1999World.js';
 import { eraPortalOverlay, eraStreamPlan, eraUnavailableText, forgetImportedEraFiles, eraSwitchReloadUrl, planEraDats, resolveBootEra, stashEraSwitch, takeEraSwitch, type DatSource, type EraDatPlan, type EraStreamPlan, type EraSwitch } from './era/EraBoot.js';
 import { EnvCellRenderer } from './world/EnvCellRenderer.js';
@@ -406,6 +406,7 @@ import { SpellCharge1999, spellChargeText1999 } from './magic/SpellCharge1999.js
 import { TalkFocus } from './ui/ChatTalkFocus.js';
 import { MAIN_CHAT_WINDOW_ID } from './ui/FloatyChatModel.js';
 import { RetailCommandSystem } from './chat/commands/index.js';
+import { LocalChatGate } from './chat/LocalChatGate.js';
 import { recruitFellow, type FellowshipStep } from './ui/FellowshipPanelActions.js';
 import { FramerateMeter, framerateMeterTemplate } from './ui/FramerateMeter.js';
 import { string2command } from './chat/commands/RetailCommandStrings.js';
@@ -1559,6 +1560,8 @@ async function main() {
   const eraRules = eraClientRules(activeEra);
   // VISUAL.ac1999-spell-charge — the 1999 per-spell Charge the spell examine text prints.
   const spellCharge1999 = eraRules.appraisalText === 'ac1999' ? new SpellCharge1999() : null;
+  // BUG.ac1999-chat-toggle-local — a client whose @chat is its own switch (1999): the local-speech gate.
+  const localChatGate = eraRules.chatToggle === 'local' ? new LocalChatGate() : null;
   // BOOT.side-tables-off-critical-path — the three weenie side-files
   // (combat style for bow/crossbow → LeftHand per ACE Creature_Equipment.cs:84-95;
   // GAP.9 attack type for the swing animation; weapon time for
@@ -6304,20 +6307,12 @@ async function main() {
   // the era fixes the features this page load's world lacks; their controls
   // are never built. End of retail / classic eras: nothing hidden.
   gameUI.setUnsupportedFeatures(eraUnsupported);
-  // AC1999.spell-research-panel — the 1999 client.exe's "Create Spell" tab (eraClientRules).
-  gameUI.setSpellResearch(eraRules.spellResearch);
-  // REVERT.ac1999-forked-panels — the shared character panel words the selected stat the era's way.
-  gameUI.setStatLineText(eraRules.statLineText);
-  // BUG.ac1999-char-info-eor-rows — the shared Character Information panel says what the era's client did.
-  gameUI.setCharacterInfoText(eraRules.characterInfoText);
-  // BUG.ac1999-spell-tabs — the shared spell bar's tab count and the toolbar's quick slots are the
-  // era's (1999: one bar with no tab strip, the nine-slot 1-9 tray).
-  gameUI.setSpellBarTabCount(eraRules.spellBarTabs);
-  gameUI.setItemShortcutSlotCount(eraRules.shortcutSlots);
-  // BUG.ac1999-spellbar-arrows (webac#6) — when the spell list's scroll arrows show (1999: one per end).
-  gameUI.setSpellBarArrowRule(eraRules.spellBarArrows);
-  // BUG.vendor-buy-quantity — the era's buy-one-at-a-time ware mask (HandleSelectionChanged / 1999 UpdateSplitUI).
-  gameUI.setVendorBuyOneMask(eraRules.vendorBuyOneMask);
+  // The era's client profile (era/EraFeatures.ts eraClientRules), one lookup for every shared
+  // panel: the 1999 "Create Spell" tab, the stat line and Character Information wording, the spell
+  // bar's tabs / arrows and the quick slots (1999: one bar, the 1-9 tray), the vendor's buy-one mask,
+  // and the values (footer wording, paperdoll slots, combat bar, chat menu, options, examine and
+  // hover text) the panels read (BUG.ac1999-eor-ui-values).
+  gameUI.setClientRules(eraRules);
 
   // FAITHFUL.270 — restore the persisted logging-on state's HUD indicator.
   // (gameUI exists now; setIndicatorActive is a no-op until indicators are
@@ -9675,7 +9670,9 @@ async function main() {
         // Player_Magic.cs DoSpellWords). SWEEP1006 npc-say — no chat-type
         // branch: an NPC's Say emote (ACE EmoteManager.cs:1129, chat type
         // Emote) reads 'X says, "…"' too; the type only picks the colour.
-        gameUI.addSystemMessage(
+        // BUG.ac1999-chat-toggle-local — 1999 @chat off hides the line (UI_ShouldHearSpeaker @ 0x4d0360);
+        // the cast-completion handshake below still runs.
+        if (!localChatGate || localChatGate.hears(data.senderGuid)) gameUI.addSystemMessage(
           formatSpeechLine(senderName, data.message, data.senderGuid === aceCharGuid),
           color, data.chatType, 0, chatSpeech('say', senderName, data.message, data.senderGuid));
         // FAITHFUL.219 — when the server echoes our own HearSpeech, that's
@@ -9795,6 +9792,8 @@ async function main() {
         // sends), so mask against that bit rather than a blanket check.
         if (data.senderGuid !== aceCharGuid &&
             squelchedNames.blocksChannel(senderName.toLowerCase(), squelchMaskForChatType(ChatMessageType.Emote))) return;
+        // BUG.ac1999-chat-toggle-local — the 1999 HearEmote worker 0x4cd610 asks UI_ShouldHearSpeaker too.
+        if (localChatGate && !localChatGate.hears(data.senderGuid)) return;
         const color = chatColorFor(ChatMessageType.Emote);
         // SWEEP1006 emote joiner — Handle_Communication__HearEmote @ 0057cbe0
         // adds the space only when the text does not start with an apostrophe.
@@ -11500,6 +11499,7 @@ async function main() {
             publicWeenieBitfield: obj?.objectDescFlags ?? (isSelf ? serverObjectManager?.playerDescFlags : undefined),
             viewerFaction1Bits: playerState.faction1Bits,
             objectName: name,
+            eraText: eraRules.characterExamineText,
           }) ?? undefined;
         }
         const quiet = quietAppraisals.delete(data.guid >>> 0);
@@ -14257,7 +14257,10 @@ async function main() {
       },
       uiLocked: () => !!gameUI.optionsSettings.lockUI,
       setLockUI: (locked) => applyCharacterOptionLocally(0x33, locked),
-    });
+      // BUG.ac1999-chat-toggle-local — @chat on the client where the era's client kept it there.
+      ...(localChatGate ? { setLocalChatSquelched: (squelched: boolean) => localChatGate.set(squelched) } : {}),
+    // The commands this era lacks the feature for are not offered (era/EraFeatures FEATURE_COMMANDS).
+    }, hiddenBy(FEATURE_COMMANDS, eraUnsupported));
 
     // gmFellowshipUI buttons (ui/FellowshipPanelActions.ts) and gmFriendsUI Remove: direct sends.
     const runFellowshipSteps = (steps: FellowshipStep[]): void => {

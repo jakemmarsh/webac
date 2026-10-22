@@ -33,8 +33,9 @@ export function retailCommandEntries(): CommandEntry<RetailCommandContext>[] {
 export class RetailCommandSystem extends CommandSystem<RetailCommandContext> {
   private turbineStarted = false;
 
-  constructor(ctx: RetailCommandContext) {
-    super(ctx, retailCommandEntries());
+  /** `withheld`: the commands this world's era lacks (era/EraFeatures FEATURE_COMMANDS via hiddenBy). */
+  constructor(ctx: RetailCommandContext, withheld: Iterable<string> = []) {
+    super(ctx, retailCommandEntries(), withheld);
   }
 
   /**

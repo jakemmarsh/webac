@@ -144,16 +144,17 @@ import {
 import type { LayoutDescData, ElementDesc } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { CreditsScreen, creditsUseAltVariant, type CreditsScreenKit } from './CreditsScreen.js';
 import {
-  TooltipHover, buildDatTooltip, tooltipSpecFromProps, tooltipWrapWidth, tooltipBoxSize, tooltipPosition,
+  TooltipHover, hudMutationsMayMoveMouseOver, buildDatTooltip, tooltipSpecFromProps, tooltipWrapWidth, tooltipBoxSize, tooltipPosition,
   TOOLTIP_FONT, TOOLTIP_TEXT_COLOR_ARGB, TOOLTIP_STRING_TABLE,
   DEFAULT_TOOLTIP_DELAY_SECONDS, DEFAULT_TOOLTIP_DURATION_SECONDS,
 } from './DatTooltip.js';
 import {
-  HUD_TOOLTIP_ROOT, PAPERDOLL_DRAG_BAND_TOOLTIP_STRING, tooltipRootGeometry, itemTooltipText, paperdollSlotTooltip, spellShortcutTooltip,
+  HUD_TOOLTIP_ROOT, PAPERDOLL_DRAG_BAND_TOOLTIP_STRING, tooltipRootGeometry, itemTooltipText, itemHoverText, paperdollSlotTooltip, spellShortcutTooltip,
   PAPERDOLL_GEM_TOOLTIP_ROOT, PAPERDOLL_SLOTS_GEM_TOOLTIP_STRING, MAP_NOTE_TOOLTIP_ROOT, MAP_NOTE_LOCATIONS, MAP_NOTE_TOOLTIP_DELAY_SECONDS, MAP_HOUSE_ICON_TOOLTIP_STRING,
   attributeRowTooltip, vitalRowTooltip, skillRowTooltip, castButtonTooltip, type CastButtonTooltipState,
   SPELLBAR_CAST_BUTTON, SPELLBAR_SPELL_NAME_TEXT, SPELLBAR_ENDOWMENT_ICON,
 } from './HudTooltips.js';
+import { collapseHiddenElements } from './CollapseHidden.js';
 import {
   MAP_MARKER_AREA, mapClickTeleportCell, MAP_HOUSE_ICON_MEDIA, MAP_HOUSE_ICON_SIZE, MAP_PLAYER_ICON_MEDIA, MAP_PLAYER_ICON_SIZE,
   houseMarkerPosition, houseIconPlacement, playerMarkerUpdate, radarCoordinateReadout, journalLocationText,
@@ -229,12 +230,23 @@ import { runtimeDDDStatusFill, runtimeDDDStatusText } from './RuntimeDDDStatusTe
 import { fellowshipOpennessButtonLabel } from './FellowshipOpenness.js';
 import { FPS_ELEMENT_ID } from './FramerateMeter.js';
 
+/**
+ * The nine body-region armour slots of the paperdoll's "Slots" view
+ * (gmPaperDollUI 0x100005ab-0x100005b3). An era whose client has none of them
+ * (the 1999 client.exe, EraClientRules.equipSlotMask) has no Slots gem.
+ */
+const PAPERDOLL_BODY_SLOT_MASK = EquipMask.HeadWear | EquipMask.ChestArmor | EquipMask.AbdomenArmor
+  | EquipMask.UpperArmArmor | EquipMask.LowerArmArmor | EquipMask.HandWear | EquipMask.UpperLegArmor
+  | EquipMask.LowerLegArmor | EquipMask.FootWear;
+
 /** gmVendorUI::HandleButtonClicks @ 004c50d0 — the close box's confirmation literal. */
 export const VENDOR_LEAVE_CONFIRM_TEXT = 'You have not completed all transactions. Are you sure you want to leave this vendor?';
 import { assignLeadership, quitFellowship, toggleOpenness, dismissFellow, disbandFellowship, type FellowshipStep } from './FellowshipPanelActions.js';
 import {
   hiddenBy, FEATURE_PANELS, FEATURE_TOOLBAR_BUTTONS, FEATURE_CHARACTER_OPTIONS, FEATURE_CHAT_FILTERS,
-  FEATURE_TALK_FOCUSES, FEATURE_KEYBIND_ACTIONS, FEATURE_SOCIAL_TABS, FEATURE_EQUIP_SLOTS, clientRuleHiddenActions, type EraFeature,
+  FEATURE_TALK_FOCUSES, FEATURE_KEYBIND_ACTIONS, FEATURE_SOCIAL_TABS, clientRuleHiddenActions, type EraFeature,
+  FEATURE_WORLD_TABS, FEATURE_INDICATORS, FEATURE_COMPONENT_CONTROLS, FEATURE_FELLOWSHIP_CONTROLS,
+  eraClientRules, resolveClientText, EOR_TRAIN_SKILL_CONFIRM, type EraClientRules, type ClientText,
 } from '../era/EraFeatures.js';
 import { ACFontRenderer, OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { placeScrollbarButtons, bindHotClick, hotClickTiming, buttonVisualState } from './ScrollbarButtons.js';
@@ -317,6 +329,14 @@ export const CHARGEN_SKILL_ROW_HEIGHT = 26;
  * p20 3 (far / right) + p21 1 (centre); only their 0xd (ghosted) state
  * carries 0xff4c4c4c, and retail never enters it.
  */
+/**
+ * BUG.era-hidden-row-gaps — the fellowship create pane's column (layout 0x21000030 pane
+ * 0x1000026b): the intro text, divider, name row, the four option rows (225 / 239 / 253 / 267,
+ * 14 px pitch) and Create Fellowship (298). An era-hidden row closes up within it.
+ */
+export const FELLOWSHIP_CREATE_COLUMN: readonly number[] = [
+  0x1000026c, 0x1000026d, 0x1000026e, 0x1000026f, 0x10000270, 0x10000271, 0x10000272, 0x10000273, 0x10000274,
+];
 const BURDEN_LABEL_REF = descRef(0x21000023, 0x100001d7);
 /** 0x21000007:0x10000052 states gmCombatUI::RecvNotice_SetCombatMode enters (melee / missile). */
 const COMBAT_LABEL_STATE_MELEE = 0x10000003;
@@ -944,8 +964,17 @@ export function aetheriaSigilVisible(mask: EquipMask, aetheriaBitfield: number):
  * 004cc620): a Recklessness (skill 0x32) record hides it below Trained
  * (SAC < 2). With no record, InqSkillAdvancementClass leaves the compared
  * slot unwritten, and the EoR client shows the band (retail-combat-melee.png).
+ *
+ * `worldHasRecklessness`: whether this world's SkillTable (0x0E000004) has the
+ * skill at all. Recklessness came after Dark Majesty: the end-of-retail table
+ * has it; the 1999 table (35 skills; its PowerBar @ 0x59c470 draws no band
+ * either) and every classic table do not (BUG.ac1999-eor-ui sweep), and a band
+ * for a skill no one can train is a dead end. The data decides, so the classic
+ * eras lose the band too (Jake, 2026-10-22). Unknown (no table yet) keeps
+ * retail's reading.
  */
-export function recklessnessBandVisible(skills: ReadonlyArray<{ id: number; sac?: number }>): boolean {
+export function recklessnessBandVisible(skills: ReadonlyArray<{ id: number; sac?: number }>, worldHasRecklessness = true): boolean {
+  if (!worldHasRecklessness) return false;
   const sac = skills.find(sk => sk.id === 50 /* Skill.Recklessness */)?.sac;
   return sac === undefined || sac >= 2;
 }
@@ -2086,6 +2115,19 @@ export class GameUI {
   private hudTooltipEl: HTMLDivElement | null = null;
   /** Timer::local_time for the HUD machine, in seconds (tests script it). */
   hudTooltipNow: () => number = () => performance.now() / 1000;
+  /**
+   * BUG.stale-hover-tooltip — MouseHitTester<MouseOverCriteria>::Recurse at a
+   * client point: the topmost element there (document.elementFromPoint; tests
+   * script it, the DOM shim has no layout).
+   */
+  hudHitTest: (clientX: number, clientY: number) => Element | null = (x, y) =>
+    (typeof document.elementFromPoint === 'function' ? document.elementFromPoint(x, y) : null);
+  /** The last HUD mouse position (client px), for the re-hit-test after the tree changes under a still mouse. */
+  private hudMouse: { x: number; y: number } | null = null;
+  /** Watches the element tree while the mouse is in the window (UIElement::OnVisibilityChanged → m_bPerformMouseHitTest). */
+  private hudMouseOverObserver: MutationObserver | null = null;
+  private hudMouseOverWatching = false;
+  private hudMouseOverPending: ReturnType<typeof setTimeout> | null = null;
   // CORE.17.k.b.b.a.d — the chargen pages' DAT tooltips (UIElementManager's
   // hover machine over the elements carrying data-ac-tooltip).
   private chargenTooltipHover: TooltipHover<HTMLElement> | null = null;
@@ -2332,6 +2374,43 @@ export class GameUI {
   }
 
   /**
+   * BUG.ac1999-eor-ui-values — the era's client profile (era/EraFeatures.ts
+   * eraClientRules): the values the shared panels read where an era's client
+   * differs only in a value (footer wording, the paperdoll's slots, the combat
+   * bar's checkboxes, the chat menu's words, option rows, examine and hover
+   * text). End of retail's profile until the era sets it.
+   */
+  private clientRules: EraClientRules = eraClientRules(null);
+  /** This world's client profile. */
+  get clientProfile(): EraClientRules { return this.clientRules; }
+  /**
+   * Set once per page load from the era: stores the profile and hands each
+   * rule-driven setter its value (spell research, the stat line, Character
+   * Information, the spell bar's tabs /
+   * arrows, the quick slots, the vendor's buy-one mask). chatToggle is read in
+   * main.ts (LocalChatGate).
+   */
+  setClientRules(rules: EraClientRules): void {
+    this.clientRules = rules;
+    if (this.inventorySlotsView && !this.paperdollHasBodySlots()) this.inventorySlotsView = false;
+    this.setSpellResearch(rules.spellResearch);
+    this.setStatLineText(rules.statLineText);
+    this.setCharacterInfoText(rules.characterInfoText);
+    this.setSpellBarTabCount(rules.spellBarTabs);
+    this.setItemShortcutSlotCount(rules.shortcutSlots);
+    this.setSpellBarArrowRule(rules.spellBarArrows);
+    this.setVendorBuyOneMask(rules.vendorBuyOneMask);
+  }
+  /** A profile string through the loaded string tables. */
+  private clientText(t: ClientText): string {
+    return resolveClientText(t, (id) => getString(id));
+  }
+  /** Whether the era's paperdoll has the body-region armour slots (and so the "Slots" view). */
+  paperdollHasBodySlots(): boolean {
+    return (this.clientRules.equipSlotMask & PAPERDOLL_BODY_SLOT_MASK) !== 0;
+  }
+
+  /**
    * BUG.ac1999-spell-tabs (webac#5) — the era's spell-bar tab count, set
    * once per page load from the era profile. Tabs past it are emptied
    * locally (a stored or restored list there is hidden, nothing is sent)
@@ -2457,8 +2536,9 @@ export class GameUI {
   private fellowshipData: {
     fellowshipName: string;
     leaderGuid: number;
-    shareXP: boolean;
-    evenShare: boolean;
+    /** Undefined when the roster does not carry them (the 1999 Fellowship; FELLOW_FIELD_NOT_CARRIED). */
+    shareXP?: boolean;
+    evenShare?: boolean;
     open: boolean;
     isLocked: boolean;
     // CORE.5.c.d.b — own guid, so the native pane can gate the leader-only
@@ -2467,7 +2547,7 @@ export class GameUI {
     selfGuid?: number;
     /** FellowshipData.tableSize — the fellows hash table's bucket count. */
     tableSize?: number;
-    fellows: Array<{ guid: number; name: string; level: number; healthCurrent: number; healthMax: number; staminaCurrent: number; staminaMax: number; manaCurrent: number; manaMax: number; shareLoot: boolean }>;
+    fellows: Array<{ guid: number; name: string; level: number; healthCurrent?: number; healthMax?: number; staminaCurrent?: number; staminaMax?: number; manaCurrent?: number; manaMax?: number; shareLoot: boolean }>;
   } | null = null;
   // CORE.5.c.d.b — selected member row in the fellowship list (retail
   // m_iidSelectedFellow; gates the Leader/Dismiss buttons).
@@ -10608,7 +10688,7 @@ export class GameUI {
     const spec = POWER_BAR_STATES[mode];
     this.powerBarHandle.setState(POWERBAR_ELEMENTS.fill, spec.state);
     this.powerBarHandle.setVisible(POWERBAR_ELEMENTS.recklessness,
-      mode === 'melee' && recklessnessBandVisible(this.charInfo.skills));
+      mode === 'melee' && recklessnessBandVisible(this.charInfo.skills, this.skillTable?.skills.has(50) ?? true));
     this.tilePowerBarArt();
     const caption = spec.captionStringId !== null
       ? (getString(spec.captionStringId) ?? spec.captionFallback)
@@ -11018,10 +11098,13 @@ export class GameUI {
       this.indicatorsHandle = this.layoutRenderer.render(0x21000071, container);
     }
     const stripLayout = this.layoutRenderer?.getResolvedLayout?.(0x21000071) ?? null;
+    // BUG.ac1999-eor-ui — an era without the indicator's feature has no icon there (FEATURE_INDICATORS).
+    const eraHiddenIndicators = hiddenBy(FEATURE_INDICATORS, this.eraUnsupported);
     for (const ind of indicatorDefs) {
       const icon = this.indicatorsHandle?.elements.get(ind.elementId);
       if (!icon) continue;
       icon.id = `hud-indicator-${ind.id}`;
+      if (eraHiddenIndicators.has(ind.id)) { icon.style.display = 'none'; continue; }
       // Retail authors no tooltip on any indicator (no tooltip attribute in
       // 0x21000071, UIElement::MouseHover @ 00462520 shows none).
       icon.removeAttribute('title');
@@ -11033,6 +11116,21 @@ export class GameUI {
       this.indicatorTexById.set(ind.id, { texActive: ind.texActive, texInactive: ind.texInactive, width: 20 });
       this.indicatorActive.set(ind.id, false);
     }
+    // BUG.era-hidden-row-gaps — an era-hidden icon leaves no 20 px hole: the
+    // icons, the logout X and the right border past it move left by its
+    // width, the top / bottom borders shrink by it, and so does the strip.
+    let stripW = 150;
+    const stripRoot = this.indicatorsHandle?.elements.get(0x10000610);
+    if (stripRoot) {
+      const strip = new Map<number, HTMLElement>([[0x10000610, stripRoot]]);
+      for (const child of Array.from(stripRoot.children)) {
+        const id = parseInt((child as HTMLElement).dataset?.elementId ?? '', 16);
+        if (Number.isFinite(id)) strip.set(id, child as HTMLElement);
+      }
+      const hiddenIcons = new Set(indicatorDefs.filter((d) => eraHiddenIndicators.has(d.id)).map((d) => d.elementId));
+      stripW -= collapseHiddenElements(strip, hiddenIcons, 'x', { shrinkSpanning: true });
+    }
+    if (stripW !== 150) container.style.width = `${stripW}px`;
     // A rebuilt strip starts on the dark defaults — repaint the burden
     // state from the current load.
     this.burdenIndicatorState = -1;
@@ -11062,7 +11160,7 @@ export class GameUI {
         container,
         windowId: INDICATORS_WINDOW_ID,
         rootElId: 0x10000610,
-        defaultW: 150,
+        defaultW: stripW,
         defaultH: 30,
       });
     }
@@ -11469,7 +11567,7 @@ export class GameUI {
         // The Chat button (0x10000014, a UIElement_Menu): opens the talk-focus
         // menu (gmMainChatUI::InitTalkFocusMenu @ 004cdc50).
         this.chatHandle.setInteractive(0x10000014, () => this.toggleTalkFocusMenu());
-        this.chatHandle.setText(0x10000015, getString(this.talkFocus.buttonLabel().stringId) ?? this.talkFocus.buttonLabel().text);
+        this.chatHandle.setText(0x10000015, this.talkFocusButtonText());
 
         // VISUAL3.2 / CORE.17.h — paint the DAT backing art at its own alpha
         // (the message tile 0x06004cc2 is black at alpha 175/255, the input
@@ -15583,8 +15681,12 @@ export class GameUI {
         // empty, through UIElementManager's machine (no native title box).
         slotEl.dataset.equipSlot = slotDef.label;
         // GetObjectNameWide(NAME_APPROPRIATE): a worn stack of arrows reads plural.
-        this.tagHudTooltip(slotEl, paperdollSlotTooltip(slotDef.mask,
-          equipped ? getAppropriateName(equipped.name, equipped.pluralName, equipped.stackSize) : null));
+        // BUG.ac1999-eor-ui-values — a 1999 world's worn item reads the 1999 help-bar text
+        // ("Name (worn)" + its hint, EraClientRules.itemHoverText).
+        const eraHover = this.clientRules.itemHoverText;
+        this.tagHudTooltip(slotEl, equipped && eraHover
+          ? itemHoverText({ ...equipped, validLocations: equipped.validLocations ?? equipped.slot }, 'worn', eraHover)
+          : paperdollSlotTooltip(slotDef.mask, equipped ? getAppropriateName(equipped.name, equipped.pluralName, equipped.stackSize) : null));
 
         if (equipped) {
           // CORE.18.c.a — the slot is a UIItem: IconData::RenderIcons' composite.
@@ -15683,8 +15785,12 @@ export class GameUI {
         paperdollEl.appendChild(slotEl);
       };
 
-      if (this.inventorySlotsView) {
-        bodySlots.forEach(makeEquipSlot);
+      // BUG.ac1999-eor-ui-values — the era's slots (EraClientRules.equipSlotMask): the 1999
+      // InventoryPanel has no body-region view, so it always shows the portrait.
+      const eraSlots = this.clientRules.equipSlotMask;
+      const showBodySlots = this.inventorySlotsView && this.paperdollHasBodySlots();
+      if (showBodySlots) {
+        bodySlots.filter(sd => (sd.mask & eraSlots) !== 0).forEach(makeEquipSlot);
       } else {
         // Portrait view: live 3D figure (element 0x100001d5, type-13 viewport)
         this.renderPaperdollToElement(paperdollEl, 224, 214);
@@ -15782,10 +15888,9 @@ export class GameUI {
       }
       // CORE.18.e — the three aetheria sigil slots only once unlocked
       // (gmPaperDollUI::UpdateAetheria @ 004a3e50).
-      // BUG.ac1999-char-info-eor-rows sweep — and no slot for an item kind the era lacks
-      // (1999: no cloaks, no trinkets; FEATURE_EQUIP_SLOTS).
-      const eraHiddenSlots = hiddenBy(FEATURE_EQUIP_SLOTS, this.eraUnsupported);
-      flankSlots.filter(sd => aetheriaSigilVisible(sd.mask, this.aetheriaBitfield) && !eraHiddenSlots.has(sd.mask)).forEach(makeEquipSlot);
+      // BUG.ac1999-eor-ui-values — and only the slots the era's client builds
+      // (1999: InventoryPanel @ 0x522fc0's eight; no shirt / pants, cloak or trinket).
+      flankSlots.filter(sd => aetheriaSigilVisible(sd.mask, this.aetheriaBitfield) && (sd.mask & eraSlots) !== 0).forEach(makeEquipSlot);
 
       // CORE.1 — the burden readout no longer lives on the paperdoll: the
       // retail backpack strip (layout 0x21000022, gmBackpackUI) carries a
@@ -15804,47 +15909,8 @@ export class GameUI {
       // and ListenToElementMessage shows the nine armor slots when it is
       // selected. The old 17x17 green orb 0x0600191a at 0.7 opacity when off
       // was an invention; retail's portrait view shows the dim state-1 gem.
-      const slotsToggle = document.createElement('div');
-      slotsToggle.dataset.elementId = '0x100005be';
-      Object.assign(slotsToggle.style, {
-        position: 'absolute', left: '42px', top: '190px', width: '120px', height: '14px',
-        cursor: 'pointer', pointerEvents: 'auto', zIndex: '3',
-      });
-      // CORE.17.k.b.b.a.g.a — the gem's p73 help string through the tooltip
-      // machine as its own root 0x10000397 (p71), not a native title box.
-      this.tagHudTooltip(slotsToggle,
-        getString(PAPERDOLL_SLOTS_GEM_TOOLTIP_STRING) ?? 'When this option is chosen, you will see explicit equipment slots instead of a portrait.',
-        PAPERDOLL_GEM_TOOLTIP_ROOT);
-      const slotsSelected = this.inventorySlotsView;
-      const gem = document.createElement('div');
-      gem.dataset.elementId = '0x10000328';
-      Object.assign(gem.style, {
-        position: 'absolute', left: '0', top: '1px', width: '13px', height: '13px',
-        backgroundSize: '100% 100%', backgroundRepeat: 'no-repeat',
-        imageRendering: 'pixelated',
-      });
-      const paintGem = (hover: boolean): void => {
-        const url = this.getTexURL(slotsCheckboxGemTexture(slotsSelected, hover));
-        gem.style.backgroundImage = url ? `url(${url})` : 'none';
-      };
-      paintGem(false);
-      slotsToggle.addEventListener('mouseenter', () => paintGem(true));
-      slotsToggle.addEventListener('mouseleave', () => paintGem(false));
-      slotsToggle.appendChild(gem);
-      // The template label is white whatever the gem state (the same
-      // template's spellbook radio rows, CORE.17.k.b.b.c.a).
-      const slotsLabel = document.createElement('div');
-      Object.assign(slotsLabel.style, {
-        position: 'absolute', left: '16px', top: '0', height: '14px',
-        display: 'flex', alignItems: 'center', pointerEvents: 'none',
-      });
-      slotsLabel.appendChild(this.renderACText(getString(226400956) ?? 'Slots', AC_COLORS.white));
-      slotsToggle.appendChild(slotsLabel);
-      slotsToggle.addEventListener('click', () => {
-        this.inventorySlotsView = !this.inventorySlotsView;
-        this.renderInventoryPanel();
-      });
-      paperdollEl.appendChild(slotsToggle);
+      // No body-region slots in the era (1999): no gem to switch to them.
+      if (this.paperdollHasBodySlots()) this.buildPaperdollSlotsGem(paperdollEl);
     }
 
     // ── Right strip: element 0x100001ce at (239,23) 61x339 ──
@@ -16385,7 +16451,8 @@ export class GameUI {
           // otherwise — nothing else (no value / burden / stack / effect
           // lines) — shown by UIElementManager's machine (tagHudTooltip).
           cell.dataset.invSlot = `${idx}`;
-          this.tagHudTooltip(cell, itemTooltipText(item.name, item.pluralName, item.stackSize));
+          // BUG.ac1999-eor-ui-values — the era's hover text (1999: the help bar's name line + hint).
+          this.tagHudTooltip(cell, itemHoverText({ ...item, selling: this.sellStateGuids().has(item.id) }, 'pack', this.clientRules.itemHoverText));
 
           cell.draggable = true;
           cell.addEventListener('dragstart', (e) => {
@@ -17222,8 +17289,10 @@ export class GameUI {
   private talkFocusItemText(item: TalkFocusMenuItem): string {
     const name = this.talkFocus.lastSpeakableName;
     if (item.focus === null) {
-      if (!name) return getString(item.stringId) ?? item.text;
-      return `${getStringParts(SQUELCH_SELECTED_STRING)?.[0] ?? 'Squelch (ignore) '}${name}`;
+      // BUG.ac1999-eor-ui-values — the 1999 ChatMenu's "Ignore Selected" / "Ignore %s" (EraClientRules.chatTargetText).
+      const era = this.clientRules.chatTargetText;
+      if (!name) return era?.squelchSelected ?? getString(item.stringId) ?? item.text;
+      return `${era?.squelchPrefix ?? getStringParts(SQUELCH_SELECTED_STRING)?.[0] ?? 'Squelch (ignore) '}${name}`;
     }
     if (item.focus === TalkFocus.Selected && name) {
       return `${getStringParts(TELL_TO_SELECTED_STRING)?.[0] ?? 'Tell to '}${name}`;
@@ -17233,8 +17302,15 @@ export class GameUI {
 
   /** HandleSelection's relabel of the button text 0x10000015. */
   applyTalkFocusLabel(): void {
+    this.chatHandle?.setText(0x10000015, this.talkFocusButtonText());
+  }
+
+  /** The Chat button's text for the focus: the era client's (1999: "Chat" / "Tell"), else the DAT's ID_Chat_ChatTargetMenu*. */
+  talkFocusButtonText(): string {
+    const eraLabel = this.clientRules.chatTargetText?.buttonLabels[this.talkFocus.focus];
+    if (eraLabel !== undefined) return eraLabel;
     const label = this.talkFocus.buttonLabel();
-    this.chatHandle?.setText(0x10000015, getString(label.stringId) ?? label.text);
+    return getString(label.stringId) ?? label.text;
   }
 
   /** SetSelected @ 004cd730 from main (selection change / UseTime); a fallback to Say relabels the button. */
@@ -17541,8 +17617,9 @@ export class GameUI {
           this.onExamineObject?.(item.guid);
         });
         // CORE.17.k.b.b.a.g — UIElement_UIItem::UpdateTooltip: the (counted)
-        // name alone, through UIElementManager's machine (no native title).
-        this.tagHudTooltip(cell, itemTooltipText(item.name, item.pluralName, item.stackSize));
+        // name alone, through UIElementManager's machine (no native title);
+        // a 1999 world's help-bar text ("Double click to pick up").
+        this.tagHudTooltip(cell, itemHoverText(item, 'external', this.clientRules.itemHoverText));
 
         // CORE.18.c.a — RenderIcons' composite (type backdrop + effects tint).
         const icon = this.buildItemIconElement(item.iconDid, 32, item.iconOverlayDid, item.iconUnderlayDid,
@@ -19400,7 +19477,7 @@ export class GameUI {
       const spellId = this.spellbookSelectedSpellId;
       if (!spellId) return;
       const name = this.knownSpells.find((s) => s.id === spellId)?.name ?? this.spellTable?.spells.get(spellId)?.name ?? '';
-      this.showConfirmationDialog(spellbookDeleteConfirmText(name), (accepted) => {
+      this.showConfirmationDialog(spellbookDeleteConfirmText(name, this.clientRules.spellDeleteConfirm), (accepted) => {
         if (!accepted) return;
         this.callbacks.onRemoveSpellFromSpellbook?.(spellId);
       });
@@ -19671,8 +19748,14 @@ export class GameUI {
       if (iconEl && iconUrl) Object.assign(iconEl.style, { backgroundImage: `url(${iconUrl})`, backgroundSize: '100% 100%' });
       this.setDatLabel(host, 0x10000469, entry.name, { justify: 'near' });
       this.setDatLabel(host, 0x1000046a, `${entry.numItems}`, { justify: 'far', margin: 8 });
-      // Desired level 0x1000046b (p22 editable, p30 = 5, digits only).
-      const desired = this.bindDatInput(host, 0x1000046b, 'ac-comp-desired', 5);
+      // Desired level 0x1000046b (p22 editable, p30 = 5, digits only); an era
+      // without the rebuy book has none (FEATURE_COMPONENT_CONTROLS, BUG.ac1999-eor-ui).
+      const desiredHidden = hiddenBy(FEATURE_COMPONENT_CONTROLS, this.eraUnsupported).has(0x1000046b);
+      if (desiredHidden) {
+        const el = host.querySelector<HTMLElement>('[data-element-id="0x1000046b"]');
+        if (el) el.style.display = 'none';
+      }
+      const desired = desiredHidden ? null : this.bindDatInput(host, 0x1000046b, 'ac-comp-desired', 5);
       if (desired) {
         desired.style.textAlign = 'right';
         desired.style.paddingRight = '8px';
@@ -20157,7 +20240,7 @@ export class GameUI {
       if (lumLabelEl) lumLabelEl.style.display = 'none';
       if (lumValueEl) lumValueEl.style.display = 'none';
     }
-    this.setDatLabel(body, 0x10000234, getString(168019916) ?? 'Total Experience (XP):', { justify: 'near', margin: 5 });
+    this.setDatLabel(body, 0x10000234, this.clientText(this.clientRules.statFooterText.totalXp), { justify: 'near', margin: 5 });
     this.setDatLabel(body, 0x10000235, this.charInfo.totalXp.toLocaleString(), { justify: 'far', margin: 5 });
 
     // XP-to-next-level meter: track media 0x060011a6, red fill child 0x2
@@ -20743,9 +20826,13 @@ export class GameUI {
     raiseEnabled: boolean; raise10Visible: boolean; raise10Enabled: boolean;
     onRaise: () => void; onRaise10: () => void;
   } | null {
-    const xpToRaise = getString(175085980) ?? 'Experience To Raise:';
-    const unassigned = getString(249332076) ?? 'Unassigned Experience:';
-    const infinity = getString(206482569) ?? 'Infinity!';
+    // BUG.ac1999-eor-ui-values — the era client's footer wording (EraClientRules.statFooterText).
+    const T = this.clientRules.statFooterText;
+    const xpToRaise = this.clientText(T.xpToRaise);
+    const unassigned = this.clientText(T.unassignedXp);
+    const infinity = this.clientText(T.infinity);
+    // The 1999 StatsPanel has one Raise button (EraClientRules.statRaiseTen).
+    const raiseTen = this.clientRules.statRaiseTen;
     const availXp = this.charInfo.unassignedXp;
     const fmtCost = (c: number): string => c > 0 ? c.toLocaleString() : infinity;
 
@@ -20788,10 +20875,11 @@ export class GameUI {
       };
       return {
         title: name, value: `${value}${tone === 'buffed' ? '+' : ''}`, tone, titleRuns,
-        line1Label: xpToRaise, line1Value: fmtCost(costs.cost1),
+        // AttribInfoBox::Display @ 0x00544e10 words a vital's line apart (1999 "XP to raise max value:").
+        line1Label: sel.kind === 'attribute' ? xpToRaise : this.clientText(T.xpToRaiseVital), line1Value: fmtCost(costs.cost1),
         line2Label: unassigned, line2Value: availXp.toLocaleString(),
         raiseEnabled: costs.cost1 > 0 && costs.cost1 <= availXp,
-        raise10Visible: true,
+        raise10Visible: raiseTen,
         raise10Enabled: costs.cost10 > 0 && costs.cost10 <= availXp,
         onRaise: () => send(costs.cost1),
         onRaise10: () => send(costs.cost10),
@@ -20816,10 +20904,10 @@ export class GameUI {
         titleRuns: this.statLineMode === 'ac1999'
           ? statLineRuns1999({ kind: 'skill', name: skill.name, value: skill.effective, base: skill.base, enchanted: this.statEnchanted(0x10, skill.id) }, this.lastVitaeMultiplier)
           : skillFooterTitleRuns(skill.name, skill.effective, skill.base, this.lastVitaeMultiplier),
-        line1Label: xpToRaise, line1Value: fmtCost(costs.cost1),
+        line1Label: this.clientText(T.xpToRaiseSkill), line1Value: fmtCost(costs.cost1),
         line2Label: unassigned, line2Value: availXp.toLocaleString(),
         raiseEnabled: costs.cost1 > 0 && costs.cost1 <= availXp,
-        raise10Visible: true,
+        raise10Visible: raiseTen,
         raise10Enabled: costs.cost10 > 0 && costs.cost10 <= availXp,
         onRaise: () => this.raiseCallbacks.onRaiseSkill?.(skill.id, costs.cost1),
         onRaise10: () => this.raiseCallbacks.onRaiseSkill?.(skill.id, costs.cost10),
@@ -20837,8 +20925,8 @@ export class GameUI {
       // "+"); the value/"+" only belong to the trained builder.
       title: skill.name, value: '', tone: 'normal',
       titleRuns: [{ text: skill.name, colorIndex: 0 }],
-      line1Label: getString(218797164) ?? 'Skill Credits To Train', line1Value: `${trainCost}`,
-      line2Label: getString(230538876) ?? 'Skill Credits Available:', line2Value: `${credits}`,
+      line1Label: this.clientText(T.creditsToTrain), line1Value: `${trainCost}`,
+      line2Label: this.clientText(T.creditsAvailable), line2Value: `${credits}`,
       raiseEnabled: trainCost <= credits,
       raise10Visible: false,
       raise10Enabled: false,
@@ -20847,16 +20935,22 @@ export class GameUI {
       // literal "Are you sure you want to spend %d credits to train %s?"
       // (0x7a7864; the cost, then InqSkillName), and only the Yes of
       // TrainSkillDialogCallback @ 0049c210 sends CM_Train::Event_TrainSkill.
-      onRaise: () => this.showConfirmationDialog(
-        GameUI.TRAIN_SKILL_CONFIRM.replace('%d', `${trainCost}`).replace('%s', skill.name),
-        (yes) => { if (yes) this.raiseCallbacks.onTrainSkill?.(skill.id, trainCost); },
-      ),
+      // BUG.ac1999-eor-ui-values — the 1999 Raise press trains at once (0x005471f9 sends 0x47;
+      // EraClientRules.trainSkillConfirm null).
+      onRaise: () => {
+        const confirm = this.clientRules.trainSkillConfirm;
+        if (confirm === null) { this.raiseCallbacks.onTrainSkill?.(skill.id, trainCost); return; }
+        this.showConfirmationDialog(
+          confirm.replace('%d', `${trainCost}`).replace('%s', skill.name),
+          (yes) => { if (yes) this.raiseCallbacks.onTrainSkill?.(skill.id, trainCost); },
+        );
+      },
       onRaise10: () => {},
     };
   }
 
   /** gmSkillUI::TrainSkill's prompt (.rdata 0x7a7864, a literal: no string-table entry). */
-  static readonly TRAIN_SKILL_CONFIRM = 'Are you sure you want to spend %d credits to train %s?';
+  static readonly TRAIN_SKILL_CONFIRM = EOR_TRAIN_SKILL_CONFIRM;
 
   /**
    * CORE.7 — render the footer region: prompt footer 0x10000240 when no row
@@ -20882,17 +20976,18 @@ export class GameUI {
       if (buttonFooter) buttonFooter.style.display = 'none';
       if (!promptFooter) return;
       promptFooter.style.display = 'block';
-      const prompt = kind === 'attributes'
-        ? (getString(202231733) ?? 'Select an Attribute to Improve')
-        : (getString(220682197) ?? 'Select a Skill to Improve');
+      const FT = this.clientRules.statFooterText;
+      const prompt = this.clientText(kind === 'attributes' ? FT.attributePrompt : FT.skillPrompt);
+      const creditsLabel = this.clientText(FT.creditsAvailable);
+      const unassignedLabel = this.clientText(FT.unassignedXp);
       if (this.datChild(promptFooter, 0x1000024e)) {
         // CORE.17.k.b.b.c.c — the lines sit at their DAT x (5 / 200) with
         // p35 = 0: no extra hand margin (character-panel-attributes.jpg:
         // "Skill Credits Available:" starts at the footer's x 5).
         this.setDatLabel(promptFooter, 0x1000024e, prompt, { justify: 'center' });
-        this.setDatLabel(promptFooter, 0x10000242, getString(230538876) ?? 'Skill Credits Available:', { justify: 'near' });
+        this.setDatLabel(promptFooter, 0x10000242, creditsLabel, { justify: 'near' });
         this.setDatLabel(promptFooter, 0x10000243, `${this.charInfo.skillCredits}`, { justify: 'far' });
-        this.setDatLabel(promptFooter, 0x10000244, getString(249332076) ?? 'Unassigned Experience:', { justify: 'near' });
+        this.setDatLabel(promptFooter, 0x10000244, unassignedLabel, { justify: 'near' });
         this.setDatLabel(promptFooter, 0x10000245, this.charInfo.unassignedXp.toLocaleString(), { justify: 'far' });
       } else {
         // Template children absent (base-element chain not materialized) —
@@ -20910,8 +21005,8 @@ export class GameUI {
           return row;
         };
         promptFooter.appendChild(mkRow(prompt, null, true));
-        promptFooter.appendChild(mkRow(getString(230538876) ?? 'Skill Credits Available:', `${this.charInfo.skillCredits}`));
-        promptFooter.appendChild(mkRow(getString(249332076) ?? 'Unassigned Experience:', this.charInfo.unassignedXp.toLocaleString()));
+        promptFooter.appendChild(mkRow(creditsLabel, `${this.charInfo.skillCredits}`));
+        promptFooter.appendChild(mkRow(unassignedLabel, this.charInfo.unassignedXp.toLocaleString()));
       }
       return;
     }
@@ -21012,8 +21107,56 @@ export class GameUI {
         'Raise 10 times', () => model.onRaise10());
     }
     mkRaiseBtn(0x10000246, 26, 0x06004cb6, 0x06004cb7, model.raiseEnabled,
-      model.line1Label.startsWith('Skill Credits To Train') ? 'Train this skill' : 'Raise once',
+      model.line1Label === this.clientText(this.clientRules.statFooterText.creditsToTrain) ? 'Train this skill' : 'Raise once',
       () => model.onRaise());
+  }
+
+  /**
+   * VISUAL.paperdoll-slots-gem-state — the paperdoll's "Slots" row 0x100005be
+   * (see renderInventoryPanel): the gem that flips to the body-region view.
+   */
+  private buildPaperdollSlotsGem(paperdollEl: HTMLElement): void {
+    const slotsToggle = document.createElement('div');
+    slotsToggle.dataset.elementId = '0x100005be';
+    Object.assign(slotsToggle.style, {
+      position: 'absolute', left: '42px', top: '190px', width: '120px', height: '14px',
+      cursor: 'pointer', pointerEvents: 'auto', zIndex: '3',
+    });
+    // CORE.17.k.b.b.a.g.a — the gem's p73 help string through the tooltip
+    // machine as its own root 0x10000397 (p71), not a native title box.
+    this.tagHudTooltip(slotsToggle,
+      getString(PAPERDOLL_SLOTS_GEM_TOOLTIP_STRING) ?? 'When this option is chosen, you will see explicit equipment slots instead of a portrait.',
+      PAPERDOLL_GEM_TOOLTIP_ROOT);
+    const slotsSelected = this.inventorySlotsView;
+    const gem = document.createElement('div');
+    gem.dataset.elementId = '0x10000328';
+    Object.assign(gem.style, {
+      position: 'absolute', left: '0', top: '1px', width: '13px', height: '13px',
+      backgroundSize: '100% 100%', backgroundRepeat: 'no-repeat',
+      imageRendering: 'pixelated',
+    });
+    const paintGem = (hover: boolean): void => {
+      const url = this.getTexURL(slotsCheckboxGemTexture(slotsSelected, hover));
+      gem.style.backgroundImage = url ? `url(${url})` : 'none';
+    };
+    paintGem(false);
+    slotsToggle.addEventListener('mouseenter', () => paintGem(true));
+    slotsToggle.addEventListener('mouseleave', () => paintGem(false));
+    slotsToggle.appendChild(gem);
+    // The template label is white whatever the gem state (the same
+    // template's spellbook radio rows, CORE.17.k.b.b.c.a).
+    const slotsLabel = document.createElement('div');
+    Object.assign(slotsLabel.style, {
+      position: 'absolute', left: '16px', top: '0', height: '14px',
+      display: 'flex', alignItems: 'center', pointerEvents: 'none',
+    });
+    slotsLabel.appendChild(this.renderACText(getString(226400956) ?? 'Slots', AC_COLORS.white));
+    slotsToggle.appendChild(slotsLabel);
+    slotsToggle.addEventListener('click', () => {
+      this.inventorySlotsView = !this.inventorySlotsView;
+      this.renderInventoryPanel();
+    });
+    paperdollEl.appendChild(slotsToggle);
   }
 
   /** CORE.17.k.b.b.c.c — the DAT raise button's fallback art when its desc is not loaded: [state 0x1, state 0xd]. */
@@ -21692,6 +21835,9 @@ export class GameUI {
     // pane 0x100001f7 (base 0x21000025 = gmHouseUI's text listbox);
     // UIElement_Panel::OpenTab @ 0046be20 → Update @ 0046bd00 shows the
     // open pair's pane, hides the other, and states the tabs 0xc / 0xb.
+    // BUG.ac1999-eor-ui — an era without housing has no House tab (FEATURE_WORLD_TABS): the Map page alone.
+    const houseHidden = hiddenBy(FEATURE_WORLD_TABS, this.eraUnsupported).has('house');
+    if (houseHidden) this.worldPanelTab = 'map';
     const houseOpen = this.worldPanelTab === 'house';
     const styleMapTab = (id: number, label: string, active: boolean, tab: 'map' | 'house'): void => {
       const el = handle.elements.get(id);
@@ -21704,6 +21850,7 @@ export class GameUI {
     };
     styleMapTab(0x100001f3, getString(148800818) ?? 'Map', !houseOpen, 'map');
     styleMapTab(0x100001f4, getString(1502562) ?? 'House', houseOpen, 'house');
+    if (houseHidden) handle.setVisible(0x100001f4, false);
 
     // Map page content block — 0x21000026 element 0x100001ea (0,135)
     // 300x330 inside pane 0x100001f6.
@@ -22063,11 +22210,11 @@ export class GameUI {
 
   /** Set fellowship data from server (FellowshipFullUpdate). Null = no fellowship. */
   setFellowshipData(data: {
-    fellowshipName: string; leaderGuid: number; shareXP: boolean; evenShare: boolean; open: boolean; isLocked: boolean;
+    fellowshipName: string; leaderGuid: number; shareXP?: boolean; evenShare?: boolean; open: boolean; isLocked: boolean;
     selfGuid?: number;
     /** FellowshipData.tableSize — the fellows hash table's bucket count. */
     tableSize?: number;
-    fellows: Array<{ guid: number; name: string; level: number; healthCurrent: number; healthMax: number; staminaCurrent: number; staminaMax: number; manaCurrent: number; manaMax: number; shareLoot: boolean }>;
+    fellows: Array<{ guid: number; name: string; level: number; healthCurrent?: number; healthMax?: number; staminaCurrent?: number; staminaMax?: number; manaCurrent?: number; manaMax?: number; shareLoot: boolean }>;
   } | null): void {
     this.fellowshipData = data;
     // Joining (or leaving) changes what an agent's want asks for: the fellows' updates start with the fellowship.
@@ -22092,11 +22239,11 @@ export class GameUI {
    * outbound GameAction.
    */
   get fellowship(): {
-    fellowshipName: string; leaderGuid: number; shareXP: boolean; evenShare: boolean; open: boolean; isLocked: boolean;
+    fellowshipName: string; leaderGuid: number; shareXP?: boolean; evenShare?: boolean; open: boolean; isLocked: boolean;
     selfGuid?: number;
     /** FellowshipData.tableSize — the fellows hash table's bucket count. */
     tableSize?: number;
-    fellows: ReadonlyArray<{ guid: number; name: string; level: number; healthCurrent: number; healthMax: number; staminaCurrent: number; staminaMax: number; manaCurrent: number; manaMax: number; shareLoot: boolean }>;
+    fellows: ReadonlyArray<{ guid: number; name: string; level: number; healthCurrent?: number; healthMax?: number; staminaCurrent?: number; staminaMax?: number; manaCurrent?: number; manaMax?: number; shareLoot: boolean }>;
   } | null {
     return this.fellowshipData;
   }
@@ -22129,7 +22276,7 @@ export class GameUI {
    * retail's FellowAdded (Handle_Fellowship__UpdateFellow @ 005690c0 with
    * IsFellow == 0), which prints the "is now a member" line.
    */
-  updateFellowshipMember(fellow: { guid: number; name: string; level: number; healthCurrent: number; healthMax: number; staminaCurrent: number; staminaMax: number; manaCurrent: number; manaMax: number; shareLoot: boolean }): void {
+  updateFellowshipMember(fellow: { guid: number; name: string; level: number; healthCurrent?: number; healthMax?: number; staminaCurrent?: number; staminaMax?: number; manaCurrent?: number; manaMax?: number; shareLoot: boolean }): void {
     if (!this.fellowshipData) return;
     const addedLine = fellowAddedLine(this.fellowshipData, fellow);
     const idx = this.fellowshipData.fellows.findIndex(f => f.guid === fellow.guid);
@@ -26406,18 +26553,25 @@ export class GameUI {
         // ID_Fellowship_FellowStats ("LEVEL/EXPERIENCE%"): the share is
         // computed client-side from levels (ACE zeroes the wire's
         // cpCached/lumCached) and stays 0 when the fellowship shares no XP.
-        const xpPercent = getFellowshipXpShareDisplayPercent(
-          f.level, data.fellows.map(x => x.level), data.shareXP, data.evenShare, this.levelXpTable,
-        );
-        const lvlXpLabel = fillDatParts(getStringParts(acStringHash('ID_Fellowship_FellowStats')), [String(f.level), String(xpPercent)], ['', '/', '%']);
+        // BUG.ac1999-eor-ui — what the roster does not carry is not shown: a
+        // roster without the share flags (the 1999 Fellowship) gives the level
+        // alone, one without vitals (the 1999 Fellow) no bars, not 0% and 0/0.
+        const sharesKnown = data.shareXP !== undefined && data.evenShare !== undefined;
+        const xpPercent = sharesKnown ? getFellowshipXpShareDisplayPercent(
+          f.level, data.fellows.map(x => x.level), data.shareXP!, data.evenShare!, this.levelXpTable,
+        ) : 0;
+        const lvlXpLabel = sharesKnown
+          ? fillDatParts(getStringParts(acStringHash('ID_Fellowship_FellowStats')), [String(f.level), String(xpPercent)], ['', '/', '%'])
+          : String(f.level);
         strip.appendChild(this.renderDatTextOr(lvlXpLabel, rowRef(0x10000282, 0x10000284), undefined, AC_COLORS.white));
         row.appendChild(strip);
-        // Line 2 — three 93x16 vitals bars (health / stamina / mana).
+        // Line 2 — three 93x16 vitals bars (health / stamina / mana), each only when carried.
         const bars = document.createElement('div');
         Object.assign(bars.style, { display: 'flex', height: '16px' });
-        bars.appendChild(vitalsBar(f.healthCurrent, f.healthMax, 0x0600251c, 0x0600251d, 0x10000285, 0x10000286, 'ID_Fellowship_FellowHealthStatus'));
-        bars.appendChild(vitalsBar(f.staminaCurrent, f.staminaMax, 0x06002520, 0x06002521, 0x10000287, 0x10000288, 'ID_Fellowship_FellowStaminaStatus'));
-        bars.appendChild(vitalsBar(f.manaCurrent, f.manaMax, 0x0600251e, 0x0600251f, 0x10000289, 0x1000028a, 'ID_Fellowship_FellowManaStatus'));
+        if (f.healthMax !== undefined) bars.appendChild(vitalsBar(f.healthCurrent ?? 0, f.healthMax, 0x0600251c, 0x0600251d, 0x10000285, 0x10000286, 'ID_Fellowship_FellowHealthStatus'));
+        if (f.staminaMax !== undefined) bars.appendChild(vitalsBar(f.staminaCurrent ?? 0, f.staminaMax, 0x06002520, 0x06002521, 0x10000287, 0x10000288, 'ID_Fellowship_FellowStaminaStatus'));
+        if (f.manaMax !== undefined) bars.appendChild(vitalsBar(f.manaCurrent ?? 0, f.manaMax, 0x0600251e, 0x0600251f, 0x10000289, 0x1000028a, 'ID_Fellowship_FellowManaStatus'));
+        bars.dataset.fellowVitals = String(bars.childElementCount);
         row.appendChild(bars);
         // gmFellowshipUI::ListenToElementMessage @ 004901c0 case 4/0x43: an
         // armed target mode runs on the fellow (ExecuteTargetModeForItem);
@@ -26494,7 +26648,8 @@ export class GameUI {
     const f = this.fellowshipData;
     if (!f) return [];
     const self = f.selfGuid ?? this.playerGuid;
-    return f.fellows.filter((m) => m.guid !== self).map((m) => ({ guid: m.guid, name: m.name, health: { cur: m.healthCurrent, max: m.healthMax }, stamina: { cur: m.staminaCurrent, max: m.staminaMax }, mana: { cur: m.manaCurrent, max: m.manaMax } }));
+    // A roster without vitals (the 1999 Fellow) reads max 0: the agent code treats that as unknown.
+    return f.fellows.filter((m) => m.guid !== self).map((m) => ({ guid: m.guid, name: m.name, health: { cur: m.healthCurrent ?? 0, max: m.healthMax ?? 0 }, stamina: { cur: m.staminaCurrent ?? 0, max: m.staminaMax ?? 0 }, mana: { cur: m.manaCurrent ?? 0, max: m.manaMax ?? 0 } }));
   }
 
   /**
@@ -26506,7 +26661,7 @@ export class GameUI {
     const f = this.fellowshipData;
     if (!f) return null;
     const self = f.selfGuid ?? this.playerGuid;
-    return { shareXP: f.shareXP, evenShare: f.evenShare, members: f.fellows.map((m) => ({ name: m.name, level: m.level, self: m.guid === self })), levelXpTable: this.levelXpTable };
+    return { shareXP: f.shareXP ?? false, evenShare: f.evenShare ?? false, members: f.fellows.map((m) => ({ name: m.name, level: m.level, self: m.guid === self })), levelXpTable: this.levelXpTable };
   }
 
   agentFellowshipInfo(): { leader: boolean; open: boolean; count: number; members: string[]; handOff: boolean; sharing: string[] } | null {
@@ -26524,8 +26679,8 @@ export class GameUI {
     const leader = f.fellows.find((m) => m.guid === f.leaderGuid)?.name ?? 'unknown';
     const self = f.selfGuid ?? this.playerGuid;
     const lines = [
-      `fellowship "${f.fellowshipName}": ${f.fellows.length}/9 fellows, leader ${f.leaderGuid === self ? 'you' : leader}, ${f.open ? 'open (any fellow may recruit)' : 'closed (only the leader recruits)'}${f.shareXP ? ', XP shared' + (f.evenShare ? ' evenly' : '') : ', XP not shared'}${f.isLocked ? ', locked' : ''}`,
-      ...f.fellows.map((m) => `  ${m.name}${m.guid === self ? ' (you)' : ''}${m.guid === f.leaderGuid ? ' [leader]' : ''} L${m.level}  HP ${m.healthCurrent}/${m.healthMax}  ST ${m.staminaCurrent}/${m.staminaMax}  MA ${m.manaCurrent}/${m.manaMax}`),
+      `fellowship "${f.fellowshipName}": ${f.fellows.length}/9 fellows, leader ${f.leaderGuid === self ? 'you' : leader}, ${f.open ? 'open (any fellow may recruit)' : 'closed (only the leader recruits)'}${f.shareXP === undefined ? '' : f.shareXP ? ', XP shared' + (f.evenShare ? ' evenly' : '') : ', XP not shared'}${f.isLocked ? ', locked' : ''}`,
+      ...f.fellows.map((m) => `  ${m.name}${m.guid === self ? ' (you)' : ''}${m.guid === f.leaderGuid ? ' [leader]' : ''} L${m.level}${m.healthMax === undefined ? '' : `  HP ${m.healthCurrent}/${m.healthMax}  ST ${m.staminaCurrent}/${m.staminaMax}  MA ${m.manaCurrent}/${m.manaMax}`}`),
     ];
     lines.push(reqs);
     return lines.join('\n');
@@ -26600,6 +26755,7 @@ export class GameUI {
         const key = action === 'requests' ? 'ignoreFellowshipRequests' : 'autoAcceptFellowshipRequests';
         const on = action === 'requests' ? (want === 'ignore' ? true : want === 'accept' ? false : null) : (want === 'on' ? true : want === 'off' ? false : null);
         if (on === null) return action === 'requests' ? 'requests takes accept or ignore' : 'auto takes on or off';
+        if (action === 'auto' && !this.eraSupports('autoAcceptFellowship')) return 'this era has no automatic accepting of fellowship requests';
         if (!!this.optionsSettings[key] !== on) {
           this.optionsSettings[key] = on;
           this.saveOptionsSettings();
@@ -26656,7 +26812,22 @@ export class GameUI {
     // (fellowshipString): the flat getString would return 0x23000005's
     // short "Share Fellowship Experience" for id 237541360.
     this.bindDatOptionCheckbox(pane, 0x10000270, fellowshipString(159149763, 'Ignore Fellowship Requests'), 'ignoreFellowshipRequests');
-    this.bindDatOptionCheckbox(pane, 0x10000271, fellowshipString(115802515, 'Automatically Accept Fellowship Requests'), 'autoAcceptFellowshipRequests');
+    // BUG.ac1999-eor-ui — an era without the option has no checkbox (FEATURE_FELLOWSHIP_CONTROLS).
+    // BUG.era-hidden-row-gaps — and no row-sized hole where it was: the rows
+    // below it (and Create Fellowship) close up by its 14 px pitch.
+    const eraHiddenControls = hiddenBy(FEATURE_FELLOWSHIP_CONTROLS, this.eraUnsupported);
+    if (eraHiddenControls.has(0x10000271)) {
+      const box = this.datChild(pane, 0x10000271);
+      if (box) box.style.display = 'none';
+    } else {
+      this.bindDatOptionCheckbox(pane, 0x10000271, fellowshipString(115802515, 'Automatically Accept Fellowship Requests'), 'autoAcceptFellowshipRequests');
+    }
+    const column = new Map<number, HTMLElement>();
+    for (const id of FELLOWSHIP_CREATE_COLUMN) {
+      const el = this.datChild(pane, id);
+      if (el) column.set(id, el);
+    }
+    collapseHiddenElements(column, eraHiddenControls, 'y');
     this.bindDatOptionCheckbox(pane, 0x10000272, fellowshipString(237541360, 'Share Fellowship Experience and Luminance'), 'shareFellowshipXP');
     this.bindDatOptionCheckbox(pane, 0x10000273, fellowshipString(143989828, 'Share Fellowship Loot'), 'shareFellowshipLoot');
 
@@ -27281,13 +27452,17 @@ export class GameUI {
       // Offline → Friends panel) and a Key Bindings list (→ Keyboard dialog).
       // NO-DEAD-ENDS — options for features this world's era lacks (trade,
       // housing, consent, chess, titles, salvage, TurbineChat) are not listed.
+      // BUG.ac1999-eor-ui-values — nor rows that do nothing in the era (EraClientRules.
+      // characterOptionsInert); a row the era's client had wears its own label.
       const eraHiddenOptions = hiddenBy(FEATURE_CHARACTER_OPTIONS, this.eraUnsupported);
+      for (const o of this.clientRules.characterOptionsInert) eraHiddenOptions.add(o);
+      const eraLabels = this.clientRules.characterOptionLabels;
       for (const section of CHARACTER_SETTINGS_PAGE) {
         this.addSectionHeader(content, characterSettingString(section.header.token, section.header.label), true);
         for (const row of section.rows) {
           const key = row.ourKey ?? '';
           if (!key || eraHiddenOptions.has(row.playerOption)) continue;
-          this.addToggleRow(content, characterSettingString(row.token, row.label), key,
+          this.addToggleRow(content, eraLabels[row.playerOption] ?? characterSettingString(row.token, row.label), key,
             this.characterSettingApplyHook(key));
         }
         content.appendChild(this.buildOptionsSeparator());
@@ -28955,9 +29130,13 @@ export class GameUI {
         // server round-trip is preserved via OPTIONS_TO_CHARACTER_OPTION).
         // PostInit replaces each row's p23 text with the options-table
         // ID_CombatPanelOption_* string (OptionsStrings.COMBAT_BAR_STRINGS).
-        this.bindCombatBarCheckbox(handle, 0x10000053, combatBarString('repeatAttacks'), 'repeatAttacks');
-        this.bindCombatBarCheckbox(handle, 0x10000054, combatBarString('autoTarget'), 'autoTarget');
-        this.bindCombatBarCheckbox(handle, 0x10000055, combatBarString('keepCombatTargetsInView'), 'keepCombatTargetsInView');
+        // BUG.ac1999-eor-ui-values — only the rows the era's bar has (EraClientRules.combatBarOptions:
+        // the 1999 CombatPanel @ 0x589bc0 has no Keep in View row); a row it lacks is not shown.
+        const barOptions: readonly string[] = this.clientRules.combatBarOptions;
+        for (const [id, key] of [[0x10000053, 'repeatAttacks'], [0x10000054, 'autoTarget'], [0x10000055, 'keepCombatTargetsInView']] as const) {
+          if (barOptions.includes(key)) this.bindCombatBarCheckbox(handle, id, combatBarString(key), key);
+          else { const row = handle.elements.get(id); if (row) row.style.display = 'none'; }
+        }
 
         // Recklessness band 0x0600715e at (70,0) — 567/707 ≈ the 10–90% power
         // window: retail shows m_RecklessnessField only when Recklessness
@@ -28975,7 +29154,7 @@ export class GameUI {
         // no skills: verification/retail-client/ab/retail-combat-melee.png,
         // band texture 0x0600715e spanning 10–90% of the track). Record →
         // SAC >= 2 shows it; no record → shown, as observed.
-        handle.setVisible(0x100005ef, recklessnessBandVisible(this.charInfo.skills));
+        handle.setVisible(0x100005ef, recklessnessBandVisible(this.charInfo.skills, this.skillTable?.skills.has(50) ?? true));
 
         // Power slider — click and drag support on slider track (0x1000004f)
         const sliderEl = handle.elements.get(0x1000004f);
@@ -30527,6 +30706,7 @@ export class GameUI {
       /* showSelectedQty — the UpdateQuantityOverlay surface */ true,
       undefined, undefined, false,
       {
+        hoverText: (it) => this.vendorHoverText(it, 'buy'),
         onExamine: (it) => { this.seedVendorSelection(it, true); this.onExamineObject?.(it.guid ?? 0); },
         // gmVendorUI::HandleMousePresses @ 004c40d0: shop list → BuySingleItem.
         onDoubleClick: (it) => {
@@ -30626,6 +30806,7 @@ export class GameUI {
       () => d.buyScrollX, (x) => { d.buyScrollX = x; },
       false, undefined, undefined, false,
       {
+        hoverText: (it) => this.vendorHoverText(it, 'buyList'),
         onExamine: (it) => { this.seedVendorSelection(it, true); this.onExamineObject?.(it.guid ?? 0); },
         // HandleMousePresses: buy list → "Removing %s from shopping list",
         // RemoveProfileFromList(m_buyList, id, 1).
@@ -30750,6 +30931,7 @@ export class GameUI {
       () => this.vendorSellDragAcceptStateForCurrentDrag(),
       /* p0x10000017 on 0x100000ce */ true,
       {
+        hoverText: (it) => this.vendorHoverText(it, 'sellList'),
         onExamine: (it) => { this.seedVendorSelection(it, false); this.onExamineObject?.(it.guid ?? 0); },
         // HandleMousePresses: sell list → the same notice, VendorItemSetSellState(id, 0)
         // and RemoveProfileFromList(m_sellList, id, -1).
@@ -30832,6 +31014,25 @@ export class GameUI {
    *  hidden) — pass showSelectedQty for the Items strip only. The overlay
    *  is text element 0x100004f5 of cell template 0x21000037:
    *  right-justified (p20=3), bottom (p21=5), 3px right margin (p36). */
+  /**
+   * BUG.ac1999-eor-ui-values — a vendor list cell's hover text in the era. End of
+   * retail: none (unchanged). 1999: the help bar's name line, then the vendor's
+   * line for the list (@ 0x5a4000: "Worth %up - Double click to buy" on the
+   * shop, "… remove from buying list" / "… remove from selling list" on the
+   * lists), the price of the cell's stack. The 1999 client picks the line by the
+   * open page for any hovered item; here each list's own cells carry theirs.
+   */
+  private vendorHoverText(
+    item: { name: string; pluralName?: string; price: number; stackSize?: number; itemType?: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys' },
+    line: 'buy' | 'buyList' | 'sellList',
+  ): string | null {
+    const text = this.clientRules.itemHoverText;
+    if (!text) return null;
+    const qty = Math.max(1, item.stackSize ?? 1);
+    return itemHoverText({ name: item.name, pluralName: item.pluralName, stackSize: item.stackSize, itemType: item.itemType },
+      line === 'sellList' ? 'pack' : 'external', text, { line, price: this.vendorUnitCost(item, qty) });
+  }
+
   private renderVendorItemStrip(
     handle: LayoutHandle,
     listElId: number,
@@ -30859,6 +31060,8 @@ export class GameUI {
       onDoubleClick?: (item: (typeof items)[number], idx: number) => void;
       /** The owner's RecvNotice_ItemListBeginDrag (a drag out of the list). */
       onDragStart?: (item: (typeof items)[number], idx: number) => void;
+      /** The cell's hover text, or null for none (vendorHoverText). */
+      hoverText?: (item: (typeof items)[number], idx: number) => string | null;
     },
   ): void {
     const listEl = handle.elements.get(listElId);
@@ -30947,6 +31150,8 @@ export class GameUI {
       if (dragAcceptProbe) this.attachCellDragAccept(cell, CELL, dragAcceptProbe);
 
       const idx = i;
+      const hover = gestures?.hoverText?.(item, idx);
+      if (hover) this.tagHudTooltip(cell, hover);
       cell.addEventListener('click', () => {
         // An armed target mode runs on the cell's object instead (message 7).
         if (item.guid !== undefined && this.itemListTargetedClick(item.guid)) return;
@@ -32514,6 +32719,7 @@ export class GameUI {
    * The House pane is gmHouseUI's page, redrawn from the current HouseData.
    */
   openWorldPanelTab(tab: 'map' | 'house'): void {
+    if (hiddenBy(FEATURE_WORLD_TABS, this.eraUnsupported).has(tab)) return;
     this.worldPanelTab = tab;
     const handle = this.mapPanelHandle;
     if (!handle) return;
@@ -34583,12 +34789,16 @@ export class GameUI {
     this.hudTooltipHover = hover;
     document.addEventListener('mousemove', (e: MouseEvent) => {
       const target = (e.target as Element | null)?.closest?.('[data-ac-tooltip-text]') as HTMLElement | null;
+      this.hudMouse = { x: e.clientX, y: e.clientY };
       hover.mouseMove(target ?? null, e.clientX, e.clientY);
       this.scheduleHudTooltipCheck();
+      this.syncHudMouseOverWatch();
     });
     document.documentElement.addEventListener('mouseleave', () => {
+      this.hudMouse = null;
       hover.mouseLeave();
       this.scheduleHudTooltipCheck();
+      this.syncHudMouseOverWatch();
     });
     // CORE.17.k.b.b.a.g.d — UIElementManager::m_dragElement: set by
     // StartDragandDrop @ 0045e040 (with the mouse capture moved onto the
@@ -34617,6 +34827,71 @@ export class GameUI {
     return hover;
   }
 
+  /**
+   * BUG.stale-hover-tooltip — UIElement::OnVisibilityChanged @ 00463700 and
+   * UIElementManager::DeletingElement @ 0045e520 (SwitchMouseOver(null)
+   * when the deleted element is m_pElementLastOver): an element shown, hidden
+   * or destroyed under the mouse sets m_bPerformMouseHitTest, and the next
+   * UseTime's DoMouseUpdate @ 0045cc60 re-hit-tests at the mouse and
+   * SwitchMouseOver's the result — the old element's tooltip goes
+   * (StopHover), and with no mouse-move stamp the element now under the
+   * mouse counts as entered (its tooltip follows once the delay since the
+   * last real move has run). Ours watched only mousemove, so closing or
+   * swapping a panel under a still mouse left its tooltip up.
+   *
+   * The DOM has no visibility notice, so a MutationObserver on the document
+   * stands in for it while the mouse is in the window (a panel opened under a
+   * still mouse is entered too, as retail's is); a batch that can change what
+   * is under the mouse (hudMutationsMayMoveMouseOver: elements added or
+   * removed, shown, hidden, restacked or moved, never a repaint) queues one
+   * re-hit-test.
+   */
+  private syncHudMouseOverWatch(): void {
+    const hover = this.hudTooltipHover;
+    const want = !!hover && this.hudMouse !== null;
+    if (want === this.hudMouseOverWatching) return;
+    if (typeof MutationObserver !== 'function') return;
+    if (!this.hudMouseOverObserver) {
+      this.hudMouseOverObserver = new MutationObserver((records) => {
+        if (!hudMutationsMayMoveMouseOver(records)) return;
+        this.queueHudMouseOverUpdate();
+      });
+    }
+    if (want) {
+      this.hudMouseOverObserver.observe(document.documentElement, {
+        subtree: true, childList: true, attributes: true, attributeOldValue: true,
+        attributeFilter: ['style', 'class', 'hidden'],
+      });
+    } else {
+      this.hudMouseOverObserver.disconnect();
+    }
+    this.hudMouseOverWatching = want;
+  }
+
+  /** m_bPerformMouseHitTest = true: one re-hit-test on the next turn, however many batches asked. */
+  private queueHudMouseOverUpdate(): void {
+    if (this.hudMouseOverPending !== null) return;
+    this.hudMouseOverPending = setTimeout(() => {
+      this.hudMouseOverPending = null;
+      this.updateHudMouseOver();
+    }, 0);
+  }
+
+  /**
+   * UIElementManager::DoMouseUpdate @ 0045cc60 — hit-test at the last mouse
+   * position and SwitchMouseOver the result (TooltipHover.reenter: no
+   * mouse-move stamp). Not mid-drag: the drag element holds the capture.
+   */
+  updateHudMouseOver(): void {
+    const hover = this.hudTooltipHover;
+    if (!hover || !this.hudMouse || this.hudDragActive) return;
+    const hit = this.hudHitTest(this.hudMouse.x, this.hudMouse.y);
+    const target = (hit?.closest?.('[data-ac-tooltip-text]') as HTMLElement | null) ?? null;
+    hover.reenter(target);
+    this.scheduleHudTooltipCheck();
+    this.syncHudMouseOverWatch();
+  }
+
   /** UIElementManager::m_dragElement != null — a HUD drag is in progress. */
   private hudDragActive = false;
   hudDragInProgress(): boolean {
@@ -34634,7 +34909,9 @@ export class GameUI {
   startHudTooltipAtMouse(el: HTMLElement, clientX: number, clientY: number): void {
     const hover = this.ensureHudTooltipMachine();
     hover.startTooltipAtMouse(el, clientX, clientY);
+    this.hudMouse = { x: clientX, y: clientY };
     this.scheduleHudTooltipCheck();
+    this.syncHudMouseOverWatch();
   }
 
   /**
@@ -34741,6 +35018,8 @@ export class GameUI {
     tip.dataset.acTooltipFor = el.dataset.invSlot ?? el.dataset.equipSlot ?? el.dataset.spellSlot ?? el.id ?? '';
     document.body.appendChild(tip);
     this.hudTooltipEl = tip;
+    // The box and the fallback span's measuring are ours, not a change under the mouse.
+    this.hudMouseOverObserver?.takeRecords();
   }
 
   private hideHudTooltip(): void {

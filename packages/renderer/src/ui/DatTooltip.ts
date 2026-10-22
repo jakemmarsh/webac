@@ -264,6 +264,41 @@ export function buildDatTooltip(opts: TooltipBoxOptions): HTMLDivElement {
   return box;
 }
 
+/** The style declarations that change what is under the mouse (shown / hidden / stacked / moved). */
+const HIT_STYLE_PROPS = /(?:^|;)\s*(display|visibility|z-index|left|top|right|bottom|transform|pointer-events)\s*:[^;]*/gi;
+const hitStyle = (style: string | null | undefined): string =>
+  (style ?? '').match(HIT_STYLE_PROPS)?.map((d) => d.replace(/^;/, '').replace(/\s+/g, '')).join(';') ?? '';
+
+/**
+ * BUG.stale-hover-tooltip — whether a MutationObserver batch can change the
+ * element under a still mouse (UIElement::OnVisibilityChanged's
+ * m_bPerformMouseHitTest): an element added or removed, a class or `hidden`
+ * change, or a style change to display / visibility / stacking / placement /
+ * pointer-events. A tooltip box (`.ac-dat-tooltip`) coming and going, and
+ * text, paint or size changes (a colour, a background image, a vital bar's
+ * width) never do, so a HUD that repaints every frame doesn't re-hit-test
+ * every frame.
+ */
+export function hudMutationsMayMoveMouseOver(
+  records: ArrayLike<Pick<MutationRecord, 'type' | 'target' | 'attributeName' | 'oldValue' | 'addedNodes' | 'removedNodes'>>,
+): boolean {
+  const isTooltip = (n: Node | null): boolean => !!(n as Element | null)?.closest?.('.ac-dat-tooltip');
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
+    if (r.type === 'childList') {
+      if (isTooltip(r.target)) continue;
+      const nodes = [...Array.from(r.addedNodes), ...Array.from(r.removedNodes)];
+      if (nodes.some((n) => n.nodeType === 1 && !(n as Element).classList?.contains('ac-dat-tooltip'))) return true;
+      continue;
+    }
+    if (r.type !== 'attributes' || isTooltip(r.target)) continue;
+    if (r.attributeName !== 'style') return true;
+    const now = (r.target as Element).getAttribute?.('style');
+    if (hitStyle(r.oldValue) !== hitStyle(now)) return true;
+  }
+  return false;
+}
+
 /** What the hover machine needs from its host (UIElementManager's collaborators). */
 export interface TooltipHoverHost<T> {
   /** Timer::local_time, in seconds. */

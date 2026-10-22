@@ -249,6 +249,14 @@ describe('server messages: fellowship, books, squelch, account', () => {
     expect(f.leaderGuid).toBe(PLAYER);
     expect(f.fellows.map((x: { guid: number; name: string; level: number }) => [x.guid, x.name, x.level])).toEqual([[PLAYER, 'Me', 12], [PLAYER + 1, 'Them', 7]]);
     expect(f.tableSize).toBe(16);
+    // BUG.ac1999-eor-ui — the 1999 roster carries no vitals and no share flags: they read as absent
+    // (FELLOW_FIELD_NOT_CARRIED), not 0, so the fellowship rows draw no bars and no XP share.
+    for (const x of f.fellows) {
+      for (const k of ['healthMax', 'staminaMax', 'manaMax', 'healthCurrent', 'staminaCurrent', 'manaCurrent']) expect(x[k], k).toBeUndefined();
+    }
+    expect(f.shareXP).toBeUndefined();
+    expect(f.evenShare).toBeUndefined();
+    expect(f.open).toBe(false);
   });
 
   it('0xB0 UpdateFellow → FellowshipUpdateFellow (Full); 0xA7 / 0xB1 / 0xB3 → quit / dismiss / disband', () => {
@@ -256,6 +264,8 @@ describe('server messages: fellowship, books, squelch, account', () => {
     const { got, feed } = recording();
     feed(a.inbound(wrapped(0xb0, (w) => { w.u32(PLAYER + 1); fellow(w, 0, 9, 'Them'); }), 4));
     expect(got.fellow[0].fellow).toMatchObject({ guid: PLAYER + 1, name: 'Them', level: 9 });
+    expect(got.fellow[0].fellow.healthMax).toBeUndefined();
+    expect(got.fellow[0].fellow.manaCurrent).toBeUndefined();
     expect(got.fellow[0].updateType).toBe(1);
     feed(a.inbound(wrapped(0xa7, (w) => w.u32(PLAYER + 1)), 4));
     feed(a.inbound(wrapped(0xb1, (w) => w.u32(PLAYER + 2)), 4));

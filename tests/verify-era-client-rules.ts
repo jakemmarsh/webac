@@ -5,7 +5,8 @@
  * MaybeStopCompletely (CastSpell @ 00568040, StartAttackRequest @ 0056c040);
  * the 1999 client.exe never stops on a cast (PanelUI_FreeHandsAndCastSpell
  * @ 0x4fecc0) and always stops on an attack request
- * (PanelUI_StartAttackRequest @ 0x4f8850 → StopCompletely).
+ * (PanelUI_StartAttackRequest @ 0x4f8850 → StopCompletely). The profile's
+ * value fields (BUG.ac1999-eor-ui-values) are pinned in verify-ac1999-eor-ui-values.ts.
  */
 import { describe, expect, it } from 'vitest';
 import { ERA_PROFILES, eraProfile } from '../packages/renderer/src/era/EraProfiles.js';
@@ -14,13 +15,13 @@ import { eraClientRules } from '../packages/renderer/src/era/EraFeatures.js';
 describe('eraClientRules', () => {
   it('end of retail and the classic eras: a cast stops the player, an attack only when the player is its own', () => {
     for (const id of ['eor', 'classicace-customdm', 'classicace-infiltration', 'classic-dereth']) {
-      expect(eraClientRules(eraProfile(id))).toEqual({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor', spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor', statLineText: 'eor', spellBarTabs: 8, shortcutSlots: 18, characterInfoText: 'eor', spellBarArrows: 'pair' });
+      expect(eraClientRules(eraProfile(id))).toMatchObject({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor', spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor', statLineText: 'eor', spellBarTabs: 8, shortcutSlots: 18, characterInfoText: 'eor', spellBarArrows: 'pair', chatToggle: 'server' });
     }
-    expect(eraClientRules(null)).toEqual({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor', spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor', statLineText: 'eor', spellBarTabs: 8, shortcutSlots: 18, characterInfoText: 'eor', spellBarArrows: 'pair' });
+    expect(eraClientRules(null)).toMatchObject({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor', spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor', statLineText: 'eor', spellBarTabs: 8, shortcutSlots: 18, characterInfoText: 'eor', spellBarArrows: 'pair', chatToggle: 'server' });
   });
 
   it('1999: a cast never stops the player (run-casting), an attack always does', () => {
-    expect(eraClientRules(eraProfile('ac1999-retail'))).toEqual({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999', spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999', statLineText: 'ac1999', spellBarTabs: 1, shortcutSlots: 9, characterInfoText: 'ac1999', spellBarArrows: 'ends' });
+    expect(eraClientRules(eraProfile('ac1999-retail'))).toMatchObject({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999', spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999', statLineText: 'ac1999', spellBarTabs: 1, shortcutSlots: 9, characterInfoText: 'ac1999', spellBarArrows: 'ends', chatToggle: 'local' });
   });
 
   it('every era profile has rules', () => {

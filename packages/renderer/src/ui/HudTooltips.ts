@@ -35,6 +35,7 @@
  *    owns the shown tooltip → UIElementManager::ResetTooltip.
  */
 import { EquipMask, getAppropriateName } from '@ac/shared';
+import type { ItemHoverText } from '../era/EraFeatures.js';
 import { TOOLTIP_ROOT_ELEMENT, TOOLTIP_MAX_HEIGHT, TOOLTIP_MAX_WIDTH, TOOLTIP_TEXT_INSET, TOOLTIP_FONT, TOOLTIP_TEXT_MARGIN } from './DatTooltip.js';
 
 /**
@@ -124,6 +125,80 @@ export function itemTooltipText(name: string, pluralName: string | undefined, st
   const n = stackSize ?? 0;
   if (n > 1) return `${n} ${getAppropriateName(name, pluralName, n)}`;
   return name;
+}
+
+/** Where a hovered item sits, for the 1999 hover text. */
+export type ItemHoverPlace = 'pack' | 'worn' | 'external';
+
+/** What the 1999 hover text reads of an item (InventoryItem's fields). */
+export interface ItemHoverSubject {
+  name: string;
+  pluralName?: string;
+  stackSize?: number;
+  itemType?: number;
+  validLocations?: number;
+  usable?: number;
+  combatUse?: number;
+  /** On the vendor's sell list (the 1999 "Selling " prefix, 0x4d16f0). */
+  selling?: boolean;
+  /** A mana stone holding mana (unknown: no mana-stone hint). */
+  hasMana?: boolean;
+}
+
+/** ITEM_TYPE bits the 1999 hint tests (its vtable +0x18 type). */
+const IT = { Creature: 0x10, Food: 0x20, Container: 0x200, Writable: 0x2000, Key: 0x4000, Caster: 0x8000, Portal: 0x10000, ManaStone: 0x80000 } as const;
+/** Clothing (0x1ff) and jewellery (0xf8000): " (worn)"; anything else worn is " (wielded)" (@ 0x58761a / 0x58762e). */
+const WORN_MASK = 0x1ff | 0xf8000;
+/** Armour, clothing and jewellery: the "wear" use result (0x4e4cda / 0x4e4cfc / 0x4e4d1e). */
+const WEAR_MASK = 0x7e00 | WORN_MASK;
+
+/**
+ * The 1999 hint line, ItemHint @ 0x589460 over the use result @ 0x4e4bf0: 2 a worn item
+ * "unwield/take off" or another container's item "pick up"; 3 a weapon or caster in the pack
+ * "wield"; 4 armour, clothing or jewellery "wear"; 1 a usable item by its type (portal, food,
+ * container, writable, key, mana stone, else "use"). null: no hint.
+ */
+export function itemHoverHint1999(item: ItemHoverSubject, place: ItemHoverPlace, text: ItemHoverText): string | null {
+  const type = item.itemType ?? 0;
+  const container = (type & IT.Container) !== 0;
+  const h = text.hints;
+  if (place === 'worn') return h.takeOff;
+  if (place === 'external' && !container) return h.pickUp;
+  if (place === 'pack') {
+    if ((item.validLocations ?? 0) !== 0 && ((item.combatUse ?? 0) !== 0 || (type & IT.Caster) !== 0)) return h.wield;
+    if (((item.validLocations ?? 0) & WEAR_MASK) !== 0) return h.wear;
+  }
+  const usable = item.usable ?? 0;
+  if (usable === 0 || usable === 1) return null; // USEABLE_UNDEF / USEABLE_NO
+  if (type & IT.Creature) return null; // "attack" is for creatures in the world
+  if (type & IT.Portal) return h.enterPortal;
+  if (type & IT.Food) return h.consume;
+  if (type & IT.Container) return h.openClose;
+  if (type & IT.Writable) return h.readWrite;
+  if (type & IT.Key) return h.unlock;
+  if (type & IT.ManaStone) return item.hasMana === undefined ? null : item.hasMana ? h.manaTransfer : h.manaDrain;
+  return h.use;
+}
+
+/**
+ * An item's hover text in the era. End of retail (text null): UIElement_UIItem::UpdateTooltip's name
+ * alone (itemTooltipText). 1999: the help bar's two lines, @ 0x5873c0 "[Selling ]<count name>
+ * [ (container)][ (worn) | (wielded)]", then the hint (itemHoverHint1999), or with the vendor open
+ * a vendor list's "Worth %up - Double click to …" (@ 0x5a4000) in its place.
+ */
+export function itemHoverText(
+  item: ItemHoverSubject, place: ItemHoverPlace, text: ItemHoverText | null,
+  vendorWorth?: { line: keyof ItemHoverText['vendorWorth']; price: number },
+): string {
+  const name = itemTooltipText(item.name, item.pluralName, item.stackSize);
+  if (!text) return name;
+  let line = `${item.selling ? text.selling : ''}${name}`;
+  if (((item.itemType ?? 0) & IT.Container) !== 0) line += text.container;
+  if (place === 'worn') line += ((item.validLocations ?? 0) & WORN_MASK) !== 0 ? text.worn : text.wielded;
+  const second = vendorWorth
+    ? text.vendorWorth[vendorWorth.line].replace('%u', `${Math.max(0, Math.trunc(vendorWorth.price))}`)
+    : itemHoverHint1999(item, place, text);
+  return second ? `${line}\n${second}` : line;
 }
 
 /** gmPaperDollUI::UpdateItemSlotTooltip's empty-slot literals, in the function's own test order. */

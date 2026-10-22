@@ -4358,15 +4358,31 @@ export function parseApproachVendor(payload: Uint8Array): ApproachVendorData | n
 /*  Fellowship parsing                                                */
 /* ================================================================ */
 
+/**
+ * A Fellow / fellowship field the server's roster does not carry. Every
+ * end-of-retail server sends all of them; the 1999 roster carries only cp,
+ * level and name per fellow and no share flags (reference/ac1999 kb
+ * structures/Fellow), so the 1999 adapter (era1999/codecs/Misc1999.ts) writes
+ * this in their place and the parsers below read it back as `undefined`. No
+ * real value is 0xFFFFFFFF (a vital, or a 0 / 1 flag).
+ */
+export const FELLOW_FIELD_NOT_CARRIED = 0xffffffff;
+
+/** A u32 field, or undefined for {@link FELLOW_FIELD_NOT_CARRIED}. */
+function carried(v: number): number | undefined {
+  return v === FELLOW_FIELD_NOT_CARRIED ? undefined : v;
+}
+
 export interface FellowData {
   guid: number;
   level: number;
-  healthMax: number;
-  staminaMax: number;
-  manaMax: number;
-  healthCurrent: number;
-  staminaCurrent: number;
-  manaCurrent: number;
+  /** The six vitals: undefined when the roster does not carry them (the 1999 Fellow). */
+  healthMax?: number;
+  staminaMax?: number;
+  manaMax?: number;
+  healthCurrent?: number;
+  staminaCurrent?: number;
+  manaCurrent?: number;
   shareLoot: boolean;
   name: string;
 }
@@ -4375,8 +4391,9 @@ export interface FellowshipData {
   fellows: FellowData[];
   fellowshipName: string;
   leaderGuid: number;
-  shareXP: boolean;
-  evenShare: boolean;
+  /** ShareXP / EvenShare: undefined when the roster does not carry them (the 1999 Fellowship). */
+  shareXP?: boolean;
+  evenShare?: boolean;
   open: boolean;
   isLocked: boolean;
   /** The fellows PackableHashTable's bucket count (its iteration order: ClientFellowshipSystem::SelectNextFellow). */
@@ -4420,12 +4437,12 @@ export function parseFellowshipFullUpdate(payload: Uint8Array): FellowshipData |
       const _cpCached = r.readUInt32();
       const _lumCached = r.readUInt32();
       const level = r.readUInt32();
-      const healthMax = r.readUInt32();
-      const staminaMax = r.readUInt32();
-      const manaMax = r.readUInt32();
-      const healthCurrent = r.readUInt32();
-      const staminaCurrent = r.readUInt32();
-      const manaCurrent = r.readUInt32();
+      const healthMax = carried(r.readUInt32());
+      const staminaMax = carried(r.readUInt32());
+      const manaMax = carried(r.readUInt32());
+      const healthCurrent = carried(r.readUInt32());
+      const staminaCurrent = carried(r.readUInt32());
+      const manaCurrent = carried(r.readUInt32());
       const shareLootFlag = r.readUInt32();
       const shareLoot = (shareLootFlag & 0x10) !== 0;
       // ACE WriteString16L pads (2 + length) to 4-byte boundary. Skipping the
@@ -4438,8 +4455,10 @@ export function parseFellowshipFullUpdate(payload: Uint8Array): FellowshipData |
     // Fellowship metadata
     const fellowshipName = readString16L(r);
     const leaderGuid = r.readUInt32();
-    const shareXP = r.readUInt32() !== 0;
-    const evenShare = r.readUInt32() !== 0;
+    const shareXPRaw = carried(r.readUInt32());
+    const evenShareRaw = carried(r.readUInt32());
+    const shareXP = shareXPRaw === undefined ? undefined : shareXPRaw !== 0;
+    const evenShare = evenShareRaw === undefined ? undefined : evenShareRaw !== 0;
     const open = r.readUInt32() !== 0;
     const isLocked = r.readUInt32() !== 0;
 
@@ -4491,12 +4510,12 @@ export function parseFellowshipUpdateFellow(payload: Uint8Array): { fellow: Fell
     const _cpCached = r.readUInt32();
     const _lumCached = r.readUInt32();
     const level = r.readUInt32();
-    const healthMax = r.readUInt32();
-    const staminaMax = r.readUInt32();
-    const manaMax = r.readUInt32();
-    const healthCurrent = r.readUInt32();
-    const staminaCurrent = r.readUInt32();
-    const manaCurrent = r.readUInt32();
+    const healthMax = carried(r.readUInt32());
+    const staminaMax = carried(r.readUInt32());
+    const manaMax = carried(r.readUInt32());
+    const healthCurrent = carried(r.readUInt32());
+    const staminaCurrent = carried(r.readUInt32());
+    const manaCurrent = carried(r.readUInt32());
     const shareLootRaw = r.readUInt32();
     const shareLoot = (shareLootRaw & 0x02) !== 0; // shareLoot << 1 format
     // ACE WriteString16L pads (2 + length) to 4-byte boundary. Skipping the

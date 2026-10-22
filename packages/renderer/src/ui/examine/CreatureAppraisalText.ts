@@ -48,7 +48,8 @@
  */
 
 import type { IdentifyResponseData } from '../../network/ServerMessageHandler.js';
-import { getAllegianceRankTitle } from '@ac/shared';
+import { getAllegianceRankTitle, APPRAISAL_1999_INT } from '@ac/shared';
+import { eraClientRules, type CharacterExamineText } from '../../era/EraFeatures.js';
 
 // ─── Element ids + DAT constants ────────────────────────────────────────
 
@@ -198,6 +199,11 @@ export interface CreatureExamineContext {
    * Defaults to @ac/shared getAllegianceRankTitle.
    */
   allegianceRankTitle?: (heritage: number, gender: number, rank: number) => string | null | undefined;
+  /**
+   * BUG.ac1999-eor-ui-values — the era client's character-page wording
+   * (EraClientRules.characterExamineText); end of retail's when absent.
+   */
+  eraText?: CharacterExamineText;
 }
 
 // ─── Property ids ───────────────────────────────────────────────────────
@@ -505,14 +511,24 @@ export function buildCharacterPage(d: IdentifyResponseData, ctx: CreatureExamine
   const rankTitle = (ctx.allegianceRankTitle ?? getAllegianceRankTitle)(heritage, gender, rank);
   const windowTitle = rankTitle ? `${rankTitle} ${objectName}` : objectName;
 
+  const text = ctx.eraText ?? eraClientRules(null).characterExamineText;
   let allegianceName = '';
+  if (rank < 1 && text.noAllegiance !== null) {
+    // The 1999 CharExaminePanel::SetAppraiseInfo @ 0x0050f760: "No Allegiance\n Loyalty: n  Leadership: n"
+    // (0x604160 / 0x604150), the two from the 1999 profile's +0x40 / +0x44 (APPRAISAL_1999_INT).
+    misc.push({ label: text.noAllegiance, value: '', color: 0 });
+    const loyalty = pi(APPRAISAL_1999_INT.loyalty);
+    const leadership = pi(APPRAISAL_1999_INT.leadership);
+    if (loyalty !== undefined) misc.push({ label: 'Loyalty:', value: `${loyalty}`, color: 0 });
+    if (leadership !== undefined) misc.push({ label: 'Leadership:', value: `${leadership}`, color: 0 });
+  }
   if (rank >= 1) {
     allegianceName = ps(PS.AllegianceName) ?? '';
     const monarch = ps(PS.MonarchsTitle);
     if (monarch === undefined) {
       let followers = pi(PI.AllegianceFollowers) ?? 0;
       if (followers < 0) followers = 0;
-      misc.push({ label: 'Alleg. Monarch:', value: followers === 1 ? '1 Follower' : `${followers} Followers`, color: 0 });
+      misc.push({ label: text.allegianceMonarch, value: followers === 1 ? '1 Follower' : `${followers} Followers`, color: 0 });
     } else {
       const patron = ps(PS.PatronsTitle);
       if (patron === undefined) misc.push({ label: 'Monarch:', value: monarch, color: 0 });
@@ -541,6 +557,7 @@ export function buildCharacterPage(d: IdentifyResponseData, ctx: CreatureExamine
 
   const fellowship = ps(PS.Fellowship);
   if (fellowship !== undefined) misc.push({ label: 'Fellowship:', value: fellowship, color: 0 });
+  else if (text.noFellowship !== null) misc.push({ label: text.noFellowship, value: '', color: 0 }); // 1999 0x603fe4 @ 0x5101ea
   const dob = ps(PS.DateOfBirth);
   if (dob !== undefined) misc.push({ label: 'Arrived in Dereth:', value: dob, color: 0 });
   const age = pi(PI.Age);
@@ -553,7 +570,7 @@ export function buildCharacterPage(d: IdentifyResponseData, ctx: CreatureExamine
   if (deaths !== undefined) misc.push({ label: 'Deaths:', value: deaths < 1 ? 'Has never died' : `${deaths}`, color: 0 });
   const titles = pi(PI.NumCharacterTitles);
   if (titles !== undefined) misc.push({ label: 'Titles Earned:', value: `${titles}`, color: 0 });
-  misc.push({ label: '* = Unenchantable', value: '', color: 0 });
+  if (text.unenchantableLegend) misc.push({ label: '* = Unenchantable', value: '', color: 0 });
 
   return {
     page: 'character',

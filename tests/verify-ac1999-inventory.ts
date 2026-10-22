@@ -20,7 +20,7 @@ import {
 } from '../packages/network/src/MessageSerializer.js';
 import { buildItemAppraisalText } from '../packages/renderer/src/ui/examine/ItemAppraisalText.js';
 import { GameActionType } from '../packages/network/src/GameActionType.js';
-import { APPRAISAL_1999_STRING } from '@ac/shared';
+import { APPRAISAL_1999_INT, APPRAISAL_1999_STRING } from '@ac/shared';
 import { ServerMessageHandler, type IdentifyResponseData } from '../packages/renderer/src/network/ServerMessageHandler.js';
 
 const PLAYER = 0x50000003;
@@ -338,8 +338,9 @@ describe('0xC9 IdentifyObjectResponse: the 1999 fixed-field AppraisalProfile →
       attributes: { strength: 60, endurance: 50, quickness: 40, coordination: 30, focus: 20, self: 10, stamina: 80, mana: 90, staminaMax: 100, manaMax: 110 },
       attributeHighlights: 2, attributeColors: 2,
     });
-    // Loyalty / Leadership (+0x40 / +0x44) are consumed and dropped: the shared character page has no place for them.
-    expect(Object.fromEntries(d.propertiesInt!)).toEqual({ 2: 31, 30: 2, 35: 3, 113: 2, 188: 2, 25: 12 });
+    // Loyalty / Leadership (+0x40 / +0x44) ride under APPRAISAL_1999_INT for the shared character page
+    // (BUG.ac1999-eor-ui-values: the 1999 CharExaminePanel prints them under "No Allegiance").
+    expect(Object.fromEntries(d.propertiesInt!)).toEqual({ 2: 31, 30: 2, 35: 3, 113: 2, 188: 2, 25: 12, [APPRAISAL_1999_INT.loyalty]: 7, [APPRAISAL_1999_INT.leadership]: 9 });
     expect(Object.fromEntries(d.propertiesString!)).toEqual({ 3: 'Female', 4: "Gharu'ndim", 5: 'Bow Hunter', 11: 'Lord Acjs', 21: 'Lord Acjs' });
     expect(Object.fromEntries(d.propertiesDataID!)).toEqual({ 9: 0x05001001, 10: 0x05001002, 11: 0x05001003, 15: 0x04001004, 16: 0x04001005, 17: 0x04001006 });
   });

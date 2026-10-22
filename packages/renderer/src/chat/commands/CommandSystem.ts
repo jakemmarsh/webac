@@ -110,6 +110,8 @@ export interface CommandRun<C> {
   lookup(name: string): CommandEntry<C> | undefined;
   /** Every entry in the table (help group listings). */
   entries(): CommandEntry<C>[];
+  /** Whether this world's era leaves `name` out of the table (era/EraFeatures FEATURE_COMMANDS): @help drops its lines. */
+  withheld(name: string): boolean;
   /** The Turbine-chat spam meter (IsMessageSpam) shared by every SendTurbineChat. */
   readonly spam: SpamMeter;
 }
@@ -308,13 +310,27 @@ export class CommandSystem<C extends CoreCommandContext> {
   private readonly table = new Map<string, CommandEntry<C>>();
   readonly spam = new SpamMeter();
 
-  constructor(readonly ctx: C, entries: Iterable<CommandEntry<C>>) {
+  private readonly withheldNames: ReadonlySet<string>;
+
+  /**
+   * `withheld`: command names (any case) this world's era lacks the feature for
+   * (era/EraFeatures FEATURE_COMMANDS). They are never registered, so the word
+   * falls through as an unknown one does and @help does not offer it.
+   */
+  constructor(readonly ctx: C, entries: Iterable<CommandEntry<C>>, withheld: Iterable<string> = []) {
+    this.withheldNames = new Set([...withheld].map((n) => n.toLowerCase()));
     for (const e of entries) this.register(e);
+  }
+
+  /** Whether `name` is left out of this world's table. */
+  isWithheld(name: string): boolean {
+    return this.withheldNames.has(name.toLowerCase());
   }
 
   /** IntrusiveHashTable::add — the first registration of a name wins, except where retail re-registers (StartupTurbineChatSystem). */
   register(entry: CommandEntry<C>, replace = false): void {
     const key = entry.name.toLowerCase();
+    if (this.withheldNames.has(key)) return;
     if (!replace && this.table.has(key)) return;
     this.table.set(key, entry);
   }
@@ -394,6 +410,7 @@ export class CommandSystem<C extends CoreCommandContext> {
       dispatch: (next) => this.onChatCommand(next, source),
       lookup: (name) => this.lookup(name),
       entries: () => this.entries(),
+      withheld: (name) => this.isWithheld(name),
       spam: this.spam,
     };
     const entry = this.lookup(command);

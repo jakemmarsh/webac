@@ -95,6 +95,12 @@ export function spellbookOrder<T extends { id: number }>(spells: readonly T[], d
  * longer be able to cast this spell unless you learn it again!" (pushed at
  * 0048bdb6; its only reference) for the callback dialog.
  */
-export function spellbookDeleteConfirmText(spellName: string): string {
-  return `Are you sure you want to remove ${spellName} from your spellbook? You will no longer be able to cast this spell unless you learn it again!`;
+export function spellbookDeleteConfirmText(spellName: string, format: string = SPELLBOOK_DELETE_CONFIRM_FORMAT): string {
+  return format.replace('%s', spellName);
 }
+
+/**
+ * End of retail's format. The era's own is EraClientRules.spellDeleteConfirm
+ * (1999: "Are you sure you want to delete %s?", 0x604e60 @ 0x5166f6).
+ */
+export const SPELLBOOK_DELETE_CONFIRM_FORMAT = 'Are you sure you want to remove %s from your spellbook? You will no longer be able to cast this spell unless you learn it again!';

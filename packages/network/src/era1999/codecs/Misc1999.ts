@@ -58,7 +58,7 @@
  *   0xF7C1 AccountBanned {u32 seconds, String16}, 0xF7DC AccountBoot {u32 0}
  */
 import { ChatMessageType, SquelchMask } from '@ac/shared';
-import { BinaryReader, BinaryWriter } from '../../MessageSerializer.js';
+import { BinaryReader, BinaryWriter, FELLOW_FIELD_NOT_CARRIED } from '../../MessageSerializer.js';
 import { Group1999, eol, type AdapterContext, type Codecs1999, type InboundCodec, type Outbound1999, type OutboundCodec } from '../Adapter1999.js';
 import { Reader1999, Writer1999 } from '../Wire1999.js';
 import type { Player1999State } from './Player1999.js';
@@ -112,12 +112,16 @@ function readFellow1999(r: Reader1999): Fellow1999 {
   return { cp, level, name: r.acString() };
 }
 
-/** An end-of-retail Fellow (ACE Fellowship.cs): cp, lum, level, six vitals, shareLoot, String16 name. 1999 has only cp, level, name. */
+/**
+ * An end-of-retail Fellow (ACE Fellowship.cs): cp, lum, level, six vitals, shareLoot, String16 name.
+ * 1999 has only cp, level, name: the vitals are written as FELLOW_FIELD_NOT_CARRIED, so the roster
+ * says it lacks them and the fellowship rows draw no bars (not empty 0/0 ones).
+ */
 function writeFellowEoL(w: BinaryWriter, f: Fellow1999): void {
   w.writeUInt32(f.cp);
   w.writeUInt32(0); // lum: none in 1999
   w.writeUInt32(f.level);
-  for (let i = 0; i < 6; i++) w.writeUInt32(0); // max / current health, stamina, mana: not in the 1999 roster
+  for (let i = 0; i < 6; i++) w.writeUInt32(FELLOW_FIELD_NOT_CARRIED); // max / current health, stamina, mana: not in the 1999 roster
   w.writeUInt32(0); // shareLoot
   w.writeString16(f.name);
 }
@@ -252,7 +256,10 @@ export function registerMisc1999(c: Codecs1999, opts: Misc1999Options = {}): voi
       for (const f of fellows) { w.writeUInt32(f.guid); writeFellowEoL(w, f.fellow); }
       w.writeString16(name);
       w.writeUInt32(leader);
-      for (let i = 0; i < 4; i++) w.writeUInt32(0); // shareXP, evenShare, open, locked: not in 1999
+      // shareXP, evenShare: not in 1999 (the server reads the leader's option), so not carried: the
+      // rows show no XP share. open, locked: 0 (no openness or locks in 1999; their controls are hidden).
+      w.writeUInt32(FELLOW_FIELD_NOT_CARRIED); w.writeUInt32(FELLOW_FIELD_NOT_CARRIED);
+      w.writeUInt32(0); w.writeUInt32(0);
       w.writeUInt16(0); w.writeUInt16(32); // empty departed table
       w.writeUInt16(0); w.writeUInt16(32); // empty locks table
     };

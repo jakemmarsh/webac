@@ -59,7 +59,7 @@
  *        {f64 efficiency, u32 curMana}; 0x2000000 AcString enchantments (UnPack @ 0x005e0fa0 in the
  *        1999 client.exe reads exactly these, in this order). 0xFFFFFFFF in a fixed section = absent.
  *        The 1999-only fields (spell names / descriptions, enchantments, mana rate, range fallback)
- *        ride under @ac/shared APPRAISAL_1999_STRING / _FLOAT keys, past every STypes range; the
+ *        ride under @ac/shared APPRAISAL_1999_STRING / _INT / _FLOAT keys, past every STypes range; the
  *        1999 item page (ui/examine/ItemAppraisalText1999.ts) reads them.
  *        → EoL: the property-table form (Int/Bool/Float/String/DID tables keyed by the same
  *        STypes, which 1999 and end of retail share), CreatureProfile {flags 0x8|0x1 only, health,
@@ -67,7 +67,8 @@
  *        WeaponDefense), ArmorProfile (8 floats), the three enchantment bitfields (u32 = u16+u16).
  *        The character block becomes Strings Sex 3 / HeritageGroup 4 / Template 5 / Fellowship 10 /
  *        MonarchsName 11 and MonarchsTitle 21, Ints Gender 113 / HeritageGroup 188 (from the names),
- *        AllegianceRank 30, AllegianceFollowers 35, the face DIDs 9/10/11/15/16/17.
+ *        AllegianceRank 30, AllegianceFollowers 35, Loyalty / Leadership (APPRAISAL_1999_INT), the
+ *        face DIDs 9/10/11/15/16/17.
  *   Flat (SendNetMessage event=FALSE):
  *     0x197 SetStackSize  1999: {guid, stack, value} (no sequence byte) → EoL u8 sequence (synthesized,
  *           +1 per object) + the same
@@ -88,7 +89,7 @@ import { BinaryReader, BinaryWriter } from '../../MessageSerializer.js';
 import { Group1999, eol, type AdapterContext, type Codecs1999, type Outbound1999 } from '../Adapter1999.js';
 import { Reader1999, Writer1999 } from '../Wire1999.js';
 import type { Player1999State } from './Player1999.js';
-import { APPRAISAL_1999_FLOAT, APPRAISAL_1999_STRING } from '@ac/shared';
+import { APPRAISAL_1999_FLOAT, APPRAISAL_1999_INT, APPRAISAL_1999_STRING } from '@ac/shared';
 
 /** The F7B0 envelope's fields, when the message arrived wrapped. */
 interface Envelope { guid: number; sequence: number }
@@ -179,9 +180,11 @@ function appraisal(r: Reader1999, w: BinaryWriter): void {
       ints.set(P.IntAllegianceRank, r.u32());
       ints.set(P.IntAllegianceFollowers, r.u32());
       // +0x40 / +0x44: the character's Loyalty and Leadership (the 1999 CharExaminePanel::SetAppraiseInfo
-      // @ 0x0050f760 prints them under "No Allegiance"; the shared character page has no place for
-      // them); +0x88 has no reader.
-      r.u32(); r.u32(); r.u32();
+      // @ 0x0050f760 prints them under "No Allegiance"): they ride under APPRAISAL_1999_INT for the shared
+      // character page; +0x88 has no reader.
+      ints.set(APPRAISAL_1999_INT.loyalty, r.u32() | 0);
+      ints.set(APPRAISAL_1999_INT.leadership, r.u32() | 0);
+      r.u32();
       const gender = r.acString();
       const heritage = r.acString();
       const profession = r.acString();

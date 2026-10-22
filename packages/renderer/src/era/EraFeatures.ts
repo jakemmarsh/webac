@@ -24,15 +24,37 @@ export type EraFeature =
   | 'netherDamage'
   /**
    * Later item kinds and pastimes the 1999 client.exe has no trace of (BUG.ac1999-char-info-eor-rows
-   * sweep): cloaks and trinkets (their paperdoll slots and the Show Your Cloak option), rare gems
-   * (Confirm Use of Rare Gems) and fishing (Allow Others to See Your Fishing Skill). Its options
-   * page lists thirteen character options, none of these (strings @ file 0x210a44-0x210ba8), and
-   * its strings name no cloak, trinket or fishing at all.
+   * sweep): cloaks (the Show Your Cloak option), rare gems (Confirm Use of Rare Gems) and fishing
+   * (Allow Others to See Your Fishing Skill). Its options page lists thirteen character options,
+   * none of these (strings @ file 0x210a44-0x210ba8), and its strings name no cloak, trinket or
+   * fishing at all. (The paperdoll's slots are data: EraClientRules.equipSlotMask.)
    */
   | 'cloaks'
-  | 'trinkets'
   | 'rareGems'
-  | 'fishing';
+  | 'fishing'
+  /**
+   * The Social panel's Squelch page, a list of the squelched names (BUG.ac1999-eor-ui sweep). The
+   * 1999 social panel has Allegiance and Fellowship only; its squelch list is a bare id list on the
+   * client, set by @squelch / @unsquelch and the chat menu's Ignore item, and nothing lists it:
+   * "@squelch with no argument to list the squelched names" came in a later patch (reference/ac1999
+   * kb client-behavior/squelch-list.md, Sybex guide appendix). @squelch / @unsquelch stay.
+   */
+  | 'squelchListPage'
+  /**
+   * The Components page's desired-level column and @fillcomps (BUG.ac1999-eor-ui sweep): the
+   * player's rebuy book, saved on the server by SetDesiredComponentLevel 0x224, which has no 1999
+   * builder (docs/ac1999-support.md, Combat1999 drops it), and @fillcomps, which buys from that
+   * book (not in the 1999 client's @-command table, kb client-behavior/ui-command-dispatch.md).
+   */
+  | 'desiredComponents'
+  /**
+   * Automatically Accept Fellowship Requests (CharacterOptions1.AutoAcceptFellowRequest): not one
+   * of the 1999 client's thirteen character options (strings @ file 0x210a44-0x210ba8), and
+   * nothing on the AC1999 server or in our client acts on it there, so its fellowship-pane
+   * checkbox, its Character options row, its Keyboard Config command and the agent's auto toggle
+   * are inert on 1999.
+   */
+  | 'autoAcceptFellowship';
 
 const NONE: ReadonlySet<EraFeature> = new Set();
 /**
@@ -55,7 +77,9 @@ const NONE: ReadonlySet<EraFeature> = new Set();
  *   end-of-retail wcids, which name other weenies on a 1999 server;
  * - friendsPanel: the 1999 server keeps the friends list and answers
  *   @friends in chat only (no inbound friends message to fill a page);
- * - netherDamage: the 1999 armor profile carries seven resistances, no nether.
+ * - netherDamage: the 1999 armor profile carries seven resistances, no nether;
+ * - squelchListPage: nothing in 1999 lists the squelched names (@squelch stays);
+ * - desiredComponents: the rebuy book's 0x224 has no 1999 builder.
  */
 const AC1999_UNSUPPORTED: ReadonlySet<EraFeature> = new Set<EraFeature>([
   ...(Object.keys(ABSENT_1999) as Absent1999Feature[]),
@@ -63,9 +87,11 @@ const AC1999_UNSUPPORTED: ReadonlySet<EraFeature> = new Set<EraFeature>([
   'friendsPanel',
   'netherDamage',
   'cloaks',
-  'trinkets',
   'rareGems',
   'fishing',
+  'squelchListPage',
+  'desiredComponents',
+  'autoAcceptFellowship',
 ]);
 
 /** The features era `p` lacks (empty for end of retail and the classic eras). */
@@ -87,6 +113,53 @@ export const FEATURE_TOOLBAR_BUTTONS: Readonly<Partial<Record<EraFeature, readon
 /** The Social panel's tabs (GameUI socialTab keys) each feature owns. */
 export const FEATURE_SOCIAL_TABS: Readonly<Partial<Record<EraFeature, readonly string[]>>> = {
   friendsPanel: ['friends'],
+  squelchListPage: ['squelch'],
+};
+
+/** The World panel's tabs (GameUI worldPanelTab keys) each feature owns: the House page is gmHouseUI's. */
+export const FEATURE_WORLD_TABS: Readonly<Partial<Record<EraFeature, readonly string[]>>> = {
+  housing: ['house'],
+};
+
+/** The indicator strip's icons (GameUI indicatorDefs ids, layout 0x21000071) each feature owns. */
+export const FEATURE_INDICATORS: Readonly<Partial<Record<EraFeature, readonly string[]>>> = {
+  chess: ['minigame'], // 0x100000f3, lit while a mini-game (chess) is in progress
+};
+
+/** The Social panel's fellowship-pane controls each feature owns (layout 0x21000031 element ids). */
+export const FEATURE_FELLOWSHIP_CONTROLS: Readonly<Partial<Record<EraFeature, readonly number[]>>> = {
+  autoAcceptFellowship: [0x10000271], // the Automatically Accept Fellowship Requests checkbox
+};
+
+/** The Components page's controls each feature owns: the desired-level field 0x1000046b (0x21000033). */
+export const FEATURE_COMPONENT_CONTROLS: Readonly<Partial<Record<EraFeature, readonly number[]>>> = {
+  desiredComponents: [0x1000046b],
+};
+
+/**
+ * The chat @-commands (CommandEntry names, lower case) each feature owns. An era lacking the
+ * feature never registers them: the word falls through as an unknown one does (DoChannelCommand,
+ * then the whole line to the server, as both clients do), @help <word> says "Unknown command", and
+ * the @help lists leave their lines out (chat/commands/TextUiHelpCommands.ts). The Turbine-chat
+ * room commands need no entry: they register only when the server's character list turns
+ * TurbineChat on (StartupTurbineChatSystem), which a 1999 world never does.
+ *
+ * Commands that work in the client alone stay on every era (@title names a chat window, @saveui /
+ * @loadui / @lockui keep the layout locally, @die / @corpse / @day / @emotes, the channel words).
+ */
+export const FEATURE_COMMANDS: Readonly<Partial<Record<EraFeature, readonly string[]>>> = {
+  afk: ['afk'],
+  // 1999's @-table has no @allegiance at all; every subcommand (boot, info, ban, officer, title,
+  // name, lock, house, hometown, motd, broadcast, chat kick / gag) is an administration action.
+  allegianceAdmin: ['allegiances', 'allegiance', 'all', 'ab', 'alh', 'ah', 'motd', 'speaker'],
+  housing: ['house', 'hou', 'hslist', 'hor', 'hr', 'hom', 'hoa'],
+  consent: ['consent', 'permit'],
+  postLaunchRecalls: ['marketplace', 'mar', 'mp', 'pkarena', 'pka', 'pklarena', 'pla'],
+  pkLite: ['pklite', 'pkl'],
+  squelchFilters: ['filter', 'unfilter', 'messagetypes', 'message_types', 'msgtypes', 'msg_types'],
+  // @join / @leave set the Listen to <room> Chat options, the TurbineChat rooms'.
+  turbineChat: ['join', 'leave'],
+  desiredComponents: ['fillcomps'],
 };
 
 /** The Character options rows (CharacterSettingsRow.playerOption) each feature owns. */
@@ -101,12 +174,7 @@ export const FEATURE_CHARACTER_OPTIONS: Readonly<Partial<Record<EraFeature, read
   cloaks: ['ShowCloak'],
   rareGems: ['ConfirmVolatileRareUse'],
   fishing: ['DisplayFishingSkill'],
-};
-
-/** The paperdoll equip slots (EquipMask bits) each feature owns. */
-export const FEATURE_EQUIP_SLOTS: Readonly<Partial<Record<EraFeature, readonly number[]>>> = {
-  cloaks: [0x08000000], // EquipMask.Cloak
-  trinkets: [0x04000000], // EquipMask.TrinketOne
+  autoAcceptFellowship: ['FellowshipAutoAcceptRequests'],
 };
 
 /** The Chat options channel filters (CHAT_CHANNELS suffixes) each feature owns. */
@@ -122,7 +190,7 @@ export const FEATURE_TALK_FOCUSES: Readonly<Partial<Record<EraFeature, readonly 
 /** The Keyboard Config commands (ActionMap 0x26000000 ids) each feature owns. */
 export const FEATURE_KEYBIND_ACTIONS: Readonly<Partial<Record<EraFeature, readonly number[]>>> = {
   housing: [0x10000018, 0x10000087], // House Page, Disable House Restriction Effects
-  contracts: [0x1000012e, 0x10000127, 0x10000128], // Contracts, Quest Detail, Quest Journal
+  contracts: [0x1000012e, 0x10000127, 0x10000128, 0x10000129], // Contracts, Quest Detail, Quest Journal, Journal Page List
   characterTitles: [0x1000011a, 0x1000011b], // Titles Page, Allow Others to See Your Number of Titles
   secureTrade: [0x10000074, 0x10000088], // Ignore All Trade Requests, Drag Item to Player Opens Trade
   consent: [0x10000081], // Accept Corpse Looting Permissions
@@ -130,6 +198,10 @@ export const FEATURE_KEYBIND_ACTIONS: Readonly<Partial<Record<EraFeature, readon
   salvage: [0x10000093, 0x1000008b], // Salvage Multiple, Use Crafting Chance of Success Dialog
   turbineChat: [0x1000008c, 0x1000010e, 0x1000010f, 0x10000110, 0x10000112, 0x10000125], // Listen to Allegiance/General/Trade/LFG/Roleplay/Society Chat
   friendsPanel: [0x10000118], // Show/Hide Friends Page
+  cloaks: [0x1000012f], // Your cloak is visible.
+  rareGems: [0x10000123], // Confirm Use of Rare Gems
+  fishing: [0x10000090], // Allow Others to See Your Fishing Skill
+  autoAcceptFellowship: [0x10000083], // Automatically Accept Fellowship Requests
 };
 
 /** Every entry of `table` owned by a feature in `unsupported`. */
@@ -140,9 +212,11 @@ export function hiddenBy<T>(table: Readonly<Partial<Record<EraFeature, readonly 
 }
 
 /**
- * The client-code rules that differ by era: facts of each era's executable,
- * not of its DATs (MOVE.combination-sweep era research). End of retail and the
- * classic eras run the end-of-retail acclient.exe; 1999 its own client.exe.
+ * The era's client profile: the client-code rules and values that differ by
+ * era, facts of each era's executable, not of its DATs (MOVE.combination-sweep
+ * era research; BUG.ac1999-eor-ui-values). End of retail and the classic eras
+ * run the end-of-retail acclient.exe; 1999 its own client.exe. One table: the
+ * shared panels read their era's values here instead of branching on the era.
  */
 export interface EraClientRules {
   /**
@@ -256,10 +330,245 @@ export interface EraClientRules {
    * while there is more to see on its side.
    */
   spellBarArrows: 'pair' | 'ends';
+  /**
+   * What @chat on / off does. End of retail ('server'): DoChatToggle @ 0056fad0 sends
+   * Event_ModifyGlobalSquelch 0x5B (Speech) and the server's squelch reply gates it. The 1999
+   * client.exe ('local'): CmdHandlers_DoChatToggle → UI_SetLocalChatSquelched @ 0x4d0470 sets
+   * UI+0x5a0, prints "Local chat is now squelched." / "Local chat is no longer squelched." and sends
+   * nothing; UI_ShouldHearSpeaker @ 0x4d0360 then hides every HearSpeech 0x37 and HearEmote line
+   * whose speaker id is non-zero (kb client-behavior/squelch-list.md). Tells are not affected.
+   */
+  chatToggle: 'server' | 'local';
+
+  // ── The era client's values (BUG.ac1999-eor-ui-values) ─────────────────────
+  // Where 1999 differs from end of retail only in a value (a string, a slot set, an option
+  // list), the shared panel reads it here: one lookup per panel, no per-era branch. End of
+  // retail's values are today's (its local-DAT string ids with their fallbacks); the 1999
+  // values are the 1999 client.exe's own (Oct 1999 4.35752, addresses cited per value).
+
+  /**
+   * The paperdoll's equip slots (EquipMask bits; a slot shows when its mask meets this). End of
+   * retail: every slot (gmPaperDollUI, layout 0x21000024). 1999: InventoryPanel's ctor @ 0x522fc0
+   * builds exactly eight ItemSlots, neck 0x8000, bracelets 0x10000 / 0x20000, rings 0x40000 /
+   * 0x80000, weapon 0x1500000, ammo 0x800000, shield 0x200000 (OR 0x1bf8000): no shirt / pants
+   * flank, no body-region armour view (so no "Slots" gem), no cloak, trinket or aetheria.
+   */
+  equipSlotMask: number;
+  /** The character panel's footer wording (gmStatManagementUI footers / the 1999 InfoBox family). */
+  statFooterText: StatFooterText;
+  /**
+   * Whether the stat footer has the "+10" raise button (0x100005eb). End of retail: yes. 1999: one
+   * Raise button only (StatsPanel @ 0x00549c90; 0x00549809 sends the shown price for an attribute
+   * or vital, 0x005471f9 for a skill).
+   */
+  statRaiseTen: boolean;
+  /**
+   * The prompt before training a skill ("%d" credits, "%s" skill), or null when the client trains
+   * at once. End of retail: gmSkillUI::TrainSkill @ 0049c5f0's .rdata 0x7a7864. 1999: the Raise
+   * press sends 0x47 TrainSkill with no dialog (0x005471f9).
+   */
+  trainSkillConfirm: string | null;
+  /**
+   * The combat bar's checkbox rows, in order (GameUI optionsSettings keys). End of retail:
+   * gmCombatUI::PostInit @ 004cc1a0, Repeat Attacks / Auto Target / Keep in View. 1999:
+   * CombatPanel @ 0x589bc0 builds High / Medium / Low, Repeat Attacks, Auto Target, Speed and
+   * Power only; "keep combat targets in view" lives on its options page instead (0x611478).
+   */
+  combatBarOptions: readonly CombatBarOption[];
+  /** The spellbook's delete prompt ("%s" = the spell's name). */
+  spellDeleteConfirm: string;
+  /** The Chat button menu's wording, or null for the local DAT's ID_Chat_* strings (end of retail). */
+  chatTargetText: ChatTargetText | null;
+  /**
+   * Character options rows that do nothing in this era (CharacterSettingsRow.playerOption): neither
+   * its server nor our client acts on them. Rows whose feature the era lacks are FEATURE_CHARACTER_OPTIONS'.
+   */
+  characterOptionsInert: readonly string[];
+  /** The era client's own label for a Character options row (by playerOption); absent = the DAT label. */
+  characterOptionLabels: Readonly<Record<string, string>>;
+  /** The character examine page's era wording. */
+  characterExamineText: CharacterExamineText;
+  /** The item hover text's era additions, or null (end of retail: UIElement_UIItem::UpdateTooltip, the name alone). */
+  itemHoverText: ItemHoverText | null;
 }
 
-const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const });
-const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const });
+/** A client string: an exe literal, or a local-DAT string-table entry with its fallback. */
+export type ClientText = string | { readonly stringId: number; readonly fallback: string };
+
+/** Resolve a ClientText through `lookup` (the loaded string tables). */
+export function resolveClientText(t: ClientText, lookup: (id: number) => string | null | undefined): string {
+  return typeof t === 'string' ? t : (lookup(t.stringId) ?? t.fallback);
+}
+
+export interface StatFooterText {
+  attributePrompt: ClientText;
+  skillPrompt: ClientText;
+  /** Line 1 of a selected attribute. */
+  xpToRaise: ClientText;
+  /** Line 1 of a selected vital. */
+  xpToRaiseVital: ClientText;
+  /** Line 1 of a selected trained / specialized skill. */
+  xpToRaiseSkill: ClientText;
+  unassignedXp: ClientText;
+  creditsToTrain: ClientText;
+  creditsAvailable: ClientText;
+  /** The price of a raise past the table's end. */
+  infinity: ClientText;
+  /** The header's total-XP label. */
+  totalXp: ClientText;
+}
+
+export type CombatBarOption = 'repeatAttacks' | 'autoTarget' | 'keepCombatTargetsInView';
+
+export interface ChatTargetText {
+  /** The squelch row with nobody selected. */
+  squelchSelected: string;
+  /** The squelch row's prefix before the selected name. */
+  squelchPrefix: string;
+  /** The Chat button's label per talk focus (ChatTalkFocus TalkFocus ids); absent = the DAT's. */
+  buttonLabels: Readonly<Partial<Record<number, string>>>;
+}
+
+export interface CharacterExamineText {
+  /** Shown when the character has no allegiance, or null for nothing (end of retail). */
+  noAllegiance: string | null;
+  /** Shown when the character has no fellowship, or null for nothing (end of retail). */
+  noFellowship: string | null;
+  /** The label over a monarch's follower count. */
+  allegianceMonarch: string;
+  /** Whether the page ends with the "* = Unenchantable" legend. */
+  unenchantableLegend: boolean;
+}
+
+/** The 1999 hover text (the help bar's two lines: the name line, then the hint). */
+export interface ItemHoverText {
+  wielded: string;
+  worn: string;
+  container: string;
+  selling: string;
+  hints: {
+    wear: string; wield: string; pickUp: string; takeOff: string; use: string;
+    consume: string; openClose: string; readWrite: string; unlock: string;
+    manaTransfer: string; manaDrain: string; enterPortal: string;
+  };
+  /** The vendor's line in place of the hint ("%u" = the price). */
+  vendorWorth: { buy: string; buyList: string; sellList: string };
+}
+
+/** gmSkillUI::TrainSkill's prompt (.rdata 0x7a7864, a literal: no string-table entry). */
+export const EOR_TRAIN_SKILL_CONFIRM = 'Are you sure you want to spend %d credits to train %s?';
+
+const EOR_STAT_FOOTER_TEXT: StatFooterText = Object.freeze({
+  attributePrompt: { stringId: 202231733, fallback: 'Select an Attribute to Improve' },
+  skillPrompt: { stringId: 220682197, fallback: 'Select a Skill to Improve' },
+  xpToRaise: { stringId: 175085980, fallback: 'Experience To Raise:' },
+  xpToRaiseVital: { stringId: 175085980, fallback: 'Experience To Raise:' },
+  xpToRaiseSkill: { stringId: 175085980, fallback: 'Experience To Raise:' },
+  unassignedXp: { stringId: 249332076, fallback: 'Unassigned Experience:' },
+  creditsToTrain: { stringId: 218797164, fallback: 'Skill Credits To Train' },
+  creditsAvailable: { stringId: 230538876, fallback: 'Skill Credits Available:' },
+  infinity: { stringId: 206482569, fallback: 'Infinity!' },
+  totalXp: { stringId: 168019916, fallback: 'Total Experience (XP):' },
+});
+
+/** The 1999 client.exe's character panel strings (StatRegion / InfoBox / AttribInfoBox / SkillInfoBox). */
+const AC1999_STAT_FOOTER_TEXT: StatFooterText = Object.freeze({
+  attributePrompt: 'Select an attribute to improve.', // 0x608ca4, InfoBox @ 0x544092
+  skillPrompt: 'Select a skill to improve.', // 0x608f34, SkillInfoBox @ 0x5455d7
+  xpToRaise: 'XP to raise:', // 0x608cd4, InfoBox @ 0x543ef3 / AttribInfoBox::Display @ 0x544fad
+  xpToRaiseVital: 'XP to raise max value:', // 0x608f1c, AttribInfoBox::Display @ 0x544f92 (a vital)
+  xpToRaiseSkill: 'XP cost to raise skill:', // 0x608f50, SkillInfoBox @ 0x5455be
+  unassignedXp: 'Unassigned XP:', // 0x608cc4, InfoBox @ 0x543fc8 / 0x5440f4 / 0x544a13
+  creditsToTrain: 'Skill credits needed to train:', // 0x60908c, SkillInfoBox display @ 0x545896
+  creditsAvailable: 'Skill credits available:', // 0x608f68, @ 0x54532c / 0x545c14
+  infinity: 'INFINITY', // 0x608c90, @ 0x543815 / 0x544ffd / 0x545f6e
+  totalXp: 'Total experience (XP):', // 0x608b7c, StatRegion @ 0x542e34
+});
+
+/** Character options rows a 1999 world has no use for (BUG.ac1999-eor-ui-values, item 8; each checked). */
+const AC1999_INERT_CHARACTER_OPTIONS: readonly string[] = Object.freeze([
+  // options2 bits the AC1999 server stores (ClientEvents.cpp CHANGE_PLAYER_OPTION) but never reads,
+  // with no local effect in our client either:
+  'MainPackPreferred', 'FilterLanguage',
+  // Read only by its appraisal builder (ObjectMsgs.cpp ~1494 / ~1711), but the 1999 creature profile
+  // the 1999 client and our adapter carry has no age, birth or deaths fields (Inventory1999.ts):
+  'DisplayDateOfBirth', 'DisplayAge', 'DisplayNumberDeaths',
+  // Stored, never read by the 1999 server (only command/ClientBugs.cpp names it), no local effect.
+  // (Automatically Accept Fellowship Requests is the same, but its row, checkbox and key belong to
+  // the autoAcceptFellowship feature: FEATURE_CHARACTER_OPTIONS.)
+  'UseChargeAttack',
+]);
+
+/** The 1999 options page's own labels (SystemPanel @ 0x591900-0x592d00) for the rows it had. */
+const AC1999_CHARACTER_OPTION_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  ViewCombatTarget: 'Automatically keep combat targets in view', // 0x611478 @ 0x5929d5
+  AutoRepeatAttack: 'Automatically Repeat Attacks', // 0x6114a4 @ 0x592861
+  AdvancedCombatUI: 'Advanced Combat Interface (No Panel)', // 0x6114c4 @ 0x59258b
+  ToggleRun: 'Run as Default Movement', // 0x6114ec @ 0x59241a
+  AllowGive: 'Let Other Players Give You Items', // 0x611504
+  UseDeception: 'Attempt to Deceive Other Players', // 0x611528
+  VividTargetingIndicator: 'Vivid targeting indicator', // 0x61154c @ 0x591d55
+  StayInChatMode: 'Stay in Chat Mode after sending a message', // 0x611568 @ 0x591bfd
+  ShowTooltips: 'Display Tooltips', // 0x611594 @ 0x591aa5
+});
+
+const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
+  castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const,
+  chatToggle: 'server' as const,
+  equipSlotMask: 0xffffffff,
+  statFooterText: EOR_STAT_FOOTER_TEXT,
+  statRaiseTen: true,
+  trainSkillConfirm: EOR_TRAIN_SKILL_CONFIRM,
+  combatBarOptions: Object.freeze(['repeatAttacks', 'autoTarget', 'keepCombatTargetsInView'] as const),
+  // gmSpellbookUI::DeleteSpell @ 0048bd50 (.rdata 0x7a3ea8, its only reference @ 0048bdb6).
+  spellDeleteConfirm: 'Are you sure you want to remove %s from your spellbook? You will no longer be able to cast this spell unless you learn it again!',
+  chatTargetText: null,
+  characterOptionsInert: Object.freeze([]),
+  characterOptionLabels: Object.freeze({}),
+  // CharExamineUI::SetAppraiseInfo @ 004b45f0: "Alleg. Monarch:", the legend last, nothing when unaffiliated.
+  characterExamineText: Object.freeze({ noAllegiance: null, noFellowship: null, allegianceMonarch: 'Alleg. Monarch:', unenchantableLegend: true }),
+  itemHoverText: null,
+});
+const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
+  castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const,
+  chatToggle: 'local' as const,
+  equipSlotMask: 0x1bf8000, // InventoryPanel @ 0x522fc0
+  statFooterText: AC1999_STAT_FOOTER_TEXT,
+  statRaiseTen: false,
+  trainSkillConfirm: null,
+  combatBarOptions: Object.freeze(['repeatAttacks', 'autoTarget'] as const), // CombatPanel @ 0x589bc0
+  // 0x604e60 (its three leading layout newlines dropped), _snprintf'd with the row's spell name @ 0x516701.
+  spellDeleteConfirm: 'Are you sure you want to delete %s?',
+  // ChatMenu @ 0x51b390 (0x605524 "Ignore Selected"), SetSelected's "Ignore " (0x605650 @ 0x51c4de);
+  // the button reads "Chat" for Chat to All and "Tell" for every tell (@ 0x51c050: 0x51c22b-0x51c2f9).
+  chatTargetText: Object.freeze({
+    squelchSelected: 'Ignore Selected', squelchPrefix: 'Ignore ',
+    buttonLabels: Object.freeze({ 1: 'Chat', 2: 'Tell', 3: 'Tell', 4: 'Tell', 5: 'Tell', 6: 'Tell' }),
+  }),
+  characterOptionsInert: AC1999_INERT_CHARACTER_OPTIONS,
+  characterOptionLabels: AC1999_CHARACTER_OPTION_LABELS,
+  // CharExaminePanel::SetAppraiseInfo @ 0x0050f760: "No Allegiance" (0x604160, then Loyalty / Leadership),
+  // "Allegiance Monarch:" (0x604190), "No Fellowship" (0x603fe4); no legend line.
+  characterExamineText: Object.freeze({ noAllegiance: 'No Allegiance', noFellowship: 'No Fellowship', allegianceMonarch: 'Allegiance Monarch:', unenchantableLegend: false }),
+  // The hover text builder @ 0x5873c0 (name line), its hint @ 0x589460, the vendor line @ 0x5a4000.
+  itemHoverText: Object.freeze({
+    wielded: ' (wielded)', worn: ' (worn)', container: ' (container)', selling: 'Selling ', // 0x60fa54 / 60 / 68, 0x60fa8c
+    hints: Object.freeze({
+      wear: "Double click to wear (if there's room)", wield: 'Double click to wield', // 0x60fb2c, 0x60fb54
+      pickUp: 'Double click to pick up', takeOff: 'Double click to unwield/take off', // 0x60fb6c, 0x60fb84
+      use: 'Double click to use', consume: 'Double click to consume', // 0x60fba8, 0x60fc90
+      openClose: 'Double click to open and close', readWrite: 'Double click to read or write', // 0x60fc70, 0x60fc50
+      unlock: 'Double click to unlock your last selected item', // 0x60fc20
+      manaTransfer: 'Double click to transfer Mana to an item.', manaDrain: 'Double click to drain Mana from, and destroy, an item.', // 0x60fbf4, 0x60fbbc
+      enterPortal: 'Double click to enter portal', // 0x60fca8
+    }),
+    vendorWorth: Object.freeze({
+      buy: 'Worth %up - Double click to buy', // 0x612f80
+      buyList: 'Worth %up - Double click to remove from buying list', // 0x612f4c
+      sellList: 'Worth %up - Double click to remove from selling list', // 0x612f14
+    }),
+  }),
+});
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {
