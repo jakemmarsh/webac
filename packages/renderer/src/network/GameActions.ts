@@ -41,6 +41,18 @@ export class GameActions {
   ) {}
 
   /**
+   * The era's spell-bar tab count (eraClientRules().spellBarTabs; BUG.ac1999-spell-tabs): a
+   * favorite on a tab past it is never sent. The 1999 client.exe has one bar, and its
+   * Event_AddToSpellbar @ 0x53e2d0 carries no bar field at all.
+   */
+  spellBarTabs = 8;
+
+  /** Whether `barIndex` is a tab this era's spell bar has. */
+  private spellBarExists(barIndex: number): boolean {
+    return Number.isInteger(barIndex) && barIndex >= 0 && barIndex < this.spellBarTabs;
+  }
+
+  /**
    * Toggle a single CharacterOption. Per GameActionSetSingleCharacterOption.cs:
    *   option u32 (CharacterOption enum) + value u32 (bool, 0/1).
    */
@@ -56,6 +68,7 @@ export class GameActions {
    *   spellId u32 + spellBarPositionId u32 (slot 0-8) + spellBarId u32 (page 0-7).
    */
   addSpellFavorite(spellId: number, position: number, barIndex: number): void {
+    if (!this.spellBarExists(barIndex)) return;
     const send = this.getSend();
     if (!send) return;
     send(GameActionType.AddSpellFavorite, buildAddSpellFavoritePayload(spellId, position, barIndex));
@@ -67,6 +80,7 @@ export class GameActions {
    *   spellId u32 + spellBarId u32 (page 0-7).
    */
   removeSpellFavorite(spellId: number, barIndex: number): void {
+    if (!this.spellBarExists(barIndex)) return;
     const send = this.getSend();
     if (!send) return;
     send(GameActionType.RemoveSpellFavorite, buildRemoveSpellFavoritePayload(spellId, barIndex));

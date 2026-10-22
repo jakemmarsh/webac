@@ -8,6 +8,7 @@
  */
 import { ABSENT_1999, type Absent1999Feature } from '@ac/network';
 import type { EraProfile } from './EraProfiles.js';
+import { quickslotCommand } from '../network/itemShortcutRestore.js';
 
 export type EraFeature =
   | Absent1999Feature
@@ -192,12 +193,54 @@ export interface EraClientRules {
    * the shared one in every era (Jake, 2026-10-22).
    */
   statLineText: 'eor' | 'ac1999';
+  /**
+   * How many spell-bar tabs (favourite spell lists) the magic bar has (BUG.ac1999-spell-tabs,
+   * webac#5). End of retail: eight (gmSpellcastingUI's tab ids 0x100000a3-a9 + 0x100005c2,
+   * RecvNotice_PlayerDescReceived @ 004c69a0 loops all 8; the Dark Majesty local DATs carry the
+   * same eight tabs in 0x21000010, and those servers run the end-of-retail acclient.exe). The 1999
+   * client.exe has ONE bar and no tabs: CM_Character_Event_AddToSpellbar @ 0x53e2d0 writes only
+   * {spellID, index} (no bar field), RemoveFromSpellbar @ 0x53e3b0 only {spellID}, its PlayerModule
+   * carries a single favorites list, and it has no spell-tab commands (tabs came with Heroes'
+   * Respite, May 2000). With one tab the shared bar draws no tab strip at all.
+   */
+  spellBarTabs: number;
+  /**
+   * How many item-shortcut (quick) slots the toolbar has (BUG.ac1999-spell-tabs sweep). End of
+   * retail: 18, two rows of 9 (gmToolbarUI::InitShortcutArray @ 004bdd50, Quickslot 1-18). The
+   * 1999 client.exe: nine, the 1-9 tray (ShortCutManager::AddShortCut @ 0x586f00 refuses an index
+   * past 8; its key commands are UseShortcut 1-9). The 1999 toolbar shows one row.
+   */
+  shortcutSlots: number;
 }
 
-const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const });
-const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const });
+const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18 });
+const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9 });
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {
   return p?.login.protocol === 'ac1999' ? AC1999_CLIENT_RULES : EOR_CLIENT_RULES;
+}
+
+/** Previous / Next / First / Last Spell Tab (ActionMap 0x26000000; gmSpellcastingUI::RecvNotice_*SpellTab). */
+export const SPELL_TAB_ACTIONS: readonly number[] = [0x10000063, 0x10000064, 0x10000104, 0x10000105];
+
+/** Every Quickslot / Select Quickslot command id (1-12: 0x10000042-59, 13-18: 0x10000132-3d). */
+const QUICKSLOT_ACTIONS: readonly number[] = [
+  ...Array.from({ length: 0x18 }, (_, i) => 0x10000042 + i),
+  ...Array.from({ length: 12 }, (_, i) => 0x10000132 + i),
+];
+
+/**
+ * The Keyboard Config commands era `rules` leaves with nothing to do (BUG.ac1999-spell-tabs): the
+ * spell-tab commands on a one-tab bar, and the Quickslot / Select Quickslot commands past the
+ * toolbar's slot count. Like FEATURE_KEYBIND_ACTIONS, they are not listed (No Dead-End UI).
+ */
+export function clientRuleHiddenActions(rules: Pick<EraClientRules, 'spellBarTabs' | 'shortcutSlots'>): Set<number> {
+  const out = new Set<number>();
+  if (rules.spellBarTabs <= 1) for (const id of SPELL_TAB_ACTIONS) out.add(id);
+  for (const id of QUICKSLOT_ACTIONS) {
+    const q = quickslotCommand(id);
+    if (q && q.slot >= rules.shortcutSlots) out.add(id);
+  }
+  return out;
 }

@@ -160,7 +160,7 @@ import {
   JOURNAL_NO_LOCATION_TEXT, type CellPosition,
 } from './MapMarkers.js';
 import {
-  SpellCastSubMenu, shortcutNumMedia, shortcutNumForIndex, nextSpellBarTab, prevSpellBarTab,
+  SpellCastSubMenu, shortcutNumMedia, shortcutNumForIndex, nextSpellBarTab, prevSpellBarTab, clampSpellBarTabCount,
   spellNeedsNoTarget, objectCompatibleWithSpellTargetType, type SpellTargetObject, pruneUnknownSpellFavorites,
   SPELL_SHORTCUT_LIST_RECT, SPELL_SHORTCUT_CELL, SPELL_SHORTCUT_VISIBLE, SPELL_SHORTCUT_SLOT_MEDIA, SPELL_SHORTCUT_SELECTED_MEDIA, SPELL_SHORTCUT_TEMPLATE, SPELL_SHORTCUT_NUM_ELEMENT, SPELL_SHORTCUT_SELECTED_ELEMENT,
   SPELL_BAR_TAB_IDS, SPELL_BAR_CONTENT_IDS, SPELL_SHORTCUT_LIST, spellListPaddedCells,
@@ -233,7 +233,7 @@ export const VENDOR_LEAVE_CONFIRM_TEXT = 'You have not completed all transaction
 import { assignLeadership, quitFellowship, toggleOpenness, dismissFellow, disbandFellowship, type FellowshipStep } from './FellowshipPanelActions.js';
 import {
   hiddenBy, FEATURE_PANELS, FEATURE_TOOLBAR_BUTTONS, FEATURE_CHARACTER_OPTIONS, FEATURE_CHAT_FILTERS,
-  FEATURE_TALK_FOCUSES, FEATURE_KEYBIND_ACTIONS, FEATURE_SOCIAL_TABS, type EraFeature,
+  FEATURE_TALK_FOCUSES, FEATURE_KEYBIND_ACTIONS, FEATURE_SOCIAL_TABS, clientRuleHiddenActions, type EraFeature,
 } from '../era/EraFeatures.js';
 import { ACFontRenderer, OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { outlineCssFromArgb, DEFAULT_TEXT_OUTLINE_ARGB } from './TextOutline.js';
@@ -2198,6 +2198,19 @@ export class GameUI {
   // initialization order makes restoring inline impossible since
   // activeSpellBarTab is declared above the optionsSettings IIFE).
   private activeSpellBarTab: number = 0; // 0-7, which spell bar tab is active
+  /**
+   * BUG.ac1999-spell-tabs (webac#5) — the tabs this era's spell bar has
+   * (eraClientRules().spellBarTabs): 8 for end of retail and the classic
+   * eras, 1 for the 1999 client.exe's single bar. A tab past it is never
+   * shown, opened, filled or sent; with one tab no tab strip is drawn.
+   */
+  private spellBarTabCount: number = SPELL_BAR_TAB_IDS.length;
+  /**
+   * BUG.ac1999-spell-tabs sweep — the toolbar's item-shortcut slots
+   * (eraClientRules().shortcutSlots): 18 (two rows) for end of retail, 9
+   * (one row, the 1-9 tray) for 1999.
+   */
+  private itemShortcutSlotCount = 18;
   private magicPanelTab: 'spells' | 'components' | 'research' = 'spells'; // VISUAL.139 — 'foci' removed (foci retired from AC in 2010; not an EoL page)
   private spellComponents: Array<{ name: string; quantity: number; icon?: number }> = [];
   private spellCallbacks: {
@@ -2295,6 +2308,54 @@ export class GameUI {
   }
   /** How this world words the selected stat's line. */
   get statLineTextKind(): 'eor' | 'ac1999' { return this.statLineMode; }
+
+  /**
+   * BUG.ac1999-spell-tabs (webac#5) — the era's spell-bar tab count, set
+   * once per page load from the era profile. Tabs past it are emptied
+   * locally (a stored or restored list there is hidden, nothing is sent)
+   * and an open tab past it falls back to the first; the persisted
+   * end-of-retail tab choice is left alone for the next end-of-retail world.
+   */
+  setSpellBarTabCount(count: number): void {
+    this.spellBarTabCount = clampSpellBarTabCount(count);
+    this.dropSpellBarTabsPastCount();
+    if (this.activeSpellBarTab >= this.spellBarTabCount) this.activeSpellBarTab = 0;
+    if (this.spellBarHandle) {
+      this.renderSpellBarPanel();
+      this.updateSpellBarVisibility();
+    }
+  }
+  /** The tabs this world's spell bar has. */
+  get spellBarTabs(): number { return this.spellBarTabCount; }
+  /** The open spell-bar tab. */
+  get openSpellBarTabIndex(): number { return this.activeSpellBarTab; }
+  /** The spell ids on tab `tab`, in order (empty for a tab this era lacks). */
+  spellBarTabSpellIds(tab: number): number[] {
+    if (tab < 0 || tab >= this.spellBarTabCount) return [];
+    return (this.spellBarSlots[tab] ?? []).filter((s): s is SpellDefinition => !!s).map((s) => s.id);
+  }
+  /** Empty every tab past the era's count (selection included). */
+  private dropSpellBarTabsPastCount(): void {
+    for (let t = this.spellBarTabCount; t < SPELL_BAR_TAB_IDS.length; t++) {
+      this.spellBarSlots[t] = new Array(9).fill(null);
+      this.spellBarSelected[t] = 0;
+      this.spellBarEndowmentSelected[t] = false;
+    }
+  }
+
+  /**
+   * BUG.ac1999-spell-tabs sweep — the era's toolbar quick slots, set once
+   * per page load: 18 (two rows) or the 1999 tray's 9 (one row; the window
+   * can't grow to show a second).
+   */
+  setItemShortcutSlotCount(count: number): void {
+    const n = Number.isInteger(count) ? Math.max(1, Math.min(18, count)) : 18;
+    if (n === this.itemShortcutSlotCount) return;
+    this.itemShortcutSlotCount = n;
+    for (let i = n; i < this.itemShortcutData.length; i++) this.itemShortcutData[i] = null;
+  }
+  /** The toolbar's item-shortcut slots in this world. */
+  get itemShortcutSlotTotal(): number { return this.itemShortcutSlotCount; }
   private statLineMode: 'eor' | 'ac1999' = 'eor';
   private charInfo: {
     name: string; level: number; heritage: string; gender: string; pkStatus: string;
@@ -10162,6 +10223,8 @@ export class GameUI {
     onResize?: (w: number, h: number) => void;
     /** After a resize drag ends (the rect already persisted). */
     onResizeEnd?: (w: number, h: number) => void;
+    /** A lower height cap than the root's p60 (an era with fewer rows to reveal). */
+    maxH?: number;
   }): void {
     const { handle, container, windowId, rootElId, defaultW, defaultH, onResize, onResizeEnd } = opts;
     const rootDesc = handle.descs?.get(rootElId);
@@ -10169,7 +10232,8 @@ export class GameUI {
       rootDesc?.properties?.get(pid)?.valueInt ?? fallback;
     // Root min/max size props (p63/p62/p61/p60 = attrs 0x3f/0x3e/0x3d/0x3c).
     const minW = propInt(63, defaultW), maxW = propInt(61, defaultW);
-    const minH = propInt(62, defaultH), maxH = propInt(60, defaultH);
+    const minH = propInt(62, defaultH);
+    const maxH = Math.max(minH, Math.min(propInt(60, defaultH), opts.maxH ?? Number.POSITIVE_INFINITY));
     const clampW = (v: number) => Math.max(minW, Math.min(maxW, v));
     const clampH = (v: number) => Math.max(minH, Math.min(maxH, v));
 
@@ -11605,7 +11669,10 @@ export class GameUI {
     // 004cfd10 write options 0x10000086-89).
     const tbGeo = this.getFloatyWindowGeometry(TOOLBAR_WINDOW_ID);
     const TB_W = 310;
-    const tbH = typeof tbGeo.h === 'number' ? Math.max(100, Math.min(132, Math.round(tbGeo.h))) : 100;
+    // BUG.ac1999-spell-tabs sweep — a one-row era (the 1999 1-9 tray) can't
+    // grow the window to reveal a second row: its max is the 100 default.
+    const tbMaxH = this.toolbarMaxHeight();
+    const tbH = typeof tbGeo.h === 'number' ? Math.max(100, Math.min(tbMaxH, Math.round(tbGeo.h))) : 100;
     const tbHasPos = typeof tbGeo.x === 'number' && typeof tbGeo.y === 'number';
     const tbX = tbHasPos ? Math.max(0, Math.min(Math.round(tbGeo.x!), this.hudLogicalWidth() - TB_W)) : 0;
     const tbY = tbHasPos ? Math.max(0, Math.min(Math.round(tbGeo.y!), this.hudLogicalHeight() - tbH)) : 0;
@@ -12150,7 +12217,7 @@ export class GameUI {
     const shortcutRows = [
       { y: 58, edgeRW: 6 },
       { y: 90, edgeRW: 8 },
-    ];
+    ].slice(0, this.toolbarShortcutRows());
     this.itemShortcutSlots.length = 0;
     for (let row = 0; row < shortcutRows.length; row++) {
       const { y: rowY, edgeRW } = shortcutRows[row];
@@ -12213,6 +12280,7 @@ export class GameUI {
         rootElId: 0x10000602,
         defaultW: TB_W,
         defaultH: 100,
+        maxH: tbMaxH,
         onResize: (_w, h) => {
           toolbarViewport.style.height = `${h - 10}px`;
         },
@@ -17483,7 +17551,11 @@ export class GameUI {
   /** Set known spells and spell bar data. Called by game logic. */
   setSpellData(spells: SpellDefinition[], spellBars?: Array<Array<SpellDefinition | null>>): void {
     this.knownSpells = spells;
-    if (spellBars) this.spellBarSlots = spellBars;
+    if (spellBars) {
+      this.spellBarSlots = Array.from({ length: SPELL_BAR_TAB_IDS.length }, (_, t) => spellBars[t] ?? new Array(9).fill(null));
+      // BUG.ac1999-spell-tabs — a list on a tab this era lacks is never shown.
+      this.dropSpellBarTabsPastCount();
+    }
     this.splitpea?.spellbookChanged();
     // RELEASE.streaming-regression-gate — streamed DATs: fetch every known spell's icon art now.
     if (this.datPrefetch) this.datPrefetch(this.spellIconFileIds(spells.map((sp) => sp.id)));
@@ -17983,13 +18055,17 @@ export class GameUI {
 
   /** RecvNotice_Next/Prev/First/LastSpellTab @ 004c73e0 / 004c7420 / 004c7740 / 004c7770: OpenTab(GetNextTabID / GetPrevTabID / 0x100000a3 / 0x100005c2). */
   switchSpellBarTab(dir: 'next' | 'prev' | 'first' | 'last'): void {
+    // BUG.ac1999-spell-tabs — the era's tabs only: on the 1999 one-tab bar every direction stays put.
+    const n = this.spellBarTabCount;
+    if (n <= 1) return;
     const t = this.activeSpellBarTab;
-    const next = dir === 'next' ? nextSpellBarTab(t) : dir === 'prev' ? prevSpellBarTab(t) : dir === 'first' ? 0 : SPELL_BAR_TAB_IDS.length - 1;
+    const next = dir === 'next' ? nextSpellBarTab(t, n) : dir === 'prev' ? prevSpellBarTab(t, n) : dir === 'first' ? 0 : n - 1;
     this.openSpellBarTab(next);
   }
 
   /** UIElement_Panel::OpenTab on the spell bar: the active page + FAITHFUL.452's persisted tab; every retail path re-runs the two updates. */
   private openSpellBarTab(t: number): void {
+    if (!Number.isInteger(t) || t < 0 || t >= this.spellBarTabCount) return;
     this.activeSpellBarTab = t;
     this.optionsSettings.activeSpellBarTab = t;
     this.saveOptionsSettings();
@@ -18021,6 +18097,8 @@ export class GameUI {
    * (append) or another tab's label (append to that tab, which stays shut).
    */
   private addSpellFavoriteToTab(bar: number, spell: SpellDefinition, slotIdx: number): void {
+    // BUG.ac1999-spell-tabs — no favorite lands on (or is sent for) a tab this era lacks.
+    if (bar < 0 || bar >= this.spellBarTabCount) return;
     const m = this.spellBarSubMenu(bar);
     const events = m.addFavorite(spell.id, slotIdx);
     this.commitSpellBarSubMenu(bar, m, spell);
@@ -18172,6 +18250,21 @@ export class GameUI {
     }
   }
 
+  /** The toolbar's shortcut rows of nine: two for end of retail's 18 slots, one for the 1999 tray. */
+  private toolbarShortcutRows(): number {
+    return Math.max(1, Math.min(2, Math.ceil(this.itemShortcutSlotCount / 9)));
+  }
+
+  /** The toolbar window's height cap: 132 shows both rows (p60), 100 (the default) one. */
+  private toolbarMaxHeight(): number {
+    return 100 + 32 * (this.toolbarShortcutRows() - 1);
+  }
+
+  /** Whether tab `t`'s label shows: one of the era's tabs, on a bar with more than one (BUG.ac1999-spell-tabs). */
+  private spellBarTabShown(t: number): boolean {
+    return this.spellBarTabCount > 1 && t < this.spellBarTabCount;
+  }
+
   /** Refresh all spell bar slot visuals and tab highlights using LayoutRenderer elements. */
   private refreshSpellBarPanel(): void {
     if (!this.spellBarHandle || !this.spellBarPanelEl) return;
@@ -18192,6 +18285,8 @@ export class GameUI {
     for (let t = 0; t < 8; t++) {
       const tabEl = this.spellBarHandle.elements.get(tabIds[t]);
       if (!tabEl) continue;
+      // BUG.ac1999-spell-tabs — only the era's tabs show, and a one-tab bar (1999) has no strip.
+      tabEl.style.display = this.spellBarTabShown(t) ? '' : 'none';
       const isActive = t === this.activeSpellBarTab;
       this.spellBarHandle.setState(tabIds[t], isActive ? UIState.Open : UIState.Closed);
       // Tab label resolved from StringTable 0x23000001 via the p23 ref on
@@ -18380,6 +18475,15 @@ export class GameUI {
     for (let t = 0; t < 8; t++) {
       const tabEl = handle.elements.get(tabIds[t]);
       if (!tabEl) continue;
+      // BUG.ac1999-spell-tabs (webac#5) — a tab this era lacks is not built
+      // into a control: hidden, no click, no drop. The 1999 client.exe's bar
+      // has no tabs at all, so with one tab even the first label hides.
+      if (!this.spellBarTabShown(t)) {
+        tabEl.style.display = 'none';
+        tabEl.style.pointerEvents = 'none';
+        tabEl.dataset.spellTabHidden = '1';
+        continue;
+      }
       tabEl.style.pointerEvents = 'auto';
       tabEl.style.cursor = 'pointer';
       tabEl.dataset.spellTab = `${t}`;
@@ -18420,6 +18524,8 @@ export class GameUI {
       const contentEl = handle.elements.get(contentIds[t]);
       if (!contentEl) continue;
       contentEl.style.display = t === this.activeSpellBarTab ? '' : 'none';
+      // BUG.ac1999-spell-tabs — a page this era lacks gets no cells.
+      if (t >= this.spellBarTabCount) continue;
       contentEl.style.pointerEvents = 'auto';
       const count = this.spellBarCellCount(t);
       const shown = Math.min(SPELL_SHORTCUT_VISIBLE, Math.max(count, this.spellBarVisibleCells()));
@@ -24643,7 +24749,11 @@ export class GameUI {
     viewport.dataset.keybindTab = String(cls);
     const ROW_H = 40;
     const sections = buildKeyboardSections(this.keybindRegistry, cls, undefined,
-      keyboardHiddenActions(hiddenBy(FEATURE_KEYBIND_ACTIONS, this.eraUnsupported)));
+      keyboardHiddenActions(new Set([
+        ...hiddenBy(FEATURE_KEYBIND_ACTIONS, this.eraUnsupported),
+        // BUG.ac1999-spell-tabs — the spell-tab commands on a one-tab bar and the quick slots past the toolbar's.
+        ...clientRuleHiddenActions({ spellBarTabs: this.spellBarTabCount, shortcutSlots: this.itemShortcutSlotCount }),
+      ])));
     let y = 0;
     for (const section of sections) {
       if (section.headerStringId !== null) {

@@ -119,11 +119,38 @@ export class ItemShortcutRestorer {
   private pending = new Map<number, number>();
   /** gmToolbarUI::m_shortcutSlots — the object each of the 18 slots holds (0 = empty). */
   private slots: number[] = new Array(ITEM_SHORTCUT_SLOT_COUNT).fill(0);
+  /**
+   * The slots this era's toolbar has (eraClientRules().shortcutSlots; BUG.ac1999-spell-tabs):
+   * 18 for end of retail, 9 for the 1999 tray (ShortCutManager::AddShortCut @ 0x586f00 refuses an
+   * index past 8). Slots past it hold nothing, take nothing and are never sent.
+   */
+  private slotCount = ITEM_SHORTCUT_SLOT_COUNT;
 
   constructor(
     private setIcon: (index: number, iconDid: number | undefined, title: string, item?: ShortcutItemInfo) => void,
     private sink?: ShortcutSink,
   ) {}
+
+  /** Set the era's slot count (1..18); any slot past it is emptied locally (nothing is sent). */
+  setSlotCount(count: number): void {
+    this.slotCount = Number.isInteger(count) ? Math.max(1, Math.min(ITEM_SHORTCUT_SLOT_COUNT, count)) : ITEM_SHORTCUT_SLOT_COUNT;
+    for (let i = this.slotCount; i < ITEM_SHORTCUT_SLOT_COUNT; i++) {
+      const id = this.slots[i];
+      if (!id) continue;
+      this.slots[i] = 0;
+      if (this.pending.get(id) === i) this.pending.delete(id);
+      this.setIcon(i, undefined, '');
+    }
+  }
+
+  /** The slots this toolbar has. */
+  get slotCountInUse(): number { return this.slotCount; }
+
+  /** The first empty slot the toolbar has, or -1. */
+  private firstEmpty(): number {
+    for (let i = 0; i < this.slotCount; i++) if (!this.slots[i]) return i;
+    return -1;
+  }
 
   /** The slot holding `objectId`'s shortcut, or -1 (RemoveShortcut's ItemList_IsInList walk). */
   slotOf(objectId: number): number {
@@ -132,7 +159,7 @@ export class ItemShortcutRestorer {
 
   /** The object in slot `index` (0 = empty). */
   objectAt(index: number): number {
-    return this.slots[index] ?? 0;
+    return index >= 0 && index < this.slotCount ? this.slots[index] ?? 0 : 0;
   }
 
   /**
@@ -159,8 +186,8 @@ export class ItemShortcutRestorer {
    */
   addShortcut(objectId: number, index: number, item: ShortcutItemInfo | undefined, send: boolean): void {
     let slot = index;
-    if (slot < 0 || slot >= ITEM_SHORTCUT_SLOT_COUNT) {
-      slot = this.slots.indexOf(0);
+    if (slot < 0 || slot >= this.slotCount) {
+      slot = this.firstEmpty();
       if (slot === -1) return;
     }
     if (!objectId) return;
@@ -204,7 +231,7 @@ export class ItemShortcutRestorer {
     }
     if (index === -1) {
       if (this.slotOf(objectId) !== -1) return quiet ? null : shortcutDuplicateText(name);
-      if (this.slots.indexOf(0) === -1) return quiet ? null : SHORTCUT_NO_FREE_SLOTS_TEXT;
+      if (this.firstEmpty() === -1) return quiet ? null : SHORTCUT_NO_FREE_SLOTS_TEXT;
     }
     this.removeShortcut(objectId, true);
     this.addShortcut(objectId, index, target.item, true);
@@ -225,14 +252,14 @@ export class ItemShortcutRestorer {
    * `index` (inclusive), else -1.
    */
   firstEmptyRightOf(index: number): number {
-    for (let i = index + 1; i < ITEM_SHORTCUT_SLOT_COUNT; i++) if (!this.slots[i]) return i;
-    for (let i = 0; i <= index && i < ITEM_SHORTCUT_SLOT_COUNT; i++) if (!this.slots[i]) return i;
+    for (let i = index + 1; i < this.slotCount; i++) if (!this.slots[i]) return i;
+    for (let i = 0; i <= index && i < this.slotCount; i++) if (!this.slots[i]) return i;
     return -1;
   }
 
   /** gmToolbarUI::IsShortcutSlotAvailable @ 004bd5e0. */
   isSlotAvailable(index: number): boolean {
-    return index >= 0 && index < ITEM_SHORTCUT_SLOT_COUNT && !this.slots[index];
+    return index >= 0 && index < this.slotCount && !this.slots[index];
   }
 
   /** gmToolbarUI::m_lastShortcutNumDragged — the slot the shortcut in flight left (-1 = none). */
@@ -357,7 +384,7 @@ export class ItemShortcutRestorer {
     for (const sc of shortcuts) {
       // Retail AddShortcut ignores out-of-range slots and zero objectIds
       // (`if ((pUVar1 != 0) && (param_1 != 0))`).
-      if (sc.index < 0 || sc.index >= ITEM_SHORTCUT_SLOT_COUNT) continue;
+      if (sc.index < 0 || sc.index >= this.slotCount) continue;
       if (!sc.objectId) continue;
       this.slots[sc.index] = sc.objectId;
       const item = getItem(sc.objectId);

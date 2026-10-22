@@ -4678,6 +4678,8 @@ async function main() {
       },
     },
   );
+  // BUG.ac1999-spell-tabs sweep — the era's quick slots (1999: the 1-9 tray, ShortCutManager::AddShortCut @ 0x586f00).
+  itemShortcutRestorer.setSlotCount(eraRules.shortcutSlots);
   /**
    * GAP.world-drag-drop.a.a.a.a — the tail of ItemHolder::AttemptMerge
    * @ 005878f0, after UIAttemptMerge(src → dst): CM_UI::
@@ -5211,6 +5213,8 @@ async function main() {
   // (dev / ?debug only) delegates to it. The send function is resolved per
   // call, so every action is a no-op until the ACE session assigns it.
   const gameActions = new GameActions(() => sendGameAction, pingLatencyTracker);
+  // BUG.ac1999-spell-tabs — a favorite on a tab the era's bar lacks is never sent (1999: one bar).
+  gameActions.spellBarTabs = eraRules.spellBarTabs;
   // CORE.17.k — Link Indicator ticker (see the post-showGame block).
   let linkStatusIntervalId: ReturnType<typeof setInterval> | null = null;
   const LINK_STATUS_TICK_MS = 250;
@@ -6304,6 +6308,10 @@ async function main() {
   gameUI.setSpellResearch(eraRules.spellResearch);
   // REVERT.ac1999-forked-panels — the shared character panel words the selected stat the era's way.
   gameUI.setStatLineText(eraRules.statLineText);
+  // BUG.ac1999-spell-tabs — the shared spell bar's tab count and the toolbar's quick slots are the
+  // era's (1999: one bar with no tab strip, the nine-slot 1-9 tray).
+  gameUI.setSpellBarTabCount(eraRules.spellBarTabs);
+  gameUI.setItemShortcutSlotCount(eraRules.shortcutSlots);
   // BUG.vendor-buy-quantity — the era's buy-one-at-a-time ware mask (HandleSelectionChanged / 1999 UpdateSplitUI).
   gameUI.setVendorBuyOneMask(eraRules.vendorBuyOneMask);
 
@@ -10283,6 +10291,8 @@ async function main() {
           // pages are padded to the 9-slot shape older callers expect.
           const { slots: spellBarSlots, removed: prunedFavorites, restored: restoredSpells } = restoreSpellBars(
             desc.spellBars, (id) => magicController.isSpellKnown(id), (id) => magicController.getSpell(id),
+            // BUG.ac1999-spell-tabs — only the era's tabs are read (1999: the one bar).
+            eraRules.spellBarTabs,
           );
           for (const r of prunedFavorites) gameActions.removeSpellFavorite(r.spellId, r.tab);
           // setSpellData accepts (SpellDefinition | null)[][] — our Slot type
@@ -10291,7 +10301,7 @@ async function main() {
           gameUI.spellbookListFlushed();
           gameUI.setSpellData(magicController.knownSpells, spellBarSlots as unknown as Parameters<typeof gameUI.setSpellData>[1]);
           if (restoredSpells > 0) {
-            console.log(`[PlayerDesc] Restored ${restoredSpells} spell-bar slot assignment(s) across 8 pages`);
+            console.log(`[PlayerDesc] Restored ${restoredSpells} spell-bar slot assignment(s) across ${eraRules.spellBarTabs} page(s)`);
           }
         }
 
@@ -14445,8 +14455,8 @@ async function main() {
         sendGameAction(GameActionType.AddShortCut, buildAddShortcutPayload(index, objectGuid, spellId, layer));
         console.log(`[AC] Sent AddShortCut: idx=${index} obj=0x${objectGuid.toString(16)}`);
       },
-      /** The object each of the 18 item-shortcut slots holds (0 = empty). */
-      toolbarShortcuts: (): number[] => Array.from({ length: 18 }, (_, i) => itemShortcutRestorer.objectAt(i)),
+      /** The object each of the era's item-shortcut slots holds (0 = empty; 18, or the 1999 tray's 9). */
+      toolbarShortcuts: (): number[] => Array.from({ length: itemShortcutRestorer.slotCountInUse }, (_, i) => itemShortcutRestorer.objectAt(i)),
       /** Remove a shortcut bar slot. Per GameActionRemoveShortcut.cs: index u32. */
       removeShortcut: (index: number) => {
         if (!sendGameAction) return;

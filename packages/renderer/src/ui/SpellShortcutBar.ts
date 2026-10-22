@@ -198,8 +198,15 @@ export function spellListPaddedCells(listWidth: number, numberedCells = 1): numb
   return Math.max(numberedCells, Math.floor(listWidth / SPELL_SHORTCUT_CELL));
 }
 
-export function nextSpellBarTab(tab: number): number { return (tab + 1) % SPELL_BAR_TAB_IDS.length; }
-export function prevSpellBarTab(tab: number): number { return (tab + SPELL_BAR_TAB_IDS.length - 1) % SPELL_BAR_TAB_IDS.length; }
+/**
+ * The era's tab count clamped to the eight tab pages the layout has (BUG.ac1999-spell-tabs:
+ * eraClientRules().spellBarTabs — 8 for end of retail and the classic eras, 1 for the 1999 bar).
+ */
+export function clampSpellBarTabCount(count: number): number {
+  return Number.isInteger(count) ? Math.max(1, Math.min(SPELL_BAR_TAB_IDS.length, count)) : SPELL_BAR_TAB_IDS.length;
+}
+export function nextSpellBarTab(tab: number, count: number = SPELL_BAR_TAB_IDS.length): number { const n = clampSpellBarTabCount(count); return (tab + 1) % n; }
+export function prevSpellBarTab(tab: number, count: number = SPELL_BAR_TAB_IDS.length): number { const n = clampSpellBarTabCount(count); return (tab + n - 1) % n; }
 
 /* ── the per-tab sub-menu ──────────────────────────────────────────── */
 
@@ -410,12 +417,16 @@ export function pruneUnknownSpellFavorites(
  * favorites lists pruned of unknown spells (one removal each for the
  * server), resolved to definitions, padded to the 9-slot shape the bar's
  * older callers expect. Nothing is cut at 9: the favorites list is
- * unbounded.
+ * unbounded. Only the era's `tabCount` tabs are read (BUG.ac1999-spell-tabs:
+ * the 1999 client has one bar); any list past them is left empty and never
+ * pruned, so no removal for a tab the era lacks goes to the server.
  */
 export function restoreSpellBars<T>(
   spellBars: ReadonlyArray<ReadonlyArray<number>>, isKnown: (spellId: number) => boolean, resolve: (spellId: number) => T | null | undefined,
+  tabCount: number = SPELL_BAR_TAB_IDS.length,
 ): { slots: Array<Array<T | null>>; removed: Array<{ spellId: number; tab: number }>; restored: number } {
-  const { tabs, removed } = pruneUnknownSpellFavorites(Array.from({ length: 8 }, (_, t) => spellBars[t] ?? []), isKnown);
+  const n = clampSpellBarTabCount(tabCount);
+  const { tabs, removed } = pruneUnknownSpellFavorites(Array.from({ length: 8 }, (_, t) => (t < n ? spellBars[t] ?? [] : [])), isKnown);
   let restored = 0;
   const slots = tabs.map((ids) => {
     const page: Array<T | null> = [];
