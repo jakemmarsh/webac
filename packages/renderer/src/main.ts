@@ -402,7 +402,6 @@ import { ABSENT_1999, buildFriendsCommand1999, friendsCommand1999Plan, getString
 import { CELL_LENGTH, MAP_TELEPORT_ORIGIN, mapCoordinateText, mapCoordsOfCell } from './ui/MapMarkers.js';
 import { tradeReceiveContainsIn } from './inventory/TradeReceiveContainId.js';
 import { buildSpellExamineModel, inqSkillLevel, spellRangeMeters } from './ui/examine/SpellExamine.js';
-import { buildCreatureExamine1999, buildSpellExamine1999, examineInscription1999, examineTitle1999 } from './ui/examine/ExaminePanel1999.js';
 import { SpellCharge1999, spellChargeText1999 } from './magic/SpellCharge1999.js';
 import { TalkFocus } from './ui/ChatTalkFocus.js';
 import { MAIN_CHAT_WINDOW_ID } from './ui/FloatyChatModel.js';
@@ -424,6 +423,7 @@ import { launcherConnectFailedReport, reportFromPage, worldListFailedReport } fr
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
 import { FramePhaseTimer, PHASE, ProgramCreationCounter, netHandlerCost, streamHandlerCost, connectionEventOp, timedAgentTick } from './telemetry/MainThreadCost.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
+import { PortalUseReporter, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
@@ -830,6 +830,8 @@ let preworldChargenStep: () => ChargenStepName | null = () => null;
 let worldReporter: WorldReporter | null = null;
 /** OBS.automation-usage — whether players use the plugin bar and routines (telemetry/AutomationReporter.ts); set at boot. */
 let automationReporter: AutomationReporter | null = null;
+/** TELEMETRY.portal-use-failed — a portal tried that did nothing, and the normal path's timing (telemetry/PortalUseReporter.ts). */
+let portalUseReporter: PortalUseReporter | null = null;
 
 // ─── Era (docs/dark-majesty-support.md, era/EraBoot.ts) ──────────────
 // One era's DATs per page load. main() resolves the boot era before any DAT
@@ -1295,6 +1297,15 @@ async function main() {
     server: () => preworldServer(),
   });
   automationReporter.install(window, document);
+  portalUseReporter = new PortalUseReporter({
+    endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
+    build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
+    trace: preworldReporter.trace,
+    era: () => activeEra.id,
+    server: () => preworldServer(),
+    snapshot: (guid) => portalSnapshot(guid),
+  });
+  portalUseReporter.install(window, document);
   // Its world sessions are the world reporter's (every exit, the drop's and the closed tab's included).
   { const ar = automationReporter; worldReporter.onSessionStart(() => ar.enteredWorld()); worldReporter.onSessionEnd((exit) => ar.worldLeft(exit)); }
 
@@ -1544,8 +1555,8 @@ async function main() {
   const eraUnsupported = unsupportedFeatures(activeEra);
   // The era's own client-code rules (a cast / attack stopping the player).
   const eraRules = eraClientRules(activeEra);
-  // VISUAL.ac1999-spell-charge — the 1999 per-spell Charge the docked examine panel prints.
-  const spellCharge1999 = eraRules.examinePanel === 'docked1999' ? new SpellCharge1999() : null;
+  // VISUAL.ac1999-spell-charge — the 1999 per-spell Charge the spell examine text prints.
+  const spellCharge1999 = eraRules.appraisalText === 'ac1999' ? new SpellCharge1999() : null;
   // BOOT.side-tables-off-critical-path — the three weenie side-files
   // (combat style for bow/crossbow → LeftHand per ACE Creature_Equipment.cs:84-95;
   // GAP.9 attack type for the swing animation; weapon time for
@@ -3501,6 +3512,43 @@ async function main() {
     return false;
   }
   let pendingTeleport = false;  // Set by PlayerTeleport, consumed by next UpdatePosition
+  /**
+   * TELEMETRY.portal-use-failed — a portal and the player as the portal telemetry reports them: the
+   * portal's flags, PhysicsState, use radius and reach, and player → portal in the server's frame
+   * (east, north, up: landblock × 192 m + the cell-local offset; a dungeon's cells share the frame).
+   */
+  function portalSnapshot(guid: number): PortalSnapshot | null {
+    const o = serverObjectManager?.getObject(guid);
+    if (!o) return null;
+    const me = movementSync?.lastSentFrame ?? null;
+    const p = o.position;
+    const gx = (cell: number, x: number): number => ((cell >>> 24) & 0xff) * 192 + x;
+    const gy = (cell: number, y: number): number => ((cell >>> 16) & 0xff) * 192 + y;
+    const rel = me && me.cellId && p && p.landblock
+      ? { dx: gx(p.landblock, p.x) - gx(me.cellId, me.x), dy: gy(p.landblock, p.y) - gy(me.cellId, me.y), dz: p.z - me.z }
+      : null;
+    return {
+      wcid: o.weenieClassId, itemType: o.itemType, descFlags: o.objectDescFlags, physicsState: o.physicsState,
+      useRadius: o.useRadius, reach: fixtureReach(o), rel,
+      playerCell: me?.cellId ? me.cellId >>> 0 : null, portalCell: p?.landblock ? p.landblock >>> 0 : null,
+    };
+  }
+  /** The portal telemetry's 100 ms check: its verdict clock, and which portals the body stands in (the walk-in try). */
+  let portalCheckAt = 0;
+  function portalUseCheck(now: number): void {
+    if (!portalUseReporter || now - portalCheckAt < 100) return;
+    portalCheckAt = now;
+    portalUseReporter.tick(cameraController.isMoving || (playerMoveTo?.isMovingTo() ?? false));
+    if (!gameStarted || !serverObjectManager || gameUI.worldHiddenByPortalSpace || teleportBusy.value || playerState.isDead) return;
+    const inside: number[] = [];
+    for (const o of serverObjectManager.getAllObjects().values()) {
+      if (!isPortalObject(o) || o.wielderId || !o.position) continue;
+      // The body's middle inside the portal's reach (no body radius added): deep enough that the
+      // server's collision has surely touched it, so brushing past a portal is no try.
+      if (overlapsPortal(Math.hypot(o.worldX - playerWorldX, o.worldZ - playerWorldZ), o.worldY - playerFeetY, fixtureReach(o), 0)) inside.push(o.guid);
+    }
+    portalUseReporter.overlaps(inside);
+  }
   /** The server's latest UpdatePosition echo of us (the agent's checkpoints wait on it; AgentHost.serverSelfPosition). */
   let serverSelfEcho: { cell: number; x: number; y: number; z: number; at: number } | null = null;
   /**
@@ -5414,6 +5462,7 @@ async function main() {
     preworldReporter?.enteredWorld();
     drainHandover.onEnteredWorld();
     worldReporter?.enteredWorld(worldResumePending);
+    portalUseReporter?.reset();
     worldResumePending = false;
     // CORE.17.k — retail gmUIElement_LinkStatusIndicator::UseTime: feed the
     // LinkStatusHolder sample (connected + seconds since the last packet)
@@ -6253,8 +6302,8 @@ async function main() {
   gameUI.setUnsupportedFeatures(eraUnsupported);
   // AC1999.spell-research-panel — the 1999 client.exe's "Create Spell" tab (eraClientRules).
   gameUI.setSpellResearch(eraRules.spellResearch);
-  // VISUAL.ac1999-examine-panel-docked — a 1999 world examines in the docked ExaminePanel.
-  gameUI.setExaminePanel(eraRules.examinePanel);
+  // REVERT.ac1999-forked-panels — the shared character panel words the selected stat the era's way.
+  gameUI.setStatLineText(eraRules.statLineText);
   // BUG.vendor-buy-quantity — the era's buy-one-at-a-time ware mask (HandleSelectionChanged / 1999 UpdateSplitUI).
   gameUI.setVendorBuyOneMask(eraRules.vendorBuyOneMask);
 
@@ -8498,6 +8547,7 @@ async function main() {
       if (animController && animController.stanceId !== stanceId) animController.setStance(stanceId);
     };
     serverObjectManager.onLocalPlayerMovement = (type, move) => {
+      portalUseReporter?.serverMovement();
       performServerMovement(playerMoveToManager(), type, move, (id) => !!serverObjectManager?.targetInfo(id));
     };
     // CPhysicsObj::InitDefaults @ 005139d0 — every object's Setup
@@ -8755,23 +8805,10 @@ async function main() {
           const wcid = wcidOf(scid);
           return wcid ? (playerState.inventory.getAll().find(i => i.weenieClassId === wcid)?.id ?? 0) : 0;
         },
+        // A 1999 world: the player's Charge for the spell (1999 ExamineSpell @ 0x00511110,
+        // InqSpellCharge @ 0x00517820), one more line of the shared spell page's text.
+        chargeLine: spellCharge1999 ? spellChargeText1999(spellCharge1999.inq(spellId, performance.now() / 1000)) : undefined,
       });
-      if (eraRules.examinePanel === 'docked1999') {
-        // SpellExaminePanel::ExamineSpell (1999 @ 0x00511110).
-        const spell1999 = buildSpellExamine1999({
-          spellId, spell,
-          formula: appropriateSpellFormula({ ...appropriateFormulaInputs(spell), school: spell.school }),
-          skillLevel: (id) => inqSkillLevel(playerState.skills, id),
-          component: (scid) => {
-            const c = spellComponentTable?.components.get(scid);
-            return c ? { name: c.name, icon: c.icon } : null;
-          },
-        });
-        // ExamineSpell's last line: the player's Charge for the spell (InqSpellCharge @ 0x00517820).
-        if (spellCharge1999) spell1999.charge = spellChargeText1999(spellCharge1999.inq(spellId, performance.now() / 1000));
-        gameUI.showExaminationWindow({ guid: 0, title: spell1999.title, page: 'spell', spell: model, spell1999 });
-        return;
-      }
       gameUI.showExaminationWindow({ guid: 0, title: model.title, page: 'spell', spell: model });
     };
     gameUI.onExamineSpell = examineSpell;
@@ -9511,6 +9548,7 @@ async function main() {
         // 00514c60); UI_ExitPortal is the tunnel's own end
         // (gmSmartBoxUI::UseTime @ 004d6e30 → GameUI.teleportTick).
         pendingTeleport = true;
+        portalUseReporter?.teleported();
         // FAITHFUL.461 — clear the last target on teleport. PlayerTeleport
         // is sent by ACE for lifestone recall, /house, portal traversal,
         // etc. — every case moves the player well outside normal
@@ -9817,6 +9855,7 @@ async function main() {
         // WorldManager.cs:268) sits on the table's green default. The old
         // resolveChatType(0 -> System) remap here painted it grey.
         // A quiet /myquests answer (the quest tracker's) never reaches the chat.
+        portalUseReporter?.serverChat(data.message, data.chatType);
         if (questTracker.onServerLine(data.message)) return;
         gameUI.addSystemMessage(data.message, chatColorFor(data.chatType), data.chatType);
 
@@ -9939,26 +9978,32 @@ async function main() {
         if (desc.strength) {
           playerState.attributes.setInnate(AttributeId.Strength, desc.strength.startingValue);
           playerState.attributes.setRaises(AttributeId.Strength, desc.strength.ranks);
+          playerState.attributes.setExperienceSpent(AttributeId.Strength, desc.strength.cpSpent);
         }
         if (desc.endurance) {
           playerState.attributes.setInnate(AttributeId.Endurance, desc.endurance.startingValue);
           playerState.attributes.setRaises(AttributeId.Endurance, desc.endurance.ranks);
+          playerState.attributes.setExperienceSpent(AttributeId.Endurance, desc.endurance.cpSpent);
         }
         if (desc.quickness) {
           playerState.attributes.setInnate(AttributeId.Quickness, desc.quickness.startingValue);
           playerState.attributes.setRaises(AttributeId.Quickness, desc.quickness.ranks);
+          playerState.attributes.setExperienceSpent(AttributeId.Quickness, desc.quickness.cpSpent);
         }
         if (desc.coordination) {
           playerState.attributes.setInnate(AttributeId.Coordination, desc.coordination.startingValue);
           playerState.attributes.setRaises(AttributeId.Coordination, desc.coordination.ranks);
+          playerState.attributes.setExperienceSpent(AttributeId.Coordination, desc.coordination.cpSpent);
         }
         if (desc.focus) {
           playerState.attributes.setInnate(AttributeId.Focus, desc.focus.startingValue);
           playerState.attributes.setRaises(AttributeId.Focus, desc.focus.ranks);
+          playerState.attributes.setExperienceSpent(AttributeId.Focus, desc.focus.cpSpent);
         }
         if (desc.self) {
           playerState.attributes.setInnate(AttributeId.Self, desc.self.startingValue);
           playerState.attributes.setRaises(AttributeId.Self, desc.self.ranks);
+          playerState.attributes.setExperienceSpent(AttributeId.Self, desc.self.cpSpent);
         }
 
         // Initialize encumbrance from Strength and server properties —
@@ -10162,16 +10207,19 @@ async function main() {
         if (desc.health) {
           playerState.vitals.setRaises(VitalId.Health, desc.health.ranks);
           playerState.vitals.setStartingValue(VitalId.Health, desc.health.startingValue);
+          playerState.vitals.setExperienceSpent(VitalId.Health, desc.health.cpSpent);
           playerState.vitals.setCurrent(VitalId.Health, desc.health.current, playerState.attributes);
         }
         if (desc.stamina) {
           playerState.vitals.setRaises(VitalId.Stamina, desc.stamina.ranks);
           playerState.vitals.setStartingValue(VitalId.Stamina, desc.stamina.startingValue);
+          playerState.vitals.setExperienceSpent(VitalId.Stamina, desc.stamina.cpSpent);
           playerState.vitals.setCurrent(VitalId.Stamina, desc.stamina.current, playerState.attributes);
         }
         if (desc.mana) {
           playerState.vitals.setRaises(VitalId.Mana, desc.mana.ranks);
           playerState.vitals.setStartingValue(VitalId.Mana, desc.mana.startingValue);
+          playerState.vitals.setExperienceSpent(VitalId.Mana, desc.mana.cpSpent);
           playerState.vitals.setCurrent(VitalId.Mana, desc.mana.current, playerState.attributes);
         }
 
@@ -10980,6 +11028,8 @@ async function main() {
           // STATS.enchantments-never-populated — ACE CreatureVital.StartingValue
           // (GameMessagePrivateUpdateVital.cs:15) is part of the max.
           if (data.initLevel !== undefined) playerState.vitals.setStartingValue(maxVitalId, data.initLevel);
+          // The next raise's price: XpTable[ranks + 1] − ExperienceSpent (gmAttributeUI::GetCostToRaise).
+          if (data.cpSpent !== undefined) playerState.vitals.setExperienceSpent(maxVitalId, data.cpSpent);
           playerState.vitals.setCurrent(maxVitalId, data.value, playerState.attributes);
           const maxVal = playerState.vitals.getMax(maxVitalId, playerState.attributes);
           console.log(`[Vital] ${VitalId[maxVitalId]}: ${data.value}/${maxVal}`);
@@ -11039,6 +11089,8 @@ async function main() {
           // message on the player (Player_Attributes.cs:48, Player_Vitals.cs:59).
           playerState.attributes.setInnate(attrId, data.initLevel);
           playerState.attributes.setRaises(attrId, data.levelFromCP);
+          // The next raise's price: XpTable[ranks + 1] − ExperienceSpent (gmAttributeUI::GetCostToRaise).
+          playerState.attributes.setExperienceSpent(attrId, data.cpSpent);
           // Strength changes affect encumbrance capacity; BUG.quickness-
           // update-no-runrate-recompute — Quickness drives the Run skill
           // formula (SkillTable Run = Quickness, DAT 0x0E000004), and ACE
@@ -11405,10 +11457,7 @@ async function main() {
           hasCreatureProfile: !!data.creatureProfile,
           propertiesString: data.propertiesString, propertiesInt: data.propertiesInt,
         });
-        const docked1999 = eraRules.examinePanel === 'docked1999';
-        const title = docked1999
-          ? examineTitle1999(name, obj?.stackSize ?? held?.stackSize ?? 1)
-          : examineTitle(name, obj?.stackSize ?? held?.stackSize ?? 1, data.propertiesString);
+        const title = examineTitle(name, obj?.stackSize ?? held?.stackSize ?? 1, data.propertiesString);
         console.log(`[AC] Examine 0x${data.guid.toString(16)} "${title}": page=${page} success=${data.success ?? true} flags=0x${data.flags.toString(16)} creatureProfile=${!!data.creatureProfile}`);
         // BUG.ac1999-appraisal-details — the weenie fields the item page is gated on, from wherever
         // the client holds the object: a shop ware's are its merchandise row's, a ground item's valid
@@ -11418,33 +11467,17 @@ async function main() {
           ? { current: playerState.getSkillCurrent(SKILL_ID_SHIELD, playerSkillTable.skills), advancementClass: playerState.skills.getAdvancementClass(SKILL_ID_SHIELD) }
           : undefined;
         const view: ExaminationView = { guid: data.guid, title, page, previewMesh };
-        // The 1999 panel's icon (item header, creature panel): the object's own, through RenderIcons.
-        if (docked1999 && iconId) {
-          view.icon = { iconDid: iconId, itemType: header.itemType, effects: header.effects, overlayDid: header.overlayDid, underlayDid: header.underlayDid };
-        }
         if (page === 'item') {
           // The 1999 client.exe builds its own lines (ItemExaminePanel::SetAppraiseInfo @ 0x0050b6c0).
           view.item = (eraRules.appraisalText === 'ac1999' ? buildItemAppraisalText1999 : buildItemAppraisalText)(data, {
             appraisalSuccess: data.success ?? true,
-            // The docked 1999 panel has its own Value / Burden header (ItemExaminePanel +0x210 / +0x214).
-            hasValueBurdenElements: docked1999,
             weenie: weenieInfo,
             viewerShieldSkill: shieldSkill,
             noNetherDamage: !gameUI.eraSupports('netherDamage'),
             resolvers: examineResolvers.item,
           });
           view.inscription = examineInscription(weenieInfo?.objectDescriptionFlags ?? 0, data.propertiesString);
-          if (docked1999) view.inscription1999 = examineInscription1999(weenieInfo?.objectDescriptionFlags ?? 0, data.propertiesString);
         } else {
-          // The 1999 panel's creature / character sub-panels (BasicCreatureExaminePanel / CharExaminePanel::
-          // SetAppraiseInfo, 1999 @ 0x0050e050 / 0x0050f760). The end-of-retail model below still feeds the
-          // agent's appraisal record.
-          if (docked1999) {
-            view.creature1999 = buildCreatureExamine1999(data, {
-              objectName: name,
-              publicWeenieBitfield: obj?.objectDescFlags ?? (isSelf ? serverObjectManager?.playerDescFlags : undefined),
-            }) ?? undefined;
-          }
           view.creature = buildCreatureExaminePage(data, {
             success: data.success ?? true,
             ...examineResolvers.creature,
@@ -12566,6 +12599,7 @@ async function main() {
           deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType));
         }
         console.log(`[AC] UseDone: errorType=${data.errorType}`);
+        portalUseReporter?.useDone(data.errorType);
         agentUseDoneTap?.(data.errorType);
       },
 
@@ -12762,6 +12796,7 @@ async function main() {
         // the ACE <summary> says). Pre-fix every code went to chat in the
         // Help colour. Map: @ac/shared WeenieErrorSink.ts (generated).
         deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType));
+        portalUseReporter?.weenieError(data.errorType);
         // The agent's melee attack reads an approach the server gave up on ("Unable to move to object!") from it.
         agentWeenieErrorTap?.(data.errorType);
         // BUG.ac1999-magic-mode-refused — GDLE and the AC1999 server refuse a
@@ -12860,6 +12895,7 @@ async function main() {
         // through formatWeenieErrorWithString which performs the template
         // lookup + multi-`_` substitution.
         const text = formatWeenieErrorWithString(data.errorType, data.message);
+        portalUseReporter?.weenieError(data.errorType);
         // CORE.17.k.c — Handle_Communication__WeenieErrorWithString @
         // 0057cb90 widens the value and runs the code through the same
         // HandleFailureEvent switch: most templates are type-0 chat lines
@@ -13170,6 +13206,11 @@ async function main() {
       aceConnection.sendMessage(useMsg, GameMessageGroup.SecureWeenieQueue);
       busyCount.noteActionSent(GameActionType.Use);
       console.log(`[AC] ACE: Sent Use (0x0036) for entity 0x${guid.toString(16)}`);
+      portalUseReporter?.useAttempt(guid, serverObjectManager?.getObject(guid), true);
+    };
+    /** TELEMETRY.portal-use-failed — a Use of a portal the client kept, and why. */
+    const portalUseHeld = (guid: number, held: PortalUseHeld): void => {
+      portalUseReporter?.useAttempt(guid, serverObjectManager?.getObject(guid), false, held);
     };
     /** The PublicWeenieDesc UseObject reads, from whichever record holds the object. */
     const useSubjectFor = (guid: number): UseSubject | null => {
@@ -13210,6 +13251,7 @@ async function main() {
       // objects: a pack item selected for the toolbar Use must not be dropped.
       if (!canUseTarget(targetResolves(guid, aceCharGuid, targetLocations))) {
         console.log(`[AC] Use suppressed: target 0x${guid.toString(16)} no longer resolves`);
+        portalUseHeld(guid, 'stale');
         return;
       }
       // SWEEP1006 world use — ItemHolder::UseObject @ 00588a80
@@ -13222,6 +13264,7 @@ async function main() {
       lastUseObjectAt = nowSec;
       if (!gateInventoryRequestSend(inventoryRequests, GameActionType.Use, (text) => gameUI.displayErrorText(text))) {
         console.log(`[AC] Use refused: ${inventoryRequests.refusal()} (pending=${JSON.stringify(inventoryRequests.pending)})`);
+        portalUseHeld(guid, 'busy');
         return;
       }
       const subject = useSubjectFor(guid);
@@ -13240,6 +13283,7 @@ async function main() {
       };
       const decision = decideUseObject(subject, useCtx);
       console.log(`[AC] UseObject 0x${guid.toString(16)} "${subject.name}": ${JSON.stringify(decision)}`);
+      if (decision.kind !== 'use' && decision.kind !== 'confirm') portalUseHeld(guid, 'decided');
       // CPlayerSystem::UsingItem @ 00562f70's client-side tail on every path
       // UseObject reaches it: an owned container (a side pack's shortcut)
       // opens in the inventory (SendNotice_OpenContainedContainer) — the Use
@@ -19061,6 +19105,7 @@ async function main() {
     framePhases.mark(PHASE.tags);
     // The automation tick marks its own phases (agent, routine, ub, mag).
     if (agentFrameTick && now - agentTickAt >= 100) { agentTickAt = now; agentFrameTick(frameMark); }
+    portalUseCheck(now);
     const dt = Math.max(0, now - lastTime) / 1000;
     lastTime = now;
 

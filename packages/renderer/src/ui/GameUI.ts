@@ -52,16 +52,12 @@ import {
   SQUELCH_SELECTED_STRING, TELL_TO_SELECTED_STRING, type TalkFocusId, type TalkFocusMenuItem,
 } from './ChatTalkFocus.js';
 import { SPELL_PAGE, spellComponentListRect, type SpellExamineModel } from './examine/SpellExamine.js';
-import {
-  renderExaminePanel1999, inscriptionRefusal1999, inscriptionCommit1999, facePalette1999, EXAMINE_PANEL_1999_HEIGHT,
-  type ExaminePanel1999View, type FaceDids1999, type Inscription1999,
-} from './examine/ExaminePanel1999.js';
 import { APPRAISAL_COLOR_ARGB, type ItemAppraisalText } from './examine/ItemAppraisalText.js';
 import { CREATURE_EXAMINE_ELEMENTS, STAT_VALUE_COLORS, MISC_INFO_COLORS, type CreaturePageModel, type CharacterPageModel } from './examine/CreatureAppraisalText.js';
 import { wheelScrollPixels } from './wheelScroll.js';
 import { pageStorage } from '../utils/pageStorage.js';
 import { COMBAT_WINDOW, combatWindowPlacement, combatBarPageVisible } from './CombatWindow.js';
-import { skillFooterTitleRuns, skillRowTone, FOOTER_TITLE_COLORS, argbToCss } from './SkillDisplay.js';
+import { skillFooterTitleRuns, skillRowTone, statLineRuns1999, FOOTER_TITLE_COLORS, argbToCss, type TextRun } from './SkillDisplay.js';
 import { AutomationPanel, hudStripText, type AutomationKit, type RoutineEditor } from './automation/AutomationPanel.js';
 import { VTankWindow, type VTankKit, type VTankSource } from './automation/VTankWindow.js';
 import { renderVvsText, vvsFieldStyle, VVS_COLORS, VVS_TAB_PX } from './automation/vvsText.js';
@@ -93,7 +89,7 @@ import {
   PANELS_WINDOW, panelsWindowPlacement, setPanelsWindowPanelVisibility,
   INVENTORY_PANEL, CHARACTER_PANEL, CHARACTER_INFO_PANEL, OPTIONS_PANEL,
   WORLD_PANEL, SOCIAL_PANEL, SPELLBOOK_PANEL, CONTRACTS_PANEL,
-  VITAE_PANEL, LINK_STATUS_PANEL, MINI_GAME_PANEL, BOOK_PANEL, AUTOMATION_PANEL, EXAMINE_1999_PANEL,
+  VITAE_PANEL, LINK_STATUS_PANEL, MINI_GAME_PANEL, BOOK_PANEL, AUTOMATION_PANEL,
   type PanelsWindowSlotState, type PanelsWindowSlotPanel, type PanelsWindowPlacement,
 } from './PanelsWindow.js';
 import {
@@ -1203,11 +1199,13 @@ export interface PlayerStateLike {
   /** CORE.7 — VitalSystem raise counts (VitalId 1/2/3) for the
    *  select-to-raise footer's vital costs. Optional so existing test fakes
    *  that pre-date this interface don't have to be touched. */
-  vitals?: { getRaises(id: number): number };
-  attributes: { getCurrent(id: number): number };
+  vitals?: { getRaises(id: number): number; getExperienceSpent?(id: number): number | undefined };
+  attributes: { getCurrent(id: number): number; getExperienceSpent?(id: number): number | undefined };
   /** STATS.enchantments-never-populated — ACE CreatureAttribute.Current (the
    *  BUFFED value). Optional so older test fakes stay valid; absent ⇒ base. */
   getAttributeCurrent?(id: number): number;
+  /** A vital's unenchanted maximum, no vitae (VitalId 1/2/3); optional for older fakes. */
+  getVitalBaseMax?(id: number): number;
   /** ACE CreatureSkill.Current (buffed) / .Base (unbuffed, with aug base
    *  bonuses). Optional; absent ⇒ skills.getTotal for both. */
   getSkillCurrent?(id: number, skillTable: Map<number, SkillBase>): number;
@@ -2284,23 +2282,28 @@ export class GameUI {
   /** Whether the magic panel shows the research tab. */
   get hasSpellResearch(): boolean { return this.spellResearchEnabled; }
   /**
-   * VISUAL.ac1999-examine-panel-docked — set once per page load from the era
-   * profile (eraClientRules().examinePanel), like setSpellResearch.
+   * REVERT.ac1999-forked-panels — how the character panel's selection line
+   * words a stat (eraClientRules().statLineText): end of retail's
+   * "Strength 80+", or the 1999 client's InfoBox::SetBase @ 0x00544a70
+   * "Strength 80 (+15)" in the same shared footer. Set once per page load
+   * from the era profile, like setSpellResearch.
    */
-  setExaminePanel(mode: 'floaty' | 'docked1999'): void {
-    if (mode === this.examinePanelMode) return;
-    this.hideExaminePanel();
-    this.examinePanelMode = mode;
+  setStatLineText(mode: 'eor' | 'ac1999'): void {
+    if (mode === this.statLineMode) return;
+    this.statLineMode = mode;
+    if (this.charPanelVisible) this.refreshCharPanel();
   }
-  /** Where an examine shows in this world. */
-  get examinePanelKind(): 'floaty' | 'docked1999' { return this.examinePanelMode; }
+  /** How this world words the selected stat's line. */
+  get statLineTextKind(): 'eor' | 'ac1999' { return this.statLineMode; }
+  private statLineMode: 'eor' | 'ac1999' = 'eor';
   private charInfo: {
     name: string; level: number; heritage: string; gender: string; pkStatus: string;
     heritageId: number; genderId: number;
     totalXp: number; unassignedXp: number; xpToNextLevel: number; skillCredits: number;
     availableLuminance: bigint; maximumLuminance: bigint;
-    attributes: Record<string, { base: number; buffed: number; raises: number }>;
-    vitals: Record<string, { current: number; max: number; raises: number }>;
+    /** xp: the XP spent (ExperienceSpent), which prices the next raise; absent ⇒ table[raises]. */
+    attributes: Record<string, { base: number; buffed: number; raises: number; xp?: number }>;
+    vitals: Record<string, { current: number; max: number; raises: number; xp?: number; baseMax?: number }>;
     // sac — the raw CACQualities SKILL_ADVANCEMENT_CLASS of the server's
     // skill record; undefined when PlayerDescription carried no record.
     skills: Array<{ id: number; name: string; status: string; base: number; effective: number; raises: number; sac?: number; pp?: number }>;
@@ -3049,16 +3052,6 @@ export class GameUI {
   private examineSpellId = 0;
   /** RecvNotice_SelectionChanged → ClientUISystem::ExamineObject(selectedID). */
   onExamineSelection: ((guid: number) => void) | null = null;
-  /**
-   * VISUAL.ac1999-examine-panel-docked — where an examine shows
-   * (eraClientRules().examinePanel): end of retail's floaty window, or the
-   * 1999 docked ExaminePanel (ExaminePanel1999.ts) in the panels window.
-   */
-  private examinePanelMode: 'floaty' | 'docked1999' = 'floaty';
-  /** The docked 1999 panel while it shows: its wrapper and the view it draws. */
-  private examine1999: { wrapper: HTMLDivElement; view: ExaminationView } | null = null;
-  /** The view the docked panel draws next (set before the panels window shows it). */
-  private examine1999Pending: ExaminationView | null = null;
   private bookPanelHandle: PanelHandle | null = null;
   /** gmBookUI's state (BookModel.ts); the view draws it. */
   private readonly book = new BookModel({
@@ -12519,18 +12512,6 @@ export class GameUI {
         else this.hideExaminePanel();
       }
     }
-    // The 1999 panel (PanelUI's selection notice @ 0x004fcb20): while it shows, a new
-    // selection is examined; a cleared one closes it only when it shows the object that
-    // was selected (0x00509c20 → 0x005098b0).
-    if (this.examine1999) {
-      const sel = this.hud.target?.id ?? null;
-      if (sel !== this.examineSelectionSeen) {
-        const prev = this.examineSelectionSeen;
-        this.examineSelectionSeen = sel;
-        if (sel) this.onExamineSelection?.(sel);
-        else if (prev !== null && prev === this.examineCurrentGuid) this.hideExaminePanel();
-      }
-    }
 
     // Vital bars — clip fill layer + AC bitmap font text
     this.lastHealthText = this.updateVitalBarDAT(this.healthFillEl, this.healthTextEl, this.hud.health, this.lastHealthText);
@@ -13385,7 +13366,6 @@ export class GameUI {
       linkStatus: this.linkStatusPanelVisible,
       miniGame: this.miniGamePanelVisible,
       book: this.bookPanelHandle !== null,
-      examine1999: this.examine1999 !== null,
       positive: this.effectsWindows.positive.visible,
       negative: this.effectsWindows.negative.visible,
     };
@@ -13405,7 +13385,6 @@ export class GameUI {
         case 'linkStatus': this.setLinkStatusPanelShown(want); break;
         case 'miniGame': this.setMiniGamePanelShown(want); break;
         case 'book': this.setBookPanelShown(want); break;
-        case 'examine1999': this.setExamine1999Shown(want); break;
         case 'positive': this.setEffectsWindowShown(POSITIVE_EFFECTS, want); break;
         case 'negative': this.setEffectsWindowShown(NEGATIVE_EFFECTS, want); break;
       }
@@ -13681,7 +13660,6 @@ export class GameUI {
       // A finished resize redraws whichever panel the window shows.
       onResizeEnd: () => {
         if (this.book.open && this.bookPanelHandle) this.renderBookPanel();
-        else if (this.examine1999) this.renderExaminePanel1999Now();
         else if (this.inventoryVisible) this.renderInventoryPanel();
         else if (this.charPanelVisible) this.renderCharPanel();
         else if (this.optionsPanelVisible) this.renderOptionsPanel();
@@ -19605,6 +19583,20 @@ export class GameUI {
 
   private charPanelRenderedTab: 'attributes' | 'skills' | 'titles' | null = null;
 
+  /**
+   * An enchantment (not vitae, not a cooldown) touches stat (statType bit, key):
+   * the 1999 InfoBox::SetBase's " (+0)" test (statLineRuns1999).
+   */
+  private statEnchanted(statType: number, key: number): boolean {
+    for (const e of this.activeEnchantments.values()) {
+      if (e.isCooldown || e.isVitae) continue;
+      const type = e.statModType ?? 0;
+      if ((type & 0x800000) !== 0) continue;
+      if ((type & statType) && (e.statModKey ?? -1) === key) return true;
+    }
+    return false;
+  }
+
   private renderCharPanelFresh(): void {
     // Clean up previous render
     if (this.charPanelHandle) {
@@ -20005,11 +19997,22 @@ export class GameUI {
     return Math.max(0, Math.min(pp, table[level + 1]) - table[level]);
   }
 
-  static statRaiseCosts(table: number[] | undefined, raises: number): { cost1: number; cost10: number } {
+  /**
+   * BUG.ac1999-attribute-raise (webac#4) — retail prices against the XP the
+   * record says is spent: GetCostToRaise = ExperienceToAttributeLevel(ranks + 1)
+   * − ExperienceSpent, GetCostToRaise10 the same at ranks + min(10, max − ranks)
+   * (gmAttributeUI @ 0049cb80 / 0049cc70; vitals through the Attribute2nd table).
+   * The 1999 client.exe prices XpTable[f0 − f1 + 1] − f2 (AttribInfoBox::Display
+   * @ 0x00544e10), which the 1999 adapter carries as ranks f0 − f1 and xp f2.
+   * Without an xp the spent XP is taken as exactly table[raises] (ACE's records
+   * always hold that, so its prices are unchanged).
+   */
+  static statRaiseCosts(table: number[] | undefined, raises: number, xpSpent?: number): { cost1: number; cost10: number } {
     if (!table || raises < 0 || raises >= table.length) return { cost1: 0, cost10: 0 };
-    const cost1 = raises + 1 < table.length ? table[raises + 1] - table[raises] : 0;
+    const spent = xpSpent ?? table[raises];
+    const cost1 = raises + 1 < table.length ? Math.max(0, table[raises + 1] - spent) : 0;
     const steps = Math.min(10, table.length - 1 - raises);
-    const cost10 = steps > 0 ? table[raises + steps] - table[raises] : 0;
+    const cost10 = steps > 0 ? Math.max(0, table[raises + steps] - spent) : 0;
     return { cost1, cost10 };
   }
 
@@ -20236,8 +20239,8 @@ export class GameUI {
       `${c.name}  level ${c.level}  ${c.heritage} ${c.gender}  ${c.pkStatus}`,
       `XP ${c.totalXp.toLocaleString()} total, ${c.unassignedXp.toLocaleString()} unassigned, ${c.xpToNextLevel.toLocaleString()} to next level; ${c.skillCredits} skill credits`,
       ...GameUI.nextSkillCreditsLine(this.xpCostTables.levelSkillCredits, c.level),
-      'Attributes: ' + Object.entries(c.attributes).map(([k, a]) => `${ATTRIBUTE_LABELS[k] ?? k} ${a.buffed}${a.buffed !== a.base ? ` (base ${a.base}${this.statCauses(0x1, ATTRIBUTE_IDS[k] ?? 0)})` : ''}${next(GameUI.statRaiseCosts(this.xpCostTables.attribute, a.raises ?? 0).cost1)}`).join(', '),
-      'Vitals: ' + Object.entries(c.vitals).map(([k, v]) => `${k} ${v.current}/${v.max}${next(GameUI.statRaiseCosts(this.xpCostTables.vital, v.raises ?? 0).cost1)}`).join(', '),
+      'Attributes: ' + Object.entries(c.attributes).map(([k, a]) => `${ATTRIBUTE_LABELS[k] ?? k} ${a.buffed}${a.buffed !== a.base ? ` (base ${a.base}${this.statCauses(0x1, ATTRIBUTE_IDS[k] ?? 0)})` : ''}${next(GameUI.statRaiseCosts(this.xpCostTables.attribute, a.raises ?? 0, a.xp).cost1)}`).join(', '),
+      'Vitals: ' + Object.entries(c.vitals).map(([k, v]) => `${k} ${v.current}/${v.max}${next(GameUI.statRaiseCosts(this.xpCostTables.vital, v.raises ?? 0, v.xp).cost1)}`).join(', '),
     ];
     for (const status of ['Specialized', 'Trained']) {
       const list = c.skills.filter((s) => s.status === status);
@@ -20321,7 +20324,7 @@ export class GameUI {
     const attr = Object.keys(GameUI.ATTR_WIRE_IDS).find((k) => k === want || (ATTRIBUTE_LABELS[k] ?? '').toLowerCase() === want);
     if (attr) {
       const data = this.charInfo.attributes[attr];
-      const { cost1 } = GameUI.statRaiseCosts(this.xpCostTables.attribute, data?.raises ?? 0);
+      const { cost1 } = GameUI.statRaiseCosts(this.xpCostTables.attribute, data?.raises ?? 0, data?.xp);
       const label = ATTRIBUTE_LABELS[attr] ?? attr;
       const at = reached(label, data?.base ?? 0);
       if (at) return at;
@@ -20330,14 +20333,14 @@ export class GameUI {
       this.raiseCallbacks.onRaiseAttribute?.(GameUI.ATTR_WIRE_IDS[attr], cost1);
       const from = data?.base ?? 0;
       const shifts = GameUI.attributeRaiseSkillShifts(GameUI.ATTR_WIRE_IDS[attr], this.charInfo.attributes, this.charInfo.skills, this.skillTable?.skills);
-      if (data) { data.raises++; data.base++; data.buffed++; }
+      if (data) { data.xp = (data.xp ?? this.xpCostTables.attribute?.[data.raises] ?? 0) + cost1; data.raises++; data.base++; data.buffed++; }
       const r = raised(label, from, cost1);
       return shifts.length ? { ...r, shifts } : r;
     }
     const vital = Object.keys(GameUI.VITAL_WIRE_IDS).find((k) => k === want || `max ${k}` === want || `maximum ${k}` === want);
     if (vital) {
       const data = this.charInfo.vitals[vital];
-      const { cost1 } = GameUI.statRaiseCosts(this.xpCostTables.vital, data?.raises ?? 0);
+      const { cost1 } = GameUI.statRaiseCosts(this.xpCostTables.vital, data?.raises ?? 0, data?.xp);
       const at = reached(`Maximum ${vital[0].toUpperCase()}${vital.slice(1)}`, data?.max ?? 0);
       if (at) return at;
       const no = afford(cost1, vital);
@@ -20345,7 +20348,7 @@ export class GameUI {
       this.raiseCallbacks.onRaiseVital?.(GameUI.VITAL_WIRE_IDS[vital], cost1);
       // No before/after numbers: the panel data holds the current maximum, which vitae and buffs move
       // away from the unbuffed one the server raises (acjs-f7: "Health 42 → 52" against a base of 55).
-      if (data) { data.raises++; data.max++; }
+      if (data) { data.xp = (data.xp ?? this.xpCostTables.vital?.[data.raises] ?? 0) + cost1; data.raises++; data.max++; }
       return raised(`Maximum ${vital[0].toUpperCase()}${vital.slice(1)}`, undefined, cost1);
     }
     const skill = this.agentFindSkill(want, (s) => s.status === 'Trained' || s.status === 'Specialized');
@@ -20410,11 +20413,14 @@ export class GameUI {
     const vital = attr ? undefined : Object.keys(GameUI.VITAL_WIRE_IDS).find((k) => k === want || `max ${k}` === want || `maximum ${k}` === want);
     if (attr || vital) {
       const table = attr ? this.xpCostTables.attribute : this.xpCostTables.vital;
-      let raises = attr ? this.charInfo.attributes[attr]?.raises ?? 0 : this.charInfo.vitals[vital!]?.raises ?? 0;
+      const rec = attr ? this.charInfo.attributes[attr] : this.charInfo.vitals[vital!];
+      let raises = rec?.raises ?? 0;
+      let xp = rec?.xp;
       for (let i = 0; i < steps; i++, raises++) {
-        const c = GameUI.statRaiseCosts(table, raises).cost1;
+        const c = GameUI.statRaiseCosts(table, raises, xp).cost1;
         if (c <= 0) break;
         out.push(c);
+        xp = (xp ?? table?.[raises] ?? 0) + c;
       }
       return out;
     }
@@ -20453,6 +20459,8 @@ export class GameUI {
       if (!sel) return null;
       let name: string; let value = 0; let tone: 'normal' | 'buffed' | 'debuffed' = 'normal';
       let costs: { cost1: number; cost10: number };
+      // The 1999 wording of the same line (eraClientRules().statLineText; InfoBox::SetBase @ 0x00544a70).
+      let titleRuns: TextRun[] | undefined;
       if (sel.kind === 'attribute') {
         const key = Object.keys(GameUI.ATTR_WIRE_IDS).find(k => GameUI.ATTR_WIRE_IDS[k] === sel.id);
         const data = key ? this.charInfo.attributes[key] : undefined;
@@ -20460,7 +20468,10 @@ export class GameUI {
         name = ATTRIBUTE_LABELS[key] ?? key;
         value = data.buffed;
         tone = data.buffed > data.base ? 'buffed' : data.buffed < data.base ? 'debuffed' : 'normal';
-        costs = GameUI.statRaiseCosts(this.xpCostTables.attribute, data.raises);
+        costs = GameUI.statRaiseCosts(this.xpCostTables.attribute, data.raises, data.xp);
+        if (this.statLineMode === 'ac1999') {
+          titleRuns = statLineRuns1999({ kind: 'attribute', name, value: data.buffed, base: data.base, enchanted: this.statEnchanted(0x1, sel.id) }, this.lastVitaeMultiplier);
+        }
       } else {
         const key = Object.keys(GameUI.VITAL_WIRE_IDS).find(k => GameUI.VITAL_WIRE_IDS[k] === sel.id);
         const data = key ? this.charInfo.vitals[key] : undefined;
@@ -20468,14 +20479,20 @@ export class GameUI {
         const vitalStrs: Record<string, number> = { health: 163745349, stamina: 252780597, mana: 204321781 };
         name = getString(vitalStrs[key]) ?? key[0].toUpperCase() + key.slice(1);
         value = data.max;
-        costs = GameUI.statRaiseCosts(this.xpCostTables.vital, data.raises);
+        costs = GameUI.statRaiseCosts(this.xpCostTables.vital, data.raises, data.xp);
+        if (this.statLineMode === 'ac1999') {
+          titleRuns = statLineRuns1999({
+            kind: 'vital', name, value: data.current, max: data.max, base: data.baseMax ?? data.max,
+            enchanted: this.statEnchanted(0x2, sel.id),
+          }, this.lastVitaeMultiplier);
+        }
       }
       const send = (cost: number): void => {
         if (sel.kind === 'attribute') this.raiseCallbacks.onRaiseAttribute?.(sel.id, cost);
         else this.raiseCallbacks.onRaiseVital?.(sel.id, cost);
       };
       return {
-        title: name, value: `${value}${tone === 'buffed' ? '+' : ''}`, tone,
+        title: name, value: `${value}${tone === 'buffed' ? '+' : ''}`, tone, titleRuns,
         line1Label: xpToRaise, line1Value: fmtCost(costs.cost1),
         line2Label: unassigned, line2Value: availXp.toLocaleString(),
         raiseEnabled: costs.cost1 > 0 && costs.cost1 <= availXp,
@@ -20500,7 +20517,10 @@ export class GameUI {
         // BUG.skill-values-red-under-vitae — DisplaySelectionFooter_Trained:
         // "<name>: <value>", the vitae modifier in colour 3, the enchantment
         // delta in green / red (vitae is not a debuff).
-        titleRuns: skillFooterTitleRuns(skill.name, skill.effective, skill.base, this.lastVitaeMultiplier),
+        // A 1999 world words it as InfoBox::SetBase @ 0x00544a70 ("War Magic 80 (+10)").
+        titleRuns: this.statLineMode === 'ac1999'
+          ? statLineRuns1999({ kind: 'skill', name: skill.name, value: skill.effective, base: skill.base, enchanted: this.statEnchanted(0x10, skill.id) }, this.lastVitaeMultiplier)
+          : skillFooterTitleRuns(skill.name, skill.effective, skill.base, this.lastVitaeMultiplier),
         line1Label: xpToRaise, line1Value: fmtCost(costs.cost1),
         line2Label: unassigned, line2Value: availXp.toLocaleString(),
         raiseEnabled: costs.cost1 > 0 && costs.cost1 <= availXp,
@@ -33174,7 +33194,6 @@ export class GameUI {
    * layout 0x2100001a.
    */
   showExaminationWindow(view: ExaminationView): void {
-    if (this.examinePanelMode === 'docked1999') { this.showExaminePanel1999(view); return; }
     if (this.pressGuard.defer(this.examinePanel, () => this.showExaminationWindow(view))) return;
     this.hideExaminePanel();
     const lr = this.layoutRenderer;
@@ -33230,12 +33249,6 @@ export class GameUI {
    * reopen it. False (nothing drawn) when that object's window isn't up.
    */
   refreshExaminationWindow(view: ExaminationView): boolean {
-    // ExaminePanel::SetAppraiseInfo @ 0x00509920 repaints a reply for the object it shows.
-    if (this.examinePanelMode === 'docked1999') {
-      if (!this.examine1999 || view.guid !== this.examineCurrentGuid) return false;
-      this.showExaminePanel1999(view);
-      return true;
-    }
     const handle = this.examinePanelHandle;
     if (!handle || view.guid !== this.examineCurrentGuid) return false;
     // Only the creature / character pages refill in place (UseTime re-appraises nothing else).
@@ -33252,7 +33265,7 @@ export class GameUI {
 
   /** The guid whose examine window is up, or null. */
   get examinedGuid(): number | null {
-    return this.examinePanelHandle || this.examine1999 ? this.examineCurrentGuid : null;
+    return this.examinePanelHandle ? this.examineCurrentGuid : null;
   }
 
   /**
@@ -33566,157 +33579,6 @@ export class GameUI {
       this.examinePanelHandle = null;
     }
     this.examinePanel = null;
-    if (this.examine1999) this.setPanelsWindowPanel(EXAMINE_1999_PANEL, false);
-  }
-
-  /**
-   * VISUAL.ac1999-examine-panel-docked — ExaminePanel::SetAppraiseInfo
-   * @ 0x00509920 (ExamineSpell @ 0x00509720 for a spell): fill the panel and,
-   * when the right column shows another panel, make this one the column's
-   * (SetActivePanel @ 0x004d06f0). The column is our panels window.
-   */
-  private showExaminePanel1999(view: ExaminationView): void {
-    // A rebuild under a held press would eat its click (PanelPressGuard), as for the floaty window.
-    if (this.examine1999 && this.pressGuard.defer(this.examine1999.wrapper, () => this.showExaminePanel1999(view))) return;
-    this.examineCurrentGuid = view.guid;
-    this.examineCurrentPage = view.page;
-    this.examineSpellId = view.spell?.spellId ?? view.spell1999?.spellId ?? 0;
-    this.examineSelectionSeen = this.hud.target?.id ?? null;
-    if (this.examine1999) {
-      this.examine1999.view = view;
-      this.renderExaminePanel1999Now();
-      return;
-    }
-    this.examine1999Pending = view;
-    this.setPanelsWindowPanel(EXAMINE_1999_PANEL, true);
-  }
-
-  /** The panels window shows / hides the docked 1999 panel (setPanelsWindowPanel drives it). */
-  private setExamine1999Shown(show: boolean): void {
-    if (show) {
-      const view = this.examine1999Pending ?? this.examine1999?.view;
-      this.examine1999Pending = null;
-      if (!view) return;
-      this.examine1999 = { wrapper: this.examine1999?.wrapper ?? document.createElement('div'), view };
-      this.renderExaminePanel1999Now();
-      return;
-    }
-    if (this.examine1999) {
-      this.examine1999.wrapper.remove();
-      this.examine1999 = null;
-      this.panelsWindowFrameHandle = null;
-    }
-  }
-
-  /** Draw the docked panel in the panels window's body (its frame round it, at the window's rect). */
-  private renderExaminePanel1999Now(): void {
-    const cur = this.examine1999;
-    if (!cur) return;
-    const at = panelsWindowPlacement(this.getFloatyWindowGeometry(PANELS_WINDOW.windowId), this.hudLogicalWidth(), this.hudLogicalHeight());
-    const wrapper = cur.wrapper;
-    wrapper.replaceChildren();
-    wrapper.dataset.panel = 'examine1999';
-    Object.assign(wrapper.style, {
-      position: 'absolute', left: `${at.x}px`, top: `${at.y}px`, width: `${at.w}px`, height: `${at.h}px`,
-      zIndex: zLayer(ZLayer.PANEL_BASE), pointerEvents: 'auto',
-    });
-    if (!wrapper.isConnected) this.hudContainer.appendChild(wrapper);
-    this.mountPanelsWindowFrame(wrapper, at.h);
-    const B = PANELS_WINDOW.bodyRect;
-    const body = document.createElement('div');
-    Object.assign(body.style, {
-      position: 'absolute', left: `${B.x}px`, top: `${B.y}px`, width: `${B.w}px`, height: `${Math.min(at.body.h, EXAMINE_PANEL_1999_HEIGHT)}px`,
-      overflow: 'hidden', zIndex: '1',
-    });
-    wrapper.appendChild(body);
-    body.appendChild(renderExaminePanel1999(document, this.examinePanel1999View(cur.view), {
-      art: (did) => this.getWorldArtURL(did),
-      onMinimize: () => this.hideExaminePanel(),
-      onInscriptionPress: () => this.examine1999InscriptionPress(),
-      onInscriptionCommit: (text) => this.examine1999InscriptionCommit(text),
-    }));
-  }
-
-  /** The examination view as the 1999 panel draws it. */
-  private examinePanel1999View(view: ExaminationView): ExaminePanel1999View {
-    const iconUrl = view.icon?.iconDid ? (this.getRenderedItemIconURL(view.icon) ?? this.getItemIconURL(view.icon.iconDid)) : null;
-    if (view.page === 'spell' && view.spell1999) {
-      return {
-        page: 'spell', title: view.spell1999.title,
-        spell: {
-          ...view.spell1999,
-          iconUrl: this.getSpellIconURL(view.spell1999.spellId, view.spell1999.iconDid),
-          componentIconUrl: (did) => this.chargenWheelImageURL(did, 'spellcomp', compositeSpellComponentIcon, 'world'),
-        },
-      };
-    }
-    if (view.page === 'item' && view.item) {
-      return {
-        page: 'item', title: view.title,
-        item: { text: view.item, iconUrl, inscription: view.inscription1999 ?? { visible: false, placeholder: false, text: '', signature: '', scribe: '', inscription: '' } },
-      };
-    }
-    const c = view.creature1999;
-    const face = c?.character?.face ?? null;
-    return { page: c?.page ?? view.page, title: c?.title ?? view.title, creature: c ? { ...c, iconUrl, faceStrips: face ? this.faceStripURLs1999(face) : null } : undefined };
-  }
-
-  /**
-   * VISUAL.ac1999-examine-face-strips — the character's three face strips: each texture decoded
-   * through the composite palette (facePalette1999), from the 1999 world portal.
-   */
-  private faceStripURLs1999(face: FaceDids1999): Array<string | null> {
-    const tm = this.textureManager;
-    if (!tm) return [null, null, null];
-    const colors = facePalette1999(face, (id) => tm.getPaletteColors(id));
-    return [face.eyesTexture, face.noseTexture, face.mouthTexture].map((tex) => {
-      try {
-        const img = tm.getRGBAWithPalette(tex, colors);
-        return img ? iconRgbaToDataURL(img) : null;
-      } catch { return null; }
-    });
-  }
-
-  /**
-   * A 1999 interface texture: the panel's art is the 1999 world portal's own
-   * (0x0600128a…), not the end-of-retail interface portal's. Opaque RGB, read
-   * as is (no black key: the art has no transparency).
-   */
-  private getWorldArtURL(did: number): string | null {
-    const cached = this.worldArtCache.get(did);
-    if (cached !== undefined) return cached;
-    const tm = this.textureManager;
-    if (!tm || !did) return null;
-    const missEpoch = datMissEpoch();
-    let url: string | null = null;
-    try { url = tm.getIconDataURL(did); } catch { url = null; }
-    if (noDatMissSince(missEpoch)) this.worldArtCache.set(did, url);
-    else this.noteIconMiss();
-    return url;
-  }
-  private worldArtCache = new Map<number, string | null>();
-
-  /** The 1999 inscription press (0x0050acc0): a refusal's notice, else the edit may begin. */
-  private examine1999InscriptionPress(): boolean {
-    const view = this.examine1999?.view;
-    const ins = view?.inscription1999;
-    if (!view || !ins) return false;
-    const guid = view.guid;
-    const owned = this.inventoryItems.some(i => i.id === guid) || this.equippedItems.some(e => e.id === guid);
-    const refusal = inscriptionRefusal1999({ inscribable: ins.visible, owned, scribe: ins.scribe, playerName: this.inventoryOwnerName });
-    if (refusal) { this.displayErrorText(refusal); return false; }
-    return true;
-  }
-
-  /** The 1999 inscription edit ends: Event_SetInscription unless nothing changed, and the block redraws. */
-  private examine1999InscriptionCommit(text: string): Inscription1999 {
-    const cur = this.examine1999;
-    const ins = cur?.view.inscription1999;
-    if (!cur || !ins) return { visible: false, placeholder: false, text: '', signature: '', scribe: '', inscription: '' };
-    const r = inscriptionCommit1999(text, ins, this.inventoryOwnerName);
-    cur.view = { ...cur.view, inscription1999: r.view };
-    if (r.send !== null && cur.view.guid) this.onSetInscription?.(cur.view.guid, r.send);
-    return r.view;
   }
 
   /* ================================================================ */
@@ -33988,7 +33850,7 @@ export class GameUI {
     if (this.salvageVisible) out.push('Salvage');
     if (this.contractVisible) out.push('Contracts');
     if (this.automationPanelVisible) out.push('Automation');
-    if (this.examinePanelHandle || this.examine1999) out.push('Examine');
+    if (this.examinePanelHandle) out.push('Examine');
     if (this.bookPanelHandle || this.book.open) out.push('Book');
     if (this.containerPanel) out.push('Container');
     const back = this.panelHandBack;
@@ -34100,7 +33962,7 @@ export class GameUI {
     };
 
     // Build attribute data from AttributeSystem
-    const attrs: Record<string, { base: number; buffed: number; raises: number }> = {};
+    const attrs: Record<string, { base: number; buffed: number; raises: number; xp?: number }> = {};
     const attrIds = [
       // FAITHFUL.601 — ids follow AttributeId (= ACE PropertyAttribute):
       // Quickness=3, Coordination=4 (previously swapped).
@@ -34115,7 +33977,8 @@ export class GameUI {
       // CreatureAttribute.Current (enchantments applied); pre-fix it was the
       // base, so a buffed attribute never showed its buffed value/tone.
       const buffed = state.getAttributeCurrent ? state.getAttributeCurrent(a.id) : base;
-      attrs[a.name] = { base, buffed, raises };
+      const xp = state.attributes.getExperienceSpent?.(a.id);
+      attrs[a.name] = { base, buffed, raises, ...(xp !== undefined ? { xp } : {}) };
     }
 
     // Build skill data from SkillSystem
@@ -34223,6 +34086,11 @@ export class GameUI {
       this.statRaiseAwaiting = false;
     }
 
+    const vitalRaise = (id: number): { raises: number; xp?: number } => {
+      const xp = state.vitals?.getExperienceSpent?.(id);
+      const baseMax = state.getVitalBaseMax?.(id);
+      return { raises: state.vitals?.getRaises(id) ?? 0, ...(xp !== undefined ? { xp } : {}), ...(baseMax !== undefined ? { baseMax } : {}) };
+    };
     this.charInfo = {
       name: state.name,
       level: state.level,
@@ -34247,9 +34115,9 @@ export class GameUI {
       // CORE.7 — vital raises (VitalSystem ranks, fed by PlayerDesc +
       // updates) drive the select-to-raise footer's vital XP costs.
       vitals: {
-        health: { current: state.health.current, max: state.health.max, raises: state.vitals?.getRaises(1) ?? 0 },
-        stamina: { current: state.stamina.current, max: state.stamina.max, raises: state.vitals?.getRaises(2) ?? 0 },
-        mana: { current: state.mana.current, max: state.mana.max, raises: state.vitals?.getRaises(3) ?? 0 },
+        health: { current: state.health.current, max: state.health.max, ...vitalRaise(1) },
+        stamina: { current: state.stamina.current, max: state.stamina.max, ...vitalRaise(2) },
+        mana: { current: state.mana.current, max: state.mana.max, ...vitalRaise(3) },
       },
       skills: skillList,
     };

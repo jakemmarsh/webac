@@ -31,6 +31,8 @@ export interface Attribute {
   id: AttributeId;
   innate: number;     // starting value from character creation
   raises: number;     // points added via XP spending
+  /** XP spent on it (the record's ExperienceSpent / _cp_spent); undefined until the server sends it. */
+  xpSpent?: number;
 }
 
 export class AttributeSystem {
@@ -79,6 +81,21 @@ export class AttributeSystem {
   setRaises(id: AttributeId, raises: number): void {
     const attr = this.attributes.get(id);
     if (attr) attr.raises = raises;
+  }
+
+  /**
+   * The XP the server says is spent on an attribute (ACE ExperienceSpent, 1999 _cp_spent), or
+   * undefined before any record arrived. Retail prices the next raise against it:
+   * XpTable[ranks + 1] − xpSpent (gmAttributeUI::GetCostToRaise @ 0049cb80).
+   */
+  getExperienceSpent(id: AttributeId): number | undefined {
+    return this.attributes.get(id)?.xpSpent;
+  }
+
+  /** Set the XP spent on an attribute (from PlayerDescription / PrivateUpdateAttribute). */
+  setExperienceSpent(id: AttributeId, xp: number): void {
+    const attr = this.attributes.get(id);
+    if (attr) attr.xpSpent = xp;
   }
 
   /** Get all attribute current values. */

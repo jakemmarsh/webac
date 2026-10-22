@@ -135,6 +135,12 @@ export interface SpellExamineInputs {
   component: (scid: number) => { name: string; icon: number } | null;
   /** The first carried object of a component (0 = not carried). */
   carriedObject: (scid: number) => number;
+  /**
+   * A 1999 world's "Charge: 87%" (VISUAL.ac1999-spell-charge; 1999 SpellExaminePanel::
+   * ExamineSpell @ 0x00511110, magic/SpellCharge1999.ts): one more line of the body,
+   * after the description. Absent in every other era.
+   */
+  chargeLine?: string;
 }
 
 /** SpellExamineUI::ExamineSpell @ 004b6210 for one spell. */
@@ -142,6 +148,7 @@ export function buildSpellExamineModel(i: SpellExamineInputs): SpellExamineModel
   const s = i.spell;
   const body: string[] = [];
   if (s.desc) body.push(s.desc);
+  if (i.chargeLine) body.push(i.chargeLine);
   const components: SpellExamineComponent[] = [];
   const formula = appropriateSpellFormula({ ...i.formula, school: s.school });
   if (formula.length > 0) {

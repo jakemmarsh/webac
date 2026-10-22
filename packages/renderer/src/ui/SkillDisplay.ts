@@ -43,4 +43,65 @@ export function skillFooterTitleRuns(name: string, current: number, raw: number,
   return runs;
 }
 
+/**
+ * A stat as the 1999 client's InfoBox::SetBase reads it (REVERT.ac1999-forked-panels:
+ * the 1999 wording in the shared footer; eraClientRules().statLineText 'ac1999').
+ */
+export interface StatLine1999 {
+  kind: 'attribute' | 'vital' | 'skill';
+  name: string;
+  /** Attribute / skill: the enchanted value. Vital: the current value. */
+  value: number;
+  /** Vital: the enchanted maximum. */
+  max?: number;
+  /** The unenchanted value (attribute / skill), or a vital's unenchanted maximum without vitae. */
+  base: number;
+  /** An enchantment (not vitae) touches it: SetBase's " (+0)" when they cancel out. */
+  enchanted: boolean;
+}
+
+/**
+ * The 1999 vitae part of a value (0x005b2b90): none for an attribute (vitae
+ * never touched primaries) or without vitae, else round(base × multiplier) −
+ * base, the float floored at 0 below 0.5.
+ */
+export function vitaeDelta1999(stat: Pick<StatLine1999, 'kind' | 'base'>, vitaeMultiplier: number): number {
+  if (stat.kind === 'attribute' || !(vitaeMultiplier < 1)) return 0;
+  let v = stat.base * vitaeMultiplier;
+  if (v <= 0.5) v = 0;
+  return Math.floor(v + 0.5) - stat.base;
+}
+
+/** The 1999 enchantments' part (0x005b2ca0): the enchanted value less vitae, less the base. */
+export function enchantDelta1999(stat: StatLine1999, vitaeMultiplier: number): number {
+  const value = stat.kind === 'vital' ? (stat.max ?? 0) : stat.value;
+  return value - vitaeDelta1999(stat, vitaeMultiplier) - stat.base;
+}
+
+/** " (Must be trained)" (1999 client.exe .rdata 0x608e04). */
+export const MUST_BE_TRAINED_1999 = ' (Must be trained)';
+
+/**
+ * The 1999 client's stat line, InfoBox::SetBase @ 0x00544a70, as the shared
+ * footer title's runs: "Name value" ("cur/max" for a vital, " (Must be
+ * trained)" for a skill at 0) in colour 0, then the vitae " (-n)" (UI+0x198,
+ * (0x80,0xff,0xff): colour 3), then the enchantments " (+n)" green (UI+0x1a4,
+ * colour 1) / " (-n)" red (UI+0x1a0, colour 2), " (+0)" green when they
+ * cancel out. A Strength of 65 with a +15 buff reads "Strength 80 (+15)".
+ */
+export function statLineRuns1999(stat: StatLine1999, vitaeMultiplier: number): TextRun[] {
+  const max = stat.kind === 'vital' ? (stat.max ?? 0) : 0;
+  let text = `${stat.name} `;
+  if (stat.value === 0 && max === 0) text += MUST_BE_TRAINED_1999;
+  else text += max > 0 ? `${stat.value}/${max}` : `${stat.value}`;
+  const runs: TextRun[] = [{ text, colorIndex: 0 }];
+  const vitae = vitaeDelta1999(stat, vitaeMultiplier);
+  if (vitae !== 0) runs.push({ text: ` (${vitae > 0 ? '+' : ''}${vitae})`, colorIndex: 3 });
+  const ench = enchantDelta1999(stat, vitaeMultiplier);
+  if (ench > 0) runs.push({ text: ` (+${ench})`, colorIndex: 1 });
+  else if (ench < 0) runs.push({ text: ` (${ench})`, colorIndex: 2 });
+  else if (stat.enchanted) runs.push({ text: ' (+0)', colorIndex: 1 });
+  return runs;
+}
+
 export const argbToCss = (argb: number): string => `#${((argb >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;

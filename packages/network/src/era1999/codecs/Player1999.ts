@@ -33,12 +33,17 @@
  *     0x20 Position {u32 key, cell, xyz, wxyz}       same (32 bytes)
  *   u32 derivedFlags, u32 wcid                     u32 vectorFlags (same bits), u32 hasHealth = 1
  *     0x001 AttributeCache u32 flags (same 9 bits)
- *       primary {field0, field1, field2}             {ranks, startingValue, xpSpent}
- *       — 1999 shows field0 alone as the value; the server folds init+raises into it and zeroes field1
- *         (AC1999::Remap1999AttributeForWire). → ranks 0, startingValue field0, xp field2.
- *       vital {raises, init, xpSpent, current}       same 4 × u32
+ *       primary {field0, field1, field2}             {ranks, startingValue, xpSpent} = {f0 − f1, f1, f2}
+ *       vital {field0, field1, xpSpent, current}     {ranks, startingValue, xpSpent, current} = {f0 − f1, f1, …}
+ *       — the 1999 client reads f0 (+4) alone as the level it shows (InqAttribute, InqAttribute2nd's
+ *         max getter @ 0x005ef620) and prices a raise as XpTable[f0 − f1 + 1] − f2
+ *         (AttribInfoBox::Display @ 0x00544e10; 0x00545070 is f0 − f1, 0x00484090 f2). End of
+ *         retail prices it XpTable[ranks + 1] − xpSpent (gmAttributeUI::GetCostToRaise @ 0049cb80)
+ *         and shows ranks + startingValue, so ranks f0 − f1 / startingValue f1 keeps both the
+ *         value and the price (eolStat1999). The AC1999 server folds the value into f0 with f1 0
+ *         and an f2 that makes that price the next step (AC1999::Remap1999AttributeForWire).
  *     0x002 Skills {u32 id, u32 rank, i32 sac, u32 xp, u32 init, i32 resist, f64 lastUsed}
- *                                                   {u32 id, u16 ranks, u16 1, u32 sac, u32 xp, u32 init,
+ *                                                   {u32 id, u16 ranks, u16 1, u32 sac, u32 xp + init, u32 0,
  *                                                     u32 resist, f64}. Ids match EoL (the 1999 SkillTable
  *                                                     uses 1–39 with EoL's numbering); id 0 is dropped.
  *                                                     SAC 1/2/3 are EoL's Untrained/Trained/Specialized.
@@ -72,11 +77,12 @@
  *   0x43 Bool     → 0x02D1 / 0x02D2        (key 4 is 1999's PK flag → Int PlayerKillerStatus 134, 4 PK / 2 NPK)
  *   0x57 IID      → 0x02D9 / 0x02DA
  *   0x2D Position → 0x02DB / 0x02DC
- *   0x26 Attribute {f0,f1,f2}  → 0x02E3 (own only; EoL has no public attribute update)
- *   0x2C AttributeScalar value → 0x02E3 built from the last known record with the value replaced
+ *   0x26 Attribute {f0,f1,f2}  → 0x02E3 {f0 − f1, f1, f2} (own only; EoL has no public attribute update)
+ *   0x2C AttributeScalar value → 0x02E3 built from the last known record with f0 replaced (the
+ *        1999 client's int SetAttribute writes the +4 level alone, 0x005ef1d0 → 0x0043bea0)
  *   0x28 Skill (28-byte record) → 0x02DD (own only)
  *   0x10 SkillLevel rank / 0x2F SkillAdvancementClass sac → 0x02DD from the last known record
- *   0x29 Attribute2nd {raises, init, xp, current}: keys 1/3/5 → 0x02E7 PrivateUpdateVital;
+ *   0x29 Attribute2nd {f0, f1, xp, current}: keys 1/3/5 → 0x02E7 PrivateUpdateVital {f0 − f1, f1, xp, current};
  *        keys 2/4/6 → 0x02E9 PrivateUpdateAttribute2ndLevel (current); other objects → 0x02E8.
  *   0x1D1–0x1DE removes (odd = private [key], even = public [objectId][key]; the AC1999 server
  *        still prepends GDLE's u8 timestamp, so both widths are accepted) → the zero value as an
@@ -86,7 +92,8 @@
  *        by ServerMessageHandler): the AC1999 server still sends these GDLE leftovers in the
  *        end-of-retail layout (a 1999 client drops them); they pass through with the key renumbered.
  *
- * Lossy: the attribute raise count (1999 sends only the folded value), the spellbook's per-spell
+ * Lossy: the AC1999 server's attribute raise count (it sends only the folded value; ranks carry the
+ * level the 1999 client indexes the XP table with), the spellbook's per-spell
  * likelihood (the charge rides in the EoL entry's f32), the derived wcid, spellbook filters / CharacterOptions2 (absent in 1999),
  * removes become zero values, position removes vanish.
  */
@@ -183,7 +190,25 @@ export function combatMode1999ToEoL(v: number): number {
 }
 
 export interface Attribute1999 { field0: number; field1: number; xp: number }
+/** A 1999 SecondaryAttribute: `raises` is f0 (the level), `init` f1, then the XP spent and the current value. */
 export interface Vital1999 { raises: number; init: number; xp: number; current: number }
+
+/**
+ * A 1999 attribute / vital record {f0, f1, f2} as end of retail's {ranks, startingValue, xpSpent}.
+ * The 1999 client shows f0 and prices the next raise XpTable[f0 − f1 + 1] − f2
+ * (AttribInfoBox::Display @ 0x00544e10); end of retail shows ranks + startingValue and prices
+ * XpTable[ranks + 1] − xpSpent (gmAttributeUI::GetCostToRaise @ 0049cb80). ranks = f0 − f1,
+ * startingValue = f1 keeps both. (BUG.ac1999-attribute-raise, webac#4: ranks 0 / startingValue f0
+ * priced every raise at the table's first step, 110.)
+ */
+export function eolStat1999(f0: number, f1: number, xp: number): { ranks: number; start: number; xp: number } {
+  const lvl = f0 >>> 0, init = f1 >>> 0;
+  return lvl >= init ? { ranks: lvl - init, start: init, xp: xp >>> 0 } : { ranks: 0, start: lvl, xp: xp >>> 0 };
+}
+function writeStatEoL(w: BinaryWriter, f0: number, f1: number, xp: number): void {
+  const e = eolStat1999(f0, f1, xp);
+  w.writeUInt32(e.ranks); w.writeUInt32(e.start); w.writeUInt32(e.xp);
+}
 export interface Skill1999 { rank: number; sac: number; xp: number; init: number; resist: number; lastUsed: number }
 export interface Enchantment1999 {
   id: number; category: number; power: number; start: number; duration: number; caster: number;
@@ -395,7 +420,8 @@ export function writePlayerDescriptionEoL(w: BinaryWriter, d: PlayerDescription1
     for (const bit of ATTR_BITS) {
       const a = d.attributes.get(bit);
       if (!a) continue;
-      if ('field0' in a) { w.writeUInt32(0); w.writeUInt32(a.field0); w.writeUInt32(a.xp); } else { w.writeUInt32(a.raises); w.writeUInt32(a.init); w.writeUInt32(a.xp); w.writeUInt32(a.current); }
+      if ('field0' in a) writeStatEoL(w, a.field0, a.field1, a.xp);
+      else { writeStatEoL(w, a.raises, a.init, a.xp); w.writeUInt32(a.current); }
     }
   }
   if (vector & 0x002) {
@@ -406,7 +432,7 @@ export function writePlayerDescriptionEoL(w: BinaryWriter, d: PlayerDescription1
     header(w, d.spells.size);
     // End of retail's f32 here is ACE's constant 2.0, which nothing reads. A 1999 world puts the
     // spell's Charge there (SpellBookPage +0x4, always < 2.0: the same sentinel the 2005
-    // SpellBookPage::UnPack splits the two forms on); the 1999 spell examine panel prints it.
+    // SpellBookPage::UnPack splits the two forms on); a 1999 world's spell examine text prints it.
     for (const [id, [charge]] of d.spells) { w.writeInt32(id); w.writeFloat32(charge); }
   }
   if (vector & 0x200) {
@@ -438,13 +464,24 @@ export function writePlayerDescriptionEoL(w: BinaryWriter, d: PlayerDescription1
   for (const e of d.equipped) { w.writeUInt32(e.iid); w.writeUInt32(e.loc); w.writeUInt32(e.priority); }
 }
 
+/**
+ * A 1999 skill's XP toward its ranks as the 1999 client reads it: _pp + _init_level, held at
+ * 0xFFFFFFFF on overflow (0x005e2b30, read by SkillInfoBox::SetProficiencyPoints @ 0x00545ed0).
+ * The 1999 client never adds _init_level to the level it shows (InqSkillLevel reads the +4 rank
+ * alone), so end of retail gets it folded into ExperienceSpent and an InitLevel of 0.
+ */
+export function skillXp1999(s: Pick<Skill1999, 'xp' | 'init'>): number {
+  const sum = (s.xp >>> 0) + (s.init >>> 0);
+  return sum > 0xffffffff ? 0xffffffff : sum;
+}
+
 function writeSkillEoL(w: BinaryWriter, id: number, s: Skill1999): void {
   w.writeUInt32(id);
   w.writeUInt16(s.rank & 0xffff);
   w.writeUInt16(1);
   w.writeUInt32(s.sac);
-  w.writeUInt32(s.xp);
-  w.writeUInt32(s.init);
+  w.writeUInt32(skillXp1999(s));
+  w.writeUInt32(0);
   w.writeUInt32(s.resist >>> 0);
   w.writeFloat64(s.lastUsed);
 }
@@ -588,9 +625,7 @@ export function registerPlayer1999(c: Codecs1999): Player1999State {
   const attributeUpdate = (key: number, a: Attribute1999): Uint8Array => eol(OP.PrivAttribute, (w) => {
     w.writeUInt8(seq('attribute', key, st.guid));
     w.writeUInt32(key);
-    w.writeUInt32(0); // ranks: 1999 sends only the folded value
-    w.writeUInt32(a.field0); // the 1999 client shows field0 alone
-    w.writeUInt32(a.xp);
+    writeStatEoL(w, a.field0, a.field1, a.xp);
   });
   const skillUpdate = (key: number, s: Skill1999): Uint8Array => {
     const w = new BinaryWriter(48);
@@ -616,7 +651,7 @@ export function registerPlayer1999(c: Codecs1999): Player1999State {
   c.inbound.set(0x2c, (r, ctx) => {
     const obj = r.u32(); const key = r.u32(); const value = r.u32();
     if (!ownOnly('0x2C UpdateAttributeScalar', ctx, obj)) return [];
-    const a = { ...(st.attributes.get(key) ?? { field0: 0, field1: 0, xp: 0 }), field0: value, field1: 0 };
+    const a = { ...(st.attributes.get(key) ?? { field0: 0, field1: 0, xp: 0 }), field0: value };
     st.attributes.set(key, a);
     return [attributeUpdate(key, a)];
   });
@@ -649,7 +684,7 @@ export function registerPlayer1999(c: Codecs1999): Player1999State {
       return [eol(OP.PubVital, (w) => {
         w.writeUInt8(seq('vital', key, obj));
         w.writeUInt32(obj); w.writeUInt32(key);
-        w.writeUInt32(v.raises); w.writeUInt32(v.init); w.writeUInt32(v.xp); w.writeUInt32(v.current);
+        writeStatEoL(w, v.raises, v.init, v.xp); w.writeUInt32(v.current);
       })];
     }
     if (key === 2 || key === 4 || key === 6) {
@@ -658,7 +693,7 @@ export function registerPlayer1999(c: Codecs1999): Player1999State {
     return [eol(OP.PrivVital, (w) => {
       w.writeUInt8(seq('vital', key, obj));
       w.writeUInt32(key);
-      w.writeUInt32(v.raises); w.writeUInt32(v.init); w.writeUInt32(v.xp); w.writeUInt32(v.current);
+      writeStatEoL(w, v.raises, v.init, v.xp); w.writeUInt32(v.current);
     })];
   });
 

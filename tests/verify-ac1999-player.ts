@@ -321,7 +321,8 @@ describe('a synthetic 1999 PlayerDescription with hotbar, spell bar, XP, vitae',
     expect(desc.availableExperience).toBe(1000n);
     expect(desc.propertiesInt.get(40)).toBe(4); // missile 3 → EoL Missile 0x4
     expect(desc.propertiesString.get(5)).toBe('Bow Hunter');
-    expect(desc.strength).toEqual({ ranks: 0, startingValue: 60, cpSpent: 12345 });
+    // f0 60 / f1 0 → ranks 60 (the level the 1999 client prices from), start 0 (BUG.ac1999-attribute-raise).
+    expect(desc.strength).toEqual({ ranks: 60, startingValue: 0, cpSpent: 12345 });
     expect(desc.health).toEqual({ ranks: 2, startingValue: 0, cpSpent: 0, current: 30 });
     expect(desc.skills).toEqual([{ skillId: 2, ranks: 7, advancementClass: 3, cpSpent: 900, initLevel: 0 }]);
     expect(desc.spellIds).toEqual([0x3e1]);

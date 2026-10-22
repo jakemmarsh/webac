@@ -14,13 +14,13 @@ import { eraClientRules } from '../packages/renderer/src/era/EraFeatures.js';
 describe('eraClientRules', () => {
   it('end of retail and the classic eras: a cast stops the player, an attack only when the player is its own', () => {
     for (const id of ['eor', 'classicace-customdm', 'classicace-infiltration', 'classic-dereth']) {
-      expect(eraClientRules(eraProfile(id))).toEqual({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor', spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor', examinePanel: 'floaty' });
+      expect(eraClientRules(eraProfile(id))).toEqual({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor', spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor', statLineText: 'eor' });
     }
-    expect(eraClientRules(null)).toEqual({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor', spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor', examinePanel: 'floaty' });
+    expect(eraClientRules(null)).toEqual({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor', spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor', statLineText: 'eor' });
   });
 
   it('1999: a cast never stops the player (run-casting), an attack always does', () => {
-    expect(eraClientRules(eraProfile('ac1999-retail'))).toEqual({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999', spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999', examinePanel: 'docked1999' });
+    expect(eraClientRules(eraProfile('ac1999-retail'))).toEqual({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999', spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999', statLineText: 'ac1999' });
   });
 
   it('every era profile has rules', () => {

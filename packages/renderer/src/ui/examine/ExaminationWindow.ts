@@ -54,16 +54,6 @@ export interface ExaminationView {
   creature?: import('./CreatureAppraisalText.js').CreaturePageModel | import('./CreatureAppraisalText.js').CharacterPageModel;
   /** The live world model to clone into the creature page's viewport. */
   previewMesh?: import('three').Group | null;
-  /**
-   * A 1999 world's docked panel (eraClientRules().examinePanel 'docked1999';
-   * ExaminePanel1999.ts) draws these instead of the floaty window's pages:
-   * the object's icon (item header, creature panel), the 1999 creature /
-   * character and spell sub-panels, and the 1999 inscription.
-   */
-  icon?: import('../ItemIconComposite.js').ItemIconSpec;
-  creature1999?: import('./ExaminePanel1999.js').CreatureExamine1999;
-  spell1999?: import('./ExaminePanel1999.js').SpellExamine1999;
-  inscription1999?: import('./ExaminePanel1999.js').Inscription1999;
 }
 
 /** SetAppraiseInfo @ 004adae0's page choice. */

@@ -32,6 +32,8 @@ export interface Vital {
   /** ACE CreatureVital.StartingValue (InitLevel) — added to max (CreatureVital.cs:49-53, :131). */
   startingValue: number;
   partialRegen: number; // fractional regen accumulator
+  /** XP spent on the max (ACE ExperienceSpent, 1999 _cp_spent); undefined until the server sends it. */
+  xpSpent?: number;
 }
 
 /**
@@ -278,6 +280,17 @@ export class VitalSystem {
   setStartingValue(id: VitalId, startingValue: number): void {
     const vital = this.vitals.get(id);
     if (vital) vital.startingValue = startingValue;
+  }
+
+  /** The XP spent on a vital's max, or undefined before the server sent it (prices the next raise). */
+  getExperienceSpent(id: VitalId): number | undefined {
+    return this.vitals.get(id)?.xpSpent;
+  }
+
+  /** Set the XP spent on a vital's max (from PlayerDescription / PrivateUpdateVital). */
+  setExperienceSpent(id: VitalId, xp: number): void {
+    const vital = this.vitals.get(id);
+    if (vital) vital.xpSpent = xp;
   }
 
   /** Get the current value. */

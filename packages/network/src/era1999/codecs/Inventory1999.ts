@@ -88,7 +88,7 @@ import { BinaryReader, BinaryWriter } from '../../MessageSerializer.js';
 import { Group1999, eol, type AdapterContext, type Codecs1999, type Outbound1999 } from '../Adapter1999.js';
 import { Reader1999, Writer1999 } from '../Wire1999.js';
 import type { Player1999State } from './Player1999.js';
-import { APPRAISAL_1999_FLOAT, APPRAISAL_1999_INT, APPRAISAL_1999_STRING } from '@ac/shared';
+import { APPRAISAL_1999_FLOAT, APPRAISAL_1999_STRING } from '@ac/shared';
 
 /** The F7B0 envelope's fields, when the message arrived wrapped. */
 interface Envelope { guid: number; sequence: number }
@@ -178,12 +178,10 @@ function appraisal(r: Reader1999, w: BinaryWriter): void {
     if (cf & 0x2) {
       ints.set(P.IntAllegianceRank, r.u32());
       ints.set(P.IntAllegianceFollowers, r.u32());
-      // +0x40 / +0x44: the character's Loyalty and Leadership, which the 1999 character examine panel
-      // prints under "No Allegiance" (CharExaminePanel::SetAppraiseInfo @ 0x0050f760 via 0x00463eb0 /
-      // 0x005a2670); +0x88 has no reader.
-      ints.set(APPRAISAL_1999_INT.loyalty, r.u32() | 0);
-      ints.set(APPRAISAL_1999_INT.leadership, r.u32() | 0);
-      r.u32();
+      // +0x40 / +0x44: the character's Loyalty and Leadership (the 1999 CharExaminePanel::SetAppraiseInfo
+      // @ 0x0050f760 prints them under "No Allegiance"; the shared character page has no place for
+      // them); +0x88 has no reader.
+      r.u32(); r.u32(); r.u32();
       const gender = r.acString();
       const heritage = r.acString();
       const profession = r.acString();

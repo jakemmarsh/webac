@@ -158,14 +158,5 @@ export const BOOK_PANEL: PanelsWindowSlotPanel = { key: 'book', slot: 0x10000182
  * Vitae panel's shell it borrows, without 0x10000049.
  */
 export const AUTOMATION_PANEL: PanelsWindowSlotPanel = { key: 'automation', slot: 0x7a000001, returnsToPrevious: false };
-/**
- * VISUAL.ac1999-examine-panel-docked — the 1999 client.exe's ExaminePanel
- * (ctor @ 0x00508f80; ui/examine/ExaminePanel1999.ts), one of the right
- * column's panels in a 1999 world. 0x2100006e has no slot for it (the 1999
- * DATs carry no layouts), so its key is its own (0x7A000002 is outside every
- * DAT id range). The minimize box empties the column (PanelUI @ 0x004f3ef0
- * shows the never-set PanelUI+0x308), so it hands nothing back.
- */
-export const EXAMINE_1999_PANEL: PanelsWindowSlotPanel = { key: 'examine1999', slot: 0x7a000002, returnsToPrevious: false };
 /** 0x2100006e:0x10000188, based on 0x2100001e:0x1000016a (gmMiniGameUI; 0x10000049 = true). */
 export const MINI_GAME_PANEL: PanelsWindowSlotPanel = { key: 'miniGame', slot: 0x10000188, returnsToPrevious: true };

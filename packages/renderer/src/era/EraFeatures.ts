@@ -183,16 +183,19 @@ export interface EraClientRules {
    */
   appraisalText: 'eor' | 'ac1999';
   /**
-   * Where an examine shows (VISUAL.ac1999-examine-panel-docked, webac#3). End of retail's
-   * gmFloatyExaminationUI, a floating window (ui/examine/ExaminationWindow.ts), or the 1999
-   * client.exe's ExaminePanel (ctor @ 0x00508f80): built in code, docked in the right-hand column
-   * under the radar like the Map, one of the column's panels (ui/examine/ExaminePanel1999.ts).
+   * How the character panel's selection line shows a stat (REVERT.ac1999-forked-panels).
+   * End of retail's gmStatManagementUI footer title, "Strength 80+" with the value green
+   * (DisplaySelectionFooter_Attribute @ 0049d280), or the 1999 client.exe's InfoBox::SetBase
+   * @ 0x00544a70 wording in the same shared footer: "Strength 80 (+15)", the enchantments'
+   * " (+n)" green / " (-n)" red, the vitae " (-n)" cyan, " (+0)" when they cancel, a vital
+   * "cur/max" (ui/SkillDisplay.ts statLineRuns1999). Only the text differs: the panel is
+   * the shared one in every era (Jake, 2026-10-22).
    */
-  examinePanel: 'floaty' | 'docked1999';
+  statLineText: 'eor' | 'ac1999';
 }
 
-const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, examinePanel: 'floaty' as const });
-const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, examinePanel: 'docked1999' as const });
+const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const });
+const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const });
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {

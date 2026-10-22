@@ -317,6 +317,11 @@ export class PlayerState {
     return getAttributeCurrent(this.attributes, id, this.enchantments);
   }
 
+  /** A vital's unenchanted maximum without vitae (VitalId 1/2/3): what the 1999 stat line measures its buffs from. */
+  getVitalBaseMax(id: VitalId): number {
+    return this.vitals.getMaxValue(id, this.attributes, false, false);
+  }
+
   /** ACE CreatureSkill.Current — enchantments, vitae, augmentations (CreatureSkill.cs:154-195). */
   getSkillCurrent(id: number, skillTable: Map<number, SkillBase>): number {
     return getSkillCurrent(this.skills, id, skillTable, this.attributes, this.enchantments, this.statMods);

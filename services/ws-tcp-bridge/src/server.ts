@@ -57,7 +57,7 @@ import type { ServerRegistry } from './serverList.js';
 import type { ServerDirectory } from './serverDirectory.js';
 import { sanitizeClientError } from './clientErrors.js';
 import { sanitizeClientPreworld, traceFromUrl } from './clientPreworld.js';
-import { isWorldOutcome, sanitizeClientWorld } from './clientWorld.js';
+import { isPortalOutcome, isWorldOutcome, sanitizeClientPortal, sanitizeClientWorld } from './clientWorld.js';
 import { isAutomationOutcome, sanitizeClientAutomation } from './clientAutomation.js';
 import { RecentEventIds } from './eventIds.js';
 import { type LookupFn, resolveTarget } from './targets.js';
@@ -239,6 +239,9 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
   // OBS.automation-usage — a page sends at most 30 automation events (AutomationReporter); its own budget, so a
   // busy automation session never spends the pre-world events' one. 40 per 10 minutes per address.
   const clientAutomationRate = new SlidingWindowCounter(40, 10 * 60_000, now);
+  // TELEMETRY.portal-use-failed — portal_use_failed / portal_used (renderer PortalUseReporter: one per portal per
+  // minute, 50 per page) on their own budget, so a portal-hopping evening never spends the pre-world and world events'.
+  const clientPortalRate = new SlidingWindowCounter(40, 10 * 60_000, now);
   // BUG.telemetry-duplicate-resend — a page resends an event whose send failed after delivery
   // (TelemetryOutbox); each event id is logged once.
   const recentEventIds = new RecentEventIds(now);
@@ -335,7 +338,17 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         log('info', 'client_automation', { ip, ...Object.fromEntries(Object.entries(aev).filter(([, v]) => v !== null)) });
         return 204;
       }
-      if (!clientPreworldRate.hit(ip)) return 429;
+      const portal = body && typeof body === 'object' && isPortalOutcome((body as { outcome?: unknown }).outcome);
+      if (!(portal ? clientPortalRate : clientPreworldRate).hit(ip)) return 429;
+      // TELEMETRY.portal-use-failed — a portal that did nothing / the normal path's timing: also a client_world line.
+      if (portal) {
+        const pev = sanitizeClientPortal(body);
+        if (!pev) return 400;
+        if (recentEventIds.repeat(pev.eid)) return 204;
+        metrics.clientPreworldEvent(pev.outcome);
+        log('info', 'client_world', { ip, ...Object.fromEntries(Object.entries(pev).filter(([, v]) => v !== null)) });
+        return 204;
+      }
       // RELEASE.first-minute — the page's in-world events share the route (clientWorld.ts): one client_world line.
       if (body && typeof body === 'object' && isWorldOutcome((body as { outcome?: unknown }).outcome)) {
         const wev = sanitizeClientWorld(body);

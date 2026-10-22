@@ -1,6 +1,7 @@
 /**
  * SpellCharge1999 — the 1999 client's per-spell Charge (VISUAL.ac1999-spell-charge), the
- * release-era mechanic the spell examine panel prints as "Charge: %u%%".
+ * release-era mechanic the 1999 spell examine prints as "Charge: %u%%" (a line of the shared
+ * spell page's text in a 1999 world: SpellExamine.ts chargeLine).
  *
  * From the 1999 client.exe (reference/ac1999 kb structures/SpellBookPage, live-confirmed there):
  *  - SpellBookPage +0x4, seeded by the 0x0013 spellbook table (UnPack @ 0x005ed9a0, no clamp);

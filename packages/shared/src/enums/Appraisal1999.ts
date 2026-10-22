@@ -25,13 +25,3 @@ export const APPRAISAL_1999_FLOAT = {
   /** +0xb0, magic block f64: the missile-range fallback (0x005df9c0) when the weapon profile drew no range. */
   rangeFallback: 0x7f000002,
 } as const;
-
-export const APPRAISAL_1999_INT = {
-  /**
-   * CreatureAppraisalProfile +0x40 (block 0x2, its third dword: UnPack @ 0x005eaf70): the character's
-   * Loyalty, which the character examine panel prints under "No Allegiance" (0x00463eb0).
-   */
-  loyalty: 0x7f000001,
-  /** +0x44 (the fourth dword): the character's Leadership (0x005a2670). */
-  leadership: 0x7f000002,
-} as const;

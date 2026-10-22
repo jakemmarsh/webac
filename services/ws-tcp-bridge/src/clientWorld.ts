@@ -198,7 +198,119 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
   return out;
 }
 
+/**
+ * TELEMETRY.portal-use-failed — a portal the player used or walked into that did nothing within 5 s
+ * of the last progress (renderer telemetry/PortalUseReporter.ts; ACE Portal.cs), and the light
+ * success event with the try → PlayerTeleport time. One per portal per minute per page.
+ */
+export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_used'] as const;
+export const PORTAL_TRIGGERS = ['use', 'walk_in'] as const;
+export const PORTAL_USE_HELD = ['stale', 'busy', 'decided'] as const;
+/** A portal watch's longest wait (renderer PORTAL_MAX_WAIT_MS 30 s, with slack for a late tick). */
+const PORTAL_WAIT_MS = 120_000;
+
+export interface ClientPortalUseFailedEvent extends WorldIds {
+  outcome: 'portal_use_failed';
+  trigger: typeof PORTAL_TRIGGERS[number] | null;
+  wcid: number | null;
+  itemType: number | null;
+  descFlags: number | null;
+  physicsState: number | null;
+  ethereal: boolean | null;
+  reportCollisions: boolean | null;
+  useRadius: number | null;
+  reach: number | null;
+  dx: number | null;
+  dy: number | null;
+  dz: number | null;
+  dist: number | null;
+  endDist: number | null;
+  playerCell: string | null;
+  portalCell: string | null;
+  useSent: boolean | null;
+  held: typeof PORTAL_USE_HELD[number] | null;
+  attempts: number | null;
+  overlapped: boolean | null;
+  serverWalk: boolean | null;
+  useDone: number | null;
+  weenieErrors: number[] | null;
+  chatLines: number | null;
+  chatType: number | null;
+  chatTemplate: string | null;
+  waitedMs: number | null;
+}
+
+export interface ClientPortalUsedEvent extends WorldIds {
+  outcome: 'portal_used';
+  trigger: typeof PORTAL_TRIGGERS[number] | null;
+  wcid: number | null;
+  ms: number | null;
+  useSent: boolean | null;
+  serverWalk: boolean | null;
+  attempts: number | null;
+}
+
+/** A finite number within ±max, rounded to `decimals` places (metres). */
+function metres(v: unknown, max: number, decimals: 1 | 2): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v) || Math.abs(v) > max) return null;
+  const k = decimals === 2 ? 100 : 10;
+  return Math.round(v * k) / k + 0; // + 0: no -0 in the log
+}
+const U32 = 0xffff_ffff;
+
+export function isPortalOutcome(v: unknown): boolean {
+  return pick(v, PORTAL_OUTCOMES) !== null;
+}
+
+/** Validate a posted portal event field by field (the world events' ids and rules); null when it is not one. */
+export function sanitizeClientPortal(body: unknown): ClientPortalEvent | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const b = body as Record<string, unknown>;
+  const outcome = pick(b.outcome, PORTAL_OUTCOMES);
+  if (!outcome) return null;
+  return sanitizePortal(outcome, worldIds(b), b);
+}
+
+function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, b: Record<string, unknown>): ClientPortalUseFailedEvent | ClientPortalUsedEvent {
+  const common = {
+    trigger: pick(b.trigger, PORTAL_TRIGGERS),
+    wcid: uint(b.wcid, U32),
+    useSent: bool(b.useSent),
+    serverWalk: bool(b.serverWalk),
+    attempts: uint(b.attempts, 1000),
+  };
+  if (outcome === 'portal_used') return { outcome, ...ids, ...common, ms: uint(b.ms, PORTAL_WAIT_MS) };
+  const codes = Array.isArray(b.weenieErrors) ? b.weenieErrors.slice(0, 4).map((c) => uint(c, U32)).filter((c): c is number => c !== null) : null;
+  return {
+    outcome, ...ids, ...common,
+    itemType: uint(b.itemType, U32),
+    descFlags: uint(b.descFlags, U32),
+    physicsState: uint(b.physicsState, U32),
+    ethereal: bool(b.ethereal),
+    reportCollisions: bool(b.reportCollisions),
+    useRadius: metres(b.useRadius, 1000, 2),
+    reach: metres(b.reach, 1000, 2),
+    dx: metres(b.dx, 100_000, 1),
+    dy: metres(b.dy, 100_000, 1),
+    dz: metres(b.dz, 100_000, 1),
+    dist: metres(b.dist, 100_000, 1),
+    endDist: metres(b.endDist, 100_000, 1),
+    playerCell: match(b.playerCell, /^[0-9a-f]{8}$/),
+    portalCell: match(b.portalCell, /^[0-9a-f]{8}$/),
+    held: pick(b.held, PORTAL_USE_HELD),
+    overlapped: bool(b.overlapped),
+    useDone: uint(b.useDone, U32),
+    weenieErrors: codes,
+    chatLines: uint(b.chatLines, 10_000),
+    chatType: uint(b.chatType, U32),
+    // The page's template: printable ASCII, numbers already '#'; a digit here means it is not one.
+    chatTemplate: match(b.chatTemplate, /^[\x20-\x2f\x3a-\x7e]{1,96}$/),
+    waitedMs: uint(b.waitedMs, PORTAL_WAIT_MS),
+  };
+}
+
 export type ClientWorldEvent = ClientFirstMinuteEvent | ClientWorldLeftEvent;
+export type ClientPortalEvent = ClientPortalUseFailedEvent | ClientPortalUsedEvent;
 
 function pick<T extends string>(v: unknown, allowed: readonly T[]): T | null {
   return allowed.find(a => a === v) ?? null;
@@ -246,6 +358,17 @@ const SESSION_MS = 7 * 24 * 3600_000;
 /** Frames in one minute: 60 s at a 500 Hz display, with headroom. */
 const MAX_FRAMES = 60_000;
 
+function worldIds(b: Record<string, unknown>): WorldIds {
+  return {
+    era: match(b.era, /^[a-z0-9-]{1,32}$/),
+    server: match(b.server, /^[A-Za-z0-9._-]{1,64}$/),
+    trace: match(b.trace, TRACE_PATTERN),
+    build: match(b.build, /^[A-Za-z0-9._-]{1,64}$/),
+    ...lateField(b.lateMs, SESSION_MS),
+    ...eidField(b.eid),
+  };
+}
+
 export function isWorldOutcome(v: unknown): v is WorldOutcome {
   return pick(v, WORLD_OUTCOMES) !== null;
 }
@@ -256,14 +379,7 @@ export function sanitizeClientWorld(body: unknown): ClientWorldEvent | null {
   const b = body as Record<string, unknown>;
   const outcome = pick(b.outcome, WORLD_OUTCOMES);
   if (!outcome) return null;
-  const ids = {
-    era: match(b.era, /^[a-z0-9-]{1,32}$/),
-    server: match(b.server, /^[A-Za-z0-9._-]{1,64}$/),
-    trace: match(b.trace, TRACE_PATTERN),
-    build: match(b.build, /^[A-Za-z0-9._-]{1,64}$/),
-    ...lateField(b.lateMs, SESSION_MS),
-    ...eidField(b.eid),
-  };
+  const ids = worldIds(b);
   if (outcome === 'world_left') {
     return {
       outcome, ...ids,
