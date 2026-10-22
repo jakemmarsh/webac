@@ -78,9 +78,14 @@ export function mouseEventToCode(e: MouseLike & { button: number }): string | nu
 }
 
 /** Canonical code for a wheel event: deltaY < 0 is the positive-axis (Up) sub-control. */
-export function wheelEventToCode(e: MouseLike & { deltaY: number }): string | null {
-  if (e.deltaY === 0) return null;
-  return metaPrefix(e) + (e.deltaY < 0 ? WHEEL_UP : WHEEL_DOWN);
+export function wheelEventToCode(e: MouseLike & { deltaY: number; deltaMode?: number }): string | null {
+  // COMPAT.wheel-deltamode: touch deltaMode before deltaY, so Firefox keeps
+  // the event in its native line units for every later listener
+  // (ui/wheelScroll.ts readWheel).
+  void e.deltaMode;
+  const dy = e.deltaY;
+  if (dy === 0) return null;
+  return metaPrefix(e) + (dy < 0 ? WHEEL_UP : WHEEL_DOWN);
 }
 
 /** The code with its meta prefixes removed ("Ctrl+MouseButton0" → "MouseButton0"). */

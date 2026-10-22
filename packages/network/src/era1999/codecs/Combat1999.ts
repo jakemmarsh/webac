@@ -68,7 +68,8 @@
  *
  * Lossy:
  *   - The 1999 spell "charge" (0x4C re-sent per cast decays it client-side) has no EoL meaning; a
- *     re-sent 0x4C becomes a MagicUpdateSpell for a known spell, which our handler ignores.
+ *     re-sent 0x4C becomes a MagicUpdateSpell for a known spell, which a 1999 world's
+ *     SpellCharge1999 decays (renderer magic/SpellCharge1999.ts).
  *   - Enchantment spell categories are 1999's numbering (AC1999Constants.h SPELLCAT_*, e.g. 1999 182
  *     vitae vs 2017 204); they pass through unrenumbered, and no spell-set id exists.
  *   - Spell bars 1–7 (EoL tabs) have no 1999 counterpart; favorites on them are not sent.

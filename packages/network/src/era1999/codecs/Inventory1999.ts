@@ -47,14 +47,20 @@
  *        nose, mouth textures; hair, eyes, skin palettes)], [0x1: u32 enchantment bits]};
  *        0x2 weapon {u32 damageType, i32 time, u32 skill, i32 damage, f64 variance, length,
  *        maxVelocity, defense, offense}; 0x4 armor 7 × f32 (slash … electric, no nether);
- *        0x8 {mass, Value, EncumbVal}; 0x200 LockpickSuccess%; 0x800 Locked; 0x2000 BoosterEnum;
+ *        0x8 {mass, Value, EncumbVal}; 0x20 {u32, u32} (unread by the client); 0x200 LockpickSuccess%;
+ *        0x80 / 0x100 book pages used / page capacity; 0x4000 Open; 0x800 Locked; 0x2000 BoosterEnum;
  *        0x1000 BoostValue; 0x8000 ArmorLevel; 0x40 ResistLockpick; 0x4000000 AcString Craftsman;
  *        0x10 AcString inscription, scribe, scribe account; 0x400 Use; 0x20000 LongDesc;
  *        0x40000 ShortDesc; 0x10000 {MinLevel, MaxLevel, AcString portal destination};
  *        0x80000 {Structure, MaxStructure}; 0x100000 / 0x200000 / 0x400000 armor / weapon / resist
  *        enchantment bits; 0x800000 magic {difficulty, spellcraft, rankLimit, curMana, maxMana,
- *        u32, u32, AcString heritage restriction, skillLevelLimit, u32 skill, AcString spell names,
- *        AcString, f64}. 0xFFFFFFFF in a fixed section = absent.
+ *        u32 manaCost, u32 (an f32) manaRate, AcString heritage restriction, skillLevelLimit, u32 skill,
+ *        AcString spell names, AcString spell descriptions, f64 range fallback}; 0x1000000 mana stone
+ *        {f64 efficiency, u32 curMana}; 0x2000000 AcString enchantments (UnPack @ 0x005e0fa0 in the
+ *        1999 client.exe reads exactly these, in this order). 0xFFFFFFFF in a fixed section = absent.
+ *        The 1999-only fields (spell names / descriptions, enchantments, mana rate, range fallback)
+ *        ride under @ac/shared APPRAISAL_1999_STRING / _FLOAT keys, past every STypes range; the
+ *        1999 item page (ui/examine/ItemAppraisalText1999.ts) reads them.
  *        → EoL: the property-table form (Int/Bool/Float/String/DID tables keyed by the same
  *        STypes, which 1999 and end of retail share), CreatureProfile {flags 0x8|0x1 only, health,
  *        maxHealth, attributes, u16+u16 enchantment bits = the 1999 u32}, WeaponProfile (+ Float 29
@@ -71,12 +77,10 @@
  *
  * Lossy:
  *   - Appraisal: 1999 sends the item's spell NAMES, not ids, so the EoL spell book is empty (the
- *     names are dropped); 1999 armor has no nether mod (sent as 0); 1999 weapons have no damage
- *     modifier (sent as 1.0) or estimated-velocity flag (0); the creature block's three unknown
- *     dwords, the mass sentinel and the magic block's two unmapped dwords / extra line / range are
- *     dropped; the portal-destination placeholder " " (the server's gate opener) is not a string.
- *     A 1999 flag bit outside the server's known set (e.g. 0x1000000, the mana-stone block whose
- *     layout is unknown) refuses the message.
+ *     names ride under APPRAISAL_1999_STRING.spellNames); 1999 armor has no nether mod (sent as 0);
+ *     1999 weapons have no damage modifier (sent as 1.0) or estimated-velocity flag (0); the creature
+ *     block's three unknown dwords, the mass sentinel and block 0x20's two dwords are dropped.
+ *     A flag bit UnPack doesn't read refuses the message.
  *   - Buy / Sell: amounts are 24 bits in 1999.
  *   - Vendor: no alternate currency in 1999 (sent as 0 / "").
  */
@@ -84,6 +88,7 @@ import { BinaryReader, BinaryWriter } from '../../MessageSerializer.js';
 import { Group1999, eol, type AdapterContext, type Codecs1999, type Outbound1999 } from '../Adapter1999.js';
 import { Reader1999, Writer1999 } from '../Wire1999.js';
 import type { Player1999State } from './Player1999.js';
+import { APPRAISAL_1999_FLOAT, APPRAISAL_1999_INT, APPRAISAL_1999_STRING } from '@ac/shared';
 
 /** The F7B0 envelope's fields, when the message arrived wrapped. */
 interface Envelope { guid: number; sequence: number }
@@ -105,9 +110,10 @@ const P = {
   IntAllegianceFollowers: 35, IntResistLockpick: 38, IntMinLevel: 86, IntMaxLevel: 87, IntBoosterEnum: 89,
   IntBoostValue: 90, IntMaxStructure: 91, IntStructure: 92, IntItemSpellcraft: 106, IntItemCurMana: 107,
   IntItemMaxMana: 108, IntItemDifficulty: 109, IntItemAllegianceRankLimit: 110, IntGender: 113,
-  IntItemSkillLevelLimit: 115, IntLockpickSuccessPercent: 173, IntHeritageGroup: 188,
-  BoolLocked: 3,
-  FloatWeaponDefense: 29,
+  IntItemSkillLevelLimit: 115, IntItemManaCost: 117, IntLockpickSuccessPercent: 173, IntAppraisalPages: 174,
+  IntAppraisalMaxPages: 175, IntHeritageGroup: 188,
+  BoolOpen: 2, BoolLocked: 3,
+  FloatWeaponDefense: 29, FloatItemEfficiency: 87,
   StrSex: 3, StrHeritageGroup: 4, StrTemplate: 5, StrInscription: 7, StrScribeName: 8, StrFellowship: 10,
   StrMonarchsName: 11, StrUse: 14, StrShortDesc: 15, StrLongDesc: 16, StrItemHeritageRestriction: 19,
   StrMonarchsTitle: 21, StrScribeAccount: 23, StrCraftsmanName: 25, StrPortalDestination: 38,
@@ -116,8 +122,10 @@ const P = {
 } as const;
 
 /** The 1999 AppraisalProfile bits the server writes (Appraisal.cpp); anything else has an unknown layout. */
-const APPRAISAL_KNOWN_1999 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x40 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000
-  | 0x8000 | 0x10000 | 0x20000 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000 | 0x800000 | 0x4000000;
+/** The 1999 AppraisalProfile bits whose layout UnPack @ 0x005e0fa0 (1999 client.exe) reads; any other bit refuses the message. */
+const APPRAISAL_KNOWN_1999 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000
+  | 0x2000 | 0x4000 | 0x8000 | 0x10000 | 0x20000 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000 | 0x800000
+  | 0x1000000 | 0x2000000 | 0x4000000;
 
 /** EoL HeritageGroup / Gender from the 1999 char-gen names the appraisal carries. */
 const HERITAGE_BY_NAME: Record<string, number> = { aluvian: 1, "gharu'ndim": 2, gharundim: 2, sho: 3 };
@@ -170,7 +178,12 @@ function appraisal(r: Reader1999, w: BinaryWriter): void {
     if (cf & 0x2) {
       ints.set(P.IntAllegianceRank, r.u32());
       ints.set(P.IntAllegianceFollowers, r.u32());
-      r.u32(); r.u32(); r.u32(); // consumption unknown (Appraisal.cpp: +0x40, +0x44, +0x88)
+      // +0x40 / +0x44: the character's Loyalty and Leadership, which the 1999 character examine panel
+      // prints under "No Allegiance" (CharExaminePanel::SetAppraiseInfo @ 0x0050f760 via 0x00463eb0 /
+      // 0x005a2670); +0x88 has no reader.
+      ints.set(APPRAISAL_1999_INT.loyalty, r.u32() | 0);
+      ints.set(APPRAISAL_1999_INT.leadership, r.u32() | 0);
+      r.u32();
       const gender = r.acString();
       const heritage = r.acString();
       const profession = r.acString();
@@ -211,10 +224,15 @@ function appraisal(r: Reader1999, w: BinaryWriter): void {
     intIfSet(P.IntValue, r.u32());
     intIfSet(P.IntEncumbVal, r.u32());
   }
+  if (has(0x20)) { r.u32(); r.u32(); } // +0x24 / +0x28: no Inq mapping, nothing in the 1999 client reads them
   if (has(0x200)) ints.set(P.IntLockpickSuccessPercent, r.i32());
+  // +0x30 / +0x34: a book's pages used / page capacity — "%d of %d pages full." (ItemExaminePanel @ 0x0050cc00).
+  if (has(0x80)) intIfSet(P.IntAppraisalPages, r.u32());
+  if (has(0x100)) intIfSet(P.IntAppraisalMaxPages, r.u32());
   if (has(0x800)) bools.set(P.BoolLocked, r.u32() ? 1 : 0);
   if (has(0x2000)) ints.set(P.IntBoosterEnum, r.i32());
   if (has(0x1000)) ints.set(P.IntBoostValue, r.i32());
+  if (has(0x4000)) bools.set(P.BoolOpen, r.u32() ? 1 : 0);
   if (has(0x8000)) ints.set(P.IntArmorLevel, r.i32());
   if (has(0x40)) ints.set(P.IntResistLockpick, r.i32());
   if (has(0x4000000)) strIfSet(P.StrCraftsmanName, r.acString());
@@ -229,8 +247,9 @@ function appraisal(r: Reader1999, w: BinaryWriter): void {
   if (has(0x10000)) {
     intIfSet(P.IntMinLevel, r.u32());
     intIfSet(P.IntMaxLevel, r.u32());
-    const dest = r.acString();
-    if (dest.trim()) strings.set(P.StrPortalDestination, dest);
+    // Kept as sent, " " included: the 1999 panel draws the level section only when this string is
+    // non-empty (gate 0x005df880), and the AC1999 server's " " filler is what opens that gate.
+    strIfSet(P.StrPortalDestination, r.acString());
   }
   if (has(0x80000)) {
     intIfSet(P.IntStructure, r.u32());
@@ -245,15 +264,25 @@ function appraisal(r: Reader1999, w: BinaryWriter): void {
     intIfSet(P.IntItemAllegianceRankLimit, r.u32());
     intIfSet(P.IntItemCurMana, r.u32());
     intIfSet(P.IntItemMaxMana, r.u32());
-    r.u32(); r.u32(); // +0x70 / +0x74: unmapped
+    intIfSet(P.IntItemManaCost, r.u32()); // +0x70: "Mana Cost: %d." (0x004207d0)
+    const rate = new DataView(new Uint32Array([r.u32()]).buffer).getFloat32(0, true); // +0x74: a dword the panel loads as a float
+    if (rate !== 0) floats.set(APPRAISAL_1999_FLOAT.manaRate, rate);
     strIfSet(P.StrItemHeritageRestriction, r.acString());
     intIfSet(P.IntItemSkillLevelLimit, r.u32());
     const skill = r.u32();
     if (skill) dids.set(P.DidItemSkillLimit, skill);
-    r.acString(); // spell names: end of retail carries spell ids (lossy, see the file comment)
-    r.acString(); // extra magic line, unused
-    r.f64(); // missile-range fallback
+    strIfSet(APPRAISAL_1999_STRING.spellNames, r.acString()); // end of retail carries spell ids; 1999 the names
+    strIfSet(APPRAISAL_1999_STRING.spellDescriptions, r.acString());
+    const range = r.f64();
+    if (range !== -1) floats.set(APPRAISAL_1999_FLOAT.rangeFallback, range);
   }
+  if (has(0x1000000)) {
+    // Mana stone: +0x118 f64 efficiency (InqFloat 0x57), then +0x68 current mana again.
+    const efficiency = r.f64();
+    if (efficiency !== -1) floats.set(P.FloatItemEfficiency, efficiency);
+    intIfSet(P.IntItemCurMana, r.u32());
+  }
+  if (has(0x2000000)) strIfSet(APPRAISAL_1999_STRING.enchantments, r.acString());
 
   let out = 0;
   if (ints.size) out |= 0x1;

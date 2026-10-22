@@ -142,3 +142,33 @@ describe('a session that ends while its bridge drains says how long it waited', 
     expect(old).not.toHaveProperty('drainWaitMs');
   });
 });
+
+/**
+ * COMPAT.telemetry-browser-unknowns — document 'freeze' / 'resume' exist only in Chromium
+ * (https://caniuse.com/mdn-api_document_freeze_event). In Firefox and Safari a session could not
+ * have seen a freeze, so world_left says freezes / frozenMs are unknown (null), not 0.
+ */
+describe('freeze counts where the browser has no page-lifecycle events', () => {
+  const fakeWin = () => ({ addEventListener: () => {}, setInterval: () => 1 });
+  const fakeDoc = (withFreeze: boolean) => ({
+    addEventListener: () => {}, visibilityState: 'visible',
+    ...(withFreeze ? { onfreeze: null } : {}),
+  });
+
+  it('Firefox / Safari (no document.onfreeze): freezes and frozenMs are null, and the bridge keeps null', () => {
+    const g = reporter();
+    g.r.install(fakeWin() as never, fakeDoc(false) as never, null);
+    pastFirstMinute(g);
+    g.r.left('closed_tab');
+    expect(g.left()).toMatchObject({ freezes: null, frozenMs: null });
+    expect(sanitizeClientWorld(g.left())).toMatchObject({ freezes: null, frozenMs: null });
+  });
+
+  it('Chromium (document.onfreeze present): counts as before', () => {
+    const g = reporter();
+    g.r.install(fakeWin() as never, fakeDoc(true) as never, null);
+    pastFirstMinute(g);
+    g.r.left('closed_tab');
+    expect(g.left()).toMatchObject({ freezes: 0, frozenMs: 0 });
+  });
+});

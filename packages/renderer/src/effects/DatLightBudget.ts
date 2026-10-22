@@ -219,6 +219,17 @@ export class DatLightBudget {
     return this.root;
   }
 
+  /**
+   * PERF.indoor-two-pass-cost — every DAT light the budget knows (the last
+   * gather's plus the tracked object lights). A DAT light starts disabled and
+   * only update() enables one, so this covers every enabled DAT light
+   * (scene/IndoorView.ts counts its pass pads from it instead of walking the scene).
+   */
+  forEachLight(visit: (light: THREE.Object3D) => void): void {
+    for (const e of this.entries) visit(e.light);
+    for (const light of this.tracked.keys()) visit(light);
+  }
+
   /** Register an object light (ObjectLightSink) — pooled from the next update(). */
   track(light: THREE.Object3D): void {
     if (this.tracked.has(light)) return;

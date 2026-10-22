@@ -20,6 +20,7 @@ import {
 } from '../packages/network/src/MessageSerializer.js';
 import { buildItemAppraisalText } from '../packages/renderer/src/ui/examine/ItemAppraisalText.js';
 import { GameActionType } from '../packages/network/src/GameActionType.js';
+import { APPRAISAL_1999_INT, APPRAISAL_1999_STRING } from '@ac/shared';
 import { ServerMessageHandler, type IdentifyResponseData } from '../packages/renderer/src/network/ServerMessageHandler.js';
 
 const PLAYER = 0x50000003;
@@ -284,7 +285,8 @@ describe('0xC9 IdentifyObjectResponse: the 1999 fixed-field AppraisalProfile →
     expect(d.propertiesString!.get(14)).toBe('Wield it.');
     expect(d.propertiesString!.get(16)).toBe('A finely made sword.');
     expect(d.weaponEnchantment).toEqual({ highlight: 0x8, color: 0x8 });
-    expect(d.spellBook).toBeUndefined(); // 1999 sends names, not ids (lossy)
+    expect(d.spellBook).toBeUndefined(); // 1999 sends names, not ids
+    expect(d.propertiesString!.get(APPRAISAL_1999_STRING.spellNames)).toBe('Blood Drinker I'); // the 1999 page's magic gate
   });
 
   it('armor: 7 floats → 8 (electric → lightning, no nether), armor level, armor enchantments', () => {
@@ -315,7 +317,8 @@ describe('0xC9 IdentifyObjectResponse: the 1999 fixed-field AppraisalProfile →
     });
     expect(Object.fromEntries(d.propertiesInt!)).toEqual({ 173: 35, 38: 250, 87: 20, 92: 8, 91: 10 });
     expect(d.propertiesBool!.get(3)).toBe(true);
-    expect(Object.fromEntries(d.propertiesString!)).toEqual({ 25: 'Acjs', 7: 'For the bold', 8: 'Scribe' });
+    // The " " filler is kept: it is what opens the 1999 panel's level-restriction gate (0x005df880).
+    expect(Object.fromEntries(d.propertiesString!)).toEqual({ 25: 'Acjs', 7: 'For the bold', 8: 'Scribe', 38: ' ' });
   });
 
   it('a player: creature profile, attributes, char details → end of retail\'s character-page properties', () => {
@@ -324,7 +327,7 @@ describe('0xC9 IdentifyObjectResponse: the 1999 fixed-field AppraisalProfile →
       w.u32(0x8 | 0x4 | 0x2 | 0x1).u32(12).i32(40).i32(55);
       for (const v of [60, 50, 40, 30, 20, 10, 80, 90, 100, 110]) w.u32(v);
       w.u32(31); // creature type (human)
-      w.u32(2).u32(3).u32(0).u32(0).u32(0);
+      w.u32(2).u32(3).u32(7).u32(9).u32(0); // rank, followers, loyalty (+0x40), leadership (+0x44), +0x88
       w.acString('Female').acString("Gharu'ndim").acString('Bow Hunter').acString('').acString('Lord Acjs');
       for (const v of [0x05001001, 0x05001002, 0x05001003, 0x04001004, 0x04001005, 0x04001006]) w.u32(v);
       w.u32(0x00020002);
@@ -335,7 +338,8 @@ describe('0xC9 IdentifyObjectResponse: the 1999 fixed-field AppraisalProfile →
       attributes: { strength: 60, endurance: 50, quickness: 40, coordination: 30, focus: 20, self: 10, stamina: 80, mana: 90, staminaMax: 100, manaMax: 110 },
       attributeHighlights: 2, attributeColors: 2,
     });
-    expect(Object.fromEntries(d.propertiesInt!)).toEqual({ 2: 31, 30: 2, 35: 3, 113: 2, 188: 2, 25: 12 });
+    // Loyalty / Leadership ride under APPRAISAL_1999_INT (the 1999 character examine panel's "No Allegiance" line).
+    expect(Object.fromEntries(d.propertiesInt!)).toEqual({ 2: 31, 30: 2, 35: 3, 113: 2, 188: 2, 25: 12, [APPRAISAL_1999_INT.loyalty]: 7, [APPRAISAL_1999_INT.leadership]: 9 });
     expect(Object.fromEntries(d.propertiesString!)).toEqual({ 3: 'Female', 4: "Gharu'ndim", 5: 'Bow Hunter', 11: 'Lord Acjs', 21: 'Lord Acjs' });
     expect(Object.fromEntries(d.propertiesDataID!)).toEqual({ 9: 0x05001001, 10: 0x05001002, 11: 0x05001003, 15: 0x04001004, 16: 0x04001005, 17: 0x04001006 });
   });
@@ -376,9 +380,9 @@ describe('0xC9 IdentifyObjectResponse: the 1999 fixed-field AppraisalProfile →
     expect(got.identify[0].weaponProfile.damage).toBe(0x7ffffffe);
   });
 
-  it('a flag bit of unknown 1999 layout (the mana-stone block) is refused, not guessed', () => {
+  it('a flag bit 1999 UnPack does not read is refused, not guessed', () => {
     const { a, logs } = adapter();
-    expect(a.inbound(wrapped(0xc9, (w) => w.u32(1).u32(0x1000000).i32(1).u32(0)), 4)).toEqual([]);
+    expect(a.inbound(wrapped(0xc9, (w) => w.u32(1).u32(0x8000000).i32(1).u32(0)), 4)).toEqual([]);
     expect(logs.join('\n')).toMatch(/unknown layout/);
   });
 });

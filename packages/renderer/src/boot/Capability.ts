@@ -15,7 +15,7 @@ import { renderAdaptConfigFor, type RenderAdaptConfig } from '../scene/RenderSca
 import { showBootNotice } from './BootNotice.js';
 
 export interface CapabilityProblem {
-  id: 'webgl2' | 'websocket' | 'memory' | 'pointer';
+  id: 'webgl2' | 'websocket' | 'decompression' | 'memory' | 'pointer';
   hard: boolean;
   text: string;
 }
@@ -24,6 +24,12 @@ export interface CapabilityEnv {
   /** A WebGL 2 context can be created. */
   webgl2: boolean;
   websocket: boolean;
+  /**
+   * COMPAT.decompression-stream-gate — DecompressionStream exists (the streamed DAT objects are
+   * gzip, inflated by it: dat/streaming/DatStore.ts). Safari only from 16.4, Firefox from 113
+   * (https://caniuse.com/mdn-api_decompressionstream). Absent = true.
+   */
+  decompressionStream?: boolean;
   /** navigator.deviceMemory in GB (Chromium; capped at 8), or null when the browser doesn't say. */
   deviceMemoryGb: number | null;
   /** A mouse or trackpad is present (`(pointer: fine)` or `(any-pointer: fine)`). */
@@ -64,6 +70,9 @@ export function capabilityProblems(env: CapabilityEnv): CapabilityProblem[] {
   if (!env.websocket) {
     out.push({ id: 'websocket', hard: true, text: 'This browser cannot open the connection the game uses (WebSocket). Use a current desktop browser.' });
   }
+  if (env.decompressionStream === false) {
+    out.push({ id: 'decompression', hard: true, text: 'This browser is too old to load the game\'s data. Update to a current Chrome, Edge, Firefox or Safari (16.4 or later).' });
+  }
   if (env.deviceMemoryGb !== null && env.deviceMemoryGb < MIN_DEVICE_MEMORY_GB) {
     out.push({
       id: 'memory', hard: false,
@@ -91,6 +100,7 @@ export function probeCapabilities(win: Window & typeof globalThis): CapabilityEn
   return {
     webgl2,
     websocket: typeof win.WebSocket === 'function',
+    decompressionStream: typeof (win as unknown as { DecompressionStream?: unknown }).DecompressionStream === 'function',
     deviceMemoryGb: typeof mem === 'number' && mem > 0 ? mem : null,
     finePointer: mq('(pointer: fine)') || mq('(any-pointer: fine)'),
     softwareGpu: webgl2 && classifyGpu(rendererString) === 'software',

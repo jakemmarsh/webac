@@ -44,7 +44,7 @@
  *                                                     SAC 1/2/3 are EoL's Untrained/Trained/Specialized.
  *     0x004 Body, 0x008 event filter, 0x010+ emote/create/page/generator tables: the server strips
  *           them; if one ever arrives the message is refused (they sit before the tail).
- *     0x100 SpellBook {u32 id, f32 charge, f32 0, f32 likelihood}   {i32 id, f32 2.0}
+ *     0x100 SpellBook {u32 id, f32 charge, f32 0, f32 likelihood}   {i32 id, f32 charge}
  *     0x200 Enchantment registry u32 mask (1 mult, 2 add, 4 vitae; 8 cooldown never in 1999)
  *           1999 Enchantment {u32 spellId|layer<<16, u32 category, i32 power, f64 start, f64 dur,
  *           u32 caster, f32 degMod, f32 degLimit, f64 lastDeg, StatMod{u32,u32,f32}} = 60 bytes
@@ -87,7 +87,7 @@
  *        end-of-retail layout (a 1999 client drops them); they pass through with the key renumbered.
  *
  * Lossy: the attribute raise count (1999 sends only the folded value), the spellbook's per-spell
- * charge and likelihood, the derived wcid, spellbook filters / CharacterOptions2 (absent in 1999),
+ * likelihood (the charge rides in the EoL entry's f32), the derived wcid, spellbook filters / CharacterOptions2 (absent in 1999),
  * removes become zero values, position removes vanish.
  */
 import { BinaryWriter } from '../../MessageSerializer.js';
@@ -404,7 +404,10 @@ export function writePlayerDescriptionEoL(w: BinaryWriter, d: PlayerDescription1
   }
   if (vector & 0x100) {
     header(w, d.spells.size);
-    for (const [id] of d.spells) { w.writeInt32(id); w.writeFloat32(2.0); }
+    // End of retail's f32 here is ACE's constant 2.0, which nothing reads. A 1999 world puts the
+    // spell's Charge there (SpellBookPage +0x4, always < 2.0: the same sentinel the 2005
+    // SpellBookPage::UnPack splits the two forms on); the 1999 spell examine panel prints it.
+    for (const [id, [charge]] of d.spells) { w.writeInt32(id); w.writeFloat32(charge); }
   }
   if (vector & 0x200) {
     w.writeUInt32(d.enchantMask & 0xf);

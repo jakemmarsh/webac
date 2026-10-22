@@ -48,6 +48,16 @@ export class AudioManager {
 
       const ctx: AudioContext = new AudioCtx();
       this.context = ctx;
+      // COMPAT.safari-audio-interrupted — Safari moves a running context to its
+      // own 'interrupted' state (another app or a call takes the audio device,
+      // the page is backgrounded); nothing resumes it on its own. Tell the
+      // gesture hook (FirstGestureAudio) so the next click or key resumes it.
+      ctx.addEventListener?.('statechange', () => {
+        const st = ctx.state as string;
+        if ((st === 'interrupted' || st === 'suspended') && !this.selfSuspended) {
+          for (const fn of this.stoppedListeners) { try { fn(); } catch { /* a listener never breaks audio */ } }
+        }
+      });
       const master = ctx.createGain();
       this.masterGain = master;
       master.connect(ctx.destination);
@@ -65,6 +75,15 @@ export class AudioManager {
     } catch {
       return false;
     }
+  }
+
+  /** We suspended the context ourselves (suspend()); not an interruption to undo. */
+  private selfSuspended = false;
+  private readonly stoppedListeners: Array<() => void> = [];
+
+  /** Called whenever the browser stops a running context (Safari 'interrupted', a suspension we didn't ask for). */
+  onStopped(fn: () => void): void {
+    this.stoppedListeners.push(fn);
   }
 
   get isInitialized(): boolean {
@@ -179,8 +198,11 @@ export class AudioManager {
    * Resume audio context (needed after user interaction).
    */
   async resume(): Promise<void> {
-    if (this.context?.state === 'suspended') {
-      await this.context.resume();
+    // 'interrupted' is Safari's (COMPAT.safari-audio-interrupted); resume() is what ends it.
+    const st = this.context?.state as string | undefined;
+    if (st === 'suspended' || st === 'interrupted') {
+      this.selfSuspended = false;
+      await this.context!.resume();
     }
   }
 
@@ -189,6 +211,7 @@ export class AudioManager {
    */
   async suspend(): Promise<void> {
     if (this.context?.state === 'running') {
+      this.selfSuspended = true;
       await this.context.suspend();
     }
   }

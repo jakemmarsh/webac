@@ -173,10 +173,26 @@ export interface EraClientRules {
    * a 1999 gem, trade note or craft base defaults to the whole stack.
    */
   vendorBuyOneMask: number;
+  /**
+   * Which client builds the item examine text (BUG.ac1999-appraisal-details). End of retail's
+   * ItemExamineUI::SetAppraiseInfo @ 004b72b0 and its Appraisal_Show* sections
+   * (ui/examine/ItemAppraisalText.ts), or the 1999 client.exe's single
+   * ItemExaminePanel::SetAppraiseInfo @ 0x0050b6c0, whose lines and wording differ
+   * ("Speed: Average (45)", "Uses Bow Skill", "Use this item, or drag it …";
+   * ui/examine/ItemAppraisalText1999.ts).
+   */
+  appraisalText: 'eor' | 'ac1999';
+  /**
+   * Where an examine shows (VISUAL.ac1999-examine-panel-docked, webac#3). End of retail's
+   * gmFloatyExaminationUI, a floating window (ui/examine/ExaminationWindow.ts), or the 1999
+   * client.exe's ExaminePanel (ctor @ 0x00508f80): built in code, docked in the right-hand column
+   * under the radar like the Map, one of the column's panels (ui/examine/ExaminePanel1999.ts).
+   */
+  examinePanel: 'floaty' | 'docked1999';
 }
 
-const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0 });
-const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0 });
+const EOR_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, examinePanel: 'floaty' as const });
+const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({ castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, examinePanel: 'docked1999' as const });
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {

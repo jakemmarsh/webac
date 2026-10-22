@@ -11,6 +11,8 @@
  * Stored bytes are the gzip objects as fetched (about half the payload size);
  * the store inflates them on read.
  */
+import type { OpfsWriteReply, OpfsWriteRequest } from './opfsSyncWrite.js';
+
 export interface ObjectCache {
   /** True when this cache persists across sessions. */
   readonly persistent: boolean;
@@ -39,32 +41,83 @@ export class MemoryObjectCache implements ObjectCache {
 
 const OPFS_DIR = 'acjs-dat-objects-v1';
 
+/** A worker that writes OPFS files for the page (opfsWrite.worker.ts), as far as the cache drives it. */
+export interface OpfsWriterWorker {
+  postMessage(msg: OpfsWriteRequest): void;
+  onmessage: ((e: { data: OpfsWriteReply }) => void) | null;
+  onerror?: ((e: unknown) => void) | null;
+}
+
+/** What OpfsObjectCache.create needs from the browser (injectable for tests). */
+export interface OpfsEnv {
+  /** navigator.storage.getDirectory, when the browser has OPFS. */
+  getDirectory: (() => Promise<FileSystemDirectoryHandle>) | null;
+  /** FileSystemFileHandle.prototype.createWritable exists (Safari only from 26). */
+  hasCreateWritable: boolean;
+  /** Start the sync-access-handle writer worker (null when workers are unavailable). */
+  startWriter: (() => OpfsWriterWorker) | null;
+}
+
+function browserOpfsEnv(): OpfsEnv {
+  const storage = typeof navigator !== 'undefined' ? navigator.storage : undefined;
+  return {
+    getDirectory: storage && typeof storage.getDirectory === 'function' ? () => storage.getDirectory() : null,
+    hasCreateWritable: typeof FileSystemFileHandle !== 'undefined' && 'createWritable' in FileSystemFileHandle.prototype,
+    startWriter: typeof Worker !== 'undefined'
+      ? () => new Worker(new URL('./opfsWrite.worker.ts', import.meta.url), { type: 'module', name: 'acjs-opfs-write' }) as unknown as OpfsWriterWorker
+      : null,
+  };
+}
+
 /**
  * Origin Private File System cache: one file per object under
  * acjs-dat-objects-v1/. Any failure degrades to a miss (caching is an
  * optimization, never a correctness dependency — the DatCache.ts rule).
  * A torn or corrupt file is harmless: DatStore checks every object's
  * inflated size and hash, and refetches on a mismatch.
+ *
+ * COMPAT.opfs-safari-sync-write — where the page has no createWritable
+ * (Safari before 26) the bytes go to a worker that writes them with a
+ * FileSystemSyncAccessHandle; with neither, there is no cache at all
+ * (a NullObjectCache), rather than an empty file left per object.
  */
 export class OpfsObjectCache implements ObjectCache {
   readonly persistent = true;
   private dir: Promise<FileSystemDirectoryHandle | null>;
+  private nextWriteId = 1;
+  private readonly pendingWrites = new Map<number, () => void>();
+  /** The writer worker failed to load or crashed: later puts are dropped. */
+  private writerBroken = false;
 
-  private constructor() {
+  private constructor(getDirectory: () => Promise<FileSystemDirectoryHandle>, private readonly writer: OpfsWriterWorker | null) {
     this.dir = (async () => {
       try {
-        const root = await navigator.storage.getDirectory();
+        const root = await getDirectory();
         return await root.getDirectoryHandle(OPFS_DIR, { create: true });
       } catch {
         return null;
       }
     })();
+    if (writer) {
+      writer.onmessage = (e) => {
+        const done = this.pendingWrites.get(e.data?.id);
+        if (done) { this.pendingWrites.delete(e.data.id); done(); }
+      };
+      writer.onerror = () => {
+        this.writerBroken = true;
+        for (const done of this.pendingWrites.values()) done();
+        this.pendingWrites.clear();
+      };
+    }
   }
 
-  /** The OPFS cache when the browser has OPFS, else a NullObjectCache. */
-  static create(): ObjectCache {
-    const ok = typeof navigator !== 'undefined' && !!navigator.storage && typeof navigator.storage.getDirectory === 'function';
-    return ok ? new OpfsObjectCache() : new NullObjectCache();
+  /** The OPFS cache when the browser can write OPFS files (page-side or in a worker), else a NullObjectCache. */
+  static create(env: OpfsEnv = browserOpfsEnv()): ObjectCache {
+    if (!env.getDirectory) return new NullObjectCache();
+    if (env.hasCreateWritable) return new OpfsObjectCache(env.getDirectory, null);
+    let writer: OpfsWriterWorker | null = null;
+    try { writer = env.startWriter?.() ?? null; } catch { writer = null; }
+    return writer ? new OpfsObjectCache(env.getDirectory, writer) : new NullObjectCache();
   }
 
   async get(hash: string): Promise<Uint8Array | null> {
@@ -94,6 +147,15 @@ export class OpfsObjectCache implements ObjectCache {
     try {
       const dir = await this.dir;
       if (!dir) return;
+      if (this.writer) {
+        if (this.writerBroken) return;
+        const id = this.nextWriteId++;
+        const done = new Promise<void>((resolve) => this.pendingWrites.set(id, resolve));
+        // A copy: the caller keeps its bytes (postMessage clones it anyway; no transfer).
+        this.writer.postMessage({ id, dir: OPFS_DIR, name: hash, bytes: gz });
+        await done;
+        return;
+      }
       const fh = await dir.getFileHandle(hash, { create: true });
       const w = await fh.createWritable();
       await w.write(gz as unknown as ArrayBuffer);

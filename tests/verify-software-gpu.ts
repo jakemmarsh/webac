@@ -46,6 +46,8 @@ function fakeWindow(renderer: string | null, opts: { webdriver?: boolean; search
     navigator: { webdriver: opts.webdriver ?? false, deviceMemory: 8 },
     location: { search: opts.search ?? '' },
     WebSocket: function WebSocket() {},
+    // COMPAT.decompression-stream-gate: a current browser has it.
+    DecompressionStream: function DecompressionStream() {},
     matchMedia: () => ({ matches: true }),
   } as unknown as ProbeWindow;
 }

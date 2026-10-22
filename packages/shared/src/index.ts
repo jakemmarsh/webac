@@ -187,6 +187,7 @@ export type { EnvironFog } from './enums/EnvironChange.js';
 export { ChatMessageType, chatColorFor, resolveChatType, buildRetailChatColorTable, RETAIL_CHAT_COLORS, RETAIL_CHAT_TEXT_TYPE_COUNT, SquelchMask, squelchMaskForChatType } from './enums/ChatMessageType.js';
 export { PlayScript } from './enums/PlayScript.js';
 export { playScript1999ToEoL, playScriptEoLTo1999, PLAYSCRIPT_EOL_ONLY_SKILLDOWNBLACK } from './enums/PlayScript1999.js';
+export { APPRAISAL_1999_STRING, APPRAISAL_1999_FLOAT, APPRAISAL_1999_INT } from './enums/Appraisal1999.js';
 export { MovementType } from './enums/MovementType.js';
 export { ChessMoveType } from './enums/ChessMoveType.js';
 export { ChessColor } from './enums/ChessColor.js';

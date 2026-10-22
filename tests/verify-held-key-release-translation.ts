@@ -115,3 +115,27 @@ describe('pointer-lock edge cases for held mouse-look', () => {
     }
   });
 });
+
+/**
+ * COMPAT.mac-cmd-keyup — macOS browsers deliver no keyup for a key released
+ * while Cmd is held. Cmd's own keyup now releases what is held, as a blur does.
+ */
+describe('Cmd coming up releases keys whose keyups macOS swallowed', () => {
+  it('W held, Cmd pressed, W released (no keyup arrives), Cmd released → forward stops', () => {
+    const { cc, el } = bound();
+    el.dispatchEvent(key('keydown', 'KeyW'));
+    el.dispatchEvent(key('keydown', 'MetaLeft'));
+    // macOS: the W keyup is never dispatched while Cmd is down.
+    expect(cc.isMovingForward).toBe(true);
+    el.dispatchEvent(key('keyup', 'MetaLeft'));
+    expect(cc.isMovingForward).toBe(false);
+  });
+
+  it('auto-run is a lock, not a held key: it survives Cmd', () => {
+    const { cc, el } = bound();
+    cc.autoRun = true;
+    el.dispatchEvent(key('keydown', 'MetaRight'));
+    el.dispatchEvent(key('keyup', 'MetaRight'));
+    expect(cc.autoRun).toBe(true);
+  });
+});

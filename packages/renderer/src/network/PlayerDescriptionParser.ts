@@ -110,6 +110,8 @@ export interface PlayerDescriptionResult {
 
   // Spells (known spell IDs from login)
   spellIds: number[];
+  /** A 1999 world's per-spell Charge (the spellbook entry's f32 when below ACE's 2.0); empty elsewhere. */
+  spellCharges1999: Map<number, number>;
 
   /**
    * BUG.enchantment-registry-login-dropped — the player's full active-
@@ -296,6 +298,7 @@ export function parsePlayerDescription(payload: Uint8Array): PlayerDescriptionRe
       health: null, stamina: null, mana: null,
       skills: [],
       spellIds: [],
+      spellCharges1999: new Map(),
       enchantments: [],
       vitae: null,
       spellBars: [[], [], [], [], [], [], [], []],
@@ -450,7 +453,10 @@ export function parsePlayerDescription(payload: Uint8Array): PlayerDescriptionRe
       const { count } = readHashTableHeader(r);
       for (let i = 0; i < count; i++) {
         const spellId = r.readInt32();
-        r.readFloat32(); // configValue, always 2.0
+        // ACE's configValue, always 2.0. Below 2.0 it is a 1999 world's spell Charge
+        // (SpellBookPage +0x4; the 1999 adapter writes it there): VISUAL.ac1999-spell-charge.
+        const value = r.readFloat32();
+        if (value < 2.0) result.spellCharges1999.set(spellId, value);
         result.spellIds.push(spellId);
       }
     }

@@ -52,9 +52,14 @@ import {
   SQUELCH_SELECTED_STRING, TELL_TO_SELECTED_STRING, type TalkFocusId, type TalkFocusMenuItem,
 } from './ChatTalkFocus.js';
 import { SPELL_PAGE, spellComponentListRect, type SpellExamineModel } from './examine/SpellExamine.js';
+import {
+  renderExaminePanel1999, inscriptionRefusal1999, inscriptionCommit1999, facePalette1999, EXAMINE_PANEL_1999_HEIGHT,
+  type ExaminePanel1999View, type FaceDids1999, type Inscription1999,
+} from './examine/ExaminePanel1999.js';
 import { APPRAISAL_COLOR_ARGB, type ItemAppraisalText } from './examine/ItemAppraisalText.js';
 import { CREATURE_EXAMINE_ELEMENTS, STAT_VALUE_COLORS, MISC_INFO_COLORS, type CreaturePageModel, type CharacterPageModel } from './examine/CreatureAppraisalText.js';
 import { wheelScrollPixels } from './wheelScroll.js';
+import { pageStorage } from '../utils/pageStorage.js';
 import { COMBAT_WINDOW, combatWindowPlacement, combatBarPageVisible } from './CombatWindow.js';
 import { skillFooterTitleRuns, skillRowTone, FOOTER_TITLE_COLORS, argbToCss } from './SkillDisplay.js';
 import { AutomationPanel, hudStripText, type AutomationKit, type RoutineEditor } from './automation/AutomationPanel.js';
@@ -88,7 +93,7 @@ import {
   PANELS_WINDOW, panelsWindowPlacement, setPanelsWindowPanelVisibility,
   INVENTORY_PANEL, CHARACTER_PANEL, CHARACTER_INFO_PANEL, OPTIONS_PANEL,
   WORLD_PANEL, SOCIAL_PANEL, SPELLBOOK_PANEL, CONTRACTS_PANEL,
-  VITAE_PANEL, LINK_STATUS_PANEL, MINI_GAME_PANEL, BOOK_PANEL, AUTOMATION_PANEL,
+  VITAE_PANEL, LINK_STATUS_PANEL, MINI_GAME_PANEL, BOOK_PANEL, AUTOMATION_PANEL, EXAMINE_1999_PANEL,
   type PanelsWindowSlotState, type PanelsWindowSlotPanel, type PanelsWindowPlacement,
 } from './PanelsWindow.js';
 import {
@@ -1906,7 +1911,7 @@ export class GameUI {
   // field-initializer load (no character identity known yet) is only a
   // placeholder; setChatHistoryScope() re-loads it under a per-character
   // key once a character actually enters the world.
-  private chatHistoryState: ChatHistoryState = ChatHistoryState.loadFrom(localStorage);
+  private chatHistoryState: ChatHistoryState = ChatHistoryState.loadFrom(pageStorage('local'));
   private chatHistoryIndex = -1;
   /** BUG.chat-history-leaks-across-characters — re-scope the chat recall
    *  buffer to this account+character's own storage key so it doesn't
@@ -1916,7 +1921,7 @@ export class GameUI {
    *  panel drag positions the same way, before any panel is rendered for
    *  the new character. */
   setChatHistoryScope(accountName: string, characterName: string): void {
-    this.chatHistoryState = ChatHistoryState.loadFrom(localStorage, ChatHistoryState.keyFor(accountName, characterName));
+    this.chatHistoryState = ChatHistoryState.loadFrom(pageStorage('local'), ChatHistoryState.keyFor(accountName, characterName));
     this.chatHistoryIndex = -1;
     LayoutRenderer.setPanelPositionsScope(accountName, characterName);
     // CORE.3.c — floaty chat window open/position persistence shares the
@@ -1937,7 +1942,7 @@ export class GameUI {
    *  FAITHFUL.451 — also persist after each push. */
   private pushChatHistory(msg: string): void {
     if (!this.chatHistoryState.push(msg)) return; // consecutive duplicate — skip
-    this.chatHistoryState.saveTo(localStorage);
+    this.chatHistoryState.saveTo(pageStorage('local'));
   }
   private lastCombatMode: CombatMode = CombatMode.NonCombat;
   /** The Advanced Combat Interface option as of the last combat-mode change (gmCombatUI::RecvNotice_SetCombatMode). */
@@ -2278,6 +2283,17 @@ export class GameUI {
   }
   /** Whether the magic panel shows the research tab. */
   get hasSpellResearch(): boolean { return this.spellResearchEnabled; }
+  /**
+   * VISUAL.ac1999-examine-panel-docked — set once per page load from the era
+   * profile (eraClientRules().examinePanel), like setSpellResearch.
+   */
+  setExaminePanel(mode: 'floaty' | 'docked1999'): void {
+    if (mode === this.examinePanelMode) return;
+    this.hideExaminePanel();
+    this.examinePanelMode = mode;
+  }
+  /** Where an examine shows in this world. */
+  get examinePanelKind(): 'floaty' | 'docked1999' { return this.examinePanelMode; }
   private charInfo: {
     name: string; level: number; heritage: string; gender: string; pkStatus: string;
     heritageId: number; genderId: number;
@@ -3033,6 +3049,16 @@ export class GameUI {
   private examineSpellId = 0;
   /** RecvNotice_SelectionChanged → ClientUISystem::ExamineObject(selectedID). */
   onExamineSelection: ((guid: number) => void) | null = null;
+  /**
+   * VISUAL.ac1999-examine-panel-docked — where an examine shows
+   * (eraClientRules().examinePanel): end of retail's floaty window, or the
+   * 1999 docked ExaminePanel (ExaminePanel1999.ts) in the panels window.
+   */
+  private examinePanelMode: 'floaty' | 'docked1999' = 'floaty';
+  /** The docked 1999 panel while it shows: its wrapper and the view it draws. */
+  private examine1999: { wrapper: HTMLDivElement; view: ExaminationView } | null = null;
+  /** The view the docked panel draws next (set before the panels window shows it). */
+  private examine1999Pending: ExaminationView | null = null;
   private bookPanelHandle: PanelHandle | null = null;
   /** gmBookUI's state (BookModel.ts); the view draws it. */
   private readonly book = new BookModel({
@@ -10091,7 +10117,7 @@ export class GameUI {
    * chat windows.
    */
   private getFloatyWindowGeometry(windowId: number): FloatyWindowState {
-    const local = loadFloatyWindowStates(localStorage, this.floatyChatScope)[windowId] ?? {};
+    const local = loadFloatyWindowStates(pageStorage('local'), this.floatyChatScope)[windowId] ?? {};
     const server = this.serverChatOptions?.chatWindows.get(windowId);
     const out: FloatyWindowState = {};
     const x = server?.x ?? local.x;
@@ -10114,7 +10140,7 @@ export class GameUI {
    */
   private persistFloatyWindowGeometry(windowId: number, state: FloatyWindowState): void {
     this.floatyWindowGeometry.set(windowId, state);
-    saveFloatyWindowState(localStorage, this.floatyChatScope, windowId, state);
+    saveFloatyWindowState(pageStorage('local'), this.floatyChatScope, windowId, state);
     // PlayerModule::SetChatWindowOption — the live module copy follows the
     // move, so a later re-render or panel re-open reads it (not the
     // login-time copy) and the next save carries it.
@@ -12493,6 +12519,18 @@ export class GameUI {
         else this.hideExaminePanel();
       }
     }
+    // The 1999 panel (PanelUI's selection notice @ 0x004fcb20): while it shows, a new
+    // selection is examined; a cleared one closes it only when it shows the object that
+    // was selected (0x00509c20 → 0x005098b0).
+    if (this.examine1999) {
+      const sel = this.hud.target?.id ?? null;
+      if (sel !== this.examineSelectionSeen) {
+        const prev = this.examineSelectionSeen;
+        this.examineSelectionSeen = sel;
+        if (sel) this.onExamineSelection?.(sel);
+        else if (prev !== null && prev === this.examineCurrentGuid) this.hideExaminePanel();
+      }
+    }
 
     // Vital bars — clip fill layer + AC bitmap font text
     this.lastHealthText = this.updateVitalBarDAT(this.healthFillEl, this.healthTextEl, this.hud.health, this.lastHealthText);
@@ -13347,6 +13385,7 @@ export class GameUI {
       linkStatus: this.linkStatusPanelVisible,
       miniGame: this.miniGamePanelVisible,
       book: this.bookPanelHandle !== null,
+      examine1999: this.examine1999 !== null,
       positive: this.effectsWindows.positive.visible,
       negative: this.effectsWindows.negative.visible,
     };
@@ -13366,6 +13405,7 @@ export class GameUI {
         case 'linkStatus': this.setLinkStatusPanelShown(want); break;
         case 'miniGame': this.setMiniGamePanelShown(want); break;
         case 'book': this.setBookPanelShown(want); break;
+        case 'examine1999': this.setExamine1999Shown(want); break;
         case 'positive': this.setEffectsWindowShown(POSITIVE_EFFECTS, want); break;
         case 'negative': this.setEffectsWindowShown(NEGATIVE_EFFECTS, want); break;
       }
@@ -13641,6 +13681,7 @@ export class GameUI {
       // A finished resize redraws whichever panel the window shows.
       onResizeEnd: () => {
         if (this.book.open && this.bookPanelHandle) this.renderBookPanel();
+        else if (this.examine1999) this.renderExaminePanel1999Now();
         else if (this.inventoryVisible) this.renderInventoryPanel();
         else if (this.charPanelVisible) this.renderCharPanel();
         else if (this.optionsPanelVisible) this.renderOptionsPanel();
@@ -14225,7 +14266,7 @@ export class GameUI {
     this.floatyChatInstances = [];
     if (!this.hudContainer || !this.layoutRenderer) return;
 
-    const stored = loadFloatyChatStates(localStorage, this.floatyChatScope);
+    const stored = loadFloatyChatStates(pageStorage('local'), this.floatyChatScope);
 
     for (const def of FLOATY_CHAT_WINDOWS) {
       const state = stored[def.index];
@@ -14540,7 +14581,7 @@ export class GameUI {
           // owns its own m_InputHistory).
           const inst = this.floatyChatInstances.find((i) => i.def.index === def.index);
           if (inst) {
-            if (inst.historyState.push(msg)) inst.historyState.saveTo(localStorage);
+            if (inst.historyState.push(msg)) inst.historyState.saveTo(pageStorage('local'));
             inst.historyIndex = -1;
           }
           this.sendTypedChat(msg, def.windowId);
@@ -14603,7 +14644,7 @@ export class GameUI {
       // account+character+window (retail: each ChatInterface's own
       // m_InputHistory, saved in the per-character client config).
       const historyState = ChatHistoryState.loadFrom(
-        localStorage,
+        pageStorage('local'),
         `${ChatHistoryState.STORAGE_KEY}:${this.floatyChatScope}:w${def.index}`,
       );
       const finalLogEl = logEl ?? document.createElement('div');
@@ -14671,7 +14712,7 @@ export class GameUI {
   private persistFloatyChatState(index: number): void {
     const inst = this.floatyChatInstances.find((i) => i.def.index === index);
     if (!inst) return;
-    saveFloatyChatState(localStorage, this.floatyChatScope, index, {
+    saveFloatyChatState(pageStorage('local'), this.floatyChatScope, index, {
       open: inst.open,
       x: parseInt(inst.panelEl.style.left) || 0,
       y: parseInt(inst.panelEl.style.top) || 0,
@@ -18901,7 +18942,7 @@ export class GameUI {
       position: 'absolute', left: '0', top: '0', width: '280px', height: `${spellListH}px`,
       overflow: 'auto',
     });
-    spellList.style.scrollbarWidth = 'none';
+    hideNativeScrollbar(spellList); // COMPAT.safari-native-scrollbars
 
     // gmSpellbookUI::IsFilteredOut @ 0048aeb0 — a spell shows only while
     // both its school bit and its level bit are set.
@@ -19313,6 +19354,7 @@ export class GameUI {
     const list = handle.elements.get(0x10000464);
     if (!list) return;
     Object.assign(list.style, { overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'none', pointerEvents: 'auto' });
+    hideNativeScrollbar(list); // COMPAT.safari-native-scrollbars
     list.classList.add('ac-components-list');
 
     const table = this.spellComponentTable;
@@ -19897,6 +19939,7 @@ export class GameUI {
         overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'none',
         pointerEvents: 'auto', display: 'block',
       });
+      hideNativeScrollbar(list); // COMPAT.safari-native-scrollbars
       // CORE.7 — rows rebuild fresh on every render (selection re-renders
       // the pane in place; without this the list would accumulate copies).
       list.replaceChildren();
@@ -21132,6 +21175,7 @@ export class GameUI {
         overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'none',
         pointerEvents: 'auto',
       });
+      hideNativeScrollbar(list); // COMPAT.safari-native-scrollbars
       // VISUAL.titles-list-vs-retail — the list keeps its own media
       // 0x06004cc2 (the panel's tile again), so the box reads darker than
       // the pane behind it as in retail (titles A/B ~(6,6,3) vs the pane).
@@ -24909,6 +24953,7 @@ export class GameUI {
       Object.assign(list.style, {
         overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'none', pointerEvents: 'auto', display: 'block',
       });
+      hideNativeScrollbar(list); // COMPAT.safari-native-scrollbars
       list.replaceChildren();
       for (const row of w.rows) list.appendChild(this.buildEffectsRow(def, row, row.spellId === w.selectedSpell));
       // The list's p114 names scrollbar 0x10000124 (the 0x2100003e:0x10000367
@@ -24930,6 +24975,7 @@ export class GameUI {
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
         overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'none', pointerEvents: 'auto',
       });
+      hideNativeScrollbar(info); // COMPAT.safari-native-scrollbars
       info.dataset.effectsInfo = text;
       const run = this.renderDatText(text, EFFECTS_INFO_TEXT_REF, undefined, { maxWidth: wrapW, hJustify: 1 });
       if (run.tagName === 'SPAN') run.style.whiteSpace = 'pre-line';
@@ -25630,6 +25676,7 @@ export class GameUI {
         ? { overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'none' }
         : { overflow: 'hidden' }),
     });
+    if (opts.scrollbar) hideNativeScrollbar(list); // COMPAT.safari-native-scrollbars
     const rowBg = this.getTexURL(opts.rowTemplate ? this.datImageMedia(opts.rowTemplate, undefined, 0x06004cca) : 0x06004cca);
     const rowSel = this.getTexURL(opts.rowTemplate ? this.datImageMedia(opts.rowTemplate, UIState.Selected, 0x06001aaf) : 0x06001aaf);
     const cell = (c: DatListRowCell): HTMLElement => (c.desc
@@ -25978,6 +26025,7 @@ export class GameUI {
         display: 'flex', flexDirection: 'column', pointerEvents: 'auto',
         overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'none',
       });
+      hideNativeScrollbar(list); // COMPAT.safari-native-scrollbars
       // RECON.social-rows-dat-templates — every row is the 0x10000281
       // template (layout 0x21000030): strip 0x10000282's own media / state-6
       // media, and its texts — name 0x10000283, LVL/XP 0x10000284 and the
@@ -27265,6 +27313,7 @@ export class GameUI {
       Object.assign(datList.style, {
         overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'none', pointerEvents: 'auto',
       });
+      hideNativeScrollbar(datList); // COMPAT.safari-native-scrollbars
       Object.assign(content.style, { padding: '0', flex: '', overflow: 'visible', minHeight: '' });
       datList.appendChild(content);
       datCol.style.display = '';
@@ -29387,7 +29436,7 @@ export class GameUI {
      *  across refreshes, clamped — VendorItemsUI::OpenVendor tail). */
     typeFilterIdx: number;
     filterMenuOpen: boolean;
-    buyItems: Array<{ guid?: number; weenieClassId: number; name: string; pluralName?: string; price: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; usable?: number; combatUse?: number; maxStackSize?: number; descStackSize?: number; objectDescFlags?: number; itemsCapacity?: number; containersCapacity?: number; burden: number; stackSize?: number; itemType?: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }>;
+    buyItems: Array<{ guid?: number; weenieClassId: number; name: string; pluralName?: string; price: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; usable?: number; combatUse?: number; maxStackSize?: number; descStackSize?: number; objectDescFlags?: number; itemsCapacity?: number; containersCapacity?: number; ammoType?: number; validLocations?: number; clothingPriority?: number; burden: number; stackSize?: number; itemType?: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }>;
     sellItems: Array<{ guid?: number; weenieClassId: number; name: string; pluralName?: string; price: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; burden: number; stackSize?: number; itemType?: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }>;
     /** Buying-tab list (retail m_buyShopList): merchandise guid + qty. */
     buyList: Array<{ guid: number; qty: number }>;
@@ -31635,6 +31684,7 @@ export class GameUI {
         const inner = document.createElement('div');
         inner.className = 'contract-notes';
         Object.assign(inner.style, { position: 'absolute', inset: '0', overflowY: 'auto', scrollbarWidth: 'none' });
+        hideNativeScrollbar(inner); // COMPAT.safari-native-scrollbars
         // m_pNotesText (0x100005de, 270x52) is a wrapping UIElement_Text:
         // each line word-wraps at the box's width inside its p35 / p36
         // margins, in the element's own font and colour (one clipped line
@@ -33124,6 +33174,7 @@ export class GameUI {
    * layout 0x2100001a.
    */
   showExaminationWindow(view: ExaminationView): void {
+    if (this.examinePanelMode === 'docked1999') { this.showExaminePanel1999(view); return; }
     if (this.pressGuard.defer(this.examinePanel, () => this.showExaminationWindow(view))) return;
     this.hideExaminePanel();
     const lr = this.layoutRenderer;
@@ -33179,6 +33230,12 @@ export class GameUI {
    * reopen it. False (nothing drawn) when that object's window isn't up.
    */
   refreshExaminationWindow(view: ExaminationView): boolean {
+    // ExaminePanel::SetAppraiseInfo @ 0x00509920 repaints a reply for the object it shows.
+    if (this.examinePanelMode === 'docked1999') {
+      if (!this.examine1999 || view.guid !== this.examineCurrentGuid) return false;
+      this.showExaminePanel1999(view);
+      return true;
+    }
     const handle = this.examinePanelHandle;
     if (!handle || view.guid !== this.examineCurrentGuid) return false;
     // Only the creature / character pages refill in place (UseTime re-appraises nothing else).
@@ -33195,7 +33252,7 @@ export class GameUI {
 
   /** The guid whose examine window is up, or null. */
   get examinedGuid(): number | null {
-    return this.examinePanelHandle ? this.examineCurrentGuid : null;
+    return this.examinePanelHandle || this.examine1999 ? this.examineCurrentGuid : null;
   }
 
   /**
@@ -33509,6 +33566,157 @@ export class GameUI {
       this.examinePanelHandle = null;
     }
     this.examinePanel = null;
+    if (this.examine1999) this.setPanelsWindowPanel(EXAMINE_1999_PANEL, false);
+  }
+
+  /**
+   * VISUAL.ac1999-examine-panel-docked — ExaminePanel::SetAppraiseInfo
+   * @ 0x00509920 (ExamineSpell @ 0x00509720 for a spell): fill the panel and,
+   * when the right column shows another panel, make this one the column's
+   * (SetActivePanel @ 0x004d06f0). The column is our panels window.
+   */
+  private showExaminePanel1999(view: ExaminationView): void {
+    // A rebuild under a held press would eat its click (PanelPressGuard), as for the floaty window.
+    if (this.examine1999 && this.pressGuard.defer(this.examine1999.wrapper, () => this.showExaminePanel1999(view))) return;
+    this.examineCurrentGuid = view.guid;
+    this.examineCurrentPage = view.page;
+    this.examineSpellId = view.spell?.spellId ?? view.spell1999?.spellId ?? 0;
+    this.examineSelectionSeen = this.hud.target?.id ?? null;
+    if (this.examine1999) {
+      this.examine1999.view = view;
+      this.renderExaminePanel1999Now();
+      return;
+    }
+    this.examine1999Pending = view;
+    this.setPanelsWindowPanel(EXAMINE_1999_PANEL, true);
+  }
+
+  /** The panels window shows / hides the docked 1999 panel (setPanelsWindowPanel drives it). */
+  private setExamine1999Shown(show: boolean): void {
+    if (show) {
+      const view = this.examine1999Pending ?? this.examine1999?.view;
+      this.examine1999Pending = null;
+      if (!view) return;
+      this.examine1999 = { wrapper: this.examine1999?.wrapper ?? document.createElement('div'), view };
+      this.renderExaminePanel1999Now();
+      return;
+    }
+    if (this.examine1999) {
+      this.examine1999.wrapper.remove();
+      this.examine1999 = null;
+      this.panelsWindowFrameHandle = null;
+    }
+  }
+
+  /** Draw the docked panel in the panels window's body (its frame round it, at the window's rect). */
+  private renderExaminePanel1999Now(): void {
+    const cur = this.examine1999;
+    if (!cur) return;
+    const at = panelsWindowPlacement(this.getFloatyWindowGeometry(PANELS_WINDOW.windowId), this.hudLogicalWidth(), this.hudLogicalHeight());
+    const wrapper = cur.wrapper;
+    wrapper.replaceChildren();
+    wrapper.dataset.panel = 'examine1999';
+    Object.assign(wrapper.style, {
+      position: 'absolute', left: `${at.x}px`, top: `${at.y}px`, width: `${at.w}px`, height: `${at.h}px`,
+      zIndex: zLayer(ZLayer.PANEL_BASE), pointerEvents: 'auto',
+    });
+    if (!wrapper.isConnected) this.hudContainer.appendChild(wrapper);
+    this.mountPanelsWindowFrame(wrapper, at.h);
+    const B = PANELS_WINDOW.bodyRect;
+    const body = document.createElement('div');
+    Object.assign(body.style, {
+      position: 'absolute', left: `${B.x}px`, top: `${B.y}px`, width: `${B.w}px`, height: `${Math.min(at.body.h, EXAMINE_PANEL_1999_HEIGHT)}px`,
+      overflow: 'hidden', zIndex: '1',
+    });
+    wrapper.appendChild(body);
+    body.appendChild(renderExaminePanel1999(document, this.examinePanel1999View(cur.view), {
+      art: (did) => this.getWorldArtURL(did),
+      onMinimize: () => this.hideExaminePanel(),
+      onInscriptionPress: () => this.examine1999InscriptionPress(),
+      onInscriptionCommit: (text) => this.examine1999InscriptionCommit(text),
+    }));
+  }
+
+  /** The examination view as the 1999 panel draws it. */
+  private examinePanel1999View(view: ExaminationView): ExaminePanel1999View {
+    const iconUrl = view.icon?.iconDid ? (this.getRenderedItemIconURL(view.icon) ?? this.getItemIconURL(view.icon.iconDid)) : null;
+    if (view.page === 'spell' && view.spell1999) {
+      return {
+        page: 'spell', title: view.spell1999.title,
+        spell: {
+          ...view.spell1999,
+          iconUrl: this.getSpellIconURL(view.spell1999.spellId, view.spell1999.iconDid),
+          componentIconUrl: (did) => this.chargenWheelImageURL(did, 'spellcomp', compositeSpellComponentIcon, 'world'),
+        },
+      };
+    }
+    if (view.page === 'item' && view.item) {
+      return {
+        page: 'item', title: view.title,
+        item: { text: view.item, iconUrl, inscription: view.inscription1999 ?? { visible: false, placeholder: false, text: '', signature: '', scribe: '', inscription: '' } },
+      };
+    }
+    const c = view.creature1999;
+    const face = c?.character?.face ?? null;
+    return { page: c?.page ?? view.page, title: c?.title ?? view.title, creature: c ? { ...c, iconUrl, faceStrips: face ? this.faceStripURLs1999(face) : null } : undefined };
+  }
+
+  /**
+   * VISUAL.ac1999-examine-face-strips — the character's three face strips: each texture decoded
+   * through the composite palette (facePalette1999), from the 1999 world portal.
+   */
+  private faceStripURLs1999(face: FaceDids1999): Array<string | null> {
+    const tm = this.textureManager;
+    if (!tm) return [null, null, null];
+    const colors = facePalette1999(face, (id) => tm.getPaletteColors(id));
+    return [face.eyesTexture, face.noseTexture, face.mouthTexture].map((tex) => {
+      try {
+        const img = tm.getRGBAWithPalette(tex, colors);
+        return img ? iconRgbaToDataURL(img) : null;
+      } catch { return null; }
+    });
+  }
+
+  /**
+   * A 1999 interface texture: the panel's art is the 1999 world portal's own
+   * (0x0600128a…), not the end-of-retail interface portal's. Opaque RGB, read
+   * as is (no black key: the art has no transparency).
+   */
+  private getWorldArtURL(did: number): string | null {
+    const cached = this.worldArtCache.get(did);
+    if (cached !== undefined) return cached;
+    const tm = this.textureManager;
+    if (!tm || !did) return null;
+    const missEpoch = datMissEpoch();
+    let url: string | null = null;
+    try { url = tm.getIconDataURL(did); } catch { url = null; }
+    if (noDatMissSince(missEpoch)) this.worldArtCache.set(did, url);
+    else this.noteIconMiss();
+    return url;
+  }
+  private worldArtCache = new Map<number, string | null>();
+
+  /** The 1999 inscription press (0x0050acc0): a refusal's notice, else the edit may begin. */
+  private examine1999InscriptionPress(): boolean {
+    const view = this.examine1999?.view;
+    const ins = view?.inscription1999;
+    if (!view || !ins) return false;
+    const guid = view.guid;
+    const owned = this.inventoryItems.some(i => i.id === guid) || this.equippedItems.some(e => e.id === guid);
+    const refusal = inscriptionRefusal1999({ inscribable: ins.visible, owned, scribe: ins.scribe, playerName: this.inventoryOwnerName });
+    if (refusal) { this.displayErrorText(refusal); return false; }
+    return true;
+  }
+
+  /** The 1999 inscription edit ends: Event_SetInscription unless nothing changed, and the block redraws. */
+  private examine1999InscriptionCommit(text: string): Inscription1999 {
+    const cur = this.examine1999;
+    const ins = cur?.view.inscription1999;
+    if (!cur || !ins) return { visible: false, placeholder: false, text: '', signature: '', scribe: '', inscription: '' };
+    const r = inscriptionCommit1999(text, ins, this.inventoryOwnerName);
+    cur.view = { ...cur.view, inscription1999: r.view };
+    if (r.send !== null && cur.view.guid) this.onSetInscription?.(cur.view.guid, r.send);
+    return r.view;
   }
 
   /* ================================================================ */
@@ -33780,7 +33988,7 @@ export class GameUI {
     if (this.salvageVisible) out.push('Salvage');
     if (this.contractVisible) out.push('Contracts');
     if (this.automationPanelVisible) out.push('Automation');
-    if (this.examinePanelHandle) out.push('Examine');
+    if (this.examinePanelHandle || this.examine1999) out.push('Examine');
     if (this.bookPanelHandle || this.book.open) out.push('Book');
     if (this.containerPanel) out.push('Container');
     const back = this.panelHandBack;

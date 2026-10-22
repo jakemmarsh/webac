@@ -21,8 +21,8 @@ describe('wheelScrollPixels', () => {
     expect(wheelScrollPixels(w(100), 14, 280)).toBe(14);
     expect(wheelScrollPixels(w(-200), 14, 280)).toBe(-28);
   });
-  it('line mode (Firefox) is lines × step; page mode is the viewport height', () => {
-    expect(wheelScrollPixels(w(3, 1), 14, 280)).toBe(42);
+  it('line mode (Firefox) is one step per 3-line notch (COMPAT.wheel-deltamode); page mode is the viewport height', () => {
+    expect(wheelScrollPixels(w(3, 1), 14, 280)).toBe(14);
     expect(wheelScrollPixels(w(-1, 2), 14, 280)).toBe(-280);
   });
   it('horizontal lists take a sideways swipe, else the vertical wheel', () => {

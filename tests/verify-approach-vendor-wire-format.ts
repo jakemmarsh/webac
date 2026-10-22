@@ -466,3 +466,32 @@ describe('ApproachVendor (0x0062) wire format — ACE-anchored, behavioral', () 
     expect(cap!.parsed!.vendorGuid).toBe(cap!.vendorGuid);
   });
 });
+
+describe('BUG.ac1999-appraisal-details — a ware keeps the weenie fields its examine reads', () => {
+  it('AmmoType / ValidLocations / Priority are kept (they were read and dropped)', () => {
+    const h = new ServerMessageHandler();
+    let cap: any = null;
+    h.setHandlers({ onApproachVendor: (d: any) => { cap = d; } });
+    const w = new BinaryWriter(256);
+    writeVendorHeader(w, {
+      vendorGuid: 0x50003333, itemTypes: 0x100, minValue: 0, maxValue: 10000, dealMagical: false,
+      buyPrice: 1.35, sellPrice: 0.6, altCurrency: 0, altCurrencyAmount: 0, altCurrencyName: '', numItems: 2,
+    });
+    const ware = (guid: number, name: string, flags: number, fields: (w: BinaryWriter) => void) => {
+      w.writeUInt32(0xffffffff); // unlimited stock
+      w.writeUInt32(guid); w.writeUInt32(flags); w.writeString16(name);
+      w.writeUInt16(363); w.writeUInt16(0x1234); w.writeUInt32(0x100); w.writeUInt32(0);
+      alignWriter(w);
+      fields(w);
+      alignWriter(w);
+    };
+    // A bow: AmmoType 0x100 (u16, before Value), Value 0x8, ValidLocations 0x10000.
+    ware(0x80000101, 'Yumi', 0x100 | 0x8 | 0x10000, (x) => { x.writeUInt16(1); x.writeUInt32(400); x.writeUInt32(0x400000); });
+    // A coat: Value, ValidLocations, Priority 0x40000, then Burden 0x200000.
+    ware(0x80000102, 'Coat', 0x8 | 0x10000 | 0x40000 | 0x200000, (x) => { x.writeUInt32(90); x.writeUInt32(0x600); x.writeUInt32(0x6); x.writeUInt16(250); });
+    h.handleMessage(event(GameEventType.ApproachVendor, w.toBuffer()));
+    const [bow, coat] = (cap.parsed as ApproachVendorData).items;
+    expect([bow.name, bow.ammoType, bow.value, bow.validLocations, bow.clothingPriority]).toEqual(['Yumi', 1, 400, 0x400000, 0]);
+    expect([coat.name, coat.value, coat.validLocations, coat.clothingPriority, coat.burden]).toEqual(['Coat', 90, 0x600, 0x6, 250]);
+  });
+});

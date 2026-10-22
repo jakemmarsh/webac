@@ -13,7 +13,8 @@ import {
 } from '@ac/shared';
 import { MotionCommand } from '../animation/MotionCommands.js';
 import { baseOfCode, mouseEventToCode, wheelEventToCode } from '../input/MouseControls.js';
-import { suppressesBrowserScroll } from '../input/BrowserDefaults.js';
+import { wheelNotches, WheelNotchCounter } from '../ui/wheelScroll.js';
+import { suppressesBrowserKeyDefault } from '../input/BrowserDefaults.js';
 
 /** The local player's interpreted locomotion (InterpretedMotionState's forward / sidestep after adjust_motion). */
 export interface LocalInterpretedMotion {
@@ -879,6 +880,16 @@ export class CameraController {
 
   /** A physical key coming up: released under the code it was pressed as. */
   handleKeyUp(physical: string): void {
+    // COMPAT.mac-cmd-keyup — macOS browsers (Safari, Chrome, Firefox) deliver
+    // no keyup for a key released while Cmd is held, so a movement or camera
+    // key let go during a Cmd chord stayed pressed (the character kept
+    // running) until pressed again. Cmd coming up releases everything held,
+    // as a window blur does; a key still down is pressed again by the player.
+    if (physical === 'MetaLeft' || physical === 'MetaRight') {
+      if (this.keyTranslations.size > 0 || this.keys.size > 0) this.releaseAllKeys();
+      this.stopHeldActions();
+      return;
+    }
     const code = this.keyTranslations.get(physical) ?? this.keyTranslator(physical);
     this.keyTranslations.delete(physical);
     if (code !== null) this.releaseKey(code);
@@ -896,7 +907,8 @@ export class CameraController {
       const consumed = this.handleKeyDown(e.code, e.repeat, e.altKey);
       // The arrows / Space / Page keys walk and jump; they never also scroll
       // the panel last clicked (retail panels take no keyboard focus).
-      if (consumed || suppressesBrowserScroll(e.code, document.activeElement)) e.preventDefault();
+      // COMPAT.firefox-quick-find — nor does a printable key open Firefox's find bar.
+      if (consumed || suppressesBrowserKeyDefault(e, document.activeElement)) e.preventDefault();
     });
     // Always process keyup to avoid stuck keys when focus changes mid-press
     element.addEventListener('keyup', (e) => this.handleKeyUp(e.code));
@@ -978,11 +990,19 @@ export class CameraController {
       // command (Keyboard Config) fires it once per event, over the world
       // only: CInputManager_WIN32::GenerateMouseWheelEvent sends the press
       // and the release back to back.
-      if (!this.wheelZoomBound || (e.deltaY < 0 ? this.wheelZoom.up : this.wheelZoom.down) === 0) {
+      // COMPAT.wheel-deltamode: wheelNotches reads deltaMode before deltaY
+      // and counts one notch per physical click in every browser (a Firefox
+      // 3-line click, a Chrome 100 px or 150 px click, a Safari wheelDelta
+      // 120); a touchpad gives fractions.
+      const notches = wheelNotches(e);
+      if (!this.wheelZoomBound || (notches < 0 ? this.wheelZoom.up : this.wheelZoom.down) === 0) {
         const wheel = wheelEventToCode(e);
         const t = e.target as HTMLElement | null;
-        if (wheel && this.mouseControlHandler && !t?.closest?.('#game-hud, #game-ui-screens')
-          && this.mouseControlHandler(wheel, true)) {
+        if (!wheel || !this.mouseControlHandler || t?.closest?.('#game-hud, #game-ui-screens')) return;
+        // One press + release per click; a touchpad's stream presses once per notch gathered.
+        const presses = Math.abs(this.wheelCommandNotches.addNotches(notches));
+        for (let i = 0; i < presses; i++) {
+          if (!this.mouseControlHandler(wheel, true)) return;
           e.preventDefault();
           this.mouseControlHandler(wheel, false);
         }
@@ -997,9 +1017,6 @@ export class CameraController {
       // instead. Retail only zooms when the pointer is over the 3D world.
       const target = e.target as HTMLElement | null;
       if (target?.closest?.('#game-hud, #game-ui-screens')) return;
-      const notches = e.deltaMode === 0
-        ? e.deltaY / 100   // pixel mode (most mice/trackpads)
-        : e.deltaY;        // line/page mode
       // deltaY < 0 is the wheel's up (positive-axis) sub-control.
       const dir = notches < 0 ? this.wheelZoom.up : this.wheelZoom.down;
       if (dir === 0) return; // that sub-control is not bound to a zoom
@@ -1078,6 +1095,9 @@ export class CameraController {
 
   /** Mouse-look is currently on. */
   get isMouseLookActive(): boolean { return this.mouseLookActive; }
+
+  /** COMPAT.wheel-deltamode — a wheel-bound command's touchpad notches gathered so far. */
+  private readonly wheelCommandNotches = new WheelNotchCounter();
 
   /** The element pointer lock is requested on (set by bind()). */
   private pointerLockTarget: HTMLElement | null = null;

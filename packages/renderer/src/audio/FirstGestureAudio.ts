@@ -24,6 +24,12 @@ export interface FirstGestureAudioSource {
   resume?(): Promise<void>;
   /** The context's clock runs (AudioManager.isRunning). */
   readonly isRunning?: boolean;
+  /**
+   * COMPAT.safari-audio-interrupted — the browser stopped a context that was
+   * running (Safari's 'interrupted'); the listeners come back so the next
+   * gesture resumes it.
+   */
+  onStopped?(fn: () => void): void;
 }
 
 export interface FirstGestureAudio {
@@ -41,15 +47,25 @@ export function installFirstGestureAudio(
 ): FirstGestureAudio {
   let initialized = false;
   let tried = false;
+  let listening = false;
   const opts = { capture: true, passive: true } as const;
   const remove = (): void => {
+    listening = false;
     for (const t of AUDIO_GESTURE_EVENTS) target.removeEventListener(t, onGesture, opts);
+  };
+  const add = (): void => {
+    if (listening) return;
+    listening = true;
+    for (const t of AUDIO_GESTURE_EVENTS) target.addEventListener(t, onGesture, opts);
   };
   function onGesture(): void {
     if (!tried) {
       tried = true;
       initialized = audio.init();
-      if (initialized) afterInit();
+      if (initialized) {
+        audio.onStopped?.(add);
+        afterInit();
+      }
     }
     // A context that could not open never will: stop listening.
     if (!initialized) { remove(); return; }
@@ -57,6 +73,6 @@ export function installFirstGestureAudio(
       .catch(() => { /* the next gesture tries again */ })
       .then(() => { if (audio.isRunning ?? true) remove(); });
   }
-  for (const t of AUDIO_GESTURE_EVENTS) target.addEventListener(t, onGesture, opts);
+  add();
   return { get initialized() { return initialized; } };
 }

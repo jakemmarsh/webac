@@ -287,9 +287,18 @@ describe('classifyGpu — only the class leaves the page', () => {
   });
 
   it('unmaskedRenderer reads WEBGL_debug_renderer_info, null when hidden or throwing', () => {
-    expect(unmaskedRenderer({ getExtension: () => ({ UNMASKED_RENDERER_WEBGL: 0x9246 }), getParameter: (p) => (p === 0x9246 ? 'Apple M1' : null) })).toBe('Apple M1');
-    expect(unmaskedRenderer({ getExtension: () => null, getParameter: () => 'x' })).toBeNull();
-    expect(unmaskedRenderer({ getExtension: () => { throw new Error('lost'); }, getParameter: () => 'x' })).toBeNull();
+    expect(unmaskedRenderer({ getExtension: () => ({ UNMASKED_RENDERER_WEBGL: 0x9246 }), getParameter: (p) => (p === 0x9246 ? 'Apple M1' : p === 0x1f01 ? 'WebKit WebGL' : null) })).toBe('Apple M1');
+    // COMPAT.telemetry-browser-unknowns — no extension: the plain RENDERER when it names a GPU
+    // (Firefox's sanitized string), never the masked browser name (Safari 'WebKit WebGL', 'Mozilla').
+    expect(unmaskedRenderer({ getExtension: () => null, getParameter: (p) => (p === 0x1f01 ? 'WebKit WebGL' : null) })).toBeNull();
+    expect(unmaskedRenderer({ getExtension: () => null, getParameter: (p) => (p === 0x1f01 ? 'Mozilla' : null) })).toBeNull();
+    expect(unmaskedRenderer({ getExtension: () => null, getParameter: (p) => (p === 0x1f01 ? 'Radeon R9 200 Series, or similar' : null) })).toBe('Radeon R9 200 Series, or similar');
+    expect(unmaskedRenderer({ getExtension: () => ({ UNMASKED_RENDERER_WEBGL: 0x9246 }), getParameter: (p) => (p === 0x9246 ? '' : p === 0x1f01 ? 'Apple GPU' : null) })).toBe('Apple GPU');
+    expect(unmaskedRenderer({ getExtension: () => { throw new Error('lost'); }, getParameter: () => 'WebKit WebGL' })).toBeNull();
+    // Firefox: RENDERER names the GPU, so the deprecated extension is never requested (its console warning).
+    let asked = 0;
+    expect(unmaskedRenderer({ getExtension: () => { asked++; return null; }, getParameter: (p) => (p === 0x1f01 ? 'Apple M1, or similar' : null) })).toBe('Apple M1, or similar');
+    expect(asked).toBe(0);
     expect(unmaskedRenderer(null)).toBeNull();
   });
 });

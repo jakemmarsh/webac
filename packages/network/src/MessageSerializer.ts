@@ -4130,6 +4130,11 @@ export interface VendorItemData {
   usable?: number;
   /** WeenieHeaderFlag.CombatUse sbyte (0 when absent) — toolbar Use button. */
   combatUse?: number;
+  /** PublicWeenieDesc _ammoType / _valid_locations / _priority (0 when absent): the examine
+   *  text's weapon, armor and ammunition sections read them off the ware's weenie. */
+  ammoType?: number;
+  validLocations?: number;
+  clothingPriority?: number;
 }
 
 export interface ApproachVendorData {
@@ -4227,7 +4232,12 @@ export function parseApproachVendor(payload: Uint8Array): ApproachVendorData | n
         let containersCapacity = 0;
         if (weenieFlags & WeenieHeaderFlag.ItemsCapacity) itemsCapacity = r.readUInt8();
         if (weenieFlags & WeenieHeaderFlag.ContainersCapacity) containersCapacity = r.readUInt8();
-        if (weenieFlags & WeenieHeaderFlag.AmmoType) r.readUInt16();
+        // BUG.ac1999-appraisal-details — AmmoType, ValidLocations and Priority are
+        // kept: an examine of a shop ware reads them off the ware's own weenie
+        // (the weapon / armor / ammunition sections of the appraisal text are
+        // gated on them), and a ware is no world object to read them from.
+        let ammoType = 0;
+        if (weenieFlags & WeenieHeaderFlag.AmmoType) ammoType = r.readUInt16();
         if (weenieFlags & WeenieHeaderFlag.Value) value = r.readUInt32();
         // SWEEP1006B.hud-status.toolbar-use-button-greyed-target — kept for
         // the toolbar Use button when a merchandise row is the selection.
@@ -4251,9 +4261,11 @@ export function parseApproachVendor(payload: Uint8Array): ApproachVendorData | n
         if (weenieFlags & WeenieHeaderFlag.MaxStackSize) maxStackSize = r.readUInt16();
         if (weenieFlags & WeenieHeaderFlag.Container) r.readUInt32();
         if (weenieFlags & WeenieHeaderFlag.Wielder) r.readUInt32();
-        if (weenieFlags & WeenieHeaderFlag.ValidLocations) r.readUInt32();
+        let validLocations = 0;
+        if (weenieFlags & WeenieHeaderFlag.ValidLocations) validLocations = r.readUInt32();
         if (weenieFlags & WeenieHeaderFlag.CurrentlyWieldedLocation) r.readUInt32();
-        if (weenieFlags & WeenieHeaderFlag.Priority) r.readUInt32();
+        let clothingPriority = 0;
+        if (weenieFlags & WeenieHeaderFlag.Priority) clothingPriority = r.readUInt32();
         if (weenieFlags & WeenieHeaderFlag.RadarBlipColor) r.readUInt8();
         if (weenieFlags & WeenieHeaderFlag.RadarBehavior) r.readUInt8();
         // BUG.9 — ushort on the wire (ACE WorldObject_Properties.cs:1536), same
@@ -4318,6 +4330,9 @@ export function parseApproachVendor(payload: Uint8Array): ApproachVendorData | n
           objectDescFlags,
           itemsCapacity,
           containersCapacity,
+          ammoType,
+          validLocations,
+          clothingPriority,
         });
       } catch (itemError) {
         console.warn(

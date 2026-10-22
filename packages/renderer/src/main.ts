@@ -10,6 +10,7 @@ import * as THREE from 'three';
 import { installCpuBacked2dCanvases } from './ui/CanvasBacking.js';
 import { installContextHealth } from './ui/ContextHealth.js';
 import { freezeStaticTransform } from './utils/freezeStatic.js';
+import { pageStorage } from './utils/pageStorage.js';
 import { readResponseBytes } from './dat/readResponseBytes.js';
 import { DatDatabase } from '@ac/dat-parser/DatDatabase.js';
 import { httpRangeFetcher, type DatFileSource } from '@ac/dat-parser/RangedDat.js';
@@ -29,6 +30,7 @@ import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
+import { APPRAISAL_1999_STRING } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
 import { closeCurrentContainer, releaseGroundObject as releaseGroundObjectState } from './world/CloseCurrentContainer.js';
@@ -55,6 +57,7 @@ import { SceneManager } from './scene/SceneManager.js';
 import { CameraController } from './scene/CameraController.js';
 import { CAMERA_DEFAULT_PIVOT_Z, CAMERA_IN_HEAD_Y, TRACK_TARGET_OFFSET_Z, blipResetsViewer, cameraPlayerTranslucency } from './scene/RetailCamera.js';
 import { surfaceViewerCell, surfaceViewerDistance, type SurfaceViewerWorld } from './scene/ViewerBoom.js';
+import { outsidePortalPolygons, type IndoorViewContext, type PortalPolygon } from './scene/IndoorView.js';
 import { RetailCameraRig } from './scene/RetailCameraRig.js';
 import { RendererWarmup } from './scene/RendererWarmup.js';
 import { applyViewerFade } from './scene/ViewerFade.js';
@@ -199,6 +202,8 @@ import { LocalPlayerDefaults, initSetupDefaults, type SetupDefaultsDeps } from '
 import { examineHeldItem, resolveExamineHeader } from './ui/examineHeader.js';
 import { chooseExaminePage, examineTitle, examineInscription, type ExaminationView } from './ui/examine/ExaminationWindow.js';
 import { buildItemAppraisalText } from './ui/examine/ItemAppraisalText.js';
+import { buildItemAppraisalText1999 } from './ui/examine/ItemAppraisalText1999.js';
+import { resolveAppraisedWeenie } from './ui/examine/appraisedWeenie.js';
 import { buildCreatureExaminePage } from './ui/examine/CreatureAppraisalText.js';
 import { createExamineResolvers } from './ui/examine/examineResolvers.js';
 import { RateLimitedWarn } from './utils/RateLimitedWarn.js';
@@ -397,6 +402,8 @@ import { ABSENT_1999, buildFriendsCommand1999, friendsCommand1999Plan, getString
 import { CELL_LENGTH, MAP_TELEPORT_ORIGIN, mapCoordinateText, mapCoordsOfCell } from './ui/MapMarkers.js';
 import { tradeReceiveContainsIn } from './inventory/TradeReceiveContainId.js';
 import { buildSpellExamineModel, inqSkillLevel, spellRangeMeters } from './ui/examine/SpellExamine.js';
+import { buildCreatureExamine1999, buildSpellExamine1999, examineInscription1999, examineTitle1999 } from './ui/examine/ExaminePanel1999.js';
+import { SpellCharge1999, spellChargeText1999 } from './magic/SpellCharge1999.js';
 import { TalkFocus } from './ui/ChatTalkFocus.js';
 import { MAIN_CHAT_WINDOW_ID } from './ui/FloatyChatModel.js';
 import { RetailCommandSystem } from './chat/commands/index.js';
@@ -1537,6 +1544,8 @@ async function main() {
   const eraUnsupported = unsupportedFeatures(activeEra);
   // The era's own client-code rules (a cast / attack stopping the player).
   const eraRules = eraClientRules(activeEra);
+  // VISUAL.ac1999-spell-charge — the 1999 per-spell Charge the docked examine panel prints.
+  const spellCharge1999 = eraRules.examinePanel === 'docked1999' ? new SpellCharge1999() : null;
   // BOOT.side-tables-off-critical-path — the three weenie side-files
   // (combat style for bow/crossbow → LeftHand per ACE Creature_Equipment.cs:84-95;
   // GAP.9 attack type for the swing animation; weapon time for
@@ -2065,9 +2074,9 @@ async function main() {
     // deg_mul at the real-GPU steady state on SwiftShader (harnessDegMulPin).
     let rendererName = '';
     try {
+      // COMPAT.telemetry-browser-unknowns — RENDERER first (no Firefox deprecation warning).
       const gl = sceneManager.renderer?.getContext();
-      const info = gl?.getExtension('WEBGL_debug_renderer_info');
-      rendererName = String((info && gl?.getParameter(info.UNMASKED_RENDERER_WEBGL)) ?? gl?.getParameter(gl.RENDERER) ?? '');
+      rendererName = unmaskedRenderer(gl) ?? String(gl?.getParameter(gl.RENDERER) ?? '');
     } catch { /* no context: no pin */ }
     const pin = harnessDegMulPin(pageDebugToolsEnabled(window.location.search), window.location.search, rendererName);
     if (pin !== null) {
@@ -2648,6 +2657,13 @@ async function main() {
   // player's, so the scan runs only while the player is in one.
   let indoorViewCellId = 0;
   let indoorViewPvs = new Set<number>();
+  // PERF.indoor-two-pass-cost — the PVS cells' outside portals (PView::DrawCells
+  // draws the landscape only while one is in view); null until every cell's data is loaded.
+  let indoorViewPortals: PortalPolygon[] | null = null;
+  /** Frames until the next try while a PVS cell's data is still streaming in. */
+  let indoorViewPortalRetry = 0;
+  /** DatLightBudget.forEachLight once the budget exists (the pad count's light list). */
+  let indoorViewLights: IndoorViewContext['forEachPointLight'];
   function updateIndoorView(): void {
     let camCell = 0;
     if (!playerInDungeon && currentSurfaceCellId !== 0 && landblockObjects.landscapeVisible) {
@@ -2666,12 +2682,22 @@ async function main() {
         indoorViewPvs.add(camCell & 0xffff);
         for (const v of env.visibleCells) indoorViewPvs.add(v);
       }
+      indoorViewPortals = null;
+      indoorViewPortalRetry = 0;
+    }
+    if (indoorViewPvs.size > 0 && !indoorViewPortals && --indoorViewPortalRetry <= 0) {
+      const prefix = indoorViewCellId & 0xffff0000;
+      indoorViewPortals = outsidePortalPolygons([...indoorViewPvs].map((c) => (prefix | c) >>> 0),
+        (id) => envCellRenderer.getCellCollisionData(id));
+      indoorViewPortalRetry = 30;
     }
     sceneManager.indoorView = indoorViewPvs.size > 0 ? {
       blockKey: indoorViewCellId >>> 16,
       cells: indoorViewPvs,
       playerCellId: currentSurfaceCellId,
       cellAt: (x, y, z) => outdoorCollision.findCellContaining(x, y, z, indoorViewCellId),
+      outsidePortals: indoorViewPortals ?? undefined,
+      forEachPointLight: indoorViewLights,
     } : null;
   }
   /** Building + cell meshes per block (streamer-owned; the camera/collision raycast rebuild reads them). */
@@ -6227,6 +6253,8 @@ async function main() {
   gameUI.setUnsupportedFeatures(eraUnsupported);
   // AC1999.spell-research-panel — the 1999 client.exe's "Create Spell" tab (eraClientRules).
   gameUI.setSpellResearch(eraRules.spellResearch);
+  // VISUAL.ac1999-examine-panel-docked — a 1999 world examines in the docked ExaminePanel.
+  gameUI.setExaminePanel(eraRules.examinePanel);
   // BUG.vendor-buy-quantity — the era's buy-one-at-a-time ware mask (HandleSelectionChanged / 1999 UpdateSplitUI).
   gameUI.setVendorBuyOneMask(eraRules.vendorBuyOneMask);
 
@@ -7763,13 +7791,13 @@ async function main() {
   }
   // Brief delay after recent disconnect to let the bridge send its Disconnect packet.
   // LoginRequest retry in ClientConnection handles longer ACE session cleanup automatically.
-  const lastDisconnect = parseInt(sessionStorage.getItem('aceDisconnectTime') || '0', 10);
+  const lastDisconnect = parseInt(pageStorage('session').getItem('aceDisconnectTime') || '0', 10);
   const elapsed = Date.now() - lastDisconnect;
   if (lastDisconnect > 0 && elapsed < 1500) {
     const waitMs = 1500 - elapsed;
     console.log(`[AC] ACE: Brief wait ${waitMs}ms for bridge disconnect packet...`);
     await new Promise(resolve => setTimeout(resolve, waitMs));
-    sessionStorage.removeItem('aceDisconnectTime');
+    pageStorage('session').removeItem('aceDisconnectTime');
   }
 
   // ERA.dm-support — the era's LoginRequest version literal and credential encoding.
@@ -7805,7 +7833,7 @@ async function main() {
   // reporter reads the screen before the disconnect tears the world down.
   installUnloadSessionClose(window, {
     module: gameUI, connection: aceConnection, reporter: { pageUnloading: () => { preworldReporter?.pageUnloading(); worldReporter?.left('closed_tab'); } },
-    after: () => sessionStorage.setItem('aceDisconnectTime', Date.now().toString()),
+    after: () => pageStorage('session').setItem('aceDisconnectTime', Date.now().toString()),
   });
   // Expose for debugging
   exposeDebugGlobal('__aceConnection', aceConnection);
@@ -8002,7 +8030,7 @@ async function main() {
     enterRequestTimer.cancel();
     aceConnection.autoReconnect = false;
     aceConnection.disconnect();
-    sessionStorage.setItem('aceDisconnectTime', Date.now().toString());
+    pageStorage('session').setItem('aceDisconnectTime', Date.now().toString());
   };
   /**
    * A refused launcher login: back to the launcher, with the refusal's OK
@@ -8054,7 +8082,7 @@ async function main() {
     sessionLifecycle.noteLoggedOut();
     enterRequestTimer.cancel();
     aceConnection.disconnect();
-    sessionStorage.setItem('aceDisconnectTime', Date.now().toString());
+    pageStorage('session').setItem('aceDisconnectTime', Date.now().toString());
     // A refusal on the way to a new build's reload: say why first, reload on OK.
     if (refusal !== undefined && reloadAtBreak(updateWatcher.pendingVersion)) {
       gameUI.showRefusalDialog(refusal, () => { reloadIfUpdatePending(); });
@@ -8728,6 +8756,22 @@ async function main() {
           return wcid ? (playerState.inventory.getAll().find(i => i.weenieClassId === wcid)?.id ?? 0) : 0;
         },
       });
+      if (eraRules.examinePanel === 'docked1999') {
+        // SpellExaminePanel::ExamineSpell (1999 @ 0x00511110).
+        const spell1999 = buildSpellExamine1999({
+          spellId, spell,
+          formula: appropriateSpellFormula({ ...appropriateFormulaInputs(spell), school: spell.school }),
+          skillLevel: (id) => inqSkillLevel(playerState.skills, id),
+          component: (scid) => {
+            const c = spellComponentTable?.components.get(scid);
+            return c ? { name: c.name, icon: c.icon } : null;
+          },
+        });
+        // ExamineSpell's last line: the player's Charge for the spell (InqSpellCharge @ 0x00517820).
+        if (spellCharge1999) spell1999.charge = spellChargeText1999(spellCharge1999.inq(spellId, performance.now() / 1000));
+        gameUI.showExaminationWindow({ guid: 0, title: spell1999.title, page: 'spell', spell: model, spell1999 });
+        return;
+      }
       gameUI.showExaminationWindow({ guid: 0, title: model.title, page: 'spell', spell: model });
     };
     gameUI.onExamineSpell = examineSpell;
@@ -10149,6 +10193,8 @@ async function main() {
           console.log(`[PlayerDesc] Initialized ${desc.skills.length} skills`);
         }
 
+        // VISUAL.ac1999-spell-charge — the 1999 spellbook's charges (SpellBookPage +0x4).
+        spellCharge1999?.seed(desc.spellCharges1999, performance.now() / 1000);
         // Learn spells from PlayerDescription (bulk spell list sent at login)
         if (desc.spellIds.length > 0 && spellTable) {
           let learned = 0;
@@ -11301,7 +11347,9 @@ async function main() {
           int: Object.fromEntries(data.propertiesInt ?? []), float: Object.fromEntries(data.propertiesFloat ?? []),
           string: Object.fromEntries(data.propertiesString ?? []), bool: Object.fromEntries(data.propertiesBool ?? []),
           did: Object.fromEntries(data.propertiesDataID ?? []),
-          spells: (data.spellBook ?? []).map((id) => spellTable?.spells.get(id)?.name ?? '').filter(Boolean),
+          // A 1999 appraisal carries the spell names, not ids (APPRAISAL_1999_STRING.spellNames, ", "-joined by the server).
+          spells: data.spellBook?.length ? data.spellBook.map((id) => spellTable?.spells.get(id)?.name ?? '').filter(Boolean)
+            : (data.propertiesString?.get(APPRAISAL_1999_STRING.spellNames) ?? '').split(', ').filter((n) => n && n !== 'Unknown'),
           spellIds: [...(data.spellBook ?? [])], activeSpellIds: [...(data.activeEnchantments ?? [])], at: performance.now(),
           // A launcher's range (WeaponProfile MaxVelocity; the agent's ranged attack reads it). A failed appraisal's
           // profile says Unknown (WeaponTime < 0), and its velocity is no stat.
@@ -11357,30 +11405,46 @@ async function main() {
           hasCreatureProfile: !!data.creatureProfile,
           propertiesString: data.propertiesString, propertiesInt: data.propertiesInt,
         });
-        const title = examineTitle(name, obj?.stackSize ?? held?.stackSize ?? 1, data.propertiesString);
+        const docked1999 = eraRules.examinePanel === 'docked1999';
+        const title = docked1999
+          ? examineTitle1999(name, obj?.stackSize ?? held?.stackSize ?? 1)
+          : examineTitle(name, obj?.stackSize ?? held?.stackSize ?? 1, data.propertiesString);
         console.log(`[AC] Examine 0x${data.guid.toString(16)} "${title}": page=${page} success=${data.success ?? true} flags=0x${data.flags.toString(16)} creatureProfile=${!!data.creatureProfile}`);
-        const weenieSrc = obj ?? held;
+        // BUG.ac1999-appraisal-details — the weenie fields the item page is gated on, from wherever
+        // the client holds the object: a shop ware's are its merchandise row's, a ground item's valid
+        // locations its CreateObject record's (ui/examine/appraisedWeenie.ts).
+        const weenieInfo = resolveAppraisedWeenie([obj, held, worldObjectRecords.sourceOf(data.guid), stock], !!data.hookProfile);
         const shieldSkill = playerSkillTable
           ? { current: playerState.getSkillCurrent(SKILL_ID_SHIELD, playerSkillTable.skills), advancementClass: playerState.skills.getAdvancementClass(SKILL_ID_SHIELD) }
           : undefined;
         const view: ExaminationView = { guid: data.guid, title, page, previewMesh };
+        // The 1999 panel's icon (item header, creature panel): the object's own, through RenderIcons.
+        if (docked1999 && iconId) {
+          view.icon = { iconDid: iconId, itemType: header.itemType, effects: header.effects, overlayDid: header.overlayDid, underlayDid: header.underlayDid };
+        }
         if (page === 'item') {
-          view.item = buildItemAppraisalText(data, {
+          // The 1999 client.exe builds its own lines (ItemExaminePanel::SetAppraiseInfo @ 0x0050b6c0).
+          view.item = (eraRules.appraisalText === 'ac1999' ? buildItemAppraisalText1999 : buildItemAppraisalText)(data, {
             appraisalSuccess: data.success ?? true,
-            weenie: weenieSrc ? {
-              validLocations: 'validLocations' in weenieSrc ? weenieSrc.validLocations : undefined, ammoType: weenieSrc.ammoType,
-              priority: weenieSrc.clothingPriority, objectDescriptionFlags: weenieSrc.objectDescFlags,
-              itemsCapacity: weenieSrc.itemsCapacity, containersCapacity: 'containersCapacity' in weenieSrc ? weenieSrc.containersCapacity : undefined,
-              // ACE AppraiseInfo.cs:290 builds a HookProfile only for a hook
-              // holding an item — the weenie's IsHooked (vtable +0x74).
-              isHooked: !!data.hookProfile,
-            } : undefined,
+            // The docked 1999 panel has its own Value / Burden header (ItemExaminePanel +0x210 / +0x214).
+            hasValueBurdenElements: docked1999,
+            weenie: weenieInfo,
             viewerShieldSkill: shieldSkill,
             noNetherDamage: !gameUI.eraSupports('netherDamage'),
             resolvers: examineResolvers.item,
           });
-          view.inscription = examineInscription(weenieSrc?.objectDescFlags ?? 0, data.propertiesString);
+          view.inscription = examineInscription(weenieInfo?.objectDescriptionFlags ?? 0, data.propertiesString);
+          if (docked1999) view.inscription1999 = examineInscription1999(weenieInfo?.objectDescriptionFlags ?? 0, data.propertiesString);
         } else {
+          // The 1999 panel's creature / character sub-panels (BasicCreatureExaminePanel / CharExaminePanel::
+          // SetAppraiseInfo, 1999 @ 0x0050e050 / 0x0050f760). The end-of-retail model below still feeds the
+          // agent's appraisal record.
+          if (docked1999) {
+            view.creature1999 = buildCreatureExamine1999(data, {
+              objectName: name,
+              publicWeenieBitfield: obj?.objectDescFlags ?? (isSelf ? serverObjectManager?.playerDescFlags : undefined),
+            }) ?? undefined;
+          }
           view.creature = buildCreatureExaminePage(data, {
             success: data.success ?? true,
             ...examineResolvers.creature,
@@ -11482,6 +11546,8 @@ async function main() {
           objectDescFlags: item.objectDescFlags,
           itemsCapacity: item.itemsCapacity,
           containersCapacity: item.containersCapacity,
+          // BUG.ac1999-appraisal-details — the ware's weenie fields an examine of it reads.
+          ammoType: item.ammoType, validLocations: item.validLocations, clothingPriority: item.clothingPriority,
           burden: item.burden,
           iconDid: item.iconId,
           iconOverlayDid: item.iconOverlayId || undefined,
@@ -12810,6 +12876,8 @@ async function main() {
       // The learn chat line comes from the server, not from here — see
       // magic/SpellLearn.ts.
       onMagicUpdateSpell: (data) => {
+        // 1999: 0x4C for a known spell decays its Charge, a new one joins at full (SpellCharge1999).
+        spellCharge1999?.updateSpell(data.spellId, performance.now() / 1000);
         const outcome = handleMagicUpdateSpell(data.spellId, {
           spellTable,
           isSpellKnown: (id) => magicController.isSpellKnown(id),
@@ -12989,6 +13057,7 @@ async function main() {
       // spell-bar/spellbook UI via `setSpellData`, matching the inverse
       // of the `onMagicUpdateSpell` (FAITHFUL.226 + .335) add-path.
       onMagicRemoveSpell: (data) => {
+        spellCharge1999?.removeSpell(data.spellId);
         if (magicController.forgetSpell(data.spellId)) {
           // gmSpellbookUI::RecvNotice_SpellRemoved @ 0048bc00 rebuilds the list:
           // no highlight, m_selectedSpellID kept.
@@ -18867,6 +18936,7 @@ async function main() {
   // BUG.server-object-setup-lights — physics objects' Setup lights
   // (ObjectLights) register here as they are built.
   setObjectLightSink(datLightBudget);
+  indoorViewLights = (visit) => datLightBudget.forEachLight(visit);
   const datLightViewerPos = new THREE.Vector3();
 
   // The browser stops rAF for a hidden, minimized or covered window; the worker's beat keeps the game
@@ -20278,6 +20348,6 @@ if (import.meta.hot) {
       exposeDebugGlobal('__aceConnection', null);
     }
     // Record disconnect time so the next page load can wait for ACE to process the logout
-    sessionStorage.setItem('aceDisconnectTime', Date.now().toString());
+    pageStorage('session').setItem('aceDisconnectTime', Date.now().toString());
   });
 }

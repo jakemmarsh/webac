@@ -119,6 +119,9 @@ export interface AppraisedWeenieInfo {
   containersCapacity?: number;
   /** The weenie's IsHooked virtual (vtable +0x74): hook-profile values replace PWD ones. */
   isHooked?: boolean;
+  /** PWD _location: the slot it is wielded in, 0 when not wielded (1999 ACCWeenieObject::get_location
+   *  @ 0x004e1f40 — "Use this item to unwield it." / "... to take it off."). */
+  location?: number;
 }
 
 export interface ItemAppraisalContext {
@@ -619,7 +622,7 @@ export function buildItemAppraisalText(data: IdentifyResponseData, ctx: ItemAppr
   // Appraisal_ShowDescription @ 004b6990 (line ~178273).
   showDescription();
 
-  return finish(header, body.runs);
+  return finishAppraisalText(header, body.runs);
 
   // ── Sections with more branching ────────────────────────────────────
 
@@ -929,7 +932,8 @@ export const EQUIPMENT_SET_NAMES: Readonly<Record<number, string>> = (() => {
 
 // ─── Output shaping ──────────────────────────────────────────────────────
 
-function finish(header: { value: string; burden: string }, runs: AppraisalRun[]): ItemAppraisalText {
+/** The append stream → the page's text, lines and paragraphs (shared with the 1999 item page). */
+export function finishAppraisalText(header: { value: string; burden: string }, runs: AppraisalRun[]): ItemAppraisalText {
   const text = runs.map((r) => r.separator + r.text).join('');
   const lines: AppraisalLine[] = [];
   let cur: AppraisalLine | null = null;

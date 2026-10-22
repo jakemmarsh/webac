@@ -126,6 +126,8 @@ describe('the captured 1999 PlayerDescription → EoL 0xF7B0/0x0013', () => {
 
   it('carries the spellbook, inventory and equipment', () => {
     expect(desc.spellIds).toEqual([0x1b, 0x4b, 0x56]);
+    expect([...desc.spellCharges1999.keys()]).toEqual([0x1b, 0x4b, 0x56]);
+    for (const c of desc.spellCharges1999.values()) expect(c).toBeLessThan(2);
     expect(desc.inventoryPlacement).toHaveLength(13);
     expect(desc.inventoryPlacement[0]).toEqual({ guid: 0x9000005b, containerType: 0 });
     expect(desc.inventoryPlacement[12]).toEqual({ guid: 0x90000058, containerType: 1 });
@@ -298,7 +300,7 @@ describe('a synthetic 1999 PlayerDescription with hotbar, spell bar, XP, vitae',
     w.u16(2).u16(0x20);
     w.u32(0).u32(1).i32(1).u32(0).u32(0).i32(0).f64(0); // skill 0: dropped
     w.u32(2).u32(7).i32(3).u32(900).u32(0).i32(0).f64(1.5);
-    w.u16(1).u16(0x40).u32(0x3e1).f32(1).f32(0).f32(0.5);
+    w.u16(1).u16(0x40).u32(0x3e1).f32(0.75).f32(0).f32(0.5); // charge, +0xC, likelihood
     w.u32(0x4); // vitae only
     w.u32(666 | (1 << 16)).u32(204).i32(0).f64(-10).f64(-1).u32(0).f32(0).f32(0).f64(0).u32(0x800000).u32(0).f32(0.95);
     w.u32(1).u32(0x400); // selectorFlags: hotbar; options ToggleRun
@@ -323,6 +325,8 @@ describe('a synthetic 1999 PlayerDescription with hotbar, spell bar, XP, vitae',
     expect(desc.health).toEqual({ ranks: 2, startingValue: 0, cpSpent: 0, current: 30 });
     expect(desc.skills).toEqual([{ skillId: 2, ranks: 7, advancementClass: 3, cpSpent: 900, initLevel: 0 }]);
     expect(desc.spellIds).toEqual([0x3e1]);
+    // The spell's Charge rides in the end-of-retail entry's f32 (below ACE's 2.0): VISUAL.ac1999-spell-charge.
+    expect([...desc.spellCharges1999]).toEqual([[0x3e1, 0.75]]);
     expect(desc.vitae).toMatchObject({ spellId: 666, layer: 1, spellCategory: 204, statModValue: expect.closeTo(0.95, 5), isVitae: true });
     expect(desc.shortcuts).toEqual([{ index: 3, objectId: 0x90000010, spellId: 0, layer: 0 }]);
     expect(desc.spellBars[0]).toEqual([0x3e1, 0x3e2]);

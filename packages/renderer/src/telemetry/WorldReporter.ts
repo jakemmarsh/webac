@@ -202,10 +202,12 @@ export interface WorldLeftEvent {
   /**
    * Page-lifecycle freezes (document 'freeze') during the session, and their total length so far.
    * A freeze still open when the report is built (no 'resume' yet: the tab closed while frozen)
-   * counts, up to the report (TELEMETRY.freeze-ending-in-close).
+   * counts, up to the report (TELEMETRY.freeze-ending-in-close). Null where the browser has no
+   * page-lifecycle events (Firefox, Safari: COMPAT.telemetry-browser-unknowns), so "no freeze" is
+   * never claimed where a freeze could not have been seen.
    */
-  freezes?: number;
-  frozenMs?: number;
+  freezes?: number | null;
+  frozenMs?: number | null;
   /**
    * How long before this report the page's 1 s telemetry tick last ran (since the enter when it
    * never ran). Up to ~1 s on a running visible page and ~60 s on a hidden one (Chrome's intensive
@@ -335,13 +337,26 @@ export function classifyGpu(renderer: string | null | undefined): GpuClass {
   return 'unknown';
 }
 
-/** The unmasked renderer string of a WebGL context (null when the browser hides it). */
+/** WebGL RENDERER strings that name the browser, not the GPU (the masked values). */
+const MASKED_RENDERERS = new Set(['webkit webgl', 'mozilla', 'webkit', 'google inc.', '']);
+/** gl.RENDERER (0x1F01). */
+const GL_RENDERER = 0x1f01;
+
+/**
+ * The unmasked renderer string of a WebGL context (null when the browser hides it).
+ * COMPAT.telemetry-browser-unknowns — gl.RENDERER first: Firefox (110+) already returns the
+ * sanitized GPU name there ("Radeon R9 200 Series, or similar") and logs a deprecation warning
+ * for every WEBGL_debug_renderer_info request, so the extension is asked only when RENDERER is
+ * the masked browser name (Chrome, Safari: "WebKit WebGL").
+ */
 export function unmaskedRenderer(gl: { getExtension(name: string): unknown; getParameter(p: number): unknown } | null | undefined): string | null {
   try {
     if (!gl) return null;
+    const plain = gl.getParameter(GL_RENDERER);
+    if (typeof plain === 'string' && !MASKED_RENDERERS.has(plain.trim().toLowerCase())) return plain;
     const ext = gl.getExtension('WEBGL_debug_renderer_info') as { UNMASKED_RENDERER_WEBGL: number } | null;
     const v = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null;
-    return typeof v === 'string' ? v : null;
+    return typeof v === 'string' && v ? v : null;
   } catch { return null; }
 }
 
@@ -451,6 +466,11 @@ export class WorldReporter {
   /** Page-lifecycle freezes this session ('freeze' → 'resume'). */
   private freezes = 0;
   private frozenMs = 0;
+  /**
+   * COMPAT.telemetry-browser-unknowns — false once install() finds no document 'freeze' event
+   * (only Chromium has the Page Lifecycle API; https://caniuse.com/mdn-api_document_freeze_event).
+   */
+  private freezeEventsSupported = true;
   private frozenAt: number | null = null;
   /** The last 1 s tick this session (the enter until one runs): when the page's JavaScript last ran on its own. */
   private lastBeatAt = 0;
@@ -683,8 +703,8 @@ export class WorldReporter {
         hiddenMs: this.hiddenSince === null ? null : Math.max(0, Math.round(at - Math.max(this.hiddenSince, this.enterAt))),
         // A freeze still open (the tab closed or the session dropped before 'resume') counts up to
         // now. The session ends here, so a later 'resume' (enterAt null) adds nothing.
-        freezes: this.freezes + (this.frozenAt !== null ? 1 : 0),
-        frozenMs: Math.round(this.frozenMs + this.openFreezeMs(at)),
+        freezes: this.freezeEventsSupported ? this.freezes + (this.frozenAt !== null ? 1 : 0) : null,
+        frozenMs: this.freezeEventsSupported ? Math.round(this.frozenMs + this.openFreezeMs(at)) : null,
         lastBeatAgoMs: count(Math.max(0, at - this.lastBeatAt), SESSION_CAP_MS) ?? 0,
         drainWaitMs: count(safe(this.src.drainWaitMs, null), SESSION_CAP_MS),
       });
@@ -705,6 +725,7 @@ export class WorldReporter {
     doc.addEventListener('visibilitychange', () => {
       if (doc.visibilityState === 'hidden') { this.hidden(); this.outbox.retry(true); } else this.visible();
     });
+    this.freezeEventsSupported = 'onfreeze' in doc;
     doc.addEventListener('freeze', () => this.frozen());
     doc.addEventListener('resume', () => this.pageResumed());
     doc.addEventListener('keydown', ((e: KeyboardEvent) => { if (!e.repeat) this.keyDown(); }) as EventListener, true);
