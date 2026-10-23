@@ -40,9 +40,13 @@
  *             EoL: u32 header, String16 name, PackedDword wcid, PackedDword icon (known type
  *                   0x06000000; 1999 icon ids are 1999 portal ids, kept as-is), u32 type,
  *                   u32 bitfield, align4, then EoL order with EoL widths (ammoType u16).
- *             Lossy: 0x200000 is the trade note's issuing vendor in 1999 but Burden in EoL,
- *             and 0x1000000 is an unnamed dword in 1999 but Workmanship (f32) in EoL: both
- *             are read and dropped. 1999 never sets 0x40 or bits above 0x1000000; such a
+ *             0x200000 is the trade note's issuing vendor in 1999 but Burden in EoL: it is
+ *             taken out of the descriptor and follows the create as an EoL 0x02D8
+ *             PublicUpdatePropertyDataID {guid, VendorsClassId (40), wcid} (the AC1999
+ *             server's own VENDORS_CLASSID_DID, StampNoteIssuer, Vendor.cpp:121), which the
+ *             client's sell-back price reads (VTE-1: ShopSystem_BuyPrice's isIssuer).
+ *             Lossy: 0x1000000 is an unnamed dword in 1999 but Workmanship (f32) in EoL: it
+ *             is read and dropped. 1999 never sets 0x40 or bits above 0x1000000; such a
  *             header is rejected (unknown width), never guessed. The bitfield's EoL
  *             IncludesSecondHeader bit (0x04000000) is masked so no header2 is implied.
  * 0xF625 ObjDescEvent  1999: u32 guid, ObjDesc (above), u16 instance, u16 objdesc, align4
@@ -87,6 +91,9 @@ const PD = {
 const PWD_KNOWN_1999 = 0x01ffffff & ~0x40;
 /** 1999 bits with no EoL meaning (vendor wcid → EoL Burden, unnamed dword → EoL Workmanship). */
 const PWD_DROPPED = 0x200000 | 0x1000000;
+/** EoL PublicUpdatePropertyDataID and PropertyDataId.VendorsClassId (ACE PropertyDataId.cs). */
+const PUBLIC_UPDATE_DATA_ID = 0x02d8;
+const DID_VENDORS_CLASS_ID = 40;
 /** EoL ObjectDescriptionFlag.IncludesSecondHeader: never implied by a 1999 bitfield. */
 const BF_INCLUDES_SECOND_HEADER = 0x04000000;
 
@@ -183,8 +190,8 @@ function physicsDesc(r: Reader1999, w: BinaryWriter, ctx: AdapterContext, opts: 
   align4(w);
 }
 
-/** 1999 PublicWeenieDesc → EoL WeenieDesc (see the file comment). */
-function weenieDesc(r: Reader1999, w: BinaryWriter): void {
+/** 1999 PublicWeenieDesc → EoL WeenieDesc (see the file comment). Returns the trade note's issuing-vendor wcid (0 = none). */
+function weenieDesc(r: Reader1999, w: BinaryWriter): number {
   const header = r.u32();
   const unknown = header & ~PWD_KNOWN_1999;
   if (unknown) throw new Error(`PublicWeenieDesc header 0x${header.toString(16)} has bits 0x${unknown.toString(16)} the 1999 reader doesn't know`);
@@ -218,7 +225,7 @@ function weenieDesc(r: Reader1999, w: BinaryWriter): void {
   const blipColor = has(0x100000) ? r.u8() : 0;
   const radar = has(0x800000) ? r.u8() : 0;
   if (has(0x1000000)) r.u32(); // unnamed 1999 dword; no EoL field
-  if (has(0x200000)) r.u16(); // issuing-vendor wcid; EoL's 0x200000 is Burden
+  const issuer = has(0x200000) ? r.u16() : 0; // issuing-vendor wcid; EoL's 0x200000 is Burden
   const spell = has(0x400000) ? r.u16() : 0;
   r.align4();
 
@@ -252,6 +259,7 @@ function weenieDesc(r: Reader1999, w: BinaryWriter): void {
   if (has(0x800000)) w.writeUInt8(radar);
   if (has(0x400000)) w.writeUInt16(spell);
   align4(w);
+  return issuer;
 }
 
 /** The real client's readers are length-bounded and ignore a tail, but a tail here means a misread layout: say so. */
@@ -260,13 +268,22 @@ function leftover(r: Reader1999, ctx: AdapterContext, what: string): void {
 }
 
 export function registerObjects1999(c: Codecs1999, opts: Objects1999Options = {}): void {
-  c.inbound.set(0xf745, (r, ctx) => [eol(0xf745, (w) => {
-    w.writeUInt32(r.u32());
-    objDesc(r, w);
-    physicsDesc(r, w, ctx, opts);
-    weenieDesc(r, w);
-    leftover(r, ctx, '0xF745 ObjectCreate');
-  })]);
+  c.inbound.set(0xf745, (r, ctx) => {
+    let guid = 0;
+    let issuer = 0;
+    const create = eol(0xf745, (w) => {
+      guid = r.u32();
+      w.writeUInt32(guid);
+      objDesc(r, w);
+      physicsDesc(r, w, ctx, opts);
+      issuer = weenieDesc(r, w);
+      leftover(r, ctx, '0xF745 ObjectCreate');
+    });
+    if (!issuer) return [create];
+    // The note's issuer as the EoL VendorsClassId DID: seq u8, guid, key, value.
+    const did = eol(PUBLIC_UPDATE_DATA_ID, (w) => { w.writeUInt8(0); w.writeUInt32(guid); w.writeUInt32(DID_VENDORS_CLASS_ID); w.writeUInt32(issuer); });
+    return [create, did];
+  });
 
   c.inbound.set(0xf625, (r, ctx) => [eol(0xf625, (w) => {
     w.writeUInt32(r.u32());

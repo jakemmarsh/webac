@@ -65,7 +65,7 @@ describe('Inscription block 0x1000013e / 0x1000013f (ItemExamineUI::SetInscripti
   });
 
   it('an inscribable item nobody has signed invites "<Inscribe here>"', () => {
-    expect(examineInscription(INSCRIBABLE, new Map())).toEqual({ visible: true, text: '<Inscribe here>', signature: '', scribe: '', inscription: '' });
+    expect(examineInscription(INSCRIBABLE, new Map())).toEqual({ visible: true, text: '<Inscribe here>', signature: '', scribe: '', inscription: '', placeholder: true });
   });
 
   it('a non-inscribable item hides the block even if it carries an inscription string', () => {

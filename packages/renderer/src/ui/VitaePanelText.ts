@@ -22,7 +22,7 @@
  */
 
 import { getStringParts } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { vitaeCpPoolThreshold } from '@ac/shared';
+import { vitaeCpPoolThreshold, vitaeCpPoolThreshold1999 } from '@ac/shared';
 
 /** StringTable 0x23000001 entry ids (resolved from client_local_English.dat). */
 export const VITAE_STRING_IDS = {
@@ -77,11 +77,31 @@ export function vitaePenaltyPercent(vitaePenalty: number): number {
  * The client's VitaeCPPoolThreshold returns a truncated ulong; ACE casts
  * `(int)` the same way (Player_Xp.cs:148).
  */
-export function vitaeXpRemaining(s: VitaePanelSource): number {
+export function vitaeXpRemaining(s: VitaePanelSource, kind: VitaePanelKind = 'eor'): number {
   const level = s.deathLevel > 0 ? s.deathLevel : s.level;
   const multiplier = 1 - s.vitaePenalty;
-  const threshold = Math.trunc(vitaeCpPoolThreshold(multiplier, level));
+  // SWEEP1999.character (CHAR-2) — the era client's threshold (EraClientRules.vitaePanel).
+  const threshold = kind === 'ac1999'
+    ? vitaeCpPoolThreshold1999(multiplier, level)
+    : Math.trunc(vitaeCpPoolThreshold(multiplier, level));
   return Math.max(0, threshold - s.vitaeCpPool);
+}
+
+/** Which client's vitae panel (EraClientRules.vitaePanel). */
+export type VitaePanelKind = 'eor' | 'ac1999';
+
+/**
+ * The 1999 VitaePanel_UpdateFromPlayerDesc @ 0x0054c120's text: its own literals, the penalty
+ * twice, the XP as a plain number (AcString(int), no commas) and " point." / " points." by count.
+ * The leading layout "\n\n" is dropped, as the other 1999 texts' are.
+ */
+export function buildVitaePanelText1999(s: VitaePanelSource): string {
+  const pct = vitaePenaltyPercent(s.vitaePenalty);
+  const xp = vitaeXpRemaining(s, 'ac1999');
+  return `Due to your recent death, you have temporarily lost ${pct}% of your Vitae, or life force.\n\n`
+    + `This means that your health, stamina, mana, and skills are temporarily reduced by ${pct}%.  `
+    + 'A reduction of less than 15% will not hinder you much, but beware losing much more than that.\n\n'
+    + `You will regain 1% of your Vitae once you earn ${xp} more experience${xp === 1 ? ' point.' : ' points.'}`;
 }
 
 /** A resolved string as [before-variable, after-variable] fragments. */
@@ -99,9 +119,10 @@ function fill(fragments: string[], variable: string): string {
  * Build the panel body text exactly as gmVitaeUI::Update assembles it.
  * Numbers use comma grouping (retail PStringBase::InsertCommas semantics).
  */
-export function buildVitaePanelText(s: VitaePanelSource): string {
+export function buildVitaePanelText(s: VitaePanelSource, kind: VitaePanelKind = 'eor'): string {
   const pct = vitaePenaltyPercent(s.vitaePenalty);
   if (pct <= 0) return fill(parts(VITAE_STRING_IDS.full), '');
+  if (kind === 'ac1999') return buildVitaePanelText1999(s);
   const xp = vitaeXpRemaining(s);
   return (
     fill(parts(VITAE_STRING_IDS.vitae), String(pct)) +

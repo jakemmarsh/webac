@@ -132,6 +132,13 @@ export interface LayoutHandle {
    * on subtree renders.
    */
   resizeSubtree?(width: number, height: number): void;
+  /**
+   * UIElement::SetSize on one rendered element (`elementId`'s DOM node): its
+   * box takes the new size and its children reflow per their DAT edge anchors
+   * from the authored size, as resizeSubtree does for the root (a 3-slice
+   * button's middle stretches, its right cap follows the far edge).
+   */
+  resizeElement?(elementId: number, width: number, height: number): void;
   /** Set the text content of an element (rendered via AC bitmap font or fallback). */
   setText(elementId: number, text: string, color?: string): void;
   /** Set the fill fraction (0-1) of a meter/bar element. */
@@ -877,6 +884,39 @@ export class LayoutRenderer {
 
     parent.appendChild(root);
 
+    // CORE.3.d — the edge-anchored reflow of resizeSubtree / resizeElement
+    // (UIElement::UpdateForParentSizeChange @ 00462640, described there).
+    const reflow = (desc: ElementDesc, parentDW: number, parentDH: number, parentNewW: number, parentNewH: number): void => {
+      const parentOrigW = parentNewW - parentDW;
+      const parentOrigH = parentNewH - parentDH;
+      for (const [, child] of desc.children) {
+        const el = domByDesc.get(child);
+        const origX1 = child.x + child.width - 1;
+        const origY1 = child.y + child.height - 1;
+        let x0 = child.x, x1 = origX1, y0 = child.y, y1 = origY1;
+        if (child.leftEdge === 2) x0 = child.x + parentDW;
+        else if (child.leftEdge === 3) x0 = Math.floor(parentNewW / 2) - Math.floor(child.width / 2);
+        else if (child.leftEdge === 4 && parentOrigW > 0) x0 = Math.round(child.x * parentNewW / parentOrigW);
+        if (child.rightEdge === 1) x1 = origX1 + parentDW;
+        else if (child.rightEdge === 3) x1 = Math.floor(parentNewW / 2) - 1 + Math.floor(child.width / 2);
+        else if (child.rightEdge === 4 && parentOrigW > 0) x1 = Math.round((origX1 + 1) * parentNewW / parentOrigW) - 1;
+        if (child.topEdge === 2) y0 = child.y + parentDH;
+        else if (child.topEdge === 3) y0 = Math.floor(parentNewH / 2) - Math.floor(child.height / 2);
+        else if (child.topEdge === 4 && parentOrigH > 0) y0 = Math.round(child.y * parentNewH / parentOrigH);
+        if (child.bottomEdge === 1) y1 = origY1 + parentDH;
+        else if (child.bottomEdge === 3) y1 = Math.floor(parentNewH / 2) - 1 + Math.floor(child.height / 2);
+        else if (child.bottomEdge === 4 && parentOrigH > 0) y1 = Math.round((origY1 + 1) * parentNewH / parentOrigH) - 1;
+        const w = x1 - x0 + 1;
+        const h = y1 - y0 + 1;
+        if (el) {
+          el.style.left = `${x0 * scale}px`;
+          el.style.top = `${y0 * scale}px`;
+          if ((child.incorporationFlags & IncorporationFlags.Width) !== 0) el.style.width = `${w * scale}px`;
+          if ((child.incorporationFlags & IncorporationFlags.Height) !== 0) el.style.height = `${h * scale}px`;
+        }
+        reflow(child, w - child.width, h - child.height, w, h);
+      }
+    };
     const handle: LayoutHandle = {
       root,
       layout,
@@ -921,39 +961,16 @@ export class LayoutRenderer {
         // order (applyRetailPaintOrder), so the nth DOM hit of an id is no
         // longer the nth desc visit — pairing that way swapped the social
         // panes' dividers / button slices onto each other's rects.
-        const reflow = (desc: ElementDesc, parentDW: number, parentDH: number, parentNewW: number, parentNewH: number): void => {
-          const parentOrigW = parentNewW - parentDW;
-          const parentOrigH = parentNewH - parentDH;
-          for (const [, child] of desc.children) {
-            const el = domByDesc.get(child);
-            const origX1 = child.x + child.width - 1;
-            const origY1 = child.y + child.height - 1;
-            let x0 = child.x, x1 = origX1, y0 = child.y, y1 = origY1;
-            if (child.leftEdge === 2) x0 = child.x + parentDW;
-            else if (child.leftEdge === 3) x0 = Math.floor(parentNewW / 2) - Math.floor(child.width / 2);
-            else if (child.leftEdge === 4 && parentOrigW > 0) x0 = Math.round(child.x * parentNewW / parentOrigW);
-            if (child.rightEdge === 1) x1 = origX1 + parentDW;
-            else if (child.rightEdge === 3) x1 = Math.floor(parentNewW / 2) - 1 + Math.floor(child.width / 2);
-            else if (child.rightEdge === 4 && parentOrigW > 0) x1 = Math.round((origX1 + 1) * parentNewW / parentOrigW) - 1;
-            if (child.topEdge === 2) y0 = child.y + parentDH;
-            else if (child.topEdge === 3) y0 = Math.floor(parentNewH / 2) - Math.floor(child.height / 2);
-            else if (child.topEdge === 4 && parentOrigH > 0) y0 = Math.round(child.y * parentNewH / parentOrigH);
-            if (child.bottomEdge === 1) y1 = origY1 + parentDH;
-            else if (child.bottomEdge === 3) y1 = Math.floor(parentNewH / 2) - 1 + Math.floor(child.height / 2);
-            else if (child.bottomEdge === 4 && parentOrigH > 0) y1 = Math.round((origY1 + 1) * parentNewH / parentOrigH) - 1;
-            const w = x1 - x0 + 1;
-            const h = y1 - y0 + 1;
-            if (el) {
-              el.style.left = `${x0 * scale}px`;
-              el.style.top = `${y0 * scale}px`;
-              if ((child.incorporationFlags & IncorporationFlags.Width) !== 0) el.style.width = `${w * scale}px`;
-              if ((child.incorporationFlags & IncorporationFlags.Height) !== 0) el.style.height = `${h * scale}px`;
-            }
-            reflow(child, w - child.width, h - child.height, w, h);
-          }
-        };
         reflow(subtreeRoot, newW - subtreeRoot.width, newH - subtreeRoot.height, newW, newH);
       } : undefined,
+      resizeElement(elementId: number, newW: number, newH: number) {
+        const desc = elementDescs.get(elementId);
+        const el = elements.get(elementId);
+        if (!desc || !el) return;
+        el.style.width = `${newW * scale}px`;
+        el.style.height = `${newH * scale}px`;
+        reflow(desc, newW - desc.width, newH - desc.height, newW, newH);
+      },
 
       setText(elementId: number, text: string, color?: string) {
         const el = textElements.get(elementId) ?? elements.get(elementId);
@@ -1771,8 +1788,13 @@ export class LayoutRenderer {
     desc: OutlineDescLike | null | undefined,
     stateId: number | undefined,
   ): void {
-    const prev = el.querySelector('.layout-text');
-    if (prev) prev.remove();
+    // The element's own label wrappers are its direct children: every one
+    // goes (a label is replaced, never stacked under the next — the 1999 Cast
+    // button's face showed its last two texts at once). With none of its own,
+    // the first nested one goes, as before (a label a caller set into a parent).
+    const own = el.querySelectorAll(':scope > .layout-text');
+    if (own.length > 0) own.forEach((n) => n.remove());
+    else el.querySelector('.layout-text')?.remove();
     const stateProps = statePropsOf(desc, stateId);
     const resting = desc ? restingStateOf(desc) : 0;
     // CORE.17.k.b.b.c — `UIElement_Text::DoFontReset @ 0046a560`:

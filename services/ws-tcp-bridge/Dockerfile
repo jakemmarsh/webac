@@ -32,6 +32,14 @@ COPY packages/shared/src/routines ./packages/shared/src/routines
 COPY packages/shared/src/encoding/Windows1252.ts ./packages/shared/src/encoding/Windows1252.ts
 # mapCoordsText.ts: the shared map-coordinate reader validateRoutine and vtankExport import.
 COPY packages/shared/src/mapCoordsText.ts ./packages/shared/src/mapCoordsText.ts
+# RefusalTextSafety.ts: clientRefusal.ts drops a refusal text that still carries a name; it reads the
+# shared refusal vocabulary (WeenieError texts, attempt-failed verbs, skill names) from these files.
+COPY packages/shared/src/util/RefusalTextSafety.ts ./packages/shared/src/util/RefusalTextSafety.ts
+COPY packages/shared/src/combat/WeenieErrorText.ts ./packages/shared/src/combat/WeenieErrorText.ts
+COPY packages/shared/src/combat/WeenieErrorWithStringText.ts ./packages/shared/src/combat/WeenieErrorWithStringText.ts
+COPY packages/shared/src/inventory/InventoryRequest.ts ./packages/shared/src/inventory/InventoryRequest.ts
+COPY packages/shared/src/inventory/objectName.ts ./packages/shared/src/inventory/objectName.ts
+COPY packages/shared/src/ace-enums.ts ./packages/shared/src/ace-enums.ts
 # The hosted connector's /mcp serves the ac-agent tool table (tools/ac-agent; no Playwright in it).
 COPY packages/renderer/src/agent/format.ts ./packages/renderer/src/agent/format.ts
 COPY packages/renderer/src/agent/gear.ts ./packages/renderer/src/agent/gear.ts

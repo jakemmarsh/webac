@@ -128,6 +128,9 @@ export const CLIENT_NOTICES = Object.freeze({
   researchNeedsMagicMode: ui('researchNeedsMagicMode', 'spew', 'You must first enter magic mode to test spell formulae', '1999 CreateSpellPanel_ListenToMessage @ 0x5ab784 (string 0x60e93c), UI vtable +0x114'),
   researchNoTarget: ui('researchNoTarget', 'spew', 'You must first select a target for the spell', '1999 CreateSpellPanel_ListenToMessage @ 0x5ab7cb (string 0x613910), UI vtable +0x114'),
   researchNotEnoughComponent: ui('researchNotEnoughComponent', 'spew', 'You do not have enough of this component', '1999 FormulaRow drop @ 0x5ac723 (string 0x613b7c), UI vtable +0x114'),
+  // SWEEP1999.input CM-3 — a single click on a non-attackable object in melee / missile mode
+  // (eraClientRules().combatClickSelect 'attackableOnly'; the end-of-retail exe has no such string).
+  combatSelectRefused: ui('combatSelectRefused', 'spew', 'You cannot select that while in combat mode', '1999 PanelUI_HandleMouseDownOnObject @ 0x004f83c0, UI vtable +0x114'),
   // CORE.17.k.b.b.a.g.c — gmSpellcastingUI::Cast @ 004c6050 with no selected shortcut.
   castNoSpellSelected: ui('castNoSpellSelected', 'spew', 'You must select a spell to cast', 'gmSpellcastingUI::Cast @ 004c6050, 0x1a'),
 

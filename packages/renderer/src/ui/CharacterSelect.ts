@@ -132,14 +132,17 @@ export class CharacterSelectScreen {
    *   4. otherwise list item 0, captured before the sort (server order).
    * An empty set selects nothing.
    */
-  selectDefault(previousId?: string): void {
+  selectDefault(previousId?: string, pendingSelectable = true): void {
     this._selectedIndex = -1;
     if (this.characters.length === 0) return;
+    // 1999 (EraWorldRules.pendingDeleteRowText): a "Temporarily Unavailable" row is never selected.
+    const selectable = (c: CharacterSlot): boolean => pendingSelectable || !c.deleteTime;
+    const prev = previousId !== undefined ? this.characters.find(c => c.id === previousId) : undefined;
     const pick =
-      (previousId !== undefined ? this.characters.find(c => c.id === previousId) : undefined)
+      (prev && selectable(prev) ? prev : undefined)
       ?? this.arrivalOrder.find(c => !c.deleteTime)
-      ?? this.arrivalOrder[0];
-    this._selectedIndex = this.characters.indexOf(pick);
+      ?? (pendingSelectable ? this.arrivalOrder[0] : undefined);
+    this._selectedIndex = pick ? this.characters.indexOf(pick) : -1;
   }
 
   /** Clear the current selection. */
@@ -159,12 +162,19 @@ export class CharacterSelectScreen {
    *      stable partition, so greyed rows stay name-sorted after the rest.
    * The selection follows its character.
    */
-  sortRetailOrder(): void {
+  sortRetailOrder(pendingRowText: string | null = null): void {
     const selectedId = this.selectedCharacter?.id;
     const byName = (a: CharacterSlot, b: CharacterSlot): number =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
     const sorted = [...this.characters].sort(byName);
-    this.characters = [...sorted.filter(c => !c.deleteTime), ...sorted.filter(c => !!c.deleteTime)];
+    if (pendingRowText !== null) {
+      // 1999: IntroUI_Update sorts the rows by their text, and a pending row's text is
+      // "Temporarily Unavailable" (kb client-behavior/char-select-pending-delete): no partition.
+      const text = (c: CharacterSlot): string => (c.deleteTime ? pendingRowText : c.name);
+      this.characters = [...this.characters].sort((a, b) => (text(a) < text(b) ? -1 : text(a) > text(b) ? 1 : 0));
+    } else {
+      this.characters = [...sorted.filter(c => !c.deleteTime), ...sorted.filter(c => !!c.deleteTime)];
+    }
     if (selectedId !== undefined) {
       this._selectedIndex = this.characters.findIndex(c => c.id === selectedId);
     }

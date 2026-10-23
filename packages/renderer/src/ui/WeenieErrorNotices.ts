@@ -31,6 +31,7 @@
  */
 import { chatColorFor, weenieErrorTextType, WEENIE_ERROR_TEXT_TYPE_SPEW, type WeenieErrorSink } from '@ac/shared';
 import type { NoticeSurface } from './ClientNotices.js';
+import type { FailureEventTable } from './FailureEventText1999.js';
 
 export interface WeenieErrorDelivery {
   readonly sink: WeenieErrorSink;
@@ -42,8 +43,25 @@ export interface WeenieErrorDelivery {
 /**
  * Deliver `text` for `code` through its retail sink. A null / empty text, or
  * a code the retail switch has no arm for, prints nothing (sink 'none').
+ *
+ * `table` is the era client's own failure switch when it is not end of
+ * retail's (eraClientRules().failureEventText; SWEEP1999.messages HC-6): the
+ * arm's type and text replace `text`, and a code with no arm prints nothing.
+ * A 0x028B WithString caller passes no table: the 1999 client had no 0x28B
+ * case at all, but the AC1999 server meant those lines (its own TODO), so
+ * they keep end of retail's switch (docs/ac1999-support.md).
  */
-export function deliverWeenieError(ui: NoticeSurface, code: number, text: string | null): WeenieErrorDelivery {
+export function deliverWeenieError(ui: NoticeSurface, code: number, text: string | null, table: FailureEventTable | null = null): WeenieErrorDelivery {
+  if (table) {
+    const arm = table.get(code);
+    if (!arm) return { sink: 'none', type: null, text: null };
+    if (arm.type === WEENIE_ERROR_TEXT_TYPE_SPEW) {
+      ui.displayErrorText(arm.text);
+      return { sink: 'spew', type: arm.type, text: arm.text };
+    }
+    ui.addSystemMessage(arm.text, chatColorFor(arm.type), arm.type);
+    return { sink: 'chat', type: arm.type, text: arm.text };
+  }
   const type = weenieErrorTextType(code);
   if (!text || type === null) return { sink: 'none', type, text };
   if (type === WEENIE_ERROR_TEXT_TYPE_SPEW) {

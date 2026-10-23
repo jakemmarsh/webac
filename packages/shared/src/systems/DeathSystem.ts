@@ -21,6 +21,19 @@ export function vitaeCpPoolThreshold(vitaeMultiplier: number, deathLevel: number
   return (Math.pow(deathLevel, 2.5) * 2.5 + 20.0) * Math.pow(vitaeMultiplier, 5.0) + 0.5;
 }
 
+/** The 1999 client's cap on one 1% step (0x30d4 at 0x005f0610; the AC1999 server's MAX_VITAE_COST). */
+export const VITAE_COST_CAP_1999 = 12500;
+
+/**
+ * SWEEP1999.character (CHAR-2) — the 1999 client's VitaeCPPoolThreshold @ 0x005f0610:
+ * `min(trunc((level^2 x 5 + 20) x vitae^5 + 0.5), 12500)`. The AC1999 server's
+ * VitaeSystem::VitaeCPPoolThreshold (PhatSDK/VitaeSystem.cpp) is the same, so the panel's number
+ * is the one the server regains at. Already truncated.
+ */
+export function vitaeCpPoolThreshold1999(vitaeMultiplier: number, deathLevel: number): number {
+  return Math.min(Math.trunc((deathLevel * deathLevel * 5 + 20) * Math.pow(vitaeMultiplier, 5) + 0.5), VITAE_COST_CAP_1999);
+}
+
 export class VitaeSystem {
   private _vitaePenalty = 0;
 

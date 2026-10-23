@@ -30,7 +30,7 @@ describe('inscriptions', () => {
   });
 
   it('HandleInscriptionLosingFocus: sends only a change; empty restores "<Inscribe here>"; text is signed by the player', () => {
-    expect(inscriptionCommit('', blank, 'Me')).toEqual({ send: null, view: { visible: true, text: INSCRIBE_HERE, signature: '', scribe: '', inscription: '' } });
+    expect(inscriptionCommit('', blank, 'Me')).toEqual({ send: null, view: { visible: true, text: INSCRIBE_HERE, signature: '', scribe: '', inscription: '', placeholder: true } });
     expect(inscriptionCommit('Hello', mine, 'Me').send).toBeNull();
     const fresh = inscriptionCommit('Mine now', blank, 'Me');
     expect(fresh.send).toBe('Mine now');

@@ -18,7 +18,6 @@
     "verify-corpse-mapcoord.ts",
     "verify-death-no-double-chat.ts",
     "verify-death-notification-wire-format.ts",
-    "verify-defender-notification-diagnostic.ts",
     "verify-disable-distance-fog.ts",
     "verify-disable-weather-wired.ts",
     "verify-emote-squelch.ts",

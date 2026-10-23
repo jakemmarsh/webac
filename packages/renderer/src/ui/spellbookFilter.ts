@@ -88,6 +88,31 @@ export function spellbookOrder<T extends { id: number }>(spells: readonly T[], d
 }
 
 /**
+ * The 1999 spellbook's order (SWEEP1999.magic MAG-8): SpellbookPanel_AddSpell
+ * @ 0x5169d0 inserts each new spell before the first row whose name is >= its
+ * own (a byte-wise compare), so the list is in name order and a spell of the
+ * same name goes before the one already there.
+ */
+export function spellbookNameOrder<T extends { name: string }>(spells: readonly T[]): T[] {
+  const out: T[] = [];
+  for (const s of spells) {
+    let at = out.findIndex((r) => byteCompare(s.name, r.name) <= 0);
+    if (at < 0) at = out.length;
+    out.splice(at, 0, s);
+  }
+  return out;
+}
+
+function byteCompare(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const d = a.charCodeAt(i) - b.charCodeAt(i);
+    if (d !== 0) return d;
+  }
+  return a.length - b.length;
+}
+
+/**
  * SWEEP1006B.magic-casting.spellbook-delete-confirmation-text-invented —
  * gmSpellbookUI::DeleteSpell @ 0048bd50 sprintf's the plain spell name
  * (ClientMagicSystem::GetSpellName) into the .rdata 0x7a3ea8 format

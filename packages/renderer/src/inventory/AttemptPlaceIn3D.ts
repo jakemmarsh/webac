@@ -40,6 +40,7 @@
  */
 
 import { ItemType, ObjectDescriptionFlag } from '@ac/shared';
+import { EOR_PLACEMENT_TEXT, type PlacementText } from './ItemHolderPlacement.js';
 
 export const PLACE_IN_3D_STRINGS = {
   mustPickUp: 'You must first pick up the %s',
@@ -107,6 +108,13 @@ export interface PlaceIn3DContext {
   playerOnGround: boolean;
   /** ClientUISystem::groundObject — the open external container (0 = none). */
   groundObjectId: number;
+  /** The era client's merge refusal wording (end of retail's when absent; INV-11). */
+  text?: PlacementText;
+  /**
+   * EraClientRules.vendorDropNeedsWholeStack (INV-12). False on 1999: ItemHolder_AttemptPlaceIn3D
+   * hands a vendor drop to 0x004d00d0 with no split test. Absent = true (end of retail).
+   */
+  vendorDropNeedsWholeStack?: boolean;
 }
 
 export type PlaceIn3DAction =
@@ -140,13 +148,17 @@ export interface PlaceIn3DOutcome {
  * has room. Returns the refusal line, null when legal, or undefined when the
  * pair is not two stacks (silent — nothing is said).
  */
-export function mergeAttemptRefusal(item: Pick<PlaceIn3DItem, 'id' | 'inTrade' | 'weenieClassId' | 'maxStackSize'>, target: Pick<PlaceIn3DTarget, 'id' | 'inTrade' | 'weenieClassId' | 'stackSize' | 'maxStackSize'>): string | null | undefined {
+export function mergeAttemptRefusal(
+  item: Pick<PlaceIn3DItem, 'id' | 'inTrade' | 'weenieClassId' | 'maxStackSize'>,
+  target: Pick<PlaceIn3DTarget, 'id' | 'inTrade' | 'weenieClassId' | 'stackSize' | 'maxStackSize'>,
+  text: PlacementText = EOR_PLACEMENT_TEXT,
+): string | null | undefined {
   if (item.id === target.id) return undefined;
   if (!(item.maxStackSize > 1) || !(target.maxStackSize > 1)) return undefined;
   if (item.inTrade || target.inTrade) return PLACE_IN_3D_STRINGS.mergeWhileTraded;
-  if (item.weenieClassId !== target.weenieClassId) return PLACE_IN_3D_STRINGS.mergeDifferentTypes;
+  if (item.weenieClassId !== target.weenieClassId) return text.mergeDifferentTypes;
   if (target.stackSize < target.maxStackSize) return null;
-  return PLACE_IN_3D_STRINGS.mergeStackFull;
+  return text.mergeStackFull;
 }
 
 /** The ItemHolder::AttemptPlaceIn3D decision (see the module header). */
@@ -169,7 +181,7 @@ export function attemptPlaceIn3D(
     return done({ kind: 'none' });
   }
   if (target) {
-    const refusal = mergeAttemptRefusal(item, target);
+    const refusal = mergeAttemptRefusal(item, target, ctx.text);
     if (refusal === null) {
       const tgtSize = Math.max(1, target.stackSize || 1);
       const amount = Math.min(Math.max(1, ctx.dragAmount), target.maxStackSize - tgtSize);
@@ -178,7 +190,7 @@ export function attemptPlaceIn3D(
     if (refusal) notices.push(refusal);
     const flags = target.objectDescFlags >>> 0;
     if (flags & ObjectDescriptionFlag.Vendor) {
-      if (!ctx.splitPartial) return done({ kind: 'sell' });
+      if (!ctx.splitPartial || ctx.vendorDropNeedsWholeStack === false) return done({ kind: 'sell' });
       notices.push(PLACE_IN_3D_STRINGS.mustSplitToSell);
       return done({ kind: 'none' });
     }

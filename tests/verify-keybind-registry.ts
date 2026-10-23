@@ -113,10 +113,11 @@ describe('KeybindRegistry', () => {
     expect(r.actionsForClass(ActionClass.Movement).length).toBe(14);
     expect(r.actionsForClass(ActionClass.Camera).length).toBe(12);
     expect(r.actionsForClass(ActionClass.Combat).length).toBe(32);
-    expect(r.actionsForClass(ActionClass.UI).length).toBe(103);
+    // 103 ActionMap UI commands + 1999's Show/Hide Spell Research Page (KeybindClientActions).
+    expect(r.actionsForClass(ActionClass.UI).length).toBe(104);
     expect(r.actionsForClass(ActionClass.CharacterSettings).length).toBe(48);
     expect(r.actionsForClass(ActionClass.Emotes).length).toBe(87);
-    expect(r.actions().length).toBe(296);
+    expect(r.actions().length).toBe(297);
   });
 
   it('movement translation maps (re)bound keys to the canonical movement code', () => {

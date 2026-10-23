@@ -30,6 +30,7 @@ import type { RouteCutOff, RouteGap } from './cellPath.js';
 import { CELL_LENGTH, mapCoordinateText, mapCoordsOfCell } from '../ui/MapMarkers.js';
 import { IN_TOWN_UNITS, nearestTownOf, townInName } from './towns.js';
 import { USEABLE_NO, isUseable, isUseableTargeted } from '../input/UseObject.js';
+import { PAPERDOLL_WEARABLE_MASK as WEARABLE_BITS } from '../inventory/PaperdollDragObject.js';
 import { SELF_TARGETABLE_TYPE_MASK } from '../ui/SpellShortcutBar.js';
 import type { PlanSpell, RoutineProfile } from '@ac/shared';
 import { parseMapCoordsText, isPartialMapCoordsText, missileShot, getProjectileSpeed, DEFAULT_MAX_VELOCITY, MATERIAL_NAMES, EquipMask, WeenieError, weenieErrorText, type MissileShot } from '@ac/shared';
@@ -8724,10 +8725,18 @@ export class AgentApi {
     // the wield (CPlayerSystem::AutoWield, AutoWield.ts), so the server refused the rest ("You must remove your Chainmail
     // Girth to wield Scalemail Shirt") with the first already in the pack: Bulwark's Covenant Pauldrons came off that way,
     // unsaid, and his `unequip` of them a moment later answered "is not worn" (stream, 2026-10-18 03:29:45Z).
+    // Armor and clothing go on through AutoWear (the host's wield runs the double-click's AutoSort), which takes
+    // nothing off: a worn piece whose ClothingPriority overlaps refuses the wear ("You must remove your Breeches to
+    // wear that"). So every such piece comes off first, one or more (BUG.eor-autowear-priority-pass). Without a
+    // coverage sent, the slot overlap stands in, as before.
     const vl = it?.validLocations ?? 0;
-    const covering = vl & BODY_BITS ? inv.filter((i) => i.where === 'equipped' && i.guid !== g && ((i.mask ?? 0) & vl) !== 0) : [];
+    const cov = it?.coverage ?? 0;
+    const byCoverage = (vl & WEARABLE_BITS) !== 0 && cov !== 0;
+    const covering = byCoverage
+      ? inv.filter((i) => i.where === 'equipped' && i.guid !== g && ((i.coverage ?? 0) & cov) !== 0)
+      : vl & BODY_BITS ? inv.filter((i) => i.where === 'equipped' && i.guid !== g && ((i.mask ?? 0) & vl) !== 0) : [];
     const tookOff: string[] = [];
-    if (covering.length >= 2) {
+    if (covering.length >= (byCoverage ? 1 : 2)) {
       for (const h of covering) {
         const off = await this.unequip(h.guid);
         if (!off.ok) return { ok: false, message: [`not equipped: ${name}: it is worn over ${covering.map((c) => c.name).join(', ')}, and taking ${h.name} off failed: ${off.message}`, ...tookOff.map((t) => `  (${t})`)].join('\n') };

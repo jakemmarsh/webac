@@ -25,6 +25,11 @@ export interface UserBindingValue {
 export interface ActionMapValue {
   unknownByte: number;
   unknownInt: number;
+  /**
+   * The input toggle type (retail ActionMapValue::m_eToggleType, what ActionMap::GetToggleType
+   * @ 00685350 returns): 1 hold, 2 toggle, 3 press (0 reads as 3, FireActionEvent @ 00432720),
+   * 4 repeat while held. ACE names this word UnknownInt2; its `ToggleType` is 0 in every EoL entry.
+   */
   unknownInt2: number;
   toggleType: number;
   userBindingData: UserBindingValue;

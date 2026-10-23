@@ -46,7 +46,7 @@
  *    cell is deleted — the split-off stack replaces the whole one.
  */
 
-import { getAppropriateName, vendorSellRejectionReason, vendorBuyPrice, unitValueOf, type InventoryItem } from '@ac/shared';
+import { getAppropriateName, vendorSellRejectionReason, vendorBuyPrice, unitValueOf, PROMISSORY_NOTE_RATES_EOR, type InventoryItem, type PromissoryNoteRates } from '@ac/shared';
 import { uiItemDragAcceptState } from './UIItemDragAccept.js';
 
 /** ITEM_TYPE::TYPE_CONTAINER. */
@@ -108,14 +108,21 @@ export function vendorRemovingFromListText(appropriateName: string): string {
 /** InqAcceptability's result codes. */
 export const VENDOR_ACCEPTABILITY = { ok: 0, wrongType: 1, noValue: 2, tooCheap: 3, tooValuable: 4 } as const;
 
-/** VendorProfile::InqAcceptability @ 005d1a90. A missing profile refuses (1). */
+/**
+ * VendorProfile::InqAcceptability @ 005d1a90. A missing profile refuses (1).
+ * `rule` 'ac1999' is the 1999 client.exe's VendorProfile_InqAcceptability
+ * @ 0x005e1920 (VTE-6): no Retained test and no trade-note exemption from
+ * max_value (EraClientRules.vendorAcceptability).
+ */
 export function vendorInqAcceptability(
   item: Pick<VendorSellDragItem, 'itemType' | 'value' | 'stackSize' | 'objectDescFlags'>,
   profile: VendorSellProfile | null,
+  rule: 'eor' | 'ac1999' = 'eor',
 ): number {
   if (!profile) return VENDOR_ACCEPTABILITY.wrongType;
   const type = (item.itemType ?? 0) >>> 0;
-  if ((type & (profile.itemTypes >>> 0)) === 0 || ((item.objectDescFlags ?? 0) & BF_RETAINED) !== 0) {
+  const retained = rule === 'eor' && ((item.objectDescFlags ?? 0) & BF_RETAINED) !== 0;
+  if ((type & (profile.itemTypes >>> 0)) === 0 || retained) {
     return VENDOR_ACCEPTABILITY.wrongType;
   }
   const value = Math.max(0, Math.floor(item.value ?? 0)) >>> 0;
@@ -125,7 +132,7 @@ export function vendorInqAcceptability(
   const max = profile.maxValue | 0;
   const min = profile.minValue | 0;
   if (max !== -1 && max < (unit | 0)) {
-    return (type & TYPE_PROMISSORY_NOTE) !== 0 ? VENDOR_ACCEPTABILITY.ok : VENDOR_ACCEPTABILITY.tooValuable;
+    return rule === 'eor' && (type & TYPE_PROMISSORY_NOTE) !== 0 ? VENDOR_ACCEPTABILITY.ok : VENDOR_ACCEPTABILITY.tooValuable;
   }
   if (min !== -1 && (unit | 0) < min) return VENDOR_ACCEPTABILITY.tooCheap;
   return VENDOR_ACCEPTABILITY.ok;
@@ -176,18 +183,19 @@ export function vendorSellDragItemAcceptable(
   item: VendorSellDragItem | null,
   profile: VendorSellProfile | null,
   silent: boolean,
+  rule: 'eor' | 'ac1999' = 'eor',
 ): { acceptable: boolean; notice: string | null } {
   if (!item) return { acceptable: false, notice: null };
   if (item.ownedByPlayer === false) return { acceptable: false, notice: silent ? null : VENDOR_SELL_STRINGS.notCarrying };
   if (vendorContainedCounts(item).items > 0) return { acceptable: true, notice: null };
-  const code = vendorInqAcceptability(item, profile);
+  const code = vendorInqAcceptability(item, profile, rule);
   if (code === VENDOR_ACCEPTABILITY.ok) return { acceptable: true, notice: null };
   return { acceptable: false, notice: silent ? null : vendorAcceptabilityNotice(code) };
 }
 
 /** OnItemListDragOver @ 004c2300: 0x10000040 / 0x10000041; no object / an alias → null. */
-export function vendorSellDragAcceptState(item: VendorSellDragItem | null, profile: VendorSellProfile | null, isAlias = false): number | null {
-  return uiItemDragAcceptState(item?.guid ?? 0, () => vendorSellDragItemAcceptable(item, profile, true).acceptable, isAlias);
+export function vendorSellDragAcceptState(item: VendorSellDragItem | null, profile: VendorSellProfile | null, isAlias = false, rule: 'eor' | 'ac1999' = 'eor'): number | null {
+  return uiItemDragAcceptState(item?.guid ?? 0, () => vendorSellDragItemAcceptable(item, profile, true, rule).acceptable, isAlias);
 }
 
 /** The objects AddItemToSell lists (each re-listed at the end) and the notices it shows. */
@@ -197,10 +205,10 @@ export interface VendorSellAddPlan {
 }
 
 /** AddItemToSell(id) — gmVendorUI::AddItem(pos -1, replace, walk, no acceptability check). */
-export function planVendorAddItemToSell(item: VendorSellDragItem, profile: VendorSellProfile | null): VendorSellAddPlan {
+export function planVendorAddItemToSell(item: VendorSellDragItem, profile: VendorSellProfile | null, rule: 'eor' | 'ac1999' = 'eor'): VendorSellAddPlan {
   const plan: VendorSellAddPlan = { guids: [], notices: [] };
   const add = (obj: VendorSellDragItem, walk: boolean, checkAcceptable: boolean): void => {
-    if (checkAcceptable && vendorInqAcceptability(obj, profile) !== VENDOR_ACCEPTABILITY.ok) return;
+    if (checkAcceptable && vendorInqAcceptability(obj, profile, rule) !== VENDOR_ACCEPTABILITY.ok) return;
     const counts = vendorContainedCounts(obj);
     if (counts.items === 0 && counts.containers === 0) {
       const at = plan.guids.indexOf(obj.guid);
@@ -234,13 +242,14 @@ export function planVendorSellDrop(
   profile: VendorSellProfile | null,
   splitWhole: boolean,
   splitSize: number,
+  rule: 'eor' | 'ac1999' = 'eor',
 ):
   | { kind: 'refused'; notice: string | null }
   | { kind: 'add'; plan: VendorSellAddPlan }
   | { kind: 'split'; pending: PendingVendorSplit; notice: string; plan: VendorSellAddPlan } {
-  const verdict = vendorSellDragItemAcceptable(item, profile, false);
+  const verdict = vendorSellDragItemAcceptable(item, profile, false, rule);
   if (!verdict.acceptable || !item) return { kind: 'refused', notice: verdict.notice };
-  const plan = planVendorAddItemToSell(item, profile);
+  const plan = planVendorAddItemToSell(item, profile, rule);
   if (splitWhole) return { kind: 'add', plan };
   return {
     kind: 'split',
@@ -289,6 +298,8 @@ export interface VendorSellRow {
   unitValue?: number;
   priceRate?: number;
   pricing?: 'vendorSells' | 'vendorBuys';
+  /** A trade note this vendor issued (VTE-1: ShopSystem_BuyPrice's isIssuer); absent = true. */
+  noteIssuer?: boolean;
   burden: number;
   stackSize?: number;
   itemType?: number;
@@ -316,6 +327,7 @@ export function buildVendorSellRows(
   owned: Iterable<InventoryItem>,
   merchandiseItemTypes: number,
   buyRate: number,
+  notes: VendorNotePricing = { rates: PROMISSORY_NOTE_RATES_EOR, vendorWcid: 0, issuerOf: () => undefined },
 ): VendorSellRow[] {
   const rows: VendorSellRow[] = [];
   const seen = new Set<number>();
@@ -324,6 +336,9 @@ export function buildVendorSellRows(
     seen.add(it.id);
     const rejection = vendorSellRejectionReason({ value: it.value ?? 0, itemType: it.itemType ?? 0 }, { merchandiseItemTypes });
     if (rejection) continue;
+    // VTE-1 — VendorProfile_VendorBuyPrice @ 0x005e19c0 (1999): a note pays the issuer rate when its
+    // issuing vendor's wcid is this vendor's; with no issuer stamped it is a foreign note.
+    const noteIssuer = noteIsFromVendor(notes, it.id);
     rows.push({
       guid: it.id,
       weenieClassId: it.weenieClassId ?? 0,
@@ -332,10 +347,11 @@ export function buildVendorSellRows(
       pluralName: it.pluralName,
       stackSize: it.stackSize,
       itemType: it.itemType,
-      price: vendorBuyPrice({ value: it.value ?? 0, stackSize: it.stackSize, itemType: it.itemType ?? 0 }, buyRate),
+      price: vendorBuyPrice({ value: it.value ?? 0, stackSize: it.stackSize, itemType: it.itemType ?? 0 }, buyRate, notes.rates, noteIssuer),
       unitValue: unitValueOf({ value: it.value ?? 0, stackSize: it.stackSize }),
       priceRate: buyRate,
       pricing: 'vendorBuys',
+      noteIssuer,
       burden: it.burden ?? 0,
       iconDid: it.iconDid,
       iconOverlayDid: it.iconOverlayDid,
@@ -350,4 +366,21 @@ export function buildVendorSellRows(
     });
   }
   return rows;
+}
+
+/** The trade-note inputs of the vendor's prices (VTE-1). */
+export interface VendorNotePricing {
+  /** The era client's rates (EraClientRules.promissoryNoteRates). */
+  rates: PromissoryNoteRates;
+  /** The open vendor's wcid. */
+  vendorWcid: number;
+  /** A note's issuing-vendor wcid (VendorsClassId), or undefined when none was stamped. */
+  issuerOf(guid: number): number | undefined;
+}
+
+/** isIssuer for `guid`: its stamped issuer is the vendor (a vendor wcid of 0 is unknown and never matches). */
+export function noteIsFromVendor(notes: VendorNotePricing, guid: number): boolean {
+  if (notes.rates.issuerBuy === notes.rates.foreignBuy) return true;
+  const issuer = notes.issuerOf(guid);
+  return notes.vendorWcid !== 0 && issuer !== undefined && issuer === notes.vendorWcid;
 }

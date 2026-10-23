@@ -40,6 +40,7 @@ import { bridgeRefusalFromClose } from '../BridgeRefusal.js';
 import { SocketHandover, type HandoverResult, type HandoverSocket } from '../SocketHandover.js';
 import { Adapter1999, Group1999 } from './Adapter1999.js';
 import { codecs1999 } from './codecs/index.js';
+import { parseCharSelectNews } from './codecs/CharSelect1999.js';
 import { buildLoginBody1999, readGrant1999 } from './Login1999.js';
 import { ThreadStallClock, silenceIsOwnStall, type LinkSample } from '../ThreadStall.js';
 import {
@@ -590,6 +591,12 @@ export class Connection1999 implements NetConnection {
     this.grantedAt = this.lastAckAt = Date.now();
     this.stopLoginTimer();
     this.sendControl(F1999.Connect | F1999.Checksum);
+    // The world clock (PW-1): GameTime_UseTime @ 0x4aedb0 runs worldTime = Timer::cur_time +
+    // clock_offset + time_zero_start_delta, the delta being this grant's second f64
+    // (Net_RecvLogonAccept @ 0x418550; the AC1999 server writes time(NULL) − its world epoch,
+    // GameTime::WorldClockDelta). The zero-payload ServerSwitch parks clock_offset at −cur_time,
+    // so the clock is the delta plus the time since now. An anchor: it replaces any earlier value.
+    this.emit({ type: 'timeSync', data: grant.worldClockDelta, clockAnchor: true });
     this.emit({ type: 'handshakeComplete' });
   }
 
@@ -665,10 +672,10 @@ export class Connection1999 implements NetConnection {
     // Option headers lead the body in a fixed order (Packet1999 optionBytes1999); fragments follow.
     let o = HEADER_SIZE_1999;
     if (h.flags & F1999.AckSequence) this.onServerAck(v.getUint32(o, true));
-    if (h.flags & F1999.TimeUpdate) {
-      const at = o + (h.flags & F1999.AckSequence ? 4 : 0);
-      this.emit({ type: 'timeSync', data: v.getFloat64(at, true) });
-    }
+    // The 0x1000000 TimeUpdate header (GDLE's time(0) − 936144000 clock, every 20 s) is skipped, not
+    // a clock: the 1999 dispatcher has no branch for it (Server NetworkDefs.h BT_TIMEUPDATE); the
+    // world clock is the grant's (onGrant). Feeding it put the sky 310 game-years and 0.685 of a
+    // day off the 1999 client's (PW-1).
     o += optionBytes1999(h.flags);
     if (h.flags & F1999.Referral) {
       for (const f of readFragments1999(b.subarray(o))) this.onFragment(f);
@@ -741,6 +748,7 @@ export class Connection1999 implements NetConnection {
     if (msg.type === 'direct') {
       switch (msg.opcode) {
         case GameMessageOpcode.CharacterList: this.emit({ type: 'characterList', data: msg.payload }); break;
+        case GameMessageOpcode.CharSelectNews: this.emit({ type: 'charSelectNews', data: parseCharSelectNews(msg.payload) }); break;
         case GameMessageOpcode.CharacterError: {
           const code = msg.payload.length >= 4 ? new DataView(msg.payload.buffer, msg.payload.byteOffset).getUint32(0, true) : 0;
           this.emit({ type: 'error', error: `Server: ${characterErrorMessage(code)}`, characterError: code, loginRetryScheduled: false });

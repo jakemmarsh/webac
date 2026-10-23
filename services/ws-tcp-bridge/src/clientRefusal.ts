@@ -11,9 +11,15 @@
  * pattern-checked string; `text` is the page's template (names already '_', no
  * digit allowed: numbers are '#'), so a name or a typed number never reaches the log
  * through this route. Unknown fields are dropped.
+ *
+ * TELEMETRY.refusal-name-safety (defence in depth): build 1e71a1abb705's pages sent other players' names in
+ * server texts ("Reemer has given you permission to loot his or her kills."). A text that still carries a
+ * capitalized word outside the shared template vocabulary, a quoted string or a speech shape
+ * (RefusalTextSafety.textCarriesUnknownWord) is dropped here; the event keeps its code and context.
  */
 import { TRACE_PATTERN, lateField } from './clientPreworld.js';
 import { eidField } from './eventIds.js';
+import { textCarriesUnknownWord } from '../../../packages/shared/src/util/RefusalTextSafety.js';
 
 export const REFUSAL_OUTCOMES = ['refusal'] as const;
 export const REFUSAL_SOURCES = ['client', 'server'] as const;
@@ -24,6 +30,12 @@ export const REFUSAL_CODE = /^(we:0x[0-9a-f]{1,8}|[ct]:[0-9a-f]{8})$/;
 /** The page's template: printable ASCII without a digit, at most 120 characters. */
 export const REFUSAL_TEXT = /^[\x20-\x2f\x3a-\x7e]{1,120}$/;
 const SESSION_MS = 7 * 24 * 3600_000;
+/** TELEMETRY.refusal-context — the pending inventory request's kind (renderer RefusalTemplates.ts). */
+export const REFUSAL_PENDING = ['merge', 'split', 'move', 'pick_up', 'put_in_container', 'drop', 'wield', 'shop_event', 'give'] as const;
+/** Where the selection is. */
+export const REFUSAL_SELECTION = ['none', 'self', 'pack', 'worn', 'world', 'unknown'] as const;
+/** BUG.cast-flood-remaining — what pressed Cast (renderer RefusalTemplates.ts CAST_INPUTS). */
+export const REFUSAL_CAST_INPUT = ['key', 'mouse', 'agent'] as const;
 
 export interface ClientRefusalEvent {
   outcome: 'refusal';
@@ -42,6 +54,33 @@ export interface ClientRefusalEvent {
   count: number | null;
   first: boolean | null;
   windowMs: number | null;
+  /** TELEMETRY.refusal-context: present only when the page sent a valid value. */
+  pending?: typeof REFUSAL_PENDING[number];
+  pendingMs?: number;
+  spellTargetType?: number;
+  selection?: typeof REFUSAL_SELECTION[number];
+  selectionType?: number;
+  prevSelection?: typeof REFUSAL_SELECTION[number];
+  prevSelectionType?: number;
+  selectionGoneMs?: number;
+  castInput?: typeof REFUSAL_CAST_INPUT[number];
+  castGapMs?: number;
+}
+
+/** The context fields, each kept only when valid (closed tokens, bounded numbers). */
+function refusalContextFields(b: Record<string, unknown>): Partial<ClientRefusalEvent> {
+  const out: Partial<ClientRefusalEvent> = {};
+  const pending = pick(b.pending, REFUSAL_PENDING); if (pending) out.pending = pending;
+  const pendingMs = uint(b.pendingMs, SESSION_MS); if (pendingMs !== null) out.pendingMs = pendingMs;
+  const stt = uint(b.spellTargetType, 0xffffffff); if (stt !== null) out.spellTargetType = stt;
+  const sel = pick(b.selection, REFUSAL_SELECTION); if (sel) out.selection = sel;
+  const selT = uint(b.selectionType, 0xffffffff); if (selT !== null) out.selectionType = selT;
+  const prev = pick(b.prevSelection, REFUSAL_SELECTION); if (prev) out.prevSelection = prev;
+  const prevT = uint(b.prevSelectionType, 0xffffffff); if (prevT !== null) out.prevSelectionType = prevT;
+  const gone = uint(b.selectionGoneMs, SESSION_MS); if (gone !== null) out.selectionGoneMs = gone;
+  const castInput = pick(b.castInput, REFUSAL_CAST_INPUT); if (castInput) out.castInput = castInput;
+  const castGap = uint(b.castGapMs, SESSION_MS); if (castGap !== null) out.castGapMs = castGap;
+  return out;
 }
 
 function pick<T extends string>(v: unknown, allowed: readonly T[]): T | null {
@@ -52,6 +91,12 @@ function match(v: unknown, re: RegExp): string | null {
 }
 function uint(v: unknown, max: number): number | null {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= max ? v : null;
+}
+
+/** The page's template, or null when it isn't one or might carry a name. */
+export function refusalText(v: unknown): string | null {
+  const t = match(v, REFUSAL_TEXT);
+  return t !== null && !textCarriesUnknownWord(t) ? t : null;
 }
 
 export function isRefusalOutcome(v: unknown): boolean {
@@ -77,12 +122,13 @@ export function sanitizeClientRefusal(body: unknown): ClientRefusalEvent | null 
     ...eidField(b.eid),
     source: pick(b.source, REFUSAL_SOURCES),
     code,
-    text: match(b.text, REFUSAL_TEXT),
+    text: refusalText(b.text),
     context: pick(b.context, REFUSAL_CONTEXTS),
     sink: pick(b.sink, REFUSAL_SINKS),
     action: uint(b.action, 0xffff),
     count: count !== null && count >= 1 ? count : null,
     first: typeof b.first === 'boolean' ? b.first : null,
     windowMs: uint(b.windowMs, SESSION_MS),
+    ...refusalContextFields(b),
   };
 }

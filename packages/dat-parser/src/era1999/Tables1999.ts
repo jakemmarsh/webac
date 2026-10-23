@@ -603,6 +603,33 @@ export function transcodeSpellComponentTable1999(raw: ArrayBuffer): ArrayBuffer 
   return c.finish();
 }
 
+// ─── SkillTable (0x0E000004) ──────────────────────────────────────────────────
+
+/**
+ * SkillTable 0x0E000004: the EoL layout (id; u16 count, u16 buckets, then
+ * per skill a u32 key, the description and name, icon, trained / specialized
+ * cost, category, chargen use, min level, the six-word formula and three f64
+ * bounds / learn mod) with AcStrings, each NUL dropped. Read as is, every
+ * skill name ended in "\0" ("trained Item Enchantment\0", the Skills panel,
+ * the raise and examine lines: BUG.ac1999-skill-name-nul, 2026-10-23).
+ */
+export function transcodeSkillTable1999(raw: ArrayBuffer): ArrayBuffer {
+  const c = new Copier(raw, 'SkillTable1999');
+  const { r, w } = c;
+  c.u32(); // id
+  const count = r.readUInt16();
+  w.writeUInt16(count).writeUInt16(r.readUInt16()); // count, buckets
+  for (let i = 0; i < count; i++) {
+    c.u32(); // key (skill id)
+    c.str(); // description
+    c.str(); // name
+    c.words(6); // icon, trained cost, specialized cost, category, chargen use, min level
+    c.words(6); // formula: w, x, y, z, attr1, attr2
+    c.words(6); // upper bound, lower bound, learn mod (f64 bits)
+  }
+  return c.finish();
+}
+
 // ─── ChatPoseTable (0x0E000007) ───────────────────────────────────────────────
 
 /**

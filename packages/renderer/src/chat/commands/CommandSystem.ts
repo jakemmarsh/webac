@@ -91,7 +91,36 @@ export interface CoreCommandContext {
   gender(): number;
   /** Seconds, for IsMessageSpam. */
   nowSeconds(): number;
+  /**
+   * 1999 targeted chat (ChatEntryField_TargetedChat @ 0x51a0c0, chat/commands/Commands1999.ts):
+   * the objects the client holds, with their 2-D distance from the player. Absent: end of retail's
+   * tells always go by name.
+   */
+  tellCandidates?(): readonly TellCandidate[];
+  /** The 1999 radar range in metres (RadarUI+0xfc: 75 outdoors, 25 indoors). */
+  radarRange?(): number;
+  /** 0x004d0170: UseObject on a vendor, its shop opening on the buy or sell page. */
+  useVendor?(id: number, page: 'buy' | 'sell'): void;
 }
+
+/** An object a 1999 tell can be addressed to (ChatEntryField_TargetedChat). */
+export interface TellCandidate {
+  id: number;
+  name: string;
+  /** PublicWeenieDesc bitfield 0x200 (BF_VENDOR; 0x004e5570). */
+  vendor: boolean;
+  /** Horizontal metres from the player. */
+  distance: number;
+}
+
+/**
+ * Which client's channel handling the command line runs (EraClientRules.commandTable).
+ * 'eor': ChannelSystem::GetChannelID's aliases and DoChannelCommand @ 005774a0 ("@f hi"
+ * broadcasts). 'ac1999': 0x005e5020's aliases and ChatEntryField_DoChannelCommand @ 0x51a6b0
+ * (only the comma form "@f, hi" broadcasts; "@f hi" goes to the server as Talk), and the
+ * talk-to-selected focus opens a vendor's shop for a "buy" / "sell" line (0x0051a980 case 1).
+ */
+export type CommandTableStyle = 'eor' | 'ac1999';
 
 /** One DoCommand invocation. */
 export interface CommandRun<C> {
@@ -110,8 +139,6 @@ export interface CommandRun<C> {
   lookup(name: string): CommandEntry<C> | undefined;
   /** Every entry in the table (help group listings). */
   entries(): CommandEntry<C>[];
-  /** Whether this world's era leaves `name` out of the table (era/EraFeatures FEATURE_COMMANDS): @help drops its lines. */
-  withheld(name: string): boolean;
   /** The Turbine-chat spam meter (IsMessageSpam) shared by every SendTurbineChat. */
   readonly spam: SpamMeter;
 }
@@ -187,6 +214,73 @@ export function getChannelId(name: string): number {
   const n = name.toLowerCase();
   for (const [aliases, id] of CHANNEL_ALIASES) if (aliases.includes(n)) return id;
   return 0;
+}
+
+// ── the 1999 client: 0x005e5020 (GetChannelID), ChatEntryField_DoChannelCommand, 0x0051a370 ──
+
+/** The 1999 GetChannelID aliases (strings @ 0x618280-0x6183a0): no allegiance, co-vassal or group channels; ab is Abuse. */
+const CHANNEL_ALIASES_1999: ReadonlyArray<readonly [readonly string[], number]> = [
+  [['ab', 'abuse'], 0x1],
+  [['ad', 'admin'], 0x2],
+  [['au', 'audit'], 0x4],
+  [['av', 'av1', 'advocate', 'advocate1'], 0x8],
+  [['av2', 'advocate2'], 0x10],
+  [['av3', 'advocate3'], 0x20],
+  [['qa', 'qa1'], 0x40],
+  [['qa2'], 0x80],
+  [['qa3'], 0x100],
+  [['sent', 'sentinel'], 0x200],
+  [['help'], 0x400],
+  [['f', 'fellows', 'fellowship'], 0x800],
+  [['v', 'vassals'], 0x1000],
+  [['p', 'patron'], 0x2000],
+  [['m', 'monarch'], 0x4000],
+  [['al-arqas', 'alarqas'], 0x8000],
+  [['holtburg'], 0x10000],
+  [['lytelthorpe'], 0x20000],
+  [['nanto'], 0x40000],
+  [['rithwic'], 0x80000],
+  [['samsur'], 0x100000],
+  [['shoushi'], 0x200000],
+  [['yanshi'], 0x400000],
+  [['yaraq'], 0x800000],
+];
+
+/** 0x005e5020 (the 1999 ChannelSystem::GetChannelID): the channel bit for an alias, 0 for none. */
+export function getChannelId1999(name: string): number {
+  const n = name.toLowerCase();
+  for (const [aliases, id] of CHANNEL_ALIASES_1999) if (aliases.includes(n)) return id;
+  return 0;
+}
+
+/**
+ * ChatEntryField_DoChannelCommand @ 0x51a6b0 for an unknown @word: the line without its '@'.
+ * Only the comma form "<channel>,<text>" broadcasts: an unknown channel (or Help) prints "That
+ * channel doesn't exist." and sends nothing; an empty text, or a line with no comma, is not a
+ * channel command (the caller then sends the whole line as Talk). The no-comma advocate forms
+ * ("index", "on|off|list <channel>") are left to the server, which reads the Talk.
+ */
+export function doChannelCommand1999(ctx: CoreCommandContext, body: string): boolean {
+  const comma = body.indexOf(',');
+  if (comma < 0) return false;
+  const name = body.slice(0, comma);
+  const text = body.slice(comma + 1).replace(/^ +/, '').replace(/ +$/, '');
+  if (text === '') return false;
+  const id = getChannelId1999(name);
+  if (id === 0 || id === 0x400) {
+    // HandleFailureEvent(0x422): the same text as end of retail's.
+    ctx.print(CHANNEL_DOES_NOT_EXIST, CHAT_TYPE_COMMAND, ALL_WINDOWS);
+    return true;
+  }
+  return channelBroadcast(ctx, id, text);
+}
+
+/** 0x0051a370: a tell starting "buy" / "sell" (_strnicmp 3 / 4) to a vendor opens its shop on that page. */
+export function vendorShopPage(text: string): 'buy' | 'sell' | null {
+  const t = text.toLowerCase();
+  if (t.startsWith('buy')) return 'buy';
+  if (t.startsWith('sell')) return 'sell';
+  return null;
 }
 
 /** Event_ChannelBroadcast (0x147): channel u32, text String16L. */
@@ -310,27 +404,14 @@ export class CommandSystem<C extends CoreCommandContext> {
   private readonly table = new Map<string, CommandEntry<C>>();
   readonly spam = new SpamMeter();
 
-  private readonly withheldNames: ReadonlySet<string>;
-
-  /**
-   * `withheld`: command names (any case) this world's era lacks the feature for
-   * (era/EraFeatures FEATURE_COMMANDS). They are never registered, so the word
-   * falls through as an unknown one does and @help does not offer it.
-   */
-  constructor(readonly ctx: C, entries: Iterable<CommandEntry<C>>, withheld: Iterable<string> = []) {
-    this.withheldNames = new Set([...withheld].map((n) => n.toLowerCase()));
+  /** `style`: whose channel handling the line runs (the era's command table, see CommandTableStyle). */
+  constructor(readonly ctx: C, entries: Iterable<CommandEntry<C>>, readonly style: CommandTableStyle = 'eor') {
     for (const e of entries) this.register(e);
-  }
-
-  /** Whether `name` is left out of this world's table. */
-  isWithheld(name: string): boolean {
-    return this.withheldNames.has(name.toLowerCase());
   }
 
   /** IntrusiveHashTable::add — the first registration of a name wins, except where retail re-registers (StartupTurbineChatSystem). */
   register(entry: CommandEntry<C>, replace = false): void {
     const key = entry.name.toLowerCase();
-    if (this.withheldNames.has(key)) return;
     if (!replace && this.table.has(key)) return;
     this.table.set(key, entry);
   }
@@ -376,7 +457,14 @@ export class CommandSystem<C extends CoreCommandContext> {
       case TalkFocus.All: publicChat(ctx, line); return;
       case TalkFocus.Selected: {
         const target = ctx.lastSpeakableTarget();
-        if (target !== 0) eventTalkDirect(ctx, line, target);
+        if (target === 0) return;
+        // 1999 (0x0051a980 case 1 → 0x0051a370): "buy" / "sell" to a selected vendor opens its shop.
+        if (this.style === 'ac1999') {
+          const vendor = ctx.tellCandidates?.().find((o) => o.id === target && o.vendor);
+          const page = vendor ? vendorShopPage(line) : null;
+          if (vendor && page && ctx.useVendor) { ctx.useVendor(vendor.id, page); return; }
+        }
+        eventTalkDirect(ctx, line, target);
         return;
       }
       case TalkFocus.Fellows: channelBroadcast(ctx, 0x800, line); return;
@@ -410,12 +498,14 @@ export class CommandSystem<C extends CoreCommandContext> {
       dispatch: (next) => this.onChatCommand(next, source),
       lookup: (name) => this.lookup(name),
       entries: () => this.entries(),
-      withheld: (name) => this.isWithheld(name),
       spam: this.spam,
     };
     const entry = this.lookup(command);
     if (!entry || !entry.handler) {
-      if (!this.doChannelCommand(command, argv)) eventTalk(this.ctx, line);
+      const channel = this.style === 'ac1999'
+        ? doChannelCommand1999(this.ctx, line.slice(1))
+        : this.doChannelCommand(command, argv);
+      if (!channel) eventTalk(this.ctx, line);
       return true;
     }
     if (!entry.handler(run, argv)) this.ctx.print(NOT_A_VALID_COMMAND, CHAT_TYPE_COMMAND, ALL_WINDOWS);

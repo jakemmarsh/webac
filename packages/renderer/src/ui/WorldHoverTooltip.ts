@@ -14,8 +14,10 @@
  * "3D tooltip" the Show 3D Tooltips option (ACE CharacterOptions1.ShowTooltips)
  * names.
  */
-export function worldHoverTooltipText(hit: { name?: string } | null | undefined, showTooltips: boolean): string | null {
+export function worldHoverTooltipText(hit: { name?: string } | null | undefined, showTooltips: boolean, hint: string | null = null): string | null {
   if (!hit || !showTooltips) return null;
   const name = hit.name ?? '';
-  return name === '' ? null : name;
+  if (name === '') return null;
+  // 1999 (PW-10): the help bar's second line, the double-click hint (HudTooltips.worldHoverHint1999).
+  return hint ? `${name}\n${hint}` : name;
 }

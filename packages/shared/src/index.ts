@@ -64,7 +64,7 @@ export { LUMINANCE_MIN_LEVEL } from './character/LuminanceSystem.js';
 
 // Inventory/Equipment (Phase 22)
 export { InventoryManager } from './inventory/InventoryManager.js';
-export { shopSellPrice, shopBuyPrice, vendorSellPrice, vendorBuyPrice, unitValueOf, TYPE_PROMISSORY_NOTE } from './inventory/vendorPricing.js';
+export { shopSellPrice, shopBuyPrice, vendorSellPrice, vendorBuyPrice, unitValueOf, TYPE_PROMISSORY_NOTE, PROMISSORY_NOTE_RATES_EOR, PROMISSORY_NOTE_RATES_1999, type PromissoryNoteRates } from './inventory/vendorPricing.js';
 export type { InventoryItem } from './inventory/InventoryManager.js';
 export { EquipmentSystem, OptimisticEquipmentTracker } from './inventory/EquipmentSystem.js';
 export { resolveAutoWield, blocksUseOfShield, isMergeAttemptLegal, UISlotSide, AUTOWIELD_CANNOT_WIELD_MORE, autoWieldRetryDue } from './inventory/AutoWield.js';
@@ -161,7 +161,7 @@ export { SPELL_COMPONENT_DID_MAPPER_ID, SPELL_COMPONENTS_MISSING_TEXT, spellComp
 export { MaterialType, MATERIAL_NAMES, getMaterialName } from './loot/MaterialTypes.js';
 
 // Vitae (Phase 28)
-export { VitaeSystem, vitaeCpPoolThreshold } from './systems/DeathSystem.js';
+export { VitaeSystem, vitaeCpPoolThreshold, vitaeCpPoolThreshold1999, VITAE_COST_CAP_1999 } from './systems/DeathSystem.js';
 
 // Vendors (Phase 29)
 export { vendorSellRejectionReason } from './npc/VendorSystem.js';
@@ -234,6 +234,10 @@ export {
   roundHalfToEven,
 } from './util/round.js';
 export { playerText, isStringToken, withNextStep } from './util/playerText.js';
+export {
+  buildRefusalVocabulary, scrubToVocabulary, textCarriesUnknownWord, BASE_REFUSAL_VOCABULARY, SERVER_REFUSAL_TEMPLATES,
+  WEENIE_ERROR_TEXTS, SPEECH_SHAPE, REFUSAL_SHAPE_WORDS, BASE_REFUSAL_VOCABULARY_SOURCES, type RefusalVocabulary, type ScrubResult,
+} from './util/RefusalTextSafety.js';
 export { SELF_EMOTE_SPEAKER, substituteEmotePronoun, composeHeardEmoteLine, composeSelfEmoteLine, isOwnSoulEmoteEcho } from './emote-lines.js';
 export * from './routines/index.js';
 export * from './goarrow/index.js';

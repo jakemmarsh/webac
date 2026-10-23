@@ -53,6 +53,10 @@ export const GIVE_DROP_STRINGS = {
 export class SelectionHistory {
   private selected = 0;
   private prev = 0;
+  private changedAt: number | null = null;
+
+  /** `now` (ms) stamps each change, for the refusal telemetry's "selection went N ms ago" (TELEMETRY.refusal-context). */
+  constructor(private readonly now: (() => number) | null = null) {}
 
   /** The selection is now `id` (0 = nothing): a change moves the old selection into prevSelectedID. */
   select(id: number): void {
@@ -60,10 +64,15 @@ export class SelectionHistory {
     if (next === this.selected) return;
     this.prev = this.selected;
     this.selected = next;
+    this.changedAt = this.now ? this.now() : null;
   }
 
   get selectedId(): number { return this.selected; }
   get prevSelectedId(): number { return this.prev; }
+  /** Milliseconds since the selection last changed, or null (no clock, or never changed). */
+  msSinceChange(): number | null {
+    return this.now && this.changedAt !== null ? Math.max(0, this.now() - this.changedAt) : null;
+  }
 }
 
 export interface GiveDropLookup {

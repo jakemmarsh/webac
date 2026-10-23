@@ -49,6 +49,7 @@
  *    the right one once the end is in view; its button handler 0x5d42a0
  *    scrolls one item width.
  */
+import { SPELL_RESEARCH_PAGE_ACTION } from '../packages/renderer/src/input/KeybindClientActions.js';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -101,7 +102,8 @@ describe('era rules: the spell bar\'s tabs and the toolbar\'s quick slots', () =
       expect(hidden.has(0x10000042 + s)).toBe(false);
       expect(hidden.has(0x1000004e + s)).toBe(false);
     }
-    expect(clientRuleHiddenActions(EOR).size).toBe(0);
+    // End of retail hides only 1999's Show/Hide Spell Research Page (SWEEP1999.input: no research tab).
+    expect([...clientRuleHiddenActions(EOR)]).toEqual([SPELL_RESEARCH_PAGE_ACTION]);
   });
 });
 

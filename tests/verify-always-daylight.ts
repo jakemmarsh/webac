@@ -20,6 +20,9 @@
 import { describe, it, expect } from 'vitest';
 import { CHARACTER_SETTINGS_PAGE, characterSettingsRowForKey } from '../packages/renderer/src/ui/CharacterSettingsModel.js';
 import { readFileSync } from 'node:fs';
+import { applyLocalOptionEffects, applyToggledOptionEffect, type LocalOptionSinks } from '../packages/renderer/src/ui/LocalOptionEffects.js';
+import { eraClientRules } from '../packages/renderer/src/era/EraFeatures.js';
+import { eraProfile } from '../packages/renderer/src/era/EraProfiles.js';
 import * as THREE from 'three';
 import { SkyboxRenderer } from '../packages/renderer/src/effects/SkyboxRenderer.js';
 import { resolve } from 'node:path';
@@ -28,6 +31,19 @@ const REPO = resolve(__dirname, '..');
 const SK = readFileSync(resolve(REPO, 'packages/renderer/src/effects/SkyboxRenderer.ts'), 'utf8');
 const UI = readFileSync(resolve(REPO, 'packages/renderer/src/ui/GameUI.ts'), 'utf8');
 const MAIN = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf8');
+
+/** The startup / restore apply (main.ts → ui/LocalOptionEffects.ts) with GameUI.optionOn's rule: the era's pin, else the stored value. */
+function appliedFor(eraId: string, stored: Record<string, boolean>): Record<string, boolean> {
+  const pins = eraClientRules(eraProfile(eraId)).optionPins;
+  const out: Record<string, boolean> = {};
+  const sinks: LocalOptionSinks = {
+    setWeatherEnabled: (v) => { out.weatherEnabled = v; }, setFogEnabled: (v) => { out.fogEnabled = v; },
+    setForceDaylight: (v) => { out.forceDaylight = v; }, setUseMouseTurning: (v) => { out.useMouseTurning = v; },
+    setRightClickMouseLook: (v) => { out.rightClickMouseLook = v; },
+  };
+  applyLocalOptionEffects((k) => (pins[k] !== undefined ? pins[k] : !!stored[k]), sinks);
+  return out;
+}
 
 describe('FAITHFUL.492 / DECOMP.always-daylight-scope — SkyboxRenderer.setForceDaylight', () => {
   const NIGHT = { begin: 0, dirBright: 0.25, dirHeading: 90, dirPitch: 0.9, dirColor: 0xffdcdcdc,
@@ -89,12 +105,33 @@ describe('FAITHFUL.492 — GameUI options wiring', () => {
 });
 
 describe('FAITHFUL.492 — main.ts live + startup wiring', () => {
-  it('onCharacterOptionToggle handles option 0x05 via skybox.setForceDaylight(value)', () => {
-    expect(MAIN).toMatch(/option === 0x05[\s\S]+?skybox\.setForceDaylight\(value\)/);
+  it('a live toggle of option 0x05 sets skybox daylight = value (1999 pins it off)', () => {
+    for (const era of ['eor', 'classic-dereth']) {
+      expect(toggledFor(era, 0x05, true).forceDaylight, era).toBe(true);
+      expect(toggledFor(era, 0x05, false).forceDaylight, era).toBe(false);
+    }
+    expect(toggledFor('ac1999-retail', 0x05, true).forceDaylight).toBe(false);
   });
+});
 
-  it('startup-apply syncs persisted alwaysDaylight', () => {
-    expect(MAIN).toMatch(/skybox\.setForceDaylight\(gameUI\.optionsSettings\.alwaysDaylight === true\)/);
+function toggledFor(eraId: string, option: number, value: boolean): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  applyToggledOptionEffect(option, value, eraClientRules(eraProfile(eraId)).optionPins, {
+    setWeatherEnabled: (v) => { out.weatherEnabled = v; }, setFogEnabled: (v) => { out.fogEnabled = v; },
+    setForceDaylight: (v) => { out.forceDaylight = v; }, setUseMouseTurning: (v) => { out.useMouseTurning = v; },
+    setRightClickMouseLook: (v) => { out.rightClickMouseLook = v; },
+  });
+  return out;
+}
+describe('FAITHFUL.492 — main.ts startup wiring', () => {
+
+  it('startup-apply syncs persisted alwaysDaylight (end of retail and Dark Majesty; 1999 pins it off)', () => {
+    for (const era of ['eor', 'classic-dereth']) {
+      expect(appliedFor(era, { alwaysDaylight: true }).forceDaylight, era).toBe(true);
+      expect(appliedFor(era, {}).forceDaylight, era).toBe(false);
+    }
+    // SWEEP1999.character — the 1999 client had no Always Daylight: a stored value never carries over.
+    expect(appliedFor('ac1999-retail', { alwaysDaylight: true }).forceDaylight).toBe(false);
   });
 });
 

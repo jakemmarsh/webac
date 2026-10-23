@@ -20,6 +20,7 @@
 
 /** PublicWeenieDesc._bitfield (ACE ObjectDescriptionFlag) bits UseObject reads. */
 export const BF_STUCK = 0x4;
+export const BF_VENDOR = 0x200;
 export const BF_PK_SWITCH = 0x400;
 export const BF_NPK_SWITCH = 0x800;
 export const BF_DOOR = 0x1000;
@@ -151,6 +152,53 @@ export function containedUseSubject(guid: number, item: OwnedUseItem, containerI
   return { ...ownedUseSubject(guid, { ...item, slot: 0 }), containerId: containerId >>> 0, wielderId: 0, location: 0, ownedByPlayer: false };
 }
 
+/**
+ * The era client's UseObject (SWEEP1999.messages VTE-4 / INV-7 / INV-11; eraClientRules().useObject).
+ * End of retail: ItemHolder::UseObject @ 00588a80 over DetermineUseResult @ 00588460 (cases 0-8).
+ * 1999: ItemHolder_UseObject @ 0x004e5ee0 over ItemHolder_DetermineUseResult @ 0x004e4bf0, which
+ * returns only 0-4 (no trade, salvage, game board or wield-left case, no component-pack or
+ * WieldOnUse test, and the slot masks 0x7e00 / 0x1ff / 0xf8000), ends its refusals with a period,
+ * and tells a double-click on a creature that can't be used or attacked to chat instead.
+ */
+export interface UseObjectRules {
+  readonly determine: 'eor' | 'ac1999';
+  /** "%s" = the object's name. */
+  readonly mustWield: string;
+  readonly door: string;
+  readonly dove: string;
+  /** The line for a non-useable, non-attackable creature (ITEM_TYPE exactly Creature), or null (end of retail: "The X cannot be used"). */
+  readonly chatHint: string | null;
+  /**
+   * Box3D_FoundObject @ 0x59f450 (1999): the selected creature (not a vendor) double-clicked in
+   * melee / missile on the panel combat interface, or null (end of retail says nothing).
+   */
+  readonly combatAttackHint: string | null;
+  /** The same in magic stance, or null. */
+  readonly combatAffectHint: string | null;
+}
+
+/** acclient.exe .rdata 0x7e25c0, 0x7e2af8, 0x7e2aa0. */
+export const EOR_USE_OBJECT_RULES: UseObjectRules = Object.freeze({
+  determine: 'eor' as const,
+  mustWield: 'You must wield the %s to use it',
+  door: "You can't open or close this %s that way",
+  dove: 'To attack %s, click on the dove icon first',
+  chatHint: null,
+  combatAttackHint: null,
+  combatAffectHint: null,
+});
+
+/** The 1999 client.exe's ItemHolder_UseObject @ 0x004e5ee0 literals. */
+export const AC1999_USE_OBJECT_RULES: UseObjectRules = Object.freeze({
+  determine: 'ac1999' as const,
+  mustWield: 'You must wield the %s to use it.',
+  door: "You can't open or close this %s that way.",
+  dove: 'To attack %s, click on the dove icon first.',
+  chatHint: 'To chat, click in the chat box and type a message.',
+  combatAttackHint: 'To attack %s, click on an attack button (High/Medium/Low) below.',
+  combatAffectHint: 'To affect %s, click the Cast button below.',
+});
+
 export interface UseContext {
   playerGuid: number;
   /** ClientUISystem::groundObject: the open ground container (0 = none). */
@@ -164,7 +212,8 @@ export interface UseContext {
  * or a capacity) takes the general path unless it is a component pack
  * (ACCWeenieObject::IsComponentPack): a focus on the ground is picked up.
  */
-export function determineUseResult(o: UseSubject, ctx: UseContext): number {
+export function determineUseResult(o: UseSubject, ctx: UseContext, rules: UseObjectRules = EOR_USE_OBJECT_RULES): number {
+  if (rules.determine === 'ac1999') return determineUseResult1999(o, ctx);
   let general = false;
   if (o.containerId !== 0 || (o.bitfield & BF_STUCK) !== 0) {
     if (ctx.groundObject === 0 || o.containerId !== ctx.groundObject) general = true;
@@ -190,6 +239,28 @@ export function determineUseResult(o: UseSubject, ctx: UseContext): number {
   if (isUseable(o.useability)) return 1;
   if (o.isPlayer && o.guid !== ctx.playerGuid) return 5;
   return 0;
+}
+
+/**
+ * ItemHolder_DetermineUseResult @ 0x004e4bf0 (1999): 2 pick up, 3 wield, 4 wear, 1 use, 0 nothing.
+ * A container-like object (RequiresPackSlot or a capacity) is never picked up this way, a focus
+ * included (1999 had none).
+ */
+export function determineUseResult1999(o: UseSubject, ctx: UseContext): number {
+  let general = false;
+  if (o.containerId !== 0 || (o.bitfield & BF_STUCK) !== 0) {
+    if (ctx.groundObject === 0 || o.containerId !== ctx.groundObject) general = true;
+  }
+  if (!general && o.wielderId !== 0 && o.wielderId !== ctx.playerGuid) general = true;
+  if (!general && !isContainerSubject(o)) return 2;
+  if (o.ownedByPlayer) {
+    if ((o.combatUse !== 0 || ((o.itemType >>> 0) & TYPE_CASTER) !== 0) && o.wielderId !== ctx.playerGuid) return 3;
+    const v = o.validLocations >>> 0, l = o.location >>> 0;
+    if (((v & 0x7e00) !== 0 && (l & 0x7e00) === 0)
+      || ((v & 0x1ff) !== 0 && (l & 0x1ff) === 0)
+      || ((v & 0xf8000) !== 0 && (l & 0xf8000) === 0)) return 4;
+  }
+  return isUseable(o.useability) ? 1 : 0;
 }
 
 export type UseDecision =
@@ -222,36 +293,78 @@ export interface UseObjectContext extends UseContext {
   confirmVolatileRare: boolean;
   /** TargetCompatibleWithObject(selected, item, false, true). */
   selectionCompatible: boolean;
+  /** The combat stance while not in peace mode (the 1999 hints): melee and missile, or magic. */
+  combatStance?: 'melee' | 'missile' | 'magic' | null;
+  /** The Advanced Combat Interface (No Panel) option: the 1999 attack hint is the panel interface's. */
+  advancedCombatUI?: boolean;
+  /**
+   * SWEEP1999.character (INV-10) — the 1999 options page's Automatically Create Shortcuts
+   * (options_ 0x1; GameUI.optionOn('autoCreateShortcuts'), pinned off in end of retail).
+   */
+  autoCreateShortcuts?: boolean;
 }
 
 /** ItemHolder::UseObject @ 00588a80 (after its time / readiness / vendor gates). */
-export function decideUseObject(o: UseSubject, ctx: UseObjectContext): UseDecision {
+export function decideUseObject(o: UseSubject, ctx: UseObjectContext, rules: UseObjectRules = EOR_USE_OBJECT_RULES): UseDecision {
   if (!ctx.skipDetermine) {
-    const r = determineUseResult(o, ctx);
+    const r = determineUseResult(o, ctx, rules);
     if (r > 1 && r < 8) return { kind: 'usingItem', result: r };
   }
   if (o.beingTraded) return { kind: 'message', text: `You cannot use the ${o.name} because you are trading it` };
   if (o.location === 0 && (leastLimitedSourceUse(o.useability) & USEABLE_WIELDED) !== 0) {
-    return { kind: 'message', text: `You must wield the ${o.name} to use it` };
+    return { kind: 'message', text: rules.mustWield.replace('%s', o.name) };
   }
   if (isUseableTargeted(o.useability)) {
-    if (!ctx.allowSelection) return { kind: 'targetMode', text: `Choose a target for the ${o.name}` };
+    if (!ctx.allowSelection) return { kind: 'targetMode', text: USE_TARGET_PROMPT_TEMPLATE.replace('%s', o.name) };
     if (ctx.selectedGuid !== 0) return ctx.selectionCompatible ? { kind: 'useWithSelection', target: ctx.selectedGuid } : { kind: 'silent' };
     return { kind: 'message', text: `Select your target before using the ${o.name}` };
   }
   if (!isUseable(o.useability)) {
     // UsingItem(guid, 0, param_3) runs here too (an owned container opens).
     if (o.guid === ctx.playerGuid) return { kind: 'silent' };
-    if ((o.bitfield & BF_DOOR) !== 0) return { kind: 'message', text: `You can't open or close this ${o.name} that way` };
-    if (ctx.attackable && ctx.peaceMode) return { kind: 'message', text: `To attack ${o.name}, click on the dove icon first` };
-    if (ctx.attackable) return { kind: 'silent' };
+    // 1999 @ 0x4e634d: InqType() == Creature exactly, not attackable → the chat hint (an NPC, another player).
+    if (rules.chatHint !== null && (o.itemType >>> 0) === TYPE_CREATURE && !ctx.attackable) return { kind: 'message', text: rules.chatHint };
+    if ((o.bitfield & BF_DOOR) !== 0) return { kind: 'message', text: rules.door.replace('%s', o.name) };
+    if (ctx.attackable && ctx.peaceMode) return { kind: 'message', text: rules.dove.replace('%s', o.name) };
+    if (ctx.attackable) {
+      // 1999 Box3D_FoundObject @ 0x59f450: the selected creature (not a vendor) double-clicked in a stance.
+      const hint = o.guid !== ctx.selectedGuid || (o.bitfield & BF_VENDOR) !== 0 ? null
+        : ctx.combatStance === 'magic' ? rules.combatAffectHint
+          : (ctx.combatStance === 'melee' || ctx.combatStance === 'missile') && !ctx.advancedCombatUI ? rules.combatAttackHint
+            : null;
+      return hint ? { kind: 'message', text: hint.replace('%s', o.name) } : { kind: 'silent' };
+    }
     return { kind: 'message', text: `The ${o.name} cannot be used` };
   }
   if ((o.bitfield & BF_PK_SWITCH) !== 0) return { kind: 'confirm', which: 'pkAltar' };
   if ((o.bitfield & BF_NPK_SWITCH) !== 0) return { kind: 'confirm', which: 'npkAltar' };
   if ((o.bitfield & BF_VOLATILE_RARE) !== 0 && ctx.confirmVolatileRare) return { kind: 'confirm', which: 'volatileRare' };
   const creature = ((o.itemType >>> 0) & TYPE_CREATURE) !== 0;
-  return { kind: 'use', text: creature ? `Approaching ${o.name}` : `Using the ${o.name}` };
+  return { kind: 'use', text: (creature ? USE_STATUS_TEMPLATES.approaching : USE_STATUS_TEMPLATES.using).replace('%s', o.name) };
+}
+
+/**
+ * The status lines a use that goes ahead posts on the spew (0x1a): 0x7e2b4c "Approaching %s" for a creature,
+ * 0x7ce214 "Using the %s" for anything else (UseWithTargetText.using, the same literal, starts the use-with
+ * forms "Using the %s on …" / "… with the …"). The 1999 client posts the same two. They are notices, not
+ * refusals: the refusal telemetry and the play-through's health check leave them out (isUseStatusNotice).
+ */
+export const USE_STATUS_TEMPLATES = Object.freeze({ approaching: 'Approaching %s', using: 'Using the %s' });
+
+/**
+ * ItemHolder::UseObject @ 00588a80's target-mode prompt (both eras: decideUseObject's targetMode arm): a
+ * use-with-target item asks for its target. A prompt, not a refusal (TELEMETRY.refusal-name-safety:
+ * production reported "Choose a target for the _" as one).
+ */
+export const USE_TARGET_PROMPT_TEMPLATE = 'Choose a target for the %s';
+
+const escapeRe = (p: string): string => p.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&');
+const templateLine = (t: string): RegExp => new RegExp('^' + t.split('%s').map(escapeRe).join('.+'));
+const USE_STATUS_LINES: readonly RegExp[] = Object.values(USE_STATUS_TEMPLATES).map(templateLine);
+
+/** Whether a spew line is a use's own status notice ("Approaching Hudriffa", "Using the Door", "Using the Kit on Bob"). */
+export function isUseStatusNotice(text: string): boolean {
+  return USE_STATUS_LINES.some((re) => re.test(text));
 }
 
 /** ACCWeenieObject::IsContainer @ 004a4530: RequiresPackSlot, or any item / container capacity. */
@@ -270,9 +383,9 @@ export function isContainerSubject(o: Pick<UseSubject, 'bitfield' | 'itemsCapaci
  * target-mode arm, the select-a-target line and the altar / volatile-rare
  * confirmations return before it.
  */
-export function useObjectRunsUsingItem(o: UseSubject, ctx: UseObjectContext): boolean {
+export function useObjectRunsUsingItem(o: UseSubject, ctx: UseObjectContext, rules: UseObjectRules = EOR_USE_OBJECT_RULES): boolean {
   if (!ctx.skipDetermine) {
-    const r = determineUseResult(o, ctx);
+    const r = determineUseResult(o, ctx, rules);
     if (r > 1 && r < 8) return true;
   }
   if (o.beingTraded) return false;
@@ -297,14 +410,28 @@ export interface UsingItemEffects {
    * the inventory shows that pack (a side pack's shortcut, the main pack's).
    */
   openContainer: boolean;
+  /**
+   * SWEEP1999.character (INV-10) — the 1999 UsingItem tail (0x004fe450 @ 0x004fe450): with
+   * Automatically Create Shortcuts on, a weapon (the +0x5c combat use), anything wearable
+   * (valid locations 0xf8000 jewellery | 0x7e00 armour | 0x1ff clothing) or anything useable
+   * becomes a shortcut: PanelUI_CreateShortcutToItem(item, -1, 0, quiet 1), which skips an item the
+   * player doesn't carry, one already on the tray and a full tray without a word.
+   */
+  createShortcut: boolean;
+}
+
+/** The 1999 UsingItem tail's item test (0x004fe450): a weapon, anything wearable, or anything useable. */
+export function autoShortcutCandidate(o: Pick<UseSubject, 'combatUse' | 'validLocations' | 'useability'>): boolean {
+  return o.combatUse !== 0 || ((o.validLocations >>> 0) & 0xfffff) !== 0 || isUseable(o.useability);
 }
 
 /** UsingItem's client-side effects on UseObject's path, or null when UseObject never calls it. */
-export function usingItemEffects(o: UseSubject, ctx: UseObjectContext): UsingItemEffects | null {
-  if (!useObjectRunsUsingItem(o, ctx)) return null;
+export function usingItemEffects(o: UseSubject, ctx: UseObjectContext, rules: UseObjectRules = EOR_USE_OBJECT_RULES): UsingItemEffects | null {
+  if (!useObjectRunsUsingItem(o, ctx, rules)) return null;
   return {
-    autoWieldLeft: !ctx.skipDetermine && determineUseResult(o, ctx) === 8,
+    autoWieldLeft: !ctx.skipDetermine && determineUseResult(o, ctx, rules) === 8,
     openContainer: o.ownedByPlayer && isContainerSubject(o),
+    createShortcut: ctx.autoCreateShortcuts === true && autoShortcutCandidate(o),
   };
 }
 

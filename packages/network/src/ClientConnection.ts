@@ -189,6 +189,8 @@ export type ConnectionEventType =
   // page's tab guard claims the account then: a login the bridge refused
   // before reaching the server never displaces another tab.
   | 'serverReached'
+  // The 1999 character-select news (0xF65A; data = the text). Only an AC1999 world sends it.
+  | 'charSelectNews'
   | 'message';
 
 /**
@@ -212,6 +214,8 @@ export interface ConnectionEvent {
   reconnectAttempt?: number;
   reconnectMax?: number;
   reconnectDelaySec?: number;
+  /** On type==='timeSync': the value is the world clock's anchor (the 1999 connect grant), replacing any earlier one. */
+  clockAnchor?: boolean;
   /**
    * CORE.17.k.b — on type==='disconnected': whether the socket ever opened
    * (retail only raises ServerDied for a live recipient) and whether this

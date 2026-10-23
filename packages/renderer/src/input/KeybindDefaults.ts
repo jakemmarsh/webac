@@ -14,6 +14,7 @@
  */
 import { CombatMode } from '@ac/shared';
 import { RETAIL_DEFAULT_KEYBINDS } from './KeybindDefaults.generated.js';
+import { KEY_REPEAT_ACTIONS } from './KeybindActions.generated.js';
 
 /** Named action ids the router dispatches (subset of the 296 baked commands). */
 export const ACT = {
@@ -55,6 +56,10 @@ export const ACT = {
   LowAttack: 0x1000005d,
   MediumAttack: 0x1000005e,
   HighAttack: 0x1000005f,
+  // The missile map's power pair (ClientCombatSystem::HandleCombatAction @ 0056d600 steps them
+  // like 0x1000005b / 5c).
+  DecreaseAccuracy: 0x100000ef,
+  IncreaseAccuracy: 0x100000f0,
   SpellSlot1: 0x10000065,
   SpellSlot2: 0x10000066,
   SpellSlot3: 0x10000067,
@@ -190,6 +195,17 @@ export const HELD_CAMERA_ACTIONS: ReadonlySet<number> = new Set([
 ]);
 
 /**
+ * Whether an OS key repeat (KeyboardEvent.repeat) runs `actionId` again. Retail reads the keyboard
+ * through DirectInput, which sends no repeats; CInputManager makes its own only for the actions
+ * whose ActionMap toggle type is 4 (KEY_REPEAT_ACTIONS: the text-entry and list-scroll commands),
+ * after sm_timeKeyRepeatDelay. Every other command (cast a spell slot, use, open a panel, emote)
+ * fires once per press. The 1999 client reads the keyboard through DirectInput too.
+ */
+export function keyRepeatDispatches(actionId: number): boolean {
+  return KEY_REPEAT_ACTIONS.has(actionId >>> 0);
+}
+
+/**
  * Browser-UX default (Jake, 2026-10-03): the wheel over the 3D world zooms the
  * camera out of the box. Retail binds zoom to Numpad − / + only and offers
  * wheel zoom behind Options → "Use Mouse Turning Settings" (SetMouseTurningDefaults
@@ -199,7 +215,7 @@ export const HELD_CAMERA_ACTIONS: ReadonlySet<number> = new Set([
  * Config and can be removed there. Codes match MouseTurningDefaults'
  * WHEEL_UP_CODE / WHEEL_DOWN_CODE.
  */
-const BROWSER_UX_BINDINGS: Record<number, string[]> = {
+export const BROWSER_UX_BINDINGS: Readonly<Record<number, readonly string[]>> = {
   [ACT.ZoomCameraIn]: ['MouseWheelUp'],
   [ACT.ZoomCameraOut]: ['MouseWheelDown'],
 };

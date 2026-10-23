@@ -62,6 +62,26 @@ export function spellDurationText(duration: number | undefined): string {
   return duration >= 60 ? `Duration: ${Math.trunc(duration / 60)} min.` : `Duration: ${Math.trunc(duration)} sec.`;
 }
 
+/** SpellType.PortalSummon: the 1999 examine prints its portal's lifetime as one value. */
+const META_SPELL_PORTAL_SUMMON = 7;
+
+/**
+ * The 1999 SpellExaminePanel_ExamineSpell @ 0x00511110 duration line (SWEEP1999.magic MAG-5):
+ * CSpellBase_InqDuration (an enchantment's duration, a portal summon's lifetime), then for a
+ * portal summon "Duration: %u min." (d / 60) from 60 s up, else "Duration: %u sec."; for every
+ * other spell the band the AC1999 server rolls in (SpellPotency.cpp clamps to ×0.75 .. ×1.25):
+ * "Duration: %.1f-%.1f min." when the top is past 90 s, else "Duration: %u-%u sec." (each ftol'd).
+ */
+export function spellDurationText1999(spell: { duration?: number; metaSpellType?: number; portalLifetime?: number }): string {
+  const portal = spell.metaSpellType === META_SPELL_PORTAL_SUMMON;
+  const d = portal ? spell.portalLifetime : spell.duration;
+  if (d === undefined || d === -1 || !(d > 0)) return '';
+  if (portal) return d >= 60 ? `Duration: ${Math.trunc(d / 60)} min.` : `Duration: ${Math.trunc(d)} sec.`;
+  const lo = d * 0.75, hi = d * 1.25;
+  if (hi > 90) return `Duration: ${(lo / 60).toFixed(1)}-${(hi / 60).toFixed(1)} min.`;
+  return `Duration: ${Math.trunc(lo)}-${Math.trunc(hi)} sec.`;
+}
+
 /** RADAR_OUTDOOR_RADIUS (.rdata 0x7cc6a0) and METERS_PER_YARD. */
 const MAX_SPELL_RANGE = 75;
 const METERS_PER_YARD = 0.9144;
@@ -120,8 +140,10 @@ export interface SpellExamineInputs {
   spell: {
     name: string; desc: string; school: number; icon: number;
     baseMana: number; manaMod: number; baseRangeConstant: number; baseRangeMod: number;
-    duration?: number;
+    duration?: number; metaSpellType?: number; portalLifetime?: number;
   };
+  /** The era's Duration line (EraClientRules.spellDurationText); end of retail's when absent. */
+  durationText?: 'eor' | 'ac1999';
   /**
    * ClientMagicSystem::GetAppropriateSpellFormula @ 00567d50's inputs: the
    * spell's base formula, the account-customized one, and what decides
@@ -167,7 +189,7 @@ export function buildSpellExamineModel(i: SpellExamineInputs): SpellExamineModel
     title: s.name,
     school: `School: ${schoolName(s.school)}`,
     mana: spellManaText(s.baseMana, s.manaMod),
-    duration: spellDurationText(s.duration),
+    duration: i.durationText === 'ac1999' ? spellDurationText1999(s) : spellDurationText(s.duration),
     // A school with no casting skill takes the best of the five magic skills.
     range: spellRangeText(s.baseRangeMod, s.baseRangeConstant,
       skill ? i.skillLevel(skill) : Math.max(...[0x1f, 0x20, 0x21, 0x22, 0x2b].map(i.skillLevel))),

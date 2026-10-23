@@ -45,7 +45,21 @@ export interface ChannelBroadcastLine {
   type: ChatMessageType;
 }
 
-export function formatChannelBroadcast(channel: number, senderName: string, message: string): ChannelBroadcastLine {
+/**
+ * Whose wording the channel lines use (EraClientRules.socialLineText). 'ac1999': the 1999
+ * client.exe's UI_HandleChannelMessage @ 0x4d24a0 says the fellowship lines as it says the patron /
+ * vassal / monarch ones: `X says to your fellowship, "…"` (type 10, Social) and
+ * `You say to your Fellowship, "…"` (type 0xb, SocialSend). Every other channel line is the same in
+ * both clients.
+ */
+export type SocialLineText = 'eor' | 'ac1999';
+
+export function formatChannelBroadcast(channel: number, senderName: string, message: string, style: SocialLineText = 'eor'): ChannelBroadcastLine {
+  if (style === 'ac1999' && channel === Channel.Fellow) {
+    return senderName
+      ? { text: `${senderName} says to your fellowship, "${message}"`, type: ChatMessageType.Social }
+      : { text: `You say to your ${channelName(channel)}, "${message}"`, type: ChatMessageType.SocialSend };
+  }
   if (!senderName) {
     switch (channel) {
       case Channel.Fellow:
@@ -103,8 +117,9 @@ export function channelBroadcastToShow(
   data: { channel: number; senderName: string; message: string },
   squelch: { blocksChannel(key: string, channelMask: number): boolean },
   filters: readonly RegExp[],
+  style: SocialLineText = 'eor',
 ): ChannelBroadcastLine | null {
-  const line = formatChannelBroadcast(data.channel, data.senderName, data.message);
+  const line = formatChannelBroadcast(data.channel, data.senderName, data.message, style);
   if (squelch.blocksChannel('', squelchMaskForChatType(line.type))) return null;
   if (data.senderName && filters.some((rx) => rx.test(data.message))) return null;
   return line;

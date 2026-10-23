@@ -50,6 +50,17 @@
  * AttemptToPlaceInContainer_IsItemLegal @ 005870c0 is isItemLegalHead.
  * Not ported: IsDragIntoContainerAttemptLegal @ 00587e90 (:376924), which only decides
  * AcceptDragObject's pending placeholder cell.
+ *
+ * The 1999 client (PlacementWorld.rule 'ac1999'; EraClientRules.inventoryPlacement, INV-1) has no
+ * holder / requested split: ItemHolder_AttemptPlaceInContainer(item, container, placement,
+ * autoMerge) @ 0x4e55b0 auto-merges only into `container`'s own items list (no side packs),
+ * then AttemptPlaceInContainerIsLegal @ 0x4e57b0 checks THAT container only and the put or split
+ * goes there or nowhere, refused with the container's own no-room line (the era's wording). When a
+ * stack matched but had no room for the split, the put is followed by "Too big to merge. Putting
+ * in <container>.".
+ * PlaceInBackpack (0x004ffb80) always asks for the player, so a pick-up, a loot or an unwield
+ * lands in the main pack whatever pack the inventory shows. The AC1999 server would accept a put
+ * into a side pack (Monster.cpp MoveItemToContainer), so this is the client's own rule.
  */
 
 /** The PublicWeenieDesc / ACCWeenieObject slice the placement reads. */
@@ -105,15 +116,19 @@ export interface PlacementWorld {
   objectSplitSize(id: number): number;
   /** The amount and whether it is a partial split, for the put/split choice. */
   dragSplit(id: number): { amount: number; partial: boolean };
+  /** The era client's refusal wording (end of retail's when absent). */
+  text?: PlacementText;
+  /** Whose AttemptToPlaceInContainer runs (EraClientRules.inventoryPlacement); absent = end of retail's. */
+  rule?: 'eor' | 'ac1999';
 }
 
 export type PlacementResult =
   /** UIAttemptMerge → StackableMerge(item, target, amount). */
   | { kind: 'merge'; targetId: number; amount: number }
-  /** UIAttemptPutInContainer → PutItemInContainer(item, container, placement). */
-  | { kind: 'put'; containerId: number; placement: number }
-  /** UIAttemptSplitToContainer → StackableSplitToContainer(item, container, placement, amount). */
-  | { kind: 'split'; containerId: number; placement: number; amount: number }
+  /** UIAttemptPutInContainer → PutItemInContainer(item, container, placement); `notice` follows the send. */
+  | { kind: 'put'; containerId: number; placement: number; notice?: string }
+  /** UIAttemptSplitToContainer → StackableSplitToContainer(item, container, placement, amount); `notice` follows the send. */
+  | { kind: 'split'; containerId: number; placement: number; amount: number; notice?: string }
   /** Nothing sent; `notice` is the 0x1a line (absent = silent). */
   | { kind: 'refused'; notice?: string };
 
@@ -257,6 +272,25 @@ export function willItemFitInContainer(itemId: number, targetId: number, w: Plac
   return true;
 }
 
+/**
+ * The placement and merge refusals as the era's client words them (SWEEP1999.messages INV-11;
+ * eraClientRules().placementText, handed in on PlacementWorld.text / PlaceIn3DContext.text).
+ * "%s" = the object's name. End of retail: the literals below. 1999: ItemHolder_
+ * AttemptPlaceInContainerIsLegal @ 0x004e5a10's and ItemHolder_AttemptMergeIsLegal's, none with a "!".
+ */
+export interface PlacementText {
+  readonly playerItems: string;
+  readonly playerContainers: string;
+  readonly items: string;
+  readonly containers: string;
+  readonly creature: string;
+  readonly stuck: string;
+  readonly wieldedElsewhere: string;
+  readonly holdsContainers: string;
+  readonly mergeDifferentTypes: string;
+  readonly mergeStackFull: string;
+}
+
 /** The four "full" 0x1a lines (acclient.exe .rdata, UTF-16). */
 export const PLACEMENT_FULL_STRINGS = {
   playerItems: '%s is completely full!',
@@ -266,11 +300,53 @@ export const PLACEMENT_FULL_STRINGS = {
 } as const;
 
 /** AttemptToPlaceInContainer's no-room line for `holder`. */
-export function placementFullNotice(holder: PlacementObject, itemIsContainer: boolean): string {
+export function placementFullNotice(holder: PlacementObject, itemIsContainer: boolean, text: PlacementText = EOR_PLACEMENT_TEXT): string {
   const fmt = holder.isPlayer
-    ? (itemIsContainer ? PLACEMENT_FULL_STRINGS.playerContainers : PLACEMENT_FULL_STRINGS.playerItems)
-    : (itemIsContainer ? PLACEMENT_FULL_STRINGS.containers : PLACEMENT_FULL_STRINGS.items);
+    ? (itemIsContainer ? text.playerContainers : text.playerItems)
+    : (itemIsContainer ? text.containers : text.items);
   return fmt.replace('%s', holder.name);
+}
+
+/**
+ * ItemHolder_AttemptPlaceInContainer @ 0x4e55b0's line after the put when a stack of the same kind
+ * matched but had no room for the split ("Too big to merge. Putting in " + name + "." 0x600f60).
+ * The no-room and legality wording is the era's PlacementText (SWEEP1999.messages).
+ */
+export const TOO_BIG_TO_MERGE_1999 = 'Too big to merge. Putting in %s.';
+
+/**
+ * The 1999 ItemHolder_AttemptPlaceInContainer @ 0x4e55b0 (item, container, placement, autoMerge):
+ * the same item / container legality as end of retail's, then an auto-merge over the
+ * container's own items only, then the container or a refusal.
+ */
+function attemptPlaceInContainer1999(
+  itemId: number, containerId: number, autoMerge: boolean, placement: number, w: PlacementWorld,
+): PlacementResult {
+  const illegal = isItemLegalHead(itemId, w);
+  if (illegal) return { kind: 'refused', notice: illegal };
+  const legal = isContainerLegal(itemId, containerId, false, w);
+  if (!legal.ok) return { kind: 'refused', notice: legal.notice };
+  const item = w.object(itemId);
+  const container = w.object(containerId);
+  if (!item || !container) return { kind: 'refused' };
+  let matchedWithoutRoom = false;
+  if (autoMerge && item.maxStackSize > 1) {
+    for (const id of w.itemsOf(containerId)) {
+      if (id === itemId) continue;
+      const target = w.object(id);
+      if (!target || !isMergeLegalQuiet(item, target)) continue;
+      matchedWithoutRoom = true;
+      if (w.splitSize <= target.maxStackSize - Math.max(1, target.stackSize)) {
+        return { kind: 'merge', targetId: id, amount: attemptMergeAmount(itemId, target, w) };
+      }
+    }
+  }
+  // The era's no-room wording (PlacementWorld.text, SWEEP1999.messages) is the container's own line.
+  if (!willItemFitInContainer(itemId, containerId, w)) return { kind: 'refused', notice: placementFullNotice(container, item.isContainer, w.text) };
+  const notice = matchedWithoutRoom ? TOO_BIG_TO_MERGE_1999.replace('%s', container.name) : undefined;
+  const split = w.dragSplit(itemId);
+  if (split.partial) return { kind: 'split', containerId, placement, amount: split.amount, ...(notice ? { notice } : {}) };
+  return { kind: 'put', containerId, placement, ...(notice ? { notice } : {}) };
 }
 
 /** acclient.exe literals AttemptToPlaceInContainer_IsItemLegal @ 005870c0 raises (SendNotice_DisplayStringInfo 0x1a). */
@@ -284,6 +360,36 @@ export const ITEM_LEGAL_STRINGS = {
   /** A container that holds containers (IsContainer && _containersCapacity != 0; push 0x7e21f0 @ 00587353). */
   holdsContainers: "The %s can't be picked up!",
 } as const;
+
+/** End of retail's placement and merge lines (ItemHolder::IsMergeAttemptLegal @ 00586f30 for the merge pair). */
+export const EOR_PLACEMENT_TEXT: PlacementText = Object.freeze({
+  ...PLACEMENT_FULL_STRINGS,
+  creature: ITEM_LEGAL_STRINGS.creature,
+  stuck: ITEM_LEGAL_STRINGS.stuck,
+  wieldedElsewhere: ITEM_LEGAL_STRINGS.wieldedElsewhere,
+  holdsContainers: ITEM_LEGAL_STRINGS.holdsContainers,
+  mergeDifferentTypes: 'You cannot merge different types of items.',
+  mergeStackFull: 'The destination stack is already full.',
+});
+
+/**
+ * The 1999 client.exe's lines: AttemptPlaceInContainerIsLegal ("The " + name + " is full", the
+ * player's own "<name> is full", " can carry / can fit no more containers", "The creature can't be
+ * picked up", " cannot be picked up", " is being wielded by someone else", " can't be picked up")
+ * and AttemptMergeIsLegal ("Cannot Merge Different Stack Types.", "This stack's too big to add to").
+ */
+export const AC1999_PLACEMENT_TEXT: PlacementText = Object.freeze({
+  playerItems: '%s is full',
+  playerContainers: '%s can carry no more containers',
+  items: 'The %s is full',
+  containers: 'The %s can fit no more containers',
+  creature: "The creature can't be picked up",
+  stuck: 'The %s cannot be picked up',
+  wieldedElsewhere: 'The %s is being wielded by someone else',
+  holdsContainers: "The %s can't be picked up",
+  mergeDifferentTypes: 'Cannot Merge Different Stack Types.',
+  mergeStackFull: "This stack's too big to add to",
+});
 
 /**
  * ItemHolder::AttemptToPlaceInContainer_IsItemLegal(item, quiet = 0)
@@ -300,10 +406,11 @@ export function isItemLegalHead(itemId: number, w: PlacementWorld): string | nul
   if (itemId === w.playerId) return ITEM_LEGAL_STRINGS.self;
   const item = w.object(itemId);
   if (!item) return null;
-  if ((item.itemType ?? 0) === 0x10) return ITEM_LEGAL_STRINGS.creature;
-  if (item.stuck && !item.contained) return ITEM_LEGAL_STRINGS.stuck.replace('%s', item.name);
-  if (!item.ownedByPlayer && (item.wieldedLocation ?? 0) !== 0) return ITEM_LEGAL_STRINGS.wieldedElsewhere.replace('%s', item.name);
-  if (item.isContainer && item.containersCapacity !== 0) return ITEM_LEGAL_STRINGS.holdsContainers.replace('%s', item.name);
+  const text = w.text ?? EOR_PLACEMENT_TEXT;
+  if ((item.itemType ?? 0) === 0x10) return text.creature;
+  if (item.stuck && !item.contained) return text.stuck.replace('%s', item.name);
+  if (!item.ownedByPlayer && (item.wieldedLocation ?? 0) !== 0) return text.wieldedElsewhere.replace('%s', item.name);
+  if (item.isContainer && item.containersCapacity !== 0) return text.holdsContainers.replace('%s', item.name);
   return null;
 }
 
@@ -315,6 +422,8 @@ export function isItemLegalHead(itemId: number, w: PlacementWorld): string | nul
 export function attemptToPlaceInContainer(
   itemId: number, holderId: number, requestedId: number, autoMerge: boolean, placement: number, w: PlacementWorld,
 ): PlacementResult {
+  // INV-1 — the 1999 client places into the container asked for (the holder) and nowhere else.
+  if (w.rule === 'ac1999') return attemptPlaceInContainer1999(itemId, holderId, autoMerge, placement, w);
   const illegal = isItemLegalHead(itemId, w);
   if (illegal) return { kind: 'refused', notice: illegal };
   const legal = isContainerLegal(itemId, holderId, false, w);
@@ -334,7 +443,7 @@ export function attemptToPlaceInContainer(
   if (preferred && willItemFitInContainer(itemId, preferred, w)) dest = preferred;
   else if (willItemFitInContainer(itemId, holderId, w)) dest = holderId;
   else dest = w.containersOf(holderId).find((pack) => willItemFitInContainer(itemId, pack, w)) ?? 0;
-  if (!dest) return { kind: 'refused', notice: placementFullNotice(holder, item.isContainer) };
+  if (!dest) return { kind: 'refused', notice: placementFullNotice(holder, item.isContainer, w.text) };
   const split = w.dragSplit(itemId);
   if (split.partial) return { kind: 'split', containerId: dest, placement, amount: split.amount };
   return { kind: 'put', containerId: dest, placement };
@@ -343,6 +452,8 @@ export function attemptToPlaceInContainer(
 /**
  * CPlayerSystem::PlaceInBackpack @ 0055d8c0: the shown pack, or the player
  * when MainPackPreferred is on (or none is shown), auto-merge on, placement 0.
+ * The 1999 PlaceInBackpack (0x004ffb80) asks for the player alone: the
+ * 'ac1999' placement ignores the shown pack.
  */
 export function placeInBackpack(
   itemId: number, shownPackId: number, mainPackPreferred: boolean, w: PlacementWorld,

@@ -67,7 +67,7 @@ describe('UsingItem @ 00562f70 — an owned container opens in the inventory on 
   it('a side pack used from its shortcut: the Use goes out ("Using the Pack") AND the pack opens', () => {
     const o = sidePack();
     expect(decideUseObject(o, ctx())).toEqual({ kind: 'use', text: 'Using the Pack' });
-    expect(usingItemEffects(o, ctx())).toEqual({ autoWieldLeft: false, openContainer: true });
+    expect(usingItemEffects(o, ctx())).toEqual({ autoWieldLeft: false, openContainer: true, createShortcut: false });
   });
 
   it('IsContainer reads RequiresPackSlot or either capacity (ACCWeenieObject::IsContainer @ 004a4530)', () => {
@@ -101,7 +101,7 @@ describe('UsingItem @ 00562f70 — an owned container opens in the inventory on 
 
   it('a plain owned item runs UsingItem but opens nothing', () => {
     const food = ownedUseSubject(0x80003333, { name: 'Apple', containerId: PLAYER, itemType: 0x20, usable: 8 }, PLAYER);
-    expect(usingItemEffects(food, ctx())).toEqual({ autoWieldLeft: false, openContainer: false });
+    expect(usingItemEffects(food, ctx())).toEqual({ autoWieldLeft: false, openContainer: false, createShortcut: false });
   });
 
   it('DetermineUseResult case 8 (a WieldLeft caster in the pack) is UsingItem\'s AutoWield(SLOT_SIDE_LEFT)', () => {

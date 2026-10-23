@@ -166,6 +166,15 @@ export class DatReader {
    * NOTE: Does NOT auto-align. Callers must call align(4) after if needed.
    * Matches ACE C#'s ReadPString (BinaryReaderExtensions.cs:60-80) which
    * uses Encoding.Default.GetString and does not align internally.
+   *
+   * BUG.ac1999-skill-name-nul — a 1999 AcString's length counts its NUL
+   * terminator (the 1999 reader, Pkt_ReadString @ 0x4b0cf0, copies `length`
+   * bytes and makes the last one the terminator), so a 1999 table read here
+   * without the 1999 overlay's translation (an untranslated table such as the
+   * GeneratorTable, or a streamed 1999 set published before the overlay
+   * translated one) would keep "Item Enchantment\0". The client's C string
+   * ends at that NUL: one trailing NUL is dropped. End-of-retail PStrings
+   * carry none, so their text is unchanged; the bytes consumed are the same.
    */
   readPString(sizeOfLength: number = 2): string {
     let length: number;
@@ -176,7 +185,7 @@ export class DatReader {
     }
 
     const bytes = this.readBytes(length);
-    return decodeWindows1252(bytes);
+    return decodeWindows1252(length > 0 && bytes[length - 1] === 0 ? bytes.subarray(0, length - 1) : bytes);
   }
 
   readObfuscatedString(): string {
@@ -188,7 +197,8 @@ export class DatReader {
       bytes[i] = ((bytes[i] >> 4) | (bytes[i] << 4)) & 0xff;
     }
 
-    return decodeWindows1252(bytes);
+    // A 1999 nibble-swapped AcString counts its NUL too (a swapped 0 is 0): dropped as readPString does.
+    return decodeWindows1252(length > 0 && bytes[length - 1] === 0 ? bytes.subarray(0, length - 1) : bytes);
   }
 
   readUnicodeString(): string {

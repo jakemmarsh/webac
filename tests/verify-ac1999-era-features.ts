@@ -26,11 +26,9 @@ import { decodeCapture } from '../tools/ac1999/decode-capture.js';
 import { ERA_PROFILES, eraProfile } from '../packages/renderer/src/era/EraProfiles.js';
 import {
   unsupportedFeatures, hiddenBy, FEATURE_KEYBIND_ACTIONS, FEATURE_CHARACTER_OPTIONS, FEATURE_TOOLBAR_BUTTONS, FEATURE_PANELS, eraClientRules, type EraFeature,
-  FEATURE_COMMANDS, FEATURE_SOCIAL_TABS, FEATURE_WORLD_TABS, FEATURE_INDICATORS, FEATURE_COMPONENT_CONTROLS, FEATURE_FELLOWSHIP_CONTROLS,
+  FEATURE_SOCIAL_TABS, FEATURE_WORLD_TABS, FEATURE_INDICATORS, FEATURE_COMPONENT_CONTROLS, FEATURE_FELLOWSHIP_CONTROLS,
 } from '../packages/renderer/src/era/EraFeatures.js';
-import { CommandSystem } from '../packages/renderer/src/chat/commands/CommandSystem.js';
-import { retailCommandEntries, type RetailCommandContext } from '../packages/renderer/src/chat/commands/index.js';
-import { withoutWithheldLines } from '../packages/renderer/src/chat/commands/TextUiHelpCommands.js';
+import { RetailCommandSystem, type RetailCommandContext } from '../packages/renderer/src/chat/commands/index.js';
 import { SkillTable } from '../packages/dat-parser/src/file-types/SkillTable.js';
 import { DatReader } from '../packages/dat-parser/src/DatReader.js';
 import { ac1999PortalOverlay } from '../packages/dat-parser/src/era1999/Ac1999Overlay.js';
@@ -56,7 +54,7 @@ describe('era capability set', () => {
     expect(ERA_1999.has('eolWcidTables')).toBe(true);
     // Every entry is an absent feature or one of those justified in EraFeatures.ts.
     const extra = [...ERA_1999].filter((f) => !(f in ABSENT_1999)).sort();
-    expect(extra).toEqual(['autoAcceptFellowship', 'cloaks', 'desiredComponents', 'eolWcidTables', 'fishing', 'friendsPanel', 'netherDamage', 'radarCoordinates', 'rareGems', 'spellDurations', 'squelchListPage']);
+    expect(extra).toEqual(['autoAcceptFellowship', 'cloaks', 'desiredComponents', 'eolWcidTables', 'fishing', 'friendsPanel', 'netherDamage', 'radarCoordinates', 'rareGems', 'spellDurations', 'spellbookFilters', 'squelchListPage']);
     // BUG.ac1999-eor-ui-values: the paperdoll's slots are the era's data (no cloak or trinket slot on 1999).
     const slots1999 = eraClientRules(eraProfile('ac1999-retail')).equipSlotMask;
     expect(slots1999 & (EquipMask.TrinketOne | EquipMask.Cloak)).toBe(0);
@@ -443,8 +441,9 @@ describe('fellowship pane: no Leader / Open / Disband buttons on a 1999 world (b
   const LEADERSHIP = [0x1000027b, 0x1000027d, 0x10000280];
   const OTHERS = [0x1000027c, 0x1000027e, 0x1000027f];
 
-  async function renderPane(features: ReadonlySet<EraFeature>): Promise<{ H: GameUIFixture; shown: (id: number) => boolean }> {
+  async function renderPane(features: ReadonlySet<EraFeature>, eraId?: string): Promise<{ H: GameUIFixture; shown: (id: number) => boolean }> {
     const H = await mountGameUI();
+    if (eraId) H.ui.setClientRules(eraClientRules(eraProfile(eraId)));
     const doc = H.win.document;
     const mk = (parent: HTMLElement, id: number): HTMLElement => {
       const el = doc.createElement('div');
@@ -511,31 +510,38 @@ describe('fellowship pane: no Leader / Open / Disband buttons on a 1999 world (b
 
   for (const [era, features] of [['ac1999-retail', ERA_1999], ['eor', ERA_EOR], ['classic-dereth', ERA_CLASSIC]] as const) {
     const is1999 = era === 'ac1999-retail';
-    it(is1999 ? '1999, no fellowship: no Automatically Accept checkbox (key and agent toggle refused too); the other three stay'
+    it(is1999 ? '1999, no fellowship: one checkbox, "Accept Fellowship Requests" (S10: no auto-accept, no XP / loot sharing)'
       : 'end of retail, no fellowship: all four option checkboxes', async () => {
-      const { H, shown } = await renderPane(features);
+      const { H, shown } = await renderPane(features, era);
       try {
         H.ui.setFellowshipData(null);
         H.ui.renderSocialPanel();
-        expect(shown(0x10000271)).toBe(!is1999);
-        for (const id of [0x10000270, 0x10000272, 0x10000273]) expect(shown(id), id.toString(16)).toBe(true);
-        // BUG.era-hidden-row-gaps — no row-sized hole: on 1999 the rows below the hidden one and
-        // Create Fellowship close up by its 14 px pitch; end of retail stays on the DAT rects exactly.
+        expect(shown(0x10000270)).toBe(true);
+        for (const id of [0x10000271, 0x10000272, 0x10000273]) expect(shown(id), id.toString(16)).toBe(!is1999);
+        // BUG.era-hidden-row-gaps — no row-sized hole: on 1999 Create Fellowship closes up by the three
+        // hidden rows' 14 px pitch; end of retail stays on the DAT rects exactly.
         const rect = (id: number): number[] => {
           const el = (H.ui.socialPanel as HTMLElement).querySelector(`[data-element-id="0x${id.toString(16)}"]`) as HTMLElement;
           return [el.style.left, el.style.top, el.style.width, el.style.height].map((v) => parseFloat(v));
         };
         for (const [id, [x, y, w, h]] of CREATE_COLUMN_RECTS) {
-          const up = is1999 && y >= 253 ? 14 : 0;
+          if (is1999 && [0x10000271, 0x10000272, 0x10000273].includes(id)) continue;
+          const up = is1999 && id === 0x10000274 ? 42 : 0;
           expect(rect(id), id.toString(16)).toEqual([x, y - up, w, h]);
-        }
-        if (is1999) {
-          const tops = [0x10000270, 0x10000272, 0x10000273].map((id) => rect(id)[1]);
-          expect(tops).toEqual([225, 239, 253]);
         }
         // A re-render (the pane is redrawn on every fellowship change) never shifts twice.
         H.ui.renderSocialPanel();
-        expect(rect(0x10000273)[1]).toBe(is1999 ? 253 : 267);
+        expect(rect(0x10000274)[1]).toBe(is1999 ? 256 : 298);
+        // 1999's box asks "Accept", showing the Ignore bit inverted; a click flips the Ignore bit.
+        H.ui.optionsSettings.ignoreFellowshipRequests = false;
+        H.ui.renderSocialPanel();
+        const box = (H.ui.socialPanel as HTMLElement).querySelector('[data-element-id="0x10000270"]') as HTMLElement;
+        expect(box.textContent).toContain(is1999 ? 'Accept Fellowship Requests' : 'Ignore Fellowship Requests');
+        expect(box.dataset.optionOn).toBe(is1999 ? '1' : '0');
+        box.click();
+        expect(H.ui.optionsSettings.ignoreFellowshipRequests).toBe(true);
+        expect(box.dataset.optionOn).toBe(is1999 ? '0' : '1');
+        H.ui.optionsSettings.ignoreFellowshipRequests = false;
         expect(hiddenBy(FEATURE_FELLOWSHIP_CONTROLS, features).has(0x10000271)).toBe(is1999);
         expect(hiddenBy(FEATURE_KEYBIND_ACTIONS, features).has(0x10000083)).toBe(is1999);
         const before = !!H.ui.optionsSettings.autoAcceptFellowshipRequests;
@@ -668,6 +674,40 @@ describe('fellowship rows show only what the roster carries (behavioral, every e
     try {
       expect(vitals).toEqual(['3', '3']);
       expect(stats[0]).toMatch(/20.*%/);
+      // A roster that carries vitals never asks for an appraisal, and one coming back changes nothing.
+      const asked: number[] = [];
+      H.ui.callbacks.onAppraiseFellow = (g: number) => asked.push(g);
+      ((H.ui.socialPanel as HTMLElement).querySelectorAll('.fellow-row')[1] as HTMLElement).click();
+      expect(asked).toEqual([]);
+      expect(H.ui.noteFellowAppraisal(OWN + 1, { health: 1, healthMax: 2 })).toBe(false);
+    } finally { H.teardown(); }
+  }, 60_000);
+
+  it('S2, the 1999 roster: selecting a fellow asks for a quiet appraisal; its Health / Stamina / Mana fill that row', async () => {
+    const { H } = await rows([{ guid: OWN, name: 'Me', level: 12, shareLoot: false }, { guid: OWN + 1, name: 'Them', level: 7, shareLoot: false }], {});
+    try {
+      const asked: number[] = [];
+      H.ui.callbacks.onAppraiseFellow = (g: number) => asked.push(g);
+      const rowAt = (i: number) => (H.ui.socialPanel as HTMLElement).querySelectorAll('.fellow-row')[i] as HTMLElement;
+      const bars = () => [0, 1].map((i) => (rowAt(i).querySelector('[data-fellow-vitals]') as HTMLElement).dataset.fellowVitals);
+      rowAt(1).click();
+      expect(asked).toEqual([OWN + 1]);
+      expect(bars()).toEqual(['0', '0']);
+      // The appraisal's creature profile (health always; stamina / mana with ShowAttributes).
+      expect(H.ui.noteFellowAppraisal(OWN + 1, { health: 30, healthMax: 45,
+        attributes: { stamina: 20, staminaMax: 50, mana: 10, manaMax: 40 } })).toBe(true);
+      expect(bars()).toEqual(['0', '3']);
+      expect(rowAt(1).textContent).toContain('30');
+      // Not a fellow: ignored. Selecting someone else shows theirs once it comes (only the selected fellow's).
+      expect(H.ui.noteFellowAppraisal(0x50000099, { health: 1, healthMax: 2 })).toBe(false);
+      rowAt(0).click();
+      expect(asked).toEqual([OWN + 1, OWN]);
+      expect(bars()).toEqual(['0', '0']);
+      // The fellow leaves: the kept vitals go with them.
+      H.ui.setFellowshipData({ fellowshipName: 'Band', leaderGuid: OWN, open: false, isLocked: false, selfGuid: OWN, fellows: [{ guid: OWN, name: 'Me', level: 12, shareLoot: false }] });
+      H.ui.setFellowshipData({ fellowshipName: 'Band', leaderGuid: OWN, open: false, isLocked: false, selfGuid: OWN, fellows: [{ guid: OWN, name: 'Me', level: 12, shareLoot: false }, { guid: OWN + 1, name: 'Them', level: 7, shareLoot: false }] });
+      rowAt(1).click();
+      expect(bars()).toEqual(['0', '0']);
     } finally { H.teardown(); }
   }, 60_000);
 });
@@ -737,9 +777,9 @@ describe('Components page: the desired-level field goes with the rebuy book (beh
   }, 60_000);
 });
 
-describe('chat commands: an era lacking a feature does not offer its commands (behavioral)', () => {
-  /** The real command table over a context that records every send and print; everything else answers nothing. */
-  function system(withheld: Iterable<string>, gate?: LocalChatGate): { sys: CommandSystem<RetailCommandContext>; sent: number[]; printed: string[]; talk: string[] } {
+describe('chat commands: each era runs its own client\'s command table (behavioral)', () => {
+  /** The era's real command table over a context that records every send and print; everything else answers nothing. */
+  function system(table: 'eor' | 'ac1999', gate?: LocalChatGate): { sys: RetailCommandSystem; sent: number[]; printed: string[]; talk: string[] } {
     const sent: number[] = [];
     const printed: string[] = [];
     const talk: string[] = [];
@@ -753,42 +793,34 @@ describe('chat commands: an era lacking a feature does not offer its commands (b
       },
       confirm: (_text: string, yes: () => void) => yes(),
       friends: () => [], globalSquelchTypes: () => new Set(), chatPose: () => null, talkFocus: () => 1,
-      nowSeconds: () => 0, gender: () => 1, lastOutsideDeathCell: () => null,
+      nowSeconds: () => 0, gender: () => 1, lastOutsideDeathCell: () => null, lastTelleeName: () => 'Bob', lastTeller: () => 0,
       // As main.ts wires it: only where eraClientRules().chatToggle is 'local'.
       ...(gate ? { setLocalChatSquelched: (sq: boolean) => gate.set(sq) } : {}),
     };
     const ctx = new Proxy(own, { get: (t, k) => (typeof k === 'string' && k in t ? t[k] : () => undefined) }) as unknown as RetailCommandContext;
-    return { sys: new CommandSystem(ctx, retailCommandEntries(), withheld), sent, printed, talk };
+    return { sys: new RetailCommandSystem(ctx, table), sent, printed, talk };
   }
-  const WITHHELD_1999 = hiddenBy(FEATURE_COMMANDS, ERA_1999);
   /** A 1999 world's command system, as main.ts builds it. */
-  const system1999 = () => system(WITHHELD_1999, eraClientRules(eraProfile('ac1999-retail')).chatToggle === 'local' ? new LocalChatGate() : undefined);
+  const rules1999 = eraClientRules(eraProfile('ac1999-retail'));
+  const system1999 = () => system(rules1999.commandTable, rules1999.chatToggle === 'local' ? new LocalChatGate() : undefined);
 
-  it('end of retail and the classic eras withhold nothing', () => {
-    for (const p of Object.values(ERA_PROFILES)) {
-      if (p.id === 'ac1999-retail') continue;
-      expect(hiddenBy(FEATURE_COMMANDS, unsupportedFeatures(p)).size, p.id).toBe(0);
-    }
+  it('the table per era: the 1999 client\'s on 1999 only', () => {
+    for (const p of Object.values(ERA_PROFILES)) expect(eraClientRules(p).commandTable, p.id).toBe(p.id === 'ac1999-retail' ? 'ac1999' : 'eor');
   });
 
-  it('every withheld name is a real command-table entry', () => {
-    const names = new Set(retailCommandEntries().map((e) => e.name));
-    for (const n of WITHHELD_1999) expect(names.has(n), n).toBe(true);
-  });
-
-  it('1999: @afk sends no AFK action; the word falls through to the server as an unknown command does', () => {
-    const r = system(WITHHELD_1999);
+  it('1999: @afk is no command; the word falls through to the server as an unknown one does', () => {
+    const r = system1999();
     r.sys.onChatCommand('@afk', 1);
     expect(r.sent).toEqual([GameActionType.Talk]);
     expect(r.talk).toEqual(['@afk']);
-    const e = system([]);
+    const e = system('eor');
     e.sys.onChatCommand('@afk', 1);
     expect(e.sent).toEqual([GameActionType.SetAfkMode]);
   });
 
   it('1999: no registered command sends an action the 1999 game lacks, whatever its arguments', () => {
     const r = system1999();
-    const argSets = [[], ['x'], ['on'], ['off'], ['msg', 'hi'], ['list'], ['all'], ['Bob'], ['1'], ['open'], ['recall'], ['motd'], ['info', 'Bob']];
+    const argSets = [[], ['x'], ['on'], ['off'], ['msg', 'hi'], ['list'], ['all'], ['Bob'], ['1'], ['open'], ['recall'], ['motd'], ['info', 'Bob'], ['Bob,', 'hi']];
     let ran = 0;
     const offenders: string[] = [];
     for (const entry of r.sys.entries()) {
@@ -802,11 +834,10 @@ describe('chat commands: an era lacking a feature does not offer its commands (b
     }
     // @notell is a 1999 command too (kb ui-command-dispatch), with a different send: 1999's sent
     // 0x1EB, which no server handles (kb Communication/0x1EB), so a dropped 0x5B does what it did.
-    // @chat is client-side on 1999 (BUG.ac1999-chat-toggle-local) and sends nothing.
     expect(offenders.filter((o) => !/^@notell /.test(o))).toEqual([]);
-    expect(ran).toBeGreaterThan(500);
+    expect(ran).toBeGreaterThan(400);
     // The same sweep on the end-of-retail table does reach them (the sweep can see a miss).
-    const e = system([]);
+    const e = system('eor');
     const reached = new Set<string>();
     for (const line of ['@afk', '@house open', '@pklite', '@allegiance motd', '@consent who', '@marketplace']) {
       e.sent.length = 0;
@@ -818,7 +849,7 @@ describe('chat commands: an era lacking a feature does not offer its commands (b
 
   it('1999 @chat off / on: the client-side switch (UI_SetLocalChatSquelched @ 0x4d0470), nothing sent; end of retail asks the server', () => {
     const gate = new LocalChatGate();
-    const r = system(WITHHELD_1999, gate);
+    const r = system('ac1999', gate);
     r.sys.onChatCommand('@chat off', 1);
     expect(r.sent).toEqual([]);
     expect(r.printed).toEqual(['Local chat is now squelched.']);
@@ -831,8 +862,12 @@ describe('chat commands: an era lacking a feature does not offer its commands (b
     r.printed.length = 0;
     r.sys.onChatCommand('@chat', 1);
     expect(r.printed).toEqual(['Please specify if you want chat text on or off.']);
+    // CmdHandlers_DoChatToggle: any other single word does nothing at all.
+    r.printed.length = 0;
+    r.sys.onChatCommand('@chat maybe', 1);
+    expect(r.printed).toEqual([]);
     expect(r.sent).toEqual([]);
-    const e = system([]);
+    const e = system('eor');
     e.sys.onChatCommand('@chat off', 1);
     expect(e.sent).toEqual([GameActionType.ModifyGlobalSquelch]);
     expect(e.printed).toEqual([]);
@@ -842,31 +877,17 @@ describe('chat commands: an era lacking a feature does not offer its commands (b
     for (const p of Object.values(ERA_PROFILES)) expect(eraClientRules(p).chatToggle, p.id).toBe(p.id === 'ac1999-retail' ? 'local' : 'server');
   });
 
-  it('1999 @help: the list leaves out the house, fillcomps and allegiance groups; @help house is an unknown command', () => {
-    const r = system(WITHHELD_1999);
+  it('1999 @help is the 1999 list; end of retail @help is retail\'s text, unchanged', () => {
+    const r = system1999();
     r.sys.onChatCommand('@help', 1);
     const list = r.printed.join('');
-    expect(list).toContain('@help chatting');
-    expect(list).toContain('@help death');
-    for (const g of ['@help house', '@help fillcomps', '@help allegiances']) expect(list, g).not.toContain(g);
-    r.printed.length = 0;
-    r.sys.onChatCommand('@help house', 1);
-    expect(r.printed).toEqual(['Unknown command']);
-    r.printed.length = 0;
-    r.sys.onChatCommand('@help commands', 1);
-    const all = r.printed.join('');
-    expect(all).toContain('@tell');
-    expect(all).not.toMatch(/^@afk\b/m);
-    expect(all).not.toMatch(/^@house\b/m);
-  });
-
-  it('end of retail @help is retail\'s text, unchanged', () => {
-    const r = system([]);
-    r.sys.onChatCommand('@help', 1);
-    const list = r.printed.join('');
-    for (const g of ['@help house', '@help fillcomps', '@help allegiances']) expect(list, g).toContain(g);
-    expect(withoutWithheldLines('@a - x\n@help house - y\n', () => false)).toBe('@a - x\n@help house - y\n');
-    expect(withoutWithheldLines('@a - x\n@help house - y\n@house open\n', (n) => n === 'house')).toBe('@a - x\n');
+    expect(list.startsWith('Avaliable commands:\n  Note: You can subsitute a / for the @\n')).toBe(true);
+    expect(list).toContain('  @lifestone -- Kills your character.\n');
+    for (const g of ['@help house', 'fillcomps', 'allegiance']) expect(list, g).not.toContain(g);
+    const e = system('eor');
+    e.sys.onChatCommand('@help', 1);
+    const eor = e.printed.join('');
+    for (const g of ['@help house', '@help fillcomps', '@help allegiances']) expect(eor, g).toContain(g);
   });
 });
 

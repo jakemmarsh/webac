@@ -150,7 +150,14 @@ describe('8. equip says what the swap does to your armor; loot from your corpse 
   const GREAVES: AgentItem = { guid: 0x80004301, name: 'Studded Leather Greaves', where: 'main pack', validLocations: 0x4000, coverage: 0x200 };
   const GAUNTLETS: AgentItem = { guid: 0x80006735, name: 'Leather Gauntlets', where: 'equipped', mask: 0x20, coverage: 0x8000, validLocations: 0x20, armorLevel: 280, appraised: true };
   const GLOVES: AgentItem = { guid: 0x8000b0f1, name: 'Gloves', where: 'main pack', validLocations: 0x20, coverage: 0x8000, armorLevel: 218, appraised: true };
+  // BUG.eor-autowear-priority-pass — a piece whose coverage overlaps comes off by the agent's own move first
+  // (AutoWear takes nothing off), then the wear goes on.
   const swapOn = (on: AgentItem, off: AgentItem): void => {
+    Object.assign(host, { placeItem: (g: number) => {
+      host.sent.push(`off ${g.toString(16)}`);
+      setTimeout(() => { host.inv = host.inv.map((i) => (i.guid === g ? { ...i, where: 'main pack', mask: undefined } : i)); }, 200);
+      return true;
+    } });
     host.wield = (g: number) => {
       host.sent.push(`wield ${g.toString(16)}`);
       setTimeout(() => {

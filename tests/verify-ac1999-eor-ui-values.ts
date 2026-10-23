@@ -93,23 +93,50 @@ describe('the client profile: 1999 values from the 1999 client.exe, end of retai
     expect(EOR.chatTargetText).toBeNull();
   });
 
-  it('8. option rows: every inert / relabelled row is a real Character-page row; end of retail hides and relabels none', () => {
-    const names = new Set(CHARACTER_SETTINGS_ROWS.map((r) => r.playerOption));
-    for (const n of [...R1999.characterOptionsInert, ...Object.keys(R1999.characterOptionLabels)]) expect(names.has(n), n).toBe(true);
-    expect([...R1999.characterOptionsInert].sort()).toEqual(['DisplayAge', 'DisplayDateOfBirth', 'DisplayNumberDeaths',
-      'FilterLanguage', 'MainPackPreferred', 'UseChargeAttack']);
-    // The auto-accept row is the autoAcceptFellowship feature's (with its pane checkbox and key), not listed twice.
-    expect(hiddenBy(FEATURE_CHARACTER_OPTIONS, unsupportedFeatures(eraProfile('ac1999-retail'))).has('FellowshipAutoAcceptRequests')).toBe(true);
-    expect(hiddenBy(FEATURE_CHARACTER_OPTIONS, unsupportedFeatures(eraProfile('eor'))).size).toBe(0);
-    // Rows that work stay: the server reads them (share XP / loot, helm, missiles, logons) or our client acts on them.
-    for (const keep of ['FellowshipShareXP', 'FellowshipShareLoot', 'ShowHelm', 'LeadMissileTargets', 'UseFastMissiles',
-      'DisplayAllegianceLogonNotifications', 'CoordinatesOnRadar', 'SideBySideVitals', 'SpellDuration', 'DisplayTimeStamps']) {
-      expect(R1999.characterOptionsInert.includes(keep), keep).toBe(false);
+  it('8. option rows: 1999 is its CharOptionsPanel\'s fifteen, in order; end of retail its own page (null)', () => {
+    const page = R1999.characterOptionsPage!;
+    // CharOptionsPanel @ 0x00591260, CharOptionsPanel.c :209-572, top to bottom.
+    expect(page.map((o) => o.label)).toEqual([
+      'Automatically Create Shortcuts', 'Display Tooltips', 'Stay in Chat Mode after sending a message',
+      'Vivid targeting indicator', 'Accept Allegiance Requests', 'Accept Fellowship Requests',
+      'Attempt to Deceive Other Players', 'Let Other Players Give You Items', 'Run as Default Movement',
+      'Advanced Combat Interface (No Panel)', 'Auto Target', 'Automatically Repeat Attacks',
+      'Automatically keep combat targets in view', 'Invert Mouse Look Up/Down', 'Right-click mouselook',
+    ]);
+    // Every row either is an end-of-retail page row with a setting, or carries its own key + options_ bit
+    // (the three end of retail dropped: 0x1, 0x10, 0x4000). Together the bits are exactly 0x1-0x8000 less 0x20.
+    const byName = new Map(CHARACTER_SETTINGS_ROWS.map((r) => [r.playerOption, r]));
+    let bits = 0;
+    for (const o of page) {
+      const row = byName.get(o.playerOption);
+      if (o.ourKey) {
+        expect(row, o.playerOption).toBeUndefined();
+        bits |= o.options1Mask!;
+      } else {
+        expect(row?.ourKey, o.playerOption).toBeTruthy();
+        expect(row!.pref.field, o.playerOption).toBe('options1');
+        bits |= row!.pref.mask;
+      }
     }
-    expect(R1999.characterOptionLabels.ViewCombatTarget).toBe('Automatically keep combat targets in view');
-    expect(R1999.characterOptionLabels.ShowTooltips).toBe('Display Tooltips');
-    expect(EOR.characterOptionsInert).toEqual([]);
-    expect(EOR.characterOptionLabels).toEqual({});
+    expect(bits).toBe(0xffdf);
+    expect(page.filter((o) => o.inverted).map((o) => o.playerOption)).toEqual(['IgnoreAllegianceRequests', 'IgnoreFellowshipRequests']);
+    // Gone on 1999: every later row, among them the ones the AC1999 server would honour.
+    for (const gone of ['FellowshipShareXP', 'FellowshipShareLoot', 'ShowHelm', 'DisplayAllegianceLogonNotifications',
+      'PersistentAtDay', 'DisableDistanceFog', 'DisableMostWeatherEffects', 'SideBySideVitals', 'DisplayTimeStamps',
+      'LeadMissileTargets', 'UseFastMissiles', 'MainPackPreferred', 'CoordinatesOnRadar', 'SpellDuration']) {
+      expect(page.some((o) => o.playerOption === gone), gone).toBe(false);
+    }
+    expect(EOR.characterOptionsPage).toBeNull();
+    expect(hiddenBy(FEATURE_CHARACTER_OPTIONS, unsupportedFeatures(eraProfile('eor'))).size).toBe(0);
+    // Pins: 1999 never had the later local effects; end of retail never had 1999's three dropped bits.
+    expect(R1999.optionPins).toEqual({ alwaysDaylight: false, disableDistanceFog: false, disableWeather: false,
+      sideBySideVitals: false, displayTimestamps: false, useMouseTurning: false, shareFellowshipXP: true, shareFellowshipLoot: false });
+    expect(EOR.optionPins).toEqual({ autoCreateShortcuts: false, invertMouseLook: false, rightClickMouselook: false });
+  });
+
+  it('8b. heritage line and vitae panel: the 1999 client\'s; end of retail its own', () => {
+    expect([R1999.heritageLine, R1999.vitaePanel]).toEqual(['ac1999', 'ac1999']);
+    expect([EOR.heritageLine, EOR.vitaePanel]).toEqual(['eor', 'eor']);
   });
 
   it('9 / 10. examine and hover text', () => {
@@ -222,7 +249,12 @@ function stubLayoutRenderer(H: GameUIFixture): any {
     };
   };
   return {
-    render: (_id: number, parent: HTMLElement) => makeHandle(parent),
+    render: (id: number, parent: HTMLElement) => {
+      const h = makeHandle(parent);
+      // The Gameplay Options page (0x2100002a): its buttons exist up front, as LayoutRenderer builds them.
+      if (id === 0x2100002a) for (const b of [0x10000203, 0x10000617, 0x10000204, 0x100005cc]) h.elements.get(b);
+      return h;
+    },
     renderPanel: (_id: number, parent: HTMLElement) => makeHandle(parent),
     getTextureDataURLWithAlpha: () => null, getResolvedLayout: () => null, setFontResolver: () => {},
   };
@@ -340,21 +372,137 @@ for (const [era, rules] of [['ac1999-retail', R1999], ['eor', EOR]] as const) {
       expect(H.ui.talkFocusButtonText()).toBe('Chat');
     });
 
-    it(is1999 ? '8. the Character page drops the inert rows and wears the 1999 labels' : '8. the Character page keeps every row and the DAT labels', () => {
+    it(is1999 ? '8. the Character page is the 1999 fifteen, in order, with its labels' : '8. the Character page keeps every row and the DAT labels', () => {
       H.ui.optionsTab = 'character';
       if (!H.ui.optionsPanelVisible) H.ui.toggleOptionsPanel(); else H.ui.renderOptionsPanel();
       const rows = [...H.ui.optionsPanel.querySelectorAll('.option-toggle-row')] as HTMLElement[];
-      const keys = new Set(rows.map((r) => r.dataset.optionKey));
-      for (const k of ['useMainPackAsDefaultForPickingUpItems', 'filterLanguage', 'allowSeeDateOfBirth', 'allowSeeAge',
-        'allowSeeNumberOfDeaths', 'autoAcceptFellowshipRequests', 'useChargeAttack']) expect(keys.has(k), k).toBe(!is1999);
-      // BUG.webac11-radar-1999: the 1999 client had no radar coordinates and no spell-duration readout.
-      for (const k of ['showCoordinatesByTheRadar', 'displaySpellDurations']) expect(keys.has(k), k).toBe(!is1999);
-      for (const k of ['shareFellowshipXP', 'shareFellowshipLoot', 'showHelm', 'keepCombatTargetsInView', 'runAsDefault']) {
-        expect(keys.has(k), k).toBe(true);
+      const keys = rows.map((r) => r.dataset.optionKey);
+      if (is1999) {
+        expect(keys).toEqual(['autoCreateShortcuts', 'showTooltips', 'stayInChatMode', 'vividTargetingIndicator',
+          'ignoreAllegianceRequests', 'ignoreFellowshipRequests', 'attemptToDeceiveOthers', 'allowGive', 'runAsDefault',
+          'advancedCombatUI', 'autoTarget', 'repeatAttacks', 'keepCombatTargetsInView', 'invertMouseLook', 'rightClickMouselook']);
+      } else {
+        for (const k of ['useMainPackAsDefaultForPickingUpItems', 'filterLanguage', 'allowSeeDateOfBirth', 'allowSeeAge',
+          'allowSeeNumberOfDeaths', 'autoAcceptFellowshipRequests', 'useChargeAttack', 'showCoordinatesByTheRadar',
+          'displaySpellDurations', 'shareFellowshipXP', 'shareFellowshipLoot', 'showHelm', 'alwaysDaylight', 'disableDistanceFog',
+          'keepCombatTargetsInView', 'runAsDefault', 'ignoreAllegianceRequests']) expect(keys.includes(k), k).toBe(true);
+        // end of retail has none of the three 1999 bits it dropped.
+        for (const k of ['autoCreateShortcuts', 'invertMouseLook', 'rightClickMouselook']) expect(keys.includes(k), k).toBe(false);
       }
       const label = rows.find((r) => r.dataset.optionKey === 'keepCombatTargetsInView')!.textContent;
       expect(label).toContain(is1999 ? 'Automatically keep combat targets in view' : 'Keep Combat Targets in View');
+      // The allegiance-request row: 1999 asks "Accept", showing the Ignore bit inverted.
+      const alleg = rows.find((r) => r.dataset.optionKey === 'ignoreAllegianceRequests')!;
+      H.ui.optionsSettings.ignoreAllegianceRequests = false;
+      H.ui.renderOptionsPanel();
+      const alleg2 = ([...H.ui.optionsPanel.querySelectorAll('.option-toggle-row')] as HTMLElement[]).find((r) => r.dataset.optionKey === 'ignoreAllegianceRequests')!;
+      expect(alleg.textContent).toContain(is1999 ? 'Accept Allegiance Requests' : 'Ignore');
+      expect(alleg2.dataset.optionOn).toBe(is1999 ? '1' : '0');
       H.ui.toggleOptionsPanel();
+    });
+
+    it(is1999 ? '8c. an era-only bit sends the whole options word; a toggle of it never sends 0x05' : '8c. end of retail pins the 1999 bits off', () => {
+      const bits: Array<[number, boolean]> = [];
+      const singles: number[] = [];
+      const cb = (H.ui as unknown as { callbacks: Record<string, unknown> }).callbacks;
+      const prevBits = cb.onCharacterOptionBits; const prevToggle = cb.onCharacterOptionToggle;
+      cb.onCharacterOptionBits = (m: number, v: boolean) => bits.push([m, v]);
+      cb.onCharacterOptionToggle = (o: number) => singles.push(o);
+      H.ui.optionsSettings.rightClickMouselook = false;
+      H.ui.optionsTab = 'character';
+      if (!H.ui.optionsPanelVisible) H.ui.toggleOptionsPanel(); else H.ui.renderOptionsPanel();
+      const row = ([...H.ui.optionsPanel.querySelectorAll('.option-toggle-row')] as HTMLElement[]).find((r) => r.dataset.optionKey === 'rightClickMouselook');
+      if (is1999) {
+        row!.click();
+        expect(bits).toEqual([[0x4000, true]]);
+        expect(singles).toEqual([]);
+        expect(H.ui.optionOn('rightClickMouselook')).toBe(true);
+      } else {
+        expect(row).toBeUndefined();
+        H.ui.optionsSettings.rightClickMouselook = true; // as a 1999 session would have stored it
+        expect(H.ui.optionOn('rightClickMouselook')).toBe(false);
+      }
+      H.ui.optionsSettings.rightClickMouselook = false;
+      cb.onCharacterOptionBits = prevBits; cb.onCharacterOptionToggle = prevToggle;
+      H.ui.toggleOptionsPanel();
+    });
+
+    it(is1999 ? '8d. 1999 pins the later local effects off whatever was stored, and lists no row for them' : '8d. end of retail reads the stored value', () => {
+      for (const k of ['alwaysDaylight', 'disableDistanceFog', 'disableWeather', 'sideBySideVitals', 'displayTimestamps', 'useMouseTurning']) {
+        H.ui.optionsSettings[k] = true;
+        expect(H.ui.optionOn(k), k).toBe(!is1999);
+        H.ui.optionsSettings[k] = false;
+      }
+      H.ui.optionsTab = 'config';
+      if (!H.ui.optionsPanelVisible) H.ui.toggleOptionsPanel(); else H.ui.renderOptionsPanel();
+      const keys = ([...H.ui.optionsPanel.querySelectorAll('.option-toggle-row')] as HTMLElement[]).map((r) => r.dataset.optionKey);
+      expect(keys.includes('useMouseTurning')).toBe(!is1999);
+      expect(keys.includes('invertMouseLookYAxis')).toBe(true);
+      H.ui.toggleOptionsPanel();
+    });
+
+    it(is1999 ? '8e. restoring the options word sets the 1999 bits' : '8e. restoring the options word ignores the 1999 bits', () => {
+      for (const k of ['autoCreateShortcuts', 'invertMouseLook', 'rightClickMouselook']) H.ui.optionsSettings[k] = false;
+      const changed = H.ui.restoreCharacterOptions(0x50c4a542 | 0x1 | 0x10 | 0x4000, -1);
+      for (const k of ['autoCreateShortcuts', 'invertMouseLook', 'rightClickMouselook']) {
+        expect(changed.includes(k), k).toBe(is1999);
+        expect(H.ui.optionOn(k), k).toBe(is1999);
+      }
+      for (const k of ['autoCreateShortcuts', 'invertMouseLook', 'rightClickMouselook']) H.ui.optionsSettings[k] = false;
+    });
+
+    it(is1999 ? '8g. the Gameplay page has no Use Mouse Turning Settings button (1999 GameOptionsPanel)' : '8g. the Gameplay page keeps Use Mouse Turning Settings', () => {
+      H.ui.optionsTab = 'gameplay';
+      if (!H.ui.optionsPanelVisible) H.ui.toggleOptionsPanel(); else H.ui.renderOptionsPanel();
+      const btn = H.ui.optionsPanel.querySelector('[data-element-id="0x100005cc"]') as HTMLElement | null;
+      expect(btn).not.toBeNull();
+      expect(btn!.style.display === 'none').toBe(is1999);
+      expect(btn!.dataset.optionsAction === undefined).toBe(is1999);
+      const exit = H.ui.optionsPanel.querySelector('[data-element-id="0x10000203"]') as HTMLElement;
+      expect(exit.dataset.optionsAction).toBeDefined();
+      H.ui.toggleOptionsPanel();
+    });
+
+    it(is1999 ? '8h. the heritage line is "(Sex Heritage Template)" from the server strings' : '8h. the heritage line stays "Sex Heritage"', () => {
+      H.ui.setCharacterStrings({ sex: 'Female', heritage: "Gharu'ndim", template: 'Blademaster' });
+      if (is1999) expect(H.ui.charHeritageLine()).toBe("(Female Gharu'ndim Blademaster)");
+      else expect(H.ui.charHeritageLine()).toMatch(/^\S+ \S/); // gmStatManagementUI: "Male Aluvian", no parentheses, no template
+      expect(H.ui.charHeritageLine().includes('Blademaster')).toBe(is1999);
+      // A string the server didn't send is left out (StatRegion_UpdateFromPlayerDesc's InqString guards).
+      H.ui.setCharacterStrings({ sex: 'Female', heritage: "Gharu'ndim" });
+      if (is1999) expect(H.ui.charHeritageLine()).toBe("(Female Gharu'ndim)");
+      H.ui.setCharacterStrings({});
+    });
+
+    it(is1999 ? '8i. the vitae panel closes itself at full strength (1999 has no full-strength text)' : '8i. the vitae panel shows its full-strength text', () => {
+      const ui = H.ui as unknown as { vitaePanelSource: unknown; vitaePanelVisible: boolean; toggleVitaePanel(): void; refreshVitaePanel(): void };
+      let penalty = 0;
+      ui.vitaePanelSource = () => ({ vitaePenalty: penalty, vitaeCpPool: 0, deathLevel: 20, level: 20 });
+      ui.toggleVitaePanel();
+      expect(ui.vitaePanelVisible).toBe(!is1999);
+      if (ui.vitaePanelVisible) ui.toggleVitaePanel();
+      penalty = 0.05;
+      ui.toggleVitaePanel();
+      expect(ui.vitaePanelVisible).toBe(true);
+      // The penalty wears off with the panel open: the 1999 panel closes on its next update.
+      penalty = 0;
+      ui.refreshVitaePanel();
+      expect(ui.vitaePanelVisible).toBe(!is1999);
+      if (ui.vitaePanelVisible) ui.toggleVitaePanel();
+      ui.vitaePanelSource = null;
+    });
+
+    it('8f. the logout prompt: the 1999 Leave World text is end of retail\'s own, word for word', () => {
+      const shown: string[] = [];
+      const orig = H.ui.showConfirmationDialog;
+      H.ui.showConfirmationDialog = (text: string) => { shown.push(text); };
+      (H.ui as unknown as { logoutContext: boolean }).logoutContext = false;
+      expect(H.ui.requestEndCharacterSession()).toBe(true);
+      H.ui.showConfirmationDialog = orig;
+      (H.ui as unknown as { logoutContext: boolean }).logoutContext = false;
+      expect(shown.length).toBe(1);
+      // GameOptionsPanel_ListenToMessage's literal (its leading layout newlines aside) = ID_Client_EndCharacterSessionConfirm.
+      expect(shown[0]).toBe('This will exit your character from the game world.\n\nAre you sure?');
     });
   });
 }

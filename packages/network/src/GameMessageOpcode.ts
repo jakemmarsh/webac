@@ -75,6 +75,9 @@ export enum GameMessageOpcode {
   CharacterCreate                 = 0xF656,
   CharacterEnterWorld             = 0xF657,
   CharacterList                   = 0xF658,
+  // The 1999 character-select news (LoginCharServerMOTD): only the AC1999 server sends it; the
+  // 1999 adapter keeps it as {String16 news} (CharSelect1999.ts). End of retail has no such message.
+  CharSelectNews                  = 0xF65A,
   CharacterError                  = 0xF659,
   ForceObjectDescSend             = 0xF6EA,
   ObjectCreate                    = 0xF745,

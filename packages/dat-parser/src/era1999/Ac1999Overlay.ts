@@ -13,7 +13,7 @@
  * (0x0E000002 / 0x0E000018 / 0x0E00000E), String 0x31 and PhysicsScriptTable
  * 0x34 (parses as is, but its keys are renumbered to end of retail's
  * PlayScript: docs/ac1999-support.md "Meaning checks") and SpellComponentTable
- * 0x0E00000F and ChatPoseTable 0x0E000007 (strings lose their NUL). Synthetic: the spell-component
+ * 0x0E00000F, ChatPoseTable 0x0E000007 and SkillTable 0x0E000004 (strings lose their NUL). Synthetic: the spell-component
  * DualDidMapper 0x27000002 the 1999 portal lacks (the client hardcoded the
  * map), served whatever the base, a streamed set included. Every other type
  * already parses and means the same (docs/ac1999-support.md). Cell routing: EnvCells.
@@ -22,7 +22,7 @@ import type { DatOverlay } from '../DatDatabase.js';
 import { transcodeEnvCell1999, transcodeEnvironment1999, transcodeGfxObj1999 } from './Geometry1999.js';
 import {
   REGION_1999_HARDWARE_ID, SPELL_COMPONENT_MAPPER_ID, synthesizeSpellComponentMapper1999, transcodeCharGen1999,
-  transcodeChatPoseTable1999, transcodePhysicsScriptTable1999, transcodeRegion1999, transcodeSpellComponentTable1999, transcodeSpellTable1999,
+  transcodeChatPoseTable1999, transcodePhysicsScriptTable1999, transcodeRegion1999, transcodeSkillTable1999, transcodeSpellComponentTable1999, transcodeSpellTable1999,
   transcodeString1999, transcodeXpTable1999,
 } from './Tables1999.js';
 import {
@@ -82,6 +82,7 @@ const XPTABLE = 0x0e000018;
 const SPELLTABLE = 0x0e00000e;
 const SPELLCOMPONENTTABLE = 0x0e00000f;
 const CHATPOSETABLE = 0x0e000007;
+const SKILLTABLE = 0x0e000004;
 const REGION = 0x13000000;
 
 type Translate = (raw: ArrayBuffer, id: number, getRaw: (id: number) => ArrayBuffer | null) => ArrayBuffer | null;
@@ -93,6 +94,7 @@ function portalTranslator(id: number): Translate | null {
     case SPELLTABLE: return (raw) => transcodeSpellTable1999(raw);
     case SPELLCOMPONENTTABLE: return (raw) => transcodeSpellComponentTable1999(raw);
     case CHATPOSETABLE: return (raw) => transcodeChatPoseTable1999(raw);
+    case SKILLTABLE: return (raw) => transcodeSkillTable1999(raw);
     default: break;
   }
   switch (id >>> 24) {

@@ -10,21 +10,25 @@
  * 0xF62C / 0x2EB bytes through the real 1999 adapter, the bridge's whitelist, the bridge's
  * route, and tools/watch-refusals.sh.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
-  RefusalReporter, REFUSAL_ROLLUP_MS, MAX_REFUSAL_CODES, refusalHash, refusalTemplate, scrubNames, weenieCode,
-  type RefusalEvent,
+  RefusalReporter, REFUSAL_ROLLUP_MS, MAX_REFUSAL_CODES, NOT_REFUSAL_CODES, isNoticeCode, refusalHash, refusalTemplate, scrubNames, weenieCode,
+  REFUSAL_TEXT, NAME_FIRST_REFUSAL, isServerTextRefusal, type RefusalEvent,
 } from '../packages/renderer/src/telemetry/RefusalReporter';
+import { REFUSAL_VOCABULARY, isTargetPromptNotice } from '../packages/renderer/src/telemetry/RefusalTemplates';
+import { BASE_REFUSAL_VOCABULARY } from '../packages/shared/src/util/RefusalTextSafety';
+import { aceReferenceExists } from './_harness/reference';
 import { sanitizeClientRefusal } from '../services/ws-tcp-bridge/src/clientRefusal';
 import { resolveBridgeConfig, type BridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil';
 import { createBridgeServer } from '../services/ws-tcp-bridge/src/server';
 import { GameUI } from '../packages/renderer/src/ui/GameUI';
 import { InventoryRequestTracker, InventoryRequest, weenieErrorText, weenieErrorWithStringText } from '../packages/shared/src/index';
 import { gateInventoryRequestSend } from '../packages/renderer/src/inventory/InventoryRequests';
+import { USE_STATUS_TEMPLATES, USE_TARGET_PROMPT_TEMPLATE, isUseStatusNotice } from '../packages/renderer/src/input/UseObject';
 import { GameActionType } from '../packages/network/src/GameActionType';
 import { deserializeMessage, serializeGameEvent, BinaryWriter } from '../packages/network/src/MessageSerializer';
 import { ServerMessageHandler } from '../packages/renderer/src/network/ServerMessageHandler';
@@ -91,6 +95,33 @@ describe('RefusalReporter: first at once, repeats rolled up', () => {
     for (const t of ['AutoRun ON', 'AutoRun OFF', 'Casting Flame Bolt I', 'A Portal Storm is imminent - leave this crowded area!', 'In Portal Space - Please Wait...']) g.r.clientSpew(t);
     g.r.quietly(() => g.r.clientSpew('Use comma after the name for targeted chat.'));
     expect(g.events).toEqual([]);
+  });
+
+  it('skips the notices ACE sends as WeenieErrors at every login (0x51D Turbine Chat is enabled, 0x51B entered the channel); a real refusal is still reported', () => {
+    const g = rig();
+    g.r.serverCode('weenie_error', 0x051d, 'Turbine Chat is enabled.', 'none');
+    g.r.serverCode('weenie_error_str', 0x051b, 'You have entered the _ channel.', 'chat');
+    g.r.serverCode('weenie_error_str', 0x050d, ' is now the leader of this fellowship.', 'chat');
+    expect(g.events).toEqual([]);
+    g.r.serverCode('weenie_error', 0x001c, null, 'none');
+    // The channel refusals stay refusals.
+    g.r.serverCode('weenie_error', 0x0423, "You can't use that channel.", 'chat');
+    expect(g.events.map((e) => e.code)).toEqual(['we:0x001c', 'we:0x0423']);
+    expect(NOT_REFUSAL_CODES.weenie_error.has(0x051d)).toBe(true);
+    expect(NOT_REFUSAL_CODES.weenie_error_str.has(0x051b)).toBe(true);
+    // A code's set is its context's: 0x51B as a plain WeenieError is not a notice.
+    expect(isNoticeCode('weenie_error', 0x051b)).toBe(false);
+  });
+
+  it('skips a use\'s own status lines (UseObject USE_STATUS_TEMPLATES), which every use posted as a refusal before 2026-10-23', () => {
+    const g = rig();
+    for (const t of ['Approaching Hudriffa', 'Using the Bread', 'Using the Door', 'Using the Healing Kit on Bob']) g.r.clientSpew(t);
+    expect(g.events).toEqual([]);
+    // The use decision posts exactly those templates; a door that won't open by hand is still a refusal.
+    expect(isUseStatusNotice(USE_STATUS_TEMPLATES.approaching.replace('%s', 'Hudriffa'))).toBe(true);
+    expect(isUseStatusNotice("You can't open or close this Door that way")).toBe(false);
+    g.r.clientSpew("You can't open or close this Door that way");
+    expect(g.events).toHaveLength(1);
   });
 
   it('carries the refused action when the gate ran inside forAction', () => {
@@ -305,4 +336,155 @@ describe('tools/watch-refusals.sh prints each new (era, code) once', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+/* ── TELEMETRY.refusal-name-safety ─────────────────────────────────────── */
+
+describe('name safety: no character or object name ever leaves in a refusal', () => {
+  const PLAYERS = ['Reemer', 'Ming Masun', 'Danath', 'Nimic', 'Nsight'];
+  const noName = (events: RefusalEvent[]) => {
+    const all = JSON.stringify(events);
+    for (const n of PLAYERS) for (const part of n.split(' ')) expect(all).not.toContain(part);
+  };
+
+  it('the loot-consent family (production, build 1e71a1abb705) is not reported and never carries the name', () => {
+    const g = rig('eor');
+    for (const n of PLAYERS) {
+      g.r.serverText('server_text', `${n} has given you permission to loot his or her kills.`, 0);
+      g.r.serverText('server_text', `${n} does not have permission to loot your kills.`, 0);
+      g.r.serverText('server_text', `You have lost permission to loot the kills of ${n}.`, 0);
+      g.r.serverText('server_text', `${n} doesn't have permission to loot your corpse.`, 0);
+      g.r.serverText('server_text', `${n}'s permission to loot your corpse has been revoked.`, 0);
+      g.r.serverText('server_text', `You don't have permission to loot ${n}'s corpse.`, 0);
+      g.r.serverText('server_text', `You don't have corpse looting permission from ${n}.`, 0);
+      // Even as an error-type line or a transient, a consent notice is a notice.
+      g.r.serverText('server_text', `${n} has given you permission to loot his or her kills.`, 0x1a);
+      g.r.serverText('transient', `${n} does not have permission to loot your kills.`, null);
+    }
+    g.r.serverText('server_text', "You no longer have permission to loot anyone else's kills.", 0);
+    g.r.serverText('server_text', `You have permissions to loot a corpse from these players:\n${PLAYERS.join('\n')}`, 0);
+    g.r.serverText('server_text', 'You have cleared your consent list. Players will have to permit you again to allow you access to their corpse.', 0);
+    g.r.serverText('server_text', "You do not have permission to loot anyone's corpse.", 0);
+    expect(g.events).toEqual([]);
+  });
+
+  it('a real refusal\'s server text is still reported, its words intact', () => {
+    const g = rig('eor');
+    g.r.serverText('server_text', 'You do not have enough Arcane Lore to learn this spell.', 0);
+    g.r.serverText('server_text', 'You do not have permission to loot that corpse!', 0);
+    g.r.serverText('server_text', 'You are encumbered!', 0);
+    g.r.serverText('server_text', 'You must pick that up first', 0x1a);
+    g.r.serverText('server_text', 'You have solved this quest too recently!', 0);
+    expect(g.events.map((e) => e.text)).toEqual([
+      'You do not have enough Arcane Lore to learn this spell.',
+      'You do not have permission to loot that corpse!',
+      'You are encumbered!',
+      'You must pick that up first',
+      'You have solved this quest too recently!',
+    ]);
+  });
+
+  it('a refusal led by an unknown name (one word or two) is reported with the name scrubbed, one code for all', () => {
+    const g = rig('eor');
+    g.r.serverText('server_text', 'Reemer is too busy to accept gifts right now.', 0);
+    g.r.serverText('server_text', 'Ming Masun is too busy to accept gifts right now.', 0);
+    g.r.serverText('server_text', 'Nimic is not accepting fellowship requests.', 0);
+    expect(g.events.map((e) => e.text)).toEqual(['_ is too busy to accept gifts right now.', '_ is not accepting fellowship requests.']);
+    g.r.flush();
+    expect(g.events[2]).toMatchObject({ code: g.events[0].code, count: 1 });
+    noName(g.events);
+  });
+
+  it('a name the scrub doesn\'t know, anywhere in the line, leaves as _; a speech shape or a mostly-name line sends no text', () => {
+    const g = rig('eor');
+    g.r.serverText('transient', 'You cannot give that to Danath while Danath is trading with Nsight.', null);
+    g.r.serverText('transient', 'You tell Reemer, "meet me at the lifestone"', null);
+    g.r.serverText('transient', 'Ming Masun Danath Nimic!', null);
+    g.r.serverText('server_text', 'You cannot use "Nsight Blade" here.', 0);
+    expect(g.events).toHaveLength(4);
+    expect(g.events[0].text).toBe('You cannot give that to _ while _ is trading with _.');
+    expect(g.events[1]).toMatchObject({ text: null, context: 'transient' });
+    expect(g.events[2]).toMatchObject({ text: null, context: 'transient' });
+    expect(g.events[3].text).toBe('You cannot use _ here.');
+    for (const e of g.events) expect(e.code).toMatch(/^t:[0-9a-f]{8}$/);
+    noName(g.events);
+  });
+
+  it('client spew lines are held to the same rule (an unknown object name in a client line)', () => {
+    const g = rig('eor');
+    g.r.clientSpew('You cannot use the Nsight Blade because you are trading it');
+    g.r.clientSpew('Reemer is too busy to accept gifts right now.');
+    expect(g.events.map((e) => e.text)).toEqual(['You cannot use the _ because you are trading it', '_ is too busy to accept gifts right now.']);
+    noName(g.events);
+  });
+
+  it('the target-mode prompt "Choose a target for the _" is a prompt, not a refusal (both eras, the UseObject literal)', () => {
+    expect(USE_TARGET_PROMPT_TEMPLATE).toBe('Choose a target for the %s');
+    const g = rig('eor');
+    g.r.clientSpew(USE_TARGET_PROMPT_TEMPLATE.replace('%s', 'Healing Kit'));
+    g.r.serverText('transient', 'Choose a target for the Lockpick', null);
+    expect(g.events).toEqual([]);
+    expect(isTargetPromptNotice('Choose a target for the Mana Stone')).toBe(true);
+    // The "select first" message stays a refusal.
+    g.r.clientSpew('Select your target before using the Healing Kit');
+    expect(g.events.map((e) => e.text)).toEqual(['Select your target before using the _']);
+  });
+
+  it('REFUSAL_TEXT is anchored: notice wording with "permission" / "too busy" / "not allowed" mid-line is not a refusal', () => {
+    expect(REFUSAL_TEXT.test('Reemer has given you permission to loot his or her kills.')).toBe(false);
+    expect(REFUSAL_TEXT.test('Your fellow is not allowed to see this.')).toBe(true);
+    expect(isServerTextRefusal('The vendor says the shop is not allowed to open.', 0)).toBe(false);
+    expect(isServerTextRefusal('Bob tells you, "you are too busy"', 0)).toBe(false);
+    expect(isServerTextRefusal('Reemer is too busy to accept gifts right now.', 0)).toBe(true);
+    expect(NAME_FIRST_REFUSAL.test('Ming Masun cannot be banned from the allegiance!')).toBe(true);
+  });
+
+  it('every capitalized word the page may send is one the bridge vouches for', () => {
+    const extra = [...REFUSAL_VOCABULARY.exact].filter((w) => /^[A-Z]/.test(w) && !BASE_REFUSAL_VOCABULARY.exact.has(w));
+    expect(extra).toEqual([]);
+  });
+
+  it('the bridge drops a text that still carries a name (an old page), keeping the code', () => {
+    const old = sanitizeClientRefusal({
+      outcome: 'refusal', code: 't:0123abcd', source: 'server', context: 'server_text', sink: 'chat', count: 1, first: true,
+      text: 'Reemer has given you permission to loot his or her kills.',
+    })!;
+    expect(old).toMatchObject({ code: 't:0123abcd', context: 'server_text', text: null });
+    expect(sanitizeClientRefusal({ outcome: 'refusal', code: 't:0123abcd', text: 'You tell _, hi' })!.text).toBeNull();
+    expect(sanitizeClientRefusal({ outcome: 'refusal', code: 't:0123abcd', text: 'You cannot use "Blade" here.' })!.text).toBeNull();
+    expect(sanitizeClientRefusal({ outcome: 'refusal', code: 't:0123abcd', text: '_ is too busy to accept gifts right now.' })!.text)
+      .toBe('_ is too busy to accept gifts right now.');
+    expect(sanitizeClientRefusal({ outcome: 'refusal', code: 't:0123abcd', text: 'You do not have enough Arcane Lore to learn this spell.' })!.text)
+      .toBe('You do not have enough Arcane Lore to learn this spell.');
+  });
+
+  describe.skipIf(!aceReferenceExists(resolve(__dirname, '..', 'reference/ACE/Source/ACE.Server/Entity/Fellowship.cs')))(
+    'every loot-consent line ACE sends is a known notice or a real refusal',
+    () => {
+      let lines: string[] = [];
+      beforeAll(() => {
+        const root = resolve(__dirname, '..', 'reference/ACE/Source/ACE.Server');
+        for (const f of ['Entity/Fellowship.cs', 'WorldObjects/Player_Death.cs']) {
+          const src = readFileSync(join(root, f), 'utf8');
+          for (const m of src.matchAll(/GameMessageSystemChat\(\s*\$?"((?:[^"\\]|\\.)*)"/g)) {
+            if (/permission|consent/i.test(m[1])) lines.push(m[1].replace(/\{[^}]*\}/g, 'Ming Masun').replace(/\\n/g, '\nReemer'));
+          }
+        }
+        lines = [...new Set(lines)];
+      });
+      it('scans them, and only the refusals are reported, name-free', () => {
+        expect(lines.length).toBeGreaterThan(10);
+        const g = rig('eor');
+        const reported: string[] = [];
+        for (const l of lines) {
+          const before = g.events.length;
+          g.r.serverText('server_text', l, 0);
+          if (g.events.length > before) reported.push(l);
+        }
+        // Not accepting permissions is the one refusal of the family (the other player's choice).
+        expect(reported).toEqual(['Ming Masun is not accepting corpse looting permissions from other players.']);
+        noName(g.events);
+      });
+    },
+  );
 });

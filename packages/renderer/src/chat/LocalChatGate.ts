@@ -30,3 +30,14 @@ export class LocalChatGate {
     return speakerGuid === 0 || !this.squelched;
   }
 }
+
+/**
+ * UI_ShouldHearSpeaker's range test @ 0x4d0360 (EraClientRules.speechHearing 'radar', the 1999
+ * client.exe): a speaker the client knows is heard only while its horizontal distance is under the
+ * radar range less one metre (0x004c8390: RadarUI+0xfc − 1; 75 m outdoors, 25 m indoors). A
+ * speaker the client holds no object for is heard. `offset` is null for an unknown speaker.
+ */
+export function speakerInHearingRange(offset: { dx: number; dz: number } | null, radarRange: number): boolean {
+  if (!offset) return true;
+  return Math.hypot(offset.dx, offset.dz) < radarRange - 1;
+}

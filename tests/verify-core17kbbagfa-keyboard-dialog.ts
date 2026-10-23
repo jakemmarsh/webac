@@ -13,6 +13,7 @@
  * string ids / geometry / ActionMap order against the real files; the
  * happy-dom block drives the shipped GameUI dialog.
  */
+import { clientRuleHiddenActions, eraClientRules } from '../packages/renderer/src/era/EraFeatures.js';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { loadDomWindow, installDomGlobals, restoreDomGlobals } from './_harness/dom.js';
 import fs from 'node:fs';
@@ -29,7 +30,7 @@ import {
 import { DIK_TO_CODE } from '../packages/renderer/src/input/DirectInputKeys.js';
 import {
   buildKeyboardSections, buildKeyboardRows, fillDatParts, keyboardButtonLabel, keyboardButtonTooltip,
-  keyboardMapInstructions, keyboardOverwritePrompt, keyboardInputMapHeader,
+  keyboardMapInstructions, keyboardOverwritePrompt, keyboardInputMapHeader, keyboardHiddenActions,
   KEYBOARD_DIALOG_STRINGS, KEYBOARD_DIALOG_STRING_FALLBACKS, KEYBOARD_INPUT_MAP_HEADERS,
 } from '../packages/renderer/src/ui/KeyboardConfigModel.js';
 
@@ -195,7 +196,8 @@ describe('buildKeyboardSections — InitOptions @ 004dd8b0: one header per input
 
   it('the UI tab holds the 103 UI commands less the 3 hidden dead ends (HIDDEN_DEAD_END_ACTIONS) across its sections, with descriptions as tooltips', () => {
     const r = new KeybindRegistry(DEFAULT_KEYBINDS);
-    const s = buildKeyboardSections(r, ActionClass.UI);
+    // As GameUI builds it for end of retail: the era hides 1999's Spell Research Page (SWEEP1999.input).
+    const s = buildKeyboardSections(r, ActionClass.UI, undefined, keyboardHiddenActions(clientRuleHiddenActions(eraClientRules(null))));
     const rows = s.flatMap((x) => x.rows);
     expect(rows.length).toBe(100);
     expect(new Set(rows.map((row) => row.id)).size).toBe(100);

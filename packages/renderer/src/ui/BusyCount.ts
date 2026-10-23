@@ -105,6 +105,28 @@ export class TeleportBusy {
   reset(): void { this.inProgress = false; }
 }
 
+/**
+ * HC-14 — the 1999 hourglass over a pending inventory request: PanelUI_Global_Loop raises the busy
+ * count while ACCWeenieObject_get_prevRequest() is non-zero and drops it when the request clears.
+ * End of retail has no such site; the era decides (EraWorldRules.inventoryRequestBusy). Edge-paired
+ * like TeleportBusy, so the count stays balanced whatever else holds it.
+ */
+export class InventoryRequestBusy {
+  private raised = false;
+  constructor(private readonly busy: BusyCount, private readonly enabled: boolean) {}
+  get value(): boolean { return this.raised; }
+  /** Once a frame: whether a request is pending now. */
+  update(pending: boolean): void {
+    const want = this.enabled && pending;
+    if (want === this.raised) return;
+    this.raised = want;
+    if (want) this.busy.increment();
+    else this.busy.decrement();
+  }
+  /** OnEndCharacterSession: the count is zeroed by BusyCount.reset. */
+  reset(): void { this.raised = false; }
+}
+
 /** gmExaminationUI::awaiting_appraisal_ID and its busy-count pairing. */
 export class ExamineAwait {
   private awaiting = 0;

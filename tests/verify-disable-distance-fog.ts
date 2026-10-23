@@ -24,6 +24,9 @@
 import { describe, it, expect } from 'vitest';
 import { CHARACTER_SETTINGS_PAGE, characterSettingsRowForKey } from '../packages/renderer/src/ui/CharacterSettingsModel.js';
 import { readFileSync } from 'node:fs';
+import { applyLocalOptionEffects, applyToggledOptionEffect, type LocalOptionSinks } from '../packages/renderer/src/ui/LocalOptionEffects.js';
+import { eraClientRules } from '../packages/renderer/src/era/EraFeatures.js';
+import { eraProfile } from '../packages/renderer/src/era/EraProfiles.js';
 import { resolve } from 'node:path';
 import * as THREE from 'three';
 import { SceneManager } from '../packages/renderer/src/scene/SceneManager.js';
@@ -32,6 +35,19 @@ import { SkyboxRenderer } from '../packages/renderer/src/effects/SkyboxRenderer.
 const REPO = resolve(__dirname, '..');
 const UI = readFileSync(resolve(REPO, 'packages/renderer/src/ui/GameUI.ts'), 'utf8');
 const MAIN = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf8');
+
+/** The startup / restore apply (main.ts → ui/LocalOptionEffects.ts) with GameUI.optionOn's rule: the era's pin, else the stored value. */
+function appliedFor(eraId: string, stored: Record<string, boolean>): Record<string, boolean> {
+  const pins = eraClientRules(eraProfile(eraId)).optionPins;
+  const out: Record<string, boolean> = {};
+  const sinks: LocalOptionSinks = {
+    setWeatherEnabled: (v) => { out.weatherEnabled = v; }, setFogEnabled: (v) => { out.fogEnabled = v; },
+    setForceDaylight: (v) => { out.forceDaylight = v; }, setUseMouseTurning: (v) => { out.useMouseTurning = v; },
+    setRightClickMouseLook: (v) => { out.rightClickMouseLook = v; },
+  };
+  applyLocalOptionEffects((k) => (pins[k] !== undefined ? pins[k] : !!stored[k]), sinks);
+  return out;
+}
 
 // CORE.18.b.a.a.a.a.a converted this block from source-text pins to
 // behavior: it drives the real SceneManager.
@@ -110,12 +126,32 @@ describe('FAITHFUL.490 — GameUI options wiring', () => {
 });
 
 describe('FAITHFUL.490 — main.ts live + startup wiring', () => {
-  it('onCharacterOptionToggle handles option 0x30 via setFogEnabled(!value)', () => {
-    expect(MAIN).toMatch(/option === 0x30[\s\S]+?sceneManager\.setFogEnabled\(!value\)/);
+  it('a live toggle of option 0x30 sets fog enabled = !value (1999 pins it off)', () => {
+    for (const era of ['eor', 'classic-dereth']) {
+      expect(toggledFor(era, 0x30, true).fogEnabled, era).toBe(false);
+      expect(toggledFor(era, 0x30, false).fogEnabled, era).toBe(true);
+    }
+    expect(toggledFor('ac1999-retail', 0x30, true).fogEnabled).toBe(true);
   });
+});
 
-  it('startup-apply syncs persisted disableDistanceFog', () => {
-    expect(MAIN).toMatch(/sceneManager\.setFogEnabled\(gameUI\.optionsSettings\.disableDistanceFog !== true\)/);
+function toggledFor(eraId: string, option: number, value: boolean): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  applyToggledOptionEffect(option, value, eraClientRules(eraProfile(eraId)).optionPins, {
+    setWeatherEnabled: (v) => { out.weatherEnabled = v; }, setFogEnabled: (v) => { out.fogEnabled = v; },
+    setForceDaylight: (v) => { out.forceDaylight = v; }, setUseMouseTurning: (v) => { out.useMouseTurning = v; },
+    setRightClickMouseLook: (v) => { out.rightClickMouseLook = v; },
+  });
+  return out;
+}
+describe('FAITHFUL.490 — main.ts startup wiring', () => {
+
+  it('startup-apply syncs persisted disableDistanceFog (end of retail and Dark Majesty; 1999 pins it off)', () => {
+    for (const era of ['eor', 'classic-dereth']) {
+      expect(appliedFor(era, { disableDistanceFog: true }).fogEnabled, era).toBe(false);
+      expect(appliedFor(era, {}).fogEnabled, era).toBe(true);
+    }
+    expect(appliedFor('ac1999-retail', { disableDistanceFog: true }).fogEnabled).toBe(true);
   });
 });
 

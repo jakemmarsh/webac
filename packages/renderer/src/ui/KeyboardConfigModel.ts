@@ -17,6 +17,7 @@ import type { KeybindRegistry } from '../input/KeybindRegistry.js';
 import { codeToLabel } from '../input/KeybindRegistry.js';
 import { ActionClass, KEYBIND_TAB_ORDER } from '../input/KeybindActionClass.js';
 import { KEYBIND_ACTION_ROWS } from '../input/KeybindActions.generated.js';
+import { CLIENT_KEYBIND_ACTION_ROWS } from '../input/KeybindClientActions.js';
 import { RETAIL_SECTION_KEYBINDS } from '../input/KeybindDefaults.generated.js';
 
 /**
@@ -186,7 +187,7 @@ export function buildKeyboardSections(
 ): KeyboardSection[] {
   const sections: KeyboardSection[] = [];
   const byMap = new Map<number, KeyboardSection>();
-  for (const { map, id } of KEYBIND_ACTION_ROWS) {
+  for (const { map, id } of [...KEYBIND_ACTION_ROWS, ...CLIENT_KEYBIND_ACTION_ROWS]) {
     const a = registry.action(id);
     if (!a || a.cls !== cls || hidden.has(id)) continue;
     let section = byMap.get(map);

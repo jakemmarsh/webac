@@ -8,6 +8,12 @@
 !packages/shared/src/routines/**
 !packages/shared/src/encoding/Windows1252.ts
 !packages/shared/src/mapCoordsText.ts
+!packages/shared/src/util/RefusalTextSafety.ts
+!packages/shared/src/combat/WeenieErrorText.ts
+!packages/shared/src/combat/WeenieErrorWithStringText.ts
+!packages/shared/src/inventory/InventoryRequest.ts
+!packages/shared/src/inventory/objectName.ts
+!packages/shared/src/ace-enums.ts
 !packages/renderer/src/agent/format.ts
 !packages/renderer/src/agent/gear.ts
 !tools/ac-agent/client.ts

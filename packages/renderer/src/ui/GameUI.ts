@@ -16,7 +16,7 @@ import { fellowshipUpdateLine, fellowAddedLine, fellowQuitLine, fellowDismissedL
 import { defaultChargenSkillClasses, chargenTotalNumSkills } from './chargenSkillDefaults.js';
 import { computeSkillFormula, Heritage, Gender, SkillAdvancementClass, EquipMask, DEFAULT_ATTRIBUTE_CREDITS, Sound, CombatMode, ItemType, COINSTACK_WCID, playerKillerStatusLabel, skillIdLabel, skillAdvancementClassLabel, characterOptionIsSet, CHARACTER_OPTION_BIT_MAP, chatColorFor, shopSellPrice, shopBuyPrice } from '@ac/shared';
 import type { InventoryItem, EquippedItem, SpellDefinition, NameFilterRules, TabooPredicate, MtChatLine, MtChatSpeech } from '@ac/shared';
-import { SPELLBOOK_FILTERS_DEFAULT, isSpellbookFilteredOut, spellbookLevelBit, spellbookOrder, spellbookSchoolBit, toggleSpellbookFilter, spellbookDeleteConfirmText, spellbookFilterOptions, type SpellbookFilterOptions } from './spellbookFilter.js';
+import { SPELLBOOK_FILTERS_DEFAULT, isSpellbookFilteredOut, spellbookLevelBit, spellbookOrder, spellbookNameOrder, spellbookSchoolBit, toggleSpellbookFilter, spellbookDeleteConfirmText, spellbookFilterOptions, type SpellbookFilterOptions } from './spellbookFilter.js';
 import { MagicSchool, magicSchoolColor, magicSchoolColorRGBA, LUMINANCE_MIN_LEVEL, getAppropriateName, StartingTown, SPELL_COMPONENT_DID_MAPPER_ID } from '@ac/shared';
 import { contractProgressText, contractTimedText, contractRepeatLeft, type ContractTiming } from '@ac/shared';
 import { TeleportAnimation, TeleportAnimState, PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
@@ -151,7 +151,7 @@ import {
 import {
   HUD_TOOLTIP_ROOT, PAPERDOLL_DRAG_BAND_TOOLTIP_STRING, tooltipRootGeometry, itemTooltipText, itemHoverText, paperdollSlotTooltip, spellShortcutTooltip,
   PAPERDOLL_GEM_TOOLTIP_ROOT, PAPERDOLL_SLOTS_GEM_TOOLTIP_STRING, MAP_NOTE_TOOLTIP_ROOT, MAP_NOTE_TOOLTIP_DELAY_SECONDS, MAP_HOUSE_ICON_TOOLTIP_STRING,
-  attributeRowTooltip, vitalRowTooltip, skillRowTooltip, castButtonTooltip, type CastButtonTooltipState,
+  attributeRowTooltip, vitalRowTooltip, skillRowTooltip, castButtonTooltip, castButtonFace, type CastButtonTooltipState,
   SPELLBAR_CAST_BUTTON, SPELLBAR_SPELL_NAME_TEXT, SPELLBAR_ENDOWMENT_ICON,
 } from './HudTooltips.js';
 import { collapseHiddenElements } from './CollapseHidden.js';
@@ -173,12 +173,12 @@ import {
 import { isUseTargetCompatible, spellFormulaTargetingType, inqSpellTargetType } from '@ac/shared';
 import { buildCharacterInfoReport } from './CharacterInfoReport.js';
 import type { CharacterInfoSource } from './CharacterInfoReport.js';
-import { buildVitaePanelText, VITAE_STRING_IDS } from './VitaePanelText.js';
+import { buildVitaePanelText, vitaePenaltyPercent, VITAE_STRING_IDS } from './VitaePanelText.js';
 import type { VitaePanelSource } from './VitaePanelText.js';
 import { buildLinkStatusPanelText, linkStatusPanelTitle } from './LinkStatusPanelText.js';
 import {
   EFFECTS_LAYOUT, EFFECTS_ELEMENTS, EFFECTS_ROW, EFFECTS_INFO, POSITIVE_EFFECTS, NEGATIVE_EFFECTS,
-  buildEffectsRows, formatEffectDuration, effectsInfoText,
+  buildEffectsRows, formatEffectDuration, effectsInfoText, combinedEffectsWindow,
 } from './EffectsPanelModel.js';
 import type { EffectsWindowDef, EffectsRow, EffectsSpellInfo } from './EffectsPanelModel.js';
 import { truncateTextToFit } from './TextTruncation.js';
@@ -245,9 +245,11 @@ import { assignLeadership, quitFellowship, toggleOpenness, dismissFellow, disban
 import {
   hiddenBy, FEATURE_PANELS, FEATURE_TOOLBAR_BUTTONS, FEATURE_CHARACTER_OPTIONS, FEATURE_CHAT_FILTERS,
   FEATURE_TALK_FOCUSES, FEATURE_KEYBIND_ACTIONS, FEATURE_SOCIAL_TABS, clientRuleHiddenActions, type EraFeature,
-  FEATURE_WORLD_TABS, FEATURE_INDICATORS, FEATURE_COMPONENT_CONTROLS, FEATURE_FELLOWSHIP_CONTROLS,
+  FEATURE_WORLD_TABS, FEATURE_INDICATORS, FEATURE_COMPONENT_CONTROLS, FEATURE_FELLOWSHIP_CONTROLS, FELLOWSHIP_PANE_OPTIONS,
   eraClientRules, resolveClientText, EOR_TRAIN_SKILL_CONFIRM, type EraClientRules, type ClientText,
 } from '../era/EraFeatures.js';
+import { EncumbranceNotice, type EncumbranceNoticeRules } from './EncumbranceNotice.js';
+import { ERA_OPTIONAL_UI_SOUNDS, landscapeDrawDistanceOption, landscapeMinAmbient, trimChatLog } from '../era/EraWorldRules.js';
 import { ACFontRenderer, OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { placeScrollbarButtons, bindHotClick, hotClickTiming, buttonVisualState } from './ScrollbarButtons.js';
 import { outlineCssFromArgb, DEFAULT_TEXT_OUTLINE_ARGB } from './TextOutline.js';
@@ -351,6 +353,19 @@ const EFFECTS_ROW_REF = descRef(0x2100001b, 0x10000128);
 const EFFECTS_LABEL_REF = descRef(0x2100001b, 0x10000128, 0x1000012a);
 const EFFECTS_VALUE_REF = descRef(0x2100001b, 0x10000128, 0x1000012b);
 const EFFECTS_INFO_TEXT_REF = descRef(0x2100001b, 0x10000122, 0x10000125, 0x10000126);
+// SWEEP1999.magic MAG-3 — the spell bar's name text (0x21000010:0x100000a0 → 0x1000048b), whose font the
+// 1999 Charge caption and its "%u%" readout take.
+const SPELLBAR_NAME_TEXT_REF = descRef(0x21000010, 0x1000009f, 0x100000a0, 0x1000048b);
+/** The 1999 Cast button's width (SpellCastSubPanel ctor @ 0x512390: the 200 x 0x20 button 0x60019e9/eb/ea). */
+const CAST_BUTTON_1999_WIDTH = 200;
+/**
+ * The end-of-retail meter art the 1999 Charge meter is drawn with (the 1999 client's own 0x06001a8d…
+ * images are not in the interface portal): the combat bar's charge track 0x21000007:0x1000004f
+ * (0x060074ca, 14 px tall) and its fill 0x10000050 → 0x2 (0x06001200).
+ */
+const CHARGE_METER_TRACK_TEX = 0x060074ca;
+const CHARGE_METER_FILL_TEX = 0x06001200;
+const CHARGE_METER_HEIGHT = 14;
 const BURDEN_LABEL_STRING_ID = 0x074464be;
 /**
  * VISUAL.charsel-pending-delete-row-red — the font colour a pending-deletion
@@ -514,6 +529,8 @@ const ATTRIBUTE_FALLBACKS: Record<string, string> = {
  * 265 px panel less its text margins p35 / p36 (9 + 26): 230 px, not the
  * former hand-picked 219 (ref1 fits "…Run and" on the first line).
  */
+/** Where character select's news box sits (the right column, over the backdrop's art). */
+export const CHARSEL_NEWS_BOX = Object.freeze({ x: 520, y: 110, w: 265, h: 400 });
 export const HERITAGE_LORE_WRAP_WIDTH = 265 - CHARGEN_FRAME_TEXT_MARGINS.left - CHARGEN_FRAME_TEXT_MARGINS.right;
 function attributeLabel(attr: string): string {
   return getString(ATTRIBUTE_STRING_IDS[attr]) ?? ATTRIBUTE_FALLBACKS[attr] ?? attr;
@@ -1095,6 +1112,12 @@ export interface GameUICallbacks {
   onFellowshipSteps?: (steps: FellowshipStep[]) => void;
   /** The Recruit button: gmFellowshipUI::RecruitFellow(ACCWeenieObject::selectedID). */
   onFellowshipRecruitSelected?: () => void;
+  /**
+   * SWEEP1999.character (S2) — a fellow was selected in a roster that carries no vitals (the 1999
+   * Fellow): main.ts sends a quiet appraisal; its creature profile comes back through
+   * GameUI.noteFellowAppraisal.
+   */
+  onAppraiseFellow?: (guid: number) => void;
   /** gmFriendsUI Remove: CM_Social::Event_RemoveFriend(id). */
   onRemoveFriend?: (guid: number) => void;
   onChatSend?: (message: string) => void;
@@ -1187,6 +1210,12 @@ export interface GameUICallbacks {
    *  Keys in `optionsSettings` without a mapping (client-only display
    *  options like `sidestepAuto`, `showNames`) do not fire this. */
   onCharacterOptionToggle?: (option: number, value: boolean) => void;
+  /**
+   * SWEEP1999.character — an option with no SetSingleCharacterOption code (an era-only options_
+   * bit, EraCharacterOption.options1Mask) was flipped: main.ts sets the bit in its options word and
+   * sends the whole word (SetCharacterOptions 0x1A1), as the 1999 client sends every change.
+   */
+  onCharacterOptionBits?: (options1Mask: number, value: boolean) => void;
   /** CORE.3.f — fires (debounced like retail CPlayerModule::UseTime, and on
    *  flushChatOptionsSave) with the full chat-window options state so
    *  main.ts can ship a SetCharacterOptions GameAction carrying the
@@ -2392,6 +2421,7 @@ export class GameUI {
    */
   setClientRules(rules: EraClientRules): void {
     this.clientRules = rules;
+    this.book.rules = rules.book;
     if (this.inventorySlotsView && !this.paperdollHasBodySlots()) this.inventorySlotsView = false;
     this.setSpellResearch(rules.spellResearch);
     this.setStatLineText(rules.statLineText);
@@ -2400,6 +2430,31 @@ export class GameUI {
     this.setItemShortcutSlotCount(rules.shortcutSlots);
     this.setSpellBarArrowRule(rules.spellBarArrows);
     this.setVendorBuyOneMask(rules.vendorBuyOneMask);
+    this.setEncumbranceNotice(rules.encumbranceNotice);
+    // The era's brightness slider (EraWorldRules.brightness): a gamma ramp or the landscape floor.
+    this.applyScreenBrightness();
+  }
+  /**
+   * SWEEP1999.messages HC-9 — the era's encumbrance notice (ui/EncumbranceNotice.ts) on the spew
+   * line: end of retail once per crossing, 1999 again every 60 s while loaded (its Global_Loop
+   * check, run here once a second).
+   */
+  private setEncumbranceNotice(rules: EncumbranceNoticeRules): void {
+    if (this.encumbranceTimer !== null) { clearInterval(this.encumbranceTimer); this.encumbranceTimer = null; }
+    const notice = new EncumbranceNotice(rules, (text) => this.displayErrorText(text));
+    this.encumbranceNotice = notice;
+    if (rules.repeatSeconds !== null) this.encumbranceTimer = setInterval(() => notice.tick(performance.now() / 1000), 1000);
+  }
+  private encumbranceNotice: EncumbranceNotice | null = null;
+  private encumbranceTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * SWEEP1999.character (CHAR-1) — an option's value as this world's client acts on it: the era's
+   * pin (EraClientRules.optionPins) when it has one, else the stored setting. Every local effect of
+   * a pinnable option reads it here, so a value another era's session stored never leaks across.
+   */
+  optionOn(key: string): boolean {
+    const pin = this.clientRules.optionPins[key];
+    return pin !== undefined ? pin : !!this.optionsSettings[key];
   }
   /** A profile string through the loaded string tables. */
   private clientText(t: ClientText): string {
@@ -2468,6 +2523,13 @@ export class GameUI {
   /** The open tab's list scroll offset (px). */
   get spellBarScrollOffset(): number { return this.spellBarScrollX[this.activeSpellBarTab] ?? 0; }
   private statLineMode: 'eor' | 'ac1999' = 'eor';
+  /** PlayerDescription PropertyString 3 Sex / 4 HeritageGroup / 5 Template, as the server sent them (the 1999 heritage line). */
+  private charStrings: { sex?: string; heritage?: string; template?: string } = {};
+  /** SWEEP1999.character — the player's own Sex / Heritage / Template strings (PropertyString 3 / 4 / 5). */
+  setCharacterStrings(strings: { sex?: string; heritage?: string; template?: string }): void {
+    this.charStrings = { ...strings };
+    if (this.charPanelVisible) this.refreshCharPanel();
+  }
   private charInfo: {
     name: string; level: number; heritage: string; gender: string; pkStatus: string;
     heritageId: number; genderId: number;
@@ -2793,6 +2855,12 @@ export class GameUI {
       // CharacterOptions2.UseMouseTurning). Default FALSE per
       // retail (right-click drag is required).
       useMouseTurning: false,
+      // SWEEP1999.character — the 1999 options_ bits end of retail dropped (EraClientRules.
+      // characterOptionsPage): Automatically Create Shortcuts 0x1, Invert Mouse Look 0x10,
+      // Right-click mouselook 0x4000. All off in the AC1999 server's 0x50C4A542 default.
+      autoCreateShortcuts: false,
+      invertMouseLook: false,
+      rightClickMouselook: false,
       // CORE.5.b — SideBySideVitals (CharacterOption 0x13 /
       // CharacterOptions1.SideBySideVitals = 0x200000). Default FALSE:
       // the retail client's built-in options_ default 0x50c4a54a
@@ -3351,6 +3419,21 @@ export class GameUI {
   private selectedStatRow: { kind: 'attribute' | 'vital'; id: number } | null = null;
   private selectedSkillId: number | null = null;
   private statRaiseAwaiting = false;
+  /** m_bAwaitingRaise: a raise is in flight and the raise buttons ignore clicks. */
+  get raiseAwaiting(): boolean { return this.statRaiseAwaiting; }
+  /**
+   * AUDIT.ac1999-request-completion — the server sent a stat (an attribute, vital, skill or
+   * PropertyInt update). Where the era's client ends the raise guard on any of them
+   * (eraClientRules().raiseAwaitClearsOnStatUpdate: the 1999 StatsPanel_SetAttribute @ 0x0054a6f0 /
+   * StatsPanel_SetInt @ 0x0054a740 fan-outs), the guard ends here, so a raise the server refuses
+   * with an unchanged 0x26 + 0x0E (or with nothing, until the next vital tick) doesn't leave every
+   * raise button dead until the XP pool next changes.
+   */
+  statQualityChanged(): void {
+    if (!this.statRaiseAwaiting || !this.clientRules.raiseAwaitClearsOnStatUpdate) return;
+    this.statRaiseAwaiting = false;
+    if (this.charPanelVisible) this.refreshCharPanel();
+  }
   // Dirty tracking for AC font HUD text
   private lastHealthText = '';
   private lastStaminaText = '';
@@ -3432,6 +3515,21 @@ export class GameUI {
       ui.resetDragSourceState();
     };
     window.addEventListener('dragstart', resetDragSource, true);
+    // The 1999 icon chimes (EraWorldRules.localUiSounds; end of retail plays none): pick-up 0x6F on
+    // a drag's start (ItemSlot_ReleaseDragObject @ the drag's grab), then DropNotify's 0x70 when a
+    // target took the drop or 0x71 when none did. Bubble phase for the start, so a source that
+    // cancels its drag (the 3D canvas with nothing under the mouse) plays nothing.
+    const chimeStart = (e: DragEvent): void => {
+      const ui = self.deref();
+      if (!ui) { window.removeEventListener('dragstart', chimeStart); return; }
+      if (e.defaultPrevented) return;
+      ui.noteIconDrag('start');
+    };
+    const chimeDrop = (): void => { self.deref()?.noteIconDrag('drop'); };
+    const chimeEnd = (): void => { self.deref()?.noteIconDrag('end'); };
+    window.addEventListener('dragstart', chimeStart);
+    window.addEventListener('drop', chimeDrop, true);
+    window.addEventListener('dragend', chimeEnd, true);
     this.hud = new HUD();
     this.wizard = new CharacterCreateWizard();
     this.selectScreen = new CharacterSelectScreen();
@@ -3572,6 +3670,29 @@ export class GameUI {
     }, true);
   }
 
+  /** The drag in flight for the icon chimes (noteIconDrag). */
+  private dragChime = { live: false, dropped: false };
+
+  /**
+   * The 1999 icon chimes over one drag: 'start' plays UI_IconPickUp, a 'drop' a target took plays
+   * UI_IconSuccessfulDrop, and an 'end' with no drop UI_IconInvalid_Drop. playUISound skips them in
+   * an era whose client never played them.
+   */
+  noteIconDrag(phase: 'start' | 'drop' | 'end'): void {
+    const d = this.dragChime;
+    if (phase === 'start') {
+      d.live = true; d.dropped = false;
+      this.playUISound(Sound.UI_IconPickUp);
+    } else if (phase === 'drop') {
+      if (!d.live || d.dropped) return;
+      d.dropped = true;
+      this.playUISound(Sound.UI_IconSuccessfulDrop);
+    } else {
+      if (d.live && !d.dropped) this.playUISound(Sound.UI_IconInvalid_Drop);
+      d.live = false;
+    }
+  }
+
   /**
    * The layout media sounds a mouse-down on `target` plays (see
    * LayoutPressSound.ts). Returns what was played, for probes/tests.
@@ -3579,7 +3700,10 @@ export class GameUI {
   playPressSounds(target: Element | null): LayoutSoundMedia[] {
     const lr = this.layoutRenderer as { getResolvedLayout?: (id: number) => LayoutDescData | null } | null;
     if (!lr?.getResolvedLayout) return [];
-    const sounds = pressSoundsFor(target, (id) => lr.getResolvedLayout!(id));
+    const everyButton = this.clientRules.world.pressSoundOnEveryButton
+      ? { table: (this.uiSoundTableId ??= resolveUiSoundTable(this.uiPortalDb)), sound: Sound.UI_ButtonPress }
+      : null;
+    const sounds = pressSoundsFor(target, (id) => lr.getResolvedLayout!(id), everyButton);
     if (sounds.length > 0) {
       debugBag().lastPressSounds = sounds.map((s) => ({ ...s }));
     }
@@ -3611,7 +3735,11 @@ export class GameUI {
    */
   playUISound(sound: Sound): void {
     if (!this.soundPlayer) return;
-    if (!isRetailClientLocalSound(sound)) {
+    // The era's own client-local sounds (EraWorldRules.localUiSounds: 1999's drag / selection /
+    // transient / query / error / slider chimes). Another era's client never played them: skipped
+    // quietly, as the call sites are shared.
+    if (ERA_OPTIONAL_UI_SOUNDS.has(sound) && !this.clientRules.world.localUiSounds.includes(sound)) return;
+    if (!isRetailClientLocalSound(sound) && !this.clientRules.world.localUiSounds.includes(sound)) {
       console.warn(`[AC] playUISound: ${Sound[sound] ?? sound} is not a retail client-local sound — not played`);
       return;
     }
@@ -5594,6 +5722,9 @@ export class GameUI {
     // with the chargen screen: the view machine, the animator and its tick.
     this.resetChargenAppearanceView();
     this.uiManager.setScreen('character-select');
+    const pendingRowText = this.clientRules.world.pendingDeleteRowText;
+    // 1999: a pending slot frees itself when its deleteTimeout counts out (CharList_ClearEntry).
+    if (pendingRowText !== null) characters = this.notePendingDeleteCountdowns(characters);
     this.lastCharacterSlots = [...characters];
     this.lastSlotCount = slotCount;
     this.selectScreen = new CharacterSelectScreen();
@@ -5601,9 +5732,55 @@ export class GameUI {
     for (const c of characters) {
       this.selectScreen.addCharacter(c);
     }
-    this.selectScreen.sortRetailOrder();
-    this.selectScreen.selectDefault(previousId);
+    this.selectScreen.sortRetailOrder(pendingRowText);
+    this.selectScreen.selectDefault(previousId, pendingRowText === null);
     this.renderCharacterSelect();
+  }
+
+  /** 1999 pending deletes: id → the list's deleteTimeout (s) and when it runs out (ms). */
+  private pendingDeleteExpiry = new Map<string, { seconds: number; at: number }>();
+  private pendingDeleteTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The 1999 countdown (IntroUI_Update @ 0x504e80, kb client-behavior/char-select-pending-delete):
+   * each pending slot's deleteTimeout counts from the list that carried it; an expired slot is
+   * cleared locally, with no message either way, and IntroUI_Global_Loop rebuilds the list when
+   * the soonest runs out. Returns the slots still standing; arms the timer for the next.
+   */
+  private notePendingDeleteCountdowns(characters: CharacterSlot[], now = Date.now()): CharacterSlot[] {
+    const seen = new Set<string>();
+    for (const c of characters) {
+      const secs = c.deleteTime ?? 0;
+      if (secs <= 0) continue;
+      seen.add(c.id);
+      const known = this.pendingDeleteExpiry.get(c.id);
+      if (!known || known.seconds !== secs) this.pendingDeleteExpiry.set(c.id, { seconds: secs, at: now + secs * 1000 });
+    }
+    for (const id of [...this.pendingDeleteExpiry.keys()]) if (!seen.has(id)) this.pendingDeleteExpiry.delete(id);
+    const standing = characters.filter((c) => !((c.deleteTime ?? 0) > 0 && (this.pendingDeleteExpiry.get(c.id)?.at ?? Infinity) <= now));
+    if (this.pendingDeleteTimer) { clearTimeout(this.pendingDeleteTimer); this.pendingDeleteTimer = null; }
+    let soonest = Infinity;
+    for (const c of standing) if ((c.deleteTime ?? 0) > 0) soonest = Math.min(soonest, this.pendingDeleteExpiry.get(c.id)?.at ?? Infinity);
+    if (Number.isFinite(soonest)) {
+      this.pendingDeleteTimer = setTimeout(() => {
+        this.pendingDeleteTimer = null;
+        if (this.uiManager.currentScreen !== 'character-select' || this.connectingMode) return;
+        this.showCharacterSelect(this.lastCharacterSlots, this.lastSlotCount);
+      }, Math.max(0, soonest - now) + 50);
+    }
+    return standing;
+  }
+
+  /**
+   * 1999 (EraWorldRules.afterCharacterCreate): the server took the new character; chargen resets and
+   * character select comes back with it selected (CG_10_UI_Global_Loop → Game_SetUIMode(2)). The
+   * server's CharacterList that follows redraws the same screen.
+   */
+  returnToCharacterSelectAfterCreate(slot: { id: string; name: string }): void {
+    this.selectedAvatarId = slot.id;
+    const known = this.lastCharacterSlots.some((c) => c.id === slot.id);
+    const slots = known ? this.lastCharacterSlots : [...this.lastCharacterSlots, { id: slot.id, name: slot.name } as CharacterSlot];
+    this.showCharacterSelect(slots, this.lastSlotCount);
   }
 
   /**
@@ -6205,6 +6382,8 @@ export class GameUI {
   private spewExpiryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Notices raised before the HUD exists (first world entry) — shown once it does. */
   private pendingSpew: string[] = [];
+  /** When the last transient-message chime played (one a frame). */
+  private lastTransientChimeAt = -Infinity;
 
   /**
    * Retail `ECM_UI::SendNotice_DisplayStringInfo(0x1a, text)`: the text goes
@@ -6230,6 +6409,13 @@ export class GameUI {
   spewNotice(text: string): void {
     // Mag-Tools' Status Text filters (preview UI).
     if (this.statusTextFilter?.(text)) return;
+    // 1999: every urgent status line chimes, at most once a frame (UI_PlayTransientMessageSound
+    // @ 0x4cccc0 from UI_SetStatusText / UI_AddStatusText; EraWorldRules.localUiSounds).
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (now - this.lastTransientChimeAt >= 16) {
+      this.lastTransientChimeAt = now;
+      this.playUISound(Sound.UI_TransientMessage);
+    }
     if (!this.spewBoxEl || !this.spewBoxEl.isConnected) { this.pendingSpew.push(text); return; }
     this.spewBox.push(text, Date.now());
     this.refreshSpewBox();
@@ -6546,8 +6732,12 @@ export class GameUI {
           }
         };
         paintRow(false);
-        slotEl.addEventListener('mouseenter', () => paintRow(true));
-        slotEl.addEventListener('mouseleave', () => paintRow(false));
+        // A 1999 "Temporarily Unavailable" row takes no rollover (it cannot be selected).
+        const rowInert = (s.deleteTime ?? 0) > 0 && this.clientRules.world.pendingDeleteRowText !== null;
+        if (!rowInert) {
+          slotEl.addEventListener('mouseenter', () => paintRow(true));
+          slotEl.addEventListener('mouseleave', () => paintRow(false));
+        }
         const nameSpan = document.createElement('span');
         // VISUAL.charsel-pending-delete-row-red — a row is exactly
         // CharacterSet::GetName (gmCharacterManagementUI::RebuildCharacterList
@@ -6559,7 +6749,10 @@ export class GameUI {
         // colour 0x1b: pure red, full opacity. The old textDim + opacity 0.55
         // + " (deletion pending)" suffix + "Level N Heritage" line were invented.
         const pendingDeletion = (s.deleteTime ?? 0) > 0;
-        nameSpan.setAttribute('data-ac-text', s.name);
+        // 1999 (EraWorldRules.pendingDeleteRowText): the row reads "Temporarily Unavailable"
+        // (CharSlot_SetAvailable @ 0x505b10) and cannot be selected.
+        const pendingRowText = pendingDeletion ? this.clientRules.world.pendingDeleteRowText : null;
+        nameSpan.setAttribute('data-ac-text', pendingRowText ?? s.name);
         // The name draws as the template's text (font 0x40000000, cream
         // 0xfffff2cc in every state, top-left after the p35 margin); only a
         // pending deletion overrides the colour.
@@ -6578,7 +6771,9 @@ export class GameUI {
         // left button with activation 0x60 MouseDblClick: a double-click on a
         // name enters the world. The first click's re-render replaces the row,
         // so the second is read from the click's OS-timed click count.
+        if (pendingRowText !== null) slotEl.style.cursor = 'default';
         slotEl.addEventListener('click', (e) => {
+          if (pendingRowText !== null) return;
           this.selectScreen.selectCharacter(i);
           this.renderCharacterSelect();
           if (e.detail === 2) this.enterSelectedCharacter();
@@ -6741,6 +6936,19 @@ export class GameUI {
       // DeleteCharacterResponse ("DELETE", _stricmp) raises Please Wait and
       // sends DeleteCharacter; anything else closes without deleting.
       if (this.deleteCharacterDialogOpen) return;
+      // SWEEP1999.messages PW-9 — a client with its own prompt (1999: IntroUI_ListenToMessage's
+      // Yes / No requester, "Deleting %s cannot be undone.  Are you sure?") asks that instead; end
+      // of retail's text promises a restore within an hour, which a 1999 world can't do.
+      const eraPrompt = this.clientRules.deleteCharacterConfirm;
+      if (eraPrompt !== null) {
+        this.showConfirmationDialog(eraPrompt.replace('%s', char.name), (yes) => {
+          if (!yes) return;
+          this.screenContainer.appendChild(this.buildWaitDialog('charsel-pleasewait', getString(7426468) ?? 'Please Wait'));
+          this.callbacks.onDeleteCharacter?.(char);
+        });
+        this.deleteCharacterDialogOpen = true;
+        return;
+      }
       const parts = getStringParts(DELETE_CHARACTER_CONFIRMATION_STRING_ID);
       const text = parts ? parts.join(char.name) : `WARNING! ${char.name} will be deleted.`;
       this.showTextEntryDialog(text, (typed) => {
@@ -6798,6 +7006,24 @@ export class GameUI {
     tagLayoutElement(exitBtn, 0x21000004, 0x100003a4);
     inner.appendChild(exitBtn);
 
+    // PW-7 / CHAR-3 — the server's character-select news (0xF65A, 1999 only: the AC1999 server's
+    // servernews.txt after every list). The 1999 IntroUI showed it in a 450x278 scrolling text box
+    // (its ctor, seeded "Receiving system messages..."); the end-of-retail screen has no such box,
+    // so it is the chargen's framed scrolling text (0x2100004c:0x100002e6, the heritage lore's)
+    // in the right column. Other eras' servers never send it: nothing is drawn.
+    const news = this.charSelectNews;
+    if (news && !this.connectingMode) {
+      const box = document.createElement('div');
+      box.id = 'charsel-news';
+      box.innerHTML = datFrameHtml((id) => this.getTexURL(id), CHARSEL_NEWS_BOX, `
+          <div style="${frameTextInsetStyle()}overflow-y:auto;" class="charsel-news-text">
+            <span data-ac-text="" data-ac-runs="${encodeTextRunsAttr([{ text: news, colorIndex: 0 }])}" ${GameUI.datTextAttrs(descRef(0x21000046, 0x100003c4))} data-ac-maxwidth="${CHARSEL_NEWS_BOX.w - CHARGEN_FRAME_TEXT_MARGINS.left - CHARGEN_FRAME_TEXT_MARGINS.right}"></span>
+          </div>`, { desc: descRef(0x21000046, 0x100003c4), scrollbar: true });
+      Object.assign(box.style, { position: 'absolute', left: '0', top: '0', zIndex: '2', pointerEvents: 'none' });
+      for (const el of Array.from(box.children) as HTMLElement[]) el.style.pointerEvents = 'auto';
+      inner.appendChild(box);
+    }
+
     // CORE.13/.13.a — scaling is owned by attachPreworldScale (immediate +
     // rAF + resize listener above). A second scale assignment here used to
     // stomp it for one frame (flash of a mis-scaled layout before rAF).
@@ -6815,7 +7041,24 @@ export class GameUI {
 
     this.replaceACTextElements(this.screenContainer);
     for (const btn of [createBtn, enterBtn, deleteBtn, creditsBtn, exitBtn]) this.justifyDatButtonLabel(btn);
+    if (news && !this.connectingMode) this.bindChargenListScrollbars();
   }
+
+  /** The server's character-select news (0xF65A; the AC1999 server's servernews.txt), or null. */
+  private charSelectNews: string | null = null;
+
+  /**
+   * Net_DispatchServerMessage case 0xF65A (1999 @ 0x4c83b0): the second string goes into the
+   * character-select text box, or waits for it (UI_GetPermanentObjects).
+   */
+  setCharSelectNews(text: string): void {
+    const t = text.replace(/\r\n?/g, '\n').replace(/^\n+|\s+$/g, '');
+    this.charSelectNews = t.length > 0 ? t : null;
+    if (this.uiManager.currentScreen === 'character-select') this.renderCharacterSelect();
+  }
+
+  /** The news text now held (tests / probes). */
+  get characterSelectNews(): string | null { return this.charSelectNews; }
 
   /**
    * CORE.13.b — a DialogFactory wait dialog (dialog type 2: element 0x31,
@@ -7366,7 +7609,7 @@ export class GameUI {
     // — the Next chevron is HIDDEN on the summary page, not drawn disabled.
     if (step !== CreateStep.Summary) {
       mkBarBtn('btn-next', 0x100003c7, 68, 13, 47, 44, '',
-        () => { this.wizard.nextStep(); this.renderCharacterCreate(); }, !this.wizard.canGoNext);
+        () => { this.chargenNext(); }, !this.wizard.canGoNext);
     }
     // NO-DEAD-ENDS (Jake 2026-10-04) — Help (0x100003c9) is not built, and
     // the layout's own copy is hidden (CHARGEN_DEAD_END_BUTTONS). A stand-in
@@ -7424,6 +7667,22 @@ export class GameUI {
   }
 
   /**
+   * The Next chevron. 1999 (EraWorldRules.chargenCreditWarnings.trainingAtSkillsNext): the Skills
+   * page's Next with training credits left chimes GeneralQuery and asks first (CG_8's ListenToMessage,
+   * ui/m0302_ui_charactergen.c: 0x00562c70 → 0x6C + the ctor's requester); Yes moves on.
+   */
+  private chargenNext(): void {
+    const advance = (): void => { this.wizard.nextStep(); this.renderCharacterCreate(); };
+    const warn = this.clientRules.world.chargenCreditWarnings;
+    if (this.wizard.currentStep === CreateStep.Skills && warn.trainingAtSkillsNext !== null && this.wizard.skillCreditsRemaining > 0) {
+      if (warn.sound !== null) this.playUISound(warn.sound);
+      this.showConfirmationDialog(warn.trainingAtSkillsNext, (accepted) => { if (accepted) advance(); });
+      return;
+    }
+    advance();
+  }
+
+  /**
    * CORE.17.k.b.b.a.c — `gmCharGenMainUI::DoFinish @ 004e9170` (FINISH =
    * DoFinish(true); the credit-warning dialog's Yes = DoFinish(false)):
    * the name is trimmed of "[] " at both ends and stored; no name entered
@@ -7458,12 +7717,23 @@ export class GameUI {
       this.showChargenFinishDialog(getStringFromTable(0x23000002, acStringHash(CHARGEN_NAME_REFUSED_TOKEN)) ?? 'That name is not allowed. Please choose another name.');
       return blocked('name_banned');
     }
+    // The era's credit warnings (EraWorldRules.chargenCreditWarnings): end of retail asks about
+    // attribute credits only (ID_CharGen_CreditWarning; skill credits carry over); 1999's
+    // CharGen_OnCreateConfirm @ 0x567980 asks about attribute, then training credits, each with the
+    // GeneralQuery chime, and its Yes creates without asking again.
+    const warn = this.clientRules.world.chargenCreditWarnings;
     if (fromButton && this.wizard.attributesRemaining > 0) {
+      if (warn.sound !== null) this.playUISound(warn.sound);
       this.showConfirmationDialog(
-        getString(acStringHash(SUMMARY_TOKENS.creditWarning))
+        warn.attributes ?? getString(acStringHash(SUMMARY_TOKENS.creditWarning))
           ?? 'Warning!\n\nYou have not used up your entire available Attribute Credits.  If you do not use them now you will lose them.  Do you wish to continue?',
         (accepted) => { if (accepted) this.doChargenFinish(false); },
       );
+      return blocked('credit_warning');
+    }
+    if (fromButton && warn.trainingAtFinish !== null && this.wizard.skillCreditsRemaining > 0) {
+      if (warn.sound !== null) this.playUISound(warn.sound);
+      this.showConfirmationDialog(warn.trainingAtFinish, (accepted) => { if (accepted) this.doChargenFinish(false); });
       return blocked('credit_warning');
     }
     // DoFinish :223958-223972 — after the name and credit dialogs: only with
@@ -10118,6 +10388,8 @@ export class GameUI {
           endWidgetDrag(drag);
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
+          // The 1999 slider release chime (0x74; the chargen sliders are the same slider class, @ 0x4945b0).
+          this.playUISound(Sound.UI_ReleaseSlider);
           this.renderCharacterCreate();
         };
         document.addEventListener('mousemove', onMove);
@@ -10854,7 +11126,7 @@ export class GameUI {
     this.lastStaminaText = '';
     this.lastManaText = '';
 
-    const sideBySide = !!this.optionsSettings.sideBySideVitals;
+    const sideBySide = this.optionOn('sideBySideVitals');
     const layoutId = sideBySide ? 0x21000075 : 0x2100006c;
     const rootElId = sideBySide ? 0x100006d4 : 0x100005f9;
     // CORE.5.b.c — the cluster window's WindowID (DAT attribute 0x1000007e
@@ -11024,7 +11296,7 @@ export class GameUI {
     if (!el) return;
     const w = parseInt(el.style.width) || 0;
     const h = parseInt(el.style.height) || 0;
-    const windowId = this.optionsSettings.sideBySideVitals ? VITALS_SIDE_BY_SIDE_WINDOW_ID : VITALS_STACKED_WINDOW_ID;
+    const windowId = this.optionOn('sideBySideVitals') ? VITALS_SIDE_BY_SIDE_WINDOW_ID : VITALS_STACKED_WINDOW_ID;
     const geo = this.floatyWindowGeometry.get(windowId) ?? this.getFloatyWindowGeometry(windowId);
     if (typeof geo.x === 'number' && typeof geo.y === 'number') {
       const x = Math.max(0, Math.min(Math.round(geo.x), this.hudLogicalWidth() - w));
@@ -11107,6 +11379,8 @@ export class GameUI {
     const stripLayout = this.layoutRenderer?.getResolvedLayout?.(0x21000071) ?? null;
     // BUG.ac1999-eor-ui — an era without the indicator's feature has no icon there (FEATURE_INDICATORS).
     const eraHiddenIndicators = hiddenBy(FEATURE_INDICATORS, this.eraUnsupported);
+    // SWEEP1999.magic MAG-4 — one magic indicator in an era with one effects window.
+    if (this.clientRules.combinedEffectsTitle !== null) eraHiddenIndicators.add('effects-harmful');
     for (const ind of indicatorDefs) {
       const icon = this.indicatorsHandle?.elements.get(ind.elementId);
       if (!icon) continue;
@@ -12541,7 +12815,7 @@ export class GameUI {
     // border chrome (interactive drag/resize borders vs plain locked art),
     // per gmFloatyPanelUI::UpdateLockedStatus @ 004d0280.
     if (this.vitalsHandle) {
-      const rootElId = this.optionsSettings.sideBySideVitals ? 0x100006d4 : 0x100005f9;
+      const rootElId = this.optionOn('sideBySideVitals') ? 0x100006d4 : 0x100005f9;
       this.applyFloatyBorderLockState(this.vitalsHandle, rootElId);
     }
     if (this.indicatorsHandle) {
@@ -12751,6 +13025,8 @@ export class GameUI {
     // 004c7270 re-runs UpdateCastButtonTooltip on every 3D selection change
     // (the Cast button's "… on %s" / target texts follow the selection).
     if (this.spellBarHandle && (this.hud.target?.id ?? null) !== this.castTooltipTargetId) this.updateCastButtonTooltip();
+    // SWEEP1999.magic MAG-3 — Global_Loop's 5 s UpdateChargeMeter(0).
+    if (this.chargeMeter) this.refreshSpellChargeMeter();
     // CORE.18.c — the open-container strip's UIItems follow the selection.
     this.refreshContainerSelectionAnts();
     // …and so do the pack grid's and the paperdoll's.
@@ -13345,7 +13621,7 @@ export class GameUI {
       });
       // FAITHFUL.483 — see addSystemMessage above for the
       // DisplayTimestamps CharacterOption (0x21) rationale.
-      if (this.optionsSettings.displayTimestamps) {
+      if (this.optionOn('displayTimestamps')) {
         const now = new Date();
         const hh = now.getHours().toString().padStart(2, '0');
         const mm = now.getMinutes().toString().padStart(2, '0');
@@ -13364,9 +13640,7 @@ export class GameUI {
       const wasAtBottom = this.chatWasAtBottom();
       this.chatMessages.appendChild(makeLine(this.chatMessages));
       this.maybeScrollChatToBottom(wasAtBottom);
-      while (this.chatMessages.children.length > 100) {
-        this.chatMessages.removeChild(this.chatMessages.children[0]);
-      }
+      trimChatLog(this.chatMessages, this.clientRules.world.chatHistory);
     }
     // CORE.3.c — also route into any floating chat window whose text-type
     // filter carries this message's type bit.
@@ -13468,10 +13742,9 @@ export class GameUI {
       // FAITHFUL.267 — cap chat log at 100 entries to match addChatMessage.
       // Pre-fix addSystemMessage grew the log unboundedly, leaking memory
       // and DOM nodes over long sessions. Server combat/spell/recall lines
-      // all flow through here, so the growth is steady.
-      while (this.chatMessages.children.length > 100) {
-        this.chatMessages.removeChild(this.chatMessages.children[0]);
-      }
+      // all flow through here, so the growth is steady. The era's cap
+      // (EraWorldRules.chatHistory): 1999 keeps 300, trimming to 200.
+      trimChatLog(this.chatMessages, this.clientRules.world.chatHistory);
       this.maybeScrollChatToBottom(wasAtBottom);
     }
     // FAITHFUL.270 — emit sniffer line for /logging dump (no-op if unsubscribed).
@@ -13514,7 +13787,7 @@ export class GameUI {
     // retail used per acpedia "Guide to Chat".
     // CORE.17.k — ClientSystem::AddTextToScroll @ 00563c50 skips the stamp
     // (and the log file) for text type 0x1a (client error notices).
-    if (this.optionsSettings.displayTimestamps && type !== ERROR_TEXT_TYPE) {
+    if (this.optionOn('displayTimestamps') && type !== ERROR_TEXT_TYPE) {
       const now = new Date();
       const hh = now.getHours().toString().padStart(2, '0');
       const mm = now.getMinutes().toString().padStart(2, '0');
@@ -13653,7 +13926,7 @@ export class GameUI {
         case 'linkStatus': this.setLinkStatusPanelShown(want); break;
         case 'miniGame': this.setMiniGamePanelShown(want); break;
         case 'book': this.setBookPanelShown(want); break;
-        case 'positive': this.setEffectsWindowShown(POSITIVE_EFFECTS, want); break;
+        case 'positive': this.setEffectsWindowShown(this.positiveEffectsDef, want); break;
         case 'negative': this.setEffectsWindowShown(NEGATIVE_EFFECTS, want); break;
       }
     };
@@ -13784,6 +14057,7 @@ export class GameUI {
   // load ≥ 2.0 → 0x10 (0x060074a4); no load (InqLoad fails) → 0xe.
   private updateBurdenIndicator(): void {
     const load = this.burdenMax > 0 ? this.burdenCurrent / this.burdenMax : 0;
+    this.encumbranceNotice?.onLoad(load, performance.now() / 1000);
     const state = load < 1 ? 0xe : load >= 2 ? 0x10 : 0xf;
     if (this.burdenIndicatorState === state) return;
     this.burdenIndicatorState = state;
@@ -13941,7 +14215,7 @@ export class GameUI {
         else if (this.linkStatusPanelVisible) { this.renderLinkStatusPanel(); this.paintLinkStatusPanelText(); }
         else if (this.miniGamePanelVisible) { this.renderMiniGamePanel(); this.renderMiniGameBoard(); }
         else {
-          for (const def of [POSITIVE_EFFECTS, NEGATIVE_EFFECTS]) {
+          for (const def of this.effectsWindowDefs()) {
             if (this.effectsWindows[def.key].visible) this.renderEffectsWindow(def);
           }
         }
@@ -14922,7 +15196,7 @@ export class GameUI {
           const dist = log.scrollHeight - log.scrollTop - log.clientHeight;
           const wasAtBottom = dist < GameUI.SCROLL_STICK_THRESHOLD_PX;
           log.appendChild(this.buildSystemChatLine(text, color));
-          while (log.children.length > 100) log.removeChild(log.children[0]);
+          trimChatLog(log, this.clientRules.world.chatHistory);
           if (wasAtBottom) log.scrollTop = log.scrollHeight;
         },
       });
@@ -15180,7 +15454,7 @@ export class GameUI {
     const dist = log.scrollHeight - log.scrollTop - log.clientHeight;
     const wasAtBottom = dist < GameUI.SCROLL_STICK_THRESHOLD_PX;
     log.appendChild(makeLine(log));
-    while (log.children.length > 100) log.removeChild(log.children[0]);
+    trimChatLog(log, this.clientRules.world.chatHistory);
     if (wasAtBottom) {
       log.scrollTop = log.scrollHeight;
     } else if (inst.indicatorEl) {
@@ -17968,6 +18242,18 @@ export class GameUI {
         changed.push(optionKey);
       }
     }
+    // SWEEP1999.character — the era page's own options_ bits (no CharacterOption code), from the word
+    // itself, only on an era whose page has them (CharOptionsPanel_Reset @ 0x005948a0 reads each).
+    if (co1 !== -1) {
+      for (const o of this.clientRules.characterOptionsPage ?? []) {
+        if (!o.ourKey || o.options1Mask === undefined) continue;
+        const desired = ((co1 >>> 0) & o.options1Mask) !== 0;
+        if (desired !== !!this.optionsSettings[o.ourKey]) {
+          this.optionsSettings[o.ourKey] = desired;
+          changed.push(o.ourKey);
+        }
+      }
+    }
     if (changed.length > 0) {
       this.saveOptionsSettings();
       // If the Options panel is currently visible, re-render so the
@@ -17981,6 +18267,7 @@ export class GameUI {
       // lock/drag buttons (gmRadarUI::UpdateLockedStatus runs off the
       // PlayerModule state, not just local clicks).
       if (changed.includes('lockUI')) this.updateRadarLockedStatus();
+      if (changed.includes('invertMouseLook')) this.applyCameraConfig();
     }
     return changed;
   }
@@ -18747,7 +19034,25 @@ export class GameUI {
     const handle = this.layoutRenderer.render(0x21000010, body, { subtreeElementId: 0x1000009f });
     if (!handle) return;
     this.spellBarHandle = handle;
-    handle.resizeSubtree?.(bodyW, bodyH);
+    // SWEEP1999.magic MAG-6 — a Cast button that carries its state as its
+    // label is the 1999 client's 200 px button: the bar reflows as if the
+    // body were that much narrower (the right-anchored button moves left,
+    // the shortcut list shrinks), then the button and the full-width
+    // backdrops take the rest.
+    const castExtra = this.clientRules.castButtonText ? CAST_BUTTON_1999_WIDTH - (handle.descs?.get(SPELLBAR_CAST_BUTTON)?.width ?? 75) : 0;
+    handle.resizeSubtree?.(bodyW - castExtra, bodyH);
+    if (castExtra > 0) {
+      for (const id of [0x1000009f, 0x100000a0, 0x100000a1, 0x100000a2]) {
+        const el = handle.elements.get(id);
+        if (el) el.style.width = `${bodyW}px`;
+      }
+      // The button itself is SetSize'd: its three slices reflow by their DAT
+      // edges (the caps keep 32 px, the middle stretches), so the art spans
+      // the 200 px the face text is centred and cut in. Widening only the
+      // box left the 75 px art with the text spilling past it.
+      const castDesc = handle.descs?.get(SPELLBAR_CAST_BUTTON);
+      handle.resizeElement?.(SPELLBAR_CAST_BUTTON, CAST_BUTTON_1999_WIDTH, castDesc?.height ?? 32);
+    }
 
     // Set up tab elements with their DAT states, labels and click handlers.
     // CORE.17.k.b.b.c.a — the tab base 0x21000010:0x1000048f defines 0xb
@@ -18859,10 +19164,14 @@ export class GameUI {
     // it (ClearAllText) and sets the SELECTED spell's name; the "100% Charge"
     // line it used to show was invented. Empty until a selection exists.
     handle.setText(SPELLBAR_SPELL_NAME_TEXT, '');
+    this.mountSpellChargeMeter(handle);
     this.updateEndowmentIcon();
     this.updateCastButtonTooltip();
 
-    this.hudContainer.appendChild(container);
+    // Only while this render is still the live bar: re-appending a container
+    // a nested re-render already replaced would bring a second, frozen bar
+    // back under the live one.
+    if (this.spellBarPanelEl === container) this.hudContainer.appendChild(container);
   }
 
   /**
@@ -18914,6 +19223,21 @@ export class GameUI {
         state.targetName = t ? t.name : null;
       }
     }
+    const faceText = this.clientRules.castButtonText;
+    if (faceText) {
+      // SWEEP1999.magic MAG-6 — the 1999 button's face is its state
+      // (UpdateCastButton @ 0x513e00), its hover text AC_ToolTipHandler 0x55;
+      // there is no separate spell-name line.
+      const face = castButtonFace(state, faceText);
+      this.tagHudTooltip(btn, face.hover);
+      if (face.castable) btn.dataset.castable = '1'; else delete btn.dataset.castable;
+      btn.dataset.castFace = face.label;
+      handle.setState(SPELLBAR_CAST_BUTTON, face.castable ? UIState.Normal : UIState.Disabled);
+      handle.setText(SPELLBAR_CAST_BUTTON, this.fitCastButtonLabel(face.label, btn));
+      handle.setText?.(SPELLBAR_SPELL_NAME_TEXT, '');
+      this.refreshSpellChargeMeter(true);
+      return;
+    }
     const { text, castable, nameField } = castButtonTooltip(state);
     this.tagHudTooltip(btn, text);
     if (castable) btn.dataset.castable = '1'; else delete btn.dataset.castable;
@@ -18922,6 +19246,103 @@ export class GameUI {
     // 0x1 only on the CAST / USE branches.
     handle.setState(SPELLBAR_CAST_BUTTON, castable ? UIState.Normal : UIState.Disabled);
     handle.setText?.(SPELLBAR_SPELL_NAME_TEXT, nameField, AC_COLORS.white);
+  }
+
+  /**
+   * The 1999 button's two lines, each cut with "..." to the button's width
+   * (0x4579b0: "CAST <spell>" to one line, the whole text to two).
+   */
+  private fitCastButtonLabel(label: string, btn: HTMLElement): string {
+    const width = parseInt(btn.style.width, 10) || CAST_BUTTON_1999_WIDTH;
+    const style = this.datTextStyleFor(descRef(0x21000010, 0x1000009f, SPELLBAR_CAST_BUTTON));
+    const renderer = style ? this.loadFontRenderer(style.font) : this.fontRenderer;
+    if (!renderer?.isReady) return label;
+    const avail = width - (style ? style.marginLeft + style.marginRight : 0) - 4;
+    return label.split('\n').slice(0, 2).map((line) => truncateTextToFit(line, avail, (t) => renderer.measureText(t)).text).join('\n');
+  }
+
+  /**
+   * SWEEP1999.magic MAG-3 — the per-spell Charge of the 1999 spell bar
+   * (main.ts: SpellCharge1999 inq), or null in an era without it.
+   */
+  spellChargeFor: ((spellId: number) => number) | null = null;
+  /** The Charge meter's parts while the era draws one. */
+  private chargeMeter: { row: HTMLElement; fill: HTMLElement; value: HTMLElement; trackW: number; pct: number } | null = null;
+
+  /**
+   * The 1999 SpellCastSubPanel's Charge caption and meter (ctor @ 0x512390,
+   * Arrange @ 0x513620: shown only while a spell is selected). Drawn in the
+   * row end of retail gives the spell's name (0x1000048b, which a 1999 bar
+   * leaves empty): the caption in that text's font, then the meter up to the
+   * Cast button, in the end-of-retail combat bar's track and fill art.
+   */
+  private mountSpellChargeMeter(handle: LayoutHandle): void {
+    this.chargeMeter = null;
+    if (!this.clientRules.spellBarChargeMeter) return;
+    const nameEl = handle.elements.get(SPELLBAR_SPELL_NAME_TEXT);
+    const host = nameEl?.parentElement;
+    const btn = handle.elements.get(SPELLBAR_CAST_BUTTON);
+    if (!nameEl || !host) return;
+    const x0 = parseInt(nameEl.style.left, 10) || 40;
+    const y0 = parseInt(nameEl.style.top, 10) || 40;
+    const h = parseInt(nameEl.style.height, 10) || 18;
+    const castLeft = btn ? (parseInt(btn.style.left, 10) || 0) : x0 + 450;
+    const rowW = Math.max(0, castLeft - x0 - 8);
+    const row = document.createElement('div');
+    row.dataset.spellChargeMeter = '1';
+    Object.assign(row.style, {
+      position: 'absolute', left: `${x0}px`, top: `${y0}px`, width: `${rowW}px`, height: `${h}px`,
+      display: 'none', pointerEvents: 'none',
+    });
+    const captionBox = document.createElement('div');
+    captionBox.dataset.spellChargeCaption = 'Charge';
+    Object.assign(captionBox.style, { position: 'absolute', left: '0', top: '0', height: `${h}px`, display: 'flex', alignItems: 'center' });
+    captionBox.appendChild(this.renderDatTextOr('Charge', SPELLBAR_NAME_TEXT_REF, undefined, AC_COLORS.white));
+    row.appendChild(captionBox);
+    const trackX = 48;
+    const trackW = Math.max(0, rowW - trackX);
+    const track = document.createElement('div');
+    const trackUrl = this.getTexURL(CHARGE_METER_TRACK_TEX);
+    Object.assign(track.style, {
+      position: 'absolute', left: `${trackX}px`, top: `${Math.floor((h - CHARGE_METER_HEIGHT) / 2)}px`,
+      width: `${trackW}px`, height: `${CHARGE_METER_HEIGHT}px`, overflow: 'hidden',
+      ...(trackUrl ? { backgroundImage: `url(${trackUrl})`, backgroundSize: '100% 100%' } : { background: '#111' }),
+    });
+    const fill = document.createElement('div');
+    const fillUrl = this.getTexURL(CHARGE_METER_FILL_TEX);
+    Object.assign(fill.style, {
+      position: 'absolute', left: '0', top: '0', width: '0px', height: '100%',
+      ...(fillUrl ? { backgroundImage: `url(${fillUrl})`, backgroundSize: `${trackW}px 100%` } : { background: '#2a4aaa' }),
+    });
+    track.appendChild(fill);
+    const value = document.createElement('div');
+    Object.assign(value.style, { position: 'absolute', left: '0', top: '0', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' });
+    track.appendChild(value);
+    row.appendChild(track);
+    host.appendChild(row);
+    this.chargeMeter = { row, fill, value, trackW, pct: -1 };
+    this.refreshSpellChargeMeter(true);
+  }
+
+  /**
+   * SpellCastSubPanel_UpdateChargeMeter @ 0x513390: pct = ftol(charge × 100
+   * + 0.5); on a change the "%u%%" text and the meter's level pct / 100. Run
+   * on a selection (`force`) and from updateHUD (Global_Loop's 5 s tick: the
+   * charge itself only moves on that tick).
+   */
+  refreshSpellChargeMeter(force = false): void {
+    const m = this.chargeMeter;
+    if (!m) return;
+    const spellId = this.selectedSpellShortcut();
+    m.row.style.display = spellId ? '' : 'none';
+    if (!spellId) { m.pct = -1; return; }
+    const charge = this.spellChargeFor?.(spellId) ?? 1;
+    const pct = Math.trunc(charge * 100 + 0.5);
+    if (!force && pct === m.pct) return;
+    m.pct = pct;
+    m.row.dataset.chargePct = String(pct);
+    m.fill.style.width = `${Math.round(Math.max(0, Math.min(1, pct / 100)) * m.trackW)}px`;
+    m.value.replaceChildren(this.renderDatTextOr(`${pct}%`, SPELLBAR_NAME_TEXT_REF, undefined, AC_COLORS.white));
   }
 
   /**
@@ -19052,13 +19473,34 @@ export class GameUI {
    */
   spellbookSpellAdded(spellId: number): void {
     const spell = this.knownSpells.find((s) => s.id === spellId);
-    if (!spell || isSpellbookFilteredOut(spell.school, spell.level, this.spellbookFilters)) return;
+    if (!spell || this.spellbookFilteredOut(spell)) return;
     this.spellbookSelectedSpellId = spellId;
     this.spellbookHighlightedSpellId = spellId;
+    // SWEEP1999.magic MAG-7 — the 1999 SpellbookPanel_AddSpell @ 0x5169d0
+    // (param_2 from Net_UpdateSpell) selects the row, shows the Magic panel
+    // (0x4d06f0) and opens its spellbook tab: a learned spell pops it open.
+    if (this.clientRules.learnOpensSpellbook) {
+      this.magicPanelTab = 'spells';
+      if (!this.magicVisible) {
+        this.setPanelsWindowPanel(SPELLBOOK_PANEL, true);
+        this.scrollSpellbookRowIntoView(spellId);
+        return;
+      }
+    }
     if (this.magicVisible && (this.magicPanel || this.magicPanelHandle)) {
       this.renderMagicPanel();
       this.scrollSpellbookRowIntoView(spellId);
     }
+  }
+
+  /**
+   * gmSpellbookUI::IsFilteredOut @ 0048aeb0 under the character's filter
+   * bits; never in an era without spellbook filters (the 1999
+   * SpellbookPanel_AddSpell inserts every spell, SWEEP1999.magic MAG-8).
+   */
+  private spellbookFilteredOut(spell: { school: number; level: number }): boolean {
+    if (!this.eraSupports('spellbookFilters')) return false;
+    return isSpellbookFilteredOut(spell.school, spell.level, this.spellbookFilters);
   }
 
   /** UIElement_ListBox::ScrollToView on the spell's row. */
@@ -19297,11 +19739,14 @@ export class GameUI {
 
     // gmSpellbookUI::IsFilteredOut @ 0048aeb0 — a spell shows only while
     // both its school bit and its level bit are set.
-    const filtered = this.knownSpells.filter(s => !isSpellbookFilteredOut(s.school, s.level, this.spellbookFilters));
+    const filtered = this.knownSpells.filter(s => !this.spellbookFilteredOut(s));
 
     // VISUAL.spellbook-scrollbar-and-order — GetSortedInsertionPlace @
-    // 0048b440: the SpellTable's DisplayOrder, not level-then-name.
-    const sorted = spellbookOrder(filtered, (id) => this.spellTable?.spells.get(id)?.displayOrder ?? 0);
+    // 0048b440: the SpellTable's DisplayOrder, not level-then-name. A 1999
+    // world files them by name (SpellbookPanel_AddSpell, SWEEP1999.magic MAG-8).
+    const sorted = this.clientRules.spellbookOrder === 'name'
+      ? spellbookNameOrder(filtered)
+      : spellbookOrder(filtered, (id) => this.spellTable?.spells.get(id)?.displayOrder ?? 0);
 
     // Retail draws an empty list (no empty-state text). Each row is the
     // spell-list UIItem 0x21000037:0x10000343 (280x32, plate 0x06001396):
@@ -19423,10 +19868,16 @@ export class GameUI {
       rowEl.addEventListener('click', onToggle);
     };
 
+    // SWEEP1999.magic MAG-8 — an era without spellbook filters (the 1999
+    // SpellbookPanel builds none) draws no captions and no school / level
+    // rows; every spell is listed (spellbookFilteredOut).
+    const filtersShown = this.eraSupports('spellbookFilters');
     // Captions "Schools:" / "Levels:" — left-justified per their p20=2.
     // CORE.17.k.b.b.c.a — white per their 0x2100003f:0x10000376 base.
-    handle.setText(0x100002a3, getString(183011123) ?? 'Schools:');
-    handle.setText(0x100002a4, getString(136010243) ?? 'Levels:');
+    if (filtersShown) {
+      handle.setText(0x100002a3, getString(183011123) ?? 'Schools:');
+      handle.setText(0x100002a4, getString(136010243) ?? 'Levels:');
+    }
 
     // VISUAL.135 — exactly five schools in DAT order, full StringTable
     // names, no invented "All". Each is an independent toggle of its
@@ -19446,8 +19897,9 @@ export class GameUI {
       const rowEl = handle.elements.get(id);
       if (rowEl) rowEl.style.display = 'none';
     };
+    if (!filtersShown) for (const id of [0x100002a3, 0x100002a4]) hideRow(id);
     for (const sr of schoolRadios) {
-      if (!filterOptions.schools.has(sr.school)) { hideRow(sr.id); continue; }
+      if (!filtersShown || !filterOptions.schools.has(sr.school)) { hideRow(sr.id); continue; }
       const bit = spellbookSchoolBit(sr.school);
       wireRadio(sr.id, getString(sr.str) ?? sr.fallback, (this.spellbookFilters & bit) !== 0,
         () => this.toggleSpellbookFilterBit(bit));
@@ -19468,7 +19920,7 @@ export class GameUI {
     for (let i = 0; i < levelRadios.length; i++) {
       const lr = levelRadios[i];
       const level = i + 1;
-      if (level > filterOptions.maxLevel) { hideRow(lr.id); continue; }
+      if (!filtersShown || level > filterOptions.maxLevel) { hideRow(lr.id); continue; }
       const bit = spellbookLevelBit(level);
       wireRadio(lr.id, getString(lr.str) ?? lr.fallback, (this.spellbookFilters & bit) !== 0,
         () => this.toggleSpellbookFilterBit(bit));
@@ -19865,11 +20317,16 @@ export class GameUI {
     else this.toggleCharPanel();
   }
 
-  toggleMagicPage(tab: 'spells' | 'components'): void {
+  toggleMagicPage(tab: 'spells' | 'components' | 'research'): void {
+    // SWEEP1999.input — 1999's SpellResearchPanel (F7): only a world with the Create Spell tab has it.
+    if (tab === 'research' && !this.spellResearchEnabled) return;
     if (this.magicVisible && this.magicPanelTab === tab) { this.toggleMagicPanel(); return; }
     this.magicPanelTab = tab;
-    this.optionsSettings.magicPanelTab = tab;
-    this.saveOptionsSettings();
+    // As the tab click: the research page is a 1999 world's alone, so it is not persisted.
+    if (tab !== 'research') {
+      this.optionsSettings.magicPanelTab = tab;
+      this.saveOptionsSettings();
+    }
     if (this.magicVisible) { this.renderMagicPanel(); }
     else this.toggleMagicPanel();
   }
@@ -20208,6 +20665,14 @@ export class GameUI {
    * the title ("Male Aluvian Adventurer").
    */
   charHeritageLine(): string {
+    // SWEEP1999.character (CHAR-6) — the 1999 StatRegion_UpdateFromPlayerDesc @ 0x00543520: '(' +
+    // InqString 3 Sex, 4 Heritage, 5 Template (each only when the server sent it, joined by ' ') + ')'.
+    // No title: 1999 had none (the characterTitles feature).
+    if (this.clientRules.heritageLine === 'ac1999') {
+      const s = this.charStrings;
+      const parts = [s.sex || this.charInfo.gender, s.heritage || this.charInfo.heritage, s.template].filter((p) => !!p);
+      return `(${parts.join(' ')})`;
+    }
     const base = `${this.charInfo.gender} ${this.charInfo.heritage}`;
     const title = this.availableTitles.find((t) => t.id === this.activeTitleId)?.name;
     return title ? `${base} ${title}` : base;
@@ -22259,6 +22724,28 @@ export class GameUI {
     }
   }
 
+  /**
+   * SWEEP1999.character (S2) — vitals appraisals gave for fellows whose roster carries none (the
+   * 1999 Fellow is cp / level / name only). The 1999 FellowVitalsRegion (ctor @ FellowVitalsRegion
+   * /ctor.c) shows the selected fellow's Health / Stamina / Mana from the appraisal its panel asks
+   * for; ours draws them as that fellow's row bars.
+   */
+  private readonly fellowAppraisedVitals = new Map<number, { healthCurrent: number; healthMax: number; staminaCurrent?: number; staminaMax?: number; manaCurrent?: number; manaMax?: number }>();
+  /**
+   * An appraisal's creature profile for `guid`: kept when `guid` is a fellow whose roster carries no
+   * vitals (returns true), ignored otherwise.
+   */
+  noteFellowAppraisal(guid: number, cp: { health: number; healthMax: number; attributes?: { stamina: number; staminaMax: number; mana: number; manaMax: number } }): boolean {
+    const f = this.fellowshipData?.fellows.find((x) => x.guid === guid);
+    if (!f || f.healthMax !== undefined) return false;
+    this.fellowAppraisedVitals.set(guid, {
+      healthCurrent: cp.health, healthMax: cp.healthMax,
+      ...(cp.attributes ? { staminaCurrent: cp.attributes.stamina, staminaMax: cp.attributes.staminaMax, manaCurrent: cp.attributes.mana, manaMax: cp.attributes.manaMax } : {}),
+    });
+    if (this.socialPanelVisible && this.socialTab === 'fellowship') this.renderSocialPanel();
+    return true;
+  }
+
   /** Set fellowship data from server (FellowshipFullUpdate). Null = no fellowship. */
   setFellowshipData(data: {
     fellowshipName: string; leaderGuid: number; shareXP?: boolean; evenShare?: boolean; open: boolean; isLocked: boolean;
@@ -22268,6 +22755,7 @@ export class GameUI {
     fellows: Array<{ guid: number; name: string; level: number; healthCurrent?: number; healthMax?: number; staminaCurrent?: number; staminaMax?: number; manaCurrent?: number; manaMax?: number; shareLoot: boolean }>;
   } | null): void {
     this.fellowshipData = data;
+    for (const g of [...this.fellowAppraisedVitals.keys()]) if (!data?.fellows.some((f) => f.guid === g)) this.fellowAppraisedVitals.delete(g);
     // Joining (or leaving) changes what an agent's want asks for: the fellows' updates start with the fellowship.
     if (this.fellowVitalsWanted) this.syncFellowshipPaneVisibility();
     // CORE.5.c.d.b — drop a stale row selection when the member left (retail
@@ -22305,7 +22793,7 @@ export class GameUI {
    * line when the panel had no fellowship before, then stores the snapshot.
    */
   applyFellowshipFullUpdate(data: NonNullable<Parameters<GameUI['setFellowshipData']>[0]>): void {
-    const line = fellowshipUpdateLine(this.fellowshipData, data, data.selfGuid);
+    const line = fellowshipUpdateLine(this.fellowshipData, data, data.selfGuid, this.clientRules.socialLineText);
     this.setFellowshipData(data);
     if (line) this.addFellowshipChatLine(line);
   }
@@ -22716,8 +23204,12 @@ export class GameUI {
     // "portal-storm" icon: light each from its own enchantment set.
     const hasBuff = Array.from(this.activeEnchantments.values()).some(e => e.isBeneficial);
     const hasDebuff = Array.from(this.activeEnchantments.values()).some(e => !e.isBeneficial && !e.isVitae && !e.isCooldown);
-    this.setIndicatorActive('effects-beneficial', hasBuff);
-    this.setIndicatorActive('effects-harmful', hasDebuff);
+    // SWEEP1999.magic MAG-4 — one 1999 indicator (0x4fa740: statusInd_210
+    // lit while the registry's mult + add lists hold anything), in the
+    // beneficial slot; the harmful one is not drawn.
+    const combined = this.clientRules.combinedEffectsTitle !== null;
+    this.setIndicatorActive('effects-beneficial', combined ? hasBuff || hasDebuff : hasBuff);
+    this.setIndicatorActive('effects-harmful', combined ? false : hasDebuff);
   }
 
   /* ================================================================ */
@@ -22778,12 +23270,33 @@ export class GameUI {
    * its close button): toggles the Beneficial Spells window.
    */
   togglePositiveEffectsPanel(): void {
-    this.setEffectsWindowVisible(POSITIVE_EFFECTS, !this.effectsWindows.positive.visible);
+    this.setEffectsWindowVisible(this.positiveEffectsDef, !this.effectsWindows.positive.visible);
   }
 
-  /** InputAction 0x10000007 "Show/Hide Negative Magic Panel" (0x2100001b:0x10000121) — the Harmful Spells window. */
+  /**
+   * InputAction 0x10000007 "Show/Hide Negative Magic Panel" (0x2100001b:0x10000121) — the Harmful Spells window.
+   * An era with one combined window has no harmful one (MAG-4; Keyboard Config omits the command).
+   */
   toggleNegativeEffectsPanel(): void {
+    if (this.clientRules.combinedEffectsTitle !== null) return;
     this.setEffectsWindowVisible(NEGATIVE_EFFECTS, !this.effectsWindows.negative.visible);
+  }
+
+  /**
+   * The positive-slot effects window: end of retail's Beneficial Spells, or
+   * the era's one combined window (the 1999 "Spells in Effect", MAG-4).
+   */
+  private get positiveEffectsDef(): EffectsWindowDef {
+    const title = this.clientRules.combinedEffectsTitle;
+    if (title === null) return POSITIVE_EFFECTS;
+    if (this.combinedEffectsDef?.titleFallback !== title) this.combinedEffectsDef = combinedEffectsWindow(title);
+    return this.combinedEffectsDef;
+  }
+  private combinedEffectsDef: EffectsWindowDef | null = null;
+
+  /** The era's effects windows: positive + negative, or the one combined window. */
+  private effectsWindowDefs(): EffectsWindowDef[] {
+    return this.clientRules.combinedEffectsTitle === null ? [POSITIVE_EFFECTS, NEGATIVE_EFFECTS] : [this.positiveEffectsDef];
   }
 
   /** The pre-gmEffectsUI name: the positive window (main.ts's ShowHidePositiveMagicPanel + the strip still call it). */
@@ -24525,6 +25038,13 @@ export class GameUI {
 
   private renderVitaePanel(): void {
     if (this.pressGuard.defer(this.vitaePanel, () => this.renderVitaePanel())) return;
+    // SWEEP1999.character (CHAR-11) — the 1999 VitaePanel has no full-strength text: with no penalty
+    // its update closes the panel (VitaePanel_UpdateFromPlayerDesc @ 0x0054c120 → 0x0054c0f0).
+    if (this.clientRules.vitaePanel === 'ac1999' && this.vitaePanelSource
+      && vitaePenaltyPercent(this.vitaePanelSource().vitaePenalty) <= 0) {
+      this.setPanelsWindowPanel(VITAE_PANEL, false);
+      return;
+    }
     if (this.vitaePanelHandle) { this.vitaePanelHandle.close(); this.vitaePanelHandle = null; }
     if (this.vitaePanel) this.vitaePanel.remove();
     if (!this.layoutRenderer || !this.vitaePanelSource) return;
@@ -24576,8 +25096,8 @@ export class GameUI {
     // RECON.vitae-panel-dat / VISUAL.info-panel-text-justify — the body is
     // UIElement_Text 0x100001c3 drawn with its own font, colour and
     // justification (no invented padding or hand colour).
-    if (contentArea) this.fillDatTextElement(contentArea, 0x21000020, 0x100001c3, buildVitaePanelText(this.vitaePanelSource()));
-    else body.appendChild(this.renderACText(buildVitaePanelText(this.vitaePanelSource()), AC_COLORS.white));
+    if (contentArea) this.fillDatTextElement(contentArea, 0x21000020, 0x100001c3, buildVitaePanelText(this.vitaePanelSource(), this.clientRules.vitaePanel));
+    else body.appendChild(this.renderACText(buildVitaePanelText(this.vitaePanelSource(), this.clientRules.vitaePanel), AC_COLORS.white));
   }
 
   /**
@@ -24586,10 +25106,11 @@ export class GameUI {
    * margins (DatTextStyle), wrapped at the element's width, one line per
    * "\n" paragraph. Replaces any text drawn there before.
    */
-  private fillDatTextElement(host: HTMLElement, layoutId: number, elementId: number, text: string): HTMLDivElement {
+  private fillDatTextElement(host: HTMLElement, layoutId: number, elementId: number, text: string, override?: { hJustify?: number }): HTMLDivElement {
     host.querySelector(':scope > .ac-dat-text-element')?.remove();
     const desc = this.datDescFor(descRef(layoutId, elementId));
-    const style = this.datTextStyleFor(descRef(layoutId, elementId)) ?? DIALOG_TEXT_BASE_TEMPLATE;
+    const base = this.datTextStyleFor(descRef(layoutId, elementId)) ?? DIALOG_TEXT_BASE_TEMPLATE;
+    const style = override?.hJustify !== undefined ? { ...base, hJustify: override.hJustify } : base;
     const cell = this.buildTemplateTextCell(text, desc?.width ?? host.offsetWidth, desc?.height ?? host.offsetHeight, style);
     cell.classList.add('ac-dat-text-element');
     Object.assign(cell.style, { left: '0', top: '0' });
@@ -25139,7 +25660,7 @@ export class GameUI {
       keyboardHiddenActions(new Set([
         ...hiddenBy(FEATURE_KEYBIND_ACTIONS, this.eraUnsupported),
         // BUG.ac1999-spell-tabs — the spell-tab commands on a one-tab bar and the quick slots past the toolbar's.
-        ...clientRuleHiddenActions({ spellBarTabs: this.spellBarTabCount, shortcutSlots: this.itemShortcutSlotCount }),
+        ...clientRuleHiddenActions({ spellBarTabs: this.spellBarTabCount, shortcutSlots: this.itemShortcutSlotCount, spellResearch: this.spellResearchEnabled, combinedEffectsTitle: this.clientRules.combinedEffectsTitle, characterOptionsPage: this.clientRules.characterOptionsPage }),
       ])));
     let y = 0;
     for (const section of sections) {
@@ -25436,7 +25957,7 @@ export class GameUI {
     this.mountInPanelsWindow(handle, at);
 
     // Title 0x10000120 — the derived element's own p23 (DAT string).
-    handle.setText(EFFECTS_ELEMENTS.title, getString(def.titleString) ?? def.titleFallback);
+    handle.setText(EFFECTS_ELEMENTS.title, (def.titleString ? getString(def.titleString) : null) ?? def.titleFallback);
 
     this.populateEffectsWindow(def);
   }
@@ -25593,7 +26114,7 @@ export class GameUI {
   /** gmEffectsUI::UpdateDurations @ 004b7bb0 — the 1 s tick of every visible window's rows. */
   private updateEffectsDurations(): void {
     const now = Date.now() / 1000;
-    for (const def of [POSITIVE_EFFECTS, NEGATIVE_EFFECTS]) {
+    for (const def of this.effectsWindowDefs()) {
       const w = this.effectsWindows[def.key];
       if (!w.visible) continue;
       for (const row of w.rows) {
@@ -25605,7 +26126,7 @@ export class GameUI {
 
   /** RecvNotice_EnchantmentsChanged @ 004b86e0 — rebuild the visible windows. */
   private refreshEffectsWindows(): void {
-    for (const def of [POSITIVE_EFFECTS, NEGATIVE_EFFECTS]) {
+    for (const def of this.effectsWindowDefs()) {
       if (this.effectsWindows[def.key].visible) this.populateEffectsWindow(def);
     }
   }
@@ -26618,11 +27139,15 @@ export class GameUI {
         strip.appendChild(this.renderDatTextOr(lvlXpLabel, rowRef(0x10000282, 0x10000284), undefined, AC_COLORS.white));
         row.appendChild(strip);
         // Line 2 — three 93x16 vitals bars (health / stamina / mana), each only when carried.
+        // SWEEP1999.character (S2) — a roster without vitals (the 1999 Fellow) shows the selected
+        // fellow's from an appraisal, as the 1999 FellowVitalsRegion did (fellowAppraisedVitals).
+        const v = f.healthMax === undefined && this.selectedFellowGuid === f.guid ? this.fellowAppraisedVitals.get(f.guid) : undefined;
+        const vit = v ?? f;
         const bars = document.createElement('div');
         Object.assign(bars.style, { display: 'flex', height: '16px' });
-        if (f.healthMax !== undefined) bars.appendChild(vitalsBar(f.healthCurrent ?? 0, f.healthMax, 0x0600251c, 0x0600251d, 0x10000285, 0x10000286, 'ID_Fellowship_FellowHealthStatus'));
-        if (f.staminaMax !== undefined) bars.appendChild(vitalsBar(f.staminaCurrent ?? 0, f.staminaMax, 0x06002520, 0x06002521, 0x10000287, 0x10000288, 'ID_Fellowship_FellowStaminaStatus'));
-        if (f.manaMax !== undefined) bars.appendChild(vitalsBar(f.manaCurrent ?? 0, f.manaMax, 0x0600251e, 0x0600251f, 0x10000289, 0x1000028a, 'ID_Fellowship_FellowManaStatus'));
+        if (vit.healthMax !== undefined) bars.appendChild(vitalsBar(vit.healthCurrent ?? 0, vit.healthMax, 0x0600251c, 0x0600251d, 0x10000285, 0x10000286, 'ID_Fellowship_FellowHealthStatus'));
+        if (vit.staminaMax !== undefined) bars.appendChild(vitalsBar(vit.staminaCurrent ?? 0, vit.staminaMax, 0x06002520, 0x06002521, 0x10000287, 0x10000288, 'ID_Fellowship_FellowStaminaStatus'));
+        if (vit.manaMax !== undefined) bars.appendChild(vitalsBar(vit.manaCurrent ?? 0, vit.manaMax, 0x0600251e, 0x0600251f, 0x10000289, 0x1000028a, 'ID_Fellowship_FellowManaStatus'));
         bars.dataset.fellowVitals = String(bars.childElementCount);
         row.appendChild(bars);
         // gmFellowshipUI::ListenToElementMessage @ 004901c0 case 4/0x43: an
@@ -26634,6 +27159,9 @@ export class GameUI {
           this.selectedFellowGuid = f.guid;
           this.fellowSelectionSyncedGuid = f.guid;
           this.onSelectObject?.(f.guid);
+          // S2 — the 1999 FellowPanel asks for the selected fellow's appraisal (0x005370f0 →
+          // FellowPanel_RequestAppraisalIfNeeded) when the roster carries no vitals.
+          if (f.healthMax === undefined) this.callbacks.onAppraiseFellow?.(f.guid);
           this.renderSocialPanel();
         });
         // RECON.dom-chrome-sweep — no right-click menu: 0x10000283's p72 is
@@ -26863,16 +27391,34 @@ export class GameUI {
     // Labels resolve through the panel's retail string-table binding
     // (fellowshipString): the flat getString would return 0x23000005's
     // short "Share Fellowship Experience" for id 237541360.
-    this.bindDatOptionCheckbox(pane, 0x10000270, fellowshipString(159149763, 'Ignore Fellowship Requests'), 'ignoreFellowshipRequests');
     // BUG.ac1999-eor-ui — an era without the option has no checkbox (FEATURE_FELLOWSHIP_CONTROLS).
+    // SWEEP1999.character (S10) — nor one its client's options page doesn't have
+    // (EraClientRules.characterOptionsPage): the 1999 FellowPanel ctor @ 0x533f90 builds one
+    // checkbox, "Accept Fellowship Requests" over the Ignore bit 0x8, so Automatically Accept and
+    // Share Fellowship Experience / Loot go (the AC1999 server would honour a share turned off,
+    // which no 1999 player could do). A kept box wears the era's label, inverted where it was.
     // BUG.era-hidden-row-gaps — and no row-sized hole where it was: the rows
     // below it (and Create Fellowship) close up by its 14 px pitch.
     const eraHiddenControls = hiddenBy(FEATURE_FELLOWSHIP_CONTROLS, this.eraUnsupported);
-    if (eraHiddenControls.has(0x10000271)) {
-      const box = this.datChild(pane, 0x10000271);
-      if (box) box.style.display = 'none';
-    } else {
-      this.bindDatOptionCheckbox(pane, 0x10000271, fellowshipString(115802515, 'Automatically Accept Fellowship Requests'), 'autoAcceptFellowshipRequests');
+    const eraPage = this.clientRules.characterOptionsPage;
+    if (eraPage) {
+      for (const [id, opt] of FELLOWSHIP_PANE_OPTIONS) if (!eraPage.some((o) => o.playerOption === opt)) eraHiddenControls.add(id);
+    }
+    const PANE: Record<number, { str: number; fallback: string; key: string }> = {
+      0x10000270: { str: 159149763, fallback: 'Ignore Fellowship Requests', key: 'ignoreFellowshipRequests' },
+      0x10000271: { str: 115802515, fallback: 'Automatically Accept Fellowship Requests', key: 'autoAcceptFellowshipRequests' },
+      0x10000272: { str: 237541360, fallback: 'Share Fellowship Experience and Luminance', key: 'shareFellowshipXP' },
+      0x10000273: { str: 143989828, fallback: 'Share Fellowship Loot', key: 'shareFellowshipLoot' },
+    };
+    for (const [id, opt] of FELLOWSHIP_PANE_OPTIONS) {
+      if (eraHiddenControls.has(id)) {
+        const box = this.datChild(pane, id);
+        if (box) box.style.display = 'none';
+        continue;
+      }
+      const era = eraPage?.find((o) => o.playerOption === opt);
+      const p = PANE[id];
+      this.bindDatOptionCheckbox(pane, id, era?.label ?? fellowshipString(p.str, p.fallback), p.key, era?.inverted === true);
     }
     const column = new Map<number, HTMLElement>();
     for (const id of FELLOWSHIP_CREATE_COLUMN) {
@@ -26880,8 +27426,6 @@ export class GameUI {
       if (el) column.set(id, el);
     }
     collapseHiddenElements(column, eraHiddenControls, 'y');
-    this.bindDatOptionCheckbox(pane, 0x10000272, fellowshipString(237541360, 'Share Fellowship Experience and Luminance'), 'shareFellowshipXP');
-    this.bindDatOptionCheckbox(pane, 0x10000273, fellowshipString(143989828, 'Share Fellowship Loot'), 'shareFellowshipLoot');
 
     const createBtn = this.bindDatSocialButton(pane, 0x10000274, getString(120885742) ?? 'Create Fellowship', () => {
       const name = nameInput?.value.trim();
@@ -26899,12 +27443,12 @@ export class GameUI {
    *  art 1=off 0x06004d15 / 6=on 0x06004d17 — the same states the friends
    *  "Appear Offline" box uses) to a boolean optionsSettings key, shipping
    *  the mapped server CharacterOption on toggle. */
-  private bindDatOptionCheckbox(scope: HTMLElement, id: number, label: string, key: string): void {
+  private bindDatOptionCheckbox(scope: HTMLElement, id: number, label: string, key: string, inverted = false): void {
     const chk = this.datChild(scope, id);
     if (!chk) return;
     const gem = this.datChild(chk, 0x10000328);
     const paintGem = (): void => {
-      const on = !!this.optionsSettings[key];
+      const on = !!this.optionsSettings[key] !== inverted;
       const url = this.getTexURL(on ? 0x06004d17 : 0x06004d15);
       if (gem && url) Object.assign(gem.style, { backgroundImage: `url(${url})`, backgroundSize: '100% 100%', backgroundRepeat: 'no-repeat' });
       chk.dataset.optionOn = on ? '1' : '0';
@@ -27504,20 +28048,27 @@ export class GameUI {
       // Offline → Friends panel) and a Key Bindings list (→ Keyboard dialog).
       // NO-DEAD-ENDS — options for features this world's era lacks (trade,
       // housing, consent, chess, titles, salvage, TurbineChat) are not listed.
-      // BUG.ac1999-eor-ui-values — nor rows that do nothing in the era (EraClientRules.
-      // characterOptionsInert); a row the era's client had wears its own label.
-      const eraHiddenOptions = hiddenBy(FEATURE_CHARACTER_OPTIONS, this.eraUnsupported);
-      for (const o of this.clientRules.characterOptionsInert) eraHiddenOptions.add(o);
-      const eraLabels = this.clientRules.characterOptionLabels;
-      for (const section of CHARACTER_SETTINGS_PAGE) {
-        this.addSectionHeader(content, characterSettingString(section.header.token, section.header.label), true);
-        for (const row of section.rows) {
-          const key = row.ourKey ?? '';
-          if (!key || eraHiddenOptions.has(row.playerOption)) continue;
-          this.addToggleRow(content, eraLabels[row.playerOption] ?? characterSettingString(row.token, row.label), key,
-            this.characterSettingApplyHook(key));
+      // SWEEP1999.character (CHAR-1) — an era whose client had its own page (EraClientRules.
+      // characterOptionsPage: the 1999 CharOptionsPanel's fifteen checkboxes) lists exactly those
+      // rows, in its order and with its labels, under no section headers (the 1999 page has none).
+      const eraPage = this.clientRules.characterOptionsPage;
+      if (eraPage) {
+        for (const o of eraPage) {
+          const key = o.ourKey ?? CHARACTER_SETTINGS_ROWS.find((r) => r.playerOption === o.playerOption)?.ourKey;
+          if (!key) continue;
+          this.addToggleRow(content, o.label, key, this.characterSettingApplyHook(key), o.inverted === true, o.options1Mask);
         }
-        content.appendChild(this.buildOptionsSeparator());
+      } else {
+        const eraHiddenOptions = hiddenBy(FEATURE_CHARACTER_OPTIONS, this.eraUnsupported);
+        for (const section of CHARACTER_SETTINGS_PAGE) {
+          this.addSectionHeader(content, characterSettingString(section.header.token, section.header.label), true);
+          for (const row of section.rows) {
+            const key = row.ourKey ?? '';
+            if (!key || eraHiddenOptions.has(row.playerOption)) continue;
+            this.addToggleRow(content, characterSettingString(row.token, row.label), key, this.characterSettingApplyHook(key));
+          }
+          content.appendChild(this.buildOptionsSeparator());
+        }
       }
     } else if (this.optionsTab === 'chat') {
       // VISUAL3.63 — retail Chat Options tab structure: "General Chat
@@ -27735,8 +28286,11 @@ export class GameUI {
       // CORE.17.h.g.a — the one Rendering Quality menu with a live consumer:
       // SmartBox::set_mid_radius(m_RenderPrefs.LandscapeDrawDistance) on
       // every pref change (decomp :325087).
-      this.addConfigMenuRow(content, configString('landscapeDrawDistance'), 'landscapeDrawDistance',
-        () => this.applyLandscapeDrawDistance());
+      // 1999 (EraWorldRules.fixedLandscapeRadius): a fixed radius and no such option, so no row.
+      if (landscapeDrawDistanceOption(this.clientRules.world)) {
+        this.addConfigMenuRow(content, configString('landscapeDrawDistance'), 'landscapeDrawDistance',
+          () => this.applyLandscapeDrawDistance());
+      }
       // CORE.17.h.g.c.b — Render.BuildingDetailTextures →
       // SmartBox::SetDetailTexturing(false, on) on every pref change
       // (decomp :325058-325070): the building + env-cell detail pass.
@@ -28011,7 +28565,9 @@ export class GameUI {
     cc.mouseLookSensitivity = sens;
     // Input.InvertMouseLookYAxis (CInputManager m_InvertMouseLookYAxis):
     // "Invert mouselook axes" negates BOTH mouse-look deltas.
-    cc.invertMouseLookY = this.optionsSettings.invertMouseLookYAxis === true;
+    // The 1999 options page's Invert Mouse Look Up/Down (options_ 0x10; CharOptionsPanel_
+    // ApplySettings @ 0x00594c70 → 0x00528c60) does the same (end of retail pins it off).
+    cc.invertMouseLookY = this.optionsSettings.invertMouseLookYAxis === true || this.optionOn('invertMouseLook');
     // CORE.18.b.a.a — Camera.Stiffness in retail units is CameraSet::
     // SetStiffness's argument (OnStiffnessChanged @ 00456490): the viewer
     // frame's t / r_stiffness ease.
@@ -28053,10 +28609,18 @@ export class GameUI {
    * Replaces the VISUAL3.70 canvas-only 1 + 0.5·pref multiply.
    */
   private applyScreenBrightness(): void {
+    const pref = this.configSliderValue('screenBrightness');
+    // 1999 (EraWorldRules.brightness): the slider is the Performance panel's brightness, which sets
+    // LScape's ambient floor (SmartBox_SetBrightness @ 0x40df93), not a gamma ramp.
+    const gamma = this.clientRules.world.brightness.gamma;
+    this.onLandscapeMinAmbient?.(landscapeMinAmbient(this.clientRules.world, gamma ? 0 : pref));
     const root = typeof document !== 'undefined' ? document.body : null;
     if (!root) return;
-    root.style.filter = screenBrightnessFilter(this.configSliderValue('screenBrightness'));
+    root.style.filter = gamma ? screenBrightnessFilter(pref) : '';
   }
+
+  /** LScape min_ambient for the era's brightness (main.ts → SkyboxRenderer.setLandscapeMinAmbient). */
+  onLandscapeMinAmbient: ((level: number) => void) | null = null;
 
   /**
    * VISUAL3.70 — Config "Full Screen" toggle via the Fullscreen API. Persists
@@ -28576,7 +29140,11 @@ export class GameUI {
       e.preventDefault(); e.stopPropagation();
       setFromX(e.clientX);
       const move = (ev: MouseEvent): void => setFromX(ev.clientX);
-      const up = (): void => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+      const up = (): void => {
+        document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+        // The 1999 slider release chime (0x74, the slider's release @ 0x4945b0; EraWorldRules.localUiSounds).
+        this.playUISound(Sound.UI_ReleaseSlider);
+      };
       document.addEventListener('mousemove', move);
       document.addEventListener('mouseup', up);
     });
@@ -28785,7 +29353,15 @@ export class GameUI {
       const node = this.datChild(page.root, id);
       if (node) node.style.display = 'none';
     }
+    // SWEEP1999.character (CHAR-10) — the 1999 Options tab (GameOptionsPanel @ 0x004f63d0) has no
+    // mouse-turning preset: the button goes where Use Mouse Turning is pinned (EraClientRules.optionPins).
+    const noMouseTurning = this.clientRules.optionPins.useMouseTurning !== undefined;
+    if (noMouseTurning) {
+      const node = this.datChild(page.root, 0x100005cc);
+      if (node) node.style.display = 'none';
+    }
     for (const b of BUTTONS) {
+      if (b.id === 0x100005cc && noMouseTurning) continue;
       const label = getString(b.str) ?? b.fallback;
       const node = this.datChild(page.root, b.id);
       if (!node) continue;
@@ -28829,6 +29405,7 @@ export class GameUI {
   /** Live side-effects a Character-page row needs beyond its CharacterOption round-trip. */
   private characterSettingApplyHook(key: string): ((on: boolean) => void) | undefined {
     if (key === 'sideBySideVitals') return () => this.refreshVitalsCluster(); // CORE.5.b
+    if (key === 'invertMouseLook') return () => this.applyCameraConfig(); // the 1999 options_ 0x10
     return undefined;
   }
 
@@ -28896,10 +29473,18 @@ export class GameUI {
     return slider ? { stringId: slider.tooltipId, tableId: CHAT_OPTIONS_STRING_TABLE } : undefined;
   }
 
-  private addToggleRow(container: HTMLElement, label: string, key: string, onApply?: (on: boolean) => void): void {
+  /**
+   * `inverted`: the checkbox shows the setting's opposite (1999's "Accept Allegiance Requests" over
+   * the Ignore bit). `options1Mask`: an era-only options_ bit with no CharacterOption code, sent
+   * whole through onCharacterOptionBits (EraCharacterOption).
+   */
+  private addToggleRow(container: HTMLElement, label: string, key: string, onApply?: (on: boolean) => void, inverted = false, options1Mask?: number): void {
+    // SWEEP1999.character — an option the era pins (EraClientRules.optionPins: one its client never
+    // had, e.g. 1999's Use Mouse Turning) has no row to set it.
+    if (this.clientRules.optionPins[key] !== undefined) return;
     const row = document.createElement('div');
     this.optionsPageKeys.add(key); // CORE.17.h.c — page-registered option
-    const isOn = !!this.optionsSettings[key];
+    const isOn = !!this.optionsSettings[key] !== inverted;
     // GAP.41 — stable hooks for behavioral tests + capture harness (AC-font
     // labels render to canvas, so the option key isn't in the text DOM).
     row.className = 'option-toggle-row';
@@ -28960,6 +29545,8 @@ export class GameUI {
       const optionCode = GameUI.OPTIONS_TO_CHARACTER_OPTION[key];
       if (optionCode !== undefined && this.callbacks.onCharacterOptionToggle) {
         this.callbacks.onCharacterOptionToggle(optionCode, !!this.optionsSettings[key]);
+      } else if (options1Mask !== undefined) {
+        this.callbacks.onCharacterOptionBits?.(options1Mask, !!this.optionsSettings[key]);
       }
       onApply?.(!!this.optionsSettings[key]); // VISUAL3.70 — live side-effect (fullscreen, …)
       // CORE.3.f — the chat-window channel checkboxes are backed by the
@@ -29958,19 +30545,12 @@ export class GameUI {
     scrollLeftArrow: 0x1000036c, scrollRightArrow: 0x1000036b, scrollThumb: 0x1,
   } as const;
 
-  /** Item-type filter menu entries — literal strings + ITEM_TYPE masks from
-   *  VendorItemsUI::OpenVendor @ 004c16d0 (decompiled EoL client), in the
-   *  retail insertion order. Only categories present in the merchandise get
-   *  a menu entry; the shop list always shows exactly one category. */
-  private static readonly VENDOR_TYPE_FILTERS: ReadonlyArray<readonly [string, number]> = [
-    ['Armor', 0x2], ['Books, Paper', 0x2000], ['Clothing', 0x4],
-    ['Containers', 0x200], ['Food', 0x20], ['Gems', 0x800],
-    ['Jewelry', 0x8], ['Keys, Tools', 0x20004000], ['Miscellaneous', 0x490],
-    ['Services', 0x100000], ['Spell Components', 0x1000],
-    ['Trade Notes', 0x40000], ['Weapons', 0x101], ['Mana Stones', 0x80000],
-    ['Magic Items', 0x8000], ['Alchemical Items', 0x4800000],
-    ['Cooking Items', 0x400000], ['Fletching Items', 0x9000000],
-  ] as const;
+  // Item-type filter menu entries — literal strings + ITEM_TYPE masks from
+  // VendorItemsUI::OpenVendor @ 004c16d0 (decompiled EoL client), in the
+  // retail insertion order, are the era's (EraClientRules.vendorTypeFilters,
+  // VTE-7: the 1999 ItemsEnvPanel_OpenVendor's Keys, Tools / Cooking Items
+  // masks differ). Only categories present in the merchandise get a menu
+  // entry; the shop list always shows exactly one category.
 
   private vendorWrapper: HTMLDivElement | null = null;
   private vendorLayoutHandle: LayoutHandle | null = null;
@@ -29987,7 +30567,7 @@ export class GameUI {
     typeFilterIdx: number;
     filterMenuOpen: boolean;
     buyItems: Array<{ guid?: number; weenieClassId: number; name: string; pluralName?: string; price: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; usable?: number; combatUse?: number; maxStackSize?: number; descStackSize?: number; objectDescFlags?: number; itemsCapacity?: number; containersCapacity?: number; ammoType?: number; validLocations?: number; clothingPriority?: number; burden: number; stackSize?: number; itemType?: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }>;
-    sellItems: Array<{ guid?: number; weenieClassId: number; name: string; pluralName?: string; price: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; burden: number; stackSize?: number; itemType?: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }>;
+    sellItems: Array<{ guid?: number; weenieClassId: number; name: string; pluralName?: string; price: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; noteIssuer?: boolean; burden: number; stackSize?: number; itemType?: number; iconDid?: number; iconOverlayDid?: number; iconUnderlayDid?: number; uiEffects?: number; cooldownId?: number; cooldownDuration?: number; structure?: number; maxStructure?: number }>;
     /** Buying-tab list (retail m_buyShopList): merchandise guid + qty. */
     buyList: Array<{ guid: number; qty: number }>;
     /** Selling-tab list (retail m_sellShopList): inventory guid + qty,
@@ -30185,7 +30765,7 @@ export class GameUI {
   /** The filter entries applicable to the current merchandise, in retail
    *  order. Empty when no itemType data matches any known category. */
   private vendorActiveFilters(): Array<readonly [string, number]> {
-    return GameUI.VENDOR_TYPE_FILTERS.filter(([, mask]) =>
+    return this.clientRules.vendorTypeFilters.filter(([, mask]) =>
       this.vendorData.buyItems.some(it => ((it.itemType ?? 0) & mask) !== 0));
   }
 
@@ -30284,7 +30864,7 @@ export class GameUI {
   }
 
   private vendorUnitCost(
-    item: { price: number; stackSize?: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; itemType?: number },
+    item: { price: number; stackSize?: number; unitValue?: number; priceRate?: number; pricing?: 'vendorSells' | 'vendorBuys'; itemType?: number; noteIssuer?: boolean },
     qty: number,
   ): number {
     // RECON.vendor-price-formulas — ShopSystem::SellPrice / BuyPrice on the
@@ -30293,8 +30873,8 @@ export class GameUI {
     // (fixtures) keep the proportional share of the stack price.
     if (item.unitValue !== undefined && item.priceRate !== undefined && item.pricing) {
       return item.pricing === 'vendorSells'
-        ? shopSellPrice(item.unitValue, item.itemType ?? 0, item.priceRate, qty)
-        : shopBuyPrice(item.unitValue, item.itemType ?? 0, item.priceRate, qty);
+        ? shopSellPrice(item.unitValue, item.itemType ?? 0, item.priceRate, qty, this.clientRules.promissoryNoteRates)
+        : shopBuyPrice(item.unitValue, item.itemType ?? 0, item.priceRate, qty, this.clientRules.promissoryNoteRates, item.noteIssuer ?? true);
     }
     return Math.max(1, Math.round(item.price / Math.max(1, item.stackSize ?? 1) * qty));
   }
@@ -30490,7 +31070,7 @@ export class GameUI {
     this.agentSellSplitOriginal = 0;
     const splitWhole = this.toolbarSplitSize === this.toolbarMaxSplitSize;
     const splitSize = item ? this.getObjectSplitSize({ guid: item.guid, stackSize: item.stackSize }) : 0;
-    const res = planVendorSellDrop(item, this.vendorData.profile, splitWhole, splitSize);
+    const res = planVendorSellDrop(item, this.vendorData.profile, splitWhole, splitSize, this.clientRules.vendorAcceptability);
     if (res.kind === 'refused') {
       if (res.notice) this.displayErrorText(res.notice);
       return false;
@@ -31541,7 +32121,7 @@ export class GameUI {
   vendorSellDragAcceptStateForCurrentDrag(): number | null {
     const item = this.vendorSellDragSource();
     if (!item) return null;
-    return vendorSellDragAcceptState(this.vendorDragItemOf(item), this.vendorData.profile);
+    return vendorSellDragAcceptState(this.vendorDragItemOf(item), this.vendorData.profile, false, this.clientRules.vendorAcceptability);
   }
 
   /**
@@ -33896,7 +34476,7 @@ export class GameUI {
     }
     // ItemExamineUI::SetInscription @ 004ae2f0 (ExaminationWindow.examineInscription).
     handle.setVisible(E.inscription, !!inscription?.visible);
-    if (inscription?.text) this.setExamineInscriptionText(handle, inscription.text);
+    if (inscription?.text) this.setExamineInscriptionText(handle, inscription.text, inscription.placeholder);
     if (inscription?.signature) handle.setText(E.signature, inscription.signature);
     if (inscription) this.wireExamineInscription(handle, inscription);
   }
@@ -33908,12 +34488,15 @@ export class GameUI {
    * hidden while the text fits). setText drew one unwrapped line that ran
    * off the element.
    */
-  private setExamineInscriptionText(handle: LayoutHandle, text: string): void {
+  private setExamineInscriptionText(handle: LayoutHandle, text: string, placeholder = false): void {
     const E = EXAMINATION_WINDOW.item;
     const el = handle.elements.get(E.inscription);
     if (!el) return;
     el.querySelectorAll(':scope > .layout-text').forEach((n) => n.remove());
-    this.fillDatTextElement(el, EXAMINATION_WINDOW.layout, E.inscription, text);
+    // VTE-5 — the era's empty-block text; the 1999 client centres it (EraClientRules.inscribePlaceholder).
+    const centred = placeholder && this.clientRules.inscribePlaceholder.centered;
+    const cell = this.fillDatTextElement(el, EXAMINATION_WINDOW.layout, E.inscription, text, centred ? { hJustify: 1 } : undefined);
+    if (placeholder) cell.dataset.inscribePlaceholder = '1';
     // The wheel scrolls it (DAT text elements default to pointer-events none);
     // wireExamineInscription forwards its clicks to the block 0x10000137.
     el.style.pointerEvents = 'auto';
@@ -33980,12 +34563,12 @@ export class GameUI {
       const finish = (): void => {
         if (done) return;
         done = true;
-        const r = inscriptionCommit(input.value.trim(), view, playerName);
+        const r = inscriptionCommit(input.value.trim(), view, playerName, this.clientRules.inscribePlaceholder.text);
         field?.destroy();
         input.remove();
         view = r.view;
         if (r.send !== null && guid) this.onSetInscription?.(guid, r.send);
-        this.setExamineInscriptionText(handle, view.text);
+        this.setExamineInscriptionText(handle, view.text, view.placeholder);
         handle.setText(E.signature, view.signature);
       };
       input.addEventListener('blur', finish);
@@ -34787,13 +35370,13 @@ export class GameUI {
     // (the combined panel, opened from the beneficial side) → the positive
     // window. Negative first: the positive window displaces it in the
     // shared panels-window slot and hands it back on close (gmPanelUI).
-    const negWant = state.negativeEffectsVisible;
+    const negWant = this.clientRules.combinedEffectsTitle !== null ? undefined : state.negativeEffectsVisible;
     if (negWant !== undefined && negWant !== this.effectsWindows.negative.visible) {
       this.setEffectsWindowVisible(NEGATIVE_EFFECTS, negWant);
     }
     const posWant = state.positiveEffectsVisible ?? state.enchantmentPanelVisible;
     if (posWant !== undefined && posWant !== this.effectsWindows.positive.visible) {
-      this.setEffectsWindowVisible(POSITIVE_EFFECTS, posWant);
+      this.setEffectsWindowVisible(this.positiveEffectsDef, posWant);
     }
     // CORE.5.b.a — Vitae panel restore.
     if (state.vitaePanelVisible !== undefined && state.vitaePanelVisible !== this.vitaePanelVisible) {
@@ -35536,6 +36119,7 @@ export class GameUI {
   requestEndCharacterSession(): boolean {
     if (this.logoutContext) return false;
     const hash = acStringHash(END_CHARACTER_SESSION_CONFIRM_TOKEN);
+    // (The 1999 Leave World prompt, GameOptionsPanel_ListenToMessage, is this same text.)
     const text = getStringFromTable(0x23000001, hash) ?? getString(hash) ?? END_CHARACTER_SESSION_CONFIRM_FALLBACK;
     this.showConfirmationDialog(text, (accepted) => {
       if (accepted) this.callbacks.onLogout?.();

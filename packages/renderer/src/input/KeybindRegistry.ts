@@ -32,6 +32,10 @@ import { ActionClass } from './KeybindActionClass.js';
 import { retailKeyLabel } from './KeyNames.js';
 import { KEYBIND_ACTIONS, type KeybindAction } from './KeybindActions.generated.js';
 import { ACTION_INPUT_MAP, INPUT_MAP_COACTIVE, RETAIL_SECTION_KEYBINDS } from './KeybindDefaults.generated.js';
+import { CLIENT_ACTION_INPUT_MAP, CLIENT_KEYBIND_ACTIONS } from './KeybindClientActions.js';
+
+/** The ActionMap's commands, then the era clients' own (KeybindClientActions: 1999's Spell Research Page). */
+const ALL_KEYBIND_ACTIONS: readonly KeybindAction[] = [...KEYBIND_ACTIONS, ...CLIENT_KEYBIND_ACTIONS];
 
 /** The maps registered in the world out of combat (KeybindDefaults.activeInputMaps(NonCombat)), inlined to keep this module free of @ac/shared. */
 const DEFAULT_ACTIVE_MAPS: number[] = [0xd, 0x1000000d, 0x1000000a, 0x10000002, 0x1000000c, 0x10000009, 0x10000008, 0x10000007, 0x10000006, 0x4, 0x5, 0x3, 0x10];
@@ -100,7 +104,7 @@ export class KeybindRegistry {
    */
   constructor(defaults: Record<number, string[]> = {}) {
     this.defaults = defaults;
-    for (const a of KEYBIND_ACTIONS) this.byId.set(a.id, a);
+    for (const a of ALL_KEYBIND_ACTIONS) this.byId.set(a.id, a);
     this.setActiveInputMaps(DEFAULT_ACTIVE_MAPS);
     // The alternate camera map (registered only while F2 / Numpad-/ is held).
     this.setSectionBindings(0x6, RETAIL_SECTION_KEYBINDS[0x6] ?? {});
@@ -123,7 +127,7 @@ export class KeybindRegistry {
 
   /** The input map that owns a command (ActionMap section), or null. */
   inputMapOf(id: number): number | null {
-    const m = ACTION_INPUT_MAP[id];
+    const m = ACTION_INPUT_MAP[id] ?? CLIENT_ACTION_INPUT_MAP[id];
     return m === undefined ? null : m;
   }
 
@@ -139,7 +143,7 @@ export class KeybindRegistry {
   /** Restore every command to its built-in default binding. */
   resetToDefaults(): void {
     this.bindings.clear();
-    for (const a of KEYBIND_ACTIONS) {
+    for (const a of ALL_KEYBIND_ACTIONS) {
       const slots: Mapping[] = [null, null, null];
       const d = this.defaults[a.id];
       if (d) for (let i = 0; i < Math.min(MAPPINGS_PER_ACTION, d.length); i++) slots[i] = d[i];
@@ -161,10 +165,10 @@ export class KeybindRegistry {
   }
 
   /** All known commands, in generated (class, id) order. */
-  actions(): readonly KeybindAction[] { return KEYBIND_ACTIONS; }
+  actions(): readonly KeybindAction[] { return ALL_KEYBIND_ACTIONS; }
 
   actionsForClass(cls: ActionClass): KeybindAction[] {
-    return KEYBIND_ACTIONS.filter((a) => a.cls === cls);
+    return ALL_KEYBIND_ACTIONS.filter((a) => a.cls === cls);
   }
 
   action(id: number): KeybindAction | null { return this.byId.get(id) ?? null; }
@@ -272,7 +276,7 @@ export class KeybindRegistry {
 
   restore(snap: Record<number, Mapping[]>): void {
     this.bindings.clear();
-    for (const a of KEYBIND_ACTIONS) {
+    for (const a of ALL_KEYBIND_ACTIONS) {
       const s = snap[a.id];
       this.bindings.set(a.id, s ? s.slice(0, MAPPINGS_PER_ACTION) : [null, null, null]);
     }
@@ -298,7 +302,7 @@ export class KeybindRegistry {
   loadSerialized(json: string): void {
     let parsed: Record<string, Mapping[]>;
     try { parsed = JSON.parse(json); } catch { return; }
-    for (const a of KEYBIND_ACTIONS) {
+    for (const a of ALL_KEYBIND_ACTIONS) {
       const s = parsed[a.id] ?? parsed[String(a.id)];
       if (!Array.isArray(s)) continue;
       const slots: Mapping[] = [null, null, null];

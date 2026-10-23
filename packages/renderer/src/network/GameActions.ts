@@ -16,7 +16,7 @@
  */
 import {
   GameActionType, BinaryWriter,
-  buildSetCharacterOptionPayload, buildAddSpellFavoritePayload,
+  buildSetCharacterOptionPayload, buildSetCharacterOptionsPayload, buildAddSpellFavoritePayload,
   buildRemoveSpellFavoritePayload, buildFinishBarberPayload, buildAbuseLogRequestPayload,
   type FinishBarberFields,
 } from '@ac/network';
@@ -61,6 +61,20 @@ export class GameActions {
     if (!send) return;
     send(GameActionType.SetSingleCharacterOption, buildSetCharacterOptionPayload(option, value));
     console.log(`[AC] Sent SetSingleCharacterOption: ${option} = ${value}`);
+  }
+
+  /**
+   * SWEEP1999.character — send the whole options_ word (SetCharacterOptions 0x1A1 with options1
+   * alone), for an option that has no SetSingleCharacterOption code: the 1999 options page's
+   * Automatically Create Shortcuts / Invert Mouse Look / Right-click mouselook bits. The 1999 client
+   * sends every option change this way (SetCharacterOption1's worker @ 0x593b70; kb
+   * Character/0x1A1), and the 1999 adapter keeps the one dword (Misc1999).
+   */
+  setCharacterOptionsWord(options1: number): void {
+    const send = this.getSend();
+    if (!send) return;
+    send(GameActionType.SetCharacterOptions, buildSetCharacterOptionsPayload({ options1: options1 | 0 }));
+    console.log(`[AC] Sent SetCharacterOptions (word): options1=0x${(options1 >>> 0).toString(16)}`);
   }
 
   /**

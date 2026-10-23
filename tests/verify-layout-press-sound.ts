@@ -129,6 +129,17 @@ describe('pressSoundsFor (DOM → layout element → state media)', () => {
     expect(pressSoundsFor(node(0x10000002), getLayout)).toHaveLength(1);
   });
 
+  it('1999 (EraWorldRules.pressSoundOnEveryButton): a button with no media of its own plays the client\'s one press sound; a sounding one keeps its own, a disabled or non-button stays silent', () => {
+    const { node } = dom();
+    const every = { table: TABLE, sound: Sound.UI_ButtonPress };
+    expect(pressSoundsFor(node(0x10000004), getLayout, every)).toEqual([every]);
+    expect(pressSoundsFor(node(0x10000002), getLayout, every)).toEqual([{ table: TABLE, sound: Sound.UI_ButtonPress }]);
+    expect(pressSoundsFor(node(0x10000005), getLayout, every)).toEqual([{ table: 0x0a000123, sound: 0 }]);
+    expect(pressSoundsFor(node(0x10000006), getLayout, every)).toEqual([]);
+    node(0x10000004).dataset.acState = 'd';
+    expect(pressSoundsFor(node(0x10000004), getLayout, every)).toEqual([]);
+  });
+
   it('sType 0 media is the raw wave', () => {
     const { node } = dom();
     expect(pressSoundsFor(node(0x10000005), getLayout)).toEqual([{ table: 0x0a000123, sound: 0 }]);

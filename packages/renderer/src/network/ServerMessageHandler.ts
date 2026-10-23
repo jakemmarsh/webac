@@ -1650,6 +1650,7 @@ export class ServerMessageHandler {
 
       // ── Messages we acknowledge but don't process yet ──
       case GameMessageOpcode.CharacterList:
+      case GameMessageOpcode.CharSelectNews: // the 1999 connection's 'charSelectNews' event
       case GameMessageOpcode.DDD_Interrogation:
       case GameMessageOpcode.DDD_EndDDD:
       case GameMessageOpcode.CharacterError:

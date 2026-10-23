@@ -106,6 +106,64 @@ export function isShortcutEligible(o: { isPlayer: boolean; stuck: boolean; itemT
   return !o.vendorItem;
 }
 
+/** The 1999 shortcut tray's drop refusals (ShortcutSlot::AcceptDragObject @ 0x00500240, UI vtable +0x114). */
+export const SHORTCUT_ONLY_USABLE_TEXT = 'Only usable items can go here';
+export const SHORTCUT_MOVE_SPLIT_TEXT = 'Move the split item before making a shortcut';
+export const SHORTCUT_ONLY_PICKUP_TEXT = 'Only items that can be picked up can go here';
+
+/** What ShortcutSlot::AcceptDragObject reads about a dragged item. */
+export interface ShortcutDropItem1999 {
+  /** ITEM_USEABLE bits (0 = undefined). */
+  usable?: number;
+  /** PublicWeenieDesc._combatUse (0 = none). */
+  combatUse?: number;
+  /** EquipMask of the locations it can be worn or wielded in. */
+  validLocations?: number;
+  itemType?: number;
+  /** pwd bitfield BF_STUCK (0x4). */
+  stuck?: boolean;
+  /** pwd bitfield BF_PLAYER (0x8). */
+  isPlayer?: boolean;
+}
+
+/**
+ * The 1999 client.exe's ShortcutSlot::AcceptDragObject @ 0x00500240 (SWEEP1999.input HC-13;
+ * eraClientRules().shortcutDropCheck 'ac1999'): an item dropped on a tray slot is refused
+ *  - "Only usable items can go here" when it is not usable (ITEM_USEABLE has USEABLE_NO, the
+ *    `(u & 1) == 0` test @ 0x005ce4e0 failing), has no combat use (+0x5c, the field
+ *    GetDefaultCombatMode reads), is not a container, can't be worn (valid locations outside
+ *    0x7e00 armour, 0x1ff clothing, 0xf8000 neck / wrists / fingers) and is not a Caster (0x8000);
+ *  - "Move the split item before making a shortcut" while the toolbar holds a partial split
+ *    (GenItemHolder splitSize != maxSplitSize);
+ *  - "Only items that can be picked up can go here" when it is stuck (bitfield 0x4) or a
+ *    creature (type 0x10), unless it is a player (vtable +0x10).
+ * Returns the refusal, or null to take the drop. End of retail's gmToolbarUI takes any item
+ * (its CreateShortcutToItem / IsShortcutEligible checks still run after).
+ */
+export function shortcutDropRefusal1999(item: ShortcutDropItem1999, split: { splitSize: number; maxSplitSize: number }): string | null {
+  const type = (item.itemType ?? 0) >>> 0;
+  const locations = (item.validLocations ?? 0) >>> 0;
+  const usable = ((item.usable ?? 0) & 1) === 0;
+  const container = (type & 0x200) !== 0;
+  const wearable = (locations & (0x7e00 | 0x1ff | 0xf8000)) !== 0;
+  if (!usable && !(item.combatUse ?? 0) && !container && !wearable && (type & 0x8000) === 0) return SHORTCUT_ONLY_USABLE_TEXT;
+  if (split.splitSize !== split.maxSplitSize) return SHORTCUT_MOVE_SPLIT_TEXT;
+  if ((item.stuck && !item.isPlayer) || ((type & 0x10) !== 0 && !item.isPlayer)) return SHORTCUT_ONLY_PICKUP_TEXT;
+  return null;
+}
+
+/**
+ * The first branch of the 1999 ShortcutSlot::AcceptDragObject @ 0x00500240: a pack item dropped on
+ * a slot whose shortcut is a container goes INTO that container (ItemHolder_AttemptPlaceInContainer),
+ * not onto the slot, unless the dragged object is a creature or itself a container. End of
+ * retail's gmToolbarUI::HandleDropRelease @ 004be7c0 has no such branch.
+ */
+export function shortcutDropIntoContainer1999(dragged: { id: number; itemType?: number }, slotItem: { id: number; itemType?: number } | null): boolean {
+  if (!slotItem || slotItem.id === dragged.id) return false;
+  if (((slotItem.itemType ?? 0) & 0x200) === 0) return false;
+  return ((dragged.itemType ?? 0) & (0x10 | 0x200)) === 0;
+}
+
 /** ListenToGlobalMessage case 0x1000010d ("Create Shortcut"): CreateShortcutToItem(selectedID, -1, true, false). */
 export const CREATE_SHORTCUT_ACTION = 0x1000010d;
 

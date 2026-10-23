@@ -31,6 +31,9 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { formatDefenderNotificationLog } from '@ac/shared';
 import { DamageType } from '@ac/shared';
+import { showDefenderNotification } from '../packages/renderer/src/ui/ServerMessageText.js';
+import { eraClientRules } from '../packages/renderer/src/era/EraFeatures.js';
+import { eraProfile, EOR_ERA_ID } from '../packages/renderer/src/era/EraProfiles.js';
 
 const REPO = resolve(__dirname, '..');
 const ACE_COMBAT = resolve(REPO, 'reference/ACE/Source/ACE.Server/WorldObjects/Player_Combat.cs');
@@ -48,25 +51,29 @@ describe('formatDefenderNotificationLog (FAITHFUL.287)', () => {
     );
   });
 
-  it('main.ts onDefenderNotification handler logs it via console.log', () => {
-    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    console.log(formatDefenderNotificationLog('Tumerok Gladiator', DamageType.Bludgeon, 2, false));
-    expect(spy).toHaveBeenCalledWith('[DefenderNotification] Tumerok Gladiator hit for 2 bludgeoning');
-    spy.mockRestore();
-  });
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('main.ts wires formatDefenderNotificationLog into onDefenderNotification', () => {
-  const MAIN = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf8');
-
-  it('the handler calls console.log(formatDefenderNotificationLog(...))', () => {
-    const block = MAIN.match(/onDefenderNotification:[\s\S]{0,1200}?addTextToScroll\(gameUI, defenderHitLine/);
-    expect(block).not.toBeNull();
-    expect(block![0]).toMatch(/console\.log\(formatDefenderNotificationLog\(/);
+describe('onDefenderNotification (showDefenderNotification) logs the diagnostic line in every era', () => {
+  const facts = { name: 'Drudge Skulker', damageType: DamageType.Bludgeon, severity: 0.3, damage: 12, critical: true, bodyPart: 3 };
+  for (const id of [EOR_ERA_ID, 'classic-dereth', 'classicace-customdm', 'classicace-infiltration', 'ac1999-retail']) {
+    it(`${id}: the [DefenderNotification] console line, then the era's one hit line on the scroll`, () => {
+      const rule = eraClientRules(eraProfile(id)).hitLineText;
+      const logged: string[] = [];
+      const chat: string[] = [];
+      const ui = { displayErrorText: () => { throw new Error('a hit line is never spew'); }, addSystemMessage: (t: string) => { chat.push(t); } };
+      const line = showDefenderNotification(ui, rule, facts, (l) => logged.push(l));
+      expect(logged).toEqual(['[DefenderNotification] Drudge Skulker hit for 12 bludgeoning CRIT']);
+      expect(chat).toEqual([line.text]);
+    });
+  }
+  it('the default logger is console.log', () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    showDefenderNotification({ displayErrorText: () => {}, addSystemMessage: () => {} }, 'eor', facts);
+    expect(spy).toHaveBeenCalledWith('[DefenderNotification] Drudge Skulker hit for 12 bludgeoning CRIT');
   });
 });
 

@@ -31,6 +31,11 @@
  *    the book can hold — the author's name for a written page, "(blank)"
  *    past the end — each with "Page <n>".
  * The notice strings are acclient.exe literals.
+ *
+ * Era rules (EraClientRules.book, VTE-8): the 1999 ReadWritePanel_UpdateMenu
+ * @ 0x00521230 writes a written page's row as "- <author>" (nothing for an
+ * empty author), and ReadWritePanel_CloseCurPage @ 0x00521820 saves a page
+ * only when its text region is dirty (here: the text differs from the page's).
  */
 
 export interface BookPage {
@@ -67,7 +72,15 @@ export function pageTextBlank(text: string): boolean {
   return /^[ \n\0]*$/.test(text);
 }
 
+/** The era's book rules (EraClientRules.book); end of retail's by default. */
+export interface BookModelRules {
+  menuAuthorFormat: string;
+  saveOnlyChanged: boolean;
+}
+const EOR_BOOK_RULES: BookModelRules = { menuAuthorFormat: '%s', saveOnlyChanged: false };
+
 export class BookModel {
+  rules: BookModelRules = EOR_BOOK_RULES;
   bookId = 0;
   maxNumPages = 0;
   pages: BookPage[] | null = null;
@@ -104,7 +117,8 @@ export class BookModel {
   get menu(): Array<{ text: string; pageLabel: string }> {
     const rows: Array<{ text: string; pageLabel: string }> = [];
     const pages = this.pages ?? [];
-    for (let i = 0; i < pages.length; i++) rows.push({ text: pages[i].authorName, pageLabel: bookPageLabel(i) });
+    const author = (name: string): string => (name ? this.rules.menuAuthorFormat.replace('%s', name) : '');
+    for (let i = 0; i < pages.length; i++) rows.push({ text: author(pages[i].authorName), pageLabel: bookPageLabel(i) });
     for (let i = pages.length; i < this.maxNumPages; i++) rows.push({ text: BOOK_BLANK_ROW, pageLabel: bookPageLabel(i) });
     return rows;
   }
@@ -160,6 +174,7 @@ export class BookModel {
       this.pages.splice(this.curPage, 1);
       return true;
     }
+    if (this.rules.saveOnlyChanged && page.pageText === this.pageText) return false;
     page.pageText = this.pageText;
     this.io.modifyPage(this.bookId, this.curPage, page.pageText);
     return false;

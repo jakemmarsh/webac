@@ -122,6 +122,10 @@ export interface PaperdollWearContext {
   inCombat: boolean;
   /** IsPlayerReadyToMakeInventoryRequest(0)'s refusal line, or null when the player is ready. */
   readyRefusal: string | null;
+  /** EraClientRules.paperdollSlotDropSwaps (INV-4): a blocked slot drop swaps (1999). Absent = false. */
+  slotDropSwaps?: boolean;
+  /** EraClientRules.dualWieldShieldSlot (INV-5): a melee weapon fits the shield slot. Absent = true. */
+  dualWieldShieldSlot?: boolean;
 }
 
 export interface PaperdollDropOutcome {
@@ -131,6 +135,11 @@ export interface PaperdollDropOutcome {
   notice?: string;
   /** ItemHolder::AttemptMerge into the wielded stack: send StackableMerge(obj → targetId, amount). */
   merge?: { targetId: number; amount: number };
+  /**
+   * INV-4 — the 1999 swap: the slot is taken, so the caller runs the double-click's AutoWield on
+   * `side` (the occupant to the backpack with "Moving X to your backpack", then the wield).
+   */
+  swap?: { side: UISlotSide };
 }
 
 const fmt = (template: string, name: string) => template.replace('%s', name);
@@ -203,6 +212,8 @@ function autoWield(obj: PaperdollDropObject, side: UISlotSide, ctx: PaperdollWea
   // param_4 = 1 / param_5 = 0: a blocked location is refused without a word
   // and nothing is unwielded (ResetUnblocking). The robe line is not gated.
   if (res.kind === 'rejected' && res.notice) return { wieldLocation: null, notice: res.notice };
+  // INV-4 — the 1999 PanelUI_AutoWield's param_4 = 1 swaps instead.
+  if (res.kind === 'blocked' && ctx.slotDropSwaps) return { wieldLocation: null, swap: { side } };
   return { wieldLocation: null };
 }
 
@@ -220,13 +231,48 @@ export function acceptPaperdollDrop(
   const slot = target.mask >>> 0;
   let fits = valid;
   let side = slot === WRIST_LEFT || slot === FINGER_LEFT ? UISlotSide.Left : UISlotSide.Right;
-  if (slot === SHIELD && (valid & MELEE_WEAPON) !== 0) {
+  // INV-5 — the dual-wield widening is end of retail's; the 1999 slot takes valid & mask only.
+  if (slot === SHIELD && (valid & MELEE_WEAPON) !== 0 && ctx.dualWieldShieldSlot !== false) {
     fits |= SHIELD;
     side = UISlotSide.Left;
   }
   if ((slot & fits) === 0) return { wieldLocation: null };
   if ((slot & PAPERDOLL_AUTOWEAR_SLOT_MASK) !== 0) return autoWear(obj, ctx);
   return autoWield(obj, side, ctx);
+}
+
+/** The non-wearable location bits AutoSort hands to AutoWield (weapons, ammo, shield, held, jewellery). */
+export const AUTOSORT_WIELD_MASK = 0x7eff8000;
+
+/**
+ * INV-2 (every era) — CPlayerSystem::UsingItem case 4 (a double-click on owned armor, clothing or
+ * jewellery not yet worn) is AutoSort(obj, 1, 0) @ 005609a0, not AutoWield. The 1999 client.exe's
+ * UsingItem (0x004fe450) case 4 is the same, 0x004fecf0:
+ *  1. a wearable bit (& 0x8007fff; the 1999 test is & 0x1ff | & 0x7e00) → AutoWear (AutoWearIsLegal,
+ *     then UIAttemptWield with the WHOLE valid mask): a hauberk covers chest and arms at once, a
+ *     covering item refuses with "You must remove your %s to wear that" and nothing comes off; an
+ *     object the player already wears ("The %s is already being worn") ends the sort;
+ *  2. failing that, a weapon / jewellery bit (& 0x7eff8000) → AutoWield(obj, right, …, unwield 1),
+ *     the double-click's own path ('wield': the caller runs it);
+ *  3. failing that, an object not owned → PlaceInBackpack ('backpack').
+ * Pre-fix ours sent every case 4 through AutoWield's single-bit chain: a hauberk went on at
+ * ChestArmor alone, and a covering piece was taken off instead of the refusal.
+ */
+export function autoSortDecision(
+  obj: PaperdollDropObject, ctx: PaperdollWearContext, ownedByPlayer: boolean,
+): { kind: 'wear'; location: number; notice?: undefined } | { kind: 'wield' | 'backpack' | 'none'; notice?: string } {
+  if (ctx.readyRefusal !== null) return { kind: 'none', notice: ctx.readyRefusal };
+  const valid = (obj.validLocations ?? 0) >>> 0;
+  let notice: string | undefined;
+  if ((valid & PAPERDOLL_WEARABLE_MASK) !== 0) {
+    const wear = autoWear(obj, ctx);
+    if (wear.wieldLocation !== null) return { kind: 'wear', location: wear.wieldLocation };
+    // AutoWearIsLegal's `worn` out-param: the object is on the player already — AutoSort stops.
+    if (ctx.equipped.some((e) => e.id === obj.id && e.slot !== 0)) return { kind: 'none', notice: wear.notice };
+    notice = wear.notice;
+  }
+  const kind = (valid & AUTOSORT_WIELD_MASK) !== 0 ? 'wield' : !ownedByPlayer ? 'backpack' : 'none';
+  return notice ? { kind, notice } : { kind };
 }
 
 /** UIItem drag-accept states (UIItemDragAccept.DRAG_ACCEPT_STATE): accept / refuse. */
@@ -244,7 +290,7 @@ const DRAG_REFUSE = 0x10000041;
 export function paperdollSlotDragAcceptState(obj: PaperdollDropObject, slotMask: number, ctx: PaperdollWearContext): number {
   let valid = (obj.validLocations ?? 0) >>> 0;
   const slot = slotMask >>> 0;
-  if (slot === SHIELD && (valid & MELEE_WEAPON) !== 0) valid |= SHIELD;
+  if (slot === SHIELD && (valid & MELEE_WEAPON) !== 0 && ctx.dualWieldShieldSlot !== false) valid |= SHIELD;
   if ((slot & valid) === 0) return DRAG_REFUSE;
   if (ctx.readyRefusal !== null) return DRAG_REFUSE;
   return autoWieldIllegal(obj, ctx) === null ? DRAG_ACCEPT : DRAG_REFUSE;

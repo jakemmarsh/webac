@@ -105,9 +105,9 @@ export interface SelectionFlipStep {
  * One due tick of `Global_Loop @ 004e5620` for a non-zero `m_cFlipCount`:
  * `++count`; `< 5` → re-arm, odd = HIGH / even = LOW; else count 0, restore.
  */
-export function selectionFlipStep(flipCount: number): SelectionFlipStep {
+export function selectionFlipStep(flipCount: number, endCount: number = SELECTION_FLIP_END_COUNT): SelectionFlipStep {
   const next = flipCount + 1;
-  if (next < SELECTION_FLIP_END_COUNT) {
+  if (next < endCount) {
     return { flipCount: next, mode: (next & 1) !== 0 ? 'high' : 'low', rearm: true };
   }
   return { flipCount: 0, mode: 'restore', rearm: false };
@@ -130,6 +130,12 @@ export class SelectionLighting {
   flipCount = 0;
   /** `m_timeNextFlip` (seconds). */
   timeNextFlip = 0;
+
+  /**
+   * The count the blink ends at: end of retail's 5, or the era's (EraWorldRules.selectionFlipEndCount:
+   * 1999's ItemHolder loop @ 0x59de50 stops at HIGH, LOW, restore = 3 here).
+   */
+  endCount = SELECTION_FLIP_END_COUNT;
 
   constructor(private readonly sink: SelectionLightingSink) {}
 
@@ -155,7 +161,7 @@ export class SelectionLighting {
   /** `Global_Loop`'s flip bookkeeping — call once per frame. */
   loop(now: number): void {
     if (this.flipCount === 0 || this.timeNextFlip > now) return;
-    const step = selectionFlipStep(this.flipCount);
+    const step = selectionFlipStep(this.flipCount, this.endCount);
     this.flipCount = step.flipCount;
     if (step.rearm) this.timeNextFlip = now + SELECTION_FLIP_TIME;
     this.sink.applyLighting(this.litGuid, step.mode);

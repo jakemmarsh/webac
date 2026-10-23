@@ -40,6 +40,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parsePlayerDescription } from '../packages/renderer/src/network/PlayerDescriptionParser';
+import { applyLocalOptionEffects, LOCAL_EFFECT_OPTION_KEYS, type LocalOptionSinks } from '../packages/renderer/src/ui/LocalOptionEffects.js';
 import {
   CHARACTER_OPTION_BIT_MAP,
   CharacterOptions1,
@@ -379,15 +380,21 @@ describe('FAITHFUL.570 — main.ts onPlayerDescription calls restoreCharacterOpt
     expect(MAIN).toMatch(/changedOpts\.includes\('runAsDefault'\)[\s\S]+?cameraController\.runIsDefault/);
   });
 
-  it('main.ts mirrors side-effects for disableWeather (inverts: disable→enabled=false)', () => {
-    expect(MAIN).toMatch(/changedOpts\.includes\('disableWeather'\)[\s\S]+?skybox\.setWeatherEnabled\(.*?!==\s*true\)/);
+  it('restored weather / fog / daylight / mouse-turning options reach their effects (applyLocalOptionEffects, inverted where "disable")', () => {
+    const calls: Record<string, boolean> = {};
+    const sinks: LocalOptionSinks = {
+      setWeatherEnabled: (v) => { calls.weather = v; }, setFogEnabled: (v) => { calls.fog = v; },
+      setForceDaylight: (v) => { calls.daylight = v; }, setUseMouseTurning: (v) => { calls.turning = v; },
+      setRightClickMouseLook: (v) => { calls.rightClick = v; },
+    };
+    const on = new Set(['disableWeather', 'alwaysDaylight', 'useMouseTurning']);
+    applyLocalOptionEffects((k) => on.has(k), sinks);
+    expect(calls).toEqual({ weather: false, fog: true, daylight: true, turning: true, rightClick: false });
+    for (const k of ['disableWeather', 'disableDistanceFog', 'alwaysDaylight', 'useMouseTurning']) expect(LOCAL_EFFECT_OPTION_KEYS).toContain(k);
   });
 
-  it('main.ts mirrors side-effects for lockUI / disableDistanceFog / alwaysDaylight / useMouseTurning', () => {
+  it('main.ts mirrors side-effects for lockUI', () => {
     expect(MAIN).toMatch(/changedOpts\.includes\('lockUI'\)[\s\S]+?LayoutRenderer\.setUILocked/);
-    expect(MAIN).toMatch(/changedOpts\.includes\('disableDistanceFog'\)[\s\S]+?sceneManager\.setFogEnabled/);
-    expect(MAIN).toMatch(/changedOpts\.includes\('alwaysDaylight'\)[\s\S]+?skybox\.setForceDaylight/);
-    expect(MAIN).toMatch(/changedOpts\.includes\('useMouseTurning'\)[\s\S]+?CameraController\.setUseMouseTurning/);
   });
 
   it('main.ts logs the count + list of restored options for diagnostics', () => {

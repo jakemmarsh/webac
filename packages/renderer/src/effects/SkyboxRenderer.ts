@@ -564,9 +564,11 @@ export class SkyboxRenderer {
    * moves FORWARD — a server value behind our current estimate is ignored,
    * so the sky never visibly jumps backward on jittery syncs.
    */
-  syncGameClock(serverTicks: number): void {
+  syncGameClock(serverTicks: number, anchor = false): void {
     if (!Number.isFinite(serverTicks) || serverTicks < 0) return;
-    if (this.gameClockTicks === null || serverTicks > this.gameClockTicks) {
+    // An anchor (the 1999 connect grant's time_zero_start_delta, PW-1) replaces the clock: it is a
+    // new session's whole clock, not a sync of the running one.
+    if (anchor || this.gameClockTicks === null || serverTicks > this.gameClockTicks) {
       this.gameClockTicks = serverTicks;
     }
     // BUG.login-sky-wrong-day — the server's day takes over at once, not on
@@ -576,6 +578,25 @@ export class SkyboxRenderer {
     // script before the re-roll. Retail sets Timer from the server before
     // the sky exists.
     this.useDay(this.absoluteDayOf(this.gameClockTicks));
+  }
+
+  /** LScape::min_ambient, the floor on the DAT ambient (end of retail: LSCAPE_LIGHT_MINIMUM). */
+  private minAmbient = LSCAPE_LIGHT_MINIMUM;
+  /** The era's sky cadence (EraWorldRules.skyObjectsOnTick): sky objects only on the 0.8 s tick. */
+  skyObjectsOnTick = false;
+
+  /** LScape::min_ambient (the floor the light tick holds the region ambient to). */
+  get landscapeMinAmbient(): number { return this.minAmbient; }
+
+  /**
+   * LScape_SetMinBrightness @ 0x441d91 (1999): set the floor and zero both throttle clocks, so the
+   * next update re-lights at once.
+   */
+  setLandscapeMinAmbient(level: number): void {
+    if (!Number.isFinite(level) || level === this.minAmbient) return;
+    this.minAmbient = level;
+    this.nextTick = 0;
+    this.nextLightTick = 0;
   }
 
   /** Current game clock estimate (null before the first server sync). */
@@ -1438,9 +1459,11 @@ export class SkyboxRenderer {
     if (this.sealedInterior) return;
 
     if (this.hasDatSky()) {
-      this.updateSkyFrame();
+      // 1999 (skyObjectsOnTick): LScape_UseTime @ 0x442242 runs GameSky_UseTime inside the tick gate.
+      if (!this.skyObjectsOnTick) this.updateSkyFrame();
       if (this.nextTick <= this.tickClock && this.skyDesc) {
         this.nextTick = this.skyDesc.tickSize + this.tickClock;
+        if (this.skyObjectsOnTick) this.updateSkyFrame();
         if (this.nextLightTick < this.tickClock) {
           this.lightTick(true);
           this.nextLightTick = this.skyDesc.lightTickSize + this.tickClock;
@@ -1505,7 +1528,7 @@ export class SkyboxRenderer {
    */
   private lightTick(advanceTransition: boolean): void {
     const lit = this.getLighting(this.timeOfDay, this.tmpDirColor, this.tmpAmbColor);
-    let ambLevel = Math.max(lit.ambBright, LSCAPE_LIGHT_MINIMUM);
+    let ambLevel = Math.max(lit.ambBright, this.minAmbient);
     const ovr = this.environOverride;
     if (ovr) {
       if (this.overrideTransition >= 1) {
@@ -1522,7 +1545,7 @@ export class SkyboxRenderer {
     if (this.forceDaylight) {
       // set_landscape_lighting's m_fAlwaysDaylight arm: GetLighting(0.5).
       sun = this.getLighting(0.5, this.tmpDirColor, this.tmpAmbColor);
-      ambLevel = Math.max(sun.ambBright, LSCAPE_LIGHT_MINIMUM);
+      ambLevel = Math.max(sun.ambBright, this.minAmbient);
     }
 
     // CORE.17.e — retail SkyDesc::GetLighting: the sunlight vector is

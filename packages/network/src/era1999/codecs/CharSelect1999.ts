@@ -12,7 +12,8 @@
  *   0xF643 CharacterCreateResponse  1999: u32 code (1 = ok), then {u32 guid, AcString name, u32 timeout}
  *                                   EoL:  u32 code, u32 guid, String16 name
  *   0xF7C7 → 0xF7DF CharacterEnterWorldServerReady (the 1999 two-phase enter's "go")
- *   0xF65A char-select news (two AcStrings; the client shows the second) — no EoL counterpart: logged
+ *   0xF65A char-select news (two AcStrings; the client shows the second) — no EoL counterpart: kept as
+ *          0xF65A {String16 news} for the page's character select (GameMessageOpcode.CharSelectNews)
  *   0xF653 CharacterLogOff acknowledgement — same opcode, empty
  *   0xF655 CharacterDelete acknowledgement — same opcode, empty (Client.cpp DeleteCharacter)
  *
@@ -35,6 +36,15 @@
 import { BinaryReader } from '../../MessageSerializer.js';
 import { Group1999, eol, type Codecs1999 } from '../Adapter1999.js';
 import { Writer1999 } from '../Wire1999.js';
+
+/** The news text of a translated 0xF65A's payload (after the opcode): one String16. */
+export function parseCharSelectNews(payload: Uint8Array): string {
+  try {
+    return new BinaryReader(payload).readString16();
+  } catch {
+    return '';
+  }
+}
 
 /** The 1999 character select has five slots. */
 export const CHARACTER_SLOTS_1999 = 5;
@@ -73,11 +83,13 @@ export function registerCharSelect1999(c: Codecs1999): void {
   c.inbound.set(0xf659, (r) => [eol(0xf659, (w) => w.writeUInt32(r.u32()))]);
   c.inbound.set(0xf653, () => [eol(0xf653)]);
   c.inbound.set(0xf655, () => [eol(0xf655)]);
+  // The char-select news (PW-7): kept as 0xF65A with the shown string as a String16, for the page's
+  // character select (Connection1999 → 'charSelectNews'). End-of-retail servers never send it.
   c.inbound.set(0xf65a, (r, ctx) => {
     r.acString();
     const news = r.acString();
     ctx.log(`[1999] char-select news: ${news.split('\n')[0]}`);
-    return [];
+    return [eol(0xf65a, (w) => w.writeString16(news))];
   });
 
   c.outbound.set(0xf656, (m) => {

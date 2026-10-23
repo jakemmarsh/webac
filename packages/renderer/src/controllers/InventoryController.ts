@@ -93,7 +93,18 @@ export class InventoryController {
       return this._logAction('equip', itemId, false, 'Item not found in inventory.');
     }
 
-    const result: EquipResult = this._playerState.equipment.equipItem(item, slot);
+    // BUG.eor-autowear-priority-pass — the client's own wield request takes
+    // nothing off. Retail's UIAttemptWield @ 0058d590 only sends the event;
+    // the paperdoll's inventoryMask / clothingPriorityMask change only when
+    // the server moves an object (gmPaperDollUI::ServerSaysMoveItem
+    // @ 004a4b50). AutoWear has already refused any wear whose ClothingPriority
+    // overlaps a worn piece, and AutoWield frees its blocker with a server
+    // move first, so nothing the server keeps worn may leave our record here.
+    // Evicting by overlapping EquipMask bits (pre-fix) dropped a worn
+    // Breeches (AbdomenWear|UpperLegWear) when a Tunic (Chest|Abdomen|
+    // UpperArm) went on, and the next Pants were sent to ACE, which refused
+    // "You must remove your Breeches to wield Pants" (prod 2026-10-23).
+    const result: EquipResult = this._playerState.equipment.equipItem(item, slot, false);
     if (!result.success) {
       return this._logAction(
         'equip', itemId, false,

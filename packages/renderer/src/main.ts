@@ -28,16 +28,16 @@ import { SkillTable } from '@ac/dat-parser/file-types/SkillTable.js';
 import { SecondaryAttributeTable } from '@ac/dat-parser/file-types/SecondaryAttributeTable.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, weenieErrorWithStringText, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
+import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyString, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatWeenieErrorWithString, weenieErrorWithStringText, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
-import { APPRAISAL_1999_STRING } from '@ac/shared';
+import { APPRAISAL_1999_STRING, inqSpellTargetType } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
 import { routeViewContents } from './world/ViewContentsRouter.js';
 import { closeCurrentContainer, releaseGroundObject as releaseGroundObjectState } from './world/CloseCurrentContainer.js';
 import { createLoadingOverlay, revealLoadingPlaceholder, fadeOutLoadingOverlay } from './ui/LoadingOverlay.js';
 import { testResearchFormula } from './ui/SpellResearch1999.js';
 import { attachPreworldScale } from './ui/PreworldScale.js';
-import { buildVendorSellRows } from './ui/VendorSellDrag.js';
+import { buildVendorSellRows, type VendorNotePricing } from './ui/VendorSellDrag.js';
 import { useObjectSelectTargetText, planSpellCast, restoreSpellBars, type SpellTargetObject } from './ui/SpellShortcutBar.js';
 import {
   buildPatchCancelButton, buildPatchCopyright, buildEpilogueFrame, renderPatchLabel,
@@ -112,7 +112,12 @@ import { CharacterAnimController, jumpChargeSeconds } from './animation/Characte
 import { MotionCommand, MotionStance, isSubstateCommand } from './animation/MotionCommands.js';
 import { KeybindRegistry, eventToCode } from './input/KeybindRegistry.js';
 import { wheelZoomDirections } from './ui/MouseTurningDefaults.js';
-import { ACT, DEFAULT_KEYBINDS, HELD_CAMERA_ACTIONS, MOVEMENT_CANONICAL, activeInputMaps, MINIGAME_PANEL_ACTION } from './input/KeybindDefaults.js';
+import { ACT, MOVEMENT_CANONICAL, activeInputMaps, MINIGAME_PANEL_ACTION } from './input/KeybindDefaults.js';
+import { routeGameKeyDown, keyDownConsumed } from './input/GameKeyDown.js';
+import { keybindDefaultsFor, keybindStorageKey } from './input/EraKeymaps.js';
+import { SPELL_RESEARCH_PAGE_ACTION } from './input/KeybindClientActions.js';
+import { stepPowerLevel } from './controllers/PowerBarStep.js';
+import { combatClickSelectRefused } from './controllers/CombatClickSelect.js';
 import { buildEmoteMotionMap } from './input/EmoteActionMap.js';
 import { PendingCastQueue, type PendingCast } from './magic/PendingCastQueue.js';
 import { handleMagicUpdateSpell } from './magic/SpellLearn.js';
@@ -184,7 +189,7 @@ import { urlOverridesEnabled } from './config/urlOverrides.js';
 import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, type World } from './launcher/worldDirectory.js';
 import { eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
 import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
-import { eraClientRules, unsupportedFeatures, hiddenBy, FEATURE_COMMANDS, type EraFeature } from './era/EraFeatures.js';
+import { eraClientRules, unsupportedFeatures, correctedOptionsWord, type EraFeature } from './era/EraFeatures.js';
 import { setAgentTownsEra } from './agent/towns.js';
 import { Ac1999World, ac1999ServerKey, type Ac1999PatchEvent } from './era/Ac1999World.js';
 import { eraPortalOverlay, eraStreamPlan, eraUnavailableText, forgetImportedEraFiles, eraSwitchReloadUrl, planEraDats, resolveBootEra, stashEraSwitch, takeEraSwitch, type DatSource, type EraDatPlan, type EraStreamPlan, type EraSwitch } from './era/EraBoot.js';
@@ -224,7 +229,7 @@ import { UITextureLoader } from './ui/UITextureLoader.js';
 import { CursorManager, resolveWorldCursorName } from './ui/CursorManager.js';
 import { setGlobalCursor } from './ui/GlobalCursor.js';
 import { installRetailFog } from './effects/RetailFog.js';
-import { BusyCount, ExamineAwait, TeleportBusy } from './ui/BusyCount.js';
+import { BusyCount, ExamineAwait, InventoryRequestBusy, TeleportBusy } from './ui/BusyCount.js';
 import { WorldTargetModeController } from './input/WorldTargetMode.js';
 import { isKeyboardField, suppressPageContextMenu } from './input/BrowserDefaults.js';
 import { ACFontRenderer } from './ui/ACFontRenderer.js';
@@ -340,7 +345,7 @@ import {
   externalContainerDragAcceptable,
 } from './inventory/ItemHolderPlacement.js';
 import { attemptPlaceIn3D, canBeginWorldDrag, WorldDropHandoff, PLACE_IN_3D_STRINGS, type PlaceIn3DAction, type PlaceIn3DItem, type PlaceIn3DTarget } from './inventory/AttemptPlaceIn3D.js';
-import { acceptPaperdollDrop, paperdollBandDragAcceptState, paperdollSlotDragAcceptState, type PaperdollDropObject, type PaperdollDropTarget, type PaperdollWearContext } from './inventory/PaperdollDragObject.js';
+import { acceptPaperdollDrop, autoSortDecision, PAPERDOLL_WEARABLE_MASK, paperdollBandDragAcceptState, paperdollSlotDragAcceptState, type PaperdollDropObject, type PaperdollDropTarget, type PaperdollWearContext } from './inventory/PaperdollDragObject.js';
 import { applyServerWieldObject } from './inventory/ServerWieldObject.js';
 import { SelectionHistory, giveSelectedObject, dropSelectedObject } from './inventory/GiveDropCommands.js';
 import type { ObjDescEventData, UpdatePositionData, AutonomousPositionData, HearSpeechData, PropertyUpdateData, VitalUpdateData, TurbineChatData, CombatNotificationData, TransientStringData, TellData, IdentifyResponseData, VendorInfoData, BookDataResponse, BookPageDataResponse, BookPageEditResponse, SkillUpdateData } from './network/ServerMessageHandler.js';
@@ -351,14 +356,18 @@ import { type AppearanceData, buildAppearanceOverrides, transplantPartChildren }
 import { attachHeldChild, buildWieldedItemMesh, heldCopiesUnder, heldCopyGuidAt, stripHeldCopies, itemVisualDescOf, wieldedMeshesBuiltWithMiss, WIELDED_PLACEMENT_KEY } from './models/WieldedItemVisual.js';
 import { SelectionLighting, SearchReason, lightingLevelsForMode, applyPlayerModelLighting, type LightingCopies } from './world/SelectionLighting.js';
 import { worldHoverTooltipText } from './ui/WorldHoverTooltip.js';
+import { worldHoverHint1999 } from './ui/HudTooltips.js';
+import { eraLandscapeRadius } from './era/EraWorldRules.js';
 import { selfHitUnderRay } from './world/PickOcclusion.js';
 import { WorldHoverFind } from './controllers/WorldHoverFind.js';
 import { PendingCombatMode, playerInReadyPosition, getAttackTarget, incompatibleCombatModeRefusal, combatModeRefusalReason, READY_WEAPON_SLOTS, UnconfirmedCombatMode, combatModeOfStance, followModeRefusal, castOnceMagicTaken } from './controllers/CombatModeChange.js';
 import { tracksCombatTarget, isObjectAttackable } from './input/InteractionSystem.js';
 import { selectionQueryFor } from './ui/ToolbarSelection.js';
 import { PHYSICS_STATE_KEY, fadedMaterialVariant } from './models/ObjectTranslucency.js';
-import { decideUseObject, usingItemEffects, USAGE_CONFIRMATION_TEXT, type UseSubject, COMPONENT_PACKS_DID_MAPPER_ID, isComponentPack, containedUseSubject, ownedUseSubject, type OwnedUseItem } from './input/UseObject.js';
+import { decideUseObject, BF_VENDOR, usingItemEffects, USAGE_CONFIRMATION_TEXT, type UseSubject, COMPONENT_PACKS_DID_MAPPER_ID, isComponentPack, containedUseSubject, ownedUseSubject, type OwnedUseItem } from './input/UseObject.js';
+import { targetCompatibleWithObject } from './input/TargetCompatible.js';
 import { WorldRightClick } from './ui/WorldRightClick.js';
+import { applyLocalOptionEffects, applyToggledOptionEffect, LOCAL_EFFECT_OPTION_KEYS, type LocalOptionSinks } from './ui/LocalOptionEffects.js';
 import { formatAcTime } from './utils/formatAcTime.js';
 import { RestartableTimer } from './utils/RestartableTimer.js';
 import { MovementSync, contactPlaneFromNormal } from './network/MovementSync.js';
@@ -367,7 +376,7 @@ import { portalStormPresentation } from './network/portalStormEvents.js';
 import { CLIENT_NOTICES as CN, raiseClientNotice, jumpRefusalNotice, combatModeChangeRefusal, combatMotionRefusal } from './ui/ClientNotices.js';
 import { LoginCompleteNotifier } from './network/LoginCompleteNotifier.js';
 import {
-  addTextToScroll, attackerHitLine, defenderHitLine, evasionAttackerLine, evasionDefenderLine,
+  addTextToScroll, addServerTextLine, attackerNotificationLine, showDefenderNotification, evasionAttackerLine, evasionDefenderLine,
   victimOrKillerLine, playerKilledLine, transientStringLine, channelIndexLines, channelListLines,
   tradeClosedLine, allegianceLoginLine, confirmationRequestText} from './ui/ServerMessageText.js';
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED } from './ui/WeenieErrorNotices.js';
@@ -384,7 +393,7 @@ import { buildContractRows, applyContractTracker, applyContractTrackerTable, typ
 import { harDumpText } from './chat/HouseAccessText.js';
 import { routeObjectSubject, buildInventoryEntry, WorldObjectRecords, PendingContainIds } from './network/objectSubjectRouting.js';
 import { packSlotCounts } from './agent/packCounts.js';
-import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, quickslotCommand, CREATE_SHORTCUT_ACTION, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
+import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, shortcutDropRefusal1999, shortcutDropIntoContainer1999, quickslotCommand, CREATE_SHORTCUT_ACTION, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
 import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from './session/SessionLifecycle.js';
@@ -406,8 +415,8 @@ import { buildSpellExamineModel, inqSkillLevel, spellRangeMeters } from './ui/ex
 import { SpellCharge1999, spellChargeText1999 } from './magic/SpellCharge1999.js';
 import { TalkFocus } from './ui/ChatTalkFocus.js';
 import { MAIN_CHAT_WINDOW_ID } from './ui/FloatyChatModel.js';
-import { RetailCommandSystem } from './chat/commands/index.js';
-import { LocalChatGate } from './chat/LocalChatGate.js';
+import { RetailCommandSystem, type TellCandidate } from './chat/commands/index.js';
+import { LocalChatGate, speakerInHearingRange } from './chat/LocalChatGate.js';
 import { recruitFellow, type FellowshipStep } from './ui/FellowshipPanelActions.js';
 import { FramerateMeter, framerateMeterTemplate } from './ui/FramerateMeter.js';
 import { string2command } from './chat/commands/RetailCommandStrings.js';
@@ -426,6 +435,7 @@ import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from
 import { FramePhaseTimer, PHASE, ProgramCreationCounter, CompileTrace, netHandlerCost, streamHandlerCost, connectionEventOp, timedAgentTick } from './telemetry/MainThreadCost.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
+import { knownObjectNames, pendingRequestDetail, castRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { PortalUseReporter, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
@@ -851,6 +861,21 @@ let refusalReporter: RefusalReporter | null = null;
 function refusalQuietly<T>(f: () => T): T { return refusalReporter ? refusalReporter.quietly(f) : f(); }
 /** Run `f` with `action` (a GameActionType) as the context of a client refusal it raises. */
 function refusalForAction<T>(action: number, f: () => T): T { return refusalReporter ? refusalReporter.forAction(action, f) : f(); }
+/**
+ * TELEMETRY.refusal-context — serializeGameAction, noting the verb for the refusal reporter, so a
+ * server refusal ("You're too busy!") says which request it answered (RefusalReporter.noteActionSent).
+ */
+function serializeTrackedGameAction(sequence: number, actionType: GameActionType, payload?: Uint8Array): Uint8Array {
+  refusalReporter?.noteActionSent(actionType);
+  return serializeGameAction(sequence, actionType, payload);
+}
+/** Run `f` with `detail` (TELEMETRY.refusal-context) as the context of a refusal it raises. */
+function refusalWithDetail<T>(detail: () => RefusalDetail | null, f: () => T): T {
+  if (!refusalReporter) return f();
+  let d: RefusalDetail | null = null;
+  try { d = detail(); } catch { d = null; }
+  return refusalReporter.withDetail(d, f);
+}
 
 // ─── Era (docs/dark-majesty-support.md, era/EraBoot.ts) ──────────────
 // One era's DATs per page load. main() resolves the boot era before any DAT
@@ -1331,12 +1356,10 @@ async function main() {
     trace: preworldReporter.trace,
     era: () => activeEra.id,
     server: () => preworldServer(),
-    // Every name the client knows (items, creatures, players, ours) becomes '_' in the template.
-    scrub: (text) => {
-      const names: string[] = [playerState.name ?? ''];
-      for (const o of serverObjectManager?.getAllObjects().values() ?? []) names.push(o.name, o.pluralName ?? '');
-      return scrubNames(text, names);
-    },
+    // Every name the client knows (the world's objects, the pack, the paperdoll, creatures, players,
+    // ours) becomes '_' in the template (TELEMETRY.refusal-name-keying: pack and worn items too).
+    scrub: (text) => scrubNames(text, knownObjectNames(playerState.name,
+      serverObjectManager?.getAllObjects().values() ?? [], playerState.inventory.getAll(), playerState.equipment.getAll())),
   });
   refusalReporter.install(window, document);
   { const rr = refusalReporter; worldReporter.onSessionEnd(() => rr.flush()); }
@@ -1597,6 +1620,15 @@ async function main() {
   const spellCharge1999 = eraRules.appraisalText === 'ac1999' ? new SpellCharge1999() : null;
   // BUG.ac1999-chat-toggle-local — a client whose @chat is its own switch (1999): the local-speech gate.
   const localChatGate = eraRules.chatToggle === 'local' ? new LocalChatGate() : null;
+  /**
+   * SWEEP1999.commands (S7) — UI_ShouldHearSpeaker's range test where the era's client has it (1999:
+   * a known speaker at or past the radar range less a metre is not shown). The player is always heard.
+   */
+  const speakerHeard = (guid: number): boolean => {
+    if (eraRules.speechHearing !== 'radar' || guid === 0 || guid === aceCharGuid) return true;
+    const o = serverObjectManager?.getObject(guid);
+    return speakerInHearingRange(o ? { dx: o.worldX - playerWorldX, dz: o.worldZ - playerWorldZ } : null, radarRangeFor(gameUI.hudState.isIndoors));
+  };
   // BOOT.side-tables-off-critical-path — the three weenie side-files
   // (combat style for bow/crossbow → LeftHand per ACE Creature_Equipment.cs:84-95;
   // GAP.9 attack type for the swing animation; weapon time for
@@ -2041,8 +2073,10 @@ async function main() {
   // CORE.17.k.b.b.a.g.f — v2: the defaults became the retail KeyMap DAT's;
   // a v1 save carried our invented I / B / C / M / P / O / Q / Tab / NumLock
   // keys for every command, so it is left behind rather than overlaid.
-  const KEYBINDS_STORAGE_KEY = 'ac_keybinds_v2';
-  const keybinds = new KeybindRegistry(DEFAULT_KEYBINDS);
+  // SWEEP1999.input — the defaults are the era client's (eraClientRules().keymap: the portal
+  // KeyMaps, or the 1999 Default.map), and each keymap keeps its own save.
+  const KEYBINDS_STORAGE_KEY = keybindStorageKey(eraRules.keymap);
+  const keybinds = new KeybindRegistry(keybindDefaultsFor(eraRules.keymap));
   // The registered input maps follow the combat mode (ClientCombatSystem::
   // RegisterInputMaps @ 0056aa20 swaps the melee / missile / magic map on
   // every SetCombatMode); re-derived from hudState on each key event.
@@ -2207,8 +2241,9 @@ async function main() {
   // persisted Config prefs here because the GameUI (which owns the menu)
   // is built long after the terrain; menu changes arrive through
   // setLandscapeDrawDistance below.
-  const initialLandscapeDrawDistance = normalizeLandscapeDrawDistance(
-    GameUI.readPersistedOptionsSettings().landscapeDrawDistance);
+  // 1999 (EraWorldRules.fixedLandscapeRadius): LScape_ctor's SetMidRadius(5), with no option.
+  const initialLandscapeDrawDistance = eraLandscapeRadius(eraRules.world, normalizeLandscapeDrawDistance(
+    GameUI.readPersistedOptionsSettings().landscapeDrawDistance));
   const terrainManager = new TerrainManager({ loadRadius: initialLandscapeDrawDistance, landHeightTable });
   terrainManager.init(cellDb, { read: (reader: DatReader) => CellLandblock.read(reader) });
   const terrainRenderer = new TerrainRenderer(sceneManager.scene, terrainManager);
@@ -2461,6 +2496,17 @@ async function main() {
   // Skybox
   await new Promise(r => setTimeout(r, 50));
   const skybox = new SkyboxRenderer(regionDesc?.skyInfo, regionDesc?.gameTime);
+  /** Where the client-rendered options' effects land (ui/LocalOptionEffects.ts). */
+  const localOptionSinks: LocalOptionSinks = {
+    setWeatherEnabled: (on) => skybox.setWeatherEnabled(on),
+    setFogEnabled: (on) => {
+      sceneManager.setFogEnabled(on);
+      skybox.setFogEnabled(on); // DECOMP.environs-fog-snap — LScape::m_fFogEnabled
+    },
+    setForceDaylight: (on) => skybox.setForceDaylight(on),
+    setUseMouseTurning: (on) => CameraController.setUseMouseTurning(on),
+    setRightClickMouseLook: (on) => CameraController.setRightClickMouseLook(on),
+  };
   // Solo-mode / pre-sync fallback phase only (mid-morning). In ACE mode the
   // first TimeSync header (sent within seconds of connecting) replaces this
   // with the server's PortalYearTicks clock via skybox.syncGameClock().
@@ -2884,7 +2930,7 @@ async function main() {
   };
 
   function setLandscapeDrawDistance(blocks: number): boolean {
-    playerDrawDistance = normalizeLandscapeDrawDistance(blocks);
+    playerDrawDistance = eraLandscapeRadius(eraRules.world, normalizeLandscapeDrawDistance(blocks));
     const dyn = sceneManager.dynamicResolution;
     dyn?.setMaxDistanceSteps(adaptiveDrawDistanceSteps(playerDrawDistance));
     return applyLandscapeDrawDistance(adaptedDrawDistance(playerDrawDistance, dyn?.distanceSteps ?? 0));
@@ -3901,15 +3947,25 @@ async function main() {
     pendingUseWithTargetGuid = 0;
     updateWorldCursor(); // GAP.84 — disarm TargetedUse cursor immediately
     if (!src) return false;
-    // BUG.weenie-targettype-discarded — retail rejects an incompatible
-    // target CLIENT-side before any request is sent
-    // (ItemHolder::TargetCompatibleWithObject @ 00587520: accept iff
-    // `source.pwd._targetType & target itemType` ≠ 0; targetType 0 = the
-    // property was null server-side, no restriction). The failure notice is
-    // the acclient.exe literal "Cannot use the %s with the %s".
-    if (!isUseTargetCompatible(src.targetType, targetItemType)) {
-      gameUI.displayErrorText(buildCannotUseMessage(src.name, targetName));
-      console.log(`[AC] UseWithTarget blocked client-side: src=0x${src.id.toString(16)} targetType=0x${(src.targetType ?? 0).toString(16)} tgt=0x${targetGuid.toString(16)} itemType=0x${targetItemType.toString(16)}`);
+    // INV-8 (every era) — ItemHolder::TargetCompatibleWithObject @ 00587520 / the 1999 one
+    // @ 0x004e6630 (input/TargetCompatible.ts): the ownership, wield, trade and self checks, then
+    // `source._targetType & target itemType` (BUG.weenie-targettype-discarded; 0 = no
+    // restriction), each refusal a 0x1a line with nothing sent; a pass prints "Using the X
+    // with the Y" / "… on <player>" before the request.
+    const tgtOwned = targetGuid === aceCharGuid || !!heldItemById(targetGuid);
+    const tgtObj = serverObjectManager?.getObject(targetGuid);
+    const compat = targetCompatibleWithObject(
+      { name: src.name, useability: src.usable ?? 0, targetType: src.targetType ?? 0, ownedByPlayer: true },
+      {
+        guid: targetGuid, name: targetName, itemType: targetItemType, ownedByPlayer: tgtOwned,
+        isPlayer: targetGuid === aceCharGuid || ((tgtObj?.objectDescFlags ?? 0) & ObjectDescriptionFlag.Player) !== 0,
+        beingTraded: gameUI.tradeStateGuids().has(targetGuid),
+      },
+      aceCharGuid ?? 0, eraRules.useWithTargetText,
+    );
+    gameUI.displayErrorText(compat.line);
+    if (!compat.ok) {
+      console.log(`[AC] UseWithTarget blocked client-side: src=0x${src.id.toString(16)} targetType=0x${(src.targetType ?? 0).toString(16)} tgt=0x${targetGuid.toString(16)} itemType=0x${targetItemType.toString(16)}: ${compat.line}`);
       return true; // gesture consumed (disarmed), nothing sent — retail parity
     }
     // RECON.craft-confirmations-and-gesture — the rest of ItemHolder::
@@ -3931,7 +3987,10 @@ async function main() {
       send(GameActionType.UseWithTarget, buildUseWithTargetPayload(src.id, targetGuid));
       console.log(`[AC] Sent UseWithTarget (${how}): src=0x${src.id.toString(16)} "${src.name}" tgt=0x${targetGuid.toString(16)} "${targetName}"`);
     };
-    if (decision.kind === 'refuse') {
+    if (!eraRules.targetedUseConfirmations) {
+      // INV-9 — the 1999 target completion (0x004e65c0) sends at once: no mana-stone or salvage question.
+      sendUse('select');
+    } else if (decision.kind === 'refuse') {
       // ClientSystem::AddTextToScroll(text, 0): the trailing "\n" ends the line.
       gameUI.addSystemMessage(decision.chat.replace(/\n$/, ''), chatColorFor(ChatMessageType.Broadcast), ChatMessageType.Broadcast);
     } else if (decision.kind === 'confirm') {
@@ -4079,6 +4138,19 @@ async function main() {
     return { candidates, ctx, ref };
   }
 
+  /**
+   * SWEEP1999.input CM-3 — whether a click may not select `guid` (eraClientRules().combatClickSelect:
+   * the 1999 PanelUI::HandleMouseDownOnObject @ 0x004f83c0 refuses a non-attackable object in
+   * melee / missile mode; end of retail never refuses).
+   */
+  function clickSelectRefused(guid: number): boolean {
+    const som = serverObjectManager;
+    return combatClickSelectRefused(eraRules.combatClickSelect, combatController.mode, guid, myPlayerGuid ?? 0, (g) => {
+      const o = som?.getObject(g);
+      return !!o && !!som && isObjectAttackable(o, som.playerDescFlags);
+    });
+  }
+
   /** CPlayerSystem::OnAction @ 00561890 — a Closest / Previous / Next select key. Returns the guid selected (0 = unchanged). */
   function runSelectCycle(type: SelectionType, cycle: SelectCycle): number {
     const inputs = selectNextInputs();
@@ -4149,7 +4221,20 @@ async function main() {
   let lastCombatSelectionGuid = 0;
   /** ACCWeenieObject::selectedID — the toolbar selection (an inventory pick clears currentTargetGuid), else the world target. */
   const selectedObjectId = (): number => gameUI.hudState.target?.id ?? currentTargetGuid ?? 0;
-  const selectionHistory = new SelectionHistory();
+  const selectionHistory = new SelectionHistory(() => performance.now());
+  /** BUG.cast-flood-remaining — the cast presses' source and cadence (refusal context). */
+  const castPresses = new CastPressTracker(() => performance.now());
+  /** TELEMETRY.refusal-context — where an object is (self / pack / worn / world) and its ItemType; never its name. */
+  const placeOfObject = (guid: number): PlacedObject => {
+    if (guid === (myPlayerGuid ?? -1)) return { place: 'self', itemType: serverObjectManager?.getObject(guid)?.itemType };
+    const worn = playerState.equipment.getAll().find((e) => e.id === guid);
+    if (worn) return { place: 'worn', itemType: worn.itemType };
+    const packed = playerState.inventory.getItem(guid);
+    if (packed) return { place: 'pack', itemType: packed.itemType };
+    const obj = serverObjectManager?.getObject(guid);
+    if (obj) return { place: 'world', itemType: obj.itemType };
+    return { place: 'unknown' };
+  };
   /** gmMainChatUI's selection reaction (installed with the chat hooks). */
   let talkFocusSelectionHook: (() => void) | null = null;
   /** PlayerDesc::PlayerIsPSRLead — the login description's IsAdmin / IsArch bools. */
@@ -4178,6 +4263,9 @@ async function main() {
     if (combatSelection !== lastCombatSelectionGuid) {
       lastCombatSelectionGuid = combatSelection;
       attackRequest?.onSelectionChanged(combatSelection);
+      // 1999: a change to a non-zero selection chimes NewTargetSelected (PanelUI_SetSelectedItem
+      // @ 0x4fcb20; EraWorldRules.localUiSounds — end of retail plays nothing).
+      if (combatSelection !== 0) gameUI.playUISound(Sound.UI_NewTargetSelected);
     }
     const target = gameUI.hudState.target;
     const guid = target?.id ?? 0;
@@ -4266,6 +4354,13 @@ async function main() {
       // SWEEP1006B.player-input.player-own-body-can-t — sr_Select on our own
       // body (or an item in our hand): it blinks and becomes the selection
       // (a pending use-with-target lands on it first, as on any found object).
+      // SWEEP1999.input CM-3 — a 1999 single click on a non-attackable object in melee / missile
+      // mode is refused (the second press of a double click is the double click's: no line).
+      const clickedGuid = found ? ('ownGuid' in found ? found.ownGuid : found.guid) : 0;
+      if (clickedGuid && !pendingUseWithTargetGuid && clickSelectRefused(clickedGuid)) {
+        if (event.detail < 2) raiseClientNotice(gameUI, CN.combatSelectRefused);
+        return;
+      }
       if (found && 'ownGuid' in found) {
         selectionLighting.objectFound(found.ownGuid, SearchReason.Select, selectionNow());
         const held = heldItemById(found.ownGuid);
@@ -4389,8 +4484,8 @@ async function main() {
     selectionLighting.objectFound(serverHit?.guid ?? 0, SearchReason.Use, selectionNow());
     if (!serverHit) return;
 
-    // Target the entity
-    currentTargetGuid = serverHit.guid;
+    // Target the entity — 1999 (CM-3): a double click refused a selection in combat mode still uses.
+    if (!clickSelectRefused(serverHit.guid)) currentTargetGuid = serverHit.guid;
 
     // sr_Use → ItemHolder::UseObject(selectedID, 0, 0) @ 00588a80: every
     // case (attackable in a combat mode: nothing) is decided there
@@ -4412,6 +4507,7 @@ async function main() {
   const busyCount = new BusyCount(() => updateWorldCursor());
   const teleportBusy = new TeleportBusy(busyCount);
   const examineAwait = new ExamineAwait(busyCount);
+  const inventoryRequestBusy = new InventoryRequestBusy(busyCount, eraRules.world.inventoryRequestBusy);
   function updateWorldCursor(overObject: boolean = lastCursorOverObject): void {
     lastCursorOverObject = overObject;
     if (!sceneManager.renderer) return;
@@ -4489,7 +4585,12 @@ async function main() {
       // usual delay. Retail draws no text in the 3D view for the hovered
       // or the selected object (CORE.17.k.b.b.a.g.a / .b) — the selection
       // feedback is the lighting blink above.
-      const hoverText = worldHoverTooltipText(hit, !!gameUI.optionsSettings.showTooltips);
+      // PW-10 — 1999 adds the double-click hint for the object (eraClientRules().itemHoverText).
+      const hoverObj = hit && eraRules.itemHoverText ? serverObjectManager.getObject(hit.guid) : undefined;
+      const hoverHint = hoverObj && eraRules.itemHoverText
+        ? worldHoverHint1999(hoverObj, eraRules.itemHoverText, combatController.isInCombat)
+        : null;
+      const hoverText = worldHoverTooltipText(hit, !!gameUI.optionsSettings.showTooltips, hoverHint);
       gameUI.tagHudTooltip(sceneManager.renderer.domElement, hoverText);
       // CORE.17.k.b.b.a.g.d — RecvNotice_SmartBoxObjectFound's drag branch:
       // a newly found object while m_dragElement is set (and the cursor in
@@ -4519,7 +4620,8 @@ async function main() {
     isReady: () => !!(gameStarted && sceneManager.renderer && serverObjectManager),
     // CORE.18.b.a.a.a.a.a.b — with Use Mouse Turning the right button holds
     // mouse-look instead (UIElement_SmartBoxWrapper::MouseUp @ 004e5820).
-    rightButtonIsMouseLook: () => CameraController.isMouseTurningEnabled(),
+    // SWEEP1999.character — or, on 1999, with Right-click mouselook (options_ 0x4000).
+    rightButtonIsMouseLook: () => CameraController.rightButtonHoldsMouseLook(),
     pick: (event) => {
       const rect = sceneManager.renderer!.domElement.getBoundingClientRect();
       mouseNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -4575,7 +4677,7 @@ async function main() {
    * showed a retail notice); false when the item isn't wieldable.
    */
   function attemptAutoWield(item: InventoryItem, side: UISlotSide = UISlotSide.Right,
-    seenBlockers: Set<number> = new Set()): boolean {
+    seenBlockers: Set<number> = new Set(), allowOtherSide = true): boolean {
     if (!item.validLocations || (item.validLocations & EquipMask.All) === 0) return false;
     const equippedAt = (bits: number): number => {
       for (const eq of playerState.equipment.getAll()) {
@@ -4596,7 +4698,7 @@ async function main() {
         dragAmount: getObjectSplitSize(item.id, item.stackSize, gameUI.hudState.target?.id ?? 0, gameUI.getToolbarSplitState()).amount,
         name: item.name, pluralName: item.pluralName,
       },
-      occupiedMask, equippedAt, side, true,
+      occupiedMask, equippedAt, side, allowOtherSide,
       (id) => {
         const eq = playerState.equipment.getAll().find(e => e.id === id);
         return eq && { weenieClassId: eq.weenieClassId, stackSize: eq.stackSize, maxStackSize: eq.maxStackSize, inTrade: tradeGuids.has(id) };
@@ -4637,7 +4739,16 @@ async function main() {
       if (sendGameAction && aceCharGuid) {
         const r = attemptToPlaceInContainer(res.blockingId, aceCharGuid, 0, true, 0, placementWorld());
         if (r.kind === 'put' && pendingAutoWield) pendingAutoWield.containerId = r.containerId;
-        if (!runPlacement(res.blockingId, r, `auto-dequip for wield of 0x${item.id.toString(16)}`) || r.kind !== 'put') pendingAutoWield = null;
+        const sent = runPlacement(res.blockingId, r, `auto-dequip for wield of 0x${item.id.toString(16)}`);
+        if (!sent || r.kind !== 'put') pendingAutoWield = null;
+        // Both clients say so: "Moving %s to your backpack" (acclient.exe 0x3ccd38, NAME_APPROPRIATE),
+        // with " - cannot unwield the %s" (0x3ccd04) when the placement sent nothing; the 1999
+        // PanelUI_AutoWield @ 0x4fee20 writes the same line.
+        const blocker = playerState.equipment.getAll().find((e) => e.id === res.blockingId);
+        if (blocker) {
+          const name = getAppropriateName(blocker.name, blocker.pluralName, blocker.stackSize);
+          gameUI.displayErrorText(`Moving ${name} to your backpack${sent ? '' : ` - cannot unwield the ${name}`}`);
+        }
       }
       return true;
     }
@@ -4678,7 +4789,7 @@ async function main() {
       // RECON.inventory-grid-dat-cells.c.a — worn items are sellable too.
       const sellItems = buildVendorSellRows(
         [...playerState.inventory.getAll(), ...playerState.equipment.getAll()],
-        activeVendorMerchandiseItemTypes, activeVendorBuyPrice);
+        activeVendorMerchandiseItemTypes, activeVendorBuyPrice, vendorNotePricing());
       gameUI.updateVendorSellItems(sellItems);
     }
   }
@@ -4888,6 +4999,9 @@ async function main() {
       maxSplitSize: split.maxSplitSize,
       objectSplitSize: (id) => dragSplitFor({ id, stackSize: object(id)?.stackSize ?? 1 }).amount,
       dragSplit: (id) => dragSplitFor({ id, stackSize: object(id)?.stackSize ?? 1 }),
+      text: eraRules.placementText, // SWEEP1999.messages INV-11
+      // INV-1 — the 1999 client places into the main pack (the container asked for) only.
+      rule: eraRules.inventoryPlacement,
     };
   }
   /**
@@ -4912,10 +5026,12 @@ async function main() {
       case 'split':
         if (!sendGameAction(GameActionType.StackableSplitToContainer, buildStackableSplitToContainerPayload(itemId, r.containerId, r.placement, r.amount))) return false;
         console.log(`[AC] Sent StackableSplitToContainer (${gesture}): item=0x${itemId.toString(16)} → 0x${r.containerId.toString(16)} slot=${r.placement} amount=${r.amount}`);
+        if (r.notice) gameUI.displayErrorText(r.notice);
         return true;
       case 'put': {
         if (!sendGameAction(GameActionType.PutItemInContainer, buildPutItemInContainerPayload(itemId, r.containerId, r.placement))) return false;
         console.log(`[AC] Sent PutItemInContainer (${gesture}): item=0x${itemId.toString(16)} → 0x${r.containerId.toString(16)} slot=${r.placement}`);
+        if (r.notice) gameUI.displayErrorText(r.notice);
         const equipped = playerState.equipment.getAll().find((e) => e.id === itemId);
         if (equipped) {
           inventoryController.unequipItem(equipped.slot);
@@ -4943,7 +5059,9 @@ async function main() {
     const w = placementWorld();
     // RECON.inventory-grid-dat-cells.b.a — SendNotice_ShowPendingInPlayer first,
     // EndPendingInPlayer when the placement sends nothing.
-    const pendingAt = placeInBackpackPendingIndex(w.object(guid)?.isContainer ?? false);
+    // INV-1 — a 1999 pick-up heads for the main pack, so a shown side pack gets no pending cell.
+    const headsElsewhere = eraRules.inventoryPlacement === 'ac1999' && gameUI.getSelectedPackSlot() > 0;
+    const pendingAt = headsElsewhere ? null : placeInBackpackPendingIndex(w.object(guid)?.isContainer ?? false);
     if (pendingAt !== null) showPendingInPack(guid, pendingAt);
     const sent = runPlacement(guid, placeInBackpackDecision(guid, shown, mainPreferred, w), 'place in backpack');
     if (!sent && pendingAt !== null) gameUI.endPendingInPack(guid);
@@ -5062,6 +5180,8 @@ async function main() {
     watchdogSeconds: eraRules.inventoryRequestWatchdogSeconds,
     now: () => Date.now() / 1000,
   });
+  /** TELEMETRY.refusal-context — the pending request's kind and age, for a "one item at a time" refusal. */
+  const inventoryLockDetail = (): RefusalDetail => pendingRequestDetail(inventoryRequests.pending, Date.now() / 1000);
   /** ACCWeenieObject::current_state for the request classifier: carried / worn / in the open container = IN_CONTAINER, a world object = IN_3D_VIEW. */
   const inventoryObjectState = (guid: number): InventoryObjectState => {
     if (playerState.inventory.getItem(guid) || playerState.equipment.isEquipped(guid) || openContainer.has(guid)) return 'contained';
@@ -5114,6 +5234,14 @@ async function main() {
   // tab showed stale entries after Buy/Sell transactions.
   let activeVendorBuyPrice = 0;
   let activeVendorMerchandiseItemTypes = 0;
+  /** VTE-1 — trade notes' issuing-vendor wcids (VendorsClassId DID; the 1999 adapter's PublicWeenieDesc 0x200000). */
+  const noteIssuers = new Map<number, number>();
+  /** The open vendor's trade-note pricing inputs (EraClientRules.promissoryNoteRates, its wcid, the notes' issuers). */
+  const vendorNotePricing = (): VendorNotePricing => ({
+    rates: eraRules.promissoryNoteRates,
+    vendorWcid: serverObjectManager?.getObject(activeVendorGuid)?.weenieClassId ?? 0,
+    issuerOf: (guid) => noteIssuers.get(guid >>> 0),
+  });
 
   // ── Magic system ───────────────────────────────────────────────
   const magicController = new MagicController();
@@ -5508,6 +5636,9 @@ async function main() {
     gameLoop.start();
     gameStarted = true;
     preworldReporter?.enteredWorld();
+    // SWEEP1999.commands (HC-11) — the 1999 client prints its version string as the first chat
+    // line on entering the world (ClientMode_RunTransition @ 0x4d08a0); end of retail prints none.
+    if (eraRules.worldEntryVersionLine) gameUI.addSystemMessage(eraRules.worldEntryVersionLine, chatColorFor(ChatMessageType.Broadcast), ChatMessageType.Broadcast);
     drainHandover.onEnteredWorld();
     worldReporter?.enteredWorld(worldResumePending);
     portalUseReporter?.reset();
@@ -5963,6 +6094,7 @@ async function main() {
     // GAP.client-busy-cursor-count — OnEndCharacterSession @ 00564ad0: m_cBusy = 0.
     teleportBusy.reset();
     examineAwait.reset();
+    inventoryRequestBusy.reset();
     busyCount.reset();
     combatController.autoAttack = false;
     meleeApproachTarget = resetMeleeChain();
@@ -6137,6 +6269,16 @@ async function main() {
     onSetDesiredComponentLevel: (wcid, level) => {
       sendGameAction?.(GameActionType.SetDesiredComponentLevel, buildSetDesiredComponentLevelPayload(wcid, level));
     },
+    // SWEEP1999.character — an era-only options_ bit (the 1999 page's Automatically Create Shortcuts,
+    // Invert Mouse Look, Right-click mouselook): the whole word goes out on 0x1A1, as the 1999
+    // client's SetCharacterOption1 worker @ 0x593b70 sends every change (the 1999 adapter keeps the
+    // one dword; the AC1999 server stores it as options_).
+    onCharacterOptionBits: (mask: number, value: boolean) => {
+      if (mask === 0x4000) CameraController.setRightClickMouseLook(gameUI.optionOn('rightClickMouselook'));
+      if (currentCharacterOptions1 === null) return; // no PlayerDescription yet: never send a guessed word
+      currentCharacterOptions1 = (value ? currentCharacterOptions1 | mask : currentCharacterOptions1 & ~mask) >>> 0;
+      gameActions.setCharacterOptionsWord(currentCharacterOptions1);
+    },
     onCharacterOptionToggle: (option: number, value: boolean) => {
       gameActions.setCharacterOption(option, value);
       // CORE.3.f — keep the CharacterOptions1/2 mirrors current so the
@@ -6159,44 +6301,18 @@ async function main() {
       if (option === 0x0A /* RunAsDefaultMovement */) {
         cameraController.runIsDefault = value;
       }
-      // FAITHFUL.440 / CORE.9 — DisableMostWeatherEffects
-      // (CharacterOption2 bit 0x04) is a CLIENT-rendered option in
-      // retail: it drives LScape::weather_enabled, which gates the
-      // properties&0x4 weather sky objects (SmartBox::EnableWeather →
-      // GameSky::Draw). ACE persists the bit but doesn't act on it.
-      // Wire it to the skybox weather gate (inverted: disable=true →
-      // enabled=false).
-      if (option === 0x04 /* DisableMostWeatherEffects */) {
-        skybox.setWeatherEnabled(!value);
-      }
       // FAITHFUL.484 — LockUI (CharacterOption 0x33) gates panel
       // drag-mousedown via LayoutRenderer.isUILocked(). Pure
       // client-side behavior; ACE persists the bit.
       if (option === 0x33 /* LockUI */) {
         LayoutRenderer.setUILocked(value);
       }
-      // FAITHFUL.490 — DisableDistanceFog (CharacterOption 0x30).
-      // ACE persists the bit but doesn't act on it client-side; we
-      // toggle the THREE.Scene fog object via SceneManager so live
-      // indoor/outdoor fog updates skip when disabled (their null-
-      // check guards already handle the missing fog reference).
-      if (option === 0x30 /* DisableDistanceFog */) {
-        sceneManager.setFogEnabled(!value);
-        skybox.setFogEnabled(!value); // DECOMP.environs-fog-snap — LScape::m_fFogEnabled
-      }
-      // FAITHFUL.492 — AlwaysDaylightOutdoors (CharacterOption 0x05 /
-      // PersistentAtDay) = LScape::SetDay. DECOMP.always-daylight-scope —
-      // only the landscape lighting is pinned to phase 0.5; the clock,
-      // fog, sky and weather keep the real time. Pure client-side.
-      if (option === 0x05 /* AlwaysDaylightOutdoors */) {
-        skybox.setForceDaylight(value);
-      }
-      // FAITHFUL.495 — UseMouseTurning (CharacterOption 0x31).
-      // Enables free-look mode in CameraController's mousemove
-      // handler. Pure client-side.
-      if (option === 0x31 /* UseMouseTurning */) {
-        CameraController.setUseMouseTurning(value);
-      }
+      // FAITHFUL.440 / CORE.9 DisableMostWeatherEffects 0x04 (LScape::weather_enabled, inverted),
+      // FAITHFUL.490 DisableDistanceFog 0x30 (the scene fog + LScape::m_fFogEnabled), FAITHFUL.492
+      // PersistentAtDay 0x05 (LScape::SetDay: only the landscape lighting, DECOMP.always-daylight-
+      // scope), FAITHFUL.495 UseMouseTurning 0x31: client-rendered options ACE only persists. Each
+      // lands live unless the era pins it (SWEEP1999.character: 1999 never had them; ui/LocalOptionEffects.ts).
+      applyToggledOptionEffect(option, value, gameUI.clientProfile.optionPins, localOptionSinks);
     },
     // CORE.3.f — chat-window options server round-trip (SAVE side). GameUI
     // debounces like retail CPlayerModule::UseTime (480s from first dirty,
@@ -6359,6 +6475,12 @@ async function main() {
   // bar's tabs / arrows and the quick slots (1999: one bar, the 1-9 tray), the vendor's buy-one mask,
   // and the values (footer wording, paperdoll slots, combat bar, chat menu, options, examine and
   // hover text) the panels read (BUG.ac1999-eor-ui-values).
+  // The era's world presentation (EraWorldRules, SWEEP1999.world): the landscape floor follows the
+  // brightness slider in 1999 (set before setClientRules applies it), the sky steps on the tick,
+  // the selection blink's length.
+  gameUI.onLandscapeMinAmbient = (level) => skybox.setLandscapeMinAmbient(level);
+  skybox.skyObjectsOnTick = eraRules.world.skyObjectsOnTick;
+  selectionLighting.endCount = eraRules.world.selectionFlipEndCount;
   gameUI.setClientRules(eraRules);
 
   // FAITHFUL.270 — restore the persisted logging-on state's HUD indicator.
@@ -6376,19 +6498,12 @@ async function main() {
   // choice. Mirror the side-effect that onCharacterOptionToggle does
   // for option 0x0A, here at startup.
   cameraController.runIsDefault = gameUI.optionsSettings.runAsDefault === true;
-  // FAITHFUL.440 — same pattern for disableWeather → the skybox
-  // weather gate; inverted because the option name is "disable" but
-  // the renderer flag is "enabled".
-  skybox.setWeatherEnabled(gameUI.optionsSettings.disableWeather !== true);
   // FAITHFUL.484 — apply persisted LockUI state.
   LayoutRenderer.setUILocked(gameUI.optionsSettings.lockUI === true);
-  // FAITHFUL.490 — apply persisted DisableDistanceFog state.
-  sceneManager.setFogEnabled(gameUI.optionsSettings.disableDistanceFog !== true);
-  skybox.setFogEnabled(gameUI.optionsSettings.disableDistanceFog !== true); // DECOMP.environs-fog-snap — LScape::m_fFogEnabled
-  // FAITHFUL.492 — apply persisted AlwaysDaylightOutdoors state.
-  skybox.setForceDaylight(gameUI.optionsSettings.alwaysDaylight === true);
-  // FAITHFUL.495 — apply persisted UseMouseTurning state.
-  CameraController.setUseMouseTurning(gameUI.optionsSettings.useMouseTurning === true);
+  // FAITHFUL.440 / 490 / 492 / 495, SWEEP1999.character — the weather gate, distance fog, Always
+  // Daylight, Use Mouse Turning and Right-click mouselook, each as the world's client acts on it
+  // (GameUI.optionOn: the era's pin first; ui/LocalOptionEffects.ts).
+  applyLocalOptionEffects((k) => gameUI.optionOn(k), localOptionSinks);
   // FAITHFUL.444 + .447 — panel-visibility layout restore moved to
   // AFTER gameUI.showGame() because showGame's renderHUD wipes the
   // hudContainer (`innerHTML = ''`). Calling restore here would
@@ -6598,6 +6713,8 @@ async function main() {
         dragItemOnPlayerOpensSecureTrade: gameUI.eraSupports('secureTrade') && characterOptionIsSet(0x17 /* DragItemOnPlayerOpensSecureTrade */, currentCharacterOptions1 ?? 0, currentCharacterOptions2 ?? 0),
         playerOnGround: !isPlayerAirborne,
         groundObjectId: openContainerGuid,
+        text: eraRules.placementText,
+        vendorDropNeedsWholeStack: eraRules.vendorDropNeedsWholeStack,
       };
     };
     const r = kind === 'give'
@@ -6715,6 +6832,9 @@ async function main() {
       equipped: playerState.equipment.getAll(),
       inCombat: gameUI.hudState.combatMode !== CombatMode.NonCombat,
       readyRefusal: refusal === null ? null : inventoryRequestRefusalText(refusal),
+      // INV-4 / INV-5 — the era's slot drop (1999: a blocked slot swaps; no dual-wield shield slot).
+      slotDropSwaps: eraRules.paperdollSlotDropSwaps,
+      dualWieldShieldSlot: eraRules.dualWieldShieldSlot,
     };
   };
 
@@ -6732,7 +6852,10 @@ async function main() {
     const outcome = acceptPaperdollDrop(
       { ...item, inTrade: gameUI.tradeStateGuids().has(item.id), dragAmount: dragSplitFor(item).amount },
       target, paperdollWearContext());
-    if (outcome.notice) gameUI.displayErrorText(outcome.notice);
+    if (outcome.notice) refusalWithDetail(inventoryLockDetail, () => gameUI.displayErrorText(outcome.notice!));
+    // INV-4 — the 1999 slot drop swaps: the double-click's AutoWield on that side only
+    // (PanelUI_AutoWield(obj, side, 0, 1, 0, 0): param_6 = 0, no falling to the other hand).
+    if (outcome.swap) return attemptAutoWield(item, outcome.swap.side, new Set(), false);
     if (outcome.merge) {
       // GAP.world-drag-drop.a.a.a — AttemptMerge into the wielded stack.
       if (outcome.merge.amount >= 1 && sendGameAction) {
@@ -6774,6 +6897,23 @@ async function main() {
     pendingEquipmentActions.recordEquip(item.id, loc, dropEvicted);
     inventoryDirty = true;
     return true;
+  }
+
+  /**
+   * INV-2 — CPlayerSystem::UsingItem case 4 (a double-click on owned armor, clothing or jewellery not yet
+   * worn) is AutoSort(obj, 1, 0) @ 005609a0: AutoWear (the ClothingPriority check, the whole valid mask),
+   * else AutoWield, else PlaceInBackpack. The agent's no-slot `equip` runs it too: it went straight to
+   * AutoWield's single-slot chain, which never reads ClothingPriority, so a Shirt over worn Breeches was
+   * sent and ACE refused it (BUG.eor-autowear-priority-pass).
+   * @returns true when a request went out.
+   */
+  function autoSortOwnedItem(item: InventoryItem): boolean {
+    const sort = autoSortDecision({ ...item, dragAmount: dragSplitFor(item).amount }, paperdollWearContext(), true);
+    if (sort.notice) refusalWithDetail(inventoryLockDetail, () => gameUI.displayErrorText(sort.notice!));
+    if (sort.kind === 'wear') return dropHeldOnPaperdoll(item, { kind: 'band' }, false);
+    if (sort.kind === 'wield') return attemptAutoWield(item);
+    if (sort.kind === 'backpack') return placeInBackpack(item.id);
+    return false;
   }
 
   gameUI.setDragCallbacks({
@@ -6853,6 +6993,8 @@ async function main() {
         dragItemOnPlayerOpensSecureTrade: gameUI.eraSupports('secureTrade') && characterOptionIsSet(0x17 /* DragItemOnPlayerOpensSecureTrade */, currentCharacterOptions1 ?? 0, currentCharacterOptions2 ?? 0),
         playerOnGround: !isPlayerAirborne,
         groundObjectId: openContainerGuid,
+        text: eraRules.placementText,
+        vendorDropNeedsWholeStack: eraRules.vendorDropNeedsWholeStack,
       });
       for (const text of outcome.notices) gameUI.displayErrorText(text);
       runPlaceIn3DAction(outcome.action, dragged, found);
@@ -6882,7 +7024,7 @@ async function main() {
         stackSize: obj?.stackSize, maxStackSize: obj?.maxStackSize,
         dragAmount: dragSplitFor({ id: guid, stackSize: obj?.stackSize ?? 1 }).amount,
       }, target, paperdollWearContext());
-      if (outcome.notice) gameUI.displayErrorText(outcome.notice);
+      if (outcome.notice) refusalWithDetail(inventoryLockDetail, () => gameUI.displayErrorText(outcome.notice!));
       if (outcome.merge) {
         // GAP.world-drag-drop.a.a.a — a ground stack merged straight into
         // the wielded stack (ACE StackableMerge searches the landblock).
@@ -7526,6 +7668,8 @@ async function main() {
       });
       if (result.kind === 'nothing') return;
       if (result.kind === 'refuse') {
+        // The magic-mode refusal chimes GeneralError (CreateSpellPanel_ListenToMessage; EraWorldRules.localUiSounds).
+        if (result.reason === 'magicMode') gameUI.playUISound(Sound.UI_GeneralError);
         raiseClientNotice(gameUI, result.reason === 'magicMode' ? CN.researchNeedsMagicMode : CN.researchNoTarget);
         return;
       }
@@ -7533,7 +7677,9 @@ async function main() {
       console.log(`[AC] ResearchSpell: comps=[${result.components.join(',')}] target=0x${result.target.toString(16)}`);
       sendGameAction(GameActionType.ResearchSpell, buildResearchSpellPayload(result.components, result.target));
     },
-    onCastSpell: (spellIndex: number) => {
+    // BUG.cast-flood-remaining — every press says what pressed it and how soon after the last one;
+    // its refusals (here, and the server's answer to the cast it sends) carry that.
+    onCastSpell: (spellIndex: number) => refusalWithDetail(() => castPresses.notePress(), (): void => {
       const spells = magicController.knownSpells;
       if (spellIndex < 0 || spellIndex >= spells.length) return;
       const spell = spells[spellIndex];
@@ -7569,6 +7715,8 @@ async function main() {
         appropriateSpellFormula({ ...appropriateFormulaInputs(rawTargeting), school: rawTargeting.school }),
         spellComponentWcids,
         (wcid) => playerState.inventory.hasItem(wcid, 1),
+        // The slots the era's client checks (1999: 1-5 only, SWEEP1999.magic MAG-10).
+        eraRules.componentPrecheckSlots,
       )) {
         raiseClientNotice(gameUI, CN.castMissingComponents);
         console.log(`[AC] Cast suppressed: spell ${spell.id} — components required and not all owned`);
@@ -7585,13 +7733,19 @@ async function main() {
           bitfield: rawTargeting.bitfield, formula: rawTargeting.formula, spellName: rawTargeting.name || spell.name,
           selectedGuid, selfGuid: myPlayerGuid, targetObjectFor: spellTargetObjectFor, rules: eraRules,
         });
+        // TELEMETRY.refusal-context — a cast refusal says what the spell needed and what was selected (webac#9 class).
+        const castDetail = (): RefusalDetail => castRefusalDetail({
+          spellTargetType: inqSpellTargetType(rawTargeting.formula, eraRules.talismanTargetTypes),
+          selectedGuid: selectedGuid ?? 0, prevSelectedGuid: selectionHistory.prevSelectedId,
+          msSinceSelectionChange: selectionHistory.msSinceChange(), placeOf: placeOfObject,
+        });
         if (plan.kind === 'no-target') {
-          raiseClientNotice(gameUI, CN.castNoTarget);
+          refusalWithDetail(castDetail, () => raiseClientNotice(gameUI, CN.castNoTarget));
           console.log(`[AC] Cast suppressed: spell ${spell.id} requires a target and none is selected`);
           return;
         }
         if (plan.kind === 'refused') {
-          if (plan.text !== null) raiseClientNotice(gameUI, CN.castTargetRefused, { text: plan.text });
+          if (plan.text !== null) refusalWithDetail(castDetail, () => raiseClientNotice(gameUI, CN.castTargetRefused, { text: plan.text! }));
           console.log(`[AC] Cast suppressed: spell ${spell.id} target 0x${plan.targetGuid.toString(16)} refused (${plan.refusal})`);
           return;
         }
@@ -7611,7 +7765,7 @@ async function main() {
       // hands and chest), executed on our object as the server-driven
       // motions play. The invented school-coloured "casting swirl" (a red /
       // orange burst + PointLight for War) is gone.
-    },
+    }),
     // FAITHFUL.383 — Persist spell-bar slot assignments to ACE so they
     // survive logout. Per ACE Player_Character.cs:295-314 the server
     // round-trips these into CharacterPropertiesSpellBar; without
@@ -7645,8 +7799,20 @@ async function main() {
           console.log(`[AC] Endowment use: no target selected for ${item.name}`);
           return;
         }
-        if (!isUseTargetCompatible(item.targetType, spellTargetObjectFor(selectedGuid)?.itemType ?? t.itemType ?? 0)) {
-          gameUI.displayErrorText(buildCannotUseMessage(item.name, t.name));
+        // TargetCompatibleWithObject(selectedID, item, false, true): INV-8's full check and line.
+        const selObj = serverObjectManager?.getObject(selectedGuid);
+        const compat = targetCompatibleWithObject(
+          { name: item.name, useability: item.usable ?? 0, targetType: item.targetType ?? 0, ownedByPlayer: true },
+          {
+            guid: selectedGuid, name: t.name, itemType: spellTargetObjectFor(selectedGuid)?.itemType ?? t.itemType ?? 0,
+            ownedByPlayer: selectedGuid === aceCharGuid || !!heldItemById(selectedGuid),
+            isPlayer: selectedGuid === aceCharGuid || ((selObj?.objectDescFlags ?? 0) & ObjectDescriptionFlag.Player) !== 0,
+            beingTraded: gameUI.tradeStateGuids().has(selectedGuid),
+          },
+          aceCharGuid ?? 0, eraRules.useWithTargetText,
+        );
+        gameUI.displayErrorText(compat.line);
+        if (!compat.ok) {
           console.log(`[AC] Endowment use blocked client-side: src=0x${item.id.toString(16)} targetType=0x${(item.targetType ?? 0).toString(16)} tgt=0x${selectedGuid.toString(16)} itemType=0x${(t.itemType ?? 0).toString(16)}`);
           return;
         }
@@ -8764,7 +8930,7 @@ async function main() {
     gameUI.onTitleSelected = (titleId: number) => {
       const payload = new BinaryWriter(4);
       payload.writeUInt32(titleId);
-      const msg = serializeGameAction(++aceActionSequence, GameActionType.TitleSet, payload.toBuffer());
+      const msg = serializeTrackedGameAction(++aceActionSequence, GameActionType.TitleSet, payload.toBuffer());
       aceConnection.sendMessage(msg, GameMessageGroup.SecureWeenieQueue);
       console.log(`[AC] ACE: Sent TitleSet (0x002C) titleId=${titleId}`);
     };
@@ -8874,10 +9040,14 @@ async function main() {
         // A 1999 world: the player's Charge for the spell (1999 ExamineSpell @ 0x00511110,
         // InqSpellCharge @ 0x00517820), one more line of the shared spell page's text.
         chargeLine: spellCharge1999 ? spellChargeText1999(spellCharge1999.inq(spellId, performance.now() / 1000)) : undefined,
+        // The era's Duration line (1999: the rolled band, SWEEP1999.magic MAG-5).
+        durationText: eraRules.spellDurationText,
       });
       gameUI.showExaminationWindow({ guid: 0, title: model.title, page: 'spell', spell: model });
     };
     gameUI.onExamineSpell = examineSpell;
+    // SWEEP1999.magic MAG-3 — the spell bar's Charge meter reads InqSpellCharge (a 1999 world only).
+    gameUI.spellChargeFor = spellCharge1999 ? (spellId) => spellCharge1999.inq(spellId, performance.now() / 1000) : null;
     // gmMainChatUI::ToggleSquelchOnCurrentSpeakableTarget @ 004cd230.
     gameUI.onToggleTalkSquelch = (guid, name, add) => {
       if (add) squelchedNames.set(name.toLowerCase(), name);
@@ -8972,7 +9142,26 @@ async function main() {
       onEndDrag: () => itemShortcutRestorer.endShortcutDrag(),
       onDropShortcut: (slot) => itemShortcutRestorer.dropShortcutOnSlot(slot),
       onDropItem: (slot, source) => {
-        const id = worldDropItemFor(source)?.item.id ?? 0;
+        const dragged = worldDropItemFor(source);
+        const id = dragged?.item.id ?? 0;
+        // SWEEP1999.input HC-13 — the 1999 tray's ShortcutSlot::AcceptDragObject checks (pack items:
+        // the facts it reads are the inventory item's).
+        const inv = dragged?.inventoryItem;
+        if (inv && eraRules.shortcutDropCheck === 'ac1999') {
+          // A container's shortcut takes the item into the container (AttemptPlaceInContainer).
+          const slotId = itemShortcutRestorer.objectAt(slot);
+          const slotItem = slotId ? heldItemById(slotId) : undefined;
+          if (slotItem && shortcutDropIntoContainer1999(inv, slotItem)) {
+            if (placementReady()) runPlacement(inv.id, attemptToPlaceInContainer(inv.id, slotItem.id, 0, true, 0, placementWorld()), 'shortcut container drop');
+            return;
+          }
+          const flags = (inv.objectDescFlags ?? 0) >>> 0;
+          const refusal = shortcutDropRefusal1999({
+            usable: inv.usable, combatUse: inv.combatUse, validLocations: inv.validLocations, itemType: inv.itemType,
+            stuck: (flags & ObjectDescriptionFlag.Stuck) !== 0, isPlayer: (flags & ObjectDescriptionFlag.Player) !== 0,
+          }, gameUI.getToolbarSplitState());
+          if (refusal) { gameUI.displayErrorText(refusal); return; }
+        }
         const notice = itemShortcutRestorer.dropItemOnSlot(id, slot, shortcutTargetOf(id), () => placeInBackpack(id));
         if (notice) gameUI.displayErrorText(notice);
       },
@@ -9506,7 +9695,14 @@ async function main() {
         // trade / consume dequip ends in this delete, with no
         // InventoryRemoveObject (Player_Inventory.cs:414-420).
         gameUI.itemRequestAnswered(data.guid);
-        if (releaseFromPlayer(data.guid) > 0) inventoryRequests.respond(data.guid);
+        releaseFromPlayer(data.guid);
+        // AUDIT.ac1999-request-completion — ObjectBeingDeleted → Remove → ServerSaysMoveItem(this, 0)
+        // clears the pending request for ANY deleted object, carried or not (EoL ACCWeenieObject::Remove
+        // @ 0058dd20 → ServerSaysMoveItem @ 0058dbb0's prevRequestObjectID test; the 1999 Remove
+        // @ 0x004e23e0 → ServerSaysMoveItem @ 0x004e2120 → ClearRequestIfCurrent @ 0x004e2e30). The
+        // AC1999 server ends a full merge of a ground stack with only its 0xF747 (Monster.cpp MergeItem):
+        // ours released only a carried object, so that merge stayed pending.
+        inventoryRequests.respond(data.guid);
         // ACCWeenieObject::Remove @ 0058dd20 → ServerSaysMoveItem(this, 0) → the toolbar's shortcut goes.
         toolbarObjectMoved(data.guid);
         // CORE.17.k.b.b.c.c.a.a.b — gmSlumlordUI::RecvNotice_BeingDeleted @
@@ -9730,7 +9926,7 @@ async function main() {
         // Emote) reads 'X says, "…"' too; the type only picks the colour.
         // BUG.ac1999-chat-toggle-local — 1999 @chat off hides the line (UI_ShouldHearSpeaker @ 0x4d0360);
         // the cast-completion handshake below still runs.
-        if (!localChatGate || localChatGate.hears(data.senderGuid)) gameUI.addSystemMessage(
+        if ((!localChatGate || localChatGate.hears(data.senderGuid)) && speakerHeard(data.senderGuid)) gameUI.addSystemMessage(
           formatSpeechLine(senderName, data.message, data.senderGuid === aceCharGuid),
           color, data.chatType, 0, chatSpeech('say', senderName, data.message, data.senderGuid));
         // FAITHFUL.219 — when the server echoes our own HearSpeech, that's
@@ -9852,6 +10048,7 @@ async function main() {
             squelchedNames.blocksChannel(senderName.toLowerCase(), squelchMaskForChatType(ChatMessageType.Emote))) return;
         // BUG.ac1999-chat-toggle-local — the 1999 HearEmote worker 0x4cd610 asks UI_ShouldHearSpeaker too.
         if (localChatGate && !localChatGate.hears(data.senderGuid)) return;
+        if (!speakerHeard(data.senderGuid)) return;
         const color = chatColorFor(ChatMessageType.Emote);
         // SWEEP1006 emote joiner — Handle_Communication__HearEmote @ 0057cbe0
         // adds the space only when the text does not start with an apostrophe.
@@ -9927,7 +10124,10 @@ async function main() {
         // A quiet /myquests answer (the quest tracker's) never reaches the chat.
         portalUseReporter?.serverChat(data.message, data.chatType);
         if (questTracker.onServerLine(data.message)) return;
-        gameUI.addSystemMessage(data.message, chatColorFor(data.chatType), data.chatType);
+        // SWEEP1999.messages HC-1 / HC-8 — TextboxString @ 0057d3a0 is an AddTextToScroll: type 0x1a
+        // goes to the spew box (it showed nowhere before: the main window hides 0x1a). The 1999
+        // client paints the raw channel from its own slot table instead, 0x1a a green chat line.
+        addServerTextLine(gameUI, eraRules.serverTextSlots, data.message, data.chatType);
         // TELEMETRY.refusal-events — GDLE's and the AC1999 server's text refusals (error type, or a refusal's wording).
         refusalReporter?.serverText('server_text', data.message, data.chatType);
 
@@ -10370,6 +10570,13 @@ async function main() {
           }
         }
 
+        // SWEEP1999.character (CHAR-6) — the Sex / Heritage / Template strings the 1999
+        // character panel's heritage line reads (StatRegion_UpdateFromPlayerDesc @ 0x00543520).
+        gameUI.setCharacterStrings({
+          sex: desc.propertiesString.get(PropertyString.Sex),
+          heritage: desc.propertiesString.get(PropertyString.HeritageGroup),
+          template: desc.propertiesString.get(PropertyString.Template),
+        });
         // FAITHFUL.570 — restore server-persisted CharacterOptions1 +
         // CharacterOptions2 toggles from PlayerDescription (always
         // included per ACE GameEventPlayerDescription.cs:359,387 — CO1 is
@@ -10390,6 +10597,16 @@ async function main() {
         // positions/sizes/visibility/filters/titles/opacities).
         if (desc.characterOptions1 !== -1) currentCharacterOptions1 = desc.characterOptions1 >>> 0;
         if (desc.characterOptions2 !== -1) currentCharacterOptions2 = desc.characterOptions2 >>> 0;
+        // SWEEP1999.character — bits the era's client could never change (1999: fellowship XP / loot
+        // sharing) go back to its value once, sent whole on 0x1A1 like the option toggles.
+        if (currentCharacterOptions1 !== null) {
+          const fixed = correctedOptionsWord(currentCharacterOptions1, gameUI.clientProfile.optionsWordFix);
+          if (fixed !== null) {
+            console.log(`[AC] options word 0x${currentCharacterOptions1.toString(16)} → 0x${fixed.toString(16)} (era-fixed bits)`);
+            currentCharacterOptions1 = fixed;
+            gameActions.setCharacterOptionsWord(fixed);
+          }
+        }
         // Always replace the live module: a character with no stored blob
         // must not keep the previous character's (null = nothing stored).
         try {
@@ -10411,21 +10628,12 @@ async function main() {
           if (changedOpts.includes('runAsDefault')) {
             cameraController.runIsDefault = gameUI.optionsSettings.runAsDefault === true;
           }
-          if (changedOpts.includes('disableWeather')) {
-            skybox.setWeatherEnabled(gameUI.optionsSettings.disableWeather !== true);
-          }
           if (changedOpts.includes('lockUI')) {
             LayoutRenderer.setUILocked(gameUI.optionsSettings.lockUI === true);
           }
-          if (changedOpts.includes('disableDistanceFog')) {
-            sceneManager.setFogEnabled(gameUI.optionsSettings.disableDistanceFog !== true);
-            skybox.setFogEnabled(gameUI.optionsSettings.disableDistanceFog !== true); // DECOMP.environs-fog-snap — LScape::m_fFogEnabled
-          }
-          if (changedOpts.includes('alwaysDaylight')) {
-            skybox.setForceDaylight(gameUI.optionsSettings.alwaysDaylight === true);
-          }
-          if (changedOpts.includes('useMouseTurning')) {
-            CameraController.setUseMouseTurning(gameUI.optionsSettings.useMouseTurning === true);
+          // Weather, fog, daylight, mouse turning, right-click mouselook (ui/LocalOptionEffects.ts).
+          if (changedOpts.some((k) => LOCAL_EFFECT_OPTION_KEYS.includes(k))) {
+            applyLocalOptionEffects((k) => gameUI.optionOn(k), localOptionSinks);
           }
           // CORE.5.b — SideBySideVitals picks which top-center vitals
           // cluster is shown (stacked 0x2100006c vs side-by-side
@@ -10582,6 +10790,7 @@ async function main() {
 
       // ── Property updates (update player state) ──
       onPrivateUpdatePropertyInt: (data: PropertyUpdateData) => {
+        gameUI.statQualityChanged(); // AUDIT.ac1999-request-completion — the 1999 stat fan-outs end the raise guard
         const val = data.value as number;
         // Keep the generic int mirror current (Character Information report).
         // A removed quality (GDLE 0x01D1) leaves the mirror, as retail's
@@ -10761,6 +10970,7 @@ async function main() {
         console.log(`[Property] Int: key=${data.key} value=${val}`);
       },
       onPrivateUpdatePropertyInt64: (data: PropertyUpdateData) => {
+        gameUI.statQualityChanged(); // AUDIT.ac1999-request-completion — the 1999 UpdateInt fan-out (avail XP rides as Int64 here)
         const val = data.value as bigint;
         // BUG.floating-damage-numbers-invented — no "+N XP" floats over the
         // player: retail has no world-anchored text at all (see onAttackerNotification).
@@ -11023,6 +11233,7 @@ async function main() {
           getObject: (guid) => serverObjectManager?.getObject(guid),
           inventory: playerState.inventory,
           onInventoryItemChanged: (guid) => { syncWornCopy(guid); inventoryDirty = true; },
+          noteIssuers,
         });
       },
       onPublicUpdatePropertyInstanceID: (data: PropertyUpdateData) => {
@@ -11081,6 +11292,7 @@ async function main() {
 
       // ── Vital updates ──
       onPrivateUpdateVital: (data: VitalUpdateData) => {
+        gameUI.statQualityChanged(); // AUDIT.ac1999-request-completion — the 1999 stat fan-outs end the raise guard
         // Per ACE Vital.cs (sequential uint): MaxHealth=1, Health=2,
         // MaxStamina=3, Stamina=4, MaxMana=5, Mana=6. "Max" keys carry
         // training data (ranks, cpSpent); "current" keys carry just the
@@ -11128,6 +11340,7 @@ async function main() {
         }
       },
       onPrivateUpdateAttribute2ndLevel: (data: VitalUpdateData) => {
+        gameUI.statQualityChanged(); // AUDIT.ac1999-request-completion — the 1999 stat fan-outs end the raise guard
         // Per ACE Vital.cs: current-vital keys are Health=2 / Stamina=4 / Mana=6.
         const vitalMap: Record<number, VitalId> = {
           [VitalKey.Health]:  VitalId.Health,
@@ -11147,6 +11360,7 @@ async function main() {
         }
       },
       onPrivateUpdateAttribute: (data) => {
+        gameUI.statQualityChanged(); // AUDIT.ac1999-request-completion — the 1999 stat fan-outs end the raise guard
         // key is PropertyAttribute per ACE source (Strength=1..Self=6, also
         // mirrored by PropertyAttribute.cs). Symbolic mapping keeps any
         // future ACE renumbering from silently dropping attribute updates.
@@ -11179,6 +11393,7 @@ async function main() {
         }
       },
       onPrivateUpdateSkill: (data: SkillUpdateData) => {
+        gameUI.statQualityChanged(); // AUDIT.ac1999-request-completion — the 1999 stat fan-outs end the raise guard
         // FAITHFUL.420 — Same pattern as attribute: detect upward
         // raises only so debuffs / training resets don't trigger the
         // chime.
@@ -11225,9 +11440,11 @@ async function main() {
         // ONE CombatSelf (0x16) line per event, the crit / Sneak Attack /
         // Recklessness prefixes and the target's Critical Protection suffix
         // folded in (CombatDialog.formatAttackerChat).
-        addTextToScroll(gameUI, attackerHitLine(
-          formatAttackerChat(data.defenderName, data.damageType, data.severity, data.damage, data.critical, data.attackConditions),
-        ));
+        // SWEEP1999.messages HC-5 — the 1999 client's line has no prefixes and goes on channel 6.
+        addTextToScroll(gameUI, attackerNotificationLine(eraRules.hitLineText, {
+          name: data.defenderName, damageType: data.damageType, severity: data.severity, damage: data.damage,
+          critical: data.critical, attackConditions: data.attackConditions,
+        }));
 
         // Hit sounds come from server via GameMessageSound (onSound handler)
 
@@ -11249,14 +11466,16 @@ async function main() {
         // @ 0056c920 stamps lastAttackedTime (AutoTarget's 15 s window).
         attackRequest?.noteAttacked();
         lastCombatAt = Date.now();
-        console.log(formatDefenderNotificationLog(data.attackerName, data.damageType, data.damage, data.critical));
+        // FAITHFUL.287 diagnostic console line (every era), then
         // DECOMP.hit-chat-lines — HandleDefenderNotificationEvent @ 0056c920:
         // ONE CombatEnemy (0x15) line per event (the body part, severity
         // verb, crit / Sneak Attack / Reckless prefixes and the Critical
         // Protection suffix all in it — CombatDialog.formatDefenderChat).
-        addTextToScroll(gameUI, defenderHitLine(
-          formatDefenderChat(data.attackerName, data.damageType, data.severity, data.damage, data.bodyPart, data.critical, data.attackConditions),
-        ));
+        // SWEEP1999.messages HC-5 / CM-2 — the 1999 line has no prefixes and no body part (" you for ").
+        showDefenderNotification(gameUI, eraRules.hitLineText, {
+          name: data.attackerName, damageType: data.damageType, severity: data.severity, damage: data.damage,
+          critical: data.critical, attackConditions: data.attackConditions, bodyPart: data.bodyPart,
+        });
 
         // Damage/wound sounds come from server via GameMessageSound (onSound handler)
 
@@ -11264,7 +11483,7 @@ async function main() {
       onEvasionAttacker: (data) => {
         lastCombatAt = Date.now();
         // DECOMP.evasion-chat-lines — HandleEvasionAttackerNotificationEvent @ 0056c7a0.
-        addTextToScroll(gameUI, evasionAttackerLine(data.targetName));
+        addTextToScroll(gameUI, evasionAttackerLine(data.targetName, eraRules.hitLineText));
         // Swoosh sounds come from server via GameMessageSound (onSound handler)
 
       },
@@ -11272,7 +11491,7 @@ async function main() {
         attackRequest?.noteAttacked(); // HandleEvasionDefenderNotificationEvent @ 0056c620
         lastCombatAt = Date.now();
         // DECOMP.evasion-chat-lines — "You evaded X!" as CombatEnemy (0x15).
-        addTextToScroll(gameUI, evasionDefenderLine(data.attackerName));
+        addTextToScroll(gameUI, evasionDefenderLine(data.attackerName, eraRules.hitLineText));
         // Evasion sounds come from server via GameMessageSound (onSound handler).
         // BUG.invented-portal-burst-and-spell-effects — no local sparkle: an
         // evade plays no effect (ACE sends none; the client adds none).
@@ -11551,7 +11770,7 @@ async function main() {
             noNetherDamage: !gameUI.eraSupports('netherDamage'),
             resolvers: examineResolvers.item,
           });
-          view.inscription = examineInscription(weenieInfo?.objectDescriptionFlags ?? 0, data.propertiesString);
+          view.inscription = examineInscription(weenieInfo?.objectDescriptionFlags ?? 0, data.propertiesString, eraRules.inscribePlaceholder.text);
         } else {
           view.creature = buildCreatureExaminePage(data, {
             success: data.success ?? true,
@@ -11563,6 +11782,7 @@ async function main() {
             eraText: eraRules.characterExamineText,
           }) ?? undefined;
         }
+        if (data.creatureProfile) gameUI.noteFellowAppraisal(data.guid >>> 0, data.creatureProfile); // S2: a 1999 fellow's vitals
         const quiet = quietAppraisals.delete(data.guid >>> 0);
         if (quiet) recordQuietExamine?.(view);
         else if (awaitedAppraisals.delete(data.guid >>> 0)) gameUI.showExaminationWindow(view);
@@ -11642,7 +11862,7 @@ async function main() {
           // per-unit value × the amount through ShopSystem::SellPrice.
           // The merchandise row prices one unit (VendorItemsUI shows the
           // selection's split cost; a stack desc is valued per _stackSize).
-          price: vendorSellPrice({ value: item.value, stackSize: item.descStackSize, itemType: item.itemType }, parsed.sellPrice, 1),
+          price: vendorSellPrice({ value: item.value, stackSize: item.descStackSize, itemType: item.itemType }, parsed.sellPrice, 1, eraRules.promissoryNoteRates),
           unitValue: unitValueOf({ value: item.value, stackSize: item.descStackSize }),
           priceRate: parsed.sellPrice,
           pricing: 'vendorSells' as const,
@@ -11680,7 +11900,8 @@ async function main() {
         // server never checks them when deciding what it will buy back.
         const sellItems = buildVendorSellRows(
           [...playerState.inventory.getAll(), ...playerState.equipment.getAll()],
-          parsed.merchandiseItemTypes ?? 0, parsed.buyPrice);
+          parsed.merchandiseItemTypes ?? 0, parsed.buyPrice,
+          { ...vendorNotePricing(), vendorWcid: serverObjectManager?.getObject(parsed.vendorGuid)?.weenieClassId ?? 0 });
 
         // Get vendor name from ServerObjectManager
         const vendorObj = serverObjectManager?.getObject(parsed.vendorGuid);
@@ -11991,7 +12212,8 @@ async function main() {
       // channel, and retail's global-only squelch (chat/ChannelBroadcastLine.ts).
       // ACE sends an empty senderName when echoing our own message back.
       onChannelBroadcast: (data) => {
-        const line = channelBroadcastToShow(data, squelchedNames, []);
+        // SWEEP1999.commands — the era client's wording (1999: "X says to your fellowship, …").
+        const line = channelBroadcastToShow(data, squelchedNames, [], eraRules.socialLineText);
         if (line) gameUI.addSystemMessage(line.text, chatColorFor(line.type), line.type);
       },
 
@@ -12049,7 +12271,9 @@ async function main() {
           (guid) => serverObjectManager?.getObject(guid),
         );
         console.warn(`[AC] InventoryServerSaveFailed: item=0x${data.itemGuid.toString(16)} error=${data.errorType.toString(16)} attempt=${JSON.stringify(attempt.text)} sink="${errText}"`);
-        const shown = ATTEMPT_FAILED_NAME_TEMPLATED.has(data.errorType) ? null : refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, errText));
+        // SWEEP1999.messages INV-3 — the 1999 client's 0xa0 case prints only the verb line above.
+        const shown = ATTEMPT_FAILED_NAME_TEMPLATED.has(data.errorType) || !eraRules.inventoryFailedRunsFailureEvent
+          ? null : refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, errText, eraRules.failureEventText));
         // TELEMETRY.refusal-events — 0x00A0 from every server family (the AC1999 server's NotifyInventoryFailedEvent too);
         // a code-0 failure (a refused vendor buy / sell) is reported with the attempt line, or none.
         refusalReporter?.serverCode('inventory_failed', data.errorType,
@@ -12678,7 +12902,7 @@ async function main() {
         // chat line, no arm → nothing. ActionCancelled (0x36) is an arm
         // ("Action cancelled!", spew) — ACE's ManaStone.cs:98 sends it.
         if (data.errorType !== WeenieError.None) {
-          const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType)));
+          const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType), eraRules.failureEventText));
           refusalReporter?.serverCode('use_done', data.errorType, weenieErrorText(data.errorType), shown.sink);
         }
         console.log(`[AC] UseDone: errorType=${data.errorType}`);
@@ -12878,7 +13102,8 @@ async function main() {
         // e.g. TradeClosed / FullInventoryLocation / SkillTooLow, whatever
         // the ACE <summary> says). Pre-fix every code went to chat in the
         // Help colour. Map: @ac/shared WeenieErrorSink.ts (generated).
-        const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType)));
+        // SWEEP1999.messages HC-6 — the era client's own switch (1999: its ~50 codes, its wording).
+        const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType), eraRules.failureEventText));
         // TELEMETRY.refusal-events — ACE / GDLE 0x028A, the AC1999 server's flat 0x1C AttemptFailed.
         refusalReporter?.serverCode('weenie_error', data.errorType, weenieErrorText(data.errorType), shown.sink);
         portalUseReporter?.weenieError(data.errorType);
@@ -13245,11 +13470,11 @@ async function main() {
       // line "You can only move or use one item at a time", an attack in
       // progress with "You cannot move or use an item while attacking", and
       // nothing is sent. Non-inventory actions are not gated.
-      if (!refusalForAction(actionType, () => gateInventoryRequestSend(inventoryRequests, actionType, (text) => gameUI.displayErrorText(text)))) {
+      if (!refusalForAction(actionType, () => refusalWithDetail(inventoryLockDetail, () => gateInventoryRequestSend(inventoryRequests, actionType, (text) => gameUI.displayErrorText(text))))) {
         console.log(`[AC] ${GameActionType[actionType] ?? actionType} refused: ${inventoryRequests.refusal()} (pending=${JSON.stringify(inventoryRequests.pending)})`);
         return false;
       }
-      const msg = serializeGameAction(++aceActionSequence, actionType, payload);
+      const msg = serializeTrackedGameAction(++aceActionSequence, actionType, payload);
       aceConnection.sendMessage(msg, GameMessageGroup.SecureWeenieQueue);
       // GAP.client-busy-cursor-count — IncrementBusyCount after every Use /
       // UseWithTarget (ItemHolder::UseObject / TargetAcquired) and Buy / Sell
@@ -13289,7 +13514,7 @@ async function main() {
     const sendUseEvent = (guid: number): void => {
       const payload = new BinaryWriter(4);
       payload.writeUInt32(guid);
-      const useMsg = serializeGameAction(++aceActionSequence, GameActionType.Use, payload.toBuffer());
+      const useMsg = serializeTrackedGameAction(++aceActionSequence, GameActionType.Use, payload.toBuffer());
       aceConnection.sendMessage(useMsg, GameMessageGroup.SecureWeenieQueue);
       busyCount.noteActionSent(GameActionType.Use);
       console.log(`[AC] ACE: Sent Use (0x0036) for entity 0x${guid.toString(16)}`);
@@ -13349,7 +13574,7 @@ async function main() {
       const nowSec = performance.now() / 1000;
       if (nowSec < lastUseObjectAt + 0.2) return;
       lastUseObjectAt = nowSec;
-      if (!refusalForAction(GameActionType.Use, () => gateInventoryRequestSend(inventoryRequests, GameActionType.Use, (text) => gameUI.displayErrorText(text)))) {
+      if (!refusalForAction(GameActionType.Use, () => refusalWithDetail(inventoryLockDetail, () => gateInventoryRequestSend(inventoryRequests, GameActionType.Use, (text) => gameUI.displayErrorText(text))))) {
         console.log(`[AC] Use refused: ${inventoryRequests.refusal()} (pending=${JSON.stringify(inventoryRequests.pending)})`);
         portalUseHeld(guid, 'busy');
         return;
@@ -13367,8 +13592,15 @@ async function main() {
         peaceMode: !combatController.isInCombat,
         confirmVolatileRare: characterOptionIsSet(0x2d /* ConfirmVolatileRareUse */, currentCharacterOptions1 ?? 0, currentCharacterOptions2 ?? 0),
         selectionCompatible: false,
+        // SWEEP1999.commands (HC-12) — the stance the 1999 attack / Cast hints read (eraRules.useObject).
+        combatStance: combatController.mode === CombatMode.Magic ? 'magic' as const
+          : combatController.mode === CombatMode.Melee ? 'melee' as const
+            : combatController.mode === CombatMode.Missile ? 'missile' as const : null,
+        advancedCombatUI: !!gameUI.optionsSettings.advancedCombatUI,
+        autoCreateShortcuts: gameUI.optionOn('autoCreateShortcuts'),
       };
-      const decision = decideUseObject(subject, useCtx);
+      // SWEEP1999.messages VTE-4 / INV-7 — the era client's UseObject (1999: cases 0-4, its own wording).
+      const decision = decideUseObject(subject, useCtx, eraRules.useObject);
       console.log(`[AC] UseObject 0x${guid.toString(16)} "${subject.name}": ${JSON.stringify(decision)}`);
       if (decision.kind !== 'use' && decision.kind !== 'confirm') portalUseHeld(guid, 'decided');
       // CPlayerSystem::UsingItem @ 00562f70's client-side tail on every path
@@ -13376,8 +13608,10 @@ async function main() {
       // opens in the inventory (SendNotice_OpenContainedContainer) — the Use
       // still goes out, as retail's Event_UseEvent does — and a WieldLeft
       // item's DetermineUseResult case 8 is AutoWield(SLOT_SIDE_LEFT).
-      const usingItem = usingItemEffects(subject, useCtx);
+      const usingItem = usingItemEffects(subject, useCtx, eraRules.useObject);
       if (usingItem?.openContainer) gameUI.openContainedContainer(guid);
+      // SWEEP1999.character (INV-10) — Automatically Create Shortcuts: quietly (no notice).
+      if (usingItem?.createShortcut) itemShortcutRestorer.createShortcutToItem(guid, -1, shortcutTargetOf(guid), false, true);
       if (usingItem?.autoWieldLeft) {
         const item = playerState.inventory.getItem(guid);
         if (item) attemptAutoWield(item, UISlotSide.Left);
@@ -13386,9 +13620,14 @@ async function main() {
         case 'usingItem':
           switch (decision.result) {
             case 2: placeInBackpack(guid); return; // PlaceInBackpack
-            case 3: case 4: { // AutoWield / AutoSort (our own items)
+            case 3: { // AutoWield (our own weapons)
               const item = playerState.inventory.getItem(guid);
               if (item) attemptAutoWield(item);
+              return;
+            }
+            case 4: { // INV-2 — AutoSort: AutoWear (the whole mask), else AutoWield, else PlaceInBackpack
+              const item = playerState.inventory.getItem(guid);
+              if (item) autoSortOwnedItem(item);
               return;
             }
             case 5: { // ClientTradeSystem::AttemptToOpenTradeNegotiations
@@ -13457,7 +13696,7 @@ async function main() {
       if (!reappraise) awaitedAppraisals.add(guid >>> 0);
       const payload = new BinaryWriter(4);
       payload.writeUInt32(guid);
-      const idMsg = serializeGameAction(++aceActionSequence, GameActionType.IdentifyObject, payload.toBuffer());
+      const idMsg = serializeTrackedGameAction(++aceActionSequence, GameActionType.IdentifyObject, payload.toBuffer());
       aceConnection.sendMessage(idMsg, GameMessageGroup.SecureWeenieQueue);
       // GAP.client-busy-cursor-count — gmExaminationUI::RecvNotice_ExamineObject
       // @ 004ab7b0 holds the busy count until the appraisal arrives; the
@@ -13523,7 +13762,7 @@ async function main() {
       }
       const modePayload = new BinaryWriter(4);
       modePayload.writeUInt32(mode);
-      const modeMsg = serializeGameAction(++aceActionSequence, GameActionType.ChangeCombatMode, modePayload.toBuffer());
+      const modeMsg = serializeTrackedGameAction(++aceActionSequence, GameActionType.ChangeCombatMode, modePayload.toBuffer());
       aceConnection.sendMessage(modeMsg, GameMessageGroup.SecureWeenieQueue);
       console.log(`[AC] Sent ChangeCombatMode: ${CombatMode[mode]} (${mode})`);
       // SWEEP1006B.player-input.entering-melee-missile-mode-never — SetCombatMode's
@@ -13570,7 +13809,7 @@ async function main() {
       const attackHeight = heightMap[height ?? gameUI.getCombatAttackHeight()] ?? AttackHeight.Medium;
       const powerLevel = power ?? gameUI.getCombatPowerLevel();
       const payload = buildTargetedMeleeAttackPayload(targetGuid, attackHeight, powerLevel);
-      const msg = serializeGameAction(++aceActionSequence, GameActionType.TargetedMeleeAttack, payload);
+      const msg = serializeTrackedGameAction(++aceActionSequence, GameActionType.TargetedMeleeAttack, payload);
       aceConnection.sendMessage(msg, GameMessageGroup.SecureWeenieQueue);
       // No local swing: retail's ExecuteAttack only sends the event. The swing
       // is the server's (Player_Melee DoSwingMotion → a non-autonomous
@@ -13739,7 +13978,7 @@ async function main() {
         const payload = buildCastTargetedSpellPayload(targetGuid, spellId);
         const seq = ++aceActionSequence;
         console.log(`[AC] CastTargetedSpell: seq=${seq} spellId=${spellId} target=0x${targetGuid.toString(16)}`);
-        const msg = serializeGameAction(seq, GameActionType.CastTargetedSpell, payload);
+        const msg = serializeTrackedGameAction(seq, GameActionType.CastTargetedSpell, payload);
         aceConnection.sendMessage(msg, GameMessageGroup.SecureWeenieQueue);
         busyCount.noteActionSent(GameActionType.CastTargetedSpell); // FreeHandsAndCastSpell's IncrementBusyCount
       } else {
@@ -13748,7 +13987,7 @@ async function main() {
         const payload = new BinaryWriter(4);
         payload.writeUInt32(spellId);
         console.log(`[AC] CastUntargetedSpell: spellId=${spellId}`);
-        const msg = serializeGameAction(++aceActionSequence, GameActionType.CastUntargetedSpell, payload.toBuffer());
+        const msg = serializeTrackedGameAction(++aceActionSequence, GameActionType.CastUntargetedSpell, payload.toBuffer());
         aceConnection.sendMessage(msg, GameMessageGroup.SecureWeenieQueue);
         busyCount.noteActionSent(GameActionType.CastUntargetedSpell); // CastSpell's IncrementBusyCount
       }
@@ -14137,7 +14376,7 @@ async function main() {
     gameUI.callbacks.onCreateFellowship = (name: string) => {
       if (!sendGameAction) return;
       sendGameAction(GameActionType.FellowshipCreate,
-        buildFellowshipCreatePayload(name, gameUI.optionsSettings.shareFellowshipXP === true));
+        buildFellowshipCreatePayload(name, gameUI.optionOn('shareFellowshipXP')));
       console.log(`[AC] Sent FellowshipCreate: "${name}"`);
     };
 
@@ -14157,7 +14396,7 @@ async function main() {
       const key = Object.entries(GameUI.OPTIONS_TO_CHARACTER_OPTION).find(([, code]) => code === option)?.[0];
       if (key) gameUI.setCharacterOptionLocal(key, value);
       if (option === 0x33 /* LockUI */) { LayoutRenderer.setUILocked(value); gameUI.updateRadarLockedStatus(); }
-      if (option === 0x05 /* PersistentAtDay */) skybox.setForceDaylight(value);
+      if (option === 0x05 /* PersistentAtDay */) applyToggledOptionEffect(option, value, gameUI.clientProfile.optionPins, localOptionSinks);
     };
     // PlayerModule hear-chat options: the Chat options' listen* settings
     // (CharacterOption codes 0x1B / 0x23–0x26 / 0x2E; ACE gates Turbine chat on them server-side).
@@ -14241,7 +14480,7 @@ async function main() {
       setHearAllegianceChat: (on) => setHears('allegiance', on),
       friends: () => gameUI.getFriendsList().map((f) => ({ id: f.guid, name: f.name, online: f.isOnline })),
       clearFriends: () => gameUI.setFriendsData([]),
-      weenieError: (code) => deliverWeenieError(gameUI, code, weenieErrorText(code)),
+      weenieError: (code) => deliverWeenieError(gameUI, code, weenieErrorText(code), eraRules.failureEventText),
       sendFriendsOld: () => {
         const w = new BinaryWriter(8);
         w.writeUInt32(0);
@@ -14268,7 +14507,8 @@ async function main() {
       fillComponentBuyList: (category, maxPrice) => gameUI.fillComponentBuyList(category, maxPrice),
       clearDesiredComponents: () => gameUI.clearDesiredComponents(),
       alwaysDaylight: () => skybox.alwaysDaylight,
-      setDay: (on) => skybox.setForceDaylight(on),
+      // An era that pins Always Daylight off (1999: EraClientRules.optionPins) never gets it this way either.
+      setDay: (on) => skybox.setForceDaylight(on && gameUI.clientProfile.optionPins.alwaysDaylight !== false),
       setPersistentAtDay: (on) => {
         gameUI.callbacks.onCharacterOptionToggle?.(0x05, on);
         applyCharacterOptionLocally(0x05, on);
@@ -14332,8 +14572,22 @@ async function main() {
       setLockUI: (locked) => applyCharacterOptionLocally(0x33, locked),
       // BUG.ac1999-chat-toggle-local — @chat on the client where the era's client kept it there.
       ...(localChatGate ? { setLocalChatSquelched: (squelched: boolean) => localChatGate.set(squelched) } : {}),
-    // The commands this era lacks the feature for are not offered (era/EraFeatures FEATURE_COMMANDS).
-    }, hiddenBy(FEATURE_COMMANDS, eraUnsupported));
+      // SWEEP1999.commands — the 1999 table's TargetedChat (tells to nearby objects and vendors) and @help.
+      ...(eraRules.commandTable === 'ac1999' ? {
+        tellCandidates: () => {
+          const out: TellCandidate[] = [];
+          for (const o of serverObjectManager?.getAllObjects().values() ?? []) {
+            if (o.guid === aceCharGuid) continue;
+            out.push({ id: o.guid, name: o.name ?? '', vendor: (o.objectDescFlags & BF_VENDOR) !== 0, distance: Math.hypot(o.worldX - playerWorldX, o.worldZ - playerWorldZ) });
+          }
+          return out;
+        },
+        radarRange: () => radarRangeFor(gameUI.hudState.isIndoors),
+        // 0x004d0170: UseObject on the vendor (our vendor window has one page for buying and selling).
+        useVendor: (id: number) => sendUseAction?.(id),
+        playerName: () => playerState.name ?? '',
+      } : {}),
+    }, eraRules.commandTable);
 
     // gmFellowshipUI buttons (ui/FellowshipPanelActions.ts) and gmFriendsUI Remove: direct sends.
     const runFellowshipSteps = (steps: FellowshipStep[]): void => {
@@ -14354,6 +14608,12 @@ async function main() {
     gameUI.callbacks.onFellowshipRecruitSelected = () => {
       const target = currentTargetGuid ?? 0;
       runFellowshipSteps(recruitFellow(gameUI.fellowship, aceCharGuid ?? 0, target, retailCommands.ctx.weenieIsPlayer(target)));
+    };
+    // SWEEP1999.character (S2) — the 1999 FellowPanel's appraisal of the selected fellow: quiet (no
+    // Examine window); its creature profile fills the row's vitals (onIdentifyResponse below).
+    gameUI.callbacks.onAppraiseFellow = (guid: number) => {
+      quietAppraisals.add(guid >>> 0);
+      sendIdentifyAction?.(guid, true);
     };
     gameUI.callbacks.onRemoveFriend = (guid: number) => {
       sendGameAction?.(GameActionType.RemoveFriend, buildRemoveFriendPayload(guid));
@@ -17150,7 +17410,7 @@ async function main() {
           // is selected, yourself included ("You cannot cast this spell upon yourself", 2026-10-10).
           if (target !== null && (selectedObjectId() >>> 0) !== (target >>> 0)) return false;
           agentPrimeMoveState();
-          gameUI['spellCallbacks'].onCastSpell?.(index);
+          castPresses.during('agent', () => gameUI['spellCallbacks'].onCastSpell?.(index));
           return true;
         },
         spellSelfTargetableTypeMask: () => eraRules.spellSelfTargetableTypeMask,
@@ -17178,7 +17438,13 @@ async function main() {
           return sendGameAction(GameActionType.DropItem, p.toBuffer());
         },
         give: (target, item, amount) => { if (!sendGameAction) return false; agentPrimeMoveState(); return sendGameAction(GameActionType.GiveObjectRequest, buildGiveObjectRequestPayload(target, item, amount)) !== false; },
-        wield: (guid) => { const it = playerState.inventory.getItem(guid); if (!it) return false; agentPrimeMoveState(); return attemptAutoWield(it); },
+        // The double-click: armor and clothing go through AutoSort (AutoWear's ClothingPriority check), the rest AutoWield.
+        wield: (guid) => {
+          const it = playerState.inventory.getItem(guid);
+          if (!it) return false;
+          agentPrimeMoveState();
+          return ((it.validLocations ?? 0) & PAPERDOLL_WEARABLE_MASK) !== 0 ? autoSortOwnedItem(it) : attemptAutoWield(it);
+        },
         // The drag onto one paperdoll slot (gmPaperDollUI::HandleDropRelease → AcceptDragObject), worn or carried.
         wieldAt: (guid, mask) => {
           const worn = playerState.equipment.getAll().find((e) => e.id === guid);
@@ -17766,7 +18032,8 @@ async function main() {
           // retail feeds this into Timer::set_time and derives the sky
           // phase from it (GameTime::UseTime). Replaces the free-running
           // clock seeded from the hardcoded 0.35 phase below.
-          skybox.syncGameClock(event.data as number);
+          // The 1999 connect grant's delta is the whole clock (an anchor; Connection1999.onGrant, PW-1).
+          skybox.syncGameClock(event.data as number, event.clockAnchor === true);
           break;
 
         case 'serverName': {
@@ -17781,6 +18048,11 @@ async function main() {
           gameUI.setWorldName(launcherWorldName ?? sn.serverName);
           break;
         }
+
+        case 'charSelectNews':
+          // PW-7 / CHAR-3 — the 1999 character-select news (0xF65A, the AC1999 server's servernews.txt).
+          gameUI.setCharSelectNews(String(event.data ?? ''));
+          break;
 
         case 'characterList': {
           // Same for the post-logoff CharacterList (Session.cs:272).
@@ -17870,7 +18142,10 @@ async function main() {
           // the verification state back to UNDEF (FINISH may send again after
           // a refusal). An OK starts the new character's login: the chargen
           // screen goes inert under Entering World (BUG.chargen-double-create).
-          gameUI.noteCharGenVerificationResponse(response.responseCode === CharacterGenerationVerificationResponse.Ok && response.characterGuid != null);
+          // 1999 (EraWorldRules.afterCharacterCreate): CG_10_UI_Global_Loop's code-1 path resets
+          // chargen and returns to character select (Game_SetUIMode(2)); nothing enters the world.
+          const createdToSelect = eraRules.world.afterCharacterCreate === 'characterSelect';
+          gameUI.noteCharGenVerificationResponse(!createdToSelect && response.responseCode === CharacterGenerationVerificationResponse.Ok && response.characterGuid != null);
           preworldReporter?.chargenResult(response.responseCode, aceCharHeritage);
           if (response.responseCode === CharacterGenerationVerificationResponse.Ok) {
             // Success!
@@ -17887,8 +18162,12 @@ async function main() {
             // the new character is the one highlighted after its logoff.
             if (aceCharGuid !== null) gameUI.noteSelectedAvatar(aceCharGuid.toString());
 
-            // Now enter the world with this character
-            if (aceCharGuid !== null) {
+            if (createdToSelect) {
+              // The new character's row, selected; the server's CharacterList that follows
+              // (Client.cpp CreateCharacter → SendCharacterList) redraws the same screen.
+              if (aceCharGuid !== null) gameUI.returnToCharacterSelectAfterCreate({ id: aceCharGuid.toString(), name: response.characterName ?? '' });
+            } else if (aceCharGuid !== null) {
+              // Now enter the world with this character
               console.log(`[AC] ACE: Requesting enter world...`);
               // Remember it as the character to resume after a drop, as a
               // character-select entry does (it never was on this path).
@@ -17921,6 +18200,8 @@ async function main() {
             // name the data set so a player's console says which.
             console.error(`[AC] ACE: chargen data: era ${activeEra.id}, ${gameUI.chargenTotalNumSkills()} skills sent`);
             gameUI.hideMessageDialog();
+            // 1999: every create refusal chimes GeneralError (CG_10_UI_Global_Loop; EraWorldRules.localUiSounds).
+            gameUI.playUISound(Sound.UI_GeneralError);
             gameUI.showMessageDialog(errorMsg);
           }
           break;
@@ -18759,8 +19040,20 @@ async function main() {
         if (!gameUI.toggleCombatMode()) return true; // refused (portal space)
         sendChangeCombatMode(gameUI.hudState.combatMode);
         return true;
-      case ACT.IncreasePower: gameUI.adjustCombatPowerLevel(0.1); return true;
-      case ACT.DecreasePower: gameUI.adjustCombatPowerLevel(-0.1); return true;
+      // SWEEP1999.input CM-5 — HandleCombatAction @ 0056d600 (1999: 0x0058b300 / 0058b390):
+      // power and accuracy step in sixths from the step below (controllers/PowerBarStep.ts).
+      case ACT.IncreasePower: case ACT.IncreaseAccuracy: {
+        const cur = gameUI.getCombatPowerLevel();
+        gameUI.adjustCombatPowerLevel(stepPowerLevel(cur, 1) - cur);
+        return true;
+      }
+      case ACT.DecreasePower: case ACT.DecreaseAccuracy: {
+        const cur = gameUI.getCombatPowerLevel();
+        gameUI.adjustCombatPowerLevel(stepPowerLevel(cur, -1) - cur);
+        return true;
+      }
+      // 1999's SpellResearchPanel (F7 in its Default.map): the magic panel's Create Spell tab.
+      case SPELL_RESEARCH_PAGE_ACTION: gameUI.toggleMagicPage('research'); return true;
       // UI panels
       case ACT.ShowHideInventoryPanel: gameUI.toggleInventory(); return true;
       case ACT.ShowHideCharDetailPanel: gameUI.toggleCharPanel(); return true;
@@ -18897,7 +19190,11 @@ async function main() {
   // InputAction exactly like the bound key (UIElement_Button::
   // HandleButtonClick @ 00471e50).
   gameUI.callbacks.onInputAction = (id: number) => { dispatchAction(id); };
-  gameUI.callbacks.onRadarObjectClick = (guid: number) => { selectGuid(guid); };
+  // RadarUI::Global_MouseDown → HandleMouseDownOnObject: a radar click is refused like a world one (CM-3).
+  gameUI.callbacks.onRadarObjectClick = (guid: number) => {
+    if (clickSelectRefused(guid)) { raiseClientNotice(gameUI, CN.combatSelectRefused); return; }
+    selectGuid(guid);
+  };
   gameUI.callbacks.onCombatAttackPress = (height) => {
     if (combatController.mode === CombatMode.Melee || combatController.mode === CombatMode.Missile) {
       attackRequest?.setRequestedAttackHeight(height);
@@ -18910,39 +19207,30 @@ async function main() {
 
   document.addEventListener('keydown', (e) => {
     if (!gameStarted) return;
-    // Any text field keeps its keys (a DAT edit field — friend / fellowship
-    // name, journal, book — sets no inputFocused flag; "i" and "s" typed there
-    // opened panels and never reached the field).
-    if (gameUI.ui.inputFocused || isKeyboardField(document.activeElement)) return;
-
     // CORE.17.k.b.b.a.g.f — the registered input maps answer first (the
     // retail CInputManager walks its map list before any UI element sees the
     // key): F3 is the Allegiance page, PgUp / PgDn are the power / spell
     // keys in combat. The client conveniences below only get a key no active
-    // map binds.
-    const code = eventToCode(e);
-    // The automation hotkeys (the VHS-style window, ui/automation/vhsHotkeys.ts): a Set waiting
-    // for its key, or a hotkey's key. A key retail binds stays retail's.
-    if (gameUI.automationHotkey(code, e.repeat)) { e.preventDefault(); return; }
-    syncActiveInputMaps();
-    // A modifier chord with no binding of its own answers as the bare key
-    // (KeybindRegistry.resolveOrBare: Shift+1 casts slot 1 while walking).
-    const id = keybinds.resolveOrBare(code);
-    // CORE.18.b.a.a — a held zoom key is one press (the OS key repeat would
-    // restart the tick clock every repeat).
-    if (e.repeat && id != null && HELD_CAMERA_ACTIONS.has(id)) { e.preventDefault(); return; }
-    if (id != null) {
-      // Movement/hold keys resolve to a MOVEMENT_CANONICAL action and are
-      // handled by CameraController's own listener (via its keyTranslator) —
-      // skip them here so we don't double-handle.
-      if (MOVEMENT_CANONICAL[id] !== undefined) return;
-      if (dispatchAction(id)) { e.preventDefault(); return; }
-    }
+    // map binds. input/GameKeyDown.ts: a text field keeps its keys (a DAT edit
+    // field sets no inputFocused flag), the automation hotkeys answer, a
+    // modifier chord with no binding answers as the bare key, an OS repeat
+    // runs only what retail repeats (a held cast key casts once), a movement
+    // key is CameraController's, and the rest is dispatched once per press.
+    const route = routeGameKeyDown(e, {
+      textFocused: () => gameUI.ui.inputFocused || isKeyboardField(document.activeElement),
+      automationHotkey: (code, repeat) => gameUI.automationHotkey(code, repeat),
+      syncMaps: syncActiveInputMaps,
+      resolve: (code) => keybinds.resolveOrBare(code),
+      dispatch: (id) => castPresses.during('key', () => dispatchAction(id)),
+    });
+    if (keyDownConsumed(route)) { e.preventDefault(); return; }
+    if (route !== 'unbound') return;
 
     // System keys — client/dev conveniences that are NOT part of the
     // rebindable AC command set (so they aren't in the Keyboard Config dialog).
     // The debug overlay sits on F7, a key the retail KeyMap leaves unbound
-    // (F3 = Allegiance page, F5 = Spellbook, F8 = Attributes in the DAT).
+    // (F3 = Allegiance page, F5 = Spellbook, F8 = Attributes in the DAT). A
+    // 1999 world binds F7 (Spell Research Page), which answers above.
     switch (e.key) {
       case 'F7': e.preventDefault(); gameUI.toggleDebug(); return;
       case 'Escape': {
@@ -19244,6 +19532,8 @@ async function main() {
       attackRequest?.useTime();
       pendingCombatModeTick?.();
       deferredLogOffTick?.();
+      // HC-14 — 1999's hourglass while an inventory request waits (PanelUI_Global_Loop).
+      inventoryRequestBusy.update(gameStarted && inventoryRequests.pending !== null);
       // UIElement_SmartBoxWrapper's per-frame sr_MouseOver find.
       runHoverFind();
 

@@ -337,4 +337,13 @@ export function registerMisc1999(c: Codecs1999, opts: Misc1999Options = {}): voi
   const pass: InboundCodec = (_r, _ctx, raw) => [raw.slice()];
   c.inbound.set(0xf7c1, pass);
   c.inbound.set(0xf7dc, pass);
+
+  // AdminEnvirons 0xEA60 (PW-18): the AC1999 server sends it only for an admin's @envmode
+  // (ClientCommands.cpp), and the 1999 client has no case for it (Net_DispatchServerMessage) and
+  // no environs sounds (its UI table stops at 0x75): dropped on purpose, not end of retail's
+  // fog and thunder.
+  c.inbound.set(ADMIN_ENVIRONS, () => []);
 }
+
+/** The end-of-retail AdminEnvirons opcode, which a 1999 world drops. */
+export const ADMIN_ENVIRONS = 0xea60;

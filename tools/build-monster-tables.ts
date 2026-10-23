@@ -75,7 +75,7 @@ const RESIST_INDEX: Record<number, number> = { 64: 2, 65: 0, 66: 1, 67: 6, 68: 5
 const ROOT = resolve(import.meta.dirname, '..');
 const OUT = join(ROOT, 'packages/renderer/src/agent/macro/monsters');
 
-function sqlFiles(dir: string): string[] {
+export function sqlFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
   const out: string[] = [];
   for (const e of readdirSync(dir)) {
@@ -92,7 +92,7 @@ function valuesOf(text: string, table: string): string {
 }
 
 /** The numeric rows of one statement, each as its comma-separated values (comments dropped). */
-function rowsOf(text: string, table: string): string[][] {
+export function rowsOf(text: string, table: string): string[][] {
   const out: string[][] = [];
   for (const r of valuesOf(text, table).replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\(([^()]*)\)/g)) out.push(r[1].split(',').map((v) => v.trim()));
   return out;

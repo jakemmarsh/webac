@@ -38,12 +38,15 @@ export function fellowshipUpdateLine(
   prev: FellowshipChatSnapshot | null,
   next: FellowshipChatSnapshot,
   selfGuid: number | null | undefined,
+  style: 'eor' | 'ac1999' = 'eor',
 ): string | null {
   if (prev && prev.fellows.length > 0) return null;
   if (selfGuid != null && next.leaderGuid === selfGuid) {
     return `You have created the Fellowship of ${next.fellowshipName}.`;
   }
   const leader = fellowName(next, next.leaderGuid) ?? '';
+  // The 1999 client.exe (0x00536f40, EraClientRules.socialLineText): "<leader> has recruited you into the <name> Fellowship.\n".
+  if (style === 'ac1999') return `${leader} has recruited you into the ${next.fellowshipName} Fellowship.`;
   return `You have been recruited into the ${next.fellowshipName} fellowship, a fellowship led by ${leader}.`;
 }
 

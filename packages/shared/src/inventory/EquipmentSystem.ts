@@ -105,8 +105,10 @@ export class EquipmentSystem {
   /**
    * Equip an item to the specified slot.
    *
-   * `evictOverlaps` (default true) is the client's own optimistic equip: what
-   * covers any of the slots comes off, as the server will move it. A wield the
+   * `evictOverlaps` (default true): what covers any of the slots comes off.
+   * Nothing in the client asks for that any more: the client's optimistic
+   * equip (InventoryController.equipItem) passes false too, because retail's
+   * wield request takes nothing off (BUG.eor-autowear-priority-pass). A wield the
    * SERVER reports (CreateObject with a wielder, WieldObject) passes false: the
    * server already decided what is worn, and a real conflict is taken off by
    * its own request first (the client's auto-dequip, ACE
@@ -280,7 +282,8 @@ export class OptimisticEquipmentTracker {
     this.pending.delete(itemId);
     if (action.kind === 'equip') {
       equipment.unequipItem(itemId);
-      if (action.evicted) equipment.equipItem(action.evicted, action.targetSlot);
+      // The displaced item goes back where it was worn, beside whatever else is worn there.
+      if (action.evicted) equipment.equipItem(action.evicted, action.evicted.slot, false);
     } else {
       equipment.equipItem(action.item, action.slot);
     }

@@ -35,7 +35,7 @@
  *    owns the shown tooltip → UIElementManager::ResetTooltip.
  */
 import { EquipMask, getAppropriateName } from '@ac/shared';
-import type { ItemHoverText } from '../era/EraFeatures.js';
+import type { CastButtonText, ItemHoverText } from '../era/EraFeatures.js';
 import { TOOLTIP_ROOT_ELEMENT, TOOLTIP_MAX_HEIGHT, TOOLTIP_MAX_WIDTH, TOOLTIP_TEXT_INSET, TOOLTIP_FONT, TOOLTIP_TEXT_MARGIN } from './DatTooltip.js';
 
 /**
@@ -171,6 +171,13 @@ export function itemHoverHint1999(item: ItemHoverSubject, place: ItemHoverPlace,
   const usable = item.usable ?? 0;
   if (usable === 0 || usable === 1) return null; // USEABLE_UNDEF / USEABLE_NO
   if (type & IT.Creature) return null; // "attack" is for creatures in the world
+  return usableTypeHint(item, text);
+}
+
+/** Case 1's type ladder after the creature test (@ 0x589460): portal, food, container, writable, key, mana stone, use. */
+function usableTypeHint(item: ItemHoverSubject, text: ItemHoverText): string | null {
+  const type = item.itemType ?? 0;
+  const h = text.hints;
   if (type & IT.Portal) return h.enterPortal;
   if (type & IT.Food) return h.consume;
   if (type & IT.Container) return h.openClose;
@@ -178,6 +185,40 @@ export function itemHoverHint1999(item: ItemHoverSubject, place: ItemHoverPlace,
   if (type & IT.Key) return h.unlock;
   if (type & IT.ManaStone) return item.hasMana === undefined ? null : item.hasMana ? h.manaTransfer : h.manaDrain;
   return h.use;
+}
+
+/** What the 1999 hint reads of an object in the 3D world (a ServerObject's fields). */
+export interface WorldHoverSubject extends ItemHoverSubject {
+  /** PublicWeenieDesc._bitfield (ObjectDescriptionFlag). */
+  objectDescFlags?: number;
+}
+
+/** The bitfield bits the 1999 world hint tests (+0x70; client.exe @ 0x4e4d90, 0x4e4e30, 0x589820, 0x4e5590, 0x4f82c0). */
+const BF = { Stuck: 0x4, Attackable: 0x10, Book: 0x100, Vendor: 0x200, Corpse: 0x2000, LifeStone: 0x4000 } as const;
+
+/**
+ * PW-10 — the 1999 hint for the object under the mouse in the 3D view: the ItemHolder loop
+ * (@ 0x59de50) puts the object's name in the status box and 0x00589460 adds this line, over
+ * ItemHolder_DetermineUseResult @ 0x4e4bf0 for an object on the landscape: one that is not stuck
+ * (bitfield 0x4), not a book (0x100) and holds nothing is "pick up" (result 2); otherwise a usable
+ * object's line (result 1): a corpse "loot corpse", a vendor "begin shopping", a lifestone "set your
+ * resurrection location", a creature "attack" while the player is in a combat mode
+ * (0x004e65a0 ≠ NonCombat), then the item ladder (portal, food, container, …). The creature line
+ * also reads a short at the object's +0x320 that is not traced; we show it only for an attackable
+ * creature (bitfield 0x10), never an NPC.
+ */
+export function worldHoverHint1999(obj: WorldHoverSubject, text: ItemHoverText, inCombatMode: boolean): string | null {
+  const flags = obj.objectDescFlags ?? 0;
+  const type = obj.itemType ?? 0;
+  const h = text.hints;
+  if ((flags & (BF.Stuck | BF.Book)) === 0 && (type & (IT.Container | IT.Creature)) === 0) return h.pickUp;
+  const usable = obj.usable ?? 0;
+  if (usable === 0 || usable === 1) return null;
+  if (flags & BF.Corpse) return h.lootCorpse;
+  if (flags & BF.Vendor) return h.beginShopping;
+  if (flags & BF.LifeStone) return h.setResurrection;
+  if (type & IT.Creature) return inCombatMode && (flags & BF.Attackable) !== 0 ? h.attack : null;
+  return usableTypeHint(obj, text);
 }
 
 /**
@@ -437,6 +478,54 @@ export function castButtonTooltip(state: CastButtonTooltipState): CastButtonTool
     return { text: CAST_BUTTON_TOOLTIPS.cast.replace('%hs', name) + CAST_BUTTON_TOOLTIPS.on.replace('%s', state.targetName), castable: true, nameField: name };
   }
   return { text: CAST_BUTTON_TOOLTIPS.selectAppropriateTarget.replace('%hs', name), castable: false, nameField: name };
+}
+
+/** The face, hover text and state of a Cast button that carries its state as its label. */
+export interface CastButtonFace {
+  /** The button's own text (up to two lines). */
+  label: string;
+  /** The hover text (AC_ToolTipHandler case 0x55). */
+  hover: string;
+  castable: boolean;
+}
+
+/**
+ * SWEEP1999.magic MAG-6 — the 1999 SpellCastSubPanel_UpdateCastButton @
+ * 0x513e00: the state is written onto the button (`text`, the era's
+ * CastButtonText), the same branches as end of retail's tooltip: no
+ * selection ("You have no spells\nready to cast" with nothing on the bar and
+ * no endowment, else "Select a spell to cast"); a spell ("CAST <spell>" for
+ * an untargeted or self spell; "You must select a target\nfor <spell>"
+ * without a selection; "CAST <spell>" + line break + "on <target>" for a
+ * compatible one; "You must select an appropriate\ntarget for <spell>"
+ * otherwise); the endowment item likewise with "USE the <item>". The button is
+ * disabled on every refusal. Its hover text is AC_ToolTipHandler @ 0x5871b0
+ * case 0x55: "Click to cast <spell>" / "Click to use your <item>" while it is
+ * enabled, else the two "… then click here to cast it." lines.
+ */
+export function castButtonFace(state: CastButtonTooltipState, text: CastButtonText): CastButtonFace {
+  const name = state.selectedSpellName;
+  const fill = (fmt: string, v: string) => fmt.replace('%s', v);
+  const disabled = (label: string): CastButtonFace => ({
+    label, castable: false, hover: state.anySpellReady ? text.hover.selectSpell : text.hover.dragSpell,
+  });
+  if (!name) {
+    const e = state.endowment;
+    if (e) {
+      const hover = fill(text.hover.use, e.itemName);
+      if (e.selfTarget) return { label: fill(text.use, e.itemName), castable: true, hover };
+      if (!state.targetName) return disabled(fill(text.selectTargetForItem, e.itemName));
+      if (e.targetCompatible) return { label: fill(text.use, e.itemName) + '\n' + fill(text.useOn, state.targetName).trimStart(), castable: true, hover };
+      return disabled(fill(text.selectAppropriateTargetForItem, e.itemName));
+    }
+    const noSpells = !state.anySpellReady && !state.endowmentPresent;
+    return disabled(noSpells ? text.noSpells : text.selectSpell);
+  }
+  const hover = fill(text.hover.cast, name);
+  if (state.untargeted) return { label: fill(text.cast, name), castable: true, hover };
+  if (!state.targetName) return disabled(fill(text.selectTarget, name));
+  if (state.targetCompatible) return { label: fill(text.cast, name) + '\n' + fill(text.on, state.targetName), castable: true, hover };
+  return disabled(fill(text.selectAppropriateTarget, name));
 }
 
 /* ── the map notes ─────────────────────────────────────────────────── */

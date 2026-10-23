@@ -142,6 +142,15 @@ export class CameraController {
   private static useMouseTurning = false;
   static isMouseTurningEnabled(): boolean { return CameraController.useMouseTurning; }
   static setUseMouseTurning(enabled: boolean): void { CameraController.useMouseTurning = enabled; }
+  /**
+   * SWEEP1999.character — the 1999 options page's Right-click mouselook (options_ 0x4000): the
+   * world's right-button press starts mouse-look instead of picking (ItemHolder 0x0059dc50 case 2:
+   * 0x00594c50 set → 0x004f3b10(1)), held until the release. End of retail pins it off.
+   */
+  private static rightClickMouseLook = false;
+  static setRightClickMouseLook(enabled: boolean): void { CameraController.rightClickMouseLook = enabled; }
+  /** The right button holds mouse-look: Use Mouse Turning (end of retail) or Right-click mouselook (1999). */
+  static rightButtonHoldsMouseLook(): boolean { return CameraController.useMouseTurning || CameraController.rightClickMouseLook; }
 
   /**
    * CORE.18.b.a.a.a.a.a.b — the turn motion Use Mouse Turning's mouse-look
@@ -1060,7 +1069,7 @@ export class CameraController {
    * (WorldRightClick). Returns whether it was consumed.
    */
   mouseRightButton(down: boolean): boolean {
-    if (!CameraController.useMouseTurning) return false;
+    if (!CameraController.rightButtonHoldsMouseLook()) return false;
     this.setMouseLook(down);
     return true;
   }

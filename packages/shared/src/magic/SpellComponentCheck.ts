@@ -48,15 +48,22 @@ export const SPELL_COMPONENTS_MISSING_TEXT = "You do not have all of this spell'
  * Retail CastSpell's component gate. Returns true when the cast may proceed:
  * components are not required, or every (non-zero) component of the
  * player's customized formula maps to a WCID the player owns.
+ *
+ * `slots` is the [first, end) range of 0-based formula slots checked: end of
+ * retail's CastSpell walks every slot; the 1999 UI_CastSpell @ 0x4d1bd0 runs
+ * `for i = 1; i < 6` (SWEEP1999.magic MAG-10), so the scarab (slot 0) and
+ * slots 6-7 are left to the server, which refuses with 0x400.
  */
 export function spellComponentsSatisfied(
   componentsRequired: boolean,
   playerFormula: readonly number[],
   componentIdToWcid: ReadonlyMap<number, number>,
   ownsWcid: (wcid: number) => boolean,
+  slots: readonly [number, number] = [0, Number.MAX_SAFE_INTEGER],
 ): boolean {
   if (!componentsRequired) return true;
-  for (const componentId of playerFormula) {
+  for (let i = Math.max(0, slots[0]); i < Math.min(playerFormula.length, slots[1]); i++) {
+    const componentId = playerFormula[i];
     if (!componentId) continue; // empty formula slot — not a component
     const wcid = componentIdToWcid.get(componentId) ?? 0;
     if (wcid === 0 || !ownsWcid(wcid)) return false;

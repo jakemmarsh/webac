@@ -75,6 +75,14 @@ out += ` * user-bindable action in it). CORE.17.k.b.b.a.g.f.a.\n */\n`;
 out += `export const KEYBIND_ACTION_ROWS: ReadonlyArray<{ map: number; id: number }> = [\n`;
 for (const r of rows) out += `  { map: ${hex(r.map)}, id: ${hex(r.id)} },\n`;
 out += `];\n`;
+// KEY_REPEAT_ACTIONS — the actions whose ActionMap toggle type is 4: the only ones retail's
+// CInputManager repeats while the key stays down (CInputManager @ 00431c99: m_toggle == 4, after
+// sm_timeKeyRepeatDelay). Every other action fires once per press (FireActionEvent @ 00432720 maps
+// a 0 toggle to 3). The toggle is the ActionMapValue word ACE calls UnknownInt2 (ActionMap.ts).
+const repeat = new Set();
+for (const vals of am.inputMaps.values()) for (const [id, v] of vals) if (v.unknownInt2 === 4) repeat.add(id);
+out += `\n/** Actions retail repeats while the key is held (ActionMap toggle type 4); the rest fire once per press. */\n`;
+out += `export const KEY_REPEAT_ACTIONS: ReadonlySet<number> = new Set([${[...repeat].sort((a, b) => a - b).map(hex).join(', ')}]);\n`;
 const target = resolve(REPO, 'packages/renderer/src/input/KeybindActions.generated.ts');
 fs.writeFileSync(target, out);
 console.error(`wrote ${target}`);

@@ -153,6 +153,7 @@ function descOfNode(
 export function pressSoundsFor(
   node: Element | null,
   getResolvedLayout: (layoutId: number) => LayoutDescData | null,
+  everyButton: LayoutSoundMedia | null = null,
 ): LayoutSoundMedia[] {
   for (let n = node as HTMLElement | null; n; n = n.parentElement) {
     if (!n.dataset) continue;
@@ -160,7 +161,11 @@ export function pressSoundsFor(
     if (!desc) continue;
     if (!desc.states.has(UI_STATE_PRESSED) && !desc.states.has(UI_STATE_SELECTED_PRESSED)) continue;
     const state = pressStateFor(parseHex(n.dataset.acState));
-    return state === null ? [] : stateSoundMedia(desc, state);
+    if (state === null) return [];
+    const media = stateSoundMedia(desc, state);
+    // `everyButton` (EraWorldRules.pressSoundOnEveryButton, 1999): the client's one press sound,
+    // played by every button class (@ 0x4516e0), stands in for a button with no media of its own.
+    return media.length === 0 && everyButton ? [everyButton] : media;
   }
   return [];
 }

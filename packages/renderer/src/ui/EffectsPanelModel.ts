@@ -93,7 +93,8 @@ export const EFFECTS_ROW = {
 /** Info text 0x10000126 geometry inside the info block 0x10000125. */
 export const EFFECTS_INFO = { x: 0, y: 8, w: 280, h: 78 } as const;
 
-export type EffectsUIType = 1 | 2;
+/** 1 beneficial, 2 harmful (gmEffectsUI m_effectsUIType); 0 every spell (the 1999 combined window). */
+export type EffectsUIType = 0 | 1 | 2;
 
 export interface EffectsWindowDef {
   /** 'positive' / 'negative' — our key. */
@@ -125,6 +126,16 @@ export const NEGATIVE_EFFECTS: EffectsWindowDef = {
   titleString: 224554165, titleFallback: 'Harmful Spells in Effect',
   inputAction: 0x10000007, panelId: 5, returnsToPrevious: false,
 };
+
+/**
+ * SWEEP1999.magic MAG-4 — an era with ONE effects window (the 1999 client's
+ * "Spells in Effect", SpellsInEffectPanel ctor @ 0x59ac70): the positive
+ * window's slot, element and InputAction, listing every spell in effect
+ * (uiType 0) under the era's own title. The negative window never shows.
+ */
+export function combinedEffectsWindow(title: string): EffectsWindowDef {
+  return { ...POSITIVE_EFFECTS, uiType: 0, titleString: 0, titleFallback: title };
+}
 
 /** compute_str_hash("ID_Effects_Info_NoSpells") / ("ID_Effects_Info_SelectASpell") in 0x23000001. */
 export const EFFECTS_INFO_STRINGS = {
@@ -206,6 +217,7 @@ export function enchantmentsInEffect(entries: Iterable<EffectsEnchantment>): Eff
 
 /** gmEffectsUI::SpellEffectMatchesUIType @ 004b76c0. */
 export function spellEffectMatchesUIType(uiType: EffectsUIType, bitfield: number): boolean {
+  if (uiType === 0) return true; // the 1999 window lists every spell (0x0059b530 inserts each)
   const beneficial = (bitfield & SPELL_FLAG_BENEFICIAL) !== 0;
   return uiType === 1 ? beneficial : !beneficial;
 }

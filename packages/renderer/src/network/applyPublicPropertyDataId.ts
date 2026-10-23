@@ -16,6 +16,12 @@
  *
  * Our own items have no ServerObject (CorePlating sets a pack item's
  * IconOverlay this way), so those go to the inventory mirror instead.
+ *
+ * VTE-1 — VendorsClassId (40), a trade note's issuing vendor (the 1999
+ * adapter's PublicWeenieDesc 0x200000), is kept by guid in `noteIssuers`
+ * whatever the object's state: the note may still be on the ground, in a
+ * corpse or arriving in a pack, and the vendor's sell-back price reads it
+ * (ShopSystem_BuyPrice's isIssuer, 1999 VendorProfile_VendorBuyPrice).
  */
 import { PropertyDataId } from '@ac/shared';
 import type { InventoryManager } from '@ac/shared';
@@ -27,11 +33,17 @@ export interface PublicPropertyDataIdDeps {
   inventory: Pick<InventoryManager, 'applyPublicPropertyDataId'>;
   /** An inventory item's icon changed: re-sync its worn copy and redraw. */
   onInventoryItemChanged(guid: number): void;
+  /** Trade notes' issuing-vendor wcids by guid (VendorsClassId). */
+  noteIssuers?: Map<number, number>;
   log?(line: string): void;
 }
 
 export function applyPublicPropertyDataIdUpdate(data: PropertyUpdateData, deps: PublicPropertyDataIdDeps): void {
   const val = data.value as number;
+  if (data.key === PropertyDataId.VendorsClassId && deps.noteIssuers) {
+    if (Number.isFinite(val) && val > 0 && !data.removed) deps.noteIssuers.set(data.guid >>> 0, val >>> 0);
+    else deps.noteIssuers.delete(data.guid >>> 0);
+  }
   const clearsIconLayer = val === 0 && (data.key === PropertyDataId.IconOverlay || data.key === PropertyDataId.IconUnderlay);
   if (Number.isFinite(val) && (val > 0 || clearsIconLayer)) {
     const obj = deps.getObject(data.guid);

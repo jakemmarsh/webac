@@ -112,7 +112,7 @@ const LOCK_UI_PLAYER_OPTION = 0x33;
 function doHelp(run: Run, argv: string[]): boolean {
   if (argv.length < 1) {
     run.reply(HELP_NOTE, CHAT_TYPE_DEFAULT);
-    run.reply(withoutWithheldLines(HELP_AVAILABLE_LIST, run.withheld), CHAT_TYPE_DEFAULT);
+    run.reply(HELP_AVAILABLE_LIST, CHAT_TYPE_DEFAULT);
     return true;
   }
   const word = argv[0].replace(/^[/@]+/, '');
@@ -125,24 +125,11 @@ function doHelp(run: Run, argv: string[]): boolean {
       return true;
     }
     run.reply(HELP_NOTE, CHAT_TYPE_DEFAULT);
-    run.reply(withoutWithheldLines(text, run.withheld), CHAT_TYPE_DEFAULT);
+    run.reply(text, CHAT_TYPE_DEFAULT);
     return true;
   }
   run.reply(HELP_UNKNOWN_COMMAND, CHAT_TYPE_COMMAND);
   return true;
-}
-
-/**
- * The help text without the lines that offer a command this world's era
- * leaves out (era/EraFeatures FEATURE_COMMANDS): a line starting "@word" or
- * "@help word" whose word is withheld. Every other line, retail's run-ons and
- * repeats included, is kept as is; with nothing withheld the text is unchanged.
- */
-export function withoutWithheldLines(text: string, withheld: (name: string) => boolean): string {
-  return text.split('\n').filter((line) => {
-    const m = /^@(?:help\s+)?([^\s,]+)/i.exec(line);
-    return !m || !withheld(m[1]);
-  }).join('\n');
 }
 
 // ── DoMessageTypes ──

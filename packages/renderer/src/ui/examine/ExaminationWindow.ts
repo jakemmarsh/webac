@@ -108,11 +108,11 @@ export function examinationWindowPlacement(geo: ExaminationGeometry, screenW: nu
  *  - a scribe but no inscription → both left clear.
  * (A PSR viewer also sees " <account>" — not a player path.)
  */
-export function examineInscription(objectDescFlags: number, propertiesString?: Map<number, string>): InscriptionView {
+export function examineInscription(objectDescFlags: number, propertiesString?: Map<number, string>, placeholder: string = INSCRIBE_HERE): InscriptionView {
   const INSCRIBABLE = 0x2;
   if ((objectDescFlags & INSCRIBABLE) === 0) return { visible: false, text: '', signature: '', scribe: '', inscription: '' };
   const scribe = propertiesString?.get(8) ?? '';
-  if (!scribe) return { visible: true, text: INSCRIBE_HERE, signature: '', scribe: '', inscription: '' };
+  if (!scribe) return { visible: true, text: placeholder, signature: '', scribe: '', inscription: '', placeholder: true };
   const text = propertiesString?.get(7) ?? '';
   if (!text) return { visible: true, text: '', signature: '', scribe, inscription: '' };
   return { visible: true, text, signature: `--${scribe}`, scribe, inscription: text };
@@ -127,9 +127,16 @@ export interface InscriptionView {
   scribe: string;
   /** PropertyString 7 (Inscription) — m_old_inscription. */
   inscription: string;
+  /** `text` is the era's empty-block placeholder (EraClientRules.inscribePlaceholder). */
+  placeholder?: boolean;
 }
 
-/** acclient.exe 0x3af564. */
+/**
+ * acclient.exe 0x3af564 — end of retail's placeholder; the era's is
+ * EraClientRules.inscribePlaceholder (VTE-5: the 1999 client.exe's
+ * ItemExaminePanel_SetInscription @ 0x0050b2e0 draws "(inscribe here)",
+ * centred; its signature separator 0x6032dc is the same "--").
+ */
 export const INSCRIBE_HERE = '<Inscribe here>';
 
 /** The 0x1a notices of ItemExamineUI::HandleInscriptionMousePresses @ 004ac230 (acclient.exe 0x3af3f8 / 0x3af3b8 / 0x3af360). */
@@ -160,11 +167,11 @@ export function inscriptionPressRefusal(o: { inscribable: boolean; owned: boolea
  * text redraws "<Inscribe here>" with no signature and no scribe, any other
  * text is signed "--<player>" and the player becomes the scribe.
  */
-export function inscriptionCommit(text: string, view: InscriptionView, playerName: string): { send: string | null; view: InscriptionView } {
+export function inscriptionCommit(text: string, view: InscriptionView, playerName: string, placeholder: string = INSCRIBE_HERE): { send: string | null; view: InscriptionView } {
   const changed = !(text === '' && view.scribe === '');
   const send = changed && text !== view.inscription ? text : null;
   const next: InscriptionView = text === ''
-    ? { visible: true, text: INSCRIBE_HERE, signature: '', scribe: '', inscription: '' }
+    ? { visible: true, text: placeholder, signature: '', scribe: '', inscription: '', placeholder: true }
     : { visible: true, text, signature: `--${playerName}`, scribe: playerName, inscription: text };
   return { send, view: next };
 }

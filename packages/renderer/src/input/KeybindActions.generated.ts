@@ -620,3 +620,6 @@ export const KEYBIND_ACTION_ROWS: ReadonlyArray<{ map: number; id: number }> = [
   { map: 0x10000006, id: 0x100000ed },
   { map: 0x10000006, id: 0x100000ee },
 ];
+
+/** Actions retail repeats while the key is held (ActionMap toggle type 4); the rest fire once per press. */
+export const KEY_REPEAT_ACTIONS: ReadonlySet<number> = new Set([0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1e, 0x1f, 0x20, 0x21, 0x26, 0x28]);
