@@ -18,7 +18,9 @@
  * ≤ 8 characters), --password (default the account); --character <name for a new character>; --query
  * <extra page parameters, e.g. datSet=…>; --out <dir>; --only step,step (enter-world always runs);
  * --data-root <checkout with reference/ and world-db-raw/>; --profile <fixed Chrome profile dir, kept>;
- * --headed; --swiftshader (default: headless on the real GPU).
+ * --headed; --swiftshader (default: headless on the real GPU); --admin (off by default; needs an admin test account:
+ * after entering the world it types @spellcomps 74 5 and @spawnwcidinv 2472 into the chat box and trains the schools
+ * the magic steps need with skill credits).
  *
  * Output: verification/ac1999-playthrough/<timestamp>-<era>/report.md (each step ok / skipped (why) /
  * FAIL (details)), results.json, run.log and the screenshots. Exit 1 on any FAIL or an aborted run.
@@ -32,7 +34,7 @@ import { chromium, type Page } from 'playwright';
 import { DEFAULT_VIEWPORT, GPU_ARGS, REMOTE_CHROMIUM, REPO, SWIFTSHADER_ARGS, createCharacterIfNeeded, waitForWorld } from './lib/game-session.ts';
 import { createRunProfile } from './lib/temp-profile.ts';
 import {
-  type ClientProbe, type Place, type PlaythroughDriver, type Signals, type VendorStockRow, loadGiveTables, loadVendorSpots, emptySignals, exitCode, freshState, loadCreatureFacts,
+  type ClientProbe, type MagicFacts, type Place, type PlaythroughDriver, type Signals, type VendorStockRow, loadGiveTables, loadVendorSpots, emptySignals, exitCode, freshState, loadCreatureFacts,
   parsePlaythroughArgs, playthroughSteps, playthroughUrl, renderReport, runPlaythrough, selectSteps,
 } from './lib/playthrough.ts';
 
@@ -78,6 +80,12 @@ const PLACE_OF_JS = `(gs) => {
   return { me: kind(me ? me.cell : null), objects };
 }`;
 
+/** The Skills panel's rows (GameUI.agentSkills) and the spell table's base mana for some spells (SpellTable baseMana). */
+const MAGIC_FACTS_JS = `(ids) => { const ac = window.__ac; const ui = ac && ac.gameUI; const t = ac && ac.spellTable;
+  const skills = ui && ui.agentSkills ? ui.agentSkills().map((k) => ({ name: k.name, training: k.training, buffed: k.buffed })) : [];
+  const mana = {}; for (const id of ids) { const s = t && t.spells && t.spells.get(id); if (s && typeof s.baseMana === 'number') mana[id] = s.baseMana; }
+  return { skills, mana }; }`;
+
 const UI_STATE_JS = `(() => { const ui = window.__ac && window.__ac.gameUI; if (!ui || !ui.getUIState) return null;
   return Object.assign({}, ui.getUIState(), { charPanelTab: ui.charPanelTab, socialTab: ui.socialTab }); })()`;
 
@@ -102,7 +110,7 @@ async function main(): Promise<number> {
   const runLog = join(out, 'run.log');
   const log = (m: string): void => { console.log(m); appendFileSync(runLog, `${new Date().toISOString()} ${m}\n`); };
   const url = playthroughUrl(args);
-  log(`first-hour play-through: ${args.era.label}; account ${args.account}; report in ${out}`);
+  log(`first-hour play-through: ${args.era.label}; account ${args.account}${args.admin ? ' (--admin prep)' : ''}; report in ${out}`);
 
   const roots = [args.dataRoot, REPO, mainCheckout()].filter((r): r is string => !!r && existsSync(r));
   const loaded = loadCreatureFacts(args.era, roots);
@@ -170,6 +178,7 @@ async function main(): Promise<number> {
     probe: () => page.evaluate(PROBE_JS) as Promise<ClientProbe>,
     uiState: () => page.evaluate(UI_STATE_JS) as Promise<Record<string, unknown> | null>,
     vendorStock: () => page.evaluate(VENDOR_STOCK_JS) as Promise<VendorStockRow[] | null>,
+    magicFacts: (ids) => page.evaluate(`(${MAGIC_FACTS_JS})(${JSON.stringify(ids)})`) as Promise<MagicFacts>,
     placeOf: (guids) => page.evaluate(`(${PLACE_OF_JS})(${JSON.stringify(guids)})`) as Promise<{ me: Place; objects: Record<number, Place> }>,
     npcCreatures: (guids) => page.evaluate(`(() => { const som = window.__ac && window.__ac.serverObjectManager; if (!som) return [];
       return ${JSON.stringify(guids)}.filter((g) => { const o = som.getObject(g);
@@ -196,7 +205,7 @@ async function main(): Promise<number> {
     now: () => Date.now(),
   };
 
-  const steps = selectSteps(playthroughSteps(args.era), args.only);
+  const steps = selectSteps(playthroughSteps(args.era, { admin: args.admin }), args.only);
   const state = freshState();
   let res;
   try {

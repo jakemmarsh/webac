@@ -24,6 +24,13 @@ export interface HostAttackDeps {
   changeCombatMode(mode: number): void;
   /** The attack key's press + release on `guid` (AttackRequestController). */
   swing(guid: number, power: number, height: AttackHeightName): void;
+  /**
+   * Move the combat bar's power slider to `power` before the swing, as a player sets the bar to attack at a power.
+   * A swing at a power off the slider made retail's AttackDone handler (EoL @ 0056c500, 1999 @ 0x004f8bb0) re-send at
+   * the slider's power after every swing; the AC1999 server refuses that as too soon (BUG.ac1999-melee-never-swings).
+   * Unset: the slider stays.
+   */
+  setSliderPower?(power: number): void;
   /** The attack key's request is waiting on the server or a swing is in progress. */
   requestPending(): boolean;
   now(): number;
@@ -56,6 +63,7 @@ export function createHostAttack(d: HostAttackDeps): {
   let enteringUntil = 0;
   return {
     attack(guid, power, height) {
+      d.setSliderPower?.(power);
       if (d.inAttackStance()) { d.swing(guid, power, height); return; }
       const plan = d.autoEnterPlan();
       if (!plan.sendAttack) return;

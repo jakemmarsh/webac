@@ -297,14 +297,19 @@ export class AttackRequestController {
    * Missile repeat at the AttackQueue power), so the client sends nothing
    * unless the slider moved: then it re-sends once at the slider's power,
    * which ACE only enqueues for the next swing. Any other code ends the
-   * repeat.
+   * repeat with AbortAutomaticAttack, CancelAttack included.
    */
   handleAttackDone(errorCode: number): void {
     // The busy count is released only for an attack it counted.
     if (this.attackInProgress) this.deps.decrementBusyCount?.();
     this.attackInProgress = false;
     this.attackServerResponsePending = false;
-    if (errorCode !== 0 && this.repeatAttacking) this.stopRepeating();
+    // BUG.ac1999-melee-never-swings — a refusal while repeating is AbortAutomaticAttack, which
+    // sends CancelAttack (EoL @ 0056c500 → 0056ae90 → CM_Combat::Event_CancelAttack; 1999
+    // @ 0x004f8bb0 → 0x004f94b0 → 0x004f9530). The AC1999 server refuses a request without
+    // touching the repeat it is running (Monster.cpp TryMeleeAttack "too soon"), so without the
+    // cancel that repeat went on unseen while this client had stopped.
+    if (errorCode !== 0 && this.repeatAttacking) this.abortAutomaticAttack();
     if (!this.attackRequestInProgress && !this.advancedCombatMode && this.deps.autoRepeat() && this.repeatAttacking) {
       const slider = this.deps.sliderPower();
       if (Math.abs(this.requestedAttackPower - slider) > POWER_EPSILON) {

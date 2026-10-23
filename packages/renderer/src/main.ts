@@ -17095,6 +17095,8 @@ async function main() {
           attackRequest.startAttackRequest();
           attackRequest.endAttackRequest(height, power);
         },
+        // The combat bar's slider to the swing's power, as a player sets it (BUG.ac1999-melee-never-swings).
+        setSliderPower: (p) => { const cur = gameUI.getCombatPowerLevel(); if (Math.abs(cur - p) > 0.001) gameUI.adjustCombatPowerLevel(p - cur); },
         requestPending: () => !!attackRequest && (attackRequest.attackServerResponsePending || attackRequest.attackInProgress || attackRequest.repeatAttackInProgress()),
         now: () => performance.now(),
         schedule: (fn, ms) => { setTimeout(fn, ms); },

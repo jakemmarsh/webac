@@ -5,9 +5,9 @@ import {
   freshState, killStep, logoutAndBackStep, mergeCreatureFacts, nearestTown, ok, panelStep, parseCreatureDanger, parsePlaythroughArgs,
   parseVendorListing, pickPrey, playthroughSteps, playthroughUrl, preyVerdict, renderReport, runPlaythrough,
   selectSteps, skip, statusLabel, vendorBuyStep,
-  type VendorStockRow, type Place, acceptedGift, castAtCreatureStep, parseGiveTable, refusedSaleEcho, cellTarget, nearestVendorSpot, sameFloorOnly, vendorSpotsIn, vendorWeenies, giveCandidates, giveStep, planSupplies, preyReachable, saleEcho, vendorSellStep, vendorSuppliesStep,
+  type VendorStockRow, type Place, type MagicFacts, type SkillRow, adminPrepStep, armForKill, castAtSelfStep, castVerdict, magicModeStep, pickCastable, schoolTrained, schoolsToTrain, selfEnchantment, atCreatureSpell, ADMIN_PREP_COMMANDS, acceptedGift, castAtCreatureStep, parseGiveTable, refusedSaleEcho, cellTarget, nearestVendorSpot, sameFloorOnly, vendorSpotsIn, vendorWeenies, giveCandidates, giveStep, planSupplies, preyReachable, saleEcho, vendorSellStep, vendorSuppliesStep,
 } from '../tools/lib/playthrough.ts';
-import type { AgentItem } from '../packages/renderer/src/agent/types.ts';
+import type { AgentItem, AgentSpell } from '../packages/renderer/src/agent/types.ts';
 import type { AgentObject } from '../packages/renderer/src/agent/types.ts';
 
 // TOOL.ac1999-playthrough: the step runner, the health checks after each step and the report, driven by a fake
@@ -45,6 +45,9 @@ class FakeDriver implements PlaythroughDriver {
   vendorStock() { return Promise.resolve(this.stock); }
   places: { me: Place; objects: Record<number, Place> } = { me: 'outdoors', objects: {} };
   placeOf() { return Promise.resolve(this.places); }
+  /** The magic steps' facts: no skills listed (training unknown) unless a test says. */
+  magic: MagicFacts = { skills: [], mana: {} };
+  magicFacts() { return Promise.resolve(this.magic); }
   indicator = { found: false, lit: false };
   indicatorClicks = 0;
   clickIndicator() { this.indicatorClicks++; this.handlers.onIndicator?.(); return Promise.resolve(this.indicator); }
@@ -285,6 +288,7 @@ VALUES (12,    28,    2.4)  /* Frost Bolt I */;
     const rabbit = mon('Brown Rabbit', 20, { guid: 0x80000042, level: 1 });
     const d = new FakeDriver({
       observe: (o: { filter: string }) => ({ me: null, nearby: o.filter === 'monster' ? [mon('Red Phyntos Wasp', 5), rabbit] : o.filter === 'corpse' ? [{ ...rabbit, guid: 0x80000043, name: 'Corpse of Brown Rabbit', kind: 'corpse' }] : [], remembered: [], dialogs: [] }),
+      inventory: () => [],
       attack: (g: number) => { expect(g).toBe(0x80000042); return { ok: true, message: 'attacking Brown Rabbit' }; },
       waitFor: () => (opts.hp === undefined && !opts.dies ? [{ type: 'target-died', text: 'You killed the Brown Rabbit!', guid: 0x80000042 }] : []),
       self: () => ({ dead: !!opts.dies, health: { cur: opts.hp ?? 50, max: 50 } }),
@@ -570,6 +574,7 @@ describe('playthrough: second live-run calibration (2026-10-23 run 2 and the EoR
     const rabbit = mon('Brown Rabbit', 84, { guid: 0x80000042, level: 1, dz: 9 });
     const d = new FakeDriver({
       observe: (o: { filter: string }) => ({ me: null, nearby: o.filter === 'monster' ? [rabbit] : [], remembered: [], dialogs: [] }),
+      inventory: () => [],
       attack: () => ({ ok: true, message: 'attacking' }),
       waitFor: () => [{ type: 'target-died', text: 'You killed the Brown Rabbit!', guid: 0x80000042 }],
       self: () => ({ dead: false, health: { cur: 50, max: 50 } }),
@@ -761,6 +766,7 @@ describe('playthrough: third calibration (2026-10-23 three-era run)', () => {
     let t = 0;
     const d = new FakeDriver({
       observe: (o: { filter: string }) => ({ me: null, nearby: o.filter === 'monster' ? [rabbit] : [], remembered: [], dialogs: [] }),
+      inventory: () => [],
       attack: () => ({ ok: true, message: 'attacking' }),
       waitFor: () => { t++; return t > 3 ? [{ type: 'target-lost', text: 'Brown Rabbit #60001dc9: no swings either way for 20 s (blocked, unreachable, fleeing, or not there on the server\'s side)' }] : []; },
       self: () => ({ dead: false, health: { cur: 50, max: 50 } }),
@@ -768,5 +774,251 @@ describe('playthrough: third calibration (2026-10-23 three-era run)', () => {
     const r = await killStep.run({ ...ctxOf(d), facts: mergeCreatureFacts([{ name: 'Brown Rabbit', level: 1, maxHealth: 5, casts: false, maxHit: 7, armed: false }]) });
     expect(r.status).toBe('fail');
     expect(r.detail).toMatch(/^ATTACK NEVER SWUNG at Brown Rabbit/);
+  });
+});
+
+describe('playthrough: fourth calibration (2026-10-23 1999 run with agenta99: Wand, Item Enchantment 79, War Magic untrained)', () => {
+  const sk = (trained: string[]): SkillRow[] => ['War Magic', 'Life Magic', 'Creature Enchantment', 'Item Enchantment', 'Void Magic']
+    .map((name) => ({ name, training: trained.includes(name) ? 'trained' : 'untrained' }));
+  const AGENTA99 = sk(['Item Enchantment']);
+  const portalRecall: AgentSpell = { id: 157, name: 'Portal Recall', school: 'Item Enchantment', self: true, power: 50 };
+  const acidBane: AgentSpell = { id: 1, name: 'Acid Bane I', school: 'Item Enchantment', buff: true, targetType: 0x6, power: 1 };
+  const strengthSelf: AgentSpell = { id: 2, name: 'Strength Self I', school: 'Creature Enchantment', buff: true, self: true, targetType: 0x10, power: 1 };
+  const armorSelf: AgentSpell = { id: 3, name: 'Armor Self I', school: 'Life Magic', buff: true, self: true, targetType: 0x10, power: 1 };
+  const flameBolt: AgentSpell = { id: 27, name: 'Flame Bolt I', school: 'War Magic', targetType: 0x10, range: 33.5, power: 1 };
+  const harmOther: AgentSpell = { id: 4, name: 'Harm Other I', school: 'Life Magic', targetType: 0x10, range: 30, power: 1 };
+  const rabbit = mon('Brown Rabbit', 20, { guid: 0x60001fb5, level: 1 });
+  const rabbitFacts = mergeCreatureFacts([{ name: 'Brown Rabbit', level: 1, maxHealth: 5, casts: false, maxHit: 7, armed: false }]);
+
+  /** A 1999 character in magic mode: its spells, skills, mana, and the server's answer to each cast (lines pushed as chat). */
+  const magicDriver = (o: { spells: AgentSpell[]; skills: SkillRow[]; manaCost?: Record<number, number>; mana?: number; answer?: (n: number) => { ok: boolean; message: string; lines?: string[]; refusal?: string } }) => {
+    const casts: unknown[][] = [];
+    const modes: string[] = [];
+    const d = new FakeDriver({
+      spells: () => o.spells,
+      self: () => ({ dead: false, health: { cur: 19, max: 19 }, mana: { cur: o.mana ?? 13, max: 29 }, combatMode: 'magic' }),
+      observe: (q: { filter: string }) => ({ me: null, nearby: q.filter === 'monster' ? [rabbit] : [], remembered: [], dialogs: [] }),
+      walkTo: () => ({ ok: true, message: 'arrived' }),
+      cast: (...a: unknown[]) => {
+        casts.push(a);
+        const r = o.answer ? o.answer(casts.length) : { ok: true, message: 'You cast it.' };
+        for (const l of r.lines ?? []) d.sig.chat.push(l);
+        if (r.refusal) d.sig.refusals.push({ source: 'server', code: 'we:0x0401', context: 'weenie_error', text: r.refusal, sink: 'spew' });
+        return { ok: r.ok, message: r.message };
+      },
+      combatMode: (m: string) => { modes.push(m); return { ok: true, message: m }; },
+      inventory: () => [],
+      attack: () => ({ ok: true, message: 'casting' }),
+      waitFor: () => [{ type: 'target-died', text: 'You killed the Brown Rabbit!', guid: rabbit.guid }],
+    });
+    d.magic = { skills: o.skills, mana: o.manaCost ?? {} };
+    const ctx = { ...ctxOf(d), facts: rabbitFacts };
+    ctx.state.caster = { guid: 9, name: 'Wand' };
+    return { d, ctx, casts, modes };
+  };
+
+  it('a school counts as trained only when the Skills panel says so (a 1999 name\'s trailing NUL ignored); no skills listed = unknown', () => {
+    expect(schoolTrained('Item Enchantment', AGENTA99)).toBe(true);
+    expect(schoolTrained('War Magic', AGENTA99)).toBe(false);
+    expect(schoolTrained('Creature Enchantment', [{ name: 'Creature Enchantment\0', training: 'specialized' }])).toBe(true);
+    expect(schoolTrained('War Magic', [])).toBeNull();
+  });
+
+  it('Portal Recall is no enchantment and an Item Enchantment goes on an item: neither is a self enchantment', () => {
+    expect(selfEnchantment(portalRecall)).toBe(false);
+    expect(selfEnchantment(acidBane)).toBe(false);
+    expect(selfEnchantment(strengthSelf)).toBe(true);
+    expect(atCreatureSpell(flameBolt)).toBe(true);
+    expect(atCreatureSpell(strengthSelf)).toBe(false);
+  });
+
+  it('picks a trained school with the mana there, and says why each other spell was passed over', () => {
+    const facts: MagicFacts = { skills: sk(['Life Magic']), mana: { 2: 10, 3: 20 } };
+    const p = pickCastable([strengthSelf, armorSelf], facts, 13, selfEnchantment, [/^creature/i, /^life/i]);
+    expect(p.spell).toBeNull();
+    expect(p.passed).toEqual(['Strength Self I (Creature Enchantment untrained)', 'Armor Self I (up to 20 mana, you have 13)']);
+    const q = pickCastable([strengthSelf, armorSelf], { ...facts, mana: { 3: 10 } }, 13, selfEnchantment, [/^creature/i, /^life/i]);
+    expect(q.spell?.name).toBe('Armor Self I');
+    expect(q.why).toBe('Life Magic trained, up to 10 mana of 13');
+  });
+
+  it('the cast verdict: run 4\'s "not trained" and "not enough Mana" are the character\'s, a fizzle is a miss, the agent\'s no is a refusal', () => {
+    expect(castVerdict({ ok: true, message: 'casting Flame Bolt I at Brown Rabbit #60001fb5' }, ['You are not trained in that skill!']).kind).toBe('character');
+    expect(castVerdict({ ok: true, message: 'casting Portal Recall on yourself\nYou don\'t have enough Mana to cast this spell.' }, []).kind).toBe('character');
+    expect(castVerdict({ ok: true, message: 'casting' }, ['Your spell fizzled.']).kind).toBe('missed');
+    expect(castVerdict({ ok: false, message: 'Strength Self I not cast: you are in portal space' }, []).kind).toBe('refused');
+    expect(castVerdict({ ok: true, message: 'You cast Strength Self I on yourself' }, []).kind).toBe('landed');
+  });
+
+  it('cast-self never casts Portal Recall: with only Item Enchantment trained it skips, saying why', async () => {
+    const { ctx, casts } = magicDriver({ spells: [portalRecall, acidBane, strengthSelf], skills: AGENTA99 });
+    const r = await castAtSelfStep.run(ctx);
+    expect(casts).toEqual([]);
+    expect(r.status).toBe('skipped');
+    expect(r.detail).toBe('no enchantment that goes on you the character can cast: Strength Self I (Creature Enchantment untrained)');
+    const only = magicDriver({ spells: [portalRecall, acidBane], skills: AGENTA99 });
+    const u = await castAtSelfStep.run(only.ctx);
+    expect(u.status).toBe('skipped');
+    expect(u.detail).toBe('no enchantment that goes on you known (known enchantments that go on an item, not on you: Acid Bane I)');
+  });
+
+  it('cast-self casts a trained-school enchantment and passes when it lands; Portal Recall is passed over', async () => {
+    const { ctx, casts } = magicDriver({ spells: [portalRecall, strengthSelf], skills: sk(['Creature Enchantment']), manaCost: { 2: 10 } });
+    const r = await castAtSelfStep.run(ctx);
+    expect(casts).toEqual([[2, 'self', null]]);
+    expect(r.status).toBe('ok');
+    expect(r.detail).toMatch(/^Strength Self I \(Creature Enchantment trained, up to 10 mana of 13\)/);
+  });
+
+  it('a server "not enough Mana" FAILS cast-self when the client had the mana, and skips when the cost was unknown', async () => {
+    const answer = () => ({ ok: true, message: 'casting Strength Self I on yourself', refusal: 'You don\'t have enough Mana to cast this spell.' });
+    const known = magicDriver({ spells: [strengthSelf], skills: sk(['Creature Enchantment']), manaCost: { 2: 10 }, answer });
+    const res = await runPlaythrough([castAtSelfStep], known.ctx);
+    expect(res.records[0].status).toBe('fail');
+    expect(res.records[0].detail).toMatch(/the server refused it \("You don't have enough Mana to cast this spell\."\) though the client has the mana/);
+    const unknown = magicDriver({ spells: [strengthSelf], skills: sk(['Creature Enchantment']), answer });
+    const u = await runPlaythrough([castAtSelfStep], unknown.ctx);
+    expect(u.records[0].status).toBe('skipped');
+    expect(u.records[0].detail).toMatch(/the character can't \(too little mana\)/);
+    expect(u.records[0].problems).toEqual([]);
+  });
+
+  it('cast-self: too little mana for every enchantment is a skip before any cast', async () => {
+    const { ctx, casts } = magicDriver({ spells: [strengthSelf], skills: sk(['Creature Enchantment']), manaCost: { 2: 15 }, mana: 13 });
+    const r = await castAtSelfStep.run(ctx);
+    expect(casts).toEqual([]);
+    expect(r.detail).toMatch(/Strength Self I \(up to 15 mana, you have 13\)/);
+  });
+
+  it('cast-self tries again after a fizzle; fizzling every time is a skip; another server refusal FAILS', async () => {
+    const again = magicDriver({ spells: [strengthSelf], skills: sk(['Creature Enchantment']), answer: (n) => (n < 2 ? { ok: true, message: 'casting', lines: ['Your spell fizzled.'] } : { ok: true, message: 'You cast Strength Self I on yourself' }) });
+    const a = await runPlaythrough([castAtSelfStep], again.ctx);
+    expect(again.casts).toHaveLength(2);
+    expect(a.records[0].status).toBe('ok');
+    const fizz = magicDriver({ spells: [strengthSelf], skills: sk(['Creature Enchantment']), answer: () => ({ ok: true, message: 'casting', lines: ['Your spell fizzled.'] }) });
+    const f = await runPlaythrough([castAtSelfStep], fizz.ctx);
+    expect(fizz.casts).toHaveLength(3);
+    expect(f.records[0].status).toBe('skipped');
+    const other = magicDriver({ spells: [strengthSelf], skills: sk(['Creature Enchantment']), answer: () => ({ ok: true, message: 'casting', refusal: 'You can\'t cast that here.' }) });
+    const o = await runPlaythrough([castAtSelfStep], other.ctx);
+    expect(o.records[0].status).toBe('fail');
+    expect(o.records[0].problems.join('\n')).toMatch(/You can't cast that here/);
+  });
+
+  it('cast-creature never picks Flame Bolt I with War Magic untrained: a trained school\'s spell, or a skip with the reason', async () => {
+    const none = magicDriver({ spells: [flameBolt], skills: AGENTA99 });
+    const r = await castAtCreatureStep.run(none.ctx);
+    expect(none.casts).toEqual([]);
+    expect(r.status).toBe('skipped');
+    expect(r.detail).toBe('no spell cast at a creature the character can cast: Flame Bolt I (War Magic untrained)');
+    const life = magicDriver({ spells: [flameBolt, harmOther], skills: sk(['Life Magic']) });
+    expect((await castAtCreatureStep.run(life.ctx)).status).toBe('ok');
+    expect(life.casts[0][0]).toBe(4);
+  });
+
+  it('cast-creature: the server\'s "not trained" with the school trained on the client is a FAIL (their states disagree)', async () => {
+    const { ctx } = magicDriver({ spells: [flameBolt], skills: sk(['War Magic']), answer: () => ({ ok: true, message: 'casting Flame Bolt I at Brown Rabbit', lines: ['You are not trained in that skill!'] }) });
+    const res = await runPlaythrough([castAtCreatureStep], ctx);
+    expect(res.records[0].status).toBe('fail');
+    expect(res.records[0].detail).toMatch(/though the client has War Magic trained/);
+  });
+
+  const wand = { guid: 9, name: 'Wand', where: 'equipped', itemType: 0x8000 } as AgentItem;
+  const killDriver = (o: { skills: SkillRow[]; inv?: AgentItem[]; unequip?: { ok: boolean; message: string } }) => {
+    const calls: string[] = [];
+    const d = new FakeDriver({
+      inventory: () => o.inv ?? [wand],
+      spells: () => [flameBolt],
+      self: () => ({ dead: false, health: { cur: 19, max: 19 }, mana: { cur: 13, max: 29 } }),
+      unequip: (g: number) => { calls.push(`unequip ${g}`); return o.unequip ?? { ok: true, message: 'took off Wand' }; },
+      equip: (g: number) => { calls.push(`equip ${g}`); return { ok: true, message: 'wielded' }; },
+      observe: (q: { filter: string }) => ({ me: null, nearby: q.filter === 'monster' ? [rabbit] : [], remembered: [], dialogs: [] }),
+      attack: () => { calls.push('attack'); return { ok: true, message: 'attacking' }; },
+      waitFor: () => [{ type: 'target-died', text: 'You killed the Brown Rabbit!', guid: rabbit.guid }],
+    });
+    d.magic = { skills: o.skills, mana: {} };
+    return { d, ctx: { ...ctxOf(d), facts: rabbitFacts }, calls };
+  };
+
+  it('kill with a caster wielded and no attack spell castable: the caster comes off and the fight is bare-handed (or a held sword)', async () => {
+    const { ctx, calls } = killDriver({ skills: AGENTA99 });
+    const r = await killStep.run(ctx);
+    expect(calls).toEqual(['unequip 9', 'attack']);
+    expect(r.status).toBe('ok');
+    expect(r.detail).toMatch(/took Wand off \(no attack spell the character can cast: Flame Bolt I \(War Magic untrained\)\); no melee weapon held, so bare hands/);
+    expect(ctx.state.unwielded).toEqual({ guid: 9, name: 'Wand' });
+    const sword = killDriver({ skills: AGENTA99, inv: [wand, { guid: 12, name: 'Short Sword', where: 'pack', itemType: 0x1 } as AgentItem] });
+    await killStep.run(sword.ctx);
+    expect(sword.calls).toEqual(['unequip 9', 'equip 12', 'attack']);
+  });
+
+  it('kill keeps the caster when an attack spell of a trained school is castable; a failed unwield is a skip with the reason', async () => {
+    const war = killDriver({ skills: sk(['War Magic']) });
+    expect(await armForKill(war.ctx)).toEqual({ note: 'with Wand wielded the attack casts Flame Bolt I (War Magic trained)' });
+    expect(war.calls).toEqual([]);
+    const stuck = killDriver({ skills: AGENTA99, unequip: { ok: false, message: 'not taken off: Wand' } });
+    const r = await killStep.run(stuck.ctx);
+    expect(r.status).toBe('skipped');
+    expect(r.detail).toMatch(/Wand is wielded, so the attack is a spell, and no attack spell .*; taking it off failed: not taken off: Wand/);
+    expect(stuck.calls).toEqual(['unequip 9']);
+  });
+
+  it('magic mode wields the caster the kill took off again', async () => {
+    const equips: number[] = [];
+    const d = new FakeDriver({
+      inventory: () => [{ ...wand, where: 'pack' }],
+      equip: (g: number) => { equips.push(g); return { ok: true, message: 'wielded' }; },
+      combatMode: () => ({ ok: true, message: 'magic' }),
+      self: () => ({ combatMode: 'magic' }),
+    });
+    const ctx = ctxOf(d);
+    ctx.state.unwielded = { guid: 9, name: 'Wand' };
+    const r = await magicModeStep.run(ctx);
+    expect(equips).toEqual([9]);
+    expect(r.detail).toBe('Wand wielded again (the kill step took it off); in magic mode');
+    expect(ctx.state.unwielded).toBeNull();
+  });
+
+  it('--admin: off by default; on, the prep runs right after entering the world, with --only too', () => {
+    expect(parsePlaythroughArgs([]).admin).toBe(false);
+    expect(parsePlaythroughArgs(['--admin']).admin).toBe(true);
+    expect(playthroughSteps(eraPlan('ac1999-retail')).some((s) => s.id === 'admin-prep')).toBe(false);
+    const ids = playthroughSteps(eraPlan('ac1999-retail'), { admin: true }).map((s) => s.id);
+    expect(ids.slice(0, 2)).toEqual(['enter-world', 'admin-prep']);
+    expect(selectSteps(playthroughSteps(eraPlan('ac1999-retail'), { admin: true }), ['cast-self']).map((s) => s.id)).toEqual(['enter-world', 'admin-prep', 'cast-self']);
+    expect(ADMIN_PREP_COMMANDS.map((c) => c.text)).toEqual(['@spellcomps 74 5', '@spawnwcidinv 2472']);
+  });
+
+  it('the schools to train: one per magic step with none of its spells\' schools trained', () => {
+    expect(schoolsToTrain([flameBolt, harmOther, acidBane, strengthSelf, armorSelf], AGENTA99)).toEqual(['War Magic', 'Creature Enchantment']);
+    expect(schoolsToTrain([flameBolt, harmOther, strengthSelf], sk(['Life Magic']))).toEqual(['Creature Enchantment']);
+    expect(schoolsToTrain([flameBolt], [])).toEqual([]);
+  });
+
+  it('--admin prep types the commands into the chat box, sees the components and the wand arrive, and trains the schools', async () => {
+    let inv: AgentItem[] = [];
+    const trained: string[] = [];
+    const d = new FakeDriver({
+      onChat: (t: string) => {
+        if (t.startsWith('@spellcomps')) d.sig.chat.push('Spawned 74 spell component types (5 each), 0 failed.');
+        if (t.startsWith('@spawnwcidinv')) inv = [{ guid: 0x90000abc, name: 'Wand', where: 'pack', itemType: 0x8000 } as AgentItem];
+      },
+      inventory: () => inv,
+      spells: () => [flameBolt, strengthSelf],
+      trainSkill: (s: string) => { trained.push(s); return { ok: true, message: `trained ${s}` }; },
+    });
+    d.magic = { skills: AGENTA99, mana: {} };
+    const r = await adminPrepStep.run(ctxOf(d));
+    expect(d.chats).toEqual(['@spellcomps 74 5', '@spawnwcidinv 2472']);
+    expect(trained).toEqual(['War Magic', 'Creature Enchantment']);
+    expect(r.status).toBe('ok');
+    expect(r.detail).toMatch(/@spellcomps 74 5: "Spawned 74 spell component types \(5 each\), 0 failed\."; @spawnwcidinv 2472: Wand #90000abc in the pack; trained with credits/);
+  });
+
+  it('--admin prep on a player account fails saying it needs an admin account ("Unknown command!")', async () => {
+    const d = new FakeDriver({ onChat: () => { d.sig.chat.push('Unknown command!'); }, inventory: () => [] });
+    const r = await adminPrepStep.run(ctxOf(d));
+    expect(r.status).toBe('fail');
+    expect(r.detail).toBe('@spellcomps 74 5 (spell components for the casts): "Unknown command!": --admin needs an admin test account');
   });
 });

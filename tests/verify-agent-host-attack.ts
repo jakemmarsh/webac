@@ -82,3 +82,39 @@ describe('agent host attack: stance auto-enter, then the attack key', () => {
     expect(modes).toEqual([]);
   });
 });
+
+/**
+ * BUG.ac1999-melee-never-swings — the agent's power goes on the combat bar's slider before the swing,
+ * as a player sets the bar: retail's AttackDone re-sends at the slider's power when the two differ
+ * (EoL @ 0056c500, 1999 @ 0x004f8bb0), and the AC1999 server refused that re-send as too soon.
+ */
+describe('agent host attack: the slider follows the agent\'s power', () => {
+  it('sets the slider before the swing, from a stance and from peace alike', () => {
+    vi.useFakeTimers();
+    try {
+      const host = new FakeHost();
+      const order: string[] = [];
+      let stance: 'peace' | 'melee' = 'melee';
+      const hostAttack = createHostAttack({
+        inAttackStance: () => stance === 'melee',
+        autoEnterPlan: () => ({ sendAttack: true, mode: 2 }),
+        changeCombatMode: () => { setTimeout(() => { stance = 'melee'; }, 400); },
+        swing: (_g, p) => { order.push(`swing ${p}`); },
+        setSliderPower: (p) => { order.push(`slider ${p}`); },
+        requestPending: () => false,
+        now: () => host.t,
+        schedule: (fn, ms) => { setTimeout(fn, ms); },
+      });
+      hostAttack.attack(RAT, 0.6, 'medium');
+      expect(order).toEqual(['slider 0.6', 'swing 0.6']);
+      stance = 'peace';
+      order.length = 0;
+      hostAttack.attack(RAT, 0.8, 'medium');
+      expect(order).toEqual(['slider 0.8']);
+      vi.advanceTimersByTime(AUTO_ENTER_DELAY_MS);
+      expect(order).toEqual(['slider 0.8', 'swing 0.8']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -93,6 +93,11 @@ export interface PlaythroughDriver {
   npcCreatures(guids: number[]): Promise<number[]>;
   /** The open vendor window's stock with each item's ItemType (GameUI vendorData), or null when none is open. */
   vendorStock(): Promise<VendorStockRow[] | null>;
+  /**
+   * What the magic steps pick by: the character's skills with their training (GameUI.agentSkills, the Skills panel's
+   * rows) and the spell table's base mana for these spells (SpellTable baseMana: the most a cast costs).
+   */
+  magicFacts(spellIds: number[]): Promise<MagicFacts>;
   /** Screenshot of the page; the file's path relative to the report dir, or null when none could be taken. */
   screenshot(name: string): Promise<string | null>;
   sleep(ms: number): Promise<void>;
@@ -100,6 +105,10 @@ export interface PlaythroughDriver {
 }
 
 export type Place = 'outdoors' | 'building' | 'dungeon' | 'unknown';
+
+export interface SkillRow { name: string; training: 'untrained' | 'trained' | 'specialized'; buffed?: number }
+/** The character's skills (empty when the client can't say) and each asked spell's base mana (absent when unknown). */
+export interface MagicFacts { skills: SkillRow[]; mana: Record<number, number> }
 
 export const emptySignals = (): Signals => ({ chat: [], spew: [], consoleErrors: [], refusals: [] });
 
@@ -225,6 +234,11 @@ export interface PlaythroughArgs {
   dataRoot: string | null;
   /** A local Chrome profile directory to reuse (kept: a warm DAT cache), instead of a temporary one. */
   profile: string | null;
+  /**
+   * --admin: an admin-prep step after entering the world (ADMIN_PREP_COMMANDS typed into the chat box, then the magic
+   * steps' schools trained with skill credits). Off by default: it needs an admin test account.
+   */
+  admin: boolean;
 }
 
 export function parsePlaythroughArgs(argv: string[], env: NodeJS.ProcessEnv = process.env, random: () => number = Math.random): PlaythroughArgs {
@@ -253,6 +267,7 @@ export function parsePlaythroughArgs(argv: string[], env: NodeJS.ProcessEnv = pr
     only: get('only')?.split(',').map((s) => s.trim()).filter(Boolean) ?? null,
     dataRoot: get('data-root') ?? null,
     profile: get('profile') ?? null,
+    admin: argv.includes('--admin'),
   };
 }
 
@@ -355,6 +370,8 @@ export interface RunState {
   bought: { guid: number; name: string } | null;
   kill: { name: string; guid: number; corpse: number | null } | null;
   caster: { guid: number; name: string } | null;
+  /** The caster the kill step took off to fight with a weapon or bare hands (the magic-mode step wields it again). */
+  unwielded: { guid: number; name: string } | null;
   /** Why the supplies step bought no item of a kind (kit, food, caster, scroll): said by the step that then skips. */
   supplies: Partial<Record<SupplyKind, string>>;
 }
@@ -378,6 +395,8 @@ export interface Step {
   timeoutMs?: number;
   /** Abort the run when this step doesn't pass (entering the world). */
   required?: boolean;
+  /** Runs with --only too (the --admin prep: the steps picked depend on it). */
+  withOnly?: boolean;
 }
 
 export const ok = (detail: string, extra: Partial<StepOutcome> = {}): StepOutcome => ({ status: 'ok', detail, ...extra });
@@ -1071,11 +1090,41 @@ async function findPrey(ctx: StepContext, exclude: number[] = []): Promise<{ pre
   return { prey: p.prey, note: p.prey ? p.why : `no safe creature within 150 m${p.rejected.length ? ` (passed over: ${p.rejected.slice(0, 8).join('; ')})` : ' (none in view)'}` };
 }
 
+/**
+ * What the kill fights with. A wielded caster makes the attack a spell (AgentApi.attack: the best War / Void attack
+ * spell): kept when the character can cast one (its school trained, the mana there), else taken off and a held melee
+ * weapon wielded, or bare hands (run 4: Wand wielded, War Magic untrained, "you know no attack spell you can cast").
+ * The magic-mode step wields the caster again.
+ */
+export async function armForKill(ctx: StepContext): Promise<{ note: string } | { skip: string }> {
+  const { driver } = ctx;
+  const inv = await driver.call<AgentItem[]>('inventory');
+  const caster = inv.find((i) => i.where === 'equipped' && ((i.itemType ?? 0) & 0x8000) !== 0);
+  if (!caster) return { note: '' };
+  const { spells, facts, mana } = await magicNow(ctx);
+  const pick = pickCastable(spells, facts, mana, attackSpell, AT_CREATURE_PREFER);
+  if (pick.spell) return { note: `with ${caster.name} wielded the attack casts ${pick.spell.name} (${pick.why})` };
+  const why = noPickReason('attack spell', pick, spells, attackSpell);
+  const off = await driver.call<AgentResult>('unequip', [caster.guid], 45_000);
+  if (!off.ok) return { skip: `${caster.name} is wielded, so the attack is a spell, and ${why}; taking it off failed: ${msg(off)}` };
+  ctx.state.unwielded = { guid: caster.guid, name: caster.name };
+  const melee = inv.find((i) => i.where !== 'equipped' && ((i.itemType ?? 0) & 0x1) !== 0);
+  if (melee) {
+    const on = await driver.call<AgentResult>('equip', [melee.guid, null], 45_000);
+    if (on.ok) return { note: `took ${caster.name} off (${why}) and wielded ${melee.name}` };
+    return { note: `took ${caster.name} off (${why}); wielding ${melee.name} failed (${msg(on)}), so bare hands` };
+  }
+  return { note: `took ${caster.name} off (${why}); no melee weapon held, so bare hands` };
+}
+
 export const killStep: Step = {
   id: 'kill', title: 'Kill a weak creature near the start', timeoutMs: 240_000,
   async run(ctx) {
-    const { prey, note } = await findPrey(ctx);
-    if (!prey) return skip(note);
+    const { prey, note: why } = await findPrey(ctx);
+    if (!prey) return skip(why);
+    const armed = await armForKill(ctx);
+    if ('skip' in armed) return skip(armed.skip);
+    const note = armed.note ? `${why}; ${armed.note}` : why;
     ctx.log(`   prey: ${prey.name} #${prey.guid.toString(16)} ${prey.dist.toFixed(0)} m (${note})`);
     const f = await fight(ctx, prey);
     if (f.outcome === 'dead') return fail(`died fighting ${prey.name}: ${f.detail}`);
@@ -1165,8 +1214,126 @@ export const healKitStep = useItemStep('use-healing-kit', 'Use a healing kit', '
 /** The server's refusal of a cast for want of components (ACE YouDontHaveAllTheComponents). */
 export const COMPONENTS_MISSING = /don't have all the components/i;
 
-/** A cast's expected misses: a fizzle, a resist, too little mana, out of reach. */
-const CAST_MISSES = /fizzle|resist|mana|out of range|too far|not enough|lack/i;
+/**
+ * The server's refusal of a cast for the character's own sake: the school untrained (the AC1999 server's "You are not
+ * trained in that skill!", 2026-10-23 run 4: Flame Bolt I with War Magic untrained) or too little mana (WeenieError
+ * 0x0401 "You don't have enough Mana to cast this spell.", the same run's Portal Recall at 13 mana).
+ */
+export const CAST_CHARACTER_CAUSE = /not trained in (that|this) skill|(don't|do not) have enough mana|not enough mana|skill is too low/i;
+/** A cast that went through and missed: the skill roll fizzled it, or the target resisted. Not a refusal. */
+export const CAST_MISSED = /fizzle|resist/i;
+
+/** The magic skill a school is cast with (ACE MagicSchool to Skill; AgentApi SCHOOL_SKILL). */
+export function schoolSkillName(school: string): string | null {
+  const s = school.trim().toLowerCase();
+  return s.startsWith('war') ? 'War Magic' : s.startsWith('life') ? 'Life Magic' : s.startsWith('creature') ? 'Creature Enchantment'
+    : s.startsWith('item') ? 'Item Enchantment' : s.startsWith('void') ? 'Void Magic' : null;
+}
+
+/** Whether the character has the school trained (or specialized); null when the client lists no skills to say. */
+export function schoolTrained(school: string, skills: SkillRow[]): boolean | null {
+  const name = schoolSkillName(school);
+  if (!name || !skills.length) return null;
+  const row = skills.find((k) => k.name.replace(/\0/g, '').trim().toLowerCase() === name.toLowerCase());
+  return row ? row.training !== 'untrained' : false;
+}
+
+/** A spell cast at a creature that harms it: no self spell, no buff, a creature target. */
+export const atCreatureSpell = (s: AgentSpell): boolean => !s.self && !s.buff && ((s.targetType ?? 0x10) & 0x10) !== 0;
+/**
+ * An enchantment that goes on you: beneficial with a duration (AgentSpell.buff), cast on a creature or self-only.
+ * Portal Recall is self-only and no enchantment (run 4 cast it, and nothing was then in effect); an Item Enchantment
+ * (Acid Bane I: armour) goes on an item.
+ */
+export const selfEnchantment = (s: AgentSpell): boolean => !!s.buff && (!!s.self || ((s.targetType ?? 0x10) & 0x10) !== 0);
+/** What a wielded caster's attack casts (AgentApi.attack with a wand: the best War or Void attack spell). */
+export const attackSpell = (s: AgentSpell): boolean => atCreatureSpell(s) && /^(war|void)/i.test(s.school.trim());
+
+export interface CastPick { spell: AgentSpell | null; manaCost: number | null; why: string; passed: string[] }
+
+/**
+ * Of the spells `want` admits, the one to cast: its school trained (by the character's skills), its base mana within the
+ * mana you have, the schools in `prefer` order and the lowest power first. Every spell passed over says why.
+ */
+export function pickCastable(spells: AgentSpell[], facts: MagicFacts, manaNow: number | undefined, want: (s: AgentSpell) => boolean, prefer: RegExp[] = []): CastPick {
+  const rank = (s: AgentSpell): number => { const i = prefer.findIndex((re) => re.test(s.school.trim())); return i < 0 ? prefer.length : i; };
+  const cands = spells.filter(want).sort((a, b) => rank(a) - rank(b) || (a.power ?? a.level ?? 0) - (b.power ?? b.level ?? 0));
+  const passed: string[] = [];
+  for (const s of cands) {
+    const trained = schoolTrained(s.school, facts.skills);
+    if (trained === false) { passed.push(`${s.name} (${schoolSkillName(s.school) ?? s.school} untrained)`); continue; }
+    const cost = facts.mana[s.id];
+    if (cost !== undefined && manaNow !== undefined && cost > manaNow) { passed.push(`${s.name} (up to ${cost} mana, you have ${manaNow})`); continue; }
+    const school = schoolSkillName(s.school) ?? s.school;
+    return { spell: s, manaCost: cost ?? null, passed,
+      why: `${school} ${trained === null ? 'training unknown (the client lists no skills)' : 'trained'}${cost !== undefined ? `, up to ${cost} mana${manaNow !== undefined ? ` of ${manaNow}` : ''}` : ''}` };
+  }
+  return { spell: null, manaCost: null, why: '', passed };
+}
+
+/** Why no spell was picked: the passed-over list (shortened), or that none of the kind is known. */
+export function noPickReason(kind: string, pick: CastPick, spells: AgentSpell[], want: (s: AgentSpell) => boolean): string {
+  if (!spells.some(want)) {
+    const onItems = spells.filter((s) => s.buff && !s.self && ((s.targetType ?? 0x10) & 0x10) === 0);
+    return `no ${kind} known${onItems.length ? ` (known enchantments that go on an item, not on you: ${onItems.slice(0, 3).map((s) => s.name).join(', ')}${onItems.length > 3 ? ` and ${onItems.length - 3} more` : ''})` : ''}`;
+  }
+  return `no ${kind} the character can cast: ${pick.passed.slice(0, 6).join('; ')}${pick.passed.length > 6 ? ` … (${pick.passed.length - 6} more)` : ''}`;
+}
+
+export type CastVerdictKind = 'landed' | 'missed' | 'components' | 'character' | 'refused';
+
+/**
+ * A cast's outcome from its reply and the lines it drew (chat, spew, refusal texts): a refusal for want of components
+ * or for the character's sake (CAST_CHARACTER_CAUSE), a miss (fizzle, resist), the agent's own refusal (not ok), or
+ * landed. The agent answers ok once the cast is sent, whatever the server then says (run 4's "casting Portal Recall
+ * on yourself / You don't have enough Mana"), so the lines decide. Any other server refusal among them is left to
+ * the step's health check, which fails it.
+ */
+export function castVerdict(r: AgentResult, lines: string[]): { kind: CastVerdictKind; line: string | null } {
+  const all = [...r.message.split('\n'), ...lines].map((l) => l.trim()).filter(Boolean);
+  const find = (re: RegExp): string | null => all.find((l) => re.test(l)) ?? null;
+  const comp = find(COMPONENTS_MISSING);
+  if (comp) return { kind: 'components', line: comp };
+  const char = find(CAST_CHARACTER_CAUSE);
+  if (char) return { kind: 'character', line: char };
+  const miss = find(CAST_MISSED);
+  if (!r.ok && !r.targetGone && !miss) return { kind: 'refused', line: msg(r) };
+  if (miss) return { kind: 'missed', line: miss };
+  return { kind: 'landed', line: null };
+}
+
+/** Lines the page drew since `before` (a peek): chat, spew and refusal texts. */
+function linesSince(driver: PlaythroughDriver, before: Signals): string[] {
+  const now = driver.peek();
+  return [...now.chat.slice(before.chat.length), ...now.spew.slice(before.spew.length), ...now.refusals.slice(before.refusals.length).map((x) => x.text ?? '')].filter(Boolean);
+}
+
+/** One cast, judged by its reply and the lines that came with it. */
+async function castJudged(ctx: StepContext, spell: AgentSpell, target: number | 'self'): Promise<{ r: AgentResult; v: ReturnType<typeof castVerdict> }> {
+  const before = ctx.driver.peek();
+  const r = await ctx.driver.call<AgentResult>('cast', [spell.id, target, null], 60_000);
+  await ctx.driver.sleep(500);
+  return { r, v: castVerdict(r, linesSince(ctx.driver, before)) };
+}
+
+/**
+ * A refusal for the character's sake: a skip when the pick couldn't see it coming (no skill list, no mana cost), a FAIL
+ * when the client had the school trained and the mana enough (the client's state and the server's disagree).
+ */
+export function characterRefusal(spell: AgentSpell, pick: CastPick, facts: MagicFacts, line: string, what: string, extra: Partial<StepOutcome> = {}): StepOutcome {
+  const untrained = /not trained|skill is too low/i.test(line);
+  const knew = untrained ? schoolTrained(spell.school, facts.skills) === true : pick.manaCost !== null;
+  if (knew) return fail(`${what}: the server refused it ("${line}") though the client has ${untrained ? `${schoolSkillName(spell.school)} trained` : `the mana (${pick.why})`}`, extra);
+  return skip(`${what}: the character can't (${untrained ? 'its school is untrained' : 'too little mana'}): "${line}"`, { ...extra, allow: [CAST_CHARACTER_CAUSE, CAST_MISSED] });
+}
+
+/** Spells, skills, mana: what a magic step picks by. */
+async function magicNow(ctx: StepContext): Promise<{ spells: AgentSpell[]; facts: MagicFacts; mana: number | undefined }> {
+  const spells = await spellsKnown(ctx);
+  const facts = await ctx.driver.magicFacts(spells.map((s) => s.id));
+  const me = await self(ctx);
+  return { spells, facts, mana: me?.mana?.cur };
+}
 
 export const magicModeStep: Step = {
   id: 'magic-mode', title: 'Enter magic mode with a held caster', timeoutMs: 90_000,
@@ -1174,9 +1341,11 @@ export const magicModeStep: Step = {
     const { driver } = ctx;
     const caster = (await driver.call<AgentItem[]>('inventory')).find((i) => ((i.itemType ?? 0) & 0x8000) !== 0);
     if (!caster) return skip(noneHeld(ctx, 'caster', 'no caster (wand, staff, orb) held'));
+    let again = '';
     if (caster.where !== 'equipped') {
       const e = await driver.call<AgentResult>('equip', [caster.guid, null], 45_000);
-      if (!e.ok) return fail(`equipping ${caster.name}: ${msg(e)}`);
+      if (!e.ok) return fail(`equipping ${caster.name}${ctx.state.unwielded?.guid === caster.guid ? ' again after the kill' : ''}: ${msg(e)}`);
+      if (ctx.state.unwielded?.guid === caster.guid) { again = ' again (the kill step took it off)'; ctx.state.unwielded = null; }
     }
     ctx.state.caster = { guid: caster.guid, name: caster.name };
     const m = await driver.call<AgentResult>('combatMode', ['magic']);
@@ -1184,19 +1353,25 @@ export const magicModeStep: Step = {
     const me = await self(ctx);
     const screenshots = await shots(ctx, 'magic-mode');
     if (me?.combatMode !== 'magic') return fail(`asked for magic mode (${msg(m)}), and the mode is ${me?.combatMode}`, { screenshots });
-    return ok(`${caster.name} wielded; in magic mode`, { screenshots });
+    return ok(`${caster.name} wielded${again}; in magic mode`, { screenshots });
   },
 };
 
 const spellsKnown = (ctx: StepContext): Promise<AgentSpell[]> => ctx.driver.call<AgentSpell[]>('spells', ['', 400]);
 
+/** At a creature: War first (a bolt), then Void, Life, then Creature (a debuff). */
+export const AT_CREATURE_PREFER = [/^war/i, /^void/i, /^life/i, /^creature/i];
+/** On yourself: Creature (Strength Self I and kin), then Life (Armor Self I). */
+export const SELF_PREFER = [/^creature/i, /^life/i];
+
 export const castAtCreatureStep: Step = {
   id: 'cast-creature', title: 'Select a spell and cast it at a creature', timeoutMs: 240_000,
   async run(ctx) {
     if (!ctx.state.caster) return skip('not in magic mode (no caster)');
-    const atCreature = (await spellsKnown(ctx)).filter((s) => !s.self && !s.buff && ((s.targetType ?? 0x10) & 0x10) !== 0);
-    const spell = atCreature.find((s) => /war/i.test(s.school)) ?? atCreature.find((s) => /life|creature/i.test(s.school));
-    if (!spell) return skip('no spell known that is cast at a creature');
+    const { spells, facts, mana } = await magicNow(ctx);
+    const pick = pickCastable(spells, facts, mana, atCreatureSpell, AT_CREATURE_PREFER);
+    const spell = pick.spell;
+    if (!spell) return skip(noPickReason('spell cast at a creature', pick, spells, atCreatureSpell));
     const { prey, note } = await findPrey(ctx, ctx.state.kill ? [ctx.state.kill.guid] : []);
     if (!prey) return skip(note);
     // Into the spell's reach first, as a player walks up (the DM run cast from 45.6 m with a 33.5 m reach).
@@ -1206,33 +1381,135 @@ export const castAtCreatureStep: Step = {
       const w = await ctx.driver.call<AgentResult>('walkTo', [prey.guid, { within, stopOnAggro: false }], 90_000);
       walked = ` (walked within ${within} m first: ${msg(w)})`;
     }
-    const r = await ctx.driver.call<AgentResult>('cast', [spell.id, prey.guid, null], 60_000);
+    const { r, v } = await castJudged(ctx, spell, prey.guid);
     const screenshots = await shots(ctx, 'cast-creature');
-    if (!r.ok && COMPONENTS_MISSING.test(r.message)) {
+    const what = `${spell.name} (${pick.why}) at ${prey.name}${walked}`;
+    if (v.kind === 'components') {
       // Expected for a character with no components (the Dark Majesty run's); with components held, a real refusal.
       const held = (await ctx.driver.call<AgentItem[]>('inventory')).filter((i) => INVENTORY_KINDS.component(i));
-      if (!held.length) return skip(`${spell.name}: the server wants components and the character holds none${walked}: ${msg(r)}`, { screenshots, allow: [CAST_MISSES, COMPONENTS_MISSING] });
-      return fail(`${spell.name} at ${prey.name}: refused for components while holding ${held.map((i) => i.name).join(', ')}${walked}: ${msg(r)}`, { screenshots, allow: [CAST_MISSES] });
+      if (!held.length) return skip(`${spell.name}: the server wants components and the character holds none${walked}: ${msg(r)}`, { screenshots, allow: [CAST_MISSED, COMPONENTS_MISSING] });
+      return fail(`${spell.name} at ${prey.name}: refused for components while holding ${held.map((i) => i.name).join(', ')}${walked}: ${msg(r)}`, { screenshots, allow: [CAST_MISSED] });
     }
-    if (!r.ok && !CAST_MISSES.test(r.message) && !r.targetGone) return fail(`${spell.name} at ${prey.name}${walked}: ${msg(r)}`, { screenshots, allow: [CAST_MISSES] });
+    if (v.kind === 'character') return characterRefusal(spell, pick, facts, v.line!, what, { screenshots });
+    if (v.kind === 'refused') return fail(`${what}: ${v.line}`, { screenshots, allow: [CAST_MISSED] });
     // The creature comes at you now: finish it (a wand in hand, the attack casts).
     const f = await fight(ctx, prey);
-    if (f.outcome === 'dead') return fail(`died fighting ${prey.name} after the cast: ${f.detail}`, { screenshots, allow: [CAST_MISSES] });
-    return ok(`${spell.name} at ${prey.name} (${note})${walked}: ${msg(r)}; then ${f.outcome}: ${f.detail}`, { screenshots, allow: [CAST_MISSES] });
+    if (f.outcome === 'dead') return fail(`died fighting ${prey.name} after the cast: ${f.detail}`, { screenshots, allow: [CAST_MISSED] });
+    return ok(`${what} (${note}): ${msg(r)}${v.kind === 'missed' ? ` (${v.line})` : ''}; then ${f.outcome}: ${f.detail}`, { screenshots, allow: [CAST_MISSED] });
   },
 };
 
+/** Casts at yourself before giving up on fizzles (each needs the mana again). */
+export const SELF_CAST_TRIES = 3;
+
 export const castAtSelfStep: Step = {
-  id: 'cast-self', title: 'Cast a spell at yourself', timeoutMs: 90_000,
+  id: 'cast-self', title: 'Cast an enchantment on yourself', timeoutMs: 120_000,
   async run(ctx) {
     if (!ctx.state.caster) return skip('not in magic mode (no caster)');
-    const spell = (await spellsKnown(ctx)).find((s) => s.self || (s.buff && ((s.targetType ?? 0x10) & 0x10) !== 0));
-    if (!spell) return skip('no spell known that goes on yourself');
-    const r = await ctx.driver.call<AgentResult>('cast', [spell.id, 'self', null], 60_000);
+    const { spells, facts, mana } = await magicNow(ctx);
+    const pick = pickCastable(spells, facts, mana, selfEnchantment, SELF_PREFER);
+    const spell = pick.spell;
+    if (!spell) { await ctx.driver.call('combatMode', ['peace']); return skip(noPickReason('enchantment that goes on you', pick, spells, selfEnchantment)); }
+    const what = `${spell.name} (${pick.why})`;
+    const said: string[] = [];
+    let last: { r: AgentResult; v: ReturnType<typeof castVerdict> } | null = null;
+    for (let i = 0; i < SELF_CAST_TRIES; i++) {
+      last = await castJudged(ctx, spell, 'self');
+      said.push(msg(last.r));
+      if (last.v.kind !== 'missed') break;
+      const left = (await self(ctx))?.mana?.cur;
+      if (pick.manaCost !== null && left !== undefined && left < pick.manaCost) break;
+      await ctx.driver.sleep(1000);
+    }
     const screenshots = await shots(ctx, 'cast-self');
     await ctx.driver.call('combatMode', ['peace']);
-    if (r.ok || CAST_MISSES.test(r.message)) return ok(`${spell.name}: ${msg(r)}`, { screenshots, allow: [CAST_MISSES] });
-    return fail(`${spell.name}: ${msg(r)}`, { screenshots, allow: [CAST_MISSES] });
+    const { v } = last!;
+    const allow = [CAST_MISSED];
+    if (v.kind === 'components') {
+      const held = (await ctx.driver.call<AgentItem[]>('inventory')).filter((i) => INVENTORY_KINDS.component(i));
+      if (!held.length) return skip(`${spell.name}: the server wants components and the character holds none: ${said.join(' | ')}`, { screenshots, allow: [CAST_MISSED, COMPONENTS_MISSING] });
+      return fail(`${spell.name}: refused for components while holding ${held.map((i) => i.name).join(', ')}: ${said.join(' | ')}`, { screenshots, allow });
+    }
+    if (v.kind === 'character') return characterRefusal(spell, pick, facts, v.line!, what, { screenshots });
+    if (v.kind === 'refused') return fail(`${what}: ${v.line}`, { screenshots, allow });
+    // Fizzled every time: nothing is in effect, so the effects panel's indicator stays unlit. The roll's, not the client's.
+    if (v.kind === 'missed') return skip(`${what}: missed ${said.length} time${said.length === 1 ? '' : 's'} (${v.line}), so nothing is in effect: ${said.join(' | ')}`, { screenshots, allow });
+    return ok(`${what}: ${said.join(' | ')}`, { screenshots, allow });
+  },
+};
+
+// ── --admin prep ────────────────────────────────────────────────────────────
+
+/**
+ * What --admin types into the chat box before the first hour (AC1999 server admin commands, ClientCommands.cpp,
+ * ADMIN_ACCESS; a player account gets "Unknown command!"): 74 component types x 5 (@spellcomps [types] [amount], which
+ * answers "Spawned N spell component types …") and a Wand (@spawnwcidinv 2472, the 1999 world's "02472 Wand"), which
+ * answers nothing when it works: a new caster in the pack says so.
+ */
+export const ADMIN_PREP_COMMANDS: ReadonlyArray<{ text: string; done: RegExp | 'new-caster'; why: string }> = [
+  { text: '@spellcomps 74 5', done: /^Spawned \d+ spell component types/i, why: 'spell components for the casts' },
+  { text: '@spawnwcidinv 2472', done: 'new-caster', why: 'a Wand to cast with' },
+];
+
+/** A server's no to an admin command from a player account. */
+const NOT_ADMIN = /unknown command|not a valid command|access|not authori[sz]ed|permission|privilege|couldn't find that to spawn|can't be spawned/i;
+
+/**
+ * The schools to train for the magic steps: per step (a cast at a creature, an enchantment on you), when no spell it
+ * would pick has its school trained, the preferred school of the known spells of its kind. Empty when the skills are
+ * unknown or every step already has one.
+ */
+export function schoolsToTrain(spells: AgentSpell[], skills: SkillRow[]): string[] {
+  if (!skills.length) return [];
+  const out: string[] = [];
+  for (const [want, prefer] of [[atCreatureSpell, AT_CREATURE_PREFER], [selfEnchantment, SELF_PREFER]] as const) {
+    const kind = spells.filter(want);
+    if (!kind.length || kind.some((s) => schoolTrained(s.school, skills) === true)) continue;
+    const pick = pickCastable(kind, { skills: [], mana: {} }, undefined, () => true, [...prefer]).spell;
+    const name = pick ? schoolSkillName(pick.school) : null;
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+export const adminPrepStep: Step = {
+  id: 'admin-prep', title: 'Admin prep: components, a wand, the magic schools trained (--admin)', timeoutMs: 90_000, withOnly: true,
+  async run(ctx) {
+    const { driver } = ctx;
+    const said: string[] = [];
+    const casters = async (): Promise<AgentItem[]> => (await driver.call<AgentItem[]>('inventory')).filter((i) => ((i.itemType ?? 0) & 0x8000) !== 0);
+    for (const c of ADMIN_PREP_COMMANDS) {
+      const before = driver.peek().chat.length;
+      const had = c.done === 'new-caster' ? new Set((await casters()).map((i) => i.guid)) : null;
+      await driver.chat(c.text);
+      let reply: string[] = [];
+      let yes: string | null = null;
+      for (let i = 0; i < 12 && !yes && !reply.some((l) => NOT_ADMIN.test(l)); i++) {
+        await driver.sleep(500);
+        reply = driver.peek().chat.slice(before).filter((l) => !/^you (say|tell)\b/i.test(l));
+        if (c.done === 'new-caster') {
+          const got = (await casters()).find((x) => !had!.has(x.guid));
+          if (got) yes = `${got.name} #${got.guid.toString(16)} in the pack`;
+        } else {
+          const done = c.done;
+          const line = reply.find((l) => done.test(l));
+          if (line) yes = `"${line}"`;
+        }
+      }
+      const no = reply.find((l) => NOT_ADMIN.test(l));
+      if (no) return fail(`${c.text} (${c.why}): "${no}": --admin needs an admin test account`, { allow: [/[\s\S]*/] });
+      if (!yes) return fail(`${c.text} (${c.why}): nothing came of it within 6 s${reply.length ? ` ("${reply[0]}")` : ''} (--admin needs an admin test account)`, { allow: [/[\s\S]*/] });
+      said.push(`${c.text}: ${yes}`);
+    }
+    const spells = await spellsKnown(ctx);
+    const { skills } = await driver.magicFacts([]);
+    const trained: string[] = [];
+    for (const school of schoolsToTrain(spells, skills)) {
+      const r = await driver.call<AgentResult>('trainSkill', [school]);
+      trained.push(`${school}: ${r.ok ? 'trained' : 'not trained'} (${msg(r)})`);
+    }
+    const why = !skills.length ? 'the client lists no skills, so none trained' : trained.length ? `trained with credits: ${trained.join('; ')}` : 'the magic steps\' schools are already trained';
+    return ok(`${said.join('; ')}; ${why}`, { allow: [/[\s\S]*/] });
   },
 };
 
@@ -1415,10 +1692,11 @@ export const logoutAndBackStep: Step = {
   },
 };
 
-/** The whole first hour, in a new player's order, for one era. */
-export function playthroughSteps(era: EraPlan): Step[] {
+/** The whole first hour, in a new player's order, for one era; `admin` adds the --admin prep after entering the world. */
+export function playthroughSteps(era: EraPlan, opts: { admin?: boolean } = {}): Step[] {
   return [
     enterWorldStep,
+    ...(opts.admin ? [adminPrepStep] : []),
     ...era.panels.map(panelStep),
     vendorBuyStep,
     vendorSellStep,
@@ -1448,7 +1726,7 @@ export function selectSteps(all: Step[], only: string[] | null): Step[] {
   if (!only) return all;
   const unknown = only.filter((id) => !all.some((s) => s.id === id));
   if (unknown.length) throw new Error(`unknown step id(s): ${unknown.join(', ')} (have: ${all.map((s) => s.id).join(', ')})`);
-  return all.filter((s) => s.required || only.includes(s.id));
+  return all.filter((s) => s.required || s.withOnly || only.includes(s.id));
 }
 
-export const freshState = (): RunState => ({ character: null, vendor: null, bought: null, kill: null, caster: null, supplies: {} });
+export const freshState = (): RunState => ({ character: null, vendor: null, bought: null, kill: null, caster: null, unwielded: null, supplies: {} });
