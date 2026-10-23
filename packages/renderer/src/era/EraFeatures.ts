@@ -7,8 +7,11 @@
  * the end-of-retail client and lack nothing here.
  */
 import { ABSENT_1999, type Absent1999Feature } from '@ac/network';
+import { TALISMAN_TARGET_TYPES_1999, TALISMAN_TARGET_TYPES_EOR, type TalismanTargetTypes } from '@ac/shared';
 import type { EraProfile } from './EraProfiles.js';
 import { quickslotCommand } from '../network/itemShortcutRestore.js';
+import { MAP_NOTE_LOCATIONS, type MapNoteLocation } from '../ui/HudTooltips.js';
+import { MAP_MARKER_AREA, MAP_MARKER_AREA_1999, type MapMarkerArea, type MapPlacement } from '../ui/MapMarkers.js';
 
 export type EraFeature =
   | Absent1999Feature
@@ -61,9 +64,9 @@ const NONE: ReadonlySet<EraFeature> = new Set();
  * What a 1999 world hides, and why each entry still needs to (2026-10-06).
  * Only features whose target needs something the 1999 server or its data
  * lack belong here; a purely client-side panel stays. The World panel (map
- * button, its keys) is client-side: the end-of-retail Dereth map from the
- * interface portal and the player's own position, so it shows on 1999 too
- * (Jake 2026-10-06: "there should still be a map button").
+ * button, its keys) is client-side: the world portal's own map picture (the
+ * 1999 portal's 1999 Dereth, webac#10) and the player's own position, so it
+ * shows on 1999 too (Jake 2026-10-06: "there should still be a map button").
  *
  * - every ABSENT_1999 feature (network era1999/Absent1999.ts, one cited kb
  *   scan per entry): the 1999 client has no builder for their actions and
@@ -339,6 +342,23 @@ export interface EraClientRules {
    * whose speaker id is non-zero (kb client-behavior/squelch-list.md). Tells are not affected.
    */
   chatToggle: 'server' | 'local';
+  /**
+   * The spell formula's talisman → target ItemType table, which decides whether a cast needs a
+   * selection and what it may be cast on (CSpellBase::InqTargetType; webac#9). End of retail:
+   * SpellComponentTable::GetTargetTypeFromComponentID @ 005bbf50 (Ashwood 0x88b8f, Hazel
+   * 0x10010000). 1999: the switch @ 0x5e4150 (Ashwood 0xa090f, Hazel 0x10000; @ac/shared
+   * TALISMAN_TARGET_TYPES_1999).
+   */
+  talismanTargetTypes: TalismanTargetTypes;
+  /**
+   * The target-type bits that let a non-Self spell be cast with the caster selected (an item
+   * spell cast on yourself lands on your gear). End of retail: 0x8107
+   * (ObjectCompatibleWithSpellTargetType @ 00567230). 1999: 0, the 1999 client.exe's check
+   * @ 0x4d20c0 refuses the caster outright ("You cannot cast this spell upon yourself"), and the
+   * AC1999 server never redirects an item spell to worn gear (SpellcastingManager.cpp
+   * CheckTargetValidity: "1999 makes you buff each item individually").
+   */
+  spellSelfTargetableTypeMask: number;
 
   // ── The era client's values (BUG.ac1999-eor-ui-values) ─────────────────────
   // Where 1999 differs from end of retail only in a value (a string, a slot set, an option
@@ -390,7 +410,34 @@ export interface EraClientRules {
   characterExamineText: CharacterExamineText;
   /** The item hover text's era additions, or null (end of retail: UIElement_UIItem::UpdateTooltip, the name alone). */
   itemHoverText: ItemHoverText | null;
+  /** The World panel's map: its town notes and how the player's marker is placed (BUG.ac1999-map-eor-art, webac#10). */
+  mapPanel: MapPanelRules;
 }
+
+/**
+ * The era client's map page (BUG.ac1999-map-eor-art, webac#10). The picture itself is world art
+ * (MapMarkers.MAP_IMAGE, read from the world portal), so each era's DAT draws its own Dereth; these
+ * are the client code's parts.
+ */
+export interface MapPanelRules {
+  /**
+   * The hover notes over the picture (gmMapUI::PostInit @ 004a1c70 → AddMapNote: the exe's
+   * `s_rgLocations` @ .rdata 0x7aa3f8, 53 end-of-retail places). The 1999 client.exe has none: its
+   * MapSubPanel ctor @ 0x00507f70 builds the picture, the player icon, the date / time and the
+   * coordinate texts and nothing else, and its only town strings are the character-creation start
+   * towns.
+   */
+  notes: readonly MapNoteLocation[];
+  /** The box the markers are placed in and clicks are read from, relative to the 257x267 picture. */
+  markerArea: Readonly<MapMarkerArea>;
+  /** MapMarkers.MapPlacement: gmMapUI::PlaceMarkerOnMap ('eor') or the 1999 MapSubPanel ('ac1999'). */
+  placement: MapPlacement;
+}
+
+/** gmMapUI: the end-of-retail exe's notes, the EoL DAT's marker box (0x21000026:0x100001ec). */
+const EOR_MAP_PANEL: MapPanelRules = Object.freeze({ notes: MAP_NOTE_LOCATIONS, markerArea: MAP_MARKER_AREA, placement: 'eor' as const });
+/** The 1999 MapSubPanel: no notes, its own box (MapMarkers.MAP_MARKER_AREA_1999). */
+const AC1999_MAP_PANEL: MapPanelRules = Object.freeze({ notes: Object.freeze([]), markerArea: MAP_MARKER_AREA_1999, placement: 'ac1999' as const });
 
 /** A client string: an exe literal, or a local-DAT string-table entry with its fallback. */
 export type ClientText = string | { readonly stringId: number; readonly fallback: string };
@@ -515,6 +562,8 @@ const AC1999_CHARACTER_OPTION_LABELS: Readonly<Record<string, string>> = Object.
 const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const,
   chatToggle: 'server' as const,
+  talismanTargetTypes: TALISMAN_TARGET_TYPES_EOR,
+  spellSelfTargetableTypeMask: 0x8107,
   equipSlotMask: 0xffffffff,
   statFooterText: EOR_STAT_FOOTER_TEXT,
   statRaiseTen: true,
@@ -528,10 +577,13 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   // CharExamineUI::SetAppraiseInfo @ 004b45f0: "Alleg. Monarch:", the legend last, nothing when unaffiliated.
   characterExamineText: Object.freeze({ noAllegiance: null, noFellowship: null, allegianceMonarch: 'Alleg. Monarch:', unenchantableLegend: true }),
   itemHoverText: null,
+  mapPanel: EOR_MAP_PANEL,
 });
 const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const,
   chatToggle: 'local' as const,
+  talismanTargetTypes: TALISMAN_TARGET_TYPES_1999, // @ 0x5e4150
+  spellSelfTargetableTypeMask: 0, // UI ObjectCompatibleWithSpellTargetType @ 0x4d20c0
   equipSlotMask: 0x1bf8000, // InventoryPanel @ 0x522fc0
   statFooterText: AC1999_STAT_FOOTER_TEXT,
   statRaiseTen: false,
@@ -568,12 +620,23 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
       sellList: 'Worth %up - Double click to remove from selling list', // 0x612f14
     }),
   }),
+  mapPanel: AC1999_MAP_PANEL,
 });
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {
-  return p?.login.protocol === 'ac1999' ? AC1999_CLIENT_RULES : EOR_CLIENT_RULES;
+  if (p?.login.protocol === 'ac1999') return AC1999_CLIENT_RULES;
+  const renames = p?.mapNoteRenames;
+  if (!renames) return EOR_CLIENT_RULES;
+  let rules = renamedNoteRules.get(renames);
+  if (!rules) {
+    const notes = Object.freeze(MAP_NOTE_LOCATIONS.map((n) => (renames[n.name] ? Object.freeze({ ...n, name: renames[n.name] }) : n)));
+    rules = Object.freeze({ ...EOR_CLIENT_RULES, mapPanel: Object.freeze({ ...EOR_MAP_PANEL, notes }) });
+    renamedNoteRules.set(renames, rules);
+  }
+  return rules;
 }
+const renamedNoteRules = new WeakMap<object, EraClientRules>();
 
 /** Previous / Next / First / Last Spell Tab (ActionMap 0x26000000; gmSpellcastingUI::RecvNotice_*SpellTab). */
 export const SPELL_TAB_ACTIONS: readonly number[] = [0x10000063, 0x10000064, 0x10000104, 0x10000105];

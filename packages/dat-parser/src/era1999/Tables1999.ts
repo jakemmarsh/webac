@@ -73,7 +73,7 @@
 import { DatReader } from '../DatReader.js';
 import { DatWriter } from './DatWriter.js';
 import { computeSpellHash } from '../file-types/SpellTable.js';
-import { playScript1999ToEoL } from '@ac/shared';
+import { inqSpellTargetType, playScript1999ToEoL, TALISMAN_TARGET_TYPES_1999 } from '@ac/shared';
 
 /** Reads 1999 bytes and writes EoL bytes in lockstep. */
 class Copier {
@@ -509,31 +509,14 @@ export function transcodeString1999(raw: ArrayBuffer): ArrayBuffer {
 
 // ─── SpellTable (0x0E00000E) ──────────────────────────────────────────────────
 
-/** 1999 SpellFormula::GetTargetingType: target component id → ItemType. */
-function targetTypeOfComponent(comp: number): number {
-  switch (comp) {
-    case 0x31: case 0x32: case 0x33: case 0x34: case 0x35: case 0x36:
-    case 0x37: case 0x38: case 0x3a: case 0x3c: case 0x3d: case 0x3e:
-      return 0x10; // TYPE_CREATURE
-    case 0x39:
-      return 0xa090f; // TYPE_ITEM_ENCHANTABLE_TARGET
-    case 0x3b:
-      return 0x10000; // TYPE_PORTAL_MAGIC_TARGET
-    default:
-      return 0; // TYPE_UNDEF
-  }
-}
-
 /**
- * The 1999 client's CSpellBase::InqTargetType: 0 unless the first five
- * components are present, else the target type of the last component in
- * slots 4..7 (the first empty slot from 5 on ends the formula).
+ * The 1999 client's CSpellBase::InqTargetType @ 0x5401e0: 0 unless the first
+ * five components are present, else the target type of the last component in
+ * slots 4..7 (the first empty slot from 5 on ends the formula), through the
+ * 1999 talisman table (@ac/shared TALISMAN_TARGET_TYPES_1999, @ 0x5e4150).
  */
 export function spellTargetType1999(comps: readonly number[]): number {
-  for (let i = 0; i < 5; i++) if (!comps[i]) return 0;
-  let i = 5;
-  while (i < 8 && comps[i]) i++;
-  return targetTypeOfComponent(comps[i - 1]);
+  return inqSpellTargetType(comps, TALISMAN_TARGET_TYPES_1999);
 }
 
 export function transcodeSpellTable1999(raw: ArrayBuffer): ArrayBuffer {

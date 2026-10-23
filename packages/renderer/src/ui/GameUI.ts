@@ -150,13 +150,13 @@ import {
 } from './DatTooltip.js';
 import {
   HUD_TOOLTIP_ROOT, PAPERDOLL_DRAG_BAND_TOOLTIP_STRING, tooltipRootGeometry, itemTooltipText, itemHoverText, paperdollSlotTooltip, spellShortcutTooltip,
-  PAPERDOLL_GEM_TOOLTIP_ROOT, PAPERDOLL_SLOTS_GEM_TOOLTIP_STRING, MAP_NOTE_TOOLTIP_ROOT, MAP_NOTE_LOCATIONS, MAP_NOTE_TOOLTIP_DELAY_SECONDS, MAP_HOUSE_ICON_TOOLTIP_STRING,
+  PAPERDOLL_GEM_TOOLTIP_ROOT, PAPERDOLL_SLOTS_GEM_TOOLTIP_STRING, MAP_NOTE_TOOLTIP_ROOT, MAP_NOTE_TOOLTIP_DELAY_SECONDS, MAP_HOUSE_ICON_TOOLTIP_STRING,
   attributeRowTooltip, vitalRowTooltip, skillRowTooltip, castButtonTooltip, type CastButtonTooltipState,
   SPELLBAR_CAST_BUTTON, SPELLBAR_SPELL_NAME_TEXT, SPELLBAR_ENDOWMENT_ICON,
 } from './HudTooltips.js';
 import { collapseHiddenElements } from './CollapseHidden.js';
 import {
-  MAP_MARKER_AREA, mapClickTeleportCell, MAP_HOUSE_ICON_MEDIA, MAP_HOUSE_ICON_SIZE, MAP_PLAYER_ICON_MEDIA, MAP_PLAYER_ICON_SIZE,
+  MAP_IMAGE, mapClickTeleportCell, MAP_HOUSE_ICON_MEDIA, MAP_HOUSE_ICON_SIZE, MAP_PLAYER_ICON_MEDIA, MAP_PLAYER_ICON_SIZE,
   houseMarkerPosition, houseIconPlacement, playerMarkerUpdate, radarCoordinateReadout, journalLocationText,
   JOURNAL_NO_LOCATION_TEXT, type CellPosition,
 } from './MapMarkers.js';
@@ -4189,6 +4189,8 @@ export class GameUI {
       try { cb(); } catch (e) { console.warn('[GameUI] files-arrived listener failed', e); }
     }
     if (this.chatFontPending) this.applyChatFont();
+    // The open map's picture, streamed in late from the world set.
+    if (this.mapImageMissed && this.mapCanvas?.isConnected) this.loadMapImage();
     // An open portal-space tunnel built without its teleport object / animation.
     this.portalSpaceRenderer?.rebuildIfIncomplete();
     for (const [holder, build] of [...this.pendingIconEls]) {
@@ -18885,9 +18887,11 @@ export class GameUI {
       // Complete check); ObjectCompatibleWithSpell @ 00567c30 takes
       // InqTargetType (with it). Neither reads NonComponentTargetType.
       const formula = sb?.formula ?? [];
-      state.untargeted = spellNeedsNoTarget(bitfield, spellFormulaTargetingType(formula));
+      // The era's talisman table and self rule (webac#9: the 1999 client.exe's own).
+      const talismans = this.clientRules.talismanTargetTypes;
+      state.untargeted = spellNeedsNoTarget(bitfield, spellFormulaTargetingType(formula, talismans));
       state.targetName = t ? t.name : null;
-      state.targetCompatible = !!t && objectCompatibleWithSpellTargetType(inqSpellTargetType(formula), this.spellTargetObject(t));
+      state.targetCompatible = !!t && objectCompatibleWithSpellTargetType(inqSpellTargetType(formula, talismans), this.spellTargetObject(t), this.clientRules.spellSelfTargetableTypeMask);
     } else if (this.endowmentItemId) {
       // CORE.17.k.b.b.a.g.e — the endowment branch: m_spellName "%s (%hs)",
       // ItemUses::IsUseable_SelfTarget, ItemHolder::TargetCompatibleWithObject
@@ -21966,15 +21970,14 @@ export class GameUI {
     // same shape as the already-removed combat-mode vector-icon fallback.
     // Dropped it (and the now-orphaned AC_COLORS.radarBg) rather than
     // researching a citable color for a path that can never render.
-    const mapTexUrl = this.getTexURL(0x0600127d);
-    if (mapTexUrl) {
-      const mapImg = new Image();
-      mapImg.onload = () => {
-        this.mapImage = mapImg;
-        this.updateMapMarkers();
-      };
-      mapImg.src = mapTexUrl;
-    }
+    //
+    // BUG.ac1999-map-eor-art (webac#10) — the picture is world art: read
+    // from the WORLD portal, so a 1999 world draws the 1999 portal's own
+    // 0x0600127d (the 1999 client.exe's MapSubPanel draws that id) instead
+    // of the interface portal's end-of-retail Dereth. One portal serving
+    // both (every other era) reads exactly what it did.
+    this.mapImageMissed = false;
+    this.loadMapImage();
 
     // gmMapUI::ListenToElementMessage @ 004a2350: a click on the map art
     // by a PSR (PlayerDesc::PlayerIsPSR) teleports to the cell under it.
@@ -21982,8 +21985,9 @@ export class GameUI {
       if (!this.mapTeleportAllowed?.()) return;
       const rect = mapCanvas.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
-      const cell = mapClickTeleportCell(MAP_MARKER_AREA,
-        (e.clientX - rect.left) * (mapW / rect.width), (e.clientY - rect.top) * (mapH / rect.height));
+      const map = this.clientRules.mapPanel;
+      const cell = mapClickTeleportCell(map.markerArea,
+        (e.clientX - rect.left) * (mapW / rect.width), (e.clientY - rect.top) * (mapH / rect.height), map.placement);
       if (cell) this.onMapTeleport?.(cell);
     });
     contentArea.appendChild(mapCanvas);
@@ -22020,7 +22024,8 @@ export class GameUI {
    */
   renderMapNotes(container: HTMLElement, mapLeft: number, mapTop: number): HTMLElement[] {
     const notes: HTMLElement[] = [];
-    for (const loc of MAP_NOTE_LOCATIONS) {
+    // The era client's notes (EraClientRules.mapPanel): end of retail's 53, none in 1999.
+    for (const loc of this.clientRules.mapPanel.notes) {
       const note = document.createElement('div');
       note.dataset.mapNote = loc.name;
       Object.assign(note.style, {
@@ -22085,6 +22090,44 @@ export class GameUI {
 
   private mapMarkerOrigin = { left: 21, top: 36 };
 
+  /** The map picture missed a streamed file: load it again when files land (onStreamedFilesArrived). */
+  private mapImageMissed = false;
+
+  /** Load the map picture (MAP_IMAGE, world art) into the open map; a streamed miss retries on arrival. */
+  private loadMapImage(): void {
+    const missEpoch = datMissEpoch();
+    const url = this.getWorldArtURL(MAP_IMAGE);
+    this.mapImageMissed = !url && !noDatMissSince(missEpoch);
+    if (!url) return;
+    const canvas = this.mapCanvas;
+    const img = new Image();
+    img.onload = () => {
+      if (this.mapCanvas !== canvas) return; // the panel was rebuilt or closed meanwhile
+      this.mapImage = img;
+      this.updateMapMarkers();
+    };
+    img.src = url;
+  }
+
+  /**
+   * A picture of the world (the map) as a data URL: the WORLD portal's art,
+   * unkeyed (getItemIconURL's 1999 black key is for icons). One portal
+   * serving both: getTexURL, unchanged.
+   */
+  getWorldArtURL(did: number): string | null {
+    if (!this.uiTextureOverride || !this.textureManager) return this.getTexURL(did);
+    const cached = this.worldArtCache.get(did);
+    if (cached !== undefined) return cached;
+    const missEpoch = datMissEpoch();
+    let url: string | null = null;
+    try { url = this.textureManager.getIconDataURL(did); } catch { url = null; }
+    if (!url) { try { url = this.textureManager.getJPEGDataURL(did); } catch { url = null; } }
+    if (noDatMissSince(missEpoch)) this.worldArtCache.set(did, url);
+    else this.noteIconMiss();
+    return url;
+  }
+  private worldArtCache = new Map<number, string | null>();
+
   /**
    * gmMapUI::Update @ 004a1eb0: the map picture redrawn, then — outside —
    * the coordinate text and the player icon at InqPlayerCoords through
@@ -22098,7 +22141,8 @@ export class GameUI {
     }
     const { left, top } = this.mapMarkerOrigin;
     const cell = this.playerMapCell;
-    const player = playerMarkerUpdate(MAP_MARKER_AREA, cell.x, cell.y, cell.outside);
+    const map = this.clientRules.mapPanel;
+    const player = playerMarkerUpdate(map.markerArea, cell.x, cell.y, cell.outside, map.placement);
     if (this.mapPlayerMarker) {
       if (player.icon) {
         this.mapPlayerMarker.style.display = 'block';
@@ -22130,7 +22174,7 @@ export class GameUI {
       }
     }
     if (this.mapHouseIcon) {
-      const house = houseIconPlacement(MAP_MARKER_AREA, this.mapHousePosition);
+      const house = houseIconPlacement(map.markerArea, this.mapHousePosition, map.placement);
       if (house) {
         this.mapHouseIcon.style.display = 'block';
         this.mapHouseIcon.style.left = `${left + house.x}px`;

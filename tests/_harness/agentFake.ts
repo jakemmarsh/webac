@@ -98,6 +98,8 @@ export class FakeHost implements AgentHost {
   /** A swing under way (the client's attackInProgress); unset = the host can't say. */
   attacking: AgentHost['attacking'] = undefined;
   cast = (id: number, t: number | null) => { this.sent.push(`cast ${id} ${t === null ? 'self' : t.toString(16)}`); return true; };
+  /** The era client's self-target bits (EraClientRules.spellSelfTargetableTypeMask); unset = end of retail's. */
+  spellSelfTargetableTypeMask: AgentHost['spellSelfTargetableTypeMask'] = undefined;
   chat = (text: string) => { this.chats.push(text); };
   setYaw = (y: number) => { this.me.yaw = y; };
   /** The agent's own position report to the server (AgentHost.reportPosition); unset = the host can't. */

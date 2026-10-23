@@ -55,23 +55,51 @@ export const SPELL_FLAG_SELF_TARGETED = 0x8;
 const SPELL_FORMULA_SLOTS = 8;
 
 /**
- * SpellComponentTable::GetTargetTypeFromComponentID @ 005bbf50: the
- * ItemType mask a targeting talisman selects. 0x31-0x38, 0x3c-0x3e and 0xbe
- * → 0x10 (Creature); 0x39 → 0x88b8f (item enchantments); 0x3b → 0x10010000
- * (portal / lifestone ties); anything else → 0 (untargeted).
+ * The era client's talisman → ItemType table: the target type a formula's
+ * last targeting component selects (component ids not listed → 0,
+ * untargeted). A fact of each era's executable, so it rides the era's client
+ * profile (EraClientRules.talismanTargetTypes).
  */
-export function targetTypeFromComponentId(componentId: number): number {
-  switch (componentId) {
-    case 0x31: case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x37: case 0x38:
-    case 0x3c: case 0x3d: case 0x3e: case 0xbe:
-      return 0x10;
-    case 0x39:
-      return 0x88b8f;
-    case 0x3b:
-      return 0x10010000;
-    default:
-      return 0;
-  }
+export type TalismanTargetTypes = Readonly<Record<number, number>>;
+
+const CREATURE_TALISMANS = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38] as const;
+
+/**
+ * End of retail: SpellComponentTable::GetTargetTypeFromComponentID @ 005bbf50.
+ * 0x31-0x38, 0x3c-0x3e and 0xbe → 0x10 (Creature); 0x39 (Ashwood) →
+ * 0x88b8f (item enchantments); 0x3b (Hazel) → 0x10010000 (portal /
+ * lifestone ties); 0x3a (Elder) and anything else → 0 (untargeted).
+ */
+export const TALISMAN_TARGET_TYPES_EOR: TalismanTargetTypes = Object.freeze({
+  ...Object.fromEntries(CREATURE_TALISMANS.map((c) => [c, 0x10])),
+  0x3c: 0x10, 0x3d: 0x10, 0x3e: 0x10, 0xbe: 0x10,
+  0x39: 0x88b8f,
+  0x3b: 0x10010000,
+});
+
+/**
+ * The 1999 client.exe (Oct 1999 4.35752): its component → target type
+ * switch @ 0x5e4150, reached from SpellFormula::GetTargetingType @ 0x5d92c0
+ * (the last talisman, @ 0x5d9270) and CSpellBase::InqTargetType @ 0x5401e0.
+ * Jump table 0x5e41b9 / index bytes 0x5e41d5: 0x31-0x38, 0x3a and 0x3c-0x3e
+ * → 0x10 (TYPE_CREATURE); 0x39 (Ashwood) → 0xa090f (TYPE_ITEM_ENCHANTABLE_TARGET:
+ * melee, armour, clothing, jewellery, missile, gem, lockable, manastone; no
+ * caster, misc or container bits); 0x3b (Hazel) → 0x10000 (portals only: no
+ * lifestone bit, the 1999 Portal Tie is the only tie). The AC1999 server's
+ * ITEM_TYPE (GameEnums.h TYPE_ITEM_ENCHANTABLE_TARGET / TYPE_PORTAL_MAGIC_TARGET)
+ * carries the same two masks, and the 1999 SpellTable transcoder writes them
+ * as the NonComponentTargetType the 1999 DAT lacks.
+ */
+export const TALISMAN_TARGET_TYPES_1999: TalismanTargetTypes = Object.freeze({
+  ...Object.fromEntries(CREATURE_TALISMANS.map((c) => [c, 0x10])),
+  0x3a: 0x10, 0x3c: 0x10, 0x3d: 0x10, 0x3e: 0x10,
+  0x39: 0xa090f,
+  0x3b: 0x10000,
+});
+
+/** The ItemType mask a targeting talisman selects in `table`'s era (end of retail's by default). */
+export function targetTypeFromComponentId(componentId: number, table: TalismanTargetTypes = TALISMAN_TARGET_TYPES_EOR): number {
+  return table[componentId] ?? 0;
 }
 
 /** The formula padded back to SpellFormula's 8 slots (our parser keeps only the non-zero comps; raw zeros are trailing). */
@@ -82,29 +110,30 @@ function formulaSlots(formula: readonly number[]): number[] {
 }
 
 /**
- * SpellFormula::GetTargetingType @ 005bc910: walk from slot 5 while the slot
- * is non-zero (to 8), then map the LAST one walked past — the last non-zero
- * of comps[5..7], or comps[4] when comps[5] is 0. CSpellBase::IsUntargeted
- * @ 005974a0 (the Cast-button tooltip's test) is this === 0.
+ * SpellFormula::GetTargetingType @ 005bc910 (1999: @ 0x5d92c0 / 0x5d9270,
+ * the same walk): walk from slot 5 while the slot is non-zero (to 8), then
+ * map the LAST one walked past — the last non-zero of comps[5..7], or
+ * comps[4] when comps[5] is 0. CSpellBase::IsUntargeted @ 005974a0 (the
+ * Cast-button tooltip's test) is this === 0.
  */
-export function spellFormulaTargetingType(formula: readonly number[]): number {
+export function spellFormulaTargetingType(formula: readonly number[], table: TalismanTargetTypes = TALISMAN_TARGET_TYPES_EOR): number {
   const comps = formulaSlots(formula);
   let i = 5;
   while (i < SPELL_FORMULA_SLOTS && comps[i] !== 0) i++;
-  return targetTypeFromComponentId(comps[i - 1]);
+  return targetTypeFromComponentId(comps[i - 1], table);
 }
 
 /**
- * CSpellBase::InqTargetType @ 00597230 on the BASE decrypted formula
- * (InqSpellFormula @ 00596eb0 — not the per-account randomized one):
- * 0 unless SpellFormula::Complete @ 005bc880 (comps[0..4] all non-zero),
- * else GetTargetingType. Used by CastSpell @ 00568040 and
+ * CSpellBase::InqTargetType @ 00597230 (1999: @ 0x5401e0) on the BASE
+ * decrypted formula (InqSpellFormula @ 00596eb0 — not the per-account
+ * randomized one): 0 unless SpellFormula::Complete @ 005bc880 (comps[0..4]
+ * all non-zero), else GetTargetingType. Used by CastSpell @ 00568040 and
  * ObjectCompatibleWithSpell @ 00567c30.
  */
-export function inqSpellTargetType(formula: readonly number[]): number {
+export function inqSpellTargetType(formula: readonly number[], table: TalismanTargetTypes = TALISMAN_TARGET_TYPES_EOR): number {
   const comps = formulaSlots(formula);
   for (let i = 0; i < 5; i++) if (comps[i] === 0) return 0;
-  return spellFormulaTargetingType(comps);
+  return spellFormulaTargetingType(comps, table);
 }
 
 export type CastTargetResolution =

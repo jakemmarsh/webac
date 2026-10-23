@@ -94,6 +94,11 @@ export interface EraProfile {
    * chargen never trains a skill the server's table doesn't know.
    */
   dropSkills?: readonly number[];
+  /**
+   * Map notes the era's own acclient.exe names differently from end of retail's `s_rgLocations`
+   * (end-of-retail name → the era exe's), same rects and order (EraFeatures MapPanelRules.notes).
+   */
+  mapNoteRenames?: Readonly<Record<string, string>>;
 }
 
 export const EOR_ERA_ID = 'eor';
@@ -127,6 +132,9 @@ export const ERA_PROFILES: Readonly<Record<string, EraProfile>> = Object.freeze(
     },
     source: 'the ClassicACE "Data Files - CustomDM 1.60" download (github.com/bDekaru/ClassicACE)',
     heritages: DARK_MAJESTY_HERITAGES,
+    // acclient_CustomDM.exe (shipped in that download): its s_rgLocations @ .rdata 0x7ab490 is end of
+    // retail's 53 rects and names except the 38th, Sanamar's (50, 42) 5x5, which it calls "Other".
+    mapNoteRenames: Object.freeze({ Sanamar: 'Other' }),
   },
   /**
    * ClassicACE Infiltration 1.9 (Doctide): ClassicACE DatManager.cs

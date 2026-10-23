@@ -63,9 +63,16 @@ function fakeCanvases(b: FakeBrowser) {
 const CHROME_WIN = { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36', userAgentData: { platform: 'Windows', brands: [{ brand: 'Google Chrome' }, { brand: 'Chromium' }] } };
 const CHROME_PI = { userAgent: 'Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36', userAgentData: { platform: 'Linux', brands: [{ brand: 'Chromium' }] } };
 const EDGE_WIN = { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0', userAgentData: { platform: 'Windows', brands: [{ brand: 'Microsoft Edge' }, { brand: 'Chromium' }] } };
+const FIREFOX_WIN = { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0' };
 const FIREFOX_LINUX = { userAgent: 'Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0' };
 const SAFARI_MAC = { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' };
 const CHROMEOS = { userAgent: 'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36' };
+
+/** Firefox 158's statusMessage when its GfxInfo blocklist refuses FEATURE_WEBGL2 (prod, Windows, 2026-10-23 00:21Z):
+ * WebGLContext::Create joins each reason as "\n* <info> (<key>)", and this reason has no key. */
+const FIREFOX_WEBGL2_BLOCKED = 'WebGL creation failed: \n* AllowWebgl2:false restricts context creation on this system. ()';
+/** Firefox with webgl.disabled = true or in Troubleshoot Mode (WebGLContext::Create). */
+const FIREFOX_WEBGL_DISABLED = 'WebGL is currently disabled.';
 
 const CHROME_NO_GPU = 'Could not create a WebGL2 context, VENDOR = 0xffff, DEVICE = 0xffff, GL_VENDOR = Disabled, GL_RENDERER = Disabled, GL_VERSION = Disabled, Sandboxed = no, ErrorMessage = OffscreenContext Creation failed, GpuChannelHost creation failed.';
 
@@ -81,6 +88,10 @@ describe('BOOT.webgl2-diagnosis — probing with fake canvases', () => {
     ['Chrome after a GPU crash (page blocked)', { status: 'Web page caused context loss and was blocked' }, 'context_lost_after_crash'],
     ['Firefox blocklist entry', { status: 'WebGL creation failed: * Refused to create native OpenGL context because of blocklist entry: FEATURE_FAILURE_OPENGL_1' }, 'blocklisted'],
     ['Chrome WebGL turned off by policy/switch (--disable-3d-apis, live 2026-10-17)', { status: 'disabled by enterprise policy or commandline switch' }, 'disabled_by_policy'],
+    ['Firefox refusing WebGL 2 on an unknown driver, WebGL 1 on WARP (prod 2026-10-23)', { status: FIREFOX_WEBGL2_BLOCKED, webgl1: { renderer: 'Microsoft Basic Render Driver, or similar' } }, 'webgl2_blocked'],
+    ['Firefox refusing WebGL 2 with WebGL 1 on the real GPU', { status: FIREFOX_WEBGL2_BLOCKED, webgl1: { renderer: 'Intel(R) HD Graphics, or similar' } }, 'webgl2_blocked'],
+    ['Firefox with webgl.disabled / Troubleshoot Mode', { status: FIREFOX_WEBGL_DISABLED }, 'webgl_turned_off'],
+    ['Firefox with webgl.enable-webgl2 = false (no event, WebGL 1 on the GPU)', { webgl1: { renderer: 'Intel(R) HD Graphics, or similar' } }, 'webgl1_only'],
     ['WebGL 1 on SwiftShader only (acceleration off)', { webgl1: { renderer: 'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)' } }, 'acceleration_disabled'],
     ['WebGL 1 on llvmpipe only', { webgl1: { renderer: 'llvmpipe (LLVM 15.0.7, 128 bits)' } }, 'acceleration_disabled'],
     ['WebGL 1 on a real GPU but no WebGL 2', { webgl1: { renderer: 'Mali-400 MP' } }, 'webgl1_only'],
@@ -200,7 +211,55 @@ describe('BOOT.webgl2-diagnosis — the advice per cause and platform', () => {
     expect(at('acceleration_disabled', CHROME_WIN)).toContain('"Use graphics acceleration when available"');
     expect(at('acceleration_disabled', CHROME_WIN)).toMatch(/work computer/);
     expect(at('acceleration_disabled', EDGE_WIN)).toContain('edge://settings/system');
-    expect(at('acceleration_disabled', FIREFOX_LINUX)).toMatch(/Settings > General > Performance/);
+  });
+
+  it('Firefox software WebGL: driver advice, never Firefox\'s hardware-acceleration checkbox (it does not gate WebGL)', () => {
+    const t = at('acceleration_disabled', FIREFOX_WIN);
+    expect(t).toMatch(/graphics driver from your graphics card's maker/);
+    expect(t).toContain('about:support');
+    expect(t).not.toMatch(/Settings > General|hardware acceleration|work computer/);
+  });
+
+  it('Firefox WebGL 2 blocked (AllowWebgl2:false): install the driver, else webgl.force-enabled; no acceleration advice', () => {
+    const t = webgl2HelpText({ cause: 'webgl2_blocked', status: null }, detectHelpPlatform(FIREFOX_WIN));
+    expect(t).toBe('This browser could not start WebGL 2, which the game needs to draw the world. '
+      + 'Firefox has turned WebGL 2 off because it doesn\'t recognise this computer\'s graphics driver (usually no graphics driver is installed, '
+      + 'and Windows is using "Microsoft Basic Display Adapter", or this is a virtual machine). '
+      + 'Install the latest graphics driver from your graphics card\'s maker (Intel, AMD or NVIDIA), then restart Firefox. '
+      + 'Or open about:config, set webgl.force-enabled to true, and reload this page (at your own risk: it may be slow or unstable).');
+    const linux = at('webgl2_blocked', FIREFOX_LINUX);
+    expect(linux).toContain('Update your graphics driver, then restart Firefox.');
+    expect(linux).not.toMatch(/Microsoft Basic/);
+  });
+
+  it('Firefox WebGL turned off: webgl.disabled and Troubleshoot Mode', () => {
+    const t = at('webgl_turned_off', FIREFOX_WIN);
+    expect(t).toContain('set webgl.disabled to false');
+    expect(t).toContain('Troubleshoot Mode');
+    expect(t).not.toMatch(/hardware acceleration/);
+  });
+
+  it('Firefox WebGL 1 only / no WebGL name the about:config prefs that silently turn them off', () => {
+    expect(at('webgl1_only', FIREFOX_WIN)).toContain('webgl.enable-webgl2 is true');
+    const none = at('no_webgl', FIREFOX_WIN);
+    expect(none).toContain('webgl.disabled is false');
+    expect(none).not.toMatch(/Settings > General|hardware acceleration/);
+  });
+
+  it('the prod Firefox report end to end: probe → capability text', () => {
+    const { factory } = fakeCanvases({ status: FIREFOX_WEBGL2_BLOCKED, webgl1: { renderer: 'Microsoft Basic Render Driver, or similar' } });
+    const win = {
+      document: { createElement: factory },
+      navigator: { ...FIREFOX_WIN, webdriver: false },
+      WebSocket: function WebSocket() {},
+      matchMedia: () => ({ matches: true }),
+      location: { search: '' },
+    } as unknown as Parameters<typeof probeCapabilities>[0];
+    const env = probeCapabilities(win);
+    expect(env.webgl2Failure).toEqual({ cause: 'webgl2_blocked', status: 'WebGL creation failed: AllowWebgl2:false restricts context creation on this system. ()' });
+    const text = capabilityProblems(env)[0].text;
+    expect(text).toContain('webgl.force-enabled');
+    expect(text).not.toMatch(/hardware acceleration|Settings > General/);
   });
 
   it('after a crash: today\'s restart wording, chrome://gpu in Chrome, no IT line', () => {
@@ -226,7 +285,7 @@ describe('BOOT.webgl2-diagnosis — the advice per cause and platform', () => {
 
   it('every cause on every platform yields one short paragraph that starts with the same sentence', () => {
     for (const cause of WEBGL_FAILURE_CAUSES) {
-      for (const nav of [CHROME_WIN, CHROME_PI, EDGE_WIN, FIREFOX_LINUX, SAFARI_MAC, CHROMEOS]) {
+      for (const nav of [CHROME_WIN, CHROME_PI, EDGE_WIN, FIREFOX_WIN, FIREFOX_LINUX, SAFARI_MAC, CHROMEOS]) {
         const t = at(cause, nav);
         expect(t.startsWith('This browser could not start WebGL 2')).toBe(true);
         expect(t).not.toMatch(/null|undefined/);

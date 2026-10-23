@@ -16,8 +16,18 @@
  * "Web page caused context loss and was blocked" (blocked after a GPU crash),
  * "disabled by enterprise policy or commandline switch", and
  * "Could not create a WebGL context, VENDOR = …, GL_VENDOR = Disabled, …
- * ErrorMessage = …" (no usable GPU process). Firefox names blocklist entries
- * in its message.
+ * ErrorMessage = …" (no usable GPU process). Firefox (dom/canvas/WebGLContext.cpp):
+ * "WebGL creation failed: * AllowWebgl2:false restricts context creation on
+ * this system." when its GfxInfo blocklist refuses FEATURE_WEBGL2 for this
+ * graphics card or driver (gfxPlatform::InitWebGLConfig). WebGL 1 is allowed on
+ * unknown configurations and WebGL 2 is not (GfxInfoBase::
+ * OnlyAllowFeatureOnKnownConfig), so a Windows PC with no graphics driver
+ * ("Microsoft Basic Display Adapter"), a virtual machine, or an unknown vendor or
+ * driver version gets WebGL 1 (often in software) but no WebGL 2. Firefox's
+ * hardware-acceleration checkbox does not change this; webgl.force-enabled skips
+ * the check. "WebGL is currently disabled." is webgl.disabled = true or
+ * Troubleshoot Mode. webgl.enable-webgl2 = false fires no event at all: the
+ * "webgl2" context type is simply not recognised (dom/canvas/CanvasUtils.cpp).
  *
  * Page code shared by every era; nothing here is era-specific.
  */
@@ -25,7 +35,7 @@ import { classifyGpu, unmaskedRenderer } from '../telemetry/WorldReporter.js';
 
 export const WEBGL_FAILURE_CAUSES = [
   'blocklisted', 'acceleration_disabled', 'gpu_process_unavailable', 'context_lost_after_crash',
-  'webgl1_only', 'no_webgl', 'unknown', 'disabled_by_policy',
+  'webgl1_only', 'no_webgl', 'unknown', 'disabled_by_policy', 'webgl2_blocked', 'webgl_turned_off',
 ] as const;
 export type WebGlFailureCause = typeof WEBGL_FAILURE_CAUSES[number];
 
@@ -71,6 +81,10 @@ export function classifyWebGlFailure(e: WebGlFailureEvidence): WebGlFailureCause
   // Chromium: "disabled by enterprise policy or commandline switch" — a policy or a launch switch
   // (e.g. --disable-3d-apis), which no flag undoes (live 2026-10-17, headless Chrome 148).
   if (/enterprise policy|commandline switch|command line switch/.test(s)) return 'disabled_by_policy';
+  // Firefox: WebGL 2 alone refused by the GfxInfo blocklist (unknown/missing driver, VM, blocklisted driver).
+  if (/allowwebgl2\s*:\s*false/.test(s)) return 'webgl2_blocked';
+  // Firefox: webgl.disabled = true, or Firefox running in Troubleshoot (safe) Mode.
+  if (/webgl is currently disabled/.test(s)) return 'webgl_turned_off';
   if (/block ?list|black ?list/.test(s)) return 'blocklisted';
   if (e.webgl1 && classifyGpu(e.webgl1Renderer) === 'software') return 'acceleration_disabled';
   if (e.webgl1) return 'webgl1_only';
@@ -180,8 +194,16 @@ function flagsStep(browser: HelpBrowser): string | null {
 function accelerationStep(browser: HelpBrowser): string | null {
   if (browser === 'chrome') return 'Open Settings > System (chrome://settings/system), turn on "Use graphics acceleration when available", and click Relaunch.';
   if (browser === 'edge') return 'Open Settings > System and performance (edge://settings/system), turn on "Use graphics acceleration when available", and restart Edge.';
-  if (browser === 'firefox') return 'Open Settings > General > Performance, untick "Use recommended performance settings", tick the hardware acceleration box, and restart Firefox.';
+  // Firefox's hardware-acceleration checkbox only sets the compositor; it does not decide whether WebGL may use
+  // the graphics card (WebGLContext::CreateAndInitGL reads it only for the power preference), so it gets no step here.
   return null;
+}
+
+function driverStep(os: HelpOs, browser: HelpBrowser): string {
+  const restart = browser === 'firefox' ? 'restart Firefox' : 'restart the browser';
+  return os === 'windows'
+    ? `Install the latest graphics driver from your graphics card's maker (Intel, AMD or NVIDIA), then ${restart}.`
+    : `Update your graphics driver, then ${restart}.`;
 }
 
 const FIREFOX_SUPPORT = 'about:support (the Graphics section) shows why Firefox turned WebGL off. '
@@ -215,7 +237,23 @@ export function webgl2HelpText(failure: WebGlFailure | null, platform: HelpPlatf
     case 'disabled_by_policy':
       parts.push(POLICY);
       break;
+    case 'webgl2_blocked':
+      parts.push(`${browser === 'firefox' ? 'Firefox' : 'The browser'} has turned WebGL 2 off because it doesn't recognise this computer's graphics driver`
+        + (os === 'windows' ? ' (usually no graphics driver is installed, and Windows is using "Microsoft Basic Display Adapter", or this is a virtual machine).' : '.'),
+      driverStep(os, browser),
+      browser === 'firefox' ? 'Or open about:config, set webgl.force-enabled to true, and reload this page (at your own risk: it may be slow or unstable).' : null);
+      break;
+    case 'webgl_turned_off':
+      parts.push(browser === 'firefox'
+        ? 'WebGL is turned off in Firefox. Open about:config, set webgl.disabled to false, and reload this page. If Firefox is in Troubleshoot Mode, restart it normally.'
+        : 'WebGL is turned off in this browser\'s settings. Turn it back on and reload this page.');
+      break;
     case 'acceleration_disabled':
+      if (browser === 'firefox') {
+        parts.push('Firefox is drawing without the graphics card, which usually means it can\'t use this computer\'s graphics driver.',
+          driverStep(os, browser), FIREFOX_SUPPORT);
+        break;
+      }
       parts.push('The browser is drawing without the graphics card (hardware acceleration looks turned off).',
         accelerationStep(browser) ?? 'Turn on hardware (graphics) acceleration in the browser settings and restart it, or try Chrome or Firefox.');
       break;
@@ -231,21 +269,31 @@ export function webgl2HelpText(failure: WebGlFailure | null, platform: HelpPlatf
       }
       break;
     case 'webgl1_only':
+      if (browser === 'firefox') {
+        // webgl.enable-webgl2 = false is silent (no creation-error event), so it lands here.
+        parts.push('It can only start the older WebGL 1.', 'Open about:config, check that webgl.enable-webgl2 is true, and reload this page.',
+          'If it is, update Firefox and your graphics driver.');
+        break;
+      }
       parts.push('It can only start the older WebGL 1, which usually means an old graphics driver or browser.',
         'Update the browser and your graphics driver.',
-        chromium ? `If that doesn't help: ${flagsStep(browser)}` : browser === 'firefox' ? FIREFOX_SUPPORT : 'Or try a current Chrome or Firefox.');
+        chromium ? `If that doesn't help: ${flagsStep(browser)}` : 'Or try a current Chrome or Firefox.');
       break;
     case 'no_webgl':
+      if (browser === 'firefox') {
+        parts.push('WebGL is turned off or blocked in Firefox.', 'Open about:config, check that webgl.disabled is false, and allow WebGL for this site in any privacy add-on.', FIREFOX_SUPPORT);
+        break;
+      }
       parts.push('WebGL is turned off or unavailable in this browser.',
         accelerationStep(browser) ?? 'Make sure hardware (graphics) acceleration is turned on in the browser settings.',
-        chromium ? `${gpuPage} shows whether WebGL is disabled and why.` : browser === 'firefox' ? FIREFOX_SUPPORT : 'Or try a current Chrome, Edge or Firefox.');
+        chromium ? `${gpuPage} shows whether WebGL is disabled and why.` : 'Or try a current Chrome, Edge or Firefox.');
       break;
     default:
       parts.push('Use a current Chrome, Edge, Firefox or Safari on a desktop or laptop, and make sure hardware acceleration '
         + '(graphics acceleration) is turned on in the browser settings.',
       `${RESTART} (in Chrome, chrome://gpu shows it).`, 'If it keeps happening, update your graphics driver.');
   }
-  if (os === 'windows' && (cause === 'blocklisted' || cause === 'acceleration_disabled' || cause === 'gpu_process_unavailable' || cause === 'no_webgl')) {
+  if (os === 'windows' && browser !== 'firefox' && (cause === 'blocklisted' || cause === 'acceleration_disabled' || cause === 'gpu_process_unavailable' || cause === 'no_webgl')) {
     parts.push(WORK_PC);
   }
   return parts.filter((p): p is string => !!p).join(' ');

@@ -40,7 +40,7 @@ export interface ClientErrorReport {
 /** The renderer's WEBGL_FAILURE_CAUSES (boot/WebGlDiagnosis.ts); the bridge doesn't import page code. */
 export const WEBGL_FAILURE_CAUSES = [
   'blocklisted', 'acceleration_disabled', 'gpu_process_unavailable', 'context_lost_after_crash',
-  'webgl1_only', 'no_webgl', 'unknown', 'disabled_by_policy',
+  'webgl1_only', 'no_webgl', 'unknown', 'disabled_by_policy', 'webgl2_blocked', 'webgl_turned_off',
 ] as const;
 export type WebGlFailureCause = typeof WEBGL_FAILURE_CAUSES[number];
 export const WEBGL_STATUS_MAX = 120;

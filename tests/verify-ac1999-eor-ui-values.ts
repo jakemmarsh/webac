@@ -36,8 +36,12 @@ const noStrings = (): null => null;
 
 describe('the client profile: 1999 values from the 1999 client.exe, end of retail unchanged', () => {
   it('end of retail and every classic era share one profile (they run the end-of-retail acclient.exe)', () => {
-    for (const id of CLASSIC_IDS) expect(eraClientRules(eraProfile(id)), id).toBe(EOR);
+    for (const id of CLASSIC_IDS.filter((i) => i !== 'classicace-customdm')) expect(eraClientRules(eraProfile(id)), id).toBe(EOR);
     expect(eraClientRules(null)).toBe(EOR);
+    // acclient_CustomDM.exe differs only in one map note's name (BUG.ac1999-map-eor-art; verify-ac1999-map-panel.ts).
+    const cdm = eraClientRules(eraProfile('classicace-customdm'));
+    expect({ ...cdm, mapPanel: null }).toEqual({ ...EOR, mapPanel: null });
+    expect(cdm.mapPanel.notes.map((n) => n.name).filter((n, i) => n !== EOR.mapPanel.notes[i].name)).toEqual(['Other']);
   });
 
   it('1. paperdoll slots: the 1999 InventoryPanel\'s eight (0x1bf8000); end of retail every slot', () => {

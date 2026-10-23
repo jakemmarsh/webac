@@ -28,7 +28,7 @@ import { SkillTable } from '@ac/dat-parser/file-types/SkillTable.js';
 import { SecondaryAttributeTable } from '@ac/dat-parser/file-types/SecondaryAttributeTable.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, resolveCastTarget, inqSpellTargetType, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
+import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
 import { APPRAISAL_1999_STRING } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
@@ -38,7 +38,7 @@ import { createLoadingOverlay, revealLoadingPlaceholder, fadeOutLoadingOverlay }
 import { testResearchFormula } from './ui/SpellResearch1999.js';
 import { attachPreworldScale } from './ui/PreworldScale.js';
 import { buildVendorSellRows } from './ui/VendorSellDrag.js';
-import { useObjectSelectTargetText, spellCastTargetCheck, restoreSpellBars, type SpellTargetObject } from './ui/SpellShortcutBar.js';
+import { useObjectSelectTargetText, planSpellCast, restoreSpellBars, type SpellTargetObject } from './ui/SpellShortcutBar.js';
 import {
   buildPatchCancelButton, buildPatchCopyright, buildEpilogueFrame, renderPatchLabel,
   PATCH_CANCEL_FONT, PATCH_CANCEL_PRESS_SOUND, PATCH_COPYRIGHT, PATCH_CONNECT_TEXT, PATCH_TITLE_IMAGE,
@@ -185,6 +185,7 @@ import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldD
 import { eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
 import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
 import { eraClientRules, unsupportedFeatures, hiddenBy, FEATURE_COMMANDS, type EraFeature } from './era/EraFeatures.js';
+import { setAgentTownsEra } from './agent/towns.js';
 import { Ac1999World, ac1999ServerKey, type Ac1999PatchEvent } from './era/Ac1999World.js';
 import { eraPortalOverlay, eraStreamPlan, eraUnavailableText, forgetImportedEraFiles, eraSwitchReloadUrl, planEraDats, resolveBootEra, stashEraSwitch, takeEraSwitch, type DatSource, type EraDatPlan, type EraStreamPlan, type EraSwitch } from './era/EraBoot.js';
 import { EnvCellRenderer } from './world/EnvCellRenderer.js';
@@ -1558,6 +1559,8 @@ async function main() {
   const eraUnsupported = unsupportedFeatures(activeEra);
   // The era's own client-code rules (a cast / attack stopping the player).
   const eraRules = eraClientRules(activeEra);
+  // The agent's town names (agent/towns.ts): the era's map notes, or its world's towns (1999 has no notes).
+  setAgentTownsEra(activeEra);
   // VISUAL.ac1999-spell-charge — the 1999 per-spell Charge the spell examine text prints.
   const spellCharge1999 = eraRules.appraisalText === 'ac1999' ? new SpellCharge1999() : null;
   // BUG.ac1999-chat-toggle-local — a client whose @chat is its own switch (1999): the local-speech gate.
@@ -7505,7 +7508,11 @@ async function main() {
       // else — Other buffs, bolts, the three PortalLink Tie spells cast
       // at a selected portal/lifestone — requires a selection and fails
       // locally with the retail TargetNotAcquired string without one.
-      let castTargetGuid = currentTargetGuid;
+      // webac#9 — the ONE global selection (ACCWeenieObject::selectedID), an
+      // inventory or paperdoll item included; currentTargetGuid is only the
+      // world half (an inventory click clears it).
+      const selectedGuid = selectedObjectId() || null;
+      let castTargetGuid = selectedGuid;
       const rawTargeting = spellTable?.spells.get(spell.id);
       // BUG.spellcast-cost-components — retail ClientMagicSystem::CastSpell
       // @ 00568040 checks component OWNERSHIP before any target check when
@@ -7527,25 +7534,25 @@ async function main() {
         // SWEEP1006B.magic-casting.cast-targeting-uses-dat-noncomponenttargettype —
         // CastSpell @ 00568040 decides on CSpellBase::InqTargetType (the
         // base formula's last talisman), not NonComponentTargetType.
-        const targetType = inqSpellTargetType(rawTargeting.formula);
-        const resolution = resolveCastTarget(rawTargeting.bitfield, targetType, currentTargetGuid, myPlayerGuid);
-        if (resolution.kind === 'no-target') {
+        // The era's talisman table (EraClientRules.talismanTargetTypes) and
+        // self rule; ObjectCompatibleWithSpell(selectedID, spell, false, true)
+        // @ 00567c30: a loud refusal sends nothing; a pass prints "Casting %hs".
+        const plan = planSpellCast({
+          bitfield: rawTargeting.bitfield, formula: rawTargeting.formula, spellName: rawTargeting.name || spell.name,
+          selectedGuid, selfGuid: myPlayerGuid, targetObjectFor: spellTargetObjectFor, rules: eraRules,
+        });
+        if (plan.kind === 'no-target') {
           raiseClientNotice(gameUI, CN.castNoTarget);
           console.log(`[AC] Cast suppressed: spell ${spell.id} requires a target and none is selected`);
           return;
         }
-        if (resolution.kind === 'targeted' && (rawTargeting.bitfield & SPELL_FLAG_SELF_TARGETED) === 0) {
-          // ObjectCompatibleWithSpell(selectedID, spell, false, true) @ 00567c30:
-          // a loud refusal sends nothing; a pass prints "Casting %hs".
-          const check = spellCastTargetCheck(targetType, spellTargetObjectFor(resolution.targetGuid), rawTargeting.name || spell.name);
-          if (!check.ok) {
-            if (check.text !== null) raiseClientNotice(gameUI, CN.castTargetRefused, { text: check.text });
-            console.log(`[AC] Cast suppressed: spell ${spell.id} target 0x${resolution.targetGuid.toString(16)} refused (${check.refusal})`);
-            return;
-          }
-          raiseClientNotice(gameUI, CN.castingSpell, { text: check.text });
+        if (plan.kind === 'refused') {
+          if (plan.text !== null) raiseClientNotice(gameUI, CN.castTargetRefused, { text: plan.text });
+          console.log(`[AC] Cast suppressed: spell ${spell.id} target 0x${plan.targetGuid.toString(16)} refused (${plan.refusal})`);
+          return;
         }
-        castTargetGuid = resolution.kind === 'targeted' ? resolution.targetGuid : null;
+        if (plan.castingText !== null) raiseClientNotice(gameUI, CN.castingSpell, { text: plan.castingText });
+        castTargetGuid = plan.targetGuid;
       }
       sendCastSpellAction(spell.id, castTargetGuid);
       // No local cast animation: the server drives the whole choreography on
@@ -7585,19 +7592,22 @@ async function main() {
       const item = playerState.equipment.getAll().find((e) => e.id === itemGuid) ?? playerState.inventory.getItem(itemGuid);
       if (!item || !sendGameAction) return;
       if (isUseWithTargetItem(item.usable)) {
+        // ItemHolder::UseObject reads the global selectedID: a pack or
+        // paperdoll item counts (currentTargetGuid is only the world half).
         const t = gameUI.hudState.target;
-        if (!currentTargetGuid || !t) {
+        const selectedGuid = selectedObjectId();
+        if (!selectedGuid || !t) {
           gameUI.displayErrorText(useObjectSelectTargetText(item.name));
           console.log(`[AC] Endowment use: no target selected for ${item.name}`);
           return;
         }
-        if (!isUseTargetCompatible(item.targetType, t.itemType ?? 0)) {
+        if (!isUseTargetCompatible(item.targetType, spellTargetObjectFor(selectedGuid)?.itemType ?? t.itemType ?? 0)) {
           gameUI.displayErrorText(buildCannotUseMessage(item.name, t.name));
-          console.log(`[AC] Endowment use blocked client-side: src=0x${item.id.toString(16)} targetType=0x${(item.targetType ?? 0).toString(16)} tgt=0x${currentTargetGuid.toString(16)} itemType=0x${(t.itemType ?? 0).toString(16)}`);
+          console.log(`[AC] Endowment use blocked client-side: src=0x${item.id.toString(16)} targetType=0x${(item.targetType ?? 0).toString(16)} tgt=0x${selectedGuid.toString(16)} itemType=0x${(t.itemType ?? 0).toString(16)}`);
           return;
         }
-        sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(item.id, currentTargetGuid));
-        console.log(`[AC] Sent UseWithTarget (endowment): src=0x${item.id.toString(16)} "${item.name}" tgt=0x${currentTargetGuid.toString(16)} "${t.name}"`);
+        sendGameAction(GameActionType.UseWithTarget, buildUseWithTargetPayload(item.id, selectedGuid));
+        console.log(`[AC] Sent UseWithTarget (endowment): src=0x${item.id.toString(16)} "${item.name}" tgt=0x${selectedGuid.toString(16)} "${t.name}"`);
         return;
       }
       const payload = new BinaryWriter(4);
@@ -17080,6 +17090,7 @@ async function main() {
           gameUI['spellCallbacks'].onCastSpell?.(index);
           return true;
         },
+        spellSelfTargetableTypeMask: () => eraRules.spellSelfTargetableTypeMask,
         chat: (text) => gameUI.callbacks.onChatSend?.(text),
         // The agent's "/sit" note (AgentApi.poseNotCommand): this era's ChatPoseTable and the client's own command table.
         chatPose: (word) => chatPoseTable?.stateFor(word.toLowerCase()) ?? null,

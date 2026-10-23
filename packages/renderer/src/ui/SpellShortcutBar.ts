@@ -41,7 +41,7 @@
  */
 
 // SpellFlags.SelfTargeted (CSpellBase::_bitfield & 8) — one source, shared with CastTargeting.
-import { SPELL_FLAG_SELF_TARGETED } from '@ac/shared';
+import { SPELL_FLAG_SELF_TARGETED, inqSpellTargetType, resolveCastTarget, type TalismanTargetTypes } from '@ac/shared';
 
 /* ── layout 0x21000010 / template 0x10000341 ───────────────────────── */
 
@@ -500,7 +500,10 @@ export function restoreSpellBars<T>(
 
 /* ── the Cast button's target logic ────────────────────────────────── */
 
-/** ItemType bits ObjectCompatibleWithSpellTargetType @ 00567230 treats as "may target the caster" (param_2 & 0x8107). */
+/**
+ * ItemType bits ObjectCompatibleWithSpellTargetType @ 00567230 treats as "may target the caster" (param_2 & 0x8107):
+ * end of retail's. The 1999 client has none (EraClientRules.spellSelfTargetableTypeMask = 0).
+ */
 export const SELF_TARGETABLE_TYPE_MASK = 0x8107;
 
 /**
@@ -550,13 +553,20 @@ export type SpellTargetRefusal = 'no-target-type' | 'self' | 'unknown' | 'stack'
  *  5. `((T & InqType()) == 0 && (T & 0x8107) == 0) || (!IsPlayer() &&
  *     !(_bitfield & 0x10 Attackable))` → 'incompatible'.
  *  6. _pet_owner != 0 → 'pet'.
+ *
+ * `selfTypeMask` is the era's 0x8107 (EraClientRules.spellSelfTargetableTypeMask).
+ * The 1999 client.exe's ObjectCompatibleWithSpellTargetType @ 0x4d20c0 has
+ * no such exception (mask 0): the caster is always refused ("You cannot cast
+ * this spell upon yourself" @ 0x4d214e) and the type test is the bare
+ * `T & InqType()` @ 0x4d21cd. Its other steps match (no pet step: 1999 had
+ * no pets, so step 6 never fires there).
  */
-export function spellTargetRefusal(targetType: number, target: SpellTargetObject | null): SpellTargetRefusal | null {
+export function spellTargetRefusal(targetType: number, target: SpellTargetObject | null, selfTypeMask: number = SELF_TARGETABLE_TYPE_MASK): SpellTargetRefusal | null {
   if (targetType === 0) return 'no-target-type';
-  if ((targetType & SELF_TARGETABLE_TYPE_MASK) === 0 && target?.isSelf) return 'self';
+  if ((targetType & selfTypeMask) === 0 && target?.isSelf) return 'self';
   if (!target) return 'unknown';
   if ((target.stackSize ?? 0) >= 2) return 'stack';
-  const typeMismatch = (targetType & target.itemType) === 0 && (targetType & SELF_TARGETABLE_TYPE_MASK) === 0;
+  const typeMismatch = (targetType & target.itemType) === 0 && (targetType & selfTypeMask) === 0;
   const flags = target.objectDescFlags;
   const notAttackable = !target.isPlayer && flags !== undefined && (flags & PWD_ATTACKABLE) === 0;
   if (typeMismatch || notAttackable) return 'incompatible';
@@ -565,8 +575,8 @@ export function spellTargetRefusal(targetType: number, target: SpellTargetObject
 }
 
 /** The quiet form (param_3 = true) the Cast-button tooltip uses. */
-export function objectCompatibleWithSpellTargetType(targetType: number, target: SpellTargetObject | null): boolean {
-  return spellTargetRefusal(targetType, target) === null;
+export function objectCompatibleWithSpellTargetType(targetType: number, target: SpellTargetObject | null, selfTypeMask: number = SELF_TARGETABLE_TYPE_MASK): boolean {
+  return spellTargetRefusal(targetType, target, selfTypeMask) === null;
 }
 
 /** "Casting %hs" (.rdata 0x7ce8f0) — ObjectCompatibleWithSpell @ 00567c30's 0x1a line on a compatible target. */
@@ -596,9 +606,51 @@ export function spellTargetRefusalText(refusal: SpellTargetRefusal, targetName: 
  * with "Casting %hs" as the 0x1a line.
  */
 export function spellCastTargetCheck(
-  targetType: number, target: SpellTargetObject | null, spellName: string,
+  targetType: number, target: SpellTargetObject | null, spellName: string, selfTypeMask: number = SELF_TARGETABLE_TYPE_MASK,
 ): { ok: true; text: string } | { ok: false; refusal: SpellTargetRefusal; text: string | null } {
-  const refusal = spellTargetRefusal(targetType, target);
+  const refusal = spellTargetRefusal(targetType, target, selfTypeMask);
   if (refusal === null) return { ok: true, text: castingSpellText(spellName) };
   return { ok: false, refusal, text: spellTargetRefusalText(refusal, target?.name ?? '') };
+}
+
+/** What ClientMagicSystem::CastSpell does with a cast once its components passed. */
+export type SpellCastPlan =
+  /** Send the cast (null target = CastUntargetedSpell); `castingText` is the 0x1a "Casting %hs" line, if any. */
+  | { kind: 'send'; targetGuid: number | null; castingText: string | null }
+  /** Nothing selected: "You must select a suitable target before casting this spell". */
+  | { kind: 'no-target' }
+  /** ObjectCompatibleWithSpell refused the selection (`text` null = silent). */
+  | { kind: 'refused'; targetGuid: number; refusal: SpellTargetRefusal; text: string | null };
+
+/**
+ * The target half of ClientMagicSystem::CastSpell @ 00568040 (1999: UI_CastSpell
+ * @ 0x4d1bd0): the spell's formula target type (InqTargetType through the era's
+ * talisman table), then the ONE global selection, ACCWeenieObject::selectedID
+ * (1999: the global @ 0x6576f4, read by 0x4c8300 from 0x4d1d82). That selection
+ * is whatever was last selected anywhere: a world object, the player, or an
+ * item in a pack or on the paperdoll, an item enchantment's usual target
+ * (webac#9: a selected Yumi was ignored and Blood Drinker II said "You must
+ * select a suitable target"). A selection then goes through
+ * ObjectCompatibleWithSpell(selectedID, spell, false, true) @ 00567c30
+ * (1999: @ 0x4d1f80 → 0x4d20c0).
+ */
+export function planSpellCast(args: {
+  bitfield: number;
+  formula: readonly number[];
+  spellName: string;
+  /** The global selection (0 / null = nothing selected). */
+  selectedGuid: number | null;
+  selfGuid: number | null;
+  targetObjectFor: (guid: number) => SpellTargetObject | null;
+  rules: { talismanTargetTypes: TalismanTargetTypes; spellSelfTargetableTypeMask: number };
+}): SpellCastPlan {
+  const targetType = inqSpellTargetType(args.formula, args.rules.talismanTargetTypes);
+  const selected = args.selectedGuid ? args.selectedGuid >>> 0 : null;
+  const resolution = resolveCastTarget(args.bitfield, targetType, selected, args.selfGuid);
+  if (resolution.kind === 'no-target') return { kind: 'no-target' };
+  if (resolution.kind === 'untargeted') return { kind: 'send', targetGuid: null, castingText: null };
+  if ((args.bitfield & SPELL_FLAG_SELF_TARGETED) !== 0) return { kind: 'send', targetGuid: resolution.targetGuid, castingText: null };
+  const check = spellCastTargetCheck(targetType, args.targetObjectFor(resolution.targetGuid), args.spellName, args.rules.spellSelfTargetableTypeMask);
+  if (!check.ok) return { kind: 'refused', targetGuid: resolution.targetGuid, refusal: check.refusal, text: check.text };
+  return { kind: 'send', targetGuid: resolution.targetGuid, castingText: check.text };
 }

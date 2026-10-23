@@ -29,7 +29,7 @@
  * so each era's own table decides what exists.
  */
 import { resolveVtankIds, SPELL_FLAG_SELF_TARGETED, vtItemIs, vtOption, vtStoredValue, type PlanItem, type PlanSkill, type PlanSpell, type RoutineProfile, type Stance, type VtankProfileData } from '@ac/shared';
-import { AgentApi, spellCastsOnYou } from '../AgentApi.ts';
+import { AgentApi } from '../AgentApi.ts';
 import { beyondSetting } from '../beyondVtank.ts';
 import type { AgentResult } from '../types.ts';
 import { buffTimeText } from '../format.ts';
@@ -1300,7 +1300,7 @@ export class VtMacro {
         const seen = on.length ? this.api.gearSpellLeftOn(on.map((i) => i.name), spell.category, spell.power) : null;
         return own === null ? seen : seen === null ? own : Math.max(own, seen);
       },
-      castsOnYou: spellCastsOnYou,
+      castsOnYou: (s) => this.api.castsOnYou(s),
       minChance: Math.max(0, Number(beyondSetting(settings, 'BuffMinLandChance')) || 0) / 100,
     });
     // A family you know only Other spells of: said once (not every buff cycle), never cast on you.

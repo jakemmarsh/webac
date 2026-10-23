@@ -382,6 +382,11 @@ export interface AgentHost {
    */
   attacking?(): boolean;
   cast(spellId: number, target: number | null): boolean;
+  /**
+   * The era client's target-type bits that let a non-Self spell be cast at you (EraClientRules.spellSelfTargetableTypeMask:
+   * end of retail 0x8107, 1999 0). Absent: end of retail's.
+   */
+  spellSelfTargetableTypeMask?(): number;
   chat(text: string): void;
   /** The ChatPoseTable's (0x0E000007, this era's DAT) motion state for a pose word ("sit" → "SitState"), or null. */
   chatPose?(word: string): string | null;
@@ -1119,12 +1124,19 @@ export function fullBoostLine(line: string): { spell: string; vital: string; who
  * on your gear), not a creature-only Other spell (Creature 0x10: Heal Other, Magic Resistance Other). A spell whose target
  * type isn't known is let through to the client's check.
  */
-export function spellCastsOnYou(s: Pick<AgentSpell, 'self' | 'targetType'>): boolean {
+export function spellCastsOnYou(s: Pick<AgentSpell, 'self' | 'targetType'>, selfTypeMask: number = SELF_TARGETABLE_TYPE_MASK): boolean {
   if (s.self || s.targetType === undefined) return true;
-  return (s.targetType & SELF_TARGETABLE_TYPE_MASK) !== 0;
+  // The era's mask (EraClientRules.spellSelfTargetableTypeMask): 0 in 1999, whose client refuses the caster for every
+  // non-Self spell (@ 0x4d20c0), item spells included (webac#9).
+  return (s.targetType & selfTypeMask) !== 0;
 }
 
-export function isArmorRedirectBuff(s: Pick<AgentSpell, 'buff' | 'targetType'>): boolean {
+/**
+ * An item buff that, cast with no target, goes on your own armor (ACE redirects a self cast to every worn piece). Never in
+ * an era whose client refuses the caster (`selfTypeMask` 0: 1999, where each item is buffed on its own).
+ */
+export function isArmorRedirectBuff(s: Pick<AgentSpell, 'buff' | 'targetType'>, selfTypeMask: number = SELF_TARGETABLE_TYPE_MASK): boolean {
+  if (selfTypeMask === 0) return false;
   if (!s.buff || s.targetType === undefined) return false;
   return (s.targetType & 0x2) !== 0 && (s.targetType & 0x10) === 0;
 }
@@ -7403,7 +7415,7 @@ export class AgentApi {
       // was offered as "target=self casts it on you" and the client refused it ("You cannot cast this spell upon
       // yourself", Arcanist, 2026-10-17 11:08:33Z).
       const why = spellSideOf(twin) !== 'other' ? ' (it goes on you only)'
-        : spellCastsOnYou(twin) ? ' (target=self casts it on you)'
+        : this.castsOnYou(twin) ? ' (target=self casts it on you)'
         : ` (it goes on someone else only: the game won't let you cast ${twin.name} on yourself; cast it on a fellow with target=<their name>)`;
       return { ok: false, message: `you don't know ${spell}; you know ${twin.name}${why}` };
     }
@@ -7421,6 +7433,16 @@ export class AgentApi {
   }
 
   /** Whether a target argument names you: "self" / "me" / "myself", your name or your guid. */
+  /** The era client's self-target bits (end of retail's when the host doesn't say). */
+  selfTargetableTypeMask(): number {
+    return this.host.spellSelfTargetableTypeMask?.() ?? SELF_TARGETABLE_TYPE_MASK;
+  }
+
+  /** spellCastsOnYou under this era's client rule. */
+  castsOnYou(s: Pick<AgentSpell, 'self' | 'targetType'>): boolean {
+    return spellCastsOnYou(s, this.selfTargetableTypeMask());
+  }
+
   private namesYou(target: TargetArg): boolean {
     const me = this.host.self();
     if (typeof target === 'string') return /^(self|me|myself)$/i.test(target.trim()) || (!!me && target.trim().toLowerCase() === me.name.toLowerCase());
@@ -7431,11 +7453,11 @@ export class AgentApi {
   private castTarget(s: AgentSpell, target: TargetArg): number | null | AgentResult {
     // Impenetrability and the Banes with no target go on your own armor, as cast on yourself (ACE redirects a self cast
     // to every worn piece): "Impenetrability IV needs a target … or self" while Self spells defaulted (Arcanist, 2026-10-16).
-    const onYou = s.self || isArmorRedirectBuff(s);
+    const onYou = s.self || isArmorRedirectBuff(s, this.selfTargetableTypeMask());
     // An Other spell whose target type leaves you out (a creature-only buff: Magic Resistance Other, Heal Other) is never
     // sent at you: the client's own check refuses it (ObjectCompatibleWithSpellTargetType @ 00567230: "You cannot cast
     // this spell upon yourself").
-    if ((target === 'self' || target === 'me' || (target !== null && target !== undefined && target !== '' && this.namesYou(target))) && !spellCastsOnYou(s)) {
+    if ((target === 'self' || target === 'me' || (target !== null && target !== undefined && target !== '' && this.namesYou(target))) && !this.castsOnYou(s)) {
       return { ok: false, message: `${s.name} can't be cast on yourself: it goes on someone else only (the game answers "You cannot cast this spell upon yourself"). Cast it on a fellow (target=<their name>)${this.selfTwinNote(s)}` };
     }
     if (target === 'self' || target === 'me' || ((target === null || target === undefined) && onYou)) return null;
@@ -7451,6 +7473,10 @@ export class AgentApi {
     if (sel && o && kind === 'monster' && this.host.isDying(sel)) return { ok: false, targetGone: true, message: `${s.name} not cast: your target ${o.name} is dead (pick another target)${this.deadTargetNote(sel)}` };
     if (sel && o && this.released(o)) return { ok: false, message: `${s.name} not cast: your target ${o.name} #${(sel >>> 0).toString(16)} is out of sight: ${this.releasedWhy(o)}` };
     if (sel && (kind === 'monster' || kind === 'npc' || kind === 'player')) return sel;
+    // An item spell where you can't stand in for your gear (1999: each item is buffed on its own): the item is the target.
+    if (s.targetType !== undefined && (s.targetType & 0x10) === 0 && !this.castsOnYou(s)) {
+      return { ok: false, message: `${s.name} needs a target: pass target= (the weapon or armor to cast it on, by name or #id)` };
+    }
     return { ok: false, message: `${s.name} needs a target: pass target= (a creature or player), or "self"` };
   }
 

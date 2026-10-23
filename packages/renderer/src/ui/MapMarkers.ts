@@ -65,6 +65,44 @@ export interface MapMarkerArea { x0: number; x1: number; y0: number; y1: number 
 /** The EoL DAT's values (client_local_English.dat 0x21000026:0x100001ec). */
 export const MAP_MARKER_AREA: Readonly<MapMarkerArea> = { x0: 6, x1: 247, y0: 8, y1: 258 };
 
+/**
+ * The map picture: 0x0600127d, 257x267, in BOTH clients — gmMapUI's map
+ * element media and the 1999 client.exe's MapSubPanel ctor @ 0x00507f70
+ * (`push 0x600127d` @ 0x005080e4, at (0x16, 0x3f) 0x101 x 0x10b). It is
+ * world art: each era's portal draws its own Dereth under that id (the 1999
+ * portal a 1999 continent with no Marae Lassel, Halaetan Isles or
+ * Aerlinthe; ClassicACE CustomDM / Infiltration their classic art; end of
+ * retail and Classic Dereth the end-of-retail art). GameUI reads it from the
+ * world portal (webac#10).
+ */
+export const MAP_IMAGE = 0x0600127d;
+
+/**
+ * BUG.ac1999-map-eor-art (webac#10) — the 1999 client.exe's map: the
+ * landscape box its MapSubPanel places the player in, relative to the map
+ * picture (drawn at panel (0x16, 0x3f) @ 0x005080e4).
+ *  - MapSubPanel update @ 0x0050899e / 0x005089c8: the player's landscape
+ *    cell (lx, ly) from 0x004371c0 lands at panel
+ *    (0x1c + ⌊lx·0xf5 / 2048⌋, 0x4a + ⌊(0x7ff − ly)·0xf5 / 2048⌋) (signed
+ *    divide, cdq / and 0x7ff / sar 11), and 0x00508ea0 draws the 17x16 icon
+ *    0x0600127c at that point − (8, 8). Map-relative: x0 = 0x1c − 0x16 = 6,
+ *    y0 = 0x4a − 0x3f = 11, 0xf5 = 245 pixels across both ways.
+ *  - MapSubPanel_MouseDown @ 0x005086b0 (a PSR's click): panel x in
+ *    [0x1c, 0x111), y in [0x4a, 0x13f), lx = (x − 0x1c)·0x7ff / 0xf4,
+ *    ly = 0x7ff − (y − 0x4a)·0x7ff / 0xf4 (unsigned divide).
+ * As a MapMarkerArea (x1 − x0 + 1 = 245, x1 − x0 = 244): 6 / 250 / 11 / 255.
+ */
+export const MAP_MARKER_AREA_1999: Readonly<MapMarkerArea> = { x0: 6, x1: 250, y0: 11, y1: 255 };
+
+/**
+ * How an era's client turns a landscape cell into a map position. 'eor':
+ * gmMapUI::PlaceMarkerOnMap on the cell's map coordinate ((c − 1024)·0.1 +
+ * 0.5, so the cell's centre), the click box's far edges excluded. 'ac1999':
+ * the 1999 MapSubPanel on the cell itself (its corner) in integer steps, the
+ * click box's far edges included (MAP_MARKER_AREA_1999).
+ */
+export type MapPlacement = 'eor' | 'ac1999';
+
 /** gmMapUI::Update's re-run cadence while the panel is open (m_nextUpdate = cur_time + 5.0). */
 export const MAP_UPDATE_INTERVAL_SECONDS = 5;
 
@@ -114,6 +152,27 @@ export function placeMarkerOnMap(area: MapMarkerArea, icon: MarkerSize, ew: numb
   const x = area.x0 - halfW - ftol((ew * PLACE_MARKER_SCALE + PLACE_MARKER_BIAS) * width * PLACE_MARKER_STEP);
   const y = area.y0 - halfH - ftol((PLACE_MARKER_FLIP - (ns * PLACE_MARKER_SCALE + PLACE_MARKER_BIAS)) * height * PLACE_MARKER_STEP);
   return { x, y };
+}
+
+/**
+ * The 1999 MapSubPanel's placement (MAP_MARKER_AREA_1999): the icon's
+ * top-left inside the map picture for a landscape cell, x0 − ⌊w/2⌋ +
+ * ⌊lx·(x1 − x0 + 1) / 2048⌋, y0 − ⌊h/2⌋ + ⌊(2047 − ly)·(y1 − y0 + 1) / 2048⌋.
+ */
+export function placeMarkerAtCell1999(area: MapMarkerArea, icon: MarkerSize, cellX: number, cellY: number): { x: number; y: number } {
+  const width = area.x1 - area.x0 + 1;
+  const height = area.y1 - area.y0 + 1;
+  return {
+    x: area.x0 - ftol(icon.width / 2) + Math.trunc((cellX * width) / 2048),
+    y: area.y0 - ftol(icon.height / 2) + Math.trunc(((PLACE_MARKER_FLIP - cellY) * height) / 2048),
+  };
+}
+
+/** A landscape cell's icon place under `placement` (the era client's map). */
+export function placeMarkerAtCell(area: MapMarkerArea, icon: MarkerSize, cellX: number, cellY: number, placement: MapPlacement = 'eor'): { x: number; y: number } {
+  if (placement === 'ac1999') return placeMarkerAtCell1999(area, icon, cellX, cellY);
+  const c = mapCoordsOfCell(cellX, cellY);
+  return placeMarkerOnMap(area, icon, c.ew, c.ns);
 }
 
 /**
@@ -271,12 +330,12 @@ export function houseMarkerPosition<T extends CellPosition>(houseType: number, p
  * position (the outside cell's landscape coordinate → map coordinates →
  * PlaceMarkerOnMap), or null when the icon is hidden.
  */
-export function houseIconPlacement(area: MapMarkerArea, position: CellPosition | null | undefined): { x: number; y: number; coords: MapCoords } | null {
+export function houseIconPlacement(area: MapMarkerArea, position: CellPosition | null | undefined, placement: MapPlacement = 'eor'): { x: number; y: number; coords: MapCoords } | null {
   if (!positionIsValid(position)) return null;
   const outside = gidToLcoord(getOutsideCellId(position!));
   if (!outside) return null;
   const coords = mapCoordsOfCell(outside.x, outside.y);
-  return { ...placeMarkerOnMap(area, MAP_HOUSE_ICON_SIZE, coords.ew, coords.ns), coords };
+  return { ...placeMarkerAtCell(area, MAP_HOUSE_ICON_SIZE, outside.x, outside.y, placement), coords };
 }
 
 /**
@@ -284,10 +343,10 @@ export function houseIconPlacement(area: MapMarkerArea, position: CellPosition |
  * and the icon's place for the player's landscape cell; inside, "" and no
  * icon (SetVisible(0)).
  */
-export function playerMarkerUpdate(area: MapMarkerArea, cellX: number, cellY: number, outside: boolean): { text: string; icon: { x: number; y: number } | null; coords: MapCoords | null } {
+export function playerMarkerUpdate(area: MapMarkerArea, cellX: number, cellY: number, outside: boolean, placement: MapPlacement = 'eor'): { text: string; icon: { x: number; y: number } | null; coords: MapCoords | null } {
   if (!outside) return { text: '', icon: null, coords: null };
   const coords = mapCoordsOfCell(cellX, cellY);
-  return { text: mapCoordinateText(coords), icon: placeMarkerOnMap(area, MAP_PLAYER_ICON_SIZE, coords.ew, coords.ns), coords };
+  return { text: mapCoordinateText(coords), icon: placeMarkerAtCell(area, MAP_PLAYER_ICON_SIZE, cellX, cellY, placement), coords };
 }
 
 /**
@@ -298,10 +357,13 @@ export function playerMarkerUpdate(area: MapMarkerArea, cellX: number, cellY: nu
  * then CM_Advocate::Event_Teleport("", that cell at (10, 10, 0), heading 0).
  * 0 = the click missed the marker area.
  */
-export function mapClickTeleportCell(area: MapMarkerArea, px: number, py: number): number {
+export function mapClickTeleportCell(area: MapMarkerArea, px: number, py: number, placement: MapPlacement = 'eor'): number {
   const x = Math.floor(px);
   const y = Math.floor(py);
-  if (x < area.x0 || x >= area.x1 || y < area.y0 || y >= area.y1) return 0;
+  // The 1999 MapSubPanel_MouseDown takes the box's far edges too (x < 0x111 = x1 + 1).
+  const farX = placement === 'ac1999' ? area.x1 + 1 : area.x1;
+  const farY = placement === 'ac1999' ? area.y1 + 1 : area.y1;
+  if (x < area.x0 || x >= farX || y < area.y0 || y >= farY) return 0;
   const lx = Math.trunc(((x - area.x0) * 0x7ff) / (area.x1 - area.x0));
   const ly = Math.trunc(((area.y0 - y) * 0x7ff) / (area.y1 - area.y0)) + 0x7ff;
   return lcoordToGid(lx, ly);

@@ -152,8 +152,8 @@ export {
 } from './magic/SpellFormula.js';
 export type { Version1Tapers, Version1PersonalTaper } from './magic/SpellFormula.js';
 export type { SpellComponentGestureInfo } from './magic/SpellFormula.js';
-export { SPELL_FLAG_SELF_TARGETED, resolveCastTarget, targetTypeFromComponentId, spellFormulaTargetingType, inqSpellTargetType } from './magic/CastTargeting.js';
-export type { CastTargetResolution } from './magic/CastTargeting.js';
+export { SPELL_FLAG_SELF_TARGETED, resolveCastTarget, targetTypeFromComponentId, spellFormulaTargetingType, inqSpellTargetType, TALISMAN_TARGET_TYPES_EOR, TALISMAN_TARGET_TYPES_1999 } from './magic/CastTargeting.js';
+export type { CastTargetResolution, TalismanTargetTypes } from './magic/CastTargeting.js';
 export { SPELL_COMPONENT_DID_MAPPER_ID, SPELL_COMPONENTS_MISSING_TEXT, spellComponentsSatisfied, appropriateSpellFormula, scarabOnlyFormula, componentPowerLevel, INFUSED_MAGIC_AUGMENTATION_INT, PRISMATIC_TAPER_COMPONENT_ID } from './magic/SpellComponentCheck.js';
 
 // Loot materials (Phase 27)
