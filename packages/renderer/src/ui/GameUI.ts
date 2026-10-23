@@ -6217,9 +6217,14 @@ export class GameUI {
    * (handled by buildSystemChatLine via the type argument).
    */
   displayErrorText(text: string, targetWindowId = 0): void {
+    // TELEMETRY.refusal-events — every spew line also reaches the refusal reporter (main.ts sets the tap).
+    try { this.refusalTap?.(text); } catch { /* telemetry never breaks the notice */ }
     this.spewNotice(text);
     this.addSystemMessage(text, ERROR_TEXT_CHAT_COLOR, ERROR_TEXT_TYPE, targetWindowId);
   }
+
+  /** TELEMETRY.refusal-events — telemetry/RefusalReporter.clientSpew, set by main.ts. */
+  refusalTap: ((text: string) => void) | null = null;
 
   /** gmSpewBoxUI::RecvNotice_DisplayFinalStringInfo + Update for one string. */
   spewNotice(text: string): void {
@@ -12794,7 +12799,9 @@ export class GameUI {
     // InqPlayerCoords' cell-quantized (c − 1024) × 0.1 + 0.5 (the map
     // panel's number), not ACE's GetMapCoordStr, and the readout hides
     // wherever InqPlayerCoords fails — any indoor cell (radarCoordinateReadout).
-    const showCoords = this.optionsSettings.showCoordinatesByTheRadar !== false;
+    // BUG.webac11-radar-1999 — the 1999 client's radar prints no coordinates
+    // (EraFeatures 'radarCoordinates'); the map page keeps them.
+    const showCoords = this.optionsSettings.showCoordinatesByTheRadar !== false && this.eraSupports('radarCoordinates');
     if (this.coordCanvas) {
       const cell = this.playerMapCell;
       const readout = radarCoordinateReadout(cell.x, cell.y, cell.outside, showCoords);
@@ -25575,7 +25582,8 @@ export class GameUI {
   private fillEffectsValue(host: HTMLElement, remaining: number): void {
     // PlayerModule::SpellDuration — the "Display Spell Durations" option
     // (FAITHFUL.494, CharacterOption 0x15); off → no text is set.
-    const text = this.optionsSettings.displaySpellDurations === false ? '' : formatEffectDuration(remaining);
+    // The 1999 SpellsInEffectPanel shows no remaining time (EraFeatures 'spellDurations').
+    const text = this.optionsSettings.displaySpellDurations === false || !this.eraSupports('spellDurations') ? '' : formatEffectDuration(remaining);
     if (host.dataset.effectsDuration === text && (host.childElementCount > 0 || !text)) return;
     host.dataset.effectsDuration = text;
     host.replaceChildren();

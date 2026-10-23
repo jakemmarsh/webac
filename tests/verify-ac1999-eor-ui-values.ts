@@ -347,7 +347,9 @@ for (const [era, rules] of [['ac1999-retail', R1999], ['eor', EOR]] as const) {
       const keys = new Set(rows.map((r) => r.dataset.optionKey));
       for (const k of ['useMainPackAsDefaultForPickingUpItems', 'filterLanguage', 'allowSeeDateOfBirth', 'allowSeeAge',
         'allowSeeNumberOfDeaths', 'autoAcceptFellowshipRequests', 'useChargeAttack']) expect(keys.has(k), k).toBe(!is1999);
-      for (const k of ['shareFellowshipXP', 'shareFellowshipLoot', 'showHelm', 'showCoordinatesByTheRadar', 'keepCombatTargetsInView', 'runAsDefault']) {
+      // BUG.webac11-radar-1999: the 1999 client had no radar coordinates and no spell-duration readout.
+      for (const k of ['showCoordinatesByTheRadar', 'displaySpellDurations']) expect(keys.has(k), k).toBe(!is1999);
+      for (const k of ['shareFellowshipXP', 'shareFellowshipLoot', 'showHelm', 'keepCombatTargetsInView', 'runAsDefault']) {
         expect(keys.has(k), k).toBe(true);
       }
       const label = rows.find((r) => r.dataset.optionKey === 'keepCombatTargetsInView')!.textContent;

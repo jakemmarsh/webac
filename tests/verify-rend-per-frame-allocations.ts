@@ -43,8 +43,8 @@ function referenceDots(objs: Obj[], ctx: RadarFeedContext<Obj>) {
   const fellowGuids = new Set<number>(ctx.fellows ? ctx.fellows.map(f => f.guid) : []);
   const out: Array<{ dx: number; dz: number; dy: number; color: string; guid: number; shape: number; name: string }> = [];
   for (const obj of objs) {
-    if (!ctx.eligible(obj)) continue;
     const { dx, dz } = radarOffsetFromWorld(obj.worldX, obj.worldZ, ctx.playerWorldX, ctx.playerWorldZ);
+    if (!ctx.eligible(obj, dx, obj.worldY - ctx.playerFeetY, dz)) continue;
     if (!blipInRange(dx, dz, ctx.range)) continue;
     const shape = selectBlipShape({
       isFellow: fellowGuids.has(obj.guid),

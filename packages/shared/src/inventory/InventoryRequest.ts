@@ -30,7 +30,8 @@
  *     `ServerSaysAttemptFailed @ 0058eae0` (0x00A0) carry the same id-matched clear;
  *     `ClientUISystem::OnViewContents @ 00565870` and the 0x0052 close-ground-container
  *     case call RecordResponse for the container. Nothing clears on a timer:
- *     `prevRequestTime` is written and never compared.
+ *     `prevRequestTime` is written and never compared. (The 1999 client does
+ *     clear on one — INVENTORY_REQUEST_WATCHDOG_1999_SECONDS below.)
  *   - `IsPlayerReadyToMakeInventoryRequest(int quiet) @ 0058d050` is the gate every
  *     request runs through first (CORE.17.k.c.a.a): `prevRequest != IR_NONE` →
  *     `SendNotice_DisplayStringInfo(0x1a, "You can only move or use one item at a time")`
@@ -165,6 +166,22 @@ export interface PendingInventoryRequest {
 }
 
 /**
+ * The 1999 client's watchdog on the pending request (BUG.webac12-inventory-request-lock):
+ * `Global_Loop @ 0x4c6b30` force-clears it while `prevRequest != 0 && 105.0 <= cur_time -
+ * prevRequestTime` (reference/ac1999/Client/decomp/UI/Global_Loop.c:447-451 →
+ * `ACCWeenieObject_ClearCurrentInventoryRequest @ 0x4e2ec0`). The end-of-retail client has none:
+ * `prevRequestTime` is written and never read there.
+ */
+export const INVENTORY_REQUEST_WATCHDOG_1999_SECONDS = 105;
+
+export interface InventoryRequestTrackerOptions {
+  /** Seconds after which a pending request is force-cleared (the 1999 watchdog); null / absent = never (end of retail). */
+  readonly watchdogSeconds?: number | null;
+  /** Timer::cur_time, in the unit `record()`'s `now` uses (seconds). Required for the watchdog. */
+  readonly now?: () => number;
+}
+
+/**
  * The client's one pending inventory request — ACCWeenieObject::prevRequest /
  * prevRequestObjectID / prevRequestTime.
  */
@@ -172,41 +189,84 @@ export class InventoryRequestTracker {
   private objectId = 0;
   private request = InventoryRequest.None;
   private time = 0;
+  private snapshot: AttemptFailedObject | null = null;
+  private readonly watchdogSeconds: number | null;
+  private readonly clock: (() => number) | null;
+
+  constructor(opts: InventoryRequestTrackerOptions = {}) {
+    this.watchdogSeconds = opts.watchdogSeconds ?? null;
+    this.clock = opts.now ?? null;
+  }
 
   /** prevRequestObjectID (0 = none pending). */
-  get pendingObjectId(): number { return this.objectId; }
+  get pendingObjectId(): number { this.tick(); return this.objectId; }
   /** prevRequest. */
-  get pendingRequest(): InventoryRequest { return this.request; }
+  get pendingRequest(): InventoryRequest { this.tick(); return this.request; }
   /** The pending request, or null when none is. */
   get pending(): PendingInventoryRequest | null {
+    this.tick();
     return this.request === InventoryRequest.None && this.objectId === 0
       ? null
       : { objectId: this.objectId, request: this.request, time: this.time };
   }
+  /**
+   * The pending object as the client knew it when the request was recorded (name, plural, stack),
+   * or null. Both retail clients' 0x00A0 dispatch finds the pending object through the object
+   * maintenance (EoL CObjectMaint::GetWeenieObject; 1999 Net_DispatchServerMessage case 0xa0 →
+   * ObjMgr_GetWeenieObjectById), which keeps every weenie the client was told about; ours forgets a
+   * ground container's contents when its panel closes, so the record keeps what that lookup would
+   * still have answered.
+   */
+  get pendingSnapshot(): AttemptFailedObject | null { this.tick(); return this.objectId !== 0 ? this.snapshot : null; }
 
   /** ACCWeenieObject::RecordRequest @ 0058c220 — overwrites whatever was pending. */
-  record(objectId: number, request: InventoryRequest, now = 0): void {
+  record(objectId: number, request: InventoryRequest, now = 0, snapshot?: AttemptFailedObject): void {
     this.objectId = objectId >>> 0;
     this.request = request;
     this.time = now;
+    this.snapshot = snapshot ?? null;
   }
 
   /** ACCWeenieObject::RecordResponse @ 0058cab0 — clears iff `objectId` is the pending one. Returns whether it cleared. */
   respond(objectId: number): boolean {
     if ((objectId >>> 0) !== this.objectId) return false;
+    this.clear();
+    return true;
+  }
+
+  /**
+   * ACCWeenieObject_ClearCurrentInventoryRequest (1999 @ 0x4e2ec0): drop whatever is pending.
+   * Also run when the world session ends: a request the dropped session sent can never be
+   * answered by the next one (our automatic reconnect resumes in the same page).
+   */
+  clear(): void {
     this.objectId = 0;
     this.request = InventoryRequest.None;
     this.time = 0;
+    this.snapshot = null;
+  }
+
+  /**
+   * The 1999 Global_Loop watchdog, run every frame and before every read of the pending state:
+   * with a watchdog configured, a request pending for at least that many seconds is cleared.
+   * Returns whether it cleared one. A no-op without a watchdog (end of retail).
+   */
+  tick(): boolean {
+    if (this.watchdogSeconds === null || !this.clock) return false;
+    if (this.request === InventoryRequest.None && this.objectId === 0) return false;
+    if (this.clock() - this.time < this.watchdogSeconds) return false;
+    this.clear();
     return true;
   }
 
   /** The 0x00A0 dispatch's object choice: the pending object when one is, else the message's guid. */
   failedObjectId(messageGuid: number): number {
+    this.tick();
     return this.objectId !== 0 ? this.objectId : (messageGuid >>> 0);
   }
 
   /** ACCWeenieObject::IsPlayerReadyToMakeInventoryRequest's first gate: nothing pending. */
-  get isIdle(): boolean { return this.request === InventoryRequest.None; }
+  get isIdle(): boolean { this.tick(); return this.request === InventoryRequest.None; }
 
   private attacking = false;
 
@@ -222,6 +282,7 @@ export class InventoryRequestTracker {
    * tested first), 'attacking' (attackInProgress), or null when the player is ready.
    */
   refusal(): InventoryRequestRefusal | null {
+    this.tick();
     if (this.request !== InventoryRequest.None) return 'pending';
     if (this.attacking) return 'attacking';
     return null;

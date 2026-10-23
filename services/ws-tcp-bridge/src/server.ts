@@ -58,6 +58,7 @@ import type { ServerDirectory } from './serverDirectory.js';
 import { sanitizeClientError } from './clientErrors.js';
 import { sanitizeClientPreworld, traceFromUrl } from './clientPreworld.js';
 import { isPortalOutcome, isWorldOutcome, sanitizeClientPortal, sanitizeClientWorld } from './clientWorld.js';
+import { isRefusalOutcome, sanitizeClientRefusal } from './clientRefusal.js';
 import { isAutomationOutcome, sanitizeClientAutomation } from './clientAutomation.js';
 import { RecentEventIds } from './eventIds.js';
 import { type LookupFn, resolveTarget } from './targets.js';
@@ -242,10 +243,13 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
   // TELEMETRY.portal-use-failed — portal_use_failed / portal_used (renderer PortalUseReporter: one per portal per
   // minute, 50 per page) on their own budget, so a portal-hopping evening never spends the pre-world and world events'.
   const clientPortalRate = new SlidingWindowCounter(40, 10 * 60_000, now);
+  // TELEMETRY.refusal-events — refusal (renderer RefusalReporter: the first of each code at once, then a
+  // per-minute count; 200 per page) on its own budget, so a refusal-heavy evening never spends the others'.
+  const clientRefusalRate = new SlidingWindowCounter(60, 10 * 60_000, now);
   // BUG.telemetry-duplicate-resend — a page resends an event whose send failed after delivery
   // (TelemetryOutbox); each event id is logged once.
   const recentEventIds = new RecentEventIds(now);
-  const sweepTimer = setInterval(() => { connectRate.sweep(); clientErrorRate.sweep(); clientPreworldRate.sweep(); clientAutomationRate.sweep(); }, limits.connectRateWindowMs);
+  const sweepTimer = setInterval(() => { connectRate.sweep(); clientErrorRate.sweep(); clientPreworldRate.sweep(); clientAutomationRate.sweep(); clientPortalRate.sweep(); clientRefusalRate.sweep(); }, limits.connectRateWindowMs);
   sweepTimer.unref?.();
   const sessions = new Set<Session>();
   /** Admitted-but-not-yet-open upgrades count against the global cap too. */
@@ -336,6 +340,16 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         if (recentEventIds.repeat(aev.eid)) return 204;
         metrics.clientAutomationEvent(aev.outcome);
         log('info', 'client_automation', { ip, ...Object.fromEntries(Object.entries(aev).filter(([, v]) => v !== null)) });
+        return 204;
+      }
+      // TELEMETRY.refusal-events — a refusal the player saw (clientRefusal.ts): one client_refusal line.
+      if (body && typeof body === 'object' && isRefusalOutcome((body as { outcome?: unknown }).outcome)) {
+        if (!clientRefusalRate.hit(ip)) return 429;
+        const rev = sanitizeClientRefusal(body);
+        if (!rev) return 400;
+        if (recentEventIds.repeat(rev.eid)) return 204;
+        metrics.clientPreworldEvent(rev.outcome);
+        log('info', 'client_refusal', { ip, ...Object.fromEntries(Object.entries(rev).filter(([, v]) => v !== null)) });
         return 204;
       }
       const portal = body && typeof body === 'object' && isPortalOutcome((body as { outcome?: unknown }).outcome);

@@ -7,7 +7,7 @@
  * the end-of-retail client and lack nothing here.
  */
 import { ABSENT_1999, type Absent1999Feature } from '@ac/network';
-import { TALISMAN_TARGET_TYPES_1999, TALISMAN_TARGET_TYPES_EOR, type TalismanTargetTypes } from '@ac/shared';
+import { INVENTORY_REQUEST_WATCHDOG_1999_SECONDS, TALISMAN_TARGET_TYPES_1999, TALISMAN_TARGET_TYPES_EOR, type TalismanTargetTypes } from '@ac/shared';
 import type { EraProfile } from './EraProfiles.js';
 import { quickslotCommand } from '../network/itemShortcutRestore.js';
 import { MAP_NOTE_LOCATIONS, type MapNoteLocation } from '../ui/HudTooltips.js';
@@ -57,7 +57,27 @@ export type EraFeature =
    * checkbox, its Character options row, its Keyboard Config command and the agent's auto toggle
    * are inert on 1999.
    */
-  | 'autoAcceptFellowship';
+  | 'autoAcceptFellowship'
+  /**
+   * The coordinates under the radar and their Show Coordinates By the Radar option
+   * (BUG.webac11-radar-1999, webac#11). End of retail's gmRadarUI::UpdateCoordinates prints them
+   * when PlayerModule::CoordinatesOnRadar is on (its default). The 1999 client.exe's
+   * RadarUI_Update @ 0x527fc0 prints no coordinates (its only texts are the two hover lines
+   * "Blips show creatures and other important objects." 0x607400 and "You are facing toward the
+   * top of the Compass." 0x6073d0), its options page has no such row (strings @ file
+   * 0x210a44-0x210bb8), and its one coordinate format ("%.1f%s, %.1f%s" 0x602e80) belongs to the
+   * map page (MapSubPanel_UpdateDateAndTime @ 0x5087f0, the push @ 0x508c0d). The map keeps them.
+   */
+  | 'radarCoordinates'
+  /**
+   * The remaining time beside each spell in the effects list and its Display Spell Durations
+   * option (BUG.webac11-radar-1999 sweep). End of retail's EffectInfoRegion::Update @ 004f1c00
+   * writes "%d:%02d" / "%d:%02d:%02d" while PlayerModule::SpellDuration is on (its default). The
+   * 1999 client.exe's SpellsInEffectPanel (@ 0x59ac70, info text @ 0x59b7c0: the name, the
+   * description, "NO SPELLS" / "SELECT A SPELL") shows none, and the exe has no clock format at all
+   * (no "%d:%02d"), and no such row on its options page.
+   */
+  | 'spellDurations';
 
 const NONE: ReadonlySet<EraFeature> = new Set();
 /**
@@ -82,7 +102,9 @@ const NONE: ReadonlySet<EraFeature> = new Set();
  *   @friends in chat only (no inbound friends message to fill a page);
  * - netherDamage: the 1999 armor profile carries seven resistances, no nether;
  * - squelchListPage: nothing in 1999 lists the squelched names (@squelch stays);
- * - desiredComponents: the rebuy book's 0x224 has no 1999 builder.
+ * - desiredComponents: the rebuy book's 0x224 has no 1999 builder;
+ * - radarCoordinates / spellDurations: readouts the 1999 client never drew
+ *   (webac#11), shown by default in end of retail.
  */
 const AC1999_UNSUPPORTED: ReadonlySet<EraFeature> = new Set<EraFeature>([
   ...(Object.keys(ABSENT_1999) as Absent1999Feature[]),
@@ -95,6 +117,8 @@ const AC1999_UNSUPPORTED: ReadonlySet<EraFeature> = new Set<EraFeature>([
   'squelchListPage',
   'desiredComponents',
   'autoAcceptFellowship',
+  'radarCoordinates',
+  'spellDurations',
 ]);
 
 /** The features era `p` lacks (empty for end of retail and the classic eras). */
@@ -178,6 +202,8 @@ export const FEATURE_CHARACTER_OPTIONS: Readonly<Partial<Record<EraFeature, read
   rareGems: ['ConfirmVolatileRareUse'],
   fishing: ['DisplayFishingSkill'],
   autoAcceptFellowship: ['FellowshipAutoAcceptRequests'],
+  radarCoordinates: ['CoordinatesOnRadar'],
+  spellDurations: ['SpellDuration'],
 };
 
 /** The Chat options channel filters (CHAT_CHANNELS suffixes) each feature owns. */
@@ -205,6 +231,8 @@ export const FEATURE_KEYBIND_ACTIONS: Readonly<Partial<Record<EraFeature, readon
   rareGems: [0x10000123], // Confirm Use of Rare Gems
   fishing: [0x10000090], // Allow Others to See Your Fishing Skill
   autoAcceptFellowship: [0x10000083], // Automatically Accept Fellowship Requests
+  radarCoordinates: [0x10000085], // Show Coordinates By the Radar
+  spellDurations: [0x10000086], // Display Spell Durations
 };
 
 /** Every entry of `table` owned by a feature in `unsupported`. */
@@ -359,6 +387,17 @@ export interface EraClientRules {
    * CheckTargetValidity: "1999 makes you buff each item individually").
    */
   spellSelfTargetableTypeMask: number;
+  /**
+   * Which InqShowableOnRadar decides a radar blip (and a Closest Compass Item candidate;
+   * BUG.webac11-radar-1999, webac#11). End of retail ('eor'): ACCWeenieObject::
+   * InqShowableOnRadar @ 0058c250 shows RadarBehavior ShowMovement, ShowAttacking and ShowAlways
+   * alike, so every monster the server sends shows (the classic eras run that exe). The 1999
+   * client.exe ('ac1999', @ 0x4e2f20): ShowAlways always; a ShowMovement object only within
+   * 10 m, or while it moves, turns, acts or holds a combat stance; a ShowAttacking one only
+   * within 10 m or in a combat stance; the selected creature always (ui/RadarBlips.ts
+   * inqShowableOnRadar1999). Most 1999 monsters are ShowMovement, so an idle one is off the radar.
+   */
+  radarVisibility: 'eor' | 'ac1999';
 
   // ── The era client's values (BUG.ac1999-eor-ui-values) ─────────────────────
   // Where 1999 differs from end of retail only in a value (a string, a slot set, an option
@@ -412,6 +451,14 @@ export interface EraClientRules {
   itemHoverText: ItemHoverText | null;
   /** The World panel's map: its town notes and how the player's marker is placed (BUG.ac1999-map-eor-art, webac#10). */
   mapPanel: MapPanelRules;
+  /**
+   * Seconds after which the one pending inventory request is force-cleared, or null for never
+   * (BUG.webac12-inventory-request-lock, webac#12). The 1999 client's Global_Loop @ 0x4c6b30
+   * clears it once `105.0 <= cur_time - prevRequestTime` (reference/ac1999/Client/decomp/UI/
+   * Global_Loop.c:447-451, ClearCurrentInventoryRequest @ 0x4e2ec0); the end-of-retail client
+   * never reads prevRequestTime.
+   */
+  inventoryRequestWatchdogSeconds: number | null;
 }
 
 /**
@@ -564,6 +611,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   chatToggle: 'server' as const,
   talismanTargetTypes: TALISMAN_TARGET_TYPES_EOR,
   spellSelfTargetableTypeMask: 0x8107,
+  radarVisibility: 'eor' as const, // ACCWeenieObject::InqShowableOnRadar @ 0058c250
   equipSlotMask: 0xffffffff,
   statFooterText: EOR_STAT_FOOTER_TEXT,
   statRaiseTen: true,
@@ -578,12 +626,14 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   characterExamineText: Object.freeze({ noAllegiance: null, noFellowship: null, allegianceMonarch: 'Alleg. Monarch:', unenchantableLegend: true }),
   itemHoverText: null,
   mapPanel: EOR_MAP_PANEL,
+  inventoryRequestWatchdogSeconds: null,
 });
 const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const,
   chatToggle: 'local' as const,
   talismanTargetTypes: TALISMAN_TARGET_TYPES_1999, // @ 0x5e4150
   spellSelfTargetableTypeMask: 0, // UI ObjectCompatibleWithSpellTargetType @ 0x4d20c0
+  radarVisibility: 'ac1999' as const, // ACCWeenieObject_InqShowableOnRadar @ 0x4e2f20
   equipSlotMask: 0x1bf8000, // InventoryPanel @ 0x522fc0
   statFooterText: AC1999_STAT_FOOTER_TEXT,
   statRaiseTen: false,
@@ -621,6 +671,7 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
     }),
   }),
   mapPanel: AC1999_MAP_PANEL,
+  inventoryRequestWatchdogSeconds: INVENTORY_REQUEST_WATCHDOG_1999_SECONDS, // Global_Loop @ 0x4c6b30
 });
 
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */

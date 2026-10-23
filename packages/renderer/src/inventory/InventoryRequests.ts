@@ -139,16 +139,22 @@ export function gateInventoryRequestSend(
   return tracker.isPlayerReadyToMakeInventoryRequest(false, display);
 }
 
-/** Record the request a sent action implies (if any); returns what was recorded. */
+/**
+ * Record the request a sent action implies (if any); returns what was recorded.
+ * `snapshotOf` reads the object as the client knows it at the send (name /
+ * plural / stack), kept with the request for the 0x00A0 dispatch
+ * (InventoryRequestTracker.pendingSnapshot; BUG.webac12-inventory-request-lock).
+ */
 export function recordInventoryRequestFromAction(
   tracker: InventoryRequestTracker,
   actionType: GameActionType,
   payload: Uint8Array,
   stateOf: (guid: number) => InventoryObjectState,
   now = 0,
+  snapshotOf?: (guid: number) => AttemptFailedObject | undefined,
 ): RecordedInventoryRequest | null {
   const rec = classifyInventoryRequest(actionType, payload, stateOf);
-  if (rec) tracker.record(rec.objectId, rec.request, now);
+  if (rec) tracker.record(rec.objectId, rec.request, now, snapshotOf?.(rec.objectId));
   return rec;
 }
 
@@ -192,6 +198,21 @@ export interface AttemptFailedOutcome {
  * skips the call for a null weenie object). The caller then runs the code's
  * HandleFailureEvent sink unless the code is one of the seven the dispatch
  * excludes.
+ *
+ * The 1999 client's case 0xa0 (Net_DispatchServerMessage, reference/ac1999/
+ * Client/decomp/UI/Net_DispatchServerMessage.c:693-706) is the same: the
+ * pending id when one is armed, ObjMgr_GetWeenieObjectById, then
+ * ServerSaysAttemptFailed → ClearRequestIfCurrent.
+ *
+ * BUG.webac12-inventory-request-lock — retail resolves the pending object
+ * through CObjectMaint::GetWeenieObject, which still holds a ground
+ * container's contents after its panel closes; ours (`resolve`) forgets them
+ * with the panel. A pick-up from a corpse refused after the panel closed
+ * (the player stepped out of range, so the server answered "too far" /
+ * "object gone") then never cleared, and every inventory verb and use after
+ * it read "You can only move or use one item at a time" for the rest of the
+ * session. The pending object now falls back to the record taken when the
+ * request was sent.
  */
 export function handleAttemptFailed(
   tracker: InventoryRequestTracker,
@@ -202,7 +223,7 @@ export function handleAttemptFailed(
 ): AttemptFailedOutcome {
   const objectId = tracker.failedObjectId(messageGuid);
   const request = tracker.pendingRequest;
-  const obj = resolve(objectId);
+  const obj = resolve(objectId) ?? (objectId === tracker.pendingObjectId ? tracker.pendingSnapshot ?? undefined : undefined);
   if (!obj) return { objectId: 0, request, text: null, cleared: false };
   const text = attemptFailedText(request, code, obj);
   if (text) display(text);

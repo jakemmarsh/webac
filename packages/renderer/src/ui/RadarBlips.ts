@@ -156,6 +156,183 @@ export function showableOnRadar(radarBehavior: number, uiHidden: boolean): boole
     || radarBehavior === RadarBehavior.ShowAlways;
 }
 
+/**
+ * BUG.webac11-radar-1999 (webac#11) — the 1999 client.exe's
+ * ACCWeenieObject_InqShowableOnRadar(Vector3 *offset) @ 0x4e2f20 (read from
+ * dat-sets/ac1999-retail/client.exe; the end-of-retail one ignores its
+ * argument and shows 2, 3 and 4 alike). `offset` is the object's offset from
+ * the player (RadarUI_Update @ 0x527fc0 builds it @ 0x5284e0 and calls this
+ * @ 0x528506, after the bitfield-0x80 UI-hidden skip @ 0x52849c):
+ *
+ *   no physics object (+0x88)                → no
+ *   _radar_enum (pwd+0x78) == ShowNever (1)  → no
+ *   _radar_enum == ShowAlways (4)            → yes
+ *   selected (+0x68) && IsCreature (vtbl +0x20 = InqType() & 0x10) → yes
+ *   ShowAttacking (3): |offset| < reveal distance → yes; no interpreted
+ *     motion state → yes; current_style a combat stance → yes; else no
+ *   ShowMovement (2): |offset| < reveal distance → yes; get_velocity
+ *     (CPhysicsObj +0x14c @ 0x4387a0) not Vector3::is_zero @ 0x4349c0
+ *     (every |axis| < F_EPSILON 0.0002 @ 0x5f7c60) → yes; no interpreted
+ *     state → yes; its actions list non-empty (+0x20, 0x4e4210) → yes;
+ *     turn_command (+0x18) != 0 → yes; combat stance → yes; else no
+ *   Undefined (0) / anything else            → no
+ *
+ * The reveal distance is PublicWeenieDesc +0x7c (header bit 0x1000000, a
+ * float), which PublicWeenieDesc_Reset @ 0x5d7bf0 sets to 10.0f (@ 0x617b10)
+ * and the AC1999 server never sends (kb publicweeniedesc-packing: "Never
+ * populated"). The interpreted state is the movement manager's
+ * CMotionInterp +0x44 (0x43b860 → 0x482d20).
+ */
+export const RADAR_REVEAL_DISTANCE_1999 = 10;
+/** F_EPSILON @ 0x5f7c60 (0.0002f), Vector3::is_zero's per-axis bound. */
+export const RADAR_STILL_EPSILON_1999 = 0.0002;
+
+/**
+ * 0x4e3160 — the motion styles that count as "in combat": HandCombat 0x3c,
+ * SwordCombat 0x3e, BowCombat 0x3f, SwordShield 0x40, Crossbow 0x41,
+ * Unused 0x42, Sling 0x43, 2HSword 0x44, 2HStaff 0x45, DualWield 0x46,
+ * ThrownWeapon 0x47, Magic 0x49 (all | 0x80000000). NonCombat 0x3d and
+ * Graze 0x48 are not.
+ */
+const COMBAT_STYLES_1999: ReadonlySet<number> = new Set([
+  0x8000003c, 0x8000003e, 0x8000003f, 0x80000040, 0x80000041, 0x80000043,
+  0x80000044, 0x80000045, 0x80000046, 0x80000047, 0x80000049, 0x80000042,
+]);
+export function isCombatStyle1999(style: number): boolean {
+  return COMBAT_STYLES_1999.has(style >>> 0);
+}
+
+/** What the 1999 InqShowableOnRadar reads of one object. */
+export interface RadarShowFacts1999 {
+  radarBehavior: number;
+  uiHidden: boolean;
+  /** |offset| from the player's position, metres (3D). */
+  distance: number;
+  /** ACCWeenieObject +0x68 `selected` (it is selectedID). */
+  selected: boolean;
+  /** InqType() & 0x10. */
+  isCreature: boolean;
+  /** CPhysicsObj::get_velocity is not zero. */
+  moving: boolean;
+  /** The interpreted motion state, or null when the object has none (→ shown). */
+  motion: { style: number; turning: boolean; actionsPending: boolean } | null;
+  /** PublicWeenieDesc +0x7c; RADAR_REVEAL_DISTANCE_1999 when not sent. */
+  revealDistance?: number;
+}
+
+/** ACCWeenieObject_InqShowableOnRadar @ 0x4e2f20 (plus RadarUI_Update's UI-hidden skip). */
+export function inqShowableOnRadar1999(f: RadarShowFacts1999): boolean {
+  if (f.uiHidden) return false;
+  const re = f.radarBehavior;
+  if (re === RadarBehavior.ShowNever) return false;
+  if (re === RadarBehavior.ShowAlways) return true;
+  if (f.selected && f.isCreature) return true;
+  if (re !== RadarBehavior.ShowAttacking && re !== RadarBehavior.ShowMovement) return false;
+  if (f.distance < (f.revealDistance ?? RADAR_REVEAL_DISTANCE_1999)) return true;
+  if (re === RadarBehavior.ShowMovement && f.moving) return true;
+  const m = f.motion;
+  if (!m) return true;
+  if (re === RadarBehavior.ShowMovement && (m.actionsPending || m.turning)) return true;
+  return isCombatStyle1999(m.style);
+}
+
+/** The object fields RadarVisibility reads. */
+export interface RadarVisibilityObject {
+  guid: number;
+  worldX: number; worldY: number; worldZ: number;
+  radarBehavior: number;
+  uiHidden?: boolean;
+  itemType?: number;
+  /** The interpreted state's turn command (world/RemoteMotion InterpretedMotion.turn). */
+  motionState?: { turn: number };
+}
+
+/** The motion interpreter facts of one object (MotionManager), or undefined when it has none. */
+export interface RadarMotionSource {
+  readonly currentStyleId: number;
+  readonly motionsPending: boolean;
+}
+
+/**
+ * Which InqShowableOnRadar the era's client runs: end of retail's
+ * (showableOnRadar) or the 1999 client's (inqShowableOnRadar1999). One
+ * instance serves the radar feed and the Closest Compass Item key, which
+ * share the predicate in both clients (1999 PanelUI_SelectNext case 2,
+ * end-of-retail CPlayerSystem::SelectNext).
+ *
+ * get_velocity is the physics object's cached velocity, the displacement of
+ * its last update: beginFrame samples each object's position once per frame,
+ * and reads between frames (a select key) see the last frame's answer.
+ */
+export class RadarVisibility<T extends RadarVisibilityObject> {
+  rule: 'eor' | 'ac1999' = 'eor';
+  private frame = 0;
+  private nowSec = 0;
+  private dtSec = 0;
+  private readonly samples = new Map<number, { x: number; y: number; z: number; frame: number; moving: boolean }>();
+  private readonly facts: RadarShowFacts1999 = {
+    radarBehavior: 0, uiHidden: false, distance: 0, selected: false, isCreature: false, moving: false, motion: null,
+  };
+  private readonly motionFacts = { style: 0, turning: false, actionsPending: false };
+
+  constructor(private readonly motionOf: (guid: number) => RadarMotionSource | undefined) {}
+
+  /** Once per rendered frame, before the radar feed is built. */
+  beginFrame(nowSec: number): void {
+    this.dtSec = this.frame === 0 ? 0 : Math.max(0, nowSec - this.nowSec);
+    this.nowSec = nowSec;
+    this.frame++;
+    // Forget objects not sampled for a while (gone, or out of every frame's walk).
+    if ((this.frame & 0xff) === 0) {
+      for (const [guid, s] of this.samples) if (this.frame - s.frame > 0x100) this.samples.delete(guid);
+    }
+  }
+
+  /** CPhysicsObj::get_velocity is not zero — sampled at most once per frame. */
+  private moving(obj: T): boolean {
+    let s = this.samples.get(obj.guid);
+    if (!s) {
+      s = { x: obj.worldX, y: obj.worldY, z: obj.worldZ, frame: this.frame, moving: false };
+      this.samples.set(obj.guid, s);
+      return false;
+    }
+    if (s.frame !== this.frame) {
+      if (this.dtSec > 0) {
+        const bound = RADAR_STILL_EPSILON_1999 * this.dtSec;
+        s.moving = Math.abs(obj.worldX - s.x) >= bound || Math.abs(obj.worldY - s.y) >= bound || Math.abs(obj.worldZ - s.z) >= bound;
+      }
+      s.x = obj.worldX; s.y = obj.worldY; s.z = obj.worldZ; s.frame = this.frame;
+    }
+    return s.moving;
+  }
+
+  /**
+   * Whether `obj` gets a radar blip / counts for Closest Compass Item.
+   * `dx`, `dy`, `dz` are its offset from the player's position (metres).
+   */
+  showable(obj: T, dx: number, dy: number, dz: number, selectedGuid: number): boolean {
+    if (this.rule === 'eor') return showableOnRadar(obj.radarBehavior, !!obj.uiHidden);
+    const f = this.facts;
+    f.radarBehavior = obj.radarBehavior;
+    f.uiHidden = !!obj.uiHidden;
+    f.distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    f.selected = selectedGuid !== 0 && selectedGuid === obj.guid;
+    f.isCreature = ((obj.itemType ?? 0) & ItemType.Creature) !== 0;
+    f.moving = obj.radarBehavior === RadarBehavior.ShowMovement ? this.moving(obj) : false;
+    const mm = this.motionOf(obj.guid);
+    if (mm) {
+      const m = this.motionFacts;
+      m.style = mm.currentStyleId;
+      m.turning = (obj.motionState?.turn ?? 0) !== 0;
+      m.actionsPending = mm.motionsPending;
+      f.motion = m;
+    } else {
+      f.motion = null;
+    }
+    return inqShowableOnRadar1999(f);
+  }
+}
+
 export enum RadarBlipShape {
   Undef = 0,
   AllegianceMember = 1,
@@ -431,8 +608,11 @@ export interface RadarFeedContext<T extends RadarFeedObject> {
   fellowshipLeaderGuid: number;
   playerMonarchGuid: number | undefined;
   playerPKStatus: number | undefined;
-  /** gmRadarUI::AddObject culling (ServerObjectManager.radarDotEligible). */
-  eligible: (obj: T) => boolean;
+  /**
+   * gmRadarUI::AddObject culling (InqShowableOnRadar: RadarVisibility.showable).
+   * dx east, dy up (from the player's feet), dz south — the object's offset in metres.
+   */
+  eligible: (obj: T, dx: number, dy: number, dz: number) => boolean;
 }
 
 /**
@@ -472,10 +652,11 @@ export class RadarDotFeed<T extends RadarFeedObject> {
     si.playerIsPKLite = isPKLite(ctx.playerPKStatus);
     let n = 0;
     for (const obj of objects) {
-      if (!ctx.eligible(obj)) continue;
       // radarOffsetFromWorld, inlined (dz is metres SOUTH).
       const dx = obj.worldX - ctx.playerWorldX;
       const dz = ctx.playerWorldZ - obj.worldZ;
+      const dy = obj.worldY - ctx.playerFeetY;
+      if (!ctx.eligible(obj, dx, dy, dz)) continue;
       if (!blipInRange(dx, dz, ctx.range)) continue;
       si.isFellow = fellowGuids.has(obj.guid);
       si.isFellowshipLeader = obj.guid === ctx.fellowshipLeaderGuid;
@@ -488,7 +669,7 @@ export class RadarDotFeed<T extends RadarFeedObject> {
         this.pool[n] = d;
       }
       n++;
-      d.dx = dx; d.dz = dz; d.dy = obj.worldY - ctx.playerFeetY;
+      d.dx = dx; d.dz = dz; d.dy = dy;
       const ci = this.colorInputs;
       ci.blipColor = obj.radarColor;
       ci.objectDescFlags = obj.objectDescFlags ?? 0;

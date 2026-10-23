@@ -56,7 +56,7 @@ describe('era capability set', () => {
     expect(ERA_1999.has('eolWcidTables')).toBe(true);
     // Every entry is an absent feature or one of those justified in EraFeatures.ts.
     const extra = [...ERA_1999].filter((f) => !(f in ABSENT_1999)).sort();
-    expect(extra).toEqual(['autoAcceptFellowship', 'cloaks', 'desiredComponents', 'eolWcidTables', 'fishing', 'friendsPanel', 'netherDamage', 'rareGems', 'squelchListPage']);
+    expect(extra).toEqual(['autoAcceptFellowship', 'cloaks', 'desiredComponents', 'eolWcidTables', 'fishing', 'friendsPanel', 'netherDamage', 'radarCoordinates', 'rareGems', 'spellDurations', 'squelchListPage']);
     // BUG.ac1999-eor-ui-values: the paperdoll's slots are the era's data (no cloak or trinket slot on 1999).
     const slots1999 = eraClientRules(eraProfile('ac1999-retail')).equipSlotMask;
     expect(slots1999 & (EquipMask.TrinketOne | EquipMask.Cloak)).toBe(0);

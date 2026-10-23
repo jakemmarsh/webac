@@ -28,7 +28,7 @@ import { SkillTable } from '@ac/dat-parser/file-types/SkillTable.js';
 import { SecondaryAttributeTable } from '@ac/dat-parser/file-types/SecondaryAttributeTable.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
 import { parseMasterProperty, setMasterPropertyTypes, parseStringTable, registerStringTable, acStringHash, getStringFromTable, getString } from '@ac/dat-parser/file-types/LayoutDesc.js';
-import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
+import { targetResolves, type TargetLocations, attemptToOpenTradeNegotiations, RUN_ANIM_SPEED, WALK_ANIM_SPEED, Heritage, TerrainCollision, VitalId, CombatMode, getAutoEnterAttackPlan, Sound, EquipMask, MagicSchool, getPlayerRunRate, getJumpHeight, getJumpVelocity, getJumpStaminaCost, jumpSkillWithStamina, getBurden, AttributeId, ChatMessageType, chatColorFor, resolveChatType, WeenieError, weenieErrorText, substituteWeenieErrorItemName, getMaterialName, ItemType, RadarColor, ParentLocation, VitalKey, AttackHeight, PropertyInt, PropertyInt64, PropertyBool, PropertyAttribute, TradeSide, CharacterGenerationVerificationResponse, characterCreateErrorToken, characterCreateErrorFallbackText, playerText, PlayerKillerStatus, isInteriorCellIndex, landblockX, landblockY, cellIndexOf, formatMapCoord, titleDisplayName, houseTypeName, spellLevelFromPower, formatAttackerChat, formatDefenderChat, formatDefenderNotificationLog, formatWeenieErrorWithString, weenieErrorWithStringText, PropertyInstanceId, vendorSellPrice, unitValueOf, turbineChannelLabel, turbineChannelMessageType, isPlayerGuid, POSTYPE_LAST_OUTSIDE_DEATH, SPELL_FLAG_SELF_TARGETED, isUseWithTargetItem, isUseTargetCompatible, buildCannotUseMessage, resolveLoginPositionRestore, squelchMaskForChatType, isTieSpell, isTieBindConfirmationText, resolveTieBindConfirmation, targetAcquiredDecision, itemListDropSlot, composeHeardEmoteLine, isOwnSoulEmoteEcho, allegianceInfoLines, getAllegianceRankTitle, getAppropriateName } from '@ac/shared';
 import type { PendingTieBind } from '@ac/shared';
 import { APPRAISAL_1999_STRING } from '@ac/shared';
 import { OpenContainerTracker } from './world/OpenContainerTracker.js';
@@ -230,7 +230,7 @@ import { isKeyboardField, suppressPageContextMenu } from './input/BrowserDefault
 import { ACFontRenderer } from './ui/ACFontRenderer.js';
 import { AC_COLORS, type WorldDropSource, type ItemListDropTarget } from './ui/GameUI.js';
 import { placeInBackpackPendingIndex, itemListDropPendingIndex } from './inventory/PendingPackItem.js';
-import { RadarDotFeed, selectBlipColor, RADAR_RGBA_DEFAULT, radarIsIndoors, radarRangeFor, radarHeadingRadians, type RadarFeedContext } from './ui/RadarBlips.js';
+import { RadarDotFeed, RadarVisibility, selectBlipColor, RADAR_RGBA_DEFAULT, radarIsIndoors, radarRangeFor, radarHeadingRadians, type RadarFeedContext } from './ui/RadarBlips.js';
 import { VividTargetIndicatorView, loadVtiImageDids, objectBoundingStatus, vtiFrame, vtiShowsSelection, type VtiCamera } from './ui/VividTargetIndicator.js';
 import { iconRgbaToDataURL } from './ui/ItemIconComposite.js';
 import { zLayer, ZLayer } from './ui/ZIndexRegistry.js';
@@ -425,6 +425,7 @@ import { launcherConnectFailedReport, reportFromPage, worldListFailedReport } fr
 import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from './telemetry/WorldReporter.js';
 import { FramePhaseTimer, PHASE, ProgramCreationCounter, CompileTrace, netHandlerCost, streamHandlerCost, connectionEventOp, timedAgentTick } from './telemetry/MainThreadCost.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
+import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
 import { PortalUseReporter, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
@@ -569,10 +570,18 @@ const radarDotFeed = new RadarDotFeed<RadarServerObject>();
 // immediately) and the camera rig's velocity input.
 const collisionProbePos = new THREE.Vector3();
 const rigVelocity = new THREE.Vector3();
+// BUG.webac11-radar-1999 — the era client's InqShowableOnRadar (end of
+// retail: RadarBehavior 2/3/4 alike; 1999: 2 and 3 only near, moving or in
+// combat). Its rule is set from eraClientRules at boot, its motion source
+// once the object manager exists; the radar feed and Closest Compass Item share it.
+let radarMotionOf: (guid: number) => import('./ui/RadarBlips.js').RadarMotionSource | undefined = () => undefined;
+const radarVisibility = new RadarVisibility<RadarServerObject>((guid) => radarMotionOf(guid));
+/** ACCWeenieObject::selectedID as of this frame's radar walk (the 1999 rule shows a selected creature). */
+let radarSelectedGuid = 0;
 const radarFeedCtx: RadarFeedContext<RadarServerObject> = {
   playerWorldX: 0, playerWorldZ: 0, playerFeetY: 0, range: 75,
   fellows: null, fellowshipLeaderGuid: 0, playerMonarchGuid: undefined, playerPKStatus: undefined,
-  eligible: (obj) => ServerObjectManager.radarDotEligible(obj),
+  eligible: (obj, dx, dy, dz) => radarVisibility.showable(obj, dx, dy, dz, radarSelectedGuid),
 };
 
 type TargetType = 'creature' | 'npc' | 'player' | 'item';
@@ -836,6 +845,12 @@ let worldReporter: WorldReporter | null = null;
 let automationReporter: AutomationReporter | null = null;
 /** TELEMETRY.portal-use-failed — a portal tried that did nothing, and the normal path's timing (telemetry/PortalUseReporter.ts). */
 let portalUseReporter: PortalUseReporter | null = null;
+/** TELEMETRY.refusal-events — every refusal the player saw, client- or server-made (telemetry/RefusalReporter.ts). */
+let refusalReporter: RefusalReporter | null = null;
+/** Run `f` with the refusal reporter's client spew tap off (server text shown through the spew, chat-command feedback). */
+function refusalQuietly<T>(f: () => T): T { return refusalReporter ? refusalReporter.quietly(f) : f(); }
+/** Run `f` with `action` (a GameActionType) as the context of a client refusal it raises. */
+function refusalForAction<T>(action: number, f: () => T): T { return refusalReporter ? refusalReporter.forAction(action, f) : f(); }
 
 // ─── Era (docs/dark-majesty-support.md, era/EraBoot.ts) ──────────────
 // One era's DATs per page load. main() resolves the boot era before any DAT
@@ -1310,6 +1325,21 @@ async function main() {
     snapshot: (guid) => portalSnapshot(guid),
   });
   portalUseReporter.install(window, document);
+  refusalReporter = new RefusalReporter({
+    endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
+    build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
+    trace: preworldReporter.trace,
+    era: () => activeEra.id,
+    server: () => preworldServer(),
+    // Every name the client knows (items, creatures, players, ours) becomes '_' in the template.
+    scrub: (text) => {
+      const names: string[] = [playerState.name ?? ''];
+      for (const o of serverObjectManager?.getAllObjects().values() ?? []) names.push(o.name, o.pluralName ?? '');
+      return scrubNames(text, names);
+    },
+  });
+  refusalReporter.install(window, document);
+  { const rr = refusalReporter; worldReporter.onSessionEnd(() => rr.flush()); }
   // Its world sessions are the world reporter's (every exit, the drop's and the closed tab's included).
   { const ar = automationReporter; worldReporter.onSessionStart(() => ar.enteredWorld()); worldReporter.onSessionEnd((exit) => ar.worldLeft(exit)); }
 
@@ -1559,6 +1589,8 @@ async function main() {
   const eraUnsupported = unsupportedFeatures(activeEra);
   // The era's own client-code rules (a cast / attack stopping the player).
   const eraRules = eraClientRules(activeEra);
+  // BUG.webac11-radar-1999 — which InqShowableOnRadar this era's client runs.
+  radarVisibility.rule = eraRules.radarVisibility;
   // The agent's town names (agent/towns.ts): the era's map notes, or its world's towns (1999 has no notes).
   setAgentTownsEra(activeEra);
   // VISUAL.ac1999-spell-charge — the 1999 per-spell Charge the spell examine text prints.
@@ -3544,6 +3576,7 @@ async function main() {
   function portalUseCheck(now: number): void {
     if (!portalUseReporter || now - portalCheckAt < 100) return;
     portalCheckAt = now;
+    refusalReporter?.tick();
     portalUseReporter.tick(cameraController.isMoving || (playerMoveTo?.isMovingTo() ?? false));
     if (!gameStarted || !serverObjectManager || gameUI.worldHiddenByPortalSpace || teleportBusy.value || playerState.isDead) return;
     const inside: number[] = [];
@@ -4018,10 +4051,10 @@ async function main() {
     for (const obj of som.getAllObjects().values()) {
       candidates.push({
         guid: obj.guid,
-        dx: obj.worldX - playerWorldX, dy: obj.worldZ - playerWorldZ, dz: obj.worldY - playerWorldY,
+        dx: obj.worldX - playerWorldX, dy: obj.worldZ - playerWorldZ, dz: obj.worldY - playerFeetY,
         bitfield: obj.objectDescFlags ?? 0,
         physicsState: obj.physicsState ?? 0,
-        showableOnRadar: ServerObjectManager.radarDotEligible(obj),
+        showableOnRadar: radarVisibility.showable(obj, obj.worldX - playerWorldX, obj.worldY - playerFeetY, playerWorldZ - obj.worldZ, selectedObjectId()),
         present: inWorld(obj),
         radarEnum: obj.radarBehavior ?? 0,
         wielderId: obj.wielderId ?? 0,
@@ -4031,7 +4064,7 @@ async function main() {
     const refGuid = selectedObjectId() || selectionHistory.prevSelectedId;
     const refObj = refGuid ? som.getObject(refGuid) : undefined;
     const ref = selectNextReference(refGuid, myPlayerGuid ?? 0, refObj && inWorld(refObj)
-      ? { dx: refObj.worldX - playerWorldX, dy: refObj.worldZ - playerWorldZ, dz: refObj.worldY - playerWorldY }
+      ? { dx: refObj.worldX - playerWorldX, dy: refObj.worldZ - playerWorldZ, dz: refObj.worldY - playerFeetY }
       : null);
     const ctx: SelectNextContext = {
       playerGuid: myPlayerGuid ?? 0,
@@ -5023,7 +5056,12 @@ async function main() {
   // ServerSaysSetStackSize @ 0058cc40, ServerSaysAttemptFailed @ 0058eae0,
   // OnViewContents @ 00565870, the 0x0052 close). onInventoryServerSaveFailed
   // builds "The %s can't be …" from it.
-  const inventoryRequests = new InventoryRequestTracker();
+  // BUG.webac12-inventory-request-lock — the era's watchdog (the 1999 client clears a request
+  // pending 105 s; end of retail never does), on the clock record() is stamped with.
+  const inventoryRequests = new InventoryRequestTracker({
+    watchdogSeconds: eraRules.inventoryRequestWatchdogSeconds,
+    now: () => Date.now() / 1000,
+  });
   /** ACCWeenieObject::current_state for the request classifier: carried / worn / in the open container = IN_CONTAINER, a world object = IN_3D_VIEW. */
   const inventoryObjectState = (guid: number): InventoryObjectState => {
     if (playerState.inventory.getItem(guid) || playerState.equipment.isEquipped(guid) || openContainer.has(guid)) return 'contained';
@@ -5929,6 +5967,10 @@ async function main() {
     combatController.autoAttack = false;
     meleeApproachTarget = resetMeleeChain();
     inventoryRequests.resetAttack(); // CORE.17.k.c.a.a — ClientCombatSystem::Begin starts a session with no attack in progress
+    // BUG.webac12-inventory-request-lock — a request the ending session sent can't be answered by
+    // the next one (the automatic reconnect resumes in this page): drop it, or every inventory verb
+    // and use of the resumed session reads "You can only move or use one item at a time".
+    inventoryRequests.clear();
     playerMoveTo?.cancelMoveTo(); // world teardown ends a server MoveTo
     pendingTeleport = false;
     activeCorrection = null;
@@ -6302,6 +6344,8 @@ async function main() {
   // (CPlayerModule::SaveToServer(true)); the browser equivalent is a
   // best-effort flush when the page is being hidden/unloaded.
   window.addEventListener('pagehide', () => gameUI.flushChatOptionsSave());
+  // TELEMETRY.refusal-events — every spew line the client raises goes to the refusal reporter.
+  gameUI.refusalTap = (text) => refusalReporter?.clientSpew(text);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') gameUI.flushChatOptionsSave();
   });
@@ -8333,6 +8377,10 @@ async function main() {
     const serverMessageHandler = new ServerMessageHandler();
     serverObjectManager = new ServerObjectManager(setupModelRenderer, appearanceManager, sceneManager.scene);
     serverObjectManager.setPortalDb(worldPortalDb);
+    {
+      const som = serverObjectManager;
+      radarMotionOf = (guid) => som.getAnimated(guid)?.motionManager;
+    }
     let examineFigurePoser: ExamineFigurePoser | null = null;
     /** The examination viewport's figure: a clone of the live world mesh, normalized and posed. */
     const examineFigureClone = (mesh: THREE.Object3D, motionTableId: number): THREE.Group => {
@@ -9880,6 +9928,8 @@ async function main() {
         portalUseReporter?.serverChat(data.message, data.chatType);
         if (questTracker.onServerLine(data.message)) return;
         gameUI.addSystemMessage(data.message, chatColorFor(data.chatType), data.chatType);
+        // TELEMETRY.refusal-events — GDLE's and the AC1999 server's text refusals (error type, or a refusal's wording).
+        refusalReporter?.serverText('server_text', data.message, data.chatType);
 
         // BUG.login-position-restore-unreachable-positiontypes — ACE never
         // ships a position packet for a lifestone/portal Tie bind (verified:
@@ -9921,7 +9971,8 @@ async function main() {
       onCommunicationTransientString: (data: TransientStringData) => {
         // DECOMP.transient-string-notice — Handle_Communication__TransientString
         // @ 0057d460: AddTextToScroll(text, 0x1a) — the spew-box notice.
-        addTextToScroll(gameUI, transientStringLine(data.message));
+        refusalQuietly(() => addTextToScroll(gameUI, transientStringLine(data.message)));
+        refusalReporter?.serverText('transient', data.message, null);
         // BUG.nonpositional-human-table-sounds — no chime: retail's client
         // plays nothing for a transient string (audio/RetailLocalSounds).
       },
@@ -11979,10 +12030,10 @@ async function main() {
         // WeenieErrorWithString), ClientCommunicationSystem::
         // HandleFailureEvent prints the code's own sink text, so 0x3ee shows
         // this line AND "The container is closed!".
-        const attempt = handleAttemptFailed(
+        const attempt = refusalQuietly(() => handleAttemptFailed(
           inventoryRequests, data.itemGuid, data.errorType, resolveAttemptFailedObject,
           (text) => gameUI.displayErrorText(text),
-        );
+        ));
         // ServerSaysAttemptFailed @ 0058eae0 opens with the waiting clear on the object it ran on.
         if (attempt.objectId) gameUI.itemRequestAnswered(attempt.objectId);
         let errText = data.errorType ? weenieErrorText(data.errorType) : null;
@@ -11998,7 +12049,12 @@ async function main() {
           (guid) => serverObjectManager?.getObject(guid),
         );
         console.warn(`[AC] InventoryServerSaveFailed: item=0x${data.itemGuid.toString(16)} error=${data.errorType.toString(16)} attempt=${JSON.stringify(attempt.text)} sink="${errText}"`);
-        if (!ATTEMPT_FAILED_NAME_TEMPLATED.has(data.errorType)) deliverWeenieError(gameUI, data.errorType, errText);
+        const shown = ATTEMPT_FAILED_NAME_TEMPLATED.has(data.errorType) ? null : refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, errText));
+        // TELEMETRY.refusal-events — 0x00A0 from every server family (the AC1999 server's NotifyInventoryFailedEvent too);
+        // a code-0 failure (a refused vendor buy / sell) is reported with the attempt line, or none.
+        refusalReporter?.serverCode('inventory_failed', data.errorType,
+          (data.errorType ? weenieErrorText(data.errorType) : null) ?? attempt.text ?? null,
+          shown && shown.sink !== 'none' ? shown.sink : (attempt.text ? 'spew' : 'none'));
         // BUG.duplicate-local-sounds — no UI_GeneralError chime: the retail
         // client never plays it (audio/RetailLocalSounds).
       },
@@ -12178,7 +12234,8 @@ async function main() {
       onTransientString: (data) => {
         // Same retail handler as onCommunicationTransientString
         // (DECOMP.transient-string-notice): the 0x1a spew-box notice.
-        addTextToScroll(gameUI, transientStringLine(data.message));
+        refusalQuietly(() => addTextToScroll(gameUI, transientStringLine(data.message)));
+        refusalReporter?.serverText('transient', data.message, null);
       },
 
       // FAITHFUL.581 — `GameMessagePublicUpdatePosition` (0x02DC) ships
@@ -12621,7 +12678,8 @@ async function main() {
         // chat line, no arm → nothing. ActionCancelled (0x36) is an arm
         // ("Action cancelled!", spew) — ACE's ManaStone.cs:98 sends it.
         if (data.errorType !== WeenieError.None) {
-          deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType));
+          const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType)));
+          refusalReporter?.serverCode('use_done', data.errorType, weenieErrorText(data.errorType), shown.sink);
         }
         console.log(`[AC] UseDone: errorType=${data.errorType}`);
         portalUseReporter?.useDone(data.errorType);
@@ -12820,7 +12878,9 @@ async function main() {
         // e.g. TradeClosed / FullInventoryLocation / SkillTooLow, whatever
         // the ACE <summary> says). Pre-fix every code went to chat in the
         // Help colour. Map: @ac/shared WeenieErrorSink.ts (generated).
-        deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType));
+        const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType)));
+        // TELEMETRY.refusal-events — ACE / GDLE 0x028A, the AC1999 server's flat 0x1C AttemptFailed.
+        refusalReporter?.serverCode('weenie_error', data.errorType, weenieErrorText(data.errorType), shown.sink);
         portalUseReporter?.weenieError(data.errorType);
         // The agent's melee attack reads an approach the server gave up on ("Unable to move to object!") from it.
         agentWeenieErrorTap?.(data.errorType);
@@ -12927,7 +12987,9 @@ async function main() {
         // (" is now the leader of this fellowship."), the PK "fails to
         // affect you" family is type 7, "_ is already at full health!" /
         // "_ is already one of your followers" are 0x1a spew.
-        deliverWeenieError(gameUI, data.errorType, text);
+        const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, text));
+        // The code's template ('_' for the value: a name never goes out).
+        refusalReporter?.serverCode('weenie_error_str', data.errorType, weenieErrorWithStringText(data.errorType) || null, shown.sink);
       },
 
       // ── Magic ──
@@ -13183,7 +13245,7 @@ async function main() {
       // line "You can only move or use one item at a time", an attack in
       // progress with "You cannot move or use an item while attacking", and
       // nothing is sent. Non-inventory actions are not gated.
-      if (!gateInventoryRequestSend(inventoryRequests, actionType, (text) => gameUI.displayErrorText(text))) {
+      if (!refusalForAction(actionType, () => gateInventoryRequestSend(inventoryRequests, actionType, (text) => gameUI.displayErrorText(text)))) {
         console.log(`[AC] ${GameActionType[actionType] ?? actionType} refused: ${inventoryRequests.refusal()} (pending=${JSON.stringify(inventoryRequests.pending)})`);
         return false;
       }
@@ -13196,7 +13258,7 @@ async function main() {
       // CORE.17.k.c.a — the UIAttempt* record after CM_Inventory::Event_*
       // (UIAttemptMerge @ 0058d770 … UIAttemptGive @ 0058d620): which object
       // and which kind of request is now pending, for the failed-attempt line.
-      recordInventoryRequestFromAction(inventoryRequests, actionType, payload, inventoryObjectState, Date.now() / 1000);
+      recordInventoryRequestFromAction(inventoryRequests, actionType, payload, inventoryObjectState, Date.now() / 1000, resolveAttemptFailedObject);
       return true;
     };
 
@@ -13287,7 +13349,7 @@ async function main() {
       const nowSec = performance.now() / 1000;
       if (nowSec < lastUseObjectAt + 0.2) return;
       lastUseObjectAt = nowSec;
-      if (!gateInventoryRequestSend(inventoryRequests, GameActionType.Use, (text) => gameUI.displayErrorText(text))) {
+      if (!refusalForAction(GameActionType.Use, () => gateInventoryRequestSend(inventoryRequests, GameActionType.Use, (text) => gameUI.displayErrorText(text)))) {
         console.log(`[AC] Use refused: ${inventoryRequests.refusal()} (pending=${JSON.stringify(inventoryRequests.pending)})`);
         portalUseHeld(guid, 'busy');
         return;
@@ -14118,7 +14180,8 @@ async function main() {
       print: (text, chatType, windowId) => {
         const body = text.endsWith('\n') ? text.slice(0, -1) : text;
         for (const line of body.split('\n')) {
-          if (chatType === 0x1a) gameUI.displayErrorText(line, windowId);
+          // Chat-command feedback (it may echo what was typed) is no refusal telemetry.
+          if (chatType === 0x1a) refusalQuietly(() => gameUI.displayErrorText(line, windowId));
           else gameUI.addSystemMessage(line, chatColorFor(chatType as ChatMessageType), chatType, windowId);
         }
       },
@@ -20204,10 +20267,13 @@ async function main() {
         radarFeedCtx.playerMonarchGuid = playerState.monarchGuid;
         radarFeedCtx.playerPKStatus = playerPKStatus;
         // BUG.uihidden-never-read — ShowNever / no-color / UiHidden culling
-        // lives in ServerObjectManager.radarDotEligible (retail
-        // gmRadarUI::AddObject @ 004d9a00 refuses BF_UI_HIDDEN objects);
+        // lives in RadarVisibility.showable (retail gmRadarUI::AddObject
+        // @ 004d9a00 refuses BF_UI_HIDDEN objects; the 1999 rule also gates
+        // ShowMovement / ShowAttacking on what the object is doing);
         // CORE.18.a — dz is metres SOUTH; gmRadarUI::DrawObjects @ 004d9380
         // keeps dx²+dy² < (range-1)² (both inside RadarDotFeed.build).
+        radarVisibility.beginFrame(performance.now() / 1000);
+        radarSelectedGuid = selectedObjectId();
         gameUI.hudState.radarDots = radarDotFeed.build(serverObjectManager.getAllObjects().values(), radarFeedCtx);
         // gmRadarUI::DrawObjects boxes the blip that is ACCWeenieObject::
         // selectedID — the one global selection, however it was made (a pack

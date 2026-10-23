@@ -75,8 +75,9 @@ export {
   InventoryRequest, InventoryRequestTracker, ATTEMPT_FAILED_VERB, ATTEMPT_FAILED_SUFFIX,
   INVENTORY_REQUEST_PENDING_TEXT, INVENTORY_REQUEST_ATTACKING_TEXT, inventoryRequestRefusalText,
   attemptFailedObjectName, attemptFailedVerbLine, attemptFailedSuffix, attemptFailedText,
+  INVENTORY_REQUEST_WATCHDOG_1999_SECONDS,
 } from './inventory/InventoryRequest.js';
-export type { AttemptFailedNameType, AttemptFailedVerb, AttemptFailedObject, PendingInventoryRequest, InventoryRequestRefusal } from './inventory/InventoryRequest.js';
+export type { AttemptFailedNameType, AttemptFailedVerb, AttemptFailedObject, PendingInventoryRequest, InventoryRequestRefusal, InventoryRequestTrackerOptions } from './inventory/InventoryRequest.js';
 
 // Combat (Phase 23)
 export {
