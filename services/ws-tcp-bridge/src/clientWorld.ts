@@ -236,6 +236,8 @@ export interface ClientPortalUseFailedEvent extends WorldIds {
   held: typeof PORTAL_USE_HELD[number] | null;
   attempts: number | null;
   overlapped: boolean | null;
+  /** The body's closest horizontal approach to the portal's centre during the watch (m 0.01). */
+  closest: number | null;
   serverWalk: boolean | null;
   useDone: number | null;
   weenieErrors: number[] | null;
@@ -304,6 +306,7 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
     portalCell: match(b.portalCell, /^[0-9a-f]{8}$/),
     held: pick(b.held, PORTAL_USE_HELD),
     overlapped: bool(b.overlapped),
+    closest: metres(b.closest, 100_000, 2),
     useDone: uint(b.useDone, U32),
     weenieErrors: codes,
     chatLines: uint(b.chatLines, 10_000),

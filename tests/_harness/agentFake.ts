@@ -23,7 +23,7 @@ export class FakeHost implements AgentHost {
   chats: string[] = [];
   target: number | null = null;
   dying = new Set<number>();
-  container: { guid: number; items: Array<{ guid: number; name: string }> } | null = null;
+  container: { guid: number; items: Array<{ guid: number; name: string; stack?: number }> } | null = null;
   inv: AgentItem[] = [];
   screenName: ReturnType<AgentHost['screen']> = 'world';
 
@@ -76,6 +76,12 @@ export class FakeHost implements AgentHost {
   freePackSlots = () => this.freeSlots;
   /** The main pack and side packs with their item slots (AgentHost.packs); unset = the host can't say. */
   packs: AgentHost['packs'] = undefined;
+  /** Carried items by pack slot (AgentHost.itemSlots); unset = the host can't say. */
+  itemSlots: AgentHost['itemSlots'] = undefined;
+  /** A drop into a pack or onto a stack (AgentHost.placeItem); unset = the host can't move items. */
+  placeItem: AgentHost['placeItem'] = undefined;
+  /** What the client last sent for an item (AgentHost.lastPlacement); unset = the host can't say. */
+  lastPlacement: AgentHost['lastPlacement'] = undefined;
   burdenPercent = () => 30;
   dialogs = () => this.dialogList;
   answerDialog = (label: string, index?: number) => { expect(index).toBeUndefined(); const i = this.dialogList.findIndex((d) => d.buttons.includes(label)); if (i < 0) return false; this.dialogList.splice(i, 1); return true; };

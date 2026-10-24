@@ -13,8 +13,21 @@
  * 0x10000):
  * - `use`: a Use on it (double-click, the Use key or button, ac_use), whether
  *   or not the client sent the Use (`useSent` false + `held` say why not);
- * - `walk_in`: the player's body began to overlap its physics shape (main.ts
- *   compares the body with the portal's part-array reach each 100 ms).
+ * - `walk_in`: the player's body began to touch the portal's physics shape
+ *   (main.ts, each 100 ms: the body's Setup spheres against the portal's —
+ *   bodyTouchesPortal, the sphere-sphere test a server transition makes —
+ *   else, with either shape unknown, the body's middle within the portal's
+ *   part-array reach). `closest` is the body's nearest horizontal approach to
+ *   the portal's centre during the watch.
+ *
+ * GDLE (Dark Majesty) has no Use for a walk-in: the portal acts only when the
+ * server's own transition of the player sweeps the player's spheres into the
+ * portal's (CPhysicsObj::report_object_collision → CPortal::DoCollision), and
+ * the server learns where we are from a MoveToState (a swept transition),
+ * a once-a-second AutonomousPosition (SetPositionSimple: a placement at the
+ * point, no sweep) and its own simulation between them. A walk-in the server
+ * never collided with ends here as a failure with no WeenieError
+ * (BUG.gdle-walkin-portal-silent, progress.md 2026-10-24).
  *
  * It ends well when the server teleports us (PlayerTeleport 0xF751, which
  * starts portal space): one light `portal_used` with the ms from the try to
@@ -98,6 +111,26 @@ export function overlapsPortal(horizontalM: number, portalBaseAboveFeetM: number
   return horizontalM <= Math.max(0, reachM) + bodyRadiusM + 0.05 && portalBaseAboveFeetM >= -1.5 && portalBaseAboveFeetM <= 2;
 }
 
+/**
+ * The body touches the portal the way a server transition finds it: any of the body's Setup spheres
+ * within (radius sum) of any of the portal's, centres at the objects' origins plus each sphere's height
+ * (both Setups' spheres sit on the vertical axis: the portal 0x020001B3 and the heritage bodies).
+ * `portalBaseAboveFeetM` = the portal's origin height minus the feet. Empty shapes never touch.
+ */
+export function bodyTouchesPortal(
+  horizontalM: number, portalBaseAboveFeetM: number,
+  body: readonly { z: number; radius: number }[], portal: readonly { z: number; radius: number }[],
+): boolean {
+  if (!Number.isFinite(horizontalM) || !Number.isFinite(portalBaseAboveFeetM)) return false;
+  for (const b of body) {
+    for (const p of portal) {
+      const dz = portalBaseAboveFeetM + p.z - b.z;
+      if (Math.hypot(horizontalM, dz) <= b.radius + p.radius) return true;
+    }
+  }
+  return false;
+}
+
 /** A server chat line worth a template: it speaks of portals or teleports. */
 const PORTAL_CHAT = /portal|teleport|destination|quest|recall|summon/i;
 
@@ -143,7 +176,11 @@ export interface PortalUseFailedEvent extends Ids {
   /** m, 0.01. */
   useRadius: number;
   reach: number;
-  /** Player → portal at the try, server frame (east, north, up), m 0.1; and the horizontal distance at the try and at the end. */
+  /**
+   * Player → portal at the try, server frame (east, north, up), m 0.1; and the horizontal distance at the
+   * try and at the end. "Player" is the last AutonomousPosition sent (where the server was last told we
+   * are), not the body: walking in, it trails the body by up to a second of running.
+   */
   dx: number | null;
   dy: number | null;
   dz: number | null;
@@ -159,6 +196,8 @@ export interface PortalUseFailedEvent extends Ids {
   attempts: number;
   /** The body overlapped the portal at some point during the watch. */
   overlapped: boolean;
+  /** The body's closest horizontal approach to the portal's centre during the watch, m 0.01; null = not measured. */
+  closest: number | null;
   /** The server moved the player during the watch (its MoveTo toward the portal). */
   serverWalk: boolean;
   /** The UseDone code that came back (0 = done, no error); null = no UseDone. */
@@ -208,6 +247,7 @@ interface Watch {
   held: PortalUseHeld | null;
   attempts: number;
   overlapped: boolean;
+  closest: number | null;
   serverWalk: boolean;
   useDone: number | null;
   errors: number[];
@@ -279,6 +319,13 @@ export class PortalUseReporter {
       if (w && w.guid === g) { w.overlapped = true; w.progressAt = this.now(); continue; }
       this.begin(g, 'walk_in', this.now(), false, null);
     }
+  }
+
+  /** The body's horizontal distance (m) to the portal under watch now (main.ts, each check); keeps the closest. */
+  approach(guid: number, horizontalM: number): void {
+    const w = this.watch;
+    if (!w || w.guid !== guid >>> 0 || !Number.isFinite(horizontalM) || horizontalM < 0) return;
+    if (w.closest === null || horizontalM < w.closest) w.closest = horizontalM;
   }
 
   /** The server moved the player (a MoveTo / MoveToPosition, our own movement event). */
@@ -366,6 +413,7 @@ export class PortalUseReporter {
       held: w.useSent ? null : w.held,
       attempts: w.attempts,
       overlapped: w.overlapped,
+      closest: w.closest === null ? null : r2(w.closest),
       serverWalk: w.serverWalk,
       useDone: w.useDone,
       weenieErrors: [...w.errors],
@@ -388,7 +436,7 @@ export class PortalUseReporter {
     if (!snap) return;
     this.watch = {
       guid: guid >>> 0, trigger, startedAt: at, progressAt: at, snap,
-      useSent: sent, held, attempts: trigger === 'use' ? 1 : 0, overlapped: trigger === 'walk_in',
+      useSent: sent, held, attempts: trigger === 'use' ? 1 : 0, overlapped: trigger === 'walk_in', closest: null,
       serverWalk: false, useDone: null, errors: [], chatLines: 0, chatType: null, chatTemplate: null,
     };
   }

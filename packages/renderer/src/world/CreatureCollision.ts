@@ -30,6 +30,27 @@ export function creatureBlockRadius(setup: CollisionShapeSource | null, scale = 
   return r * (scale || 1);
 }
 
+/** A Setup sphere in the object's frame, × scale: centre (m) and radius (m). */
+export interface PhysicsSphere { x: number; y: number; z: number; radius: number }
+
+/**
+ * The Setup's Spheres × scale — the shape a server transition tests for an
+ * object with no cylspheres and no physics BSP (a portal: Setup 0x020001B3
+ * has one sphere, r 1.357 at z 1.42), and the moving player's own shape
+ * (CPhysicsObj::GetSphere; the human Setup 0x02000001: r 0.48 at z 0.475 and
+ * 1.35). Empty when the Setup can't load or has none.
+ */
+export function setupPhysicsSpheres(
+  setup: { spheres?: { origin?: { x: number; y: number; z: number }; radius: number }[] } | null | undefined,
+  scale = 1,
+): PhysicsSphere[] {
+  if (!setup?.spheres) return [];
+  const s = scale || 1;
+  return setup.spheres
+    .filter((sp) => sp.radius > 0)
+    .map((sp) => ({ x: (sp.origin?.x ?? 0) * s, y: (sp.origin?.y ?? 0) * s, z: (sp.origin?.z ?? 0) * s, radius: sp.radius * s }));
+}
+
 /**
  * SWEEP1006B.world-objects.remote-objects-radius-height-are — the object's
  * bounding cylinder as retail's physics reads it for EVERY object with a part

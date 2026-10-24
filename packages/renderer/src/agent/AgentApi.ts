@@ -54,6 +54,12 @@ import type {
 /** Your fellowship as Auto Fellow Mgmt reads it (AgentHost.fellowshipInfo). */
 export interface FellowshipInfo { leader: boolean; open: boolean; count: number; members?: string[]; handOff?: boolean; /** The fellows whose Share Loot is on (VTank's LootFellowCorpses). */ sharing?: string[] }
 
+/** A placement the client sent (ItemHolderPlacement's PlacementResult, minus refusals). */
+export type AgentPlacementSent =
+  | { kind: 'merge'; targetId: number; amount: number }
+  | { kind: 'put'; containerId: number }
+  | { kind: 'split'; containerId: number; amount: number };
+
 export interface AgentHostObject {
   guid: number;
   name: string;
@@ -286,6 +292,13 @@ export interface AgentHost {
   placeItem?(guid: number, to: { packSlot: number } | { onto: number }): boolean;
   /** Split `amount` off a stack into the main pack (a shift-drag's StackableSplitToContainer). */
   splitStack?(guid: number, amount: number): boolean;
+  /**
+   * What the client last sent for this item (runPlacement): a put into a container, a StackableMerge onto a stack
+   * (PlaceInBackpack auto-merges onto a stack of the same thing: the item's own guid is then destroyed, ACE
+   * InventoryRemoveObject), or a split. Null when nothing was sent for it. Lets a pick-up or move know what "done" looks
+   * like instead of waiting for a guid that will never arrive.
+   */
+  lastPlacement?(guid: number): AgentPlacementSent | null;
   /** Every skill with its training (the macro's planners). */
   skillList?(): Array<{ id: number; name: string; training: 'untrained' | 'trained' | 'specialized'; base: number; buffed: number }>;
   /** A spell's components by name, as the server will charge them: the formula the client's own cast pre-check walks (personalized, or scarabs and tapers with foci; SpellComponentCheck.appropriateSpellFormula), through the component table. */
@@ -314,7 +327,7 @@ export interface AgentHost {
   /** The era's spell table (the macro's planners build spell families from it). */
   spellTableData?(): { spells: Map<number, { name: string; desc: string; category: number; school: number; bitfield: number; power: number; duration?: number; baseMana?: number }> } | null;
   /** The items in the currently open container (corpse/chest), or null when none is open. */
-  openContainer(): { guid: number; items: Array<{ guid: number; name: string; uiEffects?: number }> } | null;
+  openContainer(): { guid: number; items: Array<{ guid: number; name: string; uiEffects?: number; stack?: number }> } | null;
   /** Open dialogs, oldest first. */
   dialogs(): AgentDialog[];
   /** The open book or note (gmBookUI): its object, title and pages; a page's text is null until the server has sent it. */
@@ -5704,7 +5717,10 @@ export class AgentApi {
 
   private nameOf(guid: number): string {
     if (guid === this.host.self()?.guid) return 'yourself';
-    return this.host.object(guid)?.name ?? this.host.inventory().find((i) => i.guid === guid)?.name ?? `#${guid.toString(16)}`;
+    // An item in an open chest or corpse is listed in the container's window, not always as a world object: its name from
+    // there (a pick-up out of a chest read "picked up 20 #80000443", BUG.agent-pickup-merge-misreport).
+    return this.host.object(guid)?.name ?? this.host.inventory().find((i) => i.guid === guid)?.name
+      ?? this.host.openContainer()?.items.find((i) => i.guid === guid)?.name ?? `#${guid.toString(16)}`;
   }
 
   // ── simple actions ──
@@ -8412,6 +8428,45 @@ export class AgentApi {
   }
 
   /**
+   * How a move of item `g` lands when it doesn't arrive as itself: merged onto a stack you carry (its guid destroyed,
+   * or what's left of it staying put) or split off into a new stack. Keyed off what the client sent
+   * (host.lastPlacement): a merge onto stack X is done once X grew; a split once a new stack of the same thing arrived;
+   * a put only by the item itself arriving (null here). A host that can't say what it sent: a stack of the same name
+   * that grew, or a new one. `before` is every carried stack size before the send.
+   */
+  private stackLanding(g: number, itemName: string, before: Map<number, number>, sent: AgentPlacementSent | null): {
+    landed: () => { kind: 'merge' | 'split'; guid: number; from: number; to: number } | null;
+    text: (l: { kind: 'merge' | 'split'; guid: number; from: number; to: number }, sourceStack: number | undefined, where: string) => string;
+  } {
+    const same = (i: AgentItem): boolean => i.name.toLowerCase() === itemName.toLowerCase();
+    const landed = (): { kind: 'merge' | 'split'; guid: number; from: number; to: number } | null => {
+      if (sent?.kind === 'put') return null;
+      const inv = this.host.inventory();
+      if (sent?.kind !== 'split') {
+        const grew = inv.find((i) => i.guid !== g && before.has(i.guid) && (i.stack ?? 1) > before.get(i.guid)!
+          && (sent ? i.guid === sent.targetId : same(i)));
+        if (grew) return { kind: 'merge', guid: grew.guid, from: before.get(grew.guid)!, to: grew.stack ?? 1 };
+      }
+      if (sent?.kind !== 'merge') {
+        const fresh = inv.find((i) => i.guid !== g && !before.has(i.guid) && same(i));
+        if (fresh) return { kind: 'split', guid: fresh.guid, from: 0, to: fresh.stack ?? 1 };
+      }
+      return null;
+    };
+    const text = (l: { kind: 'merge' | 'split'; guid: number; from: number; to: number }, sourceStack: number | undefined, where: string): string => {
+      const got = l.to - l.from;
+      // The name captured before the send; the stack it landed in names the same thing when that was only a guid.
+      const name = /^#[0-9a-f]+$/i.test(itemName) ? (this.host.inventory().find((i) => i.guid === l.guid)?.name ?? itemName) : itemName;
+      const rest = sourceStack !== undefined && sourceStack > got ? sourceStack - got : 0;
+      const left = rest > 0 ? `; ${rest} left ${where}` : '';
+      return l.kind === 'merge'
+        ? `${got} ${name}: merged into your stack of ${l.from} (now ${l.to})${left}`
+        : `${got} ${name}: a new stack of ${l.to} in your pack${left}`;
+    };
+    return { landed, text };
+  }
+
+  /**
    * Pick an item up and wait for the server's answer: in your pack, or its refusal ("The A torn note can't be picked up
    * - action cancelled": ACE walks you to it first and a move of your own cancels that). "picking up …" at once, with
    * the walk_to after it cancelling the pick-up, read as done (Arcanist, Holtburg Dungeon, 2026-10-12).
@@ -8437,12 +8492,19 @@ export class AgentApi {
   private async pickUpNow(g: number, name: string): Promise<AgentResult> {
     for (let w = 0; w < 50 && this.host.busy(); w++) await sleep(200);
     const since = this.seqN;
+    // Stacks before the pick-up: PlaceInBackpack auto-merges onto a stack of the same thing (ItemHolder::AttemptAutoMerge),
+    // and then the picked guid never reaches the pack (ACE merges it and removes it, InventoryRemoveObject): 20 Practice
+    // Arrows out of a chest merged into the pack's stack and the pick-up read "no answer … not in your pack yet" (local
+    // ACE, 2026-10-24, BUG.agent-pickup-merge-misreport).
+    const before = new Map(this.host.inventory().map((i) => [i.guid, i.stack ?? 1]));
+    const lyingStack = this.host.object(g)?.stack ?? this.host.openContainer()?.items.find((i) => i.guid === g)?.stack;
     if (!this.host.pickUp(g)) return { ok: false, message: `pick-up of ${name} refused by the client (busy with another item, or not reachable)` };
     const n = name.toLowerCase();
     // The server's refusal: its line names the item ("The X can't be picked up - …") or is a bare failure notice.
     const refusal = (): string[] => this.eventsSince(since).filter((e) => e.type === 'chat' && !AgentApi.spokenEvent(e) && (e.text.toLowerCase().includes(n) || /^(action cancelled|you can't|you cannot|unable to move|you're too busy|you are too busy)/i.test(e.text.replace(/^\(\w+\) /, ''))))
       .map((e) => e.text.replace(/^\(\w+\) /, ''));
-    const inPack = (): boolean => this.host.inventory().some((i) => i.guid === g) || this.host.carriedGuids().has(g);
+    const landing = this.stackLanding(g, name, before, this.host.lastPlacement?.(g) ?? null);
+    const inPack = (): boolean => this.host.inventory().some((i) => i.guid === g) || this.host.carriedGuids().has(g) || landing.landed() !== null;
     // The server walks you to it first (ACE CreateMoveToChain): while that walk is still moving you, its answer is still
     // to come. "No answer in 15 s" while the server's walk was on its way round a row of shelves, and the Parchment was in
     // the pack moments later (Holtburg Dungeon, 2026-10-12).
@@ -8460,6 +8522,8 @@ export class AgentApi {
       const moved = said.some((l) => /cancel/i.test(l)) ? ' (the server walks you to it first; moving or acting before it gets there cancels the pick-up: ac_pick_up it again and wait for the answer)' : '';
       return { ok: false, message: `not picked up: ${name}: ${said.join('; ')}${moved}` };
     }
+    const merged = landing.landed();
+    if (merged) return { ok: true, message: `picked up ${landing.text(merged, lyingStack, 'where it lay')}` };
     if (inPack()) return { ok: true, message: `picked up ${name}: it's in your pack now` };
     const o = this.host.object(g), m = this.me();
     const d = o && o.cell && m ? Math.hypot(toGlobal(o.cell, o.x, o.y).x - m.g.x, toGlobal(o.cell, o.x, o.y).y - m.g.y) : null;
@@ -9102,8 +9166,19 @@ export class AgentApi {
     if (now.count >= now.capacity && !stackable) return { ok: false, message: `not moved: ${name}: your ${pack.name} is full (${now.count}/${now.capacity})` };
     if (!this.host.placeItem) return { ok: false, message: 'moving items is not available in this client' };
     const from = it.where;
-    return this.inventoryRequest(`moved ${name} from your ${from} into your ${pack.name}`, `not moved: ${name}`, () => this.host.placeItem!(g, { packSlot: pack.slot }),
-      () => { const i = this.host.inventory().find((x) => x.guid === g); return !i || isThere(i); }, 4000, { item: name });
+    // A stackable dropped on a pack merges onto a stack of the same thing there when one has room: its guid is then
+    // destroyed, or (the stack nearly full) part of it merges and the rest stays where it was. Either is the move done.
+    const before = new Map(this.host.inventory().map((i) => [i.guid, i.stack ?? 1]));
+    let landing: ReturnType<AgentApi['stackLanding']> | null = null;
+    const r = await this.inventoryRequest(`moved ${name} from your ${from} into your ${pack.name}`, `not moved: ${name}`, () => {
+      const sent = this.host.placeItem!(g, { packSlot: pack.slot });
+      if (sent) landing = this.stackLanding(g, name, before, this.host.lastPlacement?.(g) ?? null);
+      return sent;
+    }, () => { const i = this.host.inventory().find((x) => x.guid === g); return !i || isThere(i) || !!landing?.landed(); }, 4000, { item: name });
+    const merged = r.ok ? (landing as ReturnType<AgentApi['stackLanding']> | null)?.landed() : null;
+    if (!merged) return r;
+    const [, ...rest] = r.message.split('\n');
+    return { ok: true, message: [`moved ${landing!.text(merged, it.stack, `in your ${from}`)} (your ${pack.name})`, ...rest].join('\n') };
   }
 
   /**

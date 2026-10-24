@@ -136,7 +136,7 @@ import { rangedSpeechInRange } from './chat/RangedSpeechGate.js';
 import { PingLatencyTracker } from './network/PingLatencyTracker.js';
 import { GameActions } from './network/GameActions.js';
 import { pageDebugToolsEnabled, harnessDegMulPin } from './utils/debugTools.js';
-import { AgentApi, agentApiEnabled, automationUiEnabled, doorFacing, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, yawToCompass, type AgentHost, type AgentHostObject } from './agent/AgentApi.js';
+import { AgentApi, agentApiEnabled, automationUiEnabled, doorFacing, fixtureReach, parseMapCoords, toGlobal as agentToGlobal, yawToCompass, type AgentHost, type AgentHostObject, type AgentPlacementSent } from './agent/AgentApi.js';
 import { createHostAttack } from './agent/hostAttack.js';
 import { skillKey, skillSpellLines, spellSkillMod } from './agent/spellFamilies.js';
 import { pluginLootSets } from './agent/pluginLootSets.js';
@@ -436,7 +436,7 @@ import { FramePhaseTimer, PHASE, ProgramCreationCounter, CompileTrace, netHandle
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
-import { PortalUseReporter, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
+import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
@@ -3626,11 +3626,21 @@ async function main() {
     portalUseReporter.tick(cameraController.isMoving || (playerMoveTo?.isMovingTo() ?? false));
     if (!gameStarted || !serverObjectManager || gameUI.worldHiddenByPortalSpace || teleportBusy.value || playerState.isDead) return;
     const inside: number[] = [];
+    const body = serverObjectManager.getObject(aceCharGuid ?? myPlayerGuid ?? 0)?.physicsSpheres;
+    const watched = portalUseReporter.watching;
     for (const o of serverObjectManager.getAllObjects().values()) {
       if (!isPortalObject(o) || o.wielderId || !o.position) continue;
-      // The body's middle inside the portal's reach (no body radius added): deep enough that the
-      // server's collision has surely touched it, so brushing past a portal is no try.
-      if (overlapsPortal(Math.hypot(o.worldX - playerWorldX, o.worldZ - playerWorldZ), o.worldY - playerFeetY, fixtureReach(o), 0)) inside.push(o.guid);
+      const horizontal = Math.hypot(o.worldX - playerWorldX, o.worldZ - playerWorldZ);
+      if (o.guid === watched) portalUseReporter.approach(o.guid, horizontal);
+      // BUG.gdle-walkin-portal-silent — a walk-in is a touch of the shapes the server's transition
+      // collides (the body's Setup spheres against the portal's). The part-array reach (Setup radius
+      // 1.92 m for the stock portal) is wider than that touch (1.36 + 0.48 m), so a brush past the
+      // rim counted as a try the server could never see. The reach stays the fallback while either
+      // Setup is unknown.
+      const touching = body?.length && o.physicsSpheres?.length
+        ? bodyTouchesPortal(horizontal, o.worldY - playerFeetY, body, o.physicsSpheres)
+        : overlapsPortal(horizontal, o.worldY - playerFeetY, fixtureReach(o), 0);
+      if (touching) inside.push(o.guid);
     }
     portalUseReporter.overlaps(inside);
   }
@@ -5011,7 +5021,21 @@ async function main() {
    * bookkeeping (BUG.equip-unequip-optimistic-no-rollback). True when a
    * request went out.
    */
+  let lastSentPlacement: { itemId: number; sent: AgentPlacementSent } | null = null;
   function runPlacement(itemId: number, r: PlacementResult, gesture: string): boolean {
+    const sent = runPlacementSend(itemId, r, gesture);
+    // What went out, for the agent's pick-up / move to know what "done" looks like (a merge destroys the item's guid).
+    if (sent && r.kind !== 'refused') {
+      lastSentPlacement = {
+        itemId: itemId >>> 0,
+        sent: r.kind === 'merge' ? { kind: 'merge', targetId: r.targetId >>> 0, amount: r.amount }
+          : r.kind === 'split' ? { kind: 'split', containerId: r.containerId >>> 0, amount: r.amount }
+            : { kind: 'put', containerId: r.containerId >>> 0 },
+      };
+    }
+    return sent;
+  }
+  function runPlacementSend(itemId: number, r: PlacementResult, gesture: string): boolean {
     if (!sendGameAction) return false;
     switch (r.kind) {
       case 'refused':
@@ -17381,7 +17405,7 @@ async function main() {
           void worldStreamingDats?.pendingFor(() => appearanceManager.loadPaletteColors(paletteId));
           return null;
         },
-        openContainer: () => (openContainerGuid ? { guid: openContainerGuid >>> 0, items: openContainer.items().map((i) => ({ guid: i.guid >>> 0, name: i.name, ...(i.uiEffects ? { uiEffects: i.uiEffects } : {}) })) } : null),
+        openContainer: () => (openContainerGuid ? { guid: openContainerGuid >>> 0, items: openContainer.items().map((i) => ({ guid: i.guid >>> 0, name: i.name, ...(i.uiEffects ? { uiEffects: i.uiEffects } : {}), ...(i.stackSize ? { stack: i.stackSize } : {}) })) } : null),
         dialogs: () => gameUI.agentDialogs(),
         book: () => gameUI.agentBook(),
         bookPage: (index) => gameUI.agentBookPage(index),
@@ -17442,6 +17466,7 @@ async function main() {
           return agentSkillLines.get(skillKey(skill)) ?? null;
         },
         pickUp: (guid) => { agentPrimeMoveState(); return placeInBackpack(guid); },
+        lastPlacement: (guid) => (lastSentPlacement && lastSentPlacement.itemId === guid >>> 0 ? lastSentPlacement.sent : null),
         drop: (guid) => {
           if (!sendGameAction || !playerState.inventory.getItem(guid)) return false;
           agentPrimeMoveState();

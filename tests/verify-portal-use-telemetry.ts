@@ -5,14 +5,21 @@
  * portal_used with its timing. Both go to POST /client-preworld and the bridge logs them as client_world
  * through its whitelist (services/ws-tcp-bridge/src/clientWorld.ts sanitizeClientPortal).
  */
-import { describe, it, expect } from 'vitest';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import * as THREE from 'three';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
-  PortalUseReporter, PORTAL_REPLY_MS, PORTAL_MAX_WAIT_MS, PORTAL_RATE_MS, chatTemplate, isPortalObject, overlapsPortal,
+  PortalUseReporter, PORTAL_REPLY_MS, PORTAL_MAX_WAIT_MS, PORTAL_RATE_MS, chatTemplate, isPortalObject, overlapsPortal, bodyTouchesPortal,
   type PortalEvent, type PortalSnapshot, type PortalUseFailedEvent,
 } from '../packages/renderer/src/telemetry/PortalUseReporter';
 import { sanitizeClientPortal, sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld';
 import { resolveBridgeConfig, type BridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil';
 import { createBridgeServer } from '../services/ws-tcp-bridge/src/server';
+import { setupPhysicsSpheres, partArrayCylinder, type PhysicsSphere } from '../packages/renderer/src/world/CreatureCollision';
+import { ServerObjectManager } from '../packages/renderer/src/world/ServerObjectManager';
+import { SetupModel } from '../packages/dat-parser/src/file-types/SetupModel';
+import { openDat, DAT_PATHS } from './_harness/dat';
 
 /** The Scrivener's Annex exit as a fake: Portal desc flag, ItemType Portal, Ethereal | ReportCollisions | Static. */
 const PORTAL_GUID = 0x7013500a;
@@ -166,12 +173,117 @@ describe('PortalUseReporter: walking into a portal', () => {
     expect(g.events).toEqual([expect.objectContaining({ outcome: 'portal_used', trigger: 'use', ms: 300 })]);
   });
 
+  it('the closest approach of the body during the watch rides on the failure', () => {
+    const g = rig();
+    g.r.overlaps([]);
+    g.r.overlaps([PORTAL_GUID]);
+    g.r.approach(PORTAL_GUID, 1.734);
+    g.r.approach(PORTAL_GUID, 0.416);
+    g.r.approach(0x70000001, 0.01); // another portal: not this watch
+    g.r.approach(PORTAL_GUID, 3.2);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ trigger: 'walk_in', closest: 0.42 });
+    const h = rig();
+    h.r.useAttempt(PORTAL_GUID, portalObj, true);
+    h.run(PORTAL_REPLY_MS + 100);
+    expect(h.events[0]).toMatchObject({ trigger: 'use', closest: null });
+  });
+
   it('overlapsPortal: the body within the reach, the portal base near the feet', () => {
     expect(overlapsPortal(1.0, 0, 1.2, 0)).toBe(true);
     expect(overlapsPortal(1.3, 0, 1.2, 0)).toBe(false);
     expect(overlapsPortal(1.3, 0, 1.2, 0.5)).toBe(true);
     expect(overlapsPortal(0.5, 5, 1.2, 0)).toBe(false); // a floor above
     expect(overlapsPortal(Number.NaN, 0, 1.2, 0)).toBe(false);
+  });
+});
+
+/**
+ * BUG.gdle-walkin-portal-silent — a walk-in counts only when the body's Setup spheres touch the portal's,
+ * as the server's transition finds them (GDLE CPhysicsObj::report_object_collision → CPortal::DoCollision;
+ * ACE PhysicsObj.FindObjCollisions). The stock portal (Setup 0x020001B3): one sphere r 1.357 at z 1.42,
+ * part-array radius 1.919. The human body (0x02000001): r 0.48 at z 0.475 and z 1.35.
+ */
+const PORTAL_SPHERES: PhysicsSphere[] = setupPhysicsSpheres({ spheres: [{ origin: { x: 0, y: 0, z: 1.42 }, radius: 1.357 }] });
+const HUMAN_SPHERES: PhysicsSphere[] = setupPhysicsSpheres({ spheres: [
+  { origin: { x: 0, y: 0, z: 0.475 }, radius: 0.48 }, { origin: { x: 0, y: 0, z: 1.35 }, radius: 0.48 },
+] });
+
+describe('bodyTouchesPortal: the shapes the server collides', () => {
+  it('touches inside the sphere sum (1.837 m level), not on the rim the part-array reach still covered', () => {
+    expect(bodyTouchesPortal(0, 0, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(true);
+    expect(bodyTouchesPortal(1.8, 0, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(true);
+    // The rim: within the 1.919 m reach the old test used, outside every sphere pair.
+    expect(overlapsPortal(1.88, 0, 1.919, 0)).toBe(true);
+    expect(bodyTouchesPortal(1.88, 0, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(false);
+  });
+
+  it('height counts: a portal base 1.9 m above the feet is out of reach, 1.9 m below only near the middle', () => {
+    expect(overlapsPortal(0.5, 1.9, 1.919, 0)).toBe(true); // the old window took it
+    expect(bodyTouchesPortal(0.5, 1.9, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(false);
+    expect(bodyTouchesPortal(0.3, -1.9, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(true);
+    expect(bodyTouchesPortal(1.6, -1.9, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(false);
+  });
+
+  it('scale grows both the centre heights and the radii; empty or NaN never touches', () => {
+    const big = setupPhysicsSpheres({ spheres: [{ origin: { x: 0, y: 0, z: 1.42 }, radius: 1.357 }] }, 2);
+    expect(big).toEqual([{ x: 0, y: 0, z: 2.84, radius: 2.714 }]);
+    expect(bodyTouchesPortal(2.7, 0, HUMAN_SPHERES, big)).toBe(true);
+    expect(bodyTouchesPortal(3.0, 0, HUMAN_SPHERES, big)).toBe(false);
+    expect(bodyTouchesPortal(0, 0, [], PORTAL_SPHERES)).toBe(false);
+    expect(bodyTouchesPortal(Number.NaN, 0, HUMAN_SPHERES, PORTAL_SPHERES)).toBe(false);
+    expect(setupPhysicsSpheres(null)).toEqual([]);
+    expect(setupPhysicsSpheres({ spheres: [{ radius: 0.7 }] })).toEqual([{ x: 0, y: 0, z: 0, radius: 0.7 }]);
+  });
+
+  it('ServerObjectManager gives every part-array object its scaled Setup spheres', () => {
+    const smr = {
+      createSetupMeshWithOverrides: () => new THREE.Group(),
+      loadSetupModel: (id: number) => (id === 0x020001b3
+        ? { radius: 1.919, height: 2.714, cylSpheres: [], spheres: [{ origin: { x: 0, y: 0, z: 1.42 }, radius: 1.357 }] }
+        : null),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const m = new ServerObjectManager(smr as any, { loadPaletteColors: () => null } as any, new THREE.Scene());
+    const o = m.createObject({
+      guid: 0x7a0000aa, name: 'Portal', weenieClassId: 22011, itemType: 0x10000,
+      position: { landblock: 0xA9B40017, x: 100, y: 120, z: 12, rw: 1, rx: 0, ry: 0, rz: 0 }, setupId: 0x020001b3, motionTableId: 0, iconId: 0,
+      physicsState: 0xc0c, objectDescFlags: 0x40000, radarColor: 0, radarBehavior: 0, basePalette: 0, subPalettes: [],
+      textureChanges: [], animPartChanges: [], containerId: 0, wielderId: 0, currentWieldedLocation: 0, parentLocation: 0,
+      validLocations: 0, stackSize: 0, maxStackSize: 0, value: 0, burden: 0, uiEffects: 0, usable: 0, velocityX: 0,
+      velocityY: 0, velocityZ: 0, soundTableId: 0, objScale: 1, translucency: 0, defaultScript: 0, defaultScriptIntensity: 1,
+      iconOverlayId: 0, iconUnderlayId: 0,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)!;
+    expect(o.physicsSpheres).toEqual(PORTAL_SPHERES);
+    expect(o.collisionRadius).toBeCloseTo(1.919, 6);
+    m.setObjectScale(0x7a0000aa, 1.5);
+    expect(o.physicsSpheres![0].radius).toBeCloseTo(1.357 * 1.5, 6);
+  });
+});
+
+const CLASSIC_PORTAL = resolve(__dirname, '..', 'dat/sets/classic-dereth/client_portal.dat');
+describe.skipIf(!existsSync(DAT_PATHS.portal) || !existsSync(CLASSIC_PORTAL))('bodyTouchesPortal on the DAT shapes (end of retail and Dark Majesty)', () => {
+  const shapes: Record<string, { portal: PhysicsSphere[]; body: PhysicsSphere[]; reach: number }> = {};
+  beforeAll(() => {
+    for (const [era, path] of [['eor', DAT_PATHS.portal], ['classic', CLASSIC_PORTAL]] as const) {
+      const db = openDat(path);
+      const portal = new SetupModel(db.getReader(0x020001b3));
+      const body = new SetupModel(db.getReader(0x02000001));
+      shapes[era] = { portal: setupPhysicsSpheres(portal), body: setupPhysicsSpheres(body), reach: partArrayCylinder(portal).radius };
+    }
+  });
+
+  it('both eras: the rim between the touch and the part-array reach is no walk-in', () => {
+    for (const era of ['eor', 'classic']) {
+      const { portal, body, reach } = shapes[era];
+      expect(portal).toHaveLength(1);
+      expect(body).toHaveLength(2);
+      expect(reach).toBeGreaterThan(1.9);
+      expect(bodyTouchesPortal(1.8, 0, body, portal)).toBe(true);
+      expect(bodyTouchesPortal(reach - 0.02, 0, body, portal)).toBe(false);
+      expect(overlapsPortal(reach - 0.02, 0, reach, 0)).toBe(true);
+    }
   });
 });
 
@@ -187,6 +299,7 @@ describe('the bridge keeps the portal fields', () => {
   it('sanitizeClientPortal keeps every field the page sends and drops junk', () => {
     const g = rig();
     g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.r.approach(PORTAL_GUID, 0.734);
     g.r.useDone(0);
     g.r.weenieError(0x0484);
     g.r.serverChat('Portal destination for portal ID 90001 not yet implemented!', 5);
@@ -197,10 +310,11 @@ describe('the bridge keeps the portal fields', () => {
     expect(sanitizeClientWorld(sent)).toBeNull();
     const junk = sanitizeClientPortal({
       ...sent, name: 'Portal to Zaikhal', chatTemplate: 'Bob has 3 pyreals', playerCell: '0x0135', weenieErrors: [1, 'x', -1, 2, 3, 4, 5],
-      trigger: 'telepathy', dx: Infinity, physicsState: 2 ** 33,
+      trigger: 'telepathy', dx: Infinity, physicsState: 2 ** 33, closest: 'near',
     }) as unknown as Record<string, unknown>;
+    expect((sent as PortalUseFailedEvent).closest).toBe(0.73);
     expect(junk).not.toHaveProperty('name');
-    expect(junk).toMatchObject({ chatTemplate: null, playerCell: null, weenieErrors: [1, 2], trigger: null, dx: null, physicsState: null });
+    expect(junk).toMatchObject({ chatTemplate: null, playerCell: null, weenieErrors: [1, 2], trigger: null, dx: null, physicsState: null, closest: null });
   });
 
   it('sanitizeClientPortal keeps portal_used', () => {

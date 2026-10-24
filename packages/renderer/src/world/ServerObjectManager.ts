@@ -5,7 +5,7 @@
  * Each server object has a 3D representation in the scene.
  */
 
-import { addCreatureObstacles, creatureBlockRadius, blocksLocalPlayer, partArrayCylinder, type CreatureBlocker } from './CreatureCollision.js';
+import { addCreatureObstacles, creatureBlockRadius, blocksLocalPlayer, partArrayCylinder, setupPhysicsSpheres, type CreatureBlocker, type PhysicsSphere } from './CreatureCollision.js';
 import type { ObjectPhysicsModel } from './ObjectCollision.js';
 import { DungeonCollision } from './DungeonCollision.js';
 import { MoveToManager, performServerMovement, type MoveToHost } from '../controllers/MoveToManager.js';
@@ -302,6 +302,14 @@ export interface ServerObject {
    * getMeleeCylinderDistance call sites.
    */
   collisionHeight: number;
+  /**
+   * BUG.gdle-walkin-portal-silent — the Setup's Spheres × scale
+   * (world/CreatureCollision.ts setupPhysicsSpheres): the shape a server
+   * transition collides with for an object with no cylspheres / BSP (a
+   * portal), and our own body's shape. The portal telemetry's walk-in test
+   * reads it; unset until the Setup loads.
+   */
+  physicsSpheres?: PhysicsSphere[];
   /**
    * CORE.17.k.b.b.a.g.b — the part materials `CPhysicsPart::CopyMaterial`
    * replaced while a selection-lighting override is on (see
@@ -1081,6 +1089,7 @@ export class ServerObjectManager {
     const cyl = partArrayCylinder(setup, scale);
     obj.collisionRadius = cyl.radius;
     obj.collisionHeight = cyl.height;
+    obj.physicsSpheres = setupPhysicsSpheres(setup, scale);
     obj.blockRadius = (obj.itemType & ItemType.Creature) !== 0 ? creatureBlockRadius(setup, scale) : 0;
   }
 
