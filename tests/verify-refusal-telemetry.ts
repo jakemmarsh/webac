@@ -113,6 +113,61 @@ describe('RefusalReporter: first at once, repeats rolled up', () => {
     expect(isNoticeCode('weenie_error', 0x051b)).toBe(false);
   });
 
+  it('TELEMETRY.refusal-trade-notices: the trade flow\'s progress notices are not refusals; trade refusals still are', () => {
+    // Production (end-of-retail ACE, 2026-10-23) logged each of these as a client_refusal.
+    const g = rig('eor', (t) => scrubNames(t, ['Reemer']));
+    g.r.noteActionSent(0x1fa);
+    g.r.serverCode('weenie_error', 0x0529, weenieErrorText(0x0529), 'spew');
+    g.r.serverText('transient', 'The items are being traded', null);
+    g.r.serverText('transient', 'Reemer has accepted the offer', null);
+    g.r.serverText('transient', 'Ming Masun has accepted the offer', null); // a name the scrub doesn't know
+    g.r.serverText('transient', 'You have accepted the offer', null);
+    g.r.noteActionSent(0xc8);
+    g.r.serverCode('weenie_error', 0x0451, weenieErrorText(0x0451), 'none');
+    g.r.clientSpew('The trade has been cancelled.');
+    expect(weenieErrorText(0x0529)).toBe('Trade Complete!');
+    expect(weenieErrorText(0x0451)).toBe('Trade closed.');
+    expect(g.events).toEqual([]);
+
+    // The refusals of the same flow stay reported.
+    g.r.serverText('transient', 'You cannot trade that!', null);
+    g.r.serverCode('weenie_error', 0x0455, weenieErrorText(0x0455), 'spew');
+    g.r.serverText('transient', 'Trade confirmation failed...', null);
+    g.r.serverText('transient', 'You are too encumbered to complete the trade!', null);
+    g.r.serverCode('weenie_error', 0x044c, weenieErrorText(0x044c), 'spew');
+    expect(g.events.map((e) => [e.code, e.context])).toEqual([
+      [`t:${refusalHash('You cannot trade that!')}`, 'transient'],
+      ['we:0x0455', 'weenie_error'],
+      [g.events[2].code, 'transient'],
+      [g.events[3].code, 'transient'],
+      ['we:0x044c', 'weenie_error'],
+    ]);
+    expect(g.events[0].text).toBe('You cannot trade that!');
+    expect(g.events[1].text).toBe('You cannot trade while in combat mode.');
+    expect(isServerTextRefusal('Reemer has accepted the offer', null, true)).toBe(false);
+    expect(isServerTextRefusal('The trade has been cancelled.', 0x1a)).toBe(false);
+  });
+
+  it('TELEMETRY.refusal-trade-notices sweep: PK, hook, fellowship and allegiance state changes are notices; their refusals are not', () => {
+    const g = rig();
+    for (const c of [0x04f1, 0x04f2, 0x0502, 0x0504, 0x0512, 0x0513, 0x0546, 0x054a, 0x0572, 0x057c, 0x0581, 0x0496, 0x0497]) {
+      g.r.serverCode('weenie_error', c, weenieErrorText(c), 'spew');
+    }
+    for (const c of [0x050e, 0x0514, 0x0515, 0x052d, 0x053a, 0x053b, 0x0543, 0x0574, 0x0578, 0x0582, 0x0583]) {
+      g.r.serverCode('weenie_error_str', c, weenieErrorWithStringText(c), 'chat');
+    }
+    g.r.clientSpew('Moving Bread to your backpack');
+    expect(g.events).toEqual([]);
+    // Kept: the auto-wield's failure form, the PK-switch refusals, the punishments, an allegiance refusal.
+    g.r.clientSpew('Moving Bread to your backpack - cannot unwield the Bread');
+    g.r.serverCode('weenie_error', 0x04f0, weenieErrorText(0x04f0), 'spew');
+    g.r.serverCode('weenie_error_str', 0x0533, weenieErrorWithStringText(0x0533), 'chat');
+    g.r.serverCode('weenie_error_str', 0x057f, weenieErrorWithStringText(0x057f), 'chat');
+    g.r.serverCode('weenie_error_str', 0x0542, weenieErrorWithStringText(0x0542), 'chat');
+    expect(g.events.map((e) => e.code)).toEqual([g.events[0].code, 'we:0x04f0', 'we:0x0533', 'we:0x057f', 'we:0x0542']);
+    expect(g.events[0].source).toBe('client');
+  });
+
   it('skips a use\'s own status lines (UseObject USE_STATUS_TEMPLATES), which every use posted as a refusal before 2026-10-23', () => {
     const g = rig();
     for (const t of ['Approaching Hudriffa', 'Using the Bread', 'Using the Door', 'Using the Healing Kit on Bob']) g.r.clientSpew(t);

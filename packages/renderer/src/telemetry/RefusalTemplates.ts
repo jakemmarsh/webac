@@ -117,6 +117,14 @@ export const SERVER_TEXT_NOTICE_TEMPLATES: readonly string[] = Object.freeze([
   "You don't have corpse looting permission from %s.",
   'You have removed the corpse looting permission of %s.',
   "You don't have any corpse consent to clear!",
+  // TELEMETRY.refusal-trade-notices — the trade's progress transients (0x02EB), ACE WorldObjects/Player_Trade.cs:
+  // HandleActionAcceptTrade 204 (to you) / 212 (to the partner, your name), both accepted 229-230. ClassicACE the
+  // same. "Trade confirmation failed..." (HandleActionDeclineTrade 314 / 321) stays a refusal: ACE also sends it
+  // when FinalizeTrade's inventory check fails (VerifyTrade_Inventory), as are the busy / encumbered / pack-space
+  // lines (353-354, 421-422) and "You cannot trade that!" (142).
+  'You have accepted the offer',
+  '%s has accepted the offer',
+  'The items are being traded',
 ]);
 /** Whole-line, across newlines (the consent list is one message, a name a line); a trailing slot may be empty. */
 const noticeLine = (t: string): RegExp => new RegExp('^' + t.split('%s').map(escapeRe).join('[\\s\\S]*') + '\\s*$');

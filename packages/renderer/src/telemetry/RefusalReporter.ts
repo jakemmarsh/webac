@@ -130,6 +130,12 @@ export const NOT_REFUSAL: readonly RegExp[] = [
   /^In Portal Space/,
   /^Removing .* from shopping list$/,
   /^Some game data for this area could not be downloaded/,
+  // TELEMETRY.refusal-trade-notices (2026-10-23): Handle_Trade__Recv_CloseTrade @ 0056de30 posts this (0x1a) on every
+  // CloseTrade, whatever the end reason (ServerMessageText.ts TRADE_CLOSED_TEXT): the trade window's state, not a refusal.
+  /^The trade has been cancelled\.$/,
+  // The auto-wield's own status line ("Moving %s to your backpack", acclient.exe 0x3ccd38; main.ts) when the slot's
+  // old item goes to the pack first. The " - cannot unwield the %s" form is a failure and stays reported.
+  /^Moving .+ to your backpack$/,
 ];
 
 /**
@@ -143,14 +149,40 @@ export const NOT_REFUSAL: readonly RegExp[] = [
  * hear-list and squelch toggles (0x521-0x524), PK Lite (0x508), the fellowship's open / closed / leader notices
  * (Fellowship.cs: 0x50B-0x50D), channel joins and leaves (GameActionAddChannel / RemoveChannel: 0x51B / 0x51C),
  * snooping (0x52C) and allegiance status changes (0x534, 0x539, 0x541, 0x549, 0x56B, 0x56E, 0x575, 0x57B).
+ *
+ * TELEMETRY.refusal-trade-notices (2026-10-23, production on an end-of-retail ACE server): the trade flow's steps.
+ * ACE WorldObjects/Player_Trade.cs sends TradeClosed (0x451, "Trade closed.") on every HandleActionCloseTradeNegotiations
+ * (line 113: the window closing, beside CloseTrade) and TradeComplete (0x529, "Trade Complete!") to both sides when
+ * FinalizeTrade commits (267-268); GDLE and the AC1999 server send 0x529 too (TradeManager.cpp 221-222). Opening
+ * (RegisterTrade), adding an item (AddToTrade) and reset (ResetTrade) carry no text. Trade refusals stay reported:
+ * TradeIgnoringRequests 0x44C, TradeAlreadyTrading, TradeNonCombatMode 0x455, TradeMaxDistanceExceeded.
+ * The same sweep, success or state-change notices by their text and senders:
+ * - PK status changes: 0x4F1 "You are once more a player killer" / 0x4F2 "temporarily no longer a player killer"
+ *   (ACE Player_Death.cs 967 / 1009, GDLE PK_SWITCH_AUTO_PK / RESPITE), 0x504 "once again a Non-Player Killer"
+ *   (Player_Networking.cs 68, Player_Death.cs 972); the protections 0x502 (Player_Death.cs 915
+ *   HandleLifestoneProtection, GDLE LIFESTONE_PROTECTION) and 0x503 (the portal's twin).
+ * - house hooks after a successful hook / unhook (Player_Inventory.cs 1108-1134): 0x512 / 0x513 and, with a
+ *   hook group, 0x514 / 0x515.
+ * - fellowship: 0x50E "You have passed leadership of the fellowship to _" (Fellowship.cs 384 / 404).
+ * - allegiance (GDLE's senders; ACE has none): dissolved / patron broken 0x496 / 0x497, officers cleared 0x546,
+ *   no longer an officer 0x54A / 0x543, titles cleared 0x572, unbanned 0x53A, the banned list 0x53B, the lock's
+ *   display 0x574, pre-approved 0x578, pre-approval cleared 0x57C, chat privileges restored 0x581 / 0x582 / 0x583;
+ *   snooping stopped 0x52D.
  * Everything else, including a punishment's notice (booted 0x533, gagged 0x57F / 0x580) and the channel refusals
  * (0x422-0x425, 0x548, 0x551), stays reported.
  */
 export const NOT_REFUSAL_CODES: Readonly<{ weenie_error: ReadonlySet<number>; weenie_error_str: ReadonlySet<number> }> = Object.freeze({
-  weenie_error: new Set([0x049d, 0x04a1, 0x04e1, 0x0508, 0x051d, 0x0523, 0x0524, 0x056b]),
+  weenie_error: new Set([
+    0x049d, 0x04a1, 0x04e1, 0x0508, 0x051d, 0x0523, 0x0524, 0x056b,
+    // TELEMETRY.refusal-trade-notices
+    0x0451, 0x0529, 0x0496, 0x0497, 0x04f1, 0x04f2, 0x0502, 0x0503, 0x0504, 0x0512, 0x0513, 0x0546, 0x054a, 0x0572,
+    0x057c, 0x0581,
+  ]),
   weenie_error_str: new Set([
     0x04d6, 0x04d7, 0x04d8, 0x04d9, 0x050b, 0x050c, 0x050d, 0x051b, 0x051c, 0x0521, 0x0522, 0x052c,
     0x0534, 0x0539, 0x0541, 0x0549, 0x055b, 0x055c, 0x056e, 0x0575, 0x057b,
+    // TELEMETRY.refusal-trade-notices
+    0x050e, 0x0514, 0x0515, 0x052d, 0x053a, 0x053b, 0x0543, 0x0574, 0x0578, 0x0582, 0x0583,
   ]),
 });
 
