@@ -9553,7 +9553,7 @@ async function main() {
       // packs: an item that leaves the open container (to us, another
       // container, the world) leaves its strip; a move into / out of a nested
       // pack re-parents. Taking a nested pack drops its tab + contents.
-      if (openContainer.serverSaysMove(data.itemGuid, data.containerGuid)) syncOpenContainerUI();
+      if (openContainer.serverSaysMoveFor(data.itemGuid, { kind: 'containId', containerGuid: data.containerGuid })) syncOpenContainerUI();
       // If item moved back to player inventory (unequip), update local state.
       // BUG.death-items-stay-equipped — a side pack too: ServerSaysMoveItem
       // @ 0058dbb0 clears the player wield location for ANY contain-in.
@@ -9679,7 +9679,7 @@ async function main() {
         // ACCWeenieObject::Remove @ 0058dd20 → ServerSaysMoveItem(this, 0): a
         // deleted item (a rotted stack, a consumed key, a pack's contents) leaves
         // the open strip. The open container itself closes by its range check.
-        if (openContainer.serverSaysMove(data.guid, 0)) syncOpenContainerUI();
+        if (openContainer.serverSaysMoveFor(data.guid, { kind: 'delete' })) syncOpenContainerUI();
         loginCompleteNotifier.noteObjectDeleted(data.guid); // DECOMP.login-complete-timing
         // FAITHFUL.276 — if the deleted object is currently wielded by a
         // creature/NPC, detach the corresponding mesh from the wielder
@@ -13008,6 +13008,9 @@ async function main() {
         console.log(`[AC] WieldObject: item=0x${data.itemGuid.toString(16)} location=0x${data.location.toString(16)}`);
         // RecvNotice_ServerSaysMoveItem @ 00563260 (UIQueueManager 0x23): a moved ground container is released.
         if (data.itemGuid === openContainerGuid) releaseGroundObject();
+        // BUG.stack-merge-not-found sweep — ServerSaysMoveItem(0, …): an item wielded straight out of the
+        // open corpse / chest leaves its strip (UIElement_ItemList::RecvNotice_ServerSaysMoveItem @ 004e5110).
+        if (openContainer.serverSaysMoveFor(data.itemGuid, { kind: 'wield' })) syncOpenContainerUI();
         // BUG.wield-leaves-request-pending + GAP.world-drag-drop.a —
         // ServerSaysMoveItem (UIQueueManager case 0x23) clears the pending
         // request, and a ground object wielded off the landblock becomes a
@@ -13033,6 +13036,8 @@ async function main() {
         inventoryRequests.respond(data.itemGuid);
         gameUI.itemRequestAnswered(data.itemGuid);
         console.log(`[AC] InventoryPutIn3D: item=0x${data.itemGuid.toString(16)} dropped to ground`);
+        // BUG.stack-merge-not-found sweep — ServerSaysMoveItem(0, 0, 0, 0, 1): the object leaves any open container's strip.
+        if (openContainer.serverSaysMoveFor(data.itemGuid, { kind: 'putIn3D' })) syncOpenContainerUI();
         // ServerSaysMoveItem @ 0058dbb0: the old wielder was the player → its wield location clears. A worn
         // item dropped (ACE HandleActionDropItem dequips it first) used to stay on the paperdoll and in the
         // equipment list, and the next item worn in its place was listed twice (2026-10-10). A dropped pack's
@@ -13064,6 +13069,11 @@ async function main() {
         // fully-merged / consumed object (corrects CORE.17.k.c.a's note).
         inventoryRequests.respond(data.itemGuid);
         gameUI.itemRequestAnswered(data.itemGuid);
+        // BUG.stack-merge-not-found — ServerSaysRemove @ 0058e4c0 = ServerSaysMoveItem(this, 0, …, 1): the
+        // object leaves the open corpse / chest strip. ACE ends a merge that uses up a contained stack with
+        // only this message (Player_Inventory.cs:3096), so the merged-away stack used to stay listed and
+        // every later merge of it drew "Source stack not found!".
+        if (openContainer.serverSaysMoveFor(data.itemGuid, { kind: 'remove' })) syncOpenContainerUI();
         // BUG.death-items-stay-equipped — out of the equipment too (a merge
         // that consumes an equipped stack sends this for the worn source,
         // Player_Inventory.cs:3096-3103) and a pack's contents with it.

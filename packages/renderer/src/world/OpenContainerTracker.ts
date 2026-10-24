@@ -84,6 +84,35 @@ export interface OpenContainerItem {
   itemsCapacity?: number;
 }
 
+/**
+ * BUG.stack-merge-not-found — the server messages retail's UIQueueManager
+ * hands to ACCWeenieObject::ServerSaysMoveItem @ 0058dbb0 (whose param_5 = 1
+ * raises RecvNotice_ServerSaysMoveItem, and UIElement_ItemList::RecvNotice_
+ * ServerSaysMoveItem @ 004e5110 re-lists the object). The same messages in all
+ * three eras (Inventory1999 maps the 1999 server's 0x22 / 0x23 / 0x24 / 0x19A
+ * onto them):
+ *   0x0022 ContainID          → ServerSaysMoveItem(container, slot, …)
+ *   0x0023 WieldObject        → ServerSaysMoveItem(0, 0, wielder, location): no container
+ *   0x019A PutObjectIn3D      → ServerSaysMoveItem(0, 0, 0, 0, 1)
+ *   0x0024 InventoryRemove    → ACCWeenieObject::ServerSaysRemove @ 0058e4c0 = ServerSaysMoveItem(0, 0, 0, 0, 1)
+ *   0xF747 DeleteObject       → ObjectBeingDeleted @ 0058e4d0 → Remove @ 0058dd20 = ServerSaysMoveItem(0, …)
+ * ACE ends a merge that uses up a corpse's or chest's stack with only 0x0024
+ * for it (Player_Inventory.cs:3096; the contained stack's Destroy broadcasts
+ * nothing), so before this the stack stayed in the strip and every later
+ * merge of it drew "Source stack not found!".
+ */
+export type ServerMoveMessage =
+  | { kind: 'containId'; containerGuid: number }
+  | { kind: 'wield' }
+  | { kind: 'putIn3D' }
+  | { kind: 'remove' }
+  | { kind: 'delete' };
+
+/** The _containerID ServerSaysMoveItem gives the object for `message` (0 = in no container). */
+export function serverMoveContainer(message: ServerMoveMessage): number {
+  return message.kind === 'containId' ? message.containerGuid >>> 0 : 0;
+}
+
 interface TrackedData {
   name: string;
   pluralName: string;
@@ -386,6 +415,17 @@ export class OpenContainerTracker {
     if (this.parents.get(guid) === newContainer) return false;
     this.parents.set(guid, newContainer);
     return true;
+  }
+
+  /**
+   * BUG.stack-merge-not-found — serverSaysMove for one server message, with
+   * the container the object lands in read the way retail's dispatch reads
+   * it (serverMoveContainer). Every message retail runs through
+   * ACCWeenieObject::ServerSaysMoveItem goes through here, so no message can
+   * leave a stale cell in the open container's strip.
+   */
+  serverSaysMoveFor(guid: number, message: ServerMoveMessage): boolean {
+    return this.serverSaysMove(guid, serverMoveContainer(message));
   }
 
   /** Update a tracked stack's size; returns false when the guid isn't tracked. */
