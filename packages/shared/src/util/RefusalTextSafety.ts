@@ -90,6 +90,28 @@ export const REFUSAL_SHAPE_WORDS: readonly string[] = Object.freeze([
   'dead alive combat mode peace attack attacking fight fighting run walk jump stand sit sleep',
   'here there where away near close far reach range distance sight line view',
   'not now never only just even also very so such',
+  // TELEMETRY.refusal-vocabulary-sweep (2026-10-24): lower-case words of the fixed-text (no %s, no name slot)
+  // player lines the emulator servers send that the lines above lacked. Swept from SendText /
+  // NotifyWeenieError-style literals in reference/ac1999/Server/Source, reference/classic/ClassicDereth/Source
+  // and reference/classic/Seedsow/Source, and GameMessageSystemChat / GameEventCommunicationTransientString
+  // literals in reference/ACE/Source/ACE.Server; admin / developer command output left out. Prod sent
+  // AC1999's "You're exhausted!" (Healer.cpp:175/222, also ClassicDereth Healer.cpp:209/235 and the melee /
+  // missile attack paths) as t:ea7955f8 ("You're _!") with no text, one word short; it is t:41d888ba now, text
+  // kept. Game-only terms (aetheria, luminance) and debug words left out. Ordinary English only, never
+  // capitalized: a capitalized word in a line still passes only through `exact`, so these can't vouch for a name.
+  'exhausted disrupted damage taken hit found compatible dequip existing piece onto appearance',
+  'storage dwellings houses guests public private owning maintenance paid costs period next due reverted',
+  'stored lost abandoned monarchy day grant revoked tied tie bound primary secondary recallable summoned',
+  'unsummon pet pets raise lower innate completed ago consumed without visible invisible hidden radar',
+  'attackable mortal immortal protected dispelled ungag general muted sending messages friend should really',
+  'tailor tailoring retained property claimed lockpicked slots main sold locate create result results',
+  'request requested processing amount large choices teleporting die fully charges device refill recover',
+  "returned current enchantments prevents always dismiss multiple transfer those them but did hasn't gain",
+  'play reached penalty reduced increased greatly accepted learned changes active activated outdoors',
+  'encounter previous location return restriction restrictions apply permanent permit consent looting match types',
+  'find meet requirement scroll show effect destroyed great understand environment made landscape prepay',
+  'came forbids resist coins supported surface specified send force world timer attuned search renewed',
+  'opportunity dungeon dungeons squelch ban ranks running round serve',
 ]);
 
 /** The base vocabulary's sources: the server templates, the attempt-failed lines, the skill names and the shape words. */

@@ -20,7 +20,7 @@ import {
   REFUSAL_TEXT, NAME_FIRST_REFUSAL, isServerTextRefusal, type RefusalEvent,
 } from '../packages/renderer/src/telemetry/RefusalReporter';
 import { REFUSAL_VOCABULARY, isTargetPromptNotice } from '../packages/renderer/src/telemetry/RefusalTemplates';
-import { BASE_REFUSAL_VOCABULARY } from '../packages/shared/src/util/RefusalTextSafety';
+import { BASE_REFUSAL_VOCABULARY, scrubToVocabulary, textCarriesUnknownWord } from '../packages/shared/src/util/RefusalTextSafety';
 import { aceReferenceExists } from './_harness/reference';
 import { sanitizeClientRefusal } from '../services/ws-tcp-bridge/src/clientRefusal';
 import { resolveBridgeConfig, type BridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil';
@@ -309,6 +309,18 @@ describe('AC1999: the 1999 server refusals reach the same reporter', () => {
     ]);
   });
 
+  it('"You\'re exhausted!" (Healer.cpp:175, LTT_ERROR 0x1A) keeps its text: prod sent it as t:ea7955f8 with none', () => {
+    const g = rig('ac1999-retail');
+    const feed = feed1999(g.r);
+    feed(new Writer1999().u32(0xf62c).acString("You're exhausted!").u32(0x1a).toBytes());
+    expect(g.events).toHaveLength(1);
+    expect(g.events[0]).toMatchObject({
+      era: 'ac1999-retail', source: 'server', context: 'server_text', text: "You're exhausted!", code: `t:${refusalHash("You're exhausted!")}`,
+    });
+    // The old code was the one-word-short scrub's "You're _!".
+    expect(refusalHash("You're _!")).toBe('ea7955f8');
+  });
+
   it('the 1999 lock line (webac#12) goes out as a client refusal tagged ac1999', () => {
     const g = rig('ac1999-retail');
     const tracker = new InventoryRequestTracker();
@@ -492,6 +504,46 @@ describe('name safety: no character or object name ever leaves in a refusal', ()
     expect(isServerTextRefusal('Bob tells you, "you are too busy"', 0)).toBe(false);
     expect(isServerTextRefusal('Reemer is too busy to accept gifts right now.', 0)).toBe(true);
     expect(NAME_FIRST_REFUSAL.test('Ming Masun cannot be banned from the allegiance!')).toBe(true);
+  });
+
+  it('TELEMETRY.refusal-vocabulary-sweep: the emulator servers\' fixed lines keep every word; a name in them still goes', () => {
+    // Fixed-text lines (no name slot) from the AC1999 / ClassicDereth / Seedsow SendText calls and ACE's
+    // GameMessageSystemChat literals: every word is vouched for now, so the page and the bridge keep them whole.
+    const fixed = [
+      "You're exhausted!", // ac1999 Healer.cpp:175/222, ClassicDereth Healer.cpp:209/235, Seedsow AttackManager_.cpp:538
+      'Your movement disrupted healing!',
+      "There's not enough room for the coins in your inventory.",
+      'You must unsummon your pet before you can trade this item!',
+      'You have no lifestone tied.',
+      'You do not have a primary portal tied.',
+      'Your dwelling is now private.',
+      'You are no longer visible on radar.',
+      'You completed the quest this portal requires too long ago!',
+    ];
+    for (const line of fixed) {
+      expect(scrubToVocabulary(line), line).toMatchObject({ text: line, replaced: 0 });
+      expect(textCarriesUnknownWord(line), line).toBe(false);
+      expect(sanitizeClientRefusal({ outcome: 'refusal', code: 't:0123abcd', text: line })!.text, line).toBe(line);
+    }
+    // No capitalized word is added (it could be a name): ACE's own "You're Exhausted!" (Player.cs:968) still
+    // carries a word the bridge doesn't vouch for.
+    expect(textCarriesUnknownWord("You're Exhausted!")).toBe(true);
+    expect(sanitizeClientRefusal({ outcome: 'refusal', code: 't:0123abcd', text: "You're Exhausted!" })!.text).toBeNull();
+    // The same words beside a name: the page still scrubs the name to '_', the bridge still drops the raw line.
+    expect(scrubToVocabulary('Reemer is exhausted!').text).toBe('_ is exhausted!');
+    expect(scrubToVocabulary('Your movement disrupted Danath healing!').text).toBe('Your movement disrupted _ healing!');
+    expect(textCarriesUnknownWord('Reemer is exhausted!')).toBe(true);
+    expect(sanitizeClientRefusal({ outcome: 'refusal', code: 't:0123abcd', text: 'Reemer is exhausted!' })!.text).toBeNull();
+    const g = rig('ac1999-retail');
+    g.r.serverText('server_text', 'Ming Masun is exhausted!', 0x1a);
+    g.r.serverText('server_text', "You're exhausted!", 0x1a);
+    expect(g.events.map((e) => e.text)).toEqual(['_ is exhausted!', "You're exhausted!"]);
+    noName(g.events);
+    // The added words are lower-case only: a capitalized spelling never becomes vouched for.
+    for (const w of ['exhausted', 'tied', 'unsummon', 'radar', 'compatible']) {
+      expect(BASE_REFUSAL_VOCABULARY.lower.has(w), w).toBe(true);
+      expect(BASE_REFUSAL_VOCABULARY.exact.has(w[0].toUpperCase() + w.slice(1)), w).toBe(false);
+    }
   });
 
   it('every capitalized word the page may send is one the bridge vouches for', () => {
