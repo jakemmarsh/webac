@@ -168,14 +168,25 @@ export function tradeAppropriateName(item: Pick<TradeDragItem, 'name' | 'pluralN
   return getAppropriateName(item.name, item.pluralName, Math.floor(item.stackSize));
 }
 
+/**
+ * gmSecureTradeUI's two status lines (SendNotice_DisplayStringInfo 0x1a), %s = NAME_APPROPRIATE: AddItem's walk
+ * notice "Trading contents of %s" (.rdata 0x7b7408) as a pack's contents go on the list, and AcceptDragObject's
+ * "Splitting the %s before trading them" (.rdata 0x7b7480) as the split request goes out. Both report a step that
+ * is going ahead, not a refusal: the refusal telemetry reads them from here (RefusalTemplates SPEW_STATUS_TEMPLATES).
+ */
+export const TRADE_NOTICE_TEMPLATES = Object.freeze({
+  contents: 'Trading contents of %s',
+  split: 'Splitting the %s before trading them',
+});
+
 /** AddItem's walk notice (.rdata 0x7b7408). */
 export function tradeContentsNotice(item: Pick<TradeDragItem, 'name' | 'pluralName' | 'stackSize'>): string {
-  return `Trading contents of ${tradeAppropriateName(item)}`;
+  return TRADE_NOTICE_TEMPLATES.contents.replace('%s', () => tradeAppropriateName(item));
 }
 
 /** AcceptDragObject's split notice (.rdata 0x7b7480). */
 export function tradeSplitNotice(item: Pick<TradeDragItem, 'name' | 'pluralName' | 'stackSize'>): string {
-  return `Splitting the ${tradeAppropriateName(item)} before trading them`;
+  return TRADE_NOTICE_TEMPLATES.split.replace('%s', () => tradeAppropriateName(item));
 }
 
 function isTradeContainer(item: TradeDragItem): boolean {

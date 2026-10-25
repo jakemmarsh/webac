@@ -414,9 +414,12 @@ export function slumlordAppropriateName(item: Pick<SlumlordDragItem, 'name' | 'p
   return getAppropriateName(item.name, item.pluralName, Math.floor(item.stackSize));
 }
 
+/** AcceptDragObject's success notice for the split gesture (.rdata 0x7b6bf0): a status line, not a refusal. */
+export const SLUMLORD_SPLIT_NOTICE_TEMPLATE = 'Splitting the %s before adding to housing panel';
+
 /** AcceptDragObject's success notice for the split gesture (.rdata 0x7b6bf0). */
 export function slumlordSplitNotice(item: Pick<SlumlordDragItem, 'name' | 'pluralName' | 'stackSize'>): string {
-  return `Splitting the ${slumlordAppropriateName(item)} before adding to housing panel`;
+  return SLUMLORD_SPLIT_NOTICE_TEMPLATE.replace('%s', () => slumlordAppropriateName(item));
 }
 
 /** RecvNotice_FailedHouseTransaction: the slumlord to QueryLord — m_iidOwner when one was ever set, else nothing. */

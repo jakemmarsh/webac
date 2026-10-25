@@ -124,9 +124,12 @@ export function isSalvageItemSuitable(item: SalvageCandidate, listMaterial: numb
 /** DragItemAcceptable @ 004cb650's refusal for an object the player does not own. */
 export const SALVAGE_NOT_OWNED_TEXT = 'You can only salvage items that you own!';
 
+/** _AddContainedItems @ 004cb4f0's notice (.rdata 0x7b7b10), %s = GetObjectNameWide(NAME_APPROPRIATE): a status line, not a refusal. */
+export const SALVAGE_ADDING_CONTENTS_TEMPLATE = 'Adding contents of %s';
+
 /** _AddContainedItems @ 004cb4f0's notice (.rdata 0x7b7b10), %s = GetObjectNameWide(NAME_APPROPRIATE). */
 export function salvageAddingContentsText(containerName: string): string {
-  return `Adding contents of ${containerName}`;
+  return SALVAGE_ADDING_CONTENTS_TEMPLATE.replace('%s', () => containerName);
 }
 
 export interface SalvageDropState {

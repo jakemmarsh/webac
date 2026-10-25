@@ -17,8 +17,17 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   RefusalReporter, REFUSAL_ROLLUP_MS, MAX_REFUSAL_CODES, NOT_REFUSAL_CODES, isNoticeCode, refusalHash, refusalTemplate, scrubNames, weenieCode,
-  REFUSAL_TEXT, NAME_FIRST_REFUSAL, isServerTextRefusal, type RefusalEvent,
+  REFUSAL_TEXT, NAME_FIRST_REFUSAL, isServerTextRefusal, isSpewNotice, type RefusalEvent,
 } from '../packages/renderer/src/telemetry/RefusalReporter';
+import { planTradeAddItem, planTradeDrop, TRADE_STRINGS } from '../packages/renderer/src/ui/SecureTradePanel';
+import { vendorSellContentsNotice, vendorSellSplitNotice, vendorRemovingFromListText } from '../packages/renderer/src/ui/VendorSellDrag';
+import { slumlordSplitNotice } from '../packages/renderer/src/ui/SlumlordPanel';
+import { salvageAddingContentsText, SALVAGE_NOT_OWNED_TEXT } from '../packages/renderer/src/ui/SalvagePanel';
+import { TOO_BIG_TO_MERGE_1999 } from '../packages/renderer/src/inventory/ItemHolderPlacement';
+import { EncumbranceNotice, EOR_ENCUMBRANCE_NOTICE, AC1999_ENCUMBRANCE_NOTICE } from '../packages/renderer/src/ui/EncumbranceNotice';
+import { PORTAL_SPACE_NOTICE } from '../packages/renderer/src/effects/PortalSpaceModel';
+import { CLIENT_NOTICES, allClientNotices, raiseClientNotice } from '../packages/renderer/src/ui/ClientNotices';
+import { PEACE_MODE_TO_TRADE_TEXT } from '../packages/shared/src/systems/OpenTradeGate';
 import { REFUSAL_VOCABULARY, isTargetPromptNotice } from '../packages/renderer/src/telemetry/RefusalTemplates';
 import { BASE_REFUSAL_VOCABULARY, scrubToVocabulary, textCarriesUnknownWord } from '../packages/shared/src/util/RefusalTextSafety';
 import { aceReferenceExists } from './_harness/reference';
@@ -225,6 +234,82 @@ describe('the client spew tap (GameUI.displayErrorText)', () => {
     const shown2: string[] = [];
     GameUI.prototype.displayErrorText.call({ ...fake, refusalTap: () => { throw new Error('x'); }, spewNotice: (t: string) => shown2.push(t) } as unknown as GameUI, 'x');
     expect(shown2).toEqual(['x']);
+  });
+});
+
+describe('TELEMETRY.refusal-client-notice-sweep: the client status lines are not refusals', () => {
+  /** A real RefusalReporter fed through the real ClientNotices sink, as GameUI's tap does. */
+  function spewRig() {
+    const g = rig('dm');
+    const surface = {
+      displayErrorText: (t: string) => g.r.clientSpew(t),
+      addSystemMessage: () => {},
+    };
+    return { ...g, surface };
+  }
+  const pack = { guid: 0x50000001, name: 'Pack', weenieClassId: 166, stackSize: 1, itemType: 0x200, ownedByPlayer: true,
+    contents: [{ guid: 0x50000002, name: 'Gem', weenieClassId: 2413, stackSize: 1, itemType: 0x800, ownedByPlayer: true }] };
+
+  it('the trade panel\'s pack walk and split lines (prod c:b276169a "Trading contents of _") send nothing', () => {
+    const g = spewRig();
+    const plan = planTradeAddItem(pack, new Set(), true);
+    expect(plan.notices).toEqual(['Trading contents of Pack']);
+    for (const t of plan.notices) g.surface.displayErrorText(t);
+    const drop = planTradeDrop({ guid: 0x50000003, name: 'Arrow', weenieClassId: 300, stackSize: 20, ownedByPlayer: true }, new Set(), false, 5);
+    expect(drop.kind).toBe('split');
+    if (drop.kind === 'split') g.surface.displayErrorText(drop.notice);
+    expect(g.events).toEqual([]);
+    expect(isSpewNotice('Trading contents of _')).toBe(true);
+  });
+
+  it('vendor, housing, salvage, 1999 merge and encumbrance status lines send nothing (both eras)', () => {
+    const g = spewRig();
+    const arrows = { name: 'Arrow', stackSize: 20 };
+    const lines = [
+      vendorSellContentsNotice({ name: 'Pack', stackSize: 1 }),
+      vendorSellSplitNotice(arrows),
+      vendorRemovingFromListText('Mana Stones'),
+      slumlordSplitNotice({ name: 'Pyreal', stackSize: 500 }),
+      salvageAddingContentsText('Sack'),
+      TOO_BIG_TO_MERGE_1999.replace('%s', 'Pack'),
+      PORTAL_SPACE_NOTICE,
+    ];
+    for (const t of lines) g.surface.displayErrorText(t);
+    for (const rules of [EOR_ENCUMBRANCE_NOTICE, AC1999_ENCUMBRANCE_NOTICE]) {
+      const n = new EncumbranceNotice(rules, (t) => g.surface.displayErrorText(t));
+      n.onLoad(1.5, 0); n.onLoad(2.5, 100); n.tick(500);
+    }
+    expect(g.events).toEqual([]);
+  });
+
+  it('every catalogue status entry sends nothing; every other spew entry is still reported', () => {
+    const status = allClientNotices().filter((n) => n.sink === 'spew' && n.status);
+    expect(status.map((n) => n.id).sort()).toEqual([
+      'actionInterrupted', 'autoRunOff', 'autoRunOn', 'castingSpell', 'datStreamFailed',
+      'portalStormBrewing', 'portalStormImminent', 'portalStormSubsided',
+    ]);
+    const g = spewRig();
+    for (const n of status) raiseClientNotice(g.surface, n, n.id === 'castingSpell' ? { text: 'Casting Flame Bolt I' } : {});
+    expect(g.events).toEqual([]);
+    const refusals = allClientNotices().filter((n) => n.sink === 'spew' && !n.status);
+    expect(refusals.length).toBeGreaterThan(15);
+    for (const n of refusals) raiseClientNotice(g.surface, n);
+    expect(g.events).toHaveLength(refusals.length);
+    expect(g.events.every((e) => e.source === 'client' && e.context === 'spew')).toBe(true);
+  });
+
+  it('real refusals beside them stay reported', () => {
+    const g = spewRig();
+    const refusals = [
+      TRADE_STRINGS.cannotSplit, TRADE_STRINGS.mustSplit, TRADE_STRINGS.notCarrying,
+      SALVAGE_NOT_OWNED_TEXT, PEACE_MODE_TO_TRADE_TEXT,
+      CLIENT_NOTICES.cantJumpLoad.text, "You don't have enough money",
+    ];
+    for (const t of refusals) g.surface.displayErrorText(t);
+    expect(g.events).toHaveLength(refusals.length);
+    expect(g.events.map((e) => e.text)).toContain("You're too loaded down to jump");
+    // A near miss on a status template is still a refusal: the auto-wield's failure form.
+    expect(isSpewNotice('Moving Robe to your backpack - cannot unwield the Robe')).toBe(false);
   });
 });
 

@@ -55,7 +55,7 @@
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import { isUseStatusNotice } from '../input/UseObject.js';
 import {
-  matchClientTemplate, isUseHintNotice, isTargetPromptNotice, isServerTextNotice, nameSafeText, cleanRefusalDetail, type RefusalDetail,
+  matchClientTemplate, isUseHintNotice, isTargetPromptNotice, isServerTextNotice, isSpewStatusNotice, nameSafeText, cleanRefusalDetail, type RefusalDetail,
 } from './RefusalTemplates.js';
 
 export const REFUSAL_OUTCOME = 'refusal';
@@ -127,9 +127,8 @@ export const NOT_REFUSAL: readonly RegExp[] = [
   /^AutoRun (ON|OFF)$/,
   /^Casting /,
   /Portal Storm/i,
-  /^In Portal Space/,
-  /^Removing .* from shopping list$/,
-  /^Some game data for this area could not be downloaded/,
+  // The shopping-list, portal-space and streamed-DAT lines moved to RefusalTemplates.SPEW_STATUS_TEMPLATES (read from
+  // their source modules; TELEMETRY.refusal-client-notice-sweep).
   // TELEMETRY.refusal-trade-notices (2026-10-23): Handle_Trade__Recv_CloseTrade @ 0056de30 posts this (0x1a) on every
   // CloseTrade, whatever the end reason (ServerMessageText.ts TRADE_CLOSED_TEXT): the trade window's state, not a refusal.
   /^The trade has been cancelled\.$/,
@@ -195,10 +194,13 @@ export function isNoticeCode(context: string, code: number): boolean {
 /**
  * A spew line that is a notice, not a refusal: NOT_REFUSAL, or a use's own status line ("Approaching %s" /
  * "Using the %s", UseObject.ts USE_STATUS_TEMPLATES, from the client's literals). Every use reported
- * "Approaching _" / "Using the _" as a refusal until 2026-10-23 (found by tools/ac1999-playthrough.ts).
+ * "Approaching _" / "Using the _" as a refusal until 2026-10-23 (found by tools/ac1999-playthrough.ts). Or one of
+ * the client's status lines (RefusalTemplates.SPEW_STATUS_TEMPLATES: trade / vendor / salvage / housing progress,
+ * encumbrance, AutoRun, Casting, Action interrupted …): "Trading contents of _" was reported until 2026-10-25.
  */
 export function isSpewNotice(text: string): boolean {
-  return NOT_REFUSAL.some((re) => re.test(text)) || isUseStatusNotice(text) || isUseHintNotice(text) || isTargetPromptNotice(text);
+  return NOT_REFUSAL.some((re) => re.test(text)) || isUseStatusNotice(text) || isUseHintNotice(text) || isTargetPromptNotice(text)
+    || isSpewStatusNotice(text);
 }
 
 /**

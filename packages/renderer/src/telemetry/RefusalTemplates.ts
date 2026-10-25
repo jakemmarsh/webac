@@ -31,6 +31,14 @@ import {
   EOR_USE_OBJECT_RULES, AC1999_USE_OBJECT_RULES, USE_STATUS_TEMPLATES, USE_TARGET_PROMPT_TEMPLATE, type UseObjectRules,
 } from '../input/UseObject.js';
 import { CLIENT_NOTICES } from '../ui/ClientNotices.js';
+import { TRADE_NOTICE_TEMPLATES } from '../ui/SecureTradePanel.js';
+import { VENDOR_NOTICE_TEMPLATES } from '../ui/VendorSellDrag.js';
+import { SLUMLORD_SPLIT_NOTICE_TEMPLATE } from '../ui/SlumlordPanel.js';
+import { SALVAGE_ADDING_CONTENTS_TEMPLATE } from '../ui/SalvagePanel.js';
+import { TOO_BIG_TO_MERGE_1999 } from '../inventory/ItemHolderPlacement.js';
+import { EOR_ENCUMBRANCE_NOTICE, AC1999_ENCUMBRANCE_NOTICE } from '../ui/EncumbranceNotice.js';
+import { PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
+import { portalStormPresentation } from '../network/portalStormEvents.js';
 
 /** A printf slot as the client's literals write them (%s, %hs, %ls). */
 const SLOT = /%[hl]?s/;
@@ -74,6 +82,45 @@ const TARGET_PROMPT_LINES: readonly RegExp[] = TARGET_PROMPT_TEMPLATES.map(templ
 export function isTargetPromptNotice(text: string): boolean {
   const t = text.trim();
   return TARGET_PROMPT_LINES.some((re) => re.test(t));
+}
+
+/**
+ * TELEMETRY.refusal-client-notice-sweep — the client's own spew (0x1a) lines that report something going ahead or
+ * a state change, not a refusal, read from the modules that print them so the text can't drift. Production
+ * reported "Trading contents of _" (c:b276169a, Dark Majesty, 2026-10-25) as a refusal: a pack added to a trade.
+ * - the ClientNotices catalogue's status entries (ClientNotice.status: AutoRun ON / OFF @ 006b4850, "Casting %hs"
+ *   @ 00567c30, "Action interrupted" (Escape while moving, AddTextToScroll 0x1a, decomp :347508), the portal storm's
+ *   stages, the streamed-DAT warning);
+ * - gmSecureTradeUI: "Trading contents of %s" (.rdata 0x7b7408), "Splitting the %s before trading them" (0x7b7480);
+ * - gmVendorUI: "Removing %s from shopping list" (HandleMousePresses @ 004c40d0), "Selling contents of %s"
+ *   (AddItem @ 004c14b0), "Splitting the %s before selling them" (AcceptDragObject @ 004c4f00);
+ * - the slumlord panel's "Splitting the %s before adding to housing panel" (.rdata 0x7b6bf0);
+ * - gmSalvageUI::_AddContainedItems @ 004cb4f0 "Adding contents of %s" (.rdata 0x7b7b10);
+ * - the 1999 put's "Too big to merge. Putting in %s." (ItemHolder_AttemptPlaceInContainer @ 0x4e55b0: the put
+ *   still goes out);
+ * - the encumbrance notices of both eras (CPlayerSystem::OnLoadChanged @ 0055f510, decomp :343068 / :343078; the
+ *   1999 PanelUI_Global_Loop @ 0x004f4e10): the load crossed a threshold, nothing was refused;
+ * - portal space's "In Portal Space - Please Wait..." and the portal storm's teleport line.
+ * Real refusals ("You can't …", "Cannot split the stack to trade it", "You must split the stack before trading it.")
+ * are not here and stay reported.
+ */
+export const SPEW_STATUS_TEMPLATES: readonly string[] = Object.freeze([...new Set([
+  ...Object.values(CLIENT_NOTICES).filter((n) => n.status && n.sink === 'spew').map((n) => n.text),
+  ...Object.values(TRADE_NOTICE_TEMPLATES),
+  ...Object.values(VENDOR_NOTICE_TEMPLATES),
+  SLUMLORD_SPLIT_NOTICE_TEMPLATE,
+  SALVAGE_ADDING_CONTENTS_TEMPLATE,
+  TOO_BIG_TO_MERGE_1999,
+  ...[EOR_ENCUMBRANCE_NOTICE, AC1999_ENCUMBRANCE_NOTICE].flatMap((r) => [r.encumbered, r.severe]),
+  PORTAL_SPACE_NOTICE,
+  ...(['brewing', 'imminent', 'storm', 'subsided'] as const).map((k) => portalStormPresentation(k).text),
+])]);
+const SPEW_STATUS_LINES: readonly RegExp[] = SPEW_STATUS_TEMPLATES.map(templateLine);
+
+/** A spew line that is one of the client's status notices (SPEW_STATUS_TEMPLATES), not a refusal. */
+export function isSpewStatusNotice(text: string): boolean {
+  const t = text.trim();
+  return SPEW_STATUS_LINES.some((re) => re.test(t));
 }
 
 /**

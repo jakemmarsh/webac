@@ -71,6 +71,12 @@ export interface ClientNotice {
    * in, unfiltered, and nowhere else.
    */
   readonly commandFeedback: boolean;
+  /**
+   * A status line, not a refusal: it reports something that happened or is going ahead (AutoRun ON, "Casting %hs",
+   * "Action interrupted", the portal storm's stages). The refusal telemetry leaves these out
+   * (TELEMETRY.refusal-client-notice-sweep, RefusalTemplates SPEW_STATUS_TEMPLATES).
+   */
+  readonly status: boolean;
 }
 
 /** The subset of GameUI a notice needs. */
@@ -84,13 +90,18 @@ export interface NoticeSurface {
 /** Retail AddTextToScroll's "no target window" id: filtered per window. */
 export const UNTARGETED_WINDOW_ID = 0;
 
-function n(id: string, sink: NoticeSink, text: string, cite: string, commandFeedback = true): ClientNotice {
-  return Object.freeze({ id, sink, text, cite, commandFeedback });
+function n(id: string, sink: NoticeSink, text: string, cite: string, commandFeedback = true, status = false): ClientNotice {
+  return Object.freeze({ id, sink, text, cite, commandFeedback, status });
 }
 
 /** A notice retail raises untargeted (UI call sites, window-0 AddTextToScroll). */
 function ui(id: string, sink: NoticeSink, text: string, cite: string): ClientNotice {
   return n(id, sink, text, cite, false);
+}
+
+/** An untargeted STATUS line (ClientNotice.status): something happened or is going ahead, nothing was refused. */
+function uiStatus(id: string, sink: NoticeSink, text: string, cite: string): ClientNotice {
+  return n(id, sink, text, cite, false, true);
 }
 
 const SPEW_CMD = 'ClientCommunicationSystem::Do* AddTextToScroll(…, 0x1a, …) — validation failure';
@@ -122,7 +133,7 @@ export const CLIENT_NOTICES = Object.freeze({
   // cannot be cast on %s" (text supplied per raise, spellTargetRefusalText).
   castTargetRefused: ui('castTargetRefused', 'spew', 'This spell cannot be cast on %s', 'ObjectCompatibleWithSpellTargetType @ 00567230, SendNotice_DisplayStringInfo(0x1a)'),
   // ObjectCompatibleWithSpell @ 00567c30 on a compatible target: "Casting %hs" (.rdata 0x7ce8f0).
-  castingSpell: ui('castingSpell', 'spew', 'Casting %hs', 'ObjectCompatibleWithSpell @ 00567c30, SendNotice_DisplayStringInfo(0x1a)'),
+  castingSpell: uiStatus('castingSpell', 'spew', 'Casting %hs', 'ObjectCompatibleWithSpell @ 00567c30, SendNotice_DisplayStringInfo(0x1a)'),
   // AC1999.spell-research-panel — the 1999 client.exe's research panel (ui/SpellResearch1999.ts).
   // It prints through the UI vtable +0x114 (UI_SetStatusText: the status line, our spew).
   researchNeedsMagicMode: ui('researchNeedsMagicMode', 'spew', 'You must first enter magic mode to test spell formulae', '1999 CreateSpellPanel_ListenToMessage @ 0x5ab784 (string 0x60e93c), UI vtable +0x114'),
@@ -135,9 +146,9 @@ export const CLIENT_NOTICES = Object.freeze({
   castNoSpellSelected: ui('castNoSpellSelected', 'spew', 'You must select a spell to cast', 'gmSpellcastingUI::Cast @ 004c6050, 0x1a'),
 
   // ── movement (CommandInterpreter::SetAutoRun @ 006b4850, SendNotice_DisplayStringInfo(0x1a)) ──
-  autoRunOn: ui('autoRunOn', 'spew', 'AutoRun ON', 'CommandInterpreter::SetAutoRun @ 006b4850, SendNotice_DisplayStringInfo(0x1a)'),
-  autoRunOff: ui('autoRunOff', 'spew', 'AutoRun OFF', 'CommandInterpreter::SetAutoRun @ 006b4850, SendNotice_DisplayStringInfo(0x1a)'),
-  actionInterrupted: ui('actionInterrupted', 'spew', 'Action interrupted', 'ClientUISystem::OnAction case 0x27 (Escape while moving), AddTextToScroll(…, 0x1a)'),
+  autoRunOn: uiStatus('autoRunOn', 'spew', 'AutoRun ON', 'CommandInterpreter::SetAutoRun @ 006b4850, SendNotice_DisplayStringInfo(0x1a)'),
+  autoRunOff: uiStatus('autoRunOff', 'spew', 'AutoRun OFF', 'CommandInterpreter::SetAutoRun @ 006b4850, SendNotice_DisplayStringInfo(0x1a)'),
+  actionInterrupted: uiStatus('actionInterrupted', 'spew', 'Action interrupted', 'ClientUISystem::OnAction case 0x27 (Escape while moving), AddTextToScroll(…, 0x1a)'),
   // ── jump refusals (ClientCombatSystem::CommenceJump @ 0056af90 / DoJump @ 0056b110, AddTextToScroll(…, 0x1a, true, 0)) ──
   cantJumpPosition: ui('cantJumpPosition', 'spew', "You can't jump from this position", 'cant_jump_position ($E139 @ 00709040), 0x1a'),
   cantJumpInAir: ui('cantJumpInAir', 'spew', "You can't jump while in the air", 'cant_jump_in_air ($E142 @ 00709080), 0x1a'),
@@ -152,9 +163,9 @@ export const CLIENT_NOTICES = Object.freeze({
   cantEmoteCombat: ui('cantEmoteCombat', 'spew', "You can't use chat emotes in combat mode", 'cant_emote_combat (DoMotion → 0x42), MovePlayer @ 006b3f40, 0x1a'),
 
   // ── portal storm (ClientUISystem::Handle_Misc__PortalStorm*) ──
-  portalStormBrewing: ui('portalStormBrewing', 'spew', 'This area is getting too crowded - a Portal Storm is brewing.', '@ 347620, SendNotice_DisplayStringInfo(0x1a)'),
-  portalStormImminent: ui('portalStormImminent', 'spew', 'A Portal Storm is imminent - leave this crowded area!', '@ 347661, SendNotice_DisplayStringInfo(0x1a)'),
-  portalStormSubsided: ui('portalStormSubsided', 'spew', 'The Portal Storm has subsided', '@ 347589, SendNotice_DisplayStringInfo(0x1a)'),
+  portalStormBrewing: uiStatus('portalStormBrewing', 'spew', 'This area is getting too crowded - a Portal Storm is brewing.', '@ 347620, SendNotice_DisplayStringInfo(0x1a)'),
+  portalStormImminent: uiStatus('portalStormImminent', 'spew', 'A Portal Storm is imminent - leave this crowded area!', '@ 347661, SendNotice_DisplayStringInfo(0x1a)'),
+  portalStormSubsided: uiStatus('portalStormSubsided', 'spew', 'The Portal Storm has subsided', '@ 347589, SendNotice_DisplayStringInfo(0x1a)'),
 
   // ── fellowship / allegiance flows (retail: panel buttons, disabled without a target) ──
   noTargetSelected: ui('noTargetSelected', 'spew', 'No target selected. Select a player first.', SPEW_CMD + ' (our text; retail disables the button)'),
@@ -180,7 +191,7 @@ export const CLIENT_NOTICES = Object.freeze({
   // failed download) and let the player out of portal space anyway. Retail's
   // DATs were local, so it has no such line; the spew sink is its kind's
   // (a transient warning over the 3D view).
-  datStreamFailed: ui('datStreamFailed', 'spew', 'Some game data for this area could not be downloaded.', 'no retail equivalent (retail DATs are local); RELEASE.portal-space-cell-gate'),
+  datStreamFailed: uiStatus('datStreamFailed', 'spew', 'Some game data for this area could not be downloaded.', 'no retail equivalent (retail DATs are local); RELEASE.portal-space-cell-gate'),
 });
 
 export type ClientNoticeId = keyof typeof CLIENT_NOTICES;

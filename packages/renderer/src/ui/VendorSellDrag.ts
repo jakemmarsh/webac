@@ -102,8 +102,20 @@ export const VENDOR_SELL_STRINGS = {
  * 0x3b5a6c, the only such string) with GetObjectNameWide(NAME_APPROPRIATE).
  */
 export function vendorRemovingFromListText(appropriateName: string): string {
-  return `Removing ${appropriateName} from shopping list`;
+  return VENDOR_NOTICE_TEMPLATES.removingFromList.replace('%s', () => appropriateName);
 }
+
+/**
+ * gmVendorUI's status lines (SendNotice_DisplayStringInfo 0x1a), %s = NAME_APPROPRIATE: HandleMousePresses @ 004c40d0
+ * "Removing %s from shopping list", AddItem @ 004c14b0's walk notice "Selling contents of %s" and AcceptDragObject
+ * @ 004c4f00's "Splitting the %s before selling them" as the split request goes out. Each reports a step going
+ * ahead, not a refusal (the refusal telemetry reads them from here: RefusalTemplates SPEW_STATUS_TEMPLATES).
+ */
+export const VENDOR_NOTICE_TEMPLATES = Object.freeze({
+  removingFromList: 'Removing %s from shopping list',
+  sellContents: 'Selling contents of %s',
+  sellSplit: 'Splitting the %s before selling them',
+});
 
 /** InqAcceptability's result codes. */
 export const VENDOR_ACCEPTABILITY = { ok: 0, wrongType: 1, noValue: 2, tooCheap: 3, tooValuable: 4 } as const;
@@ -155,12 +167,12 @@ export function vendorSellAppropriateName(item: Pick<VendorSellDragItem, 'name' 
 
 /** AddItem's walk notice. */
 export function vendorSellContentsNotice(item: Pick<VendorSellDragItem, 'name' | 'pluralName' | 'stackSize'>): string {
-  return `Selling contents of ${vendorSellAppropriateName(item)}`;
+  return VENDOR_NOTICE_TEMPLATES.sellContents.replace('%s', () => vendorSellAppropriateName(item));
 }
 
 /** AcceptDragObject's split notice. */
 export function vendorSellSplitNotice(item: Pick<VendorSellDragItem, 'name' | 'pluralName' | 'stackSize'>): string {
-  return `Splitting the ${vendorSellAppropriateName(item)} before selling them`;
+  return VENDOR_NOTICE_TEMPLATES.sellSplit.replace('%s', () => vendorSellAppropriateName(item));
 }
 
 function isVendorContainer(item: VendorSellDragItem): boolean {
