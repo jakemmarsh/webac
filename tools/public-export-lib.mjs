@@ -43,6 +43,8 @@ export const EXCLUDED = [
   'tools/annotate-decomp-globals.ts', 'tools/extract-pdb-globals.ts',
   // Our own harness: tools/hooks/ are Claude-harness hooks (.claude/ stays private).
   'tools/hooks/',
+  // Production monitoring: our own addresses, the log filters and the routine's runbook.
+  'tools/monitor/',
 ];
 
 /**

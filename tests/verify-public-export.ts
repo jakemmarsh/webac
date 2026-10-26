@@ -19,11 +19,12 @@ const PARAM = 'param' + '_3';
 // Private paths, split so this file never names one in code (tests that do are left out of the mirror).
 const HOOK = 'tools/hooks/' + 'pre-commit-check.sh';
 const SHOT = 'docs/images/retail-' + 'client-wine-charselect.png';
+const MONITOR = 'tools/monitor/' + 'check.sh';
 
 describe('isPublicPath', () => {
   it('publishes the code, tests, tools and public docs', () => {
     for (const p of ['packages/renderer/src/main.ts', 'services/ws-tcp-bridge/src/server.ts', 'tests/verify-x.ts',
-      'tools/task-status.mjs', 'LICENSE', 'README.md', 'package.json', '.github/workflows/ci.yml',
+      'tools/task-status.mjs', 'tools/aws-logs.sh', 'LICENSE', 'README.md', 'package.json', '.github/workflows/ci.yml',
       'docs/architecture.md', 'docs/mockups/automation/index.html',
       'verification/texture-index.json', 'verification/scorecard.json']) {
       expect(isPublicPath(p), p).toBe(true);
@@ -34,7 +35,7 @@ describe('isPublicPath', () => {
     for (const p of ['verification/sidebyside/inv.png', 'verification/perf/run.json', SHOT,
       'docs/remote-agent-ops.md', 'docs/progress-archive/2026-09.md', 'docs/retail-client-symbols.md', 'docs/release-plan.md',
       'CLAUDE.md', 'GOAL.md', 'progress.md', 'tasks.json', '.claude/settings.json',
-      'tools/capture-' + 'retail-ab.ts', 'tools/launch-' + 'retail-client-mac.sh', HOOK,
+      'tools/capture-' + 'retail-ab.ts', 'tools/launch-' + 'retail-client-mac.sh', HOOK, MONITOR,
       'reference/client-' + 'eol/acclient.exe', 'dat/client_portal.dat']) {
       expect(isPublicPath(p), p).toBe(false);
     }

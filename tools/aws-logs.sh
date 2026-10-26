@@ -18,7 +18,10 @@
 # --filter takes a CloudWatch filter pattern: a plain term matches anywhere in the
 # line; '{ $.event = "session_close" && $.server = "ac1999" }' matches JSON fields.
 set -euo pipefail
-export AWS_PROFILE="${AWS_PROFILE:-webac}" AWS_REGION="${AWS_REGION:-us-east-1}"
+# Keys in the environment (the cloud monitoring routine's read-only webac-monitor user) win over the
+# default profile; otherwise the webac profile (`aws login --profile webac`).
+if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -z "${AWS_PROFILE:-}" ]; then export AWS_REGION="${AWS_REGION:-us-east-1}"
+else export AWS_PROFILE="${AWS_PROFILE:-webac}" AWS_REGION="${AWS_REGION:-us-east-1}"; fi
 svc="${1:?usage: aws-logs.sh bridge|web|host [--since 1h] [--filter pattern] [--follow] [--json]}"; shift
 since=1h filter="" follow=() json=0
 while [ $# -gt 0 ]; do
