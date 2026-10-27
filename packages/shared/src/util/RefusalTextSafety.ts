@@ -112,6 +112,10 @@ export const REFUSAL_SHAPE_WORDS: readonly string[] = Object.freeze([
   'find meet requirement scroll show effect destroyed great understand environment made landscape prepay',
   'came forbids resist coins supported surface specified send force world timer attuned search renewed',
   'opportunity dungeon dungeons squelch ban ranks running round serve',
+  // TELEMETRY.refusal-server-notice-sweep (2026-10-27): ACE's answer to an @command typed with the wrong number of
+  // arguments, "Invalid parameter count, got {n}, expected {m}!" (GameActionTalk.cs:89, ChatMessageType.Help), went
+  // out as t:88cb9b2c ("Invalid _, _ #, _ #!") with no text; it keeps its words now (a new code).
+  'parameter count got expected',
 ]);
 
 /** The base vocabulary's sources: the server templates, the attempt-failed lines, the skill names and the shape words. */

@@ -1248,7 +1248,7 @@ async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope;
   preworldReporter?.bootStream(scope, s.bootReport);
   const st = s.store.stats;
   noteSetCache(scope, st);
-  console.log(`[AC:DatStream] set ${s.store.pointer.set}${opts.scope && opts.scope !== 'all' ? ` (${opts.scope})` : ''}: char-select set resident in ${Math.round(performance.now() - t0)} ms (net ${st.netBytes} B / ${st.netObjects} objects, cache ${st.cacheBytes} B / ${st.cacheObjects} objects, ${s.bootReport.preWorldArtFiles} pre-world art files); ${s.bootReport.worldCached ? `world + terrain packs loaded from the object cache too in ${s.bootReport.worldCacheMs} ms (warm profile)` : 'world + terrain packs continue in the background'}`);
+  console.log(`[AC:DatStream] set ${s.store.pointer.set}${opts.scope && opts.scope !== 'all' ? ` (${opts.scope})` : ''}: char-select set resident in ${Math.round(performance.now() - t0)} ms (net ${st.netBytes} B / ${st.netObjects} objects, cache ${st.cacheBytes} B / ${st.cacheObjects} objects, ${s.bootReport.preWorldArtFiles} pre-world art files); ${s.bootReport.worldCached ? `world + terrain packs loaded from the object cache too in ${s.bootReport.worldCacheMs} ms (warm profile)` : 'world + terrain packs continue in the background'}; phases ${JSON.stringify(s.bootReport.phases)}`);
   return s;
 }
 

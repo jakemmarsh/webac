@@ -200,6 +200,31 @@ export interface BootStreamReport {
   netBytes: number;
   cacheBytes: number;
   cacheObjects: number;
+  /** Where `ms` went (StreamingDats StreamBootPhases), when the set reported it. */
+  phases?: BootStreamPhases;
+}
+
+/**
+ * PERF.warm-boot-slow-breakdown — the phase breakdown's fields (StreamingDats
+ * StreamBootPhases; the bridge's clientPreworld BOOT_STREAM_PHASE_KEYS is the
+ * same list). Every one is a non-negative integer: ms, bytes or a count.
+ */
+export const BOOT_STREAM_PHASE_KEYS = [
+  'pointerMs', 'pointerTries', 'pointerBytes', 'dirMs', 'manifestMs', 'packsMs', 'splashMs', 'layoutMs', 'artMs', 'artFiles',
+  'hasMs', 'cacheReadMs', 'cacheReadMaxMs', 'cacheMisses', 'inflateMs', 'retries', 'failures', 'rcvBytes', 'lagMs', 'lagMaxMs', 'hiddenMs',
+] as const;
+export type BootStreamPhases = Partial<Record<typeof BOOT_STREAM_PHASE_KEYS[number], number>>;
+
+/** A report's phases, bounded: known keys with finite numbers only (null when none). */
+export function boundBootStreamPhases(v: unknown): BootStreamPhases | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const src = v as Record<string, unknown>;
+  const out: BootStreamPhases = {};
+  for (const k of BOOT_STREAM_PHASE_KEYS) {
+    const n = src[k];
+    if (typeof n === 'number' && Number.isFinite(n)) out[k] = boundInt(n, BOOT_STREAM_MAX_BYTES);
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 function boundInt(v: unknown, max: number): number {
@@ -207,9 +232,10 @@ function boundInt(v: unknown, max: number): number {
 }
 
 /** A set's bootReport as the wire's BootStreamReport (null for an unknown scope). */
-export function boundBootStreamReport(scope: string, r: { ms?: unknown; worldCacheMs?: unknown; worldCached?: unknown; netBytes?: unknown; cacheBytes?: unknown; cacheObjects?: unknown }): BootStreamReport | null {
+export function boundBootStreamReport(scope: string, r: { ms?: unknown; worldCacheMs?: unknown; worldCached?: unknown; netBytes?: unknown; cacheBytes?: unknown; cacheObjects?: unknown; phases?: unknown }): BootStreamReport | null {
   const sc = BOOT_STREAM_SCOPES.find((s) => s === scope);
   if (!sc) return null;
+  const phases = boundBootStreamPhases(r.phases);
   return {
     scope: sc,
     ms: boundInt(r.ms, BOOT_STREAM_MAX_MS),
@@ -218,6 +244,7 @@ export function boundBootStreamReport(scope: string, r: { ms?: unknown; worldCac
     netBytes: boundInt(r.netBytes, BOOT_STREAM_MAX_BYTES),
     cacheBytes: boundInt(r.cacheBytes, BOOT_STREAM_MAX_BYTES),
     cacheObjects: boundInt(r.cacheObjects, BOOT_STREAM_MAX_OBJECTS),
+    ...(phases ? { phases } : {}),
   };
 }
 

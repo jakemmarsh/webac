@@ -173,11 +173,45 @@ export const SERVER_TEXT_NOTICE_TEMPLATES: readonly string[] = Object.freeze([
   '%s has accepted the offer',
   'The items are being traded',
 ]);
+/**
+ * TELEMETRY.refusal-server-notice-sweep (2026-10-27) — the servers' success and state lines that reach the refusal
+ * path: a transient (every transient counts as a refusal unless it is a known notice) or a plain line in a refusal's
+ * wording. Production logged ACE's "You have learned a new spell." as t:c082a2d0 2156 times in 42 h from one
+ * end-of-retail server. Found by sweeping every GameEventCommunicationTransientString / SendTransientError /
+ * GameMessageSystemChat literal in ACE.Server and ClassicACE, and every SendText / SendTextToOverlay literal in
+ * GDLE (ClassicDereth, Seedsow) and the AC1999 server, through isServerTextRefusal:
+ * - ACE Player_Spells.cs:84 (ClassicACE :94): a spell added to the spellbook without the "You learn the %s spell."
+ *   chat line (a quest or an NPC handing it over).
+ * - ACE Player_Character.cs:358 (ClassicACE :380), GDLE ClassicDereth Player.cpp:3556 and the AC1999 server's
+ *   Player.cpp:3530 (SendTextToOverlay, the 1999 OverlayText 0x02EB): a title was added.
+ * - ACE Player_Skills.cs:481 / 483 (ClassicACE 544 / 546, SendTransientError): skill credits awarded.
+ * - ACE PlayerCommands.cs:172 (ClassicACE :230): /fixcast cleared a stuck cast.
+ * - ACE Player.cs:818 SendUngagNotice (Player_Tick.cs:607; ClassicACE Player.cs:1063): a gag ran out. Its WeenieError
+ *   twins 0x581-0x583 are notices already (RefusalReporter NOT_REFUSAL_CODES); the gag itself ("Your chat
+ *   privileges have been suspended.", Player.cs:812) stays reported, as 0x57F / 0x580 do.
+ * - GDLE ClassicDereth ManaStone.cpp:186 / Seedsow Player.cpp:1280 and Seedsow Player.cpp:1320: what a mana stone
+ *   that just gave its mana left uncharged (plain LTT_DEFAULT lines, caught by REFUSAL_TEXT's "you need"). ACE folds
+ *   the same words into its "The Mana Stone gives …" line (ManaStone.cs:178), which never matched.
+ * Every other swept line is a refusal and stays reported ("You are out of ammunition!", "You are too encumbered to
+ * carry that!", "Trade confirmation failed...", "You have used this item too recently", "_ is already at full
+ * stamina!" …). These lines never leave the page, so their words are not added to the refusal vocabulary.
+ */
+export const SERVER_STATUS_NOTICE_TEMPLATES: readonly string[] = Object.freeze([
+  'You have learned a new spell.',
+  'You have been granted a new title.',
+  'You have been awarded %s additional skill credits.',
+  'You have been awarded an additional skill credit.',
+  'Fixed casting state',
+  'Your chat privileges have been restored.',
+  'You need %s more mana to fully charge your items.',
+  'You need %s more mana to fully charge the %s.',
+]);
+
 /** Whole-line, across newlines (the consent list is one message, a name a line); a trailing slot may be empty. */
 const noticeLine = (t: string): RegExp => new RegExp('^' + t.split('%s').map(escapeRe).join('[\\s\\S]*') + '\\s*$');
-const SERVER_TEXT_NOTICE_LINES: readonly RegExp[] = SERVER_TEXT_NOTICE_TEMPLATES.map(noticeLine);
+const SERVER_TEXT_NOTICE_LINES: readonly RegExp[] = [...SERVER_TEXT_NOTICE_TEMPLATES, ...SERVER_STATUS_NOTICE_TEMPLATES].map(noticeLine);
 
-/** A server line that is a known notice (SERVER_TEXT_NOTICE_TEMPLATES) or a target-mode prompt. */
+/** A server line that is a known notice (SERVER_TEXT_NOTICE_TEMPLATES, SERVER_STATUS_NOTICE_TEMPLATES) or a target-mode prompt. */
 export function isServerTextNotice(text: string): boolean {
   const t = text.trim();
   return SERVER_TEXT_NOTICE_LINES.some((re) => re.test(t)) || isTargetPromptNotice(t);

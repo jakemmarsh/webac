@@ -20,6 +20,12 @@ export interface ObjectCache {
   put(hash: string, gz: Uint8Array): Promise<void>;
   /** Whether an object is stored, without reading it (absent: treat as unknown → false). */
   has?(hash: string): Promise<boolean>;
+  /**
+   * PERF.warm-boot-slow-breakdown — how long opening the store took (OPFS:
+   * navigator.storage.getDirectory + the objects directory), once known; null
+   * before then or for a cache with nothing to open.
+   */
+  readonly openMs?: number | null;
 }
 
 /** No persistence (OPFS unavailable, ?nocache, tests). */
@@ -56,6 +62,8 @@ export interface OpfsEnv {
   hasCreateWritable: boolean;
   /** Start the sync-access-handle writer worker (null when workers are unavailable). */
   startWriter: (() => OpfsWriterWorker) | null;
+  /** Clock for openMs (default performance.now). */
+  now?: () => number;
 }
 
 function browserOpfsEnv(): OpfsEnv {
@@ -88,14 +96,19 @@ export class OpfsObjectCache implements ObjectCache {
   private readonly pendingWrites = new Map<number, () => void>();
   /** The writer worker failed to load or crashed: later puts are dropped. */
   private writerBroken = false;
+  /** ObjectCache.openMs: getDirectory + the objects directory, once settled. */
+  openMs: number | null = null;
 
-  private constructor(getDirectory: () => Promise<FileSystemDirectoryHandle>, private readonly writer: OpfsWriterWorker | null) {
+  private constructor(getDirectory: () => Promise<FileSystemDirectoryHandle>, private readonly writer: OpfsWriterWorker | null, now: () => number) {
+    const t0 = now();
     this.dir = (async () => {
       try {
         const root = await getDirectory();
         return await root.getDirectoryHandle(OPFS_DIR, { create: true });
       } catch {
         return null;
+      } finally {
+        this.openMs = Math.round(now() - t0);
       }
     })();
     if (writer) {
@@ -114,10 +127,11 @@ export class OpfsObjectCache implements ObjectCache {
   /** The OPFS cache when the browser can write OPFS files (page-side or in a worker), else a NullObjectCache. */
   static create(env: OpfsEnv = browserOpfsEnv()): ObjectCache {
     if (!env.getDirectory) return new NullObjectCache();
-    if (env.hasCreateWritable) return new OpfsObjectCache(env.getDirectory, null);
+    const now = env.now ?? (() => performance.now());
+    if (env.hasCreateWritable) return new OpfsObjectCache(env.getDirectory, null, now);
     let writer: OpfsWriterWorker | null = null;
     try { writer = env.startWriter?.() ?? null; } catch { writer = null; }
-    return writer ? new OpfsObjectCache(env.getDirectory, writer) : new NullObjectCache();
+    return writer ? new OpfsObjectCache(env.getDirectory, writer, now) : new NullObjectCache();
   }
 
   async get(hash: string): Promise<Uint8Array | null> {

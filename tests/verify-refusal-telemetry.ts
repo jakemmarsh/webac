@@ -28,7 +28,7 @@ import { EncumbranceNotice, EOR_ENCUMBRANCE_NOTICE, AC1999_ENCUMBRANCE_NOTICE } 
 import { PORTAL_SPACE_NOTICE } from '../packages/renderer/src/effects/PortalSpaceModel';
 import { CLIENT_NOTICES, allClientNotices, raiseClientNotice } from '../packages/renderer/src/ui/ClientNotices';
 import { PEACE_MODE_TO_TRADE_TEXT } from '../packages/shared/src/systems/OpenTradeGate';
-import { REFUSAL_VOCABULARY, isTargetPromptNotice } from '../packages/renderer/src/telemetry/RefusalTemplates';
+import { REFUSAL_VOCABULARY, SERVER_STATUS_NOTICE_TEMPLATES, isTargetPromptNotice } from '../packages/renderer/src/telemetry/RefusalTemplates';
 import { BASE_REFUSAL_VOCABULARY, scrubToVocabulary, textCarriesUnknownWord } from '../packages/shared/src/util/RefusalTextSafety';
 import { aceReferenceExists } from './_harness/reference';
 import { sanitizeClientRefusal } from '../services/ws-tcp-bridge/src/clientRefusal';
@@ -311,6 +311,107 @@ describe('TELEMETRY.refusal-client-notice-sweep: the client status lines are not
     // A near miss on a status template is still a refusal: the auto-wield's failure form.
     expect(isSpewNotice('Moving Robe to your backpack - cannot unwield the Robe')).toBe(false);
   });
+});
+
+describe('TELEMETRY.refusal-server-notice-sweep: server success and state lines are not refusals', () => {
+  /** What the servers send, slots filled as they fill them (numbers, an item name). */
+  const NOTICES: readonly (readonly [string, 'transient' | 'server_text', number | null])[] = [
+    ['You have learned a new spell.', 'transient', null], // ACE Player_Spells.cs:84 (prod t:c082a2d0)
+    ['You have been granted a new title.', 'transient', null], // ACE Player_Character.cs:358, AC1999 / GDLE overlay
+    ['You have been awarded 2 additional skill credits.', 'transient', null], // ACE Player_Skills.cs:481
+    ['You have been awarded an additional skill credit.', 'transient', null], // :483
+    ['Fixed casting state', 'transient', null], // ACE PlayerCommands.cs:172 (/fixcast)
+    ['Your chat privileges have been restored.', 'transient', null], // ACE Player.cs:818
+    ['Your chat privileges have been restored.', 'server_text', 0x14], // its WorldBroadcast twin
+    ['You need 3,640 more mana to fully charge your items.', 'server_text', 0], // GDLE ManaStone.cpp:186
+    ['You need 1,200 more mana to fully charge the Nsight Blade.', 'server_text', 0], // Seedsow Player.cpp:1320
+  ];
+
+  it('prod t:c082a2d0 was "You have learned a new spell." as a transient; it sends nothing now', () => {
+    expect(refusalHash(refusalTemplate('You have learned a new spell.'))).toBe('c082a2d0');
+    const g = rig('eor');
+    for (let i = 0; i < 5; i++) g.r.serverText('transient', 'You have learned a new spell.', null);
+    g.clock.t += REFUSAL_ROLLUP_MS;
+    g.r.tick();
+    expect(g.events).toEqual([]);
+  });
+
+  it('every swept success / state line sends nothing, as a transient, a plain line or an error-type line', () => {
+    expect(SERVER_STATUS_NOTICE_TEMPLATES.length).toBeGreaterThanOrEqual(8);
+    const g = rig('eor');
+    for (const [text, ctx, chatType] of NOTICES) {
+      g.r.serverText(ctx, text, chatType);
+      g.r.serverText('server_text', text, 0x1a);
+    }
+    // Every template, its slots filled with a name, through every path.
+    for (const t of SERVER_STATUS_NOTICE_TEMPLATES) {
+      const line = t.split('%s').join('Ming Masun');
+      g.r.serverText('transient', line, null);
+      g.r.serverText('server_text', line, 0x1a);
+      g.r.serverText('server_text', line, 0);
+    }
+    g.r.flush();
+    expect(g.events).toEqual([]);
+  });
+
+  it('the real refusals beside them stay reported, one code each', () => {
+    const g = rig('eor');
+    const refusals: readonly (readonly [string, 'transient' | 'server_text', number | null])[] = [
+      ['You are out of ammunition!', 'transient', null], // ACE Player_Combat.cs:852
+      ['You are too encumbered to carry that!', 'transient', null], // Player_Inventory.cs:841
+      ["The key doesn't fit this lock.", 'transient', null],
+      ['Trade confirmation failed...', 'transient', null], // Player_Trade.cs:314
+      ['You have used this item too recently', 'transient', null], // WorldObject_Use.cs:297
+      ['Your chat privileges have been suspended.', 'transient', null], // Player.cs:812, the gag itself
+      ['Reemer is already at full stamina!', 'transient', null], // Healer.cs:97
+      ['You need 2 credits to specialize this skill.', 'server_text', 0], // GDLE SkillAlterationDevice.cpp:65
+      ['You have no items equipped that need mana.', 'server_text', 0], // ACE ManaStone.cs:166
+      ['Not enough pack space!', 'server_text', 0x1a], // GDLE Player.cpp:2529
+    ];
+    for (const [text, ctx, chatType] of refusals) g.r.serverText(ctx, text, chatType);
+    expect(g.events).toHaveLength(refusals.length);
+    expect(new Set(g.events.map((e) => e.code)).size).toBe(refusals.length);
+    expect(g.events.map((e) => e.text)).toContain('You are out of ammunition!');
+    expect(g.events.map((e) => e.text)).toContain('_ is already at full stamina!');
+    // A near miss on a notice template is still a refusal.
+    expect(isServerTextRefusal('You have learned a new spell, but it fizzled.', null, true)).toBe(true);
+  });
+
+  it('prod t:88cb9b2c is ACE\'s "Invalid parameter count, got #, expected #!" (GameActionTalk.cs:89): a refusal, now with its text', () => {
+    // The old vocabulary left "Invalid _, _ #, _ #!", text dropped: that is the code production logged after a Talk (0x15).
+    expect(refusalHash('Invalid _, _ #, _ #!')).toBe('88cb9b2c');
+    const g = rig('eor');
+    g.r.noteActionSent(GameActionType.Talk);
+    g.r.serverText('server_text', 'Invalid parameter count, got 0, expected 1!', 0x0f); // ChatMessageType.Help
+    expect(g.events).toHaveLength(1);
+    expect(g.events[0]).toMatchObject({
+      source: 'server', context: 'server_text', sink: 'chat', action: GameActionType.Talk,
+      text: 'Invalid parameter count, got #, expected #!',
+      code: `t:${refusalHash('Invalid parameter count, got #, expected #!')}`,
+    });
+    expect(sanitizeClientRefusal({ outcome: 'refusal', code: g.events[0].code, text: g.events[0].text })!.text)
+      .toBe('Invalid parameter count, got #, expected #!');
+  });
+
+  describe.skipIf(!aceReferenceExists(resolve(__dirname, '..', 'reference/ACE/Source/ACE.Server/WorldObjects/Player_Spells.cs')))(
+    'the ACE notices are the server\'s own literals',
+    () => {
+      let src = '';
+      beforeAll(() => {
+        const root = resolve(__dirname, '..', 'reference/ACE/Source/ACE.Server');
+        src = ['WorldObjects/Player_Spells.cs', 'WorldObjects/Player_Character.cs', 'WorldObjects/Player_Skills.cs',
+          'Command/Handlers/PlayerCommands.cs', 'WorldObjects/Player.cs'].map((f) => readFileSync(join(root, f), 'utf8')).join('\n');
+      });
+      it('each ACE-sourced template appears in ACE as written ({n} for a slot)', () => {
+        for (const t of ['You have learned a new spell.', 'You have been granted a new title.',
+          'You have been awarded {amount:N0} additional skill credits.', 'You have been awarded an additional skill credit.',
+          'Fixed casting state', 'Your chat privileges have been restored.']) {
+          expect(src, t).toContain(t);
+          expect(SERVER_STATUS_NOTICE_TEMPLATES, t).toContain(t.replace(/\{[^}]*\}/g, '%s'));
+        }
+      });
+    },
+  );
 });
 
 /** main.ts's server hooks, around the REAL handler: deliver quietly, then report by code / text. */

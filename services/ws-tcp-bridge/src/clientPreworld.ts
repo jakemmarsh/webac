@@ -65,6 +65,29 @@ export interface BootStream {
   netBytes: number;
   cacheBytes: number;
   cacheObjects: number;
+  /** Where `ms` went (PERF.warm-boot-slow-breakdown): known keys, non-negative integers only. */
+  phases?: Partial<Record<typeof BOOT_STREAM_PHASE_KEYS[number], number>>;
+}
+/**
+ * PERF.warm-boot-slow-breakdown — a streamed set's phase breakdown (renderer
+ * StreamingDats StreamBootPhases; PreworldReporter BOOT_STREAM_PHASE_KEYS):
+ * ms, bytes and counts, nothing else.
+ */
+export const BOOT_STREAM_PHASE_KEYS = [
+  'pointerMs', 'pointerTries', 'pointerBytes', 'dirMs', 'manifestMs', 'packsMs', 'splashMs', 'layoutMs', 'artMs', 'artFiles',
+  'hasMs', 'cacheReadMs', 'cacheReadMaxMs', 'cacheMisses', 'inflateMs', 'retries', 'failures', 'rcvBytes', 'lagMs', 'lagMaxMs', 'hiddenMs',
+] as const;
+
+/** A stream entry's phases: each known key that is an in-bounds integer; anything else is dropped. */
+export function streamPhasesField(v: unknown): Pick<BootStream, 'phases'> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  const src = v as Record<string, unknown>;
+  const out: NonNullable<BootStream['phases']> = {};
+  for (const k of BOOT_STREAM_PHASE_KEYS) {
+    const n = uint(src[k], MAX_STREAM_BYTES);
+    if (n !== null) out[k] = n;
+  }
+  return Object.keys(out).length ? { phases: out } : {};
 }
 export const BOOT_CACHE_STATES = ['cold', 'warm', 'partial', 'off'] as const;
 export const CAPABILITY_ISSUES = ['webgl2', 'websocket', 'memory', 'pointer', 'software_gpu'] as const;
@@ -225,7 +248,7 @@ export function streamField(v: unknown): { stream?: BootStream[] } {
     const cacheObjects = uint(r.cacheObjects, MAX_STREAM_OBJECTS);
     if (!scope || ms === null || worldCacheMs === null || netBytes === null || cacheBytes === null || cacheObjects === null
       || typeof r.worldCached !== 'boolean' || out.some((o) => o.scope === scope)) continue;
-    out.push({ scope, ms, worldCacheMs, worldCached: r.worldCached, netBytes, cacheBytes, cacheObjects });
+    out.push({ scope, ms, worldCacheMs, worldCached: r.worldCached, netBytes, cacheBytes, cacheObjects, ...streamPhasesField(r.phases) });
     if (out.length >= MAX_BOOT_STREAMS) break;
   }
   return out.length ? { stream: out } : {};

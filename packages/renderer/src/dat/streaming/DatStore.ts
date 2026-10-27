@@ -78,6 +78,29 @@ export const DEFAULT_MIN_RESIDENT_AGE_MS = 120_000;
 /** Eviction trims to this fraction of the cap (hysteresis: one batch, not one file per fetch). */
 const EVICT_TO_FRACTION = 0.85;
 
+/**
+ * PERF.warm-boot-slow-breakdown — one attempt at the set pointer (a ~1 KB
+ * JSON, fetched no-store every launch: the one network request a warm boot
+ * waits on) may take this long before it is aborted and tried again. Every
+ * object fetch was retried; the pointer was not, so one dropped request
+ * failed the whole boot, and a stalled one held it with no limit.
+ */
+export const POINTER_ATTEMPT_TIMEOUT_MS = 8000;
+
+/** DatStore.open's own steps (DatStore.openTimings), ms from when each began. */
+export interface DatStoreOpenTimings {
+  /** The pointer fetch, every attempt and backoff included. */
+  pointerMs: number;
+  /** Pointer attempts made (1 = no retry). */
+  pointerTries: number;
+  /** The pointer's JSON length. */
+  pointerBytes: number;
+  /** After the pointer: the manifest loaded (cache or network) and parsed. */
+  manifestMs: number;
+  /** After the pointer: every boot-time pack resident. */
+  packsMs: number;
+}
+
 /** Fetch priority: critical (a miss / a gate), prefetch (streamer ring), background (warm-fill). */
 export enum FetchPriority { Critical = 0, Prefetch = 1, Background = 2 }
 
@@ -225,6 +248,19 @@ export interface DatStoreStats {
   missesByType: Record<string, number>;
   /** Fetches that failed after retries. */
   failures: number;
+  /** Network attempts after an object's first (each failed attempt that was tried again). */
+  retries: number;
+  /**
+   * PERF.warm-boot-slow-breakdown — the object cache's side: objects it did
+   * not serve (absent, unreadable or failing their size / hash check), the
+   * time spent reading it (summed over objects, and the slowest one; queueing
+   * for a disk slot excluded), and the time spent inflating + hash-checking
+   * every object (cache and network, summed).
+   */
+  cacheMisses: number;
+  cacheReadMs: number;
+  cacheReadMaxMs: number;
+  inflateMs: number;
   /** Missed files not resident yet (in flight): 0 once every miss has landed (the A/B gate's check). */
   unresolvedMisses: number;
   /** Payload bytes resident now: packs + leaves + bundles (what the session holds instead of whole DATs). */
@@ -248,8 +284,10 @@ export interface DatStoreOptions {
   /** The set pointer URL, e.g. https://dats.example.org/v1/sets/eol-p2072-c982-h497-l994.json. */
   pointerUrl: string;
   fetchObject?: ObjectFetcher;
-  /** Fetches the pointer JSON (default: fetch no-store). */
-  fetchPointer?: (url: string) => Promise<unknown>;
+  /** Fetches the pointer JSON (default: fetch no-store). `signal` aborts an attempt that timed out. */
+  fetchPointer?: (url: string, opts?: { signal?: AbortSignal }) => Promise<unknown>;
+  /** One pointer attempt's limit before it is tried again (default POINTER_ATTEMPT_TIMEOUT_MS). */
+  pointerTimeoutMs?: number;
   cache?: ObjectCache;
   /** Concurrent network fetches (HTTP/2 streams; default DEFAULT_MAX_CONCURRENT). */
   maxConcurrent?: number;
@@ -392,7 +430,8 @@ class Limiter {
 
 export class DatStore {
   readonly stats: DatStoreStats = {
-    netObjects: 0, netBytes: 0, netReceivedBytes: 0, cacheObjects: 0, cacheBytes: 0, misses: 0, missesByType: {}, failures: 0, unresolvedMisses: 0,
+    netObjects: 0, netBytes: 0, netReceivedBytes: 0, cacheObjects: 0, cacheBytes: 0, misses: 0, missesByType: {}, failures: 0, retries: 0, unresolvedMisses: 0,
+    cacheMisses: 0, cacheReadMs: 0, cacheReadMaxMs: 0, inflateMs: 0,
     residentBytes: 0, packBytes: 0, evictableBytes: 0, evictions: 0, evictedBytes: 0,
   };
   /** Resident file bytes per DAT (views into packs / bundles / leaf payloads). */
@@ -461,6 +500,9 @@ export class DatStore {
   /** The parsed binary manifest (leaf / pack / bundle tables). */
   get manifest(): DatSetManifest { return this._manifest; }
 
+  /** How open() spent its time (zeros for a store made with fromParts). */
+  openTimings: DatStoreOpenTimings = { pointerMs: 0, pointerTries: 0, pointerBytes: 0, manifestMs: 0, packsMs: 0 };
+
   /** The object root for a pointer URL: everything before "/v1/sets/". */
   static baseUrlOf(pointerUrl: string): string {
     const i = pointerUrl.indexOf('/v1/sets/');
@@ -474,18 +516,24 @@ export class DatStore {
    */
   static async open(opts: DatStoreOptions): Promise<DatStore> {
     const base = DatStore.baseUrlOf(opts.pointerUrl);
-    const fetchPointer = opts.fetchPointer ?? (async (url: string) => {
-      const r = await fetch(url, { cache: 'no-store' });
+    const now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
+    const fetchPointer = opts.fetchPointer ?? (async (url: string, o?: { signal?: AbortSignal }) => {
+      const r = await fetch(url, { cache: 'no-store', ...(o?.signal ? { signal: o.signal } : {}) });
       if (!r.ok) throw new Error(`GET ${url}: HTTP ${r.status}`);
       return r.json();
     });
-    const pointer = parseSetPointer(await fetchPointer(opts.pointerUrl));
+    const tp = now();
+    const got = await fetchPointerRetried(opts.pointerUrl, fetchPointer, opts.retries ?? 3, opts.pointerTimeoutMs ?? POINTER_ATTEMPT_TIMEOUT_MS);
+    const pointer = parseSetPointer(got.raw);
+    const timings: DatStoreOpenTimings = { pointerMs: Math.round(now() - tp), pointerTries: got.tries, pointerBytes: got.bytes, manifestMs: 0, packsMs: 0 };
+    const tm = now();
     const roles = opts.packs ?? (['boot', 'local', 'skeleton', 'world', 'terrain'] as PackRole[]);
     const total = pointer.manifest.gzSize + roles.reduce((s, r) => s + (pointer.packs[r]?.gzSize ?? 0), 0);
     let done = 0;
     const tick = (n: number) => { done += n; opts.onProgress?.(done, total); };
     // The manifest and the packs in parallel (the pointer names the packs).
     const store = new DatStore(base, pointer, { leaves: { portal: new Map(), highres: new Map() }, packs: new Map(), bundles: new Map() }, opts);
+    store.openTimings = timings;
     const manifestBytes = store.loadObject(pointer.manifest, FetchPriority.Critical).then((b) => { tick(pointer.manifest.gzSize); return b; });
     const packBytes = roles.map((role) => {
       const ref = pointer.packs[role];
@@ -493,12 +541,14 @@ export class DatStore {
       return store.loadObject(ref, FetchPriority.Critical).then((b) => { tick(ref.gzSize); return b; });
     });
     store._manifest = parseSetManifest(await manifestBytes);
+    timings.manifestMs = Math.round(now() - tm);
     // Each pack is resident as soon as it lands (the splash draws from boot + local while a bigger pack is in flight).
     await Promise.all(packBytes.map((p, i) => p.then((b) => {
       if (!b) return;
       store.addPack(roles[i], b);
       opts.onPackResident?.(roles[i], store);
     })));
+    timings.packsMs = Math.round(now() - tm);
     return store;
   }
 
@@ -983,7 +1033,16 @@ export class DatStore {
   }
 
   private async fetchAndVerify(ref: ObjectRef, ticket: Ticket): Promise<Uint8Array> {
-    const cached = await this.disk.run(ticket, () => this.cache.get(ref.hash));
+    const cached = await this.disk.run(ticket, async () => {
+      const t = this.now();
+      try {
+        return await this.cache.get(ref.hash);
+      } finally {
+        const ms = this.now() - t;
+        this.stats.cacheReadMs += ms;
+        if (ms > this.stats.cacheReadMaxMs) this.stats.cacheReadMaxMs = ms;
+      }
+    });
     if (cached) {
       const payload = await this.inflateChecked(cached, ref).catch(() => null);
       if (payload) {
@@ -992,11 +1051,15 @@ export class DatStore {
         return payload;
       }
     }
+    this.stats.cacheMisses++;
     const url = `${this.baseUrl}/${objectKey(ref.hash)}`;
     let lastErr: unknown = null;
     ticket.bytes = ref.gzSize;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 250 * 2 ** (attempt - 1)));
+      if (attempt > 0) {
+        this.stats.retries++;
+        await new Promise((r) => setTimeout(r, 250 * 2 ** (attempt - 1)));
+      }
       try {
         const gz = await this.limiter.run(ticket, async () => {
           let got = 0;
@@ -1031,6 +1094,15 @@ export class DatStore {
   }
 
   private async inflateChecked(gz: Uint8Array, ref: ObjectRef): Promise<Uint8Array> {
+    const t = this.now();
+    try {
+      return await this.inflateCheckedNow(gz, ref);
+    } finally {
+      this.stats.inflateMs += this.now() - t;
+    }
+  }
+
+  private async inflateCheckedNow(gz: Uint8Array, ref: ObjectRef): Promise<Uint8Array> {
     const payload = await gunzip(gz);
     if (payload.byteLength !== ref.size) throw new Error(`${ref.hash}: inflated to ${payload.byteLength} bytes, manifest says ${ref.size}`);
     if (this.verifyHash) {
@@ -1097,4 +1169,37 @@ export class DatStore {
     };
     this.request(dat, id, FetchPriority.Critical).then((ok) => { if (!ok) settle(); }, settle);
   }
+}
+
+/**
+ * The pointer fetch, tried like an object (retries + 1 attempts, 250 ms
+ * doubling backoff), each attempt limited to `timeoutMs`: a stalled request
+ * is aborted and tried again instead of holding the boot. The bytes are the
+ * parsed JSON's length (the fetcher may hand back an object).
+ */
+export async function fetchPointerRetried(
+  url: string, fetchPointer: (url: string, opts?: { signal?: AbortSignal }) => Promise<unknown>, retries: number, timeoutMs: number,
+): Promise<{ raw: unknown; tries: number; bytes: number }> {
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 250 * 2 ** (attempt - 1)));
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const raw = await Promise.race([
+        fetchPointer(url, ac ? { signal: ac.signal } : {}),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => { ac?.abort(); reject(new Error(`GET ${url}: no answer in ${timeoutMs} ms`)); }, timeoutMs);
+        }),
+      ]);
+      let bytes = 0;
+      try { bytes = JSON.stringify(raw)?.length ?? 0; } catch { bytes = 0; }
+      return { raw, tries: attempt + 1, bytes };
+    } catch (err) {
+      lastErr = err;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
