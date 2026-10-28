@@ -21,6 +21,10 @@ set -euo pipefail
 # Keys in the environment (the cloud monitoring routine's read-only webac-monitor user) win over the
 # default profile; otherwise the webac profile (`aws login --profile webac`).
 if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -z "${AWS_PROFILE:-}" ]; then export AWS_REGION="${AWS_REGION:-us-east-1}"
+# Reads need no `aws login`: the read-only webac-monitor profile is the default when it is set up
+# (docs/monitoring.md); otherwise the webac profile.
+elif [ -z "${AWS_PROFILE:-}" ] && grep -q '^\[webac-monitor\]' "${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}" 2>/dev/null; then
+  export AWS_PROFILE=webac-monitor AWS_REGION="${AWS_REGION:-us-east-1}"
 else export AWS_PROFILE="${AWS_PROFILE:-webac}" AWS_REGION="${AWS_REGION:-us-east-1}"; fi
 svc="${1:?usage: aws-logs.sh bridge|web|host [--since 1h] [--filter pattern] [--follow] [--json]}"; shift
 since=1h filter="" follow=() json=0
