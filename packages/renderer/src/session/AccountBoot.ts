@@ -36,6 +36,52 @@ const CLIENT_VERSION_BOOT_RE = /^\s*because (?:your client is not the correct ve
 /** A trailing sentence that sends the player to a website to download something: dropped from server reasons. */
 const DOWNLOAD_LINK_SENTENCE_RE = /\.?\s*Please visit \S*(?:https?:\/\/|www\.)\S*[^.]*\.?\s*$/i;
 
+/**
+ * A refusal that names a VPN or proxy: ClassicACE's " Connections from VPN /
+ * proxy disallowed by server policy" (AuthenticationHandler.cs:265, AChard)
+ * and any other server's wording of the same rule (JawnTide's site says "No
+ * VPNs or proxies"; its boot text was never captured, 2026-10-29). Every
+ * webAC player reaches a world through the bridge's shared egress, which such
+ * a check sees as a proxy, so no webAC player can get in there.
+ */
+const PROXY_REFUSAL_RE = /\b(?:vpns?|prox(?:y|ies))\b/i;
+
+/** True for a boot / ban reason that refuses VPN or proxy connections (PROXY_REFUSAL_RE). */
+export function isProxyRefusalReason(reason: string | null | undefined): boolean {
+  return typeof reason === 'string' && PROXY_REFUSAL_RE.test(reason);
+}
+
+/** The next step under a VPN / proxy refusal: nothing the player can change from webAC. */
+export const PROXY_REFUSED_HINT =
+  "This world doesn't accept connections that come through a proxy, and webAC connects through one. Pick another world.";
+
+/**
+ * A refusal over a per-address (per-IP) limit on accounts or sessions
+ * ("Up to 2 accounts logged in at a time per person", JawnTide): the words
+ * IP / address together with a limit word. Every webAC player shares the
+ * bridge's address, so other webAC players can fill such a limit.
+ */
+const ADDRESS_LIMIT_REFUSAL_RE = /\b(?:ip|address(?:es)?)\b/i;
+const LIMIT_WORD_RE = /\b(?:too many|limit(?:ed)?|max(?:imum)?|only \d+|exceed(?:s|ed)?)\b/i;
+
+/** True for a boot reason about a per-address limit (and not a VPN / proxy refusal). */
+export function isAddressLimitReason(reason: string | null | undefined): boolean {
+  return typeof reason === 'string' && !isProxyRefusalReason(reason)
+    && ADDRESS_LIMIT_REFUSAL_RE.test(reason) && LIMIT_WORD_RE.test(reason);
+}
+
+/** The next step under a per-address limit refusal. */
+export const ADDRESS_LIMIT_HINT =
+  'Every webAC player reaches this world from the same address, so its per-address limit may be taken by other webAC players. Try again later, or pick another world.';
+
+/** The webAC next step for a server's boot / ban reason, or null when retail's text is enough. */
+export function serverReasonNextStep(reason: string | null | undefined): string | null {
+  if (isClientVersionBootReason(reason)) return RELOAD_FOR_LATEST_TEXT;
+  if (isProxyRefusalReason(reason)) return PROXY_REFUSED_HINT;
+  if (isAddressLimitReason(reason)) return ADDRESS_LIMIT_HINT;
+  return null;
+}
+
 /** True for a boot reason that says the client is the wrong version (CLIENT_VERSION_BOOT_RE). */
 export function isClientVersionBootReason(reason: string | null | undefined): boolean {
   return typeof reason === 'string' && CLIENT_VERSION_BOOT_RE.test(reason);
@@ -69,7 +115,8 @@ export function accountBootedText(reason: string | undefined | null): string {
   const [inline, own] = given ? splitServerReason(reason) : [' for Code of Conduct Violations', ''];
   let text = `You have been booted from Asheron's Call${inline}.`;
   if (own) text += `\n\n${own}`;
-  if (isClientVersionBootReason(reason)) text += `\n\n${RELOAD_FOR_LATEST_TEXT}`;
+  const next = serverReasonNextStep(reason);
+  if (next) text += `\n\n${next}`;
   return text;
 }
 
@@ -132,7 +179,9 @@ export function asctimeLocal(epochSeconds: number): string {
 export function accountBannedText(seconds: number, reason: string | undefined | null, nowMs: number): string {
   const s = seconds | 0;
   const [inline, own] = splitServerReason(reason);
-  const tail = `${own ? `\n\n${own}` : ''}\n\n${BAN_APPEAL_TEXT}`;
+  // A ban for a VPN / proxy (or a per-address limit) gets its next step before the appeal line.
+  const next = isProxyRefusalReason(reason) || isAddressLimitReason(reason) ? serverReasonNextStep(reason) : null;
+  const tail = `${own ? `\n\n${own}` : ''}${next ? `\n\n${next}` : ''}\n\n${BAN_APPEAL_TEXT}`;
   if (s < 1) return `You have been banned from Asheron's Call${inline}.${tail}`;
   let t = Math.floor(nowMs / 1000);
   if (t % 60 !== 0) t += 60 - (t % 60);

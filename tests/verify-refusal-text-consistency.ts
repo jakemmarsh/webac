@@ -31,7 +31,7 @@ import {
   RELOAD_FOR_LATEST_HINT,
 } from '../packages/renderer/src/ui/ConnectionNotices.js';
 import {
-  accountBootedText, splitServerReason, isClientVersionBootReason, RELOAD_FOR_LATEST_TEXT, PASSWORD_MISMATCH_BOOT_REASON,
+  accountBootedText, splitServerReason, isClientVersionBootReason, RELOAD_FOR_LATEST_TEXT, PASSWORD_MISMATCH_BOOT_REASON, PROXY_REFUSED_HINT,
 } from '../packages/renderer/src/session/AccountBoot.js';
 import { loginFailureText, accountBootLoginText } from '../packages/renderer/src/launcher/worldDirectory.js';
 import { parseStringTable, registerStringTable, getString, acStringHash } from '../packages/dat-parser/src/index.js';
@@ -159,7 +159,7 @@ describe('boot reasons', () => {
 
   it("a reason that is its own sentence (ClassicACE's VPN boot, no leading space) is not glued onto retail's", () => {
     expect(accountBootedText(' Connections from VPN / proxy disallowed by server policy'))
-      .toBe("You have been booted from Asheron's Call.\n\nConnections from VPN / proxy disallowed by server policy.");
+      .toBe(`You have been booted from Asheron's Call.\n\nConnections from VPN / proxy disallowed by server policy.\n\n${PROXY_REFUSED_HINT}`);
     expect(accountBootedText('Testing')).toBe("You have been booted from Asheron's Call.\n\nTesting.");
     expect(splitServerReason('\n\nBanned.\n\n\n\n')).toEqual(['', 'Banned.']);
     expect(splitServerReason(' - x.')).toEqual([' - x', '']);
@@ -186,7 +186,9 @@ describe.skipIf(!existsSync(DAT_PATHS.local))('EoL DAT: the one token-valued ent
       expect(loginFailureText(netErrorNotice(token), NO_WORLD, false)).not.toMatch(TOKEN_ANYWHERE);
     }
     // Retail's wording leads, unchanged.
-    expect(characterErrorNotice(CharacterError.LogonServerFull).text).toBe("Sorry, but the Asheron's Call server is full currently. Please try again later.");
+    // ACE also sends it for its per-IP session cap (every webAC player shares one address): the way out follows.
+    expect(characterErrorNotice(CharacterError.LogonServerFull).text).toBe("Sorry, but the Asheron's Call server is full currently. Please try again later.\n\nIf it keeps happening, pick another world.");
+    expect(characterErrorNotice(CharacterError.ServerCrash1).text.endsWith('\n\nTry again in a minute, or pick another world.')).toBe(true);
     expect(characterErrorNotice(CharacterError.Logoff).text).toBe('Server could not log off your character\n\nTry again in a minute.');
   });
 

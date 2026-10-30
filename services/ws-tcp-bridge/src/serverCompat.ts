@@ -196,6 +196,15 @@ export const SERVER_COMPAT: CompatOverlay = {
     // At login: "You have been booted from Asheron's Call Connections from
     // VPN / proxy disallowed by server policy."
     '9d17ce44-7db5-40c1-b7bb-a01c9de21d00': VPN_BLOCK, // AChard
+    // ACE (a DocTide fork), play.jawntide.com:9000. Prod logs 2026-10-22..29: 9
+    // login_refused with token boot_other across 6 players, 0 char_list, 0
+    // enter_ok; its version check passes (a login probe gets AccountDoesntExist).
+    // Its website: "Connections: No VPNs or proxies" and "Up to 2 accounts
+    // logged in at a time per person". The boot text itself wasn't captured
+    // (the client logs only the token); bootReasonToken now codes a VPN / proxy
+    // reason boot_vpn_blocked and a per-IP limit boot_address_limit, so the
+    // next refusal says which (COMPAT.jawntide-vpn-block).
+    '19c05a84-551c-428e-859e-9ea2fd06592e': VPN_BLOCK, // JawnTide
     // Two accounts / two sessions per IP (AC1999_PUBLIC_COMPAT). serverList.AC1999_PUBLIC_SERVER.id.
     ac1999: AC1999_PUBLIC_COMPAT,
   },

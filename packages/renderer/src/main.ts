@@ -397,7 +397,7 @@ import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, is
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
 import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from './session/SessionLifecycle.js';
-import { ProvenLoginRetry, type LoginCredentials } from './session/ProvenLoginRetry.js';
+import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { handleUnexpectedDrop } from './session/UnexpectedDrop.js';
 import { DrainHandover } from './session/DrainHandover.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel } from './session/AccountTabGuard.js';
@@ -18775,13 +18775,17 @@ async function main() {
             // BUG.gdle-transient-login-failed — a proven login's "Client logon failed" (GDLE /
             // AC1999; ACE never sends it) retries on its own behind the connecting screen; the
             // last refusal, and any other, is shown as before (ProvenLoginRetry decides).
+            // UX.gdle-first-login-retry — on a GDL / GDLE launcher world (not register-first) a
+            // first-time login retries the same way (firstTimeLoginRetryAllowed).
             if (!gameStarted && event.serverNetError) {
               const creds: LoginCredentials = { world: connectUrl, account: aceAccount, password: acePassword };
-              void provenLoginRetry.onRefused(creds, netNotice.token).then((verdict) => {
+              const firstTime = firstTimeLoginRetryAllowed(launcherWorld);
+              void provenLoginRetry.onRefused(creds, netNotice.token, { firstTime }).then((verdict) => {
                 if (gameStarted) return;
                 if (verdict.retry) {
-                  preworldReporter?.loginRetry(event, netNotice.token || null, verdict.attempt);
-                  console.log(`[AC] ACE: "${netNotice.text}" for a login this page already got in with — retrying in ${verdict.delayMs} ms (attempt ${verdict.attempt})`);
+                  preworldReporter?.loginRetry(event, netNotice.token || null, verdict.attempt, verdict.kind);
+                  const why = verdict.kind === 'proven' ? 'a login this page already got in with' : `a first-time login on ${launcherWorld?.emu ?? 'GDLE'}`;
+                  console.log(`[AC] ACE: "${netNotice.text}" for ${why} — retrying in ${verdict.delayMs} ms (attempt ${verdict.attempt})`);
                   if (provenLoginRetryTimer !== null) clearTimeout(provenLoginRetryTimer);
                   provenLoginRetryTimer = setTimeout(() => {
                     provenLoginRetryTimer = null;

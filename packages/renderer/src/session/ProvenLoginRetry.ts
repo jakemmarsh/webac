@@ -28,6 +28,22 @@
  * ACE (end of retail) never sends this NetError (its wrong password is an
  * AccountBoot, its account-in-use a CharacterError ClientConnection already
  * retries), so the same decision simply never fires there.
+ *
+ * UX.gdle-first-login-retry — on a GDL / GDLE world (the launcher world's
+ * `emu`) a FIRST-TIME login refused this way is retried the same way too
+ * (firstTimeLoginRetryAllowed). Production 2026-10-26 (Seedsow): one player
+ * was refused four times and got in on the fifth with the same LoginRequest
+ * each time; nothing was proven yet on that page, so each refusal was shown.
+ * A typo there now waits about 9 s for today's error; Jake accepted that
+ * ("add retry to seedsow if it'd help real users"). Not on:
+ *  - register-first worlds (a `registration` note or link): a first-time
+ *    refusal there is most often an account not registered yet, and the
+ *    registration hint is the answer, so it shows at once;
+ *  - worlds with per-address caps (perIpLimits): the refusal can be the
+ *    account cap, which no retry passes;
+ *  - the AC1999 server (emu "AC1999"): its refusal is a wrong password or its
+ *    per-IP caps, handled on their own (perIpLogonFailedText);
+ *  - ACE, Custom… and URL logins (no world, or no emu): unchanged.
  */
 
 /** Waits before each automatic retry of a proven login (about 10 s in all); after the last, today's error. */
@@ -43,6 +59,33 @@ export const PROVEN_LOGIN_RETRY_DELAYS_MS: readonly number[] = Object.freeze([30
 export const RETRYABLE_LOGIN_REFUSAL_TOKENS: ReadonlySet<string> = new Set([
   'ID_ConnectionError_ClientLogOnFailed',
 ]);
+
+/** What a launcher world says about itself that decides a first-time retry (launcher/worldDirectory.ts World). */
+export interface FirstTimeRetryWorld {
+  readonly emu: string | null;
+  readonly registration: string | null;
+  readonly registrationUrl: string | null;
+  readonly perIpLimits?: { readonly accounts: number; readonly sessions: number } | null;
+}
+
+/** Emulators whose "Client logon failed" can be their own account query failing (GDLE Network.cpp AuthenticateUserQuery::PerformQuery). */
+export const FIRST_TIME_RETRY_EMUS: ReadonlySet<string> = new Set(['GDL', 'GDLE']);
+
+/**
+ * UX.gdle-first-login-retry — whether a first-time login to `world` is
+ * retried quietly too: a GDL / GDLE world that is not register-first and has
+ * no per-address caps. null (a URL or Custom… login) never.
+ */
+export function firstTimeLoginRetryAllowed(world: FirstTimeRetryWorld | null | undefined): boolean {
+  if (!world?.emu || !FIRST_TIME_RETRY_EMUS.has(world.emu.toUpperCase())) return false;
+  if (world.registration || world.registrationUrl) return false;
+  const caps = world.perIpLimits;
+  if (caps && (caps.accounts > 0 || caps.sessions > 0)) return false;
+  return true;
+}
+
+/** Why a refusal is retried: the credentials got in earlier on this page, or a first-time login on a GDLE world. */
+export type LoginRetryKind = 'proven' | 'first_time';
 
 /** What a login was made with. `world` is the bridge URL naming the server (main.ts connectUrl). */
 export interface LoginCredentials {
@@ -61,16 +104,18 @@ export function provenLoginRetryDelay(input: {
   proven: boolean;
   retriesSoFar: number;
   delays?: readonly number[];
+  /** A first-time login on a world where firstTimeLoginRetryAllowed. */
+  firstTimeAllowed?: boolean;
 }): number | null {
   const delays = input.delays ?? PROVEN_LOGIN_RETRY_DELAYS_MS;
-  if (!input.proven) return null;
+  if (!input.proven && !input.firstTimeAllowed) return null;
   if (!input.token || !RETRYABLE_LOGIN_REFUSAL_TOKENS.has(input.token)) return null;
   if (input.retriesSoFar < 0 || input.retriesSoFar >= delays.length) return null;
   return delays[input.retriesSoFar];
 }
 
 export type ProvenLoginRefusalVerdict =
-  | { readonly retry: true; readonly attempt: number; readonly delayMs: number }
+  | { readonly retry: true; readonly attempt: number; readonly delayMs: number; readonly kind: LoginRetryKind }
   | { readonly retry: false };
 
 /** A salted digest of `text`, or null when the platform has no WebCrypto. */
@@ -141,8 +186,13 @@ export class ProvenLoginRetry {
    * and its delay) or show the refusal. Giving up resets the count and
    * forgets these credentials, so the player's own next try is shown at once
    * if it fails too (a password changed elsewhere stops being delayed).
+   * `firstTime`: the world retries first-time logins too
+   * (firstTimeLoginRetryAllowed), so each of the player's own attempts gets
+   * the retries, proven or not.
    */
-  async onRefused(creds: LoginCredentials, token: string | null | undefined): Promise<ProvenLoginRefusalVerdict> {
+  async onRefused(
+    creds: LoginCredentials, token: string | null | undefined, opts: { firstTime?: boolean } = {},
+  ): Promise<ProvenLoginRefusalVerdict> {
     if (!token || !RETRYABLE_LOGIN_REFUSAL_TOKENS.has(token) || !creds.account || !creds.password) {
       this.retries = 0;
       return { retry: false };
@@ -150,14 +200,16 @@ export class ProvenLoginRetry {
     await this.pendingNote;
     const d = this.proven.size ? await this.digest(credentialText(creds)) : null;
     const isProven = d !== null && this.proven.has(d);
-    const delayMs = provenLoginRetryDelay({ token, proven: isProven, retriesSoFar: this.retries, delays: this.delays });
+    const delayMs = provenLoginRetryDelay({
+      token, proven: isProven, retriesSoFar: this.retries, delays: this.delays, firstTimeAllowed: opts.firstTime === true,
+    });
     if (delayMs === null) {
       if (isProven && d) this.proven.delete(d);
       this.retries = 0;
       return { retry: false };
     }
     this.retries++;
-    return { retry: true, attempt: this.retries, delayMs };
+    return { retry: true, attempt: this.retries, delayMs, kind: isProven ? 'proven' : 'first_time' };
   }
 
   /** The connect cycle ended some other way (the launcher, another tab, the Disconnected screen): start counting afresh. */

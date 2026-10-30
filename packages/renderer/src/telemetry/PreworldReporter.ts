@@ -27,9 +27,10 @@
  * session_close carry the same id.
  */
 import { boundNetDiagnostics, NET_DIAG_END_CAUSES, type ConnectionEvent } from '@ac/network';
-import { PASSWORD_MISMATCH_BOOT_REASON } from '../session/AccountBoot.js';
+import { isAddressLimitReason, isProxyRefusalReason, PASSWORD_MISMATCH_BOOT_REASON } from '../session/AccountBoot.js';
 import { CharacterError, CharacterGenerationVerificationResponse, characterCreateErrorToken } from '@ac/shared';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
+import type { LoginRetryKind } from '../session/ProvenLoginRetry.js';
 
 export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
@@ -343,6 +344,13 @@ export interface PreworldEvent {
   handoverMs?: number;
   reason?: HandoverReason;
   path?: HandoverPath;
+  /**
+   * UX.gdle-first-login-retry — 'login_retry' only: why the page retried
+   * ('proven': these credentials got in earlier on the page; 'first_time': a
+   * first-time login on a GDLE world). A first_time retry followed by the
+   * trace's char_list is a login the retry rescued.
+   */
+  retry?: LoginRetryKind;
 }
 
 export interface PreworldReporterOptions {
@@ -425,7 +433,9 @@ function safeToken(t: string | null | undefined): string | null {
  *    "Your DAT files are newer than expected" / "Your DAT files are incomplete", PropertyManager.cs:677-678).
  *  - ACE PlayerManager.cs:818 world closed; :140 forced log off by system (a second login of an in-world character).
  *  - ACE DeveloperCommands.cs:2470 forced log off by an admin; SentinelCommands.cs:333 boot " - <reason>" (or none).
- *  - ClassicACE AuthenticationHandler.cs:265 VPN / proxy refused.
+ *  - ClassicACE AuthenticationHandler.cs:265 VPN / proxy refused, and any other
+ *    reason naming a VPN or proxy (JawnTide, 2026-10-29: boot_other before), as
+ *    boot_vpn_blocked; a per-address (IP) limit as boot_address_limit.
  *  - GDLE / AC1999 CNetwork::KickClient (Network.cpp): an empty reason (u32 0).
  */
 export function bootReasonToken(reason: string | null | undefined): string {
@@ -438,7 +448,8 @@ export function bootReasonToken(reason: string | null | undefined): string {
   if (r === ' because the world is now closed') return 'boot_world_closed';
   if (r === ' because the character was forced to log off by system') return 'boot_forced_logoff_system';
   if (r === ' because the character was forced to log off by an admin') return 'boot_forced_logoff_admin';
-  if (r.startsWith(' Connections from VPN / proxy disallowed')) return 'boot_vpn_blocked';
+  if (isProxyRefusalReason(r)) return 'boot_vpn_blocked';
+  if (isAddressLimitReason(r)) return 'boot_address_limit';
   if (r.startsWith(' - ')) return 'boot_admin';
   return 'boot_other';
 }
@@ -619,19 +630,25 @@ export class PreworldReporter {
    * own (a proven login's "Client logon failed", session/ProvenLoginRetry.ts):
    * login_retry with the refusal's code / table / token and the retry's
    * attempt number (count). The last refusal still ends in login_refused; a
-   * retry that gets in shows up as the usual char_list.
+   * retry that gets in shows up as the usual char_list. `kind` (the event's
+   * `retry`): a proven login's retry, or a GDLE first-time login's
+   * (UX.gdle-first-login-retry).
    */
-  loginRetry(event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId'>, token: string | null, attempt: number): void {
+  loginRetry(
+    event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId'>, token: string | null, attempt: number,
+    kind: LoginRetryKind = 'proven',
+  ): void {
     const count = Math.max(0, Math.min(1000, Math.trunc(attempt)));
+    const retry = kind === 'first_time' ? 'first_time' : 'proven';
     if (event.serverNetError) {
       this.report('login_retry', {
-        code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token), count,
+        code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token), count, retry,
       });
       return;
     }
     this.report('login_retry', {
       code: event.characterError !== undefined ? event.characterError >>> 0 : undefined,
-      token: safeToken(token) ?? safeToken(event.netErrorId), count,
+      token: safeToken(token) ?? safeToken(event.netErrorId), count, retry,
     });
   }
 
@@ -906,7 +923,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path'>>, withStream = false): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry'>>, withStream = false): void {
     if (!this.opts.endpoint) return;
     if (outcome === 'handover' ? this.handoversSent >= MAX_HANDOVER_EVENTS : this.sent >= MAX_PREWORLD_EVENTS) return;
     const { screen, step } = this.sample();
@@ -937,6 +954,7 @@ export class PreworldReporter {
       ...(f.net ? { net: f.net } : {}),
       ...(f.heritage !== undefined ? { heritage: f.heritage } : {}),
       ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path } : {}),
+      ...(outcome === 'login_retry' && f.retry ? { retry: f.retry } : {}),
     };
     if (outcome === 'handover') this.handoversSent++;
     else this.sent++;

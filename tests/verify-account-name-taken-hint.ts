@@ -27,7 +27,7 @@ import { serverNetErrorNotice } from '../packages/renderer/src/ui/ConnectionNoti
 import {
   accountBootLoginText, loginFailureText, ACCOUNT_NAME_TAKEN_HINT, LOGON_FAILED_HINT, type World,
 } from '../packages/renderer/src/launcher/worldDirectory.js';
-import { PASSWORD_MISMATCH_BOOT_REASON } from '../packages/renderer/src/session/AccountBoot.js';
+import { ADDRESS_LIMIT_HINT, accountBannedText, PASSWORD_MISMATCH_BOOT_REASON, PROXY_REFUSED_HINT, BAN_APPEAL_TEXT } from '../packages/renderer/src/session/AccountBoot.js';
 import { bootReasonToken } from '../packages/renderer/src/telemetry/PreworldReporter.js';
 
 type W = Pick<World, 'name' | 'registration' | 'registrationUrl'>;
@@ -168,6 +168,49 @@ describe("ACE / ClassicACE: the wrong-password AccountBoot's bytes to the shown 
     expect(aceBootText(PASSWORD_MISMATCH_BOOT_REASON, COLDEVE, true)).toBe(BOOT);
     expect(aceBootText(' because the world is now closed', COLDEVE)).toBe("You have been booted from Asheron's Call because the world is now closed.");
     expect(aceBootText(null, COLDEVE)).toBe("You have been booted from Asheron's Call for Code of Conduct Violations.");
+  });
+});
+
+describe('COMPAT.jawntide-vpn-block: a VPN / proxy boot (or a per-IP limit) says what to do from webAC', () => {
+  const ACHARD_BOOT = ' Connections from VPN / proxy disallowed by server policy';
+
+  it("ClassicACE's VPN boot keeps retail's text first, then the proxy next step; telemetry codes it boot_vpn_blocked", () => {
+    expect(aceBootText(ACHARD_BOOT, COLDEVE)).toBe(
+      `You have been booted from Asheron's Call.\n\nConnections from VPN / proxy disallowed by server policy.\n\n${PROXY_REFUSED_HINT}`);
+    expect(bootReasonToken(ACHARD_BOOT)).toBe('boot_vpn_blocked');
+    expect(PROXY_REFUSED_HINT).toMatch(/proxy.*webAC connects through one.*Pick another world\.$/);
+  });
+
+  it('any wording naming a VPN or proxy gets the same (JawnTide: "No VPNs or proxies"), in the world too', () => {
+    for (const r of [' because VPNs are not allowed', 'No proxies allowed', ' - proxy connection detected']) {
+      expect(aceBootText(r, COLDEVE).endsWith(`\n\n${PROXY_REFUSED_HINT}`), r).toBe(true);
+      expect(aceBootText(r, COLDEVE).startsWith("You have been booted from Asheron's Call"), r).toBe(true);
+      expect(aceBootText(r, null, true).endsWith(PROXY_REFUSED_HINT), r).toBe(true);
+      expect(bootReasonToken(r)).toBe('boot_vpn_blocked');
+    }
+    // Never the taken-name hint: that is the wrong-password boot's alone.
+    expect(aceBootText(ACHARD_BOOT, COLDEVE)).not.toContain(ACCOUNT_NAME_TAKEN_HINT);
+  });
+
+  it('a per-IP limit boot says other webAC players share the address; boot_address_limit', () => {
+    const r = ' because there are too many accounts logged in from your IP';
+    expect(aceBootText(r, COLDEVE)).toBe(
+      `You have been booted from Asheron's Call because there are too many accounts logged in from your IP.\n\n${ADDRESS_LIMIT_HINT}`);
+    expect(bootReasonToken(r)).toBe('boot_address_limit');
+  });
+
+  it('the wrong-password boot is unchanged: boot_password_mismatch and the taken-name hint, no proxy line', () => {
+    const t = aceBootText(PASSWORD_MISMATCH_BOOT_REASON, COLDEVE);
+    expect(t).toContain(ACCOUNT_NAME_TAKEN_HINT);
+    expect(t).not.toContain(PROXY_REFUSED_HINT);
+    expect(t).not.toContain(ADDRESS_LIMIT_HINT);
+    expect(bootReasonToken(PASSWORD_MISMATCH_BOOT_REASON)).toBe('boot_password_mismatch');
+  });
+
+  it('a ban for a VPN puts the proxy step before the appeal line; other bans are unchanged', () => {
+    expect(accountBannedText(0, ' - VPN use', 0)).toBe(
+      `You have been banned from Asheron's Call - VPN use.\n\n${PROXY_REFUSED_HINT}\n\n${BAN_APPEAL_TEXT}`);
+    expect(accountBannedText(0, ' - griefing', 0)).toBe(`You have been banned from Asheron's Call - griefing.\n\n${BAN_APPEAL_TEXT}`);
   });
 });
 

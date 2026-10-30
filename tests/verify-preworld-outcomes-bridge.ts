@@ -63,7 +63,7 @@ describe('sanitizeClientPreworld', () => {
   });
 
   it('the boot reason codes pass the token check; boot text does not', () => {
-    for (const token of ['boot_password_mismatch', 'boot_banned', 'boot_client_version', 'boot_dat_newer', 'boot_no_reason', 'boot_other']) {
+    for (const token of ['boot_password_mismatch', 'boot_banned', 'boot_client_version', 'boot_dat_newer', 'boot_no_reason', 'boot_other', 'boot_vpn_blocked', 'boot_address_limit']) {
       expect(sanitizeClientPreworld({ outcome: 'login_refused', token })!.token).toBe(token);
     }
     expect(sanitizeClientPreworld({ outcome: 'login_refused', token: ' because the password entered for this account was not correct' })!.token).toBeNull();

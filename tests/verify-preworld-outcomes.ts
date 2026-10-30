@@ -333,6 +333,14 @@ describe('AccountBoot / AccountBanned — the real bytes through ServerMessageHa
       [' because the character was forced to log off by system', 'boot_forced_logoff_system'],
       [' because the character was forced to log off by an admin', 'boot_forced_logoff_admin'],
       [' Connections from VPN / proxy disallowed by server policy', 'boot_vpn_blocked'],
+      // COMPAT.jawntide-vpn-block: other servers' wordings of the same rule (JawnTide's was boot_other).
+      [' because VPNs are not allowed on this server', 'boot_vpn_blocked'],
+      ['Proxy connections are not permitted.', 'boot_vpn_blocked'],
+      [' - no proxies', 'boot_vpn_blocked'],
+      [' because there are too many accounts logged in from your IP', 'boot_address_limit'],
+      ['Maximum of 2 connections per IP address reached.', 'boot_address_limit'],
+      [' because your IP was flagged', 'boot_other'], // IP with no limit word: not a limit
+      [' because approximately nothing', 'boot_other'], // "proxy" inside a word does not count
       [` - ${ACCOUNT} was rude to Secretname`, 'boot_admin'],
       [`something ${PASSWORD} else`, 'boot_other'],
     ];

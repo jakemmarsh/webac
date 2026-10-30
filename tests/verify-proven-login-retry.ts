@@ -23,11 +23,17 @@ import { Connection1999 } from '../packages/network/src/era1999/Connection1999.j
 import { buildPacket1999 } from '../packages/network/src/era1999/Packet1999.js';
 import { connectionFailureNotice, characterErrorNotice, netErrorNotice } from '../packages/renderer/src/ui/ConnectionNotices.js';
 import {
-  ProvenLoginRetry, provenLoginRetryDelay, webCryptoDigest, PROVEN_LOGIN_RETRY_DELAYS_MS, RETRYABLE_LOGIN_REFUSAL_TOKENS,
+  ProvenLoginRetry, provenLoginRetryDelay, webCryptoDigest, firstTimeLoginRetryAllowed,
+  PROVEN_LOGIN_RETRY_DELAYS_MS, RETRYABLE_LOGIN_REFUSAL_TOKENS,
   type LoginCredentials,
 } from '../packages/renderer/src/session/ProvenLoginRetry.js';
 import { PreworldReporter, type PreworldEvent } from '../packages/renderer/src/telemetry/PreworldReporter.js';
-import { sanitizeClientPreworld, PREWORLD_OUTCOMES } from '../services/ws-tcp-bridge/src/clientPreworld.js';
+import { sanitizeClientPreworld, PREWORLD_OUTCOMES, LOGIN_RETRY_KINDS } from '../services/ws-tcp-bridge/src/clientPreworld.js';
+import { buildDirectory } from '../services/ws-tcp-bridge/src/serverDirectory.js';
+import type { ServerEntry } from '../services/ws-tcp-bridge/src/serverList.js';
+import {
+  worldFromEntry, loginFailureText, localWorld, LOGON_FAILED_HINT, type World,
+} from '../packages/renderer/src/launcher/worldDirectory.js';
 import { CharacterError } from '../packages/shared/src/index.js';
 
 // NetworkDefs.h (GDLE and the AC1999 server)
@@ -114,15 +120,20 @@ const LANES: Lane[] = [
  * main.ts's loop, minus the DOM: each login attempt opens a socket, the server
  * answers with `answers[i]` (a NetError id, or 'ok'), a refusal goes through
  * connectionFailureNotice → ProvenLoginRetry.onRefused, and a retry verdict
- * connects again. Returns what the player ends up with.
+ * connects again. Returns what the player ends up with. `world` is the
+ * launcher world (main.ts launcherWorld): it decides the first-time retry
+ * (firstTimeLoginRetryAllowed) and the shown dialog's text (loginFailureText).
  */
-async function drive(lane: Lane, helper: ProvenLoginRetry, creds: LoginCredentials, answers: Array<number | 'ok'>) {
+async function drive(lane: Lane, helper: ProvenLoginRetry, creds: LoginCredentials, answers: Array<number | 'ok'>, world: World | null = null) {
   const conn = lane.make();
   const events: ConnectionEvent[] = [];
   conn.on((e) => events.push(e));
   const delays: number[] = [];
+  const kinds: string[] = [];
   let shown: string | null = null;
+  let text: string | null = null;
   let accepted = false;
+  const firstTime = firstTimeLoginRetryAllowed(world);
   conn.connect(creds.account, creds.password);
   for (let i = 0; ; i++) {
     const sock = FakeSocket.sockets[FakeSocket.sockets.length - 1];
@@ -138,14 +149,15 @@ async function drive(lane: Lane, helper: ProvenLoginRetry, creds: LoginCredentia
     const err = events.slice(before).find((e) => e.type === 'error');
     expect(err?.serverNetError).toEqual({ stringId: answer >>> 0, tableId: ST_SERVER_ERRORS });
     const notice = connectionFailureNotice(err!)!;
-    const verdict = await helper.onRefused(creds, notice.token);
-    if (!verdict.retry) { shown = notice.token; break; }
+    const verdict = await helper.onRefused(creds, notice.token, { firstTime });
+    if (!verdict.retry) { shown = notice.token; text = loginFailureText(notice, world, false); break; }
     expect(verdict.attempt).toBe(delays.length + 1);
     delays.push(verdict.delayMs);
+    kinds.push(verdict.kind);
     conn.connect(creds.account, creds.password); // the page's timer firing
   }
   conn.disconnect();
-  return { delays, shown, accepted, sockets: FakeSocket.sockets.length };
+  return { delays, kinds, shown, text, accepted, sockets: FakeSocket.sockets.length };
 }
 
 describe('BUG.gdle-transient-login-failed — the decision', () => {
@@ -245,10 +257,10 @@ describe('BUG.gdle-transient-login-failed — a cancelled cycle starts counting 
   it('cancel() after one retry gives the next refusal both retries again', async () => {
     const h = new ProvenLoginRetry();
     await h.noteAccepted(GOOD);
-    expect(await h.onRefused(GOOD, 'ID_ConnectionError_ClientLogOnFailed')).toEqual({ retry: true, attempt: 1, delayMs: 3000 });
+    expect(await h.onRefused(GOOD, 'ID_ConnectionError_ClientLogOnFailed')).toEqual({ retry: true, attempt: 1, delayMs: 3000, kind: 'proven' });
     h.cancel();
-    expect(await h.onRefused(GOOD, 'ID_ConnectionError_ClientLogOnFailed')).toEqual({ retry: true, attempt: 1, delayMs: 3000 });
-    expect(await h.onRefused(GOOD, 'ID_ConnectionError_ClientLogOnFailed')).toEqual({ retry: true, attempt: 2, delayMs: 6000 });
+    expect(await h.onRefused(GOOD, 'ID_ConnectionError_ClientLogOnFailed')).toEqual({ retry: true, attempt: 1, delayMs: 3000, kind: 'proven' });
+    expect(await h.onRefused(GOOD, 'ID_ConnectionError_ClientLogOnFailed')).toEqual({ retry: true, attempt: 2, delayMs: 6000, kind: 'proven' });
   });
 
   it('a refusal that lands while the acceptance is still being digested waits for it', async () => {
@@ -286,5 +298,138 @@ describe('BUG.gdle-transient-login-failed — telemetry', () => {
         count: e.count, server: 'seedsow', screen: 'connecting',
       });
     }
+  });
+});
+
+/**
+ * UX.gdle-first-login-retry — production 2026-10-26 (Seedsow): a player was
+ * refused four times with STR_LOGIN_FAILED and got in on the fifth, the same
+ * LoginRequest each time. Nothing was proven on that page, so every refusal
+ * was shown. Now a first-time login on a GDL / GDLE world retries quietly at
+ * 3 s and 6 s too; register-first GDLE worlds, the AC1999 server, ACE and
+ * Custom… / URL logins keep showing it at once.
+ *
+ * The worlds come through the real pipeline: the bridge's buildDirectory
+ * (its compat overlay: Reefcull's registration, AC1999's per-IP caps) → the
+ * /servers row → the launcher's worldFromEntry.
+ */
+describe('UX.gdle-first-login-retry', () => {
+  const SERVERS: ServerEntry[] = [
+    { id: '394c58d0-885d-466b-b17f-d7e0b96fe3e2', name: 'Seedsow', emu: 'GDLE', host: 'seedsow.example', port: 9000, source: 'list' },
+    { id: 'eea962c0-cf9f-481e-9736-0eb058acc1d8', name: 'Snowreap', emu: 'GDLE', host: 'snowreap.example', port: 9000, source: 'list' },
+    { id: 'gdl-world', name: 'Some GDL', emu: 'GDL', host: 'gdl.example', port: 9000, source: 'list' },
+    { id: 'a7502ac9-0cec-4caf-b81c-b3eb40a4689a', name: 'Reefcull', emu: 'GDLE', host: 'reefcull.example', port: 9000, source: 'list' },
+    { id: 'ace-world', name: 'Some ACE', emu: 'ACE', host: 'ace.example', port: 9000, source: 'list' },
+    { id: 'ac1999', name: 'AC1999', emu: 'AC1999', host: 'ac1999.example', port: 9000, source: 'overlay' },
+  ];
+  const WORLDS = new Map<string, World>(
+    buildDirectory(SERVERS, new Map(), new Map(), { now: 0 })
+      .map((row) => worldFromEntry(JSON.parse(JSON.stringify(row))))
+      .filter((w): w is World => w !== null)
+      .map((w) => [w.name, w]),
+  );
+  const world = (name: string): World => WORLDS.get(name)!;
+  const GDLE_LANE = LANES[0];
+  const LANE_1999 = LANES[1];
+
+  it('the directory gives the worlds what decides it: emu, Reefcull\'s registration, AC1999\'s caps', () => {
+    expect(world('Seedsow')).toMatchObject({ emu: 'GDLE', registration: null, registrationUrl: null });
+    expect(world('Reefcull').registrationUrl).toMatch(/reefcull/);
+    expect(world('AC1999').perIpLimits?.accounts).toBeGreaterThan(0);
+    expect(firstTimeLoginRetryAllowed(world('Seedsow'))).toBe(true);
+    expect(firstTimeLoginRetryAllowed(world('Snowreap'))).toBe(true);
+    expect(firstTimeLoginRetryAllowed(world('Some GDL'))).toBe(true);
+    expect(firstTimeLoginRetryAllowed(world('Reefcull'))).toBe(false);
+    expect(firstTimeLoginRetryAllowed(world('Some ACE'))).toBe(false);
+    expect(firstTimeLoginRetryAllowed(world('AC1999'))).toBe(false);
+    expect(firstTimeLoginRetryAllowed(localWorld())).toBe(false);
+    expect(firstTimeLoginRetryAllowed(null)).toBe(false);
+    // A GDLE world that caps accounts per address: the refusal can be the cap, so no retry.
+    expect(firstTimeLoginRetryAllowed({ ...world('Seedsow'), perIpLimits: { accounts: 2, sessions: 0 } })).toBe(false);
+  });
+
+  it('a GDLE first-time login refused every time retries at 3 s and 6 s, then shows today\'s error and hint', async () => {
+    const r = await drive(GDLE_LANE, new ProvenLoginRetry(), GOOD, [STR_LOGIN_FAILED], world('Seedsow'));
+    expect(r).toMatchObject({
+      delays: [3000, 6000], kinds: ['first_time', 'first_time'], shown: 'ID_ConnectionError_ClientLogOnFailed', accepted: false, sockets: 3,
+    });
+    // Exactly today's dialog text for that refusal on that world.
+    const notice = netErrorNotice('ID_ConnectionError_ClientLogOnFailed');
+    expect(r.text).toBe(loginFailureText(notice, world('Seedsow'), false));
+    expect(r.text).toContain(LOGON_FAILED_HINT);
+  });
+
+  it('a GDLE first-time login that gets in on a retry enters with no error (the 2026-10-26 Seedsow case)', async () => {
+    const h = new ProvenLoginRetry();
+    const once = await drive(GDLE_LANE, h, GOOD, [STR_LOGIN_FAILED, 'ok'], world('Seedsow'));
+    expect(once).toMatchObject({ delays: [3000], kinds: ['first_time'], shown: null, text: null, accepted: true, sockets: 2 });
+    FakeSocket.sockets = [];
+    const twice = await drive(GDLE_LANE, h, { ...GOOD, account: 'other' }, [STR_LOGIN_FAILED, STR_LOGIN_FAILED, 'ok'], world('Snowreap'));
+    expect(twice).toMatchObject({ delays: [3000, 6000], shown: null, accepted: true, sockets: 3 });
+    // Now proven: its next refusal retries as a proven login.
+    FakeSocket.sockets = [];
+    expect((await drive(GDLE_LANE, h, GOOD, [STR_LOGIN_FAILED, 'ok'], world('Seedsow'))).kinds).toEqual(['proven']);
+  });
+
+  it('each of the player\'s own attempts gets the retries again (the player tried five times)', async () => {
+    const h = new ProvenLoginRetry();
+    expect((await drive(GDLE_LANE, h, GOOD, [STR_LOGIN_FAILED], world('Seedsow'))).delays).toEqual([3000, 6000]);
+    FakeSocket.sockets = [];
+    expect(await drive(GDLE_LANE, h, GOOD, [STR_LOGIN_FAILED, 'ok'], world('Seedsow'))).toMatchObject({ delays: [3000], accepted: true });
+  });
+
+  it('server full and account online are still never retried on a GDLE world', async () => {
+    for (const err of [STR_LOGIN_SERVER_FULL, STR_LOGIN_ACCOUNT_ONLINE]) {
+      FakeSocket.sockets = [];
+      expect(await drive(GDLE_LANE, new ProvenLoginRetry(), GOOD, [err], world('Seedsow'))).toMatchObject({ delays: [], sockets: 1 });
+    }
+  });
+
+  it('register-first GDLE (Reefcull): a first-time refusal shows the registration hint at once', async () => {
+    const r = await drive(GDLE_LANE, new ProvenLoginRetry(), GOOD, [STR_LOGIN_FAILED], world('Reefcull'));
+    expect(r).toMatchObject({ delays: [], shown: 'ID_ConnectionError_ClientLogOnFailed', sockets: 1 });
+    expect(r.text).toContain('New account? Register on the Reefcull website first');
+    // A proven login there still retries, as before.
+    const h = new ProvenLoginRetry();
+    FakeSocket.sockets = [];
+    await drive(GDLE_LANE, h, GOOD, ['ok'], world('Reefcull'));
+    FakeSocket.sockets = [];
+    expect((await drive(GDLE_LANE, h, GOOD, [STR_LOGIN_FAILED, 'ok'], world('Reefcull'))).kinds).toEqual(['proven']);
+  });
+
+  it('AC1999: a first-time refusal shows at once with its per-address text (unchanged)', async () => {
+    const r = await drive(LANE_1999, new ProvenLoginRetry(), GOOD, [STR_LOGIN_FAILED], world('AC1999'));
+    expect(r).toMatchObject({ delays: [], shown: 'ID_ConnectionError_ClientLogOnFailed', sockets: 1 });
+    expect(r.text).toContain('per network address');
+  });
+
+  it('ACE, Custom… and URL logins: a first-time refusal shows at once (unchanged)', async () => {
+    for (const w of [world('Some ACE'), localWorld(), null]) {
+      FakeSocket.sockets = [];
+      expect(await drive(GDLE_LANE, new ProvenLoginRetry(), GOOD, [STR_LOGIN_FAILED], w)).toMatchObject({ delays: [], sockets: 1 });
+    }
+  });
+
+  it('telemetry: login_retry carries retry=first_time, and the bridge keeps it (and drops anything else)', () => {
+    const sent: PreworldEvent[] = [];
+    const r = new PreworldReporter({
+      endpoint: 'http://x/client-preworld', build: 'eb3bcb5e', era: () => 'classic-dereth-1-0', server: () => '394c58d0-885d-466b-b17f-d7e0b96fe3e2',
+      screen: () => 'connecting', chargenStep: () => null, now: () => 10_000, trace: 'feedc0de12345678',
+      send: (_u, raw) => { sent.push(JSON.parse(raw) as PreworldEvent); },
+    });
+    const ev = { serverNetError: { stringId: STR_LOGIN_FAILED, tableId: ST_SERVER_ERRORS } };
+    r.loginStarted();
+    r.loginRetry(ev, 'ID_ConnectionError_ClientLogOnFailed', 1, 'first_time');
+    r.loginRetry(ev, 'ID_ConnectionError_ClientLogOnFailed', 2, 'proven');
+    r.connectionError(ev, 'ID_ConnectionError_ClientLogOnFailed');
+    expect(sent.map((e) => [e.outcome, e.count, e.retry])).toEqual([
+      ['login_retry', 1, 'first_time'], ['login_retry', 2, 'proven'], ['login_refused', null, undefined],
+    ]);
+    expect([...LOGIN_RETRY_KINDS]).toEqual(['proven', 'first_time']);
+    expect(sanitizeClientPreworld(sent[0])).toMatchObject({ outcome: 'login_retry', retry: 'first_time', count: 1, code: STR_LOGIN_FAILED });
+    expect(sanitizeClientPreworld(sent[1])).toMatchObject({ retry: 'proven' });
+    expect(sanitizeClientPreworld(sent[2])).not.toHaveProperty('retry');
+    expect(sanitizeClientPreworld({ ...sent[0], retry: 'hunter2' })).not.toHaveProperty('retry');
+    expect(sanitizeClientPreworld({ ...sent[2], retry: 'first_time' })).not.toHaveProperty('retry');
   });
 });

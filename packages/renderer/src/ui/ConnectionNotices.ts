@@ -226,6 +226,11 @@ export const NET_ERROR_TOKENS: readonly string[] = Object.freeze(Object.keys(NET
 export const RETRY_OR_OTHER_WORLD_HINT = 'Try again in a minute, or pick another world.';
 /** webAC players can't install a client: a version refusal is fixed by reloading the page. */
 export const RELOAD_FOR_LATEST_HINT = 'Reload the page to get the latest webAC.';
+/**
+ * Under ID_CHAR_ERROR_LOGON_SERVER_FULL ("... Please try again later."): ACE also sends it
+ * for its per-IP session cap, which other webAC players can fill (one shared address).
+ */
+export const LOGON_SERVER_FULL_HINT = 'If it keeps happening, pick another world.';
 /** An account already in use elsewhere. */
 export const ACCOUNT_IN_USE_HINT = 'Close any other window logged in to this account, or wait a minute and try again.';
 
@@ -393,11 +398,13 @@ export const PICK_ANOTHER_CHARACTER_HINT = 'Pick another character.';
 const CHAR_ERROR_ROWS: ReadonlyMap<number, CharErrorRow> = new Map<number, CharErrorRow>([
   [CharacterError.Logon, { token: 'ID_CHAR_ERROR_LOGON', surface: 'disconnected', nextStep: ACCOUNT_IN_USE_HINT }],
   [CharacterError.AccountLogin, { token: 'ID_CHAR_ERROR_ACCOUNT_LOGON', surface: 'disconnected' }],
-  [CharacterError.ServerCrash1, { token: 'ID_CHAR_ERROR_SERVER_CRASH', surface: 'disconnected' }],
+  // ACE sends SERVER_CRASH for a login during a shutdown (NetworkManager.cs:107/112), a bad
+  // handshake and a session it closes (AuthenticationHandler.cs:108/135): retry or move on.
+  [CharacterError.ServerCrash1, { token: 'ID_CHAR_ERROR_SERVER_CRASH', surface: 'disconnected', nextStep: RETRY_OR_OTHER_WORLD_HINT }],
   [CharacterError.Logoff, { token: 'ID_CHAR_ERROR_LOGOFF', surface: 'dialog', nextStep: 'Try again in a minute.' }],
   [CharacterError.Delete, { token: 'ID_CHAR_ERROR_DELETE', surface: 'dialog', nextStep: 'Try again in a minute.' }],
   // CHAR_ERROR_ACCOUNT_IN_USE (0x8) shares the SERVER_CRASH case.
-  [CharacterError.ServerCrash2, { token: 'ID_CHAR_ERROR_SERVER_CRASH', surface: 'disconnected' }],
+  [CharacterError.ServerCrash2, { token: 'ID_CHAR_ERROR_SERVER_CRASH', surface: 'disconnected', nextStep: RETRY_OR_OTHER_WORLD_HINT }],
   [CharacterError.AccountInvalid, { token: 'ID_CHAR_ERROR_ACCOUNT_INVALID', surface: 'disconnected', nextStep: 'Check the account name and password, then try again.' }],
   [CharacterError.AccountDoesntExist, { token: 'ID_CHAR_ERROR_ACCOUNT_DOESNT_EXIST', surface: 'disconnected', nextStep: "Check the account name. If this server needs an account registered first, register on its website." }],
   [CharacterError.EnterGameGeneric, { token: 'ID_CHAR_ERROR_ENTER_GAME_GENERIC', surface: 'dialog', nextStep: PICK_ANOTHER_CHARACTER_HINT }],
@@ -410,7 +417,11 @@ const CHAR_ERROR_ROWS: ReadonlyMap<number, CharErrorRow> = new Map<number, CharE
   [CharacterError.EnterGameCorruptCharacter, { token: 'ID_CHAR_ERROR_ENTER_GAME_CORRUPT_CHARACTER', surface: 'dialog' }],
   [CharacterError.EnterGameStartServerDown, { token: 'ID_CHAR_ERROR_ENTER_GAME_START_SERVER_DOWN', surface: 'dialog' }],
   [CharacterError.EnterGameCouldntPlaceCharacter, { token: 'ID_CHAR_ERROR_ENTER_GAME_COULDNT_PLACE_CHARACTER', surface: 'dialog' }],
-  [CharacterError.LogonServerFull, { token: 'ID_CHAR_ERROR_LOGON_SERVER_FULL', surface: 'disconnected' }],
+  // ACE sends LOGON_SERVER_FULL for a full world, for its per-IP session cap
+  // (MaximumAllowedSessionsPerIPAddress, NetworkManager.cs:143: every webAC player shares
+  // the bridge's address), a closed world and a shutdown (CharacterHandler.cs). Retail's
+  // text already says to try later; the line adds the way out.
+  [CharacterError.LogonServerFull, { token: 'ID_CHAR_ERROR_LOGON_SERVER_FULL', surface: 'disconnected', nextStep: LOGON_SERVER_FULL_HINT }],
   [CharacterError.EnterGameCharacterLocked, { token: 'ID_CHAR_ERROR_ENTER_GAME_CHARACTER_LOCKED', surface: 'dialog' }],
   [CharacterError.SubscriptionExpired, { token: 'ID_CHAR_ERROR_SUBSCRIPTION_EXPIRED', surface: 'disconnected' }],
 ]);

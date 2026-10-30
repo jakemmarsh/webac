@@ -133,15 +133,17 @@ describe('compat overlay', () => {
 describe('worlds whose VPN check refuses the bridge (survey 2026-10-12, docs/operators.md)', () => {
   const CONQUEST = '2d7bfb40-7726-4951-b65f-b4948807e602';
   const ACHARD = '9D17CE44-7DB5-40C1-B7BB-A01C9DE21D00'; // Servers.xml spells it upper-case
+  // COMPAT.jawntide-vpn-block: "Connections: No VPNs or proxies"; every webAC login booted (2026-10-29).
+  const JAWNTIDE = '19c05a84-551c-428e-859e-9ea2fd06592e';
 
-  it('Conquest and AChard are refused with a reason; no other world is', () => {
-    for (const id of [CONQUEST, ACHARD]) {
+  it('Conquest, AChard and JawnTide are refused with a reason; no other world is', () => {
+    for (const id of [CONQUEST, ACHARD, JAWNTIDE, JAWNTIDE.toUpperCase()]) {
       expect(compatFor(id, 'ACE')).toEqual({
         compat: 'incompatible', note: 'Blocks webAC', reason: "Its VPN check refuses webAC players. We're working on a fix.",
       });
     }
     const blocked = Object.entries(SERVER_COMPAT.byId).filter(([, c]) => c === VPN_BLOCK).map(([id]) => id).sort();
-    expect(blocked).toEqual([CONQUEST, ACHARD.toLowerCase()].sort());
+    expect(blocked).toEqual([CONQUEST, ACHARD.toLowerCase(), JAWNTIDE].sort());
     // Only a refused world carries a reason.
     for (const c of [...Object.values(SERVER_COMPAT.byId), ...Object.values(SERVER_COMPAT.byEmu)]) {
       if (c.reason) expect(c.compat).toBe('incompatible');
@@ -153,9 +155,10 @@ describe('worlds whose VPN check refuses the bridge (survey 2026-10-12, docs/ope
       ...fixtureServers(),
       { id: ACHARD, name: 'AChard', emu: 'ACE', host: 'achard.example.org', port: 9000, source: 'list' },
       { id: CONQUEST, name: 'Conquest', emu: 'ACE', host: 'conquest.example.org', port: 9000, source: 'list' },
+      { id: JAWNTIDE, name: 'JawnTide', emu: 'ACE', host: 'jawntide.example.org', port: 9000, source: 'list' },
     ];
     const byName = Object.fromEntries(buildDirectory(servers, new Map(), new Map(), { now: NOW }).map(e => [e.name, e]));
-    for (const n of ['AChard', 'Conquest']) {
+    for (const n of ['AChard', 'Conquest', 'JawnTide']) {
       expect(byName[n]).toMatchObject({
         compat: 'incompatible', compatNote: 'Blocks webAC', compatReason: "Its VPN check refuses webAC players. We're working on a fix.", era: null,
       });

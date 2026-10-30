@@ -41,6 +41,13 @@ export type PreworldScreen = typeof PREWORLD_SCREENS[number];
 export const HANDOVER_REASONS = ['safe', 'hard_cut'] as const;
 export const HANDOVER_PATHS = ['adopt', 'relogin'] as const;
 
+/**
+ * UX.gdle-first-login-retry — a 'login_retry''s kind: 'proven' (these
+ * credentials got in earlier on the page) or 'first_time' (a first-time
+ * login on a GDLE world, renderer session/ProvenLoginRetry.ts).
+ */
+export const LOGIN_RETRY_KINDS = ['proven', 'first_time'] as const;
+
 export const CHARGEN_STEPS = ['heritage', 'profession', 'skills', 'appearance', 'town', 'summary'] as const;
 
 /** RELEASE.preworld-boot-stage — main()'s boot steps before the launcher (PreworldReporter BOOT_STAGES). */
@@ -138,6 +145,8 @@ export interface ClientPreworldEvent {
   handoverMs?: number;
   reason?: typeof HANDOVER_REASONS[number];
   path?: typeof HANDOVER_PATHS[number];
+  /** 'login_retry' only: why the page retried (LOGIN_RETRY_KINDS). */
+  retry?: typeof LOGIN_RETRY_KINDS[number];
 }
 
 /**
@@ -216,6 +225,7 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...eidField(b.eid),
     ...(outcome === 'dropped' ? netDiagField(b.net) : {}),
     ...(outcome === 'handover' ? handoverFields(b) : {}),
+    ...(outcome === 'login_retry' ? loginRetryField(b.retry) : {}),
     ...(outcome === 'chargen_ok' || outcome === 'chargen_refused' ? heritageField(b.heritage) : {}),
   };
 }
@@ -252,6 +262,12 @@ export function streamField(v: unknown): { stream?: BootStream[] } {
     if (out.length >= MAX_BOOT_STREAMS) break;
   }
   return out.length ? { stream: out } : {};
+}
+
+/** `{ retry }` when it is a known LOGIN_RETRY_KINDS value, else nothing. */
+export function loginRetryField(v: unknown): Pick<ClientPreworldEvent, 'retry'> {
+  const retry = pick(v, LOGIN_RETRY_KINDS);
+  return retry ? { retry } : {};
 }
 
 /** The 'handover' outcome's own fields, each only when valid. */
