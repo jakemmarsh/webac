@@ -46,8 +46,11 @@
  * check showed 11 fps behind a "no regression" SwiftShader ratchet):
  *   location   — player x/y/z + landblock, so runs are only ever compared at
  *                the same map spot (Eastham vs Holtburg landmine).
- *   census     — mesh counts by category / distance, InstancedMesh count:
- *                WHAT is being drawn, not just how many calls.
+ *   census     — mesh counts by category / world distance / visibility,
+ *                InstancedMesh count: WHAT the scene holds.
+ *   draws      — idle draw calls per frame by category and blend class
+ *                (renderBufferDirect counted over 60 frames): what each
+ *                bucket actually costs (tools/lib/scene-census.ts).
  *   renderJs   — JS-side `renderer.render()` time per frame (draw-call
  *                submission cost; not rasterization-bound like total frame
  *                time, so it moves with the real bottleneck even on
@@ -95,6 +98,7 @@ import {
   type PerfInfoSample, type PerfInfoSummary, type PerfLocation, type PerfRun, type PerfRenderJsStats,
 } from './perf-ratchet-lib.js';
 import { PROBE_CHARGEN_REOPEN_JS } from './lib/game-session.js';
+import { DRAW_CENSUS_SRC, SCENE_CENSUS_SRC, type DrawCensus, type SceneCensus } from './lib/scene-census.js';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dir, '..', 'verification', 'perf');
@@ -369,46 +373,27 @@ async function playerLocation(page: Page): Promise<PerfLocation | null> {
   return { x: r(cs.x), y: r(cs.z), z: r(cs.y), landblock: landblockOf(cs.x, cs.z) };
 }
 
-interface SceneCensus {
-  meshes: number;
-  instanced: number;
-  /** category (parent-name family: part / envcell_# / gfxobj_# / physcoll_# …) → counts */
-  categories: Record<string, { total: number; beyond300: number; beyond600: number }>;
-}
-
 /**
- * What the scene is made of: every Mesh bucketed by its named ancestor
- * (SetupModel parts are `part_N` under a named setup; EnvCells `envcell_#`;
- * collision proxies `physcoll_#`) and by distance from the camera. This is
- * the number that tells you WHY draw calls are high — 8.5k scenery parts
- * beyond 600m, 800 interior cells drawn outdoors — and whether a batching
- * change actually landed (InstancedMesh count).
+ * What the scene is made of (every Mesh bucketed by its named ancestor and
+ * by world-space distance from the camera) and what each bucket draws per
+ * frame. tools/lib/scene-census.ts has both halves and the distance fix.
  */
 async function sceneCensus(page: Page): Promise<SceneCensus | null> {
   return page.evaluate(`(() => {
     const sm = window.__ac && window.__ac.sceneManager;
     if (!sm || !sm.scene || !sm.camera) return null;
-    const cp = sm.camera.position; const v = cp.clone();
-    const categories = {}; let meshes = 0, instanced = 0;
-    sm.scene.traverse((o) => {
-      if (!o.isMesh) return;
-      meshes++; if (o.isInstancedMesh) instanced++;
-      let n = o; while (n && !n.name) n = n.parent;
-      const nm = ((n && n.name) || '?').replace(/[0-9a-fx]{6,}/g, '#').replace(/part_\\d+/, 'part');
-      // InstancedMesh world position is the origin (instance transforms live
-      // in the matrix attribute) — use its instance-aware bounding-sphere
-      // center for distance, or every instanced bucket miscounts as >600m.
-      if (o.isInstancedMesh && o.boundingSphere) v.copy(o.boundingSphere.center);
-      else o.getWorldPosition(v);
-      const d = v.distanceTo(cp);
-      const b = categories[nm] || (categories[nm] = { total: 0, beyond300: 0, beyond600: 0 });
-      b.total++; if (d > 300) b.beyond300++; if (d > 600) b.beyond600++;
-    });
-    return { meshes, instanced, categories };
+    return (${SCENE_CENSUS_SRC})(sm.scene, sm.camera);
   })()`) as Promise<SceneCensus | null>;
 }
 
-/** Wrap renderer.render() once so each call's JS-side duration is recorded. */
+async function drawCensus(page: Page, frames = 60): Promise<DrawCensus | null> {
+  return page.evaluate(`(() => {
+    const sm = window.__ac && window.__ac.sceneManager; const r = sm && sm.renderer;
+    if (!r || typeof r.renderBufferDirect !== 'function') return null;
+    return (${DRAW_CENSUS_SRC})(r, ${frames}, () => new Promise((res) => requestAnimationFrame(() => res())));
+  })()`) as Promise<DrawCensus | null>;
+}
+
 async function installRenderTimer(page: Page): Promise<boolean> {
   return page.evaluate(`(() => {
     const sm = window.__ac && window.__ac.sceneManager; const r = sm && sm.renderer;
@@ -663,6 +648,7 @@ async function main() {
   renderSamples.idle = idleS.infoSamples;
   renderJs.idle = await drainRenderTimer(page);
   const census = await sceneCensus(page);
+  const draws = await drawCensus(page);
   if (PROGRAM_KEYS) keys.idle = await programKeys(page);
 
   console.log(`[perf] phase: turning (${PHASE_SECS}s)…`);
@@ -736,6 +722,7 @@ async function main() {
     renderJs,
     renderSamples,
     census,
+    draws,
     estimatedRealGpu: estimated,
     programKeys: PROGRAM_KEYS ? keys : undefined,
     // Filled below when --ratchet ran: the run's own verdict, so
@@ -788,10 +775,15 @@ async function main() {
   if (census) {
     console.log(`\nscene census: ${census.meshes} meshes, ${census.instanced} instanced`);
     const rows = Object.entries(census.categories).sort((a, b) => b[1].total - a[1].total).slice(0, 8);
-    console.log('category        total  >300m  >600m');
+    console.log('category        total  visible  >300m  >600m');
     for (const [cat, c] of rows) {
-      console.log(`${cat.padEnd(14)} ${String(c.total).padStart(6)} ${String(c.beyond300).padStart(6)} ${String(c.beyond600).padStart(6)}`);
+      console.log(`${cat.padEnd(14)} ${String(c.total).padStart(6)} ${String(c.visible).padStart(8)} ${String(c.beyond300).padStart(6)} ${String(c.beyond600).padStart(6)}`);
     }
+  }
+  if (draws) {
+    console.log(`\nidle draws: ${draws.drawsPerFrame}/frame over ${draws.frames} frames; ${draws.distinctMaterials} materials, ${draws.distinctGeometries} geometries per frame`);
+    console.log(`  by blend: ${Object.entries(draws.byBlend).map(([k, n]) => `${k} ${n}`).join(', ')}`);
+    for (const [cat, n] of Object.entries(draws.byCategory).slice(0, 12)) console.log(`  ${cat.padEnd(22)} ${String(n).padStart(7)}`);
   }
   for (const w of warnings) console.log(`\n[perf] *** WARNING *** ${w}`);
   console.log(`\n[perf] wrote ${outFile}`);

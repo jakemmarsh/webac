@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { TERRAIN_RENDER_ORDER } from '../world/PortalPunch.js';
-import { freezeStaticTransform } from '../utils/freezeStatic.js';
 import {
   LandblockMesh, LandblockGeometry, BlockDirection, buildLandblockLod, retailBlockLod,
   type BlockLod,
@@ -10,6 +9,7 @@ import type { TMTerrainDesc, RoadAlphaMap, TerrainAlphaMap, TexMerge } from '@ac
 import type { TextureManager } from '../models/TextureManager.js';
 import { LruMap } from '../utils/LruMap.js';
 import { OverlayMergePool, type PooledOverlayBucket } from './OverlayMergePool.js';
+import { BaseTerrainPool } from './BaseTerrainPool.js';
 import { applyRetailLighting } from '../models/RetailLighting.js';
 import { textureSamplerPrefs, EOL_REGION_BASE_TEX_SIZE } from '../models/TextureSamplerPrefs.js';
 import { disposeOwnedMaterials } from '../models/MaterialOwnership.js';
@@ -88,6 +88,7 @@ export class TerrainRenderer {
   /** PERF.1 — cross-landblock road/blend overlay pool: one Mesh per distinct
    *  (layer, base texture, alpha map) key REGION-WIDE instead of per block. */
   private overlayPool: OverlayMergePool;
+  private basePool: BaseTerrainPool;
 
   /** Map from terrain type index → Three.js material (when using Region data) */
   private terrainMaterials: Map<number, THREE.Material> = new Map();
@@ -172,6 +173,7 @@ export class TerrainRenderer {
     this.scene = scene;
     this.terrainManager = terrainManager;
     this.overlayPool = new OverlayMergePool(scene);
+    this.basePool = new BaseTerrainPool(scene);
     // Default material: green terrain with flat shading
     this.material = material ?? applyRetailLighting(new THREE.MeshLambertMaterial({
       color: 0x4a7c2e,
@@ -206,6 +208,7 @@ export class TerrainRenderer {
     this.landscapeVisible = visible;
     for (const mesh of this.meshes.values()) mesh.visible = visible;
     this.overlayPool.setVisible(visible);
+    this.basePool.setVisible(visible);
     for (const objs of this.attachments.values()) {
       for (const o of objs) o.visible = visible;
     }
@@ -926,7 +929,10 @@ export class TerrainRenderer {
       }
     }
 
-    if (loaded.length > 0 || unloaded.length > 0 || relod > 0) this.overlayPool.flush();
+    if (loaded.length > 0 || unloaded.length > 0 || relod > 0) {
+      this.basePool.flush();
+      this.overlayPool.flush();
+    }
 
     return { added: loaded.length, removed: unloaded.length };
   }
@@ -967,10 +973,10 @@ export class TerrainRenderer {
   private removeBlockVisuals(id: number): void {
     const mesh = this.meshes.get(id);
     if (mesh) {
-      this.scene.remove(mesh);
       mesh.geometry.dispose();
       this.meshes.delete(id);
     }
+    this.basePool.removeBlock(id);
     this.blockLods.delete(id);
     // Retire the block's road/blend overlay quads from the pool
     this.overlayPool.removeBlock(id);
@@ -1013,8 +1019,10 @@ export class TerrainRenderer {
     // Position in world space
     mesh.position.set(blockX * 192, 0, blockY * 192);
     mesh.visible = this.landscapeVisible;
-    this.scene.add(mesh);
-    freezeStaticTransform(mesh);
+    // PERF.terrain-base-pool — the block's triangles draw from the
+    // cross-landblock pool (one mesh per material); this mesh stays the
+    // block's record, outside the scene.
+    this.basePool.addBlock(id, mesh);
     this.meshes.set(id, mesh);
     this.blockLods.set(id, lod);
 
@@ -1070,6 +1078,11 @@ export class TerrainRenderer {
     return this.meshes.get(fileId);
   }
 
+  /** The cross-landblock base terrain pool (tests/verification). */
+  get baseTerrainPool(): BaseTerrainPool {
+    return this.basePool;
+  }
+
   /** The cross-landblock road/blend overlay pool (tests/verification). */
   get overlayMergePool(): OverlayMergePool {
     return this.overlayPool;
@@ -1079,11 +1092,9 @@ export class TerrainRenderer {
    * Remove all terrain meshes from the scene.
    */
   clear(): void {
-    for (const mesh of this.meshes.values()) {
-      this.scene.remove(mesh);
-      mesh.geometry.dispose();
-    }
+    for (const mesh of this.meshes.values()) mesh.geometry.dispose();
     this.meshes.clear();
+    this.basePool.clear();
     this.blockLods.clear();
     this.viewerBlock = null;
     this.overlayPool.clear();

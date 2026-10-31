@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { KeybindRegistry } from '@ac/renderer/input/KeybindRegistry.js';
 import { ACT, DEFAULT_KEYBINDS } from '@ac/renderer/input/KeybindDefaults.js';
+import { dispatchGameAction, type ActionHost } from '@ac/renderer/input/ActionDispatch.js';
 
 const REPO = resolve(__dirname, '..');
 const MAIN = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf8');
@@ -54,9 +55,13 @@ describe('Home is bound to "Select Last Attacker" (FAITHFUL.382 / VISUAL.127)', 
   it('SelectLastAttacker is the UI-class command that drives selectTarget', () => {
     const r = new KeybindRegistry(DEFAULT_KEYBINDS);
     expect(r.action(ACT.SelectLastAttacker)?.name).toBe('Select Last Attacker');
-    // The router still reads lastAttackerGuid + selects the visible object.
-    expect(MAIN).toMatch(/case ACT\.SelectLastAttacker:/);
-    expect(MAIN).toMatch(/serverObjectManager\.getObject\(lastAttackerGuid\)/);
-    expect(MAIN).toMatch(/selectTarget\(obj\)/);
+    // The shipped dispatcher routes it to the host's selectLastAttacker (main.ts reads
+    // lastAttackerGuid there and selects the visible object).
+    const calls: string[] = [];
+    const host = new Proxy({} as ActionHost, {
+      get: (_t, k) => (k === 'ui' || k === 'camera' ? {} : k === 'emoteMotion' ? () => undefined : () => { calls.push(String(k)); }),
+    });
+    expect(dispatchGameAction(ACT.SelectLastAttacker, host)).toBe(true);
+    expect(calls).toEqual(['selectLastAttacker']);
   });
 });

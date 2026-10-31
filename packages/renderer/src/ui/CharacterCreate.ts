@@ -30,7 +30,7 @@ import {
 import type { ChargenSkillCosts, ChargenSkillState, ChargenTemplate } from './ChargenTemplates.js';
 import {
   randomizeHeritageGroup, randomizeStartArea, randomizeTemplate, randomizeSkills, randomizeAppearance,
-  randomizeHeadgear, randomizeShirt, randomizeTrousers, randomizeFootwear, randomizeClothing, resetAppearance, rollDice,
+  randomizeHeadgear, randomizeShirt, randomizeTrousers, randomizeFootwear, randomizeClothing, resetAppearance, rollDice, clampClothingColors,
   constrainAppearance,
 } from './ChargenRandomize.js';
 import type { AppearanceRollLists, ChargenRandomSource, ClothingColorCounts } from './ChargenRandomize.js';
@@ -667,6 +667,15 @@ export class CharacterCreateWizard {
   /** CharGenState::RandomizeAppearance(0) @ 005c4f10 — the face only. */
   randomizeAppearance(lists: AppearanceRollLists, src: ChargenRandomSource): void {
     randomizeAppearance(src, this.appearance, lists);
+  }
+
+  /**
+   * Set<Slot>Style's colour hold, for the clothing items whose colour counts are known now
+   * (clampClothingColors): the page runs it as streamed ClothingTables land. True when a colour moved.
+   */
+  clampClothingColors(deps: ChargenRollDeps): boolean {
+    if (this.heritage === Heritage.Invalid || this.gender === Gender.Invalid) return false;
+    return clampClothingColors(this.appearance, deps.clothingColorCounts?.(this.heritage, this.gender, this.appearance) ?? null);
   }
 
   /** CharGenState::RandomizeClothing(excludeHeadgear) @ 005c6770 — the clothes only. */

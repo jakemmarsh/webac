@@ -533,6 +533,41 @@ describe('the Landscape Maps window', () => {
   });
 });
 
+describe('/ub dungeonmaps typed in chat (the VirindiTank window\'s command path)', () => {
+  /** The chat path: main.ts sends /vt and /ub lines to GameUI.automationCommand → VTankWindow.command → metaCommand → UbRuntime. */
+  async function chatPath(load: () => Promise<unknown>) {
+    const { maps, store, f } = setup();
+    live = maps;
+    const { VTankWindow } = await import('../packages/renderer/src/ui/automation/VTankWindow.ts');
+    const host = new Proxy({ toggleMap: (w: 'dungeon' | 'landscape') => maps.toggle(w) }, { get: (t, k) => (k in t ? (t as Record<string, unknown>)[k as string] : () => null) }) as unknown as UbHost;
+    const ub = new UbRuntime(host, store, new QuestTracker({ send: () => true, now: () => 0 }));
+    let loads = 0;
+    const source = {
+      load: () => { loads++; return load(); },
+      status: () => ({ running: false, paused: false, profile: null, state: null, acting: null, last: [] }),
+      character: () => 'Tester', coords: () => null, now: () => 0, history: () => [], report: () => {}, setting: () => undefined,
+      tools: { ub: (line: string, lootRules: (n: string) => unknown) => ub.command(line, lootRules as never) },
+    };
+    const win = new VTankWindow({ download: () => {} } as never, source as never, { open: () => {}, close: () => {} });
+    return { win, f, loads: () => loads };
+  }
+
+  it('opens the map while the routines are still loading (a load that never answers)', async () => {
+    const { win, f, loads } = await chatPath(() => new Promise(() => {}));
+    expect(await win.command('/ub dungeonmaps')).toEqual(['DungeonMaps window opened']);
+    expect(f.opened.has('ubDungeonMaps')).toBe(true);
+    expect(loads()).toBe(0);
+    expect(await win.command('/ub dungeonmaps')).toEqual(['DungeonMaps window closed']);
+  });
+
+  it('opens the map when the routines failed to load; /vt still says they did not', async () => {
+    const { win, f } = await chatPath(async () => ({ ok: false, message: 'no routines token: the bridge did not answer' }));
+    expect(await win.command('/ub landscapemaps')).toEqual(['LandscapeMaps window opened']);
+    expect(f.opened.has('ubLandscapeMaps')).toBe(true);
+    expect(await win.command('/vt opt get AttackDistance')).toEqual(['no routines token: the bridge did not answer']);
+  });
+});
+
 describe('the automation window\'s Options tab', () => {
   it('carries no UtilityBelt buttons: UB\'s maps open from its own window and VVS\'s bar', async () => {
     const { VTankWindow } = await import('../packages/renderer/src/ui/automation/VTankWindow.ts');

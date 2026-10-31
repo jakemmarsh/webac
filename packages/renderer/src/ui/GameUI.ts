@@ -314,7 +314,10 @@ import {
   RANDOMIZE_WARNING_STRING_ID, RANDOMIZE_WARNING_FALLBACK,
 } from './ChargenRandomize.js';
 import type { ChargenRandomSource } from './ChargenRandomize.js';
-import type { ChargenRollDeps } from './CharacterCreate.js';
+import type { ChargenRollDeps, AppearanceState } from './CharacterCreate.js';
+import type { ClothingColorCounts } from './ChargenRandomize.js';
+import type { CharacterModelBuilder } from '../models/CharacterModelBuilder.js';
+import { restoreWizardVerdict, snapshotWizard, type ChargenWizardSnapshot } from './ChargenDraft.js';
 import { currentObjectAmbientScale, setCellLighting } from '../models/RetailLighting.js';
 import { stripClonedObjectLights } from '../effects/ObjectLights.js';
 import { stripHeldCopies } from '../models/WieldedItemVisual.js';
@@ -1517,18 +1520,43 @@ export class GameUI {
       },
       templatesFor: (h) => this.charGen?.heritageGroups.get(h)?.templates ?? [],
       costsFor: (h) => chargenSkillCosts(this.skillTable?.skills, this.charGen?.heritageGroups.get(h)?.skills),
-      listsFor: (h, g) => appearanceRollLists(this.getSexCG(h, g)),
+      listsFor: (h, g) => {
+        const lists = appearanceRollLists(this.getSexCG(h, g));
+        if (!this.uiHost?.characterModelBuilder) return lists;
+        // The roll draws a colour within the chosen item's own colours (StoreColorInformation), when known.
+        return { ...lists, itemColorCount: (slot, a) => this.chargenClothingColorCounts(h, g, a)?.[slot] ?? null };
+      },
       // The EoL portal.dat lists five starter areas (Holtburg, Shoushi, Yaraq, Sanamar, OlthoiLair).
       starterAreaCount: this.charGen?.starterAreas.length ?? 5,
       heritageListed: (h) => heritageListed(h, getString, this.chargenHeritageDefined),
-      clothingColorCounts: (h, g, a) => {
-        const colors = this.uiHost?.characterModelBuilder?.getChargenClothingColors(h, g, a as unknown as import('@ac/shared').AppearanceInfo);
-        return colors ? {
-          headgear: colors.headgear.templateIds.length, shirt: colors.shirt.templateIds.length,
-          pants: colors.pants.templateIds.length, footwear: colors.footwear.templateIds.length,
-        } : null;
-      },
+      // Each item's colour count, null while its ClothingTable streams (clampClothingColors re-holds when it lands).
+      clothingColorCounts: (h, g, a) => this.chargenClothingColorCounts(h, g, a),
     };
+  }
+
+  /**
+   * Each clothing slot's item colour count (StoreColorInformation) for `a`'s styles: null for a
+   * slot whose ClothingTable is not resident yet (CharacterModelBuilder.clothingColorCount), and
+   * the whole answer null without a model builder. A builder without clothingColorCount (test
+   * doubles) answers through its colour choices, as before.
+   */
+  private chargenClothingColorCounts(h: number, g: number, a: AppearanceState): ClothingColorCounts | null {
+    const builder = this.uiHost?.characterModelBuilder as
+      (CharacterModelBuilder & { clothingColorCount?: CharacterModelBuilder['clothingColorCount'] }) | undefined;
+    const sex = this.getSexCG(h, g);
+    if (!builder || !sex) return null;
+    if (typeof builder.clothingColorCount === 'function') {
+      const count = (list: unknown, style: number) => builder.clothingColorCount(sex as never, list as never, style);
+      return {
+        headgear: count(sex.headgearList, a.headgearStyle), shirt: count(sex.shirtList, a.shirtStyle),
+        pants: count(sex.pantsList, a.pantsStyle), footwear: count(sex.footwearList, a.footwearStyle),
+      };
+    }
+    const colors = builder.getChargenClothingColors?.(h, g, a as unknown as import('@ac/shared').AppearanceInfo);
+    return colors ? {
+      headgear: colors.headgear.templateIds.length, shirt: colors.shirt.templateIds.length,
+      pants: colors.pants.templateIds.length, footwear: colors.footwear.templateIds.length,
+    } : null;
   }
 
   private selectScreen: CharacterSelectScreen;
@@ -5914,7 +5942,17 @@ export class GameUI {
     };
   }
 
-  showCharacterCreate(): void {
+  /**
+   * Open chargen: a fresh gmCharGenMainUI (RandomizeCharacter's roll), or,
+   * with `restore` (UX.chargen-resume: the draft a dropped connection left),
+   * the player's own choices back on the page they were on. A draft that no
+   * longer validates against the CharGen data loaded (ChargenDraft.ts
+   * restoreWizard) is dropped and chargen starts clean. Every call without
+   * `restore` (the Create Character button) is a clean start.
+   */
+  showCharacterCreate(restore: ChargenWizardSnapshot | null = null): void {
+    // A later call replaces what an earlier one waiting for the art asked for (a fresh start beats a draft).
+    this.chargenPendingRestore = restore;
     // RELEASE.streaming-charselect-weight — chargen draws the heritage /
     // clothing art of the world packs: with streamed DATs it opens once they
     // are resident (normally long before: they load behind the launcher).
@@ -5933,7 +5971,9 @@ export class GameUI {
           // select: a world entry, a disconnect or a new connect cycle in the
           // meantime must not be replaced by chargen when the art lands.
           const screen = this.uiManager.currentScreen;
-          if (screen !== 'game' && screen !== 'disconnected' && !this.connectingMode) this.showCharacterCreate();
+          const pending = this.chargenPendingRestore;
+          this.chargenPendingRestore = null;
+          if (screen !== 'game' && screen !== 'disconnected' && !this.connectingMode) this.showCharacterCreate(pending);
         };
         this.worldArtPending.then(open, open);
       }
@@ -5943,17 +5983,8 @@ export class GameUI {
     this.uiManager.setScreen('character-create');
     // A new gmCharGenMainUI / CharGenState: no CharacterCreate in flight.
     this.endChargenSession();
-    // Use CharGen data for credits if available
-    if (this.charGen) {
-      const firstHeritage = this.charGen.heritageGroups.get(Heritage.Aluvian);
-      if (firstHeritage) {
-        this.wizard = new CharacterCreateWizard(firstHeritage.attributeCredits, firstHeritage.skillCredits);
-      } else {
-        this.wizard = new CharacterCreateWizard();
-      }
-    } else {
-      this.wizard = new CharacterCreateWizard();
-    }
+    this.chargenPendingRestore = null;
+    this.wizard = this.newChargenWizard();
     // CORE.17.k.b.b.a.c — gmCGSummaryPage::m_bNameEntered starts false with
     // the page: the name field shows the ID_CharGen_NamePrompt until typed in.
     this.chargenNameEntered = false;
@@ -5962,10 +5993,20 @@ export class GameUI {
     // CORE.17.k.b.b.a.e — gmCharGenMainUI builds fresh pages: the appearance
     // view machine is InitializePage'd anew on its first render.
     this.resetChargenAppearanceView();
-    // FAITHFUL.176 + .178 — apply DAT-driven name-validation rules if loaded.
-    if (this.nameFilterRules || this.tabooCheck) {
-      this.wizard.setNameValidationRules(this.nameFilterRules, this.tabooCheck);
+    // UX.chargen-resume — the draft's choices, when they validate here.
+    const refusal = restore ? restoreWizardVerdict(this.wizard, restore, this.chargenRollDeps()) : null;
+    if (restore && refusal !== null) console.warn(`[GameUI] chargen draft refused: ${refusal}`);
+    if (restore && refusal === null) {
+      this.chargenNameEntered = restore.nameEntered;
+      // The Face page's m_LastHeritageGroup as the player left it: opening it on a Gearknight must not
+      // re-roll the face and clothes the draft restored (a fresh page starts at 0, which would).
+      this.chargenLastAppearanceHeritage = restore.appearanceLastHeritage ?? restore.heritage;
+      this.lastChargenRestore = 'restored';
+      this.renderCharacterCreate();
+      return;
     }
+    this.lastChargenRestore = restore ? 'invalid' : 'fresh';
+    if (restore) this.wizard = this.newChargenWizard();
     // VISUAL.chargen-default-profession — the gmCharGenMainUI ctor @ 004e7eb0
     // runs CharGenState::RandomizeCharacter(AccountHasThroneOfDestiny) before
     // its pages' InitializePage: every fresh chargen opens on a rolled
@@ -5974,6 +6015,50 @@ export class GameUI {
     this.wizard.randomizeCharacter(this.chargenRollDeps(), this.chargenRandomSource);
     this.renderCharacterCreate();
   }
+
+  /** UX.chargen-resume — what a draft asked showCharacterCreate for, while it waits on the world art. */
+  private chargenPendingRestore: ChargenWizardSnapshot | null = null;
+  /** How the last showCharacterCreate opened: a fresh roll, the draft restored, or a draft that failed validation (tests / probes). */
+  lastChargenRestore: 'fresh' | 'restored' | 'invalid' = 'fresh';
+
+  /** A new CharGenState: the CharGen's credits when loaded, and the DAT name rules. */
+  private newChargenWizard(): CharacterCreateWizard {
+    const firstHeritage = this.charGen?.heritageGroups.get(Heritage.Aluvian);
+    const w = firstHeritage
+      ? new CharacterCreateWizard(firstHeritage.attributeCredits, firstHeritage.skillCredits)
+      : new CharacterCreateWizard();
+    // FAITHFUL.176 + .178 — apply DAT-driven name-validation rules if loaded.
+    if (this.nameFilterRules || this.tabooCheck) w.setNameValidationRules(this.nameFilterRules, this.tabooCheck);
+    return w;
+  }
+
+  /**
+   * UX.chargen-resume — the chargen choices to keep across a dropped
+   * connection, or null when chargen is not the screen. `pending`: FINISH
+   * sent a CharacterCreate that has no reply yet, or the reply was OK and the
+   * new character's login is under way (`created`).
+   */
+  captureChargenDraft(): { wizard: ChargenWizardSnapshot; pending: boolean; created: boolean } | null {
+    if (this.uiManager.currentScreen !== 'character-create') return null;
+    // The clothing colours held to the items' counts known now, as the page shows them.
+    this.wizard.clampClothingColors(this.chargenRollDeps());
+    return {
+      wizard: { ...snapshotWizard(this.wizard, this.chargenNameEntered), appearanceLastHeritage: this.chargenLastAppearanceHeritage },
+      pending: this.chargenVerificationPending || this.chargenAwaitingLogin,
+      created: this.chargenAwaitingLogin,
+    };
+  }
+
+  /** UX.chargen-resume — whether a draft validates against the CharGen data loaded now (a scratch wizard; nothing shown). */
+  chargenDraftApplies(draft: ChargenWizardSnapshot): boolean {
+    return this.chargenDraftRefusal(draft) === null;
+  }
+
+  /** Why a draft does not validate here (the failed check, its field and value), or null when it does. */
+  chargenDraftRefusal(draft: ChargenWizardSnapshot): string | null {
+    return restoreWizardVerdict(this.newChargenWizard(), draft, this.chargenRollDeps());
+  }
+
 
   /**
    * Capture tooling: seed the roll the next showCharacterCreate opens with
@@ -7261,6 +7346,10 @@ export class GameUI {
   private renderCharacterCreate(): void {
     const missEpoch = datMissEpoch();
     try {
+      // Set<Slot>Style's colour hold for the clothing items whose ClothingTables are resident now: a
+      // streamed page repaints as they land, so a colour rolled before (past the item's own count) is
+      // held then, before it is drawn, sent or kept in a resume draft (UX.chargen-resume).
+      this.wizard.clampClothingColors(this.chargenRollDeps());
       this.renderCharacterCreatePage();
     } finally {
       if (!noDatMissSince(missEpoch)) this.chargenMissedDats = true;
@@ -18281,6 +18370,37 @@ export class GameUI {
    * SetSingleCharacterOption GameAction separately. Returns true if the
    * value actually changed.
    */
+  /**
+   * BUG.keybind-use-closest-corpse (sweep) — the Keyboard Config's Character Settings commands
+   * (CPlayerSystem::OnAction @ 00561890 cases 0x17–0x4a): PlayerModule::Set<Option>(!<Option>),
+   * silently. The option flips as a click on its Options row flips it: persisted, the
+   * CharacterOption sent (onCharacterOptionToggle, which also lands its client effect), the row's
+   * live hook run, and every checkbox showing it repainted. Returns false when `code` maps to no
+   * option of ours (nothing changes).
+   */
+  togglePlayerOption(code: number): boolean {
+    const key = Object.entries(GameUI.OPTIONS_TO_CHARACTER_OPTION).find(([, c]) => c === code)?.[0];
+    if (!key) return false;
+    const on = !this.optionsSettings[key];
+    this.optionsSettings[key] = on;
+    this.saveOptionsSettings();
+    this.callbacks.onCharacterOptionToggle?.(code, on);
+    this.characterSettingApplyHook(key)?.(on);
+    for (const paint of this.optionGemPainters.get(key) ?? []) paint();
+    if (this.optionsPanelVisible) this.renderOptionsPanel();
+    if (this.socialPanelVisible) this.renderSocialPanel();
+    return true;
+  }
+
+  /** The checkbox gems showing each option (combat bar, social panes): repainted when a key flips it. */
+  private readonly optionGemPainters = new Map<string, Set<() => void>>();
+  private registerOptionGem(key: string, el: HTMLElement, paint: () => void): void {
+    let set = this.optionGemPainters.get(key);
+    if (!set) { set = new Set(); this.optionGemPainters.set(key, set); }
+    const guarded = (): void => { if (el.isConnected) paint(); else set!.delete(guarded); };
+    set.add(guarded);
+  }
+
   setCharacterOptionLocal(optionKey: string, value: boolean): boolean {
     if (!(optionKey in this.optionsSettings)) return false;
     if (!!this.optionsSettings[optionKey] === value) return false;
@@ -26535,10 +26655,20 @@ export class GameUI {
    *  CM_UI::SendNotice_StartTell → gmMainChatUI::RecvNotice_StartTell @
    *  004cce40): open the chat entry, prefill the tell prefix, cursor to
    *  the end. Our /tell grammar is `/tell <player>, <message>`. */
-  private startTell(name: string): void {
+  startTell(name: string): void {
+    this.beginChatWith(`/tell ${name}, `);
+  }
+
+  /**
+   * ChatInterface's prefilled entries (HandleReplyKey @ 004f5350, HandleCommandOrAliasKey
+   * @ 004f2ff0, RecvNotice_StartTell): activate the chat entry, set its text, deselect, cursor to
+   * the end. The texts are table 0x2300000c's: ID_CmdPrefix "/", ID_AssistedTell
+   * "{prefix}tell {target}, ".
+   */
+  beginChatWith(text: string): void {
     const chatInput = document.getElementById('chat-input') as HTMLInputElement | null;
     if (!chatInput) return;
-    chatInput.value = `/tell ${name}, `;
+    chatInput.value = text;
     chatInput.focus();
     chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
   }
@@ -27475,6 +27605,7 @@ export class GameUI {
       if (this.optionsPanelVisible) this.renderOptionsPanel();
     });
     paintGem();
+    this.registerOptionGem(key, chk, paintGem);
   }
 
   /**
@@ -27853,12 +27984,23 @@ export class GameUI {
    * the panel shows (or switches) to it.
    */
   toggleGameplayOptionsPage(): void {
-    if (this.optionsPanelVisible && this.optionsTab === 'gameplay') {
+    this.toggleOptionsPage('gameplay');
+  }
+
+  /**
+   * BUG.keybind-use-closest-corpse (sweep) — UIElementManager::DoVisibilityToggleAction for an
+   * Options page's InputAction (the page roots' p87: Gameplay 0x2100002a:0x10000202 =
+   * 0x1000001b, Character Settings 0x21000028:0x100001f9 = 0x1000001c, Configuration
+   * 0x21000029:0x100001ff = 0x1000001d): showing on that page hides the panel; otherwise the
+   * panel shows (or switches) to it.
+   */
+  toggleOptionsPage(tab: 'gameplay' | 'character' | 'chat' | 'config'): void {
+    if (this.optionsPanelVisible && this.optionsTab === tab) {
       this.setPanelsWindowPanel(OPTIONS_PANEL, false);
       return;
     }
-    this.optionsTab = 'gameplay';
-    this.optionsSettings.optionsTab = 'gameplay';
+    this.optionsTab = tab;
+    this.optionsSettings.optionsTab = tab;
     this.saveOptionsSettings();
     if (this.optionsPanelVisible) this.renderOptionsPanel();
     else this.setPanelsWindowPanel(OPTIONS_PANEL, true);
@@ -29963,6 +30105,7 @@ export class GameUI {
       if (this.optionsPanelVisible) this.renderOptionsPanel();
     });
     paintGem();
+    this.registerOptionGem(key, chk, paintGem);
   }
 
   /** Get the current combat power level (0-1). */
@@ -32492,6 +32635,21 @@ export class GameUI {
     this.setPanelsWindowPanel(CONTRACTS_PANEL, !this.contractVisible);
   }
 
+  /**
+   * BUG.keybind-use-closest-corpse (sweep) — the Show/Hide commands of the quest panel's pages
+   * (their roots' p87: Contracts 0x21000069:0x100005cd = 0x1000012e, Quest Journal
+   * 0x21000066:0x1000055b = 0x10000128, Journal Page List 0x21000067:0x1000055c = 0x10000129;
+   * UIElementManager::DoVisibilityToggleAction): a hidden panel opens on that page, an open one
+   * on another page switches to it, and one already on it hides.
+   */
+  toggleContractPage(tab: 'contracts' | 'journal' | 'page_list'): void {
+    if (!this.eraSupports('contracts')) return;
+    if (this.contractVisible && this.contractTab === tab) { this.toggleContractPanel(); return; }
+    this.contractTab = tab;
+    if (this.contractVisible) this.renderContractPanel();
+    else this.toggleContractPanel();
+  }
+
   hideContractPanel(): void {
     this.setPanelsWindowPanel(CONTRACTS_PANEL, false);
   }
@@ -33361,6 +33519,20 @@ export class GameUI {
     handle.setVisible(0x100001f6, !houseOpen);
     handle.setVisible(0x100001f7, houseOpen);
     if (houseOpen) this.renderHousePage(handle);
+  }
+
+  /**
+   * BUG.keybind-use-closest-corpse (sweep) — Show/Hide Map Page (0x21000026:0x100001e8's p87 =
+   * 0x10000017) / Show/Hide House Page (0x21000025:0x100001e5's p87 = 0x10000018), through
+   * UIElementManager::DoVisibilityToggleAction: the World panel opens on that page, switches
+   * to it, or hides when it already shows it. A world without housing has no House page.
+   */
+  toggleWorldPage(tab: 'map' | 'house'): void {
+    if (hiddenBy(FEATURE_WORLD_TABS, this.eraUnsupported).has(tab)) return;
+    if (this.mapPanelVisible && this.worldPanelTab === tab) { this.toggleMapPanel(); return; }
+    this.worldPanelTab = tab;
+    if (this.mapPanelVisible) this.openWorldPanelTab(tab);
+    else this.toggleMapPanel();
   }
 
   getWorldPanelTab(): 'map' | 'house' {

@@ -6,6 +6,7 @@ import { ProgramRetention, type RetainableProgram } from './ProgramRetention.js'
 import { renderPixelRatio, renderAdaptConfig, contextAntialias, MIN_RENDER_PIXEL_RATIO } from './RenderScale.js';
 import { DynamicResolution } from './DynamicResolution.js';
 import { renderIndoorView, type IndoorViewContext } from './IndoorView.js';
+import { installHiddenSubtreeMatrixSkip } from './HiddenSubtreeMatrixSkip.js';
 
 /** Retail `Render::znear` (globals.tsv: 0.1; SetFOVRad resets it to 0.1). */
 export const RETAIL_ZNEAR = 0.1;
@@ -124,6 +125,9 @@ export class SceneManager {
     const far = config?.far ?? RETAIL_ZFAR;
 
     this.scene = new THREE.Scene();
+    // PERF.hidden-subtree-matrix-skip — the per-frame matrix walk stops at
+    // hidden top-level objects (HiddenSubtreeMatrixSkip.ts).
+    installHiddenSubtreeMatrixSkip(this.scene);
     this.gameFovDeg = fov;
     this.camera = new THREE.PerspectiveCamera(fov, 1, near, far);
     // CORE.18 — the world is built with AC (x,y,z) → three (x,z,y), a

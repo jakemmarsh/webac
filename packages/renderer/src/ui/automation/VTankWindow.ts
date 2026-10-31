@@ -1725,23 +1725,36 @@ export class VTankWindow {
    * chat or run by a meta's Chat Command: the profile, option and action
    * commands a player uses. Each answer is a line for chat.
    */
+  /** UtilityBelt's networking, the debug / inventory commands (metaCommands.ts) and UB's /ub lines; null when none takes it. */
+  private async toolCommand(line: string): Promise<string[] | null> {
+    // UtilityBelt networking between this browser's tabs (ubNet.ts): /ub bc, bct, netclients, its opt keys.
+    const net = this.kit.net?.();
+    const netLines = net ? ubNetCommand(line, net) : null;
+    if (netLines) return netLines;
+    return this.source.tools ? metaCommand(line, this.source.tools, {
+      download: (f, t) => this.kit.download(f, t),
+      // A loot profile by name (/ub count profile, the equipment commands): from the routines when they are loaded.
+      lootRules: (n) => { const p = this.profile(); if (!p) return null; return n ? p.lootSets?.[Object.keys(p.lootSets ?? {}).find((k) => k.toLowerCase() === n.toLowerCase()) ?? ''] ?? null : activeLoot(p).rules; },
+    }) : null;
+  }
+
+  /** A /ub line: answered whether or not the routines have loaded (a loot-profile argument needs them; the rest don't). */
+  private async ubCommand(line: string): Promise<string[]> {
+    return (await this.toolCommand(line)) ?? [`unknown command ${line.trim()} (/ub autostack, autocram, count, clearbugged)`];
+  }
+
   async command(line: string): Promise<string[]> {
+    // UtilityBelt's /ub lines need none of VTank's routines: they run without waiting on the routine store,
+    // whose load can take seconds or fail (no token, bridge unreachable). Before, a failed load answered
+    // every /ub line (/ub dungeonmaps too) with "Your routines have not loaded." and a hung one answered nothing.
+    if (/^\s*\/ub(\s|$)/i.test(line)) return this.ubCommand(line);
     if (!this.doc) await this.load(() => {});
     // A command reads the document and may save it: take in one stored elsewhere first, so it isn't saved over.
     else await this.refreshStored(5000);
     const doc = this.doc;
     if (!doc) return [this.message || 'Your routines have not loaded.'];
-    // UtilityBelt networking between this browser's tabs (ubNet.ts): /ub bc, bct, netclients, its opt keys.
-    const net = this.kit.net?.();
-    const netLines = net ? ubNetCommand(line, net) : null;
-    if (netLines) return netLines;
-    // The debug and inventory commands (metaCommands.ts), and UtilityBelt's /ub lines.
-    const extra = this.source.tools ? await metaCommand(line, this.source.tools, {
-      download: (f, t) => this.kit.download(f, t),
-      lootRules: (n) => { const p = this.profile(); if (!p) return null; return n ? p.lootSets?.[Object.keys(p.lootSets ?? {}).find((k) => k.toLowerCase() === n.toLowerCase()) ?? ''] ?? null : activeLoot(p).rules; },
-    }) : null;
+    const extra = await this.toolCommand(line);
     if (extra) return extra;
-    if (/^\s*\/ub(\s|$)/i.test(line)) return [`unknown command ${line.trim()} (/ub autostack, autocram, count, clearbugged)`];
     const args = line.trim().replace(/^\/(vt|vtank)\s*/i, '').split(/\s+/).filter(Boolean);
     const [cmd = '', ...rest] = args;
     const tail = line.trim().replace(/^\/(vt|vtank)\s+\S+\s*/i, '');

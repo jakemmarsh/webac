@@ -29,6 +29,7 @@
 import { boundNetDiagnostics, NET_DIAG_END_CAUSES, type ConnectionEvent } from '@ac/network';
 import { isAddressLimitReason, isProxyRefusalReason, PASSWORD_MISMATCH_BOOT_REASON } from '../session/AccountBoot.js';
 import { CharacterError, CharacterGenerationVerificationResponse, characterCreateErrorToken } from '@ac/shared';
+import type { ChargenResumeToken } from '../session/ChargenResume.js';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import type { LoginRetryKind } from '../session/ProvenLoginRetry.js';
 
@@ -662,8 +663,14 @@ export class PreworldReporter {
    * BUG.resume-silent-launcher — the automatic resume after an in-world drop
    * stopped without the world: 'character_gone' (the character list no
    * longer has the character; the page stays at char select).
+   *
+   * UX.chargen-resume — and how a chargen resume ended (ChargenResumeToken):
+   * 'chargen_restored' (chargen back with the draft), 'chargen_created'
+   * (FINISH's character exists: no second create), 'chargen_invalid' (the
+   * draft no longer fits: character select), and for a manual login after the
+   * resume gave up 'chargen_offered' then 'chargen_offer_yes' / '_no'.
    */
-  resumeEnded(reason: 'character_gone'): void {
+  resumeEnded(reason: 'character_gone' | ChargenResumeToken): void {
     this.report('resume_ended', { token: reason });
   }
 

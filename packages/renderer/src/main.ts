@@ -112,10 +112,10 @@ import { CharacterAnimController, jumpChargeSeconds } from './animation/Characte
 import { MotionCommand, MotionStance, isSubstateCommand } from './animation/MotionCommands.js';
 import { KeybindRegistry, eventToCode } from './input/KeybindRegistry.js';
 import { wheelZoomDirections } from './ui/MouseTurningDefaults.js';
-import { ACT, MOVEMENT_CANONICAL, activeInputMaps, MINIGAME_PANEL_ACTION } from './input/KeybindDefaults.js';
+import { ACT, MOVEMENT_CANONICAL, activeInputMaps } from './input/KeybindDefaults.js';
+import { dispatchGameAction, isTellableSelection, channelReplyPartner, CHAT_COMMAND_PREFIX, type ActionHost } from './input/ActionDispatch.js';
 import { routeGameKeyDown, keyDownConsumed } from './input/GameKeyDown.js';
 import { keybindDefaultsFor, keybindStorageKey } from './input/EraKeymaps.js';
-import { SPELL_RESEARCH_PAGE_ACTION } from './input/KeybindClientActions.js';
 import { stepPowerLevel } from './controllers/PowerBarStep.js';
 import { combatClickSelectRefused } from './controllers/CombatClickSelect.js';
 import { buildEmoteMotionMap } from './input/EmoteActionMap.js';
@@ -393,12 +393,14 @@ import { buildContractRows, applyContractTracker, applyContractTrackerTable, typ
 import { harDumpText } from './chat/HouseAccessText.js';
 import { routeObjectSubject, buildInventoryEntry, WorldObjectRecords, PendingContainIds } from './network/objectSubjectRouting.js';
 import { packSlotCounts } from './agent/packCounts.js';
-import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, shortcutDropRefusal1999, shortcutDropIntoContainer1999, quickslotCommand, CREATE_SHORTCUT_ACTION, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
+import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, shortcutDropRefusal1999, shortcutDropIntoContainer1999, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
 import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from './session/SessionLifecycle.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { handleUnexpectedDrop } from './session/UnexpectedDrop.js';
+import { SessionLiveness, sessionDropped, liveSessionSocketFailed, characterListRole } from './session/SessionLiveness.js';
+import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel } from './session/AccountTabGuard.js';
 import { SquelchState } from './session/SquelchState.js';
@@ -849,6 +851,8 @@ let preworldReporter: PreworldReporter | null = null;
 let preworldScreen: () => PreworldScreen = () => 'boot';
 let preworldServer: () => string | null = () => null;
 let preworldChargenStep: () => ChargenStepName | null = () => null;
+/** UX.chargen-resume — drop the chargen draft (the ACE section points it at its store). */
+let clearChargenDraft: () => void = () => {};
 /** RELEASE.first-minute — the first minute in the world, and the session's end (telemetry/WorldReporter.ts); set at boot. */
 let worldReporter: WorldReporter | null = null;
 /** OBS.automation-usage — whether players use the plugin bar and routines (telemetry/AutomationReporter.ts); set at boot. */
@@ -4170,17 +4174,6 @@ async function main() {
     return guid;
   }
 
-  /**
-   * OnAction cases 0x13 / 0x14 — Select Closest / Next Unopened Corpse, then
-   * ItemHolder::UseObject(selectedID) when the selection is a corpse.
-   */
-  function runCorpseSelect(cycle: 'closest' | 'next'): void {
-    runSelectCycle(SelectionType.UnopenedCorpse, cycle);
-    const sel = selectedObjectId();
-    const obj = sel ? serverObjectManager?.getObject(sel) : undefined;
-    if (obj && ((obj.objectDescFlags ?? 0) & ObjectDescriptionFlag.Corpse) !== 0 && sendUseAction) sendUseAction(sel);
-  }
-
   /** ClientFellowshipSystem::SelectNextFellow @ 005694f0 / SelectPreviousFellow @ 005695c0. */
   function runFellowSelect(next: boolean): void {
     const f = gameUI.fellowship;
@@ -5075,10 +5068,11 @@ async function main() {
    * (CharacterOptions2 0x4000) is on, through AttemptToPlaceInContainer
    * (auto-merge, then the shown pack → main pack → side packs that fit).
    */
-  const placeInBackpack = (guid: number): boolean => {
+  /** CPlayerSystem::PlaceInBackpack @ 0055d8c0; `toMainPack` (Place Selected Object in Main Pack, OnAction case 0x3e) acts as MainPackPreferred. */
+  const placeInBackpack = (guid: number, toMainPack = false): boolean => {
     if (!sendGameAction || !aceCharGuid || !guid) return false;
     if (!placementReady()) return false;
-    const mainPreferred = characterOptionIsSet(0x29 /* MainPackPreferred */, currentCharacterOptions1 ?? 0, currentCharacterOptions2 ?? 0);
+    const mainPreferred = toMainPack || characterOptionIsSet(0x29 /* MainPackPreferred */, currentCharacterOptions1 ?? 0, currentCharacterOptions2 ?? 0);
     const shown = gameUI.getSelectedPackSlot() > 0 ? sidePackGuids[gameUI.getSelectedPackSlot()] ?? 0 : 0;
     const w = placementWorld();
     // RECON.inventory-grid-dat-cells.b.a — SendNotice_ShowPendingInPlayer first,
@@ -5388,6 +5382,9 @@ async function main() {
   /** gmCCommunicationSystem::GetLastTeller: the guid @reply answers. */
   let lastTellerGuid = 0;
   let lastTellTarget: string | null = null;
+  /** gmCCommunicationSystem::Set/GetLastAtMonarchUserName / LastAtPatronUserName (Monarch-Reply / Patron-Reply). */
+  let lastAtMonarchUserName: string | null = null;
+  let lastAtPatronUserName: string | null = null;
 
   // FAITHFUL.521/.522 — Strip the trailing Olthoi marker (`&` for
   // Olthoi-talk, `^` for NoOlthoiTalk) that ACE appends per
@@ -6246,7 +6243,9 @@ async function main() {
     },
 
     onCreateNew: () => {
-      // Handled by GameUI internally — switches to character create screen
+      // Handled by GameUI internally — switches to character create screen.
+      // UX.chargen-resume — a new start is always clean: any draft goes (set below).
+      clearChargenDraft();
     },
 
     onCancelCreate: async () => {
@@ -8114,7 +8113,9 @@ async function main() {
   console.log(`[AC] network connection: ${netInWorker ? 'worker' : 'page'}`);
   // Every connect attempt (page load, launcher ENTER, relaunch, resume) starts a fresh pre-world session for the
   // reporter: a socket that never opens must not inherit the last session's character list (screen="char-select").
-  reportConnectAttempts(aceConnection, () => preworldReporter?.connectAttempt());
+  // UX.chargen-resume — whether THIS session reached its character list, whichever socket carries it (SessionLiveness.ts).
+  const sessionLiveness = new SessionLiveness();
+  reportConnectAttempts(aceConnection, () => { sessionLiveness.noteConnectAttempt(); preworldReporter?.connectAttempt(); });
   sessionConnected = () => aceConnection.isConnected;
   // BUG.multi-tab-login-pingpong — one session per account + server across
   // this browser's tabs: the latest login wins, and a tab that held the same
@@ -8179,6 +8180,31 @@ async function main() {
   // session/SessionLifecycle.ts for the ACE Session.cs anchoring.
   const sessionLifecycle = new SessionLifecycle();
   resumingAfterDrop = () => sessionLifecycle.resumingAfterDrop;
+  // UX.chargen-resume — the chargen draft a dropped connection leaves (session/ChargenResume.ts):
+  // this tab's sessionStorage, keyed by world + account + era, never the password.
+  const chargenDrafts = new ChargenDraftStore(pageStorage('session'));
+  clearChargenDraft = () => chargenDrafts.clear();
+  const chargenDraftOwner = (): ChargenDraftOwner => ({ world: chargenWorldKey(connectUrl), account: aceAccount, era: activeEra.id });
+  /**
+   * A drop in chargen: keep the player's choices (and whether FINISH had sent),
+   * and arm the chargen resume. False when chargen is not the screen.
+   */
+  const keepChargenDraft = (): boolean => {
+    const cap = gameUI.captureChargenDraft();
+    if (!cap) return false;
+    const createdGuid = cap.created ? aceCharGuid : null;
+    chargenDrafts.save({
+      owner: chargenDraftOwner(),
+      savedAt: Date.now(),
+      wizard: cap.wizard,
+      pending: cap.pending,
+      createdGuid,
+      knownGuids: (aceCharList?.characters ?? []).map((c) => c.id).filter((id) => id !== createdGuid),
+    });
+    sessionLifecycle.beginChargenResume();
+    console.log(`[AC] ACE: connection lost in chargen (step ${cap.wizard.step}${cap.pending ? ', FINISH pending' : ''}) — draft kept`);
+    return true;
+  };
   // CPlayerSystem::UseTime @ 00563110 — an enter-world request unanswered for
   // REQUEST_TIMEOUT (110 s) raises ServerDied, the connection-lost path. Each
   // request (and each "still in the world" retry) re-arms it, as
@@ -8381,6 +8407,8 @@ async function main() {
     exitToLauncherAfterLogOff = false;
     accountTabGuard.release();
     sessionLifecycle.noteLoggedOut();
+    // UX.chargen-resume — leaving this world (a logout to the server select): no draft follows.
+    chargenDrafts.clear();
     enterRequestTimer.cancel();
     aceConnection.disconnect();
     pageStorage('session').setItem('aceDisconnectTime', Date.now().toString());
@@ -12236,6 +12264,11 @@ async function main() {
       // channel, and retail's global-only squelch (chat/ChannelBroadcastLine.ts).
       // ACE sends an empty senderName when echoing our own message back.
       onChannelBroadcast: (data) => {
+        // Handle_Communication__ChannelBroadcast @ 00570b90: a Monarch (0x4000) / Patron (0x2000)
+        // line from someone else names the Monarch-Reply / Patron-Reply partner.
+        const replyTo = channelReplyPartner(data.channel, data.senderName);
+        if (replyTo === 'monarch') lastAtMonarchUserName = data.senderName;
+        else if (replyTo === 'patron') lastAtPatronUserName = data.senderName;
         // SWEEP1999.commands — the era client's wording (1999: "X says to your fellowship, …").
         const line = channelBroadcastToShow(data, squelchedNames, [], eraRules.socialLineText);
         if (line) gameUI.addSystemMessage(line.text, chatColorFor(line.type), line.type);
@@ -14155,6 +14188,8 @@ async function main() {
         return;
       }
       sessionLifecycle.noteEnterWorldRequested(parseInt(slot.id, 10));
+      // UX.chargen-resume — playing a character: an unanswered draft offer is over.
+      chargenDrafts.clear();
       // A new world session: the server's fellowship-pane flag starts off (GameUI re-sends what is shown / wanted).
       gameUI.noteWorldSessionStart();
       preworldReporter?.enterRequested();
@@ -14241,6 +14276,8 @@ async function main() {
     // Nothing goes to the server: ACE holds no chargen state until
     // CharacterCreate itself (CharacterHandler.cs), so leaving is client-only.
     gameUI.callbacks.onCancelCreate = () => {
+      // UX.chargen-resume — the player left chargen on purpose: no draft comes back.
+      chargenDrafts.clear();
       if (!aceCharList) return; // GameUI falls back to the set it last showed
       gameUI.showCharacterSelect(aceCharList.characters.map(c => ({
         id: c.id.toString(),
@@ -18095,6 +18132,14 @@ async function main() {
           // Same for the post-logoff CharacterList (Session.cs:272).
           if (launcherActive) break;
           aceCharList = parseCharacterList(event.data as Uint8Array);
+          // UX.chargen-resume — the AC1999 server sends every login's list twice (a sequence probe after
+          // its news, SessionLiveness.characterListRole): a repeat over chargen keeps chargen.
+          const listRole = characterListRole(sessionLiveness.isLive, gameUI.ui.currentScreen ?? null);
+          sessionLiveness.noteCharacterList();
+          if (listRole === 'keep_chargen') {
+            console.log('[AC] ACE: character list again for this session — chargen stays');
+            break;
+          }
           aceServerAccount = aceCharList.accountName || null;
           preworldReporter?.characterList(aceCharList.characters.length);
           // BUG.gdle-transient-login-failed — this world + account + password got in: proven for this page.
@@ -18124,8 +18169,57 @@ async function main() {
           // list whatever its size. An empty account gets character select
           // with an empty list (ENTER / DELETE disabled, CREATE enabled);
           // chargen opens only from CREATE (case 0x100003a0 → mode 0x1000000b).
+          // UX.chargen-resume — a chargen draft for this world + account + era (any other is dropped here).
+          const chargenResume = sessionLifecycle.resumingChargen;
+          if (chargenResume) sessionLifecycle.endResume();
+          // The draft is decided on the session's first list only (a repeat would offer it twice).
+          const draftAction = listRole === 'first'
+            ? decideChargenDraft(chargenDrafts, chargenDraftOwner(), characterSlots, chargenResume)
+            : { kind: 'none' as const };
+          // The pending FINISH made the character: its row selected, never a second create.
+          if (draftAction.kind === 'created') gameUI.noteSelectedAvatar(draftAction.slotId);
           gameUI.showCharacterSelect(characterSlots, aceCharList.slotCount);
           console.log(`[AC] ACE: ${characterSlots.length} character(s) on ${aceCharList.accountName}`);
+          if (chargenResume && draftAction.kind === 'none') preworldReporter?.resumeEnded('chargen_invalid');
+          if (draftAction.kind === 'created') {
+            preworldReporter?.resumeEnded('chargen_created');
+            const slot = characterSlots.find((c) => c.id === draftAction.slotId)!;
+            console.log(`[AC] ACE: the character "${slot.name}" FINISH sent before the drop exists — not creating it again`);
+            // What FINISH's OK does in this era: enter with it (end of retail, Dark Majesty), or stay on
+            // character select with it selected (1999, EraWorldRules.afterCharacterCreate). Only for the
+            // automatic resume: a manual login lands on character select as usual.
+            if (chargenResume && eraRules.world.afterCharacterCreate !== 'characterSelect') {
+              autoEnterTimer.schedule(() => {
+                if (isAutoEnterTargetStillValid(aceCharList?.characters ?? [], parseInt(slot.id, 10))) gameUI.autoEnterCharacter(slot);
+              }, 500);
+            }
+            break;
+          }
+          if (draftAction.kind === 'restore') {
+            const refusal = gameUI.chargenDraftRefusal(draftAction.wizard);
+            const ok = refusal === null;
+            preworldReporter?.resumeEnded(ok ? 'chargen_restored' : 'chargen_invalid');
+            console.log(`[AC] ACE: chargen resume — ${ok ? `back on step ${draftAction.wizard.step} with the draft` : `the draft no longer fits this world\'s chargen data (${refusal}): character select`}`);
+            if (ok) gameUI.showCharacterCreate(draftAction.wizard);
+            break;
+          }
+          if (draftAction.kind === 'offer') {
+            const offerRefusal = gameUI.chargenDraftRefusal(draftAction.wizard);
+            if (offerRefusal !== null) {
+              console.log(`[AC] ACE: chargen draft not offered — it no longer fits this world's chargen data (${offerRefusal})`);
+              chargenDrafts.clear();
+            } else {
+              preworldReporter?.resumeEnded('chargen_offered');
+              console.log(`[AC] ACE: chargen draft offered (step ${draftAction.wizard.step})`);
+              const owner = chargenDraftOwner();
+              gameUI.showConfirmationDialog(CHARGEN_DRAFT_OFFER_TEXT, (accepted) => {
+                const d = chargenDrafts.take(owner);
+                preworldReporter?.resumeEnded(accepted ? 'chargen_offer_yes' : 'chargen_offer_no');
+                if (accepted && d && !gameStarted && !sessionLifecycle.inWorld && !sessionLifecycle.enterWorldPending) gameUI.showCharacterCreate(d.wizard);
+              });
+              break;
+            }
+          }
 
           // ASSESS — auto-enter policy lives in SessionLifecycle now:
           // resume the LAST-entered character on reconnect (not always
@@ -18185,6 +18279,8 @@ async function main() {
           gameUI.noteCharGenVerificationResponse(!createdToSelect && response.responseCode === CharacterGenerationVerificationResponse.Ok && response.characterGuid != null);
           preworldReporter?.chargenResult(response.responseCode, aceCharHeritage);
           if (response.responseCode === CharacterGenerationVerificationResponse.Ok) {
+            // UX.chargen-resume — created: no draft survives it.
+            chargenDrafts.clear();
             // Success!
             console.log(`[AC] ACE: Character created! GUID=0x${response.characterGuid?.toString(16)} (${response.characterGuid}) name="${response.characterName}"`);
             console.log(`[AC] ACE: character "${response.characterName}" created`);
@@ -18612,7 +18708,13 @@ async function main() {
           // deliberate logout: keep the last-entered character so
           // /reconnect resumes it.
           const wasInWorld = sessionLifecycle.inWorld;
-          const droppedInWorld = wasInWorld || sessionLifecycle.resumingAfterDrop;
+          // A live session ended under the player: the closing socket had opened, or the session behind it had
+          // reached its character list (a socket the connection opened on its own can fail unopened: SessionLiveness.ts).
+          const unexpected = sessionDropped(event, sessionLiveness.isLive);
+          sessionLiveness.noteEnded();
+          // UX.chargen-resume — a drop in chargen keeps the draft and resumes the same way (not a world resume).
+          const droppedInChargen = unexpected && !wasInWorld && !sessionLifecycle.resumingAfterDrop && keepChargenDraft();
+          const droppedInWorld = wasInWorld || sessionLifecycle.resumingAfterDrop || droppedInChargen;
           // RELEASE.first-minute — the world session ended under the player (a no-op after a tab close).
           // BUG.hidden-tab-session-drop — with what ended it (a network close vs the client's own verdict).
           // OBS.dm-stall-diagnostics — with the connection's state at the drop (the worker's
@@ -18635,11 +18737,14 @@ async function main() {
           // already raised ID_NetError_CantSocket) do not raise it. The
           // old "Disconnected from ACE server. Type /reconnect to retry."
           // chat line was a client diagnostic retail never printed.
-          if (event.everOpened && !event.deliberate) {
+          if (unexpected) {
             // Before the world (a resume attempt's session counts: its world_left already went out).
             if (!wasInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
             // In the world (or mid-resume): reconnect and re-enter on our own first.
-            if (droppedInWorld && scheduleResume()) { worldResumePending = true; drainHandover.onSessionDropped(); break; }
+            if (droppedInWorld && scheduleResume()) {
+              if (!sessionLifecycle.resumingChargen) { worldResumePending = true; drainHandover.onSessionDropped(); }
+              break;
+            }
             raiseServerDied();
           }
           break;
@@ -18756,6 +18861,12 @@ async function main() {
             break;
           }
           if (event.netErrorId || event.serverNetError) {
+            // A socket the connection opened on its own for a live session couldn't open: the
+            // 'disconnected' right after it ends (and resumes) the session; no refusal dialog.
+            if (liveSessionSocketFailed(event, sessionLiveness.isLive, sessionLifecycle.resumingAfterDrop)) {
+              console.warn('[AC] ACE: a live session\'s new socket could not open — handled as a drop');
+              break;
+            }
             // A resume attempt that couldn't connect: the next one, or the
             // Disconnected screen once the budget is spent.
             if (sessionLifecycle.resumingAfterDrop) {
@@ -18997,236 +19108,125 @@ async function main() {
     }
   };
 
-  // Monster select/cycle (UI tab "Select Closest/Next/Previous Monster").
-  const SPELL_SLOT_IDS: number[] = [
-    ACT.SpellSlot1, ACT.SpellSlot2, ACT.SpellSlot3, ACT.SpellSlot4, ACT.SpellSlot5,
-    ACT.SpellSlot6, ACT.SpellSlot7, ACT.SpellSlot8, ACT.SpellSlot9,
-  ];
-
-  /** Dispatch a resolved one-shot command. Returns true if handled. */
-  const dispatchAction = (id: number): boolean => {
-    const emote = emoteMotionForAction.get(id);
-    if (emote !== undefined) { triggerEmoteMotion(emote); return true; }
-
-    const spellSlot = SPELL_SLOT_IDS.indexOf(id);
-    if (spellSlot >= 0) { gameUI.castFromSpellBar(spellSlot); return true; }
-
-    // GAP.toolbar-item-shortcuts-inert — gmToolbarUI::ListenToGlobalMessage
-    // @ 004be4e0: Quickslot N uses, Select Quickslot N selects, Create
-    // Shortcut puts the selection in the first free slot.
-    const quickslot = quickslotCommand(id);
-    if (quickslot) { useItemShortcut(quickslot.slot, quickslot.use); return true; }
-    if (id === CREATE_SHORTCUT_ACTION) {
+  // BUG.keybind-use-closest-corpse — the command table lives in input/ActionDispatch.ts (tests run
+  // it against every bindable command); this host is what only main.ts can reach.
+  let mouseLookKeyHeld = false;
+  const actionHost: ActionHost = {
+    ui: gameUI,
+    camera: cameraController,
+    emoteMotion: (id) => emoteMotionForAction.get(id),
+    triggerEmote: (motion) => triggerEmoteMotion(motion),
+    useItemShortcut: (slot, use) => useItemShortcut(slot, use),
+    createShortcut: () => {
       const sel = gameUI.hudState.target?.id ?? currentTargetGuid ?? 0;
-      if (sel) {
-        const notice = itemShortcutRestorer.createShortcutToItem(sel, -1, shortcutTargetOf(sel), true, false, () => placeInBackpack(sel));
-        if (notice) gameUI.displayErrorText(notice);
-      }
-      return true;
-    }
-
-    // GAP.indicator-bar-interactive — gmMiniGameUI's action has no ActionMap
-    // command; only the mini-game indicator fires it.
-    if (id === MINIGAME_PANEL_ACTION) { gameUI.toggleMiniGamePanel(); return true; }
-
-    // BUG.combat-attack-charge-build — ClientCombatSystem::HandleCombatAction
-    // @ 0056d600 (melee / missile maps): the Low / Medium / High Attack press
-    // is SetRequestedAttackHeight → StartAttackRequest (the power bar
-    // builds); the release (keyup listener) is EndAttackRequest.
-    const pressedHeight = attackHeightForAction(id);
-    if (pressedHeight) {
-      gameUI.setCombatAttackHeight(pressedHeight);
+      if (!sel) return;
+      const notice = itemShortcutRestorer.createShortcutToItem(sel, -1, shortcutTargetOf(sel), true, false, () => placeInBackpack(sel));
+      if (notice) gameUI.displayErrorText(notice);
+    },
+    // BUG.combat-attack-charge-build — SetRequestedAttackHeight → StartAttackRequest (the power
+    // bar builds); the release (keyup listener) is EndAttackRequest.
+    pressAttackHeight: (height) => {
+      gameUI.setCombatAttackHeight(height);
       if (combatController.mode === CombatMode.Melee || combatController.mode === CombatMode.Missile) {
-        attackRequest?.setRequestedAttackHeight(pressedHeight);
+        attackRequest?.setRequestedAttackHeight(height);
       }
+    },
+    toggleCombatMode: () => {
+      if (!gameUI.toggleCombatMode()) return; // refused (portal space)
+      sendChangeCombatMode(gameUI.hudState.combatMode);
+    },
+    stepPower: (dir) => {
+      const cur = gameUI.getCombatPowerLevel();
+      gameUI.adjustCombatPowerLevel(stepPowerLevel(cur, dir) - cur);
+    },
+    endCharacterSession: () => gameUI.callbacks.onLogout?.(),
+    holdSubstate: (motion) => animController?.setHeldSubstate(motion),
+    // CMotionInterp::DoMotion refuses the three postures outside the NonCombat style (combatMotionRefusal).
+    holdPosture: (id) => {
+      const posture = EMOTE_INPUT_ACTION_MOTIONS.get(id)!;
+      const refused = combatMotionRefusal(posture, !combatController.isInCombat);
+      if (refused) raiseClientNotice(gameUI, refused);
+      else animController?.setHeldSubstate(posture);
+    },
+    // GAP.84 — retail ExamineObject(param_1): a known target examines immediately; nothing
+    // selected arms TARGET_MODE_EXAMINE instead. BUG.examine-key-ignores-pack-selection — the
+    // selection is global (ACCWeenieObject::selectedID).
+    examineSelected: () => {
+      const r = worldTargetModeController.trigger('examine', gameUI.hudState.target?.id ?? currentTargetGuid);
+      if (r.kind === 'act') { if (sendIdentifyAction) sendIdentifyAction(r.targetGuid); }
+      else updateWorldCursor();
+    },
+    // GAP.84 — retail UseObject(param_1): same pattern as Examine.
+    useSelected: () => {
+      const r = worldTargetModeController.trigger('use', gameUI.hudState.target?.id ?? currentTargetGuid);
+      if (r.kind === 'act') { if (sendUseAction) sendUseAction(r.targetGuid); }
+      else updateWorldCursor();
+    },
+    selectLastAttacker: () => {
+      if (lastAttackerGuid === null || !serverObjectManager) return;
+      const obj = serverObjectManager.getObject(lastAttackerGuid);
+      if (obj && obj.mesh && obj.mesh.visible) selectTarget(obj);
+    },
+    giveSelected: () => runGiveDropCommand('give'),
+    dropSelected: () => runGiveDropCommand('drop'),
+    placeSelectedInBackpack: (toMainPack) => {
+      const sel = selectedObjectId();
+      if (!sel) return false;
+      placeInBackpack(sel, toMainPack);
       return true;
-    }
-
-    switch (id) {
-      // CORE.17.k.b.b.a.g.c — gmSpellcastingUI's keyed notices: Cast Spell =
-      // RecvNotice_CastCurrentSpell @ 004c6400 (the selection), the
-      // selection walks @ 004c7460 / 004c75d0 / 004c77a0 / 004c7820, the tab
-      // walks @ 004c73e0 / 004c7420 / 004c7740 / 004c7770.
-      // CORE.17.k.b.b.a.g.f — retail defaults the KeyMap DAT binds that had
-      // no handler: Stop Moving (S), the F-key pages, Tab's chat toggle, F1
-      // help, Alt+1-4 floaty chat windows.
-      case ACT.StopMoving: cameraController.stopMoving(); return true;
-      case ACT.ShowHideAllegiancePage: gameUI.toggleSocialPage('allegiance'); return true;
-      case ACT.ShowHideFellowshipPage: gameUI.toggleSocialPage('fellowship'); return true;
-      case ACT.ShowHideSpellComponentsPage: gameUI.toggleMagicPage('components'); return true;
-      case ACT.ShowHideAttributesPage: gameUI.toggleCharPage('attributes'); return true;
-      case ACT.ShowHideSkillsPage: gameUI.toggleCharPage('skills'); return true;
-      case ACT.ShowHideWorldPanel: gameUI.toggleMapPanel(); return true;
-      case ACT.EnterExitChatMode: {
-        const chatInput = document.getElementById('chat-input') as HTMLInputElement | null;
-        if (!chatInput) return true;
-        if (document.activeElement === chatInput) chatInput.blur(); else chatInput.focus();
-        return true;
-      }
-      case ACT.ToggleFloatingChatWindow1: gameUI.toggleFloatyChatWindow(1); return true;
-      case ACT.ToggleFloatingChatWindow2: gameUI.toggleFloatyChatWindow(2); return true;
-      case ACT.ToggleFloatingChatWindow3: gameUI.toggleFloatyChatWindow(3); return true;
-      case ACT.ToggleFloatingChatWindow4: gameUI.toggleFloatyChatWindow(4); return true;
-      case ACT.CastSpell: gameUI.castSelectedSpell(); return true;
-      case ACT.NextSpell: gameUI.cycleSpellSelection('next'); return true;
-      case ACT.PreviousSpell: gameUI.cycleSpellSelection('prev'); return true;
-      case ACT.FirstSpell: gameUI.cycleSpellSelection('first'); return true;
-      case ACT.LastSpell: gameUI.cycleSpellSelection('last'); return true;
-      case ACT.NextSpellTab: gameUI.switchSpellBarTab('next'); return true;
-      case ACT.PreviousSpellTab: gameUI.switchSpellBarTab('prev'); return true;
-      case ACT.FirstSpellTab: gameUI.switchSpellBarTab('first'); return true;
-      case ACT.LastSpellTab: gameUI.switchSpellBarTab('last'); return true;
-      // Combat
-      case ACT.ToggleCombatMode:
-        if (!gameUI.toggleCombatMode()) return true; // refused (portal space)
-        sendChangeCombatMode(gameUI.hudState.combatMode);
-        return true;
-      // SWEEP1999.input CM-5 — HandleCombatAction @ 0056d600 (1999: 0x0058b300 / 0058b390):
-      // power and accuracy step in sixths from the step below (controllers/PowerBarStep.ts).
-      case ACT.IncreasePower: case ACT.IncreaseAccuracy: {
-        const cur = gameUI.getCombatPowerLevel();
-        gameUI.adjustCombatPowerLevel(stepPowerLevel(cur, 1) - cur);
-        return true;
-      }
-      case ACT.DecreasePower: case ACT.DecreaseAccuracy: {
-        const cur = gameUI.getCombatPowerLevel();
-        gameUI.adjustCombatPowerLevel(stepPowerLevel(cur, -1) - cur);
-        return true;
-      }
-      // 1999's SpellResearchPanel (F7 in its Default.map): the magic panel's Create Spell tab.
-      case SPELL_RESEARCH_PAGE_ACTION: gameUI.toggleMagicPage('research'); return true;
-      // UI panels
-      case ACT.ShowHideInventoryPanel: gameUI.toggleInventory(); return true;
-      case ACT.ShowHideCharDetailPanel: gameUI.toggleCharPanel(); return true;
-      case ACT.ShowHideCharInfoPanel: gameUI.toggleCharacterInfoTextPanel(); return true;
-      case ACT.ShowHideSpellbookPage: gameUI.toggleMagicPage('spells'); return true;
-      case ACT.ShowHideMapPage: gameUI.toggleMapPanel(); return true;
-      case ACT.ShowHideOptionsPanel: gameUI.toggleOptionsPanel(); return true;
-      // gmGamePlayUI::HandleKeyPress @ 004e9df0: 0x10000026 sets
-      // m_bLogoutConfirmed directly — the logout with no dialog.
-      case ACT.EndCharacterSession: gameUI.callbacks.onLogout?.(); return true;
-      case ACT.ShowHideContractsPage: gameUI.toggleContractPanel(); return true;
-      case ACT.ShowHideSocialPanel: gameUI.toggleSocialPanel(); return true;
-      case ACT.ShowHidePositiveMagicPanel: gameUI.togglePositiveEffectsPanel(); return true;
-      case ACT.ShowHideNegativeMagicPanel: gameUI.toggleNegativeEffectsPanel(); return true;
-      case ACT.ShowHideVitaePanel: gameUI.toggleVitaePanel(); return true;
-      // VISUAL.emote-poses-not-held — ACCmdInterp::OnAction @ 0058b370: an
-      // emote input action in m_hashEmoteInputActionsToCommands runs
-      // SetMotion(command, true); Crouch / Sit / Lay Down hold their substate
-      // (sent as the MoveToState forward command) until a move overwrites it.
-      case ACT.Ready: animController?.setHeldSubstate(MotionCommand.Ready); return true;
-      // CMotionInterp::DoMotion refuses the three postures outside the NonCombat style (combatMotionRefusal).
-      case ACT.Crouch: case ACT.Sitting: case ACT.Sleeping: {
-        const posture = EMOTE_INPUT_ACTION_MOTIONS.get(id)!;
-        const refused = combatMotionRefusal(posture, !combatController.isInCombat);
-        if (refused) raiseClientNotice(gameUI, refused);
-        else animController?.setHeldSubstate(posture);
-        return true;
-      }
-      case ACT.ShowHideLinkStatusPanel: gameUI.toggleLinkStatusPanel(); return true;
-      case ACT.ShowHideKeyboardConfig: gameUI.toggleKeyboardConfigPanel(); return true;
-      // Targeting / selection
-      case ACT.ExamineSelected: {
-        // GAP.84 — retail ExamineObject(param_1): a known target examines
-        // immediately; nothing selected arms TARGET_MODE_EXAMINE instead
-        // (cursor swaps, next canvas click on an object examines it).
-        // BUG.examine-key-ignores-pack-selection — the selection is global
-        // (ACCWeenieObject::selectedID): a selected pack or worn item is
-        // examined too, as the toolbar magnifier already did.
-        const r = worldTargetModeController.trigger('examine', gameUI.hudState.target?.id ?? currentTargetGuid);
-        if (r.kind === 'act') { if (sendIdentifyAction) sendIdentifyAction(r.targetGuid); }
-        else updateWorldCursor();
-        return true;
-      }
-      case ACT.UseSelected: {
-        // GAP.84 — retail UseObject(param_1): same pattern as Examine above.
-        const r = worldTargetModeController.trigger('use', gameUI.hudState.target?.id ?? currentTargetGuid);
-        if (r.kind === 'act') { if (sendUseAction) sendUseAction(r.targetGuid); }
-        else updateWorldCursor();
-        return true;
-      }
-      case ACT.SelectLastAttacker:
-        if (lastAttackerGuid !== null && serverObjectManager) {
-          const obj = serverObjectManager.getObject(lastAttackerGuid);
-          if (obj && obj.mesh && obj.mesh.visible) selectTarget(obj);
-        }
-        return true;
-      case ACT.SplitSelectedStack:
-        // CORE.10.f — OnAction case 2 @ 00561890 → CM_UI::SendNotice_
-        // SplitStack(selectedID); gmToolbarUI::RecvNotice_SplitStack
-        // @ 004bd2a0 focuses the toolbar split entry + SelectAll when the
-        // selection is a stack of >=2 (no-op otherwise, but the action is
-        // consumed either way — retail returns true from the case).
-        gameUI.focusToolbarSplitEntry();
-        return true;
-      // GAP.world-drag-drop.b — OnAction cases 0x15 / 0x16 @ 00561890; false
-      // (the key passes on) when retail's case breaks.
-      case ACT.GiveSelectedToTarget: return runGiveDropCommand('give');
-      case ACT.DropSelected: return runGiveDropCommand('drop');
-      // CORE.retail-select-keys — CPlayerSystem::OnAction @ 00561890 cases
-      // 3–0x14: SelectNext @ 0055f9a0 per UI_SELECTION_TYPE, the fellowship
-      // walks, Previous Selection (prevSelectedID).
-      case ACT.SelectPreviousSelection: {
-        const prev = selectionHistory.prevSelectedId;
-        if (!prev) return false;
-        selectGuid(prev);
-        return true;
-      }
-      case ACT.SelectClosestCompassItem: runSelectCycle(SelectionType.CompassItem, 'closest'); return true;
-      case ACT.SelectPrevCompassItem: runSelectCycle(SelectionType.CompassItem, 'previous'); return true;
-      case ACT.SelectNextCompassItem: runSelectCycle(SelectionType.CompassItem, 'next'); return true;
-      case ACT.SelectClosestItem: runSelectCycle(SelectionType.Item, 'closest'); return true;
-      case ACT.SelectPrevItem: runSelectCycle(SelectionType.Item, 'previous'); return true;
-      case ACT.SelectNextItem: runSelectCycle(SelectionType.Item, 'next'); return true;
-      case ACT.SelectClosestMonster: runSelectCycle(SelectionType.Monster, 'closest'); return true;
-      case ACT.SelectPrevMonster: runSelectCycle(SelectionType.Monster, 'previous'); return true;
-      case ACT.SelectNextMonster: runSelectCycle(SelectionType.Monster, 'next'); return true;
-      case ACT.SelectClosestPlayer: runSelectCycle(SelectionType.Player, 'closest'); return true;
-      case ACT.SelectPrevPlayer: runSelectCycle(SelectionType.Player, 'previous'); return true;
-      case ACT.SelectNextPlayer: runSelectCycle(SelectionType.Player, 'next'); return true;
-      case ACT.SelectPrevFellow: runFellowSelect(false); return true;
-      case ACT.SelectNextFellow: runFellowSelect(true); return true;
-      case ACT.SelectClosestUnopenedCorpse: runCorpseSelect('closest'); return true;
-      case ACT.SelectNextUnopenedCorpse: runCorpseSelect('next'); return true;
-      case ACT.SelectSelf: selectSelfAction(); return true;
-      // Camera
-      // CORE.18.b.a.a — CameraManager::OnAction 0x33 / 0x34 with m_fStart:
-      // Closer / Farther keep ticking while the key is held (the keyup
-      // listener below is the StopCloser / StopFarther).
-      case ACT.ZoomCameraIn: cameraController.startZoom(-1); return true;
-      case ACT.ZoomCameraOut: cameraController.startZoom(1); return true;
-      case ACT.MoveCameraToDefault: cameraController.resetZoom(); return true;
-      case ACT.FirstPersonCamera: cameraController.enterHead(); return true;
-      // CORE.18.b.a.a.a.a — CameraManager::OnAction 0x3b → CameraSet::ToggleLookDown.
-      case ACT.OverheadView: cameraController.toggleLookDown(); return true;
-      // CORE.18.b.a.a.a.a.a — OnAction 0x35–0x38 with m_fStart: Rotate /
-      // Raise / Lower tick now and every frame until the key is released
-      // (the keyup listener below is StopRotating / StopRaising / StopLowering).
-      case ACT.RotateCameraLeft: cameraController.startRotate('left'); return true;
-      case ACT.RotateCameraRight: cameraController.startRotate('right'); return true;
-      case ACT.RotateCameraUp: cameraController.startRaiseLower('raise'); return true;
-      case ACT.RotateCameraDown: cameraController.startRaiseLower('lower'); return true;
-      // OnAction 0x3c → CameraSet::ToggleMapMode.
-      case ACT.MapView: cameraController.toggleMapMode(); return true;
-      // Retail default mouse-look: OnAction 0x3e registers the alternate
-      // camera map 6 at priority 2000 and falls through to 0x3d,
-      // CameraSet::ToggleMouseLook(m_fStart). Both hold-to-look: the keyup
-      // listener below undoes them. (0x3d itself is the held MIDDLE button,
-      // handled in CameraController.)
-      case ACT.ToggleAlternateCameraMode:
-        altCameraHeld = true;
-        syncActiveInputMaps();
-        cameraController.setMouseLook(true);
-        return true;
-      // Chat
-      case ACT.BeginChat: {
-        const chatInput = document.getElementById('chat-input') as HTMLInputElement | null;
-        if (chatInput) chatInput.focus();
-        return true;
-      }
-    }
-    return false;
+    },
+    selectPreviousSelection: () => {
+      const prev = selectionHistory.prevSelectedId;
+      if (!prev) return false;
+      selectGuid(prev);
+      return true;
+    },
+    selectCycle: (type, cycle) => runSelectCycle(type, cycle),
+    selectedId: () => selectedObjectId(),
+    isCorpse: (guid) => ((serverObjectManager?.getObject(guid)?.objectDescFlags ?? 0) & ObjectDescriptionFlag.Corpse) !== 0,
+    useObject: (guid) => { if (sendUseAction) sendUseAction(guid); },
+    selectFellow: (next) => runFellowSelect(next),
+    selectSelf: () => selectSelfAction(),
+    // Retail default mouse-look: OnAction 0x3e registers the alternate camera map 6 at priority
+    // 2000 and falls through to 0x3d, CameraSet::ToggleMouseLook(m_fStart). Both hold-to-look: the
+    // keyup listener below undoes them. (0x3d on a mouse button is CameraController's.)
+    altCameraDown: () => {
+      altCameraHeld = true;
+      syncActiveInputMaps();
+      cameraController.setMouseLook(true);
+    },
+    mouseLookDown: () => {
+      mouseLookKeyHeld = true;
+      cameraController.setMouseLook(true);
+    },
+    toggleChatEntry: () => {
+      const chatInput = document.getElementById('chat-input') as HTMLInputElement | null;
+      if (!chatInput) return;
+      if (document.activeElement === chatInput) chatInput.blur(); else chatInput.focus();
+    },
+    beginChat: () => {
+      const chatInput = document.getElementById('chat-input') as HTMLInputElement | null;
+      if (chatInput) chatInput.focus();
+    },
+    // ChatInterface::HandleReplyKey @ 004f5350: the last @monarch / @patron speaker or the last
+    // teller (gmCCommunicationSystem::GetLastAtMonarchUserName / GetLastAtPatronUserName /
+    // GetLastTellerName) as ID_AssistedTell; nothing when there is none.
+    replyKey: (kind) => {
+      const name = kind === 'monarch' ? lastAtMonarchUserName : kind === 'patron' ? lastAtPatronUserName : lastTellSender;
+      if (name) gameUI.startTell(name);
+    },
+    // ChatInterface::HandleCommandOrAliasKey @ 004f2ff0: the entry opens holding ID_CmdPrefix.
+    startCommand: () => gameUI.beginChatWith(CHAT_COMMAND_PREFIX),
+    // ChatInterface::OnAction 0x10000119: GetObjectNameWide(selectedID, 2) → SendNotice_StartTell.
+    tellToSelected: () => {
+      const sel = selectedObjectId();
+      if (!isTellableSelection(sel)) return;
+      const name = sel === myPlayerGuid ? playerState.name : serverObjectManager?.getObject(sel)?.name;
+      if (name) gameUI.startTell(name);
+    },
   };
+  /** Dispatch a resolved one-shot command. Returns true if handled. */
+  const dispatchAction = (id: number): boolean => dispatchGameAction(id, actionHost);
   // GAP.indicator-bar-interactive — a strip indicator click fires its DAT
   // InputAction exactly like the bound key (UIElement_Button::
   // HandleButtonClick @ 00471e50).
@@ -19331,6 +19331,9 @@ async function main() {
       cameraController.stopRotate();
     } else if (id === ACT.RotateCameraUp || id === ACT.RotateCameraDown) {
       cameraController.stopRaiseLower();
+    } else if (id === ACT.ToggleMouselook && mouseLookKeyHeld) {
+      mouseLookKeyHeld = false;
+      cameraController.setMouseLook(false);
     } else if (id === ACT.ToggleAlternateCameraMode && altCameraHeld) {
       altCameraHeld = false;
       syncActiveInputMaps();
@@ -19360,6 +19363,7 @@ async function main() {
     cameraController.releaseAllKeys();
     cameraController.stopHeldActions();
     cameraController.setMouseLook(false);
+    mouseLookKeyHeld = false;
     if (altCameraHeld) { altCameraHeld = false; syncActiveInputMaps(); }
   });
 

@@ -124,6 +124,36 @@ export const ACT = {
   SelectNextFellow: 0x1000003d,
   SelectClosestUnopenedCorpse: 0x10000121,
   SelectNextUnopenedCorpse: 0x10000122,
+  // BUG.keybind-use-closest-corpse — OnAction cases 0x13 / 0x14 (select, then use a corpse);
+  // 0x10000121 / 22 above are cases 0x43 / 0x44 (select only).
+  UseClosestUnopenedCorpse: 0x1000003e,
+  UseNextUnopenedCorpse: 0x1000003f,
+  // OnAction case 1 / 0x3e → CPlayerSystem::PlaceInBackpack(selectedID, toMainPack).
+  PlaceSelectedInInventory: 0x1000002c,
+  PlaceSelectedInMainPack: 0x1000011c,
+  // ChatInterface::OnAction @ 004f5690.
+  MonarchReply: 0x10000020,
+  PatronReply: 0x10000021,
+  Reply: 0x10000022,
+  StartCommand: 0x10000028,
+  TellToSelected: 0x10000119,
+  // Panel pages UIElementManager::DoVisibilityToggleAction shows / hides (their roots' p87).
+  ShowHideSpellManagementPanel: 0x10000010,
+  ShowHideHousePage: 0x10000018,
+  ShowHideGameplayOptionsPage: 0x1000001b,
+  ShowHideCharacterSettingsPage: 0x1000001c,
+  ShowHideConfigurationPage: 0x1000001d,
+  ShowHideFriendsPage: 0x10000118,
+  ShowHideCharacterTitlesPage: 0x1000011a,
+  ShowHideQuestDetailPanel: 0x10000127,
+  ShowHideQuestJournalPage: 0x10000128,
+  ShowHideJournalPageList: 0x10000129,
+  // ClientUISystem::OnAction @ 00564b90: 0x7c = KeyStone::Open/ClosePluginManager, 0x1000001e =
+  // SendNotice_UpdateRadarVisibility, whose every EoL listener is an empty stub (both are
+  // HIDDEN_DEAD_END_ACTIONS); 0x55 = Device::SaveScreenshot (UNHANDLED_BINDABLE_ACTIONS).
+  DisplayPluginManager: 0x7c,
+  TakeScreenshot: 0x55,
+  ShowHideCompass: 0x1000001e,
   BeginChat: 0x10000023,
   EnterExitChatMode: 0x10000024,
   OpenHelp: 0x7b,

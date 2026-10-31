@@ -24,9 +24,17 @@ import { RETAIL_SECTION_KEYBINDS } from '../input/KeybindDefaults.generated.js';
  * NO-DEAD-ENDS (Jake 2026-10-04) — commands whose retail target is gone are
  * not listed: Open Help (0x7b, an external Keystone plugin), Show/Hide Abuse
  * Reporting Panel (0x10000003, ACE drops AbuseLogRequest) and Show/Hide
- * Urgent Assistance Panel (0x1000000b). Their keys simply do nothing.
+ * Urgent Assistance Panel (0x1000000b). Display Plugin Manager (0x7c) joined
+ * them in BUG.keybind-use-closest-corpse: ClientUISystem::OnAction @ 00564b90
+ * opens KeyStone::OpenPluginManager, the same external Keystone host as Help.
+ * So did Show/Hide Compass (0x1000001e): OnAction sends
+ * CM_UI::SendNotice_UpdateRadarVisibility @ 0047a250, which calls vtable slot
+ * +0x278 of each listener, and in the EoL exe both implementations
+ * (gmNoticeHandler's, vftable 0x7bf328, and gmPanelUI's, vftable 0x7b3c58)
+ * are the empty stub at 0x00508950: the end-of-retail compass was gone.
+ * Their keys simply do nothing.
  */
-export const HIDDEN_DEAD_END_ACTIONS: ReadonlySet<number> = new Set([0x7b, 0x10000003, 0x1000000b]);
+export const HIDDEN_DEAD_END_ACTIONS: ReadonlySet<number> = new Set([0x7b, 0x7c, 0x10000003, 0x1000000b, 0x1000001e]);
 
 /** HIDDEN_DEAD_END_ACTIONS plus `eraHidden` (the commands of features a world's era lacks). */
 export function keyboardHiddenActions(eraHidden: Iterable<number>): ReadonlySet<number> {

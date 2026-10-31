@@ -72,7 +72,6 @@
     "verify-public-property-string-did-consumers.ts",
     "verify-public-update-bool-locked-uihidden.ts",
     "verify-public-update-wielder-detach.ts",
-    "verify-quest-log-keybind.ts",
     "verify-recall-bow-deep.ts",
     "verify-renderer-imports.ts",
     "verify-repeat-attacks-checkbox-honored.ts",

@@ -94,6 +94,18 @@ export class CharacterModelBuilder {
     return storeColorInformation(this.clothingRenderer.loadClothingTable(gear.clothingTable), sexCG.clothingColorsList);
   }
 
+  /**
+   * UX.chargen-resume — one slot's colour count (StoreColorInformation), or null while the chosen
+   * style's ClothingTable is not resident (a streamed set still fetching it): unknown, not none.
+   */
+  clothingColorCount(sexCG: SexCG | null, gearList: readonly GearCG[] | undefined, style: number): number | null {
+    const gear = style >= 0 ? gearList?.[style] : undefined;
+    if (!sexCG || !gear?.clothingTable) return 0;
+    const table = this.clothingRenderer.loadClothingTable(gear.clothingTable);
+    if (!table) return null;
+    return storeColorInformation(table, sexCG.clothingColorsList).templateIds.length;
+  }
+
   /** The four clothing slots' colour choices for a chargen appearance. */
   getChargenClothingColors(heritage: Heritage, gender: Gender, appearance: AppearanceInfo): ChargenClothingColors {
     const sexCG = this.getSexCG(heritage, gender);

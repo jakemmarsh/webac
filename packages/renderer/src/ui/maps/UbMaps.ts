@@ -79,6 +79,11 @@ const PLAYER_ICON = 0x06004d10;
 /** UB's sticky-point image (VisualNav, DrawPortalImage 100667897). */
 const STICKY_POINT_ICON = 100667897;
 const POLY_SETTING: Record<DungeonPolyKind, string> = { floor: 'Floors', stairs: 'Stairs', wall: 'Walls', inner: 'InnerWalls', ramped: 'RampedWalls' };
+/** The kinds by index: the ground ones (drawn in the first pass) first. */
+const POLY_KINDS: readonly DungeonPolyKind[] = ['floor', 'stairs', 'inner', 'ramped', 'wall'];
+const POLY_KIND_INDEX: Record<DungeonPolyKind, number> = { floor: 0, stairs: 1, inner: 2, ramped: 3, wall: 4 };
+/** One draw's polygon settings: each kind's colour bytes (null: off), and the visited tint (null: off). */
+type PolyBase = { colors: Array<[number, number, number, number] | null>; visitedTint: [number, number, number, number] | null };
 
 type Ctx = CanvasRenderingContext2D;
 
@@ -291,6 +296,8 @@ class DungeonMapWindow extends MapWindowBase {
   private drag: { x: number; y: number; ox: number; oy: number; rot: number; rotate: boolean } | null = null;
   private loading = 0;
   private names: Map<number, string> | null = null;
+  /** This beat's tracked objects (stateKey's), for its draw. */
+  private tickObjects: UbMapObject[] | null = null;
 
   constructor(maps: UbMaps) {
     super(maps, 'ubDungeonMaps', 'Utility Belt Maps', 'DungeonMaps');
@@ -465,7 +472,10 @@ class DungeonMapWindow extends MapWindowBase {
 
   protected stateKey(): string {
     const me = this.maps.host.me();
-    const objs = this.trackedObjects(me).map((o) => `${o.guid}:${o.x.toFixed(1)},${o.y.toFixed(1)},${o.z.toFixed(1)}`).join(';');
+    const tracked = this.trackedObjects(me);
+    // The draw that may follow in this beat uses the same list (walking every world object once a beat, not twice).
+    this.tickObjects = tracked;
+    const objs = tracked.map((o) => `${o.guid}:${o.x.toFixed(1)},${o.y.toFixed(1)},${o.z.toFixed(1)}`).join(';');
     return [this.map ? this.landblock : 0, this.manual, this.follow, this.showAll, this.drawZ.toFixed(1), this.scale.toFixed(2), this.rotation.toFixed(1),
       this.offsetX.toFixed(2), this.offsetY.toFixed(2), me ? `${me.x.toFixed(2)},${me.y.toFixed(2)},${me.heading.toFixed(1)}` : '', this.visited.size, objs].join('|');
   }
@@ -530,6 +540,33 @@ class DungeonMapWindow extends MapWindowBase {
     };
   }
 
+  /**
+   * The polygon colours of one layer's tint, by kind and visited (UB's colour, its visited tint, the layer's
+   * grey wash or darkening): null where that kind is off. Read once per draw from the settings.
+   */
+  private polyColors(tint: { mul: number; grey: boolean }, base: PolyBase): Array<string | null> {
+    const out: Array<string | null> = new Array(POLY_KINDS.length * 2).fill(null);
+    for (let k = 0; k < POLY_KINDS.length; k++) {
+      const b = base.colors[k];
+      if (!b) continue;
+      for (let v = 0; v < 2; v++) {
+        let [r, g, bl, a] = b;
+        const vt = base.visitedTint;
+        if (v === 1 && vt) { r = (r * vt[0]) / 255; g = (g * vt[1]) / 255; bl = (bl * vt[2]) / 255; }
+        if (tint.grey) { r = (r * 151) / 255; g = (g * 151) / 255; bl = (bl * 151) / 255; a = (a * 121) / 255; }
+        r *= tint.mul; g *= tint.mul; bl *= tint.mul;
+        out[k * 2 + v] = `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(bl)}, ${Math.round((a / 255) * 1000) / 1000})`;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The map. Work is bounded by what the window shows (webac#14: a 4,000-cell dungeon cost ~50 ms a redraw
+   * at the 10 Hz beat): the settings are read once per draw, a standing polygon's two far points were found
+   * when the map was built, and a cell whose bounds lie wholly outside the canvas is skipped (it would draw
+   * nothing). What reaches the canvas is the same calls in the same order.
+   */
   protected draw(): void {
     const c = this.canvas;
     const ctx = c?.getContext('2d') as Ctx | null | undefined;
@@ -542,57 +579,74 @@ class DungeonMapWindow extends MapWindowBase {
     const ppm = this.scale * TILE_SCALE;
     ctx.save();
     ctx.globalAlpha = Math.max(0, Math.min(1, this.s.num('DungeonMaps.Opacity') / 20));
-    const objs = this.trackedObjects(me);
+    const objs = this.tickObjects ?? this.trackedObjects(me);
+    this.tickObjects = null;
     const byLayer = new Map<number, UbMapObject[]>();
     for (const o of objs) { const l = layerOf(o.z); const a = byLayer.get(l); if (a) a.push(o); else byLayer.set(l, [o]); }
-    const visitedTint = this.s.bool('DungeonMaps.ShowVisitedTiles') ? argbBytes(this.s.num('DungeonMaps.VisitedTilesColor')) : null;
+    const base: PolyBase = {
+      colors: POLY_KINDS.map((kind) => {
+        const set = `DungeonMaps.Display.${POLY_SETTING[kind]}`;
+        return this.s.bool(`${set}.Enabled`) ? argbBytes(this.s.num(`${set}.Color`)) : null;
+      }),
+      visitedTint: this.s.bool('DungeonMaps.ShowVisitedTiles') ? argbBytes(this.s.num('DungeonMaps.VisitedTilesColor')) : null,
+    };
     const route = !this.manual ? this.maps.host.navRoute?.(this.landblock) ?? null : null;
+    // The projection (this.projector's, inlined: no arrays per point).
+    const cw2 = c.width / 2; const ch2 = c.height / 2;
+    const following = this.follow && !this.manual && me;
+    const cx = following ? me.x : this.offsetX;
+    const cy = following ? me.y : -this.offsetY;
+    const rad = (this.rotation * Math.PI) / 180;
+    const cos = Math.cos(rad); const sin = Math.sin(rad);
+    const wallW = Math.max(1, 0.5 * ppm);
+    const innerW = Math.max(1, 0.3 * ppm);
+    // The canvas in landblock metres: a square round the circle through its corners, padded by a wall's half width.
+    const reach = (Math.hypot(c.width, c.height) / 2 + wallW / 2 + 2) / ppm;
+    const x0 = cx - reach; const x1 = cx + reach; const y0 = cy - reach; const y1 = cy + reach;
+    let fill = ''; let stroke = ''; let lw = -1;
     for (const [layer, cells] of m.layers) {
       const tint = layerTint(this.drawZ, layer, this.showAll);
       if (tint === 'hidden') continue;
-      const color = (kind: DungeonPolyKind, visited: boolean): string | null => {
-        const set = `DungeonMaps.Display.${POLY_SETTING[kind]}`;
-        if (!this.s.bool(`${set}.Enabled`)) return null;
-        let [r, g, b, a] = argbBytes(this.s.num(`${set}.Color`));
-        if (visited && visitedTint) { r = (r * visitedTint[0]) / 255; g = (g * visitedTint[1]) / 255; b = (b * visitedTint[2]) / 255; }
-        if (tint.grey) { r = (r * 151) / 255; g = (g * 151) / 255; b = (b * 151) / 255; a = (a * 121) / 255; }
-        r *= tint.mul; g *= tint.mul; b *= tint.mul;
-        return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${Math.round((a / 255) * 1000) / 1000})`;
-      };
-      for (const pass of [['floor', 'stairs'], ['inner', 'ramped', 'wall']] as DungeonPolyKind[][]) {
+      const colors = this.polyColors(tint, base);
+      for (let pass = 0; pass < 2; pass++) {
         for (const cell of cells) {
-          const visited = this.visited.has(cell.id);
+          if (cell.maxX < x0 || cell.minX > x1 || cell.maxY < y0 || cell.minY > y1) continue;
+          const visited = this.visited.has(cell.id) ? 1 : 0;
           for (const p of cell.polys) {
-            if (!pass.includes(p.kind)) continue;
-            const col = color(p.kind, visited);
+            const k = POLY_KIND_INDEX[p.kind];
+            const ground = k < 2;
+            if (ground !== (pass === 0)) continue;
+            const col = colors[k * 2 + visited];
             if (!col) continue;
-            if (p.kind === 'floor' || p.kind === 'stairs') {
+            const pts = p.pts;
+            if (ground) {
               ctx.beginPath();
-              for (let i = 0; i < p.pts.length; i += 2) { const [sx, sy] = P(p.pts[i]!, p.pts[i + 1]!); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
+              for (let i = 0; i < pts.length; i += 2) {
+                const dx = pts[i]! - cx; const dy = pts[i + 1]! - cy;
+                const sx = cw2 + (dx * cos - dy * sin) * ppm; const sy = ch2 - (dx * sin + dy * cos) * ppm;
+                if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+              }
               ctx.closePath();
-              ctx.fillStyle = col;
+              if (col !== fill) { ctx.fillStyle = col; fill = col; }
               ctx.fill();
             } else {
-              // A standing polygon seen from above is its two farthest-apart points.
-              let best = 0; let a = 0; let b = 0;
-              for (let i = 0; i < p.pts.length; i += 2) for (let j = i + 2; j < p.pts.length; j += 2) {
-                const d = (p.pts[i]! - p.pts[j]!) ** 2 + (p.pts[i + 1]! - p.pts[j + 1]!) ** 2;
-                if (d > best) { best = d; a = i; b = j; }
-              }
-              const [x1, y1] = P(p.pts[a]!, p.pts[a + 1]!);
-              const [x2, y2] = P(p.pts[b]!, p.pts[b + 1]!);
-              ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
-              ctx.strokeStyle = col;
-              ctx.lineWidth = Math.max(1, (p.kind === 'wall' ? 0.5 : 0.3) * ppm);
+              const ax = pts[p.a]! - cx; const ay = pts[p.a + 1]! - cy;
+              const bx = pts[p.b]! - cx; const by = pts[p.b + 1]! - cy;
+              ctx.beginPath();
+              ctx.moveTo(cw2 + (ax * cos - ay * sin) * ppm, ch2 - (ax * sin + ay * cos) * ppm);
+              ctx.lineTo(cw2 + (bx * cos - by * sin) * ppm, ch2 - (bx * sin + by * cos) * ppm);
+              if (col !== stroke) { ctx.strokeStyle = col; stroke = col; }
+              const w = p.kind === 'wall' ? wallW : innerW;
+              if (w !== lw) { ctx.lineWidth = w; lw = w; }
               ctx.stroke();
             }
           }
         }
       }
+      // Routes and markers set their styles inside save / restore, so the ones tracked above still hold.
       if (route) this.drawRoute(ctx, P, route, layer, tint);
       for (const o of byLayer.get(layer) ?? []) this.drawMarker(ctx, P, o, me, ppm, tint);
     }
-    // Labels: the shown floor's (all floors' with All), unrotated, centred on the object.
     for (const [layer, list] of byLayer) {
       if (!this.showAll && layer !== layerOf(this.drawZ)) continue;
       if (!m.layers.has(layer)) continue;

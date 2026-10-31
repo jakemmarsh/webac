@@ -90,6 +90,13 @@ export const UB_SETTING_DEFAULTS: Readonly<Record<string, UbSettingValue>> = Obj
   ...UB_MAP_SETTING_DEFAULTS,
 });
 
+/** Every setting's name by its lower-cased spelling (UbStore.name). */
+const UB_SETTING_NAMES: ReadonlyMap<string, string> = (() => {
+  const m = new Map<string, string>();
+  for (const k of Object.keys(UB_SETTING_DEFAULTS)) if (!m.has(k.toLowerCase())) m.set(k.toLowerCase(), k);
+  return m;
+})();
+
 /** UB's AutoXp default policy (AutoXp.cs `Policy`): weight per target; higher spends more there. */
 export const UB_XP_POLICY_DEFAULT: Readonly<Record<string, number>> = Object.freeze({
   Strength: 1, Endurance: 1, Coordination: 1, Quickness: 1, Focus: 1, Self: 1,
@@ -167,10 +174,14 @@ export class UbStore {
     try { this.storage()?.setItem(this.key, JSON.stringify(d)); } catch { /* blocked storage: kept for this page */ }
   }
 
-  /** A setting's full name as UB spells it (case-insensitive lookup), or null. */
+  /**
+   * A setting's full name as UB spells it (case-insensitive lookup), or null. An exact name is found at
+   * once; any other spelling through a lower-cased index (every read goes through here: the Dungeon Maps
+   * draw reads its settings each redraw, and a linear scan of every name per read cost milliseconds, webac#14).
+   */
   name(n: string): string | null {
-    const want = n.trim().toLowerCase();
-    return Object.keys(UB_SETTING_DEFAULTS).find((k) => k.toLowerCase() === want) ?? null;
+    if (Object.prototype.hasOwnProperty.call(UB_SETTING_DEFAULTS, n)) return n;
+    return UB_SETTING_NAMES.get(n.trim().toLowerCase()) ?? null;
   }
 
   get(name: string): UbSettingValue {

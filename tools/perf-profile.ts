@@ -5,24 +5,38 @@
  * file:function), and a per-process RSS breakdown of the launched Chromium
  * (browser / GPU / renderer), plus the renderer's JS heap and ArrayBuffer
  * external memory. Writes verification/perf/profile-<utc>.json.
- * Usage: npx tsx tools/perf-profile.ts [--secs 6] [--swiftshader]
+ * Usage: npx tsx tools/perf-profile.ts [--secs 6] [--swiftshader] [--throttle N] [--yaw DEG] [--idle]
+ *   --throttle N  CDP CPU throttling (N× slower main thread) — a stand-in
+ *                 for the low-end laptops behind PERF.integrated-gpu-cpu-bound.
+ *   --yaw DEG     face this heading before profiling (Holtburg: 180–240 looks
+ *                 into town, the draw-heaviest view; 0 looks out of it).
+ *   --idle        stand still instead of running + turning.
+ * The output also groups self time by area (three.js renderer, game code,
+ * GC, idle) so the draw-submission share is one number.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { REPO, adminCommand, enterWorld } from './lib/game-session.ts';
+import { profileArea } from './lib/profile-area.ts';
 const args = process.argv.slice(2);
 const SECS = Number(args[args.indexOf('--secs') + 1]) || 6;
+const THROTTLE = args.includes('--throttle') ? Number(args[args.indexOf('--throttle') + 1]) || 1 : 1;
+const YAW = args.includes('--yaw') ? Number(args[args.indexOf('--yaw') + 1]) : null;
+const IDLE = args.includes('--idle');
 const { browser, page } = await enterWorld({ gpu: !args.includes('--swiftshader') });
 let done = false; page.on('console', (m) => { if (/Sent LoginComplete/.test(m.text())) done = true; });
 await adminCommand(page, '@telepoi Holtburg'); for (let i = 0; i < 90 && !done; i++) await page.waitForTimeout(500); await page.waitForTimeout(5000);
 const cdp = await page.context().newCDPSession(page);
 await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 200 });
 await page.mouse.click(780, 250);
+if (YAW !== null && Number.isFinite(YAW)) { await page.evaluate(`window.acDebug.setPlayerYaw(${(YAW * Math.PI) / 180})`); await page.waitForTimeout(3000); }
+if (THROTTLE > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: THROTTLE });
+await page.evaluate(`(() => { window.__profFrames = 0; const t = () => { window.__profFrames++; requestAnimationFrame(t); }; requestAnimationFrame(t); })()`);
 await cdp.send('Profiler.start');
-await page.keyboard.down('KeyW'); await page.keyboard.down('KeyD');
+if (!IDLE) { await page.keyboard.down('KeyW'); await page.keyboard.down('KeyD'); }
 await page.waitForTimeout(SECS * 1000);
-await page.keyboard.up('KeyD'); await page.keyboard.up('KeyW');
+if (!IDLE) { await page.keyboard.up('KeyD'); await page.keyboard.up('KeyW'); }
 const { profile } = await cdp.send('Profiler.stop') as { profile: { nodes: Array<{ id: number; callFrame: { functionName: string; url: string; lineNumber: number } }>; samples: number[]; timeDeltas: number[] } };
 const self = new Map<number, number>();
 profile.samples.forEach((id, i) => self.set(id, (self.get(id) ?? 0) + (profile.timeDeltas[i] ?? 0)));
@@ -34,6 +48,14 @@ for (const n of profile.nodes) {
   const key = `${f.functionName || '(anon)'}  ${file}:${f.lineNumber + 1}`;
   byFn.set(key, (byFn.get(key) ?? 0) + t);
 }
+const fps = +((await page.evaluate('window.__profFrames') as number) / SECS).toFixed(1);
+if (THROTTLE > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+const byArea = new Map<string, number>();
+for (const n of profile.nodes) {
+  const t = self.get(n.id); if (!t) continue;
+  byArea.set(profileArea(n.callFrame), (byArea.get(profileArea(n.callFrame)) ?? 0) + t);
+}
+const areas = Object.fromEntries([...byArea.entries()].sort((a, b) => b[1] - a[1]).map(([k, t]) => [k, +(100 * t / total).toFixed(1)]));
 const top = [...byFn.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25).map(([k, t]) => ({ fn: k, pct: +(100 * t / total).toFixed(1) }));
 const heap = await cdp.send('Runtime.getHeapUsage') as { usedSize: number; totalSize: number; embedderHeapUsedSize?: number; backingStorageSize?: number };
 const procs = (() => { try {
@@ -41,7 +63,7 @@ const procs = (() => { try {
   const pw = rows.filter((m) => /playwright_chromiumdev_profile|chromium-\d+\/chrome-mac/.test(m[4]) && /Chrom/.test(m[4]));
   return pw.map((m) => ({ type: (/--type=([a-z-]+)/.exec(m[4])?.[1] ?? 'browser'), rssMB: Math.round(Number(m[3]) / 1024) })).sort((a, b) => b.rssMB - a.rssMB).slice(0, 8);
 } catch { return []; } })();
-const out = { secs: SECS, top, heapMB: { used: +(heap.usedSize / 1048576).toFixed(0), total: +(heap.totalSize / 1048576).toFixed(0), backingStore: heap.backingStorageSize ? +(heap.backingStorageSize / 1048576).toFixed(0) : null }, processes: procs };
+const out = { secs: SECS, throttle: THROTTLE, yaw: YAW, idle: IDLE, fps, areas, top, heapMB: { used: +(heap.usedSize / 1048576).toFixed(0), total: +(heap.totalSize / 1048576).toFixed(0), backingStore: heap.backingStorageSize ? +(heap.backingStorageSize / 1048576).toFixed(0) : null }, processes: procs };
 mkdirSync(resolve(REPO, 'verification/perf'), { recursive: true });
 const file = resolve(REPO, `verification/perf/profile-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
 writeFileSync(file, JSON.stringify(out, null, 1) + '\n');

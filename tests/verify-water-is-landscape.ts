@@ -91,11 +91,14 @@ describe('water terrain is drawn as the landscape mesh, not a sea-level plane', 
 
   it('a shore landblock adds only its landscape mesh: no water plane, nothing translucent', () => {
     const scene = new THREE.Scene();
-    renderShore(scene, [[GRASS, 0x05000001], [WATER_DEEP_SEA, 0x0500106b]]);
-    expect(scene.children).toHaveLength(1);
+    const { tr } = renderShore(scene, [[GRASS, 0x05000001], [WATER_DEEP_SEA, 0x0500106b]]);
+    // PERF.terrain-base-pool — the landscape draws as one pool mesh per
+    // terrain material (grass, water), and nothing else is added.
+    expect(scene.children).toEqual(tr.baseTerrainPool.meshes);
+    expect(scene.children).toHaveLength(2);
     expect(scene.getObjectByName('water_surface')).toBeUndefined();
-    const mesh = scene.children[0] as THREE.Mesh;
-    const mats = mesh.material as THREE.Material[];
+    const mats = (scene.children as THREE.Mesh[]).map(m => m.material as THREE.Material);
+    expect(mats).toEqual(tr.getMesh(LB_ID)!.material);
     for (const m of mats) {
       expect(m.transparent).toBe(false);
       expect(m.depthWrite).toBe(true);
@@ -105,8 +108,8 @@ describe('water terrain is drawn as the landscape mesh, not a sea-level plane', 
 
   it('the water cells draw with the water type\'s own TMTerrainDesc texture, at the terrain height', () => {
     const scene = new THREE.Scene();
-    const { lbMesh, gidOf } = renderShore(scene, [[GRASS, 0x05000001], [WATER_DEEP_SEA, 0x0500106b]]);
-    const mesh = scene.children[0] as THREE.Mesh;
+    const { tr, lbMesh, gidOf } = renderShore(scene, [[GRASS, 0x05000001], [WATER_DEEP_SEA, 0x0500106b]]);
+    const mesh = tr.getMesh(LB_ID)!;
     const mats = mesh.material as THREE.MeshLambertMaterial[];
     const geom = mesh.geometry;
     const index = geom.getIndex()!.array;
@@ -132,8 +135,8 @@ describe('water terrain is drawn as the landscape mesh, not a sea-level plane', 
 
   it('the water texture tiles per cell like every terrain texture and does not scroll', () => {
     const scene = new THREE.Scene();
-    const { gidOf } = renderShore(scene, [[WATER_DEEP_SEA, 0x0500106b]]);
-    const mesh = scene.children[0] as THREE.Mesh;
+    const { tr, gidOf } = renderShore(scene, [[WATER_DEEP_SEA, 0x0500106b]]);
+    const mesh = tr.getMesh(LB_ID)!;
     const map = (mesh.material as THREE.MeshLambertMaterial[])[0].map!;
     expect(gidOf.get(map)).toBe(0x0500106b);
     // CORE.17.h.g.c.a — at the retail default Medium (TexMerge window 512)

@@ -212,6 +212,8 @@ describe('GameUI.toggleGameplayOptionsPage — DoVisibilityToggleAction(0x100000
       saveOptionsSettings: () => { calls.push('save'); },
       renderOptionsPanel: () => { calls.push('render'); },
       setPanelsWindowPanel: (_p: unknown, show: boolean) => { calls.push(show ? 'show' : 'hide'); ui.optionsPanelVisible = show; },
+      // BUG.keybind-use-closest-corpse — the Gameplay page is one of toggleOptionsPage's pages.
+      toggleOptionsPage(t: 'gameplay' | 'character' | 'chat' | 'config') { GameUI.prototype.toggleOptionsPage.call(ui as unknown as GameUI, t); },
     };
     return { ui, calls };
   }

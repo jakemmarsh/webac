@@ -12,14 +12,22 @@
  * through Options → Configure Keyboard, as in retail.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { KeybindRegistry } from '@ac/renderer/input/KeybindRegistry.js';
 import { ActionClass } from '@ac/renderer/input/KeybindActionClass.js';
 import { ACT, DEFAULT_KEYBINDS } from '@ac/renderer/input/KeybindDefaults.js';
+import { dispatchGameAction, type ActionHost } from '@ac/renderer/input/ActionDispatch.js';
+import { GameUI } from '@ac/renderer/ui/GameUI.js';
 
-const REPO = resolve(__dirname, '..');
-const MAIN_TS = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf-8');
+/** The shipped dispatcher over a host whose GameUI records what the command calls. */
+function dispatched(id: number): string[] {
+  const calls: string[] = [];
+  const ui = new Proxy({}, { get: (_t, k) => () => { calls.push(String(k)); } });
+  const host = new Proxy({} as ActionHost, {
+    get: (_t, k) => (k === 'ui' ? ui : k === 'camera' ? {} : k === 'emoteMotion' ? () => undefined : () => { calls.push(`host.${String(k)}`); }),
+  });
+  dispatchGameAction(id, host);
+  return calls;
+}
 
 describe('FAITHFUL.239 / VISUAL.127 — the Contracts Page command', () => {
   it('is a UI-class command that ships unbound (retail gives it no key); Q is Autorun', () => {
@@ -35,12 +43,15 @@ describe('FAITHFUL.239 / VISUAL.127 — the Contracts Page command', () => {
     expect(r.resolve('KeyV')).toBe(ACT.ShowHideContractsPage);
   });
 
-  it('the router dispatches the Contracts command to toggleContractPanel', () => {
-    expect(MAIN_TS).toMatch(/case ACT\.ShowHideContractsPage: gameUI\.toggleContractPanel\(\)/);
+  // BUG.keybind-use-closest-corpse — the command is the Contracts PAGE's (0x21000069:0x100005cd's
+  // p87): DoVisibilityToggleAction opens the quest panel on that page (toggleContractPage).
+  it('the router dispatches the Contracts command to the quest panel\'s Contracts page', () => {
+    expect(dispatched(ACT.ShowHideContractsPage)).toEqual(['toggleContractPage']);
+    expect(dispatched(ACT.ShowHideQuestDetailPanel)).toEqual(['toggleContractPanel']);
   });
 
-  it('toggleContractPanel is still defined in GameUI', () => {
-    const ui = readFileSync(resolve(REPO, 'packages/renderer/src/ui/GameUI.ts'), 'utf-8');
-    expect(ui).toContain('toggleContractPanel(): void {');
+  it('GameUI has both toggles', () => {
+    expect(typeof GameUI.prototype.toggleContractPanel).toBe('function');
+    expect(typeof GameUI.prototype.toggleContractPage).toBe('function');
   });
 });

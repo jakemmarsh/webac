@@ -264,12 +264,21 @@ describe.skipIf(!hasCellDat)('Phase 11: Three.js Scene + Camera + Textured Terra
       expect(result.added).toBeGreaterThan(0);
       expect(tr.meshCount).toBeGreaterThan(0);
 
-      // Each terrain mesh should be a Three.js Mesh in the scene
-      let meshCount = 0;
+      // PERF.terrain-base-pool — the blocks draw from the cross-landblock
+      // pool (one scene mesh per material) carrying every block's triangles.
+      const inScene: THREE.Mesh[] = [];
       scene.traverse((child) => {
-        if (child instanceof THREE.Mesh) meshCount++;
+        if (child instanceof THREE.Mesh) inScene.push(child);
       });
-      expect(meshCount).toBe(tr.meshCount);
+      expect(inScene).toEqual(tr.baseTerrainPool.meshes);
+      expect(inScene.length).toBeGreaterThan(0);
+      const tris = (m: THREE.Mesh) => m.geometry.getIndex()!.count / 3;
+      let blockTris = 0;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+        const m = tr.getMesh(TerrainManager.blockToFileId(100 + dx, 100 + dy));
+        if (m) blockTris += tris(m);
+      }
+      expect(inScene.reduce((a, m) => a + tris(m), 0)).toBe(blockTris);
     });
 
     it('terrain streaming unloads when moving away', () => {

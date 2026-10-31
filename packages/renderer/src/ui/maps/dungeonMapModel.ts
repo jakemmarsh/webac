@@ -18,8 +18,12 @@ import type { CellStruct } from '@ac/dat-parser/file-types/Environment.js';
 
 export type DungeonPolyKind = 'floor' | 'stairs' | 'wall' | 'inner' | 'ramped';
 
-/** One polygon seen from above: its kind and its landblock-local x, y points (flattened pairs). */
-export interface DungeonMapPoly { kind: DungeonPolyKind; pts: number[]; z: number }
+/**
+ * One polygon seen from above: its kind and its landblock-local x, y points (flattened pairs). A standing
+ * one (wall, inner, ramped) is drawn as the line between its two farthest-apart points: `a` and `b` are
+ * their indices into `pts` (found once, when the map is built).
+ */
+export interface DungeonMapPoly { kind: DungeonPolyKind; pts: number[]; z: number; a: number; b: number }
 
 export interface DungeonMapCell {
   id: number;
@@ -27,6 +31,8 @@ export interface DungeonMapCell {
   x: number; y: number; z: number;
   layer: number;
   polys: DungeonMapPoly[];
+  /** Its polygons' bounds, landblock-local (the map skips a cell wholly outside the window). */
+  minX: number; maxX: number; minY: number; maxY: number;
 }
 
 export interface DungeonMap {
@@ -133,14 +139,30 @@ export function buildDungeonCell(id: number, g: DungeonCellGeometry): DungeonMap
   }
   if (!Number.isFinite(floorZ)) for (const vs of placed) for (const v of vs) floorZ = Math.min(floorZ, v.z);
   const out: DungeonMapPoly[] = [];
+  let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
   for (const vs of placed) {
     const kind = classifyPolygon(vs, floorZ);
     if (!kind) continue;
     const pts: number[] = [];
-    for (const v of vs) pts.push(v.x, v.y);
-    out.push({ kind, pts, z: vs.reduce((s, v) => s + v.z, 0) / vs.length });
+    for (const v of vs) {
+      pts.push(v.x, v.y);
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+    const [a, b] = kind === 'floor' || kind === 'stairs' ? [0, 0] : farthestPair(pts);
+    out.push({ kind, pts, z: vs.reduce((s, v) => s + v.z, 0) / vs.length, a, b });
   }
-  return { id, x: origin.x, y: origin.y, z: origin.z, layer: layerOf(origin.z), polys: out };
+  return { id, x: origin.x, y: origin.y, z: origin.z, layer: layerOf(origin.z), polys: out, minX, maxX, minY, maxY };
+}
+
+/** A standing polygon seen from above is its two farthest-apart points: their indices into `pts` (the first such pair). */
+export function farthestPair(pts: number[]): [number, number] {
+  let best = 0; let a = 0; let b = 0;
+  for (let i = 0; i < pts.length; i += 2) for (let j = i + 2; j < pts.length; j += 2) {
+    const d = (pts[i]! - pts[j]!) ** 2 + (pts[i + 1]! - pts[j + 1]!) ** 2;
+    if (d > best) { best = d; a = i; b = j; }
+  }
+  return [a, b];
 }
 
 /** The whole dungeon (UB Dungeon.LoadCells): every interior cell of the landblock, by layer. Null when it has none. */

@@ -400,3 +400,93 @@ intended cache, not a leak.
 
 What remains is first-use, not churn: the paperdoll's first render on the
 first inventory open, and portal space's first draw. They are filed separately.
+
+## Where the frame goes, by bucket and by function (2026-10-31, M3 Max `--gpu`, Holtburg, LDD 8)
+
+Prompted by an outside comparison (another three.js AC client) suggesting
+draw count is the lever and pointing at creature parts, per-emitter
+particles, "far interior furniture" and portal punches.
+
+**Census fix.** The scene census measured distance from each mesh's own
+position (and an InstancedMesh's local bounding sphere), so every cell
+furniture InstancedMesh (under a cell group) and every portal punch (world
+vertices on a mesh at 0,0,0) read as ">600 m" while standing a few metres
+off. `tools/lib/scene-census.ts` now measures world-space bounding-sphere
+centres, counts `visible` (whole ancestor chain visible), and adds a draw
+census: renderBufferDirect calls per frame by category and blend class
+(measure-perf.ts `draws`). Outdoors facing yaw 0: 0 of 848 furniture meshes
+and 0 of 477 cell meshes visible; 408 draws.
+
+**Draws by heading** (draw census, 30 frames per 30° step). Facing out of
+town (yaw 300–120) 396–501 draws; facing into town (150–270) 678–1,437:
+
+| yaw 240 bucket | draws | note |
+|---|---|---|
+| `part` (server-object Setup parts) | 350 | 43 objects, ~8 draws each, all within 100 m |
+| `lod_N` (degrade-level part groups) | ~200 | ~16 objects, ~13 each, within 100 m |
+| `envfurninst` + `envcell` (interiors through doorways) | ~356 | 60 cells; ~60% within 50 m, ~130 draws at 100–200 m |
+| terrain base (unnamed, renderOrder −10) + `blendmerge` | ~257 | constant every heading; ~180 of them beyond 300 m |
+| portal punch | 18–30 | |
+| particles | 16–25 | |
+
+**CPU profile, town view (yaw 210, idle), `tools/perf-profile.ts --throttle 4`**
+(4× CPU throttle as the stand-in for PERF.integrated-gpu-cpu-bound): 24–26 fps,
+idle 0.1% (main-thread bound); unthrottled 100 fps, also ~0 idle.
+Self time: three.js draw submission 27.6%, three.js scene graph 20.6%
+(updateMatrixWorld alone 8.1%, all from `SceneManager.render`), browser
+(program) 19.3%, three.js other 6.6%, raycasts 5.5% (mouse-over
+`pickAtScreenPos` 3.1%, camera collision `DungeonCollision` 3.1%), native 5%,
+all game code together ~15% (world 4.8, scene 3.3, ui 1.5, effects 1.4).
+Scene graph: 7,714 nodes, 4,672 (61%) under hidden subtrees; three's
+updateMatrixWorld walks them every frame.
+
+**Reading.** Draw submission is the largest single cost, but only about a
+quarter of the throttled frame; the matrix walk over mostly hidden nodes is
+the next fifth and needs no batching. The draw-heavy buckets are server-object
+parts (~550 draws from ~60 objects), interiors seen through doorways (~350)
+and terrain (~257 at every heading), not far furniture or punches.
+
+### Shipped from it (2026-10-31): hidden-subtree matrix skip + base terrain pool
+
+- **PERF.hidden-subtree-matrix-skip** (`scene/HiddenSubtreeMatrixSkip.ts`): the
+  world scene's `updateMatrixWorld` stops at hidden top-level children. Their own
+  matrices stay current; the subtree is refreshed the moment the child is shown
+  (an accessor on `visible`), so pre-render readers (DegradeLod, picking, the
+  indoor view's second pass with matrixWorldAutoUpdate off) never see a stale
+  matrix. Nodes that override updateMatrixWorld (ParticleSystem's object,
+  ObjectLights: they re-sync their own visibility there) still run every frame,
+  and hidden nodes under a VISIBLE top-level object (degrade holders) are walked
+  as before, because picking ray-casts a visible object's whole subtree.
+- **PERF.terrain-base-pool** (`terrain/BaseTerrainPool.ts`): every landblock's
+  base terrain triangles draw from one mesh per material. Vertices are
+  origin-relative: baking world coordinates into float32 (as the overlay pool
+  does) jittered vertices by millimetres in the GPU's view transform and changed
+  10–23% of terrain pixels by up to 36 levels against the per-block meshes; with
+  the mesh origin at its blocks' centre, 0–1,992 of 1.2M pixels differ, almost
+  all by 1 level (PERF.overlay-pool-world-space-precision files the overlays).
+
+**How it was validated** (`tools/perf-render-ab.ts` runs the speed A/B, matrix invariant and pixel A/B below in any era):
+- Same-session A/B at 4× CPU throttle, Holtburg, median of 3 interleaved rounds
+  (swap three's own updateMatrixWorld back in; hide the pool and re-add the frozen
+  per-block meshes):
+
+  | view | before | skip only | pool only | both |
+  |---|---|---|---|---|
+  | into town (yaw 210) | 26.3 fps, 26.4 ms, 1,332 draws | 27.5 fps, 24.9 ms | 27.1 fps, 25.4 ms, 1,224 | 28.3 fps, 23.9 ms |
+  | out of town (yaw 0) | 49.0 fps, 10.4 ms, 396 draws | 56.2 fps, 7.8 ms | 52.5 fps, 9.4 ms, 319 | 60.4 fps, 7.0 ms |
+
+  Dark Majesty (ClassicACE CustomDM, Holtburg, yaw 0): 33.5 → 39.9 fps,
+  11.4 → 7.2 ms, 374 → 297 draws. AC1999 (start area): 96 → 104 fps,
+  5.7 → 4.9 ms, 314 → 276 draws. `measure-perf --gpu` (unthrottled M3 Max):
+  idle draws 415 → 319, renderJs p50 idle/turning/running 3.0/3.5/3.5 →
+  1.7/2.0/2.0 ms.
+- Matrix invariant, checked live after every render: each drawn, unfrozen mesh's
+  matrixWorld against the product of its chain's local transforms. 0 mismatches:
+  3.1M mesh-frames walking/turning outdoors, 755k in a Holtburg building interior
+  (two-pass indoor view), 629k in a dungeon, 2.0M Dark Majesty, 1.7M AC1999.
+- Same-frame pixel A/B of the pool against the per-block meshes (render, read
+  pixels, swap, render again in one task; pool-vs-pool noise is 0): 12 views at
+  Holtburg / Rithwic / Yaraq plus 4 each in Dark Majesty and AC1999.
+- Streaming: a landblock crossing rebuilds the touched pool meshes in ~1–1.4 ms
+  (4× throttle) and the next render is ~4 ms slower once (the upload); no frame
+  over 100 ms in two minutes of running.

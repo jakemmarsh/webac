@@ -101,6 +101,8 @@ export class SessionLifecycle {
   private inWorldFlag = false;
   private resumeAttempts = 0;
   private resuming = false;
+  /** UX.chargen-resume — the drop came in chargen: the resume reopens chargen, not a character. */
+  private chargenResume = false;
   private inWorldRetries = 0;
   private enterInFlight = false;
   private createdGuid: number | null = null;
@@ -120,7 +122,8 @@ export class SessionLifecycle {
    * then show the Disconnected screen.
    */
   nextResumeDelay(): number | null {
-    if (this.lastEnteredGuid === null || this.manualLogout || this.resumeAttempts >= RESUME_DELAYS_MS.length) {
+    const resumable = this.chargenResume || (this.lastEnteredGuid !== null && !this.manualLogout);
+    if (!resumable || this.resumeAttempts >= RESUME_DELAYS_MS.length) {
       this.endResume();
       return null;
     }
@@ -132,6 +135,24 @@ export class SessionLifecycle {
   endResume(): void {
     this.resuming = false;
     this.resumeAttempts = 0;
+    this.chargenResume = false;
+  }
+
+  /**
+   * UX.chargen-resume — the connection dropped in character creation (a named
+   * browser-UX exception, like the in-world resume): the same attempts and
+   * delays (nextResumeDelay) reconnect, and the character list reopens chargen
+   * from the draft (session/ChargenResume.ts) instead of entering a character.
+   * Call before nextResumeDelay. A deliberate logout earlier in the page does
+   * not stop it: the player is in chargen, not on their way out.
+   */
+  beginChargenResume(): void {
+    if (!this.resuming) this.chargenResume = true;
+  }
+
+  /** The resume under way is a chargen resume (beginChargenResume). */
+  get resumingChargen(): boolean {
+    return this.resuming && this.chargenResume;
   }
 
   /** True between PlayerCreate and logout/disconnect. */
@@ -312,6 +333,8 @@ export class SessionLifecycle {
     autoEnterEnabled: boolean,
   ): T | null {
     const enterable = slots.filter(s => (s.deleteTime ?? 0) === 0);
+    // A chargen resume reopens chargen: no character is entered.
+    if (this.resuming && this.chargenResume) return null;
     // Resuming after a drop: only the character that was in the world.
     if (this.resuming) return enterable.find(s => parseInt(s.id, 10) === this.lastEnteredGuid) ?? null;
     if (!autoEnterEnabled) return null;

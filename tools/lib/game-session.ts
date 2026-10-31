@@ -162,7 +162,9 @@ export async function openSession(opts: SessionOptions = {}): Promise<{ browser:
 export const IN_WORLD_JS = '(() => { const c = window.acDebug && window.acDebug.collisionState && window.acDebug.collisionState(); return !!(c && c.x > 0 && c.loginComplete !== false); })()';
 /** Character select is up with the list loaded. */
 export const AT_CHAR_SELECT_JS = "(() => { const i = document.getElementById('charsel-inner'); if (i && i.dataset.mode === 'select') return true;"
-  + " const ui = window.__ac && window.__ac.gameUI; return !!(ui && ui.uiManager && ui.uiManager.currentScreen === 'character-select'); })()";
+  // Not the connecting screen: its GameUI screen is 'character-select' too, before any list (a live
+  // probe opened chargen there mid-login and judged a drop that never happened, 2026-10-29).
+  + " const ui = window.__ac && window.__ac.gameUI; return !!(ui && ui.uiManager && ui.uiManager.currentScreen === 'character-select' && ui.connectingScreenShown !== true); })()";
 /** The chargen wizard is mounted. */
 export const IN_CHARGEN_JS = "!!document.getElementById('chargen-root')";
 

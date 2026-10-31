@@ -194,14 +194,15 @@ describe('buildKeyboardSections — InitOptions @ 004dd8b0: one header per input
     expect(s[0].rows.find((row) => row.id === rot.id)?.codes).toEqual(['Numpad4', null, null]);
   });
 
-  it('the UI tab holds the 103 UI commands less the 3 hidden dead ends (HIDDEN_DEAD_END_ACTIONS) across its sections, with descriptions as tooltips', () => {
+  it('the UI tab holds the 103 UI commands less the 5 hidden dead ends (HIDDEN_DEAD_END_ACTIONS) across its sections, with descriptions as tooltips', () => {
     const r = new KeybindRegistry(DEFAULT_KEYBINDS);
     // As GameUI builds it for end of retail: the era hides 1999's Spell Research Page (SWEEP1999.input).
     const s = buildKeyboardSections(r, ActionClass.UI, undefined, keyboardHiddenActions(clientRuleHiddenActions(eraClientRules(null))));
     const rows = s.flatMap((x) => x.rows);
-    expect(rows.length).toBe(100);
-    expect(new Set(rows.map((row) => row.id)).size).toBe(100);
-    for (const id of [0x7b, 0x10000003, 0x1000000b]) expect(rows.some((row) => row.id === id)).toBe(false);
+    expect(rows.length).toBe(98);
+    expect(new Set(rows.map((row) => row.id)).size).toBe(98);
+    // Open Help, Display Plugin Manager (both KeyStone), Abuse Reporting, Urgent Assistance, Show/Hide Compass
+    for (const id of [0x7b, 0x7c, 0x10000003, 0x1000000b, 0x1000001e]) expect(rows.some((row) => row.id === id)).toBe(false);
     expect(s.map((x) => x.header)).toEqual(['Chat', 'Toggle Chat Entry', 'Quickslots', 'Item Selection', 'UI']);
     expect(rows.find((row) => row.name === 'Show/Hide Inventory Panel')?.mappings[0]).toBe('F12');
     expect(rows.every((row) => typeof row.desc === 'string')).toBe(true);
@@ -512,18 +513,18 @@ describe('GameUI — the dialog list scrolls, labels, captures and prompts', () 
     domWindow.document.dispatchEvent(ev);
   };
 
-  it('the UI tab lists its 100 shown commands in a 345 px viewport whose paper is the stacked 40 px rows plus the headers', () => {
+  it('the UI tab lists its 98 shown commands (Display Plugin Manager and Show/Hide Compass hidden with Help) in a 345 px viewport whose paper is the stacked 40 px rows plus the headers', () => {
     const vp = open(ActionClass.UI);
     expect(vp.dataset.keybindList).toBe('10000025');
     expect(vp.style.height).toBe('345px');
-    expect(rows(vp).length).toBe(100);
+    expect(rows(vp).length).toBe(98);
     const headers = Array.from(vp.querySelectorAll('[data-keybind-section]')) as HTMLElement[];
     expect(headers.length).toBe(5);
     const sheet = vp.firstElementChild as HTMLElement;
-    expect(sheet.style.height).toBe(`${(100 + 5) * ROW_H}px`);
+    expect(sheet.style.height).toBe(`${(98 + 5) * ROW_H}px`);
     // every row sits at a 40 px pitch, the buttons at x 270 / 370 / 470
-    const last = rows(vp)[99];
-    expect(last.style.top).toBe(`${(100 + 5 - 1) * ROW_H}px`);
+    const last = rows(vp)[97];
+    expect(last.style.top).toBe(`${(98 + 5 - 1) * ROW_H}px`);
     expect(last.style.height).toBe(`${ROW_H}px`);
     expect((button(vp, 'Take Screenshot', 0)).style.left).toBe('270px');
     expect((button(vp, 'Take Screenshot', 2)).style.left).toBe('470px');

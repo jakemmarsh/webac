@@ -303,7 +303,16 @@ export interface AppearanceRollLists {
   readonly footwearCount: number;
   /** The colour count the clothing pages offer (our page's clothingColorsList). */
   readonly clothingColorCount: number;
+  /**
+   * UX.chargen-resume — the chosen item's own colour count (CharGenState::StoreColorInformation
+   * @ 005c44d0: the style's ClothingTable templates that are in clothingColorsList), which
+   * Set<Slot>Style stores and the Random rolls draw within; null while that ClothingTable is not
+   * resident yet (streamed sets), absent without one (then clothingColorCount, as before).
+   */
+  itemColorCount?(slot: ClothingSlot, a: AppearanceState): number | null;
 }
+
+export type ClothingSlot = 'headgear' | 'shirt' | 'pants' | 'footwear';
 
 /**
  * CharGenState::RandomizeAppearance(0) @ 005c4f10 — the face: the eyes /
@@ -323,9 +332,15 @@ export function randomizeAppearance(src: ChargenRandomSource, a: AppearanceState
   if (lists.hairStyleCount !== 0) a.hairStyle = randIntExcluding(src, lists.hairStyleCount, a.hairStyle);
 }
 
-/** The colour count SetHeadgearStyle / SetShirtStyle … store: 0 for "no gear". */
-function gearColorCount(style: number, lists: AppearanceRollLists): number {
-  return style === -1 ? 0 : lists.clothingColorCount;
+/**
+ * The colour count SetHeadgearStyle / SetShirtStyle … store: 0 for "no gear", else the item's own
+ * (StoreColorInformation) when known, else the page's clothingColorsList. A roll past the item's
+ * own count went out as a colour the item does not have, and was clamped later when its file
+ * arrived: an AC1999 chargen resume came back with a different colour (2026-10-29).
+ */
+function gearColorCount(style: number, lists: AppearanceRollLists, slot: ClothingSlot, a: AppearanceState): number {
+  if (style === -1) return 0;
+  return lists.itemColorCount?.(slot, a) ?? lists.clothingColorCount;
 }
 
 /**
@@ -340,13 +355,13 @@ export function randomizeHeadgear(src: ChargenRandomSource, a: AppearanceState, 
       ? randIntExcluding(src, lists.headgearCount + 1, a.headgearStyle + 1)
       : randInt(src, lists.headgearCount + 1);
     a.headgearStyle = draw - 1;
-    const colours = gearColorCount(a.headgearStyle, lists);
+    const colours = gearColorCount(a.headgearStyle, lists, 'headgear', a);
     if (a.headgearStyle !== -1) {
       if (a.headgearColor < 0) a.headgearColor = 0;
       if (colours <= a.headgearColor) a.headgearColor = colours - 1;
     }
   }
-  const colours = gearColorCount(a.headgearStyle, lists);
+  const colours = gearColorCount(a.headgearStyle, lists, 'headgear', a);
   if (colours !== 0) a.headgearColor = randIntExcluding(src, colours, a.headgearColor);
   a.headgearHue = randomReal(src);
 }
@@ -355,9 +370,10 @@ export function randomizeHeadgear(src: ChargenRandomSource, a: AppearanceState, 
 export function randomizeShirt(src: ChargenRandomSource, a: AppearanceState, lists: AppearanceRollLists): void {
   if (lists.shirtCount !== 0) {
     a.shirtStyle = randIntExcluding(src, lists.shirtCount, a.shirtStyle);
-    if (lists.clothingColorCount <= a.shirtColor) a.shirtColor = lists.clothingColorCount - 1;
+    const held = gearColorCount(a.shirtStyle, lists, 'shirt', a);
+    if (held <= a.shirtColor) a.shirtColor = held - 1;
   }
-  const colours = gearColorCount(a.shirtStyle, lists);
+  const colours = gearColorCount(a.shirtStyle, lists, 'shirt', a);
   if (colours !== 0) a.shirtColor = randIntExcluding(src, colours, a.shirtColor);
   a.shirtHue = randomReal(src);
 }
@@ -366,9 +382,10 @@ export function randomizeShirt(src: ChargenRandomSource, a: AppearanceState, lis
 export function randomizeTrousers(src: ChargenRandomSource, a: AppearanceState, lists: AppearanceRollLists): void {
   if (lists.pantsCount !== 0) {
     a.pantsStyle = randIntExcluding(src, lists.pantsCount, a.pantsStyle);
-    if (lists.clothingColorCount <= a.pantsColor) a.pantsColor = lists.clothingColorCount - 1;
+    const held = gearColorCount(a.pantsStyle, lists, 'pants', a);
+    if (held <= a.pantsColor) a.pantsColor = held - 1;
   }
-  const colours = gearColorCount(a.pantsStyle, lists);
+  const colours = gearColorCount(a.pantsStyle, lists, 'pants', a);
   if (colours !== 0) a.pantsColor = randIntExcluding(src, colours, a.pantsColor);
   a.pantsHue = randomReal(src);
 }
@@ -377,9 +394,10 @@ export function randomizeTrousers(src: ChargenRandomSource, a: AppearanceState, 
 export function randomizeFootwear(src: ChargenRandomSource, a: AppearanceState, lists: AppearanceRollLists): void {
   if (lists.footwearCount !== 0) {
     a.footwearStyle = randIntExcluding(src, lists.footwearCount, a.footwearStyle);
-    if (lists.clothingColorCount <= a.footwearColor) a.footwearColor = lists.clothingColorCount - 1;
+    const held = gearColorCount(a.footwearStyle, lists, 'footwear', a);
+    if (held <= a.footwearColor) a.footwearColor = held - 1;
   }
-  const colours = gearColorCount(a.footwearStyle, lists);
+  const colours = gearColorCount(a.footwearStyle, lists, 'footwear', a);
   if (colours !== 0) a.footwearColor = randIntExcluding(src, colours, a.footwearColor);
   a.footwearHue = randomReal(src);
 }
@@ -427,11 +445,36 @@ export function resetAppearance(a: AppearanceState): void {
 }
 
 /** The colour count each clothing slot's chosen item offers (CharGenState::num<Slot>Colors, set by Set<Slot>Style). */
+/** Each slot's item colour count (StoreColorInformation); null = its ClothingTable is not resident yet. */
 export interface ClothingColorCounts {
-  readonly headgear: number;
-  readonly shirt: number;
-  readonly pants: number;
-  readonly footwear: number;
+  readonly headgear: number | null;
+  readonly shirt: number | null;
+  readonly pants: number | null;
+  readonly footwear: number | null;
+}
+
+/**
+ * Set<Slot>Style's colour hold for every slot whose count is known: with a style chosen, colour < 0
+ * → 0, colour >= num → num − 1. Retail held it the moment the style was set; a streamed page knows
+ * an item's count only once its ClothingTable arrives, so the page applies this again then
+ * (UX.chargen-resume: a colour rolled before it, past the item's count, changed after a resume).
+ * Returns whether anything changed.
+ */
+export function clampClothingColors(a: AppearanceState, counts: ClothingColorCounts | null | undefined): boolean {
+  if (!counts) return false;
+  let changed = false;
+  const hold = (style: number, c: number, n: number | null): number => {
+    if (style === -1 || n === null) return c;
+    let v = c < 0 ? 0 : c;
+    if (n <= v) v = n - 1;
+    if (v !== c) changed = true;
+    return v;
+  };
+  a.headgearColor = hold(a.headgearStyle, a.headgearColor, counts.headgear);
+  a.shirtColor = hold(a.shirtStyle, a.shirtColor, counts.shirt);
+  a.pantsColor = hold(a.pantsStyle, a.pantsColor, counts.pants);
+  a.footwearColor = hold(a.footwearStyle, a.footwearColor, counts.footwear);
+  return changed;
 }
 
 /**
@@ -465,8 +508,9 @@ export function constrainAppearance(a: AppearanceState, lists: AppearanceRollLis
   a.footwearStyle = top(a.footwearStyle, lists.footwearCount);
   if (!colorCounts) return;
   // Set<Slot>Style(style): with a style chosen, colour < 0 → 0, colour >= num → num − 1.
-  const color = (style: number, c: number, n: number): number => {
-    if (style === -1) return c;
+  // A count not known yet (the item's ClothingTable still streaming) holds nothing: clampClothingColors runs when it lands.
+  const color = (style: number, c: number, n: number | null): number => {
+    if (style === -1 || n === null) return c;
     let v = c < 0 ? 0 : c;
     if (n <= v) v = n - 1;
     return v;

@@ -851,6 +851,8 @@ export class ClientConnection {
     });
     this.loginRejectRetryTimer = setTimeout(() => {
       this.loginRejectRetryTimer = null;
+      // A socket the page did not ask for: say so (a live probe could not tell what opened it, 2026-10-29).
+      console.log(`[AC:NET] Stale-session login retry ${this.loginRejectRetryAttempts}: opening a new session socket`);
       this.doConnect(this.lastAccount, this.lastPassword);
     }, ClientConnection.LOGIN_REJECT_RETRY_MS);
     return true;
@@ -1135,6 +1137,7 @@ export class ClientConnection {
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      console.log(`[AC:NET] Auto-reconnect attempt ${this.reconnectAttempts}: opening a new session socket`);
       this.doConnect(this.lastAccount, this.lastPassword);
     }, delay);
   }
