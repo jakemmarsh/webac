@@ -2429,6 +2429,8 @@ export class ServerObjectManager {
    * of again (a monster that died out of sight) stays gone.
    */
   private maintReleased = new Map<number, CreateObjectData>();
+  /** The records ObjectMaint let go and still keeps (TELEMETRY.objsend-diagnostics counts them). */
+  releasedRecords(): IterableIterator<CreateObjectData> { return this.maintReleased.values(); }
   /** Most released records kept (oldest dropped first). */
   static readonly MAINT_RELEASED_MAX = 1024;
 

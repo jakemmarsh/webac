@@ -57,7 +57,7 @@ import type { ServerRegistry } from './serverList.js';
 import type { ServerDirectory } from './serverDirectory.js';
 import { sanitizeClientError } from './clientErrors.js';
 import { sanitizeClientPreworld, traceFromUrl } from './clientPreworld.js';
-import { isPortalOutcome, isWorldOutcome, sanitizeClientPortal, sanitizeClientWorld } from './clientWorld.js';
+import { isObjsendOutcome, isPortalOutcome, isWorldOutcome, sanitizeClientObjsend, sanitizeClientPortal, sanitizeClientWorld } from './clientWorld.js';
 import { isRefusalOutcome, sanitizeClientRefusal } from './clientRefusal.js';
 import { isAutomationOutcome, sanitizeClientAutomation } from './clientAutomation.js';
 import { RecentEventIds } from './eventIds.js';
@@ -353,7 +353,18 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         return 204;
       }
       const portal = body && typeof body === 'object' && isPortalOutcome((body as { outcome?: unknown }).outcome);
-      if (!(portal ? clientPortalRate : clientPreworldRate).hit(ip)) return 429;
+      // TELEMETRY.objsend-diagnostics — objsend / objsend_after (renderer ObjsendReporter: 2 per command, 10 commands
+      // per page) share the portal events' budget: in-world diagnostics that never spend the pre-world ones'.
+      const objsend = body && typeof body === 'object' && isObjsendOutcome((body as { outcome?: unknown }).outcome);
+      if (!(portal || objsend ? clientPortalRate : clientPreworldRate).hit(ip)) return 429;
+      if (objsend) {
+        const oev = sanitizeClientObjsend(body);
+        if (!oev) return 400;
+        if (recentEventIds.repeat(oev.eid)) return 204;
+        metrics.clientPreworldEvent(oev.outcome);
+        log('info', 'client_world', { ip, ...Object.fromEntries(Object.entries(oev).filter(([, v]) => v !== null)) });
+        return 204;
+      }
       // TELEMETRY.portal-use-failed — a portal that did nothing / the normal path's timing: also a client_world line.
       if (portal) {
         const pev = sanitizeClientPortal(body);

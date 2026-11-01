@@ -317,6 +317,89 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
   };
 }
 
+/**
+ * TELEMETRY.objsend-diagnostics — the client's object table when the player typed ACE's @objsend, and
+ * 5 s later (renderer telemetry/ObjsendReporter.ts). Counts, a hex cell and wcid / ItemType numbers only.
+ */
+export const OBJSEND_OUTCOMES = ['objsend', 'objsend_after'] as const;
+/** The command count a page reports (renderer MAX_OBJSEND_EVENTS 10, with slack). */
+const OBJSEND_MAX_SEQ = 100;
+/** An object count: the client's whole table stays far below this. */
+const OBJ_COUNT = 1_000_000;
+/** wcids / ItemTypes kept (renderer OBJSEND_TOP). */
+const OBJSEND_TOP = 5;
+
+export interface ClientObjsendEvent extends WorldIds {
+  outcome: typeof OBJSEND_OUTCOMES[number];
+  seq: number | null;
+  msSinceTeleport: number | null;
+  playerCell: string | null;
+  serverObjects: number | null;
+  placed: number | null;
+  inView: number | null;
+  unrendered: number | null;
+  lostCell: number | null;
+  noMesh: number | null;
+  detached: number | null;
+  invisible: number | null;
+  hiddenByState: number | null;
+  culledByCell: number | null;
+  topWcids: number[] | null;
+  topItemTypes: number[] | null;
+  released: number | null;
+  releasedInView: number | null;
+  pendingLoads: number | null;
+  unresolvedMisses: number | null;
+  portalSpace: boolean | null;
+  /** objsend_after only. */
+  createsNew?: number | null;
+  createsKnown?: number | null;
+  deletes?: number | null;
+}
+
+export function isObjsendOutcome(v: unknown): boolean {
+  return pick(v, OBJSEND_OUTCOMES) !== null;
+}
+
+/** Up to OBJSEND_TOP u32s; null when not an array. */
+function u32List(v: unknown): number[] | null {
+  if (!Array.isArray(v)) return null;
+  return v.slice(0, OBJSEND_TOP).map((x) => uint(x, U32)).filter((x): x is number => x !== null);
+}
+
+/** Validate a posted objsend event field by field (the world events' ids and rules); null when it is not one. */
+export function sanitizeClientObjsend(body: unknown): ClientObjsendEvent | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const b = body as Record<string, unknown>;
+  const outcome = pick(b.outcome, OBJSEND_OUTCOMES);
+  if (!outcome) return null;
+  const n = (k: string): number | null => uint(b[k], OBJ_COUNT);
+  return {
+    outcome, ...worldIds(b),
+    seq: uint(b.seq, OBJSEND_MAX_SEQ),
+    msSinceTeleport: uint(b.msSinceTeleport, SESSION_MS),
+    playerCell: match(b.playerCell, /^[0-9a-f]{8}$/),
+    serverObjects: n('serverObjects'),
+    placed: n('placed'),
+    inView: n('inView'),
+    unrendered: n('unrendered'),
+    lostCell: n('lostCell'),
+    noMesh: n('noMesh'),
+    detached: n('detached'),
+    invisible: n('invisible'),
+    hiddenByState: n('hiddenByState'),
+    culledByCell: n('culledByCell'),
+    topWcids: u32List(b.topWcids),
+    topItemTypes: u32List(b.topItemTypes),
+    released: n('released'),
+    releasedInView: n('releasedInView'),
+    pendingLoads: n('pendingLoads'),
+    unresolvedMisses: n('unresolvedMisses'),
+    portalSpace: bool(b.portalSpace),
+    ...(outcome === 'objsend_after' ? { createsNew: n('createsNew'), createsKnown: n('createsKnown'), deletes: n('deletes') } : {}),
+  };
+}
+
 export type ClientWorldEvent = ClientFirstMinuteEvent | ClientWorldLeftEvent;
 export type ClientPortalEvent = ClientPortalUseFailedEvent | ClientPortalUsedEvent;
 

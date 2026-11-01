@@ -100,6 +100,35 @@ export interface ViewerLoadPoint {
 }
 
 /**
+ * The viewer's cell for CellManager::ChangePosition (BUG.walkin-dungeon-objects-lost,
+ * webac#15): the dungeon cell after a teleport into one; else the env cell
+ * the player walked into from the street (a building, or a whole complex
+ * under a walk-in hole such as the Sword of Bellenesse dungeon 0x40D8,
+ * whose deeper rooms are not SeenOutside); else the outdoor block.
+ * Retail keys the load on the player's own cell, however it got there
+ * (CPhysicsObj::change_cell → SmartBox::PlayerPositionUpdated →
+ * ChangePosition), so a walked-into sealed cell is as sealed as a
+ * teleported-into one. `sealed`: the viewer is in an env cell without
+ * SeenOutside (LScape::release_all).
+ */
+export function viewerLoadCell(p: {
+  inDungeon: boolean;
+  dungeonCellId: number;
+  surfaceCellId: number;
+  worldX: number;
+  worldY: number;
+  isSeenOutside: (cellId: number) => boolean;
+}): { viewerCellId: number; sealed: boolean } {
+  let viewerCellId: number;
+  // Interior mode (a teleport into an env cell) keeps its own rule: sealed unless the cell sees outside.
+  if (p.inDungeon && p.dungeonCellId) return { viewerCellId: p.dungeonCellId >>> 0, sealed: !p.isSeenOutside(p.dungeonCellId >>> 0) };
+  if (!p.inDungeon && p.surfaceCellId && isInteriorCellIndex(p.surfaceCellId & 0xFFFF)) viewerCellId = p.surfaceCellId >>> 0;
+  else viewerCellId = ((((Math.floor(p.worldX / 192) & 0xFF) << 24) | ((Math.floor(p.worldY / 192) & 0xFF) << 16) | 0xFFFF) >>> 0);
+  const sealed = isInteriorCellIndex(viewerCellId & 0xFFFF) && !p.isSeenOutside(viewerCellId);
+  return { viewerCellId, sealed };
+}
+
+/**
  * Whether a full cell id is loaded for this viewer (CellManager::ChangePosition
  * + LScape grid + env-cell set, see the module doc).
  */
@@ -120,6 +149,16 @@ export function isCellLoaded(cellId: number, v: ViewerLoadPoint): boolean {
     const seen = v.visibleCells?.(v.viewerCellId >>> 0);
     if (!seen) return true;
     return Array.isArray(seen) ? seen.includes(index) : (seen as ReadonlySet<number>).has(index);
+  }
+  // BUG.walkin-dungeon-objects-lost (webac#15) — a viewer in a SeenOutside
+  // env cell keeps the landscape AND grabs its own cell's visible cells:
+  // ChangePosition @ 004559b0 calls the cell's grab_visible (vtable +0x70)
+  // whether or not it sees outside, so a sealed room on its stab list (the
+  // dungeon beyond a walk-in hole's stairs) stays loaded with its objects.
+  if (interior && isInteriorCellIndex(v.viewerCellId & 0xFFFF) && bx === vx && by === vy) {
+    if (id === (v.viewerCellId >>> 0)) return true;
+    const seen = v.visibleCells?.(v.viewerCellId >>> 0);
+    if (seen && (Array.isArray(seen) ? seen.includes(index) : (seen as ReadonlySet<number>).has(index))) return true;
   }
   // LScape::get_landblock: a block outside the full-detail ring has no cells.
   if (Math.max(Math.abs(bx - vx), Math.abs(by - vy)) > objectRingRadius(v.midRadius)) return false;

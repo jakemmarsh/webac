@@ -35,6 +35,7 @@ import { sanitizeClientRefusal } from '../services/ws-tcp-bridge/src/clientRefus
 import { resolveBridgeConfig, type BridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil';
 import { createBridgeServer } from '../services/ws-tcp-bridge/src/server';
 import { GameUI } from '../packages/renderer/src/ui/GameUI';
+import { shortcutIneligibleText, shortcutDuplicateText, SHORTCUT_NO_FREE_SLOTS_TEXT } from '../packages/renderer/src/network/itemShortcutRestore';
 import { InventoryRequestTracker, InventoryRequest, weenieErrorText, weenieErrorWithStringText } from '../packages/shared/src/index';
 import { gateInventoryRequestSend } from '../packages/renderer/src/inventory/InventoryRequests';
 import { USE_STATUS_TEMPLATES, USE_TARGET_PROMPT_TEMPLATE, isUseStatusNotice } from '../packages/renderer/src/input/UseObject';
@@ -467,18 +468,25 @@ describe('end of retail: the server refusals ACE / GDLE send', () => {
   });
 });
 
-describe('AC1999: the 1999 server refusals reach the same reporter', () => {
-  const PLAYER = 0x50000003;
-  function feed1999(r: RefusalReporter) {
-    const c = emptyCodecs();
-    registerCombat1999(c, { player: () => ({ guid: PLAYER, eventSequence: 0 }) });
-    registerInventory1999(c, { player: () => ({ guid: PLAYER, eventSequence: 100 } as Player1999State) });
-    registerMovement1999(c);
-    const adapter = new Adapter1999(c, { account: 'acjs', log: () => {} });
-    const h = serverHooks(r, { displayErrorText: (t) => r.clientSpew(t), addSystemMessage: () => {} });
-    return (bytes: Uint8Array) => { for (const e of adapter.inbound(bytes, 4)) h.handleMessage(deserializeMessage(e)); };
-  }
+const PLAYER = 0x50000003;
+/** AC1999 bytes through the real 1999 adapter into the real handler and the reporter. */
+function feed1999(r: RefusalReporter) {
+  const c = emptyCodecs();
+  registerCombat1999(c, { player: () => ({ guid: PLAYER, eventSequence: 0 }) });
+  registerInventory1999(c, { player: () => ({ guid: PLAYER, eventSequence: 100 } as Player1999State) });
+  registerMovement1999(c);
+  const adapter = new Adapter1999(c, { account: 'acjs', log: () => {} });
+  const h = serverHooks(r, { displayErrorText: (t) => r.clientSpew(t), addSystemMessage: () => {} });
+  return (bytes: Uint8Array) => { for (const e of adapter.inbound(bytes, 4)) h.handleMessage(deserializeMessage(e)); };
+}
 
+/** An AC1999 0xF62C server text (LTT_ERROR, 0x1A), as the 1999 server's SendText sends it. */
+function feed1999Text(r: RefusalReporter) {
+  const feed = feed1999(r);
+  return (text: string) => feed(new Writer1999().u32(0xf62c).acString(text).u32(0x1a).toBytes());
+}
+
+describe('AC1999: the 1999 server refusals reach the same reporter', () => {
   it('0x1C AttemptFailed, 0xA0 NotifyInventoryFailed, 0xF62C text refusals and 0x2EB overlay text', () => {
     const g = rig('ac1999-retail');
     const feed = feed1999(g.r);
@@ -734,6 +742,88 @@ describe('name safety: no character or object name ever leaves in a refusal', ()
       expect(BASE_REFUSAL_VOCABULARY.lower.has(w), w).toBe(true);
       expect(BASE_REFUSAL_VOCABULARY.exact.has(w[0].toUpperCase() + w.slice(1)), w).toBe(false);
     }
+  });
+
+  it('TELEMETRY.refusal-template-word-sweep: ACE\'s sell refusal keeps "unsellable" (prod t:97a94890 was "The _ is _.")', () => {
+    // ACE Player_Commerce.cs:271 / :278 send these as GameEventCommunicationTransientString (0x02EB), item name in.
+    // main.ts's scrub knows the pack's item names (knownObjectNames); the line goes through it, then nameSafeText.
+    const g = rig('eor', (t) => scrubNames(t, ['Pyreal Scarab', 'Danath Tunic']));
+    const ui = { displayErrorText: () => {}, addSystemMessage: () => {} };
+    const h = serverHooks(g.r, ui);
+    const transient = (text: string) => {
+      const w = new BinaryWriter(128); w.writeString16(text);
+      h.handleMessage(deserializeMessage(serializeGameEvent(1, 0x02eb, w.toBuffer(), 0x50000001)));
+    };
+    transient('The Pyreal Scarab is unsellable.');
+    transient('The Danath Tunic has no value and cannot be sold.');
+    expect(g.events.map((e) => [e.source, e.context, e.text])).toEqual([
+      ['server', 'transient', 'The _ is unsellable.'],
+      ['server', 'transient', 'The _ has no value and cannot be sold.'],
+    ]);
+    expect(g.events[0].code).toBe(`t:${refusalHash('The _ is unsellable.')}`);
+    // The old, colliding code is gone: it was any "The X is Y." line.
+    expect(refusalHash('The _ is _.')).toBe('97a94890');
+    expect(g.events[0].code).not.toBe('t:97a94890');
+    expect(g.events[0].code).not.toBe(g.events[1].code);
+    noName(g.events);
+    // The bridge keeps the page's text whole.
+    expect(sanitizeClientRefusal({ outcome: 'refusal', code: g.events[0].code, text: g.events[0].text })!.text).toBe('The _ is unsellable.');
+    // An item name the client doesn't know still goes by the vocabulary alone (an unknown word is '_').
+    const u = rig('eor');
+    u.r.serverText('transient', 'The Nsight Scarab is unsellable.', null);
+    expect(u.events[0]).toMatchObject({ text: 'The _ is unsellable.', code: g.events[0].code });
+  });
+
+  it('TELEMETRY.refusal-template-word-sweep: every swept server template (all three eras) keeps its fixed words', () => {
+    // tests/fixtures/refusal-template-corpus.json: the refusal-like templates ('_' per slot) of ACE / ClassicACE
+    // GameEventCommunicationTransientString + GameMessageSystemChat, the WeenieError / WeenieErrorWithString enum
+    // texts, and the AC1999 / ClassicDereth / Seedsow SendText calls and WERROR_ comments, swept 2026-11-01; then the
+    // client's own refusal-shaped spew literals in packages/renderer/src and packages/shared/src.
+    const corpus = JSON.parse(readFileSync(resolve(__dirname, 'fixtures/refusal-template-corpus.json'), 'utf8')) as { text: string; where: string }[];
+    expect(corpus.length).toBeGreaterThan(800);
+    // TELEMETRY.refusal-client-word-sweep: the client's own refusal-shaped spew literals (packages/…) too.
+    for (const era of ['ACE/', 'ac1999/', 'classic/ClassicACE/', 'classic/ClassicDereth/', 'classic/Seedsow/', 'packages/renderer/src/', 'packages/shared/src/']) {
+      expect(corpus.some((r) => r.where.startsWith(era)), era).toBe(true);
+    }
+    const WORD = /[A-Za-z]+(?:'[A-Za-z]+)*/g;
+    const lost: string[] = [];
+    for (const { text, where } of corpus) {
+      const r = scrubToVocabulary(text, REFUSAL_VOCABULARY);
+      const kept = new Set([...r.scrubbed.matchAll(WORD)].map((m) => m[0]));
+      const gone = [...text.replace(/_'s\b/g, '_').matchAll(WORD)].map((m) => m[0]).filter((w) => !kept.has(w));
+      if (gone.length) lost.push(`${where}: ${text} [${gone.join(' ')}]`);
+    }
+    expect(lost).toEqual([]);
+    // Through the reporter with a name in the slot: the name goes, the template's words stay (AC1999's healer line).
+    const g = rig('ac1999-retail');
+    const feed = feed1999Text(g.r);
+    feed('You fail to heal yourself. Your Nimic Kit has 3 uses left.');
+    expect(g.events[0]?.text).toBe('You fail to heal yourself. Your _ has # uses left.');
+    noName(g.events);
+    // The added words are ordinary English; the capitalized ones are sentence starts, never a name in the test set.
+    for (const w of ['unsellable', 'uses', 'value', 'workmanship', 'privacy']) expect(BASE_REFUSAL_VOCABULARY.lower.has(w), w).toBe(true);
+    for (const n of PLAYERS) for (const part of n.split(' ')) expect(REFUSAL_VOCABULARY.exact.has(part), part).toBe(false);
+  });
+
+  it('TELEMETRY.refusal-client-word-sweep: the client\'s shortcut refusal keeps "shortcut" (prod c:44711de0 was "You cannot make a _ to the _")', () => {
+    // CreateShortcutToItem's .rdata literals, printed to the spew (0x1a) by the client itself.
+    const g = rig('eor', (t) => scrubNames(t, ['Pyreal Scarab', 'Danath Tunic']));
+    g.r.clientSpew(shortcutIneligibleText('Pyreal Scarab'));
+    g.r.clientSpew(shortcutDuplicateText('Danath Tunic'));
+    g.r.clientSpew(SHORTCUT_NO_FREE_SLOTS_TEXT);
+    expect(g.events.map((e) => [e.source, e.context, e.text])).toEqual([
+      ['client', 'spew', 'You cannot make a shortcut to the _'],
+      ['client', 'spew', 'There is already a shortcut to the _'],
+      ['client', 'spew', 'There are no free shortcut slots'],
+    ]);
+    expect(g.events[0].code).toBe(`c:${refusalHash('You cannot make a shortcut to the _')}`);
+    expect(refusalHash('You cannot make a _ to the _')).toBe('44711de0');
+    expect(new Set(g.events.map((e) => e.code)).size).toBe(3);
+    noName(g.events);
+    // An item the client doesn't know: the vocabulary alone still keeps the template.
+    const u = rig('ac1999-retail');
+    u.r.clientSpew(shortcutIneligibleText('Nsight Kit'));
+    expect(u.events[0]).toMatchObject({ text: 'You cannot make a shortcut to the _', code: g.events[0].code });
   });
 
   it('every capitalized word the page may send is one the bridge vouches for', () => {

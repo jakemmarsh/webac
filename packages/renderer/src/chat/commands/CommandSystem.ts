@@ -101,6 +101,11 @@ export interface CoreCommandContext {
   radarRange?(): number;
   /** 0x004d0170: UseObject on a vendor, its shop opening on the buy or sell page. */
   useVendor?(id: number, page: 'buy' | 'sell'): void;
+  /**
+   * A command line the client has no handler for went to the server as Event_Talk (DoCommand's
+   * fall-through: every ACE '@' command, e.g. @objsend). Telemetry only (TELEMETRY.objsend-diagnostics).
+   */
+  serverCommandSent?(line: string): void;
 }
 
 /** An object a 1999 tell can be addressed to (ChatEntryField_TargetedChat). */
@@ -505,7 +510,7 @@ export class CommandSystem<C extends CoreCommandContext> {
       const channel = this.style === 'ac1999'
         ? doChannelCommand1999(this.ctx, line.slice(1))
         : this.doChannelCommand(command, argv);
-      if (!channel) eventTalk(this.ctx, line);
+      if (!channel && eventTalk(this.ctx, line)) this.ctx.serverCommandSent?.(line);
       return true;
     }
     if (!entry.handler(run, argv)) this.ctx.print(NOT_A_VALID_COMMAND, CHAT_TYPE_COMMAND, ALL_WINDOWS);

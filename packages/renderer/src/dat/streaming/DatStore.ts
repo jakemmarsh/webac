@@ -818,6 +818,9 @@ export class DatStore {
   /** Network requests waiting for a slot (all priorities). */
   get queuedFetches(): number { return this.limiter.pending; }
 
+  /** Files being loaded now (fetching, queued or inflating): TELEMETRY.objsend-diagnostics' pendingLoads. */
+  get pendingFileLoads(): number { return this.fileLoads.size; }
+
   // ── internals ────────────────────────────────────────────────────────────
 
   private emitResident(key: FileKey): void {

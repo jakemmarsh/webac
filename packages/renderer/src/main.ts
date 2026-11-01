@@ -64,7 +64,7 @@ import { applyViewerFade } from './scene/ViewerFade.js';
 import { yawFromAcQuaternion } from './scene/AcHeading.js';
 import { TerrainManager } from './terrain/TerrainManager.js';
 import { normalizeLandscapeDrawDistance, adaptedDrawDistance, adaptiveDrawDistanceSteps } from './world/LandscapeDrawDistance.js';
-import { isCellLoaded as isObjectCellLoaded } from './world/ObjectMaint.js';
+import { isCellLoaded as isObjectCellLoaded, viewerLoadCell } from './world/ObjectMaint.js';
 import { textureSamplerPrefs, type TexturePrefValues } from './models/TextureSamplerPrefs.js';
 import { detailTexturing } from './models/DetailTexturing.js';
 import { DegradeLod } from './models/DegradeLod.js';
@@ -110,12 +110,12 @@ import { StepSmoother, updateLocalStepLag } from './animation/StepSmoother.js';
 import { FrameClock } from './scene/FrameClock.js';
 import { CharacterAnimController, jumpChargeSeconds } from './animation/CharacterAnimController.js';
 import { MotionCommand, MotionStance, isSubstateCommand } from './animation/MotionCommands.js';
-import { KeybindRegistry, eventToCode } from './input/KeybindRegistry.js';
+import { eventToCode } from './input/KeybindRegistry.js';
 import { wheelZoomDirections } from './ui/MouseTurningDefaults.js';
 import { ACT, MOVEMENT_CANONICAL, activeInputMaps } from './input/KeybindDefaults.js';
 import { dispatchGameAction, isTellableSelection, channelReplyPartner, CHAT_COMMAND_PREFIX, type ActionHost } from './input/ActionDispatch.js';
 import { routeGameKeyDown, keyDownConsumed } from './input/GameKeyDown.js';
-import { keybindDefaultsFor, keybindStorageKey } from './input/EraKeymaps.js';
+import { loadEraKeybinds, saveEraKeybinds, type KeybindStore } from './input/EraKeymaps.js';
 import { stepPowerLevel } from './controllers/PowerBarStep.js';
 import { combatClickSelectRefused } from './controllers/CombatClickSelect.js';
 import { buildEmoteMotionMap } from './input/EmoteActionMap.js';
@@ -438,6 +438,7 @@ import { FramePhaseTimer, PHASE, ProgramCreationCounter, CompileTrace, netHandle
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
+import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
 import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
@@ -859,6 +860,8 @@ let worldReporter: WorldReporter | null = null;
 let automationReporter: AutomationReporter | null = null;
 /** TELEMETRY.portal-use-failed — a portal tried that did nothing, and the normal path's timing (telemetry/PortalUseReporter.ts). */
 let portalUseReporter: PortalUseReporter | null = null;
+/** TELEMETRY.objsend-diagnostics — the object table when the player types ACE's @objsend, and 5 s later (telemetry/ObjsendReporter.ts). */
+let objsendReporter: ObjsendReporter | null = null;
 /** TELEMETRY.refusal-events — every refusal the player saw, client- or server-made (telemetry/RefusalReporter.ts). */
 let refusalReporter: RefusalReporter | null = null;
 /** Run `f` with the refusal reporter's client spew tap off (server text shown through the spew, chat-command feedback). */
@@ -1354,6 +1357,18 @@ async function main() {
     snapshot: (guid) => portalSnapshot(guid),
   });
   portalUseReporter.install(window, document);
+  objsendReporter = new ObjsendReporter({
+    endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
+    build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
+    trace: preworldReporter.trace,
+    era: () => activeEra.id,
+    server: () => preworldServer(),
+    // ACE and the ACE-based classic servers have @objsend; the AC1999 server has no equivalent.
+    enabled: () => activeEra.login.protocol !== 'ac1999',
+    snapshot: () => objsendSnapshot(),
+    heldGuids: () => serverObjectManager?.getAllObjects().keys() ?? [],
+  });
+  objsendReporter.install(window, document);
   refusalReporter = new RefusalReporter({
     endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
     build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
@@ -2079,8 +2094,8 @@ async function main() {
   // keys for every command, so it is left behind rather than overlaid.
   // SWEEP1999.input — the defaults are the era client's (eraClientRules().keymap: the portal
   // KeyMaps, or the 1999 Default.map), and each keymap keeps its own save.
-  const KEYBINDS_STORAGE_KEY = keybindStorageKey(eraRules.keymap);
-  const keybinds = new KeybindRegistry(keybindDefaultsFor(eraRules.keymap));
+  const keybindStore = (): KeybindStore | null => { try { return localStorage; } catch { return null; } };
+  const keybinds = loadEraKeybinds(eraRules.keymap, keybindStore());
   // The registered input maps follow the combat mode (ClientCombatSystem::
   // RegisterInputMaps @ 0056aa20 swaps the melee / missile / magic map on
   // every SetCombatMode); re-derived from hudState on each key event.
@@ -2089,16 +2104,12 @@ async function main() {
   const syncActiveInputMaps = (): void => {
     keybinds.setActiveInputMaps(activeInputMaps(gameUI.hudState.combatMode, altCameraHeld));
   };
-  try {
-    const saved = localStorage.getItem(KEYBINDS_STORAGE_KEY);
-    if (saved) keybinds.loadSerialized(saved);
-  } catch { /* storage disabled — defaults stand */ }
   // CORE.18.b.a.a.a.a.a.b.a — the wheel zooms only while a Zoom Camera In /
   // Out mapping is a wheel sub-control (the mouse-turning bindings).
   const syncWheelZoom = (): void => { cameraController.wheelZoom = wheelZoomDirections(keybinds); };
   syncWheelZoom();
   const persistKeybinds = () => {
-    try { localStorage.setItem(KEYBINDS_STORAGE_KEY, keybinds.serialize()); } catch { /* ignore */ }
+    saveEraKeybinds(keybinds, eraRules.keymap, keybindStore());
     syncWheelZoom();
   };
   // Movement/hold keys: translate a (possibly rebound) physical key to the
@@ -3621,6 +3632,24 @@ async function main() {
       playerCell: me?.cellId ? me.cellId >>> 0 : null, portalCell: p?.landblock ? p.landblock >>> 0 : null,
     };
   }
+  /** TELEMETRY.objsend-diagnostics — when handleTeleportToPosition last placed the player (performance.now ms); null = not this session. */
+  let lastTeleportArrivalAt: number | null = null;
+  /** The object table around the player for the objsend telemetry (telemetry/ObjsendReporter.ts); null outside the world. */
+  function objsendSnapshot(): ObjsendSnapshot | null {
+    if (!gameStarted || !serverObjectManager) return null;
+    const me = movementSync?.lastSentFrame ?? null;
+    const counts = summarizeObjects(serverObjectManager.getAllObjects().values(), { x: playerWorldX, z: playerWorldZ, guid: aceCharGuid ?? myPlayerGuid ?? 0 });
+    const stores = [...new Set([streamingDats, worldStreamingDats])].filter((x): x is StreamingDats => !!x);
+    return {
+      ...counts,
+      ...countReleasedInView(serverObjectManager.releasedRecords(), me),
+      msSinceTeleport: lastTeleportArrivalAt === null ? null : Math.max(0, Math.round(performance.now() - lastTeleportArrivalAt)),
+      playerCell: me?.cellId ? (me.cellId >>> 0).toString(16).padStart(8, '0') : null,
+      pendingLoads: stores.length ? stores.reduce((n, sd) => n + sd.store.pendingFileLoads, 0) : null,
+      unresolvedMisses: stores.length ? stores.reduce((n, sd) => n + sd.store.stats.unresolvedMisses, 0) : null,
+      portalSpace: gameUI.worldHiddenByPortalSpace,
+    };
+  }
   /** The portal telemetry's 100 ms check: its verdict clock, and which portals the body stands in (the walk-in try). */
   let portalCheckAt = 0;
   function portalUseCheck(now: number): void {
@@ -3657,13 +3686,18 @@ async function main() {
    * with object cells, BUG.ghost-objects — or only the dungeon's env cells
    * around a sealed one)? world/ObjectMaint.ts.
    */
+  function objectLoadViewer(): { viewerCellId: number; sealed: boolean } {
+    // BUG.walkin-dungeon-objects-lost — the cell the player walked into counts (webac#15).
+    return viewerLoadCell({
+      inDungeon: playerInDungeon, dungeonCellId: dungeonLandblockId ?? 0, surfaceCellId: currentSurfaceCellId,
+      worldX: playerWorldX, worldY: playerWorldZ, isSeenOutside: isCellSeenOutside,
+    });
+  }
   function objectCellLoaded(cellId: number): boolean {
-    const viewerCellId = playerInDungeon && dungeonLandblockId
-      ? dungeonLandblockId
-      : ((((Math.floor(playerWorldX / 192) & 0xFF) << 24) | ((Math.floor(playerWorldZ / 192) & 0xFF) << 16) | 0xFFFF) >>> 0);
+    const { viewerCellId, sealed } = objectLoadViewer();
     return isObjectCellLoaded(cellId, {
       viewerCellId,
-      sealed: playerInDungeon && !!dungeonLandblockId && !isCellSeenOutside(dungeonLandblockId),
+      sealed,
       midRadius: landblockObjects.loadRadius,
       isSeenOutside: isCellSeenOutside,
       visibleCells: envCellVisibleCells,
@@ -5755,6 +5789,7 @@ async function main() {
    * Transitions between outdoor↔indoor, repositions camera, loads new area.
    */
   function handleTeleportToPosition(landblock: number, x: number, y: number, z: number, rw: number, rx: number, ry: number, rz: number): void {
+    lastTeleportArrivalAt = performance.now();
     // ASSESS — a teleport supersedes any in-flight smooth correction.
     activeCorrection = null;
     playerStepSmoother.reset();
@@ -6126,6 +6161,7 @@ async function main() {
     inventoryRequests.clear();
     playerMoveTo?.cancelMoveTo(); // world teardown ends a server MoveTo
     pendingTeleport = false;
+    lastTeleportArrivalAt = null;
     activeCorrection = null;
     // Server objects + our own avatar.
     serverObjectManager?.clear();
@@ -9722,8 +9758,13 @@ async function main() {
     // Wire up all server message handlers
     serverMessageHandler.setHandlers(gateObjectHandlers({
       // ── Object lifecycle ──
-      onObjectCreate: (data: CreateObjectData) => handleObjectCreateOrUpdate(data, false),
+      onObjectCreate: (data: CreateObjectData) => {
+        // TELEMETRY.objsend-diagnostics — inside an objsend window: was this a guid the client held at the command?
+        objsendReporter?.objectCreated(data.guid);
+        handleObjectCreateOrUpdate(data, false);
+      },
       onObjectDelete: (data) => {
+        objsendReporter?.objectDeleted();
         selectionLighting.forget(data.guid);
         pendingContainIds.forget(data.guid);
         openContainer.forgetEarly(data.guid);
@@ -14641,6 +14682,8 @@ async function main() {
       },
       uiLocked: () => !!gameUI.optionsSettings.lockUI,
       setLockUI: (locked) => applyCharacterOptionLocally(0x33, locked),
+      // TELEMETRY.objsend-diagnostics — a server command line went out as Talk (only @objsend is reported).
+      serverCommandSent: (line) => { objsendReporter?.commandSent(line); },
       // BUG.ac1999-chat-toggle-local — @chat on the client where the era's client kept it there.
       ...(localChatGate ? { setLocalChatSquelched: (squelched: boolean) => localChatGate.set(squelched) } : {}),
       // SWEEP1999.commands — the 1999 table's TargetedChat (tells to nearby objects and vendors) and @help.
@@ -20123,8 +20166,11 @@ async function main() {
             };
           }
           // In a dungeon the expired are deleted only after a cell change of ours (ACE forgets them only then).
+          // (A walked-into sealed cell counts too, BUG.walkin-dungeon-objects-lost.)
+          const maintViewer = objectLoadViewer();
           serverObjectManager.updateObjectMaint(objectCellLoaded, performance.now() / 1000,
-            playerInDungeon && dungeonLandblockId && (dungeonLandblockId & 0xffff) >= 0x100 ? dungeonLandblockId : undefined);
+            (playerInDungeon || maintViewer.sealed) && (maintViewer.viewerCellId & 0xffff) >= 0x100
+              ? maintViewer.viewerCellId : undefined);
         }
         // PERF.browser-memory-crash — after landblocks unload, release the
         // pooled meshes, templates, materials and textures nothing drawn

@@ -1,0 +1,3430 @@
+[
+  {
+    "text": "Could not find allegiance member.",
+    "where": "ac1999/Server/Source/AllegianceManager.cpp:1993"
+  },
+  {
+    "text": "Your _ is too low to do this.",
+    "where": "ac1999/Server/Source/AttributeTransferDevice.cpp:41"
+  },
+  {
+    "text": "Your _ is too high to do this.",
+    "where": "ac1999/Server/Source/AttributeTransferDevice.cpp:49"
+  },
+  {
+    "text": "Couldn't find target player.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:1586"
+  },
+  {
+    "text": "Couldn't find player.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:1637"
+  },
+  {
+    "text": "This command is not enabled on this server.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:1728"
+  },
+  {
+    "text": "Invalid spell id.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:1860"
+  },
+  {
+    "text": "Couldn't find a drop zone there.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:2471"
+  },
+  {
+    "text": "You must enter a search string.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:2602"
+  },
+  {
+    "text": "Couldn't find player \"_\"",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:2693"
+  },
+  {
+    "text": "You do not have the access to use this command.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:2707"
+  },
+  {
+    "text": "That is not a valid email address.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:285"
+  },
+  {
+    "text": "You must assess a valid target.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:4018"
+  },
+  {
+    "text": "You must assess a player target.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:4023"
+  },
+  {
+    "text": "You must assess a player target",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:4067"
+  },
+  {
+    "text": "Cannot teleport to _. They have privacy mode enabled.",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:622"
+  },
+  {
+    "text": "Couldn't find player \"_\" ?",
+    "where": "ac1999/Server/Source/ClientCommands.cpp:632"
+  },
+  {
+    "text": "You have been involved in Player Killer combat too recently!",
+    "where": "ac1999/Server/Source/ClientEvents.cpp:1129"
+  },
+  {
+    "text": "You are not in an allegiance.",
+    "where": "ac1999/Server/Source/ClientEvents.cpp:1389"
+  },
+  {
+    "text": "You do not own a house.",
+    "where": "ac1999/Server/Source/ClientEvents.cpp:1642"
+  },
+  {
+    "text": "Can't find a player by that name.",
+    "where": "ac1999/Server/Source/ClientEvents.cpp:1717"
+  },
+  {
+    "text": "That is not a valid spell formula.",
+    "where": "ac1999/Server/Source/ClientEvents.cpp:2894"
+  },
+  {
+    "text": "You do not have access to that.",
+    "where": "ac1999/Server/Source/ClientEvents.cpp:3724"
+  },
+  {
+    "text": "Unable to open trade.",
+    "where": "ac1999/Server/Source/ClientEvents.cpp:4030"
+  },
+  {
+    "text": "You do not have permission to loot that corpse!",
+    "where": "ac1999/Server/Source/Corpse.cpp:72"
+  },
+  {
+    "text": "You can't do that yet!",
+    "where": "ac1999/Server/Source/Gem.cpp:34"
+  },
+  {
+    "text": "You're exhausted!",
+    "where": "ac1999/Server/Source/Healer.cpp:175"
+  },
+  {
+    "text": "You fail to _ yourself. Your _ has _ uses left.",
+    "where": "ac1999/Server/Source/Healer.cpp:293"
+  },
+  {
+    "text": "You fail to _ _. Your _ has _ uses left.",
+    "where": "ac1999/Server/Source/Healer.cpp:298"
+  },
+  {
+    "text": "You must be at least level _ to purchase this dwelling.",
+    "where": "ac1999/Server/Source/House.cpp:481"
+  },
+  {
+    "text": "You cannot buy another landscape house yet. This restriction does not apply to apartments.",
+    "where": "ac1999/Server/Source/House.cpp:507"
+  },
+  {
+    "text": "You do not have permission to access that.",
+    "where": "ac1999/Server/Source/House.cpp:892"
+  },
+  {
+    "text": "Your Lockpicking skill is too low for that.",
+    "where": "ac1999/Server/Source/Lockpick.cpp:145"
+  },
+  {
+    "text": "You must be trained in Lockpicking.",
+    "where": "ac1999/Server/Source/Lockpick.cpp:89"
+  },
+  {
+    "text": "You can't do that... you're dead!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You're too loaded down to jump",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Invalid PK status!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You fail to affect _ because you cannot affect anyone!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You fail to affect _ because $s cannot be harmed!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You fail to affect _ because beneficial spells do not affect _!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You fail to affect _ because you are not a player killer!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You fail to affect _ because _ is not a player killer!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You fail to affect _ because you are not the same sort of player killer as _!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You fail to affect _ because you are acting across a house boundary!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is already one of your followers",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ cannot have any more Vassals",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Not all the items are available.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ doesn't know what to do with that.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You must be above level _ to purchase this dwelling.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You must be at or below level _ to purchase this dwelling.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You must be above allegiance rank _ to purchase this dwelling.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You must be at or below allegiance rank _ to purchase this dwelling.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You must specify a character to boot.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You can't boot yourself!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The _ was not suitable for salvaging.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The _ contains the wrong material.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You must be _ to use that item's magic.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Your _ is too low to use that item's magic.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Only _ may use that item's magic.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You must have _ specialized to use that item's magic.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Your _ skill must be trained, not untrained or specialized, in order to be altered in this way!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You do not have enough skill credits to specialize your _ skill.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have too many available experience points to be able to absorb the experience points from your _ skill. Please spend some of your experience points and try again.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Your _ skill is already untrained!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You are currently wielding items which require a certain level of _. Your _ skill cannot be lowered while you are wielding these items. Please remove these items and try again.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have succeeded in specializing your _ skill!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have succeeded in lowering your _ skill from specialized to trained!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have succeeded in untraining your _ skill!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Although you cannot untrain your _ skill, you have succeeded in recovering all the experience you had invested in it.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have too many credits invested in specialized skills already! Before you can specialize your _ skill, you will need to unspecialize some other skill.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The _ cannot be used while on a hook and only the owner may open the hook.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The _ can only be used while on a hook.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ fails to affect you because $s cannot affect anyone!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ fails to affect you because you cannot be harmed!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ fails to affect you because _ is not a player killer!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "fails to affect you because you are not the same sort of player killer as",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is an invalid target.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You are an invalid target for the spell of _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is already at full health!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have no appropriate targets equipped for _'s spell.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have passed leadership of the fellowship to _",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You may not hook any more _ on your house. You already have the maximum number of _ hooked or you are not permitted to hook any on your type of house.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You are now using the maximum number of hooks. You cannot use another hook until you take an item off one of your hooks.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You are no longer using the maximum number of hooks. You may again add items to your hooks.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You now have the maximum number of _ hooked. You cannot hook any additional _ until you remove one or more from your house.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You no longer have the maximum number of _ hooked. You may hook additional _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "This fellowship is locked; _ cannot be recruited into the fellowship.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have entered the _ channel.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have left the _ channel.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Message Blocked: _",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "// You cannot add anymore people to the list of players that you can hear.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You fail to remove _ from your loud list.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You are now snooping on _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You are no longer snooping on _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You fail to snoop on _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ attempted to snoop on you.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is already being snooped on, only one person may snoop on another at a time.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is in limbo and cannot receive your message.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ has been booted from the allegiance chat room.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The account of _ is already banned from the allegiance.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The account of _ is not banned from the allegiance.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The account of _ was not unbanned from the allegiance.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The account of _ has been banned from the allegiance.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The account of _ is no longer banned from the allegiance.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is banned from the allegiance!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You are banned from _'s allegiance!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is now an allegiance officer.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "An unspecified error occurred while attempting to set _ as an allegiance officer.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is no longer an allegiance officer.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "An unspecified error occurred while attempting to remove _ as an allegiance officer.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You must wait _ before communicating again!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Your allegiance officer status has been modified. You now hold the position of: _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is already an allegiance officer of that level.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "The _ is currently in use.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You are not listening to the _ channel!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Although your augmentation will not allow you to untrain your _ skill, you have succeeded in recovering all the experience you had invested in it.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is already on your friends list!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You may only change your allegiance name once every 24 hours. You may change your allegiance name again in _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is the monarch and cannot be promoted or demoted.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "That level of allegiance officer is now known as: _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "That allegiance officer title name is too long. Please choose another name.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "That allegiance officer title contains illegal characters. Please choose another name using only letters, spaces, - and '.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Your allegiance is currently: _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Your allegiance is now: _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You may not accept the offer of allegiance from _ because your allegiance is locked.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You may not swear allegiance at this time because the allegiance of _ is locked.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have pre-approved _ to join your allegiance.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is already a member of your allegiance!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ has been pre-approved to join your allegiance.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Your allegiance chat privileges have been temporarily removed by _. Until they are restored, you may not view or speak in the allegiance chat channel.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ is now temporarily unable to view or speak in allegiance chat. The gag will run out in 5 minutes, or _ may be explicitly ungagged before then.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Your allegiance chat privileges have been restored by _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You have restored allegiance chat privileges to _.",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "_ cowers from you!",
+    "where": "ac1999/Server/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "You don't have enough health to do that.",
+    "where": "ac1999/Server/Source/Player.cpp:1916"
+  },
+  {
+    "text": "You don't have enough stamina to do that.",
+    "where": "ac1999/Server/Source/Player.cpp:1924"
+  },
+  {
+    "text": "You don't have enough mana to do that.",
+    "where": "ac1999/Server/Source/Player.cpp:1936"
+  },
+  {
+    "text": "Unable to create result!",
+    "where": "ac1999/Server/Source/Player.cpp:2087"
+  },
+  {
+    "text": "Not enough pack space!",
+    "where": "ac1999/Server/Source/Player.cpp:2697"
+  },
+  {
+    "text": "You are not skilled enough in _ to use the _.",
+    "where": "ac1999/Server/Source/Player.cpp:4009"
+  },
+  {
+    "text": "You have been in PK battle too recently!",
+    "where": "ac1999/Server/Source/Portal.cpp:74"
+  },
+  {
+    "text": "You are not allowed to use that portal!",
+    "where": "ac1999/Server/Source/Portal.cpp:94"
+  },
+  {
+    "text": "You do not have enough Arcane Lore to learn this spell.",
+    "where": "ac1999/Server/Source/Scroll.cpp:112"
+  },
+  {
+    "text": "You are not trained in _!",
+    "where": "ac1999/Server/Source/Scroll.cpp:82"
+  },
+  {
+    "text": "You are not skilled enough in _ to learn this spell.",
+    "where": "ac1999/Server/Source/Scroll.cpp:89"
+  },
+  {
+    "text": "_ has been involved in Player Killer combat too recently!",
+    "where": "ac1999/Server/Source/SpellcastingManager_Effects.cpp:74"
+  },
+  {
+    "text": "You are not powerful enough to summon this portal yet.",
+    "where": "ac1999/Server/Source/SpellcastingManager_Effects.cpp:844"
+  },
+  {
+    "text": "You are too powerful to summon this portal.",
+    "where": "ac1999/Server/Source/SpellcastingManager_Effects.cpp:849"
+  },
+  {
+    "text": "That target is too far away!",
+    "where": "ac1999/Server/Source/SpellcastingManager.cpp:1041"
+  },
+  {
+    "text": "Your movement disrupted spell casting!",
+    "where": "ac1999/Server/Source/SpellcastingManager.cpp:1065"
+  },
+  {
+    "text": "You fail to affect _ because _ cannot be harmed!",
+    "where": "ac1999/Server/Source/SpellcastingManager.cpp:2013"
+  },
+  {
+    "text": "You are not trained in that skill!",
+    "where": "ac1999/Server/Source/SpellcastingManager.cpp:275"
+  },
+  {
+    "text": "You do not have enough pack space to complete this trade!",
+    "where": "ac1999/Server/Source/TradeManager.cpp:139"
+  },
+  {
+    "text": "Invalid item in trade!",
+    "where": "ac1999/Server/Source/TradeManager.cpp:160"
+  },
+  {
+    "text": "You cannot trade that item!",
+    "where": "ac1999/Server/Source/TradeManager.cpp:274"
+  },
+  {
+    "text": "You don't have enough money.",
+    "where": "ac1999/Server/Source/Vendor.cpp:350"
+  },
+  {
+    "text": "There's not enough room for the items in your inventory.",
+    "where": "ac1999/Server/Source/Vendor.cpp:356"
+  },
+  {
+    "text": "Couldn't find all the money for the payment.",
+    "where": "ac1999/Server/Source/Vendor.cpp:373"
+  },
+  {
+    "text": "There's not enough room for the coins in your inventory.",
+    "where": "ac1999/Server/Source/Vendor.cpp:479"
+  },
+  {
+    "text": "You failed to go to non-combat mode.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You're too busy!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must control both objects!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Unable to move to object!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can't jump while in the air",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That is not a valid command.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The item is under someone else's control!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot pick that up!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Action cancelled!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can't do that... you're dead! or You can't do that... its dead!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You charged too far!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are too tired to do that!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can't jump from this position",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Ack! You killed yourself!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Invalid PK Status!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The container is closed!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are too fatigued to attack!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your missile attack misfired!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You've attempted an impossible spell path!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You don't know that spell!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Incorrect target type",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You don't have all the components for this spell.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You don't have enough Mana to cast this spell.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your spell fizzled.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your spell's target is missing!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your projectile spell mislaunched!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your spell cannot be cast outside",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your spell cannot be cast inside",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are unprepared to cast a spell",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You've already sworn your Allegiance",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You don't have enough experience available to swear Allegiance",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are not in an allegiance!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must be the leader of a Fellowship",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your Fellowship is full",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That Fellowship name is not permitted",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That channel doesn't exist.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can't use that channel.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You're already on that channel.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You're not currently on that channel.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "_ can't be dropped",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot merge different stacks!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot merge enchanted items!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must control at least one stack!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your craft attempt fails.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Given that number of items, you cannot craft anything.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Either you or one of the items involved does not pass the requirements for this craft interaction.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You do not have all the neccessary items.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Not all the items are avaliable.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must be at rest in peace mode to do trade skills.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are not trained in that trade skill.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your hands must be free.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot link to that portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have solved this quest too many times!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "This item requires you to complete a specific quest before you can pick it up!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Player killers may not interact with that portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Non-player killers may not interact with that portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You do not own a house!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must purchase Asheron's Call: Dark Majesty to interact with that portal.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have used all the hooks you are allowed to use for this house.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must complete a quest to interact with that portal.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must own a house to use this command.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your monarch does not own a mansion or a villa!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your monarch has closed the mansion to the Allegiance.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must be a monarch to purchase this dwelling.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your offer of Allegiance has been ignored.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are already involved in something!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must be a monarch to use this command.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That character does not exist.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That person is not a member of your Allegiance!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "No patron from which to break!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your Allegiance has been dissolved!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your patron's Allegiance to you has been broken!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have moved too far!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That is not a valid destination!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must purchase Asheron's Call -- Dark Majesty to use this function.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You fail to link with the lifestone!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You wandered too far to link with the lifestone!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You successfully link with the lifestone!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must have linked with a lifestone in order to recall to it!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You fail to recall to the lifestone!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You fail to link with the portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You successfully link with the portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You fail to recall to the portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must have linked with a portal in order to recall to it!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You fail to summon the portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must have linked with a portal in order to summon it!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You fail to teleport!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have been teleported too recently!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must be an Advocate to interact with that portal.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Players may not interact with that portal.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are not powerful enough to interact with that portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are too powerful to interact with that portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot recall to that portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot summon that portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The lock is already unlocked.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can't lock or unlock that!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can't lock or unlock what is open!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The key doesn't fit this lock.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The lock has been used too recently.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You aren't trained in lockpicking!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must specify a character to query.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Please use the allegiance panel to view your own information.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have used that command too recently.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You do not own that salvage tool!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You do not own that item!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The material cannot be created.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The list of items you are attempting to salvage is invalid.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot salvage items that you are trading!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must be a guest in this house to interact with that portal.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your Allegiance Rank is too low to use that item's magic.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your Arcane Lore skill is too low to use that item's magic.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That item doesn't have enough Mana.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have been involved in a player killer battle too recently to do that!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have failed to alter your skill.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Appears to be sent to a recruiter 30 seconds after the initial recruit message when the recruitee doesn't respond.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have failed to alter your attributes.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are currently wielding items which require a certain level of skill. Your attributes cannot be transferred while you are wielding these items. Please remove these items and try again.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have succeeded in transferring your attributes!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "This hook is a duplicated housing object. You may not add items to a duplicated housing object. Please empty the hook and allow it to reset.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That item is of the wrong type to be placed on this hook.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "This chest is a duplicated housing object. You may not add items to a duplicated housing object. Please empty everything -- including backpacks -- out of the chest and allow the chest to reset.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "This hook was a duplicated housing object. Since it is now empty, it will be deleted momentarily. Once it is gone, it is safe to use the other, non-duplicated hook that is here.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "This chest was a duplicated housing object. Since it is now empty, it will be deleted momentarily. Once it is gone, it is safe to use the other, non-duplicated chest that is here.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot swear allegiance to anyone because you own a monarch-only house. Please abandon your house and try again.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can't do that while in the air!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot modify your player killer status while you are recovering from a PK death.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Advocates may not change their player killer status!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your level is too low to change your player killer status with this object.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your level is too high to change your player killer status with this object.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You feel a harsh dissonance, and you sense that an act of killing you have committed recently is interfering with the conversion.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Bael'Zharon's power flows through you again. You are once more a player killer.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Bael'Zharon has granted you respite after your moment of weakness. You are temporarily no longer a player killer.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Lite Player Killers may not interact with that portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You aren't trained in healing!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You don't own that healing kit!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can't heal that!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You aren't ready to heal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can only use Healing Kits on player characters.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The Lifestone's magic protects you from the attack!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The portal's residual energy protects you from the attack!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are enveloped in a feeling of warmth as you are brought back into the protection of the Light. You are once again a Non-Player Killer.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You're too close to your sanctuary!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can't do that -- you're trading!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Only Non-Player Killers may enter PK Lite. Please see @help pklite for more details about this command.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "A cold wind touches your heart. You are now a Player Killer Lite.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You do not belong to a Fellowship.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are now using the maximum number of hooks.  You cannot use another hook until you take an item off one of your hooks.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are no longer using the maximum number of hooks.  You may again add items to your hooks.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are not permitted to use that hook.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The fellowship is locked, you were not added to the fellowship.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Only the original owner may use that item's magic.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Turbine Chat is enabled.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot add anymore people to the list of players that you can hear.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are now deaf to player's screams.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You can hear all players once again.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You chicken out.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot posssibly succeed.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The fellowship is locked; you cannot open locked fellowships.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Trade Complete!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That is not a salvaging tool.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That person is not available now.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must wait 30 days after purchasing a house before you may purchase another with any character on the same account. This applies to all housing except apartments.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You do not have the authority within your allegiance to do that.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have the maximum number of accounts banned.!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You already have the maximum number of allegiance officers. You must remove some before you add any more.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your allegiance officers have been cleared.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot join any chat channels while gagged.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are no longer an allegiance officer.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your allegiance does not have a hometown.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The hook does not contain a usable item. You cannot open the hook because you do not own the house to which it belongs.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The hook does not contain a usable item. Use the '@house hooks on'command to make the hook openable.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Out of Range!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must purchase Asheron's Call -- Throne of Destiny to use this function.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must purchase Asheron's Call -- Throne of Destiny to use this item.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must purchase Asheron's Call -- Throne of Destiny to use this portal.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must purchase Asheron's Call -- Throne of Destiny to access this quest.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have failed to complete the augmentation.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have used this augmentation too many times already.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have used augmentations of this type too many times already.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You do not have enough unspent experience available to purchase this augmentation.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You must exit the Training Academy before that command will be available to you.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Only Player Killer characters may use this command!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Only Player Killer Lite characters may use this command!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You may only have a maximum of 50 friends at once. If you wish to add more friends, you must first remove some.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That character is not on your friends list!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Only the character who owns the house may use this command.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That allegiance name is invalid because it is empty. Please use the @allegiance name clear command to clear your allegiance name.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That allegiance name is too long. Please choose another name.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That allegiance name contains illegal characters. Please choose another name using only letters, spaces, - and '.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That allegiance name is not appropriate. Please choose another name.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That allegiance name is already in use. Please choose another name.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your allegiance name has been cleared.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That is already the name of your allegiance!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That is an invalid officer level.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That allegiance officer title is not appropriate.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "All of your allegiance officer titles have been cleared.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That allegiance title contains illegal characters. Please choose another name using only letters, spaces, - and '.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have not pre-approved any vassals to join your allegiance.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You have cleared the pre-approved vassal for your allegiance.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That character is already gagged!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That character is not currently gagged!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Your allegiance chat privileges have been restored.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot pick up more of that item!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You are restricted to clothes and armor created for your race.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "That item was specifically created for another race.",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Olthoi cannot interact with that!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Olthoi cannot use regular lifestones! Asheron would not allow it!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The vendor looks at you in horror!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "As a mindless engine of destruction an Olthoi cannot join a fellowship!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "The Olthoi only have an allegiance to the Olthoi Queen!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You cannot use that item!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "This person will not interact with you!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Only Olthoi may pass through this portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Olthoi may not pass through this portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "You may not pass through this portal while Vitae weakens you!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "This character must be two weeks old or have been created on an account at least two weeks old to use this portal!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "Olthoi characters can only use Lifestone and PK Arena recalls!",
+    "where": "ACE WeenieError.cs"
+  },
+  {
+    "text": "is too busy to accept gifts right now.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "cannot carry anymore.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You fail to affect  because $s cannot be harmed!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You fail to affect  because beneficial spells do not affect !",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You fail to affect  because you are not a player killer!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You fail to affect  because  is not a player killer!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You fail to affect  because you are not the same sort of player killer as !",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You fail to affect  because you are acting across a house boundary!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is not accepting gifts right now.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is already one of your followers",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "cannot have any more Vassals",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "doesn't know what to do with that.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You must be above level  to purchase this dwelling.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You must be at or below level  to purchase this dwelling.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You must be above allegiance rank  to purchase this dwelling.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You must be at or below allegiance rank  to purchase this dwelling.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "The  contains the wrong material.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You must be  to use that item's magic.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Your  is too low to use that item's magic.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Only  may use that item's magic.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You must have  specialized to use that item's magic.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "cannot accept stacked objects. Try giving one at a time.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Your  skill must be trained, not untrained or specialized, in order to be altered in this way!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You do not have enough skill credits to specialize your  skill.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have too many available experience points to be able to absorb the experience points from your  skill. Please spend some of your experience points and try again.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Your  skill is already untrained!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You are currently wielding items which require a certain level of .  Your  skill cannot be lowered while you are wielding these items.  Please remove these items and try again.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have succeeded in specializing your  skill!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have succeeded in lowering your  skill from specialized to trained!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have succeeded in untraining your  skill!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Although you cannot untrain your  skill, you have succeeded in recovering all the experience you had invested in it.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have too many credits invested in specialized skills already! Before you can specialize your  skill, you will need to unspecialize some other skill.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "The  cannot be used while on a hook and only the owner may open the hook.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "The  can only be used while on a hook.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "fails to affect you because $s cannot affect anyone!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "fails to affect you because you cannot be harmed!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "fails to affect you because  is not a player killer!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "fails to affect you because you are not a player killer!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "fails to affect you because you are not the same sort of player killer as !",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "fails to affect you across a house boundary!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is an invalid target.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You are an invalid target for the spell of .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is already at full health!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "has no appropriate targets equipped for this spell.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have no appropriate targets equipped for 's spell.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is now an open fellowship; anyone may recruit new members.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is now a closed fellowship.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is now the leader of this fellowship.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have passed leadership of the fellowship to",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You may not hook any more  on your house.  You already have the maximum number of  hooked or you are not permitted to hook any on your type of house.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You now have the maximum number of  hooked.  You cannot hook any additional  until you remove one or more from your house.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You no longer have the maximum number of  hooked.  You may hook additional .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is not close enough to your level.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "This fellowship is locked;  cannot be recruited into the fellowship.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have entered the  channel.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have left the  channel.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "will not receive your message, please use urgent assistance to speak with an in-game representative",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "has been added to the list of people you can hear.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "has been removed from the list of people you can hear.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You fail to remove  from your loud list.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You are now snooping on .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You are no longer snooping on .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You fail to snoop on .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "attempted to snoop on you.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is already being snooped on, only one person may snoop on another at a time.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is in limbo and cannot receive your message.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "has been booted from the allegiance chat room.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "The account of  is already banned from the allegiance.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "The account of  is not banned from the allegiance.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "The account of  was not unbanned from the allegiance.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "The account of  has been banned from the allegiance.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "The account of  is no longer banned from the allegiance.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Banned Characters:",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is banned from the allegiance!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You are banned from 's allegiance!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is now an allegiance officer.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "An unspecified error occurred while attempting to set  as an allegiance officer.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is no longer an allegiance officer.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "An unspecified error occurred while attempting to remove  as an allegiance officer.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You must wait  before communicating again!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Your allegiance officer status has been modified. You now hold the position of: .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is already an allegiance officer of that level.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "The  is currently in use.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You are not listening to the  channel!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Congratulations! You have succeeded in acquiring the  augmentation.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Although your augmentation will not allow you to untrain your  skill, you have succeeded in recovering all the experience you had invested in it.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is already on your friends list!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You may only change your allegiance name once every 24 hours. You may change your allegiance name again in _.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is the monarch and cannot be promoted or demoted.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "That level of allegiance officer is now known as: _.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Your allegiance is currently: .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Your allegiance is now: .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You may not accept the offer of allegiance from  because your allegiance is locked.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You may not swear allegiance at this time because the allegiance of  is locked.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have pre-approved  to join your allegiance.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is already a member of your allegiance!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "has been pre-approved to join your allegiance.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Your allegiance chat privileges have been temporarily removed by . Until they are restored, you may not view or speak in the allegiance chat channel.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "is now temporarily unable to view or speak in allegiance chat. The gag will run out in 5 minutes, or  may be explicitly ungagged before then.",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "Your allegiance chat privileges have been restored by .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You have restored allegiance chat privileges to .",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "cowers from you!",
+    "where": "ACE WeenieErrorWithString.cs"
+  },
+  {
+    "text": "You can't use the _ on itself.",
+    "where": "ACE/Source/ACE.Server/Entity/Aetheria.cs:184"
+  },
+  {
+    "text": "You must be level 275 for enlightenment.",
+    "where": "ACE/Source/ACE.Server/Entity/Enlightenment.cs:67"
+  },
+  {
+    "text": "You must have at least 25 free inventory slots in your main pack for enlightenment.",
+    "where": "ACE/Source/ACE.Server/Entity/Enlightenment.cs:85"
+  },
+  {
+    "text": "You are too encumbered to tailor that!",
+    "where": "ACE/Source/ACE.Server/Entity/Tailoring.cs:315"
+  },
+  {
+    "text": "You do not have enough pack space to tailor that!",
+    "where": "ACE/Source/ACE.Server/Entity/Tailoring.cs:317"
+  },
+  {
+    "text": "You do not have enough container slots to tailor that!",
+    "where": "ACE/Source/ACE.Server/Entity/Tailoring.cs:319"
+  },
+  {
+    "text": "You have solved this quest too recently!",
+    "where": "ACE/Source/ACE.Server/Managers/QuestManager.cs:572"
+  },
+  {
+    "text": "You are not trained in _.",
+    "where": "ACE/Source/ACE.Server/Managers/RecipeManager.cs:223"
+  },
+  {
+    "text": "The _ cannot be combined with itself.",
+    "where": "ACE/Source/ACE.Server/Managers/RecipeManager.cs:61"
+  },
+  {
+    "text": "The _ cannot be used on the _.",
+    "where": "ACE/Source/ACE.Server/Managers/RecipeManager.cs:71"
+  },
+  {
+    "text": "Invalid parameter count, got _, expected _!",
+    "where": "ACE/Source/ACE.Server/Network/GameAction/Actions/GameActionTalk.cs:89"
+  },
+  {
+    "text": "_ is currently disabled_.",
+    "where": "ACE/Source/ACE.Server/Network/Handlers/TurbineChatHandler.cs:336"
+  },
+  {
+    "text": "You may not loot the _ because the _ has generated a rare item.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Corpse.cs:129"
+  },
+  {
+    "text": "You may not loot the _ because the death was caused by a player killer.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Corpse.cs:131"
+  },
+  {
+    "text": "You do not yet have the right to loot the _.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Corpse.cs:133"
+  },
+  {
+    "text": "The door is locked!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Door.cs:112"
+  },
+  {
+    "text": "Invalid spell id _",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Food.cs:152"
+  },
+  {
+    "text": "You are too encumbered to use that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Gem.cs:198"
+  },
+  {
+    "text": "You do not have enough pack space to use that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Gem.cs:200"
+  },
+  {
+    "text": "You do not have enough container slots to use that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Gem.cs:202"
+  },
+  {
+    "text": "_ is already at full mana!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Healer.cs:100"
+  },
+  {
+    "text": "You fail to heal _._",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Healer.cs:201"
+  },
+  {
+    "text": "_ is already at full stamina!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Healer.cs:97"
+  },
+  {
+    "text": "You can't squelch yourself!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Managers/SquelchManager.cs:111"
+  },
+  {
+    "text": "Couldn't find player to squelch.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Managers/SquelchManager.cs:92"
+  },
+  {
+    "text": "You have no items equipped that need mana.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/ManaStone.cs:166"
+  },
+  {
+    "text": "You must be a _ to use the _",
+    "where": "ACE/Source/ACE.Server/WorldObjects/PetDevice.cs:115"
+  },
+  {
+    "text": "You must refill the essence to use it again.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/PetDevice.cs:77"
+  },
+  {
+    "text": "You cannot boot yourself from allegiance chat.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:1111"
+  },
+  {
+    "text": "You cannot boot the monarch from allegiance chat.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:1117"
+  },
+  {
+    "text": "You cannot gag yourself.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:1185"
+  },
+  {
+    "text": "You cannot gag the monarch.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:1191"
+  },
+  {
+    "text": "You cannot ungag yourself.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:1249"
+  },
+  {
+    "text": "_ cannot be banned from the allegiance!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:1340"
+  },
+  {
+    "text": "You cannot boot yourself from the allegiance.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:1430"
+  },
+  {
+    "text": "You cannot boot the monarch from the allegiance!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:1436"
+  },
+  {
+    "text": "You cannot swear allegiance to yourself.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:337"
+  },
+  {
+    "text": "You cannot swear to a lower level character.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:345"
+  },
+  {
+    "text": "You cannot swear allegiance to _.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:370"
+  },
+  {
+    "text": "_ is not accepting allegiance requests.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:379"
+  },
+  {
+    "text": "You cannot swear allegiance while owning a mansion.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Allegiance.cs:395"
+  },
+  {
+    "text": "You are out of ammunition!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Combat.cs:852"
+  },
+  {
+    "text": "You are too encumbered to sell that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Commerce.cs:185"
+  },
+  {
+    "text": "You do not have enough free pack space to sell that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Commerce.cs:187"
+  },
+  {
+    "text": "The _ is unsellable.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Commerce.cs:271"
+  },
+  {
+    "text": "The _ has no value and cannot be sold.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Commerce.cs:278"
+  },
+  {
+    "text": "You cannot sell that! The _ is currently being traded.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Commerce.cs:285"
+  },
+  {
+    "text": "You cannot sell that! The _ must be empty.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Commerce.cs:292"
+  },
+  {
+    "text": "_ is not accepting corpse looting permissions from other players.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Death.cs:757"
+  },
+  {
+    "text": "_ is not accepting fellowship requests.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Fellowship.cs:100"
+  },
+  {
+    "text": "You can't dismiss yourself from the fellowship",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Fellowship.cs:74"
+  },
+  {
+    "text": "Unable to put _ into container",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:1322"
+  },
+  {
+    "text": "Item not found!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:1384"
+  },
+  {
+    "text": "You must unsummon your pet before you can drop this item!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:1397"
+  },
+  {
+    "text": "Failed to dequip item!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:1422"
+  },
+  {
+    "text": "Failed to remove item from inventory!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:1431"
+  },
+  {
+    "text": "Cannot pick that up and wield it while not at peace!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:1572"
+  },
+  {
+    "text": "You must remove your _ to wield _",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:1807"
+  },
+  {
+    "text": "Failed to dequip existing weapon!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2063"
+  },
+  {
+    "text": "Failed to add dequip back into inventory!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2070"
+  },
+  {
+    "text": "Split amount not valid!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2250"
+  },
+  {
+    "text": "Source stack not found!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2260"
+  },
+  {
+    "text": "You cannot split that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2278"
+  },
+  {
+    "text": "Stack not valid!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2307"
+  },
+  {
+    "text": "You cannot merge from vendor",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2336"
+  },
+  {
+    "text": "Split failed!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2368"
+  },
+  {
+    "text": "Stack not found!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2491"
+  },
+  {
+    "text": "Merge amount not valid!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2856"
+  },
+  {
+    "text": "Target stack not found!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2888"
+  },
+  {
+    "text": "You cannot merge those items!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2912"
+  },
+  {
+    "text": "Stacks not compatible!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2929"
+  },
+  {
+    "text": "Target not valid!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2945"
+  },
+  {
+    "text": "Merge Failed!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:3020"
+  },
+  {
+    "text": "Give amount not valid!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:3202"
+  },
+  {
+    "text": "Target not found!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:3212"
+  },
+  {
+    "text": "Olthoi cannot trade items with other players!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:3283"
+  },
+  {
+    "text": "Source item not found!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:826"
+  },
+  {
+    "text": "You are too encumbered to carry that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:841"
+  },
+  {
+    "text": "Target container not found!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:848"
+  },
+  {
+    "text": "You cannot put _ in that.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:855"
+  },
+  {
+    "text": "You must unsummon your pet before you can transfer this item!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:876"
+  },
+  {
+    "text": "You fail to affect _ with _",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Magic.cs:1110"
+  },
+  {
+    "text": "_ cannot be cast on _.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Magic.cs:417"
+  },
+  {
+    "text": "You cannot trade that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Trade.cs:142"
+  },
+  {
+    "text": "You must unsummon your pet before you can trade this item!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Trade.cs:149"
+  },
+  {
+    "text": "Trade confirmation failed...",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Trade.cs:314"
+  },
+  {
+    "text": "You must _ the _ to use it.",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Player_Use.cs:73"
+  },
+  {
+    "text": "You do not have permission to access _",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Storage.cs:70"
+  },
+  {
+    "text": "You are too encumbered to buy that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Vendor.cs:496"
+  },
+  {
+    "text": "You do not have enough pack space to buy that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Vendor.cs:498"
+  },
+  {
+    "text": "You do not have enough container slots to buy that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/Vendor.cs:500"
+  },
+  {
+    "text": "_ has been involved in a player killer battle too recently to do that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/WorldObject_Magic.cs:1472"
+  },
+  {
+    "text": "You must have _ trained to use that item's magic",
+    "where": "ACE/Source/ACE.Server/WorldObjects/WorldObject_Use.cs:231"
+  },
+  {
+    "text": "You are not high enough level to use that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/WorldObject_Use.cs:268"
+  },
+  {
+    "text": "You have used this item too recently",
+    "where": "ACE/Source/ACE.Server/WorldObjects/WorldObject_Use.cs:297"
+  },
+  {
+    "text": "Olthoi can't interact with that!",
+    "where": "ACE/Source/ACE.Server/WorldObjects/WorldObject_Use.cs:303"
+  },
+  {
+    "text": "Can't find a road to follow.",
+    "where": "classic/ClassicACE/Source/ACE.Server/Command/Handlers/PlayerCommands.cs:2108"
+  },
+  {
+    "text": "You must be in an allegiance to use this command.",
+    "where": "classic/ClassicACE/Source/ACE.Server/Command/Handlers/PlayerCommands.cs:917"
+  },
+  {
+    "text": "You have used this command too recently!",
+    "where": "classic/ClassicACE/Source/ACE.Server/Command/Handlers/PlayerCommands.cs:923"
+  },
+  {
+    "text": "These items cannot be used, incompatible gameplay mode!",
+    "where": "classic/ClassicACE/Source/ACE.Server/Entity/Aetheria.cs:190"
+  },
+  {
+    "text": "You must have _ trained to appraise that.",
+    "where": "classic/ClassicACE/Source/ACE.Server/Entity/MagnifyingGlass.cs:130"
+  },
+  {
+    "text": "You fail to appraise any items in the container. There are still _ unappraised item(s) in this container.",
+    "where": "classic/ClassicACE/Source/ACE.Server/Entity/MagnifyingGlass.cs:180"
+  },
+  {
+    "text": "You can't appraise that.",
+    "where": "classic/ClassicACE/Source/ACE.Server/Entity/MagnifyingGlass.cs:201"
+  },
+  {
+    "text": "You fail to appraise the value of the _.",
+    "where": "classic/ClassicACE/Source/ACE.Server/Entity/MagnifyingGlass.cs:243"
+  },
+  {
+    "text": "Only bags of the same material can be combined.",
+    "where": "classic/ClassicACE/Source/ACE.Server/Managers/RecipeManager.cs:887"
+  },
+  {
+    "text": "The _ cannot be tinkered_",
+    "where": "classic/ClassicACE/Source/ACE.Server/Managers/RecipeManager.cs:904"
+  },
+  {
+    "text": "The _ cannot be applied to _ because its workmanship is not high enough.",
+    "where": "classic/ClassicACE/Source/ACE.Server/Managers/RecipeManager.cs:910"
+  },
+  {
+    "text": "The _ doesn't have enough mana!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Gem.cs:201"
+  },
+  {
+    "text": "You may not summon portals from this location.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Gem.cs:86"
+  },
+  {
+    "text": "You may not recall from this location.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Gem.cs:92"
+  },
+  {
+    "text": "You cannot properly explore your surroundings while in combat!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/GenericObject.cs:57"
+  },
+  {
+    "text": "This item cannot be used, invalid gameplay mode!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Healer.cs:54"
+  },
+  {
+    "text": "You have no items in this container that need mana.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/ManaStone.cs:249"
+  },
+  {
+    "text": "You're too busy to keep taunting _!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Monster_Awareness.cs:186"
+  },
+  {
+    "text": "You're too busy with your current targets to attempt to taunt any others!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Monster_Awareness.cs:237"
+  },
+  {
+    "text": "Invalid gameplay mode!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/PKModifier.cs:250"
+  },
+  {
+    "text": "You must be sneaking to use this technique.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Awareness.cs:205"
+  },
+  {
+    "text": "You fail on your attempt to start sneaking.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Awareness.cs:48"
+  },
+  {
+    "text": "You are not trained in sneaking!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Awareness.cs:50"
+  },
+  {
+    "text": "Characters playing gameplay modes other than the default may not change their titles.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Character.cs:370"
+  },
+  {
+    "text": "You refrain from throwing your last _!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Combat.cs:930"
+  },
+  {
+    "text": "You cannot sell that! The _ is of too little value to be sold here.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Commerce.cs:305"
+  },
+  {
+    "text": "You cannot sell that! The _ is too valuable to sell here.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Commerce.cs:312"
+  },
+  {
+    "text": "The _ _ cannot be sold, incompatible gameplay mode!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Commerce.cs:319"
+  },
+  {
+    "text": "You cannot buy this house yet! It has not been saved to the database.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_House.cs:40"
+  },
+  {
+    "text": "The _ can't hold that type of item!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:1313"
+  },
+  {
+    "text": "You are not trained in using shields!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:1889"
+  },
+  {
+    "text": "That cannot be wielded, incompatible gameplay mode!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:2070"
+  },
+  {
+    "text": "Cannot merge stacks of different gameplay modes!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:3336"
+  },
+  {
+    "text": "Cannot merge stacks with different gameplay mode identifiers!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:3350"
+  },
+  {
+    "text": "This item cannot be given, incompatible gameplay mode!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:3854"
+  },
+  {
+    "text": "You must first pickup the _",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:855"
+  },
+  {
+    "text": "This item cannot be moved to that container, incompatible gameplay mode!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Inventory.cs:869"
+  },
+  {
+    "text": "You can't see your target well enough to affect it!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Magic.cs:1232"
+  },
+  {
+    "text": "Cannot cast spell on a stack of items.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Magic.cs:440"
+  },
+  {
+    "text": "This spell cannot be cast on _.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Magic.cs:446"
+  },
+  {
+    "text": "You can't quite reach your target!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Melee.cs:301"
+  },
+  {
+    "text": "You cannot raise your _ skill directly as it's set as a secondary skill of your _ skill.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Skills.cs:82"
+  },
+  {
+    "text": "Invalid movement detected. Rolling back to last known good location.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/Player_Tick.cs:811"
+  },
+  {
+    "text": "Cannot set a skill with secondaries as a secondary.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/SkillAlterationDevice.cs:293"
+  },
+  {
+    "text": "The _ cannot contain _.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/SpellTransferScroll.cs:106"
+  },
+  {
+    "text": "The _ cannot receive spell tranfers.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/SpellTransferScroll.cs:123"
+  },
+  {
+    "text": "The _ cannot contain any more spells.",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/SpellTransferScroll.cs:125"
+  },
+  {
+    "text": "The _ cannot have its spells extracted!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/SpellTransferScroll.cs:235"
+  },
+  {
+    "text": "You cannot dig for treasure while in combat!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/TreasureMap.cs:324"
+  },
+  {
+    "text": "You don't have enough mana so your _ cannot cast _!",
+    "where": "classic/ClassicACE/Source/ACE.Server/WorldObjects/WorldObject_Weapon.cs:1528"
+  },
+  {
+    "text": "You are not trained in this skill!",
+    "where": "classic/ClassicDereth/Source/AugmentationDevice.cpp:379"
+  },
+  {
+    "text": "You do not have access to this command.",
+    "where": "classic/ClassicDereth/Source/ClientCommands.cpp:3218"
+  },
+  {
+    "text": "Invalid target!",
+    "where": "classic/ClassicDereth/Source/ClientCommands.cpp:699"
+  },
+  {
+    "text": "You must unequip this armor before tailoring.",
+    "where": "classic/ClassicDereth/Source/Gem.cpp:507"
+  },
+  {
+    "text": "You must unequip this weapon before tailoring.",
+    "where": "classic/ClassicDereth/Source/Gem.cpp:566"
+  },
+  {
+    "text": "You fail to heal yourself. Your _ has _ uses left.",
+    "where": "classic/ClassicDereth/Source/Healer.cpp:309"
+  },
+  {
+    "text": "You fail to recover any vitals. Your _ has _ uses left.",
+    "where": "classic/ClassicDereth/Source/Healer.cpp:311"
+  },
+  {
+    "text": "You fail to heal _. Your _ has _ uses left.",
+    "where": "classic/ClassicDereth/Source/Healer.cpp:317"
+  },
+  {
+    "text": "You fail to restore any vitals to _. Your _ has _ uses left.",
+    "where": "classic/ClassicDereth/Source/Healer.cpp:322"
+  },
+  {
+    "text": "You cannot use the _ on other creatures or players.",
+    "where": "classic/ClassicDereth/Source/ManaStone.cpp:93"
+  },
+  {
+    "text": "_",
+    "where": "classic/ClassicDereth/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Congratulations! You have succeeded in acquiring the _ augmentation.",
+    "where": "classic/ClassicDereth/Source/PhatSDK/GameEnums.h WERROR"
+  },
+  {
+    "text": "Cannot raise or lower this skill.",
+    "where": "classic/ClassicDereth/Source/SkillAlterationDevice.cpp:105"
+  },
+  {
+    "text": "Cannot raise or lower _. All the experience that you spent on this skill have been refunded to you.",
+    "where": "classic/ClassicDereth/Source/SkillAlterationDevice.cpp:170"
+  },
+  {
+    "text": "You cannot untrain _!",
+    "where": "classic/ClassicDereth/Source/SkillAlterationDevice.cpp:253"
+  },
+  {
+    "text": "You need _ credits to specialize this skill.",
+    "where": "classic/ClassicDereth/Source/SkillAlterationDevice.cpp:65"
+  },
+  {
+    "text": "Unable to specialize this skill.",
+    "where": "classic/ClassicDereth/Source/SkillAlterationDevice.cpp:84"
+  },
+  {
+    "text": "You do not have enough experience to use this augmentation gem.",
+    "where": "classic/Seedsow/Source/AugmentationDevice.cpp:102"
+  },
+  {
+    "text": "You are not powerful enough to use this portal yet.",
+    "where": "classic/Seedsow/Source/Portal.cpp:79"
+  },
+  {
+    "text": "You are too powerful to use this portal.",
+    "where": "classic/Seedsow/Source/Portal.cpp:83"
+  },
+  {
+    "text": "You are not powerful enough to tie to this portal yet.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1371"
+  },
+  {
+    "text": "You are too powerful to tie to this portal.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1376"
+  },
+  {
+    "text": "You cannot link that.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1390"
+  },
+  {
+    "text": "You cannot link that portal.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1403"
+  },
+  {
+    "text": "You have no lifestone tied.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1459"
+  },
+  {
+    "text": "You have not used a recallable portal yet.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1475"
+  },
+  {
+    "text": "You are not powerful enough to recall this portal yet.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1508"
+  },
+  {
+    "text": "You are too powerful to recall this portal.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1513"
+  },
+  {
+    "text": "You have no primary portal tied.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1542"
+  },
+  {
+    "text": "You have no secondary portal tied.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1609"
+  },
+  {
+    "text": "The _ can't be enchanted.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:1701"
+  },
+  {
+    "text": "You do not have a primary portal tied.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:2051"
+  },
+  {
+    "text": "You do not have a secondary portal tied.",
+    "where": "classic/Seedsow/Source/SpellcastingManager.cpp:2062"
+  },
+  {
+    "text": "No reason given.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:170"
+  },
+  {
+    "text": "This command takes no arguments!",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:344"
+  },
+  {
+    "text": "Your friends list is empty!",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:382"
+  },
+  {
+    "text": "You have no friends that are online.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:396"
+  },
+  {
+    "text": "Invalid friends command specified.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:419"
+  },
+  {
+    "text": "You must specify the name of the friend you wish to add.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:431"
+  },
+  {
+    "text": "You must specify the name of the friend you wish to remove.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:451"
+  },
+  {
+    "text": "Your friends list has been cleared.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:457"
+  },
+  {
+    "text": "Not enough arguements.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:500"
+  },
+  {
+    "text": "You have not specified a squelch target.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:527"
+  },
+  {
+    "text": "This command must be issued from a popup chat window.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:579"
+  },
+  {
+    "text": "You must provide a new title for the window.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:584"
+  },
+  {
+    "text": "Window title length cannot exceed 100 characters.",
+    "where": "packages/renderer/src/chat/commands/AllegianceSocialCommands.ts:588"
+  },
+  {
+    "text": "You can now accept corpse looting permissions from other players.",
+    "where": "packages/renderer/src/chat/commands/DeathTravelHouseCommands.ts:124"
+  },
+  {
+    "text": "You are no longer accepting corpse looting permissions from other players.",
+    "where": "packages/renderer/src/chat/commands/DeathTravelHouseCommands.ts:125"
+  },
+  {
+    "text": "Invalid component type specified.",
+    "where": "packages/renderer/src/chat/commands/EmoteStatusCommands.ts:233"
+  },
+  {
+    "text": "Not in valid cell!",
+    "where": "packages/renderer/src/chat/commands/EmoteStatusCommands.ts:331"
+  },
+  {
+    "text": "Your location is: _",
+    "where": "packages/renderer/src/chat/commands/EmoteStatusCommands.ts:334"
+  },
+  {
+    "text": "Radius must be between 5 and 25",
+    "where": "packages/renderer/src/chat/commands/EmoteStatusCommands.ts:376"
+  },
+  {
+    "text": "Field of view must be between 10 and 160",
+    "where": "packages/renderer/src/chat/commands/EmoteStatusCommands.ts:385"
+  },
+  {
+    "text": "You must select a valid combat target before attacking",
+    "where": "packages/renderer/src/controllers/AttackRequest.ts:47"
+  },
+  {
+    "text": "You must own the _ to use it",
+    "where": "packages/renderer/src/era/EraFeatures.ts:748"
+  },
+  {
+    "text": "You must wield the _ to use it",
+    "where": "packages/renderer/src/era/EraFeatures.ts:749"
+  },
+  {
+    "text": "You can't use the _ on an item you are trading",
+    "where": "packages/renderer/src/era/EraFeatures.ts:750"
+  },
+  {
+    "text": "You can't use the _ on what you don't own",
+    "where": "packages/renderer/src/era/EraFeatures.ts:751"
+  },
+  {
+    "text": "You can't use the _ on what you aren't wielding",
+    "where": "packages/renderer/src/era/EraFeatures.ts:752"
+  },
+  {
+    "text": "Cannot use the _ on yourself",
+    "where": "packages/renderer/src/era/EraFeatures.ts:753"
+  },
+  {
+    "text": "Cannot use the _ with the _",
+    "where": "packages/renderer/src/era/EraFeatures.ts:754"
+  },
+  {
+    "text": "You must own the _ to use it.",
+    "where": "packages/renderer/src/era/EraFeatures.ts:759"
+  },
+  {
+    "text": "You must wield the _ to use it.",
+    "where": "packages/renderer/src/era/EraFeatures.ts:760"
+  },
+  {
+    "text": "You can't use the _ on what you don't own.",
+    "where": "packages/renderer/src/era/EraFeatures.ts:762"
+  },
+  {
+    "text": "You can't use the _ on what you aren't wielding.",
+    "where": "packages/renderer/src/era/EraFeatures.ts:763"
+  },
+  {
+    "text": "You can't open or close this _ that way",
+    "where": "packages/renderer/src/input/UseObject.ts:184"
+  },
+  {
+    "text": "You can't open or close this _ that way.",
+    "where": "packages/renderer/src/input/UseObject.ts:195"
+  },
+  {
+    "text": "You cannot use the _ because you are trading it",
+    "where": "packages/renderer/src/input/UseObject.ts:313"
+  },
+  {
+    "text": "The _ cannot be used",
+    "where": "packages/renderer/src/input/UseObject.ts:337"
+  },
+  {
+    "text": "You must first pick up the _",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:46"
+  },
+  {
+    "text": "You are trading the _, it cannot be dropped",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:47"
+  },
+  {
+    "text": "You must split the stack before selling it.",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:48"
+  },
+  {
+    "text": "The _ is locked",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:49"
+  },
+  {
+    "text": "You must open the _ first",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:50"
+  },
+  {
+    "text": "Cannot give _ to _",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:51"
+  },
+  {
+    "text": "You cannot do that in mid air",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:53"
+  },
+  {
+    "text": "You cannot merge items while they are being traded.",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:55"
+  },
+  {
+    "text": "The destination stack is already full.",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:56"
+  },
+  {
+    "text": "You cannot merge different types of items.",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:57"
+  },
+  {
+    "text": "You are already trading with someone else.",
+    "where": "packages/renderer/src/inventory/AttemptPlaceIn3D.ts:59"
+  },
+  {
+    "text": "The destination container is not valid!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:172"
+  },
+  {
+    "text": "You cannot place an object within itself!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:173"
+  },
+  {
+    "text": "The _ is being traded",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:175"
+  },
+  {
+    "text": "That item cannot be placed on the hook.",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:176"
+  },
+  {
+    "text": "You must own the house to manipulate the hook.",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:178"
+  },
+  {
+    "text": "The _ is completely full!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:298"
+  },
+  {
+    "text": "The _ can fit no more containers!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:299"
+  },
+  {
+    "text": "Too big to merge. Putting in _.",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:315"
+  },
+  {
+    "text": "You cannot place yourself within a container!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:354"
+  },
+  {
+    "text": "You cannot pick up creatures!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:355"
+  },
+  {
+    "text": "The _ cannot be picked up!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:357"
+  },
+  {
+    "text": "The _ is being wielded by someone else!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:359"
+  },
+  {
+    "text": "The _ can't be picked up!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:361"
+  },
+  {
+    "text": "The _ is full",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:384"
+  },
+  {
+    "text": "The _ can fit no more containers",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:385"
+  },
+  {
+    "text": "The creature can't be picked up",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:386"
+  },
+  {
+    "text": "The _ cannot be picked up",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:387"
+  },
+  {
+    "text": "The _ is being wielded by someone else",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:388"
+  },
+  {
+    "text": "The _ can't be picked up",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:389"
+  },
+  {
+    "text": "Cannot Merge Different Stack Types.",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:390"
+  },
+  {
+    "text": "This stack's too big to add to",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:391"
+  },
+  {
+    "text": "The _ cannot accept items",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:467"
+  },
+  {
+    "text": "Cannot place container in item list",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:468"
+  },
+  {
+    "text": "Cannot place item in container list",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:469"
+  },
+  {
+    "text": "You can't put that item there",
+    "where": "packages/renderer/src/inventory/PaperdollDragObject.ts:70"
+  },
+  {
+    "text": "The _ is already being worn",
+    "where": "packages/renderer/src/inventory/PaperdollDragObject.ts:73"
+  },
+  {
+    "text": "You must remove your _ to wear that",
+    "where": "packages/renderer/src/inventory/PaperdollDragObject.ts:75"
+  },
+  {
+    "text": "Cannot be used with _",
+    "where": "packages/renderer/src/inventory/PaperdollDragObject.ts:79"
+  },
+  {
+    "text": "A shield may not be worn with the _",
+    "where": "packages/renderer/src/inventory/PaperdollDragObject.ts:81"
+  },
+  {
+    "text": "Cannot hold _ while in combat",
+    "where": "packages/renderer/src/inventory/PaperdollDragObject.ts:83"
+  },
+  {
+    "text": "Only usable items can go here",
+    "where": "packages/renderer/src/network/itemShortcutRestore.ts:110"
+  },
+  {
+    "text": "Only items that can be picked up can go here",
+    "where": "packages/renderer/src/network/itemShortcutRestore.ts:112"
+  },
+  {
+    "text": "You cannot make a shortcut to the _",
+    "where": "packages/renderer/src/network/itemShortcutRestore.ts:171"
+  },
+  {
+    "text": "There is already a shortcut to the _",
+    "where": "packages/renderer/src/network/itemShortcutRestore.ts:172"
+  },
+  {
+    "text": "There are no free shortcut slots",
+    "where": "packages/renderer/src/network/itemShortcutRestore.ts:173"
+  },
+  {
+    "text": "This area is getting too crowded - a Portal Storm is brewing.",
+    "where": "packages/renderer/src/network/portalStormEvents.ts:65"
+  },
+  {
+    "text": "The Portal Storm has teleported you away from the crowded area!",
+    "where": "packages/renderer/src/network/portalStormEvents.ts:75"
+  },
+  {
+    "text": "The Portal Storm has subsided",
+    "where": "packages/renderer/src/network/portalStormEvents.ts:80"
+  },
+  {
+    "text": "You have been booted from Asheron's Call_.",
+    "where": "packages/renderer/src/session/AccountBoot.ts:116"
+  },
+  {
+    "text": "Cannot log off while in mid-air.",
+    "where": "packages/renderer/src/session/LogoutFlow.ts:51"
+  },
+  {
+    "text": "You no longer have permission to loot anyone else's kills.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:145"
+  },
+  {
+    "text": "You have lost permission to loot the kills of _.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:146"
+  },
+  {
+    "text": "You already have permission to loot your corpse.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:149"
+  },
+  {
+    "text": "You have given permission to _ to loot one of your corpses. This permission will last one hour.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:152"
+  },
+  {
+    "text": "You always have permission to loot your corpse.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:153"
+  },
+  {
+    "text": "You do not have permission to loot anyone's corpse.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:157"
+  },
+  {
+    "text": "You have permissions to loot a corpse from these players:_",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:158"
+  },
+  {
+    "text": "You have cleared your consent list. Players will have to permit you again to allow you access to their corpse.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:159"
+  },
+  {
+    "text": "You don't have permission to loot _'s corpse.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:160"
+  },
+  {
+    "text": "You have removed your permissions to loot _'s corpse.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:161"
+  },
+  {
+    "text": "You have corpse looting permission from:_",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:163"
+  },
+  {
+    "text": "You don't have corpse looting permission from _.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:164"
+  },
+  {
+    "text": "You have removed the corpse looting permission of _.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:165"
+  },
+  {
+    "text": "You don't have any corpse consent to clear!",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:166"
+  },
+  {
+    "text": "You have accepted the offer",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:172"
+  },
+  {
+    "text": "The items are being traded",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:174"
+  },
+  {
+    "text": "You have learned a new spell.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:200"
+  },
+  {
+    "text": "You have been granted a new title.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:201"
+  },
+  {
+    "text": "Your chat privileges have been restored.",
+    "where": "packages/renderer/src/telemetry/RefusalTemplates.ts:205"
+  },
+  {
+    "text": "The _ is already open to a blank page",
+    "where": "packages/renderer/src/ui/BookModel.ts:65"
+  },
+  {
+    "text": "Only _ can change this page",
+    "where": "packages/renderer/src/ui/BookModel.ts:66"
+  },
+  {
+    "text": "You cannot change this page",
+    "where": "packages/renderer/src/ui/BookModel.ts:67"
+  },
+  {
+    "text": "You are now set to away-from-keyboard.",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:123"
+  },
+  {
+    "text": "You are no longer set to away-from-keyboard.",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:124"
+  },
+  {
+    "text": "You must select a suitable target before casting this spell",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:129"
+  },
+  {
+    "text": "This spell cannot be cast on _",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:134"
+  },
+  {
+    "text": "You must first enter magic mode to test spell formulae",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:139"
+  },
+  {
+    "text": "You must first select a target for the spell",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:140"
+  },
+  {
+    "text": "You do not have enough of this component",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:141"
+  },
+  {
+    "text": "You cannot select that while in combat mode",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:144"
+  },
+  {
+    "text": "You must select a spell to cast",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:146"
+  },
+  {
+    "text": "You can't enter _ mode while wielding the _",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:155"
+  },
+  {
+    "text": "You can't enter combat mode while in portal space",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:156"
+  },
+  {
+    "text": "You can't crouch while in combat mode",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:160"
+  },
+  {
+    "text": "You can't sit down while in combat mode",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:161"
+  },
+  {
+    "text": "You can't lie down while in combat mode",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:162"
+  },
+  {
+    "text": "You can't use chat emotes in combat mode",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:163"
+  },
+  {
+    "text": "No target selected. Select a player first.",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:171"
+  },
+  {
+    "text": "You must target another player to swear allegiance.",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:172"
+  },
+  {
+    "text": "That player is already in your allegiance.",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:173"
+  },
+  {
+    "text": "You must target a player from your allegiance to break.",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:174"
+  },
+  {
+    "text": "You have been restored to life.",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:189"
+  },
+  {
+    "text": "Some game data for this area could not be downloaded.",
+    "where": "packages/renderer/src/ui/ClientNotices.ts:194"
+  },
+  {
+    "text": "Player already logged on",
+    "where": "packages/renderer/src/ui/ConnectionNotices.ts:211"
+  },
+  {
+    "text": "Invalid server address",
+    "where": "packages/renderer/src/ui/ConnectionNotices.ts:218"
+  },
+  {
+    "text": "You are encumbered!",
+    "where": "packages/renderer/src/ui/EncumbranceNotice.ts:25"
+  },
+  {
+    "text": "You are severely encumbered!",
+    "where": "packages/renderer/src/ui/EncumbranceNotice.ts:25"
+  },
+  {
+    "text": "You are encumbered",
+    "where": "packages/renderer/src/ui/EncumbranceNotice.ts:30"
+  },
+  {
+    "text": "You are severely encumbered",
+    "where": "packages/renderer/src/ui/EncumbranceNotice.ts:30"
+  },
+  {
+    "text": "Given that number of goods, you cannot craft anything.",
+    "where": "packages/renderer/src/ui/FailureEventText1999.ts:76"
+  },
+  {
+    "text": "Your craft goods are unsatisfactory.",
+    "where": "packages/renderer/src/ui/FailureEventText1999.ts:78"
+  },
+  {
+    "text": "That person is not in the fellowship.",
+    "where": "packages/renderer/src/ui/FellowshipPanelActions.ts:37"
+  },
+  {
+    "text": "You need an open vendor.",
+    "where": "packages/renderer/src/ui/FillComponentList.ts:56"
+  },
+  {
+    "text": "There was not enough:",
+    "where": "packages/renderer/src/ui/FillComponentList.ts:58"
+  },
+  {
+    "text": "I can't possibly sell you that much! Please be a little more reasonable.",
+    "where": "packages/renderer/src/ui/FillComponentList.ts:61"
+  },
+  {
+    "text": "A character name cannot exceed 32 characters",
+    "where": "packages/renderer/src/ui/GameUI.ts:10568"
+  },
+  {
+    "text": "No skills data",
+    "where": "packages/renderer/src/ui/GameUI.ts:22096"
+  },
+  {
+    "text": "No character information available.",
+    "where": "packages/renderer/src/ui/GameUI.ts:23560"
+  },
+  {
+    "text": "You don't have enough money",
+    "where": "packages/renderer/src/ui/GameUI.ts:30935"
+  },
+  {
+    "text": "You must empty some slots in your backpack first",
+    "where": "packages/renderer/src/ui/GameUI.ts:30948"
+  },
+  {
+    "text": "This item costs _ _. You have _ _.",
+    "where": "packages/renderer/src/ui/GameUI.ts:31066"
+  },
+  {
+    "text": "You cannot split items from this panel",
+    "where": "packages/renderer/src/ui/GameUI.ts:31666"
+  },
+  {
+    "text": "You must enter a name for this character!",
+    "where": "packages/renderer/src/ui/GameUI.ts:7796"
+  },
+  {
+    "text": "That name is not allowed. Please choose another name.",
+    "where": "packages/renderer/src/ui/GameUI.ts:7806"
+  },
+  {
+    "text": "You can only salvage items that you own!",
+    "where": "packages/renderer/src/ui/SalvagePanel.ts:125"
+  },
+  {
+    "text": "Your augmentation has given you a return bonus of _%!",
+    "where": "packages/renderer/src/ui/SalvagePanel.ts:76"
+  },
+  {
+    "text": "You can only trade items you are carrying",
+    "where": "packages/renderer/src/ui/SecureTradePanel.ts:157"
+  },
+  {
+    "text": "Cannot split the stack to trade it",
+    "where": "packages/renderer/src/ui/SecureTradePanel.ts:158"
+  },
+  {
+    "text": "You must split the stack before trading it.",
+    "where": "packages/renderer/src/ui/SecureTradePanel.ts:159"
+  },
+  {
+    "text": "The trade has been cancelled.",
+    "where": "packages/renderer/src/ui/ServerMessageText.ts:231"
+  },
+  {
+    "text": "Cannot split the stack for dwelling costs",
+    "where": "packages/renderer/src/ui/SlumlordPanel.ts:123"
+  },
+  {
+    "text": "This spell would require no target",
+    "where": "packages/renderer/src/ui/SpellShortcutBar.ts:593"
+  },
+  {
+    "text": "You can only sell items you are carrying",
+    "where": "packages/renderer/src/ui/VendorSellDrag.ts:90"
+  },
+  {
+    "text": "That item cannot be sold here",
+    "where": "packages/renderer/src/ui/VendorSellDrag.ts:91"
+  },
+  {
+    "text": "That item has no value and cannot be sold",
+    "where": "packages/renderer/src/ui/VendorSellDrag.ts:92"
+  },
+  {
+    "text": "That item is too cheap to sell here",
+    "where": "packages/renderer/src/ui/VendorSellDrag.ts:93"
+  },
+  {
+    "text": "That item is too valuable to sell here",
+    "where": "packages/renderer/src/ui/VendorSellDrag.ts:94"
+  },
+  {
+    "text": "You cannot sell that here",
+    "where": "packages/renderer/src/ui/VendorSellDrag.ts:95"
+  },
+  {
+    "text": "Cannot split the stack to sell it",
+    "where": "packages/renderer/src/ui/VendorSellDrag.ts:96"
+  },
+  {
+    "text": "You are currently wielding items which require a certain level of _.  Your _ skill cannot be lowered while you are wielding these items.  Please remove these items and try again.",
+    "where": "packages/shared/src/combat/WeenieErrorWithStringText.ts:175"
+  },
+  {
+    "text": "You may not hook any more _ on your house.  You already have the maximum number of _ hooked or you are not permitted to hook any on your type of house.",
+    "where": "packages/shared/src/combat/WeenieErrorWithStringText.ts:201"
+  },
+  {
+    "text": "You now have the maximum number of _ hooked.  You cannot hook any additional _ until you remove one or more from your house.",
+    "where": "packages/shared/src/combat/WeenieErrorWithStringText.ts:202"
+  },
+  {
+    "text": "You no longer have the maximum number of _ hooked.  You may hook additional _.",
+    "where": "packages/shared/src/combat/WeenieErrorWithStringText.ts:203"
+  },
+  {
+    "text": "You're already wearing a trinket.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:131"
+  },
+  {
+    "text": "You're already wearing a cloak.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:132"
+  },
+  {
+    "text": "You're already wearing a helm.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:136"
+  },
+  {
+    "text": "You're already wearing chest armor.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:137"
+  },
+  {
+    "text": "You're already wearing abdomen armor.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:138"
+  },
+  {
+    "text": "You're already wearing upper arm armor.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:139"
+  },
+  {
+    "text": "You're already wearing lower arm armor.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:140"
+  },
+  {
+    "text": "You're already wearing hand armor.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:141"
+  },
+  {
+    "text": "You're already wearing upper leg armor.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:142"
+  },
+  {
+    "text": "You're already wearing lower leg armor.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:143"
+  },
+  {
+    "text": "You're already wearing foot armor.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:144"
+  },
+  {
+    "text": "You're already wearing jewelry on your neck.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:212"
+  },
+  {
+    "text": "You're already wearing jewelry on both wrists.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:239"
+  },
+  {
+    "text": "You're already wearing jewelry on both hands.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:240"
+  },
+  {
+    "text": "You must unwield your shirt and pants to wield that.",
+    "where": "packages/shared/src/inventory/AutoWield.ts:312"
+  },
+  {
+    "text": "You cannot wield more _",
+    "where": "packages/shared/src/inventory/AutoWield.ts:68"
+  },
+  {
+    "text": "The _ can't be given",
+    "where": "packages/shared/src/inventory/InventoryRequest.ts:100"
+  },
+  {
+    "text": "You can only move or use one item at a time",
+    "where": "packages/shared/src/inventory/InventoryRequest.ts:149"
+  },
+  {
+    "text": "You cannot move or use an item while attacking",
+    "where": "packages/shared/src/inventory/InventoryRequest.ts:151"
+  },
+  {
+    "text": "The _ can't be merged",
+    "where": "packages/shared/src/inventory/InventoryRequest.ts:93"
+  },
+  {
+    "text": "The _ can't be split",
+    "where": "packages/shared/src/inventory/InventoryRequest.ts:94"
+  },
+  {
+    "text": "The _ can't be moved",
+    "where": "packages/shared/src/inventory/InventoryRequest.ts:95"
+  },
+  {
+    "text": "The _ can't be put in the container",
+    "where": "packages/shared/src/inventory/InventoryRequest.ts:97"
+  },
+  {
+    "text": "The _ can't be dropped",
+    "where": "packages/shared/src/inventory/InventoryRequest.ts:98"
+  },
+  {
+    "text": "The _ can't be wielded",
+    "where": "packages/shared/src/inventory/InventoryRequest.ts:99"
+  },
+  {
+    "text": "You do not have all of this spell's components",
+    "where": "packages/shared/src/magic/SpellComponentCheck.ts:45"
+  },
+  {
+    "text": "You need to be in peace mode to trade.",
+    "where": "packages/shared/src/systems/OpenTradeGate.ts:48"
+  },
+  {
+    "text": "You have successfully linked with the life stone.",
+    "where": "packages/shared/src/systems/TieBindResolver.ts:43"
+  },
+  {
+    "text": "You have successfully linked with the portal.",
+    "where": "packages/shared/src/systems/TieBindResolver.ts:44"
+  },
+  {
+    "text": "You you You're you're Your your Not not enough Unable unable Invalid invalid Only only Can't can't Cannot cannot",
+    "where": "packages/shared/src/util/RefusalTextSafety.ts:78"
+  }
+]

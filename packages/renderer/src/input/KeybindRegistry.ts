@@ -283,11 +283,18 @@ export class KeybindRegistry {
     this.rebuildReverse();
   }
 
-  /** JSON of every non-empty binding (for localStorage / "Save As"). */
+  /**
+   * JSON of every non-empty binding, plus every command the player left with no key that has a
+   * default (for localStorage / "Save As"). The emptied ones are written as [null, null, null]:
+   * binding a key takes it from its co-active owner (setMapping), and a save that dropped that
+   * owner let loadSerialized give it its default key back, so the key resolved to the old owner
+   * after a reload (BUG.keybind-saved-binding-load, webac#13: L bound to Use Closest Unopened
+   * Corpse fired Select Previous Monster, L's default, until the player re-bound it in-session).
+   */
   serialize(): string {
     const out: Record<string, Mapping[]> = {};
     for (const [id, slots] of this.bindings) {
-      if (slots.some((s) => s)) out[id] = slots.slice();
+      if (slots.some((s) => s) || (this.defaults[id]?.length ?? 0) > 0) out[id] = slots.slice();
     }
     return JSON.stringify(out);
   }
@@ -298,16 +305,40 @@ export class KeybindRegistry {
    * constructor-default binding from resetToDefaults()) rather than being
    * wiped to unbound — this keeps a save written before an action existed
    * from clobbering that action's shipped default.
+   *
+   * A kept default loses any key a saved command in a co-active map holds, as setMapping took it
+   * when the player bound it (CInputMap::AddMapping @ 0068ef90). Saves written before serialize()
+   * kept emptied commands omit the command the key was taken from, and the default would come back
+   * beside the player's binding and win resolve() (BUG.keybind-saved-binding-load, webac#13).
    */
   loadSerialized(json: string): void {
     let parsed: Record<string, Mapping[]>;
     try { parsed = JSON.parse(json); } catch { return; }
+    if (parsed === null || typeof parsed !== 'object') return;
+    const saved = new Set<number>();
+    const savedOwners = new Map<string, number[]>();
     for (const a of ALL_KEYBIND_ACTIONS) {
       const s = parsed[a.id] ?? parsed[String(a.id)];
       if (!Array.isArray(s)) continue;
       const slots: Mapping[] = [null, null, null];
-      for (let i = 0; i < Math.min(MAPPINGS_PER_ACTION, s.length); i++) slots[i] = s[i] ?? null;
+      for (let i = 0; i < Math.min(MAPPINGS_PER_ACTION, s.length); i++) {
+        const c = s[i];
+        slots[i] = typeof c === 'string' && c ? c : null;
+      }
       this.bindings.set(a.id, slots);
+      saved.add(a.id);
+      for (const c of slots) {
+        if (!c) continue;
+        const owners = savedOwners.get(c);
+        if (owners) owners.push(a.id); else savedOwners.set(c, [a.id]);
+      }
+    }
+    for (const [id, slots] of this.bindings) {
+      if (saved.has(id)) continue;
+      for (let i = 0; i < slots.length; i++) {
+        const c = slots[i];
+        if (c && (savedOwners.get(c) ?? []).some((o) => this.coactive(id, o))) slots[i] = null;
+      }
     }
     this.rebuildReverse();
   }

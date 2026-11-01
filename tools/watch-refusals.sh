@@ -56,10 +56,10 @@ for line in sys.stdin:
     if not key[1] or key in seen: continue
     a = new.get(key)
     if a is None:
-        a = new[key] = {"count": 0, "source": set(), "context": set(), "server": set(), "text": None, "action": None}
+        a = new[key] = {"count": 0, "source": set(), "context": set(), "server": set(), "trace": set(), "ip": set(), "text": None, "action": None}
         order.append(key)
     a["count"] += int(o.get("count") or 1)
-    for k in ("source", "context", "server"):
+    for k in ("source", "context", "server", "trace", "ip"):
         if o.get(k): a[k].add(str(o[k]))
     if a["text"] is None and o.get("text"): a["text"] = str(o["text"])
     if a["action"] is None and o.get("action") is not None: a["action"] = o["action"]
@@ -72,7 +72,8 @@ with open(state, "a", encoding="utf-8") as f:
             continue
         j = lambda s: ",".join(sorted(s)) or "-"
         act = "" if a["action"] is None else " action=0x%x" % int(a["action"])
-        print("NEW refusal era=%s code=%s source=%s context=%s servers=%s count=%d%s text=%s" % (
-            key[0], key[1], j(a["source"]), j(a["context"]), j(a["server"]), a["count"], act, json.dumps(a["text"])))
+        print("NEW refusal era=%s code=%s source=%s context=%s servers=%s count=%d players=%d traces=%s%s text=%s" % (
+            key[0], key[1], j(a["source"]), j(a["context"]), j(a["server"]), a["count"], len(a["ip"]) or 1,
+            ",".join(sorted(a["trace"])[:5]) or "-", act, json.dumps(a["text"])))
         f.write("%s\t%s\t%s\n" % (key[0], key[1], now))
 '

@@ -116,6 +116,36 @@ export const REFUSAL_SHAPE_WORDS: readonly string[] = Object.freeze([
   // arguments, "Invalid parameter count, got {n}, expected {m}!" (GameActionTalk.cs:89, ChatMessageType.Help), went
   // out as t:88cb9b2c ("Invalid _, _ #, _ #!") with no text; it keeps its words now (a new code).
   'parameter count got expected',
+  // TELEMETRY.refusal-template-word-sweep (2026-11-01): the fixed words of server lines WITH a name slot. Prod logged
+  // ACE's sell refusal "The {itemName} is unsellable." (Player_Commerce.cs:271, transient) as t:97a94890 "The _ is _.",
+  // which collides with any "The X is Y." line. Swept every refusal-like ACE / ClassicACE GameEventCommunication-
+  // TransientString and GameMessageSystemChat template, the WeenieError / WeenieErrorWithString enum texts, and the
+  // AC1999 / ClassicDereth / Seedsow SendText templates and GameEnums.h WERROR_ comments (slots as '_'); admin /
+  // developer command output, debug lines (method names) and game proper nouns left out. Lower-case words:
+  'unsellable value uses its itself combined applied disabled generated rare caused essence confirmation equal',
+  'higher bestow capacity enlightenment appraise unappraised sneaking start technique database saved incompatible',
+  'gameplay modes default playing road follow bags tinkered workmanship portals properly explore surroundings keep',
+  'taunt taunting others refrain throwing little valuable pickup shields identifiers well quite directly detected',
+  'good secondaries extracted tranfers dig treasure email address privacy zone string formula era restore creatures',
+  'spent refunded gem vitals id',
+  // Capitalized sentence starts of those lines ("Failed to dequip item!", "Target container not found!", "Stack not
+  // valid!", "Invalid movement detected. Rolling back …", "They have privacy mode enabled.", "Invalid PK Status!"), and the skill as AC1999
+  // writes it ("You must be trained in Lockpicking."). None is a personal name.
+  'Failed Target Source Split Stack Stacks Merge Give These Rolling They Status Lockpicking',
+  // TELEMETRY.refusal-client-word-sweep (2026-11-01): the client's own spew lines lose words the same way, and their
+  // c: codes hash the scrubbed text too. Prod logged c:44711de0 "You cannot make a _ to the _" for the client's
+  // "You cannot make a shortcut to the %s" (itemShortcutRestore.ts shortcutIneligibleText, CreateShortcutToItem's
+  // .rdata literal). Swept every refusal-shaped string literal of the spew-feeding modules in packages/renderer/src and
+  // packages/shared/src (AutoWield's slot lines, ItemHolderPlacement, AttemptPlaceIn3D, BookModel, LogoutFlow,
+  // VendorSellDrag, FillComponentList, the 1999 craft failures, the chat commands' 0x1a replies); dialogs (not
+  // reported), help essays, plugin options and proper nouns (aetheria of Lyr / Kor / Tem) left out.
+  'shortcut page blank wearing trinket cloak helm abdomen hand foot upper arm leg jewelry neck wrists unwield shirt',
+  'pants mid containers completely big selling manipulate log cheap takes arguments arguements online issued popup',
+  'provide length exceed between cell reason goods unsatisfactory possibly reasonable stone bonus severely backpack',
+  // Their capitalized words: sentence starts ("Window title length cannot exceed …", "Radius must be between …",
+  // "Field of view …", "Too big to merge. Putting in _.", "I can't possibly sell you that much!") and retail's own
+  // capitals in "Cannot Merge Different Stack Types.".
+  'Window Radius Field Putting I Different Types',
 ]);
 
 /** The base vocabulary's sources: the server templates, the attempt-failed lines, the skill names and the shape words. */
