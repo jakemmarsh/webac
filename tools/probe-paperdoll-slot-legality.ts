@@ -94,7 +94,7 @@ async function main(): Promise<void> {
       const pd = ui.inventoryPanelHandle.elements.get(0x100001cd); const at = pd && pd.querySelector(${JSON.stringify(b.target)});
       if (!at) return false; const r = at.getBoundingClientRect(); const x = r.left + r.width / 2, y = r.top + r.height / 2;
       const el = document.elementFromPoint(x, y); if (!el) return false;
-      ui.dragItemIndex = ${item.idx}; ui.dragSourceSlot = null;
+      ui.dragItemGuid = ui.inventoryItems[${item.idx}]?.id ?? 0; ui.dragSourceSlot = null;
       const o = { bubbles: true, cancelable: true, clientX: x, clientY: y };
       el.dispatchEvent(new DragEvent('dragover', o)); el.dispatchEvent(new DragEvent('drop', o)); return true; })()`);
     // The spew strip keeps a line 5 s: read it at once.

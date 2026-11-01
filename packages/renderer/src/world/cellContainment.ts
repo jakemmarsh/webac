@@ -74,3 +74,40 @@ export function pointInCell(
   });
   return pointInsideCellBsp(cellRoot, local);
 }
+
+/** BSPNODE::sphere_intersects_cell_bsp's slack added to the sphere's radius (0.01, `___real_3c23d70a`). */
+export const CELL_SPHERE_SLACK = 0.01;
+
+/**
+ * BUG.walkin-cave-invisible-walls — BSPNODE::sphere_intersects_cell_bsp
+ * @ 0053c260 (ACE BSPNode.cs:219) through CCellStruct::sphere_intersects_cell
+ * @ 00533900: whether a sphere (CELL-LOCAL centre) reaches the cell's volume,
+ * i.e. the BoundingType is not OUTSIDE (PARTIALLY_INSIDE or ENTIRELY_INSIDE).
+ * Behind a splitting plane by radius + 0.01 or more is outside; otherwise the
+ * positive child decides, and a missing one (a leaf) is inside.
+ */
+export function sphereIntersectsCellBsp(node: BSPNodeBase | undefined, center: ACVec3, radius: number): boolean {
+  if (!node) return true;
+  const internal = node as { splittingPlane?: { normal: ACVec3; distance: number }; posNode?: BSPNodeBase };
+  const plane = internal.splittingPlane;
+  if (!plane) return true; // a leaf: ACE's default zero plane → PartiallyInside
+  const dist = plane.normal.x * center.x + plane.normal.y * center.y + plane.normal.z * center.z + plane.distance;
+  if (dist <= -(radius + CELL_SPHERE_SLACK)) return false;
+  return internal.posNode ? sphereIntersectsCellBsp(internal.posNode, center, radius) : true;
+}
+
+/** EnvCell.check_building_transit's test: sphereIntersectsCellBsp with the sphere in LANDBLOCK-LOCAL coordinates. */
+export function sphereIntersectsCell(
+  cellRoot: BSPNodeBase | undefined,
+  cellOrigin: ACVec3,
+  cellOrientation: ACQuat,
+  center: ACVec3,
+  radius: number,
+): boolean {
+  const local = inverseRotate(cellOrientation, {
+    x: center.x - cellOrigin.x,
+    y: center.y - cellOrigin.y,
+    z: center.z - cellOrigin.z,
+  });
+  return sphereIntersectsCellBsp(cellRoot, local, radius);
+}

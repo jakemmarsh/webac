@@ -19,7 +19,6 @@
  * helpers the chargen Appearance page uses. The 3D view 0x1000059b is a
  * gmCG3DView: the host draws the model's face into its canvas.
  */
-import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 import type { LayoutRenderer, PanelHandle } from './LayoutRenderer.js';
 import type { ElementDesc } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import {
@@ -38,6 +37,7 @@ import {
 import { buildCreatureModeCamera } from './CreatureViewCamera.js';
 import { buildCreatureModeScene, renderSceneToCanvas } from './CreatureViewRender.js';
 import type { UIHost } from './UIHost.js';
+import { PreviewBuildHold } from './PreviewBuildHold.js';
 import type * as THREE from 'three';
 
 /** The UI state a hovered row arrow shows (0x100002c6 / c7: 1 normal, 2 rollover). */
@@ -387,36 +387,41 @@ export class BarberPanel {
  * page never calls StartAnimation: the figure keeps its placement pose.
  * No-op without the host's WebGL renderer (DOM tests).
  */
-export function barberPreviewRenderer(host: Pick<UIHost, 'characterModelBuilder' | 'renderer'> | null | undefined):
-  (canvas: HTMLCanvasElement, model: BarberModel) => void {
+export function barberPreviewRenderer(
+  host: Pick<UIHost, 'characterModelBuilder' | 'renderer'> | null | undefined,
+  opts: { onMiss?: (model: BarberModel) => void; hold?: PreviewBuildHold<THREE.Group> } = {},
+): (canvas: HTMLCanvasElement, model: BarberModel) => void {
   let built: THREE.Group | null = null;
-  let builtRevision = -1;
-  let waitingForFiles = false;
-  const render = (canvas: HTMLCanvasElement, m: BarberModel): void => {
-    const builder = host?.characterModelBuilder;
+  let requestedRevision = -1;
+  // UX.chargen-preview-no-placeholder — a face whose streamed files aren't
+  // resident yet is built off-screen and swapped in once they are (or the
+  // hold's cap releases a stall); the last complete face stays meanwhile.
+  const hold = opts.hold ?? new PreviewBuildHold<THREE.Group>();
+  const draw = (canvas: HTMLCanvasElement, m: BarberModel): void => {
     const renderer = host?.renderer;
-    if (!builder || !renderer) return;
-    if (!built || builtRevision !== m.viewRevision) {
-      const missEpoch = datMissEpoch();
-      built = builder.buildCharacterModel(m.heritage, m.gender, m.appearanceInfo(), m.previewSetupId);
-      builtRevision = m.viewRevision;
-      // Built while a streamed face / palette / texture file wasn't resident:
-      // rebuild and redraw once it lands (the panel only redraws on a change).
-      if (!noDatMissSince(missEpoch) && !waitingForFiles) {
-        waitingForFiles = true;
-        const unsubscribe = onDatMissResolved(() => {
-          unsubscribe();
-          waitingForFiles = false;
-          built = null;
-          if (canvas.isConnected) render(canvas, m);
-        });
-      }
-    }
-    if (!built) return;
+    if (!built || !renderer) return;
     built.rotation.set(0, headingToModelYaw(m.view.heading), 0);
     const scene = buildCreatureModeScene(built, CHARGEN_VIEW_LIGHT_DIRECTION, CHARGEN_VIEW_LIGHT_INTENSITY);
     renderSceneToCanvas(renderer, scene, buildCreatureModeCamera(m.camera, canvas.width, canvas.height), canvas);
     scene.remove(built);
+  };
+  const render = (canvas: HTMLCanvasElement, m: BarberModel): void => {
+    const builder = host?.characterModelBuilder;
+    if (!builder || !host?.renderer) return;
+    if (requestedRevision !== m.viewRevision) {
+      requestedRevision = m.viewRevision;
+      const heritage = m.heritage, gender = m.gender, info = m.appearanceInfo(), setupId = m.previewSetupId;
+      hold.request(
+        () => builder.buildCharacterModel(heritage, gender, info, setupId),
+        (model, sync) => {
+          built = model;
+          // Swapped in after its files landed: the panel only redraws on a change.
+          if (!sync && canvas.isConnected) draw(canvas, m);
+        },
+        { onMiss: () => opts.onMiss?.(m) },
+      );
+    }
+    draw(canvas, m);
   };
   return render;
 }

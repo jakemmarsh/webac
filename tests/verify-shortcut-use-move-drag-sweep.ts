@@ -313,6 +313,7 @@ function dragEvent(type: string, data: Record<string, string> = {}): Event {
     value: {
       effectAllowed: '', setData: (k: string, v: string) => { store[k] = v; }, getData: (k: string) => store[k] ?? '',
       setDragImage: () => {},
+      get types() { return Object.keys(store); },
     },
   });
   return e;
@@ -385,12 +386,32 @@ describe('GameUI — spell bar shortcuts drag off, back on, and onto another tab
     expect(events).toEqual([]);
   });
 
-  it('a spellbook row still drops on a cell (text/spell-index)', () => {
+  it('a spellbook row still drops on a cell (it carries its spell id, text/spell-id)', () => {
     const { ui, events, cells, ids } = setup();
     ui.spellBarSlots[0] = [A, null, null, null, null, null, null, null, null];
-    cells[0].dispatchEvent(dragEvent('drop', { 'text/spell-index': '2' }));
+    cells[0].dispatchEvent(dragEvent('drop', { 'text/spell-id': '300' }));
     expect(ids()).toEqual([300, 100]);
     expect(events).toEqual(['add 300 @0 bar0']);
+  });
+
+  it('VISUAL.drag-merge-indicator — a spell dragged over a cell shows the ring (end of retail); the cell is never dimmed; 1999 shows nothing', async () => {
+    const { ui, cells } = setup();
+    // SpellCastSubMenu::OnItemListDragOver @ 004c5990: a drag carrying a spell → 0x10000040 (template 0x10000341 → 0x1000045d).
+    cells[3].dispatchEvent(dragEvent('dragover', { 'text/spell-index': '2' }));
+    const overlay = cells[3].querySelector('[data-ac-drag-accept]') as HTMLElement;
+    expect(overlay.dataset.acDragAccept).toBe(String(0x10000040));
+    expect(overlay.dataset.acDragTemplate).toBeUndefined();
+    expect(cells[3].style.opacity).toBe('');
+    cells[3].dispatchEvent(dragEvent('dragleave'));
+    expect(overlay.dataset.acDragAccept).toBe(String(0x1000003f));
+    // An item drag carries no spell: nothing.
+    cells[2].dispatchEvent(dragEvent('dragover', { 'text/plain': 'inv:0' }));
+    expect(cells[2].querySelector('[data-ac-drag-accept]')).toBeNull();
+    const { eraClientRules } = await import('../packages/renderer/src/era/EraFeatures.js');
+    const { eraProfile } = await import('../packages/renderer/src/era/EraProfiles.js');
+    ui.setClientRules(eraClientRules(eraProfile('ac1999-retail')));
+    cells[1].dispatchEvent(dragEvent('dragover', { 'text/spell-index': '2' }));
+    expect(cells[1].querySelector('[data-ac-drag-accept]')).toBeNull();
   });
 
   it('dropped on another tab\'s label it is appended there and the open tab stays open', () => {
@@ -427,7 +448,7 @@ describe('GameUI — a sell-list entry drags off the list and on as the player\'
 
   it('the entry leaves the sell list and the drag is the inventory item (a pack, the toolbar or the 3D view take it)', async () => {
     ui.beginSellListDrag(SWORD);
-    expect(ui.worldDropSource()).toEqual({ kind: 'inventory', itemIndex: 1 });
+    expect(ui.worldDropSource()).toEqual({ kind: 'inventory', guid: SWORD });
     await new Promise((r) => setTimeout(r, 0));
     expect(ui.vendorData.sellList).toEqual([]);
   });

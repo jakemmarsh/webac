@@ -13,7 +13,7 @@ import { resolve } from 'path';
 import {
   VTI_MIN_DIST, VtiImage, VividTargetIndicatorView, colorizeRGBA, loadVtiImageDids,
   objectBoundingStatus, offscreenAngleDeg, offscreenImageForAngle, offscreenPosition,
-  onScreenPlacement, vtiFrame, vtiShowsSelection, type RgbaImage, type VtiCamera,
+  onScreenPlacement, vtiFrame, vtiInContainer, vtiShowsSelection, type RgbaImage, type VtiCamera,
 } from '../packages/renderer/src/ui/VividTargetIndicator.js';
 import { openDat } from './_harness/dat.js';
 
@@ -108,6 +108,23 @@ describe('VividTargetIndicator::SetSelected filter', () => {
     expect(vtiShowsSelection(0x80000010, 0x50000001, true, false)).toBe(false);
     expect(vtiShowsSelection(0x80000010, 0x50000001, false, true)).toBe(false);
     expect(vtiShowsSelection(0x80000010, 0x50000001, false, false)).toBe(true);
+  });
+
+  it('BUG.contained-item-target-arrows: an item in a corpse, vendor or trade window, or in no cell and unheld, is IN_CONTAINER', () => {
+    const none = { inGroundContainer: false, ownedByVendor: false, ownedByTradePartner: false, outOfWorld: false };
+    // A monster on the ground: shown.
+    expect(vtiInContainer(none)).toBe(false);
+    // An item listed in the open corpse / chest strip (even one whose record still sits in a cell).
+    expect(vtiInContainer({ ...none, inGroundContainer: true })).toBe(true);
+    expect(vtiInContainer({ ...none, ownedByVendor: true })).toBe(true);
+    expect(vtiInContainer({ ...none, ownedByTradePartner: true })).toBe(true);
+    // The monster's weapon after it died: unparented, its record out of the world at a stale place.
+    expect(vtiInContainer({ ...none, outOfWorld: true })).toBe(true);
+    expect(vtiInContainer({ ...none, outOfWorld: true, wielderId: 0 })).toBe(true);
+    // Still held (state 1): framed on its holder, as retail.
+    expect(vtiInContainer({ ...none, outOfWorld: true, wielderId: 0x80000001 })).toBe(false);
+    // Through the filter the corpse item shows nothing; the selection itself is untouched.
+    expect(vtiShowsSelection(0x80000010, 0x50000001, false, vtiInContainer({ ...none, inGroundContainer: true }))).toBe(false);
   });
 });
 

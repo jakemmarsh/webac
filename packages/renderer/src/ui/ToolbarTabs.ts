@@ -48,3 +48,38 @@ export function collapseToolbarTabs(slots: readonly ToolbarTabSlot[], hidden: Re
   const end = tabs.length ? tabs[tabs.length - 1].x + tabs[tabs.length - 1].w : slots[0].x;
   return { tabs, filler: rowEnd > end ? { x: end, w: rowEnd - end } : null };
 }
+
+/**
+ * The 1999 client.exe's own tab row (VISUAL.ac1999-hidden-element-gaps). PanelUI's ctor
+ * @ 0x004eb120 builds five panel tabs with 0x005cf710(parent, 0, x, y, w, h), the same art
+ * as end of retail's (0x0600111f social, 0x06001119 magic, 0x06001122 character, 0x06001116
+ * map, 0x0600111c options) and no journal: social x 0x3d w 0x23, magic 0x60 / 0x22,
+ * character 0x82 / 0x22, map 0xa4 / 0x22, options 0xc6 / 0x27, all 0x1b tall. They abut (each
+ * x is the previous x + w) from the left separator 0x0600112b (blitted at x 0x37) to the
+ * right one 0x0600112c (x 0xed), the options tab at its art's full 39 px. End of retail's
+ * six (0x21000016) overlap by ~4 px to fit the journal in the same span.
+ */
+export const AC1999_TOOLBAR_TABS: readonly ToolbarTabSlot[] = [
+  { id: 'tb-social', x: 0x3d, w: 0x23 },
+  { id: 'tb-magic', x: 0x60, w: 0x22 },
+  { id: 'tb-char', x: 0x82, w: 0x22 },
+  { id: 'tb-map', x: 0xa4, w: 0x22 },
+  { id: 'tb-opt', x: 0xc6, w: 0x27 },
+];
+
+/**
+ * Lay out the tab row for an era: its client's own row (`eraSlots`, e.g. AC1999_TOOLBAR_TABS)
+ * when it has one, with no filler (that row spans the bar between its separators), else the
+ * layout's row closed up around the `hidden` tabs (collapseToolbarTabs). A tab neither in
+ * `eraSlots` nor visible is not built.
+ */
+export function eraToolbarRow(
+  slots: readonly ToolbarTabSlot[], hidden: ReadonlySet<string>, eraSlots: readonly ToolbarTabSlot[] | null,
+): CollapsedToolbarRow {
+  if (!eraSlots) return collapseToolbarTabs(slots, hidden);
+  const known = new Set(slots.map((s) => s.id));
+  return {
+    tabs: eraSlots.filter((s) => known.has(s.id) && !hidden.has(s.id)).map((s) => ({ id: s.id, x: s.x, w: s.w })),
+    filler: null,
+  };
+}

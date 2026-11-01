@@ -25,7 +25,6 @@
     "verify-faithful-569-spell-quickbar-restore.ts",
     "verify-faithful-570-character-options-restore.ts",
     "verify-faithful-572-inventory-placement-restore.ts",
-    "verify-faithful-573-inventory-reorder-save.ts",
     "verify-faithful-574-create-object-parent-location.ts",
     "verify-faithful-581-public-update-handlers.ts",
     "verify-faithful-590-skill-effective-value.ts",

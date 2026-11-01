@@ -149,9 +149,12 @@ export interface BuildingGate {
 export interface SurfaceView {
   /**
    * Positions tested against the portal plane — pass if ANY is on the
-   * enterable side. Retail tests only the render viewpoint (the camera);
-   * we add the player so a third-person camera trailing through the
-   * doorway during entry/exit never hides a room the player still sees.
+   * enterable side. Retail tests only the render viewpoint (the camera), and
+   * main.ts passes only the camera: BUG.doorway-pvs-over-terrain — the
+   * player as a second viewpoint opened a doorway's gate and punch from its
+   * closed side while the camera trailed through it (the punch erased the
+   * terrain's depth and road overlays seen out of the door). A camera inside
+   * a building cell is drawn from that cell instead (scene/IndoorView.ts).
    */
   viewpoints: Vec3[];
   /** frustum planes, inward normals: n·p + d >= 0 inside */

@@ -61,7 +61,7 @@ const dropOn = (page: Page, idx: number, slot: string) => readAc<boolean>(page, 
   const pd = ui.inventoryPanelHandle.elements.get(0x100001cd); const at = pd && pd.querySelector('[data-equip-slot="${slot}"]');
   if (!at) return false; const r = at.getBoundingClientRect(); const x = r.left + r.width / 2, y = r.top + r.height / 2;
   const el = document.elementFromPoint(x, y); if (!el) return false;
-  ui.dragItemIndex = ${idx}; ui.dragSourceSlot = null;
+  ui.dragItemGuid = ui.inventoryItems[${idx}]?.id ?? 0; ui.dragSourceSlot = null;
   const o = { bubbles: true, cancelable: true, clientX: x, clientY: y };
   el.dispatchEvent(new DragEvent('dragover', o)); el.dispatchEvent(new DragEvent('drop', o)); return true; })()`);
 const doubleClick = (page: Page, idx: number) => readAc<boolean>(page, `(ac.gameUI.dragCallbacks.onDoubleClickItem(${idx}), true)`);

@@ -190,7 +190,7 @@ for t in "${'$'}{tags[@]}"; do echo "${'$'}t ${'$'}d" >> "${'$'}FAKE_DIR/registr
     // Every path the script's git archive names, so the build context extracts.
     c.base = commit(dir, {
       'package.json': '{}', 'package-lock.json': '{}', 'tsconfig.json': '{}', 'vite.config.ts': '',
-      'tools/lib/vite-head-from-stat.ts': '', 'tools/ac-agent/tools.ts': 't', '.dockerignore': '',
+      'tools/lib/vite-head-from-stat.ts': '', 'tools/lib/temp-profile.ts': '', 'tools/ac-agent/tools.ts': 't', '.dockerignore': '',
       'deploy/web/railway.json': JSON.stringify({ build: { watchPatterns: WEB_WATCH } }),
       'services/ws-tcp-bridge/railway.json': JSON.stringify({ build: { watchPatterns: BRIDGE_WATCH } }),
       'services/ws-tcp-bridge/src/bridge.ts': 'b1',

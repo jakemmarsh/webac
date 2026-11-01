@@ -41,7 +41,12 @@
  * (`set_velocity @ 005113f0`, clamped to max_velocity 50) and omega on ANY
  * object — a peer's jump, a knockback.
  *
- * No collision world is simulated for remote objects: an object on the
+ * BUG.remote-creature-obstacle-collision — a move of the object's own motion
+ * (sequence, velocity, sticky) runs through the static world's transition
+ * (the `transition` hook, world/RemoteTransition.ts) when it has one: walls,
+ * buildings, rocks, trees, other creatures stop or slide it, and it climbs
+ * stairs and ramps on the ground the step down finds. Without one (no
+ * spheres, beyond 96 m, a world we hold no collision for) an object on the
  * ground outdoors follows the terrain height under it, and an airborne one
  * lands on the terrain (outdoors) or back at the height it last stood at
  * (indoors) — the stand-in for `transition()`'s contact test. The one
@@ -115,6 +120,14 @@ export const DEFAULT_FRICTION = 0.95;
 const MAX_QUEUE = 20;
 /** InterpolationManager's node-fail count that triggers the blip. */
 const NODE_FAIL_BLIP = 4;
+
+/**
+ * `PhysicsGlobals::floor_z` — the least contact-plane Normal.Z an object can stand on (cos 48.4°;
+ * ACE PhysicsGlobals.FloorZ, TerrainCollision.ACE_FLOOR_Z).
+ */
+export const FLOOR_Z = 0.66417414618662751;
+/** COLLISIONINFO::frames_stationary_fall: the third stationary slide stands the body (validate_transition). */
+const STATIONARY_STUCK_FRAMES = 3;
 
 /** PhysicsState `Sledding` (0x800000) — calc_acceleration / calc_friction's sled branch. */
 const SLEDDING = 0x800000;
@@ -407,6 +420,18 @@ export class ConstraintManager {
   }
 }
 
+/** What a remote object's transition did with its move (world/RemoteTransition.ts RemoteMoveResult). */
+export interface RemoteTransitionResult {
+  x: number;
+  y: number;
+  /** The ground under it (AC z), or null when not asked / none found. */
+  groundZ: number | null;
+  /** That ground is the terrain itself. */
+  onTerrain: boolean;
+  /** The move was stopped or turned. */
+  blocked: boolean;
+}
+
 /** What the object's physics reads from its surroundings. */
 export interface RemotePhysicsEnv {
   /** AC ground height (z) under (x, y) outdoors, or null (no terrain there / unknown). */
@@ -430,6 +455,11 @@ export interface RemotePhysicsEnv {
   holdsSurfaceCell?(cell: number): boolean;
   /** The walkable of the landscape's collision under (x, y) nearest feet height z, or null. */
   surfaceFloorZ?(x: number, y: number, z: number): number | null;
+  /**
+   * The unit normal (AC axes, z up) of the terrain triangle under AC global (x, y), or null when the
+   * landblock's heights are not loaded: the contact plane of a body on the land (BUG.ac1999-monster-jitter).
+   */
+  terrainNormal?(x: number, y: number): SeqV3 | null;
 }
 
 /** The land cell (0xXXYY00NN, NN = 1 + 8·column + row) holding AC global (x, y). */
@@ -516,6 +546,13 @@ export class RemotePhysicsObject implements PositionHost {
   /** Elapsed time not yet stepped by the physics (under MIN_QUANTUM). */
   private physicsCarry = 0;
   /**
+   * BUG.ac1999-monster-jitter — the steep terrain face the body is in contact with but cannot stand on
+   * (Normal.Z < FLOOR_Z), null on a walkable: it slides down it (see `update`).
+   */
+  private slidePlane: SeqV3 | null = null;
+  /** Consecutive slide frames that went nowhere (frames_stationary_fall). */
+  private slideStationary = 0;
+  /**
    * MOVE.chunked-motion-judder — the object moves in whole steps (its
    * sequence's animation frames, its velocity's MIN_QUANTUM updates); these
    * place the DRAWN object between them (drawPosition / drawOrientation).
@@ -531,6 +568,13 @@ export class RemotePhysicsObject implements PositionHost {
   readonly interp: InterpolationManager;
   readonly sticky: StickyManager;
   readonly constraint: ConstraintManager;
+
+  /**
+   * BUG.remote-creature-obstacle-collision — the object's transition for a move of its own motion
+   * from where it stands to AC (x, y) (ServerObjectManager wires world/RemoteTransition.ts); null =
+   * no collision (no spheres, out of range, no collision world). Returns null when not run.
+   */
+  transition: ((to: { x: number; y: number }, opts: { airborne: boolean; wantGround: boolean }) => RemoteTransitionResult | null) | null = null;
 
   /** Hooks into the rest of the object. */
   motion: {
@@ -802,13 +846,41 @@ export class RemotePhysicsObject implements PositionHost {
         this.physicsCarry = 0;
         this.lastQuantum = Math.min(rem, MAX_QUANTUM);
         const bx = frame.origin.x, by = frame.origin.y, bz = frame.origin.z, byaw = yawOf(frame.orientation);
-        while (rem > MAX_QUANTUM) { this.updatePhysicsInternal(MAX_QUANTUM, frame); rem -= MAX_QUANTUM; }
-        this.updatePhysicsInternal(rem, frame);
+        while (rem > MAX_QUANTUM) { this.updatePhysicsInternal(MAX_QUANTUM, frame, this.slidePlane); rem -= MAX_QUANTUM; }
+        this.updatePhysicsInternal(rem, frame, this.slidePlane);
         quantumRan = true;
         quantumMoved.x = frame.origin.x - bx;
         quantumMoved.y = frame.origin.y - by;
         quantumMoved.z = frame.origin.z - bz;
         quantumMoved.yaw = wrapAngle(yawOf(frame.orientation) - byaw);
+      }
+    }
+    // BUG.remote-creature-obstacle-collision — UpdateObjectInternal @ 005156b0: a frame that moved
+    // goes through CPhysicsObj::transition @ 00512dc0 from where the object stands; a blocked one
+    // keeps its origin (set_frame), a slid one ends where the sphere path did. An interpolated step
+    // is not collided again: it heads for a position the server's own transition reached
+    // (RemoteTransition.ts; a node it still cannot reach blips there, InterpolationManager.useTime).
+    let transitGround: number | null = null;
+    let transitOnTerrain = true;
+    if (!hidden && !interpolated && this.transition) {
+      const mx = frame.origin.x - this.pos.x, my = frame.origin.y - this.pos.y;
+      const want = Math.hypot(mx, my);
+      if (want >= F_EPSILON) {
+        const r = this.transition({ x: frame.origin.x, y: frame.origin.y }, {
+          airborne: !this.contact,
+          wantGround: this.contact && this.onWalkable && !stuck && (this.state & PhysicsState.Gravity) !== 0,
+        });
+        if (r) {
+          if (r.blocked) {
+            const got = Math.hypot(r.x - this.pos.x, r.y - this.pos.y);
+            const k = Math.min(1, got / want);
+            quantumMoved.x *= k;
+            quantumMoved.y *= k;
+            frame.origin = { x: r.x, y: r.y, z: frame.origin.z };
+          }
+          transitGround = r.groundZ;
+          transitOnTerrain = r.onTerrain;
+        }
       }
     }
     let outdoor = isOutdoorCell(this.cell);
@@ -836,9 +908,17 @@ export class RemotePhysicsObject implements PositionHost {
         }
         outdoor = isOutdoorCell(this.cell);
       }
+      // BUG.ac1999-monster-jitter — sliding down a steep face: the body stays on the terrain.
+      if (this.slidePlane && outdoor) {
+        const h = env.terrainHeight(frame.origin.x, frame.origin.y);
+        if (h !== null) frame.origin.z = h;
+      } else if (!interpolated && !stuck && transitGround !== null) {
+        // BUG.remote-creature-obstacle-collision — the ground the transition's step down found (a
+        // stair tread, a porch, a dungeon ramp, the terrain less any wade).
+        frame.origin.z = transitGround;
+      } else if (!interpolated && !stuck) {
       // Ground contact: follow the ground under a self-moved object (a
       // server target is already at the height the server gave).
-      if (!interpolated && !stuck) {
         if (refind && !outdoor) {
           const f = env.surfaceFloorZ?.(frame.origin.x, frame.origin.y, frame.origin.z) ?? null;
           if (f !== null) frame.origin.z = f;
@@ -849,6 +929,9 @@ export class RemotePhysicsObject implements PositionHost {
           if (h0 !== null && h1 !== null) frame.origin.z += h1 - h0;
         }
       }
+      // The terrain is the contact plane only where the body stands on it (not on a porch or a bridge).
+      if (outdoor && transitOnTerrain) this.contactPlane(env, frame.origin, oldX, oldY, interpolated || stuck);
+      else if (this.slidePlane) this.endSlide();
       if (this.velocity.z > SMALL_VELOCITY) {
         // Moving up off the ground (set_on_walkable(false) → MovementManager::
         // LeaveGround, then calc_acceleration).
@@ -905,8 +988,61 @@ export class RemotePhysicsObject implements PositionHost {
     }
   }
 
+  /**
+   * BUG.ac1999-monster-jitter — `CPhysicsObj::SetPositionInternal`'s walkable decision for a body on
+   * the land: a move onto a terrain face whose Normal.Z is under FLOOR_Z clears OnWalkable
+   * (`set_on_walkable @ 00511310` → MovementManager::LeaveGround: the run becomes the leave-ground
+   * velocity and Falling), `calc_acceleration @ 00510950` gives it gravity, `UpdatePositionInternal
+   * @ 00512c30` drops its animation offset, and CTransition::adjust_offset keeps its fall on the
+   * plane: it slides down until a walkable plane (set_on_walkable(1) → HitGround), or stands on the
+   * third stationary slide (validate_transition's StationaryStuck). The player's port of the same
+   * rules is player/SteepSlide.ts.
+   *
+   * Pre-fix a remote creature followed the terrain height whatever its slope, so it ran straight up a
+   * face the server's copy (the same physics) cannot climb, and every position correction (each
+   * 0.2 s for a creature mid-moveto on the AC1999 server) pulled it back: a monster chasing an archer
+   * on a hill jumped back and forth and never reached him.
+   *
+   * Only a body that moved is judged (a standing object is never re-transitioned), and only a Gravity
+   * object (nothing else falls).
+   */
+  private contactPlane(env: RemotePhysicsEnv, at: SeqV3, oldX: number, oldY: number, serverMoved: boolean): void {
+    if ((this.state & PhysicsState.Gravity) === 0 || !env.terrainNormal) return;
+    const moved = Math.hypot(at.x - oldX, at.y - oldY);
+    const n = env.terrainNormal(at.x, at.y);
+    if (!n) return;
+    const walkable = n.z >= FLOOR_Z;
+    if (this.slidePlane) {
+      if (walkable) { this.endSlide(); return; }
+      this.slidePlane = n;
+      this.slideStationary = moved < F_EPSILON ? this.slideStationary + 1 : 0;
+      if (this.slideStationary >= STATIONARY_STUCK_FRAMES) this.endSlide();
+      return;
+    }
+    // A server position (interpolation, sticky) is where the server's own transition put it.
+    if (walkable || serverMoved || moved < F_EPSILON) return;
+    this.slidePlane = n;
+    this.slideStationary = 0;
+    this.onWalkable = false;
+    this.motion.leaveGround();
+    this.calcAcceleration();
+  }
+
+  /** The slide ended on a walkable plane (or stuck): set_on_walkable(1) → MovementManager::HitGround. */
+  private endSlide(): void {
+    this.slidePlane = null;
+    this.slideStationary = 0;
+    if (this.onWalkable || !this.contact) return;
+    this.onWalkable = true;
+    this.calcAcceleration();
+    this.motion.hitGround();
+  }
+
+  /** Whether the body is sliding down a face it cannot stand on (BUG.ac1999-monster-jitter). */
+  get sliding(): boolean { return this.slidePlane !== null; }
+
   /** `UpdatePhysicsInternal @ 00510700` (+ `calc_friction @ 0050ee70` on a flat walkable plane). */
-  private updatePhysicsInternal(q: number, frame: SequenceFrame): void {
+  private updatePhysicsInternal(q: number, frame: SequenceFrame, plane: SeqV3 | null = null): void {
     const v = this.velocity;
     let v2 = v.x * v.x + v.y * v.y + v.z * v.z;
     if (v2 > 0) {
@@ -925,11 +1061,13 @@ export class RemotePhysicsObject implements PositionHost {
       }
       if (v2 - SMALL_VELOCITY * SMALL_VELOCITY < F_EPSILON) { v.x = 0; v.y = 0; v.z = 0; }
       const a = this.acceleration;
-      frame.origin = {
-        x: frame.origin.x + v.x * q + 0.5 * a.x * q * q,
-        y: frame.origin.y + v.y * q + 0.5 * a.y * q * q,
-        z: frame.origin.z + v.z * q + 0.5 * a.z * q * q,
-      };
+      let o = { x: v.x * q + 0.5 * a.x * q * q, y: v.y * q + 0.5 * a.y * q * q, z: v.z * q + 0.5 * a.z * q * q };
+      if (plane) {
+        // CTransition::adjust_offset: an offset into the contact plane loses its normal component.
+        const into = o.x * plane.x + o.y * plane.y + o.z * plane.z;
+        if (into <= 0) o = { x: o.x - plane.x * into, y: o.y - plane.y * into, z: o.z - plane.z * into };
+      }
+      frame.origin = { x: frame.origin.x + o.x, y: frame.origin.y + o.y, z: frame.origin.z + o.z };
     }
     const a = this.acceleration;
     v.x += a.x * q; v.y += a.y * q; v.z += a.z * q;

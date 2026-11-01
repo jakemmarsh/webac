@@ -121,6 +121,46 @@ export const ERROR_TEXT_CHAT_COLOR = argbToCssHex(SPEW_TEXT_COLOR_ARGB);
  */
 export const SPEW_TEXT_OUTLINE_COLOR = argbToCssHex(0xff000000);
 
+/**
+ * Where an era's client puts its status line, and how many lines it keeps
+ * (BUG.ac1999-status-text-under-vitals). Our HUD is end of retail's in every
+ * era, so the vitals plate is the EoR stacked cluster at (centre, 0) 160x58.
+ *
+ *  - End of retail and the classic (Dark Majesty) eras run the EoR exe: the
+ *    spew strip at (centre, 20), four rows, newest on top, BEHIND the vitals
+ *    plate. Checked, retail: the EoR Wine frame
+ *    verification/bug-spew-under-vitals/retail-portal-2.png shows only "In"
+ *    and "..." of the portal line peeking out either side of the plate.
+ *  - The 1999 client.exe has one status line, and it is never under its
+ *    vitals. PanelUI_PanelUI @ 0x004eb120 builds the vitals as a stat-line
+ *    Region at (0,0), which PanelUI_ArrangeStatLine @ 0x004fc270 sizes to the
+ *    screen width x 0x1c. PanelUI_Arrange @ 0x004fad30 moves the 3D view
+ *    (Box3D) to y 0x1c, below that strip, and the status box (PanelUI+0x244,
+ *    the box UI_SetStatusText @ 0x004ccb80 writes through UI+0x104) to
+ *    (10, 0x25), 0x1e high. StatusBox_SetStatusText @ 0x005cd4e0 strncpy()s
+ *    the new text over the old (one line, replaced) and the routine @
+ *    0x005cd2d0 fades it 5 s later. So the 1999 line's top is
+ *    0x1c + 0x25 = 65 px from the screen top, clear of the 58 px plate, and
+ *    it holds one line.
+ */
+export interface StatusLineRules {
+  /** The strip's top edge in HUD pixels. */
+  readonly top: number;
+  /** Lines it keeps at once (newest first). */
+  readonly maxItems: number;
+}
+
+/** 1999: PanelUI_ArrangeStatLine's stat-line height (0x1c), the 3D view's top. */
+export const STAT_LINE_HEIGHT_1999 = 0x1c;
+/** 1999: PanelUI_Arrange's MoveTo(10, 0x25) of the status box. */
+export const STATUS_BOX_Y_1999 = 0x25;
+
+export const EOR_STATUS_LINE: StatusLineRules = Object.freeze({ top: SPEW_BOX_TOP, maxItems: SPEW_MAX_ITEMS });
+export const AC1999_STATUS_LINE: StatusLineRules = Object.freeze({
+  top: STAT_LINE_HEIGHT_1999 + STATUS_BOX_Y_1999,
+  maxItems: 1,
+});
+
 export interface SpewItem {
   text: string;
   /** Wall-clock ms at which the item's 5-second timer fires. */
@@ -152,9 +192,15 @@ export class SpewBoxModel {
   readonly items: SpewItem[] = [];
 
   constructor(
-    private readonly maxItems: number = SPEW_MAX_ITEMS,
+    private maxItems: number = SPEW_MAX_ITEMS,
     private readonly lifetimeMs: number = SPEW_ITEM_LIFETIME_MS,
   ) {}
+
+  /** The era's line count (StatusLineRules.maxItems); drops the oldest beyond it. */
+  setMaxItems(maxItems: number): SpewItem[] {
+    this.maxItems = Math.max(1, maxItems);
+    return this.items.splice(this.maxItems);
+  }
 
   /** gmSpewBoxUI::Update for one pending string. */
   push(rawText: string, nowMs: number): SpewPushResult {

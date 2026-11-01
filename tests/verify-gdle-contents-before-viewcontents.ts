@@ -87,7 +87,7 @@ const GEM = 0x80010004;
 describe('RELEASE.gdle-contents-before-viewcontents', () => {
   let tracker: OpenContainerTracker;
   let known: Set<number>;
-  let slots: Map<number, number>;
+  let slots: Map<number, number[]>;
   let ctx: ViewContentsContext;
 
   /** main.ts's CreateObject branch for a non-player subject. */
@@ -114,7 +114,7 @@ describe('RELEASE.gdle-contents-before-viewcontents', () => {
       sidePackGuids: [CHAR],
       hasInventoryItem: () => false,
       isKnownWorldObject: (g) => known.has(g),
-      setSlotForItem: (g, s) => slots.set(g, s),
+      setContainerContents: (c, items) => slots.set(c, items.map((i) => i.guid)),
       tracker,
     };
   });

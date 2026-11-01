@@ -129,3 +129,29 @@ export function spellbookDeleteConfirmText(spellName: string, format: string = S
  * (1999: "Are you sure you want to delete %s?", 0x604e60 @ 0x5166f6).
  */
 export const SPELLBOOK_DELETE_CONFIRM_FORMAT = 'Are you sure you want to remove %s from your spellbook? You will no longer be able to cast this spell unless you learn it again!';
+
+/** The spellbook page's split between the spell list and the footer below it. */
+export interface SpellbookPageSplit {
+  /** The list's (and its scrollbar's) height. */
+  listH: number;
+  /** The footer's top and height (page-relative). */
+  footerY: number;
+  footerH: number;
+  /** The Delete button's top inside the footer, or null for its DAT y (61). */
+  deleteY: number | null;
+}
+
+/**
+ * VISUAL.ac1999-hidden-element-gaps — the spellbook page (0x21000032, 337 px authored) for a page
+ * `pageH` tall. End of retail: the list 0x10000295 280x224 over the footer 0x10000297 (0,224)
+ * 300x113 (T2B1, it rides the page bottom), which holds the school / level filters and Delete at
+ * (187,61). Without filters (1999) that footer would be a 113 px plate holding only Delete. The
+ * 1999 SpellbookPanel ctor @ 0x00516240 splits the same 337 px as a 0x118 x 0x100 (280x256) list
+ * over a 0x51 (81) px box at (0,0x100) with Delete at y 8 inside it (0x00452730(box, 0, 0xd2, 8,
+ * 0x50, ..., "Delete")): the list takes 32 px more, Delete sits at the box's top.
+ */
+export function spellbookPageSplit(pageH: number, filtersShown: boolean): SpellbookPageSplit {
+  const footerH = filtersShown ? 113 : 0x51;
+  const listH = Math.max(32, pageH - footerH);
+  return { listH, footerY: pageH - footerH, footerH, deleteY: filtersShown ? null : 8 };
+}

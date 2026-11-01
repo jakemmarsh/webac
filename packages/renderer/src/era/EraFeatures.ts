@@ -16,11 +16,13 @@ import { MAP_NOTE_LOCATIONS, type MapNoteLocation } from '../ui/HudTooltips.js';
 import { MAP_MARKER_AREA, MAP_MARKER_AREA_1999, type MapMarkerArea, type MapPlacement } from '../ui/MapMarkers.js';
 import type { HitLineText, ServerTextSlots } from '../ui/ServerMessageText.js';
 import { FAILURE_EVENT_TEXT_1999, type FailureEventTable } from '../ui/FailureEventText1999.js';
+import { AC1999_STATUS_LINE, EOR_STATUS_LINE, type StatusLineRules } from '../ui/SpewBoxModel.js';
 import { AC1999_PLACEMENT_TEXT, EOR_PLACEMENT_TEXT, type PlacementText } from '../inventory/ItemHolderPlacement.js';
 import { AC1999_USE_OBJECT_RULES, EOR_USE_OBJECT_RULES, type UseObjectRules } from '../input/UseObject.js';
 import { AC1999_ENCUMBRANCE_NOTICE, EOR_ENCUMBRANCE_NOTICE, type EncumbranceNoticeRules } from '../ui/EncumbranceNotice.js';
 import { AC1999_WORLD_RULES, EOR_WORLD_RULES, type EraWorldRules } from './EraWorldRules.js';
 import { AC1999_VERBOSE_VERSION } from '../chat/commands/Commands1999.js';
+import { AC1999_TOOLBAR_TABS, type ToolbarTabSlot } from '../ui/ToolbarTabs.js';
 import type { CommandTableStyle } from '../chat/commands/CommandSystem.js';
 
 export type EraFeature =
@@ -334,6 +336,14 @@ export interface EraClientRules {
    */
   shortcutSlots: number;
   /**
+   * The toolbar's panel-tab row as the era's client lays it out, or null for the layout's
+   * (0x21000016, end of retail and the classic eras). The 1999 client.exe's PanelUI ctor
+   * @ 0x004eb120 builds five abutting tabs, no journal (ui/ToolbarTabs.ts AC1999_TOOLBAR_TABS;
+   * VISUAL.ac1999-hidden-element-gaps): the row spans the bar with no hole where end of
+   * retail's journal tab sits.
+   */
+  toolbarTabSlots: readonly ToolbarTabSlot[] | null;
+  /**
    * What the Character Information panel says (BUG.ac1999-char-info-eor-rows, webac#8). End of
    * retail's gmCharacterInfoUI::Update @ 0x4ba790 (born / played / deaths, resistance and
    * regeneration tiers, innate attributes, chess / fishing, masteries, luminance, augmentations,
@@ -525,6 +535,13 @@ export interface EraClientRules {
    */
   serverTextSlots: ServerTextSlots | null;
   /**
+   * Where the client's status line (our spew strip) sits and how many lines it keeps
+   * (BUG.ac1999-status-text-under-vitals; ui/SpewBoxModel.ts StatusLineRules). End of retail:
+   * gmSpewBoxUI at (centre, 20), four rows, behind the vitals plate (retail). 1999: one line at
+   * y 0x1c + 0x25 below the stat line (PanelUI_Arrange @ 0x004fad30).
+   */
+  statusLine: StatusLineRules;
+  /**
    * The client's failure-code switch for 0x28A WeenieError (the AC1999 server's 0x1C AttemptFailed)
    * and a non-zero 0x1C7 UseDone (SWEEP1999.messages HC-6 / VTE-2 / MAG-9). null: end of retail's
    * ClientCommunicationSystem::HandleFailureEvent @ 00571990 (@ac/shared WeenieErrorSink, 344 codes).
@@ -625,6 +642,17 @@ export interface EraClientRules {
    * backpack ("Moving X to your backpack") and wields the new item (PanelUI_AutoWield @ 0x4fee20).
    */
   paperdollSlotDropSwaps: boolean;
+  /**
+   * Whose drag-over art the pack grid and pack column show (VISUAL.drag-merge-indicator;
+   * UIItemDragAccept.itemListDragOverState). End of retail ('eor', UIElement_ItemList::
+   * ItemList_DragOver @ 004e3400): the ring over every grid cell, the arrow / circle on the pack
+   * column by room. The 1999 client.exe ('ac1999', the UI_Item draw @ 0x004e7d20): the same three
+   * pieces of art, with a merge check (ItemHolder_AttemptMergeIsLegal) for a drop no list rule covers.
+   * The toolbar and the spell bar follow it too: end of retail's gmToolbarUI::OnItemListDragOver
+   * @ 004bd150 / SpellCastSubMenu::OnItemListDragOver @ 004c5990 light the hovered cell; the 1999
+   * ShortcutSlot and spell bar have no drag-over art.
+   */
+  itemListDragOver: 'eor' | 'ac1999';
   /**
    * Whether a melee weapon dropped on the shield slot is a left-hand (dual) wield (INV-5). End of
    * retail: gmPaperDollUI::AcceptDragObject @ 004a3b10 widens the shield slot for a melee weapon.
@@ -1047,7 +1075,7 @@ export function correctedOptionsWord(word: number, fix: OptionsWordFix | null): 
 }
 
 const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
-  castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const,
+  castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, toolbarTabSlots: null, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const,
   chatToggle: 'server' as const,
   talismanTargetTypes: TALISMAN_TARGET_TYPES_EOR,
   spellSelfTargetableTypeMask: 0x8107,
@@ -1077,6 +1105,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   inventoryRequestWatchdogSeconds: null,
   raiseAwaitClearsOnStatUpdate: false,
   serverTextSlots: null,
+  statusLine: EOR_STATUS_LINE, // gmSpewBoxUI, layout 0x2100000f pane 0x10000046 at (0,20)
   failureEventText: null,
   inventoryFailedRunsFailureEvent: true,
   hitLineText: 'eor' as const,
@@ -1093,6 +1122,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   componentPrecheckSlots: Object.freeze([0, 8] as const),
   inventoryPlacement: 'eor' as const,
   paperdollSlotDropSwaps: false,
+  itemListDragOver: 'eor' as const,
   dualWieldShieldSlot: true,
   targetedUseConfirmations: true,
   vendorDropNeedsWholeStack: true,
@@ -1111,7 +1141,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   worldEntryVersionLine: null,
 });
 const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
-  castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const,
+  castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, toolbarTabSlots: AC1999_TOOLBAR_TABS, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const,
   chatToggle: 'local' as const,
   talismanTargetTypes: TALISMAN_TARGET_TYPES_1999, // @ 0x5e4150
   spellSelfTargetableTypeMask: 0, // UI ObjectCompatibleWithSpellTargetType @ 0x4d20c0
@@ -1164,6 +1194,7 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   inventoryRequestWatchdogSeconds: INVENTORY_REQUEST_WATCHDOG_1999_SECONDS, // Global_Loop @ 0x4c6b30
   raiseAwaitClearsOnStatUpdate: true, // StatsPanel_SetAttribute @ 0x0054a6f0, StatsPanel_SetInt @ 0x0054a740
   serverTextSlots: SERVER_TEXT_SLOTS_1999,
+  statusLine: AC1999_STATUS_LINE, // PanelUI_Arrange @ 0x004fad30, StatusBox_SetStatusText @ 0x005cd4e0
   failureEventText: FAILURE_EVENT_TEXT_1999, // UI_HandleFailureEvent @ 0x004ccd10
   inventoryFailedRunsFailureEvent: false, // Net_DispatchServerMessage case 0xa0
   hitLineText: 'ac1999' as const, // Net_HandleAttackerNotification @ 0x004cd7f0 and its three siblings
@@ -1180,6 +1211,7 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   componentPrecheckSlots: Object.freeze([1, 6] as const), // UI_CastSpell @ 0x4d1bd0
   inventoryPlacement: 'ac1999' as const, // ItemHolder_AttemptPlaceInContainer @ 0x4e55b0
   paperdollSlotDropSwaps: true, // ItemSlot_AcceptDragObject → PanelUI_AutoWield(obj, side, 0, 1, 0, 0)
+  itemListDragOver: 'ac1999' as const, // the UI_Item draw @ 0x004e7d20
   dualWieldShieldSlot: false, // ItemSlot_AcceptDragObject: valid & slot only
   targetedUseConfirmations: false, // 0x004e65c0
   vendorDropNeedsWholeStack: false, // ItemHolder_AttemptPlaceIn3D → 0x004d00d0

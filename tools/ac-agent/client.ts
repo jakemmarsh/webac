@@ -12,6 +12,7 @@ import { type DaemonInfo, accountForProfile, listInfos, logFile, readInfo, STATE
 import { agentEra, eraAccount } from './eras.ts';
 import { defaultCharacterName } from './state.ts';
 import type { AgentVitals } from '../../packages/renderer/src/agent/types.ts';
+import { sweepChromeCodeSignClones } from '../lib/temp-profile.ts';
 
 // The repo root (game-session.ts has the same; importing it would load Playwright, which the bridge doesn't carry).
 // Worked out only when a daemon is started: the bridge bundles this module as CommonJS, where import.meta is empty.
@@ -63,6 +64,7 @@ export async function ensureAgentChrome(url = 'https://playwebac.com/?agent'): P
   if (await up()) return endpoint;
   if (!existsSync(CHROME_APP)) throw new Error(`Google Chrome not found at ${CHROME_APP}; start any Chrome with --remote-debugging-port and pass attach=<its endpoint>`);
   mkdirSync(AGENT_CHROME_PROFILE, { recursive: true });
+  sweepChromeCodeSignClones(); // a killed agent Chrome leaves its ~2 GB app copy behind
   spawn(CHROME_APP, [`--remote-debugging-port=${AGENT_CHROME_PORT}`, `--user-data-dir=${AGENT_CHROME_PROFILE}`, '--no-first-run', '--no-default-browser-check', url], { detached: true, stdio: 'ignore' }).unref();
   for (let i = 0; i < 60; i++) {
     if (await up()) return endpoint;

@@ -282,11 +282,11 @@ describe('GameUI — shortcut slots are item lists', () => {
 
   it('a pack item dragged onto a slot is offered as a real item; nothing in flight is refused', () => {
     expect(fire(slots[4], 'dragover').defaultPrevented).toBe(false);
-    ui.dragItemIndex = 7;
+    ui.dragItemGuid = 0x7777; // the drag carries the object id (BUG.ammo-merge-swaps-first)
     expect(fire(slots[4], 'dragover').defaultPrevented).toBe(true);
     fire(slots[4], 'drop');
-    expect(calls).toEqual(['dropItem 4 {"kind":"inventory","itemIndex":7}']);
-    expect(ui.dragItemIndex).toBe(-1);
+    expect(calls).toEqual(['dropItem 4 {"kind":"inventory","guid":30583}']);
+    expect(ui.dragItemGuid).toBe(0);
   });
 
   it('useHeldItem runs ItemHolder::UseObject on a pack or worn item (SWEEP1006B), and is false for anything else', () => {

@@ -225,6 +225,37 @@ export function colorizeRGBA(img: RgbaImage, color: Rgba01): RgbaImage {
   return { width: img.width, height: img.height, data: out };
 }
 
+/** What the client knows about where a selected object is (BUG.contained-item-target-arrows). */
+export interface VtiContainment {
+  /** In the open ground container (a corpse or chest's strip). */
+  inGroundContainer: boolean;
+  /** In the open vendor's list. */
+  ownedByVendor: boolean;
+  /** In the trade partner's side of the trade window. */
+  ownedByTradePartner: boolean;
+  /** Its record is in no cell (ServerObject.outOfWorld: no position, or picked up). */
+  outOfWorld: boolean;
+  /** Its holder, when it is wielded (0 / undefined: not held). */
+  wielderId?: number;
+}
+
+/**
+ * ACCWeenieObject::current_state == IN_CONTAINER (2) or being removed (3), the
+ * state SetSelected filters on (BUG.contained-item-target-arrows). End of retail:
+ * DeterminePositionState @ 0058be70 gives 2 for any `_containerID != 0` and 3 while
+ * being removed; VividTargetIndicator::SetSelected @ 004f5ce0 then sets the
+ * indicator's target to 0 (no wedges, no off-screen arrow) while the selection
+ * itself stays. 1999: PanelUI_SetSelectedItem @ 0x004fcb20 passes 0 to
+ * VividTargetIndicator_SetSelected @ 0x00506f60 when 0x004e7720 (current_state)
+ * is 2, and PanelUI_ServerSaysMoveItem drops it when an item moves to state 2 / 3.
+ * Our record has no container id, so containment is read from where the item is
+ * shown (the ground strip, the vendor, the trade window) or from the record being
+ * in no cell and held by nobody (a wielded item, state 1, is framed on its holder).
+ */
+export function vtiInContainer(c: VtiContainment): boolean {
+  return c.inGroundContainer || c.ownedByVendor || c.ownedByTradePartner || (c.outOfWorld && !c.wielderId);
+}
+
 /** SetSelected's filter: the player, owned objects and contained objects show nothing. */
 export function vtiShowsSelection(guid: number, playerGuid: number, ownedByPlayer: boolean, inContainer: boolean): boolean {
   return guid !== 0 && guid !== playerGuid && !ownedByPlayer && !inContainer;

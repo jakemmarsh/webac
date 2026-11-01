@@ -190,7 +190,7 @@ describe('GameUI — item lists follow the global selection (behavioral)', () =>
     const neck = panel().querySelector('[data-equip-slot="Neck"]') as HTMLElement;
     const dropped: unknown[] = [];
     ui.setDragCallbacks({ onDropToSlot: (...a: unknown[]) => dropped.push(a) });
-    ui.dragItemIndex = 1;
+    ui.dragItemGuid = PACK;
     ui.dragIsContainer = true;
     neck.dispatchEvent(new domWindow.Event('drop', { bubbles: true, cancelable: true }));
     expect(dropped).toEqual([]);

@@ -26,7 +26,7 @@ set -euo pipefail
 # The build context: the paths deploy/web/Dockerfile and services/ws-tcp-bridge/Dockerfile
 # copy from (tests/verify-bridge-docker-inputs.ts runs --print-context-paths).
 CONTEXT_PATHS=(package.json package-lock.json tsconfig.json vite.config.ts
-  tools/lib/vite-head-from-stat.ts packages services deploy tools/ac-agent .dockerignore)
+  tools/lib/vite-head-from-stat.ts tools/lib/temp-profile.ts packages services deploy tools/ac-agent .dockerignore)
 
 usage() { echo "usage: build-push-images.sh <commit> [--only web|bridge] [--skip-gate] | --print-context-paths" >&2; exit 2; }
 COMMIT="" ONLY="" SKIP_GATE=0

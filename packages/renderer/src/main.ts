@@ -57,7 +57,7 @@ import { SceneManager } from './scene/SceneManager.js';
 import { CameraController } from './scene/CameraController.js';
 import { CAMERA_DEFAULT_PIVOT_Z, CAMERA_IN_HEAD_Y, TRACK_TARGET_OFFSET_Z, blipResetsViewer, cameraPlayerTranslucency } from './scene/RetailCamera.js';
 import { surfaceViewerCell, surfaceViewerDistance, type SurfaceViewerWorld } from './scene/ViewerBoom.js';
-import { outsidePortalPolygons, type IndoorViewContext, type PortalPolygon } from './scene/IndoorView.js';
+import { cameraGateView, cellPortalGraph, outsidePortalPolygons, type IndoorViewContext, type PortalGraph, type PortalPolygon } from './scene/IndoorView.js';
 import { RetailCameraRig } from './scene/RetailCameraRig.js';
 import { RendererWarmup } from './scene/RendererWarmup.js';
 import { applyViewerFade } from './scene/ViewerFade.js';
@@ -236,7 +236,7 @@ import { ACFontRenderer } from './ui/ACFontRenderer.js';
 import { AC_COLORS, type WorldDropSource, type ItemListDropTarget } from './ui/GameUI.js';
 import { placeInBackpackPendingIndex, itemListDropPendingIndex } from './inventory/PendingPackItem.js';
 import { RadarDotFeed, RadarVisibility, selectBlipColor, RADAR_RGBA_DEFAULT, radarIsIndoors, radarRangeFor, radarHeadingRadians, type RadarFeedContext } from './ui/RadarBlips.js';
-import { VividTargetIndicatorView, loadVtiImageDids, objectBoundingStatus, vtiFrame, vtiShowsSelection, type VtiCamera } from './ui/VividTargetIndicator.js';
+import { VividTargetIndicatorView, loadVtiImageDids, objectBoundingStatus, vtiFrame, vtiInContainer, vtiShowsSelection, type VtiCamera } from './ui/VividTargetIndicator.js';
 import { iconRgbaToDataURL } from './ui/ItemIconComposite.js';
 import { zLayer, ZLayer } from './ui/ZIndexRegistry.js';
 import { isMirroredCamera } from './scene/WorldMirror.js';
@@ -339,12 +339,14 @@ import type { NetDiagnostics, ConnectionEvent, CharacterListData, CharacterCreat
 import { ServerMessageHandler } from './network/ServerMessageHandler.js';
 import { applySetStackSize } from './network/applySetStackSize.js';
 import { getObjectSplitSize } from './inventory/dragSplit.js';
+import { applyContainIdOrder } from './inventory/applyContainIdOrder.js';
 import {
   attemptToPlaceInContainer, placeInBackpack as placeInBackpackDecision, acceptItemListDrop,
   type PlacementWorld, type PlacementObject, type PlacementResult,
   externalContainerDragAcceptable,
 } from './inventory/ItemHolderPlacement.js';
 import { attemptPlaceIn3D, canBeginWorldDrag, WorldDropHandoff, PLACE_IN_3D_STRINGS, type PlaceIn3DAction, type PlaceIn3DItem, type PlaceIn3DTarget } from './inventory/AttemptPlaceIn3D.js';
+import { itemListDragOverState } from './ui/UIItemDragAccept.js';
 import { acceptPaperdollDrop, autoSortDecision, PAPERDOLL_WEARABLE_MASK, paperdollBandDragAcceptState, paperdollSlotDragAcceptState, type PaperdollDropObject, type PaperdollDropTarget, type PaperdollWearContext } from './inventory/PaperdollDragObject.js';
 import { applyServerWieldObject } from './inventory/ServerWieldObject.js';
 import { SelectionHistory, giveSelectedObject, dropSelectedObject } from './inventory/GiveDropCommands.js';
@@ -392,6 +394,7 @@ import { parsePlayerDescription } from './network/PlayerDescriptionParser.js';
 import { buildContractRows, applyContractTracker, applyContractTrackerTable, type TimedContractEntry } from './network/contractRows.js';
 import { harDumpText } from './chat/HouseAccessText.js';
 import { routeObjectSubject, buildInventoryEntry, WorldObjectRecords, PendingContainIds } from './network/objectSubjectRouting.js';
+import { NonWorldObjectRecords, placeKnownObjectByPosition } from './world/NonWorldObjectRecords.js';
 import { packSlotCounts } from './agent/packCounts.js';
 import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, shortcutDropRefusal1999, shortcutDropIntoContainer1999, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
@@ -479,6 +482,7 @@ let recordQuietExamine: ((view: Parameters<GameUI['showExaminationWindow']>[0]) 
 const agentAppraisals = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[]; spellIds: number[]; activeSpellIds: number[]; at?: number; maxVelocity?: number }>();
 import { openStreamingDats, type StreamScope, type StreamingDats } from './dat/streaming/StreamingDats.js';
 import { FetchPriority, fileKey, splitFileKey } from './dat/streaming/DatStore.js';
+import { PreviewBuildHold } from './ui/PreviewBuildHold.js';
 import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 import { CellGate, GatedEventQueue, PrefetchStatus, settleBurst } from './dat/streaming/PortalSpaceGate.js';
 import { GameplayUiShow } from './session/GameplayUiShow.js';
@@ -595,6 +599,7 @@ const radarFeedCtx: RadarFeedContext<RadarServerObject> = {
   playerWorldX: 0, playerWorldZ: 0, playerFeetY: 0, range: 75,
   fellows: null, fellowshipLeaderGuid: 0, playerMonarchGuid: undefined, playerPKStatus: undefined,
   eligible: (obj, dx, dy, dz) => radarVisibility.showable(obj, dx, dy, dz, radarSelectedGuid),
+  // holderOf is set once the object manager exists (below, with radarMotionOf).
 };
 
 type TargetType = 'creature' | 'npc' | 'player' | 'item';
@@ -2672,12 +2677,11 @@ async function main() {
   let surfaceCellZeroFrames = 0;          // debounce for transient containment misses
   // CORE.14.b.1 — reused per-frame view state for portal gating (alloc-free)
   let surfacePortalGatingEnabled = true; // acDebug A/B toggle for verification
-  const surfaceFrustum = new THREE.Frustum();
-  const surfaceProjView = new THREE.Matrix4();
   const surfaceCamPos = new THREE.Vector3();
   const surfacePvs = new Set<number>();
   const surfaceView: SurfaceView = {
-    viewpoints: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }],
+    // BUG.doorway-pvs-over-terrain — the camera alone (scene/IndoorView.ts cameraGateView).
+    viewpoints: [{ x: 0, y: 0, z: 0 }],
     frustum: Array.from({ length: 6 }, () => ({ nx: 0, ny: 0, nz: 0, d: 0 })),
   };
 
@@ -2697,7 +2701,9 @@ async function main() {
 
     let found = 0;
     if (currentSurfaceCellId !== 0 || buildingShells.some(b => b.wasInside)) {
-      found = outdoorCollision.findCellContaining(acX, acY, acZ, currentSurfaceCellId);
+      // A body that left every cell's volume stays in its env cell unless it reaches the land cells there
+      // (out through a doorway): retail keeps the env cell id (DungeonCollision.nextBodyCell).
+      found = outdoorCollision.nextBodyCell(currentSurfaceCellId, acX, acY, acZ);
     }
     if (found !== 0) {
       surfaceCellZeroFrames = 0;
@@ -2742,41 +2748,34 @@ async function main() {
     // coords; three world (X,Y,Z) = AC (x,z,y), so swap y/z on conversion.
     const cam = sceneManager.camera;
     cam.updateMatrixWorld();
-    cam.getWorldPosition(surfaceCamPos);
-    surfaceProjView.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
-    surfaceFrustum.setFromProjectionMatrix(surfaceProjView);
-    surfaceView.viewpoints[0].x = surfaceCamPos.x;
-    surfaceView.viewpoints[0].y = surfaceCamPos.z;
-    surfaceView.viewpoints[0].z = surfaceCamPos.y;
-    surfaceView.viewpoints[1].x = acX;
-    surfaceView.viewpoints[1].y = acY;
-    surfaceView.viewpoints[1].z = acZ;
-    for (let i = 0; i < 6; i++) {
-      const p = surfaceFrustum.planes[i];
-      const fp = surfaceView.frustum[i];
-      fp.nx = p.normal.x; fp.ny = p.normal.z; fp.nz = p.normal.y; fp.d = p.constant;
-    }
+    cameraGateView(cam, surfaceView);
     applySurfaceCellVisibility(surfaceCellRegistry, playerBlockKey, surfacePvs,
       surfacePortalGatingEnabled ? surfaceView : undefined);
   }
   // BUG.bunker-terrain-over-stairs — retail keys its indoor draw on the
   // VIEWER's cell (SmartBox::RenderNormalMode @ 00453aa0): with the camera in
   // a surface cell that sees outside, the frame draws the landscape as a
-  // backdrop, clears depth and draws that cell's PVS over it
-  // (scene/IndoorView.ts). The camera reaches a cell only through the
+  // backdrop, clears depth and draws over it the cells of its PVS that the
+  // portal flood reaches, each held to its portal's screen rectangle
+  // (scene/IndoorView.ts; BUG.doorway-pvs-over-terrain). The camera reaches a cell only through the
   // player's, so the scan runs only while the player is in one.
   let indoorViewCellId = 0;
   let indoorViewPvs = new Set<number>();
   // PERF.indoor-two-pass-cost — the PVS cells' outside portals (PView::DrawCells
   // draws the landscape only while one is in view); null until every cell's data is loaded.
   let indoorViewPortals: PortalPolygon[] | null = null;
+  // BUG.doorway-pvs-over-terrain — the PVS cells' portals: renderIndoorView floods from the
+  // camera's cell through the ones on screen (PView::ConstructView); null until loaded.
+  let indoorViewGraph: PortalGraph | null = null;
   /** Frames until the next try while a PVS cell's data is still streaming in. */
   let indoorViewPortalRetry = 0;
   /** DatLightBudget.forEachLight once the budget exists (the pad count's light list). */
   let indoorViewLights: IndoorViewContext['forEachPointLight'];
   function updateIndoorView(): void {
     let camCell = 0;
-    if (!playerInDungeon && currentSurfaceCellId !== 0 && landblockObjects.landscapeVisible) {
+    // BUG.doorway-pvs-over-terrain — the camera's cell, not the player's: a camera still in the
+    // doorway as the player steps out draws from it (SmartBox::update_viewer; ViewerBoom.ts).
+    if (!playerInDungeon && landblockObjects.landscapeVisible) {
       const cam = sceneManager.camera;
       cam.updateMatrixWorld();
       cam.getWorldPosition(surfaceCamPos);
@@ -2793,12 +2792,23 @@ async function main() {
         for (const v of env.visibleCells) indoorViewPvs.add(v);
       }
       indoorViewPortals = null;
+      indoorViewGraph = null;
       indoorViewPortalRetry = 0;
+      // Retail draws the viewer cell's PVS (CObjCell::draw_visible): build its meshes, as for the player's.
+      if (indoorViewPvs.size > 0) landblockObjects.ensureSurfaceCells(camCell >>> 16, indoorViewPvs);
     }
-    if (indoorViewPvs.size > 0 && !indoorViewPortals && --indoorViewPortalRetry <= 0) {
+    // ...and show them this frame (the surface rule ran from the player's cell): the flood picks
+    // the ones the cell pass draws, the rest draw with the landscape, depth-tested.
+    if (indoorViewPvs.size > 0) {
+      const meshes = surfaceCellRegistry.get(indoorViewCellId >>> 16)?.meshes;
+      if (meshes) for (const c of indoorViewPvs) { const m = meshes.get(c); if (m) m.visible = true; }
+    }
+    if (indoorViewPvs.size > 0 && (!indoorViewPortals || !indoorViewGraph) && --indoorViewPortalRetry <= 0) {
       const prefix = indoorViewCellId & 0xffff0000;
-      indoorViewPortals = outsidePortalPolygons([...indoorViewPvs].map((c) => (prefix | c) >>> 0),
-        (id) => envCellRenderer.getCellCollisionData(id));
+      const ids = [...indoorViewPvs].map((c) => (prefix | c) >>> 0);
+      const data = (id: number) => envCellRenderer.getCellCollisionData(id);
+      indoorViewPortals = outsidePortalPolygons(ids, data);
+      indoorViewGraph = cellPortalGraph(ids, data);
       indoorViewPortalRetry = 30;
     }
     sceneManager.indoorView = indoorViewPvs.size > 0 ? {
@@ -2808,6 +2818,8 @@ async function main() {
       cellAt: (x, y, z) => outdoorCollision.findCellContaining(x, y, z, indoorViewCellId),
       outsidePortals: indoorViewPortals ?? undefined,
       forEachPointLight: indoorViewLights,
+      viewerCell: indoorViewCellId & 0xffff,
+      portalGraph: indoorViewGraph ?? undefined,
     } : null;
   }
   /** Building + cell meshes per block (streamer-owned; the camera/collision raycast rebuild reads them). */
@@ -3166,6 +3178,8 @@ async function main() {
    * transplant that preserves the live Group (animation bindings via
    * refreshParts, wielded attachments, scene membership, transform).
    */
+  /** The own figure's pending new look (applyPlayerAppearance). */
+  const playerAppearanceHold = new PreviewBuildHold<THREE.Group>();
   function applyPlayerAppearance(data: ObjDescEventData): void {
     if (!playerModel || !playerSetupId) return;
 
@@ -3175,30 +3189,39 @@ async function main() {
     playerLastVisualDescSeq = data.visualDescSequence;
     playerAppearance = data;
 
-    const ov = buildAppearanceOverrides(data, (id) => appearanceManager.loadPaletteColors(id));
-    const rebuilt = setupModelRenderer.createSetupMeshWithOverrides(
-      playerSetupId,
-      0,
-      ov.partChanges,
-      ov.perPartTextureOverrides,
-      ov.paletteColors,
+    // UX.chargen-preview-no-placeholder (sweep) — streamed DATs: the new look
+    // (a piece of armour put on, a barber change) is built off-screen and
+    // transplanted only once its parts, textures and palettes are resident (or
+    // the hold's cap released a stall), so the figure — and the paperdoll that
+    // clones it — never wears white placeholder parts in between; the old look
+    // stays meanwhile. Whole DATs: built and transplanted at once, as before.
+    const setupId = playerSetupId;
+    playerAppearanceHold.request(
+      () => {
+        const ov = buildAppearanceOverrides(data, (id) => appearanceManager.loadPaletteColors(id));
+        const rebuilt = setupModelRenderer.createSetupMeshWithOverrides(setupId, 0, ov.partChanges, ov.perPartTextureOverrides, ov.paletteColors);
+        if (!rebuilt) console.warn(`[AC] Own ObjDescEvent: rebuild of setup 0x${setupId.toString(16)} failed — appearance unchanged`);
+        return rebuilt;
+      },
+      (rebuilt) => {
+        if (!playerModel || playerSetupId !== setupId) return;
+        // FX.player-transplant-kills-part-emitters — same CPhysicsObj, same parts:
+        // its part emitters, UV scroll and script values follow the new nodes.
+        physicsScriptPlayer.transferParts(playerModel, transplantPartChildren(playerModel, rebuilt));
+        playerAnimated?.refreshParts();
+        // gmPaperDollUI::RecvNotice_PlayerObjDescChanged @ 004a4350 →
+        // RedressCreature: the portrait wears the new look at once.
+        gameUI.onPlayerObjDescChanged();
+        console.log(`[AC] Own appearance updated: ${data.animPartChanges.length} part changes, ` +
+          `${data.textureChanges.length} tex changes, ${data.subPalettes.length} palette overrides (seq=${data.visualDescSequence})`);
+      },
+      {
+        onMiss: () => {
+          void worldStreamingDats?.closure.ensure(appearanceRoots({ setupId, ...data }), FetchPriority.Critical).catch(() => { /* the cap releases it */ });
+        },
+      },
     );
-    if (!rebuilt) {
-      console.warn(`[AC] Own ObjDescEvent: rebuild of setup 0x${playerSetupId.toString(16)} failed — appearance unchanged`);
-      return;
-    }
-
-    // FX.player-transplant-kills-part-emitters — same CPhysicsObj, same parts:
-    // its part emitters, UV scroll and script values follow the new nodes.
-    physicsScriptPlayer.transferParts(playerModel, transplantPartChildren(playerModel, rebuilt));
-    playerAnimated?.refreshParts();
-    // gmPaperDollUI::RecvNotice_PlayerObjDescChanged @ 004a4350 →
-    // RedressCreature: the portrait wears the new look at once.
-    gameUI.onPlayerObjDescChanged();
-    console.log(`[AC] Own appearance updated: ${data.animPartChanges.length} part changes, ` +
-      `${data.textureChanges.length} tex changes, ${data.subPalettes.length} palette overrides (seq=${data.visualDescSequence})`);
   }
-
   /**
    * RELEASE.streaming-regression-gate — the player's latest ObjDesc (login
    * CreateObject, then each own ObjDescEvent), so a model built while a
@@ -6464,11 +6487,20 @@ async function main() {
     const guid = gameStarted ? selectedObjectId() : 0;
     const obj = guid && gameUI.optionsSettings.vividTargetingIndicator ? serverObjectManager?.getObject(guid) : undefined;
     const owned = !!obj && (!!playerState.inventory.getItem(guid) || playerState.equipment.getAll().some((e) => e.id === guid));
-    // Contained objects never get a world mesh here (the SetSelected
-    // IN_CONTAINER case); no mesh = CObjectMaint::GetObjectA fails.
+    // BUG.contained-item-target-arrows — SetSelected's IN_CONTAINER filter. A
+    // contained item can still have a record and a hidden mesh at a stale
+    // place (a monster's weapon left in its corpse, a create that came before
+    // its container's contents list), so containment is tested, not assumed.
     // A held item is framed where its copy hangs on the holder (drawnRoot).
+    const inContainer = !!obj && vtiInContainer({
+      inGroundContainer: openContainer.has(guid),
+      ownedByVendor: gameUI.vendorHasItem(guid),
+      ownedByTradePartner: gameUI.getTradeData().theirItems.some((i) => i.guid === guid),
+      outOfWorld: !!obj.outOfWorld,
+      wielderId: obj.wielderId,
+    });
     const drawn = obj ? serverObjectManager?.drawnRoot(obj) ?? null : null;
-    if (!obj || !drawn || !sceneManager.renderer || !vtiShowsSelection(guid, myPlayerGuid ?? 0, owned, false)) {
+    if (!obj || !drawn || !sceneManager.renderer || !vtiShowsSelection(guid, myPlayerGuid ?? 0, owned, inContainer)) {
       vividTargetIndicator.update({ kind: 'hidden' }, RADAR_RGBA_DEFAULT);
       return;
     }
@@ -6650,7 +6682,7 @@ async function main() {
       return { source, item: { id: obj.guid, name: obj.name, ownedByPlayer: false, inTrade: false, in3DView: !inContainer, weenieClassId: obj.weenieClassId, stackSize: obj.stackSize, maxStackSize: obj.maxStackSize ?? 0 } };
     }
     const inv = source.kind === 'inventory'
-      ? playerState.inventory.getAll()[source.itemIndex]
+      ? playerState.inventory.getItem(source.guid)
       : playerState.equipment.getSlot(source.slot);
     if (!inv) return null;
     return {
@@ -6732,8 +6764,7 @@ async function main() {
   // OnAction cases 0x15 / 0x16 @ 00561890 (inventory/GiveDropCommands.ts):
   // AttemptPlaceIn3D(selected, previous selection, 0) / (selected, 0, 1).
   function worldDropSourceForGuid(guid: number): WorldDropSource {
-    const itemIndex = playerState.inventory.getAll().findIndex((i) => i.id === guid);
-    if (itemIndex >= 0) return { kind: 'inventory', itemIndex };
+    if (playerState.inventory.getItem(guid)) return { kind: 'inventory', guid };
     const equipped = playerState.equipment.getAll().find((e) => e.id === guid);
     if (equipped) return { kind: 'equipped', slot: equipped.slot };
     return { kind: 'world', guid };
@@ -6976,8 +7007,10 @@ async function main() {
   }
 
   gameUI.setDragCallbacks({
-    onDropToSlot: (itemIndex: number, target: PaperdollDropTarget) => {
-      const item = playerState.inventory.getAll()[itemIndex];
+    // BUG.ammo-merge-swaps-first — the drag names its object by id; a list position went stale whenever the
+    // inventory re-sorted between the grid's render and the drop (the wrong stack was wielded / swapped).
+    onDropToSlot: (guid: number, target: PaperdollDropTarget) => {
+      const item = playerState.inventory.getItem(guid);
       if (item) dropHeldOnPaperdoll(item, target, false);
     },
     onDropWornToPaperdoll: (slot: EquipMask, target: PaperdollDropTarget) => {
@@ -6996,7 +7029,7 @@ async function main() {
     onItemListDrop: (source: WorldDropSource, target: ItemListDropTarget): boolean => {
       if (!sendGameAction || !aceCharGuid) return false;
       const itemId = source.kind === 'world' ? source.guid
-        : source.kind === 'inventory' ? playerState.inventory.getAll()[source.itemIndex]?.id ?? 0
+        : source.kind === 'inventory' ? playerState.inventory.getItem(source.guid)?.id ?? 0
           : playerState.equipment.getSlot(source.slot)?.id ?? 0;
       if (!itemId) return false;
       const w = placementWorld();
@@ -7074,6 +7107,13 @@ async function main() {
       const ctx = paperdollWearContext();
       return target.kind === 'band' ? paperdollBandDragAcceptState(obj, ctx) : paperdollSlotDragAcceptState(obj, target.mask, ctx);
     },
+    // VISUAL.drag-merge-indicator — the pack grid's / pack column's drag-over
+    // art (end of retail: UIElement_ItemList::ItemList_DragOver @ 004e3400;
+    // 1999: the UI_Item draw @ 0x004e7d20), from the same client view of the
+    // objects the drop's placement reads.
+    itemListDragAcceptState: (guid, d) => itemListDragOverState(placementWorld(), {
+      rule: eraRules.itemListDragOver, draggedId: guid, ...d,
+    }),
     onWieldWorldObject: (guid, target) => {
       const entry = worldObjectRecords.entryOf(guid);
       if (entry === null || !sendGameAction) return false;
@@ -7115,8 +7155,8 @@ async function main() {
     // AcceptDragObject @ 004caa40 (GameUI.acceptTradeDrag: ownership, the
     // listed check, the pack walk, the split in place); each object it adds
     // goes out through the trade callbacks' onAddItemToTrade.
-    onDropToTrade: (itemIndex: number) => {
-      const item = playerState.inventory.getAll()[itemIndex];
+    onDropToTrade: (guid: number) => {
+      const item = playerState.inventory.getItem(guid);
       if (!item) return;
       gameUI.acceptTradeDrag(tradeDragItemFor(item));
     },
@@ -7129,11 +7169,10 @@ async function main() {
     // BUG.house-buy-rent-payment-item-selection-ui — drag an inventory item
     // onto the House panel's Buy/Rent payment tray. GameUI owns the
     // wcid/NeedsMore validation (it already has the HouseProfile cost
-    // lists in scope); this callback just resolves the dragged index to
+    // lists in scope); this callback just resolves the dragged object to
     // the actual inventory item and hands it over.
-    onDropToHousePayment: (itemIndex: number, tab: 'buy' | 'rent') => {
-      const items = playerState.inventory.getAll();
-      const item = items[itemIndex];
+    onDropToHousePayment: (guid: number, tab: 'buy' | 'rent') => {
+      const item = playerState.inventory.getItem(guid);
       if (!item) return;
       // CORE.17.k.b.b.c.c.a.a.b — gmSlumlordUI::AcceptDragObject @ 004c87c0:
       // the dragged object with what ACCWeenieObject answers about it (an
@@ -7156,8 +7195,8 @@ async function main() {
     // (UIElement_ItemList::ListenToElementMessage @ 004e4d50, action 8).
     // Use / wield / drop / give / trade are the double-click, the drag and
     // the toolbar, as in retail.
-    onRightClickItem: (itemIndex: number) => {
-      const item = playerState.inventory.getAll()[itemIndex];
+    onRightClickItem: (guid: number) => {
+      const item = playerState.inventory.getItem(guid);
       if (item && sendIdentifyAction) sendIdentifyAction(item.id);
     },
     // CORE.10.d — onSplitStack (the invented split dialog's callback) is
@@ -7738,10 +7777,10 @@ async function main() {
     },
     // BUG.cast-flood-remaining — every press says what pressed it and how soon after the last one;
     // its refusals (here, and the server's answer to the cast it sends) carry that.
-    onCastSpell: (spellIndex: number) => refusalWithDetail(() => castPresses.notePress(), (): void => {
-      const spells = magicController.knownSpells;
-      if (spellIndex < 0 || spellIndex >= spells.length) return;
-      const spell = spells[spellIndex];
+    onCastSpell: (spellId: number) => refusalWithDetail(() => castPresses.notePress(), (): void => {
+      // BUG.ammo-merge-swaps-first sweep — by spell id: GameUI's spell list is synced from this one a frame later.
+      const spell = magicController.knownSpells.find((s) => s.id === spellId);
+      if (!spell) return;
 
       // The server handles validation, mana and fizzle. sendCastSpellAction
       // is wired synchronously during startup, before aceConnection.connect()
@@ -8634,6 +8673,7 @@ async function main() {
     {
       const som = serverObjectManager;
       radarMotionOf = (guid) => som.getAnimated(guid)?.motionManager;
+      radarFeedCtx.holderOf = (guid) => som.getObject(guid);
     }
     let examineFigurePoser: ExamineFigurePoser | null = null;
     /** The examination viewport's figure: a clone of the live world mesh, normalized and posed. */
@@ -8809,6 +8849,17 @@ async function main() {
     // BUG.door-collision-static-pose-no-hold — set_ethereal(0)'s overlap
     // test (a door closing on us stays open until we are out of it).
     serverObjectManager.objectPhysics = objectPhysics;
+    // BUG.remote-creature-obstacle-collision — every remote object's own motion runs through the
+    // same static world our character collides with (CPhysicsObj::transition for each mover;
+    // world/RemoteTransition.ts). The dungeon world is swapped at runtime: read it through a getter.
+    serverObjectManager.remoteTransitionWorld = {
+      outdoor: outdoorCollision,
+      get dungeon() { return dungeonCollision; },
+      terrain: terrainCollision,
+      water: waterMap,
+      waterDepthAt: (x, z) => waterMap.waterDepthAt(x, z),
+    };
+    serverObjectManager.localPhysicsState = () => playerPhysicsState;
     // A server MoveTo / TurnTo for our character runs on its MoveToManager
     // (MovementManager::unpack_movement @ 00524440 cases 6–9). Its host is
     // our character: CMotionInterp::adjust_motion with our own run rate
@@ -9334,13 +9385,20 @@ async function main() {
      * an open chest's contents) are tracked in this set until deleted.
      */
     const createdNonWorldGuids = new Set<number>();
+    /**
+     * BUG.ac1999-drop-not-shown — the CreateObject of each of those (and of each world object we
+     * pick up or wield): an UpdatePosition for one puts it in the world (HandleReceivedPosition →
+     * MoveOrTeleport with no cell; world/NonWorldObjectRecords.ts). The AC1999 server drops an item
+     * with 0x19A + 0xF748 and no new CreateObject for the dropper.
+     */
+    const nonWorldRecords = new NonWorldObjectRecords();
     const objectBlobGate = createObjectBlobGate({
       queue: pendingPlayScripts,
       worldInstance: (guid) => {
         const o = serverObjectManager?.getObject(guid);
         return o ? o.instanceSequence : null;
       },
-      knownWithoutWorldRecord: (guid) => guid === aceCharGuid || createdNonWorldGuids.has(guid)
+      knownWithoutWorldRecord: (guid) => guid === aceCharGuid || createdNonWorldGuids.has(guid) || nonWorldRecords.has(guid)
         || !!playerState.inventory.getItem(guid) || playerState.equipment.getAll().some((e) => e.id === guid),
       isNewer: isSequenceNewer,
       now: () => performance.now(),
@@ -9353,8 +9411,8 @@ async function main() {
         && objectBlobGate.deferUntilKnown(data.physicsParentId, () => handleObjectCreateOrUpdate(data, isUpdate))) return;
       handleObjectCreateOrUpdateInner(data, isUpdate);
       if (data.guid !== aceCharGuid) {
-        if (serverObjectManager?.getObject(data.guid)) createdNonWorldGuids.delete(data.guid);
-        else createdNonWorldGuids.add(data.guid);
+        if (serverObjectManager?.getObject(data.guid)) { createdNonWorldGuids.delete(data.guid); nonWorldRecords.forget(data.guid); }
+        else { createdNonWorldGuids.add(data.guid); nonWorldRecords.remember(data); }
       }
       // SmartBox::ProcessObjectNetBlobs @ 00454b20 — the queued messages now.
       pendingPlayScripts.replayFor(data.guid, performance.now());
@@ -9594,7 +9652,7 @@ async function main() {
 
     // ── Inventory item moved to container (confirmation from server) ──
     // A named function: GDLE's container-id property update reuses it (onPublicUpdatePropertyInstanceID).
-    const handleInventoryPut = (data: { itemGuid: number; containerGuid: number; slot: number }): void => {
+    const handleInventoryPut = (data: { itemGuid: number; containerGuid: number; slot: number; itemType: number }): void => {
       // CORE.17.k.c.a — 0x0022 ServerSaysContainID → ServerSaysMoveItem @ 0058dbb0 clears the pending request for this object.
       inventoryRequests.respond(data.itemGuid);
       // ServerSaysMoveItem also clears ACCWeenieObject::waiting (RECON.inventory-grid-dat-cells.b).
@@ -9605,15 +9663,10 @@ async function main() {
       // BUG.inventory-put-slot-itemtype-unused — every server-confirmed
       // contain-in event (pickup, vendor buy, trade, corpse loot,
       // server-side reshuffle — not just local drag-drop) carries the
-      // authoritative PlacementPosition. Without this, getAll()/
-      // getByContainer() fell back to Map-insertion order for any item
-      // not already in _placementOrder until the next relog. data.itemType
-      // is ACE's ContainerType (NonContainer/Container/Foci per
-      // reference/ACE/Source/ACE.Entity/Enum/ContainerType.cs) — a
-      // different enum than InventoryItem.itemType (the ItemType
-      // bitmask), so it is intentionally not stored here; see
-      // PlayerDescriptionParser's identical field for the same
-      // precedent (parsed to advance the reader, never persisted).
+      // authoritative PlacementPosition, applied below. data.itemType is the
+      // ContainerType (NonContainer/Container/Foci, ACE ContainerType.cs; the
+      // AC1999 server's RequiresPackSlot 0/1), not InventoryItem.itemType: it
+      // picks the items list or the containers list the slot indexes.
       // GAP.world-drag-drop — ServerSaysMoveItem @ 0058dbb0 moves the
       // existing object: a ground object picked up into one of our packs
       // becomes a carried item from its CreateObject record, and leaves
@@ -9623,6 +9676,9 @@ async function main() {
           && !playerState.inventory.getItem(data.itemGuid)) {
         const picked = worldObjectRecords.containIn(data.itemGuid, data.containerGuid);
         if (picked) {
+          // BUG.ac1999-drop-not-shown — kept for a later drop (its world record goes now).
+          const worldRec = serverObjectManager?.getObject(data.itemGuid)?.createData;
+          if (worldRec) nonWorldRecords.carryFromWorld(worldRec, data.containerGuid);
           serverObjectManager?.deleteObject(data.itemGuid, 'pickup');
           playerState.inventory.addItem(picked, data.itemGuid);
           if ((picked.itemType & ItemType.Container) !== 0 && data.containerGuid === aceCharGuid && !sidePackGuids.includes(data.itemGuid)) {
@@ -9632,7 +9688,17 @@ async function main() {
           inventoryDirty = true;
         }
       }
-      playerState.inventory.setSlotForItem(data.itemGuid, data.slot);
+      // BUG.ac1999-inventory-placement-order — ServerSaysMoveItem @ 0058dbb0 (1999 @ 0x004e2120):
+      // out of its old list, INSERTED at the slot in the new container's items list, or its
+      // containers list when the event's ContainerType is not 0 (ServerSaysContainID @ 0058be40);
+      // the items after it shift down, as on the server.
+      const intoPackList = applyContainIdOrder(playerState.inventory, data);
+      // A pack put into the player takes its slot among the side packs (the containers list).
+      if (intoPackList && aceCharGuid !== null && data.containerGuid === aceCharGuid && sidePackGuids.length > 2) {
+        packPlacement = playerState.inventory.containerOrder(aceCharGuid, true);
+        reorderSidePacks();
+        gameUI.setSidePackGuids([...sidePackGuids]);
+      }
       // If item was in the open container and moved to us (the main pack or
       // a side pack: PlaceInBackpack aims at the shown pack), remove it
       // from container UI
@@ -9738,7 +9804,7 @@ async function main() {
         if (stash) {
           storedItemStash.delete(data.itemGuid);
           playerState.inventory.addItem({ ...stash, containerId: data.containerGuid }, data.itemGuid);
-          playerState.inventory.setSlotForItem(data.itemGuid, data.slot);
+          applyContainIdOrder(playerState.inventory, data);
           inventoryDirty = true;
         }
       }
@@ -9822,6 +9888,7 @@ async function main() {
         // …and a selected held / container item (its pick nulls currentTargetGuid).
         deselectIfSelected(data.guid);
         createdNonWorldGuids.delete(data.guid);
+        nonWorldRecords.forget(data.guid);
       },
 
       // ── Position & Movement ──
@@ -9888,6 +9955,17 @@ async function main() {
           return; // don't move our mesh — camera follows playerWorldX/Z
         }
         reviveReleased(data.guid);
+        // BUG.ac1999-drop-not-shown — HandleReceivedPosition @ 00453fd0 (1999 @ 0x0040fb7d) →
+        // MoveOrTeleport @ 00516330 (1999 @ 0x004337b0): a known object with no cell enters the
+        // world at this position (a drop, a corpse's spilled contents), with no new CreateObject.
+        const placed = placeKnownObjectByPosition(nonWorldRecords, {
+          hasWorldObject: (g) => !!serverObjectManager!.getObject(g),
+          create: (rec) => handleObjectCreateOrUpdate(rec, false),
+        }, data);
+        if (placed) {
+          console.log(`[AC] 0x${(data.guid >>> 0).toString(16)} "${placed.name}" placed in the world by its position (cell 0x${(data.landblock >>> 0).toString(16)})`);
+          return;
+        }
         serverObjectManager!.updatePosition(data);
       },
       onPlayerTeleport: () => {
@@ -9947,8 +10025,8 @@ async function main() {
         // ShowCloak, all sent to self per ACE EnqueueBroadcast
         // sendSelf:true) to the player-model transplant path.
         if (aceCharGuid !== null && data.guid === aceCharGuid) {
-          // RELEASE.streaming-regression-gate — a build that missed streamed files is redone when they land.
-          streamedPlayerBuild(() => applyPlayerAppearance(data));
+          // UX.chargen-preview-no-placeholder — applyPlayerAppearance holds the old look until the new one's files land.
+          applyPlayerAppearance(data);
           return;
         }
         reviveReleased(data.guid);
@@ -10835,9 +10913,9 @@ async function main() {
         // tick re-renders with the restored order (items themselves arrive
         // via individual CreateObject events around login time).
         if (desc.inventoryPlacement.length > 0) {
-          playerState.inventory.setPlacementOrder(
-            desc.inventoryPlacement.map(p => p.guid),
-          );
+          // ACCObjectMaint::ViewObjectContents @ 00558a70: the player's items list and
+          // containers list, each in the listed order (BUG.ac1999-inventory-placement-order).
+          playerState.inventory.setContainerContents(aceCharGuid ?? 0, desc.inventoryPlacement);
           packPlacement = desc.inventoryPlacement.map(p => p.guid);
           if (sidePackGuids.length > 2) { reorderSidePacks(); gameUI.setSidePackGuids([...sidePackGuids]); }
           inventoryDirty = true;
@@ -11339,7 +11417,9 @@ async function main() {
           partnerTradeGuids: gameUI.getTradeData().theirItems.map((i) => i.guid),
           holds: (guid) => !!playerState.inventory.getItem(guid),
         })) {
-          handleInventoryPut({ itemGuid: data.guid, containerGuid: val, slot: 0 });
+          // OnStatUpdated @ 0058e220 case 2 → ServerSaysMoveItem(player, 0): slot 0, in the containers
+          // list when the object is a container (AddContent @ 0058cce0's own test).
+          handleInventoryPut({ itemGuid: data.guid, containerGuid: val, slot: 0, itemType: placementWorld().object(data.guid)?.isContainer ? 1 : 0 });
         }
         // FAITHFUL.345 — Detach the visual wielded-item mesh when ACE
         // broadcasts a Wielder=Invalid (=0) transition. ACE emits this
@@ -13040,7 +13120,7 @@ async function main() {
           sidePackGuids,
           hasInventoryItem: (g) => playerState.inventory.getItem(g) !== undefined,
           isKnownWorldObject: (g) => !!serverObjectManager?.getObject(g),
-          setSlotForItem: (g, slot) => playerState.inventory.setSlotForItem(g, slot),
+          setContainerContents: (container, items) => playerState.inventory.setContainerContents(container, items),
           tracker: openContainer,
         }, realContainerGuid, data.items);
         if (route === 'own-pack') {
@@ -13109,6 +13189,9 @@ async function main() {
         // BUG.stack-merge-not-found sweep — ServerSaysMoveItem(0, …): an item wielded straight out of the
         // open corpse / chest leaves its strip (UIElement_ItemList::RecvNotice_ServerSaysMoveItem @ 004e5110).
         if (openContainer.serverSaysMoveFor(data.itemGuid, { kind: 'wield' })) syncOpenContainerUI();
+        // BUG.ac1999-inventory-placement-order — ServerSaysMoveItem(0, …) → RemoveContent: a wielded
+        // item leaves its pack's list, so later slots from the server count the same items we do.
+        playerState.inventory.leaveContainer(data.itemGuid);
         // BUG.wield-leaves-request-pending + GAP.world-drag-drop.a —
         // ServerSaysMoveItem (UIQueueManager case 0x23) clears the pending
         // request, and a ground object wielded off the landblock becomes a
@@ -13121,7 +13204,12 @@ async function main() {
           playerId: aceCharGuid,
           getItem: (guid) => playerState.inventory.getItem(guid),
           addItem: (entry, guid) => { playerState.inventory.addItem(entry, guid); },
-          removeWorldObject: (guid) => { serverObjectManager?.deleteObject(guid, 'wield'); },
+          removeWorldObject: (guid) => {
+            // BUG.ac1999-drop-not-shown — kept for a later drop (its world record goes now).
+            const worldRec = serverObjectManager?.getObject(guid)?.createData;
+            if (worldRec && aceCharGuid !== null) nonWorldRecords.carryFromWorld(worldRec, 0, aceCharGuid);
+            serverObjectManager?.deleteObject(guid, 'wield');
+          },
           equip: (it, location) => { playerState.equipment.equipItem(it, location as EquipMask, false); },
           confirmEquip: (id) => pendingEquipmentActions.confirm(id),
           markInventoryDirty: () => { inventoryDirty = true; },
@@ -13555,6 +13643,8 @@ async function main() {
         // CORE.17.k.c.a — 0x0197 ServerSaysSetStackSize @ 0058cc40 clears the pending request for this object.
         inventoryRequests.respond(data.guid);
         gameUI.itemRequestAnswered(data.guid);
+        // BUG.ac1999-drop-not-shown — a carried stack placed in the world later shows this count.
+        nonWorldRecords.setStackSize(data.guid, data.stackSize, data.value);
         applySetStackSize({
         equipmentUpdateStackSize: (g, n) => playerState.equipment.updateStackSize(g, n),
         getInventoryItem: (g) => playerState.inventory.getItem(g),
@@ -14001,6 +14091,7 @@ async function main() {
       // command is Ready.
       inReadyPosition: () => combatController.mode === CombatMode.Melee
         || (combatController.mode === CombatMode.Missile && (animController?.interpretedForwardCommand(cameraController) ?? MotionCommand.Ready) === MotionCommand.Ready),
+      forwardHeldByServer: () => combatController.mode === CombatMode.Missile && !!animController?.forwardHeldByServer(cameraController),
       finishJump: () => animController?.cancelJumpCharge(),
       combatMode: () => combatController.mode === CombatMode.Melee ? 'melee' : combatController.mode === CombatMode.Missile ? 'missile' : null,
       currentStyle: () => (getDualWieldItem() ? DUAL_WIELD_COMBAT_STYLE : 0),
@@ -17519,14 +17610,13 @@ async function main() {
         attacking: () => inventoryRequests.attackInProgress,
         cast: (spellId, target) => {
           // The spell bar / spellbook's own cast (component, target and compatibility checks included).
-          const index = magicController.knownSpells.findIndex((s) => s.id === spellId);
-          if (index < 0) return false;
+          if (!magicController.knownSpells.some((s) => s.id === spellId)) return false;
           selectGuid(target ?? myPlayerGuid ?? aceCharGuid ?? 0);
           // A target the client could not select (it is gone) is no cast: the spell bar would cast at whatever
           // is selected, yourself included ("You cannot cast this spell upon yourself", 2026-10-10).
           if (target !== null && (selectedObjectId() >>> 0) !== (target >>> 0)) return false;
           agentPrimeMoveState();
-          castPresses.during('agent', () => gameUI['spellCallbacks'].onCastSpell?.(index));
+          castPresses.during('agent', () => gameUI['spellCallbacks'].onCastSpell?.(spellId));
           return true;
         },
         spellSelfTargetableTypeMask: () => eraRules.spellSelfTargetableTypeMask,
@@ -20750,6 +20840,15 @@ async function main() {
   gameUI.setUIHost({
     get renderer() { return sceneManager.renderer; },
     characterModelBuilder,
+    // UX.chargen-preview-no-placeholder — the builder reads the world portal: its set's closure walker.
+    prefetchPortalFiles: worldStreamingDats
+      ? (ids, priority) => {
+        const sd = worldStreamingDats;
+        if (!sd || ids.length === 0) return Promise.resolve();
+        return sd.closure.ensure(ids.map((id) => fileKey('portal', id)),
+          priority === 'critical' ? FetchPriority.Critical : FetchPriority.Background).then(() => undefined);
+      }
+      : undefined,
     appearanceManager,
     get playerModel() { return playerModel; },
     cameraController,

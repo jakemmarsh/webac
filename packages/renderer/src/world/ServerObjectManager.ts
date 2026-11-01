@@ -9,7 +9,12 @@ import { addCreatureObstacles, creatureBlockRadius, blocksLocalPlayer, partArray
 import type { ObjectPhysicsModel } from './ObjectCollision.js';
 import { DungeonCollision } from './DungeonCollision.js';
 import { MoveToManager, performServerMovement, type MoveToHost } from '../controllers/MoveToManager.js';
-import { RemotePhysicsObject, type RemotePhysicsEnv, type SequenceStepInfo } from './RemotePhysics.js';
+import { RemotePhysicsObject, type RemotePhysicsEnv, type SequenceStepInfo, type RemoteTransitionResult } from './RemotePhysics.js';
+import {
+  remoteBodyShape, remoteTransition, moverBlockedBy, REMOTE_TRANSITION_RANGE,
+  type RemoteBodyShape, type RemoteTransitionWorld,
+} from './RemoteTransition.js';
+import type { MovementCreatureObstacles, SlideState } from '../player/OutdoorMovement.js';
 import {
   readyMotion, adjustMotion, applyInterpretedMotion, removeInterpretedMotion, resolveMotion,
   sequencePhysicsFor, adjustedMaxSpeed, maxSpeed, HoldKey, type InterpretedMotion,
@@ -27,6 +32,7 @@ import {
 import * as THREE from 'three';
 import type { CreateObjectData, ACPosition, ParsedMovementData, ParsedMoveTo, ParsedTurnTo } from '@ac/network';
 import { parseMovementData, PhysicsTimestamp } from '@ac/network';
+import { CreatureCorrectionLog } from './CreatureCorrectionLog.js';
 import type { DatDatabase } from '@ac/dat-parser/DatDatabase.js';
 import type { SetupModelRenderer } from '../models/SetupModelRenderer.js';
 import type { AppearanceManager } from '../models/AppearanceManager.js';
@@ -61,6 +67,13 @@ import { MotionCommand, MotionStance, motionCommandFromWireIndex, isSubstateComm
  * mask (which the wire format strips). 0x40000011 & 0xFFFF = 0x0011.
  */
 const MOTION_DEAD_WIRE_INDEX = MotionCommand.Dead & 0xFFFF;
+/**
+ * BUG.remote-creature-obstacle-collision — slack (m) on a remote move's reach when picking the objects
+ * that could stop it: an object farther than the move's length + the mover's radius + its own radius
+ * + this cannot touch the mover's spheres in this transition (radii are each Setup's bounding radius,
+ * which holds every sphere and cylsphere).
+ */
+const MOVER_OBSTACLE_SLACK = 0.5;
 
 /**
  * Wire index for MotionCommand.Ready. ACE's InterpretedMotionState keeps
@@ -310,6 +323,14 @@ export interface ServerObject {
    * reads it; unset until the Setup loads.
    */
   physicsSpheres?: PhysicsSphere[];
+  /**
+   * BUG.remote-creature-obstacle-collision — the shape its transitions run with (Setup radius,
+   * height, step heights, first two spheres × scale; world/RemoteTransition.ts); null = no spheres
+   * (never transitioned), unset until the Setup loads.
+   */
+  transitionShape?: RemoteBodyShape | null;
+  /** CPhysicsObj::sliding_normal between its transitions. */
+  transitionSlide?: SlideState;
   /**
    * CORE.17.k.b.b.a.g.b — the part materials `CPhysicsPart::CopyMaterial`
    * replaced while a selection-lighting override is on (see
@@ -1090,6 +1111,7 @@ export class ServerObjectManager {
     obj.collisionRadius = cyl.radius;
     obj.collisionHeight = cyl.height;
     obj.physicsSpheres = setupPhysicsSpheres(setup, scale);
+    obj.transitionShape = remoteBodyShape(setup, scale);
     obj.blockRadius = (obj.itemType & ItemType.Creature) !== 0 ? creatureBlockRadius(setup, scale) : 0;
   }
 
@@ -1816,11 +1838,19 @@ export class ServerObjectManager {
     const me = this.localPlayerPosition?.();
     // CPhysicsObj::player_distance — the 3-D offset from the player (update_object @ 00515d10).
     const playerDistance = me ? Math.hypot(me.x - newX, me.z - newZ, (me.y ?? z) - z) : 0;
+    const clientWas = { ...body.pos };
     const r = body.receivePosition({
       cell, pos: { x: newX, y: newZ, z }, orient: { w: rw, x: rx, y: ry, z: rz },
       contact: stamps.contact, positionTs: stamps.positionTs, teleportTs: stamps.teleportTs,
     }, playerDistance);
     if (r === 'stale') return;
+    // BUG.ac1999-monster-jitter — a creature corrected far from our copy (world/CreatureCorrectionLog.ts).
+    if ((obj.itemType & ItemType.Creature) !== 0 && !reentering) {
+      this.correctionLog.report({
+        guid, name: obj.name, cell, server: { x: newX, y: newZ, z }, client: clientWas,
+        movingTo: !!obj.moveTo?.isMovingTo(), sliding: body.sliding, contact: stamps.contact, result: r,
+      }, performance.now());
+    }
     // Where the server says it is, for the agent's observations (an airborne one the body ignores included).
     obj.serverPlace = { cell: cell >>> 0, worldX: newX, worldY: newY, worldZ: newZ };
     obj.serverPlaceAt = performance.now();
@@ -3135,9 +3165,17 @@ export class ServerObjectManager {
     obj.mesh.quaternion.set(qx, qy, qz, qw);
   }
 
+  /** BUG.ac1999-monster-jitter — `[AC:Move] correction` lines for far creature corrections. */
+  private readonly correctionLog = new CreatureCorrectionLog();
+
   /** What remote physics reads from the world: the terrain height (AC z) outdoors. */
   private readonly physicsEnv: RemotePhysicsEnv = {
     terrainHeight: (x, y) => this.terrainCollision?.getHeightAt(x, y) ?? null,
+    // BUG.ac1999-monster-jitter — the land's contact plane (three.js normal → AC axes).
+    terrainNormal: (x, y) => {
+      const n = this.terrainCollision?.getTriangleNormalAt?.(x, y);
+      return n ? { x: n.x, y: n.z, z: n.y } : null;
+    },
     landingZ: (cell, x, y, z, spheres) => this.objectLandingQuery?.(cell, x, y, z, spheres) ?? null,
     surfaceCellAt: (x, y, z, preferred) => this.surfaceCells?.surfaceCellAt(x, y, z, preferred) ?? 0,
     holdsSurfaceCell: (cell) => this.surfaceCells?.holdsSurfaceCell(cell) ?? false,
@@ -3177,7 +3215,96 @@ export class ServerObjectManager {
       leaveGround: () => this.motionInterpGroundChange(obj, true),
       targetPosition: (id) => this.targetInfo(id)?.pos ?? null,
     };
+    body.transition = (to, opts) => this.transitionFor(obj, to, opts);
   }
+
+  /**
+   * BUG.remote-creature-obstacle-collision — the static world remote objects' transitions collide
+   * with (main.ts: the landscape's and the dungeon's collision, the terrain, the sea). Null = none:
+   * remote motion is not collided.
+   */
+  remoteTransitionWorld: RemoteTransitionWorld | null = null;
+  /** Counters of remote transitions run (the frame-cost probe and tests read them). */
+  readonly transitionStats = { runs: 0, blocked: 0 };
+
+  /**
+   * One remote object's transition (RemotePhysicsObject.transition): CPhysicsObj::update_object
+   * @ 00515d10 moves only an object within MAX_PHYSICS_DISTANCE of the player, and
+   * UpdateObjectInternal @ 005156b0 transitions only one with physics spheres. Missiles fly in
+   * MissilePhysics; our own character is moved by the player's step.
+   */
+  private transitionFor(obj: ServerObject, to: { x: number; y: number }, opts: { airborne: boolean; wantGround: boolean }): RemoteTransitionResult | null {
+    const world = this.remoteTransitionWorld;
+    const body = obj.physics;
+    const shape = obj.transitionShape;
+    if (!world || !body || !shape || obj.guid === this.localPlayerGuid || this.projectiles.has(obj.guid)) return null;
+    if (body.state & PhysicsState.Missile) return null;
+    const me = this.localPlayerPosition?.();
+    if (me && Math.hypot(me.x - body.pos.x, me.z - body.pos.y, (me.y ?? body.pos.z) - body.pos.z) > REMOTE_TRANSITION_RANGE) return null;
+    const r = remoteTransition(world, {
+      shape, cell: body.cell,
+      from: body.pos, to,
+      airborne: opts.airborne,
+      edgeSlide: (body.state & PhysicsState.EdgeSlide) !== 0,
+      slide: (obj.transitionSlide ??= { slidingNormal: null }),
+      obstacles: this.moverObstacles(obj, me, Math.hypot(to.x - body.pos.x, to.y - body.pos.y) + shape.radius + MOVER_OBSTACLE_SLACK),
+      wantGround: opts.wantGround,
+    });
+    if (r) {
+      this.transitionStats.runs++;
+      if (r.blocked) this.transitionStats.blocked++;
+    }
+    return r;
+  }
+
+  /**
+   * What stops `mover` in its transition (CPhysicsObj::FindObjCollisions @ 0050f050 per object,
+   * world/RemoteTransition.ts moverBlockedBy): the other objects' cylspheres / spheres / part BSPs
+   * (creatures, players, closed doors) and our own character's spheres, registered in the
+   * collider for the one move.
+   */
+  private moverObstacles(
+    mover: ServerObject,
+    // Read before the transition: inside it the collider holds the mover's shape, not ours.
+    me: ReturnType<NonNullable<ServerObjectManager['localPlayerPosition']>> | null | undefined,
+    /** How far the move can reach (its length + the mover's radius + slack): an object farther than this plus its own radius cannot touch it. */
+    reach: number,
+  ): MovementCreatureObstacles | null {
+    if (!this.objectPhysics) return null;
+    const physics = this.objectPhysics;
+    const moverParty = { physicsState: mover.physics?.state ?? mover.physicsState, objectDescFlags: mover.objectDescFlags };
+    return (collider, x, z, range) => {
+      const collision = collider as DungeonCollision;
+      const blockers: CreatureBlocker[] = [];
+      for (const obj of this.objects.values()) {
+        if (obj === mover || !obj.mesh || obj.outOfWorld || obj.wielderId || !obj.physics?.inCell) continue;
+        if (this.projectiles.has(obj.guid)) continue;
+        if ((obj.itemType & ItemType.Creature) && obj.blockRadius <= 0) continue;
+        const dx = obj.worldX - x, dz = obj.worldZ - z;
+        const near = Math.min(range, reach + Math.max(obj.blockRadius, obj.collisionRadius));
+        if (dx * dx + dz * dz > near * near) continue;
+        if (!moverBlockedBy(moverParty, obj)) continue;
+        blockers.push(this.blockerOf(obj));
+      }
+      const keys = addCreatureObstacles(collision, blockers, physics);
+      // Our character: its Setup spheres (the mover sees it as any other player object).
+      if (me && me.y !== undefined && Math.hypot(me.x - x, me.z - z) <= Math.min(range, reach + me.radius)
+        && moverBlockedBy(moverParty, { physicsState: this.localPhysicsState(), objectDescFlags: this.localDescFlags | ObjectDescriptionFlag.Player })) {
+        const spheres = me.bodySpheres ?? {
+          radius: DungeonCollision.BODY_SPHERE_RADIUS,
+          heights: [DungeonCollision.LOWER_SPHERE_HEIGHT, DungeonCollision.UPPER_SPHERE_HEIGHT],
+        };
+        spheres.heights.forEach((h, i) => {
+          const key = `creature:self:s${i}`;
+          collision.addSphereObstacle(key, me.x, me.y! + h, me.z, spheres.radius);
+          keys.push(key);
+        });
+      }
+      return () => { for (const k of keys) collision.removeKey(k); };
+    };
+  }
+  /** Our character's PhysicsState (main.ts keeps it; Ethereal while portaling). */
+  localPhysicsState: () => number = () => 0;
 
   /**
    * What the object's sequence plays for its interpreted state

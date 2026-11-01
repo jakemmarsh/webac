@@ -32,7 +32,6 @@ import { acceptItemListDrop } from '../packages/renderer/src/inventory/ItemHolde
 import { makeWorld, PLAYER } from './_harness/placementWorld.js';
 
 const REPO = resolve(fileURLToPath(import.meta.url), '../..');
-const INV_MGR = readFileSync(resolve(REPO, 'packages/shared/src/inventory/InventoryManager.ts'), 'utf-8');
 const ACE_PUT = readFileSync(resolve(REPO, 'reference/ACE/Source/ACE.Server/Network/GameAction/Actions/GameActionPutItemInContainer.cs'), 'utf-8');
 
 /* ================================================================ */
@@ -40,12 +39,16 @@ const ACE_PUT = readFileSync(resolve(REPO, 'reference/ACE/Source/ACE.Server/Netw
 /* ================================================================ */
 
 describe('FAITHFUL.573 — InventoryManager.reorderItem', () => {
-  it('reorderItem method is exposed', () => {
-    expect(INV_MGR).toMatch(/reorderItem\(itemId:\s*number,\s*newIndex:\s*number\)/);
-  });
-
-  it('docblock cites the ACE handler line range', () => {
-    expect(INV_MGR).toMatch(/GameActionPutItemInContainer\.cs:9-13/);
+  it('reorderItem moves within its own container only (BUG.ac1999-inventory-placement-order)', () => {
+    const inv = new InventoryManager();
+    const mk = (name: string, containerId: number, id: number) => inv.addItem({ weenieClassId: 1, name, value: 0, burden: 0,
+      stackSize: 1, maxStackSize: 1, stackable: false, containerId }, id);
+    mk('A', 1, 501); mk('B', 1, 502); mk('P', 2, 503); mk('Q', 2, 504);
+    inv.setPlacementOrder([501, 502], 1);
+    inv.setPlacementOrder([503, 504], 2);
+    inv.reorderItem(504, 0);
+    expect(inv.getByContainer(2).map((i) => i.name)).toEqual(['Q', 'P']);
+    expect(inv.getByContainer(1).map((i) => i.name)).toEqual(['A', 'B']);
   });
 
   it('moves an item from its current index to a new index', () => {

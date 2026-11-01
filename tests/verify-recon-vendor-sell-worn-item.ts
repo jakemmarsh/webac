@@ -116,7 +116,7 @@ function harness(withDats: boolean) {
       '1.25', '0.75', undefined, undefined, 0x80009999, WEAPONSMITH);
     ui.toolbarSplitSize = 1;
     ui.toolbarMaxSplitSize = 1;
-    ui.dragItemIndex = -1;
+    ui.dragItemGuid = 0;
     ui.dragSourceSlot = null;
   });
   return H;
@@ -172,7 +172,7 @@ describe.skipIf(!hasDats)('GameUI: a paperdoll drag onto the vendor bar lists th
   });
 
   it('pack drags still work: the inventory sword is listed', () => {
-    H.ui.dragItemIndex = 0;
+    H.ui.dragItemGuid = SWORD;
     fire('drop');
     expect(H.ui.vendorData.sellList).toEqual([{ guid: SWORD, qty: 1 }]);
   });

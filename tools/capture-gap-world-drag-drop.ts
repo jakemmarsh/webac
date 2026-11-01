@@ -76,7 +76,7 @@ const invFind = (page: Page, wcid: number) => ev<{ idx: number; id: number; name
 
 /** Start an inventory-cell drag the way the cell's own dragstart does, then release over the canvas at (x, y). */
 const dropInvOnView = (page: Page, idx: number, x: number, y: number) => ev(page, `(() => {
-  const ui = window.__ac.gameUI; ui.dragItemIndex = ${idx}; ui.dragSourceSlot = null;
+  const ui = window.__ac.gameUI; ui.dragItemGuid = ui.inventoryItems[${idx}]?.id ?? 0; ui.dragSourceSlot = null;
   const canvas = document.getElementById('game-canvas');
   const o = { bubbles: true, cancelable: true, clientX: ${x}, clientY: ${y} };
   canvas.dispatchEvent(new DragEvent('dragover', o));

@@ -77,9 +77,9 @@ describe('GAP.18 — pack tabs accept item drops (behavioral)', () => {
     drops = [];
     ui.setDragCallbacks({
       // SWEEP1006B — every item-list drop goes through onItemListDrop (AcceptDragObject).
-      onItemListDrop: (source: { kind: string; itemIndex?: number; slot?: number }, target: { list: string; packSlot: number; cellItemId?: number }) => {
+      onItemListDrop: (source: { kind: string; guid?: number; slot?: number }, target: { list: string; packSlot: number; cellItemId?: number }) => {
         drops.push(source.kind === 'inventory'
-          ? { itemIndex: source.itemIndex!, packSlot: target.packSlot, list: target.list, cellItemId: target.cellItemId }
+          ? { guid: source.guid!, packSlot: target.packSlot, list: target.list, cellItemId: target.cellItemId }
           : { kind: source.kind, slot: source.slot, packSlot: target.packSlot, list: target.list, cellItemId: target.cellItemId });
       },
     });
@@ -127,9 +127,9 @@ describe('GAP.18 — pack tabs accept item drops (behavioral)', () => {
   it('dragging an item cell onto a side-pack tab drops it on the pack column slot 1', () => {
     const cells = itemCells();
     expect(cells.length).toBeGreaterThan(0);
-    fire(cells[0], 'dragstart'); // Dagger — inventoryItems[0]
+    fire(cells[0], 'dragstart'); // Dagger: the drag carries its id
     fire(packTabs()[1], 'drop');
-    expect(drops).toEqual([{ itemIndex: 0, packSlot: 1, list: 'packs', cellItemId: undefined }]);
+    expect(drops).toEqual([{ guid: 0x8000aaaa, packSlot: 1, list: 'packs', cellItemId: undefined }]);
   });
 
   it('a worn item dropped on a pack tab is accepted (AcceptDragObject ignores the drag source)', () => {
@@ -153,9 +153,9 @@ describe('GAP.18 — pack tabs accept item drops (behavioral)', () => {
     // Select the side pack tab so the grid shows the Apple, then drag it home.
     packTabs()[1].click();
     const cells = itemCells();
-    fire(cells[0], 'dragstart'); // Apple — inventoryItems[2]
+    fire(cells[0], 'dragstart'); // Apple
     fire(packTabs()[0], 'drop');
-    expect(drops).toEqual([{ itemIndex: 2, packSlot: 0, list: 'packs', cellItemId: undefined }]);
+    expect(drops).toEqual([{ guid: 0x8000bbbb, packSlot: 0, list: 'packs', cellItemId: undefined }]);
   });
 
   it('drop with no active drag is a no-op', () => {

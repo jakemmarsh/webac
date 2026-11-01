@@ -204,7 +204,7 @@ async function main(): Promise<void> {
   for (const it of invA) {
     await ev(A, `(() => {
       const ui = window.__ac.gameUI;
-      ui.dragItemIndex = ${it.idx}; ui.dragSourceSlot = null;
+      ui.dragItemGuid = ui.inventoryItems[${it.idx}]?.id ?? 0; ui.dragSourceSlot = null;
       const list = ui.tradePanel.querySelector('[data-element-id="0x10000088"]');
       list.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true }));
     })()`);
@@ -221,7 +221,7 @@ async function main(): Promise<void> {
     tried.push(it.name);
     await ev(B, `(() => {
       const ui = window.__ac.gameUI;
-      ui.dragItemIndex = ${it.idx}; ui.dragSourceSlot = null;
+      ui.dragItemGuid = ui.inventoryItems[${it.idx}]?.id ?? 0; ui.dragSourceSlot = null;
       const list = ui.tradePanel.querySelector('[data-element-id="0x10000088"]');
       list.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true }));
     })()`);

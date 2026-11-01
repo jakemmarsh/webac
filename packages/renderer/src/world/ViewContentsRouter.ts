@@ -26,9 +26,10 @@ import type { OpenContainerTracker } from './OpenContainerTracker';
  * Routes:
  *  - 'own-pack': the player themself, one of their carried packs, or a
  *    container the client doesn't know at all (login race above). The
- *    event's authoritative PlacementPosition order is applied via
- *    ctx.setSlotForItem; the caller must mark the inventory dirty and do
- *    nothing else.
+ *    event's authoritative PlacementPosition order replaces the container's
+ *    lists via ctx.setContainerContents (ACCObjectMaint::ViewObjectContents
+ *    @ 00558a70); the caller must mark the inventory dirty and do nothing
+ *    else.
  *  - 'sub': fills a nested container of the already-open external
  *    container (panel state must not be reset).
  *  - 'opened': (re)opens an external container — show panel, lid motion,
@@ -46,8 +47,8 @@ export interface ViewContentsContext {
   hasInventoryItem: (guid: number) => boolean;
   /** Whether the guid exists as a client-known world object. */
   isKnownWorldObject: (guid: number) => boolean;
-  /** Persist one item's authoritative slot index within its container. */
-  setSlotForItem: (guid: number, slot: number) => void;
+  /** Replace the container's ordered contents (items list + containers list), in the event's order. */
+  setContainerContents: (containerGuid: number, items: ReadonlyArray<{ guid: number; containerType: number }>) => void;
   /** External-container state (chest/corpse/hook + nested packs). */
   tracker: OpenContainerTracker;
 }
@@ -77,7 +78,7 @@ export function routeViewContents(
       return 'deferred';
     }
     if (isOwnPack || !ctx.isKnownWorldObject(containerGuid)) {
-      for (let i = 0; i < items.length; i++) ctx.setSlotForItem(items[i].guid, i);
+      ctx.setContainerContents(containerGuid, items);
       return 'own-pack';
     }
   }

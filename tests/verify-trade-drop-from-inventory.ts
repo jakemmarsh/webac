@@ -10,7 +10,7 @@
  * handler. This version renders the REAL trade panel (stub layout
  * handle, happy-dom) and dispatches real dragstart/drop events,
  * asserting the guards the pin used to grep for:
- *  - drop with an open trade fires onDropToTrade(draggedIdx)
+ *  - drop with an open trade fires onDropToTrade(dragged object id)
  *  - partnerGuid === 0 (no active trade) → no-op
  *  - no active drag → no-op
  *  - equipped-slot drags go to onDropEquippedToTrade (CORE.17.k.b.b.c.c.a.a.c.a.b.a)
@@ -102,9 +102,9 @@ describe('FAITHFUL.548 — trade window accepts inventory drops (behavioral)', (
     added = [];
     // In a real browser dragend clears drag state after every gesture;
     // tests dispatch no dragend, so reset explicitly between cases.
-    ui.dragItemIndex = -1;
+    ui.dragItemGuid = 0;
     ui.dragSourceSlot = null;
-    ui.setDragCallbacks({ onDropToTrade: (idx: number) => { added.push(idx); } });
+    ui.setDragCallbacks({ onDropToTrade: (guid: number) => { added.push(guid); } });
     ui.setInventoryData(
       [{
         id: 0x8000aaaa, weenieClassId: 300, name: 'Arrow', value: 1, burden: 1,
@@ -130,11 +130,11 @@ describe('FAITHFUL.548 — trade window accepts inventory drops (behavioral)', (
     list.dispatchEvent(new domWindow.Event('drop', { bubbles: true, cancelable: true }));
   }
 
-  it('drop with an open trade fires onDropToTrade with the dragged index', () => {
+  it('drop with an open trade fires onDropToTrade with the dragged object id', () => {
     openTrade(0x50002222);
     beginDragFirstItem();
     dropOnTrade();
-    expect(added).toEqual([0]);
+    expect(added).toEqual([0x8000aaaa]);
   });
 
   it('CORE.17.k.b.b.c.c.a.a.c.a.b — a drop on the PARTNER\'s list 0x10000081 (or elsewhere on the slot) adds nothing', () => {
@@ -161,12 +161,12 @@ describe('FAITHFUL.548 — trade window accepts inventory drops (behavioral)', (
   it('CORE.17.k.b.b.c.c.a.a.c.a.b.a — an equipped-slot drag is offered too (a wielded item IsOwnedByPlayer; ACE falls back to GetEquippedItem)', () => {
     const equippedDrops: number[] = [];
     ui.setDragCallbacks({
-      onDropToTrade: (idx: number) => { added.push(idx); },
+      onDropToTrade: (guid: number) => { added.push(guid); },
       onDropEquippedToTrade: (slot: number) => { equippedDrops.push(slot); },
     });
     openTrade(0x50002222);
-    ui.dragItemIndex = -1;
-    ui.dragSourceSlot = 0x100000; // a paperdoll dragstart: index -1, the slot set
+    ui.dragItemGuid = 0;
+    ui.dragSourceSlot = 0x100000; // a paperdoll dragstart: no pack object, the slot set
     dropOnTrade();
     expect(added).toEqual([]);
     expect(equippedDrops).toEqual([0x100000]);

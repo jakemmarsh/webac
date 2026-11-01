@@ -77,6 +77,12 @@ export function motionAllowsJump(motion: number): number {
   return blocked ? JumpError.YouCantJumpFromThisPosition : JumpError.None;
 }
 
+/** A missile attack's server motions: Reload (0x40000016) and AimLevel…AimLow90 (0x4000001e–2a). */
+export function isMissileAttackMotion(motion: number): boolean {
+  const m = motion >>> 0;
+  return m === (MotionCommand.Reload >>> 0) || (m >= 0x4000001e && m <= 0x4000002a);
+}
+
 /** The substates the player's own input drives (everything else is the server's). */
 const CONTROLLER_SUBSTATES: ReadonlySet<number> = new Set([
   MotionCommand.Ready, MotionCommand.WalkForward, MotionCommand.WalkBackwards, MotionCommand.RunForward,
@@ -166,6 +172,18 @@ export class CharacterAnimController {
     // The player's own held substate (a posture or state emote it applied) is not the server's.
     if ((this.applied.fwd.motion >>> 0) === (sub >>> 0)) return false;
     return !CONTROLLER_SUBSTATES.has(sub >>> 0);
+  }
+
+  /**
+   * BUG.missile-repeat-attack-stall — the interpreted forward command is a
+   * missile Reload or Aim (0x40000016, 0x4000001e–2a) the SERVER applied and
+   * still holds, and the player is not walking: out of the ready position
+   * only until the server's next motion (its Ready) arrives.
+   */
+  forwardHeldByServer(input: CameraController | null): boolean {
+    if (input?.isMovingForward || input?.isMovingBackward) return false;
+    if (!this.holdsServerSubstate) return false;
+    return isMissileAttackMotion(this.tableState!.substate);
   }
 
   /** InterpretedMotionState::current_style: the stance last set. */

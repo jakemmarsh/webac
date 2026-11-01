@@ -252,8 +252,8 @@ export const SCENES: Scene[] = [
         const l = loose();
         if (l.length >= 1 || ++tries > 16) {
           clearInterval(poll);
-          if (l[0]) cb.onDropItem(0, { kind: 'inventory', itemIndex: l[0].i });
-          if (l[1]) cb.onDropItem(10, { kind: 'inventory', itemIndex: l[1].i });
+          if (l[0]) cb.onDropItem(0, { kind: 'inventory', guid: l[0].it.id });
+          if (l[1]) cb.onDropItem(10, { kind: 'inventory', guid: l[1].it.id });
           if (ui.inventoryVisible) ui.renderInventoryPanel();
         }
       }, 500);
@@ -299,7 +299,7 @@ export const SCENES: Scene[] = [
           if (u < 0) return;
           ui.dragCallbacks.onDoubleClickItem(u);
           if (l < 0) return;
-          ui.dragItemIndex = l; ui.dragSourceSlot = null;
+          ui.dragItemGuid = ui.inventoryItems[l]?.id ?? 0; ui.dragSourceSlot = null;
           const list = ui.salvagePanel && ui.salvagePanel.querySelector('[data-element-id="0x10000074"]');
           if (list) list.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true }));
         }

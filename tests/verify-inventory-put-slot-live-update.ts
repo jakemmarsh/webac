@@ -11,7 +11,7 @@
  * full PlayerDescription-driven relog.
  *
  * The fix: `InventoryManager.setSlotForItem(guid, slot)` upserts a single
- * guid→index entry into `_placementOrder` (unlike `setPlacementOrder`,
+ * guid into its container's ordered list (unlike `setPlacementOrder`,
  * which replaces the whole order), called from `onInventoryPut` for every
  * live server-confirmed move.
  */

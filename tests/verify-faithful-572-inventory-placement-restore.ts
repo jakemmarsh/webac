@@ -45,7 +45,6 @@ import { InventoryManager } from '@ac/shared';
 const REPO = resolve(fileURLToPath(import.meta.url), '../..');
 const PARSER = readFileSync(resolve(REPO, 'packages/renderer/src/network/PlayerDescriptionParser.ts'), 'utf-8');
 const MAIN = readFileSync(resolve(REPO, 'packages/renderer/src/main.ts'), 'utf-8');
-const INV_MGR = readFileSync(resolve(REPO, 'packages/shared/src/inventory/InventoryManager.ts'), 'utf-8');
 const ACE_PD = readFileSync(resolve(REPO, 'reference/ACE/Source/ACE.Server/Network/GameEvent/Events/GameEventPlayerDescription.cs'), 'utf-8');
 const ACE_OPT_FLAG = readFileSync(resolve(REPO, 'reference/ACE/Source/ACE.Entity/Enum/CharacterOptionDataFlag.cs'), 'utf-8');
 const ACE_CONTAINER = readFileSync(resolve(REPO, 'reference/ACE/Source/ACE.Entity/Enum/ContainerType.cs'), 'utf-8');
@@ -304,9 +303,17 @@ describe('FAITHFUL.572 — synthetic PlayerDescription restores inventory placem
 /* ================================================================ */
 
 describe('FAITHFUL.572 — InventoryManager.setPlacementOrder reorders getAll()', () => {
-  it('exports setPlacementOrder method and an internal _placementOrder map', () => {
-    expect(INV_MGR).toMatch(/setPlacementOrder\(guids:\s*number\[\]\)/);
-    expect(INV_MGR).toMatch(/_placementOrder:\s*Map<number,\s*number>/);
+  it('a parsed inventoryPlacement list orders the player\'s items (setContainerContents, as main.ts applies it)', () => {
+    const inv = new InventoryManager();
+    const PLAYER = 0x50000001;
+    for (const [id, name] of [[11, 'C'], [12, 'A'], [13, 'Pack'], [14, 'B']] as const) {
+      inv.addItem({ weenieClassId: 1, name, value: 0, burden: 0, stackSize: 1, maxStackSize: 1, stackable: false, containerId: PLAYER }, id);
+    }
+    // BUG.ac1999-inventory-placement-order — items and packs are separate lists (ViewObjectContents @ 00558a70).
+    inv.setContainerContents(PLAYER, [{ guid: 12, containerType: 0 }, { guid: 13, containerType: 1 }, { guid: 14, containerType: 0 }, { guid: 11, containerType: 0 }]);
+    expect(inv.containerOrder(PLAYER)).toEqual([12, 14, 11]);
+    expect(inv.containerOrder(PLAYER, true)).toEqual([13]);
+    expect(inv.getByContainer(PLAYER).filter((i) => i.id !== 13).map((i) => i.name)).toEqual(['A', 'B', 'C']);
   });
 
   it('getAll() respects the placement order when one is set', () => {
@@ -362,10 +369,6 @@ describe('FAITHFUL.572 — InventoryManager.setPlacementOrder reorders getAll()'
 /* ================================================================ */
 
 describe('FAITHFUL.572 — main.ts calls inventory.setPlacementOrder on login', () => {
-  it('main.ts calls playerState.inventory.setPlacementOrder with desc.inventoryPlacement guids', () => {
-    expect(MAIN).toMatch(/playerState\.inventory\.setPlacementOrder\([\s\S]*?desc\.inventoryPlacement\.map/);
-  });
-
   it('main.ts marks inventoryDirty so the next render-loop tick re-syncs the panel', () => {
     expect(MAIN).toMatch(/FAITHFUL\.572[\s\S]+?inventoryDirty = true/);
   });

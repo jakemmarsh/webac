@@ -90,7 +90,7 @@ describe('GAP.22 — salvage panel flow (behavioral)', () => {
 
   beforeEach(() => {
     salvaged = [];
-    ui.dragItemIndex = -1;
+    ui.dragItemGuid = 0;
     ui.dragSourceSlot = null;
     ui.setDragCallbacks({});
     ui.setSalvageCallbacks({ onSalvage: (tool: number, items: number[]) => { salvaged.push({ tool, items }); } });

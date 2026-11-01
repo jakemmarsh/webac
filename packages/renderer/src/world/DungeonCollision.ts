@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { CellStruct } from '@ac/dat-parser/file-types/Environment.js';
 import type { Frame } from '@ac/dat-parser/file-types/Frame.js';
 import type { GfxObj } from '@ac/dat-parser/file-types/GfxObj.js';
-import { pointInCell } from './cellContainment.js';
+import { CELL_SPHERE_SLACK, pointInCell, pointInsideCellBsp, sphereIntersectsCell } from './cellContainment.js';
 import {
   buildCollisionBSP, sphereIntersectsPoly, sphereIntersectsAnyPoly, sphereIntersectsSolid, findFloorHeight, collectWalkableFloorHeights, collectWalkableFloors, findCrossedEdge, findWalkable, collectWalkableSphereHits, sphereRestLift, FLOOR_WALKABLE_Z,
   landblockX, landblockY,
@@ -231,7 +231,11 @@ function landKey(key: CollisionKey): boolean {
 }
 
 /** A cell-local plane through an outside portal polygon (unit normal n, n·p + d = 0). */
-interface OutsidePortalPlane { nx: number; ny: number; nz: number; d: number }
+/**
+ * An outside portal's plane, cell-local. `inside` is the sign of the plane distance on the cell's side
+ * (1 / -1; 0 when the cell BSP could not tell), so a point beyond the doorway reads as outside.
+ */
+interface OutsidePortalPlane { nx: number; ny: number; nz: number; d: number; inside?: 1 | -1 | 0 }
 
 /** CellCollision.cellBox: the cell's vertices carried out of its frame, padded by a centimetre; undefined with none. */
 function cellBoxOf(cellStruct: CellStruct, position: Frame, offX: number, offY: number): CellCollision['cellBox'] {
@@ -250,6 +254,20 @@ function cellBoxOf(cellStruct: CellStruct, position: Frame, offX: number, offY: 
 
 /** The plane through a portal polygon's first three vertices, or null for a degenerate one. */
 function portalPlane(cellStruct: CellStruct, polygonId: number): OutsidePortalPlane | null {
+  const plane = portalPlaneOnly(cellStruct, polygonId);
+  if (!plane) return null;
+  // Which side the cell is on: probe 5 cm either side of the polygon's centroid against the CELL BSP.
+  const poly = cellStruct.polygons.get(polygonId)!;
+  const pts = poly.vertexIndices.map((i) => cellStruct.vertexArray.vertices.get(i)?.origin).filter((o): o is { x: number; y: number; z: number } => !!o);
+  const c = pts.reduce((a, p) => ({ x: a.x + p.x / pts.length, y: a.y + p.y / pts.length, z: a.z + p.z / pts.length }), { x: 0, y: 0, z: 0 });
+  const root = cellStruct.cellBSP?.rootNode;
+  const at = (s: number) => pointInsideCellBsp(root, { x: c.x + plane.nx * s, y: c.y + plane.ny * s, z: c.z + plane.nz * s });
+  const pos = at(0.05), neg = at(-0.05);
+  plane.inside = pos === neg ? 0 : pos ? 1 : -1;
+  return plane;
+}
+
+function portalPlaneOnly(cellStruct: CellStruct, polygonId: number): OutsidePortalPlane | null {
   const poly = cellStruct.polygons.get(polygonId);
   if (!poly || poly.vertexIndices.length < 3) return null;
   const v = poly.vertexIndices.slice(0, 3).map((i) => cellStruct.vertexArray.vertices.get(i)?.origin);
@@ -262,6 +280,21 @@ function portalPlane(cellStruct: CellStruct, polygonId: number): OutsidePortalPl
   if (len < 1e-9) return null;
   nx /= len; ny /= len; nz /= len;
   return { nx, ny, nz, d: -(nx * a.x + ny * a.y + nz * a.z) };
+}
+
+/**
+ * A moving body's collision shape (DungeonCollision.withBody), metres, already × the object's
+ * scale: its part-array cylinder, Setup step heights, and its (first two) Setup spheres' radius and
+ * centre heights above the feet.
+ */
+export interface CollisionBodyShape {
+  radius: number;
+  height: number;
+  stepUpHeight: number;
+  sphereRadius: number;
+  sphereHeights: readonly [number, number];
+  /** The body's cell (0xXXYYcccc); an env cell starts the cell search there. */
+  cell: number;
 }
 
 /** Extra facts about a GfxObj collision source (addGfxObjCollision). */
@@ -641,6 +674,49 @@ export class DungeonCollision {
     }
   }
 
+  /**
+   * BUG.remote-creature-obstacle-collision — run `fn` with another body's shape in place of the
+   * player's: CPhysicsObj::transition @ 00512dc0 builds each mover's transition from its own part
+   * array (CTransition::init_sphere with GetNumSphere / GetSphere × m_scale, at most two spheres;
+   * the step heights from its Setup), and starts the cell search at its own cell (init_path). Every
+   * query this collider answers inside `fn` (the move, its step up, the step down, the floor) is
+   * the mover's; the player's shape, body cell and last-move results (lastStepUp, collisionNormal)
+   * come back afterwards whatever `fn` does. A body with one sphere tests it twice (feet = head).
+   */
+  withBody<T>(body: CollisionBodyShape, fn: () => T): T {
+    const saved = {
+      playerRadius: this.playerRadius, playerHeight: this.playerHeight, stepUpHeight: this.stepUpHeight,
+      bodySphereRadius: this.bodySphereRadius, bodySphereHeights: this.bodySphereHeights,
+      bodyCell: this.bodyCell, lastShellCell: this.lastShellCell,
+      lastStepUp: this.lastStepUp, collisionNormal: this.collisionNormal,
+    };
+    this.playerRadius = body.radius;
+    this.playerHeight = body.height;
+    this.stepUpHeight = body.stepUpHeight;
+    this.bodySphereRadius = body.sphereRadius;
+    this.bodySphereHeights = body.sphereHeights;
+    // Only an env cell starts the search (a land cell's body is found from its position).
+    this.bodyCell = (body.cell & 0xffff) >= 0x100 ? body.cell >>> 0 : 0;
+    this.lastShellCell = 0;
+    this.lastStepUp = 0;
+    this.collisionNormal = null;
+    this.scopeEpoch++;
+    try {
+      return fn();
+    } finally {
+      this.playerRadius = saved.playerRadius;
+      this.playerHeight = saved.playerHeight;
+      this.stepUpHeight = saved.stepUpHeight;
+      this.bodySphereRadius = saved.bodySphereRadius;
+      this.bodySphereHeights = saved.bodySphereHeights;
+      this.bodyCell = saved.bodyCell;
+      this.lastShellCell = saved.lastShellCell;
+      this.lastStepUp = saved.lastStepUp;
+      this.collisionNormal = saved.collisionNormal;
+      this.scopeEpoch++;
+    }
+  }
+
   // ── BSP cell management ───────────────────────────────────
 
   /**
@@ -695,7 +771,7 @@ export class DungeonCollision {
     // One step asks it several times at one spot (the move, its step up, the placement, the floor).
     const m = this.lastBodyScope;
     if (m && m.gx === gx && m.gy === gy && m.baseY === baseY && m.epoch === this.scopeEpoch) return m.scope;
-    const scope = this.scopeFor(this.bodySphereHeights.map((h) => ({ x: gx, y: gy, z: baseY + h })), this.bodySphereRadius);
+    const scope = this.scopeFor(this.bodySphereHeights.map((h) => ({ x: gx, y: gy, z: baseY + h })), this.bodySphereRadius, this.bodyCell);
     this.lastBodyScope = { gx, gy, baseY, epoch: this.scopeEpoch, scope };
     return scope;
   }
@@ -721,7 +797,7 @@ export class DungeonCollision {
    * env cell the first centre in one stands in (componentOf), found from the
    * body's cell (setBodyCell) through its portals.
    */
-  private scopeFor(centres: readonly { x: number; y: number; z: number }[], radius: number): BodyScope {
+  private scopeFor(centres: readonly { x: number; y: number; z: number }[], radius: number, homeCell = 0): BodyScope {
     const r = radius + PHYSICS_EPSILON;
     let home = -1;
     let inCell = false;
@@ -741,7 +817,68 @@ export class DungeonCollision {
         }
       }
     }
-    return inCell ? { land: false, home } : EVERYTHING;
+    if (inCell) return { land: false, home };
+    return homeCell ? this.strayScope(centres, r, homeCell) : EVERYTHING;
+  }
+
+  /**
+   * BUG.walkin-cave-invisible-walls (follow-up) — the scope of a body whose
+   * centres lie in no cell while its own cell is env cell `homeCell` (a
+   * corner where the walls reach past the cell's volume, a seam between two
+   * cells). Retail keeps the position's env cell: CTransition::check_other_cells
+   * finds no new cell, and the check position keeps its env cell id (only a
+   * land cell id is carried to the outside, LandDefs::adjust_to_outside;
+   * ACE Transition.cs CheckOtherCells), so its cell array is that cell's
+   * (find_cell_list) and reaches the land cells only near one of its outside
+   * portals. Here: the land cells when a centre is within the radius of an
+   * outside portal's plane, or past it on the far side (out through the
+   * doorway, however far a frame carried it); otherwise the cell's group.
+   * A cell registered without its portals keeps everything, as before.
+   */
+  private strayScope(centres: readonly { x: number; y: number; z: number }[], r: number, homeCell: number): BodyScope {
+    const home = this.envCells.get(homeCell >>> 0);
+    if (!home?.outsidePlanes) return EVERYTHING;
+    // The cell array: the home cell, and the cells its portals lead to whose volume a sphere reaches,
+    // outward through theirs (CEnvCell::find_transit_cells @ 0052c820).
+    const array = [homeCell >>> 0];
+    for (let i = 0; i < array.length; i++) {
+      const cell = this.envCells.get(array[i])!;
+      if (!cell.outsidePlanes) return EVERYTHING;
+      for (const cc of centres) {
+        const p = globalToLocal(cell.origin, cell.quat, { x: cc.x - cell.blockOffsetX, y: cc.y - cell.blockOffsetY, z: cc.z });
+        for (const pl of cell.outsidePlanes) {
+          const dist = pl.nx * p.x + pl.ny * p.y + pl.nz * p.z + pl.d;
+          if (dist > -r && dist < r) return EVERYTHING;
+          if (pl.inside && dist * pl.inside < 0) return EVERYTHING;
+        }
+      }
+      for (const n of cell.neighbors ?? []) {
+        if (array.includes(n)) continue;
+        const next = this.envCells.get(n);
+        if (!next?.cellBspRoot) continue;
+        if (centres.some((cc) => sphereIntersectsCell(next.cellBspRoot, next.origin, next.quat,
+          { x: cc.x - next.blockOffsetX, y: cc.y - next.blockOffsetY, z: cc.z }, r))) array.push(n);
+      }
+    }
+    return { land: false, home: this.componentOf(homeCell) };
+  }
+
+  /**
+   * The cell a body whose feet are at (gx, gy, feetY) stands in after a move,
+   * given the cell it stood in (`prevCell`, 0 = outdoors): the env cell
+   * holding the point, else `prevCell` itself when it is an env cell whose
+   * land cells the body does not reach there (strayScope: retail keeps the
+   * env cell), else 0 (outdoors). Leaving through a doorway reaches the land
+   * cells; a corner of a cave whose walls reach past its cell does not, so
+   * the body is no longer put on the landscape there (the 0x482E cave mouth:
+   * the chamber 0x148's north-west corner, where the player then counted as
+   * outdoors, stood on the terrain and the camera sat in the rock).
+   */
+  nextBodyCell(prevCell: number, gx: number, gy: number, feetY: number): number {
+    const found = this.findCellContaining(gx, gy, feetY, prevCell);
+    if (found !== 0) return found;    if (!prevCell || !this.envCells.has(prevCell >>> 0)) return 0;
+    const centres = this.bodySphereHeights.map((h) => ({ x: gx, y: gy, z: feetY + h }));
+    return this.scopeFor(centres, this.bodySphereRadius, prevCell).land ? 0 : prevCell >>> 0;
   }
   /** scopeFor's preferred cell when no body cell is set: the last one it found a body in. */
   private lastShellCell = 0;
@@ -1665,7 +1802,7 @@ export class DungeonCollision {
       const inv = 1 / cell.scale;
       let checkSolid = true;
       if (cell.building) {
-        hitsInteriorCell ??= this.bodySphereHeights.some((h) => this.findCellContaining(gx, gy, baseY + h) !== 0);
+        hitsInteriorCell ??= this.hitsInteriorCell(gx, gy, baseY);
         checkSolid = !hitsInteriorCell;
       }
       for (const h of this.bodySphereHeights) {
@@ -1675,6 +1812,42 @@ export class DungeonCollision {
       }
     }
     return true;
+  }
+
+  /**
+   * SPHEREPATH::hits_interior_cell for a body stacked on `baseY` at AC
+   * landblock-global (gx, gy), as CTransition::find_cell_list sets it before a
+   * step's collisions: a body sphere's centre is in an env cell (its cell, or
+   * the one it stands in; ACE ObjCell.find_cell_list), or a body sphere
+   * reaches the volume of a cell behind a building's portal:
+   * CSortCell::find_transit_cells @ 00534060 → CBuildingObj::
+   * find_building_transit_cells @ 006b5230 → CEnvCell::check_building_transit
+   * @ 0052c5d0, which sets it when CCellStruct::sphere_intersects_cell
+   * @ 00533900 is not OUTSIDE (the sphere within its radius + 0.01 of the
+   * cell). A cell behind a building portal is one registered with an outside
+   * portal (EnvCell cellPortals OtherCellId 0xFFFF).
+   *
+   * BUG.walkin-cave-invisible-walls — with only the centres tested, a body
+   * stepping up the lip of a walk-in cave's doorway cell (the AC1999 Old
+   * Warehouse cave 0xC88A0104: 2 m wide, a slab between leaning faces only
+   * 0.1–0.3 m deep at mid-height, its floor rising 0.12 m) had both centres still outside it, so the cave mouth's shell
+   * (building GfxObj 0x010011A9) kept its solid leaves and refused every
+   * step up there: an invisible wall across the mouth.
+   */
+  private hitsInteriorCell(gx: number, gy: number, baseY: number): boolean {
+    if (this.bodySphereHeights.some((h) => this.findCellContaining(gx, gy, baseY + h) !== 0)) return true;    const r = this.bodySphereRadius;
+    const near = this.spatialIndex
+      ? this.envCellGrid.queryDisc(gx, gy, r + CELL_SPHERE_SLACK).map((slot) => slot.cellId)
+      : this.envCells.keys();
+    for (const id of near) {
+      const cell = this.envCells.get(id);
+      if (!cell?.outsidePlanes?.length) continue;
+      for (const h of this.bodySphereHeights) {
+        const center = { x: gx - cell.blockOffsetX, y: gy - cell.blockOffsetY, z: baseY + h };
+        if (sphereIntersectsCell(cell.cellBspRoot, cell.origin, cell.quat, center, r)) return true;
+      }
+    }
+    return false;
   }
 
   /**

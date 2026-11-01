@@ -199,6 +199,82 @@ interface ObjectBlock {
 
 const GATE_IDENTITY_QUAT = { w: 1, x: 0, y: 0, z: 0 };
 
+/**
+ * CORE.14.b.1 — world-space (AC coords) doorway polygons for one
+ * building, keyed by CBldPortal index. Retail PView::DrawPortal
+ * (@ 005a5ab0) maps each CPortalPoly in the building model's drawing BSP
+ * to outdoor_portal_list[portal_index] — the building's CBldPortal at
+ * that index. Validated against EoL cell.dat 2026-09-04: every
+ * Holtburg/Cragstone building's BSP portal polys ↔ its CBldPortals 1:1
+ * (indices 0..N-1, all polygonId lookups resolve). Any resolution
+ * failure only leaves the affected portal's gate always open.
+ */
+export function resolveBuildingGatePolys(
+  building: LandblockInfo['buildings'][number],
+  worldOffsetX: number,
+  worldOffsetZ: number,
+  deps: Pick<LandblockObjectStreamerDeps, 'setupModels' | 'models' | 'warn'>,
+): { gatePolys: Map<number, ACVec3[][]>; punchPolys: Map<number, ACVec3[][]> } {
+  const out = new Map<number, ACVec3[][]>();
+  const punch = new Map<number, ACVec3[][]>();
+  const result = { gatePolys: out, punchPolys: punch };
+  try {
+    const highByte = (building.modelId >> 24) & 0xff;
+    const parts: { gfxId: number; frame: { origin: ACVec3; orientation: { w: number; x: number; y: number; z: number } } | null }[] = [];
+    if (highByte === PortalFileType.Setup) {
+      const setup = deps.setupModels.loadSetupModel(building.modelId);
+      if (!setup) return result;
+      const placement = placementFrameOf(setup);
+      for (let pi = 0; pi < setup.parts.length; pi++) {
+        parts.push({ gfxId: setup.parts[pi], frame: placement?.frames[pi] ?? null });
+      }
+    } else if (highByte === PortalFileType.GraphicsObject) {
+      parts.push({ gfxId: building.modelId, frame: null });
+    }
+    const bldgOrigin = building.frame.origin;
+    const bldgQuat = building.frame.orientation;
+    for (const part of parts) {
+      const gfx = deps.models.loadGfxObj(part.gfxId);
+      if (!gfx?.drawingBSP || !gfx.vertexArray) continue;
+      let origin = bldgOrigin;
+      let quat = bldgQuat;
+      if (part.frame) {
+        const composed = DungeonCollision.composeFrames(
+          bldgOrigin, bldgQuat, part.frame.origin, part.frame.orientation);
+        origin = composed.origin;
+        quat = composed.orientation;
+      }
+      for (const ref of collectDrawingPortalPolys(gfx.drawingBSP.rootNode)) {
+        if (ref.portalIndex < 0 || ref.portalIndex >= building.portals.length) continue;
+        const poly = gfx.polygonMap.get(ref.polygonId);
+        if (!poly) continue;
+        const verts: ACVec3[] = [];
+        for (const vi of poly.vertexIndices) {
+          const v = gfx.vertexArray.vertices.get(vi);
+          if (!v) { verts.length = 0; break; }
+          const w = DungeonCollision.composeFrames(origin, quat, v.origin, GATE_IDENTITY_QUAT).origin;
+          verts.push({ x: worldOffsetX + w.x, y: worldOffsetZ + w.y, z: w.z });
+        }
+        if (verts.length < 3) continue;
+        const list = out.get(ref.portalIndex);
+        if (list) list.push(verts);
+        else out.set(ref.portalIndex, [verts]);
+        // DrawPortalPolyInternal's edge guard reads the part-local vertices.
+        const local = poly.vertexIndices.map(vi => gfx.vertexArray!.vertices.get(vi)!.origin);
+        if (retailPortalPunchDrawn(local)) {
+          const pl = punch.get(ref.portalIndex);
+          if (pl) pl.push(verts);
+          else punch.set(ref.portalIndex, [verts]);
+        }
+      }
+    }
+  } catch (err) {
+    // Leave unresolved portals always open.
+    deps.warn.warn(`building 0x${(building.modelId >>> 0).toString(16)} doorway gates unresolved`, err);
+  }
+  return result;
+}
+
 function keyOf(blockX: number, blockY: number): number {
   return ((blockX & 0xff) << 8) | (blockY & 0xff);
 }
@@ -643,79 +719,13 @@ export class LandblockObjectStreamer {
     if (ri >= 0) block.raycastMeshes.splice(ri, 1);
   }
 
-  /**
-   * CORE.14.b.1 — world-space (AC coords) doorway polygons for one
-   * building, keyed by CBldPortal index. Retail PView::DrawPortal
-   * (@ 005a5ab0) maps each CPortalPoly in the building model's drawing BSP
-   * to outdoor_portal_list[portal_index] — the building's CBldPortal at
-   * that index. Validated against EoL cell.dat 2026-09-04: every
-   * Holtburg/Cragstone building's BSP portal polys ↔ its CBldPortals 1:1
-   * (indices 0..N-1, all polygonId lookups resolve). Any resolution
-   * failure only leaves the affected portal's gate always open.
-   */
+  /** CORE.14.b.1 — see resolveBuildingGatePolys (module level). */
   private resolveBuildingGatePolys(
     building: LandblockInfo['buildings'][number],
     worldOffsetX: number,
     worldOffsetZ: number,
   ): { gatePolys: Map<number, ACVec3[][]>; punchPolys: Map<number, ACVec3[][]> } {
-    const out = new Map<number, ACVec3[][]>();
-    const punch = new Map<number, ACVec3[][]>();
-    const result = { gatePolys: out, punchPolys: punch };
-    try {
-      const highByte = (building.modelId >> 24) & 0xff;
-      const parts: { gfxId: number; frame: { origin: ACVec3; orientation: { w: number; x: number; y: number; z: number } } | null }[] = [];
-      if (highByte === PortalFileType.Setup) {
-        const setup = this.deps.setupModels.loadSetupModel(building.modelId);
-        if (!setup) return result;
-        const placement = placementFrameOf(setup);
-        for (let pi = 0; pi < setup.parts.length; pi++) {
-          parts.push({ gfxId: setup.parts[pi], frame: placement?.frames[pi] ?? null });
-        }
-      } else if (highByte === PortalFileType.GraphicsObject) {
-        parts.push({ gfxId: building.modelId, frame: null });
-      }
-      const bldgOrigin = building.frame.origin;
-      const bldgQuat = building.frame.orientation;
-      for (const part of parts) {
-        const gfx = this.deps.models.loadGfxObj(part.gfxId);
-        if (!gfx?.drawingBSP || !gfx.vertexArray) continue;
-        let origin = bldgOrigin;
-        let quat = bldgQuat;
-        if (part.frame) {
-          const composed = DungeonCollision.composeFrames(
-            bldgOrigin, bldgQuat, part.frame.origin, part.frame.orientation);
-          origin = composed.origin;
-          quat = composed.orientation;
-        }
-        for (const ref of collectDrawingPortalPolys(gfx.drawingBSP.rootNode)) {
-          if (ref.portalIndex < 0 || ref.portalIndex >= building.portals.length) continue;
-          const poly = gfx.polygonMap.get(ref.polygonId);
-          if (!poly) continue;
-          const verts: ACVec3[] = [];
-          for (const vi of poly.vertexIndices) {
-            const v = gfx.vertexArray.vertices.get(vi);
-            if (!v) { verts.length = 0; break; }
-            const w = DungeonCollision.composeFrames(origin, quat, v.origin, GATE_IDENTITY_QUAT).origin;
-            verts.push({ x: worldOffsetX + w.x, y: worldOffsetZ + w.y, z: w.z });
-          }
-          if (verts.length < 3) continue;
-          const list = out.get(ref.portalIndex);
-          if (list) list.push(verts);
-          else out.set(ref.portalIndex, [verts]);
-          // DrawPortalPolyInternal's edge guard reads the part-local vertices.
-          const local = poly.vertexIndices.map(vi => gfx.vertexArray!.vertices.get(vi)!.origin);
-          if (retailPortalPunchDrawn(local)) {
-            const pl = punch.get(ref.portalIndex);
-            if (pl) pl.push(verts);
-            else punch.set(ref.portalIndex, [verts]);
-          }
-        }
-      }
-    } catch (err) {
-      // Leave unresolved portals always open.
-      this.deps.warn.warn(`building 0x${(building.modelId >>> 0).toString(16)} doorway gates unresolved`, err);
-    }
-    return result;
+    return resolveBuildingGatePolys(building, worldOffsetX, worldOffsetZ, this.deps);
   }
 
   /**

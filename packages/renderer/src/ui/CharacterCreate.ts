@@ -87,6 +87,9 @@ export enum CreateStep {
  */
 export const OLTHOI_HIDDEN_STEPS: readonly CreateStep[] = [CreateStep.Profession, CreateStep.Skills, CreateStep.Town];
 
+/** The tab the 1999 chargen has no page for (its town is the summary page's menu). */
+export const TOWN_ON_SUMMARY_HIDDEN_STEPS: readonly CreateStep[] = [CreateStep.Town];
+
 /**
  * CORE.17.k.b.b.c.c.b.a — what the Back chevron (0x100003c6) does:
  * `gmCharGenMainUI::ListenToElementMessage @ 004e9450` case 0x100003c6
@@ -123,9 +126,13 @@ export const UI_MODE_CHARACTER_MANAGEMENT = 0x1000000a;
  * same page) onto Profession / Skills lands on Appearance and onto Town
  * lands on Summary. Every other heritage takes the page as requested.
  */
-export function resolveProgressState(requested: CreateStep, previous: CreateStep, heritage: number): CreateStep {
-  if (!OLTHOI_HERITAGES.includes(heritage)) return requested;
+export function resolveProgressState(requested: CreateStep, previous: CreateStep, heritage: number, townOnSummary = false): CreateStep {
   const backward = requested < previous;
+  // The 1999 client has no Town page: its start area is the Name and Summary
+  // page's "Starting Town" menu (Chargen1999 STARTING_TOWN_LABEL_1999), so the
+  // Town tab is skipped the way an Olthoi heritage skips it.
+  if (townOnSummary && requested === CreateStep.Town) return backward ? CreateStep.Appearance : CreateStep.Summary;
+  if (!OLTHOI_HERITAGES.includes(heritage)) return requested;
   if (requested === CreateStep.Profession || requested === CreateStep.Skills) {
     return backward ? CreateStep.Heritage : CreateStep.Appearance;
   }
@@ -333,8 +340,16 @@ export class CharacterCreateWizard {
 
   /** The progress tabs SetProgressState hides for the current heritage (none unless Olthoi). */
   get hiddenSteps(): readonly CreateStep[] {
-    return this.isOlthoi ? OLTHOI_HIDDEN_STEPS : [];
+    if (this.isOlthoi) return OLTHOI_HIDDEN_STEPS;
+    return this.townOnSummary ? TOWN_ON_SUMMARY_HIDDEN_STEPS : [];
   }
+
+  /**
+   * The 1999 chargen (VISUAL.ac1999-chargen-town-page): the start area is
+   * picked on the summary page's "Starting Town" menu, and there is no Town
+   * page. False for every other era. Set by the page when it makes the wizard.
+   */
+  townOnSummary = false;
 
   /** Whether the page's progress tab is visible for the current heritage. */
   isStepVisible(step: CreateStep): boolean {
@@ -349,7 +364,7 @@ export class CharacterCreateWizard {
    * tab click (0x100003ef–f4) — comes through here. Returns the page opened.
    */
   setProgressState(requested: CreateStep): CreateStep {
-    this.currentStep = resolveProgressState(requested, this.currentStep, this.heritage);
+    this.currentStep = resolveProgressState(requested, this.currentStep, this.heritage, this.townOnSummary);
     return this.currentStep;
   }
 

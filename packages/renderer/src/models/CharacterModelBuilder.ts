@@ -19,6 +19,7 @@ import {
 } from './ChargenClothingColors.js';
 import { FACE_SUBPALETTE_RANGES, modifyPalette, subPaletteScale } from './AppearanceOverrides.js';
 import { PLACEMENT_RESTING } from './SetupModelGroup.js';
+import type { ChargenPrefetchSources } from './ChargenPrefetch.js';
 
 /**
  * CharacterModelBuilder — creates fully-dressed character models from
@@ -72,6 +73,28 @@ export class CharacterModelBuilder {
     // DAT genders are keyed by ACE Gender enum values (Male=1, Female=2);
     // our Gender enum now matches exactly, so no translation needed.
     return group.genders.get(gender) ?? null;
+  }
+
+  /**
+   * UX.chargen-preview-no-placeholder — every heritage + sex this CharGen
+   * offers (13 heritages at end of retail, the era's own list in a classic
+   * or 1999 set), in DAT order: the prefetch walks them.
+   */
+  sexes(): Array<{ heritage: number; gender: number; sex: SexCG }> {
+    const out: Array<{ heritage: number; gender: number; sex: SexCG }> = [];
+    for (const [heritage, group] of this.loadCharGen()?.heritageGroups ?? []) {
+      for (const [gender, sex] of group.genders) out.push({ heritage, gender, sex });
+    }
+    return out;
+  }
+
+  /** The structural reads ChargenPrefetch lists a choice's files from (PaletteSets, ClothingTables). */
+  get prefetchSources(): ChargenPrefetchSources {
+    return {
+      loadPaletteSet: (id) => this.appearanceManager.loadPaletteSet(id),
+      loadClothingTable: (id) => this.clothingRenderer.loadClothingTable(id),
+      setupParts: (id) => this.setupModelRenderer.loadSetupModel(id)?.parts ?? null,
+    };
   }
 
   /**

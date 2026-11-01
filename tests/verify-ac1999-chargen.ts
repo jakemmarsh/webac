@@ -8,8 +8,10 @@
  *   description ids, which the EoL format has no slot for: Chargen1999.ts);
  * - the profession rows are the CharGen's 8 templates (template index sent
  *   as is), the watermark art is off;
- * - the town page is a list of the CharGen's start areas, the clicked index
- *   (0..17) being what the create request carries;
+ * - there is no Town page (the 1999 client's ten pages have none): the start
+ *   area is the summary page's "Starting Town" menu, in CG_10_UI_Update's
+ *   order, the picked index (0..17) being what the create request carries
+ *   (VISUAL.ac1999-chargen-town-page);
  * - the summary names the template and the start area.
  *
  * Every other era keeps its pages (chargen1999 is null): the end-of-retail
@@ -25,9 +27,10 @@ import { FileDatBytes } from '../packages/dat-parser/src/node/FileDatBytes.js';
 import { ac1999PortalOverlay } from '../packages/dat-parser/src/era1999/Ac1999Overlay.js';
 import { HERITAGE_ROWS, heritageListed, visibleHeritageRows } from '../packages/renderer/src/ui/HeritageRows.js';
 import { randomizeHeritageGroup, scriptedRandomSource } from '../packages/renderer/src/ui/ChargenRandomize.js';
-import { loadChargen1999, startAreasFor1999, type Chargen1999 } from '../packages/renderer/src/ui/Chargen1999.js';
+import { loadChargen1999, startAreasFor1999, startingTownMenuOrder1999, Chargen1999Page, type Chargen1999 } from '../packages/renderer/src/ui/Chargen1999.js';
+import { snapshotWizard } from '../packages/renderer/src/ui/ChargenDraft.js';
 import { buildSummaryRows } from '../packages/renderer/src/ui/ChargenSummary.js';
-import { CreateStep } from '../packages/renderer/src/ui/CharacterCreate.js';
+import { CreateStep, resolveProgressState } from '../packages/renderer/src/ui/CharacterCreate.js';
 import { parseTextRuns } from '../packages/renderer/src/ui/HeritageText.js';
 import { mountGameUI, openChargen, type GameUIFixture } from './_harness/gameui.js';
 import { DAT_PATHS, openDat } from './_harness/dat.js';
@@ -60,6 +63,38 @@ describe('start areas and the summary', () => {
     expect(startAreasFor1999({ primaryStartAreas: [12, 13], secondaryStartAreas: [0, 13, 1, 40] }, 18)).toEqual([12, 13, 0, 1]);
     expect(startAreasFor1999(undefined, 3)).toEqual([0, 1, 2]);
     expect(startAreasFor1999({ primaryStartAreas: [], secondaryStartAreas: [] }, 2)).toEqual([0, 1]);
+  });
+
+  it('startingTownMenuOrder1999: each list shuffled by rand() within the unused count, then grouped by first word, alphabetical in the group', () => {
+    const names = ['Holtburg South', 'Holtburg West', 'Rithwic East', 'Rithwic South', 'Lytelthorpe East', 'Lytelthorpe West',
+      'Shoushi Southeast', 'Shoushi West', 'Yanshi North', 'Yanshi South', 'Nanto East', 'Nanto North',
+      'Yaraq North', 'Yaraq East', 'Samsur East', 'Samsur Northwest', 'Al-Arqas West', 'Al-Arqas North'];
+    const nameOf = (a: number): string => names[a];
+    const gharu = { primaryStartAreas: [12, 13, 14, 15, 16, 17], secondaryStartAreas: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] };
+    // rand() 0: the first unused each time.
+    expect(startingTownMenuOrder1999(gharu, nameOf, 18, () => 0)).toEqual([13, 12, 14, 15, 17, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    // rand() at the top: the last unused each time (the draw is within the UNUSED count, 0x004afe90).
+    const counts: number[] = [];
+    expect(startingTownMenuOrder1999(gharu, nameOf, 18, (n) => { counts.push(n); return n - 1; }))
+      .toEqual([17, 16, 14, 15, 13, 12, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1]);
+    expect(counts).toEqual([6, 5, 4, 3, 2, 1, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    // A town's later area goes into its group, before the next town, wherever the group sits.
+    const three = { primaryStartAreas: [0, 2, 1], secondaryStartAreas: [] };
+    expect(startingTownMenuOrder1999(three, nameOf, 18, () => 0)).toEqual([0, 1, 2]);
+    const three2 = { primaryStartAreas: [1, 2, 0], secondaryStartAreas: [] };
+    expect(startingTownMenuOrder1999(three2, nameOf, 18, () => 0)).toEqual([0, 1, 2]);
+    // No lists: every area; indices past the CharGen are dropped.
+    expect(startingTownMenuOrder1999(undefined, nameOf, 3, () => 0)).toEqual([0, 1, 2]);
+    expect(startingTownMenuOrder1999({ primaryStartAreas: [40, 1], secondaryStartAreas: [] }, nameOf, 18, () => 0)).toEqual([1]);
+  });
+
+  it('resolveProgressState: townOnSummary skips Town both ways; Olthoi and the default are unchanged', () => {
+    expect(resolveProgressState(CreateStep.Town, CreateStep.Appearance, 1, true)).toBe(CreateStep.Summary);
+    expect(resolveProgressState(CreateStep.Town, CreateStep.Summary, 1, true)).toBe(CreateStep.Appearance);
+    expect(resolveProgressState(CreateStep.Skills, CreateStep.Profession, 1, true)).toBe(CreateStep.Skills);
+    expect(resolveProgressState(CreateStep.Town, CreateStep.Appearance, 1)).toBe(CreateStep.Town);
+    expect(resolveProgressState(CreateStep.Town, CreateStep.Appearance, 1, false)).toBe(CreateStep.Town);
+    expect(resolveProgressState(CreateStep.Town, CreateStep.Appearance, 0xc)).toBe(CreateStep.Summary);
   });
 
   it('buildSummaryRows prints the 1999 names when given, pcProfessions / pcTown otherwise', () => {
@@ -110,7 +145,8 @@ const charGen1999Shape = {
 const text1999: Chargen1999 = {
   heritageText: (h) => `heritage-${h}`,
   templateText: (h, t) => `template-${h}-${t}`,
-  sexText: () => null,
+  sexText: (h, g) => (h === 3 ? null : `sex-${h}-${g} "names"`),
+  pageHelp: (page) => `help-${page}`,
 };
 
 describe('GameUI chargen with the 1999 world', () => {
@@ -185,24 +221,91 @@ describe('GameUI chargen with the 1999 world', () => {
     expect(states).toEqual([0x1000002b]); // the Custom state: no art
   });
 
-  it('town page: the heritage\'s start areas as a list (own towns first); a click sets the 0..17 index the create request carries', () => {
+  it('1999 has no Town page: the Town tab is hidden and Next / Back step over it (VISUAL.ac1999-chargen-town-page)', () => {
     open(H.ui, true);
+    expect(H.ui.wizard.townOnSummary).toBe(true);
+    expect(H.ui.wizard.isStepVisible(CreateStep.Town)).toBe(false);
+    H.ui.wizard.currentStep = CreateStep.Appearance;
+    expect(H.ui.wizard.setProgressState(CreateStep.Town)).toBe(CreateStep.Summary);
+    expect(H.ui.wizard.setProgressState(CreateStep.Town)).toBe(CreateStep.Appearance);
+    // A caller that sets the step directly gets an empty page: no end-of-retail map, pins, heading or town text box.
+    const page = render(H.ui.renderMapStep());
+    expect(page.querySelector('img')).toBeNull();
+    expect(page.querySelector('.map-pin, .town-description, .ac-dat-frame, [data-ac-text]')).toBeNull();
+  });
+
+  it('summary: the "Starting Town" menu holds the heritage\'s start areas in CG_10_UI_Update\'s order; a row sets the 0..17 index the create request carries', () => {
+    open(H.ui, true);
+    H.ui.chargenRandomSource = scriptedRandomSource([0], [0]);
     H.ui.wizard.setHeritageGroup(2, H.ui.chargenRollDeps(), scriptedRandomSource([0], [0]));
-    step(CreateStep.Town);
+    step(CreateStep.Summary);
     const c = H.container;
-    expect(c.querySelector('img')).toBeNull(); // no end-of-retail map art
-    const rows = Array.from(c.querySelectorAll('.start-area-row')) as HTMLElement[];
-    expect(rows.map((r) => Number(r.dataset.area))).toEqual([...range(12, 18), ...range(0, 12)]);
-    // All 18 rows fit the 481 px frame (8 + 18 x 26 = 476): the list clips, never a native scrollbar.
-    const list = c.querySelector('.start-area-list') as HTMLElement;
-    expect(list.style.overflow).toBe('hidden');
-    const last = rows[rows.length - 1];
-    expect(parseInt(last.style.top, 10) + parseInt(last.style.height, 10)).toBeLessThanOrEqual(481);
-    expect(texts(render(H.ui.renderMapStep()), '.start-area-row').slice(0, 2)).toEqual(['Yaraq North', 'Yaraq East']);
-    click(c.querySelector('.start-area-row[data-area="13"]'));
-    expect(H.ui.wizard.startArea).toBe(13);
-    expect(H.ui.wizard.getCharacterInfo().startArea).toBe(13);
-    expect(render(H.ui.renderMapStep()).querySelector('[data-ac-text="Yaraq East"]')).toBeTruthy(); // the heading
+    expect(texts(render(H.ui.renderFinishStep()), '.starting-town-label')).toEqual(['Starting Town']);
+    expect(c.querySelector('.town-description')).toBeNull();
+    const menu = c.querySelector('.starting-town-menu') as HTMLElement;
+    expect(menu.dataset.value).toBe(AREAS[H.ui.wizard.startArea]);
+    expect(c.querySelector('.starting-town-list')).toBeNull();
+    click(menu);
+    const rows = Array.from(c.querySelectorAll('.starting-town-row')) as HTMLElement[];
+    // rand() 0 takes each list in order; the rows group by town, alphabetical within it.
+    expect(rows.map((r) => Number(r.dataset.area))).toEqual([13, 12, 14, 15, 17, 16, ...range(0, 12)]);
+    expect(texts(render(H.ui.renderFinishStep()), '.starting-town-row').slice(0, 2)).toEqual(['Yaraq East', 'Yaraq North']);
+    // The list opens below the menu and stays inside the 485 px page.
+    const list = c.querySelector('.starting-town-list') as HTMLElement;
+    expect(parseInt(list.style.top, 10) + parseInt(list.style.height, 10)).toBeLessThanOrEqual(485);
+    expect(parseInt(list.style.height, 10)).toBe(18 * 18);
+    click(c.querySelector('.starting-town-row[data-area="9"]'));
+    expect(H.ui.wizard.startArea).toBe(9);
+    expect(H.ui.wizard.getCharacterInfo().startArea).toBe(9);
+    expect(c.querySelector('.starting-town-list')).toBeNull();
+    expect((c.querySelector('.starting-town-menu') as HTMLElement).dataset.value).toBe('Yanshi South');
+    // The order is drawn once per heritage / sex, as Update redraws it only when they change.
+    H.ui.chargenRandomSource = scriptedRandomSource([32767], [0]);
+    click(c.querySelector('.starting-town-menu'));
+    expect((Array.from(c.querySelectorAll('.starting-town-row')) as HTMLElement[]).map((r) => Number(r.dataset.area))[0]).toBe(13);
+  });
+
+  it('end of retail (and Dark Majesty, the same pages) keep the Town page with its map, pins and town text, and no summary menu', () => {
+    open(H.ui, false);
+    expect(H.ui.wizard.townOnSummary).toBe(false);
+    expect(H.ui.wizard.isStepVisible(CreateStep.Town)).toBe(true);
+    H.ui.wizard.currentStep = CreateStep.Appearance;
+    expect(H.ui.wizard.setProgressState(CreateStep.Town)).toBe(CreateStep.Town);
+    const town = render(H.ui.renderMapStep());
+    expect(town.querySelectorAll('.map-pin')).toHaveLength(4);
+    expect(town.querySelector('.town-description')).toBeTruthy();
+    expect(render(H.ui.renderFinishStep()).querySelector('.starting-town-menu, .starting-town-label')).toBeNull();
+  });
+
+  it('a chargen draft left on the Town page does not restore on a 1999 world (no such page); one on the summary does', () => {
+    open(H.ui, true);
+    H.ui.wizard.setHeritageGroup(1, H.ui.chargenRollDeps(), scriptedRandomSource([0], [0]));
+    const draft = { ...snapshotWizard(H.ui.wizard, false), step: CreateStep.Town };
+    expect(H.ui.chargenDraftRefusal(draft)).toContain('no Town page');
+    expect(H.ui.chargenDraftRefusal({ ...draft, step: CreateStep.Summary })).toBeNull();
+  });
+
+
+  it('help boxes: the 1999 Skills / Appearance / Clothing page help and the sex\'s naming conventions on the summary; end of retail keeps its strings', () => {
+    const allTexts = (root: Element): string[] => Array.from(root.querySelectorAll('[data-ac-text]')).map((e) => (e as HTMLElement).getAttribute('data-ac-text') ?? '');
+    open(H.ui, true);
+    H.ui.wizard.setHeritageGroup(1, H.ui.chargenRollDeps(), scriptedRandomSource([0], [0]));
+    H.ui.wizard.gender = 2;
+    expect(allTexts(render(H.ui.renderSkillsStep()))).toContain(`help-${Chargen1999Page.Skills}`);
+    H.ui.appearMode = 'face';
+    expect(allTexts(render(H.ui.renderAppearanceStep()))).toContain(`help-${Chargen1999Page.Appearance}`);
+    H.ui.appearMode = 'clothes';
+    expect(allTexts(render(H.ui.renderAppearanceStep()))).toContain(`help-${Chargen1999Page.Clothing}`);
+    H.ui.appearMode = 'face';
+    // CG_10_UI_Update replaces the name-page help with the sex's description; quotes survive the attribute.
+    const howTo = (): string => (render(H.ui.renderFinishStep()).querySelector('.summary-howto [data-ac-text]') as HTMLElement).getAttribute('data-ac-text') ?? '';
+    expect(howTo()).toBe('sex-1-2 "names"');
+    H.ui.wizard.setHeritageGroup(3, H.ui.chargenRollDeps(), scriptedRandomSource([0], [0]));
+    expect(howTo()).toBe(`help-${Chargen1999Page.NameAndSummary}`); // no sex text: the page help stays
+    open(H.ui, false);
+    expect(allTexts(render(H.ui.renderSkillsStep())).some((t) => t.startsWith('help-'))).toBe(false);
+    expect(allTexts(render(H.ui.renderAppearanceStep())).some((t) => t.startsWith('help-'))).toBe(false);
+    expect(howTo().startsWith('sex-')).toBe(false);
   });
 
   it('town Random rolls among the listed start areas', () => {
@@ -261,6 +364,14 @@ describe.skipIf(!HAS_1999)('the 1999 retail portal through the overlay', () => {
     expect(text!.templateText(2, 7)!.startsWith('WARRIORS')).toBe(true);
     expect(text!.sexText(2, 2)!.startsWith("There are three ways Gharu'ndim women's names")).toBe(true);
     expect(text!.heritageText(4)).toBeNull();
+    // The page help ids in CharGen +0x28 + 4 x page order (the CG_n_UI ctors' 0x0056c5e0 reads).
+    expect(text!.pageHelp(Chargen1999Page.Sex)!.startsWith('Click one of the two boxes below to select your character\'s sex')).toBe(true);
+    expect(text!.pageHelp(Chargen1999Page.Appearance)!.startsWith('Use the tools below to select your character\'s appearance')).toBe(true);
+    expect(text!.pageHelp(Chargen1999Page.Clothing)!.startsWith('You may use this screen to customize the clothing')).toBe(true);
+    expect(text!.pageHelp(Chargen1999Page.Heraldry)!.startsWith('You may use this screen to select your character\'s heraldic symbol')).toBe(true);
+    expect(text!.pageHelp(Chargen1999Page.Attributes)!.startsWith('Use this screen to select and modify your character\'s Attributes')).toBe(true);
+    expect(text!.pageHelp(Chargen1999Page.Skills)!.startsWith('Use this screen to select and modify your character\'s skills')).toBe(true);
+    expect(text!.pageHelp(Chargen1999Page.NameAndSummary)!.startsWith('Please type your character\'s name')).toBe(true);
   });
 
   it('GameUI on the 1999 world portal: three heritage rows, the 1999 lore, the 18 start areas', async () => {
@@ -280,8 +391,16 @@ describe.skipIf(!HAS_1999)('the 1999 retail portal through the overlay', () => {
       const runs = parseTextRuns(host.querySelector('.heritage-lore [data-ac-runs]')!.getAttribute('data-ac-runs')!)!;
       expect(runs).toHaveLength(1);
       expect(runs[0].text.startsWith('ALUVIANS')).toBe(true);
-      host.innerHTML = ui.renderMapStep();
-      expect(host.querySelectorAll('.start-area-row')).toHaveLength(18);
+      // No Town page: the summary's "Starting Town" menu lists all 18, each town's two areas together.
+      expect(ui.wizard.isStepVisible(CreateStep.Town)).toBe(false);
+      ui.chargenTownMenuOpen = true;
+      host.innerHTML = ui.renderFinishStep();
+      const names = Array.from(host.querySelectorAll('.starting-town-row [data-ac-text]')).map((e) => (e as HTMLElement).getAttribute('data-ac-text') ?? '');
+      expect(names).toHaveLength(18);
+      expect(new Set(names).size).toBe(18);
+      for (let k = 0; k < 18; k += 2) expect(names[k].split(' ')[0]).toBe(names[k + 1].split(' ')[0]);
+      // Aluvian's own six (Holtburg, Rithwic, Lytelthorpe) come first.
+      expect(new Set(names.slice(0, 6).map((n) => n.split(' ')[0]))).toEqual(new Set(['Holtburg', 'Rithwic', 'Lytelthorpe']));
       expect(ui.chargenRollDeps().starterAreaCount).toBe(18);
       expect(ui.chargenRollDeps().heritageGroup(1).attributeCredits).toBe(330);
       expect(ui.chargenRollDeps().heritageGroup(1).skillCredits).toBe(50);

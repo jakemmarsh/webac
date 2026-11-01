@@ -84,7 +84,7 @@ const invIndex = (page: Page, pred: string) => ev<{ idx: number; id: number; nam
   return null;
 })()`);
 
-const setDrag = (page: Page, idx: number) => ev(page, `(() => { const ui = window.__ac.gameUI; ui.dragItemIndex = ${idx}; ui.dragSourceSlot = null; })()`);
+const setDrag = (page: Page, idx: number) => ev(page, `(() => { const ui = window.__ac.gameUI; ui.dragItemGuid = ui.inventoryItems[${idx}]?.id ?? 0; ui.dragSourceSlot = null; })()`);
 
 /** A real dragover on cell `n` of the list element `listId` (cells: `sel`); every cell's state after. */
 const hover = (page: Page, listId: number, sel: string, n: number) => ev<{ states: string[]; bg: string }>(page, `(() => {
@@ -226,7 +226,7 @@ async function main(): Promise<void> {
       await shoot(A, 'ours-vendor-refuse', 0x100000ce);
     }
     await leave(A, 0x100000ce, VSEL, 0);
-    vendor.afterLeave = await hover(A, 0x100000ce, VSEL, 0).catch(() => null); // dragItemIndex still set: re-probe
+    vendor.afterLeave = await hover(A, 0x100000ce, VSEL, 0).catch(() => null); // dragItemGuid still set: re-probe
     await leave(A, 0x100000ce, VSEL, 0);
     await setDrag(A, -1);
     await ev(A, `window.__ac.gameUI.hideVendorWindow()`);

@@ -38,7 +38,7 @@ const invFind = (page: Page, wcid: number) => readAc<{ idx: number; id: number; 
 
 /** Drop a pack item on open ground ahead of the player (the pack cell's own dragstart state, released over the canvas). */
 async function dropOnGround(page: Page, idx: number, x: number, y: number): Promise<void> {
-  await readAc(page, `(() => { const ui = ac.gameUI; ui.dragItemIndex = ${idx}; ui.dragSourceSlot = null;
+  await readAc(page, `(() => { const ui = ac.gameUI; ui.dragItemGuid = ui.inventoryItems[${idx}]?.id ?? 0; ui.dragSourceSlot = null;
     const canvas = document.getElementById('game-canvas');
     const o = { bubbles: true, cancelable: true, clientX: ${x}, clientY: ${y} };
     canvas.dispatchEvent(new DragEvent('dragover', o)); canvas.dispatchEvent(new DragEvent('drop', o)); return 0; })()`);

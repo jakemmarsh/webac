@@ -17,6 +17,7 @@
 !packages/renderer/src/agent/format.ts
 !packages/renderer/src/agent/gear.ts
 !tools/ac-agent/client.ts
+!tools/lib/temp-profile.ts
 !tools/ac-agent/eras.ts
 !tools/ac-agent/hostedGuide.ts
 !tools/ac-agent/journal.ts

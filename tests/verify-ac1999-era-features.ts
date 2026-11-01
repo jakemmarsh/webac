@@ -4,7 +4,7 @@
  * client never had (secure trade, housing, consent, chess, TurbineChat,
  * contracts, character titles, salvage, fellowship leadership). The World
  * panel is client-side and stays (Jake 2026-10-06); the toolbar's tab row
- * closes up around the hidden journal button instead of leaving a hole. End
+ * is the 1999 client's own five-tab row, with no hole where the journal was. End
  * of retail and the classic eras keep every control.
  *
  * Evidence: the AC1999 KB's builder scans (knowledge/kb/game-mechanics/
@@ -209,20 +209,22 @@ for (const [era, features] of [['ac1999-retail', ERA_1999], ['eor', ERA_EOR]] as
     afterAll(() => H?.teardown());
 
     it(is1999 ? 'the toolbar has a map button and no journal, and its tab row has no hole' : 'the toolbar keeps the journal and map buttons at the layout x', () => {
+      // The toolbar row is the era client's (EraClientRules.toolbarTabSlots); the later tests here
+      // pin the end-of-retail pages with only the features hidden, so the rules go back after.
+      H.ui.setClientRules(eraClientRules(eraProfile(era)));
       H.ui.uiManager.setScreen('game');
       H.ui.renderHUD();
+      H.ui.setClientRules(eraClientRules(null));
       const doc = H.win.document;
       for (const id of ['tb-social', 'tb-magic', 'tb-char', 'tb-map', 'tb-opt', 'tb-inv']) expect(doc.getElementById(id), id).toBeTruthy();
       expect(!!doc.getElementById('tb-journal')).toBe(!is1999);
       const left = (id: string): number => parseFloat((doc.getElementById(id) as HTMLElement).style.left);
       const filler = doc.querySelector('.tb-tab-filler') as HTMLElement | null;
       if (is1999) {
-        // The map and options tabs close up into the journal's slot (layout 0x21000016 x 145 / 175 / 204).
-        expect([left('tb-social'), left('tb-magic'), left('tb-char'), left('tb-map'), left('tb-opt')]).toEqual([55, 85, 115, 145, 174]);
-        // The freed end of the row (to the options slot's right edge, 238) is the plain bar, under the separator.
-        expect(filler).toBeTruthy();
-        expect([parseFloat(filler!.style.left), parseFloat(filler!.style.width)]).toEqual([208, 30]);
-        expect(filler!.style.pointerEvents).toBe('none');
+        // VISUAL.ac1999-hidden-element-gaps — the 1999 client's own row (PanelUI @ 0x004eb120): five
+        // abutting tabs across the bar, so no freed end and no filler.
+        expect([left('tb-social'), left('tb-magic'), left('tb-char'), left('tb-map'), left('tb-opt')]).toEqual([61, 96, 130, 164, 198]);
+        expect(filler).toBeNull();
       } else {
         expect([left('tb-social'), left('tb-magic'), left('tb-char'), left('tb-journal'), left('tb-map'), left('tb-opt')]).toEqual([55, 85, 115, 145, 175, 204]);
         expect(filler).toBeNull();

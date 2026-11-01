@@ -48,7 +48,7 @@ describe.skipIf(!domWindow)('pack item right-click (real GameUI)', () => {
         return { root, elements, setText: () => {}, close: () => { root.remove(); } };
       },
     };
-    ui.setDragCallbacks({ onRightClickItem: (idx: number) => examined.push(idx) });
+    ui.setDragCallbacks({ onRightClickItem: (guid: number) => examined.push(guid) });
     ui.toggleInventory();
     ui.setInventoryData([apple], [], 50, 15000);
   });
@@ -65,7 +65,7 @@ describe.skipIf(!domWindow)('pack item right-click (real GameUI)', () => {
     cell.dispatchEvent(new domWindow.MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
     expect(ui.hudState.target?.id).toBe(apple.id);
     expect(ui.hudState.target?.name).toBe('Apple');
-    expect(examined).toEqual([0]);
+    expect(examined).toEqual([apple.id]);
     expect(ui.contextMenu ?? null).toBeNull();
     // Nothing named Use / Drop / Examine was added to the page.
     const labels = [...domWindow.document.querySelectorAll('div')].map((d: HTMLElement) => d.textContent);

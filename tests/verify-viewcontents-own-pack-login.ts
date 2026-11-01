@@ -64,7 +64,7 @@ describe('routeViewContents — login side-pack snapshot (behavioral)', () => {
       sidePackGuids,
       hasInventoryItem: (g) => inv.getItem(g) !== undefined,
       isKnownWorldObject: (g) => knownWorldObjects.has(g),
-      setSlotForItem: (g, slot) => inv.setSlotForItem(g, slot),
+      setContainerContents: (c, items) => inv.setContainerContents(c, items),
       tracker,
     };
   });

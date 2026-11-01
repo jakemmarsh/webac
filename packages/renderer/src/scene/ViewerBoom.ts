@@ -59,17 +59,29 @@ export function surfaceViewerDistance(
 /**
  * The viewer's cell for SmartBox::RenderNormalMode @ 00453aa0 (outdoors:
  * useSunlightSet(1), no pool lights; else the cell's lights): the camera's
- * position, not the player's. An outdoor player's viewer stays outdoors; from
- * an env cell, the env cell holding the clipped camera, else outdoors for a
- * SeenOutside cell (the boom left by its doorway) or the player's own cell
- * (a sealed cell holds its viewer; AdjustPosition, ACE PhysicsObj.cs:232-262).
- * 0 = outdoors.
+ * position, not the player's. From an env cell, the env cell holding the
+ * clipped camera, else outdoors for a SeenOutside cell (the boom left by its
+ * doorway) or the player's own cell (a sealed cell holds its viewer;
+ * AdjustPosition, ACE PhysicsObj.cs:232-262). 0 = outdoors.
+ *
+ * BUG.doorway-pvs-over-terrain — an outdoor player's viewer is not always
+ * outdoors: SmartBox::update_viewer @ 00453ce0 moves the viewer sphere from
+ * the player's cell to the sought camera position with a CTransition and
+ * takes `sphere_path.curr_cell`, and a transition from a land cell enters a
+ * building's cells through its portals. So a camera trailing back through a
+ * doorway (or into a counter window) as the player steps out is in that
+ * SeenOutside cell, and the frame is drawn from it (PView::DrawInside). The
+ * boom is clipped by the shells, so a camera inside one got there through
+ * an opening: containment stands in for the transition.
  */
 export function surfaceViewerCell(
   world: Pick<SurfaceViewerWorld, 'seenOutside'> & { collision: Pick<DungeonCollision, 'findCellContaining'> },
   playerCellId: number, camera: THREE.Vector3,
 ): number {
-  if ((playerCellId & 0xffff) < 0x100) return playerCellId;
+  if ((playerCellId & 0xffff) < 0x100) {
+    const cell = world.collision.findCellContaining(camera.x, camera.z, camera.y);
+    return cell !== 0 && world.seenOutside(cell) ? cell : playerCellId;
+  }
   const cell = world.collision.findCellContaining(camera.x, camera.z, camera.y, playerCellId);
   if (cell !== 0) return cell;
   return world.seenOutside(playerCellId) ? 0 : playerCellId;

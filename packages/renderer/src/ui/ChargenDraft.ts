@@ -130,9 +130,9 @@ export function restoreWizardVerdict(w: CharacterCreateWizard, s: ChargenWizardS
   if (!group) return `heritage ${s.heritage}: not in this CharGen`;
   if (deps.heritageListed && !deps.heritageListed(s.heritage)) return `heritage ${s.heritage}: not listed on this world`;
   if (s.gender !== Gender.Male && s.gender !== Gender.Female) return `gender ${s.gender}: invalid`;
-  // The page: one of the six, and not one SetProgressState hides for the heritage (Olthoi).
+  // The page: one of the six, and not one SetProgressState hides for the heritage (Olthoi) or the era (1999's Town).
   if (s.step < CreateStep.Heritage || s.step > CreateStep.Summary) return `step ${s.step}: not a chargen page`;
-  if (resolveProgressState(s.step as CreateStep, s.step as CreateStep, s.heritage) !== s.step) return `step ${s.step}: hidden for heritage ${s.heritage}`;
+  if (resolveProgressState(s.step as CreateStep, s.step as CreateStep, s.heritage, w.townOnSummary) !== s.step) return `step ${s.step}: hidden for heritage ${s.heritage}${w.townOnSummary ? ' (no Town page in this era)' : ''}`;
   // SetHeritageGroup's credits.
   if (s.attributeCredits !== group.attributeCredits) return `attributeCredits ${s.attributeCredits}: the heritage has ${group.attributeCredits}`;
   if (s.skillCredits !== group.skillCredits) return `skillCredits ${s.skillCredits}: the heritage has ${group.skillCredits}`;

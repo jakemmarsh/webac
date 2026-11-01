@@ -63,28 +63,38 @@ export function collapseHiddenElements(
   opts: { shrinkSpanning?: boolean } = {},
 ): number {
   const rects = new Map<number, CollapseBox>();
-  for (const [id, el] of els) {
-    let saved = el.dataset.acDatRect;
-    if (!saved) {
-      saved = [el.style.left, el.style.top, el.style.width, el.style.height].map((v) => `${parseFloat(v) || 0}`).join(',');
-      el.dataset.acDatRect = saved;
-    }
-    const [x, y, w, h] = saved.split(',').map(Number);
-    rects.set(id, { x, y, w, h });
-  }
+  for (const [id, el] of els) rects.set(id, datRect(el));
   const { boxes, freed } = collapseHiddenBoxes(rects, hidden, axis, opts);
-  for (const [id, el] of els) {
-    const before = rects.get(id)!;
-    const after = boxes.get(id)!;
-    // Write only a moved value, or one restoring a value an earlier collapse moved.
-    const put = (prop: 'left' | 'top' | 'width' | 'height', v: number, orig: number): void => {
-      const cur = el.style[prop];
-      if (v !== orig || (cur !== '' && parseFloat(cur) !== v)) el.style[prop] = `${v}px`;
-    };
-    put('left', after.x, before.x);
-    put('top', after.y, before.y);
-    put('width', after.w, before.w);
-    put('height', after.h, before.h);
-  }
+  for (const [id, el] of els) placeRect(el, boxes.get(id)!);
   return freed;
+}
+
+/**
+ * An absolutely placed element's authored (DAT) rect: read from its style the
+ * first time and kept (data-ac-dat-rect), so later moves never compound.
+ */
+export function datRect(el: HTMLElement): CollapseBox {
+  let saved = el.dataset.acDatRect;
+  if (!saved) {
+    saved = [el.style.left, el.style.top, el.style.width, el.style.height].map((v) => `${parseFloat(v) || 0}`).join(',');
+    el.dataset.acDatRect = saved;
+  }
+  const [x, y, w, h] = saved.split(',').map(Number);
+  return { x, y, w, h };
+}
+
+/**
+ * Put `el` at `after`, its authored rect kept by datRect. Only a moved value
+ * is written, or one restoring a value an earlier move changed.
+ */
+export function placeRect(el: HTMLElement, after: CollapseBox): void {
+  const before = datRect(el);
+  const put = (prop: 'left' | 'top' | 'width' | 'height', v: number, orig: number): void => {
+    const cur = el.style[prop];
+    if (v !== orig || (cur !== '' && parseFloat(cur) !== v)) el.style[prop] = `${v}px`;
+  };
+  put('left', after.x, before.x);
+  put('top', after.y, before.y);
+  put('width', after.w, before.w);
+  put('height', after.h, before.h);
 }

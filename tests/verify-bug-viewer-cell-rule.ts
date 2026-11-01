@@ -220,7 +220,12 @@ describe('the boom from a cell under the ground (surfaceViewerDistance)', () => 
     expect(surfaceViewerCell(w, CELL, new THREE.Vector3(18, 2, RY))).toBe(CELL);
     expect(surfaceViewerCell(w, CELL, new THREE.Vector3(13, 2, RY))).toBe(0);
     expect(surfaceViewerCell(surfaceWorld(-10, { sealed: true }), CELL, new THREE.Vector3(13, 2, RY))).toBe(CELL);
-    expect(surfaceViewerCell(w, 0x00000001, new THREE.Vector3(18, 2, RY))).toBe(0x00000001);
+    // BUG.doorway-pvs-over-terrain — an outdoor player's camera back through the doorway is in the cell
+    // (SmartBox::update_viewer @ 00453ce0: the viewer sphere's transition from the player's cell enters it);
+    // a camera outdoors stays outdoors, and a sealed cell is never a viewer reached from outside.
+    expect(surfaceViewerCell(w, 0x00000001, new THREE.Vector3(18, 2, RY))).toBe(CELL);
+    expect(surfaceViewerCell(w, 0x00000001, new THREE.Vector3(13, 2, RY))).toBe(0x00000001);
+    expect(surfaceViewerCell(surfaceWorld(-10, { sealed: true }), 0x00000001, new THREE.Vector3(18, 2, RY))).toBe(0x00000001);
   });
 });
 

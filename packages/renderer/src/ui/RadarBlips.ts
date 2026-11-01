@@ -597,6 +597,10 @@ export interface RadarFeedObject {
   monarchGuid?: number;
   playerKillerStatus?: number;
   name: string;
+  /** ServerObject.outOfWorld: the record is in no cell (picked up, contained, or never placed). */
+  outOfWorld?: boolean;
+  /** The holder's guid while the object is wielded (0 / undefined: not held). */
+  wielderId?: number;
 }
 
 /** Per-frame inputs to RadarDotFeed.build — a caller keeps one and mutates it. */
@@ -613,6 +617,14 @@ export interface RadarFeedContext<T extends RadarFeedObject> {
    * dx east, dy up (from the player's feet), dz south — the object's offset in metres.
    */
   eligible: (obj: T, dx: number, dy: number, dz: number) => boolean;
+  /**
+   * BUG.contained-item-target-arrows (sweep) — the holder record of a wielded
+   * object. A held child takes its holder's cell and place (CPhysicsObj::
+   * set_parent @ 00515a90 → change_cell(parent->cell) + UpdateChild), so its
+   * blip sits on the holder; its own record keeps a stale place. Absent, or no
+   * holder found → the held object draws no blip.
+   */
+  holderOf?: (guid: number) => T | undefined;
 }
 
 /**
@@ -652,10 +664,22 @@ export class RadarDotFeed<T extends RadarFeedObject> {
     si.playerIsPKLite = isPKLite(ctx.playerPKStatus);
     let n = 0;
     for (const obj of objects) {
+      // DrawObjects @ 004d9380 skips an object CObjectMaint::GetObjectA can't
+      // find or whose cell / objcell_id is 0. A record in no cell (contained,
+      // picked up, never placed) keeps a stale or zero place: no blip. A held
+      // object is in its holder's cell, at its holder.
+      let at: RadarFeedObject = obj;
+      if (obj.wielderId) {
+        const holder = ctx.holderOf?.(obj.wielderId);
+        if (!holder || holder.outOfWorld) continue;
+        at = holder;
+      } else if (obj.outOfWorld) {
+        continue;
+      }
       // radarOffsetFromWorld, inlined (dz is metres SOUTH).
-      const dx = obj.worldX - ctx.playerWorldX;
-      const dz = ctx.playerWorldZ - obj.worldZ;
-      const dy = obj.worldY - ctx.playerFeetY;
+      const dx = at.worldX - ctx.playerWorldX;
+      const dz = ctx.playerWorldZ - at.worldZ;
+      const dy = at.worldY - ctx.playerFeetY;
       if (!ctx.eligible(obj, dx, dy, dz)) continue;
       if (!blipInRange(dx, dz, ctx.range)) continue;
       si.isFellow = fellowGuids.has(obj.guid);

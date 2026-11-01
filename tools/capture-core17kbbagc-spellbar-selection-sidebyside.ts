@@ -52,7 +52,7 @@ interface BarState {
   nameField: string;
   /** The Cast button's tooltip text. */
   castTooltip: string | null;
-  /** onCastSpell calls so far (known-spell indices). */
+  /** onCastSpell calls so far (spell ids). */
   casts: number[];
   /** displayErrorText (the 0x1a spew) lines so far. */
   spew: string[];

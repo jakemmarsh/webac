@@ -91,7 +91,8 @@ describe.skipIf(!hasPortal)('GameUI.paperdollClickMap retries after a streamed m
 });
 
 describe('barber preview rebuilds once a missed file lands', () => {
-  it('a model built across a streamed miss is rebuilt and redrawn on arrival; a clean build is reused', async () => {
+  // UX.chargen-preview-no-placeholder — and the model built across the miss is never drawn (no white face).
+  it('a model built across a streamed miss is held, rebuilt and drawn on arrival; a clean build is reused', async () => {
     const { barberPreviewRenderer } = await import('../packages/renderer/src/ui/BarberPanel.js');
     const { noteDatMissResolved, DAT_ARRIVAL_COALESCE_MS } = await import('../packages/dat-parser/src/streaming/DatMiss.js');
     let builds = 0; let missing = true; let renders = 0;
@@ -107,12 +108,14 @@ describe('barber preview rebuilds once a missed file lands', () => {
     const draw = barberPreviewRenderer(host);
     draw(canvas, model);
     expect(builds).toBe(1);
+    expect(renders).toBe(0); // the build missed: nothing incomplete is drawn
     missing = false;
     noteDatMissResolved();
     await new Promise((r) => setTimeout(r, DAT_ARRIVAL_COALESCE_MS + 30));
     expect(builds).toBe(2); // rebuilt on arrival
-    expect(renders).toBe(2); // and redrawn without the panel asking
+    expect(renders).toBe(1); // and drawn without the panel asking
     draw(canvas, model);
     expect(builds).toBe(2); // clean build reused
+    expect(renders).toBe(2);
   });
 });

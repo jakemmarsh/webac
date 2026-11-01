@@ -288,6 +288,38 @@ describe('CORE.17.k — GameUI spew box (happy-dom, real renderHUD)', () => {
     expect(rows().map((r) => r.textContent)).toEqual(['e', 'd', 'c', 'b']);
   });
 
+  it('BUG.ac1999-status-text-under-vitals: the 1999 era puts its one status line below the vitals plate; end of retail keeps (centre, 20)', async () => {
+    const { eraClientRules } = await import('../packages/renderer/src/era/EraFeatures.js');
+    const { eraProfile } = await import('../packages/renderer/src/era/EraProfiles.js');
+    const ac1999 = eraProfile('ac1999-retail')!;
+    const classic = eraProfile('classicace-customdm')!;
+    expect(ac1999.login.protocol).toBe('ac1999');
+    expect(classic.login.protocol).not.toBe('ac1999');
+    // 1999: rules applied before the HUD exists (login), then the HUD mounts.
+    const a = makeUI();
+    a.ui.setClientRules(eraClientRules(ac1999));
+    a.ui.showGame();
+    expect(a.box().style.top).toBe('65px'); // 0x1c + 0x25: below the 58 px vitals plate at the top
+    const vitalsBottom = 58;
+    expect(parseInt(a.box().style.top, 10)).toBeGreaterThanOrEqual(vitalsBottom);
+    a.ui.displayErrorText('one'); a.ui.displayErrorText('two');
+    expect(a.rows().map((r) => r.textContent)).toEqual(['two']); // StatusBox_SetStatusText replaces
+    // Rules changing with the HUD up (a later world): the strip moves and trims.
+    const b = makeUI();
+    b.ui.displayErrorText('x'); b.ui.displayErrorText('y');
+    expect(b.box().style.top).toBe('20px');
+    b.ui.setClientRules(eraClientRules(ac1999));
+    expect(b.box().style.top).toBe('65px');
+    expect(b.rows().map((r) => r.textContent)).toEqual(['y']);
+    // Back to end of retail (and the classic eras, which run its exe): (centre, 20), four rows.
+    for (const p of [null, classic]) {
+      b.ui.setClientRules(eraClientRules(p));
+      expect(b.box().style.top).toBe('20px');
+      b.ui.displayErrorText('1'); b.ui.displayErrorText('2'); b.ui.displayErrorText('3'); b.ui.displayErrorText('4'); b.ui.displayErrorText('5');
+      expect(b.rows()).toHaveLength(4);
+    }
+  });
+
   it('a notice raised before the HUD exists is shown once renderHUD runs (first world entry)', () => {
     domWindow.document.body.innerHTML = '';
     const container = domWindow.document.createElement('div');

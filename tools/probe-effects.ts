@@ -193,8 +193,7 @@ async function main(): Promise<void> {
     await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 80, everyNthFrame: 1 });
     await page.waitForTimeout(1000); // the stream takes ~1 s to deliver its first frame
     // The spell bar's own cast path (gameUI → onCastSpell), the one a player's click takes.
-    const idx = await page.evaluate(`window.__ac.magicController.knownSpells.findIndex((s) => s.id === ${c.spellId})`) as number;
-    await page.evaluate(`window.__ac.gameUI.spellCallbacks.onCastSpell(${idx})`);
+    await page.evaluate(`window.__ac.gameUI.spellCallbacks.onCastSpell(${c.spellId})`);
     await page.waitForTimeout(RECORD_MS);
     await cdp.send('Page.stopScreencast');
     for (const f of frames) writeFileSync(`${out}/${String(f.ms).padStart(5, '0')}.jpg`, Buffer.from(f.data, 'base64'));

@@ -172,3 +172,31 @@ describe.skipIf(!existsSync(DAT_PATHS.portal))('a server Ready with the forward 
     expect(mm.motionTableState!.substate >>> 0).toBe(MotionCommand.SideStepRight);
   });
 });
+
+describe.skipIf(!existsSync(DAT_PATHS.portal))('forwardHeldByServer: a server Reload holds the forward command until its Ready (BUG.missile-repeat-attack-stall)', () => {
+  it('true while the server Reload holds and the player stands still; false once Ready lands, and false while walking', async () => {
+    const { MotionManager } = await import('../packages/renderer/src/animation/MotionManager.js');
+    const { CharacterAnimController, isMissileAttackMotion } = await import('../packages/renderer/src/animation/CharacterAnimController.js');
+    const { applyServerForwardToLocalPlayer } = await import('../packages/renderer/src/world/ServerObjectManager.js');
+    const BOW = 0x8000003f;
+    const mm = new MotionManager(openDat(DAT_PATHS.portal));
+    mm.loadMotionTable(0x09000001); mm.setDefaultStance(1);
+    const anim = new CharacterAnimController(mm);
+    anim.setStance(BOW);
+    const idle = { isMovingForward: false, isMovingBackward: false, isStrafingLeft: false, isStrafingRight: false, isTurningLeft: false, isTurningRight: false, isRunning: true } as never;
+    for (let i = 0; i < 300; i++) { mm.update(1 / 60); anim.update(1 / 60, idle); }
+    expect(anim.forwardHeldByServer(idle)).toBe(false);
+    applyServerForwardToLocalPlayer(mm, 0x16, 1, BOW); // the AC1999 server's Reload
+    expect(anim.interpretedForwardCommand(idle)).toBe(MotionCommand.Reload);
+    expect(anim.forwardHeldByServer(idle)).toBe(true);
+    // Walking forward is the player's own not-ready: never held for the server.
+    expect(anim.forwardHeldByServer({ ...(idle as object), isMovingForward: true } as never)).toBe(false);
+    applyServerForwardToLocalPlayer(mm, 0, 1, BOW); // its Ready (forward left out)
+    expect(anim.forwardHeldByServer(idle)).toBe(false);
+    expect(isMissileAttackMotion(MotionCommand.Reload)).toBe(true);
+    expect(isMissileAttackMotion(0x4000001e)).toBe(true);
+    expect(isMissileAttackMotion(0x4000002a)).toBe(true);
+    expect(isMissileAttackMotion(0x40000017)).toBe(false); // Unload
+    expect(isMissileAttackMotion(MotionCommand.Ready)).toBe(false);
+  });
+});

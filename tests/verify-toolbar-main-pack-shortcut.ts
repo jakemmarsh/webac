@@ -233,6 +233,30 @@ describe('GameUI — the main pack is a drag source the toolbar takes', () => {
     expect(fire(slots[5], 'dragover').defaultPrevented).toBe(false);
   });
 
+  it('VISUAL.drag-merge-indicator — the hovered slot shows 0x1000045f\'s add-shortcut art (end of retail), nothing in 1999', async () => {
+    const { eraClientRules } = await import('../packages/renderer/src/era/EraFeatures.js');
+    const { eraProfile } = await import('../packages/renderer/src/era/EraProfiles.js');
+    // gmToolbarUI::OnItemListDragOver @ 004bd150: SetDragAcceptState(0x10000040) for any drag carrying an object.
+    fire(packTabs()[0], 'dragstart');
+    fire(slots[4], 'dragover');
+    const overlay = slots[4].querySelector('[data-ac-drag-accept]') as HTMLElement;
+    expect(overlay.dataset.acDragTemplate).toBe('1000045f');
+    expect(overlay.dataset.acDragAccept).toBe(String(0x10000040));
+    fire(slots[4], 'drop');
+    expect(overlay.dataset.acDragAccept).toBe(String(0x1000003f));
+    // The 1999 ShortcutSlot has no DragOverAction.
+    ui.setClientRules(eraClientRules(eraProfile('ac1999-retail')));
+    try {
+      fire(packTabs()[0], 'dragstart');
+      fire(slots[6], 'dragover');
+      expect(slots[6].querySelector('[data-ac-drag-accept]')).toBeNull();
+      fire(packTabs()[0], 'dragend');
+      ui.settleItemDragWaiting();
+    } finally {
+      ui.setClientRules(eraClientRules(null));
+    }
+  });
+
   it('released anywhere else the drag ends with nothing sent', () => {
     fire(packTabs()[0], 'dragstart');
     expect(fire(packTabs()[1], 'dragover').defaultPrevented).toBe(false);

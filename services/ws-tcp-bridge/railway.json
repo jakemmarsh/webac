@@ -19,7 +19,8 @@
       "packages/shared/src/ace-enums.ts",
       "packages/renderer/src/agent/format.ts",
       "packages/renderer/src/agent/gear.ts",
-      "tools/ac-agent/**"
+      "tools/ac-agent/**",
+      "tools/lib/temp-profile.ts"
     ]
   },
   "deploy": {

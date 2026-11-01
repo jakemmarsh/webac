@@ -155,7 +155,7 @@ export class EnvCellRenderer {
    * Get collision data for a cell: CellStruct (with physicsBSP) + position Frame.
    * Used by DungeonCollision to build sphere-BSP collision trees.
    */
-  getCellCollisionData(cellId: number): { cellStruct: CellStruct; position: Frame; outsidePortalPolygonIds: number[]; neighborCellIds: number[] } | null {
+  getCellCollisionData(cellId: number): { cellStruct: CellStruct; position: Frame; outsidePortalPolygonIds: number[]; neighborCellIds: number[]; cellPortals: EnvCell['cellPortals'] } | null {
     const envCell = this.loadEnvCell(cellId);
     if (!envCell) return null;
     const cellStruct = this.getCellStruct(envCell);
@@ -165,7 +165,8 @@ export class EnvCellRenderer {
     // The cells its other portals lead to (DungeonCollision.componentOf / findCellContaining).
     const neighborCellIds = envCell.cellPortals.filter((p) => p.otherCellId !== 0xFFFF)
       .map((p) => ((cellId & 0xffff0000) | p.otherCellId) >>> 0);
-    return { cellStruct, position: envCell.position, outsidePortalPolygonIds, neighborCellIds };
+    // BUG.doorway-pvs-over-terrain — every portal, for the indoor view's flood (scene/IndoorView.ts cellPortalGraph).
+    return { cellStruct, position: envCell.position, outsidePortalPolygonIds, neighborCellIds, cellPortals: envCell.cellPortals };
   }
 
   /**

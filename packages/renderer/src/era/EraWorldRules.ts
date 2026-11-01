@@ -78,9 +78,12 @@ export interface EraWorldRules {
    */
   selectionFlipEndCount: number;
   /**
-   * Sky objects move only on the landscape tick (sky_info.tick_size, 0.8 s). 1999: LScape_UseTime
-   * @ 0x442242 calls GameSky_UseTime inside its next_tick gate, so the sun and moon step. End of
-   * retail runs GameSky::UseTime every frame.
+   * The sky objects' timeline state (luminosity, translucency, arc windows) changes only on the
+   * landscape tick (sky_info.tick_size, 0.8 s). 1999: LScape_UseTime @ 0x442242 calls
+   * GameSky_UseTime inside its next_tick gate. End of retail runs GameSky::UseTime every frame.
+   * Their MOTION is every frame in every era (SkyboxRenderer.updateSkyMotion,
+   * BUG.sky-steps-not-smooth): texture scroll is CPhysics' (0x444160), never the tick's, and the
+   * 1999 arc step (half a pixel on a 1999 screen, several today) is a browser-UX exception.
    */
   skyObjectsOnTick: boolean;
   /**

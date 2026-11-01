@@ -84,6 +84,13 @@ export interface AttackRequestDeps {
    * forward / backward is not ready; strafing and turning are).
    */
   inReadyPosition(): boolean;
+  /**
+   * BUG.missile-repeat-attack-stall — the player is out of the ready position
+   * only because a motion the SERVER applied (a missile Reload / Aim) still
+   * holds the forward command, not because the player is walking. Absent →
+   * never (retail's plain cancel).
+   */
+  forwardHeldByServer?(): boolean;
   /** 'melee' | 'missile' for the current COMBAT_MODE, null otherwise. */
   combatMode(): 'melee' | 'missile' | null;
   /** The player's current motion style (dual wield shortens the build). */
@@ -270,6 +277,20 @@ export class AttackRequestController {
             this.buildStartTime = 0;
           }
         }
+      } else if (this.currentBuildIsAutomatic && !this.attackRequestInProgress && this.deps.forwardHeldByServer?.()) {
+        // BUG.missile-repeat-attack-stall — the repeat's automatic build began
+        // while the server's own Reload still holds the forward command. The
+        // AC1999 server sends a reload's AttackDone (AttackManager.cpp
+        // OnMotionDone) BEFORE the Ready that ends it (WeenieObject.cpp
+        // DoForcedStopCompletely), each in its own datagram, and our socket
+        // hands each to its own task, so a frame can run between them. Retail
+        // cancels a not-ready repeat (UseTime @ 0056c1f0; 1999 PanelUI_Global_Loop
+        // @ 0x004f4e10 → 0x004f9530), but its loop drains the network first, so
+        // the pair lands together; a cancel here ended the server's repeat after
+        // one shot. Hold the bar at 0 until the server's Ready; a player who
+        // walks (input forward / back) is still cancelled below.
+        this.buildStartTime = this.deps.now();
+        this.setPowerBarLevel(0);
       } else {
         // Out of the ready position mid-build (a missile build while moving
         // forward / back): with Repeat Attacks on the attack is cancelled.

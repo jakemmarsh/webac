@@ -131,101 +131,150 @@ export class InventoryManager {
   private items: Map<number, InventoryItem> = new Map();
   private _nextId = 1;
   /**
-   * FAITHFUL.572 — guid → desired slot index, set from PlayerDescription's
-   * inventory placement block at login. Items present here render first
-   * in the order their index implies; items not present (e.g. picked up
-   * mid-session before a save) sort after, in arrival order.
+   * BUG.ac1999-inventory-placement-order — each container's contents in order, kept the way
+   * retail's CObjectInventory keeps them: an items list and a containers list (IDList) per
+   * container, keyed by `listKey(containerId, packs)`. A slot on the wire is an index into one of
+   * these lists, and a contain-in INSERTS there and shifts the rest: EoL ServerSaysContainID
+   * @ 0058be40 / AddContent @ 0058cce0 → IDList::AddAtNum @ 005add20; the 1999
+   * ACCWeenieObject_AddContent @ 0x004e26d0 clamps the slot to the count and inserts the same
+   * way. Both servers keep the same lists: ACE Container.TryAddToInventory shifts every
+   * PlacementPosition at or past the new one; AC1999 Container_InsertInventoryItem inserts into
+   * m_Items / m_Packs.
+   *
+   * Pre-fix this was one guid → slot map with no shifting, so a pick-up at slot 0 tied with the
+   * item already at 0 and drew second (after it, by arrival), and each later slot-0 add (give,
+   * buy, loot) queued behind the earlier ones instead of going first.
    */
-  private _placementOrder: Map<number, number> = new Map();
+  private _lists: Map<string, number[]> = new Map();
+  /** Which list (listKey) holds each guid. A guid is in at most one, as in retail. */
+  private _listOf: Map<number, string> = new Map();
 
-  /**
-   * FAITHFUL.572 — apply the inventory placement order from the server's
-   * PlayerDescription. The guids array is the authoritative ordering the
-   * user dragged into during their last session; ACE persists this via
-   * `PlacementPosition` and ships it at login per
-   * `reference/ACE/Source/ACE.Server/Network/GameEvent/Events/GameEventPlayerDescription.cs:401-416`.
-   * Replaces any prior placement entirely.
-   */
-  setPlacementOrder(guids: number[]): void {
-    this._placementOrder = new Map();
-    for (let i = 0; i < guids.length; i++) {
-      this._placementOrder.set(guids[i], i);
+  private static listKey(containerId: number, packs: boolean): string {
+    return `${containerId >>> 0}:${packs ? 'packs' : 'items'}`;
+  }
+
+  /** IDList::RemoveByID @ 005addf0 on whichever list holds the guid (ACCWeenieObject::RemoveContent @ 0058cd70). */
+  private unlist(guid: number): void {
+    const key = this._listOf.get(guid);
+    if (key === undefined) return;
+    const list = this._lists.get(key);
+    const at = list ? list.indexOf(guid) : -1;
+    if (list && at >= 0) list.splice(at, 1);
+    this._listOf.delete(guid);
+  }
+
+  /** Replace one list (IDList::Clear @ 005ade60, then IDList::Add for each guid in order). */
+  private setList(key: string, guids: readonly number[]): void {
+    for (const g of this._lists.get(key) ?? []) {
+      if (this._listOf.get(g) === key) this._listOf.delete(g);
+    }
+    const list: number[] = [];
+    this._lists.set(key, list);
+    for (const g of guids) {
+      this.unlist(g);
+      list.push(g);
+      this._listOf.set(g, key);
     }
   }
 
   /**
-   * FAITHFUL.573 — relocate an item to a new slot in the local placement
-   * order so the inventory grid updates immediately on drag-drop. Mirrors
-   * the optimistic-local-update pattern used by other inventory mutations
-   * (the authoritative PlacementPosition save ships to ACE via
-   * `GameActionPutItemInContainer` per
-   * `reference/ACE/Source/ACE.Server/Network/GameAction/Actions/GameActionPutItemInContainer.cs:9-13`,
-   * but waiting for the server round-trip would leave the cell stale
-   * until the next CreateObject re-emit at login).
-   *
-   * Algorithm: take the current sorted item list, splice the source item
-   * out, splice it in at `newIndex` (clamped to [0, length-1]), then
-   * rebuild `_placementOrder` so every visible item has an explicit
-   * index. Items missing from the prior order (picked up mid-session
-   * with no PlacementPosition) get included in their pre-sort position
-   * so they participate in the ordering too.
+   * ACCObjectMaint::ViewObjectContents @ 00558a70: a container's whole contents in order (the
+   * PlayerDescription's ContentProfile list for the player at login, a ViewContents for one of
+   * the player's packs). Both lists are cleared, then each entry goes to the end of the items
+   * list (containerType 0) or of the containers list (a pack or a foci).
+   */
+  setContainerContents(containerId: number, entries: ReadonlyArray<{ guid: number; containerType: number }>): void {
+    this.setList(InventoryManager.listKey(containerId, false), entries.filter((e) => e.containerType === 0).map((e) => e.guid));
+    this.setList(InventoryManager.listKey(containerId, true), entries.filter((e) => e.containerType !== 0).map((e) => e.guid));
+  }
+
+  /** FAITHFUL.572 — set one container's items (or `packs`) list to `guids`, in order, replacing it. */
+  setPlacementOrder(guids: readonly number[], containerId = 0, packs = false): void {
+    this.setList(InventoryManager.listKey(containerId, packs), guids);
+  }
+
+  /**
+   * FAITHFUL.573 — move an item to `newIndex` (clamped) in its own container's order. Retail's
+   * UpdateObject of a contained item puts it first this way (ACE RecipeManager
+   * MoveItemToFirstContainerSlot). Items of that container no list names yet join after the
+   * listed ones, in arrival order, so the move is made against what is shown.
    */
   reorderItem(itemId: number, newIndex: number): void {
-    if (!this.items.has(itemId)) return;
-    const sorted = this.getAll();
-    const fromIndex = sorted.findIndex(i => i.id === itemId);
-    if (fromIndex === -1) return;
-    const clampedTarget = Math.max(0, Math.min(newIndex, sorted.length - 1));
-    if (fromIndex === clampedTarget) return;
-    const [moved] = sorted.splice(fromIndex, 1);
-    sorted.splice(clampedTarget, 0, moved);
-    this.setPlacementOrder(sorted.map(i => i.id));
+    const item = this.items.get(itemId);
+    if (!item) return;
+    const key = this._listOf.get(itemId) ?? InventoryManager.listKey(item.containerId, false);
+    const order = [...(this._lists.get(key) ?? [])];
+    for (const it of this.items.values()) {
+      if (!this._listOf.has(it.id) && it.containerId === item.containerId) order.push(it.id);
+    }
+    const from = order.indexOf(itemId);
+    const to = Math.max(0, Math.min(newIndex, order.length - 1));
+    if (from === to) return;
+    order.splice(from, 1);
+    order.splice(to, 0, itemId);
+    this.setList(key, order);
   }
 
   /**
-   * BUG.inventory-put-slot-itemtype-unused — upsert a single guid→slot
-   * entry into the placement order for a live server-confirmed move
-   * (pickup, vendor buy, trade, corpse loot, server-side reshuffle), sent
-   * via `GameEventItemServerSaysContainId.PlacementPosition` per
-   * `reference/ACE/Source/ACE.Server/Network/GameEvent/Events/GameEventItemServerSaysContainId.cs:10-13`.
-   * Unlike {@link setPlacementOrder}, this does not replace the whole
-   * order — only the moved item's slot is updated, so other items'
-   * saved positions (from login or earlier live moves) are preserved.
+   * ACCWeenieObject::ServerSaysMoveItem @ 0058dbb0 for a contain-in (InventoryPutObjInContainer
+   * 0x22, both eras): out of the list it was in (RemoveContent), then inserted at `slot` in the
+   * container's items list, or its containers list when `packs` (the event's ContainerType is not
+   * 0) — IDList::AddAtNum, which appends when the slot is past the end. Without a container the
+   * item stays in the list it is in (or its own container's items list).
    */
-  setSlotForItem(guid: number, slot: number): void {
-    this._placementOrder.set(guid, slot);
+  setSlotForItem(guid: number, slot: number, containerId?: number, packs = false): void {
+    const key = containerId !== undefined
+      ? InventoryManager.listKey(containerId, packs)
+      : this._listOf.get(guid) ?? InventoryManager.listKey(this.items.get(guid)?.containerId ?? 0, false);
+    this.unlist(guid);
+    let list = this._lists.get(key);
+    if (!list) { list = []; this._lists.set(key, list); }
+    list.splice(Math.max(0, Math.min(slot >>> 0, list.length)), 0, guid);
+    this._listOf.set(guid, key);
   }
 
   /**
-   * Sort comparator that honors {@link setPlacementOrder} when set:
-   * items with a saved index come first (in index order), then items
-   * without a saved index in their original Map insertion order.
+   * ServerSaysMoveItem with no container (a wield, 0x23): the item leaves its container's list
+   * (RemoveContent), so the items after it move up and the server's later slots line up.
    */
-  private placementCompare(a: InventoryItem, b: InventoryItem): number {
-    const ai = this._placementOrder.get(a.id);
-    const bi = this._placementOrder.get(b.id);
-    if (ai !== undefined && bi !== undefined) return ai - bi;
-    if (ai !== undefined) return -1;
-    if (bi !== undefined) return 1;
-    return 0;
+  leaveContainer(guid: number): void {
+    this.unlist(guid);
+  }
+
+  /** One container's list in order (guids the client may not hold yet included). */
+  containerOrder(containerId: number, packs = false): number[] {
+    return [...(this._lists.get(InventoryManager.listKey(containerId, packs)) ?? [])];
   }
 
   /**
-   * Get all items in inventory, ordered per the server-supplied placement
-   * order ({@link setPlacementOrder}) when one is set, otherwise in
-   * Map insertion order (i.e. ObjectCreate arrival order).
+   * Listed items first, by their index in their container's list; then items no list names, in
+   * Map insertion (CreateObject arrival) order.
+   */
+  private sortByPlacement(items: InventoryItem[]): InventoryItem[] {
+    if (this._listOf.size === 0) return items;
+    const rank = new Map<number, number>();
+    for (const list of this._lists.values()) list.forEach((g, i) => rank.set(g, i));
+    return items.sort((a, b) => {
+      const ai = rank.get(a.id);
+      const bi = rank.get(b.id);
+      if (ai !== undefined && bi !== undefined) return ai - bi;
+      if (ai !== undefined) return -1;
+      if (bi !== undefined) return 1;
+      return 0;
+    });
+  }
+
+  /**
+   * Get all items in inventory, each container's in its list order (see {@link sortByPlacement}),
+   * otherwise in Map insertion order (i.e. ObjectCreate arrival order).
    */
   getAll(): InventoryItem[] {
-    const items = [...this.items.values()];
-    if (this._placementOrder.size === 0) return items;
-    return items.sort((a, b) => this.placementCompare(a, b));
+    return this.sortByPlacement([...this.items.values()]);
   }
 
   /** Get items in a specific container (0 = root), honoring placement order. */
   getByContainer(containerId: number): InventoryItem[] {
-    const items = [...this.items.values()].filter(i => i.containerId === containerId);
-    if (this._placementOrder.size === 0) return items;
-    return items.sort((a, b) => this.placementCompare(a, b));
+    return this.sortByPlacement([...this.items.values()].filter(i => i.containerId === containerId));
   }
 
   /** Get an item by instance ID. */
@@ -341,6 +390,8 @@ export class InventoryManager {
     const item = this.items.get(id);
     if (!item) return undefined;
     this.items.delete(id);
+    // It left the player: out of its container's list (ServerSaysMoveItem → RemoveContent).
+    this.unlist(id);
     return item;
   }
 
@@ -438,5 +489,7 @@ export class InventoryManager {
   /** Clear all items. */
   clear(): void {
     this.items.clear();
+    this._lists.clear();
+    this._listOf.clear();
   }
 }

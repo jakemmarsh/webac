@@ -16,7 +16,7 @@ import { fellowshipUpdateLine, fellowAddedLine, fellowQuitLine, fellowDismissedL
 import { defaultChargenSkillClasses, chargenTotalNumSkills } from './chargenSkillDefaults.js';
 import { computeSkillFormula, Heritage, Gender, SkillAdvancementClass, EquipMask, DEFAULT_ATTRIBUTE_CREDITS, Sound, CombatMode, ItemType, COINSTACK_WCID, playerKillerStatusLabel, skillIdLabel, skillAdvancementClassLabel, characterOptionIsSet, CHARACTER_OPTION_BIT_MAP, chatColorFor, shopSellPrice, shopBuyPrice } from '@ac/shared';
 import type { InventoryItem, EquippedItem, SpellDefinition, NameFilterRules, TabooPredicate, MtChatLine, MtChatSpeech } from '@ac/shared';
-import { SPELLBOOK_FILTERS_DEFAULT, isSpellbookFilteredOut, spellbookLevelBit, spellbookOrder, spellbookNameOrder, spellbookSchoolBit, toggleSpellbookFilter, spellbookDeleteConfirmText, spellbookFilterOptions, type SpellbookFilterOptions } from './spellbookFilter.js';
+import { SPELLBOOK_FILTERS_DEFAULT, isSpellbookFilteredOut, spellbookLevelBit, spellbookOrder, spellbookNameOrder, spellbookSchoolBit, toggleSpellbookFilter, spellbookDeleteConfirmText, spellbookFilterOptions, spellbookPageSplit, type SpellbookFilterOptions } from './spellbookFilter.js';
 import { MagicSchool, magicSchoolColor, magicSchoolColorRGBA, LUMINANCE_MIN_LEVEL, getAppropriateName, StartingTown, SPELL_COMPONENT_DID_MAPPER_ID } from '@ac/shared';
 import { contractProgressText, contractTimedText, contractRepeatLeft, type ContractTiming } from '@ac/shared';
 import { TeleportAnimation, TeleportAnimState, PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
@@ -107,7 +107,7 @@ import {
   SALVAGE_SLOT_EL, SALVAGE_CELL, salvageListCellCount, salvageButtonState, salvageRequestGuids,
   planSalvageDrop, salvageDragAcceptState,
 } from './SalvagePanel.js';
-import { DRAG_ACCEPT_STATE, UIITEM_DRAG_ACCEPT_TEX, uiItemDragAcceptState } from './UIItemDragAccept.js';
+import { CONTAINER_CELL_DRAG_ACCEPT_TEX, DRAG_ACCEPT_STATE, TOOLBAR_CELL_DRAG_ACCEPT_TEX, UIITEM_DRAG_ACCEPT_TEX, uiItemDragAcceptState, type DragAcceptTemplate } from './UIItemDragAccept.js';
 import type { SoundPlayer } from '../audio/SoundPlayer.js';
 import type { AudioManager } from '../audio/AudioManager.js';
 import { isRetailClientLocalSound, resolveUiSoundTable } from '../audio/RetailLocalSounds.js';
@@ -133,7 +133,7 @@ import type { TextureManager } from '../models/TextureManager.js';
 import { getString, getStringParts, getStringFromTable, acStringHash } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { heritageListed, visibleHeritageRows } from './HeritageRows.js';
 import { isOlthoiHeritage, OLTHOI_UNAVAILABLE_NOTE } from './ChargenRefusal.js';
-import { loadChargen1999, startAreasFor1999, type Chargen1999 } from './Chargen1999.js';
+import { loadChargen1999, startAreasFor1999, startingTownMenuOrder1999, STARTING_TOWN_LABEL_1999, Chargen1999Page, type Chargen1999 } from './Chargen1999.js';
 import { buildEpilogueFrame } from './PatchScreen.js';
 import { fellowshipString } from './FellowshipStrings.js';
 import {
@@ -154,7 +154,8 @@ import {
   attributeRowTooltip, vitalRowTooltip, skillRowTooltip, castButtonTooltip, castButtonFace, type CastButtonTooltipState,
   SPELLBAR_CAST_BUTTON, SPELLBAR_SPELL_NAME_TEXT, SPELLBAR_ENDOWMENT_ICON,
 } from './HudTooltips.js';
-import { collapseHiddenElements } from './CollapseHidden.js';
+import { collapseHiddenElements, datRect, placeRect } from './CollapseHidden.js';
+import { fellowshipOneRow, FELLOWSHIP_BUTTONS_TOP, FELLOWSHIP_BUTTONS_BOTTOM, FELLOWSHIP_LIST_IDS } from './FellowshipButtonRow.js';
 import {
   MAP_IMAGE, mapClickTeleportCell, MAP_HOUSE_ICON_MEDIA, MAP_HOUSE_ICON_SIZE, MAP_PLAYER_ICON_MEDIA, MAP_PLAYER_ICON_SIZE,
   houseMarkerPosition, houseIconPlacement, playerMarkerUpdate, radarCoordinateReadout, journalLocationText,
@@ -289,12 +290,14 @@ import { mirrorCameraX } from '../scene/WorldMirror.js';
 import { buildCreatureModeScene, renderSceneToCanvas, rendererContextLost } from './CreatureViewRender.js';
 import { BarberModel, BARBER_STRINGS, type BarberData, type BarberApplyResult } from './BarberModel.js';
 import { BarberPanel, barberPreviewRenderer } from './BarberPanel.js';
+import { PreviewBuildHold } from './PreviewBuildHold.js';
+import { ChargenPrefetcher, chargenAppearanceIds } from '../models/ChargenPrefetch.js';
 import { AppearanceManager } from '../models/AppearanceManager.js';
 import {
   buildCreatureModeCamera, examineCameraPosition, threeBoxToAc,
   EXAMINE_HEADING_DEG, EXAMINE_LIGHT_DIRECTION, EXAMINE_LIGHT_INTENSITY, copyRenderTargetToImageData,
 } from './CreatureViewCamera.js';
-import { ChargenViewAnimator, PaperdollPoser, SummaryViewObject } from './ChargenViewAnimation.js';
+import { ChargenViewAnimator, PaperdollPoser, SummaryViewObject, loadChargenDidMapper, resolveChargenAnimationDids } from './ChargenViewAnimation.js';
 import {
   attributeStateId, sliderPositionForValue, sliderWidgetX, sliderBarWidth, sliderValueFromPosition,
   startWidgetDrag, scrollbarDragMove, endWidgetDrag,
@@ -310,7 +313,7 @@ import {
 } from './ChargenTemplates.js';
 import type { ChargenTemplate, ChargenSkillCosts } from './ChargenTemplates.js';
 import {
-  defaultRandomSource, seededRandomSource, randomizeHeritageGroup, randomizeTownPage, setStartArea, appearanceRollLists,
+  defaultRandomSource, seededRandomSource, randomizeHeritageGroup, randomizeTownPage, setStartArea, appearanceRollLists, randInt,
   RANDOMIZE_WARNING_STRING_ID, RANDOMIZE_WARNING_FALLBACK,
 } from './ChargenRandomize.js';
 import type { ChargenRandomSource } from './ChargenRandomize.js';
@@ -398,7 +401,7 @@ import { UIState, LayoutRenderer } from './LayoutRenderer.js';
 import { UIManager } from './UIManager.js';
 import { ZLayer, zLayer } from './ZIndexRegistry.js';
 import {
-  SpewBoxModel, spewBoxLeft, SPEW_BOX_WIDTH, SPEW_BOX_HEIGHT, SPEW_BOX_TOP, SPEW_ITEM_HEIGHT,
+  SpewBoxModel, spewBoxLeft, SPEW_BOX_WIDTH, SPEW_BOX_HEIGHT, SPEW_ITEM_HEIGHT, type StatusLineRules,
   SPEW_TEXT_COLOR, SPEW_TEXT_OUTLINE_COLOR, SPEW_TEXT_FONT_DID, ERROR_TEXT_TYPE, ERROR_TEXT_CHAT_COLOR, argbToCssHex,
 } from './SpewBoxModel.js';
 import { CLIENT_NOTICES, raiseClientNotice } from './ClientNotices.js';
@@ -488,7 +491,8 @@ import { HUD } from './HUD.js';
 import type { VitalBarState, TargetInfo } from './HUD.js';
 import { ATTRIBUTE_PICTOGRAM_TEXTURES } from './attributePictograms.js';
 import type { UIHost } from './UIHost.js';
-import { collapseToolbarTabs } from './ToolbarTabs.js';
+import { eraToolbarRow } from './ToolbarTabs.js';
+import { applySharedTabStrip } from './TabStripShare.js';
 import { loadIconEnumMaps, resolveRenderIconsDids, renderIcons, renderIconsKey, iconRgbaToDataURL, keyBlackTransparent, worldIconsBlackKeyed, type IconEnumMaps, type IconRgba, type ItemIconSpec } from './ItemIconComposite.js';
 import { compositeSpellIcon, loadSpellIconEnumMaps, resolveSpellIconDids, spellIconKey, type SpellIconEnumMaps } from './SpellIconComposite.js';
 import {
@@ -1018,11 +1022,12 @@ const CAST_BUTTON_STRING_ID = 227743108;
 
 /**
  * GAP.world-drag-drop — what a drag released over the 3D view carries: an
- * inventory cell (index into the inventory list), a paperdoll slot, or an
- * object dragged off the world itself.
+ * inventory cell (the carried object's id: BUG.ammo-merge-swaps-first — never
+ * a list position, which a re-sort moves), a paperdoll slot, or an object
+ * dragged off the world itself.
  */
 export type WorldDropSource =
-  | { kind: 'inventory'; itemIndex: number }
+  | { kind: 'inventory'; guid: number }
   | { kind: 'equipped'; slot: EquipMask }
   | { kind: 'world'; guid: number };
 
@@ -1460,6 +1465,17 @@ export class GameUI {
   private chargenEditFields: DatEditFieldHandle[] = [];
   private chargenPreviewCamera: THREE.PerspectiveCamera | null = null;
   private chargenPreviewModel: THREE.Group | null = null;
+  /**
+   * UX.chargen-preview-no-placeholder — the chargen views keep their last
+   * complete figure while a new choice's streamed files land (PreviewBuildHold).
+   */
+  private readonly chargenPreviewHold = new PreviewBuildHold<THREE.Group>();
+  /** A figure the hold swapped in that no view has bound its animator to yet. */
+  private chargenPreviewUnbound = false;
+  /** Streamed misses inside the hold's builds (the hold retries them itself; the page repaint must not). */
+  private chargenHoldMisses = 0;
+  /** UX.chargen-preview-no-placeholder — the background warm of the chargen choices (streamed DATs only). */
+  private chargenPrefetcher: ChargenPrefetcher | null = null;
   /** Selected profession — keys the 0x100003d8 watermark art states
    *  (Custom = no art) and the profession-button highlight. */
   /**
@@ -1607,6 +1623,7 @@ export class GameUI {
   /** DEBT.main-ts-extractions — main.ts hands GameUI its world services (replaces the window.__ac reach-backs). */
   setUIHost(host: UIHost | null): void {
     this.uiHost = host;
+    this.chargenPrefetcher = null;
     this.watchRendererContext(host?.renderer?.domElement ?? null);
   }
 
@@ -2078,7 +2095,14 @@ export class GameUI {
   private burdenCurrent = 0;
   private burdenMax = 15000; // Default: 100 STR * 150
   // Drag-and-drop state
-  private dragItemIndex = -1; // index in inventoryItems being dragged, -1 = none
+  /**
+   * BUG.ammo-merge-swaps-first — the carried object dragged off a pack cell, by its object id (0 = none),
+   * as retail's drag carries the object (UIElement_ItemList::ItemList_BeginDrag @ 004e32d0 drags the UIItem
+   * and sends CM_Item::SendNotice_BeginDrag(itemID, spellID); gmPaperDollUI::AcceptDragObject @ 004a3b10
+   * reads the object back). It was an index into inventoryItems, which a list refresh between the cell's
+   * render and the drop re-sorts.
+   */
+  private dragItemGuid = 0;
   private dragSourceSlot: EquipMask | null = null; // if dragging from equipment slot
   /**
    * GAP.world-drag-drop — the object dragged off the 3D view (sr_Drag:
@@ -2091,7 +2115,7 @@ export class GameUI {
      * (gmPaperDollUI::HandleDropRelease @ 004a4d80 → AcceptDragObject /
      * AcceptPaperDollDragObject).
      */
-    onDropToSlot?: (itemIndex: number, target: PaperdollDropTarget) => void;
+    onDropToSlot?: (guid: number, target: PaperdollDropTarget) => void;
     /** A worn item (by its wield mask) dropped on a paperdoll slot or the figure. */
     onDropWornToPaperdoll?: (slot: EquipMask, target: PaperdollDropTarget) => void;
     /**
@@ -2121,6 +2145,12 @@ export class GameUI {
      */
     paperdollDragAcceptState?: (guid: number, target: PaperdollDropTarget) => number | null;
     /**
+     * VISUAL.drag-merge-indicator — the drag-over state a pack-grid cell
+     * (`containerList` false) or pack-column cell shows while `guid` is
+     * dragged over it (UIItemDragAccept.itemListDragOverState); null = leave it.
+     */
+    itemListDragAcceptState?: (guid: number, d: { fromContainerList: boolean; containerList: boolean; cellObjectId: number }) => number | null;
+    /**
      * A click (examine = false) or right-click (true) on the paperdoll
      * portrait's drag band hit `guid` — a worn item, or the player where
      * nothing is worn (gmPaperDollUI::ListenToElementMessage @ 004a5c30).
@@ -2137,7 +2167,7 @@ export class GameUI {
      * when the user drags an inventory cell over the trade window with
      * a trade open. Caller ships GameActionAddToTrade per ACE wire
      * format (matches the right-click path). */
-    onDropToTrade?: (itemIndex: number) => void;
+    onDropToTrade?: (guid: number) => void;
     /** CORE.17.k.b.b.c.c.a.a.c.a.b.a — a wielded item dropped on the trade self list. */
     onDropEquippedToTrade?: (slot: EquipMask) => void;
     /** BUG.house-buy-rent-payment-item-selection-ui — drop an inventory
@@ -2145,7 +2175,7 @@ export class GameUI {
      *  gmSlumlordUI's ItemListDragHandler drop target; caller resolves
      *  the item and forwards it to GameUI.addHousePaymentItem() for
      *  wcid/NeedsMore validation before staging it. */
-    onDropToHousePayment?: (itemIndex: number, tab: 'buy' | 'rent') => void;
+    onDropToHousePayment?: (guid: number, tab: 'buy' | 'rent') => void;
     /**
      * SWEEP1006B — ItemHolder::UseObject @ 00588a80 on an owned item: a
      * pack cell's or a paperdoll slot's double-click (UIElement_ItemList::
@@ -2154,7 +2184,7 @@ export class GameUI {
      * DetermineUseResult case 2 (PlaceInBackpack).
      */
     onUseObject?: (guid: number) => void;
-    onRightClickItem?: (itemIndex: number) => void;
+    onRightClickItem?: (guid: number) => void;
     /** FAITHFUL.525 — Right-click an equipment-slot to surface a
      *  context menu with "Unequip" + "Examine". The caller (main.ts)
      *  receives the slot mask + the equipped-item snapshot. */
@@ -2323,7 +2353,7 @@ export class GameUI {
   private magicPanelTab: 'spells' | 'components' | 'research' = 'spells'; // VISUAL.139 — 'foci' removed (foci retired from AC in 2010; not an EoL page)
   private spellComponents: Array<{ name: string; quantity: number; icon?: number }> = [];
   private spellCallbacks: {
-    onCastSpell?: (spellIndex: number) => void;
+    onCastSpell?: (spellId: number) => void;
     /**
      * AC1999.spell-research-panel — the 1999 research panel's Test button
      * (CreateSpellPanel_ListenToMessage @ 0x5ab710): main decides (magic
@@ -2459,6 +2489,7 @@ export class GameUI {
     this.setSpellBarArrowRule(rules.spellBarArrows);
     this.setVendorBuyOneMask(rules.vendorBuyOneMask);
     this.setEncumbranceNotice(rules.encumbranceNotice);
+    this.setStatusLineRules(rules.statusLine);
     // The era's brightness slider (EraWorldRules.brightness): a gamma ramp or the landscape floor.
     this.applyScreenBrightness();
   }
@@ -4066,6 +4097,7 @@ export class GameUI {
       0x060011f9, // Drag accept (state 0x10000040): green ring
       0x060011f8, // Drag refuse (state 0x10000041): red slashed circle
       0x060011f7, // Toolbar backpack button drag-over (0x1000045e state 0x10000046)
+      0x060011fa, // Toolbar shortcut cell drag-over (0x1000045f state 0x10000040), VISUAL.drag-merge-indicator
       // CORE.1 — per-slot EMPTY pictogram tiles for the paperdoll (each slot
       // element in layout 0x21000024 names its own UIItem template via prop
       // 0x1000000e; the template's icon el 0x1000033b shows this texture in
@@ -4909,7 +4941,8 @@ export class GameUI {
     const panel = this.inventoryPanel;
     if (!panel || !panel.isConnected) return false;
     for (const cell of panel.querySelectorAll<HTMLElement>('[data-inv-slot]')) {
-      const item = this.inventoryItems[Number(cell.dataset.invSlot)];
+      const guid = Number(cell.dataset.invGuid);
+      const item = this.inventoryItems.find((i) => i.id === guid);
       if (!item) return false;
       const decile = item.cooldownId
         ? cooldownDecile(item.cooldownId, item.cooldownDuration ?? 0, this.activeEnchantments.values(), now)
@@ -5985,6 +6018,9 @@ export class GameUI {
     this.endChargenSession();
     this.chargenPendingRestore = null;
     this.wizard = this.newChargenWizard();
+    // A new CG_10_UI: its "Starting Town" menu is built anew, closed (1999).
+    this.chargenTownMenu1999 = null;
+    this.chargenTownMenuOpen = false;
     // CORE.17.k.b.b.a.c — gmCGSummaryPage::m_bNameEntered starts false with
     // the page: the name field shows the ID_CharGen_NamePrompt until typed in.
     this.chargenNameEntered = false;
@@ -6029,6 +6065,9 @@ export class GameUI {
       : new CharacterCreateWizard();
     // FAITHFUL.176 + .178 — apply DAT-driven name-validation rules if loaded.
     if (this.nameFilterRules || this.tabooCheck) w.setNameValidationRules(this.nameFilterRules, this.tabooCheck);
+    // VISUAL.ac1999-chargen-town-page — 1999 has no Town page: the start
+    // area is the summary page's "Starting Town" menu.
+    w.townOnSummary = !!this.chargen1999;
     return w;
   }
 
@@ -6506,6 +6545,19 @@ export class GameUI {
     this.refreshSpewBox();
   }
 
+  /**
+   * BUG.ac1999-status-text-under-vitals — the era's status-line placement and line count
+   * (EraClientRules.statusLine): end of retail's strip at (centre, 20) behind the vitals plate,
+   * the 1999 client's one line below its stat line.
+   */
+  private setStatusLineRules(rules: StatusLineRules): void {
+    this.spewBox.setMaxItems(rules.maxItems);
+    if (this.spewBoxEl) {
+      this.spewBoxEl.style.top = `${rules.top}px`;
+      this.refreshSpewBox();
+    }
+  }
+
   /** The strip itself: layout 0x21000011 hosted at (0,20) 450x72, centred (edges L3/R3). */
   private renderSpewBox(): void {
     this.spewBoxEl?.remove();
@@ -6514,7 +6566,7 @@ export class GameUI {
     box.setAttribute('data-element-id', '0x10000048');
     Object.assign(box.style, {
       position: 'absolute',
-      top: `${SPEW_BOX_TOP}px`,
+      top: `${this.clientRules.statusLine.top}px`,
       left: `${spewBoxLeft(this.hudLogicalWidth())}px`,
       width: `${SPEW_BOX_WIDTH}px`, height: `${SPEW_BOX_HEIGHT}px`,
       overflow: 'hidden', pointerEvents: 'none',
@@ -7345,6 +7397,8 @@ export class GameUI {
 
   private renderCharacterCreate(): void {
     const missEpoch = datMissEpoch();
+    const holdBefore = this.chargenHoldMisses;
+    this.warmChargenChoices();
     try {
       // Set<Slot>Style's colour hold for the clothing items whose ClothingTables are resident now: a
       // streamed page repaints as they land, so a colour rolled before (past the item's own count) is
@@ -7352,8 +7406,59 @@ export class GameUI {
       this.wizard.clampClothingColors(this.chargenRollDeps());
       this.renderCharacterCreatePage();
     } finally {
-      if (!noDatMissSince(missEpoch)) this.chargenMissedDats = true;
+      if (this.missedOutsideChargenHold(missEpoch, holdBefore)) this.chargenMissedDats = true;
     }
+  }
+
+  /**
+   * Whether a streamed read missed since `missEpoch` other than inside the
+   * preview hold's builds (the hold rebuilds those itself on arrival; a whole
+   * page repaint for them would rebuild every control on each batch).
+   */
+  private missedOutsideChargenHold(missEpoch: number, holdBefore: number): boolean {
+    return datMissEpoch() - missEpoch - (this.chargenHoldMisses - holdBefore) > 0;
+  }
+
+  /**
+   * UX.chargen-preview-no-placeholder — warm what the next choice will need:
+   * every option of the heritage + sex in force (first), then every heritage
+   * + sex's base figure, so a heritage switch or a step through the Appearance
+   * rows finds its files resident. Streamed DATs only (the host has no fetch
+   * with whole DATs); one set in flight at Background priority.
+   */
+  private warmChargenChoices(heritage = this.wizard.heritage, gender = this.wizard.gender, bases = true): void {
+    const host = this.uiHost;
+    const builder = host?.characterModelBuilder;
+    const fetch = host?.prefetchPortalFiles;
+    if (!builder || !fetch) return;
+    const pf = (this.chargenPrefetcher ??= new ChargenPrefetcher((ids) => fetch.call(host, ids, 'background'), builder, {
+      ...builder.prefetchSources,
+      // gmCG3DView's idle / rest / gestures for the heritage (DidMapper 0x25000010, an interface mapper).
+      chargenAnimations: (h) => {
+        const d = resolveChargenAnimationDids(h, this.uiPortalDb ? loadChargenDidMapper(this.uiPortalDb) : null);
+        return [d.animation, d.rest, ...d.gestures];
+      },
+    }));
+    pf.focus(heritage, gender);
+    if (bases) pf.warmBases();
+  }
+
+  /**
+   * A held preview build missed: fetch its whole appearance closure at once at
+   * critical priority (one wave), rather than one dependency level per retry.
+   */
+  private fetchChargenAppearanceNow(heritage: number, gender: number, appearance: import('@ac/shared').AppearanceInfo, setupIdOverride = 0): void {
+    const host = this.uiHost;
+    const builder = host?.characterModelBuilder;
+    const sex = builder?.getSexCG(heritage, gender);
+    if (!host?.prefetchPortalFiles || !builder || !sex) return;
+    void host.prefetchPortalFiles(chargenAppearanceIds(sex, appearance, builder.prefetchSources, setupIdOverride), 'critical').catch(() => { /* the hold's cap releases it */ });
+  }
+
+  /** Redraw whichever chargen view is up from the current figure (no rebuild). */
+  private redrawChargenViews(): void {
+    if (this.screenContainer.querySelector('.chargen-preview-canvas')) this.renderChargenPreview(false);
+    else if (this.screenContainer.querySelector('.chargen-summary-canvas')) this.renderChargenSummaryView(false);
   }
 
   private renderCharacterCreatePage(): void {
@@ -7881,6 +7986,12 @@ export class GameUI {
   /** gmCharGenMainUI's per-UI state ends (a new one, or the screen left): no
    *  CharacterCreate pending, no reply timer, no login awaited. */
   private endChargenSession(): void {
+    // UX.chargen-preview-no-placeholder — a pending figure is for this page
+    // only, and the next chargen starts from no figure, not this one's.
+    this.chargenPreviewHold.cancel();
+    this.chargenPreviewScene = null;
+    this.chargenPreviewCamera = null;
+    this.chargenPreviewModel = null;
     this.chargenVerificationPending = false;
     this.chargenAwaitingLogin = false;
     this.clearChargenReplyTimer();
@@ -8749,10 +8860,11 @@ export class GameUI {
     anim: ChargenViewAnim,
   ): void {
     const missEpoch = datMissEpoch();
+    const holdBefore = this.chargenHoldMisses;
     try {
       this.renderChargenModelIntoCanvas(canvas, rebuild, cam, anim);
     } finally {
-      if (!noDatMissSince(missEpoch)) this.chargenMissedDats = true;
+      if (this.missedOutsideChargenHold(missEpoch, holdBefore)) this.chargenMissedDats = true;
     }
   }
 
@@ -8767,28 +8879,39 @@ export class GameUI {
 
     const w = canvas.width, h = canvas.height;
     if (rebuild || !this.chargenPreviewScene) {
-      const model = builder.buildCharacterModel(
-        this.wizard.heritage, this.wizard.gender,
-        { ...this.wizard.appearance } as import('@ac/shared').AppearanceInfo,
+      // UX.chargen-preview-no-placeholder — the new figure is built off-screen
+      // and swapped in only once every file it reads is resident (or the hold's
+      // cap released a stall); until then the last complete figure stays.
+      const heritage = this.wizard.heritage, gender = this.wizard.gender;
+      const appearance = { ...this.wizard.appearance } as import('@ac/shared').AppearanceInfo;
+      this.chargenPreviewHold.request(
+        () => builder.buildCharacterModel(heritage, gender, appearance),
+        (model, sync) => {
+          // CORE.17.k.b.b.a.e — gmCG3DView::Update's viewport lighting:
+          // CreatureMode's ambient (0.3, 0.3, 0.3) and ONE DISTANT_LIGHT of
+          // intensity 2.0 travelling along AC (0.3, 1.9, 0.65) — white Diffuse
+          // × 2.0 on the D3D directional (config_hardware_light).
+          this.chargenPreviewScene = buildCreatureModeScene(model, CHARGEN_VIEW_LIGHT_DIRECTION, CHARGEN_VIEW_LIGHT_INTENSITY);
+          // CORE.18.f — the scene is the world's (x, z, y) reflection, so the
+          // view draws through the same mirror as the world camera.
+          this.chargenPreviewCamera = mirrorCameraX(new THREE.PerspectiveCamera(cam.fov, w / h, 0.1, 100));
+          this.chargenPreviewModel = model;
+          this.chargenPreviewUnbound = true;
+          // Swapped in after the files landed: draw it in whichever view is up now.
+          if (!sync) this.redrawChargenViews();
+        },
+        { onMiss: () => this.fetchChargenAppearanceNow(heritage, gender, appearance) },
       );
-      if (!model) return;
-      this.syncChargenViewAnimation(model, anim);
-      // CORE.17.k.b.b.a.e — gmCG3DView::Update's viewport lighting:
-      // CreatureMode's ambient (0.3, 0.3, 0.3) and ONE DISTANT_LIGHT of
-      // intensity 2.0 travelling along AC (0.3, 1.9, 0.65) — white Diffuse
-      // × 2.0 on the D3D directional (config_hardware_light).
-      const scene = buildCreatureModeScene(model, CHARGEN_VIEW_LIGHT_DIRECTION, CHARGEN_VIEW_LIGHT_INTENSITY);
-      // CORE.18.f — the scene is the world's (x, z, y) reflection, so the
-      // view draws through the same mirror as the world camera.
-      const camera = mirrorCameraX(new THREE.PerspectiveCamera(cam.fov, w / h, 0.1, 100));
-      this.chargenPreviewScene = scene;
-      this.chargenPreviewCamera = camera;
-      this.chargenPreviewModel = model;
+      this.chargenHoldMisses += this.chargenPreviewHold.lastBuildMisses;
     }
-    const scene = this.chargenPreviewScene!;
-    const camera = this.chargenPreviewCamera!;
-    const model = this.chargenPreviewModel!;
-    if (!rebuild) this.syncChargenViewAnimation(null, anim);
+    // Nothing complete to show yet (a cold first build): the viewport stays empty.
+    if (!this.chargenPreviewScene || !this.chargenPreviewCamera || !this.chargenPreviewModel) return;
+    const scene = this.chargenPreviewScene;
+    const camera = this.chargenPreviewCamera;
+    const model = this.chargenPreviewModel;
+    // A figure just swapped in binds the view's sequence (the animator keeps its clock).
+    this.syncChargenViewAnimation(this.chargenPreviewUnbound ? model : null, anim);
+    this.chargenPreviewUnbound = false;
     model.rotation.set(0, cam.yaw, 0);
     camera.fov = cam.fov;
     camera.aspect = w / h;
@@ -9203,7 +9326,12 @@ export class GameUI {
     // box (its case falls through to break); a category's p73 help string is
     // that row's TOOLTIP, not the box text (VISUAL.chargen-appearance-wheel-
     // and-frame: retail opens on the page intro with Hair Style selected).
-    const instruction = getString(43066563)
+    // VISUAL.ac1999-chargen-town-page sweep — 1999's Appearance (CG_3_UI)
+    // and Clothing (CG_4_UI) pages each put their own CharGen help text in
+    // the help box (CharGen +0x2c / +0x30 through 0x0056c5e0); the 1999
+    // world shows those, by this page's face / clothes half.
+    const help1999 = this.chargen1999?.pageHelp(this.appearMode === 'clothes' ? Chargen1999Page.Clothing : Chargen1999Page.Appearance);
+    const instruction = help1999 ?? getString(43066563)
       ?? 'You can customize the look of your character on this screen.';
 
     return `
@@ -9231,7 +9359,7 @@ export class GameUI {
              (CORE.17.k.b.b.a) -->
         ${datFrameHtml(texUrl, { x: 10, y: 201, w: 270, h: 292 }, `
           <div style="${frameTextInsetStyle()}overflow-y:auto;">
-            <span data-ac-text="${instruction}" ${GameUI.datTextAttrs(descRef(0x21000049, 0x100003ab))} data-ac-maxwidth="235"></span>
+            <span data-ac-text="${escapeHtmlAttr(instruction)}" ${GameUI.datTextAttrs(descRef(0x21000049, 0x100003ab))} data-ac-maxwidth="235"></span>
           </div>`, { desc: descRef(0x21000049, 0x100003ab), scrollbar: true })}
 
         <!-- Category panel 0x100003ac (305,20) 193x228 — drawn by the page's own
@@ -9784,7 +9912,9 @@ export class GameUI {
     // VISUAL.164 (remaining scope) — right panel 0x100003fd shows the DAT
     // instruction string (p23 24143443), not an invented "Trained Skills" list.
     const texUrl = (id: number): string | null => this.getTexURL(id);
-    const skillsInstructionText = getString(24143443)
+    // VISUAL.ac1999-chargen-town-page sweep — the 1999 Skills page (CG_8_UI)
+    // shows its CharGen help text (CharGen +0x3c through 0x0056c5e0).
+    const skillsInstructionText = this.chargen1999?.pageHelp(Chargen1999Page.Skills) ?? getString(24143443)
       ?? "Use this screen to select and modify your character's skills. "
         + 'Clicking the up-arrow increases your training level (from Untrained '
         + 'to Trained, or from Trained to Specialized). Clicking the down-arrow '
@@ -9832,7 +9962,7 @@ export class GameUI {
              (CORE.17.k.b.b.a). -->
         ${datFrameHtml(texUrl, { x: 486, y: 41, w: 305, h: 444 }, `
           <div style="${frameTextInsetStyle()}overflow:hidden;">
-            <span data-ac-text="${skillsInstructionText}" ${GameUI.datTextAttrs(descRef(0x21000048, 0x100003fd))} data-ac-maxwidth="270"></span>
+            <span data-ac-text="${escapeHtmlAttr(skillsInstructionText)}" ${GameUI.datTextAttrs(descRef(0x21000048, 0x100003fd))} data-ac-maxwidth="270"></span>
           </div>`, { desc: descRef(0x21000048, 0x100003fd) })}
       </div>
     `;
@@ -9886,7 +10016,7 @@ export class GameUI {
    * Town description at (9,85) 250x380.
    */
   private renderMapStep(): string {
-    if (this.chargen1999) return this.renderStartAreaList1999();
+    if (this.chargen1999) return this.renderNoTownPage1999();
     const mapTex = this.getTexURL(0x06004d5f);
     // The pin 0x1000040c: state 1 (normal) 0x06004d60, state 6 (selected)
     // 0x06004d61, the large lit marker (VISUAL.chargen-town-page; the two
@@ -9983,47 +10113,78 @@ export class GameUI {
   }
 
   /**
-   * The Town page against the 1999 world — an INTERIM surface (the faithful
-   * 1999 chargen is docs/ac1999-support-scope.md Phase 8). The 1999 CharGen
-   * has 18 named start areas ("Holtburg South" …) where end of retail has the
-   * four map towns, and the map art is end of retail's Dereth, so the map
-   * frame 0x1000040a (288,10) 481x481 holds a list of the heritage's start
-   * areas instead (startAreasFor1999: its own towns first), each row a
-   * `.map-pin` carrying the CharGen start-area index the 1999 server takes
-   * (0..17; CharSelect1999 sends it through). The heading shows the selected
-   * area's name as on the end-of-retail page; the description box stays
-   * empty (the end-of-retail town texts and "click on the map" how-to don't
-   * apply, and the 1999 CharGen has no town text). At most 18 rows (8 + 18 x
-   * 26 = 476 px) fit the 481 px frame, so the list clips: it never scrolled,
-   * and a 2 px text overhang put a native scrollbar on it.
+   * VISUAL.ac1999-chargen-town-page — the 1999 client has no Town page (its
+   * ten chargen pages are CG_1_UI … CG_10_UI; Chargen1999
+   * STARTING_TOWN_LABEL_1999), so the wizard skips the Town tab there
+   * (CharacterCreateWizard.townOnSummary) and the start area is the summary
+   * page's "Starting Town" menu (renderStartingTownMenu1999). Nothing lands
+   * here on a 1999 world; if a caller sets the step directly, the page is
+   * empty rather than end of retail's map and town texts.
    */
-  private renderStartAreaList1999(): string {
-    const texUrl = (id: number): string | null => this.getTexURL(id);
-    const areas = this.chargenStartAreas1999();
-    const nameOf = (i: number): string => this.charGen?.starterAreas[i]?.name ?? '';
-    const selected = areas.includes(this.wizard.startArea) ? this.wizard.startArea : -1;
-    const ROW_H = 26;
-    const rows = areas.map((area, i) => {
-      const on = area === selected;
-      return `<div class="map-pin start-area-row" data-area="${area}" style="
-        position:absolute;left:10px;top:${8 + i * ROW_H}px;width:461px;height:${ROW_H}px;cursor:pointer;
-        display:flex;align-items:center;justify-content:center;">
-          <span data-ac-text="${escapeHtmlAttr(nameOf(area))}" ${GameUI.datTextAttrs(descRef(0x2100004a, 0x1000040a, 0x1000040d, 0x10000409), on ? 6 : 1)}></span>
-      </div>`;
-    }).join('');
+  private renderNoTownPage1999(): string {
+    return '<div class="chargen-no-town-page" style="position:relative;width:800px;height:485px;"></div>';
+  }
+
+  /** The 1999 "Starting Town" menu's order for the wizard's heritage and sex (startingTownMenuOrder1999), drawn when they change, as CG_10_UI_Update draws it. */
+  private chargenTownMenu1999: { key: string; order: number[] } | null = null;
+  /** Whether the 1999 "Starting Town" menu's list is open. */
+  private chargenTownMenuOpen = false;
+
+  private chargenTownMenuOrder1999(): number[] {
+    const key = `${this.wizard.heritage}:${this.wizard.gender}`;
+    if (this.chargenTownMenu1999?.key === key) return this.chargenTownMenu1999.order;
+    const areas = this.charGen?.starterAreas ?? [];
+    const order = startingTownMenuOrder1999(
+      this.charGen?.heritageGroups.get(this.wizard.heritage),
+      (a) => areas[a]?.name ?? '',
+      areas.length,
+      (n) => randInt(this.chargenRandomSource, n),
+    );
+    this.chargenTownMenu1999 = { key, order };
+    return order;
+  }
+
+  /**
+   * VISUAL.ac1999-chargen-town-page — the 1999 Name and Summary page's start
+   * area control (CG_10_UI ctor @ 0x005660e0): the label "Starting Town"
+   * (0x0045bbf0 at (0x268,0xa2) 150x18, the exe's literal) over the menu
+   * 0x005d1ef0 at (0x268,0xb6) 117x25, whose rows are the CharGen
+   * start-area names in CG_10_UI_Update's order, the selected row being the
+   * state's start area (0x00569ce0 / 0x005d23c0). The 1999 art for it is
+   * Phase 8 (docs/ac1999-support-scope.md); here it is the end-of-retail menu
+   * the Options page uses (UIOption_Menu 0x10000224: value plate 0x060012b3,
+   * arrow 0x060012b1, list rows 0x1000035a with hover 0x060012b4), in the
+   * 28 px between the name field and the how-to: label (315,76), menu
+   * (417,76) 145x19, its list opening below.
+   */
+  private renderStartingTownMenu1999(texUrl: (id: number) => string | null): string {
+    const areas = this.charGen?.starterAreas ?? [];
+    const order = this.chargenTownMenuOrder1999();
+    const nameOf = (a: number): string => areas[a]?.name ?? '';
+    const current = order.includes(this.wizard.startArea) ? nameOf(this.wizard.startArea) : '';
+    const plate = texUrl(0x060012b3);
+    const arrow = texUrl(0x060012b1);
+    const ROW_H = 18;
+    const FIELD = { x: 417, y: 76, w: 145, h: 19 };
+    const plateW = FIELD.w - 17;
+    const plateCss = plate ? `background-image:url(${plate});background-size:100% 100%;` : 'background:rgba(20,30,15,0.7);';
+    const rows = this.chargenTownMenuOpen ? order.map((a, i) => `<div class="starting-town-row" data-area="${a}"${a === this.wizard.startArea ? ' data-current="1"' : ''} style="
+        position:absolute;left:0;top:${i * ROW_H}px;width:${plateW}px;height:${ROW_H}px;cursor:pointer;
+        display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap;${plateCss}">
+        <span data-ac-text="${escapeHtmlAttr(nameOf(a))}" ${GameUI.datTextAttrs(descRef(0x21000043, 0x1000035a))}></span>
+      </div>`).join('') : '';
+    const listH = Math.min(order.length * ROW_H, 485 - (FIELD.y + FIELD.h));
     return `
-      <div style="position:relative;width:800px;height:485px;">
-        <div style="position:absolute;left:13px;top:20px;width:180px;height:60px;display:flex;align-items:center;padding-left:7px;box-sizing:border-box;">
-          ${selected >= 0 ? `<span data-ac-text="${escapeHtmlAttr(nameOf(selected))}" ${GameUI.datTextAttrs(descRef(0x2100004a, 0x10000407, 0x10000408))}></span>` : ''}
+        <div class="starting-town-label" style="position:absolute;left:315px;top:${FIELD.y}px;width:${FIELD.x - 315}px;height:${FIELD.h}px;display:flex;align-items:center;white-space:nowrap;overflow:hidden;">
+          <span data-ac-text="${STARTING_TOWN_LABEL_1999}" ${GameUI.datTextAttrs(descRef(0x2100004c, 0x100002f8, 0x100002f9))}></span>
         </div>
-        ${datFrameHtml(texUrl, { x: 9, y: 85, w: 250, h: 406 }, `
-          <div class="town-description" style="${frameTextInsetStyle()}overflow:hidden;"></div>`, { desc: descRef(0x2100004a, 0x10000409) })}
-        ${datFrameHtml(texUrl, { x: 288, y: 10, w: 481, h: 481 }, `
-          <div class="start-area-list" style="position:absolute;left:0;top:0;width:481px;height:481px;overflow:hidden;">
-            ${rows}
-          </div>`, { desc: descRef(0x2100004a, 0x1000040a) })}
-      </div>
-    `;
+        <div class="starting-town-menu" data-value="${escapeHtmlAttr(current)}" style="position:absolute;left:${FIELD.x}px;top:${FIELD.y}px;width:${FIELD.w}px;height:${FIELD.h}px;cursor:pointer;">
+          <div class="starting-town-value" style="position:absolute;left:0;top:0;width:${plateW}px;height:18px;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:nowrap;${plateCss}">
+            <span data-ac-text="${escapeHtmlAttr(current)}" ${GameUI.datTextAttrs(descRef(0x21000043, 0x1000035a))}></span>
+          </div>
+          <div class="starting-town-arrow" style="position:absolute;left:${plateW}px;top:0;width:17px;height:19px;${arrow ? `background-image:url(${arrow});background-size:100% 100%;` : ''}"></div>
+        </div>
+        ${this.chargenTownMenuOpen ? `<div class="starting-town-list" style="position:absolute;left:${FIELD.x}px;top:${FIELD.y + FIELD.h}px;width:${plateW}px;height:${listH}px;overflow:hidden;z-index:20;">${rows}</div>` : ''}`;
   }
 
   /**
@@ -10103,7 +10264,18 @@ export class GameUI {
     // where a p21-centred line in the 42 px field would sit ~7 px lower.
     // (Why the edit field ignores its p21 is not yet traced in the decomp.)
     const nameTop = calcJustification(nameFontPx, 42, 0, 0, nameStyle?.marginTop ?? 8, nameStyle?.marginBottom ?? 5);
-    const howTo = summaryHowToText(this.wizard.heritage, this.wizard.gender, (token) => getString(acStringHash(token)));
+    // VISUAL.ac1999-chargen-town-page sweep — on the 1999 Name and Summary
+    // page (CG_10_UI) the help box gets the name-page help (CharGen +0x44)
+    // in the ctor, then CG_10_UI_Update @ 0x00568370 replaces it with the
+    // sex's description (Sex_CG +0x14, the heritage's naming conventions)
+    // whenever the sex changes, which it does on the first Update (the cached
+    // id starts 0). 0x0056c5e0's second argument 0 replaces the text, as
+    // CG_6_UI's template text does on every pick. So the box shows the naming
+    // conventions; end of retail's SummaryHowTo frame text is not 1999's.
+    const howTo = this.chargen1999
+      ? this.chargen1999.sexText(this.wizard.heritage, this.wizard.gender)
+        ?? this.chargen1999.pageHelp(Chargen1999Page.NameAndSummary) ?? ''
+      : summaryHowToText(this.wizard.heritage, this.wizard.gender, (token) => getString(acStringHash(token)));
 
     return `
       <div style="position:relative;width:800px;height:485px;">
@@ -10129,6 +10301,7 @@ export class GameUI {
               color:transparent;caret-color:${nameColor};font-size:${nameFontPx}px;
             ">
           </div>`, { desc: nameRef })}
+        ${this.chargen1999 ? this.renderStartingTownMenu1999(texUrl) : ''}
 
         ${datFrameHtml(texUrl, { x: 315, y: 98, w: 247, h: 380 }, `
           <div class="summary-howto" style="${frameTextInsetStyle()}overflow-y:auto;">
@@ -10527,6 +10700,38 @@ export class GameUI {
         this.renderCharacterCreate();
       });
     });
+
+    // VISUAL.ac1999-chargen-town-page — the 1999 summary page's "Starting
+    // Town" menu: a click opens the list, a row sets the start area (the
+    // CharGen index the create request carries) and closes it, a click
+    // anywhere else closes it.
+    const townMenu = this.screenContainer.querySelector('.starting-town-menu');
+    if (townMenu) {
+      townMenu.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this.chargenTownMenuOpen = !this.chargenTownMenuOpen;
+        this.renderCharacterCreate();
+      });
+      this.screenContainer.querySelectorAll('.starting-town-row').forEach(el => {
+        el.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          this.wizard.startArea = parseInt((el as HTMLElement).dataset.area || '0');
+          this.chargenTownMenuOpen = false;
+          this.renderCharacterCreate();
+        });
+      });
+      if (this.chargenTownMenuOpen) {
+        const list = this.screenContainer.querySelector('.starting-town-list');
+        const close = (ev: Event): void => {
+          if (list?.contains(ev.target as Node) || townMenu.contains(ev.target as Node)) return;
+          window.removeEventListener('pointerdown', close, true);
+          if (!this.chargenTownMenuOpen) return;
+          this.chargenTownMenuOpen = false;
+          if (this.uiManager.currentScreen === 'character-create') this.renderCharacterCreate();
+        };
+        window.addEventListener('pointerdown', close, true);
+      }
+    }
 
     // CORE.17.k.b.b.a.c — the name field 0x10000402
     // (gmCGSummaryPage::ListenToElementMessage @ 0047bf40 on messages 0x12 /
@@ -12371,11 +12576,13 @@ export class GameUI {
     ];
     // NO-DEAD-ENDS — a feature this world's era lacks has no button (the
     // journal on a 1999 world, which has no contracts). Retail has no
-    // disabled art for these tabs, so the row collapses instead of leaving
-    // a hole (ui/ToolbarTabs.ts): later tabs close up and the freed end of
-    // the row is the plain bar.
+    // disabled art for these tabs, so no hole is left (ui/ToolbarTabs.ts):
+    // VISUAL.ac1999-hidden-element-gaps — an era whose client lays out its
+    // own row (1999: PanelUI @ 0x004eb120, five abutting tabs across the
+    // bar) gets that row; otherwise later tabs close up and the freed end
+    // of the row is the plain bar.
     const eraHiddenButtons = hiddenBy(FEATURE_TOOLBAR_BUTTONS, this.eraUnsupported);
-    const row = collapseToolbarTabs(tabDefs, eraHiddenButtons);
+    const row = eraToolbarRow(tabDefs, eraHiddenButtons, this.clientRules.toolbarTabSlots);
     if (row.filler) {
       // A tab tile's edge column is the plain bar (gold strip over black):
       // stretched across the freed span, under the right separator.
@@ -12391,11 +12598,12 @@ export class GameUI {
       });
       bottomBar.appendChild(filler);
     }
-    const tabX = new Map(row.tabs.map((t) => [t.id, t.x]));
+    const tabAt = new Map(row.tabs.map((t) => [t.id, t]));
     for (const tab of tabDefs) {
-      const x = tabX.get(tab.id);
-      if (x === undefined) continue;
-      tab.x = x;
+      const slot = tabAt.get(tab.id);
+      if (slot === undefined) continue;
+      tab.x = slot.x;
+      tab.w = slot.w;
       const btn = document.createElement('div');
       btn.id = tab.id;
       tagLayoutElement(btn, CLASSIC_TOOLBAR_LAYOUT, tab.el);
@@ -12471,7 +12679,7 @@ export class GameUI {
       invDragOverlay.style.backgroundImage = url ? `url(${url})` : 'none';
       invDragOverlay.dataset.acState = on ? '10000046' : '1000003f';
     };
-    const draggingObject = (): boolean => this.dragItemIndex >= 0 || this.dragSourceSlot !== null || !!this.worldDragGuid;
+    const draggingObject = (): boolean => this.dragItemGuid !== 0 || this.dragSourceSlot !== null || !!this.worldDragGuid;
     rightBtn.addEventListener('dragover', (e) => {
       if (!draggingObject()) return;
       e.preventDefault();
@@ -12488,7 +12696,7 @@ export class GameUI {
       setInvDragOverlay(false);
       const guid = this.currentDragGuid();
       this.worldDragGuid = 0;
-      this.dragItemIndex = -1;
+      this.dragItemGuid = 0;
       this.dragSourceSlot = null;
       if (guid) this.dragCallbacks.onPlaceInBackpack?.(guid);
     });
@@ -15574,16 +15782,21 @@ export class GameUI {
    */
   private paperdollDropIgnoresContainer(): boolean {
     if (!this.dragIsContainer) return false;
-    this.dragItemIndex = -1;
+    this.dragItemGuid = 0;
     this.dragSourceSlot = null;
     this.dragIsContainer = false;
     return true;
   }
 
+  /** The carried pack item under the current drag, looked up by its id in the current list (never a stale position). */
+  private draggedInventoryItem(): InventoryItem | undefined {
+    return this.dragItemGuid !== 0 ? this.inventoryItems.find((i) => i.id === this.dragItemGuid) : undefined;
+  }
+
   /** The object under the current drag (a pack item, a worn item or a ground object), or 0. */
   private currentDragGuid(): number {
     if (this.worldDragGuid) return this.worldDragGuid;
-    if (this.dragItemIndex >= 0) return this.inventoryItems[this.dragItemIndex]?.id ?? 0;
+    if (this.dragItemGuid !== 0) return this.dragItemGuid;
     if (this.dragSourceSlot !== null) return this.equippedItems.find(eq => eq.slot === this.dragSourceSlot)?.id ?? 0;
     return 0;
   }
@@ -16116,7 +16329,7 @@ export class GameUI {
         if (equipped) {
           slotEl.draggable = true;
           slotEl.addEventListener('dragstart', (e) => {
-            this.dragItemIndex = -1;
+            this.dragItemGuid = 0;
             this.dragSourceSlot = equipped.slot;
             if (e.dataTransfer) {
               e.dataTransfer.effectAllowed = 'move';
@@ -16127,7 +16340,7 @@ export class GameUI {
             this.beginItemListDragWaiting(equipped.id);
           });
           slotEl.addEventListener('dragend', () => {
-            this.dragItemIndex = -1;
+            this.dragItemGuid = 0;
             this.dragSourceSlot = null;
           });
         }
@@ -16144,13 +16357,13 @@ export class GameUI {
           this.setCellDragAccept(slotEl, DRAG_ACCEPT_STATE.none);
           if (this.paperdollDropIgnoresContainer()) return;
           if (this.acceptWorldDragToPaperdoll({ kind: 'slot', mask: slotDef.mask })) return;
-          if (this.dragItemIndex >= 0) {
-            this.dragCallbacks.onDropToSlot?.(this.dragItemIndex, { kind: 'slot', mask: slotDef.mask });
+          if (this.dragItemGuid !== 0) {
+            this.dragCallbacks.onDropToSlot?.(this.dragItemGuid, { kind: 'slot', mask: slotDef.mask });
           } else if (this.dragSourceSlot !== null && (this.dragSourceSlot & slotDef.mask) === 0) {
             // (Dropped back on a slot it already fills: nothing to do.)
             this.dragCallbacks.onDropWornToPaperdoll?.(this.dragSourceSlot, { kind: 'slot', mask: slotDef.mask });
           }
-          this.dragItemIndex = -1;
+          this.dragItemGuid = 0;
           this.dragSourceSlot = null;
         });
 
@@ -16214,12 +16427,12 @@ export class GameUI {
           setBandOverlay(DRAG_ACCEPT_STATE.none);
           if (this.paperdollDropIgnoresContainer()) return;
           if (this.acceptWorldDragToPaperdoll({ kind: 'band' })) return;
-          if (this.dragItemIndex >= 0) {
-            this.dragCallbacks.onDropToSlot?.(this.dragItemIndex, { kind: 'band' });
+          if (this.dragItemGuid !== 0) {
+            this.dragCallbacks.onDropToSlot?.(this.dragItemGuid, { kind: 'band' });
           } else if (this.dragSourceSlot !== null) {
             this.dragCallbacks.onDropWornToPaperdoll?.(this.dragSourceSlot, { kind: 'band' });
           }
-          this.dragItemIndex = -1;
+          this.dragItemGuid = 0;
           this.dragSourceSlot = null;
         });
         // gmPaperDollUI::ListenToElementMessage @ 004a5c30 on the band: the
@@ -16245,7 +16458,7 @@ export class GameUI {
           const worn = hit ? this.equippedItems.find(eq => eq.id === hit) : undefined;
           // PrepareDragIcon only succeeds for an item (the player itself is not draggable).
           if (!worn) { e.preventDefault(); return; }
-          this.dragItemIndex = -1;
+          this.dragItemGuid = 0;
           this.dragSourceSlot = worn.slot;
           if (e.dataTransfer) {
             e.dataTransfer.effectAllowed = 'move';
@@ -16253,7 +16466,7 @@ export class GameUI {
           }
         });
         dragBand.addEventListener('dragend', () => {
-          this.dragItemIndex = -1;
+          this.dragItemGuid = 0;
           this.dragSourceSlot = null;
         });
         paperdollEl.appendChild(dragBand);
@@ -16484,7 +16697,7 @@ export class GameUI {
           if (packIdx === 0 && packSelGuid !== 0) {
             slot.draggable = true;
             slot.addEventListener('dragstart', (e) => {
-              this.dragItemIndex = -1;
+              this.dragItemGuid = 0;
               this.dragSourceSlot = null;
               this.worldDragGuid = 0;
               this.playerPackDragGuid = packSelGuid;
@@ -16503,23 +16716,22 @@ export class GameUI {
           }
           // A side pack drags like any pack item.
           if (packItem) {
-            const packInvIdx = this.inventoryItems.indexOf(packItem);
             slot.draggable = true;
             slot.addEventListener('dragstart', (e) => {
-              this.dragItemIndex = packInvIdx;
+              this.dragItemGuid = packItem.id;
               this.dragSourceSlot = null;
               // InqDropIconInfo's DROPITEM_IS_CONTAINER: the drag left a container list.
               this.dragIsContainer = true;
               if (e.dataTransfer) {
                 e.dataTransfer.effectAllowed = 'move';
-                e.dataTransfer.setData('text/plain', `inv:${packInvIdx}`);
+                e.dataTransfer.setData('text/plain', `inv:0x${packItem.id.toString(16)}`);
                 this.setItemDragImage(e.dataTransfer, { iconDid: packItem.iconDid ?? 0, overlayDid: packItem.iconOverlayDid,
                   underlayDid: packItem.iconUnderlayDid, itemType: packItem.itemType, effects: packItem.uiEffects });
               }
               this.beginItemListDragWaiting(packItem.id);
             });
             slot.addEventListener('dragend', () => {
-              this.dragItemIndex = -1;
+              this.dragItemGuid = 0;
               this.dragSourceSlot = null;
               this.dragIsContainer = false;
             });
@@ -16531,9 +16743,12 @@ export class GameUI {
           slot.addEventListener('dragover', (e) => {
             if (this.worldDropSource()) e.preventDefault();
           });
+          // The cell's UIItem (0x10000340, 32x32 at (2,2)) carries 0x1000045a on 0x1000045e.
+          this.attachCellDragAccept(inset, 32, () => this.itemListDragAcceptFor(true, packSelGuid), '1000045e');
           slot.addEventListener('drop', (e) => {
             e.preventDefault();
             e.stopPropagation();
+            this.setCellDragAccept(inset, DRAG_ACCEPT_STATE.none);
             this.itemListDrop({ list: 'packs', packSlot: packIdx });
           });
         }
@@ -16729,6 +16944,7 @@ export class GameUI {
             cell.addEventListener('dragover', (e) => {
               if (this.worldDropSource()) e.preventDefault();
             });
+            this.attachCellDragAccept(cell, 32, () => this.itemListDragAcceptFor(false, 0));
             cell.addEventListener('drop', (e) => {
               e.preventDefault();
               this.itemListDrop({ list: 'items', packSlot: this.selectedPackSlot, cellItemId: 0 });
@@ -16815,7 +17031,7 @@ export class GameUI {
             e.preventDefault();
             e.stopPropagation();
             select();
-            this.dragCallbacks.onRightClickItem?.(idx);
+            this.dragCallbacks.onRightClickItem?.(item.id);
           });
 
           // CORE.17.k.b.b.a.g — the item's tooltip is UIElement_UIItem::
@@ -16823,30 +17039,33 @@ export class GameUI {
           // otherwise — nothing else (no value / burden / stack / effect
           // lines) — shown by UIElementManager's machine (tagHudTooltip).
           cell.dataset.invSlot = `${idx}`;
+          // BUG.ammo-merge-swaps-first — the in-place refreshes find the cell's object by its id: the list can re-sort before the grid rebuilds.
+          cell.dataset.invGuid = `${item.id}`;
           // BUG.ac1999-eor-ui-values — the era's hover text (1999: the help bar's name line + hint).
           this.tagHudTooltip(cell, itemHoverText({ ...item, selling: this.sellStateGuids().has(item.id) }, 'pack', this.clientRules.itemHoverText));
 
           cell.draggable = true;
           cell.addEventListener('dragstart', (e) => {
-            this.dragItemIndex = idx;
+            this.dragItemGuid = item.id;
             this.dragSourceSlot = null;
             if (e.dataTransfer) {
               e.dataTransfer.effectAllowed = 'move';
-              e.dataTransfer.setData('text/plain', `inv:${idx}`);
+              e.dataTransfer.setData('text/plain', `inv:0x${item.id.toString(16)}`);
               this.setItemDragImage(e.dataTransfer, { iconDid: item.iconDid ?? 0, overlayDid: item.iconOverlayDid,
                 underlayDid: item.iconUnderlayDid, itemType: item.itemType, effects: item.uiEffects });
             }
             this.beginItemListDragWaiting(item.id);
           });
           cell.addEventListener('dragend', () => {
-            this.dragItemIndex = -1;
+            this.dragItemGuid = 0;
             this.dragSourceSlot = null;
           });
           cell.addEventListener('dragover', (e) => { e.preventDefault(); });
+          this.attachCellDragAccept(cell, 32, () => this.itemListDragAcceptFor(false, item.id));
           cell.addEventListener('drop', (e) => {
             e.preventDefault();
-            if (this.dragItemIndex === idx && !this.worldDragGuid && this.dragSourceSlot === null) {
-              this.dragItemIndex = -1;
+            if (this.dragItemGuid === item.id && !this.worldDragGuid && this.dragSourceSlot === null) {
+              this.dragItemGuid = 0;
               return;
             }
             this.itemListDrop({ list: 'items', packSlot: this.selectedPackSlot, cellItemId: item.id, cellIndex: pi });
@@ -16901,7 +17120,7 @@ export class GameUI {
     el.addEventListener('drop', (e) => {
       e.preventDefault();
       const source = this.worldDropSource();
-      this.dragItemIndex = -1;
+      this.dragItemGuid = 0;
       this.dragSourceSlot = null;
       this.worldDragGuid = 0;
       if (!source) return;
@@ -16956,7 +17175,7 @@ export class GameUI {
   private resetDragSourceState(): void {
     this.worldDragGuid = 0;
     this.dragSourceSlot = null;
-    this.dragItemIndex = -1;
+    this.dragItemGuid = 0;
     this.dragIsContainer = false;
     this.playerPackDragGuid = 0;
     this.shortcutDragFrom = -1;
@@ -16966,7 +17185,7 @@ export class GameUI {
   worldDropSource(): WorldDropSource | null {
     if (this.worldDragGuid !== 0) return { kind: 'world', guid: this.worldDragGuid };
     if (this.dragSourceSlot !== null) return { kind: 'equipped', slot: this.dragSourceSlot };
-    if (this.dragItemIndex >= 0) return { kind: 'inventory', itemIndex: this.dragItemIndex };
+    if (this.dragItemGuid !== 0) return { kind: 'inventory', guid: this.dragItemGuid };
     return null;
   }
 
@@ -16980,7 +17199,7 @@ export class GameUI {
     look: { overlayDid?: number; itemType?: number; effects?: number } = {},
   ): void {
     this.worldDragGuid = guid >>> 0;
-    this.dragItemIndex = -1;
+    this.dragItemGuid = 0;
     this.dragSourceSlot = null;
     if (!dataTransfer) return;
     dataTransfer.effectAllowed = 'move';
@@ -17036,7 +17255,7 @@ export class GameUI {
   private itemListDrop(target: ItemListDropTarget): void {
     const source = this.worldDropSource();
     this.worldDragGuid = 0;
-    this.dragItemIndex = -1;
+    this.dragItemGuid = 0;
     this.dragSourceSlot = null;
     this.dragIsContainer = false;
     if (!source) return;
@@ -17060,7 +17279,7 @@ export class GameUI {
     const guid = this.worldDragGuid;
     if (!guid) return false;
     this.worldDragGuid = 0;
-    this.dragItemIndex = -1;
+    this.dragItemGuid = 0;
     this.dragSourceSlot = null;
     this.dragCallbacks.onWieldWorldObject?.(guid, target);
     return true;
@@ -17966,7 +18185,7 @@ export class GameUI {
         // OnItemListDragOver @ 004cbf80: the hovered cell shows
         // DragItemAcceptable's verdict (green ring / red slashed circle).
         this.attachCellDragAccept(cell, CELL, () => {
-          const dragged = this.dragItemIndex >= 0 && this.dragSourceSlot === null ? this.inventoryItems[this.dragItemIndex]?.id ?? 0 : 0;
+          const dragged = this.dragSourceSlot === null ? this.dragItemGuid : 0;
           return uiItemDragAcceptState(dragged, () => this.containerCallbacks.dragAcceptable?.(dragged) ?? true);
         });
         // CORE.18.c — the selected object's UIItem carries the ants.
@@ -18045,14 +18264,14 @@ export class GameUI {
       // client-side; ACE rejects them with the retail "You cannot put X in
       // that." transient.
       itemsEl.addEventListener('dragover', (e) => {
-        if (this.dragItemIndex >= 0 && this.dragSourceSlot === null) e.preventDefault();
+        if (this.dragItemGuid !== 0 && this.dragSourceSlot === null) e.preventDefault();
       });
       itemsEl.addEventListener('drop', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (this.dragItemIndex < 0 || this.dragSourceSlot !== null) return;
-        const dragged = this.inventoryItems[this.dragItemIndex];
-        this.dragItemIndex = -1;
+        if (this.dragItemGuid === 0 || this.dragSourceSlot !== null) return;
+        const dragged = this.draggedInventoryItem();
+        this.dragItemGuid = 0;
         this.clearListDragAccept(itemsEl);
         if (!dragged) return;
         // The cell under the pointer (GetItemUnderMouse): an item, or 0.
@@ -18161,7 +18380,7 @@ export class GameUI {
     slot.addEventListener('dragstart', (e) => {
       if (!this.itemShortcutData[index]) { e.preventDefault(); return; }
       this.shortcutDragFrom = index;
-      this.dragItemIndex = -1;
+      this.dragItemGuid = 0;
       this.dragSourceSlot = null;
       if (e.dataTransfer) {
         e.dataTransfer.effectAllowed = 'move';
@@ -18179,10 +18398,24 @@ export class GameUI {
       this.itemShortcutCallbacks.onEndDrag?.();
     });
     slot.addEventListener('dragover', (e) => {
-      if (this.shortcutDragFrom !== -1 || this.playerPackDragGuid !== 0 || this.worldDropSource()) e.preventDefault();
+      const carries = this.shortcutDragFrom !== -1 || this.playerPackDragGuid !== 0 || !!this.worldDropSource();
+      if (carries) e.preventDefault();
+      // VISUAL.drag-merge-indicator — gmToolbarUI::OnItemListDragOver @ 004bd150: any drag carrying an
+      // object (a pack / worn / ground object, the main pack, a shortcut) sets 0x10000040 on the cell,
+      // whose 0x1000045a bases 0x1000045f (the add-shortcut art 0x060011fa). The 1999 ShortcutSlot has
+      // no DragOverAction: nothing.
+      if (carries && this.clientRules.itemListDragOver === 'eor') {
+        this.ensureCellDragAcceptOverlay(slot, 32, '1000045f');
+        this.setCellDragAccept(slot, DRAG_ACCEPT_STATE.accept);
+      }
+    });
+    slot.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget instanceof Node && slot.contains(e.relatedTarget)) return;
+      this.setCellDragAccept(slot, DRAG_ACCEPT_STATE.none);
     });
     slot.addEventListener('drop', (e) => {
       e.preventDefault();
+      this.setCellDragAccept(slot, DRAG_ACCEPT_STATE.none);
       // (A toolbar rebuild mid-drag can drop the source slot's dragend, so
       // the payload, when there is one, decides.)
       const payload = e.dataTransfer?.getData('text/plain');
@@ -18199,7 +18432,7 @@ export class GameUI {
         return;
       }
       const source = this.worldDropSource();
-      this.dragItemIndex = -1;
+      this.dragItemGuid = 0;
       this.dragSourceSlot = null;
       this.worldDragGuid = 0;
       if (source) this.itemShortcutCallbacks.onDropItem?.(index, source);
@@ -18629,9 +18862,10 @@ export class GameUI {
       raiseClientNotice(this, CLIENT_NOTICES.castNoSpellSelected);
       return;
     }
-    const globalIdx = this.knownSpells.findIndex((s) => s.id === id);
-    if (globalIdx < 0) return;
-    this.spellCallbacks.onCastSpell?.(globalIdx);
+    if (!this.knownSpells.some((s) => s.id === id)) return;
+    // BUG.ammo-merge-swaps-first sweep — the cast names its spell by id, not by its place in a list the
+    // caller keeps separately (synced a frame later: a spell learned in between shifted the index).
+    this.spellCallbacks.onCastSpell?.(id);
   }
 
   /** RecvNotice_Next/Prev/First/LastSpellSelection @ 004c7460 / 004c75d0 / 004c77a0 / 004c7820 on the open tab. */
@@ -18706,11 +18940,9 @@ export class GameUI {
     this.refreshSpellBarPanel();
   }
 
-  /** The spell a spell drag carries: a spellbook row (`text/spell-index`) or a bar shortcut (`text/spell-id`). */
+  /** The spell a spell drag carries (`text/spell-id`): a spellbook row or a bar shortcut. */
   private spellOfDrag(dt: DataTransfer | null): SpellDefinition | null {
     if (!dt) return null;
-    const idx = parseInt(dt.getData('text/spell-index') || '-1', 10);
-    if (idx >= 0 && idx < this.knownSpells.length) return this.knownSpells[idx];
     const id = parseInt(dt.getData('text/spell-id') || '0', 10);
     if (!id) return null;
     return this.knownSpells.find((s) => s.id === id)
@@ -19526,12 +19758,26 @@ export class GameUI {
 
     // Drop target: a spellbook row or a bar shortcut, inserted at this cell
     // (HandleDropRelease → AddSpellShortcut(spell, WhatNum(cell))).
-    slot.addEventListener('dragover', (e) => { e.preventDefault(); slot.style.opacity = '0.7'; });
-    slot.addEventListener('dragleave', () => { slot.style.opacity = ''; });
+    // VISUAL.drag-merge-indicator — SpellCastSubMenu::OnItemListDragOver @ 004c5990: a drag carrying a
+    // spell sets 0x10000040 on the cell (template 0x10000341's 0x1000045a on 0x1000045d: the ring
+    // 0x060011f9). The 1999 spell bar has no drag-over art. (The 0.7 opacity dim it replaces was invented.)
+    slot.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      const types = e.dataTransfer?.types ?? [];
+      const spellDrag = types.includes('text/spell-id') || types.includes('text/spell-index');
+      if (spellDrag && this.clientRules.itemListDragOver === 'eor') {
+        this.ensureCellDragAcceptOverlay(slot, SPELL_SHORTCUT_CELL);
+        this.setCellDragAccept(slot, DRAG_ACCEPT_STATE.accept);
+      }
+    });
+    slot.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget instanceof Node && slot.contains(e.relatedTarget)) return;
+      this.setCellDragAccept(slot, DRAG_ACCEPT_STATE.none);
+    });
     slot.addEventListener('drop', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      slot.style.opacity = '';
+      this.setCellDragAccept(slot, DRAG_ACCEPT_STATE.none);
       const spell = this.spellOfDrag(e.dataTransfer);
       if (spell) this.dropSpellOnBar(spell, slotIdx);
     });
@@ -19840,7 +20086,10 @@ export class GameUI {
     // to the LIST area only (not the full page): the footer below it is the
     // adopted DAT chrome subtree, and a full-height transparent wrapper on
     // top of it would swallow its clicks.
-    const spellListH = Math.max(32, 224 + pageDH);
+    // VISUAL.ac1999-hidden-element-gaps — without filters (1999) the list
+    // takes the 1999 split: 32 px more, over an 81 px footer (spellbookPageSplit).
+    const pageSplit = spellbookPageSplit(337 + pageDH, this.eraSupports('spellbookFilters'));
+    const spellListH = pageSplit.listH;
     const magicContent = document.createElement('div');
     Object.assign(magicContent.style, { position: 'relative', overflow: 'hidden', width: '300px', height: `${spellListH}px` });
 
@@ -19904,7 +20153,6 @@ export class GameUI {
       // enclosing one is the magic panel's, whose desc has no 0x10000344.
       this.setDatLabel(row, 0x10000344, spell.name, { justify: 'near', layout: 0x21000037 });
 
-      const globalIdx = this.knownSpells.indexOf(spell);
       row.addEventListener('click', () => {
         // A spell UIItem under an armed Examine mode is examined
         // (HandleTargetedUseLeftClick → ExecuteTargetModeForSpell).
@@ -19930,7 +20178,8 @@ export class GameUI {
       // Make spell rows draggable to spell bar slots
       row.draggable = true;
       row.addEventListener('dragstart', (e) => {
-        e.dataTransfer?.setData('text/spell-index', `${globalIdx}`);
+        // The row carries its spell id (Init_UIItem_Spell_Shortcut stores the spellID), as a bar shortcut does.
+        e.dataTransfer?.setData('text/spell-id', `${spell.id}`);
       });
       spellList.appendChild(row);
     }
@@ -20065,6 +20314,15 @@ export class GameUI {
         this.callbacks.onRemoveSpellFromSpellbook?.(spellId);
       });
     });
+    // VISUAL.ac1999-hidden-element-gaps — a footer with no filter rows is the
+    // 1999 box: 81 px under the longer list, Delete at its top (no 113 px
+    // plate holding one button).
+    if (pageSplit.deleteY !== null) {
+      const footerEl = handle.elements.get(0x10000297);
+      const deleteEl = handle.elements.get(0x100002a5);
+      if (footerEl) placeRect(footerEl, { ...datRect(footerEl), y: pageSplit.footerY, h: pageSplit.footerH });
+      if (deleteEl) placeRect(deleteEl, { ...datRect(deleteEl), y: pageSplit.deleteY });
+    }
 
     contentEl.appendChild(magicContent);
   }
@@ -20174,8 +20432,8 @@ export class GameUI {
     const slotAt = (e: DragEvent): number => Math.floor((e.clientX - row.getBoundingClientRect().left) / L.cell);
     const draggedComponent = (): { wcid: number } | null => {
       if (this.researchDrag?.kind === 'grid') return { wcid: this.researchDrag.wcid };
-      if (this.dragItemIndex >= 0 && this.dragSourceSlot === null) {
-        const it = this.inventoryItems[this.dragItemIndex];
+      if (this.dragItemGuid !== 0 && this.dragSourceSlot === null) {
+        const it = this.draggedInventoryItem();
         if (it && this.componentScidByWcid.has(it.weenieClassId) && ((it.itemType ?? 0) & 0x1000) !== 0) return { wcid: it.weenieClassId };
       }
       return null;
@@ -20194,7 +20452,7 @@ export class GameUI {
         return;
       }
       const comp = draggedComponent();
-      if (this.dragItemIndex >= 0) this.dragItemIndex = -1;
+      if (this.dragItemGuid !== 0) this.dragItemGuid = 0;
       this.researchDrag = null;
       if (!comp) return;
       // FormulaRow drop @ 0x5ac6b0: at the slot under the pointer, clamped to the end.
@@ -20696,6 +20954,11 @@ export class GameUI {
         });
       }
     }
+
+    // VISUAL.ac1999-hidden-element-gaps — no blank run where the Titles tab
+    // was: Attributes and Skills share the strip, 138 px each, as the 1999
+    // StatsPanel lays them out (ui/TabStripShare.ts).
+    if (!this.eraSupports('characterTitles')) applySharedTabStrip(handle, tabBtnIds, new Set([0x10000538]));
 
     // ── Populate active tab content ──
     const activeContentEl = handle.elements.get(
@@ -22446,7 +22709,12 @@ export class GameUI {
     };
     styleMapTab(0x100001f3, getString(148800818) ?? 'Map', !houseOpen, 'map');
     styleMapTab(0x100001f4, getString(1502562) ?? 'House', houseOpen, 'house');
-    if (houseHidden) handle.setVisible(0x100001f4, false);
+    if (houseHidden) {
+      handle.setVisible(0x100001f4, false);
+      // VISUAL.ac1999-hidden-element-gaps — the Map tab takes the whole strip
+      // (the 1999 map page's title spans it: ui/TabStripShare.ts).
+      applySharedTabStrip(handle, [0x100001f3, 0x100001f4], new Set([0x100001f4]));
+    }
 
     // Map page content block — 0x21000026 element 0x100001ea (0,135)
     // 300x330 inside pane 0x100001f6.
@@ -23364,6 +23632,8 @@ export class GameUI {
     });
     model.dressPreview(this.chargenRandomSource);
     model.initializePage(data);
+    // UX.chargen-preview-no-placeholder — warm every face choice the page can step to.
+    this.warmChargenChoices(player.heritage, player.gender, false);
     const self = this;
     const panel = BarberPanel.open({
       layoutRenderer: this.layoutRenderer,
@@ -23374,7 +23644,9 @@ export class GameUI {
       wheelImage: (did, key, paint) => this.chargenWheelImageURL(did, key, paint),
       textureUrl: (did) => this.getTexURL(did),
       string: (key) => getStringFromTable(BARBER_STRINGS[key].table, acStringHash(BARBER_STRINGS[key].token)),
-      renderPreview: barberPreviewRenderer(this.uiHost),
+      renderPreview: barberPreviewRenderer(this.uiHost, {
+        onMiss: (m) => this.fetchChargenAppearanceNow(m.heritage, m.gender, m.appearanceInfo(), m.previewSetupId),
+      }),
       onApply,
       onClose: () => { if (this.barberPanel === panel) this.barberPanel = null; },
     });
@@ -26358,6 +26630,12 @@ export class GameUI {
         if (switchingToAllegiance) this.callbacks.onAllegianceUpdate?.();
       });
     }
+    // VISUAL.ac1999-hidden-element-gaps — the tabs an era keeps share the
+    // strip (1999: Allegiance and Fellowship, 138 px each, as its GroupPanel
+    // lays them out; ui/TabStripShare.ts), so no blank run where Friends and
+    // Squelch were.
+    applySharedTabStrip(handle, SOCIAL_TAB_ELEMENTS.map((t) => t.id),
+      new Set(SOCIAL_TAB_ELEMENTS.filter((t) => this.socialTabHidden(t.key)).map((t) => t.id)));
 
     // CORE.5.c.d — each of the four stacked page panes inherits its OWN
     // tab's base layout via base-element inheritance (friends 0x2100005d:
@@ -27176,6 +27454,20 @@ export class GameUI {
       return;
     }
     if (!inFrame) return;
+    // VISUAL.ac1999-hidden-element-gaps — without leadership (1999) the three
+    // buttons left make the 1999 FellowPanel's one row (Recruit, Dismiss,
+    // Quit) and the list grows over the emptied row, instead of three holes
+    // in the grid (ui/FellowshipButtonRow.ts). Other eras: the DAT grid.
+    {
+      const els = new Map<number, HTMLElement>();
+      for (const id of [...FELLOWSHIP_BUTTONS_TOP, ...FELLOWSHIP_BUTTONS_BOTTOM, ...FELLOWSHIP_LIST_IDS]) {
+        const el = this.datChild(inFrame, id);
+        if (el) els.set(id, el);
+      }
+      const rects = new Map([...els].map(([id, el]) => [id, datRect(el)]));
+      const moved = this.eraSupports('fellowshipLeadership') ? undefined : fellowshipOneRow(rects);
+      for (const [id, el] of els) placeRect(el, moved?.get(id) ?? rects.get(id)!);
+    }
 
     // Name in the plain light text color — fellowship-panel-2.jpg shows a
     // white "Olthoi Hunters", and Update @ 0048f440 SetTexts it with no
@@ -30530,18 +30822,18 @@ export class GameUI {
     // HandleActionAddToTrade falls back to GetEquippedItem).
     if (selfListEl) {
       selfListEl.addEventListener('dragover', (e) => {
-        if (this.dragItemIndex >= 0 || this.dragSourceSlot !== null) e.preventDefault();
+        if (this.dragItemGuid !== 0 || this.dragSourceSlot !== null) e.preventDefault();
       });
       selfListEl.addEventListener('drop', (e) => {
         e.preventDefault();
         e.stopPropagation();
         this.clearListDragAccept(selfListEl);
-        const idx = this.dragItemIndex;
+        const guid = this.dragItemGuid;
         const slot = this.dragSourceSlot;
-        this.dragItemIndex = -1;
+        this.dragItemGuid = 0;
         this.dragSourceSlot = null;
         if (this.tradeData.partnerGuid === 0) return; // no active trade
-        if (idx >= 0) this.dragCallbacks.onDropToTrade?.(idx);
+        if (guid !== 0) this.dragCallbacks.onDropToTrade?.(guid);
         else if (slot !== null) this.dragCallbacks.onDropEquippedToTrade?.(slot);
       });
     }
@@ -31122,7 +31414,7 @@ export class GameUI {
       e.stopPropagation();
       this.clearListDragAccept(wrapper);
       const dragged = this.vendorSellDragSource();
-      this.dragItemIndex = -1;
+      this.dragItemGuid = 0;
       this.dragSourceSlot = null;
       if (!dragged) return;
       this.acceptVendorSellDrag(this.vendorDragItemOf(dragged));
@@ -31658,10 +31950,10 @@ export class GameUI {
     const d = this.vendorData;
     const at = d.sellList.findIndex((e) => e.guid === guid);
     if (at === -1) return;
-    const invIdx = this.inventoryItems.findIndex((i) => i.id === guid);
     this.worldDragGuid = 0;
     this.dragSourceSlot = null;
-    this.dragItemIndex = invIdx;
+    // A worn item on the sell list is not a pack drag (it was index -1 before).
+    this.dragItemGuid = this.inventoryItems.some((i) => i.id === guid) ? guid : 0;
     if (this.toolbarSplitSize < this.toolbarMaxSplitSize) {
       this.displayErrorText('You cannot split items from this panel');
       this.setToolbarSplitSize(this.toolbarMaxSplitSize);
@@ -32156,13 +32448,13 @@ export class GameUI {
 
   /**
    * The object a drag in flight carries, as the salvage rules see it: an
-   * inventory-grid drag (dragItemIndex) or a paperdoll drag (dragSourceSlot
+   * inventory-grid drag (dragItemGuid) or a paperdoll drag (dragSourceSlot
    * — the wielded item, owned). Null when no item drag is in flight (a
    * shortcut drag is an alias and never reaches here).
    */
   private salvageDragCandidate(): { item: InventoryItem; owned: boolean } | null {
-    if (this.dragItemIndex >= 0) {
-      const item = this.inventoryItems[this.dragItemIndex];
+    if (this.dragItemGuid !== 0) {
+      const item = this.draggedInventoryItem();
       return item ? { item, owned: true } : null;
     }
     if (this.dragSourceSlot !== null) {
@@ -32178,10 +32470,11 @@ export class GameUI {
    * slashed circle 0x10000041, nothing at 0x1000003f (UIItemDragAccept.ts).
    */
   private setCellDragAccept(cell: HTMLElement, state: number): void {
-    const overlay = cell.querySelector<HTMLElement>('[data-ac-drag-accept]');
+    const overlay = cell.querySelector<HTMLElement>(':scope > [data-ac-drag-accept]') ?? cell.querySelector<HTMLElement>('[data-ac-drag-accept]');
     if (!overlay || overlay.dataset.acDragAccept === String(state)) return;
     overlay.dataset.acDragAccept = String(state);
-    const tex = UIITEM_DRAG_ACCEPT_TEX[state];
+    const tex = (overlay.dataset.acDragTemplate === '1000045e' ? CONTAINER_CELL_DRAG_ACCEPT_TEX
+      : overlay.dataset.acDragTemplate === '1000045f' ? TOOLBAR_CELL_DRAG_ACCEPT_TEX : UIITEM_DRAG_ACCEPT_TEX)[state];
     const url = tex !== undefined ? this.uiTextures.get(tex) : undefined;
     overlay.style.backgroundImage = url ? `url(${url})` : 'none';
   }
@@ -32193,15 +32486,8 @@ export class GameUI {
    * untouched); the pointer leaving the cell resets it to 0x1000003f
    * (ListenToElementMessage @ 004e1390).
    */
-  private attachCellDragAccept(cell: HTMLElement, size: number, probe: () => number | null): void {
-    const overlay = document.createElement('div');
-    overlay.dataset.acDragAccept = String(DRAG_ACCEPT_STATE.none);
-    Object.assign(overlay.style, {
-      position: 'absolute', left: '0', top: '0', width: `${size}px`, height: `${size}px`,
-      pointerEvents: 'none', zIndex: '4', backgroundSize: `${size}px ${size}px`,
-      backgroundRepeat: 'no-repeat', imageRendering: 'pixelated',
-    });
-    cell.appendChild(overlay);
+  private attachCellDragAccept(cell: HTMLElement, size: number, probe: () => number | null, template?: DragAcceptTemplate): void {
+    this.ensureCellDragAcceptOverlay(cell, size, template);
     cell.addEventListener('dragover', () => {
       const state = probe();
       if (state !== null) this.setCellDragAccept(cell, state);
@@ -32210,6 +32496,40 @@ export class GameUI {
       if (e.relatedTarget instanceof Node && cell.contains(e.relatedTarget)) return;
       this.setCellDragAccept(cell, DRAG_ACCEPT_STATE.none);
     });
+    // UIElement_UIItem::ListenToElementMessage @ 004e1390: the release (0x3e off) resets it too.
+    cell.addEventListener('drop', () => this.setCellDragAccept(cell, DRAG_ACCEPT_STATE.none));
+  }
+
+  /**
+   * The cell's m_elem_Icon_DragAccept overlay (0x1000045a), made when missing
+   * (a cell whose children a re-render replaced gets a new one). `template`
+   * names the 0x1000045a base when it is not 0x1000045d: the pack column's
+   * 0x1000045e (with the 0x10000046 arrow), the toolbar cells' 0x1000045f.
+   */
+  private ensureCellDragAcceptOverlay(cell: HTMLElement, size: number, template?: DragAcceptTemplate): HTMLElement {
+    const have = cell.querySelector<HTMLElement>(':scope > [data-ac-drag-accept]');
+    if (have) return have;
+    const overlay = document.createElement('div');
+    overlay.dataset.acDragAccept = String(DRAG_ACCEPT_STATE.none);
+    if (template) overlay.dataset.acDragTemplate = template;
+    Object.assign(overlay.style, {
+      position: 'absolute', left: '0', top: '0', width: `${size}px`, height: `${size}px`,
+      pointerEvents: 'none', zIndex: '4', backgroundSize: `${size}px ${size}px`,
+      backgroundRepeat: 'no-repeat', imageRendering: 'pixelated',
+    });
+    cell.appendChild(overlay);
+    return overlay;
+  }
+
+  /**
+   * VISUAL.drag-merge-indicator — a pack-grid / pack-column cell's drag-over
+   * state for the drag in flight (UIItemDragAccept.itemListDragOverState):
+   * no object (a shortcut drag, the main-pack cell's own drag) → null.
+   */
+  private itemListDragAcceptFor(containerList: boolean, cellObjectId: number): number | null {
+    const guid = this.currentDragGuid();
+    if (!guid) return null;
+    return this.dragCallbacks.itemListDragAcceptState?.(guid, { fromContainerList: this.dragIsContainer, containerList, cellObjectId }) ?? null;
   }
 
   /** Every cell of a list back to 0x1000003f (the drop released the drag). */
@@ -32242,8 +32562,8 @@ export class GameUI {
 
   /** The inventory-grid item a drag in flight carries (vendor / housing lists take no paperdoll drag). */
   private inventoryDragItem(): InventoryItem | null {
-    if (this.dragItemIndex < 0 || this.dragSourceSlot !== null) return null;
-    return this.inventoryItems[this.dragItemIndex] ?? null;
+    if (this.dragItemGuid === 0 || this.dragSourceSlot !== null) return null;
+    return this.draggedInventoryItem() ?? null;
   }
 
   /** gmSecureTradeUI::OnItemListDragOver @ 004ca980 for the drag now hovering a self-list cell. */
@@ -32427,14 +32747,14 @@ export class GameUI {
     // CORE.17.k.b.b.c.c.a.a.c.a.a.a.a — a paperdoll drag is a drop source
     // too: the wielded item is IsOwnedByPlayer and reaches IsItemSuitable.
     listEl.addEventListener('dragover', (e) => {
-      if (this.dragItemIndex >= 0 || this.dragSourceSlot !== null) e.preventDefault();
+      if (this.dragItemGuid !== 0 || this.dragSourceSlot !== null) e.preventDefault();
     });
     listEl.addEventListener('drop', (e) => {
       e.preventDefault();
       e.stopPropagation();
       this.clearListDragAccept(listEl);
       const drag = this.salvageDragCandidate();
-      this.dragItemIndex = -1;
+      this.dragItemGuid = 0;
       this.dragSourceSlot = null;
       if (!drag || !this.addSalvageItem(drag.item, drag.owned)) return;
       this.renderSalvagePanel();
@@ -33749,8 +34069,8 @@ export class GameUI {
     if (!panel || !panel.isConnected) return false;
     const inTradeGuids = this.tradeStateGuids();
     for (const cell of panel.querySelectorAll<HTMLElement>('[data-inv-slot]')) {
-      const idx = Number(cell.dataset.invSlot);
-      const item = this.inventoryItems[idx];
+      const guid = Number(cell.dataset.invGuid);
+      const item = this.inventoryItems.find((i) => i.id === guid);
       if (!item) return false;
       const isInTrade = inTradeGuids.has(item.id);
       const isSelected = item.id === this.containerSelectedGuid();
@@ -34342,18 +34662,18 @@ export class GameUI {
         listEl.appendChild(cell);
       }
     }
-    // The drop target (the inventory's HTML5 drag: dragItemIndex names the item).
+    // The drop target (the inventory's HTML5 drag: dragItemGuid names the item).
     listEl.addEventListener('dragover', (e) => {
-      if (this.dragItemIndex >= 0 && this.dragSourceSlot === null) e.preventDefault();
+      if (this.dragItemGuid !== 0 && this.dragSourceSlot === null) e.preventDefault();
     });
     listEl.addEventListener('drop', (e) => {
       e.preventDefault();
       e.stopPropagation();
       this.clearListDragAccept(listEl);
-      if (this.dragItemIndex < 0 || this.dragSourceSlot !== null) return;
-      const idx = this.dragItemIndex;
-      this.dragItemIndex = -1;
-      this.dragCallbacks.onDropToHousePayment?.(idx, op);
+      if (this.dragItemGuid === 0 || this.dragSourceSlot !== null) return;
+      const guid = this.dragItemGuid;
+      this.dragItemGuid = 0;
+      this.dragCallbacks.onDropToHousePayment?.(guid, op);
     });
   }
 

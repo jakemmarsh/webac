@@ -1156,6 +1156,7 @@ export class SkyboxRenderer {
       this.lightTick(false);
       this.fogTick(false);
       this.updateSkyFrame();
+      this.updateSkyMotion();
     } else {
       this.updateFallback();
     }
@@ -1459,7 +1460,9 @@ export class SkyboxRenderer {
     if (this.sealedInterior) return;
 
     if (this.hasDatSky()) {
-      // 1999 (skyObjectsOnTick): LScape_UseTime @ 0x442242 runs GameSky_UseTime inside the tick gate.
+      // 1999 (skyObjectsOnTick): LScape_UseTime @ 0x442242 runs GameSky_UseTime inside the tick gate,
+      // so the sky objects' timeline state (luminosity, translucency, arc windows) changes on the
+      // tick. Their motion does not (BUG.sky-steps-not-smooth): updateSkyMotion below, every frame.
       if (!this.skyObjectsOnTick) this.updateSkyFrame();
       if (this.nextTick <= this.tickClock && this.skyDesc) {
         this.nextTick = this.skyDesc.tickSize + this.tickClock;
@@ -1470,6 +1473,7 @@ export class SkyboxRenderer {
         }
         this.fogTick(true);
       }
+      this.updateSkyMotion();
     } else {
       this.updateFallback();
     }
@@ -1679,27 +1683,15 @@ export class SkyboxRenderer {
 
       mesh.visible = entry.litMaterials.length > 0 && litVisible;
 
-      // --- Arc rotation for objects with begin/end angles ---
+      // --- Arc window: sun / moon / celestial bodies are only drawn inside
+      // their begin/end time (the arc angle itself is updateSkyMotion's) ---
       if (skyObj.beginAngle !== 0 || skyObj.endAngle !== 0) {
-        let angle: number;
         const bt = skyObj.beginTime;
         const et = skyObj.endTime;
-
-        if (bt !== 0 || et !== 0) {
-          // Time-dependent arc: hide when outside active time range.
-          // Sun/moon/celestial bodies only visible during their arc window.
-          if (t < bt || t > et) {
-            mesh.visible = false;
-            continue;
-          }
-          angle = lerp(skyObj.beginAngle, skyObj.endAngle, (t - bt) / (et - bt));
-        } else {
-          angle = skyObj.beginAngle;
+        if ((bt !== 0 || et !== 0) && (t < bt || t > et)) {
+          mesh.visible = false;
+          continue;
         }
-
-        // Rotate around Z-axis (north-south) for east-west sky arc
-        // AC sun geometry is pre-positioned on the sky sphere; rotation moves it across the sky
-        mesh.rotation.set(0, 0, angle * Math.PI / 180);
       }
 
       // --- Static rotation from SkyObjectReplace (star field rotation) ---
@@ -1712,16 +1704,55 @@ export class SkyboxRenderer {
           mesh.rotation.set(0, rotate * Math.PI / 180, 0);
         }
       }
+    }
+  }
 
-      // --- Cloud UV scrolling ---
+  /**
+   * BUG.sky-steps-not-smooth — the sky objects' MOTION, every frame in every era:
+   *
+   *  - Texture scroll (clouds, the rain sheet): retail never scrolls these in
+   *    GameSky::UseTime. GameSky::MakeObject @ 00506ee0 hands the SkyObject's
+   *    tex_velocity to CPhysicsObj::SetTextureVelocity once, and
+   *    CPhysics::UpdateTexVelocity @ 00509820 advances it from
+   *    CPhysics::UseTime @ 00509950 on every physics quantum. 1999 is the
+   *    same: GameSky's MakeObject @ 0x48c70d registers it (0x439890 →
+   *    0x444010) and CPhysics UseTime @ 0x443d60 → 0x444160 advances it,
+   *    outside LScape_UseTime's 0.8 s gate. (The 1999 rain sheet 0x01001642,
+   *    v = −2 /s, jumped 1.6 texture-heights per tick while this ran on it.)
+   *  - The arc angle (sun, moons): end of retail sets it every frame
+   *    (LScape::UseTime @ 00505880 → GameSky::UseTime @ 005075b0). 1999 sets
+   *    it on the 0.8 s tick (GameSky_UseTime @ 0x48c3d2 → CalcFrame
+   *    0x48c78d → set_frame 0x438670): a moon's 0.13° step was half a pixel
+   *    at 1999's 480-line screens and is 2–5 px on today's, so the moons
+   *    hopped across the sky. Ours places it every frame in every era
+   *    (a browser-UX exception, CLAUDE.md); the arc WINDOW (show / hide) keeps
+   *    the era's cadence in updateSkyObjectProperties, and an object past its
+   *    window holds its last angle until that hides it, as retail.
+   */
+  private updateSkyMotion(): void {
+    const t = this.timeOfDay;
+    for (const entry of this.skyObjectEntries) {
+      const { mesh, skyObj } = entry;
+      if (skyObj.beginAngle !== 0 || skyObj.endAngle !== 0) {
+        const bt = skyObj.beginTime;
+        const et = skyObj.endTime;
+        let angle = skyObj.beginAngle;
+        if (bt !== 0 || et !== 0) {
+          if (t < bt || t > et) continue;
+          angle = lerp(skyObj.beginAngle, skyObj.endAngle, (t - bt) / (et - bt));
+        }
+        // Rotate around Z-axis (north-south) for east-west sky arc
+        // AC sun geometry is pre-positioned on the sky sphere; rotation moves it across the sky
+        mesh.rotation.set(0, 0, angle * Math.PI / 180);
+      }
       if (skyObj.texVelocityX !== 0 || skyObj.texVelocityY !== 0) {
-        for (const mat of entry.litMaterials.map(l => l.material)) {
-          if (mat.map) {
-            mat.map.offset.x = (this.cloudUvTime * skyObj.texVelocityX) % 1.0;
-            mat.map.offset.y = (this.cloudUvTime * skyObj.texVelocityY) % 1.0;
-            mat.map.wrapS = THREE.RepeatWrapping;
-            mat.map.wrapT = THREE.RepeatWrapping;
-          }
+        for (const lit of entry.litMaterials) {
+          const map = lit.material.map;
+          if (!map) continue;
+          map.offset.x = (this.cloudUvTime * skyObj.texVelocityX) % 1.0;
+          map.offset.y = (this.cloudUvTime * skyObj.texVelocityY) % 1.0;
+          map.wrapS = THREE.RepeatWrapping;
+          map.wrapT = THREE.RepeatWrapping;
         }
       }
     }

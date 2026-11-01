@@ -59,7 +59,7 @@ async function guidOf(page: Page, idx: number): Promise<number> {
 async function setDrag(page: Page, drag: { idx?: number; slot?: number }): Promise<void> {
   await page.evaluate((d) => {
     const ui = (window as any).__ac?.gameUI;
-    ui.dragItemIndex = d.idx ?? -1; ui.dragSourceSlot = d.slot ?? null;
+    ui.dragItemGuid = ui.inventoryItems[d.idx ?? -1]?.id ?? 0; ui.dragSourceSlot = d.slot ?? null;
   }, drag);
 }
 

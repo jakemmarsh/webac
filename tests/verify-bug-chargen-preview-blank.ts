@@ -22,7 +22,8 @@ import { existsSync } from 'node:fs';
 import * as THREE from 'three';
 import { renderSceneToCanvas, rendererContextLost } from '../packages/renderer/src/ui/CreatureViewRender.js';
 import { installMirrorAwareCulling, mirrorCameraX, type MirrorCullingRenderer } from '../packages/renderer/src/scene/WorldMirror.js';
-import { noteDatMiss } from '../packages/dat-parser/src/streaming/DatMiss.js';
+import { noteDatMiss, noteDatMissResolved, DAT_ARRIVAL_COALESCE_MS } from '../packages/dat-parser/src/streaming/DatMiss.js';
+import { PreviewBuildHold } from '../packages/renderer/src/ui/PreviewBuildHold.js';
 import { scriptedRandomSource } from '../packages/renderer/src/ui/ChargenRandomize.js';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
 import { openDat, DAT_PATHS } from './_harness/dat.js';
@@ -235,6 +236,8 @@ describe.skipIf(!hasPortal)('GameUI chargen preview converges through streamed m
     ui.portalDb = db;
     ui.loadCharGenAsset();
     ui.setUIHost({ renderer, characterModelBuilder: builder, appearanceManager: am });
+    // UX.chargen-preview-no-placeholder — no cap release inside this test's rounds (real time).
+    ui.chargenPreviewHold = new PreviewBuildHold(60_000);
     ui.chargenRandomSource = scriptedRandomSource([0], [0]);
     ui.showCharacterCreate();
     ui.wizard.heritage = 1; ui.wizard.gender = 1;
@@ -243,17 +246,20 @@ describe.skipIf(!hasPortal)('GameUI chargen preview converges through streamed m
     ui.renderCharacterCreate();
     let rounds = 0;
     while (missed.size > 0 && rounds < 15) {
-      expect(ui.chargenMissedDats).toBe(true);
       for (const id of missed) resident.add(id);
       missed.clear();
-      // The DatMiss arrival listener (GameUI's onDatMissResolved hook).
-      ui.onStreamedFilesArrived();
+      // The real DatMiss arrival signal: GameUI's page repaint and the preview hold's retry.
+      noteDatMissResolved();
+      await new Promise((r) => setTimeout(r, DAT_ARRIVAL_COALESCE_MS + 40));
       rounds++;
     }
     expect(missed.size).toBe(0);
     expect(rounds).toBeGreaterThan(1);
+    expect(state.draws.length).toBeGreaterThan(0);
     const meshes = state.draws[state.draws.length - 1];
     expect(meshes).toBeGreaterThan(20);
-    expect(textured[textured.length - 1]).toBe(meshes);
+    // UX.chargen-preview-no-placeholder — every draw along the way was the whole, textured
+    // figure: the preview held (drew nothing) until its files were resident.
+    expect(textured).toEqual(state.draws);
   }, 60_000);
 });

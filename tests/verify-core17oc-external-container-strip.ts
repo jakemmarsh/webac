@@ -325,9 +325,9 @@ describe('CORE.17.o.c — GameUI renders the container on the 0x21000008 strip (
 
   it('the item row is the drop target (OnItemListDragOver → DragItemAcceptable): a dragged inventory item dropped on it is stored', () => {
     ui.showContainerPanel(CHEST, [], -1);
-    ui.dragItemIndex = 0;
-    ui.dragSourceSlot = null;
     ui.inventoryItems = [{ id: 0x8000aaaa, name: 'Arrow', iconDid: 0, stackSize: 1 }];
+    ui.dragItemGuid = 0x8000aaaa;
+    ui.dragSourceSlot = null;
     el(0x1000006a).dispatchEvent(new domWindow.Event('drop', { bubbles: true, cancelable: true }));
     expect(stored).toEqual([0x8000aaaa]);
   });

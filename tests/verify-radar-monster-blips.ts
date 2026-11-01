@@ -107,6 +107,35 @@ describe('BUG.radar-monsters-missing — a monster (no RadarBlipColor) gets an o
     expect(dots[0].color).toBe('#ffaa00');
   });
 
+  it('BUG.contained-item-target-arrows sweep: a record in no cell draws no blip; a held one draws at its holder (DrawObjects @ 004d9380, set_parent @ 00515a90)', () => {
+    type O = RadarFeedObject & { radarBehavior: number; uiHidden: boolean };
+    const base = { radarColor: 2, radarBehavior: RadarBehavior.ShowAlways, uiHidden: false, itemType: ItemType.Misc, objectDescFlags: 0 };
+    const monster: O = { ...base, guid: 0x80000001, name: 'Drudge', worldX: 30, worldY: 0, worldZ: 0, itemType: ItemType.Creature };
+    // A sword left in the corpse: picked up / contained, stale place near the player.
+    const contained: O = { ...base, guid: 0x80000002, name: 'Sword', worldX: 5, worldY: 0, worldZ: 5, outOfWorld: true };
+    // A positionless create (contents before their container): a mesh at the origin.
+    const atOrigin: O = { ...base, guid: 0x80000003, name: 'Arrows', worldX: 0, worldY: 0, worldZ: 0, outOfWorld: true };
+    // The monster's shield: its own record is out of the world at a stale place, held by the monster.
+    const held: O = { ...base, guid: 0x80000004, name: 'Shield', worldX: 2, worldY: 0, worldZ: 2, outOfWorld: true, wielderId: monster.guid };
+    // A held item whose holder is unknown or gone: nothing to place it at.
+    const orphan: O = { ...base, guid: 0x80000005, name: 'Mace', worldX: 3, worldY: 0, worldZ: 3, outOfWorld: true, wielderId: 0x80009999 };
+    const all = [monster, contained, atOrigin, held, orphan];
+    const ctx: RadarFeedContext<O> = {
+      playerWorldX: 0, playerWorldZ: 0, playerFeetY: 0, range: 75,
+      fellows: null, fellowshipLeaderGuid: 0, playerMonarchGuid: undefined, playerPKStatus: undefined,
+      eligible: () => true,
+      holderOf: (g) => all.find((o) => o.guid === g),
+    };
+    const dots = new RadarDotFeed<O>().build(all, ctx).map((d) => ({ guid: d.guid, dx: d.dx, dz: d.dz }));
+    expect(dots).toEqual([
+      { guid: monster.guid, dx: 30, dz: 0 },
+      { guid: held.guid, dx: 30, dz: 0 },
+    ]);
+    // No holder lookup wired: a held object draws nothing rather than its stale place.
+    const bare = new RadarDotFeed<O>().build(all, { ...ctx, holderOf: undefined }).map((d) => d.guid);
+    expect(bare).toEqual([monster.guid]);
+  });
+
   it('no RadarBehavior on the wire (Undefined) → no blip, as retail InqShowableOnRadar', () => {
     const parsed = parseCreateObject(createObject({ name: 'Rock', itemType: ItemType.Misc, odf: 0 }))!;
     expect(showableOnRadar(parsed.radarBehavior, false)).toBe(false);

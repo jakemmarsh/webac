@@ -71,7 +71,7 @@ interface Args {
  * couldn't tell a 105 s "arrived" walk that stood searching from one that ran).
  */
 export function pageLogLine(text: string, now: Date = new Date()): string | null {
-  if (!/\[AC:Agent\]|\[AC\] Sent|WeenieError|UseDone|ServerSaveFailed|error/i.test(text) || text.startsWith('[AC:Chat]')) return null;
+  if (!/\[AC:Agent\]|\[AC:Move\]|\[AC\] Sent|WeenieError|UseDone|ServerSaveFailed|error/i.test(text) || text.startsWith('[AC:Chat]')) return null;
   return `${now.toISOString()} [page] ${text.slice(0, 300)}\n`;
 }
 

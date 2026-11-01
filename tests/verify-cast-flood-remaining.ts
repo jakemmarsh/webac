@@ -187,7 +187,7 @@ describe('GameUI spell bar: a held mouse is one cast at most', () => {
     expect(ui.spellBarSelected[0]).toBe(A.id);
     holdClick(slot, 2);
     mouse(slot, 'dblclick', 2);
-    expect(casts).toEqual([0]);
+    expect(casts).toEqual([A.id]);
   });
 
   it('the Cast button held down casts once, on its click; each click is one cast', () => {
@@ -204,9 +204,9 @@ describe('GameUI spell bar: a held mouse is one cast at most', () => {
     ui.renderSpellBarPanel();
     doc.body.appendChild(castBtn);
     holdClick(castBtn);
-    expect(casts).toEqual([0]);
+    expect(casts).toEqual([A.id]);
     holdClick(castBtn); holdClick(castBtn);
-    expect(casts).toEqual([0, 0, 0]);
+    expect(casts).toEqual([A.id, A.id, A.id]);
   });
 });
 

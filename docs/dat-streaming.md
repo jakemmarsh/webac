@@ -880,3 +880,24 @@ behind 96 background world-pack fetches that were all missing too). The first pl
 Client side, Create Character no longer looks dead during the world-pack wait: it raises retail's Please Wait
 (BUG.chargen-silent-wait-for-world-art). Throttle the production page, not Vite: a dev page loads its source modules one by
 one over the throttled link (one took 27 s), which production's bundle never does.
+
+### 6.13 3D previews hold their last whole figure; chargen choices prefetch (UX.chargen-preview-no-placeholder, 2026-11-01)
+
+Rebuild-on-arrival (§6.5) fixes a figure *after* it drew incomplete. For a preview the player is looking straight at, that
+is the bug: every chargen change flashed a white face for about a second (Jake, playwebac.com). The rule for a preview
+that **replaces** a figure already on screen: build off-screen, and swap only a build that read every file.
+
+- `ui/PreviewBuildHold.ts`: a build with no DatMiss epoch move swaps in the caller's frame (whole DATs: no change). A build
+  that missed is dropped and retried on each arrival batch; a newer request supersedes it; a 1.75 s cap, anchored at the
+  oldest unresolved request, shows the latest build as it is, and later arrivals keep rebuilding it (bounded) until it is
+  complete. Its misses are subtracted from GameUI's chargen repaint flag (the hold retries itself). Used by the chargen
+  appearance + summary views, the barber, and the own player's ObjDescEvent (the world figure and the paperdoll).
+- The first miss of a held build fetches that appearance's whole closure at Critical priority (`chargenAppearanceIds`),
+  so the retry costs one wave instead of one dependency level (GfxObj → texture → palette) per arrival batch.
+- `models/ChargenPrefetch.ts` warms, at Background priority with one closure in flight, the focused heritage + sex's
+  every Appearance option and then every heritage + sex's base figure (`UIHost.prefetchPortalFiles` →
+  the world set's `DatClosure.ensure`). Root a Setup on its **part GfxObjs**: a Setup root walks its motion table's
+  default-style animations (~3 MB gz for a human) that a preview never plays.
+- Bytes: `npx tsx tools/measure-chargen-prefetch.ts` (closure leaves, gzip -6, local DATs). End of retail / Dark Majesty:
+  3.45 MB gz mean per heritage + sex (max 6.45 MB, Undead), all base figures 3.70 MB; AC1999 ≈ 0.32 MB per heritage + sex.
+- Still draw-then-rebuild (not previews): other creatures' appearance changes in the world.

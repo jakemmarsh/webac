@@ -44,6 +44,7 @@ COPY packages/shared/src/ace-enums.ts ./packages/shared/src/ace-enums.ts
 COPY packages/renderer/src/agent/format.ts ./packages/renderer/src/agent/format.ts
 COPY packages/renderer/src/agent/gear.ts ./packages/renderer/src/agent/gear.ts
 COPY tools/ac-agent/client.ts ./tools/ac-agent/client.ts
+COPY tools/lib/temp-profile.ts ./tools/lib/temp-profile.ts
 COPY tools/ac-agent/eras.ts ./tools/ac-agent/eras.ts
 COPY tools/ac-agent/hostedGuide.ts ./tools/ac-agent/hostedGuide.ts
 COPY tools/ac-agent/journal.ts ./tools/ac-agent/journal.ts

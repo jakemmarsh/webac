@@ -162,7 +162,7 @@ describe.skipIf(!hasDats)('CORE.17.k.b.b.c.c.a.a.c.a.a.a.a.a.b — the live stri
   });
   beforeEach(() => {
     ui.hideVendorWindow(); ui.hideSlumlordPanel();
-    ui.dragItemIndex = -1;
+    ui.dragItemGuid = 0;
     ui.dragSourceSlot = null;
     ui.setInventoryData(INVENTORY, [], 30, 15000);
   });

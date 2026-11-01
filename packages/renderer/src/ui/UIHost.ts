@@ -29,6 +29,14 @@ export interface UIHost {
   readonly renderer?: THREE.WebGLRenderer | null;
   /** Builds the chargen preview character (CORE.17.k.b.b.a.e). */
   readonly characterModelBuilder?: CharacterModelBuilder | null;
+  /**
+   * UX.chargen-preview-no-placeholder — streamed DATs: make these portal files
+   * of the set the character builder reads (and their closures: parts,
+   * textures, palettes) resident. 'background' warms the chargen / barber
+   * choices; 'critical' fetches what a held preview build missed. Absent with
+   * whole DATs (nothing to fetch).
+   */
+  prefetchPortalFiles?(ids: readonly number[], priority: 'critical' | 'background'): Promise<void>;
   /** Resolves chargen palette-set swatches + the shade disk (VISUAL.156). */
   readonly appearanceManager?: AppearanceManager | null;
   /** The player's live model, cloned into the paperdoll (CORE.17.m). */
