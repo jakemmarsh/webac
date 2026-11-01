@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# TELEMETRY.refusal-events — print each refusal (era, code) pair the bridge logged that this
-# state file has not seen yet: a refusal players hit that we never saw before.
+# TELEMETRY.refusal-events — print each refusal code the bridge logged that this state file has
+# not seen in any era yet: a refusal players hit that we never saw before. A code already seen in
+# another era is recorded for this era silently (codes name the same refusal in every era: a
+# WeenieError, a client string, a server line's text).
 #
 #   bash tools/watch-refusals.sh <state-file>                 # the last 10 minutes of bridge logs
 #   bash tools/watch-refusals.sh <state-file> --since 1d      # seed / catch up
@@ -39,6 +41,7 @@ with open(state, encoding="utf-8") as f:
     for row in f:
         p = row.rstrip("\n").split("\t")
         if len(p) >= 2: seen.add((p[0], p[1]))
+seen_codes = {c for _, c in seen}
 new = {}
 order = []
 for line in sys.stdin:
@@ -64,6 +67,9 @@ now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"
 with open(state, "a", encoding="utf-8") as f:
     for key in order:
         a = new[key]
+        if key[1] in seen_codes:
+            f.write("%s\t%s\t%s\n" % (key[0], key[1], now))
+            continue
         j = lambda s: ",".join(sorted(s)) or "-"
         act = "" if a["action"] is None else " action=0x%x" % int(a["action"])
         print("NEW refusal era=%s code=%s source=%s context=%s servers=%s count=%d%s text=%s" % (

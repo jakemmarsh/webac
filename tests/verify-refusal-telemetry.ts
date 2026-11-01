@@ -585,6 +585,10 @@ describe('tools/watch-refusals.sh prints each new (era, code) once', () => {
       expect(readFileSync(state, 'utf8').trim().split('\n')).toHaveLength(2);
       // Nothing new the second time.
       expect(run().trim()).toBe('');
+      // A code already seen in another era is recorded for this era without printing.
+      writeFileSync(input, line({ era: 'classic-dereth-1-0', server: 'snowreap', source: 'server', code: 'we:0x001d', text: "You're too busy!", context: 'weenie_error', count: 1, first: true }) + '\n');
+      expect(run().trim()).toBe('');
+      expect(readFileSync(state, 'utf8')).toMatch(/^classic-dereth-1-0\twe:0x001d\t/m);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
