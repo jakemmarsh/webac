@@ -35,6 +35,11 @@ import { TRANSLUCENCY_KEY, DEFAULT_TRANSLUCENCY, carryPartTranslucency, objectPa
  *    each object plays its PhysicsScripts ONE AFTER ANOTHER — a script added
  *    while another is queued starts when the last queued one ends
  *    (`start = prev.start + prev.length`); an idle object starts it now.
+ *    Adding a script only queues it (play_script_internal @ 00510cd0 →
+ *    AddScript @ 0051b3a0); UpdateScripts' own loop fires every due hook,
+ *    including those of a script a hook just queued (a CallPES with no
+ *    pause, a DefaultScript hook), so a self-calling loop runs iteratively,
+ *    never by recursion (BUG.callpes-loop-stack-overflow).
  *  - PhysicsObjHooks (FPHook, process_hooks @ 00511550): the timed value
  *    ramps (scale, translucency, luminosity, diffusion, per part) and the
  *    delayed CallPES, each evaluated from its own start on the object's clock.
@@ -224,6 +229,18 @@ export function makeSkyEmitterFrameSource(anchor: THREE.Object3D, frame: SkyObje
 /** ScriptManager's ScriptData: a queued script and its start on the object's clock. */
 interface ScriptData { script: PhysicsScript; start: number; length: number }
 
+/**
+ * BUG.callpes-loop-stack-overflow — the most hooks one object fires in one
+ * pass (a frame, or a play from outside). Retail's UpdateScripts loop has no
+ * bound: a cycle of zero-pause CallPES scripts of zero total length would
+ * never leave it (no era's DAT has one), and a long freeze (a suspended tab,
+ * a sleeping machine) makes a looping script replay every iteration it
+ * missed, all in one tick. Past the budget the rest waits for the next pass,
+ * so a catch-up spreads over a few frames and nothing can hang the page.
+ * Normal play fires a handful per pass.
+ */
+export const MAX_SCRIPT_HOOKS_PER_PASS = 1024;
+
 /** The FPHook kinds process_fp_hook @ 005135c0 switches on. */
 type FPKind = 'scale' | 'translucency' | 'partTranslucency' | 'luminosity' | 'diffusion'
   | 'partLuminosity' | 'partDiffusion' | 'callPES';
@@ -251,6 +268,8 @@ interface ObjState {
   hookIndex: number;
   /** PhysicsObjHooks, newest first (CallPES / SetTranslucency2 … push at the head). */
   hooks: FPHook[];
+  /** A script was queued while this object's scripts were running: the pass runs the queue again. */
+  requeued: boolean;
 }
 
 /** PhysicsScript's length: its last hook's start time (UnPack sorts, then keeps the last). */
@@ -325,6 +344,15 @@ export class PhysicsScriptPlayer {
   private readonly anchorForward = new WeakMap<THREE.Object3D, THREE.Object3D>();
   /** update()'s reusable snapshot of `states` (no per-frame allocation). */
   private readonly stateScratch: Array<[THREE.Object3D, ObjState]> = [];
+  /**
+   * BUG.callpes-loop-stack-overflow — objects whose scripts / hooks are being
+   * run right now. A script played on one of them from inside that run (its
+   * own CallPES or DefaultScript hook, a CallPES ramp coming due) only
+   * queues, as AddScript does; the run's loop picks it up.
+   */
+  private readonly running = new Set<THREE.Object3D>();
+  /** Script errors already sent to the page's error telemetry (one per distinct message). */
+  private readonly reportedFaults = new Set<string>();
 
   constructor(deps: PhysicsScriptDeps) {
     this.deps = deps;
@@ -333,7 +361,7 @@ export class PhysicsScriptPlayer {
   private stateFor(anchor: THREE.Object3D): ObjState {
     let st = this.states.get(anchor);
     if (!st) {
-      st = { clock: 0, scripts: [], hookIndex: -1, hooks: [] };
+      st = { clock: 0, scripts: [], hookIndex: -1, hooks: [], requeued: false };
       this.states.set(anchor, st);
     }
     return st;
@@ -343,8 +371,11 @@ export class PhysicsScriptPlayer {
    * CPhysicsObj::play_script @ 00510d30 → play_script_internal @ 00510cd0 →
    * ScriptManager::AddScriptInternal @ 0051b310: queue `script` on the
    * object. An object out of the world plays nothing (cell == 0 → return).
-   * Hooks already due (an idle object's t=0 hooks) fire now, so a caller's
-   * anchor-position lookups are accurate before any later reposition.
+   * Played from outside the object's own script run, hooks already due (an
+   * idle object's t=0 hooks) fire now, so a caller's anchor-position lookups
+   * are accurate before any later reposition (retail fires them in the same
+   * tick's update_object). Played from inside it (a CallPES / DefaultScript
+   * hook, a CallPES ramp coming due), it only queues and that run fires it.
    */
   play(script: PhysicsScript, anchor: THREE.Object3D): void {
     // DECOMP.scripts-replayed-on-reentry — play_script drops it outright.
@@ -369,30 +400,92 @@ export class PhysicsScriptPlayer {
     if (st.scripts.length === 1) st.hookIndex = -1;
     // Out of the world, update_object does not run: it waits for the return.
     if (this.suspendedAnchors.has(anchor)) return;
-    this.runScripts(anchor, st);
-    this.processHooks(anchor, st);
+    // BUG.callpes-loop-stack-overflow — AddScript only queues: inside the
+    // object's own run, that run's loop fires it (no recursion).
+    if (this.running.has(anchor)) {
+      st.requeued = true;
+      return;
+    }
+    this.advance(anchor, st);
+  }
+
+  /**
+   * One pass over an object at its current clock: UpdateScripts (every due
+   * hook, in order) and process_hooks (its ramps and delayed CallPES), again
+   * while a CallPES ramp coming due queued a script. Retail runs
+   * process_hooks before UpdateScripts in the same UpdateObjectInternal
+   * @ 005156b0, so that script's due hooks fire in the same tick. Scripts
+   * the hooks play on this object only queue (`running`). An error in a
+   * hook is contained here: it drops this object's script queue instead of
+   * escaping into the frame loop or a message handler.
+   */
+  private advance(anchor: THREE.Object3D, st: ObjState): void {
+    this.running.add(anchor);
+    try {
+      let budget = MAX_SCRIPT_HOOKS_PER_PASS;
+      // Bounded: a CallPES ramp only comes due once time has passed, so a
+      // ramp queued in this pass cannot fire in it.
+      for (let round = 0; round < 8; round++) {
+        st.requeued = false;
+        budget = this.runScripts(anchor, st, budget);
+        if (this.states.get(anchor) !== st) return;
+        this.processHooks(anchor, st);
+        if (this.states.get(anchor) !== st) return;
+        if (!st.requeued || budget <= 0) return;
+      }
+    } catch (err) {
+      this.scriptFault(anchor, err);
+    } finally {
+      this.running.delete(anchor);
+    }
+  }
+
+  /**
+   * A hook threw (a broken DAT record, a part that is not there): log it,
+   * report it once to the page's error telemetry without throwing, and drop
+   * the object's queued scripts and ramps so the same failure does not
+   * repeat every frame. Its emitters and every other object carry on.
+   */
+  private scriptFault(anchor: THREE.Object3D, err: unknown): void {
+    const st = this.states.get(anchor);
+    const script = st?.scripts[0]?.script;
+    const where = script ? ` in script 0x${(script.id >>> 0).toString(16)}, hook ${st!.hookIndex}` : '';
+    console.error(`[AC:FX] PhysicsScript error${where}: the object's scripts are dropped`, err);
+    if (st) this.states.delete(anchor);
+    const key = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    if (this.reportedFaults.has(key)) return;
+    this.reportedFaults.add(key);
+    const report = (globalThis as { reportError?: (e: unknown) => void }).reportError;
+    if (typeof report === 'function') {
+      try { report(err); } catch { /* reporting never throws into the caller */ }
+    }
   }
 
   /**
    * ScriptManager::UpdateScripts @ 0051b480: fire every hook of the queue
    * whose time (script start + hook start) has come, in order; a script
-   * whose hooks are all fired leaves the queue and the next one continues.
+   * whose hooks are all fired leaves the queue and the next one continues,
+   * a script one of these hooks just queued included (retail's while loop
+   * re-reads curr_data and next_hook_time each turn). Fires at most
+   * `budget` hooks and returns what is left of it.
    */
-  private runScripts(anchor: THREE.Object3D, st: ObjState): void {
+  private runScripts(anchor: THREE.Object3D, st: ObjState, budget: number): number {
     for (;;) {
       const cur = st.scripts[0];
-      if (!cur) return;
+      if (!cur) return budget;
       const idx = st.hookIndex + 1;
       if (idx >= cur.script.steps.length) {
         st.scripts.shift();
         st.hookIndex = -1;
         continue;
       }
-      if (cur.start + cur.script.steps[idx].startTime > st.clock) return;
+      if (cur.start + cur.script.steps[idx].startTime > st.clock) return budget;
+      if (budget <= 0) return 0;
+      budget--;
       st.hookIndex = idx;
       this.dispatchHook(cur.script.steps[idx].hook, anchor);
       // A hook may have removed the object (stopForAnchor) mid-script.
-      if (this.states.get(anchor) !== st) return;
+      if (this.states.get(anchor) !== st) return budget;
     }
   }
 
@@ -492,9 +585,8 @@ export class PhysicsScriptPlayer {
       if (this.states.get(anchor) !== st) continue; // stopped by an earlier object's hook
       if (this.suspendedAnchors.has(anchor)) continue;
       st.clock += dt;
-      this.runScripts(anchor, st);
+      this.advance(anchor, st);
       if (this.states.get(anchor) !== st) continue;
-      this.processHooks(anchor, st);
       if (st.scripts.length === 0 && st.hooks.length === 0 && this.states.get(anchor) === st) this.states.delete(anchor);
     }
     snap.length = 0;
@@ -700,9 +792,27 @@ export class PhysicsScriptPlayer {
   executeHook(hook: AnimationHook, anchor: THREE.Object3D): void {
     // An object out of the world runs no animation hooks.
     if (this.suspendedAnchors.has(anchor)) return;
-    this.dispatchHook(hook, anchor);
-    const st = this.states.get(anchor);
-    if (st) this.processHooks(anchor, st);
+    // Inside the object's own script run (no script hook drives an
+    // animation, but stay flat if one ever does): the run carries on.
+    if (this.running.has(anchor)) {
+      this.dispatchHook(hook, anchor);
+      return;
+    }
+    this.running.add(anchor);
+    let st: ObjState | undefined;
+    try {
+      this.dispatchHook(hook, anchor);
+      st = this.states.get(anchor);
+      if (st && !st.requeued) this.processHooks(anchor, st);
+    } catch (err) {
+      this.scriptFault(anchor, err);
+      return;
+    } finally {
+      this.running.delete(anchor);
+    }
+    // A script the hook played (DefaultScript, a CallPES with no pause)
+    // fires its due hooks now, then the ramps run, as before.
+    if (st?.requeued && this.states.get(anchor) === st) this.advance(anchor, st);
   }
 
   /**
@@ -761,7 +871,19 @@ export class PhysicsScriptPlayer {
       this.states.delete(from);
       const existing = this.states.get(to);
       if (existing) {
-        for (const d of st.scripts) existing.scripts.push(d);
+        // BUG.callpes-loop-stack-overflow sweep — the two meshes' clocks
+        // started apart (each state is born on its first script); retail has
+        // one object and one clock. Rebase the old times onto the new clock,
+        // or the old queue waits out the difference (or, the other way,
+        // replays it all at once), and keep the hooks the old current script
+        // already fired from firing again when it reaches the head.
+        const shift = existing.clock - st.clock;
+        st.scripts.forEach((d, i) => {
+          const fired = i === 0 ? st.hookIndex + 1 : 0;
+          const script = fired > 0 ? { ...d.script, steps: d.script.steps.slice(fired) } as PhysicsScript : d.script;
+          existing.scripts.push({ script, start: d.start + shift, length: d.length });
+        });
+        for (const h of st.hooks) h.created += shift;
         existing.hooks.unshift(...st.hooks);
       } else {
         this.states.set(to, st);

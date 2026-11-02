@@ -464,7 +464,9 @@ export function linkSampleIsDead(sample: { connected: boolean; secondsSinceLastP
  * NET.client-suspended-endcause — what a dead link sample (linkSampleIsDead)
  * reports: 'client_suspended' when the receiving thread's own stop (a sleeping
  * machine, a frozen worker) longer than DISCONNECT_TIME ended inside the
- * silence and the quiet since is within it, else 'link_dead'. The stop is the
+ * silence and the quiet since is within it, or ended just before a receive
+ * held through it that no post-wake answer from the server followed
+ * (silenceIsOwnStall, NET.stale-receive-after-wake), else 'link_dead'. The stop is the
  * worker's (the thread that measures receives), not the page timer's: a
  * throttled hidden page whose worker kept running heard a really silent server.
  */

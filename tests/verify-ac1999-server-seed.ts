@@ -12,7 +12,8 @@
  * - a capture of what a browser stored (the real OpfsDatBlobStore + Ac1999World.persist, read
  *   back by the real CAPTURE_SNIPPET) compares byte for byte with the seed, and one changed
  *   byte is reported;
- * - restore: a seed only where nothing usable is stored; stored patches always win; a state
+ * - restore: the newest state fully held wins (a seed above an unseeded stored state replaces it,
+ *   BUG.ac1999-stored-patches-beat-newer-seed; one equal or past it is kept unfetched); a state
  *   built on a seed comes back only with that seed, never mixed with another; a server that
  *   moved on gets its diff applied and stored over the seed; a seed from other base iterations
  *   is refused;
@@ -297,22 +298,155 @@ describe('Ac1999World.restore with a seed', () => {
     expect(served(next, 'cell', 0xd755fffe)).toEqual([9, 9, 9]);
   });
 
-  it('stored patches from before seeds win: no seed is fetched or mixed in, even when it is newer', async () => {
-    const { store } = withOpfs();
-    const { store: plain } = worldSet(null);
-    const old = world(plain);
+  /** An unseeded stored state, as a browser from before seeds wrote it: `records` pushed at `iterations`. */
+  async function storeUnseeded(store: DatBlobStore, iterations: { portal: number; cell: number }, records: PatchRecord[]): Promise<void> {
+    const old = world(worldSet(null).store);
     await old.restore(store, SERVER_KEY);
-    const pushed = await old.applyEvent(pushEvent({ ...sampleSeed(), records: [rec('portal', 0x0e00000e, 1, 1)] }));
-    await old.persist(store, SERVER_KEY, pushed);
+    await old.persist(store, SERVER_KEY, await old.applyEvent(pushEvent({ base: { portal: 102, cell: 67 }, iterations, records })));
+  }
+  const manifestOf = (opfs: Map<string, Uint8Array>) => JSON.parse(new TextDecoder().decode(opfs.get(`ac1999-patch__${SERVER_KEY}__manifest.datcache`)!));
+  const quiet = () => { const l = vi.spyOn(console, 'log').mockImplementation(() => {}); const w = vi.spyOn(console, 'warn').mockImplementation(() => {}); return () => { l.mockRestore(); w.mockRestore(); }; };
+
+  it('BUG.ac1999-stored-patches-beat-newer-seed: an unseeded stored state below the seed (prod: 10006 under a 10007 seed) takes the seed', async () => {
+    const { store, files: opfs } = withOpfs();
+    // Stored on an earlier visit, before seeds: 10006, with a record 10007 no longer has.
+    await storeUnseeded(store, { portal: 10006, cell: 10006 }, [rec('portal', 0x0e00000e, 1, 1), rec('portal', 0x0200dead, 6, 6)]);
+    expect(opfs.has(`ac1999-patch__${SERVER_KEY}__0200dead.datcache`)).toBe(true);
 
     const newer = encodeServerPatchSeed({ ...sampleSeed(), iterations: { portal: 10007, cell: 10007 } });
     const { store: set, fetches } = worldSet(newer);
     const w = world(set);
-    expect(await w.restore(store, SERVER_KEY, ac1999SeedSource(set, 'ac1999'))).toBe(1);
-    expect(fetches).toEqual([]);
+    const done = quiet();
+    expect(await w.restore(store, SERVER_KEY, ac1999SeedSource(set, 'ac1999'))).toBe(4);
+    done();
+    expect(fetches).toHaveLength(1);
+    expect(w.iterations).toEqual({ portal: 10007, cell: 10007 });
+    expect(served(w, 'portal', 0x0e00000e)).toEqual([1, 2, 3, 4]);
+    // The stored files are set aside, not layered over the seed.
+    expect(served(w, 'portal', 0x0200dead)).toBeNull();
+    // The up-to-date login stores the seeded state by reference and drops the set-aside files.
+    await w.persist(store, SERVER_KEY, await w.applyEvent({ patches: [], portalIteration: 10007, cellIteration: 10007 }));
+    expect(manifestOf(opfs)).toEqual({ portalIteration: 10007, cellIteration: 10007, files: [], seed: seedHash(newer) });
+    expect(opfs.has(`ac1999-patch__${SERVER_KEY}__0200dead.datcache`)).toBe(false);
+    expect(opfs.has(`ac1999-patch__${SERVER_KEY}__0e00000e.datcache`)).toBe(false);
+    // And it comes back next visit.
+    const next = world(worldSet(newer).store);
+    expect(await next.restore(store, SERVER_KEY, ac1999SeedSource(worldSet(newer).store, 'ac1999'))).toBe(4);
+    expect(next.iterations).toEqual({ portal: 10007, cell: 10007 });
+  });
+
+  it('a seed above the stored state in one DAT only (cell) still takes the seed', async () => {
+    const { store } = withOpfs();
+    await storeUnseeded(store, { portal: 10007, cell: 10006 }, [rec('portal', 0x0e00000e, 1, 1)]);
+    const newer = encodeServerPatchSeed({ ...sampleSeed(), iterations: { portal: 10007, cell: 10007 } });
+    const set = worldSet(newer).store;
+    const w = world(set);
+    const done = quiet();
+    expect(await w.restore(store, SERVER_KEY, ac1999SeedSource(set, 'ac1999'))).toBe(4);
+    done();
+    expect(w.iterations).toEqual({ portal: 10007, cell: 10007 });
+  });
+
+  it('a mixed pair (stored portal above the seed, cell below: a server reset) takes the whole seed, never a blend', async () => {
+    const { store } = withOpfs();
+    await storeUnseeded(store, { portal: 10009, cell: 10006 }, [rec('portal', 0x0e00000e, 9, 9)]);
+    const seedBytes = encodeServerPatchSeed({ ...sampleSeed(), iterations: { portal: 10007, cell: 10007 } });
+    const set = worldSet(seedBytes).store;
+    const w = world(set);
+    const done = quiet();
+    expect(await w.restore(store, SERVER_KEY, ac1999SeedSource(set, 'ac1999'))).toBe(4);
+    done();
+    expect(w.iterations).toEqual({ portal: 10007, cell: 10007 });
+    expect(served(w, 'portal', 0x0e00000e)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('the inverse: an unseeded stored state equal to or past the seed is kept, and the seed is never fetched', async () => {
+    for (const at of [{ portal: 10007, cell: 10007 }, { portal: 10008, cell: 10007 }, { portal: 10008, cell: 10008 }]) {
+      const { store } = withOpfs();
+      await storeUnseeded(store, at, [rec('portal', 0x0e00000e, 7, 7)]);
+      const seedBytes = encodeServerPatchSeed({ ...sampleSeed(), iterations: { portal: 10007, cell: 10007 } });
+      const { store: set, fetches } = worldSet(seedBytes);
+      const w = world(set);
+      expect(await w.restore(store, SERVER_KEY, ac1999SeedSource(set, 'ac1999'))).toBe(1);
+      expect(fetches).toEqual([]);
+      expect(w.iterations).toEqual(at);
+      expect(served(w, 'portal', 0x0e00000e)).toEqual([7, 7]);
+      expect(served(w, 'portal', 0x01001932)).toBeNull();
+    }
+  });
+
+  it('a seed source with no pointer description is loaded to compare: equal keeps the stored state, newer replaces it', async () => {
+    const { store } = withOpfs();
+    await storeUnseeded(store, { portal: 10007, cell: 10007 }, [rec('portal', 0x0e00000e, 7, 7)]);
+    const same = seedOf(encodeServerPatchSeed({ ...sampleSeed(), iterations: { portal: 10007, cell: 10007 } }));
+    const w = world(worldSet(null).store);
+    expect(await w.restore(store, SERVER_KEY, async () => same)).toBe(1);
+    expect(w.iterations).toEqual({ portal: 10007, cell: 10007 });
+    const newer = seedOf(encodeServerPatchSeed({ ...sampleSeed(), iterations: { portal: 10008, cell: 10007 } }));
+    const x = world(worldSet(null).store);
+    const done = quiet();
+    expect(await x.restore(store, SERVER_KEY, async () => newer)).toBe(4);
+    done();
+    expect(x.iterations).toEqual({ portal: 10008, cell: 10007 });
+  });
+
+  it('a newer seed the pointer lists but that fails to load leaves the stored state (the newest one fully held)', async () => {
+    const { store } = withOpfs();
+    await storeUnseeded(store, { portal: 10006, cell: 10006 }, [rec('portal', 0x0e00000e, 1, 1)]);
+    const newer = encodeServerPatchSeed({ ...sampleSeed(), iterations: { portal: 10007, cell: 10007 } });
+    const { pointer } = worldSet(newer);
+    const broken = DatStore.fromParts('https://dats.example', pointer, emptyManifest(), { fetchObject: async () => { throw new Error('offline'); }, retries: 0, onError: () => {} });
+    const w = world(broken);
+    const done = quiet();
+    expect(await w.restore(store, SERVER_KEY, ac1999SeedSource(broken, 'ac1999'))).toBe(1);
+    done();
     expect(w.iterations).toEqual({ portal: 10006, cell: 10006 });
     expect(served(w, 'portal', 0x0e00000e)).toEqual([1, 1]);
-    expect(served(w, 'portal', 0x01001932)).toBeNull();
+  });
+
+  it('a partial unseeded state (a listed file missing) takes the newer seed, and the next persist neither lists nor keeps it', async () => {
+    const { store, files: opfs } = withOpfs();
+    await storeUnseeded(store, { portal: 10006, cell: 10006 }, [rec('portal', 0x0e00000e, 1, 1), rec('cell', 0xd755fffe, 3)]);
+    opfs.delete(`ac1999-patch__${SERVER_KEY}__d755fffe.datcache`);
+    const newer = encodeServerPatchSeed({ ...sampleSeed(), iterations: { portal: 10007, cell: 10007 } });
+    const set = worldSet(newer).store;
+    const w = world(set);
+    const done = quiet();
+    expect(await w.restore(store, SERVER_KEY, ac1999SeedSource(set, 'ac1999'))).toBe(4);
+    done();
+    expect(w.iterations).toEqual({ portal: 10007, cell: 10007 });
+    await w.persist(store, SERVER_KEY, []);
+    expect(manifestOf(opfs).files).toEqual([]);
+    expect(opfs.has(`ac1999-patch__${SERVER_KEY}__0e00000e.datcache`)).toBe(false);
+  });
+
+  it('a seed-built state below its own seed\'s level (a damaged manifest) is set aside for the seed', async () => {
+    const { store, files: opfs } = withOpfs();
+    const payload = encodeServerPatchSeed(sampleSeed());
+    opfs.set(`ac1999-patch__${SERVER_KEY}__manifest.datcache`, new TextEncoder().encode(JSON.stringify({ portalIteration: 10005, cellIteration: 10006, files: [], seed: seedHash(payload) })));
+    const set = worldSet(payload).store;
+    const w = world(set);
+    const done = quiet();
+    expect(await w.restore(store, SERVER_KEY, ac1999SeedSource(set, 'ac1999'))).toBe(4);
+    done();
+    expect(w.iterations).toEqual({ portal: 10006, cell: 10006 });
+  });
+
+  it('a push with a file that fails to inflate does not adopt the server\'s iterations and says it is incomplete', async () => {
+    const { store } = withOpfs();
+    await storeUnseeded(store, { portal: 10006, cell: 10006 }, [rec('portal', 0x0e00000e, 1, 1)]);
+    const w = world(worldSet(null).store);
+    await w.restore(store, SERVER_KEY);
+    const ev = pushEvent({ base: { portal: 10006, cell: 10006 }, iterations: { portal: 10007, cell: 10006 }, records: [rec('portal', 0x02000984, 8, 8)] });
+    ev.patches.push({ dat: 'portal', fileId: 0x02000985, compressed: bytes(0xff, 0xfe, 0xfd), rawLength: 40 });
+    const done = quiet();
+    const files = await w.applyEvent(ev);
+    done();
+    expect(files.complete).toBe(false);
+    expect(w.iterations).toEqual({ portal: 10006, cell: 10006 });
+    const ok = await w.applyEvent(pushEvent({ base: { portal: 10006, cell: 10006 }, iterations: { portal: 10007, cell: 10006 }, records: [rec('portal', 0x02000984, 8, 8)] }));
+    expect(ok.complete).toBe(true);
+    expect(w.iterations).toEqual({ portal: 10007, cell: 10006 });
   });
 
   it('a state built on another seed is set aside, the offered seed applies, and the next persist drops the old files', async () => {

@@ -33,7 +33,7 @@ import {
 import { Connection1999 } from '../packages/network/src/era1999/Connection1999.js';
 import { NetWorkerClient, SNAPSHOT_EXTRAPOLATION_MAX_MS, type NetWorkerEndpoint } from '../packages/renderer/src/network/NetWorkerClient.js';
 import { linkDeadCause, linkSampleIsDead } from '../packages/renderer/src/ui/ConnectionNotices.js';
-import { ThreadStallClock, silenceIsOwnStall } from '../packages/network/src/ThreadStall.js';
+import { ThreadStallClock, silenceIsOwnStall, STALE_RECEIVE_GRACE_MS } from '../packages/network/src/ThreadStall.js';
 import { WorldReporter, type WorldEvent } from '../packages/renderer/src/telemetry/WorldReporter.js';
 import { sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld.js';
 import { resolveBridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil.js';
@@ -54,8 +54,16 @@ class FakeWebSocket {
   onclose: ((ev: { code: number }) => void) | null = null;
   onerror: ((ev: unknown) => void) | null = null;
   closedByUs = false;
+  /** Every datagram we sent, as sent. */
+  sent: Uint8Array[] = [];
   constructor(public url: string) { FakeWebSocket.last = this; }
-  send(): void { /* not inspected here */ }
+  send(data: ArrayBufferView | ArrayBuffer): void {
+    this.sent.push(data instanceof ArrayBuffer ? new Uint8Array(data.slice(0)) : new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)));
+  }
+  /** The highest client sequence sent so far (the header's first u32). */
+  lastSentSeq(): number {
+    return Math.max(0, ...this.sent.map((p) => new DataView(p.buffer, p.byteOffset).getUint32(0, true)));
+  }
   /** Our own close(): no code, as the browser reports it (1005). */
   close(): void {
     if (this.readyState === FakeWebSocket.CLOSED) return;
@@ -75,6 +83,12 @@ function packet(seq: number, flags: number, payload: Uint8Array = new Uint8Array
   writePacketHeader(header, buf, 0);
   buf.set(payload, PACKET_HEADER_SIZE);
   return buf;
+}
+/** ACE's ACK-only packet: stamped with the server's current sequence, acking ours through `ackedSeq`. */
+function serverAckOnly(serverSeq: number, ackedSeq: number): Uint8Array {
+  const p = new Uint8Array(4);
+  new DataView(p.buffer).setUint32(0, ackedSeq, true);
+  return packet(serverSeq, PacketHeaderFlags.AckSequence, p);
 }
 function connectRequest(): Uint8Array {
   const payload = new Uint8Array(32);
@@ -188,8 +202,10 @@ describe('the page link check reads the worker, not the page clock', () => {
     expect(sample.stall).toMatchObject({ lengthMs: expect.any(Number) });
     expect(sample.stall!.lengthMs).toBeGreaterThan(60_000);
     expect(linkDeadCause(sample)).toBe('client_suspended');
-    // Heard after waking, then 41 s of real silence: the server's (link_dead).
+    // Heard after waking, the server acking the keepalive our first tick sent
+    // (it was alive once we woke), then 41 s of real silence: the server's (link_dead).
     s.ws.receive(serverMessage(3));
+    s.ws.receive(serverAckOnly(3, s.ws.lastSentSeq()));
     vi.advanceTimersByTime(41_000);
     const later = s.client.getLinkStatus(Date.now());
     expect(linkSampleIsDead(later)).toBe(true);
@@ -205,15 +221,19 @@ describe('the page link check reads the worker, not the page clock', () => {
     expect(c.latest(2000 + 50_000)).toEqual({ agoMs: 0, lengthMs: 50_000 }); // still asleep / no tick yet
     c.tick(2000 + 50_000);
     c.tick(2000 + 51_000); // a short gap does not replace it
-    expect(c.latest(2000 + 55_000)).toEqual({ agoMs: 5000, lengthMs: 50_000 });
+    expect(c.latest(2000 + 55_000)).toEqual({ agoMs: 5000, lengthMs: 50_000, answered: false });
     // Silence 52 s (last receive before the stop), limit 40 s: ours.
     expect(silenceIsOwnStall(c.latest(57_000), 52_000, 40_000)).toBe(true);
-    // Last receive after the stop ended: the server's.
+    // A silence within the limit is no drop, and never ours.
     expect(silenceIsOwnStall(c.latest(57_000), 4000, 40_000)).toBe(false);
+    // Last receive more than the grace after the stop ended: the server's.
+    expect(silenceIsOwnStall({ agoMs: 41_000 + STALE_RECEIVE_GRACE_MS + 1, lengthMs: 600_000 }, 41_000, 40_000)).toBe(false);
     // A stop shorter than the limit explains nothing.
     expect(silenceIsOwnStall({ agoMs: 1000, lengthMs: 50_000 }, 160_000, 140_000)).toBe(false);
     // More than the limit of quiet since waking: the server's.
     expect(silenceIsOwnStall({ agoMs: 45_000, lengthMs: 600_000 }, 700_000, 40_000)).toBe(false);
+    // A check that ran late: woke 61 s ago, a held receive 1 s after: more than limit + grace of quiet since waking.
+    expect(silenceIsOwnStall({ agoMs: 61_000, lengthMs: 600_000 }, 60_000, 40_000)).toBe(false);
     expect(silenceIsOwnStall(null, 700_000, 40_000)).toBe(false);
     c.reset();
     expect(c.latest(10_000_000)).toBeNull();
@@ -263,7 +283,8 @@ describe('the worker drop measures silence by received data', () => {
     vi.advanceTimersByTime(1000);
     vi.setSystemTime(Date.now() + 600_000);
     vi.advanceTimersByTime(100);
-    s.ws.receive(serverMessage(3)); // the server was alive across the sleep
+    s.ws.receive(serverMessage(3)); // the server was alive across the sleep:
+    s.ws.receive(serverAckOnly(3, s.ws.lastSentSeq())); // it acks the keepalive we sent on waking
     vi.advanceTimersByTime(141_000);
     expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'server_silent' })]);
   });
@@ -284,6 +305,114 @@ describe('the worker drop measures silence by received data', () => {
     c.client.disconnect();
     vi.advanceTimersByTime(10);
     expect(c.disconnects()).toEqual([expect.objectContaining({ deliberate: true, endCause: 'local' })]);
+  });
+});
+
+// ── NET.stale-receive-after-wake: 2026-11-02 production, a Safari Mac asleep ~8 h ──
+
+describe('a receive held through a long stop does not make the drop the server\'s', () => {
+  // world_left net: tickGapMaxMs 29009725, rxAgoMs 40010, srvAckAdvAgoMs 29052408;
+  // bridge: serverQuietMs 28990418 (nothing from the server for 8 h), bytesFromServer = bytesToBrowser.
+  const SLEEP_MS = 29_009_725;
+
+  it('the production sample: one packet handed over right after waking, then 40 s: client_suspended at the page check and the worker drop', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    vi.advanceTimersByTime(4000); // our first keepalive goes out
+    s.ws.receive(serverAckOnly(2, s.ws.lastSentSeq())); // the server's last ack advance, just before the sleep
+    vi.advanceTimersByTime(1000);
+    vi.setSystemTime(Date.now() + SLEEP_MS); // asleep: neither thread ran
+    vi.advanceTimersByTime(100); // the worker's first tick after waking: its keepalive goes out, unanswered
+    // The packet the server sent early in the sleep, handed to the worker now. It
+    // came before the worker's next tick (100 ms), or its own 140 s check would
+    // have ended the session first, as client_suspended.
+    vi.advanceTimersByTime(30);
+    s.ws.receive(serverMessage(3));
+    vi.advanceTimersByTime(40_010);
+    const sample = s.client.getLinkStatus(Date.now());
+    expect(linkSampleIsDead(sample)).toBe(true);
+    // The old rule's miss: the stop ended before the last receive.
+    expect(sample.stall!.agoMs).toBeGreaterThan(sample.secondsSinceLastPacket * 1000);
+    expect(sample.stall!.lengthMs).toBeGreaterThan(SLEEP_MS);
+    expect(sample.stall!.answered).toBe(false);
+    expect(linkDeadCause(sample)).toBe('client_suspended');
+    const net = s.client.getDiagnostics();
+    expect(net.srvAckAdvAgoMs!).toBeGreaterThan(net.tickGapMaxMs);
+    // The worker's own 140 s drop, if the page check had not run, reads the same.
+    vi.advanceTimersByTime(101_000);
+    expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'client_suspended' })]);
+  });
+
+  it('the same receive, but the server acks the keepalive we sent on waking: it was alive, so the silence after is its own (link_dead, server_silent)', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    vi.advanceTimersByTime(1000);
+    vi.setSystemTime(Date.now() + SLEEP_MS);
+    vi.advanceTimersByTime(100);
+    s.ws.receive(serverMessage(3));
+    s.ws.receive(serverAckOnly(3, s.ws.lastSentSeq()));
+    vi.advanceTimersByTime(40_010);
+    const sample = s.client.getLinkStatus(Date.now());
+    expect(sample.stall!.answered).toBe(true);
+    expect(linkDeadCause(sample)).toBe('link_dead');
+    vi.advanceTimersByTime(101_000);
+    expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'server_silent' })]);
+  });
+
+  it('a held ack of what we sent before the sleep proves nothing', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    vi.advanceTimersByTime(4000); // a keepalive went out before the sleep
+    s.ws.receive(serverMessage(3)); // the server still talking
+    const beforeSleep = s.ws.lastSentSeq();
+    expect(beforeSleep).toBeGreaterThan(0);
+    vi.setSystemTime(Date.now() + SLEEP_MS);
+    vi.advanceTimersByTime(100);
+    expect(s.ws.lastSentSeq()).toBeGreaterThan(beforeSleep); // the post-wake keepalive went out
+    s.ws.receive(serverAckOnly(3, beforeSleep)); // stale: acks only the pre-sleep send
+    vi.advanceTimersByTime(40_100);
+    expect(linkDeadCause(s.client.getLinkStatus(Date.now()))).toBe('client_suspended');
+  });
+
+  it('a receive past the grace after waking, then 40 s: the server\'s (link_dead)', () => {
+    const s = workerSession();
+    s.ws.receive(serverMessage(2));
+    vi.advanceTimersByTime(1000);
+    vi.setSystemTime(Date.now() + 60_000); // under the worker's 140 s limit: it keeps the session
+    vi.advanceTimersByTime(100);
+    vi.advanceTimersByTime(STALE_RECEIVE_GRACE_MS + 1000);
+    s.ws.receive(serverMessage(3));
+    vi.advanceTimersByTime(40_100);
+    expect(linkDeadCause(s.client.getLinkStatus(Date.now()))).toBe('link_dead');
+  });
+
+  it('ThreadStallClock: only an ack beyond what we had sent when the stop ended counts as an answer; a new stop forgets it', () => {
+    const c = new ThreadStallClock();
+    c.reset(1000);
+    c.tick(2000, 10);
+    c.serverAcked(50); // no stop yet: nothing to answer
+    c.tick(100_000, 12); // a 98 s stop; we had sent through 12
+    expect(c.latest(100_000)).toEqual({ agoMs: 0, lengthMs: 98_000, answered: false });
+    c.serverAcked(12); // held through the stop
+    expect(c.latest(101_000)!.answered).toBe(false);
+    c.serverAcked(13); // the keepalive sent on waking
+    expect(c.latest(101_000)!.answered).toBe(true);
+    c.tick(200_000, 20); // another stop
+    expect(c.latest(200_000)!.answered).toBe(false);
+    // A connection that does not report its sequence never counts as answered.
+    const d = new ThreadStallClock();
+    d.reset(1000);
+    d.tick(100_000);
+    d.serverAcked(1_000_000);
+    expect(d.latest(100_000)!.answered).toBe(false);
+  });
+
+  it('silenceIsOwnStall on the production numbers', () => {
+    const stall = { agoMs: 42_683, lengthMs: SLEEP_MS, answered: false };
+    expect(silenceIsOwnStall(stall, 40_010, 40_000)).toBe(true);
+    expect(linkDeadCause({ connected: true, secondsSinceLastPacket: 40.01, stall })).toBe('client_suspended');
+    expect(silenceIsOwnStall({ ...stall, answered: true }, 40_010, 40_000)).toBe(false);
+    expect(linkDeadCause({ connected: true, secondsSinceLastPacket: 40.01, stall: { ...stall, answered: true } })).toBe('link_dead');
   });
 });
 
@@ -322,7 +451,10 @@ function session1999() {
   let i = 0;
   for (; i < s2c.length && !events.some((e) => e.type === 'characterList'); i++) sock.deliver(s2c[i]);
   expect(events.some((e) => e.type === 'characterList')).toBe(true);
-  return { conn, sock, events, next: s2c[i] ?? s2c[s2c.length - 1], disconnects: () => events.filter(e => e.type === 'disconnected') };
+  return {
+    conn, sock, events, next: s2c[i] ?? s2c[s2c.length - 1], after: s2c[i + 1] ?? s2c[s2c.length - 1],
+    disconnects: () => events.filter(e => e.type === 'disconnected'),
+  };
 }
 
 describe('Connection1999 timeout', () => {
@@ -360,14 +492,28 @@ describe('Connection1999 timeout', () => {
     expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'client_suspended' })]);
   });
 
-  it('heard after the stop, then 60 s of real silence: server_silent', () => {
+  it('heard after the stop and still talking past the grace, then 60 s of real silence: server_silent', () => {
     const s = session1999();
     vi.advanceTimersByTime(500);
     vi.setSystemTime(Date.now() + 70_000);
     vi.advanceTimersByTime(100);
     s.sock.deliver(s.next);
+    vi.advanceTimersByTime(STALE_RECEIVE_GRACE_MS + 2000);
+    s.sock.deliver(s.after); // a live server keeps talking after we woke
     vi.advanceTimersByTime(61_000);
     expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'server_silent' })]);
+  });
+
+  it('NET.stale-receive-after-wake — one packet held through a 70 s stop, then nothing: client_suspended', () => {
+    const s = session1999();
+    vi.advanceTimersByTime(500);
+    vi.setSystemTime(Date.now() + 70_000);
+    vi.advanceTimersByTime(100);
+    s.sock.deliver(s.next); // queued while the thread was stopped, stamped when processed
+    vi.advanceTimersByTime(40_500);
+    expect(linkDeadCause(s.conn.getLinkStatus(Date.now()))).toBe('client_suspended');
+    vi.advanceTimersByTime(21_000);
+    expect(s.disconnects()).toEqual([expect.objectContaining({ deliberate: false, endCause: 'client_suspended' })]);
   });
 
   it('a remote close reports its code; our own disconnect() reads local', () => {

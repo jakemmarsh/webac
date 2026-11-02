@@ -846,6 +846,7 @@ export class Connection1999 implements NetConnection {
   private onServerAck(seq: number): void {
     if (seq > this.diag.srvAck) this.diag.srvAck = seq;
     this.diagTx.serverAck(seq, Date.now());
+    this.stallClock.serverAcked(seq); // NET.stale-receive-after-wake: alive since we woke?
     for (const k of [...this.resendCache.keys()]) if (k <= seq) this.resendCache.delete(k);
   }
 
@@ -877,7 +878,7 @@ export class Connection1999 implements NetConnection {
     const clockStalled = this.lastServiceAt !== 0 && now - this.lastServiceAt > SERVER_TIMEOUT_MS;
     if (this.lastServiceAt !== 0 && now - this.lastServiceAt > this.diag.tickGapMax) this.diag.tickGapMax = now - this.lastServiceAt;
     this.lastServiceAt = now;
-    this.stallClock.tick(now);
+    this.stallClock.tick(now, this.sequence);
     if (!this.granted) return;
     if (!this.sessionAnswered) {
       if (now - this.grantedAt >= POST_GRANT_WAIT_MS) { this.sessionNeverStarted(); return; }

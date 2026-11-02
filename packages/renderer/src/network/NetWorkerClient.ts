@@ -124,7 +124,7 @@ export class NetWorkerClient implements NetConnection {
     const { link, at } = this.snap;
     if (!link.connected) return { connected: false, secondsSinceLastPacket: 0 };
     const age = Math.min(Math.max(0, now - at), SNAPSHOT_EXTRAPOLATION_MAX_MS);
-    const stall = link.stall ? { agoMs: link.stall.agoMs + age, lengthMs: link.stall.lengthMs } : null;
+    const stall = link.stall ? { ...link.stall, agoMs: link.stall.agoMs + age } : null;
     return { connected: true, secondsSinceLastPacket: link.secondsSinceLastPacket + age / 1000, stall };
   }
 

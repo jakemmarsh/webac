@@ -1334,7 +1334,7 @@ export class ClientConnection {
     const clockStalled = now - this.lastServiceAt > ClientConnection.SERVER_DEAD_MS;
     if (now - this.lastServiceAt > this.diagTickGapMax) this.diagTickGapMax = now - this.lastServiceAt;
     this.lastServiceAt = now;
-    this.stallClock.tick(now);
+    this.stallClock.tick(now, this.packetSequence);
 
     // cs_ConnectionRequestAcked: only the ConnectAck resend (its own timer)
     // and the no-data drop run until the server's first packet.
@@ -1418,7 +1418,9 @@ export class ClientConnection {
    * 'client_suspended' when our own tick loop stopped past the limit inside
    * the silence and the server has been quiet less than the limit since we
    * woke (2026-10-16 production: a laptop slept 29 min and the drop read
-   * 'server_silent', sending triage after a healthy server).
+   * 'server_silent', sending triage after a healthy server), or when the
+   * last receive was one held through that stop and the server has answered
+   * nothing we sent since waking (silenceIsOwnStall, NET.stale-receive-after-wake).
    */
   private checkServerDead(now: number = Date.now()): void {
     if (this.connectionData.state < SessionState.AuthConnected) return;
@@ -1732,6 +1734,7 @@ export class ClientConnection {
     PKT_DEBUG && console.log(`[AC:PKT] Server acked our seq ${ackedSeq}`);
     if (ackedSeq > this.diagSrvAck) this.diagSrvAck = ackedSeq;
     this.diagTx.serverAck(ackedSeq, Date.now());
+    this.stallClock.serverAcked(ackedSeq); // NET.stale-receive-after-wake: alive since we woke?
     for (const seq of this.sentPacketCache.keys()) {
       if (seq < ackedSeq) this.sentPacketCache.delete(seq);
     }

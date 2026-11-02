@@ -188,7 +188,7 @@ export type { HandoverResult, HandoverSocket, HandoverStage, SocketHandoverOptio
 export { createConnection } from './createConnection.js';
 export { hex32, msAgo, boundNetDiagnostics, NET_DIAG_END_CAUSES, NET_DIAG_MAX_MS, NET_DIAG_MAX_COUNT, NET_DIAG_TX_RING, NET_DIAG_WHAT_RE, TxRing, messageLabel, joinLabels } from './NetDiagnostics.js';
 export type { NetDiagnostics, NetTxRecord, BoundTxRecord } from './NetDiagnostics.js';
-export { ThreadStallClock, silenceIsOwnStall, THREAD_STALL_MIN_MS, type ThreadStall, type LinkSample } from './ThreadStall.js';
+export { ThreadStallClock, silenceIsOwnStall, THREAD_STALL_MIN_MS, STALE_RECEIVE_GRACE_MS, type ThreadStall, type LinkSample } from './ThreadStall.js';
 export { Connection1999, VERSION_1999 } from './era1999/Connection1999.js';
 export { CREDENTIAL_BYTES_1999 } from './era1999/Login1999.js';
 export type { DatPatch1999, DatPatchEvent, DatPatchProgressEvent } from './era1999/Connection1999.js';

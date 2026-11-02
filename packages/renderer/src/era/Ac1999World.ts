@@ -18,9 +18,13 @@
  * BUG.ac1999-slow-login-ddd-push). Where the world set carries a seed for the
  * server (that same difference, prepared ahead: dat-parser era1999
  * ServerPatchSeed, tools/ac1999-dat-seed.ts), the seed is applied instead, as
- * if the server had sent it. Stored patches always win over a seed; a state
- * built on a seed names it (`seed` in the manifest) and is dropped when that
- * seed is no longer the one offered, so it is never mixed with another.
+ * if the server had sent it. The login reports the newest state the client
+ * fully holds: stored patches win over a seed only when they are at least the
+ * seed's level in both DATs (BUG.ac1999-stored-patches-beat-newer-seed: a
+ * browser that stored 10006 before seeds existed kept reporting it under a
+ * 10007 seed and was pushed the difference); a state built on a seed names it
+ * (`seed` in the manifest) and is dropped when that seed is no longer the one
+ * offered, so it is never mixed with another.
  */
 import { ac1999CellOverlay, ac1999PortalOverlay, decodeServerPatchSeed, type Ac1999DatOverlay, type DatDatabase, type DatIterations } from '@ac/dat-parser';
 import type { DatBlobStore } from '../dat/DatCache.js';
@@ -38,8 +42,14 @@ export interface Ac1999Patch { dat: 'portal' | 'cell'; fileId: number; bytes: Ar
  * iterations it was diffed from, `iterations` the server's.
  */
 export interface Ac1999Seed { id: string; base: DatIterations; iterations: DatIterations; files: Ac1999Patch[] }
-/** Fetches the seed for the server being restored, or null when there is none. */
-export type Ac1999SeedSource = () => Promise<Ac1999Seed | null>;
+/** What a seed is, as the set pointer describes it (no fetch). */
+export interface Ac1999SeedInfo { id: string; base: DatIterations; iterations: DatIterations }
+/**
+ * Fetches the seed for the server being restored, or null when there is none. `describe`, when
+ * present, says what the pointer offers without fetching it, so a stored state already at or past
+ * the seed's level never loads it.
+ */
+export interface Ac1999SeedSource { (): Promise<Ac1999Seed | null>; describe?: () => Ac1999SeedInfo | null }
 
 /** A seed payload (ServerPatchSeed's "ACSS") as an Ac1999Seed; throws on a malformed one. */
 export function ac1999SeedFromPayload(id: string, payload: Uint8Array): Ac1999Seed {
@@ -55,9 +65,9 @@ export function ac1999SeedFromPayload(id: string, payload: Uint8Array): Ac1999Se
  * world id, `?server=`), or undefined when there is no set or no id. A seed whose header
  * disagrees with the pointer's description of it is refused.
  */
-export function ac1999SeedSource(store: Pick<DatStore, 'loadServerSeed'> | null | undefined, serverId: string | null): Ac1999SeedSource | undefined {
+export function ac1999SeedSource(store: (Pick<DatStore, 'loadServerSeed'> & Partial<Pick<DatStore, 'pointer'>>) | null | undefined, serverId: string | null): Ac1999SeedSource | undefined {
   if (!store || !serverId) return undefined;
-  return async () => {
+  const source: Ac1999SeedSource = async () => {
     const got = await store.loadServerSeed(serverId);
     if (!got) return null;
     const seed = ac1999SeedFromPayload(got.ref.hash, got.payload);
@@ -67,6 +77,14 @@ export function ac1999SeedSource(store: Pick<DatStore, 'loadServerSeed'> | null 
     }
     return seed;
   };
+  if (store.pointer) {
+    const pointer = store.pointer;
+    source.describe = () => {
+      const ref = pointer.serverSeeds?.[serverId];
+      return ref ? { id: ref.hash, base: { ...ref.base }, iterations: { ...ref.iterations } } : null;
+    };
+  }
+  return source;
 }
 
 /** `seed`: the seed the stored files were applied over (absent: they are the whole difference from the base). */
@@ -167,9 +185,14 @@ export class Ac1999World {
     }
   }
 
-  /** Inflate and apply a `datPatch1999` event; resolves to the files applied. */
-  async applyEvent(e: Ac1999PatchEvent): Promise<Ac1999Patch[]> {
-    const files: Ac1999Patch[] = [];
+  /**
+   * Inflate and apply a `datPatch1999` event; resolves to the files applied. When a file fails to
+   * inflate the server's iterations are NOT adopted (the world keeps reporting the level it fully
+   * holds, so the next login is sent the push again) and the caller must not persist the event:
+   * `complete` says which.
+   */
+  async applyEvent(e: Ac1999PatchEvent): Promise<Ac1999Patch[] & { complete?: boolean }> {
+    const files: Ac1999Patch[] & { complete?: boolean } = [];
     for (const p of e.patches) {
       try {
         files.push({ dat: p.dat, fileId: p.fileId >>> 0, bytes: await inflateAc1999Patch(p) });
@@ -177,7 +200,9 @@ export class Ac1999World {
         console.warn(`[AC:1999] patch 0x${(p.fileId >>> 0).toString(16)} could not be inflated:`, err);
       }
     }
-    this.apply(files, { portal: e.portalIteration, cell: e.cellIteration });
+    files.complete = files.length === e.patches.length;
+    if (!files.complete) console.warn(`[AC:1999] ${e.patches.length - files.length} of ${e.patches.length} pushed file(s) unusable: staying at ${this.iterations.portal} / ${this.iterations.cell}`);
+    this.apply(files, files.complete ? { portal: e.portalIteration, cell: e.cellIteration } : { portal: 0, cell: 0 });
     return files;
   }
 
@@ -197,10 +222,13 @@ export class Ac1999World {
 
   private async persistNow(store: DatBlobStore, serverKey: string, files: readonly Ac1999Patch[]): Promise<void> {
     if (!store.available) return;
+    let step = 'reading the stored manifest';
     try {
-      const prev = this.storedTrusted ? await readManifest(store, serverKey) : null;
+      const stored = await readManifest(store, serverKey);
+      const prev = this.storedTrusted ? stored : null;
       const known = new Map((prev?.files ?? []).map((f) => [f.id >>> 0, f.dat] as const));
       for (const f of files) {
+        step = `writing ${f.dat} 0x${(f.fileId >>> 0).toString(16)} (${f.bytes.byteLength} bytes)`;
         await store.put(ac1999PatchKey(serverKey, f.fileId), f.bytes, { size: f.bytes.byteLength, lastModified: null, etag: null });
         known.set(f.fileId >>> 0, f.dat);
       }
@@ -211,10 +239,17 @@ export class Ac1999World {
         ...(this.seedId ? { seed: this.seedId } : {}),
       };
       const bytes = new TextEncoder().encode(JSON.stringify(manifest)).buffer as ArrayBuffer;
+      step = `writing the manifest (${files.length} new file(s))`;
       await store.put(manifestKey(serverKey), bytes, { size: bytes.byteLength, lastModified: null, etag: null });
       this.storedTrusted = true;
+      // A manifest restore set aside leaves its files behind: remove the ones the new manifest doesn't list
+      // (after it is written, so a closed tab leaves extra files, never a manifest naming removed ones).
+      if (stored && !prev) {
+        step = 'removing set-aside files';
+        for (const f of stored.files) if (!known.has(f.id >>> 0)) await store.remove(ac1999PatchKey(serverKey, f.id));
+      }
     } catch (err) {
-      console.warn('[AC:1999] could not store the server\'s DAT patches:', err);
+      console.warn(`[AC:1999] could not store the server's DAT patches (${step}):`, err);
     }
   }
 
@@ -223,12 +258,22 @@ export class Ac1999World {
    * replaces the previous server's). Resolves to the number of files applied.
    * Never throws: a missing or partial store means the server sends them again.
    *
-   * `seed`, when given, is the server's prepared push (Ac1999Seed). It is used
-   * only where nothing usable is stored (stored patches always win, so a newer
-   * stored level is never overridden), and only over the base it was diffed
-   * from. A stored state built on a seed comes back only with that same seed
-   * (applied first, the stored files over it); with another seed or none it is
-   * set aside, and the next persist starts fresh.
+   * The login then reports the newest state the client fully holds (the
+   * server pushes the difference from whatever iteration is reported:
+   * TurbineData.cpp GetSyncPlan), never one whose files it lacks:
+   * - A stored state with no seed is a complete difference from the base.
+   *   It is used when it is at or past the offered seed's level in both DATs
+   *   (or nothing is offered); a seed above it in either DAT replaces it, and
+   *   the stored files are set aside, not layered (they were diffed from the
+   *   base, not from the seed). A server's iterations only rise, so two of
+   *   its states are ordered in both DATs; a mixed pair (a server reset)
+   *   takes the seed, which is always a whole, consistent state.
+   * - A state built on a seed comes back only with that same seed (applied
+   *   first, the stored files, the server's later pushes, over it) and only
+   *   at or past its level; otherwise it is set aside.
+   * - Nothing usable stored (none, incomplete, an empty baseline): the seed.
+   * A seed applies only over the base it was diffed from. Whatever is set
+   * aside is not merged by the next persist, which also removes its files.
    */
   async restore(store: DatBlobStore, serverKey: string, seed?: Ac1999SeedSource): Promise<number> {
     if (this.restoredFor === serverKey) return 0;
@@ -238,6 +283,8 @@ export class Ac1999World {
     this.restoredFor = serverKey;
     this.seedId = null;
     this.storedTrusted = true;
+    const base = this.baseIterations;
+    const fromBase = (s: Ac1999SeedInfo | Ac1999Seed): boolean => s.base.portal === base.portal && s.base.cell === base.cell;
     let offered: Ac1999Seed | null | undefined;
     const getSeed = async (): Promise<Ac1999Seed | null> => {
       if (offered !== undefined) return offered;
@@ -245,35 +292,48 @@ export class Ac1999World {
       if (!seed) return null;
       try {
         const s = await seed();
-        if (s && (s.base.portal !== this.baseIterations.portal || s.base.cell !== this.baseIterations.cell)) {
-          console.warn(`[AC:1999] the server's seed was diffed from ${s.base.portal} / ${s.base.cell}, this world is ${this.baseIterations.portal} / ${this.baseIterations.cell}: not used`);
+        if (s && !fromBase(s)) {
+          console.warn(`[AC:1999] the server's seed was diffed from ${s.base.portal} / ${s.base.cell}, this world is ${base.portal} / ${base.cell}: not used`);
         } else offered = s;
       } catch (err) {
         console.warn('[AC:1999] could not load the server\'s DAT seed:', err);
       }
       return offered;
     };
+    /** The offered seed's level: from the pointer's description when there is one (no fetch), else by loading it. */
+    const seedLevel = async (): Promise<DatIterations | null> => {
+      const info = seed?.describe ? seed.describe() : undefined;
+      if (info !== undefined) return info && fromBase(info) ? info.iterations : null;
+      const s = await getSeed();
+      return s ? s.iterations : null;
+    };
+    // A manifest iteration of 0 means "not moved off the base" (apply() keeps the base for 0).
+    const level = (m: PatchManifest): DatIterations => ({ portal: m.portalIteration || base.portal, cell: m.cellIteration || base.cell });
+    const atLeast = (a: DatIterations, b: DatIterations) => a.portal >= b.portal && a.cell >= b.cell;
     try {
       const manifest = store.available ? await readManifest(store, serverKey) : null;
       if (manifest) {
-        const files = await readStoredFiles(store, serverKey, manifest);
-        const baseline = manifest.files.length === 0 && !manifest.seed
-          && manifest.portalIteration === this.baseIterations.portal && manifest.cellIteration === this.baseIterations.cell;
-        if (files && !baseline) {
-          if (!manifest.seed) {
+        const files = await readStoredFiles(store, serverKey, manifest).catch(() => null);
+        const have = level(manifest);
+        if (files && !manifest.seed) {
+          const target = await seedLevel();
+          // A seed the pointer lists but that fails to load leaves the stored state the newest one held.
+          if (!target || atLeast(have, target) || !(await getSeed())) {
             this.apply(files, { portal: manifest.portalIteration, cell: manifest.cellIteration });
             return files.length;
           }
+          console.log(`[AC:1999] stored DAT patches at ${have.portal} / ${have.cell} are behind the server's seed (${target.portal} / ${target.cell}): set aside`);
+        } else if (files && manifest.seed) {
           const s = await getSeed();
-          if (s && s.id === manifest.seed) {
+          if (s && s.id === manifest.seed && atLeast(have, s.iterations)) {
             this.apply(s.files, s.iterations);
             this.apply(files, { portal: manifest.portalIteration, cell: manifest.cellIteration });
             this.seedId = s.id;
             return s.files.length + files.length;
           }
-          console.log(`[AC:1999] stored DAT patches were built on seed ${manifest.seed}, which is ${s ? `now ${s.id}` : 'not offered'}: set aside`);
+          console.log(`[AC:1999] stored DAT patches were built on seed ${manifest.seed}, which is ${s ? (s.id === manifest.seed ? `above their stored ${have.portal} / ${have.cell}` : `now ${s.id}`) : 'not offered'}: set aside`);
         }
-        // Incomplete, an empty baseline, or built on another seed: the next persist must not merge it.
+        // Incomplete, behind the seed, or built on another seed: the next persist must not merge it.
         this.storedTrusted = false;
       }
       const s = await getSeed();

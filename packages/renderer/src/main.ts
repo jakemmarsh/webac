@@ -8366,7 +8366,8 @@ async function main() {
         console.log(`[AC:1999] server DAT patches: ${files.length} of ${ev.patches.length} file(s) applied (portal ${ev.portalIteration}, cell ${ev.cellIteration})`);
         const it = ac1999World.iterations;
         aceConnection.datIterations = { ...aceConnection.datIterations, portal: it.portal, cell: it.cell };
-        await ac1999World.persist(datCacheStore, serverKey, files);
+        // A push with an unusable file is not stored: the next login reports the level we fully hold.
+        if (files.complete !== false) await ac1999World.persist(datCacheStore, serverKey, files);
       });
     });
   }
