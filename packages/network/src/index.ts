@@ -191,7 +191,7 @@ export type { NetDiagnostics, NetTxRecord, BoundTxRecord } from './NetDiagnostic
 export { ThreadStallClock, silenceIsOwnStall, THREAD_STALL_MIN_MS, type ThreadStall, type LinkSample } from './ThreadStall.js';
 export { Connection1999, VERSION_1999 } from './era1999/Connection1999.js';
 export { CREDENTIAL_BYTES_1999 } from './era1999/Login1999.js';
-export type { DatPatch1999, DatPatchEvent } from './era1999/Connection1999.js';
+export type { DatPatch1999, DatPatchEvent, DatPatchProgressEvent } from './era1999/Connection1999.js';
 export { ABSENT_1999, absent1999FeatureOfAction, absent1999FeatureOfOpcode } from './era1999/Absent1999.js';
 export { buildFriendsCommand1999, friendsCommand1999Plan, FriendsCommand1999 } from './era1999/codecs/Misc1999.js';
 export type { Absent1999Feature, Absent1999Entry } from './era1999/Absent1999.js';

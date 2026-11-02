@@ -289,6 +289,8 @@ export interface PlacementText {
   readonly holdsContainers: string;
   readonly mergeDifferentTypes: string;
   readonly mergeStackFull: string;
+  /** The keyboard Give's line when the previous selection is not a creature. */
+  readonly giveNeedsCreature: string;
 }
 
 /** The four "full" 0x1a lines (acclient.exe .rdata, UTF-16). */
@@ -315,6 +317,44 @@ export function placementFullNotice(holder: PlacementObject, itemIsContainer: bo
 export const TOO_BIG_TO_MERGE_1999 = 'Too big to merge. Putting in %s.';
 
 /**
+ * The 1999 client.exe's own lines for the head of ItemHolder_AttemptPlaceInContainerIsLegal
+ * @ 0x004e57b0 (0x6010a4 / 0x60106c + 0x601094, 0x60105c + 0x60104c, 0x601028). End of retail has
+ * none of these words: its "The destination container is not valid!" / "You cannot place an object
+ * within itself!" / "You cannot place yourself within a container!" are not in the 1999 binary.
+ */
+export const AC1999_CONTAINER_LEGAL_STRINGS = {
+  /** The item is unknown: the CONTAINER's name ([ebp-4] at 0x004e5821). */
+  itemInvalid: 'The item to be placed in the %s is not valid',
+  /** The container is unknown: the ITEM's name ([ebp-8] at 0x004e588b). */
+  containerInvalid: 'The container in which to place the %s is not valid',
+  withinItself: "Can't place %s within itself",
+  /** The container's name ([ebp-4] at 0x004e596a). */
+  self: "Can't place yourself within the %s",
+  locked: 'The %s is locked',
+} as const;
+
+/**
+ * The 1999 ItemHolder_AttemptPlaceInContainerIsLegal @ 0x004e57b0 up to its capacity checks, in its
+ * order: the item unknown, the container unknown, the item itself, the player, a creature, a stuck
+ * object loose in the world, one another creature wields, a container that is not a holder ("The %s
+ * is locked", the player's own pack excepted). No trade or hook test (1999 has neither).
+ * Returns the refusal line, '' for a silent refusal, or null when legal so far.
+ */
+export function placementLegalHead1999(itemId: number, containerId: number, w: PlacementWorld): string | null {
+  const s = AC1999_CONTAINER_LEGAL_STRINGS;
+  const item = w.object(itemId);
+  const container = w.object(containerId);
+  if (!item) return container ? s.itemInvalid.replace('%s', container.name) : '';
+  if (!container) return s.containerInvalid.replace('%s', item.name);
+  if (itemId === containerId) return s.withinItself.replace('%s', item.name);
+  if (itemId === w.playerId) return s.self.replace('%s', container.name);
+  const head = isItemLegalHead(itemId, w);
+  if (head) return head;
+  if (!validHolder(container, containerId, w)) return s.locked.replace('%s', container.name);
+  return null;
+}
+
+/**
  * The 1999 ItemHolder_AttemptPlaceInContainer @ 0x4e55b0 (item, container, placement, autoMerge):
  * the same item / container legality as end of retail's, then an auto-merge over the
  * container's own items only, then the container or a refusal.
@@ -322,10 +362,8 @@ export const TOO_BIG_TO_MERGE_1999 = 'Too big to merge. Putting in %s.';
 function attemptPlaceInContainer1999(
   itemId: number, containerId: number, autoMerge: boolean, placement: number, w: PlacementWorld,
 ): PlacementResult {
-  const illegal = isItemLegalHead(itemId, w);
-  if (illegal) return { kind: 'refused', notice: illegal };
-  const legal = isContainerLegal(itemId, containerId, false, w);
-  if (!legal.ok) return { kind: 'refused', notice: legal.notice };
+  const head = placementLegalHead1999(itemId, containerId, w);
+  if (head !== null) return head === '' ? { kind: 'refused' } : { kind: 'refused', notice: head };
   const item = w.object(itemId);
   const container = w.object(containerId);
   if (!item || !container) return { kind: 'refused' };
@@ -370,6 +408,8 @@ export const EOR_PLACEMENT_TEXT: PlacementText = Object.freeze({
   holdsContainers: ITEM_LEGAL_STRINGS.holdsContainers,
   mergeDifferentTypes: 'You cannot merge different types of items.',
   mergeStackFull: 'The destination stack is already full.',
+  // CPlayerSystem::OnAction case 0x15 (its trailing "\n" right-trimmed by the spew box).
+  giveNeedsCreature: 'You must select a creature or a character to give that to.',
 });
 
 /**
@@ -389,6 +429,8 @@ export const AC1999_PLACEMENT_TEXT: PlacementText = Object.freeze({
   holdsContainers: "The %s can't be picked up",
   mergeDifferentTypes: 'Cannot Merge Different Stack Types.',
   mergeStackFull: "This stack's too big to add to",
+  // PanelUI_HandleCommand case 0x90000a6: no full stop in the 1999 literal.
+  giveNeedsCreature: 'You must select a creature or a character to give that to',
 });
 
 /**
@@ -467,6 +509,8 @@ export const ITEM_LIST_DROP_STRINGS = {
   cannotAcceptItems: 'The %s cannot accept items',
   containerInItemList: 'Cannot place container in item list',
   itemInContainerList: 'Cannot place item in container list',
+  /** The 1999 ItemList_AcceptDragObject @ 0x0053ade0: the player dropped on the player's own list (no end-of-retail twin). */
+  selfInInventory1999: 'You cannot place yourself in your inventory!',
 } as const;
 
 export interface ItemListDrop {
@@ -489,6 +533,10 @@ export interface ItemListDrop {
  * and a full side pack refuses with its "The %s is completely full!".
  */
 export function acceptItemListDrop(d: ItemListDrop, w: PlacementWorld): PlacementResult {
+  // The 1999 ItemList_AcceptDragObject asks this first (the main-pack drag onto the player's own list).
+  if (w.rule === 'ac1999' && d.itemId === w.playerId && d.listContainerId === w.playerId) {
+    return { kind: 'refused', notice: ITEM_LIST_DROP_STRINGS.selfInInventory1999 };
+  }
   const item = w.object(d.itemId);
   if (!item) return { kind: 'refused' };
   const draggingContainer = item.isContainer;
@@ -504,7 +552,11 @@ export function acceptItemListDrop(d: ItemListDrop, w: PlacementWorld): Placemen
   if (cell) {
     if (!draggingContainer) {
       if (cell.itemsCapacity !== 0) { dest = d.cellItemId; autoMerge = true; }
-      else if (cell.isContainer) return { kind: 'refused', notice: ITEM_LIST_DROP_STRINGS.cannotAcceptItems.replace('%s', cell.name) };
+      // The 1999 list has no such refusal ("The %s cannot accept items" is not in its binary): a
+      // container cell that takes no items is passed over and the item goes into the list's own
+      // container at that cell (ItemList_AcceptDragObject: the cell is the destination only when
+      // it can hold the item).
+      else if (cell.isContainer && w.rule !== 'ac1999') return { kind: 'refused', notice: ITEM_LIST_DROP_STRINGS.cannotAcceptItems.replace('%s', cell.name) };
     } else if (cell.containersCapacity !== 0) {
       dest = d.cellItemId;
     }

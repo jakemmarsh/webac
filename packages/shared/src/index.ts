@@ -67,7 +67,7 @@ export { InventoryManager } from './inventory/InventoryManager.js';
 export { shopSellPrice, shopBuyPrice, vendorSellPrice, vendorBuyPrice, unitValueOf, TYPE_PROMISSORY_NOTE, PROMISSORY_NOTE_RATES_EOR, PROMISSORY_NOTE_RATES_1999, type PromissoryNoteRates } from './inventory/vendorPricing.js';
 export type { InventoryItem } from './inventory/InventoryManager.js';
 export { EquipmentSystem, OptimisticEquipmentTracker } from './inventory/EquipmentSystem.js';
-export { resolveAutoWield, blocksUseOfShield, isMergeAttemptLegal, UISlotSide, AUTOWIELD_CANNOT_WIELD_MORE, autoWieldRetryDue } from './inventory/AutoWield.js';
+export { resolveAutoWield, blocksUseOfShield, isMergeAttemptLegal, UISlotSide, AUTOWIELD_CANNOT_WIELD_MORE, AUTOWIELD_RINGS_FULL, autoWieldRetryDue, type ShieldBlockRule } from './inventory/AutoWield.js';
 export type { AutoWieldItem, AutoWieldResolution, AutoWieldStack, EquippedLookup, PendingAutoWieldRetry } from './inventory/AutoWield.js';
 export type { EquippedItem, WieldRequirement, EquipResult, PendingEquipmentAction } from './inventory/EquipmentSystem.js';
 export { getAppropriateName, getPluralName } from './inventory/objectName.js';

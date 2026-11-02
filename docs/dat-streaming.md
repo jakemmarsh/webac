@@ -745,6 +745,20 @@ UPLOAD_KEY=… npx tsx tools/upload-stream-set-r2.ts <worker url> dat-sets/strea
 # then ACJS_ERA_DAT_SETS='{…,"ac1999-retail":"https://dats.playwebac.com/v1/sets/ac1999-retail-world-p102-c67.json"}'
 ```
 
+A server's login DAT push can ride the pointer as a seed (`serverSeeds`, BUG.ac1999-slow-login-ddd-push;
+docs/ac1999-support.md). Build it, check it byte for byte, then stage it into the live pointer, changing nothing else:
+
+```
+npx tsx tools/ac1999-dat-seed.ts snippet          # paste into DevTools at char select (fresh profile): downloads ac1999-push-capture.json
+npx tsx tools/ac1999-dat-seed.ts build --capture ~/Downloads/ac1999-push-capture.json --out dat-sets/ac1999-seeds/ac1999.acss
+npx tsx tools/ac1999-dat-seed.ts compare dat-sets/ac1999-seeds/ac1999.acss <another source>   # a capture, a seed, or server-level DATs
+npx tsx tools/publish-dats-r2.ts --seed-only https://dats.playwebac.com/v1/sets/ac1999-retail-world-p102-c67.json \
+  --server-seed ac1999=dat-sets/ac1999-seeds/ac1999.acss --stage dat-sets/stream-stage/seed/ac1999-retail-world-p102-c67
+UPLOAD_KEY=… npx tsx tools/upload-stream-set-r2.ts <worker url> dat-sets/stream-stage/seed/ac1999-retail-world-p102-c67
+```
+
+A full republish of the 1999 set takes the same `--server-seed`; without it the new pointer lists no seeds.
+
 The 1999 world shares no objects with end of retail (every file is a 1999 file), so `--known` saves nothing here.
 Tests: `tests/verify-ac1999-world-set.ts` builds the real set into a temp stage and drives DatStore, StreamingDats,
 Ac1999World and Chargen1999 over it. The EraBoot, StreamingDats, CellGate and SoundPlayer cases live in their existing

@@ -142,6 +142,8 @@ export const CLIENT_NOTICES = Object.freeze({
   // SWEEP1999.input CM-3 — a single click on a non-attackable object in melee / missile mode
   // (eraClientRules().combatClickSelect 'attackableOnly'; the end-of-retail exe has no such string).
   combatSelectRefused: ui('combatSelectRefused', 'spew', 'You cannot select that while in combat mode', '1999 PanelUI_HandleMouseDownOnObject @ 0x004f83c0, UI vtable +0x114'),
+  // BUG.ac1999-combat-button-drop — a non-weapon dropped on the 1999 combat button (eraClientRules().combatButtonWieldDrop).
+  combatButtonNotWieldable: ui('combatButtonNotWieldable', 'spew', 'Only weaponry, shields, and magic items can be auto-wielded', '1999 CombatButton AcceptDragObject @ 0x00502180, UI vtable +0x114'),
   // CORE.17.k.b.b.a.g.c — gmSpellcastingUI::Cast @ 004c6050 with no selected shortcut.
   castNoSpellSelected: ui('castNoSpellSelected', 'spew', 'You must select a spell to cast', 'gmSpellcastingUI::Cast @ 004c6050, 0x1a'),
 

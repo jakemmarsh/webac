@@ -111,5 +111,7 @@ export type {
 export { ac1999PortalOverlay, ac1999CellOverlay, AC1999_OVERLAY_KIND, AC1999_UNTRANSLATED_COPIES } from './era1999/Ac1999Overlay.js';
 export type { Patches1999, Ac1999OverlayOptions, Ac1999DatOverlay } from './era1999/Ac1999Overlay.js';
 export { readCharGen1999Text } from './era1999/Tables1999.js';
+export { crc32, stampOf, planDatSync, sortRecords, encodeServerPatchSeed, decodeServerPatchSeed, DDD_MAX_FILE_BYTES } from './era1999/ServerPatchSeed.js';
+export type { PatchDat, PatchRecord, DatIterations, ServerPatchSeed, RecordStamp, DatManifest, SyncPlan } from './era1999/ServerPatchSeed.js';
 export type { CharGen1999Text } from './era1999/Tables1999.js';
 export type { DatOverlay, DatContainer } from './DatDatabase.js';

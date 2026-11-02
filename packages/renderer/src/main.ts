@@ -191,7 +191,8 @@ import { eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumab
 import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
 import { eraClientRules, unsupportedFeatures, correctedOptionsWord, type EraFeature } from './era/EraFeatures.js';
 import { setAgentTownsEra } from './agent/towns.js';
-import { Ac1999World, ac1999ServerKey, type Ac1999PatchEvent } from './era/Ac1999World.js';
+import { Ac1999World, ac1999SeedSource, ac1999ServerKey, type Ac1999PatchEvent, type Ac1999SeedSource } from './era/Ac1999World.js';
+import { Ac1999PatchProgress } from './era/Ac1999PatchProgress.js';
 import { eraPortalOverlay, eraStreamPlan, eraUnavailableText, forgetImportedEraFiles, eraSwitchReloadUrl, planEraDats, resolveBootEra, stashEraSwitch, takeEraSwitch, type DatSource, type EraDatPlan, type EraStreamPlan, type EraSwitch } from './era/EraBoot.js';
 import { EnvCellRenderer } from './world/EnvCellRenderer.js';
 import {
@@ -335,7 +336,7 @@ import {
   buildChangeStoragePermissionPayload,
   buildAddFriendPayload,
   buildRemoveFriendPayload} from '@ac/network';
-import type { NetDiagnostics, ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant, PairingReply, RelayLinkNotice, HandoverResult } from '@ac/network';
+import type { NetDiagnostics, ConnectionEvent, CharacterListData, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData, GameMessage, SetCharacterOptionsFields, RoutinesGrant, PairingReply, RelayLinkNotice, HandoverResult, DatPatchProgressEvent } from '@ac/network';
 import { ServerMessageHandler } from './network/ServerMessageHandler.js';
 import { applySetStackSize } from './network/applySetStackSize.js';
 import { getObjectSplitSize } from './inventory/dragSplit.js';
@@ -346,8 +347,8 @@ import {
   externalContainerDragAcceptable,
 } from './inventory/ItemHolderPlacement.js';
 import { attemptPlaceIn3D, canBeginWorldDrag, WorldDropHandoff, PLACE_IN_3D_STRINGS, type PlaceIn3DAction, type PlaceIn3DItem, type PlaceIn3DTarget } from './inventory/AttemptPlaceIn3D.js';
-import { itemListDragOverState } from './ui/UIItemDragAccept.js';
-import { acceptPaperdollDrop, autoSortDecision, PAPERDOLL_WEARABLE_MASK, paperdollBandDragAcceptState, paperdollSlotDragAcceptState, type PaperdollDropObject, type PaperdollDropTarget, type PaperdollWearContext } from './inventory/PaperdollDragObject.js';
+import { combatButtonDropWields, itemListDragOverState, type ShortcutSlotDragObject } from './ui/UIItemDragAccept.js';
+import { acceptPaperdollDrop, autoSortDecision, autoWieldPrecheck, eraAutoWieldLine, type AutoWieldPrecheckOptions, PAPERDOLL_WEARABLE_MASK, paperdollBandDragAcceptState, paperdollSlotDragAcceptState, type PaperdollDropObject, type PaperdollDropTarget, type PaperdollWearContext } from './inventory/PaperdollDragObject.js';
 import { applyServerWieldObject } from './inventory/ServerWieldObject.js';
 import { SelectionHistory, giveSelectedObject, dropSelectedObject } from './inventory/GiveDropCommands.js';
 import type { ObjDescEventData, UpdatePositionData, AutonomousPositionData, HearSpeechData, PropertyUpdateData, VitalUpdateData, TurbineChatData, CombatNotificationData, TransientStringData, TellData, IdentifyResponseData, VendorInfoData, BookDataResponse, BookPageDataResponse, BookPageEditResponse, SkillUpdateData } from './network/ServerMessageHandler.js';
@@ -443,7 +444,7 @@ import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
 import { knownObjectNames, pendingRequestDetail, castRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
 import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
-import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
+import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, serverIdFromUrl, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
 import { capabilityProblems, probeCapabilities, showCapabilityScreen, renderAdaptFor } from './boot/Capability.js';
 import { setRenderAdaptConfig, contextAntialias } from './scene/RenderScale.js';
 import { DEV_BUILD_ID, UpdateWatcher, decideUpdateAction, reloadAtBreak, updateNoticeAsDialog, updateNoticeText, type Screen } from './update/UpdateWatcher.js';
@@ -1685,8 +1686,12 @@ async function main() {
     console.log(`[AC:Era] world portal: ${worldPortalDb.fileCount} files, iteration ${worldPortalDb.totalIterations} (${worldPortalDb.container}); interface portal iteration ${uiPortalDb.totalIterations}`);
     if (!ac1999World) console.warn('[AC:Era] the world portal / cell are neither pre-ToD DATs nor a 1999 world set: served without the 1999 overlay');
   }
+  // BUG.ac1999-slow-login-ddd-push — the server's login push prepared ahead (the world set's
+  // `serverSeeds`), applied where nothing is stored, so a first visit reports the server's iteration.
+  const ac1999SeedFor = (url: string): Ac1999SeedSource | undefined =>
+    ac1999SeedSource(streamed1999World ? worldStreamingDats?.store : null, serverIdFromUrl(url));
   if (ac1999World && pendingEraLogin) {
-    const n = await ac1999World.restore(datCacheStore, ac1999ServerKey(pendingEraLogin.connectUrl));
+    const n = await ac1999World.restore(datCacheStore, ac1999ServerKey(pendingEraLogin.connectUrl), ac1999SeedFor(pendingEraLogin.connectUrl));
     if (n) console.log(`[AC:1999] ${n} stored server DAT patch file(s) applied`);
   }
 
@@ -4726,6 +4731,8 @@ async function main() {
     seenBlockers: Set<number>;
     /** The container the blocker's dequip went to (a side pack when the main pack is full): its landing there retries. */
     containerId: number;
+    /** The object off the ground being wielded (the 1999 combat button's drop): not in the inventory to look up again. */
+    groundItem?: InventoryItem;
   } | null = null;
 
   /**
@@ -4733,12 +4740,35 @@ async function main() {
    * the target slot per CPlayerSystem::AutoWield and either send
    * GetAndWieldItem with the chosen slot bit, or dequip the blocking item
    * first and retry on the server's confirmation.
+   * @param optimistic false for an object off the ground (the 1999 combat button's drop): the
+   * server picks it up and wields it, so nothing is equipped locally before it says so.
+   * @param how AutoWield's param_3 / param_4 / param_5: `silent` (param_3 = 1) and `keepOccupant`
+   * (param_4 = 0: the "You're already wearing …" line instead of moving the occupant to the pack) for
+   * AutoSort's wield, (obj, right, 1, 0, 0, 1) in both clients (CPlayerSystem::AutoSort @ 005609a0;
+   * 1999 0x004fecf0); `moveToBackpack` (param_5) for the 1999 combat button.
    * @returns true when the gesture consumed the click (sent a request or
    * showed a retail notice); false when the item isn't wieldable.
    */
   function attemptAutoWield(item: InventoryItem, side: UISlotSide = UISlotSide.Right,
-    seenBlockers: Set<number> = new Set(), allowOtherSide = true): boolean {
+    seenBlockers: Set<number> = new Set(), allowOtherSide = true, optimistic = true,
+    how: Pick<AutoWieldPrecheckOptions, 'silent' | 'moveToBackpack'> & { keepOccupant?: boolean } = {}): boolean {
     if (!item.validLocations || (item.validLocations & EquipMask.All) === 0) return false;
+    // BUG.ac1999-autowield-is-legal — AutoWield's own checks before the slot chain, both clients
+    // (CPlayerSystem::AutoWield @ 00560a60 → AutoWieldIsLegal @ 0055ed60; the 1999 PanelUI_AutoWield
+    // @ 0x004fee20 → PanelUI_AutoWieldIsLegal @ 0x004ff660): another creature's object, ammunition the
+    // ready launcher doesn't take, a shield beside a weapon that keeps it off, a held item outside peace.
+    const pre = autoWieldPrecheck(
+      { ...item, wielderId: serverObjectManager?.getObject(item.id)?.wielderId },
+      paperdollWearContext(),
+      { ...how, ownedByPlayer: !!heldItemById(item.id), moveToBackpackLine: eraRules.autoWieldMoveToBackpackLine },
+    );
+    if (pre.kind !== 'proceed') {
+      pendingAutoWield = null;
+      if (pre.notice) refusalWithDetail(inventoryLockDetail, () => gameUI.displayErrorText(pre.notice!));
+      // The 1999 combat button: 0x004fecf0(obj, 0, 0) — a weapon isn't wearable, so PlaceInBackpack.
+      if (pre.kind === 'backpack') return placeInBackpack(item.id) || !!pre.notice;
+      return !!pre.notice;
+    }
     const equippedAt = (bits: number): number => {
       for (const eq of playerState.equipment.getAll()) {
         if ((eq.slot & bits) !== 0) return eq.id;
@@ -4753,7 +4783,7 @@ async function main() {
     const tradeGuids = gameUI.tradeStateGuids();
     const res = resolveAutoWield(
       {
-        id: item.id, validLocations: item.validLocations, combatUse: item.combatUse, itemType: item.itemType, weenieClassId: item.weenieClassId,
+        id: item.id, validLocations: item.validLocations, combatUse: item.combatUse, itemType: item.itemType, ammoType: item.ammoType, weenieClassId: item.weenieClassId,
         stackSize: item.stackSize, maxStackSize: item.maxStackSize, inTrade: tradeGuids.has(item.id),
         dragAmount: getObjectSplitSize(item.id, item.stackSize, gameUI.hudState.target?.id ?? 0, gameUI.getToolbarSplitState()).amount,
         name: item.name, pluralName: item.pluralName,
@@ -4763,6 +4793,7 @@ async function main() {
         const eq = playerState.equipment.getAll().find(e => e.id === id);
         return eq && { weenieClassId: eq.weenieClassId, stackSize: eq.stackSize, maxStackSize: eq.maxStackSize, inTrade: tradeGuids.has(id) };
       },
+      eraRules.shieldBlockRule,
     );
     if (res.kind === 'merge') {
       pendingAutoWield = null;
@@ -4779,6 +4810,7 @@ async function main() {
         if (!sendGameAction(GameActionType.GetAndWieldItem, buildGetAndWieldItemPayload(item.id, res.slot))) return true;
         console.log(`[AC] Sent GetAndWieldItem (auto-wield): item=0x${item.id.toString(16)} slot=0x${res.slot.toString(16)}`);
       }
+      if (!optimistic) return true;
       // BUG.equip-unequip-optimistic-no-rollback — optimistic equip with
       // rollback bookkeeping, same as the drag-to-slot path.
       const evicted = playerState.equipment.getSlot(res.slot as EquipMask);
@@ -4787,12 +4819,22 @@ async function main() {
       inventoryDirty = true;
       return true;
     }
+    // param_4 = 0 (AutoSort): the occupant stays; the slot's "You're already wearing …" line is shown.
+    // Both clients gate the unwield and those lines on the same argument (acclient.exe 0x00560b9f
+    // and 0x00561734 read [esp+0xc4]; the 1999 PanelUI_AutoWield @ 0x004fee20's param_4).
+    if (res.kind === 'blocked' && how.keepOccupant) {
+      pendingAutoWield = null;
+      const line = eraAutoWieldLine(res.notice, eraRules.autoWieldRingsFullLine);
+      if (line) gameUI.displayErrorText(line);
+      return !!line;
+    }
     if (res.kind === 'blocked' && !seenBlockers.has(res.blockingId)) {
       // Dequip the blocker exactly like retail's AttemptToPlaceInContainer:
       // PutItemInContainer back to the player, then retry from
       // onInventoryPut when the server confirms the move.
       seenBlockers.add(res.blockingId);
-      pendingAutoWield = { itemId: item.id, side, blockingId: res.blockingId, seenBlockers, containerId: aceCharGuid ?? 0 };
+      pendingAutoWield = { itemId: item.id, side, blockingId: res.blockingId, seenBlockers, containerId: aceCharGuid ?? 0,
+        ...(optimistic ? {} : { groundItem: item }) };
       // SWEEP1006B — CPlayerSystem::AutoWield (decomp :344680):
       // AttemptToPlaceInContainer(blocker, player, 0, autoMerge = 1, 0) —
       // runPlacement takes the blocker off the paperdoll when it is put.
@@ -5062,6 +5104,26 @@ async function main() {
       text: eraRules.placementText, // SWEEP1999.messages INV-11
       // INV-1 — the 1999 client places into the main pack (the container asked for) only.
       rule: eraRules.inventoryPlacement,
+    };
+  }
+  /**
+   * What the 1999 ShortcutSlot reads of an object (its DragOverAction @ 0x005004b0 and
+   * AcceptDragObject @ 0x00500240): the type, stuck / player bits, container-ness and packs, and
+   * DetermineUseResult's usable / combat use / valid locations. Undefined = unknown object.
+   */
+  function shortcutObjectFacts1999(id: number): ShortcutSlotDragObject | undefined {
+    const o = placementWorld().object(id);
+    if (!o) return undefined;
+    const held = heldItemById(id);
+    const so = held ? undefined : serverObjectManager?.getObject(id);
+    const src = held ? undefined : worldObjectRecords.sourceOf(id);
+    return {
+      id,
+      itemType: o.isPlayer && !o.itemType ? 0x10 : (o.itemType ?? 0),
+      stuck: !!o.stuck, isPlayer: o.isPlayer, isContainer: o.isContainer, holdsPacks: o.containersCapacity !== 0,
+      usable: held?.usable ?? so?.usable ?? src?.usable,
+      combatUse: held?.combatUse ?? so?.combatUse ?? src?.combatUse,
+      validLocations: held?.validLocations ?? src?.validLocations,
     };
   }
   /**
@@ -6679,7 +6741,7 @@ async function main() {
       if (!obj) return null;
       // A ground container's item (dragged off its item row) is not IN_3D_VIEW.
       const inContainer = openContainer.items().some((i) => i.guid === obj.guid);
-      return { source, item: { id: obj.guid, name: obj.name, ownedByPlayer: false, inTrade: false, in3DView: !inContainer, weenieClassId: obj.weenieClassId, stackSize: obj.stackSize, maxStackSize: obj.maxStackSize ?? 0 } };
+      return { source, item: { id: obj.guid, name: obj.name, ownedByPlayer: false, inTrade: false, in3DView: !inContainer, itemType: obj.itemType, weenieClassId: obj.weenieClassId, stackSize: obj.stackSize, maxStackSize: obj.maxStackSize ?? 0 } };
     }
     const inv = source.kind === 'inventory'
       ? playerState.inventory.getItem(source.guid)
@@ -6688,7 +6750,7 @@ async function main() {
     return {
       source, inventoryItem: inv,
       item: {
-        id: inv.id, name: inv.name, ownedByPlayer: true, inTrade: gameUI.tradeStateGuids().has(inv.id), in3DView: false,
+        id: inv.id, name: inv.name, ownedByPlayer: true, inTrade: gameUI.tradeStateGuids().has(inv.id), in3DView: false, itemType: inv.itemType,
         weenieClassId: inv.weenieClassId ?? 0, stackSize: inv.stackSize, maxStackSize: inv.maxStackSize ?? 0,
       },
     };
@@ -6805,10 +6867,11 @@ async function main() {
         groundObjectId: openContainerGuid,
         text: eraRules.placementText,
         vendorDropNeedsWholeStack: eraRules.vendorDropNeedsWholeStack,
+        order: eraRules.inventoryPlacement,
       };
     };
     const r = kind === 'give'
-      ? giveSelectedObject(selected, selectionHistory.prevSelectedId, lookup, ctx)
+      ? giveSelectedObject(selected, selectionHistory.prevSelectedId, lookup, ctx, eraRules.placementText)
       : dropSelectedObject(selected, lookup, ctx);
     if (!r.handled) return false;
     for (const text of r.notices) gameUI.displayErrorText(text);
@@ -6925,6 +6988,7 @@ async function main() {
       // INV-4 / INV-5 — the era's slot drop (1999: a blocked slot swaps; no dual-wield shield slot).
       slotDropSwaps: eraRules.paperdollSlotDropSwaps,
       dualWieldShieldSlot: eraRules.dualWieldShieldSlot,
+      shieldBlockRule: eraRules.shieldBlockRule,
     };
   };
 
@@ -7001,9 +7065,34 @@ async function main() {
     const sort = autoSortDecision({ ...item, dragAmount: dragSplitFor(item).amount }, paperdollWearContext(), true);
     if (sort.notice) refusalWithDetail(inventoryLockDetail, () => gameUI.displayErrorText(sort.notice!));
     if (sort.kind === 'wear') return dropHeldOnPaperdoll(item, { kind: 'band' }, false);
-    if (sort.kind === 'wield') return attemptAutoWield(item);
+    // AutoSort's AutoWield(obj, right, 1, 0, 0, 1): the legality refusals silent, the occupant kept.
+    if (sort.kind === 'wield') return attemptAutoWield(item, UISlotSide.Right, new Set(), true, true, { silent: true, keepOccupant: true });
     if (sort.kind === 'backpack') return placeInBackpack(item.id);
     return false;
+  }
+
+  /** An object off the ground (or in an open chest) as AutoWield reads it; null when unknown. */
+  function groundWieldItem(guid: number): InventoryItem | null {
+    const entry = worldObjectRecords.entryOf(guid);
+    if (!entry) return null;
+    const obj = serverObjectManager?.getObject(guid);
+    return {
+      id: guid, weenieClassId: entry.weenieClassId ?? 0, name: entry.name, pluralName: entry.pluralName,
+      value: 0, burden: 0, stackSize: obj?.stackSize ?? entry.stackSize ?? 1, maxStackSize: obj?.maxStackSize ?? entry.maxStackSize ?? 0,
+      stackable: (obj?.maxStackSize ?? entry.maxStackSize ?? 0) > 1, containerId: 0,
+      validLocations: entry.validLocations, itemType: entry.itemType, combatUse: entry.combatUse,
+      ammoType: entry.ammoType ?? obj?.ammoType,
+    };
+  }
+
+  /** What the 1999 CombatButton reads of an object (0x005020b0 / 0x00502180); undefined = unknown. */
+  function combatButtonObjectFacts(guid: number): { combatUse: number; itemType: number } | undefined {
+    // The player (the main-pack drag) is a creature with no combat use.
+    if (aceCharGuid && guid === aceCharGuid) return { combatUse: 0, itemType: 0x10 };
+    const held = heldItemById(guid);
+    if (held) return { combatUse: held.combatUse ?? 0, itemType: held.itemType ?? 0 };
+    const entry = worldObjectRecords.entryOf(guid);
+    return entry ? { combatUse: entry.combatUse ?? 0, itemType: entry.itemType ?? 0 } : undefined;
   }
 
   gameUI.setDragCallbacks({
@@ -7087,6 +7176,7 @@ async function main() {
         groundObjectId: openContainerGuid,
         text: eraRules.placementText,
         vendorDropNeedsWholeStack: eraRules.vendorDropNeedsWholeStack,
+        order: eraRules.inventoryPlacement,
       });
       for (const text of outcome.notices) gameUI.displayErrorText(text);
       runPlaceIn3DAction(outcome.action, dragged, found);
@@ -7101,9 +7191,13 @@ async function main() {
     // for the object under the drag — a held item or a ground object.
     paperdollDragAcceptState: (guid, target) => {
       const held = heldItemById(guid);
-      const entry = held ? null : worldObjectRecords.entryOf(guid);
-      if (!held && entry === null) return null;
-      const obj: PaperdollDropObject = held ? { ...held } : { ...entry!, id: guid, wielderId: serverObjectManager?.getObject(guid)?.wielderId };
+      const isPlayer = !held && !!aceCharGuid && guid === aceCharGuid;
+      const entry = held || isPlayer ? null : worldObjectRecords.entryOf(guid);
+      if (!held && !isPlayer && entry === null) return null;
+      // VISUAL.eor-main-pack-drag-art — the main-pack drag: the player, no valid locations (the circle).
+      const obj: PaperdollDropObject = held ? { ...held }
+        : isPlayer ? { id: guid, name: playerState.name || '', validLocations: 0 }
+          : { ...entry!, id: guid, wielderId: serverObjectManager?.getObject(guid)?.wielderId };
       const ctx = paperdollWearContext();
       return target.kind === 'band' ? paperdollBandDragAcceptState(obj, ctx) : paperdollSlotDragAcceptState(obj, target.mask, ctx);
     },
@@ -7114,6 +7208,30 @@ async function main() {
     itemListDragAcceptState: (guid, d) => itemListDragOverState(placementWorld(), {
       rule: eraRules.itemListDragOver, draggedId: guid, ...d,
     }),
+    // The 1999 toolbar backpack button reads the dragged object's type and
+    // stuck bit (InventoryButton_DragOverAction @ 0x005014d0).
+    inventoryButtonDragObject: (guid) => {
+      const o = placementWorld().object(guid);
+      return o ? { itemType: o.itemType, stuck: o.stuck, isPlayer: o.isPlayer } : undefined;
+    },
+    // The 1999 toolbar slots read the dragged object and the slot's (ShortcutSlot_DragOverAction @ 0x005004b0).
+    shortcutSlotDragObject: (guid) => shortcutObjectFacts1999(guid),
+    // BUG.ac1999-combat-button-drop — the 1999 CombatButton reads the dragged object's combat use and
+    // type (DragOverAction @ 0x005020b0); the player is a creature with none.
+    combatButtonDragObject: (guid) => combatButtonObjectFacts(guid),
+    // CombatButton AcceptDragObject @ 0x00502180: a non-weapon is refused out loud; a weapon, shield
+    // or caster goes PanelUI_AutoWield(obj, 2, 0, 1, 1, 1) — the double-click's AutoWield (one off
+    // the ground is picked up and wielded by the server, GetAndWieldItem).
+    onCombatButtonDrop: (guid) => {
+      if (!combatButtonDropWields(combatButtonObjectFacts(guid))) { raiseClientNotice(gameUI, CN.combatButtonNotWieldable); return; }
+      // BUG.ac1999-autowield-is-legal — param_5 = 1: an object off the ground that can't be wielded
+      // ("Cannot be used with …") goes to the pack instead, ". Moving to backpack.".
+      const how = { moveToBackpack: true };
+      const held = heldItemById(guid);
+      if (held) { attemptAutoWield(held, UISlotSide.Right, new Set(), true, true, how); return; }
+      const ground = groundWieldItem(guid);
+      if (ground) attemptAutoWield(ground, UISlotSide.Right, new Set(), true, false, how);
+    },
     onWieldWorldObject: (guid, target) => {
       const entry = worldObjectRecords.entryOf(guid);
       if (entry === null || !sendGameAction) return false;
@@ -7124,6 +7242,11 @@ async function main() {
         dragAmount: dragSplitFor({ id: guid, stackSize: obj?.stackSize ?? 1 }).amount,
       }, target, paperdollWearContext());
       if (outcome.notice) refusalWithDetail(inventoryLockDetail, () => gameUI.displayErrorText(outcome.notice!));
+      // INV-4 — the swap from the ground: the occupant to the pack, then the server picks the object up and wields it.
+      if (outcome.swap) {
+        const ground = groundWieldItem(guid);
+        return ground ? attemptAutoWield(ground, outcome.swap.side, new Set(), false, false) : false;
+      }
       if (outcome.merge) {
         // GAP.world-drag-drop.a.a.a — a ground stack merged straight into
         // the wielded stack (ACE StackableMerge searches the landblock).
@@ -8223,7 +8346,7 @@ async function main() {
   // (0xF7B7 → the `datPatch1999` event), applied and stored for next time.
   if (ac1999World) {
     const serverKey = ac1999ServerKey(connectUrl);
-    const n = await ac1999World.restore(datCacheStore, serverKey);
+    const n = await ac1999World.restore(datCacheStore, serverKey, ac1999SeedFor(connectUrl));
     if (n) console.log(`[AC:1999] ${n} stored server DAT patch file(s) applied`);
     aceConnection.on((e) => {
       if ((e as { type: string }).type !== 'datPatch1999') return;
@@ -8236,6 +8359,20 @@ async function main() {
       });
     });
   }
+  // BUG.ac1999-slow-login-ddd-push — an AC1999 server's DAT push (10-15 s on a browser's first login there)
+  // says how far it has come under Please Wait, as the 1999 loading screen's bar did. Only Connection1999
+  // emits these, and only when the server has files to send.
+  const ac1999PatchProgress = new Ac1999PatchProgress();
+  aceConnection.on((e) => {
+    const type = (e as { type: string }).type;
+    if (type === 'datPatchProgress1999') {
+      const line = ac1999PatchProgress.onProgress(e as unknown as DatPatchProgressEvent);
+      if (line) gameUI.setConnectingStatus(line);
+    } else if (type === 'datPatch1999') {
+      const line = ac1999PatchProgress.onFinished();
+      if (line) gameUI.setConnectingStatus(line);
+    }
+  });
   // Set DAT iteration counts so DDD_InterrogationResponse matches server's DATs
   // (prevents session termination when DAT patching is disabled on server)
   aceConnection.datIterations = {
@@ -9287,11 +9424,13 @@ async function main() {
         // the facts it reads are the inventory item's).
         const inv = dragged?.inventoryItem;
         if (inv && eraRules.shortcutDropCheck === 'ac1999') {
-          // A container's shortcut takes the item into the container (AttemptPlaceInContainer).
+          // A container's shortcut takes the item into the container (AttemptPlaceInContainer);
+          // the main pack's shortcut (the player) is one too.
           const slotId = itemShortcutRestorer.objectAt(slot);
-          const slotItem = slotId ? heldItemById(slotId) : undefined;
-          if (slotItem && shortcutDropIntoContainer1999(inv, slotItem)) {
-            if (placementReady()) runPlacement(inv.id, attemptToPlaceInContainer(inv.id, slotItem.id, 0, true, 0, placementWorld()), 'shortcut container drop');
+          const slotFacts = slotId ? shortcutObjectFacts1999(slotId) : undefined;
+          const draggedFacts = shortcutObjectFacts1999(inv.id);
+          if (slotFacts && draggedFacts && shortcutDropIntoContainer1999(draggedFacts, slotFacts)) {
+            if (placementReady()) runPlacement(inv.id, attemptToPlaceInContainer(inv.id, slotId, 0, true, 0, placementWorld()), 'shortcut container drop');
             return;
           }
           const flags = (inv.objectDescFlags ?? 0) >>> 0;
@@ -9730,8 +9869,8 @@ async function main() {
       if (aceCharGuid !== null && autoWieldRetryDue(pendingAutoWield, data.itemGuid, data.containerGuid)) {
         const pending = pendingAutoWield!;
         pendingAutoWield = null;
-        const blocked = playerState.inventory.getItem(pending.itemId);
-        if (blocked) attemptAutoWield(blocked, pending.side, pending.seenBlockers);
+        const blocked = playerState.inventory.getItem(pending.itemId) ?? pending.groundItem;
+        if (blocked) attemptAutoWield(blocked, pending.side, pending.seenBlockers, true, blocked !== pending.groundItem);
       }
       // GAP.18 — server-confirmed container move: retag the item's
       // containerId when it lands in the main pack or any of our side

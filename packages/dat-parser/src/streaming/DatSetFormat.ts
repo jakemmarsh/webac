@@ -82,7 +82,19 @@ export interface DatSetPointer {
    * clients ignore the key, so adding it never breaks a deployed client.
    */
   areas?: ObjectRef;
+  /**
+   * A 1999 world set only: per AC1999 server (its launcher world id), that server's login DAT
+   * push prepared ahead of time (era1999/ServerPatchSeed.ts, BUG.ac1999-slow-login-ddd-push).
+   * Optional and ignored by older clients, like `areas`.
+   */
+  serverSeeds?: Record<string, ServerSeedRef>;
   created?: string;
+}
+
+/** One server's seed object: `base` is the iterations it was diffed from, `iterations` the server's. */
+export interface ServerSeedRef extends ObjectRef {
+  base: { portal: number; cell: number };
+  iterations: { portal: number; cell: number };
 }
 
 /**
@@ -156,7 +168,19 @@ export function parseSetPointer(json: unknown): DatSetPointer {
     }
   }
   const areas = j.areas ? ref(j.areas, 'areas') : null;
-  return { format: 1, set: j.set, iterations, manifest: ref(j.manifest, 'manifest'), packs, ...(dats ? { dats } : {}), ...(areas ? { areas } : {}), ...(typeof j.created === 'string' ? { created: j.created } : {}) };
+  let serverSeeds: Record<string, ServerSeedRef> | null = null;
+  if (j.serverSeeds && typeof j.serverSeeds === 'object') {
+    serverSeeds = {};
+    for (const [id, v] of Object.entries(j.serverSeeds as Record<string, unknown>)) {
+      const o = (v ?? {}) as Record<string, Record<string, unknown> | undefined>;
+      const pair = (w: Record<string, unknown> | undefined, what: string) => ({ portal: num(w?.portal, `${what}.portal`), cell: num(w?.cell, `${what}.cell`) });
+      serverSeeds[id] = { ...ref(v, `serverSeeds.${id}`), base: pair(o.base, `serverSeeds.${id}.base`), iterations: pair(o.iterations, `serverSeeds.${id}.iterations`) };
+    }
+  }
+  return {
+    format: 1, set: j.set, iterations, manifest: ref(j.manifest, 'manifest'), packs, ...(dats ? { dats } : {}), ...(areas ? { areas } : {}),
+    ...(serverSeeds ? { serverSeeds } : {}), ...(typeof j.created === 'string' ? { created: j.created } : {}),
+  };
 }
 
 export interface ManifestPack extends ObjectRef { role: PackRole; files: number }

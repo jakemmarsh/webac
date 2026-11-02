@@ -51,6 +51,8 @@ export const PLACE_IN_3D_STRINGS = {
   cannotGive: 'Cannot give %s to %s',
   moveCancelled: 'Move cancelled',
   midAir: 'You cannot do that in mid air',
+  /** The 1999 creature branch, a creature dragged or selected ("You cannot give the " 0x600f48, ItemHolder_AttemptPlaceIn3D @ 0x004e50c0). */
+  cannotGiveCreature: 'You cannot give the %s',
   // ItemHolder::IsMergeAttemptLegal @ 00586f30, run loud by AttemptMerge(…, 0).
   mergeWhileTraded: 'You cannot merge items while they are being traded.',
   mergeStackFull: 'The destination stack is already full.',
@@ -75,6 +77,8 @@ export interface PlaceIn3DItem {
   inTrade: boolean;
   /** current_state == IN_3D_VIEW. */
   in3DView: boolean;
+  /** ITEM_TYPE (vtable +0x18): the 1999 creature branch refuses to give a creature. */
+  itemType?: number;
   weenieClassId: number;
   stackSize: number;
   maxStackSize: number;
@@ -115,6 +119,12 @@ export interface PlaceIn3DContext {
    * hands a vendor drop to 0x004d00d0 with no split test. Absent = true (end of retail).
    */
   vendorDropNeedsWholeStack?: boolean;
+  /**
+   * Whose ItemHolder decides (EraClientRules.inventoryPlacement): end of retail's AttemptPlaceIn3D
+   * @ 00588600 refuses an object the player doesn't own before looking at the target; the 1999
+   * ItemHolder_AttemptPlaceIn3D @ 0x004e50c0 asks per branch (see attemptPlaceIn3D1999). Absent = 'eor'.
+   */
+  order?: 'eor' | 'ac1999';
 }
 
 export type PlaceIn3DAction =
@@ -168,6 +178,7 @@ export function attemptPlaceIn3D(
   placeIn3D: boolean,
   ctx: PlaceIn3DContext,
 ): PlaceIn3DOutcome {
+  if (ctx.order === 'ac1999') return attemptPlaceIn3D1999(item, target, placeIn3D, ctx);
   const notices: string[] = [];
   const done = (action: PlaceIn3DAction): PlaceIn3DOutcome => ({ action, notices });
   if (!ctx.ready || !item) return done({ kind: 'none' });
@@ -219,6 +230,89 @@ export function attemptPlaceIn3D(
   if (!placeIn3D) return done({ kind: 'none' });
   if (!ctx.playerOnGround) {
     notices.push(PLACE_IN_3D_STRINGS.midAir);
+    return done({ kind: 'none' });
+  }
+  if (ctx.splitPartial) return done({ kind: 'split3d', amount: Math.max(1, ctx.dragAmount) });
+  if (item.in3DView) {
+    notices.push(PLACE_IN_3D_STRINGS.moveCancelled);
+    return done({ kind: 'none' });
+  }
+  return done({ kind: 'put3d' });
+}
+
+/**
+ * The 1999 client.exe's ItemHolder_AttemptPlaceIn3D @ 0x004e50c0 (BUG.ac1999-autowield-is-legal
+ * sweep): no secure trade, and ownership asked branch by branch, not first:
+ *   1. InventoryRequestIsLegal; the target is the player → AttemptPlaceInContainer(player).
+ *   2. AttemptMerge(item, target, 0) (loud) — an object off the ground merges onto a stack too. The
+ *      whole 1999 merge path asks no ownership (read 2026-11-01): 0x004e4e80 → AttemptMergeIsLegal
+ *      @ 0x004e4f70 (InventoryRequestIsLegal, two different known objects, both maxStackSize > 1, the
+ *      same wcid "Cannot Merge Different Stack Types.", room "This stack's too big to add to") →
+ *      UIAttemptMerge (InventoryRequestIsLegal, Event_StackableMerge, RecordRequest).
+ *   3. A vendor (bitfield 0x200) and an owned object → the vendor drop 0x004d00d0 (no split test).
+ *   4. A creature target: a creature dragged → "You cannot give the %s"; an object not owned →
+ *      "You must first pick up the %s"; else UIAttemptGive(split size).
+ *   5. A container (HasContainerCapacity): not Openable → "The %s is locked"; not the open ground
+ *      object → "You must open the %s first"; else AttemptPlaceInContainer — owned or not.
+ *   6. param_1 == 0 (the keyboard Give) → "Cannot give %s to %s".
+ *   7. The ground (param_1 = 1, nothing placed): in the air → "You cannot do that in mid air"; then
+ *      not owned → "You must first pick up the %s"; split < max → UIAttemptSplitTo3D; already in
+ *      the 3D view → "Move cancelled"; else UIAttemptPutIn3D.
+ */
+export function attemptPlaceIn3D1999(
+  item: PlaceIn3DItem | null,
+  target: PlaceIn3DTarget | null,
+  placeIn3D: boolean,
+  ctx: PlaceIn3DContext,
+): PlaceIn3DOutcome {
+  const notices: string[] = [];
+  const done = (action: PlaceIn3DAction): PlaceIn3DOutcome => ({ action, notices });
+  if (!ctx.ready || !item) return done({ kind: 'none' });
+  if (target) {
+    if (target.id === ctx.playerId) return done({ kind: 'backpack' });
+    const refusal = mergeAttemptRefusal(item, target, ctx.text);
+    if (refusal === null) {
+      const tgtSize = Math.max(1, target.stackSize || 1);
+      const amount = Math.min(Math.max(1, ctx.dragAmount), target.maxStackSize - tgtSize);
+      return done({ kind: 'merge', amount });
+    }
+    if (refusal) notices.push(refusal);
+    const flags = target.objectDescFlags >>> 0;
+    if ((flags & ObjectDescriptionFlag.Vendor) && item.ownedByPlayer) return done({ kind: 'sell' });
+    if (target.itemType === ItemType.Creature) {
+      if (item.itemType === ItemType.Creature) {
+        notices.push(fmt(PLACE_IN_3D_STRINGS.cannotGiveCreature, item.name));
+        return done({ kind: 'none' });
+      }
+      if (!item.ownedByPlayer) {
+        notices.push(fmt(PLACE_IN_3D_STRINGS.mustPickUp, item.name));
+        return done({ kind: 'none' });
+      }
+      return done({ kind: 'give', amount: Math.max(1, ctx.dragAmount) });
+    }
+    if (target.itemType & ItemType.Container) {
+      if (!(flags & ObjectDescriptionFlag.Openable)) {
+        notices.push(fmt(PLACE_IN_3D_STRINGS.locked, target.name));
+        return done({ kind: 'none' });
+      }
+      if (ctx.groundObjectId !== target.id) {
+        notices.push(fmt(PLACE_IN_3D_STRINGS.mustOpenFirst, target.name));
+        return done({ kind: 'none' });
+      }
+      return done({ kind: 'container' });
+    }
+    if (!placeIn3D) {
+      notices.push(fmt(PLACE_IN_3D_STRINGS.cannotGive, item.name, target.name));
+      return done({ kind: 'none' });
+    }
+  }
+  if (!placeIn3D) return done({ kind: 'none' });
+  if (!ctx.playerOnGround) {
+    notices.push(PLACE_IN_3D_STRINGS.midAir);
+    return done({ kind: 'none' });
+  }
+  if (!item.ownedByPlayer) {
+    notices.push(fmt(PLACE_IN_3D_STRINGS.mustPickUp, item.name));
     return done({ kind: 'none' });
   }
   if (ctx.splitPartial) return done({ kind: 'split3d', amount: Math.max(1, ctx.dragAmount) });

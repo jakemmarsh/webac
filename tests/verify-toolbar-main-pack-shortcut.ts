@@ -233,7 +233,7 @@ describe('GameUI — the main pack is a drag source the toolbar takes', () => {
     expect(fire(slots[5], 'dragover').defaultPrevented).toBe(false);
   });
 
-  it('VISUAL.drag-merge-indicator — the hovered slot shows 0x1000045f\'s add-shortcut art (end of retail), nothing in 1999', async () => {
+  it('VISUAL.drag-merge-indicator — the hovered slot shows 0x1000045f\'s add-shortcut art (end of retail), the 1999 ShortcutSlot\'s own', async () => {
     const { eraClientRules } = await import('../packages/renderer/src/era/EraFeatures.js');
     const { eraProfile } = await import('../packages/renderer/src/era/EraProfiles.js');
     // gmToolbarUI::OnItemListDragOver @ 004bd150: SetDragAcceptState(0x10000040) for any drag carrying an object.
@@ -244,12 +244,23 @@ describe('GameUI — the main pack is a drag source the toolbar takes', () => {
     expect(overlay.dataset.acDragAccept).toBe(String(0x10000040));
     fire(slots[4], 'drop');
     expect(overlay.dataset.acDragAccept).toBe(String(0x1000003f));
-    // The 1999 ShortcutSlot has no DragOverAction.
+    // The 1999 ShortcutSlot_DragOverAction @ 0x005004b0 (vtable 0x601e28 slot 42): the main pack
+    // (the player: a container, so ItemHolder_DetermineUseResult @ 0x004fe720 takes it) gets the
+    // add-shortcut box from the 1999 table; with its facts unknown, the circle.
     ui.setClientRules(eraClientRules(eraProfile('ac1999-retail')));
     try {
+      ui.setDragCallbacks({ shortcutSlotDragObject: (guid: number) => guid === PLAYER
+        ? { id: PLAYER, itemType: 0x10, isPlayer: true, isContainer: true, holdsPacks: true } : undefined });
       fire(packTabs()[0], 'dragstart');
       fire(slots[6], 'dragover');
-      expect(slots[6].querySelector('[data-ac-drag-accept]')).toBeNull();
+      const o6 = slots[6].querySelector('[data-ac-drag-accept]') as HTMLElement;
+      expect(o6.dataset.acDragTemplate).toBe('shortcut1999');
+      expect(o6.dataset.acDragAccept).toBe(String(0x10000040));
+      fire(slots[6], 'dragleave');
+      expect(o6.dataset.acDragAccept).toBe(String(0x1000003f));
+      ui.setDragCallbacks({});
+      fire(slots[6], 'dragover');
+      expect(o6.dataset.acDragAccept).toBe(String(0x10000041));
       fire(packTabs()[0], 'dragend');
       ui.settleItemDragWaiting();
     } finally {

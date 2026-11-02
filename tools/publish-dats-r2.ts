@@ -31,6 +31,13 @@
  *   --areas-only <pointer url>
  *                          add area packs to a LIVE set and change nothing else: stages the area objects and
  *                          the live pointer plus `areas` (upload with tools/upload-stream-set-r2.ts)
+ *   --server-seed <id>=<seed file>
+ *                          (--overlay ac1999) list an AC1999 server's prepared login DAT push in the pointer's
+ *                          `serverSeeds` (tools/ac1999-dat-seed.ts builds it; BUG.ac1999-slow-login-ddd-push).
+ *                          <id> is the server's launcher world id (the public server: ac1999)
+ *   --seed-only <pointer url>
+ *                          add --server-seed to a LIVE set and change nothing else: stages the seed object and
+ *                          the live pointer plus that seed (upload with tools/upload-stream-set-r2.ts)
  *
  * Idempotent: every object key is the hash of its uncompressed content, so a
  * re-run uploads only objects R2 does not already hold (rclone --ignore-existing),
@@ -74,7 +81,7 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatDatabase } from '../packages/dat-parser/src/DatDatabase.js';
 import { DatReader } from '../packages/dat-parser/src/DatReader.js';
@@ -87,6 +94,7 @@ import { SKELETON_TYPES, buildAreaIndex, parsePack, parseSetManifest } from '../
 import { planAreas } from './lib/area-packs.js';
 import { worldDbRoots } from './lib/world-db-roots.js';
 import { AC1999_UNTRANSLATED_COPIES, ac1999CellOverlay, ac1999PortalOverlay, type Ac1999DatOverlay } from '../packages/dat-parser/src/era1999/Ac1999Overlay.js';
+import { gzipObject, pointerWithServerSeed } from './lib/ac1999-seed.js';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -140,6 +148,14 @@ if (overlayName !== null && overlayName !== 'ac1999') throw new Error(`--overlay
 const ac1999World = overlayName === 'ac1999';
 /** The DATs this run packs: the four end-of-retail files, or the 1999 world's two. */
 const SET_FILES: Partial<Record<DatName, string>> = ac1999World ? { portal: 'portal.dat', cell: 'cell.dat' } : DAT_FILES;
+/** --server-seed <id>=<file>: one AC1999 server's prepared login push (tools/lib/ac1999-seed.ts). */
+const serverSeedArg = opt('--server-seed');
+const serverSeed = serverSeedArg === null ? null : (() => {
+  const at = serverSeedArg.indexOf('=');
+  if (at <= 0) throw new Error(`--server-seed: expected <server id>=<seed file>, got "${serverSeedArg}"`);
+  return { id: serverSeedArg.slice(0, at), payload: new Uint8Array(readFileSync(resolve(serverSeedArg.slice(at + 1)))) };
+})();
+if (serverSeed && !ac1999World && !flag('--seed-only')) throw new Error('--server-seed is for a 1999 world set (--overlay ac1999)');
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 const hash8 = (b: Uint8Array) => createHash('sha256').update(b).digest().subarray(0, 8);
@@ -382,12 +398,15 @@ function main(): void {
   const dats = Object.fromEntries((Object.keys(SET_FILES) as DatName[]).map((d) => [d, {
     blockSize: dbs[d].blockSize, dataSet: dbs[d].dataSet, dataSubset: dbs[d].dataSubset, masterMapId: dbs[d].masterMapId,
   }]));
-  const pointer = { format: 1, set: setName, iterations, manifest: { hash: hex(manifest.hash), key: manifest.key, size: manifest.size, gzSize: manifest.gzSize },
+  const basePointer = { format: 1, set: setName, iterations, manifest: { hash: hex(manifest.hash), key: manifest.key, size: manifest.size, gzSize: manifest.gzSize },
     // the packs again, so boot can fetch boot+local in parallel with (not after) the manifest
     packs: Object.fromEntries(packs.map(({ role, p, files }) => [role, { key: p.key, size: p.size, gzSize: p.gzSize, files }])),
     dats,
     ...(areaIndex ? { areas: { key: areaIndex.key, size: areaIndex.size, gzSize: areaIndex.gzSize } } : {}),
     created: new Date().toISOString() };
+  // A seed's object is planned (and staged) like any other: content-addressed under v1/o.
+  const pointer = serverSeed ? pointerWithServerSeed(basePointer, serverSeed.id, serverSeed.payload, (p) => putObject(p)) : basePointer;
+  if (ac1999World && !serverSeed) console.warn('[publish] no --server-seed: this pointer lists no AC1999 server seeds (a live one that does would lose them)');
   if (writeStage) writeFileSync(join(stageDir, `v1/sets/${setName}.json`), JSON.stringify(pointer, null, 2) + '\n');
 
   // ── report ────────────────────────────────────────────────────────────────
@@ -501,6 +520,33 @@ async function areasOnly(pointerUrl: string): Promise<void> {
   console.log(`  upload: UPLOAD_KEY=… npx tsx tools/upload-stream-set-r2.ts <worker url> ${stageDir}`);
 }
 
+/**
+ * --seed-only <pointer url>: list --server-seed in a set that is already live, changing nothing
+ * else (the live pointer plus `serverSeeds`). Stages the seed object and the pointer; upload with
+ * tools/upload-stream-set-r2.ts.
+ */
+async function seedOnly(pointerUrl: string): Promise<void> {
+  if (!serverSeed) throw new Error('--seed-only needs --server-seed <id>=<seed file>');
+  const r = await fetch(pointerUrl, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`GET ${pointerUrl}: HTTP ${r.status}`);
+  const live = JSON.parse(await r.text()) as { set: string; iterations: Record<string, number>; serverSeeds?: Record<string, unknown> };
+  // upload-stream-set-r2.ts names the pointer after the stage dir, so the dir is the set's own name.
+  stageDir = resolve(opt('--stage', join(tmpdir(), 'acjs-dat-publish', 'seed', live.set))!);
+  if (basename(stageDir) !== live.set) throw new Error(`--stage: the dir must be named ${live.set} (upload-stream-set-r2.ts names the pointer after it)`);
+  mkdirSync(join(stageDir, 'v1/o'), { recursive: true });
+  mkdirSync(join(stageDir, 'v1/sets'), { recursive: true });
+  const pointer = pointerWithServerSeed(live, serverSeed.id, serverSeed.payload, (payload) => {
+    const o = gzipObject(payload);
+    writeFileSync(join(stageDir, o.key), o.gz);
+    return o;
+  });
+  writeFileSync(join(stageDir, `v1/sets/${live.set}.json`), JSON.stringify(pointer, null, 2) + '\n');
+  const e = pointer.serverSeeds[serverSeed.id] as { key: string; size: number; gzSize: number; iterations: { portal: number; cell: number } };
+  console.log(`\nserver seed ${serverSeed.id} for live set ${live.set}: ${e.key}, ${e.size} bytes (${e.gzSize} gz), server iterations ${e.iterations.portal} / ${e.iterations.cell}`);
+  console.log(`  staged the seed object + the pointer in ${stageDir}`);
+  console.log(`  upload: UPLOAD_KEY=… npx tsx tools/upload-stream-set-r2.ts <worker url> ${stageDir}`);
+}
+
 function uploadCommands(setName: string): string[][] {
   const common = ['--s3-no-check-bucket', '--transfers', '64', '--checkers', '64', '--retries', '5', '--stats-one-line', '--stats', '30s'];
   const cmds: string[][] = [
@@ -521,5 +567,7 @@ function uploadCommands(setName: string): string[][] {
 }
 
 const areasOnlyUrl = opt('--areas-only');
+const seedOnlyUrl = opt('--seed-only');
 if (areasOnlyUrl) void areasOnly(areasOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
+else if (seedOnlyUrl) void seedOnly(seedOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
 else main();

@@ -107,7 +107,15 @@ import {
   SALVAGE_SLOT_EL, SALVAGE_CELL, salvageListCellCount, salvageButtonState, salvageRequestGuids,
   planSalvageDrop, salvageDragAcceptState,
 } from './SalvagePanel.js';
-import { CONTAINER_CELL_DRAG_ACCEPT_TEX, DRAG_ACCEPT_STATE, TOOLBAR_CELL_DRAG_ACCEPT_TEX, UIITEM_DRAG_ACCEPT_TEX, uiItemDragAcceptState, type DragAcceptTemplate } from './UIItemDragAccept.js';
+import {
+  COMBAT_BUTTON_DRAG_TEX, CONTAINER_CELL_DRAG_ACCEPT_TEX, DRAG_ACCEPT_STATE, INVENTORY_BUTTON_DRAG_TEX, MAIN_PACK_DRAG_IS_CONTAINER_DRAG,
+  SHORTCUT_SLOT_1999_DRAG_TEX, TOOLBAR_CELL_DRAG_ACCEPT_TEX, UIITEM_DRAG_ACCEPT_TEX,
+  combatButtonDragArtAt, combatButtonDragOverState, externalContainerCellHasDragArt, externalContainerDragOverState,
+  inventoryButtonDragArtAt, inventoryButtonDragOverState, paperdollFigureDragOverlayState,
+  shortcutSlotDragOverState, spellBarDragOverState, uiItemDragAcceptState, vendorListDragOverState, vendorListHasDragArt,
+  type CombatButtonDragObject, type DragAcceptTemplate, type ExternalContainerCell, type InventoryButtonDragObject,
+  type ShortcutSlotDragObject, type VendorDragList,
+} from './UIItemDragAccept.js';
 import type { SoundPlayer } from '../audio/SoundPlayer.js';
 import type { AudioManager } from '../audio/AudioManager.js';
 import { isRetailClientLocalSound, resolveUiSoundTable } from '../audio/RetailLocalSounds.js';
@@ -171,6 +179,7 @@ import {
   findEndowment, endowmentIconTooltip, isUseableSelfTarget, itemOverlayShortcutNumMedia, ITEM_SHORTCUT_SLOTS,
   ITEM_WAITING_GHOST_MEDIA, ITEM_SELL_STATE_MEDIA,
 } from './SpellShortcutBar.js';
+import { AC1999_SPELLBAR_DRAG_SCROLL, DragScrollClock, dragScrollRegion, layoutDragScrollRule, type DragScrollRule } from './SpellBarDragScroll.js';
 import { isUseTargetCompatible, spellFormulaTargetingType, inqSpellTargetType } from '@ac/shared';
 import { buildCharacterInfoReport } from './CharacterInfoReport.js';
 import type { CharacterInfoSource } from './CharacterInfoReport.js';
@@ -1820,6 +1829,8 @@ export class GameUI {
   private playerPackDragGuid = 0;
   /** gmToolbarUI::m_shortcutSlots — the object in shortcut slot `index` (0 = empty); main's restorer. */
   itemShortcutObjectAt: ((index: number) => number) | null = null;
+  /** The object of the shortcut being dragged off a slot (shortcutDragFrom), 0 = none. */
+  private shortcutDragObject = 0;
   /**
    * RECON.inventory-grid-dat-cells.b — whether an inventory request is in
    * flight for `guid` (main: the request tracker's pending object). A drag
@@ -2151,6 +2162,17 @@ export class GameUI {
      */
     itemListDragAcceptState?: (guid: number, d: { fromContainerList: boolean; containerList: boolean; cellObjectId: number }) => number | null;
     /**
+     * The dragged object's type, stuck bit and player-ness, which the 1999
+     * toolbar backpack button reads for its drag-over art
+     * (UIItemDragAccept.inventoryButtonDragOverState); undefined = unknown.
+     */
+    inventoryButtonDragObject?: (guid: number) => InventoryButtonDragObject | undefined;
+    /**
+     * What the 1999 toolbar shortcut slot reads of the dragged object and of the slot's own
+     * (UIItemDragAccept.shortcutSlotDragOverState); undefined = unknown.
+     */
+    shortcutSlotDragObject?: (guid: number) => ShortcutSlotDragObject | undefined;
+    /**
      * A click (examine = false) or right-click (true) on the paperdoll
      * portrait's drag band hit `guid` — a worn item, or the player where
      * nothing is worn (gmPaperDollUI::ListenToElementMessage @ 004a5c30).
@@ -2162,6 +2184,16 @@ export class GameUI {
      * PlaceInBackpack, anything else AttemptToPlaceInContainer(it, player).
      */
     onPlaceInBackpack?: (guid: number) => void;
+    /**
+     * BUG.ac1999-combat-button-drop — what the 1999 combat button reads of the dragged object
+     * (UIItemDragAccept.combatButtonDragOverState); undefined = unknown.
+     */
+    combatButtonDragObject?: (guid: number) => CombatButtonDragObject | undefined;
+    /**
+     * An item dropped on the 1999 combat button (CombatButton AcceptDragObject @ 0x00502180): the
+     * refusal line for a non-weapon, else PanelUI_AutoWield(obj, 2, 0, 1, 1, 1).
+     */
+    onCombatButtonDrop?: (guid: number) => void;
     /** FAITHFUL.548 — drop inventory item onto the trade window panel.
      * Mirror of onRightClickItem's right-click "Add to Trade" path; fires
      * when the user drags an inventory cell over the trade window with
@@ -2349,6 +2381,9 @@ export class GameUI {
    * whole scroller, the 1999 client's one arrow per end).
    */
   private spellBarScrollX: number[] = new Array(8).fill(0);
+  /** VISUAL.ac1999-spellbar-drag-autoscroll — the spell drag being tracked (pointer in client px), or null. */
+  private spellDragScroll: { clock: DragScrollClock; rule: DragScrollRule; x: number; y: number; raf: number } | null = null;
+  private spellDragScrollInstalled = false;
   private spellBarArrowRule: SpellBarArrowRule = 'pair';
   private magicPanelTab: 'spells' | 'components' | 'research' = 'spells'; // VISUAL.139 — 'foci' removed (foci retired from AC in 2010; not an EoL page)
   private spellComponents: Array<{ name: string; quantity: number; icon?: number }> = [];
@@ -12540,6 +12575,7 @@ export class GameUI {
     });
     bottomBar.appendChild(combatModeBtn);
     this.drawCombatMode();
+    this.attachCombatButtonDrop(combatModeBtn);
 
     // ── Left separator at (55,0) 7x27, z=2 ──
     const sepL = document.createElement('div');
@@ -12666,6 +12702,9 @@ export class GameUI {
     // 32x32 on 0x21000037:0x1000045e: state 0x10000046 draws 0x060011f7
     // while an item is dragged over the button
     // (HandleInventoryButtonDragOver @ 004bd180), 0x1000003f nothing.
+    // The 1999 InventoryButton (DragOverAction @ 0x005014d0, DrawThis
+    // @ 0x00501420) draws the same arrow there, or the red circle centred
+    // for a creature, an untyped or a stuck object (inventoryButtonDragOverState).
     const invDragOverlay = document.createElement('div');
     invDragOverlay.dataset.elementId = '0x1000046c';
     Object.assign(invDragOverlay.style, {
@@ -12674,18 +12713,27 @@ export class GameUI {
       imageRendering: 'pixelated',
     });
     rightBtn.appendChild(invDragOverlay);
-    const setInvDragOverlay = (on: boolean): void => {
-      const url = on ? this.uiTextures.get(0x060011f7) : undefined;
+    const setInvDragOverlay = (state: number): void => {
+      const tex = INVENTORY_BUTTON_DRAG_TEX[state];
+      const url = tex !== undefined ? this.uiTextures.get(tex) : undefined;
       invDragOverlay.style.backgroundImage = url ? `url(${url})` : 'none';
-      invDragOverlay.dataset.acState = on ? '10000046' : '1000003f';
+      invDragOverlay.dataset.acState = state.toString(16);
+      const at = inventoryButtonDragArtAt(this.clientRules.itemListDragOver, state);
+      invDragOverlay.style.left = `${at.x}px`;
+      invDragOverlay.style.top = `${at.y}px`;
     };
     const draggingObject = (): boolean => this.dragItemGuid !== 0 || this.dragSourceSlot !== null || !!this.worldDragGuid;
     rightBtn.addEventListener('dragover', (e) => {
-      if (!draggingObject()) return;
-      e.preventDefault();
-      setInvDragOverlay(true);
+      const guid = this.itemDragArtGuid();
+      const state = inventoryButtonDragOverState(this.clientRules.itemListDragOver, guid,
+        guid ? this.dragCallbacks.inventoryButtonDragObject?.(guid) : undefined);
+      if (draggingObject()) e.preventDefault();
+      if (state !== null) setInvDragOverlay(state);
     });
-    rightBtn.addEventListener('dragleave', () => setInvDragOverlay(false));
+    rightBtn.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget instanceof Node && rightBtn.contains(e.relatedTarget)) return;
+      setInvDragOverlay(DRAG_ACCEPT_STATE.none);
+    });
     // gmToolbarUI::HandleDropRelease @ 004be7c0 on 0x100001b1: an object the
     // player owns goes CPlayerSystem::PlaceInBackpack (a worn item comes off
     // into the pack); anything else ItemHolder::AttemptToPlaceInContainer
@@ -12693,7 +12741,7 @@ export class GameUI {
     rightBtn.addEventListener('drop', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      setInvDragOverlay(false);
+      setInvDragOverlay(DRAG_ACCEPT_STATE.none);
       const guid = this.currentDragGuid();
       this.worldDragGuid = 0;
       this.dragItemGuid = 0;
@@ -13281,6 +13329,58 @@ export class GameUI {
   }
 
   /** Update the combat mode button's DAT-textured background for the current mode. */
+  /**
+   * BUG.ac1999-combat-button-drop — the combat button as a drop target where the era's has one
+   * (EraClientRules.combatButtonWieldDrop: the 1999 CombatButton). DragOverAction @ 0x005020b0
+   * latches the ring / circle (UIItemDragAccept.combatButtonDragOverState), drawn centred by
+   * DrawThis @ 0x00501fc0; StopDraggingOver @ 0x00502150 (the pointer leaving) and the drop clear it;
+   * AcceptDragObject @ 0x00502180 refuses a non-weapon out loud, else auto-wields it. End of retail:
+   * the drag-over takes nothing (no preventDefault), so the browser refuses the drop and nothing is
+   * drawn. The rule is read per event: the era's rules can change after the toolbar is built.
+   */
+  private attachCombatButtonDrop(btn: HTMLElement): void {
+    const overlay = document.createElement('div');
+    overlay.dataset.acDragAccept = String(DRAG_ACCEPT_STATE.none);
+    overlay.dataset.acCombatDragArt = '1';
+    const at = combatButtonDragArtAt(55, 58);
+    Object.assign(overlay.style, {
+      position: 'absolute', left: `${at.x}px`, top: `${at.y}px`, width: '32px', height: '32px',
+      pointerEvents: 'none', backgroundSize: '32px 32px', backgroundRepeat: 'no-repeat',
+      imageRendering: 'pixelated',
+    });
+    btn.appendChild(overlay);
+    const setState = (state: number): void => {
+      overlay.dataset.acDragAccept = String(state);
+      const tex = COMBAT_BUTTON_DRAG_TEX[state];
+      const url = tex !== undefined ? this.uiTextures.get(tex) : undefined;
+      overlay.style.backgroundImage = url ? `url(${url})` : 'none';
+    };
+    btn.addEventListener('dragover', (e) => {
+      const guid = this.itemDragArtGuid();
+      if (!this.clientRules.combatButtonWieldDrop || !guid) return;
+      e.preventDefault();
+      // The latch: the first verdict stands until the drag leaves.
+      if (overlay.dataset.acDragAccept !== String(DRAG_ACCEPT_STATE.none)) return;
+      const state = combatButtonDragOverState(true, guid, this.dragCallbacks.combatButtonDragObject?.(guid));
+      if (state !== null) setState(state);
+    });
+    btn.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget instanceof Node && btn.contains(e.relatedTarget)) return;
+      setState(DRAG_ACCEPT_STATE.none);
+    });
+    btn.addEventListener('drop', (e) => {
+      setState(DRAG_ACCEPT_STATE.none);
+      const guid = this.itemDragArtGuid();
+      if (!this.clientRules.combatButtonWieldDrop || !guid) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.worldDragGuid = 0;
+      this.dragItemGuid = 0;
+      this.dragSourceSlot = null;
+      this.dragCallbacks.onCombatButtonDrop?.(guid);
+    });
+  }
+
   private drawCombatMode(): void {
     const btn = document.getElementById('combat-mode-btn');
     if (!btn) return;
@@ -16348,8 +16448,9 @@ export class GameUI {
         // Accept drops from inventory onto equipment slots; the slot's UIItem
         // shows OnItemListDragOver's ring / circle (m_elem_Icon_DragAccept).
         slotEl.addEventListener('dragover', (e) => { e.preventDefault(); });
+        // The main-pack drag (the player) is answered too: not wearable, so the circle.
         this.attachCellDragAccept(slotEl, 32, () => {
-          const guid = this.currentDragGuid();
+          const guid = this.itemDragArtGuid();
           return guid ? (this.dragCallbacks.paperdollDragAcceptState?.(guid, { kind: 'slot', mask: slotDef.mask }) ?? null) : null;
         });
         slotEl.addEventListener('drop', (e) => {
@@ -16397,11 +16498,15 @@ export class GameUI {
         // band on 0x21000037:0x1000045d (the UIItem ring / circle art):
         // HandlePaperDollDragOver @ 004a3a70 sets it under a drag, the drop
         // (message 0x15) and the drag leaving (0x3e off) reset 0x1000003f.
+        // VISUAL.ac1999-paperdoll-figure-drag-art — the era's place for it
+        // (EraClientRules.paperdollFigureDragArt: the 1999 PaperDollRegion's
+        // (+0x53,+0x58) of the panel is (32,65) of the band).
+        const figureArt = this.clientRules.paperdollFigureDragArt;
         const bandOverlay = document.createElement('div');
         bandOverlay.dataset.elementId = '0x1000046d';
         bandOverlay.dataset.acDragAccept = String(DRAG_ACCEPT_STATE.none);
         Object.assign(bandOverlay.style, {
-          position: 'absolute', left: '33px', top: '68px', width: '32px', height: '32px',
+          position: 'absolute', left: `${figureArt.x}px`, top: `${figureArt.y}px`, width: '32px', height: '32px',
           pointerEvents: 'none', backgroundSize: '32px 32px', backgroundRepeat: 'no-repeat',
           imageRendering: 'pixelated',
         });
@@ -16414,9 +16519,11 @@ export class GameUI {
         };
         dragBand.addEventListener('dragover', (e) => {
           e.preventDefault();
-          const guid = this.currentDragGuid();
-          const state = guid ? this.dragCallbacks.paperdollDragAcceptState?.(guid, { kind: 'band' }) : null;
-          if (state !== null && state !== undefined) setBandOverlay(state);
+          const guid = this.itemDragArtGuid();
+          if (!guid) return;
+          const verdict = this.dragCallbacks.paperdollDragAcceptState?.(guid, { kind: 'band' }) ?? null;
+          const state = paperdollFigureDragOverlayState(verdict, figureArt.wornDrawsNothing);
+          if (state !== undefined) setBandOverlay(state);
         });
         dragBand.addEventListener('dragleave', (e) => {
           if (e.relatedTarget instanceof Node && dragBand.contains(e.relatedTarget)) return;
@@ -17554,6 +17661,7 @@ export class GameUI {
       if (meter) inset.appendChild(meter);
     }
     cell.appendChild(inset);
+    this.attachContainerPackCellDragAccept(inset, packGuid);
     const arrow = isOpen ? this.buildOpenPackArrow(PACK) : null;
     if (arrow) cell.appendChild(arrow);
     // CORE.17.k.b.b.a.g — UIElement_UIItem::UpdateTooltip: the object's name.
@@ -17638,7 +17746,35 @@ export class GameUI {
     Object.assign(inset.style, { position: 'absolute', left: '2px', top: '2px', width: '32px', height: '32px' });
     this.styleSlotTile(inset, 'empty', 0x06000f6e);
     cell.appendChild(inset);
+    this.attachContainerPackCellDragAccept(inset, 0);
     return cell;
+  }
+
+  /**
+   * An open chest's / corpse's 36x36 container cell (its own, a nested pack's,
+   * an empty one): drag-over art where the era's list has it
+   * (UIItemDragAccept.externalContainerCellHasDragArt: the 1999 ItemEnvPanel's
+   * container lists), on the cell's 32x32 UIItem at (2,2) as the pack column's.
+   */
+  private attachContainerPackCellDragAccept(inset: HTMLElement, packGuid: number): void {
+    if (!externalContainerCellHasDragArt(this.clientRules.itemListDragOver, 'pack')) return;
+    this.attachCellDragAccept(inset, 32, () => this.externalContainerDragAcceptFor('pack', packGuid), '1000045e');
+  }
+
+  /**
+   * An external-container cell's drag-over state for the drag in flight
+   * (UIItemDragAccept.externalContainerDragOverState): end of retail, a pack
+   * drag's DragItemAcceptable verdict on a filled item cell (OnItemListDragOver
+   * @ 004cbf80); 1999, the inventory lists' rule for any item drag.
+   */
+  private externalContainerDragAcceptFor(cell: ExternalContainerCell, cellObjectId: number): number | null {
+    return externalContainerDragOverState(this.clientRules.itemListDragOver, cell,
+      () => {
+        // VISUAL.eor-main-pack-drag-art — the main-pack drag asks DragItemAcceptable @ 004cbb60 for the player.
+        const dragged = this.dragSourceSlot === null ? (this.dragItemGuid || (this.isMainPackDrag() ? this.playerPackDragGuid : 0)) : 0;
+        return uiItemDragAcceptState(dragged, () => this.containerCallbacks.dragAcceptable?.(dragged) ?? true);
+      },
+      (containerList) => this.itemListDragAcceptFor(containerList, cellObjectId));
   }
 
   /** CORE.18.c — the global selection (ACCWeenieObject::selectedID) the strip's UIItems draw their ants for. */
@@ -18176,6 +18312,9 @@ export class GameUI {
           // (UIItem template empty state, 0x06004d20).
           cell.dataset.acContainerCell = 'empty';
           this.styleSlotTile(cell, 'empty');
+          if (externalContainerCellHasDragArt(this.clientRules.itemListDragOver, 'emptyItem')) {
+            this.attachCellDragAccept(cell, CELL, () => this.externalContainerDragAcceptFor('emptyItem', 0));
+          }
           row.appendChild(cell);
           continue;
         }
@@ -18183,11 +18322,9 @@ export class GameUI {
         cell.dataset.acContainerGuid = `${item.guid}`;
         if (item.isContainer) cell.dataset.acContainerItem = '1';
         // OnItemListDragOver @ 004cbf80: the hovered cell shows
-        // DragItemAcceptable's verdict (green ring / red slashed circle).
-        this.attachCellDragAccept(cell, CELL, () => {
-          const dragged = this.dragSourceSlot === null ? this.dragItemGuid : 0;
-          return uiItemDragAcceptState(dragged, () => this.containerCallbacks.dragAcceptable?.(dragged) ?? true);
-        });
+        // DragItemAcceptable's verdict (green ring / red slashed circle);
+        // a 1999 world's ItemList rule (externalContainerDragAcceptFor).
+        this.attachCellDragAccept(cell, CELL, () => this.externalContainerDragAcceptFor('item', item.guid));
         // CORE.18.c — the selected object's UIItem carries the ants.
         cell.dataset.acSelGuid = `${item.guid}`;
         this.applyItemTradeStateOverlay(cell, this.tradeStateGuids().has(item.guid));
@@ -18380,6 +18517,8 @@ export class GameUI {
     slot.addEventListener('dragstart', (e) => {
       if (!this.itemShortcutData[index]) { e.preventDefault(); return; }
       this.shortcutDragFrom = index;
+      // The slot empties as the drag begins (onBeginDrag): the drag keeps its object.
+      this.shortcutDragObject = this.itemShortcutObjectAt?.(index) ?? 0;
       this.dragItemGuid = 0;
       this.dragSourceSlot = null;
       if (e.dataTransfer) {
@@ -18402,11 +18541,26 @@ export class GameUI {
       if (carries) e.preventDefault();
       // VISUAL.drag-merge-indicator — gmToolbarUI::OnItemListDragOver @ 004bd150: any drag carrying an
       // object (a pack / worn / ground object, the main pack, a shortcut) sets 0x10000040 on the cell,
-      // whose 0x1000045a bases 0x1000045f (the add-shortcut art 0x060011fa). The 1999 ShortcutSlot has
-      // no DragOverAction: nothing.
-      if (carries && this.clientRules.itemListDragOver === 'eor') {
-        this.ensureCellDragAcceptOverlay(slot, 32, '1000045f');
-        this.setCellDragAccept(slot, DRAG_ACCEPT_STATE.accept);
+      // whose 0x1000045a bases 0x1000045f (the add-shortcut art 0x060011fa). The 1999 ShortcutSlot's
+      // DragOverAction @ 0x005004b0 picks the arrow / box / circle (shortcutSlotDragOverState).
+      const shortcutDrag = this.shortcutDragFrom !== -1;
+      const draggedId = shortcutDrag ? this.shortcutDragObject : (this.currentDragGuid() || this.playerPackDragGuid);
+      const slotId = this.itemShortcutObjectAt?.(index) ?? 0;
+      const facts = this.dragCallbacks.shortcutSlotDragObject;
+      const over = shortcutSlotDragOverState(this.clientRules.itemListDragOver, {
+        carries, shortcutDrag,
+        dragged: draggedId ? facts?.(draggedId) : undefined,
+        slot: slotId ? (facts?.(slotId) ?? null) : null,
+        split: this.getToolbarSplitState(),
+      });
+      if (over) {
+        const overlay = this.ensureCellDragAcceptOverlay(slot, 32, over.template);
+        // A slot's overlay follows the era's table (a client-rules switch keeps the element).
+        if (overlay.dataset.acDragTemplate !== over.template) {
+          overlay.dataset.acDragTemplate = over.template;
+          overlay.dataset.acDragAccept = String(DRAG_ACCEPT_STATE.none);
+        }
+        this.setCellDragAccept(slot, over.state);
       }
     });
     slot.addEventListener('dragleave', (e) => {
@@ -19213,6 +19367,69 @@ export class GameUI {
     this.layoutSpellBarPage(t, false);
   }
 
+  /**
+   * VISUAL.ac1999-spellbar-drag-autoscroll — the era's drag-scroll rule for the spell bar's list
+   * (EraClientRules.spellBarDragScroll): end of retail's from the list's DAT attributes
+   * (0x21000010:0x100000b6), the 1999 client's constants; null when the list doesn't scroll.
+   */
+  private spellBarDragScrollRule(): DragScrollRule | null {
+    if (this.clientRules.spellBarDragScroll === 'ac1999') return AC1999_SPELLBAR_DRAG_SCROLL;
+    return layoutDragScrollRule(this.spellBarHandle?.descs?.get(SPELL_SHORTCUT_LIST)?.properties);
+  }
+
+  /**
+   * Track a spell drag over the page for the spell bar's drag scrolling: end of retail's
+   * RecvNotice_BeginDrag @ 004e2540 → TrackDragScrolling @ 004e30d0 every frame; the 1999 spell
+   * list's Global_Loop @ 0x00515120. The pointer comes from dragover (the only pointer events a
+   * native drag sends), the clock from a frame loop, so a pointer at rest still steps.
+   */
+  private installSpellBarDragScroll(): void {
+    if (this.spellDragScrollInstalled || typeof document === 'undefined') return;
+    this.spellDragScrollInstalled = true;
+    const isSpellDrag = (dt: DataTransfer | null): boolean => {
+      const types = dt?.types ?? [];
+      return types.includes('text/spell-id') || types.includes('text/spell-index');
+    };
+    const begin = (x: number, y: number) => {
+      if (this.spellDragScroll) return;
+      const rule = this.spellBarDragScrollRule();
+      if (!rule) return;
+      this.spellDragScroll = { clock: new DragScrollClock(rule.delaySeconds), rule, x, y, raf: 0 };
+      this.spellDragScroll.raf = requestAnimationFrame(this.spellDragScrollTick);
+    };
+    document.addEventListener('dragstart', (e) => { if (isSpellDrag(e.dataTransfer)) begin(e.clientX, e.clientY); });
+    document.addEventListener('dragover', (e) => {
+      const s = this.spellDragScroll;
+      if (s) { s.x = e.clientX; s.y = e.clientY; } else if (isSpellDrag(e.dataTransfer)) begin(e.clientX, e.clientY);
+    });
+    const end = () => {
+      const s = this.spellDragScroll;
+      if (!s) return;
+      cancelAnimationFrame(s.raf);
+      this.spellDragScroll = null;
+    };
+    document.addEventListener('dragend', end);
+    document.addEventListener('drop', end, true);
+  }
+
+  /** One frame of the spell drag's scrolling: the open tab's list, its band under the pointer, the rest clock. */
+  private spellDragScrollTick = (): void => {
+    const s = this.spellDragScroll;
+    if (!s) return;
+    s.raf = requestAnimationFrame(this.spellDragScrollTick);
+    const t = this.activeSpellBarTab;
+    const list = this.spellBarPageEl(t, SPELL_SHORTCUT_LIST);
+    const box = list?.getBoundingClientRect();
+    // WhatDragScrollRegion asks IsVisible first; the 1999 list is only dragged over when shown.
+    if (!list || !box || box.width <= 0 || list.offsetWidth <= 0) { s.clock.reset(); return; }
+    const scale = box.width / list.offsetWidth;
+    const region = dragScrollRegion(s.rule, { left: 0, top: 0, right: list.offsetWidth, bottom: list.offsetHeight },
+      (s.x - box.left) / scale, (s.y - box.top) / scale);
+    const dir = s.clock.tick(region, performance.now() / 1000);
+    if (dir === 0) return;
+    for (let i = 0, n = Math.max(1, Math.round(s.rule.stepPx / SPELL_SHORTCUT_CELL)); i < n; i++) this.scrollSpellBarList(t, dir);
+  };
+
   /** Wire tab `t`'s arrow pair: retail's runtime placement, the pointer only on the arrows, hot-click stepping, the button states. */
   private wireSpellBarArrows(t: number): void {
     const handle = this.spellBarHandle;
@@ -19386,6 +19603,7 @@ export class GameUI {
     const handle = this.layoutRenderer.render(0x21000010, body, { subtreeElementId: 0x1000009f });
     if (!handle) return;
     this.spellBarHandle = handle;
+    this.installSpellBarDragScroll();
     // SWEEP1999.magic MAG-6 — a Cast button that carries its state as its
     // label is the 1999 client's 200 px button: the bar reflows as if the
     // body were that much narrower (the right-anchored button moves left,
@@ -19758,16 +19976,17 @@ export class GameUI {
 
     // Drop target: a spellbook row or a bar shortcut, inserted at this cell
     // (HandleDropRelease → AddSpellShortcut(spell, WhatNum(cell))).
-    // VISUAL.drag-merge-indicator — SpellCastSubMenu::OnItemListDragOver @ 004c5990: a drag carrying a
-    // spell sets 0x10000040 on the cell (template 0x10000341's 0x1000045a on 0x1000045d: the ring
-    // 0x060011f9). The 1999 spell bar has no drag-over art. (The 0.7 opacity dim it replaces was invented.)
+    // VISUAL.drag-merge-indicator / VISUAL.ac1999-spellbar-drag-hover — a drag carrying a spell rings
+    // the hovered cell, empty pads included, in both eras (UIItemDragAccept.spellBarDragOverState: end
+    // of retail's SpellCastSubMenu::OnItemListDragOver @ 004c5990; the 1999 spell list's Global_Loop
+    // @ 0x00515120 → the cell draw @ 0x00515ce0). (The 0.7 opacity dim it replaces was invented.)
     slot.addEventListener('dragover', (e) => {
       e.preventDefault();
       const types = e.dataTransfer?.types ?? [];
-      const spellDrag = types.includes('text/spell-id') || types.includes('text/spell-index');
-      if (spellDrag && this.clientRules.itemListDragOver === 'eor') {
+      const state = spellBarDragOverState(types.includes('text/spell-id') || types.includes('text/spell-index'));
+      if (state !== null) {
         this.ensureCellDragAcceptOverlay(slot, SPELL_SHORTCUT_CELL);
-        this.setCellDragAccept(slot, DRAG_ACCEPT_STATE.accept);
+        this.setCellDragAccept(slot, state);
       }
     });
     slot.addEventListener('dragleave', (e) => {
@@ -31771,7 +31990,7 @@ export class GameUI {
       },
       () => d.itemsScrollX, (x) => { d.itemsScrollX = x; },
       /* showSelectedQty — the UpdateQuantityOverlay surface */ true,
-      undefined, undefined, false,
+      undefined, this.vendorListDragAcceptProbe('items'), false,
       {
         hoverText: (it) => this.vendorHoverText(it, 'buy'),
         onExamine: (it) => { this.seedVendorSelection(it, true); this.onExamineObject?.(it.guid ?? 0); },
@@ -31871,7 +32090,7 @@ export class GameUI {
         this.renderVendorPanel();
       },
       () => d.buyScrollX, (x) => { d.buyScrollX = x; },
-      false, undefined, undefined, false,
+      false, undefined, this.vendorListDragAcceptProbe('buy'), false,
       {
         hoverText: (it) => this.vendorHoverText(it, 'buyList'),
         onExamine: (it) => { this.seedVendorSelection(it, true); this.onExamineObject?.(it.guid ?? 0); },
@@ -31995,7 +32214,7 @@ export class GameUI {
       },
       () => d.sellScrollX, (x) => { d.sellScrollX = x; },
       false, undefined,
-      () => this.vendorSellDragAcceptStateForCurrentDrag(),
+      this.vendorListDragAcceptProbe('sell'),
       /* p0x10000017 on 0x100000ce */ true,
       {
         hoverText: (it) => this.vendorHoverText(it, 'sellList'),
@@ -32473,8 +32692,10 @@ export class GameUI {
     const overlay = cell.querySelector<HTMLElement>(':scope > [data-ac-drag-accept]') ?? cell.querySelector<HTMLElement>('[data-ac-drag-accept]');
     if (!overlay || overlay.dataset.acDragAccept === String(state)) return;
     overlay.dataset.acDragAccept = String(state);
-    const tex = (overlay.dataset.acDragTemplate === '1000045e' ? CONTAINER_CELL_DRAG_ACCEPT_TEX
-      : overlay.dataset.acDragTemplate === '1000045f' ? TOOLBAR_CELL_DRAG_ACCEPT_TEX : UIITEM_DRAG_ACCEPT_TEX)[state];
+    const t = overlay.dataset.acDragTemplate;
+    const tex = (t === '1000045e' ? CONTAINER_CELL_DRAG_ACCEPT_TEX
+      : t === '1000045f' ? TOOLBAR_CELL_DRAG_ACCEPT_TEX
+        : t === 'shortcut1999' ? SHORTCUT_SLOT_1999_DRAG_TEX : UIITEM_DRAG_ACCEPT_TEX)[state];
     const url = tex !== undefined ? this.uiTextures.get(tex) : undefined;
     overlay.style.backgroundImage = url ? `url(${url})` : 'none';
   }
@@ -32527,9 +32748,39 @@ export class GameUI {
    * no object (a shortcut drag, the main-pack cell's own drag) → null.
    */
   private itemListDragAcceptFor(containerList: boolean, cellObjectId: number): number | null {
-    const guid = this.currentDragGuid();
+    const guid = this.itemDragArtGuid();
     if (!guid) return null;
-    return this.dragCallbacks.itemListDragAcceptState?.(guid, { fromContainerList: this.dragIsContainer, containerList, cellObjectId }) ?? null;
+    // The main pack's icon carries DROPITEM_IS_CONTAINER (UIItemDragAccept.MAIN_PACK_DRAG_IS_CONTAINER_DRAG).
+    const fromContainerList = this.dragIsContainer || (this.isMainPackDrag() && MAIN_PACK_DRAG_IS_CONTAINER_DRAG);
+    return this.dragCallbacks.itemListDragAcceptState?.(guid, { fromContainerList, containerList, cellObjectId }) ?? null;
+  }
+
+  /**
+   * The object a drag-over art probe answers for: the drag in flight
+   * (currentDragGuid), or the main-pack cell's own drag (the player), which
+   * every era's widgets answer (UIItemDragAccept.MAIN_PACK_DRAG_IS_CONTAINER_DRAG).
+   */
+  private itemDragArtGuid(): number {
+    return this.currentDragGuid() || this.playerPackDragGuid;
+  }
+
+  /** The drag in flight is the main-pack cell's own (the player). */
+  private isMainPackDrag(): boolean {
+    return this.playerPackDragGuid !== 0 && this.currentDragGuid() === 0;
+  }
+
+  /**
+   * VISUAL.eor-main-pack-drag-art — the player as the panels' DragItemAcceptable sees it while the
+   * main-pack cell is dragged: owned by the player (IsOwnedByObject: id == player), and
+   * GetNumContainedItems = what the main pack holds (side packs included; worn items are not
+   * contained). Null for any other drag. Only the drag-over art reads it; no drop takes the player.
+   */
+  private mainPackDragPlayer(): { guid: number; name: string; contents: InventoryItem[] } | null {
+    if (!this.isMainPackDrag()) return null;
+    const guid = this.playerPackDragGuid;
+    const worn = new Set(this.equippedItems.map((e) => e.id));
+    const contents = this.inventoryItems.filter((i) => (i.containerId === guid || i.containerId === 0) && !worn.has(i.id) && i.id !== guid);
+    return { guid, name: this.inventoryOwnerName, contents };
   }
 
   /** Every cell of a list back to 0x1000003f (the drop released the drag). */
@@ -32568,6 +32819,11 @@ export class GameUI {
 
   /** gmSecureTradeUI::OnItemListDragOver @ 004ca980 for the drag now hovering a self-list cell. */
   tradeDragAcceptStateForCurrentDrag(): number | null {
+    const player = this.mainPackDragPlayer();
+    if (player) {
+      // VISUAL.eor-main-pack-drag-art — DragItemAcceptable @ 004ca6a0: owned and not listed.
+      return tradeDragAcceptState({ guid: player.guid, name: player.name, weenieClassId: 0, stackSize: 0, ownedByPlayer: true }, this.tradeSelfListed());
+    }
     const drag = this.salvageDragCandidate();
     const item: TradeDragItem | null = drag
       ? { guid: drag.item.id, name: drag.item.name, weenieClassId: drag.item.weenieClassId, stackSize: drag.item.stackSize, ownedByPlayer: drag.owned }
@@ -32582,9 +32838,35 @@ export class GameUI {
    * VendorProfile::InqAcceptability == 0).
    */
   vendorSellDragAcceptStateForCurrentDrag(): number | null {
+    const player = this.mainPackDragPlayer();
+    if (player) {
+      // VISUAL.eor-main-pack-drag-art — DragItemAcceptable(player): owned, and it contains items.
+      return vendorSellDragAcceptState({
+        guid: player.guid, name: player.name, weenieClassId: 0, stackSize: 0, itemType: 0x10, ownedByPlayer: true,
+        ...(player.contents.length > 0 ? { contents: player.contents.map((c) => this.vendorDragItemOf(c)) } : {}),
+      }, this.vendorData.profile, false, this.clientRules.vendorAcceptability);
+    }
     const item = this.vendorSellDragSource();
     if (!item) return null;
     return vendorSellDragAcceptState(this.vendorDragItemOf(item), this.vendorData.profile, false, this.clientRules.vendorAcceptability);
+  }
+
+  /**
+   * A vendor list's cell drag-over probe, or none where the era's list has no
+   * art (UIItemDragAccept.vendorListHasDragArt / vendorListDragOverState): end
+   * of retail's sell list alone; every 1999 ShopList.
+   */
+  private vendorListDragAcceptProbe(list: VendorDragList): (() => number | null) | undefined {
+    const rule = this.clientRules.itemListDragOver;
+    if (!vendorListHasDragArt(rule, list)) return undefined;
+    return () => {
+      const guid = this.itemDragArtGuid();
+      return vendorListDragOverState(rule, list, {
+        draggedId: guid,
+        isPlayer: guid !== 0 && guid === this.playerPackDragGuid,
+        sell: () => this.vendorSellDragAcceptStateForCurrentDrag(),
+      });
+    };
   }
 
   /**
@@ -32598,6 +32880,14 @@ export class GameUI {
 
   /** gmSlumlordUI::OnItemListDragOver @ 004c8770 for the drag now hovering a Buy / Rent cell. */
   slumlordDragAcceptStateForCurrentDrag(op: HouseOp): number | null {
+    const player = this.mainPackDragPlayer();
+    if (player) {
+      // VISUAL.eor-main-pack-drag-art — DragItemAcceptable @ 004c85f0 for the player.
+      return slumlordDragAcceptState(op, this.houseData.profile, this.housePayment[op], {
+        guid: player.guid, name: player.name, weenieClassId: 0, itemType: 0x10, stackSize: 0, value: 0, ownedByPlayer: true,
+        ...(player.contents.length > 0 ? { contents: player.contents.map((c) => this.slumlordDragItemOf(c)) } : {}),
+      });
+    }
     const item = this.inventoryDragItem();
     if (!item) return null;
     return slumlordDragAcceptState(op, this.houseData.profile, this.housePayment[op], this.slumlordDragItemOf(item));
@@ -32605,6 +32895,17 @@ export class GameUI {
 
   /** The salvage cell's accept state for the drag now hovering it (null = unchanged). */
   salvageDragAcceptStateForCurrentDrag(): number | null {
+    const player = this.mainPackDragPlayer();
+    if (player) {
+      // VISUAL.eor-main-pack-drag-art — DragItemAcceptable @ 004cb650 for the player (owned).
+      return salvageDragAcceptState({ id: player.guid, name: player.name }, {
+        listed: this.getSalvageQueue(),
+        listMaterial: this.salvageListMaterial,
+        salvageMultiple: !!this.optionsSettings.salvageMultipleMaterialsAtOnce,
+        owned: true,
+        contents: (guid) => (guid === player.guid ? player.contents : this.inventoryItems.filter(i => i.containerId === guid && i.id !== guid)),
+      });
+    }
     const drag = this.salvageDragCandidate();
     return salvageDragAcceptState(drag?.item ?? null, {
       listed: this.getSalvageQueue(),

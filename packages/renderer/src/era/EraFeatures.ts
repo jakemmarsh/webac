@@ -7,7 +7,7 @@
  * the end-of-retail client and lack nothing here.
  */
 import { ABSENT_1999, type Absent1999Feature } from '@ac/network';
-import { INVENTORY_REQUEST_WATCHDOG_1999_SECONDS, TALISMAN_TARGET_TYPES_1999, TALISMAN_TARGET_TYPES_EOR, type TalismanTargetTypes, PROMISSORY_NOTE_RATES_EOR, PROMISSORY_NOTE_RATES_1999, type PromissoryNoteRates } from '@ac/shared';
+import { INVENTORY_REQUEST_WATCHDOG_1999_SECONDS, TALISMAN_TARGET_TYPES_1999, TALISMAN_TARGET_TYPES_EOR, type TalismanTargetTypes, PROMISSORY_NOTE_RATES_EOR, PROMISSORY_NOTE_RATES_1999, type PromissoryNoteRates, type ShieldBlockRule } from '@ac/shared';
 import type { EraProfile } from './EraProfiles.js';
 import { quickslotCommand } from '../network/itemShortcutRestore.js';
 import { SPELL_RESEARCH_PAGE_ACTION } from '../input/KeybindClientActions.js';
@@ -24,6 +24,7 @@ import { AC1999_WORLD_RULES, EOR_WORLD_RULES, type EraWorldRules } from './EraWo
 import { AC1999_VERBOSE_VERSION } from '../chat/commands/Commands1999.js';
 import { AC1999_TOOLBAR_TABS, type ToolbarTabSlot } from '../ui/ToolbarTabs.js';
 import type { CommandTableStyle } from '../chat/commands/CommandSystem.js';
+import type { SpellBarDragScrollSource } from '../ui/SpellBarDragScroll.js';
 
 export type EraFeature =
   | Absent1999Feature
@@ -635,11 +636,14 @@ export interface EraClientRules {
    */
   inventoryPlacement: 'eor' | 'ac1999';
   /**
-   * Whether a drop on an occupied paperdoll slot swaps (INV-4). End of retail: gmPaperDollUI::
-   * AcceptDragObject calls AutoWield(obj, side, 0, 1, 0, 0) and param_5 = 0 never unwields, so the
-   * drop is refused without a word. The 1999 client.exe: ItemSlot_AcceptDragObject calls
-   * PanelUI_AutoWield(obj, side, 0, 1, 0, 0) and its param_4 = 1 moves the occupant to the
-   * backpack ("Moving X to your backpack") and wields the new item (PanelUI_AutoWield @ 0x4fee20).
+   * Whether a drop on an occupied paperdoll slot swaps (INV-4). Both clients: yes. End of retail's
+   * gmPaperDollUI::AcceptDragObject @ 004a3b10 calls AutoWield(obj, side, 0, 1, 0, 0) (pushes at
+   * 0x004a3b6c-0x004a3b98), and AutoWield @ 00560a60 gates the unwield on param_4 ([esp+0xc4] at
+   * 0x00561734), not param_5: Ghidra's names in that block are shifted by one, which is how the
+   * earlier "end of retail refuses" reading came about (BUG.ac1999-autowield-is-legal sweep,
+   * 2026-11-01). The 1999 client.exe: ItemSlot_AcceptDragObject calls PanelUI_AutoWield(obj, side,
+   * 0, 1, 0, 0) and its param_4 = 1 moves the occupant to the backpack ("Moving X to your
+   * backpack") and wields the new item (PanelUI_AutoWield @ 0x4fee20).
    */
   paperdollSlotDropSwaps: boolean;
   /**
@@ -648,11 +652,28 @@ export interface EraClientRules {
    * ItemList_DragOver @ 004e3400): the ring over every grid cell, the arrow / circle on the pack
    * column by room. The 1999 client.exe ('ac1999', the UI_Item draw @ 0x004e7d20): the same three
    * pieces of art, with a merge check (ItemHolder_AttemptMergeIsLegal) for a drop no list rule covers.
-   * The toolbar and the spell bar follow it too: end of retail's gmToolbarUI::OnItemListDragOver
-   * @ 004bd150 / SpellCastSubMenu::OnItemListDragOver @ 004c5990 light the hovered cell; the 1999
-   * ShortcutSlot and spell bar have no drag-over art.
+   * The toolbar follows it too: end of retail's gmToolbarUI::OnItemListDragOver @ 004bd150 lights
+   * the hovered cell with the add-shortcut box; the 1999 ShortcutSlot (0x005004b0) picks the
+   * arrow / box / circle. (The spell bar draws the ring in both: UIItemDragAccept.spellBarDragOverState.)
    */
   itemListDragOver: 'eor' | 'ac1999';
+  /**
+   * Whether the toolbar's combat-mode button takes a dragged weapon, shield or caster and wields it
+   * (BUG.ac1999-combat-button-drop; UIItemDragAccept.combatButtonDragOverState). End of retail: no
+   * (the combat button 0x10000192 has no drop handler; the client has no "auto-wielded" string).
+   * The 1999 client.exe: CombatButton (ctor @ 0x00501950) AcceptDragObject @ 0x00502180 →
+   * PanelUI_AutoWield(obj, 2, 0, 1, 1, 1), DragOverAction @ 0x005020b0 the ring / circle.
+   */
+  combatButtonWieldDrop: boolean;
+  /**
+   * The paperdoll figure's drag-over art (VISUAL.ac1999-paperdoll-figure-drag-art), relative to the
+   * drag band 0x100001d6 (our figure's drop region, at (51,23) of the inventory panel). End of
+   * retail: m_paperDollDragOverlay 0x1000046d at (33,68) of the band; a verdict of "already worn"
+   * leaves its state (HandlePaperDollDragOver @ 004a3a70). The 1999 client.exe: PaperDollRegion
+   * DragOverAction @ 0x00526f90 draws at (+0x53,+0x58) of its parent, the InventoryPanel, so
+   * (0x53 - 51, 0x58 - 23) = (32,65) of the band, and for "already worn" draws nothing.
+   */
+  paperdollFigureDragArt: Readonly<{ x: number; y: number; wornDrawsNothing: boolean }>;
   /**
    * Whether a melee weapon dropped on the shield slot is a left-hand (dual) wield (INV-5). End of
    * retail: gmPaperDollUI::AcceptDragObject @ 004a3b10 widens the shield slot for a melee weapon.
@@ -660,6 +681,37 @@ export interface EraClientRules {
    * server refuses it, Container_CanEquip).
    */
   dualWieldShieldSlot: boolean;
+  /**
+   * Which weapons keep a shield off, for AutoWieldIsLegal's shield refusal and AutoWield's weapon
+   * branch (BUG.ac1999-autowield-is-legal; @ac/shared blocksUseOfShield). End of retail
+   * ('eor', ACCWeenieObject::BlocksUseOfShield @ 0055d3e0): a missile weapon with an ammo type,
+   * a two-hander, a caster. The 1999 client.exe ('ac1999', PanelUI_AutoWieldIsLegal @ 0x004ff660,
+   * PanelUI_AutoWield @ 0x004fee20): combat use Missile (a thrown weapon too) or a caster.
+   */
+  shieldBlockRule: ShieldBlockRule;
+  /**
+   * What AutoWield appends to a legality refusal when its caller asked it to move an object the
+   * player doesn't own to the pack instead (param_5; only the 1999 combat button asks). End of
+   * retail: null (CPlayerSystem::AutoWield @ 00560a60 goes to AutoSort without a word). The 1999
+   * client.exe: ". Moving to backpack." (PanelUI_AutoWield @ 0x004fee20, 0x118 onto the refusal
+   * line), then 0x004fecf0(obj, 0, 0).
+   */
+  autoWieldMoveToBackpackLine: string | null;
+  /**
+   * AutoWield's line when both ring fingers are taken (shown where param_4 = 0, AutoSort's wield).
+   * End of retail: "You're already wearing jewelry on both hands." (CPlayerSystem::AutoWield
+   * @ 00560a60). The 1999 client.exe: "You're already wearing rings on both hands." (PanelUI_AutoWield
+   * @ 0x004fee20; the wrist and neck lines are the same in both).
+   */
+  autoWieldRingsFullLine: string;
+  /**
+   * How the spell bar scrolls under a resting spell drag (VISUAL.ac1999-spellbar-drag-autoscroll;
+   * ui/SpellBarDragScroll.ts). End of retail ('layout'): UIElement_ItemList::TrackDragScrolling
+   * @ 004e30d0 with the list's DAT attributes (0x21000010:0x100000b6: 32 px beyond each end, a cell
+   * every 0.2 s). The 1999 client.exe ('ac1999', Global_Loop @ 0x00515120): within 30 px inside
+   * either end, a cell every 0.4 s.
+   */
+  spellBarDragScroll: SpellBarDragScrollSource;
   /**
    * Whether a target-mode use asks first (INV-9): end of retail's ItemHolder::TargetAcquired
    * @ 00588ef0 confirms an empty mana stone (and refuses one on a Retained item) and a salvage bag.
@@ -1121,9 +1173,15 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   spellbookOrder: 'displayOrder' as const,
   componentPrecheckSlots: Object.freeze([0, 8] as const),
   inventoryPlacement: 'eor' as const,
-  paperdollSlotDropSwaps: false,
+  paperdollSlotDropSwaps: true, // AcceptDragObject @ 004a3b10 → AutoWield(obj, side, 0, 1, 0, 0)
   itemListDragOver: 'eor' as const,
+  combatButtonWieldDrop: false,
+  paperdollFigureDragArt: Object.freeze({ x: 33, y: 68, wornDrawsNothing: false }),
   dualWieldShieldSlot: true,
+  shieldBlockRule: 'eor' as const, // ACCWeenieObject::BlocksUseOfShield @ 0055d3e0
+  autoWieldMoveToBackpackLine: null,
+  autoWieldRingsFullLine: "You're already wearing jewelry on both hands.",
+  spellBarDragScroll: 'layout' as const, // UIElement_ItemList::TrackDragScrolling @ 004e30d0
   targetedUseConfirmations: true,
   vendorDropNeedsWholeStack: true,
   useWithTargetText: EOR_USE_WITH_TARGET_TEXT,
@@ -1212,7 +1270,13 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   inventoryPlacement: 'ac1999' as const, // ItemHolder_AttemptPlaceInContainer @ 0x4e55b0
   paperdollSlotDropSwaps: true, // ItemSlot_AcceptDragObject → PanelUI_AutoWield(obj, side, 0, 1, 0, 0)
   itemListDragOver: 'ac1999' as const, // the UI_Item draw @ 0x004e7d20
+  combatButtonWieldDrop: true, // CombatButton AcceptDragObject @ 0x00502180
+  paperdollFigureDragArt: Object.freeze({ x: 0x53 - 51, y: 0x58 - 23, wornDrawsNothing: true }), // 0x00526f90
   dualWieldShieldSlot: false, // ItemSlot_AcceptDragObject: valid & slot only
+  shieldBlockRule: 'ac1999' as const, // PanelUI_AutoWieldIsLegal @ 0x004ff660, AutoWield @ 0x004fee20
+  autoWieldMoveToBackpackLine: '. Moving to backpack.', // PanelUI_AutoWield @ 0x004fee20
+  autoWieldRingsFullLine: "You're already wearing rings on both hands.", // PanelUI_AutoWield @ 0x004fee20
+  spellBarDragScroll: 'ac1999' as const, // the spell list Global_Loop @ 0x00515120
   targetedUseConfirmations: false, // 0x004e65c0
   vendorDropNeedsWholeStack: false, // ItemHolder_AttemptPlaceIn3D → 0x004d00d0
   useWithTargetText: AC1999_USE_WITH_TARGET_TEXT,

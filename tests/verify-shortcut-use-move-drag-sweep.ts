@@ -394,7 +394,7 @@ describe('GameUI — spell bar shortcuts drag off, back on, and onto another tab
     expect(events).toEqual(['add 300 @0 bar0']);
   });
 
-  it('VISUAL.drag-merge-indicator — a spell dragged over a cell shows the ring (end of retail); the cell is never dimmed; 1999 shows nothing', async () => {
+  it('VISUAL.drag-merge-indicator — a spell dragged over a cell shows the ring in both eras; the cell is never dimmed', async () => {
     const { ui, cells } = setup();
     // SpellCastSubMenu::OnItemListDragOver @ 004c5990: a drag carrying a spell → 0x10000040 (template 0x10000341 → 0x1000045d).
     cells[3].dispatchEvent(dragEvent('dragover', { 'text/spell-index': '2' }));
@@ -409,9 +409,15 @@ describe('GameUI — spell bar shortcuts drag off, back on, and onto another tab
     expect(cells[2].querySelector('[data-ac-drag-accept]')).toBeNull();
     const { eraClientRules } = await import('../packages/renderer/src/era/EraFeatures.js');
     const { eraProfile } = await import('../packages/renderer/src/era/EraProfiles.js');
+    // VISUAL.ac1999-spellbar-drag-hover — the 1999 spell list's Global_Loop @ 0x00515120 sets the hovered
+    // cell's +0xc8, whose draw @ 0x00515ce0 paints g_ClientWorldMgr+0x3e0 = the ring 0x060011f9.
     ui.setClientRules(eraClientRules(eraProfile('ac1999-retail')));
     cells[1].dispatchEvent(dragEvent('dragover', { 'text/spell-index': '2' }));
-    expect(cells[1].querySelector('[data-ac-drag-accept]')).toBeNull();
+    expect((cells[1].querySelector('[data-ac-drag-accept]') as HTMLElement).dataset.acDragAccept).toBe(String(0x10000040));
+    cells[1].dispatchEvent(dragEvent('dragleave'));
+    expect((cells[1].querySelector('[data-ac-drag-accept]') as HTMLElement).dataset.acDragAccept).toBe(String(0x1000003f));
+    cells[2].dispatchEvent(dragEvent('dragover', { 'text/plain': 'inv:0' }));
+    expect(cells[2].querySelector('[data-ac-drag-accept]')).toBeNull();
   });
 
   it('dropped on another tab\'s label it is appended there and the open tab stays open', () => {

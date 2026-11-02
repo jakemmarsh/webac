@@ -48,7 +48,8 @@ describe('the era profile values (EraClientRules)', () => {
     });
     for (const id of EOR_ERAS) {
       expect(eorRules(id), id).toMatchObject({
-        inventoryPlacement: 'eor', paperdollSlotDropSwaps: false, dualWieldShieldSlot: true,
+        // INV-4 corrected 2026-11-01: end of retail's AcceptDragObject @ 004a3b10 swaps too (AutoWield's param_4 = 1).
+        inventoryPlacement: 'eor', paperdollSlotDropSwaps: true, dualWieldShieldSlot: true,
         targetedUseConfirmations: true, vendorDropNeedsWholeStack: true, vendorAcceptability: 'eor',
         promissoryNoteRates: { sell: 1.15, issuerBuy: 1, foreignBuy: 1 },
         inscribePlaceholder: { text: '<Inscribe here>', centered: false },
@@ -273,13 +274,15 @@ describe('INV-2 (every era) — a double-clicked armor piece is AutoSort, not Au
 describe('INV-4 / INV-5 — the paperdoll slot drop', () => {
   const ring = { id: 0x80000020, name: 'Gold Ring', validLocations: 0x40000 | 0x80000 };
   const worn = { id: 0x80000021, name: 'Silver Ring', slot: 0x40000, validLocations: 0xc0000 };
-  it('1999: a drop on an occupied slot swaps on that side; end of retail refuses silently', () => {
+  it('a drop on an occupied slot swaps on that side, in every era (AutoWield gates the unwield on param_4)', () => {
     const y = acceptPaperdollDrop(ring, { kind: 'slot', mask: 0x40000 }, wearCtx([worn], { slotDropSwaps: R1999.paperdollSlotDropSwaps }));
     expect(y).toEqual({ wieldLocation: null, swap: { side: UISlotSide.Left } });
     for (const id of EOR_ERAS) {
       const e = acceptPaperdollDrop(ring, { kind: 'slot', mask: 0x40000 }, wearCtx([worn], { slotDropSwaps: eorRules(id).paperdollSlotDropSwaps }));
-      expect(e, id).toEqual({ wieldLocation: null });
+      expect(e, id).toEqual({ wieldLocation: null, swap: { side: UISlotSide.Left } });
     }
+    // Without the swap rule the drop is refused without a word (the ResetUnblocking branch).
+    expect(acceptPaperdollDrop(ring, { kind: 'slot', mask: 0x40000 }, wearCtx([worn], { slotDropSwaps: false }))).toEqual({ wieldLocation: null });
   });
   it('1999 has no dual-wield shield slot; end of retail does', () => {
     const sword = { id: 0x80000030, name: 'Sword', validLocations: 0x100000, combatUse: 1 };

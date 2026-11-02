@@ -124,6 +124,13 @@ export interface ShortcutDropItem1999 {
   stuck?: boolean;
   /** pwd bitfield BF_PLAYER (0x8). */
   isPlayer?: boolean;
+  /**
+   * ACCWeenieObject_HasContainerCapacity (the UI_Item's +0xe0); absent = ITEM_TYPE container
+   * (0x200). The player is one (its type is a creature's).
+   */
+  isContainer?: boolean;
+  /** GetContainersCapacity != 0 (the UI_Item's +0xe4, 0x004e76c0): it holds packs. */
+  holdsPacks?: boolean;
 }
 
 /**
@@ -144,7 +151,7 @@ export function shortcutDropRefusal1999(item: ShortcutDropItem1999, split: { spl
   const type = (item.itemType ?? 0) >>> 0;
   const locations = (item.validLocations ?? 0) >>> 0;
   const usable = ((item.usable ?? 0) & 1) === 0;
-  const container = (type & 0x200) !== 0;
+  const container = item.isContainer ?? (type & 0x200) !== 0;
   const wearable = (locations & (0x7e00 | 0x1ff | 0xf8000)) !== 0;
   if (!usable && !(item.combatUse ?? 0) && !container && !wearable && (type & 0x8000) === 0) return SHORTCUT_ONLY_USABLE_TEXT;
   if (split.splitSize !== split.maxSplitSize) return SHORTCUT_MOVE_SPLIT_TEXT;
@@ -152,16 +159,32 @@ export function shortcutDropRefusal1999(item: ShortcutDropItem1999, split: { spl
   return null;
 }
 
+/** What the 1999 ShortcutSlot's into-container test reads of an object. */
+export interface ShortcutContainerFacts1999 {
+  id: number;
+  itemType?: number;
+  /** HasContainerCapacity (UI_Item +0xe0); absent = ITEM_TYPE container (0x200). */
+  isContainer?: boolean;
+  /** It holds packs (UI_Item +0xe4); absent = no. */
+  holdsPacks?: boolean;
+}
+
 /**
- * The first branch of the 1999 ShortcutSlot::AcceptDragObject @ 0x00500240: a pack item dropped on
- * a slot whose shortcut is a container goes INTO that container (ItemHolder_AttemptPlaceInContainer),
- * not onto the slot, unless the dragged object is a creature or itself a container. End of
- * retail's gmToolbarUI::HandleDropRelease @ 004be7c0 has no such branch.
+ * The first branch of the 1999 ShortcutSlot::AcceptDragObject @ 0x00500240, and the arrow of its
+ * DragOverAction @ 0x005004b0 (the same test): an item dragged (UI_Item type 1, not a shortcut)
+ * onto a slot whose shortcut is a container goes INTO that container
+ * (ItemHolder_AttemptPlaceInContainer), not onto the slot, when the dragged object is not a creature
+ * (type exactly 0x10) and is not a container, or is a pack holding no packs over a container that
+ * holds packs (a side pack onto the main pack's shortcut). End of retail's gmToolbarUI::
+ * HandleDropRelease @ 004be7c0 has no such branch.
  */
-export function shortcutDropIntoContainer1999(dragged: { id: number; itemType?: number }, slotItem: { id: number; itemType?: number } | null): boolean {
+export function shortcutDropIntoContainer1999(dragged: ShortcutContainerFacts1999, slotItem: ShortcutContainerFacts1999 | null): boolean {
   if (!slotItem || slotItem.id === dragged.id) return false;
-  if (((slotItem.itemType ?? 0) & 0x200) === 0) return false;
-  return ((dragged.itemType ?? 0) & (0x10 | 0x200)) === 0;
+  const isContainer = (o: ShortcutContainerFacts1999): boolean => o.isContainer ?? ((o.itemType ?? 0) & 0x200) !== 0;
+  if (!isContainer(slotItem)) return false;
+  if (((dragged.itemType ?? 0) >>> 0) === 0x10) return false;
+  if (!isContainer(dragged)) return true;
+  return !dragged.holdsPacks && !!slotItem.holdsPacks;
 }
 
 /** ListenToGlobalMessage case 0x1000010d ("Create Shortcut"): CreateShortcutToItem(selectedID, -1, true, false). */

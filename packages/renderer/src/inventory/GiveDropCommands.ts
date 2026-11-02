@@ -34,6 +34,7 @@
  */
 
 import { ItemType } from '@ac/shared';
+import type { PlacementText } from './ItemHolderPlacement.js';
 import {
   attemptPlaceIn3D,
   type PlaceIn3DContext,
@@ -109,6 +110,8 @@ export function giveSelectedObject(
   prevSelectedId: number,
   lookup: GiveDropLookup,
   ctx: () => PlaceIn3DContext,
+  /** The era client's wording (EraClientRules.placementText): its no-creature line. */
+  text?: Pick<PlacementText, 'giveNeedsCreature'>,
 ): GiveDropResult {
   if (selectedId === 0 || prevSelectedId === 0 || selectedId === prevSelectedId) return { handled: false };
   const target = lookup.target(prevSelectedId);
@@ -117,7 +120,7 @@ export function giveSelectedObject(
     const outcome = attemptPlaceIn3D(item, target, false, ctx());
     return { handled: true, notices: outcome.notices.slice(), outcome, item, target, reselect: prevSelectedId };
   }
-  return { handled: true, notices: [GIVE_DROP_STRINGS.mustSelectCreature], outcome: null, item: null, target, reselect: 0 };
+  return { handled: true, notices: [text?.giveNeedsCreature ?? GIVE_DROP_STRINGS.mustSelectCreature], outcome: null, item: null, target, reselect: 0 };
 }
 
 /** OnAction case 0x16 — "Drop Selected Object". */

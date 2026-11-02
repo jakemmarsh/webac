@@ -63,6 +63,17 @@ export interface DatPatch1999 { dat: 'portal' | 'cell'; fileId: number; compress
 export interface DatPatchEvent { type: 'datPatch1999'; patches: DatPatch1999[]; portalIteration: number; cellIteration: number }
 
 /**
+ * How far a login's DAT push has come (BUG.ac1999-slow-login-ddd-push). The
+ * 0xF7B8 begin arms it with the file count (D1 + D3) and the raw byte total
+ * (D4 + D5); every 0xF7B7 adds one file and its raw length. The 1999 client
+ * drew the same fraction on its loading screen (LoadingScreen_Tick @
+ * 0x57a3d0: bytesDone / totalBytes, armed by DDD_HandleBegin @ 0x41dff0,
+ * advanced by DDD_HandleDataChunk @ 0x41dd20). Emitted only when the server
+ * has files to send: an up-to-date login (0 files) emits none.
+ */
+export interface DatPatchProgressEvent { type: 'datPatchProgress1999'; files: number; filesDone: number; bytes: number; bytesDone: number }
+
+/**
  * The 1999 client's connect-request retry, from its own client.exe
  * (dat-sets/ac1999-retail/client.exe, md5 aef6b20d, the release "4.35752"
  * build). Net_Connect @ 0x004187c0 loops: send the login (Net_SendPacket @
@@ -190,6 +201,8 @@ export class Connection1999 implements NetConnection {
   private everOpened = false;
   private dddFiles: DatPatch1999[] = [];
   private dddExpected = 0;
+  private dddBytes = 0;
+  private dddBytesDone = 0;
   private dddIterations = { portal: 0, cell: 0 };
   private dddFinished = false;
 
@@ -245,6 +258,8 @@ export class Connection1999 implements NetConnection {
     this.enterWorldGranted = false;
     this.dddFiles = [];
     this.dddExpected = 0;
+    this.dddBytes = 0;
+    this.dddBytesDone = 0;
     this.dddIterations = { portal: 0, cell: 0 };
     this.dddFinished = false;
     this.diag = Connection1999.freshDiag();
@@ -307,7 +322,7 @@ export class Connection1999 implements NetConnection {
   }
   on(l: ConnectionListener): void { this.listeners.push(l); }
   off(l: ConnectionListener): void { this.listeners = this.listeners.filter((x) => x !== l); }
-  private emit(e: ConnectionEvent | DatPatchEvent): void {
+  private emit(e: ConnectionEvent | DatPatchEvent | DatPatchProgressEvent): void {
     for (const l of [...this.listeners]) {
       try { l(e as ConnectionEvent); } catch (err) { console.error('[1999] listener threw', err); }
     }
@@ -712,8 +727,21 @@ export class Connection1999 implements NetConnection {
     if (m.length < 28 || this.dddFinished) return;
     const v = new DataView(m.buffer, m.byteOffset);
     this.dddIterations = { portal: v.getUint32(4, true), cell: v.getUint32(12, true) };
-    this.dddExpected = v.getUint32(8, true) + v.getUint32(16, true);
-    if (this.dddExpected === 0) this.finishDdd();
+    const expected = v.getUint32(8, true) + v.getUint32(16, true);
+    const bytes = v.getUint32(20, true) + v.getUint32(24, true);
+    const changed = expected !== this.dddExpected || bytes !== this.dddBytes;
+    this.dddExpected = expected;
+    this.dddBytes = bytes;
+    if (this.dddExpected === 0) { this.finishDdd(); return; }
+    // The server sends the begin three times (Client.cpp UpdateLoginScreen); report the arming once.
+    if (changed) this.emitDddProgress();
+  }
+
+  private emitDddProgress(): void {
+    this.emit({
+      type: 'datPatchProgress1999', files: this.dddExpected, filesDone: this.dddFiles.length,
+      bytes: this.dddBytes, bytesDone: this.dddBytesDone,
+    });
   }
 
   /** 0xF7B7: {u32 fileId, u32 dbType, u32 compressedLength, u32 rawLength, zlib data}; dbType 0–2 cell, 3+ portal. */
@@ -724,6 +752,8 @@ export class Connection1999 implements NetConnection {
     const compressed = v.getUint32(12, true);
     const rawLength = v.getUint32(16, true);
     this.dddFiles.push({ dat: dbType <= 2 ? 'cell' : 'portal', fileId, compressed: m.slice(20, 20 + compressed), rawLength });
+    this.dddBytesDone += rawLength;
+    if (this.dddExpected > 0 && !this.dddFinished) this.emitDddProgress();
     if (this.dddFiles.length >= this.dddExpected) this.finishDdd();
   }
 

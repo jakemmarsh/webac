@@ -45,7 +45,7 @@
 import { DatDatabase, type DatResidentSource } from '@ac/dat-parser/DatDatabase.js';
 import { noteDatMiss, noteDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 import {
-  type AreaIndex, type DatName, type DatSetManifest, type DatSetPointer, type ObjectRef, type PackRole,
+  type AreaIndex, type DatName, type DatSetManifest, type DatSetPointer, type ObjectRef, type PackRole, type ServerSeedRef,
   DAT_CODE, PACK_DAT, SKELETON_TYPES, areaTileOf, datHeaderFor, iterationRecordBytes, objectKey, parseAreaIndex, parsePack, parseSetManifest, parseSetPointer,
 } from '@ac/dat-parser/streaming/DatSetFormat.js';
 import { readResponseBytes } from '../readResponseBytes.js';
@@ -998,6 +998,16 @@ export class DatStore {
       return this.resident.cell.has(id);
     }
     return this.resident[dat].has(id);
+  }
+
+  /**
+   * The seed the pointer lists for an AC1999 server (its launcher world id; era1999/ServerPatchSeed.ts),
+   * fetched like any object (cache, network, hash-verified), or null when the set has none for it.
+   */
+  async loadServerSeed(serverId: string): Promise<{ ref: ServerSeedRef; payload: Uint8Array } | null> {
+    const ref = this.pointer.serverSeeds?.[serverId];
+    if (!ref) return null;
+    return { ref, payload: await this.loadObject(ref, FetchPriority.Critical) };
   }
 
   /** One object's payload: ObjectCache, else network (retried), inflated and verified. Coalesced by hash. */

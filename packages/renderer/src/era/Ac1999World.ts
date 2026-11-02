@@ -12,9 +12,19 @@
  * `ac1999-patch__<server>__<file id>` plus a manifest, reloaded before the
  * world loads on the next visit (and reported as the server's iteration, so
  * the server does not send them again).
+ *
+ * A first visit has nothing stored and reports the world set's iterations, so
+ * the server sends its whole difference first (10-14 s at its pacing;
+ * BUG.ac1999-slow-login-ddd-push). Where the world set carries a seed for the
+ * server (that same difference, prepared ahead: dat-parser era1999
+ * ServerPatchSeed, tools/ac1999-dat-seed.ts), the seed is applied instead, as
+ * if the server had sent it. Stored patches always win over a seed; a state
+ * built on a seed names it (`seed` in the manifest) and is dropped when that
+ * seed is no longer the one offered, so it is never mixed with another.
  */
-import { ac1999CellOverlay, ac1999PortalOverlay, type Ac1999DatOverlay, type DatDatabase } from '@ac/dat-parser';
+import { ac1999CellOverlay, ac1999PortalOverlay, decodeServerPatchSeed, type Ac1999DatOverlay, type DatDatabase, type DatIterations } from '@ac/dat-parser';
 import type { DatBlobStore } from '../dat/DatCache.js';
+import type { DatStore } from '../dat/streaming/DatStore.js';
 
 /** One pushed file, as Connection1999 emits it (zlib from the AC1999 server; see inflateAc1999Patch). */
 export interface Ac1999PatchFile { dat: 'portal' | 'cell'; fileId: number; compressed: Uint8Array; rawLength: number }
@@ -23,7 +33,44 @@ export interface Ac1999PatchEvent { patches: Ac1999PatchFile[]; portalIteration:
 /** A patch ready to serve: its 1999-format bytes. */
 export interface Ac1999Patch { dat: 'portal' | 'cell'; fileId: number; bytes: ArrayBuffer }
 
-interface PatchManifest { portalIteration: number; cellIteration: number; files: Array<{ dat: 'portal' | 'cell'; id: number }> }
+/**
+ * A server's login push prepared ahead of time. `id` names it (its content hash); `base` is the
+ * iterations it was diffed from, `iterations` the server's.
+ */
+export interface Ac1999Seed { id: string; base: DatIterations; iterations: DatIterations; files: Ac1999Patch[] }
+/** Fetches the seed for the server being restored, or null when there is none. */
+export type Ac1999SeedSource = () => Promise<Ac1999Seed | null>;
+
+/** A seed payload (ServerPatchSeed's "ACSS") as an Ac1999Seed; throws on a malformed one. */
+export function ac1999SeedFromPayload(id: string, payload: Uint8Array): Ac1999Seed {
+  const s = decodeServerPatchSeed(payload);
+  return {
+    id, base: s.base, iterations: s.iterations,
+    files: s.records.map((r) => ({ dat: r.dat, fileId: r.id >>> 0, bytes: r.bytes.slice().buffer as ArrayBuffer })),
+  };
+}
+
+/**
+ * The seed a streamed 1999 world set offers for the server a connect URL names (its launcher
+ * world id, `?server=`), or undefined when there is no set or no id. A seed whose header
+ * disagrees with the pointer's description of it is refused.
+ */
+export function ac1999SeedSource(store: Pick<DatStore, 'loadServerSeed'> | null | undefined, serverId: string | null): Ac1999SeedSource | undefined {
+  if (!store || !serverId) return undefined;
+  return async () => {
+    const got = await store.loadServerSeed(serverId);
+    if (!got) return null;
+    const seed = ac1999SeedFromPayload(got.ref.hash, got.payload);
+    const same = (a: DatIterations, b: DatIterations) => a.portal === b.portal && a.cell === b.cell;
+    if (!same(seed.base, got.ref.base) || !same(seed.iterations, got.ref.iterations)) {
+      throw new Error(`seed ${got.ref.hash} says ${seed.base.portal}/${seed.base.cell} → ${seed.iterations.portal}/${seed.iterations.cell}; the set pointer says otherwise`);
+    }
+    return seed;
+  };
+}
+
+/** `seed`: the seed the stored files were applied over (absent: they are the whole difference from the base). */
+interface PatchManifest { portalIteration: number; cellIteration: number; files: Array<{ dat: 'portal' | 'cell'; id: number }>; seed?: string }
 
 const KEY_PREFIX = 'ac1999-patch__';
 
@@ -78,6 +125,12 @@ export class Ac1999World {
   readonly portalOverlay: Ac1999DatOverlay;
   readonly cellOverlay: Ac1999DatOverlay;
   private restoredFor: string | null = null;
+  /** The world's own iterations (the set's or the 1999 files'), before any patch. */
+  readonly baseIterations: DatIterations;
+  /** The seed the served patches were built on, or null. */
+  private seedId: string | null = null;
+  /** False after restore set the stored manifest aside: the next persist starts from nothing, not from it. */
+  private storedTrusted = true;
 
   /**
    * `translatedBase`: the DATs are a streamed 1999 world set, already in the
@@ -91,6 +144,7 @@ export class Ac1999World {
     this.cellOverlay = ac1999CellOverlay({ patches: new Map(), onError, translatedBase });
     portal.setOverlay(this.portalOverlay);
     cell.setOverlay(this.cellOverlay);
+    this.baseIterations = { portal: portal.totalIterations, cell: cell.totalIterations };
   }
 
   /** What the login reports (DDD): the base iterations, or the server's once its patches are applied. */
@@ -127,11 +181,24 @@ export class Ac1999World {
     return files;
   }
 
-  /** Persist `files` (merged into what the server already stored) and the current iterations. Never throws. */
-  async persist(store: DatBlobStore, serverKey: string, files: readonly Ac1999Patch[]): Promise<void> {
+  /**
+   * Persist `files` (merged into what the server already stored) and the current iterations. Never throws.
+   * Calls run one after another: a second login's persist (a relog in the same page, reporting the
+   * server's iteration, so no files) must read the manifest the first one writes, not run beside it and
+   * store the server's iteration with none of its files while the first is still writing them.
+   */
+  persist(store: DatBlobStore, serverKey: string, files: readonly Ac1999Patch[]): Promise<void> {
+    const run = this.persisting.then(() => this.persistNow(store, serverKey, files));
+    this.persisting = run;
+    return run;
+  }
+
+  private persisting: Promise<void> = Promise.resolve();
+
+  private async persistNow(store: DatBlobStore, serverKey: string, files: readonly Ac1999Patch[]): Promise<void> {
     if (!store.available) return;
     try {
-      const prev = await readManifest(store, serverKey);
+      const prev = this.storedTrusted ? await readManifest(store, serverKey) : null;
       const known = new Map((prev?.files ?? []).map((f) => [f.id >>> 0, f.dat] as const));
       for (const f of files) {
         await store.put(ac1999PatchKey(serverKey, f.fileId), f.bytes, { size: f.bytes.byteLength, lastModified: null, etag: null });
@@ -141,9 +208,11 @@ export class Ac1999World {
         portalIteration: this.portalOverlay.iteration ?? 0,
         cellIteration: this.cellOverlay.iteration ?? 0,
         files: [...known].map(([id, dat]) => ({ dat, id })),
+        ...(this.seedId ? { seed: this.seedId } : {}),
       };
       const bytes = new TextEncoder().encode(JSON.stringify(manifest)).buffer as ArrayBuffer;
       await store.put(manifestKey(serverKey), bytes, { size: bytes.byteLength, lastModified: null, etag: null });
+      this.storedTrusted = true;
     } catch (err) {
       console.warn('[AC:1999] could not store the server\'s DAT patches:', err);
     }
@@ -153,30 +222,81 @@ export class Ac1999World {
    * Load the patches stored for `serverKey` (once per key; a different key
    * replaces the previous server's). Resolves to the number of files applied.
    * Never throws: a missing or partial store means the server sends them again.
+   *
+   * `seed`, when given, is the server's prepared push (Ac1999Seed). It is used
+   * only where nothing usable is stored (stored patches always win, so a newer
+   * stored level is never overridden), and only over the base it was diffed
+   * from. A stored state built on a seed comes back only with that same seed
+   * (applied first, the stored files over it); with another seed or none it is
+   * set aside, and the next persist starts fresh.
    */
-  async restore(store: DatBlobStore, serverKey: string): Promise<number> {
+  async restore(store: DatBlobStore, serverKey: string, seed?: Ac1999SeedSource): Promise<number> {
     if (this.restoredFor === serverKey) return 0;
     if (this.restoredFor !== null) {
       for (const o of [this.portalOverlay, this.cellOverlay]) { o.patches.clear(); o.iteration = undefined; o.clearCache(); }
     }
     this.restoredFor = serverKey;
-    if (!store.available) return 0;
-    try {
-      const manifest = await readManifest(store, serverKey);
-      if (!manifest) return 0;
-      const files: Ac1999Patch[] = [];
-      for (const f of manifest.files) {
-        const bytes = await store.getData(ac1999PatchKey(serverKey, f.id));
-        if (!bytes) return 0; // incomplete: report the base iterations so the server resends everything
-        files.push({ dat: f.dat, fileId: f.id >>> 0, bytes });
+    this.seedId = null;
+    this.storedTrusted = true;
+    let offered: Ac1999Seed | null | undefined;
+    const getSeed = async (): Promise<Ac1999Seed | null> => {
+      if (offered !== undefined) return offered;
+      offered = null;
+      if (!seed) return null;
+      try {
+        const s = await seed();
+        if (s && (s.base.portal !== this.baseIterations.portal || s.base.cell !== this.baseIterations.cell)) {
+          console.warn(`[AC:1999] the server's seed was diffed from ${s.base.portal} / ${s.base.cell}, this world is ${this.baseIterations.portal} / ${this.baseIterations.cell}: not used`);
+        } else offered = s;
+      } catch (err) {
+        console.warn('[AC:1999] could not load the server\'s DAT seed:', err);
       }
-      this.apply(files, { portal: manifest.portalIteration, cell: manifest.cellIteration });
-      return files.length;
+      return offered;
+    };
+    try {
+      const manifest = store.available ? await readManifest(store, serverKey) : null;
+      if (manifest) {
+        const files = await readStoredFiles(store, serverKey, manifest);
+        const baseline = manifest.files.length === 0 && !manifest.seed
+          && manifest.portalIteration === this.baseIterations.portal && manifest.cellIteration === this.baseIterations.cell;
+        if (files && !baseline) {
+          if (!manifest.seed) {
+            this.apply(files, { portal: manifest.portalIteration, cell: manifest.cellIteration });
+            return files.length;
+          }
+          const s = await getSeed();
+          if (s && s.id === manifest.seed) {
+            this.apply(s.files, s.iterations);
+            this.apply(files, { portal: manifest.portalIteration, cell: manifest.cellIteration });
+            this.seedId = s.id;
+            return s.files.length + files.length;
+          }
+          console.log(`[AC:1999] stored DAT patches were built on seed ${manifest.seed}, which is ${s ? `now ${s.id}` : 'not offered'}: set aside`);
+        }
+        // Incomplete, an empty baseline, or built on another seed: the next persist must not merge it.
+        this.storedTrusted = false;
+      }
+      const s = await getSeed();
+      if (!s) return 0;
+      this.apply(s.files, s.iterations);
+      this.seedId = s.id;
+      return s.files.length;
     } catch (err) {
       console.warn('[AC:1999] could not read the stored DAT patches:', err);
       return 0;
     }
   }
+}
+
+/** Every file a manifest lists, or null when one is missing (the server must resend them all). */
+async function readStoredFiles(store: DatBlobStore, serverKey: string, manifest: PatchManifest): Promise<Ac1999Patch[] | null> {
+  const files: Ac1999Patch[] = [];
+  for (const f of manifest.files) {
+    const bytes = await store.getData(ac1999PatchKey(serverKey, f.id));
+    if (!bytes) return null;
+    files.push({ dat: f.dat, fileId: f.id >>> 0, bytes });
+  }
+  return files;
 }
 
 async function readManifest(store: DatBlobStore, serverKey: string): Promise<PatchManifest | null> {
@@ -189,6 +309,7 @@ async function readManifest(store: DatBlobStore, serverKey: string): Promise<Pat
       portalIteration: Number(v.portalIteration) || 0,
       cellIteration: Number(v.cellIteration) || 0,
       files: v.files.filter((f) => (f?.dat === 'portal' || f?.dat === 'cell') && Number.isFinite(f.id)),
+      ...(typeof v.seed === 'string' && v.seed ? { seed: v.seed } : {}),
     };
   } catch {
     return null;

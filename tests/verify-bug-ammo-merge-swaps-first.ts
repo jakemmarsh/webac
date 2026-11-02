@@ -148,13 +148,13 @@ describe('BUG.ammo-merge-swaps-first — the wielded stack is known from the era
         )).toEqual({ kind: 'merge', targetId: WIELDED.guid, amount: 20 });
       });
 
-      it('another ammo (a different wcid) is no merge: the slot drop blocks (1999 swaps, end of retail refuses quietly)', () => {
+      it('another ammo (a different wcid) is no merge: the slot drop swaps, in every era (AutoWield param_4 = 1)', () => {
         const w = world(era.id, era.create);
         for (const a of [WIELDED, PACKED, OTHER]) w.arrive(a);
         expect(w.dropOnSlot(OTHER.guid, AMMO)).toBeNull();
         const item = w.state.inventory.getItem(OTHER.guid)!;
         const outcome = acceptPaperdollDrop({ ...item, inTrade: false, dragAmount: item.stackSize }, { kind: 'slot', mask: AMMO }, w.ctx());
-        expect(outcome.swap !== undefined).toBe(era.id === 'ac1999-retail');
+        expect(outcome.swap !== undefined).toBe(true);
       });
     });
   }

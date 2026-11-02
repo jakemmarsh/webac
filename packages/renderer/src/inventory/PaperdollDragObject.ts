@@ -32,8 +32,8 @@
  * @ 0058ce00 — silently when no such object is found.
  *
  * AutoWield with those arguments (param_3 = 0 shows the legality lines,
- * param_4 = 1 suppresses every "You're already wearing …" line, param_5 = 0
- * never unwields the blocking item, param_6 = 0 never falls to the other
+ * param_4 = 1 suppresses every "You're already wearing …" line and moves the
+ * blocking item to the pack (the swap, INV-4), param_6 = 0 never falls to the other
  * hand/wrist): IsPlayerReadyToMakeInventoryRequest(0); "The %s is being
  * wielded by someone else" (0x7cd350) for an object another creature
  * wields; AutoWieldIsLegal(obj, 0) @ 0055ed60 — ammunition whose AmmoType
@@ -46,11 +46,11 @@
  * double-click (resolveAutoWield); an occupied weapon / ammo ready slot
  * first takes a merge of the same stack (ItemHolder::AttemptMerge — the
  * outcome's `merge`), a same-wcid ammo stack with no room says "You cannot
- * wield more %s" (0x7ccddc, NAME_PLURAL), and any other occupied target is
- * refused silently.
+ * wield more %s" (0x7ccddc, NAME_PLURAL), and any other occupied target
+ * swaps: the occupant to the pack, then the wield (INV-4).
  */
 
-import { resolveAutoWield, blocksUseOfShield, getAppropriateName, UISlotSide } from '@ac/shared';
+import { resolveAutoWield, blocksUseOfShield, getAppropriateName, UISlotSide, AUTOWIELD_RINGS_FULL, type ShieldBlockRule } from '@ac/shared';
 
 /** The wearable EquipMask bits AcceptPaperDollDragObject / AutoWearIsLegal test (clothing + armor + cloak; jewelry and weapons are not worn). */
 export const PAPERDOLL_WEARABLE_MASK = 0x8007fff;
@@ -122,10 +122,12 @@ export interface PaperdollWearContext {
   inCombat: boolean;
   /** IsPlayerReadyToMakeInventoryRequest(0)'s refusal line, or null when the player is ready. */
   readyRefusal: string | null;
-  /** EraClientRules.paperdollSlotDropSwaps (INV-4): a blocked slot drop swaps (1999). Absent = false. */
+  /** EraClientRules.paperdollSlotDropSwaps (INV-4): a blocked slot drop swaps (both clients). Absent = false. */
   slotDropSwaps?: boolean;
   /** EraClientRules.dualWieldShieldSlot (INV-5): a melee weapon fits the shield slot. Absent = true. */
   dualWieldShieldSlot?: boolean;
+  /** EraClientRules.shieldBlockRule: which weapons keep a shield off. Absent = 'eor'. */
+  shieldBlockRule?: ShieldBlockRule;
 }
 
 export interface PaperdollDropOutcome {
@@ -136,7 +138,7 @@ export interface PaperdollDropOutcome {
   /** ItemHolder::AttemptMerge into the wielded stack: send StackableMerge(obj → targetId, amount). */
   merge?: { targetId: number; amount: number };
   /**
-   * INV-4 — the 1999 swap: the slot is taken, so the caller runs the double-click's AutoWield on
+   * INV-4 — the swap: the slot is taken, so the caller runs the double-click's AutoWield on
    * `side` (the occupant to the backpack with "Moving X to your backpack", then the wield).
    */
   swap?: { side: UISlotSide };
@@ -167,7 +169,14 @@ function autoWear(obj: PaperdollDropObject, ctx: PaperdollWearContext): Paperdol
   return { wieldLocation: null, notice: fmt(PAPERDOLL_STRINGS.mustRemoveToWear, appropriate(blocker)) };
 }
 
-/** CPlayerSystem::AutoWieldIsLegal @ 0055ed60 with param_2 = 0: null when legal, else the refusal line. */
+/**
+ * CPlayerSystem::AutoWieldIsLegal @ 0055ed60 with param_2 = 0: null when legal, else the refusal line.
+ * The 1999 PanelUI_AutoWieldIsLegal @ 0x004ff660 asks the same three things in the same order with
+ * the same names (the launcher NAME_APPROPRIATE @ 0x004ff748, the weapon NAME_SINGULAR @ 0x004ff7e5,
+ * the object NAME_APPROPRIATE @ 0x004ff862; "Cannot be used with " 0x601da8, "A shield may not be
+ * worn with the " 0x601d84, "Cannot hold " 0x601d74 + " while in combat" 0x601d60); only its shield
+ * test differs (ctx.shieldBlockRule).
+ */
 function autoWieldIllegal(obj: PaperdollDropObject, ctx: PaperdollWearContext): string | null {
   const valid = (obj.validLocations ?? 0) >>> 0;
   const weapon = ctx.equipped.find((e) => (e.slot & WEAPON_READY) !== 0);
@@ -175,7 +184,7 @@ function autoWieldIllegal(obj: PaperdollDropObject, ctx: PaperdollWearContext): 
     && weapon.ammoType !== (obj.ammoType ?? 0)) {
     return fmt(PAPERDOLL_STRINGS.cannotBeUsedWith, appropriate(weapon));
   }
-  if ((valid & SHIELD) !== 0 && weapon && blocksUseOfShield({ ...weapon, validLocations: weapon.validLocations ?? 0 })) {
+  if ((valid & SHIELD) !== 0 && weapon && blocksUseOfShield({ ...weapon, validLocations: weapon.validLocations ?? 0 }, ctx.shieldBlockRule)) {
     return fmt(PAPERDOLL_STRINGS.shieldNotWithWeapon, weapon.name);
   }
   if ((valid & HELD) !== 0 && ctx.inCombat && ((obj.itemType ?? 0) & ITEM_TYPE_CASTER) === 0) {
@@ -184,35 +193,80 @@ function autoWieldIllegal(obj: PaperdollDropObject, ctx: PaperdollWearContext): 
   return null;
 }
 
+/** How an AutoWield caller asks (CPlayerSystem::AutoWield's param_3 / param_5). */
+export interface AutoWieldPrecheckOptions {
+  /** param_3 != 0: every refusal line is suppressed (AutoSort's AutoWield(obj, right, 1, 0, 0, 1)). */
+  silent?: boolean;
+  /**
+   * param_5 != 0 (the 1999 combat button, PanelUI_AutoWield(obj, 2, 0, 1, 1, 1) @ 0x00502180): on a
+   * legality refusal an object the player doesn't own goes to the pack (AutoSort(obj, 0, 0)).
+   */
+  moveToBackpack?: boolean;
+  /** ACCWeenieObject::IsOwnedByPlayer — the object is in the player's packs or on the player. */
+  ownedByPlayer?: boolean;
+  /** EraClientRules.autoWieldMoveToBackpackLine: appended to the refusal on that branch. */
+  moveToBackpackLine?: string | null;
+}
+
+export type AutoWieldPrecheck =
+  | { kind: 'proceed' }
+  /** Nothing is sent; `notice` is the 0x1a line (absent when silent or a silent refusal). */
+  | { kind: 'refused'; notice?: string }
+  /** param_5's branch: place the object in the pack (PlaceInBackpack: a weapon is not wearable). */
+  | { kind: 'backpack'; notice?: string };
+
+/**
+ * AutoWield's checks ahead of the slot chain, every era: "The %s is being wielded by someone else"
+ * for an object another creature wields, no location bit (silent), then AutoWieldIsLegal. End of
+ * retail: CPlayerSystem::AutoWield @ 00560a60 (AutoWieldIsLegal @ 0055ed60); the 1999 client.exe:
+ * PanelUI_AutoWield @ 0x004fee20 (PanelUI_AutoWieldIsLegal @ 0x004ff660). The double-click (UsingItem
+ * case 3 / 8, (obj, side, 0, 1, 0, 1) in both) shows the refusal; AutoSort's wield is silent; the 1999
+ * combat button moves an object off the ground to the pack instead, with the era's line after the
+ * refusal ("Cannot be used with Yew Longbow. Moving to backpack.").
+ * IsPlayerReadyToMakeInventoryRequest stays with the caller (the request gate).
+ */
+export function autoWieldPrecheck(
+  obj: PaperdollDropObject, ctx: PaperdollWearContext, opts: AutoWieldPrecheckOptions = {},
+): AutoWieldPrecheck {
+  const say = (line: string) => (opts.silent ? {} : { notice: line });
+  if (obj.wielderId && obj.wielderId !== ctx.playerId) {
+    return { kind: 'refused', ...say(fmt(PAPERDOLL_STRINGS.wieldedBySomeoneElse, appropriate(obj))) };
+  }
+  if ((((obj.validLocations ?? 0) >>> 0) & 0x7fffffff) === 0) return { kind: 'refused' };
+  const illegal = autoWieldIllegal(obj, ctx);
+  if (illegal === null) return { kind: 'proceed' };
+  if (opts.moveToBackpack && !opts.ownedByPlayer) {
+    return { kind: 'backpack', ...say(illegal + (opts.moveToBackpackLine ?? '')) };
+  }
+  return { kind: 'refused', ...say(illegal) };
+}
+
 /** CPlayerSystem::AutoWield @ 00560a60 as AcceptDragObject calls it: (obj, side, 0, 1, 0, 0). */
 function autoWield(obj: PaperdollDropObject, side: UISlotSide, ctx: PaperdollWearContext): PaperdollDropOutcome {
   if (ctx.readyRefusal !== null) return { wieldLocation: null, notice: ctx.readyRefusal };
-  if (obj.wielderId && obj.wielderId !== ctx.playerId) {
-    return { wieldLocation: null, notice: fmt(PAPERDOLL_STRINGS.wieldedBySomeoneElse, appropriate(obj)) };
-  }
+  const pre = autoWieldPrecheck(obj, ctx);
+  if (pre.kind !== 'proceed') return pre.notice ? { wieldLocation: null, notice: pre.notice } : { wieldLocation: null };
   const valid = (obj.validLocations ?? 0) >>> 0;
-  if ((valid & 0x7fffffff) === 0) return { wieldLocation: null };
-  const illegal = autoWieldIllegal(obj, ctx);
-  if (illegal !== null) return { wieldLocation: null, notice: illegal };
   const occupiedMask = ctx.equipped.reduce((m, e) => m | e.slot, 0);
   const equippedAt = (bits: number) => ctx.equipped.find((e) => (e.slot & bits) !== 0)?.id ?? 0;
   const res = resolveAutoWield(
     {
-      id: obj.id, validLocations: valid, combatUse: obj.combatUse, itemType: obj.itemType, weenieClassId: obj.weenieClassId,
+      id: obj.id, validLocations: valid, combatUse: obj.combatUse, itemType: obj.itemType, ammoType: obj.ammoType, weenieClassId: obj.weenieClassId,
       stackSize: obj.stackSize, maxStackSize: obj.maxStackSize, inTrade: obj.inTrade, dragAmount: obj.dragAmount,
       name: obj.name, pluralName: obj.pluralName,
     },
     occupiedMask, equippedAt, side, false,
     (id) => ctx.equipped.find((e) => e.id === id),
+    ctx.shieldBlockRule,
   );
   if (res.kind === 'wield') return { wieldLocation: res.slot >>> 0 };
   if (res.kind === 'merge') return { wieldLocation: null, merge: { targetId: res.targetId, amount: res.amount } };
   // param_3 = 0: the ammo branch's "You cannot wield more %s" is shown.
   if (res.kind === 'rejected' && res.legalityNotice) return { wieldLocation: null, notice: res.legalityNotice };
-  // param_4 = 1 / param_5 = 0: a blocked location is refused without a word
-  // and nothing is unwielded (ResetUnblocking). The robe line is not gated.
+  // A blocked location with no swap rule is refused without a word (ResetUnblocking).
+  // The robe line is not gated.
   if (res.kind === 'rejected' && res.notice) return { wieldLocation: null, notice: res.notice };
-  // INV-4 — the 1999 PanelUI_AutoWield's param_4 = 1 swaps instead.
+  // INV-4 — param_4 = 1 swaps (both clients: AutoWield @ 00560a60 at 0x00561734; 1999 @ 0x4fee20).
   if (res.kind === 'blocked' && ctx.slotDropSwaps) return { wieldLocation: null, swap: { side } };
   return { wieldLocation: null };
 }
@@ -312,4 +366,12 @@ export function paperdollBandDragAcceptState(obj: PaperdollDropObject, ctx: Pape
   if ((priority & priorityMask) === 0) return DRAG_ACCEPT;
   if (ctx.equipped.some((e) => e.id === obj.id && e.slot !== 0)) return null;
   return DRAG_REFUSE;
+}
+
+/**
+ * AutoWield's slot line in the era client's words (EraClientRules.autoWieldRingsFullLine): the 1999
+ * client.exe says "You're already wearing rings on both hands." where end of retail says "jewelry".
+ */
+export function eraAutoWieldLine(line: string | undefined, ringsFullLine: string): string | undefined {
+  return line === AUTOWIELD_RINGS_FULL ? ringsFullLine : line;
 }

@@ -39,6 +39,8 @@ export interface AutoWieldItem {
   combatUse?: number;
   /** ACE ItemType bitmask — Caster (0x8000) also blocks shield use. */
   itemType?: number;
+  /** pwd._ammoType — end of retail's BlocksUseOfShield counts a missile weapon only with one. */
+  ammoType?: number;
   /** Weenie class id — retail merges same-wcid stacks into the occupied
    *  weapon / ammo ready slot instead of dequipping (AttemptMerge). */
   weenieClassId?: number;
@@ -66,6 +68,8 @@ export interface AutoWieldStack {
 
 /** acclient.exe 0x7ccddc — AutoWield's ammo branch, same-wcid full stack. */
 export const AUTOWIELD_CANNOT_WIELD_MORE = 'You cannot wield more %s';
+/** acclient.exe, AutoWield's ring branch when both fingers are taken (the 1999 client words it differently: EraClientRules.autoWieldRingsFullLine). */
+export const AUTOWIELD_RINGS_FULL = "You're already wearing jewelry on both hands.";
 
 export type AutoWieldResolution =
   /** Send GetAndWieldItem(item, slot) — retail UIAttemptWield with the
@@ -91,12 +95,25 @@ export type AutoWieldResolution =
  *  or 0 when those slots are free. */
 export type EquippedLookup = (bits: number) => number;
 
-/** BlocksUseOfShield, decomp @ 0055d3e0: missile launcher (CombatUse
- *  Missile with ammo), two-hander, or Caster item type. */
-export function blocksUseOfShield(item: AutoWieldItem): boolean {
-  if (item.combatUse === CombatUse.Missile) return true;
+/**
+ * Which client decides whether a weapon keeps a shield off (EraClientRules.shieldBlockRule).
+ *  - 'eor': ACCWeenieObject::BlocksUseOfShield @ 0055d3e0 — a missile weapon that takes
+ *    ammunition (CombatUse Missile and AmmoType != 0; a thrown weapon has none), a two-hander,
+ *    or a caster.
+ *  - 'ac1999': the 1999 client.exe asks combatUse == Missile (any ammo type) or a caster, in
+ *    PanelUI_AutoWieldIsLegal @ 0x004ff660 (at 0x004ff7a0, of the weapon-slot object) and in
+ *    PanelUI_AutoWield @ 0x004fee20's weapon branch (at 0x004ff260, of the object being
+ *    wielded while the shield slot is taken). It has no two-handed combat use.
+ */
+export type ShieldBlockRule = 'eor' | 'ac1999';
+
+/** Whether `item`, in (or headed for) the weapon slot, keeps a shield off. */
+export function blocksUseOfShield(item: AutoWieldItem, rule: ShieldBlockRule = 'eor'): boolean {
+  const caster = ((item.itemType ?? 0) & 0x8000) !== 0; // ItemType.Caster
+  if (rule === 'ac1999') return item.combatUse === CombatUse.Missile || caster;
+  if (item.combatUse === CombatUse.Missile && (item.ammoType ?? 0) !== 0) return true;
   if (item.combatUse === CombatUse.TwoHanded) return true;
-  return ((item.itemType ?? 0) & 0x8000) !== 0; // ItemType.Caster
+  return caster;
 }
 
 /**
@@ -167,6 +184,7 @@ const DUAL_WIELD_GROUP = EquipMask.MeleeWeapon | EquipMask.MissileWeapon
  *                      ammo branches first try ItemHolder::AttemptMerge into
  *                      the wielded stack (same wcid, room left) before
  *                      dequipping it
+ * @param shieldRule    the era client's shield test (blocksUseOfShield)
  */
 export function resolveAutoWield(
   item: AutoWieldItem,
@@ -175,6 +193,7 @@ export function resolveAutoWield(
   side: UISlotSide = UISlotSide.Right,
   allowOtherSide = true,
   stackOf?: (id: number) => AutoWieldStack | undefined,
+  shieldRule: ShieldBlockRule = 'eor',
 ): AutoWieldResolution {
   let valid = item.validLocations >>> 0;
   if ((valid & EquipMask.All) === 0) {
@@ -237,7 +256,7 @@ export function resolveAutoWield(
     }
     block(prefer, wristValid
       ? "You're already wearing jewelry on both wrists."
-      : "You're already wearing jewelry on both hands.");
+      : AUTOWIELD_RINGS_FULL);
   }
 
   // ── Dual wield: left-side melee/missile/two-hander goes to the shield
@@ -251,7 +270,7 @@ export function resolveAutoWield(
   if (weaponBits !== 0) {
     if ((occupiedMask & WEAPON_GROUP) === 0) {
       const shieldItem = equippedAt(EquipMask.Shield);
-      if (shieldItem !== 0 && blocksUseOfShield(item)) {
+      if (shieldItem !== 0 && blocksUseOfShield(item, shieldRule)) {
         // Two-hander / launcher / wand forces the shield off first.
         blockingId = shieldItem;
         blockingNotice = undefined;
