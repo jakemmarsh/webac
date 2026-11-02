@@ -396,6 +396,7 @@ import { buildContractRows, applyContractTracker, applyContractTrackerTable, typ
 import { harDumpText } from './chat/HouseAccessText.js';
 import { routeObjectSubject, buildInventoryEntry, WorldObjectRecords, PendingContainIds } from './network/objectSubjectRouting.js';
 import { NonWorldObjectRecords, placeKnownObjectByPosition } from './world/NonWorldObjectRecords.js';
+import { placementObjectFromRecords } from './inventory/PlacementObjectOf.js';
 import { packSlotCounts } from './agent/packCounts.js';
 import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, shortcutDropRefusal1999, shortcutDropIntoContainer1999, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
@@ -441,7 +442,7 @@ import { WorldReporter, classifyGpu, unmaskedRenderer, type WorldEndCause } from
 import { FramePhaseTimer, PHASE, ProgramCreationCounter, CompileTrace, netHandlerCost, streamHandlerCost, connectionEventOp, timedAgentTick } from './telemetry/MainThreadCost.js';
 import { AutomationReporter } from './telemetry/AutomationReporter.js';
 import { RefusalReporter, scrubNames } from './telemetry/RefusalReporter.js';
-import { knownObjectNames, pendingRequestDetail, castRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
+import { knownObjectNames, pendingRequestDetail, castRefusalDetail, selectionRefusalDetail, CastPressTracker, type RefusalDetail, type PlacedObject } from './telemetry/RefusalTemplates.js';
 import { ObjsendReporter, countReleasedInView, summarizeObjects, type ObjsendSnapshot } from './telemetry/ObjsendReporter.js';
 import { PortalUseReporter, bodyTouchesPortal, isPortalObject, overlapsPortal, type PortalSnapshot, type PortalUseHeld } from './telemetry/PortalUseReporter.js';
 import { PreworldReporter, bootCacheVerdict, streamedBootStage, type StreamBootPhase, chargenStepName, preworldScreenFor, preworldServerFor, reportConnectAttempts, serverIdFromUrl, type ChargenStepName, type LauncherLeaveReason, type PreworldScreen } from './telemetry/PreworldReporter.js';
@@ -5057,27 +5058,14 @@ async function main() {
           contained: true, ownedByPlayer: heldItemById(id) !== null,
         };
       }
-      const o = serverObjectManager?.getObject(id);
-      const src = worldObjectRecords.sourceOf(id);
-      if (!o && !src) return undefined;
-      const flags = o?.objectDescFlags ?? src?.objectDescFlags ?? 0;
-      const itemsCapacity = o?.itemsCapacity ?? src?.itemsCapacity ?? 0;
-      const containersCapacity = o?.containersCapacity ?? 0;
-      return {
-        id, name: o?.name ?? src?.name ?? '', weenieClassId: o?.weenieClassId ?? src?.weenieClassId ?? 0,
-        stackSize: o?.stackSize ?? src?.stackSize ?? 0, maxStackSize: o?.maxStackSize ?? src?.maxStackSize ?? 0,
-        itemsCapacity, containersCapacity,
-        isContainer: (flags & 0x800000) !== 0 || itemsCapacity !== 0 || containersCapacity !== 0,
-        holder: (flags & 0x1) !== 0, inTrade: tradeGuids.has(id), isPlayer: (flags & 0x8) !== 0,
-        // A housing hook's _hook_type / _hook_item_types / _house_owner_iid.
-        hookType: o?.hookType ?? src?.hookType ?? 0, hookItemTypes: o?.hookItemTypes ?? 0,
-        houseOwnerId: o?.houseOwnerId ?? 0, itemType: o?.itemType ?? src?.itemType ?? 0,
-        // _IsItemLegal's inputs: BF_STUCK, in a container (the open ground
-        // container's contents) or wielded, and the wielded slot.
-        stuck: (flags & ObjectDescriptionFlag.Stuck) !== 0,
-        contained: (o?.wielderId ?? 0) !== 0 || openContainer.has(id),
-        wieldedLocation: o?.wieldedLocation ?? 0,
-      };
+      // The client's object table: the world record, the kept world CreateObject, then the
+      // CreateObject of an object created without a world record (BUG.ac1999-placement-item-not-valid).
+      const created = nonWorldRecords.get(id);
+      return placementObjectFromRecords(id, {
+        world: serverObjectManager?.getObject(id),
+        kept: worldObjectRecords.sourceOf(id),
+        created: created && { ...created, wieldedLocation: created.currentWieldedLocation },
+      }, { inTrade: tradeGuids.has(id), inOpenContainer: openContainer.has(id) });
     };
     const inside = (holderId: number) => holderId === playerId
       ? playerState.inventory.getAll().filter((i) => (i.containerId === playerId || i.containerId === 0) && !worn.has(i.id))
@@ -5151,7 +5139,8 @@ async function main() {
     if (!sendGameAction) return false;
     switch (r.kind) {
       case 'refused':
-        if (r.notice) gameUI.displayErrorText(r.notice);
+        // BUG.ac1999-placement-item-not-valid — the refusal says where the (selected) object resolves.
+        if (r.notice) refusalWithDetail(placementRefusalDetail, () => gameUI.displayErrorText(r.notice!));
         return false;
       case 'merge':
         if (r.amount < 1) return false;
@@ -5178,9 +5167,21 @@ async function main() {
       }
     }
   }
-  /** AttemptToPlaceInContainer's head: IsPlayerReadyToMakeInventoryRequest(0). */
-  const placementReady = (): boolean =>
-    inventoryRequests.isPlayerReadyToMakeInventoryRequest(false, (text) => gameUI.displayErrorText(text));
+  /**
+   * AttemptToPlaceInContainer's head: IsPlayerReadyToMakeInventoryRequest(0). Its "one item at a
+   * time" line carries the pending request's kind and age (TELEMETRY.refusal-context; the
+   * placement's lock lines went out without it, BUG.ac1999-placement-item-not-valid).
+   */
+  const placementReady = (): boolean => refusalWithDetail(inventoryLockDetail,
+    () => inventoryRequests.isPlayerReadyToMakeInventoryRequest(false, (text) => gameUI.displayErrorText(text)));
+  /** A placement refusal's context: the pending request (none, past the gate) and the selection the drag made. */
+  const placementRefusalDetail = (): RefusalDetail => ({
+    ...inventoryLockDetail(),
+    ...selectionRefusalDetail({
+      selectedGuid: selectedObjectId(), prevSelectedGuid: selectionHistory.prevSelectedId,
+      msSinceSelectionChange: selectionHistory.msSinceChange(), placeOf: placeOfObject,
+    }),
+  });
   /**
    * CPlayerSystem::PlaceInBackpack @ 0055d8c0: the pack the inventory shows
    * (mOpenContainerID), or the main pack when MainPackPreferred
@@ -5357,6 +5358,16 @@ async function main() {
   // fresh CreateObject for an already-known object) can restore them
   // losslessly into local inventory.
   const storedItemStash: Map<number, import('@ac/shared').InventoryItem> = new Map();
+  /**
+   * BUG.ac1999-drop-not-shown — the CreateObject of each object created without a world record
+   * (our own pack, worn, an open container's contents; createdNonWorldGuids below), and of each
+   * world object we pick up or wield: an UpdatePosition for one puts it in the world
+   * (HandleReceivedPosition → MoveOrTeleport with no cell; world/NonWorldObjectRecords.ts). The
+   * AC1999 server drops an item with 0x19A + 0xF748 and no new CreateObject for the dropper.
+   * BUG.ac1999-placement-item-not-valid — with the world records it is the client's object table:
+   * the placement and UseObject read an object from it (inventory/PlacementObjectOf.ts).
+   */
+  const nonWorldRecords = new NonWorldObjectRecords();
 
   // ── Vendor system ──────────────────────────────────────────────
   let activeVendorGuid = 0;
@@ -6859,7 +6870,7 @@ async function main() {
       const split = dragSplitFor({ id: selected, stackSize: dragged?.item.stackSize ?? 1 });
       return {
         playerId: aceCharGuid ?? 0,
-        ready: inventoryRequests.isPlayerReadyToMakeInventoryRequest(false, (text) => gameUI.displayErrorText(text)),
+        ready: refusalWithDetail(inventoryLockDetail, () => inventoryRequests.isPlayerReadyToMakeInventoryRequest(false, (text) => gameUI.displayErrorText(text))),
         dragAmount: split.amount,
         splitPartial: split.partial,
         dragItemOnPlayerOpensSecureTrade: gameUI.eraSupports('secureTrade') && characterOptionIsSet(0x17 /* DragItemOnPlayerOpensSecureTrade */, currentCharacterOptions1 ?? 0, currentCharacterOptions2 ?? 0),
@@ -7168,7 +7179,7 @@ async function main() {
       const split = dragSplitFor({ id: dragged.item.id, stackSize: dragged.item.stackSize });
       const outcome = attemptPlaceIn3D(dragged.item, found, true, {
         playerId: aceCharGuid ?? 0,
-        ready: inventoryRequests.isPlayerReadyToMakeInventoryRequest(false, (text) => gameUI.displayErrorText(text)),
+        ready: refusalWithDetail(inventoryLockDetail, () => inventoryRequests.isPlayerReadyToMakeInventoryRequest(false, (text) => gameUI.displayErrorText(text))),
         dragAmount: split.amount,
         splitPartial: split.partial,
         dragItemOnPlayerOpensSecureTrade: gameUI.eraSupports('secureTrade') && characterOptionIsSet(0x17 /* DragItemOnPlayerOpensSecureTrade */, currentCharacterOptions1 ?? 0, currentCharacterOptions2 ?? 0),
@@ -9524,13 +9535,7 @@ async function main() {
      * an open chest's contents) are tracked in this set until deleted.
      */
     const createdNonWorldGuids = new Set<number>();
-    /**
-     * BUG.ac1999-drop-not-shown — the CreateObject of each of those (and of each world object we
-     * pick up or wield): an UpdatePosition for one puts it in the world (HandleReceivedPosition →
-     * MoveOrTeleport with no cell; world/NonWorldObjectRecords.ts). The AC1999 server drops an item
-     * with 0x19A + 0xF748 and no new CreateObject for the dropper.
-     */
-    const nonWorldRecords = new NonWorldObjectRecords();
+    // nonWorldRecords (declared with storedItemStash) keeps the CreateObject of each of those.
     const objectBlobGate = createObjectBlobGate({
       queue: pendingPlayScripts,
       worldInstance: (guid) => {
@@ -13869,7 +13874,9 @@ async function main() {
       const stored = storedItemStash.get(guid);
       if (stored) return containedUseSubject(guid, stored as OwnedUseItem, stored.containerId ?? 0);
       const o = serverObjectManager?.getObject(guid);
-      const src = worldObjectRecords.sourceOf(guid);
+      // BUG.ac1999-placement-item-not-valid sweep — the object table's third part: an object created
+      // without a world record (a Stuck or creature-typed object in a chest) is known to UseObject too.
+      const src = worldObjectRecords.sourceOf(guid) ?? nonWorldRecords.get(guid) ?? null;
       if (!o && !src) return null;
       const flags = o?.objectDescFlags ?? src?.objectDescFlags ?? 0;
       return {

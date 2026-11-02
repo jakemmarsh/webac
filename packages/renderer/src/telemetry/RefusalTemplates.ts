@@ -440,7 +440,23 @@ export function castRefusalDetail(args: {
   msSinceSelectionChange: number | null;
   placeOf: (guid: number) => PlacedObject;
 }): RefusalDetail {
-  const d: RefusalDetail = { spellTargetType: args.spellTargetType >>> 0 };
+  return { spellTargetType: args.spellTargetType >>> 0, ...selectionRefusalDetail(args) };
+}
+
+/**
+ * Where the selection is and its ItemType; with nothing selected, where the previous selection
+ * resolves now ('unknown' once it is gone) and how long ago the selection changed. The cast
+ * refusal's context, and a placement refusal's (BUG.ac1999-placement-item-not-valid: a drag off
+ * a pack, the corpse strip or the paperdoll selects its object first, ItemList_BeginDrag, so the
+ * selection is the object the placement refused).
+ */
+export function selectionRefusalDetail(args: {
+  selectedGuid: number;
+  prevSelectedGuid: number;
+  msSinceSelectionChange: number | null;
+  placeOf: (guid: number) => PlacedObject;
+}): RefusalDetail {
+  const d: RefusalDetail = {};
   const typeOf = (o: PlacedObject): number | undefined =>
     typeof o.itemType === 'number' && Number.isFinite(o.itemType) ? o.itemType >>> 0 : undefined;
   if (args.selectedGuid) {

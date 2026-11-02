@@ -68,6 +68,11 @@ export class NonWorldObjectRecords {
     return this.records.has(guid >>> 0);
   }
 
+  /** The kept CreateObject (the object as the server last described it), or undefined when not known. */
+  get(guid: number): CreateObjectData | undefined {
+    return this.records.get(guid >>> 0);
+  }
+
   get size(): number {
     return this.records.size;
   }

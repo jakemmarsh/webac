@@ -389,6 +389,8 @@ function attemptPlaceInContainer1999(
 
 /** acclient.exe literals AttemptToPlaceInContainer_IsItemLegal @ 005870c0 raises (SendNotice_DisplayStringInfo 0x1a). */
 export const ITEM_LEGAL_STRINGS = {
+  /** The object is not in the client's object table (GetWeenieObject null, the branch's head @ 005870d8). */
+  invalid: 'That item is not valid!',
   self: 'You cannot place yourself within a container!',
   creature: 'You cannot pick up creatures!',
   /** Stuck and in no container, wielded by nobody (push 0x7e227c @ 00587264). */
@@ -440,14 +442,15 @@ export const AC1999_PLACEMENT_TEXT: PlacementText = Object.freeze({
  * wielded by nobody; an object the player does not own that something
  * wields; and a container that holds containers (a chest, a corpse) — each
  * refused with its 0x1a line (the object's name formatted in). The literal
- * each branch pushes was read from the acclient.exe disassembly. An unknown
- * object ("That item is not valid!") is the caller's own refusal. Null =
- * legal.
+ * each branch pushes was read from the acclient.exe disassembly. Before them
+ * all, an object the client's object table does not hold: "That item is not
+ * valid!" (BUG.ac1999-placement-item-not-valid sweep: ours returned null and
+ * the caller refused in silence). Null = legal.
  */
 export function isItemLegalHead(itemId: number, w: PlacementWorld): string | null {
   if (itemId === w.playerId) return ITEM_LEGAL_STRINGS.self;
   const item = w.object(itemId);
-  if (!item) return null;
+  if (!item) return ITEM_LEGAL_STRINGS.invalid;
   const text = w.text ?? EOR_PLACEMENT_TEXT;
   if ((item.itemType ?? 0) === 0x10) return text.creature;
   if (item.stuck && !item.contained) return text.stuck.replace('%s', item.name);

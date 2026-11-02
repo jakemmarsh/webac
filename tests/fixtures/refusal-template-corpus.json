@@ -2820,6 +2820,18 @@
     "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:172"
   },
   {
+    "text": "That item is not valid!",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:393"
+  },
+  {
+    "text": "The item to be placed in the _ is not valid",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:327"
+  },
+  {
+    "text": "The container in which to place the _ is not valid",
+    "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:329"
+  },
+  {
     "text": "You cannot place an object within itself!",
     "where": "packages/renderer/src/inventory/ItemHolderPlacement.ts:173"
   },
