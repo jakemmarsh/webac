@@ -4,7 +4,7 @@ import { PortalFileType } from '@ac/dat-parser/DatFileType.js';
 import type { ModelRenderer } from '../models/ModelRenderer.js';
 import {
   DUNGEON_AMBIENT_COLOR, DUNGEON_LIGHT_MINIMUM, LSCAPE_LIGHT_MINIMUM, setRetailLightLevels,
-  applyRetailLighting, setSkyDiffuse,
+  applyRetailLighting, setSkyDiffuse, lightColourRule,
 } from '../models/RetailLighting.js';
 
 /**
@@ -1558,7 +1558,10 @@ export class SkyboxRenderer {
     // RetailLighting shader patch sums light colours WITHOUT three.js's 1/PI
     // BRDF, so the DAT brightness is the intensity verbatim.
     this.sunLight.intensity = sun.dirBright;
-    this.sunLight.color.copy(this.tmpDirColor);
+    // 1999 (lightColourRule 'intensityOnly', BUG.ac1999-grey-lighting): the levels only, white.
+    const coloured = lightColourRule.value === 'rgb';
+    if (coloured) this.sunLight.color.copy(this.tmpDirColor);
+    else this.sunLight.color.setRGB(1, 1, 1);
     const sunDir = sunDirectionFromHeadingPitch(sun.dirHeading, sun.dirPitch);
     this.sunLight.position.copy(sunDir).multiplyScalar(200);
 
@@ -1566,7 +1569,8 @@ export class SkyboxRenderer {
     // object materials scale it by the SetWorldAmbientLight factor
     // (level + 0.2·dir_bright) / level via the shared uniform.
     this.ambientLight.intensity = ambLevel;
-    this.ambientLight.color.copy(this.tmpAmbColor);
+    if (coloured) this.ambientLight.color.copy(this.tmpAmbColor);
+    else this.ambientLight.color.setRGB(1, 1, 1);
     setRetailLightLevels(sun.dirBright, ambLevel);
     this.litDirBright = sun.dirBright;
   }

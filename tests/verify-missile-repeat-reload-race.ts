@@ -16,7 +16,7 @@
  * interpreted forward command is the server's Reload / Aim and the player is not walking).
  */
 import { describe, expect, it } from 'vitest';
-import { AttackRequestController } from '../packages/renderer/src/controllers/AttackRequest.js';
+import { AttackRequestController, SERVER_READY_WAIT } from '../packages/renderer/src/controllers/AttackRequest.js';
 
 const TARGET = 0x80001234;
 type Forward = 'ready' | 'reload' | 'walk';
@@ -95,5 +95,47 @@ describe('missile repeat across the AC1999 server\'s AttackDone-then-Ready datag
     r.setForward('reload');
     r.tick(1 / 60);
     expect(r.sent).toEqual(['cancel']);
+  });
+
+  // webac#16 — "after firing an arrow the animation gets stuck and the combat stops until I move
+  // away". The AC1999 server can end a repeat with AttackDone {0} and no Ready behind it:
+  // AttackManager::OnAttackCancelled(0) sends 0x1A7 {0} and only DoForcedMotion(style), which keeps
+  // the forward command (AttackManager.cpp:45-58), after CheckTimeout's Cancel(0) or a failed Aim's
+  // Cancel() (AttackEventData.cpp; Cancel's default error is 0, AttackEventData.h:47). The hold
+  // above then waited for a Ready that never came: the bar sat at 0 and nothing went out.
+  it('an AttackDone {0} with no Ready behind it: the hold gives up after SERVER_READY_WAIT and the retail cancel runs', () => {
+    const r = rig();
+    firstShot(r);
+    r.setForward('reload'); // the server's Aim / Reload still holds the forward command
+    r.attack.handleAttackDone(0);
+    const frames = Math.floor((SERVER_READY_WAIT - 0.05) * 60);
+    for (let i = 0; i < frames; i++) r.tick(1 / 60);
+    expect(r.sent).not.toContain('cancel'); // still inside the datagram window
+    expect(r.attack.repeatAttacking).toBe(true);
+    for (let i = 0; i < 10; i++) r.tick(1 / 60);
+    expect(r.sent).toEqual(['attack 0.5', 'cancel']);
+    expect(r.attack.repeatAttacking).toBe(false);
+    expect(r.attack.buildInProgress).toBe(false);
+    // A fresh press builds and swings again once the body is back in the ready position.
+    r.setForward('ready');
+    r.attack.setRequestedAttackHeight('medium');
+    r.tick(0.5);
+    r.attack.endAttackRequest();
+    expect(r.sent).toEqual(['attack 0.5', 'cancel', 'attack 0.5']);
+  });
+
+  it('each automatic build gets its own window: a long fight never trips it while the Ready keeps coming', () => {
+    const r = rig();
+    firstShot(r);
+    for (let shot = 0; shot < 5; shot++) {
+      r.setForward('reload');
+      r.attack.handleAttackDone(0);
+      r.tick(1 / 60);
+      r.setForward('ready'); // the Ready, a frame later
+      for (let i = 0; i < 120; i++) r.tick(1 / 60); // 2 s: past SERVER_READY_WAIT from the first shot
+      r.attack.handleCommenceAttack();
+    }
+    expect(r.sent).toEqual(['attack 0.5']);
+    expect(r.attack.repeatAttacking).toBe(true);
   });
 });

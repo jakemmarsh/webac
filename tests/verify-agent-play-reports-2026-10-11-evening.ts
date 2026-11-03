@@ -247,6 +247,17 @@ describe('agent play reports 2026-10-11 (evening)', () => {
     dispatch.observe({});
     expect(host.appraiseCalls.map((c) => c.guid)).toEqual([0x80005000, 0x80005001, 0x80005002, 0x80005003, 0x80005004]);
   });
+
+  it('webac#16 — no quiet level look while an attack runs (the AC1999 server turns you to appraise, which cancels the attack); it comes after', async () => {
+    host.add({ guid: 0x80005020, name: 'Brown Rabbit', itemType: 0x10, objectDescFlags: 0x10, x: 81, y: 30 });
+    const dispatch = api.surface() as Record<string, (...a: unknown[]) => unknown>;
+    host.pending = true;
+    dispatch.observe({});
+    expect(host.appraiseCalls).toEqual([]);
+    host.pending = false;
+    dispatch.observe({});
+    expect(host.appraiseCalls).toEqual([{ guid: 0x80005020, quiet: true }]);
+  });
 });
 
 it('the CLI prints a screenshot\'s path and the text beside it (ac_look\'s observation)', () => {

@@ -41,6 +41,35 @@ export const USE_POWER_BAR_LEVEL = -1;
 export const DUAL_WIELD_COMBAT_STYLE = 0x80000046;
 /** AUTO_TARGET_LAST_ATTACKER_MAX_INTERVAL (acclient global, 15 s). */
 export const AUTO_TARGET_LAST_ATTACKER_MAX_INTERVAL = 15;
+/**
+ * webac#16 — the longest the automatic build waits, out of the ready position,
+ * for the server's Ready (BUG.missile-repeat-attack-stall's hold). Ours, not
+ * retail's: retail cancels at once. The AC1999 server sends that Ready in the
+ * same tick as the AttackDone (WeenieObject.cpp OnMotionDone: AttackManager::
+ * OnMotionDone's 0x1A7, then DoForcedStopCompletely), so the wait only has to
+ * cover the two datagrams arriving apart. An AttackDone {0} with no Ready
+ * behind it (AttackManager::OnAttackCancelled(0) after a 15 s timeout or a
+ * failed Aim, AttackEventData.cpp CheckTimeout / OnMotionDone) held the bar
+ * at 0 forever, the server's attack already over: combat stopped until the
+ * player walked. Past this the retail cancel runs.
+ */
+export const SERVER_READY_WAIT = 1.0;
+/**
+ * webac#16 — how long a parked automatic build (the repeat's bar refilled to the
+ * swing's power) waits for the server's CommenceAttack before the repeat is
+ * treated as over. Ours, not retail's (retail waits for ever). A GDLE-family
+ * server (the AC1999 server included) starts every repeat with 0x1B8 when its
+ * charge, power × 1 s (+1 s for a missile reload), expires (AttackEventData.cpp
+ * Update; AttackTimeMod 1.0, AttackEventData.h:57), the same clock as our
+ * build. But it also reports a CANCELLED attack as AttackDone {0}, the code
+ * of a finished swing: AttackManager::OnAttackCancelled(0) after Cancel()
+ * (AttackEventData.cpp OnMotionDone(!success), e.g. a [MOTION-FLUSH]
+ * leave-ground mid-Aim, live 2026-11-03 16:22:28). The client then rebuilt,
+ * parked and waited for a swing that would never come, with the bar showing.
+ * ACE never sends CommenceAttack, so the wait is armed only on a server that
+ * has sent one during a repeat (or is known to: serverCommencesRepeats).
+ */
+export const COMMENCE_WAIT = 3.0;
 /** HandleAttackDoneEvent's |requested − slider| threshold (___real_3c23d70a). */
 const POWER_EPSILON = 0.01;
 
@@ -150,6 +179,8 @@ export interface AttackRequestDeps {
   maybeStopCompletely?(): void;
   /** cmdinterp->FinishJump (+0x50): a jump charge ends without a jump. */
   finishJump?(): void;
+  /** The server is known to send CommenceAttack on every repeat (the AC1999 server). Absent → learned when one arrives. */
+  serverCommencesRepeats?(): boolean;
 }
 
 export class AttackRequestController {
@@ -164,6 +195,12 @@ export class AttackRequestController {
   attackWhenResponseReceived = false;
   attackWhenResponseReceivedPower = 0;
   currentBuildIsAutomatic = false;
+  /** When the current automatic build began (HandleAttackDoneEvent), for SERVER_READY_WAIT. */
+  automaticBuildBeganAt = 0;
+  /** When the automatic build parked at the swing's power (0: not parked), for COMMENCE_WAIT. */
+  automaticBuildParkedAt = 0;
+  /** The server starts each repeat with CommenceAttack (seen once, or serverCommencesRepeats). */
+  serverCommencesRepeats = false;
   repeatAttacking = false;
   /** attackInProgress: CommenceAttack received, AttackDone not yet. */
   attackInProgress = false;
@@ -180,6 +217,7 @@ export class AttackRequestController {
   latestPowerBarLevel = 0;
 
   constructor(private readonly deps: AttackRequestDeps) {
+    this.serverCommencesRepeats = !!deps.serverCommencesRepeats?.();
     this.latchAdvancedCombatMode();
   }
 
@@ -263,6 +301,14 @@ export class AttackRequestController {
 
   /** UseTime @ 0056c1f0 — once per frame. */
   useTime(): void {
+    if (this.automaticBuildParkedAt !== 0 && this.serverCommencesRepeats && this.repeatAttacking
+      && !this.attackRequestInProgress && !this.attackServerResponsePending
+      && this.deps.now() - this.automaticBuildParkedAt >= COMMENCE_WAIT) {
+      // webac#16 — the server's repeat ended without saying so (COMMENCE_WAIT).
+      this.automaticBuildParkedAt = 0;
+      this.abortAutomaticAttack();
+      this.hidePowerBar();
+    }
     if (this.buildInProgress && this.powerBarMode !== 0) {
       const level = this.getPowerBarLevel();
       if (this.deps.inReadyPosition()) {
@@ -275,9 +321,11 @@ export class AttackRequestController {
           } else {
             this.buildInProgress = false;
             this.buildStartTime = 0;
+            this.automaticBuildParkedAt = this.deps.now();
           }
         }
-      } else if (this.currentBuildIsAutomatic && !this.attackRequestInProgress && this.deps.forwardHeldByServer?.()) {
+      } else if (this.currentBuildIsAutomatic && !this.attackRequestInProgress && this.deps.forwardHeldByServer?.()
+        && this.deps.now() - this.automaticBuildBeganAt < SERVER_READY_WAIT) {
         // BUG.missile-repeat-attack-stall — the repeat's automatic build began
         // while the server's own Reload still holds the forward command. The
         // AC1999 server sends a reload's AttackDone (AttackManager.cpp
@@ -287,8 +335,9 @@ export class AttackRequestController {
         // cancels a not-ready repeat (UseTime @ 0056c1f0; 1999 PanelUI_Global_Loop
         // @ 0x004f4e10 → 0x004f9530), but its loop drains the network first, so
         // the pair lands together; a cancel here ended the server's repeat after
-        // one shot. Hold the bar at 0 until the server's Ready; a player who
-        // walks (input forward / back) is still cancelled below.
+        // one shot. Hold the bar at 0 until the server's Ready (at most
+        // SERVER_READY_WAIT); a player who walks (input forward / back) is
+        // still cancelled below.
         this.buildStartTime = this.deps.now();
         this.setPowerBarLevel(0);
       } else {
@@ -321,6 +370,7 @@ export class AttackRequestController {
    * repeat with AbortAutomaticAttack, CancelAttack included.
    */
   handleAttackDone(errorCode: number): void {
+    this.automaticBuildParkedAt = 0;
     // The busy count is released only for an attack it counted.
     if (this.attackInProgress) this.deps.decrementBusyCount?.();
     this.attackInProgress = false;
@@ -342,6 +392,7 @@ export class AttackRequestController {
       if (!this.attackRequestInProgress) {
         this.startPowerBarBuild();
         this.currentBuildIsAutomatic = true;
+        this.automaticBuildBeganAt = this.deps.now();
       }
     } else {
       this.repeatAttacking = false;
@@ -371,6 +422,8 @@ export class AttackRequestController {
    * AttackDone), the request-in-progress early-out included.
    */
   handleCommenceAttack(): void {
+    if (this.currentBuildIsAutomatic && this.repeatAttacking) this.serverCommencesRepeats = true;
+    this.automaticBuildParkedAt = 0;
     this.attackInProgress = true;
     this.attackServerResponsePending = true;
     if (!this.attackRequestInProgress) {
@@ -464,6 +517,7 @@ export class AttackRequestController {
 
   /** Leaving combat, dying, teleporting: drop the request and the bar. */
   reset(): void {
+    this.automaticBuildParkedAt = 0;
     this.attackRequestInProgress = false;
     // Retail clears attackInProgress only in HandleAttackDoneEvent (and
     // ClientCombatSystem::Begin); this reset clears it early, so it releases
@@ -542,6 +596,19 @@ export class AttackRequestController {
    */
   repeatAttackInProgress(): boolean {
     return this.deps.autoRepeat() && (this.attackInProgress || this.powerBarMode === 1);
+  }
+
+  /**
+   * webac#16 — an attack of ours is still running: the server owes an answer,
+   * a swing is in progress, or the repeat goes on. Unlike
+   * repeatAttackInProgress (retail's, which a bar left showing keeps true after
+   * the repeat ended), a finished or aborted repeat is not pending. The agent
+   * tools' "wait, an attack is pending" test: with repeatAttackInProgress a bar
+   * parked after the server's silent cancel blocked every new attack.
+   */
+  attackChainPending(): boolean {
+    return this.attackServerResponsePending || this.attackInProgress || this.attackRequestInProgress
+      || (this.deps.autoRepeat() && this.repeatAttacking);
   }
 
   /**

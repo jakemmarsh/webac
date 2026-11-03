@@ -268,6 +268,13 @@ export interface EraClientRules {
    */
   attackStopsAlways: boolean;
   /**
+   * webac#16 — how a server movement's action stamp is judged newer than the
+   * object's last (ServerObjectManager.actionStampIsNewer). End of retail's
+   * move_to_interpreted_state @ 005289c0 uses a wrap-aware 15-bit window; the
+   * 1999 client's @ 0x00473400 a plain less-than.
+   */
+  actionStampCompare: 'eor' | 'ac1999';
+  /**
    * Which CompatibleCombatMode the client applies to a requested combat-mode
    * change (controllers/CombatModeChange.ts compatibleCombatMode). End of
    * retail's ClientCombatSystem::CompatibleCombatMode @ 0056a580 lets magic
@@ -1151,7 +1158,7 @@ export function correctedOptionsWord(word: number, fix: OptionsWordFix | null): 
 }
 
 const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
-  castStopsMovement: true, attackStopsAlways: false, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, toolbarTabSlots: null, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const,
+  castStopsMovement: true, attackStopsAlways: false, actionStampCompare: 'eor' as const, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, toolbarTabSlots: null, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const,
   chatToggle: 'server' as const,
   talismanTargetTypes: TALISMAN_TARGET_TYPES_EOR,
   spellSelfTargetableTypeMask: 0x8107,
@@ -1227,7 +1234,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   worldEntryVersionLine: null,
 });
 const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
-  castStopsMovement: false, attackStopsAlways: true, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, toolbarTabSlots: AC1999_TOOLBAR_TABS, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const,
+  castStopsMovement: false, attackStopsAlways: true, actionStampCompare: 'ac1999' as const, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, toolbarTabSlots: AC1999_TOOLBAR_TABS, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const,
   chatToggle: 'local' as const,
   talismanTargetTypes: TALISMAN_TARGET_TYPES_1999, // @ 0x5e4150
   spellSelfTargetableTypeMask: 0, // UI ObjectCompatibleWithSpellTargetType @ 0x4d20c0

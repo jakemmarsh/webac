@@ -6,6 +6,8 @@
  * disassembly). One table, no era checks in the panels (docs/ac1999-support.md).
  */
 import { Sound } from '@ac/shared';
+import type { TextureSamplingRule } from '../models/TextureSamplerPrefs.js';
+import type { LightColourRule } from '../models/RetailLighting.js';
 
 /** The chargen "you have unspent credits" requesters (gmCharGenMainUI::DoFinish / the 1999 CG pages). */
 export interface ChargenCreditWarnings {
@@ -98,6 +100,21 @@ export interface EraWorldRules {
    * it holds more than 300.
    */
   chatHistory: { max: number; trimTo: number };
+  /**
+   * The world textures' samplers (TextureSamplerPrefs.setSamplingRule). End of retail: 'prefs', the
+   * Config page's Texture Filtering (RenderDeviceD3D::SetSamplerFilterMode, mipmapped). 1999:
+   * 'bilinearNoMips', fixed: Render_SetupD3DDevice @ 0x43d2a0 sets MIN / MAG LINEAR and never a mip
+   * filter, ImgTex_InitOther @ 0x42a34f makes one-level textures, and the client has no filtering
+   * option, so the Config page lists no Texture Filtering row (`textureFilteringOption`).
+   */
+  textureSampling: TextureSamplingRule;
+  /**
+   * What a light's colour does (RetailLighting.lightColourRule). End of retail: 'rgb', colour ×
+   * level per channel. 1999: 'intensityOnly', one intensity per vertex and no light colour read
+   * (0x5832b0 / 0x5832f0 / 0x583330 into vertex + 0x44, the scalar landscape arm of 0x47d8a0, the
+   * grey diffuse of 0x5836e0): every light draws white at its own level.
+   */
+  lightColour: LightColourRule;
 }
 
 export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
@@ -112,6 +129,8 @@ export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
   skyObjectsOnTick: false,
   inventoryRequestBusy: false,
   chatHistory: Object.freeze({ max: 100, trimTo: 100 }),
+  textureSampling: 'prefs' as const,
+  lightColour: 'rgb' as const,
 });
 
 export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
@@ -136,6 +155,8 @@ export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
   skyObjectsOnTick: true,
   inventoryRequestBusy: true,
   chatHistory: Object.freeze({ max: 300, trimTo: 200 }),
+  textureSampling: 'bilinearNoMips' as const,
+  lightColour: 'intensityOnly' as const,
 });
 
 /** LScape min_ambient for the brightness slider's value `pref` (Render.ScreenBrightness, -1..1). */
@@ -147,6 +168,11 @@ export function landscapeMinAmbient(rules: EraWorldRules, pref: number): number 
 /** Whether the Config page lists Landscape Draw Distance (not on a fixed-radius era: 1999 had no such option). */
 export function landscapeDrawDistanceOption(rules: EraWorldRules): boolean {
   return rules.fixedLandscapeRadius === null;
+}
+
+/** Whether the Config page lists Texture Filtering (not where the era fixes the samplers: 1999 had no such option). */
+export function textureFilteringOption(rules: EraWorldRules): boolean {
+  return rules.textureSampling === 'prefs';
 }
 
 /** The landscape radius the era draws: its fixed one, else the player's choice. */

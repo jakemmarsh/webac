@@ -354,7 +354,7 @@ import { SelectionHistory, giveSelectedObject, dropSelectedObject } from './inve
 import type { ObjDescEventData, UpdatePositionData, AutonomousPositionData, HearSpeechData, PropertyUpdateData, VitalUpdateData, TurbineChatData, CombatNotificationData, TransientStringData, TellData, IdentifyResponseData, VendorInfoData, BookDataResponse, BookPageDataResponse, BookPageEditResponse, SkillUpdateData } from './network/ServerMessageHandler.js';
 import { sweepHeightfield, nearestContact } from './world/MissilePhysics.js';
 import { applyPublicPropertyDataIdUpdate } from './network/applyPublicPropertyDataId.js';
-import { ServerObjectManager, isSequenceNewer, applyPublicUpdatePropertyInt, applyPublicUpdatePropertyIntToHudTarget, TRANSLUCENCY_ORIGINAL_KEY } from './world/ServerObjectManager.js';
+import { ServerObjectManager, isSequenceNewer, isServerActionNewer1999, applyPublicUpdatePropertyInt, applyPublicUpdatePropertyIntToHudTarget, TRANSLUCENCY_ORIGINAL_KEY } from './world/ServerObjectManager.js';
 import { type AppearanceData, buildAppearanceOverrides, transplantPartChildren } from './models/AppearanceOverrides.js';
 import { attachHeldChild, buildWieldedItemMesh, heldCopiesUnder, heldCopyGuidAt, stripHeldCopies, itemVisualDescOf, wieldedMeshesBuiltWithMiss, WIELDED_PLACEMENT_KEY } from './models/WieldedItemVisual.js';
 import { SelectionLighting, SearchReason, lightingLevelsForMode, applyPlayerModelLighting, type LightingCopies } from './world/SelectionLighting.js';
@@ -390,7 +390,7 @@ import { characterRestoreRefusalText } from './session/CharacterRestore.js';
 import { CharacterError, runExpr } from '@ac/shared';
 import { DatLightBudget, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
 import { createViewerLight, updateViewerLight, viewerLightActive } from './effects/ViewerLight.js';
-import { setCellLighting } from './models/RetailLighting.js';
+import { lightColourRule, setCellLighting } from './models/RetailLighting.js';
 import type { MovementState, PlayerPosition } from './network/MovementSync.js';
 import { parsePlayerDescription } from './network/PlayerDescriptionParser.js';
 import { buildContractRows, applyContractTracker, applyContractTrackerTable, type TimedContractEntry } from './network/contractRows.js';
@@ -1589,6 +1589,13 @@ async function main() {
   // scales). Read the persisted Config prefs here, ahead of every
   // TextureManager; menu changes arrive through setTexturePrefs below.
   {
+    // The era's samplers and light colours (EraWorldRules): 1999 draws bilinear with no mips and
+    // white lights at their own levels (BUG.ac1999-bilinear-no-mips / BUG.ac1999-grey-lighting);
+    // end of retail and the classic eras keep the Config page's filtering and coloured light.
+    // Fixed for the page load (an era switch reloads), and set before the first texture or light.
+    const eraWorld = eraClientRules(activeEra).world;
+    textureSamplerPrefs.setSamplingRule(eraWorld.textureSampling);
+    lightColourRule.value = eraWorld.lightColour;
     const persisted = GameUI.readPersistedOptionsSettings();
     textureSamplerPrefs.set({
       textureFiltering: persisted.textureFiltering,
@@ -8872,6 +8879,8 @@ async function main() {
     // ── Server message handling ──
     const serverMessageHandler = new ServerMessageHandler();
     serverObjectManager = new ServerObjectManager(setupModelRenderer, appearanceManager, sceneManager.scene);
+    // webac#16 — the era's action-stamp test (1999: a plain less-than).
+    if (eraRules.actionStampCompare === 'ac1999') serverObjectManager.actionStampIsNewer = isServerActionNewer1999;
     serverObjectManager.setPortalDb(worldPortalDb);
     {
       const som = serverObjectManager;
@@ -9089,6 +9098,9 @@ async function main() {
           return 0;
         },
         stopCompletely: () => { Object.assign(playerMoveToMotion, readyMotion()); },
+        // webac#16 — a server MoveTo / TurnTo's own StopCompletely ends a
+        // server substate the player holds (an Aim / Reload, a gesture).
+        stopServerSubstate: () => animController?.stopServerSubstate(),
         // CPhysicsObj::motions_pending: BeginTurnToHeading @ 00529b90 waits for
         // the player's motions (a stop link, a server swing) before it turns,
         // and the MoveTo stays in progress meanwhile — UseTime cannot take
@@ -14347,7 +14359,18 @@ async function main() {
       decrementBusyCount: () => busyCount.decrement(),
       // The 1999 client stops even under server control (eraClientRules).
       maybeStopCompletely: () => { if (eraRules.attackStopsAlways) stopCompletelyImpl(stopCompletelyDeps); else maybeStopCompletely(); },
+      // webac#16 — the AC1999 server starts every repeat with CommenceAttack (AttackEventData.cpp Update).
+      serverCommencesRepeats: () => activeEra?.login.protocol === 'ac1999',
     });
+    // webac#16 — live triage: the attack state machine and the body's interpreted forward / server substate.
+    exposeDebugGlobal('__attackRequest', attackRequest);
+    exposeDebugGlobal('__attackAnimState', () => ({
+      forward: animController ? (animController.interpretedForwardCommand(cameraController) >>> 0).toString(16) : null,
+      forwardHeldByServer: animController?.forwardHeldByServer(cameraController) ?? null,
+      motionsPending: animController?.motionsPending ?? null,
+      controlledByServer: cameraController.controlledByServer,
+      moveToActive: playerMoveTo ? playerMoveTo.movementType !== 0 : false,
+    }));
 
     // FAITHFUL.219 — server-confirmed cast queue. When we send a cast
     // packet, we remember the spell metadata here; the server's incantation
@@ -17544,7 +17567,8 @@ async function main() {
         },
         // The combat bar's slider to the swing's power, as a player sets it (BUG.ac1999-melee-never-swings).
         setSliderPower: (p) => { const cur = gameUI.getCombatPowerLevel(); if (Math.abs(cur - p) > 0.001) gameUI.adjustCombatPowerLevel(p - cur); },
-        requestPending: () => !!attackRequest && (attackRequest.attackServerResponsePending || attackRequest.attackInProgress || attackRequest.repeatAttackInProgress()),
+        // webac#16 — not repeatAttackInProgress: a bar left showing after the server's silent cancel kept it true for ever.
+        requestPending: () => !!attackRequest && attackRequest.attackChainPending(),
         now: () => performance.now(),
         schedule: (fn, ms) => { setTimeout(fn, ms); },
         canSwing: (guid) => { const o = serverObjectManager?.getObject(guid); return !!o && !serverObjectManager!.isDying(guid) && isObjectAttackable(o, serverObjectManager?.playerDescFlags ?? 0); },

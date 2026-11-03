@@ -179,6 +179,14 @@ export interface MoveToHost {
   stopMotion(motion: number, speed: number, holdKey: number): number;
   /** `CPhysicsObj::StopCompletely`. */
   stopCompletely(): void;
+  /**
+   * webac#16 — the rest of that StopCompletely when a movement STARTS: CMotionInterp::
+   * StopCompletely @ 00527e40 also ends a substate the server put the object in (our own
+   * character's Aim / Reload / gesture hold). Only at the start: retail's move_to_interpreted_state
+   * @ 005289c0 cancels a running MoveTo before it applies a new server state, so the StopCompletely
+   * of CleanUpAndCallWeenie never meets a substate that arrived mid-move. Absent: nothing to end.
+   */
+  stopServerSubstate?(): void;
   /** `CPhysicsObj::motions_pending`. */
   motionsPending(): boolean;
   /** transient_state & Contact. */
@@ -308,6 +316,7 @@ export class MoveToManager {
     this.cancelMoveTo();
     this.host.unstick?.();
     this.host.stopCompletely();
+    this.host.stopServerSubstate?.();
     const t = this.host.target(objectId);
     this.startingPosition = { ...this.host.position() };
     this.soughtObjectId = objectId;
@@ -326,6 +335,7 @@ export class MoveToManager {
     this.cancelMoveTo();
     this.host.unstick?.();
     this.host.stopCompletely();
+    this.host.stopServerSubstate?.();
     this.currentTargetPosition = { ...pos };
     this.soughtObjectRadius = 0;
     // get_command runs with the NEW params (its argument), GetCurrentDistance with the old.
@@ -347,7 +357,7 @@ export class MoveToManager {
   turnToObject(objectId: number, params: MovementParams): void {
     this.cancelMoveTo();
     this.host.unstick?.();
-    if (params.flags & MoveFlag.StopCompletely) this.host.stopCompletely();
+    if (params.flags & MoveFlag.StopCompletely) { this.host.stopCompletely(); this.host.stopServerSubstate?.(); }
     this.movementType = MoveType.TurnToObject;
     this.soughtObjectId = objectId;
     this.topLevelObjectId = objectId;
@@ -360,7 +370,7 @@ export class MoveToManager {
   turnToHeading(params: MovementParams): void {
     this.cancelMoveTo();
     this.host.unstick?.();
-    if (params.flags & MoveFlag.StopCompletely) this.host.stopCompletely();
+    if (params.flags & MoveFlag.StopCompletely) { this.host.stopCompletely(); this.host.stopServerSubstate?.(); }
     this.params = { ...params, flags: params.flags & ~MoveFlag.Sticky };
     this.soughtHeading = params.desiredHeading;
     this.movementType = MoveType.TurnToHeading;

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { PhysicsState } from '@ac/shared';
 import type { LightInfo } from '@ac/dat-parser/file-types/SetupModel.js';
-import { CELL_LIGHTING_KEY, rawByteColor, retailLightRange, retailStaticLightDecay } from '../models/RetailLighting.js';
+import { CELL_LIGHTING_KEY, eraLightColor, retailLightRange, retailStaticLightDecay } from '../models/RetailLighting.js';
 
 /**
  * ObjectLights — a physics object's own Setup lights (BUG.server-object-setup-lights).
@@ -197,7 +197,7 @@ export function initObjectLights(
     // bytes × intensity, Range = falloff × rangeAdjust (1.5), attenuation 1/d.
     // A static light carries the −intensity class tag (RetailLighting).
     const pl = new THREE.PointLight(
-      rawByteColor(info.color),
+      eraLightColor(info.color), // 1999: white at its intensity (lightColourRule)
       info.intensity,
       retailLightRange(info.falloff),
       isStatic ? retailStaticLightDecay(info.intensity) : 1,

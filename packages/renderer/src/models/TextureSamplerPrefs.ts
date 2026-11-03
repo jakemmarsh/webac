@@ -282,6 +282,30 @@ export function mipLodBiasFor(mode: TextureFilteringMode): number {
   return mode === TEXTURE_FILTERING.SHARP ? SHARP_MIP_LOD_BIAS : 0;
 }
 
+/**
+ * Where an era's world samplers come from (EraWorldRules.textureSampling).
+ *
+ * - `'prefs'` (end of retail and the classic eras, which run its exe): the Config page's Texture
+ *   Filtering choice through `samplerFilters`, mipmapped.
+ * - `'bilinearNoMips'` (AC1999, BUG.ac1999-bilinear-no-mips): the Nov 1999 client's D3D6 path.
+ *   Render_SetupD3DDevice @ 0x43d2a0 sets stage 0 MINFILTER (0x11) and MAGFILTER (0x10) to
+ *   D3DTFN_LINEAR (2) and never sets MIPFILTER (0x12), which stays D3DTFP_NONE; the only other
+ *   SetTextureStageState call is ADDRESS (0x0c, ACRender_SetSurface @ 0x5807a0). Every D3D texture
+ *   is made by ImgTex_InitOther @ 0x42a34f with DDSD flags 0x1007 (CAPS | HEIGHT | WIDTH |
+ *   PIXELFORMAT: no MIPMAPCOUNT) and caps 0x1800 / 0x5800 (TEXTURE + system / video memory: no
+ *   MIPMAP or COMPLEX), so there is one level and nothing to mip. The client has no filtering
+ *   option (its strings name no filter; PerformancePanel @ 0x594e00 offers texture resolution
+ *   only), so the choice is fixed.
+ */
+export type TextureSamplingRule = 'prefs' | 'bilinearNoMips';
+
+/** The filters an era's rule fixes, or null when the Config page's choice decides (`'prefs'`). */
+export function fixedSamplerFilters(rule: TextureSamplingRule): SamplerFilters | null {
+  return rule === 'bilinearNoMips'
+    ? { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, anisotropy: 1 }
+    : null;
+}
+
 export interface RgbaImage {
   data: Uint8Array;
   width: number;
@@ -544,6 +568,8 @@ export class TextureSamplerPrefs {
   private readonly hiResPending = new Set<THREE.Texture>();
   private unsubscribeArrival: (() => void) | null = null;
   private readonly bias: { value: number };
+  /** The era's fixed samplers (EraWorldRules.textureSampling), or null for the Config page's choice. */
+  private fixed: SamplerFilters | null = null;
 
   constructor(bias: { value: number } = mipBiasUniform) {
     this.bias = bias;
@@ -564,12 +590,31 @@ export class TextureSamplerPrefs {
   get registeredCount(): number { return this.registry.size; }
   get mipLodBias(): number { return this.bias.value; }
 
+  /**
+   * The era's sampling rule (EraWorldRules.textureSampling), set once at boot before the first
+   * world texture: `'bilinearNoMips'` draws every registered texture with bilinear min / mag, no
+   * mip chain (generateMipmaps off, so none is allocated either), anisotropy 1 and no LOD bias,
+   * whatever Texture Filtering a session of another era stored (the stored value is kept).
+   * Re-applies every registered texture when the rule changes. Returns whether it changed.
+   */
+  setSamplingRule(rule: TextureSamplingRule): boolean {
+    const next = fixedSamplerFilters(rule);
+    if ((next === null) === (this.fixed === null)) return false;
+    this.fixed = next;
+    this.bias.value = next ? 0 : mipLodBiasFor(this.filtering);
+    for (const tex of this.registry.keys()) this.applyTo(tex);
+    return true;
+  }
+
+  /** The current rule: whether the Config page's Texture Filtering choice reaches the samplers. */
+  get samplingRule(): TextureSamplingRule { return this.fixed ? 'bilinearNoMips' : 'prefs'; }
+
   /** The device cap (renderer.capabilities.getMaxAnisotropy()); re-applies when Anisotropic is active. */
   setMaxAnisotropy(max: number): void {
     const v = Math.max(1, Math.floor(max));
     if (v === this.maxAnisotropy) return;
     this.maxAnisotropy = v;
-    if (this.filtering === TEXTURE_FILTERING.ANISOTROPIC) {
+    if (this.filtering === TEXTURE_FILTERING.ANISOTROPIC && !this.fixed) {
       for (const tex of this.registry.keys()) this.applyTo(tex);
     }
   }
@@ -639,7 +684,7 @@ export class TextureSamplerPrefs {
     this.filtering = next.textureFiltering;
     this.landscapeDetail = next.landscapeTextureDetail;
     this.environmentDetail = next.environmentTextureDetail;
-    this.bias.value = mipLodBiasFor(this.filtering);
+    this.bias.value = this.fixed ? 0 : mipLodBiasFor(this.filtering);
     const retargeted = new Map<THREE.TextureSource<unknown>, THREE.TextureSource<unknown>>();
     for (const tex of this.registry.keys()) this.applyTo(tex, retargeted);
     return true;
@@ -769,10 +814,14 @@ export class TextureSamplerPrefs {
     const reg = this.registry.get(tex);
     if (!reg) return;
     let dirty = false;
-    const f = samplerFilters(this.filtering, this.maxAnisotropy);
+    const f = this.fixed ?? samplerFilters(this.filtering, this.maxAnisotropy);
     if (tex.minFilter !== f.minFilter) { tex.minFilter = f.minFilter; dirty = true; }
     if (tex.magFilter !== f.magFilter) { tex.magFilter = f.magFilter; dirty = true; }
     if (tex.anisotropy !== f.anisotropy) { tex.anisotropy = f.anisotropy; dirty = true; }
+    // An era with no mip chain (1999's ImgTex_InitOther: one level) allocates none: three.js r186
+    // builds the chain whenever generateMipmaps is on, whatever the min filter. Under the prefs a
+    // texture keeps the mip setting its creator gave it.
+    if (this.fixed && tex.generateMipmaps) { tex.generateMipmaps = false; dirty = true; }
     // CORE.17.h.g.c.d — DropUnwantedLevels: Very High + the HiFi DAT keeps
     // the highres level (drawn at scale 0, ConstructTexture sizes the D3D
     // texture at that level); any other choice, or no highres level for

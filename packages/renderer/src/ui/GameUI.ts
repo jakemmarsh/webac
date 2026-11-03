@@ -265,7 +265,7 @@ import {
   eraClientRules, resolveClientText, EOR_TRAIN_SKILL_CONFIRM, type EraClientRules, type ClientText,
 } from '../era/EraFeatures.js';
 import { EncumbranceNotice, type EncumbranceNoticeRules } from './EncumbranceNotice.js';
-import { ERA_OPTIONAL_UI_SOUNDS, landscapeDrawDistanceOption, landscapeMinAmbient, trimChatLog } from '../era/EraWorldRules.js';
+import { ERA_OPTIONAL_UI_SOUNDS, landscapeDrawDistanceOption, landscapeMinAmbient, textureFilteringOption, trimChatLog } from '../era/EraWorldRules.js';
 import { ACFontRenderer, OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { placeScrollbarButtons, bindHotClick, hotClickTiming, buttonVisualState } from './ScrollbarButtons.js';
 import { outlineCssFromArgb, DEFAULT_TEXT_OUTLINE_ARGB } from './TextOutline.js';
@@ -29168,8 +29168,12 @@ export class GameUI {
         () => this.applyTexturePrefs());
       this.addConfigMenuRow(content, configString('environmentTextureDetail'), 'environmentTextureDetail',
         () => this.applyTexturePrefs());
-      this.addConfigMenuRow(content, configString('textureFiltering'), 'textureFiltering',
-        () => this.applyTexturePrefs());
+      // 1999 (EraWorldRules.textureSampling): bilinear with no mips, fixed; the client had no
+      // filtering option (PerformancePanel @ 0x594e00), so no row.
+      if (textureFilteringOption(this.clientRules.world)) {
+        this.addConfigMenuRow(content, configString('textureFiltering'), 'textureFiltering',
+          () => this.applyTexturePrefs());
+      }
       // CORE.17.h.g.a — the one Rendering Quality menu with a live consumer:
       // SmartBox::set_mid_radius(m_RenderPrefs.LandscapeDrawDistance) on
       // every pref change (decomp :325087).

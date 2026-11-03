@@ -159,6 +159,42 @@ export function rawByteColor(argb: number): THREE.Color {
 }
 
 /**
+ * What a light's colour does in the era's client (EraWorldRules.lightColour).
+ *
+ * - `'rgb'` (end of retail and the classic eras): every light is colour × level, per channel
+ *   (CLandBlockStruct::calc_lighting @ 00531700, config_hardware_light @ 0059ad30).
+ * - `'intensityOnly'` (AC1999, BUG.ac1999-grey-lighting): the 1999 client lights a vertex with ONE
+ *   float at vertex + 0x44. The sun adds max(0, N·sunlight) (0x5832b0), a directional light its
+ *   intensity (+0x48) × N·L (0x5832f0), a point light its intensity × geometry within range
+ *   (+0x4c, 0x583330); no light colour is read. The landscape's lighting is the scalar arm of
+ *   0x47d8a0 (ambient_level + max(0, N·sunlight), clamped to 1): its coloured arm (ambient_color
+ *   / sunlight_color into a packed vertex diffuse) runs only for vertex type 2, which needs
+ *   0x62f548, set only by render modes 5-8 (0x403990); WinMain only ever passes mode 3 or 4
+ *   (0x401d1d / 0x401d30). The object ambient is the scalar level (0x40f585 → 0x652be8); the
+ *   colour 0x652bec is read only by a D3D light setup at 0x584ff0, and the only draws that could
+ *   use D3D lights (0x585a03 / 0x585a39, untransformed) OR in D3DDP_DONOTLIGHT (0x8, at 0x5859f0 /
+ *   0x585a21). The pre-lit D3D draw (0x5836e0, FVF 0x1c4) then writes I·255 into R, G and B of a
+ *   textured polygon's diffuse (a solid-colour polygon gets the surface colour × I). So every
+ *   light is white at its own level. (The 1999 region's day groups carry 0xDCDCDC for both colours
+ *   at every keyframe, so a coloured lane drew them at 86 %.)
+ */
+export type LightColourRule = 'rgb' | 'intensityOnly';
+
+/** The era's light-colour rule, set once at boot (main.ts from EraWorldRules.lightColour). */
+export const lightColourRule: { value: LightColourRule } = { value: 'rgb' };
+
+/** Into `target`: a light's colour as the era's client used it (`rawByteColor`, or white). */
+export function eraLightColorInto(target: THREE.Color, argb: number, rule: LightColourRule = lightColourRule.value): THREE.Color {
+  if (rule === 'intensityOnly') return target.setRGB(1, 1, 1);
+  return target.setRGB(((argb >> 16) & 0xff) / 255, ((argb >> 8) & 0xff) / 255, (argb & 0xff) / 255);
+}
+
+/** A DAT light's colour as the era's client used it: `rawByteColor`, or white under 'intensityOnly'. */
+export function eraLightColor(argb: number, rule: LightColourRule = lightColourRule.value): THREE.Color {
+  return eraLightColorInto(new THREE.Color(), argb, rule);
+}
+
+/**
  * CORE.17.q.a — `calc_point_light` @ 0059c8b0, the per-vertex static-light
  * term retail burns into env-cell vertex colours (`SetStaticLightingVertexColors`
  * @ 0059cfe0 loops it over `Render::world_lights.sorted_static_lights`):

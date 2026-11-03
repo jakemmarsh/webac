@@ -7,7 +7,7 @@
  * ours replayed it each time.
  */
 import { describe, it, expect } from 'vitest';
-import { ServerObjectManager, isServerActionNewer } from '../packages/renderer/src/world/ServerObjectManager.js';
+import { ServerObjectManager, isServerActionNewer, isServerActionNewer1999 } from '../packages/renderer/src/world/ServerObjectManager.js';
 
 /** An 0xF74C body: header, InterpretedMotionState with no fields and the given actions. */
 function actionsEvent(guid: number, actions: Array<{ cmd: number; seq: number }>): { guid: number; movementData: Uint8Array } {
@@ -26,8 +26,9 @@ function actionsEvent(guid: number, actions: Array<{ cmd: number; seq: number }>
   return { guid, movementData: buf };
 }
 
-function harness(local = false) {
+function harness(local = false, era1999 = false) {
   const som = new ServerObjectManager({} as never, {} as never, { add: () => {}, remove: () => {} } as never);
+  if (era1999) som.actionStampIsNewer = isServerActionNewer1999;
   const queued: number[] = [];
   const mm = {
     queueAction: (k: number) => queued.push(k & 0xffff), setForwardMotion: () => true, playDeath: () => {},
@@ -61,5 +62,37 @@ describe('command-list actions play once per stamp', () => {
     expect(queued).toEqual([]);
     som.handleMovementEvent(actionsEvent(0x50000001, [{ cmd: 0x88, seq: 10 }]) as never);
     expect(queued).toEqual([0x88]);
+  });
+});
+
+/**
+ * webac#16 (AC1999, "a Banderling Captain swings and lands a hit but its attack animation does
+ * not play") — the 1999 client's move_to_interpreted_state @ 0x00473400 plays an action when
+ * `server_action_stamp < stamp` on the 15-bit stamp (unpack @ 0x00475ac0: `stamp & 0x7fff`), with
+ * no wrap window. The AC1999 server stamps every swing, MoveTo and TurnTo from one per-weenie
+ * counter (m_wAnimSequence, Animate.cpp; ++ in MeleeAttackEventData.cpp OnReadyToAttack,
+ * AttackEventData.cpp MoveToAttack / TurnToAttack), and a new object's last stamp is 0.
+ */
+describe('webac#16 — the 1999 action-stamp test is a plain less-than', () => {
+  it('isServerActionNewer1999: larger is newer, no wrap window', () => {
+    expect(isServerActionNewer1999(5, 4)).toBe(true);
+    expect(isServerActionNewer1999(4, 4)).toBe(false);
+    expect(isServerActionNewer1999(3, 4)).toBe(false);
+    expect(isServerActionNewer1999(0x5000, 0)).toBe(true);
+    expect(isServerActionNewer1999(2, 0x7ffe)).toBe(false); // a wrap is older to 1999
+    expect(isServerActionNewer1999(0x8000 | 9, 8)).toBe(true); // bit 15 is the autonomous flag, not the stamp
+  });
+
+  it('a creature first seen with its counter past 0x4000: 1999 plays its swings; end of retail (the window) does not', () => {
+    const old = harness(false, true);
+    old.som.handleMovementEvent(actionsEvent(0x50000001, [{ cmd: 0x62, seq: 0x5001 }]) as never);
+    old.som.handleMovementEvent(actionsEvent(0x50000001, [{ cmd: 0x62, seq: 0x5001 }, { cmd: 0x63, seq: 0x5003 }]) as never);
+    expect(old.queued).toEqual([0x62, 0x63]);
+    // End of retail and Dark Majesty keep retail's wrap-aware window (move_to_interpreted_state @ 005289c0).
+    const eor = harness();
+    eor.som.handleMovementEvent(actionsEvent(0x50000001, [{ cmd: 0x62, seq: 0x5001 }]) as never);
+    expect(eor.queued).toEqual([]);
+    eor.som.handleMovementEvent(actionsEvent(0x50000001, [{ cmd: 0x63, seq: 0x0003 }]) as never);
+    expect(eor.queued).toEqual([0x63]);
   });
 });

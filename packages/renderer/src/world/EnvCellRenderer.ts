@@ -7,7 +7,7 @@ import { EnvCell } from '@ac/dat-parser/file-types/EnvCell.js';
 import { Environment, type CellStruct } from '@ac/dat-parser/file-types/Environment.js';
 import type { Frame } from '@ac/dat-parser/file-types/Frame.js';
 import { prepareSurfaceMesh, type MaterialFactory } from '../models/MaterialFactory.js';
-import { applyRetailLighting, cellObjectVariantOf, rawByteColor, retailLightRange, retailStaticLightDecay, setCellLighting, SURFACE_LUMINOSITY_KEY } from '../models/RetailLighting.js';
+import { applyRetailLighting, cellObjectVariantOf, eraLightColor, retailLightRange, retailStaticLightDecay, setCellLighting, SURFACE_LUMINOSITY_KEY } from '../models/RetailLighting.js';
 import type { SetupModelRenderer } from '../models/SetupModelRenderer.js';
 import { surfaceIsTextured, type ModelRenderer } from '../models/ModelRenderer.js';
 import { clampedSurfaceBatches } from '../models/GfxObjMesh.js';
@@ -616,7 +616,7 @@ export class EnvCellRenderer {
       // CORE.17.q.a — decay is the light-class channel: −intensity marks a
       // STATIC light (the burned-in calc_point_light path on env cells; the
       // hardware 1/d path on objects ignores the tag).
-      const pl = new THREE.PointLight(rawByteColor(light.color), light.intensity, retailLightRange(light.falloff), retailStaticLightDecay(light.intensity));
+      const pl = new THREE.PointLight(eraLightColor(light.color), light.intensity, retailLightRange(light.falloff), retailStaticLightDecay(light.intensity));
       const lp = light.viewerSpaceLocation.origin;
       pl.position.set(lp.x, lp.z, lp.y); // AC (x,y,z) → Three (x,z,y)
       pl.userData.datLight = true;

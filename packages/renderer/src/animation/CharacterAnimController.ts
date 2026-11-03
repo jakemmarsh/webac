@@ -390,7 +390,27 @@ export class CharacterAnimController {
   stopCompletely(input: CameraController): void {
     if (this.isDead) return;
     this._heldSubstate = 0;
+    this.stopServerSubstate();
     this.update(0, input);
+  }
+
+  /**
+   * webac#16 — CMotionInterp::StopCompletely (end of retail @ 00527e40, 1999
+   * @ 0x00473c40) sets the interpreted forward command to Ready and runs
+   * StopCompletely_Internal → CMotionTable::StopObjectCompletely @ 00523ed0,
+   * so a substate the SERVER put the player in (a missile Aim / Reload, a cast
+   * gesture's hold, Eat / Drink) ends with it: its link back to Ready plays.
+   * Ours re-applied only the player's own input, whose forward was Ready all
+   * along, so the server's substate stayed. The 1999 attack press
+   * (PanelUI_StartAttackRequest @ 0x4f8850 → StopCompletely) then left the
+   * body in the Reload / Aim hold and out of the ready position, and a
+   * server TurnTo (MoveToManager TurnToObject's StopCompletely) waited on it
+   * forever (motionsPending). The player's own held substate (a posture) is
+   * not touched here: stopCompletely clears it through the input.
+   */
+  stopServerSubstate(): void {
+    if (this.isDead || !this.tableState || !this.holdsServerSubstate) return;
+    this.tableState.stopMotion(this.tableState.substate);
   }
 
   /**

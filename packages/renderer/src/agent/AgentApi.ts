@@ -5075,6 +5075,10 @@ export class AgentApi {
   static readonly LEVEL_LOOKS_PER_OBSERVE = 3;
   static readonly LEVEL_LOOK_RANGE_M = 60;
   private lookAtLevels(objs: AgentObject[]): void {
+    // webac#16 — not while an attack of ours runs: the AC1999 server turns the player to an appraised object
+    // ([1999-APPRAISE] turn-to), and that turn's end reaches the attack (HandleMoveToDone → Cancel(0x36,
+    // WERROR_INTERRUPTED)): a quiet level look killed a bow repeat live (2026-11-03 16:22:20). Looked at later.
+    if (this.host.attackPending()) return;
     let n = 0;
     for (const o of [...objs].sort((a, b) => a.dist - b.dist)) {
       if (n >= AgentApi.LEVEL_LOOKS_PER_OBSERVE || o.dist > AgentApi.LEVEL_LOOK_RANGE_M) break;

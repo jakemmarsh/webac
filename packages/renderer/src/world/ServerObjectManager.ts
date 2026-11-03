@@ -771,6 +771,8 @@ export class ServerObjectManager {
   private animatedObjects = new Map<number, AnimatedEntity>();
   /** CMotionInterp::server_action_stamp per object (0 on a new object — the ctor's). */
   private serverActionStamps = new Map<number, number>();
+  /** The era's action-stamp test: end of retail's wrap window, or the 1999 client's plain compare (main.ts, eraClientRules). */
+  actionStampIsNewer: (stamp: number, last: number) => boolean = isServerActionNewer;
   /**
    * BUG.setup-default-animation-never-played — CPartArray::InitDefaults
    * @ 00518980 (from SetSetupID, for every object): a Setup with a
@@ -3052,7 +3054,7 @@ export class ServerObjectManager {
       if (action.command <= 0) continue;
       const stamp = action.sequence & 0x7fff;
       const autonomous = (action.sequence & 0x8000) !== 0;
-      if (!isServerActionNewer(stamp, this.serverActionStamps.get(guid) ?? 0)) continue;
+      if (!this.actionStampIsNewer(stamp, this.serverActionStamps.get(guid) ?? 0)) continue;
       if (isLocalPlayer && autonomous) continue;
       this.serverActionStamps.set(guid, stamp);
       const key = MotionManager.compositeKey(fullStanceId, action.command);
@@ -4039,4 +4041,17 @@ export function isServerActionNewer(stamp: number, last: number): boolean {
   const a = stamp & 0x7fff, b = last & 0x7fff;
   const diff = a > b ? a - b : b - a;
   return diff < 0x4000 ? b < a : a < b;
+}
+
+/**
+ * webac#16 — the 1999 client's test (CMotionInterp_move_to_interpreted_state
+ * @ 0x00473400): a plain `server_action_stamp < stamp` on the 15-bit stamp
+ * (the unpack @ 0x00475ac0 keeps `stamp & 0x7fff`), no wrap window. An object
+ * first seen with its counter at 0x4000 or more (the AC1999 server's
+ * per-weenie m_wAnimSequence, bumped by every swing, MoveTo and TurnTo) plays
+ * its actions there; the end-of-retail window read them as older than 0 and
+ * dropped every swing until the counter wrapped.
+ */
+export function isServerActionNewer1999(stamp: number, last: number): boolean {
+  return (last & 0x7fff) < (stamp & 0x7fff);
 }

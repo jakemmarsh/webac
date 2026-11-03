@@ -441,6 +441,17 @@ for (const [era, rules] of [['ac1999-retail', R1999], ['eor', EOR]] as const) {
       H.ui.toggleOptionsPanel();
     });
 
+    it(is1999 ? '8d-b. 1999 lists no Texture Filtering row (fixed bilinear, no option in PerformancePanel @ 0x594e00)' : '8d-b. end of retail lists Texture Filtering', () => {
+      H.ui.optionsTab = 'config';
+      if (!H.ui.optionsPanelVisible) H.ui.toggleOptionsPanel(); else H.ui.renderOptionsPanel();
+      const has = (k: string) => H.ui.optionsPanel.querySelector(`[data-option-key="${k}"]`) !== null;
+      expect(has('textureFiltering')).toBe(!is1999);
+      // The neighbouring texture rows stay in both eras.
+      expect(has('landscapeTextureDetail')).toBe(true);
+      expect(has('environmentTextureDetail')).toBe(true);
+      H.ui.toggleOptionsPanel();
+    });
+
     it(is1999 ? '8e. restoring the options word sets the 1999 bits' : '8e. restoring the options word ignores the 1999 bits', () => {
       for (const k of ['autoCreateShortcuts', 'invertMouseLook', 'rightClickMouselook']) H.ui.optionsSettings[k] = false;
       const changed = H.ui.restoreCharacterOptions(0x50c4a542 | 0x1 | 0x10 | 0x4000, -1);
