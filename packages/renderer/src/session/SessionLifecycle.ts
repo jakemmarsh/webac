@@ -104,6 +104,10 @@ export class SessionLifecycle {
   /** UX.chargen-resume — the drop came in chargen: the resume reopens chargen, not a character. */
   private chargenResume = false;
   private inWorldRetries = 0;
+  /** BUG.second-tab-in-world-refusal — the holder (another tab) was asked to log out: short waits. */
+  private holderLeaving = false;
+  /** Bumped by every new enter (noteEnterWorldRequested), not by its retries. */
+  private enterSerialN = 0;
   private enterInFlight = false;
   private createdGuid: number | null = null;
   private createdAt = 0;
@@ -172,6 +176,8 @@ export class SessionLifecycle {
     this.lastEnteredGuid = guid;
     this.manualLogout = false;
     this.inWorldRetries = 0;
+    this.holderLeaving = false;
+    this.enterSerialN++;
     this.enterInFlight = true;
   }
 
@@ -192,7 +198,7 @@ export class SessionLifecycle {
    */
   inWorldRetryDelay(now: number = Date.now()): number {
     const n = this.inWorldRetries - 1;
-    if (this.resuming && n >= 0 && n < RESUME_IN_WORLD_RETRY_DELAYS_MS.length) return RESUME_IN_WORLD_RETRY_DELAYS_MS[n];
+    if ((this.resuming || this.holderLeaving) && n >= 0 && n < RESUME_IN_WORLD_RETRY_DELAYS_MS.length) return RESUME_IN_WORLD_RETRY_DELAYS_MS[n];
     if (this.createdGuid !== null && this.createdGuid === this.lastEnteredGuid
       && now - this.createdAt <= JUST_CREATED_WINDOW_MS && n >= 0 && n < JUST_CREATED_RETRY_DELAYS_MS.length) {
       return JUST_CREATED_RETRY_DELAYS_MS[n];
@@ -257,6 +263,7 @@ export class SessionLifecycle {
     this.createdGuid = null;
     this.inWorldFlag = true;
     this.inWorldRetries = 0;
+    this.holderLeaving = false;
     this.enterInFlight = false;
     this.enterRequestAt = null;
     this.endResume();
@@ -266,6 +273,33 @@ export class SessionLifecycle {
   noteEnterRefused(): void {
     this.enterInFlight = false;
     this.enterRequestAt = null;
+    this.holderLeaving = false;
+  }
+
+  /** Which enter is under way: changes with each new enter request, not with its retries. */
+  get enterSerial(): number {
+    return this.enterSerialN;
+  }
+
+  /** The holder (another tab) was asked to log out for the enter under way (noteHolderLeaving). */
+  get waitingOnHolder(): boolean {
+    return this.holderLeaving;
+  }
+
+  /** "Character still in the world" refusals of the enter under way so far (0 before the first). */
+  get inWorldRefusalCount(): number {
+    return this.inWorldRetries;
+  }
+
+  /**
+   * BUG.second-tab-in-world-refusal — the player chose to log out the other
+   * tab of this browser that holds this account in the world: the enter goes
+   * on with a fresh budget, asking every second while that character logs out
+   * (RESUME_IN_WORLD_RETRY_DELAYS_MS, the same clock a resume waits on).
+   */
+  noteHolderLeaving(): void {
+    this.inWorldRetries = 0;
+    this.holderLeaving = true;
   }
 
   /**

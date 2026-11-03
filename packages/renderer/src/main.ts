@@ -104,6 +104,7 @@ import { AmbientSoundManager } from './audio/AmbientSoundManager.js';
 import { AmbientCellGate } from './audio/AmbientCellGate.js';
 import { resolveUiSoundTable } from './audio/RetailLocalSounds.js';
 import { WavePrefetch, setWavePrefetch } from './audio/WavePrefetch.js';
+import { setAnimationPrefetch, storeAnimationPrefetch } from './animation/AnimationPrefetch.js';
 import { MotionManager } from './animation/MotionManager.js';
 import { AnimatedEntity } from './animation/AnimatedEntity.js';
 import { StepSmoother, updateLocalStepLag } from './animation/StepSmoother.js';
@@ -409,6 +410,7 @@ import { SessionLiveness, sessionDropped, liveSessionSocketFailed, characterList
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
 import { AccountTabGuard, accountSessionKey, openSessionChannel } from './session/AccountTabGuard.js';
+import { InWorldEnterWait, LOGGED_OUT_FOR_OTHER_TAB_TEXT } from './session/InWorldHolder.js';
 import { SquelchState } from './session/SquelchState.js';
 import { LastOutsideDeathState } from './session/LastOutsideDeathState.js';
 // ASSESS — relative import: the new delete/restore builders live in
@@ -484,7 +486,7 @@ const awaitedAppraisals = new Set<number>();
 let recordQuietExamine: ((view: Parameters<GameUI['showExaminationWindow']>[0]) => void) | null = null;
 const agentAppraisals = new Map<number, { int: Record<number, number>; float: Record<number, number>; string: Record<number, string>; bool: Record<number, boolean>; did: Record<number, number>; spells: string[]; spellIds: number[]; activeSpellIds: number[]; at?: number; maxVelocity?: number }>();
 import { openStreamingDats, type StreamScope, type StreamingDats } from './dat/streaming/StreamingDats.js';
-import { FetchPriority, fileKey, splitFileKey } from './dat/streaming/DatStore.js';
+import { FetchPriority, NetworkLink, fileKey, splitFileKey } from './dat/streaming/DatStore.js';
 import { PreviewBuildHold } from './ui/PreviewBuildHold.js';
 import { datMissEpoch, noDatMissSince, onDatMissResolved } from '@ac/dat-parser/streaming/DatMiss.js';
 import { CellGate, GatedEventQueue, PrefetchStatus, settleBurst } from './dat/streaming/PortalSpaceGate.js';
@@ -1221,6 +1223,14 @@ function setStreamBootPhase(scope: StreamScope, phase: StreamBootPhase): void {
   preworldReporter?.bootStage(streamedBootStage(streamBootPhases.values()));
 }
 
+/**
+ * STREAM.shared-network-link — every streamed set on this page fetches over
+ * one link (one HTTP/2 connection to the set host): one fetch limiter, one
+ * LinkMeter, one background hold for the portal-space gate (AC1999 boots two
+ * sets).
+ */
+const streamNetwork = new NetworkLink();
+
 async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope; wholeBytes?: number } = {}): Promise<StreamingDats> {
   const t0 = performance.now();
   const scope = opts.scope ?? 'all';
@@ -1242,6 +1252,7 @@ async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope;
     pointerUrl,
     bypassCache: datCacheBypass,
     scope,
+    network: streamNetwork,
     onProgress: (done, total) => feed.onProgress(done, total),
     // A warm profile's world + terrain packs and UI art load from the object cache before open() resolves.
     onWorldCache: () => setStreamBootPhase(scope, 'world_cache'),
@@ -2236,6 +2247,8 @@ async function main() {
   if (worldStreamingDats) {
     const world = worldStreamingDats;
     setWavePrefetch(new WavePrefetch((id) => { void world.store.request('portal', id, FetchPriority.Background).catch(() => false); }));
+    // STREAM.style-animations-on-first-use — a style's animations as an object takes the style.
+    setAnimationPrefetch(storeAnimationPrefetch(world.store));
   }
   const musicPlayer = new MusicPlayer(audioManager, (waveId) => soundPlayer.decodeWave(waveId));
   const ambientSoundManager = new AmbientSoundManager(soundPlayer, audioManager);
@@ -6707,6 +6720,8 @@ async function main() {
   skybox.skyObjectsOnTick = eraRules.world.skyObjectsOnTick;
   selectionLighting.endCount = eraRules.world.selectionFlipEndCount;
   gameUI.setClientRules(eraRules);
+  // webac#18 — Enable Decal Plugins: this era's kept choice, else its default (off in AC1999).
+  gameUI.setDecalPluginsEra(activeEra.id);
 
   // FAITHFUL.270 — restore the persisted logging-on state's HUD indicator.
   // (gameUI exists now; setIndicatorActive is a no-op until indicators are
@@ -8392,9 +8407,14 @@ async function main() {
   // account stands down (stops its retries and resume, closes its session,
   // says why) instead of logging back in and booting the other tab
   // (session/AccountTabGuard.ts). standDownForOtherTab is defined below.
+  // BUG.second-tab-in-world-refusal — this tab answers another tab's "who is in the world
+  // on this server?" with its character (worldCharacter), and logs out when that tab's
+  // player chose "log out that tab and enter here" for this same server + account.
   const accountTabGuard = new AccountTabGuard({
     channel: openSessionChannel(),
     onStandDown: () => standDownForOtherTab(),
+    onLogoutRequested: () => logOutForOtherTab(),
+    worldCharacter: () => (sessionLifecycle.inWorld ? { name: worldCharacterName } : null),
   });
   accountTabGuard.watch(aceConnection, () => (aceAccount ? accountSessionKey(connectUrl, aceAccount) : null));
   // Disable auto-reconnect — prevents cascading duplicate sessions
@@ -8505,6 +8525,28 @@ async function main() {
       raiseServerDied();
     }, REQUEST_TIMEOUT_S * 1000);
   };
+  // BUG.second-tab-in-world-refusal — the "character still in the world" (0x0D) wait of an
+  // enter: quiet retries on SessionLifecycle's budget, this browser's other tabs asked once,
+  // the line under Entering World, and the final dialog's text (session/InWorldHolder.ts).
+  const inWorldWait = new InWorldEnterWait({
+    verdict: () => sessionLifecycle.characterInWorldRefusal(),
+    retryDelay: () => sessionLifecycle.inWorldRetryDelay(),
+    refusalCount: () => sessionLifecycle.inWorldRefusalCount,
+    enterSerial: () => sessionLifecycle.enterSerial,
+    resuming: () => sessionLifecycle.resumingAfterDrop,
+    waitingOnHolder: () => sessionLifecycle.waitingOnHolder,
+    mayRetry: () => aceCharGuid !== null && sessionLifecycle.mayRetryEnterWorld(),
+    holderLeaving: () => sessionLifecycle.noteHolderLeaving(),
+    queryHolders: () => (aceAccount ? accountTabGuard.queryWorldHolders(accountSessionKey(connectUrl, aceAccount)) : Promise.resolve([])),
+    requestLogout: (holder) => accountTabGuard.requestLogout(holder),
+    sendRetry: () => { console.log('[AC] ACE: Retrying CharacterEnterWorldRequest...'); sendEnterWorldRequest(); },
+    schedule: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); },
+    now: () => Date.now(),
+    setStatus: (text) => gameUI.setEnteringWorldStatus(text),
+    showEnteringWorld: () => gameUI.showEnteringWorldDialog(),
+    confirm: (text, onAnswer) => { gameUI.showConfirmationDialog(text, onAnswer); return () => gameUI.hideConfirmationDialog(); },
+    report: (kind) => preworldReporter?.enterHeld(kind),
+  });
   // BUG.gdle-transient-login-failed — GDLE / the AC1999 server answer a correct login with
   // "Client logon failed" now and then (their account query failed, e.g. busy saving the
   // logout a moment before). A login this page already got in with retries on its own at
@@ -8761,6 +8803,20 @@ async function main() {
     if (launcherActive || gameUI.disconnectedScreenShown) return;
     // From the world: the Disconnected screen; before it, the OK dialog over the launcher.
     raiseAccountRefusal(characterErrorNotice(CharacterError.Logon).text);
+  };
+  /**
+   * BUG.second-tab-in-world-refusal — the player, in another tab of this
+   * browser entering the world on this server and account, chose to log this
+   * tab out (AccountTabGuard.requestLogout; the guard checked the key and that
+   * this tab is in the world). The session closes as a stand-down does (the
+   * server logs the character out), and the Disconnected screen says why.
+   */
+  const logOutForOtherTab = (): void => {
+    cancelProvenLoginRetry();
+    worldResumePending = false;
+    sessionLifecycle.endResume();
+    if (launcherActive || gameUI.disconnectedScreenShown) return;
+    raiseAccountRefusal(LOGGED_OUT_FOR_OTHER_TAB_TEXT);
   };
   /**
    * A client-side connection failure (ID_ConnectionError_* / ID_NetError_*):
@@ -18802,6 +18858,7 @@ async function main() {
         case 'playerCreate': {
           console.log(`[AC] ACE: PlayerCreate received — we are in the world! aceCharGuid=0x${(aceCharGuid ?? 0).toString(16)}`);
           sessionLifecycle.noteWorldEntered();
+          inWorldWait.end();
           enterRequestTimer.cancel();
 
           // Initialize side pack tracking: index 0 = main pack (player GUID)
@@ -19195,22 +19252,17 @@ async function main() {
             // BUG.ac1999-in-world-enter-retry — a refusal that answers a
             // duplicate request (we are already in the world) is ignored.
             const inWorldVerdict = code === CharacterError.EnterGameCharacterInWorld && aceCharGuid !== null
-              ? sessionLifecycle.characterInWorldRefusal() : null;
+              ? inWorldWait.onRefusal() : null;
             if (inWorldVerdict === 'ignore') {
               console.log('[AC] ACE: "character still in the world" answers a duplicate enter-world request; ignored');
               break;
             }
             if (inWorldVerdict === 'retry') {
               // BUG.resume-silent-launcher — the first retry of each enter is visible (a resume's says so).
+              // BUG.second-tab-in-world-refusal — InWorldEnterWait scheduled the retry, asked the other
+              // tabs once and set the line under Entering World; the retries never stop for a holder.
               preworldReporter?.enterRetry(code, sessionLifecycle.resumingAfterDrop);
-              const retryDelay = sessionLifecycle.inWorldRetryDelay();
-              console.log(`[AC] ACE: Character still in world, retrying enter world in ${retryDelay}ms...`);
-              setTimeout(() => {
-                if (aceCharGuid !== null && sessionLifecycle.mayRetryEnterWorld()) {
-                  console.log('[AC] ACE: Retrying CharacterEnterWorldRequest...');
-                  sendEnterWorldRequest();
-                }
-              }, retryDelay);
+              console.log('[AC] ACE: Character still in world, retrying enter world');
               break;
             }
             // ASSESS — "two accounts logged on" with a timed fresh login
@@ -19236,10 +19288,13 @@ async function main() {
             if (charError.route === 'account') {
               raiseAccountRefusal(charError.text);
             } else if (charError.route === 'charselect') {
-              console.warn(`[AC] ACE: CharacterError ${notice.token || `0x${code.toString(16)} (not in retail's switch)`} → char-select dialog: "${charError.text}"`);
+              // BUG.second-tab-in-world-refusal — the 0x0D budget spent: retail's text and the line for the tab seen in the world.
+              const charSelectText = inWorldVerdict === 'dialog'
+                ? inWorldWait.finalText(charError.text, charError.text.split('\n\n')[0]) : charError.text;
+              console.warn(`[AC] ACE: CharacterError ${notice.token || `0x${code.toString(16)} (not in retail's switch)`} → char-select dialog: "${charSelectText}"`);
               // QueueUIModeWithError(0x1000000a): a fresh character select
               // (the wait dialogs go with the old one), then the OK dialog.
-              gameUI.showCharacterErrorDialog(charError.text, aceCharList?.characters.map(c => ({
+              gameUI.showCharacterErrorDialog(charSelectText, aceCharList?.characters.map(c => ({
                 id: c.id.toString(),
                 name: c.name,
                 deleteTime: c.deleteTime,
@@ -19371,11 +19426,13 @@ async function main() {
     const QUEUED_OBJECT_QUIET_MS = 400;
     const QUEUED_OBJECT_BURST_MAX_MS = 1500;
     const SESSION_LIFECYCLE = new Set(['connected', 'disconnected', 'error', 'reconnecting', 'serverTimeout', 'loginRetry']);
+    let gateBackgroundRelease: (() => void) | null = null;
+    const releaseGateBackgroundHold = (): void => { gateBackgroundRelease?.(); gateBackgroundRelease = null; };
     const sessionEventGate: GatedEventQueue<ConnectionEvent> = new GatedEventQueue<ConnectionEvent>({
       // PERF.slow-first-minute-diagnostics — every handled event's synchronous cost, by type / opcode.
       dispatch: (e) => netHandlerCost.time(() => connectionEventOp(e), () => onSessionEvent(e)),
       passThrough: (e) => {
-        if (e.type === 'disconnected') { sessionEventGate.clear(); dddStatus.end(); }
+        if (e.type === 'disconnected') { sessionEventGate.clear(); dddStatus.end(); releaseGateBackgroundHold(); }
         return SESSION_LIFECYCLE.has(e.type);
       },
       gateFor: (e) => {
@@ -19401,6 +19458,9 @@ async function main() {
         }
         const stores = gateStores();
         dddStatus.begin();
+        // STREAM.shared-network-link — background warm-fill (the area common pack) stops and waits while the gate holds.
+        releaseGateBackgroundHold();
+        gateBackgroundRelease = streamNetwork.holdBackground();
         const sum = () => stores.reduce((a, st) => ({ netBytes: a.netBytes + st.stats.netBytes, netObjects: a.netObjects + st.stats.netObjects, cacheBytes: a.cacheBytes + st.stats.cacheBytes }), { netBytes: 0, netObjects: 0, cacheBytes: 0 });
         const before = sum();
         // The hold begins now (the world packs may still be on their way): the gate's cap counts from here.
@@ -19454,7 +19514,7 @@ async function main() {
           ]).then((how) => console.log(`[AC:DatStream] portal-space gate: ${creates()} queued objects (${roots.length} roots) ${how} after ${Math.round(performance.now() - t0)} ms`));
         });
       },
-      afterRelease: () => { tunnelOpenedByGate = false; dddStatus.end(); console.log('[AC:DatStream] portal-space gate: released'); },
+      afterRelease: () => { tunnelOpenedByGate = false; dddStatus.end(); releaseGateBackgroundHold(); console.log('[AC:DatStream] portal-space gate: released'); },
     });
     blockingForCells = () => sessionEventGate.isHolding;
     exposeDebugGlobal('__sessionEventGate', sessionEventGate);

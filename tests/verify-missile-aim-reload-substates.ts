@@ -31,17 +31,17 @@ const BOW = 0x8000003f, CROSSBOW = 0x80000041, ATLATL = 0x8000013b, THROWN = 0x8
 
 // MovementEvent: 6-byte header (timestamps, autonomous = 0) + InterpretedMotionState with only ForwardCommand (+ speed).
 function movement(styleIndex: number, forwardCmd: number, speed?: number): Uint8Array {
-  const buf = new Uint8Array(6 + 4 + 4 + 2 + 2 + 4);
+  // InterpretedMotionState::Pack: the commands, then the speeds (no padding between), aligned at the end.
+  const buf = new Uint8Array(6 + 4 + 4 + 2 + 4 + 2);
   const view = new DataView(buf.buffer);
   let o = 6;
   view.setUint8(o, 0); o += 1; // InterpretedMotionState
   view.setUint8(o, 0); o += 1;
   view.setUint16(o, styleIndex, true); o += 2;
-  view.setUint32(o, speed === undefined ? 0x2 : 0x2 | 0x10, true); o += 4; // ForwardCommand (+ ForwardSpeed)
+  view.setUint32(o, speed === undefined ? 0x2 : 0x2 | 0x4, true); o += 4; // ForwardCommand (+ ForwardSpeed 0x4)
   view.setUint16(o, forwardCmd, true); o += 2;
-  o += 2; // align
   if (speed !== undefined) view.setFloat32(o, speed, true);
-  return speed === undefined ? buf.subarray(0, 18) : buf;
+  return speed === undefined ? buf.subarray(0, 18) : buf.subarray(0, 20);
 }
 
 const quatAngle = (a: { w: number; x: number; y: number; z: number }, b: typeof a): number =>

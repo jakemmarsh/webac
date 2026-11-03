@@ -301,6 +301,14 @@ export interface EraClientRules {
    */
   splitpea: boolean;
   /**
+   * Whether Decal and its plugins (the Virindi Views bar, VirindiTank, UtilityBelt, Mag-Tools, GoArrow,
+   * Splitpea …) are on before the player chooses (webac#18; ui/automation/DecalPlugins.ts). The Config
+   * page's Enable Decal Plugins row changes it per era. End of retail and the classic eras: on, as their
+   * players ran Decal. AC1999: off; its client predates Decal (2001) and players asked for a plain 1999
+   * screen, with the plugins one checkbox away.
+   */
+  decalPlugins: boolean;
+  /**
    * The ITEM_TYPE mask of shop wares whose toolbar buy quantity seeds 1
    * instead of the whole object stack (gmToolbarUI::HandleSelectionChanged
    * @ 004bf380, decomp 185731–185737: `& 0xdc41cb0`). The 1999 client.exe's
@@ -1158,7 +1166,7 @@ export function correctedOptionsWord(word: number, fix: OptionsWordFix | null): 
 }
 
 const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
-  castStopsMovement: true, attackStopsAlways: false, actionStampCompare: 'eor' as const, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, toolbarTabSlots: null, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const,
+  castStopsMovement: true, attackStopsAlways: false, actionStampCompare: 'eor' as const, combatModeCheck: 'eor' as const, spellResearch: false, splitpea: false, decalPlugins: true, vendorBuyOneMask: 0x0dc41cb0, appraisalText: 'eor' as const, statLineText: 'eor' as const, spellBarTabs: 8, shortcutSlots: 18, toolbarTabSlots: null, characterInfoText: 'eor' as const, spellBarArrows: 'pair' as const,
   chatToggle: 'server' as const,
   talismanTargetTypes: TALISMAN_TARGET_TYPES_EOR,
   spellSelfTargetableTypeMask: 0x8107,
@@ -1234,7 +1242,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   worldEntryVersionLine: null,
 });
 const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
-  castStopsMovement: false, attackStopsAlways: true, actionStampCompare: 'ac1999' as const, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, toolbarTabSlots: AC1999_TOOLBAR_TABS, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const,
+  castStopsMovement: false, attackStopsAlways: true, actionStampCompare: 'ac1999' as const, combatModeCheck: 'ac1999' as const, spellResearch: true, splitpea: true, decalPlugins: false, vendorBuyOneMask: 0x14b0, appraisalText: 'ac1999' as const, statLineText: 'ac1999' as const, spellBarTabs: 1, shortcutSlots: 9, toolbarTabSlots: AC1999_TOOLBAR_TABS, characterInfoText: 'ac1999' as const, spellBarArrows: 'ends' as const,
   chatToggle: 'local' as const,
   talismanTargetTypes: TALISMAN_TARGET_TYPES_1999, // @ 0x5e4150
   spellSelfTargetableTypeMask: 0, // UI ObjectCompatibleWithSpellTargetType @ 0x4d20c0

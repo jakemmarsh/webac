@@ -78,6 +78,12 @@ export interface AreaPlanOptions {
   inPacks?: ReadonlySet<number>;
   /** Landblocks to plan (default: every landblock with terrain or a bundle). */
   landblocks?: readonly number[];
+  /**
+   * Leaves the common pack carries whatever their landblock count, and no tile
+   * then: the effect leaves (tools/lib/effect-leaves.ts, STREAM.spell-projectile-first-use).
+   * Leaves in `inPacks` stay out.
+   */
+  commonExtra?: readonly number[];
   onProgress?: (done: number, total: number) => void;
   /** After every DAT read (the 1999 overlay drops its translation cache now and then). */
   onRead?: () => void;
@@ -150,8 +156,9 @@ export function planAreas(opts: AreaPlanOptions): AreaPlan {
     }
     if (++done % 2048 === 0) opts.onProgress?.(done, blocks.length);
   }
-  const common = [...uses].filter(([, n]) => n > opts.commonThreshold).map(([id]) => id).sort((a, b) => a - b);
-  const commonSet = new Set(common);
+  const commonSet = new Set([...uses].filter(([, n]) => n > opts.commonThreshold).map(([id]) => id));
+  for (const id of opts.commonExtra ?? []) if (!opts.inPacks?.has(id >>> 0) && opts.portal.hasFile(id >>> 0)) commonSet.add(id >>> 0);
+  const common = [...commonSet].sort((a, b) => a - b);
   const tileSets = new Map<number, Set<number>>();
   for (const [lb, leaves] of blockLeaves) {
     const tile = areaTileOf(lb, opts.tileSize);

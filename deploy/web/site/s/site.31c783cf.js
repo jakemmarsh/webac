@@ -4,7 +4,7 @@
   const table = document.querySelector('table.servers');
   if (!table || !window.fetch) return;
   const works = (s) => {
-    if (s.compat === 'incompatible') return ['Blocks webAC', 'no'];
+    if (s.compat === 'incompatible') return [s.compatNote || 'Blocks webAC', 'no'];
     if (s.online === false) return ['Offline now', 'warn'];
     if (s.registration) return [s.compat === 'beta' ? 'Register first (beta)' : 'Register first', 'warn'];
     return [s.compat === 'beta' ? 'Yes (beta)' : 'Yes', 'yes'];

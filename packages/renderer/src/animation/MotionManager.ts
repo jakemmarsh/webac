@@ -6,11 +6,36 @@ import { AnimationPlayer, SEQUENCE_EPSILON, type HookCallback } from './Animatio
 import type { SequenceMotion } from './SequenceFrame.js';
 import { MotionCommand, MotionSpeed, motionCommandFromWireIndex, isActionCommand } from './MotionCommands.js';
 import { wavePrefetch } from '../audio/WavePrefetch.js';
+import { animationPrefetch } from './AnimationPrefetch.js';
+import { datMissEpoch, noDatMissSince } from '@ac/dat-parser/streaming/DatMiss.js';
 
 /** `same_sign @ 00522260`: both ≥ 0, or both < 0. */
 export function sameSign(a: number, b: number): boolean {
   return a >= 0 ? b >= 0 : b < 0;
 }
+
+/**
+ * STREAM.action-held-for-animation — the longest an action, the death fall
+ * or a non-locomotion substate link (a cast gesture) waits for its streamed
+ * Animation before it is dropped as with whole DATs.
+ * A critical miss lands in ~50-300 ms (docs/dat-streaming.md §2.2, a cold
+ * R2 edge at the top); past this the action is stale (the hit it shows has
+ * long landed) and the object's later motions must not stay queued.
+ */
+export const ACTION_ANIMATION_HOLD_MAX_S = 1.5;
+
+/**
+ * Substates whose links are NOT held for a streamed miss: locomotion (the
+ * body moves whatever the parts show, so a late walk / run / turn link would
+ * slide it in the old pose) and Ready, the return from all of them. A link
+ * into any other substate (a cast gesture, sitting, a door swinging On / Off,
+ * Reload) is held like an action: it is what the motion shows.
+ */
+const LOCOMOTION_SUBSTATES: ReadonlySet<number> = new Set([
+  MotionCommand.Ready, MotionCommand.Stop, MotionCommand.WalkForward, MotionCommand.WalkBackwards, MotionCommand.RunForward,
+  MotionCommand.TurnRight, MotionCommand.TurnLeft, MotionCommand.SideStepRight, MotionCommand.SideStepLeft,
+  MotionCommand.Falling, MotionCommand.Interpolating, MotionCommand.Hover,
+].map((m) => m & 0xffff));
 
 /** One link of a chain (CMotionTable::add_motion(sequence, link, speed)), with the action's completion callback on the action's own link. */
 interface ChainLink { data: MotionData; speed: number; onComplete?: () => void }
@@ -69,6 +94,17 @@ export class MotionManager {
    * only the drawing is behind, and retryMissedAnimation catches it up.
    */
   private _animationMissed = false;
+  /**
+   * STREAM.action-held-for-animation — an action / death-fall / gesture node whose
+   * Animation was a streamed miss (not resident yet, being fetched). Retail's
+   * DBObj::Get blocked until the file was local, so the action always
+   * played, late; dropping it showed a creature's hit land with no swing
+   * (webac#16). The node waits on `nodeSeq` while the player keeps its
+   * current pose / cycle, the queue behind it waits too, and the arrival
+   * (retryMissedAnimation) plays it; after ACTION_ANIMATION_HOLD_MAX_S it is
+   * dropped as before. Whole DATs never miss: never set there.
+   */
+  private held: { waited: number } | null = null;
 
   constructor(portalDb: DatDatabase) {
     this.portalDb = portalDb;
@@ -105,7 +141,17 @@ export class MotionManager {
    *  Used by CharacterAnimController to enforce combat stance
    *  without interrupting movement animations. */
   overrideStyleId(stanceId: number): void {
-    this._currentStyleId = stanceId;
+    this.enterStyle(stanceId);
+  }
+
+  /**
+   * The object takes `style`: a streamed set fetches the style's animations
+   * now, so its first swing / cast / chase link is resident when it plays
+   * (animation/AnimationPrefetch.ts, STREAM.style-animations-on-first-use).
+   */
+  private enterStyle(style: number): void {
+    this._currentStyleId = style;
+    if (this.motionTable && style) animationPrefetch().style(this.motionTable, style);
   }
 
   /**
@@ -151,6 +197,7 @@ export class MotionManager {
     const data = this.portalDb.getFileData(motionTableId);
     if (!data) return null;
     this.motionTable = new MotionTable(new DatReader(data));
+    if (this._currentStyleId) animationPrefetch().style(this.motionTable, this._currentStyleId);
     return this.motionTable;
   }
 
@@ -159,6 +206,7 @@ export class MotionManager {
    */
   setMotionTable(mt: MotionTable): void {
     this.motionTable = mt;
+    if (this._currentStyleId) animationPrefetch().style(mt, this._currentStyleId);
   }
 
   /**
@@ -385,7 +433,7 @@ export class MotionManager {
   setStanceFromId(stanceId: number, speed = 1.0): boolean {
     if (!this.motionTable) return false;
 
-    this._currentStyleId = stanceId;
+    this.enterStyle(stanceId);
 
     const motion = this.motionTable.styleDefaults.get(stanceId);
     if (motion === undefined) {
@@ -437,7 +485,7 @@ export class MotionManager {
       viaDefault = defDefault !== undefined ? this.getLink(defStyle, defDefault, 1.0, newStyle, 1.0) : null;
     }
 
-    this._currentStyleId = newStyle;
+    this.enterStyle(newStyle);
     this.currentStance = cycleKey;
     this.currentMotion = cycleKey;
     this.currentSubstateSpeed = speed;
@@ -518,7 +566,7 @@ export class MotionManager {
     if (!this.motionTable) return false;
 
     const style = this.motionTable.defaultStyle;
-    this._currentStyleId = style;
+    this.enterStyle(style);
     const motion = this.motionTable.styleDefaults.get(style);
     if (motion === undefined) return false;
 
@@ -687,6 +735,13 @@ export class MotionManager {
    * Advance the animation state by deltaTime seconds.
    */
   update(deltaTime: number, motion?: SequenceMotion): void {
+    if (this.held) {
+      // The pose / cycle on the player carries on while the held node's file is fetched.
+      this.player.update(deltaTime, motion);
+      this.held.waited += deltaTime;
+      if (this.held.waited >= ACTION_ANIMATION_HOLD_MAX_S) this.giveUpHeld();
+      return;
+    }
     this.player.update(deltaTime, motion);
     // CSequence::update_internal carries a finished node's overshoot into
     // the node that follows it (advance_to_next_animation, then recurse).
@@ -694,7 +749,7 @@ export class MotionManager {
       if (this.player.isPlaying) return;
       const leftover = this.player.leftoverTime;
       this.advanceFinishedNode();
-      if (!this.player.isPlaying) return;
+      if (this.held || !this.player.isPlaying) return;
       // advance_to_next_animation: the node it arrives on moves the body by its starting frame.
       if (motion) this.player.enterNode(motion);
       if (!(leftover > 0)) return;
@@ -793,6 +848,8 @@ export class MotionManager {
 
   private playMotionData(motionData: MotionData, speed: number, looping: boolean, onComplete?: () => void): boolean {
     if (motionData.anims.length === 0) return false;
+    // Whatever replaces the sequence replaces a held node too (as it would cut a playing link).
+    this.held = null;
     this.nodeSeq = { data: motionData, speed, looping, index: 0, onComplete };
     return this.playNode(0);
   }
@@ -811,8 +868,19 @@ export class MotionManager {
     const looping = seq.looping && count === 1;
     const onComplete = index === count - 1 ? seq.onComplete : undefined;
 
+    const missEpoch = datMissEpoch();
     const anim = this.loadAnimation(animData.animId);
-    if (!anim) { this._animationMissed = true; return false; }
+    if (!anim) {
+      this._animationMissed = true;
+      // A streamed miss inside an action, the death fall or a gesture link: hold the node
+      // until its file lands (STREAM.action-held-for-animation). An Animation
+      // the DAT does not have at all (no miss noted) is skipped as before.
+      if (!noDatMissSince(missEpoch) && this.playingAction && this.holdsForMiss()) {
+        this.held = { waited: 0 };
+        return true;
+      }
+      return false;
+    }
     this._animationMissed = false;
 
     // Negative framerate means reverse playback (e.g. door close uses -30fps);
@@ -921,6 +989,45 @@ export class MotionManager {
     return this._animationMissed;
   }
 
+  /** Whether the playing chain waits for a missed node (an action, the death fall, a link into a non-locomotion substate). */
+  private holdsForMiss(): boolean {
+    if (this.chainKind === 'action' || this.chainKind === 'death') return true;
+    return this.chainKind === 'substate' && !LOCOMOTION_SUBSTATES.has(this.currentStance & 0xffff);
+  }
+
+  /** An action / death-fall / gesture node is waiting for its streamed Animation (STREAM.action-held-for-animation). */
+  get isHoldingForAnimation(): boolean {
+    return this.held !== null;
+  }
+
+  /**
+   * The held node's file did not land in time: drop it as whole DATs drop
+   * an action with no animation. An action's chain ends (its callback runs,
+   * dropAction) and the queue behind it plays; a substate change ends on its
+   * cycle; the death fall ends on the Dead cycle, as playDeath does without
+   * a fall.
+   */
+  private giveUpHeld(): void {
+    this.held = null;
+    // The pose on the player is its own (the cycle it was in): nothing for retryMissedAnimation to restart.
+    this._animationMissed = false;
+    const callbacks = [this.nodeSeq?.onComplete, ...this.linkQueue.map((l) => l.onComplete)];
+    const kind = this.chainKind;
+    this.playingAction = false;
+    this.chainKind = null;
+    this.linkQueue = [];
+    this._styleTransitionActive = false;
+    for (const cb of callbacks) cb?.();
+    if (kind === 'death') {
+      const cycle = this.substateCycle(this._deathCycleKey);
+      if (cycle && cycle.anims.length > 0) this.playMotionData(cycle, this.currentSubstateSpeed, true);
+      return;
+    }
+    // A substate change's links end on the new substate's cycle (applySubstate without its links).
+    if (kind === 'substate') this.resumeSubstateCycle();
+    this.playNextAction();
+  }
+
   /**
    * STREAM.initial-motion-not-retried — after a streamed rebuild, put the
    * committed state's cycle on the player when its Animation missed (the
@@ -928,12 +1035,22 @@ export class MotionManager {
    * an open door drawn shut, a corpse standing). The object is already in
    * that state, so the cycle plays without the links that led to it, as
    * removeAllLinkAnimations leaves an object entering the world. A chain
-   * still playing is left to finish: a link that misses is skipped
-   * (advanceFinishedNode) or its action dropped with its callback
-   * (dropAction), and the chain ends on the cycle, which tries again.
-   * Returns whether a cycle was put on the player.
+   * still playing is left to finish: a locomotion or style link that misses
+   * is skipped (advanceFinishedNode), and the chain ends on the cycle, which
+   * tries again. An action, death-fall or non-locomotion substate node
+   * (holdsForMiss: a cast gesture, a door swing) that missed is HELD instead
+   * (STREAM.action-held-for-animation) and plays here, from its first frame.
+   * Returns whether a cycle or a held node was put on the player.
    */
   retryMissedAnimation(): boolean {
+    // STREAM.action-held-for-animation — a held action / fall / gesture plays now that its file landed.
+    if (this.held && this.nodeSeq) {
+      const waited = this.held.waited;
+      this.held = null;
+      this.playNode(this.nodeSeq.index);
+      if (this.held) { (this.held as { waited: number }).waited = waited; return false; }
+      return true;
+    }
     if (!this._animationMissed || !this.motionTable || this.playingAction) return false;
     const key = this._isDead ? this._deathCycleKey : this.currentStance;
     const cycle = this.substateCycle(key);

@@ -93,6 +93,19 @@ describe('every static page', () => {
     expect(d.querySelector('time')?.getAttribute('datetime')?.slice(0, 10)).toBe(path === '/servers/' ? '2026-10-17' : webPage.dateModified);
   });
 
+  it('the Decal / VTank answer names the Enable Decal Plugins switch and its AC1999 default (webac#18)', () => {
+    const answers = PAGES.flatMap((p: { path: string }) => {
+      const faq = ldGraph(page(p.path)).find((n) => n['@type'] === 'FAQPage');
+      return (faq?.mainEntity ?? []).filter((q: { name: string }) => q.name === 'Can I use Decal or VTank?').map((q: { acceptedAnswer: { text: string } }) => q.acceptedAnswer.text);
+    });
+    expect(answers.length).toBeGreaterThan(0);
+    for (const a of answers) {
+      expect(a).toContain('on by default, except on AC1999');
+      expect(a).toContain('Options → Config → UI Options → Enable Decal Plugins');
+      expect(a).toContain("Follow each server's rules on automation");
+    }
+  });
+
   it('every root-relative link and image resolves to a file the site ships (or the game at /)', () => {
     for (const p of PAGES) {
       const d = page(p.path);

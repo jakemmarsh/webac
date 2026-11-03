@@ -143,7 +143,11 @@ describe('the fetch limiter: critical work first, a slow link starts few fetches
     expect(c.started).toHaveLength(2); // one critical still running
     c.release(leafHash(store, 0x01000004));
     await settle();
-    expect(c.started.slice(2).sort()).toEqual([leafHash(store, 0x01000002), leafHash(store, 0x01000003)].sort());
+    // Prefetch next; background only once the link is idle (STREAM.shared-network-link).
+    expect(c.started.slice(2)).toEqual([leafHash(store, 0x01000002)]);
+    c.release(leafHash(store, 0x01000002));
+    await settle();
+    expect(c.started.slice(3)).toEqual([leafHash(store, 0x01000003)]);
     for (const h of c.started) c.release(h);
   });
 
@@ -163,11 +167,14 @@ describe('the fetch limiter: critical work first, a slow link starts few fetches
     const { store } = await streamedSet(c.make, 30, () => t, 20_000);
     c.arm();
     expect(store.link.slow).toBe(false);
-    // The live case: ~1 MB in flight, 25 KB arriving in a second.
-    store.link.begin(1_000_000); t += 1000; store.link.received(25_000);
+    // The live case: ~1 MB in flight, its body arriving at 25 KB a second.
+    const big = store.link.begin(1_000_000); store.link.received(1, big); t += 1000; store.link.received(24_999, big);
     expect(store.link.slow).toBe(true);
-    store.link.end(975_000);
-    expect(store.link.slowBudgetBytes).toBe(Math.max(SLOW_LINK_MIN_INFLIGHT_BYTES, 50_000));
+    store.link.end(975_000, big);
+    // ~25 KB/s (the store's own open adds its few hundred bytes to the window).
+    expect(store.link.rate).toBeGreaterThanOrEqual(25_000);
+    expect(store.link.rate).toBeLessThan(26_000);
+    expect(store.link.slowBudgetBytes).toBe(Math.max(SLOW_LINK_MIN_INFLIGHT_BYTES, 2 * store.link.rate!));
     for (let i = 0; i < 20; i++) void store.request('portal', 0x01000001 + i, FetchPriority.Prefetch);
     await settle();
     // 20 KB each, 50 KB of room: two in flight, not 20 (each would get 1/20 of 25 KB/s, and the game's socket a sliver).
@@ -180,8 +187,9 @@ describe('the fetch limiter: critical work first, a slow link starts few fetches
     expect(c.started[2]).toBe(leafHash(store, 0x01000015));
     expect(c.started).toHaveLength(3);
     // A second at 1 MB/s: healthy again, the rest start as before.
-    store.link.begin(2_000_000); t += 1000; store.link.received(1_000_000);
+    const fast = store.link.begin(2_000_000); store.link.received(1, fast); t += 1000; store.link.received(999_999, fast);
     expect(store.link.slow).toBe(false);
+    store.link.end(1_000_000, fast);
     c.release(c.started[1]);
     await settle();
     c.release(leafHash(store, 0x01000015));
@@ -195,8 +203,8 @@ describe('the fetch limiter: critical work first, a slow link starts few fetches
     let t = 0;
     const { store } = await streamedSet(c.make, 12, () => t);
     c.arm();
-    store.link.begin(1_000_000); t += 1000; store.link.received(10_000);
-    store.link.end(990_000);
+    const big = store.link.begin(1_000_000); store.link.received(1, big); t += 1000; store.link.received(9_999, big);
+    store.link.end(990_000, big);
     expect(store.link.slow).toBe(true);
     for (let i = 0; i < 12; i++) void store.request('portal', 0x01000001 + i, FetchPriority.Prefetch);
     await settle();
@@ -212,17 +220,32 @@ describe('LinkMeter', () => {
     let t = 0;
     const m = new LinkMeter(() => t);
     // 8 small objects (2 KB each) on a cold edge: 16 KB/s, but nothing is queued behind them.
-    m.begin(16_000); t += 1000; m.received(16_000);
+    const small = m.begin(16_000); t += 1000; m.received(16_000, small); m.end(0, small);
     expect(m.slow).toBe(false);
-    // 120 KB/s with 2 MB in flight: saturated and slow.
-    m.begin(2_000_000); t += 1000; m.received(120_000);
+    // 120 KB/s with 2 MB in flight (its body arriving for a second): saturated and slow.
+    const big = m.begin(2_000_000); m.received(1, big); t += 1000; m.received(119_999, big);
     expect(m.slow).toBe(true);
-    expect(m.rate).toBe(120_000);
-    // A stalled link (nothing at all for a second, bytes in flight) stays slow.
+    expect(m.rate).toBe(120_000 + 16_000); // the trickle's bytes crossed the link in this window too
+    // A stalled link (nothing at all for a second, a body in flight) stays slow.
     t += 1000;
     expect(m.slow).toBe(true);
-    t += 1000; m.received(2 * SLOW_LINK_BYTES_PER_S + 1);
+    t += 1000; m.received(2 * SLOW_LINK_BYTES_PER_S + 1, big);
     expect(m.slow).toBe(false);
+  });
+
+  it('latency is not bandwidth: 1 s to every first byte on a fast line never reads as slow (STREAM.link-meter-latency)', () => {
+    let t = 0;
+    const m = new LinkMeter(() => t);
+    // The 2026-11-03 live case: 1 s added to every object fetch on a 4 MB/s line. Each round: four 40 KB
+    // objects start, wait a second for their first byte, then land at once. The wall-clock meter called this
+    // slow (40 KB in a second with 120 KB still in flight) and held every fetch past the 32 KB floor.
+    for (let round = 0; round < 10; round++) {
+      const ids = [0, 1, 2, 3].map(() => m.begin(40_000));
+      t += 1000;
+      for (const id of ids) { m.received(40_000, id); t += 10; m.end(0, id); }
+      expect(m.slow).toBe(false);
+    }
+    expect(m.room(1, 0, 100_000)).toBe(true);
   });
 });
 

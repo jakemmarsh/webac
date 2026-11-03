@@ -37,7 +37,7 @@ export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
   | 'chargen_sent' | 'chargen_blocked'
   | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed'
-  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover' | 'boot_done';
+  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover' | 'boot_done' | 'enter_held';
 
 /**
  * A draining bridge's session moving to the new deployment (session/DrainHandover.ts): why
@@ -626,6 +626,20 @@ export class PreworldReporter {
     this.report('enter_retry', {
       code: code >>> 0,
       token: resume ? 'resume' : 'enter',
+      sinceEnterMs: this.enterAt !== null ? Math.round(this.now() - this.enterAt) : null,
+    });
+  }
+
+  /**
+   * BUG.second-tab-in-world-refusal — what this browser's other tabs answered
+   * after the first "still in the world" refusal of an enter: enter_held with
+   * token 'offer_logout' (a tab holds this account in the world on this
+   * server), 'other_account' (a tab is in the world there under another
+   * account) or 'none' (no tab: the retries go on).
+   */
+  enterHeld(kind: 'none' | 'offer-logout' | 'other-account'): void {
+    this.report('enter_held', {
+      token: kind.replace('-', '_'),
       sinceEnterMs: this.enterAt !== null ? Math.round(this.now() - this.enterAt) : null,
     });
   }

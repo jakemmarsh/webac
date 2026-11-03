@@ -391,6 +391,9 @@ export const LOGIN_REFUSED_TOKENS: ReadonlySet<string> = new Set([
 
 interface CharErrorRow { readonly token: string; readonly surface: ErrorSurface; readonly nextStep?: string }
 
+/** Under ID_CHAR_ERROR_ENTER_GAME_CHARACTER_IN_WORLD, once the quiet retries are spent. */
+export const IN_WORLD_ELSEWHERE_HINT = 'If one of your characters is in the world in another program or on another computer, log out there first.';
+
 /** Pick another character: the next step for a char-select refusal about the chosen one. */
 export const PICK_ANOTHER_CHARACTER_HINT = 'Pick another character.';
 
@@ -409,7 +412,9 @@ const CHAR_ERROR_ROWS: ReadonlyMap<number, CharErrorRow> = new Map<number, CharE
   [CharacterError.AccountDoesntExist, { token: 'ID_CHAR_ERROR_ACCOUNT_DOESNT_EXIST', surface: 'disconnected', nextStep: "Check the account name. If this server needs an account registered first, register on its website." }],
   [CharacterError.EnterGameGeneric, { token: 'ID_CHAR_ERROR_ENTER_GAME_GENERIC', surface: 'dialog', nextStep: PICK_ANOTHER_CHARACTER_HINT }],
   [CharacterError.EnterGameStressAccount, { token: 'ID_CHAR_ERROR_ENTER_GAME_STRESS_ACCOUNT', surface: 'dialog' }],
-  [CharacterError.EnterGameCharacterInWorld, { token: 'ID_CHAR_ERROR_ENTER_GAME_CHARACTER_IN_WORLD', surface: 'dialog' }],
+  // BUG.second-tab-in-world-refusal — shown once the retries ran out (75 s): the holder is no tab
+  // of this browser (those are asked first, session/InWorldHolder.ts), so say where else it can be.
+  [CharacterError.EnterGameCharacterInWorld, { token: 'ID_CHAR_ERROR_ENTER_GAME_CHARACTER_IN_WORLD', surface: 'dialog', nextStep: IN_WORLD_ELSEWHERE_HINT }],
   [CharacterError.EnterGamePlayerAccountMissing, { token: 'ID_CHAR_ERROR_ENTER_GAME_PLAYER_ACCOUNT_MISSING', surface: 'disconnected' }],
   [CharacterError.EnterGameCharacterNotOwned, { token: 'ID_CHAR_ERROR_ENTER_GAME_CHARACTER_NOT_OWNED', surface: 'dialog', nextStep: PICK_ANOTHER_CHARACTER_HINT }],
   [CharacterError.EnterGameCharacterInWorldServer, { token: 'ID_CHAR_ERROR_ENTER_GAME_CHARACTER_IN_WORLD_SERVER', surface: 'dialog' }],

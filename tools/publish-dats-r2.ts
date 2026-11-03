@@ -35,6 +35,19 @@
  *                          (--overlay ac1999) list an AC1999 server's prepared login DAT push in the pointer's
  *                          `serverSeeds` (tools/ac1999-dat-seed.ts builds it; BUG.ac1999-slow-login-ddd-push).
  *                          <id> is the server's launcher world id (the public server: ac1999)
+ *   --effect-weenies <world.sqlite | SQL dir | none>
+ *                          where the effect leaves' weenie roots come from (STREAM.spell-projectile-first-use,
+ *                          tools/lib/effect-leaves.ts): every ProjectileSpell / Missile / Ammunition weenie's
+ *                          Setup / MotionTable / PhysicsEffectTable. Default: the AC1999 SQL tree for
+ *                          --overlay ac1999, else ./dat/world.sqlite (also for classic sets: their servers run the
+ *                          retail weenies; ids the set's portal lacks are skipped). The effect leaves (those, every
+ *                          PhysicsScriptTable's scripts, every animation hook's emitters) go to the common pack.
+ *   --no-effect-waves      leave the effect weenies' and scripts' Waves out of the common pack (they gzip poorly:
+ *                          end of retail ~3.3 MB gz of the effect leaves' ~4.6 MB)
+ *   --effects-only <pointer url>
+ *                          add the effect leaves to a LIVE set's common pack and change nothing else: stages the new
+ *                          common pack, a new area index naming it (the live tiles unchanged) and the live pointer
+ *                          with only `areas` changed (upload with tools/upload-stream-set-r2.ts)
  *   --seed-only <pointer url>
  *                          add --server-seed to a LIVE set and change nothing else: stages the seed object and
  *                          the live pointer plus that seed (upload with tools/upload-stream-set-r2.ts)
@@ -79,7 +92,7 @@
 import { createHash } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,8 +103,9 @@ import { Surface } from '../packages/dat-parser/src/file-types/Surface.js';
 import { SurfaceTexture } from '../packages/dat-parser/src/file-types/SurfaceTexture.js';
 import { Texture } from '../packages/dat-parser/src/file-types/Texture.js';
 import { FileDatBytes } from '../packages/dat-parser/src/node/FileDatBytes.js';
-import { SKELETON_TYPES, buildAreaIndex, parsePack, parseSetManifest } from '../packages/dat-parser/src/streaming/DatSetFormat.js';
+import { SKELETON_TYPES, buildAreaIndex, parseAreaIndex, parsePack, parseSetManifest } from '../packages/dat-parser/src/streaming/DatSetFormat.js';
 import { planAreas } from './lib/area-packs.js';
+import { effectLeavesToAdd, effectWeenieRootsFromSqlDir, effectWeenieRootsFromWorldDb, planEffectLeaves } from './lib/effect-leaves.js';
 import { worldDbRoots } from './lib/world-db-roots.js';
 import { AC1999_UNTRANSLATED_COPIES, ac1999CellOverlay, ac1999PortalOverlay, type Ac1999DatOverlay } from '../packages/dat-parser/src/era1999/Ac1999Overlay.js';
 import { gzipObject, pointerWithServerSeed } from './lib/ac1999-seed.js';
@@ -143,6 +157,8 @@ const worldDbOpt = opt('--world-db', join(REPO, 'dat/world.sqlite'))!;
 const worldDbPath = worldDbOpt === 'none' ? null : resolve(worldDbOpt);
 const areaTile = Number(opt('--area-tile', '4'));
 const areaCommon = Number(opt('--area-common', '512'));
+/** The AC1999 server's weenies (docs/ac1999-support.md: its world imports from this SQL tree). */
+const AC1999_WEENIE_SQL = join(REPO, 'reference/ac1999/Server/Database/AC1999-World/3-Core/9 WeenieDefaults/SQL');
 if (overlayName !== null && overlayName !== 'ac1999') throw new Error(`--overlay: unknown overlay "${overlayName}" (known: ac1999)`);
 /** A world-only set read through the 1999 overlay. */
 const ac1999World = overlayName === 'ac1999';
@@ -156,6 +172,15 @@ const serverSeed = serverSeedArg === null ? null : (() => {
   return { id: serverSeedArg.slice(0, at), payload: new Uint8Array(readFileSync(resolve(serverSeedArg.slice(at + 1)))) };
 })();
 if (serverSeed && !ac1999World && !flag('--seed-only')) throw new Error('--server-seed is for a 1999 world set (--overlay ac1999)');
+
+/** The effect weenies' portal roots (STREAM.spell-projectile-first-use; --effect-weenies). */
+function effectWeenieRoots(): number[] {
+  const src = opt('--effect-weenies', ac1999World ? AC1999_WEENIE_SQL : join(REPO, 'dat/world.sqlite'))!;
+  if (src === 'none') return [];
+  const path = resolve(src);
+  if (!existsSync(path)) throw new Error(`--effect-weenies: ${path} does not exist (pass none to plan the DAT-only effect roots)`);
+  return statSync(path).isDirectory() ? effectWeenieRootsFromSqlDir(path) : effectWeenieRootsFromWorldDb(path);
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 const hash8 = (b: Uint8Array) => createHash('sha256').update(b).digest().subarray(0, 8);
@@ -443,7 +468,9 @@ function buildAreas(dbs: Record<DatName, DatDatabase>, inPacks: ReadonlySet<numb
   const ta = Date.now();
   const region = dbs.portal.getFileData(0x13000000);
   const world = worldDbPath ? worldDbRoots(worldDbPath) : null;
+  const effects = planEffectLeaves({ portal: dbs.portal, weenieRoots: effectWeenieRoots(), onRead, waves: !flag('--no-effect-waves') });
   const plan = planAreas({
+    commonExtra: effects.leaves,
     portal: dbs.portal, cell: dbs.cell, regionDesc: region ? new RegionDesc(new DatReader(region)) : null,
     serverRoots: world?.roots, commonThreshold: areaCommon, tileSize: areaTile, inPacks,
     onProgress: (d, t) => process.stderr.write(`\r[publish] area plan ${d}/${t}`),
@@ -459,7 +486,7 @@ function buildAreas(dbs: Record<DatName, DatDatabase>, inPacks: ReadonlySet<numb
   const index = putObject(buildAreaIndex(areaTile, common ? { ...ref(common), files: plan.common.length } : null, tiles.map(({ tile, p }) => ({ tile, ref: ref(p) }))));
   const tsz = tiles.map((t) => t.p.gzSize).sort((a, b) => a - b);
   const report = `  area packs: ${tiles.length} tiles of ${areaTile}x${areaTile} (${mb(tiles.reduce((s, t) => s + t.p.gzSize, 0))} gz; median ${(tsz[tsz.length >> 1] / 1024).toFixed(0)} KB, max ${mb(tsz[tsz.length - 1])}), `
-    + `${world ? '' : '(no world DB) '}common ${plan.common.length} leaves ${mb(common?.gzSize ?? 0)} gz (> ${areaCommon} landblocks), index ${(index.gzSize / 1024).toFixed(0)} KB gz ${index.key}; planned in ${((Date.now() - ta) / 1000).toFixed(0)} s`;
+    + `${world ? '' : '(no world DB) '}common ${plan.common.length} leaves (with ${effects.leaves.length} effect leaves) ${mb(common?.gzSize ?? 0)} gz (> ${areaCommon} landblocks), index ${(index.gzSize / 1024).toFixed(0)} KB gz ${index.key}; planned in ${((Date.now() - ta) / 1000).toFixed(0)} s`;
   return { index, report };
 }
 
@@ -521,6 +548,77 @@ async function areasOnly(pointerUrl: string): Promise<void> {
 }
 
 /**
+ * --effects-only <pointer url>: add the effect leaves (STREAM.spell-projectile-first-use,
+ * tools/lib/effect-leaves.ts) to a LIVE set's common pack, changing nothing else. The new common
+ * pack is the live one's files plus the effect leaves it lacks (each checked against the live
+ * manifest's hash; a mismatch fetches the published leaf instead); the new area index names it and
+ * keeps every live tile; the new pointer is the live one with only `areas` changed (serverSeeds and
+ * every other key kept). A client then loads the effects with the common pack, in the background
+ * at boot, behind char select. Stages only the new objects and the pointer.
+ */
+async function effectsOnly(pointerUrl: string): Promise<void> {
+  const t0 = Date.now();
+  const base = pointerUrl.slice(0, pointerUrl.indexOf('/v1/sets/'));
+  const get = async (url: string) => { const r = await fetch(url, { cache: 'no-store' }); if (!r.ok) throw new Error(`GET ${url}: HTTP ${r.status}`); return new Uint8Array(await r.arrayBuffer()); };
+  const getObject = async (key: string) => new Uint8Array(gunzipSync(await get(`${base}/${key}`)));
+  const live = JSON.parse(new TextDecoder().decode(await get(pointerUrl))) as {
+    set: string; iterations: Record<string, number>; manifest: { key: string }; packs: Record<string, { key: string }>;
+    areas?: { key: string; size: number; gzSize: number }; [k: string]: unknown;
+  };
+  if (!live.areas) throw new Error(`--effects-only: ${live.set} has no area index (publish it with --areas-only first)`);
+  const index = parseAreaIndex(await getObject(live.areas.key));
+  const commonFiles = new Map<number, Uint8Array>();
+  if (index.common) for (const [id, data] of parsePack(await getObject(`v1/o/${index.common.hash}`)).files) commonFiles.set(id >>> 0, data);
+  const inPacks = new Set<number>();
+  for (const role of ['boot', 'world', 'ui']) {
+    const ref = live.packs[role];
+    if (ref) for (const id of parsePack(await getObject(ref.key)).ids) inPacks.add(id >>> 0);
+  }
+  const manifestLeaves = parseSetManifest(await getObject(live.manifest.key)).leaves.portal;
+  const portal = new DatDatabase(new FileDatBytes(join(datDir, SET_FILES.portal!)));
+  let overlay: Ac1999DatOverlay | null = null;
+  if (ac1999World) { overlay = ac1999PortalOverlay({ onError: () => {} }); portal.setOverlay(overlay); }
+  if (iterationOf(portal) !== live.iterations.portal) {
+    throw new Error(`--effects-only: ${join(datDir, SET_FILES.portal!)} is iteration ${iterationOf(portal)}, the live set ${live.set} is ${live.iterations.portal} (wrong --dat-dir?)`);
+  }
+  let reads = 0;
+  const onRead = () => { if (overlay && ++reads % 512 === 0) overlay.clearCache(); };
+  const effects = planEffectLeaves({ portal, weenieRoots: effectWeenieRoots(), onRead, waves: !flag('--no-effect-waves') });
+  const add = effectLeavesToAdd(effects.leaves, { manifestLeaves, inPacks, commonIds: new Set(commonFiles.keys()) });
+  let fetched = 0, addRaw = 0, waveRaw = 0;
+  const waveIds = new Set(effects.waves);
+  for (const id of add) {
+    const want = manifestLeaves.get(id)!.hash;
+    onRead();
+    const local = portal.getFileData(id);
+    let data = local ? new Uint8Array(local) : null;
+    if (!data || hex(hash8(data)) !== want) { data = await getObject(`v1/o/${want}`); fetched++; }
+    if (hex(hash8(data)) !== want) throw new Error(`--effects-only: leaf 0x${id.toString(16)} does not match the live manifest's ${want}`);
+    commonFiles.set(id, data);
+    addRaw += data.length;
+    if (waveIds.has(id)) waveRaw += data.length;
+  }
+  // upload-stream-set-r2.ts names the pointer after the stage dir, so the dir is the set's own name.
+  stageDir = resolve(opt('--stage', join(tmpdir(), 'acjs-dat-publish', 'effects', live.set))!);
+  if (basename(stageDir) !== live.set) throw new Error(`--stage: the dir must be named ${live.set} (upload-stream-set-r2.ts names the pointer after it)`);
+  writeStage = true;
+  mkdirSync(join(stageDir, 'v1/o'), { recursive: true });
+  mkdirSync(join(stageDir, 'v1/sets'), { recursive: true });
+  const common = putObject(buildPack([...commonFiles].map(([id, data]) => ({ id, data }))));
+  const newIndex = putObject(buildAreaIndex(index.tileSize, { hash: hex(common.hash), size: common.size, gzSize: common.gzSize, files: commonFiles.size },
+    [...index.areas].map(([tile, ref]) => ({ tile, ref }))));
+  const pointer = { ...live, areas: { key: newIndex.key, size: newIndex.size, gzSize: newIndex.gzSize } };
+  writeFileSync(join(stageDir, `v1/sets/${live.set}.json`), JSON.stringify(pointer, null, 2) + '\n');
+  const kb = (n: number) => `${(n / 1024).toFixed(0)} KB`;
+  console.log(`\neffects for live set ${live.set}: ${effects.leaves.length} effect leaves (roots: ${effects.roots.weenies} weenie ids, ${effects.roots.tables} tables, ${effects.roots.hookEmitters} animation-hook emitters)`);
+  console.log(`  ${add.length} added to the common pack (${kb(addRaw)} raw; ${effects.leaves.length - add.length} already resident in boot / world / ui / common or not in the set; ${fetched} fetched from the bucket); of them Waves: ${add.filter((id) => waveIds.has(id)).length}, ${kb(waveRaw)} raw`);
+  console.log(`  common pack: ${index.common ? `${index.common.files} files ${kb(index.common.gzSize)} gz` : 'none'} → ${commonFiles.size} files ${kb(common.gzSize)} gz  ${common.key}`);
+  console.log(`  area index: ${live.areas.key} → ${newIndex.key} (${index.areas.size} tiles unchanged)`);
+  console.log(`  staged ${objects.size} objects + the pointer in ${stageDir} (${((Date.now() - t0) / 1000).toFixed(0)} s)`);
+  console.log(`  upload: UPLOAD_KEY=… npx tsx tools/upload-stream-set-r2.ts <worker url> --no-pointer ${stageDir}   (objects), then without --no-pointer (the flip)`);
+}
+
+/**
  * --seed-only <pointer url>: list --server-seed in a set that is already live, changing nothing
  * else (the live pointer plus `serverSeeds`). Stages the seed object and the pointer; upload with
  * tools/upload-stream-set-r2.ts.
@@ -568,6 +666,8 @@ function uploadCommands(setName: string): string[][] {
 
 const areasOnlyUrl = opt('--areas-only');
 const seedOnlyUrl = opt('--seed-only');
-if (areasOnlyUrl) void areasOnly(areasOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
+const effectsOnlyUrl = opt('--effects-only');
+if (effectsOnlyUrl) void effectsOnly(effectsOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
+else if (areasOnlyUrl) void areasOnly(areasOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
 else if (seedOnlyUrl) void seedOnly(seedOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
 else main();

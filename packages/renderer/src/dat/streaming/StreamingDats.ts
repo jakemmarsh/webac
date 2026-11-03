@@ -167,6 +167,8 @@ export interface OpenStreamingOptions {
   onBootPacks?: (store: DatStore) => void;
   /** DatStore LRU bound (default DEFAULT_RESIDENT_CAP_BYTES). */
   residentCapBytes?: number;
+  /** The page's network link, shared with its other streamed sets (DatStore NetworkLink). */
+  network?: DatStoreOptions['network'];
   /**
    * Which side of the game this set serves (StreamScope). Default 'all'.
    */
@@ -231,6 +233,7 @@ async function openStreamingDatsWatched(opts: OpenStreamingOptions, watch: Retur
     ...(opts.fetchObject ? { fetchObject: opts.fetchObject } : {}),
     ...(opts.fetchPointer ? { fetchPointer: opts.fetchPointer } : {}),
     ...(opts.residentCapBytes !== undefined ? { residentCapBytes: opts.residentCapBytes } : {}),
+    ...(opts.network ? { network: opts.network } : {}),
     onProgress: (done, total) => { firstDone = done; firstTotal = total; opts.onProgress?.(done, total); },
     // The splash draws from boot + local: as soon as both are in, not after the skeleton.
     onPackResident: (_role, s) => {

@@ -149,25 +149,54 @@ export const SLOW_LINK_INFLIGHT_SECONDS = 2;
 export const SLOW_LINK_MIN_INFLIGHT_BYTES = 32 * 1024;
 
 /**
+ * STREAM.first-byte-stall (2026-11-03): a fetch that has received nothing
+ * this long, while the link delivered at least FIRST_BYTE_STALL_LINK_BYTES to
+ * other fetches meanwhile and the LinkMeter does not call the link slow (a
+ * saturated slow line queues first bytes for real), is stopped and
+ * asked for again at once (once per object; not one of its retries). Throttled cold logins (CDP
+ * 150 ms + 10 Mbit/s) met one object per portal-space gate whose first byte
+ * took 3-16 s on dats.playwebac.com (a 22 KB leaf held an end-of-retail login
+ * gate 13 s with nothing else left to fetch); objects are immutable and
+ * content-addressed, so a second request is always safe.
+ */
+export const FIRST_BYTE_STALL_MS = 4000;
+export const FIRST_BYTE_STALL_LINK_BYTES = 64 * 1024;
+
+/**
  * BUG.slow-link-fetch-flood (2026-10-20, live at 25 KB/s): 96 fetches in
  * flight split a slow link 96 ways, so no object landed for minutes (the
  * gate saw no progress) and the game's WebSocket got a sliver of the link
  * (the session dropped and resumed twice). LinkMeter watches the bytes in
- * flight and the rate they arrive at, one-second windows while anything is
- * in flight: a saturated window under SLOW_LINK_BYTES_PER_S marks the link
- * slow, any window at twice that marks it healthy again.
+ * flight and the rate they arrive at, in windows of one second of BODY time
+ * (while some fetch's body is arriving): a saturated window under
+ * SLOW_LINK_BYTES_PER_S marks the link slow, any window at twice that marks it
+ * healthy again.
+ *
+ * STREAM.link-meter-latency (2026-11-03): the windows were wall-clock seconds
+ * from a fetch's start, so the wait for first bytes counted as a slow link.
+ * With 1 s added to every object fetch on a 4 MB/s line the meter called the
+ * link slow in 154 of 159 in-world samples, which held every fetch past the
+ * 32 KB floor behind the one running (docs/dat-streaming.md §6.15). Latency
+ * is not bandwidth: time before a body's first byte is not counted.
  */
 export class LinkMeter {
   private inflight = 0;
-  private winStart: number | null = null;
+  /** Body bytes received over the link's life (any fetch). */
+  totalReceived = 0;
+  /** Fetches whose body is arriving (a byte came, not ended yet). */
+  private readonly bodies = new Set<number>();
+  private nextId = 1;
+  /** The current window: body-flowing time (ms) and the bytes received in it. */
+  private winBodyMs = 0;
   private winBytes = 0;
+  private lastT: number | null = null;
   private _slow = false;
   /** The last window's rate, bytes/s (null before one closed). */
   rate: number | null = null;
 
   constructor(private readonly now: () => number) {}
 
-  get slow(): boolean { this.roll(); return this._slow; }
+  get slow(): boolean { this.tick(); this.roll(); return this._slow; }
   get inflightBytes(): number { return this.inflight; }
   /** While slow: the bytes that may be in flight. */
   get slowBudgetBytes(): number {
@@ -179,38 +208,48 @@ export class LinkMeter {
     return this.inflight + starting + bytes <= this.slowBudgetBytes;
   }
 
-  /** A network fetch of `bytes` (its expected size) started. */
-  begin(bytes: number): void {
-    this.roll();
-    if (this.inflight <= 0) { this.inflight = 0; this.winStart = this.now(); this.winBytes = 0; }
+  /** A network fetch of `bytes` (its expected size) started. Returns its id for received / end. */
+  begin(bytes: number): number {
+    this.tick();
+    if (this.inflight <= 0) this.inflight = 0;
     this.inflight += Math.max(0, bytes);
+    return this.nextId++;
   }
 
-  /** `n` body bytes arrived. */
-  received(n: number): void {
+  /** `n` body bytes of fetch `id` arrived. */
+  received(n: number, id = 0): void {
     if (!(n > 0)) return;
+    this.tick();
+    this.bodies.add(id);
+    this.totalReceived += n;
     this.winBytes += n;
     this.inflight = Math.max(0, this.inflight - n);
     this.roll();
   }
 
-  /** A fetch ended (landed or failed) with `unreceived` of its expected bytes never arriving. */
-  end(unreceived: number): void {
+  /** Fetch `id` ended (landed or failed) with `unreceived` of its expected bytes never arriving. */
+  end(unreceived: number, id = 0): void {
+    this.tick();
+    this.bodies.delete(id);
     this.inflight = Math.max(0, this.inflight - Math.max(0, unreceived));
     this.roll();
   }
 
-  private roll(): void {
-    if (this.winStart === null) return;
+  /** Body time accrues while any body is arriving (the wait for first bytes is latency, not bandwidth). */
+  private tick(): void {
     const t = this.now();
-    const ms = t - this.winStart;
-    if (ms < 1000) return;
-    const rate = this.winBytes / (ms / 1000);
+    if (this.lastT !== null && this.bodies.size > 0) this.winBodyMs += t - this.lastT;
+    this.lastT = t;
+  }
+
+  private roll(): void {
+    if (this.winBodyMs < 1000) return;
+    const rate = this.winBytes / (this.winBodyMs / 1000);
     this.rate = rate;
     // Saturated: the bytes still in flight are more than ~2 s of this rate.
     if (rate >= 2 * SLOW_LINK_BYTES_PER_S) this._slow = false;
     else if (rate < SLOW_LINK_BYTES_PER_S && this.inflight > 2 * rate) this._slow = true;
-    this.winStart = this.inflight > 0 ? t : null;
+    this.winBodyMs = 0;
     this.winBytes = 0;
   }
 }
@@ -272,6 +311,15 @@ export interface DatStoreStats {
   /** Leaves / bundles evicted, and their payload bytes. */
   evictions: number;
   evictedBytes: number;
+  /**
+   * Background downloads stopped part-way because a portal-space gate began
+   * (NetworkLink.holdBackground) and queued again behind it, and the body
+   * bytes they had received (fetched again later).
+   */
+  yields: number;
+  yieldedBytes: number;
+  /** Attempts stopped with no first byte after FIRST_BYTE_STALL_MS while the link moved (asked again). */
+  stalls: number;
 }
 
 /** Collects the files a synchronous build missed (DatStore.beginScope / endScope). */
@@ -289,8 +337,14 @@ export interface DatStoreOptions {
   /** One pointer attempt's limit before it is tried again (default POINTER_ATTEMPT_TIMEOUT_MS). */
   pointerTimeoutMs?: number;
   cache?: ObjectCache;
-  /** Concurrent network fetches (HTTP/2 streams; default DEFAULT_MAX_CONCURRENT). */
+  /** Concurrent network fetches (HTTP/2 streams; default DEFAULT_MAX_CONCURRENT). Ignored with `network`. */
   maxConcurrent?: number;
+  /**
+   * The page's one network link, shared by every store whose objects come
+   * over it (AC1999's interface and world sets: NetworkLink). Default: a
+   * link of this store's own.
+   */
+  network?: NetworkLink;
   /** Check each payload's sha256 prefix against its key (default true). */
   verifyHash?: boolean;
   /** Packs to load before open() resolves (default: all five). */
@@ -333,6 +387,14 @@ class Ticket {
   wake: (() => void) | null = null;
   /** The network download's expected size (gzip bytes), for the slow-link rule. */
   bytes = 0;
+  /** Aborts the running network attempt (set while one runs). */
+  abort: AbortController | null = null;
+  /** Body bytes the running attempt has received. */
+  received = 0;
+  /** The running attempt was stopped for a portal-space gate (NetworkLink.holdBackground), not failed. */
+  yielded = false;
+  /** The running attempt was stopped: no first byte in FIRST_BYTE_STALL_MS while the link moved (STREAM.first-byte-stall). */
+  stalled = false;
   constructor(public priority: FetchPriority) {}
   promote(priority: FetchPriority): void {
     if (priority >= this.priority) return;
@@ -347,6 +409,8 @@ interface LimiterPolicy {
   room(running: number, starting: number, bytes: number): boolean;
   /** Non-critical work waits while critical work is running or queued. */
   holdNonCritical: boolean;
+  /** Background work does not start (NetworkLink.holdBackground). */
+  backgroundHeld?: () => boolean;
 }
 
 /**
@@ -354,8 +418,9 @@ interface LimiterPolicy {
  * limiter): prefetch and background work do not start while a critical load
  * (a portal-space gate, a miss) runs or waits, so a gate gets the link to
  * itself, and on a slow link a fetch starts only while the bytes in flight
- * fit SLOW_LINK_INFLIGHT_SECONDS of it (LinkMeter.room).
- * Work already running is never cut off.
+ * fit SLOW_LINK_INFLIGHT_SECONDS of it (LinkMeter.room). Background work
+ * starts only on an idle link (no critical or prefetch work running).
+ * Work already running is cut off only by yieldBackground (a gate began).
  */
 class Limiter {
   private readonly active = new Set<Ticket>();
@@ -370,9 +435,21 @@ class Limiter {
     return false;
   }
 
+  /** Critical or prefetch work is running (it may be waking: counted in active). */
+  private foregroundRunning(): boolean {
+    for (const t of this.active) if (t.priority !== FetchPriority.Background) return true;
+    return false;
+  }
+
   private canStart(ticket: Ticket, priority: FetchPriority = ticket.priority): boolean {
     if (this.active.size >= this.max) return false;
     if (!this.policy) return true;
+    if (priority === FetchPriority.Background) {
+      // Warm-fill uses an idle link only (STREAM.shared-network-link): not while a gate holds, and not
+      // beside critical or prefetch work (the 1999 world's common pack slowed the login's world pack).
+      if (this.policy.backgroundHeld?.()) return false;
+      if (this.policy.holdNonCritical && this.foregroundRunning()) return false;
+    }
     if (this.policy.holdNonCritical && priority !== FetchPriority.Critical && this.criticalWaiting()) return false;
     let starting = 0;
     for (const t of this.waking) starting += t.bytes;
@@ -424,15 +501,95 @@ class Limiter {
     this.queues[priority].push(ticket);
     this.pump();
   }
+  /**
+   * Stop every running background download with more than `keepBytes` still
+   * to come (its owner queues it again: DatStore.fetchAndVerify); one nearly
+   * done finishes.
+   */
+  yieldBackground(keepBytes = 0): number {
+    let n = 0;
+    for (const t of this.active) {
+      if (t.priority !== FetchPriority.Background || !t.abort) continue;
+      if (t.bytes - t.received <= keepBytes) continue;
+      t.yielded = true;
+      t.abort.abort();
+      n++;
+    }
+    return n;
+  }
   get pending(): number { return this.queues[0].length + this.queues[1].length + this.queues[2].length; }
   get running(): number { return this.active.size; }
+}
+
+/**
+ * STREAM.shared-network-link (2026-11-03): the one network link every
+ * streamed set's objects come over (one HTTP/2 connection to the set host).
+ * Its fetch limiter and LinkMeter used to be per DatStore, so AC1999's two
+ * sets (end of retail's interface, the 1999 world) ran 2 × 96 fetches, each
+ * store's critical-first rule could not see the other's gate, and each
+ * LinkMeter measured half the link: the world store judged a 10 Mbit/s link
+ * "slow" while the interface's 23 MB world pack took the bandwidth.
+ *
+ * holdBackground: while a portal-space gate holds the player, background
+ * warm-fill (the area common pack, Wave prefetch) does not start, and what is
+ * already downloading stops and queues again behind the gate. The limiter
+ * never pre-empts running work, so the common pack (8.3 MB in end of retail)
+ * that began just before a cold login shared the link with the gate's own
+ * downloads for its whole length: +6.7 s at 10 Mbit/s, measured. Its bytes so
+ * far are fetched again later (stats.yieldedBytes); a browser player's link
+ * (and Chrome's throttling) splits bandwidth between streams regardless of
+ * their priority hints.
+ */
+/** A background download this close to done is left to finish when a gate begins (holdBackground). */
+export const BACKGROUND_YIELD_KEEP_BYTES = 256 * 1024;
+
+export class NetworkLink {
+  readonly meter: LinkMeter;
+  /** @internal DatStore's network limiter. */
+  readonly limiter: Limiter;
+  private holds = 0;
+
+  constructor(opts: { maxConcurrent?: number; now?: () => number } = {}) {
+    const now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
+    const meter = this.meter = new LinkMeter(now);
+    this.limiter = new Limiter(opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT, {
+      room: (running, starting, bytes) => meter.room(running, starting, bytes),
+      holdNonCritical: true,
+      backgroundHeld: () => this.holds > 0,
+    });
+  }
+
+  /** Whether background downloads are held (a gate is holding). */
+  get backgroundHeld(): boolean { return this.holds > 0; }
+
+  /** Network fetches running / queued (every store on the link). */
+  get running(): number { return this.limiter.running; }
+  get pending(): number { return this.limiter.pending; }
+
+  /**
+   * Hold background downloads (a portal-space gate began): running ones stop
+   * and queue again, none start until every hold is released. Returns the
+   * release (idempotent).
+   */
+  holdBackground(): () => void {
+    this.holds++;
+    // One that would land within about a second at the link's rate finishes (its bytes are not thrown away).
+    if (this.holds === 1) this.limiter.yieldBackground(Math.max(BACKGROUND_YIELD_KEEP_BYTES, this.meter.rate ?? 0));
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.holds--;
+      if (this.holds === 0) this.limiter.pump();
+    };
+  }
 }
 
 export class DatStore {
   readonly stats: DatStoreStats = {
     netObjects: 0, netBytes: 0, netReceivedBytes: 0, cacheObjects: 0, cacheBytes: 0, misses: 0, missesByType: {}, failures: 0, retries: 0, unresolvedMisses: 0,
     cacheMisses: 0, cacheReadMs: 0, cacheReadMaxMs: 0, inflateMs: 0,
-    residentBytes: 0, packBytes: 0, evictableBytes: 0, evictions: 0, evictedBytes: 0,
+    residentBytes: 0, packBytes: 0, evictableBytes: 0, evictions: 0, evictedBytes: 0, yields: 0, yieldedBytes: 0, stalls: 0,
   };
   /** Resident file bytes per DAT (views into packs / bundles / leaf payloads). */
   private readonly resident: Record<DatName, Map<number, Uint8Array>> = { portal: new Map(), cell: new Map(), local: new Map(), highres: new Map() };
@@ -458,6 +615,8 @@ export class DatStore {
   private readonly dbs = new Map<DatName, DatDatabase>();
   private readonly limiter: Limiter;
   private readonly disk = new Limiter(32);
+  /** The network link this store fetches over (shared with the page's other sets). */
+  readonly network: NetworkLink;
   /** The network link's state (LinkMeter): a slow link starts fewer fetches. */
   readonly link: LinkMeter;
   private readonly fetchObject: ObjectFetcher;
@@ -489,12 +648,9 @@ export class DatStore {
     this.residentCap = opts.residentCapBytes ?? DEFAULT_RESIDENT_CAP_BYTES;
     this.minResidentAge = opts.minResidentAgeMs ?? DEFAULT_MIN_RESIDENT_AGE_MS;
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
-    this.link = new LinkMeter(this.now);
-    const link = this.link;
-    this.limiter = new Limiter(opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT, {
-      room: (running, starting, bytes) => link.room(running, starting, bytes),
-      holdNonCritical: true,
-    });
+    this.network = opts.network ?? new NetworkLink({ maxConcurrent: opts.maxConcurrent, now: this.now });
+    this.link = this.network.meter;
+    this.limiter = this.network.limiter;
   }
 
   /** The parsed binary manifest (leaf / pack / bundle tables). */
@@ -1068,29 +1224,45 @@ export class DatStore {
     const url = `${this.baseUrl}/${objectKey(ref.hash)}`;
     let lastErr: unknown = null;
     ticket.bytes = ref.gzSize;
+    let resumeAfterYield = false;
+    let stallRetried = false;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
-      if (attempt > 0) {
+      if (attempt > 0 && !resumeAfterYield) {
         this.stats.retries++;
         await new Promise((r) => setTimeout(r, 250 * 2 ** (attempt - 1)));
       }
+      resumeAfterYield = false;
+      let got = 0;
       try {
         const gz = await this.limiter.run(ticket, async () => {
-          let got = 0;
-          this.link.begin(ref.gzSize);
+          got = 0;
+          ticket.received = 0;
+          const linkId = this.link.begin(ref.gzSize);
           const onBytes = (n: number): void => {
             if (!(n > 0)) return;
             got += n;
+            ticket.received = got;
             this.stats.netReceivedBytes += n;
-            this.link.received(n);
+            this.link.received(n, linkId);
           };
+          const abort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          ticket.abort = abort;
+          const linkAtStart = this.link.totalReceived;
+          const stallTimer = abort && !stallRetried ? setTimeout(() => {
+            if (got === 0 && !this.link.slow && this.link.totalReceived - linkAtStart >= FIRST_BYTE_STALL_LINK_BYTES) { ticket.stalled = true; abort.abort(); }
+          }, FIRST_BYTE_STALL_MS) : null;
           try {
-            const bytes = await this.fetchObject(url, { priority: ticket.priority, onBytes });
+            const bytes = await this.fetchObject(url, { priority: ticket.priority, onBytes, ...(abort ? { signal: abort.signal } : {}) });
             if (bytes.byteLength > got) onBytes(bytes.byteLength - got); // a fetcher that reports nothing (or not all)
             return bytes;
           } finally {
-            this.link.end(ref.gzSize - got);
+            if (stallTimer !== null) clearTimeout(stallTimer);
+            ticket.abort = null;
+            this.link.end(ref.gzSize - got, linkId);
           }
         });
+        ticket.yielded = false; // landed before the abort took effect
+        ticket.stalled = false;
         if (gz.byteLength !== ref.gzSize) throw new Error(`${ref.hash}: got ${gz.byteLength} bytes, manifest says ${ref.gzSize}`);
         const payload = await this.inflateChecked(gz, ref);
         this.stats.netObjects++;
@@ -1098,6 +1270,25 @@ export class DatStore {
         void this.cache.put(ref.hash, gz);
         return payload;
       } catch (err) {
+        const yielded = ticket.yielded, stalled = ticket.stalled;
+        ticket.yielded = false;
+        ticket.stalled = false;
+        if (yielded) {
+          // Stopped for a portal-space gate: not a failure. Queue again (held until the gate releases).
+          this.stats.yields++;
+          this.stats.yieldedBytes += got;
+          attempt--;
+          resumeAfterYield = true;
+          continue;
+        }
+        if (stalled) {
+          // No first byte while the link moved: ask again at once, once per object (not an attempt).
+          this.stats.stalls++;
+          stallRetried = true;
+          attempt--;
+          resumeAfterYield = true;
+          continue;
+        }
         lastErr = err;
       }
     }

@@ -362,3 +362,36 @@ describe('the teleport loop keeps running when rAF stops (hidden tab)', () => {
     expect(frames.size).toBe(0);
   });
 });
+
+describe('the "In Portal Space" notice after arrival (checked, retail; 2026-11-03 throttled-login follow-up)', () => {
+  // gmSmartBoxUI::UseTime @ 004d6e30 posts the notice at every roll segment in TAS_TUNNEL_FADE_IN, TUNNEL,
+  // TUNNEL_CONTINUE and TUNNEL_FADE_OUT, and gmSpewBoxUI's item lives 5 s (SPEW_ITEM_LIFETIME_MS, the item
+  // template's timer). So a line posted in the zoom-out stays up to ~3-4 s into the world: seen 2 s after
+  // entering the world in a throttled AC1999 login (hold-ac1999-cast-400ms.png), not an ordering bug.
+  it('notices post through TUNNEL_FADE_OUT and never once the tunnel is torn down', () => {
+    for (let seed = 1; seed <= 40; seed++) {
+      let a = seed;
+      const rand = () => { a = (a * 1103515245 + 12345) % 2147483648; return a / 2147483648; };
+      const anim = new TeleportAnimation(rand);
+      anim.begin(TeleportAnimState.Tunnel, 0);
+      let lastPost = -1, hiddenAt = -1, offAt = -1, fadeOutPosts = 0;
+      for (let t = 0; t < 20 && offAt < 0; t += 1 / 60) {
+        if (t >= 3 && anim.state === TeleportAnimState.Tunnel) anim.end(t);
+        const before = anim.state;
+        const f = anim.update(t, Math.floor(t * 40) % 120);
+        if (f.postNotice) {
+          expect(hiddenAt).toBe(-1);
+          lastPost = t;
+          if (before === TeleportAnimState.TunnelFadeOut) fadeOutPosts++;
+        }
+        if (f.tunnelHidden) hiddenAt = t;
+        if (f.finished) offAt = t;
+      }
+      expect(offAt).toBeGreaterThan(0);
+      // The last post comes within one roll segment (< 1.8 s) of the release, then the zoom-out (1 s) and
+      // the world zoom-in (1 s): so the last 5 s spew line outlives TAS_OFF by about 1.2-4 s.
+      expect(offAt - lastPost).toBeLessThan(2 + 1.8 + 2 / 60);
+      expect(fadeOutPosts).toBeLessThanOrEqual(2);
+    }
+  });
+});

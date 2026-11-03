@@ -70,6 +70,60 @@ export function accountSessionKey(connectUrl: string, account: string): string {
   return `${server}|${account.trim().toLowerCase()}`;
 }
 
+/** The server part of an accountSessionKey (everything before the account). */
+export function serverOfSessionKey(key: string): string {
+  const i = key.lastIndexOf('|');
+  return i < 0 ? key : key.slice(0, i);
+}
+
+/**
+ * BUG.second-tab-in-world-refusal — "is any tab of this browser in the world
+ * on this server?", asked after the server refused an enter with "one of your
+ * characters is still in the world" (CharacterError 0x0D).
+ */
+export interface WorldPresenceQuery {
+  kind: 'webac-world-query';
+  /** serverOfSessionKey of the asking tab's key. */
+  server: string;
+  tab: string;
+  id: string;
+}
+
+/** A tab in the world on the queried server answers with its key and character. */
+export interface WorldPresenceReply {
+  kind: 'webac-world-presence';
+  /** The query answered. */
+  id: string;
+  /** The asking tab. */
+  to: string;
+  tab: string;
+  key: string;
+  character: string | null;
+}
+
+/**
+ * The player chose "log out the other tab and enter here": sent to one tab,
+ * under the key both tabs hold (the same server AND account), and acted on
+ * only by that tab while it holds that key in the world.
+ */
+export interface LogoutRequest {
+  kind: 'webac-logout-request';
+  key: string;
+  to: string;
+  from: string;
+}
+
+/** A tab of this browser in the world on the same server (WorldPresenceReply, read). */
+export interface WorldHolder {
+  tab: string;
+  character: string | null;
+  /** It holds the same server + account as the asking tab. */
+  sameAccount: boolean;
+}
+
+/** How long a world query waits for answers (BroadcastChannel delivery is a task away; a busy tab answers in a frame or two). */
+export const WORLD_QUERY_WAIT_MS = 400;
+
 function isClaim(v: unknown): v is AccountTabClaim {
   const c = v as Partial<AccountTabClaim> | null;
   return !!c && c.kind === 'webac-account-claim' && typeof c.key === 'string' && typeof c.tab === 'string' && typeof c.at === 'number';
@@ -97,14 +151,30 @@ export interface AccountTabGuardOptions {
   channel: SessionChannelLike | null;
   /** Another tab logged in to the key this tab held: stop retrying, close the session, say why. */
   onStandDown: (key: string) => void;
+  /**
+   * BUG.second-tab-in-world-refusal — another tab of this browser, entering
+   * the world on the same server and account, asked this tab to log out
+   * (its player chose to). The guard has already let the key go.
+   */
+  onLogoutRequested?: (key: string) => void;
+  /**
+   * This tab's character in the world under the key it holds, or null when
+   * it is not in the world (main.ts reads SessionLifecycle.inWorld). Without
+   * it the tab never counts as in the world.
+   */
+  worldCharacter?: () => { name: string | null } | null;
   tabId?: string;
   now?: () => number;
+  /** Timers (tests). */
+  setTimeout?: (fn: () => void, ms: number) => unknown;
 }
 
 export class AccountTabGuard {
   readonly tabId: string;
   private held: { key: string; at: number } | null = null;
   private readonly now: () => number;
+  private readonly pending = new Map<string, { server: string; key: string; holders: WorldHolder[] }>();
+  private querySeq = 0;
 
   constructor(private readonly opts: AccountTabGuardOptions) {
     this.tabId = opts.tabId ?? randomTabId();
@@ -131,6 +201,46 @@ export class AccountTabGuard {
     this.held = null;
   }
 
+  /** This tab holds `heldKey` with a character in the world. */
+  get inWorld(): boolean {
+    return this.held !== null && this.opts.worldCharacter?.() != null;
+  }
+
+  /**
+   * BUG.second-tab-in-world-refusal — the tabs of this browser in the world
+   * on the server `key` names (any account), answered within `waitMs`. No
+   * channel (an old browser): none.
+   */
+  queryWorldHolders(key: string, waitMs: number = WORLD_QUERY_WAIT_MS): Promise<WorldHolder[]> {
+    const channel = this.opts.channel;
+    if (!channel) return Promise.resolve([]);
+    const id = `${this.tabId}:${++this.querySeq}`;
+    const server = serverOfSessionKey(key);
+    const entry = { server, key, holders: [] as WorldHolder[] };
+    this.pending.set(id, entry);
+    const query: WorldPresenceQuery = { kind: 'webac-world-query', server, tab: this.tabId, id };
+    try { channel.postMessage(query); } catch { this.pending.delete(id); return Promise.resolve([]); }
+    const later = this.opts.setTimeout ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
+    return new Promise((resolve) => {
+      later(() => {
+        this.pending.delete(id);
+        resolve(entry.holders);
+      }, waitMs);
+    });
+  }
+
+  /**
+   * Ask the tab `holder` (a sameAccount answer to queryWorldHolders) to log
+   * out. Only ever for a holder of this tab's own key: false (nothing sent)
+   * for any other account, or when this tab holds no key.
+   */
+  requestLogout(holder: WorldHolder): boolean {
+    if (!holder.sameAccount || !this.held || holder.tab === this.tabId) return false;
+    const req: LogoutRequest = { kind: 'webac-logout-request', key: this.held.key, to: holder.tab, from: this.tabId };
+    try { this.opts.channel?.postMessage(req); } catch { return false; }
+    return true;
+  }
+
   /** Claim on each socket's first frame from the server, under the key the page names now. */
   watch(connection: ClaimSource, key: () => string | null): void {
     connection.on((event) => {
@@ -141,6 +251,10 @@ export class AccountTabGuard {
   }
 
   private receive(data: unknown): void {
+    const kind = (data as { kind?: unknown } | null)?.kind;
+    if (kind === 'webac-world-query') { this.answerWorldQuery(data as WorldPresenceQuery); return; }
+    if (kind === 'webac-world-presence') { this.collectWorldPresence(data as WorldPresenceReply); return; }
+    if (kind === 'webac-logout-request') { this.receiveLogoutRequest(data as LogoutRequest); return; }
     if (!isClaim(data) || !this.held) return;
     if (data.tab === this.tabId || data.key !== this.held.key) return;
     // Two claims crossed: the later one wins (the tab id breaks a tie), and
@@ -151,5 +265,34 @@ export class AccountTabGuard {
     this.held = null;
     console.log('[AC] another tab logged in to this account: this tab stands down');
     this.opts.onStandDown(key);
+  }
+
+  private answerWorldQuery(q: WorldPresenceQuery): void {
+    if (typeof q.server !== 'string' || typeof q.tab !== 'string' || typeof q.id !== 'string') return;
+    if (q.tab === this.tabId || !this.held) return;
+    const world = this.opts.worldCharacter?.();
+    if (!world || serverOfSessionKey(this.held.key) !== q.server) return;
+    const reply: WorldPresenceReply = {
+      kind: 'webac-world-presence', id: q.id, to: q.tab, tab: this.tabId, key: this.held.key, character: world.name,
+    };
+    try { this.opts.channel?.postMessage(reply); } catch { /* a closed channel: nothing to answer */ }
+  }
+
+  private collectWorldPresence(r: WorldPresenceReply): void {
+    if (r.to !== this.tabId || typeof r.key !== 'string' || typeof r.tab !== 'string') return;
+    const entry = this.pending.get(r.id);
+    if (!entry || serverOfSessionKey(r.key) !== entry.server) return;
+    if (entry.holders.some((h) => h.tab === r.tab)) return;
+    entry.holders.push({ tab: r.tab, character: typeof r.character === 'string' ? r.character : null, sameAccount: r.key === entry.key });
+  }
+
+  private receiveLogoutRequest(r: LogoutRequest): void {
+    if (r.to !== this.tabId || r.from === this.tabId) return;
+    // Only the exact key this tab holds (same server AND account), and only from the world.
+    if (!this.held || r.key !== this.held.key || !this.inWorld) return;
+    const key = this.held.key;
+    this.held = null;
+    console.log('[AC] another tab of this account asked to enter the world: this tab logs out');
+    this.opts.onLogoutRequested?.(key);
   }
 }

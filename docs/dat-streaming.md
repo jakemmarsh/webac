@@ -181,9 +181,19 @@ OPFS-cached path.
   - Prefetching the setup closure before `buildMesh` (2 dependent waves, ~2 RTT) lands it before it is visible.
   - Worst case: something spawned *in view* that was never seen before (a summon, a drop, a first spell projectile) appears 50–250 ms late, once ever per device.
   - Mitigation: warm the common sets (spell projectiles/particles, player heritages, starter gear) in background idle.
+    Spell projectiles, missiles, arrows and every PhysicsScriptTable effect now ride the common pack (§6.14).
 - **Animations** are leaves (56 MB in total). The default-stance cycles are prefetched with the object.
   - A first-ever combat stance switch: prefetch the stance's animation set when the stance-change command is issued. The stance transition itself plays for ~0.5 s, which covers 1–2 RTT.
+    Shipped 2026-11-03 (STREAM.style-animations-on-first-use, webac#16): until then nothing did it, so the first swing / cast
+    of each kind in a combat style missed and was dropped (an AC1999 Banderling Captain hit with no swing) or snapped to its
+    hold. `animation/AnimationPrefetch.ts`: `MotionManager.enterStyle` asks for the style's cycles, links and modifiers at
+    prefetch priority as any object (ours included) takes the style, once per table and style per session.
   - If an action animation is still missing, hold the current cycle until it arrives rather than skipping it.
+    Shipped 2026-11-03 (STREAM.action-held-for-animation): `MotionManager` holds an action, the death fall or a link into a
+    non-locomotion substate (a cast gesture, sitting, a door swing) whose Animation is a streamed miss, and plays it from frame 0
+    when `onDatMissResolved` runs `retryMissedAnimation`; after `ACTION_ANIMATION_HOLD_MAX_S` (1.5 s) it is dropped as with whole
+    DATs. Locomotion / Ready / style links still skip (the body is moving; the cycle catches up). A style entered again re-asks
+    the files the LRU evicted (STREAM.style-prefetch-after-eviction).
 - **Sounds:** WebAudio decoding is already async. Waves are fetched on first play, ~1 RTT late the first time. UI and ambient sounds go in the world pack or a background warm-fill.
 - **Icons:** inventory/spell icons fetch on first display and need a repaint-on-arrival hook. Prefetch the PlayerDescription's inventory and spellbook icons at login, behind portal space.
 - **Portaling:** the gate (§2.1) shows the tunnel slightly longer on a cold destination (1–4 s at the 50/200 ms rows), then never again for that place.
@@ -915,3 +925,157 @@ that **replaces** a figure already on screen: build off-screen, and swap only a 
 - Bytes: `npx tsx tools/measure-chargen-prefetch.ts` (closure leaves, gzip -6, local DATs). End of retail / Dark Majesty:
   3.45 MB gz mean per heritage + sex (max 6.45 MB, Undead), all base figures 3.70 MB; AC1999 ≈ 0.32 MB per heritage + sex.
 - Still draw-then-rebuild (not previews): other creatures' appearance changes in the world.
+
+### 6.14 Effect leaves ride the common pack (STREAM.spell-projectile-first-use, webac#16 item 4, 2026-11-03)
+
+A creature's first spell projectile (the 1999 Banderling Captain's Whirling Blade, Setup 0x020003FC) flew for ~430 ms as a
+3-triangle partial mesh: its GfxObjs and textures were fetched at the projectile's CreateObject, one RTT per dependency
+level, and later casts were fine. The client cannot know a creature's spells or ammunition ahead of the first cast, so
+the fix is in the sets: the **effect leaves** go in the common pack, which every client already loads in the background
+at boot (`StreamingDats`: after the ui pack, Background priority, so no gate or login waits for it) and keeps for the
+session (`DatStore.addLeafPack`, not evictable). No client change.
+
+- Roots (`tools/lib/effect-leaves.ts`, all from the set's own data): every ProjectileSpell (33), Missile (4) and Ammunition
+  (5) weenie's Setup / MotionTable / PhysicsEffectTable / SoundTable (every Wave) / icons (Icon, IconOverlay,
+  IconOverlaySecondary, IconUnderlay: `GameUI.itemIconFileIds` prefetches them at every CreateObject), from the world DB
+  the era's server runs (ACE's `dat/world.sqlite` for end of retail and the classic sets, whose servers run the retail
+  weenies; the AC1999 SQL tree for 1999); every PhysicsScriptTable in the portal DAT with **every** script (caster /
+  target spell effects, level up, blood and hit splats, portal storm, fizzle) and their Sound hooks' Waves, not only the
+  Hidden / UnHide pair the arrival walk takes; and every Animation's CreateParticle / CallPES hook emitters (cast
+  gestures, breath attacks). The walk is `DatClosure.edges`.
+- First live check (lead, AC1999 staged pointer, 2026-11-03): Whirling Blade drew 27 triangles from its first frame. The
+  leaves still fetched at the Captain's Shockwave / Whirling Blade CreateObject were four Waves (0x0A000251 / 252 / 26D /
+  26E, their SoundTables' launch and impact sounds) and the projectile icon 0x06001066 — no visuals. Hence the sound
+  tables and icons above.
+- Sizes added to each live common pack. Waves barely compress (3.7 MB raw → ~3.2 MB gz in end of retail), so each set is
+  staged twice: with Waves (`verification/dat-streaming/effects-staged/`) and without (`--no-effect-waves`,
+  `verification/dat-streaming/effects-staged-nowaves/`; a first sound then plays ~1 RTT late, as before):
+
+  | Set | leaves added (of them Waves) | common gz before | with Waves | without |
+  |---|---|---|---|---|
+  | eol-p2072-c982-h497-l994 | 742 (52) | 7.0 MB | 11.5 MB | 8.3 MB |
+  | classicace-infiltration-1.9 | 751 (52) | 1.5 MB | 6.0 MB | 2.9 MB |
+  | classicace-customdm-1.60 | 754 (52) | 1.3 MB | 5.8 MB | 2.6 MB |
+  | classic-dereth-1.1 | 751 (52) | 3.6 MB | 8.1 MB | 5.0 MB |
+  | ac1999-retail-world-p102-c67 | 271 (28) | 0.7 MB | 1.8 MB | 0.9 MB |
+
+- Live sets: `npx tsx tools/publish-dats-r2.ts --effects-only <live pointer url> [--dat-dir <that set's DATs>] [--overlay ac1999]
+  --stage <dir>/<set>` stages the new common pack (the live one's files byte-for-byte plus the effect leaves, each checked
+  against the live manifest's hash), a new area index naming it with every live tile unchanged, and the live pointer with
+  only `areas` changed (serverSeeds kept). A full publish (`main` / `--areas-only`) puts the effect leaves in the common
+  pack too (`planAreas` `commonExtra`: never in a tile). `--effect-weenies <world.sqlite | SQL dir | none>` overrides the roots.
+- Objects uploaded 2026-11-03 (immutable, content-addressed; nothing live references them until a pointer flips; each
+  set's common pack + area index):
+
+  | Set | with Waves | without Waves |
+  |---|---|---|
+  | eol | `aef431f3a5fbe543` + `1fcb51b12335ea60` | `bb10599322f0c4b8` + `5fa807c90f078cc0` |
+  | classicace-infiltration | `1d03cf8a4e425107` + `22419130a8061ded` | `c5dfa0ea233ff805` + `53fab7ec36e9cb32` |
+  | classicace-customdm | `68fdad7ab393cdb1` + `685be9c609830777` | `378d419ef3ae2bd9` + `b149d145561caf4c` |
+  | classic-dereth | `bc5ee7754d436691` + `fd80972ae85d78d5` | `cb64e21f26754586` + `e58b906383b017a9` |
+  | ac1999 world | `be04228f3b6c05eb` + `8a12067f98825784` | `ed166cfbc6f836db` + `57c60925e9b765c8` |
+
+  The first upload's objects (no Waves or icons; e.g. eol `23ade3187c271f17` + `eb79da46662b6912`) are superseded and
+  unreferenced.
+- The flip is the pointer upload, per set: `npx wrangler r2 object put webac-dats/v1/sets/<set>.json --file
+  verification/dat-streaming/effects-staged[-nowaves]/v1/sets/<set>.json --content-type application/json --cache-control "public,
+  max-age=60, must-revalidate" --remote`, after checking the live pointer still equals the staged one minus `areas` (a
+  republish since would be lost). Rollback: upload the previous pointer (same command, old `areas`: the old index and
+  common pack stay in the bucket).
+- Test before the flip: `npx tsx tools/stage-proxy.ts verification/dat-streaming/effects-staged[-nowaves] --pointer-only` and load
+  the game with `&datSet=http://localhost:9177/v1/sets/<set>.json` (1999: `&eraDatSet=ac1999-retail:http://localhost:9177/v1/sets/ac1999-retail-world-p102-c67.json`).
+- Tests: `tests/verify-effect-leaves.ts` builds every effect weenie's Setup and every table's emitters with the real
+  renderer over a DatStore whose only portal leaves are the common pack (loaded through `ensureCommonPack`), with no miss,
+  in end of retail and AC1999 (Whirling Blade whole), and the negative without them.
+- Not covered: Waves of animations' Sound hooks (creature attack / footstep sounds), which stream on first play (§2.3).
+
+### 6.15 Slow links: one network link, background yields to gates, stalled first bytes (2026-11-03)
+
+Follow-ups from the live check of §6.14 / STREAM.action-held-for-animation, all three eras, production builds
+(`VITE_ACJS_URL_OVERRIDES=1 npx vite build` served locally: a Vite dev page loads hundreds of modules over the throttled
+link), cold profiles, CDP `Network.emulateNetworkConditions` from page load, the agent auto-login (Enter at once, the
+worst case: a real new player spends minutes in chargen while the packs land). Scripts: the session scratchpad's
+`t1/login.ts` (per-request timings + a 500 ms sampler of each store's LinkMeter / limiter / gate), `t1/ab.sh` (interleaved).
+
+**The 265 s AC1999 login was the probe, not the client.** Its URL carried `eraDatSet` but no `datSet`, so on Vite (no
+config.json) the end-of-retail interface loaded whole: `[AC:DatCache] portal.dat: downloading from network`, 884 MB of
+client_portal.dat at 4 MB/s (reproduced: 235 s, the same URL on a production build). Production's config.json always names
+`datSet`. Probe URLs for AC1999 and the classic eras must pass both (`&datSet=<eol pointer>&eraDatSet=<era>:<set>`).
+
+**Not a regression from 2026-11-03.** 150 ms / 10 Mbit/s, the build at 7caa236a7 with the pre-flip pointers (served by a
+Playwright route) vs main 3f8d72d99 with the live ones: AC1999 51.8 → 52.8 s to the world, end of retail 63.2 → 63.2 s,
+Dark Majesty 56.6 → 56.7 s. The effect leaves grew each common pack (end of retail 6.96 → 8.33 MB gz, AC1999 world
+0.69 → 1.85, CustomDM 1.30 → 2.64), but the login does not wait for it.
+
+**Where the time goes (10 Mbit/s).** Bytes before the world: end of retail ~67 MB (boot 10.6, world pack 23.4, terrain 3.5,
+ui 1.4, the gate's area packs and leaves ~8, the common pack 8.3), AC1999 ~48 MB (its interface world pack is the same
+23.4 MB). At 1.25 MB/s that floor is ~54 s / ~38 s; the rest is the login itself and the queued-objects pass, which hits
+its 3 s cap on every era at this speed. What was ours to fix:
+
+1. **Background work shared the link with the gate.** The limiter never pre-empts running work, and the common pack
+   (Background) starts after the ui pack, so on an immediate login it began ~2 s before the gate and downloaded beside
+   the gate's own area packs for 14 s (end of retail: common 39.3 → 53.3 s, gate 41.2 → 54.9 s). Chrome's throttling,
+   like a real last mile, splits bandwidth between streams whatever their priority hint. Now `NetworkLink.holdBackground`
+   (main.ts, from the hold's start to `afterRelease` or a disconnect): background downloads with more than
+   ~1 s / 256 KB to go stop and queue again (their bytes so far are fetched again later: `stats.yieldedBytes`), and none
+   start while held. Background also starts only on an idle link (no critical or prefetch fetch running), so the AC1999
+   world's common pack no longer splits the link with the interface world pack the login waits for.
+2. **Two sets, two limiters.** AC1999 boots two DatStores; each had its own 96-fetch limiter and LinkMeter (192 streams on
+   one HTTP/2 connection, a critical-first rule blind to the other set's gate, and a meter that saw half the link: the
+   world store marked a 10 Mbit/s line slow, rate 300 KB/s with 1.4 MB in flight, while the interface's world pack took
+   the bandwidth). `NetworkLink` is now the page's one link (main.ts `streamNetwork`, passed to every `openStreamingDats`).
+3. **A stalled first byte held a gate with nothing else to fetch.** About one object per cold gate took 3-16 s to its
+   first byte from dats.playwebac.com (a 22 KB leaf: 16.0 s, the end-of-retail gate idle at 36/37 for 13 s). A fetch with
+   no byte after `FIRST_BYTE_STALL_MS` (4 s) while the link delivered ≥ 64 KB to others and is not slow is now asked for
+   again, once per object, not counted as a retry (`stats.stalls`).
+
+Two interleaved rounds, 150 ms / 10 Mbit/s, main → fix (round 1 without the meter and Critical-style-prefetch changes
+below, round 2 the final build):
+
+| Era | in world | gate (destination) | queued-objects pass |
+|---|---|---|---|
+| End of retail | 63.3 / 63.2 → 60.5 / 59.7 s | 14.3 / 14.3 → 10.8 / 10.0 s | capped 3.4 s in all four |
+| Dark Majesty (CustomDM) | 56.4 / 56.5 → 56.1 / 56.1 s | 7.5 / 7.5 → 7.1 / 7.1 s | capped 3.4 s in all four |
+| AC1999 | 52.8 / 52.7 → 52.7 / 52.3 s | 2.0 s in all four | ~2.05 s, resident |
+
+(one earlier run of the yield-only build: end of retail 59.8 s, gate 10.3 s; one with the 16 s first-byte stall: gate
+24 s, the reason for item 3.) Dark Majesty's and AC1999's common packs are small (2.6 / 1.9 MB), so their gates gain
+little; AC1999's login is the interface world pack. At 200 ms / 2 Mbit/s (end of retail, one pair): 264.0 → 248.9 s to the
+world, gate 59.6 → 45.5 s; char select at 65 s and the world packs at 193 s in both (42 MB of packs at ~0.24 MB/s).
+
+**What is left is bytes, and the next cut needs a republish.** A cold immediate login waits for the 23.4 MB world pack
+(§6.6: GameUI's preload art, chargen's art, portal space; ~100 s at 2 Mbit/s, ~19 s at 10). It is one object, so the
+client cannot take part of it; splitting it (what the login HUD reads vs chargen and the rest) means repacking and
+uploading the sets, which takes Jake's R2 credentials (§4, tools/r2-uploader/README.md). A new player rarely sees it:
+the packs land while they make a character. The rest of a slow-link login is bytes: the 23 MB world pack is GameUI's preload art,
+chargen's art and portal space, which every era's login waits for (§6.6).
+
+**Held actions (STREAM.held-action-starved).** The style prefetch asked for a style's animations at Prefetch, and the
+limiter holds Prefetch while any critical load runs or waits; in a fight on a high-latency link (1 s added to every object
+fetch) that was nearly always, so the Banderling Captain's swing 0x03000570, asked for on entering SwordCombat at 4.9 s,
+was still missing at 9.9 s: held, then dropped after `ACTION_ANIMATION_HOLD_MAX_S`. The held miss did promote the queued
+request to Critical (`residentSource.get` → `noteMiss` → `request(Critical)` → `promoteFile` → `Ticket.promote` →
+`requeue`; pinned in tests/verify-stream-network-link.ts), but from 1.5 s before the drop, one 1 s+ round trip behind a
+busy critical queue. Two causes, both fixed:
+
+- `storeAnimationPrefetch` now asks at Critical: the files are needed within the style change's own link and are few
+  (24-40 per style).
+- **The LinkMeter took latency for a slow link** (STREAM.link-meter-latency). Its windows were wall-clock seconds from a
+  fetch's start, so a second spent waiting for first bytes read as a saturated slow link, and the flag only cleared on a
+  ≥ 512 KB/s window, which light in-world traffic never makes. With 1 s on every object fetch (4 MB/s, 150 ms) it read
+  slow in 154 of 159 in-world samples (main), which caps the bytes in flight at the 32 KB floor: every fetch bigger than
+  that waits for the one running. Windows now count body time only (while some fetch's body is arriving): 0 of 159.
+
+Same run after (AC1999, 1 s on every object fetch from entering the world): the Captain's SwordCombat files were asked
+for at Critical on entering the style at 6.53 s and landed at 7.72 s (the 1 s delay + the round trip); the link misses at
+7.67 s resolved 48 ms later; no hold reached its cap, no action dropped, slow-link samples 0. End of retail (drudge fight)
+and Dark Majesty (CustomDM drudge) the same way: no give-ups, slow samples 0 of 86 / 0 of 107.
+
+**The "In Portal Space - Please Wait..." line 2 s into the world is retail.** gmSmartBoxUI::UseTime @ 004d6e30 posts it at
+every roll segment in TAS_TUNNEL_FADE_IN / TUNNEL / TUNNEL_CONTINUE / TUNNEL_FADE_OUT, and gmSpewBoxUI's item lives 5 s
+(`SPEW_ITEM_LIFETIME_MS`): the last line posted before the zoom-out outlives TAS_OFF by about 1.2-4 s
+(tests/verify-portal-space-retail.ts pins no post once the tunnel is torn down).
+
+Tests: tests/verify-stream-network-link.ts (shared limit, cross-store critical-first, idle-only background, the gate's
+yield / keep-small / promoted cases, the stall retry and its slow-link negative, the style prefetch at Critical, the held
+miss promoting a queued prefetch).

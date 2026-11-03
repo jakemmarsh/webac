@@ -63,6 +63,7 @@ import { VTankWindow, type VTankKit, type VTankSource } from './automation/VTank
 import { renderVvsText, vvsFieldStyle, VVS_COLORS, VVS_TAB_PX } from './automation/vvsText.js';
 import { renderUbMainWindow, UB_MAIN_SIZE, type UbMainSource } from './automation/UbMainWindow.js';
 import { renderVvsBar, VVS_BAR, type VvsBarEntry } from './automation/VvsBar.js';
+import { DECAL_PLUGINS_LABEL, DECAL_PLUGINS_OPTION_KEY, readDecalPlugins, writeDecalPlugins } from './automation/DecalPlugins.js';
 import { UB_ICON_PNG } from './automation/ubIcon.js';
 import { redrawKeepingFocus } from './automation/keepFocus.js';
 import { VTANK_ICON_PNG, VHS_ICON_PNG, VIRINDI_UIS_ICON_PNG, VCS_ICON_PNG, SPLITPEA_ICON_PNG } from './automation/virindiIcons.js';
@@ -7350,6 +7351,34 @@ export class GameUI {
     const dlg = this.buildWaitDialog('charsel-enteringworld', getString(50695556) ?? 'Entering World');
     this.screenContainer.appendChild(dlg);
     this.replaceACTextElements(dlg);
+  }
+
+  /**
+   * BUG.second-tab-in-world-refusal — a line under the Entering World wait
+   * dialog while the enter waits on something the player should know about
+   * (a "still in the world" refusal being retried, the other tab logging
+   * out). Retail's wait was a second; ours can be a minute. Null puts the
+   * plain dialog back. Nothing when no Entering World dialog is up.
+   */
+  setEnteringWorldStatus(text: string | null): void {
+    const old = this.screenContainer.querySelector('#charsel-enteringworld');
+    if (!old) return;
+    const entering = getString(50695556) ?? 'Entering World';
+    const next = this.buildWaitDialog('charsel-enteringworld', text ? `${entering}\n${text}` : entering);
+    next.dataset.status = text ?? '';
+    old.replaceWith(next);
+    this.replaceACTextElements(next);
+  }
+
+  /** BUG.second-tab-in-world-refusal — the Entering World wait goes while the player answers a question about it. */
+  hideEnteringWorldDialog(): void {
+    this.screenContainer.querySelector('#charsel-enteringworld')?.remove();
+  }
+
+  /** The Entering World dialog's status line now showing ('' none, null no dialog; tests / probes). */
+  get enteringWorldStatusText(): string | null {
+    const el = this.screenContainer.querySelector<HTMLElement>('#charsel-enteringworld');
+    return el ? (el.dataset.status ?? '') : null;
   }
 
   /** RECON.charselect-dat-controls — the char-select EXIT button (see its
@@ -24173,10 +24202,11 @@ export class GameUI {
     };
   }
 
-  get automationAvailable(): boolean { return this.automationModel !== null; }
+  /** The plugins are here: the automation exists on this client and Enable Decal Plugins is on (webac#18). Gates /vt, /ub, /mt, /goarrow and /automation. */
+  get automationAvailable(): boolean { return this.automationModel !== null && this.decalPluginsOn; }
 
   /** A key pressed in the world, offered to the automation hotkeys (vhsHotkeys.ts) before retail's unbound-key handling. */
-  automationHotkey(code: string, repeat = false): boolean { return this.vtankModel?.hotkeys.onKey(code, repeat) ?? false; }
+  automationHotkey(code: string, repeat = false): boolean { return this.decalPluginsOn ? this.vtankModel?.hotkeys.onKey(code, repeat) ?? false : false; }
 
   /** The routine engine's stand-by profile (M. Charges When Off while the macro is off): the VirindiTank window's selection. */
   automationStandbyProfile(): ReturnType<VTankWindow['standbyProfile']> { return this.vtankModel?.standbyProfile() ?? null; }
@@ -24202,7 +24232,7 @@ export class GameUI {
   }
 
   toggleAutomationPanel(): void {
-    if (!this.automationModel) return;
+    if (!this.automationModel || !this.decalPluginsOn) return;
     this.setPanelsWindowPanel(AUTOMATION_PANEL, !this.automationPanelVisible);
   }
 
@@ -24215,7 +24245,7 @@ export class GameUI {
 
   /** `/automation` and the HUD strip: the VirindiTank-style window (the default surface). */
   toggleAutomationWindow(): void {
-    if (!this.vtankModel) return;
+    if (!this.vtankModel || !this.decalPluginsOn) return;
     if (this.vtankEl) this.closeVTankWindow();
     else this.openVTankWindow();
   }
@@ -24646,6 +24676,64 @@ export class GameUI {
     imported(outcome: 'ok' | 'partial' | 'failed', fileNames: readonly string[]): void;
   } | null = null;
 
+  // ── Enable Decal Plugins (webac#18; automation/DecalPlugins.ts): the Config page's switch for every plugin (automationAvailable ANDs it) ──
+
+  /** The era whose choice the switch reads and keeps (main.ts: the page's EraProfile id). */
+  private decalPluginsEra: string | null = null;
+  /** What the plugins were last set to, so a change (the row, Reset, Defaults) unloads or brings them back once. */
+  private decalPluginsApplied: boolean | null = null;
+
+  /** Decal's plugins are on: the player's choice for this era, else the era's default (EraClientRules.decalPlugins). */
+  get decalPluginsOn(): boolean {
+    const v = this.optionsSettings[DECAL_PLUGINS_OPTION_KEY];
+    return typeof v === 'boolean' ? v : this.clientRules.decalPlugins;
+  }
+
+  /** Set once per page load after setClientRules: read this era's kept choice (or its default) onto the Config row. */
+  setDecalPluginsEra(eraId: string): void {
+    this.decalPluginsEra = eraId;
+    this.optionsSettings[DECAL_PLUGINS_OPTION_KEY] = readDecalPlugins(GameUI.browserStorage, eraId, this.clientRules.decalPlugins);
+    // Read, not chosen: nothing is kept until the player changes it (so the era's default stays the default).
+    this.applyDecalPlugins(false);
+  }
+
+  /** Turn the plugins on or off (the Config row, and tests). */
+  setDecalPlugins(on: boolean): void {
+    this.optionsSettings[DECAL_PLUGINS_OPTION_KEY] = on;
+    this.applyDecalPlugins();
+    if (this.optionsPanelVisible) this.renderOptionsPanel();
+  }
+
+  private static browserStorage(): Storage | null { try { return globalThis.localStorage ?? null; } catch { return null; } }
+
+  /**
+   * Act on the switch's value: keep it for this era, and on a change take every plugin surface away
+   * (as if Decal unloaded: the bar, every plugin window and meta view, the HUD strip, the player's own
+   * macro run) or bring the bar back. Their chat commands and hotkeys read decalPluginsOn as they come.
+   */
+  private applyDecalPlugins(keep = true): void {
+    const on = this.decalPluginsOn;
+    const was = this.decalPluginsApplied;
+    this.decalPluginsApplied = on;
+    if (was === on) return;
+    if (keep && this.decalPluginsEra !== null) writeDecalPlugins(GameUI.browserStorage, this.decalPluginsEra, on);
+    if (!on) this.unloadPluginWindows();
+    this.refreshVvsBar();
+    this.updateAutomationStrip();
+  }
+
+  /** Close everything the plugins have on screen; a macro the player runs stops (its window is gone). */
+  private unloadPluginWindows(): void {
+    if (this.automationPanelVisible) this.setPanelsWindowPanel(AUTOMATION_PANEL, false);
+    this.closeAutomationEditor();
+    this.closeVTankWindow();
+    for (const k of [...this.vtankWindows.keys()]) this.closeVTankAux(k);
+    this.ubMaps?.closeAll();
+    this.closeAllMetaViews();
+    const src = this.automationModel?.source;
+    if (src?.status().running) src.stop();
+  }
+
   /** Put the plugin elements renderHUD swept off the HUD layer back on it (the bar, VirindiTank's windows, UB's maps, meta views). */
   private reattachPluginLayers(): void {
     const els: Array<HTMLElement | null> = [this.vtankEl, this.vtankDialogEl, ...[...this.vtankWindows.values()].map((w) => w.el), ...this.ubMapEls.values(), ...this.metaViews.values()];
@@ -24864,7 +24952,7 @@ export class GameUI {
 
   /** The HUD strip under the vitals while a routine runs: state dot, "Running · Hunt", XP/h and time. Click opens the panel. */
   private updateAutomationStrip(): void {
-    const src = this.automationModel?.source ?? null;
+    const src = this.decalPluginsOn ? this.automationModel?.source ?? null : null;
     const t = src ? hudStripText(src.status(), src.stats(), src.now()) : null;
     if (!t) { this.automationStrip?.remove(); this.automationStrip = null; return; }
     if (!this.automationStrip) {
@@ -25360,6 +25448,7 @@ export class GameUI {
 
   /** A meta's view (VirindiTank's Create View): a VVS-framed window of its buttons at their XML places. */
   openMetaView(name: string, view: { title: string; width: number; height: number; buttons: Array<{ name: string; left: number; top: number; width: number; height: number; text: string }> }, click: (b: { name: string; left: number; top: number; width: number; height: number; text: string }) => void): void {
+    if (!this.decalPluginsOn) return; // no Decal, no VVS views
     // The same view again (a rule that fires on every step) stays as it is: no flicker, no lost place.
     const sig = JSON.stringify(view);
     if (this.metaViews.get(name)?.dataset.metaViewSig === sig) return;
@@ -29212,6 +29301,13 @@ export class GameUI {
       // every ChatInterface re-resolves Chat_<Face>_<Size> (applyChatFont).
       this.addConfigMenuRow(content, configString('chatFontFace'), 'chatFontFace', () => this.applyChatFont());
       this.addConfigMenuRow(content, configString('chatFontSize'), 'chatFontSize', () => this.applyChatFont());
+      // webac#18 — not a retail row: Decal's plugins on or off, a checkbox like the page's own
+      // (its default is the era's, EraClientRules.decalPlugins; kept per era in this browser).
+      // Only where this client has the plugins at all.
+      if (this.automationModel) {
+        this.optionsSettings[DECAL_PLUGINS_OPTION_KEY] = this.decalPluginsOn;
+        this.addToggleRow(content, DECAL_PLUGINS_LABEL, DECAL_PLUGINS_OPTION_KEY, () => this.applyDecalPlugins());
+      }
       content.appendChild(this.buildOptionsSeparator()); // InitOptions' closing AddSeperator
     }
     body.appendChild(content);
@@ -29268,7 +29364,7 @@ export class GameUI {
         // come back OFF) — GameUI.CHARACTER_PAGE_DEFAULTS.
         const defaults = this.optionsTab === 'character'
           ? { ...GameUI.OPTIONS_DEFAULTS, ...GameUI.CHARACTER_PAGE_DEFAULTS }
-          : GameUI.OPTIONS_DEFAULTS;
+          : { ...GameUI.OPTIONS_DEFAULTS, [DECAL_PLUGINS_OPTION_KEY]: this.clientRules.decalPlugins };
         this.applyOptionsBulk(this.pickVisiblePageOptions(defaults));
         // Retail restores only the visible page's options; the Chat page
         // owns the two sliders.
@@ -29365,6 +29461,7 @@ export class GameUI {
     // CORE.17.h.a — the chat windows re-read options 0x10000080/81 too
     // (Reset/Defaults reach them through UIOption_Slider::Apply).
     this.applyChatOpacityFromOptions();
+    this.applyDecalPlugins(); // webac#18 — Reset / Defaults on the Config page
     this.saveOptionsSettings();
     // Only re-render the page while the panel is open: Reset/Defaults live
     // in its footer, but probes call this with the panel closed and an
@@ -29879,7 +29976,9 @@ export class GameUI {
    */
   saveOptionsSettings(): void {
     try {
-      localStorage.setItem('ac_options_settings_v1', JSON.stringify(this.optionsSettings));
+      // Enable Decal Plugins is kept per era (automation/DecalPlugins.ts), not in this every-era blob.
+      const { [DECAL_PLUGINS_OPTION_KEY]: _perEra, ...shared } = this.optionsSettings;
+      localStorage.setItem('ac_options_settings_v1', JSON.stringify(shared));
     } catch { /* quota / disabled — drop silently */ }
     this.updateOptionsFooterButtons();
   }
