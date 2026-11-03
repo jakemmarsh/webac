@@ -31,7 +31,7 @@
  */
 import { chatColorFor, weenieErrorTextType, WEENIE_ERROR_TEXT_TYPE_SPEW, type WeenieErrorSink } from '@ac/shared';
 import type { NoticeSurface } from './ClientNotices.js';
-import type { FailureEventTable } from './FailureEventText1999.js';
+import type { FailureEventArm, FailureEventTable } from './FailureEventText1999.js';
 
 export interface WeenieErrorDelivery {
   readonly sink: WeenieErrorSink;
@@ -50,10 +50,16 @@ export interface WeenieErrorDelivery {
  * A 0x028B WithString caller passes no table: the 1999 client had no 0x28B
  * case at all, but the AC1999 server meant those lines (its own TODO), so
  * they keep end of retail's switch (docs/ac1999-support.md).
+ *
+ * `departure` is the line the era adds where its switch has no arm (BUG.ac1999-fellow-recruit-silent:
+ * ui/SocialRefusalLines1999.ts, a refused recruit or swear); an arm the switch has always wins.
  */
-export function deliverWeenieError(ui: NoticeSurface, code: number, text: string | null, table: FailureEventTable | null = null): WeenieErrorDelivery {
+export function deliverWeenieError(
+  ui: NoticeSurface, code: number, text: string | null, table: FailureEventTable | null = null,
+  departure: FailureEventArm | null = null,
+): WeenieErrorDelivery {
   if (table) {
-    const arm = table.get(code);
+    const arm = table.get(code) ?? departure;
     if (!arm) return { sink: 'none', type: null, text: null };
     if (arm.type === WEENIE_ERROR_TEXT_TYPE_SPEW) {
       ui.displayErrorText(arm.text);

@@ -39,6 +39,9 @@ import { TOO_BIG_TO_MERGE_1999 } from '../inventory/ItemHolderPlacement.js';
 import { EOR_ENCUMBRANCE_NOTICE, AC1999_ENCUMBRANCE_NOTICE } from '../ui/EncumbranceNotice.js';
 import { PORTAL_SPACE_NOTICE } from '../effects/PortalSpaceModel.js';
 import { portalStormPresentation } from '../network/portalStormEvents.js';
+import { AC1999_FELLOWSHIP_NAME_TEMPLATES, AC1999_FELLOWSHIP_TEXT } from '../ui/FellowshipPanelActions.js';
+import { AC1999_ALLEGIANCE_BREAK_TEXT } from '../ui/AllegiancePanelFlow.js';
+import { SOCIAL_REFUSAL_LINES_1999, socialRefusalNameTemplates } from '../ui/SocialRefusalLines1999.js';
 
 /** A printf slot as the client's literals write them (%s, %hs, %ls). */
 const SLOT = /%[hl]?s/;
@@ -75,7 +78,13 @@ export function isUseHintNotice(text: string): boolean {
  * Prompts, not refusals: the client's target-mode prompt (UseObject.ts USE_TARGET_PROMPT_TEMPLATE, both eras;
  * production reported "Choose a target for the _" on 2026-10-23).
  */
-export const TARGET_PROMPT_TEMPLATES: readonly string[] = Object.freeze([USE_TARGET_PROMPT_TEMPLATE]);
+export const TARGET_PROMPT_TEMPLATES: readonly string[] = Object.freeze([
+  USE_TARGET_PROMPT_TEMPLATE,
+  // The 1999 fellowship / allegiance click-a-character prompts (FellowPanel_ListenToMessage @ 0x00535770,
+  // AllegPanel_ListenToMessage @ 0x00530a70; BUG.ac1999-fellowship-refusal-wording).
+  ...Object.values(AC1999_FELLOWSHIP_TEXT.targetMode ?? {}),
+  AC1999_ALLEGIANCE_BREAK_TEXT.patronOrVassal, AC1999_ALLEGIANCE_BREAK_TEXT.patron, AC1999_ALLEGIANCE_BREAK_TEXT.vassal,
+]);
 const TARGET_PROMPT_LINES: readonly RegExp[] = TARGET_PROMPT_TEMPLATES.map(templateLine);
 
 /** A line that is a target-mode prompt ("Choose a target for the Healing Kit"). */
@@ -113,6 +122,8 @@ export const SPEW_STATUS_TEMPLATES: readonly string[] = Object.freeze([...new Se
   TOO_BIG_TO_MERGE_1999,
   ...[EOR_ENCUMBRANCE_NOTICE, AC1999_ENCUMBRANCE_NOTICE].flatMap((r) => [r.encumbered, r.severe]),
   PORTAL_SPACE_NOTICE,
+  // The player called off a 1999 Break (0x0052db90): nothing was refused.
+  AC1999_ALLEGIANCE_BREAK_TEXT.cancelled,
   ...(['brewing', 'imminent', 'storm', 'subsided'] as const).map((k) => portalStormPresentation(k).text),
 ])]);
 const SPEW_STATUS_LINES: readonly RegExp[] = SPEW_STATUS_TEMPLATES.map(templateLine);
@@ -233,6 +244,8 @@ export const CLIENT_LINE_TEMPLATES: readonly string[] = Object.freeze([...new Se
   'Select your target before using the %s',
   'The %s cannot be used',
   ...Object.values(CLIENT_NOTICES).map((n) => n.text),
+  ...AC1999_FELLOWSHIP_NAME_TEMPLATES,
+  ...socialRefusalNameTemplates(SOCIAL_REFUSAL_LINES_1999),
 ].filter((t) => typeof t === 'string' && SLOT.test(t)))]);
 
 interface CompiledTemplate { re: RegExp; out: string; literal: number }
@@ -299,6 +312,8 @@ export const REFUSAL_VOCABULARY: RefusalVocabulary = buildRefusalVocabulary(
   Object.values(PAPERDOLL_STRINGS),
   useRuleTemplates(EOR_USE_OBJECT_RULES),
   useRuleTemplates(AC1999_USE_OBJECT_RULES),
+  // BUG.ac1999-fellow-recruit-silent — the 1999 departure lines' generic forms (the named ones are client line templates).
+  [...SOCIAL_REFUSAL_LINES_1999.byAction.values(), SOCIAL_REFUSAL_LINES_1999.any].flatMap((m) => [...m.values()].map((l) => l.generic)),
 );
 
 /**

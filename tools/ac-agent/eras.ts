@@ -100,7 +100,38 @@ export function agentEra(id: string | undefined | null): AgentEra {
  */
 export function eraAccount(base: string, era: AgentEra): string {
   const slug = base.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const tag = era.accountTag ?? (era.id ? { 'classicace-customdm': 'dm', 'classicace-infiltration': 'in', 'classic-dereth': 'cd', 'ac1999-retail': '99' }[era.id] ?? '' : '');
+  const tag = eraAccountTag(era);
   const max = era.maxAccountLength ?? 20;
   return `${slug.slice(0, max - tag.length)}${tag}`;
+}
+
+/** The era's account suffix (eraAccount). */
+export function eraAccountTag(era: AgentEra): string {
+  return era.accountTag ?? (era.id ? { 'classicace-customdm': 'dm', 'classicace-infiltration': 'in', 'classic-dereth': 'cd', 'ac1999-retail': '99' }[era.id] ?? '' : '');
+}
+
+/**
+ * An account for `profile` on `era` that no other profile's eraAccount gives, within the era's length limit: the
+ * account's head, then four base-36 characters hashed from the whole profile name, then the era tag. Offered (not
+ * used on its own) when a profile's eraAccount is already in use by another running profile: AC1999's 8-character
+ * limit keeps one letter of the profile ("agent" + 1 + "99"), so rcA and rcB both got agentr99 and the second start
+ * logged into the first one's session (2026-11-02). eraAccount itself stays as it was: every account that exists
+ * keeps its profile (agenta99, agentc99 for claude / claude-ac1999-retail, …).
+ */
+export function distinctEraAccount(base: string, profile: string, era: AgentEra): string {
+  const slug = base.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const tag = eraAccountTag(era);
+  const max = era.maxAccountLength ?? 20;
+  let h = (fnv1a(profile.toLowerCase()) % 36 ** 4).toString(36).padStart(4, '0');
+  const head = slug.slice(0, Math.max(0, max - tag.length - h.length));
+  // "ag" + "entX" would be the legacy "agentX99" of a one-letter profile: never hand out a name eraAccount gives.
+  if (`${head}${h}`.startsWith('agent') && head.length < 5) h = `x${h.slice(1)}`;
+  return `${head}${h}${tag}`;
+}
+
+/** FNV-1a, 32-bit: a short stable hash (no crypto needed; it only spreads profile names). */
+function fnv1a(text: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193) >>> 0;
+  return h >>> 0;
 }

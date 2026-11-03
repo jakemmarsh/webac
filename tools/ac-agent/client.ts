@@ -10,6 +10,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type DaemonInfo, accountForProfile, listInfos, logFile, readInfo, STATE_DIR } from './state.ts';
 import { agentEra, eraAccount } from './eras.ts';
+import { type ClaimOptions, accountClashMessage, accountHolder } from './accountClaim.ts';
 import { defaultCharacterName } from './state.ts';
 import type { AgentVitals } from '../../packages/renderer/src/agent/types.ts';
 import { sweepChromeCodeSignClones } from '../lib/temp-profile.ts';
@@ -47,6 +48,12 @@ export interface StartOptions {
   attach?: string;
   /** Attached: drive only the tab in the world as this character (several game tabs in one Chrome, e.g. a stream's two). */
   attachCharacter?: string;
+  /**
+   * The server account to log in as, instead of the profile's own (eraAccount). For a profile whose account another
+   * running profile already plays (AC1999 keeps one letter of the profile: rcA and rcB are both agentr99); the
+   * refusal names one (accountClaim.ts).
+   */
+  account?: string;
 }
 
 export const AGENT_CHROME_PORT = 9222;
@@ -109,18 +116,34 @@ export function daemonExitReason(log: string): string | null {
   return lines.find((l) => /^[a-z]\w*\.\w+: \S/.test(l)) ?? null;
 }
 
+/**
+ * The account a new (not attached) profile logs in as: `asked`, else the profile's own (eraAccount). Throws when the
+ * name isn't one the era's server takes, or when another running profile plays that account: a second login would
+ * take its character over (rcA / rcB on agentr99, AC1999, 2026-11-02).
+ */
+export function startAccount(profile: string, base: string, eraKey: string | undefined, asked?: string, opts: ClaimOptions = {}): string {
+  const era = agentEra(eraKey);
+  const account = asked ?? eraAccount(accountForProfile(base), era);
+  const max = era.maxAccountLength ?? 20;
+  if (!/^[a-z0-9]+$/.test(account) || account.length > max) throw new Error(`account "${account}" won't do on ${era.label}: lower-case letters and digits, at most ${max} characters`);
+  const holder = accountHolder(account, era, profile, opts);
+  if (holder) throw new Error(accountClashMessage(profile, account, era, holder, base));
+  return account;
+}
+
 export async function startDaemon(opts: StartOptions = {}): Promise<{ info: DaemonInfo; started: boolean }> {
   const era = opts.era && opts.era !== 'eor' ? opts.era : undefined;
   const base = opts.profile ?? DEFAULT_PROFILE;
   const profile = opts.profile ?? (opts.attach ? 'me' : era ? `${DEFAULT_PROFILE}-${era}` : DEFAULT_PROFILE);
   const existing = readInfo(profile);
   if (existing) return { info: existing, started: false };
+  const account = opts.attach ? null : startAccount(profile, base, era, opts.account);
   const args = ['tsx', 'tools/ac-agent/daemon.ts', '--profile', profile];
   if (opts.attach) args.push('--attach', opts.attach === 'chrome' ? await ensureAgentChrome() : opts.attach);
   if (opts.attach && opts.attachCharacter) args.push('--attach-character', opts.attachCharacter);
   // The character and account come from the base profile, not the era-suffixed session name.
   args.push('--character', opts.character ?? defaultCharacterName(base));
-  args.push('--account', eraAccount(accountForProfile(base), agentEra(era)));
+  if (account) args.push('--account', account);
   if (opts.headless) args.push('--headless');
   if (opts.base) args.push('--base', opts.base);
   if (opts.bridge) args.push('--bridge', opts.bridge);

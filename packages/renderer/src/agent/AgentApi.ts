@@ -32,6 +32,7 @@ import { IN_TOWN_UNITS, nearestTownOf, townInName } from './towns.js';
 import { USEABLE_NO, isUseable, isUseableTargeted } from '../input/UseObject.js';
 import { PAPERDOLL_WEARABLE_MASK as WEARABLE_BITS } from '../inventory/PaperdollDragObject.js';
 import { SELF_TARGETABLE_TYPE_MASK } from '../ui/SpellShortcutBar.js';
+import { type SocialRequest, isSocialRefusal, isSocialRefusalCode } from './socialRefusal.js';
 import type { PlanSpell, RoutineProfile } from '@ac/shared';
 import { parseMapCoordsText, isPartialMapCoordsText, missileShot, getProjectileSpeed, DEFAULT_MAX_VELOCITY, MATERIAL_NAMES, EquipMask, WeenieError, weenieErrorText, type MissileShot } from '@ac/shared';
 import { RoutineEngine, type ItemPalette } from './RoutineEngine.ts';
@@ -3054,10 +3055,12 @@ export class AgentApi {
         this.push('chat', `(system) [Agent] "${weenieErrorText(code) ?? 'Unable to move to object!'}" is the server's approach to ${dead.name} #${dead.guid.toString(16)} ending because it died (WeenieError ${AgentApi.weenieErrorName(code)}: the target left the server's tracking): nothing went wrong, and it says nothing about where you stand`);
       }
     }
-    this.weenieErrors.push({ at: now, seq: this.seqN, code, about });
+    this.weenieErrors.push({ at: now, seq: this.seqN, n: ++this.weenieErrorN, code, about });
     if (this.weenieErrors.length > 20) this.weenieErrors.shift();
   }
-  private weenieErrors: Array<{ at: number; seq: number; code: number; about: number | null }> = [];
+  private weenieErrors: Array<{ at: number; seq: number; n: number; code: number; about: number | null }> = [];
+  /** WeenieErrors received so far: a request notes it when sent (a code that printed nothing has no event of its own). */
+  private weenieErrorN = 0;
   /** The melee targets fought lately, newest last (a WeenieError after one's death is attributed to it). */
   private meleeTargets: Array<{ guid: number; name: string; at: number }> = [];
   /**
@@ -6953,6 +6956,7 @@ export class AgentApi {
       return { ok: true, message: this.host.fellowship() };
     }
     const since = this.seqN;
+    const errMark = this.weenieErrorN;
     const before = this.host.fellowship();
     let who = '';
     if (action === 'recruit') {
@@ -6963,16 +6967,45 @@ export class AgentApi {
     }
     const err = this.host.fellowshipAction(action, arg);
     if (err) return { ok: false, message: err };
-    // The server answers in a moment (the pane updates, or a 0x1a line); back within 5 s so that one
+    const req: SocialRequest = action === 'recruit' ? 'recruit' : 'fellowship';
+    // The server answers in a moment (the pane updates, a refusal, or a 0x1a line); back within 5 s so that one
     // Claude playing both characters can answer a recruit's 30 s dialog on the other.
-    for (let i = 0; i < 25 && this.host.fellowship() === before; i++) await sleep(200);
+    for (let i = 0; i < 25 && this.host.fellowship() === before && !this.socialRefusals(since, errMark, req).length; i++) await sleep(200);
     const said = this.replyLines(since);
     const after = this.host.fellowship();
     if (action === 'requests' || action === 'auto') return { ok: true, message: this.host.fellowship() };
+    // A refusal answers the request and replaces the claim: "asked Claude Yak to join. They have 30 s to accept…" sat
+    // over "Claude Yak is already a member of a Fellowship." (AC1999, 2026-11-02).
+    const refused = after === before ? this.socialRefusals(since, errMark, req) : [];
+    if (refused.length) {
+      const head = action === 'recruit' ? `${who} was not recruited: the server refused` : `${action}${arg ? ` ${arg}` : ''} refused by the server`;
+      return { ok: false, message: [head, ...[...refused, ...said.filter((l) => !refused.includes(l))].map((l) => `  ${l}`)].join('\n') };
+    }
     const head = action === 'recruit'
       ? `asked ${who} to join. They have 30 s to accept the server's dialog; if you also play ${who}, answer it now: ac_dialog button=Yes on their profile.`
       : after !== before ? `done: ${action}` : `sent: ${action}${arg ? ` ${arg}` : ''} (no change yet)`;
     return { ok: true, message: [head, ...said.map((l) => `  ${l}`), ...(after !== before ? [after] : [])].join('\n') };
+  }
+
+  /**
+   * The server's refusals of a fellowship / allegiance request sent at event `since` (`errMark`: the WeenieErrors
+   * received by then): the reply lines that refuse it (socialRefusal.ts: every era's wording), else a refusal code that
+   * came with no line the agent saw, in end of retail's words.
+   */
+  private socialRefusals(since: number, errMark: number, req: SocialRequest): string[] {
+    const out: string[] = [];
+    for (const e of this.eventsSince(since)) {
+      if (e.type !== 'chat' || e.plugin) continue;
+      const kind = /^\((\w+)\) /.exec(e.text)?.[1];
+      const text = e.text.replace(/^\(\w+\) /, '');
+      // Someone's words are never the server's no ("I cannot wait" in /f); a channel line counts only in a known
+      // wording with no speaker (ACE sends "{Name} is not accepting fellowship requests." on the Fellowship channel).
+      if (kind === 'say' || kind === 'tell' || kind === 'emote') continue;
+      if (kind === 'channel' ? !/ says?,? "/.test(text) && isSocialRefusal(text, req, true) : isSocialRefusal(text, req)) out.push(text);
+    }
+    if (out.length) return out;
+    const code = this.weenieErrors.find((w) => w.n > errMark && isSocialRefusalCode(w.code, req));
+    return code ? [`${weenieErrorText(code.code) ?? 'refused'} (WeenieError ${AgentApi.weenieErrorName(code.code)})`] : [];
   }
 
   // ── allegiance ──
@@ -6995,17 +7028,19 @@ export class AgentApi {
     const name = this.nameOf(g);
     if (!this.host.select(g)) return { ok: false, message: `can't select ${name}` };
     const since = this.seqN;
+    const errMark = this.weenieErrorN;
     const before = this.allegiance();
     const err = this.host.swearAllegiance();
     if (err) return { ok: false, message: err };
-    const lines = (): string[] => this.replyLines(since);
-    // The server's refusal, not someone's words ("I cannot wait" in /f): spoken lines are left out of the verdict.
-    const refusedLine = (): boolean => this.eventsSince(since).some((e) => e.type === 'chat' && !AgentApi.spokenEvent(e) && /declined|refuse|cannot|can't|not accepting|ignor/i.test(e.text.replace(/^\(\w+\) /, '')));
-    for (let i = 0; i < 25 && this.allegiance() === before && !refusedLine(); i++) await sleep(200);
+    // The server's refusal in any era's wording (socialRefusal.ts; it caught only declined / refuse / cannot / not
+    // accepting / ignor before, so "You charged too far!" and the 1999 "… is busy." fell through to "asked to swear").
+    const refused = (): string[] => this.socialRefusals(since, errMark, 'swear');
+    for (let i = 0; i < 25 && this.allegiance() === before && !refused().length; i++) await sleep(200);
     const after = this.allegiance();
-    const said = lines();
+    const said = this.replyLines(since);
     if (after !== before) return { ok: true, message: [`swore allegiance to ${name}.`, ...said.map((l) => `  ${l}`), after].join('\n') };
-    if (refusedLine()) return { ok: false, message: [`${name} did not take your oath:`, ...said.map((l) => `  ${l}`)].join('\n') };
+    const no = refused();
+    if (no.length) return { ok: false, message: [`${name} did not take your oath: the server refused`, ...[...no, ...said.filter((l) => !no.includes(l))].map((l) => `  ${l}`)].join('\n') };
     return {
       ok: true,
       message: [
@@ -7015,11 +7050,38 @@ export class AgentApi {
     };
   }
 
-  /** Break from your patron (no name), or release a vassal by name. */
+  /**
+   * Break from your patron (no name), or release a vassal by name: the request only, said as sent (UB's
+   * /ub breakallegiance prints its own line at once). ac_allegiance action=break waits for the answer
+   * ({@link breakAllegianceAnswered}).
+   */
   breakAllegiance(name?: string): AgentResult {
     if (!this.host.breakAllegiance) return { ok: false, message: 'this client has no allegiance pane' };
     const err = this.host.breakAllegiance(name);
-    return err ? { ok: false, message: err } : { ok: true, message: name ? `broke allegiance with ${name}` : 'broke from your patron' };
+    return err ? { ok: false, message: err } : { ok: true, message: name ? `asked to break allegiance with ${name}` : 'asked to break from your patron' };
+  }
+
+  /**
+   * ac_allegiance action=break: the request, then the server's answer within 5 s. It said "broke from your patron"
+   * before the server had answered, and stayed so when the server refused ("No patron from which to break!", "That
+   * person is not a member of your Allegiance!"). Now: done once the allegiance changes, refused on a refusal, else
+   * sent with no change yet.
+   */
+  async breakAllegianceAnswered(name?: string): Promise<AgentResult> {
+    const since = this.seqN;
+    const errMark = this.weenieErrorN;
+    const before = this.allegiance();
+    const sent = this.breakAllegiance(name);
+    if (!sent.ok) return sent;
+    const what = name ? `break allegiance with ${name}` : 'break from your patron';
+    const refused = (): string[] => this.socialRefusals(since, errMark, 'break');
+    for (let i = 0; i < 25 && this.allegiance() === before && !refused().length; i++) await sleep(200);
+    const after = this.allegiance();
+    const said = this.replyLines(since);
+    if (after !== before) return { ok: true, message: [name ? `broke allegiance with ${name}` : 'broke from your patron', ...said.map((l) => `  ${l}`), after].join('\n') };
+    const no = refused();
+    if (no.length) return { ok: false, message: [`could not ${what}: the server refused`, ...[...no, ...said.filter((l) => !no.includes(l))].map((l) => `  ${l}`)].join('\n') };
+    return { ok: true, message: [`asked to ${what}; no change yet (ac_allegiance shows it)`, ...said.map((l) => `  ${l}`)].join('\n') };
   }
 
   useOn(item: TargetArg, target: TargetArg): AgentResult {
@@ -15781,7 +15843,7 @@ export class AgentApi {
       probe: (to: { x: number; y: number }) => { const me = this.me(); return me && this.host.navProbe ? this.host.navProbe({ x: me.g.x, y: me.g.y, z: me.s.z }, to) : null; },
       where: () => { const me = this.me(); return me ? { x: me.g.x, y: me.g.y, z: me.s.z, cell: me.s.cell >>> 0, heading: me.heading } : null; },
       swearAllegiance: (t: TargetArg) => this.swearAllegiance(t),
-      breakAllegiance: (n?: string) => this.breakAllegiance(n),
+      breakAllegiance: (n?: string) => this.breakAllegianceAnswered(n),
       itemPalettes: (guid: number) => this.itemPalettes(guid),
       say: (t: string) => this.say(t),
       select: (t: TargetArg) => this.select(t),

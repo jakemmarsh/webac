@@ -250,7 +250,20 @@ reply says so.
 
 One daemon per profile; each profile is its own account, so sessions never kick each other (or Jake on
 `testacjs`, the GPU worker on `testacjs2/3`, or the social probes on `fxprobe1/2`). Pass `profile=` to
-every tool when more than one is running. Several Claude Code sessions can also share one player (the
+every tool when more than one is running.
+
+**One running profile per account (2026-11-02).** AC1999 account names are at most 8 characters, so a profile's
+1999 account keeps one letter of it: `agent` + the profile's first letter (after any `agent` prefix) + `99`
+(claude / claude-ac1999-retail → `agentc99`, yak → `agenty99`). Profiles `rcA` and `rcB` both got `agentr99`,
+and starting the second logged into the first one's account and took its character over. The names are kept
+(every existing account keeps its character), and `ac_start` now refuses a profile whose account another running
+profile plays, on the same server: `profile "rcB" would log in as account agentr99, which profile "rcA" is
+playing …; … start "rcB" on its own account: account=<name>`. Start it again with that `account=` (a hash of the
+whole profile name, e.g. `ag3k9x99`; never one a profile gets on its own) and pass the same `account=` on every
+later start of that profile. The check runs in `start` against the live daemons and again in the daemon, which
+takes the account with an exclusive claim file in the state dir (`account-<port>-<name>.claim`,
+tools/ac-agent/accountClaim.ts) before anything logs in, so two starts at the same moment can't both pass. A
+claim whose daemon died is taken over. Several Claude Code sessions can also share one player (the
 daemon serializes nothing; don't have two brains drive one body).
 
 **Agents playing together don't group up unless told how (2026-10-09).** Two subagents, one per character
@@ -259,7 +272,22 @@ about 100 m from the other, and neither sent a tell. Make the teamwork the goal 
 brief: send an opening `/tell <Name>, …` with coordinates, `ac_wait` for the reply (tell events wake it), and
 name one leader. The leader runs `ac_fellowship action=create`, then `recruit target=<partner>`. The recruit
 first turns on `ac_fellowship action=requests name=accept` (or `auto name=on`): new characters ignore fellowship
-requests. Both confirm with `show` before leaving town. Then the brief sets the rules of play:
+requests. Both confirm with `show` before leaving town.
+
+**A refusal answers the request, not the claim (2026-11-02).** `recruit` says "asked <Name> to join. They have
+30 s …" only when the server has neither refused nor changed the fellowship within 5 s. When it refuses, the result is
+`ok: false`, "<Name> was not recruited: the server refused", and the refusal line under it, in every era's wording:
+end of retail's failure texts and ACE's own lines ("<Name> is already a member of a Fellowship.", "… is not accepting
+fellowship requests.", "… is busy.", "… declines your invite"), the 1999 client's failure switch ("You charged too
+far!", "You're too busy!", "Unable to move to object!") and the lines the 1999 client adds for the codes that switch
+leaves silent (ui/SocialRefusalLines1999.ts); a refusal code that printed nothing is named ("refused (WeenieError
+FellowshipMember)"). Someone's words in say, a tell or /f never count. The pane's other buttons (quit, dismiss,
+leader, open, close, disband, create) read "<action> refused by the server" the same way. `ac_allegiance
+action=swear` does too ("<Name> did not take your oath: the server refused"), and `action=break` now waits up to 5 s
+for the answer: "broke from your patron" once the allegiance changes, "could not break from your patron: the server
+refused" with the line, else "asked to break … no change yet". Wording table: packages/renderer/src/agent/socialRefusal.ts.
+
+Then the brief sets the rules of play:
 - a leash of about 15 m. The observation's `fellows:` line gives each fellow's health, distance and direction, or
   "out of sight". On 2026-10-10 Bulwark sat in 5-minute waits for buffs while Arcanist was 490 m away: brief
   players to keep waits short and to walk to a partner who is out of sight;

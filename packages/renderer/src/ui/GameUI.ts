@@ -251,7 +251,13 @@ const PAPERDOLL_BODY_SLOT_MASK = EquipMask.HeadWear | EquipMask.ChestArmor | Equ
 
 /** gmVendorUI::HandleButtonClicks @ 004c50d0 — the close box's confirmation literal. */
 export const VENDOR_LEAVE_CONFIRM_TEXT = 'You have not completed all transactions. Are you sure you want to leave this vendor?';
-import { assignLeadership, quitFellowship, toggleOpenness, dismissFellow, disbandFellowship, type FellowshipStep } from './FellowshipPanelActions.js';
+import { assignLeadership, quitFellowship, toggleOpenness, dismissFellow, dismissPress, disbandFellowship, type FellowshipStep } from './FellowshipPanelActions.js';
+import {
+  breakClick1999, breakPrompt1999, swearArea1999, titledName1999, AC1999_ALLEGIANCE_PANE_TEXT,
+  AC1999_ALLEGIANCE_BUTTON_RECTS, AC1999_BUTTON_LOOK,
+  type AllegianceBreakText, type SwearArea1999,
+} from './AllegiancePanelFlow.js';
+import { swallowPress } from '../input/WorldTargetMode.js';
 import {
   hiddenBy, FEATURE_PANELS, FEATURE_TOOLBAR_BUTTONS, FEATURE_CHARACTER_OPTIONS, FEATURE_CHAT_FILTERS,
   FEATURE_TALK_FOCUSES, FEATURE_KEYBIND_ACTIONS, FEATURE_SOCIAL_TABS, clientRuleHiddenActions, type EraFeature,
@@ -1128,7 +1134,15 @@ export interface GameUICallbacks {
   /** A fellowship-panel button's steps (FellowshipPanelActions.ts): sends and 0x1a refusals. */
   onFellowshipSteps?: (steps: FellowshipStep[]) => void;
   /** The Recruit button: gmFellowshipUI::RecruitFellow(ACCWeenieObject::selectedID). */
-  onFellowshipRecruitSelected?: () => void;
+  /**
+   * Recruit on the world selection (main.ts runs the check and the sends) and returns the steps it ran.
+   * `agent`: the check alone (RecruitObject), never the 1999 click mode: the agent names its target.
+   */
+  onFellowshipRecruitSelected?: (opts?: { agent?: boolean }) => FellowshipStep[] | void;
+  /** The 1999 Break click mode armed (true) or ended (false): main.ts shows its cursor meanwhile. */
+  onAllegianceBreakMode?: (armed: boolean) => void;
+  /** A fellow's row clicked: true when a 1999 recruit / dismiss mode took the press (main.ts). */
+  onFellowRowTargetClick?: (guid: number) => boolean;
   /**
    * SWEEP1999.character (S2) — a fellow was selected in a roster that carries no vitals (the 1999
    * Fellow): main.ts sends a quiet appraisal; its creature profile comes back through
@@ -1307,6 +1321,8 @@ export interface PlayerStateLike {
    *  existing test fakes that pre-date this interface don't have to be touched. */
   availableLuminance?: bigint;
   maximumLuminance?: bigint;
+  /** Every int the server sent (PlayerState.serverIntProps); the 1999 swear cost reads 132. Optional for older fakes. */
+  serverIntProps?: ReadonlyMap<number, number>;
 }
 
 /**
@@ -2724,7 +2740,7 @@ export class GameUI {
     // direct vassals; retail lists only the player's own vassals via
     // AllegianceProfile::GetFirstVassal/GetNextVassal(player_id)).
     selfGuid?: number;
-    members: Array<{ guid: number; parentGuid: number; name: string; level: number; rank: number; isOnline: boolean; xpProduced?: number }>;
+    members: Array<{ guid: number; parentGuid: number; name: string; level: number; rank: number; isOnline: boolean; xpProduced?: number; gender?: number; heritage?: number }>;
   } | null = null;
   // Friends data
   private friendsList: Array<{ guid: number; name: string; isOnline: boolean }> = [];
@@ -23536,7 +23552,7 @@ export class GameUI {
     allegianceName: string; playerRank: number; totalMembers: number; totalVassals: number; isLocked: boolean;
     patron?: { name: string; level: number; isOnline: boolean; xpProduced?: number };
     selfGuid?: number;
-    members: Array<{ guid: number; parentGuid: number; name: string; level: number; rank: number; isOnline: boolean; xpProduced?: number }>;
+    members: Array<{ guid: number; parentGuid: number; name: string; level: number; rank: number; isOnline: boolean; xpProduced?: number; gender?: number; heritage?: number }>;
   } | null): void {
     this.allegianceInfo = data;
     // CORE.5.c.d.a — drop a stale vassal selection when the update no longer
@@ -27075,6 +27091,11 @@ export class GameUI {
    *  mirroring retail's state-13 gating. */
   private bindDatSocialButton(
     scope: HTMLElement, id: number, label: string, onClick: () => void,
+    /**
+     * A 1999 button (AC1999_BUTTON_LOOK): disabled keeps the body art and greys only the label
+     * (0x004511d0 swaps the text colour, +0xc0 → +0xc4); the label colours are the client's own.
+     */
+    look?: { enabledColor: string; disabledColor: string },
   ): { setEnabled(on: boolean): void } | null {
     const btn = this.datChild(scope, id);
     if (!btn) return null;
@@ -27091,10 +27112,12 @@ export class GameUI {
     };
     const paint = (): void => {
       const state = stateOf();
+      // 1999: disabled draws the normal art (only the label greys).
+      const artState = look && state === UI_STATE_DISABLED ? UI_STATE_NORMAL : state;
       for (const [cid, normal, pressedTex, ghosted] of GameUI.DAT_BTN_SLICES) {
         const slice = this.datChild(btn, cid);
-        const tex = sliceTex(cid, state,
-          state === UI_STATE_DISABLED ? ghosted : state === UI_STATE_PRESSED ? pressedTex : normal);
+        const tex = sliceTex(cid, artState,
+          artState === UI_STATE_DISABLED ? ghosted : artState === UI_STATE_PRESSED ? pressedTex : normal);
         if (!slice) continue;
         // the state's art id, whether or not a texture URL is available to paint it
         slice.setAttribute('data-tex', `0x${tex.toString(16).padStart(8, '0')}`);
@@ -27111,7 +27134,7 @@ export class GameUI {
       // The label centred as CalcJustification @ 00467260 does, (box >> 1) -
       // (text >> 1): whole pixels. Flex centring put a 21 px "Yes" at 29.5 px
       // in the 80 px button and the pixelated glyphs lost a column.
-      const text = this.renderDatText(label, ref, state);
+      const text = this.renderDatText(label, ref, state, look ? { color: state === UI_STATE_DISABLED ? look.disabledColor : look.enabledColor } : {});
       const boxW = parseFloat(btn.style.width) || btn.offsetWidth || (desc?.width ?? 80);
       const boxH = parseFloat(btn.style.height) || btn.offsetHeight || (desc?.height ?? 32);
       const textW = parseFloat(text.style.width) || (text as HTMLCanvasElement).width || 0;
@@ -27746,6 +27769,8 @@ export class GameUI {
         const row = document.createElement('div');
         row.className = this.selectedFellowGuid === f.guid ? 'fellow-row selected' : 'fellow-row';
         row.dataset.fellowName = f.name;
+        // The 1999 one-click modes pass a press here through (WorldTargetMode oneClickPressRoute).
+        row.dataset.fellowGuid = String(f.guid);
         Object.assign(row.style, { height: '32px', flexShrink: '0', cursor: 'pointer' });
         // Line 1 — navy name strip (state-6 art when the row is selected).
         const strip = document.createElement('div');
@@ -27796,6 +27821,8 @@ export class GameUI {
         // otherwise the row selects and SetSelectedObject(fellow) makes them
         // the global selection (the toolbar strip, health query, radar box).
         row.addEventListener('click', () => {
+          // 1999 (0x00533e50): under the recruit / dismiss mode the row takes the 'd' press, no selection.
+          if (this.callbacks.onFellowRowTargetClick?.(f.guid)) return;
           if (this.itemListTargetedClick(f.guid)) return;
           this.selectedFellowGuid = f.guid;
           this.fellowSelectionSyncedGuid = f.guid;
@@ -27838,15 +27865,18 @@ export class GameUI {
       // RecruitFellow(ACCWeenieObject::selectedID): the world selection, resolved by the client.
       this.callbacks.onFellowshipRecruitSelected?.();
     });
+    // 1999: Dismiss arms the click-a-character mode (FellowPanel_ListenToMessage @ 0x00535770, eraClientRules().fellowshipText).
+    const fellowshipText = this.clientRules.fellowshipText;
     const dismissBtn = this.bindDatSocialButton(inFrame, 0x1000027f, getString(190852030) ?? 'Dismiss', () => {
-      if (this.selectedFellowGuid !== null) fellowSteps(dismissFellow(this.fellowshipData, selfId, this.selectedFellowGuid));
+      fellowSteps(dismissPress(this.fellowshipData, selfId, this.selectedFellowGuid, fellowshipText));
     });
     const disbandBtn = this.bindDatSocialButton(inFrame, 0x10000280, getString(73892702) ?? 'Disband', () => {
       fellowSteps(disbandFellowship());
     });
     quitBtn?.setEnabled(true);
     leaderBtn?.setEnabled(isLeader && !!selected && !selectedIsSelf);
-    dismissBtn?.setEnabled(isLeader && !!selected && !selectedIsSelf);
+    // The 1999 leader's Dismiss needs no selection: the click after it picks the fellow (the panel state @ 0x00535c30, leader).
+    dismissBtn?.setEnabled(isLeader && (fellowshipText.targetMode ? true : !!selected && !selectedIsSelf));
     openBtn?.setEnabled(isLeader);
     disbandBtn?.setEnabled(isLeader);
     recruitBtn?.setEnabled((isLeader || data.open) && data.fellows.length < 9);
@@ -27944,8 +27974,16 @@ export class GameUI {
         if (!f) return 'you are not in a fellowship (create one first)';
         if (!(isLeader || f.open)) return 'only the leader can recruit into a closed fellowship';
         if (f.fellows.length >= 9) return 'the fellowship is full (9)';
-        this.callbacks.onFellowshipRecruitSelected?.();
-        return null;
+        {
+          // The check's own answer: a refusal ("You can't recruit yourself.", "<name> is already in your
+          // Fellowship") or nothing sent (not a player) is reported, never a request that wasn't made.
+          const ran = this.callbacks.onFellowshipRecruitSelected?.({ agent: true });
+          if (!Array.isArray(ran)) return null;
+          const refusal = ran.find((x) => x.kind === 'refuse') as { token?: string; text?: string } | undefined;
+          if (refusal) return `refused: ${refusal.text ?? (refusal.token ? getString(acStringHash(refusal.token)) ?? refusal.token : '')}`;
+          if (!ran.some((x) => x.kind === 'recruit')) return 'nothing sent: the selection is not a player who can be recruited';
+          return null;
+        }
       case 'quit':
         if (!f) return 'you are not in a fellowship';
         return steps(quitFellowship(f, self));
@@ -27955,7 +27993,8 @@ export class GameUI {
         if (!isLeader) return `only the leader can ${action === 'leader' ? 'hand over leadership' : 'dismiss a fellow'}`;
         const g = fellowByName(arg);
         if (g === null) return `no fellow named "${arg ?? ''}" (fellows: ${f.fellows.map((m) => m.name).join(', ')})`;
-        return steps(action === 'leader' ? assignLeadership(f, self, g) : dismissFellow(f, self, g));
+        // Dismiss by name: the fellow is the clicked character (in 1999, the click after Dismiss).
+        return steps(action === 'leader' ? assignLeadership(f, self, g) : dismissFellow(f, self, g, this.clientRules.fellowshipText));
       }
       case 'open': case 'close': {
         if (!f) return 'you are not in a fellowship';
@@ -28188,6 +28227,13 @@ export class GameUI {
     const hasPatron = !!self && self.parentGuid !== 0;
     const patronRec = hasPatron ? a!.members.find(m => m.guid === self!.parentGuid) : undefined;
     const patronIsMonarch = hasPatron && !!monarch && self!.parentGuid === monarch.guid;
+    // VISUAL.ac1999-allegpanel-swear-label — the 1999 pane (eraClientRules().allegianceFlow.pane1999):
+    // the monarch's and patron's rows name them with their rank title (AllegPanel_Update @ 0x0052e590 →
+    // 0x005ae8b0); the patron's and vassals' XP show only in Show XP mode (0x005302e0, 0x005314a0).
+    const pane1999 = this.clientRules.allegianceFlow.pane1999;
+    const showXp = !pane1999 || this.allegianceShowXp1999;
+    const nameOf = (m: { name: string; rank: number; heritage?: number; gender?: number }, titled: boolean): string =>
+      pane1999 && titled ? titledName1999(m.name, getAllegianceRankTitle(m.heritage ?? 0, m.gender ?? 0, m.rank)) : m.name;
 
     // MONARCH section 0x10000255 — hidden when no allegiance or self IS the
     // monarch. Whole-section gray when the monarch is offline (state 13).
@@ -28206,15 +28252,15 @@ export class GameUI {
         ? (getString(261461036) ?? 'PATRON/MONARCH')
         : (getString(205803500) ?? 'MONARCH');
       this.setDatLabel(monarchField, 0x10000256, monLabel, { justify: 'near', margin: 2, state });
-      this.setDatLabel(monarchField, 0x10000257, monarch.name, { justify: 'near', margin: 2, state });
+      this.setDatLabel(monarchField, 0x10000257, nameOf(monarch, true), { justify: 'near', margin: 2, state });
       // Monarch followers = allegiance size minus the monarch (the wire
       // carries no per-node follower count; panel-2.jpg's "Followers: 2,537"
       // matches allegiance size, not any direct-vassal subset).
       this.setDatLabel(monarchField, 0x10000258, `${followersStr}${Math.max(0, (a!.totalMembers ?? 1) - 1).toLocaleString()}`, { justify: 'near', margin: 2, state });
       const monXp = this.datChild(monarchField, 0x10000490);
       if (monXp) {
-        monXp.style.display = patronIsMonarch ? '' : 'none';
-        if (patronIsMonarch) {
+        monXp.style.display = patronIsMonarch && showXp ? '' : 'none';
+        if (patronIsMonarch && showXp) {
           this.setDatLabel(monXp, 0x10000491, getString(186315644) ?? 'XP Produced', { justify: 'near' });
           this.setDatLabel(monXp, 0x10000492, (self?.xpProduced ?? 0).toLocaleString(), { justify: 'far' });
         }
@@ -28225,15 +28271,25 @@ export class GameUI {
     const patronField = this.datChild(pane, 0x1000025a);
     const showPatron = !!patronRec && !patronIsMonarch;
     if (patronField) patronField.style.display = showPatron ? '' : 'none';
+    // The 1999 Break click's patron row (AllegiancePanelFlow): the patron field, or the monarch's when they are one.
+    if (patronField) {
+      if (showPatron && patronRec) patronField.dataset.allegianceGuid = String(patronRec.guid);
+      else delete patronField.dataset.allegianceGuid;
+    }
+    if (monarchField) {
+      if (patronIsMonarch && monarch) monarchField.dataset.allegianceGuid = String(monarch.guid);
+      else delete monarchField.dataset.allegianceGuid;
+    }
     if (patronField && showPatron && patronRec) {
       // CORE.17.k.b.b.c.b — UpdatePatronData @ 004917c0: the same
       // IsLoggedIn → SetState(0xd) / SetState(1) on m_pPatronField.
       const state = patronRec.isOnline ? undefined : UI_STATE_DISABLED;
       patronField.dataset.acState = (state ?? UI_STATE_NORMAL).toString(16);
       this.setDatLabel(patronField, 0x1000025b, getString(153744444) ?? 'PATRON', { justify: 'near', margin: 2, state });
-      this.setDatLabel(patronField, 0x1000025c, patronRec.name, { justify: 'near', margin: 2, state });
+      this.setDatLabel(patronField, 0x1000025c, nameOf(patronRec, !showXp), { justify: 'near', margin: 2, state });
       const patXp = this.datChild(patronField, 0x10000490);
-      if (patXp) {
+      if (patXp) patXp.style.display = showXp ? '' : 'none';
+      if (patXp && showXp) {
         this.setDatLabel(patXp, 0x10000491, getString(186315644) ?? 'XP Produced', { justify: 'near' });
         this.setDatLabel(patXp, 0x10000492, (self?.xpProduced ?? 0).toLocaleString(), { justify: 'far' });
       }
@@ -28242,6 +28298,8 @@ export class GameUI {
     // VASSALS / XP Produced column headers — always visible, white.
     this.setDatLabel(pane, 0x1000025e, getString(8039948) ?? 'VASSALS', { justify: 'near', margin: 2 });
     this.setDatLabel(pane, 0x1000025f, getString(186315644) ?? 'XP Produced', { justify: 'far', margin: 2 });
+    const vassalXpHeader = this.datChild(pane, 0x1000025f);
+    if (vassalXpHeader) vassalXpHeader.style.display = showXp ? '' : 'none';
 
     // Vassal list 0x10000260 — direct vassals only, in wire order, as
     // 32px two-line 0x10000266-template rows.
@@ -28256,6 +28314,7 @@ export class GameUI {
         const row = document.createElement('div');
         row.className = isSel ? 'vassal-row selected' : 'vassal-row';
         row.dataset.rowName = v.name;
+        row.dataset.allegianceGuid = String(v.guid);
         Object.assign(row.style, { height: '32px', flexShrink: '0', cursor: 'pointer', position: 'relative' });
         // Line 1 — selectable name strip 0x10000267 (0x06001aaf; state-6
         // selected 0x06001451), name 0x10000268 near-justified margin 2.
@@ -28268,7 +28327,7 @@ export class GameUI {
             ? { backgroundImage: `url(${bg})`, backgroundSize: '100% 100%', backgroundRepeat: 'no-repeat' }
             : (isSel ? { background: goldAlpha(0.25) } : {})),
         });
-        strip.appendChild(this.renderACText(v.name, AC_COLORS.white));
+        strip.appendChild(this.renderACText(nameOf(v, !showXp), AC_COLORS.white));
         row.appendChild(strip);
         // Line 2 — "(Offline)" 0x100004aa (only when logged out, per
         // UpdateVassalsData's SetVisible) + XP produced 0x10000269, right
@@ -28282,7 +28341,7 @@ export class GameUI {
         line2.appendChild(v.isOnline
           ? document.createElement('span')
           : this.renderACText(getString(71451909) ?? '(Offline)', AC_COLORS.socialOfflineGray));
-        line2.appendChild(this.renderACText((v.xpProduced ?? 0).toLocaleString(), AC_COLORS.white));
+        if (showXp) line2.appendChild(this.renderACText((v.xpProduced ?? 0).toLocaleString(), AC_COLORS.white));
         row.appendChild(line2);
         row.addEventListener('click', () => {
           this.selectedVassalName = this.selectedVassalName === v.name ? null : v.name;
@@ -28342,8 +28401,19 @@ export class GameUI {
     // Swear / Break / Kick — the pane's inherited 3-slice buttons
     // (0x100002ce/cf/d0 slices; DAT defSt=13 matches the retail
     // disabled-until-eligible gating). Each confirms via dialog first,
-    // mirroring Make{Swear,Break,Kick}ConfirmationDialog.
-    const swearBtn = this.bindDatSocialButton(pane, 0x10000263, getString(61394636) ?? 'Swear', () => {
+    // mirroring Make{Swear,Break,Kick}ConfirmationDialog. The 1999 client has no
+    // dialogs and no Kick (eraClientRules().allegianceFlow, ui/AllegiancePanelFlow.ts).
+    const flow = this.clientRules.allegianceFlow;
+    // 1999: the swear area (SetXPChange @ 0x0052ddd0 / HandleSelection @ 0x0052fcd0) — the button reads
+    // "Swear Allegiance To <name>" and shows only when a valid character is selected and the cost is met.
+    const T1999 = AC1999_ALLEGIANCE_PANE_TEXT;
+    const area = pane1999 ? this.allegianceSwearArea1999() : null;
+    this.allegianceSwearArea1999Key = area ? JSON.stringify(area) : null;
+    const swearLabel = area?.kind === 'swear' ? `${T1999.swearTo}${area.name}` : (getString(61394636) ?? 'Swear');
+    // 1999: the buttons take their rects BEFORE binding, so the label centres in the 1999 width.
+    if (pane1999) this.placeAllegianceButtons1999(pane);
+    const look1999 = pane1999 ? AC1999_BUTTON_LOOK : undefined;
+    const swearBtn = this.bindDatSocialButton(pane, 0x10000263, swearLabel, () => {
       // Retail swears to the SELECTED world target; the button is only
       // enabled while UpdateSwearButton's conditions hold.
       const target = this.hudState.target;
@@ -28351,17 +28421,31 @@ export class GameUI {
       // MakeSwearConfirmationDialog @ 004927b0 captures m_iidPossibleNewPatron
       // = selectedID when it opens; RecvNotice_CloseDialog swears to THAT id.
       const patronGuid = target.id;
+      // 1999 AllegPanel_ListenToMessage @ 0x00530a70: SwearAllegiance(selectedID) at once, no dialog.
+      if (!flow.confirmDialogs) { this.callbacks.onAllegianceSwear?.(patronGuid); return; }
       this.showConfirmationDialog(`${getString(76234542) ?? 'Do you wish to swear to '}${target.name}?`, (accepted) => {
         if (accepted) this.callbacks.onAllegianceSwear?.(patronGuid);
       });
-    });
-    const breakBtn = this.bindDatSocialButton(pane, 0x10000264, getString(236977100) ?? 'Break', () => {
+    }, look1999);
+    const vassalGuids = (a && a.selfGuid != null) ? a.members.filter((m) => m.parentGuid === a.selfGuid).map((m) => m.guid) : [];
+    const breakBtn = this.bindDatSocialButton(pane, 0x10000264, pane1999 ? T1999.breakButton : (getString(236977100) ?? 'Break'), () => {
+      if (flow.breakMode) {
+        this.armAllegianceBreak1999(flow.breakMode, hasPatron && self ? self.parentGuid : null, vassalGuids);
+        return;
+      }
       if (!self || !patronRec) return;
       this.showConfirmationDialog(`${getString(198864862) ?? 'Are you sure you wish to break from '}${patronRec.name}?`, (accepted) => {
         if (accepted) this.callbacks.onAllegianceBreak?.(self.parentGuid);
       });
-    });
-    const kickBtn = this.bindDatSocialButton(pane, 0x10000265, getString(204926940) ?? 'Kick', () => {
+    }, look1999);
+    // 1999: Kick's slot is the Show XP / Show Titles toggle (ctor @ 0x0052bf80 "Show XP"; ListenToMessage
+    // @ 0x00530a70 flips it: titles shown → "Show XP", XP shown → "Show Titles").
+    const kickBtn = pane1999
+      ? this.bindDatSocialButton(pane, 0x10000265, this.allegianceShowXp1999 ? T1999.showTitles : T1999.showXp, () => {
+        this.allegianceShowXp1999 = !this.allegianceShowXp1999;
+        this.renderSocialPanel();
+      }, look1999)
+      : this.bindDatSocialButton(pane, 0x10000265, getString(204926940) ?? 'Kick', () => {
       const target = this.selectedVassalName;
       if (!target) return;
       // MakeKickConfirmationDialog @ 00492e10 captures m_iidPossibleKickedVassal;
@@ -28377,8 +28461,154 @@ export class GameUI {
     });
     this.allegianceSwearButton = swearBtn ? { handle: swearBtn, enabled: null } : null;
     this.updateAllegianceSwearButton();
-    breakBtn?.setEnabled(hasPatron && !!patronRec);
-    kickBtn?.setEnabled(!!this.selectedVassalName);
+    // 1999: Break covers the patron and the vassals (a click picks which); there is no Kick.
+    breakBtn?.setEnabled(flow.breakMode ? hasPatron || vassalGuids.length > 0 : hasPatron && !!patronRec);
+    if (pane1999) {
+      // AllegPanel_Update: Show XP and Break are off with neither a patron nor a vassal.
+      kickBtn?.setEnabled(hasPatron || vassalGuids.length > 0);
+      swearBtn?.setEnabled(area!.kind === 'swear');
+      this.layoutAllegiancePane1999(pane, area!);
+    } else {
+      kickBtn?.setEnabled(!!this.selectedVassalName);
+      if (!flow.kickButton) {
+        const kickEl = this.datChild(pane, 0x10000265);
+        if (kickEl) kickEl.style.display = 'none';
+      }
+    }
+  }
+
+  /**
+   * The 1999 buttons' rects (AC1999_ALLEGIANCE_BUTTON_RECTS), with the 3-slice art re-laid to the new
+   * width: the end caps keep their own widths at each end, the middle fills between. Without this the
+   * art stayed at the layout's 88 px and a wider label was centred into 88 px and clipped ("reak
+   * Allegiance", live 2026-11-02).
+   */
+  private placeAllegianceButtons1999(pane: HTMLElement): void {
+    const R = AC1999_ALLEGIANCE_BUTTON_RECTS;
+    const place = (id: number, x: number, w: number, y?: number): void => {
+      const el = this.datChild(pane, id);
+      if (!el) return;
+      const r = datRect(el);
+      placeRect(el, { x, y: y ?? r.y, w, h: r.h });
+      const [left, mid, right] = GameUI.DAT_BTN_SLICES.map(([cid]) => this.datChild(el, cid));
+      const capW = (s: HTMLElement | null, dflt: number): number => (s ? datRect(s).w || dflt : dflt);
+      const lw = capW(left, 32);
+      const rw = capW(right, 32);
+      const h = r.h;
+      if (left) placeRect(left, { x: 0, y: 0, w: lw, h });
+      if (mid) placeRect(mid, { x: lw, y: 0, w: Math.max(0, w - lw - rw), h });
+      if (right) placeRect(right, { x: w - rw, y: 0, w: rw, h });
+    };
+    place(0x10000263, R.swear.x, R.swear.w, R.swear.y);
+    place(0x10000265, R.showXp.x, R.showXp.w);
+    place(0x10000264, R.breakButton.x, R.breakButton.w);
+  }
+
+  /** 1999: Show XP mode (true) or titles mode (the ctor's default, false). */
+  private allegianceShowXp1999 = false;
+  /** int 0x84 NumAllegianceBreaks, for the 1999 swear cost (syncFromPlayerState). */
+  private allegianceBreaks = 0;
+  /** The swear area last drawn (1999), so a selection change redraws it. */
+  private allegianceSwearArea1999Key: string | null = null;
+
+  /** The 1999 swear area for the current state (AllegiancePanelFlow.swearArea1999). */
+  private allegianceSwearArea1999(): SwearArea1999 {
+    const a = this.allegianceInfo;
+    const self = a?.selfGuid != null ? a.members.find((m) => m.guid === a.selfGuid) : undefined;
+    const c = this.charInfo;
+    return swearArea1999({
+      hasPatron: !!self && self.parentGuid !== 0,
+      level: c.level,
+      totalXp: c.totalXp,
+      unassignedXp: c.unassignedXp,
+      table: this.levelXpTable,
+      breaks: this.allegianceBreaks,
+      eligibleTarget: this.allegianceSwearEligible() ? (this.hudState.target?.name ?? null) : null,
+    });
+  }
+
+  /**
+   * The 1999 pane's geometry on the end-of-retail layout (the ctor @ 0x0052bf80's own rects): the swear
+   * area where the monarch / patron rows go (they and it never show together) — the message (4, 0x38,
+   * 0x124, 0x22, centred), the button (4, 0x3a, 0x124 wide), the xp line at y 0x5a (cost centred;
+   * available left 0x92 wide; needed right from x 0x96) — and the bottom row's Show XP (x 0x19) and
+   * Break Allegiance (x 0x96), 0x78 wide each.
+   */
+  private layoutAllegiancePane1999(pane: HTMLElement, area: SwearArea1999): void {
+    const T1999 = AC1999_ALLEGIANCE_PANE_TEXT;
+    const swearEl = this.datChild(pane, 0x10000263);
+    const toggleEl = this.datChild(pane, 0x10000265);
+    if (toggleEl) toggleEl.style.display = '';
+    if (swearEl) swearEl.style.display = area.kind === 'swear' ? '' : 'none';
+    pane.querySelector('#alleg-swear-1999')?.remove();
+    if (area.kind === 'hidden') return;
+    const box = document.createElement('div');
+    box.id = 'alleg-swear-1999';
+    box.dataset.swearArea = area.kind;
+    Object.assign(box.style, { position: 'absolute', left: '0px', top: '0px', width: '300px', height: '0px', pointerEvents: 'none' });
+    const line = (text: string, x: number, y: number, w: number, h: number, justify: 'left' | 'center' | 'right', role: string): void => {
+      const el = document.createElement('div');
+      el.dataset.swearLine = role;
+      Object.assign(el.style, {
+        position: 'absolute', left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`,
+        display: 'flex', alignItems: 'center', justifyContent: justify === 'left' ? 'flex-start' : justify === 'right' ? 'flex-end' : 'center',
+        textAlign: justify, whiteSpace: 'normal',
+      });
+      el.appendChild(this.renderACText(text, AC_COLORS.white));
+      box.appendChild(el);
+    };
+    const n = (v: number): string => v.toLocaleString('en-US');
+    if (area.kind === 'select') line(T1999.selectPrompt, 4, 0x38, 0x124, 0x22, 'center', 'message');
+    if (area.kind === 'short') line(T1999.notEnough, 4, 0x38, 0x124, 0x22, 'center', 'message');
+    if (area.kind === 'level') line(T1999.notAtLevel, 4, 0x38, 0x124, 0x22, 'center', 'message');
+    if (area.kind === 'select' || area.kind === 'swear') line(`${T1999.xpCost}${n(area.cost)}`, 4, 0x5a, 0x124, 0x14, 'center', 'cost');
+    if (area.kind === 'short') {
+      line(`${T1999.xpAvailable}${n(area.available)}`, 4, 0x5a, 0x92, 0x14, 'left', 'available');
+      line(`${T1999.xpNeeded}${n(area.needed)}`, 0x96, 0x5a, 0x8e, 0x14, 'right', 'needed');
+    }
+    if (area.kind === 'level') line(T1999.checkAgain, 4, 0x5a, 0x124, 0x14, 'center', 'note');
+    pane.appendChild(box);
+  }
+
+  /** The armed 1999 Break mode's document listener, removed on the click that ends it. */
+  private allegianceBreakListener: ((e: Event) => void) | null = null;
+
+  /**
+   * BUG.ac1999-fellowship-refusal-wording — the 1999 Break (AllegPanel_ListenToMessage @ 0x00530a70):
+   * the prompt for what can be broken on the status line, then the next click anywhere either lands
+   * on the patron's or a vassal's row and breaks with that character, or prints "Break Allegiance
+   * cancelled" (0x0052db90). Rows carry their character in data-allegiance-guid.
+   */
+  private armAllegianceBreak1999(text: AllegianceBreakText, patronGuid: number | null, vassalGuids: readonly number[]): void {
+    const prompt = breakPrompt1999(text, patronGuid !== null, vassalGuids.length);
+    if (prompt === null) return;
+    this.disarmAllegianceBreak();
+    this.displayErrorText(prompt);
+    // The panel's global mouse listener (RegisterGlobalEvent mask 1 @ 0x00530cc2) gets the next left
+    // press anywhere, the 3D view included, as the 'd' press (0x00414030); 0x0052db90 breaks on a row
+    // and cancels on anything else. A right press is no 'd' press and leaves the mode armed. That
+    // press does nothing else anywhere (the world's 'd' arm has no case 6: no selection), so it is swallowed.
+    const listener = (e: Event): void => {
+      if ((e as MouseEvent).button !== 0) return;
+      this.disarmAllegianceBreak();
+      const row = (e.target as Element | null)?.closest?.('[data-allegiance-guid]') as HTMLElement | null;
+      const guid = row ? Number(row.dataset.allegianceGuid) : null;
+      swallowPress(e, document);
+      const r = breakClick1999(text, guid, patronGuid, vassalGuids);
+      if (r.kind === 'break') this.callbacks.onAllegianceBreak?.(r.guid);
+      else this.displayErrorText(r.text);
+    };
+    this.allegianceBreakListener = listener;
+    this.callbacks.onAllegianceBreakMode?.(true);
+    // The press that armed it is still dispatching; listen from the next click on.
+    setTimeout(() => { if (this.allegianceBreakListener === listener) document.addEventListener('mousedown', listener, true); }, 0);
+  }
+
+  private disarmAllegianceBreak(): void {
+    if (!this.allegianceBreakListener) return;
+    document.removeEventListener('mousedown', this.allegianceBreakListener, true);
+    this.allegianceBreakListener = null;
+    this.callbacks.onAllegianceBreakMode?.(false);
   }
 
   /**
@@ -28418,6 +28648,12 @@ export class GameUI {
       if (self && self.parentGuid !== 0) return 'you already have a patron (break from them first)';
       if (!(target.isPlayer ?? target.type === 'player')) return `${target.name} is not a player`;
       return `${target.name} is already in your allegiance`;
+    }
+    // 1999: the button shows only while the swear cost is met (AllegPanel_SetXPChange @ 0x0052ddd0).
+    if (this.clientRules.allegianceFlow.pane1999) {
+      const area = this.allegianceSwearArea1999();
+      if (area.kind === 'short') return `${AC1999_ALLEGIANCE_PANE_TEXT.notEnough} (${area.available} of ${area.needed} unassigned XP)`;
+      if (area.kind === 'level') return AC1999_ALLEGIANCE_PANE_TEXT.notAtLevel;
     }
     this.callbacks.onAllegianceSwear?.(target.id);
     return null;
@@ -28470,6 +28706,12 @@ export class GameUI {
   /** Re-gate Swear (RecvNotice_SelectionChanged @ 00490d70 → UpdateSwearButton).
    *  updateHUD calls this every frame, so it repaints only on a flip. */
   private updateAllegianceSwearButton(): void {
+    // 1999: the swear area follows the selection (HandleSelection relabels / swaps it): redraw on a change.
+    if (this.clientRules.allegianceFlow.pane1999) {
+      if (this.allegianceSwearArea1999Key === null || !this.socialPanelVisible || this.socialTab !== 'allegiance') return;
+      if (JSON.stringify(this.allegianceSwearArea1999()) !== this.allegianceSwearArea1999Key) this.renderSocialPanel();
+      return;
+    }
     const gate = this.allegianceSwearButton;
     if (!gate) return;
     const on = this.allegianceSwearEligible();
@@ -35866,6 +36108,8 @@ export class GameUI {
   /** Update character info panel data from a PlayerState. */
   syncFromPlayerState(state: PlayerStateLike, levelXpTable?: bigint[]): void {
     if (levelXpTable) this.levelXpTable = levelXpTable;
+    // int 0x84 NumAllegianceBreaks (132): the 1999 swear cost's multiplier.
+    if (state.serverIntProps) this.allegianceBreaks = state.serverIntProps.get(132) ?? 0;
     // FAITHFUL.255/CORE.5.b — drive the vitae strip indicator from live
     // state. In the EoL strip the vitae element is 0x100000f4
     // (gmUIElement_VitaeIndicator, class 0x10000006): lit 0x060074a0 when

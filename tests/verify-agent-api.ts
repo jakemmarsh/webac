@@ -190,8 +190,8 @@ describe('AgentApi', () => {
     expect(host.sent).toContain('swear 50000009');
     expect(r.ok).toBe(true);
     expect(r.message).toMatch(/^swore allegiance to Jake Main\.[\s\S]*patron: Jake Main/);
-    expect(api.breakAllegiance()).toEqual({ ok: true, message: 'broke from your patron' });
-    expect(api.breakAllegiance('Tink')).toEqual({ ok: true, message: 'broke allegiance with Tink' });
+    expect(api.breakAllegiance()).toEqual({ ok: true, message: 'asked to break from your patron' });
+    expect(api.breakAllegiance('Tink')).toEqual({ ok: true, message: 'asked to break allegiance with Tink' });
     // No answer yet: back within 5 s (the server's offer lasts 30 s), saying how to accept on the patron.
     host.allegianceText = 'no allegiance (no patron, no vassals)';
     const pending = api.swearAllegiance('Jake Main');

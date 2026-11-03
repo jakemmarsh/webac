@@ -16,8 +16,11 @@ import { MAP_NOTE_LOCATIONS, type MapNoteLocation } from '../ui/HudTooltips.js';
 import { MAP_MARKER_AREA, MAP_MARKER_AREA_1999, type MapMarkerArea, type MapPlacement } from '../ui/MapMarkers.js';
 import type { HitLineText, ServerTextSlots } from '../ui/ServerMessageText.js';
 import { FAILURE_EVENT_TEXT_1999, type FailureEventTable } from '../ui/FailureEventText1999.js';
+import { SOCIAL_REFUSAL_LINES_1999, type SocialRefusalTable } from '../ui/SocialRefusalLines1999.js';
 import { AC1999_STATUS_LINE, EOR_STATUS_LINE, type StatusLineRules } from '../ui/SpewBoxModel.js';
 import { AC1999_PLACEMENT_TEXT, EOR_PLACEMENT_TEXT, type PlacementText } from '../inventory/ItemHolderPlacement.js';
+import { AC1999_FELLOWSHIP_TEXT, EOR_FELLOWSHIP_TEXT, type FellowshipText } from '../ui/FellowshipPanelActions.js';
+import { AC1999_ALLEGIANCE_FLOW, EOR_ALLEGIANCE_FLOW, type AllegianceFlowRules } from '../ui/AllegiancePanelFlow.js';
 import { AC1999_USE_OBJECT_RULES, EOR_USE_OBJECT_RULES, type UseObjectRules } from '../input/UseObject.js';
 import { AC1999_ENCUMBRANCE_NOTICE, EOR_ENCUMBRANCE_NOTICE, type EncumbranceNoticeRules } from '../ui/EncumbranceNotice.js';
 import { AC1999_WORLD_RULES, EOR_WORLD_RULES, type EraWorldRules } from './EraWorldRules.js';
@@ -551,6 +554,12 @@ export interface EraClientRules {
    */
   failureEventText: FailureEventTable | null;
   /**
+   * BUG.ac1999-fellow-recruit-silent — the lines this era adds where its failure switch has no arm
+   * for a refused recruit or swear (ui/SocialRefusalLines1999.ts; a recorded departure from 1999).
+   * null: end of retail and Dark Majesty, whose servers say these refusals themselves.
+   */
+  socialRefusalLines: SocialRefusalTable | null;
+  /**
    * Whether 0xA0 InventoryServerSaveFailed also runs the failure switch after
    * ServerSaysAttemptFailed's verb line (INV-3). End of retail: yes, unless the code is one of the
    * seven name-templated ones (the 0xA0 dispatch @ decomp :339961). 1999: no, Net_DispatchServerMessage
@@ -773,6 +782,21 @@ export interface EraClientRules {
    * Fellowship, "…"`, and 0x00536f40's `<leader> has recruited you into the <name> Fellowship.`
    */
   socialLineText: 'eor' | 'ac1999';
+  /**
+   * The fellowship panel's Recruit / Dismiss refusals and the 1999 click-a-character mode
+   * (ui/FellowshipPanelActions.ts; BUG.ac1999-fellowship-refusal-wording). 1999: FellowPanel_RecruitObject
+   * @ 0x00535670 / FellowPanel_DismissObject @ 0x00535570's "<name> is already in your Fellowship" etc.
+   */
+  fellowshipText: FellowshipText;
+  /** The allegiance pane's Swear / Break / Kick flow (ui/AllegiancePanelFlow.ts; 1999 AllegPanel_ListenToMessage @ 0x00530a70). */
+  allegianceFlow: AllegianceFlowRules;
+  /**
+   * Use / examine target modes end on the next left press anywhere, hit or miss, and select nothing
+   * (input/WorldTargetMode.ts). 1999: SetTargetMode @ 0x004d0220's arms all raise the target-cursor flag
+   * the mouse dispatch 0x00414030 spends on the next left press. End of retail: a miss keeps the mode
+   * armed (ExecuteTargetModeForItem), and the hit selects. Recruit / dismiss are one-click in any era.
+   */
+  oneClickTargetModes: boolean;
   /**
    * The chat line printed on entering the world, or null. 1999: ClientMode_RunTransition @ 0x4d08a0
    * prints the client's version string (0x0062f508) as the first line; end of retail prints none.
@@ -1159,6 +1183,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   serverTextSlots: null,
   statusLine: EOR_STATUS_LINE, // gmSpewBoxUI, layout 0x2100000f pane 0x10000046 at (0,20)
   failureEventText: null,
+  socialRefusalLines: null,
   inventoryFailedRunsFailureEvent: true,
   hitLineText: 'eor' as const,
   encumbranceNotice: EOR_ENCUMBRANCE_NOTICE, // CPlayerSystem::OnLoadChanged @ 0055f510
@@ -1196,6 +1221,9 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   commandTable: 'eor' as const,
   speechHearing: 'all' as const,
   socialLineText: 'eor' as const,
+  fellowshipText: EOR_FELLOWSHIP_TEXT, // RecruitFellow @ 0048e530, DismissFellow @ 0048e470
+  allegianceFlow: EOR_ALLEGIANCE_FLOW, // gmAllegianceUI's confirmation dialogs
+  oneClickTargetModes: false, // ClientUISystem::ExecuteTargetModeForItem
   worldEntryVersionLine: null,
 });
 const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
@@ -1254,6 +1282,7 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   serverTextSlots: SERVER_TEXT_SLOTS_1999,
   statusLine: AC1999_STATUS_LINE, // PanelUI_Arrange @ 0x004fad30, StatusBox_SetStatusText @ 0x005cd4e0
   failureEventText: FAILURE_EVENT_TEXT_1999, // UI_HandleFailureEvent @ 0x004ccd10
+  socialRefusalLines: SOCIAL_REFUSAL_LINES_1999, // departure: FellowshipManager::Recruit / TrySwearAllegiance codes 1999 left silent
   inventoryFailedRunsFailureEvent: false, // Net_DispatchServerMessage case 0xa0
   hitLineText: 'ac1999' as const, // Net_HandleAttackerNotification @ 0x004cd7f0 and its three siblings
   encumbranceNotice: AC1999_ENCUMBRANCE_NOTICE, // 0x004fa610 + PanelUI_Global_Loop @ 0x004f4e10
@@ -1291,6 +1320,9 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   commandTable: 'ac1999' as const, // ChatEntryField @ 0x518970
   speechHearing: 'radar' as const, // UI_ShouldHearSpeaker @ 0x4d0360
   socialLineText: 'ac1999' as const, // UI_HandleChannelMessage @ 0x4d24a0, 0x00536f40
+  fellowshipText: AC1999_FELLOWSHIP_TEXT, // FellowPanel_RecruitObject @ 0x00535670, DismissObject @ 0x00535570
+  allegianceFlow: AC1999_ALLEGIANCE_FLOW, // AllegPanel_ListenToMessage @ 0x00530a70
+  oneClickTargetModes: true, // SetTargetMode @ 0x004d0220, mouse dispatch 0x00414030
   worldEntryVersionLine: AC1999_VERBOSE_VERSION, // ClientMode_RunTransition @ 0x4d08a0
 });
 

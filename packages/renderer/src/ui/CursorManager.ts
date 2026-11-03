@@ -101,7 +101,9 @@ export function resolveWorldCursorName(
   if (targetMode === 'examine') {
     return overObject ? 'Examine_OverObject' : 'Examine';
   }
-  if (targetMode === 'use') {
+  // The 1999 recruit / dismiss modes show the use cursor: SetTargetMode @ 0x004d0220 arms 1 (use), 7
+  // and 8 all with the UI's +0x35c cursor (0x0600120c, loaded @ 0x004d3752), hotspot pushes 0 / 0.
+  if (targetMode === 'use' || targetMode === 'recruit' || targetMode === 'dismiss') {
     return overObject ? 'Use_OverObject' : 'Use';
   }
   if (targetMode === 'targeted-use') {
@@ -116,16 +118,44 @@ export function resolveWorldCursorName(
   return overObject ? 'Default_OverObject' : 'Default';
 }
 
+/**
+ * BUG.ac1999-break-cursor — the cursor texture to show over everything else while the 1999 Break click
+ * mode is armed (SetTargetMode(6) @ 0x004d0220 sets it directly), or null for the ordinary cursor.
+ */
+export function breakModeCursorDid(breakArmed: boolean, breakCursor: number | null): number | null {
+  return breakArmed && breakCursor ? breakCursor : null;
+}
+
 export class CursorManager {
   private readonly portalDb: DatDatabase;
   private readonly textureManager: TextureManager;
+  /** The era's world portal's textures (1999-only cursor art, e.g. Break's 0x0600144f); the UI's when none. */
+  private readonly worldTextureManager: Pick<TextureManager, 'getIconDataURL'>;
   private nameToDid = new Map<string, number>();
   private cssCache = new Map<string, string>();
+  private didCssCache = new Map<number, string>();
   private loaded = false;
 
-  constructor(portalDb: DatDatabase, textureManager: TextureManager) {
+  constructor(portalDb: DatDatabase, textureManager: TextureManager, worldTextureManager?: Pick<TextureManager, 'getIconDataURL'>) {
     this.portalDb = portalDb;
     this.textureManager = textureManager;
+    this.worldTextureManager = worldTextureManager ?? textureManager;
+  }
+
+  /**
+   * A cursor straight from a texture in the era's world portal (no DidMapper name), hotspot (hx, hy):
+   * the 1999 client's own cursors are plain textures it loads by id (the UI ctor @ 0x004d35c0). Null
+   * when the texture isn't there (yet).
+   */
+  getWorldTextureCursorCSS(did: number, hx = 0, hy = 0): string | null {
+    const cached = this.didCssCache.get(did);
+    if (cached) return cached;
+    const epoch = datMissEpoch();
+    const url = this.worldTextureManager.getIconDataURL(did);
+    if (!url) return null;
+    const css = `url(${url}) ${hx} ${hy}, auto`;
+    if (noDatMissSince(epoch)) this.didCssCache.set(did, css);
+    return css;
   }
 
   private ensureLoaded(): void {

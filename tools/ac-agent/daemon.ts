@@ -33,6 +33,7 @@ import { type AgentEra, agentEra, eraAccount } from './eras.ts';
 import { CALLS_SETTLE_MS, SHUTDOWN_DEADLINE_MS, createShutdown, killTree, waitForCalls } from './shutdown.ts';
 import { replyDeadlineMs, withCallDeadline } from './callDeadline.ts';
 import { withStateLock } from './stateLock.ts';
+import { accountClashMessage, claimAccount, releaseAccount } from './accountClaim.ts';
 import { AGENT_VITE_CONFIG_SOURCE, NO_RELOAD_ENV } from '../lib/vite-no-reload.ts';
 
 /** `p`, or a rejection after `ms`. */
@@ -313,6 +314,13 @@ async function main(): Promise<void> {
     if (process.stdout.isTTY) console.log(line);
   };
 
+  // One running profile per account (accountClaim.ts): an exclusive claim before anything logs in, so two starts at the
+  // same moment can't both pass startDaemon's check and the second take the first one's character over.
+  if (!args.attach) {
+    const holder = claimAccount(args.account, args.era, args.profile);
+    if (holder) throw new Error(accountClashMessage(args.profile, args.account, args.era, holder));
+  }
+
   // ── Bridge, snapshot and Vite: under the state dir's start lock (tools/ac-agent/stateLock.ts) ──
   // Two daemons started together (a stream's pair) otherwise race: both `git worktree add` the same tree, and both
   // take the same "free" port, so one page runs on the other's bridge and drops when that daemon stops (2026-10-13).
@@ -557,6 +565,7 @@ async function main(): Promise<void> {
     exit: (code) => process.exit(code),
     steps: async () => {
       clearInfo(args.profile);
+      if (!args.attach) releaseAccount(args.account, args.era);
       if (args.attach) {
         // The human's own session and browser: leave both as they are and only let go of the tab.
         say('detached; the game and browser stay as they were');

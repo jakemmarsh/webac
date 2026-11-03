@@ -227,11 +227,11 @@ import { chargenRefusalText, chargenWorldKey, isOlthoiRefusal, olthoiRefusedOnWo
 import { dispatchBarberApply } from './ui/BarberModel.js';
 import { LayoutRenderer } from './ui/LayoutRenderer.js';
 import { UITextureLoader } from './ui/UITextureLoader.js';
-import { CursorManager, resolveWorldCursorName } from './ui/CursorManager.js';
+import { CursorManager, resolveWorldCursorName, breakModeCursorDid } from './ui/CursorManager.js';
 import { setGlobalCursor } from './ui/GlobalCursor.js';
 import { installRetailFog } from './effects/RetailFog.js';
 import { BusyCount, ExamineAwait, InventoryRequestBusy, TeleportBusy } from './ui/BusyCount.js';
-import { WorldTargetModeController } from './input/WorldTargetMode.js';
+import { WorldTargetModeController, isOneClickMode, oneClickPressRoute, swallowPress, fellowRowPress } from './input/WorldTargetMode.js';
 import { isKeyboardField, suppressPageContextMenu } from './input/BrowserDefaults.js';
 import { ACFontRenderer } from './ui/ACFontRenderer.js';
 import { AC_COLORS, type WorldDropSource, type ItemListDropTarget } from './ui/GameUI.js';
@@ -383,6 +383,7 @@ import {
   victimOrKillerLine, playerKilledLine, transientStringLine, channelIndexLines, channelListLines,
   tradeClosedLine, allegianceLoginLine, confirmationRequestText} from './ui/ServerMessageText.js';
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED } from './ui/WeenieErrorNotices.js';
+import { SocialRefusalMemo } from './ui/SocialRefusalLines1999.js';
 import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkDeadCause, linkSampleIsDead, NET_ERROR_STRING_TABLE, REQUEST_TIMEOUT_S, type ConnectionNotice } from './ui/ConnectionNotices.js';
 import { accountRefusalRoute, characterErrorRoute, staleSessionWaitText } from './session/RefusalRoute.js';
 import { characterRestoreRefusalText } from './session/CharacterRestore.js';
@@ -424,7 +425,7 @@ import { TalkFocus } from './ui/ChatTalkFocus.js';
 import { MAIN_CHAT_WINDOW_ID } from './ui/FloatyChatModel.js';
 import { RetailCommandSystem, type TellCandidate } from './chat/commands/index.js';
 import { LocalChatGate, speakerInHearingRange } from './chat/LocalChatGate.js';
-import { recruitFellow, type FellowshipStep } from './ui/FellowshipPanelActions.js';
+import { recruitFellow, recruitPress, dismissFellow, type FellowshipStep } from './ui/FellowshipPanelActions.js';
 import { FramerateMeter, framerateMeterTemplate } from './ui/FramerateMeter.js';
 import { string2command } from './chat/commands/RetailCommandStrings.js';
 import { RETAIL_VERBOSE_VERSION } from './chat/commands/EmoteStatusCommands.js';
@@ -2154,7 +2155,8 @@ async function main() {
   detailTexturing.setEnabled(GameUI.readPersistedOptionsSettings().buildingDetailTextures !== false);
   // GAP.84 — DAT-sourced world cursor (Default/Combat/Spellcast bitmaps,
   // see CursorManager.ts for the retail UICURSOR DidMapper citation).
-  const cursorManager = new CursorManager(uiPortalDb, uiTextureManager);
+  // The world portal's textures too: the 1999 Break cursor 0x0600144f is there, not in the interface portal.
+  const cursorManager = new CursorManager(uiPortalDb, uiTextureManager, textureManager);
   // gmClientUI's ctor sets the Default cursor before the first screen
   // (GAP.ui-cursor-global), so the pre-world screens show it too.
   setGlobalCursor(cursorManager.getCursorCSS('Default'));
@@ -3996,7 +3998,47 @@ async function main() {
   // onServerMessage.
   let pendingTieBind: PendingTieBind | null = null;
   // GAP.84 — armed Examine/Use world-target mode; see WorldTargetMode.ts.
-  const worldTargetModeController = new WorldTargetModeController();
+  // BUG.ac1999-use-examine-one-click — 1999's use / examine follow its one-click rule too (EraClientRules.oneClickTargetModes).
+  const worldTargetModeController = new WorldTargetModeController(eraRules.oneClickTargetModes);
+  /** BUG.ac1999-fellow-recruit-silent — the last recruit / swear sent, for the era's refusal lines. */
+  const socialRefusalMemo = eraRules.socialRefusalLines ? new SocialRefusalMemo(eraRules.socialRefusalLines) : null;
+  /**
+   * BUG.ac1999-fellowship-refusal-wording — a click consumed by the 1999 fellowship panel's recruit /
+   * dismiss mode (PanelUI_HandleMouseDownOnObject @ 0x004f83c0 → FellowPanel_RecruitObject /
+   * FellowPanel_DismissObject). Set once the fellowship panel's steps are wired.
+   */
+  /** The 1999 Break click mode is armed (GameUI.onAllegianceBreakMode): its cursor shows. */
+  let allegianceBreakArmed = false;
+  let fellowTargetModeHook: ((mode: 'recruit' | 'dismiss', guid: number) => void) | null = null;
+  const runFellowTargetMode = (mode: string, guid: number): void => {
+    if (mode === 'recruit' || mode === 'dismiss') fellowTargetModeHook?.(mode, guid);
+  };
+  /** A target mode's action on `guid` (PanelUI_HandleMouseDownOnObject's 'd' arm: 1 use, 2 examine, 7 / 8). */
+  const runTargetMode = (mode: string, guid: number): void => {
+    if (mode === 'examine') sendIdentifyAction?.(guid);
+    else if (mode === 'use') sendUseAction?.(guid);
+    else runFellowTargetMode(mode, guid);
+  };
+  // The 1999 mouse dispatch (0x00414030): with a target cursor up, the next left press anywhere is the
+  // 'd' press and puts the cursor back. The world, the radar and a fellow's row run the mode on it;
+  // any other control ignores it, so ours swallows that press and only ends the mode.
+  document.addEventListener('mousedown', (e: MouseEvent) => {
+    const armed = worldTargetModeController.current;
+    if (e.button !== 0 || !worldTargetModeController.isOneClick(armed)) return;
+    // Use / examine have 'd' arms on the world, the radar, the pack and the paperdoll (InventoryPanel
+    // MouseDown, 0x004e8420): every press goes through to its handler, then the gesture ends the mode.
+    const route = isOneClickMode(armed) ? oneClickPressRoute(e.target as Element | null, sceneManager.renderer?.domElement ?? null) : 'pass';
+    if (route === 'pass') {
+      // The handler runs the mode (or finds nothing): either way the gesture ends it.
+      document.addEventListener('click', () => setTimeout(() => {
+        if (worldTargetModeController.isOneClick(worldTargetModeController.current)) { worldTargetModeController.disarm(); updateWorldCursor(); }
+      }, 0), { capture: true, once: true });
+      return;
+    }
+    swallowPress(e, document);
+    worldTargetModeController.disarm();
+    updateWorldCursor();
+  }, true);
   // GAP.21 — armed use-with-target source (key/lockpick/healing-kit guid).
   // Set by double-clicking a target-mask item in the pack; consumed by the
   // NEXT world-object selection (retail: "Double-click on the healing kit,
@@ -4406,12 +4448,18 @@ async function main() {
       selectionLighting.objectFound(armedGuid, SearchReason.TargetedUse, selectionNow());
       const result = worldTargetModeController.consumeClick(armedGuid || null);
       if (result.kind === 'executed') {
-        if (armedHit) selectTarget(armedHit);
-        else selectGuid(armedGuid);
+        // The 1999 recruit / dismiss press is PanelUI_HandleMouseDownOnObject's 'd' arm @ 0x004f83c0:
+        // it runs the mode and never calls SetSelectedObject.
+        if (!worldTargetModeController.isOneClick(result.mode)) {
+          if (armedHit) selectTarget(armedHit);
+          else selectGuid(armedGuid);
+        }
         if (result.mode === 'examine' && sendIdentifyAction) sendIdentifyAction(result.targetGuid);
         else if (result.mode === 'use' && sendUseAction) sendUseAction(result.targetGuid);
-        updateWorldCursor();
+        else runFellowTargetMode(result.mode, result.targetGuid);
       }
+      // A miss ends a one-click mode too (its cursor goes back to normal).
+      updateWorldCursor();
       return;
     }
 
@@ -4580,6 +4628,10 @@ async function main() {
     // GAP.84 — pendingUseWithTargetGuid (GAP.21/UNLOCK.1's "double-click a
     // healing kit, then select the target" arm) is retail's
     // TARGET_MODE_USE_TARGET; it takes priority the same way Examine/Use do.
+    // BUG.ac1999-break-cursor — the 1999 Break click mode's own cursor (SetTargetMode(6): 0x0600144f, hotspot 0, 0).
+    const breakDid = breakModeCursorDid(allegianceBreakArmed, eraRules.allegianceFlow.breakCursor);
+    const breakCss = breakDid ? cursorManager.getWorldTextureCursorCSS(breakDid) : null;
+    if (breakCss) { lastCursorName = 'AllegianceBreak'; setGlobalCursor(breakCss); return; }
     const targetMode = pendingUseWithTargetGuid !== 0 ? 'targeted-use' : worldTargetModeController.current;
     const name = resolveWorldCursorName(gameUI.hudState.combatMode, overObject, targetMode, busyCount.busy);
     lastCursorName = name;
@@ -5246,6 +5298,7 @@ async function main() {
       if (r.kind === 'executed') {
         if (r.mode === 'examine' && sendIdentifyAction) sendIdentifyAction(r.targetGuid);
         else if (r.mode === 'use' && sendUseAction) sendUseAction(r.targetGuid);
+        else runFellowTargetMode(r.mode, r.targetGuid);
       }
       updateWorldCursor();
       return true;
@@ -6243,6 +6296,7 @@ async function main() {
     gameUI.hudState.target = null;
     // GAP.84 — retail OnEndCharacterSession resets targetMode to NONE.
     worldTargetModeController.disarm();
+    socialRefusalMemo?.clear();
     // GAP.client-busy-cursor-count — OnEndCharacterSession @ 00564ad0: m_cBusy = 0.
     teleportBusy.reset();
     examineAwait.reset();
@@ -13444,9 +13498,14 @@ async function main() {
         // the ACE <summary> says). Pre-fix every code went to chat in the
         // Help colour. Map: @ac/shared WeenieErrorSink.ts (generated).
         // SWEEP1999.messages HC-6 — the era client's own switch (1999: its ~50 codes, its wording).
-        const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType), eraRules.failureEventText));
+        // BUG.ac1999-fellow-recruit-silent — a refused recruit / swear the era's switch left silent gets one line
+        // (ui/SocialRefusalLines1999.ts), named after the target the request went to.
+        const departure = socialRefusalMemo?.lineFor(data.errorType, performance.now(), (g) => serverObjectManager?.getObject(g)?.name) ?? null;
+        const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType), eraRules.failureEventText, departure?.arm ?? null));
         // TELEMETRY.refusal-events — ACE / GDLE 0x028A, the AC1999 server's flat 0x1C AttemptFailed.
-        refusalReporter?.serverCode('weenie_error', data.errorType, weenieErrorText(data.errorType), shown.sink);
+        // A departure line keys by its own name-free template.
+        const shownTemplate = departure && shown.text === departure.arm.text ? departure.template : weenieErrorText(data.errorType);
+        refusalReporter?.serverCode('weenie_error', data.errorType, shownTemplate, shown.sink);
         portalUseReporter?.weenieError(data.errorType);
         // The agent's melee attack reads an approach the server gave up on ("Unable to move to object!") from it.
         agentWeenieErrorTap?.(data.errorType);
@@ -14686,6 +14745,7 @@ async function main() {
       const payload = new BinaryWriter(4);
       payload.writeUInt32(targetGuid);
       sendGameAction(GameActionType.SwearAllegiance, payload.toBuffer());
+      socialRefusalMemo?.note('swear', targetGuid, performance.now());
       raiseClientNotice(gameUI, CN.allegianceSwearing);
     };
     // CM_Fellowship::Event_UpdateRequest(visible) from gmFellowshipUI::OnVisibilityChanged @ 0048e460.
@@ -14942,6 +15002,8 @@ async function main() {
     }, eraRules.commandTable);
 
     // gmFellowshipUI buttons (ui/FellowshipPanelActions.ts) and gmFriendsUI Remove: direct sends.
+    // A 1999 refusal names its object (GetObjectName_ById): the fellow's roster name, else the world object's.
+    const fellowshipNames = { nameOf: (guid: number): string | undefined => serverObjectManager?.getObject(guid)?.name ?? undefined };
     const runFellowshipSteps = (steps: FellowshipStep[]): void => {
       for (const step of steps) {
         switch (step.kind) {
@@ -14949,17 +15011,50 @@ async function main() {
           case 'dismiss': gameActions.fellowshipDismiss(step.guid); break;
           case 'quit': retailCommands.ctx.send(GameActionType.FellowshipQuit, (w) => w.writeUInt32(step.disband ? 1 : 0)); break;
           case 'setOpen': retailCommands.ctx.send(GameActionType.FellowshipChangeOpenness, (w) => w.writeUInt32(step.open ? 1 : 0)); break;
-          case 'recruit': retailCommands.ctx.send(GameActionType.FellowshipRecruit, (w) => w.writeUInt32(step.guid >>> 0)); break;
+          case 'recruit':
+            retailCommands.ctx.send(GameActionType.FellowshipRecruit, (w) => w.writeUInt32(step.guid >>> 0));
+            socialRefusalMemo?.note('recruit', step.guid, performance.now());
+            break;
           case 'refuse':
             gameUI.displayErrorText(step.text ?? getString(acStringHash(step.token ?? '')) ?? step.token ?? '');
+            break;
+          case 'targetMode':
+            // 1999 FellowPanel_ListenToMessage @ 0x00535770: SetTargetMode(7 / 8) + the status-line prompt.
+            worldTargetModeController.arm(step.mode);
+            gameUI.displayErrorText(step.text);
+            updateWorldCursor();
             break;
         }
       }
     };
     gameUI.callbacks.onFellowshipSteps = runFellowshipSteps;
-    gameUI.callbacks.onFellowshipRecruitSelected = () => {
+    gameUI.callbacks.onAllegianceBreakMode = (armed: boolean) => { allegianceBreakArmed = armed; updateWorldCursor(); };
+    fellowTargetModeHook = (mode, guid) => {
+      const self = aceCharGuid ?? 0;
+      const isPlayer = guid === self ? true : retailCommands.ctx.weenieIsPlayer(guid);
+      runFellowshipSteps(mode === 'recruit'
+        ? recruitFellow(gameUI.fellowship, self, guid, isPlayer, eraRules.fellowshipText, fellowshipNames)
+        : dismissFellow(gameUI.fellowship, self, guid, eraRules.fellowshipText, fellowshipNames, isPlayer));
+    };
+    // A fellow's row under a 1999 one-click mode (0x00533e50 takes the 'd' press): dismiss runs on that
+    // fellow; recruit (and use) have no arm there, so the press only ends the mode; nothing is selected.
+    gameUI.callbacks.onFellowRowTargetClick = (guid: number): boolean => {
+      const r = fellowRowPress(worldTargetModeController, guid);
+      if (!r) return false;
+      if (r.run) runTargetMode(r.run, r.guid);
+      updateWorldCursor();
+      return true;
+    };
+    gameUI.callbacks.onFellowshipRecruitSelected = (opts?: { agent?: boolean }) => {
       const target = currentTargetGuid ?? 0;
-      runFellowshipSteps(recruitFellow(gameUI.fellowship, aceCharGuid ?? 0, target, retailCommands.ctx.weenieIsPlayer(target)));
+      const self = aceCharGuid ?? 0;
+      const isPlayer = target !== 0 && target === self ? true : retailCommands.ctx.weenieIsPlayer(target);
+      // The agent names its target: the check alone, never the 1999 click mode.
+      const steps = opts?.agent
+        ? recruitFellow(gameUI.fellowship, self, target, isPlayer, eraRules.fellowshipText, fellowshipNames)
+        : recruitPress(gameUI.fellowship, self, target, isPlayer, eraRules.fellowshipText, fellowshipNames);
+      runFellowshipSteps(steps);
+      return steps;
     };
     // SWEEP1999.character (S2) — the 1999 FellowPanel's appraisal of the selected fellow: quiet (no
     // Examine window); its creature profile fills the row's vitals (onIdentifyResponse below).
@@ -19513,6 +19608,14 @@ async function main() {
   gameUI.callbacks.onInputAction = (id: number) => { dispatchAction(id); };
   // RadarUI::Global_MouseDown → HandleMouseDownOnObject: a radar click is refused like a world one (CM-3).
   gameUI.callbacks.onRadarObjectClick = (guid: number) => {
+    // RadarUI_Global_MouseDown @ 0x00528e00 → PanelUI_HandleMouseDownOnObject: a one-click mode's press
+    // on a blip (1999: use / examine too) runs the mode on it, with no selection.
+    if (worldTargetModeController.isOneClick(worldTargetModeController.current)) {
+      const r = worldTargetModeController.consumeClick(guid);
+      if (r.kind === 'executed') runTargetMode(r.mode, r.targetGuid);
+      updateWorldCursor();
+      return;
+    }
     if (clickSelectRefused(guid)) { raiseClientNotice(gameUI, CN.combatSelectRefused); return; }
     selectGuid(guid);
   };

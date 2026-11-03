@@ -496,12 +496,13 @@ export const TOOLS: AgentTool[] = [
       skills: { type: 'string', description: 'Skills for a NEW character by name, e.g. "Weapon Tinkering=specialized; Armor Tinkering=trained; Item Tinkering=trained" (credits permitting; applied after template=). It is the whole build: trained skills not listed are untrained, free ones stay. A tinkerer is a custom build; there is no Tinkerer template.' },
       headless: { type: 'boolean', description: 'No visible window (default false: a window opens so a human can watch).' },
       era: { type: 'string', description: `Which era's local server to play: ${ERA_IDS.map((k) => `${k} (${AGENT_ERAS[k].label})`).join(', ')}. Default eor. Each era is its own session (profile claude-<era>).`, enum: ERA_IDS },
+      account: { type: 'string', description: 'The server account to log in as, instead of the profile\'s own. Only needed when start refuses because another running profile plays the profile\'s account (AC1999 keeps one letter of the profile name: rcA and rcB are both agentr99); the refusal names one to use. Pass the same account on every later start of this profile.' },
       base: { type: 'string', description: 'Game page origin to use, e.g. your own Vite to verify uncommitted work (default: a snapshot of the committed tree on its own Vite, which other sessions\' file saves can\'t reload).' },
       attach: { type: 'string', description: 'Play the human\'s OWN character instead, on any server (playwebac.com included): "chrome" opens (or reuses) a Chrome window at https://playwebac.com/?agent where the human logs in and enters the world themselves; or a DevTools endpoint like http://127.0.0.1:9222. Profile "me". Stopping never logs them out. With character=, only the tab in the world as that character is driven (several game tabs in one Chrome: give each its own profile=).' },
     },
     async run(a) {
       const attach = a.attach ?? defaultAttach(a);
-      const { info, started } = await startDaemon({ profile: a.profile, character: a.character, headless: a.headless, base: a.base, era: a.era, template: a.template, heritage: a.heritage, gender: a.gender, town: a.town, seed: a.seed, attributes: a.attributes, skills: a.skills, attach, ...(attach && a.character ? { attachCharacter: a.character } : {}) });
+      const { info, started } = await startDaemon({ profile: a.profile, character: a.character, headless: a.headless, base: a.base, era: a.era, template: a.template, heritage: a.heritage, gender: a.gender, town: a.town, seed: a.seed, attributes: a.attributes, skills: a.skills, attach, ...(attach && a.character ? { attachCharacter: a.character } : {}), ...(a.account ? { account: String(a.account) } : {}) });
       const c = new AgentClient(info);
       const st = await c.status().catch(() => null);
       if (st?.attached && !st.ready) {
@@ -723,7 +724,7 @@ export const TOOLS: AgentTool[] = [
   },
   {
     name: 'ac_fellowship',
-    description: 'Fellowship, through the fellowship pane: action=show (default; members, leader, XP sharing, whether you accept requests), create (name=…), recruit (target= a nearby player; they get a 30 s dialog to accept with ac_dialog button=Yes), quit, leader / dismiss (name= a fellow), open, close, disband, requests (name=accept|ignore: the "Ignore Fellowship Requests" option; a character ignoring requests can\'t be recruited), auto (name=on|off: automatically accept requests). Leader-only actions are refused for others, as the pane\'s buttons are.',
+    description: 'Fellowship, through the fellowship pane: action=show (default; members, leader, XP sharing, whether you accept requests), create (name=…), recruit (target= a nearby player; they get a 30 s dialog to accept with ac_dialog button=Yes; a server refusal — already in a fellowship, not accepting requests, busy, too far — comes back as not recruited, with the server\'s line), quit, leader / dismiss (name= a fellow), open, close, disband, requests (name=accept|ignore: the "Ignore Fellowship Requests" option; a character ignoring requests can\'t be recruited), auto (name=on|off: automatically accept requests). Leader-only actions are refused for others, as the pane\'s buttons are.',
     props: {
       ...PROFILE_PROP,
       action: { type: 'string', enum: ['show', 'create', 'recruit', 'quit', 'leader', 'dismiss', 'open', 'close', 'disband', 'requests', 'auto'], description: 'What to do (default show).' },
@@ -741,7 +742,7 @@ export const TOOLS: AgentTool[] = [
   },
   {
     name: 'ac_allegiance',
-    description: 'Allegiance, through the allegiance pane: action=show (patron, vassals, monarch), swear (swear to a nearby player: the server walks you over and asks them in a dialog that expires in 30 s; returns in about 5 s so you can answer it on the patron\'s profile with ac_dialog button=Yes right away), or break (from your patron; with target=<vassal name>, release that vassal).',
+    description: 'Allegiance, through the allegiance pane: action=show (patron, vassals, monarch), swear (swear to a nearby player: the server walks you over and asks them in a dialog that expires in 30 s; returns in about 5 s so you can answer it on the patron\'s profile with ac_dialog button=Yes right away), or break (from your patron; with target=<vassal name>, release that vassal; waits up to 5 s and says whether it broke or the server refused). A refused swear says so, with the server\'s line.',
     props: {
       ...PROFILE_PROP,
       action: { type: 'string', enum: ['show', 'swear', 'break'], description: 'show (default), swear, or break.' },
