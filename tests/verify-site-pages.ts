@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 // @ts-expect-error -- a plain .mjs tool without type declarations
 import { buildSite, aboutCount, htmlToText } from '../tools/site/build-site.mjs';
 // @ts-expect-error -- a plain .mjs tool without type declarations
-import { PAGES } from '../tools/site/facts.mjs';
+import { PAGES, worksLabel } from '../tools/site/facts.mjs';
 
 const ROOT = resolve(__dirname, '..');
 const PAGE_PATHS: string[] = (PAGES as Array<{ path: string }>).map((p) => p.path);
@@ -120,6 +120,15 @@ describe('every static page', () => {
 });
 
 describe('/servers/', () => {
+  it("a refused world's cell names the bridge's chip: a VPN block, or custom game files (COMPAT.dark-destiny-custom-dats)", () => {
+    expect(worksLabel(world({ compat: 'incompatible', compatNote: 'Blocks webAC', compatReason: 'Its VPN check refuses webAC players.' })))
+      .toEqual({ key: 'blocked', text: 'Blocks webAC', detail: 'Its VPN check refuses webAC players.' });
+    expect(worksLabel(world({ compat: 'incompatible', compatNote: 'Custom game files', compatReason: "It uses its own custom game files, which webAC doesn't have." })))
+      .toEqual({ key: 'blocked', text: 'Custom game files', detail: "It uses its own custom game files, which webAC doesn't have." });
+    // A row with no chip keeps the old wording.
+    expect(worksLabel(world({ compat: 'incompatible' })).text).toBe('Blocks webAC');
+  });
+
   it('says which worlds work in webAC instead of claiming they all do', () => {
     const d = page('/servers/');
     const row = (name: string) => d.querySelector(`tr#${name.toLowerCase()}`)!;

@@ -329,6 +329,8 @@ describe('AccountBoot / AccountBanned — the real bytes through ServerMessageHa
       [' because you are not running the correct executable file version for this server', 'boot_client_version'],
       [' because Your DAT files are newer than expected.\nPlease visit https://emulator.ac/how-to-play to download the correct DAT files', 'boot_dat_newer'],
       [' because Your DAT files are incomplete.\nThis server does not support dynamic DAT updating at this time', 'boot_dat_incomplete'],
+      // COMPAT.dark-destiny-custom-dats: ClassicACE Infiltration / CustomDM dat_older_warning_msg (boot_other before).
+      [' because The location you are attempting to enter is not present in your data files', 'boot_dat_location_missing'],
       [' because the world is now closed', 'boot_world_closed'],
       [' because the character was forced to log off by system', 'boot_forced_logoff_system'],
       [' because the character was forced to log off by an admin', 'boot_forced_logoff_admin'],

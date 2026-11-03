@@ -5341,7 +5341,7 @@ async function main() {
   const metaNextLogin = new NextLogin();
   // UtilityBelt's /ub commands, aliases, game events and quest tracker (agent/ub/ubCommands.ts), once the agent runs.
   let ubRuntime: UbRuntime | null = null;
-  // Mag-Tools (agent/magtools/magToolsRuntime.ts): /mt and its item info on identify; preview UI for now.
+  // Mag-Tools (agent/magtools/magToolsRuntime.ts): /mt and its item info on identify; on wherever the automation is.
   let magTools: MagToolsRuntime | null = null;
   let mtSpellWords: Set<string> | null = null;
   /** An object left view or was destroyed: Mag-Tools' corpse tracker drops a corpse that decayed within 10 m. */
@@ -5353,7 +5353,7 @@ async function main() {
     const o = serverObjectManager?.getObject(senderGuid);
     return { kind, sender, message, self: senderGuid === aceCharGuid, senderClass: mtSenderClass(o ? decalObjectClass(o.itemType, o.objectDescFlags) : null) };
   };
-  // GoArrow (ui/goarrow/goArrowRuntime.ts): the arrow HUD, its window and /goarrow; preview UI for now.
+  // GoArrow (ui/goarrow/goArrowRuntime.ts): the arrow HUD, its window and /goarrow; on wherever the automation is.
   let goArrow: GoArrowRuntime | null = null;
   // UB's /ub clearbugged: the server's last answer to an identify, per item.
   const metaIdentifyAnswers = new Map<number, { success: boolean; at: number }>();
@@ -5492,7 +5492,7 @@ async function main() {
         // lingers in pendingCasts until its 8s TTL prune, keeping the HUD
         // busy/cast indicator lit after death.
         pendingCastHooks.__clearPendingCasts?.();
-        // Mag-Tools' Log Out on Death (preview UI; default off).
+        // Mag-Tools' Log Out on Death (default off).
         magTools?.died();
         // FAITHFUL.460 — the selection feedback is dropped with the target.
         // Sibling of FAITHFUL.459 — the same clear chain, here for the
@@ -6457,7 +6457,7 @@ async function main() {
     onTeleportInProgressChanged: (inProgress) => teleportBusy.set(inProgress),
     onChatLine: (line: string) => {
       chatLogFile?.lines.push(line);
-      // Mag-Tools' combat tracker reads every chat line (preview UI).
+      // Mag-Tools' combat tracker reads every chat line.
       magTools?.chatLine(line);
     },
 
@@ -8817,7 +8817,7 @@ async function main() {
       console.log('[AC] Sent LoginComplete (teleport animation finished)');
       chatOptionsRepair.loginCompleteSent();
       questTracker.loginComplete(String(aceCharGuid ?? worldCharacterName ?? ''));
-      // Mag-Tools' On Login Complete commands and Open Main Pack On Login (once per login; preview UI).
+      // Mag-Tools' On Login Complete commands and Open Main Pack On Login (once per login).
       magTools?.loginComplete();
     },
   });
@@ -9132,7 +9132,7 @@ async function main() {
       play: (script, anchor) => physicsScriptPlayer.play(script, anchor),
     };
     serverObjectManager.onObjectCreated = (obj) => {
-      // Mag-Tools' corpse and player trackers (preview UI).
+      // Mag-Tools' corpse and player trackers.
       magTools?.objectSeen(obj.guid);
       // SOUND.wave-precache — CPhysicsObj::set_description @ 00514f40 loads the
       // object's sound table (its waves follow, WavePrefetch).
@@ -10092,7 +10092,7 @@ async function main() {
 
       // ── Position & Movement ──
       onUpdatePosition: (data: UpdatePositionData) => {
-        // Mag-Tools' player tracker: where other players were last seen (preview UI).
+        // Mag-Tools' player tracker: where other players were last seen.
         if (magTools && data.guid !== aceCharGuid && isPlayerGuid(data.guid)) magTools.objectSeen(data.guid);
         // Track sequence numbers from our own position corrections
         if (aceCharGuid !== null && data.guid === aceCharGuid && movementSync) {
@@ -12351,7 +12351,7 @@ async function main() {
         const tradeHandoff = worldDropHandoff.tradeRegistered(data.partnerGuid);
         const tradeObj = tradeHandoff ? playerState.inventory.getItem(tradeHandoff) : undefined;
         if (tradeObj) gameUI.tradeAnItemForDummies(tradeDragItemFor(tradeObj));
-        // Mag-Tools' Auto Add To Trade (preview UI; only when I opened the trade).
+        // Mag-Tools' Auto Add To Trade (only when I opened the trade).
         magTools?.tradeOpened({ initiatorGuid: data.initiatorGuid, partnerGuid: data.partnerGuid, partner: partnerName });
       },
       onAddToTrade: (data) => {
@@ -12434,7 +12434,7 @@ async function main() {
           yourReady: isLocal ? true : td.yourReady,
           theirReady: !isLocal ? true : td.theirReady,
         });
-        // Mag-Tools' Auto Trade Accept (preview UI): a whitelisted partner's Accept.
+        // Mag-Tools' Auto Trade Accept: a whitelisted partner's Accept.
         magTools?.tradeAcceptedBy(data.whoAcceptedGuid);
       },
       onDeclineTradeEvt: (data) => {
@@ -12727,7 +12727,7 @@ async function main() {
         // onObjectCreate handler picks up the player CreateObject right
         // after, so no extra work is needed beyond logging.
         console.log('[AC] PlayerCreate received');
-        // Mag-Tools' On Login commands (preview UI).
+        // Mag-Tools' On Login commands.
         magTools?.loggedIn();
       },
       onPickupEvent: (data) => {
@@ -15077,7 +15077,7 @@ async function main() {
       // UtilityBelt's aliases (agent/ub/aliases.ts), where the automation is (as /ub itself): an "eat" alias keeps the line.
       if (gameUI.automationAvailable && ubRuntime?.onChatSend(message)) return;
       if (gameUI.automationAvailable && VT_COMMAND.test(message)) { gameUI.automationCommand(message); return; }
-      // Mag-Tools' /mt (preview UI: off for players not on the preview list, whose /mt stays retail's unknown command).
+      // Mag-Tools' /mt, where the automation is (elsewhere /mt stays retail's unknown command).
       if (gameUI.automationAvailable && magTools?.chat(message)) return;
       if (gameUI.automationAvailable && goArrow?.chat(message)) return;
       if (gameUI.automationAvailable && isAutomationCommand(message)) {
@@ -17446,8 +17446,8 @@ async function main() {
       if (e.type === 'handover') { if ((e.data as HandoverResult).ok) relayLink.reset(); return; }
       if (e.type === 'routinesGrant') routineSync.onGrant(e.data as RoutinesGrant | null, e.error);
       else if (e.type === 'automationAccess') { automationReporter?.automationAccess(e.data === true); if (e.data === true) { startAgent(false); showAutomationUi(); } }
-      // Preview UI for the accounts the bridge names (the Virindi Views bar). Follows automationAccess: the answer is whole.
-      else if (e.type === 'previewAccess') { automationReporter?.previewAccess(e.data === true); gameUI.setPreviewFeatures(e.data === true || automationUiEnabled(urlOverridesEnabled())); }
+      // The bridge's preview flag: telemetry only (the bar and the Decal plugins follow automationAccess; Jake, 2026-11-03).
+      else if (e.type === 'previewAccess') { automationReporter?.previewAccess(e.data === true); }
       else if (e.type === 'characterList') {
         routineSync.reset();
         worldCharacterName = null;
@@ -18230,7 +18230,7 @@ async function main() {
         },
         lootRules: () => (agentApi.routine.loadedProfile ?? gameUI.automationStandbyProfile())?.loot ?? null,
         selectedGuid: () => { const g = agentApi.selectedGuid(); return g === null ? null : g >>> 0; },
-        enabled: () => gameUI.previewFeaturesOn,
+        enabled: () => gameUI.automationAvailable,
         me: () => playerState.name || '',
         who: () => `${launcherWorldName ?? ''}.${worldCharacterName ?? ''}`,
         combatStore: () => { try { return globalThis.localStorage ?? null; } catch { return null; } },
@@ -18297,8 +18297,10 @@ async function main() {
         chat: (line) => gameUI.callbacks.onChatSend?.(line),
         copy: (text) => { void navigator.clipboard?.writeText(text).catch(() => {}); },
         storage: () => { try { return globalThis.localStorage ?? null; } catch { return null; } },
-        enabled: () => gameUI.previewFeaturesOn,
+        enabled: () => gameUI.automationAvailable,
       });
+      // What GoArrow answers players is counted in the session's automation summary (no text leaves the page).
+      goArrow.onReply = (r) => automationReporter?.goArrowReply(r);
       gameUI.setGoArrow(goArrow);
       // Splitpea, AC1999 only (eraClientRules().splitpea). The spellbook read is the personal formula the client
       // already shows and casts for a spell you know; the solver itself only ever sees tapers.
@@ -18382,7 +18384,7 @@ async function main() {
           setNearestWaypoint: () => agentApi.routine.setNearestWaypoint(),
           cancelForceBuff: () => agentApi.routine.cancelForceBuff(),
           lootThis: () => agentApi.routine.lootThis(),
-          // Mag-Tools' hotkeys in the hotkey window (preview UI).
+          // Mag-Tools' hotkeys in the hotkey window.
           pluginHotkeys: () => magTools?.hotkeys() ?? [],
           // The era's own tables decide which controls exist (no Summoning / Void Magic in Dark Majesty or AC1999).
           hasSkill: (name) => (playerSkillTable ? [...playerSkillTable.skills.values()].some((s) => s.name.toLowerCase() === name.toLowerCase()) : undefined),
@@ -18446,7 +18448,7 @@ async function main() {
           now: () => performance.now(),
         });
       }
-      if (automationUiEnabled(urlOverridesEnabled())) { showAutomationUi(); gameUI.setPreviewFeatures(true); }
+      if (automationUiEnabled(urlOverridesEnabled())) showAutomationUi();
       if (exposeApi) {
         (window as unknown as { __acAgent: unknown }).__acAgent = agentApi.surface();
         console.log('[AC:Agent] window.__acAgent ready (docs/agent-play.md)');

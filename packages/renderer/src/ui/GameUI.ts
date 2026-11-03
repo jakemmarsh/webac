@@ -24125,8 +24125,7 @@ export class GameUI {
     this.automationTimer = source ? setInterval(() => this.tickAutomation(), 1000) : null;
     this.startUbNet(source);
     this.updateAutomationStrip();
-    // The bar is up from login for a preview player: whichever of this and the bridge's preview flag comes second draws it.
-    this.refreshVvsBar();
+    // The bar is up from login wherever the automation is.
     this.refreshVvsBar();
   }
 
@@ -24480,16 +24479,16 @@ export class GameUI {
   /** Open or close VCS's window. */
   toggleVcsWindow(): void {
     if (this.vtankWindows.has('vcs')) { this.closeVTankAux('vcs'); return; }
-    if (!this.previewFeatures) return;
+    if (!this.automationAvailable) return;
     this.openVTankAux('vcs', VCS_TITLE, VCS_FRAME.w, VCS_FRAME.h, (body, redraw) => renderVcsWindow(body, this.vtankKit(), this.vcs, this.vcsUi, { sounds: () => this.vcsSounds(), playWave: (w) => this.playVcsWave(w) }, redraw), { icon: VCS_ICON_PNG });
   }
 
   /**
-   * VCS's choke point (preview UI only): after Mag-Tools' filters, a line with a set preset, or one a
+   * VCS's choke point (where the automation is): after Mag-Tools' filters, a line with a set preset, or one a
    * pattern matches, is routed, recoloured or hidden here and its action fired. True when VCS handled it.
    */
   private vcsHandle(text: string, color: string, type: number, targetWindowId: number, speech: MtChatSpeech | null, preset: { plugin: string; category: string } | null): boolean {
-    if (!this.previewFeatures) return false;
+    if (!this.automationAvailable) return false;
     const r = this.vcs.route({ text, color, preset: preset ?? vcsAcPreset(text, type, speech) });
     if (!r) return false;
     if (r.action) this.vcsActions.fire(r.action, text, type, speech);
@@ -24625,7 +24624,7 @@ export class GameUI {
       out.push({ id: 'goarrow-arrow', plugin: 'GoArrow', title: 'GoArrow: Arrow', icon: { url: goArrowGlyphUrl() }, open: rt.settings().visible, toggle: () => { rt.model.setShowArrow(!rt.settings().visible); this.refreshVvsBar(); } });
     }
     // Virindi Chat System 5: its snow globe is Virindi's art, so our own stand-in (virindiIcons.ts).
-    if (this.previewFeatures) out.push({ id: 'vcs', plugin: 'Virindi Chat System', title: VCS_TITLE, icon: { url: VCS_ICON_PNG }, open: this.vtankWindows.has('vcs'), toggle: () => this.toggleVcsWindow() });
+    out.push({ id: 'vcs', plugin: 'Virindi Chat System', title: VCS_TITLE, icon: { url: VCS_ICON_PNG }, open: this.vtankWindows.has('vcs'), toggle: () => this.toggleVcsWindow() });
     if (this.magTools) out.push({ id: 'magtools', plugin: 'Mag-Tools', title: 'Mag-Tools', icon: { dat: MT_WINDOW.icon }, open: this.vtankWindows.has('magtools'), toggle: () => this.toggleMagToolsWindow() });
     if (this.reporter) {
       out.push({ id: 'reporter', plugin: 'VirindiReporter', title: 'VirindiReporter', icon: { dat: REPORTER_ICON }, open: this.vtankWindows.has('reporter'), toggle: () => this.toggleReporterWindow() });
@@ -24647,14 +24646,6 @@ export class GameUI {
     imported(outcome: 'ok' | 'partial' | 'failed', fileNames: readonly string[]): void;
   } | null = null;
 
-  /**
-   * Preview UI (2026-10-12, Jake: gate the bar to him until it's trusted): on for the accounts the bridge
-   * names (BRIDGE_PREVIEW_ACCOUNTS) and on dev builds. The windows themselves stay for everyone.
-   */
-  private previewFeatures = false;
-  setPreviewFeatures(on: boolean): void { this.previewFeatures = on; this.refreshVvsBar(); }
-  get previewFeaturesOn(): boolean { return this.previewFeatures; }
-
   /** Put the plugin elements renderHUD swept off the HUD layer back on it (the bar, VirindiTank's windows, UB's maps, meta views). */
   private reattachPluginLayers(): void {
     const els: Array<HTMLElement | null> = [this.vtankEl, this.vtankDialogEl, ...[...this.vtankWindows.values()].map((w) => w.el), ...this.ubMapEls.values(), ...this.metaViews.values()];
@@ -24665,7 +24656,8 @@ export class GameUI {
 
   /** Draw (or remove) the bar for what is open now. */
   refreshVvsBar(): void {
-    const show = this.previewFeatures && this.automationAvailable && this.vvsBarShown();
+    // The bar and every Decal plugin are on wherever the automation is (Jake, 2026-11-03: no preview gate).
+    const show = this.automationAvailable && this.vvsBarShown();
     if (!show) { this.vvsBarEl?.remove(); this.vvsBarEl = null; return; }
     this.pluginUsage?.barOnScreen();
     let bar = this.vvsBarEl;

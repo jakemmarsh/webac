@@ -2,13 +2,13 @@
  * GoArrow in the game (docs/plugin-specs/goarrow.md; the rules in @ac/shared goarrow/, the HUD and
  * window in this folder): settings and lists kept per browser, the era's generated location database
  * (loaded on first use, its own chunk), the arrow's destination, `/goarrow` and its aliases, and the
- * HUD each frame. Preview UI for now (GameUI.setPreviewFeatures): off for players not on the list.
+ * HUD each frame. On wherever the automation is (GameUI.automationAvailable; no preview gate since 2026-11-03).
  */
 import {
-  GOARROW_DEFAULT_SETTINGS, GOARROW_HUDS_RESET_MESSAGE, GOARROW_LOCKED_MESSAGE, GOARROW_MESSAGE_PREFIX, GOARROW_TAG_NOTHING_SELECTED,
+  GOARROW_DEFAULT_SETTINGS, GOARROW_HIDDEN_INDOORS_MESSAGE, GOARROW_HUDS_RESET_MESSAGE, GOARROW_LOCKED_MESSAGE, GOARROW_MESSAGE_PREFIX, GOARROW_TAG_NOTHING_SELECTED,
   GOARROW_TO_ERROR, GOARROW_UNLOCKED_MESSAGE, GOARROW_HUD_DEFAULT_POSITION, formatGoCoords, goArrowInDungeon, goCoordsFromCell, goDecodeEraData,
-  goDefaultStartLocations, goHelpText, goIsHereArg, goLocSendLine, goNoFindMatches, goParseCommand, parseGoCoords,
-  type GoArrowEraData, type GoArrowTarget, type GoCommandNames, type GoCoords, type GoLocation, type GoPortalDevice, type GoStartLocation,
+  goDefaultStartLocations, goHelpText, goNoDestinationMessage, GOARROW_COORDS_PLACEHOLDER_ERROR, GOARROW_HUD_TARGET_ERROR, goIsHereArg, goLocSendLine, goNoFindMatches, goParseCommand, parseGoCoords,
+  type GoArrowEraData, type GoArrowReply, type GoArrowTarget, type GoCommandNames, type GoCoords, type GoLocation, type GoPortalDevice, type GoStartLocation,
 } from '@ac/shared';
 import { ArrowHud, type ArrowHudPlayer } from './ArrowHud.js';
 import { GoArrowModel, type GoArrowWindowHost, type GoArrowWindowSettings } from './GoArrowModel.js';
@@ -48,6 +48,9 @@ export class GoArrowRuntime implements GoArrowWindowHost {
   onResize: ((w: number, h: number) => void) | null = null;
   /** The window should redraw (its model changed outside a click). */
   onRedraw: (() => void) | null = null;
+  /** What GoArrow answered the player, for the session's telemetry counts (main.ts: AutomationReporter). */
+  onReply: ((r: GoArrowReply) => void) | null = null;
+  private reply(r: GoArrowReply): void { try { this.onReply?.(r); } catch { /* telemetry never breaks a command */ } }
 
   constructor(private readonly d: GoArrowDeps) {
     this.model = new GoArrowModel(this);
@@ -102,7 +105,16 @@ export class GoArrowRuntime implements GoArrowWindowHost {
     this.saveSettings({ visible: true });
     this.model.noteDestination(t);
   }
-  arrowHiddenReason(): string | null { return this.hud?.hiddenReason() ?? null; }
+  /**
+   * Said when the arrow is switched on (the window's Show Arrow, the bar, `/goarrow arrow on`): GoArrow's
+   * not-visible messages, else ours when there is no destination to point at.
+   */
+  arrowHiddenReason(): string | null {
+    const why = this.hud?.hiddenReason() ?? null;
+    if (why) { this.reply(why === GOARROW_HIDDEN_INDOORS_MESSAGE ? 'hidden_indoors' : 'hidden_error'); return why; }
+    if (!this.resolvedTarget()) { this.reply('no_destination'); return goNoDestinationMessage(this.settings().chatCommand.toLowerCase()); }
+    return null;
+  }
   readonly store = {
     load: (k: 'favorites' | 'recentLocations' | 'recentCoords') => this.load<unknown>(`list.${k}`, null),
     save: (k: 'favorites' | 'recentLocations' | 'recentCoords', v: unknown) => this.save(`list.${k}`, v),
@@ -195,47 +207,66 @@ export class GoArrowRuntime implements GoArrowWindowHost {
     if (!this.d.enabled()) return false;
     const cmd = goParseCommand(line, this.names());
     if (!cmd) return false;
-    void this.ensureData();
+    const loaded = this.ensureData();
     switch (cmd.kind) {
-      case 'help': for (const l of goHelpText(this.names())) this.say(l, 'help'); break;
-      case 'error': this.say(cmd.message, 'error'); break;
+      case 'help': this.reply('help'); for (const l of goHelpText(this.names())) this.say(l, 'help'); break;
+      case 'error':
+        this.reply(cmd.message === GOARROW_HUD_TARGET_ERROR ? 'hud_target' : cmd.message === GOARROW_COORDS_PLACEHOLDER_ERROR ? 'coords_placeholder' : 'invalid_command');
+        this.say(cmd.message, 'error');
+        break;
       case 'hud': {
         if (cmd.target === 'arrow' || cmd.target === 'all') {
           const on = cmd.action === 'show' ? true : cmd.action === 'hide' ? false : !this.settings().visible;
           this.saveSettings({ visible: on });
-          if (on) { const r = this.hud?.hiddenReason(); if (r) this.say(r, 'warning'); }
-        } else this.say('This client has no GoArrow map or toolbar; UtilityBelt\'s Landscape and Dungeon Maps are on the Virindi Views bar.', 'warning');
+          this.reply(on ? 'arrow_on' : 'arrow_off');
+          if (on) { const r = this.arrowHiddenReason(); if (r) this.say(r, 'warning'); }
+        } else { this.reply('no_map'); this.say('This client has no GoArrow map or toolbar; UtilityBelt\'s Landscape and Dungeon Maps are on the Virindi Views bar.', 'warning'); }
         break;
       }
       case 'to': case 'start': case 'end': {
+        const apply = (hit: { coords: GoCoords; name?: string }, waited: boolean): void => {
+          this.reply(cmd.kind !== 'to' ? 'route_set' : waited ? 'to_waited' : 'to_set');
+          if (cmd.kind === 'to') this.setArrowTarget(hit.name ? { kind: 'location', name: hit.name, coords: hit.coords } : { kind: 'coords', coords: hit.coords });
+          else { this.model.top = 'Atlas'; this.model.atlasTab = 'Route'; this.model.setRouteEndCoords(cmd.kind === 'start' ? 'from' : 'to', hit.coords); }
+          this.onRedraw?.();
+        };
         const hit = this.coordsOrPlace(cmd.arg);
-        if (!hit) { this.say(GOARROW_TO_ERROR, 'error'); break; }
-        if (cmd.kind === 'to') this.setArrowTarget(hit.name ? { kind: 'location', name: hit.name, coords: hit.coords } : { kind: 'coords', coords: hit.coords });
-        else { this.model.top = 'Atlas'; this.model.atlasTab = 'Route'; this.model.setRouteEndCoords(cmd.kind === 'start' ? 'from' : 'to', hit.coords); }
-        this.onRedraw?.();
+        if (hit) { apply(hit, false); break; }
+        // A place name before the era's database has loaded (its own chunk, fetched on first use): wait for it,
+        // so the first `/goarrow to Holtburg` of a page works instead of saying the name is unknown (Reddit, 2026-11-03).
+        if (!this.data) {
+          void loaded.then(() => { const late = this.coordsOrPlace(cmd.arg); if (late) apply(late, true); else { this.reply('to_unknown'); this.say(GOARROW_TO_ERROR, 'error'); } });
+          break;
+        }
+        this.reply('to_unknown');
+        this.say(GOARROW_TO_ERROR, 'error');
         break;
       }
-      case 'reset': this.resetHudPositions(); this.say(GOARROW_HUDS_RESET_MESSAGE); break;
-      case 'lock': this.saveSettings({ positionLocked: cmd.locked }); this.say(cmd.locked ? GOARROW_LOCKED_MESSAGE : GOARROW_UNLOCKED_MESSAGE); break;
+      case 'reset': this.reply('reset'); this.resetHudPositions(); this.say(GOARROW_HUDS_RESET_MESSAGE); break;
+      case 'lock': this.reply('lock'); this.saveSettings({ positionLocked: cmd.locked }); this.say(cmd.locked ? GOARROW_LOCKED_MESSAGE : GOARROW_UNLOCKED_MESSAGE); break;
       case 'loc': case 'dest': {
         const c = cmd.kind === 'loc' ? this.player() : (this.resolvedTarget() ? (this.resolvedTarget() as { coords?: GoCoords | null }).coords ?? null : null);
-        if (!c) { this.say('No coordinates to send', 'error'); break; }
+        if (!c) { this.reply('no_coords'); this.say('No coordinates to send', 'error'); break; }
+        this.reply('loc_sent');
         this.d.chat(goLocSendLine(cmd.arg, formatGoCoords(c)));
         break;
       }
       case 'search': {
-        void this.ensureData().then(() => { this.model.commandSearch(cmd.text || null); this.onRedraw?.(); });
+        this.reply('search');
+        void loaded.then(() => { this.model.commandSearch(cmd.text || null); this.onRedraw?.(); });
         break;
       }
       case 'find': {
         const hits = this.d.findByName(cmd.text);
-        if (!hits.length) { this.say(goNoFindMatches(cmd.text), 'error'); break; }
+        if (!hits.length) { this.reply('find_none'); this.say(goNoFindMatches(cmd.text), 'error'); break; }
+        this.reply('find_selected');
         this.d.select(hits[0]!.guid);
         break;
       }
       case 'tag': {
         const s = this.d.selected();
-        if (!s) { this.say(GOARROW_TAG_NOTHING_SELECTED, 'error'); break; }
+        if (!s) { this.reply('tag_nothing'); this.say(GOARROW_TAG_NOTHING_SELECTED, 'error'); break; }
+        this.reply('tag_set');
         const o = this.d.object(s.guid);
         this.target = { kind: 'object', name: s.name, coords: o ? goCoordsFromCell(o.cell, o.x, o.y) : null, inRange: !!o };
         this.trackedGuid = s.guid;

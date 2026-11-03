@@ -28,6 +28,22 @@ export const GOARROW_TAG_NOTHING_SELECTED = 'Select something to attach the arro
 export const GOARROW_HUDS_RESET_MESSAGE = 'The HUDs should now be in visible locations on the screen';
 export const GOARROW_LOCKED_MESSAGE = 'Arrow HUD position locked';
 export const GOARROW_UNLOCKED_MESSAGE = 'Arrow HUD position unlocked';
+/**
+ * Ours (not GoArrow's): said when the arrow is switched on with no destination, where GoArrow drew an arrow
+ * pointing nowhere useful. Names the command that sets one (2026-11-03; a player couldn't get the arrow to work).
+ */
+export const goNoDestinationMessage = (cmd: string): string =>
+  `The arrow has no destination yet. Type /${cmd} to (coords) or /${cmd} to (location name), or pick a place in the GoArrow window.`;
+/**
+ * What GoArrow answered a player (its commands and switching the arrow on), a closed list for the session's
+ * telemetry counts (renderer AutomationReporter, bridge clientAutomation mirror it). Never text.
+ */
+export const GOARROW_REPLIES = [
+  'help', 'arrow_on', 'arrow_off', 'no_map', 'to_set', 'to_waited', 'to_unknown', 'route_set', 'reset', 'lock',
+  'loc_sent', 'no_coords', 'search', 'find_selected', 'find_none', 'tag_set', 'tag_nothing',
+  'invalid_command', 'hud_target', 'coords_placeholder', 'hidden_indoors', 'hidden_error', 'no_destination',
+] as const;
+export type GoArrowReply = typeof GOARROW_REPLIES[number];
 export const goInvalidCommandMessage = (word: string, cmd: string): string => `Invalid command: ${word}. Type /${cmd} help for a list of available commands`;
 export const goNoFindMatches = (text: string): string => `No matches found for '${text}'`;
 

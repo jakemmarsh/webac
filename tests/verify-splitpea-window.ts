@@ -52,7 +52,6 @@ describe('the era gate: Splitpea exists only in AC1999', () => {
 
 type Ui = {
   setAutomationSource(s: unknown): void;
-  setPreviewFeatures(on: boolean): void;
   setSplitpea(p: SplitpeaPlugin | null): void;
   toggleSplitpeaWindow(): void;
   setSpellData(spells: unknown[]): void;
@@ -71,7 +70,6 @@ beforeAll(async () => {
     current: () => null, character: () => 'T', coords: () => null, now: () => 0, items: () => [], spells: () => [], buffs: () => [], history: () => [], setting: () => undefined, report: () => {}, spellTable: () => null, selection: () => null,
   };
   ui.setAutomationSource(new Proxy(base, { get: (t, k) => (k in t ? t[k as string] : () => ({ ok: true, message: '' })) }));
-  ui.setPreviewFeatures(true);
 });
 afterAll(() => { (H.ui as Ui).setSplitpea(null); (H.ui as Ui).setAutomationSource(null); H.teardown(); });
 
@@ -93,10 +91,6 @@ describe('GameUI: the bar entry', () => {
     expect(entry.style.backgroundImage).toMatch(/^url\("?data:image\/png/);
     const ids = qa('[data-vvs-bar-entry]').map((e) => e.dataset.vvsBarEntry);
     expect(ids[ids.length - 1]).toBe('splitpea');
-    // Preview UI: the bar (and so the entry) goes with the preview flag.
-    ui.setPreviewFeatures(false);
-    expect(q('[data-vvs-bar-entry="splitpea"]')).toBeNull();
-    ui.setPreviewFeatures(true);
     ui.setSplitpea(null);
     expect(q('[data-vvs-bar-entry="splitpea"]')).toBeNull();
   });

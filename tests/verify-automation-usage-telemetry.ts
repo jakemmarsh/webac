@@ -20,7 +20,8 @@ import {
 } from '../packages/renderer/src/telemetry/AutomationReporter.ts';
 import { WorldReporter } from '../packages/renderer/src/telemetry/WorldReporter.ts';
 import { ALL_MODULES_OFF, EXAMPLE_HUNT_PROFILE, type RoutineProfile } from '../packages/shared/src/routines/index.ts';
-import { sanitizeClientAutomation, isAutomationOutcome } from '../services/ws-tcp-bridge/src/clientAutomation.ts';
+import { sanitizeClientAutomation, isAutomationOutcome, GOARROW_REPLIES as BRIDGE_GOARROW_REPLIES } from '../services/ws-tcp-bridge/src/clientAutomation.ts';
+import { GOARROW_REPLIES } from '../packages/shared/src/goarrow/commands.ts';
 import { CLIENT_PREWORLD_MAX_BODY } from '../services/ws-tcp-bridge/src/clientPreworld.ts';
 import { resolveBridgeConfig, type BridgeConfig } from '../services/ws-tcp-bridge/src/bridgeUtil.ts';
 import { createBridgeServer } from '../services/ws-tcp-bridge/src/server.ts';
@@ -214,6 +215,7 @@ describe('AutomationReporter — the session summary', () => {
       starts: { player: 1, agent: 0 }, stops: { player: 0, agent: 0, died: 0, rule: 0, replaced: 0 }, kinds: ['macro'],
       runMs: 600_000, running: true, errors: 0,
       imports: { ok: 0, partial: 1, failed: 0 }, importKinds: ['met', 'nav'],
+      goarrow: Object.fromEntries(GOARROW_REPLIES.map((k) => [k, 0])) as AutomationSummaryEvent['goarrow'],
     } satisfies AutomationSummaryEvent & { eid: string });
     expect(sanitizeClientAutomation(sum)).toEqual(sum);
     expect(JSON.stringify(sum).length).toBeLessThan(CLIENT_PREWORLD_MAX_BODY);
@@ -249,6 +251,28 @@ describe('AutomationReporter — the session summary', () => {
       expect(sum.windows).toEqual([era === 'ac1999' ? 'splitpea' : 'magtools']);
       expect(sanitizeClientAutomation(sum)).toEqual(sum);
     }
+  });
+
+  it('GoArrow\'s replies are counted per session (no text), alone make a session worth a summary, and pass the bridge', () => {
+    expect([...BRIDGE_GOARROW_REPLIES]).toEqual([...GOARROW_REPLIES]);
+    const g = rig('ac1999', 'ac1999');
+    g.world.enteredWorld();
+    g.r.goArrowReply('to_unknown');
+    g.r.goArrowReply('to_waited');
+    g.r.goArrowReply('no_destination');
+    g.r.goArrowReply('to_unknown');
+    g.r.goArrowReply('<{ GoArrow }> Invalid coordinates' as never);
+    g.world.left('logout');
+    const [sum] = byOutcome(g.events, 'automation_summary');
+    expect(sum.goarrow).toMatchObject({ to_unknown: 2, to_waited: 1, no_destination: 1, to_set: 0 });
+    expect(Object.keys(sum.goarrow)).toEqual([...GOARROW_REPLIES]);
+    expect(sanitizeClientAutomation(sum)).toEqual(sum);
+    expect(JSON.stringify(sum)).not.toContain('Invalid');
+    // A fresh session starts its counts at zero.
+    g.world.enteredWorld();
+    g.r.goArrowReply('help');
+    g.world.left('logout');
+    expect(byOutcome(g.events, 'automation_summary')[1]!.goarrow).toMatchObject({ help: 1, to_unknown: 0 });
   });
 
   it('helpers: a profile\'s kind and a file\'s import kind', () => {

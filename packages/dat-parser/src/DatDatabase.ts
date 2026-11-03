@@ -36,6 +36,23 @@ const DIR_NODE_SIZE = (DIR_BRANCH_COUNT * 4) + 4 + (DIR_MAX_ENTRIES * DAT_FILE_E
 const PRE_TOD_DIR_NODE_SIZE = (DIR_BRANCH_COUNT * 4) + 4 + (DIR_MAX_ENTRIES * PRE_TOD_FILE_ENTRY_SIZE); // 984
 
 /**
+ * Whether a directory branch points at a node that can be read: a sector
+ * inside the file. Retail tests leaf vs internal by NextNode_[0] != 0
+ * (BTree::Search @ 0x006731c0) and loads a child through
+ * CLBlockAllocator::Load_Data @ 0x006744e0 → DiskDev::SyncRead @ 0x00676c60,
+ * whose SetFilePointer(offset as a signed LONG, FILE_BEGIN) fails for an
+ * offset with bit 31 set and whose ReadFile comes back short past the end;
+ * the load returns false and the lookup finds nothing there. ACE's
+ * DatReader.ReadDat seeks past the end and reads a zeroed node (an empty
+ * leaf). Either way such a branch holds no files. Third-party DAT tools
+ * leave a leaf's 62 branches as MSVC's uninitialised fill 0xCDCDCDCD
+ * (Dark Destiny 1.0 client_portal.dat), which is both.
+ */
+export function isReadableDirBranch(offset: number, fileLength: number): boolean {
+  return offset > 0 && offset <= 0x7fffffff && offset + 4 <= fileLength;
+}
+
+/**
  * Rewrites what a DAT serves, file by file, without touching the container:
  * the server's DAT patches (AC1999 0xF7B7) and the 1999 → end-of-retail format
  * translation (dat-parser era1999/) plug in here, so every parser and renderer
@@ -442,16 +459,20 @@ export class DatDatabase implements DatFileSource {
       });
     }
 
-    // If non-leaf node, recurse into children
+    // If non-leaf node, recurse into children. A branch that cannot be read
+    // holds nothing (isReadableDirBranch): third-party DAT tools leave leaves'
+    // branches as 0xCDCDCDCD (Dark Destiny's portal.dat, 27 leaves).
     if (branches[0] !== 0) {
       for (let i = 0; i < entryCount + 1; i++) {
-        this.readDirectory(branches[i]);
+        if (isReadableDirBranch(branches[i], this.bytes.byteLength)) this.readDirectory(branches[i]);
       }
     }
 
-    // Add all entries to the file map
+    // Add all entries to the file map. Id 0 is INVALID_DID, which retail's
+    // BTree::Lookup @ 0x00673800 refuses before searching, so an entry stored
+    // under it (Dark Destiny's portal.dat has a 24-byte Surface there) is unreachable.
     for (const entry of entries) {
-      this.files.set(entry.objectId, entry);
+      if (entry.objectId !== 0) this.files.set(entry.objectId, entry);
     }
   }
 

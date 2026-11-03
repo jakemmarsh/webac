@@ -27,7 +27,7 @@ import { serverNetErrorNotice } from '../packages/renderer/src/ui/ConnectionNoti
 import {
   accountBootLoginText, loginFailureText, ACCOUNT_NAME_TAKEN_HINT, LOGON_FAILED_HINT, type World,
 } from '../packages/renderer/src/launcher/worldDirectory.js';
-import { ADDRESS_LIMIT_HINT, accountBannedText, PASSWORD_MISMATCH_BOOT_REASON, PROXY_REFUSED_HINT, BAN_APPEAL_TEXT } from '../packages/renderer/src/session/AccountBoot.js';
+import { ADDRESS_LIMIT_HINT, DAT_MISMATCH_HINT, accountBannedText, PASSWORD_MISMATCH_BOOT_REASON, PROXY_REFUSED_HINT, BAN_APPEAL_TEXT } from '../packages/renderer/src/session/AccountBoot.js';
 import { bootReasonToken } from '../packages/renderer/src/telemetry/PreworldReporter.js';
 
 type W = Pick<World, 'name' | 'registration' | 'registrationUrl'>;
@@ -236,5 +236,30 @@ describe('AC1999: the STR_LOGIN_FAILED NetError bytes through Connection1999 to 
     expect(shownFor(ac1999Login(STR_LOGIN_FAILED), REEF)).toBe(`Client logon failed${REEF_HINT}`);
     FakeSocket.sockets = [];
     expect(shownFor(ac1999Login(STR_LOGIN_ACCOUNT_ONLINE), AC1999)).toBe('Player already logged on\n\nClose any other window logged in to this account, or wait a minute and try again.');
+  });
+});
+
+describe('COMPAT.dark-destiny-custom-dats: a DAT-mismatch boot names a next step', () => {
+  const LOCATION = ' because The location you are attempting to enter is not present in your data files';
+
+  it("ClassicACE's dat_older boot (Dark Destiny) keeps the server's text, then the next step; boot_dat_location_missing", () => {
+    expect(aceBootText(LOCATION, COLDEVE)).toBe(
+      "You have been booted from Asheron's Call because The location you are attempting to enter is not present in your data files."
+      + `\n\n${DAT_MISMATCH_HINT}`);
+    expect(DAT_MISMATCH_HINT).toMatch(/Pick another world\.$/);
+    expect(bootReasonToken(LOCATION)).toBe('boot_dat_location_missing');
+  });
+
+  it("ACE's own DAT boots (newer, incomplete) get the same step; the download link stays dropped", () => {
+    expect(aceBootText(' because Your DAT files are newer than expected.\nPlease visit https://emulator.ac/how-to-play to download the correct DAT files', COLDEVE))
+      .toBe(`You have been booted from Asheron's Call because Your DAT files are newer than expected.\n\n${DAT_MISMATCH_HINT}`);
+    expect(aceBootText(' because Your DAT files are incomplete.\nThis server does not support dynamic DAT updating at this time', COLDEVE).endsWith(`\n\n${DAT_MISMATCH_HINT}`)).toBe(true);
+  });
+
+  it('other boots get no DAT step (wrong password, version, VPN, world closed, an admin reason)', () => {
+    for (const r of [PASSWORD_MISMATCH_BOOT_REASON, ' because the world is now closed', ' Connections from VPN / proxy disallowed by server policy',
+      ' because you do not have the correct data files for this server', ' - data files were mentioned by an admin']) {
+      expect(aceBootText(r, COLDEVE), r).not.toContain(DAT_MISMATCH_HINT);
+    }
   });
 });

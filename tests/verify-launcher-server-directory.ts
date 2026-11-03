@@ -13,7 +13,8 @@ import {
   parseTreeStatsStatus, parsePlayerCounts, buildDirectory, compareEntries, ServerDirectory, withDetection,
   POPULATION_MAX_AGE_MS, TREESTATS_STATUS_URL, TREESTATS_COUNTS_URL, type DirectoryEntry,
 } from '../services/ws-tcp-bridge/src/serverDirectory';
-import { compatFor, SERVER_COMPAT, VPN_BLOCK } from '../services/ws-tcp-bridge/src/serverCompat';
+import { compatFor, CUSTOM_DATS, SERVER_COMPAT, VPN_BLOCK } from '../services/ws-tcp-bridge/src/serverCompat';
+import { worldEnterBlock, worldFromEntry } from '../packages/renderer/src/launcher/worldDirectory';
 import { BridgeMetrics, makeHttpHandler, type BridgeSnapshot } from '../services/ws-tcp-bridge/src/metrics';
 
 const NOW = Date.parse('2026-10-04T16:15:00Z');
@@ -180,6 +181,46 @@ describe('worlds whose VPN check refuses the bridge (survey 2026-10-12, docs/ope
     // A detection-only refusal (no overlay reason) is unchanged.
     expect(withDetection({ compat: 'ok' }, { kind: 'unsupported', classicAce: false, at: 0 }))
       .toEqual({ compat: 'incompatible', note: 'Unsupported client version' });
+  });
+});
+
+describe('COMPAT.dark-destiny-custom-dats: a world on its own custom DAT files is refused at ENTER', () => {
+  const DARK_DESTINY = '0c4eec44-a1cc-44b9-84b3-9df3e283e54b';
+  const REASON = "It uses its own custom game files, which webAC doesn't have.";
+  // A working ClassicACE Infiltration world (Doctide's id; detected classicace-infiltration).
+  const DOCTIDE = '1528da56-f52c-4e84-947c-a814255c7a23';
+  const infiltration = { kind: 'era' as const, era: 'classicace-infiltration', version: 'i104', note: 'Dark Majesty era', at: 0 };
+
+  it('Dark Destiny alone carries CUSTOM_DATS, with its own reason (not the VPN one)', () => {
+    for (const id of [DARK_DESTINY, DARK_DESTINY.toUpperCase()]) {
+      expect(compatFor(id, 'ACE')).toEqual({ compat: 'incompatible', note: 'Custom game files', reason: REASON });
+    }
+    const custom = Object.entries(SERVER_COMPAT.byId).filter(([, c]) => c === CUSTOM_DATS).map(([id]) => id);
+    expect(custom).toEqual([DARK_DESTINY]);
+    expect(CUSTOM_DATS.reason).not.toEqual(VPN_BLOCK.reason);
+    // Other ClassicACE worlds keep their own entries / detection.
+    expect(compatFor(DOCTIDE, 'ACE')).toEqual({ compat: 'ok' });
+  });
+
+  it('bridge row to launcher: ENTER on Dark Destiny explains, an Infiltration world that works is still enterable', () => {
+    const servers: ServerEntry[] = [
+      ...fixtureServers(),
+      { id: DARK_DESTINY, name: 'Dark Destiny', emu: 'ACE', host: 'dd.example.org', port: 9000, source: 'list' },
+      { id: DOCTIDE, name: 'Doctide', emu: 'ACE', host: 'doctide.example.org', port: 9000, source: 'list' },
+    ];
+    // Both detected as Infiltration: the block stands over detection, Doctide stays open.
+    const rows = buildDirectory(servers, new Map(), new Map(), { now: NOW, detected: () => infiltration });
+    const byName = Object.fromEntries(rows.map(e => [e.name, e]));
+    expect(byName['Dark Destiny']).toMatchObject({
+      compat: 'incompatible', compatNote: 'Custom game files', compatReason: REASON, era: 'classicace-infiltration',
+    });
+    expect(byName.Doctide).toMatchObject({ compat: 'beta', compatReason: null, era: 'classicace-infiltration' });
+    // Through the client's JSON reader and ENTER gate, as the launcher runs them.
+    const dd = worldFromEntry(JSON.parse(JSON.stringify(byName['Dark Destiny'])));
+    expect(worldEnterBlock(dd)).toBe(
+      "Dark Destiny can't be played from webAC yet: it uses its own custom game files, which webAC doesn't have. Pick another world for now.");
+    const doc = worldFromEntry(JSON.parse(JSON.stringify(byName.Doctide)));
+    expect(worldEnterBlock(doc)).toBeNull();
   });
 });
 

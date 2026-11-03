@@ -126,3 +126,16 @@ Verified live:
 Open:
 - **Live Dekarutide / Doctide.** Seedsow is played (above). Snowreap's create failure was found by Jake playing it (2026-10-11) and fixed with the `classic-dereth-1-0` era; on 2026-10-12 both Seedsow and Snowreap accepted a live 1.0 create from `tools/probe-gdl-chargen.ts` (throwaway accounts, which Jake OK'd for third-party servers on 2026-10-11). Still unverified live: Doctide (41 skills, Infiltration 1.9), Unfamiliar Shores (offline; which CustomDM release), Dekarutide (offline). Mark a server `ok` instead of `beta` in `serverCompat.ts` only after someone plays it end to end.
 - The weenie JSON side-files (combat style, attack type and weapon speed per weenie class id, plus wielded-item meshes) come from the end-of-retail world DB. Original-content class ids are the same on classic servers, a miss falls back to defaults (animation only, never stats), and per-server exports would need each operator's world DB.
+
+## Custom-DAT worlds: Dark Destiny (2026-11-03)
+
+Dark Destiny (ClassicACE, Infiltration ruleset; bridge id 0c4eec44…) ships its own data files (Mega download linked from its Discord, "DarkDestiny_dats_Release_1.0") and boots any client with older iterations: ClassicACE `DDD_InterrogationResponse` with patching off sends `dat_older_warning_msg`. The launcher refuses ENTER there (`CUSTOM_DATS`, serverCompat.ts).
+
+What the Release 1.0 set holds, against Infiltration 1.9:
+- portal 10079 vs 10006: ~590 new files (~220 MB: 117 GfxObj, 211 textures up to 2048², 47 Surfaces, 22 Clothing; new armor/weapon models), CharGen with heritage 14 "Golem", SkillTable with skills 48–52 and repricing, 20 new spells.
+- cell 10009 vs 10001: new dungeons (0x00b0–0x00b4, 0x004d/4e, 0x00f0, 0xcb00–0xcd00 …), and ~3,100 buildings removed (housing).
+- highres and local_English: byte-identical to stock.
+- Their acclient.exe is the community end-of-retail exe with 63 bytes changed: login literal "i104", Sanamar → "Random", "Shield Level" → "Covers Front", and a few code bytes.
+- Their portal.dat has 0xCDCDCDCD (MSVC uninitialised fill) in 27 leaf nodes' branch slots and a file under id 0; the parser now reads both as retail does (`isReadableDirBranch`, BUG.dat-garbage-leaf-branches).
+
+Why DDD patching can't deliver it: ClassicACE DDDManager diffs by per-file Iteration, and 579 of the 600 new or changed portal files sit at iteration 0 (the textures, SkillTable, SpellTable), and removed cells can't be sent at all. Cell per-file iterations reach 11015, above the cell total 10009. Only hosting the whole set works, which needs the operators' permission (the ask: host Release sets and re-publish on update; a stable download URL or an update ping). Then: a Dark Destiny era profile (Infiltration login, iterations 10079/10009/10002), drop the CUSTOM_DATS entry, and live-check Golem, skills 48–52 and the iterations the server accepts. Players never supply files (see above); hosting is the only path we take.

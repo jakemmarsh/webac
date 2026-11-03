@@ -175,6 +175,25 @@ export const VPN_BLOCK: CompatEntry = {
   reason: "Its VPN check refuses webAC players. We're working on a fix.",
 };
 
+/**
+ * A world that runs its own custom DAT files (newer iterations than the set
+ * webAC serves for its era). ClassicACE's DDD handshake boots a client whose
+ * DATs are behind the server's when DAT patching is off (DDDHandler.cs
+ * DDD_InterrogationResponse: clientIsMissingIterations, boot " because " +
+ * dat_older_warning_msg, which the Infiltration and CustomDM rulesets set to
+ * "The location you are attempting to enter is not present in your data
+ * files"), right after the character list, every login. We can't serve
+ * files we don't have, so ENTER is refused with this reason instead. Remove
+ * the entry if the operator publishes the files and webAC hosts them as an
+ * era DAT set. tools/probe-world-access.ts re-checks a world.
+ */
+export const CUSTOM_DATS: CompatEntry = {
+  compat: 'incompatible',
+  note: 'Custom game files',
+  // Fits the launcher's 2-line details note; worldEnterBlock lower-cases the first letter.
+  reason: "It uses its own custom game files, which webAC doesn't have.",
+};
+
 export const SERVER_COMPAT: CompatOverlay = {
   byId: {
     // "A PVE Dark Majesty server must use classic AC .dats"
@@ -205,6 +224,14 @@ export const SERVER_COMPAT: CompatOverlay = {
     // reason boot_vpn_blocked and a per-IP limit boot_address_limit, so the
     // next refusal says which (COMPAT.jawntide-vpn-block).
     '19c05a84-551c-428e-859e-9ea2fd06592e': VPN_BLOCK, // JawnTide
+    // ClassicACE Infiltration-era ("Hybrid classic/custom experience. Diverts from
+    // Infiltration"). Prod 2026-11-03: a player booted 0.5 s after char_list with
+    // " because The location you are attempting to enter is not present in your
+    // data files" (ClassicACE's dat_older_warning_msg: our DATs are behind its
+    // custom set; telemetry boot_other then, boot_dat_location_missing now), and
+    // tools/probe-world-access.ts reproduced it with a fresh account through
+    // playwebac.com (COMPAT.dark-destiny-custom-dats).
+    '0c4eec44-a1cc-44b9-84b3-9df3e283e54b': CUSTOM_DATS, // Dark Destiny
     // Two accounts / two sessions per IP (AC1999_PUBLIC_COMPAT). serverList.AC1999_PUBLIC_SERVER.id.
     ac1999: AC1999_PUBLIC_COMPAT,
   },

@@ -36,7 +36,7 @@
  * the routines request, which both connection classes (ClientConnection,
  * era1999/Connection1999) relay. Splitpea's windows exist only in AC1999.
  */
-import { EXAMPLE_HUNT_PROFILE, type RoutineProfile } from '@ac/shared';
+import { EXAMPLE_HUNT_PROFILE, GOARROW_REPLIES, type GoArrowReply, type RoutineProfile } from '@ac/shared';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
 export const AUTOMATION_OUTCOMES = ['automation_offered', 'routine_started', 'routine_stopped', 'routine_error', 'automation_summary'] as const;
@@ -139,6 +139,11 @@ export interface AutomationSummaryEvent extends Ids {
   errors: number;
   imports: Record<ImportOutcome, number>;
   importKinds: ImportKind[];
+  /**
+   * What GoArrow answered this session, counted per reply (@ac/shared GOARROW_REPLIES; never text): shows
+   * whether players reach a destination (to_set / to_waited) or keep hitting an error (2026-11-03).
+   */
+  goarrow: Record<GoArrowReply, number>;
 }
 
 export type AutomationEvent = AutomationOfferedEvent | RoutineStartedEvent | RoutineStoppedEvent | RoutineErrorEvent | AutomationSummaryEvent;
@@ -176,6 +181,7 @@ function safe<T>(f: () => T, fallback: T): T {
 const zeroStarts = (): Record<RoutineDriver, number> => ({ player: 0, agent: 0 });
 const zeroStops = (): Record<RoutineStopReason, number> => ({ player: 0, agent: 0, died: 0, rule: 0, replaced: 0 });
 const zeroImports = (): Record<ImportOutcome, number> => ({ ok: 0, partial: 0, failed: 0 });
+const zeroGoArrow = (): Record<GoArrowReply, number> => Object.fromEntries(GOARROW_REPLIES.map((k) => [k, 0])) as Record<GoArrowReply, number>;
 
 export class AutomationReporter {
   private readonly now: () => number;
@@ -203,6 +209,7 @@ export class AutomationReporter {
   private runMs = 0;
   private errors = 0;
   private imports = zeroImports();
+  private goarrow = zeroGoArrow();
   private importKinds = new Set<ImportKind>();
 
   constructor(private readonly opts: AutomationReporterOptions) {
@@ -242,6 +249,12 @@ export class AutomationReporter {
   }
   /** A plugin window opened (from the bar, a chat command or another window). */
   windowOpened(id: string): void { if (this.enterAt !== null) this.windows.add(pluginWindow(id)); }
+
+  /** GoArrow answered the player (GoArrowRuntime.onReply): counted for this world session. */
+  goArrowReply(reply: GoArrowReply): void {
+    if (this.enterAt === null || !(GOARROW_REPLIES as readonly string[]).includes(reply)) return;
+    this.goarrow[reply]++;
+  }
 
   /** A VirindiTank import (the editor's Import, the loot editor's File → Open). */
   imported(outcome: ImportOutcome, fileNames: readonly string[]): void {
@@ -305,6 +318,7 @@ export class AutomationReporter {
     this.kinds.clear();
     this.runMs = 0;
     this.errors = 0;
+    this.goarrow = zeroGoArrow();
     if (this.run) { this.run.countedFrom = at; this.kinds.add(this.run.kind); }
     // Imports made at character select (the editor is open there too) count in the session that follows.
   }
@@ -319,7 +333,7 @@ export class AutomationReporter {
     if (this.run) { runMs += Math.max(0, at - this.run.countedFrom); this.run.countedFrom = at; }
     const importsTotal = this.imports.ok + this.imports.partial + this.imports.failed;
     const used = this.barToggles > 0 || this.barClicks > 0 || this.windows.size > 0 || this.starts.player + this.starts.agent > 0
-      || this.run !== null || importsTotal > 0 || runMs > 0;
+      || this.run !== null || importsTotal > 0 || runMs > 0 || GOARROW_REPLIES.some((k) => this.goarrow[k] > 0);
     if (used) {
       this.post({
         outcome: 'automation_summary', ...this.ids(),
@@ -333,6 +347,7 @@ export class AutomationReporter {
         runMs: Math.round(runMs), running: this.run !== null, errors: this.errors,
         imports: { ...this.imports },
         importKinds: IMPORT_KINDS.filter((k) => this.importKinds.has(k)),
+        goarrow: { ...this.goarrow },
       });
     }
     this.imports = zeroImports();

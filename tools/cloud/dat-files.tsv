@@ -1,0 +1,19 @@
+# The DAT files the test suite opens, as tools/cloud/fetch-dats.sh downloads them.
+# Source: the production raw sets, public at https://dats.playwebac.com/v1/raw/<set>/<file> (tools/publish-dats-r2.ts --raw).
+# Sizes and sha256 pinned from Jake's checkout on 2026-11-02 (byte-identical to the R2 objects: sizes match,
+# single-part ETags equal the local MD5s, and a fresh Linux download hashed the same).
+# group	repo path	raw path (under the base URL)	size	sha256
+eol	dat/client_portal.dat	eol-p2072-c982-h497-l994/client_portal.dat	926941184	dc6e500ba22e6b186db7171e3f3345238b6444c85d798adc85e550973b8d12e4
+eol	dat/client_cell_1.dat	eol-p2072-c982-h497-l994/client_cell_1.dat	348127232	6db0abf00fbceed62c3f1ee842ee7c1f423d732bed77a5b7c102ee89a52ab99e
+eol	dat/client_highres.dat	eol-p2072-c982-h497-l994/client_highres.dat	133169152	503e0828d14f2f9ccbc31431e1055ac188464bf4b499de37f4c3d5b2d9f3e727
+eol	dat/client_local_English.dat	eol-p2072-c982-h497-l994/client_local_English.dat	1048576	e85c820280c88fac7df6c8043f5e24596e9c8774193af4123d756546f78fb2bb
+ac1999	dat-sets/ac1999-retail/portal.dat	ac1999-retail-p102-c67/portal.dat	99614720	195e6fbb6d1cb9c849b2f4732c29509b5f20f67038a1d0763041387287c1975a
+ac1999	dat-sets/ac1999-retail/cell.dat	ac1999-retail-p102-c67/cell.dat	45088768	111855655c7b1daec563a96476e29cf10f17a8252a50f6102f1245146e0870b8
+classic-dereth	dat-sets/classic-dereth-1.1/client_portal.dat	classic-dereth-1.1/client_portal.dat	926941184	3e3e71cedf76e511195a3ab24e34da6c1b8851858a4c86bebcd0e6ee5c463907
+classic-dereth	dat-sets/classic-dereth-1.1/client_cell_1.dat	classic-dereth-1.1/client_cell_1.dat	255745536	ccbf28152378f3fb02bba4da902dfac4bac3881d987e84d5faa519803442f5f1
+customdm	dat-sets/classicace-customdm-1.60/client_portal.dat	classicace-customdm-1.60/client_portal.dat	935232512	b8d8ef1aebd16e22f38069ddf541eeb80a32885d190b8952603e700e0a0aa931
+customdm	dat-sets/classicace-customdm-1.60/client_cell_1.dat	classicace-customdm-1.60/client_cell_1.dat	223295488	36450a362baccbd69d15cee2310193d410c6175a776c635fa5216e7e66f5c71e
+customdm	dat-sets/classicace-customdm-1.60/client_local_English.dat	classicace-customdm-1.60/client_local_English.dat	1048576	1758f5b2479aa710e46d38757b64e4454b9f5c4d326829365e98fdaa72390d92
+infiltration	dat-sets/classicace-infiltration-1.9/client_portal.dat	classicace-infiltration-1.9/client_portal.dat	931521536	4647f81177d6678066ca05139574c1299c3c4aa28e802255d6600fb6ae1ee2cb
+infiltration	dat-sets/classicace-infiltration-1.9/client_cell_1.dat	classicace-infiltration-1.9/client_cell_1.dat	222017280	48584d27be6f9df4375b7ef8372ec10d36d20d0a871af8d2b1d98195e80406e6
+infiltration	dat-sets/classicace-infiltration-1.9/client_local_English.dat	classicace-infiltration-1.9/client_local_English.dat	1048576	bd62238dd21a9d09edac0c29f4322c8bccd76cdf055fa000cd4390eceab3b8a1

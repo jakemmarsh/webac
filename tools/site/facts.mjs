@@ -59,7 +59,8 @@ export function softwareLabel(emu) {
 
 /** What a world means for a webAC player, from the bridge's compat + registration + online fields. */
 export function worksLabel(s) {
-  if (s.compat === 'incompatible') return { key: 'blocked', text: 'Blocks webAC', detail: s.compatReason || '' };
+  // The bridge's chip names why ("Blocks webAC" for a VPN check, "Custom game files" for a world on its own DATs).
+  if (s.compat === 'incompatible') return { key: 'blocked', text: s.compatNote || 'Blocks webAC', detail: s.compatReason || '' };
   if (s.online === false) return { key: 'offline', text: 'Offline now', detail: '' };
   if (s.registration) return { key: 'register', text: s.compat === 'beta' ? 'Register first (beta)' : 'Register first', detail: s.registration };
   if (s.compat === 'beta') return { key: 'beta', text: 'Yes (beta)', detail: '' };

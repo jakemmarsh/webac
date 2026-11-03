@@ -3,8 +3,8 @@
  * `/mt` over the agent API, so every action takes the client's own path, and the item info
  * line printed when you identify something. Rebuilt from Mag-Tools' behaviour (LGPL; facts only).
  *
- * Preview UI for now (GameUI.setPreviewFeatures; Jake, 2026-10-12): a player not on the preview
- * list gets neither `/mt` nor the ident lines, so retail's chat is unchanged for them.
+ * On wherever the automation is (GameUI.automationAvailable; no preview gate since Jake, 2026-11-03):
+ * an account without it gets neither `/mt` nor the ident lines, so retail's chat is unchanged for it.
  *
  * Ours, where the client differs: the vendor commands add to our vendor path, which buys or sells
  * at once (`/mt vendor addbuy` buys; `buy` / `clearbuy` have nothing left to do).

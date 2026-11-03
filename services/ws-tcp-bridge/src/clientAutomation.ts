@@ -10,7 +10,7 @@
  *   drove it, why it ended and how long it ran (state changes only, capped
  *   per page);
  * - automation_summary: what one world session did (the bar, the windows
- *   opened, runs, run time, imports).
+ *   opened, runs, run time, imports, what GoArrow answered).
  *
  * Each accepted event becomes one JSON log line, `client_automation`, with
  * the page's `trace`, era and server, so usage counts by world.
@@ -38,6 +38,12 @@ export const ROUTINE_ERROR_PLACES = ['rule', 'loot', 'macro'] as const;
 export const IMPORT_OUTCOMES = ['ok', 'partial', 'failed'] as const;
 export const IMPORT_KINDS = ['met', 'nav', 'utl', 'usd', 'af', 'other'] as const;
 export const AUTOMATION_EXITS = ['closed_tab', 'logout', 'disconnected'] as const;
+/** What GoArrow answered the player, counted per session (@ac/shared GOARROW_REPLIES; the test pins them equal). */
+export const GOARROW_REPLIES = [
+  'help', 'arrow_on', 'arrow_off', 'no_map', 'to_set', 'to_waited', 'to_unknown', 'route_set', 'reset', 'lock',
+  'loc_sent', 'no_coords', 'search', 'find_selected', 'find_none', 'tag_set', 'tag_nothing',
+  'invalid_command', 'hud_target', 'coords_placeholder', 'hidden_indoors', 'hidden_error', 'no_destination',
+] as const;
 
 interface Ids {
   era: string | null;
@@ -75,6 +81,7 @@ export interface ClientAutomationSummary extends Ids {
   errors: number | null;
   imports: Record<typeof IMPORT_OUTCOMES[number], number> | null;
   importKinds: Array<typeof IMPORT_KINDS[number]> | null;
+  goarrow: Record<typeof GOARROW_REPLIES[number], number> | null;
 }
 export type ClientAutomationEvent = ClientAutomationOffered | ClientRoutineStarted | ClientRoutineStopped | ClientRoutineError | ClientAutomationSummary;
 
@@ -157,6 +164,7 @@ export function sanitizeClientAutomation(body: unknown): ClientAutomationEvent |
         errors: uint(b.errors, MAX_COUNT),
         imports: counts(b.imports, IMPORT_OUTCOMES, MAX_COUNT),
         importKinds: pickList(b.importKinds, IMPORT_KINDS),
+        goarrow: counts(b.goarrow, GOARROW_REPLIES, MAX_COUNT),
       };
   }
 }

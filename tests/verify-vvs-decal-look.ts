@@ -152,7 +152,7 @@ type Ui = {
 };
 
 describe('GameUI: the bar, UB\'s window and the windows\' VVS text', () => {
-  it('the bar is up from login for a preview player, lists the plugins\' windows, and opens UB\'s window', async () => {
+  it('the bar is up from login wherever the automation is (no preview flag), lists the plugins\' windows, and opens UB\'s window', async () => {
     const ui = H.ui as unknown as Ui;
     try { globalThis.localStorage?.removeItem('acjs.vvsBar'); } catch { /* none */ }
     const settings: Record<string, boolean> = { 'AutoVendor.Enabled': true, 'DungeonMaps.Enabled': true, 'LandscapeMaps.Enabled': true };
@@ -168,8 +168,6 @@ describe('GameUI: the bar, UB\'s window and the windows\' VVS text', () => {
     ui.setUbSettings(store);
     ui.setUbMaps({ toggle: (w: string) => { if (open.has(w)) open.delete(w); else open.add(w); return ''; }, closeAll: () => {}, close: (w: string) => { closed.push(w); open.delete(w); }, isOpen: (w: string) => open.has(w) });
     ui.setAutomationSource(source());
-    // The bar is preview UI (the bridge's BRIDGE_PREVIEW_ACCOUNTS); verify-virindi-reporter.ts tests the gate.
-    (ui as unknown as { setPreviewFeatures(on: boolean): void }).setPreviewFeatures(true);
     const bar = () => ui.hudContainer.querySelector('[data-vvs-bar]') as HTMLElement | null;
     // Up before any plugin window has opened (Jake, 2026-10-13: "i dont even see it").
     expect(bar()).not.toBeNull();
@@ -206,7 +204,7 @@ describe('GameUI: the bar, UB\'s window and the windows\' VVS text', () => {
     expect(bar()).toBeNull();
     expect(globalThis.localStorage?.getItem('acjs.vvsBar')).toBe('off');
     expect(ui.toggleVvsBar()).toMatch(/shown/);
-    // Either order at login: the preview flag before the automation source still draws it.
+    // The automation source alone draws it.
     ui.setAutomationSource(null);
     expect(bar()).toBeNull();
     ui.setAutomationSource(source());
@@ -220,7 +218,6 @@ describe('GameUI: the bar, UB\'s window and the windows\' VVS text', () => {
     const ui = H.ui as unknown as Ui & { showGame(): void; toggleHotkeysForTest?: never };
     try { globalThis.localStorage?.removeItem('acjs.vvsBar'); } catch { /* none */ }
     ui.setAutomationSource(source());
-    (ui as unknown as { setPreviewFeatures(on: boolean): void }).setPreviewFeatures(true);
     ui.toggleAutomationWindow();
     await new Promise((r) => setTimeout(r, 10));
     // Entering the world rebuilds the HUD layer (renderHUD empties it).

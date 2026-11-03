@@ -1,7 +1,7 @@
 /**
  * Virindi Reporter (@ac/shared virindiReporter.ts) and Virindi HUDs' Status HUD (ui/automation/StatusHud.ts),
  * rebuilt from their behaviour (reference/plugin-specs/reporter-statushud.md), and GameUI's hosting of them:
- * the VVS bar's entries, the HUD, its Ctrl+click config, and the bar's preview gate (2026-10-12).
+ * the VVS bar's entries, the HUD, its Ctrl+click config, and the bar following the automation (no preview gate, 2026-11-03).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
@@ -129,7 +129,6 @@ describe('the bar\'s icons on streamed DATs', () => {
 type Ui = {
   setAutomationSource(s: unknown): void;
   setReporterReads(r: ReporterReads | null): void;
-  setPreviewFeatures(on: boolean): void;
   toggleAutomationWindow(): void;
   toggleStatusHud(): void;
   refreshVvsBar(): void;
@@ -157,7 +156,7 @@ describe('GameUI: Reporter and the Status HUD', () => {
     ui.setReporterReads(null);
   });
 
-  it('the bar is preview UI: hidden without the bridge\'s preview flag, with Reporter and Virindi HUDs entries when shown', async () => {
+  it('the bar follows the automation alone (no preview flag): hidden without it, with Reporter and Virindi HUDs entries with it', async () => {
     const ui = H.ui as unknown as Ui;
     const { emptyRoutineDoc } = await import('../packages/shared/src/routines/index.js');
     const base: Record<string, unknown> = {
@@ -166,13 +165,12 @@ describe('GameUI: Reporter and the Status HUD', () => {
       stats: () => ({ startedAt: 0, xpGained: 0, kills: 0, deaths: 0, kept: 0, left: 0, sold: 0, rebuffs: 0, stateTime: {} }),
       current: () => null, character: () => 'T', coords: () => null, now: () => 0, items: () => [], spells: () => [], buffs: () => [], history: () => [], setting: () => undefined, report: () => {}, spellTable: () => null, selection: () => null,
     };
-    ui.setAutomationSource(new Proxy(base, { get: (t, k) => (k in t ? t[k as string] : () => ({ ok: true, message: '' })) }));
     ui.setReporterReads({ xp: () => 1000, lum: () => 0, level: () => 5, levelXp: () => 2000, now: () => Date.now() });
-    ui.setPreviewFeatures(false);
+    ui.refreshVvsBar();
+    expect(ui.hudContainer.querySelector('[data-vvs-bar]')).toBeNull();
+    ui.setAutomationSource(new Proxy(base, { get: (t, k) => (k in t ? t[k as string] : () => ({ ok: true, message: '' })) }));
     ui.toggleAutomationWindow();
     await new Promise((r) => setTimeout(r, 5));
-    expect(ui.hudContainer.querySelector('[data-vvs-bar]')).toBeNull();
-    ui.setPreviewFeatures(true);
     const ids = Array.from(ui.hudContainer.querySelectorAll<HTMLElement>('[data-vvs-bar-entry]')).map((e) => e.dataset.vvsBarEntry);
     expect(ids).toEqual(expect.arrayContaining(['vtank', 'vhs', 'reporter', 'vhuds']));
     // VTank, the Hotkey System and Virindi UIs show our own stand-in icons, each a different image, never the coral box.
@@ -180,8 +178,8 @@ describe('GameUI: Reporter and the Status HUD', () => {
     expect(bg.every((b) => b.startsWith('url(') && b.includes('data:image/png'))).toBe(true);
     expect(new Set(bg).size).toBe(3);
     ui.toggleAutomationWindow();
-    ui.setPreviewFeatures(false);
     ui.setAutomationSource(null);
+    expect(ui.hudContainer.querySelector('[data-vvs-bar]')).toBeNull();
     ui.setReporterReads(null);
   });
 });

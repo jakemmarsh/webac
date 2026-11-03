@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { redrawKeepingFocus } from '../packages/renderer/src/ui/automation/keepFocus.js';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
+import { emptyRoutineDoc } from '../packages/shared/src/routines/index.js';
 
 function form(root: HTMLElement, values: string[]): HTMLInputElement[] {
   root.innerHTML = '';
@@ -40,7 +41,7 @@ describe('redrawKeepingFocus', () => {
   });
 });
 
-type Ui = { setPreviewFeatures(on: boolean): void; toggleVcsWindow(): void; hudContainer: HTMLElement; vtankWindows: Map<string, { el: HTMLElement; redraw: () => void }> };
+type Ui = { setAutomationSource(s: unknown): void; toggleVcsWindow(): void; hudContainer: HTMLElement; vtankWindows: Map<string, { el: HTMLElement; redraw: () => void }> };
 let H: GameUIFixture;
 beforeAll(async () => { H = await mountGameUI(); });
 afterAll(() => H.teardown());
@@ -48,7 +49,7 @@ afterAll(() => H.teardown());
 describe('GameUI: a plugin window redrawn while typing', () => {
   it('the Chat System\'s Action box keeps focus across a redraw (every plugin window redraws through the same path)', () => {
     const ui = H.ui as unknown as Ui;
-    ui.setPreviewFeatures(true);
+    ui.setAutomationSource(new Proxy<Record<string, unknown>>({ load: async () => ({ ok: true, doc: emptyRoutineDoc('local-eor', 'tester') }), status: () => ({ running: false, paused: false, profile: null, state: null, acting: null, last: [] }), stats: () => ({ startedAt: 0, xpGained: 0, kills: 0, deaths: 0, kept: 0, left: 0, sold: 0, rebuffs: 0, stateTime: {} }), current: () => null, character: () => 'T', coords: () => null, now: () => 0, items: () => [], spells: () => [], buffs: () => [], history: () => [], setting: () => undefined, report: () => {}, spellTable: () => null, selection: () => null }, { get: (t, k) => (k in t ? t[k as string] : () => ({ ok: true, message: '' })) }));
     ui.toggleVcsWindow();
     const win = ui.vtankWindows.get('vcs')!;
     const box = win.el.querySelector<HTMLInputElement>('input')!;
@@ -61,6 +62,6 @@ describe('GameUI: a plugin window redrawn while typing', () => {
     expect(now?.tagName).toBe('INPUT');
     expect(win.el.contains(now)).toBe(true);
     ui.toggleVcsWindow();
-    ui.setPreviewFeatures(false);
+    ui.setAutomationSource(null);
   });
 });

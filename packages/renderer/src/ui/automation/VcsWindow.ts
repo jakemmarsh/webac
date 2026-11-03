@@ -4,7 +4,7 @@
  * Rebuilt clean-room from VCS5's wiki and screenshots (docs/plugin-specs/vcs5.md; VCS5 is closed: no code
  * or art). The rule model is @ac/shared vcs5.ts.
  *
- * Preview UI (GameUI.previewFeaturesOn): with it off VCS never sees a line.
+ * Where the automation is (GameUI.automationAvailable): without it VCS never sees a line.
  *
  * The layout is the screenshots' ([S-new], [S-pat], [S-act]), less the frame's 6, 29. Ours where VCS
  * differs or is unknown:

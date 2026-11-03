@@ -432,6 +432,9 @@ function safeToken(t: string | null | undefined): string | null {
  *  - ACE AuthenticationHandler.cs:114 / CharacterHandler.cs:139, ClassicACE :189 client version.
  *  - ACE / ClassicACE DDDHandler.cs dat_newer_warning_msg / dat_older_warning_msg (defaults
  *    "Your DAT files are newer than expected" / "Your DAT files are incomplete", PropertyManager.cs:677-678).
+ *  - ClassicACE's dat_older_warning_msg under its Infiltration / CustomDM rulesets ("The location you
+ *    are attempting to enter is not present in your data files", PropertyManager.cs) as
+ *    boot_dat_location_missing: a world on its own custom DATs (Dark Destiny, 2026-11-03: boot_other before).
  *  - ACE PlayerManager.cs:818 world closed; :140 forced log off by system (a second login of an in-world character).
  *  - ACE DeveloperCommands.cs:2470 forced log off by an admin; SentinelCommands.cs:333 boot " - <reason>" (or none).
  *  - ClassicACE AuthenticationHandler.cs:265 VPN / proxy refused, and any other
@@ -446,6 +449,7 @@ export function bootReasonToken(reason: string | null | undefined): string {
   if (r.startsWith(' because your client is not the correct version') || r.startsWith(' because you are not running the correct executable file version')) return 'boot_client_version';
   if (r.startsWith(' because ') && r.includes('DAT files are newer')) return 'boot_dat_newer';
   if (r.startsWith(' because ') && r.includes('DAT files are incomplete')) return 'boot_dat_incomplete';
+  if (r.startsWith(' because ') && /location you are attempting to enter is not present in your data files/i.test(r)) return 'boot_dat_location_missing';
   if (r === ' because the world is now closed') return 'boot_world_closed';
   if (r === ' because the character was forced to log off by system') return 'boot_forced_logoff_system';
   if (r === ' because the character was forced to log off by an admin') return 'boot_forced_logoff_admin';

@@ -33,8 +33,19 @@ if [[ ! -d "$REPO/node_modules" ]]; then
 fi
 
 if [[ ! -d "$REPO/reference/ACE/Source" ]]; then
-  echo "[provision] shallow-cloning ACE C# source…"
-  git clone --depth 1 https://github.com/ACEmulator/ACE.git "$REPO/reference/ACE"
+  # The commit CI pins (ci.yml ACE_REF): the parity tests are anchored to it, not to ACE's HEAD.
+  ACE_REF="$(sed -n 's/^ *ACE_REF: *\([0-9a-f]\{40\}\).*/\1/p' "$REPO/.github/workflows/ci.yml" 2>/dev/null | head -1)"
+  echo "[provision] shallow-cloning ACE C# source${ACE_REF:+ at $ACE_REF (ci.yml ACE_REF)}…"
+  rm -rf "$REPO/reference/ACE"
+  if [[ -n "$ACE_REF" ]]; then
+    mkdir -p "$REPO/reference/ACE"
+    git -C "$REPO/reference/ACE" init -q
+    git -C "$REPO/reference/ACE" remote add origin https://github.com/ACEmulator/ACE.git
+    git -C "$REPO/reference/ACE" fetch -q --depth=1 origin "$ACE_REF"
+    git -C "$REPO/reference/ACE" checkout -q FETCH_HEAD
+  else
+    git clone --depth 1 https://github.com/ACEmulator/ACE.git "$REPO/reference/ACE"
+  fi
 else
   echo "[provision] reference/ACE: ok"
 fi
@@ -48,8 +59,15 @@ else
   echo "[provision] reference/ACViewer: ok"
 fi
 
+# The four end-of-retail DATs (highres included) from the public production raw set on
+# dats.playwebac.com, pinned by sha256 (tools/cloud/fetch-dats.sh). The Mega / reference-bundle
+# zip path (fetch-eor-dats.mjs, no highres) stays as the fallback when that host is unreachable
+# (a cloud environment whose network allowlist lacks it: docs/cloud-sessions.md).
 echo "[provision] ensuring EoR DAT files…"
-node "$REPO/tools/fetch-eor-dats.mjs"
+if ! bash "$REPO/tools/cloud/fetch-dats.sh" --groups eol; then
+  echo "[provision] WARN: dats.playwebac.com fetch failed; falling back to tools/fetch-eor-dats.mjs"
+  node "$REPO/tools/fetch-eor-dats.mjs"
+fi
 
 # reference/client-eol (decompiled retail client) + reference/images (retail
 # screenshot corpus) — the two authoritative layers for VISUAL-lane work.

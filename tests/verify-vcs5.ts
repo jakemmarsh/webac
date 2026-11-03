@@ -1,6 +1,6 @@
 /**
  * Virindi Chat System 5 (docs/plugin-specs/vcs5.md): the rule model (@ac/shared vcs5.ts), AC's built-in
- * presets from the client's own line builders, the actions, and GameUI's hosting: the preview gate, the
+ * presets from the client's own line builders, the actions, and GameUI's hosting: on where the automation is, the
  * order after Mag-Tools' filters, routing to windows, the window and its VVS bar entry.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -12,6 +12,7 @@ import { VcsActions, VCS_ACTION_MIN_MS, vcsAcPreset } from '../packages/renderer
 import { evasionAttackerLine, evasionDefenderLine } from '../packages/renderer/src/ui/ServerMessageText.js';
 import { VCS_ICON_PNG } from '../packages/renderer/src/ui/automation/virindiIcons.js';
 import { mountGameUI, type GameUIFixture } from './_harness/gameui.js';
+import { emptyRoutineDoc } from '../packages/shared/src/routines/index.js';
 
 class Mem { m = new Map<string, string>(); getItem(k: string) { return this.m.get(k) ?? null; } setItem(k: string, v: string) { this.m.set(k, v); } }
 
@@ -152,7 +153,7 @@ describe('actions', () => {
 type Ui = {
   chatMessages: HTMLElement; hudContainer: HTMLElement; callbacks: Record<string, unknown>;
   vcs: VcsModel; chatLineFilter: ((l: { text: string }) => boolean) | null;
-  setPreviewFeatures(on: boolean): void; setAutomationSource(s: unknown): void; toggleAutomationWindow(): void; toggleVcsWindow(): void;
+  setAutomationSource(s: unknown): void; toggleAutomationWindow(): void; toggleVcsWindow(): void;
   addSystemMessage(text: string, color?: string, type?: number, target?: number, speech?: unknown, preset?: { plugin: string; category: string } | null): void;
 };
 
@@ -181,8 +182,8 @@ describe('GameUI hosting', () => {
     expect(played).toEqual([[0x0a000123, 'plugin']]);
   });
 
-  it('with preview UI off chat is unchanged, whatever VCS holds', () => {
-    ui.setPreviewFeatures(false);
+  it('without the automation chat is unchanged, whatever VCS holds', () => {
+    ui.setAutomationSource(null);
     ui.vcs.update((s) => { s.patterns = [{ pattern: '*secret*', regex: false, patternColor: 'Any', changeTo: 'Filter', windows: [], action: 0 }]; });
     ui.addSystemMessage('a secret line', '#ffffff', ChatMessageType.Broadcast);
     expect(ui.chatMessages.textContent).toContain('a secret line');
@@ -191,8 +192,8 @@ describe('GameUI hosting', () => {
     expect(ui.hudContainer.querySelector('[data-vtank-aux="vcs"]')).toBeNull();
   });
 
-  it('preview on: a pattern hides a line (still sniffed); a preset routes a plugin line to main chat in its colour; its action fires', () => {
-    ui.setPreviewFeatures(true);
+  it('with the automation (no preview flag): a pattern hides a line (still sniffed); a preset routes a plugin line to main chat in its colour; its action fires', () => {
+    ui.setAutomationSource(new Proxy<Record<string, unknown>>({ load: async () => ({ ok: true, doc: emptyRoutineDoc('local-eor', 'tester') }), status: () => ({ running: false, paused: false, profile: null, state: null, acting: null, last: [] }), stats: () => ({ startedAt: 0, xpGained: 0, kills: 0, deaths: 0, kept: 0, left: 0, sold: 0, rebuffs: 0, stateTime: {} }), current: () => null, character: () => 'T', coords: () => null, now: () => 0, items: () => [], spells: () => [], buffs: () => [], history: () => [], setting: () => undefined, report: () => {}, spellTable: () => null, selection: () => null }, { get: (t, k) => (k in t ? t[k as string] : () => ({ ok: true, message: '' })) }));
     ui.chatMessages.replaceChildren();
     sniffed.length = 0;
     ui.addSystemMessage('another secret line', '#ffffff', ChatMessageType.Broadcast);
@@ -286,7 +287,6 @@ describe('GameUI hosting', () => {
     ui.toggleVcsWindow();
     expect(ui.hudContainer.querySelector('[data-vtank-aux="vcs"]')).toBeNull();
     ui.toggleAutomationWindow();
-    ui.setPreviewFeatures(false);
     ui.setAutomationSource(null);
   });
 });

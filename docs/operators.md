@@ -215,6 +215,21 @@ been tested. Worlds that need the classic (Dark Majesty) data files load
 that era's data and are labelled "Dark Majesty era"
 ([dark-majesty-support.md](dark-majesty-support.md)).
 
+## If your world runs its own data files
+
+webAC serves one DAT set per era (end of retail, the classic Dark Majesty
+sets, 1999). A world on its own custom DAT files with newer iterations boots
+every webAC player right after the character list (ClassicACE: "The location
+you are attempting to enter is not present in your data files"). Such a world
+is listed with a "Custom game files" chip and ENTER is refused with "It uses
+its own custom game files, which webAC doesn't have." (`CUSTOM_DATS` in
+services/ws-tcp-bridge/src/serverCompat.ts; Dark Destiny as of 2026-11-03).
+If you'd like webAC players on your world, open an issue: with a download of
+your data files and permission to host them, we can look at adding them as a data
+set for your world. Note that DAT patching (`EnableDATPatching`) only carries files whose per-file
+iteration is newer than the client's: a tool that leaves changed files at iteration 0 makes patching send
+nothing, so the full set is what we would host.
+
 ## Opting out
 
 If you don't want your world listed in the browser launcher, open an issue

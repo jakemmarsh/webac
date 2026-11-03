@@ -1,6 +1,6 @@
 /**
  * The Mag-Tools and GoArrow runtimes (agent/magtools/magToolsRuntime.ts, ui/goarrow/goArrowRuntime.ts):
- * gated as preview UI, Mag-Tools' item-info line printed once per selection on the player's own examine
+ * on where the automation is (the `enabled` dep), Mag-Tools' item-info line printed once per selection on the player's own examine
  * (the open examine window asks again a second later; found live 2026-10-12), /mt through its options,
  * the combat tracker reading chat, and /goarrow setting the arrow.
  */
@@ -46,7 +46,7 @@ describe('Mag-Tools in the game', () => {
     expect(m.printed).toEqual([expect.stringContaining('Round Shield')]);
   });
 
-  it('prints nothing for an item that isn\'t selected, nor when preview UI is off', () => {
+  it('prints nothing for an item that isn\'t selected, nor when the automation is off', () => {
     const m = magTools();
     m.setSelected(0x99);
     m.rt.appraised(shield);
@@ -87,21 +87,80 @@ function goArrow(over: Partial<GoArrowDeps> = {}) {
 }
 
 describe('GoArrow in the game', () => {
-  it('/goarrow to <coords> points the arrow and switches it on; bad input says GoArrow\'s error', () => {
+  it('/goarrow to <coords> points the arrow and switches it on; bad input says GoArrow\'s error', async () => {
     const g = goArrow();
     expect(g.rt.chat('/goarrow to 42.1N, 33.6E')).toBe(true);
     expect(g.rt.arrowTarget()).toMatchObject({ kind: 'coords', coords: { ns: 42.1, ew: 33.6 } });
     expect(g.rt.settings().visible).toBe(true);
     g.rt.chat('/goarrow to nowhere at all');
+    await g.rt.ensureData();
+    await Promise.resolve();
     expect(g.said.at(-1)).toMatch(/^<\{ GoArrow \}> Invalid coordinates or unknown location name/);
   });
 
-  it('/goarrow tag follows the selected object; off without preview UI', () => {
+  it('/goarrow tag follows the selected object; off without the automation', () => {
     const g = goArrow();
     g.rt.chat('/goarrow tag');
     expect(g.rt.arrowTarget()).toMatchObject({ kind: 'object', name: 'Drudge Skulker', inRange: true });
     const off = goArrow({ enabled: () => false });
     expect(off.rt.chat('/goarrow to 1N, 1E')).toBe(false);
+  });
+
+  it('/goarrow to <place> works on a fresh page, before the era\'s location database has loaded (Reddit, 2026-11-03)', async () => {
+    for (const era of ['eol', 'dm', 'ac1999'] as const) {
+      const g = goArrow({ era: () => era });
+      expect(g.rt.chat('/goarrow to Holtburg')).toBe(true);
+      expect(g.said).toEqual([]);
+      await g.rt.ensureData();
+      await Promise.resolve();
+      expect(g.rt.arrowTarget(), era).toMatchObject({ kind: 'location', name: 'Holtburg' });
+      expect(g.rt.settings().visible).toBe(true);
+      expect(g.said).toEqual([]);
+    }
+    // An unknown name still says GoArrow's error, once the database has answered.
+    const g = goArrow();
+    g.rt.chat('/goarrow to Nowhere Town');
+    await g.rt.ensureData();
+    await Promise.resolve();
+    expect(g.said).toEqual([expect.stringMatching(/Invalid coordinates or unknown location name/)]);
+  });
+});
+
+describe('GoArrow: what it answers', () => {
+  it('switched on with no destination it says how to set one; with a destination it says nothing', () => {
+    const g = goArrow();
+    const replies: string[] = [];
+    g.rt.onReply = (r) => replies.push(r);
+    g.rt.chat('/goarrow arrow on');
+    expect(g.said.at(-1)).toBe('<{ GoArrow }> The arrow has no destination yet. Type /goarrow to (coords) or /goarrow to (location name), or pick a place in the GoArrow window.');
+    expect(replies).toEqual(['arrow_on', 'no_destination']);
+    // The window's Show Arrow box and the bar's "GoArrow: Arrow" go through the same notice.
+    g.rt.model.setShowArrow(false);
+    g.rt.model.setShowArrow(true);
+    expect(g.said.filter((t) => /no destination yet/.test(t))).toHaveLength(2);
+    g.rt.chat('/goarrow to 42.1N, 33.6E');
+    g.said.length = 0;
+    g.rt.chat('/goarrow arrow on');
+    expect(g.said).toEqual([]);
+  });
+
+  it('every command reports a reply from the closed list (telemetry), the place-name wait as to_waited', async () => {
+    const g = goArrow();
+    const replies: string[] = [];
+    g.rt.onReply = (r) => replies.push(r);
+    g.rt.chat('/goarrow');
+    g.rt.chat('/goarrow bogus');
+    g.rt.chat('/goarrow show nothing');
+    g.rt.chat('/goarrow to [coords]');
+    g.rt.chat('/goarrow map');
+    g.rt.chat('/goarrow to Holtburg');
+    g.rt.chat('/goarrow tag');
+    g.rt.chat('/goarrow find Nobody');
+    await g.rt.ensureData();
+    await Promise.resolve();
+    g.rt.chat('/goarrow to 1N, 1E');
+    g.rt.chat('/goarrow to Nowhere Town');
+    expect(replies).toEqual(['help', 'invalid_command', 'hud_target', 'coords_placeholder', 'no_map', 'tag_set', 'find_none', 'to_waited', 'to_set', 'to_unknown']);
   });
 });
 
@@ -110,7 +169,7 @@ describe('GoArrow on the VVS bar', () => {
     const { mountGameUI } = await import('./_harness/gameui.js');
     const H = await mountGameUI();
     try {
-      const ui = H.ui as unknown as { setPreviewFeatures(on: boolean): void; setAutomationSource(s: unknown): void; setGoArrow(rt: GoArrowRuntime | null): void; hudContainer: HTMLElement };
+      const ui = H.ui as unknown as { setAutomationSource(s: unknown): void; setGoArrow(rt: GoArrowRuntime | null): void; hudContainer: HTMLElement };
       const { rt, said } = goArrow({ self: () => ({ cell: 0x01030100, x: 10, y: 10, headingRadians: 0 }), seenOutside: () => false });
       const { emptyRoutineDoc } = await import('../packages/shared/src/routines/index.js');
       const base: Record<string, unknown> = {
@@ -120,7 +179,6 @@ describe('GoArrow on the VVS bar', () => {
         current: () => null, character: () => 'T', coords: () => null, now: () => 0, items: () => [], spells: () => [], buffs: () => [], history: () => [], setting: () => undefined, report: () => {}, spellTable: () => null, selection: () => null,
       };
       ui.setAutomationSource(new Proxy(base, { get: (t, k) => (k in t ? t[k as string] : () => ({ ok: true, message: '' })) }));
-      ui.setPreviewFeatures(true);
       ui.setGoArrow(rt);
       rt.frame?.();
       const entry = ui.hudContainer.querySelector<HTMLElement>('[data-vvs-bar-entry="goarrow-arrow"]');
@@ -128,7 +186,7 @@ describe('GoArrow on the VVS bar', () => {
       entry!.click();
       expect(rt.settings().visible).toBe(true);
       expect(said.some((t) => /not visible because you are indoors/.test(t))).toBe(true);
-      ui.setGoArrow(null); ui.setAutomationSource(null); ui.setPreviewFeatures(false);
+      ui.setGoArrow(null); ui.setAutomationSource(null);
     } finally { H.teardown(); }
   });
 });

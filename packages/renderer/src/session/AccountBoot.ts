@@ -74,11 +74,33 @@ export function isAddressLimitReason(reason: string | null | undefined): boolean
 export const ADDRESS_LIMIT_HINT =
   'Every webAC player reaches this world from the same address, so its per-address limit may be taken by other webAC players. Try again later, or pick another world.';
 
+/**
+ * ACE's / ClassicACE's DAT-mismatch boots (DDDHandler.cs
+ * DDD_InterrogationResponse, " because " + the reason): dat_newer_warning_msg
+ * ("Your DAT files are newer than expected", the download link dropped by
+ * DOWNLOAD_LINK_SENTENCE_RE) and dat_older_warning_msg, whose default is "Your
+ * DAT files are incomplete" in ACE and "The location you are attempting to
+ * enter is not present in your data files" under ClassicACE's Infiltration and
+ * CustomDM rulesets (PropertyManager.cs; Dark Destiny, 2026-11-03). Each says
+ * the server's data files differ from the ones the client has, and stops
+ * there: a retail player installed the right files, a webAC player can't.
+ */
+const DAT_MISMATCH_BOOT_RE = /^\s*because (?:your DAT files are (?:newer than expected|incomplete)|the location you are attempting to enter is not present in your data files)/i;
+
+/** True for a boot reason that says the server's data files differ from ours (DAT_MISMATCH_BOOT_RE). */
+export function isDatMismatchBootReason(reason: string | null | undefined): boolean {
+  return typeof reason === 'string' && DAT_MISMATCH_BOOT_RE.test(reason);
+}
+
+/** The next step under a DAT-mismatch boot: nothing the player can change from webAC. */
+export const DAT_MISMATCH_HINT = "This world uses game files webAC doesn't have. Pick another world.";
+
 /** The webAC next step for a server's boot / ban reason, or null when retail's text is enough. */
 export function serverReasonNextStep(reason: string | null | undefined): string | null {
   if (isClientVersionBootReason(reason)) return RELOAD_FOR_LATEST_TEXT;
   if (isProxyRefusalReason(reason)) return PROXY_REFUSED_HINT;
   if (isAddressLimitReason(reason)) return ADDRESS_LIMIT_HINT;
+  if (isDatMismatchBootReason(reason)) return DAT_MISMATCH_HINT;
   return null;
 }
 

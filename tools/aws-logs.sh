@@ -18,6 +18,11 @@
 # --filter takes a CloudWatch filter pattern: a plain term matches anywhere in the
 # line; '{ $.event = "session_close" && $.server = "ac1999" }' matches JSON fields.
 set -euo pipefail
+# A fresh Linux container (a cloud session) has no AWS CLI: install v2 into ~/.local (docs/cloud-sessions.md).
+# shellcheck source=tools/lib/install-aws-cli.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/install-aws-cli.sh"
+ensure_aws_cli || { echo "aws-logs: no AWS CLI v2 (Linux: needs curl + unzip to install it; macOS: brew install awscli)" >&2; exit 2; }
+export AWS_PAGER=""
 # Keys in the environment (the cloud monitoring routine's read-only webac-monitor user) win over the
 # default profile; otherwise the webac profile (`aws login --profile webac`).
 if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -z "${AWS_PROFILE:-}" ]; then export AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -26,6 +31,10 @@ if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -z "${AWS_PROFILE:-}" ]; then export AWS
 elif [ -z "${AWS_PROFILE:-}" ] && grep -q '^\[webac-monitor\]' "${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}" 2>/dev/null; then
   export AWS_PROFILE=webac-monitor AWS_REGION="${AWS_REGION:-us-east-1}"
 else export AWS_PROFILE="${AWS_PROFILE:-webac}" AWS_REGION="${AWS_REGION:-us-east-1}"; fi
+if [ -z "${AWS_ACCESS_KEY_ID:-}" ] && ! grep -q "^\[\(profile \)\?$AWS_PROFILE\]" "${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}" "${AWS_CONFIG_FILE:-$HOME/.aws/config}" 2>/dev/null; then
+  echo "aws-logs: no AWS credentials: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (the read-only webac-monitor key; docs/cloud-sessions.md) or configure profile '$AWS_PROFILE'" >&2
+  exit 2
+fi
 svc="${1:?usage: aws-logs.sh bridge|web|host [--since 1h] [--filter pattern] [--follow] [--json]}"; shift
 since=1h filter="" follow=() json=0
 while [ $# -gt 0 ]; do

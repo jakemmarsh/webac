@@ -1,5 +1,5 @@
 import { DatReader } from './DatReader.js';
-import type { DatFileEntry } from './DatDatabase.js';
+import { isReadableDirBranch, type DatFileEntry } from './DatDatabase.js';
 
 /**
  * Reads individual files out of a DAT through byte-range requests, without
@@ -65,6 +65,8 @@ export class RangedDat {
     private readonly fetchRange: RangeFetcher,
     readonly blockSize: number,
     readonly bTreeRoot: number,
+    /** The header's FileSize (0 = unknown): a branch past it holds nothing (isReadableDirBranch). */
+    readonly fileSize: number,
   ) {}
 
   static async open(fetchRange: RangeFetcher): Promise<RangedDat> {
@@ -73,10 +75,11 @@ export class RangedDat {
     const r = new DatReader(head.buffer.slice(head.byteOffset, head.byteOffset + head.length) as ArrayBuffer, DAT_HEADER_OFFSET);
     r.readUInt32(); // FileType
     const blockSize = r.readUInt32();
-    for (let i = 0; i < 6; i++) r.readUInt32(); // FileSize .. FreeCount
+    const fileSize = r.readUInt32();
+    for (let i = 0; i < 5; i++) r.readUInt32(); // DataSet .. FreeCount
     const bTreeRoot = r.readUInt32();
     if (blockSize <= 4 || bTreeRoot === 0) throw new Error(`not a DAT header (blockSize ${blockSize}, root ${bTreeRoot})`);
-    return new RangedDat(fetchRange, blockSize, bTreeRoot);
+    return new RangedDat(fetchRange, blockSize, bTreeRoot, fileSize);
   }
 
   /**
@@ -156,6 +159,7 @@ export class RangedDat {
   /** The directory entry for `fileId`, or null when the DAT has no such file. */
   async findEntry(fileId: number): Promise<DatFileEntry | null> {
     const id = fileId >>> 0;
+    if (id === 0) return null; // INVALID_DID: retail's BTree::Lookup @ 0x00673800 refuses it
     let offset = this.bTreeRoot;
     for (;;) {
       const node = await this.readNode(offset);
@@ -164,6 +168,8 @@ export class RangedDat {
       if (i < node.entries.length && node.entries[i].objectId === id) return node.entries[i];
       if (node.branches[0] === 0) return null;
       offset = node.branches[i];
+      // An unreadable branch (a leaf's 0xCDCDCDCD fill) is a miss, as retail's failed load is.
+      if (!isReadableDirBranch(offset, this.fileSize || 0x80000000)) return null;
     }
   }
 
