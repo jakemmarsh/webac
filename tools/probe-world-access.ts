@@ -33,7 +33,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes, randomInt } from 'node:crypto';
 import { chromium, type Page } from 'playwright';
-import { GPU_ARGS, DEFAULT_VIEWPORT } from './lib/game-session.js';
+import { GPU_ARGS, DEFAULT_VIEWPORT, typeIntoLauncherField } from './lib/game-session.js';
 import { createRunProfile } from './lib/temp-profile.js';
 
 const args = process.argv.slice(2);
@@ -125,8 +125,8 @@ async function main(): Promise<void> {
       const account = `acjsprobe${randomInt(10000, 99999)}`;
       const password = randomBytes(8).toString('hex');
       appendFileSync(join(out, 'accounts.txt'), `${w.name}\t${account}\t${password}\n`);
-      await page.mouse.click(418, 92); await page.keyboard.type(account, { delay: 15 });
-      await page.mouse.click(418, 160); await page.keyboard.type(password, { delay: 15 });
+      await typeIntoLauncherField(page, 'input.launcher-account', 418, 92, account);
+      await typeIntoLauncherField(page, 'input.launcher-password', 418, 160, password);
       await page.mouse.click(712, 508);
       // Character select, or the connection-failure text.
       const end = Date.now() + 60_000;

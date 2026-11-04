@@ -91,3 +91,14 @@ export function eraSwitchLogin(era: EraProfile, sw: EraSwitch): LauncherLogin {
     wire: string16WireFor(era, null),
   };
 }
+
+/**
+ * The char-select World box text when the server names its world: the
+ * launcher's name for the world wins (a listed or custom world); the server's
+ * own name (ACE / GDLE ServerName 0xF7E1; on AC1999 the world_name its
+ * 0xF65A news carries, BUG.ac1999-charsel-world-name) fills it for the
+ * local / pinned server and URL logins.
+ */
+export function charselWorldName(launcherWorldName: string | null, serverName: string): string {
+  return launcherWorldName ?? serverName;
+}

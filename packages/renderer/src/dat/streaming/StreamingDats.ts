@@ -15,6 +15,10 @@
  *             preload art, chargen, the terrain materials, portal space. main()
  *             defers what needs them and awaits `worldPacks` before chargen and
  *             before entering the world (at the latest in the login gate).
+ *           → with a split world pack (STREAM.login-pack-split, WorldSplit.ts):
+ *             worldCore (+ worldLand + terrain where the set serves the world)
+ *             stand in for `worldPacks`; worldChargen follows in the background
+ *             and only character creation waits for it (`chargenArtReady`).
  */
 import type { DatDatabase } from '@ac/dat-parser/DatDatabase.js';
 import { DatReader } from '@ac/dat-parser/DatReader.js';
@@ -22,10 +26,11 @@ import { parseMasterProperty, setMasterPropertyTypes } from '@ac/dat-parser/file
 import type { RegionDesc } from '@ac/dat-parser/file-types/RegionDesc.js';
 import type { PackRole } from '@ac/dat-parser/streaming/DatSetFormat.js';
 import { DatClosure, layoutArtIds } from './DatClosure.js';
-import { DatStore, type DatStoreOptions, FetchPriority, type FileKey, type MissScope, fileKey, splitFileKey } from './DatStore.js';
-import { type ObjectCache, NullObjectCache, OpfsObjectCache } from './ObjectCache.js';
+import { type CacheHedgePolicy, DatStore, type DatStoreOptions, FetchPriority, type FileKey, type MissScope, fileKey, splitFileKey } from './DatStore.js';
+import { type ObjectCache, NullObjectCache, OpfsObjectCache, SlowReadObjectCache } from './ObjectCache.js';
 import { streamHandlerCost } from '../../telemetry/MainThreadCost.js';
 import { type BootWatchEnv, startBootWatch } from './BootWatch.js';
+import { CHARGEN_LAYOUTS, hasWorldSplit, inWorldLayoutIds } from './WorldSplit.js';
 
 export interface StreamingDats {
   store: DatStore;
@@ -53,10 +58,31 @@ export interface StreamingDats {
    */
   pendingFor(probe: () => unknown, roots?: readonly FileKey[]): Promise<void> | null;
   /**
-   * The LayoutDescs' portal art (layoutArtIds) as closure roots, computed once.
-   * Call after MasterProperty is registered.
+   * The in-world LayoutDescs' portal art (layoutArtIds over every layout but
+   * character creation's, WorldSplit.inWorldLayoutIds) as closure roots,
+   * computed once: what the HUD and the world's panels draw, and the login
+   * gate's HUD roots. Call after MasterProperty is registered.
    */
   uiArtRoots(): readonly FileKey[];
+  /**
+   * Character creation's art resident (STREAM.login-pack-split): with a split
+   * world pack, the worldCore + worldChargen packs and the chargen layouts'
+   * art (CHARGEN_LAYOUTS), loaded in the background behind the login's own
+   * packs. Null when the set has no split (chargen then waits for
+   * `worldPacks` + `uiArtReady`, which carry it). Never rejects.
+   */
+  chargenArtReady: Promise<void> | null;
+  /** Character creation was asked for: fetch its pack first (Critical). No-op without a split. */
+  wantChargenArt(): void;
+  /**
+   * A portal file whose read should wait for chargenArtReady: it is not
+   * resident and the set's worldChargen pack (which likely holds it) has not
+   * landed, so reading it now would fetch it again as a leaf. Always false
+   * without a split, and once the pack is resident.
+   */
+  chargenArtDeferred(id: number): boolean;
+  /** Whether this set's world pack is split (the pointer names worldCore / worldChargen / worldLand). */
+  readonly worldSplit: boolean;
   /**
    * Kept for callers: the UI art now loads as part of `uiArtReady` (started
    * at open()); returns it.
@@ -152,6 +178,11 @@ export interface StreamBootPhases {
   lagMs: number;
   lagMaxMs: number;
   hiddenMs: number;
+  /** PERF.cache-read-slower-than-network: cache reads that passed their deadline (the network asked too), and the ones it won. */
+  hedges: number;
+  hedgeWins: number;
+  /** How long the page was prerendering (Chrome defers OPFS until it is shown; BootWatch). */
+  prerenderMs: number;
 }
 
 export interface OpenStreamingOptions {
@@ -181,6 +212,14 @@ export interface OpenStreamingOptions {
   onWorldCache?: () => void;
   /** The page watch's timers + document (tests; default the browser's). */
   watchEnv?: BootWatchEnv;
+  /**
+   * Dev only (`?cacheReadDelayMs=N[&cacheReadDelayMinBytes=B]`, tools/probe-warm-boot-cache.ts): object-cache
+   * reads of B bytes or more (default 1 MB) take N ms longer (SlowReadObjectCache), to measure a stalled disk.
+   */
+  cacheReadDelayMs?: number;
+  cacheReadDelayMinBytes?: number;
+  /** DatStore's cacheHedge (default DEFAULT_CACHE_HEDGE; null: never hedge; dev `?noCacheHedge`). */
+  cacheHedge?: CacheHedgePolicy | null;
 }
 
 /**
@@ -195,9 +234,30 @@ export interface OpenStreamingOptions {
  */
 export type StreamScope = 'all' | 'interface' | 'world';
 
-/** The background packs main() awaits before chargen / entering the world, per scope. */
-export function backgroundPacks(scope: StreamScope): PackRole[] {
+/**
+ * The background packs main() awaits before entering the world, per scope.
+ * With a split world pack (STREAM.login-pack-split) the world pack's
+ * worldCore part (and, where the set serves the world, worldLand) stands in
+ * for it: worldChargen loads behind them and only character creation waits.
+ */
+export function backgroundPacks(scope: StreamScope, split = false): PackRole[] {
+  if (split) return scope === 'interface' ? ['worldCore'] : ['worldCore', 'worldLand', 'terrain'];
   return scope === 'interface' ? ['world'] : ['world', 'terrain'];
+}
+
+/**
+ * The whole `world` pack is in the object cache and the split parts a scope would load are not
+ * (STREAM.login-pack-split): a profile warmed before the split keeps using what it has.
+ */
+async function wholeWorldPackCached(store: DatStore, cache: ObjectCache, scope: StreamScope): Promise<boolean> {
+  if (!cache.has) return false;
+  const has = (role: PackRole): Promise<boolean> => {
+    const ref = store.pointer.packs[role];
+    return ref ? cache.has!(ref.hash).catch(() => false) : Promise.resolve(false);
+  };
+  if (!(await has('world'))) return false;
+  const parts: PackRole[] = scope === 'interface' ? ['worldCore', 'worldChargen'] : ['worldCore', 'worldChargen', 'worldLand'];
+  return !(await Promise.all(parts.map(has))).every(Boolean);
 }
 
 /** Awaited before the character screen. */
@@ -220,9 +280,8 @@ async function openStreamingDatsWatched(opts: OpenStreamingOptions, watch: Retur
   };
   const scope = opts.scope ?? 'all';
   const servesInterface = scope !== 'world';
-  // Background: awaited before chargen / entering the world (a pack the set lacks is skipped).
-  const WORLD = backgroundPacks(scope);
-  const cache: ObjectCache = opts.cache ?? (opts.bypassCache ? new NullObjectCache() : OpfsObjectCache.create());
+  const baseCache: ObjectCache = opts.cache ?? (opts.bypassCache ? new NullObjectCache() : OpfsObjectCache.create());
+  const cache: ObjectCache = opts.cacheReadDelayMs && opts.cacheReadDelayMs > 0 ? new SlowReadObjectCache(baseCache, opts.cacheReadDelayMs, opts.cacheReadDelayMinBytes || undefined) : baseCache;
   let firstDone = 0;
   let firstTotal = 0;
   let bootPacksSignalled = false;
@@ -234,6 +293,7 @@ async function openStreamingDatsWatched(opts: OpenStreamingOptions, watch: Retur
     ...(opts.fetchPointer ? { fetchPointer: opts.fetchPointer } : {}),
     ...(opts.residentCapBytes !== undefined ? { residentCapBytes: opts.residentCapBytes } : {}),
     ...(opts.network ? { network: opts.network } : {}),
+    ...(opts.cacheHedge !== undefined ? { cacheHedge: opts.cacheHedge } : {}),
     onProgress: (done, total) => { firstDone = done; firstTotal = total; opts.onProgress?.(done, total); },
     // The splash draws from boot + local: as soon as both are in, not after the skeleton.
     onPackResident: (_role, s) => {
@@ -243,6 +303,12 @@ async function openStreamingDatsWatched(opts: OpenStreamingOptions, watch: Retur
     },
   });
   if (!bootPacksSignalled) { bootPacksSignalled = true; bootPacksHook(store); } // a set without one of them
+  // STREAM.login-pack-split: a pointer that names the world pack's parts loads them instead of the whole,
+  // unless this profile already holds the whole pack (a returning player from before the split) and not
+  // the parts: then the cached whole pack serves, and nothing is downloaded again.
+  const split = hasWorldSplit(store.pointer.packs, scope) && !(await wholeWorldPackCached(store, cache, scope));
+  // Background: awaited before entering the world (a pack the set lacks is skipped).
+  const WORLD = backgroundPacks(scope, split);
   const tLayout = performance.now();
 
   let region: RegionDesc | null = null;
@@ -296,11 +362,35 @@ async function openStreamingDatsWatched(opts: OpenStreamingOptions, watch: Retur
     void worldPacks.then(() => store.loadAreaIndex(FetchPriority.Prefetch), () => undefined);
     void uiPack.then(() => store.ensureCommonPack(FetchPriority.Background), () => undefined);
   }
+  const artRoots = (layouts: readonly number[]): FileKey[] => layoutArtIds(store.db('local'), layouts).filter((id) => store.exists('portal', id)).map((id) => fileKey('portal', id));
   let uiArt: FileKey[] | null = null;
-  const uiArtRoots = (): FileKey[] => (uiArt ??= !servesInterface ? [] : layoutArtIds(store.db('local')).filter((id) => store.exists('portal', id)).map((id) => fileKey('portal', id)));
+  const uiArtRoots = (): FileKey[] => (uiArt ??= !servesInterface ? [] : artRoots(inWorldLayoutIds(store.db('local'))));
   // Prefetch, not Background: entering the world waits for it (a background
   // load joined by the gate's critical requests made the gate wait behind it).
   const uiArtReady = uiPack.then(() => closure.ensure(uiArtRoots(), FetchPriority.Prefetch)).then(() => undefined, () => { /* panels stream on miss */ });
+  // STREAM.login-pack-split: character creation's pack behind the login's own (Background: it yields
+  // to a gate and starts on an idle link; wantChargenArt asks for it first), then the chargen layouts' art.
+  let chargenArtReady: Promise<void> | null = null;
+  let chargenWanted = false;
+  let startChargen: (p: FetchPriority) => void = () => undefined;
+  if (split) {
+    // Started behind the login's packs, or at once (Critical) when the player opens character creation:
+    // a second ensurePack joins the first and promotes it.
+    const landed = new Promise<void>((resolve, reject) => {
+      startChargen = (p) => { store.ensurePack('worldChargen', p).then(resolve, reject); };
+    });
+    void uiArtReady.then(() => startChargen(FetchPriority.Background));
+    chargenArtReady = Promise.all([store.ensurePack('worldCore', FetchPriority.Prefetch), landed])
+      .then(() => closure.ensure(artRoots(CHARGEN_LAYOUTS), chargenWanted ? FetchPriority.Critical : FetchPriority.Prefetch))
+      .then(() => undefined, () => { /* chargen streams on miss */ });
+  }
+  const wantChargenArt = (): void => {
+    if (!split || chargenWanted) return;
+    chargenWanted = true;
+    void store.ensurePack('worldCore', FetchPriority.Critical).catch(() => undefined);
+    startChargen(FetchPriority.Critical);
+  };
+  const chargenArtDeferred = (id: number): boolean => split && !store.isPackResident('worldChargen') && !store.isResident('portal', id);
 
   // A warm profile already holds the world packs: nothing to download behind
   // char select, so load them (and the UI art) now and let main() build the
@@ -333,10 +423,15 @@ async function openStreamingDatsWatched(opts: OpenStreamingOptions, watch: Retur
     cacheReadMs: r(st.cacheReadMs), cacheReadMaxMs: r(st.cacheReadMaxMs), cacheMisses: st.cacheMisses, inflateMs: r(st.inflateMs),
     retries: st.retries, failures: st.failures, rcvBytes: st.netReceivedBytes,
     lagMs: page.lagMs, lagMaxMs: page.lagMaxMs, hiddenMs: page.hiddenMs,
+    hedges: st.cacheHedges, hedgeWins: st.cacheHedgeWins, prerenderMs: page.prerenderMs,
   };
   const bootReport: StreamingBootReport = { netBytes: st.netBytes, netObjects: st.netObjects, cacheBytes: st.cacheBytes, cacheObjects: st.cacheObjects, preWorldArtFiles: preWorld.length, ms: Math.round(performance.now() - t0), worldCached, worldCacheMs, phases };
   return {
     uiArtReady,
+    chargenArtReady,
+    wantChargenArt,
+    chargenArtDeferred,
+    worldSplit: split,
     worldPacks,
     worldPacksResident: () => worldDone,
     bootReport,

@@ -15,6 +15,7 @@
  * fall back to a plain network fetch: caching is an optimization, never a
  * correctness dependency.
  */
+import { type CacheHedgePolicy, DEFAULT_CACHE_HEDGE } from './CacheHedge.js';
 
 export interface DatCacheMeta {
   /** Byte length of the resource. */
@@ -90,7 +91,14 @@ export interface LoadDatOptions {
   fetchData: (
     url: string,
     onProgress?: (pct: number, loaded: number, total: number) => void,
+    signal?: AbortSignal,
   ) => Promise<ArrayBuffer>;
+  /**
+   * PERF.cache-read-slower-than-network: a cache read still running at the
+   * policy's deadline also downloads the file, and the first copy wins (default
+   * DEFAULT_CACHE_HEDGE; null: wait for the cache however long it takes).
+   */
+  hedge?: CacheHedgePolicy | null;
   onProgress?: (pct: number, loaded: number, total: number) => void;
   /** Notified with where the bytes came from, for UI/telemetry. */
   onSource?: (source: 'cache' | 'network') => void;
@@ -118,7 +126,21 @@ export async function loadDatWithCache(
       if (cachedMeta) {
         const remoteMeta = await opts.headMeta(url).catch(() => null);
         if (isCacheValid(cachedMeta, remoteMeta)) {
-          const data = await opts.store.getData(key);
+          const hedge = opts.hedge === undefined ? DEFAULT_CACHE_HEDGE : opts.hedge;
+          const got = hedge
+            ? await hedgedCacheRead(opts.store.getData(key), cachedMeta.size, hedge, (signal) => opts.fetchData(url, undefined, signal))
+            : { buffer: await opts.store.getData(key), fromCache: true };
+          if (!got.fromCache && got.buffer) {
+            // The download won. A valid cached copy (only slow) is kept as it is; an unusable one is replaced.
+            opts.onSource?.('network');
+            if (got.cacheUnusable) {
+              const buffer = got.buffer;
+              void opts.store.put(key, buffer, { size: buffer.byteLength, lastModified: remoteMeta?.lastModified ?? cachedMeta.lastModified, etag: remoteMeta?.etag ?? cachedMeta.etag })
+                .catch((err) => console.warn('[AC:DatCache] cache write skipped:', err));
+            }
+            return { buffer: got.buffer, fromCache: false };
+          }
+          const data = got.buffer;
           if (data && data.byteLength === cachedMeta.size) {
             opts.onSource?.('cache');
             return { buffer: data, fromCache: true };
@@ -161,6 +183,37 @@ export async function loadDatWithCache(
   }
 
   return { buffer, fromCache: false };
+}
+
+/**
+ * PERF.cache-read-slower-than-network — a whole DAT's cache read raced against
+ * its download once the read passes the policy's deadline (an AC1999 world DAT
+ * is 99.6 MB: 3 s + 12.5 s at the 8 MB/s floor). The first copy wins; a cache
+ * win aborts the download; a failed download leaves the read to finish. The
+ * download reports no progress (the patch meter announced a cache hit).
+ */
+export async function hedgedCacheRead(
+  read: Promise<ArrayBuffer | null>, size: number, hedge: CacheHedgePolicy,
+  download: (signal: AbortSignal | undefined) => Promise<ArrayBuffer>,
+): Promise<{ buffer: ArrayBuffer | null; fromCache: boolean; cacheUnusable?: boolean }> {
+  const safeRead = read.catch(() => null);
+  let fire: () => void = () => undefined;
+  const deadline = new Promise<'hedge'>((r) => { fire = () => r('hedge'); });
+  const cancel = hedge.wait(hedge.delayMs(size), () => fire());
+  const first = await Promise.race([safeRead.then((b) => ({ b })), deadline]);
+  if (first !== 'hedge') { cancel(); return { buffer: first.b, fromCache: true }; }
+  const abort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const net = download(abort?.signal).then((b) => ({ b, ok: true as const }), () => ({ b: null, ok: false as const }));
+  const winner = await Promise.race([safeRead.then((b) => ({ from: 'cache' as const, b })), net.then((n) => ({ from: 'net' as const, ...n }))]);
+  if (winner.from === 'cache') {
+    if (winner.b) { abort?.abort(); return { buffer: winner.b, fromCache: true }; }
+    // Unusable cache copy: the download is the miss path (and the copy to store).
+    const n = await net;
+    return { buffer: n.b, fromCache: false, cacheUnusable: true };
+  }
+  if (winner.ok && winner.b) return { buffer: winner.b, fromCache: false };
+  // The download failed: wait for the cache after all.
+  return { buffer: await safeRead, fromCache: true };
 }
 
 export interface InterrogateDatOptions {

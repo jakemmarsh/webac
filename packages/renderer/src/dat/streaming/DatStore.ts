@@ -51,6 +51,7 @@ import {
 import { readResponseBytes } from '../readResponseBytes.js';
 import { NullObjectCache, type ObjectCache } from './ObjectCache.js';
 import { streamHandlerCost } from '../../telemetry/MainThreadCost.js';
+import { type CacheHedgePolicy, DEFAULT_CACHE_HEDGE } from '../CacheHedge.js';
 
 const ITERATION_FILE_ID = 0xffff0001;
 
@@ -300,6 +301,13 @@ export interface DatStoreStats {
   cacheReadMs: number;
   cacheReadMaxMs: number;
   inflateMs: number;
+  /**
+   * PERF.cache-read-slower-than-network — cache reads still running at their
+   * CacheHedgePolicy deadline (the network was asked too), and of those, the
+   * ones the network delivered first.
+   */
+  cacheHedges: number;
+  cacheHedgeWins: number;
   /** Missed files not resident yet (in flight): 0 once every miss has landed (the A/B gate's check). */
   unresolvedMisses: number;
   /** Payload bytes resident now: packs + leaves + bundles (what the session holds instead of whole DATs). */
@@ -362,7 +370,17 @@ export interface DatStoreOptions {
   minResidentAgeMs?: number;
   /** Clock for the LRU (tests). */
   now?: () => number;
+  /**
+   * When a slow object-cache read also asks the network (PERF.cache-read-slower-than-network;
+   * default DEFAULT_CACHE_HEDGE). null: a cache read is always awaited to the end.
+   */
+  cacheHedge?: CacheHedgePolicy | null;
 }
+
+export { CACHE_HEDGE_BASE_MS, CACHE_HEDGE_BYTES_PER_MS, type CacheHedgePolicy, DEFAULT_CACHE_HEDGE, prerenderAwareWait } from '../CacheHedge.js';
+
+/** The network load of a hedged read was not needed: the cache delivered first. */
+class HedgeCancelled extends Error {}
 
 /** One evictable resident unit: a leaf file, or a landblock bundle (all its cell files). */
 interface ResidentUnit {
@@ -588,7 +606,7 @@ export class NetworkLink {
 export class DatStore {
   readonly stats: DatStoreStats = {
     netObjects: 0, netBytes: 0, netReceivedBytes: 0, cacheObjects: 0, cacheBytes: 0, misses: 0, missesByType: {}, failures: 0, retries: 0, unresolvedMisses: 0,
-    cacheMisses: 0, cacheReadMs: 0, cacheReadMaxMs: 0, inflateMs: 0,
+    cacheMisses: 0, cacheReadMs: 0, cacheReadMaxMs: 0, inflateMs: 0, cacheHedges: 0, cacheHedgeWins: 0,
     residentBytes: 0, packBytes: 0, evictableBytes: 0, evictions: 0, evictedBytes: 0, yields: 0, yieldedBytes: 0, stalls: 0,
   };
   /** Resident file bytes per DAT (views into packs / bundles / leaf payloads). */
@@ -623,6 +641,7 @@ export class DatStore {
   private readonly cache: ObjectCache;
   private readonly verifyHash: boolean;
   private readonly retries: number;
+  private readonly cacheHedge: CacheHedgePolicy | null;
   private readonly onError: (detail: string, err: unknown) => void;
   private readonly residentListeners = new Set<(key: FileKey) => void>();
   /** Files a synchronous read missed that have not landed yet (stats.unresolvedMisses). */
@@ -644,6 +663,7 @@ export class DatStore {
     this.cache = opts.cache ?? new NullObjectCache();
     this.verifyHash = opts.verifyHash ?? true;
     this.retries = opts.retries ?? 3;
+    this.cacheHedge = opts.cacheHedge === undefined ? DEFAULT_CACHE_HEDGE : opts.cacheHedge;
     this.onError = opts.onError ?? ((d, e) => console.warn(`[DatStore] ${d}`, e));
     this.residentCap = opts.residentCapBytes ?? DEFAULT_RESIDENT_CAP_BYTES;
     this.minResidentAge = opts.minResidentAgeMs ?? DEFAULT_MIN_RESIDENT_AGE_MS;
@@ -1202,7 +1222,7 @@ export class DatStore {
   }
 
   private async fetchAndVerify(ref: ObjectRef, ticket: Ticket): Promise<Uint8Array> {
-    const cached = await this.disk.run(ticket, async () => {
+    const read = this.disk.run(ticket, async () => {
       const t = this.now();
       try {
         return await this.cache.get(ref.hash);
@@ -1212,29 +1232,104 @@ export class DatStore {
         if (ms > this.stats.cacheReadMaxMs) this.stats.cacheReadMaxMs = ms;
       }
     });
-    if (cached) {
+    // A verified payload from the cache's bytes, or null (absent, unreadable, or failing its size / hash check).
+    const verified = async (cached: Uint8Array | null): Promise<Uint8Array | null> => {
+      if (!cached) return null;
       const payload = await this.inflateChecked(cached, ref).catch(() => null);
-      if (payload) {
-        this.stats.cacheObjects++;
-        this.stats.cacheBytes += cached.byteLength;
-        return payload;
-      }
+      if (!payload) return null;
+      this.stats.cacheObjects++;
+      this.stats.cacheBytes += cached.byteLength;
+      return payload;
+    };
+    const hedge = this.cache.persistent ? this.cacheHedge : null;
+    let readDone: { b: Uint8Array | null } | null = null;
+    if (!hedge) readDone = { b: await read.catch(() => null) };
+    else {
+      // PERF.cache-read-slower-than-network: the clock runs from the request (a disk-slot wait counts:
+      // a stalled disk holds every slot) to the bytes (the inflate is not the disk's), and the network
+      // is asked too once it passes the deadline.
+      let fired: () => void = () => undefined;
+      const deadline = new Promise<'hedge'>((resolve) => { fired = () => resolve('hedge'); });
+      const cancelTimer = hedge.wait(hedge.delayMs(ref.gzSize), () => fired());
+      const first = await Promise.race([read.then((b) => ({ b }), () => ({ b: null })), deadline]);
+      if (first !== 'hedge') { cancelTimer(); readDone = first; }
     }
-    this.stats.cacheMisses++;
+    if (readDone) {
+      const payload = await verified(readDone.b);
+      if (payload) return payload;
+      this.stats.cacheMisses++;
+      return this.fetchFromNetwork(ref, ticket, null);
+    }
+    const fromCache = read.then(verified, () => null);
+    let settled = false;
+    this.stats.cacheHedges++;
+    const cancelled = (): boolean => settled;
+    const net = this.fetchFromNetwork(ref, ticket, cancelled, false);
+    net.catch(() => undefined);
+    return new Promise<Uint8Array>((resolve, reject) => {
+      let cacheMissed = false;
+      let netFailed = false;
+      let netErr: unknown = null;
+      let netGz: Uint8Array | null = null;
+      fromCache.then((p) => {
+        if (p) {
+          if (settled) return;
+          settled = true;
+          // The download is not needed: stop it (cancelled() makes the abort a non-failure).
+          ticket.abort?.abort();
+          resolve(p);
+          return;
+        }
+        cacheMissed = true;
+        this.stats.cacheMisses++;
+        // The network delivered first and the cache's copy turned out unusable: store the good one.
+        if (netGz) void this.cache.put(ref.hash, netGz);
+        else if (netFailed && !settled) { settled = true; reject(netErr); }
+      });
+      net.then((r) => {
+        if (settled) return;
+        settled = true;
+        this.stats.cacheHedgeWins++;
+        // The cache holds this object already (only slow); rewrite it only when its read came back unusable.
+        if (cacheMissed) void this.cache.put(ref.hash, r.gz);
+        else netGz = r.gz;
+        resolve(r.payload);
+      }, (err) => {
+        netFailed = true;
+        netErr = err;
+        if (!settled && cacheMissed) { settled = true; reject(err); }
+        // Otherwise the cache read may still deliver.
+      });
+    });
+  }
+
+  /**
+   * One object from the network (retried), inflated and verified; stored in
+   * the object cache unless `store` is false. `cancelled` (a hedged read whose
+   * cache delivered first) stops it without counting a failure.
+   */
+  private fetchFromNetwork(ref: ObjectRef, ticket: Ticket, cancelled: null, store?: boolean): Promise<Uint8Array>;
+  private fetchFromNetwork(ref: ObjectRef, ticket: Ticket, cancelled: () => boolean, store: false): Promise<{ payload: Uint8Array; gz: Uint8Array }>;
+  private async fetchFromNetwork(ref: ObjectRef, ticket: Ticket, cancelled: (() => boolean) | null, store = true): Promise<Uint8Array | { payload: Uint8Array; gz: Uint8Array }> {
+    const isCancelled = (): boolean => cancelled?.() ?? false;
     const url = `${this.baseUrl}/${objectKey(ref.hash)}`;
     let lastErr: unknown = null;
     ticket.bytes = ref.gzSize;
     let resumeAfterYield = false;
     let stallRetried = false;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
+      if (isCancelled()) throw new HedgeCancelled();
       if (attempt > 0 && !resumeAfterYield) {
         this.stats.retries++;
         await new Promise((r) => setTimeout(r, 250 * 2 ** (attempt - 1)));
+        if (isCancelled()) throw new HedgeCancelled();
       }
       resumeAfterYield = false;
       let got = 0;
       try {
         const gz = await this.limiter.run(ticket, async () => {
+          // Queued behind other downloads while the cache delivered: nothing to fetch.
+          if (isCancelled()) throw new HedgeCancelled();
           got = 0;
           ticket.received = 0;
           const linkId = this.link.begin(ref.gzSize);
@@ -1267,9 +1362,11 @@ export class DatStore {
         const payload = await this.inflateChecked(gz, ref);
         this.stats.netObjects++;
         this.stats.netBytes += gz.byteLength;
+        if (!store) return { payload, gz };
         void this.cache.put(ref.hash, gz);
         return payload;
       } catch (err) {
+        if (err instanceof HedgeCancelled || isCancelled()) throw new HedgeCancelled();
         const yielded = ticket.yielded, stalled = ticket.stalled;
         ticket.yielded = false;
         ticket.stalled = false;

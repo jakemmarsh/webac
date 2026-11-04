@@ -1079,3 +1079,175 @@ every roll segment in TAS_TUNNEL_FADE_IN / TUNNEL / TUNNEL_CONTINUE / TUNNEL_FAD
 Tests: tests/verify-stream-network-link.ts (shared limit, cross-store critical-first, idle-only background, the gate's
 yield / keep-small / promoted cases, the stall retry and its slow-link negative, the style prefetch at Critical, the held
 miss promoting a queued prefetch).
+
+### 6.16 The login waits for its own part of the world pack (STREAM.login-pack-split, 2026-11-03)
+
+§6.15 left one cut: every cold login that enters at once waited for the whole 23.4 MB interface `world` pack (one object,
+so nothing could take part of it). What is in it, by the access simulation's phase that first reads each file
+(`tools/dat-access-sim.ts --boot-set` now writes these as `worldPhases` in `pack-sets.json`; gzip -6, end of retail):
+
+| Phase | files | gz | what |
+|---|---|---|---|
+| world-init | 77 | 17.8 MB | the terrain materials: 30 land textures 512×512 ARGB (fmt 21, 0.3-0.8 MB gz each), alpha / road maps, their SurfaceTextures |
+| gameui-preload | 321 | 5.1 MB | GameUI's preload list: 3.9 MB of it is the 13 heritage portraits (265×451) and the 6 attribute overlays, drawn only by chargen; the rest HUD frames, toolbar / inventory / paperdoll art |
+| chargen | 143 | 0.5 MB | the chargen preview's base figures, palettes, clothing (also every human NPC's) |
+| portal-space | 12 | 0.04 MB | the tunnel |
+
+An AC1999 login never reads the 17.8 MB: its landscape comes from the 1999 world set (§6.11). No login reads the portraits.
+
+**The split** (`packages/renderer/src/dat/streaming/WorldSplit.ts`, one rule for the publish tool and the client):
+
+- `worldLand`: the world-init files plus the set's own RegionDesc TexMerge closure (`tools/lib/world-split.ts regionTerrainLeaves`).
+- `worldChargen`: art that only the character-creation layouts draw (`CHARGEN_LAYOUTS`: chargen_master 0x21000038 and its
+  pages 0x21000046-0x2100004c), closures included, and no other layout draws: the portraits, the chargen backdrop
+  0x06004d26, the attribute overlays, the start map.
+- `worldCore`: everything else. A first cut also moved the chargen phase's models into the chargen part; the first live
+  run then read 0x01001860 / 0x01001864 (human base-figure GfxObjs) at the login for an NPC, so models stay in the core.
+
+| Set | world (whole) | worldCore | worldChargen | worldLand |
+|---|---|---|---|---|
+| eol-p2072-c982-h497-l994 | 555 files 23.4 MB | 453 / 1.5 MB `f1d38a110003f1d5` | 25 / 4.1 MB `cb8fd1d7c0fa46eb` | 77 / 17.8 MB `90b3d269dcea2733` |
+| classicace-customdm-1.60 | 552 / 22.1 MB | 450 / 1.5 MB `124140827e71d381` | 25 / 4.2 MB `52b8621b080190da` | 77 / 16.4 MB `a9b87681ee1f2b2b` |
+| classicace-infiltration-1.9 | 552 / 22.1 MB | 450 / 1.5 MB `6f8899e7879e2acf` | 25 / 4.2 MB `52b8621b080190da` | 77 / 16.4 MB `a9b87681ee1f2b2b` |
+| classic-dereth-1.1 | 552 / 22.0 MB | 450 / 1.5 MB `c307e5d209ff3066` | 25 / 4.1 MB `cb8fd1d7c0fa46eb` | 77 / 16.4 MB `522210d21a0b9a26` |
+
+(MB = MiB of gzip; the AC1999 world set has no split: its own world pack is the 0.9 MB terrain closure; AC1999 gets the
+split through the end-of-retail interface pointer.) What a login waits for from the world pack: end of retail and the
+classic sets 23.4 → 19.3 MB, AC1999 23.4 → 1.5 MB.
+
+**Client** (`StreamingDats`): a pointer naming all the parts its scope needs (`hasWorldSplit`; interface scope:
+worldCore + worldChargen) loads `worldCore` (+ `worldLand` + `terrain`) as `worldPacks`, then the ui pack and the in-world
+layouts' art, then `worldChargen` at Background (it yields to a gate and starts on an idle link). `chargenArtReady` =
+worldCore + worldChargen + the chargen layouts' art; GameUI opens chargen on it (`chargenArtReady` option; Please Wait
+until then) and asks for the pack at Critical when the player clicks Create Character (`onChargenArtWanted` →
+`wantChargenArt`), so a new player's chargen no longer waits for the land textures either. GameUI's preload runs its
+HUD part at `worldArtReady` and skips what is still on its way (`chargenArtDeferred`: not resident while worldChargen is
+pending, so nothing is fetched twice as a leaf), and its chargen part when the pack lands. `uiArtRoots` (the login gate's
+HUD roots and `uiArtReady`) now leave the chargen layouts out (`inWorldLayoutIds`), in every pointer. A profile that
+cached the whole `world` pack before the split and not the parts keeps using it (`wholeWorldPackCached`), so returning
+players download nothing again.
+
+**Compatibility.** The parts are pointer-only `packs` roles (`worldCore` 7 / `worldChargen` 8 / `worldLand` 9 in
+`PACK_ROLE_CODE`; never in a manifest), and every split pointer keeps the whole `world` pack. An older client skips roles it
+does not know (`parseSetPointer`) and loads `world` as before; checked live: the origin/main build on the staged EoL
+pointer fetched `001964aaf55ec211` and entered normally. A newer client on an old pointer has no split and behaves as before.
+
+**Measured** (production builds served locally, cold profiles, CDP throttle from page load, agent auto-login with Enter at
+once; base = the origin/main build on the live pointers, split = this build on the staged pointers through a Playwright
+route, every object from R2; interleaved, one browser at a time; scripts in the session scratchpad `split/`):
+
+| Era | 150 ms / 10 Mbit/s, base → split (two rounds) | 200 ms / 2 Mbit/s, base → split |
+|---|---|---|
+| End of retail (local ACE) | 60.2 / 60.0 → 56.5 / 56.4 s | 249.2 → 231.8 s |
+| AC1999 (local AC1999 server) | 52.5 / 52.5 → 32.7 / 32.8 s | 216.8 → 124.4 s |
+| Dark Majesty (local ClassicACE CustomDM) | 62.5 / 56.1 → 52.6 / 52.6 s | 230.3 → 212.7 s |
+
+(Seconds from page load to in the world. End of retail's and Dark Majesty's login packs landed 3.4 s earlier at 10 Mbit/s
+and 17 s earlier at 2; AC1999's interface stopped being the wait at all: its world set is now the last to land. The gate
+itself is unchanged: 9.9 / 9.9 s end of retail, 2.0-3.2 s AC1999, 6.8 s Dark Majesty except one 13.3 s base outlier.)
+Every split run: no read of a worldChargen file before or after entry (the probe's `__missTrace` against the pack's ids),
+entry screenshots match the base runs (HUD, terrain, sky; only the arrival bubble's phase differs), and the in-world miss
+counts are the base's (NPC clothing / icons, §6.12).
+
+What is left for end of retail and Dark Majesty is the 17.8 / 16.4 MB of land textures: TerrainRenderer builds every
+terrain type's material once (`buildTerrainMaterials`), and a landblock mesh takes `terrainMaterials.get(type) ??
+this.material` when it is built, so waiting only for the destination's terrain types needs materials that rebuild the
+meshes when a type's texture lands. That is a renderer change with a visible failure mode (a far landblock drawn with the
+fallback), not a repack, and was not made here.
+
+Inverse sweep: no in-world layout's art is in worldChargen (`inWorldLayoutIds` closure; the barber 0x21000068 is in-world,
+so its art and anything chargen shares with it stays in the core). The one surface that waits is chargen: opened before
+its pack, it shows Please Wait, asks for the pack at Critical, and opens complete when it lands
+(tests/verify-dat-streaming-world-split.ts, real EoL DATs: the HUD, inventory, character, magic, social and map panels and
+the terrain materials build with no miss while the pack is absent; chargen opens with every deferred preload texture).
+
+**Publishing.** `npx tsx tools/publish-dats-r2.ts --world-split-only https://dats.playwebac.com/v1/sets/<set>.json --stage
+<dir>/<set>` (no DATs needed: it reads the live packs and `pack-sets.json` worldPhases; the parts hold the live world
+pack's bytes; a full publish builds the parts too). The 2026-11-03 objects above are uploaded (each 404'd first, verified
+byte-identical through the CDN after); nothing references them until a pointer flips. Staged pointers (the live ones with
+only the three `packs` entries added): `verification/dat-streaming/world-split-staged/v1/sets/`. Superseded and
+unreferenced from the same day's first cut (chargen models in the chargen part): `2ea9fc8c75f6d58d`, `cbbfda1763f8d542`,
+`dfe973291ce8c6fd`, `b229132fb9cd74cf`, `2de7663436702ea1`, `c3435580c815f8ac`, `63557efe3834ff50`.
+
+**The flip** (the client must be deployed first or with it; an older client ignores the parts either way), per set:
+re-run `--world-split-only` against the live pointer into a fresh stage dir (keeps any change made to the pointer since,
+e.g. an effects-pack flip; the part objects come out the same), check the staged pointer differs from the live one only
+by `packs.worldCore` / `worldChargen` / `worldLand`, then `npx wrangler r2 object put webac-dats/v1/sets/<set>.json --file
+<stage>/v1/sets/<set>.json --content-type application/json --cache-control "public, max-age=60, must-revalidate" --remote`.
+The end-of-retail pointer carries AC1999's gain (its interface). Rollback: upload the live pointer without the three entries.
+Live check before the flip: a production build (`VITE_ACJS_URL_OVERRIDES=1 npx vite build`) with the staged pointer served
+by a route or `tools/stage-proxy.ts verification/dat-streaming/world-split-staged --pointer-only`
+(`&datSet=http://localhost:9177/v1/sets/eol-p2072-c982-h497-l994.json`; classic / AC1999 add
+`&eraDatSet=<era>:<their pointer>`), a cold profile: the boot log names `worldCore` / `worldLand` resident and never
+fetches the whole world pack (`001964aaf55ec211` for end of retail), and Create Character opens with the portraits.
+
+Tests: tests/verify-dat-streaming-world-split.ts (the rule, pointer parsing old and new, openStreamingDats over split /
+old / interface-only / cached-whole-pack pointers with priorities and order, chargen asked for first; the real-DAT login
+and chargen above), tests/verify-chargen-finish-silent.ts (chargen's wait is `chargenArtPending`).
+
+### 6.17 A slow cache read races the network; prerendered boots are not slow boots (PERF.cache-read-slower-than-network, 2026-11-04)
+
+**Signal.** Boots whose object-cache (OPFS) reads took longer than downloading would have:
+
+| When (UTC) | Who | What the phases said | Cause |
+|---|---|---|---|
+| 2026-11-04 01:32 (8658ebcf) | 69.156.98.60, Windows, 4 GB, Vega 8 | warm, 37,168,872 B / 111 objects from the cache, `cacheReadMs` 40037, `cacheReadMaxMs` 19158, `worldCacheMs` 21139, `lagMs` 81, `hiddenMs` 0, `netBytes` 0 | one read stalled: the disk under it |
+| 2026-11-02 22:19 (d0eb70b8) | 76.33.184.45, Windows, 32 GB | `dirMs` 129384, `hiddenMs` 129346, `cacheReadMaxMs` 128961, `manifestMs` 129079 | a Chrome prerender |
+
+*The 19 s read.* 37,168,872 B / 111 objects is exactly what a warm end-of-retail boot reads from a profile holding the
+§6.16 parts (measured here: same bytes, same object count), so the biggest read was `worldLand` (18.6 MB gzip). The same
+player's boot six minutes earlier read its biggest object in 1.97 s (already the slowest in 213 production boots of
+2026-11-01..04; the median slowest read is 81 ms; here it is 60-70 ms). Nothing in the page explains it: no writes that
+boot (`netBytes` 0), the main thread free (`lagMs` 81), no queueing in the timer (it starts inside the disk slot), and the
+other 110 reads summed ~21 s over a 24 s boot. The page before it in that tab (a Classic Dereth boot) sat 17.7 s in the
+same `world_cache` stage, so for about a minute the laptop's disk was slow for everything big. Locally, CPU throttling
+(6×) only moved the slowest read 39 → 235 ms; a 19 s read does not come from our read pattern
+(`getFile().arrayBuffer()`, 32 reads at once) but from the machine. What we controlled: the store awaited every read to
+the end, so the boot was as slow as the disk's worst minute even with a fast network one request away.
+
+*The 129 s read.* `dirMs` (opening OPFS: `navigator.storage.getDirectory()`) − `hiddenMs` = 38 ms: OPFS opened the
+moment the page was first shown. Chrome defers `getDirectory()` and `storage.estimate()` in a prerendered page until
+activation. Reproduced with Chrome for Testing 1223 and no DevTools attached (DevTools disables prerendering:
+`PrerenderingDisabledByDevTools`): a speculation-rules prerender's `getDirectory()` resolved 32 ms after activation,
+5.8 s after it was called, while `fetch` and `CompressionStream` ran at once. The player waited ~0.3 s; boot_slow and the
+phases counted the 129 s nobody watched.
+
+**Fix.**
+- `DatStore` (`dat/CacheHedge.ts` policy): a cache read still running `3 s + gzSize / 8 MB/s` after the object was asked
+  for (disk-slot wait included; inflate excluded) also downloads the object. The first verified payload wins. A cache win
+  aborts the download (no failure, no retry counted); a network win leaves the cached copy alone (it is valid, only
+  slow; rewriting 18 MB onto a struggling disk would make it worse) unless the read then comes back unusable, when the
+  downloaded copy replaces it. A failed download leaves the read to finish. worldLand's deadline is 5.3 s.
+- The whole-DAT cache (`DatCache.loadDatWithCache`: AC1999's 99.6 MB / 45.1 MB world DATs) takes the same race
+  (`hedgedCacheRead`; 99.6 MB → 15.5 s), its download aborted when the cache wins. Chargen's and area packs go through
+  `DatStore.loadObject`, so they have it. The AC1999 patch restore (`Ac1999World.restore`) has no network copy to race.
+- The deadline's timer does not run while `document.prerendering` (`prerenderAwareWait`): a prerender would otherwise
+  download the whole set for a page the player may never open. It starts again on activation.
+- Telemetry: phases `hedges`, `hedgeWins`, `prerenderMs` (BootWatch; the bridge keeps them). boot_slow counts
+  BOOT_SLOW_MS from when the page was shown.
+- Dev knobs for measuring (`urlOverridesEnabled` only): `?cacheReadDelayMs=N&cacheReadDelayMinBytes=B` delays every
+  cache read of B+ bytes by N ms (`SlowReadObjectCache`), `?noCacheHedge` turns the race off.
+
+**Measured** (`tools/probe-warm-boot-cache.ts`, own Vite, production end-of-retail set from dats.playwebac.com,
+headless Chromium, one per-run profile; "boot" = char-select set resident, "world" = world packs resident, which a warm
+boot awaits before resolving):
+
+| Run | boot | world | hedges / won | cacheReadMaxMs |
+|---|---|---|---|---|
+| cold (network, unthrottled) | 1.1 s | 2.9 s | - | - |
+| warm | 0.47 s | 0.73 s | 0 | 57 |
+| warm, CPU 6× | 1.1 s | 4.0 s | 0 | 235 |
+| network only (`?nocache`) at 20 Mbit/s | 4.5 s | 23.8 s | - | - |
+| every read ≥ 1 MB stalls 19 s, race off | 76.5 s | 76.7 s | 0 | 19051 |
+| every read ≥ 1 MB stalls 19 s, race on | 17.2 s | 17.5 s | 7 / 7 | (stalled reads finish later) |
+| the same at 20 Mbit/s, race on | 26.3 s | 34.5 s | 7 / 7 | |
+| only worldLand (18.6 MB) stalls 19 s, race off: the production signature | 19.4 s | 19.7 s | 0 | 19058 |
+| only worldLand stalls 19 s, race on | 6.9 s | 7.1 s | 1 / 1 | 39 (the stalled read lands later) |
+| the same at 20 Mbit/s, race on | 13.3 s | 19.9 s | 1 / 1 | |
+
+Inverse: a healthy warm boot asks the network for nothing (hedges 0, netBytes 0 in every warm run; tests pin it), and a
+race holds at most one extra copy of the object it raced.
+
+Tests: tests/verify-cache-read-hedge.ts (store race both ways, abort, unusable copy replaced, failed download falls back,
+null policy / non-persistent cache, deadline math, phases + bridge keys, prerender timer, BootWatch prerenderMs,
+boot_slow from activation, whole-DAT race), tests/verify-warm-boot-slow-breakdown.ts.

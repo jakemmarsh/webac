@@ -53,3 +53,12 @@ Effect leaves for a live set (STREAM.spell-projectile-first-use, docs/dat-stream
 handful of objects `npx wrangler r2 object put webac-dats/v1/o/<hash> --file <staged object> --content-type
 application/octet-stream --cache-control "public, max-age=31536000, immutable" --remote` needs no Worker (wrangler's OAuth
 login); check each key 404s first with a cache-busting query (never overwrite) and verify it through the CDN after.
+
+World-pack split for a live set (STREAM.login-pack-split, docs/dat-streaming.md §6.16): `publish-dats-r2.ts
+--world-split-only <pointer url> --stage <scratch>/<set>` stages three part packs (worldCore / worldChargen /
+worldLand, the live world pack's bytes) and the live pointer with only those three `packs` entries added; it needs
+no DATs (it reads the live packs and `pack-sets.json` worldPhases). Upload the objects like the effect leaves above
+(each must 404 first), never the pointer. Staged pointers: `verification/dat-streaming/world-split-staged/`. The flip
+is the pointer upload, after re-running the tool against the live pointer (so any change made to it since is kept;
+the part objects come out byte-identical). Rollback: upload the pointer without the three entries (the whole `world`
+pack stays named in every pointer, and older clients only ever read it).

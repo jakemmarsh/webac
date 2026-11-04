@@ -11,6 +11,10 @@
  *    that much.
  *  - hiddenMs: how long the document was hidden (a background tab: Chrome
  *    throttles its timers to once a second, so its ticks do not count as lag).
+ *  - prerenderMs: of which, how long the page was a prerender (document.prerendering,
+ *    until 'prerenderingchange'). Chrome defers navigator.storage.getDirectory()
+ *    in a prerendered page until it is shown (PERF.cache-read-slower-than-network:
+ *    a 129 s "cache read" on 2026-11-02 was a prerender the player opened 129 s later).
  *
  * Prod signal (2026-10-23 / 10-27): two warm-cache boots spent ~21 s in the
  * 'all' set's open with zero network DAT bytes; nothing said whether the page
@@ -23,8 +27,9 @@ export const BOOT_WATCH_LAG_FLOOR_MS = 50;
 
 export interface BootWatchDoc {
   visibilityState?: string;
-  addEventListener(type: 'visibilitychange', l: () => void): void;
-  removeEventListener(type: 'visibilitychange', l: () => void): void;
+  prerendering?: boolean;
+  addEventListener(type: 'visibilitychange' | 'prerenderingchange', l: () => void): void;
+  removeEventListener(type: 'visibilitychange' | 'prerenderingchange', l: () => void): void;
 }
 
 export interface BootWatchEnv {
@@ -38,6 +43,7 @@ export interface BootWatchResult {
   lagMs: number;
   lagMaxMs: number;
   hiddenMs: number;
+  prerenderMs: number;
 }
 
 export interface BootWatch {
@@ -75,6 +81,12 @@ export function startBootWatch(env: BootWatchEnv = browserBootWatchEnv()): BootW
     }
   };
   env.doc?.addEventListener('visibilitychange', onVisibility);
+  let prerenderMs = 0;
+  let prerenderSince: number | null = env.doc?.prerendering ? env.now() : null;
+  const onActivate = () => {
+    if (prerenderSince !== null) { prerenderMs += env.now() - prerenderSince; prerenderSince = null; }
+  };
+  if (prerenderSince !== null) env.doc?.addEventListener('prerenderingchange', onActivate);
 
   const id = env.setInterval(() => {
     const t = env.now();
@@ -90,12 +102,14 @@ export function startBootWatch(env: BootWatchEnv = browserBootWatchEnv()): BootW
       if (stopped) return stopped;
       env.clearInterval(id);
       env.doc?.removeEventListener('visibilitychange', onVisibility);
+      env.doc?.removeEventListener('prerenderingchange', onActivate);
       // The interval's last, unfired period: lateness that has not ticked yet still counts.
       const t = env.now();
       const pending = t - last - BOOT_WATCH_TICK_MS;
       if (!isHidden() && pending >= BOOT_WATCH_LAG_FLOOR_MS) { lagMs += pending; if (pending > lagMaxMs) lagMaxMs = pending; }
       if (hiddenSince !== null) hiddenMs += t - hiddenSince;
-      stopped = { lagMs: Math.round(lagMs), lagMaxMs: Math.round(lagMaxMs), hiddenMs: Math.round(hiddenMs) };
+      if (prerenderSince !== null) prerenderMs += t - prerenderSince;
+      stopped = { lagMs: Math.round(lagMs), lagMaxMs: Math.round(lagMaxMs), hiddenMs: Math.round(hiddenMs), prerenderMs: Math.round(prerenderMs) };
       return stopped;
     },
   };

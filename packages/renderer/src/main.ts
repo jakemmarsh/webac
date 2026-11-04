@@ -188,7 +188,7 @@ import { exposeDebugGlobal, readDebugGlobal, debugBag, debugGlobalsEnabled } fro
 import { resolveUrlLogin, resolveUrlWorld, withoutUrlWorld } from './launcher/urlLogin.js';
 import { urlOverridesEnabled } from './config/urlOverrides.js';
 import { accountBootLoginText, bridgeHttpOrigin, bridgeUrlWithServer, loadWorldDirectory, loginFailureText, type World } from './launcher/worldDirectory.js';
-import { eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
+import { charselWorldName, eraSwitchFor, eraSwitchLogin, launcherEraTarget, launcherLogin, resumableEraSwitch, type LauncherEnter, type LauncherLogin } from './launcher/launcherLogin.js';
 import { EOR_ERA_ID, eraProfile, type DatRole, type EraProfile } from './era/EraProfiles.js';
 import { eraClientRules, unsupportedFeatures, correctedOptionsWord, type EraFeature } from './era/EraFeatures.js';
 import { setAgentTownsEra } from './agent/towns.js';
@@ -1103,11 +1103,15 @@ const datCacheBypass =
 async function fetchDatFromNetwork(
   url: string,
   onProgress?: (pct: number, loadedBytes: number, totalBytes: number) => void,
+  hedgeSignal?: AbortSignal,
 ): Promise<ArrayBuffer> {
   // no-store: the OPFS DatCache is the cache. The browser HTTP cache would
   // hold a second 1.4 GB copy, and Chrome answered a full GET with only the
   // splash's cached Range bytes under a 200 (playwebac.com, 2026-10-04).
-  const resp = await fetch(url, { cache: 'no-store', ...(patchAbort ? { signal: patchAbort.signal } : {}) });
+  // hedgeSignal: a slow cache read's download (DatCache.hedgedCacheRead), stopped when the cache wins.
+  const signals = [patchAbort?.signal, hedgeSignal].filter((x): x is AbortSignal => !!x);
+  const signal = signals.length > 1 && typeof AbortSignal.any === 'function' ? AbortSignal.any(signals) : signals[0];
+  const resp = await fetch(url, { cache: 'no-store', ...(signal ? { signal } : {}) });
   if (!resp.ok) throw new Error(`Failed to fetch ${url}: ${resp.status}`);
 
   return readResponseBytes(resp, onProgress);
@@ -1125,7 +1129,7 @@ async function fetchDat(
   const { buffer } = await loadDatWithCache(url, {
     store: datCacheStore,
     headMeta: fetchHeadMeta,
-    fetchData: (u, op) => fetchDatFromNetwork(u, op),
+    fetchData: (u, op, signal) => fetchDatFromNetwork(u, op, signal),
     onProgress: (pct, loaded, total) => {
       if (loaded > reported) {
         onPatchEvent({ kind: 'downloaded', bytes: loaded - reported });
@@ -1256,6 +1260,12 @@ async function bootStreamedDats(pointerUrl: string, opts: { scope?: StreamScope;
     onProgress: (done, total) => feed.onProgress(done, total),
     // A warm profile's world + terrain packs and UI art load from the object cache before open() resolves.
     onWorldCache: () => setStreamBootPhase(scope, 'world_cache'),
+    // Dev only: ?cacheReadDelayMs=N makes big object-cache reads N ms slower (tools/probe-warm-boot-cache.ts).
+    ...(urlOverridesEnabled() ? {
+      cacheReadDelayMs: Number(new URLSearchParams(window.location.search).get('cacheReadDelayMs') ?? 0) || 0,
+      cacheReadDelayMinBytes: Number(new URLSearchParams(window.location.search).get('cacheReadDelayMinBytes') ?? 0) || 0,
+    } : {}),
+    ...(urlOverridesEnabled() && new URLSearchParams(window.location.search).has('noCacheHedge') ? { cacheHedge: null } : {}),
     onBootPacks: (store) => {
       noteSetCache(scope, store.stats);
       console.log(`[AC:DatStream] boot packs resident in ${Math.round(performance.now() - t0)} ms (net ${store.stats.netBytes} B / ${store.stats.netObjects} objects, cache ${store.stats.cacheBytes} B)`);
@@ -6578,7 +6588,15 @@ async function main() {
       console.log(`[AC] Sent AbandonContract: 0x${contractId.toString(16)}`);
     },
   }, worldPortalDb, textureManager, soundPlayer, audioManager, langDb, layoutRenderer,
-  streamedWorldReady ? { worldArtReady: streamedWorldReady } : undefined,
+  streamedWorldReady || streamingDats?.chargenArtReady ? {
+    ...(streamedWorldReady ? { worldArtReady: streamedWorldReady } : {}),
+    // STREAM.login-pack-split: with a split world pack chargen waits for its own pack, not the landscape's.
+    ...(streamingDats?.chargenArtReady ? {
+      chargenArtReady: streamingDats.chargenArtReady,
+      chargenArtDeferred: (id: number) => streamingDats?.chargenArtDeferred(id) ?? false,
+      onChargenArtWanted: () => streamingDats?.wantChargenArt(),
+    } : {}),
+  } : undefined,
   sharedPortal ? null : { portalDb: uiPortalDb, textureManager: uiTextureManager });
   gameUIForAudio = gameUI;
   // A click during the boot opened the context before the GameUI existed: its saved Sound Options apply now.
@@ -8831,7 +8849,7 @@ async function main() {
     // STR_LOGIN_FAILED NetError), on a register-first world: say so, with the
     // link. On an auto-create world STR_LOGIN_FAILED is a wrong password for a
     // name someone already owns: say that instead.
-    const text = loginFailureText(notice, launcherWorld, gameStarted);
+    const text = loginFailureText(notice, launcherWorld, gameStarted, aceAccount);
     if (connectionFailureRecovery({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
       returnToLauncher(text);
       return;
@@ -13568,8 +13586,11 @@ async function main() {
         // SWEEP1999.messages HC-6 — the era client's own switch (1999: its ~50 codes, its wording).
         // BUG.ac1999-fellow-recruit-silent — a refused recruit / swear the era's switch left silent gets one line
         // (ui/SocialRefusalLines1999.ts), named after the target the request went to.
+        // BUG.ac1999-silent-refusals — likewise an out-of-range cast, a healing kit, a wand or a key the server
+        // refused with no text (ui/SilentRefusalLines1999.ts): end of retail's line for the code.
         const departure = socialRefusalMemo?.lineFor(data.errorType, performance.now(), (g) => serverObjectManager?.getObject(g)?.name) ?? null;
-        const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType), eraRules.failureEventText, departure?.arm ?? null));
+        const silentLine = departure ? null : eraRules.silentRefusalLines?.get(data.errorType) ?? null;
+        const shown = refusalQuietly(() => deliverWeenieError(gameUI, data.errorType, weenieErrorText(data.errorType), eraRules.failureEventText, departure?.arm ?? silentLine));
         // TELEMETRY.refusal-events — ACE / GDLE 0x028A, the AC1999 server's flat 0x1C AttemptFailed.
         // A departure line keys by its own name-free template.
         const shownTemplate = departure && shown.text === departure.arm.text ? departure.template : weenieErrorText(data.errorType);
@@ -18575,8 +18596,8 @@ async function main() {
           // dropped. Plumb it to the char-select world plate. One-time console
           // log validates the parse (NOT an in-game chat line — diagnostic only).
           const sn = event.data as { serverName: string; currentConnections: number; maxConnections: number };
-          console.log(`[AC] ACE: ServerName — world="${sn.serverName}" connections=${sn.currentConnections}/${sn.maxConnections}`);
-          gameUI.setWorldName(launcherWorldName ?? sn.serverName);
+          console.log(`[AC] ServerName — world="${sn.serverName}" connections=${sn.currentConnections}/${sn.maxConnections}`);
+          gameUI.setWorldName(charselWorldName(launcherWorldName, sn.serverName));
           break;
         }
 
@@ -19346,7 +19367,7 @@ async function main() {
             // first-time login retries the same way (firstTimeLoginRetryAllowed).
             if (!gameStarted && event.serverNetError) {
               const creds: LoginCredentials = { world: connectUrl, account: aceAccount, password: acePassword };
-              const firstTime = firstTimeLoginRetryAllowed(launcherWorld);
+              const firstTime = firstTimeLoginRetryAllowed(launcherWorld, aceAccount);
               void provenLoginRetry.onRefused(creds, netNotice.token, { firstTime }).then((verdict) => {
                 if (gameStarted) return;
                 if (verdict.retry) {

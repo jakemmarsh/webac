@@ -95,7 +95,7 @@ describe('BootWatch: main-thread lag and hidden time while a set opens', () => {
     f.setVisibility('visible');
     f.fire(0);
     const r = w.stop();
-    expect(r).toEqual({ lagMs: 1600, lagMaxMs: 1200, hiddenMs: (BOOT_WATCH_TICK_MS + 750) * 2 + 100 });
+    expect(r).toEqual({ lagMs: 1600, lagMaxMs: 1200, hiddenMs: (BOOT_WATCH_TICK_MS + 750) * 2 + 100, prerenderMs: 0 });
     expect(f.cleared).toBe(true);
     expect(f.listeners.size).toBe(0);
     f.clock.t += 5000;
@@ -108,7 +108,7 @@ describe('BootWatch: main-thread lag and hidden time while a set opens', () => {
     const w = startBootWatch(f.env);
     f.fire(750);
     f.clock.t += 3000;
-    expect(w.stop()).toEqual({ lagMs: 0, lagMaxMs: 0, hiddenMs: BOOT_WATCH_TICK_MS + 750 + 3000 });
+    expect(w.stop()).toEqual({ lagMs: 0, lagMaxMs: 0, hiddenMs: BOOT_WATCH_TICK_MS + 750 + 3000, prerenderMs: 0 });
   });
 
   it('a task still blocking when the open ends counts too (its tick never fired)', () => {

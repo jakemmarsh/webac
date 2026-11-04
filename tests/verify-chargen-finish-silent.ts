@@ -544,12 +544,15 @@ describe('after an OK reply, and leaving the chargen screen (no DATs)', () => {
 
   it('CREATE waiting on the world art opens chargen only if character select is still up when it lands', async () => {
     const { ui } = fx;
-    /** The world art pending, cleared on arrival as the constructor's worldArtReady hook does. */
+    /**
+     * Chargen's art pending, cleared on arrival as the constructor's hook does (chargenArtReady, or
+     * worldArtReady when the set has no split world pack: STREAM.login-pack-split).
+     */
     const pendingArt = (): { done: Promise<void>; land: () => void } => {
       let land!: () => void;
       const done = new Promise<void>((r) => { land = r; });
-      done.then(() => { if (ui.worldArtPending === done) ui.worldArtPending = null; });
-      ui.worldArtPending = done;
+      done.then(() => { if (ui.chargenArtPending === done) ui.chargenArtPending = null; });
+      ui.chargenArtPending = done;
       return { done, land };
     };
     ui.showCharacterSelect([]);

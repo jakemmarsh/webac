@@ -48,6 +48,13 @@
  *                          add the effect leaves to a LIVE set's common pack and change nothing else: stages the new
  *                          common pack, a new area index naming it (the live tiles unchanged) and the live pointer
  *                          with only `areas` changed (upload with tools/upload-stream-set-r2.ts)
+ *   --world-split-only <pointer url>
+ *                          split a LIVE set's world pack into worldCore / worldChargen / worldLand
+ *                          (STREAM.login-pack-split, packages/renderer/src/dat/streaming/WorldSplit.ts) and
+ *                          change nothing else: stages the three part packs (the live world pack's files
+ *                          byte for byte) and the live pointer with only those three `packs` entries added
+ *                          (the whole `world` pack stays named, for older clients). Reads --pack-sets'
+ *                          worldPhases (tools/dat-access-sim.ts --boot-set). No DATs needed.
  *   --seed-only <pointer url>
  *                          add --server-seed to a LIVE set and change nothing else: stages the seed object and
  *                          the live pointer plus that seed (upload with tools/upload-stream-set-r2.ts)
@@ -99,12 +106,11 @@ import { fileURLToPath } from 'node:url';
 import { DatDatabase } from '../packages/dat-parser/src/DatDatabase.js';
 import { DatReader } from '../packages/dat-parser/src/DatReader.js';
 import { RegionDesc } from '../packages/dat-parser/src/file-types/RegionDesc.js';
-import { Surface } from '../packages/dat-parser/src/file-types/Surface.js';
-import { SurfaceTexture } from '../packages/dat-parser/src/file-types/SurfaceTexture.js';
-import { Texture } from '../packages/dat-parser/src/file-types/Texture.js';
 import { FileDatBytes } from '../packages/dat-parser/src/node/FileDatBytes.js';
 import { SKELETON_TYPES, buildAreaIndex, parseAreaIndex, parsePack, parseSetManifest } from '../packages/dat-parser/src/streaming/DatSetFormat.js';
 import { planAreas } from './lib/area-packs.js';
+import { WORLD_SPLIT_ROLES, type WorldSplitRole } from '../packages/renderer/src/dat/streaming/WorldSplit.js';
+import { planWorldSplit, regionTerrainLeaves } from './lib/world-split.js';
 import { effectLeavesToAdd, effectWeenieRootsFromSqlDir, effectWeenieRootsFromWorldDb, planEffectLeaves } from './lib/effect-leaves.js';
 import { worldDbRoots } from './lib/world-db-roots.js';
 import { AC1999_UNTRANSLATED_COPIES, ac1999CellOverlay, ac1999PortalOverlay, type Ac1999DatOverlay } from '../packages/dat-parser/src/era1999/Ac1999Overlay.js';
@@ -227,42 +233,6 @@ function buildPack(files: Array<{ id: number; data: Uint8Array }>): Uint8Array {
   return out;
 }
 
-/**
- * The leaves (non-skeleton portal files) the terrain materials read: RegionDesc 0x13000000's TexMerge
- * (land textures + their detail textures, corner / side alpha maps, road maps) → SurfaceTexture 0x05
- * (every level) or Surface 0x08 → Texture 0x06/0x07 → default Palette 0x04. The structural files on the
- * way (0x05, 0x08, 0x13) ride the skeleton pack.
- */
-function regionTerrainLeaves(get: (id: number) => ArrayBuffer | null): number[] {
-  const region = get(0x13000000);
-  if (!region) return [];
-  const tm = new RegionDesc(new DatReader(region)).terrainInfo.landSurfaces.texMerge;
-  if (!tm) return [];
-  const roots = [
-    ...tm.terrainDesc.flatMap((d) => [d.terrainTex.texGID, d.terrainTex.detailTexGID]),
-    ...tm.cornerTerrainMaps.map((m) => m.texGID), ...tm.sideTerrainMaps.map((m) => m.texGID),
-    ...tm.roadMaps.map((m) => m.roadTexGID),
-  ];
-  const seen = new Set<number>();
-  const leaves = new Set<number>();
-  const queue = roots.map((id) => id >>> 0).filter((id) => id !== 0);
-  while (queue.length) {
-    const id = queue.pop()!;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const data = get(id);
-    if (!data) continue;
-    const type = id >>> 24;
-    if (!SKELETON_TYPES.has(type)) leaves.add(id);
-    const next: number[] = [];
-    if (type === 0x05) next.push(...SurfaceTexture.read(new DatReader(data)).textures);
-    else if (type === 0x08) { const s = Surface.read(new DatReader(data)); next.push(s.origTextureId, s.origPaletteId); }
-    else if (type === 0x06 || type === 0x07) { const t = Texture.read(new DatReader(data)); if (t.defaultPaletteId) next.push(t.defaultPaletteId); }
-    for (const n of next) if (n) queue.push(n >>> 0);
-  }
-  return [...leaves].sort((a, b) => a - b);
-}
-
 function iterationOf(db: DatDatabase): number {
   if (db.container === 'pre-tod') return db.totalIterations; // the header's (no 0xFFFF0001 record)
   const d = db.getFileData(ITERATION_FILE_ID);
@@ -298,7 +268,7 @@ function main(): void {
   if (writeStage) mkdirSync(join(stageDir, 'v1/sets'), { recursive: true });
 
   const packSets = ac1999World ? null : existsSync(packSetsPath)
-    ? JSON.parse(readFileSync(packSetsPath, 'utf8')) as { boot: Record<string, string[]>; world: Record<string, string[]>; ui?: Record<string, string[]> }
+    ? JSON.parse(readFileSync(packSetsPath, 'utf8')) as PackSets
     : null;
   if (!packSets && !ac1999World) console.warn(`[publish] no pack-sets file at ${packSetsPath} — boot/world packs will be empty (run tools/dat-access-sim.ts --boot-set first)`);
 
@@ -316,6 +286,8 @@ function main(): void {
   };
   const leaves: Record<'portal' | 'highres', Array<{ id: number; p: Planned }>> = { portal: [], highres: [] };
   const packs: Array<{ role: Role; p: Planned; files: number }> = [];
+  /** Pointer-only packs (never in the manifest): the world pack's split parts. */
+  const splitPacks: Array<{ role: WorldSplitRole; p: Planned; files: number }> = [];
   const bundles: Array<{ lb: number; p: Planned }> = [];
 
   // portal: skeleton pack + leaves
@@ -356,6 +328,16 @@ function main(): void {
     for (const id of ids) inEarlierPack.add(id);
     const files = ids.map((id) => ({ id, data: read('portal', id) }));
     packs.push({ role, p: putObject(buildPack(files)), files: files.length });
+    // STREAM.login-pack-split: the world pack again in three parts (pointer-only roles; the manifest
+    // lists the whole pack, which older clients load).
+    if (role === 'world' && packSets?.worldPhases && dbs.local) {
+      const byId = new Map(files.map((f) => [f.id, f.data]));
+      const parts = planWorldSplit(byId, packSets.worldPhases, (id) => dbs.portal.getFileData(id), dbs.local);
+      for (const r of WORLD_SPLIT_ROLES) {
+        const pf = parts[r].map((id) => ({ id, data: byId.get(id)! }));
+        splitPacks.push({ role: r, p: putObject(buildPack(pf)), files: pf.length });
+      }
+    }
   }
   // A world-only set has no access-simulated world pack, but the client builds the terrain materials
   // ONCE when the world + terrain packs are resident (main.ts deferredWorldInit; TerrainRenderer
@@ -425,7 +407,7 @@ function main(): void {
   }]));
   const basePointer = { format: 1, set: setName, iterations, manifest: { hash: hex(manifest.hash), key: manifest.key, size: manifest.size, gzSize: manifest.gzSize },
     // the packs again, so boot can fetch boot+local in parallel with (not after) the manifest
-    packs: Object.fromEntries(packs.map(({ role, p, files }) => [role, { key: p.key, size: p.size, gzSize: p.gzSize, files }])),
+    packs: Object.fromEntries([...packs, ...splitPacks].map(({ role, p, files }) => [role, { key: p.key, size: p.size, gzSize: p.gzSize, files }])),
     dats,
     ...(areaIndex ? { areas: { key: areaIndex.key, size: areaIndex.size, gzSize: areaIndex.gzSize } } : {}),
     created: new Date().toISOString() };
@@ -645,6 +627,63 @@ async function seedOnly(pointerUrl: string): Promise<void> {
   console.log(`  upload: UPLOAD_KEY=… npx tsx tools/upload-stream-set-r2.ts <worker url> ${stageDir}`);
 }
 
+/** tools/dat-access-sim.ts --boot-set's output. */
+interface PackSets {
+  boot: Record<string, string[]>;
+  world: Record<string, string[]>;
+  ui?: Record<string, string[]>;
+  /** The world pack's ids by the phase that first read them (STREAM.login-pack-split). */
+  worldPhases?: Record<string, Record<string, string[]>>;
+}
+
+/**
+ * --world-split-only <pointer url>: split a LIVE set's world pack (STREAM.login-pack-split), changing
+ * nothing else. The parts hold the live world pack's own bytes; the pointer is the live one with the
+ * three part packs added to `packs` (every other key, the whole `world` pack included, kept). Re-run
+ * it against the live pointer right before a flip: the parts are content-addressed, so a re-run after
+ * another change to the pointer stages the same objects and a pointer that keeps that change.
+ */
+async function worldSplitOnly(pointerUrl: string): Promise<void> {
+  const t0 = Date.now();
+  const base = pointerUrl.slice(0, pointerUrl.indexOf('/v1/sets/'));
+  const get = async (url: string) => { const r = await fetch(url, { cache: 'no-store' }); if (!r.ok) throw new Error(`GET ${url}: HTTP ${r.status}`); return new Uint8Array(await r.arrayBuffer()); };
+  const getPack = async (key: string) => parsePack(new Uint8Array(gunzipSync(await get(`${base}/${key}`)))).files;
+  const live = JSON.parse(new TextDecoder().decode(await get(`${pointerUrl}${pointerUrl.includes('?') ? '&' : '?'}cb=${Date.now()}`))) as {
+    set: string; packs: Record<string, { key: string; size: number; gzSize: number; files: number }>; [k: string]: unknown;
+  };
+  for (const r of ['world', 'skeleton', 'local'] as const) if (!live.packs[r]) throw new Error(`--world-split-only: ${live.set} has no ${r} pack (an interface or full set is needed)`);
+  const packSets = JSON.parse(readFileSync(packSetsPath, 'utf8')) as PackSets;
+  if (!packSets.worldPhases) throw new Error(`--world-split-only: ${packSetsPath} has no worldPhases (re-run tools/dat-access-sim.ts --boot-set)`);
+  const world = await getPack(live.packs.world.key);
+  const skeleton = await getPack(live.packs.skeleton.key);
+  // The other packs' files too, so the closure walk sees edges that pass through them.
+  const others = await Promise.all(['boot', 'ui'].filter((r) => live.packs[r]).map((r) => getPack(live.packs[r].key)));
+  const localFiles = await getPack(live.packs.local.key);
+  const ab = (b: Uint8Array | undefined) => (b ? b.slice().buffer : null);
+  const portalGet = (id: number) => ab(skeleton.get(id) ?? world.get(id) ?? others.map((m) => m.get(id)).find((b) => b));
+  const local = {
+    listFileIds: (p?: number) => [...localFiles.keys()].filter((id) => p === undefined || (id >>> 24) === p),
+    getFileData: (id: number) => ab(localFiles.get(id)),
+  };
+  const parts = planWorldSplit(world, packSets.worldPhases, portalGet, local);
+  stageDir = resolve(opt('--stage', join(tmpdir(), 'acjs-dat-publish', 'world-split', live.set))!);
+  if (basename(stageDir) !== live.set) throw new Error(`--stage: the dir must be named ${live.set} (upload-stream-set-r2.ts names the pointer after it)`);
+  writeStage = true;
+  mkdirSync(join(stageDir, 'v1/o'), { recursive: true });
+  mkdirSync(join(stageDir, 'v1/sets'), { recursive: true });
+  const added: Record<string, { key: string; size: number; gzSize: number; files: number }> = {};
+  for (const r of WORLD_SPLIT_ROLES) {
+    const p = putObject(buildPack(parts[r].map((id) => ({ id, data: world.get(id)! }))));
+    added[r] = { key: p.key, size: p.size, gzSize: p.gzSize, files: parts[r].length };
+  }
+  const pointer = { ...live, packs: { ...live.packs, ...added } };
+  writeFileSync(join(stageDir, `v1/sets/${live.set}.json`), JSON.stringify(pointer, null, 2) + '\n');
+  console.log(`\nworld split for live set ${live.set}: world ${live.packs.world.files} files ${mb(live.packs.world.gzSize)} gz (${live.packs.world.key})`);
+  for (const r of WORLD_SPLIT_ROLES) console.log(`  ${r.padEnd(13)} ${String(added[r].files).padStart(4)} files ${mb(added[r].gzSize).padStart(8)} gz  ${added[r].key}`);
+  console.log(`  staged ${objects.size} objects + the pointer in ${stageDir} (${((Date.now() - t0) / 1000).toFixed(0)} s)`);
+  console.log(`  upload: the objects first (never the pointer: the lead flips it after a live check)`);
+}
+
 function uploadCommands(setName: string): string[][] {
   const common = ['--s3-no-check-bucket', '--transfers', '64', '--checkers', '64', '--retries', '5', '--stats-one-line', '--stats', '30s'];
   const cmds: string[][] = [
@@ -667,7 +706,9 @@ function uploadCommands(setName: string): string[][] {
 const areasOnlyUrl = opt('--areas-only');
 const seedOnlyUrl = opt('--seed-only');
 const effectsOnlyUrl = opt('--effects-only');
-if (effectsOnlyUrl) void effectsOnly(effectsOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
+const worldSplitOnlyUrl = opt('--world-split-only');
+if (worldSplitOnlyUrl) void worldSplitOnly(worldSplitOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
+else if (effectsOnlyUrl) void effectsOnly(effectsOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
 else if (areasOnlyUrl) void areasOnly(areasOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
 else if (seedOnlyUrl) void seedOnly(seedOnlyUrl).catch((err) => { console.error(err); process.exit(1); });
 else main();

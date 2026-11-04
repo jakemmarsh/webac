@@ -214,6 +214,7 @@ export interface BootStreamReport {
 export const BOOT_STREAM_PHASE_KEYS = [
   'pointerMs', 'pointerTries', 'pointerBytes', 'dirMs', 'manifestMs', 'packsMs', 'splashMs', 'layoutMs', 'artMs', 'artFiles',
   'hasMs', 'cacheReadMs', 'cacheReadMaxMs', 'cacheMisses', 'inflateMs', 'retries', 'failures', 'rcvBytes', 'lagMs', 'lagMaxMs', 'hiddenMs',
+  'hedges', 'hedgeWins', 'prerenderMs',
 ] as const;
 export type BootStreamPhases = Partial<Record<typeof BOOT_STREAM_PHASE_KEYS[number], number>>;
 
@@ -366,6 +367,13 @@ export interface PreworldReporterOptions {
   /** The chargen page while the screen is 'chargen'. */
   chargenStep?: () => ChargenStepName | null;
   now?: () => number;
+  /**
+   * Whether the page is a prerender nobody is looking at yet (default document.prerendering).
+   * PERF.cache-read-slower-than-network: Chrome holds OPFS until the page is shown, so a
+   * prerendered boot sits on 'boot' for as long as the player has not opened it. boot_slow
+   * counts BOOT_SLOW_MS from when the page was shown.
+   */
+  prerendering?: () => boolean;
   /** A random id for this page load; generated when absent. */
   trace?: string;
   /**
@@ -513,6 +521,8 @@ export class PreworldReporter {
   private caps: CapabilityIssue[] = [];
   private bootSlowSent = false;
   private bootDoneSent = false;
+  /** When the boot's slow clock started: the page's start, or its activation when it was a prerender. */
+  private bootClockFrom: number;
   private streamReportedOnCharList = false;
   private readonly streams = new Map<string, BootStreamReport>();
   private handoversSent = 0;
@@ -523,6 +533,7 @@ export class PreworldReporter {
     this.trace = opts.trace && /^[a-z0-9]{8,32}$/.test(opts.trace) ? opts.trace : randomTrace();
     this.startedAt = this.now();
     this.screenSince = this.startedAt;
+    this.bootClockFrom = this.startedAt;
   }
 
   /** The bridge's event URL for a ws(s):// bridge URL (null when it isn't one). */
@@ -861,9 +872,17 @@ export class PreworldReporter {
       return;
     }
     if (this.bootSlowSent) return;
-    if (this.now() - this.startedAt < BOOT_SLOW_MS) return;
+    if (this.isPrerendering()) { this.bootClockFrom = this.now(); return; }
+    if (this.now() - this.bootClockFrom < BOOT_SLOW_MS) return;
     this.bootSlowSent = true;
     this.report('boot_slow', {});
+  }
+
+  private isPrerendering(): boolean {
+    try {
+      if (this.opts.prerendering) return this.opts.prerendering();
+      return typeof document !== 'undefined' && (document as Document & { prerendering?: boolean }).prerendering === true;
+    } catch { return false; }
   }
 
   // ── Leaving ──────────────────────────────────────────────────────────

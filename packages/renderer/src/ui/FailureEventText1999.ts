@@ -7,7 +7,9 @@
  * colour is the spew yellow), except 0x4a and 0x402, which go to the chat scroll (channel 0 / 7). A
  * code with no arm prints nothing, so the codes the AC1999 server sends from a later code set
  * (MOVED_TOO_FAR, the chest and lockpick codes, the recall and portal-link codes, HEAL_NOT_TRAINED,
- * MISSILE_OUT_OF_RANGE, ...) are silent, as they were for a 1999 player. The texts are the exe's
+ * MISSILE_OUT_OF_RANGE, ...) are silent, as they were for a 1999 player; the ones that answer a
+ * player's own click get end of retail's line as a recorded departure (ui/SilentRefusalLines1999.ts,
+ * ui/SocialRefusalLines1999.ts). The texts are the exe's
  * literals with their trailing "\n" dropped; 0x3e, 0x434 and 0x437 word it differently from end of
  * retail ("too fatigued to attack", "goods", "Your craft goods are unsatisfactory.").
  */

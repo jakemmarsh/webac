@@ -296,6 +296,71 @@ export const ACCOUNT_NAME_TAKEN_HINT =
 export const LOGON_FAILED_HINT = `That usually means a wrong password for this account name. ${ACCOUNT_NAME_TAKEN_HINT} `
   + 'If this name and password worked before, the server may be having trouble: wait a minute and try again.';
 
+/**
+ * BUG.gdl-account-name-rule — emulators whose first-login auto-create takes
+ * only names of letters, digits, '-' and '_', 1 to 32 characters:
+ * CDatabaseIO::CreateAccount → IsUserNameValid, MIN/MAX_USERNAME_LENGTH
+ * (reference/classic/ClassicDereth/Source/DatabaseIO.cpp, the GDLE 1.34 code
+ * Seedsow and Snowreap run; reference/ac1999 Server/Source/DatabaseIO.cpp the
+ * same). Any other name gets CREATEACCOUNT_ERROR_BAD_USERNAME, which
+ * AuthenticateUserQuery::PerformQuery sends as STR_LOGIN_FAILED ("Client
+ * logon failed"), every time. ACE takes any name up to 50 characters
+ * (AuthenticationHandler.cs), so a player whose usual account name is an
+ * email or "first.last" gets in on every ACE world and is refused on every
+ * GDL one (production, 2026-10-30 and 2026-11-04: twelve refusals on
+ * Seedsow, none rescued by a retry; live 2026-11-04: a fresh "acjs.q…" was
+ * refused twice while the same name without the dot was created at once).
+ */
+export const AUTO_CREATE_NAME_RULE_EMUS: ReadonlySet<string> = new Set(['GDL', 'GDLE', 'AC1999']);
+/** MAX_USERNAME_LENGTH in those servers' DatabaseIO.h. */
+export const AUTO_CREATE_NAME_MAX_LENGTH = 32;
+
+/** Why `account` can't be auto-created on `world`, or null (a name the rule takes, or a world without the rule). */
+export type AutoCreateNameProblem =
+  | { readonly kind: 'chars'; readonly chars: readonly string[] }
+  | { readonly kind: 'length'; readonly length: number };
+
+/**
+ * BUG.gdl-account-name-rule — the reason a GDL / GDLE / AC1999 world's
+ * auto-create refuses `account` (IsUserNameValid's characters first, then the
+ * length), or null. Length counts bytes as the server's strlen does (the
+ * login packs the name as UTF-8; any non-ASCII character fails the
+ * character test anyway). Only worlds that auto-create: a register-first
+ * world never creates on login, so the rule says nothing there.
+ */
+export function autoCreateNameProblem(
+  world: (Partial<Pick<World, 'emu' | 'registration' | 'registrationUrl'>>) | null | undefined,
+  account: string | null | undefined,
+): AutoCreateNameProblem | null {
+  if (!world?.emu || !AUTO_CREATE_NAME_RULE_EMUS.has(world.emu.toUpperCase())) return null;
+  if (world.registration || world.registrationUrl) return null;
+  if (!account) return null;
+  const bad: string[] = [];
+  for (const c of account) {
+    if (/[A-Za-z0-9_-]/.test(c)) continue;
+    if (!bad.includes(c)) bad.push(c);
+  }
+  if (bad.length) return { kind: 'chars', chars: bad };
+  const length = new TextEncoder().encode(account).length;
+  return length > AUTO_CREATE_NAME_MAX_LENGTH ? { kind: 'length', length } : null;
+}
+
+const charName = (c: string): string => (c === ' ' ? 'a space' : c.trim() === '' ? 'a blank character' : `"${c}"`);
+
+/**
+ * The launcher's line under "Client logon failed" when the account name
+ * breaks the world's auto-create rule: replaces LOGON_FAILED_HINT (a wrong
+ * password / taken name, wrong here) with what the server needs.
+ */
+export function autoCreateNameText(worldName: string, problem: AutoCreateNameProblem): string {
+  const why = problem.kind === 'chars'
+    ? `this account name has ${problem.chars.slice(0, 3).map(charName).join(', ')}`
+    : `this account name is ${problem.length} characters long`;
+  return `${worldName} only creates accounts named with letters, numbers, - and _ (up to ${AUTO_CREATE_NAME_MAX_LENGTH} characters), and ${why}. `
+    + 'If you are new here, pick an account name like that (for example without dots, spaces or an email address). '
+    + 'If you already have this account, check its password.';
+}
+
 const COUNT_WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
 const countWord = (n: number): string => COUNT_WORDS[n] ?? String(n);
 const capitalized = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
@@ -342,12 +407,21 @@ export function perIpServerFullText(limits: PerIpLimits): string {
  */
 export function loginFailureText(
   notice: { readonly token: string; readonly text: string },
-  world: (Pick<World, 'name' | 'registration' | 'registrationUrl'> & Partial<Pick<World, 'kind' | 'bridgeUrl' | 'perIpLimits'>>) | null,
+  world: (Pick<World, 'name' | 'registration' | 'registrationUrl'> & Partial<Pick<World, 'kind' | 'bridgeUrl' | 'perIpLimits' | 'emu'>>) | null,
   inWorld: boolean,
+  account?: string | null,
 ): string {
   // A Custom… world's bridge that never answered: say that, not retail's
   // "make sure you have a working network" (listed worlds keep retail's text).
   if (!inWorld && world?.kind === 'custom' && notice.token === 'ID_NetError_CantSocket') return customBridgeUnansweredText(world);
+  // BUG.gdl-account-name-rule — a name the world's auto-create never takes:
+  // say what it needs. Not on a world whose per-address account cap already
+  // stops every webAC create (perIpLogonFailedText below says so): a better
+  // name would not get in there either.
+  if (!inWorld && world && notice.token === 'ID_ConnectionError_ClientLogOnFailed' && !(world.perIpLimits && world.perIpLimits.accounts > 0)) {
+    const problem = autoCreateNameProblem(world, account);
+    if (problem) return `${notice.text}\n\n${autoCreateNameText(world.name, problem)}`;
+  }
   // A world whose per-address caps every webAC player shares (perIpLimits):
   // its refused create and its session cap read as that, not as a taken name
   // or a full server.

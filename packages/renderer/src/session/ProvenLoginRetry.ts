@@ -44,7 +44,15 @@
  *  - the AC1999 server (emu "AC1999"): its refusal is a wrong password or its
  *    per-IP caps, handled on their own (perIpLogonFailedText);
  *  - ACE, Custom… and URL logins (no world, or no emu): unchanged.
+ *
+ * BUG.gdl-account-name-rule — nor a first-time login whose account name the
+ * world's auto-create never takes (letters, digits, - and _, up to 32:
+ * autoCreateNameProblem): every retry is refused the same way, so the
+ * refusal and its name hint show at once. Production 2026-10-30 / 11-04: 0
+ * of 6 first-time retry rounds on Seedsow got anyone in; each eventual
+ * success came after the player changed the name or password.
  */
+import { autoCreateNameProblem } from '../launcher/worldDirectory.js';
 
 /** Waits before each automatic retry of a proven login (about 10 s in all); after the last, today's error. */
 export const PROVEN_LOGIN_RETRY_DELAYS_MS: readonly number[] = Object.freeze([3000, 6000]);
@@ -75,12 +83,15 @@ export const FIRST_TIME_RETRY_EMUS: ReadonlySet<string> = new Set(['GDL', 'GDLE'
  * UX.gdle-first-login-retry — whether a first-time login to `world` is
  * retried quietly too: a GDL / GDLE world that is not register-first and has
  * no per-address caps. null (a URL or Custom… login) never.
+ * BUG.gdl-account-name-rule — `account` given: never for a name the world's
+ * auto-create refuses every time (autoCreateNameProblem).
  */
-export function firstTimeLoginRetryAllowed(world: FirstTimeRetryWorld | null | undefined): boolean {
+export function firstTimeLoginRetryAllowed(world: FirstTimeRetryWorld | null | undefined, account?: string | null): boolean {
   if (!world?.emu || !FIRST_TIME_RETRY_EMUS.has(world.emu.toUpperCase())) return false;
   if (world.registration || world.registrationUrl) return false;
   const caps = world.perIpLimits;
   if (caps && (caps.accounts > 0 || caps.sessions > 0)) return false;
+  if (autoCreateNameProblem(world, account)) return false;
   return true;
 }
 

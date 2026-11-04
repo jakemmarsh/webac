@@ -69,6 +69,13 @@ export const REFUSAL_SINKS = ['spew', 'chat', 'none'] as const;
 export type RefusalSink = typeof REFUSAL_SINKS[number];
 
 export const MAX_REFUSAL_TEXT = 120;
+/**
+ * BUG.ac1999-silent-refusals — a code the client prints nothing for still reached the player when the
+ * server said why in a refusal line of its own just before it (the AC1999 server's 0x4B research:
+ * "That is not a valid spell formula." then 0x405; GDLE / AC1999 SendText + NotifyUseDone pairs). Such a
+ * code is reported with that line's sink, not "none", so `sink="none"` keeps meaning the player saw nothing.
+ */
+export const SERVER_TEXT_PAIR_MS = 250;
 /** Repeats of a refusal are sent as one count this often. */
 export const REFUSAL_ROLLUP_MS = 60_000;
 export const MAX_REFUSAL_CODES = 64;
@@ -217,7 +224,7 @@ export const REFUSAL_TEXT = /^(you (can't|cannot|can not|can only|do not|don't|a
  * "Ming Masun cannot …" (a run of capitalized words, then the refusal's predicate). The subject leaves as '_'
  * (RefusalTemplates.nameSafeText).
  */
-export const NAME_FIRST_REFUSAL = /^[A-Z][A-Za-z'-]*(?: (?:[A-Z][A-Za-z'-]*|of|the|de|du|van|von|al))* (?:(?:is|are) (?:too busy|not (?:accepting|allowed|permitted|able)|unable)\b|(?:cannot|can't|can not|won't|will not|may not|refuses)\b)/;
+export const NAME_FIRST_REFUSAL = /^[A-Z][A-Za-z'-]*(?: (?:[A-Z][A-Za-z'-]*|of|the|de|du|van|von|al))* (?:(?:is|are) (?:too busy|busy|not (?:accepting|allowed|permitted|able)|unable)\b|(?:cannot|can't|can not|won't|will not|may not|refuses)\b)/;
 
 /**
  * Whether a server text line (chat type `chatType`, null for a transient) is a refusal: never a known
@@ -297,6 +304,8 @@ export class RefusalReporter {
   private action: number | null = null;
   private detail: RefusalDetail | null = null;
   private lastSent: { action: number; at: number; detail: RefusalDetail | null } | null = null;
+  /** The last server refusal line (SERVER_TEXT_PAIR_MS): when, and where it showed. */
+  private lastServerLine: { at: number; sink: RefusalSink } | null = null;
 
   constructor(private readonly opts: RefusalReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -368,7 +377,9 @@ export class RefusalReporter {
     if (!Number.isFinite(code)) return;
     if (isNoticeCode(context, code)) return;
     const t = template ? this.template(template) : null;
-    this.record('server', weenieCode(code), t?.text ?? null, context, sink, this.recentAction(), this.serverDetail());
+    const line = this.lastServerLine;
+    const shownSink = sink === 'none' && line && this.now() - line.at <= SERVER_TEXT_PAIR_MS ? line.sink : sink;
+    this.record('server', weenieCode(code), t?.text ?? null, context, shownSink, this.recentAction(), this.serverDetail());
   }
 
   /** A server text line (chat type `chatType`) or transient string; kept when it reads as a refusal. */
@@ -377,9 +388,11 @@ export class RefusalReporter {
     const raw = text.trim();
     if (!raw) return;
     if (!isServerTextRefusal(raw, chatType, context === 'transient')) return;
+    const sink: RefusalSink = context === 'transient' || chatType === 0x1a ? 'spew' : 'chat';
+    this.lastServerLine = { at: this.now(), sink };
     const t = this.template(raw);
     if (!t) return;
-    this.record('server', `t:${refusalHash(t.key)}`, t.text, context, context === 'transient' || chatType === 0x1a ? 'spew' : 'chat', this.recentAction(), this.serverDetail());
+    this.record('server', `t:${refusalHash(t.key)}`, t.text, context, sink, this.recentAction(), this.serverDetail());
   }
 
   /** The reporters' 100 ms clock: resend what the network refused, and send the minute's roll-ups. */

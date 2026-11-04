@@ -285,6 +285,20 @@ export async function launcherLogin(page: Page, login: LauncherLogin, timeoutMs 
 }
 
 /** Page-side source: press character select's ENTER (0x100003a2) on the selected character. */
+/**
+ * Click a launcher text field with the mouse, empty it, then key-type into it.
+ * The launcher pre-fills the account with the last-used one, so typing alone
+ * APPENDS to it on the second and later worlds of a run (a probe once logged
+ * into "wactest47b0bfawactest47b0bfb"). `.fill('')` empties the real input
+ * under the DAT-painted edit; the click + keystrokes keep the mouse/keyboard
+ * path the probe is exercising.
+ */
+export async function typeIntoLauncherField(page: Page, selector: 'input.launcher-account' | 'input.launcher-password', x: number, y: number, text: string, delay = 15): Promise<void> {
+  await page.mouse.click(x, y);
+  await page.locator(selector).fill('');
+  await page.keyboard.type(text, { delay });
+}
+
 export const PRESS_CHARSEL_ENTER_JS = `(() => { const el = [...document.querySelectorAll('[data-ac-press]')].find(e => e.dataset.acPress.toLowerCase().includes('100003a2') && e.offsetParent !== null); if (el) el.click(); return !!el; })()`;
 /**
  * Page-side source: an account with no characters opens chargen (as CREATE

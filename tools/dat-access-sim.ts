@@ -515,6 +515,9 @@ async function main(): Promise<void> {
       // 'ui' = every other LayoutDesc's art (the publish tool drops ids boot/world carry);
       // the streaming client loads it in the background once in world.
       ui: pick(['ui-all']),
+      // STREAM.login-pack-split: the world pack's ids by the phase that first read them, so the
+      // publish tool can split it into what a login waits for and what only chargen / the terrain reads.
+      worldPhases: Object.fromEntries(['gameui-preload', 'chargen', 'world-init', 'portal-space'].map((ph) => [ph, pick([ph])])),
     }, null, 1) + '\n');
   }
 

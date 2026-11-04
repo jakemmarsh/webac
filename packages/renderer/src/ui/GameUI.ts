@@ -1103,6 +1103,17 @@ export interface GameUIStreamingOptions {
    * chargen) loads then, and showCharacterCreate waits for it.
    */
   worldArtReady?: Promise<unknown>;
+  /**
+   * STREAM.login-pack-split — settles once character creation's art is
+   * resident (the set's worldChargen pack). When given, showCharacterCreate
+   * waits for this instead of worldArtReady, and the preload art splits: the
+   * HUD's part loads at worldArtReady, chargen's here. Absent = worldArtReady.
+   */
+  chargenArtReady?: Promise<unknown>;
+  /** A preload texture not to read yet (its pack is on its way; reading now fetches it twice). */
+  chargenArtDeferred?: (texId: number) => boolean;
+  /** Character creation was opened while its art is still on its way: fetch it first. */
+  onChargenArtWanted?: () => void;
 }
 
 export interface GameUICallbacks {
@@ -1805,6 +1816,10 @@ export class GameUI {
   private uiTexturePreloadIncomplete = false;
   /** Streamed DATs: settles once the world packs are resident (preload art, chargen). Null = resident now. */
   private worldArtPending: Promise<unknown> | null = null;
+  /** Streamed DATs: settles once character creation's art is resident (STREAM.login-pack-split). Null = resident now. */
+  private chargenArtPending: Promise<unknown> | null = null;
+  private chargenArtDeferred: ((texId: number) => boolean) | null = null;
+  private onChargenArtWanted: (() => void) | null = null;
   private chargenAwaitingWorldArt = false;
 
   // BUG.shortcut-bar-restore-dropped / CORE.5.b.d — the 18 item-shortcut
@@ -3702,6 +3717,16 @@ export class GameUI {
       const clear = () => { if (this.worldArtPending === ready) this.worldArtPending = null; };
       ready.then(clear, clear);
     }
+    {
+      const cg = streaming?.chargenArtReady ?? streaming?.worldArtReady;
+      if (cg) {
+        this.chargenArtPending = cg;
+        const clear = () => { if (this.chargenArtPending === cg) this.chargenArtPending = null; };
+        cg.then(clear, clear);
+      }
+      this.chargenArtDeferred = streaming?.chargenArtDeferred ?? null;
+      this.onChargenArtWanted = streaming?.onChargenArtWanted ?? null;
+    }
 
     // Load DAT assets
     this.loadDATAssets();
@@ -3882,18 +3907,28 @@ export class GameUI {
     // never read after assignment.
 
     // The preload art: now, or (streamed DATs) once the world packs are resident.
-    const preloadArt = () => {
-      // Pre-cache heritage icons
-      this.loadDatAsset('heritageIcons');
-      // Load chargen UI textures by known DAT IDs
+    // STREAM.login-pack-split: the HUD's part then, character creation's (and the
+    // heritage icons) once its own pack is in; loadChargenTextures skips what is
+    // still on its way (chargenArtDeferred) and the second run loads it.
+    const preloadTextures = () => {
       try {
         this.loadChargenTextures();
       } catch (e) {
         console.warn('[GameUI] Failed to load chargen textures:', e);
       }
     };
-    if (this.worldArtPending) this.worldArtPending.then(preloadArt, preloadArt);
-    else preloadArt();
+    const chargenArt = () => {
+      // Pre-cache heritage icons
+      this.loadDatAsset('heritageIcons');
+      preloadTextures();
+    };
+    if (this.chargenArtPending && this.chargenArtPending !== this.worldArtPending) {
+      if (this.worldArtPending) this.worldArtPending.then(preloadTextures, preloadTextures);
+      else preloadTextures();
+      this.chargenArtPending.then(chargenArt, chargenArt);
+    } else if (this.worldArtPending) {
+      this.worldArtPending.then(chargenArt, chargenArt);
+    } else chargenArt();
   }
 
   /**
@@ -3915,7 +3950,7 @@ export class GameUI {
     if (steps.length === 0) return;
     for (const step of steps) this.loadDatAsset(step);
     // The heritage icons need CharacterGenerator; it may have been the miss.
-    if (steps.includes('charGen') && !this.worldArtPending) this.loadDatAsset('heritageIcons');
+    if (steps.includes('charGen') && !this.chargenArtPending) this.loadDatAsset('heritageIcons');
     if (steps.includes('font')) this.applyChatFont();
     if (steps.includes('charGen') || steps.includes('heritageIcons')) this.chargenMissedDats = true;
     this.iconMissedSinceRepaint = true;
@@ -4338,8 +4373,11 @@ export class GameUI {
 
     let loaded = 0;
     const missEpoch = datMissEpoch();
+    const deferred = this.chargenArtPending ? this.chargenArtDeferred : null;
+    let waiting = 0;
     for (const texId of texturesToLoad) {
       if (this.uiTextures.has(texId)) { loaded++; continue; } // a retry after streamed files landed
+      if (deferred?.(texId)) { waiting++; continue; } // in character creation's pack, on its way (loaded when it lands)
       const texEpoch = datMissEpoch();
       try {
         const rgba = tm.getIconRGBA(texId);
@@ -4367,7 +4405,7 @@ export class GameUI {
     // RELEASE.streaming-regression-gate — streamed art that was not resident
     // yet loads again when it lands (onStreamedFilesArrived).
     this.uiTexturePreloadIncomplete = !noDatMissSince(missEpoch);
-    console.log(`[GameUI] Loaded ${loaded}/${texturesToLoad.length} chargen textures`);
+    console.log(`[GameUI] Loaded ${loaded}/${texturesToLoad.length} chargen textures${waiting ? ` (${waiting} wait for character creation's pack)` : ''}`);
   }
 
   /**
@@ -6044,8 +6082,11 @@ export class GameUI {
     // Until then the click shows retail's Please Wait box (MakePleaseWaitDialog
     // @ 004eced0, string 7426468): on a cold first visit the world packs land
     // 1-3 minutes after char select, and a silent wait read as a dead button
-    // (playwebac.com, 2026-10-08).
-    if (this.worldArtPending) {
+    // (playwebac.com, 2026-10-08). STREAM.login-pack-split: with a split world
+    // pack it waits for character creation's own pack (asked for first now),
+    // not the landscape's.
+    if (this.chargenArtPending) {
+      this.onChargenArtWanted?.();
       if (!this.chargenAwaitingWorldArt) {
         this.chargenAwaitingWorldArt = true;
         this.screenContainer.appendChild(this.buildWaitDialog(CHARGEN_WORLD_ART_WAIT_ID, getString(7426468) ?? 'Please Wait'));
@@ -6060,7 +6101,7 @@ export class GameUI {
           this.chargenPendingRestore = null;
           if (screen !== 'game' && screen !== 'disconnected' && !this.connectingMode) this.showCharacterCreate(pending);
         };
-        this.worldArtPending.then(open, open);
+        this.chargenArtPending.then(open, open);
       }
       return;
     }

@@ -13,7 +13,9 @@
  *                                   EoL:  u32 code, u32 guid, String16 name
  *   0xF7C7 → 0xF7DF CharacterEnterWorldServerReady (the 1999 two-phase enter's "go")
  *   0xF65A char-select news (two AcStrings; the client shows the second) — no EoL counterpart: kept as
- *          0xF65A {String16 news} for the page's character select (GameMessageOpcode.CharSelectNews)
+ *          0xF65A {String16 news} for the page's character select (GameMessageOpcode.CharSelectNews);
+ *          the first (the server's world_name, discarded by the 1999 client) → 0xF7E1 ServerName
+ *          {i32 0, i32 -1, String16 name} for the World box
  *   0xF653 CharacterLogOff acknowledgement — same opcode, empty
  *   0xF655 CharacterDelete acknowledgement — same opcode, empty (Client.cpp DeleteCharacter)
  *
@@ -34,6 +36,7 @@
  *                           an index into the list it sent, in the order the 0xF658 codec keeps)
  */
 import { BinaryReader } from '../../MessageSerializer.js';
+import { GameMessageOpcode } from '../../GameMessageOpcode.js';
 import { Group1999, eol, type Codecs1999 } from '../Adapter1999.js';
 import { Writer1999 } from '../Wire1999.js';
 
@@ -85,11 +88,21 @@ export function registerCharSelect1999(c: Codecs1999): void {
   c.inbound.set(0xf655, () => [eol(0xf655)]);
   // The char-select news (PW-7): kept as 0xF65A with the shown string as a String16, for the page's
   // character select (Connection1999 → 'charSelectNews'). End-of-retail servers never send it.
+  // BUG.ac1999-charsel-world-name: the first AcString is the server's world_name (Client.cpp
+  // SendCharacterList's news block). The 1999 client reads and discards it (Net_DispatchServerMessage
+  // case 0xf65a; its IntroUI has no world box), and 1999 has no ServerName (0xF7E1, no dispatcher case).
+  // Our character select is end of retail's, whose World box ServerName fills: the world name goes out
+  // as that ServerName (no connection counts in 1999: 0 and -1), ahead of the news.
   c.inbound.set(0xf65a, (r, ctx) => {
-    r.acString();
-    const news = r.acString();
+    const first = r.acString();
+    // A one-string 0xF65A (the server's Preview2 codec) is the news alone.
+    const twoStrings = r.remaining >= 2;
+    const news = twoStrings ? r.acString() : first;
+    const world = twoStrings ? first.trim() : '';
     ctx.log(`[1999] char-select news: ${news.split('\n')[0]}`);
-    return [eol(0xf65a, (w) => w.writeString16(news))];
+    const out = [eol(0xf65a, (w) => w.writeString16(news))];
+    if (world) out.unshift(eol(GameMessageOpcode.ServerName, (w) => { w.writeInt32(0); w.writeInt32(-1); w.writeString16(world); }));
+    return out;
   });
 
   c.outbound.set(0xf656, (m) => {

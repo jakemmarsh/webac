@@ -34,12 +34,22 @@ export const DAT_NAMES: readonly DatName[] = ['portal', 'cell', 'local', 'highre
 export const DAT_CODE: Readonly<Record<DatName, number>> = { portal: 1, cell: 2, local: 3, highres: 4 };
 const DAT_BY_CODE: Record<number, DatName> = { 1: 'portal', 2: 'cell', 3: 'local', 4: 'highres' };
 
-export type PackRole = 'boot' | 'world' | 'skeleton' | 'terrain' | 'local' | 'ui';
-/** Manifest `role` byte (tools/publish-dats-r2.ts ROLE). */
-export const PACK_ROLE_CODE: Readonly<Record<PackRole, number>> = { boot: 1, world: 2, skeleton: 3, terrain: 4, local: 5, ui: 6 };
-const ROLE_BY_CODE: Record<number, PackRole> = { 1: 'boot', 2: 'world', 3: 'skeleton', 4: 'terrain', 5: 'local', 6: 'ui' };
+/**
+ * Pack roles. `worldCore` / `worldChargen` / `worldLand` (STREAM.login-pack-split, docs/dat-streaming.md
+ * §6.16) are the `world` pack's files in three parts: what a login draws (HUD preload art, portal space),
+ * what only character creation draws, and the terrain materials' textures. They are named only by the
+ * pointer (never the manifest); a set that has them keeps the whole `world` pack too, so an older client
+ * (which skips roles it does not know) loads exactly what it did.
+ */
+export type PackRole = 'boot' | 'world' | 'skeleton' | 'terrain' | 'local' | 'ui' | 'worldCore' | 'worldChargen' | 'worldLand';
+/** Manifest `role` byte (tools/publish-dats-r2.ts ROLE). The split roles never appear in a manifest. */
+export const PACK_ROLE_CODE: Readonly<Record<PackRole, number>> = { boot: 1, world: 2, skeleton: 3, terrain: 4, local: 5, ui: 6, worldCore: 7, worldChargen: 8, worldLand: 9 };
+const ROLE_BY_CODE: Record<number, PackRole> = { 1: 'boot', 2: 'world', 3: 'skeleton', 4: 'terrain', 5: 'local', 6: 'ui', 7: 'worldCore', 8: 'worldChargen', 9: 'worldLand' };
 /** Which DAT each pack's files belong to. */
-export const PACK_DAT: Readonly<Record<PackRole, DatName>> = { boot: 'portal', world: 'portal', skeleton: 'portal', terrain: 'cell', local: 'local', ui: 'portal' };
+export const PACK_DAT: Readonly<Record<PackRole, DatName>> = {
+  boot: 'portal', world: 'portal', skeleton: 'portal', terrain: 'cell', local: 'local', ui: 'portal',
+  worldCore: 'portal', worldChargen: 'portal', worldLand: 'portal',
+};
 
 /**
  * Portal file types shipped in the skeleton pack (small structural files:

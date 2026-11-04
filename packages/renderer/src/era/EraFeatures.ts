@@ -17,6 +17,7 @@ import { MAP_MARKER_AREA, MAP_MARKER_AREA_1999, type MapMarkerArea, type MapPlac
 import type { HitLineText, ServerTextSlots } from '../ui/ServerMessageText.js';
 import { FAILURE_EVENT_TEXT_1999, type FailureEventTable } from '../ui/FailureEventText1999.js';
 import { SOCIAL_REFUSAL_LINES_1999, type SocialRefusalTable } from '../ui/SocialRefusalLines1999.js';
+import { SILENT_REFUSAL_LINES_1999 } from '../ui/SilentRefusalLines1999.js';
 import { AC1999_STATUS_LINE, EOR_STATUS_LINE, type StatusLineRules } from '../ui/SpewBoxModel.js';
 import { AC1999_PLACEMENT_TEXT, EOR_PLACEMENT_TEXT, type PlacementText } from '../inventory/ItemHolderPlacement.js';
 import { AC1999_FELLOWSHIP_TEXT, EOR_FELLOWSHIP_TEXT, type FellowshipText } from '../ui/FellowshipPanelActions.js';
@@ -574,6 +575,12 @@ export interface EraClientRules {
    * null: end of retail and Dark Majesty, whose servers say these refusals themselves.
    */
   socialRefusalLines: SocialRefusalTable | null;
+  /**
+   * BUG.ac1999-silent-refusals — end of retail's line for the server codes that answer the player's own
+   * click (an out-of-range cast, a healing kit, a wand, a key) where this era's failure switch has no arm
+   * (ui/SilentRefusalLines1999.ts; a recorded departure from 1999). null: the switch is end of retail's.
+   */
+  silentRefusalLines: FailureEventTable | null;
   /**
    * Whether 0xA0 InventoryServerSaveFailed also runs the failure switch after
    * ServerSaysAttemptFailed's verb line (INV-3). End of retail: yes, unless the code is one of the
@@ -1199,6 +1206,7 @@ const EOR_CLIENT_RULES: EraClientRules = Object.freeze({
   statusLine: EOR_STATUS_LINE, // gmSpewBoxUI, layout 0x2100000f pane 0x10000046 at (0,20)
   failureEventText: null,
   socialRefusalLines: null,
+  silentRefusalLines: null,
   inventoryFailedRunsFailureEvent: true,
   hitLineText: 'eor' as const,
   encumbranceNotice: EOR_ENCUMBRANCE_NOTICE, // CPlayerSystem::OnLoadChanged @ 0055f510
@@ -1298,6 +1306,7 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   statusLine: AC1999_STATUS_LINE, // PanelUI_Arrange @ 0x004fad30, StatusBox_SetStatusText @ 0x005cd4e0
   failureEventText: FAILURE_EVENT_TEXT_1999, // UI_HandleFailureEvent @ 0x004ccd10
   socialRefusalLines: SOCIAL_REFUSAL_LINES_1999, // departure: FellowshipManager::Recruit / TrySwearAllegiance codes 1999 left silent
+  silentRefusalLines: SILENT_REFUSAL_LINES_1999, // departure: cast out of range, healing kit, wand mana, wrong key, moved too far
   inventoryFailedRunsFailureEvent: false, // Net_DispatchServerMessage case 0xa0
   hitLineText: 'ac1999' as const, // Net_HandleAttackerNotification @ 0x004cd7f0 and its three siblings
   encumbranceNotice: AC1999_ENCUMBRANCE_NOTICE, // 0x004fa610 + PanelUI_Global_Loop @ 0x004f4e10

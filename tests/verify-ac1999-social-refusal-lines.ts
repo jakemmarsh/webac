@@ -56,7 +56,8 @@ function client1999(rules: EraClientRules = R1999) {
   h.setHandlers({
     onWeenieError: (d: { errorType: number }) => {
       const departure = memo?.lineFor(d.errorType, clock.t, nameOf) ?? null;
-      const shown = reporter.quietly(() => deliverWeenieError(ui, d.errorType, weenieErrorText(d.errorType), rules.failureEventText, departure?.arm ?? null));
+      const silentLine = departure ? null : rules.silentRefusalLines?.get(d.errorType) ?? null;
+      const shown = reporter.quietly(() => deliverWeenieError(ui, d.errorType, weenieErrorText(d.errorType), rules.failureEventText, departure?.arm ?? silentLine));
       const template = departure && shown.text === departure.arm.text ? departure.template : weenieErrorText(d.errorType);
       reporter.serverCode('weenie_error', d.errorType, template, shown.sink);
     },
@@ -175,11 +176,11 @@ describe('AC1999 0x1C refusals of a swear', () => {
     ]);
   });
 
-  it('0x550 from anything but a swear stays silent (MISSILE_OUT_OF_RANGE elsewhere is 1999-silent)', () => {
+  it('0x550 from anything but a swear reads the same (BUG.ac1999-silent-refusals: an out-of-range cast)', () => {
     const k = client1999();
     k.memo!.note('recruit', RECRUIT, k.clock.t);
     k.attemptFailed(WERROR_1999.MISSILE_OUT_OF_RANGE);
-    expect(k.spew).toEqual([]);
+    expect(k.spew).toEqual(['Out of Range!']);
   });
 });
 

@@ -29,7 +29,7 @@ import {
 import type { GameMessageGroup } from '../GameMessageGroup.js';
 import { EOR_LOGIN_PROFILE, type LoginProfile } from '../LoginProfile.js';
 import {
-  deserializeMessage, parseCharacterCreateResponse, parseCharacterRestoreResponse, parseCreateObject,
+  deserializeMessage, parseCharacterCreateResponse, parseCharacterRestoreResponse, parseCreateObject, parseServerName,
 } from '../MessageSerializer.js';
 import { GameMessageOpcode } from '../GameMessageOpcode.js';
 import { ISAAC } from '../ISAAC.js';
@@ -779,6 +779,8 @@ export class Connection1999 implements NetConnection {
       switch (msg.opcode) {
         case GameMessageOpcode.CharacterList: this.emit({ type: 'characterList', data: msg.payload }); break;
         case GameMessageOpcode.CharSelectNews: this.emit({ type: 'charSelectNews', data: parseCharSelectNews(msg.payload) }); break;
+        // The world name the 0xF65A codec lifts out of the news (BUG.ac1999-charsel-world-name).
+        case GameMessageOpcode.ServerName: this.emit({ type: 'serverName', data: parseServerName(msg.payload) }); break;
         case GameMessageOpcode.CharacterError: {
           const code = msg.payload.length >= 4 ? new DataView(msg.payload.buffer, msg.payload.byteOffset).getUint32(0, true) : 0;
           this.emit({ type: 'error', error: `Server: ${characterErrorMessage(code)}`, characterError: code, loginRetryScheduled: false });

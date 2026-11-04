@@ -16,7 +16,7 @@
 import { chromium, firefox, webkit, type BrowserType, type Page } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DEFAULT_VIEWPORT } from './lib/game-session.js';
+import { DEFAULT_VIEWPORT, typeIntoLauncherField } from './lib/game-session.js';
 
 const args = process.argv.slice(2);
 const opt = (name: string, dflt: string): string => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] ?? dflt : dflt; };
@@ -81,10 +81,8 @@ try {
   // Pick the world row by its name, then the fields and ENTER by mouse.
   const row = page.getByText(world, { exact: true }).first();
   if (await row.count()) await row.click();
-  await page.mouse.click(418, 92);
-  await page.keyboard.type(account, { delay: 20 });
-  await page.mouse.click(418, 160);
-  await page.keyboard.type(password, { delay: 20 });
+  await typeIntoLauncherField(page, 'input.launcher-account', 418, 92, account, 20);
+  await typeIntoLauncherField(page, 'input.launcher-password', 418, 160, password, 20);
   await beat(page, 'credentials', {
     passwordDots: await page.evaluate(() => {
       const p = document.querySelector('.launcher-password') as HTMLInputElement | null;

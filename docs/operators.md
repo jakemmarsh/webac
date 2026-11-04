@@ -150,6 +150,12 @@ world). Of 34 online worlds:
   playwebac.com, and a local GDL-Classic server creates and logs in a fresh
   account on the first try: a transient server-side stall, not a webAC bug
   and not registration.
+- Seedsow and Snowreap (stock GDLE 1.34 account code) create accounts on first
+  login only for names of letters, numbers, `-` and `_`, up to 32 characters
+  (`CDatabaseIO::IsUserNameValid`); any other new name gets "Client logon
+  failed", the same refusal as a wrong password. ACE takes any name, so players
+  who use an email or "first.last" elsewhere hit this. webAC now says so
+  (2026-11-04). It is not an IP limit: webAC players create accounts there freely.
 - Seedsow and Snowreap run Classic Dereth **1.0** data (no Salvaging skill).
   A client on the 1.1 files trains Salvaging at creation and the server
   answers Corrupt ("The server cannot create your new character at this

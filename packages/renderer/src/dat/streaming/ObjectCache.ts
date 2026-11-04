@@ -45,6 +45,28 @@ export class MemoryObjectCache implements ObjectCache {
   async has(hash: string): Promise<boolean> { return this.map.has(hash); }
 }
 
+/**
+ * PERF.cache-read-slower-than-network — a cache whose reads of big objects
+ * take `delayMs` (dev only: `?cacheReadDelayMs=N`, tools/probe-warm-boot-cache.ts).
+ * A stand-in for the disk of 2026-11-04's 4 GB Windows laptop, where one
+ * 24 MB world pack read took 19 s while the rest of the boot read in
+ * milliseconds. Objects under `minBytes` read at the inner cache's speed.
+ */
+export class SlowReadObjectCache implements ObjectCache {
+  readonly persistent: boolean;
+  constructor(private readonly inner: ObjectCache, private readonly delayMs: number, private readonly minBytes = 1 << 20) {
+    this.persistent = inner.persistent;
+  }
+  get openMs(): number | null { return this.inner.openMs ?? null; }
+  async get(hash: string): Promise<Uint8Array | null> {
+    const got = await this.inner.get(hash);
+    if (got && got.byteLength >= this.minBytes) await new Promise((r) => setTimeout(r, this.delayMs));
+    return got;
+  }
+  put(hash: string, gz: Uint8Array): Promise<void> { return this.inner.put(hash, gz); }
+  async has(hash: string): Promise<boolean> { return this.inner.has ? this.inner.has(hash) : false; }
+}
+
 const OPFS_DIR = 'acjs-dat-objects-v1';
 
 /** A worker that writes OPFS files for the page (opfsWrite.worker.ts), as far as the cache drives it. */
