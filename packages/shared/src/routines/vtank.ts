@@ -829,7 +829,13 @@ export function importVTank(files: Array<{ name: string; text: string }>, base: 
     try {
       if (f.kind === 'met') {
         const r = metToProfile(profileName, parseMet(f.text), f.name.replace(/^.*[\\/]/, ''));
-        p = { ...r.value, name: p.name, loot: p.loot.length ? p.loot : r.value.loot, buffSets: p.buffSets, routes: [...p.routes.filter((x) => !r.value.routes.some((y) => y.name === x.name)), ...r.value.routes] };
+        const routes = [...p.routes.filter((x) => !r.value.routes.some((y) => y.name === x.name)), ...r.value.routes];
+        // Into an existing profile a meta replaces only the meta (its states and the routes it embeds), as
+        // VTank loads a .met beside the loaded settings, loot and nav. Before 2026-11-04 the whole profile was
+        // replaced: its VTank options, tabs, loot profiles and loaded route went with it.
+        p = base
+          ? { ...p, states: r.value.states, initialState: r.value.initialState, ruleFiring: r.value.ruleFiring, macro: true, routes }
+          : { ...r.value, name: p.name, loot: p.loot.length ? p.loot : r.value.loot, buffSets: p.buffSets, routes };
         problems.push(...r.problems.map((x) => `${f.name}: ${x}`));
       } else if (f.kind === 'nav') {
         let name = stem(f.name);

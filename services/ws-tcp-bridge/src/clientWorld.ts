@@ -132,6 +132,10 @@ export interface ClientFirstMinuteEvent extends WorldIds {
   /** BUG.hud-text-blank-font-sheet — page totals: blank bitmap-font sheets (rebuilt) and lost 2D canvas contexts. */
   fontSheetBad?: number | null;
   canvas2dLost?: number | null;
+  /** PERF.slow-minute-power-evidence — on mains power, battery level (0..1 in 0.05 steps), the CPU probe's fastest run (ms, 0.1). */
+  charging?: boolean | null;
+  batteryLevel?: number | null;
+  cpuProbeMs?: number | null;
 }
 
 /** frameStep's phases (renderer telemetry/MainThreadCost.ts FRAME_PHASES): phaseMs keeps only these keys. */
@@ -200,6 +204,9 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
   set('serverObjects', uint(b.serverObjects, 1_000_000));
   set('fontSheetBad', uint(b.fontSheetBad, 1_000_000));
   set('canvas2dLost', uint(b.canvas2dLost, 1_000_000));
+  set('charging', bool(b.charging));
+  set('batteryLevel', batteryLevel(b.batteryLevel));
+  set('cpuProbeMs', tenths(b.cpuProbeMs, CPU_PROBE_MAX_MS));
   return out;
 }
 
@@ -207,15 +214,18 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
  * TELEMETRY.portal-use-failed — a portal the player used or walked into that did nothing within 5 s
  * of the last progress (renderer telemetry/PortalUseReporter.ts; ACE Portal.cs), and the light
  * success event with the try → PlayerTeleport time. One per portal per minute per page.
+ * BUG.portal-walk-in-nothing: a try the server answered with a refusal (a WeenieError other than
+ * ActionCancelled, or a portal chat line: a quest, level or age gate, "teleported too recently") is
+ * `portal_refused`, with the failure's fields; `portal_use_failed` is left for tries nothing answered.
  */
-export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_used'] as const;
+export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_used'] as const;
 export const PORTAL_TRIGGERS = ['use', 'walk_in'] as const;
 export const PORTAL_USE_HELD = ['stale', 'busy', 'decided'] as const;
 /** A portal watch's longest wait (renderer PORTAL_MAX_WAIT_MS 30 s, with slack for a late tick). */
 const PORTAL_WAIT_MS = 120_000;
 
 export interface ClientPortalUseFailedEvent extends WorldIds {
-  outcome: 'portal_use_failed';
+  outcome: 'portal_use_failed' | 'portal_refused';
   trigger: typeof PORTAL_TRIGGERS[number] | null;
   wcid: number | null;
   itemType: number | null;
@@ -239,6 +249,8 @@ export interface ClientPortalUseFailedEvent extends WorldIds {
   /** The body's closest horizontal approach to the portal's centre during the watch (m 0.01). */
   closest: number | null;
   serverWalk: boolean | null;
+  /** The player's own movement keys moved them during the watch (after a use: they walked off). */
+  playerMoved: boolean | null;
   useDone: number | null;
   weenieErrors: number[] | null;
   chatLines: number | null;
@@ -307,6 +319,7 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
     held: pick(b.held, PORTAL_USE_HELD),
     overlapped: bool(b.overlapped),
     closest: metres(b.closest, 100_000, 2),
+    playerMoved: bool(b.playerMoved),
     useDone: uint(b.useDone, U32),
     weenieErrors: codes,
     chatLines: uint(b.chatLines, 10_000),
@@ -428,6 +441,21 @@ function dpr(v: unknown): number | null {
 function px100(v: unknown): number | null {
   const n = uint(v, 16_000);
   return n !== null && n % 100 === 0 ? n : null;
+}
+
+/** The renderer's CPU_PROBE_MAX_MS: a probe time is at most this. */
+export const CPU_PROBE_MAX_MS = 1000;
+/** A battery level 0..1 in 0.05 steps (the renderer rounds to them). */
+function batteryLevel(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) return null;
+  const k = Math.round(v * 20);
+  return Math.abs(v * 20 - k) < 1e-6 ? k / 20 : null;
+}
+/** A number 0..max at 0.1 steps. */
+function tenths(v: unknown, max: number): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > max) return null;
+  const k = Math.round(v * 10);
+  return Math.abs(v * 10 - k) < 1e-6 ? k / 10 : null;
 }
 
 /** A WebSocket close code (1000–4999). */

@@ -17,7 +17,7 @@
  * The link ends when the game session does (its reconnect lands on a live bridge).
  */
 import type { AgentCallFrame, PairingReply, RelayLinkNotice } from '@ac/network';
-import { parseAgentCall, parsePairingReply } from '@ac/network';
+import { parseAgentCall, parsePairingReply, WS_CONNECTING, WS_OPEN_TIMEOUT_MS } from '@ac/network';
 
 /** The few WebSocket members the link uses (a browser WebSocket fits; tests pass a fake). */
 export interface LinkSocket {
@@ -144,7 +144,16 @@ export class RelayLink {
     let ws: LinkSocket;
     try { ws = this.o.open(relayLinkUrl(this.o.gameUrl())); } catch { this.scheduleRetry(); return; }
     this.socks.add(ws);
-    ws.onopen = () => { try { ws.send(JSON.stringify({ relayHello: ticket })); } catch { /* closing */ } };
+    // BUG.resume-hung-socket — a link socket still CONNECTING after WS_OPEN_TIMEOUT_MS is not opening (a path that
+    // drops packets waits for the OS's own TCP give-up, a minute or more): drop it and link again on the retry clock.
+    const openTimer = (this.o.setTimer ?? ((fn, t) => setTimeout(fn, t)))(() => {
+      if (ws.readyState !== WS_CONNECTING || this.dropped.has(ws) || !this.socks.has(ws)) return;
+      this.o.log?.(`the relay link did not open in ${WS_OPEN_TIMEOUT_MS / 1000} s`);
+      this.drop(ws);
+      this.scheduleRetry();
+    }, WS_OPEN_TIMEOUT_MS);
+    const stopOpenTimer = () => (this.o.clearTimer ?? ((t) => clearTimeout(t as ReturnType<typeof setTimeout>)))(openTimer);
+    ws.onopen = () => { stopOpenTimer(); try { ws.send(JSON.stringify({ relayHello: ticket })); } catch { /* closing */ } };
     ws.onmessage = (ev) => {
       if (typeof ev.data !== 'string') return;
       const text = ev.data;
@@ -169,6 +178,7 @@ export class RelayLink {
     };
     ws.onerror = () => { /* onclose follows */ };
     ws.onclose = () => {
+      stopOpenTimer();
       this.socks.delete(ws);
       if (ws === this.sock) this.sock = null;
       // A link we dropped (refused, or replaced by a newer one), or one that closed while another is up: nothing to do.

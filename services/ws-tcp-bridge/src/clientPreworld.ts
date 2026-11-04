@@ -24,6 +24,7 @@ export const PREWORLD_OUTCOMES = [
   'chargen_sent', 'chargen_blocked',
   'enter_refused', 'enter_ok', 'dropped', 'page_hidden', 'page_left', 'page_reload', 'boot_slow', 'boot_failed',
   'enter_retry', 'left_for_launcher', 'resume_ended', 'login_retry', 'handover', 'boot_done', 'enter_held',
+  'login_held',
 ] as const;
 export type PreworldOutcome = typeof PREWORLD_OUTCOMES[number];
 
@@ -47,6 +48,14 @@ export const HANDOVER_PATHS = ['adopt', 'relogin'] as const;
  * login on a GDLE world, renderer session/ProvenLoginRetry.ts).
  */
 export const LOGIN_RETRY_KINDS = ['proven', 'first_time'] as const;
+
+/**
+ * BUG.resume-hung-socket — a 'connect_failed''s cause when the page knows the
+ * network was out: 'open_timeout' (the socket stayed CONNECTING until the
+ * client's open timeout, renderer network WsOpenTimeout.ts) or 'offline'
+ * (navigator.onLine was false). Absent on an ordinary failed open.
+ */
+export const CONNECT_FAILED_CAUSES = ['open_timeout', 'offline'] as const;
 
 export const CHARGEN_STEPS = ['heritage', 'profession', 'skills', 'appearance', 'town', 'summary'] as const;
 
@@ -148,6 +157,8 @@ export interface ClientPreworldEvent {
   path?: typeof HANDOVER_PATHS[number];
   /** 'login_retry' only: why the page retried (LOGIN_RETRY_KINDS). */
   retry?: typeof LOGIN_RETRY_KINDS[number];
+  /** 'connect_failed' only: the network was out (CONNECT_FAILED_CAUSES). */
+  why?: typeof CONNECT_FAILED_CAUSES[number];
 }
 
 /**
@@ -227,6 +238,7 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...(outcome === 'dropped' ? netDiagField(b.net) : {}),
     ...(outcome === 'handover' ? handoverFields(b) : {}),
     ...(outcome === 'login_retry' ? loginRetryField(b.retry) : {}),
+    ...(outcome === 'connect_failed' ? connectFailedWhyField(b.why) : {}),
     ...(outcome === 'chargen_ok' || outcome === 'chargen_refused' ? heritageField(b.heritage) : {}),
   };
 }
@@ -263,6 +275,12 @@ export function streamField(v: unknown): { stream?: BootStream[] } {
     if (out.length >= MAX_BOOT_STREAMS) break;
   }
   return out.length ? { stream: out } : {};
+}
+
+/** `{ why }` when it is a known CONNECT_FAILED_CAUSES value, else nothing. */
+export function connectFailedWhyField(v: unknown): Pick<ClientPreworldEvent, 'why'> {
+  const why = pick(v, CONNECT_FAILED_CAUSES);
+  return why ? { why } : {};
 }
 
 /** `{ retry }` when it is a known LOGIN_RETRY_KINDS value, else nothing. */

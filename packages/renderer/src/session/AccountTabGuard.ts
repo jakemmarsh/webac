@@ -22,9 +22,18 @@
  * login with no live tab behind it (a genuine phantom) keeps its retry: no tab
  * answers, so nothing stands down.
  *
- * The claim goes out on the first frame from the server ('serverReached'), not
- * when the socket opens: a connection the bridge refused before it reached the
- * server (its per-IP cap) must not displace the tab that is playing.
+ * The claim goes out once the server let the login in ('handshakeComplete',
+ * its ConnectRequest / the AC1999 grant, or a character list) or answered it
+ * with ACE's CharacterError.Logon (ACE has then booted the other session
+ * already), never when the socket opens: a connection the bridge refused
+ * before it reached the server (its per-IP cap) must not displace the tab
+ * that is playing.
+ *
+ * BUG.second-tab-login-refusal — nor a login the server refused with a
+ * NetError ('serverReached', then an 'error' carrying `serverNetError`):
+ * GDLE's "Player already logged on" (STR_LOGIN_ACCOUNT_ONLINE) leaves the
+ * other session in, so the tab holding it must not be logged out unasked
+ * (Reefcull 2026-11-04). The refused tab asks instead (session/LoginHolder.ts).
  */
 
 /** The BroadcastChannel every webAC tab of this origin shares. */
@@ -52,6 +61,16 @@ export interface SessionChannelLike {
 export interface ClaimSource {
   on(listener: (event: { type: string }) => void): void;
 }
+
+/** The fields of a connection event the claim reads (@ac/network ConnectionEvent). */
+interface ClaimSourceEvent {
+  type: string;
+  characterError?: number;
+  serverNetError?: unknown;
+}
+
+/** ACE's CharacterError.Logon (0x1, @ac/shared): the "account in use" answer that already booted the other session. */
+const CHARACTER_ERROR_LOGON = 0x1;
 
 /**
  * The key a session is held under: the bridge URL that names the server
@@ -87,6 +106,13 @@ export interface WorldPresenceQuery {
   server: string;
   tab: string;
   id: string;
+  /**
+   * BUG.second-tab-login-refusal — set: "who holds exactly this key, in the
+   * world or not?" (a login refused as account-in-use). Only a tab holding
+   * this key with an open session answers. Older builds ignore the field and
+   * answer as to a world query; the asker keeps only same-key answers.
+   */
+  key?: string;
 }
 
 /** A tab in the world on the queried server answers with its key and character. */
@@ -99,6 +125,8 @@ export interface WorldPresenceReply {
   tab: string;
   key: string;
   character: string | null;
+  /** BUG.second-tab-login-refusal — the answering tab has a character in the world (absent from older builds: in the world). */
+  inWorld?: boolean;
 }
 
 /**
@@ -111,7 +139,16 @@ export interface LogoutRequest {
   key: string;
   to: string;
   from: string;
+  /**
+   * Why: 'enter' (the default: the asking tab's enter was refused; acted on
+   * only from the world) or 'login' (BUG.second-tab-login-refusal: its login
+   * was refused; acted on at any stage while this tab's session is open).
+   */
+  reason?: LogoutReason;
 }
+
+/** Why another tab asked this one to log out. */
+export type LogoutReason = 'enter' | 'login';
 
 /** A tab of this browser in the world on the same server (WorldPresenceReply, read). */
 export interface WorldHolder {
@@ -119,6 +156,8 @@ export interface WorldHolder {
   character: string | null;
   /** It holds the same server + account as the asking tab. */
   sameAccount: boolean;
+  /** BUG.second-tab-login-refusal — it has a character in the world (false: at character select or in chargen). */
+  inWorld?: boolean;
 }
 
 /** How long a world query waits for answers (BroadcastChannel delivery is a task away; a busy tab answers in a frame or two). */
@@ -156,13 +195,21 @@ export interface AccountTabGuardOptions {
    * the world on the same server and account, asked this tab to log out
    * (its player chose to). The guard has already let the key go.
    */
-  onLogoutRequested?: (key: string) => void;
+  onLogoutRequested?: (key: string, reason: LogoutReason) => void;
   /**
    * This tab's character in the world under the key it holds, or null when
    * it is not in the world (main.ts reads SessionLifecycle.inWorld). Without
    * it the tab never counts as in the world.
    */
   worldCharacter?: () => { name: string | null } | null;
+  /**
+   * BUG.second-tab-login-refusal — this tab's session with the server is
+   * open (main.ts reads the connection). A tab left on a Disconnected screen
+   * still holds its key but no longer holds the account on the server: it
+   * neither answers an account query nor acts on a login's logout request.
+   * Without it the session counts as open.
+   */
+  sessionLive?: () => boolean;
   tabId?: string;
   now?: () => number;
   /** Timers (tests). */
@@ -201,6 +248,11 @@ export class AccountTabGuard {
     this.held = null;
   }
 
+  /** This tab holds a key and its session with the server is open. */
+  private get sessionLive(): boolean {
+    return this.held !== null && (this.opts.sessionLive?.() ?? true);
+  }
+
   /** This tab holds `heldKey` with a character in the world. */
   get inWorld(): boolean {
     return this.held !== null && this.opts.worldCharacter?.() != null;
@@ -212,13 +264,26 @@ export class AccountTabGuard {
    * channel (an old browser): none.
    */
   queryWorldHolders(key: string, waitMs: number = WORLD_QUERY_WAIT_MS): Promise<WorldHolder[]> {
+    return this.query(key, false, waitMs);
+  }
+
+  /**
+   * BUG.second-tab-login-refusal — the tabs of this browser holding exactly
+   * `key` (this server AND account) with an open session, in the world or
+   * not, answered within `waitMs`. No channel (an old browser): none.
+   */
+  async queryAccountHolders(key: string, waitMs: number = WORLD_QUERY_WAIT_MS): Promise<WorldHolder[]> {
+    return (await this.query(key, true, waitMs)).filter((h) => h.sameAccount);
+  }
+
+  private query(key: string, anyStage: boolean, waitMs: number): Promise<WorldHolder[]> {
     const channel = this.opts.channel;
     if (!channel) return Promise.resolve([]);
     const id = `${this.tabId}:${++this.querySeq}`;
     const server = serverOfSessionKey(key);
     const entry = { server, key, holders: [] as WorldHolder[] };
     this.pending.set(id, entry);
-    const query: WorldPresenceQuery = { kind: 'webac-world-query', server, tab: this.tabId, id };
+    const query: WorldPresenceQuery = { kind: 'webac-world-query', server, tab: this.tabId, id, ...(anyStage ? { key } : {}) };
     try { channel.postMessage(query); } catch { this.pending.delete(id); return Promise.resolve([]); }
     const later = this.opts.setTimeout ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
     return new Promise((resolve) => {
@@ -241,11 +306,44 @@ export class AccountTabGuard {
     return true;
   }
 
-  /** Claim on each socket's first frame from the server, under the key the page names now. */
+  /**
+   * BUG.second-tab-login-refusal — ask the tab `holder` (a queryAccountHolders
+   * answer) to log out so this tab's refused login can get in, under `key`,
+   * the key that login asked for (a refused login holds none: it never
+   * claims). Only for a holder of that same key: false (nothing sent) for
+   * any other account or world.
+   */
+  requestLogoutForLogin(holder: WorldHolder, key: string): boolean {
+    if (!holder.sameAccount || holder.tab === this.tabId) return false;
+    const req: LogoutRequest = { kind: 'webac-logout-request', key, to: holder.tab, from: this.tabId, reason: 'login' };
+    try { this.opts.channel?.postMessage(req); } catch { return false; }
+    return true;
+  }
+
+  /**
+   * Claim when a socket's login got in (or ACE refused it with
+   * CharacterError.Logon, having booted the other session), under the key the
+   * page named when the server first answered; never for a login the server
+   * refused with a NetError (BUG.second-tab-login-refusal).
+   */
   watch(connection: ClaimSource, key: () => string | null): void {
+    let pending: string | null = null;
     connection.on((event) => {
-      if (event.type !== 'serverReached') return;
-      const k = key();
+      const e = event as ClaimSourceEvent;
+      switch (e.type) {
+        case 'serverReached': pending = key(); return;
+        case 'handshakeComplete':
+        case 'characterList':
+          break;
+        case 'error':
+          if (e.serverNetError) { pending = null; return; }
+          if (e.characterError !== CHARACTER_ERROR_LOGON) return;
+          break;
+        case 'disconnected': pending = null; return;
+        default: return;
+      }
+      const k = pending;
+      pending = null;
       if (k) this.claim(k);
     });
   }
@@ -270,10 +368,16 @@ export class AccountTabGuard {
   private answerWorldQuery(q: WorldPresenceQuery): void {
     if (typeof q.server !== 'string' || typeof q.tab !== 'string' || typeof q.id !== 'string') return;
     if (q.tab === this.tabId || !this.held) return;
-    const world = this.opts.worldCharacter?.();
-    if (!world || serverOfSessionKey(this.held.key) !== q.server) return;
+    const world = this.opts.worldCharacter?.() ?? null;
+    if (typeof q.key === 'string') {
+      // An account query (a refused login): only the exact key, with the session still open.
+      if (q.key !== this.held.key || !this.sessionLive) return;
+    } else if (!world || serverOfSessionKey(this.held.key) !== q.server) {
+      return;
+    }
     const reply: WorldPresenceReply = {
-      kind: 'webac-world-presence', id: q.id, to: q.tab, tab: this.tabId, key: this.held.key, character: world.name,
+      kind: 'webac-world-presence', id: q.id, to: q.tab, tab: this.tabId, key: this.held.key,
+      character: world?.name ?? null, inWorld: world !== null,
     };
     try { this.opts.channel?.postMessage(reply); } catch { /* a closed channel: nothing to answer */ }
   }
@@ -283,16 +387,22 @@ export class AccountTabGuard {
     const entry = this.pending.get(r.id);
     if (!entry || serverOfSessionKey(r.key) !== entry.server) return;
     if (entry.holders.some((h) => h.tab === r.tab)) return;
-    entry.holders.push({ tab: r.tab, character: typeof r.character === 'string' ? r.character : null, sameAccount: r.key === entry.key });
+    entry.holders.push({
+      tab: r.tab, character: typeof r.character === 'string' ? r.character : null, sameAccount: r.key === entry.key,
+      inWorld: r.inWorld !== false,
+    });
   }
 
   private receiveLogoutRequest(r: LogoutRequest): void {
     if (r.to !== this.tabId || r.from === this.tabId) return;
-    // Only the exact key this tab holds (same server AND account), and only from the world.
-    if (!this.held || r.key !== this.held.key || !this.inWorld) return;
+    // Only the exact key this tab holds (same server AND account); for an enter only from the
+    // world, for a login at any stage while the session is open.
+    const reason: LogoutReason = r.reason === 'login' ? 'login' : 'enter';
+    if (!this.held || r.key !== this.held.key) return;
+    if (reason === 'enter' ? !this.inWorld : !this.sessionLive) return;
     const key = this.held.key;
     this.held = null;
-    console.log('[AC] another tab of this account asked to enter the world: this tab logs out');
-    this.opts.onLogoutRequested?.(key);
+    console.log(`[AC] another tab of this account asked to ${reason === 'login' ? 'log in' : 'enter the world'}: this tab logs out`);
+    this.opts.onLogoutRequested?.(key, reason);
   }
 }

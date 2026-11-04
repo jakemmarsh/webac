@@ -133,7 +133,10 @@ describe('a live session', () => {
     expect(r.decisions.at(-1)).toEqual({ dropped: true });
     // Simulate a session the page still holds as live when the replacement socket fails (no 'disconnected' in between).
     r.live.noteCharacterList();
-    vi.advanceTimersByTime(60_000);
+    // The reconnect opens its socket after 2 s; the browser fails it before its own open timeout
+    // (15 s, BUG.resume-hung-socket: past it the connection gives up on the socket itself).
+    vi.advanceTimersByTime(5_000);
+    expect(FakeSocket.instances).toHaveLength(2);
     const failed = FakeSocket.instances[1];
     expect(failed).toBeTruthy();
     failed.die();

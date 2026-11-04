@@ -54,6 +54,7 @@ import { FragmentAssembler } from './FragmentAssembler.js';
 import { MAX_SERVER_PACKET_SIZE } from './PacketBuilder.js';
 import { LinkStatusAverages } from './LinkStatusAverages.js';
 import { SocketHandover, type HandoverResult, type HandoverSocket } from './SocketHandover.js';
+import { armOpenTimeout, WS_OPEN_TIMEOUT_MS } from './WsOpenTimeout.js';
 import { type NetDiagnostics, TxRing, hex32, joinLabels, messageLabel, msAgo } from './NetDiagnostics.js';
 import { ThreadStallClock, silenceIsOwnStall, type LinkSample } from './ThreadStall.js';
 import type { GameMessage, CharacterCreateResponseData, CharacterRestoreResponseData, CreateObjectData } from './MessageSerializer.js';
@@ -155,6 +156,10 @@ export type ConnectionEventType =
   // session's player logoff + cleanup completes (~10-60s), so a timed
   // retry recovers without a manual page reload.
   | 'loginRetry'
+  // BUG.second-tab-login-refusal — the login has gone unanswered a while (no
+  // ConnectRequest / grant, no refusal) and still resends: some GDLE builds
+  // ignore a second login on an account that is in silently. Once per login.
+  | 'loginUnanswered'
   // FAITHFUL: DDD_BeginDDD/DDD_DataMessage previously fell through to the
   // generic no-op case (see MessageSerializer.ts DDD parser comments) — now
   // parsed and dispatched so a future patching UI (or at minimum a visible
@@ -256,6 +261,14 @@ export interface ConnectionEvent {
    * session cap. No 'disconnected' follows.
    */
   bridgeRefusal?: BridgeRefusal;
+  /**
+   * BUG.resume-hung-socket — on type==='error' with ID_NetError_CantSocket: the
+   * socket never failed on its own but was still CONNECTING after
+   * WS_OPEN_TIMEOUT_MS (WsOpenTimeout.ts), so the client gave up on it: no
+   * answer at all from the bridge's address (a network path that drops
+   * packets). A 'disconnected' follows, as after any socket that never opened.
+   */
+  openTimedOut?: boolean;
 }
 
 /** A NetError optional header's payload (`NetError::UnPack @ 004114a0`: u32 m_stringID, u32 m_tableID). */
@@ -428,6 +441,8 @@ export class ClientConnection {
   private maxReconnectAttempts: number = 5;
   private reconnectDelay: number = 2000; // ms, doubles each attempt
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** BUG.resume-hung-socket — disarms the open timeout of the socket connect() opened (WsOpenTimeout.ts). */
+  private disarmOpenTimeout: (() => void) | null = null;
   private lastAccount: string = '';
   private lastPassword: string = '';
   autoReconnect: boolean = true;
@@ -602,6 +617,15 @@ export class ClientConnection {
   // 5 s apart, and give up at 25 s.
   static readonly LOGIN_RETRY_INTERVAL = 2000;
   static readonly LOGIN_MAX_RETRIES = 19;
+  /**
+   * BUG.second-tab-login-refusal — the resend at which the login counts as
+   * unanswered ('loginUnanswered'): the 2nd, 4 s after the first send, with
+   * three LoginRequests out and no reply. A server that is up answers within
+   * one round trip (prod char_list arrives 0.3-0.6 s after the login), and the
+   * 2 s resend already covers one lost datagram; GDLE's silent "account is
+   * in" (AcceptClientLogin, docs/gdle-compat.md) never answers at all.
+   */
+  static readonly LOGIN_UNANSWERED_AFTER_RETRIES = 2;
 
 
   /** DAT iteration counts for DDD_InterrogationResponse (must match server's DATs). */
@@ -888,10 +912,17 @@ export class ClientConnection {
 
     this.wsEverOpened = false;
     this.deliberateClose = false;
-    this.ws = new WebSocket(this.url);
+    const socket = new WebSocket(this.url);
+    this.ws = socket;
     this.ws.binaryType = 'arraybuffer';
+    this.stopOpenTimeout();
+    this.disarmOpenTimeout = armOpenTimeout(socket, () => {
+      this.disarmOpenTimeout = null;
+      if (this.ws === socket) this.openTimedOut(socket);
+    });
 
     this.ws.onopen = () => {
+      this.stopOpenTimeout();
       this.wsEverOpened = true;
       this.reconnectAttempts = 0;
       this.emit({ type: 'connected' });
@@ -899,6 +930,30 @@ export class ClientConnection {
       this.startLoginRetry(account, password);
     };
     this.attachSocket(this.ws, false);
+  }
+
+  private stopOpenTimeout(): void {
+    this.disarmOpenTimeout?.();
+    this.disarmOpenTimeout = null;
+  }
+
+  /**
+   * BUG.resume-hung-socket — the socket connect() opened is still CONNECTING
+   * after WS_OPEN_TIMEOUT_MS: give up on it and report it exactly as a socket
+   * that failed to open (onerror's CantSocket, then the close's 'disconnected'),
+   * so the page's own failure path runs: a resume's next attempt, or the
+   * launcher's CantSocket dialog. Its handlers go first, so a late browser
+   * error / close on it reports nothing twice.
+   */
+  private openTimedOut(socket: WebSocket): void {
+    console.warn(`[AC:NET] The bridge socket did not open in ${WS_OPEN_TIMEOUT_MS / 1000} s — giving up on it (${this.url})`);
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onclose = null;
+    socket.onerror = null;
+    try { socket.close(); } catch { /* still connecting */ }
+    this.emit({ type: 'error', error: 'WebSocket open timed out', netErrorId: 'ID_NetError_CantSocket', openTimedOut: true });
+    this.handleSocketEnded(socket, 'socket_closed');
   }
 
   /**
@@ -920,6 +975,7 @@ export class ClientConnection {
     };
 
     socket.onerror = () => {
+      if (this.ws === socket) this.stopOpenTimeout();
       if (!this.wsEverOpened) {
         console.warn(`[AC:NET] Bridge not reachable at ${this.url} — start: npx tsx services/ws-tcp-bridge/src/bridge.ts`);
         // CORE.17.k.b — the browser client's local socket layer could not be
@@ -1022,6 +1078,7 @@ export class ClientConnection {
     if (this.ws !== null && this.ws !== socket) return;
     this.sessionEndedFor = socket;
     this.cancelHandover();
+    this.stopOpenTimeout();
     if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
     this.stopConnectResponseRetry();
     this.stopLoginRetry();
@@ -1041,6 +1098,7 @@ export class ClientConnection {
    * login stops and the page shows why.
    */
   private handleBridgeRefusal(socket: WebSocket, refusal: BridgeRefusal): void {
+    this.stopOpenTimeout();
     this.sessionEndedFor = socket;
     this.ws = null;
     this.stopLoginRetry();
@@ -1103,6 +1161,7 @@ export class ClientConnection {
    * For a login that ended before any session existed.
    */
   private detachSocket(): void {
+    this.stopOpenTimeout();
     const socket = this.ws;
     if (!socket) return;
     this.sessionEndedFor = socket;
@@ -1166,6 +1225,7 @@ export class ClientConnection {
         this.emit({ type: 'error', error: 'Login timed out', netErrorId: 'ID_ConnectionError_ClientTimedOutServer' });
         return;
       }
+      if (this.loginRetryCount === ClientConnection.LOGIN_UNANSWERED_AFTER_RETRIES) this.emit({ type: 'loginUnanswered' });
       console.log(`[AC:NET] No ConnectRequest received, retrying LoginRequest (${this.loginRetryCount}/${ClientConnection.LOGIN_MAX_RETRIES})`);
       this.sendLoginRequest(this.lastAccount, this.lastPassword);
     }, ClientConnection.LOGIN_RETRY_INTERVAL);
@@ -1212,6 +1272,7 @@ export class ClientConnection {
 
   disconnect(): void {
     this.cancelHandover();
+    this.stopOpenTimeout();
     this.autoReconnect = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);

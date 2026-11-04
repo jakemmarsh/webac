@@ -17,6 +17,7 @@ import { AgentRelay, accountKey } from '../services/ws-tcp-bridge/src/relay';
 import { OAuthServer, RELAY_TICKET_MS } from '../services/ws-tcp-bridge/src/oauth';
 import { parseRelayLinkNotice } from '../packages/network/src/ClientConnection';
 import { RelayLink, RELINK_DELAYS_MS, relayLinkUrl, type LinkSocket } from '../packages/renderer/src/agent/relayLink';
+import { WS_OPEN_TIMEOUT_MS } from '../packages/network/src/WsOpenTimeout';
 import { TabRelay } from '../packages/renderer/src/agent/relayTab';
 
 function str16(s: string): Buffer {
@@ -263,14 +264,55 @@ describe('the pieces', () => {
     // The new deployment restarts: the link closes; it relinks after the first delay.
     socks[0].readyState = 3;
     socks[0].onclose?.({});
-    expect(timers.map((t) => t.ms)).toEqual([RELINK_DELAYS_MS[0]]);
-    timers[0].fn();
+    // (Each link socket also arms its open timeout: BUG.resume-hung-socket.)
+    const retries = () => timers.filter((t) => t.ms !== WS_OPEN_TIMEOUT_MS);
+    expect(retries().map((t) => t.ms)).toEqual([RELINK_DELAYS_MS[0]]);
+    retries()[0].fn();
     expect(tickets).toBe(2);
     link.onNotice({ kind: 'ticket', ticket: 'l1.t2', draining: true });
     expect(socks.length).toBe(2);
     link.reset();
     expect(socks[1].readyState).toBe(3);
-    expect(timers.length).toBe(1); // a dropped link doesn't retry
+    expect(retries().length).toBe(1); // a dropped link doesn't retry
+  });
+
+  it('BUG.resume-hung-socket: a link socket that never opens is dropped at the open timeout and linked again; an open one never is', () => {
+    const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+    const socks: Array<LinkSocket & { sent: string[]; readyState: number; closed: boolean }> = [];
+    let tickets = 0;
+    const logs: string[] = [];
+    const link = new RelayLink({
+      gameUrl: () => 'wss://bridge.example/?server=x',
+      requestTicket: () => { tickets++; },
+      // Sockets start CONNECTING (0), as a browser WebSocket does.
+      open: () => { const s = { readyState: 0, closed: false, sent: [] as string[], send(t: string) { this.sent.push(t); }, close() { this.closed = true; this.readyState = 3; }, onopen: null, onmessage: null, onclose: null, onerror: null } as LinkSocket & { sent: string[]; readyState: number; closed: boolean }; socks.push(s); return s; },
+      onCall: () => {}, onPairing: () => {}, onLinked: () => {},
+      log: (t) => logs.push(t),
+      setTimer: (fn, ms) => { timers.push({ fn, ms, cleared: false }); return timers.length - 1; },
+      clearTimer: (h) => { timers[h as number].cleared = true; },
+    });
+    link.onNotice({ kind: 'draining' });
+    link.onNotice({ kind: 'ticket', ticket: 'l1.t', draining: true });
+    const openTimer = timers.find((t) => t.ms === WS_OPEN_TIMEOUT_MS)!;
+    expect(openTimer).toBeDefined();
+    // Still CONNECTING at the timeout: dropped, and the retry clock links again.
+    openTimer.fn();
+    expect(socks[0].closed).toBe(true);
+    expect(logs.some((l) => l.includes('did not open'))).toBe(true);
+    const retry = timers.filter((t) => t.ms === RELINK_DELAYS_MS[0]);
+    expect(retry).toHaveLength(1);
+    retry[0].fn();
+    expect(tickets).toBe(2);
+    // The next socket opens in time: its open timer is cleared, and firing it anyway does nothing.
+    link.onNotice({ kind: 'ticket', ticket: 'l1.t2', draining: true });
+    const second = timers.filter((t) => t.ms === WS_OPEN_TIMEOUT_MS)[1];
+    socks[1].readyState = 1;
+    socks[1].onopen?.({});
+    expect(second.cleared).toBe(true);
+    second.fn();
+    expect(socks[1].closed).toBe(false);
+    socks[1].onmessage?.({ data: '{"relayLinked":{"ok":true}}' });
+    expect(link.linked).toBe(true);
   });
 
   it('a tab with Claude off opens no link on a drain; a pairing code typed then links and goes once linked', () => {

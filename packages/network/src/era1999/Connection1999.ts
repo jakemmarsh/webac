@@ -38,6 +38,7 @@ import { type NetDiagnostics, TxRing, hex32, messageLabel, msAgo } from '../NetD
 import type { DisconnectCause } from '../ClientConnection.js';
 import { bridgeRefusalFromClose } from '../BridgeRefusal.js';
 import { SocketHandover, type HandoverResult, type HandoverSocket } from '../SocketHandover.js';
+import { armOpenTimeout, WS_OPEN_TIMEOUT_MS } from '../WsOpenTimeout.js';
 import { Adapter1999, Group1999 } from './Adapter1999.js';
 import { codecs1999 } from './codecs/index.js';
 import { parseCharSelectNews } from './codecs/CharSelect1999.js';
@@ -328,8 +329,16 @@ export class Connection1999 implements NetConnection {
     }
   }
 
+  /** BUG.resume-hung-socket — disarms the open timeout of the socket connect() opened (WsOpenTimeout.ts). */
+  private disarmOpenTimeout: (() => void) | null = null;
+  private stopOpenTimeout(): void {
+    this.disarmOpenTimeout?.();
+    this.disarmOpenTimeout = null;
+  }
+
   connect(account: string, password: string): void {
     this.cancelHandover();
+    this.stopOpenTimeout();
     if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null; }
     this.stopLoginTimer();
     if (this.serviceTimer) clearInterval(this.serviceTimer);
@@ -349,14 +358,34 @@ export class Connection1999 implements NetConnection {
     const ws = new WebSocket(withProto1999(this.url));
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    // BUG.resume-hung-socket — as ClientConnection: a socket still CONNECTING after
+    // WS_OPEN_TIMEOUT_MS is reported as one that failed to open (CantSocket, then 'disconnected').
+    this.disarmOpenTimeout = armOpenTimeout(ws, () => {
+      this.disarmOpenTimeout = null;
+      if (ws !== this.ws) return;
+      console.warn(`[1999] The bridge socket did not open in ${WS_OPEN_TIMEOUT_MS / 1000} s — giving up on it`);
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      try { ws.close(); } catch { /* still connecting */ }
+      this.emit({ type: 'error', error: 'Bridge connection timed out', netErrorId: 'ID_NetError_CantSocket', openTimedOut: true });
+      // The page may have left the socket from the error (disconnect(), which reported the end itself).
+      if (ws === this.ws) this.ended();
+    });
     ws.onopen = () => {
       if (ws !== this.ws) return;
+      this.stopOpenTimeout();
       this.everOpened = true;
       this.emit({ type: 'connected' });
       this.sendLogin();
       this.loginTimer = setInterval(() => {
         if (this.granted) { this.stopLoginTimer(); return; }
         if (this.loginSends >= LOGIN_MAX_SENDS) { this.loginTimedOut(); return; }
+        // BUG.second-tab-login-refusal — as ClientConnection: unanswered at the first resend (6 s).
+        // The AC1999 server answers a second login on an account (it admits it, dropping the old
+        // session: Network.cpp:665-680), so this is only a slow or silent server here.
+        if (this.loginSends === 1) this.emit({ type: 'loginUnanswered' });
         this.sendLogin();
       }, LOGIN_RESEND_MS);
       this.serviceTimer = setInterval(() => this.service(), SERVICE_MS);
@@ -396,6 +425,7 @@ export class Connection1999 implements NetConnection {
     };
     ws.onerror = () => {
       if (ws !== this.ws) return;
+      this.stopOpenTimeout();
       // A socket that never opened is retail ClientNet::InitAddresses' ID_NetError_CantSocket, as on
       // ClientConnection: without it the page kept "Please Wait" up forever (an unreachable Custom… bridge).
       if (!this.everOpened) { this.emit({ type: 'error', error: 'Bridge connection error', netErrorId: 'ID_NetError_CantSocket' }); return; }
@@ -467,6 +497,7 @@ export class Connection1999 implements NetConnection {
 
   private ended(closeCode?: number): void {
     this.cancelHandover();
+    this.stopOpenTimeout();
     this.stopLoginTimer();
     if (this.serviceTimer) clearInterval(this.serviceTimer);
     this.serviceTimer = null;

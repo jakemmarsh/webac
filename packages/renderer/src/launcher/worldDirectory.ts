@@ -468,6 +468,9 @@ export async function probeBridgeEra(
   return (await probeCustomBridge(bridgeUrl, fetchFn, health)).era;
 }
 
+/** The custom bridge's /healthz fallback gives up after this (its WebSocket health probe: 3 s). */
+export const HEALTHZ_TIMEOUT_MS = 5000;
+
 /**
  * probeBridgeEra, also saying whether the bridge answered at all: `reachable`
  * is false when neither its WebSocket health probe nor its /healthz answered
@@ -488,7 +491,9 @@ export async function probeCustomBridge(
   const origin = bridgeHttpOrigin(bridgeUrl);
   if (!origin) return { reachable: false, era: null };
   try {
-    const resp = await fetchFn(`${origin}/healthz`, { cache: 'no-store' });
+    // BUG.resume-hung-socket — bounded like the WebSocket probe: a fetch on a path that drops packets waits for the OS's TCP give-up.
+    const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(HEALTHZ_TIMEOUT_MS) : undefined;
+    const resp = await fetchFn(`${origin}/healthz`, { cache: 'no-store', ...(signal ? { signal } : {}) });
     if (!resp.ok) return { reachable: true, era: null };
     return { reachable: true, era: eraIdFrom(((await resp.json()) as { era?: unknown }).era) };
   } catch {

@@ -409,8 +409,10 @@ import { handleUnexpectedDrop } from './session/UnexpectedDrop.js';
 import { SessionLiveness, sessionDropped, liveSessionSocketFailed, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
-import { AccountTabGuard, accountSessionKey, openSessionChannel } from './session/AccountTabGuard.js';
+import { ResumeRunner, windowOnlineSource } from './session/ResumeRunner.js';
+import { AccountTabGuard, accountSessionKey, openSessionChannel, type LogoutReason } from './session/AccountTabGuard.js';
 import { InWorldEnterWait, LOGGED_OUT_FOR_OTHER_TAB_TEXT } from './session/InWorldHolder.js';
+import { LoginHolderWait, LOGGED_OUT_FOR_LOGIN_TEXT, stoodDownForOtherTabText } from './session/LoginHolder.js';
 import { SquelchState } from './session/SquelchState.js';
 import { LastOutsideDeathState } from './session/LastOutsideDeathState.js';
 // ASSESS — relative import: the new delete/restore builders live in
@@ -1369,6 +1371,8 @@ async function main() {
   // PERF.slow-first-minute-diagnostics — the main-thread work outside frameStep (telemetry/MainThreadCost.ts).
   worldReporter.setHandlerMeters(netHandlerCost, streamHandlerCost);
   worldReporter.install(window, document, canvas);
+  // PERF.slow-minute-power-evidence — battery / mains power, asked once now and never awaited.
+  worldReporter.readBattery(navigator as Navigator & { getBattery?: () => Promise<unknown> });
   automationReporter = new AutomationReporter({
     endpoint: PreworldReporter.endpointFor(runtimeConfig.bridgeUrl),
     build: (import.meta.env.VITE_ACJS_BUILD_ID as string | undefined) ?? DEV_BUILD_ID,
@@ -3717,9 +3721,16 @@ async function main() {
     if (!portalUseReporter || now - portalCheckAt < 100) return;
     portalCheckAt = now;
     refusalReporter?.tick();
-    portalUseReporter.tick(cameraController.isMoving || (playerMoveTo?.isMovingTo() ?? false));
+    // BUG.portal-walk-in-nothing — only the server's walk extends a use's wait; the player's own keys
+    // mark it walked-off (retail cancels a use's walk on a movement command), and a death drops it.
+    portalUseReporter.tick({
+      serverWalking: playerMoveTo?.isMovingTo() ?? false,
+      playerMoving: cameraController.isMoving,
+      dead: playerState.isDead,
+    });
     if (!gameStarted || !serverObjectManager || gameUI.worldHiddenByPortalSpace || teleportBusy.value || playerState.isDead) return;
     const inside: number[] = [];
+    const insideAt: number[] = [];
     const body = serverObjectManager.getObject(aceCharGuid ?? myPlayerGuid ?? 0)?.physicsSpheres;
     const watched = portalUseReporter.watching;
     for (const o of serverObjectManager.getAllObjects().values()) {
@@ -3734,9 +3745,11 @@ async function main() {
       const touching = body?.length && o.physicsSpheres?.length
         ? bodyTouchesPortal(horizontal, o.worldY - playerFeetY, body, o.physicsSpheres)
         : overlapsPortal(horizontal, o.worldY - playerFeetY, fixtureReach(o), 0);
-      if (touching) inside.push(o.guid);
+      if (touching) { inside.push(o.guid); insideAt.push(horizontal); }
     }
     portalUseReporter.overlaps(inside);
+    // The touch that starts a walk-in watch is its first (often its closest) approach.
+    inside.forEach((g, i) => portalUseReporter!.approach(g, insideAt[i]));
   }
   /** The server's latest UpdatePosition echo of us (the agent's checkpoints wait on it; AgentHost.serverSelfPosition). */
   let serverSelfEcho: { cell: number; x: number; y: number; z: number; at: number } | null = null;
@@ -8428,11 +8441,14 @@ async function main() {
   // BUG.second-tab-in-world-refusal — this tab answers another tab's "who is in the world
   // on this server?" with its character (worldCharacter), and logs out when that tab's
   // player chose "log out that tab and enter here" for this same server + account.
+  // BUG.second-tab-login-refusal — and answers a refused login's "who holds this account?" (any
+  // stage, while its session is open), logging out when that tab's player chose to log in there.
   const accountTabGuard = new AccountTabGuard({
     channel: openSessionChannel(),
     onStandDown: () => standDownForOtherTab(),
-    onLogoutRequested: () => logOutForOtherTab(),
+    onLogoutRequested: (_key, reason) => logOutForOtherTab(reason),
     worldCharacter: () => (sessionLifecycle.inWorld ? { name: worldCharacterName } : null),
+    sessionLive: () => aceConnection.isConnected,
   });
   accountTabGuard.watch(aceConnection, () => (aceAccount ? accountSessionKey(connectUrl, aceAccount) : null));
   // Disable auto-reconnect — prevents cascading duplicate sessions
@@ -8577,7 +8593,35 @@ async function main() {
   const cancelProvenLoginRetry = (): void => {
     if (provenLoginRetryTimer !== null) { clearTimeout(provenLoginRetryTimer); provenLoginRetryTimer = null; }
     provenLoginRetry.cancel();
+    loginHolderWait.cancel();
   };
+  // BUG.second-tab-login-refusal — a login refused as "Player already logged on" (GDLE): this
+  // browser's other tabs are asked who holds the account; a tab → Yes / No to log it out and log
+  // in here (then bounded quiet logins); none → retail's text and hint as before
+  // (session/LoginHolder.ts). The refusal being answered, for the dialog it ends in.
+  let loginHolderRefusal: { event: ConnectionEvent; notice: ConnectionNotice } | null = null;
+  const loginHolderWait = new LoginHolderWait({
+    resuming: () => sessionLifecycle.resumingAfterDrop,
+    queryHolders: () => (aceAccount ? accountTabGuard.queryAccountHolders(accountSessionKey(connectUrl, aceAccount)) : Promise.resolve([])),
+    requestLogout: (holder) => !!aceAccount && accountTabGuard.requestLogoutForLogin(holder, accountSessionKey(connectUrl, aceAccount)),
+    confirm: (text, onAnswer) => { gameUI.showConfirmationDialog(text, onAnswer); return () => gameUI.hideConfirmationDialog(); },
+    login: () => {
+      console.log('[AC] ACE: logging in again now that the other tab was asked to log out');
+      aceConnection.autoReconnect = false;
+      aceConnection.connect(aceAccount, acePassword);
+    },
+    schedule: (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); },
+    setStatus: (text) => gameUI.setConnectingStatus(text),
+    refuse: (text) => {
+      const r = loginHolderRefusal;
+      loginHolderRefusal = null;
+      if (!r || gameStarted) return;
+      preworldReporter?.connectionError(r.event, r.notice.token || null);
+      raiseNetError(r.notice, text ?? undefined);
+    },
+    stillWaiting: () => !launcherActive && !gameStarted,
+    report: (kind) => preworldReporter?.loginHeld(kind),
+  });
 
   // ── CORE.17.k.b — retail connection-loss reporting ─────────────────────
   // gmUIFlow::RecvNotice_ServerDied @ 0047a9a0 queues the Disconnected UI
@@ -8621,20 +8665,30 @@ async function main() {
    * only the NetConnection surface (connect/disconnect), so every era's
    * connection resumes the same way. Not retail (it had no auto-reconnect):
    * a named exception in CLAUDE.md.
+   *
+   * BUG.resume-hung-socket — `unreachable`: the attempt that just failed found
+   * no network (the browser offline, or its socket's open timed out with no
+   * answer): it is not counted while RESUME_UNREACHABLE_GRACE_MS lasts, and
+   * an attempt due while offline waits for 'online' first (ResumeRunner).
    */
-  const scheduleResume = (): boolean => {
-    const delay = sessionLifecycle.nextResumeDelay();
-    if (delay === null) return false;
+  const resumeRunner = new ResumeRunner({
+    lifecycle: sessionLifecycle,
+    connect: () => {
+      aceConnection.autoReconnect = false;
+      aceConnection.connect(aceAccount, acePassword);
+    },
+    online: windowOnlineSource(window),
+    log: (text) => console.log(text),
+  });
+  const scheduleResume = (opts: { unreachable?: boolean } = {}): boolean => {
+    const delay = sessionLifecycle.nextResumeDelay({ unreachable: opts.unreachable });
+    if (delay === null) { resumeRunner.cancel(); return false; }
     console.log(`[AC] ACE: connection lost — reconnecting in ${delay} ms to resume the same character`);
     aceConnection.disconnect();
     gameUI.hideDisconnectedScreen();
     gameUI.showConnectingScreen();
     raiseClientNotice(gameUI, CN.reconnecting);
-    setTimeout(() => {
-      if (!sessionLifecycle.resumingAfterDrop) return; // gave up or logged out meanwhile
-      aceConnection.autoReconnect = false;
-      aceConnection.connect(aceAccount, acePassword);
-    }, delay);
+    resumeRunner.schedule(delay);
     return true;
   };
   /**
@@ -8820,7 +8874,9 @@ async function main() {
     sessionLifecycle.endResume();
     if (launcherActive || gameUI.disconnectedScreenShown) return;
     // From the world: the Disconnected screen; before it, the OK dialog over the launcher.
-    raiseAccountRefusal(characterErrorNotice(CharacterError.Logon).text);
+    // BUG.second-tab-login-refusal sweep — retail's text, then which window took the account (not
+    // the hint to close "any other window": this browser knows it was one of its own tabs).
+    raiseAccountRefusal(stoodDownForOtherTabText(characterErrorNotice(CharacterError.Logon).text.split('\n\n')[0]));
   };
   /**
    * BUG.second-tab-in-world-refusal — the player, in another tab of this
@@ -8829,12 +8885,14 @@ async function main() {
    * this tab is in the world). The session closes as a stand-down does (the
    * server logs the character out), and the Disconnected screen says why.
    */
-  const logOutForOtherTab = (): void => {
+  const logOutForOtherTab = (reason: LogoutReason): void => {
     cancelProvenLoginRetry();
     worldResumePending = false;
     sessionLifecycle.endResume();
     if (launcherActive || gameUI.disconnectedScreenShown) return;
-    raiseAccountRefusal(LOGGED_OUT_FOR_OTHER_TAB_TEXT);
+    // BUG.second-tab-login-refusal — for another tab's login this tab may be at character select or
+    // in chargen: the same route closes the session (the OK dialog before the world).
+    raiseAccountRefusal(reason === 'login' ? LOGGED_OUT_FOR_LOGIN_TEXT : LOGGED_OUT_FOR_OTHER_TAB_TEXT);
   };
   /**
    * A client-side connection failure (ID_ConnectionError_* / ID_NetError_*):
@@ -8843,13 +8901,14 @@ async function main() {
    * OK returns a launcher login to the launcher, and relaunches the connect
    * cycle for a URL login (connectionFailureRecovery).
    */
-  const raiseNetError = (notice: ConnectionNotice): void => {
+  const raiseNetError = (notice: ConnectionNotice, textOverride?: string): void => {
     console.warn(`[AC] ACE: connection failure ${notice.token || `0x${notice.stringId.toString(16)}`}: "${notice.text}"`);
     // A login that timed out, or that the server refused (GDLE's / AC1999's
     // STR_LOGIN_FAILED NetError), on a register-first world: say so, with the
     // link. On an auto-create world STR_LOGIN_FAILED is a wrong password for a
-    // name someone already owns: say that instead.
-    const text = loginFailureText(notice, launcherWorld, gameStarted, aceAccount);
+    // name someone already owns: say that instead. (textOverride: the whole
+    // text, e.g. "Player already logged on" naming this browser's other tab.)
+    const text = textOverride ?? loginFailureText(notice, launcherWorld, gameStarted, aceAccount);
     if (connectionFailureRecovery({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
       returnToLauncher(text);
       return;
@@ -18622,6 +18681,8 @@ async function main() {
           preworldReporter?.characterList(aceCharList.characters.length);
           // BUG.gdle-transient-login-failed — this world + account + password got in: proven for this page.
           void provenLoginRetry.noteAccepted({ world: connectUrl, account: aceAccount, password: acePassword });
+          // BUG.second-tab-login-refusal — the login got in (after the other tab logged out, say).
+          loginHolderWait.end();
           console.log(`[AC] ACE: Got character list — ${aceCharList.characters.length} characters on account "${aceCharList.accountName}" (${aceCharList.slotCount} slots)`);
           // CPlayerSystem::m_accountHasThroneofDestiny — the chargen Random
           // rolls (heritage / town) read it (CORE.17.k.b.b.a.f.d).
@@ -19240,6 +19301,20 @@ async function main() {
           break;
         }
 
+        case 'loginUnanswered': {
+          // BUG.second-tab-login-refusal — the silent form of "account in use" (some GDLE builds never
+          // answer a second login): a tab of this browser holding this world + account with an open
+          // session gets the same offer over the running resends; no tab → nothing changes.
+          if (gameStarted || launcherActive || sessionLifecycle.resumingAfterDrop) break;
+          const heldNotice = connectionFailureNotice({ netErrorId: 'ID_ConnectionError_PlayerAlreadyLoggedOn' })!;
+          loginHolderRefusal = {
+            event: { type: 'error', error: 'Login unanswered while another tab holds the account', netErrorId: heldNotice.token },
+            notice: heldNotice,
+          };
+          loginHolderWait.onUnanswered(heldNotice.text);
+          break;
+        }
+
         case 'loginRetry': {
           // ASSESS: stale-session recovery — ACE rejected the login because
           // the previous (abandoned) session hasn't finished logging off yet.
@@ -19350,7 +19425,9 @@ async function main() {
               // BUG.resume-silent-launcher — say why this attempt failed (a GDLE STR_LOGIN_FAILED
               // can be the server's own database hiccup: the next attempt may pass).
               preworldReporter?.connectionError(event, connectionFailureNotice(event)?.token || null);
-              if (!scheduleResume()) raiseServerDied();
+              // BUG.resume-hung-socket — no network at all (offline, or no answer to the socket): not counted while the grace lasts.
+              const unreachable = event.openTimedOut === true || navigator.onLine === false;
+              if (!scheduleResume({ unreachable })) raiseServerDied();
               break;
             }
             // CORE.17.k.b — a client-side connection failure: the bridge
@@ -19360,6 +19437,14 @@ async function main() {
             // with a NetError (ClientNet::EndState @ 00543380), e.g. GDLE's
             // STR_LOGIN_FAILED = "Client logon failed".
             const netNotice = connectionFailureNotice(event)!;
+            // BUG.second-tab-login-refusal — "Player already logged on": ask this browser's other tabs
+            // (LoginHolderWait shows the refusal itself when no tab holds the account, or the player
+            // keeps it). Any other refusal ends a wait under way and goes on below.
+            if (!gameStarted && event.serverNetError) {
+              loginHolderRefusal = { event, notice: netNotice };
+              if (loginHolderWait.onRefused(netNotice.token, netNotice.text)) break;
+              loginHolderRefusal = null;
+            }
             // BUG.gdle-transient-login-failed — a proven login's "Client logon failed" (GDLE /
             // AC1999; ACE never sends it) retries on its own behind the connecting screen; the
             // last refusal, and any other, is shown as before (ProvenLoginRetry decides).

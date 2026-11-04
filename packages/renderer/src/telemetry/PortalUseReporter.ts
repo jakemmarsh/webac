@@ -60,10 +60,34 @@
  * the bridge as `client_world` (services/ws-tcp-bridge/src/clientWorld.ts).
  * Eras: all three; the inputs (Use, UseDone, WeenieError, PlayerTeleport) are
  * the same messages from ACE, GDLE and the AC1999 server.
+ *
+ * BUG.portal-walk-in-nothing (2026-11-03): 7 days of production counted ~49
+ * failures against ~730 uses, and every one but three was a portal acting as
+ * retail made it act:
+ * - (a use the client itself refused, held 'decided' on an ItemUseable-No
+ *   portal such as wcid 28709 "Destroyed Portal to Sanamar", is a refusal too.)
+ * - 31 were the server's answer: a WeenieError (0x0474 quest, 0x04AB level,
+ *   0x0592 account age; ACE Portal.cs CheckUseRequirements) or the AC1999
+ *   server's chat line ("You are not powerful enough to interact with that
+ *   portal!"), each shown to the player. They now end as `portal_refused`.
+ * - 15 were walk-ins into a portal that cannot act on a walk-in: "Gateway"
+ *   (wcid 1955, PhysicsState Ethereal | LightingOn, its Use text "You must use
+ *   this portal to activate it. Walking through the portal will not activate
+ *   it.") and portals with IgnoreCollisions. A collision reaches the portal's
+ *   weenie only when the portal has ReportCollisions and the mover lacks
+ *   IgnoreCollisions (retail CPhysicsObj::report_object_collision @ 0x00513060:
+ *   `(obj->state & 0x8) && !(this->state & 0x10)`; ACE PhysicsObj.cs
+ *   report_object_collision → Portal.OnCollideObject), and an object with
+ *   IgnoreCollisions is never a collision candidate (ACE PhysicsObj.cs
+ *   FindObjCollisions). Those walk-ins are no try (walkInActs).
+ * - 2 were a use the player walked away from (their own movement keys after
+ *   the server's walk began) or died during; the player's own movement no
+ *   longer extends the wait, a use the player walked off from without
+ *   reaching the portal is dropped, and a death drops the watch.
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
-export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_used'] as const;
+export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_used'] as const;
 export type PortalOutcome = typeof PORTAL_OUTCOMES[number];
 
 /** How the player tried the portal. */
@@ -84,6 +108,23 @@ export const ITEM_TYPE_PORTAL = 0x00010000;
 /** PhysicsState bits (ACE PhysicsState.cs). */
 const PS_ETHEREAL = 0x4;
 const PS_REPORT_COLLISIONS = 0x8;
+const PS_IGNORE_COLLISIONS = 0x10;
+const PS_REPORT_COLLISIONS_AS_ENVIRONMENT = 0x200000;
+/** WeenieError.ActionCancelled: the server's walk was cancelled (no refusal). */
+export const WEENIE_ERROR_ACTION_CANCELLED = 0x0036;
+
+export const PORTAL_REFUSED = 'portal_refused' as const;
+
+/**
+ * A portal whose PhysicsState lets a walk-in reach it: ReportCollisions set, IgnoreCollisions and
+ * ReportCollisionsAsEnvironment clear (retail CPhysicsObj::report_object_collision @ 0x00513060; ACE
+ * PhysicsObj.cs report_object_collision / FindObjCollisions). "Gateway" (wcid 1955, 0x804) is not one:
+ * it must be used. The same flags come from ACE, GDLE and the AC1999 server.
+ */
+export function walkInActs(physicsState: number): boolean {
+  const ps = Number.isFinite(physicsState) ? physicsState >>> 0 : 0;
+  return (ps & PS_REPORT_COLLISIONS) !== 0 && (ps & (PS_IGNORE_COLLISIONS | PS_REPORT_COLLISIONS_AS_ENVIRONMENT)) === 0;
+}
 
 export const PORTAL_REPLY_MS = 5_000;
 export const PORTAL_MAX_WAIT_MS = 30_000;
@@ -165,7 +206,8 @@ export interface PortalSnapshot {
 interface Ids { era: string; server: string | null; trace: string; build: string }
 
 export interface PortalUseFailedEvent extends Ids {
-  outcome: 'portal_use_failed';
+  /** `portal_refused`: the server answered the try with a refusal (a WeenieError, a portal chat line). */
+  outcome: 'portal_use_failed' | 'portal_refused';
   trigger: PortalTrigger;
   wcid: number;
   itemType: number;
@@ -200,6 +242,8 @@ export interface PortalUseFailedEvent extends Ids {
   closest: number | null;
   /** The server moved the player during the watch (its MoveTo toward the portal). */
   serverWalk: boolean;
+  /** The player's own movement keys moved them during the watch. */
+  playerMoved: boolean;
   /** The UseDone code that came back (0 = done, no error); null = no UseDone. */
   useDone: number | null;
   /** WeenieError / WeenieErrorWithString codes that came back, in order. */
@@ -249,6 +293,9 @@ interface Watch {
   overlapped: boolean;
   closest: number | null;
   serverWalk: boolean;
+  playerMoved: boolean;
+  /** The body touched the portal after the player's own movement began (a use walked into it). */
+  overlappedAfterMove: boolean;
   useDone: number | null;
   errors: number[];
   chatLines: number;
@@ -316,7 +363,12 @@ export class PortalUseReporter {
     for (const g of now) {
       if (before.has(g)) continue;
       const w = this.watch;
-      if (w && w.guid === g) { w.overlapped = true; w.progressAt = this.now(); continue; }
+      if (w && w.guid === g) {
+        w.overlapped = true;
+        if (w.playerMoved) w.overlappedAfterMove = true;
+        w.progressAt = this.now();
+        continue;
+      }
       this.begin(g, 'walk_in', this.now(), false, null);
     }
   }
@@ -382,21 +434,32 @@ export class PortalUseReporter {
     this.overlapping = null;
   }
 
-  /** The verdict clock: main.ts calls it every 100 ms; `moving` = the player's body is moving now. */
-  tick(moving: boolean): void {
+  /**
+   * The verdict clock: main.ts calls it every 100 ms. `state.serverWalking` = the server's MoveTo is
+   * moving the player now (it extends the wait); `state.playerMoving` = the player's own movement keys
+   * (they never extend it: retail cancels a use's walk on a movement command); `state.dead` = the
+   * player is dead (the watch is dropped: the try ended with the life).
+   * A bare boolean is the old `moving` (server walk or keys), kept for callers that cannot tell them apart.
+   */
+  tick(state: boolean | { serverWalking: boolean; playerMoving: boolean; dead?: boolean }): void {
     this.outbox.retry();
     const w = this.watch;
     if (!w) return;
+    const st = typeof state === 'boolean' ? { serverWalking: state, playerMoving: false, dead: false } : state;
+    if (st.dead) { this.watch = null; return; }
     const at = this.now();
-    if (moving && w.serverWalk) w.progressAt = at;
+    if (st.playerMoving) w.playerMoved = true;
+    if (st.serverWalking && w.serverWalk) w.progressAt = at;
     if (at - w.progressAt < PORTAL_REPLY_MS && at - w.startedAt < PORTAL_MAX_WAIT_MS) return;
     this.watch = null;
+    // The player walked off from a use and never reached the portal: they changed their mind.
+    if (w.trigger === 'use' && w.playerMoved && !w.overlappedAfterMove && !this.refused(w)) return;
     if (!this.allowed(w.guid, at) || this.failedSent >= MAX_FAILED_EVENTS) return;
     this.failedSent++;
     const end = safe(() => this.opts.snapshot(w.guid), null);
     const s = w.snap;
     this.post({
-      outcome: 'portal_use_failed', ...this.ids(), trigger: w.trigger,
+      outcome: this.refused(w) ? PORTAL_REFUSED : 'portal_use_failed', ...this.ids(), trigger: w.trigger,
       wcid: u32(s.wcid), itemType: u32(s.itemType), descFlags: u32(s.descFlags), physicsState: u32(s.physicsState),
       ethereal: (s.physicsState & PS_ETHEREAL) !== 0,
       reportCollisions: (s.physicsState & PS_REPORT_COLLISIONS) !== 0,
@@ -415,6 +478,7 @@ export class PortalUseReporter {
       overlapped: w.overlapped,
       closest: w.closest === null ? null : r2(w.closest),
       serverWalk: w.serverWalk,
+      playerMoved: w.playerMoved,
       useDone: w.useDone,
       weenieErrors: [...w.errors],
       chatLines: w.chatLines,
@@ -431,13 +495,26 @@ export class PortalUseReporter {
     doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') this.outbox.retry(true); });
   }
 
+  /**
+   * The try was answered with a refusal: a server WeenieError other than ActionCancelled, a portal chat
+   * line, or the client's own UseObject refusing a use it never sent (held 'decided': "The Destroyed
+   * Portal to Sanamar cannot be used", ItemUseable No; ItemHolder::UseObject @ 0x00588a80).
+   */
+  private refused(w: Watch): boolean {
+    return w.errors.some((c) => c !== WEENIE_ERROR_ACTION_CANCELLED) || w.chatTemplate !== null
+      || (!w.useSent && w.held === 'decided');
+  }
+
   private begin(guid: number, trigger: PortalTrigger, at: number, sent: boolean, held: PortalUseHeld | null): void {
     const snap = safe(() => this.opts.snapshot(guid >>> 0), null);
     if (!snap) return;
+    // A walk-in reaches only a portal that reports collisions (walkInActs); a Gateway must be used.
+    if (trigger === 'walk_in' && !walkInActs(snap.physicsState)) return;
     this.watch = {
       guid: guid >>> 0, trigger, startedAt: at, progressAt: at, snap,
       useSent: sent, held, attempts: trigger === 'use' ? 1 : 0, overlapped: trigger === 'walk_in', closest: null,
-      serverWalk: false, useDone: null, errors: [], chatLines: 0, chatType: null, chatTemplate: null,
+      serverWalk: false, playerMoved: false, overlappedAfterMove: false,
+      useDone: null, errors: [], chatLines: 0, chatType: null, chatTemplate: null,
     };
   }
 

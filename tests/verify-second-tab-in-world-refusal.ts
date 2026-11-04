@@ -83,7 +83,7 @@ describe('BUG.second-tab-in-world-refusal — who holds the world, asked across 
     // A different account: B's claim does not make A stand down.
     expect(a.stoodDown).toBe(0);
     const holders = await b.guard.queryWorldHolders(keyB);
-    expect(holders).toEqual([{ tab: 'tab-a', character: 'Eldrin', sameAccount: false }]);
+    expect(holders).toEqual([{ tab: 'tab-a', character: 'Eldrin', sameAccount: false, inWorld: true }]);
     // The logout path never fires for another account: nothing sent, and A stays in.
     expect(b.guard.requestLogout(holders[0])).toBe(false);
     expect(a.loggedOut).toBe(0);
@@ -146,8 +146,8 @@ describe('BUG.second-tab-in-world-refusal — who holds the world, asked across 
     c.world = { name: 'Cobalt' };
     (b.guard as unknown as { held: { key: string; at: number } }).held = { key, at: 0 };
     const holders = await b.guard.queryWorldHolders(key);
-    expect(holders).toContainEqual({ tab: 'tab-a', character: 'Eldrin', sameAccount: true });
-    expect(holders).toContainEqual({ tab: 'tab-c', character: 'Cobalt', sameAccount: false });
+    expect(holders).toContainEqual({ tab: 'tab-a', character: 'Eldrin', sameAccount: true, inWorld: true });
+    expect(holders).toContainEqual({ tab: 'tab-c', character: 'Cobalt', sameAccount: false, inWorld: true });
     const action = inWorldHolderAction(holders, 'retail');
     expect(action.kind).toBe('offer-logout');
     if (action.kind !== 'offer-logout') return;

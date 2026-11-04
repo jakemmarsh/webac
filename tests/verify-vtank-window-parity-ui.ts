@@ -326,7 +326,7 @@ describe('§9.3 the generated [Default] / [By char] profile', () => {
     t.setLoadout({ items: carried, skills, mastery: 1 });
     t.show('profiles');
     q(t.body, '[data-vtank="macro-profile"]').click();
-    expect(lastMenu!.items.map((i) => i.label)).toEqual(['[Default]', '[By char]', 'Hunt']);
+    expect(lastMenu!.items.map((i) => i.label)).toEqual(['[Default]', '[By char]', 'Hunt', 'Load from file…']);
     pick(q(t.body, '[data-vtank="macro-profile"]'), '[Default]');
     await flush();
     expect(q(t.body, '[data-vtank="macro-profile"]').dataset.field).toBe('[Default]');

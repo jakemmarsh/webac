@@ -35,6 +35,8 @@ const FIRST_MINUTE_KEYS = [
   'programs', 'geometries', 'textures', 'programsCreated', 'compileMs', 'sceneObjects', 'serverObjects',
   // BUG.hud-text-blank-font-sheet (verify-acfont-sheet-health.ts): blank font sheets + lost 2D contexts, null without a source.
   'fontSheetBad', 'canvas2dLost',
+  // PERF.slow-minute-power-evidence (verify-slow-minute-power-evidence.ts): battery + the CPU probe, null when unknown.
+  'charging', 'batteryLevel', 'cpuProbeMs',
 ].sort();
 const WORLD_LEFT_BASE_KEYS = ['outcome', 'era', 'server', 'trace', 'build', 'exit', 'sessionMs', 'contextLost', 'errors', 'eid'].sort();
 // BUG.hidden-tab-session-drop: the page adds hiddenMs / freezes / frozenMs to every world_left (endCause / closeCode

@@ -60,6 +60,7 @@ import { COMBAT_WINDOW, combatWindowPlacement, combatBarPageVisible } from './Co
 import { skillFooterTitleRuns, skillRowTone, statLineRuns1999, FOOTER_TITLE_COLORS, argbToCss, type TextRun } from './SkillDisplay.js';
 import { AutomationPanel, hudStripText, type AutomationKit, type RoutineEditor } from './automation/AutomationPanel.js';
 import { VTankWindow, type VTankKit, type VTankSource } from './automation/VTankWindow.js';
+import { attachVTankFileDrop, guardPageFileDrops, pickVTankFiles } from './automation/vtankFileIn.js';
 import { renderVvsText, vvsFieldStyle, VVS_COLORS, VVS_TAB_PX } from './automation/vvsText.js';
 import { renderUbMainWindow, UB_MAIN_SIZE, type UbMainSource } from './automation/UbMainWindow.js';
 import { renderVvsBar, VVS_BAR, type VvsBarEntry } from './automation/VvsBar.js';
@@ -25109,6 +25110,8 @@ export class GameUI {
         });
         input.click();
       },
+      // The player's own VirindiTank files (AGENT.vtank-import-files): the picker, several at once (vtankFileIn.ts).
+      openFiles: (onFiles) => pickVTankFiles(onFiles),
       // VTank's New / CopyTo paste a command for the player to finish (CHG .172): the chat entry, prefilled, cursor at the end.
       pasteChat: (text) => {
         const chatInput = document.getElementById('chat-input') as HTMLInputElement | null;
@@ -25465,6 +25468,10 @@ export class GameUI {
     const { win, body } = this.buildVTankFrame('Automation', W, H, 'acjs.vtankWindow', () => this.closeVTankWindow(), { icon: VTANK_ICON_PNG });
     win.dataset.vtankWindow = '1';
     const redraw = () => redrawKeepingFocus(body, () => model.render(body, W - 12, H - 35, redraw));
+    // VirindiTank files dropped on the window come in as if picked (AGENT.vtank-import-files); a file dropped
+    // elsewhere on the page does nothing, rather than the browser opening it in place of the game.
+    attachVTankFileDrop(win, (files) => { void model.importAndReport(files, () => this.vtankRedraw?.()); });
+    guardPageFileDrops();
     this.hudContainer.appendChild(win);
     this.vtankEl = win;
     this.vtankRedraw = redraw;

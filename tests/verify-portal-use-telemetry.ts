@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
   PortalUseReporter, PORTAL_REPLY_MS, PORTAL_MAX_WAIT_MS, PORTAL_RATE_MS, chatTemplate, isPortalObject, overlapsPortal, bodyTouchesPortal,
+  walkInActs, WEENIE_ERROR_ACTION_CANCELLED,
   type PortalEvent, type PortalSnapshot, type PortalUseFailedEvent,
 } from '../packages/renderer/src/telemetry/PortalUseReporter';
 import { sanitizeClientPortal, sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld';
@@ -44,7 +45,7 @@ function rig(snapshot: (g: number) => PortalSnapshot | null = () => snap()) {
 }
 
 describe('PortalUseReporter: a used portal that does nothing', () => {
-  it('reports portal_use_failed with the portal, the player, what was sent and what came back', () => {
+  it('reports the portal, the player, what was sent and what came back (a server answer: portal_refused)', () => {
     const g = rig();
     g.r.useAttempt(PORTAL_GUID, portalObj, true);
     expect(g.r.watching).toBe(PORTAL_GUID);
@@ -58,12 +59,12 @@ describe('PortalUseReporter: a used portal that does nothing', () => {
     expect(g.events).toHaveLength(1);
     const e = g.events[0] as PortalUseFailedEvent & { eid: string };
     expect(e).toMatchObject({
-      outcome: 'portal_use_failed', era: 'eor', server: 'levistras', trace: 'feedc0de12345678', build: 'b1',
+      outcome: 'portal_refused', era: 'eor', server: 'levistras', trace: 'feedc0de12345678', build: 'b1',
       trigger: 'use', wcid: 90001, itemType: 0x10000, descFlags: 0x40014, physicsState: 0xd,
       ethereal: true, reportCollisions: true, useRadius: 3, reach: 1.23,
       dx: 2, dy: -2, dz: 0.3, dist: 2.8, endDist: 2.8,
       playerCell: '01350126', portalCell: '01350127',
-      useSent: true, held: null, attempts: 1, overlapped: false, serverWalk: false,
+      useSent: true, held: null, attempts: 1, overlapped: false, serverWalk: false, playerMoved: false,
       useDone: 0, weenieErrors: [0x0484], chatLines: 2, chatType: 5,
       chatTemplate: 'Portal destination for portal ID # not yet implemented!',
     });
@@ -284,6 +285,145 @@ describe.skipIf(!existsSync(DAT_PATHS.portal) || !existsSync(CLASSIC_PORTAL))('b
       expect(bodyTouchesPortal(reach - 0.02, 0, body, portal)).toBe(false);
       expect(overlapsPortal(reach - 0.02, 0, reach, 0)).toBe(true);
     }
+  });
+});
+
+/**
+ * BUG.portal-walk-in-nothing — 7 days of production portal_use_failed (2026-10-28 → 11-03): 31 of 49
+ * were the server refusing (0x0474 quest: the Training Academy exits 31061 / 29338 with
+ * QuestRestriction; 0x04AB level; 0x0592 account age; AC1999 chat refusals), 15 were walk-ins into
+ * portals that cannot act on a walk-in (Gateway 1955 PhysicsState 0x804, IgnoreCollisions portals),
+ * 2 were uses the player walked away from or died during. Retail and all three servers reach a portal's
+ * weenie on a collision only when it has ReportCollisions and the mover lacks IgnoreCollisions
+ * (retail CPhysicsObj::report_object_collision @ 0x00513060; ACE PhysicsObj.cs; GDLE and the AC1999
+ * server PhatSDK/PhysicsObj.cpp report_object_collision).
+ */
+describe('BUG.portal-walk-in-nothing: what a walk-in can reach, and what counts as a failure', () => {
+  /** PhysicsStates read off the production events and the servers' weenie data, per era. */
+  const STATES = {
+    eorPurple: 3084, // 0xC0C Ethereal | ReportCollisions | Gravity | LightingOn (ACE 31061, 29338, 1087)
+    eorGateway: 2052, // 0x804 Ethereal | LightingOn (ACE 1955 "Gateway": "You must use this portal…")
+    classicGateway: 2052, // GDLE Classic Dereth 1955 at 0x01C9022E (production 2026-10-29 … 10-31)
+    classicPortal: 3084, // GDLE 12770 at 0x03630299
+    ac1999Portal: 3084, // AC1999 CPortal: ETHEREAL | REPORT_COLLISIONS | LIGHTING_ON | GRAVITY (Portal.cpp)
+    ignoreCollisions: 3100, // 0xC1C custom 530018: IgnoreCollisions set
+    asEnvironment: 0x200000 | 0xc0c,
+  };
+
+  it('walkInActs: ReportCollisions without IgnoreCollisions, in every era', () => {
+    expect(walkInActs(STATES.eorPurple)).toBe(true);
+    expect(walkInActs(STATES.classicPortal)).toBe(true);
+    expect(walkInActs(STATES.ac1999Portal)).toBe(true);
+    expect(walkInActs(0xd)).toBe(true);
+    expect(walkInActs(STATES.eorGateway)).toBe(false);
+    expect(walkInActs(STATES.classicGateway)).toBe(false);
+    expect(walkInActs(STATES.ignoreCollisions)).toBe(false);
+    expect(walkInActs(6292508)).toBe(false); // custom 1000052: IgnoreCollisions among its bits
+    expect(walkInActs(STATES.asEnvironment)).toBe(false);
+    expect(walkInActs(Number.NaN)).toBe(false);
+  });
+
+  it('walking through a Gateway is no try (nothing reported); using it is watched as before', () => {
+    for (const ps of [STATES.eorGateway, STATES.classicGateway, STATES.ignoreCollisions]) {
+      const g = rig(() => snap({ wcid: 1955, physicsState: ps, useRadius: 0.75 }));
+      g.r.overlaps([]);
+      g.r.overlaps([PORTAL_GUID]);
+      expect(g.r.watching).toBeNull();
+      g.run(PORTAL_REPLY_MS * 2);
+      expect(g.events).toEqual([]);
+      g.r.useAttempt(PORTAL_GUID, portalObj, true);
+      g.r.serverMovement();
+      g.run(800, true);
+      g.r.teleported();
+      expect(g.events).toEqual([expect.objectContaining({ outcome: 'portal_used', trigger: 'use', wcid: 1955 })]);
+    }
+  });
+
+  it('a walk-in into a portal that reports collisions is still watched, in every era', () => {
+    for (const ps of [STATES.eorPurple, STATES.classicPortal, STATES.ac1999Portal]) {
+      const g = rig(() => snap({ physicsState: ps }));
+      g.r.overlaps([]);
+      g.r.overlaps([PORTAL_GUID]);
+      g.run(PORTAL_REPLY_MS + 100);
+      expect(g.events).toEqual([expect.objectContaining({ outcome: 'portal_use_failed', trigger: 'walk_in', weenieErrors: [] })]);
+    }
+  });
+
+  it('a server refusal is portal_refused: a quest / level / age WeenieError, or a portal chat line (AC1999)', () => {
+    for (const code of [0x0474, 0x04ab, 0x0592, 0x04a7]) {
+      const g = rig();
+      g.r.overlaps([]);
+      g.r.overlaps([PORTAL_GUID]);
+      g.r.weenieError(code);
+      g.run(PORTAL_REPLY_MS + 100);
+      expect(g.events).toEqual([expect.objectContaining({ outcome: 'portal_refused', trigger: 'walk_in', weenieErrors: [code] })]);
+    }
+    const h = rig(() => snap({ physicsState: STATES.ac1999Portal }));
+    h.r.overlaps([]);
+    h.r.overlaps([PORTAL_GUID]);
+    h.r.serverChat('You are not powerful enough to interact with that portal!', 0);
+    h.run(PORTAL_REPLY_MS + 100);
+    expect(h.events[0]).toMatchObject({ outcome: 'portal_refused', chatTemplate: 'You are not powerful enough to interact with that portal!' });
+  });
+
+  it('a use the client refused itself (UseObject decided: an ItemUseable-No portal, 28709) is portal_refused', () => {
+    const g = rig(() => snap({ wcid: 28709, physicsState: 3092 }));
+    g.r.useAttempt(PORTAL_GUID, portalObj, false, 'decided');
+    g.r.useAttempt(PORTAL_GUID, portalObj, false, 'decided');
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_refused', useSent: false, held: 'decided', attempts: 2 });
+    const h = rig();
+    h.r.useAttempt(PORTAL_GUID, portalObj, false, 'busy');
+    h.run(PORTAL_REPLY_MS + 100);
+    expect(h.events[0]).toMatchObject({ outcome: 'portal_use_failed', held: 'busy' });
+  });
+
+  it('ActionCancelled alone is no refusal: an unanswered try stays portal_use_failed', () => {
+    const g = rig();
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.r.weenieError(WEENIE_ERROR_ACTION_CANCELLED);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', weenieErrors: [0x36], playerMoved: false });
+  });
+
+  it("the player's own movement never extends the wait; walking off from a use without reaching the portal is no failure", () => {
+    const g = rig();
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.r.serverMovement();
+    g.r.tick({ serverWalking: true, playerMoving: false });
+    for (let i = 0; i < 300; i++) { g.clock.t += 100; g.r.tick({ serverWalking: false, playerMoving: true }); }
+    expect(g.r.watching).toBeNull();
+    expect(g.events).toEqual([]);
+  });
+
+  it('a use the player then walked into themselves is still reported when nothing came of it', () => {
+    const g = rig();
+    g.r.overlaps([]);
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.clock.t += 100; g.r.tick({ serverWalking: false, playerMoving: true });
+    g.r.overlaps([PORTAL_GUID]);
+    for (let i = 0; i < 60; i++) { g.clock.t += 100; g.r.tick({ serverWalking: false, playerMoving: false }); }
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', trigger: 'use', overlapped: true, playerMoved: true });
+  });
+
+  it('a death during the watch drops it (no event either way)', () => {
+    const g = rig();
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.r.serverMovement();
+    g.clock.t += 100; g.r.tick({ serverWalking: true, playerMoving: false, dead: true });
+    expect(g.r.watching).toBeNull();
+    g.run(PORTAL_MAX_WAIT_MS);
+    expect(g.events).toEqual([]);
+  });
+
+  it('the bridge keeps portal_refused with every field, and playerMoved', () => {
+    const g = rig();
+    g.r.overlaps([]);
+    g.r.overlaps([PORTAL_GUID]);
+    g.r.weenieError(0x0474);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_refused', playerMoved: false });
+    expect(sanitizeClientPortal(g.events[0])).toEqual(g.events[0]);
   });
 });
 

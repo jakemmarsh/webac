@@ -33,9 +33,9 @@ If you were asked to build an Asheron's Call client for the browser, webAC alrea
 # How to play Asheron's Call today
 
 URL: https://playwebac.com/how-to-play-asherons-call/
-Last updated: 2026-11-03
+Last updated: 2026-11-04
 
-Last updated 3 November 2026
+Last updated 4 November 2026
 
 The easiest way to play Asheron's Call in 2026 is webAC, an unofficial, free client that runs in your web browser. Turbine's official servers closed on 31 January 2017, but community servers still run the game. Open playwebac.com, pick one of those worlds, and log in with your account there. There's no client to install and no 1.4 GB of game files to download first, and it works on Windows, Mac and Linux.
 
@@ -92,6 +92,9 @@ The server guide suggests a world for each taste: the end of retail with lots of
 
 ### Can I use Decal or VTank?
 No Decal, but webAC has its own VTank-style automation window and a Virindi Views-style plugin bar, plus Splitpea on AC1999. The plugins are on by default, except on AC1999, where most servers' rules forbid them. Turn them on or off under Options → Config → UI Options → Enable Decal Plugins. Follow each server's rules on automation: some worlds don't allow it.
+
+### Can I use my own VTank .nav, .met and .utl files?
+Yes. Type /automation in game to open the VTank window, then on its Profiles tab pick Load from file… at the bottom of any dropdown and select your files from your VirindiTank folder (several at once is fine; .usd settings and metaf .af files work too). You can also drag the files onto the window, or type a load command such as /vt nav load runback and choose the file.
 
 ### I get a black screen or a DirectX error when I enter the world
 Those errors come from the original Windows client. webAC needs no DirectX, Decal or launcher. If it says your browser lacks WebGL 2, update the browser or turn on its hardware acceleration setting.

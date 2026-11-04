@@ -189,6 +189,21 @@ export interface FirstMinuteEvent {
    */
   fontSheetBad?: number | null;
   canvas2dLost?: number | null;
+  /**
+   * PERF.slow-minute-power-evidence (2026-11-04: an RTX 3060 laptop on Edge ran its first minute at 101 ms a
+   * frame with 83 ms of our own JS per frame, where weaker machines at the same landblock ran 17-23 ms; most
+   * likely battery saver or efficiency mode, which nothing in the event could show). navigator.getBattery()
+   * at the event: on mains power and the level to 0.05. Null where the API is missing (Firefox, Safari) or
+   * failed. A desktop with no battery reads charging true, level 1 in Chromium.
+   */
+  charging?: boolean | null;
+  batteryLevel?: number | null;
+  /**
+   * The fastest of up to CPU_PROBE_SAMPLES runs of a fixed integer loop (cpuProbeMs()), 0.1 ms, timed in the
+   * 1 s tick during the minute; null when none ran. ~0.75 ms on an Apple M-series core; a CPU held at a low
+   * clock (battery saver, thermal limits, an efficiency-mode tab) reads several times that.
+   */
+  cpuProbeMs?: number | null;
 }
 
 export interface WorldLeftEvent {
@@ -314,6 +329,38 @@ export function gpuNameOf(renderer: string | null | undefined): string | null {
   return t || null;
 }
 
+/** The CPU probe: iterations of the fixed loop, samples per minute, the first sample's delay and the spacing. */
+export const CPU_PROBE_ITERATIONS = 500_000;
+export const CPU_PROBE_SAMPLES = 5;
+export const CPU_PROBE_FIRST_MS = 5_000;
+export const CPU_PROBE_EVERY_MS = 10_000;
+/** A probe time is sent up to this (ms); anything slower reads as this. */
+export const CPU_PROBE_MAX_MS = 1000;
+let cpuProbeSink = 0;
+
+/**
+ * PERF.slow-minute-power-evidence — time CPU_PROBE_ITERATIONS steps of an xorshift (pure integer work, no
+ * allocation, no memory traffic), so the number follows the core's clock and nothing else. The result is
+ * kept in a module sink so the loop is not optimised away. Returns ms (performance.now resolution: 0.1 ms
+ * in Chromium without cross-origin isolation).
+ */
+export function cpuProbeMs(now: () => number = () => performance.now()): number {
+  let x = 0x9e3779b9 | 0;
+  const t = now();
+  for (let i = 0; i < CPU_PROBE_ITERATIONS; i++) { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; }
+  const d = now() - t;
+  cpuProbeSink ^= x;
+  return d;
+}
+
+/** A BatteryManager as the reporter reads it. */
+export interface BatteryLike { charging?: unknown; level?: unknown }
+
+/** A battery level 0..1 to the nearest 0.05, else null. */
+export function batteryLevelOf(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1 ? Math.round(v * 20) / 20 : null;
+}
+
 /** navigator.deviceMemory's values (GiB); anything else reads as unknown. */
 const MEM_GB = [0.25, 0.5, 1, 2, 4, 8, 16, 32] as const;
 
@@ -326,6 +373,8 @@ export interface WorldReporterOptions {
   now?: () => number;
   /** As PreworldReporterOptions.send: a rejected promise keeps the event to go again. */
   send?: TelemetrySend;
+  /** The CPU probe (tests swap it); cpuProbeMs by default. */
+  cpuProbe?: () => number;
 }
 
 /**
@@ -464,6 +513,12 @@ export class WorldReporter {
   private meters: { net: HandlerCostMeter; stream: HandlerCostMeter } | null = null;
   private device: Pick<FirstMinuteEvent, 'browser' | 'browserMajor' | 'os' | 'cores' | 'memGb'> = {};
   private gpuName: string | null = null;
+  /** navigator.getBattery()'s manager once it resolved (its fields are live); null: none, or not yet. */
+  private battery: BatteryLike | null = null;
+  /** This session's fastest CPU probe (ms), samples taken, and when the next one is due. */
+  private cpuBest: number | null = null;
+  private cpuSamples = 0;
+  private cpuNextAt = 0;
   private worldDrawnAt: number | null = null;
   private firstMoveAt: number | null = null;
   private firstClickAt: number | null = null;
@@ -519,6 +574,34 @@ export class WorldReporter {
     };
   }
 
+  /**
+   * PERF.slow-minute-power-evidence — ask navigator.getBattery() once (call it early; main.ts does at boot).
+   * Never awaited: the manager is kept when it resolves and its live fields are read when an event is built.
+   * A missing API, a throw or a rejection leaves charging / batteryLevel null.
+   */
+  readBattery(nav: { getBattery?: () => Promise<unknown> } | null | undefined): void {
+    try {
+      const get = nav?.getBattery;
+      if (typeof get !== 'function') return;
+      const p = get.call(nav);
+      if (p && typeof (p as Promise<unknown>).then === 'function') {
+        (p as Promise<unknown>).then(
+          (b) => { if (b && typeof b === 'object') this.battery = b as BatteryLike; },
+          () => { /* no battery reading */ },
+        );
+      }
+    } catch { /* no battery reading */ }
+  }
+
+  /** The battery fields at the event. */
+  private batteryFields(): Pick<FirstMinuteEvent, 'charging' | 'batteryLevel'> {
+    const b = this.battery;
+    let charging: unknown = null;
+    let level: unknown = null;
+    try { charging = b?.charging; level = b?.level; } catch { /* a getter threw */ }
+    return { charging: typeof charging === 'boolean' ? charging : null, batteryLevel: batteryLevelOf(level) };
+  }
+
   /** A main-thread long task finished (PerformanceObserver 'longtask'); counted inside the first minute only. */
   longTask(durationMs: number): void {
     if (this.enterAt === null || this.minuteSent || !(durationMs > 0)) return;
@@ -557,6 +640,9 @@ export class WorldReporter {
     this.maxFrame = 0;
     this.workHist.fill(0);
     this.works = 0;
+    this.cpuBest = null;
+    this.cpuSamples = 0;
+    this.cpuNextAt = at + CPU_PROBE_FIRST_MS;
     this.drawCallSum = 0;
     this.triangleSum = 0;
     this.drawSamples = 0;
@@ -655,6 +741,12 @@ export class WorldReporter {
     const at = this.now();
     this.lastBeatAt = at;
     this.pollModal(at);
+    if (!this.minuteSent && this.cpuSamples < CPU_PROBE_SAMPLES && at >= this.cpuNextAt) {
+      this.cpuSamples++;
+      this.cpuNextAt = at + CPU_PROBE_EVERY_MS;
+      const ms = safe(this.opts.cpuProbe ?? cpuProbeMs, NaN);
+      if (Number.isFinite(ms) && ms >= 0 && (this.cpuBest === null || ms < this.cpuBest)) this.cpuBest = ms;
+    }
     if (!this.minuteSent && at - this.enterAt >= FIRST_MINUTE_MS) this.sendFirstMinute('still_in', at);
   }
 
@@ -818,6 +910,8 @@ export class WorldReporter {
       gpuName: this.gpuName,
       ...this.costFields(),
       ...this.uiCanvasFields(),
+      ...this.batteryFields(),
+      cpuProbeMs: this.cpuBest === null ? null : Math.min(CPU_PROBE_MAX_MS, Math.round(this.cpuBest * 10) / 10),
       ...detail,
     });
   }

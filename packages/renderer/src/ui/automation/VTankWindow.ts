@@ -19,7 +19,7 @@
 import {
   type RoutineAction, type RoutineCondition, type RoutineDoc, type RoutineProfile, type RoutineRule, type Route, type VtMonsterRow, type VtOption, type VtankProfileData,
   type VTankExport,
-  ROUTINE_SCHEMA_VERSION, VT_DEFAULT_MONSTER, VT_MONSTER_COLUMNS, VT_OPTIONS, activeLoot, emptyVtankData, exportMet, exportNav, exportUtl, exportVTank, validateRoutineDoc, vtankChatCommand, vtDisplayValue, vtFromVTank, vtLinkedSettings, vtOption, vtStoredValue, vtToVTank, exportAf, exportNavAf, exportUsd, type VtNames,
+  ROUTINE_SCHEMA_VERSION, VT_DEFAULT_MONSTER, VT_MONSTER_COLUMNS, VT_OPTIONS, activeLoot, afToVTankText, emptyVtankData, importVTankFiles, vtankFileKind, exportMet, exportNav, exportUtl, exportVTank, validateRoutineDoc, vtankChatCommand, vtDisplayValue, vtFromVTank, vtLinkedSettings, vtOption, vtStoredValue, vtToVTank, exportAf, exportNavAf, exportUsd, type VtNames,
 } from '@ac/shared';
 import type { RoutineStatus } from '../../agent/RoutineEngine.js';
 import { matchMonsterRow } from '../../agent/macro/combatPlan.js';
@@ -130,6 +130,12 @@ export interface VTankKit extends AutomationKit {
   pasteChat?(text: string): void;
   /** The browser's file picker for one file (VTank's files are Windows-1252 text): the loot editor's File → Open, Import Ranges. */
   openFile?(accept: string, onFile: (f: { name: string; text: string }) => void): void;
+  /**
+   * The browser's file picker for VirindiTank files, several at once (a whole VirindiTank folder's): the
+   * Profiles dropdowns' "Load from file…" and `/vt … load` of a name not here yet (vtankFileIn.ts). False
+   * when the browser would not open it (no click or key press just before).
+   */
+  openFiles?(onFiles: (files: Array<{ name: string; text: string }>) => void): boolean;
   /** Names for a .usd's object and spell ids (the spell table, what you carry); vtankUsd.ts. */
   names?(): VtNames;
   /** This tab's UtilityBelt network client (/ub bc, bct, netclients; agent/ubNet.ts), null without one. */
@@ -470,6 +476,63 @@ export const VT_BY_CHAR = '[By char]';
 export const vtByCharName = (character: string): string => `${VT_BY_CHAR} ${character}`;
 
 /** The recalls Add Recall offers (VirindiTank's list; ACE spell names). */
+/** The Profiles dropdowns' last entry: the player's own VirindiTank files, through the browser's file picker. */
+export const VT_LOAD_FROM_FILE = '\u0000load-from-file';
+export const VT_LOAD_FROM_FILE_LABEL = 'Load from file…';
+/** Where to go when the browser refused to open the picker (a command run without a key press, e.g. by a meta). */
+export const VT_LOAD_FROM_FILE_HINT = 'Pick Load from file… in a Profiles dropdown (/automation), or drop your VirindiTank files on this window.';
+
+type SalvageCombineBlock = NonNullable<RoutineProfile['salvageCombine']>;
+
+/** The loot sets a profile's rules and route stops load (load-loot), wherever they nest. */
+export function lootRefs(p: Pick<RoutineProfile, 'states' | 'routes'>): Set<string> {
+  const out = new Set<string>();
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) { for (const x of v) walk(x); return; }
+    if (!v || typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+    if (o.kind === 'load-loot' && typeof o.set === 'string') out.add(o.set);
+    for (const x of Object.values(o)) walk(x);
+  };
+  walk(p.states);
+  walk(p.routes);
+  return out;
+}
+
+/** A meta's own profile keeps only the loot sets (and their salvage bands) its rules load. */
+function keepReferencedLoot(p: RoutineProfile): RoutineProfile {
+  const refs = lootRefs(p);
+  const pick = <T>(m: Record<string, T> | undefined) => Object.fromEntries(Object.entries(m ?? {}).filter(([k]) => refs.has(k)));
+  const out: RoutineProfile = { ...p, lootSets: pick(p.lootSets), salvageCombineSets: pick(p.salvageCombineSets) };
+  if (!Object.keys(out.lootSets!).length) delete out.lootSets;
+  if (!Object.keys(out.salvageCombineSets!).length) delete out.salvageCombineSets;
+  delete out.lootSet;
+  return out;
+}
+
+/**
+ * VTank's meta load: `to` runs `from`'s meta (its states), with the routes and loot sets its rules load
+ * (else a "load route" / "load loot profile" rule names one the profile doesn't have and the account
+ * refuses the save). `replaceRoutes`: `from`'s routes win over same-named ones (a .met file replacing the
+ * meta it was saved from); otherwise `to` keeps its own.
+ */
+export function copyMeta(from: RoutineProfile, to: RoutineProfile, replaceRoutes = false): void {
+  to.states = structuredClone(from.states);
+  to.initialState = from.initialState;
+  if (from.ruleFiring) to.ruleFiring = from.ruleFiring; else delete to.ruleFiring;
+  for (const r of from.routes) {
+    const i = to.routes.findIndex((x) => x.name === r.name);
+    if (i < 0) to.routes.push(structuredClone(r));
+    else if (replaceRoutes) to.routes[i] = structuredClone(r);
+  }
+  for (const k of lootRefs(from)) {
+    if (to.lootSets?.[k] !== undefined || from.lootSets?.[k] === undefined) continue;
+    to.lootSets = { ...(to.lootSets ?? {}), [k]: structuredClone(from.lootSets[k]) };
+    const c = from.salvageCombineSets?.[k];
+    if (c) to.salvageCombineSets = { ...(to.salvageCombineSets ?? {}), [k]: structuredClone(c) };
+  }
+}
+
 export const VT_RECALLS = ['Primary Portal Recall', 'Secondary Portal Recall', 'Lifestone Recall', 'Lifestone Sending', 'Portal Recall', 'Recall the Sanctuary', 'Recall Aphus Lassel', 'Recall to the Singularity Caul', 'Glenden Wood Recall', 'Aerlinthe Recall', 'Mount Lethe Recall', "Ulgrim's Recall", 'Bur Recall', 'Call of the Mhoire Forge', 'Colosseum Recall', 'Facility Hub Recall', 'Return to the Keep'];
 
 // ── the window ──
@@ -881,10 +944,13 @@ export class VTankWindow {
     // Macro Settings: [Default], [By char] (the generated templates, VTank's first two entries), then the saved
     // profiles; CopyTo pastes VTank's save command into the chat box for the player to name.
     label('Macro Settings', 6);
+    // Each dropdown ends with the player's own VirindiTank files (VTank listed its folder's here).
+    const fromFile = { label: VT_LOAD_FROM_FILE_LABEL, value: VT_LOAD_FROM_FILE };
     const byChar = ch ? vtByCharName(ch) : null;
     const shownName = p ? (p.name === byChar ? VT_BY_CHAR : p.name) : '[None]';
     const choices = [VT_DEFAULT_PROFILE, ...(byChar ? [VT_BY_CHAR] : []), ...doc.profiles.filter((x) => x.name !== VT_DEFAULT_PROFILE && !x.name.startsWith(`${VT_BY_CHAR} `)).map((x) => x.name)];
-    area.appendChild(at(tag(kit.dropdown(shownName, (a) => kit.menu(a, choices.map((x) => ({ label: x, value: x })), (v) => {
+    area.appendChild(at(tag(kit.dropdown(shownName, (a) => kit.menu(a, [...choices.map((x) => ({ label: x, value: x })), fromFile], (v) => {
+      if (v === VT_LOAD_FROM_FILE) { this.loadFromFile(redraw); return; }
       if (this.source.status().running) { this.message = 'Turn Run Macro off (and stop) before changing profiles.'; redraw(); return; }
       if (v === VT_DEFAULT_PROFILE || v === VT_BY_CHAR) { void this.useTemplate(v, redraw); return; }
       this.profileName = v; this.routeName = null; redraw();
@@ -897,7 +963,8 @@ export class VTankWindow {
     // Enable Auto-Navigation: the route the macro walks.
     const nav = this.value('EnableNav') === true;
     area.appendChild(at(this.check('Enable Auto-Navigation', nav, (v) => this.setValue('EnableNav', v, redraw), { vtankOption: 'EnableNav' }), 10, 30));
-    area.appendChild(at(tag(kit.dropdown(p?.navRoute ?? '[None]', (a) => kit.menu(a, [{ label: '[None]', value: '' }, ...(p?.routes ?? []).map((r) => ({ label: r.name, value: r.name }))], (v) => {
+    area.appendChild(at(tag(kit.dropdown(p?.navRoute ?? '[None]', (a) => kit.menu(a, [{ label: '[None]', value: '' }, ...(p?.routes ?? []).map((r) => ({ label: r.name, value: r.name })), fromFile], (v) => {
+      if (v === VT_LOAD_FROM_FILE) { this.loadFromFile(redraw); return; }
       const q = this.ensureProfile();
       if (v) q.navRoute = v; else delete q.navRoute;
       // [None] loads no route (the Route tab shows none, and /vt nav save makes a new empty one: "[None], CopyTo, name it").
@@ -911,7 +978,8 @@ export class VTankWindow {
     const loot = this.value('EnableLooting') === true;
     area.appendChild(at(this.check('Enable Looting', loot, (v) => this.setValue('EnableLooting', v, redraw), { vtankOption: 'EnableLooting' }), 10, 54));
     const sets = Object.keys(p?.lootSets ?? {});
-    area.appendChild(at(tag(kit.dropdown(p?.lootSet ?? (p?.loot.length ? '[This profile]' : '[None]'), (a) => kit.menu(a, [{ label: '[This profile]', value: '' }, ...sets.map((s) => ({ label: s, value: s }))], (v) => {
+    area.appendChild(at(tag(kit.dropdown(p?.lootSet ?? (p?.loot.length ? '[This profile]' : '[None]'), (a) => kit.menu(a, [{ label: '[This profile]', value: '' }, ...sets.map((s) => ({ label: s, value: s })), fromFile], (v) => {
+      if (v === VT_LOAD_FROM_FILE) { this.loadFromFile(redraw); return; }
       const q = this.ensureProfile();
       if (v) q.lootSet = v; else delete q.lootSet;
       this.changed(redraw);
@@ -937,6 +1005,14 @@ export class VTankWindow {
     // Enable Meta Actions: the profile's rules run.
     const meta = this.value('EnableMeta') === true;
     area.appendChild(at(this.check('Enable Meta Actions', meta, (v) => this.setValue('EnableMeta', v, redraw), { vtankOption: 'EnableMeta' }), 10, 78));
+    // The meta dropdown (VTank's lists its .met files; BBG "loads a .met"): the metas kept here (profiles with
+    // rules, as /vt meta save keeps them), then Load from file…. Picking one is /vt meta load: it replaces the
+    // shown profile's meta, so a meta with rules that isn't kept elsewhere is asked about first.
+    const metaNames = doc.profiles.filter((x) => x !== p && x.states.some((s) => s.rules.length)).map((x) => x.name);
+    area.appendChild(at(tag(kit.dropdown('[This profile]', (a) => kit.menu(a, [{ label: '[This profile]', value: '' }, ...metaNames.map((x) => ({ label: x, value: x })), fromFile], (v) => {
+      if (v === VT_LOAD_FROM_FILE) { this.loadFromFile(redraw); return; }
+      if (v) void this.loadMetaFrom(v, redraw);
+    }), 130), { vtank: 'meta-profile' }), 146, 76));
     // CopyTo pastes /vt meta save for the player to name (INF from the other two; with .met the file comes too).
     area.appendChild(at(tag(kit.flatButton('CopyTo', () => this.paste('/vt meta save ', redraw), 40), { vtank: 'copy-meta' }), 285, 78));
     // Clear profile!: back to VirindiTank's defaults. Clear nav profile!: an empty route.
@@ -1720,6 +1796,279 @@ export class VTankWindow {
     return [`${f.fileName} saved to your downloads; not carried over exactly (${f.problems.length}):`, ...shown.map((x) => `  ${x}`), ...(f.problems.length > shown.length ? [`  … and ${f.problems.length - shown.length} more`] : [])];
   }
 
+  // ── Files in: the player's own VirindiTank folder (AGENT.vtank-import-files, 2026-11-04) ──
+
+  /**
+   * "Load from file…" (the Profiles tab's dropdowns) and `/vt … load` of a name not here yet: VTank read these
+   * from its folder; here the browser's file picker (several files at once) stands in for it. False when the
+   * browser wouldn't open the picker (no click or key press just before); the message line then says where
+   * the button is.
+   */
+  loadFromFile(redraw: () => void = () => this.redrawWindow()): boolean {
+    const opened = this.kit.openFiles?.((files) => { void this.importAndReport(files, redraw); }) ?? false;
+    if (!opened) {
+      this.message = VT_LOAD_FROM_FILE_HINT;
+      redraw();
+    }
+    return opened;
+  }
+
+  /**
+   * The Meta dropdown's pick (VTank's meta load): `name`'s meta into the shown profile. Its own meta, when it
+   * has rules no other profile keeps, is asked about first (VTank's lived in its .met file; ours only here).
+   */
+  async loadMetaFrom(name: string, redraw: () => void): Promise<void> {
+    const doc = this.doc;
+    const from = doc?.profiles.find((x) => x.name === name);
+    if (!doc || !from) return;
+    const p = this.ensureProfile();
+    const n = p.states.reduce((k, s) => k + s.rules.length, 0);
+    const same = JSON.stringify(p.states);
+    const kept = doc.profiles.some((x) => x !== p && JSON.stringify(x.states) === same);
+    if (n > 0 && !kept && (await this.askReplace([`the meta loaded in "${p.name}" (${n} rule${n === 1 ? '' : 's'}; "${from.name}" takes its place)`], false)) !== 'replace') {
+      this.message = `Kept "${p.name}"'s meta (/vt meta save <name> keeps a copy of it).`;
+      redraw();
+      return;
+    }
+    if (this.doc !== doc || this.profile() !== p) return;
+    copyMeta(from, p);
+    this.message = `meta "${from.name}" loaded`;
+    this.changed(redraw);
+  }
+
+  /**
+   * `/vt <kind> load <name>` of one not here: VTank read <name> from its folder. Here the picker opens (the
+   * Enter that sent the command is the key press a browser asks for); else the message says where to go.
+   */
+  private loadMissing(kind: 'nav' | 'meta' | 'loot' | 'settings', name: string): string[] {
+    const ext = { nav: '.nav', meta: '.met', loot: '.utl', settings: '.usd' }[kind];
+    const what = { nav: 'route', meta: 'meta', loot: 'loot profile', settings: 'settings profile' }[kind];
+    const stem = name.replace(/\.(met|nav|utl|usd|af)$/i, '');
+    const file = stem === name ? `${name}${ext}` : name;
+    if (this.loadFromFile()) return [`No ${what} "${stem}" here yet: choose ${file} from your VirindiTank folder (you can pick several files at once).`];
+    this.tab = 'profiles';
+    this.advanced = false;
+    this.dialogs.showMain?.(true);
+    return [`No ${what} "${stem}" here yet. ${VT_LOAD_FROM_FILE_HINT}`];
+  }
+
+  /** Import files (the picker's, or dropped on the window) and print what came in to chat; the summary stays on the message line. */
+  async importAndReport(files: Array<{ name: string; text: string }>, redraw: () => void = () => this.redrawWindow()): Promise<string[]> {
+    const lines = await this.importFiles(files);
+    for (const l of lines) this.source.report(l);
+    redraw();
+    return lines;
+  }
+
+  /**
+   * The player's VirindiTank files into the routines, in VTank's terms, through the same importer as the
+   * docked panel's Import (importVTankFiles: what can't be carried over is imported switched off and said):
+   * - `.utl`: a loot profile (the Looting dropdown), loaded;
+   * - `.nav` (or a nav `.af`): a route (the Auto-Navigation dropdown), loaded;
+   * - `.met` (or a meta `.af`): a meta kept under its name (`/vt meta load <name>`, the Meta dropdown); a lone
+   *   one is also loaded into the shown profile;
+   * - `.usd`: a Macro Settings profile with the shown profile's nav, loot and meta (VTank keeps those loaded
+   *   across a settings change), shown unless the macro runs. A `.met` of the same name joins it.
+   * Nothing is replaced without asking (Replace / Keep both / Cancel); a file that can't be read is said and
+   * changes nothing. Returns the lines to show: the summary first.
+   */
+  async importFiles(files: Array<{ name: string; text: string }>): Promise<string[]> {
+    if (!files.length) return [];
+    if (!this.doc) await this.load(() => {});
+    else await this.refreshStored(5000);
+    const doc = this.doc;
+    if (!doc) return [this.message || 'Your routines have not loaded.'];
+    const names = this.kit.names?.() ?? {};
+    const S = this.ensureProfile();
+    type In = { file: string; stem: string; name: string; text: string };
+    const failed: string[] = [];
+    const sets: Array<In & { rules: RoutineProfile['loot']; combine?: SalvageCombineBlock; problems: string[] }> = [];
+    const navs: Array<In & { route: Route; problems: string[] }> = [];
+    const usds: Array<In & { problems: string[] }> = [];
+    const mets: In[] = [];
+    // A file the importer couldn't read at all: its own line, and nothing of it is applied.
+    const unread = (problems: string[], ...fileNames: string[]) => problems.find((x) => fileNames.some((n) => x.startsWith(`${n}: could not read it`) || x.startsWith(`${n}: not a VirindiTank`)));
+    for (const f of files) {
+      const file = f.name.replace(/^.*[\\/]/, '');
+      const stem = file.replace(/\.(met|nav|utl|usd|af)$/i, '') || file;
+      let kind = vtankFileKind(f.name, f.text);
+      if (kind === 'af') {
+        try { kind = afToVTankText(f.text).kind; } catch (e) { failed.push(`${file}: could not read it (${(e as Error).message})`); continue; }
+      }
+      if (!kind) { failed.push(`${file}: not a VirindiTank .met, .nav, .utl or .usd file, or a metaf .af`); continue; }
+      const one: In = { file, stem, name: f.name, text: f.text };
+      // The importer reads an .af as the .met / .nav it stands for, under that name.
+      const as = [f.name, `${f.name.replace(/\.af$/i, '')}.${kind}`];
+      if (kind === 'utl') {
+        const r = importVTankFiles([f], null, stem);
+        const key = Object.keys(r.value.lootSets ?? {})[0];
+        const bad = unread(r.problems, ...as);
+        if (bad || key === undefined) { failed.push(bad ?? `${file}: no loot rules in it`); continue; }
+        sets.push({ ...one, rules: r.value.lootSets![key], combine: r.value.salvageCombineSets?.[key], problems: r.problems });
+      } else if (kind === 'nav') {
+        const r = importVTankFiles([f], null, stem);
+        const route = r.value.routes[0];
+        const bad = unread(r.problems, ...as);
+        if (bad || !route) { failed.push(bad ?? `${file}: no route in it`); continue; }
+        navs.push({ ...one, route, problems: r.problems });
+      } else if (kind === 'usd') {
+        // Read now so a bad one is refused before anything changes; applied below onto its real base.
+        const r = importVTankFiles([f], structuredClone(S), S.name, names);
+        const bad = unread(r.problems, ...as);
+        if (bad) { failed.push(bad); continue; }
+        usds.push({ ...one, problems: r.problems });
+      } else mets.push(one);
+    }
+    // Metas read after the loot: a rule's "load loot profile" finds the shown profile's and this batch's.
+    const lootPool: NonNullable<RoutineProfile['lootSets']> = { ...structuredClone(S.lootSets ?? {}), ...Object.fromEntries(sets.map((s) => [s.stem, s.rules])) };
+    const combinePool: NonNullable<RoutineProfile['salvageCombineSets']> = { ...structuredClone(S.salvageCombineSets ?? {}) };
+    for (const s of sets) { if (s.combine) combinePool[s.stem] = s.combine; else delete combinePool[s.stem]; }
+    const metas: Array<In & { profile: RoutineProfile; problems: string[] }> = [];
+    for (const m of mets) {
+      const shell: RoutineProfile = { ...newProfile(m.stem), initialState: 'Default', states: [{ name: 'Default', rules: [] }], lootSets: structuredClone(lootPool), salvageCombineSets: structuredClone(combinePool) };
+      const r = importVTankFiles([{ name: m.name, text: m.text }], shell, m.stem);
+      const bad = unread(r.problems, m.name, `${m.name.replace(/\.af$/i, '')}.met`);
+      if (bad) { failed.push(bad); continue; }
+      metas.push({ ...m, profile: keepReferencedLoot(r.value), problems: r.problems });
+    }
+    const fileNames = files.map((f) => f.name.replace(/^.*[\\/]/, ''));
+    if (!sets.length && !navs.length && !usds.length && !metas.length) {
+      this.kit.imported?.('failed', fileNames);
+      this.message = `Nothing imported: ${failed.length === 1 ? failed[0] : `${failed.length} files couldn't be read`}.`;
+      return [this.message, ...(failed.length > 1 ? failed.map((x) => `  ${x}`) : [])];
+    }
+
+    // Where they land: a .usd's profile (shown, when the macro isn't running), else the shown profile.
+    const lower = (n: string) => n.toLowerCase();
+    const byName = (n: string) => doc.profiles.find((p) => lower(p.name) === lower(n));
+    const running = this.source.status().running;
+    const switchTo = usds.length && !running ? usds[0] : null;
+    const target = (switchTo && byName(switchTo.stem)) || S;
+    const ruleCount = (p: RoutineProfile) => p.states.reduce((n, s) => n + s.rules.length, 0);
+    const conflicts: string[] = [];
+    for (const u of usds) if (byName(u.stem)) conflicts.push(`Macro Settings "${byName(u.stem)!.name}" (${u.file})`);
+    for (const s of sets) if (target.lootSets?.[s.stem] !== undefined) conflicts.push(`loot profile "${s.stem}" (${s.file})`);
+    for (const n of navs) { const r = target.routes.find((x) => lower(x.name) === lower(n.stem)); if (r) conflicts.push(`route "${r.name}" (${n.file})`); }
+    for (const m of metas) if (byName(m.stem) && !usds.some((u) => lower(u.stem) === lower(m.stem))) conflicts.push(`meta "${byName(m.stem)!.name}" (${m.file})`);
+    const lone = metas.length === 1 ? metas[0] : null;
+    const loneIsTarget = !!lone && lower(lone.stem) === lower(switchTo?.stem ?? target.name);
+    if (lone && !loneIsTarget && ruleCount(target) > 0) conflicts.push(`the meta loaded in "${target.name}" (${ruleCount(target)} rules; ${lone.file} takes its place)`);
+    const mode = conflicts.length ? await this.askReplace(conflicts) : 'replace';
+    if (mode === 'cancel') { this.message = 'Import cancelled; nothing changed.'; return [this.message]; }
+    if (this.doc !== doc) { this.message = 'Your routines changed meanwhile; nothing imported. Load the files again.'; return [this.message]; }
+    const keep = mode === 'keep';
+    const unique = (stem: string, taken: (n: string) => boolean) => { let n = stem; for (let i = 2; taken(n); i++) n = `${stem} (${i})`; return n; };
+    const before = structuredClone(doc);
+    const lines: string[] = [];
+    const problems: string[] = [];
+
+    // Settings (.usd): a profile carrying the shown one's nav, loot and meta, or the same-named one updated.
+    let T = S;
+    const usdProfiles = new Map<string, RoutineProfile>();
+    for (const u of usds) {
+      const existing = byName(u.stem);
+      const replace = !!existing && !keep;
+      const name = replace ? existing!.name : existing ? unique(u.stem, (n) => !!byName(n)) : u.stem;
+      const r = importVTankFiles([{ name: u.name, text: u.text }], structuredClone(replace ? existing! : S), name, names);
+      const prof: RoutineProfile = { ...r.value, name, macro: true };
+      prof.vtank ??= emptyVtankData();
+      if (replace) doc.profiles[doc.profiles.indexOf(existing!)] = prof; else doc.profiles.push(prof);
+      if (existing === S && replace) T = prof;
+      usdProfiles.set(lower(u.stem), prof);
+      if (u === switchTo) T = prof;
+      problems.push(...r.problems);
+      lines.push(`${u.file}: Macro Settings "${name}"${replace ? ' (replaced)' : ''}${u === switchTo ? ', loaded' : running && u === usds[0] ? ' (turn Run Macro off to switch to it)' : ''}`);
+    }
+    // Loot (.utl): the Looting dropdown's entries; the last one is loaded.
+    let lastSet: string | null = null;
+    for (const s of sets) {
+      const had = T.lootSets?.[s.stem] !== undefined;
+      const name = had && keep ? unique(s.stem, (n) => T.lootSets?.[n] !== undefined) : s.stem;
+      T.lootSets = { ...(T.lootSets ?? {}), [name]: s.rules };
+      const combine = { ...(T.salvageCombineSets ?? {}) };
+      if (s.combine) combine[name] = s.combine; else delete combine[name];
+      T.salvageCombineSets = combine;
+      lastSet = name;
+      problems.push(...s.problems);
+      lines.push(`${s.file}: loot profile "${name}"${had && !keep ? ' (replaced)' : ''}, ${s.rules.length} rule${s.rules.length === 1 ? '' : 's'}`);
+    }
+    if (lastSet) T.lootSet = lastSet;
+    // Routes (.nav): the Auto-Navigation dropdown's entries; the last one is loaded.
+    let lastNav: string | null = null;
+    for (const n of navs) {
+      const i = T.routes.findIndex((x) => lower(x.name) === lower(n.stem));
+      const replace = i >= 0 && !keep;
+      const name = replace ? T.routes[i].name : i >= 0 ? unique(n.stem, (x) => T.routes.some((r) => lower(r.name) === lower(x))) : n.stem;
+      const route: Route = { ...n.route, name };
+      if (replace) T.routes[i] = route; else T.routes.push(route);
+      lastNav = name;
+      problems.push(...n.problems);
+      lines.push(`${n.file}: route "${name}"${replace ? ' (replaced)' : ''}, ${route.points.length} point${route.points.length === 1 ? '' : 's'}`);
+    }
+    if (lastNav) T.navRoute = lastNav;
+    // Metas (.met): each kept under its name (/vt meta load); a lone one is loaded into the profile shown.
+    const holders: RoutineProfile[] = [];
+    for (const m of metas) {
+      const own = usdProfiles.get(lower(m.stem));
+      const existing = own ?? byName(m.stem);
+      let holder: RoutineProfile;
+      if (existing && (own || !keep)) { copyMeta(m.profile, existing, true); holder = existing; }
+      else { holder = { ...m.profile, name: existing ? unique(m.stem, (n) => !!byName(n)) : m.stem }; doc.profiles.push(holder); }
+      holders.push(holder);
+      problems.push(...m.problems);
+      lines.push(`${m.file}: meta "${holder.name}"${existing && !own && !keep ? ' (replaced)' : ''}, ${ruleCount(holder)} rule${ruleCount(holder) === 1 ? '' : 's'}`);
+    }
+    if (holders.length === 1 && holders[0] !== T) {
+      if (keep && ruleCount(T) > 0) lines.push(`  kept beside "${T.name}"'s own meta: /vt meta load ${holders[0].name} loads it`);
+      else { copyMeta(holders[0], T, false); lines[lines.length - 1] += ', loaded'; }
+    } else if (holders.length === 1) lines[lines.length - 1] += ', loaded';
+    else if (holders.length > 1) lines.push(`  /vt meta load <name> (or the Meta dropdown) loads one of them`);
+
+    if (switchTo) { this.profileName = T.name; this.waypoint = -1; }
+    if (lastNav) { this.routeName = lastNav; this.waypoint = -1; } else if (switchTo) this.routeName = T.navRoute ?? null;
+    // Never store what the account can't hold: put everything back and say why.
+    const issues = validateRoutineDoc(doc);
+    if (issues.length) {
+      this.doc = before;
+      if (!this.doc.profiles.some((p) => p.name === this.profileName)) this.profileName = S.name;
+      this.message = `Nothing imported: ${issues[0].path}: ${issues[0].message}`;
+      this.kit.imported?.('failed', fileNames);
+      return [this.message];
+    }
+    this.changed(() => {});
+    await this.saveNow(() => {});
+    const ok = [...usds, ...sets, ...navs, ...metas].map((x) => x.file);
+    this.kit.imported?.(problems.length || failed.length ? 'partial' : 'ok', fileNames);
+    const summary = `Imported ${ok.join(', ')}${problems.length ? `; ${problems.length} thing${problems.length === 1 ? '' : 's'} couldn't be carried over exactly (switched off)` : ''}${failed.length ? `; couldn't read ${failed.length === 1 ? failed[0].split(':')[0] : `${failed.length} files`}` : ''}.`;
+    if (!this.message.startsWith('Not saved')) this.message = summary;
+    const shown = problems.slice(0, 8);
+    return [summary, ...lines, ...shown.map((x) => `  ${x}`), ...(problems.length > shown.length ? [`  … and ${problems.length - shown.length} more`] : []), ...failed.map((x) => `  ${x}; nothing changed for it`)];
+  }
+
+  /** Names already here: Replace, Keep both (the import takes "name (2)"), or Cancel (the window's own dialog). */
+  private askReplace(conflicts: string[], allowKeep = true): Promise<'replace' | 'keep' | 'cancel'> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v: 'replace' | 'keep' | 'cancel') => { if (!done) { done = true; resolve(v); } };
+      const shown = conflicts.slice(0, 8);
+      const h = 96 + 16 * (shown.length + (conflicts.length > shown.length ? 1 : 0));
+      this.dialogs.open('Virindi Tank', 380, h, (body, _redraw, close) => {
+        body.innerHTML = '';
+        const { kit } = this;
+        const root = el('div', { position: 'absolute', left: '0', top: '0', width: '368px', height: `${h - 35}px` }, { vtank: 'import-confirm' });
+        body.appendChild(root);
+        root.appendChild(at(kit.text('These are already here:', { color: kit.colors.text }), 8, 6));
+        shown.forEach((c, i) => root.appendChild(at(kit.text(c, { color: kit.colors.gold, maxWidth: 350 }), 16, 24 + i * 16)));
+        if (conflicts.length > shown.length) root.appendChild(at(kit.text(`… and ${conflicts.length - shown.length} more`, { color: kit.colors.dim }), 16, 24 + shown.length * 16));
+        const by = h - 35 - 28;
+        const button = (label: string, v: 'replace' | 'keep' | 'cancel', x: number, key: string) => root.appendChild(at(tag(kit.flatButton(label, () => { finish(v); close(); }, 80, 22), { vtank: key }), x, by));
+        button('Replace', 'replace', 8, 'import-replace');
+        if (allowKeep) button('Keep both', 'keep', 96, 'import-keep');
+        button('Cancel', 'cancel', 280, 'import-cancel');
+      }, () => finish('cancel'));
+    });
+  }
+
   /**
    * VirindiTank's /vt commands (Virindi_Tank_Commands on its wiki), typed in
    * chat or run by a meta's Chat Command: the profile, option and action
@@ -1810,8 +2159,8 @@ export class VTankWindow {
         const [sub = '', ...nm] = rest;
         const name = nm.join(' ');
         if (/^load(char)?$/i.test(sub)) {
-          const p = byName(name);
-          if (!p) return [`no settings profile "${name}"`];
+          const p = byName(name.replace(/\.usd$/i, ''));
+          if (!p) return name ? this.loadMissing('settings', name) : ['/vt settings load <name>[.usd]'];
           if (this.source.status().running) return ['turn the macro off (/vt stop) and stop it before loading a profile'];
           this.profileName = p.name;
           if (/char/i.test(sub)) { const ch = this.source.character(); if (ch) doc.characters = { ...(doc.characters ?? {}), [ch]: p.name }; }
@@ -1836,8 +2185,9 @@ export class VTankWindow {
         const name = nm.join(' ');
         const p = this.ensureProfile();
         if (/^load$/i.test(sub)) {
-          const r = p.routes.find((x) => x.name.toLowerCase() === name.toLowerCase());
-          if (!r) return [`no route "${name}" in "${p.name}"`];
+          const want = name.replace(/\.(nav|af)$/i, '').toLowerCase();
+          const r = p.routes.find((x) => x.name.toLowerCase() === want);
+          if (!r) return name ? this.loadMissing('nav', name) : ['/vt nav load <name>[.nav]'];
           p.navRoute = r.name;
           this.routeName = r.name;
           if (this.running()) this.source.update(p);
@@ -1865,9 +2215,10 @@ export class VTankWindow {
         const name = nm.join(' ').replace(/\.utl$/i, '');
         const p = this.ensureProfile();
         if (/^load$/i.test(sub)) {
-          if (!p.lootSets?.[name]) return [`no loot profile "${name}" (import its .utl first)`];
-          p.lootSet = name;
-          return saved(`loot "${name}" loaded`);
+          const key = Object.keys(p.lootSets ?? {}).find((k) => k === name) ?? Object.keys(p.lootSets ?? {}).find((k) => k.toLowerCase() === name.toLowerCase());
+          if (key === undefined) return name ? this.loadMissing('loot', nm.join(' ')) : ['/vt loot load <name>[.utl]'];
+          p.lootSet = key;
+          return saved(`loot "${key}" loaded`);
         }
         if (/^new$/i.test(sub)) {
           // A blank VTClassic profile, loaded, in its editor (VTClassic LootCore.LoadProfile(newprofile): "Created blank profile <file>.").
@@ -1893,21 +2244,17 @@ export class VTankWindow {
         // Meta profiles are a profile's states: load copies another profile's, save makes a profile of these.
         if (/^load$/i.test(sub)) {
           const from = byName(name);
-          if (!from) return [`no meta "${name}"`];
-          p.states = structuredClone(from.states);
-          p.initialState = from.initialState;
-          p.ruleFiring = from.ruleFiring;
-          for (const r of from.routes) if (!p.routes.some((x) => x.name === r.name)) p.routes.push(structuredClone(r));
+          if (!from) return name ? this.loadMissing('meta', nm.join(' ')) : ['/vt meta load <name>[.met]'];
+          // With the routes and loot sets its rules load (before 2026-11-04 the loot sets stayed behind and the save was refused).
+          copyMeta(from, p);
           if (this.running()) this.source.update(p);
           return saved(`meta "${from.name}" loaded`);
         }
         if (/^save$/i.test(sub) && name) {
           const existing = byName(name);
           const copy: RoutineProfile = existing ?? { ...newProfile(name), states: [], initialState: p.initialState };
-          copy.states = structuredClone(p.states);
-          copy.initialState = p.initialState;
-          // The routes its rules load come along, as meta load brings them (else the document no longer validates).
-          for (const r of p.routes) if (!copy.routes.some((x) => x.name === r.name)) copy.routes.push(structuredClone(r));
+          // The routes and loot sets its rules load come along, as meta load brings them (else the document no longer validates).
+          copyMeta(p, copy);
           if (!existing) doc.profiles.push(copy);
           const out = await saved(`meta saved as "${name}"`);
           // With VTank's extension (/vt meta save hunt.met) the file comes too: this profile's meta, its routes embedded.

@@ -37,7 +37,7 @@ export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
   | 'chargen_sent' | 'chargen_blocked'
   | 'enter_refused' | 'enter_ok' | 'dropped' | 'page_hidden' | 'page_left' | 'page_reload' | 'boot_slow' | 'boot_failed'
-  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover' | 'boot_done' | 'enter_held';
+  | 'enter_retry' | 'left_for_launcher' | 'resume_ended' | 'login_retry' | 'handover' | 'boot_done' | 'enter_held' | 'login_held';
 
 /**
  * A draining bridge's session moving to the new deployment (session/DrainHandover.ts): why
@@ -353,6 +353,12 @@ export interface PreworldEvent {
    * trace's char_list is a login the retry rescued.
    */
   retry?: LoginRetryKind;
+  /**
+   * BUG.resume-hung-socket — 'connect_failed' only: the network was out
+   * ('open_timeout': the socket never answered within WS_OPEN_TIMEOUT_MS;
+   * 'offline': navigator.onLine was false). Absent on an ordinary failed open.
+   */
+  why?: 'open_timeout' | 'offline';
 }
 
 export interface PreworldReporterOptions {
@@ -656,6 +662,19 @@ export class PreworldReporter {
   }
 
   /**
+   * BUG.second-tab-login-refusal — a login refused as "Player already logged
+   * on": login_held with token 'none' (no tab of this browser holds the
+   * account), 'offer_logout' (one does: the Yes / No is up), 'logged_out'
+   * (Yes: that tab was asked to log out), 'kept' (No) or 'spent' (the logins
+   * after Yes were refused to the end); for a login the server never
+   * answered (GDLE's silent form), 'silent_none' (no tab: the resends go on)
+   * or 'silent_offer' (a tab holds it: the Yes / No is up).
+   */
+  loginHeld(kind: 'none' | 'offer-logout' | 'kept' | 'logged-out' | 'spent' | 'silent-none' | 'silent-offer'): void {
+    this.report('login_held', { token: kind.replace('-', '_') });
+  }
+
+  /**
    * BUG.gdle-transient-login-failed — a login refusal the page retries on its
    * own (a proven login's "Client logon failed", session/ProvenLoginRetry.ts):
    * login_retry with the refusal's code / table / token and the retry's
@@ -728,7 +747,7 @@ export class PreworldReporter {
    * or a client-side NetError (socket, login timeout, version). `token` is
    * the notice token the page shows for it.
    */
-  connectionError(event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId'>, token: string | null = null): void {
+  connectionError(event: Pick<ConnectionEvent, 'characterError' | 'serverNetError' | 'netErrorId' | 'openTimedOut'>, token: string | null = null): void {
     if (event.characterError !== undefined) {
       const code = event.characterError >>> 0;
       const name = safeToken(token) ?? safeToken(CharacterError[code]);
@@ -753,7 +772,10 @@ export class PreworldReporter {
     // no; the rest are the client giving up (no socket: ID_NetError_CantSocket; no answer:
     // ID_ConnectionError_ClientTimedOutServer).
     if (event.netErrorId) {
-      this.report(SERVER_REFUSAL_NET_ERRORS.has(event.netErrorId) ? 'login_refused' : 'connect_failed', { token: safeToken(event.netErrorId) });
+      if (SERVER_REFUSAL_NET_ERRORS.has(event.netErrorId)) { this.report('login_refused', { token: safeToken(event.netErrorId) }); return; }
+      const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+      const why = event.openTimedOut ? 'open_timeout' : offline ? 'offline' : undefined;
+      this.report('connect_failed', { token: safeToken(event.netErrorId), ...(why ? { why } : {}) });
     }
   }
 
@@ -967,7 +989,7 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry'>>, withStream = false): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry' | 'why'>>, withStream = false): void {
     if (!this.opts.endpoint) return;
     if (outcome === 'handover' ? this.handoversSent >= MAX_HANDOVER_EVENTS : this.sent >= MAX_PREWORLD_EVENTS) return;
     const { screen, step } = this.sample();
@@ -999,6 +1021,7 @@ export class PreworldReporter {
       ...(f.heritage !== undefined ? { heritage: f.heritage } : {}),
       ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path } : {}),
       ...(outcome === 'login_retry' && f.retry ? { retry: f.retry } : {}),
+      ...(outcome === 'connect_failed' && f.why ? { why: f.why } : {}),
     };
     if (outcome === 'handover') this.handoversSent++;
     else this.sent++;

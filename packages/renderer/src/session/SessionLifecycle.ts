@@ -40,6 +40,28 @@
  */
 export const RESUME_DELAYS_MS: readonly number[] = Object.freeze([2000, 5000, 10000]);
 
+/**
+ * BUG.resume-hung-socket — how long the network being out keeps a resume's
+ * attempts from being spent. Within this time from when the resume first met
+ * the network out (not from the drop: a machine that slept through it wakes
+ * with the wall clock minutes on and the network still coming up), an attempt
+ * that failed while the browser was offline (navigator.onLine false) or whose
+ * socket never answered at all (its open timed out: WsOpenTimeout.ts) is not
+ * counted against RESUME_DELAYS_MS, and an attempt due while offline waits
+ * for the browser's 'online' event first (ResumeRunner). Past it, every
+ * attempt counts, as before, so a network that never comes back still ends on
+ * the Disconnected screen: at most this plus the three attempts (each bounded
+ * by the open timeout), about 3 minutes.
+ *
+ * 2 minutes: the prod resumes that failed an attempt (2026-11-03 Android,
+ * 2026-11-04 Coldeve) came right after the machine woke (the page's clock
+ * stood still for 167 s and 207 s while wall time ran), with the network
+ * still coming up; Wi-Fi rejoins and router restarts take seconds to a
+ * minute or two. A player whose network is out longer gets the Disconnected
+ * screen and its relaunch.
+ */
+export const RESUME_UNREACHABLE_GRACE_MS = 120_000;
+
 /** Wait before re-asking to enter after a "character still in the world" refusal (CharacterError 0x0D). */
 export const IN_WORLD_RETRY_DELAY_MS = 3000;
 /**
@@ -101,6 +123,8 @@ export class SessionLifecycle {
   private inWorldFlag = false;
   private resumeAttempts = 0;
   private resuming = false;
+  /** When the resume under way first met the network out (noteNetworkOut), for RESUME_UNREACHABLE_GRACE_MS. */
+  private networkOutSince: number | null = null;
   /** UX.chargen-resume — the drop came in chargen: the resume reopens chargen, not a character. */
   private chargenResume = false;
   private inWorldRetries = 0;
@@ -125,8 +149,15 @@ export class SessionLifecycle {
    * to resume (no character, a deliberate logout) or the budget is spent —
    * then show the Disconnected screen.
    */
-  nextResumeDelay(): number | null {
+  nextResumeDelay(opts: { unreachable?: boolean; now?: number } = {}): number | null {
+    const now = opts.now ?? Date.now();
     const resumable = this.chargenResume || (this.lastEnteredGuid !== null && !this.manualLogout);
+    // BUG.resume-hung-socket — an attempt that failed with the network out (offline, or no answer
+    // at all) is given back while the grace lasts: the attempts are for a server that isn't ready yet.
+    if (resumable && this.resuming && opts.unreachable && this.resumeAttempts > 0) {
+      this.noteNetworkOut(now);
+      if (this.unreachableGraceLeftMs(now) > 0) this.resumeAttempts--;
+    }
     if (!resumable || this.resumeAttempts >= RESUME_DELAYS_MS.length) {
       this.endResume();
       return null;
@@ -135,10 +166,27 @@ export class SessionLifecycle {
     return RESUME_DELAYS_MS[this.resumeAttempts++];
   }
 
+  /**
+   * BUG.resume-hung-socket — what is left of RESUME_UNREACHABLE_GRACE_MS for the
+   * resume under way (0 when none is, or it is spent): how long an attempt due
+   * while offline may wait for the network.
+   */
+  unreachableGraceLeftMs(now: number = Date.now()): number {
+    if (!this.resuming) return 0;
+    if (this.networkOutSince === null) return RESUME_UNREACHABLE_GRACE_MS;
+    return Math.max(0, RESUME_UNREACHABLE_GRACE_MS - (now - this.networkOutSince));
+  }
+
+  /** The resume under way met the network out (an offline wait began, or an attempt found no network): the grace starts, once. */
+  noteNetworkOut(now: number = Date.now()): void {
+    if (this.resuming && this.networkOutSince === null) this.networkOutSince = now;
+  }
+
   /** Stop resuming (back in the world, logged out, or given up). */
   endResume(): void {
     this.resuming = false;
     this.resumeAttempts = 0;
+    this.networkOutSince = null;
     this.chargenResume = false;
   }
 
