@@ -286,7 +286,7 @@ import {
   HUD_SCROLLBAR_SKIN, CHARGEN_SCROLLBAR_SKIN, listBoxScrollDelta, textScrollDelta, hideNativeScrollbar, type DatScrollbarSkin,
 } from './DatFrame.js';
 import {
-  buildSummaryRows, summaryHowToText, summaryViewCamera, filterNameInput, trimFinishName, escapeHtmlAttr,
+  buildSummaryRows, summaryHowToText, summaryViewCamera, filterNameInput, trimFinishName, textReplacingPrompt, stripNamePrompt, escapeHtmlAttr,
   SUMMARY_PROFESSIONS, SUMMARY_TOKENS, SUMMARY_NAME_MAX, SUMMARY_VIEW_FOV_DEGREES,
 } from './ChargenSummary.js';
 import type { SummarySkill } from './ChargenSummary.js';
@@ -8008,6 +8008,11 @@ export class GameUI {
    * dialog ID_CharGen_CreditWarning (Yes finishes without the check); else
    * the CharGenResult is sent.
    */
+  /** The name field's ID_CharGen_NamePrompt ("[ Name ]"), shown until a name is typed. */
+  private chargenNamePrompt(): string {
+    return getString(acStringHash(SUMMARY_TOKENS.namePrompt)) ?? '[ Name ]';
+  }
+
   private doChargenFinish(fromButton: boolean): boolean {
     const blocked = (reason: ChargenBlockReason): false => {
       this.callbacks.onChargenFinish?.('blocked', reason);
@@ -8018,7 +8023,9 @@ export class GameUI {
     // A second CharacterCreate went out here, and its reply timer later fired
     // in the world as a phantom refusal (playwebac.com, 2026-10-19).
     if (this.chargenAwaitingLogin) return blocked('entering_world');
-    const name = trimFinishName(this.wizard.name);
+    // UX.chargen-name-prompt — the prompt never goes out inside a name (the
+    // first edit already drops it; this catches any path that kept it).
+    const name = trimFinishName(stripNamePrompt(this.wizard.name, this.chargenNamePrompt()));
     this.wizard.setName(name);
     if (!this.chargenNameEntered || name.length === 0) {
       this.showChargenFinishDialog(getString(acStringHash(SUMMARY_TOKENS.noNameWarning)) ?? 'You must enter a name for this character!');
@@ -10371,8 +10378,7 @@ export class GameUI {
           <span data-ac-text="${r.value}" ${rowDesc(0x100002fb, 0x100002fd)}></span></div></div>`;
     }).join('');
 
-    const namePrompt = getString(acStringHash(SUMMARY_TOKENS.namePrompt)) ?? '[ Name ]';
-    const nameValue = this.chargenNameEntered ? this.wizard.name : namePrompt;
+    const nameValue = this.chargenNameEntered ? this.wizard.name : this.chargenNamePrompt();
     // VISUAL.chargen-summary-name-field — the field 0x10000402 draws its text
     // in its own DAT font (as the attribute value boxes do: the <input> only
     // takes keys, its glyphs and caret transparent; RECON.dom-chrome-sweep.b
@@ -10858,8 +10864,8 @@ export class GameUI {
 
     // CORE.17.k.b.b.a.c — the name field 0x10000402
     // (gmCGSummaryPage::ListenToElementMessage @ 0047bf40 on messages 0x12 /
-    // 0x44): the first change drops the ID_CharGen_NamePrompt (shown
-    // selected whole — Update's SelectAll — so typing replaces it), typed
+    // 0x44): the first change sets m_bNameEntered (the ID_CharGen_NamePrompt
+    // shows selected whole — Update's SelectAll — so typing replaces it), typed
     // characters pass NameInputFilter (letters, apostrophe, space, hyphen),
     // and a 33rd character is refused: the field goes back to the state's
     // name and DoNameLimitDialog raises the OK dialog ID_CharGen_NameTooLong.
@@ -10869,10 +10875,57 @@ export class GameUI {
     const syncNameSelection = (): void => { if (nameBox && nameInput) this.syncAttributeValueSelection(nameBox, nameInput); };
     // The box already sits at the field's p35 / p36 margins and the line's
     // top (renderSummaryStep), so the edit layer fills it.
-    if (nameInput && nameBox) {
-      this.bindChargenEditField(nameBox, nameInput, nameRef, { marginLeft: 0, marginRight: 0, marginTop: 0, marginBottom: 0, vJustify: 0 });
-    }
+    const nameEdit = nameInput && nameBox
+      ? this.bindChargenEditField(nameBox, nameInput, nameRef, { marginLeft: 0, marginRight: 0, marginTop: 0, marginBottom: 0, vJustify: 0 })
+      : null;
     if (nameInput) {
+      // UX.chargen-name-prompt (a named browser-UX exception, CLAUDE.md) —
+      // retail kept the prompt's text on the first change (0047bf40 only sets
+      // m_bNameEntered) and a click into the focused field placed the cursor
+      // (UIElement_Text::MouseDown @ 00469370), so click-then-type gave
+      // "Quellio[ Name ]" and FINISH refused it (14 of 131 prod creates in a
+      // week, 2026-11-05). Here, while the prompt is untouched: a press
+      // selects it whole (as MouseDown does for an unfocused field with
+      // attribute 0xd1), the first edit of any kind (typing, paste, drop, an
+      // IME's commit, a delete) replaces all of it, and Ctrl / Cmd+A selects
+      // the field (macOS's Ctrl+A only moves to the line start).
+      const prompt = this.chargenNamePrompt();
+      const selectWhole = (): void => {
+        nameInput.setSelectionRange(0, nameInput.value.length);
+        nameEdit?.refresh();
+        syncNameSelection();
+      };
+      nameBox?.addEventListener('mousedown', (e) => {
+        if (this.chargenNameEntered || e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        nameInput.focus();
+        selectWhole();
+      }, true);
+      nameInput.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'a') return;
+        e.preventDefault();
+        selectWhole();
+      });
+      /** The first edit of the untouched prompt: the field keeps only what it typed. */
+      const leavePrompt = (): void => {
+        this.chargenNameEntered = true;
+        nameInput.dataset.prompt = '0';
+        const typed = filterNameInput(textReplacingPrompt(prompt, nameInput.value));
+        if (typed !== nameInput.value) {
+          nameInput.value = typed;
+          nameInput.setSelectionRange(typed.length, typed.length);
+        }
+      };
+      // An IME's composition stays in the field until it commits (rewriting
+      // the value mid-composition cancels it); compositionend takes the commit.
+      nameInput.addEventListener('compositionend', () => {
+        if (this.chargenNameEntered) return;
+        leavePrompt();
+        this.wizard.setName(nameInput.value);
+        if (nameBox) this.repaintDatTextBox(nameBox, nameInput.value, nameRef);
+        syncNameSelection();
+      });
       nameInput.addEventListener('beforeinput', (ev) => {
         const e = ev as InputEvent;
         if (!e.inputType.startsWith('insert') || typeof e.data !== 'string') return;
@@ -10886,10 +10939,10 @@ export class GameUI {
         }
         nameInput.dispatchEvent(new Event('input', { bubbles: true }));
       });
-      nameInput.addEventListener('input', () => {
+      nameInput.addEventListener('input', (ev) => {
         if (!this.chargenNameEntered) {
-          this.chargenNameEntered = true;
-          nameInput.dataset.prompt = '0';
+          if ((ev as InputEvent).isComposing) return;
+          leavePrompt();
         }
         if (nameInput.value.length > SUMMARY_NAME_MAX) {
           nameInput.value = this.wizard.name;
@@ -27396,14 +27449,15 @@ export class GameUI {
    */
   private bindChargenEditField(
     box: HTMLElement, input: HTMLInputElement, ref: string, geometry?: Partial<DatEditFieldOptions>,
-  ): void {
+  ): DatEditFieldHandle | null {
     const handle = this.bindDatEditField(input, box, ref, geometry);
-    if (!handle) return;
+    if (!handle) return null;
     this.chargenEditFields.push(handle);
     for (const c of Array.from(box.children)) {
       if (c === input || c === handle.layer || c.tagName === 'STYLE') continue;
       c.remove();
     }
+    return handle;
   }
 
   /** CORE.5.c.d — overlay a real <input> onto a DAT edit-field element

@@ -255,6 +255,29 @@ export function trimFinishName(name: string): string {
   return name.slice(start, end);
 }
 
+/**
+ * UX.chargen-name-prompt — what the first edit of the untouched name prompt
+ * typed: the field's new value with the prompt's unchanged head and tail
+ * taken off (one edit replaces one range of the prompt, so its common prefix
+ * and suffix are the prompt's own). A click that put the cursor after the
+ * prompt and then "Quellio" gives "Quellio", not "[ Name ]Quellio"; a
+ * delete gives "". Retail kept the prompt text (gmCGSummaryPage::
+ * ListenToElementMessage @ 0047bf40 only sets m_bNameEntered).
+ */
+export function textReplacingPrompt(prompt: string, value: string): string {
+  const max = Math.min(prompt.length, value.length);
+  let head = 0;
+  while (head < max && prompt[head] === value[head]) head++;
+  let tail = 0;
+  while (tail < max - head && prompt[prompt.length - 1 - tail] === value[value.length - 1 - tail]) tail++;
+  return value.slice(head, value.length - tail);
+}
+
+/** UX.chargen-name-prompt — the name with every copy of the prompt removed (FINISH's last guard). */
+export function stripNamePrompt(name: string, prompt: string): string {
+  return prompt.length > 0 ? name.split(prompt).join('') : name;
+}
+
 /** The 3D view camera per heritage (gmCGSummaryPage::Update): AC position (x, y, z), facing +y; the FOV is CreatureMode's π/4. */
 export const SUMMARY_VIEW_FOV_DEGREES = 45;
 export function summaryViewCamera(heritage: number): { y: number; z: number } {
