@@ -400,9 +400,15 @@ const bundleUnitKey = (lb: number): number => lb & 0xffff;
  * of the same object) is promoted, so it never waits behind the work it
  * should pre-empt (RELEASE.streaming-charselect-weight: priority inversion).
  */
-class Ticket {
-  queuedIn: Limiter | null = null;
-  wake: (() => void) | null = null;
+export class Ticket {
+  /**
+   * Every limiter this ticket waits in now. A hedged load waits in two at once
+   * (the disk limiter for its cache read, the network limiter for the hedge's
+   * download: PERF.cache-read-slower-than-network), so each limiter keeps its
+   * own wait (Limiter.waits); a single shared wake let one limiter's pump start
+   * the other's wait (BUG.streaming-hedge-shared-ticket).
+   */
+  readonly queuedIn = new Set<Limiter>();
   /** The network download's expected size (gzip bytes), for the slow-link rule. */
   bytes = 0;
   /** Aborts the running network attempt (set while one runs). */
@@ -416,8 +422,8 @@ class Ticket {
   constructor(public priority: FetchPriority) {}
   promote(priority: FetchPriority): void {
     if (priority >= this.priority) return;
-    if (this.queuedIn) this.queuedIn.requeue(this, priority);
-    else this.priority = priority;
+    this.priority = priority;
+    for (const limiter of [...this.queuedIn]) limiter.requeue(this);
   }
 }
 
@@ -440,11 +446,13 @@ interface LimiterPolicy {
  * starts only on an idle link (no critical or prefetch work running).
  * Work already running is cut off only by yieldBackground (a gate began).
  */
-class Limiter {
+export class Limiter {
   private readonly active = new Set<Ticket>();
   /** Woken by pump but not yet running fn (their bytes are not in the link meter yet). */
   private readonly waking = new Set<Ticket>();
   private readonly queues: Ticket[][] = [[], [], []];
+  /** Each queued ticket's wait in THIS limiter: its resolver and the queue it sits in. */
+  private readonly waits = new Map<Ticket, { wake: () => void; queue: FetchPriority }>();
   constructor(private readonly max: number, private readonly policy: LimiterPolicy | null = null) {}
 
   private criticalWaiting(): boolean {
@@ -476,8 +484,14 @@ class Limiter {
 
   async run<T>(ticket: Ticket, fn: () => Promise<T>): Promise<T> {
     const ahead = this.queues.slice(0, ticket.priority + 1).some((q) => q.length > 0);
+    if (this.waits.has(ticket) || this.active.has(ticket)) throw new Error('Limiter.run: this ticket is already waiting or running here');
     if (ahead || !this.canStart(ticket)) {
-      await new Promise<void>((r) => { ticket.wake = r; ticket.queuedIn = this; this.queues[ticket.priority].push(ticket); });
+      await new Promise<void>((wake) => {
+        const queue = ticket.priority;
+        this.waits.set(ticket, { wake, queue });
+        ticket.queuedIn.add(this);
+        this.queues[queue].push(ticket);
+      });
     }
     this.waking.delete(ticket);
     this.active.add(ticket);
@@ -500,9 +514,10 @@ class Limiter {
         else if (q.length > 0) break;
       }
       if (!next) return;
-      const wake = next.wake!;
-      next.wake = null;
-      next.queuedIn = null;
+      // Only run() queues, and it records the wait with the entry: every queued ticket has one here.
+      const { wake } = this.waits.get(next)!;
+      this.waits.delete(next);
+      next.queuedIn.delete(this);
       // Counted at once (active, and its bytes as starting), so this loop's canStart sees it.
       this.active.add(next);
       this.waking.add(next);
@@ -510,13 +525,16 @@ class Limiter {
     }
   }
 
-  /** Move a queued ticket to a higher-priority queue. */
-  requeue(ticket: Ticket, priority: FetchPriority): void {
-    const q = this.queues[ticket.priority];
+  /** A ticket waiting here was promoted (Ticket.promote): move it to its new priority's queue. */
+  requeue(ticket: Ticket): void {
+    const w = this.waits.get(ticket);
+    // Not waiting here (already woken or running): nothing to move, and never a second entry.
+    if (!w || ticket.priority >= w.queue) return;
+    const q = this.queues[w.queue];
     const i = q.indexOf(ticket);
     if (i >= 0) q.splice(i, 1);
-    ticket.priority = priority;
-    this.queues[priority].push(ticket);
+    w.queue = ticket.priority;
+    this.queues[w.queue].push(ticket);
     this.pump();
   }
   /**

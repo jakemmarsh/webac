@@ -1251,3 +1251,13 @@ race holds at most one extra copy of the object it raced.
 Tests: tests/verify-cache-read-hedge.ts (store race both ways, abort, unusable copy replaced, failed download falls back,
 null policy / non-persistent cache, deadline math, phases + bridge keys, prerender timer, BootWatch prerenderMs,
 boot_slow from activation, whole-DAT race), tests/verify-warm-boot-slow-breakdown.ts.
+
+**One wait per limiter (BUG.streaming-hedge-shared-ticket, 2026-11-05).** A hedged load's Ticket waits in two limiters
+at once: the disk limiter (its cache read, 32 slots) and the network limiter (the hedge's download). The Ticket used to
+hold one `wake` / `queuedIn`, so the second queue overwrote the first: the disk limiter's pump started the network wait
+(past the link's rules), the cache read never ran and its disk slot leaked, and the network limiter later popped a ticket
+whose wake was null (prod 2026-11-05: `TypeError: n is not a function` at Limiter.pump from holdBackground's release).
+It needs 33+ stalled reads at once, so the 33rd queues in the disk limiter. Now each Limiter keeps its own
+`Map<Ticket, {wake, queue}>`; the ticket records every limiter it waits in, `promote` requeues in each, `requeue` moves
+only a ticket waiting there (never a second entry), and `run` refuses a ticket already waiting or running in that limiter.
+The whole-DAT race (`hedgedCacheRead`) shares no waiter: it has no limiter. Tests: tests/verify-streaming-hedge-shared-ticket.ts.
