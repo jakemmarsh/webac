@@ -31,7 +31,7 @@ import { buildPacket1999, F1999, HEADER_SIZE_1999, readHeader1999 } from '../pac
 import type { ConnectionEvent } from '../packages/network/src/index.js';
 import { serverNetErrorNotice, netErrorNotice, characterErrorNotice } from '../packages/renderer/src/ui/ConnectionNotices.js';
 import {
-  loginFailureText, LOGON_FAILED_HINT, perIpLimitsFrom, perIpLogonFailedText, perIpServerFullText, worldFromEntry,
+  ac1999AccountNameProblem, loginFailureText, LOGON_FAILED_HINT, perIpLimitsFrom, perIpLogonFailedText, perIpServerFullText, worldFromEntry,
 } from '../packages/renderer/src/launcher/worldDirectory.js';
 import { buildDirectory } from '../services/ws-tcp-bridge/src/serverDirectory.js';
 import { AC1999_PUBLIC_SERVER, AC1999_LOCAL_ID } from '../services/ws-tcp-bridge/src/serverList.js';
@@ -265,6 +265,73 @@ describe('a refusal on a world whose per-IP caps every webAC player shares', () 
     expect(perIpLimitsFrom({ accounts: 2, sessions: 2 })).toEqual({ accounts: 2, sessions: 2 });
     for (const bad of [null, undefined, 'x', {}, { accounts: 2 }, { accounts: -1, sessions: 2 }, { accounts: 1.5, sessions: 2 }, { accounts: '2', sessions: 2 }, { accounts: 0, sessions: 0 }]) {
       expect(perIpLimitsFrom(bad)).toBeNull();
+    }
+  });
+});
+
+/**
+ * BUG.ac1999-logon-failed-first-login: an account name the AC1999 server can
+ * never accept gets the same ClientLogOnFailed as a wrong password (or, past
+ * 19 characters, BadCryptoKey with "Reload the page"). The login carries only
+ * 20 characters of "account:password" (Login1999), and CreateAccount takes
+ * only [A-Za-z0-9_-] names with a non-empty password, so the launcher says
+ * which it was. Every other name, and every other era, keeps its text.
+ */
+describe('an AC1999 refusal of an account name that server can never accept says why', () => {
+  const rows = buildDirectory(
+    [{ ...AC1999_PUBLIC_SERVER }, { id: AC1999_LOCAL_ID, name: 'AC1999 (local)', emu: 'AC1999', host: '127.0.0.1', port: 9310, source: 'overlay' }],
+    new Map(), new Map(), { now: 0 },
+  );
+  const fromRow = (id: string) => worldFromEntry(JSON.parse(JSON.stringify(rows.find((r) => r.id === id))))!;
+  const refusedWith = (id: number) => {
+    FakeSocket.sockets = [];
+    const { events, sock } = start();
+    sock.deliver(refusal1999(id));
+    const e = errors(events)[0].serverNetError!;
+    return serverNetErrorNotice(e.stringId, e.tableId);
+  };
+
+  it('names the rule the name breaks', () => {
+    expect(ac1999AccountNameProblem('oldtimer')).toBeNull();
+    expect(ac1999AccountNameProblem('Under_score-9')).toBeNull();
+    expect(ac1999AccountNameProblem('abcdefghijklmnopqr')).toBeNull(); // 18: one password character fits
+    for (const name of ['John Smith', 'john.smith', 'me@mail.co', 'café']) expect(ac1999AccountNameProblem(name)).toMatch(/only letters, numbers, hyphens/);
+    expect(ac1999AccountNameProblem('abcdefghijklmnopqrs')).toMatch(/18 characters or fewer/); // 19: empty password
+    expect(ac1999AccountNameProblem('abcdefghijklmnopqrstuvw')).toMatch(/18 characters or fewer/); // no ':' at all
+  });
+
+  const AC1999 = 'ac1999-retail';
+  const as = (account: string, eraId: string = AC1999) => [account, eraId] as const;
+
+  it('replaces the generic hint in a 1999-era session, for ClientLogOnFailed and BadCryptoKey (launcher worlds)', () => {
+    for (const id of ['ac1999', AC1999_LOCAL_ID]) {
+      const world = fromRow(id);
+      expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), world, false, ...as('john.smith'))).toMatch(/^Client logon failed\n\nAccount names on this server can use only letters/);
+      expect(loginFailureText(refusedWith(STR_LOGIN_INVALID_AUTH), world, false, ...as('averyveryverylongname')))
+        .toMatch(/^Invalid or corrupted authentication\n\nThis server reads only the first 20 characters/);
+      // A valid name: the refusal is its password; the text stays what it was.
+      expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), world, false, ...as('oldtimer'))).toBe(loginFailureText(refusedWith(STR_LOGIN_FAILED), world, false));
+      // In the world, or another refusal: unchanged.
+      expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), world, true, ...as('john.smith'))).toBe('Client logon failed');
+      expect(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), world, false, ...as('john.smith'))).toBe(loginFailureText(refusedWith(STR_LOGIN_SERVER_FULL), world, false));
+    }
+  });
+
+  it('a URL / ?era= login (no launcher world) and a Custom… 1999 server get it too: keyed on the session era', () => {
+    // ?ace&bridge=…&account=john.smith&password=pw&era=ac1999-retail: launcherWorld is null.
+    expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), null, false, ...as('john.smith')))
+      .toMatch(/^Client logon failed\n\nAccount names on this server can use only letters, numbers, hyphens/);
+    expect(loginFailureText(refusedWith(STR_LOGIN_INVALID_AUTH), null, false, ...as('abcdefghijklmnopqrstu')))
+      .toMatch(/^Invalid or corrupted authentication\n\nThis server reads only the first 20 characters.*18 characters or fewer\.$/s);
+    const custom = { name: 'Custom', registration: null, registrationUrl: null, kind: 'custom' as const, bridgeUrl: 'ws://localhost:9095' };
+    expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), custom, false, ...as('john.smith'))).toMatch(/only letters, numbers, hyphens/);
+  });
+
+  it('other eras keep their text: their servers take other names', () => {
+    for (const eraId of ['eor', 'classicace-customdm']) {
+      expect(loginFailureText(refusedWith(STR_LOGIN_FAILED), null, false, ...as('john.smith', eraId))).toBe(`Client logon failed\n\n${LOGON_FAILED_HINT}`);
+      expect(loginFailureText(refusedWith(STR_LOGIN_INVALID_AUTH), null, false, ...as('abcdefghijklmnopqrstu', eraId)))
+        .toBe('Invalid or corrupted authentication\n\nReload the page and try again.');
     }
   });
 });

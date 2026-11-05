@@ -87,7 +87,7 @@
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
-export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_used'] as const;
+export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_used'] as const;
 export type PortalOutcome = typeof PORTAL_OUTCOMES[number];
 
 /** How the player tried the portal. */
@@ -114,6 +114,15 @@ const PS_REPORT_COLLISIONS_AS_ENVIRONMENT = 0x200000;
 export const WEENIE_ERROR_ACTION_CANCELLED = 0x0036;
 
 export const PORTAL_REFUSED = 'portal_refused' as const;
+/**
+ * BUG.portal-use-held-keys: the player's own movement event (a MoveToState) went out while a Use was
+ * unanswered. ACE cancels the server's walk on any MoveToState (GameActionMoveToState.cs:
+ * StopExistingMoveToChains while IsPlayerMovingTo; the next MoveToChain poll, Player_Move.cs, calls back
+ * false → Player_Use.cs TryUseItem(item, false) → UseDone(None), no teleport). Retail sends one only for
+ * a fresh movement input (CommandInterpreter::HandleKeyboardCommand @ 0x006b3690 → TakeControlFromServer
+ * @ 0x006b32d0); a key merely held does not (UseTime @ 0x006b3bf0 waits for the MoveTo to end).
+ */
+export const PORTAL_CANCELLED = 'portal_cancelled' as const;
 
 /**
  * A portal whose PhysicsState lets a walk-in reach it: ReportCollisions set, IgnoreCollisions and
@@ -206,8 +215,12 @@ export interface PortalSnapshot {
 interface Ids { era: string; server: string | null; trace: string; build: string }
 
 export interface PortalUseFailedEvent extends Ids {
-  /** `portal_refused`: the server answered the try with a refusal (a WeenieError, a portal chat line). */
-  outcome: 'portal_use_failed' | 'portal_refused';
+  /**
+   * `portal_refused`: the server answered the try with a refusal (a WeenieError, a portal chat line).
+   * `portal_cancelled`: no refusal, and the player's own movement event went out while a Use was unanswered
+   * (PORTAL_CANCELLED: ACE ends the walk and the use on it).
+   */
+  outcome: 'portal_use_failed' | 'portal_refused' | 'portal_cancelled';
   trigger: PortalTrigger;
   wcid: number;
   itemType: number;
@@ -246,6 +259,18 @@ export interface PortalUseFailedEvent extends Ids {
   playerMoved: boolean;
   /** The UseDone code that came back (0 = done, no error); null = no UseDone. */
   useDone: number | null;
+  /** Uses the client sent (of `attempts`), and those it held because a request was pending ('busy'). */
+  sends: number;
+  busyHeld: number;
+  /** Server movements of the player during the watch (MoveToPosition / MoveToObject / TurnTo). */
+  serverMoves: number;
+  /** Movement input (a key in a movement list, or autorun) was held when the first Use went out; null = none went out. */
+  keysAtSend: boolean | null;
+  /** The player's own movement events (MoveToState) sent while a Use was unanswered (after its send, before a UseDone). */
+  movesSent: number;
+  /** UseDones in the watch, and ms from the first Use sent to the first UseDone. */
+  useDones: number;
+  firstUseDoneMs: number | null;
   /** WeenieError / WeenieErrorWithString codes that came back, in order. */
   weenieErrors: number[];
   /** Server chat lines in the watch, the first portal line's ChatMessageType and template. */
@@ -301,6 +326,16 @@ interface Watch {
   chatLines: number;
   chatType: number | null;
   chatTemplate: string | null;
+  sends: number;
+  busyHeld: number;
+  serverMoves: number;
+  keysAtSend: boolean | null;
+  movesSent: number;
+  useDones: number;
+  firstSendAt: number | null;
+  firstUseDoneMs: number | null;
+  /** A Use went out and no UseDone has come back since. */
+  useOutstanding: boolean;
 }
 
 function safe<T>(f: (() => T) | undefined, fallback: T): T {
@@ -336,17 +371,36 @@ export class PortalUseReporter {
    * The player used `guid`. `sent` false with `held` = the client kept the Use. Not a portal: nothing.
    * A use of the portal already watched counts as another attempt and restarts the wait.
    */
-  useAttempt(guid: number, o: { itemType?: number; objectDescFlags?: number } | null | undefined, sent: boolean, held: PortalUseHeld | null = null): void {
+  useAttempt(
+    guid: number, o: { itemType?: number; objectDescFlags?: number } | null | undefined, sent: boolean,
+    held: PortalUseHeld | null = null, keysHeld?: boolean,
+  ): void {
     if (!isPortalObject(o)) return;
     const at = this.now();
-    const w = this.watch;
+    let w = this.watch;
     if (w && w.guid === guid >>> 0) {
       w.attempts++;
       w.progressAt = at;
       if (sent) { w.useSent = true; w.held = null; } else if (!w.useSent) w.held = held;
-      return;
+    } else {
+      this.begin(guid, 'use', at, sent, sent ? null : held);
+      w = this.watch;
+      if (!w) return;
     }
-    this.begin(guid, 'use', at, sent, sent ? null : held);
+    if (!sent) { if (held === 'busy') w.busyHeld++; return; }
+    w.sends++;
+    w.useOutstanding = true;
+    if (w.firstSendAt === null) { w.firstSendAt = at; w.keysAtSend = keysHeld ?? null; }
+  }
+
+  /**
+   * The client sent a MoveToState (MovementSync). While a Use is unanswered ACE cancels the use's walk on it
+   * (PORTAL_CANCELLED).
+   */
+  movementSent(): void {
+    const w = this.watch;
+    if (!w || !w.useOutstanding) return;
+    w.movesSent++;
   }
 
   /**
@@ -385,6 +439,7 @@ export class PortalUseReporter {
     const w = this.watch;
     if (!w) return;
     w.serverWalk = true;
+    w.serverMoves++;
     w.progressAt = this.now();
   }
 
@@ -393,7 +448,11 @@ export class PortalUseReporter {
     const w = this.watch;
     if (!w) return;
     if (w.useDone === null || code !== 0) w.useDone = u32(code);
-    w.progressAt = this.now();
+    const at = this.now();
+    w.progressAt = at;
+    w.useDones++;
+    w.useOutstanding = false;
+    if (w.firstUseDoneMs === null && w.firstSendAt !== null) w.firstUseDoneMs = Math.max(0, Math.round(at - w.firstSendAt));
   }
 
   /** A WeenieError or WeenieErrorWithString came back (its code only). */
@@ -458,8 +517,9 @@ export class PortalUseReporter {
     this.failedSent++;
     const end = safe(() => this.opts.snapshot(w.guid), null);
     const s = w.snap;
+    const outcome = this.refused(w) ? PORTAL_REFUSED : w.trigger === 'use' && w.movesSent > 0 ? PORTAL_CANCELLED : 'portal_use_failed';
     this.post({
-      outcome: this.refused(w) ? PORTAL_REFUSED : 'portal_use_failed', ...this.ids(), trigger: w.trigger,
+      outcome, ...this.ids(), trigger: w.trigger,
       wcid: u32(s.wcid), itemType: u32(s.itemType), descFlags: u32(s.descFlags), physicsState: u32(s.physicsState),
       ethereal: (s.physicsState & PS_ETHEREAL) !== 0,
       reportCollisions: (s.physicsState & PS_REPORT_COLLISIONS) !== 0,
@@ -480,6 +540,13 @@ export class PortalUseReporter {
       serverWalk: w.serverWalk,
       playerMoved: w.playerMoved,
       useDone: w.useDone,
+      sends: w.sends,
+      busyHeld: w.busyHeld,
+      serverMoves: w.serverMoves,
+      keysAtSend: w.keysAtSend,
+      movesSent: w.movesSent,
+      useDones: w.useDones,
+      firstUseDoneMs: w.firstUseDoneMs,
       weenieErrors: [...w.errors],
       chatLines: w.chatLines,
       chatType: w.chatType,
@@ -515,6 +582,8 @@ export class PortalUseReporter {
       useSent: sent, held, attempts: trigger === 'use' ? 1 : 0, overlapped: trigger === 'walk_in', closest: null,
       serverWalk: false, playerMoved: false, overlappedAfterMove: false,
       useDone: null, errors: [], chatLines: 0, chatType: null, chatTemplate: null,
+      sends: 0, busyHeld: 0, serverMoves: 0, keysAtSend: null, movesSent: 0, useDones: 0,
+      firstSendAt: null, firstUseDoneMs: null, useOutstanding: false,
     };
   }
 

@@ -243,7 +243,7 @@ export class MagToolsRuntime {
     const o = this.x.object?.(guid >>> 0);
     if (!o) return;
     if (o.objectClass === 27) {
-      if (this.corpses.seen({ id: guid >>> 0, name: o.name, cell: o.cell, x: o.x, y: o.y, z: o.z, ...(o.burden !== undefined ? { burden: o.burden } : {}), appraised: false }) === 'appraise') void this.api.appraise(guid >>> 0, { quiet: true });
+      if (this.corpses.seen({ id: guid >>> 0, name: o.name, cell: o.cell, x: o.x, y: o.y, z: o.z, ...(o.burden !== undefined ? { burden: o.burden } : {}), appraised: false }) === 'appraise') this.api.backgroundAppraise(guid >>> 0);
     } else if (o.objectClass === 24) {
       this.players.seen({ id: guid >>> 0, name: o.name, cell: o.cell, x: o.x, y: o.y, z: o.z });
     }

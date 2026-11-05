@@ -86,3 +86,26 @@ export function screenBrightnessFilter(pref: number): string {
   const f = screenBrightnessFactor(pref);
   return Math.abs(f - 1) < 1e-9 ? '' : `brightness(${f.toFixed(3)})`;
 }
+
+/**
+ * BUG.launcher-brightness (webac#21) — the filter the whole frame (document.body) carries for the
+ * slider value `pref` on the screen showing now.
+ *
+ * - `gamma` false (1999, EraWorldRules.brightness): the slider is the landscape's ambient floor
+ *   (SmartBox_SetBrightness @ 0x40df93), never a screen-wide ramp: no filter on any screen.
+ * - `ownScreen` true (the launcher's server select and login, and Claude's connect page): those
+ *   screens are ours, not retail's. Retail's world choice and login lived in the Turbine launcher,
+ *   a separate Windows program outside acclient's D3D device, so the client's gamma ramp never
+ *   reached it: no filter there in any era.
+ * - Otherwise (end of retail / Dark Majesty in the client's own screens): retail's ramp. It was
+ *   installed from the saved preference from the first frame on, pre-world included: every
+ *   Client::KeepUIAlive @ 004112d0 / Client::UseTime @ 00411c40 runs
+ *   SceneTool::PrepareGraphicsDevice @ 0043e4f0 → Render::UpdateFromPreferences @ 0054d850 →
+ *   RenderDeviceD3D::SetGamma when the value differs, and the pref comes from UserPreferences
+ *   (Render.ScreenBrightness, registered client-wide, not per character). So character select,
+ *   character creation, the connecting screen and portal space keep it.
+ */
+export function frameScreenBrightnessFilter(pref: number, o: { gamma: boolean; ownScreen: boolean }): string {
+  if (!o.gamma || o.ownScreen) return '';
+  return screenBrightnessFilter(pref);
+}

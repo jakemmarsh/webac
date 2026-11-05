@@ -437,6 +437,21 @@ export interface AgentHost {
   inventoryPending?(guid: number): boolean;
   /** `quiet`: the automation's own look (no Examine window), as VirindiTank's background IDs. */
   appraise(guid: number, quiet?: boolean): void;
+  /**
+   * May the client look at this object on its own, an appraisal nobody asked for
+   * (controllers/BackgroundAppraisal.ts): not a world object in an era whose server turns the
+   * appraiser toward it (AC1999, webac#20), nor while the player's Examine window holds the server's
+   * appraisal target. Unset: always.
+   */
+  backgroundAppraisalAllowed?(guid: number): boolean;
+  /**
+   * AGENT.idle-no-agent-work — an agent is attached to this page: Claude switched on for the tab (the hosted connector's
+   * relay), or the ?agent API a daemon drives. Without one, and with nothing of the API's own under way (a task, a wait,
+   * an attack order, held keys, a loaded routine: {@link AgentApi.agentRunning}), the tick does only what the player's
+   * plugins need (agentIdleTick): no creature sampling, background level looks, door / buff / fellow watchers, object
+   * diffing, remembered-places or gear-cast storage writes. Unset: always attached (tests, tools).
+   */
+  agentAttached?(): boolean;
   /** Appraisal text once the server has answered, else null. */
   appraisal(guid: number): string | null;
   /** The appraisal's property maps and spell names (loot rules on item properties), when one arrived. */
@@ -2656,6 +2671,16 @@ export class AgentApi {
   pushChat(text: string, type?: number, plugin?: string): void {
     const clean = text.replace(/\s+$/, '');
     if (!clean) return;
+    // AGENT.idle-no-agent-work — no agent running: the line goes on the event ring as it is (UtilityBelt's game events
+    // read its death-drop line), and only the victim line is read (the death event names its killer). The rest (buffs and
+    // gear casts and your corpses kept in storage, boosts, locked doors, attackers, spells at you) is the agent's.
+    if (!this.agentRunning()) {
+      this.push('chat', `(${chatKindOf(type, clean)}) ${clean}`, undefined, type);
+      if (plugin) { const e = this.events[this.events.length - 1]; if (e && e.seq === this.seqN) e.plugin = plugin; return; }
+      const v = AgentApi.spokenLine(clean, type) ? null : parseVictimDeathLine(clean);
+      if (v) this.victimLine = { killer: v.killer, at: this.host.now() };
+      return;
+    }
     const boostNote = plugin || AgentApi.spokenLine(clean, type) ? '' : this.receivedBoostNote(clean);
     this.push('chat', `(${chatKindOf(type, clean)}) ${clean}${boostNote}`, undefined, type);
     if (plugin) {
@@ -5083,10 +5108,21 @@ export class AgentApi {
     for (const o of [...objs].sort((a, b) => a.dist - b.dist)) {
       if (n >= AgentApi.LEVEL_LOOKS_PER_OBSERVE || o.dist > AgentApi.LEVEL_LOOK_RANGE_M) break;
       if (o.kind !== 'monster' || o.level || o.dying || this.levelLooks.has(o.guid)) continue;
+      if (!this.backgroundAppraise(o.guid)) continue;
       this.levelLooks.add(o.guid);
-      this.host.appraise(o.guid, true);
       n++;
     }
+  }
+
+  /**
+   * A look the client takes on its own (a level look, a corpse's "my kill?", a routine's door ID): quiet, and only
+   * where the host allows one (backgroundAppraisalAllowed: on the AC1999 server every appraisal of a world object
+   * turned the player toward it, so a run stopped for a monster nobody examined, webac#20). False: not sent.
+   */
+  backgroundAppraise(guid: number): boolean {
+    if (this.host.backgroundAppraisalAllowed && !this.host.backgroundAppraisalAllowed(guid >>> 0)) return false;
+    this.host.appraise(guid >>> 0, true);
+    return true;
   }
 
   observe(opts: ObserveOptions = {}, lean = false): AgentObservation {
@@ -11837,7 +11873,7 @@ export class AgentApi {
             let asked = levelWait.get(c.guid);
             if (asked === undefined) {
               levelWait.set(c.guid, asked = now);
-              if (!this.levelLooks.has(c.guid)) { this.levelLooks.add(c.guid); this.host.appraise(c.guid, true); }
+              if (!this.levelLooks.has(c.guid) && this.backgroundAppraise(c.guid)) this.levelLooks.add(c.guid);
             }
             return now - asked >= AgentApi.AGGRO_LEVEL_WAIT_MS;
           });
@@ -15609,10 +15645,82 @@ export class AgentApi {
   }
 
   /**
+   * AGENT.idle-no-agent-work (Jake, 2026-11-04: "we should only be running agent code when an agent is running!!") —
+   * whether the agent's own work runs this tick: an agent attached (host.agentAttached: Claude on for the tab, the ?agent
+   * API), or work of the API's own under way that its tick steps: a task (a walk, use or follow a plugin command started
+   * too: /ub, /mt, GoArrow, VTank's commands), a wait, an attack order, keys the agent holds, or a routine loaded (VTank's
+   * macro or a meta, running or paused, whoever started it). Otherwise every automation player (on playwebac.com all of
+   * them) ran the creature sampler and its background level looks (webac#20 turned AC1999 players toward monsters), the
+   * door / buff / fellow watchers, the object diff and the remembered-places and gear-cast storage writes, with no agent.
+   */
+  agentRunning(): boolean {
+    return (this.host.agentAttached?.() ?? true) || this.task !== null || this.waiters.length > 0 || this.attackTarget !== 0
+      || this.agentKeys.size > 0 || this.routine.loadedProfile !== null;
+  }
+  /** The last tick's {@link agentRunning}. Starts true: a page with an agent from its first tick is as before. */
+  private running = true;
+  /** The API has idled at least once: its watchers' baselines are stale when it wakes. */
+  private idled = false;
+
+  /**
+   * The tick with no agent running: only what the player's own plugins read from the API. The routine engine's tick (no
+   * routine loaded: VirindiTank's stand-by upkeep, ManaChargesWhenOff, which acts only when the player set it) and your
+   * death as an event (UtilityBelt's CharacterDeath game event reads it, MagToolsRuntime's ubRuntime.tick). Nothing here
+   * sends a packet unless the player configured it, or writes storage.
+   */
+  private idleTick(marks?: { routineStart(): void; routineEnd(): void }): void {
+    this.idled = true;
+    marks?.routineStart();
+    this.routine.tick();
+    marks?.routineEnd();
+    const s = this.host.self();
+    if (s) {
+      if (s.dead && !this.lastDead) this.push('death', this.recordDeath(s));
+      this.lastDead = s.dead;
+    }
+  }
+
+  /**
+   * An agent starts running after the API idled (Claude switched on, a routine started, a plugin's walk): the watchers
+   * start from what is here now, not from the last time one ran. The object list is seeded again (no "arrived" for what
+   * was already in view), vitals, dialogs, screen and buffs are read as the new baseline, and the creature trails and
+   * held chases start over, so a monster coming at you is raised from the next looks (sampleCreatures, every
+   * TRAIL_STEP_MS) and its level asked for then, or at the agent's first observe (lookAtLevels): levels on demand.
+   */
+  private wake(): void {
+    if (!this.idled) return;
+    this.known = null;
+    this.lostLastTick = new Set();
+    this.placesInView = new Map();
+    this.creatureTrail.clear();
+    this.lastTrailAt = -Infinity;
+    this.aggroStall.clear();
+    this.longStuck.clear();
+    this.fellowHealth.clear();
+    this.buffLanded.clear();
+    this.buffLandedSeen = false;
+    this.lastTickAt = null;
+    this.lastDialogCount = this.host.dialogs().length;
+    const screen = this.host.screen();
+    if (this.lastScreen !== 'unknown') this.lastScreen = screen;
+    const s = this.host.self();
+    this.lastHealthFrac = s && s.health.max ? s.health.current / s.health.max : 1;
+    this.lastHealthCur = s ? s.health.current : null;
+    this.lastStamina = s ? s.stamina.current : null;
+    this.critAlarmFrac = 1;
+  }
+
+  /**
    * Step the running task and the watchers. main.ts calls this ~10×/s. `marks`: told just before and after the routine's
    * tick, so the frame's phase timing (telemetry/MainThreadCost.ts) can tell the routine's time from the rest.
    */
   tick(marks?: { routineStart(): void; routineEnd(): void }): void {
+    const on = this.agentRunning();
+    if (on !== this.running) {
+      this.running = on;
+      if (on) this.wake();
+    }
+    if (!on) { this.idleTick(marks); return; }
     this.settleCorpse();
     marks?.routineStart();
     this.routine.tick();

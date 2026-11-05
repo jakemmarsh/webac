@@ -73,7 +73,10 @@ import { RoutineStore } from './routineStore.js';
 import {
   type SessionProtocol, sessionProtocol, readGrant1999Ids, readTime1999, buildDisconnectPacket1999,
 } from './protocol.js';
-import { EARLY_RESEND_MS, type EgressLease, type EgressManager, NO_REPLY_MOVE_MS, readLoginAccount, readLoginRefusal } from './egress.js';
+import {
+  EARLY_RESEND_MS, type EgressLease, type EgressManager, type LoginCredentialShape, loginCredentialShape, loginRefusedFields,
+  NO_REPLY_MOVE_MS, readLoginAccount, readLoginCredential1999, readLoginRefusal,
+} from './egress.js';
 import { HANDOVER_RELEASE, HANDOVER_TICKET_REQUEST, HandoverTickets, bindWhenFree, type HandoverTicket } from './handover.js';
 
 /** Where a session's datagrams go. */
@@ -687,8 +690,16 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         if (session.closed) return;
         // An egress world's new-account rule: the server refused the login outright (no account made), so
         // the pending markers that login left are dropped. Only before the character list.
-        if (lease?.accountRule && session.account === null && readLoginRefusal(msg, protocol)) {
-          try { egress!.loginRefused(lease); } catch (err) { egressFailure('login_refused', err); }
+        if (session.account === null && readLoginRefusal(msg, protocol)) {
+          if (lease?.accountRule) {
+            try { egress!.loginRefused(lease); } catch (err) { egressFailure('login_refused', err); }
+          }
+          // A refused 1999 login, once per login: what its credential looked like (never the name or
+          // password), so a refusal reads as a wrong password or as one the server could never accept.
+          if (lastLogin1999) {
+            log('info', 'login_refused', loginRefusedLine(lastLogin1999, msg));
+            lastLogin1999 = null;
+          }
         }
         if (lease && session.packetsDown === 0 && firstUpAt) {
           clearEarlyResends();
@@ -955,6 +966,20 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
     // create the account). The check is async (a cross-process lock): packets behind it wait,
     // in order, and go once it allows the login.
     let loginCheck = false;
+
+    /** The 1999 login last sent up, for the `login_refused` line (its shape only: never the name or password). */
+    let lastLogin1999: { shape: LoginCredentialShape; known: boolean | null } | null = null;
+    function noteLogin1999(buf: Buffer): void {
+      const c = readLoginCredential1999(buf);
+      const shape = loginCredentialShape(c);
+      if (!shape) return;
+      let known: boolean | null = null;
+      try { known = lease && c.account !== null ? egress!.accountKnown(lease, c.account) : null; } catch { /* a log field only */ }
+      lastLogin1999 = { shape, known };
+    }
+    function loginRefusedLine(entry: { shape: LoginCredentialShape; known: boolean | null }, msg: Buffer): Record<string, unknown> {
+      return { session: id, ip, server: session.target?.key ?? null, ...loginRefusedFields(entry.shape, entry.known, msg), ...egressFields(), ...(trace ? { trace } : {}) };
+    }
     const waiting: Buffer[] = [];
     const MAX_WAITING = 64;
 
@@ -964,6 +989,7 @@ export function createBridgeServer(config: BridgeConfig, deps: BridgeDeps = {}):
         if (waiting.length < MAX_WAITING) waiting.push(buf);
         return;
       }
+      if (is1999 && session.account === null) noteLogin1999(buf);
       if (lease?.accountRule) {
         const login = readLoginAccount(buf, protocol);
         if (login.login && login.account !== null && !egress!.loginAllowed(lease, login.account)) {

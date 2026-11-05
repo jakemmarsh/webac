@@ -29,6 +29,7 @@ import { resolveTarget } from './targets.js';
 import { defaultFetchText } from './serverList.js';
 import { isAc1999Era } from './protocol.js';
 import { startEgress } from './egress.js';
+import { WorldReachability, trackerLoginProbe } from './worldProbe.js';
 
 async function main(): Promise<void> {
   const config = resolveBridgeConfig(process.argv.slice(2), process.env);
@@ -77,6 +78,17 @@ async function main(): Promise<void> {
       detector,
       // A world whose sessions each get their own address no longer shares its per-address caps.
       egressWorlds: config.egress ? new Set(config.egress.worlds.keys()) : undefined,
+      // AC1999 worlds: no feed reports them, so `online` comes from a tracker-login probe (webac#22).
+      // BRIDGE_ERA_PROBE=off turns this off too (no probe datagrams leave the bridge).
+      reachability: process.env.BRIDGE_ERA_PROBE === 'off' ? undefined : new WorldReachability({
+        probe: trackerLoginProbe(),
+        skip: (s) => config.spp.servers.has(s.id.toLowerCase()),
+        resolve: async (host) => {
+          const r = await resolveTarget(host, { allowPrivate: config.allowPrivateTargets });
+          return r.ok ? r.address : null;
+        },
+        log,
+      }),
     });
     directory.start();
     if (config.allowPrivateTargets) {

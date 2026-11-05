@@ -210,6 +210,19 @@ function nodeStep(n: NavNode): { do: RoutineAction[]; problem?: string } | { pro
   }
 }
 
+/** Plain data equal regardless of key order (routes from navToRoute or read back from storage). */
+function sameData(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a).filter((k) => (a as Record<string, unknown>)[k] !== undefined);
+  const kb = Object.keys(b).filter((k) => (b as Record<string, unknown>)[k] !== undefined);
+  return ka.length === kb.length && ka.every((k) => sameData((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+}
+
+/** Two routes with the same name and every field the same: one route, not two. */
+export function sameRoute(a: Route, b: Route): boolean { return sameData(a, b); }
+
 /** A navroute as one of our routes: points, and on-arrival stops for its recall / pause / chat / use / jump steps. */
 export function navToRoute(name: string, nav: NavRoute): { route: Route | null; problems: string[] } {
   if (nav.mode === 'follow') return { route: { name, mode: 'follow', points: [], ...(nav.follow?.name ? { follow: nav.follow.name } : {}) }, problems: [] };
@@ -372,7 +385,16 @@ function convertAction(id: number, data: MetValue, ctx: ConvertCtx): RoutineActi
       if (!nav) return [unsupportedAction(`load navroute "${name}" (empty)`, { id, data })];
       ctx.usesNav = true;
       let routeName = (name && name !== '[None]' ? name : `${ctx.metName} route`).trim();
-      for (let n = 2; ctx.routes.some((r) => r.name === routeName); n++) routeName = `${name || ctx.metName} (${n})`;
+      // The same nav embedded again (FearFactoryFellowV2 embeds RynthidToGeilla.nav twice) loads the route
+      // already made; different contents under a taken name get "name (n)", since VTank loaded the one
+      // embedded at that action.
+      for (let n = 2; ; n++) {
+        const had = ctx.routes.find((r) => r.name === routeName);
+        if (!had) break;
+        const again = navToRoute(routeName, nav).route;
+        if (again && sameRoute(had, again)) return [{ kind: 'load-route', route: routeName }];
+        routeName = `${name || ctx.metName} (${n})`;
+      }
       const { route, problems } = navToRoute(routeName, nav);
       ctx.problems.push(...problems);
       if (!route) return [unsupportedAction(`load navroute "${name}"`, { id, data })];
@@ -838,9 +860,21 @@ export function importVTank(files: Array<{ name: string; text: string }>, base: 
           : { ...r.value, name: p.name, loot: p.loot.length ? p.loot : r.value.loot, buffSets: p.buffSets, routes };
         problems.push(...r.problems.map((x) => `${f.name}: ${x}`));
       } else if (f.kind === 'nav') {
+        // A name already taken gets "name (n)", unless that route is this nav exactly: the same file again
+        // (or one a meta embedded under that name) is the route already here, not a silent copy. The
+        // VirindiTank window asks Replace / Keep both itself before it gets here.
+        const nav = parseNav(f.text);
         let name = stem(f.name);
-        for (let n = 2; p.routes.some((r) => r.name === name); n++) name = `${stem(f.name)} (${n})`;
-        const r = navToRoute(name, parseNav(f.text));
+        let same = false;
+        for (let n = 2; ; n++) {
+          const had = p.routes.find((r) => r.name === name);
+          if (!had) break;
+          const again = navToRoute(name, nav).route;
+          if (again && sameRoute(had, again)) { same = true; break; }
+          name = `${stem(f.name)} (${n})`;
+        }
+        if (same) continue;
+        const r = navToRoute(name, nav);
         if (r.route) p.routes.push(r.route);
         problems.push(...r.problems.map((x) => `${f.name}: ${x}`));
       } else {

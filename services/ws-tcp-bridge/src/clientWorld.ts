@@ -217,15 +217,18 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
  * BUG.portal-walk-in-nothing: a try the server answered with a refusal (a WeenieError other than
  * ActionCancelled, or a portal chat line: a quest, level or age gate, "teleported too recently") is
  * `portal_refused`, with the failure's fields; `portal_use_failed` is left for tries nothing answered.
+ * BUG.portal-use-held-keys: a use the player's own MoveToState went out on while it was unanswered is
+ * `portal_cancelled` (ACE GameActionMoveToState.cs StopExistingMoveToChains ends the walk and the use),
+ * and every failure carries sends / busyHeld / serverMoves / keysAtSend / movesSent / useDones / firstUseDoneMs.
  */
-export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_used'] as const;
+export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_used'] as const;
 export const PORTAL_TRIGGERS = ['use', 'walk_in'] as const;
 export const PORTAL_USE_HELD = ['stale', 'busy', 'decided'] as const;
 /** A portal watch's longest wait (renderer PORTAL_MAX_WAIT_MS 30 s, with slack for a late tick). */
 const PORTAL_WAIT_MS = 120_000;
 
 export interface ClientPortalUseFailedEvent extends WorldIds {
-  outcome: 'portal_use_failed' | 'portal_refused';
+  outcome: 'portal_use_failed' | 'portal_refused' | 'portal_cancelled';
   trigger: typeof PORTAL_TRIGGERS[number] | null;
   wcid: number | null;
   itemType: number | null;
@@ -252,6 +255,13 @@ export interface ClientPortalUseFailedEvent extends WorldIds {
   /** The player's own movement keys moved them during the watch (after a use: they walked off). */
   playerMoved: boolean | null;
   useDone: number | null;
+  sends: number | null;
+  busyHeld: number | null;
+  serverMoves: number | null;
+  keysAtSend: boolean | null;
+  movesSent: number | null;
+  useDones: number | null;
+  firstUseDoneMs: number | null;
   weenieErrors: number[] | null;
   chatLines: number | null;
   chatType: number | null;
@@ -321,6 +331,13 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
     closest: metres(b.closest, 100_000, 2),
     playerMoved: bool(b.playerMoved),
     useDone: uint(b.useDone, U32),
+    sends: uint(b.sends, 1000),
+    busyHeld: uint(b.busyHeld, 1000),
+    serverMoves: uint(b.serverMoves, 10_000),
+    keysAtSend: bool(b.keysAtSend),
+    movesSent: uint(b.movesSent, 10_000),
+    useDones: uint(b.useDones, 1000),
+    firstUseDoneMs: uint(b.firstUseDoneMs, PORTAL_WAIT_MS),
     weenieErrors: codes,
     chatLines: uint(b.chatLines, 10_000),
     chatType: uint(b.chatType, U32),

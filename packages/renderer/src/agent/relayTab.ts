@@ -94,3 +94,13 @@ export class TabRelay {
     } finally { if (timer) clearTimeout(timer); this.control?.done(call.method, ok, Math.round(this.now() - start)); }
   }
 }
+
+/**
+ * AGENT.idle-no-agent-work — whether a relay state frame goes to the bridge: always when asked for (`force`: a switch,
+ * a pairing, the CharacterList's registration, a relay link), on main.ts's 10 s beat only while Claude is on (the
+ * bridge's view of the tab stays fresh for its calls) or when the frame changed since the last one sent. A tab with
+ * Claude off sent the same "off" every 10 s for every player.
+ */
+export function relayStateBeat(force: boolean, relayOn: boolean, frame: string, lastSent: string | null): boolean {
+  return force || relayOn || frame !== lastSent;
+}

@@ -392,6 +392,31 @@ export function perIpServerFullText(limits: PerIpLimits): string {
 }
 
 /**
+ * Why an AC1999 server can never accept this account name, or null. Its
+ * login carries only the first 20 characters of "account:password"
+ * (Login1999 CREDENTIAL_BYTES_1999), and its auto-create
+ * (CDatabaseIO::CreateAccount) takes names of letters, digits, '_' and '-'
+ * only (IsUserNameValid) with a password of at least one character. So a
+ * name of 19 characters leaves an empty password, one of 20 or more leaves
+ * no ':' at all, and a name with any other character can never be created,
+ * so it can never exist either. Each answers ClientLogOnFailed (or
+ * BadCryptoKey) exactly like a wrong password; this says which it was.
+ */
+export function ac1999AccountNameProblem(account: string): string | null {
+  if (account.length >= 19) {
+    return 'This server reads only the first 20 characters of your account name and password together, '
+      + 'so an account name this long leaves no room for the password. Use an account name of 18 characters or fewer.';
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(account)) {
+    return 'Account names on this server can use only letters, numbers, hyphens (-) and underscores (_): no spaces, dots or @.';
+  }
+  return null;
+}
+
+/** The refusals an AC1999 server answers an account name it can never accept with (ac1999AccountNameProblem). */
+const AC1999_NAME_REFUSAL_TOKENS: ReadonlySet<string> = new Set(['ID_ConnectionError_ClientLogOnFailed', 'ID_ConnectionError_BadCryptoKey']);
+
+/**
  * The text of a connection-failure dialog (ConnectionNotices'
  * netErrorNotice / serverNetErrorNotice) for a login to `world`: a refused
  * login before entering the world (LOGIN_REFUSED_TOKENS: the timeout, or
@@ -403,17 +428,26 @@ export function perIpServerFullText(limits: PerIpLimits): string {
  * answered (CantSocket) gets customBridgeUnansweredText. Anything else, or
  * anything once in the world, is the notice text with its plain next step
  * (NET_ERROR_NEXT_STEP: "Server Full" → wait or pick another world, the
- * version mismatch → reload the page) after one blank line.
+ * version mismatch → reload the page) after one blank line. In a session of
+ * the 1999 era (`eraId`), a refusal of an account name that server can
+ * never accept (`account`, ac1999AccountNameProblem) says why instead.
  */
 export function loginFailureText(
   notice: { readonly token: string; readonly text: string },
   world: (Pick<World, 'name' | 'registration' | 'registrationUrl'> & Partial<Pick<World, 'kind' | 'bridgeUrl' | 'perIpLimits' | 'emu'>>) | null,
   inWorld: boolean,
   account?: string | null,
+  eraId?: string | null,
 ): string {
   // A Custom… world's bridge that never answered: say that, not retail's
   // "make sure you have a working network" (listed worlds keep retail's text).
   if (!inWorld && world?.kind === 'custom' && notice.token === 'ID_NetError_CantSocket') return customBridgeUnansweredText(world);
+  // Keyed on the era the session runs (a launcher world, a URL / ?era= login and a Custom… server
+  // alike: a 1999 server is only ever played in the 1999 era), not on the launcher's world row.
+  if (!inWorld && account && eraId && eraProfile(eraId)?.login.protocol === 'ac1999' && AC1999_NAME_REFUSAL_TOKENS.has(notice.token)) {
+    const problem = ac1999AccountNameProblem(account);
+    if (problem) return `${notice.text}\n\n${problem}`;
+  }
   // BUG.gdl-account-name-rule — a name the world's auto-create never takes:
   // say what it needs. Not on a world whose per-address account cap already
   // stops every webAC create (perIpLogonFailedText below says so): a better

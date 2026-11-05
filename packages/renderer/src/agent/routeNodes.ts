@@ -347,7 +347,8 @@ export async function openDoorOnTheWay(ctx: NodeCtx, goal: { x: number; y: numbe
   const door = api.nearby(o.idRange).filter((d) => d.kind === 'door' && d.open === false && !d.notByHand && !o.skip.has(d.guid))
     .filter((d) => doorOnRoute({ ...objectAt(me, d), dz: d.dz }, me, goal))[0];
   if (!door) return null;
-  if (!api.itemData(door.guid)) void api.appraise(door.guid, { quiet: true });
+  // A background look (none on the AC1999 server, which turns you to face what you appraise: webac#20).
+  if (!api.itemData(door.guid)) api.backgroundAppraise(door.guid);
   if (door.dist > o.openRange) {
     const w = await api.walkTo(door.guid, { within: Math.max(0.5, o.openRange - 0.25), timeoutMs: 20_000 });
     if (!w.ok) { o.skip.set(door.guid, ctx.now() + DOOR_SKIP_MS); return { ok: false, message: `couldn't reach ${door.name}: ${w.message.split('\n')[0]}` }; }

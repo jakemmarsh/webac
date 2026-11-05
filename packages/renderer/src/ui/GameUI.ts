@@ -204,7 +204,7 @@ import {
 } from './RadarBlips.js';
 import type { CompassTokenKey } from './RadarCompassTokens.js';
 import { targetHealthMeterVisible, toolbarUseButtonDisabled, type SelectionWeenie } from './ToolbarSelection.js';
-import { screenBrightnessFilter } from './ScreenGamma.js';
+import { frameScreenBrightnessFilter } from './ScreenGamma.js';
 import { KeybindRegistry, eventToCode, codeToLabel } from '../input/KeybindRegistry.js';
 import { isCapturableMouseCode, mouseEventToCode, swallowMouseRelease, wheelEventToCode } from '../input/MouseControls.js';
 import { ActionClass } from '../input/KeybindActionClass.js';
@@ -509,6 +509,7 @@ import type { VitalBarState, TargetInfo } from './HUD.js';
 import { ATTRIBUTE_PICTOGRAM_TEXTURES } from './attributePictograms.js';
 import type { UIHost } from './UIHost.js';
 import { eraToolbarRow } from './ToolbarTabs.js';
+import { combatAmmoCountShown, combatAmmoCountText } from './CombatAmmoCount.js';
 import { applySharedTabStrip } from './TabStripShare.js';
 import { loadIconEnumMaps, resolveRenderIconsDids, renderIcons, renderIconsKey, iconRgbaToDataURL, keyBlackTransparent, worldIconsBlackKeyed, type IconEnumMaps, type IconRgba, type ItemIconSpec } from './ItemIconComposite.js';
 import { compositeSpellIcon, loadSpellIconEnumMaps, resolveSpellIconDids, spellIconKey, type SpellIconEnumMaps } from './SpellIconComposite.js';
@@ -5984,12 +5985,12 @@ export class GameUI {
    */
   /** AGENT.hosted-mcp-connector — Claude's connect page, drawn like the launcher (launcher/ConnectScreen.ts). */
   showConnectClaude(api: ConnectApi, req: string): Promise<ConnectOutcome> {
-    return new ConnectScreen(this.launcherKit(), api, req).run();
+    return this.holdOwnPreworldScreen(new ConnectScreen(this.launcherKit(), api, req).run());
   }
 
   showLauncher(opts: LauncherOptions): Promise<LauncherChoice> {
     const screen = new LauncherScreen(this.launcherKit(), opts);
-    const done = screen.run();
+    const done = this.holdOwnPreworldScreen(screen.run());
     screen.focusFirstField();
     return done;
   }
@@ -13480,6 +13481,38 @@ export class GameUI {
     // (CORE.5.b — the FAITHFUL.259 small combat-toggle indicator is gone:
     // the EoL indicator strip 0x21000071 has no combat button; combat mode
     // is shown only by this toolbar button, as in retail.)
+    this.drawCombatAmmoCount();
+  }
+
+  /**
+   * BUG.ac1999-combat-ammo-count (webac#19) — the arrows left, on the combat button in missile
+   * mode (ui/CombatAmmoCount.ts: gmToolbarUI::UpdateAmmoID @ 004bf210 / UpdateAmmoNumber @ 004be9e0;
+   * the 1999 CombatButton's TextRegion, 0x005024a0 / 0x005025a0). Drawn the way the missile-mode
+   * state 0x21000016:0x10000194 draws its text: its font and colour, centred, on the bottom edge
+   * less its 4 px p38 margin (justifyDatButtonLabel). Runs on every mode change and every
+   * inventory sync (a wield, an unwield, a shot's SetStackSize).
+   */
+  private drawCombatAmmoCount(): void {
+    const btn = document.getElementById('combat-mode-btn');
+    if (!btn) return;
+    let box = btn.querySelector(':scope > [data-ac-combat-ammo]') as HTMLElement | null;
+    if (!box) {
+      box = document.createElement('div');
+      Object.assign(box.style, {
+        position: 'absolute', left: '0px', top: '0px', width: '55px', height: '58px',
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'center', boxSizing: 'border-box',
+        paddingBottom: '4px', pointerEvents: 'none',
+      });
+      box.dataset.acCombatAmmo = '';
+      btn.insertBefore(box, btn.firstChild);
+    }
+    const text = combatAmmoCountShown(this.hud.combatMode) ? combatAmmoCountText(this.equippedItems) : '';
+    if (box.dataset.acCombatAmmo === text && box.childElementCount === (text ? 1 : 0)) return;
+    box.dataset.acCombatAmmo = text;
+    box.replaceChildren();
+    if (!text) return;
+    box.appendChild(this.renderDatText(text, descRef(CLASSIC_TOOLBAR_LAYOUT, 0x10000194)));
+    this.justifyDatButtonLabel(box);
   }
 
   /** Toggle combat mode (called from external input handler).
@@ -14436,6 +14469,8 @@ export class GameUI {
   setInventoryData(items: InventoryItem[], equipped: EquippedItem[], burdenCurrent: number, burdenMax: number, itemsCapacity?: number, containersCapacity?: number): void {
     this.inventoryItems = items;
     this.equippedItems = equipped;
+    // BUG.ac1999-combat-ammo-count — a wield / unwield / shot changes the combat button's count.
+    this.drawCombatAmmoCount();
     // SpellExamineUI::RecvNotice_UpdateSpellComponents @ 004ac040 →
     // UpdateComponents: the open spell page re-checks which components the
     // player carries.
@@ -29652,7 +29687,24 @@ export class GameUI {
     this.onLandscapeMinAmbient?.(landscapeMinAmbient(this.clientRules.world, gamma ? 0 : pref));
     const root = typeof document !== 'undefined' ? document.body : null;
     if (!root) return;
-    root.style.filter = gamma ? screenBrightnessFilter(pref) : '';
+    root.style.filter = frameScreenBrightnessFilter(pref, { gamma, ownScreen: this.ownPreworldScreens > 0 });
+  }
+
+  /**
+   * BUG.launcher-brightness (webac#21) — how many of our own pre-world screens (the launcher's server
+   * select + login, Claude's connect page) are up. Retail's were the Turbine launcher, outside the
+   * client's gamma ramp, so the frame filter is off while one shows (ScreenGamma
+   * frameScreenBrightnessFilter) and comes back when it resolves into the client's own screens.
+   */
+  private ownPreworldScreens = 0;
+  private holdOwnPreworldScreen<T>(done: Promise<T>): Promise<T> {
+    this.ownPreworldScreens++;
+    this.applyScreenBrightness();
+    const release = (): void => {
+      this.ownPreworldScreens = Math.max(0, this.ownPreworldScreens - 1);
+      this.applyScreenBrightness();
+    };
+    return done.then((v) => { release(); return v; }, (e: unknown) => { release(); throw e; });
   }
 
   /** LScape min_ambient for the era's brightness (main.ts → SkyboxRenderer.setLandscapeMinAmbient). */
@@ -35587,9 +35639,12 @@ export class GameUI {
    * gmExaminationUI::UseTime @ 004ab530 — while the window is up and the
    * player is NOT in peace mode, a creature / character page re-appraises
    * its object every 0.75 s (the fight's health/vitals follow). Returns the
-   * guid to appraise now, or 0.
+   * guid to appraise now, or 0. Not in an era whose client had no such loop
+   * (EraWorldRules.examineReappraise: 1999, where each one also turned the
+   * player on the AC1999 server, webac#20).
    */
   examineUseTime(nowSec: number, inPeaceMode: boolean): number {
+    if (!this.clientRules.world.examineReappraise) return 0;
     if (!this.examinePanelHandle || this.examineNextUpdate > nowSec || inPeaceMode) return 0;
     this.examineNextUpdate = nowSec + 0.75;
     return this.examineCurrentPage !== 'item' ? this.examineCurrentGuid : 0;

@@ -492,6 +492,8 @@ export class MovementSync {
 
   /** MoveToStates sent this session (automation sends a standing one before its first action when none has gone: agentPrimeMoveState in main.ts). */
   moveToStatesSent = 0;
+  /** Each MoveToState sent (main.ts: the portal telemetry counts those sent while a Use is unanswered). */
+  onMoveToStateSent: (() => void) | null = null;
 
   private sendMoveToState(state: MovementState, pos: PlayerPosition, now: number): void {
     this.lastSentTime = now; // SendMovementEvent stamps last_sent_position_time
@@ -512,6 +514,7 @@ export class MovementSync {
     });
     const msg = serializeGameAction(this.actionSequence(), GameActionType.MoveToState, payload);
     this.connection.sendMessage(msg, GameMessageGroup.SmartboxQueue);
+    this.onMoveToStateSent?.();
   }
 
   /**
@@ -585,6 +588,7 @@ export class MovementSync {
     const payload = buildMoveToStatePayload(motionState, this.buildPosition(pos));
     const msg = serializeGameAction(this.actionSequence(), GameActionType.MoveToState, payload);
     this.connection.sendMessage(msg, GameMessageGroup.SmartboxQueue);
+    this.onMoveToStateSent?.();
   }
 
   // ─── AutonomousPosition ─────────────────────────────────────

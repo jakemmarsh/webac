@@ -115,6 +115,21 @@ export interface EraWorldRules {
    * grey diffuse of 0x5836e0): every light draws white at its own level.
    */
   lightColour: LightColourRule;
+  /**
+   * The open Examine window re-appraises its creature / character every 0.75 s outside peace mode.
+   * End of retail: gmExaminationUI::UseTime @ 004ab530. 1999: no such loop; CM_Item_Event_Appraise
+   * @ 0x005adca0 is called only by ExaminePanel_ExamineObject @ 0x005096d0 (an examine, or a new
+   * selection while the panel examines) and the panel's release paths. On the AC1999 server each
+   * re-appraisal also turned the player (appraisalTurnsAppraiser), every 0.75 s (webac#20).
+   */
+  examineReappraise: boolean;
+  /**
+   * The era's server turns the appraiser to face a world object it appraises (the AC1999 server's
+   * CClientEvents::TurnToAppraiseTarget, 1999 retail until the 2002-07 Repercussions patch). The
+   * client then sends no appraisal of a world object the player didn't ask for
+   * (controllers/BackgroundAppraisal.ts). ACE and GDLE turn nothing.
+   */
+  appraisalTurnsAppraiser: boolean;
 }
 
 export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
@@ -131,6 +146,8 @@ export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
   chatHistory: Object.freeze({ max: 100, trimTo: 100 }),
   textureSampling: 'prefs' as const,
   lightColour: 'rgb' as const,
+  examineReappraise: true,
+  appraisalTurnsAppraiser: false,
 });
 
 export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
@@ -157,6 +174,8 @@ export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
   chatHistory: Object.freeze({ max: 300, trimTo: 200 }),
   textureSampling: 'bilinearNoMips' as const,
   lightColour: 'intensityOnly' as const,
+  examineReappraise: false,
+  appraisalTurnsAppraiser: true,
 });
 
 /** LScape min_ambient for the brightness slider's value `pref` (Render.ScreenBrightness, -1..1). */

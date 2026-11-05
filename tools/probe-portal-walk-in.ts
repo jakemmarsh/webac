@@ -64,11 +64,11 @@ await page.route('**/client-preworld', async (route) => {
 });
 page.on('console', (m) => {
   const t = m.text();
-  if (/PlayerTeleport|teleport(ed)? too|portal|WeenieError|0xF751/i.test(t) && !/emitter|particle|PortalSpace|portal space/i.test(t)) console.log(`${ts()} [page] ${t.slice(0, 180)}`);
+  if (/PlayerTeleport|teleport(ed)? too|portal|WeenieError|0xF751|Sent Use|UseDone|Use refused|MoveToState|MoveTo|too busy/i.test(t) && !/emitter|particle|PortalSpace|portal space/i.test(t)) console.log(`${ts()} [page] ${t.slice(0, 180)}`);
 });
 
 const ev = <T = unknown>(js: string): Promise<T> => page.evaluate(js) as Promise<T>;
-await page.goto(`${base}?ace&debug&bridge=${encodeURIComponent(bridge)}&account=${acct}&password=${acct}`, { waitUntil: 'commit' });
+await page.goto(`${base}?ace&debug&agent&bridge=${encodeURIComponent(bridge)}&account=${acct}&password=${acct}`, { waitUntil: 'commit' });
 if (!(await waitFor(page, IN_WORLD_JS, { timeoutMs: 300_000, reloadEveryMs: 0 }))) throw new Error('never entered the world');
 console.log(`${ts()} in world`);
 await page.waitForTimeout(5000);
@@ -115,6 +115,38 @@ if (run('gateway')) {
   await hold('KeyW', 2200);
   await settle('after walking through the Gateway');
   console.log(`${ts()} gateway teleported: ${(await teleports()) > tp}`);
+}
+/** Back 8 m away from a fresh Gateway, select it, and use it with the UseSelected key (the path a player's double-click takes: the Use goes out, ACE walks the player). */
+async function gatewayAtRange(): Promise<void> {
+  await spawn(1955);
+  await hold('KeyX', 3500);
+  const [g] = await portalsNear(1955);
+  console.log(`${ts()} gateway at ${g?.d} m`);
+  const sel = await ev(`JSON.stringify(window.__acAgent.select('Gateway'))`);
+  await page.waitForTimeout(500);
+  console.log(`${ts()} select ${sel}; hud target ${await ev(`String(window.__ac.gameUI.hudState.target?.id?.toString(16))`)}`);
+  await page.mouse.click(640, 650); // keyboard focus back on the game, off any panel
+}
+if (run('held-use')) {
+  // Prod 2026-11-04 shape: use the Gateway while a run key is held. Retail: the held key sends nothing, the server's walk wins.
+  await fresh('held-use: hold W, use the Gateway at 8 m');
+  await gatewayAtRange();
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(400);
+  await page.keyboard.press('KeyR');
+  await page.waitForTimeout(6000);
+  await page.keyboard.up('KeyW');
+  await settle('after using the Gateway with W held');
+}
+if (run('busy-use')) {
+  // Prod 2026-11-04 shape: a player spamming casts (dozens of "You're too busy!") uses the Gateway 5 times; no walk, no teleport.
+  await fresh('busy-use: cast nonstop, use the Gateway at 8 m five times');
+  await gatewayAtRange();
+  await ev(`(() => { window.__probeCasting = true; const loop = async () => { while (window.__probeCasting) { try { await window.__acAgent.cast('Strength Self I', 'self'); } catch {} await new Promise((r) => setTimeout(r, 150)); } }; void loop(); })()`);
+  await page.waitForTimeout(2500);
+  for (let i = 0; i < 5; i++) { await page.keyboard.press('KeyR'); await page.waitForTimeout(1800); }
+  await ev(`window.__probeCasting = false`);
+  await settle('after five uses while casting');
 }
 if (run('quest')) {
   await fresh('quest: walk into the Training Academy exit (QuestRestriction)');

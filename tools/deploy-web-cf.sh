@@ -4,17 +4,28 @@
 # (tools/build-web-release.mjs) and uploads it with wrangler. The AWS host is not involved, so a
 # web deploy can never touch the bridge or its players. docs/web-hosting-cloudflare-plan.md.
 #
-#   bash tools/deploy-web-cf.sh --ref <sha> [--env staging|production] [--urgent] [--skip-gate] [--dry-run]
+#   bash tools/deploy-web-cf.sh --ref <sha> [--env staging|production] [--urgent] [--skip-gate] [--dry-run] [--no-rollback]
 #
-# staging (default) deploys the Worker with only next.playwebac.com; production also carries the
-# playwebac.com/* route (inert until that A record is proxied). Rollback: npx wrangler@4 rollback
-# --config deploy/web/cloudflare/wrangler.jsonc [--env production] (instant; older versions stay).
+# Both --env values deploy the SAME Worker, `webac-web` (wrangler.jsonc's env.production sets
+# name "webac-web" too), and a Worker has one live version that serves every hostname attached to
+# it. playwebac.com/* is a zone route a production deploy attached; a staging deploy declares no
+# zone routes, so wrangler leaves that route alone (it only PUTs the route list when the config has
+# one) and the new version serves playwebac.com as well as next.playwebac.com. So "staging" is NOT
+# isolated: every deploy is a production deploy (seen 2026-11-04). The only difference: production
+# (re)attaches the playwebac.com/* route.
+#
+# After uploading, tools/web-cf-ship.sh checks what players load on both hosts (version.json,
+# index.html, every JS / CSS it references: 200 within 15 s at the release's size, retried over
+# 60 s) and, if that fails, rolls the Worker back to the version live before the deploy and checks
+# that (--no-rollback skips it). Manual rollback: npx wrangler@4 rollback <version-id>
+# --config deploy/web/cloudflare/wrangler.jsonc -y (instant; older versions stay;
+# `npx wrangler@4 versions list --config …` lists them).
 # wrangler signs in with `npx wrangler@4 login` (browser OAuth); no key is stored in the repo.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/deploy-gate.sh
 . "$REPO/tools/lib/deploy-gate.sh"
-REF="" ENV=staging URGENT="" SKIP_GATE=0 DRY=0
+REF="" ENV=staging URGENT="" SKIP_GATE=0 DRY=0 NO_ROLLBACK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref) REF="$2"; shift 2 ;;
@@ -22,7 +33,8 @@ while [ $# -gt 0 ]; do
     --urgent) URGENT="--urgent"; shift ;;
     --skip-gate) SKIP_GATE=1; shift ;;
     --dry-run) DRY=1; shift ;;
-    *) echo "usage: deploy-web-cf.sh --ref <sha> [--env staging|production] [--urgent] [--skip-gate] [--dry-run]" >&2; exit 2 ;;
+    --no-rollback) NO_ROLLBACK="--no-rollback"; shift ;;
+    *) echo "usage: deploy-web-cf.sh --ref <sha> [--env staging|production] [--urgent] [--skip-gate] [--dry-run] [--no-rollback]" >&2; exit 2 ;;
   esac
 done
 case "$ENV" in staging|production) ;; *) echo "--env must be staging or production" >&2; exit 2 ;; esac
@@ -45,12 +57,7 @@ ln -s "$(cd "$MAIN" && pwd)/node_modules" "$WORK/src/node_modules"
 node "$REPO/tools/build-web-release.mjs" --dist "$WORK/dist" --site "$WORK/src/deploy/web/site" --out "$WORK/release" --build "$BUILD" $URGENT
 if [ "$DRY" = 1 ]; then
   git -C "$REPO" worktree remove --force "$WORK/src" >/dev/null 2>&1 || true
-  echo "[cf] dry run: release assembled in $WORK/release (kept)"; trap - EXIT; exit 0
+  echo "[cf] dry run: release assembled in $WORK/release (kept; ship it with tools/web-cf-ship.sh --release $WORK/release --build $BUILD)"; trap - EXIT; exit 0
 fi
-# --assets replaces only assets.directory: the config's `main` (report-worker.mjs, run only for
-# /__webac/* via assets.run_worker_first), the ASSETS binding and observability still deploy.
-ARGS=(--config "$REPO/deploy/web/cloudflare/wrangler.jsonc" --assets "$WORK/release")
-[ "$ENV" = production ] && ARGS+=(--env production)
-(cd "$REPO" && npx --yes wrangler@4 deploy "${ARGS[@]}")
-HOST=next.playwebac.com
-echo "[cf] $HOST/version.json: $(curl -fsS "https://$HOST/version.json" || echo unreachable)"
+# Deploy, check what players load, roll back on failure (exit non-zero).
+bash "$REPO/tools/web-cf-ship.sh" --release "$WORK/release" --build "$BUILD" --env "$ENV" $NO_ROLLBACK

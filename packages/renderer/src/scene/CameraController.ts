@@ -170,6 +170,13 @@ export class CameraController {
    * Assigning goes through setAutoRun, so every change raises its notice.
    */
   get autoRun(): boolean { return this._autoRun; }
+  /**
+   * A movement key sits in one of the CommandLists (held, whoever controls the player), or autorun is on:
+   * what UseTime @ 006b3bf0 hands back to the player once a server MoveTo ends.
+   */
+  get movementInputHeld(): boolean {
+    return this._autoRun || this.substateList.length > 0 || this.turnList.length > 0 || this.sidestepList.length > 0;
+  }
   set autoRun(on: boolean) { this.setAutoRun(on); }
   private _autoRun = false;
   /**

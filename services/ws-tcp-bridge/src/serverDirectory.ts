@@ -9,7 +9,10 @@
  *     Decal-plugin based, so a floor, not a census),
  *   - the committed era/compat overlay (serverCompat.ts),
  *   - each ACE server's era, detected live from the login version it
- *     accepts (eraDetect.ts) where the overlay names none.
+ *     accepts (eraDetect.ts) where the overlay names none,
+ *   - for the worlds TreeStats does not watch (AC1999), `online` from the
+ *     bridge's own reachability probe (worldProbe.ts); their population
+ *     stays null, since no source reports it.
  *
  * Both feeds are fetched server-side and cached (refresh ~5 min) so browsers
  * never hit TreeStats directly, and a feed failure keeps the last good copy.
@@ -18,6 +21,7 @@ import type { Logger } from './log.js';
 import type { FetchText, ServerEntry } from './serverList.js';
 import { type Compat, type CompatEntry, type CompatOverlay, type PerIpLimits, NO_PROBE_ERAS, SERVER_COMPAT, compatFor } from './serverCompat.js';
 import type { Detection, EraDetector } from './eraDetect.js';
+import type { WorldReachability } from './worldProbe.js';
 
 export const TREESTATS_STATUS_URL = 'https://servers.treestats.net/api/servers/';
 export const TREESTATS_COUNTS_URL = 'https://treestats.net/player_counts-latest.json';
@@ -135,10 +139,14 @@ export function buildDirectory(
   servers: readonly ServerEntry[],
   status: ReadonlyMap<string, ServerStatus>,
   counts: ReadonlyMap<string, PlayerCount>,
-  opts: { now: number; compat?: CompatOverlay; detected?: (id: string) => Detection | undefined; egressWorlds?: ReadonlySet<string> },
+  opts: {
+    now: number; compat?: CompatOverlay; detected?: (id: string) => Detection | undefined; egressWorlds?: ReadonlySet<string>;
+    /** The bridge's own reachability probe (worldProbe.ts), for a world the status feed has no row for. */
+    reachable?: (id: string) => ServerStatus | undefined;
+  },
 ): DirectoryEntry[] {
   const entries = servers.map((s): DirectoryEntry => {
-    const st = status.get(s.id.toLowerCase());
+    const st = status.get(s.id.toLowerCase()) ?? opts.reachable?.(s.id);
     const pc = counts.get(s.name.toLowerCase());
     const fresh = pc !== undefined && (pc.at === null || opts.now - pc.at <= POPULATION_MAX_AGE_MS);
     const online = st ? st.online : null;
@@ -188,6 +196,8 @@ export interface ServerDirectoryOptions {
   detector?: EraDetector;
   /** BRIDGE_EGRESS_SERVERS world ids (lower-case): their rows drop the shared per-address warning and limits. */
   egressWorlds?: ReadonlySet<string>;
+  /** Reachability of the never-probed worlds (AC1999; worldProbe.ts), swept after each refresh. */
+  reachability?: WorldReachability;
 }
 
 /** Cached TreeStats feeds + the merged body for GET /servers. */
@@ -249,6 +259,8 @@ export class ServerDirectory {
       // In the background: a sweep probes servers one login at a time.
       const status = this.status;
       void this.opts.detector?.sweep(this.probeable(), (id) => status.get(id.toLowerCase())?.online ?? null);
+      // The worlds no feed reports (AC1999) get their own reachability probe.
+      void this.opts.reachability?.sweep(this.unwatched());
     };
     this.inflight = run().finally(() => { this.inflight = null; });
     return this.inflight;
@@ -267,12 +279,25 @@ export class ServerDirectory {
     });
   }
 
+  /**
+   * The servers the reachability probe covers: those the era detector never
+   * probes (AC1999) and the status feed has no row for.
+   */
+  unwatched(): ServerEntry[] {
+    const overlay = this.opts.compat ?? SERVER_COMPAT;
+    return this.opts.servers().filter((s) => {
+      const era = compatFor(s.id, s.emu, overlay).era;
+      return era !== undefined && NO_PROBE_ERAS.has(era) && !this.status.has(s.id.toLowerCase());
+    });
+  }
+
   body(): DirectoryBody {
     return {
       mode: 'multi',
       updatedAt: this.updatedAt === null ? null : new Date(this.updatedAt).toISOString(),
       servers: buildDirectory(this.opts.servers(), this.status, this.counts, {
         now: this.now(), compat: this.opts.compat, detected: this.opts.detector && ((id) => this.opts.detector!.get(id)), egressWorlds: this.opts.egressWorlds,
+        reachable: this.opts.reachability && ((id) => this.opts.reachability!.get(id)),
       }),
     };
   }

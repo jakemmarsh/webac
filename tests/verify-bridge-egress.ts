@@ -28,7 +28,7 @@ import {
   readLoginAccount, readLoginAccount1999, readLoginAccountEor, readLoginRefusal, SESSION_STALE_MS, EGRESS_TAG,
   realIpKey, ALLOC_LOCK, RECONCILE_LOCK, PENDING_MARKER_TTL_MS, ATTACH_TRIES, READY_DEADLINE_MS, READY_POLL_MS, EARLY_RESEND_MS, NO_REPLY_MOVE_MS,
   AC1999_TRACKER_LOGIN, PATH_PROBE_POLL_MS, PATH_PROBE_MAX_MS, pathProbePollMs, pathProbeFor, udpReplyProbe, type Ec2Api, type TaggedAddress, type EgressLease, type EgressProvider,
-  type NoReplyMove,
+  type NoReplyMove, readLoginCredential1999, loginCredentialShape, loginRefusedFields,
 } from '../services/ws-tcp-bridge/src/egress';
 import {
   createBridgeServer, CLOSE_IP_CAP, CLOSE_WORLD_FULL, CLOSE_NEW_ACCOUNT_CAP, CLOSE_NEW_ACCOUNT_UNAVAILABLE, type BridgeServer,
@@ -2225,6 +2225,82 @@ describe('bridge end to end: an explicit refusal gives the allowance back', () =
       expect(await c.closed).toBe(CLOSE_NEW_ACCOUNT_CAP);
     });
   }
+});
+
+// ─── A refused 1999 login's credential shape (BUG.ac1999-logon-failed-first-login) ───
+
+describe('a refused 1999 login logs its credential shape, never the name or password', () => {
+  it('reads the credential the server reads, and its shape', () => {
+    const ok = readLoginCredential1999(clientLogin('ac1999', 'oldtimer', 'secret'));
+    expect(ok).toEqual({ login: true, account: 'oldtimer', password: 'secret', fieldFull: false });
+    expect(loginCredentialShape(ok)).toEqual({ credential: true, nameValid: true, nameLength: 8, passwordEmpty: false, fieldFull: false });
+    // The 20-byte field keeps "account:password" truncated (the server stores the same truncation).
+    const long = readLoginCredential1999(clientLogin('ac1999', 'abcdefghij', 'pwprobe12345'));
+    expect(long).toMatchObject({ account: 'abcdefghij', password: 'pwprobe12', fieldFull: true });
+    // A 19-character name leaves no room for any password: CreateAccount refuses MIN_PASSWORD_LENGTH 1.
+    expect(loginCredentialShape(readLoginCredential1999(clientLogin('ac1999', 'abcdefghijklmnopqrs', 'pw'))))
+      .toEqual({ credential: true, nameValid: true, nameLength: 19, passwordEmpty: true, fieldFull: true });
+    // Outside IsUserNameValid's [A-Za-z0-9_-]: a space, a dot, an e-mail address.
+    for (const name of ['John Smith', 'john.smith', 'me@mail.co']) {
+      expect(loginCredentialShape(readLoginCredential1999(clientLogin('ac1999', name, 'pw')))?.nameValid).toBe(false);
+    }
+    expect(loginCredentialShape(readLoginCredential1999(clientLogin('ac1999', 'Under_score-ok9', 'pw')))?.nameValid).toBe(true);
+    // 20+ characters: no ':' in the field, no credential (the server answers BadCryptoKey).
+    expect(loginCredentialShape(readLoginCredential1999(clientLogin('ac1999', 'abcdefghijklmnopqrst', 'pw'))))
+      .toEqual({ credential: false, nameValid: false, nameLength: 0, passwordEmpty: false, fieldFull: false });
+    // Not a login at all.
+    expect(loginCredentialShape(readLoginCredential1999(characterList1999('someone')))).toBeNull();
+    // The log fields: the server's NetError id beside the shape.
+    expect(loginRefusedFields(loginCredentialShape(ok)!, true, netError1999(STR_LOGIN_FAILED)))
+      .toEqual({ netError: '0x04df9c54', credential: true, nameValid: true, nameLength: 8, passwordEmpty: false, fieldFull: false, accountKnown: true });
+  });
+
+  it('accountKnown: only an account that reached a character list through the bridge', async () => {
+    const m = await staticManager(tempDir(), 'ac1999:2:2:5', ['10.0.0.1']);
+    const l = await lease(m, 'ac1999', '203.0.113.1');
+    expect(m.accountKnown(l, 'Returning')).toBe(false);
+    m.accountConfirmed(l, 'returning', 2);
+    expect(m.accountKnown(l, 'Returning')).toBe(true); // case-insensitive, as the server's lookup
+    await m.stop();
+  });
+
+  describe('end to end through the bridge', () => {
+    let server: FakeServer;
+    let bridge: BridgeServer | null = null;
+    const sockets: WebSocket[] = [];
+    beforeEach(async () => { server = await fakeServer(); });
+    afterEach(async () => {
+      for (const s of sockets.splice(0)) s.terminate();
+      if (bridge) await bridge.shutdown();
+      bridge = null;
+      server.close();
+    });
+
+    it('one login_refused line per refused login, with the shape and whether the account was known', async () => {
+      const cap = capture();
+      const config = bridgeConfig({
+        BRIDGE_EGRESS_PROVIDER: 'static', BRIDGE_EGRESS_SLOTS: '127.0.0.1', BRIDGE_EGRESS_DIR: tempDir(),
+        BRIDGE_EGRESS_SERVERS: 'pinned:2:2:99', BRIDGE_ERA: 'ac1999-retail',
+      }, server.port);
+      bridge = createBridgeServer(config, { log: cap.log, egress: await startEgress(config.egress, () => {}) });
+      const url = `ws://127.0.0.1:${await bridge.listen()}/`;
+      const a = await openAs(url, '203.0.113.1');
+      sockets.push(a.ws);
+      a.ws.send(clientLogin('ac1999', 'John Smith', 'hunter2'));
+      await until(() => server.msgs.length === 1);
+      const to = server.msgs[0].rinfo;
+      server.sock.send(netError1999(STR_LOGIN_FAILED), to.port, to.address);
+      await new Promise((res) => a.ws.once('message', res));
+      server.sock.send(netError1999(STR_LOGIN_FAILED), to.port, to.address); // a repeat logs nothing more
+      await new Promise((res) => a.ws.once('message', res));
+      const refused = cap.lines.filter((x) => x.event === 'login_refused');
+      expect(refused).toHaveLength(1);
+      expect(refused[0].fields).toMatchObject({ server: 'pinned', netError: '0x04df9c54', credential: true, nameValid: false, nameLength: 10, passwordEmpty: false, accountKnown: false });
+      const text = JSON.stringify(cap.lines);
+      expect(text).not.toContain('John Smith');
+      expect(text).not.toContain('hunter2');
+    });
+  });
 });
 
 // ─── No reply from the server: move once to another address ───

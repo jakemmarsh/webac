@@ -1806,6 +1806,15 @@ provide.**
   thinks in seconds and AC runs in real time: the LLM sets intent, the page executes reflexes.
 - Enabled only with the `?agent` URL parameter (or the debug-tools gate). It is a non-retail layer and
   off by default (CLAUDE.md "Always Match Retail's Defaults").
+- **Its work runs only while an agent runs** (AGENT.idle-no-agent-work, Jake 2026-11-04). The API object exists
+  for every automation player (the Decal plugins are built on it), but its watchers (creature sampler and
+  background level looks, door / buff / fellow watchers, object diff, remembered places, chat parsers, the
+  `[AC:Chat]` console line) run only while `AgentApi.agentRunning()`: the `?agent` API exposed, Claude on for
+  the tab, or the API's own work under way (a task, a wait, an attack order, held keys, a routine loaded).
+  Idle, its tick is the routine engine's stand-by upkeep and the death event UtilityBelt reads. When an agent
+  starts, `wake()` rebaselines: a monster already coming at you is raised from the next looks (~1 s) and its
+  level asked for then or at the first observe. A new watcher goes in the running tick, not `idleTick`,
+  unless a player-facing plugin needs it with no agent (tests/verify-agent-idle-no-agent-work.ts).
 - `format.ts` renders results as compact text (nearby objects with distance + direction relative to
   facing, e.g. `#80001a2b Drudge Skulker [monster L5]  14.2m ahead-left (NW)  hp 100%`).
 

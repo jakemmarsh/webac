@@ -38,6 +38,7 @@ function fakeGame() {
     skillList: () => state.skills,
     placeItem: (g: number, to: { packSlot: number } | { onto: number }) => { calls.push(`place ${g.toString(16)} ${JSON.stringify(to)}`); return { ok: true, message: '' }; },
     appraise: (g: number) => { calls.push(`appraise ${g.toString(16)}`); return Promise.resolve({ ok: true, message: '' }); },
+    backgroundAppraise: (g: number) => { calls.push(`appraise ${g.toString(16)}`); return true; },
     use: (g: number) => { calls.push(`use ${g.toString(16)}`); return Promise.resolve({ ok: true, message: '' }); },
     useOn: (a: number, b: number) => { calls.push(`useOn ${a.toString(16)} ${b.toString(16)}`); return { ok: true, message: '' }; },
     logout: () => { calls.push('logout'); return { ok: true, message: '' }; },

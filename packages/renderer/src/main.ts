@@ -119,6 +119,7 @@ import { routeGameKeyDown, keyDownConsumed } from './input/GameKeyDown.js';
 import { loadEraKeybinds, saveEraKeybinds, type KeybindStore } from './input/EraKeymaps.js';
 import { stepPowerLevel } from './controllers/PowerBarStep.js';
 import { combatClickSelectRefused } from './controllers/CombatClickSelect.js';
+import { backgroundAppraisalVerdict } from './controllers/BackgroundAppraisal.js';
 import { buildEmoteMotionMap } from './input/EmoteActionMap.js';
 import { PendingCastQueue, type PendingCast } from './magic/PendingCastQueue.js';
 import { handleMagicUpdateSpell } from './magic/SpellLearn.js';
@@ -159,7 +160,7 @@ import { cellIdRange, cellStandPoint, floorsAt, findRouteViaOutside, loadCellGra
 import { RoutineSync } from './agent/RoutineSync.js';
 import { isAutomationCommand } from './ui/automation/AutomationPanel.js';
 import { bridgeConnectApi } from './launcher/ConnectScreen.js';
-import { TabRelay, type RelayCall } from './agent/relayTab.js';
+import { TabRelay, relayStateBeat, type RelayCall } from './agent/relayTab.js';
 import { RelayLink, type LinkSocket } from './agent/relayLink.js';
 import { BackgroundTicker } from './scene/BackgroundTicker.js';
 import { installWorkerTimers, makeTimersWorker } from './scene/workerTimers.js';
@@ -5431,6 +5432,29 @@ async function main() {
   };
   /** IdentifyObject's search (ACE Everywhere): the same, and the open vendor's merchandise (an examine of a shop item). */
   const identifyLocations: TargetLocations = { ...targetLocations, forSale: (g) => !!gameUI.vendorStockItem(g) };
+  /**
+   * BUG.ac1999-auto-turn-to-mobs (webac#20) — may the client appraise this on its own (a look nobody asked for:
+   * the agent API's level looks, Mag-Tools' corpse check, UB's nametags, a routine's door ID)? Not a world object
+   * on the AC1999 server, which turns the player to face it, nor while the Examine window holds ACE's one appraisal
+   * target (controllers/BackgroundAppraisal.ts).
+   */
+  const backgroundAppraisalLogged = new Set<string>();
+  const backgroundAppraisalAllowed = (guid: number): boolean => {
+    const verdict = backgroundAppraisalVerdict(guid, {
+      selfGuid: aceCharGuid ?? myPlayerGuid ?? null,
+      where: identifyLocations,
+      turnsAppraiser: eraRules.world.appraisalTurnsAppraiser,
+      examineOpen: gameUI.examinedGuid !== null,
+    });
+    if (verdict === 'send') return true;
+    const key = `${verdict}:${guid >>> 0}`;
+    if (!backgroundAppraisalLogged.has(key)) {
+      if (backgroundAppraisalLogged.size > 500) backgroundAppraisalLogged.clear();
+      backgroundAppraisalLogged.add(key);
+      console.log(`[AC] Background appraisal of 0x${(guid >>> 0).toString(16)} not sent (${verdict})`);
+    }
+    return false;
+  };
   /** CObjectMaint::GetWeenieObject for the failed-attempt line: name / plural / stack of anything the client knows, the player included. */
   const resolveAttemptFailedObject = (guid: number): AttemptFailedObject | undefined => {
     const own = playerState.inventory.getItem(guid) ?? playerState.equipment.getAll().find((e) => e.id === guid);
@@ -8908,7 +8932,7 @@ async function main() {
     // link. On an auto-create world STR_LOGIN_FAILED is a wrong password for a
     // name someone already owns: say that instead. (textOverride: the whole
     // text, e.g. "Player already logged on" naming this browser's other tab.)
-    const text = textOverride ?? loginFailureText(notice, launcherWorld, gameStarted, aceAccount);
+    const text = textOverride ?? loginFailureText(notice, launcherWorld, gameStarted, aceAccount, activeEra.id);
     if (connectionFailureRecovery({ inWorld: gameStarted, launcherLogin: !urlLogin.autoLogin }) === 'launcher') {
       returnToLauncher(text);
       return;
@@ -8978,6 +9002,8 @@ async function main() {
     );
     // RawMotionState::current_style: the style the player's sequence is in.
     movementSync.stanceProvider = () => playerAnimated?.motionManager.currentStyleId ?? 0;
+    // BUG.portal-use-held-keys — a MoveToState while a Use is unanswered cancels ACE's walk (PORTAL_CANCELLED).
+    movementSync.onMoveToStateSent = () => portalUseReporter?.movementSent();
 
     // STATS.enchantments-never-populated / STATS.burden-capacity-augs-buffs —
     // everything derived from the BUFFED stats (capacity from buffed Strength,
@@ -14068,7 +14094,7 @@ async function main() {
       aceConnection.sendMessage(useMsg, GameMessageGroup.SecureWeenieQueue);
       busyCount.noteActionSent(GameActionType.Use);
       console.log(`[AC] ACE: Sent Use (0x0036) for entity 0x${guid.toString(16)}`);
-      portalUseReporter?.useAttempt(guid, serverObjectManager?.getObject(guid), true);
+      portalUseReporter?.useAttempt(guid, serverObjectManager?.getObject(guid), true, null, cameraController.movementInputHeld);
     };
     /** TELEMETRY.portal-use-failed — a Use of a portal the client kept, and why. */
     const portalUseHeld = (guid: number, held: PortalUseHeld): void => {
@@ -17495,6 +17521,8 @@ async function main() {
     // playwebac.com for accounts the bridge allowlists (BRIDGE_AUTOMATION_ACCOUNTS, checked against
     // the account the server reported). The bridge's answer to the routines request carries it.
     let agentStarted = false;
+    /** The ?agent API (window.__acAgent) is on: a daemon or the agent tools drive this page. */
+    let agentApiExposed = false;
     let enableAutomationUi: (() => void) | null = null;
     let automationUiOn = false;
     const showAutomationUi = (): void => { if (!automationUiOn && enableAutomationUi) { automationUiOn = true; enableAutomationUi(); } };
@@ -17533,9 +17561,15 @@ async function main() {
       if (!e.isTrusted || !tabRelay.on) return;
       if (isTakeoverInput({ kind: 'mouse', onWorld: e.target === sceneManager.renderer?.domElement })) claudeControl.playerInput();
     }, true);
-    const relayState = () => {
+    // AGENT.idle-no-agent-work — the 10 s beat re-sends the state only while Claude is on (or when it changed): a tab
+    // with Claude off told the bridge once, not every 10 s for every player. An explicit send (a switch, a pairing,
+    // the account's CharacterList, a relay link) always goes.
+    let relayStateSent: string | null = null;
+    const relayState = (force = true) => {
       if (!aceConnection.isConnected) return;
       const state = tabRelay.stateFrame(worldCharacterName, tabScreen(), readRevokedBefore(relayStorage, relayKey()));
+      if (!relayStateBeat(force, tabRelay.on, state, relayStateSent)) return;
+      relayStateSent = state;
       aceConnection.sendBridgeText(state);
       relayLink.send(state);
     };
@@ -17590,7 +17624,7 @@ async function main() {
       else { relayState(); sendPairingFrame(pairFrame(cmd.code)); }
       return true;
     };
-    setInterval(relayState, 10_000);
+    setInterval(() => relayState(false), 10_000);
     function onPairingReply(r: PairingReply): void {
       // A code the bridge accepted is the player's opt-in for this account; unpairing already switched it off.
       if (r.kind === 'paired' && r.ok) { setRelayOn(true); startAgent(false); }
@@ -17622,6 +17656,7 @@ async function main() {
       }
     });
     function startAgent(exposeApi: boolean): void {
+      if (exposeApi) agentApiExposed = true;
       if (agentStarted) return;
       agentStarted = true;
       const examined = new Map<number, string>();
@@ -18069,6 +18104,9 @@ async function main() {
           // Quiet: sent as a re-appraise, so no busy count is held for a window that won't open.
           sendIdentifyAction?.(guid, !!quiet);
         },
+        backgroundAppraisalAllowed: (guid) => backgroundAppraisalAllowed(guid),
+        // AGENT.idle-no-agent-work — an agent is attached: Claude on for this tab (the hosted connector), or the ?agent API.
+        agentAttached: () => agentApiExposed || tabRelay.on,
         appraisal: (guid) => examined.get(guid) ?? null,
         appraisalData: (guid) => agentAppraisals.get(guid >>> 0) ?? null,
         playerOption: (code) => (currentCharacterOptions1 === null || currentCharacterOptions2 === null ? undefined : characterOptionIsSet(code, currentCharacterOptions1, currentCharacterOptions2)),
@@ -18488,7 +18526,8 @@ async function main() {
           // A plugin's print (its VCS preset: Mag-Tools' item info) is tagged, so no action's reply reads it.
           agentApi.pushChat(text, type, preset?.plugin);
           // The agent daemon keeps every line in <profile>.chat.log (tools/ac-agent/daemon.ts): what was said and shown.
-          console.log(`[AC:Chat] ${text.replace(/\s+$/, '')}`);
+          // Only while an agent runs (AGENT.idle-no-agent-work): a plain player's console stays the game's.
+          if (agentApi.agentRunning()) console.log(`[AC:Chat] ${text.replace(/\s+$/, '')}`);
         }
         addSystemMessage(text, color, type, targetWindowId, speech, preset);
       };
@@ -20077,6 +20116,7 @@ async function main() {
       for (const e of chosen) {
         const src = sources.find((s) => s.guid === e.guid)!;
         if (!nametagNeedsAssess(src.base, src.appraisal, agentAppraisals.has(e.guid >>> 0))) continue;
+        if (!backgroundAppraisalAllowed(e.guid)) continue;
         if (!nametagAssess.want(e.guid, e.dist, now)) continue;
         quietAppraisals.add(e.guid >>> 0);
         sendIdentifyAction?.(e.guid, true);

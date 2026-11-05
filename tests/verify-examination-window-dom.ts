@@ -162,6 +162,22 @@ describe.skipIf(!domWindow)('GameUI.showExaminationWindow (real GameUI in happy-
     expect(ui.examineUseTime(200, false)).toBe(0);
   });
 
+  it('UseTime: the 1999 client has no re-appraisal loop (each one turned the player on the AC1999 server, webac#20)', async () => {
+    const { eraClientRules } = await import('../packages/renderer/src/era/EraFeatures.js');
+    const { eraProfile } = await import('../packages/renderer/src/era/EraProfiles.js');
+    const before = ui.clientProfile;
+    try {
+      ui.setClientRules(eraClientRules(eraProfile('ac1999-retail')));
+      ui.showExaminationWindow({ guid: 0x80001ca1, title: 'Drudge Skulker', page: 'creature', creature: { page: 'creature', headerPanel: 0x1000014d, level: '8', stats: [], miscInfo: [], creatureDisplayName: 'Drudge', allegianceName: '' } });
+      for (const t of [300, 300.8, 301.6, 310]) expect(ui.examineUseTime(t, false)).toBe(0);
+      // Dark Majesty runs the end-of-retail exe: its window re-appraises as end of retail's does.
+      ui.setClientRules(eraClientRules(eraProfile('classic-dereth')));
+      expect(ui.examineUseTime(400, false)).toBe(0x80001ca1);
+    } finally {
+      ui.setClientRules(before);
+    }
+  });
+
   const drudge = (level: string) => ({ guid: 0x80001ca1, title: 'Drudge Skulker', page: 'creature', creature: { page: 'creature', headerPanel: 0x1000014d, level, stats: [], miscInfo: [], creatureDisplayName: 'Drudge', allegianceName: '' } });
 
   it('a re-appraisal refills the open creature page in place: same window, same close button', () => {

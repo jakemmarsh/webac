@@ -635,16 +635,31 @@ const NOT_LOGIN: LoginRead = { login: false, account: null };
  * logs nobody in (the server answers "invalid auth").
  */
 export function readLoginAccount1999(buf: Buffer): LoginRead {
-  if (buf.length < 20) return NOT_LOGIN;
+  const c = readLoginCredential1999(buf);
+  return { login: c.login, account: c.account };
+}
+
+/** A 1999 login's credential as the server reads it. Held in memory only and never logged: loginCredentialShape is what gets logged. */
+export interface LoginCredential1999 extends LoginRead {
+  /** The password the server reads (what the 20-byte field kept after the ':'); null when there is no credential. */
+  password: string | null;
+  /** The field had no NUL: "account:password" filled all 20 bytes, so anything past them never reached the server. */
+  fieldFull: boolean;
+}
+
+/** readLoginAccount1999, with the password and whether the field was full. */
+export function readLoginCredential1999(buf: Buffer): LoginCredential1999 {
+  const none = (login: boolean): LoginCredential1999 => ({ login, account: null, password: null, fieldFull: false });
+  if (buf.length < 20) return none(false);
   const flags = buf.readUInt32LE(4);
   const size = buf.readUInt16LE(16);
-  if (buf.readUInt16LE(8) !== 0) return NOT_LOGIN;
-  if (!(flags === FLAG_LOGIN_REQUEST || (flags === 0x2 && size > 0))) return NOT_LOGIN;
+  if (buf.readUInt16LE(8) !== 0) return none(false);
+  if (!(flags === FLAG_LOGIN_REQUEST || (flags === 0x2 && size > 0))) return none(false);
   // The server drops a runt (fewer body bytes than the header's size) before reading it.
-  if (buf.length - 20 < size) return NOT_LOGIN;
+  if (buf.length - 20 < size) return none(false);
   const body = buf.subarray(20, 20 + size);
   let pos = 4;
-  if (pos + 2 > body.length) return { login: true, account: null };
+  if (pos + 2 > body.length) return none(true);
   const versionLen = body.readUInt16LE(pos);
   pos += 2;
   if (versionLen > 0 && versionLen <= 32) pos += versionLen;
@@ -655,9 +670,54 @@ export function readLoginAccount1999(buf: Buffer): LoginRead {
     const cred = field.toString('latin1', 0, nul >= 0 ? nul : CREDENTIAL_BYTES_1999);
     const colon = cred.indexOf(':');
     if (colon < 0) continue;
-    return { login: true, account: cred.slice(0, colon) };
+    return { login: true, account: cred.slice(0, colon), password: cred.slice(colon + 1), fieldFull: nul < 0 };
   }
-  return { login: true, account: null };
+  return none(true);
+}
+
+/**
+ * What a refused 1999 login's credential looked like, safe to log (no name,
+ * no password): the facts that tell a login the server could never accept
+ * from a wrong password. The AC1999 server (AuthenticateUserQuery::PerformQuery)
+ * answers ClientLogOnFailed both for a wrong password and for an auto-create
+ * CDatabaseIO::CreateAccount refuses: a name outside [A-Za-z0-9_-] or over
+ * 32 characters, an empty password, or its per-IP account cap.
+ */
+export interface LoginCredentialShape {
+  /**
+   * The field held a ':' at all. false: no credential the server can read (an
+   * account name of 20 or more characters fills the field); it answers
+   * BadCryptoKey, and the fields below are false / 0.
+   */
+  credential: boolean;
+  /** The name passes CreateAccount's rule (1-32 characters, letters, digits, '_' and '-'). */
+  nameValid: boolean;
+  nameLength: number;
+  /** Nothing followed the ':' (an account name of 19 characters leaves no room in the 20-byte field). */
+  passwordEmpty: boolean;
+  /** "account:password" filled the 20-byte field; anything past it was dropped (the server stores the same truncation). */
+  fieldFull: boolean;
+}
+
+/** CDatabaseIO::IsUserNameValid plus CreateAccount's MIN/MAX_USERNAME_LENGTH (1..32). */
+export const AC1999_ACCOUNT_NAME = /^[A-Za-z0-9_-]{1,32}$/;
+
+/** The shape of a 1999 login datagram's credential; null when the datagram is no login. */
+export function loginCredentialShape(c: LoginCredential1999): LoginCredentialShape | null {
+  if (!c.login) return null;
+  if (c.account === null || c.password === null) return { credential: false, nameValid: false, nameLength: 0, passwordEmpty: false, fieldFull: false };
+  return { credential: true, nameValid: AC1999_ACCOUNT_NAME.test(c.account), nameLength: c.account.length, passwordEmpty: c.password.length === 0, fieldFull: c.fieldFull };
+}
+
+/**
+ * The fields of the bridge's `login_refused` line for a refused 1999 login:
+ * the server's NetError id (the connectionless {u32 id, u32 table} blob),
+ * the credential's shape, and whether the account had reached a character
+ * list through this bridge before (null: not tracked on this world).
+ */
+export function loginRefusedFields(shape: LoginCredentialShape, accountKnown: boolean | null, refusal: Buffer): Record<string, unknown> {
+  const netError = refusal.length >= 24 ? `0x${refusal.readUInt32LE(20).toString(16).padStart(8, '0')}` : null;
+  return { netError, ...shape, accountKnown };
 }
 
 /**
@@ -1583,6 +1643,17 @@ export class EgressManager {
    * The login leaves a pending marker for the IP and the address at once.
    * Throws only on a state-dir failure (the caller closes the session).
    */
+  /**
+   * Whether `account` has reached a character list through this bridge
+   * before (it exists on the world), for a refused login's log line: a
+   * refusal of a known account is its password. null without the rule.
+   */
+  accountKnown(lease: EgressLease, account: string): boolean | null {
+    const world = this.worlds.get(lease.world);
+    if (!world || !lease.accountRule) return null;
+    return fs.existsSync(this.knownFile(world.key, this.hash(`account:${world.key}`, account.toLowerCase())));
+  }
+
   async checkLogin(lease: EgressLease, account: string): Promise<LoginVerdict> {
     const state = this.leases.get(lease.sessionId);
     const world = this.worlds.get(lease.world);

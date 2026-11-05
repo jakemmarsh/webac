@@ -1342,7 +1342,8 @@ describe('ERA.ac1999: a world\'s era is its compat chip, the same mechanism for 
       listed({ id: 'doc', name: 'Doctide', compat: 'beta', compatNote: 'Dark Majesty era', era: 'classicace-infiltration', population: 12 }),
       listed({ id: 'seed', name: 'Seedsow', compat: 'beta', compatNote: 'Dark Majesty era', era: 'classic-dereth', population: 35 }),
       listed({ id: 'dek', name: 'Dekarutide', compat: 'beta', compatNote: 'Dark Majesty era', era: 'classicace-customdm', population: 9 }),
-      listed({ id: 'ac1999', name: 'AC1999', emu: 'AC1999', type: null, compat: 'beta', compatNote: '1999 launch era', era: 'ac1999-retail', online: null, population: null }),
+      listed({ id: 'ac1999', name: 'AC1999', emu: 'AC1999', type: null, compat: 'beta', compatNote: '1999 launch era', era: 'ac1999-retail', online: true, population: null }),
+      listed({ id: 'gone', name: 'Unknown', online: null, population: null }),
     ];
     const screen = new mod.LauncherScreen(kit, { bridgeUrl: BRIDGE, storage: null, loadDirectory: async () => ({ mode: 'multi', worlds }) });
     void screen.run();
@@ -1350,9 +1351,13 @@ describe('ERA.ac1999: a world\'s era is its compat chip, the same mechanism for 
     const rows = () => [...mount.querySelectorAll('.launcher-world-row')] as HTMLElement[];
     // Rows are name + population, exactly as on main: no per-era tag.
     expect(rows().map((r) => [r.dataset.world, r.textContent])).toEqual([
-      ['c0ldeve', 'Coldeve691'], ['doc', 'Doctide12'], ['seed', 'Seedsow35'], ['dek', 'Dekarutide9'], ['ac1999', 'AC1999'],
+      ['c0ldeve', 'Coldeve691'], ['doc', 'Doctide12'], ['seed', 'Seedsow35'], ['dek', 'Dekarutide9'],
+      // webac#22: a world whose count nobody reports (AC1999) shows no number (never a made-up 0); its dot carries the status.
+      ['ac1999', 'AC1999'], ['gone', 'Unknown'],
     ]);
     expect(mount.querySelector('.launcher-era-tag, .launcher-era')).toBeNull();
+    const dot = (id: string) => (rows().find((r) => r.dataset.world === id)!.querySelector('.launcher-dot') as HTMLElement).dataset.online;
+    expect([dot('ac1999'), dot('gone')]).toEqual(['true', undefined]);
     const chips: Record<string, string[]> = {};
     for (const id of ['c0ldeve', 'doc', 'seed', 'dek', 'ac1999']) {
       rows().find((r) => r.dataset.world === id)!.click();
@@ -1364,7 +1369,7 @@ describe('ERA.ac1999: a world\'s era is its compat chip, the same mechanism for 
       doc: ['ACE', 'PvE', '12 online', 'Dark Majesty era'],
       seed: ['ACE', 'PvE', '35 online', 'Dark Majesty era'],
       dek: ['ACE', 'PvE', '9 online', 'Dark Majesty era'],
-      ac1999: ['AC1999', '1999 launch era'],
+      ac1999: ['AC1999', 'Online', '1999 launch era'],
     });
   });
 });
