@@ -22,6 +22,9 @@
  *     a few attempts with backoff, before retail's Disconnected screen.
  *     Retail had no auto-reconnect; Jake (2026-10-06) wants deploys and
  *     blips not to strand players — a named exception (CLAUDE.md).
+ *   • UX.charselect-resume (2026-11-05): the same reconnect for a drop at
+ *     character select (or while its Entering World waits), landing back on
+ *     character select with the list and the selection; nothing is entered.
  */
 
 /**
@@ -61,6 +64,40 @@ export const RESUME_DELAYS_MS: readonly number[] = Object.freeze([2000, 5000, 10
  * screen and its relaunch.
  */
 export const RESUME_UNREACHABLE_GRACE_MS = 120_000;
+
+/**
+ * BUG.resume-loop-unbounded — how long a session must stay up after a resume
+ * brought it back before its next drop gets a fresh RESUME_DELAYS_MS budget.
+ * A drop sooner than this continues the budget the resume left (its next
+ * attempt is the next delay; after the third in all, the Disconnected screen).
+ *
+ * Without it, every resume that succeeded ended the budget, so a server that
+ * takes the login and drops the session moments later reconnected forever:
+ * locally 2026-11-05, a GDL server reached with the wrong era profile sent the
+ * character list and dropped ~30 ms later, 13 reconnects in 30 s, each one a
+ * fresh 2 s resume (on a server with per-address connection caps, the AC1999
+ * one, that pattern risks the address being banned). Drops that come from the
+ * session itself being refused come within seconds of the login (that 30 ms;
+ * ACE's account-in-use boot 2 s after the refusal; the servers' own logout
+ * clocks of 5-8 s), and a resume takes 2-15 s end to end (prod 2026-10-17:
+ * 11 s and 15 s), so a minute up is a session that works: a drop after that
+ * is a new blip and resumes from the start, every time.
+ */
+export const RESUME_HEALTHY_MS = 60_000;
+/**
+ * BUG.resume-loop-unbounded — the backstop: at most this many automatic resume
+ * attempts in any RESUME_PAGE_CAP_WINDOW_MS on the page, whatever each
+ * session's uptime between them (a server that drops every 61 s would
+ * otherwise get a fresh budget each time). Two full budgets: a player with a
+ * couple of real blips in ten minutes still resumes from each. Attempts given
+ * back while the network is out (RESUME_UNREACHABLE_GRACE_MS) do not count.
+ * Reached, the Disconnected screen shows, as when a budget is spent.
+ */
+export const RESUME_PAGE_CAP = RESUME_DELAYS_MS.length * 2;
+export const RESUME_PAGE_CAP_WINDOW_MS = 10 * 60_000;
+
+/** Why the resume a drop asked for was refused before its budget's own end (BUG.resume-loop-unbounded), for logs and telemetry. */
+export type ResumeBound = 'chain' | 'page_cap';
 
 /** Wait before re-asking to enter after a "character still in the world" refusal (CharacterError 0x0D). */
 export const IN_WORLD_RETRY_DELAY_MS = 3000;
@@ -123,10 +160,24 @@ export class SessionLifecycle {
   private inWorldFlag = false;
   private resumeAttempts = 0;
   private resuming = false;
+  /**
+   * BUG.resume-loop-unbounded — the attempts the last successful resume had
+   * used, and when it succeeded (noteResumeRestored): a new resume within
+   * RESUME_HEALTHY_MS of it continues that budget.
+   */
+  private restoredAttempts = 0;
+  private restoredAt: number | null = null;
+  /** When each automatic attempt of this page was scheduled, for RESUME_PAGE_CAP. */
+  private attemptLog: number[] = [];
+  private lastBound: ResumeBound | null = null;
   /** When the resume under way first met the network out (noteNetworkOut), for RESUME_UNREACHABLE_GRACE_MS. */
   private networkOutSince: number | null = null;
   /** UX.chargen-resume — the drop came in chargen: the resume reopens chargen, not a character. */
   private chargenResume = false;
+  /** UX.charselect-resume — the drop came at character select: the resume lands there, nothing entered. */
+  private charSelectResume = false;
+  /** The character selected at character select when it dropped (CharacterSlot.id), restored on the list. */
+  private charSelectSelection: string | undefined = undefined;
   private inWorldRetries = 0;
   /** BUG.second-tab-in-world-refusal — the holder (another tab) was asked to log out: short waits. */
   private holderLeaving = false;
@@ -151,19 +202,68 @@ export class SessionLifecycle {
    */
   nextResumeDelay(opts: { unreachable?: boolean; now?: number } = {}): number | null {
     const now = opts.now ?? Date.now();
-    const resumable = this.chargenResume || (this.lastEnteredGuid !== null && !this.manualLogout);
+    const resumable = this.chargenResume || this.charSelectResume || (this.lastEnteredGuid !== null && !this.manualLogout);
+    this.lastBound = null;
+    // BUG.resume-loop-unbounded — a new resume soon after the last one succeeded continues its budget.
+    if (resumable && !this.resuming) {
+      if (this.restoredAt !== null && now - this.restoredAt < RESUME_HEALTHY_MS) {
+        this.resumeAttempts = this.restoredAttempts;
+        if (this.resumeAttempts >= RESUME_DELAYS_MS.length) this.lastBound = 'chain';
+      }
+      this.restoredAt = null;
+      this.restoredAttempts = 0;
+    }
     // BUG.resume-hung-socket — an attempt that failed with the network out (offline, or no answer
     // at all) is given back while the grace lasts: the attempts are for a server that isn't ready yet.
     if (resumable && this.resuming && opts.unreachable && this.resumeAttempts > 0) {
       this.noteNetworkOut(now);
-      if (this.unreachableGraceLeftMs(now) > 0) this.resumeAttempts--;
+      if (this.unreachableGraceLeftMs(now) > 0) {
+        this.resumeAttempts--;
+        this.attemptLog.pop();
+      }
     }
-    if (!resumable || this.resumeAttempts >= RESUME_DELAYS_MS.length) {
+    // BUG.resume-loop-unbounded — the page-wide backstop.
+    this.attemptLog = this.attemptLog.filter((t) => now - t < RESUME_PAGE_CAP_WINDOW_MS);
+    if (resumable && this.resumeAttempts < RESUME_DELAYS_MS.length && this.attemptLog.length >= RESUME_PAGE_CAP) this.lastBound = 'page_cap';
+    if (!resumable || this.resumeAttempts >= RESUME_DELAYS_MS.length || this.lastBound === 'page_cap') {
+      const bound = this.lastBound;
       this.endResume();
+      this.lastBound = bound;
       return null;
     }
     this.resuming = true;
+    this.attemptLog.push(now);
     return RESUME_DELAYS_MS[this.resumeAttempts++];
+  }
+
+  /**
+   * BUG.resume-loop-unbounded — why the last nextResumeDelay() refused a resume
+   * that had something to resume: 'chain' (the drop came within
+   * RESUME_HEALTHY_MS of a resume that had already used the whole budget),
+   * 'page_cap' (RESUME_PAGE_CAP attempts in RESUME_PAGE_CAP_WINDOW_MS); null
+   * otherwise (an attempt was granted, the budget of the resume under way ran
+   * out, or nothing to resume).
+   */
+  get resumeBound(): ResumeBound | null {
+    return this.lastBound;
+  }
+
+  /**
+   * BUG.resume-loop-unbounded — the resume under way succeeded (back in the
+   * world, on character select, or in chargen): it ends, and remembers the
+   * attempts it used, so a drop within RESUME_HEALTHY_MS continues that budget
+   * instead of starting a new one (see there). The page cap's record stays.
+   * Just endResume() when no resume is under way.
+   */
+  noteResumeRestored(now: number = Date.now()): void {
+    if (!this.resuming) {
+      this.endResume();
+      return;
+    }
+    const used = this.resumeAttempts;
+    this.clearResume();
+    this.restoredAttempts = used;
+    this.restoredAt = now;
   }
 
   /**
@@ -182,12 +282,26 @@ export class SessionLifecycle {
     if (this.resuming && this.networkOutSince === null) this.networkOutSince = now;
   }
 
-  /** Stop resuming (back in the world, logged out, or given up). */
+  /**
+   * Stop resuming for good (logged out, given up, the session closed from our
+   * side): the budget, the record of a recent success (noteResumeRestored) and
+   * the page cap's record all start afresh, so the player's own next login
+   * gets a whole budget. A resume that succeeded ends with noteResumeRestored.
+   */
   endResume(): void {
+    this.clearResume();
+    this.restoredAttempts = 0;
+    this.restoredAt = null;
+    this.attemptLog = [];
+  }
+
+  private clearResume(): void {
     this.resuming = false;
     this.resumeAttempts = 0;
     this.networkOutSince = null;
     this.chargenResume = false;
+    this.charSelectResume = false;
+    this.charSelectSelection = undefined;
   }
 
   /**
@@ -205,6 +319,50 @@ export class SessionLifecycle {
   /** The resume under way is a chargen resume (beginChargenResume). */
   get resumingChargen(): boolean {
     return this.resuming && this.chargenResume;
+  }
+
+  /**
+   * UX.charselect-resume — the connection dropped at character select (a named
+   * browser-UX exception, like the in-world and chargen resumes): the same
+   * attempts and delays (nextResumeDelay) log in again, and the character list
+   * lands on character select with `selectedId` selected; no character is
+   * entered (pickAutoEnterSlot returns null), whatever the URL login asks. A
+   * deliberate logout earlier in the page does not stop it: the player is at
+   * character select, not on their way out. Call before nextResumeDelay.
+   */
+  beginCharSelectResume(selectedId?: string): void {
+    if (this.resuming) return;
+    this.charSelectResume = true;
+    this.charSelectSelection = selectedId;
+  }
+
+  /** The resume under way is a character-select resume (beginCharSelectResume). */
+  get resumingCharSelect(): boolean {
+    return this.resuming && this.charSelectResume;
+  }
+
+  /** The selection a character-select resume restores (undefined when none was selected). */
+  get charSelectResumeSelection(): string | undefined {
+    return this.charSelectResume ? this.charSelectSelection : undefined;
+  }
+
+  /**
+   * A character list arrived. A chargen or char-select resume under way is
+   * done here (the list is where it lands): it ends as a success
+   * (noteResumeRestored), and says which it was and the selection to restore.
+   * A world resume goes on (it ends at PlayerCreate, noteWorldEntered).
+   */
+  takeListResume(now: number = Date.now()): { chargen: boolean; charSelect: boolean; selection: string | undefined } {
+    const chargen = this.resumingChargen;
+    const charSelect = this.resumingCharSelect;
+    const selection = this.charSelectResumeSelection;
+    if (chargen || charSelect) this.noteResumeRestored(now);
+    return { chargen, charSelect, selection };
+  }
+
+  /** The resume under way re-enters a character (an in-world drop, or one while entering): not chargen, not char select. */
+  get resumingWorld(): boolean {
+    return this.resuming && !this.chargenResume && !this.charSelectResume;
   }
 
   /** True between PlayerCreate and logout/disconnect. */
@@ -306,15 +464,19 @@ export class SessionLifecycle {
     return true;
   }
 
-  /** PlayerCreate arrived — we are in the world. */
-  noteWorldEntered(): void {
+  /**
+   * PlayerCreate arrived — we are in the world. A resume under way succeeded
+   * (noteResumeRestored: a drop within RESUME_HEALTHY_MS continues its budget).
+   */
+  noteWorldEntered(now: number = Date.now()): void {
     this.createdGuid = null;
     this.inWorldFlag = true;
     this.inWorldRetries = 0;
     this.holderLeaving = false;
     this.enterInFlight = false;
     this.enterRequestAt = null;
-    this.endResume();
+    if (this.resuming) this.noteResumeRestored(now);
+    else this.endResume();
   }
 
   /** The server refused the enter for good (its dialog is shown): the player may try again. */
@@ -415,8 +577,8 @@ export class SessionLifecycle {
     autoEnterEnabled: boolean,
   ): T | null {
     const enterable = slots.filter(s => (s.deleteTime ?? 0) === 0);
-    // A chargen resume reopens chargen: no character is entered.
-    if (this.resuming && this.chargenResume) return null;
+    // A chargen resume reopens chargen, a char-select resume lands on character select: no character is entered.
+    if (this.resuming && (this.chargenResume || this.charSelectResume)) return null;
     // Resuming after a drop: only the character that was in the world.
     if (this.resuming) return enterable.find(s => parseInt(s.id, 10) === this.lastEnteredGuid) ?? null;
     if (!autoEnterEnabled) return null;

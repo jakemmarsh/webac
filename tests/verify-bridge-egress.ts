@@ -681,15 +681,16 @@ describe('reconciler', () => {
 describe('the account a login request names (the client\'s own packets)', () => {
   it('end of retail (ACE, auth type 2): the Account string', () => {
     const pkt = clientLogin('eor', 'PlayerOne', 'hunter22');
-    expect(readLoginAccountEor(pkt)).toEqual({ login: true, account: 'PlayerOne' });
-    expect(readLoginAccount(pkt, 'eor')).toEqual({ login: true, account: 'PlayerOne' });
+    // BUG.login-credential-case — the client lowercases the account as retail's `-a` did.
+    expect(readLoginAccountEor(pkt)).toEqual({ login: true, account: 'playerone' });
+    expect(readLoginAccount(pkt, 'eor')).toEqual({ login: true, account: 'playerone' });
     // Odd lengths pad differently; still read.
     expect(readLoginAccountEor(clientLogin('eor', 'abc', 'x')).account).toBe('abc');
   });
 
   it('end of retail, "-a account:password" (auth type 1): the part before the colon', () => {
     const pkt = clientLogin('eor-colon', 'Classic', 'pw:with:colons');
-    expect(readLoginAccountEor(pkt)).toEqual({ login: true, account: 'Classic' });
+    expect(readLoginAccountEor(pkt)).toEqual({ login: true, account: 'classic' });
   });
 
   it('1999: the credential field after the 0xBEEFBEEF marker, as the AC1999 server reads it', () => {
@@ -943,14 +944,16 @@ describe('bridge end to end (static provider, one slot on 127.0.0.1)', () => {
     expect(server.msgs).toHaveLength(1); // Beta's login never left the bridge
     a.ws.close();
     await until(() => bridge!.snapshot().sessions === 0);
-    // A known account logs in from the same IP, any case.
+    // A known account logs in from the same IP, any case (an older client sent it as typed).
     const c = await session(url, '203.0.113.1');
-    c.ws.send(clientLogin('eor', 'ALPHA', 'pw'));
+    const upper = clientLogin('eor', 'alpha', 'pw');
+    upper.write('ALPHA', upper.indexOf('alpha', 0, 'latin1'), 'latin1');
+    c.ws.send(upper);
     await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'ALPHA'));
     // Another IP may make its own.
     const d = await session(url, '203.0.113.9');
     d.ws.send(clientLogin('eor', 'Beta', 'pw'));
-    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'Beta'));
+    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'beta'));
     expect(bridge!.metrics.rejects.get('egress_new_account_cap')).toBe(1);
   });
 
@@ -970,7 +973,7 @@ describe('bridge end to end (static provider, one slot on 127.0.0.1)', () => {
     // The same IP may still create its one account.
     const b = await session(url, '203.0.113.1');
     b.ws.send(clientLogin('eor', 'Fresh', 'pw'));
-    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'Fresh'));
+    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'fresh'));
   });
 
   it('closing before the character list does not hand back the allowance (the server already made the account)', async () => {
@@ -997,7 +1000,7 @@ describe('bridge end to end (static provider, one slot on 127.0.0.1)', () => {
     const confirm = vi.spyOn(manager!, 'accountConfirmed').mockImplementationOnce(() => { throw new Error('EACCES'); });
     const b = await session(url, '203.0.113.2');
     b.ws.send(clientLogin('eor', 'Beta', 'pw'));
-    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'Beta'));
+    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'beta'));
     const r = server.msgs[server.msgs.length - 1].rinfo;
     server.sock.send(characterListEor('Beta'), r.port, r.address);
     expect(await b.closed).toBe(CLOSE_WORLD_FULL);
@@ -1005,7 +1008,7 @@ describe('bridge end to end (static provider, one slot on 127.0.0.1)', () => {
     // The bridge still serves.
     const c = await session(url, '203.0.113.3');
     c.ws.send(clientLogin('eor', 'Gamma', 'pw'));
-    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'Gamma'));
+    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'gamma'));
   });
 
   it('a failed egress start refuses its world as full and leaves every other world working', async () => {
@@ -1028,7 +1031,7 @@ describe('bridge end to end (static provider, one slot on 127.0.0.1)', () => {
     const url2 = `ws://127.0.0.1:${await bridge.listen()}/`;
     const b = await session(url2, '203.0.113.1');
     b.ws.send(clientLogin('eor', 'Anyone', 'pw'));
-    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'Anyone'));
+    await until(() => server.msgs.some((m) => readLoginAccountEor(m.msg).account === 'anyone'));
   });
 
   it('1999: the same rule with the 1999 client\'s login and character list', async () => {

@@ -8,10 +8,11 @@
  * sets (the socket URL, the World box name, the launcher world, the string
  * wire for the world's emulator) is lost or left era-shaped by the reload.
  */
-import type { String16Wire } from '@ac/network';
+import type { PasswordCase, String16Wire } from '@ac/network';
 import { eraProfile, string16WireFor, type EraProfile } from '../era/EraProfiles.js';
 import type { EraSwitch } from '../era/EraBoot.js';
 import { worldBoxName, type World } from './worldDirectory.js';
+import { passwordCaseFor } from '../session/LoginCredentialCase.js';
 import { worldKeyOf } from './launcherStorage.js';
 
 /** A launcher ENTER (LauncherScreen's LauncherChoice). */
@@ -34,6 +35,8 @@ export interface LauncherLogin {
   world: World | null;
   /** How this world's server reads String16 (GDL / GDLE end-of-retail worlds: Windows-1252). */
   wire: String16Wire;
+  /** BUG.login-credential-case — the password's case on the wire (session/LoginCredentialCase.ts passwordCaseFor). */
+  passwordCase: PasswordCase;
 }
 
 /**
@@ -58,6 +61,7 @@ export function launcherLogin(era: EraProfile, enter: LauncherEnter): LauncherLo
     worldName: worldBoxName(enter.world),
     world: enter.world,
     wire: string16WireFor(era, enter.world.emu),
+    passwordCase: passwordCaseFor(era.login, enter.world.emu),
   };
 }
 
@@ -89,6 +93,7 @@ export function eraSwitchLogin(era: EraProfile, sw: EraSwitch): LauncherLogin {
   return {
     account: sw.account, password: sw.password, connectUrl: sw.connectUrl, worldName: sw.worldName, world: null,
     wire: string16WireFor(era, null),
+    passwordCase: passwordCaseFor(era.login, null),
   };
 }
 

@@ -27,10 +27,17 @@ export type AuthStyle = 'account-password' | 'account-colon-password';
  */
 export type WireProtocol = 'eor' | 'ac1999';
 
+/**
+ * BUG.login-credential-case — whether the password goes on the wire as typed
+ * or ASCII-lowercased (loginWireCredentials). Absent = 'verbatim'.
+ */
+export type PasswordCase = 'verbatim' | 'lower';
+
 export interface LoginProfile {
   clientVersion: string;
   authStyle: AuthStyle;
   protocol?: WireProtocol;
+  passwordCase?: PasswordCase;
 }
 
 /** End of retail: what ACE and GDLE expect, and what we always sent before profiles. */
@@ -42,4 +49,39 @@ export const EOR_LOGIN_PROFILE: Readonly<LoginProfile> = Object.freeze({
 /** A version literal is 1–16 printable ASCII characters (retail's is 4). */
 export function isValidClientVersion(v: string): boolean {
   return /^[\x21-\x7e]{1,16}$/.test(v);
+}
+
+/**
+ * ASCII-only lowercase (A-Z → a-z), as the C runtime's `_strlwr` / `tolower`
+ * do in the "C" locale retail ran under: every other character is left alone.
+ */
+export function retailLowercase(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/**
+ * BUG.login-credential-case — the account and password a LoginRequest carries.
+ *
+ * Retail lowercases the whole `-a` command-line argument before it logs in:
+ * the end-of-retail client's Client::EvaluateCommandLineArg @ 0x004124f0 runs
+ * `_strlwr` over it (and the accountID copy ctor @ 0x004e85f0 lowercases
+ * again); the 1999 client copies the first 20 characters of `-a` through
+ * tolower (0x00402380, a char loop over 0x005b9ab0) into its credential
+ * field. `-v` (the end-of-retail password argument) is kept as typed.
+ *
+ * So the account always reaches the server lowercased, on every world. The
+ * password is lowercased only where retail's launch put it inside `-a`
+ * (`passwordCase: 'lower'`): "-a user:password" (auth type 1: Seedsow, the
+ * 1999 client) and every GDL / GDLE world, which ThwargLauncher launches as
+ * "-a user:password" (GameLauncher.cs), so accounts there were hashed with
+ * the lowercased password. ACE and ClassicACE get "-a user -v password": the
+ * password stays as typed.
+ */
+export function loginWireCredentials(
+  account: string, password: string, profile: Pick<LoginProfile, 'passwordCase'> | null | undefined,
+): { account: string; password: string } {
+  return {
+    account: retailLowercase(account),
+    password: profile?.passwordCase === 'lower' ? retailLowercase(password) : password,
+  };
 }

@@ -5848,7 +5848,7 @@ export class GameUI {
   /*  Screen management                                                */
   /* ================================================================ */
 
-  showCharacterSelect(characters: CharacterSlot[] = [], slotCount?: number): void {
+  showCharacterSelect(characters: CharacterSlot[] = [], slotCount?: number, opts: { selectId?: string } = {}): void {
     // MakeDialogInCurrentUI dialogs belong to the UI they were made in: a
     // server PopupString from the world (the Society Greeter's welcome) goes
     // with gmGamePlayUI at logoff, as UIFlow::UseNewMode destroys it.
@@ -5859,7 +5859,11 @@ export class GameUI {
     // character last selected (or played) stays selected after a logoff,
     // after chargen Exit / Back and across delete / restore rebuilds. Only a
     // fresh connect (a new retail process) starts with none.
-    const previousId = this.connectingMode
+    // UX.charselect-resume — `selectId`: the row to keep selected across the
+    // automatic reconnect's connecting screen (a fresh connect otherwise starts with none).
+    const previousId = opts.selectId !== undefined
+      ? opts.selectId
+      : this.connectingMode
       ? undefined
       : this.uiManager.currentScreen === 'character-select'
         ? this.selectScreen.selectedCharacter?.id
@@ -37424,6 +37428,16 @@ export class GameUI {
    */
   noteSelectedAvatar(id: string): void {
     this.selectedAvatarId = id;
+  }
+
+  /**
+   * UX.charselect-resume — the character selected on character select, when
+   * that is the screen (not the connecting screen over it): what a drop's
+   * automatic reconnect selects again.
+   */
+  get charSelectSelectionId(): string | undefined {
+    if (this.connectingMode || this.uiManager.currentScreen !== 'character-select') return undefined;
+    return this.selectScreen.selectedCharacter?.id;
   }
 
   /**

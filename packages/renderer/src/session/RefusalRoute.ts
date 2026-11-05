@@ -34,7 +34,11 @@ import { characterErrorNotice, type ConnectionNotice } from '../ui/ConnectionNot
 export interface RefusalContext {
   /** In the world: PlayerCreate arrived (SessionLifecycle.inWorld) or the world is running. */
   inWorld: boolean;
-  /** An automatic resume of an in-world drop is under way (SessionLifecycle.resumingAfterDrop). */
+  /**
+   * An automatic resume of a drop is under way (SessionLifecycle.resumingAfterDrop): from the
+   * world, chargen or character select (UX.charselect-resume). A refusal of its login ends it on
+   * the Disconnected screen, where the drop would have left the player without the resume.
+   */
   resuming: boolean;
   /** The player logged in from the launcher (not a dev URL login). */
   launcherLogin: boolean;

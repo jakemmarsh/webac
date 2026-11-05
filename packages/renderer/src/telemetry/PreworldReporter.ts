@@ -349,8 +349,9 @@ export interface PreworldEvent {
   /**
    * UX.gdle-first-login-retry — 'login_retry' only: why the page retried
    * ('proven': these credentials got in earlier on the page; 'first_time': a
-   * first-time login on a GDLE world). A first_time retry followed by the
-   * trace's char_list is a login the retry rescued.
+   * first-time login on a GDLE world; 'case_verbatim': BUG.login-credential-case,
+   * a lowercased password was refused and the page tried it as typed). A
+   * retry followed by the trace's char_list is a login the retry rescued.
    */
   retry?: LoginRetryKind;
   /**
@@ -688,7 +689,7 @@ export class PreworldReporter {
     kind: LoginRetryKind = 'proven',
   ): void {
     const count = Math.max(0, Math.min(1000, Math.trunc(attempt)));
-    const retry = kind === 'first_time' ? 'first_time' : 'proven';
+    const retry: LoginRetryKind = kind === 'first_time' || kind === 'case_verbatim' ? kind : 'proven';
     if (event.serverNetError) {
       this.report('login_retry', {
         code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token), count, retry,
@@ -717,8 +718,17 @@ export class PreworldReporter {
    * (FINISH's character exists: no second create), 'chargen_invalid' (the
    * draft no longer fits: character select), and for a manual login after the
    * resume gave up 'chargen_offered' then 'chargen_offer_yes' / '_no'.
+   *
+   * UX.charselect-resume — 'charselect_restored': a drop at character select
+   * came back there (the list and the selection; nothing entered). A drop
+   * there without it ended on the Disconnected screen.
+   *
+   * BUG.resume-loop-unbounded — 'loop_chain_spent': a drop came within
+   * RESUME_HEALTHY_MS of a resume that had used every attempt, so no new
+   * resume (the Disconnected screen); 'loop_page_cap': RESUME_PAGE_CAP
+   * attempts in ten minutes (SessionLifecycle).
    */
-  resumeEnded(reason: 'character_gone' | ChargenResumeToken): void {
+  resumeEnded(reason: 'character_gone' | 'charselect_restored' | 'loop_chain_spent' | 'loop_page_cap' | ChargenResumeToken): void {
     this.report('resume_ended', { token: reason });
   }
 

@@ -8,7 +8,10 @@ export { GameEventType, getGameEventTypeName } from './GameEventType.js';
 export { GameMessageGroup } from './GameMessageGroup.js';
 export { NetAuthType } from './NetAuthType.js';
 export { AuthFlags } from './AuthFlags.js';
-export { type AuthStyle, type LoginProfile, type WireProtocol, EOR_LOGIN_PROFILE, isValidClientVersion } from './LoginProfile.js';
+export {
+  type AuthStyle, type LoginProfile, type WireProtocol, type PasswordCase, EOR_LOGIN_PROFILE, isValidClientVersion,
+  retailLowercase, loginWireCredentials,
+} from './LoginProfile.js';
 export { ContactLongJump } from './ContactLongJump.js';
 
 // Hash / checksum

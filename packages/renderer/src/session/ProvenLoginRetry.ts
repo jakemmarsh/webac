@@ -96,7 +96,7 @@ export function firstTimeLoginRetryAllowed(world: FirstTimeRetryWorld | null | u
 }
 
 /** Why a refusal is retried: the credentials got in earlier on this page, or a first-time login on a GDLE world. */
-export type LoginRetryKind = 'proven' | 'first_time';
+export type LoginRetryKind = 'proven' | 'first_time' | 'case_verbatim';
 
 /** What a login was made with. `world` is the bridge URL naming the server (main.ts connectUrl). */
 export interface LoginCredentials {
@@ -126,7 +126,7 @@ export function provenLoginRetryDelay(input: {
 }
 
 export type ProvenLoginRefusalVerdict =
-  | { readonly retry: true; readonly attempt: number; readonly delayMs: number; readonly kind: LoginRetryKind }
+  | { readonly retry: true; readonly attempt: number; readonly delayMs: number; readonly kind: 'proven' | 'first_time' }
   | { readonly retry: false };
 
 /** A salted digest of `text`, or null when the platform has no WebCrypto. */

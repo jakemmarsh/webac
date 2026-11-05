@@ -404,9 +404,10 @@ import { packSlotCounts } from './agent/packCounts.js';
 import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, isShortcutEligible, shortcutDropRefusal1999, shortcutDropIntoContainer1999, type ShortcutTarget, type ShortcutItemInfo } from './network/itemShortcutRestore.js';
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
-import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid } from './session/SessionLifecycle.js';
+import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS } from './session/SessionLifecycle.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
-import { handleUnexpectedDrop } from './session/UnexpectedDrop.js';
+import { LoginCaseFallback, passwordCaseFor, CASE_VERBATIM_RETRY_DELAY_MS } from './session/LoginCredentialCase.js';
+import { armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal } from './session/UnexpectedDrop.js';
 import { SessionLiveness, sessionDropped, liveSessionSocketFailed, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
 import { DrainHandover } from './session/DrainHandover.js';
@@ -421,7 +422,7 @@ import { LastOutsideDeathState } from './session/LastOutsideDeathState.js';
 // concurrent agent this round, so they're imported by path. Resolves to the
 // same module instance as the barrel under vite, vitest, and tsc.
 import { buildCharacterDelete, buildCharacterRestore } from '../../network/src/MessageSerializer.js';
-import { ABSENT_1999, buildFriendsCommand1999, friendsCommand1999Plan, getString16Wire, setString16Wire } from '@ac/network';
+import { ABSENT_1999, buildFriendsCommand1999, friendsCommand1999Plan, getString16Wire, setString16Wire, loginWireCredentials } from '@ac/network';
 import { CELL_LENGTH, MAP_TELEPORT_ORIGIN, mapCoordinateText, mapCoordsOfCell } from './ui/MapMarkers.js';
 import { tradeReceiveContainsIn } from './inventory/TradeReceiveContainId.js';
 import { buildSpellExamineModel, inqSkillLevel, spellRangeMeters } from './ui/examine/SpellExamine.js';
@@ -5949,8 +5950,18 @@ async function main() {
           // 'disconnected' reports and schedules nothing more).
           scheduleResume,
           raiseServerDied: () => raiseServerDied(undefined, cause, net),
+          // UX.charselect-resume — the tick outlives a logout: a dead session at character select
+          // (or in chargen, or Entering World) resumes as the socket's own close does.
+          armPreworldResume: () => armDropResume(sessionLifecycle, {
+            unexpected: true,
+            wasInWorld: false,
+            enterPending: sessionLifecycle.enterWorldPending,
+            screen: preworldScreenAtDrop(sessionLiveness.isLive),
+            keepChargenDraft,
+            selection: () => gameUI.charSelectSelectionId,
+          }) !== null,
         });
-        if (verdict === 'resuming') { worldResumePending = true; drainHandover.onSessionDropped(); }
+        if (verdict === 'resuming' && sessionLifecycle.resumingWorld) { worldResumePending = true; drainHandover.onSessionDropped(); }
       }
     }, LINK_STATUS_TICK_MS);
     // Reveal the WebGL canvas — kept hidden during pre-play to avoid sky bleed-through
@@ -8218,6 +8229,9 @@ async function main() {
   }
   let aceAccount = urlLogin.autoLogin?.account ?? '';
   let acePassword = urlLogin.autoLogin?.password ?? '';
+  // BUG.login-credential-case — the password's case on the wire, and the one quiet retry as
+  // typed (session/LoginCredentialCase.ts). A URL login has no world: the era's auth style decides.
+  const loginCase = new LoginCaseFallback(passwordCaseFor(activeEra.login, null));
   /** The account name as ACE stores it (from the CharacterList); see session/ServerAccountName.ts. */
   let aceServerAccount: string | null = null;
   // AGENT.hosted-mcp-connector: the chat side of pairing Claude (set where the tab relay is built).
@@ -8255,17 +8269,25 @@ async function main() {
   let eraSwitchPending = false;
   // The drop's automatic resume (sessionLifecycle, made below; read through this so the 1 s tick never meets its TDZ).
   let resumingAfterDrop: () => boolean = () => false;
-  preworldScreen = () => preworldScreenFor({
+  const screenState = (charListReceived: boolean) => ({
     gameStarted,
     disconnected: gameUI.disconnectedScreenShown,
     launcherActive,
     eraSwitchPending,
     uiScreen: gameUI.ui.currentScreen ?? null,
     portalSpace: gameUI.worldHiddenByPortalSpace,
-    charListReceived: preworldReporter?.characterListReceived ?? false,
+    charListReceived,
     connectingScreen: gameUI.connectingScreenShown,
     resuming: resumingAfterDrop(),
   });
+  preworldScreen = () => preworldScreenFor(screenState(preworldReporter?.characterListReceived ?? false));
+  /**
+   * UX.charselect-resume — the screen a session ended on, for the drop's resume
+   * (session/UnexpectedDrop.ts armDropResume). `live`: this session's character
+   * list arrived (SessionLiveness, read before noteEnded), which holds with the
+   * telemetry off too, unlike the reporter's flag.
+   */
+  const preworldScreenAtDrop = (live: boolean): PreworldScreen => preworldScreenFor(screenState(live));
   gameUI.onRelaunch = () => preworldReporter?.leavingForReload('epilogue');
   gameUI.pluginUsage = automationReporter;
   worldReporter?.setSources({
@@ -8364,6 +8386,9 @@ async function main() {
     launcherWorldName = login.worldName;
     launcherWorld = login.world;
     launcherLoginAt = Date.now();
+    // BUG.login-credential-case — the world's password case, no case retry made yet (applied to
+    // the connection by syncLoginProfile before it logs in).
+    loginCase.reset(login.passwordCase);
     // An end-of-retail world on GDL / GDLE reads strings as Windows-1252, not ACE's UTF-8.
     setString16Wire(login.wire);
     if (login.world) console.log(`[AC] ${login.world.name}: ${login.world.emu ?? 'unknown'} server, strings as ${login.wire === 'ace' ? 'UTF-8' : 'Windows-1252'}`);
@@ -8447,9 +8472,18 @@ async function main() {
   // RELEASE.preworld-outcomes — the page's trace id rides on the socket URL (the bridge logs it on session_open).
   const { connection: aceConnection, inWorker: netInWorker } = createNetConnection(preworldReporter?.tagUrl(connectUrl) ?? connectUrl, {
     search: window.location.search,
-    loginProfile: activeEra.login,
-    inThread: (url) => createConnection(url, { loginProfile: activeEra.login }),
+    loginProfile: loginCase.profile(activeEra.login),
+    inThread: (url) => createConnection(url, { loginProfile: loginCase.profile(activeEra.login) }),
   });
+  /** BUG.login-credential-case — the connection logs in with the password case loginCase holds now. */
+  const syncLoginProfile = (): void => {
+    if (aceConnection.loginProfile.passwordCase !== loginCase.current) aceConnection.loginProfile = loginCase.profile(activeEra.login);
+  };
+  /** The credentials as the connection puts them on the wire (what a proven login is remembered as). */
+  const wireLoginCredentials = (): LoginCredentials => {
+    const w = loginWireCredentials(aceAccount, acePassword, { passwordCase: loginCase.current });
+    return { world: connectUrl, account: w.account, password: w.password };
+  };
   console.log(`[AC] network connection: ${netInWorker ? 'worker' : 'page'}`);
   // Every connect attempt (page load, launcher ENTER, relaunch, resume) starts a fresh pre-world session for the
   // reporter: a socket that never opens must not inherit the last session's character list (screen="char-select").
@@ -8706,7 +8740,17 @@ async function main() {
   });
   const scheduleResume = (opts: { unreachable?: boolean } = {}): boolean => {
     const delay = sessionLifecycle.nextResumeDelay({ unreachable: opts.unreachable });
-    if (delay === null) { resumeRunner.cancel(); return false; }
+    if (delay === null) {
+      resumeRunner.cancel();
+      // BUG.resume-loop-unbounded — a drop soon after a resume came back (or too many resumes in
+      // ten minutes): no fresh budget, the Disconnected screen, and the reason in telemetry.
+      const bound = sessionLifecycle.resumeBound;
+      if (bound) {
+        console.warn(`[AC] ACE: connection lost again — ${bound === 'chain' ? `within ${RESUME_HEALTHY_MS / 1000} s of a resume that used every attempt` : `${RESUME_PAGE_CAP} resume attempts in ${RESUME_PAGE_CAP_WINDOW_MS / 60_000} min`}: no more automatic reconnects`);
+        preworldReporter?.resumeEnded(bound === 'chain' ? 'loop_chain_spent' : 'loop_page_cap');
+      }
+      return false;
+    }
     console.log(`[AC] ACE: connection lost — reconnecting in ${delay} ms to resume the same character`);
     aceConnection.disconnect();
     gameUI.hideDisconnectedScreen();
@@ -8843,6 +8887,7 @@ async function main() {
     if (reloadIfUpdatePending()) return;
     void runLauncher().then(() => {
       aceConnection.setUrl(preworldReporter?.tagUrl(connectUrl) ?? connectUrl);
+      syncLoginProfile();
       exposeDebugGlobal('__aceAccount', aceAccount);
       gameUI.showConnectingScreen();
       gameUI.setWorldName(launcherWorldName ?? '');
@@ -18719,7 +18764,10 @@ async function main() {
           aceServerAccount = aceCharList.accountName || null;
           preworldReporter?.characterList(aceCharList.characters.length);
           // BUG.gdle-transient-login-failed — this world + account + password got in: proven for this page.
-          void provenLoginRetry.noteAccepted({ world: connectUrl, account: aceAccount, password: acePassword });
+          // BUG.login-credential-case — remembered in the form that got in (lowercased, or as typed
+          // after the case retry), which resumes and reconnects keep using.
+          void provenLoginRetry.noteAccepted(wireLoginCredentials());
+          loginCase.noteAccepted();
           // BUG.second-tab-login-refusal — the login got in (after the other tab logged out, say).
           loginHolderWait.end();
           console.log(`[AC] ACE: Got character list — ${aceCharList.characters.length} characters on account "${aceCharList.accountName}" (${aceCharList.slotCount} slots)`);
@@ -18748,16 +18796,23 @@ async function main() {
           // with an empty list (ENTER / DELETE disabled, CREATE enabled);
           // chargen opens only from CREATE (case 0x100003a0 → mode 0x1000000b).
           // UX.chargen-resume — a chargen draft for this world + account + era (any other is dropped here).
-          const chargenResume = sessionLifecycle.resumingChargen;
-          if (chargenResume) sessionLifecycle.endResume();
+          // UX.charselect-resume — a drop at character select lands back there, its selection kept, nothing entered.
+          // BUG.resume-loop-unbounded — either resume succeeds here: a drop within RESUME_HEALTHY_MS continues its budget.
+          const { chargen: chargenResume, charSelect: charSelectResume, selection: charSelectResumeSelection } = sessionLifecycle.takeListResume();
           // The draft is decided on the session's first list only (a repeat would offer it twice).
           const draftAction = listRole === 'first'
             ? decideChargenDraft(chargenDrafts, chargenDraftOwner(), characterSlots, chargenResume)
             : { kind: 'none' as const };
           // The pending FINISH made the character: its row selected, never a second create.
           if (draftAction.kind === 'created') gameUI.noteSelectedAvatar(draftAction.slotId);
-          gameUI.showCharacterSelect(characterSlots, aceCharList.slotCount);
+          // A list after the connecting screen starts from the default pick; the resumes keep theirs.
+          const keepSelectedId = draftAction.kind === 'created' ? draftAction.slotId : charSelectResumeSelection;
+          gameUI.showCharacterSelect(characterSlots, aceCharList.slotCount, { selectId: keepSelectedId });
           console.log(`[AC] ACE: ${characterSlots.length} character(s) on ${aceCharList.accountName}`);
+          if (charSelectResume) {
+            preworldReporter?.resumeEnded('charselect_restored');
+            console.log(`[AC] ACE: char-select resume — back on character select${charSelectResumeSelection ? ' with the same character selected' : ''}`);
+          }
           if (chargenResume && draftAction.kind === 'none') preworldReporter?.resumeEnded('chargen_invalid');
           if (draftAction.kind === 'created') {
             preworldReporter?.resumeEnded('chargen_created');
@@ -18808,19 +18863,20 @@ async function main() {
           // Auto-enter is the URL-login tooling's convenience; a launcher
           // login lands on character select, as retail's did.
           const autoEnter = urlLogin.autoLogin !== null && urlParams.get('autoenter') !== 'false';
-          const autoSlot = sessionLifecycle.pickAutoEnterSlot(characterSlots, autoEnter);
+          // UX.charselect-resume — the player was at character select: never auto-enter from its resume.
+          const autoSlot = charSelectResume ? null : sessionLifecycle.pickAutoEnterSlot(characterSlots, autoEnter);
           // A resume whose character is gone (deleted meanwhile) ends at character select.
           if (!autoSlot && sessionLifecycle.resumingAfterDrop) {
-            sessionLifecycle.endResume();
+            sessionLifecycle.noteResumeRestored();
             preworldReporter?.resumeEnded('character_gone');
           }
           // The same tooling convenience for an empty account (not retail):
           // a URL-login session goes on to chargen as if CREATE were pressed,
           // so the probes / captures that create their character still can.
           // &autoenter=false (and every launcher login) stays on the list.
-          if (autoEnter && characterSlots.length === 0) gameUI.showCharacterCreate();
+          if (autoEnter && characterSlots.length === 0 && !charSelectResume) gameUI.showCharacterCreate();
           // UB's setnextlogin (a meta's login switch): after this logout, enter that character.
-          const nextLoginSlot = autoSlot ? null : metaNextLogin.take(characterSlots);
+          const nextLoginSlot = autoSlot || charSelectResume ? null : metaNextLogin.take(characterSlots);
           if (nextLoginSlot) {
             console.log(`[AC] ACE: next login (setnextlogin): ${nextLoginSlot.name}`);
             autoEnterTimer.schedule(() => {
@@ -19290,10 +19346,19 @@ async function main() {
           // A live session ended under the player: the closing socket had opened, or the session behind it had
           // reached its character list (a socket the connection opened on its own can fail unopened: SessionLiveness.ts).
           const unexpected = sessionDropped(event, sessionLiveness.isLive);
+          // UX.chargen-resume / UX.charselect-resume — a drop in chargen keeps the draft, one at character
+          // select keeps the list and selection, one while Entering World waits enters the same character:
+          // each resumes the same way (session/UnexpectedDrop.ts armDropResume).
+          const dropResume = armDropResume(sessionLifecycle, {
+            unexpected,
+            wasInWorld,
+            enterPending: sessionLifecycle.enterWorldPending,
+            screen: preworldScreenAtDrop(sessionLiveness.isLive),
+            keepChargenDraft,
+            selection: () => gameUI.charSelectSelectionId,
+          });
           sessionLiveness.noteEnded();
-          // UX.chargen-resume — a drop in chargen keeps the draft and resumes the same way (not a world resume).
-          const droppedInChargen = unexpected && !wasInWorld && !sessionLifecycle.resumingAfterDrop && keepChargenDraft();
-          const droppedInWorld = wasInWorld || sessionLifecycle.resumingAfterDrop || droppedInChargen;
+          const droppedInWorld = dropResume !== null;
           // RELEASE.first-minute — the world session ended under the player (a no-op after a tab close).
           // BUG.hidden-tab-session-drop — with what ended it (a network close vs the client's own verdict).
           // OBS.dm-stall-diagnostics — with the connection's state at the drop (the worker's
@@ -19321,7 +19386,7 @@ async function main() {
             if (!wasInWorld) preworldReporter?.dropped(event.closeCode ?? null, event.endCause ?? null, dropNet);
             // In the world (or mid-resume): reconnect and re-enter on our own first.
             if (droppedInWorld && scheduleResume()) {
-              if (!sessionLifecycle.resumingChargen) { worldResumePending = true; drainHandover.onSessionDropped(); }
+              if (sessionLifecycle.resumingWorld) { worldResumePending = true; drainHandover.onSessionDropped(); }
               break;
             }
             raiseServerDied();
@@ -19463,7 +19528,15 @@ async function main() {
             if (sessionLifecycle.resumingAfterDrop) {
               // BUG.resume-silent-launcher — say why this attempt failed (a GDLE STR_LOGIN_FAILED
               // can be the server's own database hiccup: the next attempt may pass).
-              preworldReporter?.connectionError(event, connectionFailureNotice(event)?.token || null);
+              const attemptNotice = connectionFailureNotice(event);
+              preworldReporter?.connectionError(event, attemptNotice?.token || null);
+              // UX.charselect-resume sweep — a server that refuses this client's version won't take it
+              // on the next attempt either: stop, with that refusal (and its reload hint) on the screen.
+              if (attemptNotice && resumeAttemptRefusalIsFinal(attemptNotice.token)) {
+                console.warn(`[AC] ACE: resume attempt refused (${attemptNotice.token}) — no more attempts`);
+                raiseServerDied(attemptNotice.text);
+                break;
+              }
               // BUG.resume-hung-socket — no network at all (offline, or no answer to the socket): not counted while the grace lasts.
               const unreachable = event.openTimedOut === true || navigator.onLine === false;
               if (!scheduleResume({ unreachable })) raiseServerDied();
@@ -19489,8 +19562,28 @@ async function main() {
             // last refusal, and any other, is shown as before (ProvenLoginRetry decides).
             // UX.gdle-first-login-retry — on a GDL / GDLE launcher world (not register-first) a
             // first-time login retries the same way (firstTimeLoginRetryAllowed).
+            // BUG.login-credential-case — a lowercased password (GDL / GDLE, auth-type-1 eras) that
+            // differs from what was typed and is refused as "Client logon failed": log in once more
+            // at once with the password as typed (an account made with capitals), before anything
+            // below. A named browser-UX exception (CLAUDE.md).
+            if (!gameStarted && event.serverNetError && loginCase.onRefused(netNotice.token, acePassword)) {
+              syncLoginProfile();
+              preworldReporter?.loginRetry(event, netNotice.token || null, 1, 'case_verbatim');
+              console.log(`[AC] ACE: "${netNotice.text}" with the password lowercased as retail sends it — trying it as typed`);
+              if (provenLoginRetryTimer !== null) clearTimeout(provenLoginRetryTimer);
+              const typed = { account: aceAccount, password: acePassword, url: connectUrl };
+              provenLoginRetryTimer = setTimeout(() => {
+                provenLoginRetryTimer = null;
+                if (launcherActive || gameStarted || aceAccount !== typed.account || acePassword !== typed.password || connectUrl !== typed.url) return;
+                aceConnection.autoReconnect = false;
+                aceConnection.connect(aceAccount, acePassword);
+              }, CASE_VERBATIM_RETRY_DELAY_MS);
+              break;
+            }
+            syncLoginProfile();
             if (!gameStarted && event.serverNetError) {
-              const creds: LoginCredentials = { world: connectUrl, account: aceAccount, password: acePassword };
+              const creds = wireLoginCredentials();
+              const typed = { account: aceAccount, password: acePassword };
               const firstTime = firstTimeLoginRetryAllowed(launcherWorld, aceAccount);
               void provenLoginRetry.onRefused(creds, netNotice.token, { firstTime }).then((verdict) => {
                 if (gameStarted) return;
@@ -19502,9 +19595,9 @@ async function main() {
                   provenLoginRetryTimer = setTimeout(() => {
                     provenLoginRetryTimer = null;
                     // Gone to the launcher, another tab, or new credentials meanwhile: nothing to retry.
-                    if (launcherActive || gameStarted || aceAccount !== creds.account || acePassword !== creds.password) return;
+                    if (launcherActive || gameStarted || aceAccount !== typed.account || acePassword !== typed.password) return;
                     aceConnection.autoReconnect = false;
-                    aceConnection.connect(creds.account, creds.password);
+                    aceConnection.connect(typed.account, typed.password);
                   }, verdict.delayMs);
                   return;
                 }

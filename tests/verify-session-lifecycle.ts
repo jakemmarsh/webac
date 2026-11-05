@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { SessionLifecycle, RESUME_DELAYS_MS, RESUME_IN_WORLD_RETRY_DELAYS_MS, IN_WORLD_RETRY_DELAY_MS, characterSlotIndex, isAutoEnterTargetStillValid } from '@ac/renderer/session/SessionLifecycle.js';
+import { SessionLifecycle, RESUME_DELAYS_MS, RESUME_HEALTHY_MS, RESUME_IN_WORLD_RETRY_DELAYS_MS, IN_WORLD_RETRY_DELAY_MS, characterSlotIndex, isAutoEnterTargetStillValid } from '@ac/renderer/session/SessionLifecycle.js';
 
 const slots = [
   { id: '1342177280', name: 'First' },                    // 0x50000000
@@ -205,14 +205,16 @@ describe('resume after an unexpected drop in the world (bridge restart, network 
     expect(s.pickAutoEnterSlot([{ id: String(0x50000001) }], false)).toBeNull();
   });
 
-  it('back in the world resets the budget; a logout or nothing entered means nothing to resume', () => {
+  it('back in the world and up past RESUME_HEALTHY_MS resets the budget; a logout or nothing entered means nothing to resume', () => {
     const s = inWorldAs(0x50000002);
+    const t0 = 1_000_000;
     s.noteDisconnected();
-    s.nextResumeDelay(); s.nextResumeDelay();
-    s.noteWorldEntered();
+    s.nextResumeDelay({ now: t0 }); s.nextResumeDelay({ now: t0 + 2000 });
+    s.noteWorldEntered(t0 + 10_000);
     expect(s.resumingAfterDrop).toBe(false);
     s.noteDisconnected();
-    expect(s.nextResumeDelay()).toBe(RESUME_DELAYS_MS[0]);
+    // BUG.resume-loop-unbounded — a drop a minute later is a new blip: a whole budget.
+    expect(s.nextResumeDelay({ now: t0 + 10_000 + RESUME_HEALTHY_MS })).toBe(RESUME_DELAYS_MS[0]);
 
     const out = inWorldAs(0x50000002);
     out.noteLoggedOut();

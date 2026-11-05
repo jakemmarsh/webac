@@ -424,6 +424,11 @@ describe('LauncherScreen (behavioral, fake kit)', () => {
     expect(s.account.getAttribute('autocomplete')).toBe('username');
     expect(s.password.getAttribute('autocomplete')).toBe('current-password');
     expect(s.password.type).toBe('password');
+    // BUG.login-credential-case — no phone autocorrect or spellcheck changing what is typed.
+    for (const input of [s.account, s.password]) {
+      expect(input.getAttribute('autocorrect')).toBe('off');
+      expect(input.spellcheck).toBe(false);
+    }
   });
 
   it('the world list stacks above the buttons whose boxes it overlaps (the last row selects, it never opens Custom…)', async () => {

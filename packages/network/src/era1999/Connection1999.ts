@@ -27,7 +27,7 @@ import {
   parseAgentCall, parsePairingReply, parseRelayLinkNotice, parseRoutinesGrant, probeBridgeHealth, type BridgeHealth, type ConnectionEvent, type ConnectionListener,
 } from '../ClientConnection.js';
 import type { GameMessageGroup } from '../GameMessageGroup.js';
-import { EOR_LOGIN_PROFILE, type LoginProfile } from '../LoginProfile.js';
+import { EOR_LOGIN_PROFILE, loginWireCredentials, type LoginProfile } from '../LoginProfile.js';
 import {
   deserializeMessage, parseCharacterCreateResponse, parseCharacterRestoreResponse, parseCreateObject, parseServerName,
 } from '../MessageSerializer.js';
@@ -554,9 +554,11 @@ export class Connection1999 implements NetConnection {
   private sendLogin(): void {
     this.loginSends++;
     // Credentials past the 20-byte field are truncated, as the retail client did (Login1999.ts).
+    // BUG.login-credential-case — and lowercased as it did its `-a` (loginWireCredentials).
+    const wire = loginWireCredentials(this.account, this.password, this.loginProfile);
     const body = buildLoginBody1999({
       version: this.loginProfile.clientVersion || VERSION_1999,
-      account: this.account, password: this.password,
+      account: wire.account, password: wire.password,
       portalIteration: this.datIterations.portal, cellIteration: this.datIterations.cell,
     });
     this.raw(buildPacket1999({ sequence: 1, flags: F1999.Checksum, recipient: 0, time: 0, body }));

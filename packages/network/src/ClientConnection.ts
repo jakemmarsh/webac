@@ -36,7 +36,7 @@ import {
 import { GameMessageOpcode } from './GameMessageOpcode.js';
 import { GameMessageGroup } from './GameMessageGroup.js';
 import { NetAuthType } from './NetAuthType.js';
-import { type LoginProfile, EOR_LOGIN_PROFILE, isValidClientVersion } from './LoginProfile.js';
+import { type LoginProfile, EOR_LOGIN_PROFILE, isValidClientVersion, loginWireCredentials } from './LoginProfile.js';
 import { AuthFlags } from './AuthFlags.js';
 import { type BridgeRefusal, BridgeRefusalError, bridgeRefusalFromClose } from './BridgeRefusal.js';
 import { CharacterError, characterErrorMessage } from '@ac/shared';
@@ -1536,9 +1536,11 @@ export class ClientConnection {
 
   // ─── Internal Packet Handling ──────────────────────
 
-  private sendLoginRequest(account: string, password: string): void {
+  private sendLoginRequest(typedAccount: string, typedPassword: string): void {
     const profile = this.loginProfile;
     const version = isValidClientVersion(profile.clientVersion) ? profile.clientVersion : EOR_LOGIN_PROFILE.clientVersion;
+    // BUG.login-credential-case — what retail's `-a` / `-v` put on the wire (LoginProfile.ts).
+    const { account, password } = loginWireCredentials(typedAccount, typedPassword, profile);
     if (profile.authStyle === 'account-colon-password') {
       this.sendAccountColonPasswordLogin(version, account, password);
       return;

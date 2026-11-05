@@ -425,7 +425,7 @@ describe('UX.gdle-first-login-retry', () => {
     expect(sent.map((e) => [e.outcome, e.count, e.retry])).toEqual([
       ['login_retry', 1, 'first_time'], ['login_retry', 2, 'proven'], ['login_refused', null, undefined],
     ]);
-    expect([...LOGIN_RETRY_KINDS]).toEqual(['proven', 'first_time']);
+    expect([...LOGIN_RETRY_KINDS]).toEqual(['proven', 'first_time', 'case_verbatim']);
     expect(sanitizeClientPreworld(sent[0])).toMatchObject({ outcome: 'login_retry', retry: 'first_time', count: 1, code: STR_LOGIN_FAILED });
     expect(sanitizeClientPreworld(sent[1])).toMatchObject({ retry: 'proven' });
     expect(sanitizeClientPreworld(sent[2])).not.toHaveProperty('retry');

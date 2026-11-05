@@ -665,6 +665,8 @@ export class LauncherScreen {
       input.setAttribute('autocomplete', autocomplete);
       input.spellcheck = false;
       input.autocapitalize = 'off';
+      // BUG.login-credential-case — no phone autocorrect turning "jake" into "Jake" (as GameUI's fields).
+      input.setAttribute('autocorrect', 'off');
       // No maxLength: an input's cap silently cuts what is typed or pasted, and
       // retail sent the whole string (the EoL client keeps -a/-v in a PStringBase;
       // ACE reads String16L/String32L with no cap, refusing an account over 50
