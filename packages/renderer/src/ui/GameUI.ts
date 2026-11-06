@@ -149,7 +149,7 @@ import { fellowshipString } from './FellowshipStrings.js';
 import {
   combatBarHelpId, combatBarString, configString, CONFIG_HELP_TOKENS, CONFIG_TOGGLE_HELP_TOKENS, OPTIONS_STRING_TABLE,
   type ConfigStringKey, CHAT_OPTIONS_STRING_TABLE, CHAT_OPACITY_OPTION_DESCS, chatFilterHelpId, chatFilterLabel,
-  chatFilterSuffixForKey, chatOpacityLabel, chatSectionHeader, type ChatFilterSuffix,
+  chatFilterSuffixForKey, chatOpacityLabel, chatSectionHeader, type ChatFilterSuffix, LANDSCAPE_DETAIL_TEXTURES_LABEL,
 } from './OptionsStrings.js';
 import type { LayoutDescData, ElementDesc } from '@ac/dat-parser/file-types/LayoutDesc.js';
 import { CreditsScreen, creditsUseAltVariant, type CreditsScreenKit } from './CreditsScreen.js';
@@ -267,7 +267,7 @@ import {
   eraClientRules, resolveClientText, EOR_TRAIN_SKILL_CONFIRM, type EraClientRules, type ClientText,
 } from '../era/EraFeatures.js';
 import { EncumbranceNotice, type EncumbranceNoticeRules } from './EncumbranceNotice.js';
-import { ERA_OPTIONAL_UI_SOUNDS, landscapeDrawDistanceOption, landscapeMinAmbient, textureFilteringOption, trimChatLog } from '../era/EraWorldRules.js';
+import { ERA_OPTIONAL_UI_SOUNDS, landscapeDetailTexturesOption, landscapeDrawDistanceOption, landscapeMinAmbient, textureFilteringOption, trimChatLog } from '../era/EraWorldRules.js';
 import { ACFontRenderer, OUTLINE_NEIGHBOUR_OFFSETS } from './ACFontRenderer.js';
 import { placeScrollbarButtons, bindHotClick, hotClickTiming, buttonVisualState } from './ScrollbarButtons.js';
 import { outlineCssFromArgb, DEFAULT_TEXT_OUTLINE_ARGB } from './TextOutline.js';
@@ -3177,6 +3177,9 @@ export class GameUI {
       textureFiltering: 1,              // Render.TextureFiltering (index values) → 1 = Trilinear
       landscapeDrawDistance: 8,         // Render.LandscapeDrawDistance values [3,5,8,11,15,25] landblocks → 8 = Medium
       buildingDetailTextures: true,     // AddToggleOption(Render_BuildingDetailTextures) → SetDefaultValue(1)
+      // webac#23 — 1999 only (EraWorldRules.landscapeDetailTextures): the Performance panel's
+      // "Detail Texture: Landscape" checkbox, off by default (the render-options defaults @ 0x42c236).
+      landscapeDetailTextures: false,
       multiPassAlpha: false,            // AddToggleOption(Render_MultiPassAlpha) → SetDefaultValue(0)
       mouseLookSensitivity: 0.55,       // Input.MouseLookSensitivity 0.01..1.0, SetDefaultValue(0x3f0ccccd = 0.55)
       invertMouseLookYAxis: false,      // AddToggleOption(Input_InvertMouseLookYAxis) → SetDefaultValue(0)
@@ -11151,6 +11154,14 @@ export class GameUI {
     onResizeEnd?: (w: number, h: number) => void;
     /** A lower height cap than the root's p60 (an era with fewer rows to reveal). */
     maxH?: number;
+    /**
+     * Elements that are not DAT Dragbars but move the window the same way
+     * (clamped on screen, the rect persisted under the WindowID on release):
+     * the examine window's title strip.
+     */
+    moveHandleIds?: readonly number[];
+    /** A press on any drag / resize handle (e.g. raise a z-stacked panel). */
+    onPress?: () => void;
   }): void {
     const { handle, container, windowId, rootElId, defaultW, defaultH, onResize, onResizeEnd } = opts;
     const rootDesc = handle.descs?.get(rootElId);
@@ -11193,43 +11204,55 @@ export class GameUI {
       };
     };
 
+    // UIElement_Dragbar (StartMouseMoving @ 0046c760) — drag the whole window.
+    const wireMoveHandle = (barEl: HTMLElement): void => {
+      barEl.style.pointerEvents = 'auto';
+      barEl.style.cursor = 'move';
+      barEl.addEventListener('click', (e) => e.stopPropagation());
+      barEl.addEventListener('mousedown', (e) => {
+        if (LayoutRenderer.isUILocked()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        opts.onPress?.();
+        const startMX = e.clientX, startMY = e.clientY;
+        const start = currentRect();
+        const onMove = (me: MouseEvent) => {
+          const { sx, sy } = designScale();
+          let nx = start.x + (me.clientX - startMX) / (sx || 1);
+          let ny = start.y + (me.clientY - startMY) / (sy || 1);
+          nx = Math.max(0, Math.min(nx, this.hudLogicalWidth() - start.w));
+          ny = Math.max(0, Math.min(ny, this.hudLogicalHeight() - start.h));
+          container.style.right = '';
+          container.style.bottom = '';
+          // A window centred by its HUD edges (the transaction dock) is
+          // placed by left + marginLeft until first moved.
+          container.style.marginLeft = '';
+          container.style.left = `${Math.round(nx)}px`;
+          container.style.top = `${Math.round(ny)}px`;
+        };
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          // A press that never moved the window is no MoveTo: nothing is
+          // saved, so an unmoved window keeps following its HUD edges.
+          const end = currentRect();
+          if (end.x !== start.x || end.y !== start.y) persist();
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    };
+    for (const id of opts.moveHandleIds ?? []) {
+      const el = handle.elements.get(id);
+      if (el) wireMoveHandle(el);
+    }
+
     for (const [descId, desc] of handle.descs ?? new Map<number, ElementDesc>()) {
       if (descId === rootElId) continue;
       const barEl = handle.elements.get(descId);
       if (!barEl) continue;
       if (desc.type === 2) {
-        // UIElement_Dragbar — drag the whole window.
-        barEl.style.pointerEvents = 'auto';
-        barEl.style.cursor = 'move';
-        barEl.addEventListener('click', (e) => e.stopPropagation());
-        barEl.addEventListener('mousedown', (e) => {
-          if (LayoutRenderer.isUILocked()) return;
-          e.preventDefault();
-          e.stopPropagation();
-          const startMX = e.clientX, startMY = e.clientY;
-          const start = currentRect();
-          const onMove = (me: MouseEvent) => {
-            const { sx, sy } = designScale();
-            let nx = start.x + (me.clientX - startMX) / (sx || 1);
-            let ny = start.y + (me.clientY - startMY) / (sy || 1);
-            nx = Math.max(0, Math.min(nx, this.hudLogicalWidth() - start.w));
-            ny = Math.max(0, Math.min(ny, this.hudLogicalHeight() - start.h));
-            container.style.right = '';
-            container.style.bottom = '';
-            // A window centred by its HUD edges (the transaction dock) is
-            // placed by left + marginLeft until first moved.
-            container.style.marginLeft = '';
-            container.style.left = `${Math.round(nx)}px`;
-            container.style.top = `${Math.round(ny)}px`;
-          };
-          const onUp = () => {
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onUp);
-            persist();
-          };
-          document.addEventListener('mousemove', onMove);
-          document.addEventListener('mouseup', onUp);
-        });
+        wireMoveHandle(barEl);
       } else if (desc.type === 9) {
         // UIElement_Resizebar — direction from the handle's own props.
         const readFlag = (pid: number): boolean =>
@@ -11243,6 +11266,7 @@ export class GameUI {
           if (LayoutRenderer.isUILocked()) return;
           e.preventDefault();
           e.stopPropagation();
+          opts.onPress?.();
           const startMX = e.clientX, startMY = e.clientY;
           const start = currentRect();
           const onMove = (me: MouseEvent) => {
@@ -19753,6 +19777,16 @@ export class GameUI {
     place(this.powerBarContainer, POWERBAR_WINDOW_ID);
     place(this.chatContainer, MAIN_CHAT_WINDOW_ID);
     for (const inst of this.floatyChatInstances) place(inst.panelEl, inst.def.windowId);
+    // webac#24 sweep — the examine window (WindowID 7) and a moved
+    // transaction dock (WindowID 6: vendor / trade / salvage / slumlord /
+    // container) were left where they were when the screen shrank.
+    // Unmoved, the examine window keeps its R1/B1 slot gaps on the new screen.
+    if (this.examinePanel) {
+      const at = examinationWindowPlacement(this.getFloatyWindowGeometry(EXAMINATION_WINDOW.windowId), sw, sh);
+      this.examinePanel.style.left = `${at.x}px`;
+      this.examinePanel.style.top = `${at.y}px`;
+    }
+    for (const host of this.hudContainer.querySelectorAll<HTMLElement>('[data-dock-panel]')) place(host, TRANSACTION_DOCK.windowId);
   }
 
 
@@ -29417,6 +29451,15 @@ export class GameUI {
       // (decomp :325058-325070): the building + env-cell detail pass.
       this.addToggleRow(content, configString('environmentDetailTextures'), 'buildingDetailTextures',
         () => this.applyDetailTexturing());
+      // webac#23 — the landscape detail pass, only where the era has it (1999's PerformancePanel
+      // @ 0x594e00 "Detail Texture: Landscape"; the classic eras by Jake's request; end of retail
+      // compiled it out) and the world's region texture is see-through (UIHost.landscapeDetailAvailable).
+      const landHost = this.uiHost?.landscapeDetailAvailable;
+      if (landscapeDetailTexturesOption(this.clientRules.world)
+        && (typeof landHost !== 'function' || landHost.call(this.uiHost))) {
+        this.addToggleRow(content, LANDSCAPE_DETAIL_TEXTURES_LABEL, 'landscapeDetailTextures',
+          () => this.applyLandscapeDetailTexturing());
+      }
       this.addToggleRow(content, configString('multiplePassAlpha'), 'multiPassAlpha');
 
       // ── Input Options ──
@@ -29593,6 +29636,7 @@ export class GameUI {
     this.applyLandscapeDrawDistance();
     this.applyTexturePrefs();
     this.applyDetailTexturing();
+    this.applyLandscapeDetailTexturing();
     this.applyDegradePrefs();
     // CORE.17.h.g.b — Reset/Defaults reach UI.ChatFontFace/Size too
     // (UIOption_Menu::Apply → ModifyPreference → OnFontPreferenceChanged).
@@ -29848,6 +29892,7 @@ export class GameUI {
     this.applyLandscapeDrawDistance();
     this.applyTexturePrefs();
     this.applyDetailTexturing();
+    this.applyLandscapeDetailTexturing();
     this.applyDegradePrefs();
     this.applyChatFont();
     this.applyScreenBrightness();
@@ -29889,6 +29934,18 @@ export class GameUI {
     const host = this.uiHost;
     if (typeof host?.setDetailTexturing !== 'function') return;
     host.setDetailTexturing(this.optionsSettings.buildingDetailTextures !== false);
+  }
+
+  /**
+   * webac#23 — hand the 1999 "Detail Texture: Landscape" checkbox to the world (1999:
+   * PerformancePanel_ApplySettings @ 0x598430 → LScape_SetDetailTexturing @ 0x44340f with the
+   * landscape flag). main.ts injects UIHost.setLandscapeDetailTexturing; it reads the persisted value
+   * itself before the terrain is built. An era without the pass draws nothing either way.
+   */
+  private applyLandscapeDetailTexturing(): void {
+    const host = this.uiHost;
+    if (typeof host?.setLandscapeDetailTexturing !== 'function') return;
+    host.setLandscapeDetailTexturing(this.optionsSettings.landscapeDetailTextures === true);
   }
 
   /**
@@ -35630,7 +35687,11 @@ export class GameUI {
       anchorLeft: true,
       subtreeElementId: E.root,
       closeButtonId: E.close,
-      dragHandleId: E.title,
+      // webac#24 — no generic dragHandleId: LayoutRenderer's drag moved the
+      // window but saved nothing, so the next examine reopened it at the
+      // default spot. The title strip moves it through the floaty path below
+      // (gmFloatyExaminationUI::MoveTo @ 004d45e0: clamp, then options
+      // 0x10000086/87 under WindowID 7).
       onClose: () => {
         this.examinePanelHandle = null;
         this.examinePanel = null;
@@ -35648,6 +35709,11 @@ export class GameUI {
       this.wireFloatyWindowBorders({
         handle, container: wrapper, windowId: E.windowId, rootElId: E.root,
         defaultW: E.design.w, defaultH: E.design.h,
+        // Retail's only mover is the 5 px top Dragbar 0x1000067c; the title
+        // strip 0x1000012d under it moves the window too (kept from the
+        // earlier panel), through the same MoveTo + persist.
+        moveHandleIds: [E.title],
+        onPress: () => handle.bringToFront(),
       });
       if (at.w !== E.design.w || at.h !== E.design.h) handle.resizeSubtree?.(at.w, at.h);
     }

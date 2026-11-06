@@ -8,7 +8,7 @@
  */
 import { ABSENT_1999, type Absent1999Feature } from '@ac/network';
 import { INVENTORY_REQUEST_WATCHDOG_1999_SECONDS, TALISMAN_TARGET_TYPES_1999, TALISMAN_TARGET_TYPES_EOR, type TalismanTargetTypes, PROMISSORY_NOTE_RATES_EOR, PROMISSORY_NOTE_RATES_1999, type PromissoryNoteRates, type ShieldBlockRule } from '@ac/shared';
-import type { EraProfile } from './EraProfiles.js';
+import { EOR_ERA_ID, type EraProfile } from './EraProfiles.js';
 import { quickslotCommand } from '../network/itemShortcutRestore.js';
 import { SPELL_RESEARCH_PAGE_ACTION } from '../input/KeybindClientActions.js';
 import type { EraKeymap } from '../input/EraKeymaps.js';
@@ -24,7 +24,7 @@ import { AC1999_FELLOWSHIP_TEXT, EOR_FELLOWSHIP_TEXT, type FellowshipText } from
 import { AC1999_ALLEGIANCE_FLOW, EOR_ALLEGIANCE_FLOW, type AllegianceFlowRules } from '../ui/AllegiancePanelFlow.js';
 import { AC1999_USE_OBJECT_RULES, EOR_USE_OBJECT_RULES, type UseObjectRules } from '../input/UseObject.js';
 import { AC1999_ENCUMBRANCE_NOTICE, EOR_ENCUMBRANCE_NOTICE, type EncumbranceNoticeRules } from '../ui/EncumbranceNotice.js';
-import { AC1999_WORLD_RULES, EOR_WORLD_RULES, type EraWorldRules } from './EraWorldRules.js';
+import { AC1999_WORLD_RULES, CLASSIC_WORLD_RULES, EOR_WORLD_RULES, type EraWorldRules } from './EraWorldRules.js';
 import { AC1999_VERBOSE_VERSION } from '../chat/commands/Commands1999.js';
 import { AC1999_TOOLBAR_TABS, type ToolbarTabSlot } from '../ui/ToolbarTabs.js';
 import type { CommandTableStyle } from '../chat/commands/CommandSystem.js';
@@ -1350,15 +1350,22 @@ const AC1999_CLIENT_RULES: EraClientRules = Object.freeze({
   worldEntryVersionLine: AC1999_VERBOSE_VERSION, // ClientMode_RunTransition @ 0x4d08a0
 });
 
+/**
+ * The classic (Dark Majesty) eras: end of retail's rules (they run its exe) except the world's
+ * Landscape Detail Textures, the pre-ToD option Jake asked for (webac#23, EraWorldRules.CLASSIC_WORLD_RULES).
+ */
+const CLASSIC_CLIENT_RULES: EraClientRules = Object.freeze({ ...EOR_CLIENT_RULES, world: CLASSIC_WORLD_RULES });
+
 /** The client-code rules of era `p` (end of retail's for every era that runs its exe). */
 export function eraClientRules(p: EraProfile | null | undefined): EraClientRules {
   if (p?.login.protocol === 'ac1999') return AC1999_CLIENT_RULES;
+  const base = p && p.id !== EOR_ERA_ID ? CLASSIC_CLIENT_RULES : EOR_CLIENT_RULES;
   const renames = p?.mapNoteRenames;
-  if (!renames) return EOR_CLIENT_RULES;
+  if (!renames) return base;
   let rules = renamedNoteRules.get(renames);
   if (!rules) {
     const notes = Object.freeze(MAP_NOTE_LOCATIONS.map((n) => (renames[n.name] ? Object.freeze({ ...n, name: renames[n.name] }) : n)));
-    rules = Object.freeze({ ...EOR_CLIENT_RULES, mapPanel: Object.freeze({ ...EOR_MAP_PANEL, notes }) });
+    rules = Object.freeze({ ...base, mapPanel: Object.freeze({ ...EOR_MAP_PANEL, notes }) });
     renamedNoteRules.set(renames, rules);
   }
   return rules;

@@ -51,7 +51,7 @@ import {
 import { readResponseBytes } from '../readResponseBytes.js';
 import { NullObjectCache, type ObjectCache } from './ObjectCache.js';
 import { streamHandlerCost } from '../../telemetry/MainThreadCost.js';
-import { type CacheHedgePolicy, DEFAULT_CACHE_HEDGE } from '../CacheHedge.js';
+import { CacheHealth, type CacheHedgePolicy, DEFAULT_CACHE_HEDGE } from '../CacheHedge.js';
 
 const ITERATION_FILE_ID = 0xffff0001;
 
@@ -308,6 +308,8 @@ export interface DatStoreStats {
    */
   cacheHedges: number;
   cacheHedgeWins: number;
+  /** PERF.slow-cache-bypass — reads sent straight to the network because the page's cache was bypassed (CacheHealth). */
+  cacheBypassReads: number;
   /** Missed files not resident yet (in flight): 0 once every miss has landed (the A/B gate's check). */
   unresolvedMisses: number;
   /** Payload bytes resident now: packs + leaves + bundles (what the session holds instead of whole DATs). */
@@ -377,7 +379,7 @@ export interface DatStoreOptions {
   cacheHedge?: CacheHedgePolicy | null;
 }
 
-export { CACHE_HEDGE_BASE_MS, CACHE_HEDGE_BYTES_PER_MS, type CacheHedgePolicy, DEFAULT_CACHE_HEDGE, prerenderAwareWait } from '../CacheHedge.js';
+export { CACHE_HAS_BOUND_MS, CACHE_HEDGE_BASE_MS, CACHE_HEDGE_BYTES_PER_MS, CACHE_SLOW_OPS_TO_BYPASS, CacheHealth, type CacheHedgePolicy, DEFAULT_CACHE_HEDGE, boundedHas, pageCacheHealth, prerenderAwareWait } from '../CacheHedge.js';
 
 /** The network load of a hedged read was not needed: the cache delivered first. */
 class HedgeCancelled extends Error {}
@@ -624,7 +626,7 @@ export class NetworkLink {
 export class DatStore {
   readonly stats: DatStoreStats = {
     netObjects: 0, netBytes: 0, netReceivedBytes: 0, cacheObjects: 0, cacheBytes: 0, misses: 0, missesByType: {}, failures: 0, retries: 0, unresolvedMisses: 0,
-    cacheMisses: 0, cacheReadMs: 0, cacheReadMaxMs: 0, inflateMs: 0, cacheHedges: 0, cacheHedgeWins: 0,
+    cacheMisses: 0, cacheReadMs: 0, cacheReadMaxMs: 0, inflateMs: 0, cacheHedges: 0, cacheHedgeWins: 0, cacheBypassReads: 0,
     residentBytes: 0, packBytes: 0, evictableBytes: 0, evictions: 0, evictedBytes: 0, yields: 0, yieldedBytes: 0, stalls: 0,
   };
   /** Resident file bytes per DAT (views into packs / bundles / leaf payloads). */
@@ -660,6 +662,11 @@ export class DatStore {
   private readonly verifyHash: boolean;
   private readonly retries: number;
   private readonly cacheHedge: CacheHedgePolicy | null;
+  /**
+   * PERF.slow-cache-bypass — the slow-cache record this store reads and feeds (the policy's, shared
+   * by the page's stores; else its own). Null when nothing is raced (no persistent cache, a null policy).
+   */
+  readonly cacheHealth: CacheHealth | null;
   private readonly onError: (detail: string, err: unknown) => void;
   private readonly residentListeners = new Set<(key: FileKey) => void>();
   /** Files a synchronous read missed that have not landed yet (stats.unresolvedMisses). */
@@ -682,6 +689,7 @@ export class DatStore {
     this.verifyHash = opts.verifyHash ?? true;
     this.retries = opts.retries ?? 3;
     this.cacheHedge = opts.cacheHedge === undefined ? DEFAULT_CACHE_HEDGE : opts.cacheHedge;
+    this.cacheHealth = this.cache.persistent && this.cacheHedge ? (this.cacheHedge.health ?? new CacheHealth()) : null;
     this.onError = opts.onError ?? ((d, e) => console.warn(`[DatStore] ${d}`, e));
     this.residentCap = opts.residentCapBytes ?? DEFAULT_RESIDENT_CAP_BYTES;
     this.minResidentAge = opts.minResidentAgeMs ?? DEFAULT_MIN_RESIDENT_AGE_MS;
@@ -1239,8 +1247,16 @@ export class DatStore {
     if (ref) this.promote(ref.hash, priority);
   }
 
+  /** Store an object in the cache, never awaited (a slow disk never holds a load); not into a bypassed one. */
+  private storeInCache(hash: string, gz: Uint8Array): void {
+    if (this.cacheHealth?.bypassed) return;
+    void this.cache.put(hash, gz);
+  }
+
   private async fetchAndVerify(ref: ObjectRef, ticket: Ticket): Promise<Uint8Array> {
-    const read = this.disk.run(ticket, async () => {
+    const hedge = this.cache.persistent ? this.cacheHedge : null;
+    const health = hedge ? this.cacheHealth : null;
+    const startRead = (): Promise<Uint8Array | null> => this.disk.run(ticket, async () => {
       const t = this.now();
       try {
         return await this.cache.get(ref.hash);
@@ -1251,26 +1267,54 @@ export class DatStore {
       }
     });
     // A verified payload from the cache's bytes, or null (absent, unreadable, or failing its size / hash check).
-    const verified = async (cached: Uint8Array | null): Promise<Uint8Array | null> => {
+    // Counted only where the cache's copy is the one used: a late copy after the network won is not
+    // served from the cache (BUG.slow-cache-bypass-late-count: it was counted, flakily, by timing).
+    const countCached = (gz: Uint8Array): void => {
+      this.stats.cacheObjects++;
+      this.stats.cacheBytes += gz.byteLength;
+    };
+    const checked = async (cached: Uint8Array | null): Promise<{ payload: Uint8Array; gz: Uint8Array } | null> => {
       if (!cached) return null;
       const payload = await this.inflateChecked(cached, ref).catch(() => null);
-      if (!payload) return null;
-      this.stats.cacheObjects++;
-      this.stats.cacheBytes += cached.byteLength;
-      return payload;
+      return payload ? { payload, gz: cached } : null;
     };
-    const hedge = this.cache.persistent ? this.cacheHedge : null;
+    const verified = async (cached: Uint8Array | null): Promise<Uint8Array | null> => {
+      const c = await checked(cached);
+      if (!c) return null;
+      countCached(c.gz);
+      return c.payload;
+    };
+    if (health?.bypassed) {
+      // PERF.slow-cache-bypass: this page's cache has been slow; the network first, the cache only
+      // when the network fails (offline: however slow, it is the only copy).
+      health.bypassReads++;
+      this.stats.cacheBypassReads++;
+      try {
+        return (await this.fetchFromNetwork(ref, ticket, () => false, false)).payload;
+      } catch (err) {
+        const payload = await verified(await startRead().catch(() => null));
+        if (payload) return payload;
+        this.stats.cacheMisses++;
+        throw err;
+      }
+    }
+    const read = startRead();
     let readDone: { b: Uint8Array | null } | null = null;
     if (!hedge) readDone = { b: await read.catch(() => null) };
     else {
       // PERF.cache-read-slower-than-network: the clock runs from the request (a disk-slot wait counts:
       // a stalled disk holds every slot) to the bytes (the inflate is not the disk's), and the network
-      // is asked too once it passes the deadline.
+      // is asked too once it passes the deadline, or as soon as the page's cache is bypassed.
       let fired: () => void = () => undefined;
+      let timedOut = false;
       const deadline = new Promise<'hedge'>((resolve) => { fired = () => resolve('hedge'); });
-      const cancelTimer = hedge.wait(hedge.delayMs(ref.gzSize), () => fired());
+      const cancelTimer = hedge.wait(hedge.delayMs(ref.gzSize), () => { timedOut = true; fired(); });
+      const offBypass = health ? health.onBypass(() => fired()) : () => undefined;
       const first = await Promise.race([read.then((b) => ({ b }), () => ({ b: null })), deadline]);
-      if (first !== 'hedge') { cancelTimer(); readDone = first; }
+      cancelTimer();
+      offBypass();
+      if (first !== 'hedge') readDone = first;
+      else if (timedOut) health?.noteSlow();
     }
     if (readDone) {
       const payload = await verified(readDone.b);
@@ -1278,7 +1322,7 @@ export class DatStore {
       this.stats.cacheMisses++;
       return this.fetchFromNetwork(ref, ticket, null);
     }
-    const fromCache = read.then(verified, () => null);
+    const fromCache = read.then(checked, () => null);
     let settled = false;
     this.stats.cacheHedges++;
     const cancelled = (): boolean => settled;
@@ -1289,19 +1333,20 @@ export class DatStore {
       let netFailed = false;
       let netErr: unknown = null;
       let netGz: Uint8Array | null = null;
-      fromCache.then((p) => {
-        if (p) {
+      fromCache.then((c) => {
+        if (c) {
           if (settled) return;
           settled = true;
+          countCached(c.gz);
           // The download is not needed: stop it (cancelled() makes the abort a non-failure).
           ticket.abort?.abort();
-          resolve(p);
+          resolve(c.payload);
           return;
         }
         cacheMissed = true;
         this.stats.cacheMisses++;
         // The network delivered first and the cache's copy turned out unusable: store the good one.
-        if (netGz) void this.cache.put(ref.hash, netGz);
+        if (netGz) this.storeInCache(ref.hash, netGz);
         else if (netFailed && !settled) { settled = true; reject(netErr); }
       });
       net.then((r) => {
@@ -1309,7 +1354,7 @@ export class DatStore {
         settled = true;
         this.stats.cacheHedgeWins++;
         // The cache holds this object already (only slow); rewrite it only when its read came back unusable.
-        if (cacheMissed) void this.cache.put(ref.hash, r.gz);
+        if (cacheMissed) this.storeInCache(ref.hash, r.gz);
         else netGz = r.gz;
         resolve(r.payload);
       }, (err) => {
@@ -1381,7 +1426,7 @@ export class DatStore {
         this.stats.netObjects++;
         this.stats.netBytes += gz.byteLength;
         if (!store) return { payload, gz };
-        void this.cache.put(ref.hash, gz);
+        this.storeInCache(ref.hash, gz);
         return payload;
       } catch (err) {
         if (err instanceof HedgeCancelled || isCancelled()) throw new HedgeCancelled();

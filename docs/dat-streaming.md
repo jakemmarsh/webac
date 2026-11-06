@@ -1261,3 +1261,53 @@ It needs 33+ stalled reads at once, so the 33rd queues in the disk limiter. Now 
 `Map<Ticket, {wake, queue}>`; the ticket records every limiter it waits in, `promote` requeues in each, `requeue` moves
 only a ticket waiting there (never a second entry), and `run` refuses a ticket already waiting or running in that limiter.
 The whole-DAT race (`hedgedCacheRead`) shares no waiter: it has no limiter. Tests: tests/verify-streaming-hedge-shared-ticket.ts.
+
+### 6.18 A cache that keeps answering slowly is bounded, then bypassed (PERF.slow-cache-bypass, 2026-11-06)
+
+**Signal.** One player (Brazil, one address, builds 491864d24 then 5a407a377, 2026-11-06), with §6.17's read race shipped:
+
+| When (UTC) | ms | dirMs | hasMs | cacheReadMaxMs | hedges / won | other |
+|---|---|---|---|---|---|---|
+| 17:08:44 (cold) | 11947 | 22 | 5517 | 5516 | 2 / 2 | 43 cache misses, each answered in up to 5.5 s |
+| 17:10:38 | 22614 | 22100 | 130 | 22185 | 4 / 4 | pointer + packs + art + has = 4.4 s; 18 s unaccounted |
+| 17:11:07 AC1999 world set | 12528 | 12525 | 9203 | 12493 | 5 / 5 | packs 3.3 s + has 9.2 s |
+| 17:27:26 | 46622 | 46097 | 57 | 44907 | 4 / 4 | pointer + packs + art + has = 6.2 s; 40 s unaccounted |
+
+**Cause.** Every OPFS operation awaits the objects directory (`OpfsObjectCache.dir`: `getDirectory()` + the directory
+handle), which on this machine took 12-46 s to open; on the cold boot the directory opened in 22 ms but each file lookup
+took seconds. Reads were raced (§6.17), so each paid its 3 s deadline and then the network won. The two has() checks
+were not raced at all: the warm-profile check (`hasMs`, 9.2 s on the AC1999 boot) and the split-pack check
+(`wholeWorldPackCached`, untimed: the "unaccounted" 18 s and 40 s above). Retail has no counterpart (browser streaming
+layer).
+
+**Healthy distribution** (677 streamed-set boots 2026-10-23..11-06, `bash tools/aws-logs.sh bridge --since 14d --filter
+cacheReadMaxMs`, prerenders excluded): hasMs median 4 / p95 90 / p99 605 / slowest healthy 649 ms; dirMs median 10 /
+p95 83 / p99 570; cacheReadMaxMs median 77 / p95 386 / slowest healthy 1969 ms. Incidents: hasMs 3.9-12.1 s, dirMs
+12.5-46 s (129 s for the prerender of §6.17).
+
+**Fix** (`dat/CacheHedge.ts` `CacheHealth`, `boundedHas`; `DatStore.fetchAndVerify`; `StreamingDats`; `Ac1999World.restore`):
+- A has() check answers "not stored" once it passes `CACHE_HAS_BOUND_MS` (1.5 s, prerender-aware). That is the cold
+  path: the world packs load behind char select, their reads raced as usual. A late answer is dropped.
+- `CacheHealth` (one per page: `DEFAULT_CACHE_HEDGE.health`, shared by an AC1999 boot's two sets) counts slow cache
+  operations: reads that reached their deadline and has() checks that reached their bound. After
+  `CACHE_SLOW_OPS_TO_BYPASS` (2) the cache is bypassed for the rest of the page: reads go straight to the network and
+  fall back to the cache only when the network fails (offline still boots from the cache, however slow); has() answers
+  "not stored" at once; nothing is written to it. Reads waiting on their deadline when the bypass begins ask the
+  network then. Writes were already never awaited by a load.
+- AC1999's stored server patches (`Ac1999World.restore`, a whole-DAT blob store on the same OPFS): with a server seed
+  offered (the network copy), the stored state is read for at most `delayMs(0)` (3 s), and not at all once the page's
+  cache is bypassed; the seed serves and the server pushes anything newer. Without a seed, or when the seed fails to
+  load, the stored state is waited for (it is the only copy).
+- Telemetry (stream phases; the bridge keeps them): `splitMs` (the split-pack check, now timed), `hasTimeouts`,
+  `bypassReads`, `cacheBypassed` (0 / 1), beside `hedges` / `hedgeWins`.
+- Not changed: the whole-DAT cache (`loadDatWithCache`) is not on any production path (every era streams); its reads
+  keep §6.17's race.
+
+Inverse: a healthy cache never reaches a bound (the 1.5 s has() bound is 2.3× the slowest healthy one; the 3 s read
+deadline is 1.5× the slowest healthy read), so a healthy warm boot still reads everything from the cache and downloads
+nothing (tests pin it). Expected on the 17:27 boot: the manifest and boot-pack reads hedge at 3 s, the cache is bypassed,
+the split check answers at once: about 6 s instead of 46 s.
+
+Tests: tests/verify-slow-cache-bypass.ts (CacheHealth, boundedHas, bypassed reads, bypass starting waiting hedges,
+offline fallback, healthy inverse, unawaited writes, a fully stalled OPFS boot, has-only stalls, phases + bridge keys),
+tests/verify-ac1999-server-seed.ts (the bounded stored-patch read both ways).

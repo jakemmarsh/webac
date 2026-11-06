@@ -71,6 +71,9 @@ import {
 import {
   detailTexturing, markDetail, patchDetailFragment, patchDetailVertex, RETAIL_OUTGOING_LINE,
   DETAIL_MAP_UNIFORM, DETAIL_TILING_UNIFORM, DETAIL_ON_UNIFORM, DETAIL_CACHE_KEY, type DetailKind,
+  patchLandscapeDetailFragment, patchLandscapeDetailVertex, LAND_DETAIL_CACHE_KEY,
+  LAND_DETAIL_MAP_UNIFORM, LAND_DETAIL_ON_UNIFORM, LAND_DETAIL_SCALE_UNIFORM, LAND_DETAIL_ORIGIN_UNIFORM,
+  LAND_DETAIL_FADE_UNIFORM,
 } from './DetailTexturing.js';
 
 /** `LScape::min_ambient` — the floor on the DAT ambient level. */
@@ -715,6 +718,10 @@ export function applyRetailLighting<T extends THREE.Material>(material: T, kind:
   // (CellManager::ChangePosition sets it for outdoor and seen_outside cells alike).
   const scale = kind === 'landscape' ? landscapeAmbientScale : objectAmbientScale;
   const detailUniforms = detail ? detailTexturing.uniformsFor(detail) : null;
+  // webac#23 — every landscape program carries the landscape pass in an era whose client had it
+  // (EraWorldRules.landscapeDetailTextures, set before the terrain is built); elsewhere none.
+  const landDetail = kind === 'landscape' && !detail && detailTexturing.landscapeAvailable
+    ? detailTexturing.landscapeUniformsFor() : null;
   const skyDiffuse = kind === 'sky' ? skyDiffuseUniform(material) : null;
   const partSphere = kind === 'cellobject' ? installPartSphere(material) : null;
   material.onBeforeCompile = (shader) => {
@@ -731,9 +738,19 @@ export function applyRetailLighting<T extends THREE.Material>(material: T, kind:
       shader.vertexShader = patchDetailVertex(shader.vertexShader);
       shader.fragmentShader = patchDetailFragment(shader.fragmentShader);
     }
+    if (landDetail) {
+      shader.uniforms[LAND_DETAIL_MAP_UNIFORM] = landDetail.map;
+      shader.uniforms[LAND_DETAIL_ON_UNIFORM] = landDetail.on;
+      shader.uniforms[LAND_DETAIL_SCALE_UNIFORM] = landDetail.scale;
+      shader.uniforms[LAND_DETAIL_ORIGIN_UNIFORM] = landDetail.origin;
+      shader.uniforms[LAND_DETAIL_FADE_UNIFORM] = landDetail.fade;
+      shader.vertexShader = patchLandscapeDetailVertex(shader.vertexShader);
+      shader.fragmentShader = patchLandscapeDetailFragment(shader.fragmentShader);
+    }
   };
   const cacheKey = `${retailLightingCacheKey(kind)}|${SAMPLER_BIAS_CACHE_KEY}`
-    + (detail ? `|${DETAIL_CACHE_KEY}:${detail}` : '');
+    + (detail ? `|${DETAIL_CACHE_KEY}:${detail}` : '')
+    + (landDetail ? `|${LAND_DETAIL_CACHE_KEY}` : '');
   material.customProgramCacheKey = () => cacheKey;
   material.needsUpdate = true;
   patched.set(material, kind);

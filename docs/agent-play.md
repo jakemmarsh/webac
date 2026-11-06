@@ -962,6 +962,8 @@ heal and hand control back on danger. The brief only listed a routine beside tho
     keys so the body stands (the walk then plans round, or says the way on passes the portal). Each look it also reports
     the body's place when the server's straight line from the last report would cut a portal's disk. Only keys the agent
     itself holds are touched: a player's own movement never is. Its trace line: `portal sentinel: …; let go of KeyW`.
+    `ac_move`'s answer names its stop too ("…; the portal sentinel let go of KeyW 2.2 m from Drudge Hideout #7a9b3000 …";
+    BUG.drudge-hideout-portal-stop, 2026-11-06: a bare "forward for 3s" beside a portal was taken for a collision wall).
   - *stay_with after a portal.* A fellow not placed yet within 30 s of your own arrival is waited for up to 20 s ("isn't
     placed here yet … waiting"), not "out of sight" at once; the fellows line says "not placed here yet (you came
     through a portal N s ago; …)". Bulwark's walk set off while Arcanist was still in portal space.

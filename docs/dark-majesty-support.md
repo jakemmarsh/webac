@@ -127,6 +127,15 @@ Open:
 - **Live Dekarutide / Doctide.** Seedsow is played (above). Snowreap's create failure was found by Jake playing it (2026-10-11) and fixed with the `classic-dereth-1-0` era; on 2026-10-12 both Seedsow and Snowreap accepted a live 1.0 create from `tools/probe-gdl-chargen.ts` (throwaway accounts, which Jake OK'd for third-party servers on 2026-10-11). Still unverified live: Doctide (41 skills, Infiltration 1.9), Unfamiliar Shores (offline; which CustomDM release), Dekarutide (offline). Mark a server `ok` instead of `beta` in `serverCompat.ts` only after someone plays it end to end.
 - The weenie JSON side-files (combat style, attack type and weapon speed per weenie class id, plus wielded-item meshes) come from the end-of-retail world DB. Original-content class ids are the same on classic servers, a miss falls back to defaults (animation only, never stats), and per-server exports would need each operator's world DB.
 
+## Landscape Detail Textures (webac#23, 2026-11-06)
+
+A named departure (CLAUDE.md): the classic eras run the end-of-retail exe, which forces the landscape detail pass off and lists no row for it, but Jake asked for the pre-ToD option on these worlds because the reporter plays older servers. `EraWorldRules.CLASSIC_WORLD_RULES` is end of retail's world plus `landscapeDetailTextures` { 10, 50 }. That fade is the exe's own dormant landscape draw (ACRender::landPolyDraw @ 006b6320, MY_MIN/MAX_Z_TO_DETAIL .rdata 0x8067b0 / 0x8067b4); no pre-ToD 2002-2004 client is in reference/ to read a period value from. AC1999's client fades 10 → 20 m (docs/ac1999-support.md).
+
+- The texture and tiling are the world's own: terrain_desc[0] in RegionDesc 0x13000000 (0x5001786 ×4 in the CustomDM, Infiltration and Classic Dereth sets), drawn SRCALPHA / INVSRCALPHA over the lit ground with the vertex fade (`DetailTexturing`, "The landscape pass").
+- The row appears only when that texture is see-through: mean alpha ≤ 127 (`landscapeDetailSeeThrough`, judged once when the region loads, before the terrain materials are built). CustomDM and Infiltration (alpha 48-60) get it. Classic Dereth 1.0 and 1.1 replace 0x5001786 with an opaque 512² image (alpha 255 everywhere), which would paint over the ground, so Classic Dereth worlds (Seedsow, Snowreap, GDL-Classic) get no row and no shader change.
+- Off by default, as in the pre-ToD clients. End of retail is unchanged.
+- Tests: `tests/verify-landscape-detail-textures.ts`.
+
 ## Custom-DAT worlds: Dark Destiny (2026-11-03)
 
 Dark Destiny (ClassicACE, Infiltration ruleset; bridge id 0c4eec44…) ships its own data files (Mega download linked from its Discord, "DarkDestiny_dats_Release_1.0") and boots any client with older iterations: ClassicACE `DDD_InterrogationResponse` with patching off sends `dat_older_warning_msg`. The launcher refuses ENTER there (`CUSTOM_DATS`, serverCompat.ts).

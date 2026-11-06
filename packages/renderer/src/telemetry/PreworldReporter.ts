@@ -217,7 +217,7 @@ export interface BootStreamReport {
 export const BOOT_STREAM_PHASE_KEYS = [
   'pointerMs', 'pointerTries', 'pointerBytes', 'dirMs', 'manifestMs', 'packsMs', 'splashMs', 'layoutMs', 'artMs', 'artFiles',
   'hasMs', 'cacheReadMs', 'cacheReadMaxMs', 'cacheMisses', 'inflateMs', 'retries', 'failures', 'rcvBytes', 'lagMs', 'lagMaxMs', 'hiddenMs',
-  'hedges', 'hedgeWins', 'prerenderMs',
+  'hedges', 'hedgeWins', 'prerenderMs', 'splitMs', 'hasTimeouts', 'bypassReads', 'cacheBypassed',
 ] as const;
 export type BootStreamPhases = Partial<Record<typeof BOOT_STREAM_PHASE_KEYS[number], number>>;
 

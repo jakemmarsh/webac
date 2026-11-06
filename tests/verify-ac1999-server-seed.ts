@@ -31,7 +31,7 @@ import {
   type DatManifest, type PatchRecord, type ServerPatchSeed,
 } from '../packages/dat-parser/src/era1999/ServerPatchSeed.js';
 import { parseSetPointer, type DatSetPointer } from '../packages/dat-parser/src/streaming/DatSetFormat.js';
-import { DatStore } from '../packages/renderer/src/dat/streaming/DatStore.js';
+import { CacheHealth, type CacheHedgePolicy, DatStore } from '../packages/renderer/src/dat/streaming/DatStore.js';
 import { OpfsDatBlobStore, type DatBlobStore, type DatCacheMeta } from '../packages/renderer/src/dat/DatCache.js';
 import {
   Ac1999World, ac1999SeedFromPayload, ac1999SeedSource, type Ac1999PatchEvent, type Ac1999Seed,
@@ -528,6 +528,91 @@ describe('Ac1999World.restore with a seed', () => {
     const w = world(set);
     expect(await w.restore(store, SERVER_KEY, ac1999SeedSource(set, 'ac1999'))).toBe(4);
     expect(w.iterations).toEqual({ portal: 10006, cell: 10006 });
+  });
+
+  // PERF.slow-cache-bypass (2026-11-06: an OPFS that took 12-46 s to open, on an AC1999 boot among others).
+  /** `inner` with every getData held until release() while `held` is set. */
+  function heldStore(inner: DatBlobStore) {
+    const waiting: Array<() => void> = [];
+    const h = {
+      held: true,
+      reads: 0,
+      release() { h.held = false; for (const r of waiting.splice(0)) r(); },
+      store: {
+        get available() { return inner.available; },
+        getMeta: (k: string) => inner.getMeta(k),
+        getData: async (k: string) => { h.reads++; if (h.held) await new Promise<void>((r) => waiting.push(r)); return inner.getData(k); },
+        put: (k: string, d: ArrayBuffer, m: DatCacheMeta) => inner.put(k, d, m),
+        remove: (k: string) => inner.remove(k),
+        clear: () => inner.clear(),
+      } satisfies DatBlobStore,
+    };
+    return h;
+  }
+  const fastPolicy = (health = new CacheHealth()): CacheHedgePolicy => ({
+    delayMs: () => 20, wait: (t, fire) => { const id = setTimeout(fire, t); return () => clearTimeout(id); }, health,
+  });
+
+  it('PERF.slow-cache-bypass: a stored state the browser storage will not hand over in time gives way to the seed; its late answer is dropped', async () => {
+    const { store } = withOpfs();
+    // Stored: 10007 over the 10006 seed (the server moved on).
+    const payload = encodeServerPatchSeed(sampleSeed());
+    const set = worldSet(payload).store;
+    const first = world(set);
+    await first.restore(store, SERVER_KEY, ac1999SeedSource(set, 'ac1999'));
+    await first.persist(store, SERVER_KEY, await first.applyEvent(pushEvent({ base: { portal: 10006, cell: 10006 }, iterations: { portal: 10007, cell: 10006 }, records: [rec('portal', 0x02000984, 8)] })));
+    const slow = heldStore(store);
+    const health = new CacheHealth();
+    const w = world(worldSet(payload).store);
+    const done = quiet();
+    expect(await w.restore(slow.store, SERVER_KEY, ac1999SeedSource(worldSet(payload).store, 'ac1999'), fastPolicy(health))).toBe(4);
+    done();
+    expect(w.iterations).toEqual({ portal: 10006, cell: 10006 }); // the seed's: the server pushes 10007 again
+    expect(served(w, 'portal', 0x02000984)).toBeNull();
+    expect(health.slowOps).toBe(1);
+    slow.release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(w.iterations).toEqual({ portal: 10006, cell: 10006 });
+    expect(served(w, 'portal', 0x02000984)).toBeNull();
+    // A page whose cache is already bypassed does not read the stored state at all.
+    const bypassed = new CacheHealth();
+    bypassed.noteSlow(); bypassed.noteSlow();
+    const slow2 = heldStore(store);
+    const w2 = world(worldSet(payload).store);
+    const done2 = quiet();
+    expect(await w2.restore(slow2.store, SERVER_KEY, ac1999SeedSource(worldSet(payload).store, 'ac1999'), fastPolicy(bypassed))).toBe(4);
+    done2();
+    expect(slow2.reads).toBe(0);
+  });
+
+  it('PERF.slow-cache-bypass inverse: without a seed, or when the seed fails to load, the slow stored state is waited for', async () => {
+    const { store } = withOpfs();
+    await storeUnseeded(store, { portal: 10006, cell: 10006 }, sampleSeed().records);
+    // No seed offered: the stored state is the only copy.
+    const slow = heldStore(store);
+    const w = world(worldSet(null).store);
+    const got = w.restore(slow.store, SERVER_KEY, undefined, fastPolicy());
+    await new Promise((r) => setTimeout(r, 60));
+    slow.release();
+    expect(await got).toBe(4);
+    expect(w.iterations).toEqual({ portal: 10006, cell: 10006 });
+    // A seed that fails to load (offline): the stored state after all, however slow.
+    const slow2 = heldStore(store);
+    const w2 = world(worldSet(null).store);
+    const failing = Object.assign(async (): Promise<Ac1999Seed | null> => { throw new Error('offline'); }, {});
+    const done = quiet();
+    const got2 = w2.restore(slow2.store, SERVER_KEY, failing, fastPolicy());
+    await new Promise((r) => setTimeout(r, 60));
+    slow2.release();
+    expect(await got2).toBe(4);
+    done();
+    expect(w2.iterations).toEqual({ portal: 10006, cell: 10006 });
+    // A healthy store inside the deadline: the stored state, nothing timed out.
+    const health = new CacheHealth();
+    const w3 = world(worldSet(null).store);
+    const payload = encodeServerPatchSeed(sampleSeed());
+    expect(await w3.restore(store, SERVER_KEY, ac1999SeedSource(worldSet(payload).store, 'ac1999'), { ...fastPolicy(health), delayMs: () => 5000 })).toBe(4);
+    expect(health.slowOps).toBe(0);
   });
 });
 

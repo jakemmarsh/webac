@@ -36,11 +36,16 @@ const noStrings = (): null => null;
 
 describe('the client profile: 1999 values from the 1999 client.exe, end of retail unchanged', () => {
   it('end of retail and every classic era share one profile (they run the end-of-retail acclient.exe)', () => {
-    for (const id of CLASSIC_IDS.filter((i) => i !== 'classicace-customdm')) expect(eraClientRules(eraProfile(id)), id).toBe(EOR);
+    // webac#23: the classic eras' one difference is the pre-ToD Landscape Detail Textures (Jake, 2026-11-06).
+    const classicWorld = { ...EOR.world, landscapeDetailTextures: { fadeMinZ: 10, fadeMaxZ: 50 } };
+    const classic = eraClientRules(eraProfile('classic-dereth'));
+    for (const id of CLASSIC_IDS.filter((i) => i !== 'classicace-customdm')) expect(eraClientRules(eraProfile(id)), id).toBe(classic);
+    expect({ ...classic, world: null }).toEqual({ ...EOR, world: null });
+    expect(classic.world).toEqual(classicWorld);
     expect(eraClientRules(null)).toBe(EOR);
     // acclient_CustomDM.exe differs only in one map note's name (BUG.ac1999-map-eor-art; verify-ac1999-map-panel.ts).
     const cdm = eraClientRules(eraProfile('classicace-customdm'));
-    expect({ ...cdm, mapPanel: null }).toEqual({ ...EOR, mapPanel: null });
+    expect({ ...cdm, mapPanel: null }).toEqual({ ...EOR, mapPanel: null, world: classicWorld });
     expect(cdm.mapPanel.notes.map((n) => n.name).filter((n, i) => n !== EOR.mapPanel.notes[i].name)).toEqual(['Other']);
   });
 

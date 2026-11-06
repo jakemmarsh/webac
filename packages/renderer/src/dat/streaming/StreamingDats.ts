@@ -26,7 +26,7 @@ import { parseMasterProperty, setMasterPropertyTypes } from '@ac/dat-parser/file
 import type { RegionDesc } from '@ac/dat-parser/file-types/RegionDesc.js';
 import type { PackRole } from '@ac/dat-parser/streaming/DatSetFormat.js';
 import { DatClosure, layoutArtIds } from './DatClosure.js';
-import { type CacheHedgePolicy, DatStore, type DatStoreOptions, FetchPriority, type FileKey, type MissScope, fileKey, splitFileKey } from './DatStore.js';
+import { type CacheHedgePolicy, DEFAULT_CACHE_HEDGE, DatStore, boundedHas, type DatStoreOptions, FetchPriority, type FileKey, type MissScope, fileKey, splitFileKey } from './DatStore.js';
 import { type ObjectCache, NullObjectCache, OpfsObjectCache, SlowReadObjectCache } from './ObjectCache.js';
 import { streamHandlerCost } from '../../telemetry/MainThreadCost.js';
 import { type BootWatchEnv, startBootWatch } from './BootWatch.js';
@@ -146,6 +146,7 @@ export interface StreamingBootReport {
  *   splashMs    of which, the onBootPacks hook (the DAT splash, built synchronously)
  *   layoutMs    MasterProperty + the pre-world layouts' art list (synchronous)
  *   artMs       the pre-world art's closure resident (artFiles roots)
+ *   splitMs     (before layoutMs) whether the cache holds the pre-split whole world pack
  *   hasMs       the warm-profile check (are the world packs in the cache)
  *   worldCacheMs (on the report itself) the warm world + UI art wait
  *
@@ -183,6 +184,15 @@ export interface StreamBootPhases {
   hedgeWins: number;
   /** How long the page was prerendering (Chrome defers OPFS until it is shown; BootWatch). */
   prerenderMs: number;
+  /**
+   * PERF.slow-cache-bypass: the split-pack check's time (it was untimed: 40 s of a 46.6 s boot,
+   * 2026-11-06), this set's has() checks that passed their bound (answered "not stored"), reads sent
+   * straight to the network because the page's cache was bypassed, and whether it was (0 / 1).
+   */
+  splitMs: number;
+  hasTimeouts: number;
+  bypassReads: number;
+  cacheBypassed: number;
 }
 
 export interface OpenStreamingOptions {
@@ -249,11 +259,11 @@ export function backgroundPacks(scope: StreamScope, split = false): PackRole[] {
  * The whole `world` pack is in the object cache and the split parts a scope would load are not
  * (STREAM.login-pack-split): a profile warmed before the split keeps using what it has.
  */
-async function wholeWorldPackCached(store: DatStore, cache: ObjectCache, scope: StreamScope): Promise<boolean> {
-  if (!cache.has) return false;
+async function wholeWorldPackCached(store: DatStore, scope: StreamScope, cacheHas: ((hash: string) => Promise<boolean>) | null): Promise<boolean> {
+  if (!cacheHas) return false;
   const has = (role: PackRole): Promise<boolean> => {
     const ref = store.pointer.packs[role];
-    return ref ? cache.has!(ref.hash).catch(() => false) : Promise.resolve(false);
+    return ref ? cacheHas(ref.hash) : Promise.resolve(false);
   };
   if (!(await has('world'))) return false;
   const parts: PackRole[] = scope === 'interface' ? ['worldCore', 'worldChargen'] : ['worldCore', 'worldChargen', 'worldLand'];
@@ -303,10 +313,19 @@ async function openStreamingDatsWatched(opts: OpenStreamingOptions, watch: Retur
     },
   });
   if (!bootPacksSignalled) { bootPacksSignalled = true; bootPacksHook(store); } // a set without one of them
+  // PERF.slow-cache-bypass: a has() check that passes its bound answers "not stored" (a stalled OPFS
+  // took 5-46 s to answer one, 2026-11-06), and a bypassed cache answers at once.
+  const hedgePolicy = opts.cacheHedge === undefined ? DEFAULT_CACHE_HEDGE : opts.cacheHedge;
+  let hasTimeouts = 0;
+  const cacheHas = cache.has
+    ? (hash: string): Promise<boolean> => boundedHas((h) => cache.has!(h), hash, hedgePolicy, store.cacheHealth, () => { hasTimeouts++; })
+    : null;
   // STREAM.login-pack-split: a pointer that names the world pack's parts loads them instead of the whole,
   // unless this profile already holds the whole pack (a returning player from before the split) and not
   // the parts: then the cached whole pack serves, and nothing is downloaded again.
-  const split = hasWorldSplit(store.pointer.packs, scope) && !(await wholeWorldPackCached(store, cache, scope));
+  const tSplit = performance.now();
+  const split = hasWorldSplit(store.pointer.packs, scope) && !(await wholeWorldPackCached(store, scope, cacheHas));
+  const splitMs = performance.now() - tSplit;
   // Background: awaited before entering the world (a pack the set lacks is skipped).
   const WORLD = backgroundPacks(scope, split);
   const tLayout = performance.now();
@@ -399,8 +418,8 @@ async function openStreamingDatsWatched(opts: OpenStreamingOptions, watch: Retur
   // login gate 0.57 s → 2.5 s). Cold profiles keep the light char select.
   const tHas = performance.now();
   const worldRefs = WORLD.map((role) => store.manifest.packs.get(role) ?? store.pointer.packs[role]).filter((r): r is NonNullable<typeof r> => !!r);
-  const worldCached = worldRefs.length > 0 && cache.has !== undefined
-    && (await Promise.all(worldRefs.map((r) => cache.has!(r.hash).catch(() => false)))).every(Boolean);
+  const worldCached = worldRefs.length > 0 && cacheHas !== null
+    && (await Promise.all(worldRefs.map((r) => cacheHas(r.hash)))).every(Boolean);
   const hasMs = performance.now() - tHas;
   let worldCacheMs = 0;
   if (worldCached) {
@@ -424,6 +443,7 @@ async function openStreamingDatsWatched(opts: OpenStreamingOptions, watch: Retur
     retries: st.retries, failures: st.failures, rcvBytes: st.netReceivedBytes,
     lagMs: page.lagMs, lagMaxMs: page.lagMaxMs, hiddenMs: page.hiddenMs,
     hedges: st.cacheHedges, hedgeWins: st.cacheHedgeWins, prerenderMs: page.prerenderMs,
+    splitMs: r(splitMs), hasTimeouts, bypassReads: st.cacheBypassReads, cacheBypassed: store.cacheHealth?.bypassed ? 1 : 0,
   };
   const bootReport: StreamingBootReport = { netBytes: st.netBytes, netObjects: st.netObjects, cacheBytes: st.cacheBytes, cacheObjects: st.cacheObjects, preWorldArtFiles: preWorld.length, ms: Math.round(performance.now() - t0), worldCached, worldCacheMs, phases };
   return {

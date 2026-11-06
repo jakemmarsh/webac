@@ -57,6 +57,10 @@ export interface UIHost {
   setDegradePrefs?(prefs: Record<string, unknown>): boolean;
   /** Render.BuildingDetailTextures (CORE.17.h.g.c.b). */
   setDetailTexturing?(on: boolean): boolean;
+  /** The 1999 Performance panel's "Detail Texture: Landscape" (webac#23; EraWorldRules.landscapeDetailTextures). */
+  setLandscapeDetailTexturing?(on: boolean): boolean;
+  /** Whether the loaded region's landscape detail texture can be offered (DetailTexturing.landscapeAvailable; webac#23). */
+  landscapeDetailAvailable?(): boolean;
   /** Render.TextureFiltering / *TextureDetail (CORE.17.h.g.c). */
   setTexturePrefs?(prefs: Record<string, unknown>): boolean;
   /** Render.LandscapeDrawDistance in landblocks (CORE.17.h.g.a). */

@@ -9,7 +9,8 @@
  *    the one Config toggle `Render.BuildingDetailTextures` drives BOTH the
  *    building and the environment surface; landscape/object detailing is
  *    compiled out (`Render::UpdateFromPreferences` :325054 forces landscape
- *    false, object is passed 0).
+ *    false, object is passed 0). The 1999 client still draws the landscape
+ *    pass behind its own checkbox: see "The landscape pass" below (webac#23).
  *  - `LScape::SetDetailTexturing` reads `TexMerge::GetDetailTiling(i)` /
  *    `GetDetailTex(i)` (@ 00503a10 / 005039e0) = `terrain_desc[i].terrain_tex
  *    ->detail_tex_tiling / detail_tex_gid` by LIST INDEX i — 0 landscape,
@@ -210,6 +211,155 @@ export function patchDetailVertex(vertexShader: string): string {
     .replace(UV_VERTEX_INCLUDE, `${UV_VERTEX_INCLUDE}\n\t${DETAIL_UV_VARYING} = uv;`);
 }
 
+// ── The landscape pass (webac#23: the 1999 Performance panel's "Detail Texture: Landscape") ──
+//
+// 1999 client.exe (reference/ac1999/Client/decomp + disassembly):
+//  - PerformancePanel @ 0x594e00 builds "Detail Texture" with a "Landscape" and an "Environment"
+//    checkbox; ApplySettings @ 0x598430 passes (landscape, env, env, 0) to LScape_SetDetailTexturing
+//    @ 0x44340f, which wraps GenerateDetailSurface(0) = terrain_desc[0]'s detail texture and sets
+//    the landscape detail surface (0x65421c) and its tiling (0x61c504, the DetailTexTiling) — the
+//    same LIST index 0 the EoL decomp reads (TexMerge::GetDetailTex @ 005039e0).
+//  - The render-options defaults @ 0x42c236 zero all four flags: off until the player ticks it.
+//  - The D3D device's block draw (0x57e9de) makes it the current detail surface, src blend 5
+//    (SRCALPHA) / dst blend 6 (INVSRCALPHA), only for a block at full resolution (side == the
+//    LandDefs side, 0x6573a0). Its triangle draw (0x583a58) then draws the land triangle a second
+//    time when any vertex lies nearer than screen z 0.04: each vertex keeps its lit RGB, its alpha
+//    is 255 below screen z 0.02, (1 − (z − 0.02) / 0.02) · 255 up to 0.04, 0 beyond, and its UVs
+//    are the base cell UVs (CLandBlockStruct land_uvs, 0..1 across a cell) × the tiling. Screen z
+//    is the camera z (which the 1999 view transform keeps divided by the focal length F) × F / 500
+//    (0x61dbc8 = 0x61c4cc / 0x61c4d4 @ 0x57f87a), i.e. view depth / 500 m: 10 m to 20 m.
+//  - Render_SetupD3DDevice @ 0x43d2a0 sets stage 0 COLOROP / ALPHAOP MODULATE(TEXTURE, DIFFUSE),
+//    so per pixel, with dst = texel · L already drawn and a = detail.a · fade:
+//        out = clamp(detail.rgb · L) · a + texel · L · (1 − a)
+//  - The end-of-retail client keeps the same immediate-mode draw (ACRender::landPolyDraw
+//    @ 006b6320, MY_MIN/MAX_Z_TO_DETAIL 10 / 50 m) but never reaches it: Render::
+//    UpdateFromPreferences @ 0054d850 forces landscape detail off. EraWorldRules.
+//    landscapeDetailTextures carries the era's fade; null leaves the terrain programs unpatched.
+//
+// Ours folds the second draw into every landscape program (the base cells and the blend / road
+// overlays: the blend is affine in the colour, so detailing each layer before the overlay's alpha
+// blend equals detailing the finished cell). One extra texture sample per terrain fragment, only in
+// an era with the option; `acLandDetailOn` switches it without a recompile.
+
+export const LAND_DETAIL_MAP_UNIFORM = 'acLandDetailMap';
+export const LAND_DETAIL_ON_UNIFORM = 'acLandDetailOn';
+/** (tiling / 24 m): cell UVs per metre × DetailTexTiling. */
+export const LAND_DETAIL_SCALE_UNIFORM = 'acLandDetailScale';
+/** A whole-landblock world offset (x, north) subtracted before scaling, keeping the UVs small. */
+export const LAND_DETAIL_ORIGIN_UNIFORM = 'acLandDetailOrigin';
+/** (fadeMinZ, fadeMaxZ) in metres of view depth. */
+export const LAND_DETAIL_FADE_UNIFORM = 'acLandDetailFade';
+export const LAND_DETAIL_UV_VARYING = 'vAcLandDetailUv';
+export const LAND_DETAIL_ALPHA_VARYING = 'vAcLandDetailFade';
+export const LAND_DETAIL_CACHE_KEY = 'acLandDetail';
+
+/** A landblock is 8 cells of 24 m; the origin snaps to it so integer tilings stay seamless. */
+const LAND_CELL_SIZE = 24;
+const LANDBLOCK_SIZE = 192;
+
+/** The per-vertex fade (0..1): the 1999 vertex alpha before its byte truncation. */
+export function landscapeDetailFade(viewDepth: number, fade: { fadeMinZ: number; fadeMaxZ: number }): number {
+  if (viewDepth < fade.fadeMinZ) return 1;
+  if (viewDepth > fade.fadeMaxZ) return 0;
+  return 1 - (viewDepth - fade.fadeMinZ) / (fade.fadeMaxZ - fade.fadeMinZ);
+}
+
+/**
+ * One pixel of the landscape pass: `texelSrgb` and `detail` raw bytes / 255, `light` the clamped
+ * lit vertex diffuse, `fade` the interpolated vertex alpha. SRCALPHA / INVSRCALPHA of
+ * src = clamp(detail.rgb · L), src.a = detail.a · fade over dst = texel · L.
+ */
+export function retailLandscapeDetail(texelSrgb: Rgb, light: Rgb, detail: Rgba, fade: number): Rgb {
+  const a = detail[3] * fade;
+  const out: Rgb = [0, 0, 0];
+  for (let c = 0; c < 3; c++) {
+    const dst = texelSrgb[c] * light[c];
+    out[c] = clamp01(clamp01(detail[c] * light[c]) * a + dst * (1 - a));
+  }
+  return out;
+}
+
+/**
+ * Whether a landscape detail texture is see-through enough to offer (webac#23): its mean alpha, the
+ * pass's blend weight, is at most half (127 / 255). The retail detail textures weigh about 0.2
+ * (1999 0x5001786: 51 everywhere; end of retail / Dark Majesty: 48-60). Classic Dereth 1.0 / 1.1
+ * replace 0x5001786 with an opaque 512² image (alpha 255 everywhere), which would paint over the
+ * ground near the camera, so those regions offer no option.
+ */
+export const LANDSCAPE_DETAIL_MAX_MEAN_ALPHA = 127;
+
+export function landscapeDetailSeeThrough(rgba: { data: Uint8Array } | null): boolean {
+  if (!rgba || rgba.data.length < 4) return false;
+  let sum = 0;
+  const n = rgba.data.length >> 2;
+  for (let i = 3; i < rgba.data.length; i += 4) sum += rgba.data[i];
+  return sum / n <= LANDSCAPE_DETAIL_MAX_MEAN_ALPHA;
+}
+
+/** The cell UV the 1999 land vertex carries (u east, v south, one per 24 m cell) × the tiling. */
+export function landscapeDetailUv(worldX: number, worldNorth: number, tiling: number): [number, number] {
+  return [worldX / LAND_CELL_SIZE * tiling, -worldNorth / LAND_CELL_SIZE * tiling];
+}
+
+const LAND_VERTEX_PRELUDE = `uniform float ${LAND_DETAIL_SCALE_UNIFORM};
+uniform vec2 ${LAND_DETAIL_ORIGIN_UNIFORM};
+uniform vec2 ${LAND_DETAIL_FADE_UNIFORM};
+varying vec2 ${LAND_DETAIL_UV_VARYING};
+varying float ${LAND_DETAIL_ALPHA_VARYING};
+`;
+
+/** After project_vertex: world x / north → cell UVs × tiling; view depth → the vertex fade. */
+const LAND_VERTEX_BODY = `
+	{
+		vec4 acLdWorld = modelMatrix * vec4( transformed, 1.0 );
+		${LAND_DETAIL_UV_VARYING} = vec2( acLdWorld.x - ${LAND_DETAIL_ORIGIN_UNIFORM}.x, ${LAND_DETAIL_ORIGIN_UNIFORM}.y - acLdWorld.z ) * ${LAND_DETAIL_SCALE_UNIFORM};
+		${LAND_DETAIL_ALPHA_VARYING} = 1.0 - clamp( ( -mvPosition.z - ${LAND_DETAIL_FADE_UNIFORM}.x ) / ( ${LAND_DETAIL_FADE_UNIFORM}.y - ${LAND_DETAIL_FADE_UNIFORM}.x ), 0.0, 1.0 );
+	}`;
+
+const LAND_FRAGMENT_PRELUDE = `uniform sampler2D ${LAND_DETAIL_MAP_UNIFORM};
+uniform float ${LAND_DETAIL_ON_UNIFORM};
+varying vec2 ${LAND_DETAIL_UV_VARYING};
+varying float ${LAND_DETAIL_ALPHA_VARYING};
+`;
+
+/** The landscape second draw, folded into the retail-lit fragment: see the section header. */
+export const LAND_DETAIL_OUTGOING_LINES = [
+  `\tvec4 acLandDetail = texture2D( ${LAND_DETAIL_MAP_UNIFORM}, ${LAND_DETAIL_UV_VARYING}, ${MIP_BIAS_UNIFORM} );`,
+  `\tfloat acLandDetailA = acLandDetail.a * ${LAND_DETAIL_ALPHA_VARYING} * ${LAND_DETAIL_ON_UNIFORM};`,
+  '\tvec3 outgoingLight = acSRGBToLinear( mix( acTexel * acLight, clamp( acLandDetail.rgb * acLight, 0.0, 1.0 ), acLandDetailA ) );',
+].join('\n');
+
+/** Rewrite a RetailLighting-patched landscape fragment shader to carry the landscape pass. */
+export function patchLandscapeDetailFragment(fragmentShader: string): string {
+  if (fragmentShader.includes(`uniform sampler2D ${LAND_DETAIL_MAP_UNIFORM};`)) return fragmentShader;
+  if (!fragmentShader.includes(RETAIL_OUTGOING_LINE)) {
+    throw new Error('DetailTexturing: landscape fragment shader lacks the RetailLighting outgoing line (patch order)');
+  }
+  if (!fragmentShader.includes(`uniform float ${MIP_BIAS_UNIFORM};`)) {
+    throw new Error('DetailTexturing: landscape fragment shader lacks the sampler-bias uniform (patch order)');
+  }
+  return LAND_FRAGMENT_PRELUDE + fragmentShader.replace(RETAIL_OUTGOING_LINE, LAND_DETAIL_OUTGOING_LINES);
+}
+
+const PROJECT_VERTEX_INCLUDE = '#include <project_vertex>';
+
+/** Compute the detail UVs + the vertex fade after project_vertex (mvPosition, transformed). */
+export function patchLandscapeDetailVertex(vertexShader: string): string {
+  if (vertexShader.includes(`varying vec2 ${LAND_DETAIL_UV_VARYING};`)) return vertexShader;
+  if (!vertexShader.includes(PROJECT_VERTEX_INCLUDE)) {
+    throw new Error('DetailTexturing: landscape vertex shader lost its project_vertex anchor');
+  }
+  return LAND_VERTEX_PRELUDE + vertexShader.replace(PROJECT_VERTEX_INCLUDE, `${PROJECT_VERTEX_INCLUDE}${LAND_VERTEX_BODY}`);
+}
+
+export interface LandscapeDetailUniforms {
+  map: { value: THREE.Texture | null };
+  on: { value: number };
+  scale: { value: number };
+  origin: { value: THREE.Vector2 };
+  fade: { value: THREE.Vector2 };
+}
+
 // ── Shared uniforms + registry ────────────────────────────────────────────
 
 export interface DetailUniforms {
@@ -251,6 +401,18 @@ export class DetailTexturing {
     environment: { map: { value: null }, tiling: { value: 0 }, on: { value: 0 } },
   };
   private surfaces: RegionDetailSurfaces | null = null;
+  /** webac#23 — the era's landscape pass (null: the era's client has none; terrain programs stay unpatched). */
+  private landscapeRule: { fadeMinZ: number; fadeMaxZ: number } | null = null;
+  /** The landscape checkbox (1999 default off, the render-options defaults @ 0x42c236). */
+  private landscapeEnabled = false;
+  /** The region's landscape detail texture would cover the ground (landscapeDetailSeeThrough false). */
+  private landscapeOpaque = false;
+  /** landscapeDetailSeeThrough per landscape detail GID (decoded once). */
+  private readonly seeThroughByGid = new Map<number, boolean>();
+  private readonly landscapeUniforms: LandscapeDetailUniforms = {
+    map: { value: null }, on: { value: 0 }, scale: { value: 0 },
+    origin: { value: new THREE.Vector2(0, 0) }, fade: { value: new THREE.Vector2(0, 0) },
+  };
   /** One DataTexture per detail GID (building + environment share 0x5001787). */
   private textures = new Map<number, THREE.DataTexture>();
   /** Material → its detail variant, per kind (building shells share
@@ -277,6 +439,58 @@ export class DetailTexturing {
     return s ? this.textures.get(s.texGID) ?? null : null;
   }
 
+  /**
+   * webac#23 — the era's landscape pass rule (EraWorldRules.landscapeDetailTextures). Set once per
+   * page load before the first terrain material is made: a landscape material made while it is
+   * null carries no detail program at all.
+   */
+  setLandscapeRule(rule: { fadeMinZ: number; fadeMaxZ: number } | null): void {
+    this.landscapeRule = rule;
+    this.landscapeUniforms.fade.value.set(rule?.fadeMinZ ?? 0, rule?.fadeMaxZ ?? 0);
+    this.refresh();
+  }
+
+  /**
+   * Whether landscape materials take the detail program and the Config page offers the row: the
+   * era has the pass and the loaded region's texture (if loaded yet) is see-through.
+   */
+  get landscapeAvailable(): boolean {
+    return this.landscapeRule !== null && !this.landscapeOpaque;
+  }
+
+  get isLandscapeEnabled(): boolean {
+    return this.landscapeEnabled;
+  }
+
+  /** Whether the landscape pass draws now (era rule, checkbox, and a region surface). */
+  get isLandscapeDrawing(): boolean {
+    return this.landscapeUniforms.on.value === 1;
+  }
+
+  landscapeUniformsFor(): LandscapeDetailUniforms {
+    return this.landscapeUniforms;
+  }
+
+  /** The 1999 "Detail Texture: Landscape" checkbox → LScape_SetDetailTexturing(landscape, …). Returns whether it changed. */
+  setLandscapeEnabled(on: boolean): boolean {
+    if (this.landscapeEnabled === on) return false;
+    this.landscapeEnabled = on;
+    this.refresh();
+    return true;
+  }
+
+  /**
+   * Keep the detail UVs small: snap the subtracted world offset to the landblock (192 m) holding
+   * (x, north). A whole number of cells × an integer tiling moves the UVs by whole repeats, so
+   * the drawn texture is unchanged as the origin follows the camera.
+   */
+  setLandscapeOrigin(x: number, north: number): void {
+    const ox = Math.floor(x / LANDBLOCK_SIZE) * LANDBLOCK_SIZE;
+    const oy = Math.floor(north / LANDBLOCK_SIZE) * LANDBLOCK_SIZE;
+    const o = this.landscapeUniforms.origin.value;
+    if (o.x !== ox || o.y !== oy) o.set(ox, oy);
+  }
+
   /** `Render.BuildingDetailTextures` → `SmartBox::SetDetailTexturing(false, on)`. Returns whether it changed. */
   setEnabled(on: boolean): boolean {
     if (this.enabled === on) return false;
@@ -299,20 +513,45 @@ export class DetailTexturing {
       const s = surfaces[kind];
       const u = this.uniforms[kind];
       if (!s) { u.map.value = null; u.tiling.value = 0; continue; }
-      let tex = this.textures.get(s.texGID) ?? null;
-      if (!tex) {
-        // CORE.17.h.g.c.d — the detail surfaces are RenderTextures like any
-        // other, so Very High draws their client_highres.dat level too.
-        const hiRes = source.getHighResRGBA && (source.hasHighResLevel?.(s.texGID) ?? true)
-          ? () => source.getHighResRGBA!(s.texGID) : undefined;
-        tex = DetailTexturing.createDetailTexture(source.getRGBA(s.texGID), hiRes);
-        if (tex) this.textures.set(s.texGID, tex);
-      }
-      u.map.value = tex;
+      u.map.value = this.textureForSurface(s, source);
       u.tiling.value = s.tiling;
     }
+    // webac#23 — terrain_desc[0], only decoded where the era has the landscape pass, and only
+    // used when it is see-through (landscapeDetailSeeThrough).
+    let land = this.landscapeRule ? surfaces.landscape : null;
+    let landRgba: { width: number; height: number; data: Uint8Array } | null = null;
+    if (land && !this.seeThroughByGid.has(land.texGID)) {
+      landRgba = source.getRGBA(land.texGID);
+      this.seeThroughByGid.set(land.texGID, landscapeDetailSeeThrough(landRgba));
+    }
+    this.landscapeOpaque = land !== null && !this.seeThroughByGid.get(land.texGID);
+    if (this.landscapeOpaque) land = null;
+    this.landscapeUniforms.map.value = land ? this.textureForSurface(land, source, landRgba) : null;
+    this.landscapeUniforms.scale.value = land ? land.tiling / LAND_CELL_SIZE : 0;
     this.refresh();
     return surfaces;
+  }
+
+  /** The landscape detail DataTexture (null outside an era with the pass, or before the region loads). */
+  landscapeTexture(): THREE.DataTexture | null {
+    return (this.landscapeUniforms.map.value as THREE.DataTexture | null) ?? null;
+  }
+
+  /** One decoded DataTexture per detail GID. */
+  private textureForSurface(
+    s: DetailSurface, source: DetailTextureSource,
+    rgba?: { width: number; height: number; data: Uint8Array } | null,
+  ): THREE.DataTexture | null {
+    let tex = this.textures.get(s.texGID) ?? null;
+    if (!tex) {
+      // CORE.17.h.g.c.d — the detail surfaces are RenderTextures like any
+      // other, so Very High draws their client_highres.dat level too.
+      const hiRes = source.getHighResRGBA && (source.hasHighResLevel?.(s.texGID) ?? true)
+        ? () => source.getHighResRGBA!(s.texGID) : undefined;
+      tex = DetailTexturing.createDetailTexture(rgba ?? source.getRGBA(s.texGID), hiRes);
+      if (tex) this.textures.set(s.texGID, tex);
+    }
+    return tex;
   }
 
   /**
@@ -366,6 +605,8 @@ export class DetailTexturing {
       const u = this.uniforms[kind];
       u.on.value = this.enabled && u.map.value ? 1 : 0;
     }
+    const l = this.landscapeUniforms;
+    l.on.value = this.landscapeRule && this.landscapeEnabled && l.map.value ? 1 : 0;
   }
 }
 

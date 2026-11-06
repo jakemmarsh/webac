@@ -1631,6 +1631,10 @@ async function main() {
     textureSamplerPrefs.setSamplingRule(eraWorld.textureSampling);
     lightColourRule.value = eraWorld.lightColour;
     const persisted = GameUI.readPersistedOptionsSettings();
+    // webac#23 — the landscape detail texture pass, only in an era whose client had it (1999's
+    // Performance panel "Detail Texture: Landscape", default off); set before any terrain material.
+    detailTexturing.setLandscapeRule(eraWorld.landscapeDetailTextures);
+    detailTexturing.setLandscapeEnabled(persisted.landscapeDetailTextures === true);
     textureSamplerPrefs.set({
       textureFiltering: persisted.textureFiltering,
       landscapeTextureDetail: persisted.landscapeTextureDetail,
@@ -2340,15 +2344,22 @@ async function main() {
     if (worldInline) await new Promise(r => setTimeout(r, 50));
     const texMerge = regionDesc.terrainInfo.landSurfaces.texMerge;
     worldInit('terrain materials', () => {
+      // CORE.17.h.g.c.b — LScape::SetDetailTexturing @ 00506b40: the region's
+      // terrain_desc[1] (building) / [2] (environment) detail surfaces. First: webac#23's
+      // landscape surface ([0]) decides whether the terrain materials below carry the pass.
+      const detail = detailTexturing.loadSurfaces(texMerge, textureManager);
       terrainRenderer.buildTerrainMaterials(texMerge.terrainDesc, textureManager, texMerge.baseTexSize);
       terrainRenderer.buildTerrainBlendOverlays(texMerge, textureManager);
       terrainRenderer.buildRoadOverlays(texMerge, textureManager);
-      // CORE.17.h.g.c.b — LScape::SetDetailTexturing @ 00506b40: the region's
-      // terrain_desc[1] (building) / [2] (environment) detail surfaces.
-      const detail = detailTexturing.loadSurfaces(texMerge, textureManager);
       console.log(`[AC] Detail texturing → building ${detail.building ? `0x${detail.building.texGID.toString(16)} ×${detail.building.tiling}` : 'none'},`
         + ` environment ${detail.environment ? `0x${detail.environment.texGID.toString(16)} ×${detail.environment.tiling}` : 'none'},`
-        + ` ${detailTexturing.isEnabled ? 'on' : 'off'}`);
+        + ` ${detailTexturing.isEnabled ? 'on' : 'off'}`
+        + (eraClientRules(activeEra).world.landscapeDetailTextures && !detailTexturing.landscapeAvailable
+          ? '; landscape detail texture opaque: no option' : '')
+        + (detailTexturing.landscapeAvailable
+          ? `; landscape ${detail.landscape ? `0x${detail.landscape.texGID.toString(16)} ×${detail.landscape.tiling}` : 'none'}`
+            + ` ${detailTexturing.isLandscapeEnabled ? 'on' : 'off'}`
+          : ''));
     });
   }
 
@@ -2980,6 +2991,17 @@ async function main() {
   function setDetailTexturing(on: boolean): boolean {
     const changed = detailTexturing.setEnabled(!!on);
     if (changed) console.log(`[AC] Detail texturing → ${detailTexturing.isEnabled ? 'on' : 'off'}`);
+    return changed;
+  }
+
+  /**
+   * webac#23 — the 1999 Performance panel's "Detail Texture: Landscape" →
+   * LScape_SetDetailTexturing(landscape, …): the landscape detail pass on/off (one shared
+   * uniform, no recompile). A no-op draw-wise in an era without the pass. Returns whether it changed.
+   */
+  function setLandscapeDetailTexturing(on: boolean): boolean {
+    const changed = detailTexturing.setLandscapeEnabled(!!on);
+    if (changed) console.log(`[AC] Landscape detail texturing → ${detailTexturing.isLandscapeEnabled ? 'on' : 'off'}`);
     return changed;
   }
 
@@ -21439,7 +21461,15 @@ async function main() {
     // only competed with the portal-space gate's prefetch (the full sky's
     // layers held the warm login gate ~1.5 s on SwiftShader, 2026-10-05).
     if ((!draw && !sceneManager.capturePending) || gameUI.worldHiddenByPortalSpace) sceneManager.skipDraw();
-    else { updateIndoorView(); sceneManager.render(); }
+    else {
+      updateIndoorView();
+      // webac#23 — the landscape detail UVs are taken relative to the camera's landblock.
+      if (detailTexturing.landscapeAvailable) {
+        const cp = sceneManager.camera.position;
+        detailTexturing.setLandscapeOrigin(cp.x, cp.z);
+      }
+      sceneManager.render();
+    }
     framePhases.mark(PHASE.render);
     compileTrace.frameEnd({
       at: performance.now(), workMs: performance.now() - workStart,
@@ -21489,6 +21519,8 @@ async function main() {
     portalTunnelHold: () => rendererWarmup?.slicing ?? false,
     setDegradePrefs,
     setDetailTexturing,
+    setLandscapeDetailTexturing,
+    landscapeDetailAvailable: () => detailTexturing.landscapeAvailable,
     setTexturePrefs,
     setLandscapeDrawDistance,
   });
@@ -21538,6 +21570,8 @@ async function main() {
     /** CORE.17.h.g.c.b — Render.BuildingDetailTextures (GameUI's Config
      *  toggle calls the setter; probes read the live state + surfaces). */
     setDetailTexturing,
+    /** webac#23 — the 1999 landscape detail pass (GameUI's row calls the setter). */
+    setLandscapeDetailTexturing,
     detailTexturing,
     /** CORE.17.h.g.c.c — Render.DegradeDistance / AutomaticDegrades /
      *  GraphicsPerformance (GameUI's Config rows call the setter; probes read

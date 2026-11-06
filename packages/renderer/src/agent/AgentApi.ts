@@ -7351,8 +7351,18 @@ export class AgentApi {
     } as Record<string, string>)[direction.toLowerCase().replace(/[ -]/g, '_')];
     if (!code) return Promise.resolve({ ok: false, message: `unknown direction ${direction} (forward, backward, left, right, turn_left, turn_right)` });
     this.cancelTask('replaced by move');
+    const started = this.host.now();
     this.key(code, true);
-    return new Promise((res) => setTimeout(() => { this.key(code, false); res({ ok: true, message: `${direction} for ${seconds}s` }); }, Math.min(seconds, 10) * 1000));
+    return new Promise((res) => setTimeout(() => {
+      this.key(code, false);
+      // BUG.drudge-hideout-portal-stop: the sentinel's stop read as "forward for 3s", and a body standing 2.1 m from a
+      // portal it was pressed into was taken for a collision bug (2026-11-06). Say who let go of the key.
+      const v = this.sentinelVeto;
+      const vetoed = v && v.at >= started && v.keys.includes(code)
+        ? `; the portal sentinel let go of ${code} ${v.dist.toFixed(1)} m from ${v.label} #${v.guid.toString(16)} (it keeps the agent's own keys out of a portal they weren't sent into; the portal doesn't block: ac_use it or ac_walk_to it to go through)`
+        : '';
+      res({ ok: true, message: `${direction} for ${seconds}s${vetoed}` });
+    }, Math.min(seconds, 10) * 1000));
   }
 
   /**
@@ -15534,6 +15544,8 @@ export class AgentApi {
   private sentinelRunMps = 0;
   private sentinelReportedAt: { x: number; y: number } | null = null;
   private sentinelSaid: { guid: number; at: number } | null = null;
+  /** The sentinel's last stop: when, how far from which portal, and the keys it let go of (move's answer names it). */
+  private sentinelVeto: { at: number; dist: number; label: string; guid: number; keys: string[] } | null = null;
   private sentinelDiskCache: { at: number; disks: Array<AvoidDisk & { guid: number; label: string; touch: number }> } | null = null;
 
   /** Portals near the body that it must not touch: every one but the portal a walk is sent into. */
@@ -15627,6 +15639,7 @@ export class AgentApi {
         this.trace(`portal sentinel: ${th.dist.toFixed(1)} m from ${th.disk.label} #${th.disk.guid.toString(16)}, and the next ${stride(pace()).toFixed(1)} m (looks up to ${(gap * 1000).toFixed(0)} ms apart) would come within ${th.closest.toFixed(1)} m of it (touching at ${th.disk.touch.toFixed(1)}); let go of ${held.join('+')}`);
       }
       this.sentinelSaid = { guid: th.disk.guid, at: now };
+      this.sentinelVeto = { at: now, dist: th.dist, label: th.disk.label, guid: th.disk.guid, keys: held };
     }
     // The server's straight line between two reports, kept out of every disk: a report at each bend near one.
     if (look && this.host.reportPosition) {

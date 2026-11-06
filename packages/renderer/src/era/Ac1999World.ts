@@ -28,6 +28,7 @@
  */
 import { ac1999CellOverlay, ac1999PortalOverlay, decodeServerPatchSeed, type Ac1999DatOverlay, type DatDatabase, type DatIterations } from '@ac/dat-parser';
 import type { DatBlobStore } from '../dat/DatCache.js';
+import { type CacheHedgePolicy, DEFAULT_CACHE_HEDGE } from '../dat/CacheHedge.js';
 import type { DatStore } from '../dat/streaming/DatStore.js';
 
 /** One pushed file, as Connection1999 emits it (zlib from the AC1999 server; see inflateAc1999Patch). */
@@ -207,6 +208,35 @@ export class Ac1999World {
   }
 
   /**
+   * The stored manifest + files (null: no manifest), or 'slow' when `hedge` is given and the
+   * read passes its deadline or the page's cache is bypassed.
+   */
+  private async readStoredBounded(store: DatBlobStore, serverKey: string, hedge: CacheHedgePolicy | null): Promise<StoredPatches | null | 'slow'> {
+    const health = hedge?.health ?? null;
+    if (hedge && health?.bypassed) return 'slow';
+    const read = (async (): Promise<StoredPatches | null> => {
+      const manifest = await readManifest(store, serverKey);
+      if (!manifest) return null;
+      return { manifest, files: await readStoredFiles(store, serverKey, manifest).catch(() => null) };
+    })();
+    if (!hedge) return read;
+    read.catch(() => undefined);
+    return new Promise<StoredPatches | null | 'slow'>((resolve, reject) => {
+      let done = false;
+      let cancel: () => void = () => undefined;
+      let off: () => void = () => undefined;
+      const finish = (fn: () => void): void => { if (done) return; done = true; cancel(); off(); fn(); };
+      cancel = hedge.wait(hedge.delayMs(0), () => {
+        if (done) return;
+        finish(() => resolve('slow'));
+        health?.noteSlow();
+      });
+      if (!done && health) off = health.onBypass(() => finish(() => resolve('slow')));
+      read.then((v) => finish(() => resolve(v)), (err) => finish(() => reject(err)));
+    });
+  }
+
+  /**
    * Persist `files` (merged into what the server already stored) and the current iterations. Never throws.
    * Calls run one after another: a second login's persist (a relog in the same page, reporting the
    * server's iteration, so no files) must read the manifest the first one writes, not run beside it and
@@ -274,8 +304,15 @@ export class Ac1999World {
    * - Nothing usable stored (none, incomplete, an empty baseline): the seed.
    * A seed applies only over the base it was diffed from. Whatever is set
    * aside is not merged by the next persist, which also removes its files.
+   *
+   * PERF.slow-cache-bypass: with a seed offered (a copy on the network), the
+   * stored state is read for at most `hedge.delayMs(0)` (3 s), and not at all
+   * once the page's cache is bypassed (CacheHealth); a read that runs over is
+   * set aside like an unusable one and the seed serves (a stalled OPFS took
+   * 12-46 s to open, 2026-11-06). Its late answer is dropped. Without a seed
+   * the stored state is the only copy and is waited for. `hedge` null: always wait.
    */
-  async restore(store: DatBlobStore, serverKey: string, seed?: Ac1999SeedSource): Promise<number> {
+  async restore(store: DatBlobStore, serverKey: string, seed?: Ac1999SeedSource, hedge: CacheHedgePolicy | null = DEFAULT_CACHE_HEDGE): Promise<number> {
     if (this.restoredFor === serverKey) return 0;
     if (this.restoredFor !== null) {
       for (const o of [this.portalOverlay, this.cellOverlay]) { o.patches.clear(); o.iteration = undefined; o.clearCache(); }
@@ -311,9 +348,20 @@ export class Ac1999World {
     const level = (m: PatchManifest): DatIterations => ({ portal: m.portalIteration || base.portal, cell: m.cellIteration || base.cell });
     const atLeast = (a: DatIterations, b: DatIterations) => a.portal >= b.portal && a.cell >= b.cell;
     try {
-      const manifest = store.available ? await readManifest(store, serverKey) : null;
-      if (manifest) {
-        const files = await readStoredFiles(store, serverKey, manifest).catch(() => null);
+      let stored = store.available ? await this.readStoredBounded(store, serverKey, seed ? hedge : null) : null;
+      if (stored === 'slow') {
+        if (await getSeed()) {
+          console.log('[AC:1999] the browser storage is slow to answer: the server\'s seed serves instead of the stored DAT patches');
+          this.storedTrusted = false;
+          stored = null;
+        } else {
+          // The seed did not load (offline?): the stored state is the only copy, however slow.
+          stored = await this.readStoredBounded(store, serverKey, null);
+        }
+      }
+      const manifest = stored && stored !== 'slow' ? stored.manifest : null;
+      if (manifest && stored && stored !== 'slow') {
+        const files = stored.files;
         const have = level(manifest);
         if (files && !manifest.seed) {
           const target = await seedLevel();
@@ -347,6 +395,9 @@ export class Ac1999World {
     }
   }
 }
+
+/** The stored manifest and its files (null: one is missing). */
+interface StoredPatches { manifest: PatchManifest; files: Ac1999Patch[] | null }
 
 /** Every file a manifest lists, or null when one is missing (the server must resend them all). */
 async function readStoredFiles(store: DatBlobStore, serverKey: string, manifest: PatchManifest): Promise<Ac1999Patch[] | null> {

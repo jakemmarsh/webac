@@ -121,6 +121,15 @@ export const CONFIG_STRINGS = {
 
 export type ConfigStringKey = keyof typeof CONFIG_STRINGS;
 
+/**
+ * webac#23 — the Landscape Detail Textures row (AC1999 only, EraWorldRules.landscapeDetailTextures).
+ * Not a CONFIG_STRINGS entry: the end-of-retail string table has no ID_Graphics_ token for it (its
+ * client attaches no row). The text is the client's own preference name, the same exe's
+ * "Landscape Detail Textures" (Render::RegisterPreferences, decomp :325927) beside "Environment
+ * Detail Textures"; the 1999 Performance panel showed it as the "Landscape" box under "Detail Texture".
+ */
+export const LANDSCAPE_DETAIL_TEXTURES_LABEL = 'Landscape Detail Textures';
+
 /** `optionString` for a Config-tab row by its CONFIG_STRINGS key. */
 export function configString(key: ConfigStringKey): string {
   const [token, fallback] = CONFIG_STRINGS[key];

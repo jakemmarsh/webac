@@ -130,7 +130,43 @@ export interface EraWorldRules {
    * (controllers/BackgroundAppraisal.ts). ACE and GDLE turn nothing.
    */
   appraisalTurnsAppraiser: boolean;
+  /**
+   * The landscape detail texture pass (webac#23), or null where the era's client offers none.
+   * 1999: the Performance panel's "Detail Texture: Landscape" checkbox (PerformancePanel @ 0x594e00,
+   * default off: the render-options defaults @ 0x42c236 zero it) → LScape_SetDetailTexturing
+   * @ 0x44340f. The D3D land draw (0x57e9de, full-resolution blocks only) then draws each land
+   * triangle again with the region's terrain_desc[0] detail texture at its DetailTexTiling per
+   * cell, SRCALPHA / INVSRCALPHA over MODULATE(texture, lit diffuse), the vertex alpha fading with
+   * depth (0x583a58: 255 below screen z 0.02, linear to 0 at 0.04; screen z = view depth / 500
+   * there, the 0x61dbc8 scale over the 1/F camera z, so 10 m to 20 m). End of retail: none.
+   * Render::UpdateFromPreferences @ 0054d850 forces
+   * Current_Render_LandscapeDetailTextures false and passes landscape = false to
+   * SmartBox::SetDetailTexturing, and gmConfigUI attaches no row for Render.LandscapeDetailTextures.
+   * The classic (Dark Majesty) eras run that exe but get the pre-ToD option at Jake's request
+   * (2026-11-06, webac#23): CLASSIC_WORLD_RULES, the exe's own dormant fade (see CLASSIC_LANDSCAPE_DETAIL).
+   * Where the option exists, it is offered only for a region whose detail texture is see-through
+   * (DetailTexturing.landscapeUsable: Classic Dereth's opaque 0x5001786 would cover the ground).
+   */
+  landscapeDetailTextures: LandscapeDetailRule | null;
 }
+
+/** The landscape detail pass's view-depth fade (metres): full below `fadeMinZ`, none beyond `fadeMaxZ`. */
+export interface LandscapeDetailRule {
+  fadeMinZ: number;
+  fadeMaxZ: number;
+}
+
+/** 1999: screen z 0.02 / 0.04 (.rdata 0x60e740 / 0x60e744) × the 500 m depth scale (0x61c4d4). */
+export const AC1999_LANDSCAPE_DETAIL: LandscapeDetailRule = Object.freeze({ fadeMinZ: 10, fadeMaxZ: 20 });
+
+/**
+ * Dark Majesty (classic eras, the end-of-retail exe): the fade that exe's own landscape detail draw
+ * uses, ACRender::landPolyDraw @ 006b6320 (dormant there): MY_MIN_Z_TO_DETAIL 10 / MY_MAX_Z_TO_DETAIL
+ * 50 (.rdata 0x8067b0 / 0x8067b4). No pre-ToD (2002-2004) client is in reference/ to read its value
+ * from; this is the immediate-mode path the pre-built-mesh clients ran, as compiled into the exe
+ * these eras run.
+ */
+export const CLASSIC_LANDSCAPE_DETAIL: LandscapeDetailRule = Object.freeze({ fadeMinZ: 10, fadeMaxZ: 50 });
 
 export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
   brightness: Object.freeze({ gamma: true, minAmbientBase: 0.2, minAmbientPerBrightness: 0 }),
@@ -148,6 +184,13 @@ export const EOR_WORLD_RULES: EraWorldRules = Object.freeze({
   lightColour: 'rgb' as const,
   examineReappraise: true,
   appraisalTurnsAppraiser: false,
+  landscapeDetailTextures: null,
+});
+
+/** The classic (Dark Majesty) eras: end of retail's world plus the pre-ToD landscape detail option (webac#23). */
+export const CLASSIC_WORLD_RULES: EraWorldRules = Object.freeze({
+  ...EOR_WORLD_RULES,
+  landscapeDetailTextures: CLASSIC_LANDSCAPE_DETAIL,
 });
 
 export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
@@ -176,6 +219,7 @@ export const AC1999_WORLD_RULES: EraWorldRules = Object.freeze({
   lightColour: 'intensityOnly' as const,
   examineReappraise: false,
   appraisalTurnsAppraiser: true,
+  landscapeDetailTextures: AC1999_LANDSCAPE_DETAIL,
 });
 
 /** LScape min_ambient for the brightness slider's value `pref` (Render.ScreenBrightness, -1..1). */
@@ -192,6 +236,11 @@ export function landscapeDrawDistanceOption(rules: EraWorldRules): boolean {
 /** Whether the Config page lists Texture Filtering (not where the era fixes the samplers: 1999 had no such option). */
 export function textureFilteringOption(rules: EraWorldRules): boolean {
   return rules.textureSampling === 'prefs';
+}
+
+/** Whether the era has a Landscape Detail Textures option (1999's client; the classic eras by request). The row also needs a see-through region texture. */
+export function landscapeDetailTexturesOption(rules: EraWorldRules): boolean {
+  return rules.landscapeDetailTextures !== null;
 }
 
 /** The landscape radius the era draws: its fixed one, else the player's choice. */
