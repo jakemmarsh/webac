@@ -17,8 +17,8 @@
  * claims `server + account` on a BroadcastChannel; any other tab holding the
  * same key stands down: it stops its retries and resumes, closes its socket
  * (freeing the bridge slot and logging its session off at once) and says why,
- * and never logs in again on its own. The player's own click (the Disconnected
- * screen's button, the launcher) is the only way back in that tab. A refused
+ * and never logs in again on its own. The player's own login from the launcher (the Disconnected
+ * screen's Quit Game leads there) is the only way back in that tab. A refused
  * login with no live tab behind it (a genuine phantom) keeps its retry: no tab
  * answers, so nothing stands down.
  *

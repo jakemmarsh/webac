@@ -387,7 +387,7 @@ import {
 import { deliverWeenieError, ATTEMPT_FAILED_NAME_TEMPLATED } from './ui/WeenieErrorNotices.js';
 import { SocialRefusalMemo } from './ui/SocialRefusalLines1999.js';
 import { connectionLostText, characterErrorNotice, connectionFailureNotice, linkDeadCause, linkSampleIsDead, NET_ERROR_STRING_TABLE, REQUEST_TIMEOUT_S, type ConnectionNotice } from './ui/ConnectionNotices.js';
-import { accountRefusalRoute, characterErrorRoute, staleSessionWaitText } from './session/RefusalRoute.js';
+import { accountRefusalRoute, characterErrorRoute, disconnectedQuitAction, staleSessionWaitText, type DisconnectedCause } from './session/RefusalRoute.js';
 import { characterRestoreRefusalText } from './session/CharacterRestore.js';
 import { CharacterError, runExpr } from '@ac/shared';
 import { DatLightBudget, deviceLightLimit, DEFAULT_FILLER_STEP } from './effects/DatLightBudget.js';
@@ -405,6 +405,7 @@ import { ItemShortcutRestorer, toolbarObjectMoved as toolbarObjectMovedOnBar, is
 import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
 import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS } from './session/SessionLifecycle.js';
+import { LoginRefusalMemory } from './session/LoginRefusalMemory.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
 import { LoginCaseFallback, LoginCaseMemory, passwordCaseFor, CASE_VERBATIM_RETRY_DELAY_MS } from './session/LoginCredentialCase.js';
 import { armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal } from './session/UnexpectedDrop.js';
@@ -862,6 +863,11 @@ let errorReporter: ErrorReporter | null = null;
 let reportScreen: () => string = () => 'boot';
 /** RELEASE.preworld-outcomes — pre-world outcome events to the bridge (telemetry/PreworldReporter.ts); set at boot. */
 let preworldReporter: PreworldReporter | null = null;
+/**
+ * OBS.login-after-refusal — salted digests of each connect attempt's account and typed password (memory only),
+ * so char_list can say whether a login that got in after a refusal used the same ones (session/LoginRefusalMemory.ts).
+ */
+const loginRefusalMemory = new LoginRefusalMemory();
 /** The pre-world screen and launcher world id those events carry; the ACE section points them at its state. */
 let preworldScreen: () => PreworldScreen = () => 'boot';
 let preworldServer: () => string | null = () => null;
@@ -1355,6 +1361,7 @@ async function main() {
     server: () => preworldServer(),
     screen: () => preworldScreen(),
     chargenStep: () => preworldChargenStep(),
+    loginRefusals: loginRefusalMemory,
   });
   preworldReporter.install(window, document);
   worldReporter = new WorldReporter({
@@ -6313,6 +6320,12 @@ async function main() {
         } else {
           terrainRenderer.update(decision.worldX, decision.worldZ);
           feedTerrainCollision(decision.worldX, decision.worldZ);
+          // BUG.stale-surface-cell-sent — the blip puts the body where the server says without a swept
+          // transition (SmartBox::BlipPlayer → SetPosition at the server's cell): the surface cell
+          // restarts there too, never the building room the body was snapped out of.
+          currentSurfaceCellId = outdoorCollision.nextBodyCell(0, decision.worldX, decision.worldZ, z);
+          surfaceCellZeroFrames = 0;
+          outdoorCollision.setBodyCell(currentSurfaceCellId);
           const gy = outdoorGroundY(outdoorGroundSources, decision.worldX, decision.worldZ, z);
           lastFloorAwareGroundY = gy ?? z;
           // Airborne: stay at the server's real height (z), not the terrain
@@ -8493,7 +8506,13 @@ async function main() {
   // reporter: a socket that never opens must not inherit the last session's character list (screen="char-select").
   // UX.chargen-resume — whether THIS session reached its character list, whichever socket carries it (SessionLiveness.ts).
   const sessionLiveness = new SessionLiveness();
-  reportConnectAttempts(aceConnection, () => { sessionLiveness.noteConnectAttempt(); preworldReporter?.connectAttempt(); });
+  reportConnectAttempts(aceConnection, (account, password) => {
+    sessionLiveness.noteConnectAttempt();
+    preworldReporter?.connectAttempt();
+    // OBS.login-after-refusal — the credentials as typed (connect()'s arguments; the connection applies the
+    // password's wire case itself), so a case retry (LoginCaseFallback) is not a changed password.
+    void loginRefusalMemory.attempt(connectUrl, account, password);
+  });
   sessionConnected = () => aceConnection.isConnected;
   // BUG.multi-tab-login-pingpong — one session per account + server across
   // this browser's tabs: the latest login wins, and a tab that held the same
@@ -8855,7 +8874,9 @@ async function main() {
       resuming: sessionLifecycle.resumingAfterDrop,
       launcherLogin: !urlLogin.autoLogin,
     });
-    if (route === 'disconnected') { raiseServerDied(text, endCause); return; }
+    // BUG.old-tab-quit-steals-account — the server or another login ended this account's session:
+    // Quit Game goes to the server select, never straight back in (that booted the newer tab).
+    if (route === 'disconnected') { raiseServerDied(text, endCause, undefined, 'account'); return; }
     if (route === 'launcher') { returnToLauncher(text); return; }
     endRefusedSession();
     console.log(`[AC] ACE: refused before the world — OK relaunches: "${text}"`);
@@ -8912,8 +8933,14 @@ async function main() {
    * ECM_Login::SendNotice_ServerDied (or a Disconnected-screen CharacterError):
    * drop the dead session and the world, then show the Disconnected screen
    * with `text`. Idempotent while the screen is up (gmUIFlow's mode guard).
+   * `cause` picks what its Quit Game does (session/RefusalRoute.ts
+   * disconnectedQuitAction): log in again after a lost connection; after the
+   * server or another login ended the account's session ('account'), the
+   * server select (BUG.old-tab-quit-steals-account).
    */
-  const raiseServerDied = (text: string = connectionLostText(), endCause?: WorldEndCause, net?: NetDiagnostics): void => {
+  const raiseServerDied = (
+    text: string = connectionLostText(), endCause?: WorldEndCause, net?: NetDiagnostics, cause: DisconnectedCause = 'connection_lost',
+  ): void => {
     if (serverDiedShown || gameUI.disconnectedScreenShown) return;
     serverDiedShown = true;
     cancelProvenLoginRetry();
@@ -8930,15 +8957,22 @@ async function main() {
     pingLatencyTracker.reset();
     gameUI.setIndicatorActive('connection', false);
     console.log(`[AC] ACE: ServerDied — showing the Disconnected screen: "${text}"`);
-    gameUI.showDisconnectedScreen(text, relaunchConnectCycle);
+    const quit = disconnectedQuitAction({ cause, launcherLogin: !urlLogin.autoLogin });
+    gameUI.showDisconnectedScreen(text, quit === 'launcher' ? quitDisconnectedToLauncher : relaunchConnectCycle);
+  };
+  /** Quit Game after the account's session was ended for it: the server select, no login. */
+  const quitDisconnectedToLauncher = (): void => {
+    serverDiedShown = false;
+    gameUI.hideDisconnectedScreen();
+    leaveForLauncher('account_ended');
   };
   /**
    * BUG.multi-tab-login-pingpong — another tab of this browser logged in to
    * the account this tab held (AccountTabGuard). Stand down: no resume, no
    * fresh-login retry (disconnect() cancels the pending one), the session
    * closed (its bridge slot freed, its character logged off), and retail's
-   * account-in-use text on the Disconnected screen, whose button is the only
-   * way back in from this tab. Nothing more to do on the launcher or on a
+   * account-in-use text on the Disconnected screen, whose Quit Game leads to the
+   * server select (BUG.old-tab-quit-steals-account), the only way back in. Nothing more to do on the launcher or on a
    * screen that already says the session is over.
    */
   const standDownForOtherTab = (): void => {
@@ -9053,6 +9087,19 @@ async function main() {
     movementSync.stanceProvider = () => playerAnimated?.motionManager.currentStyleId ?? 0;
     // BUG.portal-use-held-keys — a MoveToState while a Use is unanswered cancels ACE's walk (PORTAL_CANCELLED).
     movementSync.onMoveToStateSent = () => portalUseReporter?.movementSent();
+    // BUG.stale-surface-cell-sent — a position about to name a building room the body is nowhere near went out
+    // with the land cell instead: drop the room (the per-frame scan finds the real one) and report it once per
+    // cell (ErrorReporter dedupes repeats into a count and caps the page's reports), so prod shows a recurrence.
+    movementSync.onSurfaceCellCorrected = (stale, sent) => {
+      if (currentSurfaceCellId === stale) {
+        currentSurfaceCellId = 0;
+        surfaceCellZeroFrames = 0;
+        outdoorCollision.setBodyCell(0);
+      }
+      const hex = (n: number) => (n >>> 0).toString(16).padStart(8, '0');
+      console.warn(`[AC] stale surface cell 0x${hex(stale)} in an outgoing position; sent land cell 0x${hex(sent)}`);
+      errorReporter?.report('error', `stale surface cell ${hex(stale)} in an outgoing position (sent ${hex(sent >>> 16 << 16)})`);
+    };
 
     // STATS.enchantments-never-populated / STATS.burden-capacity-augs-buffs —
     // everything derived from the BUFFED stats (capacity from buffed Strength,

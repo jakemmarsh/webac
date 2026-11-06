@@ -30,6 +30,7 @@ import {
 } from '@ac/network';
 import { NetWorkerClient, type NetWorkerEndpoint } from '../packages/renderer/src/network/NetWorkerClient';
 import { connectionFailureRecovery } from '../packages/renderer/src/session/AccountBoot';
+import { accountRefusalRoute, characterErrorRoute, disconnectedQuitAction } from '../packages/renderer/src/session/RefusalRoute';
 import { loginFailureText } from '../packages/renderer/src/launcher/worldDirectory';
 import {
   AccountTabGuard, accountSessionKey, type SessionChannelLike,
@@ -252,6 +253,72 @@ describe('AccountTabGuard — the latest login wins across tabs', () => {
       .toBe(accountSessionKey('wss://b.example/connect?trace=zzz&server=coldeve', 'player1'));
     expect(accountSessionKey('wss://b.example/connect?server=coldeve', 'p'))
       .not.toBe(accountSessionKey('wss://b.example/connect?server=leafcull', 'p'));
+  });
+});
+
+/**
+ * BUG.old-tab-quit-steals-account — production 2026-11-06 (Coldeve, trace
+ * e65d40881bf33ed9 / f0542b5c61763925): tab A in the world, the player logs in
+ * in tab B; ACE boots A (CharacterError.Logon) and A stands down onto the
+ * Disconnected screen, with no automatic resume (none was attempted: no session
+ * at drop + 2 s). Eight seconds later the player, back in tab A, pressed its
+ * "Quit Game", which relaunched a full login: that booted B at character select,
+ * and B had to log in again. Quit Game after the account's session was ended
+ * for it now goes to the server select with no login.
+ */
+describe('BUG.old-tab-quit-steals-account — the old tab never logs back in over the new one', () => {
+  it('the replayed sequence: A is booted in the world, stands down, and its Quit Game leads to the launcher, not a login', () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let t = 1_000;
+    const hub = new FakeChannelHub();
+    const a = makeTab(hub, 'tab-a', 'Player1', () => t);
+    const b = makeTab(hub, 'tab-b', 'Player1', () => t);
+
+    const wsA = connectTab(a);
+    wsA.serverSends(opcodePacket(2, CHARACTER_LIST, 0)); // A past its login (in the world)
+    t += 330_000;
+    // B's login: ACE boots A (A's live session gets CharacterError.Logon) and refuses B.
+    const wsB = connectTab(b);
+    wsA.serverSends(opcodePacket(3, CHARACTER_ERROR, 1, ERR_LOGON));
+    wsB.serverSends(opcodePacket(2, CHARACTER_ERROR, 0, ERR_LOGON));
+
+    // A: a boot after its login, never a "stale session" retry; an account-level refusal.
+    const bootA = a.events.find(e => e.type === 'error');
+    expect(bootA).toMatchObject({ characterError: ERR_LOGON, loginRetryScheduled: false });
+    expect(characterErrorRoute(ERR_LOGON, { inWorld: true }).route).toBe('account');
+    expect(accountRefusalRoute({ inWorld: true, resuming: false, launcherLogin: true })).toBe('disconnected');
+    expect(a.stoodDown).toBe(1);
+    // Its Disconnected screen's Quit Game: the server select, no login (a launcher login).
+    expect(disconnectedQuitAction({ cause: 'account', launcherLogin: true })).toBe('launcher');
+
+    // B's stale-session retry gets in; nothing from A follows it.
+    vi.advanceTimersByTime(3_000);
+    const wsB2 = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    wsB2.open();
+    wsB2.serverSends(opcodePacket(2, CHARACTER_LIST, 0));
+    const sockets = FakeWebSocket.instances.length;
+    vi.advanceTimersByTime(15_000); // inside B's login budget (this fake server never completes its handshake)
+    expect(FakeWebSocket.instances.length).toBe(sockets);
+    expect(b.stoodDown).toBe(0);
+    expect(FakeWebSocket.openCount).toBe(1);
+  });
+
+  it('the inverse: a lost connection\'s Quit Game still logs in again; a URL login (dev, no launcher) keeps the relaunch', () => {
+    for (const launcherLogin of [true, false]) {
+      expect(disconnectedQuitAction({ cause: 'connection_lost', launcherLogin })).toBe('relaunch');
+    }
+    expect(disconnectedQuitAction({ cause: 'account', launcherLogin: false })).toBe('relaunch');
+  });
+
+  it('every era\'s "another login took the account" is an account-level end, never a resumable drop', () => {
+    // ACE: the booted live session's CharacterError.Logon (above). GDL kicks the old client with
+    // AccountBoot 0xF7DC (Seedsow CNetwork::KickClient): main.ts onAccountBoot → raiseAccountRefusal.
+    // GDLE / ClassicDereth refuse the new login (STR_LOGIN_ACCOUNT_ONLINE) and leave the old one in.
+    // The account-level CharacterErrors all route as account refusals (their Quit → launcher).
+    for (const code of [ERR_LOGON]) expect(characterErrorRoute(code, { inWorld: true }).route).toBe('account');
+    expect(accountRefusalRoute({ inWorld: false, resuming: true, launcherLogin: true })).toBe('disconnected');
   });
 });
 

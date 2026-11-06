@@ -233,7 +233,32 @@ export function shouldSendPositionEvent(
   return !contactPlanesEqual(last.contactPlane, contactPlane());
 }
 
+/**
+ * BUG.stale-surface-cell-sent — how far outside its own landblock a surface building's interior cell may put
+ * the player's origin in an outgoing position. Every SeenOutside EnvCell of the end-of-retail cell.dat has its
+ * origin within x −38..226, y −30..245 of its block (the starter cottages: y −28.5), so a room plus this
+ * margin covers them all; a frame past it names a cell the body is not in (Coldeve 2026-11-06: cell
+ * 0xA9B40162 at local y −156, the player 200 m away in 0xA9B3).
+ */
+export const SURFACE_CELL_FRAME_SLACK = 96;
+
+/** A surface interior cell's frame (origin relative to the cell's landblock) a body could be in. */
+export function surfaceCellFrameSane(localX: number, localY: number): boolean {
+  const lo = -SURFACE_CELL_FRAME_SLACK;
+  const hi = 192 + SURFACE_CELL_FRAME_SLACK;
+  return localX >= lo && localX < hi && localY >= lo && localY < hi;
+}
+
 export class MovementSync {
+  /**
+   * BUG.stale-surface-cell-sent — outgoing positions whose surface interior cell could not hold the body
+   * (surfaceCellFrameSane) and went out with the land cell instead, this session.
+   */
+  surfaceCellCorrections = 0;
+  /** Called with the rejected cell and the land cell sent in its place (main.ts drops the cell, reports it). */
+  onSurfaceCellCorrected: ((staleCell: number, sentCell: number) => void) | null = null;
+  private lastStaleSurfaceCell = 0;
+
   /**
    * Report a surface building's interior cell in outgoing positions (retail
    * SendPositionEvent sends m_position's EnvCell). On by default. It was
@@ -626,7 +651,15 @@ export class MovementSync {
     let landblockId: number;
     let localX: number;
     let localY: number;
-    const surfaceCell = MovementSync.reportSurfaceInteriorCells ? (pos.surfaceCell ?? 0) >>> 0 : 0;
+    let surfaceCell = MovementSync.reportSurfaceInteriorCells ? (pos.surfaceCell ?? 0) >>> 0 : 0;
+    let staleSurfaceCell = 0;
+    if (!pos.inDungeon && (surfaceCell & 0xFFFF) >= 0x100
+      && !surfaceCellFrameSane(pos.worldX - ((surfaceCell >>> 24) & 0xFF) * 192, pos.worldZ - ((surfaceCell >>> 16) & 0xFF) * 192)) {
+      // BUG.stale-surface-cell-sent — never tell the server we are in a room we are nowhere near: the land
+      // cell under the body goes out instead (a dungeon's frame is its own: never checked here).
+      staleSurfaceCell = surfaceCell;
+      surfaceCell = 0;
+    }
     if (pos.inDungeon || (surfaceCell & 0xFFFF) >= 0x100) {
       // In dungeons and surface-building interiors, report the stored interior cell ID — and derive the
       // local origin relative to THAT cell's landblock, never by floor
@@ -653,6 +686,12 @@ export class MovementSync {
       const cellId = cellX * 8 + cellY + 1; // 1-based, row-major
       landblockId = ((lbX << 24) | (lbY << 16) | (cellId & 0xFFFF)) >>> 0;
     }
+    // Counted once per run of frames naming it (a frame builds its position more than once).
+    if (staleSurfaceCell !== 0 && staleSurfaceCell !== this.lastStaleSurfaceCell) {
+      this.surfaceCellCorrections++;
+      this.onSurfaceCellCorrected?.(staleSurfaceCell, landblockId);
+    }
+    this.lastStaleSurfaceCell = staleSurfaceCell;
 
     // CORE.18.a — the AC orientation for the camera yaw: heading θ = π − yaw
     // about +Z (scene/AcHeading.ts). Sending θ = yaw told ACE a heading

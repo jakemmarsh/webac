@@ -88,7 +88,7 @@ export const IN_WORLD_WAIT_STATUS = 'Waiting for the server to let this characte
 /** The line under Entering World after the other tab was asked to log out. */
 export const HOLDER_LEAVING_STATUS = 'Logging out the other tab…';
 
-/** What the tab that was asked to log out shows (the Disconnected screen; its button logs back in). */
+/** What the tab that was asked to log out shows (the Disconnected screen; its Quit Game goes to the server select, BUG.old-tab-quit-steals-account). */
 export const LOGGED_OUT_FOR_OTHER_TAB_TEXT = 'You chose to enter the world in another tab, so this tab logged out.';
 
 /** What InWorldEnterWait needs from the page (main.ts wires SessionLifecycle, the guard, GameUI, timers). */

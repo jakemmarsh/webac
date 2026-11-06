@@ -183,6 +183,9 @@ export const NOT_REFUSAL_CODES: Readonly<{ weenie_error: ReadonlySet<number>; we
     // TELEMETRY.refusal-trade-notices
     0x0451, 0x0529, 0x0496, 0x0497, 0x04f1, 0x04f2, 0x0502, 0x0503, 0x0504, 0x0512, 0x0513, 0x0546, 0x054a, 0x0572,
     0x057c, 0x0581,
+    // BUG.portal-refusal-before-watch sweep: ITeleported, ACE's textless notice after every portal teleport
+    // (Portal.cs ActOnUse → SendWeenieError(ITeleported)); production logged it as a sink-none refusal.
+    0x003c,
   ]),
   weenie_error_str: new Set([
     0x04d6, 0x04d7, 0x04d8, 0x04d9, 0x050b, 0x050c, 0x050d, 0x051b, 0x051c, 0x0521, 0x0522, 0x052c,

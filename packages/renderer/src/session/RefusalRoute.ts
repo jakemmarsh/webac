@@ -100,3 +100,28 @@ export function characterErrorRoute(code: number, ctx: { inWorld: boolean; conne
   if (!ctx.inWorld && ctx.connecting) return { route: 'account', text, notice };
   return { route: 'charselect', text, notice };
 }
+
+/**
+ * Why the Disconnected screen is up: 'connection_lost' (retail's ServerDied: a
+ * drop the automatic resume could not bring back) or 'account' (the server or
+ * another login ended this account's session: ACE's in-world
+ * CharacterError.Logon when another client logged in, GDL's AccountBoot,
+ * AccountTabGuard's stand-down, the player choosing "log this tab out" in
+ * another tab, or any other boot / ban / account-level CharacterError).
+ */
+export type DisconnectedCause = 'connection_lost' | 'account';
+
+/**
+ * What the Disconnected screen's "Quit Game" button (0x10000418) does.
+ * Retail exited the process; a tab cannot, so after a lost connection it
+ * logs in again (a fresh connect cycle). BUG.old-tab-quit-steals-account
+ * (Coldeve 2026-11-06): after another tab's login took the account, Quit
+ * Game in the old tab logged it back in, which booted the newer tab, and the
+ * player had to log in there twice. After an account-level end it now leaves
+ * for the server select instead, with no login: logging in again from there
+ * is the player's own choice. A URL login (dev tooling, no launcher in its
+ * flow) keeps the relaunch.
+ */
+export function disconnectedQuitAction(ctx: { cause: DisconnectedCause; launcherLogin: boolean }): 'relaunch' | 'launcher' {
+  return ctx.cause === 'account' && ctx.launcherLogin ? 'launcher' : 'relaunch';
+}

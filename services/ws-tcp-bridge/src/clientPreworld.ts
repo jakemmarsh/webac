@@ -163,7 +163,27 @@ export interface ClientPreworldEvent {
   retry?: typeof LOGIN_RETRY_KINDS[number];
   /** 'connect_failed' only: the network was out (CONNECT_FAILED_CAUSES). */
   why?: typeof CONNECT_FAILED_CAUSES[number];
+  /**
+   * OBS.login-after-refusal — 'char_list' only: a login to the same world was
+   * refused earlier on the page within 10 min (renderer
+   * session/LoginRefusalMemory.ts). Whether this login used the same account
+   * (case-insensitive) and password (as typed) as the latest refused attempt
+   * (compared by in-page salted digests; neither is ever sent), ms since that
+   * refusal, and how many refused attempts. Absent otherwise or when malformed.
+   */
+  afterRefusal?: AfterRefusalField;
 }
+
+export interface AfterRefusalField {
+  sameAccount: boolean;
+  samePassword: boolean;
+  sinceRefusedMs: number;
+  refusals: number;
+}
+
+/** The client's window (LoginRefusalMemory AFTER_REFUSAL_WINDOW_MS) plus slack for a slow digest. */
+const MAX_AFTER_REFUSAL_MS = 15 * 60_000;
+const MAX_AFTER_REFUSALS = 1000;
 
 /**
  * The route's body limit (client_preworld and client_world share it). 4 KiB since
@@ -242,6 +262,7 @@ export function sanitizeClientPreworld(body: unknown): ClientPreworldEvent | nul
     ...(outcome === 'dropped' ? netDiagField(b.net) : {}),
     ...(outcome === 'handover' ? handoverFields(b) : {}),
     ...(outcome === 'login_retry' ? loginRetryField(b.retry) : {}),
+    ...(outcome === 'char_list' ? afterRefusalField(b.afterRefusal) : {}),
     ...(outcome === 'connect_failed' ? connectFailedWhyField(b.why) : {}),
     ...(outcome === 'chargen_ok' || outcome === 'chargen_refused' ? heritageField(b.heritage) : {}),
   };
@@ -291,6 +312,22 @@ export function connectFailedWhyField(v: unknown): Pick<ClientPreworldEvent, 'wh
 export function loginRetryField(v: unknown): Pick<ClientPreworldEvent, 'retry'> {
   const retry = pick(v, LOGIN_RETRY_KINDS);
   return retry ? { retry } : {};
+}
+
+/**
+ * `{ afterRefusal }` when it is an object of exactly two booleans and two
+ * in-bounds integers (refusals at least 1); anything else, or any extra key,
+ * drops it whole.
+ */
+export function afterRefusalField(v: unknown): Pick<ClientPreworldEvent, 'afterRefusal'> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  const r = v as Record<string, unknown>;
+  const keys = Object.keys(r).sort();
+  if (keys.join(',') !== 'refusals,sameAccount,samePassword,sinceRefusedMs') return {};
+  const sinceRefusedMs = uint(r.sinceRefusedMs, MAX_AFTER_REFUSAL_MS);
+  const refusals = uint(r.refusals, MAX_AFTER_REFUSALS);
+  if (typeof r.sameAccount !== 'boolean' || typeof r.samePassword !== 'boolean' || sinceRefusedMs === null || refusals === null || refusals < 1) return {};
+  return { afterRefusal: { sameAccount: r.sameAccount, samePassword: r.samePassword, sinceRefusedMs, refusals } };
 }
 
 /** The 'handover' outcome's own fields, each only when valid. */

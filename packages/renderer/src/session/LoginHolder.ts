@@ -88,7 +88,7 @@ export function loginHolderKeptText(retailText: string, holder: WorldHolder): st
 /** The line under Please Wait after the other tab was asked to log out. */
 export const LOGIN_HOLDER_LEAVING_STATUS = 'Logging out the other tab…';
 
-/** What the tab that was asked to log out shows (its button logs back in). */
+/** What the tab that was asked to log out shows (its Quit Game goes to the server select, BUG.old-tab-quit-steals-account). */
 export const LOGGED_OUT_FOR_LOGIN_TEXT = 'You chose to log in to this account in another tab, so this tab logged out.';
 
 /**

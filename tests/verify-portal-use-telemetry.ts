@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
   PortalUseReporter, PORTAL_REPLY_MS, PORTAL_MAX_WAIT_MS, PORTAL_RATE_MS, chatTemplate, isPortalObject, overlapsPortal, bodyTouchesPortal,
-  walkInActs, WEENIE_ERROR_ACTION_CANCELLED,
+  walkInActs, WEENIE_ERROR_ACTION_CANCELLED, WEENIE_ERROR_I_TELEPORTED, PORTAL_EARLY_REFUSAL_MS, PORTAL_REFUSAL_CODES,
   type PortalEvent, type PortalSnapshot, type PortalUseFailedEvent,
 } from '../packages/renderer/src/telemetry/PortalUseReporter';
 import { sanitizeClientPortal, sanitizeClientWorld } from '../services/ws-tcp-bridge/src/clientWorld';
@@ -424,6 +424,176 @@ describe('BUG.portal-walk-in-nothing: what a walk-in can reach, and what counts 
     g.run(PORTAL_REPLY_MS + 100);
     expect(g.events[0]).toMatchObject({ outcome: 'portal_refused', playerMoved: false });
     expect(sanitizeClientPortal(g.events[0])).toEqual(g.events[0]);
+  });
+});
+
+/**
+ * BUG.portal-refusal-before-watch — Coldeve (ACE), trace c9340448a5d0ec95, build 12059fff4: a walk-in into
+ * wcid 1307 (PhysicsState 3084) drew 0x04A7 "You have been teleported too recently!" at 13:22:20.541; the
+ * walk-in watch began 6 ms later and reported portal_use_failed with weenieErrors [] at 13:22:25.612
+ * (waitedMs 5065). The server's collision beat the page's 100 ms touch check.
+ */
+describe('BUG.portal-refusal-before-watch: a refusal that beat the watch is its answer', () => {
+  const PURPLE = 3084;
+  const COLDEVE = { wcid: 1307, physicsState: PURPLE };
+  /** In the world past the overlap baseline, touching nothing. */
+  const inWorld = (snapOver: Partial<PortalSnapshot> = COLDEVE) => {
+    const g = rig(() => snap(snapOver));
+    g.r.overlaps([]);
+    return g;
+  };
+
+  it('the production shape: 0x04A7 6 ms before the walk-in watch → portal_refused, not portal_use_failed (end of retail)', () => {
+    const g = inWorld();
+    g.r.weenieError(0x04a7);
+    g.clock.t += 6;
+    g.r.overlaps([PORTAL_GUID]);
+    expect(g.r.watching).toBe(PORTAL_GUID);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events).toHaveLength(1);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_refused', trigger: 'walk_in', wcid: 1307, weenieErrors: [0x04a7], refusalLeadMs: 6 });
+    expect(sanitizeClientPortal(g.events[0])).toEqual(g.events[0]);
+  });
+
+  it('every ACE portal refusal code is held; GDLE and AC1999 chat refusals are held too', () => {
+    for (const code of PORTAL_REFUSAL_CODES) {
+      const g = inWorld();
+      g.r.weenieError(code);
+      g.clock.t += 80;
+      g.r.overlaps([PORTAL_GUID]);
+      g.run(PORTAL_REPLY_MS + 100);
+      expect(g.events[0]).toMatchObject({ outcome: 'portal_refused', weenieErrors: [code], refusalLeadMs: 80 });
+    }
+    for (const [era, line] of [
+      ['dm', 'You try to enter the portal but there is no effect.'], // GDLE Portal.cpp CheckedTeleport (quest)
+      ['dm', 'You are not powerful enough to use this portal yet.'],
+      ['ac1999', 'You have been teleported too recently!'], // AC1999 Portal.cpp
+      ['ac1999', 'You are not powerful enough to interact with that portal!'],
+    ] as const) {
+      const g = inWorld();
+      g.r.serverChat(line, era === 'dm' ? 0x11 : 0);
+      g.clock.t += 50;
+      g.r.overlaps([PORTAL_GUID]);
+      g.run(PORTAL_REPLY_MS + 100);
+      expect(g.events[0]).toMatchObject({ outcome: 'portal_refused', chatTemplate: line, weenieErrors: [], refusalLeadMs: 50 });
+    }
+  });
+
+  it('a use right after an unattributed refusal is refused too (ACE answers a repeat inside 3.5 s with silence)', () => {
+    const g = inWorld();
+    g.r.weenieError(0x04a7);
+    g.clock.t += 900;
+    g.r.useAttempt(PORTAL_GUID, portalObj, true);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_refused', trigger: 'use', weenieErrors: [0x04a7], refusalLeadMs: 900 });
+  });
+
+  it('a refusal older than PORTAL_EARLY_REFUSAL_MS is stale: a later silent walk-in stays portal_use_failed', () => {
+    const g = inWorld();
+    g.r.weenieError(0x04a7);
+    g.clock.t += PORTAL_EARLY_REFUSAL_MS + 1;
+    g.r.overlaps([PORTAL_GUID]);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', weenieErrors: [], refusalLeadMs: null });
+  });
+
+  it('a held refusal is taken once: the next portal tried stays portal_use_failed', () => {
+    const g = inWorld();
+    const other = PORTAL_GUID + 1;
+    g.r.weenieError(0x0474);
+    g.r.overlaps([PORTAL_GUID]);
+    g.r.overlaps([]);
+    g.clock.t += 100;
+    g.r.overlaps([PORTAL_GUID]);
+    g.run(PORTAL_REPLY_MS + 100);
+    g.r.overlaps([]);
+    g.r.overlaps([other]);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events.map((e) => [e.outcome, (e as PortalUseFailedEvent).weenieErrors])).toEqual([
+      ['portal_refused', [0x0474]],
+      ['portal_use_failed', []],
+    ]);
+  });
+
+  it("another request's answer is not held: a busy / inventory / combat error before a walk-in stays out of it", () => {
+    for (const code of [0x001d, 0x0036, 0x003c, 0x0484, 0x04c9]) {
+      expect(PORTAL_REFUSAL_CODES.has(code)).toBe(false);
+      const g = inWorld();
+      g.r.weenieError(code);
+      g.clock.t += 10;
+      g.r.overlaps([PORTAL_GUID]);
+      g.run(PORTAL_REPLY_MS + 100);
+      expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', weenieErrors: [], refusalLeadMs: null });
+    }
+    const h = inWorld();
+    h.r.serverChat('Bob tells you, see you at the portal', 3);
+    expect(h.events).toEqual([]);
+  });
+
+  it('a walk-in into a portal that cannot act on walk-ins takes no refusal (and leaves it for a real try)', () => {
+    const gate = PORTAL_GUID + 7;
+    const g = rig((guid) => snap(guid === gate ? { wcid: 1955, physicsState: 2052 } : COLDEVE)); // Gateway: Ethereal | LightingOn
+    g.r.overlaps([]);
+    g.r.weenieError(0x04a7);
+    g.r.overlaps([gate]);
+    expect(g.r.watching).toBeNull();
+    g.clock.t += 100;
+    g.r.overlaps([gate, PORTAL_GUID]);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events).toHaveLength(1);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_refused', wcid: 1307, weenieErrors: [0x04a7], refusalLeadMs: 100 });
+    // Only the Gateway: nothing at all.
+    const h = rig(() => snap({ wcid: 1955, physicsState: 2052 }));
+    h.r.overlaps([]);
+    h.r.weenieError(0x04a7);
+    h.r.overlaps([PORTAL_GUID]);
+    h.run(PORTAL_REPLY_MS + 100);
+    expect(h.events).toEqual([]);
+  });
+
+  it('a refusal heard before the overlap baseline (portal space, entry) or before a teleport is not held', () => {
+    // Before the baseline: the notices around a teleport.
+    const g = rig(() => snap(COLDEVE));
+    g.r.weenieError(0x04a7);
+    g.r.serverChat('You have been teleported.', 0x11);
+    g.r.overlaps([]);
+    g.clock.t += 100;
+    g.r.overlaps([PORTAL_GUID]);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', weenieErrors: [], chatTemplate: null });
+    // Held, then a teleport (the try went through elsewhere) or leaving the world drops it.
+    for (const drop of ['teleported', 'reset'] as const) {
+      const h = inWorld();
+      h.r.weenieError(0x04a7);
+      h.r[drop]();
+      h.r.overlaps([]);
+      h.clock.t += 100;
+      h.r.overlaps([PORTAL_GUID]);
+      h.run(PORTAL_REPLY_MS + 100);
+      expect(h.events[0]).toMatchObject({ outcome: 'portal_use_failed', weenieErrors: [] });
+    }
+  });
+
+  it('a refusal during a watch still goes to that watch, never held for the next', () => {
+    const g = inWorld();
+    g.r.overlaps([PORTAL_GUID]);
+    g.r.weenieError(0x04ab);
+    g.run(PORTAL_REPLY_MS + 100);
+    g.r.overlaps([]);
+    g.r.overlaps([PORTAL_GUID + 1]);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events.map((e) => [e.outcome, (e as PortalUseFailedEvent).refusalLeadMs])).toEqual([
+      ['portal_refused', null],
+      ['portal_use_failed', null],
+    ]);
+  });
+
+  it('ITeleported (0x003C, ACE after every portal teleport) is no refusal inside a watch', () => {
+    const g = inWorld();
+    g.r.overlaps([PORTAL_GUID]);
+    g.r.weenieError(WEENIE_ERROR_I_TELEPORTED);
+    g.run(PORTAL_REPLY_MS + 100);
+    expect(g.events[0]).toMatchObject({ outcome: 'portal_use_failed', weenieErrors: [0x3c] });
   });
 });
 

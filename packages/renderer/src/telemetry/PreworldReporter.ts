@@ -32,6 +32,7 @@ import { CharacterError, CharacterGenerationVerificationResponse, characterCreat
 import type { ChargenResumeToken } from '../session/ChargenResume.js';
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 import type { LoginRetryKind } from '../session/ProvenLoginRetry.js';
+import type { AfterRefusal } from '../session/LoginRefusalMemory.js';
 
 export type PreworldOutcome =
   | 'login_refused' | 'connect_failed' | 'char_list' | 'char_error' | 'chargen_ok' | 'chargen_refused'
@@ -53,9 +54,11 @@ export type HandoverPath = 'adopt' | 'relogin';
  * (left_for_launcher's token): the char-select World box, Exit Game (char
  * select's EXIT epilogue or Options → Exit Game before the world), Exit Game's
  * logoff from the world completing, or OK on a refused login / failed
- * connection's dialog. Every return to the server select now says which.
+ * connection's dialog, or (BUG.old-tab-quit-steals-account) Quit Game on the
+ * Disconnected screen after the server or another login ended the account's
+ * session ('account_ended'). Every return to the server select now says which.
  */
-export const LAUNCHER_LEAVE_REASONS = ['world_box', 'exit_game', 'exit_logoff', 'refused'] as const;
+export const LAUNCHER_LEAVE_REASONS = ['world_box', 'exit_game', 'exit_logoff', 'refused', 'account_ended'] as const;
 export type LauncherLeaveReason = typeof LAUNCHER_LEAVE_REASONS[number];
 
 /**
@@ -357,6 +360,14 @@ export interface PreworldEvent {
    */
   retry?: LoginRetryKind;
   /**
+   * OBS.login-after-refusal — 'char_list' only, when a login to the same
+   * world was refused earlier on this page within 10 min
+   * (session/LoginRefusalMemory.ts): whether this login used the same
+   * account / password (as typed) as the latest refused one, how long after
+   * it, and how many refused attempts there were. Absent otherwise.
+   */
+  afterRefusal?: AfterRefusal;
+  /**
    * BUG.resume-hung-socket — 'connect_failed' only: the network was out
    * ('open_timeout': the socket never answered within WS_OPEN_TIMEOUT_MS;
    * 'offline': navigator.onLine was false). Absent on an ordinary failed open.
@@ -391,6 +402,18 @@ export interface PreworldReporterOptions {
    * returned promise that rejects keeps the event in the outbox to go again.
    */
   send?: TelemetrySend;
+  /**
+   * OBS.login-after-refusal — told of every refused login attempt
+   * (login_refused, and login_retry except the case retries, whether or not
+   * the event goes out), and asked on each char_list for its afterRefusal.
+   */
+  loginRefusals?: LoginRefusalSink;
+}
+
+/** What the reporter needs from session/LoginRefusalMemory. */
+export interface LoginRefusalSink {
+  refused(): void;
+  accepted(): AfterRefusal | null;
 }
 
 /** A page sends at most this many events (the bridge also caps each address). */
@@ -403,10 +426,12 @@ export const MAX_HANDOVER_EVENTS = 60;
  * path that connects (each call site in main.ts, and any later one) resets
  * the reporter's per-session state before the attempt can fail. Returns `conn`.
  */
-export function reportConnectAttempts<C extends { connect(account: string, password: string): void }>(conn: C, onAttempt: () => void): C {
+export function reportConnectAttempts<C extends { connect(account: string, password: string): void }>(
+  conn: C, onAttempt: (account: string, password: string) => void,
+): C {
   const connect = conn.connect.bind(conn);
   conn.connect = (account: string, password: string): void => {
-    try { onAttempt(); } catch { /* reporting must never throw */ }
+    try { onAttempt(account, password); } catch { /* reporting must never throw */ }
     connect(account, password);
   };
   return conn;
@@ -596,7 +621,9 @@ export class PreworldReporter {
     this.charListSeen = true;
     const withStream = !this.streamReportedOnCharList && this.streams.size > 0;
     if (withStream) this.streamReportedOnCharList = true;
-    this.report('char_list', { count: Math.max(0, Math.min(1000, Math.trunc(count))) }, withStream);
+    let afterRefusal: AfterRefusal | null = null;
+    try { afterRefusal = this.opts.loginRefusals?.accepted() ?? null; } catch { /* reporting must never throw */ }
+    this.report('char_list', { count: Math.max(0, Math.min(1000, Math.trunc(count))), ...(afterRefusal ? { afterRefusal } : {}) }, withStream);
   }
 
   /** A CharacterGenerationVerificationResponse: Ok, or the refusal code with its string-table token (ID_Character_Err_*). */
@@ -1001,7 +1028,13 @@ export class PreworldReporter {
 
   // ── Transport ────────────────────────────────────────────────────────
 
-  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry' | 'why'>>, withStream = false): void {
+  private report(outcome: PreworldOutcome, f: Partial<Pick<PreworldEvent, 'code' | 'table' | 'token' | 'count' | 'sinceEnterMs' | 'net' | 'heritage' | 'handoverMs' | 'reason' | 'path' | 'retry' | 'why' | 'afterRefusal'>>, withStream = false): void {
+    // OBS.login-after-refusal — every refused attempt, sent or not. A case retry's refusal
+    // (case_verbatim / case_lower, LoginCaseFallback) is the page trying the password's other
+    // case, not the server refusing what the player typed, so it is not counted.
+    if (outcome === 'login_refused' || (outcome === 'login_retry' && f.retry !== 'case_verbatim' && f.retry !== 'case_lower')) {
+      try { this.opts.loginRefusals?.refused(); } catch { /* reporting must never throw */ }
+    }
     if (!this.opts.endpoint) return;
     if (outcome === 'handover' ? this.handoversSent >= MAX_HANDOVER_EVENTS : this.sent >= MAX_PREWORLD_EVENTS) return;
     const { screen, step } = this.sample();
@@ -1034,6 +1067,12 @@ export class PreworldReporter {
       ...(outcome === 'handover' ? { handoverMs: f.handoverMs, reason: f.reason, path: f.path } : {}),
       ...(outcome === 'login_retry' && f.retry ? { retry: f.retry } : {}),
       ...(outcome === 'connect_failed' && f.why ? { why: f.why } : {}),
+      ...(outcome === 'char_list' && f.afterRefusal ? { afterRefusal: {
+        sameAccount: f.afterRefusal.sameAccount === true,
+        samePassword: f.afterRefusal.samePassword === true,
+        sinceRefusedMs: f.afterRefusal.sinceRefusedMs,
+        refusals: f.afterRefusal.refusals,
+      } } : {}),
     };
     if (outcome === 'handover') this.handoversSent++;
     else this.sent++;

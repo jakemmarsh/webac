@@ -160,7 +160,8 @@ describe('RefusalReporter: first at once, repeats rolled up', () => {
 
   it('TELEMETRY.refusal-trade-notices sweep: PK, hook, fellowship and allegiance state changes are notices; their refusals are not', () => {
     const g = rig();
-    for (const c of [0x04f1, 0x04f2, 0x0502, 0x0504, 0x0512, 0x0513, 0x0546, 0x054a, 0x0572, 0x057c, 0x0581, 0x0496, 0x0497]) {
+    // 0x003C ITeleported: ACE's textless notice after every portal teleport (BUG.portal-refusal-before-watch sweep).
+    for (const c of [0x04f1, 0x04f2, 0x0502, 0x0504, 0x0512, 0x0513, 0x0546, 0x054a, 0x0572, 0x057c, 0x0581, 0x0496, 0x0497, 0x003c]) {
       g.r.serverCode('weenie_error', c, weenieErrorText(c), 'spew');
     }
     for (const c of [0x050e, 0x0514, 0x0515, 0x052d, 0x053a, 0x053b, 0x0543, 0x0574, 0x0578, 0x0582, 0x0583]) {

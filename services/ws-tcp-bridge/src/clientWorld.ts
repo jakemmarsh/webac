@@ -220,6 +220,8 @@ function perfFields(b: Record<string, unknown>): Partial<ClientFirstMinuteEvent>
  * BUG.portal-use-held-keys: a use the player's own MoveToState went out on while it was unanswered is
  * `portal_cancelled` (ACE GameActionMoveToState.cs StopExistingMoveToChains ends the walk and the use),
  * and every failure carries sends / busyHeld / serverMoves / keysAtSend / movesSent / useDones / firstUseDoneMs.
+ * BUG.portal-refusal-before-watch: a portal refusal that came just before the watch began (the server's
+ * collision beat the page's 100 ms touch check) is the watch's answer; `refusalLeadMs` says how early.
  */
 export const PORTAL_OUTCOMES = ['portal_use_failed', 'portal_refused', 'portal_cancelled', 'portal_used'] as const;
 export const PORTAL_TRIGGERS = ['use', 'walk_in'] as const;
@@ -267,6 +269,8 @@ export interface ClientPortalUseFailedEvent extends WorldIds {
   chatType: number | null;
   chatTemplate: string | null;
   waitedMs: number | null;
+  /** A refusal that came before the watch began: ms before (renderer PORTAL_EARLY_REFUSAL_MS 2 s). */
+  refusalLeadMs: number | null;
 }
 
 export interface ClientPortalUsedEvent extends WorldIds {
@@ -344,6 +348,7 @@ function sanitizePortal(outcome: typeof PORTAL_OUTCOMES[number], ids: WorldIds, 
     // The page's template: printable ASCII, numbers already '#'; a digit here means it is not one.
     chatTemplate: match(b.chatTemplate, /^[\x20-\x2f\x3a-\x7e]{1,96}$/),
     waitedMs: uint(b.waitedMs, PORTAL_WAIT_MS),
+    refusalLeadMs: uint(b.refusalLeadMs, 10_000),
   };
 }
 

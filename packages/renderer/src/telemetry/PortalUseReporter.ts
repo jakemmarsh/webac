@@ -84,6 +84,20 @@
  *   the server's walk began) or died during; the player's own movement no
  *   longer extends the wait, a use the player walked off from without
  *   reaching the portal is dropped, and a death drops the watch.
+ *
+ * BUG.portal-refusal-before-watch (2026-11-06): a refusal can land just before the watch starts.
+ * Coldeve (ACE), trace c9340448a5d0ec95: a walk-in into wcid 1307 drew 0x04A7 "You have been
+ * teleported too recently!" (shown in chat) at 13:22:20.541, and the walk-in watch began 6 ms later
+ * (waitedMs 5065 before 13:22:25.612). weenieError() kept codes only while a watch ran, so the refusal
+ * was dropped and the walk-in reported `portal_use_failed` with weenieErrors []. A server collision can
+ * beat ours: the body touch is checked every 100 ms on the render loop (a long frame delays it), and
+ * the server's transition reaches about 0.1 m wider than bodyTouchesPortal (progress.md 2026-11-03).
+ * A portal refusal with no watch running is now held for PORTAL_EARLY_REFUSAL_MS and the next watch
+ * that starts takes it (refusalLeadMs says how early it came). It is taken once, only by a watch that
+ * starts (a walk-in into a portal that cannot act on walk-ins starts none), only for a portal refusal
+ * proper (PORTAL_REFUSAL_CODES or a portal chat line), never one heard before the overlap baseline
+ * (portal space, entry), and a teleport or a world change drops it. ITeleported 0x003C, ACE's notice
+ * after every portal teleport (Portal.cs ActOnUse), is no refusal in a watch either.
  */
 import { TelemetryOutbox, defaultTelemetrySend, type TelemetrySend } from './TelemetryOutbox.js';
 
@@ -112,6 +126,41 @@ const PS_IGNORE_COLLISIONS = 0x10;
 const PS_REPORT_COLLISIONS_AS_ENVIRONMENT = 0x200000;
 /** WeenieError.ActionCancelled: the server's walk was cancelled (no refusal). */
 export const WEENIE_ERROR_ACTION_CANCELLED = 0x0036;
+/** WeenieError.ITeleported: ACE's notice after a portal teleport (Portal.cs ActOnUse callback), no refusal. */
+export const WEENIE_ERROR_I_TELEPORTED = 0x003c;
+
+/**
+ * The WeenieErrors a portal sends refusing a try (ACE Portal.cs CheckUseRequirements and
+ * QuestManager.HandlePortalQuestError; ClassicACE's Portal.cs sends the same codes). Only these, or a
+ * portal chat line (GDLE Portal.cpp CheckedTeleport and the AC1999 server's Portal.cpp refuse in
+ * chat), are held for a watch that has not started yet: any other code is some other request's answer.
+ */
+export const PORTAL_REFUSAL_CODES: ReadonlySet<number> = new Set([
+  0x0446, // QuestSolvedTooLongAgo
+  0x045c, // PKsMayNotUsePortal
+  0x045d, // NonPKsMayNotUsePortal
+  0x0474, // YouMustCompleteQuestToUsePortal
+  0x04a7, // YouHaveBeenTeleportedTooRecently
+  0x04a8, // YouMustBeAnAdvocateToUsePortal
+  0x04aa, // PlayersMayNotUsePortal
+  0x04ab, // YouAreNotPowerfulEnoughToUsePortal
+  0x04ac, // YouAreTooPowerfulToUsePortal
+  0x04cc, // YouHaveBeenInPKBattleTooRecently
+  0x04f3, // PKLiteMayNotUsePortal
+  0x0554, // MustPurchaseThroneOfDestinyToUsePortal
+  0x058f, // OnlyOlthoiMayUsePortal
+  0x0590, // OlthoiMayNotUsePortal
+  0x0591, // YouMayNotUsePortalWithVitae
+  0x0592, // YouMustBeTwoWeeksOldToUsePortal
+]);
+
+/**
+ * How long a portal refusal heard with no watch running waits for one to start (BUG.portal-refusal-before-watch).
+ * Production: 6 ms early. The touch check runs every 100 ms from the render loop, so a frame hitch
+ * (streaming after an arrival) can push it out by most of a second; 2 s covers that and stays well
+ * inside ACE's 3.5 s minTimeSinceLastPortal, so it never reaches a try the server would answer afresh.
+ */
+export const PORTAL_EARLY_REFUSAL_MS = 2_000;
 
 export const PORTAL_REFUSED = 'portal_refused' as const;
 /**
@@ -279,6 +328,8 @@ export interface PortalUseFailedEvent extends Ids {
   chatTemplate: string | null;
   /** From the try to the verdict. */
   waitedMs: number;
+  /** A refusal that came before the watch began (PORTAL_EARLY_REFUSAL_MS): how many ms before; null = none. */
+  refusalLeadMs: number | null;
 }
 
 export interface PortalUsedEvent extends Ids {
@@ -336,6 +387,15 @@ interface Watch {
   firstUseDoneMs: number | null;
   /** A Use went out and no UseDone has come back since. */
   useOutstanding: boolean;
+  refusalLeadMs: number | null;
+}
+
+/** A portal refusal heard while no watch ran (BUG.portal-refusal-before-watch). */
+interface EarlyRefusal {
+  at: number;
+  code: number | null;
+  chatTemplate: string | null;
+  chatType: number | null;
 }
 
 function safe<T>(f: (() => T) | undefined, fallback: T): T {
@@ -358,6 +418,8 @@ export class PortalUseReporter {
   private readonly lastEventAt = new Map<number, number>();
   /** Portals the body overlapped at the last check; null = take the next check as the baseline (after a teleport, at entry). */
   private overlapping: Set<number> | null = null;
+  /** A portal refusal that came with no watch running; the next watch to start within PORTAL_EARLY_REFUSAL_MS takes it. */
+  private early: EarlyRefusal | null = null;
 
   constructor(private readonly opts: PortalUseReporterOptions) {
     this.now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
@@ -458,14 +520,22 @@ export class PortalUseReporter {
   /** A WeenieError or WeenieErrorWithString came back (its code only). */
   weenieError(code: number): void {
     const w = this.watch;
-    if (!w || w.errors.length >= MAX_ERROR_CODES) return;
+    if (!w) {
+      if (PORTAL_REFUSAL_CODES.has(u32(code))) this.hold({ code: u32(code), chatTemplate: null, chatType: null });
+      return;
+    }
+    if (w.errors.length >= MAX_ERROR_CODES) return;
     w.errors.push(u32(code));
   }
 
   /** A server chat line (ServerMessage 0xF7E0): counted; the first portal line's template kept. */
   serverChat(text: string, chatType: number): void {
     const w = this.watch;
-    if (!w) return;
+    if (!w) {
+      const t = chatTemplate(text ?? '');
+      if (t !== null) this.hold({ code: null, chatTemplate: t, chatType: u32(chatType) });
+      return;
+    }
     w.chatLines++;
     if (w.chatTemplate !== null) return;
     const t = chatTemplate(text ?? '');
@@ -475,6 +545,7 @@ export class PortalUseReporter {
   /** PlayerTeleport: the server took us (portal space starts). The watch ends well; overlaps re-baseline. */
   teleported(): void {
     this.overlapping = null;
+    this.early = null;
     const w = this.watch;
     this.watch = null;
     if (!w) return;
@@ -491,6 +562,7 @@ export class PortalUseReporter {
   reset(): void {
     this.watch = null;
     this.overlapping = null;
+    this.early = null;
   }
 
   /**
@@ -552,6 +624,7 @@ export class PortalUseReporter {
       chatType: w.chatType,
       chatTemplate: w.chatTemplate,
       waitedMs: Math.max(0, Math.round(at - w.startedAt)),
+      refusalLeadMs: w.refusalLeadMs,
     });
   }
 
@@ -568,7 +641,7 @@ export class PortalUseReporter {
    * Portal to Sanamar cannot be used", ItemUseable No; ItemHolder::UseObject @ 0x00588a80).
    */
   private refused(w: Watch): boolean {
-    return w.errors.some((c) => c !== WEENIE_ERROR_ACTION_CANCELLED) || w.chatTemplate !== null
+    return w.errors.some((c) => c !== WEENIE_ERROR_ACTION_CANCELLED && c !== WEENIE_ERROR_I_TELEPORTED) || w.chatTemplate !== null
       || (!w.useSent && w.held === 'decided');
   }
 
@@ -583,8 +656,25 @@ export class PortalUseReporter {
       serverWalk: false, playerMoved: false, overlappedAfterMove: false,
       useDone: null, errors: [], chatLines: 0, chatType: null, chatTemplate: null,
       sends: 0, busyHeld: 0, serverMoves: 0, keysAtSend: null, movesSent: 0, useDones: 0,
-      firstSendAt: null, firstUseDoneMs: null, useOutstanding: false,
+      firstSendAt: null, firstUseDoneMs: null, useOutstanding: false, refusalLeadMs: null,
     };
+    // A portal refusal that beat the watch (BUG.portal-refusal-before-watch) is this try's answer: taken once.
+    const e = this.early;
+    this.early = null;
+    if (!e || at - e.at > PORTAL_EARLY_REFUSAL_MS || at < e.at) return;
+    const w = this.watch;
+    if (e.code !== null) w.errors.push(e.code);
+    if (e.chatTemplate !== null) { w.chatLines++; w.chatTemplate = e.chatTemplate; w.chatType = e.chatType; }
+    w.refusalLeadMs = Math.round(at - e.at);
+  }
+
+  /**
+   * Hold a portal refusal heard with no watch running. Not before the overlap baseline (portal space, an
+   * entry: the notices around a teleport, "You have been teleported." among them, answer no try here).
+   */
+  private hold(r: Omit<EarlyRefusal, 'at'>): void {
+    if (this.overlapping === null) return;
+    this.early = { at: this.now(), ...r };
   }
 
   /** One event per portal per PORTAL_RATE_MS; records the send. */

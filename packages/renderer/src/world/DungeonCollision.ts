@@ -214,6 +214,13 @@ interface BodyScope {
 /** A body that meets every source (outdoors, or in a cell registered without its portals). */
 const EVERYTHING: BodyScope = { land: true, home: -1 };
 
+/**
+ * BUG.stale-surface-cell-sent — how far past its sphere a stray body (in no cell's volume) may be from its own
+ * env cell, or a cell that cell's portals lead to, and still keep it (strayScope): the corners and seams where
+ * a cell's walls reach past its volume are well inside this. A body farther off has left the cell.
+ */
+export const STRAY_CELL_REACH = 3;
+
 /** Whether the source belongs to a cell (land or env) a body's scope decides on. */
 function scoped(src: ScopedSource): boolean {
   return src.landCell || src.envCellId !== 0;
@@ -860,6 +867,19 @@ export class DungeonCollision {
           { x: cc.x - next.blockOffsetX, y: cc.y - next.blockOffsetY, z: cc.z }, r))) array.push(n);
       }
     }
+    // BUG.stale-surface-cell-sent — a body no longer beside any cell of that array has left the cell, whatever
+    // the portal planes say: a server snap or blend (applyServerPositionCorrection) moves the body without a
+    // swept transition, so it can leave through a wall. Coldeve 2026-11-06: snapped out of the Holtburg room
+    // 0xA9B40162 (no outside portal of its own), the player kept that cell 200 m away and every
+    // AutonomousPosition told ACE so; walk-ins into the Drudge Hideout portal then did nothing.
+    const reach = r + STRAY_CELL_REACH;
+    const beside = array.some((id) => {
+      const cell = this.envCells.get(id)!;
+      if (!cell.cellBspRoot) return true;
+      return centres.some((cc) => sphereIntersectsCell(cell.cellBspRoot, cell.origin, cell.quat,
+        { x: cc.x - cell.blockOffsetX, y: cc.y - cell.blockOffsetY, z: cc.z }, reach));
+    });
+    if (!beside) return EVERYTHING;
     return { land: false, home: this.componentOf(homeCell) };
   }
 
