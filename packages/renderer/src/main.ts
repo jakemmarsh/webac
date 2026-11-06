@@ -406,7 +406,7 @@ import { tradeItemEntryFor } from './ui/tradeItemEntry.js';
 import { decidePositionCorrection, blendStep } from './world/PositionCorrection.js';
 import { SessionLifecycle, characterSlotIndex, isAutoEnterTargetStillValid, RESUME_HEALTHY_MS, RESUME_PAGE_CAP, RESUME_PAGE_CAP_WINDOW_MS } from './session/SessionLifecycle.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from './session/ProvenLoginRetry.js';
-import { LoginCaseFallback, passwordCaseFor, CASE_VERBATIM_RETRY_DELAY_MS } from './session/LoginCredentialCase.js';
+import { LoginCaseFallback, LoginCaseMemory, passwordCaseFor, CASE_VERBATIM_RETRY_DELAY_MS } from './session/LoginCredentialCase.js';
 import { armDropResume, handleUnexpectedDrop, resumeAttemptRefusalIsFinal } from './session/UnexpectedDrop.js';
 import { SessionLiveness, sessionDropped, liveSessionSocketFailed, characterListRole } from './session/SessionLiveness.js';
 import { ChargenDraftStore, decideChargenDraft, CHARGEN_DRAFT_OFFER_TEXT, type ChargenDraftOwner } from './session/ChargenResume.js';
@@ -8231,7 +8231,8 @@ async function main() {
   let acePassword = urlLogin.autoLogin?.password ?? '';
   // BUG.login-credential-case — the password's case on the wire, and the one quiet retry as
   // typed (session/LoginCredentialCase.ts). A URL login has no world: the era's auth style decides.
-  const loginCase = new LoginCaseFallback(passwordCaseFor(activeEra.login, null));
+  // UX.login-case-remember — the as-typed form that got in on an earlier page starts the next login.
+  const loginCase = new LoginCaseFallback(passwordCaseFor(activeEra.login, null), { memory: new LoginCaseMemory() });
   /** The account name as ACE stores it (from the CharacterList); see session/ServerAccountName.ts. */
   let aceServerAccount: string | null = null;
   // AGENT.hosted-mcp-connector: the chat side of pairing Claude (set where the tab relay is built).
@@ -8388,7 +8389,8 @@ async function main() {
     launcherLoginAt = Date.now();
     // BUG.login-credential-case — the world's password case, no case retry made yet (applied to
     // the connection by syncLoginProfile before it logs in).
-    loginCase.reset(login.passwordCase);
+    // UX.login-case-remember — or the as-typed form remembered for this world + account.
+    loginCase.reset(login.passwordCase, { world: chargenWorldKey(connectUrl), account: aceAccount });
     // An end-of-retail world on GDL / GDLE reads strings as Windows-1252, not ACE's UTF-8.
     setString16Wire(login.wire);
     if (login.world) console.log(`[AC] ${login.world.name}: ${login.world.emu ?? 'unknown'} server, strings as ${login.wire === 'ace' ? 'UTF-8' : 'Windows-1252'}`);
@@ -8438,6 +8440,8 @@ async function main() {
     useLauncherLogin(eraSwitchLogin(activeEra, pendingEraLogin));
     pendingEraLogin = null;
   } else if (!urlLogin.autoLogin) await runLauncher();
+  // A URL login: the era's rule, or the as-typed form remembered for this world + account (UX.login-case-remember).
+  else loginCase.reset(passwordCaseFor(activeEra.login, null), { world: chargenWorldKey(connectUrl), account: aceAccount });
 
   console.log(`[AC] Connecting to ACE server via bridge at ${connectUrl}`);
 
@@ -18767,7 +18771,8 @@ async function main() {
           // BUG.login-credential-case — remembered in the form that got in (lowercased, or as typed
           // after the case retry), which resumes and reconnects keep using.
           void provenLoginRetry.noteAccepted(wireLoginCredentials());
-          loginCase.noteAccepted();
+          // UX.login-case-remember — remembered (as typed) or forgotten (lowercase) for the next page.
+          loginCase.noteAccepted(acePassword);
           // BUG.second-tab-login-refusal — the login got in (after the other tab logged out, say).
           loginHolderWait.end();
           console.log(`[AC] ACE: Got character list — ${aceCharList.characters.length} characters on account "${aceCharList.accountName}" (${aceCharList.slotCount} slots)`);
@@ -19568,8 +19573,11 @@ async function main() {
             // below. A named browser-UX exception (CLAUDE.md).
             if (!gameStarted && event.serverNetError && loginCase.onRefused(netNotice.token, acePassword)) {
               syncLoginProfile();
-              preworldReporter?.loginRetry(event, netNotice.token || null, 1, 'case_verbatim');
-              console.log(`[AC] ACE: "${netNotice.text}" with the password lowercased as retail sends it — trying it as typed`);
+              // UX.login-case-remember — or the remembered as-typed form refused: once lowercased.
+              preworldReporter?.loginRetry(event, netNotice.token || null, 1, loginCase.retryKind);
+              console.log(loginCase.current === 'verbatim'
+                ? `[AC] ACE: "${netNotice.text}" with the password lowercased as retail sends it — trying it as typed`
+                : `[AC] ACE: "${netNotice.text}" with the password as typed (remembered from an earlier login) — trying it lowercased`);
               if (provenLoginRetryTimer !== null) clearTimeout(provenLoginRetryTimer);
               const typed = { account: aceAccount, password: acePassword, url: connectUrl };
               provenLoginRetryTimer = setTimeout(() => {

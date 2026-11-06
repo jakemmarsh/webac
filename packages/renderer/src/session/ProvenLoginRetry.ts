@@ -96,7 +96,7 @@ export function firstTimeLoginRetryAllowed(world: FirstTimeRetryWorld | null | u
 }
 
 /** Why a refusal is retried: the credentials got in earlier on this page, or a first-time login on a GDLE world. */
-export type LoginRetryKind = 'proven' | 'first_time' | 'case_verbatim';
+export type LoginRetryKind = 'proven' | 'first_time' | 'case_verbatim' | 'case_lower';
 
 /** What a login was made with. `world` is the bridge URL naming the server (main.ts connectUrl). */
 export interface LoginCredentials {

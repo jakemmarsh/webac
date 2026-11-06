@@ -26,7 +26,8 @@ import { Connection1999 } from '../packages/network/src/era1999/Connection1999.j
 import { buildPacket1999 } from '../packages/network/src/era1999/Packet1999.js';
 import { connectionFailureNotice } from '../packages/renderer/src/ui/ConnectionNotices.js';
 import {
-  LoginCaseFallback, passwordCaseFor, CASE_VERBATIM_REFUSAL_TOKEN,
+  LoginCaseFallback, LoginCaseMemory, passwordCaseFor, CASE_VERBATIM_REFUSAL_TOKEN,
+  LOGIN_CASE_STORAGE_KEY, LOGIN_CASE_MAX_ENTRIES, LOGIN_CASE_TTL_MS,
 } from '../packages/renderer/src/session/LoginCredentialCase.js';
 import { ProvenLoginRetry, firstTimeLoginRetryAllowed, type LoginCredentials } from '../packages/renderer/src/session/ProvenLoginRetry.js';
 import { PreworldReporter, type PreworldEvent } from '../packages/renderer/src/telemetry/PreworldReporter.js';
@@ -35,6 +36,7 @@ import { EOR_ERA_ID, eraProfile, type EraProfile } from '../packages/renderer/sr
 import { launcherLogin, eraSwitchLogin } from '../packages/renderer/src/launcher/launcherLogin.js';
 import { buildDirectory } from '../services/ws-tcp-bridge/src/serverDirectory.js';
 import type { ServerEntry } from '../services/ws-tcp-bridge/src/serverList.js';
+import { chargenWorldKey } from '../packages/renderer/src/ui/ChargenRefusal.js';
 import { worldFromEntry, type World } from '../packages/renderer/src/launcher/worldDirectory.js';
 
 const BT_NETERROR = 0x00100000;
@@ -261,11 +263,11 @@ const LANES: Lane[] = [
  * sent. `accepts(password on the wire)` is the server's verdict. Returns the
  * passwords each attempt sent, the retry kinds, and whether it got in.
  */
-async function drive(lane: Lane, typed: { account: string; password: string }, accepts: (wirePassword: string, attempt: number) => boolean, helpers?: { proven: ProvenLoginRetry; loginCase: LoginCaseFallback }) {
+async function drive(lane: Lane, typed: { account: string; password: string }, accepts: (wirePassword: string, attempt: number) => boolean, helpers?: { proven?: ProvenLoginRetry; loginCase?: LoginCaseFallback; memory?: LoginCaseMemory }) {
   const w = world(lane.world);
   const login = launcherLogin(lane.era, enter(w, typed.account, typed.password));
-  const loginCase = helpers?.loginCase ?? new LoginCaseFallback();
-  loginCase.reset(login.passwordCase);
+  const loginCase = helpers?.loginCase ?? new LoginCaseFallback('verbatim', { memory: helpers?.memory ?? null });
+  loginCase.reset(login.passwordCase, { world: chargenWorldKey(login.connectUrl), account: login.account });
   const proven = helpers?.proven ?? new ProvenLoginRetry();
   const conn = lane.kind === 'eor'
     ? new ClientConnection('ws://bridge', { loginProfile: loginCase.profile(lane.era.login) })
@@ -288,7 +290,7 @@ async function drive(lane: Lane, typed: { account: string; password: string }, a
     if (accepts(wire.password, attempt)) {
       accepted = true;
       await proven.noteAccepted(wireCreds());
-      loginCase.noteAccepted();
+      loginCase.noteAccepted(login.password);
       break;
     }
     const before = events.length;
@@ -296,7 +298,7 @@ async function drive(lane: Lane, typed: { account: string; password: string }, a
     const notice = connectionFailureNotice(events.slice(before).find((e) => e.type === 'error')!)!;
     if (loginCase.onRefused(notice.token, login.password)) {
       sync();
-      kinds.push('case_verbatim');
+      kinds.push(loginCase.retryKind);
       conn.connect(login.account, login.password);
       continue;
     }
@@ -396,5 +398,175 @@ describe('BUG.login-credential-case — never on ACE, never for other refusals',
     expect(sanitizeClientPreworld(sent[0])).toMatchObject({ outcome: 'login_retry', retry: 'case_verbatim', code: STR_LOGIN_FAILED });
     // No password in it.
     expect(JSON.stringify(sent[0])).not.toMatch(/hunter/i);
+    // UX.login-case-remember — the lowercase fallback of a remembered as-typed login.
+    r.loginRetry({ serverNetError: { stringId: STR_LOGIN_FAILED, tableId: ST_SERVER_ERRORS } }, 'ID_ConnectionError_ClientLogOnFailed', 1, 'case_lower');
+    expect(sanitizeClientPreworld(sent[1])).toMatchObject({ outcome: 'login_retry', retry: 'case_lower' });
+  });
+});
+
+// ─── UX.login-case-remember ────────────────────────────────────────────
+
+/** A localStorage stand-in; `throws` makes every access throw (blocked storage). */
+class FakeStorage {
+  data = new Map<string, string>();
+  throws = false;
+  getItem(k: string): string | null { if (this.throws) throw new Error('blocked'); return this.data.get(k) ?? null; }
+  setItem(k: string, v: string): void { if (this.throws) throw new Error('blocked'); this.data.set(k, v); }
+  removeItem(k: string): void { if (this.throws) throw new Error('blocked'); this.data.delete(k); }
+}
+
+/** Every stored byte, for the never-the-password checks. */
+const storedText = (s: FakeStorage): string => [...s.data.entries()].map(([k, v]) => `${k}=${v}`).join('\n');
+
+describe.each(LANES)('UX.login-case-remember — the as-typed form is remembered on $name', (lane) => {
+  const ownerOf = (account: string) => ({ world: chargenWorldKey(enter(world(lane.world), '', '').connectUrl), account });
+
+  it('first page: lowercase refused, as typed gets in, remembered; second page starts as typed with no refusal', async () => {
+    const storage = new FakeStorage();
+    const accepts = (pw: string) => pw === 'HunterTwo';
+    // Page 1.
+    const p1 = await drive(lane, { account: 'JakeM', password: 'HunterTwo' }, accepts, { memory: new LoginCaseMemory({ storage }) });
+    expect(p1).toMatchObject({ sentPasswords: ['huntertwo', 'HunterTwo'], kinds: ['case_verbatim'], accepted: true });
+    p1.conn.disconnect();
+    expect(new LoginCaseMemory({ storage }).remembersVerbatim(ownerOf('JakeM'))).toBe(true);
+    // Page 2: a new LoginCaseFallback and LoginCaseMemory over the same storage (a reload).
+    FakeSocket.sockets = [];
+    const p2 = await drive(lane, { account: 'jakem', password: 'HunterTwo' }, accepts, { memory: new LoginCaseMemory({ storage }) });
+    expect(p2).toMatchObject({ sentPasswords: ['HunterTwo'], kinds: [], accepted: true, shown: null });
+    p2.conn.disconnect();
+    // Never the password in either form, nor the account name.
+    const text = storedText(storage);
+    expect(text).not.toContain('HunterTwo');
+    expect(text.toLowerCase()).not.toContain('huntertwo');
+    expect(text.toLowerCase()).not.toContain('jakem');
+  });
+
+  it('a remembered as-typed login refused: one lowercase try, in, and the memory cleared', async () => {
+    const storage = new FakeStorage();
+    (await drive(lane, { account: 'JakeM', password: 'HunterTwo' }, (pw) => pw === 'HunterTwo', { memory: new LoginCaseMemory({ storage }) })).conn.disconnect();
+    // The server's password was reset to the lowercase form.
+    FakeSocket.sockets = [];
+    const r = await drive(lane, { account: 'JakeM', password: 'HunterTwo' }, (pw) => pw === 'huntertwo', { memory: new LoginCaseMemory({ storage }) });
+    expect(r).toMatchObject({ sentPasswords: ['HunterTwo', 'huntertwo'], kinds: ['case_lower'], accepted: true, shown: null });
+    r.conn.disconnect();
+    expect(new LoginCaseMemory({ storage }).remembersVerbatim(ownerOf('JakeM'))).toBe(false);
+    // The next page starts lowercase again.
+    FakeSocket.sockets = [];
+    const next = await drive(lane, { account: 'JakeM', password: 'HunterTwo' }, (pw) => pw === 'huntertwo', { memory: new LoginCaseMemory({ storage }) });
+    expect(next).toMatchObject({ sentPasswords: ['huntertwo'], kinds: [] });
+    next.conn.disconnect();
+  });
+
+  it('a remembered login with a wrong password: one lowercase try, then the as-typed form for the usual retries and the error', async () => {
+    const storage = new FakeStorage();
+    (await drive(lane, { account: 'JakeM', password: 'HunterTwo' }, (pw) => pw === 'HunterTwo', { memory: new LoginCaseMemory({ storage }) })).conn.disconnect();
+    FakeSocket.sockets = [];
+    const r = await drive(lane, { account: 'JakeM', password: 'WrongOne' }, () => false, { memory: new LoginCaseMemory({ storage }) });
+    expect(r.sentPasswords.slice(0, 2)).toEqual(['WrongOne', 'wrongone']);
+    expect(r.kinds.filter((k) => k === 'case_lower' || k === 'case_verbatim')).toEqual(['case_lower']);
+    for (const pw of r.sentPasswords.slice(2)) expect(pw).toBe('WrongOne');
+    expect(r).toMatchObject({ accepted: false, shown: 'ID_ConnectionError_ClientLogOnFailed' });
+    r.conn.disconnect();
+    // A refused login leaves the memory as it was.
+    expect(new LoginCaseMemory({ storage }).remembersVerbatim(ownerOf('JakeM'))).toBe(true);
+  });
+
+  it('storage that throws: behaves exactly as without the memory, page after page', async () => {
+    const storage = new FakeStorage();
+    storage.throws = true;
+    for (let page = 0; page < 2; page++) {
+      FakeSocket.sockets = [];
+      const r = await drive(lane, { account: 'JakeM', password: 'HunterTwo' }, (pw) => pw === 'HunterTwo', { memory: new LoginCaseMemory({ storage }) });
+      expect(r).toMatchObject({ sentPasswords: ['huntertwo', 'HunterTwo'], kinds: ['case_verbatim'], accepted: true });
+      r.conn.disconnect();
+    }
+  });
+});
+
+describe('UX.login-case-remember — the store', () => {
+  const owner = { world: 'bridge.example/?server=seedsow', account: 'JakeM' };
+
+  it('ACE (verbatim rule) never reads or writes it', () => {
+    const storage = new FakeStorage();
+    const touched: string[] = [];
+    const spy = {
+      getItem: (k: string) => { touched.push(`get ${k}`); return storage.getItem(k); },
+      setItem: (k: string, v: string) => { touched.push(`set ${k}`); storage.setItem(k, v); },
+      removeItem: (k: string) => { touched.push(`rm ${k}`); storage.removeItem(k); },
+    };
+    const c = new LoginCaseFallback('verbatim', { memory: new LoginCaseMemory({ storage: spy }) });
+    c.reset(passwordCaseFor(EOR.login, 'ACE'), { world: chargenWorldKey(enter(world('Coldeve'), '', '').connectUrl), account: 'JakeM' });
+    expect(c.current).toBe('verbatim');
+    expect(c.onRefused(CASE_VERBATIM_REFUSAL_TOKEN, 'HunterTwo')).toBe(false);
+    c.noteAccepted('HunterTwo');
+    expect(touched).toEqual([]);
+  });
+
+  it('per world and account: the account name\'s case does not matter; another world or account is not remembered', () => {
+    const storage = new FakeStorage();
+    const m = new LoginCaseMemory({ storage });
+    m.rememberVerbatim(owner);
+    expect(m.remembersVerbatim({ ...owner, account: ' jakem ' })).toBe(true);
+    expect(m.remembersVerbatim({ ...owner, account: 'other' })).toBe(false);
+    expect(m.remembersVerbatim({ ...owner, world: 'bridge.example/?server=reefcull' })).toBe(false);
+    expect(storedText(storage).toLowerCase()).not.toContain('jakem');
+  });
+
+  it('entries expire after 180 days, and only the newest are kept', () => {
+    const storage = new FakeStorage();
+    let now = 1_000_000;
+    const m = new LoginCaseMemory({ storage, now: () => now });
+    m.rememberVerbatim(owner);
+    now += LOGIN_CASE_TTL_MS - 1;
+    expect(m.remembersVerbatim(owner)).toBe(true);
+    now += 1;
+    expect(m.remembersVerbatim(owner)).toBe(false);
+    for (let i = 0; i < LOGIN_CASE_MAX_ENTRIES + 10; i++) { now += 1; m.rememberVerbatim({ world: 'w', account: `a${i}` }); }
+    const stored = JSON.parse(storage.data.get(LOGIN_CASE_STORAGE_KEY)!) as { entries: Record<string, number> };
+    expect(Object.keys(stored.entries)).toHaveLength(LOGIN_CASE_MAX_ENTRIES);
+    expect(m.remembersVerbatim({ world: 'w', account: 'a0' })).toBe(false);
+    expect(m.remembersVerbatim({ world: 'w', account: `a${LOGIN_CASE_MAX_ENTRIES + 9}` })).toBe(true);
+  });
+
+  it('a lowercase-only password that gets in remembers nothing', () => {
+    const storage = new FakeStorage();
+    const c = new LoginCaseFallback('lower', { memory: new LoginCaseMemory({ storage }), owner });
+    c.noteAccepted('huntertwo');
+    expect(storage.data.size).toBe(0);
+  });
+
+  it('a corrupt entry reads as nothing remembered', () => {
+    const storage = new FakeStorage();
+    storage.data.set(LOGIN_CASE_STORAGE_KEY, '{not json');
+    expect(new LoginCaseFallback('lower', { memory: new LoginCaseMemory({ storage }), owner }).current).toBe('lower');
+  });
+
+  it('the form that got in stays proven for resumes: no case flip on a later refusal', () => {
+    const storage = new FakeStorage();
+    new LoginCaseMemory({ storage }).rememberVerbatim(owner);
+    const c = new LoginCaseFallback('lower', { memory: new LoginCaseMemory({ storage }), owner });
+    expect(c.current).toBe('verbatim');
+    c.noteAccepted('HunterTwo');
+    expect(c.onRefused(CASE_VERBATIM_REFUSAL_TOKEN, 'HunterTwo')).toBe(false);
+    expect(c.current).toBe('verbatim');
+  });
+});
+
+describe('UX.login-case-remember — the salt without Web Crypto', () => {
+  it('still remembers per world + account, and stores no password, when crypto.getRandomValues is missing', () => {
+    vi.stubGlobal('crypto', undefined);
+    try {
+      const storage = new FakeStorage();
+      const owner = { world: 'wss://example.test/?server=x', account: 'jakem' };
+      const memory = new LoginCaseMemory({ storage });
+      memory.rememberVerbatim(owner);
+      expect(new LoginCaseMemory({ storage }).remembersVerbatim(owner)).toBe(true);
+      expect(new LoginCaseMemory({ storage }).remembersVerbatim({ ...owner, account: 'someone' })).toBe(false);
+      const salt = (JSON.parse(storage.data.get('acjs.loginCase.v1') ?? '{}') as { salt?: string }).salt;
+      expect(typeof salt === 'string' && salt.length >= 8).toBe(true);
+      expect(storedText(storage)).not.toMatch(/jakem/i);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

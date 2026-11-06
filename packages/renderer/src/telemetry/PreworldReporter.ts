@@ -350,7 +350,9 @@ export interface PreworldEvent {
    * UX.gdle-first-login-retry — 'login_retry' only: why the page retried
    * ('proven': these credentials got in earlier on the page; 'first_time': a
    * first-time login on a GDLE world; 'case_verbatim': BUG.login-credential-case,
-   * a lowercased password was refused and the page tried it as typed). A
+   * a lowercased password was refused and the page tried it as typed;
+   * 'case_lower': UX.login-case-remember, the remembered as-typed form was
+   * refused and the page tried it lowercased). A
    * retry followed by the trace's char_list is a login the retry rescued.
    */
   retry?: LoginRetryKind;
@@ -689,7 +691,7 @@ export class PreworldReporter {
     kind: LoginRetryKind = 'proven',
   ): void {
     const count = Math.max(0, Math.min(1000, Math.trunc(attempt)));
-    const retry: LoginRetryKind = kind === 'first_time' || kind === 'case_verbatim' ? kind : 'proven';
+    const retry: LoginRetryKind = kind === 'first_time' || kind === 'case_verbatim' || kind === 'case_lower' ? kind : 'proven';
     if (event.serverNetError) {
       this.report('login_retry', {
         code: event.serverNetError.stringId >>> 0, table: event.serverNetError.tableId >>> 0, token: safeToken(token), count, retry,

@@ -47,9 +47,11 @@ export const HANDOVER_PATHS = ['adopt', 'relogin'] as const;
  * credentials got in earlier on the page) or 'first_time' (a first-time
  * login on a GDLE world, renderer session/ProvenLoginRetry.ts).
  * BUG.login-credential-case — or 'case_verbatim' (a lowercased password was
- * refused; the page tries it as typed, renderer session/LoginCredentialCase.ts).
+ * refused; the page tries it as typed, renderer session/LoginCredentialCase.ts)
+ * or 'case_lower' (UX.login-case-remember: the as-typed form remembered from
+ * an earlier page was refused; the page tries it lowercased).
  */
-export const LOGIN_RETRY_KINDS = ['proven', 'first_time', 'case_verbatim'] as const;
+export const LOGIN_RETRY_KINDS = ['proven', 'first_time', 'case_verbatim', 'case_lower'] as const;
 
 /**
  * BUG.resume-hung-socket — a 'connect_failed''s cause when the page knows the
